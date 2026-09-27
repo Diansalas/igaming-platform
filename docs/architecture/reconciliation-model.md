@@ -165,12 +165,12 @@ flowchart LR
        `provider_reference` or the payout's Step B settlement reference →
        `pay_status_mismatch`.
      A statement line of provider P resolves only records with
-     `provider_id = P` (ADR 0095 INV-IO-14). The payout side's named join
-     path (`withdrawal_requests.release_ledger_transaction_id`, migration
-     0026, with `transaction_type = 'withdrawal_completed'`, or a Step B
-     link on the attempt) is still to be named in ADR 0095 §12.3
-     (RV-0095 L4); until it is, this rule is not implementable for
-     payouts.
+     `provider_id = P` (ADR 0095 INV-IO-14). Join paths (ADR 0095 §12.3,
+     revision 3, RV-0095 L4): deposit via
+     `payment_attempts.ledger_transaction_id`; payout via
+     `payment_attempts.withdrawal_request_id →
+     withdrawal_requests.release_ledger_transaction_id` (migration 0026)
+     with `transaction_type = 'withdrawal_completed'`.
   7. **Classification and tolerance.** Kinds and remediation per ADR 0095
      §12.3/§12.5; amounts compared as integers (`big.Int`), zero
      tolerance (§1); every mismatch is a P1; no auto-resolution of (a).

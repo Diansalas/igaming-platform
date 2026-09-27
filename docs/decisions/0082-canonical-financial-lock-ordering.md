@@ -1579,10 +1579,10 @@ is ACCEPTED (design). Accepted in ADR 0095 §21.3 (LF-Q2) with scope rules
 LF95-C9 (a)–(e), stated in ADR 0095 §14; rule N1 is added from the
 `ledger-finance` re-verification
 `docs/plans/payment-readiness/rv-0095-ledger-reverify.md` (finding N1,
-High). Where ADR 0095's own text (§4.3 T2, §5.1, §7.1, §7.2 step 3, §14)
-still reads "lock parent, lock attempt, re-run gates" for the deposit
-path, **this amendment governs**; ADR 0095 must be conformed to it before
-PRH-I1 starts (RV-0095 "Required before PRH-I1 starts", item 2).
+High). ADR 0095 revision 3 (`3c88e13`) already conforms: §4.3 T2, §5.1,
+§7.1, §7.2 step 3, §14 and mutation MX24 put the deposit gates before the
+parent lock. If the two texts ever diverge, **this amendment governs**
+the lock order.
 
 **This amendment does not:**
 - add a lock class (R0 is a named *step*, not a class; see (2));
