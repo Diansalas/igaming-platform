@@ -197,7 +197,12 @@ migration `0097`), on the existing run/mismatch tables:
     shared helper).
   - **Provider reference length is unbounded** (security R-2):
     registered as PROVIDER-REF-BOUND-1, platform-wide; no migration in
-    this round.
+    this round. **Update (PRH-REF, 2026-09-27):** the bound is now
+    implemented: 255 bytes, validated at the verified callback boundary,
+    plus migration 0099's CHECKs. A casino callback over the bound gets
+    no rejection row (its value cannot be stored); the evidence is a log
+    line with the length and a hash prefix. See
+    `docs/plans/payment-readiness/prh-ref-provider-reference-bound.md`.
 - Read-only staff views: `GET /v1/admin/casino/reconciliation/runs`,
   `GET /v1/admin/casino/reconciliation/mismatches`,
   `GET /v1/admin/casino/callback-rejections`

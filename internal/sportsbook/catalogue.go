@@ -11,6 +11,7 @@ import (
 
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/jurisdiction"
+	"github.com/Diansalas/igaming-platform/internal/providerref"
 )
 
 // catalogueUnavailableReason is the ONE opaque, player-facing reason every
@@ -53,6 +54,12 @@ func SyncCatalogue(ctx context.Context, tx pgx.Tx, provider Provider) error {
 		return err
 	}
 	result := provider.Catalogue()
+	// PROVIDER-REF-BOUND-1: the whole tree is validated BEFORE the first
+	// upsert, so a single bad external_ref rejects the sync with nothing
+	// written (never a half-synced catalogue, never a truncated ref).
+	if err := validateCatalogueReferences(result); err != nil {
+		return err
+	}
 	for _, s := range result.Sports {
 		sportID, err := upsertSport(ctx, tx, s.ExternalRef, s.Code, s.Name)
 		if err != nil {
@@ -75,6 +82,43 @@ func SyncCatalogue(ctx context.Context, tx pgx.Tx, provider Provider) error {
 					}
 					for _, sel := range mkt.Selections {
 						if _, err := upsertSelection(ctx, tx, marketID, sel.ExternalRef, sel.Name, sel.OddsNumerator, sel.OddsDenominator); err != nil {
+							return err
+						}
+					}
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// validateCatalogueReferences applies the platform provider-reference
+// bound to every external_ref in a provider catalogue tree.
+func validateCatalogueReferences(result CatalogueResult) error {
+	check := func(field, ref string) error {
+		if err := providerref.Validate(field, ref); err != nil {
+			return fmt.Errorf("%w: %w", ErrProviderReferenceInvalid, err)
+		}
+		return nil
+	}
+	for _, s := range result.Sports {
+		if err := check("sport.external_ref", s.ExternalRef); err != nil {
+			return err
+		}
+		for _, c := range s.Competitions {
+			if err := check("competition.external_ref", c.ExternalRef); err != nil {
+				return err
+			}
+			for _, e := range c.Events {
+				if err := check("event.external_ref", e.ExternalRef); err != nil {
+					return err
+				}
+				for _, m := range e.Markets {
+					if err := check("market.external_ref", m.ExternalRef); err != nil {
+						return err
+					}
+					for _, sel := range m.Selections {
+						if err := check("selection.external_ref", sel.ExternalRef); err != nil {
 							return err
 						}
 					}

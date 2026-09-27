@@ -7,6 +7,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+
+	"github.com/Diansalas/igaming-platform/internal/providerref"
 )
 
 // Game mirrors a casino_games row - the platform-wide catalogue entry
@@ -120,6 +122,12 @@ func UpsertGame(ctx context.Context, tx pgx.Tx, in UpsertGameInput) (Game, error
 	}
 	if in.ProviderID == "" || in.ProviderGameID == "" || in.Name == "" || in.GameType == "" {
 		return Game{}, fmt.Errorf("%w: provider_id, provider_game_id, name, and game_type are required", ErrInvalidInput)
+	}
+	// PROVIDER-REF-BOUND-1: provider_game_id is the provider's own
+	// reference (it must match what verified callbacks carry, which are
+	// bounded the same way). Never truncated.
+	if err := providerref.Validate("provider_game_id", in.ProviderGameID); err != nil {
+		return Game{}, fmt.Errorf("%w: %w", ErrInvalidInput, err)
 	}
 	status := in.Status
 	if status == "" {

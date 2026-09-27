@@ -15,6 +15,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/audit"
 	"github.com/Diansalas/igaming-platform/internal/casino"
 	"github.com/Diansalas/igaming-platform/internal/observability"
+	"github.com/Diansalas/igaming-platform/internal/providerref"
 	"github.com/Diansalas/igaming-platform/internal/tenant"
 	"github.com/Diansalas/igaming-platform/internal/validation"
 	"github.com/Diansalas/igaming-platform/internal/webhookauth"
@@ -301,6 +302,11 @@ func writeCasinoCallbackError(w http.ResponseWriter, requestID string, logger in
 		apierror.Write(w, requestID, apierror.CodeValidation, "request rejected: invalid input")
 		return
 	}
+	if errors.Is(err, casino.ErrProviderReferenceInvalid) {
+		// PROVIDER-REF-BOUND-1: deterministic 400, never the generic 500.
+		apierror.Write(w, requestID, apierror.CodeValidation, "request rejected: invalid provider reference")
+		return
+	}
 	logger.Error("casino_play_failed", "error", err, "action", action)
 	apierror.Write(w, requestID, apierror.CodeInternal, "failed to process "+action)
 }
@@ -547,6 +553,12 @@ func newRollbackCasinoRoundHandler(deps Deps) http.HandlerFunc {
 		v.RequireNonEmpty("original_provider_tx_id", req.OriginalProviderTxID)
 		if v.HasErrors() {
 			apierror.Write(w, requestID, apierror.CodeValidation, v.Error())
+			return
+		}
+		// PROVIDER-REF-BOUND-1: bounded before any database work (a fixed
+		// message; the value is never echoed or logged).
+		if err := providerref.Validate("original_provider_tx_id", req.OriginalProviderTxID); err != nil {
+			apierror.Write(w, requestID, apierror.CodeValidation, "original_provider_tx_id is not a valid provider reference")
 			return
 		}
 

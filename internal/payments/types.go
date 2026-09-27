@@ -135,6 +135,13 @@ var (
 	// authenticated. Never returned for a failure that occurs BEFORE
 	// verification succeeds - see HandleCallback's own doc comment.
 	ErrCallbackMalformedBody = errors.New("payments: verified callback body is malformed")
+
+	// ErrProviderReferenceInvalid (PROVIDER-REF-BOUND-1): a VERIFIED
+	// callback's provider reference, original reference or asset code
+	// breaks the platform bound (internal/providerref). Deterministic,
+	// non-retryable, checked before any domain statement; the wrapped
+	// *providerref.Error never carries the value.
+	ErrProviderReferenceInvalid = errors.New("payments: provider reference rejected")
 	// ErrUnknownProvider is returned when a capability row or routing
 	// decision names a provider_id the orchestrator has no adapter
 	// registered for.

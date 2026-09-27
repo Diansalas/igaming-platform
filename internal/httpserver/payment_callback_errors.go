@@ -82,6 +82,16 @@ func mapReceiveCallbackError(err error, kind callbackRouteKind) (code apierror.C
 		// err's text, which is logged, never returned to the caller).
 		return apierror.CodeValidation, "callback rejected"
 	}
+	if errors.Is(err, payments.ErrProviderReferenceInvalid) {
+		// PROVIDER-REF-BOUND-1: a VERIFIED callback whose provider
+		// reference breaks the platform bound. Deterministic and never
+		// retryable - the same 400 class as a malformed verified body.
+		// Generic body only (never the reference).
+		if kind == callbackRouteSimulate {
+			return apierror.CodeValidation, "invalid provider reference"
+		}
+		return apierror.CodeValidation, "callback rejected"
+	}
 	if errors.Is(err, payments.ErrCallbackMalformedBody) {
 		if kind == callbackRouteSimulate {
 			return apierror.CodeInternal, "failed to simulate deposit callback"
