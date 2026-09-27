@@ -89,7 +89,7 @@ func sameComponent(a, b any) bool {
 
 // allOnWiring enables every optional MOCK component, so every
 // providerBundle field is non-nil and the completeness scan is not vacuous.
-var allOnWiring = mockWiring{PaymentsWebhookResolver: true, KYCWebhookEnabled: true, CasinoWebhookResolver: true, CasinoOutboundResolver: true}
+var allOnWiring = mockWiring{PaymentsWebhookResolver: true, KYCWebhookEnabled: true, CasinoWebhookResolver: true, CasinoOutboundResolver: true, KYCOutboundResolver: true}
 
 // TestSyntheticGuard_RegistrationCompletenessScan is the required W1b
 // case: buildRegistrations(cfg, providers) must enumerate EVERY non-nil

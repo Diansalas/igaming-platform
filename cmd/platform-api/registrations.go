@@ -64,6 +64,12 @@ type providerBundle struct {
 	// wiring.CasinoOutboundResolver enables it.
 	CasinoOutboundResolver casino.OutboundCredentialResolver
 
+	// KYCOutboundResolver is KYC's own OUTBOUND-credential MOCK (ADR 0095
+	// §15.2/§15.3, PROV-OUTBOUND-CRED-1) - CasinoOutboundResolver's KYC
+	// twin, built HERE for the same reason. A true nil interface unless
+	// wiring.KYCOutboundResolver enables it.
+	KYCOutboundResolver kyc.OutboundCredentialResolver
+
 	// Credentials is the REAL provider-credential subsystem (Stage 10.3
 	// W2a, ADR 0093): the handle-table resolver, outbound resolution and
 	// the four-eyes lifecycle. Nil unless BOTH a fingerprint key and a
@@ -186,6 +192,9 @@ func buildProviderBundle(wiring mockWiring) providerBundle {
 		b.KYC = kyc.NewMockKYCProvider()
 		b.KYCWebhookResolver = kyc.NewMockWebhookCredentials(b.KYC)
 	}
+	if wiring.KYCOutboundResolver {
+		b.KYCOutboundResolver = kyc.NewMockOutboundResolver()
+	}
 	return b
 }
 
@@ -302,6 +311,23 @@ func (b providerBundle) kycOrchestratorResolver() webhookauth.Resolver {
 	return webhookauth.NewKindSplitResolver(b.kycAdapters(), mock, b.Credentials.Resolver("kyc"))
 }
 
+// kycOutboundCredentials is CreateVerification/SubmitVerification's phase B
+// credential resolver (ADR 0095 §15.2/§15.3/§9.1, PROV-OUTBOUND-CRED-1) -
+// kycOrchestratorResolver's OUTBOUND twin, mirroring
+// casinoOutboundCredentials exactly (including its kind-split discipline
+// and its nil-concrete-pointer-to-true-nil-interface conversion).
+func (b providerBundle) kycOutboundCredentials() kyc.OutboundCredentialResolver {
+	var mock kyc.OutboundCredentialResolver
+	if b.KYCOutboundResolver != nil && b.KYC != nil {
+		mock = b.KYCOutboundResolver
+	}
+	var real kyc.OutboundCredentialResolver
+	if or := b.Credentials.Outbound("kyc"); or != nil {
+		real = or
+	}
+	return kyc.NewOutboundKindSplitResolver(b.kycAdapters(), mock, real)
+}
+
 // buildRegistrations enumerates every component buildProviderBundle
 // constructed, as the input to RefuseSyntheticInProduction
 // (internal/providerkind). cfg is accepted for symmetry with the design
@@ -335,6 +361,10 @@ func buildRegistrations(_ config.Config, b providerBundle) []providerkind.Regist
 		// C3) - a nil one (wiring off) is skipped by the guard, same as
 		// every other MOCK resolver above.
 		providerkind.Registration{Domain: "casino", Name: "outbound_resolver", Component: b.CasinoOutboundResolver},
+		// The KYC OUTBOUND-credential MOCK (ADR 0095 §15.2/§15.3, PRH-I2) -
+		// a nil one (wiring off) is skipped by the guard, same as every
+		// other MOCK resolver above.
+		providerkind.Registration{Domain: "kyc", Name: "outbound_resolver", Component: b.KYCOutboundResolver},
 	)
 	// The real credential subsystem (production-eligible) and each
 	// secret-store backend: awssm is ProductionEligible (W3b); devfile has

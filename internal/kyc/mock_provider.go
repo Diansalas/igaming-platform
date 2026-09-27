@@ -121,7 +121,7 @@ func (m *MockKYCProvider) GetVerification(ctx context.Context, providerReference
 	return ProviderResult{ProviderReference: providerReference, Outcome: ProviderPending, Reason: reason}, nil
 }
 
-func (m *MockKYCProvider) SubmitVerification(ctx context.Context, providerReference string, documents []SubmittedDocument) (ProviderResult, error) {
+func (m *MockKYCProvider) SubmitVerification(ctx context.Context, providerReference string, documents []SubmittedDocument, call CallContext) (ProviderResult, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.unavailable {

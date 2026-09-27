@@ -1980,6 +1980,135 @@ READY on R1) are addressed as follows.
 | Failure recovery | Identical to today's `ProviderError` outcome: the verification stays as it is, and the next upload re-submits the full set. A durable KYC submission outbox is **deferred** as KYC-SUBMIT-OUTBOX-1, and it is a **hard precondition on the first real KYC adapter**: no real KYC adapter is accepted into PRH-I2 (or later) without a durable submission outbox design landing first (IC condition 5). |
 | Migration | None. |
 
+#### 15.3.1 Implementation record (PRH-I2, KYC part, `identity-compliance`, 2026-09-27)
+
+**Status: IMPLEMENTED (code + tests); not yet gate-reviewed.** Both `kyc.CreateVerification`
+(`internal/kyc/verification_service.go`) and the document-submission step, now split out as
+its own exported `kyc.SubmitVerification` (`internal/kyc/document_service.go`), own their own
+transaction boundaries instead of running inside a caller-supplied `tx` across the provider
+call. Both take `pool providercred.TenantTxRunner` and `outbound OutboundCredentialResolver`
+explicitly (mirroring `casino.LaunchGame`'s identical parameter shape, §15.1.1) rather than
+storing them on `Orchestrator` - `CreateVerification`/`SubmitVerification` are package-level
+functions, not `Orchestrator` methods, and changing that shape was out of this task's scope.
+`*db.Pool` satisfies `providercred.TenantTxRunner` directly, the same interface
+`providercred.OutboundResolver.Resolve` and casino's identical parameter already use.
+
+- **`internal/kyc/callcontext.go`** (new) is KYC's own copy of §9.1's `CallContext` shape and
+  the `OutboundCredentialResolver`/`MockOutboundResolver`/`OutboundKindSplitResolver` trio -
+  structurally identical to `casino`'s copies (§15.1.1's own note that payments/casino/kyc each
+  get their own until PRH-I1 lands the shared version applies here too), including the same
+  redacting `String`/`GoString`/`Format`/`LogValue`/`MarshalJSON` set and the same
+  fail-closed-on-unregistered-adapter-id `OutboundKindSplitResolver` behavior.
+  `CreateVerificationInput` gained a `Call CallContext` field (an input-struct field, not a
+  parameter, so the field-by-field literal at the `provider.CreateVerification` call site
+  already guards against a stray future field leaking); `KYCProvider.SubmitVerification` gained
+  a trailing `call CallContext` parameter (its own argument, since that method has no input
+  struct to extend).
+- **`CreateVerification` phase A** (one `pool.WithTenant` transaction, `insertOrphanVerification`):
+  inserts the orphan row (`status='unverified'`, `provider_id` set, `provider_reference NULL`)
+  plus the `kyc.verification_requested` audit record, then commits. **Phase B**, outside any
+  transaction: resolves the outbound credential via `outbound.Resolve(ctx, pool, tenantID,
+  providerID)`, checks the defense-in-depth tenant/provider/domain binding (mirrors casino's
+  identical check, S95-C8(b)), then calls `provider.CreateVerification` with
+  `IdempotencyKey: "kv:" + verification.ID` - the deterministic external reference §15.2 names.
+  A phase-B failure (no resolver, credential-resolution failure, binding mismatch, or the
+  provider call itself failing) returns `ErrProviderUnavailable` and leaves the phase-A orphan
+  row exactly as committed - never rolled back, never retried automatically, matching §15.2's
+  own "Failure recovery" row (no audit row is written for this specific failure; only phase A's
+  and phase C's audit records ever exist). **Phase C** (`applyCreateVerificationResult`, a
+  second, separate, short transaction on `context.WithTimeout(context.WithoutCancel(ctx),
+  phaseCTimeout)` - 5s, mirroring casino's identical ctx-independence for the same reason,
+  RV-PRH-I2 C1): a CAS `UPDATE ... WHERE id=$1 AND tenant_id=$2 AND provider_reference IS NULL
+  AND status='unverified'` applies the normalized result, plus the `kyc.verification_submitted`
+  audit record (the existing action name, moved here from the old single-transaction
+  implementation).
+- **`SubmitVerification`** (new exported function, replacing the former unexported,
+  tx-held-across-the-call `submitVerificationDocuments`): phase A
+  (`gatherSubmissionDocuments`, one short read-only transaction) reads the verification
+  (terminal-guarded - an already-terminal verification, or one whose row does not resolve
+  under the caller's own tenant scope, is a documented no-op/`ErrNotFound` respectively, no
+  provider call attempted) and its current non-rejected document set. Phase B, outside any
+  transaction, calls `provider.SubmitVerification` with
+  `IdempotencyKey: "ks:" + verification_id + ":" + sha256(sorted document ids)` (§15.3's own
+  content-derived key - `submissionIdempotencyKey`). **IC condition 2** is enforced in two
+  places: a transport-level failure from the call itself returns `ErrProviderUnavailable`
+  without ever reaching phase C (no `ProviderResult` exists to apply), and a well-formed
+  `ProviderResult{Outcome: ProviderError}` reaching phase C (`applySubmissionResult`) returns
+  early after its own audit row, before ever calling `statusForOutcome` - in both shapes
+  `kyc_verifications.status` is provably left untouched (own tests, §15.3.2 below). Phase C
+  (a second, separate, ctx-independent, bounded transaction, identical to `CreateVerification`'s)
+  applies a definitive outcome via the existing terminal-guarded `updateVerificationStatus` plus
+  the existing `kyc.verification_submitted_to_provider` audit record. `UploadDocument` itself
+  is now phase-A-only (document insert + audit; no provider call, no `provider` parameter) -
+  the caller (`internal/httpserver`'s upload handler) calls `UploadDocument` (inside its own
+  short transaction) and then `SubmitVerification` (pool-based) afterward, exactly mirroring
+  how `casino.LaunchGame` composes `CreateLaunchSession` and `Launch`.
+- **Callback race (IC-Q1, §15.2 "Callbacks")**: `ReceiveVerifiedCallback`'s step (d) lookup by
+  `provider_reference` now distinguishes a genuinely-unknown reference from every other
+  "not found" case in this package via a new sentinel, `ErrVerificationReferenceUnknown` -
+  wrapping (not replacing) the underlying `ErrNotFound` lookup failure, but never satisfying
+  `errors.Is(err, ErrNotFound)` itself (own test asserts both directions). KYC has no receipt
+  table, so this case is structurally indistinguishable from a callback racing
+  `CreateVerification`'s own phase C - both map to the identical retryable disposition.
+  `internal/httpserver/kyc_admin_handlers.go`'s webhook dispatch maps
+  `ErrVerificationReferenceUnknown` to a `503` (`apierror.CodeUnavailable`), checked BEFORE the
+  pre-existing `kyc.ErrNotFound` branch (which now only ever fires for a different not-found
+  case reaching that dispatch); redelivery-on-5xx is `PROVIDER DEPENDENT`, confirmed at
+  real-vendor intake per the same discipline §6.6/LF-C1 already applies elsewhere.
+- **Wiring**: `httpserver.Deps` gained `KYCOutboundCredentials kyc.OutboundCredentialResolver`
+  (`CasinoOutboundCredentials`'s KYC twin); `cmd/platform-api/registrations.go` gained
+  `providerBundle.KYCOutboundResolver`/`kycOutboundCredentials()` (mirroring
+  `CasinoOutboundResolver`/`casinoOutboundCredentials()` exactly, including the kind-split
+  discipline and the nil-concrete-pointer-to-true-nil-interface conversion); `mockWiring`
+  gained `KYCOutboundResolver bool`, derived from the same `testSupport` value as every other
+  MOCK flag. `newCreateMyVerificationHandler`/`newUploadMyDocumentHandler` were restructured to
+  resolve identity/provider-selection in a short read-only transaction and then call
+  `CreateVerification`/`UploadDocument`+`SubmitVerification` against `deps.DB` directly (no
+  longer inside the identity-resolution transaction), mirroring `casino_handlers.go`'s
+  identical `LaunchGame` wiring pattern.
+- **CreateVerification vendor idempotency is `PROVIDER DEPENDENT`** (§15.2's own table row,
+  reiterated here per identity-compliance review condition "CreateVerification vendor
+  idempotency `PROVIDER DEPENDENT`"): the `"kv:" + id` key this implementation passes via
+  `CallContext.IdempotencyKey` is honored only if a real vendor supports idempotency keys at
+  all; this must be confirmed and recorded at real-vendor intake, never silently assumed.
+- **Not done here** (explicitly out of this task's scope, per its own instructions): any change
+  to `internal/kyc/enforcement*.go` or to migrations 0100/0103 (another agent's concurrent
+  work); the payments (PRH-I1) implementation; any schema migration (none was needed or added -
+  every phase reuses `kyc_verifications`' existing nullable `provider_reference` column and
+  existing `status` enum).
+
+#### 15.3.2 Tests and mutation evidence
+
+`internal/kyc/kyc_two_phase_integration_test.go` (new): no connection held across the provider
+call for either `CreateVerification` or `SubmitVerification` (a one-connection pool and a spy
+provider, mirroring casino's identical proof technique); nil-pool/nil-provider/nil-outbound-
+resolver fail closed without panicking (the nil-outbound-resolver case additionally asserts the
+phase-A orphan row is left exactly as committed, with no `kyc.verification_submitted` audit
+row); credential-binding mismatch fails closed; `CallContext` field shape pinned
+(`TenantID`/`ProviderID`/`Credential.Domain`/`IdempotencyKey`/`Deadline`); **IC condition 2's own
+required test**, in both its transport-error and definitive-`ProviderError`-outcome shapes,
+proving `kyc_verifications.status` is left completely unchanged in either case; a terminal
+verification is a documented no-op (no provider call attempted); the content-derived
+idempotency key is stable across repeated calls with an unchanged document set; cross-tenant
+isolation (a verification created for tenant A is never visible under tenant B's scope, and
+`SubmitVerification` called with the wrong tenant id fails closed); a ctx-cancellation proxy for
+"crash between phase B and phase C" (this codebase's practical substitute for a real crash,
+identical convention to casino's own §15.1.1/§15.1.2 tests) for both `CreateVerification` and
+`SubmitVerification`, proving phase C still applies the result and writes its audit record
+despite the cancelled request context; and `CallContext`'s own redaction test (mirrors
+`internal/casino/callcontext_redaction_test.go` exactly, including its negative control).
+`internal/kyc/orchestrator_webhook_integration_test.go`'s pre-existing
+`TestKYCWebhook_VerifiedUnknownReference_NotFound` and `internal/httpserver/kyc_flow_integration_test.go`'s
+`TestKYC_WebhookCallbackAuthentication` were both updated in place to assert the new retryable
+`ErrVerificationReferenceUnknown`/503 disposition instead of the old terminal
+`ErrNotFound`/404 - a deliberate, disclosed behavior change (IC-Q1), not a regression.
+
+Mutation evidence: `docs/plans/payment-readiness/evidence/prh-i2-kyc-mutation-kill.txt` -
+**11/11 killed, 0 equivalent**, covering both nil-guard panics, the credential-binding check,
+the idempotency-key shape, IC condition 2's two distinct code paths, the terminal-verification
+no-op guard, the `ErrVerificationReferenceUnknown` typing at both the package and HTTP-handler
+layers, and the `CallContext` redaction renderer.
+
 ---
 
 ## 16. Failure injection and required tests

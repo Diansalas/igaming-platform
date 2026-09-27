@@ -45,18 +45,19 @@ func newKYCTestServer(t *testing.T, pool *db.Pool, issuer *auth.Issuer) (*httpte
 	mockProvider := kyc.NewMockKYCProvider()
 	mockEmail := email.NewMockProvider()
 	srv := httptest.NewServer(New(Deps{
-		Logger:            slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
-		DB:                pool,
-		AuthIssuer:        issuer,
-		ServiceName:       "platform-api-test",
-		AccessTokenTTL:    5 * time.Minute,
-		RefreshTokenTTL:   time.Hour,
-		PersonResolver:    identityresolution.NewMockPersonResolver(),
-		KYCOrchestrator:   kyc.NewOrchestrator(map[string]kyc.KYCProvider{"mock": mockProvider}, kyc.NewMockWebhookCredentials(mockProvider)),
-		KYCWebhookEnabled: true,
-		DocumentStorage:   kyc.NewMockDocumentStorageProvider(),
-		MalwareScanner:    kyc.NewMockMalwareScanner(),
-		EmailProvider:     mockEmail,
+		Logger:                 slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
+		DB:                     pool,
+		AuthIssuer:             issuer,
+		ServiceName:            "platform-api-test",
+		AccessTokenTTL:         5 * time.Minute,
+		RefreshTokenTTL:        time.Hour,
+		PersonResolver:         identityresolution.NewMockPersonResolver(),
+		KYCOrchestrator:        kyc.NewOrchestrator(map[string]kyc.KYCProvider{"mock": mockProvider}, kyc.NewMockWebhookCredentials(mockProvider)),
+		KYCWebhookEnabled:      true,
+		DocumentStorage:        kyc.NewMockDocumentStorageProvider(),
+		MalwareScanner:         kyc.NewMockMalwareScanner(),
+		KYCOutboundCredentials: kyc.NewMockOutboundResolver(),
+		EmailProvider:          mockEmail,
 	}))
 	t.Cleanup(srv.Close)
 	return srv, mockProvider, mockEmail
@@ -850,11 +851,16 @@ func TestKYC_WebhookCallbackAuthentication(t *testing.T) {
 		t.Fatalf("expected status to remain approved after a redelivered callback, got %+v", list)
 	}
 
+	// ADR 0095 §15.2/IC-Q1: KYC has no receipt table, so an unresolvable
+	// provider_reference is indistinguishable from one racing
+	// CreateVerification's own phase C - the response is a retryable 503,
+	// never a bare 404 and never a 200 (which would durably discard the
+	// only copy of a real vendor decision arriving a moment too early).
 	unknownIn := mockProvider.CallbackPayload(tenant.ID, "no-such-reference", kyc.ProviderApproved, "x")
 	unknownResp := rawPostKYCCallback(t, srv, "/v1/webhooks/kyc/"+tenant.Slug+"/mock", unknownIn)
 	defer unknownResp.Body.Close()
-	if unknownResp.StatusCode != http.StatusNotFound {
-		t.Fatalf("expected 404 for an unknown provider_reference, got %d", unknownResp.StatusCode)
+	if unknownResp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 (retryable) for an unresolvable provider_reference, got %d", unknownResp.StatusCode)
 	}
 }
 
