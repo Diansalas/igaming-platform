@@ -158,3 +158,42 @@ Residual: a future non-test file in `payments` could assign it. Add a static tes
 **Tracked, not FH-3:** wire or delete `RecordDepositMultipleSuccessRefusal` together with the removal of the legacy path.
 
 Launch authorization remains the human's decision.
+
+---
+
+# Re-verification 1 — FH-3b @ `cb03868` (commits `6fce7a6`, `a9ef2f9`, `135127a`, `cb03868`)
+
+- Date: 2026-09-27.
+- Scope of the change:
+  - production code: `migrations/0107_…up.sql` only;
+  - tests: `migration_0101_integration_test.go`, `migration_0107_integration_test.go`, `testhookrefconflict_static_test.go`;
+  - no production Go changes.
+- Method:
+  - detached worktree at `cb03868` and a private DB `secfh3b_db` (via `priv_db.sh`, harness credentials only; no `sudo`, `ALTER ROLE` or password changes);
+  - a code-only, line-by-line diff of the three `payment_attempts_guard()` definitions (comments stripped, whitespace normalized, each file's single `CREATE … FUNCTION` statement through its closing `$$ LANGUAGE …`);
+  - a HEAD probe (not committed);
+  - 7 anchored mutants against `INVDEP1|Migration0107|Migration0101|FL3` (plus `RVLF|Receipt|Deposit|T13` for the two single-layer mutants). Baseline green. Each mutant was reverted and the tree confirmed clean.
+- Cleanup: the worktree has been removed and `secfh3b_db` dropped (0 remaining).
+
+## Verdict
+
+**APPROVE from `security` — F-M1, F-M2, F-L1, F-L2 and F-L3 are all closed.** One LOW residual (the MC2 test gap below) is handed to `qa`; it does not block.
+
+## Results
+
+| Item | Result | Evidence |
+|---|---|---|
+| **"The NULL-safe predicate is the ONLY functional difference"** | **Confirmed.** 0101 vs 0107 up differ in exactly three places: `CREATE` → `CREATE OR REPLACE`; the T13t/T13d predicate, from `IS DISTINCT FROM 'reversal_tombstone_precedes_success'` to `(NEW.terminal_reason IS NULL OR NEW.terminal_reason NOT IN ('reversal_tombstone_precedes_success','multiple_success_for_intent'))`; and the `RAISE` message text (now includes the offending reason, which is bounded to 64 bytes by the CHECK). Every other code line of the 125-line body is identical. 0107 **down** is code-identical to 0101 apart from `CREATE OR REPLACE`. 0107 creates or drops no trigger. | code-only diff |
+| **F-M1** (NULL reason accepted) | **CLOSED** | HEAD probe, deposit `declined → disputed` with: column untouched (NULL), explicit NULL, `''`, `'some_other_reason'` → **all refused**; `reversal_tombstone_precedes_success` and `multiple_success_for_intent` → accepted. MF1 (NULL-safety reverted) is KILLED by `TestMigration0107_T13tT13d_TerminalReasonTrigger_HEAD`. |
+| **F-M2** (guard tests at 0101) | **CLOSED** | `InsertGuard`, `UpdateGuard_TransitionWhitelist`, `T13t_…RequiresNamedTerminalReason` (and RLS) now use `depositV2ScratchPool` (0101 → HEAD). The new `TestMigration0107_T13tT13d_TerminalReasonTrigger_HEAD` covers T13d accepted, other reason refused, NULL refused. The tests left pinned (0101 up/down round trip, backfill and pre-flight) are migration-boundary tests, each labelled `PINNED TO 0101` with its reason, as the project rule allows. |
+| **F-L1** (choke point vs DB backstop) | **CLOSED** for the mutants I raised | MT (wrong tenant at both sites) KILLED, MC (both application layers off) KILLED, MC1 (the rule-1.4 choke point alone off) KILLED, all by `TestINVDEP1_FL1_ApplicationChokePointCatchesItBeforeTheDBBackstop`, which asserts the backstop-fired P1 does not fire on a correctly-tenanted T13d. |
+| **F-L2** (P1 log content) | **CLOSED** | ML (amount added to the alert line) KILLED by `TestINVDEP1_FL2_MultipleSuccessAlertLogContentIsPinned`. It requires `tenant_id`, `deposit_intent_id` and `attempt_id`, and forbids `amount=`, `asset_code=`, `provider_id=`, `provider_reference=` and the literal amount. |
+| **F-L3** (static hook guard) | **CLOSED** | MF3 (a non-test file assigning the hook in `init`) KILLED by `TestFL3_…NeverAssignedOutsideTests`. The guard parses every non-`_test.go` file in the package, so build tags don't hide any. It fails if it scanned nothing or never saw the identifier. `TestFL3_GuardCatchesPlantedViolation` is its own self-test. |
+
+## Residuals (LOW, non-blocking)
+
+- **MC2 SURVIVED (to `qa`).** Disabling only the rule-2 re-check inside `postDepositSuccess` passes the subset. The choke point always catches the case first, and the only caller that skips the wrapper is the test-only legacy `resolveAmbiguous`. §28.12 lists "drop the re-check inside `postDepositSuccess`" as a required kill. A direct test would close it: call `postDepositSuccess` on a resolved intent and assert `ErrDepositIntentAlreadyResolved` with no ledger insert attempted. Money stays safe because of the RLS-independent ledger index.
+- **FL2 uses a denylist.** An exact allow-list of the alert line's attribute keys would also catch a renamed key (e.g. `ref=`). Optional hardening.
+- **F-L3 only matches direct identifier assignment.** A pointer-alias write (`p := &hook; *p = f`) would evade it. That is contrived, and it is confined to package `payments` code in any case. Accepted.
+
+`RecordDepositMultipleSuccessRefusal` (informational in the original review) is unchanged and still tracked with the removal of the legacy path.
