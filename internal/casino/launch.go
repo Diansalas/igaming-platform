@@ -6,12 +6,16 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+
+	"github.com/Diansalas/igaming-platform/internal/providercred"
 )
 
 // launchTokenBytes matches auth.refreshTokenBytes' own entropy choice -
@@ -27,6 +31,65 @@ const launchTokenBytes = 32
 // DefaultLaunchTokenTTL bounds how long an un-consumed launch token
 // remains resolvable - short, per ADR 0025 §3 ("short TTL").
 const DefaultLaunchTokenTTL = 2 * time.Minute
+
+// defaultLaunchCallTimeout is CallContext.Deadline's default budget for
+// phase B's provider.Launch call (ADR 0095 §15.1/§9.1). It is informational
+// only for the MOCK adapter (which never does real I/O); a real adapter
+// consults it to bound its own transport timeout.
+const defaultLaunchCallTimeout = 10 * time.Second
+
+// CallContext is casino's own copy of ADR 0095 §9.1's call-context shape,
+// scoped to this domain (payments/kyc get their own until PRH-I1 lands the
+// shared version - see the ADR 0095 §15.1 implementation note). Every
+// outbound Launch request carries one, built fresh per call by LaunchGame's
+// phase B - never cached, never reused across sessions.
+type CallContext struct {
+	// TenantID is taken from the launch session's own tenant (server-side),
+	// never a payload.
+	TenantID   uuid.UUID
+	ProviderID string
+	// Credential is resolved per call (PROV-OUTBOUND-CRED-1) outside any
+	// database transaction; MOCK adapters get a synthetic credential
+	// (providercred.NewMockOutboundCredential) instead of a real handle-
+	// table read.
+	Credential providercred.OutboundCredential
+	// IdempotencyKey is "cas:" + the launch session's own id - the
+	// deterministic external reference/idempotency key ADR 0095 §15.1
+	// names for casino launch.
+	IdempotencyKey string
+	Deadline       time.Time
+}
+
+// callContextRedacted renders only the credential's own already-redacted
+// form plus the non-sensitive fields - never a secret (ADR 0095 §9.1,
+// mirroring OutboundCredential's identical renderer set).
+func (c CallContext) callContextRedacted() string {
+	return fmt.Sprintf("CallContext{TenantID:%s ProviderID:%s Credential:%s IdempotencyKey:%s Deadline:%s}",
+		c.TenantID, c.ProviderID, c.Credential.String(), c.IdempotencyKey, c.Deadline)
+}
+
+func (c CallContext) String() string { return c.callContextRedacted() }
+
+func (c CallContext) GoString() string { return c.callContextRedacted() }
+
+func (c CallContext) Format(f fmt.State, _ rune) { _, _ = f.Write([]byte(c.callContextRedacted())) }
+
+// LogValue implements slog.LogValuer (never the secret).
+func (c CallContext) LogValue() slog.Value { return slog.StringValue(c.callContextRedacted()) }
+
+// MarshalJSON implements json.Marshaler (never the secret).
+func (c CallContext) MarshalJSON() ([]byte, error) { return json.Marshal(c.callContextRedacted()) }
+
+// OutboundCredentialResolver is what LaunchGame's phase B needs to resolve
+// a per-call outbound credential (PROV-OUTBOUND-CRED-1) before calling
+// CasinoProvider.Launch. providercred's own *(*Subsystem).Outbound("casino")
+// return value (*providercred.OutboundResolver) satisfies this exactly, by
+// having an identical method signature; MockOutboundResolver (mock.go) is
+// the "MOCK: synthetic credential" case ADR 0095 §9.1 names, wired only
+// behind a synthetic/MOCK provider adapter.
+type OutboundCredentialResolver interface {
+	Resolve(ctx context.Context, pool providercred.TenantTxRunner, tenantID uuid.UUID, providerID string) (providercred.OutboundCredential, error)
+}
 
 func generateLaunchToken() (string, error) {
 	b := make([]byte, launchTokenBytes)

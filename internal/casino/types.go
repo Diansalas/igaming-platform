@@ -553,6 +553,11 @@ type LaunchRequest struct {
 	// within the tenant, and cannot distinguish a demo-mode round from a
 	// real-money one).
 	SessionID uuid.UUID
+	// Call is the per-call outbound context (ADR 0095 §9.1/§15.1): tenant,
+	// resolved credential, idempotency key and deadline. LaunchGame's phase
+	// B builds this fresh, outside any database transaction, immediately
+	// before calling Launch - never cached, never reused across sessions.
+	Call CallContext
 }
 
 // LaunchResult is what a CasinoProvider adapter returns from Launch.

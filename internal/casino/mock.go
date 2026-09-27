@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/Diansalas/igaming-platform/internal/providercred"
 	"github.com/Diansalas/igaming-platform/internal/webhookauth"
 )
 
@@ -96,6 +97,32 @@ func NewMockWebhookCredentials(provider *MockCasinoProvider) webhookauth.MockRes
 		Label:      webhookauth.CasinoMockKeyLabel,
 		ProviderID: provider.providerID,
 	}
+}
+
+// MockOutboundResolver implements OutboundCredentialResolver with a
+// synthetic, in-memory credential (ADR 0095 §9.1's "MOCK: synthetic
+// credential") - it never touches providercred's handle table or secret
+// store, mirroring NewMockWebhookCredentials' identical mock-vs-real split
+// for INBOUND credentials. Wired only behind a MOCK/synthetic provider
+// adapter (cmd/platform-api/registrations.go), never for a production-
+// eligible one.
+type MockOutboundResolver struct{}
+
+// SyntheticComponent implements providerkind.Synthetic (Stage 10.3,
+// MOCK-ADAPTER-PROD-1) - the same structural marker MockCasinoProvider and
+// NewMockWebhookCredentials' MockResolver already carry, so the AST
+// completeness scan (internal/providerkind) recognizes this as a mock-like
+// type that must never reach production wiring unmarked.
+func (MockOutboundResolver) SyntheticComponent() {}
+
+// NewMockOutboundResolver constructs a MockOutboundResolver.
+func NewMockOutboundResolver() MockOutboundResolver { return MockOutboundResolver{} }
+
+// Resolve implements OutboundCredentialResolver. It ignores pool entirely -
+// there is no store to read - and never fails, matching the MOCK adapter's
+// own "never a real credential, never a real failure mode" framing.
+func (MockOutboundResolver) Resolve(_ context.Context, _ providercred.TenantTxRunner, tenantID uuid.UUID, providerID string) (providercred.OutboundCredential, error) {
+	return providercred.NewMockOutboundCredential(tenantID, "casino", providerID), nil
 }
 
 // Magic values driving MockCasinoProvider's synthetic behavior - see the

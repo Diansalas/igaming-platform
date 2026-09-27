@@ -259,14 +259,15 @@ func run() error {
 	logger.Info("sportsbook catalogue synced")
 
 	handler := httpserver.New(httpserver.Deps{
-		Logger:              logger,
-		DB:                  pool,
-		AuthIssuer:          issuer,
-		ServiceName:         cfg.OTelServiceName,
-		AccessTokenTTL:      cfg.AccessTokenTTL,
-		RefreshTokenTTL:     cfg.RefreshTokenTTL,
-		PaymentOrchestrator: orchestrator,
-		CasinoOrchestrator:  casinoOrchestrator,
+		Logger:                    logger,
+		DB:                        pool,
+		AuthIssuer:                issuer,
+		ServiceName:               cfg.OTelServiceName,
+		AccessTokenTTL:            cfg.AccessTokenTTL,
+		RefreshTokenTTL:           cfg.RefreshTokenTTL,
+		PaymentOrchestrator:       orchestrator,
+		CasinoOrchestrator:        casinoOrchestrator,
+		CasinoOutboundCredentials: providers.casinoOutboundCredentials(),
 		// S9.1-LAUNCH-1/S9.1-LAUNCH-2 (docs/security/security-
 		// architecture.md): both plumbed straight from environment-sourced
 		// config, with no hardcoded default overriding cfg's own (0/0 -

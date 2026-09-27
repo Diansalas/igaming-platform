@@ -906,7 +906,16 @@ func TestFailureModeMatrix_E_MalformedAmountsAndUnknownAssetRejectedCleanly(t *t
 // callback fail "with a 5xx" without adding a mechanism to the mock, which
 // this stage's scope forbids. Recorded as a gap in the report rather than
 // papered over.
-func TestFailureModeMatrix_F_ProviderTransportFailureAtLaunchLeavesNoTrace(t *testing.T) {
+// ADR 0095 §15.1 (PRH-I2 two-phase launch split) changed this test's own
+// expected outcome: phase A now COMMITS the session before phase B ever
+// calls the provider, so a transport failure at phase B no longer rolls
+// the session row away - it leaves exactly one 'revoked' row (phase C's
+// RevokeLaunchSession CAS) rather than zero rows. The invariant that
+// matters - no financial effect, and no way to name a live session from
+// the failed attempt - is unchanged and is what this test now asserts
+// directly: a bet callback against the revoked session's id is rejected
+// with ErrLaunchSessionRequired, never posted.
+func TestFailureModeMatrix_F_ProviderTransportFailureAtLaunchRevokesSessionNoTrace(t *testing.T) {
 	pool := testPool(t)
 	f := seedCasinoFixture(t, pool)
 	fundWallet(t, pool, f, 5000)
@@ -917,51 +926,102 @@ func TestFailureModeMatrix_F_ProviderTransportFailureAtLaunchLeavesNoTrace(t *te
 	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
 
 	provider.FailNextCall()
-	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := orch.LaunchGame(ctx, tx, LaunchGameParams{
-			TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID,
-			GameID: game.ID, AssetCode: "EUR", Mode: ModeReal,
-		})
-		return err
+	_, err := orch.LaunchGame(context.Background(), pool, NewMockOutboundResolver(), LaunchGameParams{
+		TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID,
+		GameID: game.ID, AssetCode: "EUR", Mode: ModeReal,
 	})
 	if err == nil {
 		t.Fatal("expected a provider transport failure at launch to surface as an error")
 	}
 
-	// The launch transaction rolled back entirely, so not even the session
-	// row survives - a failed launch leaves no session a later callback
-	// could name, and no financial effect of any kind.
+	// Phase A committed (the session mint), phase B's transport failure
+	// then ran phase C's revoke - so exactly one row exists, and it is
+	// 'revoked', not 'active'.
 	var sessionCount int
+	var status LaunchSessionStatus
+	var sessionID uuid.UUID
 	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		return tx.QueryRow(ctx,
+		if err := tx.QueryRow(ctx,
 			`SELECT count(*) FROM casino_launch_sessions WHERE tenant_id = $1 AND player_account_id = $2`,
-			f.tenantID, f.playerAccountID).Scan(&sessionCount)
+			f.tenantID, f.playerAccountID).Scan(&sessionCount); err != nil {
+			return err
+		}
+		return tx.QueryRow(ctx,
+			`SELECT id, status FROM casino_launch_sessions WHERE tenant_id = $1 AND player_account_id = $2`,
+			f.tenantID, f.playerAccountID).Scan(&sessionID, &status)
 	}); err != nil {
-		t.Fatalf("count launch sessions: %v", err)
+		t.Fatalf("count/read launch session: %v", err)
 	}
-	if sessionCount != 0 {
-		t.Fatalf("expected zero launch sessions after a failed launch, got %d", sessionCount)
+	if sessionCount != 1 {
+		t.Fatalf("expected exactly one launch session (revoked, not deleted) after a failed launch, got %d", sessionCount)
+	}
+	if status != LaunchSessionRevoked {
+		t.Fatalf("expected the session revoked after a launch failure, got status %q", status)
 	}
 	if balance := cashBalance(t, pool, f); balance != 5000 {
 		t.Fatalf("expected the balance untouched by a failed launch, got %d", balance)
 	}
+	if !auditActionExists(t, pool, f.tenantID, "casino.launch_failed") {
+		t.Fatal("expected a casino.launch_failed audit record")
+	}
+
+	// The orphaned/revoked session can never be used to move money: a bet
+	// callback naming it is rejected with ErrLaunchSessionRequired, no
+	// ledger_transactions row is created for it, and the tenant's ledger
+	// stays exactly balanced throughout (SUM(debits) == SUM(credits) always
+	// holds - checked both before and after the rejected attempt, since
+	// fundWallet's own funding entries are already non-zero and balanced).
+	debitsBefore, creditsBefore := sumDebitsCredits(t, pool, f.tenantID)
+	if debitsBefore != creditsBefore {
+		t.Fatalf("ledger invariant violated before the rejected bet: debits=%d credits=%d", debitsBefore, creditsBefore)
+	}
+	payload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-orphan", "", "round-1", "game-1", 100, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
+	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", payload)
+		return err
+	})
+	if !errors.Is(err, ErrLaunchSessionRequired) {
+		t.Fatalf("expected ErrLaunchSessionRequired for a bet against a revoked session, got %v", err)
+	}
+	debitsAfter, creditsAfter := sumDebitsCredits(t, pool, f.tenantID)
+	if debitsAfter != creditsAfter {
+		t.Fatalf("ledger invariant violated after the rejected bet: debits=%d credits=%d", debitsAfter, creditsAfter)
+	}
+	if debitsAfter != debitsBefore || creditsAfter != creditsBefore {
+		t.Fatalf("expected no ledger effect at all from a bet against a revoked session, before=(%d,%d) after=(%d,%d)",
+			debitsBefore, creditsBefore, debitsAfter, creditsAfter)
+	}
+	var rejectedTxCount int
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx,
+			`SELECT count(*) FROM ledger_transactions WHERE tenant_id = $1 AND provider_id = 'mock-casino' AND provider_tx_id = 'bet-orphan'`,
+			f.tenantID).Scan(&rejectedTxCount)
+	}); err != nil {
+		t.Fatalf("count ledger transactions: %v", err)
+	}
+	if rejectedTxCount != 0 {
+		t.Fatalf("expected zero ledger_transactions rows for the rejected bet, got %d", rejectedTxCount)
+	}
+	if balance := cashBalance(t, pool, f); balance != 5000 {
+		t.Fatalf("expected the balance still untouched, got %d", balance)
+	}
 
 	// FailNextCall is one-shot: the very next launch succeeds, proving the
-	// failure above was the injected one and not a broken fixture.
-	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		result, err := orch.LaunchGame(ctx, tx, LaunchGameParams{
-			TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID,
-			GameID: game.ID, AssetCode: "EUR", Mode: ModeReal,
-		})
-		if err != nil {
-			return err
-		}
-		if result.SessionID == uuid.Nil {
-			return errors.New("expected a session id from the retried launch")
-		}
-		return nil
-	}); err != nil {
+	// failure above was the injected one and not a broken fixture, and that
+	// a player retry mints a brand-new session/token (existing behaviour -
+	// no automatic retry, no duplicate-token path for the failed attempt).
+	result, err := orch.LaunchGame(context.Background(), pool, NewMockOutboundResolver(), LaunchGameParams{
+		TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID,
+		GameID: game.ID, AssetCode: "EUR", Mode: ModeReal,
+	})
+	if err != nil {
 		t.Fatalf("retried launch after a one-shot transport failure: %v", err)
+	}
+	if result.SessionID == uuid.Nil {
+		t.Fatal("expected a session id from the retried launch")
+	}
+	if result.SessionID == sessionID {
+		t.Fatal("expected the retry to mint a brand-new session, not reuse the revoked one")
 	}
 }
 

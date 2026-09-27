@@ -399,14 +399,9 @@ func TestLaunchGame_MintsSingleUseSessionEmbeddedInLaunchURL(t *testing.T) {
 	registerCasinoCapability(t, pool, f, provider, 100)
 	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
 
-	var result LaunchGameResult
-	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		var err error
-		result, err = orch.LaunchGame(ctx, tx, LaunchGameParams{
-			TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID,
-			GameID: game.ID, AssetCode: "EUR", Mode: ModeReal,
-		})
-		return err
+	result, err := orch.LaunchGame(context.Background(), pool, NewMockOutboundResolver(), LaunchGameParams{
+		TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID,
+		GameID: game.ID, AssetCode: "EUR", Mode: ModeReal,
 	})
 	if err != nil {
 		t.Fatalf("LaunchGame: %v", err)
@@ -455,14 +450,9 @@ func TestLaunchSessions_CrossTenantRLSBlocksReadAndForgedInsert(t *testing.T) {
 	registerCasinoCapability(t, pool, fA, provider, 100)
 	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
 
-	var result LaunchGameResult
-	err := pool.WithTenant(context.Background(), fA.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		var err error
-		result, err = orch.LaunchGame(ctx, tx, LaunchGameParams{
-			TenantID: fA.tenantID, BrandID: fA.brandID, PlayerAccountID: fA.playerAccountID, WalletID: fA.walletID,
-			GameID: gameA.ID, AssetCode: "EUR", Mode: ModeReal,
-		})
-		return err
+	result, err := orch.LaunchGame(context.Background(), pool, NewMockOutboundResolver(), LaunchGameParams{
+		TenantID: fA.tenantID, BrandID: fA.brandID, PlayerAccountID: fA.playerAccountID, WalletID: fA.walletID,
+		GameID: gameA.ID, AssetCode: "EUR", Mode: ModeReal,
 	})
 	if err != nil {
 		t.Fatalf("LaunchGame under tenant A: %v", err)
@@ -523,12 +513,9 @@ func TestLaunchGame_InvalidGameNotFound(t *testing.T) {
 	f := seedCasinoFixture(t, pool)
 	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": NewMockCasinoProvider("mock-casino", "EUR")}, nil)
 
-	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := orch.LaunchGame(ctx, tx, LaunchGameParams{
-			TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID,
-			GameID: uuid.New(), AssetCode: "EUR", Mode: ModeReal,
-		})
-		return err
+	_, err := orch.LaunchGame(context.Background(), pool, NewMockOutboundResolver(), LaunchGameParams{
+		TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID,
+		GameID: uuid.New(), AssetCode: "EUR", Mode: ModeReal,
 	})
 	if !errors.Is(err, ErrGameNotFound) {
 		t.Fatalf("expected ErrGameNotFound, got %v", err)
@@ -556,12 +543,9 @@ func TestLaunchGame_DisabledGameAtPlatformLevel(t *testing.T) {
 		t.Fatalf("disable game: %v", err)
 	}
 
-	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := orch.LaunchGame(ctx, tx, LaunchGameParams{
-			TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID,
-			GameID: game.ID, AssetCode: "EUR", Mode: ModeReal,
-		})
-		return err
+	_, err = orch.LaunchGame(context.Background(), pool, NewMockOutboundResolver(), LaunchGameParams{
+		TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID,
+		GameID: game.ID, AssetCode: "EUR", Mode: ModeReal,
 	})
 	if !errors.Is(err, ErrGameDisabled) {
 		t.Fatalf("expected ErrGameDisabled, got %v", err)
@@ -577,12 +561,9 @@ func TestLaunchGame_NotAvailableForTenantUntilOptedIn(t *testing.T) {
 	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
 
 	// Deliberately never call enableGameForTenant - fail-closed opt-in.
-	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := orch.LaunchGame(ctx, tx, LaunchGameParams{
-			TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID,
-			GameID: game.ID, AssetCode: "EUR", Mode: ModeReal,
-		})
-		return err
+	_, err := orch.LaunchGame(context.Background(), pool, NewMockOutboundResolver(), LaunchGameParams{
+		TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID,
+		GameID: game.ID, AssetCode: "EUR", Mode: ModeReal,
 	})
 	if !errors.Is(err, ErrGameNotAvailable) {
 		t.Fatalf("expected ErrGameNotAvailable, got %v", err)
@@ -598,12 +579,9 @@ func TestLaunchGame_InvalidAssetRejected(t *testing.T) {
 	registerCasinoCapability(t, pool, f, provider, 100)
 	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
 
-	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := orch.LaunchGame(ctx, tx, LaunchGameParams{
-			TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID,
-			GameID: game.ID, AssetCode: "USD", Mode: ModeReal,
-		})
-		return err
+	_, err := orch.LaunchGame(context.Background(), pool, NewMockOutboundResolver(), LaunchGameParams{
+		TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID,
+		GameID: game.ID, AssetCode: "USD", Mode: ModeReal,
 	})
 	if !errors.Is(err, ErrInvalidInput) {
 		t.Fatalf("expected ErrInvalidInput for an asset the GAME doesn't support, got %v", err)
@@ -620,12 +598,9 @@ func TestLaunchGame_DisabledProviderCapabilityRejected(t *testing.T) {
 
 	// Deliberately never register a capability row at all - "no route
 	// configured" must behave identically to "explicitly disabled."
-	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := orch.LaunchGame(ctx, tx, LaunchGameParams{
-			TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID,
-			GameID: game.ID, AssetCode: "EUR", Mode: ModeReal,
-		})
-		return err
+	_, err := orch.LaunchGame(context.Background(), pool, NewMockOutboundResolver(), LaunchGameParams{
+		TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID,
+		GameID: game.ID, AssetCode: "EUR", Mode: ModeReal,
 	})
 	if !errors.Is(err, ErrProviderUnavailable) {
 		t.Fatalf("expected ErrProviderUnavailable with no capability row, got %v", err)
@@ -642,12 +617,9 @@ func TestLaunchGame_UnhealthyProviderCircuitOpenRejected(t *testing.T) {
 	provider.SetHealth(ProviderHealth{CircuitState: CircuitOpen})
 	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
 
-	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := orch.LaunchGame(ctx, tx, LaunchGameParams{
-			TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID,
-			GameID: game.ID, AssetCode: "EUR", Mode: ModeReal,
-		})
-		return err
+	_, err := orch.LaunchGame(context.Background(), pool, NewMockOutboundResolver(), LaunchGameParams{
+		TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID,
+		GameID: game.ID, AssetCode: "EUR", Mode: ModeReal,
 	})
 	if !errors.Is(err, ErrProviderUnavailable) {
 		t.Fatalf("expected ErrProviderUnavailable for an open circuit, got %v", err)
@@ -1612,14 +1584,9 @@ func TestResolveLaunchToken_ConcurrentResolutionOnlyOneSucceeds(t *testing.T) {
 	registerCasinoCapability(t, pool, f, provider, 100)
 	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
 
-	var result LaunchGameResult
-	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		var err error
-		result, err = orch.LaunchGame(ctx, tx, LaunchGameParams{
-			TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID,
-			GameID: game.ID, AssetCode: "EUR", Mode: ModeReal,
-		})
-		return err
+	result, err := orch.LaunchGame(context.Background(), pool, NewMockOutboundResolver(), LaunchGameParams{
+		TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID,
+		GameID: game.ID, AssetCode: "EUR", Mode: ModeReal,
 	})
 	if err != nil {
 		t.Fatalf("LaunchGame: %v", err)

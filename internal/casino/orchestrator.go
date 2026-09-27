@@ -18,6 +18,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/jurisdiction"
 	"github.com/Diansalas/igaming-platform/internal/ledger"
 	"github.com/Diansalas/igaming-platform/internal/observability"
+	"github.com/Diansalas/igaming-platform/internal/providercred"
 	"github.com/Diansalas/igaming-platform/internal/providerref"
 	"github.com/Diansalas/igaming-platform/internal/rg"
 	"github.com/Diansalas/igaming-platform/internal/risk"
@@ -126,13 +127,41 @@ type LaunchGameResult struct {
 
 // LaunchGame resolves a game's eligibility (platform status, tenant/
 // brand availability, jurisdiction, asset support), resolves its
-// provider's own capability and health, mints a single-use launch
-// session (ADR 0025 §3), and calls the provider's Launch. Every failure
-// mode returns a specific, distinguishable sentinel error (directive
-// items C/O/P/Q depend on this - "game doesn't exist" vs. "not enabled
-// here" vs. "provider unavailable" vs. "blocked in this jurisdiction"
-// are never collapsed into one generic not-found).
-func (o *Orchestrator) LaunchGame(ctx context.Context, tx pgx.Tx, params LaunchGameParams) (LaunchGameResult, error) {
+// provider's own capability, mints a single-use launch session (ADR 0025
+// §3), and calls the provider's Launch. Every failure mode returns a
+// specific, distinguishable sentinel error (directive items C/O/P/Q depend
+// on this - "game doesn't exist" vs. "not enabled here" vs. "provider
+// unavailable" vs. "blocked in this jurisdiction" are never collapsed into
+// one generic not-found).
+//
+// ADR 0095 §15.1 (PRH-I2, two-phase launch split): LaunchGame owns its own
+// transaction boundaries instead of receiving one from its caller. Phase A
+// - every eligibility/capability check plus CreateLaunchSession plus the
+// "casino.launch_requested" audit record - runs in ONE tenant-scoped
+// transaction (pool.WithTenant) that commits before this function ever
+// calls a provider adapter method that can perform real I/O (HealthStatus,
+// Launch). No transaction, and therefore no pooled connection, is held
+// across either call. Phase B resolves the per-call outbound credential
+// (PROV-OUTBOUND-CRED-1) and calls Launch. Phase C is a second short
+// transaction: success audits "casino.launched"; a failed or ambiguous
+// outcome revokes the session (CAS on status='active') and audits
+// "casino.launch_failed" - so a launch token is never left usable for a
+// round the platform can't account for. A crash on either side of the
+// vendor call leaves the session 'active' and unconsumed; it simply
+// expires (harmless - no ledger effect without a verified bet on a
+// resolvable, non-revoked session; see ErrLaunchSessionRequired). Retries
+// are the existing behaviour (no automatic retry; a player retry mints a
+// brand-new session/token) - there is no code path that mints a second
+// token for the same session.
+//
+// pool is the tenant-scoped transaction runner (*db.Pool satisfies it,
+// mirroring providercred.TenantTxRunner's identical shape); outbound is the
+// casino domain's outbound-credential resolver (a MOCK for a synthetic
+// adapter, providercred's real *(*Subsystem).Outbound("casino") for a real
+// one). Both nil fail every launch closed (never a silent fallback), the
+// same nil-resolver convention SetWebhookLogger/the inbound resolver field
+// already use.
+func (o *Orchestrator) LaunchGame(ctx context.Context, pool providercred.TenantTxRunner, outbound OutboundCredentialResolver, params LaunchGameParams) (LaunchGameResult, error) {
 	if params.TenantID == uuid.Nil || params.BrandID == uuid.Nil || params.PlayerAccountID == uuid.Nil || params.WalletID == uuid.Nil || params.GameID == uuid.Nil {
 		return LaunchGameResult{}, fmt.Errorf("%w: launch requires fully-populated, server-derived identity fields", ErrInvalidInput)
 	}
@@ -142,222 +171,329 @@ func (o *Orchestrator) LaunchGame(ctx context.Context, tx pgx.Tx, params LaunchG
 	if params.Mode != ModeReal && params.Mode != ModeDemo {
 		return LaunchGameResult{}, fmt.Errorf("%w: mode must be 'real' or 'demo'", ErrInvalidInput)
 	}
-
-	game, err := GetGameByID(ctx, tx, params.GameID)
-	if err != nil {
-		return LaunchGameResult{}, err
-	}
-	if game.Status != GameStatusActive {
-		return LaunchGameResult{}, ErrGameDisabled
-	}
-	available, err := IsGameAvailable(ctx, tx, params.TenantID, params.BrandID, params.GameID)
-	if err != nil {
-		return LaunchGameResult{}, err
-	}
-	if !available {
-		return LaunchGameResult{}, ErrGameNotAvailable
+	if pool == nil {
+		return LaunchGameResult{}, fmt.Errorf("%w: casino launch has no transaction runner configured", ErrProviderUnavailable)
 	}
 
-	// K-3 remediation (canonical-model §9): resolve the player's
-	// jurisdiction ONCE, here, and feed all three consumers from this one
-	// value (K3-3) - the blocklist check immediately below, the
-	// RiskRequest further down (real-mode only), and CreateLaunchSession's
-	// persisted snapshot. This closes the defect where this line used to
-	// dereference params.JurisdictionCode directly while a SEPARATELY-
-	// derived local fed Risk/the session - two dereferences of what should
-	// always have been one value.
-	//
-	// K3-4 (demo mode decided EXPLICITLY, canonical-model §9.6): this
-	// resolution, and the blocklist check it feeds, run for BOTH real AND
-	// demo launches - never conditioned on params.Mode. This is
-	// architect's deliberate ruling that demo launches are catalogue-
-	// availability-bearing BY DEFAULT: "may this title be offered in this
-	// market" is a question about the CATALOGUE, not about whether real
-	// money is at stake, so the platform's answer must not depend on which
-	// endpoint is asked. This is a stated, commented choice - not an
-	// accident of this code sitting above the params.Mode == ModeReal
-	// branch below (which gates Risk, a genuinely money-only concern).
-	//
-	// Resolve is a cheap, read-only, no-external-network-dependency
-	// Postgres read (canonical-model §9.4) - there is no cost reason to
-	// skip it for an unarmed game, and every player-scoped resolution
-	// resolves unresolved(no_signal) today regardless (HDR-J-3 is
-	// unanswered, canonical-model §11.3), so running it unconditionally
-	// changes nothing observable for a game carrying no blocklist.
-	jurisdictionResolution, err := jurisdiction.Resolve(ctx, tx, jurisdiction.Params{
-		TenantID: params.TenantID, BrandID: &params.BrandID, PlayerAccountID: &params.PlayerAccountID,
-		OperationClass:       jurisdiction.OperationPlay,
-		RequestedByActorType: jurisdiction.ActorPlayer, RequestedByActorID: &params.PlayerAccountID,
+	// Phase A: one committed transaction for every check plus the session
+	// mint plus its own audit record. denied captures a policy decision
+	// (RG/risk/jurisdiction) that must still COMMIT its own audit row
+	// (evaluateAndAuditEligibility/evaluateAndAuditRisk/
+	// evaluateJurisdictionBlocklist already wrote it) without being treated
+	// as a transaction-aborting error - mirroring the pre-split code's
+	// identical "Denied is a result, never a Go error" contract (see
+	// LaunchGameResult's own doc comment).
+	var (
+		session        LaunchSession
+		token          string
+		providerID     string
+		providerGameID string
+		denied         *LaunchGameResult
+	)
+	txErr := pool.WithTenant(ctx, params.TenantID, func(ctx context.Context, tx pgx.Tx) error {
+		game, err := GetGameByID(ctx, tx, params.GameID)
+		if err != nil {
+			return err
+		}
+		if game.Status != GameStatusActive {
+			return ErrGameDisabled
+		}
+		available, err := IsGameAvailable(ctx, tx, params.TenantID, params.BrandID, params.GameID)
+		if err != nil {
+			return err
+		}
+		if !available {
+			return ErrGameNotAvailable
+		}
+
+		// K-3 remediation (canonical-model §9): resolve the player's
+		// jurisdiction ONCE, here, and feed all three consumers from this one
+		// value (K3-3) - the blocklist check immediately below, the
+		// RiskRequest further down (real-mode only), and CreateLaunchSession's
+		// persisted snapshot. This closes the defect where this line used to
+		// dereference params.JurisdictionCode directly while a SEPARATELY-
+		// derived local fed Risk/the session - two dereferences of what should
+		// always have been one value.
+		//
+		// K3-4 (demo mode decided EXPLICITLY, canonical-model §9.6): this
+		// resolution, and the blocklist check it feeds, run for BOTH real AND
+		// demo launches - never conditioned on params.Mode. This is
+		// architect's deliberate ruling that demo launches are catalogue-
+		// availability-bearing BY DEFAULT: "may this title be offered in this
+		// market" is a question about the CATALOGUE, not about whether real
+		// money is at stake, so the platform's answer must not depend on which
+		// endpoint is asked. This is a stated, commented choice - not an
+		// accident of this code sitting above the params.Mode == ModeReal
+		// branch below (which gates Risk, a genuinely money-only concern).
+		//
+		// Resolve is a cheap, read-only, no-external-network-dependency
+		// Postgres read (canonical-model §9.4) - there is no cost reason to
+		// skip it for an unarmed game, and every player-scoped resolution
+		// resolves unresolved(no_signal) today regardless (HDR-J-3 is
+		// unanswered, canonical-model §11.3), so running it unconditionally
+		// changes nothing observable for a game carrying no blocklist.
+		jurisdictionResolution, err := jurisdiction.Resolve(ctx, tx, jurisdiction.Params{
+			TenantID: params.TenantID, BrandID: &params.BrandID, PlayerAccountID: &params.PlayerAccountID,
+			OperationClass:       jurisdiction.OperationPlay,
+			RequestedByActorType: jurisdiction.ActorPlayer, RequestedByActorID: &params.PlayerAccountID,
+		})
+		if err != nil {
+			return fmt.Errorf("casino: resolve jurisdiction: %w", err)
+		}
+
+		// K3-1 - the one correction the canonical model makes to RISK's/
+		// security's own K-3 recommendations (canonical-model §9.1's full
+		// reasoning is not re-derived here): the control is only ARMED for a
+		// game whose OWN jurisdiction_blocklist is non-empty. This is a clean,
+		// statically-determinable test (no jurisdiction resolution needed at
+		// all) - a game with an empty blocklist has no jurisdiction-dependent
+		// policy in force, so it must not start denying launches the moment
+		// jurisdiction resolution exists in the codebase. Applying RISK's
+		// original "remove the params.JurisdictionCode != nil guard
+		// unconditionally" recommendation literally would deny 100% of casino
+		// launches in Stage 4I, since every player-scoped resolution is
+		// unresolved(no_signal) today (HDR-J-3 unanswered).
+		// canonical-model §4.4 Layer 2: every consuming gate re-asserts the
+		// resolution's own tenant/brand/player binding against its OWN
+		// authenticated context before ever calling Code() - a resolution for
+		// a different player (or a tenant-subject resolution with no player at
+		// all) is structurally unusable here. Resolve derived this SAME
+		// resolution from these SAME params two lines above, so this is
+		// defense-in-depth rather than something that can genuinely diverge in
+		// production - but it is exactly the check that keeps a future
+		// refactor from ever laundering a mismatched resolution through this
+		// gate, and it is what makes evaluateJurisdictionBlocklist below safe
+		// to feed a resolution obtained from anywhere.
+		if err := jurisdictionResolution.AssertScope(params.TenantID, &params.BrandID, &params.PlayerAccountID); err != nil {
+			return fmt.Errorf("casino: jurisdiction resolution scope: %w", err)
+		}
+		if blocked, denialCode, err := evaluateJurisdictionBlocklist(game.JurisdictionBlocklist, jurisdictionResolution); err != nil {
+			return err
+		} else if blocked {
+			denied = &LaunchGameResult{Denied: true, DenialCode: denialCode}
+			return nil
+		}
+		if !containsString(game.SupportedAssets, params.AssetCode) {
+			return fmt.Errorf("%w: game does not support asset %s", ErrInvalidInput, params.AssetCode)
+		}
+
+		// Stage 4D-RG: the single authoritative "may this player gamble right
+		// now" policy boundary (ADR 0026 §5/§6), consulted BEFORE a launch
+		// session is minted - a prohibited player (suspended, self-excluded
+		// anywhere on the platform via their cross-brand Person, or holding a
+		// non-active wallet) must never obtain a usable session, regardless of
+		// what any provider does or does not enforce on its own end.
+		decision, err := evaluateAndAuditEligibility(ctx, tx, params.TenantID, params.BrandID, params.PlayerAccountID, params.WalletID, "casino.launch_denied")
+		if err != nil {
+			return err
+		}
+		if !decision.Allowed {
+			denied = &LaunchGameResult{Denied: true, DenialCode: decision.Code, DenialMessage: decision.Message}
+			return nil
+		}
+
+		// K3-3 (continued): the SAME jurisdictionResolution computed above
+		// feeds the risk check below and the launch session's persisted
+		// snapshot just below that (Stage 4G-FINAL Part C) - so a
+		// jurisdiction-scoped rule stays reachable from this SAME round's
+		// later bets (postBet), not just at launch time. Empty only when the
+		// resolution did not resolve - never silently defaulted
+		// (jurisdiction.Resolution.Code() is structurally unreachable for a
+		// non-Resolved outcome, canonical-model §2.3 property 2).
+		var jurisdictionCode string
+		if jurisdictionResolution.Outcome() == jurisdiction.Resolved {
+			jurisdictionCode, _ = jurisdictionResolution.Code() // err impossible: Outcome() == Resolved, just checked
+		}
+
+		// Stage 4G: the central Risk & Limits boundary, consulted alongside
+		// (never instead of) RG eligibility above - a separate domain, per
+		// ADR 0031 §1. Skipped for demo-mode launches: no real financial
+		// exposure exists yet to gate. A REVIEW outcome is treated identically
+		// to DENY at this integration point (ADR 0031 §6 - no
+		// compliance-review workflow exists yet for casino launch, so a
+		// review-flagged launch fails safe by blocking rather than proceeding
+		// provisionally).
+		if params.Mode == ModeReal {
+			// Stage 4G-FINAL Part D: resolved server-side from the tenant's
+			// OWN tenants.licensing_model, never assumed - risk.Evaluate
+			// itself never looks this up (see RiskRequest.LicensingMode's doc
+			// comment). Lets a platform-wide HARD_LIMIT expressing the
+			// PLATFORM's own licence's legal ceiling be scoped so it does not
+			// also bind a future bring-your-own-licence tenant.
+			licensingMode, err := resolveLicensingMode(ctx, tx, params.TenantID)
+			if err != nil {
+				return err
+			}
+			riskDecision, err := evaluateAndAuditRisk(ctx, tx, risk.RiskRequest{
+				TenantID: params.TenantID, BrandID: params.BrandID, PlayerAccountID: params.PlayerAccountID,
+				Operation: risk.OperationCasinoLaunch, Product: "casino", ProviderID: game.ProviderID, GameID: params.GameID,
+				AssetCode: params.AssetCode, JurisdictionCode: jurisdictionCode, LicensingMode: licensingMode,
+			}, "casino.launch_denied_by_risk_policy")
+			if err != nil {
+				return err
+			}
+			// ALLOW / REVIEW / DENY / error-or-unavailable are FOUR distinct
+			// outcomes, classified in one shared place rather than collapsed
+			// into "not allow" at each call site (ADR 0031 §34).
+			proceed, err := classifyRiskOutcome(riskDecision.Outcome)
+			if err != nil {
+				return err
+			}
+			if !proceed {
+				denied = &LaunchGameResult{Denied: true, DenialCode: riskDecision.Code, DenialMessage: riskDecision.Message}
+				return nil
+			}
+		}
+
+		capability, found, err := LoadCapability(ctx, tx, params.TenantID, params.BrandID, game.ProviderID)
+		if err != nil {
+			return err
+		}
+		if !found || capability.Status != CapabilityActive || !capability.SupportsLaunch {
+			return ErrProviderUnavailable
+		}
+		if !containsString(capability.SupportedAssets, params.AssetCode) {
+			return ErrProviderUnavailable
+		}
+		// Stage 10.3 CAS-CAP-ROLLBACK-1 (§1.4 step 7, launch coherence): a
+		// real-money launch must also require supports_bet - otherwise a
+		// player could obtain a usable real-money session in which every bet
+		// callback then 503s at postBet's own capability gate. Demo launches
+		// are unaffected (no financial exposure to gate); this has no ledger
+		// effect either way.
+		if params.Mode == ModeReal && !capability.SupportsBet {
+			return ErrProviderUnavailable
+		}
+
+		if _, registered := o.providers[game.ProviderID]; !registered {
+			return fmt.Errorf("%w: %s", ErrUnknownProvider, game.ProviderID)
+		}
+
+		session, token, err = CreateLaunchSession(ctx, tx, CreateLaunchSessionParams{
+			TenantID: params.TenantID, BrandID: params.BrandID, PlayerAccountID: params.PlayerAccountID, WalletID: params.WalletID,
+			GameID: params.GameID, ProviderID: game.ProviderID, ProviderGameID: game.ProviderGameID,
+			AssetCode: params.AssetCode, Mode: params.Mode, JurisdictionCode: jurisdictionCode,
+		})
+		if err != nil {
+			return err
+		}
+		providerID, providerGameID = game.ProviderID, game.ProviderGameID
+
+		return audit.Record(ctx, tx, audit.Entry{
+			TenantID: params.TenantID, ActorType: audit.ActorPlayer, ActorID: params.PlayerAccountID,
+			Action: "casino.launch_requested", TargetType: "casino_launch_session", TargetID: session.ID.String(),
+			Outcome: audit.OutcomeSuccess,
+			Metadata: map[string]any{
+				"game_id": params.GameID.String(), "provider_id": game.ProviderID, "provider_game_id": game.ProviderGameID,
+				"asset_code": params.AssetCode, "mode": string(params.Mode),
+			},
+		})
 	})
-	if err != nil {
-		return LaunchGameResult{}, fmt.Errorf("casino: resolve jurisdiction: %w", err)
+	if txErr != nil {
+		return LaunchGameResult{}, txErr
+	}
+	if denied != nil {
+		return *denied, nil
 	}
 
-	// K3-1 - the one correction the canonical model makes to RISK's/
-	// security's own K-3 recommendations (canonical-model §9.1's full
-	// reasoning is not re-derived here): the control is only ARMED for a
-	// game whose OWN jurisdiction_blocklist is non-empty. This is a clean,
-	// statically-determinable test (no jurisdiction resolution needed at
-	// all) - a game with an empty blocklist has no jurisdiction-dependent
-	// policy in force, so it must not start denying launches the moment
-	// jurisdiction resolution exists in the codebase. Applying RISK's
-	// original "remove the params.JurisdictionCode != nil guard
-	// unconditionally" recommendation literally would deny 100% of casino
-	// launches in Stage 4I, since every player-scoped resolution is
-	// unresolved(no_signal) today (HDR-J-3 unanswered).
-	// canonical-model §4.4 Layer 2: every consuming gate re-asserts the
-	// resolution's own tenant/brand/player binding against its OWN
-	// authenticated context before ever calling Code() - a resolution for
-	// a different player (or a tenant-subject resolution with no player at
-	// all) is structurally unusable here. Resolve derived this SAME
-	// resolution from these SAME params two lines above, so this is
-	// defense-in-depth rather than something that can genuinely diverge in
-	// production - but it is exactly the check that keeps a future
-	// refactor from ever laundering a mismatched resolution through this
-	// gate, and it is what makes evaluateJurisdictionBlocklist below safe
-	// to feed a resolution obtained from anywhere.
-	if err := jurisdictionResolution.AssertScope(params.TenantID, &params.BrandID, &params.PlayerAccountID); err != nil {
-		return LaunchGameResult{}, fmt.Errorf("casino: jurisdiction resolution scope: %w", err)
-	}
-	if denied, denialCode, err := evaluateJurisdictionBlocklist(game.JurisdictionBlocklist, jurisdictionResolution); err != nil {
-		return LaunchGameResult{}, err
-	} else if denied {
-		return LaunchGameResult{Denied: true, DenialCode: denialCode}, nil
-	}
-	if !containsString(game.SupportedAssets, params.AssetCode) {
-		return LaunchGameResult{}, fmt.Errorf("%w: game does not support asset %s", ErrInvalidInput, params.AssetCode)
+	// launchFailed runs phase C's failure path in its own short
+	// transaction (RevokeLaunchSession's CAS on status='active', plus the
+	// "casino.launch_failed" audit record) and returns the caller-facing
+	// error. It never re-panics on a revoke failure - the session simply
+	// expires on its own (harmless; see this function's own doc comment).
+	launchFailed := func(cause error) (LaunchGameResult, error) {
+		_ = pool.WithTenant(ctx, params.TenantID, func(ctx context.Context, tx pgx.Tx) error {
+			_ = RevokeLaunchSession(ctx, tx, session.ID)
+			return audit.Record(ctx, tx, audit.Entry{
+				TenantID: params.TenantID, ActorType: audit.ActorPlayer, ActorID: params.PlayerAccountID,
+				Action: "casino.launch_failed", TargetType: "casino_launch_session", TargetID: session.ID.String(),
+				Outcome: audit.OutcomeFailure,
+				Metadata: map[string]any{
+					"game_id": params.GameID.String(), "provider_id": providerID, "provider_game_id": providerGameID,
+					"reason": cause.Error(),
+				},
+			})
+		})
+		return LaunchGameResult{}, fmt.Errorf("casino: %w", cause)
 	}
 
-	// Stage 4D-RG: the single authoritative "may this player gamble right
-	// now" policy boundary (ADR 0026 §5/§6), consulted BEFORE a launch
-	// session is minted - a prohibited player (suspended, self-excluded
-	// anywhere on the platform via their cross-brand Person, or holding a
-	// non-active wallet) must never obtain a usable session, regardless of
-	// what any provider does or does not enforce on its own end.
-	decision, err := evaluateAndAuditEligibility(ctx, tx, params.TenantID, params.BrandID, params.PlayerAccountID, params.WalletID, "casino.launch_denied")
-	if err != nil {
-		return LaunchGameResult{}, err
-	}
-	if !decision.Allowed {
-		return LaunchGameResult{Denied: true, DenialCode: decision.Code, DenialMessage: decision.Message}, nil
-	}
-
-	// K3-3 (continued): the SAME jurisdictionResolution computed above
-	// feeds the risk check below and the launch session's persisted
-	// snapshot just below that (Stage 4G-FINAL Part C) - so a
-	// jurisdiction-scoped rule stays reachable from this SAME round's
-	// later bets (postBet), not just at launch time. Empty only when the
-	// resolution did not resolve - never silently defaulted
-	// (jurisdiction.Resolution.Code() is structurally unreachable for a
-	// non-Resolved outcome, canonical-model §2.3 property 2).
-	var jurisdictionCode string
-	if jurisdictionResolution.Outcome() == jurisdiction.Resolved {
-		jurisdictionCode, _ = jurisdictionResolution.Code() // err impossible: Outcome() == Resolved, just checked
-	}
-
-	// Stage 4G: the central Risk & Limits boundary, consulted alongside
-	// (never instead of) RG eligibility above - a separate domain, per
-	// ADR 0031 §1. Skipped for demo-mode launches: no real financial
-	// exposure exists yet to gate. A REVIEW outcome is treated identically
-	// to DENY at this integration point (ADR 0031 §6 - no
-	// compliance-review workflow exists yet for casino launch, so a
-	// review-flagged launch fails safe by blocking rather than proceeding
-	// provisionally).
-	if params.Mode == ModeReal {
-		// Stage 4G-FINAL Part D: resolved server-side from the tenant's
-		// OWN tenants.licensing_model, never assumed - risk.Evaluate
-		// itself never looks this up (see RiskRequest.LicensingMode's doc
-		// comment). Lets a platform-wide HARD_LIMIT expressing the
-		// PLATFORM's own licence's legal ceiling be scoped so it does not
-		// also bind a future bring-your-own-licence tenant.
-		licensingMode, err := resolveLicensingMode(ctx, tx, params.TenantID)
-		if err != nil {
-			return LaunchGameResult{}, err
-		}
-		riskDecision, err := evaluateAndAuditRisk(ctx, tx, risk.RiskRequest{
-			TenantID: params.TenantID, BrandID: params.BrandID, PlayerAccountID: params.PlayerAccountID,
-			Operation: risk.OperationCasinoLaunch, Product: "casino", ProviderID: game.ProviderID, GameID: params.GameID,
-			AssetCode: params.AssetCode, JurisdictionCode: jurisdictionCode, LicensingMode: licensingMode,
-		}, "casino.launch_denied_by_risk_policy")
-		if err != nil {
-			return LaunchGameResult{}, err
-		}
-		// ALLOW / REVIEW / DENY / error-or-unavailable are FOUR distinct
-		// outcomes, classified in one shared place rather than collapsed
-		// into "not allow" at each call site (ADR 0031 §34).
-		proceed, err := classifyRiskOutcome(riskDecision.Outcome)
-		if err != nil {
-			return LaunchGameResult{}, err
-		}
-		if !proceed {
-			return LaunchGameResult{Denied: true, DenialCode: riskDecision.Code, DenialMessage: riskDecision.Message}, nil
-		}
-	}
-
-	capability, found, err := LoadCapability(ctx, tx, params.TenantID, params.BrandID, game.ProviderID)
-	if err != nil {
-		return LaunchGameResult{}, err
-	}
-	if !found || capability.Status != CapabilityActive || !capability.SupportsLaunch {
-		return LaunchGameResult{}, ErrProviderUnavailable
-	}
-	if !containsString(capability.SupportedAssets, params.AssetCode) {
-		return LaunchGameResult{}, ErrProviderUnavailable
-	}
-	// Stage 10.3 CAS-CAP-ROLLBACK-1 (§1.4 step 7, launch coherence): a
-	// real-money launch must also require supports_bet - otherwise a
-	// player could obtain a usable real-money session in which every bet
-	// callback then 503s at postBet's own capability gate. Demo launches
-	// are unaffected (no financial exposure to gate); this has no ledger
-	// effect either way.
-	if params.Mode == ModeReal && !capability.SupportsBet {
-		return LaunchGameResult{}, ErrProviderUnavailable
-	}
-
-	provider, registered := o.providers[game.ProviderID]
+	// Phase A committed (this released every advisory lock RG/risk took):
+	// the provider is now resolved from the SAME registry Phase A already
+	// verified holds this provider id, under no transaction.
+	provider, registered := o.providers[providerID]
 	if !registered {
-		return LaunchGameResult{}, fmt.Errorf("%w: %s", ErrUnknownProvider, game.ProviderID)
+		// Unreachable in practice (Phase A just verified registration under
+		// the same process-lifetime registry), but never assume: fail the
+		// same way an actually-missing adapter would, without dereferencing
+		// a nil CasinoProvider.
+		return launchFailed(fmt.Errorf("%w: provider %q no longer registered", ErrProviderUnavailable, providerID))
 	}
+
+	// Health snapshot outside any transaction (ADR 0095 §9.6/§15.1):
+	// HealthStatus is contractually in-memory-only and returns promptly, so
+	// this never performs I/O while (or without) a pooled connection held.
 	if health, err := provider.HealthStatus(ctx); err == nil && health.CircuitState == CircuitOpen {
-		return LaunchGameResult{}, ErrProviderUnavailable
+		return launchFailed(fmt.Errorf("%w: circuit open", ErrProviderUnavailable))
 	}
 
-	session, token, err := CreateLaunchSession(ctx, tx, CreateLaunchSessionParams{
-		TenantID: params.TenantID, BrandID: params.BrandID, PlayerAccountID: params.PlayerAccountID, WalletID: params.WalletID,
-		GameID: params.GameID, ProviderID: game.ProviderID, ProviderGameID: game.ProviderGameID,
-		AssetCode: params.AssetCode, Mode: params.Mode, JurisdictionCode: jurisdictionCode,
-	})
+	// Phase B: resolve the per-call outbound credential (PROV-OUTBOUND-
+	// CRED-1) OUTSIDE any transaction, then call Launch - the one call in
+	// this function that may perform real provider I/O, with no pooled
+	// connection held across it.
+	if outbound == nil {
+		return launchFailed(fmt.Errorf("%w: no outbound credential resolver configured", ErrProviderUnavailable))
+	}
+	cred, err := outbound.Resolve(ctx, pool, params.TenantID, providerID)
 	if err != nil {
-		return LaunchGameResult{}, err
+		return launchFailed(fmt.Errorf("resolve outbound credential: %w", err))
+	}
+	// Defense in depth (ADR 0095 §9.1/S95-C8(b)): the credential this call
+	// just resolved must bind to the SAME tenant/provider/domain LaunchGame
+	// is launching for. A resolver bug or a future real adapter's own
+	// mismatch is caught here rather than silently used.
+	if cred.TenantID != params.TenantID || cred.ProviderID != providerID || cred.Domain != "casino" {
+		return launchFailed(fmt.Errorf("%w: outbound credential binding mismatch", ErrProviderUnavailable))
 	}
 
+	call := CallContext{
+		TenantID: params.TenantID, ProviderID: providerID, Credential: cred,
+		IdempotencyKey: "cas:" + session.ID.String(), Deadline: time.Now().Add(defaultLaunchCallTimeout),
+	}
 	result, err := provider.Launch(ctx, LaunchRequest{
-		ProviderGameID: game.ProviderGameID, PlayerAccountID: params.PlayerAccountID,
+		ProviderGameID: providerGameID, PlayerAccountID: params.PlayerAccountID,
 		AssetCode: params.AssetCode, Mode: params.Mode, LaunchToken: token, SessionID: session.ID,
+		Call: call,
 	})
 	if err != nil {
 		// The launch call itself failed at the transport level - the
 		// session was never actually usable, so revoke it rather than
 		// leaving an 'active' row a retried launch attempt could never
-		// reach (a fresh LaunchGame call mints its own new session
-		// instead of trying to reuse this one).
-		_ = RevokeLaunchSession(ctx, tx, session.ID)
-		return LaunchGameResult{}, fmt.Errorf("casino: provider launch call failed: %w", err)
+		// reach (a fresh LaunchGame call mints its own new session instead
+		// of trying to reuse this one).
+		return launchFailed(fmt.Errorf("provider launch call failed: %w", err))
 	}
 	if result.Outcome != OutcomeSucceeded {
-		_ = RevokeLaunchSession(ctx, tx, session.ID)
-		return LaunchGameResult{}, fmt.Errorf("casino: provider declined launch: %s", result.DeclineReason)
+		return launchFailed(fmt.Errorf("provider declined launch: %s", result.DeclineReason))
 	}
 
-	if err := audit.Record(ctx, tx, audit.Entry{
-		TenantID: params.TenantID, ActorType: audit.ActorPlayer, ActorID: params.PlayerAccountID,
-		Action: "casino.launched", TargetType: "casino_launch_session", TargetID: session.ID.String(),
-		Outcome: audit.OutcomeSuccess,
-		Metadata: map[string]any{
-			"game_id": params.GameID.String(), "provider_id": game.ProviderID, "provider_game_id": game.ProviderGameID,
-			"asset_code": params.AssetCode, "mode": string(params.Mode),
-		},
+	// Phase C success: a second short transaction for the "casino.launched"
+	// audit record only - still no transaction held during, or across, the
+	// Launch call above.
+	if err := pool.WithTenant(ctx, params.TenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return audit.Record(ctx, tx, audit.Entry{
+			TenantID: params.TenantID, ActorType: audit.ActorPlayer, ActorID: params.PlayerAccountID,
+			Action: "casino.launched", TargetType: "casino_launch_session", TargetID: session.ID.String(),
+			Outcome: audit.OutcomeSuccess,
+			Metadata: map[string]any{
+				"game_id": params.GameID.String(), "provider_id": providerID, "provider_game_id": providerGameID,
+				"asset_code": params.AssetCode, "mode": string(params.Mode),
+			},
+		})
 	}); err != nil {
+		// The vendor already accepted the launch; the player simply loses
+		// this URL and the session expires on its own (harmless - see this
+		// function's own doc comment) rather than this function silently
+		// claiming success without its own audit trail.
 		return LaunchGameResult{}, fmt.Errorf("casino: audit launch: %w", err)
 	}
 

@@ -103,14 +103,9 @@ func TestLaunchGame_DeniedWhenPlayerAccountSuspended(t *testing.T) {
 	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
 	suspendAccount(t, pool, f)
 
-	var result LaunchGameResult
-	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		var err error
-		result, err = orch.LaunchGame(ctx, tx, LaunchGameParams{
-			TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID,
-			GameID: game.ID, AssetCode: "EUR", Mode: ModeReal,
-		})
-		return err
+	result, err := orch.LaunchGame(context.Background(), pool, NewMockOutboundResolver(), LaunchGameParams{
+		TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID,
+		GameID: game.ID, AssetCode: "EUR", Mode: ModeReal,
 	})
 	if err != nil {
 		t.Fatalf("LaunchGame: %v", err)
@@ -133,14 +128,9 @@ func TestLaunchGame_DeniedWhenSelfExcludedPlatformWide(t *testing.T) {
 	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
 	selfExclude(t, pool, f)
 
-	var result LaunchGameResult
-	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		var err error
-		result, err = orch.LaunchGame(ctx, tx, LaunchGameParams{
-			TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID,
-			GameID: game.ID, AssetCode: "EUR", Mode: ModeReal,
-		})
-		return err
+	result, err := orch.LaunchGame(context.Background(), pool, NewMockOutboundResolver(), LaunchGameParams{
+		TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID,
+		GameID: game.ID, AssetCode: "EUR", Mode: ModeReal,
 	})
 	if err != nil {
 		t.Fatalf("LaunchGame: %v", err)
@@ -173,14 +163,9 @@ func TestLaunchGame_DeniedCrossBrandSelfExclusion(t *testing.T) {
 
 	selfExclude(t, pool, brandA)
 
-	var result LaunchGameResult
-	err := pool.WithTenant(context.Background(), brandB.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		var err error
-		result, err = orch.LaunchGame(ctx, tx, LaunchGameParams{
-			TenantID: brandB.tenantID, BrandID: brandB.brandID, PlayerAccountID: brandB.playerAccountID, WalletID: brandB.walletID,
-			GameID: game.ID, AssetCode: "EUR", Mode: ModeReal,
-		})
-		return err
+	result, err := orch.LaunchGame(context.Background(), pool, NewMockOutboundResolver(), LaunchGameParams{
+		TenantID: brandB.tenantID, BrandID: brandB.brandID, PlayerAccountID: brandB.playerAccountID, WalletID: brandB.walletID,
+		GameID: game.ID, AssetCode: "EUR", Mode: ModeReal,
 	})
 	if err != nil {
 		t.Fatalf("LaunchGame: %v", err)
@@ -357,13 +342,9 @@ func TestConcurrent_SelfExclusionDuringLaunch_Deterministic(t *testing.T) {
 		wg.Add(2)
 		go func() {
 			defer wg.Done()
-			launchErr = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-				var err error
-				launchResult, err = orch.LaunchGame(ctx, tx, LaunchGameParams{
-					TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID,
-					GameID: game.ID, AssetCode: "EUR", Mode: ModeReal,
-				})
-				return err
+			launchResult, launchErr = orch.LaunchGame(context.Background(), pool, NewMockOutboundResolver(), LaunchGameParams{
+				TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID,
+				GameID: game.ID, AssetCode: "EUR", Mode: ModeReal,
 			})
 		}()
 		go func() {

@@ -68,6 +68,7 @@ func newCasinoTestServer(t *testing.T, pool *db.Pool, issuer *auth.Issuer, orche
 		AccessTokenTTL:              5 * time.Minute,
 		RefreshTokenTTL:             time.Hour,
 		CasinoOrchestrator:          orchestrator,
+		CasinoOutboundCredentials:   casino.NewMockOutboundResolver(),
 		CasinoPlaySimulationEnabled: true,
 		PersonResolver:              identityresolution.NewMockPersonResolver(),
 	}))

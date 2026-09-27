@@ -59,6 +59,7 @@ func sportsbookCasinoLockOrderServer(t *testing.T, pool *db.Pool, orchestrator *
 		RefreshTokenTTL:             time.Hour,
 		SportsbookEnabled:           true,
 		CasinoOrchestrator:          orchestrator,
+		CasinoOutboundCredentials:   casino.NewMockOutboundResolver(),
 		CasinoPlaySimulationEnabled: true,
 		PersonResolver:              identityresolution.NewMockPersonResolver(),
 	}))

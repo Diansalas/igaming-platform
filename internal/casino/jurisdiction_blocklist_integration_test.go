@@ -77,14 +77,9 @@ func TestLaunchGame_EmptyBlocklist_NonRegression(t *testing.T) {
 	registerCasinoCapability(t, pool, f, provider, 100)
 	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
 
-	var result LaunchGameResult
-	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		var err error
-		result, err = orch.LaunchGame(ctx, tx, LaunchGameParams{
-			TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID,
-			GameID: game.ID, AssetCode: "EUR", Mode: ModeReal,
-		})
-		return err
+	result, err := orch.LaunchGame(context.Background(), pool, NewMockOutboundResolver(), LaunchGameParams{
+		TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID,
+		GameID: game.ID, AssetCode: "EUR", Mode: ModeReal,
 	})
 	if err != nil {
 		t.Fatalf("LaunchGame: %v", err)
@@ -113,14 +108,9 @@ func TestLaunchGame_ArmedBlocklist_DeniesOnUnresolvedJurisdiction(t *testing.T) 
 	registerCasinoCapability(t, pool, f, provider, 100)
 	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
 
-	var result LaunchGameResult
-	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		var err error
-		result, err = orch.LaunchGame(ctx, tx, LaunchGameParams{
-			TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID,
-			GameID: game.ID, AssetCode: "EUR", Mode: ModeReal,
-		})
-		return err
+	result, err := orch.LaunchGame(context.Background(), pool, NewMockOutboundResolver(), LaunchGameParams{
+		TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID,
+		GameID: game.ID, AssetCode: "EUR", Mode: ModeReal,
 	})
 	if err != nil {
 		t.Fatalf("LaunchGame: %v", err)
@@ -145,14 +135,9 @@ func TestLaunchGame_ArmedBlocklist_DeniesInDemoModeToo(t *testing.T) {
 	registerCasinoCapability(t, pool, f, provider, 100)
 	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
 
-	var result LaunchGameResult
-	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		var err error
-		result, err = orch.LaunchGame(ctx, tx, LaunchGameParams{
-			TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID,
-			GameID: game.ID, AssetCode: "EUR", Mode: ModeDemo,
-		})
-		return err
+	result, err := orch.LaunchGame(context.Background(), pool, NewMockOutboundResolver(), LaunchGameParams{
+		TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID,
+		GameID: game.ID, AssetCode: "EUR", Mode: ModeDemo,
 	})
 	if err != nil {
 		t.Fatalf("LaunchGame: %v", err)

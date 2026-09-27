@@ -221,6 +221,26 @@ func (b providerBundle) casinoOrchestratorResolver() webhookauth.Resolver {
 	return webhookauth.NewKindSplitResolver(b.casinoAdapters(), mock, b.Credentials.Resolver("casino"))
 }
 
+// casinoOutboundCredentials is LaunchGame's phase B credential resolver
+// (ADR 0095 §15.1/§9.1, PROV-OUTBOUND-CRED-1) - casinoOrchestratorResolver's
+// OUTBOUND twin. Stage 4A ships a MOCK casino adapter only (CLAUDE.md's
+// scope gate), so this returns the synthetic in-memory resolver whenever
+// the mock adapter is wired; a real casino adapter would need the same
+// kind-split-by-adapter-identity pattern casinoOrchestratorResolver already
+// uses for INBOUND credentials, added when one is actually registered (no
+// commercial relationship exists today - CLAUDE.md's provider-abstraction
+// rule). b.Credentials.Outbound("casino") is nil-receiver-safe and returns
+// nil itself when the real subsystem is not constructed, so a deployment
+// with the mock disabled and no real subsystem configured fails every
+// launch closed via LaunchGame's own nil-resolver check - never a silent
+// fallback.
+func (b providerBundle) casinoOutboundCredentials() casino.OutboundCredentialResolver {
+	if b.Casino != nil {
+		return casino.NewMockOutboundResolver()
+	}
+	return b.Credentials.Outbound("casino")
+}
+
 // kycOrchestratorResolver is the KYC Orchestrator's resolver: the bundle's
 // MOCK resolver directly (KYC wires one provider, design §B2), or a TRUE
 // nil interface when wiring left it unset.
