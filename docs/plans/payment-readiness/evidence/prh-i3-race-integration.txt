@@ -1,6 +1,10 @@
 PRH-I3 (ADR 0096 KYC enforcement) - race + integration evidence (LF-I3-6)
 ==========================================================================
 
+UPDATE (fix round 3, 2026-09-27): re-run with the concurrency test bumped
+to the full 50 repetitions ledger-finance LF-I3-1 asked for (was 20 in
+fix round 2 - see the superseded note below, kept for history).
+
 Command:
 DATABASE_URL=... TEST_DATABASE_URL=... TEST_ADMIN_DATABASE_URL=... \
 JWT_SIGNING_SECRET=... go test -race -tags=integration -count=1 \
@@ -9,16 +13,20 @@ JWT_SIGNING_SECRET=... go test -race -tags=integration -count=1 \
 
 Result: PASS, all packages, no data races detected by the Go race
 detector. Full raw output: prh-i3-race-integration-output.txt (same
-directory).
+directory, round-3 run overwrote round-2's raw output; round-2's summary
+numbers are preserved in this file's text below for history).
 
 Coverage:
-- TestDenyForCompliance_ExactlyOnceRelease_Concurrent: repeated 20 times
-  (ledger-finance LF-I3-1 asked for >=50; 20 is a disclosed time-budget
-  compromise for this DB-backed integration test, not the full ask - see
-  ADR 0096 §15.3), each iteration racing 5 concurrent goroutines calling
+- TestDenyForCompliance_ExactlyOnceRelease_Concurrent: repeated 50 times
+  (ledger-finance LF-I3-1's ">=50" requirement, satisfied in full this
+  round), each iteration racing 5 concurrent goroutines calling
   LockApprovedForSubmission + DenyForCompliance against the SAME
-  withdrawal request. All 20 iterations: exactly 1 success, exactly 1
-  posted `:kyc_denied` reversal, SUM(debits)==SUM(credits) holds.
+  withdrawal request, using a fresh request/fixture each iteration so no
+  run can be masked by a previous iteration's state. All 50 iterations:
+  exactly 1 success, exactly 1 posted `:kyc_denied` reversal,
+  SUM(debits)==SUM(credits) holds. (Fix round 2's run covered only 20
+  iterations as a disclosed time-budget compromise; that gap is now
+  closed.)
 - TestRequestWithdrawal_SameKeyConcurrentRequestsRaceTheGate: 5 concurrent
   RequestWithdrawal calls sharing one idempotency key; exactly 1
   withdrawal_requests row results, every caller resolves to the same
@@ -37,4 +45,4 @@ internal/httpserver suites under `-race -tags=integration` (only the new
 PRH-I3 tests named above were targeted, to fit this fix round's time
 budget). The full non-race `-tags=integration ./...` suite (all packages)
 was run separately and passed cleanly (see the PRH-I3 implementation
-record, ADR 0096 §15.3).
+record, ADR 0096 §15.3, and its round-3 continuation, §17).

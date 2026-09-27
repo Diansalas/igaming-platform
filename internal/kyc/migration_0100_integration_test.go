@@ -39,6 +39,28 @@ func migration0100ScratchPool(t *testing.T) *db.Pool {
 	return pool
 }
 
+// stepsThrough100 returns how many MigrateDown steps are needed, from the
+// current tip, to roll back migration 0100 itself (inclusive) - NOT a
+// hardcoded 1. Later migrations (e.g. 0101, merged in by another
+// workstream after 0100 was applied) can move ahead of 0100 in the
+// chain; a hardcoded "down 1" would then roll back the wrong migration
+// and silently pass a guard test for the wrong reason. applied is the
+// (ascending, per db.Pool.MigrateUp's contract) list of migration
+// numbers just applied to a fresh scratch database.
+func stepsThrough100(t *testing.T, applied []int64) int {
+	t.Helper()
+	steps := 0
+	for _, n := range applied {
+		if n >= 100 {
+			steps++
+		}
+	}
+	if steps == 0 {
+		t.Fatalf("migration 100 not found in the applied chain %v", applied)
+	}
+	return steps
+}
+
 func regclassExists(t *testing.T, pool *db.Pool, name string) bool {
 	t.Helper()
 	var exists bool
@@ -57,7 +79,8 @@ func TestMigration0100_UpDownUpRoundTrip(t *testing.T) {
 	pool := migration0100ScratchPool(t)
 	dir := migration0100MigrationsDir(t)
 
-	if _, err := pool.MigrateUp(context.Background(), dir); err != nil {
+	appliedUp, err := pool.MigrateUp(context.Background(), dir)
+	if err != nil {
 		t.Fatalf("migrate up the full chain: %v", err)
 	}
 	if !regclassExists(t, pool, "kyc_enforcement_policies") {
@@ -67,12 +90,19 @@ func TestMigration0100_UpDownUpRoundTrip(t *testing.T) {
 		t.Fatal("expected kyc_enforcement_decisions to exist after migrating up")
 	}
 
-	rolledBack, err := pool.MigrateDown(context.Background(), dir, 1)
+	steps := stepsThrough100(t, appliedUp)
+	rolledBack, err := pool.MigrateDown(context.Background(), dir, steps)
 	if err != nil {
-		t.Fatalf("migrate down 1 (0100): %v", err)
+		t.Fatalf("migrate down through 0100: %v", err)
 	}
-	if len(rolledBack) != 1 || rolledBack[0] != 100 {
-		t.Fatalf("expected exactly migration 100 to be rolled back, got %v", rolledBack)
+	found100 := false
+	for _, n := range rolledBack {
+		if n == 100 {
+			found100 = true
+		}
+	}
+	if !found100 {
+		t.Fatalf("expected migration 100 to be among the rolled-back migrations, got %v", rolledBack)
 	}
 	if regclassExists(t, pool, "kyc_enforcement_policies") {
 		t.Fatal("expected kyc_enforcement_policies to be dropped after rolling back migration 0100")
@@ -83,10 +113,16 @@ func TestMigration0100_UpDownUpRoundTrip(t *testing.T) {
 
 	rolledUp, err := pool.MigrateUp(context.Background(), dir)
 	if err != nil {
-		t.Fatalf("re-apply migration 0100: %v", err)
+		t.Fatalf("re-apply migration 0100 (and anything else rolled back with it): %v", err)
 	}
-	if len(rolledUp) != 1 || rolledUp[0] != 100 {
-		t.Fatalf("expected exactly migration 100 to be re-applied, got %v", rolledUp)
+	foundReapplied100 := false
+	for _, n := range rolledUp {
+		if n == 100 {
+			foundReapplied100 = true
+		}
+	}
+	if !foundReapplied100 {
+		t.Fatalf("expected migration 100 to be among the re-applied migrations, got %v", rolledUp)
 	}
 	if !regclassExists(t, pool, "kyc_enforcement_policies") || !regclassExists(t, pool, "kyc_enforcement_decisions") {
 		t.Fatal("expected both tables to exist again after re-applying migration 0100")
@@ -100,12 +136,14 @@ func TestMigration0100_UpDownUpRoundTrip(t *testing.T) {
 func TestMigration0100_DownRefusesWhileDecisionsHoldRows(t *testing.T) {
 	pool := migration0100ScratchPool(t)
 	dir := migration0100MigrationsDir(t)
-	if _, err := pool.MigrateUp(context.Background(), dir); err != nil {
+	appliedUp, err := pool.MigrateUp(context.Background(), dir)
+	if err != nil {
 		t.Fatalf("migrate up: %v", err)
 	}
+	steps := stepsThrough100(t, appliedUp)
 
 	tenantID, brandID, playerID, personID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
-	err := pool.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
+	err = pool.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, `INSERT INTO tenants (id, slug, name, licensing_model) VALUES ($1, $2, 'T', 'under_platform_licence')`, tenantID, "t-"+tenantID.String()[:8]); err != nil {
 			return err
 		}
@@ -133,8 +171,8 @@ func TestMigration0100_DownRefusesWhileDecisionsHoldRows(t *testing.T) {
 		t.Fatalf("seed decision row: %v", err)
 	}
 
-	if _, err := pool.MigrateDown(context.Background(), dir, 1); err == nil {
-		t.Fatal("expected migrating down 0100 to be refused while kyc_enforcement_decisions holds rows")
+	if _, err := pool.MigrateDown(context.Background(), dir, steps); err == nil {
+		t.Fatal("expected migrating down through 0100 to be refused while kyc_enforcement_decisions holds rows")
 	}
 	if !regclassExists(t, pool, "kyc_enforcement_decisions") {
 		t.Fatal("expected kyc_enforcement_decisions to still exist after the refused rollback")
@@ -370,6 +408,127 @@ func TestMigration0100_PolicyLifecycleTransitions(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected withdrawn -> active to be refused (terminal state)")
+	}
+}
+
+// TestSupersedeEnforcementPolicy_AtomicWithdrawAndActivateReplacement
+// proves the security F3 partial mitigation: withdrawing an active row
+// and activating its replacement commit together, in one transaction,
+// with the withdraw/create/activate steps each attributed to the correct
+// distinct principal.
+func TestSupersedeEnforcementPolicy_AtomicWithdrawAndActivateReplacement(t *testing.T) {
+	pool := testPool(t)
+	jurisdictionID := mustSeedJurisdiction(t, pool)
+	creator, activator := uuid.New(), uuid.New()
+
+	var oldID uuid.UUID
+	err := pool.WithPlatformAdmin(context.Background(), creator, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `
+			INSERT INTO kyc_enforcement_policies
+				(licensing_jurisdiction_id, trigger_type, status, threshold_minor_units, asset_code, legal_review_reference, reason_code, created_by_actor_type, created_by_actor_id)
+			VALUES ($1, 'cumulative_deposit', 'draft', 100, 'EUR', 'legal-ref-old', 'test', 'platform_admin', $2)
+			RETURNING id`, jurisdictionID, creator).Scan(&oldID)
+	})
+	if err != nil {
+		t.Fatalf("seed draft policy: %v", err)
+	}
+	if err := pool.WithPlatformAdmin(context.Background(), activator, func(ctx context.Context, tx pgx.Tx) error {
+		return ActivateEnforcementPolicy(ctx, tx, oldID)
+	}); err != nil {
+		t.Fatalf("activate old policy: %v", err)
+	}
+
+	withdrawer, newCreator, newActivator := uuid.New(), uuid.New(), uuid.New()
+	var newID uuid.UUID
+	err = pool.WithPlatformAdmin(context.Background(), withdrawer, func(ctx context.Context, tx pgx.Tx) error {
+		var err error
+		newID, err = SupersedeEnforcementPolicy(ctx, tx, SupersedeEnforcementPolicyParams{
+			WithdrawID: oldID, WithdrawFromStatus: "active", WithdrawnBy: withdrawer,
+			NewPolicy: CreateEnforcementPolicyParams{
+				LicensingJurisdictionID: jurisdictionID, TriggerType: "cumulative_deposit",
+				ThresholdMinorUnits: strPtr("200000"), AssetCode: strPtr("EUR"),
+				LegalReviewReference: "legal-ref-new", ReasonCode: "test",
+			},
+			CreatedBy: newCreator, ActivatedBy: newActivator,
+		})
+		return err
+	})
+	if err != nil {
+		t.Fatalf("SupersedeEnforcementPolicy: %v", err)
+	}
+
+	var oldStatus, newStatus string
+	if err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT status FROM kyc_enforcement_policies WHERE id = $1`, oldID).Scan(&oldStatus)
+	}); err != nil {
+		t.Fatalf("read old status: %v", err)
+	}
+	if err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT status FROM kyc_enforcement_policies WHERE id = $1`, newID).Scan(&newStatus)
+	}); err != nil {
+		t.Fatalf("read new status: %v", err)
+	}
+	if oldStatus != "withdrawn" {
+		t.Fatalf("expected old policy withdrawn, got %q", oldStatus)
+	}
+	if newStatus != "active" {
+		t.Fatalf("expected new policy active, got %q", newStatus)
+	}
+}
+
+// TestSupersedeEnforcementPolicy_RollsBackAtomically proves the whole
+// supersede rolls back together if any step fails - never a withdrawn
+// old row with no activated replacement.
+func TestSupersedeEnforcementPolicy_RollsBackAtomically(t *testing.T) {
+	pool := testPool(t)
+	jurisdictionID := mustSeedJurisdiction(t, pool)
+	creator, activator := uuid.New(), uuid.New()
+
+	var oldID uuid.UUID
+	err := pool.WithPlatformAdmin(context.Background(), creator, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `
+			INSERT INTO kyc_enforcement_policies
+				(licensing_jurisdiction_id, trigger_type, status, threshold_minor_units, asset_code, legal_review_reference, reason_code, created_by_actor_type, created_by_actor_id)
+			VALUES ($1, 'cumulative_deposit', 'draft', 100, 'EUR', 'legal-ref-old2', 'test', 'platform_admin', $2)
+			RETURNING id`, jurisdictionID, creator).Scan(&oldID)
+	})
+	if err != nil {
+		t.Fatalf("seed draft policy: %v", err)
+	}
+	if err := pool.WithPlatformAdmin(context.Background(), activator, func(ctx context.Context, tx pgx.Tx) error {
+		return ActivateEnforcementPolicy(ctx, tx, oldID)
+	}); err != nil {
+		t.Fatalf("activate old policy: %v", err)
+	}
+
+	withdrawer := uuid.New()
+	err = pool.WithPlatformAdmin(context.Background(), withdrawer, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := SupersedeEnforcementPolicy(ctx, tx, SupersedeEnforcementPolicyParams{
+			WithdrawID: oldID, WithdrawFromStatus: "active", WithdrawnBy: withdrawer,
+			NewPolicy: CreateEnforcementPolicyParams{
+				LicensingJurisdictionID: jurisdictionID, TriggerType: "cumulative_deposit",
+				ThresholdMinorUnits: strPtr("200000"), AssetCode: strPtr("EUR"),
+				LegalReviewReference: "legal-ref-new2", ReasonCode: "test",
+			},
+			// Same principal creates and activates - the four-eyes trigger
+			// must refuse this, and the whole transaction (including the
+			// withdrawal of oldID) must roll back with it.
+			CreatedBy: withdrawer, ActivatedBy: withdrawer,
+		})
+		return err
+	})
+	if err == nil {
+		t.Fatal("expected SupersedeEnforcementPolicy to fail when create/activate share one principal")
+	}
+
+	var oldStatus string
+	if err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT status FROM kyc_enforcement_policies WHERE id = $1`, oldID).Scan(&oldStatus)
+	}); err != nil {
+		t.Fatalf("read old status: %v", err)
+	}
+	if oldStatus != "active" {
+		t.Fatalf("expected old policy to remain active after the rolled-back supersede, got %q", oldStatus)
 	}
 }
 

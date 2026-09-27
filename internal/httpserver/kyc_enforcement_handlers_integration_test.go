@@ -18,6 +18,63 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/identity"
 )
 
+// TestRequestWithdrawalHandler_KYCDenyCommitsExactlyOnceAndNothingElse
+// proves LF-I3-3 end to end through the real HTTP handler: a KYC-denied
+// withdrawal request commits exactly one kyc_enforcement_decisions row
+// and one audit_log row, in the SAME transaction as the domain attempt
+// (not a separate, later-committed one), and creates zero
+// withdrawal_requests rows and zero ledger postings.
+func TestRequestWithdrawalHandler_KYCDenyCommitsExactlyOnceAndNothingElse(t *testing.T) {
+	pool, issuer := testEnv(t)
+	srv := newFinancialTestServer(t, pool, issuer, nil)
+	tenant := mustCreateTenant(t, pool)
+	brand := mustCreateBrand(t, pool, tenant)
+	player := mustRegisterPlayer(t, srv, brand.Slug)
+	mustActivatePlayer(t, pool, tenant.ID, player.ID)
+	fundWallet(t, pool, tenant.ID, brand.ID, player.ID, "EUR", 10_000)
+	// Deliberately NO kyc_verifications row is seeded - the player has
+	// never been verified, so the structural withdrawal rule denies.
+
+	decisionsBefore := countRows(t, pool, tenant.ID, `SELECT count(*) FROM kyc_enforcement_decisions WHERE tenant_id = $1 AND player_account_id = $2`, tenant.ID, player.ID)
+	auditBefore := countRows(t, pool, tenant.ID, `SELECT count(*) FROM audit_log WHERE action = 'kyc.enforcement_denied'`)
+
+	resp := postJSON(t, srv, "/v1/me/withdrawals", player.Tokens.AccessToken, map[string]any{
+		"asset_code": "EUR", "amount": 500, "idempotency_key": uuid.NewString(),
+	})
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("expected 409 for an unverified player's withdrawal request, got %d", resp.StatusCode)
+	}
+
+	decisionsAfter := countRows(t, pool, tenant.ID, `SELECT count(*) FROM kyc_enforcement_decisions WHERE tenant_id = $1 AND player_account_id = $2`, tenant.ID, player.ID)
+	if decisionsAfter != decisionsBefore+1 {
+		t.Fatalf("expected exactly 1 new kyc_enforcement_decisions row, got %d new", decisionsAfter-decisionsBefore)
+	}
+	auditAfter := countRows(t, pool, tenant.ID, `SELECT count(*) FROM audit_log WHERE action = 'kyc.enforcement_denied'`)
+	if auditAfter != auditBefore+1 {
+		t.Fatalf("expected exactly 1 new audit_log row, got %d new", auditAfter-auditBefore)
+	}
+	reqCount := countRows(t, pool, tenant.ID, `SELECT count(*) FROM withdrawal_requests WHERE tenant_id = $1 AND player_account_id = $2`, tenant.ID, player.ID)
+	if reqCount != 0 {
+		t.Fatalf("expected 0 withdrawal_requests rows after a KYC deny, got %d", reqCount)
+	}
+	ledgerCount := countRows(t, pool, tenant.ID, `SELECT count(*) FROM ledger_transactions WHERE tenant_id = $1 AND transaction_type = 'withdrawal_requested'`, tenant.ID)
+	if ledgerCount != 0 {
+		t.Fatalf("expected 0 withdrawal_requested ledger postings after a KYC deny, got %d", ledgerCount)
+	}
+}
+
+func countRows(t *testing.T, pool *db.Pool, tenantID uuid.UUID, query string, args ...any) int {
+	t.Helper()
+	var n int
+	err := pool.WithTenant(context.Background(), tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, query, args...).Scan(&n)
+	})
+	if err != nil {
+		t.Fatalf("count query %q: %v", query, err)
+	}
+	return n
+}
+
 func seedKYCDecisions(t *testing.T, pool *db.Pool, tenantID, brandID, playerID uuid.UUID, n int) {
 	t.Helper()
 	err := pool.WithTenant(context.Background(), tenantID, func(ctx context.Context, tx pgx.Tx) error {
