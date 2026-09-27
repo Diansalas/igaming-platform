@@ -109,6 +109,28 @@ func boundedDeclineReasonAudited(ctx context.Context, tx pgx.Tx, tenantID uuid.U
 	return boundedDeclineReasonSentinel, nil
 }
 
+// auditOversizeDeclineReasonOnce is L-e's own audit write, split out of
+// boundedDeclineReasonAudited so ApplyReceiptEvidence's top-level bounding
+// call (§6.1's entry point) can defer it until AFTER the R0 receipt
+// insert/dedup check confirms this delivery is genuinely new - never
+// writing it again for a redelivery of the identical event. Same redacted
+// shape as boundedDeclineReasonAudited's own write (never the raw text,
+// only byte length and a truncated SHA-256 prefix).
+func auditOversizeDeclineReasonOnce(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, targetType, targetID, providerID, originalReason string) error {
+	sum := sha256.Sum256([]byte(originalReason))
+	if err := audit.Record(ctx, tx, audit.Entry{
+		TenantID: tenantID, ActorType: audit.ActorSystem, Action: "payment.decline_reason_bounded",
+		TargetType: targetType, TargetID: targetID, Outcome: audit.OutcomeDenied,
+		Metadata: map[string]any{
+			"provider_id": providerID, "original_byte_length": len(originalReason),
+			"original_sha256_prefix": hex.EncodeToString(sum[:])[:16],
+		},
+	}); err != nil {
+		return fmt.Errorf("payments: audit oversize decline reason: %w", err)
+	}
+	return nil
+}
+
 // auditTerminalAmountAssetMismatch records the RV-PRH-I1 ledger-finance
 // M1 P1: a callback reports a matching provider reference but a
 // DIFFERENT amount/asset than the platform already has on file for an
@@ -255,6 +277,18 @@ func insertReceiptDeduped(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, pr
 	// to 'after_acceptance' (this file's own receipt-path decline
 	// branch's own hardcoded ApplyDecline stage) when the caller left it
 	// unset, rather than storing an empty string the CHECK also rejects.
+	// L-a (ledger-finance re-review): a deposit_reversal's (already-
+	// bounded) chargeback/refund reason is stored in decline_reason too -
+	// decline_stage/cascadable stay NULL for it regardless (the comment
+	// above), and the stored `outcome` column for a reversal is never
+	// itself 'declined' (H1 rule 1 normalizes a final reversal to
+	// 'succeeded'; rule 2 stores pending/ambiguous verbatim, never
+	// 'declined'), so this can never collide with
+	// payment_provider_events_check1's cascadable/decline_stage
+	// requirement.
+	if ev.EventType == string(CallbackEventDepositReversal) && ev.DeclineReason != "" {
+		declineReason = &ev.DeclineReason
+	}
 	if ev.Outcome == OutcomeDeclined && (ev.EventType == string(CallbackEventDeposit) || ev.EventType == "payout") {
 		ds := string(ev.DeclineStage)
 		if ds == "" {
@@ -413,20 +447,27 @@ func ApplyReceiptEvidence(ctx context.Context, tx pgx.Tx, o *Orchestrator, tenan
 	// BEFORE that function is ever called, using this SAME ev value, and
 	// payment_provider_events.decline_reason carries the identical
 	// 64-byte CHECK as payment_attempts.decline_reason. Bounded here,
-	// once, at the top of this function, so every persisted copy (the
-	// receipt AND the attempt) is bounded identically and the fingerprint
-	// computed below is stable across identical-payload redeliveries. An
-	// oversized reason is redacted-audited (never the raw text) BEFORE
-	// bounding, so ops are never left with a silently-discarded vendor
-	// reason and no record at all - the attempt this is about is not
-	// resolved yet at this point, so the target names (provider,
-	// reference) instead.
+	// once, at the top of this function (a PURE substitution, no audit
+	// write yet - L-e below), so every persisted copy (the receipt AND
+	// the attempt) is bounded identically and the fingerprint computed
+	// below is stable across identical-payload redeliveries.
+	//
+	// L-e (ledger-finance re-review): the audit record itself is written
+	// AFTER the R0 receipt insert/dedup check below, and ONLY when this
+	// delivery is not a duplicate of an already-stored event - otherwise
+	// an oversized-reason event redelivered by the PSP (every unresolved
+	// receipt is a candidate for that) would write a fresh
+	// "payment.decline_reason_bounded" audit row on every single
+	// redelivery forever, an unbounded audit-log growth path for exactly
+	// the payload shape this whole mechanism exists to bound. `oversized`
+	// remembers whether THIS call actually replaced anything, computed
+	// from the ORIGINAL (pre-bounding) length - never from the
+	// now-substituted `ev.DeclineReason`, which would always be
+	// short and could never trigger the write itself.
+	originalDeclineReason := ev.DeclineReason
+	oversizedDeclineReason := len(originalDeclineReason) > maxDeclineReasonBytes
 	if ev.DeclineReason != "" {
-		bounded, err := boundedDeclineReasonAudited(ctx, tx, tenantID, "payment_provider_event", verifiedProviderID+":"+ev.ProviderReference, verifiedProviderID, ev.DeclineReason)
-		if err != nil {
-			return "", err
-		}
-		ev.DeclineReason = bounded
+		ev.DeclineReason = boundedDeclineReason(ev.DeclineReason)
 	}
 
 	// PRH-payments-callback-cutover / ADR 0095 §5.4, LF95-C6(b): a
@@ -438,7 +479,7 @@ func ApplyReceiptEvidence(ctx context.Context, tx pgx.Tx, o *Orchestrator, tenan
 	// reversal's own reference) or ev.MerchantReference, which the deposit
 	// matrix below uses instead.
 	if ev.EventType == string(CallbackEventDepositReversal) {
-		return applyReversalReceiptEvidence(ctx, tx, tenantID, verifiedProviderID, ev)
+		return applyReversalReceiptEvidence(ctx, tx, tenantID, verifiedProviderID, ev, originalDeclineReason, oversizedDeclineReason)
 	}
 
 	resolved, err := ResolveAttemptForEvidence(ctx, tx, verifiedProviderID, ev.ProviderReference, ev.MerchantReference)
@@ -543,6 +584,13 @@ func ApplyReceiptEvidence(ctx context.Context, tx pgx.Tx, o *Orchestrator, tenan
 	receiptID, duplicate, err := insertReceiptDeduped(ctx, tx, tenantID, verifiedProviderID, ev, DispositionApplied)
 	if err != nil {
 		return "", err
+	}
+	// L-e: audit the oversize-reason bounding ONCE, only for a genuinely
+	// new (non-duplicate) receipt - see the top-of-function comment.
+	if oversizedDeclineReason && !duplicate {
+		if err := auditOversizeDeclineReasonOnce(ctx, tx, tenantID, "payment_provider_event", receiptID.String(), verifiedProviderID, originalDeclineReason); err != nil {
+			return "", err
+		}
 	}
 
 	// Lock parent then attempt (ADR 0095 §14), re-read under the lock.
@@ -953,7 +1001,7 @@ func applyDepositSuccessAndPost(ctx context.Context, tx pgx.Tx, o *Orchestrator,
 // function attempted) rolls back, and the HTTP layer records the denial in
 // a SEPARATE, freshly-opened transaction via RecordDepositReversalRejection
 // exactly as it did before the cutover.
-func applyReversalReceiptEvidence(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, verifiedProviderID string, ev ReceiptEvidence) (ReceiptDisposition, error) {
+func applyReversalReceiptEvidence(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, verifiedProviderID string, ev ReceiptEvidence, originalDeclineReason string, oversizedDeclineReason bool) (ReceiptDisposition, error) {
 	// RV-PRH-I1 ledger-finance H1, RULING (binding, rules 1-6; supersedes
 	// the earlier "every deposit_reversal event IS one to apply" revert).
 	// Rule 1: a deposit_reversal event's wire Outcome field is not a "did
@@ -1011,6 +1059,11 @@ func applyReversalReceiptEvidence(ctx context.Context, tx pgx.Tx, tenantID uuid.
 		}
 		if duplicate {
 			return DispositionDuplicateEffect, nil
+		}
+		if oversizedDeclineReason {
+			if err := auditOversizeDeclineReasonOnce(ctx, tx, tenantID, "payment_provider_event", receiptID.String(), verifiedProviderID, originalDeclineReason); err != nil {
+				return "", err
+			}
 		}
 		var attemptID *uuid.UUID
 		if !unresolved {
@@ -1077,6 +1130,11 @@ func applyReversalReceiptEvidence(ctx context.Context, tx pgx.Tx, tenantID uuid.
 	}
 	if duplicate {
 		return DispositionDuplicateEffect, nil
+	}
+	if oversizedDeclineReason {
+		if err := auditOversizeDeclineReasonOnce(ctx, tx, tenantID, "payment_provider_event", receiptID.String(), verifiedProviderID, originalDeclineReason); err != nil {
+			return "", err
+		}
 	}
 
 	// Lock the parent BEFORE deciding the branch (never after) - every

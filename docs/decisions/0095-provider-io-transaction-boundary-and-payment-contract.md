@@ -5086,6 +5086,25 @@ callback-ledger.md` "Re-review 1: fix round", and `rv-prh-i1-payout-security.md`
   `docs/plans/payment-readiness/lf-q1-supersession.md`) is FH-3, a LATER phase gated on kill-switch
   phase 2's `callProvider`/`Resolve` signature changes and QA's A-O matrix. Not started here.
 
+**Operator note (ledger-finance L-d): `disposition_at_receipt` vs `resolution` for an M1
+terminal-mismatch anomaly.** When `applyResolvedReceiptEvidence` finds a terminal-mismatch (M1:
+a mismatched success on an already-`succeeded` or already-`declined` attempt), the receipt row's
+`disposition_at_receipt` column stays `'applied'` - it was already written as `'applied'` at R0
+(the receipt insert, before the attempt was even locked and re-read; ADR 0082 A7), and nothing
+about a terminal-mismatch changes that value after the fact. It is `resolution` -
+`payment_provider_events.resolution`, written afterwards by `ResolveReceipt` in the SAME
+transaction - that actually records the anomaly, as `'anomaly_other'`. **An operator or a
+dashboard querying only `disposition_at_receipt` will see `'applied'` for this case and must not
+read that as "no problem was found."** The M1 queue (a `disputed` attempt with no state change
+for a terminal-mismatch cell specifically - see the audit action
+`payments.callback_amount_asset_mismatch_terminal`, or `resolution = 'anomaly_other'` on the
+receipt itself) is the correct signal to alert and triage on; `disposition_at_receipt` alone is
+never sufficient to rule out an anomaly for ANY receipt whose attempt was already resolved before
+this callback arrived. This is not a defect: `disposition_at_receipt` answers "did the receipt
+pipeline apply SOME evidence-matrix cell to this event without erroring" (true here - the M1 cell
+IS the applied cell, it just happens to conclude "no state change, only an audit"), while
+`resolution` answers "what did that cell conclude." The two questions are different by design;
+this note exists so an operator reading only one of them is not misled.
 
 ### 27.14 Revision 4 (`architect`, 2026-09-27) — AM-2, the durable-state definition, AM-1 and the status correction
 

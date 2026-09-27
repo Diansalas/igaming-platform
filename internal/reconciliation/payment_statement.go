@@ -825,17 +825,35 @@ func (m *payMatcher) matchLines(lines []payLine) {
 }
 
 // matchReversal's statement-side l.status values (succeeded/pending/
-// declined/reversed) come from the PSP's OWN statement-line status field,
-// independent of the wire callback Outcome ADR 0095's callback path
-// receives for the same event. RV-PRH-I1 ledger-finance H1 RULING
-// (rule 6, doc-only - no code change here): a callback whose wire outcome
-// was pending/ambiguous never posts or tombstones on the platform side
-// (payments.applyReversalReceiptEvidence rule 2), so a statement line for
-// that same reference, if the PSP's reconciliation feed ever reports one
-// before its own final state, correctly falls into the "no posting yet
-// expected" `PaymentStatusPending`/`PaymentStatusDeclined` branches below -
-// this matcher does not need, and must not gain, its own separate
-// pending/ambiguous carve-out for that case.
+// declined/reversed) come from the PSP's OWN statement-line status field -
+// a field on the STATEMENT import, produced independently of, and on its
+// own schedule relative to, the wire callback Outcome ADR 0095's callback
+// path receives for the very same underlying event. The two are never the
+// same read: a statement line's status is this reconciliation run's only
+// signal for that reference, while the callback path may have already
+// applied (or deferred) its own evidence for it in an earlier run. This
+// matcher's own `PaymentStatusPending`/`PaymentStatusDeclined`/
+// `PaymentStatusSucceeded`/`PaymentStatusReversed` cases below are a
+// closed set over that statement-side field only - RawOutcome/H1's
+// pending/ambiguous distinction (a CALLBACK-side, wire-outcome concept)
+// has no counterpart here and must never be reintroduced as one.
+//
+// RV-PRH-I1 ledger-finance H1 RULING (rule 6, doc-only - no code change
+// here, confirmed complete): a callback whose wire outcome was pending/
+// ambiguous never posts or tombstones on the platform side
+// (payments.applyReversalReceiptEvidence rule 2 - see that function's own
+// doc comment for the full ruling). Consequently, IF the PSP's own
+// statement feed ever reports a line for that same reference before ITS
+// OWN final state (a timing gap this matcher must tolerate, not assume
+// away), that line already falls correctly into the existing
+// `PaymentStatusPending`/`PaymentStatusDeclined` "no posting yet expected"
+// branches below - through `rev, posted := m.ledgerByRef[...]`'s own
+// !posted case, since a genuinely non-final callback outcome never wrote
+// a ledger row for this matcher to find either. This matcher therefore
+// does NOT need, and must NEVER gain, its own separate pending/ambiguous
+// carve-out mirroring H1 rule 2: the existing !posted branches already
+// cover the case, by construction, without needing to know anything about
+// the callback path's own wire-outcome vocabulary at all.
 func (m *payMatcher) matchReversal(lk string, l payLine) {
 	rev, posted := m.ledgerByRef[string("deposit_reversal")+"\x00"+l.ref]
 	if !posted {

@@ -1897,3 +1897,88 @@ Gap (c) - the reference-mismatch rule centralized in applyPayoutSuccess
 Verification after all gap (a)/(b)/(c) mutations reverted: `git status
 --porcelain` clean; `go build ./...`, `go vet -tags=integration ./...`,
 `gofmt -l .` clean; `golangci-lint run ./...` (pinned 2.9.0): 0 issues.
+
+
+Ledger-finance re-review of FH-5 (rv-prh-i1-callback-ledger.md, b9e8045),
+conditions C1-C3 and L-a/L-c/L-d/L-e, 2026-09-27
+======================================================================
+
+C1 (H1R3, reversal fingerprint uses the raw wire outcome) and C5 (code-
+review, same finding as H1b): already satisfied by the pre-existing
+TestRVLF_SecGapA3_ReversalFingerprintUsesRawWireOutcome (see the FH-5
+security re-verification gap (a) item 3 entry above) - no new test added;
+cross-referenced here per the coordinator's consolidated list.
+
+C2 (DFR) - the callback site's OWN ApplyDeferredReceiptsForAttempt call:
+  File: internal/payments/receipt.go
+  Mutation: the callback-site backstop call (`if changed { ... ; if _, err
+  := ApplyDeferredReceiptsForAttempt(...); ... }`) guarded with `if false`.
+  Killed by: TestRVLF_C2_DFR_CallbackSiteDeferredApplyBackstop.
+  Failure: "the callback site's own deferred-apply backstop must resolve
+  the first callback's deferred success, got state=pending"; deferred
+  receipt count still 1 instead of 0.
+  Reverted: targeted Edit; confirmed clean.
+
+C2 (DFS) - the sweeper's OWN ApplyDeferredReceiptsForAttempt call (T4/T9
+poll site):
+  File: internal/payments/sweeper.go
+  Mutation: the sweeper poll site's backstop call guarded with `if false`
+  (returning nil instead).
+  Killed by: TestRVLF_C2_DFS_SweeperSiteDeferredApplyBackstop.
+  Failure: "the sweeper's own deferred-apply backstop must resolve the
+  earlier deferred success, got state=pending"; deferred receipt count
+  still 1 instead of 0.
+  Reverted: targeted Edit; confirmed clean.
+  (Both DFR and DFS are distinct from drive.go's phase-C call site, which
+  TestRVLF_P8 already isolates and kills as DFD - not re-tested here.)
+
+C3 (SIBS) - sibling rejection on the sweeper's OWN T13 success (QueryStatus
+poll path), distinct from the callback/drive.go sites' own H4 checks:
+  File: internal/payments/sweeper.go
+  Mutation: `return rejectCreatedSiblings(ctx, tx, attempt,
+  EvidenceQueryStatus)` (ErrorClassSucceeded branch) guarded with `if
+  false { ... }; return nil`.
+  Killed by: TestRVLF_C3_SIBS_SweeperSuccessRejectsCreatedSibling.
+  Failure: "the sweeper's own T13 success must reject the leftover created
+  sibling, got created".
+  Reverted: targeted Edit; confirmed clean.
+
+L-a - a deposit_reversal's bounded decline reason is also stored in
+receipt.decline_reason:
+  File: internal/payments/receipt.go
+  Mutation: the new `if ev.EventType == string(CallbackEventDepositReversal)
+  && ev.DeclineReason != "" { declineReason = &ev.DeclineReason }` block
+  guarded with a leading `false &&`.
+  Killed by: TestRVLF_La_ReversalReceiptStoresBoundedDeclineReason.
+  Failure: "expected the reversal receipt's own decline_reason=
+  'chargeback_lost', got <nil>".
+  Reverted: targeted Edit; confirmed clean.
+
+L-e - the oversize-reason audit fires ONCE, never on redelivery:
+  File: internal/payments/receipt.go
+  Mutation: the main-path call site's `if oversizedDeclineReason &&
+  !duplicate {` condition had `&& !duplicate` removed (the other two call
+  sites already early-return on `duplicate` before reaching their own
+  identical guard, so only the main path's own, non-early-returning guard
+  is a meaningful mutation target).
+  Killed by: TestRVLF_Le_OversizeDeclineReasonAuditedOnceNotOnRedelivery
+  (delivers an identical 90-byte-oversized-decline-reason payload 3 times).
+  Failure: "expected exactly 1 audit record across 3 identical
+  redeliveries, got 3".
+  Reverted: targeted Edit; confirmed clean.
+
+L-c (matchReversal rule-6 comment) and L-d (ADR §27.x operator note on
+disposition_at_receipt vs resolution) are documentation-only changes -
+docs/decisions/0095-provider-io-transaction-boundary-and-payment-
+contract.md and internal/reconciliation/payment_statement.go - no code
+path changed, no mutation applicable.
+
+Verification after all C2/C3/L-a/L-e mutations reverted: `git status
+--porcelain` shows only the intended net diffs (receipt.go's L-a/L-e/C1-hook
+additions, sweeper.go clean with no residual diff); `go build ./...` and
+`go vet -tags=integration ./...` clean; `gofmt -l .` clean; full
+internal/payments + internal/reconciliation (+ internal/reconciliation/
+statement) suites pass under `-tags=integration -race -count=1` against a
+freshly rebuilt PRIV_DB (fh3_invdep1_qa, migrated through 0107, seeded with
+QA's own adjudication-corrected inv_dep1_matrix/inv_dep1_recon files).
+
