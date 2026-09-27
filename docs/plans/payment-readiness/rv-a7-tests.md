@@ -58,3 +58,46 @@ of the as-built lock sequence") is therefore not met.
 
 Each new harness test must assert the outcome, assert where the waiter blocks (`loWaitBlocked`),
 and end with `loAssertBalanced` + `loAssertProjectionMatchesRebuild`.
+
+---
+
+# Re-review: FH-6 A7 §(7) suite (`worktree-agent-a5b19b46582e95b75` @ `4b544f5`)
+
+- Environment: a detached worktree and a private DB `igaming_lf_fh6` (admin create, runtime-role
+  grants, migrated 1→106). Both have been removed. No sudo, no role or password changes.
+- Results on `4b544f5`:
+  - full `internal/payments` and `internal/withdrawal` suites, and the `internal/httpserver`
+    withdrawal tests: **pass**;
+  - `TestA7_*`, the `…SecondBlocksOnReceiptKey` R0 tests and the payout security-round tests,
+    `-race -count=3`: **pass**;
+  - pinned golangci-lint 2.9.0: 0 issues (untagged and `integration`).
+
+## Required tests: status now
+
+| # | Required (A7 §(7)) | Test at `4b544f5` | Outcome | Blocking point | Balance / rebuild | Verdict |
+|---|---|---|---|---|---|---|
+| 1a | Sweeper vs. callback vs. phase C, same **deposit intent** | none. Excluded from FH-6 by the orchestrator (owned by the double-credit fix) | n/a | n/a | n/a | **MISSING (assigned elsewhere)** |
+| 1b | Same, same **withdrawal** | `a7_lockorder_integration_test.go:TestA7_1b_SweeperClaimVsCallbackPhaseC_SameWithdrawal` | yes: `succeeded`/`completed` exactly once | yes: both racers blocked by the withdrawal-row holder (`pg_blocking_pids`); no deadlock | yes / yes | **PRESENT.** The phase-C leg is the sweeper's own status apply, not a dispatch phase C. That is acceptable: both use the same `LockForPayoutEvidence` path. |
+| 2 | Two deliveries of one event serializing on R0 | `adversarial_test.go:TestReceiveCallback_ConcurrentDuplicateCallbacks_SecondBlocksOnReceiptKey`; `webhook_replay_duplicate_integration_test.go:TestWebhook_ConcurrentDuplicates_SecondBlocksOnReceiptKey`; `replay_f7_integration_test.go:TestF7Payments_ConcurrentIdenticalReversalRedelivery_SecondBlocksOnReceiptKey` | yes: exactly one credit | **partial**: proves the second delivery waits on the *first delivery's* pid, but not that it waits at R0 rather than at the intent's L1 row lock (both appear as a transaction-id wait) | balance yes / rebuild **no** | **PRESENT, with a precision gap.** Condition A7-C1 below. |
+| 3 | Deferred-receipt backstop vs. callback, same attempt | `a7_lockorder_integration_test.go:TestA7_3_DeferredReceiptAppliedVsFreshCallback_SameAttempt` | yes: `succeeded`, exactly one ledger posting | yes: both racers block on the intent holder | yes / yes | **PRESENT** |
+| 4 | N1: sweeper deposit T2 vs. RG self-exclusion, same person | `a7_lockorder_integration_test.go:TestA7_4_N1_SweeperDepositReclaimVsSelfExclusion_SamePerson` | yes: the self-exclusion commits, and a rejected attempt has 0 provider calls | yes: both block on L0.4. The blocker key matches `rg.lockPerson` exactly (`hashtext('player_restrictions'), hashtext(person)`) | yes / yes | **PRESENT** |
+| 5a | Mutant: RG gate moved after the parent lock turns a test red | `TestA7_5a_SweeperDepositClaim_RGGateBlocksBeforeParentLock`. It holds L0.4 and the intent row, and fails if the claim queues on the intent. | n/a | yes, this is the assertion itself | yes / yes | **PRESENT (permanent test)** |
+| 5b | Mutant: `SKIP LOCKED` dropped turns a test red | `TestA7_5b_ClaimBatch_SkipLockedNeverWaitsOnALockedAttemptRow`. `claimBatch` must return within 500 ms, skip the locked row and claim the free one. | yes | yes (a timeout means it waited) | not applicable (no posting) | **PRESENT (permanent test)** |
+| 5c | Mutant: receipt insert after an L1 lock turns a test red | none | n/a | n/a | n/a | **MISSING.** It belongs with the A7-TOMB-1 fix. |
+
+## A7 status
+
+**Still `PARTIALLY IMPLEMENTED`, owner `ledger-finance` + `payments`.** 5 of 8 required tests are
+now present and substantive (1b, 3, 4, 5a, 5b), plus #2 with a precision gap. What remains before
+`IMPLEMENTED`:
+1. #1a, deposit-intent race, owned by the double-credit fix.
+2. #5c together with the A7-TOMB-1 tombstone-branch fix and its race test.
+3. **A7-C1:** #2 must pin the blocking point to R0. For example, assert that the waiter's
+   `pg_stat_activity.query` is the `payment_provider_events` insert. Otherwise a regression that
+   moved R0 after the intent lock (the 5c shape) would still pass #2. Also add
+   `loAssertProjectionMatchesRebuild`.
+4. ADR 0082 §1.6/§1.7 inventory rows for the as-built payment/withdrawal sequences: still owed. At
+   `cb1330f` neither section mentions `payment_attempts`, T1p or R0.
+5. A `ledger-finance` gate review of the deposit-side lock sequence, once items 1 and 2 land. The
+   payout side is already reviewed.
+6. Correct the ADR's status line from "NOT IMPLEMENTED" to "PARTIALLY IMPLEMENTED".
