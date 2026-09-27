@@ -91,6 +91,66 @@ type OutboundCredentialResolver interface {
 	Resolve(ctx context.Context, pool providercred.TenantTxRunner, tenantID uuid.UUID, providerID string) (providercred.OutboundCredential, error)
 }
 
+// syntheticCasinoAdapter is providerkind.Synthetic restated structurally,
+// mirroring webhookauth.syntheticAdapter's identical role for INBOUND
+// credentials.
+type syntheticCasinoAdapter interface{ SyntheticComponent() }
+
+// OutboundKindSplitResolver is security review RV-PRH-I2 C3's fix: the
+// outbound-credential resolver is chosen by the ADAPTER's own kind
+// (synthetic/MOCK vs real), never by "is any mock wired anywhere in this
+// process" - mirrors webhookauth.KindSplitResolver's identical role for
+// INBOUND credentials exactly, including its fail-closed-on-unregistered-
+// id behavior (a provider id absent from adapters gets neither resolver).
+type OutboundKindSplitResolver struct {
+	synthetic map[string]bool
+	mock      OutboundCredentialResolver
+	real      OutboundCredentialResolver
+}
+
+// NewOutboundKindSplitResolver builds the split over adapters (the same
+// registry NewOrchestrator was built with). mock serves every provider id
+// whose adapter is synthetic (nil means none is wired: those launches fail
+// closed with "no outbound credential resolver configured", the same
+// convention LaunchGame's own nil check already uses); real serves every
+// other registered adapter (nil likewise). Returns a TRUE nil interface
+// when both are nil, so LaunchGame's own nil-resolver branch still
+// applies.
+func NewOutboundKindSplitResolver(adapters map[string]CasinoProvider, mock, real OutboundCredentialResolver) OutboundCredentialResolver {
+	if mock == nil && real == nil {
+		return nil
+	}
+	s := &OutboundKindSplitResolver{synthetic: map[string]bool{}, mock: mock, real: real}
+	for id, a := range adapters {
+		_, isSynthetic := any(a).(syntheticCasinoAdapter)
+		s.synthetic[id] = isSynthetic
+	}
+	return s
+}
+
+// Resolve implements OutboundCredentialResolver. A provider id never
+// registered in the adapters map this resolver was built from fails
+// closed (ErrOutboundCredentialUnavailable), exactly like
+// webhookauth.KindSplitResolver.target's identical unregistered-id case -
+// this can only be reached if LaunchGame's own registry check (phase A)
+// and this resolver were built from different adapter maps, which never
+// happens in this codebase's wiring, but the fail-closed default is kept
+// rather than assumed.
+func (s *OutboundKindSplitResolver) Resolve(ctx context.Context, pool providercred.TenantTxRunner, tenantID uuid.UUID, providerID string) (providercred.OutboundCredential, error) {
+	isSynthetic, registered := s.synthetic[providerID]
+	if !registered {
+		return providercred.OutboundCredential{}, providercred.ErrOutboundCredentialUnavailable
+	}
+	target := s.real
+	if isSynthetic {
+		target = s.mock
+	}
+	if target == nil {
+		return providercred.OutboundCredential{}, providercred.ErrOutboundCredentialUnavailable
+	}
+	return target.Resolve(ctx, pool, tenantID, providerID)
+}
+
 func generateLaunchToken() (string, error) {
 	b := make([]byte, launchTokenBytes)
 	if _, err := rand.Read(b); err != nil {
@@ -310,11 +370,14 @@ func GetLaunchSessionByID(ctx context.Context, tx pgx.Tx, id uuid.UUID) (LaunchS
 // it (e.g. the launch attempt itself failed after the token was minted,
 // or a staff-initiated safety revocation) - never a DELETE, since the
 // row is the audit-visible record of a launch attempt having occurred at
-// all.
-func RevokeLaunchSession(ctx context.Context, tx pgx.Tx, id uuid.UUID) error {
-	_, err := tx.Exec(ctx, `UPDATE casino_launch_sessions SET status = 'revoked' WHERE id = $1 AND status = 'active'`, id)
+// all. Returns whether the CAS actually matched a row (revoked=false means
+// the session was already non-'active' - e.g. already revoked, or a
+// hypothetical race - so the caller can record the true outcome rather
+// than assuming success; security review RV-PRH-I2 C1/F3).
+func RevokeLaunchSession(ctx context.Context, tx pgx.Tx, id uuid.UUID) (bool, error) {
+	tag, err := tx.Exec(ctx, `UPDATE casino_launch_sessions SET status = 'revoked' WHERE id = $1 AND status = 'active'`, id)
 	if err != nil {
-		return fmt.Errorf("casino: revoke launch session: %w", err)
+		return false, fmt.Errorf("casino: revoke launch session: %w", err)
 	}
-	return nil
+	return tag.RowsAffected() == 1, nil
 }

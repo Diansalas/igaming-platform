@@ -20,7 +20,14 @@ already in the migrations - e.g. casino_callback_rejections' append-only grant s
 are not undone by a later blanket GRANT). Go 1.26.8. Base: worktree branch
 worktree-agent-af8a1e737aadc71bf on 13b44b5 plus this task's PRH-I2 casino change.
 
-Result: 10/10 killed (one additional candidate mutant judged EQUIVALENT, see note below).
+Result: 9/9 killed, 1 candidate mutant (M9) judged EQUIVALENT - see note below. (Corrected
+2026-09-27: the original header said "10/10 killed", which double-counted M9; code review
+RV-PRH-I2 F1 caught this. §2 below adds the fix-record's own mutants for the code/security
+review rework.)
+
+===========================================================================================
+§1. Original submission mutants (2026-09-27)
+===========================================================================================
 
 M1 phase-A "denied" early-return disabled (a policy denial would fall through to session
 mint/Launch instead of returning the Denied result): KILLED [internal/casino/orchestrator.go]
@@ -90,9 +97,67 @@ KILLED [internal/casino/orchestrator.go] by
     single "casino.launched" audit only; the new test was added specifically to cover the
     new phase-A audit record this split introduces)
 
-10/10 killed, 1 equivalent (2026-09-27).
+9/9 killed, 1 equivalent (original submission, 2026-09-27; count corrected 2026-09-27).
 
 Full regression confirms no unrelated mutant survives by accident: the entire
 internal/casino integration suite (all pre-existing Stage 4A/4D/4G/10.x tests plus the
-five new launch_two_phase_integration_test.go tests) passes on the restored,
-un-mutated tree under `go test -race -tags=integration ./internal/casino/...`.
+seven new launch_two_phase_integration_test.go tests, all in one file per code review F2
+item 2) passes on the restored, un-mutated tree under
+`go test -race -tags=integration ./internal/casino/...`.
+
+===========================================================================================
+§2. Fix record mutants (RV-PRH-I2 code/security review rework, 2026-09-27)
+===========================================================================================
+
+Scope: the R1/C1 (phase-C ctx-independence), item-2 (postBet expiry enforcement), and
+F2.1/C3 (resolver-error sentinel, outbound kind-split) fixes. Same harness and environment
+convention as §1, against private database `prh_i2_casino_fix` (migrated to 101).
+
+F1 phase-C `context.WithoutCancel` removed from `launchFailed` (a cancelled request ctx
+would again silently skip the revoke and the audit): KILLED [internal/casino/orchestrator.go]
+by `go test -tags=integration ./internal/casino/ -run TestLaunchGame_CtxCancelledDuringLaunch_StillRevokesAndAudits`
+    first failure: --- FAIL: TestLaunchGame_CtxCancelledDuringLaunch_StillRevokesAndAudits
+                       "expected the session revoked, got status active" (plus the new
+                       casino_launch_phase_c_failed ERROR log line proving the logging fix
+                       fires: "db: begin tx: context canceled")
+
+F2 phase-C `context.WithoutCancel` removed from the SUCCESS transaction (a cancelled
+request ctx right after a successful Launch would lose the casino.launched audit and
+report a spurious failure for an accepted launch): KILLED [internal/casino/orchestrator.go]
+by `go test -tags=integration ./internal/casino/ -run TestLaunchGame_CtxCancelledAfterVendorAccept_StillAuditsLaunched`
+    first failure: --- FAIL: TestLaunchGame_CtxCancelledAfterVendorAccept_StillAuditsLaunched
+                       "expected the launch to succeed ... got casino: ... audit launch:
+                       db: begin tx: context canceled"
+
+F3 `postBet`'s status allow-list reverted to only rejecting 'revoked' (an 'expired' status
+would again accept a new bet): KILLED [internal/casino/orchestrator.go] by
+`go test -tags=integration ./internal/casino/ -run TestReceiveCallback_NewBetRejectedOnExpiredStatus_LedgerBalanced`
+    first failure: --- FAIL: TestReceiveCallback_NewBetRejectedOnExpiredStatus_LedgerBalanced
+                       "expected ErrLaunchSessionRequired ... got <nil>"
+
+F4 `postBet`'s `expires_at` check removed (a still-'active' session past its own TTL, the
+literal "crash left it active forever" scenario, would accept a bet indefinitely):
+KILLED [internal/casino/orchestrator.go] by
+`go test -tags=integration ./internal/casino/ -run TestReceiveCallback_NewBetRejectedPastExpiresAtEvenIfStillActive`
+    first failure: --- FAIL: TestReceiveCallback_NewBetRejectedPastExpiresAtEvenIfStillActive
+                       "expected ErrLaunchSessionRequired ... got <nil>"
+
+F5 resolver-error branch's `ErrProviderUnavailable` wrap removed (a credential-resolution
+failure would map to a generic 500 instead of 503 - code review F2.1): KILLED
+[internal/casino/orchestrator.go] by
+`go test -tags=integration ./internal/casino/ -run TestLaunchGame_ResolverErrorRevokesAuditsAndMapsToProviderUnavailable`
+    first failure: --- FAIL: TestLaunchGame_ResolverErrorRevokesAuditsAndMapsToProviderUnavailable
+                       "expected ErrProviderUnavailable ... got casino: resolve outbound
+                       credential: simulated credential store outage"
+
+5/5 killed (fix record, 2026-09-27). Combined with §1: 14/14 killed, 1 equivalent overall.
+
+The outbound kind-split (`OutboundKindSplitResolver`, security C3) and the `CallContext`
+redaction tests (security C2) are covered by ordinary passing/failing unit tests
+(`internal/casino/outbound_kindsplit_test.go`,
+`internal/casino/callcontext_redaction_test.go`) rather than a source mutant, since their
+own test files ARE the coverage gap the reviews named (no prior test existed to mutate
+against) - each was manually verified to fail against a broken implementation during
+development (e.g. `TestCallContext_NeverRendersSecret` was run against security's own
+mutation A - appending the raw secret to `callContextRedacted` - and failed as expected
+before the fix, per §1 above).

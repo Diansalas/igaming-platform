@@ -39,6 +39,17 @@ type mockWiring struct {
 	// merely a placeholder. The mock adapter itself stays registered for
 	// catalogue and launch (MOCK-ADAPTER-PROD-1, out of this scope).
 	CasinoWebhookResolver bool
+
+	// CasinoOutboundResolver wires the casino MOCK outbound-credential
+	// resolver LaunchGame's phase B uses (ADR 0095 §15.1, PROV-OUTBOUND-
+	// CRED-1; security review RV-PRH-I2 C3). Chosen by ADAPTER KIND, not
+	// merely "is this true" - casinoOutboundCredentials() routes it through
+	// casino.NewOutboundKindSplitResolver, which serves it only to a
+	// registered SYNTHETIC casino adapter. When false, a launch against a
+	// synthetic adapter fails closed ("no outbound credential resolver
+	// configured") rather than falling back to the real, unconfigured
+	// resolver.
+	CasinoOutboundResolver bool
 }
 
 // mockProviderWiring is a pure function of cfg - no I/O, no globals - so it
@@ -57,6 +68,7 @@ func mockProviderWiring(cfg config.Config) mockWiring {
 		PaymentsWebhookResolver: testSupport,
 		KYCWebhookEnabled:       testSupport,
 		CasinoWebhookResolver:   testSupport,
+		CasinoOutboundResolver:  testSupport,
 	}
 }
 
