@@ -561,7 +561,7 @@ CREATE TABLE kyc_enforcement_policies (
     reason_code                  TEXT NOT NULL CHECK (btrim(reason_code) <> ''),
     created_at                   TIMESTAMPTZ NOT NULL DEFAULT now(),
     created_by_actor_type        TEXT NOT NULL,
-    created_by_actor_id          UUID,
+    created_by_actor_id          UUID NOT NULL, -- security condition 2: NOT NULL from creation, and equal to the acting principal by the INSERT policy below
     -- Cross-trigger-type CHECK: a row must carry the value shape its own
     -- trigger_type needs and no other (mirrors ADR 0043's per-column
     -- CHECKs; prevents a 'registration_tier' row from silently also
@@ -587,25 +587,109 @@ CREATE UNIQUE INDEX kyc_enforcement_policies_one_active
     -- and withdraw the old one" discipline applies unchanged; a full
     -- effective-dated history is read via ORDER BY effective_from.
 
--- Append-only: no UPDATE/DELETE except a status transition to
--- 'withdrawn', mirroring jurisdiction_precedence_configs' own trigger
--- (ADR 0043 Decision 3). Reuses the same trigger function shape, not a
--- new one.
-CREATE TRIGGER kyc_enforcement_policies_append_only
-    BEFORE UPDATE OR DELETE ON kyc_enforcement_policies
-    FOR EACH ROW EXECUTE FUNCTION enforce_append_only_status_transition('withdrawn');
+-- ======================================================================
+-- REVISED per security condition 2 (§13): the original sketch's RLS/
+-- trigger text was weaker than the migration 0075 precedent it claimed
+-- to follow. This block now mirrors 0075's actual predicates verbatim
+-- (NULLIF, the platform_admin_principal_id GUC, FORCE ROW LEVEL
+-- SECURITY, explicit INSERT+UPDATE policies, no DELETE/FOR ALL policy).
+-- One deliberate, disclosed difference from 0075: that table's lifecycle
+-- is "insert a new effective-dated row, close the old one via
+-- effective_to" and never mutates a status column in place. This table
+-- has no effective-dated pairs — it is governed entirely by an in-place
+-- `status` column — so its append-only trigger allows a narrow,
+-- explicit set of in-place status transitions instead. This is a
+-- different mechanism for a genuinely different lifecycle shape, not a
+-- weaker copy of 0075's; the RLS predicates that actually gate WHO may
+-- write are copied verbatim.
+-- ======================================================================
+
+CREATE FUNCTION kyc_enforcement_policies_enforce_lifecycle() RETURNS TRIGGER AS $$
+BEGIN
+    IF TG_OP = 'TRUNCATE' THEN
+        RAISE EXCEPTION 'kyc_enforcement_policies is append-only: TRUNCATE is not permitted';
+    END IF;
+    IF TG_OP = 'DELETE' THEN
+        RAISE EXCEPTION 'kyc_enforcement_policies is append-only: DELETE is not permitted';
+    END IF;
+    -- Every column except `status` (and effective_from/created_at/
+    -- created_by_* which are already forge-proofed by a BEFORE INSERT
+    -- trigger mirroring 0075's own pattern, omitted here for brevity) is
+    -- immutable after insert.
+    IF (to_jsonb(NEW) - 'status') IS DISTINCT FROM (to_jsonb(OLD) - 'status') THEN
+        RAISE EXCEPTION 'kyc_enforcement_policies: only status may change after insert';
+    END IF;
+    -- The only permitted in-place transitions (security condition 2):
+    -- draft->active, draft->withdrawn, active->withdrawn. Every other
+    -- pair, including any attempt to leave 'withdrawn' or to move
+    -- backward, is rejected.
+    IF NOT (
+        (OLD.status = 'draft' AND NEW.status IN ('active', 'withdrawn'))
+        OR (OLD.status = 'active' AND NEW.status = 'withdrawn')
+    ) THEN
+        RAISE EXCEPTION 'kyc_enforcement_policies: illegal status transition % -> %', OLD.status, NEW.status;
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER kyc_enforcement_policies_lifecycle
+    BEFORE UPDATE ON kyc_enforcement_policies
+    FOR EACH ROW EXECUTE FUNCTION kyc_enforcement_policies_enforce_lifecycle();
+
+CREATE TRIGGER kyc_enforcement_policies_deny_delete_truncate
+    BEFORE DELETE OR TRUNCATE ON kyc_enforcement_policies
+    FOR EACH STATEMENT EXECUTE FUNCTION kyc_enforcement_policies_enforce_lifecycle();
 
 ALTER TABLE kyc_enforcement_policies ENABLE ROW LEVEL SECURITY;
+ALTER TABLE kyc_enforcement_policies FORCE ROW LEVEL SECURITY;
 -- No tenant_id: platform-wide reference data, read by every tenant
 -- sharing a licensing jurisdiction, exactly like
--- jurisdiction_precedence_configs. Write restricted to a platform-scoped
--- connection (db.WithoutTenant) plus the compliance/platform_admin role
--- check already enforced by the HTTP handler layer, matching that
--- table's own policy.
+-- jurisdiction_precedence_configs. Write requires the platform-admin
+-- principal GUC AND requires tenant/player context to be unset, verbatim
+-- from migration 0075 lines 207-225 — a tenant-scoped connection
+-- (including a tenant's own StaffRoleCompliance, which is a
+-- tenant-bound role per staff_users.tenant_id) can never satisfy this,
+-- regardless of what the HTTP handler layer checks. No DELETE policy.
+-- No FOR ALL policy.
 CREATE POLICY kyc_enforcement_policies_read ON kyc_enforcement_policies
     FOR SELECT USING (true);
-CREATE POLICY kyc_enforcement_policies_write ON kyc_enforcement_policies
-    FOR INSERT WITH CHECK (current_setting('app.tenant_id', true) IS NULL);
+
+CREATE POLICY kyc_enforcement_policies_platform_insert ON kyc_enforcement_policies
+    FOR INSERT
+    WITH CHECK (
+        NULLIF(current_setting('app.platform_admin_principal_id', true), '')::uuid IS NOT NULL
+        AND NULLIF(current_setting('app.tenant_id', true), '') IS NULL
+        AND NULLIF(current_setting('app.player_account_id', true), '') IS NULL
+        -- created_by_actor_id must equal the acting principal, so
+        -- provenance cannot be forged by a caller that inserts a row and
+        -- separately claims a different actor (security condition 2).
+        AND created_by_actor_id = NULLIF(current_setting('app.platform_admin_principal_id', true), '')::uuid
+    );
+
+CREATE POLICY kyc_enforcement_policies_platform_update ON kyc_enforcement_policies
+    FOR UPDATE
+    USING (
+        NULLIF(current_setting('app.platform_admin_principal_id', true), '')::uuid IS NOT NULL
+        AND NULLIF(current_setting('app.tenant_id', true), '') IS NULL
+        AND NULLIF(current_setting('app.player_account_id', true), '') IS NULL
+    )
+    WITH CHECK (
+        NULLIF(current_setting('app.platform_admin_principal_id', true), '')::uuid IS NOT NULL
+        AND NULLIF(current_setting('app.tenant_id', true), '') IS NULL
+        AND NULLIF(current_setting('app.player_account_id', true), '') IS NULL
+    );
+
+-- created_by_actor_id is NOT NULL (moved here from the earlier sketch's
+-- nullable column) precisely so the INSERT policy's provenance check
+-- above is always evaluable.
+ALTER TABLE kyc_enforcement_policies ALTER COLUMN created_by_actor_id SET NOT NULL;
+
+-- Required tests (security condition 2): a tenant-scoped `compliance`
+-- connection's INSERT/UPDATE is rejected at the database; a tenant-scoped
+-- `platform_admin`-role-but-tenant-bound connection is rejected; a
+-- platform-service-scoped connection with no platform_admin_principal_id
+-- set is rejected; a genuine platform-admin-scoped connection succeeds.
 
 -- Immutable, tenant-scoped audit of every enforcement decision — the
 -- CLAUDE.md "audit every compliance-relevant action" requirement,
@@ -619,7 +703,7 @@ CREATE TABLE kyc_enforcement_decisions (
     operation            TEXT NOT NULL CHECK (operation IN ('deposit','withdrawal_hold','withdrawal_payout','casino_play','sportsbook_play')),
     outcome              TEXT NOT NULL CHECK (outcome IN ('not_required','passed','pending','failed','unavailable')),
     allowed              BOOLEAN NOT NULL,
-    matched_trigger      TEXT, -- e.g. 'first_withdrawal' or a policy row id; NULL for not_required with nothing configured
+    matched_trigger      TEXT, -- e.g. a policy row id, or a fixed label for the structural withdrawal rule (§3.2 point 1); NULL for not_required with nothing configured
     policy_version        TEXT NOT NULL,
     correlation_id        UUID NOT NULL,
     decided_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -628,14 +712,26 @@ CREATE TABLE kyc_enforcement_decisions (
 CREATE INDEX kyc_enforcement_decisions_player ON kyc_enforcement_decisions (tenant_id, player_account_id, decided_at DESC);
 
 ALTER TABLE kyc_enforcement_decisions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE kyc_enforcement_decisions FORCE ROW LEVEL SECURITY;
 CREATE POLICY tenant_isolation ON kyc_enforcement_decisions
-    USING (tenant_id = current_setting('app.tenant_id', true)::uuid)
-    WITH CHECK (tenant_id = current_setting('app.tenant_id', true)::uuid);
+    USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
+    WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
 -- Append-only trigger, identical convention to audit_log and every other
--- compliance-record table in this codebase (no UPDATE/DELETE ever).
+-- compliance-record table in this codebase (no UPDATE/DELETE ever), with
+-- the same explicit BEFORE TRUNCATE guard security condition 2 requires.
+CREATE FUNCTION kyc_enforcement_decisions_deny_mutation() RETURNS TRIGGER AS $$
+BEGIN
+    RAISE EXCEPTION 'kyc_enforcement_decisions is append-only: % is not permitted', TG_OP;
+END;
+$$ LANGUAGE plpgsql;
+
 CREATE TRIGGER kyc_enforcement_decisions_immutable
     BEFORE UPDATE OR DELETE ON kyc_enforcement_decisions
-    FOR EACH ROW EXECUTE FUNCTION reject_mutation();
+    FOR EACH ROW EXECUTE FUNCTION kyc_enforcement_decisions_deny_mutation();
+
+CREATE TRIGGER kyc_enforcement_decisions_deny_truncate
+    BEFORE TRUNCATE ON kyc_enforcement_decisions
+    FOR EACH STATEMENT EXECUTE FUNCTION kyc_enforcement_decisions_deny_mutation();
 ```
 
 `kyc_enforcement_decisions` is deliberately **not** the same table as
