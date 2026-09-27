@@ -390,6 +390,14 @@ type AdapterCapability struct {
 	AmountLimits           []AmountLimit
 	SettlementBehavior     string
 	CallbackCapabilities   CallbackCapability
+	// Manifest is ADR 0095 §10.1's operation manifest (contract.go's
+	// OperationManifest, a strict subset for PRH-I1 step (b)). Zero value
+	// for every adapter that predates this step - InitiateDepositAttempt
+	// (deposit_v2.go) applies the ADR's own fail-safe defaults
+	// (DefaultCallTimeout/DefaultSettlementWindow, Interactive=true) when
+	// a manifest field is left at its zero value, so this is additive,
+	// never a breaking change for an adapter that hasn't declared one.
+	Manifest OperationManifest
 }
 
 // ProviderCapability is the full effective capability row: layer (a)

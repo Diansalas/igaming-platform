@@ -221,6 +221,27 @@ func (m *MockProvider) SetHealth(h ProviderHealth) {
 	m.health = h
 }
 
+// AttemptCount reports how many Deposit/Withdraw calls this mock has
+// recorded so far - a test-only call counter (PRH-I1 step (b) onward)
+// used to assert "the provider was never called" for a gate refusal or a
+// pre-call denial.
+func (m *MockProvider) AttemptCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.attempts)
+}
+
+// SetManifest lets a test (PRH-I1 step (b) onward) drive the ADR 0095
+// §10.1 operation manifest this mock declares, since a real adapter's
+// manifest is a deployment-time fact, not something InitiateDepositAttempt
+// can infer. Additive: every pre-existing test that never calls this gets
+// the zero-value OperationManifest, exactly as before this method existed.
+func (m *MockProvider) SetManifest(manifest OperationManifest) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.capability.Manifest = manifest
+}
+
 // Resolve lets a test simulate a delayed provider-side resolution of a
 // previously-ambiguous or previously-pending attempt, observable on the
 // next QueryStatus call - the synthetic equivalent of "the provider's
