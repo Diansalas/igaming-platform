@@ -105,6 +105,24 @@ var (
 	// credential for the given (tenantID, providerID, keyID). Callers fold
 	// it into ReasonCredentialUnavailable, never surfacing it on its own.
 	ErrCredentialUnavailable = errors.New("webhookauth: no webhook credential available for this tenant/provider/key")
+
+	// ErrTenantReaderUnavailable is returned by a TenantReader
+	// implementation (ADR 0097 PAYWH-RL-1: internal/httpserver's gatedReader,
+	// wrapping the pre-verification DB admission gate) when a
+	// WithTenantReadOnly call was refused because of a CAPACITY limit -
+	// never because of a real database error or a missing/invalid
+	// credential. This is deliberately a DIFFERENT sentinel from
+	// ErrCredentialUnavailable's "fold everything else into the same
+	// closed reason" rule (security review C1 of PRH-I4, HIGH): a Resolver
+	// MUST check for this specifically, with errors.Is, BEFORE it folds
+	// any other WithTenantReadOnly error into ErrCredentialUnavailable, and
+	// propagate it distinctly (never wrapped inside ErrCredentialUnavailable)
+	// so the eventual caller can answer a retryable 503 instead of the
+	// uniform pre-verification 401 - a capacity rejection is not an
+	// authentication failure, and collapsing it into one would make a
+	// legitimate, correctly-signed callback indistinguishable from a
+	// deliberate attack every time the platform is merely busy.
+	ErrTenantReaderUnavailable = errors.New("webhookauth: tenant reader unavailable (admission capacity)")
 )
 
 // Reason is the single, closed, allow-listed reason enum behind
@@ -130,6 +148,14 @@ const (
 	// lookup, so it gets the same uniform rejection as every other
 	// pre-verification failure, tenant-independent.
 	ReasonBodyTooLarge Reason = "body_too_large"
+	// ReasonAdmissionUnavailable (ADR 0097 PAYWH-RL-1, security review C1)
+	// is distinct from every reason above: it means the pre-verification
+	// DB admission gate refused a WithTenantReadOnly call (capacity, not
+	// authentication). A caller MUST map this to a retryable 503 +
+	// Retry-After, never the uniform 401 - it is the ONE reason in this
+	// enum that is not part of the uniform-401 contract, precisely because
+	// it never depends on anything the signature proves.
+	ReasonAdmissionUnavailable Reason = "admission_unavailable"
 )
 
 // AuthError is ErrAuthFailed's concrete carrier, with the extra, still

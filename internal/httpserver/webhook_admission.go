@@ -2,7 +2,6 @@ package httpserver
 
 import (
 	"context"
-	"errors"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -16,6 +15,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/identity"
 	"github.com/Diansalas/igaming-platform/internal/observability"
 	"github.com/Diansalas/igaming-platform/internal/txscope"
+	"github.com/Diansalas/igaming-platform/internal/webhookauth"
 )
 
 // webhookAdmissionRuntime is the constructed ADR 0097 admission state for
@@ -167,7 +167,15 @@ func (rt *webhookAdmissionRuntime) rateBurstFor(def WebhookRateBurst, domain web
 // would require reentrant acquisition, AC2(b)) - the caller maps this to
 // a 503, never the uniform 401 (it is a capacity rejection, not an auth
 // failure).
-var errDBGateUnavailable = errors.New("httpserver: webhook pre-verification DB gate unavailable")
+// Security review C1 of PRH-I4 (HIGH): this MUST be exactly
+// webhookauth.ErrTenantReaderUnavailable, not a locally-defined sentinel,
+// because gatedReader.WithTenantReadOnly's error crosses package
+// boundaries (into internal/providercred's real Resolver, then back up
+// through internal/webhookauth's AuthError construction, then through
+// payments/casino/kyc's VerifyCallback) before this package's handlers
+// ever see it again - errors.Is only survives that whole path if every
+// layer checks for, and propagates, the SAME sentinel value.
+var errDBGateUnavailable = webhookauth.ErrTenantReaderUnavailable
 
 // gatedReaderMarkKey marks a context as already holding an A4b slot
 // acquired by THIS gatedReader chain, so a nested call (architect review
@@ -292,7 +300,18 @@ func (rt *webhookAdmissionRuntime) logRejected(ctx context.Context, tier string,
 // HTTP response and ok is false; the caller must return immediately.
 //
 // A nil receiver always admits (admission disabled) with a no-op release.
-func (rt *webhookAdmissionRuntime) admitPreAuth(w http.ResponseWriter, r *http.Request, domain webhookDomain, trustedProxyCount int, schemeRegistered func(string) bool) (release func(), ok bool) {
+//
+// retries429 reports the registered adapter's declared retry semantics for
+// providerID (nil, or declared=false for an unknown/unregistered
+// provider, defaults to 429 - security review C4 of PRH-I4: the ADR's own
+// §6 text originally scoped adapter-declared status to B1 only; a
+// provider that is REGISTERED is a static fact known even before
+// verification succeeds - since providerKey is only ever the raw
+// providerID when it names a registered adapter (preAuthKeys collapses
+// anything else to "_unknown"), A3 can and must honor the same
+// declaration B1 does, so a no-429-retry adapter never gets a 429 at
+// EITHER tier).
+func (rt *webhookAdmissionRuntime) admitPreAuth(w http.ResponseWriter, r *http.Request, domain webhookDomain, trustedProxyCount int, schemeRegistered func(string) bool, retries429 func(providerID string) (allows, declared bool)) (release func(), ok bool) {
 	// RL-F4 (ADR 0097 §8/§17 devops condition 3): every webhook request,
 	// admission enabled or not, gets its access-log/panic-recovery path
 	// redacted to the matched route pattern - see RequestState.LogPath's
@@ -349,8 +368,20 @@ func (rt *webhookAdmissionRuntime) admitPreAuth(w http.ResponseWriter, r *http.R
 	rb := rt.rateBurstFor(def, domain, providerKey, tenantKey)
 	preKey := string(domain) + "|" + tenantKey + "|" + providerKey
 	if admitted, retryAfter := limiter.AllowWithParams(preKey, rb.Rate, rb.Burst); !admitted {
-		rt.logRejected(ctx, "preauth", domain, tenantKey, providerKey, nil, http.StatusTooManyRequests, retryAfter, clientIP)
-		writeAdmissionRejection(w, requestID, apierror.CodeRateLimited, retryAfter)
+		status := http.StatusTooManyRequests
+		code := apierror.CodeRateLimited
+		if retries429 != nil {
+			if allows, declared := retries429(providerKey); declared && !allows {
+				// Security review C4 of PRH-I4: a registered adapter that
+				// does not retry 429 must never receive one, even at the
+				// pre-auth tier (§6.3, ADR text amended).
+				status = http.StatusServiceUnavailable
+				code = apierror.CodeUnavailable
+				retryAfter = time.Second
+			}
+		}
+		rt.logRejected(ctx, "preauth", domain, tenantKey, providerKey, nil, status, retryAfter, clientIP)
+		writeAdmissionRejection(w, requestID, code, retryAfter)
 		return nil, false
 	}
 
@@ -397,6 +428,30 @@ func (rt *webhookAdmissionRuntime) gatedTenantLookup(ctx context.Context, pool *
 	}
 	key := string(domain) + "|" + tenantKey + "|" + providerKey
 	return gatedGetTenantBySlug(ctx, rt.dbGate, key, cap, rt.clock, rt.settings.DBGateWait, pool, slug)
+}
+
+// writeDBGateUnavailable answers ADR 0097's A4b capacity rejection
+// (security review C2 of PRH-I4): 503 + Retry-After + a "db_gate"
+// allow-listed log line, whether the rejection was observed as the bare
+// errDBGateUnavailable sentinel (the platform-wide tenant lookup, or a
+// domain's first pre-verification read that propagates it unwrapped) or
+// wrapped inside the domain's own AuthError type (security review C1: a
+// rejection from INSIDE credential resolution). tenantID is nil before
+// the tenant is resolved (the slug-lookup call site). Nil-receiver-safe.
+func (rt *webhookAdmissionRuntime) writeDBGateUnavailable(w http.ResponseWriter, r *http.Request, domain webhookDomain, tenantID *uuid.UUID, providerID string) {
+	requestID := observability.RequestIDFromContext(r.Context())
+	if rt != nil {
+		rt.logRejected(r.Context(), "db_gate", domain, "", providerID, tenantID, http.StatusServiceUnavailable, time.Second, "")
+	}
+	writeAdmissionRejection(w, requestID, apierror.CodeUnavailable, time.Second)
+}
+
+// writeAdmissionUnavailableAuthError is writeDBGateUnavailable for a
+// call site that already has a resolved tenantID (every handler's own
+// AuthError branch, and their VerifyCallback-level errDBGateUnavailable
+// check).
+func (rt *webhookAdmissionRuntime) writeAdmissionUnavailableAuthError(w http.ResponseWriter, r *http.Request, domain webhookDomain, tenantID uuid.UUID, providerID string) {
+	rt.writeDBGateUnavailable(w, r, domain, &tenantID, providerID)
 }
 
 // admitVerified runs B1 (verified rate bucket) then B2 (per-tenant domain

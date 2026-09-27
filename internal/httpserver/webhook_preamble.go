@@ -132,7 +132,10 @@ func webhookPreamble(w http.ResponseWriter, r *http.Request, deps Deps, route we
 	}
 	t, err := deps.webhookAdmission.gatedTenantLookup(r.Context(), deps.DB, route.domain, tenantKey, providerKey, tenantSlug)
 	if errors.Is(err, errDBGateUnavailable) {
-		apierror.Write(w, requestID, apierror.CodeUnavailable, "service temporarily unavailable; retry later")
+		// Security review C2 of PRH-I4: every DB-gate 503 gets Retry-After
+		// and a db_gate log line - the tenant is not resolved yet at this
+		// call site (this IS the tenant lookup), so tenantID is nil.
+		deps.webhookAdmission.writeDBGateUnavailable(w, r, route.domain, nil, providerID)
 		return identity.Tenant{}, "", nil, false
 	}
 	if errors.Is(err, identity.ErrNotFound) {

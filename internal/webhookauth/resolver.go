@@ -91,6 +91,8 @@ const (
 // reasonForResolveError folds a resolver error into its closed reason.
 func reasonForResolveError(err error) Reason {
 	switch {
+	case errors.Is(err, ErrTenantReaderUnavailable):
+		return ReasonAdmissionUnavailable
 	case errors.Is(err, ErrNoResolver):
 		return ReasonNoResolver
 	case errors.Is(err, ErrCredentialIntegrity):
