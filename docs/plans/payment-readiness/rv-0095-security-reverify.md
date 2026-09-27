@@ -327,3 +327,43 @@ The first non-MOCK payments adapter stays blocked until all of the following hol
 
 This addendum does not state that anything is secure or launch-ready. Production launch
 authorization remains the human's decision.
+
+---
+
+## N5/L5 addendum (checked against commit 5418274; text-only check)
+
+**Scope:** only ADR 0095 §10.2.1 (actor-column table), §10.2.2 (point 8 and the release-request
+guard), the §13.2 guard comment, §16.2 item 20 (N5/L5 bullets), MX25 and the §27.8 rows. No other
+section was re-reviewed, and nothing is implemented.
+
+- **N5: CLOSED (design).** Each actor column is forced at exactly one step (§10.2.1).
+  `id`, `tenant_id`, `kill_switch_id`, `expected_version`, `reason_code`, `requested_by*`,
+  `created_at` and `expires_at` are INSERT-only and immutable after that. `approved_by*`,
+  `decided_at` and `decided_txid` are forced at `open→approved` only, NULL otherwise, and
+  immutable once set. Terminal rows are fully immutable. The single-actor sequence (create, then
+  approve while rewriting `requested_by`) is now refused. Item 20 tests it, and MX25 must be
+  killed by it. The "literal reading" deadlock is also gone.
+- **L5: CLOSED (design).** (a) A tenant-session INSERT is refused on a platform-engaged switch.
+  (b) `release_request_id := NULL` is forced on every switch INSERT (§10.2.2 point 8). Both are
+  tested in item 20.
+- **Residual notes (non-blocking; for PRH-I1 implementing review):**
+  - L6 (Low, fails safe): a tenant can open a request while the switch is tenant-engaged, and the
+    platform can then take the switch over (point 5). That tenant request keeps the single
+    `open` slot until it is cancelled or expires (≤ 24 h), and it can never release the switch.
+    Suggested fix: on platform take-over, the request guard or the switch trigger moves any
+    `open` tenant-scope request to `cancelled`, or the platform cancel path is documented.
+  - Editorial: the two new §27.8 rows sit after a blank line, so Markdown renders them as a
+    headerless separate table. This is cosmetic.
+
+**S95-C5: CLOSED (design).** With N5 closed, every S95 condition (C1–C13) is closed at design
+level.
+
+**Overall launch-blocking status of the ADR 0095 design: no longer launch-blocking at design
+level.** Migration 0102 and the kill-switch routes may now be implemented. The
+implementation-level gates from the revision-3 addendum still stand, unchanged:
+- The first non-MOCK payments adapter stays blocked until PRH-I1, I2 and I5 pass `security`
+  code review against this design.
+- The item 20 tests and mutations MX17–MX21 and MX25 must be shown passing and killed.
+
+This addendum does not state that anything is secure or launch-ready. Production launch
+authorization remains the human's decision.
