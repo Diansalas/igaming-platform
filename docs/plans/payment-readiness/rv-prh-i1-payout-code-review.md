@@ -655,3 +655,150 @@ M1–M12 are all killed. So are R_N6, R_R2 and R_R1, and the new ones:
    integration-tag `errcheck` noise in older httpserver tests. Neither comes from this change.
 3. Domain sign-offs from `ledger-finance` and `security` (the N4/N6 lock and reference rulings are
    theirs) before PRH-I1 payout dispatch is labelled `IMPLEMENTED`.
+
+---
+
+# FH-6 code review — `4b544f5` (payout security round, A7 suite, production fixes)
+
+- Scope: `ca696e1..4b544f5` on `worktree-agent-a5b19b46582e95b75`.
+- Method:
+  - detached worktree at `4b544f5`;
+  - private database created via `TEST_ADMIN_DATABASE_URL`, migrated to 0106, grants from
+    `deploy/init-app-role.sql`. DB access worked throughout. No role, password or privilege
+    changes were made;
+  - build, `go vet -tags=integration`, and pinned `golangci-lint` 2.9.0 (untagged, and with
+    integration tags on payments): **0 issues**;
+  - anchored mutants, each reverted with `git checkout`.
+- The container restarted mid-review. My stale worktree held one un-reverted experiment edit
+  (`sweeper.go`); it was reverted and the lost run re-run. The worktree and the private DB are
+  now removed.
+
+## Verdict
+
+**APPROVE WITH CONDITIONS.**
+
+The production changes are correct, and the claimed kills are real. Three conditions, none a
+correctness bug:
+- two S-M2 audit fields are not pinned by any test;
+- the Escalate-predicate regression test catches its mutant only about 1 time in 40;
+- the SP-C root-cause analysis in the launch-conditions note looks wrong, and a narrower fix
+  appears to exist.
+
+The domain rulings on S-L2/SP-C and the lock order belong to `ledger-finance` and `security`
+(`fca1741` is ledger-finance's).
+
+## Suites
+
+- `internal/payments` and `internal/withdrawal` **pass**.
+- `internal/httpserver` passes except 4 `TestResolutionIsolation_*` INV-POOL timing tests. The
+  same family fails on unchanged baselines under this machine's load (see re-reviews 2 and 3), and
+  `TEST-RESISO-RACE-1` is filed.
+- The A7 suite is stable: `-count=5` all pass, and `TestA7_1b` passes 40 of 40 at baseline.
+
+## Claimed kills, verified with my own mutants
+
+| Mutant | Result |
+|---|---|
+| SM2a: T12 Go-level `checkPayoutKillSwitch` removed | **killed** (`TestResubmitPayoutAmbiguous_SM2a_…`) |
+| SM7: `/resolve` linked-staff check removed | **killed** (`TestWithdrawalResolve_UnlinkedStaffAccountRejected`) |
+| SM7b: `/resolve` active-staff check removed | **killed** (`…_SuspendedStaffAccountRejected`) |
+| SM13a: only `LockApprovedForSubmission` accepts `pending_review` | **survives, harmlessly.** `MarkSubmittedPending`'s own check and CAS still refuse, so submit returns 409. This is defense in depth, not a gap. The new test's comment says this single mutant "was confirmed to SURVIVE the full suites", which is consistent. |
+| SM13b: `LockApprovedForSubmission` **and** `MarkSubmittedPending` (Go check and CAS) accept `pending_review` | **killed** (`TestWithdrawalSubmit_PendingReviewBypassRejected`). This is the real four-eyes bypass, and it is now pinned. |
+| S-M2: dispute outcome forced to `success` | killed |
+| S-M2: `attempt_state_after` shows the before-state | killed |
+| S-M2: `terminal_reason` dropped | killed |
+| **S-M2: `withdrawal_state_after` hard-coded to `submitted`** | **SURVIVED** |
+| **S-M2: `evidence_class` blanked on the QueryStatus path** | **SURVIVED** |
+| S-L2: `claimBatch` writes the bare `"sweeper"` | killed (3 tests) |
+| S-L2: Go in-flight check compares against `"sweeper"` | killed (N7 crash-recovery tests) |
+| S-L2: CAS exemption compares against `"sweeper"` | killed (N7 crash-recovery tests) |
+| `escalateAmbiguousPayout` conflict-swallow removed | killed (`TestA7_1b`) |
+| **Escalate CAS `state NOT IN (terminal)` predicate removed** | **SURVIVED at `-count=10`; killed 1 of 40 at `-count=40`**, with `violates check constraint "payment_attempts_check9"`. Baseline 0 of 40. |
+
+The cross-tenant submit and `/resolve` tests are not vacuous:
+- each asserts a 404 for the foreign tenant's staff;
+- each asserts no new audit row and no `payment_attempts` row;
+- each asserts that the owning tenant's staff can still act afterwards.
+
+## Is the Escalate predicate change safe? Could it mask a real state bug?
+
+- **Correct and required.** `payment_attempts_check9` requires `next_action_at IS NULL` in every
+  terminal state. Without the predicate, a Escalate that loses a race to a terminal transition
+  (T12 polls, then escalates *outside* the withdrawal lock, while a success callback commits)
+  would write `next_action_at` onto a terminal row and fail with a CHECK violation. My 1-in-40
+  kill reproduced exactly that error.
+- **`gateAndEscalateOnDeny`** (T2/T12 KYC deny, under the withdrawal lock) does not swallow the
+  conflict. A terminal attempt there becomes a returned error and a rollback: loud, never silent.
+- **`escalateAmbiguousPayout`** swallows *every* `ErrAttemptStateConflict` as `nil`. That covers
+  the intended cases (the attempt went terminal concurrently, or `escalated_at` was set
+  concurrently). It also covers the unintended one: 0 rows because the row was not visible at
+  all, e.g. a wrong tenant in RLS, or the id is gone. That case would be skipped with no error,
+  no audit and no escalation, and re-leased every tick. No such caller bug exists today, so this
+  is **LOW**. Recommended hardening: on conflict, re-read and return `nil` only if the state is
+  terminal or `escalated_at IS NOT NULL`, otherwise return the error.
+- **Test strength, condition.** The only regression test for the predicate (`TestA7_1b`) hits the
+  window about 2.5% of the time. For a production fix described as "required, not defense in
+  depth", add a deterministic test: drive the attempt to `succeeded`, then call Escalate or
+  `escalateAmbiguousPayout` with the stale ambiguous copy, and assert a conflict/`nil`, no CHECK
+  error, and the attempt unchanged.
+
+## S-M2 audit: correctness notes
+
+- `withdrawal_state_before` is hard-coded to `submitted`, justified by the handler's precondition.
+  But the handler reads that state without a lock, before `PollPayoutStatus`. A concurrent
+  sweeper resolution in between would make the audit claim `submitted → completed` when the
+  request was already `completed`. This is an audit-accuracy nit (LOW). Recording the state read
+  under `LockForPayoutEvidence` inside the same transaction would make it exact.
+- Two fields are unpinned: `withdrawal_state_after` and `evidence_class` on the QueryStatus path
+  (see the surviving mutants above). Add assertions for a completing resolve
+  (`withdrawal_state_after=completed`, `evidence_class=succeeded`).
+
+## SP-C: the disclosed root cause appears wrong, and a narrow fix passes the suite
+
+The launch-conditions addendum says excluding live non-batch leases in `claimBatch` "regress[ed]
+7 existing tests" because per-item claims set `next_action_at` earlier than `lease_until`. In
+fact, `ClaimCreatedForSubmission` and `ResubmitAmbiguous` both set `next_action_at =
+lease_until`. The early-`next_action_at`-with-live-lease rows come from phase C moving the row
+out of `submitting` (to `pending`/`ambiguous`) without clearing the lease.
+
+Experiment: I added the security review's actual condition, **scoped to `state='submitting'`**,
+to `claimBatch`:
+
+```sql
+AND NOT (state = 'submitting' AND lease_until > now() AND lease_owner IS DISTINCT FROM 'sweeper-batch')
+```
+
+The **full `internal/payments` suite passed** with it (one run, not `-race`). This matches SP-C's
+shape: step 4 claims a `submitting` row under a live `sweeper-payout-resubmit` lease, which this
+predicate excludes.
+
+I did not write an SP-C reproduction here, so this is evidence, not a verified fix. Route it to
+`security`/`ledger-finance` together with the addendum's correction. SP-C remains a disclosed,
+not-fixed launch condition (money-safe today per the security review).
+
+## A7 suite and the scoping fix
+
+- `a7WaitAnyLockWaiter` is now scoped to `pg_stat_activity.datname = current_database()`, which
+  is correct for a shared cluster. Each call site also confirms the found waiter is blocked by
+  its own blocker (`loBlockingPIDs`), which guards against picking up a foreign pid.
+- **#4/N1, #5a, #5b, #1b:** real production code on both sides. 5a/5b have documented
+  hand-kills. #1b is timing-dependent for its Escalate-race purpose (see above).
+- **#3 (deferred receipt vs. fresh callback): one assertion is vacuous.**
+  `SELECT count(DISTINCT ledger_transaction_id) FROM payment_attempts WHERE id = $1` reads one
+  column of one row, so it can never exceed 1. The "exactly 1 ledger posting" claim needs to count
+  `ledger_transactions` for `(provider_id, provider_tx_id)` or for the intent. The DB's own
+  idempotency constraint makes a double post structurally unlikely, but as written the assertion
+  proves nothing. LOW; fix the query.
+
+## Conditions to close
+
+1. Pin S-M2's `withdrawal_state_after` and `evidence_class`.
+2. Add a deterministic Escalate-on-terminal test.
+3. Fix `TestA7_3`'s posting-count query.
+4. Hand the SP-C evidence to `security`/`ledger-finance` and correct the addendum's root-cause
+   text.
+
+Optional hardening:
+- `escalateAmbiguousPayout` should swallow the conflict only for the terminal/already-escalated
+  cases;
+- record the actual withdrawal before-state in the S-M2 audit.
