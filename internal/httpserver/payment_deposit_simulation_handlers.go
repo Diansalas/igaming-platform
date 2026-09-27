@@ -254,6 +254,13 @@ func writeDepositCallbackError(w http.ResponseWriter, requestID string, logger i
 	apierror.Write(w, requestID, code, msg)
 }
 
+// depositSimulationBetweenPhasesHook is a TEST SEAM (nil in production;
+// set only by this package's own tests): it runs between step 2
+// (VerifyCallback) and step 3 (the domain transaction) of the deposit
+// simulation, so a test can change the intent in the gap step 3 must
+// re-validate (TestSimulateDepositCallback_IntentRevalidatedInDomainTx).
+var depositSimulationBetweenPhasesHook func(depositID uuid.UUID)
+
 // newSimulateDepositCallbackHandler simulates the provider-side webhook
 // delivery for the caller's own, still-pending deposit intent - see this
 // file's own doc comment for the full trust-boundary rationale.
@@ -323,6 +330,9 @@ func newSimulateDepositCallbackHandler(deps Deps) http.HandlerFunc {
 		var verified *payments.VerifiedCallback
 		if err == nil {
 			verified, err = deps.PaymentOrchestrator.VerifyCallback(r.Context(), deps.DB, tc.TenantID, providerID, inbound)
+		}
+		if err == nil && depositSimulationBetweenPhasesHook != nil {
+			depositSimulationBetweenPhasesHook(depositID)
 		}
 		if err == nil {
 			err = deps.DB.WithTenant(r.Context(), tc.TenantID, func(ctx context.Context, tx pgx.Tx) error {

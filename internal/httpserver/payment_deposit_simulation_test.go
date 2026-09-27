@@ -743,3 +743,71 @@ func TestSimulateDepositCallback_WritesDistinguishablePlayerAudit(t *testing.T) 
 		t.Error("expected the simulation audit record to carry the request id, for correlation with request logs")
 	}
 }
+
+// TestSimulateDepositCallback_IntentRevalidatedInDomainTx is ADR 0094
+// §4.1 / code review R-4: the deposit simulation re-validates the intent
+// in the domain transaction (step 3). An intent the provider DECLINES
+// between verification and the domain transaction must not be credited -
+// the redeemed simulated success would otherwise post (the same hole
+// TestSimulateDepositCallback_RejectedForDeclinedDeposit guards at step 1).
+func TestSimulateDepositCallback_IntentRevalidatedInDomainTx(t *testing.T) {
+	pool, issuer := testEnv(t)
+	orchestrator, mockProvider := newMockOrchestrator()
+	srv := newFinancialTestServerWithMockSettlement(t, pool, issuer, orchestrator)
+	tenant := mustCreateTenant(t, pool)
+	brand := mustCreateBrand(t, pool, tenant)
+	mustRegisterCapability(t, pool, tenant.ID, mockProvider)
+	player := mustRegisterPlayer(t, srv, brand.Slug)
+	mustActivatePlayer(t, pool, tenant.ID, player.ID)
+
+	const depositAmount int64 = 4321
+	resp := postJSON(t, srv, "/v1/me/deposits", player.Tokens.AccessToken, map[string]any{
+		"asset_code": "EUR", "amount": depositAmount, "payment_method": "card", "idempotency_key": uuid.NewString(),
+	})
+	var intent depositIntentResponse
+	decodeBody(t, resp, &intent)
+	providerRef := providerReferenceFromRedirectURL(intent.RedirectURL)
+
+	// Between the phases, the provider declines the deposit through its
+	// real (verified) webhook.
+	depositSimulationBetweenPhasesHook = func(uuid.UUID) {
+		decline := mockProvider.CallbackPayload(tenant.ID, payments.CallbackEventDeposit, providerRef, "",
+			payments.OutcomeDeclined, depositAmount, "EUR", "insufficient_funds", false)
+		req, err := http.NewRequest(http.MethodPost, srv.URL+"/v1/webhooks/payments/"+tenant.Slug+"/mock", bytes.NewReader(decline.Body))
+		if err != nil {
+			t.Errorf("build decline webhook: %v", err)
+			return
+		}
+		req.Header.Set("Content-Type", "application/json")
+		for k, vs := range decline.Header {
+			for _, v := range vs {
+				req.Header.Add(k, v)
+			}
+		}
+		r, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Errorf("decline webhook: %v", err)
+			return
+		}
+		_ = r.Body.Close()
+		if r.StatusCode >= 300 {
+			t.Errorf("decline webhook status %d", r.StatusCode)
+		}
+	}
+	defer func() { depositSimulationBetweenPhasesHook = nil }()
+
+	resp = postJSON(t, srv, "/v1/me/deposits/"+intent.ID+"/simulate-callback", player.Tokens.AccessToken, map[string]any{})
+	_ = resp.Body.Close()
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		t.Fatalf("a deposit declined between verification and the domain transaction must not be settled by the simulation (status %d)", resp.StatusCode)
+	}
+	if got := ledgerTransactionCountForProviderRef(t, pool, tenant.ID, providerRef); got != 0 {
+		t.Fatalf("%d ledger transactions for a deposit declined between the phases, want 0", got)
+	}
+	resp = getJSON(t, srv, "/v1/me/deposits/"+intent.ID, player.Tokens.AccessToken)
+	var reread depositIntentResponse
+	decodeBody(t, resp, &reread)
+	if reread.Status != "declined" {
+		t.Fatalf("the deposit must stay 'declined', got %q", reread.Status)
+	}
+}

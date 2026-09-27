@@ -314,10 +314,6 @@ func (w *isoWorld) bet(it *isoTenant, ref string, amount int64) isoResult {
 	return w.post("casino", it, "mock-casino", w.casinoEvent(it, it.casino, casino.CallbackEventBet, ref, "", "round-"+ref, amount))
 }
 
-func (w *isoWorld) win(it *isoTenant, ref, betRef string, amount int64) isoResult {
-	return w.post("casino", it, "mock-casino", w.casinoEvent(it, it.casino, casino.CallbackEventWin, ref, "", "round-"+betRef, amount))
-}
-
 func okStatus(s int) bool { return s >= 200 && s < 300 }
 
 func (w *isoWorld) wantOK(what string, r isoResult) {
@@ -327,6 +323,16 @@ func (w *isoWorld) wantOK(what string, r isoResult) {
 	}
 	if r.latency >= isoBound {
 		w.t.Fatalf("%s took %s, want < %s", what, r.latency, isoBound)
+	}
+}
+
+// wantStatusOK checks outcome only - no latency bound. Main-lane tests use
+// it: wall-clock bounds are admitted only in the isolated timing lane
+// (security ruling (6); code review 18, R-1).
+func (w *isoWorld) wantStatusOK(what string, r isoResult) {
+	w.t.Helper()
+	if r.err != nil || !okStatus(r.status) {
+		w.t.Fatalf("%s: status %d err %v", what, r.status, r.err)
 	}
 }
 
@@ -883,7 +889,8 @@ func TestResolutionIsolation_ConnectionExhaustion(t *testing.T) {
 }
 
 // TestResolutionIsolation_CrossTenant is ADR 0094 §9.3 test 6 (main
-// lane): during A's outage, a body signed with B's warm key delivered to
+// lane; outcome assertions only, no wall-clock bound - code review 18,
+// R-1): during A's outage, a body signed with B's warm key delivered to
 // A's route, and A's key delivered to B's route, are both the uniform 401
 // with 0 writes; A and B share provider id and key id with different
 // secrets and each verifies only under its own tenant; B's traffic never
@@ -893,8 +900,8 @@ func TestResolutionIsolation_CrossTenant(t *testing.T) {
 	a, b := w.newTenant(100_000), w.newTenant(100_000)
 	// (c) before the outage: equal (provider, key id), different secrets,
 	// each verifies only for its own tenant.
-	w.wantOK("A own key", w.bet(a, "ct-a-own", 10))
-	w.wantOK("B own key", w.bet(b, "ct-b-own", 10))
+	w.wantStatusOK("A own key", w.bet(a, "ct-a-own", 10))
+	w.wantStatusOK("B own key", w.bet(b, "ct-b-own", 10))
 	aLedger, bLedger := w.ledgerTxCount(a), w.ledgerTxCount(b)
 
 	// Open A's own breaker: three counting failures on three fresh refs
@@ -930,9 +937,9 @@ func TestResolutionIsolation_CrossTenant(t *testing.T) {
 	}
 	// B's own traffic - including a COLD fetch (B's payments ref) while
 	// A's breaker is open - keeps working and never touches A's state.
-	w.wantOK("B cold deposit while A's breaker is open", w.post("payments", b, "mock-psp", w.deposit(b, 100)))
+	w.wantStatusOK("B cold deposit while A's breaker is open", w.post("payments", b, "mock-psp", w.deposit(b, 100)))
 	for i := 0; i < 10; i++ {
-		w.wantOK("B during A's outage", w.bet(b, fmt.Sprintf("ct-b-%d", i), 10))
+		w.wantStatusOK("B during A's outage", w.bet(b, fmt.Sprintf("ct-b-%d", i), 10))
 	}
 	if s := w.sub.Fetcher().BreakerState("memory", a.tenant.ID); s != aState {
 		t.Fatalf("B's requests changed A's breaker %s -> %s", aState, s)
