@@ -548,3 +548,42 @@ Not reviewed:
 - the real-adapter surfaces (none exist)
 
 No penetration testing was done.
+
+---
+
+## Re-verification 5: KYC fix round 5 (`4a05c82`), confirmation of L-1/L-2
+
+- Reviewer: `security` specialist
+- Date: 2026-09-27
+- Reviewed at: `4a05c82`, in a detached worktree, on private DB `sec_rv_kyc_i2_r6` (dropped afterwards).
+- Verdict: **L-1 and L-2 are CLOSED. N-3 still holds. No launch-blocking finding from this series.** KYC-SUBMIT-OUTBOX-1 still blocks registering a real adapter.
+
+### Probe results (real create path plus verified callbacks; staff escalation via `ReviewVerification`)
+
+After a staff `review_required` on B:
+- **`rejected`:** applies, and the withdrawal from the Person's other approved account A is denied. This is the N-3 check.
+- **`expired`:** held, with one held-for-review row.
+- **`expired` → `rejected`:** the rejection applies and A is denied.
+- **`approved` → `expired`:** 2 held rows; distinct outcomes are both recorded.
+- **`approved` ×2:** 1 held row; the redelivery is de-duplicated.
+- **`approved` → `expired` → `approved` → `rejected`:** 2 held rows, B ends `rejected`, and A is denied.
+
+The 9-row N-1/N-1b matrix is unchanged.
+
+### Mutants (each killed)
+
+| Mutant | Killed by |
+|---|---|
+| Gate narrowed back to `approved` only | `..._L1_StaffReviewRequiredThenVendorExpired_HeldForReviewAudited` |
+| Gate widened to all statuses (N-3) | `..._N3_StaffReviewRequiredThenVendorRejected_StillApplies` |
+| De-dup removed | `..._L2_RedeliveredHeldOutcome_DoesNotDuplicateAudit` |
+| De-dup key widened to drop `provider_outcome` | `..._L2_RedeliveredHeldOutcome_DoesNotDuplicateAudit` |
+
+### Can the de-dup suppress a genuinely different outcome?
+
+No. The de-dup key is (tenant, verification, `provider_outcome`), so different held outcomes are always audited. A `rejected` result is never held, so it is never de-duplicated; it always applies with its own `kyc.provider_callback` row.
+
+Residual, informational only:
+- A same-outcome result with a *different reason*, or one arriving in a later staff re-escalation cycle on the same row, is not re-audited.
+- Concurrent redeliveries can race past the EXISTS check, which only produces a harmless duplicate row.
+- Neither affects enforcement.
