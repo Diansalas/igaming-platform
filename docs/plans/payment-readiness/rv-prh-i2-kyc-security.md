@@ -256,3 +256,95 @@ Not re-reviewed:
 - the ADR 0095 prose, beyond the §15.3 wording fix
 
 No penetration testing was done.
+
+---
+
+## Re-verification 2: KYC fix round 2 (`ed6d3e8`, merged at `9324189`)
+
+- Reviewer: `security` specialist
+- Date: 2026-09-27
+- Reviewed at: `9324189`, in a detached worktree.
+- Verdict: **N-1 PARTIALLY CLOSED. The launch block stands.**
+  - The pending, review_required and orphan variants are fixed and test-pinned.
+  - A new sub-finding, **N-1b**, remains: a later `expired` row on the rejected account lifts the rejection. ADR 0096 §20 says it "keeps the deny in force", so this is not what the rule intended.
+- N-2/C5 is **CLOSED**.
+- The ReviewVerification mirror-race CAS and the N5 orphan refusal are **VERIFIED**.
+- PRH-I2 (KYC part) completion is still not blocked by this review. N-1/N-1b is a pre-existing ADR 0096 issue.
+
+### Method
+
+- Database: private DB `sec_rv_kyc_i2_r3`, created via `TEST_ADMIN_DATABASE_URL`, migrated to 105, with `deploy/init-app-role.sql` grants applied (minus `CREATE ROLE igaming`, DB name adapted).
+- Baseline passed: kyc, platform-api and withdrawal, plus `httpserver -run 'KYC|Kyc'`.
+- Probe: an uncommitted probe test. Each case starts with account A approved and account B (same Person) rejected, and confirms a withdrawal from A is denied before the variant runs. B's new rows were created through the real `CreateVerification` path and then driven by a verified callback through `receiveCallbackInTx`, not seeded directly, except where noted as seeded.
+- The worktree and DB were removed afterwards, and the main tree is clean.
+
+### N-1 probe results (withdrawal from A after the variant on B)
+
+| Variant on B, after the rejection | B's new row | Withdrawal from A | Correct? |
+|---|---|---|---|
+| Fresh `CreateVerification` (the original N-1) | `pending` | **denied** | yes (fixed) |
+| Create, then `review_required` callback | `review_required` | **denied** | yes (fixed) |
+| Never-decided orphan | `unverified`/NULL ref | **denied** | yes |
+| Create, then `rejected` callback | `rejected` | **denied** | yes |
+| Create, then `approved` callback (control) | `approved` | allowed | yes (intended lift) |
+| **Create, then `expired` callback** | `expired` | **ALLOWED** | **no (N-1b)** |
+| `expired` row seeded directly | `expired` | **ALLOWED** | **no (N-1b)** |
+| `approved` row whose `expires_at` has lapsed (seeded) | `approved` | allowed | acceptable. A genuine later approval superseded the rejection. A's own expiry is still checked on the primary read. |
+
+### Mutants (each a scripted single edit, reverted afterwards)
+
+| Mutant | Result |
+|---|---|
+| Overlay reverted to the round-1 "latest decided row" predicate | **KILLED**: `..._N1_FreshPendingVerificationDoesNotLiftRejection`, `..._N1_ReviewRequiredDoesNotLiftRejection` |
+| `pending` added to `finalStatusesSQL` | **KILLED** |
+| `expired` removed from `finalStatusesSQL`, i.e. `('approved','rejected')` | **SURVIVED**. The `expired` behaviour is untested. This is also the recommended fix (below). |
+| C5: `RedactedProviderErrorDetail` default returns `err.Error()` | **KILLED**: `TestRedactedProviderErrorDetail_UnclassifiedErrorNeverEchoesRawText` |
+| Handler `create_verification_provider_unavailable` logs `err.Error()` | **KILLED**: `TestKYC_CreateVerificationProviderFailureLog_NeverLeaksRawErrorText` |
+| ReviewVerification CAS predicate `status = $6` neutralised | **KILLED**: `TestReviewVerification_ConcurrentSubmissionDuringReview_ReturnsConflict` |
+| N5 upload orphan guard disabled | **KILLED**: `TestUploadDocument_OrphanVerificationFailsClosed` |
+| N5 submit orphan guard disabled | **KILLED**: `TestSubmitVerification_OrphanVerificationFailsClosed` |
+
+### N-1b: HIGH (latent, PROVIDER DEPENDENT reachability), blocks production launch with N-1
+
+The cause is the overlay's inner subquery: `AND v2.status IN ('approved','rejected','expired')`. The outer query only matches when B's latest final row *is* the rejected row. So any newer `expired` row on B makes the overlay return false, and the rejection is lifted.
+
+ADR 0096 §20 and the `crossAccountRejectedOverlay` comment both claim the opposite: that a later `expired` "simply keeps the deny in force under a fresh terminal row". It does not. An `expired` status means an attempt lapsed. That is not evidence that clears a rejection.
+
+**Reachability:**
+- A player can start a new verification on B at will.
+- Whether that player can then cause the vendor to emit `expired`, for example by abandoning the applicant flow, is PROVIDER DEPENDENT. Many KYC vendors do emit such a status.
+- The mock adapter cannot be driven to `expired` by player action, so this is not reachable in dev today. It becomes reachable as soon as a real adapter maps an abandonment or lapse outcome to `ProviderExpired`.
+
+**Required fix:**
+- Lift a rejection only with a later final `approved`. Use `('approved','rejected')` in the overlay's subquery, or equivalently "a rejected row on another account with no later `approved` row on that account".
+- Add the test `rejected(B) → Create + expired callback on B → withdrawal from approved A still denies`. The dropped-`expired` mutant must then be killed by that test, not survive.
+- Correct the ADR 0096 §20 and code-comment wording.
+
+### Other items
+
+- **Consumer claim: VERIFIED.** `EvaluateEnforcement` dispatches by operation.
+  - `isWithdrawalOperation` covers `withdrawal_hold` (`withdrawal.go:374`) and `withdrawal_payout` (`payments/payout.go`). It goes to `evaluateWithdrawalStructuralRule`, the only caller of `crossAccountRejectedOverlay`.
+  - Deposit (`payments/kycgate.go`) goes to `evaluateDepositThreshold`. Casino and sportsbook play go to `evaluatePlayTrigger`. Neither consults the overlay; both use only the unchanged per-account primary read.
+  - The overlay only runs after the primary outcome is `passed`, so it can only turn an allow into a deny, never the reverse.
+- **N-2/C5: CLOSED.** There is now a unit test and an HTTP-level log-capture test, and both mutants are killed.
+- **ReviewVerification mirror race: VERIFIED.** The UPDATE predicates on the status read at the start of the review. A lost race returns `ErrVerificationStatusConflict`, which maps to 409, so there is no silent overwrite of a concurrent provider transition. The callback path now shares `applyForwardOnlyStatus`, with the same semantics as before.
+- **N5: VERIFIED.** Upload and submit both refuse a verification with no `provider_reference`. The check runs inside the tenant-scoped transaction, after the handler's ownership check, and fails closed with 409.
+- **Informational (LOW, pre-existing):**
+  - Both reads order rows by `created_at`, not by decision time. A rejection decided *after* a newer-created row's approval on the same account is ordered as older. This matters only with overlapping in-flight attempts, and the N5 and single-flight behaviour narrow it. Recorded for identity-compliance; not blocking.
+  - The staff `review_required` → provider `approved` forward move remains a recorded policy item.
+
+### Launch-blocking flags (updated)
+
+- **N-1b** blocks production launch; the rest of N-1 is closed.
+- **KYC-SUBMIT-OUTBOX-1** still blocks registering a real KYC adapter.
+- N-2 no longer blocks anything.
+
+### Scope
+
+In scope: the `ed6d3e8` diff to `internal/kyc/{enforcement,provider,document_service,verification_service}.go` and to `internal/httpserver/kyc_{handlers,admin_handlers}.go`, plus their tests, and ADR 0096 §20 as far as it describes the overlay.
+
+Not re-reviewed:
+- the rest of ADR 0096/0095
+- payments, casino and sportsbook, beyond confirming their `EvaluateEnforcement` operations
+
+No penetration testing was done.
