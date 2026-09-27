@@ -65,6 +65,7 @@ func assertRLSViolation(t *testing.T, err error) {
 type casinoFixture struct {
 	tenantID        uuid.UUID
 	brandID         uuid.UUID
+	personID        uuid.UUID
 	playerAccountID uuid.UUID
 	walletID        uuid.UUID
 }
@@ -75,6 +76,7 @@ func seedCasinoFixture(t *testing.T, pool *db.Pool) casinoFixture {
 	t.Helper()
 	f := casinoFixture{tenantID: uuid.New(), brandID: uuid.New(), playerAccountID: uuid.New()}
 	personID := uuid.New()
+	f.personID = personID
 
 	// Stage 4I Phase E-SECURITY (migration 0077): `tenants` writes now
 	// require a genuinely platform-admin-scoped transaction.
@@ -105,6 +107,17 @@ func seedCasinoFixture(t *testing.T, pool *db.Pool) casinoFixture {
 			`INSERT INTO player_accounts (id, tenant_id, brand_id, person_id, email, password_hash, status)
 			 VALUES ($1, $2, $3, $4, $5, 'x', 'active')`,
 			f.playerAccountID, f.tenantID, f.brandID, personID, f.playerAccountID.String()+"@example.com"); err != nil {
+			return err
+		}
+		// ADR 0096 §3.2 point 1 (PRH-I3): a small number of this package's
+		// own tests call withdrawal.RequestWithdrawal directly (racing a
+		// bet against a withdrawal) - seed an approved verification so
+		// those tests exercise their own (unrelated) behavior rather than
+		// universally hitting the new withdrawal KYC gate.
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO kyc_verifications (id, tenant_id, brand_id, player_account_id, person_id, status, provider_id)
+			 VALUES ($1, $2, $3, $4, $5, 'approved', 'mock')`,
+			uuid.New(), f.tenantID, f.brandID, f.playerAccountID, personID); err != nil {
 			return err
 		}
 		w, err := wallet.GetOrCreate(ctx, tx, f.tenantID, f.brandID, f.playerAccountID, "EUR")

@@ -200,13 +200,50 @@ func mustCreateDepositIntent(t *testing.T, pool *db.Pool, orchestrator *payments
 // mustCreateWithdrawalRequest creates a WithdrawalRequest directly (not
 // through HTTP) for a player who is NOT the one under test. The wallet
 // must already have sufficient available balance (see fundWallet).
+// mustApproveKYCForWithdrawal seeds an approved kyc_verifications row for
+// playerAccountID - ADR 0096 §3.2 point 1 (PRH-I3) requires this before
+// ANY withdrawal request can succeed, and this end-to-end HTTP test's own
+// registration flow (mustRegisterPlayer) does not itself run a
+// verification.
+func mustApproveKYCForWithdrawal(t *testing.T, pool *db.Pool, tenantID, brandID, playerAccountID uuid.UUID) {
+	t.Helper()
+	err := pool.WithTenant(context.Background(), tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		account, err := identity.GetPlayerAccountByID(ctx, tx, playerAccountID)
+		if err != nil {
+			return err
+		}
+		_, err = tx.Exec(ctx,
+			`INSERT INTO kyc_verifications (id, tenant_id, brand_id, player_account_id, person_id, status, provider_id)
+			 VALUES ($1, $2, $3, $4, $5, 'approved', 'mock')`,
+			uuid.New(), tenantID, brandID, playerAccountID, account.PersonID)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("approve kyc for withdrawal: %v", err)
+	}
+}
+
 func mustCreateWithdrawalRequest(t *testing.T, pool *db.Pool, tenantID, brandID, playerAccountID, walletID uuid.UUID, assetCode string, amount int64) withdrawal.WithdrawalRequest {
 	t.Helper()
 	var wr withdrawal.WithdrawalRequest
 	err := pool.WithTenant(context.Background(), tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		var err error
+		account, err := identity.GetPlayerAccountByID(ctx, tx, playerAccountID)
+		if err != nil {
+			return err
+		}
+		// ADR 0096 §3.2 point 1 (PRH-I3): every withdrawal now requires a
+		// passed, unexpired verification. This helper is used by tests
+		// exercising unrelated behavior (cross-player/cross-tenant access
+		// control, not KYC), so it seeds one directly rather than making
+		// every caller aware of the new gate.
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO kyc_verifications (id, tenant_id, brand_id, player_account_id, person_id, status, provider_id)
+			 VALUES ($1, $2, $3, $4, $5, 'approved', 'mock')`,
+			uuid.New(), tenantID, brandID, playerAccountID, account.PersonID); err != nil {
+			return err
+		}
 		wr, err = withdrawal.RequestWithdrawal(ctx, tx, withdrawal.RequestParams{
-			TenantID: tenantID, BrandID: brandID, PlayerAccountID: playerAccountID, WalletID: walletID,
+			TenantID: tenantID, BrandID: brandID, PlayerAccountID: playerAccountID, PersonID: account.PersonID, WalletID: walletID,
 			AssetCode: assetCode, Amount: amount, IdempotencyKey: uuid.NewString(),
 		})
 		return err
@@ -654,7 +691,9 @@ func TestFinancialHappyPath_EndToEnd(t *testing.T) {
 		t.Fatalf("expected cash/available balance %d after deposit, got cash=%d available=%d", depositAmount, walletResp.CashBalance, walletResp.AvailableBalance)
 	}
 
-	// Withdrawal.
+	// Withdrawal - ADR 0096 §3.2 point 1 (PRH-I3) requires a passed KYC
+	// verification for every withdrawal, from the first one onward.
+	mustApproveKYCForWithdrawal(t, pool, tenant.ID, brand.ID, player.ID)
 	const withdrawalAmount int64 = 4000
 	resp = postJSON(t, srv, "/v1/me/withdrawals", player.Tokens.AccessToken, map[string]any{
 		"asset_code": "EUR", "amount": withdrawalAmount, "idempotency_key": uuid.NewString(),

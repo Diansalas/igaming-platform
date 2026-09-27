@@ -39,6 +39,7 @@ func testPool(t *testing.T) *db.Pool {
 type fixture struct {
 	tenantID        uuid.UUID
 	brandID         uuid.UUID
+	personID        uuid.UUID
 	playerAccountID uuid.UUID
 	walletID        uuid.UUID
 	cashAccountID   uuid.UUID
@@ -57,6 +58,7 @@ func seedFixture(t *testing.T, pool *db.Pool, initialBalance int64) fixture {
 		playerAccountID: uuid.New(),
 	}
 	personID := uuid.New()
+	f.personID = personID
 
 	// Stage 4I Phase E-SECURITY (migration 0077): `tenants` writes now
 	// require a genuinely platform-admin-scoped transaction.
@@ -89,6 +91,21 @@ func seedFixture(t *testing.T, pool *db.Pool, initialBalance int64) fixture {
 			`INSERT INTO player_accounts (id, tenant_id, brand_id, person_id, email, password_hash, status)
 			 VALUES ($1, $2, $3, $4, $5, 'x', 'active')`,
 			f.playerAccountID, f.tenantID, f.brandID, personID, f.playerAccountID.String()+"@example.com"); err != nil {
+			return err
+		}
+		// ADR 0096 §3.2 point 1 (PRH-I3): every withdrawal now requires the
+		// player's current, latest verification to be `passed` and
+		// unexpired. This fixture seeds one `approved`, non-expiring
+		// verification so every OTHER pre-existing withdrawal test in this
+		// package - none of which are testing KYC - continues to exercise
+		// its own behavior rather than universally hitting the new KYC
+		// gate. Tests that specifically exercise the KYC gate seed their
+		// own, different verification state instead (see
+		// kyc_enforcement_integration_test.go).
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO kyc_verifications (id, tenant_id, brand_id, player_account_id, person_id, status, provider_id)
+			 VALUES ($1, $2, $3, $4, $5, 'approved', 'mock')`,
+			uuid.New(), f.tenantID, f.brandID, f.playerAccountID, personID); err != nil {
 			return err
 		}
 		f.walletID = uuid.New()
@@ -155,11 +172,11 @@ func requestWithdrawal(t *testing.T, pool *db.Pool, f fixture, amount int64, ide
 		wr, err = RequestWithdrawal(ctx, tx, RequestParams{
 			TenantID:        f.tenantID,
 			BrandID:         f.brandID,
-			PlayerAccountID: f.playerAccountID,
-			WalletID:        f.walletID,
-			AssetCode:       "EUR",
-			Amount:          amount,
-			IdempotencyKey:  idemKey,
+			PlayerAccountID: f.playerAccountID, PersonID: f.personID,
+			WalletID:       f.walletID,
+			AssetCode:      "EUR",
+			Amount:         amount,
+			IdempotencyKey: idemKey,
 		})
 		return err
 	})
