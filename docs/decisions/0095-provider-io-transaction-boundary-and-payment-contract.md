@@ -245,9 +245,11 @@ Mapping of the human's vocabulary:
   by every claim, T2/T1p/T12). `first_submitted_at` gates deferred receipts (S95-C3);
   `last_sent_at` measures the not-found window (LF95-C8(b)).
 - `next_action_at`: when the sweeper should look. NULL when terminal.
-- `last_evidence_kind`, one of `sync | callback | query_status | sweeper | operator | platform`,
-  written in the **same UPDATE** as every state change and read by the guard trigger
-  (LF95-C2). The transition's audit record carries the same value.
+- `last_evidence_kind`, one of `sync | callback | query_status | sweeper | operator | platform |
+  legacy`, written in the **same UPDATE** as every state change and read by the guard trigger
+  (LF95-C2). The transition's audit record carries the same value. `legacy` exists only on rows
+  written by the 0101 backfill (`CHECK (last_evidence_kind <> 'legacy' OR legacy_backfill)`), and
+  no application write can produce it (§13.1 INSERT and UPDATE guards).
 - `interactive`: from the manifest. True means a player must be present to use the result, for
   example a redirect URL.
 - `legacy_backfill`: true only for rows created by the 0101 backfill (§13.1). T12 is forbidden on
@@ -266,7 +268,7 @@ The "Allowed from" column is exactly the CAS predicate. Every transition sets
 | T1+T2 | ∅ → `submitting` | Player path: `InitiateDeposit` phase A inserts the intent and attempt 1 and claims it in **one** tx, after RG, the KYC deposit gate (ADR 0096) and the in-statement kill-switch predicate | Player-request driver | INSERT with `state='submitting'` guarded by the same predicates as T2 (the kill switch is evaluated in the INSERT … SELECT … WHERE NOT EXISTS statement) | Intent inserted, status `pending` | `deposit.requested`, `payment.attempt_claimed` |
 | T1p | ∅ → `submitting` | Payout claim, the **payout KYC hook** (§5.2): withdrawal `approved→submitted` in the **same** tx, after the KYC gate and with the kill-switch predicate in the claim statement | Eligible staff (submit endpoint) | Withdrawal CAS `state='approved'` under L1 `FOR UPDATE`; `UNIQUE(withdrawal_request_id)`; `NOT EXISTS` engaged switch | Withdrawal → `submitted` (`provider_id` set, `provider_reference` NULL) | `withdrawal.dispatch_claimed`, `withdrawal.submit.http` (staff) |
 | W-KYC | withdrawal `approved` → `rejected` (**no attempt**) | ADR 0096 `DenyForCompliance`: the payout KYC gate denies in T1p's phase-A tx, before the T1p CAS | System, inside the staff submit request | Withdrawal `state='approved'` under the same L1 lock as T1p, so the two are mutually exclusive by lock | Hold reversal per ADR 0096 (`withdrawal_rejected`, key `<id>:kyc_denied`); no attempt, no call | `withdrawal.rejected_kyc` (ADR 0096) |
-| T2 | `created` → `submitting` | Claim for the call. Runs in a **per-item** tx that locks the parent first and re-evaluates, in that tx: the tenant capability row; the kill switch (inside the CAS statement); for a deposit, RG and the KYC deposit gate (LF95-C10(e)); for a payout, the payout KYC gate (LF95-C10(b)) | Player-request driver (resume) or sweeper | `state='created' AND (provider_id IS NULL OR provider_id=$p) AND NOT EXISTS(engaged switch, same tenant_id) AND NOT EXISTS(succeeded attempt for the same intent)`; sets `provider_id`, `claim_token`, `lease_until`, `submit_count+1`, `last_sent_at`, and `first_submitted_at` if NULL | none. A non-pass of a gate claims nothing and makes no call: a deposit goes to T3 (`rg_ineligible`/`kyc_required`); a payout stays `created` with a compliance escalation (T16-style), and its hold is released only by M3 (`kyc_denied`), never automatically. | `payment.attempt_claimed` / `payment.attempt_claim_denied` |
+| T2 | `created` → `submitting` | Claim for the call. Runs in a **per-item** tx whose order is fixed by ADR 0082 R8 (RV-0095 ledger N1). **Deposit:** first `rg.EvaluateEligibility` (takes the L0.4 RG person advisory) and the KYC deposit gate (plain reads), **then** the parent `FOR UPDATE`, then the attempt, then the CAS (LF95-C10(e)). **Payout:** parent `FOR UPDATE`, attempt, then the payout KYC gate (it takes no lock, so it may follow the row locks), then the CAS (LF95-C10(b)). In both, the tenant capability row is re-read and the kill switch is evaluated inside the CAS statement. | Player-request driver (resume) or sweeper | `state='created' AND (provider_id IS NULL OR provider_id=$p) AND NOT EXISTS(engaged switch, same tenant_id) AND NOT EXISTS(succeeded attempt for the same intent)`; sets `provider_id`, `claim_token`, `lease_until`, `submit_count+1`, `last_sent_at`, and `first_submitted_at` if NULL | none. A non-pass of a gate claims nothing and makes no call: a deposit goes to T3 (`rg_ineligible`/`kyc_required`); a payout stays `created` with a compliance escalation (T16-style, `next_action_at` = the escalated cadence, §7.3, so the sweeper does not re-gate every lease period), and its hold is released only by M3 (`kyc_denied`), never automatically. A later **pass** resumes dispatch through this same T2; that is safe because `created` was never sent, and it is mutually exclusive with M3 by the withdrawal lock (RV-0095 ledger L2). | `payment.attempt_claimed` / `payment.attempt_claim_denied` |
 | T3 | `created` → `rejected` | Pre-call refusal (kill switch for deposits, unsupported, no route, credential exhausted, presence window expired, gate deny for a deposit), or `intent_succeeded` (LF95-C6(c)) | Driver, sweeper, or the T7/T13 tx | `state='created'` | Deposit: intent projection recomputed (§5.1). Payout: only via M3 (§4.8). | `payment.attempt_rejected` (+reason) |
 | T4 | `submitting` → `pending` | Sync `Pending` with a reference | Phase C | `state='submitting'` | Sets `provider_reference`, `accepted_at`; applies deferred receipts (§6.4); withdrawal `provider_reference` set | `payment.attempt_accepted` |
 | T5 | `submitting` → `created` | `ErrorClassNotSent` on a first send (provably not dispatched: credential unavailable, gate refusal, connection refused before write), or a `NotProcessed` code the vendor documents as leaving no trace (§8) | Phase C (same claimant) | `state='submitting' AND claim_token=$t AND NOT ever_possibly_sent` | `next_action_at` = backoff | `payment.attempt_not_sent` |
@@ -276,8 +278,9 @@ The "Allowed from" column is exactly the CAS predicate. Every transition sets
 | T9 | `ambiguous` → `pending` | Evidence that the provider holds it and has not finished | Callback or sweeper | `state='ambiguous'` | Sets `provider_reference` if it was unknown; applies deferred receipts (§6.4) | `payment.attempt_accepted` |
 | T10 | `submitting`/`pending`/`ambiguous` → `disputed` | Mismatched success (amount, asset or reference), a provider-reference conflict (§6.1), or a tombstone preceding the success (LF95-C6(d)) | Any evidence path. The state change is **committed** with its receipt, whatever HTTP code is returned (LF95-C3). | `state = ANY('{submitting,pending,ambiguous}')` | none; P1 | `payment.attempt_disputed` |
 | T11 | `pending` → `ambiguous` | Explicit "unknown" or not-found evidence for an accepted attempt (the provider forgot it) | Sweeper | `state='pending'` | none; P1 anomaly | `payment.attempt_ambiguous` |
-| T12 | `ambiguous` → `submitting` | Idempotent resubmission of the **same** attempt with the **same** key. Only if the manifest has `IdempotentSubmission=true`, `submit_count < max_resubmits` and `NOT legacy_backfill`. For a payout the per-item tx re-runs the payout KYC gate first; a non-pass means no resend and the attempt stays `ambiguous`, resolvable only by poll or callback (LF95-C10(c)). | Sweeper (per-item tx, parent locked first) | `state='ambiguous' AND submit_count < $max AND NOT legacy_backfill AND NOT EXISTS(engaged switch)`; new `claim_token`, lease, `last_sent_at` | none | `payment.attempt_resubmitted` |
-| T13 | `declined` → `succeeded` | **Deposit only.** Verified matching success from the attempt's own provider after a decline, with a provider reference | Callback or sweeper | `state='declined' AND operation='deposit'` | Flow 1 posted to `player_cash` (the money is real; LF-Q1 ruling), linked on the attempt; the intent's link is left alone if already set; intent → `succeeded`; any sibling `created` attempt → `rejected` (T3, `intent_succeeded`); P1 `contradictory_provider_outcome`. If another attempt of the intent is already `succeeded`, also P1 `multiple_success_for_intent`. A sibling already `submitting` is a stated residual under the same P1 (§20). Tombstone → T10 instead. | `payment.attempt_succeeded_after_decline` |
+| T12 | `ambiguous` → `submitting` | Idempotent resubmission of the **same** attempt with the **same** key. Only if the manifest has `IdempotentSubmission=true`, `submit_count < max_resubmits` and `NOT legacy_backfill`. For a payout the per-item tx re-runs the payout KYC gate first; a non-pass means no resend and the attempt stays `ambiguous`, resolvable only by poll or callback (LF95-C10(c)). | Sweeper (per-item tx, parent locked first) | `state='ambiguous' AND submit_count < $max AND NOT legacy_backfill AND NOT EXISTS(engaged switch)`, and for a deposit also `NOT EXISTS(succeeded attempt for the same intent)` (RV-0095 ledger N3: a paid intent is never re-sent; the attempt stays `ambiguous`, resolved by poll or callback only); new `claim_token`, lease, `last_sent_at` | none | `payment.attempt_resubmitted` |
+| T13 | `declined` → `succeeded` | **Deposit only.** Verified matching success from the attempt's own provider after a decline, with a provider reference | Callback or sweeper | `state='declined' AND operation='deposit'` | Flow 1 posted to `player_cash` (the money is real; LF-Q1 ruling), linked on the attempt; the intent's link is left alone if already set; intent → `succeeded`; any sibling `created` attempt → `rejected` (T3, `intent_succeeded`); P1 `contradictory_provider_outcome`. If another attempt of the intent is already `succeeded`, also P1 `multiple_success_for_intent`. A sibling already `submitting` is a stated residual under the same P1 (§20). If a tombstone already holds `(provider_id, provider_reference)`: **T13t** instead. | `payment.attempt_succeeded_after_decline` |
+| T13t | `declined` → `disputed` | **Deposit only.** Verified matching success after a decline, but a reversal tombstone already holds `(provider_id, provider_reference)` (LF95-C6(d); RV-0095 ledger). | Callback or sweeper | `state='declined' AND operation='deposit'`; `terminal_reason='reversal_tombstone_precedes_success'` | **No posting, no error**: committed terminally, so there is no trigger rejection and no 5xx loop; P1; the attempt sits in the M1 queue. | `payment.attempt_disputed` |
 | T14 | `declined` → `disputed` | **Payout only.** Success evidence after `withdrawal.Fail` released the hold (a double payout has already happened) | Callback or sweeper | `state='declined' AND operation='payout'` | none; P1 | `payment.attempt_disputed` |
 | T15 | `created`/`rejected` → `disputed` | Success evidence **from the attempt's own `provider_id`** for an attempt the platform never sent (adapter misclassification or a hostile verified sender). Evidence from any other provider, or for an attempt with a NULL `provider_id`, is an `anomaly` receipt with **no** state change (S95-C1). | Callback | `state = ANY('{created,rejected}') AND provider_id = $verified_provider` | **Nothing posted**; P1 | `payment.attempt_disputed` |
 | T16 | (no state change) escalation | `pending`/`ambiguous`/`submitting` older than the manifest `SettlementWindow`, or a payout `created` blocked by a gate | Sweeper | `escalated_at IS NULL` | Sets `escalated_at`; poll cadence drops to the escalated rate; alert | `payment.attempt_escalated` |
@@ -290,6 +293,7 @@ The "Allowed from" column is exactly the CAS predicate. Every transition sets
 - `rejected → *`, except T15;
 - `succeeded → *` (a reversal is a separate ledger fact, §5.4);
 - `disputed → *`, except M1/M2;
+- `declined → disputed`, except T13t (deposit) and T14 (payout);
 - `ambiguous → declined` with `last_evidence_kind='operator'`;
 - any `*→declined` for a payout unless `last_evidence_kind ∈ {sync, callback, query_status}`;
 - any `→succeeded` unless `last_evidence_kind ∈ {sync, callback, query_status}`;
@@ -325,13 +329,14 @@ state; columns are the evidence outcome. Every cell is also audited.
 | `pending` | no-op (reschedule) | T7 (tombstone → T10) | T10 | T8 | no-op | T11 |
 | `ambiguous` | T9 | T7 (tombstone → T10) | T10 | T8 | no-op (reschedule) | §4.5 |
 | `succeeded` | no-op | no-op (duplicate; the ledger is idempotent) | P1 anomaly, receipt `anomaly`, no change | P1 anomaly (a reversal needs a reversal event), no change | no-op | P1 anomaly |
-| `declined` | no-op | deposit T13 (tombstone → P1 anomaly, no change) / payout T14 | P1 anomaly | no-op | no-op | no-op |
+| `declined` | no-op | deposit T13 (tombstone → T13t `disputed`, no posting) / payout T14 | P1 anomaly | no-op | no-op | no-op |
 | `rejected` | anomaly log | T15 | T15 | no-op | no-op | no-op |
 | `disputed` | recorded only | recorded only | recorded only | recorded only | recorded only | recorded only |
 
 - "Tombstone" means a ledger tombstone already holds `(provider_id, provider_reference)` because
   a reversal arrived first. The cell is terminal `disputed` (`reversal_tombstone_precedes_success`,
-  P1), with no posting and no error, never a rollback, 5xx and re-poll loop (LF95-C6(d)).
+  P1): T10 from `submitting`/`pending`/`ambiguous`, T13t from a deposit's `declined`. There is no
+  posting and no error, never a rollback, 5xx and re-poll loop (LF95-C6(d)).
 - Evidence that carries a `provider_reference` different from a non-NULL
   `attempt.provider_reference` is a *reference mismatch*. It is T10 from a non-terminal state,
   otherwise a P1 anomaly.
@@ -441,7 +446,7 @@ All operations share these properties. Idempotency is DB-enforced. Audit goes in
 | Intent | `deposit_intents` row (unchanged table, status set unchanged). Its status is a projection of its attempts, updated in the same tx as every attempt transition, evaluated in this order: any `succeeded` → `succeeded` (sticky); any `disputed` (and no `succeeded`) → `ambiguous`, never `declined`, because funds may have been captured (LF95-C7); a live attempt that is `ambiguous` → `ambiguous`; any other live attempt → `pending`; none live → `declined`. `failed` stays unused. RG denial keeps today's behaviour: intent → `declined` with `rg_ineligible:*` and no attempt, in phase A. A KYC deposit deny (ADR 0096) is the same shape. |
 | Ledger link (LF95-C6(a)) | Every deposit posting is linked on `payment_attempts.ledger_transaction_id`. `deposit_intents.ledger_transaction_id` is written only while it is NULL (the migration 0082 trigger already forbids repointing it), so it keeps pointing at the **first** posting. Bonus deposit detection (`internal/bonus/deposit_sweep.go`) therefore sees only the first capture; `bonus-engine` confirms that is intended (LF95-R2, §20). |
 | Provider reference | `payment_attempts.provider_reference`: set once by T4, T7 or T9, bounded by `PROVIDER_REF_MAX` (0099), and unique per `(tenant, provider_id)`. `deposit_intents.provider_id/provider_reference` keep mirroring the latest routed attempt for existing readers; `TestMigration0082_DepositIntentsProviderColumnsStayMutable` must keep passing, and a new test asserts the mirror through a cascade (P95-C1). |
-| Idempotency keys | **Player:** `UNIQUE(tenant, player, idempotency_key)` on the intent (exists). A retry **resumes**: it returns the intent; if its live attempt is `created`, the retry drives it (T2 CAS in a per-item tx that re-runs RG and the KYC deposit gate, so concurrent retries yield exactly one claimant and a stale eligibility is never reused); if `submitting`/`pending`/`ambiguous`, it returns the status (the redirect URL is not persisted; it is re-obtained only by T12 when `IdempotentSubmission`). **External:** `external_idempotency_key = "pa:" + attempt.id`, `merchant_reference = attempt.id` (INV-IO-3). **Ledger:** `(tenant, provider_id, provider_tx_id = provider_reference)` plus `idempotency_key = provider_id:provider_reference` (exists). |
+| Idempotency keys | **Player:** `UNIQUE(tenant, player, idempotency_key)` on the intent (exists). A retry **resumes**: it returns the intent; if its live attempt is `created`, the retry drives it (T2 CAS in a per-item tx that first re-runs RG and the KYC deposit gate, then locks the intent and attempt, per ADR 0082 R8; concurrent retries yield exactly one claimant and a stale eligibility is never reused); if `submitting`/`pending`/`ambiguous`, it returns the status (the redirect URL is not persisted; it is re-obtained only by T12 when `IdempotentSubmission`). **External:** `external_idempotency_key = "pa:" + attempt.id`, `merchant_reference = attempt.id` (INV-IO-3). **Ledger:** `(tenant, provider_id, provider_tx_id = provider_reference)` plus `idempotency_key = provider_id:provider_reference` (exists). |
 | Flow (player request) | Phase A0 (read-only tx): load candidates → health filter **outside** the tx (§9.6) → pick a provider. Phase A (**one** tx): RG check and the ADR 0096 KYC deposit gate (a deny commits the intent as `declined` with no attempt) → insert intent plus attempt 1 directly in `submitting` (T1+T2, kill-switch predicate inside the INSERT statement) → commit. There is therefore no player-path `created` row; `created` exists only for cascade rows and NotSent reverts (LF95-C12, CP-D1). Phase B: resolve credential, `Deposit(CallContext, req)`. Phase C: `applyEvidence` (T4/T6/T8/T7), with a synchronous cascade loop (§4.6), each step its own A/B/C. The handler no longer wraps the call in `WithTenant`; `InitiateDeposit` takes `*db.Pool` (INV-IO-1a). |
 | State / retryability | §4.3. `NotSent` → T5 (the driver retries within its request budget, else the sweeper takes over if non-interactive; for an interactive attempt the player sees "temporarily unavailable" and the attempt expires via T3). `Ambiguous` → T6, never cascaded, T12 only if the manifest allows it. |
 | Callback | §6. Resolution by `(provider_id, provider_reference)` **or** `merchant_reference`, both bound to the verified provider (INV-IO-14). Accepted in `submitting`. |
@@ -650,7 +655,7 @@ These are `payment_attempts` rows with `next_action_at <= now()`:
 
 | State | Sweeper action |
 |---|---|
-| `created`, `interactive = false`, or any payout | route if `provider_id IS NULL` (A0) → per-item tx: lock parent, lock attempt, re-run gates (deposit: RG + KYC deposit gate; payout: payout KYC gate), T2 with the in-statement kill-switch predicate → commit → resolve credential → call → C. A payout gate non-pass leaves the attempt `created` with a compliance escalation (M3 only). |
+| `created`, `interactive = false`, or any payout | route if `provider_id IS NULL` (A0) → per-item tx in the T2 order of §4.3 (deposit: RG + KYC deposit gate **before** the parent and attempt locks; payout: parent and attempt locks, then the payout KYC gate), T2 with the in-statement kill-switch predicate → commit → resolve credential → call → C. A payout gate non-pass leaves the attempt `created` with a compliance escalation (M3 only). |
 | `created`, `interactive = true`, older than `presence_window` | T3 (`expired_before_submission`) |
 | `submitting`, `lease_until < now()` | `QueryStatus` (§5.3) → matrix; `not_found` → §4.5 |
 | `pending` | `QueryStatus` → matrix; still pending → backoff; past the horizon → T16 |
@@ -673,8 +678,12 @@ first. Deferred receipts still unresolved after the `SettlementWindow` raise the
    changes a state, never reads or locks a parent row and never waits on a lock (SKIP LOCKED
    only). Commit.
 3. **Per-item claim tx (state-changing items).** For `created` (T2/T3) and `ambiguous` (T12)
-   items: lock the parent, then the attempt, re-check the lease owner, run the gates, run the CAS
-   with its in-statement predicates → commit. For polls no claim tx is needed.
+   items. The order follows ADR 0082 R8, because advisory locks precede row locks:
+   - (deposit only) run RG (L0.4) and the KYC deposit gate;
+   - lock the parent, then the attempt;
+   - re-check the lease owner;
+   - (payout only) run the payout KYC gate;
+   - run the CAS with its in-statement predicates → commit. For polls no claim tx is needed.
 4. **Calls.** Each item runs outside any tx, bounded by: a global concurrency cap; a
    per-(tenant, provider) concurrency cap; a per-call deadline shorter than `lease / 2`; and
    the breaker (§9.6).
@@ -894,37 +903,120 @@ and is unchanged.
 
 `payment_kill_switches(tenant_id, provider_scope TEXT ('*' or provider_id), operation_scope
 ('deposit' | 'payout' | '*'), engaged BOOLEAN, engaged_by_scope ('platform' | 'tenant'),
-reason_code, changed_by, changed_at, version)`. It has `UNIQUE(tenant_id, provider_scope,
-operation_scope)`, `FORCE RLS` with policies that also require `app.player_account_id` unset
-(ADR 0093 A1 pattern), CAS on `version`, and every change audited (actor, tenant, before/after,
-IP, UA, reason code). Every engage also raises an alert, not only an audit row (S95-C7).
+release_request_id, reason_code, changed_by, changed_by_scope, changed_at, version)`. It has:
 
-`payment_kill_switch_release_requests` supports four-eyes release (§10.4). A guard trigger on
-`payment_kill_switches` makes the four-eyes release structural (S95-C5):
+- `UNIQUE(tenant_id, provider_scope, operation_scope)`;
+- CAS on `version`;
+- every change audited (actor, actor scope, target tenant, before/after, IP, UA, reason code);
+- an alert on every engage, not only an audit row (S95-C7).
 
-1. `DELETE` is rejected, so "missing row = not engaged" cannot be produced by deleting an
-   engaged row.
-2. `engaged` true→false is allowed only in the same transaction that moves a
-   `payment_kill_switch_release_requests` row `open→approved` with `expected_version =
-   OLD.version`, an approver distinct from the requester, and an unexpired request.
-3. `version` is strictly monotonic. A re-engage between request and approval invalidates the
+RLS is two policy families (§10.2.1), both requiring `app.player_account_id` unset.
+`payment_kill_switch_release_requests` supports four-eyes release (§10.4).
+
+#### 10.2.1 Who the database believes the actor is (S95-C7, RV-0095 N2/N3)
+
+No actor or scope column is trusted from the application. BEFORE INSERT/UPDATE triggers on both
+0102 tables **force** `changed_by`/`changed_by_scope`, `requested_by`/`requested_by_scope` and
+`approved_by`/`approved_by_scope` from the session. Client values are ignored (the ADR 0093 A1
+B5 pattern). The session scope is derived as follows:
+
+| Session scope | Required GUCs | Principal check (trigger, as migration 0044 does) |
+|---|---|---|
+| `tenant` | `app.tenant_id` set, `app.principal_id` set (the `WithPrincipalScope` shape), `app.player_account_id` unset, `app.platform_admin_principal_id` unset | `app.principal_id` resolves to a `staff_users` row with `tenant_id = app.tenant_id` |
+| `platform` | `app.platform_admin_principal_id` set (the `WithPlatformAdmin` shape), `app.tenant_id` and `app.player_account_id` unset | the principal resolves to a `staff_users` row with `tenant_id IS NULL` |
+| anything else | — | the trigger raises; nothing is written |
+
+A `'platform'` value can therefore appear in any scope column only from a genuine platform
+session. A tenant connection cannot write it.
+
+**RLS policies (both 0102 tables):**
+
+- **Tenant family:** `tenant_id = app.tenant_id`, with `app.player_account_id` and
+  `app.platform_admin_principal_id` unset. SELECT, INSERT and UPDATE; no DELETE.
+- **Platform family:** the migration 0075 precedent: `app.platform_admin_principal_id` set, and
+  `app.tenant_id` and `app.player_account_id` unset. SELECT, INSERT and UPDATE on any tenant's
+  rows (the target tenant is the row's `tenant_id`, taken from the platform route path, §10.5);
+  no DELETE; no `FOR ALL`.
+  - `WithPlatformAdmin` sets no `app.tenant_id`, so without this family a platform transaction
+    would see and write zero rows.
+  - The platform family is never visible to the claim path. Claims run under the tenant context,
+    where the platform policy's `app.tenant_id IS NULL` condition is false. The claim reads every
+    switch row of its own tenant, including platform-engaged ones, through the tenant SELECT
+    policy.
+
+#### 10.2.2 Guard trigger on `payment_kill_switches` (S95-C5, RV-0095 N1/N4)
+
+1. **`DELETE` is rejected.** "Missing row = not engaged" can therefore never be produced by
+   deleting an engaged row.
+2. **Scope is immutable (N1).** `id`, `tenant_id`, `provider_scope` and `operation_scope` can
+   never change after INSERT. Re-scoping an engaged row would be a single-actor release, so a
+   scope change is always a new row.
+3. **`version` is strictly monotonic.** A re-engage between request and approval invalidates the
    request through the version.
+4. **`engaged` false→true (engage).** `engaged_by_scope` is forced to the session scope, and
+   `release_request_id` is forced to NULL.
+5. **`engaged` true→true (re-engage or reason update).**
+   - `engaged_by_scope` may go `tenant→platform` (platform takes over a containment).
+   - It may **never** go `platform→tenant` (N2(b)).
+   - A tenant-scope session may not UPDATE a row whose `OLD.engaged_by_scope = 'platform'` at
+     all, so a tenant cannot bump its version either.
+6. **`engaged` true→false (release, N4).** `NEW.release_request_id` must reference, through the
+   composite FK `(tenant_id, release_request_id)`, a request with all of these:
+   - `kill_switch_id = id`;
+   - `status = 'approved'`;
+   - `expected_version = OLD.version`;
+   - `approved_by <> requested_by`;
+   - `now() < expires_at`;
+   - `decided_txid = txid_current()`, i.e. approved **in this very transaction**.
 
-A release request is one-shot and expires (`RECOMMENDATION` 24 h). A platform-wide,
-cross-tenant switch is **not built**; it is PROV-REVOKE-ALL-1, deferred. Its interim form is
-a platform principal engaging each tenant's `'*'` row through the existing `WithPlatformAdmin`
-pattern, with audit; such rows carry `engaged_by_scope = 'platform'` (§10.4).
+   If `OLD.engaged_by_scope = 'platform'`, the request's `requested_by_scope` and
+   `approved_by_scope` must both be `'platform'`. The same request can never release twice: it
+   is bound to one version, and the release bumps `version`.
+7. **`release_request_id` is written only by transition 6.** It is forced to NULL on engage and
+   is otherwise immutable.
+
+**Release-request guard trigger:**
+
+- Status moves only `open→approved|cancelled|expired`.
+- `created_at`, `decided_at` and `decided_txid` (= `txid_current()` at the `open→approved`
+  UPDATE) are forced.
+- `expires_at` is forced to `≤ created_at + 24 h`.
+- `requested_by*`/`approved_by*` come from the session (§10.2.1).
+- Approval is refused when the approver's session scope is not `'platform'` but the switch has
+  `engaged_by_scope = 'platform'`.
+- There is no DELETE.
+
+The approve endpoint performs the approval and the release UPDATE in one transaction; a request
+approved in any earlier transaction can never release.
+
+A platform-wide, cross-tenant switch is **not built**; it is PROV-REVOKE-ALL-1, deferred. Its
+interim form is a platform principal engaging each tenant's `'*'` row through the platform
+routes (§10.5).
 
 ### 10.3 Semantics
 
 **Engaged means no new outbound submission for the scope.**
 
-- It is evaluated **inside the claim statement itself** (T1+T2, T2, T1p, T12) as a `NOT EXISTS
-  (SELECT 1 FROM payment_kill_switches k WHERE k.tenant_id = payment_attempts.tenant_id AND
+- It is evaluated **inside the claim statement itself** (T1+T2, T2, T1p, T12) as a
+  `NOT EXISTS (SELECT 1 FROM payment_kill_switches k WHERE k.tenant_id = <attempt tenant> AND
   k.engaged AND k.provider_scope IN ('*', $provider) AND k.operation_scope IN ('*', $op))`
-  subquery, under the same RLS context as the CAS (S95-C6). A misbound or unset tenant context
-  therefore claims zero attempts: the claim can never succeed with the switch skipped. There is
-  no time-of-check/time-of-use gap. The in-flight window is at most one already-claimed call.
+  subquery, under the same RLS context as the claim (S95-C6).
+  - For the UPDATE forms (T2, T12), `<attempt tenant>` is `payment_attempts.tenant_id`.
+  - For the INSERT … SELECT forms (T1+T2, T1p), it is the tenant value being inserted.
+
+  There is no time-of-check/time-of-use gap. The in-flight window is at most one
+  already-claimed call.
+- **Why a misbound context fails closed (RV-0095 L1).** Every claim form writes
+  `payment_attempts`. That table's only write policy is `tenant_staff_scope`: `app.tenant_id`
+  equal to the row, `app.player_account_id` unset. The switch table's tenant SELECT policy has
+  the same GUC predicate.
+  - Any context that would see zero switch rows cannot write an attempt either. That covers a
+    wrong tenant, an unset tenant, a player-scoped session and a platform session.
+  - The claim therefore claims nothing and makes no call.
+  - **This coupling is binding.** Adding any other write policy to `payment_attempts` (for
+    example a player-scoped INSERT) is forbidden unless the claim predicate is re-reviewed by
+    `security`. §16.2 item 20 pins it: T1+T2 run under a player-scoped context fails and calls
+    nothing.
 - Deposits: `created` attempts are moved to `rejected` (T3, `kill_switch`) and the player sees
   "unavailable".
 - Payouts: `created` attempts are **left** in `created`. Their holds stay; they are neither
@@ -933,41 +1025,73 @@ pattern, with audit; such rows carry `engaged_by_scope = 'platform'` (§10.4).
 - **Never stopped:** callbacks, `QueryStatus` polls, postings of existing exposure, and
   reconciliation.
 - **Fail-safe:** the switch row is read in the claim tx, so any read error aborts the claim and
-  no call is made. A missing row means "not engaged", which is the only non-engaged encoding.
-  There is no cache: the switch is read from the DB on every claim and never from Redis.
+  no call is made. A missing row means "not engaged", which is the only non-engaged encoding,
+  and DELETE is impossible (§10.2.2). There is no cache: the switch is read from the DB on every
+  claim and never from Redis.
 
 ### 10.4 Authority
 
-- The switch is exposed only on the staff admin API. Permissions are
-  `payments_kill_switch:engage` and `payments_kill_switch:release`, enforced server-side and
-  scoped by tenant. It is never exposed on a player route; a route-table test asserts this.
+- The switch is exposed only on the staff admin API (tenant scope) and the platform admin API
+  (platform scope, §10.5). It is never exposed on a player route; a route-table test asserts
+  this.
 - **Engage:** a single actor with a reason code. That is the safe direction, mirroring ADR
   0093 §3 "single actor on disabling".
 - **Release:** four-eyes, ruled by `security` (§22.1) and not relaxed. The request is created by
-  one principal and approved by a **distinct** one, reusing the ADR 0093 A1 request-binding
-  shape; the §10.2 trigger enforces it in the database.
-- **Platform-engaged switches** (`engaged_by_scope = 'platform'`) can be released only by
-  platform principals, requester and approver both. Tenant staff of a B2B operator cannot undo a
-  platform containment (S95-C7).
-- The full route and permission list for the new staff surface is in §10.5.
+  one principal and approved by a **distinct** one. The switch row carries the consumed request
+  id, following the ADR 0093 A1 binding shape (§10.2.2 point 6). The database enforces it.
+- **Platform-engaged switches** (`engaged_by_scope = 'platform'`, derived from the session, never
+  asserted by the application) can be released only by platform principals, requester and
+  approver both. Tenant staff of a B2B operator can neither release nor downgrade a platform
+  containment (S95-C7).
+- A platform principal cannot act through the tenant API, and a tenant principal cannot act
+  through the platform API.
 
-### 10.5 New and changed staff routes (S95-C13)
+### 10.5 New and changed staff and platform routes (S95-C13)
 
-| Route (staff admin API only) | Permission | Notes |
+**Tenant staff admin API:**
+
+| Route (tenant staff admin API) | Permission | Notes |
 |---|---|---|
-| Kill switch engage | `payments_kill_switch:engage` | Single actor, reason code |
-| Kill switch release request / approve / cancel, and list | `payments_kill_switch:release` (list: `payments_kill_switch:read`) | Four-eyes; platform-engaged switches only by platform principals |
+| Kill switch engage | `payments_kill_switch:engage` | Single actor, reason code; refused on a platform-engaged row (§10.2.2 point 5) |
+| Kill switch release request / approve / cancel | `payments_kill_switch:release` | Four-eyes. Approve = approval plus release in one tx. Refused on platform-engaged rows. |
+| Kill switch list and read | `payments_kill_switch:read` | Shows platform-engaged rows as read-only |
 | T17 re-verify | `payments_attempt:reverify` | Sets `next_action_at` only; never calls a provider inline, so it cannot bypass the sweeper caps |
 | Attempt and receipt read | `payments_attempt:read` | Read-only, RLS-scoped |
 | M3 abandon | Today's withdrawal-resolve eligibility plus a reason code | CAS `state='created' AND NOT ever_possibly_sent` in SQL and trigger |
 | Withdrawal submit and resolve (rewritten) | Existing permissions and eligibility | §5.2 |
 
-For every route: never reachable with a player principal or on a player or public route (the
-route-table test asserts it); permissions enforced server-side and tenant-scoped from the
-authenticated context, with no tenant id taken from the path or body; object lookups run under
-RLS, and another tenant's id returns 404, never data; every mutation writes audit (actor,
-tenant, entity, before/after, IP, UA, reason code). The request/response shapes are pinned in
-OpenAPI with a conformance test (§16.2 item 20).
+For every tenant route:
+
+- It is never reachable with a player principal or on a player or public route; the route-table
+  test asserts it.
+- Permissions are enforced server-side and tenant-scoped from the authenticated context. No
+  tenant id is taken from the path or body.
+- The transaction runs under `WithPrincipalScope(tenant, principal)`.
+- Object lookups run under RLS, and another tenant's id returns 404, never data.
+- A platform-scoped principal is refused with 403.
+
+**Platform admin API** (platform admin surface only; RV-0095 N3):
+
+| Route | Permission | Notes |
+|---|---|---|
+| Engage for a target tenant: `…/platform/tenants/{tenantId}/payments/kill-switches` | `platform_payments_kill_switch:engage` | Single platform actor, reason code; `engaged_by_scope='platform'` is forced by the trigger |
+| Release request / approve / cancel for a target tenant | `platform_payments_kill_switch:release` | Four-eyes between two distinct platform principals; approve = approval plus release in one tx |
+| List and read for a target tenant | `platform_payments_kill_switch:read` | — |
+
+Rules for the platform routes:
+
+- **Target-tenant rule.** On these routes, and only here, the target tenant comes from the path.
+  - It is valid only for a platform-scoped principal: the token subject resolves to a
+    `staff_users` row with `tenant_id IS NULL`.
+  - The handler verifies that the tenant exists, then runs `WithPlatformAdmin(principal)`.
+  - All reads and writes are explicitly predicated on `tenant_id = {tenantId}`, under the
+    platform RLS family (§10.2.1).
+  - A tenant-scoped principal gets 403 (or 404) and nothing is read.
+- **Audit.** Every mutation writes audit with both the actor (platform principal) and the target
+  tenant, plus before/after, IP, UA and reason code. Every engage alerts.
+
+**For both surfaces:** the request/response shapes are pinned in OpenAPI with a conformance test
+(§16.2 item 20).
 
 ---
 
@@ -1054,6 +1178,11 @@ sent) and matched by no line:
 | `pay_missing_platform_record` | A `deposit` or `withdrawal_completed` ledger transaction in the window, carrying a `provider_id`, that maps to no `succeeded` attempt (or to more than one) |
 | `pay_status_mismatch` | A `succeeded` attempt without exactly one ledger transaction whose `(provider_id, provider_tx_id)` is the deposit's `provider_reference` or the payout's Step B settlement reference |
 
+Join paths (RV-0095 ledger L4):
+- **Deposit:** `payment_attempts.ledger_transaction_id`.
+- **Payout:** `payment_attempts.withdrawal_request_id → withdrawal_requests.release_ledger_transaction_id`
+  (migration 0026), with `transaction_type = 'withdrawal_completed'`.
+
 These rules make the reconciliation key the **ledger's** `(provider_id, provider_tx_id)`, as
 reconciliation-model §2.2 requires, not only the attempt row.
 
@@ -1133,6 +1262,7 @@ CREATE TABLE payment_attempts (
   interactive              BOOLEAN NOT NULL,
   legacy_backfill          BOOLEAN NOT NULL DEFAULT false,                      -- LF95-C11(c)
   CHECK (payment_method <> 'legacy_unknown' OR legacy_backfill),
+  CHECK (last_evidence_kind <> 'legacy' OR legacy_backfill),                     -- RV-0095 ledger N2
   merchant_reference       TEXT NOT NULL,       -- = id::text (INV-IO-3); for backfilled rows id = the parent id
   external_idempotency_key TEXT NOT NULL,       -- = 'pa:' || id::text (never sent for legacy rows; T12 forbidden)
   provider_reference       TEXT NULL CHECK (octet_length(provider_reference) <= PROVIDER_REF_MAX /* from 0099 */),
@@ -1182,6 +1312,12 @@ CREATE INDEX idx_payment_attempts_due ON payment_attempts (tenant_id, next_actio
 --     interactive, legacy_backfill, merchant_reference, external_idempotency_key, first_submitted_at once set;
 --     provider_id, provider_reference and ledger_transaction_id NULL→value once;
 --     ever_possibly_sent false→true only; submit_count and last_sent_at monotonic.
+-- payment_attempts_insert_guard (BEFORE INSERT; RV-0095 ledger N2): the only INSERT shapes are T1 ('created'),
+--   T1+T2 and T1p ('submitting'). It requires NEW.state IN ('created','submitting'), NOT NEW.legacy_backfill,
+--   NEW.last_evidence_kind <> 'legacy', NOT NEW.ever_possibly_sent, NEW.ledger_transaction_id IS NULL,
+--   NEW.provider_reference IS NULL. Created in migration 0101 AFTER the backfill statement has run, so no
+--   session-setting escape exists: `legacy` rows can come only from the migration's own backfill.
+-- The UPDATE guard likewise never lets legacy_backfill or last_evidence_kind become 'legacy'.
 -- payment_attempts_no_delete (BEFORE DELETE): RAISE.
 
 CREATE TABLE payment_provider_events (   -- verified callback receipts (INV-IO-10)
@@ -1204,8 +1340,8 @@ CREATE TABLE payment_provider_events (   -- verified callback receipts (INV-IO-1
   attempt_id UUID NULL REFERENCES payment_attempts(id),   -- one-shot NULL→value
   resolution TEXT NULL CHECK (resolution IN ('applied','anomaly_cross_provider','anomaly_reference_conflict',
       'anomaly_predates_submission','anomaly_other')),     -- one-shot NULL→value (S95-C3)
-  resolved_at TIMESTAMPTZ NULL,                            -- one-shot NULL→value
-  received_at TIMESTAMPTZ NOT NULL DEFAULT now(),          -- DB clock
+  resolved_at TIMESTAMPTZ NULL,                            -- one-shot NULL→value; forced to now() by trigger (RV-0095 L3)
+  received_at TIMESTAMPTZ NOT NULL DEFAULT now(),          -- forced to now() by BEFORE INSERT trigger; client values ignored (L3)
   UNIQUE (tenant_id, provider_id, event_fingerprint)
 );
 CREATE INDEX payment_provider_events_unresolved ON payment_provider_events (tenant_id, provider_id, provider_reference)
@@ -1217,8 +1353,27 @@ CREATE INDEX payment_provider_events_unresolved ON payment_provider_events (tena
 ```
 
 **Backfill with pre-flight (LF95-C11; synthetic/dev data only, but correct regardless).** The
-backfill writes **no ledger row**. It runs as one migration transaction; the pre-flight
-aborts, listing the offending ids, before any write, and never coerces.
+backfill writes **no ledger row**. It runs as one migration transaction, in this order:
+create the tables and the UPDATE guard, run the pre-flight, run the backfill INSERTs, then
+create the INSERT guard (RV-0095 ledger N2). The pre-flight aborts, listing the offending ids,
+before any write, and never coerces.
+
+**Columns set on every backfilled row (RV-0095 ledger N4):**
+
+- `amount`/`asset_code`: the parent's own amount and asset, never re-derived.
+- `next_action_at`: `now()` for every non-terminal row (`pending`/`ambiguous`), so the sweeper
+  polls it; NULL for terminal rows.
+- `first_submitted_at`: the parent's `created_at` (intent `created_at`, withdrawal
+  `requested_at`). That is the earliest instant a genuine callback could describe, so every
+  genuine receipt qualifies under §6.4.
+- `last_sent_at`: the migration's `now()`. That is the latest plausible send, so not-found
+  authority (§4.5) is delayed by a full Δ and is never premature.
+- `interactive`: `true` for deposits (the §10.1 "unknown means true" default), so an async
+  decline of a legacy intent finalizes it and never cascades unattended. `false` for payouts.
+- `ever_possibly_sent`: `true` for every backfilled payout, and for every deposit that has a
+  `provider_id`.
+- `excluded_provider_ids`: `'{}'`. This is not needed, because legacy rows never cascade.
+- `last_evidence_kind`: `'legacy'`.
 
 | Source row | Backfilled attempt |
 |---|---|
@@ -1229,7 +1384,7 @@ aborts, listing the offending ids, before any write, and never coerces.
 | intent `declined`/`failed` | state `declined` (`failed` maps to `declined`), `cascadable = false`; with no `provider_id`: state `rejected` |
 | `withdrawal_requests` `submitted` | `id = withdrawal.id`; state `pending` (the reference is already set; **pre-flight abort** if it is NULL) |
 | `completed` | `succeeded` |
-| `failed` | `declined`, `last_evidence_kind = 'legacy'` (the trigger accepts `legacy` only in the migration's own session setting; application code cannot write it) |
+| `failed` | `declined`, `last_evidence_kind = 'legacy'` (possible only because the INSERT guard is created after the backfill; application code can never write `legacy`) |
 | `reversed` | `succeeded` (it was omitted before; LF95-C11(d)) |
 | withdrawal `payment_method` | `withdrawal_requests` has no such column, so every backfilled payout gets the sentinel `'legacy_unknown'`, allowed only with `legacy_backfill` (LF95-C11(e)); nothing is invented |
 
@@ -1247,27 +1402,55 @@ application-level meaning changes (§4.7).
 ```sql
 CREATE TABLE payment_kill_switches (
   id UUID PRIMARY KEY, tenant_id UUID NOT NULL,
-  provider_scope TEXT NOT NULL,                       -- '*' or a provider_id (charset per webhookauth.ValidProviderID)
-  operation_scope TEXT NOT NULL CHECK (operation_scope IN ('deposit','payout','*')),
+  provider_scope TEXT NOT NULL,                       -- '*' or a provider_id (charset per webhookauth.ValidProviderID); immutable
+  operation_scope TEXT NOT NULL CHECK (operation_scope IN ('deposit','payout','*')),   -- immutable (N1)
   engaged BOOLEAN NOT NULL,
-  engaged_by_scope TEXT NOT NULL CHECK (engaged_by_scope IN ('platform','tenant')),   -- S95-C7
+  engaged_by_scope TEXT NOT NULL CHECK (engaged_by_scope IN ('platform','tenant')),   -- forced from the session (N2)
+  release_request_id UUID NULL,                       -- the consumed release request (N4, ADR 0093 A1 shape)
   reason_code TEXT NOT NULL CHECK (octet_length(reason_code) BETWEEN 1 AND 64),
-  changed_by UUID NOT NULL, changed_at TIMESTAMPTZ NOT NULL, version BIGINT NOT NULL,
-  UNIQUE (tenant_id, provider_scope, operation_scope));
+  changed_by UUID NOT NULL,                           -- forced from the session principal
+  changed_by_scope TEXT NOT NULL CHECK (changed_by_scope IN ('platform','tenant')),   -- forced from the session
+  changed_at TIMESTAMPTZ NOT NULL,                    -- forced (now())
+  version BIGINT NOT NULL,
+  UNIQUE (tenant_id, provider_scope, operation_scope),
+  UNIQUE (tenant_id, id),                             -- target of the requests' composite FK (L4)
+  UNIQUE (release_request_id));                       -- one request releases at most once (N4)
 CREATE TABLE payment_kill_switch_release_requests (
-  id UUID PRIMARY KEY, tenant_id UUID NOT NULL, kill_switch_id UUID NOT NULL REFERENCES payment_kill_switches(id),
-  expected_version BIGINT NOT NULL, requested_by UUID NOT NULL, requested_by_scope TEXT NOT NULL,
+  id UUID PRIMARY KEY, tenant_id UUID NOT NULL, kill_switch_id UUID NOT NULL,
+  FOREIGN KEY (tenant_id, kill_switch_id) REFERENCES payment_kill_switches (tenant_id, id),       -- L4: no cross-tenant reference
+  UNIQUE (tenant_id, id),
+  expected_version BIGINT NOT NULL,
+  requested_by UUID NOT NULL,                                                        -- forced from the session
+  requested_by_scope TEXT NOT NULL CHECK (requested_by_scope IN ('platform','tenant')),   -- forced (N2)
   reason_code TEXT NOT NULL CHECK (octet_length(reason_code) BETWEEN 1 AND 64),
-  approved_by UUID NULL CHECK (approved_by IS DISTINCT FROM requested_by), approved_by_scope TEXT NULL,
+  approved_by UUID NULL CHECK (approved_by IS DISTINCT FROM requested_by),          -- forced from the session
+  approved_by_scope TEXT NULL CHECK (approved_by_scope IN ('platform','tenant')),  -- forced (N2)
   status TEXT NOT NULL CHECK (status IN ('open','approved','cancelled','expired')),
-  expires_at TIMESTAMPTZ NOT NULL, created_at TIMESTAMPTZ NOT NULL, decided_at TIMESTAMPTZ NULL);
+  created_at TIMESTAMPTZ NOT NULL,                                                   -- forced
+  expires_at TIMESTAMPTZ NOT NULL,                                                   -- forced <= created_at + 24 h
+  CHECK (expires_at <= created_at + interval '24 hours'),
+  decided_at TIMESTAMPTZ NULL, decided_txid BIGINT NULL,                             -- forced at open→approved (N4)
+  CHECK ((status = 'approved') = (approved_by IS NOT NULL AND decided_txid IS NOT NULL)));
+ALTER TABLE payment_kill_switches ADD FOREIGN KEY (tenant_id, release_request_id)
+  REFERENCES payment_kill_switch_release_requests (tenant_id, id);                  -- N4 (deferrable not needed: request row exists first)
 CREATE UNIQUE INDEX ON payment_kill_switch_release_requests (kill_switch_id) WHERE status = 'open';
--- payment_kill_switches_guard (S95-C5, S95-C7): no DELETE; version strictly monotonic;
---   engaged true→false only if, in the same transaction, a release request for this row moved
---   open→approved with expected_version = OLD.version, approved_by <> requested_by, now() < expires_at,
---   and, when OLD.engaged_by_scope = 'platform', requested_by_scope = approved_by_scope = 'platform'.
--- release_requests guard: one-shot status transitions (open→approved|cancelled|expired only); no DELETE.
--- Both tables: FORCE RLS, tenant policies also require app.player_account_id unset.
+-- Session-actor derivation (§10.2.1): a shared trigger function computes (principal, scope) from
+--   app.tenant_id + app.principal_id (tenant) or app.platform_admin_principal_id with app.tenant_id unset
+--   (platform), verifies the staff_users row (tenant_id = app.tenant_id, or tenant_id IS NULL) as migration
+--   0044 does, raises on any other shape, and overwrites every *_by / *_by_scope column with it.
+-- payment_kill_switches_guard (§10.2.2): no DELETE; id, tenant_id, provider_scope, operation_scope immutable;
+--   version strictly monotonic; engage forces engaged_by_scope := session scope and release_request_id := NULL;
+--   while engaged, engaged_by_scope never platform→tenant, and a tenant session may not UPDATE a
+--   platform-engaged row; true→false requires NEW.release_request_id → request with kill_switch_id = id,
+--   status 'approved', expected_version = OLD.version, approved_by <> requested_by, now() < expires_at,
+--   decided_txid = txid_current(), and (OLD.engaged_by_scope = 'platform' ⇒ both request scopes 'platform');
+--   release_request_id is otherwise immutable.
+-- release_requests guard: status only open→approved|cancelled|expired; created_at, expires_at, decided_at,
+--   decided_txid forced; approval refused for a non-platform approver when the switch is platform-engaged; no DELETE.
+-- RLS, both tables (FORCE): tenant family (tenant_id = app.tenant_id; app.player_account_id and
+--   app.platform_admin_principal_id unset) and platform family (migration 0075 precedent:
+--   app.platform_admin_principal_id set; app.tenant_id and app.player_account_id unset); each SELECT, INSERT,
+--   UPDATE only; no DELETE policy; no FOR ALL.
 -- No manifest table: the manifest is code-declared (ADR 0022 §2.1). History of switch changes = audit_log.
 ```
 
@@ -1329,11 +1512,18 @@ CREATE TABLE payment_statement_lines (
   - payout evidence: withdrawal `FOR UPDATE` → attempt CAS → L3 → L4;
   - payout claim and W-KYC: withdrawal `FOR UPDATE` (L1) → KYC gate reads → (`DenyForCompliance`
     posting: L3 → L4) or (attempt INSERT);
+  - deposit T2 per-item claim (sweeper and player resume; RV-0095 ledger N1): RG
+    `EvaluateEligibility` (L0.4 person advisory) and KYC deposit gate reads → intent `FOR UPDATE`
+    → attempt CAS. It never takes an advisory lock after a row lock (R8). The player T1+T2 phase A
+    already runs RG before its INSERTs;
+  - payout T2/T12 per-item claim: withdrawal `FOR UPDATE` → attempt → payout KYC gate (no lock)
+    → CAS;
   - cascade insert: while holding intent and attempt, insert attempt n+1. The partial unique
     index is the only wait, and it is a key the concurrent contender needs under the same
     intent lock, so there is no cycle.
 - **Harness** (LF95-C9(e)). The §16.2 item 16 harness adds the sweeper lease and claim racing a
-  callback and phase C on the same intent and on the same withdrawal.
+  callback and phase C on the same intent and on the same withdrawal, and the sweeper deposit T2
+  re-claim racing an RG self-exclusion write for the same person (RV-0095 ledger N1).
 - **No lock is held across I/O.** This is the whole point of the ADR. The L1 lock that
   `LockApprovedForSubmission` held across `Withdraw` today is removed.
 
@@ -1482,13 +1672,27 @@ timing-based fault injection is used anywhere except the one intentional excepti
     - Revoke between two calls: the second call is refused.
     - Rotation: the second call uses the new fingerprint and the derived token is evicted.
     - Store outage gives T5 with no breaker count.
-    - A reflection test: no registered adapter struct (payments, casino, KYC) has a field of
-      type `OutboundCredential`, `secretstore.Secret`, `[]byte` named `*secret*`/`*key*`, or an
-      `*http.Client` with a non-nil default authenticator.
+    - The recursive reflection test of §11 (RV-0095 L2, superseding the earlier name- and
+      type-based check). It walks **constructed** registered adapter values (payments, casino,
+      KYC) through pointers, structs, slices, maps, interfaces and unexported fields. It fails
+      on any `OutboundCredential`, `secretstore.Secret`, `httpclient.Authenticator` or derived
+      token, and on func-typed fields that are not allow-listed.
+    - The static test: no package-level variable of those types in adapter packages, and no
+      adapter package importing `secretstore` or the Fetcher.
+    - Binding checks each alone:
+      - a `Domain` mismatch (for example a `casino` credential on a payments call) is `NotSent`
+        with no call;
+      - with a **non-checking fake adapter**, the gate alone refuses a tenant, provider or
+        domain mismatch;
+      - with the gate check **bypassed** (test seam), a conforming adapter alone refuses it.
+
+      This proves that neither check alone is load-bearing (S95-C8(b)).
     - Redaction of `CallContext` in logs, errors and JSON.
 16. **Lock order.** ADR 0082 harness extended with deposit-evidence and payout-evidence paths
-    racing reversal, `RequestWithdrawal`, `Reject` and `Fail` on the same wallet. No deadlock
-    across 500 iterations (existing harness style).
+    racing reversal, `RequestWithdrawal`, `Reject` and `Fail` on the same wallet, plus the §14
+    harness additions (sweeper claim versus callback and phase C; deposit T2 re-claim versus an
+    RG self-exclusion write for the same person). No deadlock across 500 iterations (existing
+    harness style).
 17. **State-machine exhaustiveness.** A table-driven test drives every (state, evidence) cell of
     §4.4 and every forbidden transition of §4.3 via direct SQL, which the trigger must reject.
 18. **Casino and KYC.**
@@ -1515,6 +1719,18 @@ timing-based fault injection is used anywhere except the one intentional excepti
       CP-W8) and (d) no release after possible dispatch; (e) a deposit T2 resume re-runs RG and
       the KYC deposit gate.
     - `NotSent` on a T12 resend returns to `ambiguous`, never `created` (LF95-C1).
+    - **T13t** (RV-0095 ledger C6(d)): an attempt in `declined` receives a matching success
+      whose reference is held by a reversal tombstone. It is committed as `disputed`, with no
+      posting, no trigger rejection and no 5xx; a redelivery is a no-op.
+    - **T12 with a succeeded sibling** (N3): after T13 on attempt 1, an `ambiguous` attempt 2 is
+      never re-sent (MOCK call count unchanged) and stays `ambiguous`.
+    - **INSERT guard** (N2): each forbidden INSERT shape (direct `succeeded`, `declined`,
+      `disputed`, `pending`; `legacy_backfill = true`; `last_evidence_kind = 'legacy'`;
+      `ever_possibly_sent = true`; a non-NULL `ledger_transaction_id` or `provider_reference`) is
+      refused, including under an arbitrary session GUC.
+    - **Payout T2 gate non-pass cadence** (L2): the attempt is re-gated at the escalated cadence,
+      not every lease period; a later pass resumes via T2; the M3 path audits `kyc_denied`
+      (L3).
     - A reversal of a T13 second capture reverses the second capture, not the first
       (LF95-C6(b)).
     - `P95-C1`: `TestMigration0082_DepositIntentsProviderColumnsStayMutable` keeps passing, and
@@ -1526,7 +1742,35 @@ timing-based fault injection is used anywhere except the one intentional excepti
     - A player token → 401/403 on every new route (route table plus one live request each).
     - A release requester approving their own request is refused by the application **and**
       the CHECK; a direct `UPDATE engaged=false` or `DELETE` is refused by the trigger (S95-C5).
-    - A platform-engaged switch cannot be released by tenant principals (S95-C7).
+    - **Kill-switch guard (RV-0095 N1–N4, L3, L4), each by direct SQL as well as through the
+      API:**
+      - A direct UPDATE of `provider_scope`, `operation_scope` or `tenant_id` on an engaged row
+        is refused (N1).
+      - A release whose `release_request_id` names a request approved in an **earlier**
+        transaction, a request for a different switch, an expired request, or a request whose
+        `expected_version` is stale is refused. Reusing a consumed request is refused (N4).
+      - Client-supplied `requested_by`, `approved_by`, `changed_by` and `*_by_scope` values are
+        ignored and replaced from the session. A tenant connection cannot write `'platform'` in
+        any scope column. A session with neither shape (for example player-scoped, or both GUCs
+        set) cannot write either table (N2).
+      - A tenant re-engage or UPDATE of a platform-engaged row is refused, and
+        `engaged_by_scope` never goes `platform→tenant` (N2).
+      - `expires_at` beyond `created_at + 24 h` is refused, and client `decided_at`/`decided_txid`
+        values are ignored (N4).
+      - A release request referencing another tenant's switch id is refused by the composite FK
+        (L4).
+      - A client-supplied `received_at` or `resolved_at` on a receipt is replaced by the DB
+        clock (L3).
+    - A platform-engaged switch cannot be released by tenant principals, and a tenant-principal
+      pair cannot release it even if the application asserts `'platform'` (S95-C7).
+    - **Platform routes (N3):**
+      - a platform principal pair engages and releases a target tenant's switch through the
+        platform API, under `WithPlatformAdmin` and the platform RLS family;
+      - a tenant principal gets 403/404 on every platform route and nothing is read;
+      - a platform principal gets 403 on every tenant route;
+      - audit carries both the actor and the target tenant.
+    - **Claim-path coupling (L1):** T1+T2 run under a player-scoped context, and under a
+      platform session, fails and makes no provider call.
     - A cross-provider, same-tenant merchant-reference callback gives no posting and no state
       change, including for `created`/`rejected` targets (S95-C1); cross-tenant is pinned too.
     - The claim under a misbound or unset tenant context claims nothing and calls nothing
@@ -1536,8 +1780,8 @@ timing-based fault injection is used anywhere except the one intentional excepti
     - Deferred-receipt cap → 503 above the cap, nothing stored; a receipt predating
       `first_submitted_at` is not applied (S95-C2, S95-C3).
     - The four 200 dispositions return byte-identical bodies apart from the request id (S95-C4).
-    - OpenAPI conformance for the §10.5 routes (kill switch engage/release/approve/list, T17
-      re-verify, M3, attempt read): request/response shapes pinned, OpenAPI diff checked in CI
+    - OpenAPI conformance for the §10.5 routes on both surfaces (tenant and platform kill-switch
+      engage/release/approve/list, T17 re-verify, M3, attempt read): request/response shapes pinned, OpenAPI diff checked in CI
       (QA change 4).
     - The adapter conformance suite asserts no payer-identifying vendor field reaches
       `CallbackEvent`, `StatusResult` or a statement line (S95-C10).
@@ -1551,6 +1795,9 @@ timing-based fault injection is used anywhere except the one intentional excepti
     - Backfill over a fixture with a pre-existing violation (two live attempts; a non-terminal
       intent with NULL `provider_id`; a `succeeded` intent with NULL `ledger_transaction_id`)
       aborts, lists the ids, and writes nothing.
+    - A backfilled `ambiguous` intent is picked up by the next sweep and converges by
+      `QueryStatus`; a non-terminal intent without a reference is backfilled as `ambiguous`
+      (its own named fixture); backfilled rows carry the N4 column values (RV-0095 ledger N4).
     - Backfill over clean synthetic data produces exactly the §13.1 mapping, including
       `reversed` withdrawals, `id = parent id`, `legacy_backfill = true` and
       `'legacy_unknown'`; a legacy merchant-reference callback resolves; T12 on a legacy row is
@@ -1607,6 +1854,12 @@ timing-based fault injection is used anywhere except the one intentional excepti
 | MX15 | Drop the `provider_id = verified provider` predicate from merchant-reference resolution (INV-IO-14, S95-C1) | 20 (cross-provider) |
 | MX16 | Remove the `last_evidence_kind` trigger check (LF95-C2) | 17 |
 | MX17 | Drop the kill-switch release trigger (S95-C5) | 20 (direct `UPDATE`/`DELETE`) |
+| MX19 | Remove scope-column immutability from the switch guard (RV-0095 N1) | 20 (re-scope an engaged row) |
+| MX20 | Accept a client-supplied `*_by_scope` value (RV-0095 N2) | 20 (tenant writes `'platform'`) |
+| MX21 | Drop the `decided_txid = txid_current()` check (RV-0095 N4) | 20 (earlier-tx approval) |
+| MX22 | Remove the `payment_attempts` INSERT guard (RV-0095 ledger N2) | 19 (forbidden INSERT shapes) |
+| MX23 | Drop the succeeded-sibling predicate from T12 (RV-0095 ledger N3) | 19 (T12 with a succeeded sibling) |
+| MX24 | Run the deposit gates after the parent lock (RV-0095 ledger N1) | 16 (RG self-exclusion race; lock-order static check) |
 | MX18 | Drop the `received_at >= first_submitted_at` rule (S95-C3) | 20 (pre-submission receipt) |
 
 Every INV-IO row now has at least one mutation and a named failing test (QA change 1).
@@ -2812,4 +3065,44 @@ These are escalated or deferred, and none is silently dropped:
 | LEDGER-MANUAL-ADJ-4EYES-1 (compensation mechanism) | Registry item, not built; remediation of `disputed` and of several `pay_*` kinds is BLOCKED on it |
 | ADR 0096 naming of the T2-reclaim → M3 route | Owner `identity-compliance` (§27.5) |
 | Re-verification of LF95-C10 against ADR 0096's landed revision | Owner `ledger-finance` (LF95-C10(f)) |
+
+### 27.8 Revision 3 — security re-verification RV-0095 (`docs/plans/payment-readiness/rv-0095-security-reverify.md`)
+
+Security closed S95-C1, C6 and C8 at design level. It found the kill switch (C5, C7, C13) still
+open, with findings N1–N4 and Lows L1–L4. All are written into the text as follows:
+
+| ID | Where satisfied |
+|---|---|
+| N1 (C5): re-scoping an engaged row is a single-actor release | §10.2.2 point 2 (`id`, `tenant_id`, `provider_scope`, `operation_scope` immutable); §13.2 guard; §16.2 item 20; MX19 |
+| N2 (C7): app-written, mutable scope columns | §10.2.1 (actor and scope forced from the session and verified against `staff_users` as migration 0044 does; CHECK enums on every scope column); §10.2.2 point 5 (never `platform→tenant`; no tenant UPDATE of a platform-engaged row); §13.2; §16.2 item 20; MX20 |
+| N3 (C7 + C13): platform path unbuildable, no route spec | §10.2.1 platform RLS family (migration 0075 precedent: platform GUC set, tenant and player GUCs unset; SELECT/INSERT/UPDATE, no DELETE); §10.4; §10.5 platform routes, `platform_payments_kill_switch:engage/release/read`, target-tenant rule, dual audit; §16.2 item 20 |
+| N4 (C5): release binding had no mechanism | §10.2.2 point 6 (`release_request_id` with composite FK, `UNIQUE`, and `decided_txid = txid_current()`: approval and release in one tx); request guard forces `created_at`, `expires_at ≤ +24 h`, `decided_at`, `decided_txid`; §13.2; §16.2 item 20; MX21 |
+| L1 (C6): INSERT-form fail-closed coupling implicit | §10.3 "Why a misbound context fails closed" (coupling stated as binding; no other `payment_attempts` write policy without `security` re-review); §16.2 item 20 player- and platform-context claim test |
+| L2 (C8): item 15 described the superseded reflection test | §16.2 item 15 (recursive test, static test, `Domain` mismatch, gate-alone and adapter-alone cases) |
+| L3 (C3): `received_at` only a DEFAULT | §13.1 (`received_at` and `resolved_at` forced by trigger); §16.2 item 20 |
+| L4: cross-tenant FK on release requests | §13.2 composite FK `(tenant_id, kill_switch_id)` → `(tenant_id, id)`; §16.2 item 20 |
+
+With these, every S95 condition is closed in the design text, pending `security`'s confirmation.
+Migration 0102 and the kill-switch routes must not be implemented before that confirmation
+(RV-0095 "Launch relevance"). Nothing here is implemented.
+
+### 27.9 Revision 3 — ledger-finance re-verification RV-0095 (`docs/plans/payment-readiness/rv-0095-ledger-reverify.md`)
+
+| ID | Where satisfied |
+|---|---|
+| LF95-C6(d): the T13-with-tombstone contradiction | New **T13t** `declined → disputed` (deposit only, `reversal_tombstone_precedes_success`) in §4.3, the forbidden list and the trigger (§13.1 "§4.3 exactly"); §4.4 `declined` row and tombstone note; §16.2 item 19 |
+| N1 (High): deposit T2 took L0.4 after L1 | §4.3 T2 (deposit gates before the parent lock; payout gate after, since it takes no lock); §5.1; §7.1; §7.2 step 3; §14 per-path list and harness; §16.2 item 16; MX24. `ledger-finance` carries the rule into the A7 text in ADR 0082. |
+| N2: INSERTs unguarded, `legacy` not a boundary | §13.1 `payment_attempts_insert_guard`, created after the backfill in 0101 (no session-setting escape); `CHECK (last_evidence_kind <> 'legacy' OR legacy_backfill)`; §4.2 enumeration includes `legacy`; §16.2 item 19; MX22 |
+| N3: T12 could re-send after T13 | §4.3 T12 predicate `NOT EXISTS(succeeded attempt for the same intent)` for deposits; §16.2 item 19; MX23 |
+| N4: backfill convergence columns | §13.1 "Columns set on every backfilled row" (`next_action_at`, `first_submitted_at`, `last_sent_at`, `interactive`, payout `ever_possibly_sent`, amount/asset source); §16.2 item 22 |
+| L1 | §4.2 (with N2) |
+| L2 | §4.3 T2 (escalated cadence; a later pass resumes via T2) |
+| L3 | §4.8 M3 audit `kyc_denied` (already required); §16.2 item 19 |
+| L4 | §12.3 join paths (payout via `withdrawal_requests.release_ledger_transaction_id`) |
+| LF95-C10(f) and the ADR 0096 items (T2-reclaim → M3 route; raw-guard retarget to `ClaimForDispatch` plus the payout T2/T12 per-item claims; renumbering 0096 to migration 0100; allowing the escalation write at a T2 non-pass) | **Owner `identity-compliance` (ADR 0096)**. This ADR's side is §4.3 T2/T12, §4.8 and §5.2.1. Still OPEN until ADR 0096 lands them and `ledger-finance` re-checks. |
+| Open ledger-finance actions (A7 into ADR 0082; the reconciliation-model §2.2(b) amendment) | Owner `ledger-finance`; not ADR 0095 defects |
+
+Migration 0101 must be implemented against this revision, not revision 2. In particular: the
+T13t pair, the INSERT guard (created after the backfill), the `legacy` CHECK and the N4 backfill
+columns.
 
