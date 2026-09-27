@@ -197,6 +197,18 @@ func RedactedProviderErrorDetail(err error) string {
 // even ask".
 var ErrProviderUnavailable = errors.New("kyc: provider unavailable")
 
+// ErrProviderCallRefused (IO-1B, architect review `rv-prh-architect.md`,
+// INV-IO-1(b)) is returned by CreateVerification's and SubmitVerification's
+// own phase B if ctx is txscope.Held - defence in depth behind the primary
+// API-shape control (no function that can reach KYCProvider.CreateVerification/
+// SubmitVerification takes a pgx.Tx): this refuses the adapter outbound call
+// itself if it is ever, despite that, reached while a pooled database
+// transaction is held. Mirrors internal/payments' own gate.go
+// ErrProviderCallRefused/step 1 and internal/casino's identical copy
+// (types.go) exactly, duplicated rather than imported per this package's
+// own "each domain owns its own copy" discipline (ADR 0095 §15.1.1).
+var ErrProviderCallRefused = errors.New("kyc: provider call refused because a pooled database transaction is held")
+
 var (
 	// ErrCallbackSignatureInvalid is returned by a KYCProvider's
 	// HandleCallback for any authentication failure over the raw body -

@@ -15,6 +15,7 @@ import (
 
 	"github.com/Diansalas/igaming-platform/internal/audit"
 	"github.com/Diansalas/igaming-platform/internal/providercred"
+	"github.com/Diansalas/igaming-platform/internal/txscope"
 )
 
 // ErrMalwareDetected is returned by UploadDocument when the configured
@@ -410,6 +411,16 @@ func SubmitVerification(ctx context.Context, pool providercred.TenantTxRunner, o
 	call := CallContext{
 		TenantID: tenantID, ProviderID: providerID, Credential: cred,
 		IdempotencyKey: submissionIdempotencyKey(v.ID, submitted), Deadline: time.Now().Add(defaultProviderCallTimeout),
+	}
+	// IO-1B (architect review, INV-IO-1(b)): defence in depth behind the
+	// primary API-shape control (no function that can reach
+	// KYCProvider.SubmitVerification takes a pgx.Tx) - refuse the adapter
+	// outbound call itself if ctx is, despite that, marked as holding a
+	// pooled database transaction. See ErrProviderCallRefused's own doc
+	// comment (provider.go) for why this exists as a SECOND control, not
+	// the primary one.
+	if txscope.Held(ctx) {
+		return Verification{}, ErrProviderCallRefused
 	}
 	result, err := provider.SubmitVerification(ctx, v.ProviderReference, submitted, call)
 	if err != nil {

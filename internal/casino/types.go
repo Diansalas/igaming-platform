@@ -157,6 +157,18 @@ var (
 	// no active, launch-capable casino_provider_capabilities row for this
 	// tenant/brand/asset, or is unhealthy (circuit open) - directive item Q.
 	ErrProviderUnavailable = errors.New("casino: provider is not available for this tenant/brand")
+	// ErrProviderCallRefused (IO-1B, architect review `rv-prh-architect.md`,
+	// INV-IO-1(b)) is returned by LaunchGame's phase B if ctx is
+	// txscope.Held - defence in depth behind the primary API-shape control
+	// (no function that can reach CasinoProvider.Launch takes a pgx.Tx):
+	// this refuses the adapter outbound call itself if it is ever, despite
+	// that, reached while a pooled database transaction is held. Mirrors
+	// internal/payments' own gate.go ErrProviderCallRefused/step 1
+	// (INV-IO-1(b)) exactly, duplicated rather than imported per this
+	// package's own "each domain owns its own copy" discipline (the same
+	// reason internal/kyc/casino each carry their own CallContext/resolver
+	// copies, ADR 0095 §15.1.1).
+	ErrProviderCallRefused = errors.New("casino: provider call refused because a pooled database transaction is held")
 	// ErrCapabilityWidensAdapter is returned by WriteCapability when a
 	// tenant-configured row would assert more than the adapter's own
 	// declared capability (mirrors docs/decisions/0022 §2.1).

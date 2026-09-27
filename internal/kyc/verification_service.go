@@ -13,6 +13,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/audit"
 	"github.com/Diansalas/igaming-platform/internal/jurisdiction"
 	"github.com/Diansalas/igaming-platform/internal/providercred"
+	"github.com/Diansalas/igaming-platform/internal/txscope"
 	"github.com/Diansalas/igaming-platform/internal/validation"
 )
 
@@ -317,6 +318,16 @@ func CreateVerification(ctx context.Context, pool providercred.TenantTxRunner, o
 	call := CallContext{
 		TenantID: params.TenantID, ProviderID: providerID, Credential: cred,
 		IdempotencyKey: "kv:" + v.ID.String(), Deadline: time.Now().Add(createVerificationCallTimeout),
+	}
+	// IO-1B (architect review, INV-IO-1(b)): defence in depth behind the
+	// primary API-shape control (no function that can reach
+	// KYCProvider.CreateVerification takes a pgx.Tx) - refuse the adapter
+	// outbound call itself if ctx is, despite that, marked as holding a
+	// pooled database transaction. See ErrProviderCallRefused's own doc
+	// comment (provider.go) for why this exists as a SECOND control, not
+	// the primary one.
+	if txscope.Held(ctx) {
+		return Verification{}, ErrProviderCallRefused
 	}
 	// An explicit field-by-field literal, not a type conversion, so a field
 	// later added to CreateVerificationParams is never passed to the
