@@ -79,8 +79,20 @@ func RequireRetrySemantics[A any](domain string, adapters map[string]A) error {
 		if !ok {
 			return fmt.Errorf("webhookauth: %s provider %q: adapter %T is not a Synthetic component and does not implement RetrySemanticsSource - a non-MOCK webhook adapter must declare WebhookRetrySemantics before registration (ADR 0097 §6.3/§20 AC6)", domain, id, a)
 		}
-		if _, declared := src.WebhookRetrySemantics(); !declared {
+		sem, declared := src.WebhookRetrySemantics()
+		if !declared {
 			return fmt.Errorf("webhookauth: %s provider %q: adapter %T implements RetrySemanticsSource but declared ok=false - a non-MOCK webhook adapter must declare WebhookRetrySemantics before registration (ADR 0097 §6.3/§20 AC6)", domain, id, a)
+		}
+		// Security review C4 of PRH-I4: an adapter that retries NEITHER
+		// 429 nor 503 is refused outright. §6.3's own text allows such an
+		// adapter to register anyway if LF-C1 option (b) - a daily
+		// reconciliation backstop that surfaces provider-settled,
+		// platform-unposted events - exists; this implementation does not
+		// build that backstop yet (tracked as PRH-I4-T6-EXTEND-1), so
+		// until it does, the fail-closed choice is to never register such
+		// an adapter at all rather than silently lose events indefinitely.
+		if !sem.Retries429 && !sem.Retries503 {
+			return fmt.Errorf("webhookauth: %s provider %q: adapter %T declares WebhookRetrySemantics with neither Retries429 nor Retries503 - refused (ADR 0097 §6.3: this requires the LF-C1(b) reconciliation backstop, which is not implemented; see PRH-I4-T6-EXTEND-1)", domain, id, a)
 		}
 	}
 	return nil

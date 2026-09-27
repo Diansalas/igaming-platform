@@ -2,10 +2,10 @@ package httpserver
 
 import (
 	"context"
-	"errors"
 	"log/slog"
 	"net/http"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -16,6 +16,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/identity"
 	"github.com/Diansalas/igaming-platform/internal/observability"
 	"github.com/Diansalas/igaming-platform/internal/txscope"
+	"github.com/Diansalas/igaming-platform/internal/webhookauth"
 )
 
 // webhookAdmissionRuntime is the constructed ADR 0097 admission state for
@@ -47,6 +48,28 @@ type webhookAdmissionRuntime struct {
 	directory *webhookTenantDirectory
 
 	suppress *admission.Suppressor
+
+	// overflowLogged latches, per limiter tier key, whether the ADR 0097
+	// §7 "the configured bound is misestimated -> _overflow shared bucket
+	// + error" log line has already been emitted - so a sustained
+	// overflow logs exactly once, not once per request (security review
+	// Low: "emit the overflow error log", previously
+	// admission.GCRALimiter.OverflowOccurred() was computed but never
+	// actually checked/logged anywhere).
+	overflowLogged sync.Map // map[string]struct{}
+}
+
+// logOverflowOnce emits webhook_admission_limiter_overflow exactly once
+// per tier key, the first time lim reports it has ever folded a key into
+// its shared overflow bucket.
+func (rt *webhookAdmissionRuntime) logOverflowOnce(tierKey string, lim *admission.GCRALimiter) {
+	if lim == nil || !lim.OverflowOccurred() {
+		return
+	}
+	if _, already := rt.overflowLogged.LoadOrStore(tierKey, struct{}{}); already {
+		return
+	}
+	rt.logger.Error("webhook_admission_limiter_overflow", "tier", tierKey)
 }
 
 // newWebhookAdmission constructs the runtime from settings. pool feeds the
@@ -167,7 +190,15 @@ func (rt *webhookAdmissionRuntime) rateBurstFor(def WebhookRateBurst, domain web
 // would require reentrant acquisition, AC2(b)) - the caller maps this to
 // a 503, never the uniform 401 (it is a capacity rejection, not an auth
 // failure).
-var errDBGateUnavailable = errors.New("httpserver: webhook pre-verification DB gate unavailable")
+// Security review C1 of PRH-I4 (HIGH): this MUST be exactly
+// webhookauth.ErrTenantReaderUnavailable, not a locally-defined sentinel,
+// because gatedReader.WithTenantReadOnly's error crosses package
+// boundaries (into internal/providercred's real Resolver, then back up
+// through internal/webhookauth's AuthError construction, then through
+// payments/casino/kyc's VerifyCallback) before this package's handlers
+// ever see it again - errors.Is only survives that whole path if every
+// layer checks for, and propagates, the SAME sentinel value.
+var errDBGateUnavailable = webhookauth.ErrTenantReaderUnavailable
 
 // gatedReaderMarkKey marks a context as already holding an A4b slot
 // acquired by THIS gatedReader chain, so a nested call (architect review
@@ -284,6 +315,24 @@ func (rt *webhookAdmissionRuntime) logRejected(ctx context.Context, tier string,
 	rt.logger.Warn(admissionLogEvent, fields...)
 }
 
+// markWebhookRouteForLogging is RL-F4's redaction hook (ADR 0097 §8/§17
+// devops condition 3): every webhook request - including one rejected
+// BEFORE admitPreAuth ever runs (e.g. the "webhooks not enabled on this
+// deployment" 503 short-circuit every handler checks first, which is
+// still reachable with arbitrary attacker-chosen path segments) - must
+// have its access-log/panic-recovery path redacted to the matched route
+// pattern. Security review Low ("two RL-F4 leftovers"): this was
+// previously set only inside admitPreAuth, so a request that returned
+// before admitPreAuth was ever called leaked the raw path. Every one of
+// the three webhook handlers now calls this as its OWN first statement,
+// before even the orchestrator-nil check; admitPreAuth also calls it
+// (harmless, idempotent) for any caller that reaches it directly (tests).
+func markWebhookRouteForLogging(r *http.Request) {
+	if rs := observability.RequestStateFromContext(r.Context()); rs != nil {
+		rs.LogPath = r.Pattern
+	}
+}
+
 // admitPreAuth runs A2 (if enabled), A3 and A4a (ADR 0097 §3). It is the
 // FIRST thing a webhook handler calls - strictly before any body read or
 // DB work (ORD-1/ORD-2). On admission it returns a release func for the
@@ -292,16 +341,19 @@ func (rt *webhookAdmissionRuntime) logRejected(ctx context.Context, tier string,
 // HTTP response and ok is false; the caller must return immediately.
 //
 // A nil receiver always admits (admission disabled) with a no-op release.
-func (rt *webhookAdmissionRuntime) admitPreAuth(w http.ResponseWriter, r *http.Request, domain webhookDomain, trustedProxyCount int, schemeRegistered func(string) bool) (release func(), ok bool) {
-	// RL-F4 (ADR 0097 §8/§17 devops condition 3): every webhook request,
-	// admission enabled or not, gets its access-log/panic-recovery path
-	// redacted to the matched route pattern - see RequestState.LogPath's
-	// own doc comment for why this must be set here (r.Pattern is
-	// reliably populated at this point) rather than read directly by the
-	// outer logging middleware.
-	if rs := observability.RequestStateFromContext(r.Context()); rs != nil {
-		rs.LogPath = r.Pattern
-	}
+//
+// retries429 reports the registered adapter's declared retry semantics for
+// providerID (nil, or declared=false for an unknown/unregistered
+// provider, defaults to 429 - security review C4 of PRH-I4: the ADR's own
+// §6 text originally scoped adapter-declared status to B1 only; a
+// provider that is REGISTERED is a static fact known even before
+// verification succeeds - since providerKey is only ever the raw
+// providerID when it names a registered adapter (preAuthKeys collapses
+// anything else to "_unknown"), A3 can and must honor the same
+// declaration B1 does, so a no-429-retry adapter never gets a 429 at
+// EITHER tier).
+func (rt *webhookAdmissionRuntime) admitPreAuth(w http.ResponseWriter, r *http.Request, domain webhookDomain, trustedProxyCount int, schemeRegistered func(string) bool, retries429 func(providerID string) (allows, declared bool)) (release func(), ok bool) {
+	markWebhookRouteForLogging(r)
 
 	noop := func() {}
 	if rt == nil {
@@ -326,9 +378,23 @@ func (rt *webhookAdmissionRuntime) admitPreAuth(w http.ResponseWriter, r *http.R
 	requestID := observability.RequestIDFromContext(ctx)
 	clientIP := trustedProxyClientIP(r, trustedProxyCount)
 
+	// ADR 0097 §7/T9 (security review Low, "make code match the comment"):
+	// "Directory never loaded... webhook routes return 503 if called
+	// anyway" - an EXPLICIT fail-closed gate, not merely letting every
+	// tenant fall through to the non-authoritative "_unknown" bucket
+	// (which could otherwise still admit and process a genuinely
+	// well-formed, correctly-signed callback for a real tenant while the
+	// admission subsystem itself is not yet ready).
+	if rt.directory != nil && !rt.directory.Loaded() {
+		rt.logRejected(ctx, "directory_unloaded", domain, "", "", nil, http.StatusServiceUnavailable, time.Second, clientIP)
+		writeAdmissionRejection(w, requestID, apierror.CodeUnavailable, time.Second)
+		return nil, false
+	}
+
 	// A2: per-source-IP tier, off by default (§4.4).
 	if rt.perIP != nil {
 		if admitted, retryAfter := rt.perIP.Allow(clientIP); !admitted {
+			rt.logOverflowOnce("ip", rt.perIP)
 			rt.logRejected(ctx, "ip", domain, "", "", nil, http.StatusTooManyRequests, retryAfter, clientIP)
 			writeAdmissionRejection(w, requestID, apierror.CodeRateLimited, retryAfter)
 			return nil, false
@@ -341,16 +407,32 @@ func (rt *webhookAdmissionRuntime) admitPreAuth(w http.ResponseWriter, r *http.R
 
 	// A3: pre-auth bucket (domain, tenantKey, providerKey).
 	limiter := rt.preAuthKnown[domain]
+	tierKey := "preauth_known_" + string(domain)
 	def := rt.settings.PreAuthRate[string(domain)]
 	if tenantKey == unknownComponent {
 		limiter = rt.preAuthUnknown[domain]
+		tierKey = "preauth_unknown_" + string(domain)
 		def = rt.settings.PreAuthUnknownRate[string(domain)]
 	}
 	rb := rt.rateBurstFor(def, domain, providerKey, tenantKey)
 	preKey := string(domain) + "|" + tenantKey + "|" + providerKey
-	if admitted, retryAfter := limiter.AllowWithParams(preKey, rb.Rate, rb.Burst); !admitted {
-		rt.logRejected(ctx, "preauth", domain, tenantKey, providerKey, nil, http.StatusTooManyRequests, retryAfter, clientIP)
-		writeAdmissionRejection(w, requestID, apierror.CodeRateLimited, retryAfter)
+	admitted, retryAfter := limiter.AllowWithParams(preKey, rb.Rate, rb.Burst)
+	rt.logOverflowOnce(tierKey, limiter)
+	if !admitted {
+		status := http.StatusTooManyRequests
+		code := apierror.CodeRateLimited
+		if retries429 != nil {
+			if allows, declared := retries429(providerKey); declared && !allows {
+				// Security review C4 of PRH-I4: a registered adapter that
+				// does not retry 429 must never receive one, even at the
+				// pre-auth tier (§6.3, ADR text amended).
+				status = http.StatusServiceUnavailable
+				code = apierror.CodeUnavailable
+				retryAfter = time.Second
+			}
+		}
+		rt.logRejected(ctx, "preauth", domain, tenantKey, providerKey, nil, status, retryAfter, clientIP)
+		writeAdmissionRejection(w, requestID, code, retryAfter)
 		return nil, false
 	}
 
@@ -399,6 +481,30 @@ func (rt *webhookAdmissionRuntime) gatedTenantLookup(ctx context.Context, pool *
 	return gatedGetTenantBySlug(ctx, rt.dbGate, key, cap, rt.clock, rt.settings.DBGateWait, pool, slug)
 }
 
+// writeDBGateUnavailable answers ADR 0097's A4b capacity rejection
+// (security review C2 of PRH-I4): 503 + Retry-After + a "db_gate"
+// allow-listed log line, whether the rejection was observed as the bare
+// errDBGateUnavailable sentinel (the platform-wide tenant lookup, or a
+// domain's first pre-verification read that propagates it unwrapped) or
+// wrapped inside the domain's own AuthError type (security review C1: a
+// rejection from INSIDE credential resolution). tenantID is nil before
+// the tenant is resolved (the slug-lookup call site). Nil-receiver-safe.
+func (rt *webhookAdmissionRuntime) writeDBGateUnavailable(w http.ResponseWriter, r *http.Request, domain webhookDomain, tenantID *uuid.UUID, providerID string) {
+	requestID := observability.RequestIDFromContext(r.Context())
+	if rt != nil {
+		rt.logRejected(r.Context(), "db_gate", domain, "", providerID, tenantID, http.StatusServiceUnavailable, time.Second, "")
+	}
+	writeAdmissionRejection(w, requestID, apierror.CodeUnavailable, time.Second)
+}
+
+// writeAdmissionUnavailableAuthError is writeDBGateUnavailable for a
+// call site that already has a resolved tenantID (every handler's own
+// AuthError branch, and their VerifyCallback-level errDBGateUnavailable
+// check).
+func (rt *webhookAdmissionRuntime) writeAdmissionUnavailableAuthError(w http.ResponseWriter, r *http.Request, domain webhookDomain, tenantID uuid.UUID, providerID string) {
+	rt.writeDBGateUnavailable(w, r, domain, &tenantID, providerID)
+}
+
 // admitVerified runs B1 (verified rate bucket) then B2 (per-tenant domain
 // transaction bulkhead), strictly after VerifyCallback succeeded and
 // strictly before deps.DB.WithTenant opens the domain transaction (ORD-3).
@@ -435,7 +541,9 @@ func (rt *webhookAdmissionRuntime) admitVerified(w http.ResponseWriter, r *http.
 	key := tenantID.String() + "|" + providerID
 	def := rt.settings.VerifiedRate[string(domain)]
 	rb := rt.rateBurstFor(def, domain, providerID, tenantID.String())
-	if admitted, retryAfter := rt.verified[domain].AllowWithParams(key, rb.Rate, rb.Burst); !admitted {
+	admitted, retryAfter := rt.verified[domain].AllowWithParams(key, rb.Rate, rb.Burst)
+	rt.logOverflowOnce("verified_"+string(domain), rt.verified[domain])
+	if !admitted {
 		status := http.StatusTooManyRequests
 		code := apierror.CodeRateLimited
 		if retries429 != nil {

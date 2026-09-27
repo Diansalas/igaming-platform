@@ -444,9 +444,27 @@ func newKYCWebhookHandler(deps Deps) http.HandlerFunc {
 		requestID := observability.RequestIDFromContext(r.Context())
 		logger := observability.LoggerFromContext(r.Context(), deps.Logger)
 
+		// RL-F4 (security review Low "leftover"): redact BEFORE the
+		// orchestrator-nil check below, which is itself reachable with
+		// arbitrary attacker-chosen path segments.
+		markWebhookRouteForLogging(r)
+
 		if deps.KYCOrchestrator == nil {
 			apierror.Write(w, requestID, apierror.CodeUnavailable, "kyc webhooks are not enabled on this deployment")
 			return
+		}
+
+		// retries429 is the adapter's declared retry semantics (ADR 0097
+		// §6.3/§20 AC6), shared by A3 (security review C4) and B1 below.
+		retries429 := func(providerID string) (allows, declared bool) {
+			if deps.KYCOrchestrator == nil {
+				return true, false
+			}
+			sem, ok := deps.KYCOrchestrator.WebhookRetrySemantics(providerID)
+			if !ok {
+				return true, false
+			}
+			return sem.Retries429, true
 		}
 
 		// ADR 0097 A2/A3/A4a: the FIRST thing any webhook route does - no
@@ -457,7 +475,7 @@ func newKYCWebhookHandler(deps Deps) http.HandlerFunc {
 			}
 			_, ok := deps.KYCOrchestrator.WebhookScheme(id)
 			return ok
-		})
+		}, retries429)
 		if !admitted {
 			return
 		}
@@ -491,7 +509,9 @@ func newKYCWebhookHandler(deps Deps) http.HandlerFunc {
 		var applied bool
 		verified, err := deps.KYCOrchestrator.VerifyCallback(r.Context(), reader, t.ID, providerID, webhookauth.Inbound{Header: r.Header, Body: body})
 		if errors.Is(err, errDBGateUnavailable) {
-			apierror.Write(w, requestID, apierror.CodeUnavailable, "service temporarily unavailable; retry later")
+			// Security review C2 of PRH-I4: every DB-gate 503 gets
+			// Retry-After and a db_gate log line.
+			deps.webhookAdmission.writeAdmissionUnavailableAuthError(w, r, domainKYC, t.ID, providerID)
 			return
 		}
 		// ADR 0097 B1/B2 (ORD-3/ORD-4): admitted ONLY off the just-verified
@@ -499,13 +519,7 @@ func newKYCWebhookHandler(deps Deps) http.HandlerFunc {
 		var releaseDomainTx func()
 		if err == nil {
 			var admittedVerified bool
-			releaseDomainTx, admittedVerified = deps.webhookAdmission.admitVerified(w, r, domainKYC, t.ID, providerID, func(providerID string) (allows, declared bool) {
-				sem, ok := deps.KYCOrchestrator.WebhookRetrySemantics(providerID)
-				if !ok {
-					return true, false
-				}
-				return sem.Retries429, true
-			})
+			releaseDomainTx, admittedVerified = deps.webhookAdmission.admitVerified(w, r, domainKYC, t.ID, providerID, retries429)
 			if !admittedVerified {
 				return
 			}
@@ -525,6 +539,15 @@ func newKYCWebhookHandler(deps Deps) http.HandlerFunc {
 
 		var authErr *kyc.CallbackAuthError
 		if errors.As(err, &authErr) {
+			// Security review C1 of PRH-I4 (HIGH): kyc has only ONE
+			// pre-verification read (credential resolution) - EVERY DB-gate
+			// rejection inside VerifyCallback surfaces here. It must answer
+			// 503+Retry-After (C2: with its own db_gate log line), never
+			// the uniform 401.
+			if authErr.Reason == webhookauth.ReasonAdmissionUnavailable {
+				deps.webhookAdmission.writeAdmissionUnavailableAuthError(w, r, domainKYC, t.ID, providerID)
+				return
+			}
 			logWebhookAuthFailure(logger, kycWebhookRoute.authFailedEvent, r, requestID, authErr.Reason, &t.ID, providerID, true, authErr.KeyID, authErr.CredentialFingerprint, len(body))
 			apierror.Write(w, requestID, apierror.CodeUnauthorized, "callback rejected")
 			return
