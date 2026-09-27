@@ -1,0 +1,140 @@
+PRH-I4 (ADR 0097, PAYWH-RL-1) mutation-kill evidence
+=====================================================
+
+Method: manual, one mutant at a time. For each mutation below, the exact source edit is
+made with sed/python3 (anchored, exact-match string replacement), the named test command is
+run to confirm it FAILS, the failure output is captured (raw text below and in
+/tmp scratchpad mutation-runs/*.txt during the session), and `git checkout -- <file>` restores
+the original before the next mutation. Each mutation was independently re-verified to produce
+a clean pass after revert. Unlike PRH-REF's prh-ref-mutate.py, this is NOT a committed,
+re-runnable harness (time-boxed manual execution) - each mutation's exact diff is recorded
+below in unified-diff form so it can be reproduced and re-run.
+
+Environment: shared CI-local PostgreSQL (docs note it may be used by other agents
+concurrently - see the isolated TestResolutionIsolation_* wall-clock-threshold flake noted in
+commit 1eddcbb's own message, reproduced and confirmed unrelated to this change by re-running
+in isolation). Go 1.26.8.
+
+ADR 0097 §11 T16 lists five required mutations plus QA review item 2's sixth. Status:
+
+M1 "drop tenant from preKey -> T1 fails": KILLED.
+    File: internal/httpserver/webhook_admission.go, admitPreAuth.
+    Diff:
+      - preKey := string(domain) + "|" + tenantKey + "|" + providerKey
+      + preKey := string(domain) + "|" + providerKey
+    Command: go test -tags=integration ./internal/httpserver/... -run TestAdmission_T1_ -v
+    Result: FAIL - "tenant B's own callback must be admitted despite tenant A's flood, got 429"
+    (A's flood and B's own request collapsed onto the same domain-wide bucket once tenant
+    dropped out of the key, so B's callback got caught in A's exhausted bucket.)
+
+M2 "derive B1 key from preKey instead of VerifiedCallback -> T17 fails" (QA review item 2,
+   verified instead against T2, which is the more direct test of this specific invariant -
+   T17 does not reach B1 at all since it never signs correctly): KILLED.
+    File: internal/httpserver/webhook_admission.go, admitVerified.
+    Diff:
+      - key := tenantID.String() + "|" + providerID
+      + key := string(domain) + "|" + providerID
+    Command: go test -tags=integration ./internal/httpserver/... -run TestAdmission_T2_ -v
+    Result: FAIL - "tenant B's callback must be admitted despite A's verified-tier flood,
+    got 429" (B1 keyed off domain+provider only, so A and B now share one verified bucket -
+    exactly ORD-4's forbidden shape).
+
+M3 "move B1/B2 inside/around WithTenant so they no longer gate it -> T6 fails" (T6a/b/c are
+   not implemented as a dedicated suite this round - see the httpserver test file's own
+   "not covered here" note in commit 1eddcbb; verified instead against T2b, added
+   specifically because it was needed to catch this mutation - T2 alone did NOT catch it,
+   see the negative result below): KILLED by T2b, NOT KILLED by T2 alone.
+    File: internal/httpserver/deposit_handlers.go, newPaymentWebhookHandler.
+    Diff (conceptual - the early return that makes an admission rejection actually stop the
+    handler before WithTenant was removed):
+      - if !admittedVerified {
+      -     return
+      - }
+      + _ = admittedVerified // rejection no longer gates the domain transaction
+    Command (negative result first): go test -tags=integration ./internal/httpserver/...
+    -run TestAdmission_T2_ -v
+    Result: PASS (did not catch the mutation) - T2's flood uses provider references that name
+    no real deposit intent, so domain processing (ReceiveVerifiedCallback) independently
+    rejects them with "deposit not found" whether or not B1/B2 gated the call. T2's own
+    "zero ledger rows" assertion was already true for an unrelated reason. This is recorded
+    as a genuine test-suite gap, not smoothed over.
+    Command (positive result): go test -tags=integration ./internal/httpserver/...
+    -run TestAdmission_T2b_ -v
+    Result: FAIL - "the B1-rejected deposit must post ZERO rows - if this is >0, B1 stopped
+    gating the domain transaction: got 1 rows" (plus a logged "superfluous WriteHeader"
+    warning, since admitVerified had already written the 429/503 response body before the
+    mutated code additionally ran the domain transaction to completion).
+    Action taken: T2b (TestAdmission_T2b_VerifiedRejectionActuallyBlocksDomainTransaction,
+    internal/httpserver/webhook_admission_integration_test.go) was added to the suite in the
+    SAME commit this evidence was produced under (9061269), specifically because it was the
+    only test that caught this mutation. T2 is left as-is (it still pins the pre-auth/B1
+    STATUS-CODE fairness properties); T2b is the ORD-3 domain-transaction-gating pin.
+
+M4 "remove collapse -> T3 fails" (verified against internal/admission's own
+   TestCardinalityOverflow, the deterministic unit-level proxy for T3's cardinality-bound
+   property - see internal/httpserver/webhook_admission_integration_test.go's "not covered
+   here" note for why a full 100k-random-value HTTP-level T3 is not implemented this round):
+   KILLED.
+    File: internal/admission/gcra.go, AllowWithParams.
+    Diff:
+      - if _, present := g.tat[key]; !present && len(g.tat) >= g.maxKeys && g.maxKeys > 0 {
+      -     key = g.overflowOn
+      -     g.overflowLogged = true
+      - }
+      + // overflow collapse removed - key table grows unbounded
+    Command: go test ./internal/admission/... -run TestCardinalityOverflow -v
+    Result: FAIL - "overflow must be recorded" (a third distinct key no longer folds into
+    the shared overflow bucket, so OverflowOccurred() never latches true).
+
+M5 "log raw path -> T7 fails" (verified against RL-F4's own tests, the concrete instance of
+   "an admission-adjacent log line leaks attacker-controlled path content" this codebase
+   actually ships - a dedicated admission-rejection-log allow-list test (the OTHER half of
+   T7, "no secret in the webhook_admission_rejected line itself") is not yet written, see
+   the "not covered here" note): KILLED.
+    File: internal/httpserver/middleware.go, logPathFor.
+    Diff:
+      - func logPathFor(r *http.Request) string {
+      -     if rs := observability.RequestStateFromContext(r.Context()); rs != nil && rs.LogPath != "" {
+      -         return rs.LogPath
+      -     }
+      -     return r.URL.Path
+      - }
+      + func logPathFor(r *http.Request) string {
+      +     return r.URL.Path
+      + }
+    Command: go test ./internal/httpserver/... -run TestRLF4_ -v
+    Result: FAIL (both tests) - "access log leaked the attacker-chosen slug" and
+    "panic-recovery log leaked the attacker-chosen slug".
+
+M6 (architect review AC2(b)'s own mandatory mutation, additional to the ADR's five):
+   "gatedReader's reentrancy guard removed -> the AC2(b) unit tests fail": KILLED.
+    File: internal/httpserver/webhook_admission.go, gatedReader.WithTenantReadOnly.
+    Diff:
+      - if txscope.Held(ctx) {
+      -     return errDBGateUnavailable
+      - }
+      - if held, _ := ctx.Value(gatedReaderMarkKey{}).(bool); held {
+      -     return errDBGateUnavailable
+      - }
+      + // AC2(b) reentrancy guard removed
+    Command: go test ./internal/httpserver/... -run TestGatedReader -v
+    Result: FAIL - TestGatedReader_RefusesReentrantAcquire panics with a nil-pointer
+    dereference inside db.(*Pool).WithTenantReadOnly (the test's db is deliberately nil,
+    proving the mutant reaches the real pool call instead of failing closed beforehand).
+
+Summary: 6/6 mutations attempted were killed by the test suite as it exists after this
+change set, with M3 requiring a new test (T2b) to be added mid-session because the existing
+T2 did not catch it - recorded above rather than silently patched over. Every mutation was
+reverted and the full targeted test set re-confirmed green before moving to the next.
+
+Not attempted this round (documented gaps, not silently dropped - PRH-I4's implementer
+report to the orchestrator repeats this list):
+  - "remove A4b -> T4 fails": T4 (UnauthFlood_DoesNotConsumePool, the real-pool
+    pool.Stat()-based version) is not implemented as its own httpserver-level test this
+    round; A4b's bulkhead mechanics are unit-tested in internal/admission
+    (TestBulkheadTryAcquireCaps etc.) but a dedicated httpserver-level "no DB connection
+    growth" pool-statistics assertion is a gap.
+  - T16's implied T10 statement-capture mutation ("no DB before A1-A4a") is likewise not
+    exercised at the httpserver layer with a real statement-counting harness (ADR 0022 §3
+    point 9's existing TestPointNineCapture_* family lives in internal/casino/payments/kyc,
+    not httpserver, and was not extended for admission in this round).
