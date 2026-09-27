@@ -49,6 +49,20 @@ const (
 	payProvB = "mock-psp-recon-b"
 )
 
+// allowAllKYCGate is this test file's own explicit, clearly-named
+// always-allow payments.DepositKYCGate stand-in. PRH-I1's deposit cutover
+// moved payments.AllowAllDepositKYCGate into a payments-package-internal
+// _test.go file (it must never be reachable from non-test/production
+// code), so a cross-package test that needs the same "KYC deposit
+// enforcement is NOT ACTIVE" stand-in defines its own local one instead -
+// the interface (payments.DepositKYCGate) is the only thing that needs to
+// match.
+type allowAllKYCGate struct{}
+
+func (allowAllKYCGate) EvaluateDeposit(context.Context, pgx.Tx, uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID, int64, string) (bool, string, error) {
+	return true, "", nil
+}
+
 // ---------------------------------------------------------------------
 // World.
 
@@ -107,7 +121,7 @@ func (w *payWorld) registerCapability(t *testing.T, p payments.PaymentProvider, 
 // deposit runs the real ADR 0095 deposit path (phase A / gate / phase C).
 func (w *payWorld) deposit(t *testing.T, amount int64) payments.PaymentAttempt {
 	t.Helper()
-	res, err := w.orch.InitiateDepositAttempt(context.Background(), w.pool, payments.AllowAllDepositKYCGate{}, payments.MockCredentialResolver{}, payments.InitiateDepositParams{
+	res, err := w.orch.InitiateDepositAttempt(context.Background(), w.pool, allowAllKYCGate{}, payments.MockCredentialResolver{}, payments.InitiateDepositParams{
 		Scope:     payments.DepositScope{TenantID: w.f.tenantID, BrandID: w.f.brandID, PlayerAccountID: w.f.playerAccountID, WalletID: w.f.walletID},
 		AssetCode: "EUR", Amount: amount, PaymentMethod: "card", IdempotencyKey: "pay-recon-" + uuid.NewString(),
 	})
@@ -436,7 +450,7 @@ func (w *payWorld) cascade(t *testing.T) (declined, child payments.PaymentAttemp
 	}
 	child = find(payProvB)
 	if child.ProviderReference == nil {
-		sw := payments.NewSweeper(w.pool, w.orch, payments.AllowAllDepositKYCGate{}, payments.MockCredentialResolver{})
+		sw := payments.NewSweeper(w.pool, w.orch, allowAllKYCGate{}, payments.MockCredentialResolver{})
 		if st := sw.RunOnce(context.Background(), []uuid.UUID{w.f.tenantID}); len(st.Errors) > 0 {
 			t.Fatalf("sweeper: %v", st.Errors)
 		}
@@ -1142,7 +1156,7 @@ func TestPaymentStatement_LFC1b_DroppedSuccessConvergesThroughT17(t *testing.T) 
 	}); err != nil {
 		t.Fatalf("T17: %v", err)
 	}
-	sw := payments.NewSweeper(w.pool, w.orch, payments.AllowAllDepositKYCGate{}, payments.MockCredentialResolver{})
+	sw := payments.NewSweeper(w.pool, w.orch, allowAllKYCGate{}, payments.MockCredentialResolver{})
 	if st := sw.RunOnce(context.Background(), []uuid.UUID{w.f.tenantID}); len(st.Errors) > 0 {
 		t.Fatalf("sweeper: %v", st.Errors)
 	}

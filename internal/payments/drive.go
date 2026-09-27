@@ -244,12 +244,20 @@ func (o *Orchestrator) applyDepositCallResult(
 		return intent, nil, nil
 
 	case ErrorClassSucceeded:
-		updated, err := o.postDepositSuccess(ctx, tx, intent, capability.ProviderID, res.ProviderReference, attempt.Amount, attempt.AssetCode)
+		// postedTxID (never updated.LedgerTransactionID - PRH-I5 finding,
+		// LF95-C6(a)/T13): a concurrent sibling could have already posted
+		// the intent's FIRST capture between this attempt's own phase B
+		// and this phase C, in which case updated.LedgerTransactionID
+		// still names that first posting while THIS attempt's own
+		// posting (a genuine T13 second capture) got its own, different
+		// transaction id - linking the attempt to the wrong one would
+		// collide with payment_attempts_tenant_ledger_tx.
+		updated, postedTxID, err := o.postDepositSuccess(ctx, tx, intent, capability.ProviderID, res.ProviderReference, attempt.Amount, attempt.AssetCode)
 		if err != nil {
 			return intent, nil, err
 		}
 		if err := ApplySuccess(ctx, tx, attempt.ID, SuccessEvidence{
-			Evidence: evidence, ProviderReference: res.ProviderReference, LedgerTransactionID: updated.LedgerTransactionID,
+			Evidence: evidence, ProviderReference: res.ProviderReference, LedgerTransactionID: &postedTxID,
 		}); err != nil {
 			return intent, nil, err
 		}

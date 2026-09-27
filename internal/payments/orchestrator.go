@@ -722,7 +722,8 @@ func (o *Orchestrator) resolveAmbiguous(ctx context.Context, tx pgx.Tx, intent D
 
 	switch status.Outcome {
 	case OutcomeSucceeded:
-		return o.postDepositSuccess(ctx, tx, intent, providerID, providerReference, status.Amount, status.AssetCode)
+		updated, _, err := o.postDepositSuccess(ctx, tx, intent, providerID, providerReference, status.Amount, status.AssetCode)
+		return updated, err
 	case OutcomeDeclined:
 		return o.handleDecline(ctx, tx, intent, providerID, providerReference, status.Cascadable, status.DeclineReason, excluded)
 	default: // OutcomeAmbiguous or OutcomePending - still unresolved
@@ -769,17 +770,30 @@ func (o *Orchestrator) finalizeAmbiguous(ctx context.Context, tx pgx.Tx, intent 
 // postDepositSuccess posts financial-transaction-flows.md Flow 1: debit
 // psp_clearing, credit player_cash, idempotent on the provider's own
 // reference (used as both the ledger's provider_tx_id and its
-// idempotency_key). A redelivered success callback for an
-// already-succeeded intent is a no-op here - the short-circuit below,
-// combined with ledger.Post's own (tenant_id, provider_id, provider_tx_id)
-// uniqueness as a second, independent backstop
-// (payment-orchestration.md §8).
-func (o *Orchestrator) postDepositSuccess(ctx context.Context, tx pgx.Tx, intent DepositIntent, providerID, providerReference string, amount int64, assetCode string) (DepositIntent, error) {
-	if intent.Status == DepositIntentSucceeded {
-		return intent, nil
-	}
+// idempotency_key). An EXACT redelivery (same provider_id+provider_reference)
+// is a no-op via ledger.Post's own (tenant_id, provider_id, provider_tx_id)
+// uniqueness (payment-orchestration.md §8) - it returns the SAME
+// transaction id with postResult.AlreadyPosted=true, and this function
+// then does not touch deposit_intents again.
+//
+// PRH-I5 finding fix (ADR 0095 §4.3 T13, LF95-C6(a)): a call for an
+// intent that is ALREADY succeeded is NOT short-circuited before
+// ledger.Post runs. If the provider reference differs from what already
+// posted, this is a genuine second real capture (T13 - "the money is
+// real", LF-Q1 ruling) and ledger.Post creates a SECOND, real,
+// independent ledger transaction. Either way (exact redelivery or a true
+// T13), deposit_intents' own status/provider_reference/ledger_transaction_id
+// are left exactly as they already are ("the intent's link is left alone
+// if already set", T13's own row) - only the FIRST posting ever updates
+// the intent projection. The caller MUST link the attempt to
+// postDepositSuccess's own returned transaction id (the second return
+// value), never to intent.LedgerTransactionID, or a T13 second capture
+// collides with payment_attempts_tenant_ledger_tx's per-attempt
+// uniqueness (the bug ApplyReceiptEvidence's applyDepositSuccessAndPost
+// had before this fix).
+func (o *Orchestrator) postDepositSuccess(ctx context.Context, tx pgx.Tx, intent DepositIntent, providerID, providerReference string, amount int64, assetCode string) (DepositIntent, uuid.UUID, error) {
 	if amount != intent.Amount || assetCode != intent.AssetCode {
-		return intent, fmt.Errorf("%w: intent %s expected %d %s, provider confirmed %d %s",
+		return intent, uuid.Nil, fmt.Errorf("%w: intent %s expected %d %s, provider confirmed %d %s",
 			ErrCallbackProviderMismatch, intent.ID, intent.Amount, intent.AssetCode, amount, assetCode)
 	}
 
@@ -796,7 +810,7 @@ func (o *Orchestrator) postDepositSuccess(ctx context.Context, tx pgx.Tx, intent
 		ledger.AccountSpec{AccountType: ledger.AccountPSPClearing, AssetCode: intent.AssetCode},
 	)
 	if err != nil {
-		return intent, fmt.Errorf("payments: resolve deposit ledger accounts: %w", err)
+		return intent, uuid.Nil, fmt.Errorf("payments: resolve deposit ledger accounts: %w", err)
 	}
 	cashAccountID, clearingAccountID := accounts[0], accounts[1]
 
@@ -822,17 +836,38 @@ func (o *Orchestrator) postDepositSuccess(ctx context.Context, tx pgx.Tx, intent
 	if errors.Is(err, ledger.ErrIdempotencyPayloadMismatch) {
 		// Unreachable through the intent compare above today (audit
 		// site #19 is class B), kept as the typed backstop.
-		return intent, fmt.Errorf("%w: post deposit: %w", ErrCallbackPayloadMismatch, err)
+		return intent, uuid.Nil, fmt.Errorf("%w: post deposit: %w", ErrCallbackPayloadMismatch, err)
 	}
 	if err != nil {
-		return intent, fmt.Errorf("payments: post deposit: %w", err)
+		return intent, uuid.Nil, fmt.Errorf("payments: post deposit: %w", err)
+	}
+
+	if intent.Status == DepositIntentSucceeded {
+		// T13 second capture (or an exact redelivery, already collapsed
+		// to the SAME transaction id by ledger.Post above) - the intent's
+		// own projection is left untouched; only a genuinely NEW posting
+		// gets its own audit line, so a plain redelivery stays as quiet as
+		// it always was.
+		if !postResult.AlreadyPosted {
+			if err := audit.Record(ctx, tx, audit.Entry{
+				TenantID: intent.TenantID, ActorType: audit.ActorSystem, Action: "deposit.second_capture_posted",
+				TargetType: "deposit_intent", TargetID: intent.ID.String(), Outcome: audit.OutcomeSuccess,
+				Metadata: map[string]any{
+					"provider_id": providerID, "provider_reference": providerReference, "amount": amount, "asset_code": assetCode,
+					"ledger_transaction_id": postResult.TransactionID.String(),
+				},
+			}); err != nil {
+				return intent, uuid.Nil, fmt.Errorf("payments: audit second capture: %w", err)
+			}
+		}
+		return intent, postResult.TransactionID, nil
 	}
 
 	if _, err := tx.Exec(ctx,
 		`UPDATE deposit_intents SET provider_id = $2, provider_reference = $3, status = $4, ledger_transaction_id = $5, updated_at = now() WHERE id = $1`,
 		intent.ID, providerID, providerReference, DepositIntentSucceeded, postResult.TransactionID,
 	); err != nil {
-		return intent, fmt.Errorf("payments: mark deposit intent succeeded: %w", err)
+		return intent, uuid.Nil, fmt.Errorf("payments: mark deposit intent succeeded: %w", err)
 	}
 	intent.ProviderID, intent.ProviderReference = &providerID, &providerReference
 	intent.Status = DepositIntentSucceeded
@@ -846,9 +881,9 @@ func (o *Orchestrator) postDepositSuccess(ctx context.Context, tx pgx.Tx, intent
 			"ledger_transaction_id": postResult.TransactionID.String(), "already_posted": postResult.AlreadyPosted,
 		},
 	}); err != nil {
-		return intent, fmt.Errorf("payments: audit deposit posted: %w", err)
+		return intent, uuid.Nil, fmt.Errorf("payments: audit deposit posted: %w", err)
 	}
-	return intent, nil
+	return intent, postResult.TransactionID, nil
 }
 
 // ReceiveCallbackResult is what ReceiveCallback returns for a caller
@@ -1040,7 +1075,7 @@ func (o *Orchestrator) receiveDepositCallback(ctx context.Context, tx pgx.Tx, te
 
 	switch event.Outcome {
 	case OutcomeSucceeded:
-		intent, err = o.postDepositSuccess(ctx, tx, intent, providerID, event.ProviderReference, event.Amount, event.AssetCode)
+		intent, _, err = o.postDepositSuccess(ctx, tx, intent, providerID, event.ProviderReference, event.Amount, event.AssetCode)
 	case OutcomeDeclined:
 		intent, err = o.handleDecline(ctx, tx, intent, providerID, event.ProviderReference, event.Cascadable, event.DeclineReason, providerExclusionSoFar(intent))
 	case OutcomeAmbiguous:

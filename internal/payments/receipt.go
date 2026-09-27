@@ -479,17 +479,26 @@ func applyResolvedReceiptEvidence(ctx context.Context, tx pgx.Tx, o *Orchestrato
 // applyDepositSuccessAndPost posts Flow 1 (if not already posted) and
 // applies T7/T13, reusing postDepositSuccess exactly as phase C and the
 // sweeper do, so there is exactly one place that ever posts a deposit.
+//
+// PRH-I5 finding fix (ADR 0095 §4.3 T13, LF95-C6(a)): the attempt is
+// linked to postDepositSuccess's own returned transaction id
+// (postedTxID), NEVER to updated.LedgerTransactionID. For a T13 second
+// capture (this attempt was 'declined', a SIBLING already 'succeeded'),
+// intent.LedgerTransactionID still names the sibling's FIRST posting -
+// linking THIS attempt to that id would collide with
+// payment_attempts_tenant_ledger_tx's per-attempt uniqueness, which is
+// exactly the unique violation / infinite-redelivery bug PRH-I5 found.
 func applyDepositSuccessAndPost(ctx context.Context, tx pgx.Tx, o *Orchestrator, attempt PaymentAttempt, ev ReceiptEvidence) error {
 	intent, err := GetDepositIntentByID(ctx, tx, *attempt.DepositIntentID)
 	if err != nil {
 		return err
 	}
-	updated, err := o.postDepositSuccess(ctx, tx, intent, *attempt.ProviderID, ev.ProviderReference, ev.Amount, ev.AssetCode)
+	_, postedTxID, err := o.postDepositSuccess(ctx, tx, intent, *attempt.ProviderID, ev.ProviderReference, ev.Amount, ev.AssetCode)
 	if err != nil {
 		return err
 	}
 	return ApplySuccess(ctx, tx, attempt.ID, SuccessEvidence{
-		Evidence: EvidenceCallback, ProviderReference: ev.ProviderReference, LedgerTransactionID: updated.LedgerTransactionID,
+		Evidence: EvidenceCallback, ProviderReference: ev.ProviderReference, LedgerTransactionID: &postedTxID,
 	})
 }
 

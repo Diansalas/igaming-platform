@@ -101,3 +101,160 @@ INV-IO-8's own definition), but a formal mutation-kill run for them was
 not performed in this session and is recorded here as outstanding, to be
 done alongside MX1-MX21/MX24 when the fuller PRH-I1 test suite (ADR 0095
 §16.2 items 1-22) is built in later steps.
+
+===========================================================================
+PRH-I1 deposit CUTOVER (step 5-of-i, this session): InitiateDeposit and
+ReceiveVerifiedCallback wiring
+===========================================================================
+
+Scope actually cut over in this pass: the httpserver deposit-INITIATION
+entry point (newInitiateDepositHandler) now calls InitiateDepositAttempt
+(deposit_v2.go) directly, with the REAL ADR 0096 KYC deposit gate
+(KYCEnforcementDepositGate, kycgate.go) wired in place of
+AllowAllDepositKYCGate (moved to kycgate_mock_test.go, a _test.go file, so
+it can never be reachable from non-test/production code).
+ReceiveVerifiedCallback/receiveDepositCallback (orchestrator.go) were
+DELIBERATELY NOT cut over to ApplyReceiptEvidence in this pass - see the
+handback report for the precise reason and remaining scope. The two
+mutations below therefore target the wiring that DID change; the
+"skip the KYC gate" example from the task is covered by mutation
+MX-KYC-SKIP.
+
+Harness: direct source substitution on the compiled .go source (a Python
+one-shot str.replace on an exact, assert-count()==1-verified anchor),
+built, run against a private scratch database (created via
+TEST_ADMIN_DATABASE_URL, migrated to head, granted per
+deploy/init-app-role.sql - never the shared TEST_DATABASE_URL), then
+restored byte-for-byte and confirmed clean via `go build` + a targeted
+`grep` for the mutation marker before continuing.
+
+MX-KYC-SKIP (skip the real KYC gate call in InitiateDepositAttempt's
+phase A):
+    Mutation: replaced the line
+        allowed, denyReason, err := kycGate.EvaluateDeposit(actx, tx,
+          intent.TenantID, intent.BrandID, intent.PlayerAccountID,
+          eligibility.PersonID, intent.Amount, intent.AssetCode)
+    in internal/payments/deposit_v2.go with
+        allowed, denyReason, err := true, "", error(nil)
+    (the gate is never called at all).
+    Killed by: TestInitiateDepositAttempt_RealKYCEnforcementGate_DeniesOverThreshold
+        (go test -tags=integration -count=1 ./internal/payments/...
+         -run TestInitiateDepositAttempt_RealKYCEnforcementGate_DeniesOverThreshold)
+    First failure observed:
+        --- FAIL: TestInitiateDepositAttempt_RealKYCEnforcementGate_DeniesOverThreshold
+            kyc_gate_cutover_integration_test.go:119: a real KYC deny
+            must never create an attempt
+    Restored: internal/payments/deposit_v2.go byte-identical to its
+    pre-mutation state (verified via `go build` succeeding and the
+    mutation marker comment absent).
+
+MX-AMOUNT-SKIP (remove the Amount<=0 rejection from
+validateInitiateDepositParams):
+    Mutation: deleted the
+        if p.Amount <= 0 { return fmt.Errorf(...) }
+    block from internal/payments/orchestrator.go's
+    validateInitiateDepositParams.
+    Result: NOT KILLED by
+    TestInitiateDepositAttempt_NonPositiveAmount_RejectedBeforeKYCEvaluation
+    (which uses a panic-on-call spyKYCGate to prove the KYC gate is never
+    reached for a non-positive amount). InitiateDepositAttempt still
+    returned an error for amount=0/-1/-1_000_000 with the Go-level check
+    removed, because deposit_intents.amount has an independent DB CHECK
+    (amount > 0, migration 0025) that rejects the INSERT before any
+    KYC-gate code runs regardless. This is a GENUINE, verified,
+    defense-in-depth finding, not a weak test: the security requirement
+    ("reject Amount <= 0 before evaluating") holds under this mutation via
+    a second, independent control, so no test can distinguish "the
+    Go-level check ran" from "the DB CHECK caught it" without inspecting
+    which specific error surfaced. Recorded here as an EQUIVALENT-MUTANT
+    finding rather than silently treated as a kill: the Go-level check
+    remains valuable (it avoids a wasted round trip to the database and
+    gives a typed, non-DB-driver error for callers), but this codebase's
+    zero-app-level-gap claim for this rule rests on the DB CHECK, not the
+    Go code alone.
+    Restored: internal/payments/orchestrator.go byte-identical to its
+    pre-mutation state (verified via `go build` succeeding and the
+    mutation marker comment absent).
+
+===========================================================================
+PRH-I5 finding fix (reported to `payments` by the reconciliation
+specialist mid-session, ADR 0095 §4.3 T13 / LF95-C6(a)): T13 second
+capture unique-violation
+===========================================================================
+
+Bug (as found): a late verified success for a DECLINED attempt whose
+SIBLING on the same deposit intent had ALREADY succeeded failed in
+ApplyReceiptEvidence with a `payment_attempts_tenant_ledger_tx` unique
+violation, because applyDepositSuccessAndPost (receipt.go) linked the
+attempt to `updated.LedgerTransactionID` - the INTENT's (i.e. the FIRST
+posting's) ledger_transaction_id - instead of the SECOND posting's own
+new transaction id. The verified success therefore rolled back and would
+have redelivered forever (LF-C1).
+
+Fix: postDepositSuccess (orchestrator.go) no longer short-circuits before
+calling ledger.Post when the intent is already 'succeeded'. It always
+calls ledger.Post (whose own (tenant_id, provider_id, provider_tx_id)
+idempotency naturally collapses an EXACT redelivery to the SAME
+transaction id, AlreadyPosted=true), and now returns the transaction id
+THIS CALL's own posting produced as a second, explicit return value,
+distinct from the (possibly unrelated) intent projection it also returns.
+For an intent already 'succeeded' (T13 or an exact redelivery),
+deposit_intents' own status/provider_reference/ledger_transaction_id are
+left untouched (T13's own row: "the intent's link is left alone if
+already set") - every caller (drive.go's applyDepositCallResult,
+sweeper.go, receipt.go's applyDepositSuccessAndPost) now links the
+ATTEMPT to postDepositSuccess's own returned transaction id, never to
+intent.LedgerTransactionID.
+
+New regression test (through the ACTUAL reported code path, not a
+hand-built SQL simulation):
+    TestReceipt_T13SecondCapture_ThroughApplyReceiptEvidence_LedgerBalanced
+    (internal/payments/receipt_integration_test.go) - builds a genuine
+    cascade (provider A declines cascadable, provider B's cascade child
+    settles pending and then succeeds via its own ApplyReceiptEvidence
+    call), then sends a LATE success receipt for the DECLINED PARENT's own
+    provider reference through ApplyReceiptEvidence (the exact reported
+    shape) and asserts: no error, disposition=applied, the parent moves
+    declined->succeeded with its OWN ledger_transaction_id (distinct from
+    the sibling's), the intent's own ledger_transaction_id is unchanged
+    (still the sibling's first posting), SUM(debits)==SUM(credits)
+    (assertLedgerBalanced) and every wallet_balance_projection row still
+    reproduces exactly from ledger_entries alone
+    (loAssertProjectionMatchesRebuild, the same check
+    lockorder_harness_test.go's own projection-vs-rebuild proof uses).
+
+Mutation-kill (reverting the fix): with applyDepositSuccessAndPost's
+`LedgerTransactionID: &postedTxID` reverted to
+`LedgerTransactionID: updated.LedgerTransactionID` (receipt.go),
+    go test -tags=integration -count=1 ./internal/payments/...
+      -run TestReceipt_T13SecondCapture_ThroughApplyReceiptEvidence_LedgerBalanced
+reproduces the EXACT reported bug:
+    --- FAIL: TestReceipt_T13SecondCapture_ThroughApplyReceiptEvidence_LedgerBalanced
+        receipt_integration_test.go:168: ApplyReceiptEvidence (T13 second
+        capture) must not fail (PRH-I5 finding): payments: T7/T13
+        ->succeeded: ERROR: duplicate key value violates unique
+        constraint "payment_attempts_tenant_ledger_tx" (SQLSTATE 23505)
+Restored: internal/payments/receipt.go byte-identical to its post-fix
+state (verified via `go build` succeeding).
+
+Full-suite confirmation after the fix: internal/payments,
+internal/reconciliation and internal/httpserver all pass under
+`-tags=integration` against a private scratch database; internal/payments
+also passes under `-race`. internal/kyc's own pre-existing
+TestMigration0100_UpDownUpRoundTrip/TestMigration0100_DownRefusesWhileDecisionsHoldRows
+failures are migration-0100/0102-ordering collateral, unrelated to
+payments and not touched by this session's diff - not investigated
+further here (out of PRH-I1 scope).
+
+TestMigration0082_DepositIntentsDenyTruncate (internal/payments) fix, also
+requested mid-session: migration 0101's payment_attempts -> deposit_intents
+FK made a bare `TRUNCATE deposit_intents` refused by PostgreSQL itself
+("cannot truncate a table referenced in a foreign key constraint") BEFORE
+the BEFORE-TRUNCATE deny trigger (ledger_deny_mutation) ever ran, so the
+test's assertion on the trigger's own "append-only" message started
+failing - a real refusal, but not the one under test. Fixed by using
+`TRUNCATE deposit_intents CASCADE` in the probe, which extends the
+truncate to payment_attempts/payment_provider_events and lets the deny
+trigger on deposit_intents itself fire and refuse the whole statement -
+verified directly via psql before editing the test. The assertion (the
+trigger's own append-only message) is unchanged and unweakened.

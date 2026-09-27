@@ -352,12 +352,14 @@ func (s *Sweeper) applyStatusEvidence(ctx context.Context, tx pgx.Tx, intent Dep
 		return setIntentAttempt(ctx, tx, intent.ID, attempt.ProviderID, &res.ProviderReference, DepositIntentPending)
 
 	case ErrorClassSucceeded:
-		updated, err := s.Orchestrator.postDepositSuccess(ctx, tx, intent, *attempt.ProviderID, res.ProviderReference, attempt.Amount, attempt.AssetCode)
+		// postedTxID, not updated.LedgerTransactionID - PRH-I5 finding
+		// (LF95-C6(a)/T13); see drive.go's identical comment.
+		_, postedTxID, err := s.Orchestrator.postDepositSuccess(ctx, tx, intent, *attempt.ProviderID, res.ProviderReference, attempt.Amount, attempt.AssetCode)
 		if err != nil {
 			return err
 		}
 		return ApplySuccess(ctx, tx, attempt.ID, SuccessEvidence{
-			Evidence: EvidenceQueryStatus, ProviderReference: res.ProviderReference, LedgerTransactionID: updated.LedgerTransactionID,
+			Evidence: EvidenceQueryStatus, ProviderReference: res.ProviderReference, LedgerTransactionID: &postedTxID,
 		})
 
 	case ErrorClassDefiniteDecline:
