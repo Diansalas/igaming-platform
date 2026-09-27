@@ -585,6 +585,88 @@ involved. Not fixed here: migrating the shared database is out of scope
 and risky while other concurrently-running agent sessions rely on its
 current state (this task's own instruction to keep edits minimal and avoid
 contention).
+
+================================================================================
+RV-PRH-I1 FIX ROUND (independent code review NOT READY +
+ledger-finance REJECT/veto): C1/B1, H1-H4/B2-B7, M1-M5. Same method/
+environment as the sections above (manual, anchored mutations against
+depositV2ScratchPool scratch databases, each reverted to byte-identical
+source, verified via `git diff --stat`/`git status --short`). Date:
+2026-09-27.
+
+PM-PAYOUT-8 (H1, ledger-finance CRITICAL): dispatchPayoutAttempt's evidence
+kind changed from EvidenceSync back to EvidenceSweeper (the exact defect
+the review found).
+    go test -tags=integration -run 'TestPayoutDispatch_T2Resend_SyncSuccess_SettlesConcreteBalances|TestPayoutDispatch_T2Resend_SyncDecline_ReleasesConcreteBalances' ./internal/payments/...
+KILLED (both):
+    reclaimPayoutCreated: payments: T7/T13 ->succeeded: ERROR: payment_attempts:
+    ->succeeded requires last_evidence_kind in (sync, callback, query_status),
+    got sweeper (id=...) (SQLSTATE P0001)
+    reclaimPayoutCreated: payments: T8 ->declined: ERROR: payment_attempts: a
+    payout ->declined requires last_evidence_kind in (sync, callback,
+    query_status), got sweeper (id=...) (SQLSTATE P0001)
+This reproduces the ledger review's own probe-B finding exactly (a
+sweeper-driven resend's definite outcome rolled back the whole transaction,
+including the release/settle posting, stranding the hold or losing the
+settlement).
+Restored: internal/payments/payout_sweep.go byte-identical (git diff clean).
+
+PM-PAYOUT-9 (M1/B4): applyPayoutStatusEvidence's `pending` (attempt state)
++ `Pending` (gr.Class) branch - the still-pending no-op reschedule -
+replaced with a call to MarkAccepted (the transition ApplyPayoutResult
+uses for a FRESH acceptance, invalid here since the attempt is already
+`pending`).
+    go test -tags=integration -run TestPollPayoutStatus_StillPending_Reschedules ./internal/payments/...
+KILLED:
+    PROBE-C regression: still-pending poll errored instead of rescheduling:
+    payments: T4/T9 ->pending: payments: payment_attempts CAS transition conflict
+Restored: internal/payments/payout.go byte-identical after a `gofmt -w`
+re-normalization (git diff clean; the pre-existing HEAD copy of this file
+had one line of stale alignment gofmt itself corrects independently of
+this mutation - confirmed by running gofmt on the untouched HEAD copy
+separately, not part of the mutation/revert cycle).
+
+PM-PAYOUT-10 (C1/B1, ledger-finance's hard veto): resubmitPayoutAmbiguous's
+`if !manifest.IdempotentSubmission { escalate }` / `if attempt.SubmitCount
+>= s.maxResubmits() { escalate }` guards removed entirely (replaced with
+`_ = manifest`, so the Go-level gate never runs at all).
+    go test -tags=integration -run TestSweeper_T12_NonIdempotentManifest_NeverResends ./internal/payments/...
+KILLED:
+    PROBE-A regression: 3 Withdraw calls to a non-idempotent provider for
+    one withdrawal (expected exactly 1)
+This reproduces the ledger review's own probe-A finding (an unbounded
+resend loop against a non-idempotent provider). Restored:
+internal/payments/payout_sweep.go byte-identical (git diff clean).
+
+Not independently re-mutated in this round (covered by this round's own
+test suite failing during development, not as a separately re-run tracked
+mutant): H2/B3 (removing the
+amount/asset check in applyPayoutSuccessCheckedFromStatus is exactly what
+TestPollPayoutStatus_AmountMismatch_Disputes/AssetMismatch_Disputes exist
+to catch - the PRE-FIX code, with no check at all, is the documented
+probe-D failure the ledger review already reproduced); H3/B2 (removing
+`next_action_at = $15`/`$5`/`$4` from InsertSubmittingAttempt/
+ClaimCreatedForSubmission/ResubmitAmbiguous is exactly what
+TestClaimForDispatch_NextActionAtSet_CrashRecovery exists to catch); H4/B7
+(removing the QueryStatus-inside-tx fix would be a revert of the whole
+handler rewrite, not a small mutation - covered instead by the full
+existing `-run Withdraw` httpserver regression suite passing, 30/30, on a
+freshly-migrated-to-head private database).
+
+Full confirmation after every revert in this round: `git status --short`
+shows no diff on any touched file; the full new fix-round test file
+(internal/payments/payout_dispatch_fixround_test.go, 20 tests) plus the
+pre-existing 14 payout tests plus 3 deposit-sweeper regression tests (44
+total) pass under `-tags=integration`, and under `-race` for the same set;
+internal/withdrawal, internal/kyc, and internal/httpserver's `-run
+Withdraw` suite (30 tests) all pass on a private database freshly migrated
+to head (0105); the two pre-existing internal/payments failures against
+the SHARED TEST_DATABASE_URL (kyc_gate_cutover_integration_test.go,
+migration 0101 not applied there - see docs/runbooks/migration-0101-
+payment-attempts-remediation.md) are confirmed unrelated to this round,
+reproducing identically before and after every change in this diff.
+
+================================================================================
 --- PRH-payments-callback-cutover round 2 (2026-09-27): full internal/payments test migration + gap closure ---
 
 Migrated all ~13 remaining internal/payments test files off the legacy

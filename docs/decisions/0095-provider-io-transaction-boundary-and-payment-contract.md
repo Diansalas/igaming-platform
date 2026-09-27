@@ -2393,6 +2393,38 @@ own pre-flight guard, an unrelated, pre-existing data-hygiene issue - see ADR 00
 identical note). Mutation evidence (corrected, superseding §15.3.2's original file):
 `docs/plans/payment-readiness/evidence/prh-i2-kyc-mutation-kill.txt`.
 
+#### 15.3.4 Fix record (second code re-review + security re-verification, 2026-09-27)
+
+Full record of this round in ADR 0096 §20 (KYC enforcement's own ADR is the fuller home for
+most of this round's findings, since N-1/the mirror race are enforcement/staff-decision
+concerns, not transaction-boundary concerns per se). Two items belong here, in §15.3, because
+they correct/extend this section's own phase-C description:
+
+- **Phase C is forward-only for the callback path too, not only for `SubmitVerification`'s own
+  phase C.** §15.3.3's R1 fix (`applyForwardOnlyStatus`) already applied to `SubmitVerification`;
+  the callback path (`applyCallbackOutcome`, `internal/kyc/provider.go`) had always carried the
+  identical forward-only rank rule, but as a SECOND, separately hand-maintained copy of the same
+  loop rather than a shared call. Code re-review's N6 consolidated both onto the one shared
+  `applyForwardOnlyStatus` function - no behavioural change (both copies already implemented the
+  identical rank rule; verified by the full pre-existing callback suite passing unchanged after
+  the refactor), but this removes the risk of the two copies silently drifting apart in a future
+  change. Stated explicitly for this section's own record: a `review_required` decision, once
+  written by either path, is never demoted back to `pending` by a later submission result OR a
+  later callback - both paths only ever move a verification's status forward along
+  `statusRank` (unverified < pending < review_required < terminal), silently no-op'ing (not
+  erroring) on a would-be backward or same-rank write.
+- **`ReviewVerification` (staff review - approve/reject/require-more-documents) now also CAS's,
+  but with different failure semantics than the provider/callback paths' own silent no-op.** This
+  function sits outside §15.2/§15.3's own phase A/B/C shape (it has no provider call of its own),
+  but shares the SAME underlying hazard the forward-only CAS above addresses: a concurrent
+  provider submission or callback landing between `ReviewVerification`'s own read and its
+  `UPDATE` could previously overwrite, or be overwritten by, the staff decision with no error to
+  either side. Fixed with its own CAS against the status `ReviewVerification`'s own read observed
+  and a new sentinel, `ErrVerificationStatusConflict`, on a lost race - **deliberately NOT a
+  silent no-op like `applyForwardOnlyStatus`**: a staff decision is a deliberate, one-time human
+  judgment call, not a replayable provider transition, so a lost race must surface as a visible
+  conflict the staff member can see and retry with fresh information. Full record: ADR 0096 §20.3.
+
 ---
 
 ## 16. Failure injection and required tests
@@ -4046,4 +4078,77 @@ direct §6.2/S95-C4 uniform-response-body HTTP test
 showed the wall-clock-threshold flakiness their own doc comments already disclose under this host's
 concurrent multi-agent load during the combined run, and passed cleanly re-run alone - neither
 touches any code path this round changed). No test was deleted, skipped, or weakened.
+
+### 27.11 PRH-payments-payout-dispatch implementation record (`payments`, 2026-09-27)
+
+**Scope.** T1p/phase-B/phase-C payout dispatch (`ClaimForDispatch`/`DispatchWithdraw`/
+`ApplyPayoutResult`, `internal/payments/payout.go`), the sweeper's T2 re-claim and T12
+resubmission (`internal/payments/payout_sweep.go`), and `internal/httpserver`'s submit/resolve
+handlers. Went through two independent review rounds (`code-reviewer`: NOT READY;
+`ledger-finance`: REJECT with a hard veto on C1) before reaching the state recorded here; both
+reviews are filed at `docs/plans/payment-readiness/rv-prh-i1-payout-code-review.md` and
+`rv-prh-i1-payout-ledger.md`, and every finding (C1, H1-H4, M1-M5, L1-L3, plus the independent
+review's B1-B8) is addressed or explicitly disclosed as open in this record.
+
+**Fail-closed choices made where this ADR is silent (per the orchestrator's standing
+instruction):**
+
+1. **§4.3 T12's exact convergence order.** The ADR requires `IdempotentSubmission &&
+   submit_count < max_resubmits` before any resend, but does not fix whether a QueryStatus poll
+   must happen before or interleaved with that check. Chosen: **poll first, unconditionally, if
+   a reference exists at all** (`resubmitPayoutAmbiguous`) - only if the attempt is STILL
+   `ambiguous` after that poll does the manifest/cap gate even run. This is the more
+   conservative reading of §4.5's "ambiguous plus a poll is the default": a poll can never make
+   things worse (it is always safe/idempotent at the provider), so it is never skipped as an
+   optimization.
+2. **A submitting attempt with no provider reference and an expired lease** (H3/B2 - e.g. the
+   process crashed between phase A and phase B, or phase B's own credential resolution failed
+   before ever reaching the provider). The ADR's T6 trigger list ("lease expired and QueryStatus
+   not definitive") presumes a reference to query. With none, `PollPayoutStatus` moves the
+   attempt directly to `ambiguous` (T6) rather than rescheduling forever - fail-closed in the
+   sense that the platform can never prove the call was NOT sent, so it treats it as possibly
+   sent (never a plain re-claim/T2, which requires proof of never-sent, per INV-IO-9).
+   **Disclosed limitation:** this ADR's CP-W1/§4.5 "QueryStatus by merchant reference" recovery
+   path is NOT implemented - `PaymentProvider.QueryStatus` takes only a provider reference in
+   this codebase's current contract, and no adapter (including the mock) supports a
+   merchant-reference lookup. Building that is a provider-contract change, out of scope for this
+   round; recorded here rather than silently assumed complete.
+3. **A kill-switch block (migration 0105, built concurrently by another agent) at T2/T12.**
+   Neither this ADR nor ADR 0096 specifies how a transient kill-switch refusal should be
+   distinguished from a permanent KYC-deny escalation. Chosen: a kill-switch block **reschedules**
+   (a plain backoff, `RescheduleNonTerminal`), never `Escalate`/T16 - unlike a KYC deny, there is
+   no compliance decision to record and no human action required to clear it; the exact same
+   claim/resend is safe and expected to retry automatically once the switch is released.
+4. **A7's attempt-before-posting lock order, applied to phase C's late/contradicting-evidence
+   case (M4).** The ADR names T14 (`declined -> disputed`) for "success after a declined
+   payout" but does not specify how phase C notices the contradiction structurally. Chosen: on
+   an `ErrAttemptStateConflict` from `ApplySuccess`/`ApplyDecline`, re-read the attempt's actual
+   current state and route to T14 (if `declined`) or T10 (any other unexpected state) with a P1
+   audit record (`payments.payout_late_contradicting_evidence`) - never a bare rollback that
+   reduces the signal to a log line.
+5. **Decline-reason sanitization (B8/S95-C10).** No enum of canonical payout decline reasons
+   exists yet anywhere in this codebase. Chosen: a small, conservative allow-list
+   (`canonicalDeclineReason`) covering the mock adapter's own declared reasons plus a generic
+   `provider_declined` fallback for anything else - deliberately minimal pending a real PSP
+   integration's own vendor code list; recorded as a fail-safe default, not a complete taxonomy.
+
+**Not implemented, disclosed (tracked, not silently assumed done):**
+- CP-W1 merchant-reference QueryStatus (item 2 above).
+- Cascade-on-decline for payouts (unchanged from the original scope note in `payout.go`'s own
+  package doc comment - a separate, not-yet-authorized product decision, `PAY-PAYOUT-CASCADE-1`).
+- Attempt-transition audit records for every T2/T4/T6/T9/T11 transition (only T1p claim/deny,
+  T12 resend/escalate, and terminal outcomes are audited) - shared gap with the deposit side,
+  named but not closed by this round (independent review B8).
+- M1/M2 (force-resolve of an unresolvable payout / disputed attempt) remain BLOCKED on HD-0095-1,
+  unchanged.
+
+**Verification.** 44 payout-specific tests (`payout_dispatch_integration_test.go` +
+`payout_dispatch_fixround_test.go`) plus the full `internal/payments`, `internal/withdrawal`,
+`internal/kyc` suites and `internal/httpserver`'s 30 withdrawal tests pass under
+`-tags=integration` on a private database freshly migrated to head (0105); the payout/concurrency
+subset also passes under `-race`. Mutation evidence (10 payout-specific mutants across both review
+rounds, each killed and reverted to byte-identical source) is filed at
+`docs/plans/payment-readiness/evidence/prh-i1-mutation-kill.txt`. The migration-0101 pre-flight
+remediation runbook ledger-finance's review required is filed at `docs/runbooks/migration-0101-
+payment-attempts-remediation.md`.
 

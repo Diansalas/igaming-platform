@@ -242,6 +242,14 @@ func newReviewVerificationHandler(deps Deps) http.HandlerFunc {
 			apierror.Write(w, requestID, apierror.CodeConflict, err.Error())
 			return
 		}
+		if errors.Is(err, kyc.ErrVerificationStatusConflict) {
+			// Mirror race fix (RV-PRH-I2 KYC code review): the verification
+			// moved (a concurrent submission or callback) between this
+			// call's own read and its write - a genuine, actionable
+			// conflict for the reviewer, never a silent no-op.
+			apierror.Write(w, requestID, apierror.CodeConflict, "verification status changed; reload and try again")
+			return
+		}
 		if err != nil {
 			logger.Error("review_verification_failed", "error", err)
 			apierror.Write(w, requestID, apierror.CodeInternal, "failed to review verification")

@@ -2837,9 +2837,13 @@ compliance`'s scope to fix).
 
 Scope: `identity-compliance`'s own PRH-I2 (KYC part) code review
 (`docs/plans/payment-readiness/rv-prh-i2-kyc-code-review.md`, finding F1) and security review
-(`docs/plans/payment-readiness/rv-prh-i2-kyc-security.md`, cross-account overlay note in §4
-item 1) both flagged the same gap in this ADR's own §2.6 read semantics, surfaced by ADR
-0095's KYC create/submit split (§15.2's orphan row). `identity-compliance` owns both ADRs and
+(`docs/plans/payment-readiness/rv-prh-i2-kyc-security.md`, "Verified (no finding)" §, F1
+adversarial-analysis point 2) both flagged the same gap in this ADR's own §2.6 read semantics,
+surfaced by ADR 0095's KYC create/submit split (§15.2's orphan row). **Citation correction
+(security re-verification, 2026-09-27):** this section originally cited a "§4 item 1 note" in
+the security review; no such section exists in that document. The overlay-masking point this
+round closes was code review's own F1, not a separate security-review section — corrected here.
+`identity-compliance` owns both ADRs and
 is the specialist explicitly authorized (by the orchestrating task that requested this round)
 to change `internal/kyc/enforcement.go`'s read semantics for this one, narrowly-scoped case,
 coordinated with §2.6 and with security's own N1 text (§2.6 already cites N1 for the
@@ -2866,10 +2870,21 @@ and left the approval as the latest row untouched. The identical mechanism appli
 on account B, newer than B's own decided rejection, would mask that rejection from account A's
 withdrawal check.
 
-This is a **fail-closed** defect in the sense that it never lets a real deny through as an
-allow — it manufactures a spurious DENY, never a spurious ALLOW. It is nonetheless a
-correctness defect: `internal-only` outages must not be able to interrupt a player's own
-already-decided, still-valid compliance state.
+This is a **fail-closed** defect for the PRIMARY read (`readLatestVerificationByPlayerAccount`)
+in the sense that it never lets a real deny through as an allow there — it manufactures a
+spurious DENY, never a spurious ALLOW, on that read alone. It is nonetheless a correctness
+defect: `internal-only` outages must not be able to interrupt a player's own already-decided,
+still-valid compliance state.
+
+**Correction (security re-verification of fix round `492cb20`, `rv-prh-i2-kyc-security.md`,
+adversarial analysis point 2, 2026-09-27):** the paragraph above, as originally written, is
+INACCURATE for the OTHER function this round also touches, `crossAccountRejectedOverlay`.
+Before this round's fix, a newer orphan on a REJECTED account B did mask B's own rejection in
+the overlay — that is a genuine deny→allow, not merely a spurious deny. This round's fix (§19.2)
+closes that too, but the claim above that the pre-fix defect "never lets a real deny through as
+an allow" was wrong for the overlay half specifically; it was accurate only for the primary
+read. This correction does not change §19.2's fix itself, which already closed both cases -
+it corrects this section's own characterization of what the fix closed.
 
 ### 19.2 The fix
 
@@ -2915,10 +2930,206 @@ database migrated to head (0104).
   `readLatestVerificationByPlayerAccount`/`crossAccountRejectedOverlay` now exclude never-decided
   orphan rows from "latest" selection; ADR 0096 §2.6 gains point (g); ADR 0095 §15.2's own
   "no enforcement effect" claim is corrected there (§15.3.3).
-- **Cross-account overlay masking (security review, §4 item 1's own note):** the SAME fix
-  closes the specific "an orphan masks a rejection" shape that note names; the note's own
-  broader framing ("any newer row on the rejected account masks the rejection") is otherwise
-  unchanged — a genuinely NEW DECIDED row on the rejected account (e.g. a fresh, still-pending
-  re-verification) still supersedes the rejection exactly as §2.6(a)'s ordinary "latest row"
-  rule intends, which is correct, not a residual gap this round leaves open.
+- **Cross-account overlay masking (code review F1):** the SAME fix closes the specific "an
+  orphan masks a rejection" shape F1 names.
+- **CORRECTED (security re-verification, 2026-09-27 — see §20 below):** the sentence
+  originally here claimed that a fresh, still-`pending` re-verification on the rejected
+  account superseding the rejection "is correct, not a residual gap this round leaves open".
+  That claim was WRONG and has been retracted, not merely reworded: security's own N-1 finding
+  showed this is exactly how a player neutralises the cross-account overlay with one ordinary
+  API call, without the rejection ever being resolved. §20 records N-1's fix, which narrows the
+  overlay to each other account's latest FINAL row only — a merely-`pending`/`review_required`
+  re-verification no longer supersedes a rejection. See §20 for the corrected rule; this
+  paragraph is kept, struck through in substance, to preserve an honest record of the mistake
+  rather than silently deleting it.
 - **Everything else in this ADR** (§14-§18's own labels) is unchanged by this round.
+
+## 20. Fix round 6 (2026-09-27) — RV-PRH-I2 KYC code re-review N1-N6, security re-verification N-1/N-2
+
+Scope: `identity-compliance`'s own second fix round, responding to two coordinator-relayed
+messages: (1) code re-review of fix round `f7a0da0` (verdict "READY once N1 is corrected"),
+covering N1-N6 plus a mirror `ReviewVerification` race assigned directly to
+`identity-compliance` ("you own the KYC code"); (2) security re-verification `b4b225e`, adding
+N-1 (HIGH, pre-existing, blocks production launch) and N-2 (LOW, C5 untested).
+
+### 20.1 N1 — M8's evidence corrected, test un-vacuumed
+
+Fix round 5's own C4 change (`gatherSubmissionDocuments` treats an empty document set as a
+separate, legitimate no-op) made `TestSubmitVerification_TerminalVerificationIsANoOp`
+vacuous: it never seeded a document, so it passed identically whether the terminal guard
+existed or not. Fixed by seeding a document on the verification before moving it to a terminal
+status, restoring the test's discriminating power; re-verified by mutation (see
+`docs/plans/payment-readiness/evidence/prh-i2-kyc-mutation-kill.txt`, §2.5, M8-reverify). The
+evidence file's own prior "17/17" claim is corrected there as well — it was never accurate once
+M8 stopped genuinely killing anything, a fact neither this round's own predecessor nor the
+original submission had caught before code re-review flagged it.
+
+### 20.2 N-1 — cross-account overlay narrowed to each other account's latest FINAL row
+
+**This is an orchestrator engineering decision, pending review by the `architect` and by
+`identity-compliance` itself (the coordinator will dispatch those reviews separately) — not
+a unilateral redesign of shared enforcement architecture.** It is recorded here because it
+changes `crossAccountRejectedOverlay`'s own read semantics (§2.6, §19.2's own predicate), and
+because §19's own text needed correcting regardless (§19.1, §19.4 above).
+
+**The defect (security re-verification N-1, HIGH, pre-existing — predates fix round 5, predates
+this ADR's own original design; not introduced by PRH-I2's transaction-boundary split):** the
+overlay's "each OTHER account's own latest DECIDED row" read (§19.2's fix) counted a merely
+`pending`/`review_required` row as decided, identically to a terminal `approved`/`rejected`/
+`expired` row. A player with a rejection on account B could neutralise the overlay's deny on
+account A with one ordinary API call — start a new verification on B; it need not ever be
+approved — because the instant B's new row lands as `pending`, it becomes B's own "latest
+decided" row and the rejection is no longer the row `crossAccountRejectedOverlay` sees.
+Reproduced exactly as security review's own probe: account A approved, account B rejected,
+withdrawal from A denied; player calls `CreateVerification` on B, mock returns `pending`;
+withdrawal from A becomes ALLOWED. Fix round 5's own §19.4 text called this "correct, not a
+residual gap" — that was wrong (corrected above, and retracted, not merely reworded).
+
+**The fix:** `crossAccountRejectedOverlay`'s inner "latest row per OTHER account" subquery now
+selects only from each other account's rows whose status is FINAL — `approved`, `rejected`, or
+`expired` (`finalStatusesSQL`, `internal/kyc/enforcement.go`) — never `pending`,
+`review_required`, or a never-decided orphan (unchanged from §19.2: orphans stay excluded
+regardless). A rejection on another account is now lifted ONLY by a LATER final decision on
+that SAME account — ordinarily `approved`, but symmetrically also by a later `expired`/
+`rejected` re-decision, which simply keeps the deny in force under a fresh terminal row rather
+than under the stale one. A merely-in-progress re-verification attempt (`pending`,
+`review_required`) can never, by itself, lift the deny — closing exactly the gap N-1 describes.
+
+**The primary-account rule is UNCHANGED.** `readLatestVerificationByPlayerAccount` (the gated
+account's OWN latest row, §2.6(a)) still includes non-final rows exactly as before — a fresh
+`pending` on the account BEING withdrawn from still supersedes that SAME account's own prior
+approval (this is the pre-existing, intentional "success path supersedes a pending row"
+behaviour §19.2 itself already preserved, unaffected by this round). N-1's fix touches ONLY the
+cross-account overlay's OTHER-account subquery.
+
+**Consumer-path scope (verified by reading every `EvaluateEnforcement` call site, not merely
+grepping the overlay function's own name):** `crossAccountRejectedOverlay` is called from
+exactly one place, `evaluateWithdrawalStructuralRule`, reached only for withdrawal operations.
+`internal/payments/kycgate.go` (deposit) and `internal/casino/orchestrator.go`/
+`internal/sportsbook/orchestrator.go` (play) all call `EvaluateEnforcement`, but for
+deposit/play operations, which route to `evaluateDepositThreshold`/`evaluatePlayTrigger`
+instead — neither of which ever calls the overlay. Deposit and play were never affected by N-1
+and require no change.
+
+**Tests (mutation-verified — `docs/plans/payment-readiness/evidence/prh-i2-kyc-mutation-kill.txt`
+§2.5, N-1):** `internal/kyc/enforcement_integration_test.go` gains
+`TestEvaluateEnforcement_N1_FreshPendingVerificationDoesNotLiftRejection` (the exact reproduced
+sequence — a fresh `pending` on the rejected account must never lift the deny),
+`TestEvaluateEnforcement_N1_ReviewRequiredDoesNotLiftRejection` (same, for `review_required`),
+`TestEvaluateEnforcement_N1_LaterFinalApprovedLiftsRejection` (a LATER final `approved` on that
+same account DOES lift the deny — the fix's own positive case), and
+`TestEvaluateEnforcement_N1_OrphanOnRejectedAccountDoesNotLiftRejection` (an orphan on the
+rejected account changes nothing, per §19.2's unaffected predicate).
+
+**Policy item, not a new human decision unless `identity-compliance` says otherwise:** the
+pre-existing "a staff `review_required` escalation is not sticky against a later provider/
+callback `approved`" behaviour (statusRank: review_required=2 < terminal=3, so a vendor
+auto-approval can still move a row forward past a staff escalation) is left AS-IS by this round.
+It is not touched by N-1 and is not itself a new finding — recorded as a policy item for
+`identity-compliance` in `docs/governance/task-registry.md`, per the coordinator's explicit
+instruction not to treat it as a new human decision unilaterally.
+
+### 20.3 Mirror race — `ReviewVerification` now CAS's against the status it read
+
+Assigned directly to `identity-compliance` ("you own the KYC code"): `ReviewVerification`
+(staff decisions — approve/reject/require-more-documents) performed a read-then-update with NO
+status predicate, unlike `SubmitVerification`'s phase C and the callback path, which both CAS
+against `applyForwardOnlyStatus`'s forward-only rank rule. A concurrent provider submission or
+callback landing between `ReviewVerification`'s own read and its `UPDATE` could be silently
+overwritten by the staff write, or vice versa, with no error to either side.
+
+**The fix:** the `UPDATE` now carries `AND kyc_verifications.status = $6` (the status
+`ReviewVerification`'s own read observed). On a lost race (`pgx.ErrNoRows`), it returns the new
+sentinel `ErrVerificationStatusConflict` rather than silently no-op'ing. **This is deliberately
+DIFFERENT from the provider/callback paths' own `applyForwardOnlyStatus`, which silently no-ops
+on a lost race (safe there — a provider-driven transition is naturally retryable/idempotent).
+A staff decision is not**: it is a deliberate, one-time human judgment call, not a replayable
+provider transition, so a lost race must surface as a conflict the staff member can see and
+retry with fresh information, never disappear silently. `internal/httpserver/
+kyc_admin_handlers.go`'s review handler maps `ErrVerificationStatusConflict` to 409 Conflict.
+
+**Test (mutation-verified — evidence file §2.5, "Mirror race"):**
+`TestReviewVerification_ConcurrentSubmissionDuringReview_ReturnsConflict`
+(`internal/kyc/kyc_two_phase_integration_test.go`) uses a package-level test-only hook
+(`reviewVerificationTestRaceHook`, nil in production) to run a genuine concurrent
+`SubmitVerification` call between `ReviewVerification`'s own read and write, in the same P1/P2
+race style fix round 5's own R1 tests use. Requires a multi-connection pool (`testPool`, not
+`testPoolSized(t, 1)`) since the hook runs a genuinely separate transaction on a separate
+connection.
+
+### 20.4 N6 — one shared forward-only CAS loop, not two hand-maintained copies
+
+`applyCallbackOutcome` (the provider callback path) previously carried its own, separately
+hand-maintained copy of the identical forward-only rank/CAS loop `SubmitVerification`'s own
+phase C uses via `applyForwardOnlyStatus`. Refactored so `applyCallbackOutcome` now calls the
+SAME shared `applyForwardOnlyStatus` — one loop, not two copies that could silently drift apart.
+No behavioural change; verified by the full pre-existing callback test suite plus the full
+`internal/kyc` suite, both green after the refactor. Stale comments claiming the callback path
+had "no enforcement effect" from this consolidation are corrected in-line.
+
+**Phase C is now forward-only for BOTH paths, and this correction applies retroactively to
+ADR 0095 §15.3's own description:** a `review_required` decision can no longer be demoted back
+to `pending` by either a later submission result or a later callback — both paths only ever
+move a verification's status FORWARD along `statusRank` (unverified < pending < review_required
+< terminal), never backward, silently no-op'ing (not erroring) when a lower-rank result would
+otherwise have been written. This was already true for `SubmitVerification`'s own phase C since
+fix round 5's R1 fix; N6 only removes the duplicate implementation, it does not change this
+behaviour, but ADR 0095 §15.3 is amended (see that document) to state it applies to the
+callback path too, since its own text had described only the submission path.
+
+### 20.5 N3/N-2/C5 — `RedactedProviderErrorDetail` unit-tested
+
+Both code re-review (N3) and security re-verification (N-2, closing C5) independently flagged
+the same gap: `RedactedProviderErrorDetail`'s default branch (an unclassified error returns the
+fixed string `"internal error (redacted)"`) had no test, so a "return the raw error text
+instead" mutant survived undetected. Closed with
+`internal/kyc/redacted_provider_error_detail_test.go` (new, no build tag — a pure unit test) and
+`internal/httpserver/kyc_create_verification_log_redaction_test.go` (new, build-tag
+`integration` — an end-to-end companion proving the redaction survives through to the
+`CreateVerification` handler's own structured log line). Mutation-verified (evidence file §2.5).
+
+### 20.6 N5 — orphan verifications fail closed on upload and submit
+
+A verification with `provider_reference IS NULL` (an orphan — `CreateVerification`'s own phase
+B never completed, ADR 0095 §15.2) had no explicit guard against a document upload or a submit
+attempt. A submit attempt against such a row would have sent an EMPTY reference string to the
+provider, which is malformed and PROVIDER DEPENDENT with a real vendor. Fixed with a new
+sentinel, `ErrVerificationNotSubmitted`, checked in both `UploadDocument` and
+`SubmitVerification` independently (defense in depth — `SubmitVerification` is itself an
+exported, independently callable entry point). `internal/httpserver/kyc_handlers.go` maps the
+sentinel to 409 Conflict with guidance to start a new verification. Mutation-verified (evidence
+file §2.5).
+
+### 20.7 Verification (fix round 6)
+
+`gofmt -l .`, `go build ./...`, `go vet ./...`, `go vet -tags integration ./...`, and
+`golangci-lint run ./...` (no build tags, matching this repository's own CI invocation) all
+report clean/0 issues. `go test -tags integration -race -count=1 ./internal/kyc/...`,
+`go test -tags integration -race -count=1 ./internal/httpserver/... -run 'KYC|Kyc'`,
+`go test -tags integration -race -count=1 ./internal/withdrawal/...`, and
+`go test -tags integration -race -count=1 ./cmd/platform-api/...` all pass, against private
+databases (never the shared `igaming_platform_ci_local` instance). Full mutation-kill evidence:
+`docs/plans/payment-readiness/evidence/prh-i2-kyc-mutation-kill.txt`, §2.5.
+
+### 20.8 Labels (round 6 summary)
+
+- **N1 (code re-review):** IMPLEMENTED — test corrected, M8 evidence corrected.
+- **N2 (code re-review):** IMPLEMENTED — misleading comment and merged doc-comment block fixed.
+- **N3 / N-2 / C5 (code re-review + security):** IMPLEMENTED — unit + end-to-end tests added,
+  mutation-killed.
+- **N4 (code re-review):** IMPLEMENTED — `status_applied` audit flag test added, mutation-killed.
+- **N5 (code re-review):** IMPLEMENTED — orphan fail-closed guards added to both call sites,
+  mutation-killed.
+- **N6 (code re-review):** IMPLEMENTED — shared `applyForwardOnlyStatus` loop, no behavioural
+  change, verified.
+- **Mirror race (identity-compliance's own KYC code, assigned by code re-review):**
+  IMPLEMENTED — `ReviewVerification` now CAS's and fails closed with
+  `ErrVerificationStatusConflict` on a lost race, mutation-killed.
+- **N-1 (security re-verification, HIGH):** IMPLEMENTED as an orchestrator engineering decision
+  (§20.2) — pending `architect` and `identity-compliance` review, to be dispatched separately by
+  the coordinator. Not yet a fully closed finding until that review completes.
+- **review_required → approved forward move (security review, §19.2's "residual" note):** left
+  as-is, recorded as a policy item for `identity-compliance` in
+  `docs/governance/task-registry.md` — not a new human decision unilaterally.
+- **Everything else in this ADR** (§14-§19's own labels, except the §19.1/§19.4 corrections
+  above) is unchanged by this round.

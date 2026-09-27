@@ -438,6 +438,17 @@ func TestSubmitVerification_TerminalVerificationIsANoOp(t *testing.T) {
 	pool := testPoolSized(t, 1)
 	f := seedFixture(t, pool)
 	verificationID := seedVerification(t, pool, f)
+	// N1 (RV-PRH-I2 KYC code re-review): a document is REQUIRED here, seeded
+	// while the verification is still non-terminal. Without it, C4's own
+	// "empty document set is a no-op" skip (§ above) would ALSO produce
+	// `called == false` even if gatherSubmissionDocuments' terminal guard
+	// were removed entirely - the two no-op paths would be indistinguishable,
+	// making this test pass regardless of whether the terminal guard exists
+	// (confirmed: removing the terminal guard alone left this test green
+	// until this document was added). Seeding a document here is what makes
+	// `called == false` actually PROVE the terminal guard fired, not merely
+	// that there was nothing to submit.
+	seedDocument(t, pool, f, verificationID, DocumentPassport, "p.png")
 	staffID := seedComplianceStaff(t, pool, f)
 	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := ReviewVerification(ctx, tx, ReviewVerificationParams{
@@ -468,14 +479,6 @@ func TestSubmitVerification_TerminalVerificationIsANoOp(t *testing.T) {
 	}
 }
 
-// independentSubmissionIdempotencyKey computes ADR 0095 §15.3's documented
-// key shape ("ks:" + verification id + ":" + sha256(sorted document ids,
-// NUL-separated)) from FIRST PRINCIPLES - crypto/sha256 and sort.Strings
-// called directly here, never through submissionIdempotencyKey itself - so
-// a test asserting against this is not tautological (RV-PRH-I2 KYC code
-// review F3/MD: the original test called submissionIdempotencyKey to
-// compute its own "expected" value, which cannot detect a bug IN
-// submissionIdempotencyKey, e.g. a dropped sort.Strings).
 // TestSubmissionIdempotencyKey_SortsDocumentIDs is submissionIdempotencyKey's
 // OWN direct unit test (no database), added because
 // TestSubmitVerification_IdempotencyKeyStableForMultiDocumentSet's own
@@ -485,7 +488,8 @@ func TestSubmitVerification_TerminalVerificationIsANoOp(t *testing.T) {
 // so that integration test alone cannot distinguish "submissionIdempotencyKey
 // sorts its own input" from "its caller already handed it pre-sorted
 // input" (removing sort.Strings there is a SURVIVING, not merely
-// equivalent, mutant against that test alone). This test calls
+// equivalent, mutant against that test alone - confirmed: code review's own
+// re-verification reproduced the survival). This test calls
 // submissionIdempotencyKey directly with two DELIBERATELY differently-
 // ordered slices of the identical three document ids and requires the
 // SAME key from both - a removed sort.Strings makes them diverge.
@@ -506,6 +510,14 @@ func TestSubmissionIdempotencyKey_SortsDocumentIDs(t *testing.T) {
 	}
 }
 
+// independentSubmissionIdempotencyKey computes ADR 0095 §15.3's documented
+// key shape ("ks:" + verification id + ":" + sha256(sorted document ids,
+// NUL-separated)) from FIRST PRINCIPLES - crypto/sha256 and sort.Strings
+// called directly here, never through submissionIdempotencyKey itself - so
+// a test asserting against this is not tautological (RV-PRH-I2 KYC code
+// review F3/MD: the original test called submissionIdempotencyKey to
+// compute its own "expected" value, which cannot detect a bug IN
+// submissionIdempotencyKey, e.g. a dropped sort.Strings).
 func independentSubmissionIdempotencyKey(verificationID uuid.UUID, docIDs []uuid.UUID) string {
 	ids := make([]string, len(docIDs))
 	for i, id := range docIDs {
@@ -521,13 +533,23 @@ func independentSubmissionIdempotencyKey(verificationID uuid.UUID, docIDs []uuid
 }
 
 // TestSubmitVerification_IdempotencyKeyStableForMultiDocumentSet is ADR
-// 0095 §15.3's content-derived key, exercised over a THREE-document set
-// (RV-PRH-I2 KYC code review F3/MD: the original test only ever submitted
-// an EMPTY set, which cannot exercise sort.Strings at all - two or more
-// documents are required for ordering to matter) uploaded in a
-// DELIBERATELY non-sorted order, with the expected key computed completely
-// independently (independentSubmissionIdempotencyKey above) rather than by
-// calling submissionIdempotencyKey itself.
+// 0095 §15.3's content-derived key, exercised over the full SubmitVerification
+// pipeline with a THREE-document set (RV-PRH-I2 KYC code review F3/MD: the
+// original test only ever submitted an EMPTY set, which never reached the
+// provider with any documents at all - a real, non-trivial document_count is
+// required to prove the key covers the actual submitted set). Its own
+// expected value is computed independently
+// (independentSubmissionIdempotencyKey above) rather than by calling
+// submissionIdempotencyKey itself, for the same reason
+// TestSubmissionIdempotencyKey_SortsDocumentIDs's own doc comment gives.
+// NOTE (code review N2): this test alone does NOT prove sort.Strings is
+// exercised - gatherSubmissionDocuments' own `ORDER BY id` SQL already
+// yields sorted input regardless of upload order (confirmed: dropping
+// sort.Strings survives this test on its own). This test instead proves
+// end-to-end stability (the SAME key across two real calls) and that
+// document_count=3 actually reaches the provider;
+// TestSubmissionIdempotencyKey_SortsDocumentIDs above is the one that pins
+// the sort itself.
 func TestSubmitVerification_IdempotencyKeyStableForMultiDocumentSet(t *testing.T) {
 	pool := testPoolSized(t, 1)
 	f := seedFixture(t, pool)
@@ -563,10 +585,13 @@ func TestSubmitVerification_IdempotencyKeyStableForMultiDocumentSet(t *testing.T
 	if keys[0] != keys[1] {
 		t.Fatalf("expected the SAME idempotency key for the same 3-document set, got %q and %q", keys[0], keys[1])
 	}
-	// Deliberately built in a DIFFERENT order than the documents were
-	// uploaded (id3, id1, id2) - if sort.Strings were ever dropped from
-	// submissionIdempotencyKey, this independently-computed expectation
-	// would still be the SORTED order and would no longer match.
+	// Built with the three ids in a DIFFERENT order than they were uploaded
+	// (id3, id1, id2) purely so this assertion cannot be satisfied by
+	// accidentally matching upload order - independentSubmissionIdempotencyKey
+	// sorts its own argument regardless, so this pins the documented key
+	// shape either way. (This ordering choice does NOT by itself prove
+	// submissionIdempotencyKey sorts its own input - see the NOTE above and
+	// TestSubmissionIdempotencyKey_SortsDocumentIDs.)
 	want := independentSubmissionIdempotencyKey(verificationID, []uuid.UUID{id3, id1, id2})
 	if keys[0] != want {
 		t.Fatalf("unexpected idempotency key shape: got %q, want %q", keys[0], want)
@@ -1011,5 +1036,210 @@ func TestSubmitVerification_CallbackApprovalDuringProviderCall_NotDemoted(t *tes
 	}
 	if got := mustGetStatus(t, pool, f.tenantID, verificationID); got != StatusApproved {
 		t.Fatalf("R1 (P2): expected the PERSISTED status to still be 'approved', got %q", got)
+	}
+}
+
+// TestSubmitVerification_AuditRecordsStatusAppliedFlag is N4's own required
+// test (RV-PRH-I2 KYC code re-review): `status_applied` is the ONLY audit
+// signal distinguishing a submission whose own status write actually
+// applied from one superseded by a concurrent, higher-or-equal-rank
+// decision (applyForwardOnlyStatus's own `applied` return value, R1 fix) -
+// hard-wiring it to `true` in applySubmissionResult would survive every
+// other test, since none of them read this specific field. This asserts
+// both values directly: `true` for an ordinary submission that changes the
+// row, and `false` for one superseded by a concurrent staff decision
+// (reusing the exact P1 race shape).
+func TestSubmitVerification_AuditRecordsStatusAppliedFlag(t *testing.T) {
+	t.Run("true when the submission's own status write applies", func(t *testing.T) {
+		pool := testPoolSized(t, 1)
+		f := seedFixture(t, pool)
+		verificationID := seedVerification(t, pool, f)
+		seedDocument(t, pool, f, verificationID, DocumentPassport, "p.png")
+
+		provider := NewMockKYCProvider()
+		provider.created[mustGetProviderReference(t, pool, f.tenantID, verificationID)] = true
+		v, err := SubmitVerification(context.Background(), pool, NewMockOutboundResolver(), provider, f.tenantID, verificationID)
+		if err != nil {
+			t.Fatalf("SubmitVerification: %v", err)
+		}
+		if v.Status == StatusPending {
+			t.Fatalf("test setup: expected the submission to move the status forward, got %q", v.Status)
+		}
+		m := latestAuditMetadata(t, pool, f.tenantID, "kyc.verification_submitted_to_provider", verificationID)
+		applied, ok := m["status_applied"].(bool)
+		if !ok || !applied {
+			t.Fatalf("N4: expected status_applied=true on an ordinary submission's audit row, got %v (present=%v)", m["status_applied"], ok)
+		}
+	})
+
+	t.Run("false when a concurrent staff decision supersedes the submission", func(t *testing.T) {
+		pool := testPoolSized(t, 1)
+		f := seedFixture(t, pool)
+		verificationID := seedVerification(t, pool, f)
+		seedDocument(t, pool, f, verificationID, DocumentPassport, "p.png")
+		staffID := seedComplianceStaff(t, pool, f)
+
+		base := NewMockKYCProvider()
+		ref := mustGetProviderReference(t, pool, f.tenantID, verificationID)
+		base.created[ref] = true
+		base.SetOutcome(ref, ProviderResult{Outcome: ProviderApproved, Reason: "auto_approved"})
+		provider := &spyKYCProvider{MockKYCProvider: base}
+		provider.onSubmitVerification = func(ctx context.Context, ref string, docs []SubmittedDocument, call CallContext) (ProviderResult, error) {
+			if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+				_, err := ReviewVerification(ctx, tx, ReviewVerificationParams{
+					VerificationID: verificationID, StaffID: staffID, NewStatus: StatusRejected, Reason: "suspected_fraud",
+				})
+				return err
+			}); err != nil {
+				t.Fatalf("simulate staff reject during phase B: %v", err)
+			}
+			return base.SubmitVerification(ctx, ref, docs, call)
+		}
+
+		if _, err := SubmitVerification(context.Background(), pool, NewMockOutboundResolver(), provider, f.tenantID, verificationID); err != nil {
+			t.Fatalf("SubmitVerification: %v", err)
+		}
+		m := latestAuditMetadata(t, pool, f.tenantID, "kyc.verification_submitted_to_provider", verificationID)
+		applied, ok := m["status_applied"].(bool)
+		if !ok || applied {
+			t.Fatalf("N4: expected status_applied=false on a superseded submission's audit row, got %v (present=%v)", m["status_applied"], ok)
+		}
+	})
+}
+
+// seedOrphanVerificationID creates a genuine phase-A-only orphan row (no
+// live provider reference) using CreateVerification's own documented
+// nil-outbound-resolver failure mode (ADR 0095 §15.2) - the same mechanism
+// TestCreateVerification_NilOutboundResolverLeavesHarmlessOrphanRow uses -
+// rather than a raw SQL insert, so this is exactly the shape a real
+// vendor outage produces.
+func seedOrphanVerificationID(t *testing.T, pool *db.Pool, f fixture) uuid.UUID {
+	t.Helper()
+	_, err := CreateVerification(context.Background(), pool, nil, NewMockKYCProvider(), CreateVerificationParams{
+		TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerID, PersonID: f.personID,
+	})
+	if !errors.Is(err, ErrProviderUnavailable) {
+		t.Fatalf("seed orphan verification: expected ErrProviderUnavailable, got %v", err)
+	}
+	var id uuid.UUID
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT id FROM kyc_verifications WHERE tenant_id = $1 AND player_account_id = $2`,
+			f.tenantID, f.playerID).Scan(&id)
+	}); err != nil {
+		t.Fatalf("seed orphan verification: read id: %v", err)
+	}
+	return id
+}
+
+// TestUploadDocument_OrphanVerificationFailsClosed is N5's own required
+// test for the upload side (RV-PRH-I2 KYC code review): a player must not
+// be able to upload a document against an orphan verification (no live
+// provider reference).
+func TestUploadDocument_OrphanVerificationFailsClosed(t *testing.T) {
+	pool := testPoolSized(t, 1)
+	f := seedFixture(t, pool)
+	verificationID := seedOrphanVerificationID(t, pool, f)
+
+	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := UploadDocument(ctx, tx, NewMockDocumentStorageProvider(), NewMockMalwareScanner(), UploadDocumentParams{
+			TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerID, PersonID: f.personID,
+			VerificationID: verificationID, DocumentType: DocumentPassport, Filename: "p.png", Content: tinyPNGBytes,
+		})
+		return err
+	})
+	if !errors.Is(err, ErrVerificationNotSubmitted) {
+		t.Fatalf("N5: expected ErrVerificationNotSubmitted uploading against an orphan verification, got %v", err)
+	}
+	var docCount int
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT count(*) FROM kyc_documents WHERE verification_id = $1`, verificationID).Scan(&docCount)
+	}); err != nil {
+		t.Fatalf("count documents: %v", err)
+	}
+	if docCount != 0 {
+		t.Fatalf("N5: expected NO document row for a rejected orphan upload, got %d", docCount)
+	}
+}
+
+// TestSubmitVerification_OrphanVerificationFailsClosed is N5's own required
+// test for the submit side: SubmitVerification must never call the
+// provider with an empty reference against an orphan verification.
+func TestSubmitVerification_OrphanVerificationFailsClosed(t *testing.T) {
+	pool := testPoolSized(t, 1)
+	f := seedFixture(t, pool)
+	verificationID := seedOrphanVerificationID(t, pool, f)
+
+	base := NewMockKYCProvider()
+	provider := &spyKYCProvider{MockKYCProvider: base}
+	called := false
+	provider.onSubmitVerification = func(ctx context.Context, ref string, docs []SubmittedDocument, call CallContext) (ProviderResult, error) {
+		called = true
+		return base.SubmitVerification(ctx, ref, docs, call)
+	}
+
+	_, err := SubmitVerification(context.Background(), pool, NewMockOutboundResolver(), provider, f.tenantID, verificationID)
+	if !errors.Is(err, ErrVerificationNotSubmitted) {
+		t.Fatalf("N5: expected ErrVerificationNotSubmitted submitting an orphan verification, got %v", err)
+	}
+	if called {
+		t.Fatal("N5: expected NO provider call for an orphan verification (never send an empty reference to the vendor)")
+	}
+}
+
+// TestReviewVerification_ConcurrentSubmissionDuringReview_ReturnsConflict is
+// the "mirror race" required regression test (RV-PRH-I2 KYC code review,
+// surfaced-to-other-owners item 1): ReviewVerification's own write was,
+// until this fix, a blind `UPDATE ... WHERE id = $4` with no status
+// predicate - so a SubmitVerification phase C (or a verified callback)
+// committing between ReviewVerification's own read and its write could be
+// silently overwritten, including moving a terminal `approved` BACKWARD to
+// a staff `review_required`. Uses reviewVerificationTestRaceHook (the
+// P1/P2 tests' own style, applied to ReviewVerification's read/write
+// window instead of SubmitVerification's provider-call window) to commit a
+// concurrent SubmitVerification approval exactly between
+// ReviewVerification's read and its CAS write.
+func TestReviewVerification_ConcurrentSubmissionDuringReview_ReturnsConflict(t *testing.T) {
+	// A pool of >1 connections is REQUIRED here (unlike this file's other
+	// tests): the hook below runs a genuinely separate transaction (its own
+	// SubmitVerification call) WHILE the outer ReviewVerification
+	// transaction is still open on its own connection - a single-connection
+	// pool would deadlock (the outer tx holds the only connection and
+	// never releases it until the hook's own call - which needs a second
+	// connection from the SAME pool - returns).
+	pool := testPool(t)
+	f := seedFixture(t, pool)
+	verificationID := seedVerification(t, pool, f)
+	seedDocument(t, pool, f, verificationID, DocumentPassport, "p.png")
+	staffID := seedComplianceStaff(t, pool, f)
+
+	base := NewMockKYCProvider()
+	ref := mustGetProviderReference(t, pool, f.tenantID, verificationID)
+	base.created[ref] = true
+	base.SetOutcome(ref, ProviderResult{Outcome: ProviderApproved, Reason: "auto_approved"})
+
+	t.Cleanup(func() { reviewVerificationTestRaceHook = nil })
+	reviewVerificationTestRaceHook = func(id uuid.UUID) {
+		if id != verificationID {
+			return
+		}
+		if _, err := SubmitVerification(context.Background(), pool, NewMockOutboundResolver(), base, f.tenantID, verificationID); err != nil {
+			t.Fatalf("simulate concurrent submission during review: %v", err)
+		}
+	}
+
+	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := ReviewVerification(ctx, tx, ReviewVerificationParams{
+			VerificationID: verificationID, StaffID: staffID, NewStatus: StatusReviewRequired, Reason: "need more documents",
+		})
+		return err
+	})
+	if !errors.Is(err, ErrVerificationStatusConflict) {
+		t.Fatalf("mirror race: expected ErrVerificationStatusConflict, got %v", err)
+	}
+	// The concurrent submission's own approval must survive completely
+	// untouched - the staff review must never have silently overwritten it
+	// (moving a terminal approved BACKWARD to review_required).
+	if got := mustGetStatus(t, pool, f.tenantID, verificationID); got != StatusApproved {
+		t.Fatalf("mirror race: expected the concurrent approval to survive untouched, got %q", got)
 	}
 }

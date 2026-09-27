@@ -374,6 +374,36 @@ func readLatestVerificationByPlayerAccount(ctx context.Context, tx pgx.Tx, tenan
 // AFTER a genuine rejection must never mask that rejection just by being
 // newer; the inner subquery's own predicate is what enforces this per
 // OTHER account, independent of the outer query's tenant/person scope.
+// finalStatusesSQL is N-1's own predicate (RV-PRH-I2 KYC security
+// re-verification, HIGH, pre-existing): the set of statuses that
+// constitute a FINAL, terminal decision - exactly statusRank's own
+// terminal tier (unverified(0) < pending(1) < review_required(2) <
+// terminal(3), provider.go). Used ONLY by crossAccountRejectedOverlay's
+// own "latest row per OTHER account" subquery - never by the primary read
+// (readLatestVerificationByPlayerAccount), whose own "latest row"
+// semantics (§2.6(a)) are unchanged, non-final rows (pending,
+// review_required) included, per the primary-account rule.
+const finalStatusesSQL = `('approved', 'rejected', 'expired')`
+
+// crossAccountRejectedOverlay implements security re-verification N1's
+// original prescription, NARROWED by N-1 (security re-verification of fix
+// round 492cb20, HIGH, pre-existing - not introduced by that round): "a
+// rejection on another account of the same Person denies a withdrawal"
+// held only until the FIRST reproduction of a fresh, merely-pending
+// CreateVerification on the rejected account - a `pending` row counted as
+// "decided" under the F1 fix, so a player could neutralise the overlay
+// with one ordinary API call (start a new verification; it need not ever
+// be approved). N-1's fix: the overlay is now computed from each OTHER
+// account's latest FINAL/terminal row (finalStatusesSQL above) ONLY -
+// unverified, pending, review_required and any never-decided orphan are
+// ALL ignored when deciding whether a rejection has been superseded. A
+// rejection on another account is lifted ONLY by a LATER final `approved`
+// (or, symmetrically, superseded by a later final `expired`/`rejected`
+// re-decision) on that SAME account - never by a merely-in-progress
+// re-verification attempt. The primary-account rule (§2.6(a), the gated
+// account's own latest row, non-final rows included) is UNCHANGED - this
+// predicate applies only inside this function's own subquery, scoped to
+// OTHER accounts.
 func crossAccountRejectedOverlay(ctx context.Context, tx pgx.Tx, tenantID, personID, excludePlayerAccountID uuid.UUID) (bool, error) {
 	var rejected bool
 	err := tx.QueryRow(ctx, `
@@ -384,7 +414,7 @@ func crossAccountRejectedOverlay(ctx context.Context, tx pgx.Tx, tenantID, perso
 			   AND v1.id = (
 			       SELECT v2.id FROM kyc_verifications v2
 			        WHERE v2.tenant_id = v1.tenant_id AND v2.player_account_id = v1.player_account_id
-			          AND NOT (v2.status = 'unverified' AND v2.provider_reference IS NULL)
+			          AND v2.status IN `+finalStatusesSQL+`
 			        ORDER BY v2.created_at DESC, v2.id DESC LIMIT 1
 			   )
 		)`,

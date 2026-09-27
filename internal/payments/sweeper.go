@@ -71,6 +71,9 @@ type Sweeper struct {
 	// no-op), matching this file's existing convention for scope this
 	// sweeper is not configured to drive.
 	PayoutKYCGate PayoutKYCGate
+	// MaxResubmits bounds T12 (C1/B1) - see (*Sweeper).maxResubmits().
+	// <= 0 means payoutMaxResubmits.
+	MaxResubmits int
 
 	BatchPerTenant  int
 	Lease           time.Duration
