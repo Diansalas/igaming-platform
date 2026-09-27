@@ -413,3 +413,113 @@ Full confirmation after every revert: `git status --short`/`git diff
 --stat` show no diff on any touched file; all 14 payout tests plus
 internal/withdrawal's full suite pass under `-tags=integration`; the two
 concurrent-race tests additionally pass under `-race`.
+===========================================================================
+PRH-I1 kill switch (ADR 0095 §10.2/§10.2.1/§10.2.2, migration 0105)
+2026-09-27
+===========================================================================
+
+Scope: MX17, MX19, MX20, MX21, MX25 (ADR 0095 §16.4 table). MX18 (received_at
+>= first_submitted_at) is receipt.go's own S95-C3 concern, not this table,
+and is out of scope here.
+
+Harness: identical technique to the migration-0101 entries above - a
+verified-anchored Python str.replace directly on
+migrations/0105_payment_kill_switch.up.sql (count==1 asserted before
+writing), each mutation proven present via grep for its own "MX.. MUTANT"
+marker, exercised against a fresh scratch database (TEST_ADMIN_DATABASE_URL,
+internal/testsupport/scratchdb via migration0105Scratch), then the file
+restored byte-for-byte from a pre-mutation copy and md5sum-verified
+identical before continuing to the next mutation. Environment: local
+PostgreSQL (CI-local container), Go per go.mod.
+
+Result: 5/5 killed.
+
+MX20 (accept a client-supplied *_by_scope value, RV-0095 N2):
+    Mutation: removed the "NEW.changed_by_scope := v_scope;" forcing
+    statement from payment_kill_switches_guard(), leaving changed_by_scope
+    whatever the client supplied.
+    Killed by: TestMigration0105_ClientSuppliedActorIsIgnored
+    First failure observed: the test's own read-back assertion
+    ("changed_by=... scope=platform") - the client's spoofed 'platform'
+    value passed straight through instead of being forced to 'tenant'.
+    Restored: byte-identical (md5sum matched pre-mutation copy).
+
+MX19 (remove scope-column immutability from the switch guard, RV-0095 N1):
+    Mutation: dropped the provider_scope/operation_scope comparisons from
+    the switch guard's immutable-columns IF, leaving only id/tenant_id/
+    created_at protected.
+    Killed by: TestMigration0105_ScopeColumnsAreImmutable
+    First failure observed: "expected provider_scope to be immutable after
+    insert" - an UPDATE re-scoping an engaged row from provider_scope='mock'
+    to '*' succeeded.
+    Restored: byte-identical.
+
+MX21 (drop the decided_txid = txid_current() check, RV-0095 N4):
+    Mutation: removed the "OR v_req.decided_txid <> txid_current()" arm
+    from the release-validation IF in payment_kill_switches_guard().
+    New test added for this mutation specifically (the existing four-eyes
+    tests always approve and release in the SAME transaction, so they
+    cannot distinguish this arm from the others):
+    TestMigration0105_ApprovalMustReleaseInTheSameTransaction - approves
+    and commits in one transaction, then attempts the release UPDATE in a
+    SEPARATE, later transaction referencing that already-committed
+    approval.
+    Confirmed the test PASSES against the correct (unmutated) migration
+    first, then killed by the same test once mutated.
+    First failure observed: "expected a release in a transaction OTHER
+    than the one that approved it to be refused" - the release succeeded
+    using an approval decided in an earlier, already-committed transaction.
+    Restored: byte-identical.
+
+MX17 (drop the kill-switch release trigger, S95-C5):
+    Mutation: replaced the entire release-validation branch (point 6 -
+    the NULL check, the approved-request lookup, and the platform-scope
+    cross-check) with a single "NEW.engaged_by_scope := NULL;", i.e. a
+    bare UPDATE ... SET engaged=false now always succeeds.
+    New test added: TestMigration0105_DirectReleaseWithoutApprovedRequestIsRejected
+    (a direct `UPDATE payment_kill_switches SET engaged=false WHERE id=$1`
+    with no release_request_id at all). Confirmed PASSES against the
+    correct migration first, then killed once mutated.
+    First failure observed: "expected a direct release with no
+    release_request_id to be refused" - the bare release succeeded.
+    Restored: byte-identical.
+
+MX25 (allow an UPDATE of release_requests.requested_by, RV-0095 N5):
+    Mutation: removed the "OR NEW.requested_by IS DISTINCT FROM
+    OLD.requested_by" arm from payment_kill_switch_release_requests_guard()'s
+    immutable-columns check.
+    Test used: TestMigration0105_RequestIdentityColumnsAreImmutable, fixed
+    during this exercise to combine the tampered column with a legitimate
+    status transition (open -> approved) in the SAME UPDATE - a bare
+    "SET requested_by=... " with status left at 'open' is refused anyway by
+    the unrelated "status may only move open -> approved|cancelled|expired"
+    rule, which would have masked this specific mutation (a same-status,
+    no-op-status UPDATE is never reachable in the real approval flow, so
+    the original version of this test could not have distinguished MX25
+    from that unrelated control). Confirmed the corrected test PASSES
+    against the correct migration first, then killed once mutated.
+    First failure observed: "expected requested_by to be immutable - a
+    single actor must never be able to manufacture a distinct approver" -
+    an UPDATE that simultaneously changed requested_by AND legitimately
+    moved status open->approved succeeded.
+    Restored: byte-identical.
+
+Full-suite confirmation after all five reverts and the test file's final
+state: `go test -tags=integration ./internal/payments/... -run
+'TestMigration0105|TestKillSwitch'` - 14/14 pass (10 schema/trigger tests,
+4 Go-service-layer tests). `go test -tags=integration -race
+./internal/payments/... -run 'TestMigration0105|TestMigration0101'` also
+passes. Full `internal/payments/...` under `-tags=integration -race` was
+also run: the only failures
+(TestInitiateDepositAttempt_RealKYCEnforcementGate_{Denies,Allows}...) are
+pre-existing and environmental - kyc_gate_cutover_integration_test.go uses
+the SHARED TEST_DATABASE_URL (testPool(t), not a scratch database), and
+that shared database in this session's environment is stuck at migration
+100 (schema_migrations max version = 100, predating even migration 0101's
+payment_attempts table) - confirmed unrelated to this change by inspecting
+the file's own doc comment and by reproducing the identical "relation
+payment_attempts does not exist" failure with no kill-switch-related code
+involved. Not fixed here: migrating the shared database is out of scope
+and risky while other concurrently-running agent sessions rely on its
+current state (this task's own instruction to keep edits minimal and avoid
+contention).

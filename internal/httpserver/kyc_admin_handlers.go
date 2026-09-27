@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -561,7 +562,24 @@ func newKYCWebhookHandler(deps Deps) http.HandlerFunc {
 			// arrived a moment too early. Always a retryable 5xx, never a
 			// 200 - whether the vendor actually redelivers on it is
 			// PROVIDER DEPENDENT, confirmed at real-vendor intake.
-			apierror.Write(w, requestID, apierror.CodeUnavailable, "verification not yet available; retry")
+			//
+			// Security review RV-PRH-I2 KYC C3: this branch is otherwise
+			// silent, so an operator cannot tell a transient race from a
+			// PERMANENTLY stuck reference (CreateVerification's phase C
+			// failing after the vendor already accepted the request leaves
+			// the row 'unverified'/provider_reference NULL forever - every
+			// subsequent callback for that reference 503s until the vendor's
+			// own retry policy gives up, and the decision is never linked to
+			// any platform row; recorded as part of KYC-SUBMIT-OUTBOX-1's
+			// scope, ADR 0095 §15.3, since a durable pre-phase-C record of
+			// the pending reference is exactly what a submission outbox
+			// would provide). One allow-listed log line - tenant/provider/
+			// request id only, NEVER the provider_reference itself or the
+			// callback body - lets an operator distinguish "normal race,
+			// resolves on redelivery" from "stuck reference, needs manual
+			// reconciliation" via its own recurrence rate.
+			logger.Warn("kyc_webhook_reference_unknown", "request_id", requestID, "tenant_id", t.ID.String(), "provider_id", providerID)
+			writeAdmissionRejection(w, requestID, apierror.CodeUnavailable, time.Second)
 			return
 		}
 		if errors.Is(err, kyc.ErrNotFound) {

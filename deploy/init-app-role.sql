@@ -229,3 +229,29 @@ BEGIN
     END IF;
 END
 $$;
+
+-- PRH-I1 (migration 0105, payment_kill_switches/
+-- payment_kill_switch_release_requests; ADR 0095 §10.2): re-asserted on
+-- every run for the same reason as the block above. The application needs
+-- SELECT/INSERT/UPDATE (engage, request, approve, cancel) but never
+-- DELETE or TRUNCATE - both tables reject those at the trigger layer
+-- (payment_kill_switches_no_delete / payment_kill_switch_release_requests_
+-- no_delete); this GRANT is defence in depth, not the binding control.
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM information_schema.tables
+        WHERE table_schema = 'public' AND table_name = 'payment_kill_switches'
+    ) THEN
+        EXECUTE 'REVOKE ALL ON payment_kill_switches FROM igaming_runtime';
+        EXECUTE 'GRANT SELECT, INSERT, UPDATE ON payment_kill_switches TO igaming_runtime';
+    END IF;
+    IF EXISTS (
+        SELECT 1 FROM information_schema.tables
+        WHERE table_schema = 'public' AND table_name = 'payment_kill_switch_release_requests'
+    ) THEN
+        EXECUTE 'REVOKE ALL ON payment_kill_switch_release_requests FROM igaming_runtime';
+        EXECUTE 'GRANT SELECT, INSERT, UPDATE ON payment_kill_switch_release_requests TO igaming_runtime';
+    END IF;
+END
+$$;

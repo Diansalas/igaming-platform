@@ -740,13 +740,15 @@ func TestMigration0101_T13t_TombstonePrecedesSuccess_RequiresNamedTerminalReason
 // --- T12 legacy_backfill and N3 sibling-succeeded guards --------------------
 
 func TestMigration0101_T12_RefusedOnLegacyBackfillRow(t *testing.T) {
-	v := migration0101Version(t)
 	pool, _ := migration0101ScratchBefore101(t, "m0101t12leg_")
 	f := seedM0101Fixture(t, pool)
 	intentID := insertDepositIntent(t, pool, f, "ambiguous", ptr("mock-psp"), nil, nil)
 
-	dir := migration0101Dir(t, v)
-	if _, err := pool.MigrateUp(context.Background(), dir); err != nil {
+	// Migrate through the latest on-disk migration, not just 0101: the
+	// backfill boundary this test exercises is 0101's, but
+	// ResubmitAmbiguous (called below) also evaluates the migration
+	// 0105 kill-switch predicate and needs that table to exist.
+	if _, err := pool.MigrateUp(context.Background(), realMigrationsDir(t)); err != nil {
 		t.Fatalf("migrate up: %v", err)
 	}
 
@@ -773,6 +775,12 @@ func TestMigration0101_T12_RefusedOnLegacyBackfillRow(t *testing.T) {
 func TestMigration0101_T12_RefusedWhenSiblingSucceeded(t *testing.T) {
 	v := migration0101Version(t)
 	pool, _ := migration0101Scratch(t, "m0101t12sib_", v)
+	// ResubmitAmbiguous (called below) also evaluates the migration 0105
+	// kill-switch predicate; bring the scratch database the rest of the
+	// way up so that table exists too.
+	if _, err := pool.MigrateUp(context.Background(), realMigrationsDir(t)); err != nil {
+		t.Fatalf("migrate up to latest: %v", err)
+	}
 	f := seedM0101Fixture(t, pool)
 	intentID := insertDepositIntent(t, pool, f, "pending", nil, nil, nil)
 

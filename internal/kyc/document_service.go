@@ -163,7 +163,7 @@ func UploadDocument(ctx context.Context, tx pgx.Tx, storage DocumentStorageProvi
 // accumulated evidence, not one file in isolation), read in a short,
 // read-only, tenant-scoped transaction. Returns ok=false (no error) when
 // the verification is already terminal - SubmitVerification's own no-op
-// case, mirroring updateVerificationStatus's identical idempotency
+// case, mirroring applyForwardOnlyStatus's identical idempotency
 // convention.
 func gatherSubmissionDocuments(ctx context.Context, tx pgx.Tx, verificationID uuid.UUID) (v Verification, submitted []SubmittedDocument, ok bool, err error) {
 	v, err = GetVerificationByID(ctx, tx, verificationID)
@@ -218,27 +218,40 @@ func submissionIdempotencyKey(verificationID uuid.UUID, docs []SubmittedDocument
 // 0095 §15.3) is mapped to the SAME "no state change, one failure audit
 // row" handling document_service.go's pre-split code already used - it is
 // NEVER passed to statusForOutcome and NEVER read as a definitive outcome,
-// so kyc_verifications.status is left exactly as it was. A definitive
-// outcome applies the existing terminal-guarded updateVerificationStatus
-// plus its own success audit row - identical to the pre-split behaviour,
-// just moved into its own short, bounded transaction.
+// so kyc_verifications.status is left exactly as it was.
+//
+// R1 fix (RV-PRH-I2 KYC code review, security C1): a DEFINITIVE outcome no
+// longer applies via a blind UPDATE. The whole provider call (phase B) runs
+// with v.Status as it stood at the END of phase A - up to
+// defaultProviderCallTimeout later, a staff ReviewVerification or a verified
+// callback's own forward-only CAS transition can have already committed a
+// DIFFERENT status for this same row. applyForwardOnlyStatus applies the
+// SAME forward-only rank rule applyCallbackOutcome already enforces for the
+// callback path (unverified(0) < pending(1) < review_required(2) <
+// terminal(3)): the CAS starts from v.Status (phase A's own read, the best
+// available expectation), and on a lost race re-reads the row and
+// re-evaluates - if the row's CURRENT rank is already at or above this
+// result's own rank (a concurrent staff decision, or a concurrent callback,
+// already moved it forward, including to a terminal status), this call is a
+// no-op: the concurrent decision is never overwritten, and it is never
+// moved backward (e.g. review_required -> pending, or approved ->
+// anything). The `kyc.verification_submitted_to_provider` audit row is
+// still written unconditionally (this call genuinely happened, whether or
+// not its own status write ended up applying), now carrying a
+// `status_applied` flag so a superseded submission is distinguishable from
+// one that actually changed the row.
 func applySubmissionResult(ctx context.Context, tx pgx.Tx, v Verification, submitted []SubmittedDocument, result ProviderResult) (Verification, error) {
 	result, reasonTruncated := normalizeProviderResult(result)
 
-	auditOutcome := audit.OutcomeSuccess
 	if result.Outcome == ProviderError {
-		auditOutcome = audit.OutcomeFailure
-	}
-	if err := audit.Record(ctx, tx, audit.Entry{
-		TenantID: v.TenantID, ActorType: audit.ActorSystem,
-		Action: "kyc.verification_submitted_to_provider", TargetType: "kyc_verification", TargetID: v.ID.String(),
-		Outcome:  auditOutcome,
-		Metadata: withReasonTruncated(map[string]any{"provider_id": v.ProviderID, "document_count": len(submitted), "provider_outcome": string(result.Outcome), "reason": result.Reason}, reasonTruncated),
-	}); err != nil {
-		return Verification{}, fmt.Errorf("kyc: audit provider submission: %w", err)
-	}
-
-	if result.Outcome == ProviderError {
+		if err := audit.Record(ctx, tx, audit.Entry{
+			TenantID: v.TenantID, ActorType: audit.ActorSystem,
+			Action: "kyc.verification_submitted_to_provider", TargetType: "kyc_verification", TargetID: v.ID.String(),
+			Outcome:  audit.OutcomeFailure,
+			Metadata: withReasonTruncated(map[string]any{"provider_id": v.ProviderID, "document_count": len(submitted), "provider_outcome": string(result.Outcome), "reason": result.Reason}, reasonTruncated),
+		}); err != nil {
+			return Verification{}, fmt.Errorf("kyc: audit provider submission: %w", err)
+		}
 		// IC condition 2: an ambiguous/timeout/transport-error result is
 		// NEVER read by statusForOutcome, and kyc_verifications.status is
 		// left exactly as it was - identical to today's ProviderError
@@ -254,7 +267,23 @@ func applySubmissionResult(ctx context.Context, tx pgx.Tx, v Verification, submi
 	if !ok {
 		return Verification{}, fmt.Errorf("kyc: provider returned an unrecognized outcome %q", result.Outcome)
 	}
-	return updateVerificationStatus(ctx, tx, v.ID, newStatus, result.Reason)
+
+	updated, applied, err := applyForwardOnlyStatus(ctx, tx, v.TenantID, v.ID, v.Status, newStatus, result.Reason)
+	if err != nil {
+		return Verification{}, err
+	}
+	if err := audit.Record(ctx, tx, audit.Entry{
+		TenantID: v.TenantID, ActorType: audit.ActorSystem,
+		Action: "kyc.verification_submitted_to_provider", TargetType: "kyc_verification", TargetID: v.ID.String(),
+		Outcome: audit.OutcomeSuccess,
+		Metadata: withReasonTruncated(map[string]any{
+			"provider_id": v.ProviderID, "document_count": len(submitted), "provider_outcome": string(result.Outcome),
+			"reason": result.Reason, "status_applied": applied,
+		}, reasonTruncated),
+	}); err != nil {
+		return Verification{}, fmt.Errorf("kyc: audit provider submission: %w", err)
+	}
+	return updated, nil
 }
 
 // SubmitVerification is ADR 0095 §15.3's phase A(read)/B/C split of the
@@ -306,6 +335,15 @@ func SubmitVerification(ctx context.Context, pool providercred.TenantTxRunner, o
 		return Verification{}, err
 	}
 	if !proceed {
+		return v, nil
+	}
+	if len(submitted) == 0 {
+		// C4 (RV-PRH-I2 KYC code review): this function's own doc comment
+		// has always said "no current non-rejected documents to submit at
+		// all ... is a documented no-op" - the code did not actually
+		// implement that until now (it called the provider with an empty
+		// set instead). There is nothing to submit, so no call is made,
+		// mirroring the terminal-verification no-op just above it.
 		return v, nil
 	}
 	providerID := provider.ID()

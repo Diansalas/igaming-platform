@@ -1116,6 +1116,70 @@ Rules for the platform routes:
 **For both surfaces:** the request/response shapes are pinned in OpenAPI with a conformance test
 (§16.2 item 20).
 
+### 10.6 Implementation record (PRH-I1, `payments`, 2026-09-27)
+
+Label: **PARTIALLY IMPLEMENTED.** Data model, guard triggers, RLS and the Go service layer are
+`IMPLEMENTED` and tested. The staff/platform HTTP routes (§10.5), OpenAPI, and orchestrator wiring
+that turns a claim-statement refusal into a T3 `kill_switch` decline are `NOT IMPLEMENTED`. Pending
+`security`, `ledger-finance` and `code-reviewer` gate review.
+
+**Migration number, again.** §12.7's own implementation record already recorded one swap (0102
+reconciliation / 0103 kill switch). By the time this section landed, migration 0103 had been
+claimed by ADR 0096's KYC enforcement policy supersession migration (parallel branch,
+`migrations/0103_kyc_enforcement_policy_supersession.{up,down}.sql`) and 0104 by the PRH-I5
+security follow-up (`migrations/0104_payment_statement_line_charset.{up,down}.sql`). The kill
+switch is therefore **migration 0105** (`migrations/0105_payment_kill_switch.{up,down}.sql`). Read
+every "0102 kill switch" / "0103 kill switch" reference in §10.2-§10.5 above as 0105.
+
+**What landed.**
+- Migration 0105: `payment_kill_switches` and `payment_kill_switch_release_requests`, exactly per
+  §10.2/§10.2.1/§10.2.2 - `payment_kill_switch_session()` derives the acting principal and scope
+  from the transaction's own GUCs (`app.tenant_id`/`app.principal_id`/
+  `app.platform_admin_principal_id`/`app.player_account_id`, the same ones
+  `db.WithPrincipalScope`/`db.WithPlatformAdmin` set) and independently re-validates it against
+  `staff_users`, the migration 0044 pattern; nothing is ever read from an application-supplied
+  column. Both tables: FORCE RLS with the tenant/platform policy family, `DELETE` denied, scope
+  columns (`id`/`tenant_id`/`provider_scope`/`operation_scope`) immutable, `version` forced
+  strictly monotonic on every UPDATE, engage is single-actor, release requires an approved request
+  decided in the SAME transaction (`decided_txid = txid_current()`) by a distinct principal, a
+  platform-engaged row is untouchable from a tenant session, and KS-L6 (a platform takeover cancels
+  any open tenant release request for that switch) is implemented in the same trigger.
+- `internal/payments/killswitch.go`: `EngageKillSwitch` (idempotent single-actor engage/re-engage),
+  `GetKillSwitch`/`ListKillSwitches`, `RequestKillSwitchRelease`, `ApproveAndReleaseKillSwitch`
+  (approval and release in one transaction), `CancelKillSwitchRelease`, and a read-only
+  `KillSwitchEngaged` helper for orchestration code that needs to CHOOSE a terminal reason after an
+  atomic claim-statement refusal (never a substitute for the in-statement predicate).
+- The §10.3 predicate, evaluated **inside** the claim statement itself, exactly as specified:
+  `attempt.go`'s `ClaimCreatedForSubmission` (T2), `InsertSubmittingAttempt` (T1+T2/T1p, converted
+  to an `INSERT ... SELECT ... WHERE NOT EXISTS (...)` form so the combined insert-and-claim path
+  has the same atomicity as the CAS `UPDATE` forms), `ResubmitAmbiguous` (T12), and
+  `InsertCreatedAttempt` (the cascade T1 insert, checked against `provider_scope = '*'` switches
+  only, since no provider is chosen yet at T1 - defence in depth on top of T2's own full check at
+  claim time). `ErrKillSwitchEngaged` is returned by the two `INSERT ... SELECT` forms, which have
+  no prior `created` row to fall back into.
+- `deploy/init-app-role.sql`: `igaming_runtime` gets `SELECT, INSERT, UPDATE` (never `DELETE`) on
+  both new tables, re-asserted on every run, mirroring the 0102/reconciliation grant block.
+- Tests: `internal/payments/migration_0105_integration_test.go` (schema/trigger invariants, scratch
+  databases only) and `internal/payments/killswitch_integration_test.go` (the Go service layer).
+  Mutation-kill evidence for MX17/MX19/MX20/MX21/MX25 is recorded in
+  `docs/plans/payment-readiness/evidence/prh-i1-mutation-kill.txt`.
+
+**What is explicitly NOT built yet (remaining PRH-I1 scope for this section):**
+- §10.5's HTTP routes (tenant staff admin API and platform admin API), permissions
+  (`payments_kill_switch:engage/release/read`, `platform_payments_kill_switch:*`), OpenAPI, and the
+  cross-tenant 404 route-table tests. `killswitch.go` is written so a route handler is a thin
+  wrapper (open a `WithPrincipalScope`/`WithPlatformAdmin` transaction, call the function, write
+  `audit.Record`, commit) but no handler exists yet.
+- The orchestrator wiring that turns a T2/T1p refusal into a deposit's T3 `kill_switch`
+  decline/payout `created` hold with a labelled reason (§10.3's "Deposits: created attempts are
+  moved to rejected (T3, kill_switch)"). Today a refused claim surfaces as `ErrAttemptStateConflict`
+  or `ErrKillSwitchEngaged`; the caller can call `KillSwitchEngaged` to choose the right terminal
+  reason, but no call site does yet.
+- An alert on every engage (S95-C7) - `EngageKillSwitch` performs only the write; no alerting hook
+  is wired.
+- PROV-REVOKE-ALL-1 (a genuine platform-wide, cross-tenant switch) remains deferred per §10.2.2's
+  own text.
+
 ---
 
 ## 11. PROV-OUTBOUND-CRED-1 (approved scope)
@@ -1966,7 +2030,7 @@ READY on R1) are addressed as follows.
 | Intent | The `kyc_verifications` row inserted in phase A with `status='unverified'`, `provider_id` set and `provider_reference NULL`, plus audit `kyc.verification_requested`. |
 | Reference / idempotency key | `CreateVerificationInput` gains `Call CallContext` and `ExternalReference = verification.id`. The vendor idempotency key is `"kv:" + id` **only if the vendor supports keys, which is PROVIDER DEPENDENT and recorded at intake**. Where it does not, a player retry before the orphan is known creates a second, unrelated vendor-side verification under a second platform row. That is not a financial or enforcement hazard (each row is evaluated on its own merits), but it must never be assumed deduplicated. |
 | Flow | A (commit) → B (`CreateVerification`) → C: CAS `UPDATE … SET provider_reference=$r, status=$s WHERE id=$1 AND provider_reference IS NULL AND status='unverified'` plus audit `kyc.verification_submitted` (existing action, moved). |
-| Retryability | No automatic retry. A player retry creates a new row (existing behaviour). An orphan `unverified` row without a reference has **no enforcement effect** (it is not verified). |
+| Retryability | No automatic retry. A player retry creates a new row (existing behaviour). An orphan `unverified` row without a reference is **excluded from ADR 0096's "latest row" enforcement selection outright** (§15.3.3 below, RV-PRH-I2 KYC code review F1): it is never even the row consulted, decided or not. This is a correction of this row's original wording ("no enforcement effect (it is not verified)"), which was true only when the orphan happened to be older than every decided row — a NEWER orphan committed after an approval would otherwise become the "latest" row and evaluate `failed`, turning a mere vendor outage into a withdrawal denial for an already-approved player. |
 | Callbacks | KYC has **no receipt table**, so a callback that races phase C (reference unknown) returns a **retryable 5xx**, never a 200: a 200 would discard the only copy of the evidence (IC-Q1). A 200 is reserved for a callback the platform actually applied, including a duplicate or no-op apply. Whether the vendor redelivers on 5xx is **PROVIDER DEPENDENT** and is confirmed at real-vendor intake, the same discipline as §6.6/LF-C1. The merchant-reference echo is PROVIDER DEPENDENT. S-Q3 option (a) applies (re-check DB failure → 503). |
 | Failure recovery | Crash after A: an orphan row, harmless. After B: an orphan vendor verification. KYC enforcement (ADR 0096) reads only platform rows, so it is harmless. |
 | Migration | None. |
@@ -1975,7 +2039,7 @@ READY on R1) are addressed as follows.
 
 | Aspect | Specification |
 |---|---|
-| Flow | A: insert document plus audit → commit. A short read-only tx gathers the current non-rejected document set. B: `SubmitVerification(Call, providerReference, docs)` with the idempotency key `"ks:" + verification_id + ":" + sha256(sorted document ids)`. C: the existing `normalizeProviderResult` plus the terminal-guarded `updateVerificationStatus` plus audit (existing). |
+| Flow | A: insert document plus audit → commit. A short read-only tx gathers the current non-rejected document set. B: `SubmitVerification(Call, providerReference, docs)` with the idempotency key `"ks:" + verification_id + ":" + sha256(sorted document ids)`. C: the existing `normalizeProviderResult` plus **`applyForwardOnlyStatus`'s forward-only CAS** (§15.3.3 below, RV-PRH-I2 KYC code review/security review R1/C1) plus audit (existing) - **not** a blind, non-CAS `updateVerificationStatus` as an earlier revision of this row claimed: the whole provider round-trip in phase B (up to `defaultProviderCallTimeout`) is wide enough for a staff `ReviewVerification` or a verified callback's own forward-only transition to commit before phase C runs, and only a CAS starting from phase A's own status read - re-evaluated against the row's CURRENT status on a lost race, exactly like the callback path's own rule - stops phase C from silently overwriting (or demoting) that concurrent decision. |
 | Ambiguous result (IC condition 2) | **An ambiguous, timeout or transport-error `SubmitVerification` result leaves `kyc_verifications.status` unchanged.** Phase C maps it to the existing `ProviderError` branch (audit with outcome failure, no status update); it is never passed to `statusForOutcome` and never read by `normalizeProviderResult` as a definitive outcome. §15.3 does not reuse §4.4's matrix, so this rule has its own test (§16.2 item 18). |
 | Failure recovery | Identical to today's `ProviderError` outcome: the verification stays as it is, and the next upload re-submits the full set. A durable KYC submission outbox is **deferred** as KYC-SUBMIT-OUTBOX-1, and it is a **hard precondition on the first real KYC adapter**: no real KYC adapter is accepted into PRH-I2 (or later) without a durable submission outbox design landing first (IC condition 5). |
 | Migration | None. |
@@ -2037,8 +2101,12 @@ functions, not `Orchestrator` methods, and changing that shape was out of this t
   early after its own audit row, before ever calling `statusForOutcome` - in both shapes
   `kyc_verifications.status` is provably left untouched (own tests, §15.3.2 below). Phase C
   (a second, separate, ctx-independent, bounded transaction, identical to `CreateVerification`'s)
-  applies a definitive outcome via the existing terminal-guarded `updateVerificationStatus` plus
-  the existing `kyc.verification_submitted_to_provider` audit record. `UploadDocument` itself
+  applies a definitive outcome via `applyForwardOnlyStatus`'s forward-only CAS (§15.3.3's R1 fix
+  - the original submission's own doc comment claimed this call was already "the existing
+  terminal-guarded `updateVerificationStatus`", which was FALSE: `updateVerificationStatus` was
+  a blind, unconditional `UPDATE` with no status predicate at all, and its only "terminal-guard"
+  existed in phase A's stale read) plus the existing `kyc.verification_submitted_to_provider`
+  audit record. `UploadDocument` itself
   is now phase-A-only (document insert + audit; no provider call, no `provider` parameter) -
   the caller (`internal/httpserver`'s upload handler) calls `UploadDocument` (inside its own
   short transaction) and then `SubmitVerification` (pool-based) afterward, exactly mirroring
@@ -2108,6 +2176,154 @@ Mutation evidence: `docs/plans/payment-readiness/evidence/prh-i2-kyc-mutation-ki
 the idempotency-key shape, IC condition 2's two distinct code paths, the terminal-verification
 no-op guard, the `ErrVerificationReferenceUnknown` typing at both the package and HTTP-handler
 layers, and the `CallContext` redaction renderer.
+
+**Note (fix round below): the "11/11" count and its "the idempotency-key shape" and
+"the credential-binding check" claims describe the ORIGINAL submission's own evidence file as
+of this writing, and code review RV-PRH-I2 KYC (F3) found that count overstated coverage of
+several of these exact branches - see §15.3.3 and the corrected, superseding evidence file.**
+
+#### 15.3.3 Fix record (code review + security review rework, 2026-09-27)
+
+Both reviews (`docs/plans/payment-readiness/rv-prh-i2-kyc-security.md`, APPROVE WITH
+CONDITIONS C1-C5; `docs/plans/payment-readiness/rv-prh-i2-kyc-code-review.md`, NOT READY on
+R1) are addressed as follows.
+
+- **R1/C1 (BLOCKING) - `SubmitVerification` phase C was neither CAS nor terminal-guarded.**
+  Both reviews reproduced the identical defect: `applySubmissionResult`'s status write called
+  `updateVerificationStatus`, a blind `UPDATE ... WHERE id = $3` with **no status predicate at
+  all** - the only terminal check ran in phase A (`gatherSubmissionDocuments`), in a
+  transaction that had already committed before the whole provider round-trip (up to
+  `defaultProviderCallTimeout`, 10s) even began. A staff `ReviewVerification` (reject or
+  approve) or a verified callback's own forward-only CAS transition, committed anywhere in that
+  window, was silently overwritten - including backward, e.g. `review_required` demoting an
+  `approved` a callback had just committed. Security review's own reproduction: a compliance
+  officer's `rejected` decision, committed mid-submission, was overwritten by the provider's
+  later `approved` result, and ADR 0096 enforcement then read `passed` for a player a human had
+  just rejected. **Fixed**: `updateVerificationStatus` (a blind, non-CAS writer with no other
+  caller) is removed outright and replaced by a new shared function,
+  `applyForwardOnlyStatus` (`internal/kyc/provider.go`), reusing `applyCallbackOutcome`'s own
+  forward-only rank rule (unverified(0) < pending(1) < review_required(2) < terminal(3)): the
+  CAS starts from phase A's own status read and, on a lost race, re-reads the row and
+  re-evaluates (up to 3 attempts, identical to the callback path's loop) - a result whose rank
+  is at or below the row's CURRENT rank is a documented no-op, never applied, never moving the
+  row backward. `applySubmissionResult`'s own `kyc.verification_submitted_to_provider` audit
+  row is still written unconditionally (the call genuinely happened), now carrying a
+  `status_applied` boolean so a superseded submission is distinguishable from one that actually
+  changed the row. Tests: `TestSubmitVerification_StaffRejectDuringProviderCall_Survives` (P1 -
+  a staff reject committed inside the provider-call hook survives a later provider approval,
+  including `reviewed_by`) and `TestSubmitVerification_CallbackApprovalDuringProviderCall_
+  NotDemoted` (P2 - a callback's approval, committed inside the same hook, survives a later,
+  lower-rank submission result) - both in `internal/kyc/kyc_two_phase_integration_test.go`,
+  reproducing the reviews' exact P1/P2 scenarios and proving the fix. §15.2/§15.3's own table
+  rows and §15.3.1's prose are corrected above to describe `applyForwardOnlyStatus`, never the
+  removed `updateVerificationStatus`.
+- **F1 - "the orphan has no enforcement effect" was false in the deny direction.** ADR 0096's
+  `readLatestVerificationByPlayerAccount` reads the account's `ORDER BY created_at DESC, id
+  DESC LIMIT 1` row with no other filter, so a `CreateVerification` phase-B failure's own
+  orphan row (harmless by §15.2's own claim) becomes the enforcement-visible "latest" row the
+  moment it is newer than an existing approval - code review's own reproduction: an approved
+  player starting a routine re-verification while the vendor happens to be unreachable is
+  denied withdrawals until a LATER retry succeeds, purely because of a transient vendor outage
+  that, pre-split, would have rolled back and left the approval as the latest row. **Fixed**
+  (identity-compliance is this ADR's own owner and ADR 0096's; authorized to change enforcement
+  read semantics for this specific case, coordinated with security's N1 text): ADR 0096 §2.6
+  gains a new point (g) - see ADR 0096 §19 for the full text and its own implementation record
+  - excluding a row with `status='unverified' AND provider_reference IS NULL` (a row that never
+  received ANY decision) from BOTH `readLatestVerificationByPlayerAccount`'s own "latest row"
+  selection AND `crossAccountRejectedOverlay`'s per-other-account "latest row" subquery, so a
+  never-decided orphan can never supersede an already-decided approval, nor mask an
+  already-decided rejection on another account, purely by being newer. An account whose ONLY
+  rows are such orphans is treated exactly as if it had no verification row at all
+  (found=false, `OutcomeFailed` either way - this predicate changes nothing in that case).
+  Tests: `TestEvaluateEnforcement_OrphanAfterApproval_StillPassed`,
+  `TestEvaluateEnforcement_OrphanOnAnotherAccount_DoesNotMaskRejection`,
+  `TestEvaluateEnforcement_OrphanOnly_TreatedAsNoVerification`, and
+  `TestEvaluateEnforcement_DecidedOrderingIgnoresInterveningOrphans` (an orphan landing BETWEEN
+  two decided rows must not disturb ordering by decision time) - all in
+  `internal/kyc/enforcement_integration_test.go`. This is the one change this fix round makes
+  to `internal/kyc/enforcement.go` - explicitly in scope per this task's own authorization,
+  coordinated with ADR 0096 rather than decided unilaterally.
+- **F2 - the unknown-reference 503 was silent, with no `Retry-After`, and the permanent-503
+  gap was undocumented.** Fixed: `internal/httpserver/kyc_admin_handlers.go`'s
+  `ErrVerificationReferenceUnknown` branch now writes one allow-listed
+  `kyc_webhook_reference_unknown` log line (`request_id`/`tenant_id`/`provider_id` only, never
+  the reference or the callback body) via the existing `writeAdmissionRejection` helper (the
+  same one every other webhook 503 in this codebase already uses), which also now sets
+  `Retry-After`. The permanent-503 gap (`CreateVerification`'s phase C failing after the vendor
+  already accepted the request leaves the row `unverified`/`provider_reference NULL` forever;
+  every subsequent callback for that reference 503s until the vendor's own retry policy gives
+  up, and the decision is never linked to any platform row) is now explicitly documented as
+  part of `KYC-SUBMIT-OUTBOX-1`'s own scope (§15.3's "Failure recovery" row already names this
+  as a hard precondition on the first real KYC adapter; this fix round adds the specific
+  mechanism - a durable pre-phase-C record of the pending reference - as what a submission
+  outbox would need to provide to close it).
+- **F3 - four of the original evidence file's mutants were equivalent claims, not tested
+  branches; the idempotency-key test was tautological.** Code review found `SubmitVerification`'s
+  OWN credential-binding check (MB), `CreateVerification`'s phase-C CAS predicate (MC), the
+  `sort.Strings` ordering in `submissionIdempotencyKey` (MD - the original test only ever
+  submitted an EMPTY document set, so ordering was never exercised, and its own "expected" value
+  was computed by calling `submissionIdempotencyKey` itself), and `SubmitVerification`'s
+  nil-outbound-resolver guard (ME) all survived untested. Fixed: four new tests -
+  `TestSubmitVerification_CredentialBindingMismatchFailsClosed`,
+  `TestCreateVerification_PhaseCCASRejectsAlreadyAppliedRow` (calls
+  `applyCreateVerificationResult` a second time with a stale pre-phase-C value after a real
+  `CreateVerification` call already applied its own result, and asserts the CAS refuses),
+  `TestSubmitVerification_IdempotencyKeyStableForMultiDocumentSet` (replaces the empty-set test
+  with a THREE-document set uploaded out of sorted order, with the expected key computed by a
+  completely independent `independentSubmissionIdempotencyKey` helper - `crypto/sha256` and
+  `sort.Strings` called directly, never through `submissionIdempotencyKey`), and
+  `TestSubmitVerification_NilOutboundResolverFailsClosedWithoutPanic` - all in
+  `internal/kyc/kyc_two_phase_integration_test.go`. The evidence file is corrected (superseded,
+  not merely appended) with the four new mutants and a private-DB convention note; see the
+  updated `docs/plans/payment-readiness/evidence/prh-i2-kyc-mutation-kill.txt`.
+- **F4 (C2) - `OutboundKindSplitResolver` had no tests; a mutant making it always prefer the
+  mock resolver survived the full suite.** Fixed: `internal/kyc/outbound_kindsplit_test.go`
+  (new, unit tests, no database) ports `internal/casino/outbound_kindsplit_test.go`'s five
+  cases verbatim for KYC (synthetic adapter → mock only; non-synthetic adapter → real only;
+  unregistered id fails closed; both nil yields a true nil interface; a synthetic adapter with
+  nil mock fails closed with no fallback to real), and
+  `cmd/platform-api/wiring_test.go` gained `TestKYCOutboundResolver_FollowsWiring`, casino's own
+  `TestCasinoOutboundResolver_FollowsWiring`'s KYC twin, proving the wiring itself (not just the
+  resolver's own logic) reaches the mock adapter's registered provider id and fails closed for
+  an unregistered one. Confirmed to kill the reviewer's own mutant (`OutboundKindSplitResolver.
+  Resolve` hard-coded to `target := s.mock`).
+- **C3 - the unknown-reference 503 had no operator signal at all.** Folded into F2 above (the
+  same fix closes both the security and code-review framings of this finding).
+- **C4 - the empty-document-set no-op was documented but not implemented.** Fixed:
+  `SubmitVerification` now checks `len(submitted) == 0` immediately after phase A (mirroring
+  the terminal-verification no-op just above it) and returns without ever calling the provider.
+  Test: `TestSubmitVerification_EmptyDocumentSetIsANoOp`. This is a genuine, small behavior
+  change (a verification with zero non-rejected documents no longer receives a vendor decision
+  at all until at least one document is uploaded) matching the doc comment's own long-standing,
+  never-implemented claim - several pre-existing tests that previously submitted an empty set
+  incidentally (to observe the provider call for an unrelated reason) were updated to seed at
+  least one document first (`internal/kyc/kyc_two_phase_integration_test.go`'s `seedDocument`
+  helper, new; `internal/kyc/reason_platform_normalize_integration_test.go`'s
+  `TestPlatformNormalizesReason_SubmitVerification`).
+- **C5 - raw provider/resolver error text reached operator logs.** `internal/httpserver/
+  kyc_handlers.go`'s `create_verification_provider_unavailable` and `submit_verification_failed`
+  log lines logged `err`/`submitErr` directly with `%v`, which can embed a real adapter's or
+  resolver's own error text (potentially a vendor response body, header, or a credential-bearing
+  URL, once a real adapter exists). Fixed with a new exported classifier,
+  `kyc.RedactedProviderErrorDetail` (`internal/kyc/provider.go`) - KYC's own copy of
+  `casino.redactedLaunchFailureDetail`/`internal/payments/gate.go`'s `redactedReason` (the same
+  "each domain owns its own, since these two packages must not import each other" discipline
+  those two already follow) - both log lines now log its bounded classification instead of the
+  raw error.
+- **Not done here** (explicitly out of this task's own scope, confirmed unaffected): any change
+  to `internal/kyc/enforcement*.go` beyond the single, explicitly authorized F1 predicate change
+  above; migrations 0100/0103; the payments (PRH-I1) implementation; casino.
+
+Verification (fix round): `gofmt`, `go build ./...`, `go vet ./...` and `go vet -tags=integration
+./...` - all clean. `golangci-lint run ./...` (v2.9.0, no build tags, matching CI's own
+invocation) - 0 issues. `go test -tags=integration -race -count=1 ./internal/kyc/...` and
+`go test -tags=integration -count=1 ./internal/httpserver/... -run 'KYC|Kyc'` and
+`go test -tags=integration -count=1 ./cmd/platform-api/...` - all pass, against fresh private
+databases created via `TEST_ADMIN_DATABASE_URL` and migrated to head (0104), never the shared
+CI-local instance (which this sandbox's own prior sessions have left short of migration 101's
+own pre-flight guard, an unrelated, pre-existing data-hygiene issue - see ADR 0096 §18.4's
+identical note). Mutation evidence (corrected, superseding §15.3.2's original file):
+`docs/plans/payment-readiness/evidence/prh-i2-kyc-mutation-kill.txt`.
 
 ---
 

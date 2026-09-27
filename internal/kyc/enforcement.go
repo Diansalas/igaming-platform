@@ -303,23 +303,52 @@ func (s latestVerificationState) effectiveOutcome(expired bool) EnforcementOutco
 	}
 }
 
+// orphanRowExclusionSQL is ADR 0096 §2.6(g)'s "decided row" predicate
+// (RV-PRH-I2 KYC review F1, code review + security): a kyc_verifications
+// row with status='unverified' and provider_reference IS NULL is
+// CreateVerification's own phase-A intent row (ADR 0095 §15.2) that never
+// received ANY decision - phase B/C never completed a provider round-trip
+// for it (a vendor outage, a resolver failure, or a process crash between
+// phase A and phase C, ADR 0095 §15.2 "Failure recovery"). Such a row must
+// NEVER be treated as this account's "latest" state for enforcement
+// purposes: doing so would let a transient vendor outage alone silently
+// supersede an already-DECIDED approval with a manufactured deny (F1's own
+// reproduced scenario - an approved player starting a routine
+// re-verification while the vendor happens to be down must not lose
+// withdrawal access on that basis alone), and, via the cross-account
+// overlay below, would let an undecided orphan on one account mask an
+// already-decided REJECTION on that SAME account behind a newer-but-
+// meaningless row. A row that DID receive a decision - CreateVerification's
+// own phase C succeeded (provider_reference is set, whatever the resulting
+// status), a callback applied, or a staff review applied - is never
+// excluded by this predicate, however non-terminal that decision is
+// (e.g. 'pending' still counts as decided, per the pre-existing, unchanged
+// "success path already supersedes an approval with a pending row"
+// behaviour F1 also names, which is deliberate and NOT this predicate's
+// concern).
+const orphanRowExclusionSQL = `NOT (status = 'unverified' AND provider_reference IS NULL)`
+
 // readLatestVerificationByPlayerAccount is the PRIMARY read key every
 // enforcement point uses (security re-verification N1, 2026-09-27,
 // resolving the original draft's self-contradiction the same way §2.6(a)/
-// HD-KYC-6 already state it): the gated account's own latest row for
-// (tenant_id, brand_id, player_account_id), ordered (created_at DESC, id
-// DESC). PersonID is NOT used as the primary key anywhere - it is used
-// ONLY as an additional, deny-only cross-account overlay for the
-// withdrawal structural rule (crossAccountRejectedOverlay below), so a
-// newer approval on one brand/account can never mask a rejection on a
-// DIFFERENT brand/account of the same Person, without a stale approval on
-// account A ever being able to authorize a withdrawal FROM account B.
+// HD-KYC-6 already state it): the gated account's own latest DECIDED row
+// (orphanRowExclusionSQL) for (tenant_id, brand_id, player_account_id),
+// ordered (created_at DESC, id DESC). PersonID is NOT used as the primary
+// key anywhere - it is used ONLY as an additional, deny-only cross-account
+// overlay for the withdrawal structural rule (crossAccountRejectedOverlay
+// below), so a newer approval on one brand/account can never mask a
+// rejection on a DIFFERENT brand/account of the same Person, without a
+// stale approval on account A ever being able to authorize a withdrawal
+// FROM account B. A never-decided orphan is treated identically to no row
+// at all (found=false, OutcomeFailed either way) - this predicate changes
+// nothing when every row for the account happens to be such an orphan.
 func readLatestVerificationByPlayerAccount(ctx context.Context, tx pgx.Tx, tenantID, brandID, playerAccountID uuid.UUID) (latestVerificationState, bool, error) {
 	var status string
 	var expiresAt *time.Time
 	err := tx.QueryRow(ctx, `
 		SELECT status, expires_at FROM kyc_verifications
 		 WHERE tenant_id = $1 AND brand_id = $2 AND player_account_id = $3
+		   AND `+orphanRowExclusionSQL+`
 		 ORDER BY created_at DESC, id DESC LIMIT 1`,
 		tenantID, brandID, playerAccountID,
 	).Scan(&status, &expiresAt)
@@ -340,7 +369,11 @@ func readLatestVerificationByPlayerAccount(ctx context.Context, tx pgx.Tx, tenan
 // Applied ONLY to the withdrawal structural rule (ADR 0096 §3.2 point 1)
 // - never to deposit/play, which stay purely per-PlayerAccount per
 // §2.6(a)/HD-KYC-6. A "latest row" here means each OTHER account's own
-// most-recent verification, not any historical row of theirs.
+// most-recent DECIDED verification (orphanRowExclusionSQL, ADR 0096
+// §2.6(g), RV-PRH-I2 KYC review F1) - a never-submitted orphan committed
+// AFTER a genuine rejection must never mask that rejection just by being
+// newer; the inner subquery's own predicate is what enforces this per
+// OTHER account, independent of the outer query's tenant/person scope.
 func crossAccountRejectedOverlay(ctx context.Context, tx pgx.Tx, tenantID, personID, excludePlayerAccountID uuid.UUID) (bool, error) {
 	var rejected bool
 	err := tx.QueryRow(ctx, `
@@ -351,6 +384,7 @@ func crossAccountRejectedOverlay(ctx context.Context, tx pgx.Tx, tenantID, perso
 			   AND v1.id = (
 			       SELECT v2.id FROM kyc_verifications v2
 			        WHERE v2.tenant_id = v1.tenant_id AND v2.player_account_id = v1.player_account_id
+			          AND NOT (v2.status = 'unverified' AND v2.provider_reference IS NULL)
 			        ORDER BY v2.created_at DESC, v2.id DESC LIMIT 1
 			   )
 		)`,
