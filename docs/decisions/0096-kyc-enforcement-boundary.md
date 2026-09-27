@@ -50,7 +50,7 @@ is not an engineering call.
 | 7 | Casino bet placement | `internal/casino/orchestrator.go:952` `postBet` | Internal (debits `player_cash`, credits the provider-facing liability account; no external rail) | RG (`evaluateAndAuditEligibility`) → Risk (`evaluateAndAuditRisk`), ADR 0031 §1 | **ENFORCE (policy-driven, default `not_required`)** | The human directive names casino bets as an identified enforcement surface; this ADR does not silently drop that surface even though the *default* behaviour (no active jurisdiction policy) is unchanged from NOT-ENFORCE in practice. See §3.5 for the "play" trigger design — no money crosses the platform boundary at a bet, so the mechanism defaults to `not_required` absent an explicit, legally-reviewed KYC-before-play policy row (HD-KYC-8), never a compiled-in default the way withdrawal's structural rule is |
 | 8 | Casino win | `internal/casino/orchestrator.go:1456` `postWin` | Internal (credits `player_cash` from the settled bet's liability account) | Deliberately none (own doc comment: not RG-gated, "a win is the platform paying out on its own already-accepted bet, not a new player-initiated action") | **NOT-ENFORCE** | Same reasoning as #7, one level stronger: gating a *settlement* of an already-accepted wager on a compliance state that may have changed since the bet would strand the platform's own already-incurred liability with no correction mechanism — exactly the class of harm `postRollback`'s doc comment names for RG |
 | 9 | Casino rollback | `internal/casino/orchestrator.go:1586` `postRollback` | Internal (reverses #7/#8) | Deliberately none (own doc comment: "a correction to history, not a new stake") | **NOT-ENFORCE** | A correction must remain possible for exactly the players most likely to need one (own doc comment, quoted verbatim) — gating it on current KYC status would make the ledger un-correctable |
-| 10 | Sportsbook bet placement | `internal/sportsbook/orchestrator.go:583-616` | Internal (same wallet-debit shape as casino bet) | RG → Risk, mirroring casino (ADR 0031, this file's own comments) | **ENFORCE (policy-driven, default `not_required`)**, with **HUMAN-DECISION** flagged | Same design as #7 (§3.5). Separately flagged because Blueprint's "EDD above configurable limits" tier does not specify whether "configurable limits" is scored only against deposit/withdrawal amounts or also against stake size; this ADR does not assume the latter (§3.6, HD-KYC-2) |
+| 10 | Sportsbook bet placement | `internal/sportsbook/orchestrator.go:583-616` | Internal (same wallet-debit shape as casino bet) | RG → Risk, mirroring casino (ADR 0031, this file's own comments) | **ENFORCE (policy-driven, default `not_required`)**, with **HUMAN-DECISION** flagged | Same design as #7 (§3.5). Separately flagged because Blueprint's "EDD above configurable limits" tier does not specify whether "configurable limits" is scored only against deposit/withdrawal amounts or also against stake size; this ADR does not assume the latter (§3.2 point 2, HD-KYC-2) |
 | 11 | Sportsbook settlement/void/cashout | `internal/sportsbook/settlement.go` | Internal | Existing settlement state machine, no RG/Risk re-check (matches casino win/rollback precedent) | **NOT-ENFORCE** | Same as #8/#9 |
 | 12 | Bonus grant (`issued`) | `internal/bonus/eligibility.go:95-105` (`AssetAuthorization.CheckEligibility`) | Internal (creates a contingent, non-withdrawable liability) | RG → Risk (`OperationBonusGrant`), ADR 0031 §15a | **NOT-ENFORCE** | No cash leaves and none is withdrawable yet; ADR 0031 §15a's own analysis (composing RG+Risk, never a third engine) does not name KYC, and Blueprint does not tie a KYC tier to bonus issuance |
 | 13 | Bonus activation (`issued`→`activated`) | `internal/bonus/eligibility.go` reusing `OperationBonusGrant` (ADR 0031 §15a-ii) | Internal (funds now sit in the wallet as wagering-locked, still non-withdrawable) | RG → Risk | **NOT-ENFORCE** | Same as #12: not withdrawable yet; the withdrawal gate (#3/#5) is the actual money-leaves-platform checkpoint that ultimately governs this value |
@@ -347,7 +347,7 @@ resolution is a third trigger kind, distinct from both "structural"
   requires KYC before any bet," so this ADR does not compile that in.
   Unlike `cumulative_deposit`/`edd_amount`, it has no numeric threshold at
   all — it is a pure on/off fact per `(licensing_jurisdiction_id,
-  operation)`. It exists as its own `trigger_type` (§3.3/migration 0101)
+  operation)`. It exists as its own `trigger_type` (§3.6/migration 0101)
   precisely so the *capability* to require KYC-before-play is real and
   reviewable the moment a jurisdiction needs it, without a schema or code
   change — the same "mechanism now, values later" contract as every
@@ -556,6 +556,7 @@ at implementation time.
 | **HD-KYC-5** | Whether a jurisdiction may ever relax the structural "first withdrawal" rule (§3.2 point 1) — this ADR's default answer is no, recorded as a design choice, not a foreclosed option | Authority constraint, CLAUDE.md Compliance section |
 | **HD-KYC-6** | Cross-tenant/cross-brand reuse of an approved verification (ADR 0028 §7's own still-open decision) — this ADR does not change that answer; `EvaluateEnforcement` reads `kyc_verifications` scoped exactly as narrowly as today (tenant/brand), so a decision to widen reuse is a change to `internal/kyc`'s read, not to this enforcement boundary | ADR 0028 §7 |
 | **HD-KYC-7** | Whether wallet-to-wallet `ConversionOperation` (row #18) or a future affiliate payout (row #21) need their own gate, once built | Deferred, not designed here |
+| **HD-KYC-8** | Does any jurisdiction require KYC before play (casino and/or sportsbook bet placement, rows #7/#10), and at what tier — the `play` trigger (§3.5) ships with no active row and no default value; this decides whether one is ever authored, and for which surface(s) | HDR-J-6 + legal review |
 
 None of these are legal interpretation performed by this ADR — each is
 named so the mechanism can receive the value the moment it exists,
@@ -659,6 +660,10 @@ registry's KYC-ENFORCE-1 row already states).
 | Fail-closed | A migration 0101 table with an `active` policy row missing `legal_review_reference` is rejected by the CHECK constraint before it can ever govern a decision | schema |
 | Audit | Every `EvaluateEnforcement` call at every enforcement point writes exactly one `kyc_enforcement_decisions` row and one `audit.Record` call, in the same transaction as the domain effect it gated, with no PII/document content in either | all |
 | SAR-adjacent | `kyc_enforcement_decisions` plus `kyc_verifications`/`audit_log` together give a compliance reviewer a complete, joinable trail of "what was decided, when, against what policy version" for any player — proves the audit design is queryable, not just present | staff tooling |
+| Integration | Casino/sportsbook bet placement with **no active `play` policy**: KYC evaluates `not_required` and never denies, RG/Risk denials still short-circuit before KYC runs, existing RG/Risk regression suites pass unmodified | #7, #10 |
+| Integration | Casino/sportsbook bet placement with an **active `play` policy** (test-fixture row, clearly marked per §3.7): `passed` allows, `pending`/`failed`/`unavailable` all deny with no bypass, and a `casino_play` policy never governs `sportsbook_play` or vice versa (the `play_operation` column is enforced, not advisory) | #7, #10 |
+| Concurrency/lock | Placing a bet takes no additional row lock from the new KYC step — proved by running the existing `internal/casino`/`internal/sportsbook` lock-order harnesses (ADR 0082) unmodified against the amended orchestrator and confirming no new lock-class entry appears | #7, #10 |
+| Performance | The `not_required` (no active policy) path costs one indexed lookup per bet and no measurable regression against the existing `postBet`/sportsbook bet-placement latency baseline | #7, #10 |
 
 ---
 
@@ -696,16 +701,33 @@ withdrawal owners via dependency requests):
    gating a withdrawal financially); `security` review for the
    token/session and RLS handling of the new admin decisions route (per
    this specialist's Review responsibility for token/session review).
-4. **`internal/casino`, `internal/sportsbook`, `internal/bonus`**: **no
-   change** — §1's verdicts are NOT-ENFORCE for every one of their
-   enforcement points; no dependency request needed unless a future human
-   decision (HD-KYC-2, HD-KYC-4) reopens one of them.
-5. **Migration 0101**: `identity-compliance` authors it; `ledger-finance`
+4. **`internal/casino`, `internal/sportsbook`** (casino, sportsbook;
+   reviewed by identity-compliance): one new call each to `kyc.
+   EvaluateEnforcement` (`EnforcementCasinoPlay`/`EnforcementSportsbookPlay`)
+   appended after the existing RG→Risk sequence in `postBet`
+   (`internal/casino/orchestrator.go:952`) and the sportsbook bet-placement
+   orchestrator (`internal/sportsbook/orchestrator.go:583-616`), immediately
+   before the balance lock, per §2.4/§3.5 — never reordering the existing
+   RG/Risk calls. On the default (`not_required`) path this is a no-op
+   read; a deny follows the same short-circuit-before-ledger-effect shape
+   RG/Risk denials already use at that exact call site. **Dependency
+   request:** `casino` and `sportsbook` each confirm the exact denial
+   surfacing convention at their own call site (mirroring their existing
+   RG/Risk denial audit shape) and review the lock-order/performance claim
+   in §5/§7 empirically (running their own ADR 0082 lock-order harness
+   against the amended orchestrator) before this is marked implemented.
+   No change needed unless HD-KYC-8 is answered "yes" for casino wins/
+   rollbacks or sportsbook settlement/void — those stay NOT-ENFORCE
+   per §1 rows #8/#9/#11 regardless (corrections, not new stakes).
+5. **`internal/bonus`**: **no change** — §1's verdicts remain NOT-ENFORCE
+   for every bonus enforcement point; no dependency request needed unless
+   a future human decision (HD-KYC-4) reopens bonus conversion.
+6. **Migration 0101**: `identity-compliance` authors it; `ledger-finance`
    reviews the `NUMERIC(38,0)`/asset-registry handling on
    `threshold_minor_units` (CLAUDE.md's own money-representation rule);
    `security` reviews RLS and the append-only trigger.
-6. **OpenAPI / staff route**: `identity-compliance` + `code-reviewer`.
-7. **QA**: owns the test plan in §7 as an execution gate, per its
+7. **OpenAPI / staff route**: `identity-compliance` + `code-reviewer`.
+8. **QA**: owns the test plan in §7 as an execution gate, per its
    existing testing-strategy authority.
 
 Every row above is `PROPOSED`/`NOT IMPLEMENTED` until PRH-I3 is

@@ -709,3 +709,123 @@ exactly when an attacker-chosen path is most likely to be present (Condition 3).
    arises (e.g., WEBHOOK-EDGE-1's source-IP allow-list, or a shared limiter store per §10's
    WEBHOOK-RL-SHARED-1), that requires its own ADR and devops review — do not introduce
    infrastructure changes under this ADR's implementation ticket.
+
+## 17. Ledger-finance review
+
+**Reviewer:** `ledger-finance`. **Scope:** §3 ORD-3, §5.2 B2, §6.4, T2/T6 only. I checked
+these against the code at `dcddb2b`: `casino_handlers.go` and `deposit_handlers.go` webhook
+paths, `casino/rejections.go`, the `casino.postBet`/`postWin`/`postRollback` tombstone gates,
+`payments.postDepositReversalTombstone`, and `ledger/lockorder.go`.
+
+**Findings**
+
+- **Zero side effects holds as designed.** Every A/B rejection happens before
+  `deps.DB.WithTenant`, so there is no ledger row, tombstone, projection change or intent
+  transition. The only post-domain writes today are `recordCasinoCallbackRejection` and
+  `payments.RecordDepositReversalRejection`. They run in separate transactions, they depend on
+  error type, and nothing on the posting path reads them (only reconciliation does). Even so,
+  admission must never reach them (C1).
+- **Retry-after-429 is a first delivery.** Idempotency still comes from the DB unique keys
+  (`(provider_id, provider_tx_id)`, `tombstone:<provider>:<ref>`) plus the payload-mismatch
+  checks. Admission adds no state that the domain transaction consults.
+- **B2 and ADR 0082.** B2 is a goroutine-only semaphore acquired before the pool acquire. It
+  changes *arrival* order only. That is the same class of reordering a provider's own
+  network/retries already produce. ADR 0082 lock order is set inside each transaction by
+  `LockProjectionsForPosting` and is not affected. B2 adds no new wait-for edge, provided each
+  request acquires one slot and never a second one while holding it (C1). A slot holder that
+  is blocked on a row lock waits on another slot holder, and that holder can still make
+  progress.
+- **Rollback-before-bet is safe.** The rollback writes a tombstone. The retried bet hits
+  `isProviderTxTombstoned`, gets a 409 `ErrOriginalTombstoned`, posts nothing and gets a
+  rejection record. The player is never debited, so the money outcome is correct. The
+  payments analogue (reversal-before-deposit, `postDepositReversalTombstone`) is equally safe.
+- **§6.4 lists one reorder but omits one.** A win admitted before its limited bet returns
+  `ErrBetNotFound` (4xx). It posts nothing and writes a rejection record, but it only recovers
+  if the provider redelivers a 4xx. If it doesn't, the player is underpaid.
+
+**Verdict: SIGN-OFF WITH CONDITIONS**
+
+1. **C1.** An admission rejection (B1/B2, including a limiter panic) returns before
+   `recordCasinoCallbackRejection` and the payment denial-audit branch. It is never wrapped
+   as `CallbackRejectedError` or `DepositAlreadyReversedError`. T2/T6 assert zero rows in
+   `casino_callback_rejections` and zero denial-audit rows for limited requests. B2 is
+   acquired exactly once per request, strictly before `WithTenant`, and held (never
+   re-acquired) through any follow-up rejection-record transaction. That means no 429/503 can
+   follow a commit (ORD-3).
+2. **C2.** Amend §6.4 to list win-before-bet and payments reversal-before-deposit. Extend T6:
+   - (c) the late bet gets a 409 with zero ledger and projection change, and the tombstone is
+     unchanged;
+   - (d) a win before its bet gets a 4xx with zero postings. After the bet posts, the
+     redelivered win posts exactly once, and the earlier rejection record does not block it;
+   - (e) a deposit reversal retried after a 429 is idempotent on redelivery;
+   - every variant asserts `SUM(debits)==SUM(credits)` and projection == rebuild.
+3. **C3.** The §6.3 LF-C1 (b) reconciliation backstop must also surface
+   provider-settled / platform-*rejected* events: tombstoned late originals and
+   `bet_not_found` wins, not only unposted ones. This matters for any non-MOCK adapter whose
+   `RetryWindow` or 4xx-retry behaviour is unknown.
+4. **C4.** Nothing in the admission layer may be called from `internal/ledger`, `wallet`, or
+   inside a domain transaction, and no code may rely on B2 wait order for correctness. The T16
+   mutation "move B1/B2 inside `WithTenant`" stays mandatory.
+
+This is sign-off on the financial design only. PRH-I4's diff needs its own ledger-finance
+review before it is marked `IMPLEMENTED`.
+
+## 17. Payments review
+
+**Reviewer:** `payments`. **Scope:** section 9.1 payments burst defaults vs. real PSP callback
+patterns, section 6.3 retry/status-code mechanism, section 6.4 idempotency, B2 (per-tenant
+domain-tx cap = 3) vs. deposit/reversal callback throughput, and the ADR 0095 adapter-manifest
+dependency for `WebhookRetrySemantics`.
+
+**Burst defaults (9.1).** No real vendor callback pattern is asserted here, and none should be
+invented -- the ADR itself labels 50/s pre-auth / 200 burst and 25/s verified / 100 burst as
+technical, reversible defaults (`N=10` pool sizing), not vendor volumes, and commits to
+re-measurement before any real-provider gate. That framing is correct and matches CLAUDE.md's
+mocks-until-contract rule. The mechanism, not the numbers, is what a payments sign-off can
+actually judge: GCRA-with-burst (5.1) plus per-`(domain, provider_id[, tenant])` overrides
+(9.2) means a specific PSP's known replay-after-outage behavior (once a vendor contract
+exists) is accommodated by raising that provider's override, not by a platform-wide change --
+this is the right shape. 6.3's adapter-declared 429-vs-503 answer (undeclared non-MOCK adapter
+fails registration; no-429-retry adapter gets 503 instead) is a sound fail-closed design that
+does not depend on which vendor eventually shows up.
+
+**Idempotency (6.4, ORD-3).** Correct: every rejection precedes `WithTenant`, so a limited
+callback writes nothing and a redelivery is processed as a first delivery; the existing
+`(provider_id, provider_tx_id)` constraint and payload-mismatch check are unchanged and still
+the source of truth for true duplicates. This composes correctly with the ledger idempotency
+invariant this domain must uphold on every posting.
+
+**B2 cap (3) vs. deposit callback throughput.** At B1 = 25/s burst 100 per (tenant, provider),
+a genuine backlog replay after a PSP-side outage can present 100 near-simultaneous verified
+deposit/reversal callbacks to one tenant, but B2 admits only 3 concurrent domain transactions
+for that tenant (waiting up to `DomainWait`=2s, then 503). Whether that queues harmlessly or
+visibly delays legitimate deposit confirmations depends entirely on domain-tx duration, which
+9.1 estimates at ms-scale only for the *pre-verification* reads -- it does not state a duration
+estimate for the *domain* transaction (ledger posting, reserve accounting) that runs under B2.
+This gap should be closed with data, not left as a documented assumption.
+
+**ADR 0095 dependency (adapter manifest).** Agreed this belongs in the ADR 0095 capability
+manifest as a first-class, mandatory field for every non-MOCK PSP adapter, not an optional one
+-- a payments adapter without a declared `WebhookRetrySemantics` must fail registration exactly
+as 6.3 specifies, both before and after 0095 lands.
+
+**Verdict: APPROVE WITH CONDITIONS**
+
+1. Before PRH-I4 enables the payments A3/B1/B2 defaults against any non-MOCK adapter, run the
+   9.1 non-gating benchmark with a domain-transaction duration measurement for deposit *and*
+   reversal postings (not just the pre-verification read estimate), and add a payments-specific
+   scenario to section 11 (e.g. folded into T19) that drives >= B1-burst concurrent verified
+   deposit callbacks for one tenant and confirms B2's 2s `DomainWait` does not silently convert
+   legitimate backlog replay into sustained 503s within a typical PSP retry window.
+2. `WebhookRetrySemantics{Retries429, Retries503, HonorsRetryAfter, RetryWindow}` must be a
+   **mandatory, fail-closed** field in the ADR 0095 adapter capability manifest for every
+   non-MOCK payments adapter -- payments will supply this declaration per PSP only once a
+   vendor contract is confirmed; until then, and until 0095 lands, the interim per-provider
+   config key must enforce the same fail-closed registration behavior described in 6.3.
+3. Extend T6a (`RetryAfter429_Idempotent`, payments deposit) to an explicit reversal/refund
+   variant, or confirm one already exists elsewhere in the payments suite -- reversals share
+   the `(provider_id, provider_tx_id)` idempotency path and are payments-critical, and should
+   not rely on the deposit case alone to pin ORD-3/idempotency for that code path.
+4. Any code path in the eventual PRH-I4 diff that posts a ledger entry (the `D` step, domain
+   processing) requires `ledger-finance` review per CLAUDE.md, independent of this admission
+   review -- this ADR's 6.4/idempotency framing does not substitute for that review.
