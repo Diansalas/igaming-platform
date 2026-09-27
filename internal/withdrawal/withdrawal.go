@@ -275,10 +275,15 @@ type RequestParams struct {
 	TenantID        uuid.UUID
 	BrandID         uuid.UUID
 	PlayerAccountID uuid.UUID
-	// PersonID is required (ADR 0096 §3.2 point 1 / §5): the KYC
-	// structural withdrawal rule is scoped per Person, not per wallet or
-	// PlayerAccount, resolved server-side exactly like every other
-	// identity field here - never accepted from a client.
+	// PersonID is required (ADR 0096 §3.2 point 1 / §5), resolved
+	// server-side exactly like every other identity field here - never
+	// accepted from a client. The primary KYC read key is still this
+	// wallet's own PlayerAccountID (security re-verification N1);
+	// PersonID is used only as an additional, deny-only cross-account
+	// overlay so a rejection recorded against a DIFFERENT PlayerAccount
+	// of the same Person cannot be sidestepped by withdrawing from this
+	// one - see kyc.EnforcementParams.PersonID's own doc comment for the
+	// full reasoning.
 	PersonID  uuid.UUID
 	WalletID  uuid.UUID
 	AssetCode string
@@ -991,6 +996,19 @@ func LockApprovedForSubmission(ctx context.Context, tx pgx.Tx, requestID uuid.UU
 // dependency on ADR 0095 and requires only that its caller hold the L1
 // lock LockApprovedForSubmission already takes.
 func DenyForCompliance(ctx context.Context, tx pgx.Tx, requestID uuid.UUID, decision kyc.EnforcementDecision, kycParams kyc.EnforcementParams) (WithdrawalRequest, error) {
+	// B6 (code review rv-prh-i3-code-review.md): this function trusts
+	// nothing about the decision/params a caller hands it beyond what it
+	// verifies itself - a caller passing an ALLOWED decision, or a
+	// decision for a different operation, must never be able to reverse
+	// a legitimate hold and record a self-contradictory audit trail
+	// (an "allowed" decision under the action `withdrawal.rejected_kyc`).
+	if decision.Allowed {
+		return WithdrawalRequest{}, fmt.Errorf("%w: DenyForCompliance requires a DENIED decision (Allowed=false), got Allowed=true", ErrInvalidInput)
+	}
+	if kycParams.Operation != kyc.EnforcementWithdrawalPayout {
+		return WithdrawalRequest{}, fmt.Errorf("%w: DenyForCompliance requires kycParams.Operation == EnforcementWithdrawalPayout, got %q", ErrInvalidInput, kycParams.Operation)
+	}
+
 	wr, err := lockRequestForUpdate(ctx, tx, requestID)
 	if err != nil {
 		return WithdrawalRequest{}, err
