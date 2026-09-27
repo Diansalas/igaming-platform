@@ -451,3 +451,100 @@ Not re-reviewed:
 - `kyc_round3_http_test.go`, beyond confirming it passes
 
 No penetration testing was done.
+
+---
+
+## Re-verification 4: KYC fix round 4 (`e4a4de2`)
+
+- Reviewer: `security` specialist
+- Date: 2026-09-27
+- Reviewed at: `e4a4de2`, in a detached worktree.
+- Verdict: **N-3 is CLOSED. No open security finding from this review series blocks PRH-I2 (KYC part) or production launch.**
+  - The N-1/N-1b matrix shows no regression.
+  - Two LOW, non-blocking notes remain (below).
+  - The only remaining blocker is the pre-existing real-adapter precondition, **KYC-SUBMIT-OUTBOX-1**.
+
+### Method
+
+- Database: private DB `sec_rv_kyc_i2_r5`, migrated to 105, with `deploy/init-app-role.sql` grants applied (minus `CREATE ROLE igaming`, DB name adapted).
+- Baseline passed: kyc, platform-api and withdrawal, plus `httpserver -run 'KYC|Kyc'`.
+- Probe: an uncommitted probe test.
+  - Account A is approved; account B belongs to the same Person.
+  - B's rows go through the real `CreateVerification` path and verified callbacks via `receiveCallbackInTx`.
+  - Staff escalation uses the real `ReviewVerification`.
+- The worktree and DB were removed afterwards, and the main tree is clean.
+
+### N-3 reproduction and control
+
+| Sequence on B | B final | `kyc.provider_callback` rows | `kyc.provider_result_held_for_review` rows | Withdrawal from A |
+|---|---|---|---|---|
+| staff `review_required` → vendor `rejected` (the N-3 repro) | `rejected` | 1 | 0 | **denied** (fixed; was allowed at `24a9dad`) |
+| provider `review_required` → vendor `rejected` (control) | `rejected` | 2 | 0 | denied |
+| staff `review_required` → vendor `approved` | `review_required` | 0 | 1 | allowed (no rejection anywhere, correct) |
+| staff `review_required` → vendor `approved` ×2 (redelivery) | `review_required` | 0 | 2 | allowed |
+| staff `review_required` → vendor `approved` → vendor `rejected` | `rejected` | 1 | 1 | denied |
+| staff `review_required` → vendor `expired` | `expired` | 1 | 0 | allowed from A. B itself is denied (`expired` maps to failed). The overlay ignores `expired` by design (N-1b). |
+| staff `review_required` → vendor `pending` / `review_required` | unchanged | 0 | 0 | allowed. A rank ≤ current is a no-op; nothing is lost. |
+
+Deny-direction statuses on a staff-escalated row now behave correctly:
+- `rejected` applies and feeds the cross-account overlay.
+- `expired` applies. It denies B, and it neither creates nor lifts a cross-account deny, which matches the N-1b rule.
+- Only an automated `approved` is held, and it is now audited with `provider_outcome` and `discarded_status`, so the officer can see the vendor's view.
+- `reviewed_by` is still writable only through `ReviewVerification`, behind `PermVerificationReview` plus tenant scope. That was verified in re-verification 3 and is unchanged here.
+
+### N-1 / N-1b regression pass
+
+All 9 matrix rows from re-verification 3 give identical results:
+- **Denied:** pending, review_required, orphan, expired via callback, expired seeded, and approved→rejected.
+- **Allowed:** approved, expired→approved, and approved→expired.
+
+### Mutants (each a scripted single edit, reverted afterwards)
+
+| Mutant | Result |
+|---|---|
+| Gate widened back to all statuses (the N-3 defect) | **KILLED**: `TestEvaluateEnforcement_N3_StaffReviewRequiredThenVendorRejected_StillApplies` |
+| Sticky gate removed | **KILLED**: `..._N3_StaffReviewRequiredThenVendorApproved_HeldForReviewAudited`, `TestApplyForwardOnlyStatus_StaffSetReviewRequiredIsStickyAgainstProviderApproval` |
+| Held-for-review audit row dropped | **KILLED**: `..._HeldForReviewAudited` |
+| Phase C failure log back to raw `err.Error()` | **KILLED**: `TestCreateVerification_PhaseCFailureLog_NeverLeaksRawVendorOutcomeText` (the round-3 LOW note is closed) |
+| Gate widened to `approved` or `expired` | **SURVIVED**. The equivalence is analysed below. |
+
+### Notes (LOW, non-blocking)
+
+- **L-1: `expired` on a staff-escalated row is not pinned by a test.** Holding versus applying `expired` gives the same enforcement result:
+  - Holding leaves B `review_required`, which is pending, so B is denied.
+  - Applying makes B `expired`, which is failed, so B is also denied.
+  - Neither result is `rejected`, so the overlay behaves identically.
+
+  The only difference is case management: applying `expired` closes the officer's open escalation without an officer. Identity-compliance should confirm this is intended and add a one-line test pinning whichever behaviour is chosen.
+- **L-2: held-for-review audit rows repeat on vendor redelivery.** Each redelivered held `approved` writes another row. The count is bounded by the vendor's retry policy and is harmless, but it may be worth de-duplicating on (verification, outcome) when the case-management UI consumes these rows.
+
+### Finding status (whole series)
+
+| Finding | Status |
+|---|---|
+| C1/R1 | CLOSED |
+| C2 | CLOSED |
+| C3 | CLOSED |
+| C4 | CLOSED |
+| C5/N-2 | CLOSED |
+| F1 | VERIFIED |
+| N-1 | CLOSED |
+| N-1b | CLOSED |
+| N-3 | CLOSED |
+| L-1, L-2 | open, LOW, non-blocking |
+
+### Launch-blocking flags (updated)
+
+- No finding from this review series blocks production launch.
+- **KYC-SUBMIT-OUTBOX-1**, the stuck-reference / create-side reconciliation item recorded under C3, still blocks registering any real KYC adapter.
+- This review does not authorize production launch. That decision belongs to the human.
+
+### Scope
+
+In scope: the `e4a4de2` diff to `internal/kyc/{provider,document_service,verification_service}.go` and its tests, plus a regression pass of the overlay.
+
+Not reviewed:
+- ADR 0096 §22 prose
+- the real-adapter surfaces (none exist)
+
+No penetration testing was done.
