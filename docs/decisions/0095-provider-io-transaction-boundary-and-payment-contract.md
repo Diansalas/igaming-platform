@@ -67,8 +67,8 @@
 | D2 | **One state machine for every outbound money operation.** Deposits and payouts both run through `payment_attempts` rows (migration 0100). There are 8 states, 4 of them non-terminal, and every transition is CAS-guarded, audited and backstopped by a DB trigger (§4). |
 | D3 | **The attempt row is the outbox.** A cascade, a retry or a recovery is a committed `payment_attempts` row with `next_action_at`. A bounded worker (the sweeper) drives these rows with leases and `FOR UPDATE SKIP LOCKED` claims (§7). No provider I/O happens inside a webhook transaction. |
 | D4 | **Deterministic external identity.** The merchant reference and the external idempotency key are both derived from the committed attempt id. They are never generated per try (§5). |
-| D5 | **Evidence decides; the absence of evidence never does.** Success is applied only on verified, amount- and asset-matching evidence. Timeout, not-found and ambiguous results are never treated as failure for a payout, and never as success for anything. A deposit may be declined on "not found" only when the adapter declares that lookup authoritative (§4.5). |
-| D6 | **Callbacks resolve by merchant reference and by provider reference.** They are accepted in any non-terminal state and durably receipted (`payment_provider_events`). A callback that cannot be resolved yet is deferred, then applied when the attempt learns its reference (§6). |
+| D5 | **Evidence decides; the absence of evidence never does.** Success is applied only on verified, amount- and asset-matching evidence that names a provider reference, from the provider the attempt was sent to. Timeout, not-found and ambiguous results are never treated as failure for a payout, and never as success for anything. A deposit may be declined on "not found" only when the adapter declares that lookup authoritative and the provider never acknowledged the attempt (§4.5). |
+| D6 | **Callbacks resolve by merchant reference and by provider reference, always bound to the verified provider.** They are accepted in any non-terminal state and durably receipted (`payment_provider_events`). A callback that cannot be resolved yet is deferred (capped), then applied when the attempt learns its reference, but only if it was received after the attempt was first sent (§6). |
 | D7 | **A provider-neutral payment contract** (§9) with: `CallContext` (tenant plus resolved credential plus idempotency key plus deadline); a closed `ErrorClass` for retry and timeout classification; `StatusQuery` by either reference; and a code-declared `OperationManifest`. The MOCK adapter only exercises the state machine. |
 | D8 | **Capability manifest and payment kill switch** (migration 0102, §10). Unsupported operations fail closed, first at registration and then at new activity, never at settlement. The kill switch is server-authoritative, tenant- and provider-scoped, audited, fail-safe, and evaluated atomically in the claim transaction. |
 | D9 | **PROV-OUTBOUND-CRED-1** (§11). The credential is resolved per call, outside any transaction, and passed in `CallContext`. The adapter verifies the tenant and provider binding. No credential is held in an adapter. Credential access is refused while a transaction or a financial lock is held. |
@@ -115,13 +115,15 @@ Two further structural gaps this ADR also closes:
 | **INV-IO-4** | Every state change of an attempt is one CAS `UPDATE … WHERE id = $1 AND state = ANY($allowed_from)`, in the same tx as its audit record and its ledger effect (if any). A DB trigger rejects any (OLD, NEW) pair not in §4.3 and any change to an immutable column. | CAS in code; `payment_attempts_guard` trigger (0100). |
 | **INV-IO-5** | Ledger posting never spans external I/O. Each posting runs in one short domain tx holding the ADR 0082 locks in class order, with the authoritative balance read in that same tx. | The D1 pattern; ADR 0082 A7 (§14); existing `ledger.Post`. |
 | **INV-IO-6** | No success without evidence. `succeeded` is entered only by a verified callback, a `QueryStatus` result or a synchronous result reporting a definite success **whose amount and asset equal the attempt's**. A mismatch goes to `disputed`, never to `succeeded`. | `applyEvidence` (§4.4) is the only function that writes `succeeded`; trigger. |
-| **INV-IO-7** | No payout failure without definite decline evidence. `withdrawal.Fail` (the hold release) is reachable from a dispatched payout only through `declined` evidence from the provider. Timeout, not-found, ambiguous and operator impatience are never enough. | §4.5 asymmetry; trigger forbids `ambiguous→declined` without `evidence_kind ∈ {callback, query_status, sync}`. |
+| **INV-IO-7** | No payout failure without definite decline evidence. `withdrawal.Fail` (the hold release) is reachable from a dispatched payout only through `declined` evidence from the provider. Timeout, not-found, ambiguous, a KYC outcome and operator impatience are never enough. The only other release of a claimed payout's hold is M3, from `created` (never sent, INV-IO-9). | §4.5 asymmetry. The `payment_attempts.last_evidence_kind` column is written in the same UPDATE as every state change, and the guard trigger reads it (§13.1): `*→declined` for a payout requires `last_evidence_kind ∈ {sync, callback, query_status}`; any `→declined` for a deposit requires `≠ operator`; `→succeeded` requires `∈ {sync, callback, query_status}`. |
 | **INV-IO-8** | At most one live (non-terminal) attempt per deposit intent, and exactly one payout attempt per withdrawal request. | Partial unique indexes (0100). |
 | **INV-IO-9** | An attempt in `created` has never had a call that may have reached the provider (`ever_possibly_sent = false`). | `CHECK (state <> 'created' OR NOT ever_possibly_sent)`; `submitting→created` only on `ErrorClassNotSent`. |
 | **INV-IO-10** | A verified callback is never lost. It is durably receipted in the same tx as its effect (or its deferral). If that tx fails, the response is retryable (5xx), so the provider redelivers. | `payment_provider_events` (0100); §6. |
 | **INV-IO-11** | Provider credentials are resolved outside any tx, per call, and never while a financial lock is held. They are never stored in an adapter, client or cache, apart from `DerivedTokenCache`. | §11; `OutboundResolver.Resolve` `txscope` refusal (exists); adapter-field reflection test (§16). |
 | **INV-IO-12** | Reconciliation never writes the ledger, a projection, an attempt, an intent or a withdrawal. It writes only run, mismatch and statement-import rows. | Stream code; statement-capture test (§16). |
 | **INV-IO-13** | After every failure-injection test: `SUM(debits) == SUM(credits)` and projection == rebuild (LF-C2 #8). | Shared test helper, reused from the existing suites. |
+| **INV-IO-14** | Provider binding. Evidence carried by a callback, a status result or a statement line from provider P can change, post against, dispute or match only attempts whose `provider_id = P`. P always comes from the verified identity (route plus verified credential), never from a payload. | The resolution predicate `attempt.provider_id = $verified_provider` in every lookup (§6.1, §6.4, §7, §12.3); cross-provider matches are `anomaly` receipts with no state change (S95-C1). Test plus mutation MX15. |
+| **INV-IO-15** | The kill switch cannot be bypassed. A claim (T2, T1p, T12) succeeds only if no engaged switch covers it, evaluated inside the claim statement under the same tenant context. A switch can be released only through an approved four-eyes release request. | `NOT EXISTS` predicate inside the CAS statement (§10.3); `payment_kill_switches_guard` trigger (§13.2). Tests §16.2 item 12. |
 
 ---
 
@@ -1367,6 +1369,8 @@ This ADR is `NOT IMPLEMENTED` in its entirety. After PRH-I1, I2 and I5:
 
 ---
 
+---
+
 ## 21. Ledger-finance review
 
 - Reviewer: `ledger-finance` (financial-invariant owner; author of LF-C1/LF-C2, review 19 §4/§6)
@@ -1682,416 +1686,6 @@ Everything in this ADR remains `NOT IMPLEMENTED`.
 
 ---
 
-## 24. QA test-plan review
-
-**Verdict: CONFIRMED WITH CHANGES.**
-
-Scope of this review is §16 only (crash points, adversarial groups, reconciliation tests,
-mutations) plus the invariant table (§2) as the checkable contract those tests must close.
-
-### What is solid
-
-- The plan is invariant-first, not scenario-first: every adversarial group (§16.2 items 1–18)
-  and every crash point (§16.1 CP-D1..CP-W6) states a **converged outcome**, which is a
-  measurable pass/fail (state, posting count, call count), not "it worked." This is the right
-  shape for financial code and satisfies "no fake completion."
-- Crash injection is specified as **hooks in the MOCK adapter and orchestrator seams,
-  test-only** (§16.1 heading), not timing/sleep races. The one place a sleep appears (item 14's
-  pool-starvation variant, "N concurrent slow MOCK calls (sleep > 1 s)") is a deliberate
-  connection-holding fixture reused from F-POOL-1, not a race-dependent assertion — acceptable,
-  but it should be called out explicitly as the one intentional exception so a future reviewer
-  doesn't read it as a stray sleep.
-- Every financial adversarial test is required to end with INV-IO-13 (SUM(debits)==SUM(credits)
-  plus projection==rebuild), which is exactly "prove no double credit/debit" made checkable
-  rather than asserted.
-- Tests run against real Postgres (triggers, RLS, `FOR UPDATE`, REPEATABLE READ, `pg_stat_activity`
-  checks in item 14) rather than in-process mocks of the DB layer, which satisfies "do not rely
-  solely on mock unit tests for financial correctness" — the MOCK is only the *provider*, never
-  the ledger or the transaction boundary.
-- The human's specific list is each directly covered: no double credit (#1, INV-IO-13), no
-  double debit/payout (#2, CP-W4/W5), no lost successful payment (#3, three independent
-  convergence paths: poll-only, callback-only, reconciliation+T17), no lost callback (#4,
-  INV-IO-10), no unsafe retry (#5), ambiguous never silently success (#6, #9), duplicate
-  callback idempotent (#7), callback before/after internal transition (#8, §6.4 both orders),
-  timeout not auto-failure (#9), reconciliation detects divergence (§16.3, one fixture per
-  mismatch kind).
-- Repeated-run discipline exists at least for lock ordering ("no deadlock across 500
-  iterations," item 16) and duplicate-callback ("sequentially and concurrently," item 7).
-
-### Required changes before this test plan can gate `IMPLEMENTED`
-
-1. **Mutation coverage is incomplete against the invariant list.** §16.4's MX1–MX9 map cleanly
-   to INV-IO-1, 3, 6/7, 8, 10, 12, and the kill switch, but there is no mutation exercising
-   INV-IO-2 (calling the provider without a *committed* `submitting` claim token — distinct from
-   MX1, which is calling before an attempt exists at all), INV-IO-4 (bypass the CAS predicate
-   itself in application code, as opposed to the trigger-rejection direct-SQL test in item 17),
-   INV-IO-5 (post the ledger effect from inside phase B, or out of ADR 0082 lock order), INV-IO-9
-   (flip `ever_possibly_sent` without a real send), or INV-IO-11 (let an adapter cache a
-   credential across two calls). Add MX10–MX14 (or fold into existing IDs) so every INV-IO row
-   has at least one mutation and a named failing test, per the ADR's own "checkable contract for
-   qa" framing in §2.
-2. **No migration up/down test, and no explicit 0100-backfill pass/fail test.** The PRH list
-   requires migration up/down including the 0100 backfill; §13.1 describes the backfill's
-   abort-on-violation behavior in prose but §16 never turns it into a test. Add: (a) up/down/up
-   round-trip for 0100, 0102, 0103 leaves no orphaned constraints or triggers; (b) backfill over
-   a fixture set with a pre-existing two-live-attempt violation aborts and lists the offending
-   ids without partial writes; (c) backfill over clean synthetic data produces exactly the
-   states §13.1 specifies.
-3. **No RLS cross-tenant test named for the four new tables.** `payment_attempts`,
-   `payment_provider_events`, `payment_kill_switches`/`_release_requests`, and
-   `payment_statement_imports`/`_lines` are all `FORCE RLS` (§13), but §16 has no item asserting
-   that a session scoped to tenant A cannot read or affect tenant B's rows in any of them (the
-   existing `tenant_staff_scope` pattern presumably has a reusable harness — reuse it here by
-   name).
-4. **No API/OpenAPI conformance test for the new staff-admin surface.** The kill-switch
-   engage/release endpoints (§10.4) are new HTTP surface with new permissions
-   (`payments_kill_switch:engage/release`); §16.2 item 12 tests the domain effect and the
-   route-table exclusion for players, but nothing pins the request/response shape or an OpenAPI
-   diff for these routes plus the `T17` re-verify endpoint.
-5. **Deterministic mechanism for "connection lost" fault points is unstated.** CP-D5 ("Phase C
-   COMMIT connection lost") and the general "DB error causes a rollback" cases in §16.2 item 4
-   need a named, deterministic injection mechanism (e.g., a `pgx` connection wrapper or
-   `net.Conn` proxy that severs after the wire bytes for COMMIT are sent but before the ack is
-   read) — otherwise this is either untestable or accidentally timing-dependent. Name the hook
-   before implementation, not during.
-6. **No breaker state-transition test.** §9.6 defines a closed/open/half-open breaker per
-   (tenant, provider), fed by `ErrorClass`, and §16.2's list has no adversarial case forcing it
-   through open → half-open → closed, verifying a tenant-A breaker does not affect tenant B, or
-   that `DefiniteDecline` does not count against it. This is the "provider outage" case from the
-   PRH list and is currently only implied by CP-W6 (credential outage, not transport outage).
-7. **CI lane/time budget and package placement are not stated.** §16.2 item 14 says the
-   pool-starvation variant runs "in its own isolated CI lane," which is right, but no time
-   budget is given anywhere in §16, and no package location is proposed for the new suite.
-   Given the existing `internal/httpserver` (~310 s) and full-suite (~600 s) budgets, propose:
-   state-machine/evidence-matrix and mutation tests in `internal/payments` (fast, no adapter
-   I/O, should not materially move the `internal/payments` budget); the crash-point and
-   adversarial suite in a new `internal/payments/ioboundary` package sharing the existing
-   Postgres test harness; the pool-starvation and `pg_stat_activity` capture tests
-   (§16.2 item 14) in their own CI lane, budgeted separately and **not** counted against the
-   `internal/httpserver` 310 s figure, since they intentionally hold slow connections. Reconciliation
-   tests (§16.3) belong under `internal/reconciliation/payment_statement` alongside the existing
-   casino_statement suite. This needs a number from `qa`/`payments` before I1-i lands, not an
-   open-ended "isolated lane."
-8. **Repeat-run / flake bound not stated for most concurrency cases.** Only the lock-order
-   harness (500 iterations) and duplicate-callback ("sequentially and concurrently") specify a
-   repetition count. CP-W4/W5, the concurrent-cascade case (item 11), and the concurrent
-   duplicate-success-callback case (item 1) should each state a minimum iteration count (e.g.
-   ≥100 runs in CI, `-race` enabled) so "no double X" is a statistically meaningful claim rather
-   than a single lucky interleaving.
-
-None of the above blocks starting PRH-I1 work — items 1–8 are additions to I1-i (§18) and to
-§16 itself, not redesigns of the boundary. This ADR stays `NOT IMPLEMENTED`; when I1-i is
-written, it must close items 1–8 and this section's verdict updates. `qa` does not sign off
-`IMPLEMENTED` for PRH-I1 until they are closed or a specialist explicitly accepts the gap in
-writing.
-
----
-
-## 26. Casino review
-
-**Verdict: APPROVE WITH CONDITIONS**
-
-Reviewed as casino-integration owner, scoped to §15.1 (`casino.LaunchGame`) and CAS-STMT-IO-1
-only.
-
-**§15.1 launch split.** Agreed. Phase A commits the `casino_launch_sessions` intent
-(`status='active'`, `expires_at`-bounded) with no lock and no transaction held across the
-vendor `Launch` call in phase B — consistent with the no-lock-across-I/O principle in §14 and
-the general split pattern in §12. Phase C's CAS on `RevokeLaunchSession`
-(`status='active'` guard, exists today) correctly handles both an explicit vendor failure and
-an ambiguous outcome by revoking rather than assuming success, so a launch token is never
-minted or handed out for a session the platform can't account for. Orphaned-session handling
-is correct and matches this agent's non-negotiable: a crash on either side of the vendor call
-leaves the session `active` and unresolved-to-the-player; it simply expires, and a bet against
-an unknown/expired/revoked session returns `ErrLaunchSessionRequired` with no ledger effect —
-no money moves without a verified bet on a resolvable session. Idempotency is sound: `SessionID`
-is the deterministic external reference/key for phase A, retries after a crash mint a new
-session (existing behaviour, no new state), and there is no path where a duplicate `Launch`
-call or a duplicate token can be produced from the same intent. Launch-token minting itself
-(single-use, opaque, bound to player/provider/game/currency/mode, short TTL, never the brand
-session token) is unchanged by this ADR and is out of scope here — no new review trigger for
-`security`. No objection to §15.1 as specified; no redesign needed on this agent's surface.
-
-**CAS-STMT-IO-1.** Severity agreed: Low, not reachable today. The mock `CasinoStatementSource`
-is in-memory and single-process, so the provider-I/O-inside-a-tx hazard this finding names does
-not exist yet — there is no real vendor call to hold a transaction open across. Fix timing
-agreed: no redesign now; the fetch → ingest → match split from §12.1 is a hard precondition
-before wiring any real casino statement/reconciliation source, not before this stage's mock
-work. This agent will treat "first real casino statement source" as the trigger and will not
-build or accept a real statement-source adapter that reads inside the reconciliation
-transaction — that adapter must land already split per §12.1, gated on `architect` and
-`ledger-finance` sign-off, consistent with this agent's mock-only-without-a-commercial-
-relationship constraint.
-
-**Conditions for full APPROVE:** none blocking merge of this ADR's casino sections as written;
-tracking condition only — CAS-STMT-IO-1's remediation must be verified (not just referenced) at
-the time a real casino statement source is proposed, before that adapter is accepted.
-
----
-
-## 25. Identity-compliance review
-
-Reviewer: `identity-compliance`, 2026-09-27. Scope: §15 (KYC create/submit split), IC-Q1
-(§19.2), and the payout KYC gate contract against ADR 0096 (revised concurrently). Withdrawal
-financial posting shape, ledger accounts and lock-order arithmetic are `ledger-finance`'s scope
-(§12 of 0096), not re-litigated here.
-
-### IC-Q1 — the KYC callback-race response class (§15.2)
-
-**Resolved: retryable `5xx`, never a bare `200`.** §15.2 says a callback racing phase C "gets a
-retryable response class, so the vendor redelivers after C commits," but does not say which
-class. Payments can safely turn an unresolved race into a `200` (§6.2 `deferred_unresolved`)
-only because `payment_provider_events` durably receipts the event first (INV-IO-10) — the
-evidence is never lost even if nothing applies yet. §15.2 is explicit that KYC has **no receipt
-table**. A `200` on an unresolved KYC callback would durably discard the only copy of that
-evidence, which is worse than today's behaviour, not equivalent to it. §15.2 must state
-plainly: an unresolved race returns a retryable `5xx`; a `200` is reserved for a callback the
-platform actually applied (including a duplicate/no-op apply). Whether the vendor actually
-redelivers on `5xx` is `PROVIDER DEPENDENT` and must be confirmed at real-vendor intake, the
-same discipline §6.6/LF-C1 already applies to payments — this ADR should say so explicitly for
-KYC rather than leaving it implied by analogy.
-
-### §15 KYC create/submit split — state safety, idempotency, retries, KYC-SUBMIT-OUTBOX-1
-
-**Provider-accepted-but-our-tx-failed is safe as designed, with two precisions required.**
-
-- `CreateVerification`: a crash between phase B (vendor accepted) and phase C leaves an orphan
-  `unverified` row with `provider_reference NULL`. This has no enforcement effect — ADR 0096's
-  `EvaluateEnforcement` only allows on `passed`, and `unverified`/no-row already maps to
-  `failed` — so an orphan never lets a player through. Confirmed safe. **Precision required:**
-  the vendor idempotency key (`"kv:" + id`) is honored only "if the vendor supports keys"
-  (`PROVIDER DEPENDENT`). Where it does not, a player retry before the orphan is known creates a
-  second, unrelated vendor-side verification under a second platform row. That is not a
-  financial or enforcement hazard (both rows are independently evaluated on their own merits),
-  but it must be recorded as `PROVIDER DEPENDENT` vendor behaviour at intake, not silently
-  assumed deduplicated.
-- `SubmitVerification`: a crash between phase B and phase C is identical to today's
-  `ProviderError` handling — the verification stays as-is, and the next document upload
-  re-submits the full set under a new content-derived key
-  (`"ks:" + verification_id + ":" + sha256(sorted document ids)`). Confirmed safe, and
-  idempotent on a real retry. **Precision required:** §15.3 must state explicitly that an
-  ambiguous or timeout `SubmitVerification` response leaves `kyc_verifications.status`
-  unchanged — it must not be misread by `normalizeProviderResult` as a definitive outcome.
-  Unlike payments, §15.3 does not reuse `applyEvidence`'s matrix, so this guarantee needs its
-  own stated rule and its own test, not an inherited one.
-- **`KYC-SUBMIT-OUTBOX-1` deferral: accepted.** No real KYC vendor exists yet (mock only); the
-  worst case under deferral (a lost submission result, corrected by the next upload) is a
-  strict improvement over today's tx-held-across-call hazard (§1 row #9), since it removes the
-  pool-pinning risk while adding no new financial or enforcement exposure. This specialist will
-  treat "the first real KYC adapter's intake" as a hard precondition, not a suggestion: no real
-  KYC adapter is accepted into PRH-I2 without a durable submission outbox design landing first.
-
-### Payout KYC gate contract — naming the hook so ADR 0095 and ADR 0096 agree
-
-**Confirmed: T1p is the correct, and the only correct, hook — with one addition ADR 0096 must
-make explicit.**
-
-The hook both ADRs must name identically is: **T1p — the phase-A transaction that performs
-`withdrawal.ClaimForDispatch` (`approved→submitted`) together with the payout attempt's
-`∅→submitting` insert (§4.3, §5.2)**. This is, by construction, the last transaction that
-commits before the first outbound `Withdraw` call for that request. ADR 0096's
-`DenyForCompliance` (0096 §12 C2) must run inside this same phase-A transaction, evaluated
-before T1p's own CAS is attempted, sharing the identical guard predicate
-(`withdrawal_requests.state = 'approved'` under the same L1 `FOR UPDATE`, §14). Because both a
-KYC deny and a T1p claim require `state = 'approved'` under the same row lock, they are
-mutually exclusive by the lock itself, not by application-code ordering discipline — whichever
-commits first structurally forecloses the other on that request. This is exactly the "last
-committing tx before the first provider Withdraw call" property 0096 C5 asks for, and it is
-already present in §4.3/§5.2/§14 as written; it only needs naming, not redesigning.
-
-**Sweeper re-check — the case ADR 0096 does not yet name.** A payout attempt can return
-`submitting→created` via T5 (`NotSent`, provably not dispatched — INV-IO-9), and is later
-re-claimed by the sweeper via **T2** (`created→submitting`), not by a second T1p. 0096 §12 C5
-correctly requires "the sweeper's claim transaction must re-run the gate before that first
-send," but 0096 does not yet say which withdrawal-side transition a T2-time KYC deny should
-produce, and it should not reuse `DenyForCompliance`'s `approved→rejected` edge unmodified —
-by the time T2 fires, the withdrawal is already `submitted` (T1p already ran once), not
-`approved`. Since a T2 reclaim only ever occurs while the payout attempt is provably `created`
-with `ever_possibly_sent = false` (T5's own guard, INV-IO-9), the platform can prove no call has
-reached the provider yet — this is exactly the eligibility 0095 §4.8 already defines for **M3**
-("no double-payout risk, because `created` has provably never been sent"). ADR 0096 should
-route a T2-time KYC deny through **M3's existing edge** (`created→rejected`, then
-`withdrawal.Fail`), not invent a parallel one. Recommend 0096 §12 C5 (or a new sub-bullet) name
-this explicitly: *"a KYC deny discovered at a T2 payout reclaim is M3, never `DenyForCompliance`
-applied a second time."*
-
-**Never releasing a hold once dispatch may have occurred — confirmed structural, not
-discretionary.** Once a payout attempt is `submitting`/`pending`/`ambiguous` with
-`ever_possibly_sent = true`, INV-IO-7 forbids any `*→declined` transition without provider
-evidence, and the trigger's `evidence_kind` enum (`callback | query_status | sync | sweeper`,
-§4.2) has no member for a KYC decision. A KYC outcome is therefore structurally incapable of
-driving T8 once the attempt may have reached the provider — this guarantee comes from the
-state-machine trigger itself, not from an application-level check that a future code path could
-bypass. No additional mechanism is required beyond the naming corrections above.
-
-### Verdict: **APPROVE WITH CONDITIONS**
-
-1. §15.2 must state the callback-race response class explicitly as retryable `5xx` (IC-Q1),
-   with vendor redelivery-on-`5xx` flagged `PROVIDER DEPENDENT` for confirmation at real-vendor
-   intake.
-2. §15.3 must state explicitly that an ambiguous/timeout `SubmitVerification` result leaves
-   verification status unchanged, with its own test (not inherited from §4.4's matrix, which
-   §15.3 does not reuse).
-3. §15/§5.2 (or a cross-reference to 0096) must name the payout KYC gate hook precisely as
-   **T1p** for the initial claim, sharing the `state='approved'` L1 guard with
-   `DenyForCompliance`, so the two are mutually exclusive by lock, not by convention.
-4. ADR 0096 (0096 §12 C5) must be extended, before either ADR is marked implementable, to name
-   the T2-payout-reclaim case explicitly and route it through **M3** (not a second
-   `DenyForCompliance`), per the reasoning above — this is a required cross-ADR consistency fix,
-   not a new design.
-5. `KYC-SUBMIT-OUTBOX-1`'s deferral is accepted as a documented precondition on the first real
-   KYC adapter intake (PRH-I2), not merely a flagged future item.
-
-None of the above requires a redesign of §15's mechanism or of ADR 0096's enforcement boundary;
-all are naming/precision fixes needed so the two documents describe the same hook, plus two
-missing explicit statements in §15.2/§15.3.
-
----
-
-## 23. Payments review
-
-**Verdict: APPROVE WITH CONDITIONS**
-
-Reviewed as `payments` owner, scope §4–§12 and §18 per the ADR's own sign-off list, plus P-Q1
-(§19.2) and the ADR 0097/architect `WebhookRetrySemantics` cross-review item.
-
-**P-Q1 (§19.2).**
-
-- **§7.3 defaults.** Accepted as reversible engineering `RECOMMENDATION` values (15 s tick, 20
-  batch, 16 global / 4 per-(tenant, provider) concurrency, 60 s lease, 30 s/30 min backoff, 24 h
-  horizon, 30 min presence window, 3 resubmits). `MaxCascadeDepth = 3` is unchanged from today's
-  running value. No objection; these should be re-measured against real traffic once a
-  non-MOCK adapter exists, exactly as the ADR already says for the burst/rate numbers elsewhere.
-- **Does an existing adapter test rely on today's inline webhook cascade? Yes.**
-  `TestMigration0082_DepositIntentsProviderColumnsStayMutable`
-  (`internal/payments/migration_0082_immutability_integration_test.go:111`) exists specifically
-  to pin `deposit_intents.provider_id`/`provider_reference` as mutable in place, because
-  `handleDecline → attemptDeposit → setIntentAttempt` today overwrites them on the *same* intent
-  row on cascade. §5.1 keeps `deposit_intents` as an unchanged mirror that "keep[s] mirroring
-  the latest routed attempt for existing readers," so this test should keep passing once cascade
-  authority moves to `payment_attempts` — but that must be proven, not assumed (P95-C1).
-
-**The three behaviour changes — all accepted:**
-
-1. **Async cascade removed for interactive/redirect methods (§4.6).** Correct and overdue. An
-   asynchronous decline of an interactive attempt cascading to a new provider is a latent defect
-   today: the new redirect URL can never reach a player who has already left the page. Confining
-   post-decline cascade continuation to non-interactive methods, driven by the sweeper, is a bug
-   fix, not a lost capability. The player-retry-with-new-idempotency-key fallback for the
-   interactive case is the correct, and only sound, alternative.
-2. **Unresolved verified callbacks get 200 after durable receipt, not 404 (§6.2
-   `deferred_unresolved`).** Accepted. The 200 is issued only *after* the event passes
-   verification and is durably receipted, and the response is identical whether or not the
-   reference ever resolves, so it opens no existence oracle. Concur with S-Q2's framing that
-   this is a post-verification-only change.
-3. **`submitted` withdrawals may lack a `provider_reference` (§4.7).** Accepted; this is the
-   direct fix for the double-payout hazard (LF-C2 #9, hazard #5 in §1). `provider_reference`
-   moving from "set at submission" to "set once by T4/T9/T7" is the correct fix, but
-   `docs/architecture/withdrawal-state-machine.md` lines 92–93 still document `provider_id` and
-   `provider_reference` as "set on `approved` -> `submitted`" today. That doc is stale the
-   moment this ADR is implemented and is `payments`-owned per §18's "Specialist-owned document
-   changes" list; it must be updated no later than I1-f, not left implicit (P95-C2).
-
-**8-state model vs. routing / cascade-on-decline / health-based failover (Blueprint via
-`docs/architecture/payment-orchestration.md` §4–§6 and `docs/decisions/0022`) — nothing is
-lost:**
-
-- **Routing** (`payment-orchestration.md` §4: tenant/brand → jurisdiction → currency/asset →
-  method → amount → health) is unchanged in substance. §9.6's split of `RouteProvider` into
-  `ListRoutingCandidates(tx)` (in-tx) and `Rank(candidates, health)` (no-tx) only relocates the
-  health read outside the transaction; the resolution order and dimensions are untouched.
-- **Cascade-on-decline** (`payment-orchestration.md` §5) is preserved and materially improved.
-  §5 itself documents today's limitation: a single `deposit_intents` row keeps only the latest
-  attempted provider, so `providerExclusionSoFar` can exclude only the most recently tried
-  provider once a callback arrives asynchronously. The attempt-per-try model (§4.6, T1 on every
-  cascade with `excluded_provider_ids = all previous attempts' providers`) closes that gap
-  completely — this is a strict improvement over the documented current behaviour, not a
-  reduction.
-- **Health-based failover** (`payment-orchestration.md` §6: `ProviderHealth`, `circuit_state`)
-  is preserved. §9.6 tightens `HealthStatus` to an in-memory, no-I/O snapshot contract and adds
-  an orchestrator-owned breaker per `(tenant, provider)` fed by `ErrorClass` — a strict superset
-  of today's in-memory health/circuit design (which this ADR does not turn into a stored table
-  either), not a different mechanism.
-- The one genuine behaviour reduction is the interactive-cascade restriction already addressed
-  above, and it is a correctness fix, not a lost feature.
-
-**Sweeper design (§7).** Sound. Tenant round-robin reusing the existing
-`activeTenantIDs` reconciliation-scheduler pattern; a short claim tx using
-`FOR UPDATE SKIP LOCKED` plus per-row lease/`lease_owner`, so a crashed worker's items reappear
-at `lease_until`; global and per-(tenant, provider) concurrency caps that keep one tenant's slow
-provider from starving another (the F-POOL-1 lesson, correctly generalized); exponential backoff
-with jitter and a cap; and escalation (T16) at the manifest's `resolution_horizon` with no state
-change. §7.4's claim that at most one live money call per attempt exists (entry to `submitting`
-is only via CAS T2/T12) is correct and is the actual mechanism that prevents a double
-submission, not the lease.
-
-**Provider-neutral contract (§9).** Endorsed, with one gap:
-
-- The closed outcome set (`NotSent`/`NotProcessed`/`DefiniteDecline`/`Ambiguous`, §8) is
-  exhaustive and is what makes INV-IO-7 (no payout failure without definite decline evidence)
-  enforceable by CAS and trigger rather than by convention — this is the single load-bearing
-  design choice in the ADR from a payments-correctness standpoint, and it is right.
-- `StatusQuery` by either provider or merchant reference (§5.3, §9.2, manifest field
-  `StatusQuery`) is correct and is specifically what makes the withdrawal
-  `submitted`-with-no-reference case resolvable.
-- The no-I/O `HealthStatus` snapshot plus the platform breaker per `(tenant, provider)` (§9.6)
-  is correct and is the direct fix for F-POOL-2's health-check pool-pinning hazard (hazard #4 in
-  §1).
-- Refunds reserved, `NOT IMPLEMENTED` (§5.5): correctly scoped. No flow initiates a refund
-  today; refusing an adapter that declares `SupportsRefund=true` before a flow exists is the
-  right fail-closed default, and the label is accurate per CLAUDE.md's no-fake-completion rule.
-- Retry/timeout classification (§8) is correct throughout, in particular that a timeout *after*
-  dispatch is always `Ambiguous` and never a failure, and that `NotProcessed` requires the
-  vendor to *document* the response as safe-to-resend — every undocumented outcome correctly
-  degrades to `Ambiguous`.
-- **Gap: `WebhookRetrySemantics` is not in the §10.1 manifest table.** ADR 0097 §19 (payments
-  review) condition 2 already commits `payments` to requiring
-  `WebhookRetrySemantics{Retries429, Retries503, HonorsRetryAfter, RetryWindow}` as a
-  **mandatory, fail-closed** field in this ADR's capability manifest, and that condition was
-  accepted. §10.1's manifest field table as drafted here does not list it. This must be added
-  before this ADR is treated as satisfying that condition (P95-C3) — it is a table-row addition,
-  not a design change, since §18's I1-h ("manifest registration checks (incl. LF-C1(b) startup
-  rule)") is already the right place to enforce it.
-
-**MOCK adapter scope (§9.2, §16.1).** Correctly bounded. Tenant-tagged records,
-merchant-reference lookup, idempotent-by-key mode, and the `NotSent`/`NotProcessed`/
-`Ambiguous`/timeout/crash hooks are state-machine and test-harness plumbing to exercise the
-contract described above — none of it invents a vendor wire format, signature scheme, or
-vendor-specific error taxonomy. This matches CLAUDE.md's "mocks/sandboxes, clearly labelled"
-rule and ADR 0022 §6's requirement that the MOCK pass the same conformance suite as a real
-adapter, not a special-cased one.
-
-**Work breakdown PRH-I1 a–i (§18).** Sequencing (I1-b/h/a in parallel; I1-d→e→f→g sequential) is
-correct and consistent with the code dependencies described in §1 and §14. Two acceptance
-criteria are missing from the item descriptions, both closed by the conditions below rather than
-requiring resequencing: the migration-0082 mirror-invariant regression (I1-d/e, P95-C1) and the
-`WebhookRetrySemantics` manifest field (I1-h, P95-C3).
-
-**Conditions for APPROVE (P95-C#):**
-
-- **P95-C1.** I1-d/I1-e must keep `TestMigration0082_DepositIntentsProviderColumnsStayMutable`
-  passing and add an explicit test asserting `deposit_intents.provider_id`/`provider_reference`
-  continue to mirror the latest `payment_attempts` row through a cascade, so §5.1's "keep
-  mirroring" claim is proven by a test, not assumed.
-- **P95-C2.** `docs/architecture/withdrawal-state-machine.md` (currently documenting
-  `provider_id`/`provider_reference` as "set on `approved` -> `submitted`") must be updated to
-  the §4.7 semantics no later than I1-f, before PRH-I1 is marked complete.
-- **P95-C3.** Add `WebhookRetrySemantics{Retries429, Retries503, HonorsRetryAfter, RetryWindow}`
-  to the §10.1 operation manifest table as a mandatory, fail-closed field for every non-MOCK
-  payments adapter (registration refuses without it), which is what closes ADR 0097 §19
-  condition 2 and the architect cross-review item on this ADR's own text, not just on the interim
-  config key.
-- **P95-C4 (informational, not blocking).** On LF-Q1 (T13's double post to `player_cash` versus
-  a suspense account): `payments` prefers the ADR's stated default — post and raise P1 — over a
-  new suspense-account type at this stage, since it keeps the ledger reflecting real received
-  funds without adding an account type outside this ADR's scope. This is `ledger-finance`'s
-  decision to make; recorded here only as the requesting domain's preference.
-
-None of these conditions require a redesign of §4–§12; all four are documentation or test
-additions to sections already inside this ADR's scope. Payments sign-off is granted on that
-basis, conditional on P95-C1–C3 landing in PRH-I1/I1-f/I1-h as described.
-
-
 ## 22. Security review
 
 - **Reviewer:** `security`, 2026-09-27, against HEAD `eb15ac6` (design review of this PROPOSED
@@ -2251,3 +1845,414 @@ together with the existing PROV-OUTBOUND-CRED-1 and F-POOL-2 rows. The rest must
 PRH-I1/I2/I5 before their respective `security` code reviews. None of this is a claim that the
 platform is secure or launch-ready; production launch authorization remains the human's
 decision.
+
+---
+
+## 23. Payments review
+
+**Verdict: APPROVE WITH CONDITIONS**
+
+Reviewed as `payments` owner, scope §4–§12 and §18 per the ADR's own sign-off list, plus P-Q1
+(§19.2) and the ADR 0097/architect `WebhookRetrySemantics` cross-review item.
+
+**P-Q1 (§19.2).**
+
+- **§7.3 defaults.** Accepted as reversible engineering `RECOMMENDATION` values (15 s tick, 20
+  batch, 16 global / 4 per-(tenant, provider) concurrency, 60 s lease, 30 s/30 min backoff, 24 h
+  horizon, 30 min presence window, 3 resubmits). `MaxCascadeDepth = 3` is unchanged from today's
+  running value. No objection; these should be re-measured against real traffic once a
+  non-MOCK adapter exists, exactly as the ADR already says for the burst/rate numbers elsewhere.
+- **Does an existing adapter test rely on today's inline webhook cascade? Yes.**
+  `TestMigration0082_DepositIntentsProviderColumnsStayMutable`
+  (`internal/payments/migration_0082_immutability_integration_test.go:111`) exists specifically
+  to pin `deposit_intents.provider_id`/`provider_reference` as mutable in place, because
+  `handleDecline → attemptDeposit → setIntentAttempt` today overwrites them on the *same* intent
+  row on cascade. §5.1 keeps `deposit_intents` as an unchanged mirror that "keep[s] mirroring
+  the latest routed attempt for existing readers," so this test should keep passing once cascade
+  authority moves to `payment_attempts` — but that must be proven, not assumed (P95-C1).
+
+**The three behaviour changes — all accepted:**
+
+1. **Async cascade removed for interactive/redirect methods (§4.6).** Correct and overdue. An
+   asynchronous decline of an interactive attempt cascading to a new provider is a latent defect
+   today: the new redirect URL can never reach a player who has already left the page. Confining
+   post-decline cascade continuation to non-interactive methods, driven by the sweeper, is a bug
+   fix, not a lost capability. The player-retry-with-new-idempotency-key fallback for the
+   interactive case is the correct, and only sound, alternative.
+2. **Unresolved verified callbacks get 200 after durable receipt, not 404 (§6.2
+   `deferred_unresolved`).** Accepted. The 200 is issued only *after* the event passes
+   verification and is durably receipted, and the response is identical whether or not the
+   reference ever resolves, so it opens no existence oracle. Concur with S-Q2's framing that
+   this is a post-verification-only change.
+3. **`submitted` withdrawals may lack a `provider_reference` (§4.7).** Accepted; this is the
+   direct fix for the double-payout hazard (LF-C2 #9, hazard #5 in §1). `provider_reference`
+   moving from "set at submission" to "set once by T4/T9/T7" is the correct fix, but
+   `docs/architecture/withdrawal-state-machine.md` lines 92–93 still document `provider_id` and
+   `provider_reference` as "set on `approved` -> `submitted`" today. That doc is stale the
+   moment this ADR is implemented and is `payments`-owned per §18's "Specialist-owned document
+   changes" list; it must be updated no later than I1-f, not left implicit (P95-C2).
+
+**8-state model vs. routing / cascade-on-decline / health-based failover (Blueprint via
+`docs/architecture/payment-orchestration.md` §4–§6 and `docs/decisions/0022`) — nothing is
+lost:**
+
+- **Routing** (`payment-orchestration.md` §4: tenant/brand → jurisdiction → currency/asset →
+  method → amount → health) is unchanged in substance. §9.6's split of `RouteProvider` into
+  `ListRoutingCandidates(tx)` (in-tx) and `Rank(candidates, health)` (no-tx) only relocates the
+  health read outside the transaction; the resolution order and dimensions are untouched.
+- **Cascade-on-decline** (`payment-orchestration.md` §5) is preserved and materially improved.
+  §5 itself documents today's limitation: a single `deposit_intents` row keeps only the latest
+  attempted provider, so `providerExclusionSoFar` can exclude only the most recently tried
+  provider once a callback arrives asynchronously. The attempt-per-try model (§4.6, T1 on every
+  cascade with `excluded_provider_ids = all previous attempts' providers`) closes that gap
+  completely — this is a strict improvement over the documented current behaviour, not a
+  reduction.
+- **Health-based failover** (`payment-orchestration.md` §6: `ProviderHealth`, `circuit_state`)
+  is preserved. §9.6 tightens `HealthStatus` to an in-memory, no-I/O snapshot contract and adds
+  an orchestrator-owned breaker per `(tenant, provider)` fed by `ErrorClass` — a strict superset
+  of today's in-memory health/circuit design (which this ADR does not turn into a stored table
+  either), not a different mechanism.
+- The one genuine behaviour reduction is the interactive-cascade restriction already addressed
+  above, and it is a correctness fix, not a lost feature.
+
+**Sweeper design (§7).** Sound. Tenant round-robin reusing the existing
+`activeTenantIDs` reconciliation-scheduler pattern; a short claim tx using
+`FOR UPDATE SKIP LOCKED` plus per-row lease/`lease_owner`, so a crashed worker's items reappear
+at `lease_until`; global and per-(tenant, provider) concurrency caps that keep one tenant's slow
+provider from starving another (the F-POOL-1 lesson, correctly generalized); exponential backoff
+with jitter and a cap; and escalation (T16) at the manifest's `resolution_horizon` with no state
+change. §7.4's claim that at most one live money call per attempt exists (entry to `submitting`
+is only via CAS T2/T12) is correct and is the actual mechanism that prevents a double
+submission, not the lease.
+
+**Provider-neutral contract (§9).** Endorsed, with one gap:
+
+- The closed outcome set (`NotSent`/`NotProcessed`/`DefiniteDecline`/`Ambiguous`, §8) is
+  exhaustive and is what makes INV-IO-7 (no payout failure without definite decline evidence)
+  enforceable by CAS and trigger rather than by convention — this is the single load-bearing
+  design choice in the ADR from a payments-correctness standpoint, and it is right.
+- `StatusQuery` by either provider or merchant reference (§5.3, §9.2, manifest field
+  `StatusQuery`) is correct and is specifically what makes the withdrawal
+  `submitted`-with-no-reference case resolvable.
+- The no-I/O `HealthStatus` snapshot plus the platform breaker per `(tenant, provider)` (§9.6)
+  is correct and is the direct fix for F-POOL-2's health-check pool-pinning hazard (hazard #4 in
+  §1).
+- Refunds reserved, `NOT IMPLEMENTED` (§5.5): correctly scoped. No flow initiates a refund
+  today; refusing an adapter that declares `SupportsRefund=true` before a flow exists is the
+  right fail-closed default, and the label is accurate per CLAUDE.md's no-fake-completion rule.
+- Retry/timeout classification (§8) is correct throughout, in particular that a timeout *after*
+  dispatch is always `Ambiguous` and never a failure, and that `NotProcessed` requires the
+  vendor to *document* the response as safe-to-resend — every undocumented outcome correctly
+  degrades to `Ambiguous`.
+- **Gap: `WebhookRetrySemantics` is not in the §10.1 manifest table.** ADR 0097 §19 (payments
+  review) condition 2 already commits `payments` to requiring
+  `WebhookRetrySemantics{Retries429, Retries503, HonorsRetryAfter, RetryWindow}` as a
+  **mandatory, fail-closed** field in this ADR's capability manifest, and that condition was
+  accepted. §10.1's manifest field table as drafted here does not list it. This must be added
+  before this ADR is treated as satisfying that condition (P95-C3) — it is a table-row addition,
+  not a design change, since §18's I1-h ("manifest registration checks (incl. LF-C1(b) startup
+  rule)") is already the right place to enforce it.
+
+**MOCK adapter scope (§9.2, §16.1).** Correctly bounded. Tenant-tagged records,
+merchant-reference lookup, idempotent-by-key mode, and the `NotSent`/`NotProcessed`/
+`Ambiguous`/timeout/crash hooks are state-machine and test-harness plumbing to exercise the
+contract described above — none of it invents a vendor wire format, signature scheme, or
+vendor-specific error taxonomy. This matches CLAUDE.md's "mocks/sandboxes, clearly labelled"
+rule and ADR 0022 §6's requirement that the MOCK pass the same conformance suite as a real
+adapter, not a special-cased one.
+
+**Work breakdown PRH-I1 a–i (§18).** Sequencing (I1-b/h/a in parallel; I1-d→e→f→g sequential) is
+correct and consistent with the code dependencies described in §1 and §14. Two acceptance
+criteria are missing from the item descriptions, both closed by the conditions below rather than
+requiring resequencing: the migration-0082 mirror-invariant regression (I1-d/e, P95-C1) and the
+`WebhookRetrySemantics` manifest field (I1-h, P95-C3).
+
+**Conditions for APPROVE (P95-C#):**
+
+- **P95-C1.** I1-d/I1-e must keep `TestMigration0082_DepositIntentsProviderColumnsStayMutable`
+  passing and add an explicit test asserting `deposit_intents.provider_id`/`provider_reference`
+  continue to mirror the latest `payment_attempts` row through a cascade, so §5.1's "keep
+  mirroring" claim is proven by a test, not assumed.
+- **P95-C2.** `docs/architecture/withdrawal-state-machine.md` (currently documenting
+  `provider_id`/`provider_reference` as "set on `approved` -> `submitted`") must be updated to
+  the §4.7 semantics no later than I1-f, before PRH-I1 is marked complete.
+- **P95-C3.** Add `WebhookRetrySemantics{Retries429, Retries503, HonorsRetryAfter, RetryWindow}`
+  to the §10.1 operation manifest table as a mandatory, fail-closed field for every non-MOCK
+  payments adapter (registration refuses without it), which is what closes ADR 0097 §19
+  condition 2 and the architect cross-review item on this ADR's own text, not just on the interim
+  config key.
+- **P95-C4 (informational, not blocking).** On LF-Q1 (T13's double post to `player_cash` versus
+  a suspense account): `payments` prefers the ADR's stated default — post and raise P1 — over a
+  new suspense-account type at this stage, since it keeps the ledger reflecting real received
+  funds without adding an account type outside this ADR's scope. This is `ledger-finance`'s
+  decision to make; recorded here only as the requesting domain's preference.
+
+None of these conditions require a redesign of §4–§12; all four are documentation or test
+additions to sections already inside this ADR's scope. Payments sign-off is granted on that
+basis, conditional on P95-C1–C3 landing in PRH-I1/I1-f/I1-h as described.
+
+---
+
+## 24. QA test-plan review
+
+**Verdict: CONFIRMED WITH CHANGES.**
+
+Scope of this review is §16 only (crash points, adversarial groups, reconciliation tests,
+mutations) plus the invariant table (§2) as the checkable contract those tests must close.
+
+### What is solid
+
+- The plan is invariant-first, not scenario-first: every adversarial group (§16.2 items 1–18)
+  and every crash point (§16.1 CP-D1..CP-W6) states a **converged outcome**, which is a
+  measurable pass/fail (state, posting count, call count), not "it worked." This is the right
+  shape for financial code and satisfies "no fake completion."
+- Crash injection is specified as **hooks in the MOCK adapter and orchestrator seams,
+  test-only** (§16.1 heading), not timing/sleep races. The one place a sleep appears (item 14's
+  pool-starvation variant, "N concurrent slow MOCK calls (sleep > 1 s)") is a deliberate
+  connection-holding fixture reused from F-POOL-1, not a race-dependent assertion — acceptable,
+  but it should be called out explicitly as the one intentional exception so a future reviewer
+  doesn't read it as a stray sleep.
+- Every financial adversarial test is required to end with INV-IO-13 (SUM(debits)==SUM(credits)
+  plus projection==rebuild), which is exactly "prove no double credit/debit" made checkable
+  rather than asserted.
+- Tests run against real Postgres (triggers, RLS, `FOR UPDATE`, REPEATABLE READ, `pg_stat_activity`
+  checks in item 14) rather than in-process mocks of the DB layer, which satisfies "do not rely
+  solely on mock unit tests for financial correctness" — the MOCK is only the *provider*, never
+  the ledger or the transaction boundary.
+- The human's specific list is each directly covered: no double credit (#1, INV-IO-13), no
+  double debit/payout (#2, CP-W4/W5), no lost successful payment (#3, three independent
+  convergence paths: poll-only, callback-only, reconciliation+T17), no lost callback (#4,
+  INV-IO-10), no unsafe retry (#5), ambiguous never silently success (#6, #9), duplicate
+  callback idempotent (#7), callback before/after internal transition (#8, §6.4 both orders),
+  timeout not auto-failure (#9), reconciliation detects divergence (§16.3, one fixture per
+  mismatch kind).
+- Repeated-run discipline exists at least for lock ordering ("no deadlock across 500
+  iterations," item 16) and duplicate-callback ("sequentially and concurrently," item 7).
+
+### Required changes before this test plan can gate `IMPLEMENTED`
+
+1. **Mutation coverage is incomplete against the invariant list.** §16.4's MX1–MX9 map cleanly
+   to INV-IO-1, 3, 6/7, 8, 10, 12, and the kill switch, but there is no mutation exercising
+   INV-IO-2 (calling the provider without a *committed* `submitting` claim token — distinct from
+   MX1, which is calling before an attempt exists at all), INV-IO-4 (bypass the CAS predicate
+   itself in application code, as opposed to the trigger-rejection direct-SQL test in item 17),
+   INV-IO-5 (post the ledger effect from inside phase B, or out of ADR 0082 lock order), INV-IO-9
+   (flip `ever_possibly_sent` without a real send), or INV-IO-11 (let an adapter cache a
+   credential across two calls). Add MX10–MX14 (or fold into existing IDs) so every INV-IO row
+   has at least one mutation and a named failing test, per the ADR's own "checkable contract for
+   qa" framing in §2.
+2. **No migration up/down test, and no explicit 0100-backfill pass/fail test.** The PRH list
+   requires migration up/down including the 0100 backfill; §13.1 describes the backfill's
+   abort-on-violation behavior in prose but §16 never turns it into a test. Add: (a) up/down/up
+   round-trip for 0100, 0102, 0103 leaves no orphaned constraints or triggers; (b) backfill over
+   a fixture set with a pre-existing two-live-attempt violation aborts and lists the offending
+   ids without partial writes; (c) backfill over clean synthetic data produces exactly the
+   states §13.1 specifies.
+3. **No RLS cross-tenant test named for the four new tables.** `payment_attempts`,
+   `payment_provider_events`, `payment_kill_switches`/`_release_requests`, and
+   `payment_statement_imports`/`_lines` are all `FORCE RLS` (§13), but §16 has no item asserting
+   that a session scoped to tenant A cannot read or affect tenant B's rows in any of them (the
+   existing `tenant_staff_scope` pattern presumably has a reusable harness — reuse it here by
+   name).
+4. **No API/OpenAPI conformance test for the new staff-admin surface.** The kill-switch
+   engage/release endpoints (§10.4) are new HTTP surface with new permissions
+   (`payments_kill_switch:engage/release`); §16.2 item 12 tests the domain effect and the
+   route-table exclusion for players, but nothing pins the request/response shape or an OpenAPI
+   diff for these routes plus the `T17` re-verify endpoint.
+5. **Deterministic mechanism for "connection lost" fault points is unstated.** CP-D5 ("Phase C
+   COMMIT connection lost") and the general "DB error causes a rollback" cases in §16.2 item 4
+   need a named, deterministic injection mechanism (e.g., a `pgx` connection wrapper or
+   `net.Conn` proxy that severs after the wire bytes for COMMIT are sent but before the ack is
+   read) — otherwise this is either untestable or accidentally timing-dependent. Name the hook
+   before implementation, not during.
+6. **No breaker state-transition test.** §9.6 defines a closed/open/half-open breaker per
+   (tenant, provider), fed by `ErrorClass`, and §16.2's list has no adversarial case forcing it
+   through open → half-open → closed, verifying a tenant-A breaker does not affect tenant B, or
+   that `DefiniteDecline` does not count against it. This is the "provider outage" case from the
+   PRH list and is currently only implied by CP-W6 (credential outage, not transport outage).
+7. **CI lane/time budget and package placement are not stated.** §16.2 item 14 says the
+   pool-starvation variant runs "in its own isolated CI lane," which is right, but no time
+   budget is given anywhere in §16, and no package location is proposed for the new suite.
+   Given the existing `internal/httpserver` (~310 s) and full-suite (~600 s) budgets, propose:
+   state-machine/evidence-matrix and mutation tests in `internal/payments` (fast, no adapter
+   I/O, should not materially move the `internal/payments` budget); the crash-point and
+   adversarial suite in a new `internal/payments/ioboundary` package sharing the existing
+   Postgres test harness; the pool-starvation and `pg_stat_activity` capture tests
+   (§16.2 item 14) in their own CI lane, budgeted separately and **not** counted against the
+   `internal/httpserver` 310 s figure, since they intentionally hold slow connections. Reconciliation
+   tests (§16.3) belong under `internal/reconciliation/payment_statement` alongside the existing
+   casino_statement suite. This needs a number from `qa`/`payments` before I1-i lands, not an
+   open-ended "isolated lane."
+8. **Repeat-run / flake bound not stated for most concurrency cases.** Only the lock-order
+   harness (500 iterations) and duplicate-callback ("sequentially and concurrently") specify a
+   repetition count. CP-W4/W5, the concurrent-cascade case (item 11), and the concurrent
+   duplicate-success-callback case (item 1) should each state a minimum iteration count (e.g.
+   ≥100 runs in CI, `-race` enabled) so "no double X" is a statistically meaningful claim rather
+   than a single lucky interleaving.
+
+None of the above blocks starting PRH-I1 work — items 1–8 are additions to I1-i (§18) and to
+§16 itself, not redesigns of the boundary. This ADR stays `NOT IMPLEMENTED`; when I1-i is
+written, it must close items 1–8 and this section's verdict updates. `qa` does not sign off
+`IMPLEMENTED` for PRH-I1 until they are closed or a specialist explicitly accepts the gap in
+writing.
+
+---
+
+## 25. Identity-compliance review
+
+Reviewer: `identity-compliance`, 2026-09-27. Scope: §15 (KYC create/submit split), IC-Q1
+(§19.2), and the payout KYC gate contract against ADR 0096 (revised concurrently). Withdrawal
+financial posting shape, ledger accounts and lock-order arithmetic are `ledger-finance`'s scope
+(§12 of 0096), not re-litigated here.
+
+### IC-Q1 — the KYC callback-race response class (§15.2)
+
+**Resolved: retryable `5xx`, never a bare `200`.** §15.2 says a callback racing phase C "gets a
+retryable response class, so the vendor redelivers after C commits," but does not say which
+class. Payments can safely turn an unresolved race into a `200` (§6.2 `deferred_unresolved`)
+only because `payment_provider_events` durably receipts the event first (INV-IO-10) — the
+evidence is never lost even if nothing applies yet. §15.2 is explicit that KYC has **no receipt
+table**. A `200` on an unresolved KYC callback would durably discard the only copy of that
+evidence, which is worse than today's behaviour, not equivalent to it. §15.2 must state
+plainly: an unresolved race returns a retryable `5xx`; a `200` is reserved for a callback the
+platform actually applied (including a duplicate/no-op apply). Whether the vendor actually
+redelivers on `5xx` is `PROVIDER DEPENDENT` and must be confirmed at real-vendor intake, the
+same discipline §6.6/LF-C1 already applies to payments — this ADR should say so explicitly for
+KYC rather than leaving it implied by analogy.
+
+### §15 KYC create/submit split — state safety, idempotency, retries, KYC-SUBMIT-OUTBOX-1
+
+**Provider-accepted-but-our-tx-failed is safe as designed, with two precisions required.**
+
+- `CreateVerification`: a crash between phase B (vendor accepted) and phase C leaves an orphan
+  `unverified` row with `provider_reference NULL`. This has no enforcement effect — ADR 0096's
+  `EvaluateEnforcement` only allows on `passed`, and `unverified`/no-row already maps to
+  `failed` — so an orphan never lets a player through. Confirmed safe. **Precision required:**
+  the vendor idempotency key (`"kv:" + id`) is honored only "if the vendor supports keys"
+  (`PROVIDER DEPENDENT`). Where it does not, a player retry before the orphan is known creates a
+  second, unrelated vendor-side verification under a second platform row. That is not a
+  financial or enforcement hazard (both rows are independently evaluated on their own merits),
+  but it must be recorded as `PROVIDER DEPENDENT` vendor behaviour at intake, not silently
+  assumed deduplicated.
+- `SubmitVerification`: a crash between phase B and phase C is identical to today's
+  `ProviderError` handling — the verification stays as-is, and the next document upload
+  re-submits the full set under a new content-derived key
+  (`"ks:" + verification_id + ":" + sha256(sorted document ids)`). Confirmed safe, and
+  idempotent on a real retry. **Precision required:** §15.3 must state explicitly that an
+  ambiguous or timeout `SubmitVerification` response leaves `kyc_verifications.status`
+  unchanged — it must not be misread by `normalizeProviderResult` as a definitive outcome.
+  Unlike payments, §15.3 does not reuse `applyEvidence`'s matrix, so this guarantee needs its
+  own stated rule and its own test, not an inherited one.
+- **`KYC-SUBMIT-OUTBOX-1` deferral: accepted.** No real KYC vendor exists yet (mock only); the
+  worst case under deferral (a lost submission result, corrected by the next upload) is a
+  strict improvement over today's tx-held-across-call hazard (§1 row #9), since it removes the
+  pool-pinning risk while adding no new financial or enforcement exposure. This specialist will
+  treat "the first real KYC adapter's intake" as a hard precondition, not a suggestion: no real
+  KYC adapter is accepted into PRH-I2 without a durable submission outbox design landing first.
+
+### Payout KYC gate contract — naming the hook so ADR 0095 and ADR 0096 agree
+
+**Confirmed: T1p is the correct, and the only correct, hook — with one addition ADR 0096 must
+make explicit.**
+
+The hook both ADRs must name identically is: **T1p — the phase-A transaction that performs
+`withdrawal.ClaimForDispatch` (`approved→submitted`) together with the payout attempt's
+`∅→submitting` insert (§4.3, §5.2)**. This is, by construction, the last transaction that
+commits before the first outbound `Withdraw` call for that request. ADR 0096's
+`DenyForCompliance` (0096 §12 C2) must run inside this same phase-A transaction, evaluated
+before T1p's own CAS is attempted, sharing the identical guard predicate
+(`withdrawal_requests.state = 'approved'` under the same L1 `FOR UPDATE`, §14). Because both a
+KYC deny and a T1p claim require `state = 'approved'` under the same row lock, they are
+mutually exclusive by the lock itself, not by application-code ordering discipline — whichever
+commits first structurally forecloses the other on that request. This is exactly the "last
+committing tx before the first provider Withdraw call" property 0096 C5 asks for, and it is
+already present in §4.3/§5.2/§14 as written; it only needs naming, not redesigning.
+
+**Sweeper re-check — the case ADR 0096 does not yet name.** A payout attempt can return
+`submitting→created` via T5 (`NotSent`, provably not dispatched — INV-IO-9), and is later
+re-claimed by the sweeper via **T2** (`created→submitting`), not by a second T1p. 0096 §12 C5
+correctly requires "the sweeper's claim transaction must re-run the gate before that first
+send," but 0096 does not yet say which withdrawal-side transition a T2-time KYC deny should
+produce, and it should not reuse `DenyForCompliance`'s `approved→rejected` edge unmodified —
+by the time T2 fires, the withdrawal is already `submitted` (T1p already ran once), not
+`approved`. Since a T2 reclaim only ever occurs while the payout attempt is provably `created`
+with `ever_possibly_sent = false` (T5's own guard, INV-IO-9), the platform can prove no call has
+reached the provider yet — this is exactly the eligibility 0095 §4.8 already defines for **M3**
+("no double-payout risk, because `created` has provably never been sent"). ADR 0096 should
+route a T2-time KYC deny through **M3's existing edge** (`created→rejected`, then
+`withdrawal.Fail`), not invent a parallel one. Recommend 0096 §12 C5 (or a new sub-bullet) name
+this explicitly: *"a KYC deny discovered at a T2 payout reclaim is M3, never `DenyForCompliance`
+applied a second time."*
+
+**Never releasing a hold once dispatch may have occurred — confirmed structural, not
+discretionary.** Once a payout attempt is `submitting`/`pending`/`ambiguous` with
+`ever_possibly_sent = true`, INV-IO-7 forbids any `*→declined` transition without provider
+evidence, and the trigger's `evidence_kind` enum (`callback | query_status | sync | sweeper`,
+§4.2) has no member for a KYC decision. A KYC outcome is therefore structurally incapable of
+driving T8 once the attempt may have reached the provider — this guarantee comes from the
+state-machine trigger itself, not from an application-level check that a future code path could
+bypass. No additional mechanism is required beyond the naming corrections above.
+
+### Verdict: **APPROVE WITH CONDITIONS**
+
+1. §15.2 must state the callback-race response class explicitly as retryable `5xx` (IC-Q1),
+   with vendor redelivery-on-`5xx` flagged `PROVIDER DEPENDENT` for confirmation at real-vendor
+   intake.
+2. §15.3 must state explicitly that an ambiguous/timeout `SubmitVerification` result leaves
+   verification status unchanged, with its own test (not inherited from §4.4's matrix, which
+   §15.3 does not reuse).
+3. §15/§5.2 (or a cross-reference to 0096) must name the payout KYC gate hook precisely as
+   **T1p** for the initial claim, sharing the `state='approved'` L1 guard with
+   `DenyForCompliance`, so the two are mutually exclusive by lock, not by convention.
+4. ADR 0096 (0096 §12 C5) must be extended, before either ADR is marked implementable, to name
+   the T2-payout-reclaim case explicitly and route it through **M3** (not a second
+   `DenyForCompliance`), per the reasoning above — this is a required cross-ADR consistency fix,
+   not a new design.
+5. `KYC-SUBMIT-OUTBOX-1`'s deferral is accepted as a documented precondition on the first real
+   KYC adapter intake (PRH-I2), not merely a flagged future item.
+
+None of the above requires a redesign of §15's mechanism or of ADR 0096's enforcement boundary;
+all are naming/precision fixes needed so the two documents describe the same hook, plus two
+missing explicit statements in §15.2/§15.3.
+
+---
+
+## 26. Casino review
+
+**Verdict: APPROVE WITH CONDITIONS**
+
+Reviewed as casino-integration owner, scoped to §15.1 (`casino.LaunchGame`) and CAS-STMT-IO-1
+only.
+
+**§15.1 launch split.** Agreed. Phase A commits the `casino_launch_sessions` intent
+(`status='active'`, `expires_at`-bounded) with no lock and no transaction held across the
+vendor `Launch` call in phase B — consistent with the no-lock-across-I/O principle in §14 and
+the general split pattern in §12. Phase C's CAS on `RevokeLaunchSession`
+(`status='active'` guard, exists today) correctly handles both an explicit vendor failure and
+an ambiguous outcome by revoking rather than assuming success, so a launch token is never
+minted or handed out for a session the platform can't account for. Orphaned-session handling
+is correct and matches this agent's non-negotiable: a crash on either side of the vendor call
+leaves the session `active` and unresolved-to-the-player; it simply expires, and a bet against
+an unknown/expired/revoked session returns `ErrLaunchSessionRequired` with no ledger effect —
+no money moves without a verified bet on a resolvable session. Idempotency is sound: `SessionID`
+is the deterministic external reference/key for phase A, retries after a crash mint a new
+session (existing behaviour, no new state), and there is no path where a duplicate `Launch`
+call or a duplicate token can be produced from the same intent. Launch-token minting itself
+(single-use, opaque, bound to player/provider/game/currency/mode, short TTL, never the brand
+session token) is unchanged by this ADR and is out of scope here — no new review trigger for
+`security`. No objection to §15.1 as specified; no redesign needed on this agent's surface.
+
+**CAS-STMT-IO-1.** Severity agreed: Low, not reachable today. The mock `CasinoStatementSource`
+is in-memory and single-process, so the provider-I/O-inside-a-tx hazard this finding names does
+not exist yet — there is no real vendor call to hold a transaction open across. Fix timing
+agreed: no redesign now; the fetch → ingest → match split from §12.1 is a hard precondition
+before wiring any real casino statement/reconciliation source, not before this stage's mock
+work. This agent will treat "first real casino statement source" as the trigger and will not
+build or accept a real statement-source adapter that reads inside the reconciliation
+transaction — that adapter must land already split per §12.1, gated on `architect` and
+`ledger-finance` sign-off, consistent with this agent's mock-only-without-a-commercial-
+relationship constraint.
+
+**Conditions for full APPROVE:** none blocking merge of this ADR's casino sections as written;
+tracking condition only — CAS-STMT-IO-1's remediation must be verified (not just referenced) at
+the time a real casino statement source is proposed, before that adapter is accepted.
