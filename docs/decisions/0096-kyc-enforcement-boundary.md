@@ -67,12 +67,17 @@ is not an engineering call.
 
 | Verdict | Count | Rows |
 |---|---|---|
-| ENFORCE | 3 | #1, #3, #5 |
-| NOT-ENFORCE | 15 | #2, #4, #6, #7, #8, #9, #11, #12, #13, #14, #15, #16, #17, #18, #20 |
-| HUMAN-DECISION (flagged, not designed) | 5 | #10 (sportsbook stake vs. EDD), #15 (bonus conversion AML), #18 (conversion op, when built), #19 (crypto rail, when built), #21 (affiliate payout, when built) |
+| ENFORCE | 5 | #1, #3, #5, #7, #10 |
+| NOT-ENFORCE | 14 | #2, #4, #6, #8, #9, #11, #12, #13, #14, #15, #16, #17, #18, #21 |
+| Deferred, not reachable (no verdict yet meaningful) | 1 | #19 (crypto rail) |
+| HUMAN-DECISION flagged (overlaps ENFORCE/NOT-ENFORCE rows above, not a disjoint count) | #10, #15, #18, #19, #21, plus HD-KYC-8 (§4) |
 
-Rows #4 is a "not a second check" call, folded into row #3's design, not a
-gap — see §3.
+Rows #7 and #10 are **ENFORCE** as of the orchestrator's amendment
+(2026-09-27): a policy-driven "play" trigger is designed in §3.5 so the
+surface is never silently dropped, even though its *default* outcome
+(`not_required`, no active policy) leaves today's behaviour unchanged
+until a jurisdiction policy is authored. Row #4 is a "not a second check"
+call, folded into row #3's design, not a gap — see §3.
 
 ---
 
@@ -115,6 +120,8 @@ const (
 	EnforcementDeposit          EnforcementOperation = "deposit"
 	EnforcementWithdrawalHold   EnforcementOperation = "withdrawal_hold"   // row #3
 	EnforcementWithdrawalPayout EnforcementOperation = "withdrawal_payout" // row #5
+	EnforcementCasinoPlay       EnforcementOperation = "casino_play"       // row #7 — policy-driven, §3.5
+	EnforcementSportsbookPlay   EnforcementOperation = "sportsbook_play"   // row #10 — policy-driven, §3.5
 )
 
 // EnforcementParams is EvaluateEnforcement's input. Every identity field
@@ -204,7 +211,9 @@ step, never reordering what already exists:
 | Deposit initiation (`payments.InitiateDeposit`) | RG | **RG → KYC** (Risk: `NOT IMPLEMENTED` for payments per ADR 0031 §13, unaffected) |
 | Withdrawal request (`withdrawal.RequestWithdrawal`) | none | **KYC** (no RG exists on this path today — see §5, out of this ADR's scope to add) |
 | Withdrawal payout dispatch (`withdrawal.LockApprovedForSubmission`, before the caller invokes the provider) | none | **KYC** |
-| Casino launch/bet, sportsbook bet, bonus grant/activation/conversion | RG → Risk | **unchanged** — no KYC call added (§1 verdicts) |
+| Casino bet placement (`casino.postBet`) | RG → Risk | **RG → Risk → KYC** — KYC evaluated last, immediately before the balance lock/ledger post, exactly where RG/Risk already sit relative to it today (ADR 0031 §7: "after the RG check, before the balance lock"). Placed after Risk, not before or between, so neither existing tested call order is disturbed: an RG or Risk denial still short-circuits before KYC ever runs, and KYC's own `not_required` default (§3.5) means this new step is a no-op read on every path until a jurisdiction policy exists |
+| Sportsbook bet placement (`sportsbook.orchestrator.go` RG at `:593` → Risk at `:616`) | RG → Risk | **RG → Risk → KYC**, identical placement and rationale to casino bet placement above |
+| Casino win/rollback, sportsbook settlement/void/cashout, bonus grant/activation/conversion | RG → Risk (win/rollback: deliberately neither) | **unchanged** — no KYC call added (§1 verdicts; wins/rollbacks/settlements stay corrections, not new stakes) |
 
 Rationale for "RG first, then KYC" on deposit: RG's check is cheaper (no
 jurisdiction/amount resolution) and already the tested, audited
@@ -295,7 +304,18 @@ Blueprint §4.7's tiered list has two different characters:
      this is the platform's *existing* behaviour today, so shipping the
      mechanism does not newly weaken anything; it adds the capability to
      turn the gate on the moment HDR-J-6 is answered, without a code
-     change).
+     change). **This "allow when unconfigured" default is an explicit
+     design choice, flagged here for `security` review, not an
+     unexamined default**: it is safe specifically *because* value
+     cannot leave the platform through a deposit — the structural
+     first-withdrawal gate in point 1 above is the actual backstop that
+     prevents an unverified player from ever extracting funds, deposited
+     or otherwise. If a future reviewer finds a reason deposits need
+     their own fail-closed-when-unconfigured posture independent of that
+     backstop (e.g. a jurisdiction where accepting funds at all, not
+     just paying them out, carries independent legal exposure), that is
+     a new finding for this ADR to absorb, not something this default
+     silently forecloses.
    - For **rows #3/#5 (withdrawal)**, the threshold triggers are
      genuinely optional refinements on top of the always-on structural
      rule in point 1 above — "dormant" only ever means "no *additional*
@@ -325,7 +345,14 @@ CREATE TABLE kyc_enforcement_policies (
     id                          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     licensing_jurisdiction_id   UUID NOT NULL REFERENCES jurisdictions(id),
     trigger_type                TEXT NOT NULL
-        CHECK (trigger_type IN ('cumulative_deposit', 'edd_amount', 'registration_tier')),
+        CHECK (trigger_type IN ('cumulative_deposit', 'edd_amount', 'registration_tier', 'play')),
+    -- 'play' (§3.5, HD-KYC-8): the ONLY trigger_type with no numeric or
+    -- tier value at all — its mere presence as an 'active' row for a
+    -- (licensing_jurisdiction_id, operation ∈ {casino_play,
+    -- sportsbook_play}) pair means "this jurisdiction requires a passed
+    -- verification before play, full stop." It still requires
+    -- legal_review_reference like every other active row (the CHECK
+    -- below), so it can never be authored casually.
     -- Deliberately NOT ('first_withdrawal') — that trigger is structural
     -- and compiled in (§3.2 point 1), never a configurable row, so it
     -- can never be silently disabled by an application-layer write.

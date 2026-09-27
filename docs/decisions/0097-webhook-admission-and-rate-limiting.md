@@ -532,3 +532,83 @@ Security authors this design. Before it moves to ACCEPTED it needs concurrence f
 `payments` (§6.3), `architect` (the ADR 0095 manifest dependency; R5 scope), `ledger-finance`
 (§6.4 / T6), and QA confirmation of §11. This document does not declare the control secure:
 the security review of the PRH-I4 diff is still required.
+
+## 16. Devops review
+
+Verified at `24cbde1` against `cmd/platform-api/main.go`, `internal/httpserver/health.go`,
+`internal/httpserver/middleware.go`, `internal/config/config.go`, and `deploy/aws/`.
+
+**HTTP-TIMEOUTS-1 vs current state.** Confirmed: `main.go` sets only
+`ReadHeaderTimeout: 5s` (no `ReadTimeout`, `WriteTimeout`, `IdleTimeout`). No handler in
+`internal/httpserver` uses `http.Flusher`, SSE, or chunked streaming responses — admin/report
+endpoints (`casino_reconciliation_handlers.go`, `casino_statement_admin_integration_test.go`,
+etc.) are bounded JSON responses, not long-lived streams. This ADR's `BodyReadTimeout` (10 s,
+via `SetReadDeadline` on webhook routes only) is compatible with those endpoints since it is
+scoped per-request via `ResponseController`, not a global `http.Server.ReadTimeout` change —
+correctly deferred as a separate, platform-wide fix (HTTP-TIMEOUTS-1) rather than bundled here,
+since a global `WriteTimeout` sized for webhooks (10s) would need separate headroom analysis
+against the slowest admin/report handler before being applied platform-wide. No objection to
+sequencing; flag as a condition to keep the two changes in separate diffs (Condition 1).
+
+**Config/env design and startup validation.** §9.3's fail-closed startup validation (rate/burst
+bounds, `W_db < N`, `production` cannot disable) matches the existing `Load()` pattern in
+`internal/config/config.go` (e.g. the provider-credential fingerprint key and Environment
+validation already fail startup on bad config). `WEBHOOK_ADMISSION_OVERRIDES` as env-var JSON
+is consistent with "no plaintext credentials" (it carries no secrets — only rates/bursts/ids)
+and is explicitly scoped as operator config, not tenant config. Acceptable as designed. No
+Vault/KMS involvement needed since nothing here is a credential.
+
+**Tenant-slug directory refresher — lifecycle, `/readyz`, DB-down-at-boot.** §7's table is
+correct: startup blocks on the first synchronous load, `/readyz` is not-ready until loaded, and
+webhook routes 503 rather than run with unknown keying. This composes correctly with the
+existing `readyzHandler` (`health.go`), which already gates on `db.HealthCheck` — if the DB is
+down at boot, `/readyz` stays not-ready for the existing reason *and* the new one, so ECS never
+routes traffic to a task that can't build the directory. One gap: the ADR does not say what the
+refresher goroutine does on shutdown. `main.go`'s existing shutdown path
+(`http.Server.Shutdown`) should cancel the refresher via the same context so it doesn't leak or
+log after the logger/DB pool is torn down (Condition 2).
+
+**Per-process limits under single-task ECS.** `deploy/aws/modules/ecs/variables.tf` defaults
+`platform_api_desired_count` to 2 in the persistent environment (staging's ephemeral root
+defaults to 1). §10 is honest that A2/A3/B1 are per-process and only state that protects
+per-process resources (goroutines, memory, that process's pool) is authoritative — this is
+correct today at desired_count=1, and remains correct (just with 2x effective budget, disclosed
+already) once staging exercises 2 replicas for the ADR-0086 acceptance test. No Terraform
+change is required by this ADR, and none should be made — confirmed the implementation
+breakdown (§13) touches no `deploy/` file, matching the constraint that AWS/infrastructure
+stays unchanged for this control.
+
+**Observability — metric label cardinality.** All label sets in §8 are bounded: `domain` (3
+fixed values), `tier` (6 fixed values), `outcome`/`status` are enums, and `provider_key` is
+drawn from the finite process-global adapter registry (never raw input). The ADR explicitly
+avoids a `tenant_id` metric label ("Per-tenant detail goes only to logs") — correct, since
+`tenant_id` cardinality is unbounded over the platform's life; per-tenant detail belongs in
+logs (bounded by suppression, §8) rather than metrics. Gauges (`webhook_inflight`,
+`webhook_db_gate_in_use`, `webhook_limiter_keys{tier}`, directory size/age) are all
+low-cardinality. No condition needed here — this is the correct pattern and should be the
+template for future per-tenant metrics.
+
+**Access-log path redaction (RL-F4).** Confirmed the defect: `middleware.go` line 75 (and the
+panic-recovery line 94) logs `r.URL.Path` verbatim for every route, including the three
+attacker-reachable webhook routes. The ADR's fix — `r.Pattern` on webhook routes instead of
+`r.URL.Path` — is the right minimal fix, but as written in §13 it is scoped to "webhook routes"
+inside `middleware.go`; the implementer should confirm this is done by checking the route
+pattern (not by special-casing path prefixes, which is easy to bypass with a crafted path) and
+that the panic-recovery logging line (94) gets the same treatment, since a panic mid-request is
+exactly when an attacker-chosen path is most likely to be present (Condition 3).
+
+**Verdict: APPROVE WITH CONDITIONS**
+
+1. Land HTTP-TIMEOUTS-1 (platform-wide `ReadTimeout`/`WriteTimeout`/`IdleTimeout`) as a
+   separate diff/ADR from PRH-I4, sized with headroom against the slowest existing admin/report
+   handler — do not fold it into the webhook-admission change set.
+2. The tenant-slug directory refresher goroutine must be wired to the same shutdown context as
+   `main.go`'s `http.Server.Shutdown`, so it stops cleanly and does not log after the logger or
+   DB pool is torn down; add a test asserting the goroutine exits on shutdown signal.
+3. The RL-F4 access-log fix must key off the matched route pattern (not path-prefix matching)
+   and must also cover the panic-recovery log line (`middleware.go` line 94), not only the
+   happy-path `http_request` line.
+4. No Terraform or `deploy/` changes are authorized or required for PRH-I4; if a future need
+   arises (e.g., WEBHOOK-EDGE-1's source-IP allow-list, or a shared limiter store per §10's
+   WEBHOOK-RL-SHARED-1), that requires its own ADR and devops review — do not introduce
+   infrastructure changes under this ADR's implementation ticket.
