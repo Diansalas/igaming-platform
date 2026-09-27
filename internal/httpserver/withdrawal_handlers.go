@@ -1186,6 +1186,27 @@ func newResolveWithdrawalHandler(deps Deps) http.HandlerFunc {
 			return
 		}
 
+		// B3/H2: PollPayoutStatus handles an amount/asset mismatch itself
+		// (parks the attempt via T10, never an error return) - re-read the
+		// attempt so this handler can still surface the SAME distinct 409
+		// staff already expect for that condition, rather than reporting a
+		// generic 200 while silently leaving the payout disputed.
+		var resolvedAttempt payments.PaymentAttempt
+		if err := deps.DB.WithTenant(r.Context(), tc.TenantID, func(ctx context.Context, tx pgx.Tx) error {
+			var err error
+			resolvedAttempt, err = payments.GetAttemptByID(ctx, tx, attempt.ID)
+			return err
+		}); err != nil {
+			logger.Error("resolve_withdrawal_reread_attempt_failed", "error", err)
+			apierror.Write(w, requestID, apierror.CodeInternal, "failed to resolve withdrawal")
+			return
+		}
+		if resolvedAttempt.State == payments.AttemptDisputed && resolvedAttempt.TerminalReason != nil && *resolvedAttempt.TerminalReason == "amount_asset_mismatch" {
+			logger.Error("resolve_withdrawal_provider_amount_mismatch", "attempt_id", attempt.ID.String())
+			apierror.Write(w, requestID, apierror.CodeConflict, "provider-confirmed amount/asset does not match the withdrawal request")
+			return
+		}
+
 		err = deps.DB.WithTenant(r.Context(), tc.TenantID, func(ctx context.Context, tx pgx.Tx) error {
 			var err error
 			wr, err = withdrawal.GetByID(ctx, tx, id)

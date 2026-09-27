@@ -780,7 +780,7 @@ func applyPayoutSuccessCheckedFromStatus(ctx context.Context, tx pgx.Tx, request
 			TargetType: "payment_attempt", TargetID: attempt.ID.String(), Outcome: audit.OutcomeDenied,
 			Metadata: map[string]any{
 				"withdrawal_request_id": requestID.String(),
-				"requested_amount": wr.Amount, "requested_asset": wr.AssetCode,
+				"requested_amount":      wr.Amount, "requested_asset": wr.AssetCode,
 				"provider_amount": status.Amount, "provider_asset": status.AssetCode,
 			},
 		})
