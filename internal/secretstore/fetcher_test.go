@@ -511,6 +511,8 @@ func TestStoreConstants_PinnedToSecurityReview(t *testing.T) {
 		"IntegrityAlertInterval": {secretstore.IntegrityAlertInterval, 5 * time.Minute},
 		"CacheTTL":               {secretstore.CacheTTL, 10 * time.Minute},
 		"CacheMaxStale":          {secretstore.CacheMaxStale, 60 * time.Minute},
+		// ADR 0094 / code review 18, R-3.
+		"FailureStreakTTL": {secretstore.FailureStreakTTL, 15 * time.Second},
 	} {
 		if pair[0] != pair[1] {
 			t.Errorf("%s = %s, security review §5 says %s", name, pair[0], pair[1])

@@ -54,6 +54,14 @@ const (
 	MultiTenantDegradedWarnThreshold = 3
 	// MultiTenantDegradedWarnInterval rate-limits that line per backend.
 	MultiTenantDegradedWarnInterval = time.Minute
+	// FailureStreakTTL: a CLOSED breaker's run of consecutive counting
+	// failures expires this long after its last counting failure (code
+	// review 18, R-3). Until then the tenant is degraded; afterwards it is
+	// healthy again and the next failure starts a new streak. An open or
+	// half-open breaker is unaffected: it stays degraded until a probe
+	// succeeds. Equal to BreakerInitialCooldown, so "degraded" never
+	// outlives the shortest period the breaker itself would stay open.
+	FailureStreakTTL = BreakerInitialCooldown
 	// BreakerTripThreshold consecutive counting failures open a breaker.
 	BreakerTripThreshold = 3
 	// BreakerInitialCooldown is the first open period; it doubles on each
@@ -314,11 +322,11 @@ func (f *Fetcher) breakerLocked(bk breakerKey) *breaker {
 }
 
 // degradedLocked reports whether bk is degraded: its breaker is not
-// closed, or it has at least one consecutive counting failure. Guarded by
-// f.mu.
+// closed, or it has at least one consecutive counting failure less than
+// FailureStreakTTL old. Guarded by f.mu.
 func (f *Fetcher) degradedLocked(bk breakerKey) bool {
 	b, ok := f.breakers[bk]
-	return ok && (b.state != breakerClosed || b.consecutive > 0)
+	return ok && (b.state != breakerClosed || b.streakLive(f.now()))
 }
 
 // own performs the single store call for key: take a slot (waiting at most
@@ -338,11 +346,12 @@ func (f *Fetcher) own(ctx context.Context, fl *flight, key cacheKey, bk breakerK
 		// Admission lost: never negative-cached (ADR 0094 §4.2 point 3 -
 		// that would turn contention into denial), and an aborted probe is
 		// not counted.
+		f.mu.Lock()
 		if probe {
-			f.mu.Lock()
 			br.abortProbe()
-			f.mu.Unlock()
 		}
+		f.pruneBreakerLocked(bk) // security review 17, S-7
+		f.mu.Unlock()
 		fl.err = classError(ClassUnavailable)
 		return
 	}
@@ -494,7 +503,7 @@ func (f *Fetcher) release(bk breakerKey, degraded bool) {
 // counting failure (equivalent to absent), so the map is bounded by the
 // tenants with recent failures. Guarded by f.mu.
 func (f *Fetcher) pruneBreakerLocked(bk breakerKey) {
-	if b, ok := f.breakers[bk]; ok && b.state == breakerClosed && b.consecutive == 0 && !b.probeInFlight {
+	if b, ok := f.breakers[bk]; ok && b.state == breakerClosed && !b.streakLive(f.now()) && !b.probeInFlight {
 		delete(f.breakers, bk)
 	}
 }
@@ -633,6 +642,7 @@ const (
 type breaker struct {
 	state         breakerState
 	consecutive   int
+	lastFailure   time.Time
 	openUntil     time.Time
 	cooldown      time.Duration
 	probeInFlight bool
@@ -661,6 +671,12 @@ func (b *breaker) allow(now time.Time) (permitted, probe bool) {
 
 func (b *breaker) abortProbe() { b.probeInFlight = false }
 
+// streakLive reports whether the closed breaker's failure streak is still
+// live at now (see FailureStreakTTL).
+func (b *breaker) streakLive(now time.Time) bool {
+	return b.consecutive > 0 && now.Sub(b.lastFailure) < FailureStreakTTL
+}
+
 func (b *breaker) record(now time.Time, probe, counted bool) {
 	if probe {
 		b.probeInFlight = false
@@ -682,7 +698,11 @@ func (b *breaker) record(now time.Time, probe, counted bool) {
 		b.consecutive = 0
 		return
 	}
+	if b.state == breakerClosed && !b.streakLive(now) {
+		b.consecutive = 0 // an expired streak starts again
+	}
 	b.consecutive++
+	b.lastFailure = now
 	if b.state == breakerClosed && b.consecutive >= BreakerTripThreshold {
 		b.state = breakerOpen
 		b.openUntil = now.Add(b.cooldown)

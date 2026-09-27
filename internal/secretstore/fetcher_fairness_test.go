@@ -81,9 +81,11 @@ func TestFetcher_PerTenantCap(t *testing.T) {
 		t.Fatal("a caller over the per-tenant cap reached the store")
 	}
 	// A HEALTHY waiter must have waited SlotWait (not failed instantly) and
-	// not much longer.
-	if elapsed < secretstore.SlotWait-25*time.Millisecond || elapsed > secretstore.SlotWait+50*time.Millisecond {
-		t.Fatalf("a healthy caller over the per-tenant cap took %s, want SlotWait (%s) -25ms/+50ms", elapsed, secretstore.SlotWait)
+	// not much longer. The upper bound follows this file's 2x rule (code
+	// review 18, R-2): +500 ms still separates "waited SlotWait" from
+	// "waited StoreCallTimeout" (2 s) with margin for a loaded -race run.
+	if elapsed < secretstore.SlotWait-25*time.Millisecond || elapsed > secretstore.SlotWait+500*time.Millisecond {
+		t.Fatalf("a healthy caller over the per-tenant cap took %s, want SlotWait (%s) -25ms/+500ms", elapsed, secretstore.SlotWait)
 	}
 	if m := h.mem.MaxConcurrentMatching(prefix); m > secretstore.MaxConcurrentStoreCallsPerTenant {
 		t.Fatalf("tenant reached %d concurrent store calls, per-tenant cap is %d", m, secretstore.MaxConcurrentStoreCallsPerTenant)
@@ -401,6 +403,9 @@ func TestFetcher_GlobalOutageRateBound(t *testing.T) {
 		}
 	}
 	perAttempt := int64(1 + secretstore.StoreMaxRetries)
+	// Sequential arrival: exactly BreakerTripThreshold counting calls trip a
+	// tenant. (The concurrent variant below covers the P-1 extra calls that
+	// can be in flight when the threshold is crossed - security 17, S-6.)
 	bound := int64(n)*int64(secretstore.BreakerTripThreshold)*perAttempt + int64(n)*int64(probes)*perAttempt
 	if got := h.mem.Calls(); got > bound {
 		t.Fatalf("a global outage made %d store attempts over %s for %d tenants, bound %d", got, horizon, n, bound)
@@ -412,4 +417,119 @@ func TestFetcher_GlobalOutageRateBound(t *testing.T) {
 		t.Fatalf("the multi-tenant warn line must be rate-limited to 1 per %s, got %d", secretstore.MultiTenantDegradedWarnInterval, c)
 	}
 	t.Logf("store attempts %d, bound %d", h.mem.Calls(), bound)
+}
+
+// TestFetcher_GlobalOutageRateBound_Concurrent is security review 17, S-6:
+// with each tenant's callers arriving P at a time, up to P-1 more counting
+// calls can be in flight when the trip threshold is crossed, so the bound
+// is N x (BreakerTripThreshold + P - 1) x (1 + StoreMaxRetries) plus the
+// probes each tenant's cooldown schedule allows - 14 N over 120 s at
+// P = 2, still linear in N and concurrency-capped by S and D.
+func TestFetcher_GlobalOutageRateBound_Concurrent(t *testing.T) {
+	h := newHarness(t)
+	const n = 50
+	const horizon = 120 * time.Second
+	h.mem.FailAll(secretstore.ClassUnavailable)
+	tenants := make([]uuid.UUID, n)
+	for i := range tenants {
+		tenants[i] = uuid.New()
+	}
+	for tick := time.Duration(0); tick <= horizon; tick += time.Second {
+		var wg sync.WaitGroup
+		for _, tn := range tenants {
+			for j := 0; j < secretstore.MaxConcurrentStoreCallsPerTenant; j++ {
+				ref, fp, _ := h.put(tn)
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					_, _ = h.f.Fetch(context.Background(), tn, ref, fp)
+				}()
+			}
+		}
+		wg.Wait()
+		h.clk.Advance(time.Second)
+	}
+	probes := 0
+	for at, cd := time.Duration(0), secretstore.BreakerInitialCooldown; ; {
+		at += cd
+		if at > horizon {
+			break
+		}
+		probes++
+		if cd *= 2; cd > secretstore.BreakerMaxCooldown {
+			cd = secretstore.BreakerMaxCooldown
+		}
+	}
+	perAttempt := int64(1 + secretstore.StoreMaxRetries)
+	trip := int64(secretstore.BreakerTripThreshold + secretstore.MaxConcurrentStoreCallsPerTenant - 1)
+	bound := int64(n)*trip*perAttempt + int64(n)*int64(probes)*perAttempt
+	if bound != 14*n {
+		t.Fatalf("bound %d, ADR 0094 §6 states 14 N = %d", bound, 14*n)
+	}
+	if got := h.mem.Calls(); got > bound {
+		t.Fatalf("a concurrent global outage made %d store attempts over %s for %d tenants, bound %d", got, horizon, n, bound)
+	}
+	if m := h.mem.MaxConcurrent(); m > int64(secretstore.MaxConcurrentStoreCalls) {
+		t.Fatalf("%d concurrent store calls, S = %d", m, secretstore.MaxConcurrentStoreCalls)
+	}
+	t.Logf("store attempts %d, bound %d, max concurrent %d", h.mem.Calls(), bound, h.mem.MaxConcurrent())
+}
+
+// TestFetcher_DegradedStateExpires is code review 18, R-3: a single old
+// counting failure does not keep a tenant "degraded" forever. Within
+// FailureStreakTTL the tenant is degraded (fails fast when the degraded
+// budget is full, counts toward the multi-tenant warning); after it, it
+// is healthy again - admitted as a healthy owner - and a new failure starts
+// a new streak, so three failures spread wider than the TTL never trip the
+// breaker.
+func TestFetcher_DegradedStateExpires(t *testing.T) {
+	h := newHarness(t)
+	stale := uuid.New()
+	h.degrade(stale)
+	// Fill the degraded budget with two other degraded, blocked tenants.
+	var blockers []string
+	var wg sync.WaitGroup
+	for i := 0; i < secretstore.MaxDegradedStoreCalls; i++ {
+		d := uuid.New()
+		h.degrade(d)
+		p := memstore.Namespace(d.String())
+		h.mem.BlockMatching(p)
+		blockers = append(blockers, p)
+		ref, fp, _ := h.put(d)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, _ = h.f.Fetch(context.Background(), d, ref, fp)
+		}()
+	}
+	waitFor(t, "the degraded budget to fill", func() bool {
+		_, deg := h.f.AdmissionSnapshot()
+		return deg == secretstore.MaxDegradedStoreCalls
+	})
+	// Within the TTL: still degraded - refused at once.
+	ref, fp, _ := h.put(stale)
+	if _, err := h.f.Fetch(context.Background(), stale, ref, fp); classOf(err) != secretstore.ClassUnavailable {
+		t.Fatalf("within FailureStreakTTL the tenant is degraded and must be refused, got %v", err)
+	}
+	// After the TTL: healthy again - admitted without the degraded budget.
+	h.clk.Advance(secretstore.FailureStreakTTL)
+	ref2, fp2, secret := h.put(stale)
+	got, err := h.f.Fetch(context.Background(), stale, ref2, fp2)
+	if err != nil || !bytes.Equal(got.Bytes(), secret) {
+		t.Fatalf("after FailureStreakTTL the tenant must be healthy and admitted: %v", err)
+	}
+	for _, p := range blockers {
+		h.mem.UnblockMatching(p)
+	}
+	wg.Wait()
+
+	// Streak expiry: failures spread wider than the TTL never trip.
+	spread := uuid.New()
+	for i := 0; i < secretstore.BreakerTripThreshold+1; i++ {
+		h.degrade(spread)
+		h.clk.Advance(secretstore.FailureStreakTTL)
+	}
+	if s := h.f.BreakerState("memory", spread); s != "closed" {
+		t.Fatalf("failures spread wider than FailureStreakTTL must not open the breaker, got %s", s)
+	}
 }
