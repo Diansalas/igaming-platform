@@ -551,16 +551,52 @@ func newPaymentWebhookHandler(deps Deps) http.HandlerFunc {
 			apierror.Write(w, requestID, code, msg)
 			return
 		}
+		if errors.Is(err, payments.ErrDeferredReceiptCapExceeded) {
+			// ADR 0095 §6.1 step 5 / S95-C2(i): the unapplied-receipt cap
+			// for (tenant, provider) is already at or past the configured
+			// limit. Nothing is stored - a retryable 503, never a 200
+			// without storing and never a 404. A real PSP's own retry
+			// (LF-C1, ADR 0097 §6.3) redelivers this event later; the P1
+			// alert lets operations catch a backlog before the vendor's
+			// redelivery window expires.
+			logger.Error("payment_webhook_deferred_receipt_cap_exceeded", "provider_id", providerID, "tenant_id", t.ID.String(), "request_id", requestID)
+			w.Header().Set("Retry-After", "1")
+			apierror.Write(w, requestID, apierror.CodeUnavailable, "service temporarily unavailable; retry later")
+			return
+		}
 		if err != nil {
 			logger.Error("payment_webhook_failed", "error", err, "provider_id", providerID)
 			apierror.Write(w, requestID, apierror.CodeInternal, "failed to process callback")
 			return
 		}
 
-		writeJSON(w, http.StatusOK, map[string]any{
-			"deposit_intent_id": result.DepositIntentID.String(),
-			"status":            string(result.Status),
-			"tombstoned":        result.Tombstoned,
-		})
+		// ADR 0095 §6.2 / S95-C4: every 200 disposition (applied,
+		// duplicate_effect, deferred_unresolved, anomaly) returns a
+		// byte-identical body, apart from the request id - the disposition
+		// itself is recorded only in the receipt, the audit record and
+		// metrics, never echoed here, so a verified sender can never learn
+		// whether a reference exists, is already applied, or is still
+		// unresolved. This also closes today's 404 for `deferred_unresolved`
+		// (old->new: `ErrDepositIntentNotFound` used to map to 404 for an
+		// unresolved deposit callback; that sentinel is no longer reachable
+		// from ReceiveVerifiedCallback's deposit/reversal branches at all,
+		// which now defer instead of erroring - see receipt.go
+		// ApplyReceiptEvidence). result.Disposition is logged at Info
+		// (never returned to the caller) purely for operator observability.
+		logger.Info("payment_webhook_applied", "provider_id", providerID, "tenant_id", t.ID.String(), "request_id", requestID, "disposition", string(result.Disposition))
+		writeWebhookReceivedResponse(w, requestID)
 	}
+}
+
+// webhookReceivedResponse is the ADR 0095 §6.2/S95-C4 uniform payments
+// webhook success body: identical for every disposition apart from
+// request_id. Never carries deposit_intent_id, status, tombstoned or any
+// other disposition-revealing field.
+type webhookReceivedResponse struct {
+	RequestID string `json:"request_id"`
+	Received  bool   `json:"received"`
+}
+
+func writeWebhookReceivedResponse(w http.ResponseWriter, requestID string) {
+	writeJSON(w, http.StatusOK, webhookReceivedResponse{RequestID: requestID, Received: true})
 }
