@@ -29,6 +29,16 @@ and (A6's permitted extension, used in W1c) by `postWin`, keyed on its
 own reference. There is no new class and no new exception. See "Amendment A6" at the end
 of this file; the §2.1 L0.1 row is to be read with it.
 
+**Amended 2026-09-27 — Amendment A7 (ADR 0095, provider-I/O boundary).**
+`deposit_intents` and `payment_attempts` are appended to L1; a named
+step R0 (the `payment_provider_events` receipt-key insert) sits between
+L0 and L1; every `payment_attempts` lock is preceded by its parent's;
+the sweeper batch lease claims with `SKIP LOCKED` only; and rule N1 fixes
+that RG/Risk/KYC gates taking L0.x advisories run before any L1 parent
+lock in the same tx. No new named exception. See "Amendment A7" at the
+end of this file; the §2.1 L1 row and R8 are to be read with it.
+Design `ACCEPTED`; `NOT IMPLEMENTED` (target PRH-I1).
+
 ## Context
 
 ### The reported defect
@@ -258,7 +268,7 @@ apart. E-4 added 2026-09-25 by Amendment A4 (3), ADR 0088 §5.3.)*
 | L0.4 | RG person advisory (`rg.lockPerson`) | one per person |
 | L0.5 | Risk cumulative advisory (`risk/evaluator.go:338`) | one per scope key |
 | L0.6 | **Sportsbook event-exposure advisory** (`sb_exposure:<tenant>:<event>`) — **new**, Amendment A2, `docs/decisions/0083-sportsbook-jurisdiction-gating-and-cumulative-exposure.md` §6.2.5 | one per bet; keyed on the event id so no ordering question arises |
-| **L1** | Domain state rows (`withdrawal_requests`, `bonus_grants`, `bonus_held_dispositions`, `economic_operations`, `casino_launch_sessions`, sportsbook bets) | ascending `id` within a table; tables in the order listed |
+| **L1** | Domain state rows (`withdrawal_requests`, `bonus_grants`, `bonus_held_dispositions`, `economic_operations`, `casino_launch_sessions`, sportsbook bets, then *(Amendment A7)* `deposit_intents`, `payment_attempts`) | ascending `id` within a table; tables in the order listed; *(A7)* a `payment_attempts` row only after its parent row; *(A7)* R0 precedes all of L1 |
 | **L2** | `ledger_transactions` rows locked for read (`FOR UPDATE` on an existing transaction) | ascending `id` (`ORDER BY id FOR UPDATE`) |
 | **L3** | **`wallet_balance_projection` rows — ascending `ledger_accounts.id`** | strictly ascending UUID byte order (Postgres `uuid` comparison; in Go `bytes.Compare(a[:], b[:])`) |
 | **L4** | `ledger_transactions` idempotency-key index insert, `ledger_entries` inserts and the projection updates their trigger performs | n/a — by L3, every projection lock is already held, so these acquire nothing new |
@@ -318,6 +328,10 @@ and is ordered by its own canonical key (§3.2).
 - **R8 — advisory locks strictly precede row locks.** L0 before L1/L2/L3,
   in every path, with the single named exception E-1 (§5.1). This
   generalises `rg.go`'s existing rule to the whole platform.
+  *(Amendment A7, 2026-09-27, rule A7-N1: a compliance gate — RG
+  `EvaluateEligibility` (L0.4), risk (L0.5), or any KYC gate that takes an
+  L0.x advisory — runs before the first L1 parent lock of the same tx,
+  never after it. A gate that takes no lock may run after L1.)*
 
 ### 2.3 Why R6 does not weaken any financial invariant
 
@@ -1556,3 +1570,155 @@ one L0.1 per transaction, taken first. When implemented, it must be recorded in 
 met: C1 (50-iteration race tests with the waiter assertion; M1/M2 killed), C6 (W1c integration
 suites green as the NOBYPASSRLS role, on attestation, and independently recorded for C11 in
 `evidence/w1c-c11-runtime-role.txt`) and C8 (the §1.3 inventory).
+
+## Amendment A7 — 2026-09-27 — ADR 0095 (provider-I/O boundary and payment attempts): two L1 tables, step R0, parent-before-attempt, SKIP LOCKED lease, gate-before-parent (N1)
+
+**Owner: `ledger-finance`.** Written by `ledger-finance` now that ADR 0095
+(`docs/decisions/0095-provider-io-transaction-boundary-and-payment-contract.md`)
+is ACCEPTED (design). Accepted in ADR 0095 §21.3 (LF-Q2) with scope rules
+LF95-C9 (a)–(e), stated in ADR 0095 §14; rule N1 is added from the
+`ledger-finance` re-verification
+`docs/plans/payment-readiness/rv-0095-ledger-reverify.md` (finding N1,
+High). Where ADR 0095's own text (§4.3 T2, §5.1, §7.1, §7.2 step 3, §14)
+still reads "lock parent, lock attempt, re-run gates" for the deposit
+path, **this amendment governs**; ADR 0095 must be conformed to it before
+PRH-I1 starts (RV-0095 "Required before PRH-I1 starts", item 2).
+
+**This amendment does not:**
+- add a lock class (R0 is a named *step*, not a class; see (2));
+- add a named exception (there is no "E-5");
+- change R1–R7, or the L2/L3/L4 rules, or anything about what is posted.
+
+### (1) L1 list extended
+
+`deposit_intents` and `payment_attempts` are appended to the §2.1 L1
+table list, **in that order, after the existing tables**. Consequences:
+`withdrawal_requests` precedes `payment_attempts`, and `deposit_intents`
+precedes `payment_attempts`. Within each table, ascending `id`, except as
+bounded by (4).
+
+Checked (ADR 0095 §21.3): no current path holds a lock on either new table
+and then takes an earlier L1 table. `internal/bonus/deposit_sweep.go` reads
+`deposit_intents` without locking; deposit posting calls no bonus code.
+
+### (2) R0 — the receipt-key insert, between L0 and L1
+
+The `payment_provider_events` receipt-key insert (`INSERT … ON CONFLICT
+(tenant_id, …)`) is an index-insertion wait that serializes duplicate
+deliveries of one provider event, analogous in role to L0.1. It is placed
+**after all L0 and before any L1**. Binding scope (LF95-C9(a)):
+
+- a tx takes **at most one** R0;
+- it is that tx's **first write**;
+- only a callback tx, or the separate-tx rejection / `unsupported_event`
+  evidence record, takes R0;
+- **nothing that already holds an L1, L2, L3 or L4 lock ever inserts a
+  receipt.**
+
+Deadlock-freedom of R0 rests on exactly those four rules: an R0 waiter
+holds at most L0 locks, and every L0 holder that could block it follows
+R8, so no cycle passes through R0.
+
+Receipt **one-shot updates** (`attempt_id`, `resolution`/`applied_at`,
+`resolved_at`) are not R0. They happen only while the tx already holds
+the attempt's parent **and** attempt locks, in ascending receipt id
+(LF95-C9(b)). The sweeper backstop that applies deferred receipts locks
+the parent and the attempt first, then updates receipts.
+
+### (3) Parent before attempt, everywhere
+
+Every tx that locks a `payment_attempts` row first locks its parent
+(`deposit_intents` or `withdrawal_requests`) `FOR UPDATE` (LF95-C9(c)).
+This includes T3, T5, the per-item claim tx (T2/T3/T12), per-item phase
+C, callback evidence, T17 re-drive, and the cascade insert. A cascade
+inserts attempt n+1 while holding the intent and attempt n; the partial
+unique index is its only wait, on a key any contender can reach only
+under the same intent lock, so no cycle.
+
+### (4) Sweeper batch lease — `SKIP LOCKED` only, never waits on a parent
+
+The ADR 0095 §7.2 step 2 batch lease tx is the only tx that locks
+`payment_attempts` rows without their parent (LF95-C9(d)). It is allowed
+because it cannot wait, under these binding limits:
+
+- it acquires row locks **only** with `FOR UPDATE SKIP LOCKED`, never a
+  plain `FOR UPDATE`, `NOWAIT`-retry loop or any other waiting lock;
+- it **never reads-for-update, locks or writes a parent row**
+  (`deposit_intents`, `withdrawal_requests`), and takes no L0, R0, L2, L3
+  or L4;
+- it writes **only** lease columns (`lease_owner`, `lease_until`,
+  `next_action_at`) — never a `state`, never T2;
+- it holds nothing else when it starts and commits immediately.
+
+Because it never waits, it contributes no wait-for edge, so ordering its
+rows by `next_action_at` instead of ascending `id` is safe. This relaxes
+only the within-class tie-break for this one tx shape; it is not a
+class-order exception. Any change that makes the lease tx wait on
+anything (for example dropping `SKIP LOCKED`, or joining a parent
+`FOR UPDATE`) removes this carve-out and is a violation.
+
+### (5) Rule N1 — gates taking L0.x run before any L1 parent lock
+
+Any RG, risk or KYC gate that takes an L0.x advisory lock in a tx runs
+**before** the first L1 lock of that tx (in particular before the parent
+`deposit_intents` / `withdrawal_requests` `FOR UPDATE`), never after. This
+is R8 applied to the payment paths; it is restated because ADR 0095's
+revision-2 text placed the deposit re-gate after the parent and attempt
+locks. `rg.EvaluateEligibility` takes `lockPerson` (L0.4,
+`internal/rg/rg.go:607`), so for the **deposit T2 per-item tx (sweeper
+and player resume)** the order is:
+
+1. `rg.EvaluateEligibility` (L0.4) and the KYC deposit gate (plain reads);
+2. parent `deposit_intents` `FOR UPDATE` (L1);
+3. `payment_attempts` `FOR UPDATE` (L1);
+4. re-check the lease owner, then the CAS with its in-statement
+   predicates → commit.
+
+All of it stays in one tx, so the gate result and the claim are atomic
+(ADR 0095 LF95-C10(e); ADR 0096 C4(a) hold). A gate that takes no lock
+(ADR 0096 `EvaluateEnforcement` for payouts, and the kill-switch
+`NOT EXISTS` predicate) may run after L1, as below. If such a gate is
+ever changed to take an advisory, it moves before L1 under this rule.
+
+### (6) Per-path order (binding for implementation and for the harness)
+
+| Path | Order |
+| --- | --- |
+| Deposit initiation (T1, or T1+T2 in one tx) | L0.4 RG / L0.5 risk / KYC gate → `deposit_intents` INSERT → `payment_attempts` INSERT → commit. No provider call in the tx. |
+| Deposit T2 per-item claim (sweeper, player resume) | L0.4 RG + KYC gate → intent `FOR UPDATE` → attempt `FOR UPDATE` → CAS (N1, (5)) |
+| Deposit T3 / T5 / T12 / phase C / T17 apply | intent `FOR UPDATE` → attempt `FOR UPDATE` → CAS → receipts (ascending id) |
+| Deposit evidence (callback) | R0 (callback tx only) → intent `FOR UPDATE` → attempt CAS → receipts → (L2 original `ledger_transactions`, reversal only) → L3 `LockProjectionsForPosting` inside `Post` → L4 |
+| Payout evidence (callback, phase C) | R0 (callback tx only) → `withdrawal_requests` `FOR UPDATE` → attempt CAS → receipts → L3 → L4 |
+| Payout claim, T1p with W-KYC | `withdrawal_requests` `FOR UPDATE` (L1) → KYC gate reads (no lock) → kill-switch predicate (no lock) → either `DenyForCompliance` (hold reversal: L3 → L4, no L2) or attempt INSERT |
+| Payout T2 / T12 per-item re-claim | `withdrawal_requests` `FOR UPDATE` → attempt `FOR UPDATE` → KYC gate reads (no lock) → CAS, or non-pass escalation columns |
+| Cascade insert | holding intent + attempt n → INSERT attempt n+1 (partial unique index is the only wait) |
+| Sweeper batch lease | `payment_attempts` `FOR UPDATE SKIP LOCKED` only, lease columns only ((4)) |
+| Separate-tx rejection / `unsupported_event` record | R0 as first and only lock-relevant write, then audit/evidence rows; no L1+ |
+
+**No lock is held across provider I/O** (ADR 0095 INV-IO-5). The L1 lock
+that `LockApprovedForSubmission` holds across `Withdraw` today is removed
+by ADR 0095; until PRH-I1 lands, that current behaviour is the one
+recorded in §1.7.
+
+### (7) Tests (binding; ADR 0095 §16.2 item 16, LF95-C9(e), RV-0095 N1)
+
+The §6 concurrency harness gains, each asserting both outcome and where
+the waiter blocks, and each ending with the ledger balance invariant:
+
+- sweeper lease + per-item claim racing a callback and phase C on the
+  same intent, and on the same withdrawal;
+- two concurrent deliveries of one event serializing on R0;
+- a deferred-receipt backstop racing a callback for the same attempt
+  (parent → attempt → receipts in ascending id);
+- **N1:** a sweeper deposit T2 re-claim racing an RG self-exclusion write
+  for the same person (must serialize on L0.4 with no deadlock);
+- mutation checks: moving the RG gate after the parent lock, dropping
+  `SKIP LOCKED` from the lease, or inserting a receipt after an L1 lock
+  must each turn a test red.
+
+The §1.6 / §1.7 inventory rows are updated to the as-built sequence when
+PRH-I1 lands, as A4 and A6 did.
+
+**Status.** Design `ACCEPTED`. `NOT IMPLEMENTED` (target PRH-I1,
+`payments` + `ledger-finance`). `IMPLEMENTED` requires the tests in (7)
+and a `ledger-finance` gate review of the as-built lock sequence.
