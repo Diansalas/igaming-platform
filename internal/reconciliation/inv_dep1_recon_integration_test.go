@@ -33,22 +33,37 @@
 //     this exact legacy shape forever, since that shape becomes
 //     structurally unreachable in new data but is not itself deleted).
 //
-// Migration 0107 (the two partial unique indexes) does not exist yet, so
-// this file cannot exercise its pre-flight refusal on this legacy shape;
-// that is a NOT IMPLEMENTED gap here, flagged for whoever lands 0107 to
-// close with a dedicated migration-round-trip test (ledger-finance ruling
-// §3(i), "the migration refuses to apply while any intent has more than
-// one succeeded deposit attempt").
+// QA adjudication correction (docs/plans/payment-readiness/
+// qa-fh3-adjudication.md): migration 0107 now exists and is applied by
+// testPool(t)'s TEST_DATABASE_URL, so the legacy shape above can no
+// longer be built there - the SAME unique indexes this shape is meant to
+// predate would refuse it (that is the correct, intended behaviour of
+// 0107 on a fully-migrated DB; it just means this ONE test needs its own
+// pre-0107 scratch database, like every other migration-boundary test in
+// this repository already does). TestINVDEP1_Recon_M_DuplicateDetector_
+// LegacyDataShape now builds its fixture on a dedicated scratch database
+// migrated only up to and including 0106 (one migration BEFORE 0107),
+// exactly like internal/payments' own migration0101ScratchBefore101/
+// migration0106Scratch pattern, and additionally migrates that SAME
+// database up to 0107 afterward to confirm the pre-flight refuses it
+// (ledger-finance ruling §3(i)) - closing the gap this file's previous
+// revision flagged as NOT IMPLEMENTED.
 package reconciliation
 
 import (
 	"context"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/ledger"
 	"github.com/Diansalas/igaming-platform/internal/payments"
+	"github.com/Diansalas/igaming-platform/internal/testsupport/scratchdb"
 )
 
 // TestINVDEP1_Recon_M_CapturedUnposted_ReplacesDuplicate drives a real
@@ -107,19 +122,147 @@ func TestINVDEP1_Recon_M_CapturedUnposted_ReplacesDuplicate(t *testing.T) {
 	}
 }
 
+// --- pre-0107 scratch database plumbing (legacy-shape detector only) ----
+
+// reconMigrationsDir is the real, on-disk migrations/ directory - the
+// same one every other migration-boundary helper in this repository
+// (e.g. internal/payments' realMigrationsDir) resolves relative to its
+// own package directory.
+func reconMigrationsDir(t *testing.T) string {
+	t.Helper()
+	dir, err := filepath.Abs(filepath.Join("..", "..", "migrations"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// migration0106ReconVersion derives 0107's own predecessor version from
+// the real migrations/ directory's filename for 0107 (106 = 107 - 1),
+// rather than a hard-coded integer literal, exactly like internal/
+// payments' migration0101Version does for 0101 - so a rename or a
+// numbering change is caught here instead of silently testing the wrong
+// boundary.
+func migration0106ReconVersion(t *testing.T) int64 {
+	t.Helper()
+	dir := reconMigrationsDir(t)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), "0107_deposit_intent_double_credit_backstop.up.sql") {
+			return 106
+		}
+	}
+	t.Fatalf("no 0107_deposit_intent_double_credit_backstop.up.sql found under %s - migration 0107 is expected to exist on this branch", dir)
+	return 0
+}
+
+// migration0106ReconDirThroughSelf copies every on-disk migration with a
+// numeric filename prefix <= through into a fresh temp dir, so a scratch
+// database can stop exactly at migration 0106 (one before the 0107
+// double-credit backstop) - the same copy-a-prefix-bounded-subset pattern
+// internal/payments' migration0101Dir and this package's own
+// migration0098DirThroughSelf both already use.
+func migration0106ReconDirThroughSelf(t *testing.T, through int64) string {
+	t.Helper()
+	src := reconMigrationsDir(t)
+	entries, err := os.ReadDir(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := t.TempDir()
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".sql") || len(name) < 4 {
+			continue
+		}
+		v, err := strconv.Atoi(name[:4])
+		if err != nil || int64(v) > through {
+			continue
+		}
+		b, err := os.ReadFile(filepath.Join(src, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(out, name), b, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return out
+}
+
+// migration0106ReconScratch creates a PRIVATE scratch database (never the
+// shared TEST_DATABASE_URL) migrated up to and including 0106 only - the
+// pre-ADR-0095-§28 shape the legacy-data detector test needs to even be
+// able to construct its fixture.
+func migration0106ReconScratch(t *testing.T, prefix string) *db.Pool {
+	t.Helper()
+	url := scratchdb.New(t, prefix)
+	pool, err := db.Connect(context.Background(), url, 10, 5_000_000_000)
+	if err != nil {
+		t.Fatalf("connect scratch: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	through := migration0106ReconVersion(t)
+	dir := migration0106ReconDirThroughSelf(t, through)
+	applied, err := pool.MigrateUp(context.Background(), dir)
+	if err != nil {
+		t.Fatalf("migrate scratch up through %d: %v", through, err)
+	}
+	if len(applied) == 0 || applied[len(applied)-1] != through {
+		t.Fatalf("expected %d to be the last applied migration, got %v", through, applied)
+	}
+	return pool
+}
+
+// newPayWorldOnPool is newPayWorld's own wiring (mock providers,
+// capability registration, orchestrator, statement sources), duplicated
+// here - rather than refactoring newPayWorld itself - so this QA
+// correction stays confined to this file: newPayWorld always uses
+// testPool(t) (the shared, fully-migrated TEST_DATABASE_URL), which is
+// exactly what the legacy-shape test below can no longer use once 0107
+// is applied to it.
+func newPayWorldOnPool(t *testing.T, pool *db.Pool) *payWorld {
+	t.Helper()
+	w := &payWorld{pool: pool, f: seedFixture(t, pool)}
+	w.mockA = payments.NewMockProvider(payProvA, "EUR")
+	w.mockB = payments.NewMockProvider(payProvB, "EUR")
+	w.mockB.AcceptAllAmounts = true
+	w.orch = payments.NewOrchestrator(
+		map[string]payments.PaymentProvider{payProvA: w.mockA, payProvB: w.mockB},
+		payments.MultiWebhookCredentialResolver{
+			payProvA: payments.NewMockWebhookCredentials(w.mockA),
+			payProvB: payments.NewMockWebhookCredentials(w.mockB),
+		})
+	w.registerCapability(t, w.mockA, 10)
+	w.registerCapability(t, w.mockB, 50)
+	w.srcA = payments.NewMockStatementSource(w.mockA, payments.MockCredentialResolver{})
+	w.srcB = payments.NewMockStatementSource(w.mockB, payments.MockCredentialResolver{})
+	return w
+}
+
 // TestINVDEP1_Recon_M_DuplicateDetector_LegacyDataShape is the ORIGINAL
 // TestPaymentStatement_Kind_DuplicatePlatformSuccess fixture, kept
-// verbatim (ledger-finance ruling §4: "pay_duplicate ... is kept as an
-// integrity detector"). It builds the pre-§28 "legacy data shape" - two
-// succeeded deposit attempts for one intent - WITHOUT going through the
-// receipt path (direct ledger.Post + payments.ApplySuccess), and proves
-// the detector still reports it. This must keep passing after migration
-// 0107 lands too: 0107 makes this shape unreachable for NEW data, but a
-// database that predates it (or a dropped index) must still be caught
-// here, per the ruling's own words ("any occurrence means an index was
-// dropped or the data predates the migration: a P1 integrity alert").
+// verbatim in its own construction (ledger-finance ruling §4:
+// "pay_duplicate ... is kept as an integrity detector"). It builds the
+// pre-§28 "legacy data shape" - two succeeded deposit attempts for one
+// intent - WITHOUT going through the receipt path (direct ledger.Post +
+// payments.ApplySuccess), on a scratch database migrated only to 0106
+// (one migration BEFORE the 0107 backstop that would otherwise refuse
+// this exact shape), and proves:
+//  1. the detector still reports 'pay_duplicate' on this legacy shape
+//     (must keep passing forever - the shape becomes unreachable in NEW
+//     data once 0107 is applied, but old data or a dropped index must
+//     still be caught);
+//  2. migrating that SAME database the rest of the way to 0107
+//     afterward is REFUSED by the attempts pre-flight, on this exact
+//     data (ledger-finance ruling §3(i): "the migration refuses to apply
+//     while any intent has more than one succeeded deposit attempt").
 func TestINVDEP1_Recon_M_DuplicateDetector_LegacyDataShape(t *testing.T) {
-	w := newPayWorld(t)
+	pool := migration0106ReconScratch(t, "invdep1_recon_legacy_")
+	w := newPayWorldOnPool(t, pool)
 	declined, child := w.cascade(t)
 	w.succeed(t, w.mockB, payProvB, child)
 
@@ -146,4 +289,17 @@ func TestINVDEP1_Recon_M_DuplicateDetector_LegacyDataShape(t *testing.T) {
 	}
 	_, ms := w.run(t, w.srcA, PaymentStatementOptions{})
 	mustOnePay(t, ms, MismatchKindPayDuplicate, "deposit_intent=", "check=duplicate_success")
+
+	// Confirm the 0107 pre-flight refuses THIS exact data: migrate the
+	// SAME database (which still carries the two-succeeded-attempts
+	// legacy shape just proven above) the rest of the way to the latest
+	// on-disk migration (0107).
+	_, err = pool.MigrateUp(context.Background(), reconMigrationsDir(t))
+	if err == nil {
+		t.Fatal("ledger-finance ruling §3(i): expected migration 0107 to REFUSE to apply while this intent has more than one succeeded deposit attempt, but it succeeded")
+	}
+	if !strings.Contains(err.Error(), "more than one succeeded deposit attempt") {
+		t.Fatalf("expected the 0107 attempts pre-flight's own refusal message, got a different error: %v", err)
+	}
+	t.Logf("migration 0107 correctly refused on the legacy duplicate-succeeded-attempts shape: %v", err)
 }
