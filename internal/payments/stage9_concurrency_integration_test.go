@@ -122,7 +122,7 @@ func TestStage9_ConcurrentDistinctDepositsSameWallet_NoLostUpdate(t *testing.T) 
 		var intent DepositIntent
 		err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 			var err error
-			intent, err = orch.InitiateDeposit(ctx, tx, InitiateDepositParams{
+			intent, err = initiateDepositWithAttempt(ctx, tx, orch, InitiateDepositParams{
 				Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
 				AssetCode: "EUR", Amount: amount, PaymentMethod: "card",
 				IdempotencyKey: "s9-distinct-dep-" + uuid.NewString(),
@@ -211,7 +211,7 @@ func TestStage9_TamperedWebhookNeverReachesTheLedger(t *testing.T) {
 	var intent DepositIntent
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		intent, err = orch.InitiateDeposit(ctx, tx, InitiateDepositParams{
+		intent, err = initiateDepositWithAttempt(ctx, tx, orch, InitiateDepositParams{
 			Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
 			AssetCode: "EUR", Amount: 5_000, PaymentMethod: "card", IdempotencyKey: "s9-tampered-webhook",
 		})

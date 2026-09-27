@@ -532,16 +532,36 @@ func TestAdmission_T6f_PaymentsReversal_BeforeDeposit_ThenDepositArrives(t *test
 	}
 
 	// The late-arriving deposit now hits its own tombstone and must never
-	// post.
+	// post. PRH-payments-callback-cutover (ADR 0095 §4.4 tombstone cell,
+	// LF95-C6(d), §6.2 "anomaly" row): old->new, this used to roll back to
+	// a non-200 (409/500); it now COMMITS the attempt terminally as
+	// `disputed` (terminal_reason "reversal_tombstone_precedes_success")
+	// together with its receipt, and returns the SAME uniform 200 body as
+	// every other disposition (LF95-C3: never rolled back to produce an
+	// error code). The invariant this test protects - no SECOND posting -
+	// still holds and is asserted below; only the status code and the new
+	// `disputed` assertion are new.
 	time.Sleep(b1ReplenishWait)
 	deposit := rawPostCallback(t, srv, "/v1/webhooks/payments/"+tenant.Slug+"/mock",
 		mockProvider.CallbackPayload(tenant.ID, payments.CallbackEventDeposit, depositRef, "", payments.OutcomeSucceeded, 4000, "EUR", "", false))
 	deposit.Body.Close()
-	if deposit.StatusCode == http.StatusOK {
-		t.Fatal("the late-arriving deposit must never post once its reversal has tombstoned it")
+	if deposit.StatusCode != http.StatusOK {
+		t.Fatalf("expected the uniform 200 (the tombstone collision is committed as disputed, not rolled back to an error), got %d", deposit.StatusCode)
 	}
 	if got := ledgerTransactionCountForProviderRef(t, pool, tenant.ID, depositRef); got != 1 {
 		t.Fatalf("expected still exactly one row (the tombstone, never a second deposit posting): got %d", got)
+	}
+	var state, terminalReason string
+	if err := pool.WithTenant(context.Background(), tenant.ID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx,
+			`SELECT state, terminal_reason FROM payment_attempts WHERE provider_id = 'mock' AND provider_reference = $1`,
+			depositRef,
+		).Scan(&state, &terminalReason)
+	}); err != nil {
+		t.Fatalf("query attempt state: %v", err)
+	}
+	if state != "disputed" || terminalReason != "reversal_tombstone_precedes_success" {
+		t.Fatalf("expected the attempt to be disputed with terminal_reason 'reversal_tombstone_precedes_success', got state=%q terminal_reason=%q", state, terminalReason)
 	}
 
 	assertLedgerBalancedAndReconciled(t, pool, tenant.ID)

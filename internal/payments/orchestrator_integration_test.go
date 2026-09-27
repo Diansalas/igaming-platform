@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -131,7 +132,7 @@ func TestInitiateDeposit_SuccessThenCallbackPostsFlow1(t *testing.T) {
 	var intent DepositIntent
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		intent, err = orch.InitiateDeposit(ctx, tx, InitiateDepositParams{
+		intent, err = initiateDepositWithAttempt(ctx, tx, orch, InitiateDepositParams{
 			Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
 			AssetCode: "EUR", Amount: 5000, PaymentMethod: "card", IdempotencyKey: "dep-1",
 		})
@@ -179,7 +180,7 @@ func TestReceiveCallback_RedeliveredSuccessIsIdempotent(t *testing.T) {
 	var intent DepositIntent
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		intent, err = orch.InitiateDeposit(ctx, tx, InitiateDepositParams{
+		intent, err = initiateDepositWithAttempt(ctx, tx, orch, InitiateDepositParams{
 			Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
 			AssetCode: "EUR", Amount: 4200, PaymentMethod: "card", IdempotencyKey: "dep-redeliver",
 		})
@@ -215,7 +216,7 @@ func TestInitiateDeposit_SynchronousDeclineNoCascade(t *testing.T) {
 	var intent DepositIntent
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		intent, err = orch.InitiateDeposit(ctx, tx, InitiateDepositParams{
+		intent, err = initiateDepositWithAttempt(ctx, tx, orch, InitiateDepositParams{
 			Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
 			AssetCode: "EUR", Amount: MockAmountPlayerDeclineNoCascade, PaymentMethod: "card", IdempotencyKey: "dep-decline",
 		})
@@ -247,7 +248,7 @@ func TestInitiateDeposit_CascadesToSecondProviderOnCascadableDecline(t *testing.
 	var intent DepositIntent
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		intent, err = orch.InitiateDeposit(ctx, tx, InitiateDepositParams{
+		intent, err = initiateDepositWithAttempt(ctx, tx, orch, InitiateDepositParams{
 			Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
 			AssetCode: "EUR", Amount: MockAmountProviderDeclineCascade, PaymentMethod: "card", IdempotencyKey: "dep-cascade",
 		})
@@ -277,7 +278,7 @@ func TestInitiateDeposit_CascadeExhaustedEndsDeclined(t *testing.T) {
 	var intent DepositIntent
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		intent, err = orch.InitiateDeposit(ctx, tx, InitiateDepositParams{
+		intent, err = initiateDepositWithAttempt(ctx, tx, orch, InitiateDepositParams{
 			Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
 			AssetCode: "EUR", Amount: MockAmountProviderDeclineCascade, PaymentMethod: "card", IdempotencyKey: "dep-exhausted",
 		})
@@ -307,7 +308,7 @@ func TestInitiateDeposit_AmbiguousOutcomeIsNotCascaded(t *testing.T) {
 	var intent DepositIntent
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		intent, err = orch.InitiateDeposit(ctx, tx, InitiateDepositParams{
+		intent, err = initiateDepositWithAttempt(ctx, tx, orch, InitiateDepositParams{
 			Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
 			AssetCode: "EUR", Amount: MockAmountAmbiguous, PaymentMethod: "card", IdempotencyKey: "dep-ambiguous",
 		})
@@ -386,6 +387,22 @@ func TestInitiateDeposit_ClientRetryReturnsOriginalIntent_NoSecondProviderCall(t
 	}
 }
 
+// TestReceiveCallback_UnknownProviderReferenceRejected predates the
+// PRH-payments-callback-cutover (ADR 0095 §6.1 step 5/§6.2, S95-C4):
+// before it, a callback naming a reference for which no deposit_intents
+// row existed at all was ErrDepositIntentNotFound (a 404 at the HTTP
+// layer). ADR 0095 deliberately retires that: an unresolvable verified
+// callback is never an error and never a 404 (a verified sender must
+// never be able to learn "this reference does not exist" from an error
+// code) - it is durably receipted as `deferred_unresolved` and left for
+// phase C/the sweeper to apply once (if ever) a matching attempt appears.
+// ErrDepositIntentNotFound is no longer reachable from
+// ReceiveVerifiedCallback's deposit/reversal branches at all. This test's
+// original intent (an unknown reference must not silently succeed, and
+// must not be treated as if it named something real) is now expressed by
+// the SAME/stronger set of checks: no error, no ledger effect, the
+// disposition is exactly `deferred_unresolved`, and a durable, unresolved
+// receipt row exists for exactly this reference.
 func TestReceiveCallback_UnknownProviderReferenceRejected(t *testing.T) {
 	pool := testPool(t)
 	f := seedOrchFixture(t, pool)
@@ -394,12 +411,46 @@ func TestReceiveCallback_UnknownProviderReferenceRejected(t *testing.T) {
 	orch := NewOrchestrator(map[string]PaymentProvider{"mock-psp": provider}, MultiWebhookCredentialResolver{"mock-psp": NewMockWebhookCredentials(provider)})
 
 	payload := provider.CallbackPayload(f.tenantID, CallbackEventDeposit, "never-initiated-ref", "", OutcomeSucceeded, 1000, "EUR", "", false)
+	var result ReceiveCallbackResult
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-psp", payload)
+		var err error
+		result, err = orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-psp", payload)
 		return err
 	})
-	if !errors.Is(err, ErrDepositIntentNotFound) {
-		t.Fatalf("expected ErrDepositIntentNotFound, got %v", err)
+	if err != nil {
+		t.Fatalf("expected an unresolvable callback to be durably deferred, not an error, got %v", err)
+	}
+	if result.Disposition != DispositionDeferredUnresolved {
+		t.Fatalf("expected disposition %q, got %q", DispositionDeferredUnresolved, result.Disposition)
+	}
+	if balance := cashBalance(t, pool, f); balance != 0 {
+		t.Fatalf("an unresolvable callback must never post, got balance %d", balance)
+	}
+	var ledgerCount int
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT count(*) FROM ledger_transactions WHERE tenant_id = $1`, f.tenantID).Scan(&ledgerCount)
+	}); err != nil {
+		t.Fatalf("count ledger transactions: %v", err)
+	}
+	if ledgerCount != 0 {
+		t.Fatalf("expected zero ledger_transactions rows, got %d", ledgerCount)
+	}
+	var disposition string
+	var resolvedAt *time.Time
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx,
+			`SELECT disposition_at_receipt, resolved_at FROM payment_provider_events
+			  WHERE tenant_id = $1 AND provider_id = 'mock-psp' AND provider_reference = 'never-initiated-ref'`,
+			f.tenantID,
+		).Scan(&disposition, &resolvedAt)
+	}); err != nil {
+		t.Fatalf("expected a durable, unresolved receipt row for the unknown reference: %v", err)
+	}
+	if disposition != string(DispositionDeferredUnresolved) {
+		t.Fatalf("expected the receipt's disposition_at_receipt to be %q, got %q", DispositionDeferredUnresolved, disposition)
+	}
+	if resolvedAt != nil {
+		t.Fatalf("expected the receipt to remain unresolved (resolved_at IS NULL), got %v", *resolvedAt)
 	}
 }
 
@@ -427,7 +478,7 @@ func TestReceiveCallback_CrossTenantProviderReferenceIsInvisible(t *testing.T) {
 	var intent DepositIntent
 	err := pool.WithTenant(context.Background(), f1.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		intent, err = orch.InitiateDeposit(ctx, tx, InitiateDepositParams{
+		intent, err = initiateDepositWithAttempt(ctx, tx, orch, InitiateDepositParams{
 			Scope:     DepositScope{TenantID: f1.tenantID, BrandID: f1.brandID, PlayerAccountID: f1.playerAccountID, WalletID: f1.walletID},
 			AssetCode: "EUR", Amount: 2500, PaymentMethod: "card", IdempotencyKey: "dep-cross-tenant",
 		})
@@ -467,7 +518,7 @@ func TestReceiveCallback_DepositReversalPostsFlow2(t *testing.T) {
 	var intent DepositIntent
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		intent, err = orch.InitiateDeposit(ctx, tx, InitiateDepositParams{
+		intent, err = initiateDepositWithAttempt(ctx, tx, orch, InitiateDepositParams{
 			Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
 			AssetCode: "EUR", Amount: 8000, PaymentMethod: "card", IdempotencyKey: "dep-to-reverse",
 		})
@@ -542,7 +593,7 @@ func TestReceiveCallback_ReversalAmountCannotExceedOriginal(t *testing.T) {
 	var intent DepositIntent
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		intent, err = orch.InitiateDeposit(ctx, tx, InitiateDepositParams{
+		intent, err = initiateDepositWithAttempt(ctx, tx, orch, InitiateDepositParams{
 			Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
 			AssetCode: "EUR", Amount: 5000, PaymentMethod: "card", IdempotencyKey: "dep-cap-test",
 		})
@@ -622,7 +673,7 @@ func TestReceiveCallback_SecondReversalOfSameDepositRejected(t *testing.T) {
 	var intent DepositIntent
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		intent, err = orch.InitiateDeposit(ctx, tx, InitiateDepositParams{
+		intent, err = initiateDepositWithAttempt(ctx, tx, orch, InitiateDepositParams{
 			Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
 			AssetCode: "EUR", Amount: 4000, PaymentMethod: "card", IdempotencyKey: "dep-double-reversal-test",
 		})
@@ -690,7 +741,7 @@ func TestReceiveCallback_LateDeclineAfterSuccessIsNoOp(t *testing.T) {
 	var intent DepositIntent
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		intent, err = orch.InitiateDeposit(ctx, tx, InitiateDepositParams{
+		intent, err = initiateDepositWithAttempt(ctx, tx, orch, InitiateDepositParams{
 			Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
 			AssetCode: "EUR", Amount: 3000, PaymentMethod: "card", IdempotencyKey: "dep-late-decline-test",
 		})
@@ -770,7 +821,7 @@ func TestReceiveCallback_ReversalOfNeverPostedDepositWritesTombstone(t *testing.
 	var intent DepositIntent
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		intent, err = orch.InitiateDeposit(ctx, tx, InitiateDepositParams{
+		intent, err = initiateDepositWithAttempt(ctx, tx, orch, InitiateDepositParams{
 			Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
 			AssetCode: "EUR", Amount: 6000, PaymentMethod: "card", IdempotencyKey: "dep-never-posted",
 		})
@@ -795,20 +846,46 @@ func TestReceiveCallback_ReversalOfNeverPostedDepositWritesTombstone(t *testing.
 		t.Fatal("expected a tombstone for a reversal of a deposit never posted to the ledger")
 	}
 
-	// A late-arriving success callback for the ORIGINAL reference must now
-	// be rejected - the ledger's own (tenant_id, provider_id,
-	// provider_tx_id) uniqueness collides with the tombstone.
+	// A late-arriving success callback for the ORIGINAL reference must
+	// never post. PRH-payments-callback-cutover (ADR 0095 §4.4 tombstone
+	// cell / LF95-C6(d), §6.2 "anomaly" row): old->new, this used to be a
+	// hard error (the ledger's own (tenant_id, provider_id, provider_tx_id)
+	// uniqueness colliding with the tombstone, surfaced as a Go error). It
+	// is now committed terminally as `disputed`
+	// (`reversal_tombstone_precedes_success`, T10) together with its
+	// receipt - never rolled back to an error - so the call returns no
+	// error and the uniform `applied` disposition; the invariant this test
+	// exists for (no second posting, ever) is unchanged and still asserted
+	// below via the ledger row count and the attempt's own DB state.
 	latePayload := provider.CallbackPayload(f.tenantID, CallbackEventDeposit, depositRef, "", OutcomeSucceeded, 6000, "EUR", "", false)
+	var lateResult ReceiveCallbackResult
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-psp", latePayload)
+		var err error
+		lateResult, err = orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-psp", latePayload)
 		return err
 	})
-	if err == nil {
-		t.Fatal("expected the late-arriving original deposit to be rejected after a tombstone exists")
+	if err != nil {
+		t.Fatalf("expected the tombstone collision to be committed disputed, not returned as an error: %v", err)
+	}
+	if lateResult.Disposition != DispositionApplied {
+		t.Fatalf("expected disposition %q, got %q", DispositionApplied, lateResult.Disposition)
 	}
 
 	if balance := cashBalance(t, pool, f); balance != 0 {
 		t.Fatalf("a tombstoned-then-late-arriving deposit must never post, got balance %d", balance)
+	}
+
+	var attemptState, terminalReason string
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx,
+			`SELECT state, terminal_reason FROM payment_attempts WHERE provider_id = 'mock-psp' AND provider_reference = $1`,
+			depositRef,
+		).Scan(&attemptState, &terminalReason)
+	}); err != nil {
+		t.Fatalf("query attempt state: %v", err)
+	}
+	if attemptState != "disputed" || terminalReason != "reversal_tombstone_precedes_success" {
+		t.Fatalf("expected the attempt to be disputed with terminal_reason 'reversal_tombstone_precedes_success', got state=%q terminal_reason=%q", attemptState, terminalReason)
 	}
 
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {

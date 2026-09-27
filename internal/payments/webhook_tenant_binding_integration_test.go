@@ -13,6 +13,7 @@ import (
 	"errors"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -341,7 +342,7 @@ func TestWebhook_DisabledCapability_StillAccepted(t *testing.T) {
 	var intent DepositIntent
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		intent, err = orch.InitiateDeposit(ctx, tx, InitiateDepositParams{
+		intent, err = initiateDepositWithAttempt(ctx, tx, orch, InitiateDepositParams{
 			Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
 			AssetCode: "EUR", Amount: 4321, PaymentMethod: "card", IdempotencyKey: "t10-disabled",
 		})
@@ -351,19 +352,36 @@ func TestWebhook_DisabledCapability_StillAccepted(t *testing.T) {
 	// declines synchronously with no provider reference at all - directly
 	// write the intent row instead, modeling "a deposit was already in
 	// flight before the provider was disabled", which is exactly the
-	// scenario I4 protects.
+	// scenario I4 protects. PRH-payments-callback-cutover (ADR 0095 §6.1,
+	// INV-IO-14): the callback below now resolves through payment_attempts,
+	// so a matching 'pending' attempt (already accepted, same reference)
+	// is seeded alongside the manual intent row - the on-disk shape a
+	// deposit "already in flight" before the provider was disabled would
+	// actually have.
 	if err != nil {
 		t.Fatalf("InitiateDeposit: %v", err)
 	}
 	if intent.ProviderReference == nil {
 		ref := "t10-manual-ref"
 		err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-			return tx.QueryRow(ctx,
+			if err := tx.QueryRow(ctx,
 				`INSERT INTO deposit_intents (id, tenant_id, brand_id, player_account_id, wallet_id, asset_code, amount, payment_method, status, provider_id, provider_reference, idempotency_key)
 				 VALUES (gen_random_uuid(), $1, $2, $3, $4, 'EUR', 4321, 'card', 'pending', 'mock-psp', $5, 't10-manual-intent')
 				 RETURNING id`,
 				f.tenantID, f.brandID, f.playerAccountID, f.walletID, ref,
-			).Scan(&intent.ID)
+			).Scan(&intent.ID); err != nil {
+				return err
+			}
+			attempt, err := InsertSubmittingAttempt(ctx, tx, NewSubmittingAttempt{
+				ID: uuid.New(), TenantID: f.tenantID, Operation: AttemptOperationDeposit,
+				DepositIntentID: &intent.ID, ProviderID: "mock-psp", PaymentMethod: "card",
+				AssetCode: "EUR", Amount: 4321, Interactive: false,
+				ClaimToken: uuid.New(), LeaseOwner: "test-backfill", LeaseUntil: time.Now().Add(time.Minute),
+			})
+			if err != nil {
+				return err
+			}
+			return MarkAccepted(ctx, tx, attempt.ID, EvidenceSync, ref, time.Now().Add(time.Minute))
 		})
 		if err != nil {
 			t.Fatalf("seed in-flight intent for disabled provider: %v", err)
@@ -372,12 +390,20 @@ func TestWebhook_DisabledCapability_StillAccepted(t *testing.T) {
 	}
 
 	payload := provider.CallbackPayload(f.tenantID, CallbackEventDeposit, *intent.ProviderReference, "", OutcomeSucceeded, 4321, "EUR", "", false)
+	var result ReceiveCallbackResult
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-psp", payload)
+		var err error
+		result, err = orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-psp", payload)
 		return err
 	})
 	if err != nil {
 		t.Fatalf("expected a callback for a 'disabled' (routing-only) capability to still be accepted, got %v", err)
+	}
+	if result.Disposition != DispositionApplied {
+		t.Fatalf("expected the callback to actually be applied (posted), got disposition %q", result.Disposition)
+	}
+	if got := cashBalance(t, pool, f); got != 4321 {
+		t.Fatalf("expected the deposit to post despite the disabled (routing-only) capability, got cash_balance=%d", got)
 	}
 }
 

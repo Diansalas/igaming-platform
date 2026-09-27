@@ -65,7 +65,7 @@ func TestProviderRefBound_Payments_OversizeRejectedNothingWritten_ExactMaxAccept
 	var intent DepositIntent
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		intent, err = orch.InitiateDeposit(ctx, tx, InitiateDepositParams{
+		intent, err = initiateDepositWithAttempt(ctx, tx, orch, InitiateDepositParams{
 			Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
 			AssetCode: "EUR", Amount: 8000, PaymentMethod: "card", IdempotencyKey: "dep-ref-bound",
 		})

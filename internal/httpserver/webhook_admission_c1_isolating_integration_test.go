@@ -55,6 +55,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/casino"
 	"github.com/Diansalas/igaming-platform/internal/config"
 	"github.com/Diansalas/igaming-platform/internal/db"
+	"github.com/Diansalas/igaming-platform/internal/identityresolution"
 	"github.com/Diansalas/igaming-platform/internal/kyc"
 	"github.com/Diansalas/igaming-platform/internal/payments"
 	"github.com/Diansalas/igaming-platform/internal/providercred"
@@ -187,36 +188,61 @@ func TestAdmission_C1a_CasinoCredentialResolutionGateRejection_Isolated(t *testi
 
 // TestAdmission_C1a_KYCCredentialResolutionGateRejection_Isolated mirrors
 // casino's shape (k=1: slug lookup admitted, credential resolution
-// refused).
+// refused). Security re-verification #3 (§8.4, I7): targets a REAL,
+// pre-existing kyc_verifications row (seeded through the actual
+// player-facing endpoint) instead of asserting the vacuous ledger-row
+// count KYC never exercises. The mock provider's own ID() is "mock" (a
+// fixed, hardcoded value the mock's signing key derivation always uses),
+// so the orchestrator's registered map key and the URL's provider segment
+// both use "mock" too - an earlier version of this test used "mock-kyc"
+// for both, which happened not to matter only because every call here is
+// gate-rejected before the mismatch could ever be observed.
 func TestAdmission_C1a_KYCCredentialResolutionGateRejection_Isolated(t *testing.T) {
 	pool, issuer := testEnv(t)
 	sub := c1IsolatingRealSubsystem(t)
 	mock := kyc.NewMockKYCProvider()
-	orchestrator := kyc.NewOrchestrator(map[string]kyc.KYCProvider{"mock-kyc": mock}, sub.Resolver("kyc"))
+	orchestrator := kyc.NewOrchestrator(map[string]kyc.KYCProvider{"mock": mock}, sub.Resolver("kyc"))
 
 	tenant := mustCreateTenant(t, pool)
-	mustCreateBrand(t, pool, tenant)
+	brand := mustCreateBrand(t, pool, tenant)
 
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&buf, nil))
 	settings := testAdmissionSettings()
 	handler, rt := NewWithAdmission(Deps{
 		DB: pool, AuthIssuer: issuer, ServiceName: "platform-api-test", Logger: logger,
-		KYCOrchestrator: orchestrator, KYCWebhookEnabled: true, WebhookAdmission: settings,
+		AccessTokenTTL: 5 * time.Minute, RefreshTokenTTL: time.Hour,
+		PersonResolver:         identityresolution.NewMockPersonResolver(),
+		KYCOrchestrator:        orchestrator,
+		KYCOutboundCredentials: kyc.NewMockOutboundResolver(),
+		KYCWebhookEnabled:      true, WebhookAdmission: settings,
 	})
 	if err := rt.LoadDirectory(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	rt.rt.dbGate = &countingGate{t: t, wantKey: string(domainKYC) + "|" + tenant.Slug + "|" + "mock-kyc", allowed: 1}
+	rt.rt.dbGate = &countingGate{t: t, wantKey: string(domainKYC) + "|" + tenant.Slug + "|" + "mock", allowed: 1}
 
 	srv := httptest.NewServer(handler)
 	t.Cleanup(srv.Close)
 
-	payload := mock.CallbackPayload(tenant.ID, "c1a-kyc-ref", kyc.ProviderApproved, "")
-	resp := rawPostCallback(t, srv, "/v1/webhooks/kyc/"+tenant.Slug+"/mock-kyc", payments.InboundCallback{Header: payload.Header, Body: payload.Body})
+	player := mustRegisterPlayer(t, srv, brand.Slug)
+	createResp := postJSON(t, srv, "/v1/me/kyc/verifications", player.Tokens.AccessToken, map[string]any{})
+	if createResp.StatusCode != http.StatusCreated {
+		t.Fatalf("expected 201 seeding a real verification, got %d", createResp.StatusCode)
+	}
+	var created map[string]any
+	decodeBody(t, createResp, &created)
+	verificationID := uuid.MustParse(created["id"].(string))
+	beforeStatus, beforeUpdatedAt, providerRef := kycVerificationSnapshot(t, pool, tenant.ID, verificationID)
+	if providerRef == "" {
+		t.Fatal("the seeded verification has no provider_reference - the test's own setup is broken")
+	}
+
+	payload := mock.CallbackPayload(tenant.ID, providerRef, kyc.ProviderApproved, "")
+	resp := rawPostCallback(t, srv, "/v1/webhooks/kyc/"+tenant.Slug+"/mock", payments.InboundCallback{Header: payload.Header, Body: payload.Body})
 	defer resp.Body.Close()
 
-	assertC1Isolated(t, resp, pool, tenant.ID, "c1a-kyc-ref", buf.String())
+	assertC1IsolatedKYC(t, resp, pool, tenant.ID, verificationID, beforeStatus, beforeUpdatedAt, buf.String())
 }
 
 // assertC1Isolated is the shared assertion for every domain in this file:
@@ -224,6 +250,17 @@ func TestAdmission_C1a_KYCCredentialResolutionGateRejection_Isolated(t *testing.
 // ledger rows for the callback's own reference (proof it never reached
 // domain processing).
 func assertC1Isolated(t *testing.T, resp *http.Response, pool *db.Pool, tenantID uuid.UUID, ref string, logOutput string) {
+	t.Helper()
+	assertC1IsolatedCommon(t, resp, logOutput)
+	if got := ledgerTransactionCountForProviderRef(t, pool, tenantID, ref); got != 0 {
+		t.Fatalf("a DB-gate-rejected callback must post ZERO rows: got %d", got)
+	}
+}
+
+// assertC1IsolatedCommon is the domain-independent half of assertC1Isolated:
+// 503 (never the uniform 401), a Retry-After header (C2), and a db_gate
+// log line (L7).
+func assertC1IsolatedCommon(t *testing.T, resp *http.Response, logOutput string) {
 	t.Helper()
 	if resp.StatusCode == http.StatusUnauthorized {
 		t.Fatal("a DB-gate rejection during credential resolution must NEVER surface as the uniform 401 (security review C1)")
@@ -237,7 +274,22 @@ func assertC1Isolated(t *testing.T, resp *http.Response, pool *db.Pool, tenantID
 	if !strings.Contains(logOutput, `"tier":"db_gate"`) {
 		t.Fatalf("expected a webhook_admission_rejected tier=db_gate log line, got: %s", logOutput)
 	}
-	if got := ledgerTransactionCountForProviderRef(t, pool, tenantID, ref); got != 0 {
-		t.Fatalf("a DB-gate-rejected callback must post ZERO rows: got %d", got)
+}
+
+// assertC1IsolatedKYC is assertC1Isolated's KYC variant (security
+// re-verification #3, §8.4: I7's ledger-row check is vacuous for KYC,
+// which never writes ledger rows at all). It asserts the shared 503/
+// Retry-After/db_gate checks, then that a REAL, pre-existing
+// kyc_verifications row named by the gate-rejected callback's own
+// provider_reference is completely untouched - falsifiable, unlike a
+// ledger-row count that can never be anything but zero for KYC regardless
+// of whether the admission property under test actually held.
+func assertC1IsolatedKYC(t *testing.T, resp *http.Response, pool *db.Pool, tenantID, verificationID uuid.UUID, beforeStatus string, beforeUpdatedAt time.Time, logOutput string) {
+	t.Helper()
+	assertC1IsolatedCommon(t, resp, logOutput)
+	afterStatus, afterUpdatedAt, _ := kycVerificationSnapshot(t, pool, tenantID, verificationID)
+	if afterStatus != beforeStatus || !afterUpdatedAt.Equal(beforeUpdatedAt) {
+		t.Fatalf("a DB-gate-rejected KYC callback changed the targeted verification: status %q -> %q, "+
+			"updated_at %s -> %s", beforeStatus, afterStatus, beforeUpdatedAt, afterUpdatedAt)
 	}
 }

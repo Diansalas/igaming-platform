@@ -30,9 +30,26 @@ func (w *payWorld) runInfo(t *testing.T, src statement.PaymentStatementSource, o
 	return ms, info
 }
 
-// legacyDeposit runs the LIVE, not-yet-cut-over deposit path
-// (Orchestrator.InitiateDeposit, no payment_attempts row) and a verified
-// success callback, exactly as internal/httpserver does today.
+// legacyDeposit simulates a deposit posted BEFORE the payments callback
+// cutover (PRH-payments-callback-cutover): a deposit_intents row with no
+// payment_attempts row at all, and a ledger_transaction_id set directly -
+// exactly the on-disk SHAPE the pre-cutover live path (InitiateDeposit plus
+// the old, now-removed deposit_intents-only ReceiveVerifiedCallback) used
+// to produce.
+//
+// After the cutover, ReceiveVerifiedCallback resolves every deposit
+// callback through payment_attempts (ApplyReceiptEvidence, ADR 0095 §6.1,
+// INV-IO-14) - a deposit_intents row created via the legacy InitiateDeposit
+// helper (still exported for this reconciliation-history test, but no
+// longer reachable from any live HTTP path) has no attempt to resolve
+// against, so a callback for it is now correctly `deferred_unresolved`
+// (never posted) rather than posted via the old, now-removed
+// intent-only path. This helper therefore constructs the pre-cutover
+// on-disk shape directly (InitiateDeposit for the intent row, then a raw
+// ledger.Post plus a direct UPDATE for the posting) instead of driving it
+// through today's callback path, so this test keeps proving what it always
+// proved: reconciliation's legacy_unattempted exclusion (F1) for
+// attempt-less historical data, independent of how such data is created.
 func (w *payWorld) legacyDeposit(t *testing.T, amount int64) string {
 	t.Helper()
 	var intent payments.DepositIntent
@@ -50,16 +67,32 @@ func (w *payWorld) legacyDeposit(t *testing.T, amount int64) string {
 		t.Fatalf("legacy deposit has no provider reference (status %s)", intent.Status)
 	}
 	ref := *intent.ProviderReference
-	payload := w.mockA.CallbackPayload(w.f.tenantID, payments.CallbackEventDeposit, ref, "", payments.OutcomeSucceeded, amount, "EUR", "", false)
-	v, err := w.orch.VerifyCallback(context.Background(), w.pool, w.f.tenantID, payProvA, payload)
-	if err != nil {
-		t.Fatalf("VerifyCallback: %v", err)
-	}
 	if err := w.pool.WithTenant(context.Background(), w.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := w.orch.ReceiveVerifiedCallback(ctx, tx, w.f.tenantID, payProvA, v)
+		accounts, err := ledger.GetOrCreateAccounts(ctx, tx, w.f.tenantID,
+			ledger.AccountSpec{WalletID: &w.f.walletID, AccountType: ledger.AccountPlayerCash, AssetCode: "EUR"},
+			ledger.AccountSpec{AccountType: ledger.AccountPSPClearing, AssetCode: "EUR"},
+		)
+		if err != nil {
+			return err
+		}
+		cashAccountID, clearingAccountID := accounts[0], accounts[1]
+		providerID := payProvA
+		postResult, err := ledger.Post(ctx, tx, ledger.TransactionInput{
+			TenantID: w.f.tenantID, TransactionType: ledger.TxDeposit, IdempotencyKey: payProvA + ":" + ref,
+			ProviderID: &providerID, ProviderTxID: &ref, CorrelationID: intent.ID,
+			Entries: []ledger.EntryInput{
+				{LedgerAccountID: clearingAccountID, Direction: ledger.Debit, Amount: amount},
+				{LedgerAccountID: cashAccountID, Direction: ledger.Credit, Amount: amount},
+			},
+		})
+		if err != nil {
+			return err
+		}
+		_, err = tx.Exec(ctx, `UPDATE deposit_intents SET status = 'succeeded', ledger_transaction_id = $1 WHERE id = $2`,
+			postResult.TransactionID, intent.ID)
 		return err
 	}); err != nil {
-		t.Fatalf("ReceiveVerifiedCallback: %v", err)
+		t.Fatalf("legacy deposit posting: %v", err)
 	}
 	return ref
 }

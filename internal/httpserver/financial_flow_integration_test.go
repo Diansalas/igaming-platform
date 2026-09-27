@@ -874,14 +874,19 @@ func TestPaymentWebhook_UnsignedPayloadRejected(t *testing.T) {
 	// Confirm this genuinely reached the signature check rather than
 	// failing earlier for an unrelated reason (e.g. tenant lookup) - the
 	// SAME provider_reference, correctly signed, is accepted past
-	// authentication (it then hits ErrDepositIntentNotFound since it names
-	// no real intent, which is a DIFFERENT, later, 404 failure mode -
-	// proving the signature gate itself is not what's blocking a
-	// well-formed request).
+	// authentication. PRH-payments-callback-cutover (ADR 0095 §6.1 step 5/
+	// §6.2, S95-C4): a callback naming no resolvable attempt is no longer
+	// ErrDepositIntentNotFound/404 - it is durably receipted as
+	// `deferred_unresolved` and answered with the SAME uniform 200 body as
+	// every other disposition, so a verified sender can never learn
+	// whether the reference exists. This still proves the signature gate
+	// itself is not what blocked a well-formed request: an unsigned/
+	// garbage-signature request above got 401, and this identical payload,
+	// correctly signed, gets 200.
 	signedButUnknown := mockProvider.CallbackPayload(tenant.ID, payments.CallbackEventDeposit, "mock-does-not-matter", "", payments.OutcomeSucceeded, 1000, "EUR", "", false)
 	resp = rawPostCallback(t, srv, "/v1/webhooks/payments/"+tenant.Slug+"/mock", signedButUnknown)
-	if resp.StatusCode != http.StatusNotFound {
-		t.Errorf("expected a correctly-signed callback for an unknown reference to fail at 'not found', not signature verification; got %d", resp.StatusCode)
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("expected a correctly-signed callback for an unresolvable reference to be durably deferred (200), not rejected; got %d", resp.StatusCode)
 	}
 	resp.Body.Close()
 }

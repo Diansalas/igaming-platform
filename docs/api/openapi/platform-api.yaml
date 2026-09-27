@@ -2634,15 +2634,26 @@ paths:
         verification succeeds: a verified body that is still structurally
         malformed (a required field missing, or an unrecognized
         event_type/outcome value), or whose declared facts (amount/asset)
-        contradict the deposit intent it claims to resolve. 404 is
-        reachable ONLY after verification succeeds (an unknown
-        provider_reference for an otherwise-authenticated callback) - it is
-        not a second enumeration oracle. 409 covers two distinct,
-        generically-reported causes (a provider reference already posted
-        with a different payload, or a distinct-reference reversal naming
-        an already-reversed deposit) - intentionally collapsed to one
-        generic body. 503 means webhooks are not enabled on this
-        deployment.
+        contradict the deposit intent it claims to resolve. 409 covers two
+        distinct, generically-reported causes (a provider reference already
+        posted with a different payload, or a distinct-reference reversal
+        naming an already-reversed deposit) - intentionally collapsed to one
+        generic body. 503 means either webhooks are not enabled on this
+        deployment, an ADR 0097 admission-layer capacity rejection, or the
+        ADR 0095 §6.1 step 5 unapplied-receipt cap for this (tenant,
+        provider) pair.
+
+        PRH-payments-callback-cutover (ADR 0095 §6.2/S95-C4): every 200
+        response is a BYTE-IDENTICAL body regardless of disposition
+        (applied, a duplicate/idempotent replay, a deferred callback with no
+        resolvable attempt yet, or a committed anomaly) - the outcome is
+        recorded only in the receipt, the audit trail and metrics, never in
+        this response, so a verified sender can never learn whether a
+        reference exists, is already applied, or is still unresolved. This
+        also means an unresolved deposit callback (formerly a 404, "no
+        matching deposit intent for this provider reference") now returns
+        200 after a durable receipt instead - 404 is no longer used by this
+        route.
       parameters:
         - name: tenantSlug
           in: path
@@ -2671,15 +2682,21 @@ paths:
               $ref: "#/components/schemas/PaymentsMockCallback"
       responses:
         "200":
-          description: Callback processed (or safely absorbed as an idempotent replay/no-op)
+          description: >
+            Callback received - identical body for every disposition
+            (applied, an idempotent duplicate/no-op replay, a deferred
+            callback with no resolvable attempt yet, or a committed
+            anomaly). See this operation's description (ADR 0095 §6.2/
+            S95-C4): the disposition is never distinguishable from the
+            response alone.
           content:
             application/json:
               schema:
                 type: object
+                required: [request_id, received]
                 properties:
-                  deposit_intent_id: { type: string, format: uuid }
-                  status: { type: string }
-                  tombstoned: { type: boolean }
+                  request_id: { type: string }
+                  received: { type: boolean }
         "400":
           description: >
             Reachable ONLY after signature verification succeeds: a
@@ -2709,15 +2726,6 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
-        "404":
-          description: >
-            No matching deposit intent for this provider reference - only
-            observable AFTER signature verification succeeds; not a second
-            enumeration oracle.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Error"
         "409":
           $ref: "#/components/responses/Conflict"
         "429":
@@ -2728,11 +2736,14 @@ paths:
           description: >
             Payment webhooks are not enabled on this deployment, OR an ADR
             0097 admission-layer capacity rejection (A4a/A4b/B2), OR a
-            no-429-retry adapter's B1 rejection - see
-            WebhookAdmissionUnavailable.
+            no-429-retry adapter's B1 rejection (see
+            WebhookAdmissionUnavailable), OR the ADR 0095 §6.1 step 5 /
+            S95-C2(i) unapplied-receipt cap for this (tenant, provider) -
+            nothing is stored in the cap case; the provider is expected to
+            redeliver (LF-C1, ADR 0097 §6.3).
           headers:
             Retry-After:
-              description: Present only for the ADR 0097 admission-layer cause.
+              description: Present for every 503 cause on this route.
               schema: { type: integer, minimum: 1, maximum: 60 }
           content:
             application/json:
