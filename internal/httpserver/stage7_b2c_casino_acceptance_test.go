@@ -47,6 +47,7 @@ func newStage7B2CTestServer(t *testing.T, pool *db.Pool, issuer *auth.Issuer, pa
 		RefreshTokenTTL:             time.Hour,
 		PaymentOrchestrator:         paymentOrch,
 		CasinoOrchestrator:          casinoOrch,
+		CasinoOutboundCredentials:   casino.NewMockOutboundResolver(),
 		CasinoPlaySimulationEnabled: true,
 		PersonResolver:              identityresolution.NewMockPersonResolver(),
 	}))

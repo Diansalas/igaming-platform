@@ -88,6 +88,15 @@ type Deps struct {
 	// gated by whether any adapter is currently registered.
 	CasinoOrchestrator *casino.Orchestrator
 
+	// CasinoOutboundCredentials is the casino domain's outbound-credential
+	// resolver (ADR 0095 §15.1/§9.1, PROV-OUTBOUND-CRED-1): a MOCK synthetic
+	// credential behind a synthetic/MOCK provider adapter, or the real
+	// provider-credential subsystem's Outbound("casino") once a real
+	// adapter exists. Nil fails every real launch closed, mirroring every
+	// other nil-resolver convention in this struct - never a silent
+	// fallback to an unauthenticated or cached credential.
+	CasinoOutboundCredentials casino.OutboundCredentialResolver
+
 	// CasinoPlaySimulationEnabled gates the three Stage 7 mock-provider
 	// play-simulation routes (POST /v1/me/casino/sessions/{id}/wager|win|
 	// rollback - casino_play_handlers.go). These exist only because no

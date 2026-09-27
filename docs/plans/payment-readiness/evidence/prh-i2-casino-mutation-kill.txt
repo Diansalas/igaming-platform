@@ -1,0 +1,98 @@
+PRH-I2 (casino part) mutation-kill evidence
+============================================
+
+Scope: ADR 0095 §15.1 casino launch two-phase split (internal/casino/orchestrator.go
+LaunchGame, internal/casino/launch.go CallContext/OutboundCredentialResolver,
+internal/casino/mock.go MockOutboundResolver, internal/providercred/outbound.go
+NewMockOutboundCredential). Does not cover KYC (identity-compliance's own PRH-I2 slice)
+or payments (PRH-I1, not started).
+
+Harness: a scratchpad script (not committed) that copies the target file aside, applies
+exactly one source mutant (a single anchored string replacement verified to match
+exactly once), runs that mutant's killing test command against a private scratch
+database, and restores the file from the saved copy. A non-zero exit (test failure or
+panic) means KILLED.
+
+Environment: local PostgreSQL, private database `prh_i2_casino_test` (never the shared
+CI database), created via TEST_ADMIN_DATABASE_URL and migrated up to migration 99, with
+igaming_runtime's default privileges granted BEFORE migrations ran (so per-table REVOKEs
+already in the migrations - e.g. casino_callback_rejections' append-only grant shape -
+are not undone by a later blanket GRANT). Go 1.26.8. Base: worktree branch
+worktree-agent-af8a1e737aadc71bf on 13b44b5 plus this task's PRH-I2 casino change.
+
+Result: 10/10 killed (one additional candidate mutant judged EQUIVALENT, see note below).
+
+M1 phase-A "denied" early-return disabled (a policy denial would fall through to session
+mint/Launch instead of returning the Denied result): KILLED [internal/casino/orchestrator.go]
+by `go test -tags=integration ./internal/casino/ -run TestLaunchGame_ArmedBlocklist_DeniesOnUnresolvedJurisdiction|TestLaunchGame_DeniedWhenPlayerAccountSuspended`
+    first failure: --- FAIL: TestLaunchGame_ArmedBlocklist_DeniesOnUnresolvedJurisdiction (0.03s)
+                       "provider is not available for this tenant/brand" (fell through with no capability match)
+
+M2 phase-C RevokeLaunchSession call removed from launchFailed (a failed launch would
+leave the session 'active' instead of 'revoked'): KILLED [internal/casino/orchestrator.go]
+by `go test -tags=integration ./internal/casino/ -run TestLaunchGame_NilOutboundResolverFailsClosedAndRevokesSession|TestFailureModeMatrix_F_ProviderTransportFailureAtLaunchRevokesSessionNoTrace|TestLaunchGame_CredentialBindingMismatchFailsClosedAndRevokesSession`
+    first failure: --- FAIL: TestFailureModeMatrix_F_ProviderTransportFailureAtLaunchRevokesSessionNoTrace (0.05s)
+                       "expected the session revoked after a launch failure, got status active"
+
+M3 nil-pool guard removed (LaunchGame would call pool.WithTenant on a nil pool):
+KILLED [internal/casino/orchestrator.go] by
+`go test -tags=integration ./internal/casino/ -run TestLaunchGame_NilPoolFailsClosedWithoutPanic`
+    first failure: panic: runtime error: invalid memory address or nil pointer dereference
+                   (orchestrator.go:190, LaunchGame) - the guard is what turns this into a
+                   typed ErrProviderUnavailable instead of a crash
+
+M4 nil-outbound-resolver guard removed (LaunchGame would call outbound.Resolve on a true
+nil interface): KILLED [internal/casino/orchestrator.go] by
+`go test -tags=integration ./internal/casino/ -run TestLaunchGame_NilOutboundResolverFailsClosedAndRevokesSession`
+    first failure: panic: runtime error: invalid memory address or nil pointer dereference
+                   (orchestrator.go:443, LaunchGame)
+
+M5 credential tenant/provider/domain binding check removed (a resolver returning a
+credential for the WRONG tenant would still be used): KILLED [internal/casino/orchestrator.go]
+by `go test -tags=integration ./internal/casino/ -run TestLaunchGame_CredentialBindingMismatchFailsClosedAndRevokesSession`
+    first failure: --- FAIL: TestLaunchGame_CredentialBindingMismatchFailsClosedAndRevokesSession (0.04s)
+                       "expected ErrProviderUnavailable for a mismatched credential, got <nil>"
+
+M6 CircuitOpen health check short-circuited to always-healthy: KILLED
+[internal/casino/orchestrator.go] by
+`go test -tags=integration ./internal/casino/ -run TestLaunchGame_UnhealthyProviderCircuitOpenRejected`
+    first failure: --- FAIL: TestLaunchGame_UnhealthyProviderCircuitOpenRejected (0.05s)
+
+M7 IdempotencyKey prefix changed from "cas:" to "xxx:" (the deterministic external
+reference ADR 0095 §15.1 names): KILLED [internal/casino/orchestrator.go] by
+`go test -tags=integration ./internal/casino/ -run TestLaunchGame_CallContextFieldsPassedToProvider`
+    first failure: --- FAIL: TestLaunchGame_CallContextFieldsPassedToProvider (0.04s)
+                       Call.IdempotencyKey mismatch
+
+M8 "provider declined launch" branch disabled (an OutcomeDeclined/OutcomeAmbiguous
+Launch result would be treated as success): KILLED [internal/casino/orchestrator.go] by
+`go test -tags=integration ./internal/casino/ -run TestLaunchGame_ProviderDeclinedRevokesSession`
+    first failure: --- FAIL: TestLaunchGame_ProviderDeclinedRevokesSession (0.03s)
+                       "expected an error for a provider-declined launch"
+
+M9 (candidate) "provider launch call failed" (transport-error) branch disabled - JUDGED
+EQUIVALENT, not counted in 10/10: with this branch removed, a transport error from
+Launch() still produces a zero-value LaunchResult, which then fails the very next check
+(Outcome != OutcomeSucceeded) and takes the SAME launchFailed(revoke + audit + error)
+path. The only externally observable difference is the human-readable reason string in
+the audit metadata/error text ("provider launch call failed: ..." vs "provider declined
+launch: "), never tested by CLAUDE.md's own invariants (session still revoked, ledger
+still untouched, caller still gets a non-nil error). Recorded here rather than silently
+dropped, per the "no fake completion" rule - this is a genuine code-coverage gap (the
+distinct log line is never independently asserted) but not a safety-relevant survivor.
+
+M10 phase-A "casino.launch_requested" audit write replaced with a bare `return nil`:
+KILLED [internal/casino/orchestrator.go] by
+`go test -tags=integration ./internal/casino/ -run TestLaunchGame_AuditsLaunchRequestedInPhaseAAndLaunchedInPhaseC`
+    first failure: --- FAIL: TestLaunchGame_AuditsLaunchRequestedInPhaseAAndLaunchedInPhaseC (0.03s)
+                       "expected a casino.launch_requested audit record from phase A"
+    (this mutant did not exist as a gap before PRH-I2's split - the pre-split code had a
+    single "casino.launched" audit only; the new test was added specifically to cover the
+    new phase-A audit record this split introduces)
+
+10/10 killed, 1 equivalent (2026-09-27).
+
+Full regression confirms no unrelated mutant survives by accident: the entire
+internal/casino integration suite (all pre-existing Stage 4A/4D/4G/10.x tests plus the
+five new launch_two_phase_integration_test.go tests) passes on the restored,
+un-mutated tree under `go test -race -tags=integration ./internal/casino/...`.

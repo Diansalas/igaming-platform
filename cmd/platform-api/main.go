@@ -259,14 +259,15 @@ func run() error {
 	logger.Info("sportsbook catalogue synced")
 
 	handler, webhookAdmission := httpserver.NewWithAdmission(httpserver.Deps{
-		Logger:              logger,
-		DB:                  pool,
-		AuthIssuer:          issuer,
-		ServiceName:         cfg.OTelServiceName,
-		AccessTokenTTL:      cfg.AccessTokenTTL,
-		RefreshTokenTTL:     cfg.RefreshTokenTTL,
-		PaymentOrchestrator: orchestrator,
-		CasinoOrchestrator:  casinoOrchestrator,
+		Logger:                    logger,
+		DB:                        pool,
+		AuthIssuer:                issuer,
+		ServiceName:               cfg.OTelServiceName,
+		AccessTokenTTL:            cfg.AccessTokenTTL,
+		RefreshTokenTTL:           cfg.RefreshTokenTTL,
+		PaymentOrchestrator:       orchestrator,
+		CasinoOrchestrator:        casinoOrchestrator,
+		CasinoOutboundCredentials: providers.casinoOutboundCredentials(),
 		// ADR 0097 PRH-I4 (PAYWH-RL-1): mapped field by field from
 		// config.WebhookAdmissionConfig - internal/httpserver never imports
 		// internal/config (architect review AC1).

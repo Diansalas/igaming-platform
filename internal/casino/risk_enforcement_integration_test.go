@@ -172,12 +172,9 @@ func TestLaunchGame_DeniedByRiskHardLimit(t *testing.T) {
 	// casino_launch. This proves the OTHER honest outcome: a hard limit
 	// configured for a dimension casino_launch cannot supply fails
 	// closed (propagates as an error), never silently ALLOW.
-	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := orch.LaunchGame(ctx, tx, LaunchGameParams{
-			TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID,
-			GameID: game.ID, AssetCode: "EUR", Mode: ModeReal,
-		})
-		return err
+	_, err := orch.LaunchGame(context.Background(), pool, NewMockOutboundResolver(), LaunchGameParams{
+		TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID,
+		GameID: game.ID, AssetCode: "EUR", Mode: ModeReal,
 	})
 	if err == nil {
 		t.Fatal("expected an amount-shaped hard limit misconfigured for casino_launch to fail closed (error), got nil")

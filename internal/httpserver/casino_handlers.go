@@ -185,7 +185,13 @@ func newLaunchCasinoGameHandler(deps Deps) http.HandlerFunc {
 			return
 		}
 
-		var result casino.LaunchGameResult
+		// ADR 0095 §15.1 (PRH-I2): LaunchGame now owns its own transaction
+		// boundaries (phase A commits before any provider call), so it is no
+		// longer called from inside a WithTenant callback - only the
+		// identity/wallet resolution below still needs its own short
+		// tenant-scoped transaction (a cheap, no-vendor-I/O read/get-or-
+		// create).
+		var brandID, walletID uuid.UUID
 		err = deps.DB.WithTenant(r.Context(), tc.TenantID, func(ctx context.Context, tx pgx.Tx) error {
 			account, err := identity.GetPlayerAccountByID(ctx, tx, playerAccountID)
 			if err != nil {
@@ -195,12 +201,16 @@ func newLaunchCasinoGameHandler(deps Deps) http.HandlerFunc {
 			if err != nil {
 				return err
 			}
-			result, err = deps.CasinoOrchestrator.LaunchGame(ctx, tx, casino.LaunchGameParams{
-				TenantID: tc.TenantID, BrandID: account.BrandID, PlayerAccountID: playerAccountID, WalletID: wl.ID,
+			brandID, walletID = account.BrandID, wl.ID
+			return nil
+		})
+		var result casino.LaunchGameResult
+		if err == nil {
+			result, err = deps.CasinoOrchestrator.LaunchGame(r.Context(), deps.DB, deps.CasinoOutboundCredentials, casino.LaunchGameParams{
+				TenantID: tc.TenantID, BrandID: brandID, PlayerAccountID: playerAccountID, WalletID: walletID,
 				GameID: gameID, AssetCode: req.AssetCode, Mode: casino.GameMode(req.Mode),
 			})
-			return err
-		})
+		}
 		if errors.Is(err, identity.ErrNotFound) {
 			apierror.Write(w, requestID, apierror.CodeNotFound, "player account not found")
 			return

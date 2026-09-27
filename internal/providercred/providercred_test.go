@@ -19,10 +19,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/Diansalas/igaming-platform/internal/casino"
 	"github.com/Diansalas/igaming-platform/internal/config"
-	"github.com/Diansalas/igaming-platform/internal/kyc"
-	"github.com/Diansalas/igaming-platform/internal/payments"
 	"github.com/Diansalas/igaming-platform/internal/providers/httpclient"
 	"github.com/Diansalas/igaming-platform/internal/secretstore"
 	"github.com/Diansalas/igaming-platform/internal/secretstore/memstore"
@@ -143,61 +140,18 @@ func TestSecretTypes_Redaction(t *testing.T) {
 	}
 }
 
-// credentialBearing reports whether a field type may carry an outbound
-// credential or an authenticator.
-func credentialBearing(t reflect.Type) bool {
-	outbound := reflect.TypeOf(OutboundCredential{})
-	auth := reflect.TypeOf((*httpclient.Authenticator)(nil)).Elem()
-	for t.Kind() == reflect.Ptr || t.Kind() == reflect.Slice || t.Kind() == reflect.Map || t.Kind() == reflect.Array {
-		if t.Kind() == reflect.Map {
-			if credentialBearing(t.Key()) {
-				return true
-			}
-		}
-		t = t.Elem()
-	}
-	return t == outbound || t == auth || t.Implements(auth) || reflect.PointerTo(t).Implements(auth)
-}
-
-// TestOutbound_NoCredentialOnLongLivedTypes (security review §2): the HTTP
-// client, the domain orchestrators, the resolvers and the adapters hold no
-// OutboundCredential, no Authenticator, and (outside the synthetic MOCKs,
-// whose per-process MOCK master is not a vendor credential) no []byte
-// secret field.
-func TestOutbound_NoCredentialOnLongLivedTypes(t *testing.T) {
-	syntheticMocks := map[reflect.Type]bool{
-		reflect.TypeOf(payments.MockProvider{}):     true,
-		reflect.TypeOf(casino.MockCasinoProvider{}): true,
-		reflect.TypeOf(kyc.MockKYCProvider{}):       true,
-	}
-	for _, v := range []any{
-		httpclient.Client{}, payments.Orchestrator{}, casino.Orchestrator{}, kyc.Orchestrator{},
-		OutboundResolver{}, Resolver{}, webhookauth.KindSplitResolver{},
-		payments.MockProvider{}, casino.MockCasinoProvider{}, kyc.MockKYCProvider{},
-	} {
-		typ := reflect.TypeOf(v)
-		for i := 0; i < typ.NumField(); i++ {
-			field := typ.Field(i)
-			if credentialBearing(field.Type) {
-				t.Errorf("%s.%s (%s) can hold a credential or authenticator", typ, field.Name, field.Type)
-			}
-			if field.Type == reflect.TypeOf([]byte(nil)) && !syntheticMocks[typ] {
-				t.Errorf("%s.%s is a []byte field on a long-lived type", typ, field.Name)
-			}
-		}
-	}
-	// Negative control: the check sees a planted field.
-	type planted struct{ Cred OutboundCredential }
-	if !credentialBearing(reflect.TypeOf(planted{}).Field(0).Type) {
-		t.Fatal("the check must detect an OutboundCredential field")
-	}
-	type plantedAuth struct {
-		A *httpclient.HeaderAuthenticator
-	}
-	if !credentialBearing(reflect.TypeOf(plantedAuth{}).Field(0).Type) {
-		t.Fatal("the check must detect an Authenticator field")
-	}
-}
+// TestOutbound_NoCredentialOnLongLivedTypes and its credentialBearing
+// helper moved to outbound_credential_bearing_test.go (package
+// providercred_test) so this file can stop importing internal/casino:
+// casino.LaunchGame now resolves its own outbound credential via
+// providercred.TenantTxRunner/OutboundCredentialResolver (ADR 0095 §15.1,
+// PRH-I2), so internal/casino imports internal/providercred and an
+// in-package (package providercred) test file can no longer import casino
+// without an import cycle. Go's external test package convention
+// (foo_test importing foo AND anything foo imports) is the standard way to
+// break exactly this shape of cycle, and is used only for that one test -
+// every other test here still needs package providercred's own unexported
+// fields (e.g. OutboundCredential.secret) and stays in-package.
 
 func moduleRoot(t *testing.T) string {
 	t.Helper()

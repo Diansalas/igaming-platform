@@ -111,13 +111,9 @@ func TestJurisdictionResolve_ConcurrentCasinoLaunchAndBonusActivate_NoDeadlockIn
 	var launchErr error
 	go func() {
 		defer wg.Done()
-		launchErr = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-			var err error
-			launchResult, err = orch.LaunchGame(ctx, tx, LaunchGameParams{
-				TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID,
-				GameID: game.ID, AssetCode: "EUR", Mode: ModeReal,
-			})
-			return err
+		launchResult, launchErr = orch.LaunchGame(context.Background(), pool, NewMockOutboundResolver(), LaunchGameParams{
+			TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID,
+			GameID: game.ID, AssetCode: "EUR", Mode: ModeReal,
 		})
 	}()
 

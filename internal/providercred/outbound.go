@@ -162,6 +162,23 @@ func (o *OutboundResolver) Resolve(ctx context.Context, pool TenantTxRunner, ten
 	return c, nil
 }
 
+// NewMockOutboundCredential builds a synthetic OutboundCredential for a
+// MOCK/synthetic adapter - the "MOCK: synthetic credential" case ADR 0095
+// §9.1 names explicitly, mirroring MockResolver's identical role for
+// INBOUND webhook credentials. It never reads the handle table or the
+// secret store, carries no persisted HandleID (uuid.Nil), and its secret
+// is a fixed, process-local, non-configurable placeholder - never used to
+// authenticate to a real vendor endpoint, since it is only ever wired
+// behind a domain's own MOCK/synthetic adapter (ADR 0085's synthetic-guard
+// discipline keeps it out of production regardless).
+func NewMockOutboundCredential(tenantID uuid.UUID, domain, providerID string) OutboundCredential {
+	return OutboundCredential{
+		TenantID: tenantID, Domain: domain, ProviderID: providerID,
+		HandleID: uuid.Nil, KeyID: "mock", Fingerprint: "mock",
+		secret: secretstore.NewSecret([]byte("mock-outbound-credential-not-a-real-secret")),
+	}
+}
+
 // derivedTokenCacheMaxEntries bounds DerivedTokenCache so an unbounded
 // number of rotations/tenants cannot grow it forever. It is generous
 // relative to any realistic per-process count of (tenant, handle,
