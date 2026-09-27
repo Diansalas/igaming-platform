@@ -144,6 +144,50 @@ func GetKillSwitch(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, providerS
 	return ks, true, nil
 }
 
+// GetKillSwitchByID reads one switch row by id, explicitly predicated on
+// tenantID (S95-C13/§10.5's "all reads and writes are explicitly
+// predicated on tenant_id" rule for the platform route family, whose RLS
+// alone would otherwise show any tenant's row). Returns found=false - never
+// another tenant's row - when id exists but belongs to a different tenant,
+// so a handler can map that straight to 404 with no special-casing.
+func GetKillSwitchByID(ctx context.Context, tx pgx.Tx, tenantID, id uuid.UUID) (KillSwitch, bool, error) {
+	row := tx.QueryRow(ctx, `SELECT `+killSwitchColumns+` FROM payment_kill_switches WHERE tenant_id=$1 AND id=$2`, tenantID, id)
+	ks, err := scanKillSwitch(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return KillSwitch{}, false, nil
+	}
+	if err != nil {
+		return KillSwitch{}, false, fmt.Errorf("payments: get kill switch by id: %w", err)
+	}
+	return ks, true, nil
+}
+
+// GetKillSwitchReleaseRequestByID reads one release request row by id,
+// explicitly predicated on tenantID (same rationale as GetKillSwitchByID).
+func GetKillSwitchReleaseRequestByID(ctx context.Context, tx pgx.Tx, tenantID, id uuid.UUID) (KillSwitchReleaseRequest, bool, error) {
+	row := tx.QueryRow(ctx,
+		`SELECT id, tenant_id, kill_switch_id, expected_version, reason_code, requested_by, requested_by_scope, created_at, expires_at, status, approved_by, approved_by_scope, decided_at
+		 FROM payment_kill_switch_release_requests WHERE tenant_id=$1 AND id=$2`,
+		tenantID, id,
+	)
+	var req KillSwitchReleaseRequest
+	var scope string
+	var approvedByScope *string
+	if err := row.Scan(&req.ID, &req.TenantID, &req.KillSwitchID, &req.ExpectedVersion, &req.ReasonCode,
+		&req.RequestedBy, &scope, &req.CreatedAt, &req.ExpiresAt, &req.Status, &req.ApprovedBy, &approvedByScope, &req.DecidedAt); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return KillSwitchReleaseRequest{}, false, nil
+		}
+		return KillSwitchReleaseRequest{}, false, fmt.Errorf("payments: get kill switch release request by id: %w", err)
+	}
+	req.RequestedByScope = KillSwitchSessionScope(scope)
+	if approvedByScope != nil {
+		s := KillSwitchSessionScope(*approvedByScope)
+		req.ApprovedByScope = &s
+	}
+	return req, true, nil
+}
+
 // ListKillSwitches returns every switch row visible to the caller's
 // current RLS context for tenantID (tenant staff see only their own
 // tenant's rows, including platform-engaged ones read-only per §10.5;
@@ -199,24 +243,40 @@ func RequestKillSwitchRelease(ctx context.Context, tx pgx.Tx, tenantID, killSwit
 // release. tx must be a DIFFERENT principal's session from the one that
 // created requestID - the database itself refuses a same-principal
 // approval (four-eyes), this function does not re-check it.
-func ApproveAndReleaseKillSwitch(ctx context.Context, tx pgx.Tx, killSwitchID, requestID uuid.UUID) (KillSwitch, error) {
-	if _, err := tx.Exec(ctx, `UPDATE payment_kill_switch_release_requests SET status='approved' WHERE id=$1`, requestID); err != nil {
+// tenantID is an explicit, additional predicate on both statements (S95-
+// C13/§10.5's "explicitly predicated on tenant_id" rule) - essential under
+// the platform RLS family, which has no tenant predicate of its own, and
+// harmless-but-redundant under the tenant family. A killSwitchID/requestID
+// that exists but belongs to a different tenant fails exactly like a
+// nonexistent one (ErrAttemptStateConflict / zero rows), never leaking
+// which case it was.
+func ApproveAndReleaseKillSwitch(ctx context.Context, tx pgx.Tx, tenantID, killSwitchID, requestID uuid.UUID) (KillSwitch, error) {
+	tag, err := tx.Exec(ctx, `UPDATE payment_kill_switch_release_requests SET status='approved' WHERE id=$1 AND tenant_id=$2`, requestID, tenantID)
+	if err != nil {
 		return KillSwitch{}, fmt.Errorf("payments: approve kill switch release request: %w", err)
 	}
+	if tag.RowsAffected() == 0 {
+		return KillSwitch{}, fmt.Errorf("payments: approve kill switch release request: %w", ErrAttemptStateConflict)
+	}
 	row := tx.QueryRow(ctx,
-		`UPDATE payment_kill_switches SET engaged=false, release_request_id=$2 WHERE id=$1 RETURNING `+killSwitchColumns,
-		killSwitchID, requestID,
+		`UPDATE payment_kill_switches SET engaged=false, release_request_id=$2 WHERE id=$1 AND tenant_id=$3 RETURNING `+killSwitchColumns,
+		killSwitchID, requestID, tenantID,
 	)
 	ks, err := scanKillSwitch(row)
 	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return KillSwitch{}, fmt.Errorf("payments: release kill switch: %w", ErrAttemptStateConflict)
+		}
 		return KillSwitch{}, fmt.Errorf("payments: release kill switch: %w", err)
 	}
 	return ks, nil
 }
 
 // CancelKillSwitchRelease withdraws an open request before it is approved.
-func CancelKillSwitchRelease(ctx context.Context, tx pgx.Tx, requestID uuid.UUID) error {
-	tag, err := tx.Exec(ctx, `UPDATE payment_kill_switch_release_requests SET status='cancelled' WHERE id=$1 AND status='open'`, requestID)
+// tenantID is an explicit predicate, same rationale as
+// ApproveAndReleaseKillSwitch's own doc comment.
+func CancelKillSwitchRelease(ctx context.Context, tx pgx.Tx, tenantID, requestID uuid.UUID) error {
+	tag, err := tx.Exec(ctx, `UPDATE payment_kill_switch_release_requests SET status='cancelled' WHERE id=$1 AND tenant_id=$2 AND status='open'`, requestID, tenantID)
 	if err != nil {
 		return fmt.Errorf("payments: cancel kill switch release request: %w", err)
 	}

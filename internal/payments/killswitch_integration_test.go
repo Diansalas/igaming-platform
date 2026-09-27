@@ -81,7 +81,7 @@ func TestKillSwitch_ServiceLayerFourEyesRoundTrip(t *testing.T) {
 
 	// Requester cannot approve+release their own request.
 	err = pool.WithPrincipalScope(context.Background(), f.tenantID, f.tenantPrincipalA, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := ApproveAndReleaseKillSwitch(ctx, tx, ksID, reqID)
+		_, err := ApproveAndReleaseKillSwitch(ctx, tx, f.tenantID, ksID, reqID)
 		return err
 	})
 	if err == nil {
@@ -89,7 +89,7 @@ func TestKillSwitch_ServiceLayerFourEyesRoundTrip(t *testing.T) {
 	}
 
 	err = pool.WithPrincipalScope(context.Background(), f.tenantID, f.tenantPrincipalB, func(ctx context.Context, tx pgx.Tx) error {
-		ks, err := ApproveAndReleaseKillSwitch(ctx, tx, ksID, reqID)
+		ks, err := ApproveAndReleaseKillSwitch(ctx, tx, f.tenantID, ksID, reqID)
 		if err != nil {
 			return err
 		}
@@ -143,7 +143,7 @@ func TestKillSwitch_CancelOpenRequest(t *testing.T) {
 	}
 
 	err = pool.WithPrincipalScope(context.Background(), f.tenantID, f.tenantPrincipalA, func(ctx context.Context, tx pgx.Tx) error {
-		return CancelKillSwitchRelease(ctx, tx, reqID)
+		return CancelKillSwitchRelease(ctx, tx, f.tenantID, reqID)
 	})
 	if err != nil {
 		t.Fatalf("cancel: %v", err)
@@ -151,7 +151,7 @@ func TestKillSwitch_CancelOpenRequest(t *testing.T) {
 
 	// Cancelling again is refused (terminal, immutable).
 	err = pool.WithPrincipalScope(context.Background(), f.tenantID, f.tenantPrincipalA, func(ctx context.Context, tx pgx.Tx) error {
-		return CancelKillSwitchRelease(ctx, tx, reqID)
+		return CancelKillSwitchRelease(ctx, tx, f.tenantID, reqID)
 	})
 	if !errors.Is(err, ErrAttemptStateConflict) {
 		t.Fatalf("expected ErrAttemptStateConflict on double-cancel, got %v", err)

@@ -5031,6 +5031,218 @@ paths:
                 $ref: "#/components/schemas/Error"
         "500":
           $ref: "#/components/responses/InternalError"
+  /v1/admin/tenants/{tenantID}/payments/kill-switches:
+    get:
+      summary: List the tenant's payment kill switches (PRH-I1, ADR 0095 §10.5)
+      description: >
+        Requires payments_kill_switch:read (platform_admin, tenant_admin).
+        The tenant comes from the path only (canActOnTenant: a tenant-scoped
+        caller may name only its own tenant; a platform-scoped caller may
+        name any tenant). Includes platform-engaged rows, read-only.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/PaymentsKillSwitchTenantID"
+      responses:
+        "200":
+          description: The tenant's kill switches
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  kill_switches:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/PaymentsKillSwitch"
+                required: [kill_switches]
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    post:
+      summary: Engage a payment kill switch (single-actor, ADR 0095 §10.4)
+      description: >
+        Requires payments_kill_switch:engage (platform_admin, tenant_admin).
+        Idempotent on (tenant, provider_scope, operation_scope): engaging an
+        already-engaged switch re-engages it with the new reason_code. A
+        platform-scoped caller's engage is forced to engaged_by_scope=platform
+        by the database, never asserted by this request.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/PaymentsKillSwitchTenantID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PaymentsKillSwitchEngageRequest"
+      responses:
+        "200":
+          description: The switch after engage
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PaymentsKillSwitch"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/admin/tenants/{tenantID}/payments/kill-switches/{killSwitchID}:
+    get:
+      summary: Get one payment kill switch
+      description: Requires payments_kill_switch:read (platform_admin, tenant_admin). A foreign tenant's id is 404, never data.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/PaymentsKillSwitchTenantID"
+        - $ref: "#/components/parameters/PaymentsKillSwitchID"
+      responses:
+        "200":
+          description: The switch
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PaymentsKillSwitch"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/admin/tenants/{tenantID}/payments/kill-switches/{killSwitchID}/release-requests:
+    post:
+      summary: File a four-eyes release request for a payment kill switch (ADR 0095 §10.4)
+      description: >
+        Requires payments_kill_switch:release (platform_admin, tenant_admin).
+        expected_version is read from the switch's own current row
+        server-side, never accepted from the client. Refused (409) when the
+        switch is not currently engaged, and when a tenant-scoped caller
+        targets a platform-engaged switch (L5(a) - the database refuses the
+        insert).
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/PaymentsKillSwitchTenantID"
+        - $ref: "#/components/parameters/PaymentsKillSwitchID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PaymentsKillSwitchReleaseRequestBody"
+      responses:
+        "201":
+          description: The filed request (status open)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PaymentsKillSwitchReleaseRequest"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/admin/tenants/{tenantID}/payments/kill-switch-release-requests/{requestID}:
+    get:
+      summary: Get one payment kill-switch release request
+      description: Requires payments_kill_switch:read (platform_admin, tenant_admin). A foreign tenant's id is 404, never data.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/PaymentsKillSwitchTenantID"
+        - $ref: "#/components/parameters/PaymentsKillSwitchRequestID"
+      responses:
+        "200":
+          description: The request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PaymentsKillSwitchReleaseRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/admin/tenants/{tenantID}/payments/kill-switch-release-requests/{requestID}/approve:
+    post:
+      summary: Approve and release a payment kill switch in one transaction (four-eyes, ADR 0095 §10.2.2 point 6)
+      description: >
+        Requires payments_kill_switch:release (platform_admin, tenant_admin).
+        The approver must be a DIFFERENT principal from the requester
+        (enforced by the database); self-approval is 409. Approval and the
+        release UPDATE happen in the SAME database transaction, so an
+        approval decided in an earlier transaction can never release
+        separately.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/PaymentsKillSwitchTenantID"
+        - $ref: "#/components/parameters/PaymentsKillSwitchRequestID"
+      responses:
+        "200":
+          description: The switch after release
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PaymentsKillSwitch"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: Conflict - self-approval, a stale/expired/already-decided request, or a platform-lock violation
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/admin/tenants/{tenantID}/payments/kill-switch-release-requests/{requestID}/cancel:
+    post:
+      summary: Cancel an open payment kill-switch release request
+      description: Requires payments_kill_switch:release (platform_admin, tenant_admin). Refused (409) once the request has left the open status.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/PaymentsKillSwitchTenantID"
+        - $ref: "#/components/parameters/PaymentsKillSwitchRequestID"
+      responses:
+        "204":
+          description: Cancelled
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
 
 components:
   parameters:
@@ -5040,6 +5252,21 @@ components:
       required: true
       schema: { type: string, format: uuid }
     ProviderCredentialRequestID:
+      name: requestID
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    PaymentsKillSwitchTenantID:
+      name: tenantID
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    PaymentsKillSwitchID:
+      name: killSwitchID
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    PaymentsKillSwitchRequestID:
       name: requestID
       in: path
       required: true
@@ -5101,6 +5328,64 @@ components:
         decline_reason: { type: string }
         cascadable: { type: boolean }
       required: [event_type, provider_reference, outcome, amount, asset_code]
+    PaymentsKillSwitch:
+      type: object
+      description: >
+        ADR 0095 §10.2 (migration 0105). engaged_by_scope/changed_by_scope/
+        release_request_id are DATABASE-FORCED from the acting session, never
+        client-supplied - see payment_kill_switch_session() (migrations/0105_payment_kill_switch.up.sql).
+      properties:
+        id: { type: string, format: uuid }
+        tenant_id: { type: string, format: uuid }
+        provider_scope: { type: string, description: "'*' or a provider_id" }
+        operation_scope: { type: string, enum: [deposit, payout, "*"] }
+        engaged: { type: boolean }
+        engaged_by_scope: { type: string, enum: [tenant, platform], nullable: true }
+        release_request_id: { type: string, format: uuid, nullable: true }
+        reason_code: { type: string }
+        changed_by: { type: string, format: uuid }
+        changed_by_scope: { type: string, enum: [tenant, platform] }
+        changed_at: { type: string, format: date-time }
+        version: { type: integer, format: int64 }
+        created_at: { type: string, format: date-time }
+      required: [id, tenant_id, provider_scope, operation_scope, engaged, reason_code, changed_by, changed_by_scope, changed_at, version, created_at]
+    PaymentsKillSwitchEngageRequest:
+      type: object
+      additionalProperties: false
+      description: Single-actor engage (§10.4). The tenant comes from the path only, never this body.
+      properties:
+        provider_scope: { type: string, minLength: 1 }
+        operation_scope: { type: string, enum: [deposit, payout, "*"] }
+        reason_code: { type: string, minLength: 1, maxLength: 64 }
+      required: [provider_scope, operation_scope, reason_code]
+    PaymentsKillSwitchReleaseRequestBody:
+      type: object
+      additionalProperties: false
+      description: >
+        Files the release half of four-eyes release. expected_version is
+        read from the switch's OWN current row server-side, never accepted
+        from the client.
+      properties:
+        reason_code: { type: string, minLength: 1, maxLength: 64 }
+      required: [reason_code]
+    PaymentsKillSwitchReleaseRequest:
+      type: object
+      description: ADR 0095 §10.2 release-request row. approved_by/approved_by_scope/decided_at are set only at open->approved, database-forced.
+      properties:
+        id: { type: string, format: uuid }
+        tenant_id: { type: string, format: uuid }
+        kill_switch_id: { type: string, format: uuid }
+        expected_version: { type: integer, format: int64 }
+        reason_code: { type: string }
+        requested_by: { type: string, format: uuid }
+        requested_by_scope: { type: string, enum: [tenant, platform] }
+        created_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time }
+        status: { type: string, enum: [open, approved, cancelled, expired] }
+        approved_by: { type: string, format: uuid, nullable: true }
+        approved_by_scope: { type: string, enum: [tenant, platform], nullable: true }
+        decided_at: { type: string, format: date-time, nullable: true }
+      required: [id, tenant_id, kill_switch_id, expected_version, reason_code, requested_by, requested_by_scope, created_at, expires_at, status]
     KYCMockCallback:
       type: object
       description: >
