@@ -1367,6 +1367,321 @@ This ADR is `NOT IMPLEMENTED` in its entirety. After PRH-I1, I2 and I5:
 
 ---
 
+## 21. Ledger-finance review
+
+- Reviewer: `ledger-finance` (financial-invariant owner; author of LF-C1/LF-C2, review 19 §4/§6)
+- Date: 2026-09-27. Base: HEAD `eb15ac6`, working-tree text of this ADR (sections §0–§20).
+- Scope: §4, §6, §7, §12, §14 and §16 per the sign-off list, plus the §17 LF-C2 mapping,
+  LF-Q1–LF-Q3, Amendment A7, the migration 0100 backfill and the ADR 0096 payout-gate fit.
+  Code read to check the design against reality: `internal/payments/orchestrator.go`
+  (`postDepositSuccess`, `receiveDepositCallback`, `receiveDepositReversalCallback`,
+  `postDepositReversalTombstone`), `internal/withdrawal/withdrawal.go` (`Complete`, `Fail`,
+  `LockApprovedForSubmission`), `internal/httpserver/withdrawal_handlers.go:826-850`,
+  `internal/bonus/deposit_sweep.go`, migrations 0025, 0026 and 0082 §1.2.
+
+### Verdict: **SIGN-OFF WITH CONDITIONS**
+
+The architecture is correct and closes the review 19 §6 dual-write hazard. The pattern is
+commit-intent → call without a tx → CAS evidence, with a deterministic key, one live attempt,
+the payout asymmetry and detection-only reconciliation. `SUM(DEBITS) == SUM(CREDITS)` is never
+at risk from this design, because every posting remains one `ledger.Post` in one short tx.
+
+The conditions below fix concrete defects in the ADR **text**, two of which contradict the
+schema the ADR itself defines (LF95-C1, LF95-C2). They also close convergence gaps where a real
+payment could stay unposted, or a hold could be mishandled, without any P1. **LF95-C1 to
+LF95-C12 must be folded into this ADR before it is marked ACCEPTED. LF95-C13 and LF95-C14 gate
+PRH-I1/PRH-I5 being labelled `IMPLEMENTED`.** No redesign is needed.
+
+### 21.1 LF-C2 constraints 1–9: is §17 true?
+
+| LF-C2 | Met? | Finding |
+|---|---|---|
+| #1 intent committed before the call; no tx held | **Met** | T2 (deposit) and T1p (payout) commit before phase B; gate step 2 requires the committed `claim_token`; INV-IO-1 has API-shape, runtime, static and capture enforcement. CP-D1 text is inconsistent with §5.1 (LF95-C12), but that does not affect safety. |
+| #2 deterministic persisted key; player retry resumes | **Met for new rows; not for backfilled rows** | INV-IO-3 and §5.1 are correct. Legacy intents and withdrawals were sent with `MerchantReference = intent.ID` / `withdrawal id` (`orchestrator.go:596`, `withdrawal_handlers.go:840`) and never with `pa:<id>`. A backfilled attempt with a fresh id breaks both lookup and T12 safety (LF95-C11). |
+| #3 CAS state machine, illegal/backward rejected, audited | **Met, with two defects** | §8 `NotProcessed` → "T5 with `ever_possibly_sent` still true" is forbidden by the §13.1 CHECK and by T5's own guard (LF95-C1). INV-IO-7's trigger check keys on `evidence_kind`, which lives only on the audit row, so the trigger cannot see it (LF95-C2). |
+| #4 callback resolves by merchant ref **and** provider ref; accepts `submitting` | **Met, with gaps** | Merchant-reference resolution is not bound to the verified provider. I concur with S95-C1 and extend it in LF95-C3. Success evidence without a provider reference has no ledger key. Deferred receipts do not persist `cascadable`/`decline_stage` (LF95-C4). |
+| #5 sweeper `QueryStatus` without tx; no auto-decline or cascade on unknown | **Met, with conditions** | The payout asymmetry (§4.5) is correct. The deposit authoritative-not-found rule needs tightening (LF95-C8). An adapter with no merchant-reference path at all leaves CP-D4/CP-W2 unconvergeable (LF95-C5). |
+| #6 cascade through an outbox, never inline in a webhook | **Met** | D3, §4.6 and §6.5. `handleDecline → attemptDeposit` and `resolveAmbiguous` are removed from the callback path. Restricting async cascade to non-interactive attempts is correct. |
+| #7 no posting across I/O; ADR 0082 order; authoritative read in the same tx | **Met, subject to A7 conditions** | The per-path orders in §14 are correct. The sweeper batch claim and receipt-row updates are not yet placed in the order (LF95-C9). |
+| #8 required tests, each ending with SUM and rebuild | **Mostly met** | INV-IO-13 plus §16. There is no explicit test for "player retry with the same idempotency key while the attempt is in flight → exactly one provider call, one intent". It was listed in LF-C2 #8 (LF95-C14). |
+| #9 same rule for payout dispatch | **Met, subject to the KYC gate** | T1p puts the claim and `approved→submitted` in one tx under L1. Staff double-submit gets `ErrStateConflict` before any call. The L1 lock is no longer held across `Withdraw`. The ADR 0096 C5 placement needs explicit text (LF95-C10). |
+
+### 21.2 LF-Q1: T13 posts to `player_cash`, not a suspense account
+
+**Ruling: post to `player_cash`. No new account type.**
+
+A verified, amount- and asset-matching success means the platform received the player's money,
+so `psp_clearing` must be debited and the liability is owed to the player. A suspense account
+would understate a real player liability and still need a manual release posting. That posting
+is BLOCKED (LEDGER-MANUAL-ADJ-4EYES-1), so the funds would be stranded. The refund of an
+unwanted second capture is a business process through the normal reversal flow or a four-eyes
+adjustment. It is not a reason to mis-state the ledger. This ruling holds only with LF95-C6,
+because T13 as drafted collides with three existing mechanisms:
+
+- **The immutable intent link.** `deposit_intents.ledger_transaction_id` is frozen once set
+  (migration 0082 §1.2 trigger). A second posting for the same intent cannot be recorded
+  there.
+- **Reversal resolution.** `receiveDepositReversalCallback` resolves the original deposit
+  through the intent row.
+- **The tombstone.** A reversal that arrived first leaves `(provider_id, provider_tx_id)`
+  occupied by a tombstone (`postDepositReversalTombstone`), so the late T7/T13 `ledger.Post`
+  returns an error. Under this ADR that means a tx rollback, a 5xx, and a sweeper that re-polls
+  and re-fails for ever.
+
+### 21.3 LF-Q2: Amendment A7
+
+**Accepted, with the placement and scope rules in LF95-C9.** Appending `deposit_intents` then
+`payment_attempts` after the existing L1 tables is consistent with every path in the ADR:
+
+- deposit evidence: intent → attempt → (L2) → L3 → L4;
+- payout evidence: `withdrawal_requests` → `payment_attempts` → L3 → L4.
+
+I checked that no current path holds either new table's lock and then takes an earlier L1 table.
+`internal/bonus/deposit_sweep.go` joins `deposit_intents` with plain reads, and deposit posting
+calls no bonus code.
+
+"R0" is accepted as a named step **between L0 and L1**. It is the receipt-key index-insertion
+wait. A tx takes at most one, as its first write, and nothing that already holds an L1+ lock
+ever inserts a receipt. Its deadlock-freedom depends on exactly that, so the rule is binding.
+
+The A7 text is written into ADR 0082 by `ledger-finance` when this ADR is ACCEPTED, not before.
+
+### 21.4 LF-Q3: the reconciliation-model §2.2(b) amendment
+
+**Accepted.** A bulk statement line is not verified evidence of one payment. Posting from it
+would be exactly the "unreviewed path to arbitrary credits" §2.2 warns about. Detection-only
+(INV-IO-12, MX9) plus posting only through fresh `QueryStatus` evidence in the state machine
+(T17) is the correct split. One condition applies: the §2.2 reconciliation key is the
+**ledger's** `(provider_id, provider_tx_id)`, and §12.3 matches statement lines only against
+`payment_attempts`. The stream must also join the ledger (LF95-C13). Otherwise a divergence
+between an attempt and the ledger (for example a `succeeded` attempt with no posting, or a
+`psp_clearing` posting with no attempt) goes undetected. `ledger-finance` edits
+`reconciliation-model.md` when the ADR is ACCEPTED.
+
+### 21.5 Adversarial check
+
+| Hazard | Result |
+|---|---|
+| Double credit | Safe. Guards: the attempt CAS (`succeeded` is terminal for T7), `(tenant, provider_id, provider_reference)` uniqueness on attempts, the ledger's `(tenant, provider_id, provider_tx_id)` plus idempotency-key backstops, and receipt dedupe. Residual: T13 is two real captures, by design (§21.2). Two defects, fixed by LF95-C3 and LF95-C6: a cross-provider merchant-reference callback (S95-C1), and a `created` cascade sibling that is still driven after T13. |
+| Double debit / double payout | Safe on the platform side. Guards: T1p under L1 plus `UNIQUE(withdrawal_request_id)`, T12 only with the same key and only when the provider dedupes, a payout is never re-routed, and a payout never fails without definite decline evidence. Two conditions: backfilled legacy attempts must never T12, because the provider never saw their key (LF95-C11), and a `NotProcessed` payout resend must go through T12 only (LF95-C1). Residual: T14 (a contradictory provider), which is detected and P1. |
+| Lost successful payment | Converges through a callback, a poll or reconciliation plus T17, with **one gap**: no merchant-reference echo and no merchant-reference status query, plus a crash between provider accept and phase C, leaves a deferred success receipt that is never applied and an attempt that can never be polled. LF95-C5 closes this. A second path: a tombstone collision loops for ever (LF95-C6). |
+| Lost callback | Safe. The receipt is committed in the same tx as its effect, and a failure returns 5xx. `deferred_unresolved` returns 200 only after a durable receipt. Condition: the receipt must hold every field needed to apply it later (LF95-C4), and old deferred receipts must alert (LF95-C5). |
+| Unsafe retry | Safe for new rows (INV-IO-9, T5 guard, T12 gating). Unsafe for backfilled rows (LF95-C11) and for the `NotProcessed` wording (LF95-C1). |
+| Ambiguous treated as success | Safe. INV-IO-6: `applyEvidence` is the only writer. Without `SyncSuccessPossible`, a sync success is treated as `Ambiguous`. Mismatches go to T10. |
+| Duplicate callback idempotency | Safe. The fingerprint is canonical rather than raw bytes, and a duplicate still applies idempotently. Condition: a mismatched success (T10) must be **committed**. Today's typed 409 path rolls back and leaves the attempt live. §6.2's "keep reviewed codes" must not mean "roll back the state effect" (LF95-C3). |
+| Callback before or after the internal transition | Safe. Phase C's CAS fails harmlessly after a callback applied, and deferred receipts are applied at T4/T9 in the same tx. Condition: LF95-C4. |
+| Timeout ≠ failure where the provider may have accepted | Safe. A timeout after dispatch is `Ambiguous` and a settlement timeout is T16 only. A deposit `not_found` decline must not apply to an attempt the provider once acknowledged (LF95-C8). |
+| Payout failed only on a definite decline (hold release) | Correct in design. It needs a trigger-visible evidence column (LF95-C2). No KYC outcome, operator action or timeout may release a possibly-dispatched hold (LF95-C10). M2 stays BLOCKED on HD-0095-1. M3 is safe only because `created` guarantees the payout was never sent (INV-IO-9). |
+| Reconciliation detects divergence and never writes the ledger | Never writes: correct (INV-IO-12, MX9, statement-capture test). Detects: incomplete without the ledger join (LF95-C13). |
+| Deposit "authoritative not-found" decline and late success | Accepted as money-safe for the platform, because a late success still posts via T13. Conditions in LF95-C8. |
+| Backfill (0100) | Defective as drafted (LF95-C11): intents in progress without a reference are skipped, legacy merchant references are lost, T12 is possible on keys that were never sent, `reversed` withdrawals are omitted, and the payout `payment_method` does not exist on `withdrawal_requests`. |
+| The 14 crash points | CP-D2–D8 and CP-W1–W6 converge as stated, subject to LF95-C5 for CP-D4/CP-W2 without echo. CP-W1 is correctly never `Fail`: a `submitting` attempt with `ever_possibly_sent=false` is **not** proof it was not sent, because the flag is only written in phase C. CP-D1 contradicts §5.1 (LF95-C12). |
+| ADR 0096 payout KYC gate | Fits: T1p is "the last commit before the first `Withdraw`". Re-gating the sweeper T2 re-claim, gating T12, and the no-release-after-possible-dispatch rule must be written into this ADR (LF95-C10). Checked against the working-tree ADR 0096 (revision in progress). Re-check once that revision lands. |
+
+### 21.6 Conditions
+
+**LF95-C1 (ADR defect: §8 `NotProcessed` contradicts INV-IO-9).** "Treated as T5, but
+`ever_possibly_sent` stays true" violates `CHECK (state <> 'created' OR NOT ever_possibly_sent)`
+and T5's own guard. Replace it with the following:
+
+- If the vendor documents that the request left no trace, the outcome is `NotSent` and takes T5.
+- Otherwise the outcome takes T6 (`ambiguous`, `ever_possibly_sent=true`, `next_action_at=now()`).
+  A resend is **only** T12, which requires `IdempotentSubmission`, for deposits **and** payouts.
+  Delete "Yes for deposits".
+- A `NotSent` result on a T12 resend (`ever_possibly_sent` already true) returns to `ambiguous`
+  via T6. It never takes T5.
+
+Add `submitting→ambiguous` on NotSent-after-resend explicitly to §4.3.
+
+**LF95-C2 (ADR defect: INV-IO-7 is not trigger-enforceable).** Add
+`last_evidence_kind TEXT NOT NULL` to `payment_attempts`, set in the same UPDATE as every state
+change. The guard trigger enforces these rules on it:
+
+- `*→declined` for `operation='payout'` requires `last_evidence_kind ∈ {sync, callback,
+  query_status}`;
+- any `→declined` for a deposit requires `≠ operator`;
+- `→succeeded` requires `∈ {sync, callback, query_status}`.
+
+The audit record carries the same value.
+
+**LF95-C3 (resolution binding; concur with S95-C1 and extend it).**
+
+- Merchant-reference resolution matches only `attempt.provider_id = verified provider_id`, as
+  S95-C1 requires.
+- If the provider reference and the merchant reference are both present and resolve to
+  **different** attempts, or if the evidence's provider reference is already bound to another
+  attempt, the outcome is an `anomaly` receipt plus P1, with no state change and no posting.
+  This must be decided **before** any write, so it can never surface as a unique violation
+  followed by a 5xx redelivery loop.
+- A mismatched success (T10) is **committed** in the domain tx together with its receipt,
+  whatever HTTP code §6.2 returns. The state effect is never rolled back to produce a 409.
+
+**LF95-C4 (evidence completeness).**
+
+- T7/T13 require a non-empty `provider_reference` in the evidence, or an already-set
+  `attempt.provider_reference`. That value is the deposit ledger `provider_tx_id`. Success
+  evidence without one is treated as `ambiguous` plus a poll.
+- `payment_provider_events` must persist every field `applyEvidence` consumes:
+  - `cascadable`;
+  - `decline_stage`;
+  - `decline_reason` (bounded).
+- Add `CHECK (outcome <> 'succeeded' OR (amount IS NOT NULL AND asset_code IS NOT NULL))`.
+- A deferred receipt that lacks a required field can never be applied as success or as a
+  cascade.
+
+**LF95-C5 (no unconvergeable success).**
+
+- The manifest gains `CallbackEchoesMerchantReference`.
+- Registration refuses a production-eligible adapter supporting deposit or payout unless it has
+  `CallbackEchoesMerchantReference = true` **or** `StatusQuery = by_provider_or_merchant_reference`.
+- Verified deferred receipts still unapplied after the resolution horizon raise a P1. The §12
+  stream reports them as a platform-side kind (reuse `pay_unresolved`, or add one) so a lost
+  success is never silent.
+
+**LF95-C6 (T13 and posting integrity; conditions of the LF-Q1 ruling).**
+
+- (a) Each deposit posting is linked on `payment_attempts.ledger_transaction_id`. The intent's
+  `ledger_transaction_id` is written only while it is NULL; the 0082 trigger already forbids
+  repointing it.
+- (b) §5.4 reversal resolution uses `payment_attempts (provider_id, provider_reference)` →
+  **the attempt's** `ledger_transaction_id`, never the intent's. Otherwise a reversal of the
+  second capture reverses the first.
+- (c) The T13 tx, holding intent → attempt locks, also moves any sibling `created` attempt to
+  `rejected` (T3, `intent_succeeded`). T2's CAS predicate adds `NOT EXISTS (succeeded attempt
+  for the same intent)`. The race in which a sibling is already `submitting` is a stated
+  residual under the same P1.
+- (d) If T7/T13 finds a tombstone on `(provider_id, provider_reference)`, the attempt moves
+  terminally to `disputed` (`reversal_tombstone_precedes_success`, P1), with no posting and no
+  error. It is never a rollback/5xx/re-poll loop. Add this cell to §4.4.
+
+**LF95-C7 (intent projection).** When an intent has a `disputed` attempt and no `succeeded`
+attempt, its status is `ambiguous`, never `declined`. A `declined` intent invites the player to
+retry while funds may have been captured.
+
+**LF95-C8 (authoritative not-found, §4.5).** A deposit may take T8 on `not_found` only when all
+of these hold:
+
+- (a) `accepted_at IS NULL AND provider_reference IS NULL`. The provider never acknowledged the
+  attempt. Otherwise `not_found` means T11/`ambiguous`.
+- (b) Δ is measured from the **latest** send. T12 must update a `last_sent_at`.
+- (c) Registration refuses `MerchantLookupAuthoritativeAfter < lease + CallTimeout`, so a lookup
+  cannot outrun a call still in flight.
+- (d) The resulting decline carries `cascadable=false`. This is enforced in code, not only
+  stated in §4.6.
+
+A late success after that decline is T13 (posted plus P1). Covered by §16.2 item 9.
+
+**LF95-C9 (A7 scope rules, binding for acceptance).**
+
+- (a) R0 sits between L0 and L1. A tx takes at most one, as its first write, only in a callback
+  tx or in a separate-tx rejection/`unsupported_event` record.
+- (b) Receipt one-shot UPDATEs (`attempt_id`, `applied_at`) happen only while the tx holds the
+  attempt's parent **and** attempt locks, in ascending receipt id. The sweeper backstop locks the
+  parent and the attempt first.
+- (c) Every tx that locks a `payment_attempts` row locks its parent (`deposit_intents` or
+  `withdrawal_requests`) first, including T3, T5 and per-item phase C.
+- (d) The §7.2 batch claim tx is the sole exception. It uses `FOR UPDATE SKIP LOCKED` only,
+  writes only lease columns and T2, never locks or writes a parent row, and never waits on a
+  lock. This works because the lease is ordered by `next_action_at`, not by id, and it is safe
+  only because nothing in the claim tx blocks.
+- (e) The §16.2 item 16 harness adds the sweeper claim racing a callback and phase C on the same
+  intent and the same withdrawal.
+
+**LF95-C10 (ADR 0096 payout KYC gate fit; my ADR 0096 C4/C5, binding here).**
+
+- (a) §5.2 phase A order: approver eligibility → L1 `withdrawal_requests` → **KYC gate** →
+  kill-switch predicate → T1p. On deny, `DenyForCompliance` commits from `approved` (a hold
+  reversal via the `Reject` shape, `kyc_denied`), no attempt is created and no call is made.
+  List it in §4.3/§4.7 as a pre-dispatch withdrawal transition.
+- (b) The sweeper's T2 re-claim of a payout attempt in `created` (after T5) **re-runs the gate**
+  in the claim path. On a non-pass there is no claim and no call, and the attempt stays
+  `created`, escalated (T16-style) to a compliance case. The hold is released **only** by M3
+  with reason `kyc_denied`. This is safe only because of INV-IO-9, and it is never automated.
+  Because of LF95-C9(d), the gate read runs in a per-item tx that locks the parent first, not in
+  the batch claim.
+- (c) T12 for a payout re-runs the gate. On a non-pass there is no resend and the attempt stays
+  `ambiguous`, resolvable only by poll or callback.
+- (d) Once T1p has committed, no KYC outcome ever triggers `Fail`, a hold reversal or any
+  automated release. Only T8 evidence or M3-from-`created` can.
+- (e) A deposit T2 re-claim (player resume or sweeper) re-runs the RG and KYC deposit gates
+  (ADR 0096 C4(b)).
+- (f) Re-verify these rules against ADR 0096's revised text once that revision lands.
+
+**LF95-C11 (migration 0100 backfill).**
+
+- (a) Create an attempt for **every** intent whose status is non-terminal (`pending`,
+  `ambiguous`), whether or not it has a `provider_reference`. With no reference, the attempt
+  state is `ambiguous`. If `provider_id` is NULL on a non-terminal intent, the pre-flight aborts
+  and lists the ids.
+- (b) The backfilled attempt's `id` is the parent's id (intent id or withdrawal id), so
+  `merchant_reference = id::text` equals the value actually sent (INV-IO-3 holds).
+- (c) Add a `legacy_backfill BOOLEAN` column. T12 is forbidden when it is true (by trigger),
+  because the provider never received `pa:<id>`.
+- (d) Withdrawal mapping is explicit:
+  - `submitted` → `pending` (the reference is already set);
+  - `completed` → `succeeded`;
+  - `failed` → `declined` with `last_evidence_kind='sync'` marked legacy;
+  - `reversed` → `succeeded`. Include `reversed`; it was omitted.
+- (e) `withdrawal_requests` has no `payment_method`. Backfilled payouts take an explicit
+  `'legacy_unknown'` sentinel (or a column nullable only when `legacy_backfill`); nothing is
+  invented.
+- (f) Intents with status `failed` map to `declined`. An intent in `succeeded` with a NULL
+  `ledger_transaction_id` aborts the pre-flight. `ledger_transaction_id` is copied.
+- (g) The backfill writes no ledger row. A post-check asserts SUM equality and
+  projection == rebuild unchanged, and that every non-terminal intent or `submitted` withdrawal
+  has exactly one live attempt.
+
+This backs QA's §24 item 2.
+
+**LF95-C12 (text consistency).** CP-D1 says "attempt `created`" after phase A, but §5.1 puts T1
+and T2 in the same phase A tx. Either split T2 into its own short tx (then CP-D1 stands) or
+restate CP-D1 as `submitting` with the CP-D2 outcome.
+
+**LF95-C13 (reconciliation ledger join; PRH-I5).** The match tx also checks the following, all
+detection-only:
+
+- every `succeeded` attempt has exactly one ledger transaction whose `(provider_id,
+  provider_tx_id)` is the deposit's `provider_reference`, or the payout's Step B settlement
+  reference;
+- every `deposit`/`withdrawal_completed` ledger transaction in the window maps to exactly one
+  `succeeded` attempt;
+- payout statement lines match on either the instruction reference or the settlement reference.
+
+Any miss is a P1 mismatch.
+
+**LF95-C14 (tests; PRH-I1-i additions, each ending with INV-IO-13).**
+
+- Player retry with the same key, concurrent with an in-flight `submitting` attempt: one
+  intent, and a MOCK call count of 1.
+- T13 with a `created` sibling: the sibling is rejected and never called.
+- A tombstone before success leads to `disputed` with no loop.
+- A deferred **decline** receipt applied at T4 cascades per the persisted `cascadable`.
+- A disputed attempt leaves the intent `ambiguous`.
+- The LF95-C3 cross-attempt reference conflict gives `anomaly` with no 5xx.
+- The LF95-C10 (a)–(c) KYC cases.
+- The LF95-C11 fixtures: legacy T12 refused by trigger, legacy merchant-reference callback
+  resolves, a non-terminal intent without a reference is backfilled.
+- A mutation removing the LF95-C2 trigger check must fail item 17.
+
+**Recommendations (non-blocking).**
+
+- **LF95-R1.** A `payments`-owned job, **not** the reconciliation stream, sets
+  `next_action_at=now()` (a T17 equivalent) on attempts named by a new `pay_status_mismatch`,
+  so a dropped success converges without waiting for an operator. Reconciliation itself still
+  writes nothing.
+- **LF95-R2.** `bonus-engine` should confirm that a T13 second capture is intentionally not
+  bonus-eligible. `deposit_sweep.go` finds deposits via `deposit_intents.ledger_transaction_id`,
+  which LF95-C6(a) keeps pointing at the first posting.
+- **LF95-R3.** The §9.2 `Amount int64` carries forward the existing platform-wide int64 amount
+  path (the same as `ledger.EntryInput`). This is not new here, but it is noted for any
+  18-exponent asset routed through `PaymentProvider`. Custody-asset precision stays with ADR 0008
+  and its open decisions.
+
+Custody, settlement-timing and HD-0095-1 matters are not ruled on here. M1/M2 remain BLOCKED.
+Everything in this ADR remains `NOT IMPLEMENTED`.
+
+---
+
 ## 24. QA test-plan review
 
 **Verdict: CONFIRMED WITH CHANGES.**

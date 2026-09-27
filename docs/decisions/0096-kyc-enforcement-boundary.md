@@ -310,6 +310,18 @@ left to "the obvious query," because the obvious query is the bug:
   amount) and are never trusted as the sole basis for a cumulative
   comparison — only as the amount of the transaction being gated right
   now, checked against a total the server computed independently.
+  **Arithmetic (ledger-finance C6, §12.2):** `threshold_minor_units` is
+  compared against a computed total using exact integer arithmetic only —
+  SQL `NUMERIC` in the query itself, or Go `big.Int`/`int64` with an
+  explicit overflow check if the comparison ever crosses into
+  application code — **never `float64`**, per CLAUDE.md's own money-
+  representation rule. A threshold is compared **only within the same
+  `asset_code`** as the row that defines it; aggregating cumulative
+  deposits across different assets would need an FX or
+  `ConversionOperation` basis (ADR 0007/0037), which is an explicit
+  extension of HD-KYC-1, not an implicit sum this mechanism performs on
+  its own. Whether reversed/charged-back deposits net off the cumulative
+  figure is likewise part of HD-KYC-1's content, not decided here.
 - **(f) Cross-tenant negative test shape.** Any test proving cross-tenant
   isolation must use a genuinely valid token for tenant B carrying tenant
   A's `player_account_id`, and assert the caller-visible result is a
@@ -513,6 +525,16 @@ resolution is a third trigger kind, distinct from both "structural"
   before play, and at what tier, is not decided here — recorded as its
   own human decision, tied to HDR-J-6 and legal review, independent of
   HD-KYC-1/2/3.
+- **No new provider-visible outcome class (casino review condition 1,
+  §11).** A KYC-required decline at the casino/sportsbook bet call site
+  is a fifth instance of the *existing* `OutcomeDeclined`/`DeclineReason`
+  shape `postBet` already uses uniformly for the RG denial, the Risk
+  denial, the insufficient-funds denial, and the tombstoned-original
+  denial — **not** a new provider-visible outcome variant. The
+  `DeclineReason` value is `decision.Code` (e.g. `"kyc_required:pending"`,
+  matching §6's own convention for deposit/withdrawal), and no provider
+  adapter needs new handling: adapters already treat `DeclineReason` as
+  an opaque string and branch only on `OutcomeDeclined` itself.
 
 ### 3.6 Migration 0101 — sketch
 
@@ -844,17 +866,29 @@ registry's KYC-ENFORCE-1 row already states).
   caller (`db.WithTenant`), exactly like `rg.EvaluateEligibility`/`risk.
   Evaluate` — it never opens its own connection or scope.
 - **Performance / lock class.** `EvaluateEnforcement` issues plain
-  `SELECT`s (`kyc_verifications` by `(tenant_id, brand_id,
-  player_account_id)`, `kyc_enforcement_policies` by
-  `(licensing_jurisdiction_id, trigger_type)` filtered to `status =
-  'active'`, and — for the structural first-withdrawal rule — a `SELECT
-  EXISTS(... WHERE state = 'completed')` against `withdrawal_requests`
-  scoped to the wallet). **No row lock is taken by this function** — it
+  `SELECT`s only: `kyc_verifications`' **latest** row by
+  `(tenant_id, brand_id, player_account_id)` ordered `created_at DESC,
+  id DESC` (§2.6(a)) for `passed`/`pending`/`failed`, and — for
+  `deposit`/`casino_play`/`sportsbook_play` only —
+  `kyc_enforcement_policies` by `(licensing_jurisdiction_id,
+  trigger_type)` filtered to `status = 'active'`. **Revised (the original
+  sketch's `SELECT EXISTS(... completed withdrawal ...)` query is
+  removed):** because §3.2 point 1 no longer conditions the withdrawal
+  rule on withdrawal history at all (security condition 1 / ledger-finance
+  C3 — it is unconditionally required, not a one-time exemption),
+  `withdrawal_hold`/`withdrawal_payout` need **no policy-table lookup and
+  no `withdrawal_requests` history query** — they read only the player's
+  latest `kyc_verifications` row (scoped by `PersonID`, §2.2) and apply
+  §2.3's mapping directly, which is simpler and cheaper than the original
+  design, not just safer. **No row lock is taken by this function** — it
   reads the same way `rg.EvaluateEligibility`'s restriction lookup and
   `risk.Evaluate`'s rule lookup already do, so it introduces no new
   entry into ADR 0082's canonical lock-class ordering (L0–L4); it composes
   safely wherever RG/Risk already compose today, at the position §2.4
-  states, before the caller's own ledger lock is taken.
+  states, before the caller's own ledger lock is taken. Casino/sportsbook
+  reviewed this specific claim empirically (§11: verified the insertion
+  point precedes `GetOrCreateAccounts`/the pre-lock balance check in
+  current code) and confirmed it holds as designed.
 - **No provider I/O.** `EvaluateEnforcement` never calls a `KYCProvider`
   — it reads the platform's own already-materialized verification state.
   This is the same separation ADR 0028 §4 already establishes (the
@@ -862,69 +896,254 @@ registry's KYC-ENFORCE-1 row already states).
   path; enforcement only ever reads the result). It therefore carries
   none of F-POOL-2's outbound-I/O-inside-a-transaction risk and needs no
   ADR-0095-style restructuring.
-- **Concurrency.** Because no lock is taken and the function is a pure
-  read plus comparison, two concurrent calls for the same player can run
-  concurrently with no serialization need beyond what the domain's own
-  transaction already provides — a KYC status change (a staff approval,
-  a provider callback landing) that commits between two concurrent
-  deposit attempts is visible to whichever attempt's transaction starts
-  after that commit, exactly like every other read-then-decide check in
-  this codebase; no new race exists that RG/Risk do not already carry
-  today for the identical pattern.
+- **Concurrency and TOCTOU (ledger-finance C4, §12.2 — accepted, and
+  explicitly bounded, not ignored).** Because no lock is taken and the
+  function is a pure read plus comparison, two concurrent calls for the
+  same player can run concurrently with no serialization need beyond what
+  the domain's own transaction already provides — a KYC status change (a
+  staff approval, a provider callback landing) that commits between two
+  concurrent deposit attempts is visible to whichever attempt's
+  transaction starts after that commit, exactly like every other
+  read-then-decide check in this codebase; no new race exists that
+  RG/Risk do not already carry today for the identical pattern. Under
+  READ COMMITTED, a revocation that commits **after** `EvaluateEnforcement`
+  reads `kyc_verifications` but **before** the gated transaction itself
+  commits is not seen by that transaction. This window is accepted, on
+  three conditions ledger-finance's C4 states and this ADR adopts as
+  binding: (a) the gate result is always computed inside the transaction
+  that performs the gated effect, never passed between transactions
+  (§2.5 already requires this); (b) every re-entry — a retry, the ADR
+  0095 sweeper, a resubmission after rollback — re-evaluates fresh, never
+  reuses a prior decision; (c) the window is bounded to at most one
+  transaction's duration, documented as such rather than left implicit.
+  Closing the window completely (e.g. `FOR SHARE` on the verification
+  row) would add a new lock class to ADR 0082 and a contention point
+  between KYC callbacks and payouts for a risk this ADR judges
+  disproportionate; a revocation that lands inside the window is handled
+  like any other post-dispatch compliance finding (§12.2 C5, immediately
+  below).
+- **Coordination with ADR 0095 (ledger-finance C5, §12.2 — binding on
+  PRH-D1/the payments-domain owner of that ADR).** ADR 0095
+  (`docs/decisions/0095-provider-io-transaction-boundary-and-payment-
+  contract.md`) restructures withdrawal payout dispatch into Phase A
+  (claim, in a DB transaction) → Phase B (the outbound `Withdraw` call,
+  with no transaction held) → Phase C (`applyEvidence`). Read against
+  ADR 0095 §5.2 and §4.3 (transition `T1p`, `∅→submitting`, "withdrawal
+  `approved→submitted` in the same tx" under L1 `FOR UPDATE`): the KYC
+  gate for `withdrawal_payout` (row #5) must be evaluated inside **Phase
+  A, before `T1p` commits** — the same L1-locked transaction that claims
+  the request for dispatch, which is exactly "the last transaction that
+  commits before the first outbound `Withdraw` call for that intent."
+  Concretely, this ADR requires ADR 0095's Phase A to include the KYC
+  check alongside its existing approver-eligibility check and L1 lock,
+  in that transaction, before `T1p`'s `CAS` runs. If ADR 0095's sweeper
+  ever claims and dispatches a request that was left in a
+  "prepared, not yet sent" state (rather than dispatching synchronously
+  within the same request), the sweeper's own claim transaction must
+  re-run the KYC gate before that first send — the gate is never
+  satisfied once and cached across a later, separate dispatch attempt.
+  **After a request has possibly reached the provider** (ADR 0095 states
+  `submitting`/`pending`/`ambiguous`/`disputed`, or any state ADR 0095's
+  own `ever_possibly_sent` flag has set), **no KYC outcome may trigger a
+  hold reversal or any other automated release** — only provider evidence
+  (ADR 0095's `applyEvidence`, transitions T7/T8) may resolve the
+  attempt. `DenyForCompliance` (§12.2 C2) is therefore legal **only from
+  `approved`** (pre-dispatch) — never from `submitting`, `pending`,
+  `ambiguous`, `disputed`, `succeeded`, or `declined`. ADR 0095's
+  transition table must list `DenyForCompliance`
+  (`approved→rejected`) among its pre-dispatch terminal transitions and
+  must not permit it once `T1p` has committed, matching the same
+  reasoning ADR 0095 §4.7 already gives for why `Reject`/`Cancel` race
+  the claim on the same L1 row rather than acting on a claimed request. A
+  KYC revocation that lands after dispatch is a compliance case, not a
+  ledger action — reversing a hold while the PSP might still pay would
+  create a real double-spend (the hold is restored to `player_cash` and
+  the payout also completes).
 
 ---
 
 ## 6. API / OpenAPI exposure
 
-- **Staff read of decisions.** New route `GET /v1/admin/kyc/enforcement-
-  decisions?player_account_id=...` under `StaffRoleCompliance` /
-  `StaffRolePlatformAdmin` (mirrors the existing `PermVerificationReview`
-  precedent), tenant-scoped, returns `kyc_enforcement_decisions` rows
-  (outcome, operation, matched_trigger, policy_version, decided_at) —
-  never the underlying `kyc_verifications.reason` (that stays governed by
-  HD-10.3-3's existing bound/sanitized staff-only exposure, unchanged by
-  this ADR).
-- **Players see status only (HD-10.3-3, extended, not reopened).** No
-  new player-facing field is added anywhere for *why* a deposit or
-  withdrawal was denied beyond what already exists: a denied deposit
-  already surfaces as `DepositIntentDeclined` with a bounded internal
-  `reason` string (`"kyc_required:pending"` style, mirroring
-  `"rg_ineligible:"+eligibility.Code}` at `orchestrator.go:558`) — never
-  provider text, never a `kyc_enforcement_decisions` id, never a
-  `matched_trigger` value. A denied withdrawal request/payout dispatch
-  follows the identical convention: the player-facing response states
-  the withdrawal was declined and the request's own state
-  (`rejected`), never a compliance reason code beyond what
-  `withdrawal_handlers.go` already exposes today for any other rejection.
-- **OpenAPI.** `platform-api.yaml` gains: the new admin decisions route;
-  no change to any player-facing schema (deposit/withdrawal response
-  shapes already carry a generic decline reason field, reused, not
+- **Staff read of decisions — fully specified per security condition 7
+  (§13).** `GET /v1/admin/kyc/enforcement-decisions?player_account_id=...`:
+  - Tenant comes **only** from the authenticated staff context
+    (`db.WithTenant(staff.TenantID)`) — never from a query parameter or
+    any client-supplied value.
+  - Roles: `StaffRoleCompliance` and `StaffRolePlatformAdmin` only
+    (mirrors the existing `PermVerificationReview` precedent); no other
+    tenant-bound role may read it.
+  - A `player_account_id` belonging to a different tenant returns the
+    same 404 a nonexistent id would, matching this codebase's established
+    "never confirm existence of a resource outside the caller's own
+    authorization" pattern (ADR 0031 §8, ADR 0029 §4a).
+  - A platform-admin **cross-tenant** read (a platform_admin looking at a
+    tenant it does not itself belong to) requires an explicit tenant path
+    parameter, distinct from the ordinary tenant-scoped route, and that
+    access is itself audited (actor, target tenant, target player, IP).
+  - Pagination is keyset on `(decided_at, id)`, with a server-enforced
+    maximum page size and a default applied when the caller supplies
+    none — never unbounded, never offset-based.
+  - Response fields are exactly `outcome`, `operation`, `matched_trigger`,
+    `policy_version`, `decided_at` (the `kyc_enforcement_decisions`
+    columns already listed in §3.6) — never `kyc_verifications.reason`,
+    never person/document data, never an amount. `reason` stays governed
+    by HD-10.3-3's existing bound/sanitized staff-only exposure, unchanged
+    by this ADR.
+  - **Required tests:** a valid tenant B token requesting a tenant A
+    player gets 404 and zero rows; a tenant-bound role other than
+    `compliance`/`platform_admin` gets 403; the cross-tenant
+    platform-admin path is audited.
+- **Players see status only (HD-10.3-3, extended per security condition
+  8, §13 — not reopened).** No new player-facing field is added anywhere
+  for *why* a deposit or withdrawal was denied beyond what already
+  exists, and the following are explicit, binding exclusions from every
+  player-reachable surface: `matched_trigger`, any policy row id,
+  `policy_version`, or anything from which a player could infer that a
+  cumulative-deposit trigger fired, or at what value (revealing the
+  threshold's existence invites structuring around it — the same reason
+  §2.6(e) requires server-side, not client-visible, cumulative
+  computation). A denied deposit surfaces as `DepositIntentDeclined` with
+  a bounded internal `reason` string (`"kyc_required:pending"` style,
+  mirroring `"rg_ineligible:"+eligibility.Code}` at
+  `orchestrator.go:558`) — if this string is ever returned verbatim to a
+  player, `<code>` must be drawn from a **closed enum** that reveals no
+  more than the player's own verification status (`pending`/`failed`),
+  never a policy internal. `unavailable` is surfaced to the player as a
+  generic, retryable failure — never as a distinct "compliance system
+  down" message. A denied withdrawal request/payout dispatch follows the
+  identical convention: the player-facing response states the withdrawal
+  was declined and the request's own state (`rejected`), never a
+  compliance reason code beyond the closed enum above.
+  `kyc_enforcement_policies` remains readable platform-wide at the
+  database layer (`USING (true)`, §3.6) — that is acceptable because its
+  content is not tenant-secret, but no player-reachable API may ever
+  return its rows or derive a response from them directly.
+- **Dormancy observability (security condition 9, LOW, §13 — designed,
+  not deferred).** A platform-admin-only read,
+  `GET /v1/admin/kyc/enforcement-policies/dormant-jurisdictions`, lists
+  every licensing jurisdiction with at least one active tenant and **no**
+  `active` `kyc_enforcement_policies` row for a given `trigger_type` —
+  computed as `SELECT DISTINCT t.licence_jurisdiction_id, tt.trigger_type
+  FROM tenants t CROSS JOIN (VALUES ('cumulative_deposit'), ('edd_amount'),
+  ('registration_tier')) tt(trigger_type) WHERE NOT EXISTS (SELECT 1 FROM
+  kyc_enforcement_policies p WHERE p.licensing_jurisdiction_id =
+  t.licence_jurisdiction_id AND p.trigger_type = tt.trigger_type AND
+  p.status = 'active')` (illustrative; the real query additionally scopes
+  to tenants with live/active status). This supports the launch decision
+  security's ruling names (§3.2 point 2) by making "unconfigured" visible
+  to operations rather than an implicit, undiscoverable state — a human
+  reviewing this report before go-live is how HD-KYC-1/2/3/8 actually get
+  closed rather than silently forgotten.
+- **OpenAPI.** `platform-api.yaml` gains: the new admin decisions route
+  (with its keyset pagination parameters and exact response schema), the
+  cross-tenant platform-admin variant, and the dormancy report route; no
+  change to any player-facing schema (deposit/withdrawal response shapes
+  already carry a generic, closed-enum decline reason field, reused, not
   widened).
 
 ---
 
 ## 7. Test plan
 
-| Class | What it proves | Enforcement point(s) |
-|---|---|---|
-| Unit | Outcome mapping (§2.3) is exhaustive and exact; `not_required` vs `passed` vs `pending` vs `failed` vs `unavailable` for every combination of policy-row-present/absent × verification-status | `EvaluateEnforcement` in isolation |
-| Unit | Structural first-withdrawal rule fires with zero policy rows present | #3, #5 |
-| Integration | Deposit initiation: RG-denied player never reaches KYC evaluation (order preserved); KYC-denied player never reaches `attemptDeposit`/the provider | #1 |
-| Integration | Withdrawal request: KYC-denied player's hold is never posted (transaction rolls back to before the ledger lock, mirroring `TestRequestWithdrawal_InsufficientFundsRejectedAndAtomic`'s atomicity proof) | #3 |
-| Integration | Withdrawal payout dispatch: an approved-but-since-KYC-rejected request is denied at `LockApprovedForSubmission`, never reaching `MarkSubmitted`/the provider — the actual "before payout submission" backstop | #5 |
-| Integration | **Revised per security condition 1 / ledger-finance C3** (replaces the original, defective "exempt after one prior completed withdrawal" row): a `Person` with one prior `completed` withdrawal whose *current* latest verification is `rejected`/`expired` is denied on a second withdrawal request and at payout dispatch — the structural rule never expires after a first pass, and a jurisdiction's `edd_amount` trigger (if active) still applies independently, additively, on top of it | #3, #5 |
-| Integration | The structural rule is scoped per `Person`, not per wallet or `PlayerAccount`: a `rejected`/`expired` player cannot bypass it by opening a new wallet or a second `PlayerAccount` under the same `Person` | #3, #5 |
-| RLS | A `db.WithPlayerScope` connection cannot read another tenant's `kyc_enforcement_decisions`; a tenant-scoped write attempt to `kyc_enforcement_policies` is rejected (platform-wide write only) | schema |
-| Concurrency | Two concurrent deposit attempts racing a staff KYC approval that commits between them each see a consistent, individually-correct outcome (no torn read) — mirrors `TestRequestWithdrawal_ConcurrentRequestsOnlyOneSucceeds`'s pattern applied to a read-then-decide check | #1, #3, #5 |
-| Negative/security | A client-supplied field cannot influence `Outcome` (fuzz `EnforcementParams` for any player-controllable path into the decision); cross-tenant `player_account_id` cannot be evaluated against a different tenant's `kyc_verifications` row | all |
-| Negative/security | `unavailable` (a forced DB error / malformed policy row in a test harness) denies at every enforcement point, with no operation-specific bypass | all |
-| Fail-closed | A migration 0101 table with an `active` policy row missing `legal_review_reference` is rejected by the CHECK constraint before it can ever govern a decision | schema |
-| Audit | Every `EvaluateEnforcement` call at every enforcement point writes exactly one `kyc_enforcement_decisions` row and one `audit.Record` call, in the same transaction as the domain effect it gated, with no PII/document content in either | all |
-| SAR-adjacent | `kyc_enforcement_decisions` plus `kyc_verifications`/`audit_log` together give a compliance reviewer a complete, joinable trail of "what was decided, when, against what policy version" for any player — proves the audit design is queryable, not just present | staff tooling |
-| Integration | Casino/sportsbook bet placement with **no active `play` policy**: KYC evaluates `not_required` and never denies, RG/Risk denials still short-circuit before KYC runs, existing RG/Risk regression suites pass unmodified | #7, #10 |
-| Integration | Casino/sportsbook bet placement with an **active `play` policy** (test-fixture row, clearly marked per §3.7): `passed` allows, `pending`/`failed`/`unavailable` all deny with no bypass, and a `casino_play` policy never governs `sportsbook_play` or vice versa (the `play_operation` column is enforced, not advisory) | #7, #10 |
-| Concurrency/lock | Placing a bet takes no additional row lock from the new KYC step — proved by running the existing `internal/casino`/`internal/sportsbook` lock-order harnesses (ADR 0082) unmodified against the amended orchestrator and confirming no new lock-class entry appears | #7, #10 |
-| Performance | The `not_required` (no active policy) path costs one indexed lookup per bet and no measurable regression against the existing `postBet`/sportsbook bet-placement latency baseline | #7, #10 |
+Revised to close every QA gap (§10 items 1–7), every ledger-finance C7
+test, and every security-required test named against a specific
+condition in §13 — each row below states which review requirement it
+closes, so none is asserted once generically and assumed to generalize
+(QA gap 1).
+
+### 7.1 Unit
+
+| Test | Closes |
+|---|---|
+| Outcome mapping (§2.3) is exhaustive: every `(policy-row-present/absent) × (verification-status, including expired)` combination maps to exactly one of the five outcomes, with a mutation pass over `EvaluateEnforcement`'s branches (a mutant that flips any branch must turn a test red) | QA gap 5 |
+| Latest-row selection (§2.6(a)): an older `approved` row never satisfies the check when a newer row for the same player is `pending`/`rejected`/`expired`; ordering is `created_at DESC, id DESC` | security condition 4(a) |
+| Expiry (§2.6(b)): a stored `status = 'approved'` row with `expires_at <= now()` evaluates as `failed`, not `passed` | security condition 4(b) |
+| A forced query/DB error returns `unavailable`, never `not_required` — "no rows" and "query failed" are asserted as distinct code paths, not just distinct outcomes | security condition 4(c) |
+| `LicensingJurisdictionID` selects the policy; a manufactured/mismatched `JurisdictionCode`-shaped input (if any residual field exists at implementation time) has zero effect on the outcome | security condition 4(d) |
+| Threshold comparison uses `NUMERIC`/`big.Int` exact arithmetic, cross-checked against a hand-computed value at the `int64` boundary; a comparison across two different `asset_code`s is rejected/never attempted | ledger-finance C6 |
+| Migration 0101 CHECK constraints: manual true/false checklist covering every `trigger_type`/column-shape combination (including `play`/`play_operation`), and the `status <> 'active' OR legal_review_reference IS NOT NULL` constraint — the SQL CHECK is exactly the construct this project already treats as "no mutation tool applies, use a manual branch-coverage checklist" | QA gap 5 |
+
+### 7.2 Integration
+
+| Test | Closes |
+|---|---|
+| Deposit initiation: RG-denied player never reaches KYC evaluation (order preserved); a `pending`-outcome KYC denial, a `failed`-outcome denial, and an `unavailable`-outcome denial are each exercised by name (not asserted once and assumed to generalize) and never reach `attemptDeposit`/the provider | §1 row #1; QA gap 1 |
+| Withdrawal request: a `pending` KYC denial, a `failed` KYC denial, and an `unavailable` KYC denial are each exercised by name; in every case no `withdrawal_requests` row is inserted and no ledger effect is posted, and the decision + audit rows are **committed** (not rolled back — the C1 fix, verified empirically, not just designed) | §1 row #3; ledger-finance C1, C7; security condition 5; QA gap 1 |
+| Withdrawal payout dispatch: an approved-but-since-`rejected`/`expired` request is denied by `DenyForCompliance` at the `LockApprovedForSubmission`/L1 boundary, never reaching `MarkSubmitted`/the provider; the reversal posts exactly one `withdrawal_rejected` transaction reversing the original hold, `SUM(DEBITS)==SUM(CREDITS)` holds, and the decision + audit rows are committed with the reversal in the same transaction | §1 row #5; ledger-finance C1, C2, C7 |
+| **Replaces the original, defective "exempt after one prior completed withdrawal" row (security condition 1 / ledger-finance C3):** a `Person` with one prior `completed` withdrawal whose *current* latest verification is `rejected`/`expired` is denied on a second withdrawal request and at payout dispatch — the structural rule never expires after a first pass, and a jurisdiction's `edd_amount` trigger (if active) still applies independently, additively, on top of it | §1 rows #3/#5 |
+| The structural rule is scoped per `Person`, not per wallet or `PlayerAccount`: a `rejected`/`expired` player cannot bypass it by opening a new wallet or a second `PlayerAccount` under the same `Person` | §1 rows #3/#5; ledger-finance C3 |
+| A KYC revocation committed **after** payout dispatch (the request has reached `submitting`/`pending`/`ambiguous`/`disputed` under ADR 0095, or `submitted` today) causes **no** automated reversal — only provider evidence resolves the attempt | ledger-finance C5; §5's ADR 0095 coordination note |
+| A replayed withdrawal-submit call after a payout-time KYC deny gets `ErrStateConflict` and never reaches the provider | ledger-finance C7 |
+| A replayed `RequestWithdrawal` idempotency key after a successful hold does not re-run the KYC gate (pure replay, matching `TestRequestWithdrawal_IsIdempotentOnRetry`'s existing pattern) | ledger-finance C7; CLAUDE.md idempotency rule |
+| A retried deposit intent (e.g. after a client timeout) that re-enters `InitiateDeposit` for the same idempotency key: expected behavior (does it re-evaluate KYC and, if so, does a second `kyc_enforcement_decisions` row get written — append-only and acceptable — or must it dedupe) is stated explicitly and tested, not left implicit | QA gap 4 |
+| Casino/sportsbook bet placement with **no active `play` policy**: KYC evaluates `not_required` and never denies; RG/Risk denials still short-circuit before KYC runs; existing RG/Risk regression suites pass unmodified | §1 rows #7/#10 |
+| Casino/sportsbook bet placement with an **active `play` policy** (test-fixture row, clearly marked per §3.7): `passed` allows; `pending`/`failed`/`unavailable` each deny, exercised by name, with no bypass; a `casino_play` policy never governs `sportsbook_play` or vice versa (`play_operation` enforced, not advisory) | §1 rows #7/#10 |
+| A KYC-declined bet's provider redelivery of the same `provider_tx_id` is freshly re-evaluated against RG→Risk→KYC's then-current state, not replayed as a no-op (the idempotency short-circuit only fires for an already-*posted*/succeeded bet) — a policy/verification state change between the two attempts may legitimately flip the outcome | §11 condition 2 (casino review) |
+| Migration 0101 up→down→up round-trips cleanly on a fresh database, for both `kyc_enforcement_policies` and `kyc_enforcement_decisions`, per this codebase's own migration-reversibility CI rule | QA gap 2 |
+| OpenAPI contract test for `GET /v1/admin/kyc/enforcement-decisions` (and the dormancy report route), using this codebase's existing plain-text/substring structural-check convention (`internal/httpserver/openapi_paymentswebhook_contract_test.go`'s pattern) — stated explicitly, not silently discovered as a limitation later | QA gap 3 |
+
+### 7.3 RLS
+
+| Test | Closes |
+|---|---|
+| A tenant-scoped `compliance` connection's INSERT/UPDATE on `kyc_enforcement_policies` is rejected at the database, not merely by the HTTP handler | security condition 2 |
+| A tenant-scoped connection carrying a `platform_admin`-shaped role but with `app.tenant_id` set is rejected (the NULLIF/tenant-unset predicate, not the role name, is what gates) | security condition 2 |
+| A platform-service-scoped connection with no `app.platform_admin_principal_id` set is rejected | security condition 2 |
+| A genuine platform-admin-scoped connection succeeds, and the inserted row's `created_by_actor_id` matches the acting principal | security condition 2 |
+| A `db.WithPlayerScope` connection cannot read another tenant's `kyc_enforcement_decisions`; `FORCE ROW LEVEL SECURITY` is confirmed active on both tables (a superuser-equivalent bypass would otherwise silently defeat every policy above) | schema |
+
+### 7.4 Concurrency
+
+| Test | Closes |
+|---|---|
+| Two concurrent deposit attempts racing a staff KYC approval that commits between them each see a consistent, individually-correct outcome (no torn read) — mirrors `TestRequestWithdrawal_ConcurrentRequestsOnlyOneSucceeds`'s pattern applied to a read-then-decide check | §1 rows #1/#3/#5 |
+| A concurrent `Reject`/`Cancel` racing `DenyForCompliance` on the same withdrawal request produces exactly one release (L1 serializes them; the loser gets `ErrStateConflict`) | ledger-finance C7 |
+| The ADR 0082 lock-order harness passes unmodified on all five gated paths, including the two withdrawal call sites and the two play call sites | ledger-finance C7; §11 condition (casino) |
+| Placing a bet takes no additional row lock from the new KYC step — proved by running the existing `internal/casino`/`internal/sportsbook` lock-order harnesses (ADR 0082) unmodified against the amended orchestrator and confirming no new lock-class entry appears | §1 rows #7/#10 |
+
+### 7.5 Negative / security
+
+| Test | Closes |
+|---|---|
+| A client-supplied field cannot influence `Outcome` (fuzz `EnforcementParams` for any player-controllable path into the decision) | all |
+| A cross-tenant test uses a **genuinely valid** token for tenant B carrying tenant A's `player_account_id`; the caller-visible result is a rejection or not-found, never a silent evaluation against tenant A's own rows | security condition 4(f) |
+| `unavailable` (a forced DB error / malformed policy row in a test harness) denies at every enforcement point, with no operation-specific bypass | all |
+| A raw-guard test proves `withdrawal.MarkSubmitted` is reachable only after a KYC evaluation ran in the same transaction — closing every future retry/resubmit/admin-force-submit path, not only today's one caller | security condition 6 |
+| A valid tenant B staff token requesting a tenant A player via the admin decisions route gets 404 and zero rows; a tenant-bound role other than `compliance`/`platform_admin` gets 403 | security condition 7 |
+| The player-facing decline surface never contains `matched_trigger`, a policy id, or `policy_version`, under any field name, at any of the five enforcement points | security condition 8 |
+
+### 7.6 Fail-closed / audit / SAR-adjacent
+
+| Test | Closes |
+|---|---|
+| A migration 0101 row with `status = 'active'` and no `legal_review_reference` is rejected by the CHECK constraint before it can ever govern a decision | schema |
+| Every `EvaluateEnforcement` call at every enforcement point writes exactly one `kyc_enforcement_decisions` row and one `audit.Record` call, with no PII/document content in either; on `allow` these commit with the domain effect, and on `deny` they commit **without** it (§3.6's corrected commit discipline, empirically proven, not merely asserted) | ledger-finance C1; security condition 5 |
+| `kyc_enforcement_decisions` plus `kyc_verifications`/`audit_log` together give a compliance reviewer a complete, joinable trail of "what was decided, when, against what policy version" for any player | staff tooling |
+| The projection matches the recomputed-from-ledger balance after a `DenyForCompliance` reversal, with zero drift from the hourly reconciliation job | ledger-finance C7 |
+
+### 7.7 Performance and CI budget (QA gaps 6–7 — closed with concrete criteria, not prose)
+
+- **Measurable pass criterion (QA gap 7):** the `not_required` (no active
+  policy) path on the casino/sportsbook bet-placement hot path adds no
+  more than **+2 ms at p95** versus the pre-KYC baseline for `postBet`/the
+  sportsbook bet-placement handler, measured by a benchmark comparison
+  with an objective pass/fail (not a subjective "no measurable
+  regression"). Deposit/withdrawal paths, being lower-frequency and
+  already amount-validated, are not benchmarked to the same bound; a
+  regression there is caught by the existing integration-suite timeout
+  budget instead.
+- **CI time budget (QA gap 6):** the new integration/concurrency rows in
+  §7.2/§7.4 are expected to land in `internal/withdrawal`,
+  `internal/payments`, `internal/casino`, and `internal/sportsbook`'s
+  existing integration lanes (not a new package), adding an estimated
+  low tens of seconds per package at implementation time — a real number
+  must be measured and recorded at implementation, and if it materially
+  narrows the CI margin for any of those packages' existing lanes, the
+  concurrency-heavy rows (the two lock-order-harness re-runs and the
+  `DenyForCompliance`-vs-`Reject` race) are named as the first candidates
+  for `.github/workflows/ci.yml`'s existing `TIMING_LANE_TESTS`-style
+  isolation, rather than left to default into whichever lane happens to
+  be slowest.
 
 ---
 
@@ -934,34 +1153,103 @@ Ownership per PRH-I3 (`identity-compliance` + `payments`, `casino`,
 withdrawal owners via dependency requests):
 
 1. **`internal/kyc`** (identity-compliance): `EvaluateEnforcement`,
-   `EnforcementParams`/`Decision`/`Outcome` types, the structural
-   first-withdrawal query, the threshold-policy lookup, migration 0101
-   Go-side repository (mirrors `jurisdiction/evaluation_policy_admin.go`'s
-   shape: `CreateEnforcementPolicy`/`ListEnforcementPolicyVersions`/
-   `WithdrawEnforcementPolicy`).
+   `EnforcementParams`/`Decision`/`Outcome` types (§2.2, revised:
+   `PersonID` added, `JurisdictionCode` removed), the latest-row/expiry
+   read (§2.6), the threshold-policy lookup, migration 0101 Go-side
+   repository (mirrors `jurisdiction/evaluation_policy_admin.go`'s shape:
+   `CreateEnforcementPolicy`/`ActivateEnforcementPolicy`/
+   `WithdrawEnforcementPolicy`, each writing its own `audit.Record` per
+   security condition 3), and `kyc_verifications.expires_at` if it does
+   not already exist (§2.6(b) — part of this ADR's implementation scope,
+   not a follow-up).
 2. **`internal/payments`** (payments, reviewed by identity-compliance):
    one new call to `kyc.EvaluateEnforcement` in `InitiateDeposit`,
    immediately after the existing RG check, mirroring the RG denial's
-   own `finalizeDeclined` pattern exactly (`"kyc_required:"+decision.Code`).
-   **Dependency request:** `payments` confirms the exact `DepositIntent`
-   declined-reason string convention and reviews the placement.
+   own `finalizeDeclined` pattern exactly (`"kyc_required:"+decision.Code`,
+   never `matched_trigger`/`policy_version` per security condition 8).
+   The decision/audit rows commit with the `declined` intent, per §3.6's
+   corrected commit discipline — no rollback risk here, since a decline
+   already resolves to a committed `declined` row today (ledger-finance
+   §12.1 confirms this shape is already sound). **Dependency request:**
+   `payments` confirms the exact `DepositIntent` declined-reason string
+   convention and reviews the placement.
 3. **`internal/withdrawal`** (withdrawal owner — currently no dedicated
    package owner distinct from `identity-compliance`'s own review scope;
    dependency request to whichever specialist next touches this package,
    or `identity-compliance` implements directly under `ledger-finance`
-   review given the ledger-adjacent hold/reversal mechanics): a KYC call
-   in `RequestWithdrawal` before the ledger hold is posted (reusing the
-   `ErrInsufficientFunds`-adjacent early-return shape, not a new state);
-   and a KYC call in `LockApprovedForSubmission` before the row is
-   returned to the caller for provider dispatch, denying by transitioning
-   the request the same way `Reject` does (hold reversal), with a system
-   actor and a `kyc_denied` reason code. **Dependency request:**
-   `ledger-finance` review for the hold-reversal posting shape at this
-   new denial point (touches money movement, per this specialist's
-   Review responsibility to request `ledger-finance` review for anything
-   gating a withdrawal financially); `security` review for the
-   token/session and RLS handling of the new admin decisions route (per
-   this specialist's Review responsibility for token/session review).
+   review given the ledger-adjacent hold/reversal mechanics). **Design
+   corrected per ledger-finance C1/C2 (§12.2) — the original "reuse
+   `Reject`'s shape" sketch was underspecified and, as written, would
+   have rolled back the audit trail it was supposed to create:**
+   - **`RequestWithdrawal`:** look up an existing request by
+     `(tenant, player, idempotency_key)` first (replay short-circuit,
+     unchanged); then evaluate KYC (§5's exact placement). **On deny:**
+     write the decision row and the audit record, insert **no**
+     `withdrawal_requests` row and post **no** ledger effect, and return
+     a typed result (e.g. `ErrKYCRequired`) that the HTTP handler
+     **commits** before mapping it to the player-facing response — never
+     a bare Go `error` that would roll back the transaction and discard
+     the very rows this ADR requires. **On allow:** continue exactly as
+     today (`IdempotentInsert` → accounts → L3 pre-lock → `Post`).
+   - **Payout dispatch:** a new function,
+     `withdrawal.DenyForCompliance(ctx, tx, requestID, correlationID)`,
+     analogous to `Reject`/`Fail` but **not** `Reject` itself (`Reject`
+     requires `pending_review`, a staff principal, `ApproverEligibility`,
+     and a `withdrawal_approvals` insert — none of which apply to a
+     system-driven compliance denial). It runs inside the same L1
+     (`lockRequestForUpdate`) transaction `LockApprovedForSubmission`
+     already holds (§5's ADR 0095 coordination note), adding a new edge
+     `approved → rejected` to `withdrawal-state-machine.md`. The posting
+     mirrors `Reject`/`Fail` exactly: accounts resolved `(hold, cash)`
+     via `GetOrCreateAccounts`; entries debit `player_withdrawal_hold`
+     and credit `player_cash` for `wr.Amount`; `TransactionType =
+     withdrawal_rejected`; `ReversesTransactionID =
+     wr.HoldLedgerTransactionID`; `CorrelationID = requestID`. Idempotency
+     key `requestID + ":kyc_denied"`, distinct from `:rejected`/`:failed`;
+     exactly-once release via L1 plus the conditional
+     `UPDATE … WHERE state = 'approved'` (`RowsAffected()==0` →
+     `ErrStateConflict`, which rolls back the posting — the existing
+     pattern every other release path already uses). No `reason_code` on
+     the ledger transaction (migration 0021's CHECK allows one only for
+     `manual_adjustment`); the compliance reason lives in the audit entry
+     only (`ActorSystem`, action `withdrawal.rejected_kyc`, metadata:
+     outcome, `policy_version`, `hold_ledger_transaction`,
+     `release_ledger_transaction` — no sensitive content). No
+     `withdrawal_approvals` row (this is not a four-eyes decision).
+     Releasing to `player_cash` (not a compliance freeze) is the
+     financial default so no value is left stranded without an owner;
+     whether a jurisdiction ever needs a frozen-hold state instead is its
+     own future human decision (ledger-finance's own note, §12.2 C2), not
+     decided here. `DenyForCompliance` is legal **only from `approved`**
+     (pre-dispatch) — see §5's ADR 0095 coordination note for why it must
+     never fire once a request may have reached the provider. The caller
+     (`LockApprovedForSubmission`'s own call site) receives a distinct
+     return (e.g. `(wr, ErrKYCDeniedCommitted)`) that the handler commits,
+     and that can never flow into `RouteProvider`/`Withdraw`.
+     **Recommended, not blocking (ledger-finance, not part of migration
+     0101):** a DB backstop partial unique index
+     `(tenant_id, reverses_transaction_id) WHERE transaction_type IN
+     ('withdrawal_rejected','withdrawal_failed')`, mirroring migration
+     0092, for exactly-once release defense in depth. Register as its own
+     follow-up.
+   - **Every path to provider submission is covered (security condition
+     6, §13), not only today's one caller.** Today `MarkSubmitted` is
+     reached only from `withdrawal_handlers.go:827`'s submit endpoint,
+     immediately after `LockApprovedForSubmission`. This ADR requires
+     that any future retry, resubmit-after-timeout, or admin
+     force-submit path also passes through the KYC gate before reaching
+     `MarkSubmitted` — enforced by a raw-guard test (in the style of this
+     codebase's existing `raw_guard_test.go` pattern) asserting that
+     `MarkSubmitted` is reachable only after a KYC evaluation ran in the
+     same transaction, so a new call site added later cannot silently
+     bypass the gate by calling `MarkSubmitted` directly.
+   - **Dependency request:** `ledger-finance` reviews the final
+     `DenyForCompliance` implementation against §12.2's C1/C2/C7 in full
+     before it is marked implemented (touches money movement, per this
+     specialist's Review responsibility); `security` reviews the
+     token/session and RLS handling of the new admin decisions route, and
+     the raw-guard test above, before this is marked implemented (per
+     this specialist's Review responsibility for token/session review).
 4. **`internal/casino`, `internal/sportsbook`** (casino, sportsbook;
    reviewed by identity-compliance): one new call each to `kyc.
    EvaluateEnforcement` (`EnforcementCasinoPlay`/`EnforcementSportsbookPlay`)
@@ -990,6 +1278,33 @@ withdrawal owners via dependency requests):
 7. **OpenAPI / staff route**: `identity-compliance` + `code-reviewer`.
 8. **QA**: owns the test plan in §7 as an execution gate, per its
    existing testing-strategy authority.
+9. **ADR 0095 (`architect`/payments; dependency request, §5's coordination
+   note).** ADR 0095's withdrawal-payout Phase A must include the KYC gate
+   alongside its existing approver-eligibility check, inside the same
+   L1-locked transaction, before `T1p` commits; its transition table must
+   list `DenyForCompliance` (`approved→rejected`) as a pre-dispatch
+   terminal transition and must not permit it after `T1p`; any sweeper
+   that claims a "prepared, not yet sent" payout must re-run the KYC gate
+   in its own claim transaction before the first send. This is a binding
+   constraint on ADR 0095, not a request to redesign it — `identity-
+   compliance` does not own ADR 0095 and does not redesign it unilaterally
+   (CLAUDE.md's "no specialist redesigns shared architecture
+   unilaterally" rule); this item is the dependency request `architect`
+   incorporates.
+10. **Four-eyes on relaxing a policy (security condition 3).** Each
+    `kyc_enforcement_policies` create/activate/withdraw writes
+    `audit.Record` (actor, jurisdiction, before/after row, IP,
+    `reason_code`, `legal_review_reference`) in the same transaction.
+    Withdrawing an active row, or activating a value that relaxes
+    enforcement relative to the one it replaces, requires a second
+    platform-admin principal's approval (four-eyes), per CLAUDE.md's rule
+    for high-impact administrative actions. **Not designed in full here**
+    — the exact mechanism (a pending-approval row, a two-step API, or
+    reuse of an existing four-eyes primitive if the withdrawal-approval
+    one, `internal/withdrawal/policy.go`, generalizes) is implementation
+    work for PRH-I3, under `security` review. If four-eyes is deferred for
+    a first cut, that deferral must be recorded as its own decision, never
+    dropped silently, per security's own condition.
 
 Every row above is `PROPOSED`/`NOT IMPLEMENTED` until PRH-I3 is
 authorized and executed; nothing in this document is claimed as built.
