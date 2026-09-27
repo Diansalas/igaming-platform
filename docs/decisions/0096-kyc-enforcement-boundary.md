@@ -740,3 +740,217 @@ authorized and executed; nothing in this document is claimed as built.
 Per CLAUDE.md's seven-value vocabulary: this document is a design paper.
 The mechanism it specifies is **NOT IMPLEMENTED**. No threshold value is
 asserted. No vendor is selected. No regulatory approval is claimed.
+
+---
+
+## 10. QA test-plan review (`qa`, §7 only)
+
+**Verdict: CONFIRMED WITH CHANGES.**
+
+Checked against the PRH testing checklist (unit, integration, PostgreSQL-
+backed, race, concurrency, negative/security, tenant isolation, RLS,
+migration up/down, API/OpenAPI contract, idempotency, failure injection)
+and the KYC-specific requirements (per-enforcement-point outcome coverage,
+fail-closed on `unavailable`, result not player-suppliable, RG/Risk
+ordering, PII-free audit, tenant isolation, no invented thresholds).
+
+**What §7 gets right.** Unit outcome-mapping exhaustiveness; the
+structural first-withdrawal rule; RG-before-KYC ordering at deposit and at
+`play`; the withdrawal-hold and payout-dispatch backstops named against
+their real call sites (`LockApprovedForSubmission`, mirroring
+`TestRequestWithdrawal_InsufficientFundsRejectedAndAtomic`'s atomicity
+proof — a real regression pattern, not an invented one); RLS on
+`kyc_enforcement_decisions` plus platform-only write on
+`kyc_enforcement_policies`; the concurrent-approval-race row modeled on
+`TestRequestWithdrawal_ConcurrentRequestsOnlyOneSucceeds`; client-supplied-
+field fuzzing and cross-tenant `player_account_id` rejection; `unavailable`
+fail-closed "at every enforcement point, with no operation-specific
+bypass" (this one row does legitimately cover fail-closed across all five
+points, so that specific KYC requirement is met); the migration 0101 CHECK
+fail-closed test; audit-row-plus-`audit.Record`-together with no PII;
+casino/sportsbook `play` coverage explicitly enumerating `passed`/
+`pending`/`failed`/`unavailable`, the `play_operation` column enforced not
+advisory, and the test-fixture policy row "clearly marked per §3.7" — this
+satisfies "no invented thresholds" for the one place §7 exercises a
+concrete active policy.
+
+**Gaps requiring changes before this is a complete execution gate:**
+
+1. **Per-outcome coverage at deposit/withdrawal-hold/payout-dispatch is
+   under-specified.** The `play` rows explicitly enumerate `passed`/
+   `pending`/`failed`/`unavailable`; the deposit, withdrawal-hold, and
+   payout-dispatch integration rows only say "KYC-denied," not which of
+   `required`/`pending`/`failed` is being exercised (with `unavailable`
+   covered separately by the cross-cutting negative row). Add explicit
+   sub-cases so each of the five outcomes is proven, by name, at each of
+   the five enforcement points — not asserted once generically and assumed
+   to generalize.
+
+2. **No migration up/down (reversibility) test for migration 0101.** §7
+   has a CHECK-constraint fail-closed test but no down-migration test on a
+   fresh database, which is this codebase's own established rule
+   (`docs/testing/testing-strategy.md`'s Stage 10 W1 note: "the migration-
+   reversibility CI step runs on a fresh database"). Add one for 0101
+   (both `kyc_enforcement_decisions` and `kyc_enforcement_policies`).
+
+3. **No OpenAPI contract test for the new admin route.** §6 adds
+   `GET /v1/admin/kyc/enforcement-decisions` to `platform-api.yaml`; §7 has
+   no corresponding contract test, despite this codebase's own precedent
+   (`internal/httpserver/openapi_paymentswebhook_contract_test.go`) for
+   exactly this pattern. Add one, and record up front whether it will be
+   the same "plain-text/substring" structural check used for the payments
+   webhook (no OpenAPI/JSON-Schema library is a verified dependency today)
+   rather than silently discovering that limitation later.
+
+4. **No idempotency test for the `kyc_enforcement_decisions` write itself.**
+   The audit row proves "exactly one row per call" within a single call,
+   but not what happens under a retried request (e.g., a deposit-intent
+   retry after a timeout) that re-enters `EvaluateEnforcement` for the same
+   logical operation — whether that is expected to write a second decision
+   row (append-only, acceptable) or must dedupe, is unstated. CLAUDE.md's
+   financial-write idempotency rule applies to every financial write on
+   these paths; state the expected behavior and test it explicitly.
+
+5. **No mutation-kill requirement for the fail-closed/outcome-mapping
+   guard.** This codebase's own added rule (Stage 10.1: "a mutation that
+   removes the guarded predicate must turn at least one test red") applies
+   directly to `EvaluateEnforcement`'s `unavailable`-fail-closed branch and
+   its five-way outcome switch — the single highest-value guard this ADR
+   introduces. §7 names no mutation pass or manual branch-coverage
+   substitute (the SQL CHECK constraint is exactly the kind of construct
+   this project's own precedent already treats as "no mutation tool
+   applies → manual branch-coverage checklist"). Add both: a mutation pass
+   over `EvaluateEnforcement`'s Go branches, and a manual true/false
+   checklist for the 0101 CHECK constraint.
+
+6. **No stated CI time budget for the new integration/concurrency suite.**
+   §7 does not say which package(s) the integration/concurrency rows land
+   in, nor estimate their runtime. Given `internal/httpserver`'s existing
+   integration-lane runtime is already substantial against this project's
+   CI ceiling, and several of §7's new rows (deposit, withdrawal-hold,
+   payout-dispatch, casino/sportsbook `play` × 5 outcomes once item 1 above
+   is addressed, plus a new concurrency race test) are very likely to land
+   there, add an explicit runtime estimate and, if it materially narrows
+   the CI margin, name which existing `TIMING_LANE_TESTS`-style lane
+   absorbs them (`.github/workflows/ci.yml`'s existing split) rather than
+   letting the new tests default into the package's slowest lane
+   unexamined.
+
+7. **"Performance" row has no measurable pass criterion.** "No measurable
+   regression against the existing baseline" is not a number. State a
+   concrete threshold (e.g., delta vs. baseline p95 bounded to X ms/percent)
+   or replace it with a benchmark-comparison method that has an objective
+   pass/fail, consistent with this project's "measurable pass criteria"
+   norm elsewhere.
+
+None of the above blocks the design itself — §7's *shape* is sound and its
+integration rows are anchored to real, existing regression patterns rather
+than invented ones. But as an execution gate, items 1–7 must be closed
+(or explicitly descoped with a recorded reason) before `qa` will sign off
+test coverage for this ADR's implementation as `IMPLEMENTED`.
+
+---
+
+## 10. Casino review (`casino`, 2026-09-27)
+
+Reviewed against live code at `HEAD 3d50b3c` (`internal/casino/
+orchestrator.go`, `internal/sportsbook/orchestrator.go`), scoped strictly
+to the casino "play" enforcement point (§2.4, §3.5, row #7) plus a
+sportsbook symmetry sanity check (row #10). Withdrawal/deposit/bonus rows
+are outside this specialist's authority and not re-reviewed here.
+
+**Call site and ordering — verified correct.** `postBet`'s current RG
+call (`evaluateAndAuditEligibility`) and Risk call (`evaluateAndAuditRisk`)
+sit at what is now roughly lines 1184 and 1225-1247 (the ADR's `:952`
+citation is stale — see conditions below — but the *relative* order this
+ADR relies on is exactly as described: RG → Risk, both after the
+provider-tx delivery lock and the idempotency/tombstone short-circuits,
+both before `ledger.GetOrCreateAccounts`/the balance check at ~line 1253).
+Appending a third `kyc.EvaluateEnforcement` call immediately after the
+Risk block (§2.4) and before line ~1249 lands it exactly where the ADR
+claims: after RG/Risk, before the balance lock, with an RG or Risk denial
+still short-circuiting before KYC ever runs.
+
+**No lock taken — verified.** `EvaluateEnforcement` is specified as plain
+`SELECT`s only (§5). Confirmed the intended insertion point in `postBet`
+precedes `GetOrCreateAccounts`/the pre-lock balance check entirely, so the
+claim "adds no new entry to ADR 0082's lock-class ordering" holds as
+designed. Sportsbook's mirrored helpers (`evaluateAndAuditEligibility`/
+`evaluateAndAuditRisk` in `internal/sportsbook/orchestrator.go`, duplicated
+rather than imported per that file's own documented rationale) sit at the
+same relative position; the same reasoning applies there.
+
+**One extra SELECT per bet — acceptable.** Given no lock is taken and the
+dormant (`not_required`) path is a single indexed lookup, this is an
+acceptable addition to the hot bet path. Agreed this is not worth caching
+`casino_launch_sessions`-side unless profiling later shows otherwise, per
+§3.5's own "flagged as future optimization, not designed here" stance —
+do not build the cache preemptively.
+
+**Wins/rollbacks unaffected — verified.** `postWin`/`postRollbackTombstone`
+(and their non-tombstone counterpart) carry no RG/Risk call today by
+design (their own doc comments, cited accurately in §1 rows #8/#9), and
+this ADR adds no KYC call to either. Confirmed no call is being proposed
+there. Correct.
+
+**Provider-visible error class on a mid-session KYC-required decline —
+needs one clarification, not a design change.** `ReceiveCallbackResult`
+already carries exactly one decline shape used uniformly today:
+`Outcome: OutcomeDeclined, DeclineReason: <code>` (verified at the RG
+denial, the Risk denial, the insufficient-funds denial, and the
+tombstoned-original denial — four existing call sites, one shared enum
+value, only `DeclineReason` varies). A KYC-required decline
+(`decision.Code`, e.g. `"kyc_required:pending"` per §6's own stated
+convention) is a fifth instance of the *same* `OutcomeDeclined` class, not
+a new provider-visible error class — provider adapters that already branch
+on "declined vs succeeded vs replayed" need zero new handling, only a new
+string value they were already treating opaquely. §2.4/§3.5 imply this but
+never say it in so many words for the casino call site the way §6 does for
+deposit/withdrawal; recommend §3.5 or the implementation breakdown (§8
+item 4) state this explicitly so `casino`'s implementer doesn't
+independently (re)invent a new outcome variant.
+
+**Retry semantics for a KYC-declined bet — needs explicit test-plan
+coverage.** Verified in `postBet`: the idempotency short-circuit
+(`findPostedBetTransaction`) only fires for an *already-posted* (i.e.
+already-succeeded) bet — a decline posts nothing, so a provider redelivery
+of the same `provider_tx_id` after a KYC decline is **not** a no-op; it
+re-enters `postBet` and is freshly re-evaluated against RG → Risk → KYC's
+then-current state, exactly like an RG- or Risk-declined bet is today
+(same code path, same precedent, nothing new). This is the correct,
+symmetric behavior and requires no design change, but §7's test plan
+should add one row making it explicit for KYC specifically (a
+KYC-declined bet's provider retry is freshly re-evaluated, not replayed;
+if the underlying policy/verification state has since changed — e.g. the
+player's verification lands as `approved` between the two attempts — the
+retry may succeed where the first attempt didn't, which is intended, not
+a bug) so this isn't left to be inferred from RG/Risk's existing tests by
+analogy alone.
+
+**Citation staleness (cosmetic).** §1's `orchestrator.go:952/1456/1586`
+line citations and the stated baseline (`1560ad0`) no longer match current
+`HEAD` line numbers (RG/Risk/tombstone logic now sits in the 1000-1900
+range). Not a substantive problem — the described call sites and behavior
+are still correctly identified by function name and relative order — but
+should be refreshed at implementation time so `code-reviewer` isn't
+diffing against stale line numbers.
+
+**Sportsbook symmetry — consistent.** `internal/sportsbook/orchestrator.go`
+duplicates the identical RG-then-Risk shape and denial/audit convention
+casino uses, at the equivalent position ahead of settlement/ledger work.
+No divergence found that would make the ADR's "identical placement and
+rationale" claim (§2.4) inaccurate for sportsbook.
+
+**Verdict: APPROVE WITH CONDITIONS**
+1. §3.5/§8 item 4 explicitly state the KYC-required decline reuses the
+   existing `OutcomeDeclined`/`DeclineReason` class at the casino/
+   sportsbook bet call site (no new outcome variant).
+2. §7 gains an explicit test row for KYC-decline retry semantics
+   (redelivery is freshly re-evaluated, not replayed/no-op), mirroring
+   the existing RG/Risk decline-retry behavior already implicit in the
+   code.
+3. Refresh the stale `orchestrator.go` line-number citations and baseline
+   commit in §1 before/at PRH-I3 implementation.
+
+None of these require a design change to §2/§3.5's mechanism; all are
+either documentation precision or a missing test-plan line item.
