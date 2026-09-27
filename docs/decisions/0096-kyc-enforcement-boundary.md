@@ -6,7 +6,18 @@ work, item **PRH-D2**, closing the reconnaissance and design half of
 **KYC-ENFORCE-1** (`docs/governance/task-registry.md`). Design/docs only.
 No code, no migration, no commit. Allocated migration: **0101**.
 
-Baseline: branch `claude/focused-wright-jw88w9`, `HEAD 1560ad0`. Sources
+Baseline: branch `claude/focused-wright-jw88w9`, `HEAD 1560ad0` at initial
+authoring. **Staleness note (casino review condition 3, §11):** by the
+time of review the working tree had advanced to `3d50b3c`/`07c8103`, and
+`§1`'s `internal/casino/orchestrator.go:952/1456/1586` line citations no
+longer match current line numbers (the reviewed functions now sit
+roughly in the 1000–1900 range; `postBet`'s RG/Risk calls were confirmed
+at ~1184/1225–1247). The *function names and relative call order* §1/§2.4
+rely on remain correctly identified and were independently re-verified by
+`casino` (§11) against `3d50b3c` — only the line numbers are stale. This
+is recorded as a known cosmetic gap, to be refreshed against the actual
+HEAD at PRH-I3 implementation time rather than corrected speculatively
+here against a commit this paper cannot re-read. Sources
 read: `CLAUDE.md`; task registry KYC-ENFORCE-1 row and the PRH section;
 ADR 0006 (hybrid licensing), 0007 (multi-wallet), 0026 (RG foundation,
 its §14 KYC/AML extension-point note), 0028 (KYC provider abstraction,
@@ -1945,3 +1956,86 @@ Also:
 10. **[LOW] Fixture values.** The §3.7 fixture-value discipline is
     endorsed. At implementation, `security` will check that no numeric
     threshold appears in non-test Go or in migration SQL.
+
+---
+
+## 14. Revision record — every review condition mapped to where it is satisfied
+
+This section is added by the amendment that closed the security,
+ledger-finance, casino, and QA reviews above (§10–§13). It exists so a
+reviewer can check each condition was actually designed into the body
+text, not merely acknowledged in a reply. "Design text" cites the section
+that changed; "Implementation gate" notes conditions this paper commits
+to but that only PRH-I3's actual code/tests can close.
+
+### 14.1 Security (§13)
+
+| Condition | Design text | Status |
+|---|---|---|
+| Ruling: deposit "allow when unconfigured" | §3.2 point 2 (deposit bullet), cross-referencing the fixed C1/C3 backstop; §6 dormancy report | Design-satisfied; launch sign-off is HD-KYC-1 + legal, not this paper |
+| 1 (HIGH, launch-blocking) — every withdrawal requires `passed`, not only the first; scope per player | §1 row #3, §3.2 point 1 (rewritten), §5 performance bullet (query simplified), §7.2, HD-KYC-5 | Design-satisfied |
+| 2 (HIGH, launch-blocking) — migration 0101 RLS/immutability must copy 0075 exactly | §3.6 (RLS block fully rewritten: `FORCE ROW LEVEL SECURITY`, `NULLIF`+`platform_admin_principal_id` predicates, INSERT+UPDATE-only policies, no DELETE/FOR ALL, `created_by_actor_id NOT NULL` tied to the principal, explicit lifecycle trigger permitting `draft→active`/`draft→withdrawn`/`active→withdrawn`, `kyc_enforcement_decisions` given the same `FORCE`+`TRUNCATE`-guard treatment); §7.3 tests | Design-satisfied; DB-level tests are an Implementation gate |
+| 3 (MEDIUM) — every policy write audited; four-eyes on relaxing changes | §8 item 10 | Design-satisfied at the level of a binding requirement; the exact four-eyes mechanism is named as PRH-I3 implementation work, under `security` review, per item 10's own text — **not fully designed**, disclosed as such rather than claimed complete |
+| 4(a) latest row only | §2.6(a) | Design-satisfied |
+| 4(b) expiry independent of stored status | §2.6(b); §8 item 1 (adds `expires_at` to implementation scope) | Design-satisfied |
+| 4(c) lookup error → `unavailable`, never `not_required` | §2.6(c); `OutcomeUnavailable`'s comment in §2.2 | Design-satisfied |
+| 4(d) select by `LicensingJurisdictionID` only, never a player-influenceable signal | §2.2 (`JurisdictionCode` removed), §2.6(d) | Design-satisfied |
+| 4(e) server-side cumulative totals across all assets/wallets, including in-flight | §2.6(e) | Design-satisfied; the exact HD-KYC-1 computation rule (in-flight handling, reversal netting) remains a human decision, disclosed as such |
+| 4(f) cross-tenant test shape | §2.6(f), §7.5 | Design-satisfied |
+| 5 (HIGH, launch-blocking) — denial audit must survive rollback | New §3.6 "Commit discipline, corrected" subsection; §5 ordering bullet (exact placement so a deny never reaches a state-changing statement); §7.2, §7.6 | Design-satisfied |
+| 6 (MEDIUM) — payout gate must cover every path to submission | §8 item 3 ("Every path to provider submission is covered"); §7.5 raw-guard test | Design-satisfied |
+| 7 (MEDIUM) — staff read API fully specified | §6 (tenant-from-context, 404 on cross-tenant, roles, audited cross-tenant path, keyset pagination, exact response fields) | Design-satisfied |
+| 8 (MEDIUM) — players see status only | §6; §8 item 2 | Design-satisfied |
+| 9 (LOW) — dormancy observability | §6 (`GET /v1/admin/kyc/enforcement-policies/dormant-jurisdictions`) | Design-satisfied |
+| 10 (LOW) — fixture values | §3.7 (unchanged; already endorsed) | Already satisfied, no change needed |
+
+### 14.2 Ledger-finance (§12)
+
+| Condition | Design text | Status |
+|---|---|---|
+| C1 (blocking) — a denial must commit, never roll back | §3.6 "Commit discipline, corrected"; §8 item 3's exact `RequestWithdrawal`/`LockApprovedForSubmission` shapes (`ErrKYCRequired`, `ErrKYCDeniedCommitted`) | Design-satisfied |
+| C2 — payout-time denial posting shape (`DenyForCompliance`, not `Reject`) | §8 item 3, in full (accounts, entries, idempotency key, no `reason_code` on the ledger row, audit action, no `withdrawal_approvals` row, `player_cash` release default, recommended partial-unique-index follow-up) | Design-satisfied |
+| C3 — the structural exemption must not let a known `failed` status pay out; scoped per wallet was too loose | §3.2 point 1 (rewritten); §1 row #3; §7.2; HD-KYC-5 | Design-satisfied |
+| C4 — TOCTOU: accept it, bound it explicitly | §5 "Concurrency and TOCTOU" bullet, adopting conditions (a)/(b)/(c) verbatim | Design-satisfied |
+| C5 — ADR 0095 interplay | §5 "Coordination with ADR 0095" bullet; §8 item 9 (dependency request on ADR 0095's own owner); §8 item 3 (`DenyForCompliance` legal only from `approved`) | Design-satisfied as a binding constraint on ADR 0095; ADR 0095's own text is not owned by this ADR and is not edited here (CLAUDE.md's no-unilateral-redesign rule) |
+| C6 — threshold arithmetic | §2.6(e) (NUMERIC/big.Int, same-asset-only, settled-postings-only) | Design-satisfied |
+| C7 — required tests | §7.2, §7.4, §7.6 (each C7 test item individually present) | Design-satisfied |
+| 10.3 Veto check | No veto applies (ledger-finance's own conclusion); C1 was the one correctness defect, fixed above | Closed |
+
+### 14.3 Casino (§11)
+
+| Condition | Design text | Status |
+|---|---|---|
+| 1 — state the KYC-required decline reuses `OutcomeDeclined`/`DeclineReason`, no new outcome variant | §3.5 (new bullet); §8 item 4 (unchanged, already referenced this) | Design-satisfied |
+| 2 — explicit test-plan row for KYC-decline retry semantics | §7.2 (new row, casino review condition 2) | Design-satisfied |
+| 3 — refresh stale line-number citations and baseline commit | Baseline note added at the top of this document, disclosing the staleness and what was independently re-verified, deferring the exact line-number refresh to PRH-I3 implementation | Acknowledged and bounded; **not fully closed** (the actual line numbers in §1 are not renumbered in this pass — see §14.5) |
+
+### 14.4 QA (§10)
+
+| Gap | Design text | Status |
+|---|---|---|
+| 1 — per-outcome coverage named explicitly at each enforcement point | §7.2 (deposit/withdrawal-hold/payout-dispatch rows each now name `pending`/`failed`/`unavailable` explicitly) | Design-satisfied |
+| 2 — migration up/down reversibility test | §7.2 | Design-satisfied |
+| 3 — OpenAPI contract test for the new admin route | §7.2 | Design-satisfied |
+| 4 — idempotency test for the decision write itself | §7.2 (retried-deposit-intent row; states the expected behavior must be decided and tested, does not itself pick append-vs-dedupe) | Design-satisfied as a named, testable requirement; the append-vs-dedupe choice itself is left to PRH-I3, disclosed as such |
+| 5 — mutation-kill / manual branch-coverage requirement | §7.1 (mutation pass over `EvaluateEnforcement`; manual CHECK-constraint checklist) | Design-satisfied |
+| 6 — CI time budget | §7.7 | Design-satisfied as a stated estimate + escalation path; the real measured number is necessarily an Implementation gate |
+| 7 — measurable performance pass criterion | §7.7 (+2 ms p95 bound on the bet-placement hot path) | Design-satisfied |
+
+### 14.5 Known residual gaps (disclosed, not hidden)
+
+- Casino condition 3's exact line-number refresh in §1's citations is
+  deferred to PRH-I3 implementation, per the baseline note — this paper
+  does not re-derive line numbers against a commit it did not re-read in
+  full.
+- Security condition 3's four-eyes mechanism for relaxing a policy is
+  named as a binding requirement (§8 item 10) but its concrete shape
+  (pending-approval row vs. two-step API vs. reuse of an existing
+  primitive) is PRH-I3 implementation work, under `security` review — not
+  fully designed here, and stated as such rather than claimed complete.
+- HD-KYC-1's exact in-flight-deposit/reversal-netting computation rule
+  (§2.6(e)) remains a human decision; the mechanism is fully specified,
+  the value and its edge-case content are not.
+- ADR 0095 itself is authored and owned by `architect`; §5/§8 item 9 state
+  the binding constraint this ADR requires of it, but this document does
+  not, and may not, edit ADR 0095's own text.
