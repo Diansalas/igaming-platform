@@ -249,14 +249,20 @@ func TestMigration0077_RestoresPreMigrationRLSPostureOnDownThenFailsOnDirtyDatab
 	// brand-pinning fix) then 0078 (Stage 6's sportsbook foundation), all
 	// now sitting on the chain's tip and reversible in this scenario, then 0077, and confirm 0077's own EXACT pre-migration
 	// posture is restored.
-	rolledBack, err := pool.MigrateDown(context.Background(), dir, 23)
+	// Derived, not hard-coded (PRH-I3, 2026-09-27): any migration landing
+	// above 0099 (this task's own 0100, and any later one) is rolled back
+	// first, in descending order, so this test survives a future migration
+	// without being touched again - it previously hard-coded 0099 as the
+	// permanent chain tip, which migration 0100 broke.
+	above99 := migration0075MigrationsAbove(t, dir, migration0099Version)
+	rolledBack, err := pool.MigrateDown(context.Background(), dir, 23+len(above99))
 	if err != nil {
-		t.Fatalf("down migrations 0099/0098/0097/0096/0095/0094/0093/0092/0091/0090/0089/0088/0087/0086/0085/0084/0083/0082/0081/0080/0079/0078/0077 on a clean database: %v", err)
+		t.Fatalf("down migrations %v + 0099/0098/0097/0096/0095/0094/0093/0092/0091/0090/0089/0088/0087/0086/0085/0084/0083/0082/0081/0080/0079/0078/0077 on a clean database: %v", above99, err)
 	}
-	wantDown := []int64{
+	wantDown := append(append([]int64{}, above99...),
 		migration0099Version, migration0098Version, migration0097Version, migration0096Version, migration0095Version, migration0094Version, migration0093Version, migration0092Version, migration0091Version, migration0090Version, migration0089Version, migration0088Version, migration0087Version, migration0086Version, migration0085Version, migration0084Version, migration0083Version,
 		migration0082Version, migration0081Version, migration0080Version, migration0079Version, migration0078Version, migration0077Version,
-	}
+	)
 	if len(rolledBack) != len(wantDown) {
 		t.Fatalf("expected exactly migrations %v to be rolled back, got %v", wantDown, rolledBack)
 	}
