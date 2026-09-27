@@ -161,3 +161,38 @@ against) - each was manually verified to fail against a broken implementation du
 development (e.g. `TestCallContext_NeverRendersSecret` was run against security's own
 mutation A - appending the raw secret to `callContextRedacted` - and failed as expected
 before the fix, per §1 above).
+
+===========================================================================================
+§3. Orchestrator fix-round item 5: raw cause.Error() in append-only audit (2026-09-27)
+===========================================================================================
+
+Scope: `casino.launch_failed`'s audit metadata previously stored `cause.Error()` verbatim -
+a real adapter's transport error (`*url.Error`) can embed the full request URL, including
+a query-string credential, and append-only `audit_log.metadata` must never receive that.
+Fixed with a closed `LaunchFailureReason` enum (`provider_unavailable`, `declined`,
+`circuit_open`, `credential_unavailable`, `credential_binding_mismatch`, `ctx_cancelled`,
+`internal`) stored in place of the raw error text; the underlying cause is still available
+to an operator only through `phaseCLogger`'s log line, redacted by the new
+`redactedLaunchFailureDetail` (mirrors `internal/payments/gate.go`'s `redactedReason`
+without importing it - `*url.Error` reduced to op + timeout/canceled/transport-error
+classification, anything unrecognized reduced to a fixed, non-identifying label - stricter
+than payments' own fallback, which still echoes `err.Error()` for an unrecognized type).
+Grepped the whole `internal/casino` package for other `err.Error()`/`.Error()` writes into
+`audit.Record`/`Metadata` - the ONE site was this one; the other `.Error()` call in this
+package logs a *phase-C transaction's own* DB error (not the adapter's cause), which is a
+log line, never audit.
+
+M18 audit `"reason"` reverted from `string(reason)` to `cause.Error()`: KILLED
+[internal/casino/orchestrator.go] by
+`go test -tags=integration ./internal/casino/ -run TestLaunchGame_TransportErrorAuditNeverStoresRawErrorText`
+    first failure: --- FAIL: TestLaunchGame_TransportErrorAuditNeverStoresRawErrorText
+                       "audit metadata leaked the secret-bearing URL:
+                       {\"reason\": \"provider launch call failed: Post
+                       \\\"https://vendor.example/launch?api_key=SuperSecretSauce123\\\":
+                       connection refused\", ...}"
+    (the new test builds a *url.Error carrying a secret-looking query string, calls
+    LaunchGame, then reads the ACTUAL persisted audit_log.metadata row back via SQL -
+    not a mock or an in-memory assertion - and asserts both the secret's absence and the
+    bounded reason's presence)
+
+1/1 killed (fix-round item 5, 2026-09-27). Combined total: 15/15 killed, 1 equivalent.

@@ -12,7 +12,9 @@ package casino
 import (
 	"context"
 	"errors"
+	"net/url"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -477,6 +479,58 @@ func TestLaunchGame_CtxCancelledAfterVendorAccept_StillAuditsLaunched(t *testing
 // asserts only the error; this asserts the session is actually revoked and
 // audited too (a mutant deleting the revoke on this specific branch alone
 // would otherwise survive).
+// TestLaunchGame_TransportErrorAuditNeverStoresRawErrorText is the
+// orchestrator's own follow-up on RV-PRH-I2 item 5: the append-only
+// casino.launch_failed audit record must carry only a closed
+// LaunchFailureReason, never cause.Error() - a real adapter's transport
+// error (a *url.Error) can embed the full request URL, including a
+// query-string credential. This constructs exactly that shape and reads
+// the actual persisted audit_log.metadata row back to prove the secret
+// never reached append-only storage, while the bounded reason still does.
+func TestLaunchGame_TransportErrorAuditNeverStoresRawErrorText(t *testing.T) {
+	pool := testPool(t)
+	f := seedCasinoFixture(t, pool)
+	game := seedGame(t, pool, "mock-casino", "EUR")
+	enableGameForTenant(t, pool, f, game.ID)
+
+	base := NewMockCasinoProvider("mock-casino", "EUR")
+	registerCasinoCapability(t, pool, f, base, 100)
+
+	const secretQuery = "api_key=SuperSecretSauce123"
+	secretURL := "https://vendor.example/launch?" + secretQuery
+	provider := &spyLaunchProvider{MockCasinoProvider: base}
+	provider.onLaunch = func(ctx context.Context, req LaunchRequest) (LaunchResult, error) {
+		return LaunchResult{}, &url.Error{Op: "Post", URL: secretURL, Err: errors.New("connection refused")}
+	}
+
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(base))
+	_, err := orch.LaunchGame(context.Background(), pool, NewMockOutboundResolver(), LaunchGameParams{
+		TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID,
+		GameID: game.ID, AssetCode: "EUR", Mode: ModeReal,
+	})
+	if err == nil {
+		t.Fatal("expected an error for a provider transport failure")
+	}
+
+	var metadataJSON []byte
+	var reason string
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx,
+			`SELECT metadata, metadata->>'reason' FROM audit_log
+			 WHERE tenant_id = $1 AND action = 'casino.launch_failed'
+			 ORDER BY created_at DESC LIMIT 1`,
+			f.tenantID).Scan(&metadataJSON, &reason)
+	}); err != nil {
+		t.Fatalf("read casino.launch_failed audit metadata: %v", err)
+	}
+	if strings.Contains(string(metadataJSON), secretQuery) || strings.Contains(string(metadataJSON), "SuperSecretSauce123") {
+		t.Fatalf("audit metadata leaked the secret-bearing URL: %s", metadataJSON)
+	}
+	if reason != string(LaunchFailureProviderUnavailable) {
+		t.Fatalf("expected reason %q, got %q (full metadata: %s)", LaunchFailureProviderUnavailable, reason, metadataJSON)
+	}
+}
+
 func TestLaunchGame_CircuitOpenRevokesAndAudits(t *testing.T) {
 	pool := testPool(t)
 	f := seedCasinoFixture(t, pool)

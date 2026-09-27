@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math/big"
+	"net/url"
 	"strings"
 	"time"
 
@@ -76,6 +77,69 @@ func (o *Orchestrator) phaseCLogger() *slog.Logger {
 		return o.webhookLogger
 	}
 	return slog.Default()
+}
+
+// LaunchFailureReason is a closed, bounded classification of why phase C
+// (launchFailed) revoked a launch session - the ONLY thing ever written
+// into the append-only "casino.launch_failed" audit record's "reason"
+// field (orchestrator review follow-up on RV-PRH-I2: raw error text, e.g.
+// a *url.Error's embedded request URL, must never reach append-only
+// audit storage - a future real HTTP adapter's transport error can carry
+// query-string credentials). The underlying cause's own text is available
+// only through LaunchGame's returned Go error (never persisted) and, in
+// redacted form, through phaseCLogger's operator-only log line.
+type LaunchFailureReason string
+
+const (
+	LaunchFailureProviderUnavailable       LaunchFailureReason = "provider_unavailable"
+	LaunchFailureDeclined                  LaunchFailureReason = "declined"
+	LaunchFailureCircuitOpen               LaunchFailureReason = "circuit_open"
+	LaunchFailureCredentialUnavailable     LaunchFailureReason = "credential_unavailable"
+	LaunchFailureCredentialBindingMismatch LaunchFailureReason = "credential_binding_mismatch"
+	LaunchFailureCtxCancelled              LaunchFailureReason = "ctx_cancelled"
+	LaunchFailureInternal                  LaunchFailureReason = "internal"
+)
+
+// redactedLaunchFailureDetail is the ONLY place cause.Error() text is ever
+// rendered, and only for phaseCLogger's operator-only log line - never for
+// the append-only audit record (see LaunchFailureReason). It never echoes
+// arbitrary error text: a *url.Error's embedded request URL (which may
+// carry a query-string credential) is reduced to its operation plus a
+// timeout/canceled/transport-error classification, exactly like
+// internal/payments' own gate.go redactedReason (S95-C8(a)) - duplicated
+// rather than imported, since internal/casino must not import
+// internal/payments. Anything else that is not one of this package's own
+// recognized sentinels is reduced to a fixed, non-identifying label,
+// stricter than simply falling back to err.Error().
+func redactedLaunchFailureDetail(err error) string {
+	if err == nil {
+		return ""
+	}
+	var uerr *url.Error
+	if errors.As(err, &uerr) {
+		switch {
+		case errors.Is(uerr.Err, context.DeadlineExceeded):
+			return fmt.Sprintf("%s: timeout", uerr.Op)
+		case errors.Is(uerr.Err, context.Canceled):
+			return fmt.Sprintf("%s: canceled", uerr.Op)
+		default:
+			return fmt.Sprintf("%s: transport error", uerr.Op)
+		}
+	}
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		return "timeout"
+	case errors.Is(err, context.Canceled):
+		return "canceled"
+	case errors.Is(err, ErrProviderUnavailable):
+		return "provider unavailable"
+	default:
+		// Never echo unrecognized error text verbatim - it may originate
+		// from a real adapter's transport layer or vendor SDK and embed
+		// response bytes, headers or a credential-bearing URL that did not
+		// happen to be wrapped in a *url.Error.
+		return "adapter error (redacted)"
+	}
 }
 
 // NewOrchestrator constructs an Orchestrator over the given adapter
@@ -454,7 +518,16 @@ func (o *Orchestrator) LaunchGame(ctx context.Context, pool providercred.TenantT
 	// A failure of phase C itself (not the triggering cause) is logged at
 	// error level - never discarded - since it can leave a live, bet-
 	// eligible session with no trace in the audit table (F3).
-	launchFailed := func(cause error) (LaunchGameResult, error) {
+	// launchFailed's "reason" parameter is the ONLY thing ever written into
+	// the append-only casino.launch_failed audit record - a closed,
+	// bounded LaunchFailureReason, never cause.Error() (orchestrator
+	// review follow-up on RV-PRH-I2: a real adapter's transport error can
+	// carry a full request URL, including query-string credentials, and
+	// append-only audit storage must never receive that). cause's own text
+	// reaches an operator ONLY through phaseCLogger's log line, and only
+	// in redactedLaunchFailureDetail's redacted form - never verbatim,
+	// never into audit.
+	launchFailed := func(reason LaunchFailureReason, cause error, logFields ...any) (LaunchGameResult, error) {
 		phaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), phaseCTimeout)
 		defer cancel()
 		var revoked bool
@@ -470,10 +543,21 @@ func (o *Orchestrator) LaunchGame(ctx context.Context, pool providercred.TenantT
 				Outcome: audit.OutcomeFailure,
 				Metadata: map[string]any{
 					"game_id": params.GameID.String(), "provider_id": providerID, "provider_game_id": providerGameID,
-					"reason": cause.Error(), "revoked": revoked,
+					"reason": string(reason), "revoked": revoked,
 				},
 			})
 		})
+		// Operator-only, redaction-safe detail line - every launch failure,
+		// not only a phase-C transaction failure, so the actual cause is
+		// still discoverable somewhere without ever touching audit.
+		// logFields carries only pre-vetted, structured, non-error-text
+		// values a call site explicitly chose to attach (e.g. the
+		// provider's own declared decline_reason) - never a raw error.
+		fields := append([]any{
+			"tenant_id", params.TenantID.String(), "session_id", session.ID.String(),
+			"provider_id", providerID, "reason", string(reason), "detail", redactedLaunchFailureDetail(cause),
+		}, logFields...)
+		o.phaseCLogger().Warn("casino_launch_failed", fields...)
 		if phaseErr != nil {
 			o.phaseCLogger().Error("casino_launch_phase_c_failed", "tenant_id", params.TenantID.String(),
 				"session_id", session.ID.String(), "action", "casino.launch_failed", "error", phaseErr.Error())
@@ -490,14 +574,14 @@ func (o *Orchestrator) LaunchGame(ctx context.Context, pool providercred.TenantT
 		// the same process-lifetime registry), but never assume: fail the
 		// same way an actually-missing adapter would, without dereferencing
 		// a nil CasinoProvider.
-		return launchFailed(fmt.Errorf("%w: provider %q no longer registered", ErrProviderUnavailable, providerID))
+		return launchFailed(LaunchFailureInternal, fmt.Errorf("%w: provider %q no longer registered", ErrProviderUnavailable, providerID))
 	}
 
 	// Health snapshot outside any transaction (ADR 0095 §9.6/§15.1):
 	// HealthStatus is contractually in-memory-only and returns promptly, so
 	// this never performs I/O while (or without) a pooled connection held.
 	if health, err := provider.HealthStatus(ctx); err == nil && health.CircuitState == CircuitOpen {
-		return launchFailed(fmt.Errorf("%w: circuit open", ErrProviderUnavailable))
+		return launchFailed(LaunchFailureCircuitOpen, fmt.Errorf("%w: circuit open", ErrProviderUnavailable))
 	}
 
 	// Phase B: resolve the per-call outbound credential (PROV-OUTBOUND-
@@ -505,7 +589,7 @@ func (o *Orchestrator) LaunchGame(ctx context.Context, pool providercred.TenantT
 	// this function that may perform real provider I/O, with no pooled
 	// connection held across it.
 	if outbound == nil {
-		return launchFailed(fmt.Errorf("%w: no outbound credential resolver configured", ErrProviderUnavailable))
+		return launchFailed(LaunchFailureCredentialUnavailable, fmt.Errorf("%w: no outbound credential resolver configured", ErrProviderUnavailable))
 	}
 	cred, err := outbound.Resolve(ctx, pool, params.TenantID, providerID)
 	if err != nil {
@@ -514,14 +598,14 @@ func (o *Orchestrator) LaunchGame(ctx context.Context, pool providercred.TenantT
 		// credential is not something the player caused or can retry
 		// around any differently), so it maps to 503 exactly like every
 		// other phase-B/phase-A-registry failure - not a generic 500.
-		return launchFailed(fmt.Errorf("%w: resolve outbound credential: %v", ErrProviderUnavailable, err))
+		return launchFailed(LaunchFailureCredentialUnavailable, fmt.Errorf("%w: resolve outbound credential: %v", ErrProviderUnavailable, err))
 	}
 	// Defense in depth (ADR 0095 §9.1/S95-C8(b)): the credential this call
 	// just resolved must bind to the SAME tenant/provider/domain LaunchGame
 	// is launching for. A resolver bug or a future real adapter's own
 	// mismatch is caught here rather than silently used.
 	if cred.TenantID != params.TenantID || cred.ProviderID != providerID || cred.Domain != "casino" {
-		return launchFailed(fmt.Errorf("%w: outbound credential binding mismatch", ErrProviderUnavailable))
+		return launchFailed(LaunchFailureCredentialBindingMismatch, fmt.Errorf("%w: outbound credential binding mismatch", ErrProviderUnavailable))
 	}
 
 	call := CallContext{
@@ -538,11 +622,20 @@ func (o *Orchestrator) LaunchGame(ctx context.Context, pool providercred.TenantT
 		// session was never actually usable, so revoke it rather than
 		// leaving an 'active' row a retried launch attempt could never
 		// reach (a fresh LaunchGame call mints its own new session instead
-		// of trying to reuse this one).
-		return launchFailed(fmt.Errorf("provider launch call failed: %w", err))
+		// of trying to reuse this one). Distinguishes a ctx-cancellation-
+		// induced transport failure (a client disconnect mid-Launch) from
+		// any other transport failure - both revoke and audit identically,
+		// but the closed reason code says which, without ever storing the
+		// adapter's own error text.
+		reason := LaunchFailureProviderUnavailable
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			reason = LaunchFailureCtxCancelled
+		}
+		return launchFailed(reason, fmt.Errorf("provider launch call failed: %w", err))
 	}
 	if result.Outcome != OutcomeSucceeded {
-		return launchFailed(fmt.Errorf("provider declined launch: %s", result.DeclineReason))
+		return launchFailed(LaunchFailureDeclined, fmt.Errorf("provider declined launch: %s", result.DeclineReason),
+			"decline_reason", result.DeclineReason)
 	}
 
 	// Phase C success: a second short transaction for the "casino.launched"
@@ -569,7 +662,7 @@ func (o *Orchestrator) LaunchGame(ctx context.Context, pool providercred.TenantT
 		// revoke too (never leave the session silently active with an
 		// unaudited "launched" that the caller was just told failed),
 		// through the SAME ctx-independent, logged path launchFailed uses.
-		return launchFailed(fmt.Errorf("%w: audit launch: %v", ErrProviderUnavailable, err))
+		return launchFailed(LaunchFailureInternal, fmt.Errorf("%w: audit launch: %v", ErrProviderUnavailable, err))
 	}
 
 	return LaunchGameResult{LaunchURL: result.LaunchURL, SessionID: session.ID, ExpiresAt: session.ExpiresAt}, nil
