@@ -131,3 +131,128 @@ The baseline `go test -tags integration ./internal/kyc/` passed on the private D
 
 - **C1** blocks marking PRH-I2 (KYC) complete, and would block production launch if left open.
 - **C2**, **C3** and KYC-SUBMIT-OUTBOX-1 block registering any real KYC adapter.
+
+---
+
+## Re-verification: fix round `492cb20` (merged at `b9db031`)
+
+- Reviewer: `security` specialist
+- Date: 2026-09-27
+- Reviewed at: `b9db031`, in a detached worktree. HEAD later moved to `f7a0da0`, but the only changes in between are docs, payments and migration 0105; no KYC code changed.
+- Verdict: **C1 CLOSED. PRH-I2 (KYC part) is no longer blocked by this review.**
+  - C2, C3 and C4 are closed. C5 is closed in code but has no test (N-2).
+  - The F1 enforcement change is sound. It never turns a real deny into an allow.
+  - A new finding, **N-1 (HIGH, pre-existing, ADR 0096)**, is not caused by this diff and does not block PRH-I2. It must be tracked, and it blocks production launch until resolved.
+
+### Method
+
+- Worktree: detached at `b9db031` under the session scratchpad.
+- Database: private DB `sec_rv_kyc_i2_r2`, created via `TEST_ADMIN_DATABASE_URL` with owner `igaming`, migrated to 104. `deploy/init-app-role.sql` was applied, minus its `CREATE ROLE igaming` statement and with the DB name adapted.
+- Baseline: `go test -tags integration` passed for `./internal/kyc/`, `./cmd/platform-api/`, `./internal/withdrawal/` and `./internal/httpserver/` (full package, run clean). `-race ./internal/kyc/` also passed.
+- Mutants: each was one scripted edit, tested against the kyc, platform-api and withdrawal packages plus `httpserver -run 'KYC|Kyc'`, then reverted with `git checkout`. The tree was clean afterwards.
+- The worktree and the DB were removed afterwards.
+
+| Mutant | Edit | Result |
+|---|---|---|
+| R1-blind | `applyForwardOnlyStatus`: rank guard disabled and `AND status = $5` removed (the old blind write) | **KILLED**: `..._StaffRejectDuringProviderCall_Survives`, `..._CallbackApprovalDuringProviderCall_NotDemoted` |
+| R1-norank | Rank guard disabled, CAS kept (a lost race overwrites whatever it re-reads) | **KILLED** by the same two tests |
+| R1-lt | `newRank <= rank` changed to `<` (a same-rank result overwrites a staff decision) | **KILLED**: `..._StaffRejectDuringProviderCall_Survives` |
+| F1a | Primary-read predicate replaced with `TRUE` | **KILLED**: `TestEvaluateEnforcement_OrphanAfterApproval_StillPassed` |
+| F1b | Overlay inner predicate removed | **KILLED**: `..._OrphanOnAnotherAccount_DoesNotMaskRejection` |
+| F1c | Both predicates widened to `NOT (status='unverified')` | **SURVIVED, equivalent** (see F1 below) |
+| F1d | Both predicates narrowed to `provider_reference IS NOT NULL`, which hides decided rows that have a NULL reference | **KILLED**: 8+ `TestEvaluateEnforcement_*` |
+| F1e | Overlay only narrowed to `provider_reference IS NOT NULL` | **KILLED**: `..._WithdrawalCrossAccountRejectedOverlayDenies` |
+| C5-raw | `RedactedProviderErrorDetail` default case returns `err.Error()` | **SURVIVED** (N-2) |
+| C4 | `len(submitted)==0` skip disabled | **KILLED**: `..._EmptyDocumentSetIsANoOp` |
+| C3-log | `kyc_webhook_reference_unknown` log line removed | **KILLED**: `TestKYCWebhook_ReferenceUnknownLogging_AllowListOnly` |
+| C3-retry | `writeAdmissionRejection` replaced with plain `apierror.Write` (no `Retry-After`) | **KILLED**: `TestKYC_WebhookCallbackAuthentication` |
+| C2 (my original mutant C) | Kind-split resolver always prefers mock | **KILLED**: `..._NonSyntheticAdapterUsesRealOnly`, `..._SyntheticAdapterWithNilMockFailsClosed` |
+
+When several packages ran in parallel against the one DB, `TestResolutionIsolation_*` in httpserver failed once. The same tests pass when run alone and in a clean full-package run. This is load flakiness and has nothing to do with the KYC change.
+
+### Finding status
+
+**C1 / R1 (HIGH): CLOSED.**
+- `applyForwardOnlyStatus` is a CAS on phase A's status. On a lost race it re-reads, applies the same rank rule as the callback path, and allows 3 attempts before failing closed.
+- The blind `updateVerificationStatus` is deleted. Grep finds no other status writer without a predicate. The remaining writers are Create phase C (CAS), the callback path (CAS), and `ReviewVerification` (staff, intentionally authoritative).
+- The regression tests commit the concurrent staff decision and the concurrent callback *inside* the provider call, so they exercise the real lost-CAS path.
+- A superseded submission still writes its audit row, with `status_applied=false`.
+- Residual (informational, pre-existing, same as the callback path): staff `review_required` has rank 2, so a later provider or callback `approved` (rank 3) still moves the row forward to `approved`. Whether a staff escalation should be sticky against a vendor auto-approval is a policy question for `identity-compliance`. It is not a regression.
+
+**F1 (enforcement orphan exclusion): VERIFIED SOUND.** Adversarial analysis:
+1. **Only never-decided rows match the predicate `status='unverified' AND provider_reference IS NULL`.**
+   - Only `insertOrphanVerification` ever writes `unverified`.
+   - Create phase C writes a `statusForOutcome` status, or `pending`. It never writes `unverified`.
+   - Callbacks can only reach rows that have a reference.
+   - `ReviewVerification` only writes approved, rejected or review_required.
+   - `statusRank` has no backward move to rank 0.
+   - So once a row receives any decision, it leaves the predicate permanently, and no decided row can be hidden. A staff-reviewed orphan or a decided row with a NULL reference stays visible; F1d/F1e prove this is test-pinned.
+2. **Can a player or attacker manufacture a matching row to hide a rejection?**
+   - Players can create orphans. Only the player's own session can call `POST /me/verifications`, and a failure in phase B (including a client disconnect cancelling the request context during a real adapter's I/O) leaves an orphan.
+   - After the fix, an orphan is invisible to both reads, so it cannot mask anything.
+   - **Before the fix**, a newer orphan on the rejected account B *did* mask B's rejection in the overlay, which was a deny→allow. This fix closes it. ADR 0096 §19.1's statement that the pre-fix defect "never lets a real deny through as an allow" is therefore inaccurate for the overlay half (doc correction, LOW). §19 also cites a "§4 item 1 note" in this review. No such section exists; the overlay point was code review F1.
+3. **Can the predicate turn a deny into an allow?** Only in one case: an approved row followed by a newer orphan. Before the fix this was `unverified→failed`; now it is `passed`, based on a still-valid approval whose `expires_at` is still checked. This is the intended fix, and the orphan carries no decision that could justify a deny. No staff or system path creates an `unverified` row to force re-verification. The only caller of `CreateVerification` is the player handler. An all-orphan account still evaluates as `found=false`, so it is denied.
+4. **Consumers.** All three consumers share the single primary read `readLatestVerificationByPlayerAccount`: withdrawal hold/payout (with the overlay), the deposit threshold path and play triggers. No other enforcement "latest" read exists (verified by grep). Deposit and play have no overlay, so the only F1 effect there is point 3.
+5. **The F1c equivalence is by construction.** No writer produces `unverified` with a non-NULL reference. The narrower predicate that was implemented is the fail-closed choice: if a future writer did produce such a row, it would stay visible and deny. Keep the narrow form.
+6. **Minor.** The overlay repeats the predicate inline instead of using `orphanRowExclusionSQL`, which is a drift risk. F1b/F1e pin it.
+
+**C2: CLOSED.** The KYC kind-split tests plus the wiring twin kill the always-mock mutant.
+
+**C3: CLOSED.**
+- The log line contains only request_id, tenant_id and provider_id. No reference and no body.
+- `Retry-After` is set. Both halves are test-pinned.
+- The permanently stuck reference is recorded under KYC-SUBMIT-OUTBOX-1, which still blocks any real adapter.
+
+**C4: CLOSED.** Implemented and test-pinned.
+- Code re-review N1 (`rv-prh-i2-kyc-code-review.md`) found that this change makes `TestSubmitVerification_TerminalVerificationIsANoOp` vacuous, so evidence M8 is no longer killed. I agree. That is a test and evidence correction, with no security impact.
+
+**C5: CLOSED in code, untested (N-2).**
+- The two named log sites now use `kyc.RedactedProviderErrorDetail`, whose output is allow-listed and never includes raw text.
+- In the phase B/C slog lines inside `internal/kyc`, B logs ids only. Phase C adds DB `err.Error()`.
+- `create_verification_failed` still logs raw `err` for non-provider errors. Those errors come from DB or phase C. The one realistic content is a unique-violation detail that echoes a vendor `provider_reference`. That is an opaque vendor id, not PII or a secret (informational).
+
+**F3 (mutation evidence):** 17/17 is not accurate as stated. Code re-review N1 showed M8 surviving, and C5 has no mutant or test at all. Neither affects the security verdict.
+
+### New findings
+
+**N-1: HIGH, pre-existing (ADR 0096 overlay), not introduced by this diff. Does not block PRH-I2. Blocks production launch until resolved or explicitly risk-accepted by the human.**
+
+A player can neutralise the cross-account rejection overlay with one ordinary API call.
+
+Reproduced on the private DB with an uncommitted probe:
+1. Person P has account A (approved) and account B (rejected).
+2. Overlay precondition confirmed: a withdrawal from A is denied.
+3. P calls the normal `CreateVerification` path on account B. The mock provider returns `pending` with a reference set.
+4. A withdrawal from A is now **allowed**: `outcome=passed`, `code=kyc_withdrawal_hold:passed`.
+
+The cause is that the overlay only looks at each other account's *latest decided* row, and a fresh `pending` counts as decided. The same thing happened before this fix round, and before the PRH-I2 split: a single-transaction create also produced a newest `pending` row.
+
+ADR 0096 §19.4 explicitly calls this "correct, not a residual gap". I disagree. The overlay exists (security N1) so that a rejection on one account of a Person denies withdrawals on the others. A rejected player choosing to start a new verification is not new evidence and must not lift that deny. Only a later **terminal** decision on B (for example `approved`) should.
+
+Suggested direction, to be decided by `identity-compliance` and the `architect`: base the overlay on each other account's latest *terminal* row, or on a rejection not superseded by a later terminal row, instead of its latest decided row.
+
+Required test: `rejected(B) → fresh CreateVerification on B (pending) → withdrawal from approved A still denies`.
+
+**N-2: LOW. `RedactedProviderErrorDetail` has no test.** The C5-raw mutant survives the whole suite. Add a unit test covering:
+- a wrapped raw error with sentinel text never appears in the output
+- `DeadlineExceeded`, `Canceled` and `ErrProviderUnavailable` each map to their fixed strings
+- a handler-level log capture for `create_verification_provider_unavailable`
+
+Required before a real KYC adapter is registered, alongside C2/C3.
+
+### Launch-blocking flags (updated)
+
+- C1 no longer blocks.
+- **N-1** blocks production launch until resolved or explicitly risk-accepted by the human.
+- **KYC-SUBMIT-OUTBOX-1** and **N-2** block registering any real KYC adapter.
+
+### Scope of this re-verification
+
+In scope: the `492cb20` diff to `internal/kyc/{provider,document_service,verification_service,enforcement,callcontext}.go` and to `internal/httpserver/kyc_{handlers,admin_handlers}.go`, plus their tests.
+
+Not re-reviewed:
+- the rest of ADR 0096's enforcement (`enforcement_admin`, `decisions_read`, `dormancy`)
+- payments and casino
+- the ADR 0095 prose, beyond the §15.3 wording fix
+
+No penetration testing was done.
