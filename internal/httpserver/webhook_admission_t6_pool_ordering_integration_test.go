@@ -20,13 +20,22 @@
 // survive a future change that adds an unrelated acquisition to the
 // admitted path only, silently widening the margin and hiding a real
 // regression). The exact numbers were measured empirically against this
-// same real 10-connection pool:
-//   - payments: 3 admitted, 2 limited (tenant-slug lookup,
-//     ProviderAcceptsWebhook and credential resolution are payments' own
-//     three pre-domain gated reads).
-//   - casino: 2 admitted, 1 limited (casino's VerifyCallback has no
-//     ProviderAcceptsWebhook-style first read - credential resolution is
-//     its only pre-verification read, alongside the shared slug lookup).
+// same real 10-connection pool.
+//
+// Security re-verification #3 (rv-prh-i4-security.md §8.3, Info I8): the
+// composition below was corrected. The pinned numbers INCLUDE the
+// admitted path's deps.DB.WithTenant acquisition, and credential
+// resolution makes NO separate pool acquisition in this harness, because
+// it uses MOCK webhook credentials (the resolver never touches the pool
+// at all) - never "tenant-slug lookup, ProviderAcceptsWebhook and
+// credential resolution" as an earlier draft of this comment wrongly
+// said. The correct composition:
+//   - payments: 3 admitted (tenant-slug lookup, ProviderAcceptsWebhook,
+//     then deps.DB.WithTenant), 2 limited (the same two gated reads,
+//     minus WithTenant, since B1 rejects before it opens).
+//   - casino: 2 admitted (tenant-slug lookup, then deps.DB.WithTenant -
+//     casino's VerifyCallback has no ProviderAcceptsWebhook-style first
+//     read), 1 limited (the slug lookup alone).
 //   - kyc: 2 admitted, 1 limited (same shape as casino).
 //
 // Uses the real, production-sized 10-connection pool (phasecapture.Pool10)
@@ -44,12 +53,14 @@ import (
 	"net/http/httptest"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Diansalas/igaming-platform/internal/casino"
 	"github.com/Diansalas/igaming-platform/internal/db"
+	"github.com/Diansalas/igaming-platform/internal/identityresolution"
 	"github.com/Diansalas/igaming-platform/internal/kyc"
 	"github.com/Diansalas/igaming-platform/internal/payments"
 	"github.com/Diansalas/igaming-platform/internal/testsupport/phasecapture"
@@ -181,14 +192,18 @@ func TestAdmission_T6g_B1RunsBeforeWithTenant_ExactPoolAcquisitionCounts(t *test
 		orchestrator := kyc.NewOrchestrator(map[string]kyc.KYCProvider{"mock": mock}, kyc.NewMockWebhookCredentials(mock))
 
 		tenant := mustCreateTenant(t, pool)
-		mustCreateBrand(t, pool, tenant)
+		brand := mustCreateBrand(t, pool, tenant)
 
 		settings := t6Settings()
 		settings.VerifiedRate["kyc"] = WebhookRateBurst{Rate: 10, Burst: 1}
 		logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 		handler, rt := NewWithAdmission(Deps{
 			DB: pool, AuthIssuer: issuer, ServiceName: "platform-api-test", Logger: logger,
-			KYCOrchestrator: orchestrator, KYCWebhookEnabled: true, WebhookAdmission: settings,
+			AccessTokenTTL: 5 * time.Minute, RefreshTokenTTL: time.Hour,
+			PersonResolver:         identityresolution.NewMockPersonResolver(),
+			KYCOrchestrator:        orchestrator,
+			KYCOutboundCredentials: kyc.NewMockOutboundResolver(),
+			KYCWebhookEnabled:      true, WebhookAdmission: settings,
 		})
 		if err := rt.LoadDirectory(context.Background()); err != nil {
 			t.Fatal(err)
@@ -196,11 +211,36 @@ func TestAdmission_T6g_B1RunsBeforeWithTenant_ExactPoolAcquisitionCounts(t *test
 		srv := httptest.NewServer(handler)
 		t.Cleanup(srv.Close)
 
+		// Security re-verification #3 (rv-prh-i4-security.md §8.4, Info
+		// I7): a REAL verification, seeded through the actual player-
+		// facing endpoint (the orchestrator's single, synthetic MOCK
+		// adapter auto-selects with no capability-enable step needed -
+		// provider_selection.go's own "exactly one registered adapter and
+		// it is synthetic" rule), so the "must not change" assertion below
+		// is falsifiable: an unknown-reference callback would fail closed
+		// regardless of admission ordering (ErrVerificationReferenceUnknown,
+		// writing no row), which is why the earlier version of this check
+		// could never fail no matter what the admission code did.
+		player := mustRegisterPlayer(t, srv, brand.Slug)
+		createResp := postJSON(t, srv, "/v1/me/kyc/verifications", player.Tokens.AccessToken, map[string]any{})
+		if createResp.StatusCode != http.StatusCreated {
+			t.Fatalf("kyc: expected 201 seeding a real verification, got %d", createResp.StatusCode)
+		}
+		var created map[string]any
+		decodeBody(t, createResp, &created)
+		verificationID := uuid.MustParse(created["id"].(string))
+		beforeStatus, beforeUpdatedAt, providerRef := kycVerificationSnapshot(t, pool, tenant.ID, verificationID)
+		if providerRef == "" {
+			t.Fatal("kyc: the seeded verification has no provider_reference - the test's own setup is broken")
+		}
+
 		// The first (admitted) attempt reaches deps.DB.WithTenant - this
 		// test is only about WHETHER it got there (past B1), never about
 		// what domain processing then decides, so its own HTTP status is
-		// not asserted here (a minimal harness with no capability-enable
-		// step may itself answer non-2xx once inside the transaction).
+		// not asserted here. It uses an UNRELATED reference (not the real
+		// seeded verification's own) so the property under test here
+		// (pool-acquisition delta) does not depend on whether the domain
+		// layer accepts or rejects this specific callback's content.
 		before := pool.Raw().Stat().AcquireCount()
 		admitted := mock.CallbackPayload(tenant.ID, "t6g-kyc-1", kyc.ProviderApproved, "")
 		admittedResp := rawPostCallback(t, srv, "/v1/webhooks/kyc/"+tenant.Slug+"/mock", payments.InboundCallback{Header: admitted.Header, Body: admitted.Body})
@@ -213,11 +253,11 @@ func TestAdmission_T6g_B1RunsBeforeWithTenant_ExactPoolAcquisitionCounts(t *test
 			t.Fatalf("kyc: admitted acquisition delta = %d, want exactly %d (security Info I5)", got, wantAdmittedDelta)
 		}
 
-		// A second, distinct callback (same tenant+provider identity) is
-		// now unambiguously B1-limited.
+		// A second, distinct callback - naming the REAL seeded
+		// verification's own provider_reference this time - is now
+		// unambiguously B1-limited.
 		before = pool.Raw().Stat().AcquireCount()
-		const limitedRef = "t6g-kyc-2"
-		limited := mock.CallbackPayload(tenant.ID, limitedRef, kyc.ProviderApproved, "")
+		limited := mock.CallbackPayload(tenant.ID, providerRef, kyc.ProviderApproved, "")
 		limitedResp := rawPostCallback(t, srv, "/v1/webhooks/kyc/"+tenant.Slug+"/mock", payments.InboundCallback{Header: limited.Header, Body: limited.Body})
 		limitedResp.Body.Close()
 		if limitedResp.StatusCode != http.StatusTooManyRequests {
@@ -228,31 +268,34 @@ func TestAdmission_T6g_B1RunsBeforeWithTenant_ExactPoolAcquisitionCounts(t *test
 			t.Fatalf("kyc: B1-limited acquisition delta = %d, want exactly %d - admitVerified must run "+
 				"strictly BEFORE deps.DB.WithTenant, never inside it (security §4/§7.5)", got, wantLimitedDelta)
 		}
-		// Security's Info I7 (recommended, not required): a KYC-relevant
-		// zero-row check instead of a vacuous ledger-row assertion (KYC
-		// never writes ledger rows at all, so that check would pass
-		// regardless of whether this test's own admission property held).
-		// A limited callback must never reach domain processing, so no
-		// kyc_verifications row naming this reference should exist.
-		if kycVerificationExistsForRef(t, pool, tenant.ID, limitedRef) {
-			t.Fatal("a B1-limited KYC callback must not create/change any kyc_verifications row")
+		// Security's Info I7 (now falsifiable): the REAL, PRE-EXISTING
+		// verification named by the limited callback's own reference must
+		// be completely untouched - same status, same updated_at - proof
+		// the limited callback never reached domain processing.
+		afterStatus, afterUpdatedAt, _ := kycVerificationSnapshot(t, pool, tenant.ID, verificationID)
+		if afterStatus != beforeStatus || !afterUpdatedAt.Equal(beforeUpdatedAt) {
+			t.Fatalf("a B1-limited KYC callback changed the targeted verification: status %q -> %q, "+
+				"updated_at %s -> %s", beforeStatus, afterStatus, beforeUpdatedAt, afterUpdatedAt)
 		}
 	})
 }
 
-// kycVerificationExistsForRef reports whether any kyc_verifications row
-// under tenantID names providerReference in its own provider_reference
-// column - security's Info I7.
-func kycVerificationExistsForRef(t *testing.T, pool *db.Pool, tenantID uuid.UUID, providerReference string) bool {
+// kycVerificationSnapshot reads one kyc_verifications row's status,
+// updated_at and provider_reference - security's Info I7 falsifiable
+// unchanged-row check.
+func kycVerificationSnapshot(t *testing.T, pool *db.Pool, tenantID, verificationID uuid.UUID) (status string, updatedAt time.Time, providerReference string) {
 	t.Helper()
-	var count int
+	var providerRef *string
 	err := pool.WithTenant(context.Background(), tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		return tx.QueryRow(ctx,
-			`SELECT count(*) FROM kyc_verifications WHERE tenant_id = $1 AND provider_reference = $2`,
-			tenantID, providerReference).Scan(&count)
+			`SELECT status, updated_at, provider_reference FROM kyc_verifications WHERE tenant_id = $1 AND id = $2`,
+			tenantID, verificationID).Scan(&status, &updatedAt, &providerRef)
 	})
 	if err != nil {
-		t.Fatalf("kycVerificationExistsForRef: %v", err)
+		t.Fatalf("kycVerificationSnapshot: %v", err)
 	}
-	return count != 0
+	if providerRef != nil {
+		providerReference = *providerRef
+	}
+	return status, updatedAt, providerReference
 }

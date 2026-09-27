@@ -1292,10 +1292,49 @@ Security's second re-verification found round 4's own "T6 closed" and "C3 closed
   (`domain|tenantSlug|providerID`), failing immediately on a mismatch - closes the gap where
   the fake would previously admit/refuse purely by call count, regardless of key, and so
   could not have caught a regression that gated credential resolution on the wrong A4b key.
-- **Info I7 (recommended, done):** the KYC subtest's zero-row assertion now checks
-  `kyc_verifications` directly (no row created/changed for a B1-limited callback's own
-  reference) instead of the vacuous ledger-row check KYC never exercises (KYC writes no
-  ledger rows at all).
+- **Info I7, claimed done here — corrected by round 6 (see §21.11): overstated.** The KYC
+  subtest's `kyc_verifications` check landed only in `TestAdmission_T6g`'s KYC subtest, not in
+  `TestAdmission_C1a_KYC…` (which still asserted the vacuous ledger-row count). Worse, the
+  T6g check itself was vacuous too: the harness never created a real verification, and an
+  unknown-reference KYC callback fails closed (`ErrVerificationReferenceUnknown`) without
+  writing any row at all - so the assertion could never fail no matter what the admission
+  ordering was. Security's re-verification #3 (`rv-prh-i4-security.md` §8.4) caught this;
+  §21.11 records round 6's fix (seed a real verification, target its own reference, assert
+  it is unchanged - genuinely falsifiable now).
 
 Full mutation-kill evidence: `docs/plans/payment-readiness/evidence/prh-i4-mutation-kill.txt`
 (round 5 section: B1-casino, B1-kyc, N2b, N2c).
+
+### 21.11 Round 6 follow-up (security re-verification #3, `rv-prh-i4-security.md` §8, APPROVE)
+
+Security's third re-verification approved PRH-I4/PAYWH-RL-1 outright (all conditions C1-C4,
+T4, T6, C3/L8, L1-L3(partial), T10, T11 closed) and found two non-blocking documentation/test
+gaps, both fixed here:
+
+- **Info I7, now genuinely closed.** Both `TestAdmission_T6g`'s KYC subtest and
+  `TestAdmission_C1a_KYCCredentialResolutionGateRejection_Isolated` now seed a REAL
+  `kyc_verifications` row through the actual player-facing `POST /v1/me/kyc/verifications`
+  endpoint (the orchestrator's single, synthetic MOCK adapter auto-selects with no
+  capability-enable step, per `provider_selection.go`'s "exactly one registered adapter and
+  it is synthetic" rule), target that row's own `provider_reference` with the gate-rejected/
+  limited callback, and assert its `status`/`updated_at` are byte-for-byte unchanged
+  afterward. This is now falsifiable: verified by temporarily forcing the callback through
+  admission (a production mutation) with the test's own delta assertion relaxed to isolate
+  this specific check, which then failed exactly as expected (`status "pending" -> "approved"`)
+  before both the mutation and the temporary test relaxation were reverted.
+- **Info I8, documentation-only, fixed.** `TestAdmission_T6g`'s header comment previously said
+  payments' three admitted acquisitions were "tenant-slug lookup, ProviderAcceptsWebhook and
+  credential resolution", and that casino/KYC's credential resolution was "its only
+  pre-verification read". Both statements were wrong: the pinned numbers INCLUDE the admitted
+  path's `deps.DB.WithTenant` acquisition, and credential resolution makes NO pool acquisition
+  in this harness at all, because it uses MOCK webhook credentials (the resolver never touches
+  the pool). The comment is corrected; the pinned numbers themselves were always correct.
+
+Registry: `PRH-I4-SECREVIEW-1` is now **CLOSED** (security APPROVE, §8.5's verdict). `PRH-I4`
+stays **PARTIALLY IMPLEMENTED** - not because of any remaining condition on this ADR, but
+because `PRH-I4-METRICS-1` (§8's OTel metrics) is still `NOT IMPLEMENTED`, and
+`WEBHOOK-EDGE-1` (R1, pre-launch) is still open. Info items I1-I4, L4, L5 and the L3 residual
+remain registered and open, non-blocking, as before.
+
+Full mutation-kill evidence: `docs/plans/payment-readiness/evidence/prh-i4-mutation-kill.txt`
+(round 6 section: the I7 falsifiability verification).

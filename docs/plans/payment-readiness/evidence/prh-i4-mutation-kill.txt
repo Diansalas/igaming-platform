@@ -459,3 +459,74 @@ moving to the next; git status --short showed only the mutation's own diff at th
 was applied. Full targeted suite (go test -tags=integration ./internal/httpserver/... plus the
 internal/webhookauth, internal/admission, internal/providercred, internal/config unit suites,
 -race on the touched tests, -count=3/-count=5 repeats on TestAdmission_T6g) is green.
+
+--- Round 6 (security re-verification #3, rv-prh-i4-security.md section 8, verdict APPROVE;
+    Info I7 found overstated/vacuous, Info I8 new documentation-only finding) ---
+
+Security's re-verification #3 found round 5's own "Info I7 done" claim overstated: the KYC
+row-unchanged check lived only in TestAdmission_T6g's KYC subtest (not in
+TestAdmission_C1a_KYCCredentialResolutionGateRejection_Isolated, which still asserted the
+vacuous ledger-row count), and even that check was itself vacuous - the harness never created
+a real kyc_verifications row, and an unknown-reference KYC callback fails closed
+(ErrVerificationReferenceUnknown) without writing any row at all, so the assertion could never
+fail regardless of admission ordering.
+
+Fix: both tests now seed a REAL verification through POST /v1/me/kyc/verifications (the
+orchestrator's single, synthetic MOCK adapter auto-selects with no capability-enable step,
+per internal/kyc/provider_selection.go's own "exactly one registered adapter and it is
+synthetic" rule), read its provider_reference and a before-snapshot (status, updated_at) via
+a new kycVerificationSnapshot helper, target that SAME provider_reference with the gate-
+rejected (C1a) or B1-limited (T6g) callback, and assert the row is unchanged afterward. Fixed
+a related provider-ID inconsistency in the C1a KYC test along the way: it had registered the
+orchestrator under "mock-kyc" and posted to "/mock-kyc", while kyc.MockKYCProvider.ID()
+always returns "mock" (used for the actual signing-key derivation) - harmless before (every
+call was gate-rejected before the mismatch could matter), but would have broken the new
+seeded-verification flow (which needs the orchestrator to route to the same provider whose
+credentials it derives). Both now consistently use "mock".
+
+Falsifiability verification (I7): applied a production mutation that lets a B1-rejected
+callback continue into domain processing anyway (the 429 response is already written by
+admitVerified, but the mutation ignores its returned admittedVerified=false and proceeds into
+WithTenant regardless - reproducing the exact "response says rejected but the ordering
+guarantee silently broke" class this whole T6/T6g effort exists to catch):
+    File: internal/httpserver/kyc_admin_handlers.go, newKYCWebhookHandler.
+    Diff:
+      releaseDomainTx, admittedVerified = deps.webhookAdmission.admitVerified(...)
+      + admittedVerified = true
+      if !admittedVerified { return }
+    Because this mutation ALSO changes the pool-acquisition delta (WithTenant now runs), the
+    T6g test's own delta assertion fails FIRST and would mask whether the I7 check itself is
+    exercised. To verify I7 independently, the delta assertion's t.Fatalf was TEMPORARILY
+    replaced with t.Logf for this one verification run only (a test-only, throwaway change,
+    reverted immediately after, never a mutation applied to the pinned deltas' real
+    correctness).
+    Command: go test ./internal/httpserver/... -run TestAdmission_T6g/kyc -tags=integration -v
+    Result: FAIL - "a B1-limited KYC callback changed the targeted verification: status
+    \"pending\" -> \"approved\", updated_at 2026-09-27 12:38:02.127944 +0000 UTC ->
+    2026-09-27 12:38:02.136372 +0000 UTC" - the I7 check independently and correctly detects
+    the broken ordering guarantee, proving it is now genuinely falsifiable.
+    Reverted both the production mutation (kyc_admin_handlers.go) and the temporary test
+    relaxation; confirmed git status --short clean and the full T6g suite green again
+    afterward.
+
+Also re-ran N1-kyc (the round-4/round-5 gatedReader-bypass mutation) against the updated
+C1a KYC test (now using a real seeded verification and consistent "mock" provider ID) to
+confirm it is still correctly killed by the SAME assertion path (uniform-401 check), not
+accidentally masked by the new seeding logic:
+    File: internal/httpserver/kyc_admin_handlers.go, newKYCWebhookHandler.
+    Diff: replaced the gated-reader construction block with a bare
+    "var reader webhookauth.TenantReader = deps.DB".
+    Command: go test ./internal/httpserver/... -run TestAdmission_C1a_KYC -tags=integration -v
+    Result: FAIL - "a DB-gate rejection during credential resolution must NEVER surface as
+    the uniform 401". Reverted; confirmed green.
+
+Info I8 (documentation only): TestAdmission_T6g's own header comment was corrected - the
+pinned deltas include deps.DB.WithTenant on the admitted path and EXCLUDE credential
+resolution entirely (MOCK webhook credentials make no pool acquisition at all); the previous
+comment said the opposite for both. No test or production code changed for I8.
+
+Full targeted suite after round 6: go test -tags=integration ./internal/httpserver/...
+(142.8s, full package, real DB) green; go test -tags=integration -race
+./internal/httpserver/... -run 'TestAdmission_(T6|C1a|T14b)|TestWebhookRouteGuard' green;
+internal/webhookauth, internal/admission, internal/providercred, internal/config unit suites
+green; gofmt/go vet (plain and -tags=integration) clean repo-wide.
