@@ -621,10 +621,44 @@ LOW (security re-verification 3, phase C failure log) - the
 plus the phase-C log LOW fix), 0 equivalent.
 
 ===========================================================================================
+§2.8. FIFTH fix round mutants (2026-09-27) - security re-verification 4 L-1/L-2, identity-
+compliance Ruling 5 (`expired` held on a staff-sticky row)
+===========================================================================================
+
+Base for this section: this same branch/worktree, on top of §2.7's own fourth fix round
+(commit 52a61aa identity-compliance Ruling 5 + security re-verification 4, merged before
+this round began). Same harness (manual scratchpad-copy-mutate-test-restore, private
+database `kyc_r2_fix`, `diff`-verified byte-identical restoration after every mutant
+below).
+
+L-1 (security re-verification 4, LOW; identity-compliance Ruling 5) - the sticky guard's
+SQL predicate and its matching Go re-read check both narrowed BACK to `approved` only
+(security's OWN "gate widened to approved or expired" mutant from re-verification 4, which
+SURVIVED at that time because no test existed - this IS that same mutant, now genuinely
+killed): KILLED [internal/kyc/provider.go] by
+`go test -tags=integration ./internal/kyc/ -run TestEvaluateEnforcement_L1_StaffReviewRequiredThenVendorExpired_HeldForReviewAudited`
+    first failure: --- FAIL: TestEvaluateEnforcement_L1_StaffReviewRequiredThenVendorExpired_HeldForReviewAudited
+                       "L-1: expected the staff-escalated row to STAY review_required
+                       against a vendor expired, got \"expired\""
+    (TestEvaluateEnforcement_N3_StaffReviewRequiredThenVendorRejected_StillApplies remains
+    green throughout this mutant, confirming `rejected` is unaffected by the L-1 widening,
+    exactly as N-3 requires)
+
+L-2 (security re-verification 4, LOW) - the held-for-review de-duplication check
+(`SELECT EXISTS (...)` against audit_log) removed, reverting to an unconditional write on
+every discard: KILLED [internal/kyc/provider.go] by
+`go test -tags=integration ./internal/kyc/ -run TestEvaluateEnforcement_L2_RedeliveredHeldOutcome_DoesNotDuplicateAudit`
+    first failure: --- FAIL: TestEvaluateEnforcement_L2_RedeliveredHeldOutcome_DoesNotDuplicateAudit
+                       "expected 1 audit_log row(s) for action
+                       \"kyc.provider_result_held_for_review\"/target ..., got 3"
+
+2/2 killed this round (L-1, L-2), 0 equivalent.
+
+===========================================================================================
 Post-restoration verification
 ===========================================================================================
 
-After each mutant in §1, §2, §2.5, §2.6, and §2.7 was reverted from its saved backup,
+After each mutant in §1, §2, §2.5, §2.6, §2.7, and §2.8 was reverted from its saved backup,
 `diff` against the pre-mutation saved copy showed byte-identical content for every mutated
 file (internal/kyc/verification_service.go, document_service.go, provider.go,
 callcontext.go, enforcement.go, internal/httpserver/kyc_admin_handlers.go,
@@ -633,11 +667,15 @@ kyc_handlers.go), and the full targeted suite - `go test -tags=integration -race
 -run 'KYC|Kyc'`, `go test -tags=integration -race -count=1 ./internal/withdrawal/...`, and
 `go test -tags=integration -race -count=1 ./cmd/platform-api/...` - passed cleanly against
 the private databases (`kyc_r1_fix_priv`/`kyc_r1_fix_priv2` for the first fix round;
-`kyc_r2_fix`/`kyc_r2_fix2` for the second, third, AND fourth fix rounds, reused after
+`kyc_r2_fix`/`kyc_r2_fix2` for the second through fifth fix rounds, reused after
 re-migrating to head; `kyc_r2_withdrawal`/`kyc_r2_cmd` for the withdrawal/cmd suites - all
 created via TEST_ADMIN_DATABASE_URL, never the shared `igaming_platform_ci_local` instance,
 for the same reason given in the Environment note above). `gofmt -l .`, `go vet ./...`,
 `go vet -tags=integration ./...`, and `golangci-lint run ./...` (the pinned
 golangci-lint-2.9.0-linux-amd64 binary, untagged, matching this repository's own CI
-invocation in .github/workflows/ci.yml) all report clean/0 issues after this fourth fix
+invocation in .github/workflows/ci.yml) all report clean/0 issues after this fifth fix
 round as well.
+
+Running distinct-mutant total: 33 (through the fourth fix round, §2.7's own header note) +
+2 (§2.8, this fifth round) = 35 distinct mutants killed, 0 equivalent, across five fix
+rounds.

@@ -3454,15 +3454,76 @@ same style as the package's other redaction tests), mutation-killed.
 ### 22.5 Labels (round 8 summary)
 
 - **N-3 (security re-verification 3, MEDIUM, production-launch blocker):** IMPLEMENTED - the
-  sticky guard is narrowed to `newStatus = approved` only; a deny-direction result always
-  applies; an explicit `kyc.provider_result_held_for_review` audit row records every discard.
-  Regression tests mutation-killed in all three directions above. **Registry row
-  `KYC-REVIEWREQ-FORWARD-1` stays OPEN, not closed, until security independently re-verifies
-  this fix** - per the coordinator's own explicit instruction, this round's own testing is not
-  a substitute for that re-verification.
+  sticky guard is narrowed to `newStatus = approved` only (WIDENED again by §22.6 below to
+  `approved`/`expired`); a deny-direction result (`rejected`) always applies; an explicit
+  `kyc.provider_result_held_for_review` audit row records every discard. Regression tests
+  mutation-killed in all three directions above. Security re-verification 4 (§22.6) has since
+  independently confirmed this fix (CLOSED).
 - **LOW (phase C failure log):** IMPLEMENTED - bounded via `RedactedProviderErrorDetail`,
   mutation-killed.
 - **§21.2's own "closed"/"ruled and implemented" framing:** SUPERSEDED by this section - see
   §21.2's own correction note and §21.10's corrected bullet.
 - **Everything else in this ADR** (§14-§21's own labels, except the §21.2/§21.10 corrections
   above) is unchanged by this round.
+
+### 22.6 Addendum (2026-09-27) — security re-verification 4, Ruling 5 (L-1): `expired` also held on a staff-sticky row; L-2 (held-for-review de-duplication)
+
+Security re-verification 4 of `e4a4de2` CLOSED N-3 outright (no remaining regression across the
+full N-1/N-1b/N-3 matrix) and found only two LOW, non-blocking notes, both addressed here.
+
+**L-1 — a vendor `expired` on a staff-escalated row should be HELD, exactly like `approved`, not
+applied.** Identity-compliance's own Ruling 5
+(`rv-prh-i2-kyc-identity-compliance.md`) resolves this: `expired` is different from `rejected`
+in exactly the respect that matters for this guard - it is ALREADY excluded from
+`crossAccountRejectedOverlay`'s own `finalStatusesSQL` (N-1b, §21.1), so it is never a
+cross-account signal whether it is held or applied, and this account's OWN enforcement outcome
+is identical either way (a held row stays `review_required`/`OutcomePending`/deny; an applied
+row becomes `expired`/`OutcomeFailed`/deny - both deny, per §2.3's outcome table). Holding it
+therefore costs nothing on the propagation side N-3 protects, and closes the SAME
+case-management gap Ruling 2 already named for `approved`: a vendor `expired` is not a decision
+(ADR 0028 §2), so auto-applying it to a row a compliance officer deliberately escalated would
+close that officer's own open case without any officer ever deciding it. **Fix:**
+`applyForwardOnlyStatus`'s sticky guard (§22.1) is widened from `$1 = 'approved'` to
+`$1 IN ('approved', 'expired')`, with the matching Go re-read short-circuit widened identically
+(`newStatus == StatusApproved || newStatus == StatusExpired`). `rejected` remains fully
+unaffected, exactly as N-3 requires. Test:
+`TestEvaluateEnforcement_L1_StaffReviewRequiredThenVendorExpired_HeldForReviewAudited`
+(`internal/kyc/enforcement_integration_test.go`) - staff escalates, a real verified `expired`
+callback is delivered, the row stays `review_required`, zero `kyc.provider_callback` rows, one
+`kyc.provider_result_held_for_review` row. Mutation-killed: security's own re-verification 4
+mutant ("gate widened to `approved` or `expired`") SURVIVED against round 8's own test suite
+before this fix - it now fails identically to that mutant's own signature when the fix is
+reverted, confirming the mutant that previously survived is now the fix and is genuinely killed.
+`TestEvaluateEnforcement_N3_StaffReviewRequiredThenVendorRejected_StillApplies` (§22.2) remains
+green throughout - `rejected` is untouched by this widening.
+
+**L-2 — `kyc.provider_result_held_for_review` rows repeated on vendor redelivery of the same
+held outcome.** Each redelivery of an already-held outcome (a vendor's own retry policy,
+unaware the platform is holding the result) wrote one more identical audit row - bounded by the
+vendor's retry policy and harmless to enforcement, but noisy for a case-management UI consuming
+these rows. Judged small enough to fix directly rather than register: `applyCallbackOutcome`
+now checks, before writing a `kyc.provider_result_held_for_review` row, whether an identical row
+(same `tenant_id`, `target_id`, and `metadata->>'provider_outcome'`) already exists, and skips
+the write if so. A genuinely DIFFERENT held outcome on the same row (e.g. `approved` held, then
+later `expired` held, both while still escalated) still gets its own, separate row, since the
+outcome itself differs - this is a de-duplication of IDENTICAL redeliveries, not a "one row ever"
+cap. Test: `TestEvaluateEnforcement_L2_RedeliveredHeldOutcome_DoesNotDuplicateAudit` - three
+redeliveries of the SAME held `approved` outcome produce exactly one audit row; a subsequent,
+genuinely different held `expired` outcome produces a second, separate row. Mutation-killed
+(removing the de-duplication check reproduces exactly 3 rows instead of 1).
+
+**Verification:** `gofmt -l .`, `go build ./...`, `go vet ./...`, `go vet -tags integration
+./...` all clean. `golangci-lint run ./...` (pinned 2.9.0 binary, untagged) - 0 issues.
+`go test -tags integration -race -count=1` all green for `./internal/kyc/...`,
+`./internal/httpserver/... -run 'KYC|Kyc'`, `./internal/withdrawal/...`, and
+`./cmd/platform-api/...`, against private databases.
+
+**Labels:**
+- **L-1 (security re-verification 4, LOW):** IMPLEMENTED - sticky guard widened to
+  `approved`/`expired`, mutation-killed.
+- **L-2 (security re-verification 4, LOW):** IMPLEMENTED - held-for-review de-duplication on
+  (tenant, verification, provider outcome), mutation-killed.
+- **`KYC-REVIEWREQ-FORWARD-1`:** RULED (identity-compliance, Rulings 2 and 5) and IMPLEMENTED -
+  registry row updated to "ruled and implemented, pending a light security confirmation" (this
+  addendum's own fix has not yet had its own dedicated security pass, though it directly
+  resolves security's own L-1/L-2 notes from re-verification 4).

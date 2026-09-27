@@ -561,6 +561,112 @@ func TestEvaluateEnforcement_N3_StaffReviewRequiredThenVendorApproved_HeldForRev
 	assertAuditCount(t, pool, f.tenantID, "kyc.provider_result_held_for_review", v.ID.String(), 1)
 }
 
+// TestEvaluateEnforcement_L1_StaffReviewRequiredThenVendorExpired_HeldForReviewAudited
+// is identity-compliance's own Ruling 5 (security re-verification 4's L-1
+// note, resolved 2026-09-27): a vendor `expired` arriving on a
+// staff-escalated review_required row must be HELD, exactly like
+// `approved`, not applied - a vendor `expired` is not a decision (ADR 0028
+// §2, Ruling 1), and auto-applying it would close a compliance officer's
+// own open case without any officer deciding it. The row must stay
+// review_required, with a kyc.provider_result_held_for_review audit row
+// naming the discarded `expired` outcome - identical in shape to the
+// approved-held case above.
+func TestEvaluateEnforcement_L1_StaffReviewRequiredThenVendorExpired_HeldForReviewAudited(t *testing.T) {
+	pool := testPool(t)
+	f := seedFixture(t, pool)
+
+	provider := NewMockKYCProvider()
+	orch := NewOrchestrator(map[string]KYCProvider{"mock": provider}, NewMockWebhookCredentials(provider))
+	v, err := CreateVerification(context.Background(), pool, NewMockOutboundResolver(), provider, CreateVerificationParams{
+		TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerID, PersonID: f.personID,
+	})
+	if err != nil {
+		t.Fatalf("seed verification: %v", err)
+	}
+	staffID := seedComplianceStaff(t, pool, f)
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := ReviewVerification(ctx, tx, ReviewVerificationParams{
+			VerificationID: v.ID, StaffID: staffID, NewStatus: StatusReviewRequired, Reason: "needs additional evidence",
+		})
+		return err
+	}); err != nil {
+		t.Fatalf("staff escalate to review_required: %v", err)
+	}
+
+	in := provider.CallbackPayload(f.tenantID, v.ProviderReference, ProviderExpired, "vendor_round_trip_lapsed")
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, _, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock", in)
+		return err
+	}); err != nil {
+		t.Fatalf("deliver expired callback: %v", err)
+	}
+
+	if got := mustGetStatus(t, pool, f.tenantID, v.ID); got != StatusReviewRequired {
+		t.Fatalf("L-1: expected the staff-escalated row to STAY review_required against a vendor expired, got %q", got)
+	}
+	assertAuditCount(t, pool, f.tenantID, "kyc.provider_callback", v.ID.String(), 0)
+	assertAuditCount(t, pool, f.tenantID, "kyc.provider_result_held_for_review", v.ID.String(), 1)
+}
+
+// TestEvaluateEnforcement_L2_RedeliveredHeldOutcome_DoesNotDuplicateAudit
+// is security re-verification 4's own L-2 note: a vendor that redelivers
+// the SAME held outcome (its own retry policy, unaware the result is being
+// held) must not write another IDENTICAL kyc.provider_result_held_for_review
+// row per delivery - one row per (verification, provider outcome) is
+// sufficient for the officer. A genuinely DIFFERENT held outcome on the
+// same row (approved, then later expired, both while still escalated)
+// still gets its own, separate row, since the outcome itself differs.
+func TestEvaluateEnforcement_L2_RedeliveredHeldOutcome_DoesNotDuplicateAudit(t *testing.T) {
+	pool := testPool(t)
+	f := seedFixture(t, pool)
+
+	provider := NewMockKYCProvider()
+	orch := NewOrchestrator(map[string]KYCProvider{"mock": provider}, NewMockWebhookCredentials(provider))
+	v, err := CreateVerification(context.Background(), pool, NewMockOutboundResolver(), provider, CreateVerificationParams{
+		TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerID, PersonID: f.personID,
+	})
+	if err != nil {
+		t.Fatalf("seed verification: %v", err)
+	}
+	staffID := seedComplianceStaff(t, pool, f)
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := ReviewVerification(ctx, tx, ReviewVerificationParams{
+			VerificationID: v.ID, StaffID: staffID, NewStatus: StatusReviewRequired, Reason: "needs additional evidence",
+		})
+		return err
+	}); err != nil {
+		t.Fatalf("staff escalate to review_required: %v", err)
+	}
+
+	deliverApproved := func() {
+		t.Helper()
+		in := provider.CallbackPayload(f.tenantID, v.ProviderReference, ProviderApproved, "auto_approved")
+		if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+			_, _, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock", in)
+			return err
+		}); err != nil {
+			t.Fatalf("deliver approved callback: %v", err)
+		}
+	}
+	// Redeliver the SAME held outcome three times (a plausible vendor
+	// retry sequence for a webhook this platform correctly acknowledged).
+	deliverApproved()
+	deliverApproved()
+	deliverApproved()
+	assertAuditCount(t, pool, f.tenantID, "kyc.provider_result_held_for_review", v.ID.String(), 1)
+
+	// A genuinely DIFFERENT held outcome (expired, still escalated) DOES
+	// get its own, separate row.
+	in := provider.CallbackPayload(f.tenantID, v.ProviderReference, ProviderExpired, "vendor_round_trip_lapsed")
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, _, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock", in)
+		return err
+	}); err != nil {
+		t.Fatalf("deliver expired callback: %v", err)
+	}
+	assertAuditCount(t, pool, f.tenantID, "kyc.provider_result_held_for_review", v.ID.String(), 2)
+}
+
 // --- ADR 0096 §2.6(g), RV-PRH-I2 KYC review F1: never-submitted orphan
 // rows are excluded from "latest" enforcement selection ---
 
