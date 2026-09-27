@@ -128,7 +128,7 @@ func TestLockOrder_ConcurrentWithdrawalRequestAndRejection_NoDeadlock(t *testing
 			startRequest := func() *loRacer {
 				return loStartRacer(t, pool, f.tenantID, "RequestWithdrawal(cash,hold)", func(ctx context.Context, tx pgx.Tx) error {
 					_, err := RequestWithdrawal(ctx, tx, RequestParams{
-						TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID,
+						TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, PersonID: f.personID, WalletID: f.walletID,
 						AssetCode: "EUR", Amount: 500, IdempotencyKey: "lockorder-new-" + tc.name,
 					})
 					return err

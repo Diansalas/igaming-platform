@@ -315,6 +315,14 @@ const (
 	// sportsbook_bet.denied_by_exposure_policy audit record, never in this
 	// result or any HTTP response derived from it.
 	RejectionExposureLimit = "exposure_limit"
+	// RejectionKYCDenied is PRH-I3's addition (ADR 0096 §2.4/§3.5): the
+	// KYC "play" enforcement point denied this bet (a jurisdiction has an
+	// active KYC-before-play policy and the player's verification is
+	// pending/failed/unavailable). RejectionCode carries kyc.
+	// EnforcementDecision.Code (a closed enum, e.g. "kyc_sportsbook_play:
+	// pending") - never matched_trigger or policy_version (security
+	// condition 8).
+	RejectionKYCDenied = "kyc_denied"
 )
 
 // Provider is sportsbook's minimal, provider-neutral catalogue-sync

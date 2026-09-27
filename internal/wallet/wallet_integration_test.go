@@ -33,6 +33,7 @@ func testPool(t *testing.T) *db.Pool {
 type fixture struct {
 	tenantID        uuid.UUID
 	brandID         uuid.UUID
+	personID        uuid.UUID
 	playerAccountID uuid.UUID
 }
 
@@ -40,6 +41,7 @@ func seedFixture(t *testing.T, pool *db.Pool) fixture {
 	t.Helper()
 	f := fixture{tenantID: uuid.New(), brandID: uuid.New(), playerAccountID: uuid.New()}
 	personID := uuid.New()
+	f.personID = personID
 
 	// Stage 4I Phase E-SECURITY (migration 0077): `tenants` writes now
 	// require a genuinely platform-admin-scoped transaction.
@@ -66,10 +68,20 @@ func seedFixture(t *testing.T, pool *db.Pool) fixture {
 			f.brandID, f.tenantID, "b-"+f.brandID.String()[:8]); err != nil {
 			return err
 		}
-		_, err := tx.Exec(ctx,
+		if _, err := tx.Exec(ctx,
 			`INSERT INTO player_accounts (id, tenant_id, brand_id, person_id, email, password_hash, status)
 			 VALUES ($1, $2, $3, $4, $5, 'x', 'active')`,
-			f.playerAccountID, f.tenantID, f.brandID, personID, f.playerAccountID.String()+"@example.com")
+			f.playerAccountID, f.tenantID, f.brandID, personID, f.playerAccountID.String()+"@example.com"); err != nil {
+			return err
+		}
+		// ADR 0096 §3.2 point 1 (PRH-I3): wallet_adversarial_test.go calls
+		// withdrawal.RequestWithdrawal directly - seed an approved
+		// verification so it exercises its own (unrelated) insufficient-
+		// funds behavior rather than the new KYC gate.
+		_, err := tx.Exec(ctx,
+			`INSERT INTO kyc_verifications (id, tenant_id, brand_id, player_account_id, person_id, status, provider_id)
+			 VALUES ($1, $2, $3, $4, $5, 'approved', 'mock')`,
+			uuid.New(), f.tenantID, f.brandID, f.playerAccountID, personID)
 		return err
 	})
 	if err != nil {

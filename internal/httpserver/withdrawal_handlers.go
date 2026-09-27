@@ -13,6 +13,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/assetregistry"
 	"github.com/Diansalas/igaming-platform/internal/audit"
 	"github.com/Diansalas/igaming-platform/internal/identity"
+	"github.com/Diansalas/igaming-platform/internal/kyc"
 	"github.com/Diansalas/igaming-platform/internal/observability"
 	"github.com/Diansalas/igaming-platform/internal/payments"
 	"github.com/Diansalas/igaming-platform/internal/tenant"
@@ -113,11 +114,34 @@ func newRequestWithdrawalHandler(deps Deps) http.HandlerFunc {
 				return err
 			}
 			wr, err = withdrawal.RequestWithdrawal(ctx, tx, withdrawal.RequestParams{
-				TenantID: tc.TenantID, BrandID: account.BrandID, PlayerAccountID: playerAccountID, WalletID: wl.ID,
+				TenantID: tc.TenantID, BrandID: account.BrandID, PlayerAccountID: playerAccountID, PersonID: account.PersonID, WalletID: wl.ID,
 				AssetCode: req.AssetCode, Amount: req.Amount, IdempotencyKey: req.IdempotencyKey,
 			})
 			return err
 		})
+		// ADR 0096 §3.6/§8 item 3: a KYCDeniedError rolled back the
+		// transaction above with zero domain effect (no request row, no
+		// ledger posting) - the decision/audit rows are committed here, in
+		// a FRESH transaction, so the denial itself survives durably
+		// (security condition 5), mirroring internal/casino's own
+		// separately-committed-rejection pattern (CAS-RECON-1).
+		var kycDenied *withdrawal.KYCDeniedError
+		if errors.As(err, &kycDenied) {
+			if recErr := deps.DB.WithTenant(r.Context(), tc.TenantID, func(ctx context.Context, tx pgx.Tx) error {
+				return kyc.RecordDecision(ctx, tx, kycDenied.Params, kycDenied.Decision)
+			}); recErr != nil {
+				logger.Error("kyc_denial_record_failed", "error", recErr)
+			}
+			// Player-facing surface: status only, never matched_trigger/
+			// policy_version/an amount (security condition 8) - a closed
+			// enum drawn from the decision's own Outcome.
+			apierror.Write(w, requestID, apierror.CodeConflict, "withdrawal requires a passed identity verification: "+string(kycDenied.Decision.Outcome))
+			return
+		}
+		if errors.Is(err, withdrawal.ErrKYCUnavailable) {
+			apierror.Write(w, requestID, apierror.CodeInternal, "verification check is temporarily unavailable, please retry")
+			return
+		}
 		if errors.Is(err, identity.ErrNotFound) {
 			apierror.Write(w, requestID, apierror.CodeNotFound, "player account not found")
 			return

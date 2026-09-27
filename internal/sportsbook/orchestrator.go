@@ -13,6 +13,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/audit"
 	"github.com/Diansalas/igaming-platform/internal/identity"
 	"github.com/Diansalas/igaming-platform/internal/jurisdiction"
+	"github.com/Diansalas/igaming-platform/internal/kyc"
 	"github.com/Diansalas/igaming-platform/internal/ledger"
 	"github.com/Diansalas/igaming-platform/internal/money"
 	"github.com/Diansalas/igaming-platform/internal/rg"
@@ -268,6 +269,38 @@ func PlaceBet(ctx context.Context, tx pgx.Tx, params PlaceBetParams) (PlaceBetRe
 	if !proceed {
 		return PlaceBetResult{Accepted: false, RejectionCategory: RejectionRiskDenied, RejectionCode: riskDecision.Code,
 			RejectionMessage: "this bet was declined by platform risk policy: " + riskDecision.Code}, nil
+	}
+
+	// ADR 0096 §2.4/§3.5 (PRH-I3): KYC "play" trigger, mirroring
+	// internal/casino's identical placement/rationale exactly (see that
+	// package's postBet comment) - appended after RG and Risk, before the
+	// balance lock, as a third, final read-only step. Default (no active
+	// 'play' policy) is not_required/allow - a no-op read until a
+	// jurisdiction authors one (HD-KYC-8). A deny reuses this call site's
+	// existing RejectionCategory/RejectionCode shape, not a new variant.
+	kycParams := kyc.EnforcementParams{
+		TenantID: params.TenantID, BrandID: params.BrandID, PlayerAccountID: params.PlayerAccountID,
+		PersonID: rgDecision.PersonID, Operation: kyc.EnforcementSportsbookPlay, AssetCode: params.AssetCode,
+		CorrelationID: betID,
+	}
+	kycDecision, err := kyc.EvaluateEnforcement(ctx, tx, kycParams)
+	if err != nil {
+		return PlaceBetResult{}, fmt.Errorf("sportsbook: evaluate kyc enforcement: %w", err)
+	}
+	if !kycDecision.Allowed {
+		if err := kyc.RecordDecision(ctx, tx, kycParams, kycDecision); err != nil {
+			return PlaceBetResult{}, err
+		}
+		return PlaceBetResult{Accepted: false, RejectionCategory: RejectionKYCDenied, RejectionCode: kycDecision.Code,
+			RejectionMessage: "this bet requires a passed identity verification"}, nil
+	}
+	// See internal/casino's identical comment: a decision row is written
+	// only for a REAL evaluation (not the dormant not_required default),
+	// a deliberate, disclosed narrowing of §7.6 for the play surface only.
+	if kycDecision.Outcome != kyc.OutcomeNotRequired {
+		if err := kyc.RecordDecision(ctx, tx, kycParams, kycDecision); err != nil {
+			return PlaceBetResult{}, err
+		}
 	}
 
 	// ADR 0083 §7.1 step 10 (Part B2, Wave 3): computePotentialReturn

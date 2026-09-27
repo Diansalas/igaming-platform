@@ -15,6 +15,8 @@ package bonus
 import (
 	"context"
 	"os"
+	"sort"
+	"strconv"
 	"testing"
 	"time"
 
@@ -230,6 +232,40 @@ func wave3MigrationsDir(t *testing.T) string {
 	return dir
 }
 
+// wave3MigrationsAbove derives, rather than hard-codes, every migration
+// version strictly above base by scanning dir's own *.up.sql filenames
+// (PRH-I3, 2026-09-27: this test previously hard-coded its chain tip at
+// migration0099Version, which broke the instant a later migration - 0100,
+// this task's own KYC enforcement migration - landed on top; deriving the
+// tip here means a FUTURE migration lands without requiring this test to
+// be touched again). Returned in descending order (newest first), which
+// is the order MigrateDown reports rolling them back in.
+func wave3MigrationsAbove(t *testing.T, dir string, base int64) []int64 {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read migrations dir: %v", err)
+	}
+	seen := map[int64]bool{}
+	var out []int64
+	for _, e := range entries {
+		name := e.Name()
+		if len(name) < 4 {
+			continue
+		}
+		n, convErr := strconv.ParseInt(name[:4], 10, 64)
+		if convErr != nil {
+			continue
+		}
+		if n > base && !seen[n] {
+			seen[n] = true
+			out = append(out, n)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] > out[j] })
+	return out
+}
+
 // wave3ScratchDatabase creates an empty scratch database and returns its
 // URL, dropping it on cleanup - delegates to the shared
 // internal/testsupport/scratchdb helper (Stage 10 W0).
@@ -404,11 +440,16 @@ func TestWave3Phase2Migrations_FullChainUpDownUpRoundTrip(t *testing.T) {
 	// exists, which this run never creates) and sit directly on top of 0070 in the chain, so
 	// they must be rolled back first for 0070's own down migration to run
 	// at all.
-	rolledBack, err := pool.MigrateDown(context.Background(), dir, 32)
+	// Derived, not hard-coded (see wave3MigrationsAbove's doc comment):
+	// any migration landing above 0099 (this task's own 0100, and any
+	// later one) is rolled back first, in descending order, before the
+	// historical 0099..0068 chain below.
+	above99 := wave3MigrationsAbove(t, dir, migration0099Version)
+	rolledBack, err := pool.MigrateDown(context.Background(), dir, 32+len(above99))
 	if err != nil {
-		t.Fatalf("migrate down 32 (0099/0098/0097/0096/0095/0094/0093/0092/0091/0090/0089/0088/0087/0086/0085/0084/0083/0082/0081/0080/0079/0078/0077/0076/0075/0074/0073/0072/0071/0070/0069/0068): %v", err)
+		t.Fatalf("migrate down %d (%v + 0099/0098/0097/0096/0095/0094/0093/0092/0091/0090/0089/0088/0087/0086/0085/0084/0083/0082/0081/0080/0079/0078/0077/0076/0075/0074/0073/0072/0071/0070/0069/0068): %v", 32+len(above99), above99, err)
 	}
-	wantDown := []int64{migration0099Version, migration0098Version, migration0097Version, migration0096Version, migration0095Version, migration0094Version, migration0093Version, migration0092Version, migration0091Version, migration0090Version, migration0089Version, migration0088Version, migration0087Version, migration0086Version, migration0085Version, migration0084Version, migration0083Version, migration0082Version, migration0081Version, migration0080Version, migration0079Version, migration0078Version, migration0077Version, migration0076Version, migration0075Version, migration0074Version, migration0073Version, migration0072Version, migration0071Version, migration0070Version, migration0069Version, migration0068Version}
+	wantDown := append(append([]int64{}, above99...), migration0099Version, migration0098Version, migration0097Version, migration0096Version, migration0095Version, migration0094Version, migration0093Version, migration0092Version, migration0091Version, migration0090Version, migration0089Version, migration0088Version, migration0087Version, migration0086Version, migration0085Version, migration0084Version, migration0083Version, migration0082Version, migration0081Version, migration0080Version, migration0079Version, migration0078Version, migration0077Version, migration0076Version, migration0075Version, migration0074Version, migration0073Version, migration0072Version, migration0071Version, migration0070Version, migration0069Version, migration0068Version)
 	if !wave3EqualVersions(rolledBack, wantDown) {
 		t.Fatalf("expected exactly migrations %v to be rolled back in that order, got %v", wantDown, rolledBack)
 	}
@@ -466,6 +507,12 @@ func TestWave3Phase2Migrations_FullChainUpDownUpRoundTrip(t *testing.T) {
 		migration0080Version, migration0081Version, migration0082Version, migration0083Version, migration0084Version, migration0085Version,
 		migration0086Version, migration0087Version, migration0088Version, migration0089Version, migration0090Version,
 		migration0091Version, migration0092Version, migration0093Version, migration0094Version, migration0095Version, migration0096Version, migration0097Version, migration0098Version, migration0099Version,
+	}
+	// Derived (see wave3MigrationsAbove): above99 was computed newest-first
+	// for MigrateDown; MigrateUp re-applies oldest-first, so append it here
+	// in reverse.
+	for i := len(above99) - 1; i >= 0; i-- {
+		wantUp = append(wantUp, above99[i])
 	}
 	if !wave3EqualVersions(reapplied, wantUp) {
 		t.Fatalf("expected exactly migrations %v to be re-applied in that order, got %v", wantUp, reapplied)

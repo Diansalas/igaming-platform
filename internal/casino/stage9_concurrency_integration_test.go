@@ -533,7 +533,7 @@ func TestStage9_ConcurrentBetAndWithdrawalOneWallet_ExactlyOneReservesTheBalance
 		defer wg.Done()
 		withdrawalErr = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 			_, err := withdrawal.RequestWithdrawal(ctx, tx, withdrawal.RequestParams{
-				TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID,
+				TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, PersonID: f.personID, WalletID: f.walletID,
 				AssetCode: "EUR", Amount: amount, IdempotencyKey: "s9-wd-vs-bet",
 			})
 			return err

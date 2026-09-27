@@ -441,10 +441,13 @@ func newPlaceBetHandler(deps Deps) http.HandlerFunc {
 			// this file's own "one rejection response shape, distinguished
 			// by RejectionCategory" convention) rather than two near-
 			// duplicate event names.
-			if result.RejectionCategory == sportsbook.RejectionRGDenied || result.RejectionCategory == sportsbook.RejectionRiskDenied {
+			if result.RejectionCategory == sportsbook.RejectionRGDenied || result.RejectionCategory == sportsbook.RejectionRiskDenied || result.RejectionCategory == sportsbook.RejectionKYCDenied {
 				policy := "rg"
-				if result.RejectionCategory == sportsbook.RejectionRiskDenied {
+				switch result.RejectionCategory {
+				case sportsbook.RejectionRiskDenied:
 					policy = "risk"
+				case sportsbook.RejectionKYCDenied:
+					policy = "kyc"
 				}
 				logger.Warn("sportsbook_bet_policy_blocked", "policy", policy, "reason_code", result.RejectionCode)
 			}

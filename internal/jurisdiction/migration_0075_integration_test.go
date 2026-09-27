@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -272,6 +273,39 @@ func migration0075MigrationsDir(t *testing.T) string {
 		t.Fatalf("migration 0075 not found in %s: %v", dir, err)
 	}
 	return dir
+}
+
+// migration0075MigrationsAbove derives, rather than hard-codes, every
+// migration version strictly above base by scanning dir's own *.up.sql
+// filenames (PRH-I3, 2026-09-27: migration_0077_integration_test.go
+// previously hard-coded its chain tip at migration0099Version, which
+// broke the instant migration 0100 - this task's own KYC enforcement
+// migration - landed on top). Returned in descending order (newest
+// first), matching the order MigrateDown reports rolling them back in.
+func migration0075MigrationsAbove(t *testing.T, dir string, base int64) []int64 {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read migrations dir: %v", err)
+	}
+	seen := map[int64]bool{}
+	var out []int64
+	for _, e := range entries {
+		name := e.Name()
+		if len(name) < 4 {
+			continue
+		}
+		n, convErr := strconv.ParseInt(name[:4], 10, 64)
+		if convErr != nil {
+			continue
+		}
+		if n > base && !seen[n] {
+			seen[n] = true
+			out = append(out, n)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] > out[j] })
+	return out
 }
 
 // stagedMigrations0075 copies the real migrations into a fresh temp

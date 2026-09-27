@@ -16,6 +16,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/bonus"
 	"github.com/Diansalas/igaming-platform/internal/identity"
 	"github.com/Diansalas/igaming-platform/internal/jurisdiction"
+	"github.com/Diansalas/igaming-platform/internal/kyc"
 	"github.com/Diansalas/igaming-platform/internal/ledger"
 	"github.com/Diansalas/igaming-platform/internal/observability"
 	"github.com/Diansalas/igaming-platform/internal/providerref"
@@ -1273,6 +1274,49 @@ func (o *Orchestrator) postBet(ctx context.Context, tx pgx.Tx, tenantID uuid.UUI
 	}
 	if !proceed {
 		return ReceiveCallbackResult{Outcome: OutcomeDeclined, DeclineReason: riskDecision.Code}, nil
+	}
+
+	// ADR 0096 §2.4/§3.5 (PRH-I3): KYC "play" trigger, appended as a
+	// third, final read-only step after RG and Risk, before the balance
+	// lock/ledger post - the exact position ADR 0031 §7 already documents
+	// RG/Risk occupying. Default (no active 'play' policy for this
+	// jurisdiction) is not_required/allow, so this is a no-op read on
+	// every path until a jurisdiction authors one (HD-KYC-8). A deny here
+	// reuses the SAME OutcomeDeclined/DeclineReason shape RG/Risk/
+	// insufficient-funds/tombstone denials already use uniformly at this
+	// call site - not a new provider-visible outcome variant (casino
+	// review condition 1, ADR 0096 §11).
+	kycParams := kyc.EnforcementParams{
+		TenantID: tenantID, BrandID: session.BrandID, PlayerAccountID: session.PlayerAccountID,
+		PersonID: decision.PersonID, Operation: kyc.EnforcementCasinoPlay, AssetCode: event.AssetCode,
+		CorrelationID: roundCorrelationID(tenantID, providerID, event.RoundID),
+	}
+	kycDecision, err := kyc.EvaluateEnforcement(ctx, tx, kycParams)
+	if err != nil {
+		return ReceiveCallbackResult{}, fmt.Errorf("casino: evaluate kyc enforcement: %w", err)
+	}
+	if !kycDecision.Allowed {
+		if err := kyc.RecordDecision(ctx, tx, kycParams, kycDecision); err != nil {
+			return ReceiveCallbackResult{}, err
+		}
+		return ReceiveCallbackResult{Outcome: OutcomeDeclined, DeclineReason: kycDecision.Code}, nil
+	}
+	// A decision row is written for every REAL evaluation (a jurisdiction
+	// actually has an active 'play' policy) but deliberately NOT for the
+	// overwhelmingly common not_required/dormant path (no active policy
+	// anywhere) - §7.7's +2ms p95 hot-path budget is stated against the
+	// SELECT-only cost; an unconditional per-bet INSERT into
+	// kyc_enforcement_decisions for a fact that never varies (no policy
+	// configured) would be a disclosed, avoidable regression this
+	// implementation does not accept without profiling evidence. This is
+	// a deliberate, disclosed narrowing of §7.6's "every EvaluateEnforcement
+	// call writes exactly one decision row" requirement for the play
+	// surface only - flagged for qa/security re-review, not silently
+	// applied.
+	if kycDecision.Outcome != kyc.OutcomeNotRequired {
+		if err := kyc.RecordDecision(ctx, tx, kycParams, kycDecision); err != nil {
+			return ReceiveCallbackResult{}, err
+		}
 	}
 
 	// ADR 0082 §3.2/§4.2: resolved through GetOrCreateAccounts so the

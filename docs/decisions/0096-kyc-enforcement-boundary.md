@@ -1,10 +1,17 @@
 # ADR 0096 — KYC Enforcement Boundary
 
-Status: **PROPOSED.** `identity-compliance`, for the orchestrator, under
-the "PAYMENT READINESS & PROVIDER-INDEPENDENT HARDENING" (PRH) authorized
-work, item **PRH-D2**, closing the reconnaissance and design half of
-**KYC-ENFORCE-1** (`docs/governance/task-registry.md`). Design/docs only.
-No code, no migration, no commit. Allocated migration: **0101**.
+Status: **ACCEPTED — IMPLEMENTED, pending security/ledger-finance/code
+review.** PRH-I3 (`identity-compliance`) implemented the mechanism this
+paper designs: `internal/kyc.EvaluateEnforcement`, migration 0100, the
+withdrawal-request gate, `withdrawal.DenyForCompliance`, the casino/
+sportsbook play gates, and the staff read API. See §15
+("Implementation record") for the condition map, deviations, and what
+remains out of this task's scope (the deposit gate and the payout-dispatch
+call site, both wired by PRH-I1 calling this package's exported service).
+Migration allocated and implemented as **0100** (re-allocated from the
+original 0101 sketch, 2026-09-27, `docs/governance/task-registry.md`'s
+PRH allocation table — every "0101" reference in this document below was
+renumbered to 0100 in the same change).
 
 Baseline: branch `claude/focused-wright-jw88w9`, `HEAD 1560ad0` at initial
 authoring. **Staleness note (casino review condition 3, §11):** by the
@@ -158,7 +165,7 @@ type EnforcementParams struct {
 	// original sketch carried it as a second, player-influenceable
 	// jurisdiction signal (derived from geolocation or declared country,
 	// the same value risk.RiskRequest.JurisdictionCode carries per ADR
-	// 0031 §9) alongside LicensingJurisdictionID. migration 0101's
+	// 0031 §9) alongside LicensingJurisdictionID. migration 0100's
 	// kyc_enforcement_policies table has no column it could ever match
 	// against, so it was dead weight at best — but a future
 	// implementer adding one "for symmetry with risk.Evaluate" would
@@ -407,12 +414,12 @@ Blueprint §4.7's tiered list has two different characters:
    relaxing this) needs its own recorded human decision (§4, HD-KYC-5),
    never a silent per-tenant override — matching the Authority
    constraint in §2.3. There is accordingly **no `first_withdrawal`
-   `trigger_type`** in migration 0101 (§3.6) — this rule is not a
+   `trigger_type`** in migration 0100 (§3.6) — this rule is not a
    configurable row at all, exactly as the original sketch already
    stated, now applied correctly (always-on, not a one-time gate).
 2. **Threshold — cumulative deposit amount, EDD amount, registration
    tier.** These are exactly the values HDR-J-6 and legal review have
-   not yet supplied. The mechanism (migration 0101, below) exists and
+   not yet supplied. The mechanism (migration 0100, below) exists and
    is fully wired to `EvaluateEnforcement`, but **carries no seed rows**
    and defines no default numeric value anywhere, including in
    non-test code. A jurisdiction with **no active policy row** for a
@@ -489,7 +496,7 @@ resolution is a third trigger kind, distinct from both "structural"
   requires KYC before any bet," so this ADR does not compile that in.
   Unlike `cumulative_deposit`/`edd_amount`, it has no numeric threshold at
   all — it is a pure on/off fact per `(licensing_jurisdiction_id,
-  operation)`. It exists as its own `trigger_type` (§3.6/migration 0101)
+  operation)`. It exists as its own `trigger_type` (§3.6/migration 0100)
   precisely so the *capability* to require KYC-before-play is real and
   reviewable the moment a jurisdiction needs it, without a schema or code
   change — the same "mechanism now, values later" contract as every
@@ -547,7 +554,7 @@ resolution is a third trigger kind, distinct from both "structural"
   adapter needs new handling: adapters already treat `DeclineReason` as
   an opaque string and branch only on `OutcomeDeclined` itself.
 
-### 3.6 Migration 0101 — sketch
+### 3.6 Migration 0100 — sketch
 
 Two tables, both platform-wide (no `tenant_id`), mirroring
 `jurisdiction_precedence_configs`'s RLS posture (readable everywhere,
@@ -555,7 +562,7 @@ writable only by a platform-scoped `platform_admin`/`compliance`
 principal) plus one tenant-scoped decision-audit table.
 
 ```sql
--- 0101_kyc_enforcement_policy_and_decision_audit.up.sql
+-- 0100_kyc_enforcement_policy_and_decision_audit.up.sql
 
 CREATE TABLE kyc_enforcement_policies (
     id                          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -813,7 +820,7 @@ this ADR:
 
 ### 3.7 No test-only or production default values
 
-No row is seeded by migration 0101 — the same discipline ADR 0043 §
+No row is seeded by migration 0100 — the same discipline ADR 0043 §
 (Stage 4I Phase D) already followed for its own PC-GAP-1/PC-GAP-2
 content. Any numeric threshold appearing in a unit or integration test
 (e.g. "cumulative deposit threshold = 100000 minor units" to exercise the
@@ -1072,7 +1079,7 @@ closes, so none is asserted once generically and assumed to generalize
 | A forced query/DB error returns `unavailable`, never `not_required` — "no rows" and "query failed" are asserted as distinct code paths, not just distinct outcomes | security condition 4(c) |
 | `LicensingJurisdictionID` selects the policy; a manufactured/mismatched `JurisdictionCode`-shaped input (if any residual field exists at implementation time) has zero effect on the outcome | security condition 4(d) |
 | Threshold comparison uses `NUMERIC`/`big.Int` exact arithmetic, cross-checked against a hand-computed value at the `int64` boundary; a comparison across two different `asset_code`s is rejected/never attempted | ledger-finance C6 |
-| Migration 0101 CHECK constraints: manual true/false checklist covering every `trigger_type`/column-shape combination (including `play`/`play_operation`), and the `status <> 'active' OR legal_review_reference IS NOT NULL` constraint — the SQL CHECK is exactly the construct this project already treats as "no mutation tool applies, use a manual branch-coverage checklist" | QA gap 5 |
+| Migration 0100 CHECK constraints: manual true/false checklist covering every `trigger_type`/column-shape combination (including `play`/`play_operation`), and the `status <> 'active' OR legal_review_reference IS NOT NULL` constraint — the SQL CHECK is exactly the construct this project already treats as "no mutation tool applies, use a manual branch-coverage checklist" | QA gap 5 |
 
 ### 7.2 Integration
 
@@ -1090,7 +1097,7 @@ closes, so none is asserted once generically and assumed to generalize
 | Casino/sportsbook bet placement with **no active `play` policy**: KYC evaluates `not_required` and never denies; RG/Risk denials still short-circuit before KYC runs; existing RG/Risk regression suites pass unmodified | §1 rows #7/#10 |
 | Casino/sportsbook bet placement with an **active `play` policy** (test-fixture row, clearly marked per §3.7): `passed` allows; `pending`/`failed`/`unavailable` each deny, exercised by name, with no bypass; a `casino_play` policy never governs `sportsbook_play` or vice versa (`play_operation` enforced, not advisory) | §1 rows #7/#10 |
 | A KYC-declined bet's provider redelivery of the same `provider_tx_id` is freshly re-evaluated against RG→Risk→KYC's then-current state, not replayed as a no-op (the idempotency short-circuit only fires for an already-*posted*/succeeded bet) — a policy/verification state change between the two attempts may legitimately flip the outcome | §11 condition 2 (casino review) |
-| Migration 0101 up→down→up round-trips cleanly on a fresh database, for both `kyc_enforcement_policies` and `kyc_enforcement_decisions`, per this codebase's own migration-reversibility CI rule | QA gap 2 |
+| Migration 0100 up→down→up round-trips cleanly on a fresh database, for both `kyc_enforcement_policies` and `kyc_enforcement_decisions`, per this codebase's own migration-reversibility CI rule | QA gap 2 |
 | OpenAPI contract test for `GET /v1/admin/kyc/enforcement-decisions` (and the dormancy report route), using this codebase's existing plain-text/substring structural-check convention (`internal/httpserver/openapi_paymentswebhook_contract_test.go`'s pattern) — stated explicitly, not silently discovered as a limitation later | QA gap 3 |
 
 ### 7.3 RLS
@@ -1127,7 +1134,7 @@ closes, so none is asserted once generically and assumed to generalize
 
 | Test | Closes |
 |---|---|
-| A migration 0101 row with `status = 'active'` and no `legal_review_reference` is rejected by the CHECK constraint before it can ever govern a decision | schema |
+| A migration 0100 row with `status = 'active'` and no `legal_review_reference` is rejected by the CHECK constraint before it can ever govern a decision | schema |
 | Every `EvaluateEnforcement` call at every enforcement point writes exactly one `kyc_enforcement_decisions` row and one `audit.Record` call, with no PII/document content in either; on `allow` these commit with the domain effect, and on `deny` they commit **without** it (§3.6's corrected commit discipline, empirically proven, not merely asserted) | ledger-finance C1; security condition 5 |
 | `kyc_enforcement_decisions` plus `kyc_verifications`/`audit_log` together give a compliance reviewer a complete, joinable trail of "what was decided, when, against what policy version" for any player | staff tooling |
 | The projection matches the recomputed-from-ledger balance after a `DenyForCompliance` reversal, with zero drift from the hourly reconciliation job | ledger-finance C7 |
@@ -1166,7 +1173,7 @@ withdrawal owners via dependency requests):
 1. **`internal/kyc`** (identity-compliance): `EvaluateEnforcement`,
    `EnforcementParams`/`Decision`/`Outcome` types (§2.2, revised:
    `PersonID` added, `JurisdictionCode` removed), the latest-row/expiry
-   read (§2.6), the threshold-policy lookup, migration 0101 Go-side
+   read (§2.6), the threshold-policy lookup, migration 0100 Go-side
    repository (mirrors `jurisdiction/evaluation_policy_admin.go`'s shape:
    `CreateEnforcementPolicy`/`ActivateEnforcementPolicy`/
    `WithdrawEnforcementPolicy`, each writing its own `audit.Record` per
@@ -1238,7 +1245,7 @@ withdrawal owners via dependency requests):
      return (e.g. `(wr, ErrKYCDeniedCommitted)`) that the handler commits,
      and that can never flow into `RouteProvider`/`Withdraw`.
      **Recommended, not blocking (ledger-finance, not part of migration
-     0101):** a DB backstop partial unique index
+     0100):** a DB backstop partial unique index
      `(tenant_id, reverses_transaction_id) WHERE transaction_type IN
      ('withdrawal_rejected','withdrawal_failed')`, mirroring migration
      0092, for exactly-once release defense in depth. Register as its own
@@ -1282,7 +1289,7 @@ withdrawal owners via dependency requests):
 5. **`internal/bonus`**: **no change** — §1's verdicts remain NOT-ENFORCE
    for every bonus enforcement point; no dependency request needed unless
    a future human decision (HD-KYC-4) reopens bonus conversion.
-6. **Migration 0101**: `identity-compliance` authors it; `ledger-finance`
+6. **Migration 0100**: `identity-compliance` authors it; `ledger-finance`
    reviews the `NUMERIC(38,0)`/asset-registry handling on
    `threshold_minor_units` (CLAUDE.md's own money-representation rule);
    `security` reviews RLS and the append-only trigger.
@@ -1353,7 +1360,7 @@ proof — a real regression pattern, not an invented one); RLS on
 field fuzzing and cross-tenant `player_account_id` rejection; `unavailable`
 fail-closed "at every enforcement point, with no operation-specific
 bypass" (this one row does legitimately cover fail-closed across all five
-points, so that specific KYC requirement is met); the migration 0101 CHECK
+points, so that specific KYC requirement is met); the migration 0100 CHECK
 fail-closed test; audit-row-plus-`audit.Record`-together with no PII;
 casino/sportsbook `play` coverage explicitly enumerating `passed`/
 `pending`/`failed`/`unavailable`, the `play_operation` column enforced not
@@ -1373,11 +1380,11 @@ concrete active policy.
    the five enforcement points — not asserted once generically and assumed
    to generalize.
 
-2. **No migration up/down (reversibility) test for migration 0101.** §7
+2. **No migration up/down (reversibility) test for migration 0100.** §7
    has a CHECK-constraint fail-closed test but no down-migration test on a
    fresh database, which is this codebase's own established rule
    (`docs/testing/testing-strategy.md`'s Stage 10 W1 note: "the migration-
-   reversibility CI step runs on a fresh database"). Add one for 0101
+   reversibility CI step runs on a fresh database"). Add one for 0100
    (both `kyc_enforcement_decisions` and `kyc_enforcement_policies`).
 
 3. **No OpenAPI contract test for the new admin route.** §6 adds
@@ -1408,7 +1415,7 @@ concrete active policy.
    this project's own precedent already treats as "no mutation tool
    applies → manual branch-coverage checklist"). Add both: a mutation pass
    over `EvaluateEnforcement`'s Go branches, and a manual true/false
-   checklist for the 0101 CHECK constraint.
+   checklist for the 0100 CHECK constraint.
 
 6. **No stated CI time budget for the new integration/concurrency suite.**
    §7 does not say which package(s) the integration/concurrency rows land
@@ -1653,7 +1660,7 @@ refuses a non-staff, non-automated principal. Required:
   reverses_transaction_id) WHERE transaction_type IN
   ('withdrawal_rejected','withdrawal_failed')`, mirroring migration 0092.
   This is a ledger-finance-owned follow-up. Register it; it is not part of
-  migration 0101.
+  migration 0100.
 
 **C3 — The structural first-withdrawal exemption must not let a known
 `failed` status pay out.** In §3.2 point 1, any wallet with a prior
@@ -1822,7 +1829,7 @@ Also:
    one prior completed withdrawal is exempt" with the opposite
    assertion. Also scope the rule per player, not per wallet (ADR
    0007), so opening a new wallet cannot reset it.
-2. **[HIGH — launch-blocking] Migration 0101 RLS and immutability must
+2. **[HIGH — launch-blocking] Migration 0100 RLS and immutability must
    copy migration 0075 exactly. The sketch does not.** The sketch's
    write policy is
    `current_setting('app.tenant_id', true) IS NULL`. That check (i) has
@@ -1974,7 +1981,7 @@ to but that only PRH-I3's actual code/tests can close.
 |---|---|---|
 | Ruling: deposit "allow when unconfigured" | §3.2 point 2 (deposit bullet), cross-referencing the fixed C1/C3 backstop; §6 dormancy report | Design-satisfied; launch sign-off is HD-KYC-1 + legal, not this paper |
 | 1 (HIGH, launch-blocking) — every withdrawal requires `passed`, not only the first; scope per player | §1 row #3, §3.2 point 1 (rewritten), §5 performance bullet (query simplified), §7.2, HD-KYC-5 | Design-satisfied |
-| 2 (HIGH, launch-blocking) — migration 0101 RLS/immutability must copy 0075 exactly | §3.6 (RLS block fully rewritten: `FORCE ROW LEVEL SECURITY`, `NULLIF`+`platform_admin_principal_id` predicates, INSERT+UPDATE-only policies, no DELETE/FOR ALL, `created_by_actor_id NOT NULL` tied to the principal, explicit lifecycle trigger permitting `draft→active`/`draft→withdrawn`/`active→withdrawn`, `kyc_enforcement_decisions` given the same `FORCE`+`TRUNCATE`-guard treatment); §7.3 tests | Design-satisfied; DB-level tests are an Implementation gate |
+| 2 (HIGH, launch-blocking) — migration 0100 RLS/immutability must copy 0075 exactly | §3.6 (RLS block fully rewritten: `FORCE ROW LEVEL SECURITY`, `NULLIF`+`platform_admin_principal_id` predicates, INSERT+UPDATE-only policies, no DELETE/FOR ALL, `created_by_actor_id NOT NULL` tied to the principal, explicit lifecycle trigger permitting `draft→active`/`draft→withdrawn`/`active→withdrawn`, `kyc_enforcement_decisions` given the same `FORCE`+`TRUNCATE`-guard treatment); §7.3 tests | Design-satisfied; DB-level tests are an Implementation gate |
 | 3 (MEDIUM) — every policy write audited; four-eyes on relaxing changes | §8 item 10 | Design-satisfied at the level of a binding requirement; the exact four-eyes mechanism is named as PRH-I3 implementation work, under `security` review, per item 10's own text — **not fully designed**, disclosed as such rather than claimed complete |
 | 4(a) latest row only | §2.6(a) | Design-satisfied |
 | 4(b) expiry independent of stored status | §2.6(b); §8 item 1 (adds `expires_at` to implementation scope) | Design-satisfied |
@@ -2039,3 +2046,130 @@ to but that only PRH-I3's actual code/tests can close.
 - ADR 0095 itself is authored and owned by `architect`; §5/§8 item 9 state
   the binding constraint this ADR requires of it, but this document does
   not, and may not, edit ADR 0095's own text.
+
+---
+
+## 15. Implementation record (PRH-I3, `identity-compliance`, 2026-09-27)
+
+Label per CLAUDE.md's seven-value vocabulary: **IMPLEMENTED** for the
+mechanism scoped to PRH-I3 (task-registry.md's KYC-ENFORCE-1/PRH-I3 row) —
+`internal/kyc.EvaluateEnforcement`, migration 0100, the withdrawal-request
+gate, `withdrawal.DenyForCompliance`, the casino/sportsbook play gates, the
+staff read API. **NOT IMPLEMENTED / PROVIDER DEPENDENT** for what this
+task explicitly does not own: the deposit gate (`payments.InitiateDeposit`)
+and the payout-dispatch call site (`T1p`), both left for PRH-I1 to wire by
+calling this package's exported `kyc.EvaluateEnforcement`/
+`kyc.RecordDecision`. **PARTIALLY IMPLEMENTED** for `edd_amount`/
+`registration_tier` (schema and admin write path exist; the evaluator does
+not yet consult them — see N3 below) and for the dormancy report (query
+exists, `internal/kyc.ListDormantJurisdictionTriggers`; no HTTP route
+added, per CLAUDE.md's "no uncontrolled scope expansion" — nothing consumes
+it yet). No regulatory approval is claimed; no real KYC vendor is
+integrated (unchanged from this package's existing `MOCK` provider scope).
+
+### 15.1 Post-orchestrator-relay re-verification findings — how each was closed
+
+Two additional review passes (`ledger-finance` `rv-0096-ledger-reverify.md`
+and `security` `rv-0096-security-reverify.md`, both under
+`docs/plans/payment-readiness/`, 2026-09-27) were relayed mid-implementation
+and are closed as follows — in the **implementation**, not only in this
+ADR's text, since code already existed by the time they landed:
+
+| Finding | Resolution |
+|---|---|
+| ledger-finance N1 (payout deny is a carve-out, not "zero ledger effect") | `withdrawal.DenyForCompliance`'s doc comment states this explicitly; it commits the reversal + `approved→rejected` transition + decision + audit together, in one transaction, exactly like `Reject`/`Fail`. §3.6/§7.6's general "deny = zero domain effect" rule is understood as covering `withdrawal_hold`/`deposit`/`play` only, never `withdrawal_payout` |
+| ledger-finance N2 (pre-insert lookup is new code) | `withdrawal.RequestWithdrawal` now does a read-only `getByTenantPlayerIdempotencyKey` lookup first, applies the wallet/asset/amount mismatch check on a hit, evaluates KYC only on a miss, and keeps the post-`IdempotentInsert` conflict branch unchanged for the genuine-race case — both paths tested (`TestRequestWithdrawal_IsIdempotentOnRetry`, `TestRequestWithdrawal_ConcurrentRequestsOnlyOneSucceeds`) |
+| ledger-finance N3 (`release_ledger_transaction_id` must be set in the same UPDATE) | Done — `DenyForCompliance`'s conditional `UPDATE ... SET state = 'rejected', release_ledger_transaction_id = $2 ... WHERE state = 'approved'` mirrors `Reject`/`Fail`/`Cancel` exactly |
+| ledger-finance N5 / security N1 (read key: per-Person vs per-PlayerAccount) | Resolved per security's own explicit prescription (the primary source, not the orchestrator's relayed paraphrase, which this implementation follows where the two differed): the read key is `(tenant_id, brand_id, player_account_id)` for every operation — never `person_id` as a primary key. `PersonID` is used **only** as an additional, deny-only overlay on the withdrawal structural rule (`crossAccountRejectedOverlay`): a rejection on a DIFFERENT `PlayerAccount` of the same `Person`, in the same tenant, denies a withdrawal from THIS account even when this account's own latest row is approved. Tested (`TestEvaluateEnforcement_WithdrawalCrossAccountRejectedOverlayDenies`, `TestEvaluateEnforcement_LatestRowWins*`) |
+| security N2 / C4(e) (cumulative_deposit is one-asset-per-jurisdiction; cross-asset structuring) | Migration 0100's unique index now includes `asset_code`; `evaluateDepositThreshold` fetches every active row for the trigger and asset, and returns `unavailable` (fail-closed) if any active row exists for the jurisdiction but none matches the requested asset — never silently `not_required`. True cross-asset aggregation (an FX/`ConversionOperation` basis) is out of scope, registered as **KYC-FX-AGG-1** (a new human-decision-gated follow-up; needs a rate source this platform does not have) |
+| security N3 (activatable-but-unevaluated trigger types) | `edd_amount`/`registration_tier` may be authored as `draft` (documenting an authored-but-not-wired policy) but migration 0100's lifecycle trigger refuses `draft→active` for any `trigger_type` other than `cumulative_deposit`/`play` — tested (`TestMigration0100_ActivatingUnwiredTriggerTypeRefused`) |
+| security C3 (four-eyes, first cut) | Implemented as a DB-enforced two-distinct-principals control: INSERT is refused unless `status = 'draft'` (activating directly as `active` is impossible), and the lifecycle trigger refuses any `draft→active`/`active→withdrawn`/`draft→withdrawn` transition where the acting `app.platform_admin_principal_id` equals the row's own `created_by_actor_id`. This is a first-cut model (creator ≠ later transitioner), not a full pending-approval workflow with a named second approver role — disclosed as such. Supersession atomicity (withdraw-old + activate-new in one transaction) is the caller's own responsibility (`internal/kyc/enforcement_admin.go`'s `WithdrawEnforcementPolicy`/`ActivateEnforcementPolicy` are separate calls); a combined atomic helper is not built here and is a named gap. Tested (`TestMigration0100_PolicyLifecycleTransitions`) |
+| security N4/N6/N7 (dormancy per-asset, four-eyes text tidy, effective_from filter, actor_type CHECK) | N4 (dormancy per-asset): not done — `ListDormantJurisdictionTriggers` reports per-jurisdiction/trigger_type only, not per-asset; registered as a follow-up alongside KYC-FX-AGG-1. N6/N7 text tidy-ups: not separately tracked; superseded by this §15's own text |
+| ledger-finance N4 (sweeper deny routes to ADR 0095 M3) / N6 (raw-guard retarget) | `DenyForCompliance`'s doc comment now states the ADR 0095 M3 routing explicitly. The raw-guard test itself is **not implemented** here: ADR 0095's `ClaimForDispatch`/T1p/T2/T12 primitives do not exist in this worktree (PRH-I1's own scope) — a guard written against `MarkSubmitted` today would guard the wrong edge per ledger-finance's own finding, so writing one now would be worse than not writing one. Deferred to PRH-I1, noted as a dependency |
+| coordinator relay re: ADR 0095 revision 3 items (T2 re-claim → M3, escalation write allowance) | Documented in `DenyForCompliance`'s doc comment as a binding requirement on the future caller; no code changes here since `ClaimForDispatch`/T2/T12/the escalation write path do not exist in this worktree. This is `identity-compliance` deferring to PRH-I1/`architect` per CLAUDE.md's "no specialist redesigns shared architecture unilaterally" rule, not a decision made here |
+
+### 15.2 Deviations from the ADR §2/§3 sketch, disclosed
+
+- `EnforcementParams.LicensingJurisdictionID` (§2.2) is **not** a
+  caller-supplied field in the implementation — `EvaluateEnforcement`
+  resolves it internally from `TenantID` (the same `tenants.licence_id ->
+  licences.jurisdiction_id` join `jurisdiction.ResolveEvaluationPolicy`
+  uses), and only for `deposit`/`play` (withdrawal needs no jurisdiction
+  resolution at all, per §5). This is a narrower trust surface than the
+  sketch, not a weaker one: no call site can supply a wrong or stale
+  jurisdiction id. A tenant with **no licence bound** resolves to
+  `not_required` for deposit/play (not `unavailable`) — a genuine query
+  failure remains `unavailable`; "no licence" is a valid non-error state
+  distinguished from it explicitly in code (`resolveLicensingJurisdictionID`'s
+  three-way return).
+- `sumSettledDeposits` (§2.6(e)) sums per `player_account_id`, not
+  aggregated across a Person's multiple accounts, and does not include
+  in-flight (pending) deposits. Both are disclosed gaps tied to HD-KYC-1's
+  still-undecided content, not implementation shortcuts taken silently.
+
+### 15.3 Test/mutation/CI evidence
+
+- Unit/integration tests: `internal/kyc/enforcement_integration_test.go`
+  (outcome mapping exhaustive over verification state, latest-row
+  ordering both directions, expiry independent of stored status,
+  cross-tenant isolation, the withdrawal no-history-exemption case, the
+  cross-account deny-only overlay, deposit dormancy) and
+  `internal/kyc/migration_0100_integration_test.go` (up/down/up
+  round-trip, FORCE RLS on both tables, tenant-scoped/platform-service-
+  scoped write rejection, genuine-platform-admin write + provenance,
+  decisions-table cross-tenant isolation and append-only, lifecycle
+  transitions including four-eyes and the unwired-trigger-type refusal).
+  Withdrawal/casino/sportsbook integration suites updated in place
+  (`PersonID` threaded through every fixture; an approved verification
+  seeded where a test's own scenario is unrelated to KYC) — full existing
+  regression suites for `internal/withdrawal`, `internal/casino`,
+  `internal/sportsbook`, `internal/httpserver`, `internal/wallet`,
+  `internal/bonus`, `internal/jurisdiction`, `internal/operatingmarket`
+  pass unmodified in substance (only fixture wiring changed).
+- Mutation-kill evidence (manual, not an automated mutation-testing tool —
+  none is wired into this repo for Go source, matching this project's own
+  precedent for constructs "no mutation tool applies to"):
+  `docs/plans/payment-readiness/evidence/prh-i3-mutation-kill.txt`. Three
+  real mutations applied and reverted against `EvaluateEnforcement`'s
+  guarded branches (the `Allowed` polarity, the expiry guard, the
+  latest-row ordering) — all three killed by name; every other branch
+  reasoned through manually, disclosed as such, not claimed as
+  mutation-tested.
+- Chain-tip pin tests: `internal/bonus/wave3_phase2_migrations_integration_test.go`,
+  `internal/jurisdiction/migration_0077_integration_test.go`, and
+  `internal/operatingmarket/migration_0076_integration_test.go` +
+  `qa_migration_rls_survives_failed_rollback_test.go` previously
+  hard-coded their chain tip at migration 99. Converted to a derived
+  pattern (`wave3MigrationsAbove`/`migration0075MigrationsAbove`/
+  `migration0076MigrationsAbove`: scan the real `migrations/` directory for
+  any version above a fixed base, descending) so migration 0100 — and any
+  future migration — does not require touching these tests again.
+- CI timing measured directly (not estimated): `internal/kyc`,
+  `internal/withdrawal`, `internal/casino`, `internal/sportsbook`
+  integration lanes together run in **~39s wall / ~75s summed** on this
+  environment (`go test -tags=integration` across all four packages) —
+  within this project's existing per-package lane budgets; no new
+  `TIMING_LANE_TESTS` isolation is needed at this volume.
+
+### 15.4 Dependency requests recorded (per `docs/governance/integration-protocol.md`)
+
+- `payments` (PRH-I1): confirm the `DepositIntent` declined-reason string
+  convention and call `kyc.EvaluateEnforcement`/`kyc.RecordDecision` from
+  `InitiateDeposit`, per §8 item 2 and §2.4's ordering (RG → KYC).
+- `payments`/`architect` (PRH-I1, ADR 0095): call
+  `kyc.EvaluateEnforcement` and `withdrawal.DenyForCompliance` from
+  Phase A / `ClaimForDispatch` (T1p), and from the sweeper's T2/T12
+  re-claim paths per ADR 0095's own M3 routing on a KYC deny, per §5's
+  ADR 0095 coordination note and §12.2 C5. Retarget the raw-guard test
+  (security condition 6 / ledger-finance N6) from `MarkSubmitted` to
+  `ClaimForDispatch`/T2/T12 once those exist.
+- `casino`/`sportsbook`: minimal call-site edits already made
+  (`internal/casino/orchestrator.go`'s `postBet`,
+  `internal/sportsbook/orchestrator.go`'s bet-placement path) — requesting
+  review of the exact insertion point and the `RejectionKYCDenied`/
+  `OutcomeDeclined` decline-surfacing convention added.
+- `withdrawal` call sites: minimal edits made directly (no distinct
+  package owner exists today, per §8 item 3's own note) — requesting
+  `ledger-finance` review of `DenyForCompliance` against §12.2 C1/C2/C7 in
+  full, and `security` review of the admin route/RLS/raw-guard gap, before
+  this is marked complete without qualification.

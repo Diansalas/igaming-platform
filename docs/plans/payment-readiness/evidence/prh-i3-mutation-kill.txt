@@ -1,0 +1,72 @@
+PRH-I3 (ADR 0096 KYC enforcement) - mutation-kill evidence
+===========================================================
+
+Method: no automated Go mutation-testing tool is wired into this repo
+(confirmed by inspection - Stage 10.3's own precedent, e.g. w3a-mutation-
+kill.txt, uses a hand-rolled scratchpad driver applying ONE source
+mutation at a time, running named tests, and restoring the original file;
+this evidence file follows the identical method and disclosure convention
+for internal/kyc/enforcement.go, the single highest-value guard this ADR
+introduces per its own §7.1).
+
+Each mutation below was applied directly to internal/kyc/enforcement.go
+with a Python one-liner, the named tests run with
+`go test -tags=integration ./internal/kyc/... -run TestEvaluateEnforcement -v`
+against the local Postgres instance, the verdict recorded, and the file
+restored byte-for-byte from a pre-mutation backup (confirmed via `diff`
+after every restore; `git status`/`git diff` clean of any mutation
+residue at the end of this run).
+
+Environment: worktree agent-a130491df96f19d24, branch
+claude/focused-wright-jw88w9, on top of migration 0100's own commit.
+
+Result: 3 mutations, 3 KILLED, 0 SURVIVED.
+
+Id | Mutation | Verdict (failing tests)
+---|----------|------------------------
+M1 | evaluateWithdrawalStructuralRule's Allowed computation flipped (`outcome == OutcomePassed` -> `outcome != OutcomePassed`) | KILLED by TestEvaluateEnforcement_NoVerification_Failed, TestEvaluateEnforcement_Approved_Passed, TestEvaluateEnforcement_Pending_Denied, TestEvaluateEnforcement_ReviewRequired_MapsToPending, TestEvaluateEnforcement_Rejected_Failed, TestEvaluateEnforcement_ApprovedButExpired_Failed, TestEvaluateEnforcement_ApprovedNotYetExpired_Passed, TestEvaluateEnforcement_LatestRowWins, TestEvaluateEnforcement_LatestRowWins_ReverseOrder, TestEvaluateEnforcement_WithdrawalNoFirstWithdrawalExemption, TestEvaluateEnforcement_WithdrawalCrossAccountRejectedOverlayDenies, TestEvaluateEnforcement_CrossTenant_NeverEvaluatesAnotherTenantsRows, TestEvaluateEnforcement_ResultIsAlwaysServerComputed (12 of 14 tests in the run)
+M2 | latestVerificationState.effectiveOutcome's expiry guard removed (`if expired { return OutcomeFailed }` replaced with a no-op `_ = expired`) | KILLED by TestEvaluateEnforcement_ApprovedButExpired_Failed (exactly the one test targeting this guard - proves the guard is necessary AND that no other test accidentally also depends on it)
+M3 | readLatestVerificationByPlayerAccount's ordering flipped (`ORDER BY created_at DESC, id DESC` -> `ORDER BY created_at ASC, id ASC`) | KILLED by TestEvaluateEnforcement_LatestRowWins, TestEvaluateEnforcement_LatestRowWins_ReverseOrder, TestEvaluateEnforcement_WithdrawalNoFirstWithdrawalExemption
+
+Guards reasoned through manually, NOT empirically mutated (disclosed, not
+claimed as tested): the `unavailable`-on-query-error branches
+(resolveLicensingJurisdictionID's genuine-error path, readActivePolicy(ies)'s
+error path, sumSettledDeposits' malformed-sum path) have no test in this
+package that forces a genuine DB query failure (no fault-injection harness
+exists in this test file); their correctness was verified by code reading
+only. This is a named, disclosed gap for a future qa/security pass, not a
+silent omission - `unavailable` fail-closed IS exercised end-to-end at the
+"no active policy but jurisdiction unresolvable" boundary via
+TestEvaluateEnforcement_DepositDormantByDefault's own not_required/
+unavailable distinction (a tenant with no licence bound resolves
+not_required; that branch IS covered), but a forced SQL-level error
+returning `unavailable` specifically is not.
+
+Migration 0100 CHECK constraints - manual branch-coverage checklist
+(ADR 0096 §7.1: "no mutation tool applies to a SQL CHECK constraint, use
+a manual true/false checklist", mirroring migration 0075's own precedent):
+
+Trigger type / shape                          | Exercised by
+-----------------------------------------------|----------------------------------------------------------
+cumulative_deposit, valid shape                 | TestMigration0100_CheckConstraints_TriggerTypeShapes/cumulative_deposit_valid
+cumulative_deposit, missing threshold           | .../cumulative_deposit_missing_threshold
+cumulative_deposit, missing asset               | .../cumulative_deposit_missing_asset
+cumulative_deposit, carries required_tier (illegal) | .../cumulative_deposit_carries_tier_(rejected)
+registration_tier, valid shape                  | .../registration_tier_valid
+registration_tier, missing required_tier        | .../registration_tier_missing_tier
+registration_tier, carries threshold (illegal)  | .../registration_tier_carries_threshold_(rejected)
+play, valid shape                               | .../play_valid
+play, missing play_operation                    | .../play_missing_play_operation
+play, carries asset_code (illegal)              | .../play_carries_asset_(rejected)
+status='active' with no legal_review_reference  | TestMigration0100_ActiveRequiresLegalReviewReference
+lifecycle: draft->active (four-eyes, different principal) | TestMigration0100_PolicyLifecycleTransitions
+lifecycle: draft->active (four-eyes, SAME principal, refused) | TestMigration0100_PolicyLifecycleTransitions
+lifecycle: active->draft (illegal transition)   | TestMigration0100_PolicyLifecycleTransitions
+lifecycle: active->withdrawn                    | TestMigration0100_PolicyLifecycleTransitions
+lifecycle: withdrawn->active (terminal, refused) | TestMigration0100_PolicyLifecycleTransitions
+lifecycle: activating an evaluator-unwired trigger_type (registration_tier), refused | TestMigration0100_ActivatingUnwiredTriggerTypeRefused
+INSERT of status='active' directly (refused - draft-only INSERT policy) | covered implicitly by every TestMigration0100_CheckConstraints_TriggerTypeShapes case (all insert 'draft'); the INSERT policy's WITH CHECK (status = 'draft') was verified by code reading against migration 0100's SQL, not separately mutated
+
+All 10 trigger-type/shape checklist rows: PASS (each shape either inserts
+cleanly or is rejected, as expected). All 6 lifecycle checklist rows:
+PASS.
