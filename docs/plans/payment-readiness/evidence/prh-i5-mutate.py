@@ -20,6 +20,8 @@ PS = "internal/reconciliation/payment_statement.go"
 SCHED = "internal/reconciliation/scheduler.go"
 MOCK = "internal/payments/mock_statement_source.go"
 LIM = "internal/reconciliation/statement/payment_limits.go"
+M104 = "migrations/0104_payment_statement_line_charset.up.sql"
+M104D = "migrations/0104_payment_statement_line_charset.down.sql"
 PKG = "./internal/reconciliation/"
 
 # (id, description, file, old, new, test regex)
@@ -183,6 +185,23 @@ SOURCE_MUTATIONS = [
     ("PM46", "C1: the line collector never refuses", LIM,
      "\tif len(c.lines) >= c.max {", "\tif false && len(c.lines) >= c.max {",
      "TestPaymentLineCollector_|TestDecodePaymentStatementJSONLines_", "./internal/reconciliation/statement/"),
+    # --- migration 0104 (security C2, database half); scratch-database tests ---
+    ("PM47", "0104: merchant_reference CHECK drops the control-character rule", M104,
+     "AND merchant_reference !~ '[\\x01-\\x1F\\x7F-\\x9F]')),", "AND true)),",
+     "TestMigration0104_ChecksRefuseBadCharsetDirectly$"),
+    ("PM48", "0104: asset_code CHECK loosened", M104,
+     "        CHECK (asset_code ~ '^[A-Z0-9]{1,16}$');", "        CHECK (asset_code ~ '^.{1,16}$');",
+     "TestMigration0104_ChecksRefuseBadCharsetDirectly$"),
+    ("PM49", "0104: pre-flight never aborts", M104,
+     "    IF total_merchant + total_asset > 0 THEN", "    IF false THEN",
+     "TestMigration0104_PreflightCountsAndChangesNothing$"),
+    ("PM50", "0104: pre-flight counts without scoping each tenant (blinded by FORCE RLS)", M104,
+     "        PERFORM set_config('app.tenant_id', tenant_rec.id::text, true);\n", "",
+     "TestMigration0104_PreflightCountsAndChangesNothing$"),
+    ("PM51", "0104 down: the asset_code CHECK is left behind", M104D,
+     "    DROP CONSTRAINT payment_statement_lines_merchant_reference_charset,\n    DROP CONSTRAINT payment_statement_lines_asset_code_shape;",
+     "    DROP CONSTRAINT payment_statement_lines_merchant_reference_charset;",
+     "TestMigration0104_UpDownUpRoundTrip$"),
 ]
 
 MX9_IMPORT_OLD = '\t"github.com/Diansalas/igaming-platform/internal/providerref"\n'
@@ -263,7 +282,7 @@ def main():
         print(f"{mid} {status}: {desc}\n    sql: {drop}\n    test: {regex}")
         for d in detail:
             print(f"    fail: {d}")
-    rc, _ = go_test("PaymentStatement|Migration0102")
+    rc, _ = go_test("PaymentStatement|Migration0102|Migration0104")
     rc2, _ = go_test(".", "./internal/reconciliation/statement/")
     rc = rc or rc2
     print(f"\nbaseline after restore: {'PASS' if rc == 0 else 'FAIL'}")

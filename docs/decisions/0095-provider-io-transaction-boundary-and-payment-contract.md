@@ -1417,7 +1417,13 @@ real adapter's code.
 
 **Not done:** the matching DB CHECK needs a forward migration. 0103 and 0104 are already
 allocated, so the orchestrator must allocate a number. It still blocks the first real source, as
-C2 says. The Go check is the control today.
+C2 says. The Go check is the control today. **Update (2026-09-27): done in migration 0104**
+(`0104_payment_statement_line_charset`). It adds CHECKs on `payment_statement_lines.merchant_reference`
+(the providerref rule, 1..64 bytes) and `asset_code` (`^[A-Z0-9]{1,16}$`). A per-tenant, RLS-scoped
+pre-flight counts violating rows and aborts without changing any row. The down migration drops both
+CHECKs. Tests insert through the database directly: NUL, newline, escape, C1 and DEL characters,
+and lower-case, formula-style and spaced asset codes. There is a 0102-only kill control. Mutation
+evidence: PM47-PM51, 51/51 killed.
 
 **Mutation evidence.** The surviving mutants RM2 to RM6 now have tests and are killed. The harness
 rejects build failures, so a mutant that does not compile no longer counts as killed. The result
