@@ -530,6 +530,23 @@ func toPlaceBetRejectionResponse(result sportsbook.PlaceBetResult) placeBetRespo
 			RejectionMessage: "this bet was declined by platform risk policy: " + risk.CodeLimitBreach,
 		}
 	}
+	// F7 (security review rv-prh-i3-security.md): players see status
+	// only, never the internal kyc.EnforcementDecision.Code
+	// ("kyc_sportsbook_play:pending" etc. - matched_trigger/policy_version
+	// are never even reached this call site, but the raw outcome string
+	// still is, unless collapsed here) and never a distinct "unavailable"
+	// signal - a transient evaluator failure is a generic, retryable
+	// message, exactly like the withdrawal handler's own 503 mapping
+	// (B1). "verification_required" is this route's own closed-enum
+	// code - a player-facing UI can render one static "please verify
+	// your identity" flow from it, never anything jurisdiction/threshold-
+	// specific.
+	if result.RejectionCategory == sportsbook.RejectionKYCDenied {
+		return placeBetResponse{
+			Accepted: false, RejectionCategory: sportsbook.RejectionKYCDenied,
+			RejectionCode: "verification_required", RejectionMessage: "this bet requires identity verification",
+		}
+	}
 	return placeBetResponse{
 		Accepted: false, RejectionCategory: result.RejectionCategory,
 		RejectionCode: result.RejectionCode, RejectionMessage: result.RejectionMessage,
