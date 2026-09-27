@@ -404,6 +404,16 @@ func casUpdate(ctx context.Context, tx pgx.Tx, op string, sql string, args ...an
 // itself, it does not evaluate any gate (that is orchestrator wiring,
 // steps b/c). providerID may differ from a prior excluded set only
 // insofar as the caller has already chosen a not-yet-excluded provider.
+// ClaimCreatedForSubmission's T2 predicate refuses a claim once a sibling
+// attempt of the SAME deposit intent has already succeeded (RV-PRH-I1
+// ledger-finance H4/ADR 0095 §4.3 T2's own "NOT EXISTS(succeeded attempt
+// for the same intent)" requirement, mirroring ResubmitAmbiguous's
+// identical T12 guard below): without this, a cascade child left
+// 'created' after a late T13 success on a DIFFERENT sibling could still be
+// claimed and driven to a second, independent provider call for money
+// that is already captured. A payout attempt has no deposit_intent_id, so
+// the EXISTS subquery is vacuously false for it and never refuses a
+// payout claim.
 func ClaimCreatedForSubmission(ctx context.Context, tx pgx.Tx, attemptID uuid.UUID, providerID string, claimToken uuid.UUID, leaseOwner string, leaseUntil time.Time) error {
 	return casUpdate(ctx, tx, "T2 claim created->submitting",
 		`UPDATE payment_attempts
@@ -412,6 +422,12 @@ func ClaimCreatedForSubmission(ctx context.Context, tx pgx.Tx, attemptID uuid.UU
 		     first_submitted_at = COALESCE(first_submitted_at, now()),
 		     state = 'submitting', last_evidence_kind = 'platform', updated_at = now()
 		 WHERE id = $1 AND state = 'created' AND (provider_id IS NULL OR provider_id = $2)
+		   AND NOT EXISTS (
+		     SELECT 1 FROM payment_attempts sib
+		     WHERE payment_attempts.operation = 'deposit'
+		       AND sib.deposit_intent_id = payment_attempts.deposit_intent_id
+		       AND sib.state = 'succeeded' AND sib.id <> payment_attempts.id
+		   )
 		   AND `+killSwitchNotEngagedSQL("payment_attempts.tenant_id", "$2", "payment_attempts.operation"),
 		attemptID, providerID, claimToken, leaseOwner, leaseUntil,
 	)

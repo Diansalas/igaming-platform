@@ -468,9 +468,24 @@ func loadDepositIntentByProviderRef(ctx context.Context, tx pgx.Tx, providerID, 
 	return d, true, nil
 }
 
+// setIntentAttempt updates the intent's current provider_id/
+// provider_reference and status. RV-PRH-I1 ledger-finance M5: this is one
+// of several direct status writers outside the ADR 0095 §5.1/LF95-C7
+// attempt-projection path (recomputeDepositIntentProjection, receipt.go) -
+// a full single-writer refactor of every call site (drive.go, sweeper.go)
+// is tracked separately; this function itself never regresses a 'succeeded'
+// status, which is the concrete, money-adjacent defect the review found
+// (an interactive sibling's expiry-driven decline overwriting a posted
+// deposit's intent status). 'succeeded' is sticky by construction
+// everywhere else in this codebase (LF95-C7); this CASE makes that true
+// here too, independent of caller order.
 func setIntentAttempt(ctx context.Context, tx pgx.Tx, intentID uuid.UUID, providerID, providerReference *string, status DepositIntentStatus) error {
 	_, err := tx.Exec(ctx,
-		`UPDATE deposit_intents SET provider_id = $2, provider_reference = $3, status = $4, updated_at = now() WHERE id = $1`,
+		`UPDATE deposit_intents
+		    SET provider_id = $2, provider_reference = $3,
+		        status = CASE WHEN status = 'succeeded' THEN status ELSE $4 END,
+		        updated_at = now()
+		  WHERE id = $1`,
 		intentID, providerID, providerReference, status,
 	)
 	if err != nil {
