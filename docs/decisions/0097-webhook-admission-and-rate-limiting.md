@@ -262,7 +262,7 @@ still holds: the gate wraps only the read-only transactions, never the secret-st
 
 | Rejection | Status | Retry-After | Body |
 |---|---|---|---|
-| A2/A3 bucket empty | **429** `rate_limited` | computed (§5.1) | generic `"too many requests; retry later"`, request id only |
+| A2/A3 bucket empty | **429** `rate_limited` (default) or adapter-declared (§6.3, known-provider requests only) | computed (§5.1) | generic `"too many requests; retry later"`, request id only |
 | A4a / A4b capacity | **503** `service_unavailable` | 1 s | generic |
 | B1 verified bucket | **429** (default) or adapter-declared (§6.3) | computed | generic |
 | B2 domain bulkhead | **503** | 2 s | generic |
@@ -292,10 +292,19 @@ this: vendors differ, and some may treat a 4xx as terminal for win, rollback or 
   `WebhookRetrySemantics{Retries429, Retries503, HonorsRetryAfter, RetryWindow}`. This
   belongs in the adapter capability manifest that ADR 0095 designs (dependency; `architect`
   to place it). Until ADR 0095 lands, it is a per-provider config key.
-  - If the adapter does not retry 429, B1 answers with **503** for that provider.
+  - If the adapter does not retry 429, **both** B1 **and** A3 (for a *known* provider — a
+    request naming an unregistered/unknown `providerKey` has no declared adapter to consult
+    and always gets 429) answer with **503** for that provider instead of 429. This closes a
+    gap the ADR's own §6 text originally left open (security review C4 of PRH-I4): the
+    pre-auth tier previously always answered 429 regardless of an adapter's declared
+    semantics, so a no-429-retry adapter's callback could be silently dropped if it happened
+    to be limited at A3 rather than B1. `RequireRetrySemantics` enforces the corresponding
+    registration-time invariant below at both call sites.
   - If it retries neither 429 nor 503, the adapter must not be registered for webhook
-    delivery without LF-C1 option (b): daily reconciliation that detects provider-settled,
-    platform-unposted events with a P1 alert.
+    delivery at all — `RequireRetrySemantics` refuses registration outright (fail closed) —
+    until LF-C1 option (b) (daily reconciliation that detects provider-settled,
+    platform-unposted events with a P1 alert) exists; PRH-I4-T6-EXTEND-1 tracks that
+    reconciliation-backstop work (see PRH-I5, the payment reconciliation stream).
   - A non-MOCK adapter with no declaration fails registration (fail closed).
 - **`RetryWindow`:** sustained limiting longer than a vendor's retry window loses the event
   from the push channel. Reconciliation (LF-C1 (b), PRH-I5 for payments) is the backstop,
@@ -1090,3 +1099,102 @@ evidence for ORD-3 at the domain-transaction level.
   reconciliation-surfacing extension) remain open.
 - **PRH-I4-T11-TIMING-1** (new, this implementation) — QA item 1 (T11's real-time bound) is
   unresolved; open, needs a security timing-lane ruling or a virtualized deadline seam.
+
+### 21.7 Round 2 follow-up (orchestrator-directed fix round, post-merge with PRH-I3)
+
+- **PRH-I4-T6-EXTEND-1** partially addressed: the financial idempotency matrix (T6a/c/d/e) was
+  built against the real admission layer, each asserting zero rows on a limited attempt and
+  exactly one posting on redelivery; the payments-backlog/reconciliation-surfacing/SUM(debits)
+  == SUM(credits)+projection==rebuild pieces were carried forward and completed in round 3
+  (§21.8) rather than this round.
+- **PRH-I4-T11-TIMING-1** closed: T11 now drives a virtualized deadline seam
+  (`armBodyReadDeadline`, a package-level var swapped in the test for a fake-clock-driven
+  reader) instead of a real wall-clock deadline, so it runs deterministically in the main test
+  lane (no timing-lane addition needed).
+- Added a `pool.Stat()`-based assertion direction for T4/T10 (an unauthenticated flood must
+  never acquire a DB connection beyond the gate) — completed with the real 10-connection pool
+  in round 3 (§21.8) after security's own, more specific T4/T10 requirements arrived.
+- **PRH-I4-METRICS-1** left open, explicitly re-confirmed (owner: security + devops; reason:
+  §8's OTel metrics are not wired to a meter — see §21.2).
+
+### 21.8 Round 3 follow-up (security review `rv-prh-i4-security.md`, APPROVE WITH CONDITIONS)
+
+All four HIGH/MEDIUM conditions (C1–C4) and the three LOW findings from security's review are
+now closed, plus the T4/T10/T6/T11 items security specified exactly:
+
+- **C1 (HIGH) — closed.** A DB-gate rejection during credential resolution now carries a
+  distinct sentinel (`webhookauth.ErrTenantReaderUnavailable`) through
+  `internal/providercred.Resolver.Resolve`, `webhookauth.reasonForResolveError`
+  (`ReasonAdmissionUnavailable`), and each domain's `CallbackAuthError`, so the httpserver
+  layer answers 503 (never the uniform 401) for every gate rejection inside verification, in
+  all three domains. Isolated, mutation-verified regression test:
+  `internal/providercred/resolver_gate_unavailable_test.go`'s
+  `TestResolve_GateUnavailable_PropagatesDistinctSentinel` (see the mutation-kill evidence
+  file, M7). Three additional httpserver-level end-to-end tests
+  (`webhook_admission_credential_resolution_integration_test.go`) exist as broader coverage
+  but — recorded honestly, not overclaimed — do not themselves isolate this exact code path,
+  because the tenant-slug-lookup gate and the credential-resolution gate share one A4b key;
+  see that file's own doc comment and the evidence file's M7 note for the full explanation.
+- **C2 — closed.** Every DB-gate 503 (both the tenant-slug-lookup gate in
+  `webhook_preamble.go` and the credential-resolution gate reached via each domain's
+  `errDBGateUnavailable`/`ReasonAdmissionUnavailable` branch) now gets a `Retry-After` header
+  and a `db_gate`-tagged log line, via the new `writeDBGateUnavailable`/
+  `writeAdmissionUnavailableAuthError` helpers on `webhookAdmissionRuntime`.
+- **C3 — closed.** An AST-based structural guard
+  (`webhook_admission_route_guard_test.go`) parses each of the three webhook handler
+  constructors' own function bodies and fails if either `admitPreAuth` or
+  `markWebhookRouteForLogging` is not called directly inside them. Mutation-verified (evidence
+  file M9): extracting the call into a genuinely separate, differently-named top-level
+  function is caught; a same-file inline closure is not a gap (go/ast still walks into it).
+- **C4 — closed**, both halves: (a) `RequireRetrySemantics` now refuses registration outright
+  for an adapter that declares it retries neither 429 nor 503 (previously only "no
+  declaration" failed closed); (b) the ADR's own §6.3/§6.1 text is amended above so the
+  pre-auth (A3) tier, not just B1, answers 503 instead of 429 for a known provider that has
+  declared it does not retry 429.
+- **Lows — closed.** T9 now asserts the actual 503 status code (previously only `!= 200`) and
+  the runtime's own "directory unloaded" branch was already emitting the correct status —
+  the code/comment mismatch security flagged is resolved. The overflow-log line
+  (`webhook_admission_limiter_overflow`) is now emitted from A2/A3/B1's own Allow calls,
+  with a regression test. The two RL-F4 "leftover" call sites (the orchestrator-disabled path,
+  and a direct `markWebhookRouteForLogging` call before the earliest possible early return in
+  each of the three handlers) are both fixed and covered.
+- **T4 (security's exact spec) — closed:**
+  `webhook_admission_dbgate_integration_test.go`'s
+  `TestAdmission_T4_GatedReaderBoundsRealPoolAcquisition` uses a real 10-connection pool
+  (`phasecapture.Pool10`), a barrier held inside the gated section, 200 concurrent requests,
+  asserts observed concurrent holders never exceed the gate cap, an unrelated `Acquire`
+  succeeds without waiting, over-cap requests are rejected with zero DB statements, and
+  `pool.Stat().AcquireCount()` grows by at most `admitted + 5`. `S2` (the gate removed from
+  `gatedGetTenantBySlug`) is mutation-killed by the sibling
+  `TestAdmission_T4_GatedGetTenantBySlug_RespectsSaturation` (evidence file M8).
+- **T10 (security's exact spec) — closed:**
+  `webhook_admission_t10_integration_test.go` proves, in all three domains, that a
+  pre-verification-rejected request reads zero body bytes (a canary `io.ReadCloser` that fails
+  the test if `Read` is ever called), calling each handler directly via `httptest.NewRecorder`
+  to avoid a false positive from `net/http`'s own automatic body-draining. `S1` (admission
+  moved after the body read/slug lookup) is mutation-killed per-domain (evidence file M10).
+- **T6 (security's exact spec) — closed:**
+  `webhook_admission_t6_idempotency_integration_test.go` implements deposit (T6a), the
+  payments-backlog B2 load scenario (T6b — 20 concurrent legitimate deposits, zero 503s),
+  casino bet→rollback reordering (T6c), win-before-bet (T6d), payments reversal (T6e), and the
+  distinct reversal-before-deposit ordering (T6f), each through the real pre-auth AND verified
+  admission tiers. Every variant ends with `assertLedgerBalancedAndReconciled`: SUM(debits) ==
+  SUM(credits) directly over `ledger_entries`, plus `reconciliation.RunLedgerVsProjection`
+  reporting a clean rebuild with zero mismatches — security's explicit "projection == rebuild"
+  requirement. Mutation-verified for the tombstone-decline path (evidence file M11).
+- **T11** already used the virtualized deadline seam from round 2 (§21.7); unchanged this
+  round.
+- **PRH-I4-T6-EXTEND-1** is now closed for its ledger-invariant scope (SUM(debits)==
+  SUM(credits), projection==rebuild, the backlog scenario). The §6.3 reconciliation-surfacing
+  statement: a settled-but-rejected payments event (the LF-C1 option (b) backstop
+  `RequireRetrySemantics` now requires for a no-429/no-503-retry adapter) will be caught by
+  PRH-I5's payment reconciliation stream, once it exists — PRH-I5 is tracked separately (see
+  `docs/plans/payment-readiness/` for its own plan/status) and is the correct place for that
+  daily settled-vs-posted comparison; this ADR's own §2.1-style ledger-vs-projection stream
+  (`internal/reconciliation`) does not, and should not, take on that cross-system comparison
+  itself.
+- **PRH-I4-METRICS-1** remains open, re-confirmed again this round (owner: security + devops;
+  reason unchanged from §21.2/§21.7).
+
+Full mutation-kill evidence for every claim above:
+`docs/plans/payment-readiness/evidence/prh-i4-mutation-kill.txt` (M7–M11, round 3 section).

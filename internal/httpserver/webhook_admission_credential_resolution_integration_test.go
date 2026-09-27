@@ -9,14 +9,31 @@
 // then see 401s under load, and a caller cannot tell "this callback is
 // unauthenticated" from "the platform is momentarily busy".
 //
-// These tests use the REAL providercred.Resolver (never MOCK, per
-// security's explicit instruction) in all three domains, with the A4b
-// gate's per-key cap forced to 0 so gatedReader.WithTenantReadOnly always
-// refuses - the resolver's handle-read query is therefore NEVER reached
-// (no registered credential handle is needed at all: the gate decision
-// happens strictly before the pool is ever touched, so this is also a
-// clean demonstration that the fix works independent of whether a
-// credential would otherwise have resolved).
+// IMPORTANT SCOPE NOTE (recorded honestly rather than overclaimed): the
+// tenant-slug lookup (webhook_preamble.go's gatedTenantLookup) and
+// credential resolution (this file's target, inside VerifyCallback) are
+// gated by the SAME A4b bulkhead key (domain|tenantKey|providerKey, both
+// computed identically from the request's slug/providerID -
+// preAuthKeys). With DBGatePerKey/DBGateUnknown forced to 0 below, the
+// gate refuses at the FIRST read it sees - the tenant-slug lookup - so
+// these three end-to-end tests actually exercise the ALREADY-CORRECT
+// preamble-level 503 mapping (webhook_preamble.go's own
+// errors.Is(err, errDBGateUnavailable) branch, which predates this
+// round), never reaching providercred.Resolver.Resolve at all. They are
+// still valid, useful coverage (an end-to-end proof that a saturated A4b
+// gate never surfaces as the uniform 401, with a REAL resolver/real
+// orchestrators wired in, in all three domains) but they do NOT, by
+// themselves, isolate the specific C1 code fix (the
+// errors.Is(err, webhookauth.ErrTenantReaderUnavailable) check inside
+// internal/providercred/resolver.go's Resolve). That fix is isolated and
+// mutation-verified separately, at the providercred package's own level,
+// by resolver_gate_unavailable_test.go's
+// TestResolve_GateUnavailable_PropagatesDistinctSentinel (a fake
+// TenantReader that returns ErrTenantReaderUnavailable directly to
+// Resolve, with no gate/HTTP layer involved) - see that file for the
+// actual C1 mutation-kill evidence, and
+// docs/plans/payment-readiness/evidence/prh-i4-mutation-kill.txt for the
+// record of both.
 package httpserver
 
 import (
