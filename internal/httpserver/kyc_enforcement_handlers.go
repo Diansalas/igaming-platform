@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -62,22 +63,40 @@ func newListKYCEnforcementDecisionsHandler(deps Deps) http.HandlerFunc {
 
 		limit := 0
 		if raw := r.URL.Query().Get("limit"); raw != "" {
-			if v, convErr := strconv.Atoi(raw); convErr == nil {
-				limit = v
+			v, convErr := strconv.Atoi(raw)
+			if convErr != nil || v < 0 {
+				apierror.Write(w, requestID, apierror.CodeValidation, "limit must be a non-negative integer")
+				return
 			}
+			limit = v
 		}
 
+		// B3 (code review rv-prh-i3-code-review.md): accept the cursor in
+		// the EXACT shape this handler itself emits (next_before,
+		// "<RFC3339Nano>,<uuid>") - the previous version only read
+		// before_decided_at/before_id separately, which no client could
+		// ever satisfy from the response it was given, and silently
+		// treated a malformed or partially-supplied cursor as "no cursor"
+		// (returning page 1 forever) instead of rejecting it.
 		var beforeDecidedAt *time.Time
 		var beforeID *uuid.UUID
-		if raw := r.URL.Query().Get("before_decided_at"); raw != "" {
-			if t, convErr := time.Parse(time.RFC3339Nano, raw); convErr == nil {
-				beforeDecidedAt = &t
+		if raw := r.URL.Query().Get("next_before"); raw != "" {
+			parts := strings.SplitN(raw, ",", 2)
+			if len(parts) != 2 {
+				apierror.Write(w, requestID, apierror.CodeValidation, "next_before is malformed")
+				return
 			}
-		}
-		if raw := r.URL.Query().Get("before_id"); raw != "" {
-			if id, convErr := uuid.Parse(raw); convErr == nil {
-				beforeID = &id
+			t, convErr := time.Parse(time.RFC3339Nano, parts[0])
+			if convErr != nil {
+				apierror.Write(w, requestID, apierror.CodeValidation, "next_before has an invalid timestamp")
+				return
 			}
+			id, convErr := uuid.Parse(parts[1])
+			if convErr != nil {
+				apierror.Write(w, requestID, apierror.CodeValidation, "next_before has an invalid id")
+				return
+			}
+			beforeDecidedAt, beforeID = &t, &id
 		}
 
 		var decisions []kyc.EnforcementDecisionRecord
