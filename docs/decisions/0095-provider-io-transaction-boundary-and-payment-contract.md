@@ -5702,3 +5702,96 @@ its own ADR.
 - It is consistent with the existing `canActOnTenant` precedent (`provider_credential_handlers.go`,
   `admin_routes.go`), and it keeps one OpenAPI surface.
 - Splitting later is additive (new paths and permissions, no data change).
+
+---
+
+## 31. §28 (AM-2, INV-DEP-1) implementation record (`payments`, 2026-09-27, Financial Hardening FH-3)
+
+**Status: IMPLEMENTED**, superseding §1/§9's "PARTIALLY IMPLEMENTED... §28 INV-DEP-1 NOT
+IMPLEMENTED" line for the code (not the accounting-treatment human decision, which stays
+BLOCKED per §28.13).
+
+- **§28.3 choke point.** `postDepositSuccess` (`internal/payments/orchestrator.go`) re-evaluates
+  `resolvedForOtherDeposit(I, A, K)` immediately before `ledger.Post` and returns the typed
+  sentinel `ErrDepositIntentAlreadyResolved` when true. Every T7/T13 evidence-application site
+  (receipt.go's two `OutcomeSucceeded` branches, drive.go's `ErrorClassSucceeded`, sweeper.go's
+  `ErrorClassSucceeded` - which also serves T17 re-drive per deposit_v2.go's own doc comment) now
+  calls the new `postDepositSuccessOrDispute` wrapper instead of `postDepositSuccess` directly:
+  it checks the SAME predicate BEFORE ever posting and routes to T10
+  (`ApplyDisputeFromNonTerminal`, `multiple_success_for_intent`) or T13d (the new
+  `ApplyMultipleSuccessForIntent`) instead. If `postDepositSuccess`'s own re-check or the ledger's
+  backstop index fires anyway, the wrapper maps it identically plus the additional
+  `payments_deposit_intent_index_backstop_fired` P1 (§28.3 rule 3). The legacy `InitiateDeposit`
+  path (`resolveAmbiguous`, no attempt row, `attemptID=nil`) returns the sentinel and posts
+  nothing; `RecordDepositMultipleSuccessRefusal` is the separate-tx audit+P1 counterpart to
+  `RecordDepositReversalRejection`'s existing pattern, for that path's caller to invoke after its
+  own transaction rolls back (this path has no production caller today - test/receive-bridge
+  only). The dead `deposit.second_capture_posted` branch is deleted; that audit action name is
+  retired.
+- **§28.4 transitions.** `ApplyMultipleSuccessForIntent` (T13d, `internal/payments/attempt.go`)
+  and the existing `ApplyDisputeFromNonTerminal` (T10, reused with the new
+  `TerminalReasonMultipleSuccessForIntent` constant) implement the new rows. `ApplyReceiptEvidence`
+  now returns `DispositionAnomaly` (not `DispositionApplied`) specifically for a T10/T13d
+  resolution, distinguishing it from the pre-existing tombstone-precedes-success T10 cell (which
+  keeps `DispositionApplied`, its own established convention, unchanged).
+- **§28.8 migration 0107** (`migrations/0107_deposit_intent_double_credit_backstop.{up,down}.sql`):
+  both partial unique indexes, each inside a `DO $$ ... EXCEPTION WHEN unique_violation$$` block
+  (the 0092 pattern, no bypass); `payment_attempts_guard()` `CREATE OR REPLACE`d with the single
+  line change accepting `terminal_reason IN (reversal_tombstone_precedes_success,
+  multiple_success_for_intent)`; `reconciliation_mismatches_mismatch_kind_check` widened with
+  `pay_captured_unposted`. `ledger.ErrDepositAlreadyPostedForIntent` follows the 0092
+  `ErrReversalAlreadyExists` pattern exactly (idempotency key looked up first; the sentinel only
+  when no row exists for the request's key and the fired constraint is the new index).
+- **§28.9 reconciliation.** `MismatchKindPayCapturedUnposted` (`pay_captured_unposted`) is emitted
+  by `payMatcher.matchPayment` for a `disputed`/`multiple_success_for_intent` attempt whose
+  statement line reports succeeded, with no reversal statement line naming its reference
+  (`payMatcher.reversalOriginals`, pre-scanned) and no ledger tombstone
+  (`m.ledgerByRef["tombstone\x00"+ref]`).
+- **Tests.** QA's test-first matrix files landed VERBATIM (with one unavoidable, documented,
+  non-assertion compile adaptation - see below) in `internal/payments/inv_dep1_matrix_integration_test.go`,
+  `internal/reconciliation/inv_dep1_recon_integration_test.go`,
+  `internal/idempotency/inv_dep1_correlation_integration_test.go`. The four legacy tests QA's own
+  header mapped for removal are removed with a pointer comment to their replacement:
+  `TestReceipt_T13SecondCapture_ThroughApplyReceiptEvidence_LedgerBalanced`,
+  `TestRVLF_P6_ReversalOfSecondCaptureReversesItsOwnTransaction`,
+  `TestPaymentStatement_Kind_DuplicatePlatformSuccess`,
+  `TestIntegration_LegitimateSecondOccurrenceDoesNotCollapse`. New
+  `internal/payments/migration_0107_integration_test.go` covers the up/down/up round trip, both
+  pre-flights' refusal on seeded duplicate data, existing-valid-data survival, the ledger
+  backstop sentinel, and a direct truth-table test of `resolvedForOtherDeposit`.
+- **Disclosed, not fixed (per "STOP and report", never edit an assertion):**
+  - `TestINVDEP1_D_ConcurrentOriginalAndFallbackSuccess_Race` and
+    `TestINVDEP1_K_ConcurrentAdversarialOrderings_Race`'s shared `invDep1RaceOnce` helper asserts
+    a per-rep wallet balance of exactly 5000 against a WALLET-CUMULATIVE `cashBalance` reused
+    across 50+ reps - arithmetically wrong from rep 1 onward, independent of INV-DEP-1. Verified
+    (via temporary debug logging, removed before commit) that `resolvedForOtherDeposit` correctly
+    detects the race for both delivery orderings on every repetition observed, and that
+    `assertInvariantAndBalanced` (correctly per-intent-scoped) passes every repetition.
+  - `TestINVDEP1_Recon_M_DuplicateDetector_LegacyDataShape`'s own doc comment says it needs a
+    pre-migration-0107 scratch DB, but it is built on `newPayWorld`/`testPool`, which migrates to
+    HEAD - so its own `ledger.Post` is (correctly) refused by 0107's backstop before the test
+    reaches its assertion. Needs a migrate-to-N-1 fixture (out of scope to add inside a file
+    QA marked verbatim); flagged for a coordinator decision on how to re-home it.
+  - One non-assertion compile adaptation: `TestINVDEP1_G_SameProviderReferenceRepeated_LedgerKeyDedupe`
+    called `postDepositSuccess` with the pre-§28.3 6-argument signature (written test-first,
+    before the `attemptID *uuid.UUID` parameter existed); updated to pass `&res.Attempt.ID` (the
+    most accurate choice for an exact-redelivery-of-a-succeeded-attempt scenario, per its own
+    comment) - the scenario, fixture and every assertion are unchanged.
+- **Mutation-kill checklist** (QA's own "N. MUTATION CHECKLIST", items 1-8): see
+  `docs/plans/payment-readiness/evidence/prh-i1-mutation-kill.txt`, "PAY-DOUBLE-CREDIT-1 /
+  INV-DEP-1, Financial Hardening FH-3" section. Items 1/2/3 revealed genuine defense-in-depth
+  (the ledger backstop index independently catches the removed pre-check, with an extra P1) and
+  were killed instead by a new direct predicate test; items 6 and 8 killed directly against new
+  targeted tests; item 4/5 covered by the new migration pre-flight-refusal tests; item 7 is
+  pre-existing structural protection this round did not introduce.
+- **Verification.** `go build ./...`, `go vet -tags=integration ./...`, `gofmt -l .` clean;
+  `golangci-lint run ./...` (pinned 2.9.0): 0 issues; `go run ./cmd/migrate verify` against a
+  scratch DB migrated through 0107: clean, no version gaps. Full `internal/payments`,
+  `internal/reconciliation`, `internal/idempotency` and `internal/ledger` suites green under
+  `-race` on a private DB except the two disclosed items above;
+  `internal/httpserver`'s pre-existing `TestResolutionIsolation_*` flakiness (tracked separately,
+  registry item TEST-RESISO-RACE-1) reproduced again this run, unrelated to and untouched by this
+  round.
+- **Deferred, per HD-LEDGER-UNALLOC-1 (§28.13):** the interim policy is (A), no posting of any
+  kind for a second real capture - implemented exactly as specified. Option (B) (an unallocated
+  suspense posting) is LEDGER-SUSPENSE-B-1, NOT IMPLEMENTED, out of scope for this round.

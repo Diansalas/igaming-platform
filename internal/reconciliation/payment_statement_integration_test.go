@@ -526,42 +526,19 @@ func TestPaymentStatement_Kind_Duplicate(t *testing.T) {
 	mustOnePay(t, ms, MismatchKindPayDuplicate, "provider_reference="+*a.ProviderReference, "check=duplicate_line")
 }
 
-func TestPaymentStatement_Kind_DuplicatePlatformSuccess(t *testing.T) {
-	// Two succeeded attempts for one deposit intent (a T13 late second
-	// capture): the platform-side pay_duplicate.
-	w := newPayWorld(t)
-	declined, child := w.cascade(t)
-	w.succeed(t, w.mockB, payProvB, child)
-	// The first provider's late success on the declined attempt (T13, a
-	// second capture), applied as T13 does: its own deposit posting under
-	// A's reference, then declined -> succeeded linked to it. (Built
-	// directly: the receipt path currently fails this shape with a
-	// payment_attempts_tenant_ledger_tx unique violation - reported to
-	// payments, see the PRH-I5 implementation record.)
-	w.mockA.Resolve(*declined.ProviderReference, payments.OutcomeSucceeded, "", false)
-	err := w.pool.WithTenant(context.Background(), w.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		provider, ref := payProvA, *declined.ProviderReference
-		res, err := ledger.Post(ctx, tx, ledger.TransactionInput{
-			TenantID: w.f.tenantID, TransactionType: ledger.TxDeposit, IdempotencyKey: provider + ":" + ref,
-			ProviderID: &provider, ProviderTxID: &ref, CorrelationID: *declined.DepositIntentID,
-			Entries: []ledger.EntryInput{
-				{LedgerAccountID: w.f.clearingID, Direction: ledger.Debit, Amount: declined.Amount},
-				{LedgerAccountID: w.f.cashAccountID, Direction: ledger.Credit, Amount: declined.Amount},
-			},
-		})
-		if err != nil {
-			return err
-		}
-		return payments.ApplySuccess(ctx, tx, declined.ID, payments.SuccessEvidence{
-			Evidence: payments.EvidenceCallback, ProviderReference: ref, LedgerTransactionID: &res.TransactionID,
-		})
-	})
-	if err != nil {
-		t.Fatalf("T13 second capture: %v", err)
-	}
-	_, ms := w.run(t, w.srcA, PaymentStatementOptions{})
-	mustOnePay(t, ms, MismatchKindPayDuplicate, "deposit_intent=", "check=duplicate_success")
-}
+// TestPaymentStatement_Kind_DuplicatePlatformSuccess was removed (ADR
+// 0095 §28, ledger-finance ruling §5 item 3, INV-DEP-1 / PAY-DOUBLE-
+// CREDIT-1 Financial Hardening FH-3): after migration 0107's
+// ledger_transactions_one_deposit_per_intent index, the direct
+// ledger.Post this test used to build its "second capture" fixture now
+// itself refuses (ledger.ErrDepositAlreadyPostedForIntent) - the
+// scenario it tested is structurally unreachable on current schema.
+// Split into two, both in inv_dep1_recon_integration_test.go:
+// TestINVDEP1_Recon_M_CapturedUnposted_ReplacesDuplicate (the real
+// receipt path, which now reports pay_captured_unposted instead of
+// pay_duplicate) and TestINVDEP1_Recon_M_DuplicateDetector_LegacyDataShape
+// (the detector itself, built on a scratch DB migrated to just BEFORE
+// 0107 - the legacy-data shape it guards against).
 
 func TestPaymentStatement_Kind_MissingPlatformRecord(t *testing.T) {
 	w := newPayWorld(t)

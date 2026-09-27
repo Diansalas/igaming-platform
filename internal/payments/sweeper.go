@@ -398,11 +398,20 @@ func (s *Sweeper) applyStatusEvidence(ctx context.Context, tx pgx.Tx, intent Dep
 				return ApplyDisputeFromNonTerminal(ctx, tx, attempt.ID, EvidenceQueryStatus, "reversal_tombstone_precedes_success")
 			}
 		}
+		// ADR 0095 §28.3: routed through the choke-point wrapper (see
+		// drive.go's identical comment) - a poll success for an intent
+		// already financially resolved by ANOTHER attempt or posting
+		// takes T10/T13d instead of Flow 1, exactly like phase C and the
+		// receipt path. This is also T17 re-drive's own site (deposit_v2.go's
+		// doc comment: T17 re-drive reuses this same evidence application).
 		// postedTxID, not updated.LedgerTransactionID - PRH-I5 finding
 		// (LF95-C6(a)/T13); see drive.go's identical comment.
-		_, postedTxID, err := s.Orchestrator.postDepositSuccess(ctx, tx, intent, *attempt.ProviderID, res.ProviderReference, attempt.Amount, attempt.AssetCode)
+		_, postedTxID, disputed, err := s.Orchestrator.postDepositSuccessOrDispute(ctx, tx, intent, attempt, *attempt.ProviderID, res.ProviderReference, attempt.Amount, attempt.AssetCode, EvidenceQueryStatus)
 		if err != nil {
 			return err
+		}
+		if disputed {
+			return nil
 		}
 		if err := ApplySuccess(ctx, tx, attempt.ID, SuccessEvidence{
 			Evidence: EvidenceQueryStatus, ProviderReference: res.ProviderReference, LedgerTransactionID: &postedTxID,

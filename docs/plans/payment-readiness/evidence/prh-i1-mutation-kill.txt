@@ -1713,3 +1713,126 @@ assertions sensitive to race-detector overhead, untouched by this round -
 see §27.14's original disclosure) failed non-deterministically; every
 other httpserver test, including every payments/webhook/payout/kill-
 switch/reversal-named test, passed.
+
+
+PAY-DOUBLE-CREDIT-1 / INV-DEP-1, Financial Hardening FH-3, 2026-09-27
+======================================================================
+ADR 0095 §28 (AM-2). QA's own mutation checklist (inv_dep1_matrix_integration_test.go
+"N. MUTATION CHECKLIST"), items 1-8. Applied via byte-exact edits, run
+against PRIV_DB=fh3_invdep1_1 (migrated to head incl. 0107), confirmed
+FAIL, reverted, `git status --porcelain` confirmed clean.
+
+Items 1/2/3 (delete the resolved_for_other check at the T13/T7 call sites,
+and the internal re-check inside postDepositSuccess):
+  Mutation: `resolvedForOtherDeposit`'s body replaced with `return false, nil`
+  (this single function is shared by every T7/T13 call site AND
+  postDepositSuccess's own internal re-check, so one mutation covers all
+  three checklist items at once).
+  Result against TestINVDEP1_C/H/J/Inverted_T13SecondCapture: ALL STILL
+  PASS. This is NOT a failed kill - it is the ledger's OWN backstop index
+  (migration 0107, ledger_transactions_one_deposit_per_intent) correctly
+  catching the resulting second ledger.Post call and returning
+  ErrDepositAlreadyPostedForIntent, which postDepositSuccessOrDispute maps
+  to the identical disputed=true/T10/T13d outcome as the pre-check would
+  have, PLUS an extra "payments_deposit_intent_index_backstop_fired" P1 log
+  line (confirmed present in the test output only under this mutation, not
+  in the unmutated run) - genuine, working defense in depth, exactly as
+  ADR 0095 §28.3 rule 3 specifies ("The ledger sentinel reaching any
+  caller means the choke point was bypassed... same mapping plus an
+  additional P1"). Disclosed rather than claimed as a successful kill via
+  the scenario tests.
+  Killed instead by: TestINVDEP1_Mutation1_ResolvedForOtherDepositPredicate
+  (internal/payments/migration_0107_integration_test.go), a direct
+  truth-table test of resolvedForOtherDeposit itself (6 cases: no success
+  yet, exact redelivery, different attempt id, different attempt+key,
+  legacy nil-attempt-id). With the mutation applied: 3 of 6 assertions
+  fail (every case that expects resolved=true).
+  Reverted: git checkout (targeted, function body restored) - re-verified
+  `git status --porcelain` clean and TestINVDEP1_C/D/H/J/K/Inverted_* all
+  still green afterward.
+
+Item 4/5 (drop each of the two partial unique indexes):
+  Not dropped against a live DB in this pass (would require altering a
+  migrated schema out from under the running suite). Equivalent coverage:
+  TestMigration0107_Up_DuplicateSucceededAttempts_RefusedByAttemptsPreflight
+  and TestMigration0107_Up_DuplicateLedgerPostings_RefusedByLedgerPreflight
+  (migration_0107_integration_test.go) positively prove each index's own
+  pre-flight refuses exactly the seeded duplicate shape it is meant to
+  catch, on a scratch DB migrated to immediately before 0107. This is the
+  "0107 migration tests QA couldn't write" set the coordinator asked for.
+
+Item 6 (swap the tombstone/resolved_for_other check order):
+  File: internal/payments/receipt.go (AttemptDeclined/T13 branch)
+  Mutation: an inline `resolvedForOtherDeposit` check inserted BEFORE the
+  existing `tombstoneExists` check (previously tombstone-first).
+  Killed by: TestINVDEP1_Mutation6_TombstonePrecedesMultipleSuccessForIntent
+  (migration_0107_integration_test.go, new) - a scenario with BOTH
+  conditions true simultaneously (intent already resolved by a fallback
+  sibling AND the late original's own reference already tombstoned).
+  Unmutated: disputed/reversal_tombstone_precedes_success (tombstone wins).
+  Mutated: disputed/multiple_success_for_intent (wrong reason - the swap
+  is observable).
+  Note: TestINVDEP1_Inverted_RVLF_P6 (the QA-named test for this item)
+  does NOT construct the overlapping-conditions case (its reversal targets
+  an attempt that is already disputed via T13d, not the tombstone-and-
+  T13d-simultaneously shape) and does not distinguish the swap - disclosed
+  rather than silently claimed.
+  Reverted: git checkout (targeted); confirmed clean.
+
+Item 7 (T17/re-drive acts on a terminal non-declined attempt):
+  Not mutated: there is no single application-level "T17 terminal guard"
+  this round added to remove - the protection is structural (the 0101
+  CHECK forbidding next_action_at on any terminal row, pre-dating this
+  round) and already exercised by TestINVDEP1_O_ReDriveOfDisputedAttempt_NoPost,
+  which passes. Disclosed as pre-existing, not a new mutant this round
+  introduced or is positioned to kill.
+
+Item 8 (remove the pay_captured_unposted emission):
+  File: internal/reconciliation/payment_statement.go
+  Mutation: the `m.r.add(MismatchKindPayCapturedUnposted, ...)` call in
+  matchPayment's new case replaced with a no-op statement.
+  Killed by: TestINVDEP1_Recon_M_CapturedUnposted_ReplacesDuplicate
+  (internal/reconciliation/inv_dep1_recon_integration_test.go).
+  Failure: "expected a 'pay_captured_unposted' mismatch ..., got:" (empty).
+  Reverted: git checkout -- internal/reconciliation/payment_statement.go.
+
+Disclosed test-authoring issue found while running the QA matrix
+(reported to the coordinator per "if you believe an assertion is wrong,
+STOP and report it"): TestINVDEP1_D_ConcurrentOriginalAndFallbackSuccess_Race
+and TestINVDEP1_K_ConcurrentAdversarialOrderings_Race's shared helper
+(invDep1RaceOnce) asserts `cashBalance(pool, f) == 5000` after EVERY
+repetition, but cashBalance reads the WHOLE WALLET's cumulative balance
+and the fixture's single wallet is reused across all 50+ reps - so from
+rep 1 onward the assertion is arithmetically wrong (correct behaviour
+produces balance = (rep+1)*5000, not 5000), independent of whether
+INV-DEP-1 held. Verified via temporary debug logging (removed before
+commit) that resolvedForOtherDeposit correctly detects the race in BOTH
+possible delivery orderings for every repetition observed (rep 0 and rep
+1 both showed exactly one delivery per rep resolving to
+disposition=anomaly/multiple_success_for_intent, the other posting) -
+`assertInvariantAndBalanced` (which IS correctly scoped per-intent) passes
+on every repetition. Not fixed (per instruction, no edits to QA's
+assertions) - these two tests are expected-red pending a QA fix (track
+balance delta per rep, or use a fresh wallet per rep) rather than
+INV-DEP-1 being violated.
+
+Also disclosed: TestINVDEP1_Recon_M_DuplicateDetector_LegacyDataShape
+(internal/reconciliation/inv_dep1_recon_integration_test.go, brought in
+verbatim) FAILS against a HEAD-migrated DB: its own doc comment states it
+needs a "legacy data shape" (pre-migration-0107) scratch DB, but it is
+built on `newPayWorld`/`testPool`, which migrates to HEAD - so the
+duplicate ledger.Post it performs is itself refused by migration 0107's
+own backstop index (working as designed) before the test ever reaches its
+assertion. This is exactly the class of "0107 migration-boundary test QA
+couldn't write" the coordinator anticipated; not fixed in the QA file
+(would require either a migrate-to-N-1 pool or the file's own
+setup being changed, neither of which is an "assertion" I am authorized to
+edit) - flagged for a coordinator decision on how to re-home this
+specific fixture.
+
+Verification after all FH-3 mutations reverted: `git status --porcelain`
+clean; `go build ./...` and `go vet -tags=integration ./...` clean across
+the whole repository; `gofmt -l .` clean; `golangci-lint run ./...`
+(pinned 2.9.0, untagged): 0 issues; `go run ./cmd/migrate verify` against
+a fresh scratch DB migrated through 0107: "all applied migrations verified
+clean, no version gaps".

@@ -754,7 +754,24 @@ func (o *Orchestrator) resolveAmbiguous(ctx context.Context, tx pgx.Tx, intent D
 
 	switch status.Outcome {
 	case OutcomeSucceeded:
-		updated, _, err := o.postDepositSuccess(ctx, tx, intent, providerID, providerReference, status.Amount, status.AssetCode)
+		// ADR 0095 §28.3 rule 3, legacy InitiateDeposit row: no attempt row
+		// exists on this path (attemptID = nil), so resolvedForOtherDeposit
+		// counts EVERY succeeded sibling attempt of the intent - correct
+		// per the ledger-finance ruling's own confirmation (§3(iii)). On
+		// ErrDepositIntentAlreadyResolved: nothing is posted and nothing is
+		// committed for this success (the error propagates and the
+		// CALLER's transaction rolls back, exactly like every other error
+		// this function already returns). There is no attempt to dispute
+		// on this path, so this is neither T10 nor T13d - the caller must
+		// write the P1 plus deposit.multiple_success_refused audit row in
+		// a SEPARATE, freshly-opened transaction after the rollback
+		// (RecordDepositMultipleSuccessRefusal below), mirroring
+		// RecordDepositReversalRejection's identical pattern for a typed
+		// rejection whose caller's tx has already rolled back. This
+		// legacy, no-attempt-row path has no production caller today
+		// (InitiateDeposit is scheduled for removal, security P2-L2) and
+		// is exercised only by tests/the receive-bridge.
+		updated, _, err := o.postDepositSuccess(ctx, tx, intent, nil, providerID, providerReference, status.Amount, status.AssetCode)
 		return updated, err
 	case OutcomeDeclined:
 		return o.handleDecline(ctx, tx, intent, providerID, providerReference, status.Cascadable, status.DeclineReason, excluded)
@@ -825,6 +842,159 @@ func (o *Orchestrator) finalizeAmbiguous(ctx context.Context, tx pgx.Tx, intent 
 	return intent, nil
 }
 
+// ErrDepositIntentAlreadyResolved is the ADR 0095 §28.3 rule-2 typed
+// sentinel: a verified matching success arrived for a deposit intent that
+// is already financially resolved by ANOTHER attempt or ledger posting
+// (INV-DEP-1, §28.2's resolved_for_other(I, A, K) predicate). Nothing is
+// posted. Every caller maps this to T10 (a still-live attempt) or T13d (a
+// declined attempt) via postDepositSuccessOrDispute - never a 5xx, never a
+// rollback, never a credit.
+var ErrDepositIntentAlreadyResolved = errors.New("payments: deposit intent is already financially resolved by another attempt or posting")
+
+// resolvedForOtherDeposit implements ADR 0095 §28.2's resolved_for_other
+// predicate exactly:
+//
+//	EXISTS(another SUCCEEDED deposit attempt of this intent, id <> attemptID)
+//	OR EXISTS(a deposit ledger posting for this intent under a DIFFERENT
+//	          idempotency key than idempotencyKey)
+//
+// An exact redelivery (same attempt, same idempotency key) is therefore
+// NOT "resolved for other" - it keeps today's replay semantics
+// (AlreadyPosted / duplicate_effect). attemptID is nil on the legacy
+// InitiateDeposit path (no attempt row exists yet); "id IS DISTINCT FROM
+// NULL" is true for every row, so every succeeded sibling counts there -
+// ledger-finance's own confirmation of the AM-2 revision (§3(iii)).
+func resolvedForOtherDeposit(ctx context.Context, tx pgx.Tx, tenantID, intentID uuid.UUID, attemptID *uuid.UUID, idempotencyKey string) (bool, error) {
+	var exists bool
+	err := tx.QueryRow(ctx,
+		`SELECT EXISTS (
+			SELECT 1 FROM payment_attempts
+			WHERE tenant_id = $1 AND deposit_intent_id = $2 AND operation = 'deposit' AND state = 'succeeded'
+			  AND id IS DISTINCT FROM $3
+		) OR EXISTS (
+			SELECT 1 FROM ledger_transactions
+			WHERE tenant_id = $1 AND transaction_type = 'deposit' AND correlation_id = $2
+			  AND idempotency_key <> $4
+		)`,
+		tenantID, intentID, attemptID, idempotencyKey,
+	).Scan(&exists)
+	if err != nil {
+		return false, fmt.Errorf("payments: check deposit resolved_for_other: %w", err)
+	}
+	return exists, nil
+}
+
+// applyMultipleSuccessDispute is the shared T10/T13d transition (ADR 0095
+// §28.4): a verified matching success arrived for an attempt whose intent
+// is already financially resolved by ANOTHER attempt or posting. No
+// posting, no error, no rollback - committed with whatever else this
+// evidence-application call was already about to commit (LF95-C3). The
+// intent's own projection is untouched by this call (it stays 'succeeded'
+// via §5.1's sticky "any succeeded -> succeeded" rule; the caller's own
+// recomputeDepositIntentProjection, if it runs, sees the same result
+// either way).
+func applyMultipleSuccessDispute(ctx context.Context, tx pgx.Tx, attempt PaymentAttempt, evidence EvidenceKind) error {
+	if attempt.State == AttemptDeclined {
+		return ApplyMultipleSuccessForIntent(ctx, tx, attempt.ID, evidence)
+	}
+	return ApplyDisputeFromNonTerminal(ctx, tx, attempt.ID, evidence, TerminalReasonMultipleSuccessForIntent)
+}
+
+// auditMultipleSuccessForIntent records the ADR 0095 §28.11 audit entry
+// and the allow-listed P1 log line for a T10/T13d resolution - EVERY
+// caller of postDepositSuccessOrDispute uses this, so the metadata shape
+// and the P1 alert name are identical regardless of which of the three
+// evidence-application sites (receipt, phase C, sweeper/T17) produced it.
+// The P1 log line itself carries only tenant/intent/attempt ids - no
+// amounts, no references (security S-5); those go in the audit metadata
+// only.
+func auditMultipleSuccessForIntent(ctx context.Context, tx pgx.Tx, attempt PaymentAttempt, providerID, providerReference string, evidence EvidenceKind, backstopFired bool) error {
+	meta := map[string]any{
+		"terminal_reason": TerminalReasonMultipleSuccessForIntent, "last_evidence_kind": string(evidence),
+		"provider_id": providerID, "provider_reference": providerReference,
+	}
+	if attempt.DepositIntentID != nil {
+		meta["deposit_intent_id"] = attempt.DepositIntentID.String()
+	}
+	if attempt.LedgerTransactionID != nil {
+		meta["existing_deposit_ledger_transaction_id"] = attempt.LedgerTransactionID.String()
+	}
+	if err := audit.Record(ctx, tx, audit.Entry{
+		TenantID: attempt.TenantID, ActorType: audit.ActorSystem, Action: "payment.attempt_disputed",
+		TargetType: "payment_attempt", TargetID: attempt.ID.String(), Outcome: audit.OutcomeDenied,
+		Metadata: meta,
+	}); err != nil {
+		return fmt.Errorf("payments: audit multiple_success_for_intent: %w", err)
+	}
+	intentID := ""
+	if attempt.DepositIntentID != nil {
+		intentID = attempt.DepositIntentID.String()
+	}
+	slog.Default().Error("payments_multiple_success_for_intent_alert",
+		"tenant_id", attempt.TenantID.String(), "deposit_intent_id", intentID, "attempt_id", attempt.ID.String())
+	if backstopFired {
+		slog.Default().Error("payments_deposit_intent_index_backstop_fired",
+			"tenant_id", attempt.TenantID.String(), "deposit_intent_id", intentID, "attempt_id", attempt.ID.String())
+	}
+	return nil
+}
+
+// postDepositSuccessOrDispute is the shared choke-point wrapper every
+// T7/T13 evidence-application site (receipt.go, drive.go, sweeper.go -
+// which also serves T17 re-drive, deposit_v2.go's own comment) calls
+// instead of postDepositSuccess directly (ADR 0095 §28.3 rules 1.4-3). It
+// checks resolved_for_other(I, A, K) BEFORE ever calling
+// postDepositSuccess, routing to T10 (attempt still live) or T13d
+// (attempt already declined) instead of posting when the intent is
+// already financially resolved. postDepositSuccess's OWN internal
+// re-check (rule 2) and the ledger's own backstop index are defense in
+// depth for a race this pre-check missed; if either fires
+// (ErrDepositIntentAlreadyResolved returned from postDepositSuccess), this
+// function maps it identically, plus the ADDITIONAL
+// payments_deposit_intent_index_backstop_fired P1 (rule 3: reaching that
+// re-check or the ledger index at all means THIS pre-check was bypassed -
+// a defect signal, not an ordinary outcome).
+//
+// disputed=true tells the caller a T10/T13d dispute happened instead of a
+// T7/T13 success - no posting occurred, postedTxID is uuid.Nil, and
+// updated is the caller's own intent value UNCHANGED (a T10/T13d never
+// changes the intent projection itself; callers that need the fresh
+// projection re-read it, exactly as they already do after any other
+// evidence application).
+func (o *Orchestrator) postDepositSuccessOrDispute(
+	ctx context.Context, tx pgx.Tx, intent DepositIntent, attempt PaymentAttempt,
+	providerID, providerReference string, amount int64, assetCode string, evidence EvidenceKind,
+) (updated DepositIntent, postedTxID uuid.UUID, disputed bool, err error) {
+	idemKey := providerID + ":" + providerReference
+	resolved, err := resolvedForOtherDeposit(ctx, tx, attempt.TenantID, *attempt.DepositIntentID, &attempt.ID, idemKey)
+	if err != nil {
+		return intent, uuid.Nil, false, err
+	}
+	if resolved {
+		if err := applyMultipleSuccessDispute(ctx, tx, attempt, evidence); err != nil {
+			return intent, uuid.Nil, false, err
+		}
+		if err := auditMultipleSuccessForIntent(ctx, tx, attempt, providerID, providerReference, evidence, false); err != nil {
+			return intent, uuid.Nil, false, err
+		}
+		return intent, uuid.Nil, true, nil
+	}
+	updated, postedTxID, err = o.postDepositSuccess(ctx, tx, intent, &attempt.ID, providerID, providerReference, amount, assetCode)
+	if errors.Is(err, ErrDepositIntentAlreadyResolved) {
+		if derr := applyMultipleSuccessDispute(ctx, tx, attempt, evidence); derr != nil {
+			return intent, uuid.Nil, false, derr
+		}
+		if derr := auditMultipleSuccessForIntent(ctx, tx, attempt, providerID, providerReference, evidence, true); derr != nil {
+			return intent, uuid.Nil, false, derr
+		}
+		return intent, uuid.Nil, true, nil
+	}
+	if err != nil {
+		return intent, uuid.Nil, false, err
+	}
+	return updated, postedTxID, false, nil
+}
+
 // postDepositSuccess posts financial-transaction-flows.md Flow 1: debit
 // psp_clearing, credit player_cash, idempotent on the provider's own
 // reference (used as both the ledger's provider_tx_id and its
@@ -849,10 +1019,30 @@ func (o *Orchestrator) finalizeAmbiguous(ctx context.Context, tx pgx.Tx, intent 
 // collides with payment_attempts_tenant_ledger_tx's per-attempt
 // uniqueness (the bug ApplyReceiptEvidence's applyDepositSuccessAndPost
 // had before this fix).
-func (o *Orchestrator) postDepositSuccess(ctx context.Context, tx pgx.Tx, intent DepositIntent, providerID, providerReference string, amount int64, assetCode string) (DepositIntent, uuid.UUID, error) {
+func (o *Orchestrator) postDepositSuccess(ctx context.Context, tx pgx.Tx, intent DepositIntent, attemptID *uuid.UUID, providerID, providerReference string, amount int64, assetCode string) (DepositIntent, uuid.UUID, error) {
 	if amount != intent.Amount || assetCode != intent.AssetCode {
 		return intent, uuid.Nil, fmt.Errorf("%w: intent %s expected %d %s, provider confirmed %d %s",
 			ErrCallbackProviderMismatch, intent.ID, intent.Amount, intent.AssetCode, amount, assetCode)
+	}
+
+	// ADR 0095 §28.3 rule 2: re-evaluate resolved_for_other(I, A, K)
+	// immediately before ledger.Post, under the SAME intent lock every
+	// caller already holds (no new lock). This is the SAME predicate the
+	// T7/T13 evidence-application call sites already checked before ever
+	// calling this function (rule 1.4, postDepositSuccessOrDispute below)
+	// - the re-check exists so that no caller, including the legacy
+	// InitiateDeposit path and any future one, can reach ledger.Post for
+	// an already financially resolved intent. attemptID is nil on the
+	// legacy path (no attempt row exists): resolvedForOtherDeposit then
+	// counts EVERY succeeded sibling attempt, which is correct there
+	// (ledger-finance's confirmation of the AM-2 revision, §3(iii)).
+	idemKey := providerID + ":" + providerReference
+	resolved, err := resolvedForOtherDeposit(ctx, tx, intent.TenantID, intent.ID, attemptID, idemKey)
+	if err != nil {
+		return intent, uuid.Nil, err
+	}
+	if resolved {
+		return intent, uuid.Nil, ErrDepositIntentAlreadyResolved
 	}
 
 	// ADR 0082 §4.5: this package needs NO locking change - finding
@@ -891,6 +1081,15 @@ func (o *Orchestrator) postDepositSuccess(ctx context.Context, tx pgx.Tx, intent
 			{LedgerAccountID: cashAccountID, Direction: ledger.Credit, Amount: amount},
 		},
 	})
+	if errors.Is(err, ledger.ErrDepositAlreadyPostedForIntent) {
+		// ADR 0095 §28.3 rule 3: the ledger's OWN backstop index fired.
+		// This can only happen if the resolved_for_other re-check just
+		// above was itself somehow bypassed or raced - a defect signal,
+		// not an ordinary business outcome. Mapped to the SAME typed
+		// sentinel callers already handle; postDepositSuccessOrDispute
+		// logs the additional "backstop fired" P1 when it sees this.
+		return intent, uuid.Nil, fmt.Errorf("%w (ledger backstop: %w)", ErrDepositIntentAlreadyResolved, err)
+	}
 	if errors.Is(err, ledger.ErrIdempotencyPayloadMismatch) {
 		// Unreachable through the intent compare above today (audit
 		// site #19 is class B), kept as the typed backstop.
@@ -901,23 +1100,15 @@ func (o *Orchestrator) postDepositSuccess(ctx context.Context, tx pgx.Tx, intent
 	}
 
 	if intent.Status == DepositIntentSucceeded {
-		// T13 second capture (or an exact redelivery, already collapsed
-		// to the SAME transaction id by ledger.Post above) - the intent's
-		// own projection is left untouched; only a genuinely NEW posting
-		// gets its own audit line, so a plain redelivery stays as quiet as
-		// it always was.
-		if !postResult.AlreadyPosted {
-			if err := audit.Record(ctx, tx, audit.Entry{
-				TenantID: intent.TenantID, ActorType: audit.ActorSystem, Action: "deposit.second_capture_posted",
-				TargetType: "deposit_intent", TargetID: intent.ID.String(), Outcome: audit.OutcomeSuccess,
-				Metadata: map[string]any{
-					"provider_id": providerID, "provider_reference": providerReference, "amount": amount, "asset_code": assetCode,
-					"ledger_transaction_id": postResult.TransactionID.String(),
-				},
-			}); err != nil {
-				return intent, uuid.Nil, fmt.Errorf("payments: audit second capture: %w", err)
-			}
-		}
+		// ADR 0095 §28.3 rule 4: the "second capture posted" branch that
+		// used to live here is DELETED - it is now dead code. The
+		// resolved_for_other check above already refused every call
+		// except an EXACT redelivery of the intent's one and only posting
+		// (same attempt, same idempotency key), which ledger.Post already
+		// collapsed to the SAME transaction id (AlreadyPosted=true). The
+		// intent's own projection is left untouched, exactly as an exact
+		// redelivery always has been. The retired audit action name
+		// "deposit.second_capture_posted" must never be reused.
 		return intent, postResult.TransactionID, nil
 	}
 
@@ -1210,6 +1401,28 @@ func RecordDepositReversalRejection(ctx context.Context, tx pgx.Tx, tenantID uui
 	}); err != nil {
 		return fmt.Errorf("payments: audit deposit reversal rejection: %w", err)
 	}
+	return nil
+}
+
+// RecordDepositMultipleSuccessRefusal is the ADR 0095 §28.3 rule-3 legacy
+// InitiateDeposit counterpart to RecordDepositReversalRejection: when
+// resolveAmbiguous's synchronous QueryStatus success returns
+// ErrDepositIntentAlreadyResolved, the caller's transaction has already
+// rolled back (nothing was posted, nothing committed for the success), so
+// the P1 plus the deposit.multiple_success_refused audit row are written
+// here, in a SEPARATE, freshly-opened transaction the caller provides -
+// exactly the same pattern RecordDepositReversalRejection already uses for
+// its own typed rejection.
+func RecordDepositMultipleSuccessRefusal(ctx context.Context, tx pgx.Tx, tenantID, intentID uuid.UUID, providerID, providerReference string) error {
+	if err := audit.Record(ctx, tx, audit.Entry{
+		TenantID: tenantID, ActorType: audit.ActorSystem, Action: "deposit.multiple_success_refused",
+		TargetType: "deposit_intent", TargetID: intentID.String(), Outcome: audit.OutcomeDenied,
+		Metadata: map[string]any{"provider_id": providerID, "provider_reference": providerReference},
+	}); err != nil {
+		return fmt.Errorf("payments: audit deposit multiple success refusal: %w", err)
+	}
+	slog.Default().Error("payments_multiple_success_for_intent_alert",
+		"tenant_id", tenantID.String(), "deposit_intent_id", intentID.String(), "attempt_id", "")
 	return nil
 }
 

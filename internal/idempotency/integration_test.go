@@ -289,46 +289,20 @@ func TestIntegration_DuplicateDelivery(t *testing.T) {
 	assertBalance(t, pool, f.tenantID, f.cashAccountID, 500) // posted exactly once
 }
 
-// TestIntegration_LegitimateSecondOccurrenceDoesNotCollapse proves two
-// genuinely distinct occurrences of the same correlation/transaction
-// shape (e.g. two bet-builder legs, or a partial settlement followed by
-// a second one) - distinguished ONLY by occurrence_ordinal, with
-// otherwise-identical payloads - both post independently. Required test
-// case "legitimate second occurrence" and directly the scenario ADR 0038
-// §14/P1-3 named as unresolved before this package's fix.
-func TestIntegration_LegitimateSecondOccurrenceDoesNotCollapse(t *testing.T) {
-	pool := testPool(t)
-	f := seedFixture(t, pool)
-	corr := uuid.New()
-
-	ord1 := OccurrenceOrdinal(1)
-	ord2 := OccurrenceOrdinal(2)
-	composed1, err := ComposeOccurrenceKeyWithOrdinal("leg-settlement-ref", &ord1)
-	if err != nil {
-		t.Fatalf("compose 1: %v", err)
-	}
-	composed2, err := ComposeOccurrenceKeyWithOrdinal("leg-settlement-ref", &ord2)
-	if err != nil {
-		t.Fatalf("compose 2: %v", err)
-	}
-	if composed1 == composed2 {
-		t.Fatal("two distinct ordinals over the same reference must compose differently")
-	}
-
-	// Identical payload (same amount) on purpose - the exact "coincident
-	// payload" scenario the original ADR 0038 §14 gap named.
-	first := mustPost(t, pool, f.tenantID, externalVehicleInput(f, f.tenantID, "mock-provider", f.cashAccountID, composed1, corr, 300))
-	second := mustPost(t, pool, f.tenantID, externalVehicleInput(f, f.tenantID, "mock-provider", f.cashAccountID, composed2, corr, 300))
-
-	if first.AlreadyPosted || second.AlreadyPosted {
-		t.Fatalf("both occurrences should post as NEW transactions, got AlreadyPosted=%v/%v", first.AlreadyPosted, second.AlreadyPosted)
-	}
-	if first.TransactionID == second.TransactionID {
-		t.Fatal("two distinct occurrences must never share a transaction id")
-	}
-	// Both amounts posted - 300 + 300 = 600, not absorbed as one.
-	assertBalance(t, pool, f.tenantID, f.cashAccountID, 600)
-}
+// TestIntegration_LegitimateSecondOccurrenceDoesNotCollapse was removed
+// (ADR 0095 §28, ledger-finance ruling §3(ii)/§5 item 4, INV-DEP-1 /
+// PAY-DOUBLE-CREDIT-1 Financial Hardening FH-3): its two occurrences
+// shared ONE correlation id under transaction_type='deposit', which
+// migration 0107's ledger_transactions_one_deposit_per_intent index now
+// refuses (ErrDepositAlreadyPostedForIntent) - for transaction_type=
+// 'deposit', correlation_id IS the deposit_intents.id (binding contract
+// amendment), so two distinct real deposits must never share one.
+// Replaced by
+// TestIntegration_LegitimateSecondOccurrenceDoesNotCollapse_DistinctCorrelationIDs
+// (inv_dep1_correlation_integration_test.go), which gives each
+// occurrence its own correlation id - the idempotency-key-composition
+// assertions this test pinned (distinct transaction ids, both amounts
+// posted, AlreadyPosted=false for both) are unchanged.
 
 // TestIntegration_ReplayWithChangedProviderDoesNotCollapse proves the
 // SAME provider_tx_id delivered under a DIFFERENT provider_id is a

@@ -321,17 +321,26 @@ func (o *Orchestrator) applyDepositCallResult(
 				return intent, nil, nil
 			}
 		}
-		// postedTxID (never updated.LedgerTransactionID - PRH-I5 finding,
-		// LF95-C6(a)/T13): a concurrent sibling could have already posted
-		// the intent's FIRST capture between this attempt's own phase B
-		// and this phase C, in which case updated.LedgerTransactionID
-		// still names that first posting while THIS attempt's own
-		// posting (a genuine T13 second capture) got its own, different
+		// ADR 0095 §28.3: routed through the choke-point wrapper, which
+		// checks resolved_for_other(I, A, K) BEFORE ever posting - a
+		// success for an intent already financially resolved by ANOTHER
+		// attempt or posting takes T10 (this attempt is always
+		// 'submitting' here) instead of Flow 1. postedTxID (never
+		// updated.LedgerTransactionID - PRH-I5 finding, LF95-C6(a)/T13):
+		// a concurrent sibling could have already posted the intent's
+		// FIRST capture between this attempt's own phase B and this
+		// phase C, in which case updated.LedgerTransactionID still names
+		// that first posting while THIS attempt's own posting (the
+		// intent's first-ever capture, since resolved_for_other above
+		// already refused anything else) got its own, different
 		// transaction id - linking the attempt to the wrong one would
 		// collide with payment_attempts_tenant_ledger_tx.
-		updated, postedTxID, err := o.postDepositSuccess(ctx, tx, intent, capability.ProviderID, res.ProviderReference, attempt.Amount, attempt.AssetCode)
+		updated, postedTxID, disputed, err := o.postDepositSuccessOrDispute(ctx, tx, intent, attempt, capability.ProviderID, res.ProviderReference, attempt.Amount, attempt.AssetCode, evidence)
 		if err != nil {
 			return intent, nil, err
+		}
+		if disputed {
+			return intent, nil, nil
 		}
 		if err := ApplySuccess(ctx, tx, attempt.ID, SuccessEvidence{
 			Evidence: evidence, ProviderReference: res.ProviderReference, LedgerTransactionID: &postedTxID,

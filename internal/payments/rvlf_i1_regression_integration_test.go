@@ -354,68 +354,16 @@ func TestRVLF_P5_ReversalReceiptsResolved(t *testing.T) {
 	}
 }
 
-// P6 (L1/F5-M4): a reversal of a T13 second capture must reverse the
-// SECOND capture's own ledger transaction, never the first; PAY-REV-1's
-// single-reversal-per-original guarantee still holds; the first capture
-// remains independently reversible exactly once.
-func TestRVLF_P6_ReversalOfSecondCaptureReversesItsOwnTransaction(t *testing.T) {
-	pool := depositV2ScratchPool(t)
-	f := seedOrchFixture(t, pool)
-	pa := NewMockProvider("mock-rv6-a", "EUR")
-	pb := NewMockProvider("mock-rv6-b", "EUR")
-	pb.AcceptAllAmounts = true
-	registerCapability(t, pool, f, pa, 100)
-	registerCapability(t, pool, f, pb, 200)
-	orch := NewOrchestrator(map[string]PaymentProvider{"mock-rv6-a": pa, "mock-rv6-b": pb},
-		MultiWebhookCredentialResolver{"mock-rv6-a": NewMockWebhookCredentials(pa), "mock-rv6-b": NewMockWebhookCredentials(pb)})
-	amt := int64(MockAmountProviderDeclineCascade)
-	res := rvInit(t, pool, orch, f, amt, "p6")
-	childRef := *res.Attempt.ProviderReference
-	var parentID uuid.UUID
-	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		return tx.QueryRow(ctx, `SELECT id FROM payment_attempts WHERE deposit_intent_id = $1 AND attempt_no = 1`, res.Intent.ID).Scan(&parentID)
-	}); err != nil {
-		t.Fatal(err)
-	}
-	parentRef := *mustGetAttempt(t, pool, f.tenantID, parentID).ProviderReference
-
-	if _, err := rvCallback(pool, orch, f, "mock-rv6-b", pb.CallbackPayload(f.tenantID, CallbackEventDeposit, childRef, "", OutcomeSucceeded, amt, "EUR", "", false)); err != nil {
-		t.Fatalf("child success: %v", err)
-	}
-	if _, err := rvCallback(pool, orch, f, "mock-rv6-a", pa.CallbackPayload(f.tenantID, CallbackEventDeposit, parentRef, "", OutcomeSucceeded, amt, "EUR", "", false)); err != nil {
-		t.Fatalf("parent late success (T13): %v", err)
-	}
-	child := mustGetAttempt(t, pool, f.tenantID, res.Attempt.ID)
-	parent := mustGetAttempt(t, pool, f.tenantID, parentID)
-	if cashBalance(t, pool, f) != 2*amt {
-		t.Fatalf("expected two captures")
-	}
-	// Reverse the SECOND capture (the parent's T13 posting).
-	if _, err := rvCallback(pool, orch, f, "mock-rv6-a", pa.CallbackPayload(f.tenantID, CallbackEventDepositReversal, "rev-p6-second", parentRef, OutcomeSucceeded, amt, "EUR", "", false)); err != nil {
-		t.Fatalf("reversal of second capture: %v", err)
-	}
-	var reverses uuid.UUID
-	_ = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		return tx.QueryRow(ctx, `SELECT reverses_transaction_id FROM ledger_transactions WHERE provider_tx_id = 'rev-p6-second'`).Scan(&reverses)
-	})
-	if reverses != *parent.LedgerTransactionID {
-		t.Errorf("L1: reversal of the second capture reversed %s; want the parent's own %s (first capture is %s)", reverses, *parent.LedgerTransactionID, *child.LedgerTransactionID)
-	}
-	// PAY-REV-1: a distinct second reversal of the same original is refused.
-	_, err := rvCallback(pool, orch, f, "mock-rv6-a", pa.CallbackPayload(f.tenantID, CallbackEventDepositReversal, "rev-p6-second-b", parentRef, OutcomeSucceeded, amt, "EUR", "", false))
-	if !errors.Is(err, ErrDepositAlreadyReversed) {
-		t.Errorf("PAY-REV-1 not preserved: %v", err)
-	}
-	// The first capture remains independently reversible exactly once.
-	if _, err := rvCallback(pool, orch, f, "mock-rv6-b", pb.CallbackPayload(f.tenantID, CallbackEventDepositReversal, "rev-p6-first", childRef, OutcomeSucceeded, amt, "EUR", "", false)); err != nil {
-		t.Errorf("reversal of the first capture: %v", err)
-	}
-	if b := cashBalance(t, pool, f); b != 0 {
-		t.Errorf("balance after both reversals = %d", b)
-	}
-	assertLedgerBalanced(t, pool, f.tenantID)
-	loAssertProjectionMatchesRebuild(t, pool, f.tenantID)
-}
+// TestRVLF_P6_ReversalOfSecondCaptureReversesItsOwnTransaction was
+// removed (ADR 0095 §28, ledger-finance ruling §5 item 2, INV-DEP-1 /
+// PAY-DOUBLE-CREDIT-1 Financial Hardening FH-3): it asserted that a T13
+// second capture POSTS its own ledger transaction, reversible
+// independently of the first. Superseded by INV-DEP-1: a second capture
+// is disputed (multiple_success_for_intent, T13d) and never posted, so a
+// reversal naming its reference takes the TOMBSTONE branch instead (no
+// ledger effect - the attempt has LedgerTransactionID == nil). Replaced
+// by TestINVDEP1_Inverted_RVLF_P6_ReversalOfDisputedSecondCaptureTakesTombstoneBranch
+// (internal/payments/inv_dep1_matrix_integration_test.go), same fixture shape.
 
 // P7: out-of-order reversal deliveries before any deposit posted, then two
 // late success deliveries - ends disputed/ambiguous with a single

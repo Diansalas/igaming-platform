@@ -137,6 +137,15 @@ const (
 	MismatchKindPayStatusMismatch        MismatchKind = "pay_status_mismatch"
 	MismatchKindPayDuplicate             MismatchKind = "pay_duplicate"
 	MismatchKindPayUnresolved            MismatchKind = "pay_unresolved"
+	// MismatchKindPayCapturedUnposted is ADR 0095 §28.9 (INV-DEP-1 /
+	// PAY-DOUBLE-CREDIT-1, HD-LEDGER-UNALLOC-1 interim (A)): "provider
+	// captured, platform disputed, not posted" - a disputed attempt with
+	// terminal_reason='multiple_success_for_intent' whose statement line
+	// reports succeeded, with no reversal line and no ledger tombstone.
+	// Reported on every run until it clears (a reversal/tombstone appears,
+	// or M1/allocation happens - BLOCKED). Never auto-resolved, never a
+	// T17/re-drive trigger.
+	MismatchKindPayCapturedUnposted MismatchKind = "pay_captured_unposted"
 )
 
 // paymentAssetCodeRE is the asset code shape a statement line may carry
@@ -566,6 +575,7 @@ type payAttempt struct {
 	releaseTx           *uuid.UUID // payout: withdrawal_requests.release_ledger_transaction_id
 	settlementRef       string     // payout: the release tx's provider_tx_id when it is this provider's withdrawal_completed
 	releaseIsCompletion bool
+	terminalReason      string // "" when NULL - ADR 0095 §28.9's pay_captured_unposted condition
 }
 
 type payLedgerTx struct {
@@ -600,6 +610,12 @@ type payMatcher struct {
 	ledger      []*payLedgerTx
 	ledgerByRef map[string]*payLedgerTx // type + "\x00" + provider_tx_id
 	ledgerByID  map[uuid.UUID]*payLedgerTx
+
+	// reversalOriginals: ADR 0095 §28.9's "no deposit_reversal line naming
+	// its reference" condition for pay_captured_unposted - the set of
+	// every deposit_reversal statement line's OriginalProviderReference in
+	// THIS run, pre-scanned by matchLines before any line is matched.
+	reversalOriginals map[string]bool
 
 	legacyUnattempted int
 }
@@ -648,7 +664,8 @@ func (m *payMatcher) loadPlatform(ctx context.Context, tx pgx.Tx) error {
 		       a.state, a.amount::text, a.asset_code, COALESCE(a.first_submitted_at, a.created_at),
 		       a.ledger_transaction_id, wr.release_ledger_transaction_id,
 		       COALESCE(rl.provider_tx_id, ''),
-		       COALESCE(rl.transaction_type = 'withdrawal_completed' AND rl.provider_id = a.provider_id, false)
+		       COALESCE(rl.transaction_type = 'withdrawal_completed' AND rl.provider_id = a.provider_id, false),
+		       COALESCE(a.terminal_reason, '')
 		  FROM payment_attempts a
 		  LEFT JOIN withdrawal_requests wr ON wr.id = a.withdrawal_request_id
 		  LEFT JOIN ledger_transactions rl ON rl.id = wr.release_ledger_transaction_id
@@ -663,7 +680,7 @@ func (m *payMatcher) loadPlatform(ctx context.Context, tx pgx.Tx) error {
 		a := &payAttempt{}
 		var amount string
 		if err := rows.Scan(&a.id, &a.operation, &a.depositIntent, &a.providerRef, &a.merchantRef, &a.state, &amount, &a.asset,
-			&a.sentAt, &a.ledgerTx, &a.releaseTx, &a.settlementRef, &a.releaseIsCompletion); err != nil {
+			&a.sentAt, &a.ledgerTx, &a.releaseTx, &a.settlementRef, &a.releaseIsCompletion, &a.terminalReason); err != nil {
 			rows.Close()
 			return err
 		}
@@ -776,6 +793,18 @@ func orNone(s string) string {
 // order: duplicate keys are reported once and only their first line is
 // matched further.
 func (m *payMatcher) matchLines(lines []payLine) {
+	// ADR 0095 §28.9 pay_captured_unposted: "no deposit_reversal line
+	// naming its reference" is a statement-wide fact, independent of
+	// which order the lines happen to appear in - pre-scanned once here
+	// so matchPayment (called below, possibly BEFORE a later reversal
+	// line for the same original in this same statement) can already see
+	// it.
+	m.reversalOriginals = map[string]bool{}
+	for _, l := range lines {
+		if l.kind == statement.PaymentLineDepositReversal && l.original != "" {
+			m.reversalOriginals[l.original] = true
+		}
+	}
 	reportedDup := map[string]bool{}
 	for i, l := range lines {
 		lk := m.key("provider_reference="+l.ref, "kind="+l.kind)
@@ -882,6 +911,16 @@ func (m *payMatcher) matchPayment(lk string, l payLine) {
 
 	providerSucceeded := l.status == statement.PaymentStatusSucceeded || l.status == statement.PaymentStatusReversed
 	switch {
+	case a.state == "disputed" && a.terminalReason == "multiple_success_for_intent" && providerSucceeded &&
+		!m.reversalOriginals[a.providerRef] && m.ledgerByRef["tombstone\x00"+a.providerRef] == nil:
+		// ADR 0095 §28.9: the ONE disputed reason code that is NOT already
+		// a plain payments P1 for reconciliation's purposes - a real PSP
+		// capture the platform never posted and has not (yet) been
+		// refunded is a standing, reported exposure, never silently
+		// folded into "disputed: already a payments P1" like every other
+		// disputed reason below.
+		m.r.add(MismatchKindPayCapturedUnposted, ak+" check=captured_unposted",
+			"resolution: a PSP-initiated reversal/tombstone, or M1/allocation (BLOCKED)", "platform: "+a.render()+"; "+m.label+l.render())
 	case a.state == "disputed" || (a.state == "rejected" && !providerSucceeded):
 		// disputed: already a payments P1 (see the file comment).
 	case providerSucceeded && a.state != "succeeded":

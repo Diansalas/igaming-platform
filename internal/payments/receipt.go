@@ -616,6 +616,18 @@ func ApplyReceiptEvidence(ctx context.Context, tx pgx.Tx, o *Orchestrator, tenan
 	if duplicate || !changed {
 		return DispositionDuplicateEffect, nil
 	}
+	// ADR 0095 §28.5: "T10 and T13d from a callback: anomaly (uniform 200
+	// after durable receipt, §6.2)" - distinct from the pre-existing
+	// tombstone-precedes-success T10 cell, which stays DispositionApplied
+	// (that convention predates §28 and is unchanged: see
+	// TestReceiveCallback_LateDeclineAfterSuccessIsNoOp/its siblings). The
+	// freshly re-read `attempt` above already reflects whatever
+	// applyResolvedReceiptEvidence just committed, so this check is exact,
+	// not a guess from the resolution string alone (every §4.4 anomaly
+	// cell shares the same ResolutionAnomalyOther value).
+	if attempt.State == AttemptDisputed && attempt.TerminalReason != nil && *attempt.TerminalReason == TerminalReasonMultipleSuccessForIntent {
+		return DispositionAnomaly, nil
+	}
 	return DispositionApplied, nil
 }
 
@@ -703,8 +715,17 @@ func applyResolvedReceiptEvidence(ctx context.Context, tx pgx.Tx, o *Orchestrato
 			if tombstoned {
 				return true, ResolutionAnomalyOther, ApplyTombstonePrecedesSuccess(ctx, tx, attempt.ID, EvidenceCallback)
 			}
-			if err := applyDepositSuccessAndPost(ctx, tx, o, attempt, ev); err != nil {
+			disputed, err := applyDepositSuccessAndPost(ctx, tx, o, attempt, ev)
+			if err != nil {
 				return false, "", err
+			}
+			if disputed {
+				// ADR 0095 §28.4 T13d: the intent is already financially
+				// resolved by ANOTHER attempt or posting. No posting
+				// happened; this attempt's own leftover 'created' siblings
+				// are not this dispute's concern (they were only ever a
+				// concern of the SUCCEEDED sibling's own T13(c) rejection).
+				return true, ResolutionAnomalyOther, nil
 			}
 			// RV-PRH-I1 ledger-finance H4/T13(c): this success came after
 			// this SAME attempt had already declined - i.e. a genuine
@@ -731,8 +752,15 @@ func applyResolvedReceiptEvidence(ctx context.Context, tx pgx.Tx, o *Orchestrato
 				return true, ResolutionAnomalyOther, ApplyDisputeFromNonTerminal(ctx, tx, attempt.ID, EvidenceCallback, "reversal_tombstone_precedes_success")
 			}
 			if attempt.Operation == AttemptOperationDeposit {
-				if err := applyDepositSuccessAndPost(ctx, tx, o, attempt, ev); err != nil {
+				disputed, err := applyDepositSuccessAndPost(ctx, tx, o, attempt, ev)
+				if err != nil {
 					return false, "", err
+				}
+				if disputed {
+					// ADR 0095 §28.4 T10 (the guard on T7): the intent is
+					// already financially resolved by ANOTHER attempt or
+					// posting.
+					return true, ResolutionAnomalyOther, nil
 				}
 				return true, ResolutionApplied, nil
 			}
@@ -869,28 +897,32 @@ func applyResolvedReceiptEvidence(ctx context.Context, tx pgx.Tx, o *Orchestrato
 	}
 }
 
-// applyDepositSuccessAndPost posts Flow 1 (if not already posted) and
-// applies T7/T13, reusing postDepositSuccess exactly as phase C and the
-// sweeper do, so there is exactly one place that ever posts a deposit.
+// applyDepositSuccessAndPost applies T7/T13 via the ADR 0095 §28.3 choke
+// point (postDepositSuccessOrDispute), which checks resolved_for_other(I,
+// A, K) BEFORE ever posting - so a verified success for an intent already
+// financially resolved by ANOTHER attempt or posting takes T10/T13d (no
+// posting) instead of Flow 1. Returns disputed=true in that case, so the
+// caller (applyResolvedReceiptEvidence) reports the correct resolution.
 //
-// PRH-I5 finding fix (ADR 0095 §4.3 T13, LF95-C6(a)): the attempt is
-// linked to postDepositSuccess's own returned transaction id
-// (postedTxID), NEVER to updated.LedgerTransactionID. For a T13 second
-// capture (this attempt was 'declined', a SIBLING already 'succeeded'),
-// intent.LedgerTransactionID still names the sibling's FIRST posting -
-// linking THIS attempt to that id would collide with
-// payment_attempts_tenant_ledger_tx's per-attempt uniqueness, which is
-// exactly the unique violation / infinite-redelivery bug PRH-I5 found.
-func applyDepositSuccessAndPost(ctx context.Context, tx pgx.Tx, o *Orchestrator, attempt PaymentAttempt, ev ReceiptEvidence) error {
+// PRH-I5 finding fix (ADR 0095 §4.3 T13, LF95-C6(a)): when it DOES post,
+// the attempt is linked to postDepositSuccess's own returned transaction
+// id (postedTxID), NEVER to updated.LedgerTransactionID - relevant only
+// for the LEGACY, now-dead "second capture" shape this choke point no
+// longer reaches; kept as the historical reason this function still takes
+// the posted id from its own return rather than the intent's.
+func applyDepositSuccessAndPost(ctx context.Context, tx pgx.Tx, o *Orchestrator, attempt PaymentAttempt, ev ReceiptEvidence) (disputed bool, err error) {
 	intent, err := GetDepositIntentByID(ctx, tx, *attempt.DepositIntentID)
 	if err != nil {
-		return err
+		return false, err
 	}
-	_, postedTxID, err := o.postDepositSuccess(ctx, tx, intent, *attempt.ProviderID, ev.ProviderReference, ev.Amount, ev.AssetCode)
+	_, postedTxID, disputed, err := o.postDepositSuccessOrDispute(ctx, tx, intent, attempt, *attempt.ProviderID, ev.ProviderReference, ev.Amount, ev.AssetCode, EvidenceCallback)
 	if err != nil {
-		return err
+		return false, err
 	}
-	return ApplySuccess(ctx, tx, attempt.ID, SuccessEvidence{
+	if disputed {
+		return true, nil
+	}
+	return false, ApplySuccess(ctx, tx, attempt.ID, SuccessEvidence{
 		Evidence: EvidenceCallback, ProviderReference: ev.ProviderReference, LedgerTransactionID: &postedTxID,
 	})
 }
