@@ -69,13 +69,13 @@ func TestAdmission_T11_SlowBody_ReleasesSlotAtDeadline(t *testing.T) {
 
 	rb := func(rate float64, burst int) WebhookRateBurst { return WebhookRateBurst{Rate: rate, Burst: burst} }
 	settings := WebhookAdmissionSettings{
-		Enabled:             true,
-		Clock:               clock,
-		BodyReadTimeout:     10 * time.Second,
-		PreAuthRate:         map[string]WebhookRateBurst{"payments": rb(0.01, 3), "casino": rb(0.01, 3), "kyc": rb(0.01, 3)},
-		PreAuthUnknownRate:  map[string]WebhookRateBurst{"payments": rb(0.01, 2), "casino": rb(0.01, 2), "kyc": rb(0.01, 2)},
-		VerifiedRate:        map[string]WebhookRateBurst{"payments": rb(0.01, 3), "casino": rb(0.01, 3), "kyc": rb(0.01, 3)},
-		InFlightGlobal:      100, InFlightPerKey: 50, InFlightUnknown: 50,
+		Enabled:            true,
+		Clock:              clock,
+		BodyReadTimeout:    10 * time.Second,
+		PreAuthRate:        map[string]WebhookRateBurst{"payments": rb(0.01, 3), "casino": rb(0.01, 3), "kyc": rb(0.01, 3)},
+		PreAuthUnknownRate: map[string]WebhookRateBurst{"payments": rb(0.01, 2), "casino": rb(0.01, 2), "kyc": rb(0.01, 2)},
+		VerifiedRate:       map[string]WebhookRateBurst{"payments": rb(0.01, 3), "casino": rb(0.01, 3), "kyc": rb(0.01, 3)},
+		InFlightGlobal:     100, InFlightPerKey: 50, InFlightUnknown: 50,
 		DBGateGlobal: 10, DBGatePerKey: 5, DBGateUnknown: 5, DBGateWait: 100 * time.Millisecond,
 		DomainTxPerTenant: 10, DomainWait: 100 * time.Millisecond,
 		DirectoryRefresh: time.Hour, DirectoryCap: 100,
@@ -96,7 +96,7 @@ func TestAdmission_T11_SlowBody_ReleasesSlotAtDeadline(t *testing.T) {
 	// clockBoundedReader's goroutine unblocks at test teardown rather than
 	// leaking past the test's own lifetime.
 	pr, pw := io.Pipe()
-	defer pw.Close()
+	defer func() { _ = pw.Close() }()
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/webhooks/payments/some-tenant/mock", pr)
 	req.SetPathValue("tenantSlug", "some-tenant")
