@@ -498,3 +498,90 @@ defects that would mislead an operator.** Fix them in the runbook (it is not a m
 - **C-RB:** runbook items 1 to 5 corrected.
 - Tracked (orchestrator): R5 (CP-W1 as a launch condition for non-idempotent providers;
   HD-0095-1 still BLOCKED), R6 (Low).
+
+---
+
+# Re-review 2 (payout round 3): `efc63f5`, merged at `07094a3`
+
+- Environment: a detached worktree at `07094a3` and a private DB `igaming_lf_rr3_payout` (admin
+  create, runtime-role grants from `deploy/init-app-role.sql`, migrated 1→106). Both have been
+  removed.
+- Suites on the private DB: `internal/payments` (full), `internal/withdrawal` and the
+  `internal/httpserver` withdrawal tests pass. The concurrency, round-3 and lock-order subset passes
+  under `-race`. The pinned `golangci-lint` 2.9.0 reports 0 issues, both untagged and with
+  `integration`.
+
+## Verdict: APPROVE WITH CONDITIONS (conditions narrowed to R4 and the tracked items)
+
+Every round-3 condition I set is met, and the probes back it up. The only open money-path
+condition is **R4** (payout callbacks through `receipt.go`), which the orchestrator assigned to the
+callback agent and which this round does not touch. My probe L still reproduces it.
+
+## Probe results on `07094a3`
+
+| Probe | Round-2 result | Round-3 result |
+|---|---|---|
+| J: callback `pending` during phase B, then sync `Pending` | `disputed` | **`pending`**, no dispute |
+| K: callback `pending` during phase B, then sync timeout | `disputed` | **`pending`**, no dispute |
+| M: `/resolve` while phase B in flight (3 phase-C outcomes) | moved to `ambiguous`; could end `disputed`, or strip M3 from a never-sent payout | **Refused with `ErrPayoutDispatchInFlight` (409)**; attempt stays `submitting`. Phase C then applies normally: ambiguous→`ambiguous`, NotSent→`created` (`ever_possibly_sent=false`, M3 kept), pending→`pending`. |
+| N / 40P01: tx holding the withdrawal row (receipt-path order), then updating the attempt, racing phase-C sync success | **`deadlock detected (40P01)`**, phase C aborted | **No deadlock**: phase C waits on the withdrawal lock and then commits |
+| A: double payout, non-idempotent / idempotent | 1 / 3 calls | 1 / ≤3 calls. The reference returned with an ambiguous result is now stored on the attempt (R6/N1). |
+| B, C, D (400 and ×100), E, F, G, I | pass | pass, unchanged |
+| L: payout decline via callback | hold stranded | **Still stranded (R4, out of scope, open)** |
+
+## Round-2 conditions
+
+- **R1: closed.** `payoutHandleContradiction` sends only `Succeeded`/`DefiniteDecline` into
+  late-evidence dispute. A weaker result on a state conflict is a no-op for a terminal attempt, or
+  a reschedule for a non-terminal one. Covered by the three R1 tests and my J/K probes.
+- **R2: closed.** Two layers: a Go-level lease check returns `ErrPayoutDispatchInFlight`, which the
+  handler maps to 409, and the no-reference T6 CAS carries `lease_until <= now()` in its own
+  predicate. Low residual (not a condition): the Go check reads a snapshot. If a T12 claim commits
+  between `/resolve`'s read (state `ambiguous`) and its poll, the status is applied against the stale
+  state. Every transition that can result is still one ADR 0095 allows for an in-flight resend, and
+  the resend's own phase C converges without dispute (R1), so money is unaffected.
+- **R3: closed. The lock order now matches A7 everywhere I checked:**
+  - Phase C (`ApplyPayoutResult`) and status apply (`applyPayoutStatusEvidence`): withdrawal
+    `LockForPayoutEvidence` first, then the attempt CAS, then `Complete`/`Fail` (L3/L4).
+    `applyPayoutSuccess`/`applyPayoutDecline` re-lock the same row, which is harmless.
+  - T1p (`ClaimForDispatch`): withdrawal lock, then KYC gate reads, then the attempt INSERT (with
+    the kill-switch predicate).
+  - T2/T12 (`reclaimPayoutCreated`, `resubmitPayoutAmbiguous`): `LockSubmittedForResolution`
+    (withdrawal), then the kill-switch check and KYC gate, then the attempt CAS.
+  - Receipt path: a withdrawal `FOR UPDATE` (line 351) precedes every attempt write. The earlier
+    receipt inserts touch only `payment_provider_events`.
+  - The only attempt-only transactions left are the sweeper's `claimBatch` (`SKIP LOCKED`, the
+    ADR's named exception) and single-statement reschedule/escalate/T6 updates. Those take one row
+    lock and nothing after it, so they cannot join a cycle. Probe N confirms there is no 40P01.
+- **C-T1: closed.** `TestPayoutDispatch_CT1_NotSentOnResendRoutesToAmbiguousNotCreated`.
+- **C-T3: closed.** The outer-lock test now releases its holder and joins it before `t.Fatalf`.
+- **N6 (reference mismatch disputes): verified in code**
+  (`applyPayoutSuccessCheckedFromStatus`), with a test.
+- **R5 (CP-W1):** recorded in ADR 0095 §27.12 as a launch condition. That is accepted as tracked.
+  HD-0095-1 stays BLOCKED.
+
+## Runbook against my five items
+
+1. **Closed.** The §3(a) queries touch only pre-0101 tables and mirror all three pre-flight
+   predicates, including pre-flight 2's `OR`. The columns (`created_at`, `requested_at`) exist.
+2. **Closed.** It says `app.tenant_id` with `app.player_account_id` cleared, and explicitly warns
+   against `app.current_tenant_id`.
+3. **Closed.** Case (b-ii) now covers a present link with a missing reference, via the matched
+   `provider_tx_id`. The "if this column exists" hedge is gone. Nit, no action required:
+   `provider_reference` is *mutable* under 0082, not "immutable-once-set" as the text says. The
+   `COALESCE`-only script is still the safer choice.
+4. **Closed.** The terminal status is `failed`, with `disputed` explicitly ruled out.
+5. **Closed.** Pre-flights 1 and 3 each have a PSP-confirmed procedure. §4 correctly names
+   pre-flight 3 as the withdrawal shape.
+
+## Remaining conditions
+
+- **R4 (High, owner: callback agent)** must be fixed before any payout callback from a real provider
+  is accepted. Until then payout webhooks must be refused or recorded as anomalies. Probe L still
+  shows:
+  - A `deposit`-typed decline naming a payout reference declines the attempt without releasing the
+    hold, and leaves no live attempt for `/resolve` or the sweeper to recover it.
+  - A `payout`-typed decline violates `payment_provider_events_check1` and is redelivered forever.
+  - The receipt path never checks the event type against the attempt's operation.
+- **Tracked:** CP-W1 (§27.12 launch condition for non-idempotent providers); HD-0095-1
+  (M1/M2 BLOCKED).
