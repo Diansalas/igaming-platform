@@ -401,6 +401,15 @@ func newPaymentWebhookHandler(deps Deps) http.HandlerFunc {
 			apierror.Write(w, requestID, apierror.CodeInternal, "failed to process callback")
 			return
 		}
+		if errors.Is(err, payments.ErrProviderReferenceInvalid) {
+			// PROVIDER-REF-BOUND-1: verified callback, reference outside
+			// the platform bound. Deterministic 400; nothing read or
+			// written. Logged with length + hash prefix only.
+			logProviderReferenceRejected(logger, "payment_webhook_provider_reference_rejected", err, providerID, t.ID.String(), requestID)
+			code, msg := mapReceiveCallbackError(err, callbackRoutePublicWebhook)
+			apierror.Write(w, requestID, code, msg)
+			return
+		}
 		if errors.Is(err, payments.ErrCallbackMalformedBody) {
 			// Security review PW-2/P3-5 (Stage 10.1): a VERIFIED callback
 			// (the sender proved knowledge of the shared credential) whose

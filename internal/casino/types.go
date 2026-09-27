@@ -261,6 +261,19 @@ var (
 	// ever reaching the database.
 	ErrInvalidInput = errors.New("casino: invalid input")
 
+	// ErrProviderReferenceInvalid (PROVIDER-REF-BOUND-1): a VERIFIED
+	// callback carries a provider reference (provider_tx_id, original
+	// reference, round id, game id, asset code) that breaks the platform
+	// bound (internal/providerref: 1..255 bytes, valid UTF-8, no control
+	// characters). Deterministic and never retryable; checked after
+	// HandleCallback and before any domain read or write, so nothing is
+	// posted, tombstoned, audited or recorded. The wrapped
+	// *providerref.Error carries field, reason, length and a hash prefix,
+	// never the value. Not a casino_callback_rejections class: the
+	// offending value cannot be stored in that table's bounded columns, so
+	// the evidence is the log line only.
+	ErrProviderReferenceInvalid = errors.New("casino: provider reference rejected")
+
 	// ErrOutcomeNotSucceeded is returned by postBet/postWin when a
 	// CallbackEvent's own Outcome field is declared "declined" or
 	// "ambiguous" rather than "succeeded" - specialist review (qa)

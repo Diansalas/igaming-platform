@@ -8,6 +8,7 @@ package sportsbook
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -345,6 +346,10 @@ func TestSettlementValidation_FieldMatrix(t *testing.T) {
 		"missing tenant id":             {BetID: betID, ActorStaffID: actor, EventType: SettlementEventVoid, VoidReason: "push"},
 		"missing bet id":                {TenantID: f.tenantID, ActorStaffID: actor, EventType: SettlementEventVoid, VoidReason: "push"},
 		"missing actor id":              {TenantID: f.tenantID, BetID: betID, EventType: SettlementEventVoid, VoidReason: "push"},
+
+		// PROVIDER-REF-BOUND-1: the claimed asset code is provider-supplied.
+		"settle: asset_code over bound":   {TenantID: f.tenantID, BetID: betID, ActorStaffID: actor, EventType: SettlementEventSettle, Generation: 1, Outcome: SettlementOutcomeWon, ClaimPayoutAmount: stdPayout, ClaimAssetCode: strings.Repeat("E", 256)},
+		"settle: asset_code control char": {TenantID: f.tenantID, BetID: betID, ActorStaffID: actor, EventType: SettlementEventSettle, Generation: 1, Outcome: SettlementOutcomeWon, ClaimPayoutAmount: stdPayout, ClaimAssetCode: "EU\nR"},
 	}
 	for name, ev := range cases {
 		t.Run(name, func(t *testing.T) {

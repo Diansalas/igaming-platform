@@ -333,7 +333,8 @@ jobs:
                    TestPCMigration_RoundTripOnCleanDatabase TestPCMigration_DownRefusesWithRows TestPCHandles_RLS_TenantIsolation \
                    TestInitAppRole_RerunKeepsProviderCredentialGrants TestPCMigration_RuntimeGrantsMinimal \
                    TestMigration0097_DownRefusesOnceARejectionRowExists TestMigration0097_DownRefusesOnceACasinoMismatchExists \
-                   TestMigration0098_DownRefusesOnceAStatementMismatchExists TestMigration0098_CleanDatabaseDownThenUpRoundTrip; do
+                   TestMigration0098_DownRefusesOnceAStatementMismatchExists TestMigration0098_CleanDatabaseDownThenUpRoundTrip \
+                   TestMigration0099_UpEnforcesBoundDownDropsItRoundTrip TestMigration0099_PreflightFailsLoudlyWithCountsAndChangesNothing; do
             grep -q -- "--- PASS: $t " integration-test.log || { echo "expected $t to PASS"; exit 1; }
           done
           echo "packages ok:  $(grep -cE '^ok[[:space:]]' integration-test.log)"

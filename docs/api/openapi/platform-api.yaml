@@ -1539,7 +1539,7 @@ paths:
             schema:
               type: object
               properties:
-                original_provider_tx_id: { type: string, description: "The bet's or win's own provider_tx_id being reversed" }
+                original_provider_tx_id: { type: string, minLength: 1, maxLength: 255, description: "The bet's or win's own provider_tx_id being reversed. Provider reference bound (PROVIDER-REF-BOUND-1): 1..255 BYTES of valid UTF-8, no control characters; enforced in bytes, so fewer characters are allowed for multibyte text. Over-bound is a 400." }
               required: [original_provider_tx_id]
       responses:
         "200":
@@ -2686,8 +2686,11 @@ paths:
             verified body that is structurally malformed (unparseable
             JSON, a missing required field, or an unrecognized event_type/
             outcome value), or whose declared amount/asset contradict the
-            deposit intent it claims to resolve. Generic body only - never
-            the specific field or value that failed.
+            deposit intent it claims to resolve, or whose provider
+            reference breaks the platform bound (PROVIDER-REF-BOUND-1:
+            1..255 bytes, valid UTF-8, no control characters - a
+            deterministic rejection; do not retry). Generic body only -
+            never the specific field or value that failed.
           content:
             application/json:
               schema:
@@ -2963,7 +2966,11 @@ paths:
             though HandleCallback accepted it as verified - Stage 10.2
             final review K10); (2) a well-formed but domain-invalid
             callback: `ErrBetNotFound`, `ErrLaunchSessionRequired`,
-            `ErrOutcomeNotSucceeded`, or `ErrInvalidInput`. A late-arriving
+            `ErrOutcomeNotSucceeded`, `ErrInvalidInput`, or
+            `ErrProviderReferenceInvalid` (PROVIDER-REF-BOUND-1: a provider
+            reference outside 1..255 bytes of valid UTF-8 without control
+            characters - deterministic, nothing written, no rejection
+            record; do not retry). A late-arriving
             original bet whose reference a tombstone already covers is
             NOT a 400 (Stage 10.3 CAS-CAP-ROLLBACK-1): it is a 200 decline
             (`decline_reason: "original_rolled_back"`).
@@ -5032,16 +5039,27 @@ components:
         still carries one is rejected.
       properties:
         event_type: { type: string, enum: [deposit, deposit_reversal] }
-        provider_reference: { type: string }
+        provider_reference:
+          type: string
+          minLength: 1
+          maxLength: 255
+          description: >
+            Provider reference bound (PROVIDER-REF-BOUND-1): 1..255 BYTES
+            (not characters) of valid UTF-8 with no control character
+            (U+0000-U+001F, U+007F-U+009F). Applies to every provider
+            reference in this body. A verified callback that breaks it is a
+            deterministic, non-retryable 400; the reference is never
+            truncated.
         original_provider_reference:
           type: string
-          description: Set only for event_type=deposit_reversal - the reference of the deposit being reversed.
+          maxLength: 255
+          description: Set only for event_type=deposit_reversal - the reference of the deposit being reversed. Same 255-byte bound.
         outcome: { type: string, enum: [succeeded, declined, ambiguous, pending] }
         amount:
           type: integer
           format: int64
           description: Minor units at the asset's own exponent - never a float.
-        asset_code: { type: string }
+        asset_code: { type: string, maxLength: 255 }
         decline_reason: { type: string }
         cascadable: { type: boolean }
       required: [event_type, provider_reference, outcome, amount, asset_code]
@@ -5074,17 +5092,29 @@ components:
         carries one is rejected.
       properties:
         event_type: { type: string, enum: [bet, win, rollback] }
-        provider_tx_id: { type: string }
+        provider_tx_id:
+          type: string
+          minLength: 1
+          maxLength: 255
+          description: >
+            Provider reference bound (PROVIDER-REF-BOUND-1): 1..255 BYTES
+            (not characters) of valid UTF-8 with no control character
+            (U+0000-U+001F, U+007F-U+009F). Applies equally to
+            original_provider_tx_id, round_id, provider_game_id and
+            asset_code. A verified callback that breaks it is a
+            deterministic, non-retryable 400 with nothing written; the
+            reference is never truncated.
         original_provider_tx_id:
           type: string
+          maxLength: 255
           description: Set only for event_type=rollback - the reference of the bet/win being reversed.
-        round_id: { type: string }
-        provider_game_id: { type: string }
+        round_id: { type: string, maxLength: 255 }
+        provider_game_id: { type: string, maxLength: 255 }
         amount:
           type: integer
           format: int64
           description: Minor units at the asset's own exponent - never a float.
-        asset_code: { type: string }
+        asset_code: { type: string, maxLength: 255 }
         outcome: { type: string, enum: [succeeded, declined, ambiguous, pending] }
         decline_reason: { type: string }
         player_account_id: { type: string, format: uuid }
@@ -5671,7 +5701,7 @@ components:
             brand_id: { type: string, format: uuid }
             decimal_exponent: { type: integer }
             provider_id: { type: string, description: "Empty when this bet has no provider-acceptance reference recorded (always empty until a real adapter exists)." }
-            provider_bet_reference: { type: string, description: "Empty when this bet has no provider-acceptance reference recorded (always empty until a real adapter exists)." }
+            provider_bet_reference: { type: string, maxLength: 255, description: "Empty when this bet has no provider-acceptance reference recorded (always empty until a real adapter exists)." }
             correlation_id: { type: string, format: uuid, description: "The bet id itself - the ledger correlation_id every W1 posting for this bet carries." }
             lifecycle:
               type: array
@@ -5746,7 +5776,7 @@ components:
         session_id: { type: string, format: uuid }
         game_id: { type: string, format: uuid }
         provider_id: { type: string }
-        provider_game_id: { type: string }
+        provider_game_id: { type: string, maxLength: 255 }
         asset_code: { type: string }
         mode: { type: string, enum: [real, demo] }
         status: { type: string, enum: [launched, wagered, won, rolled_back] }
@@ -5754,9 +5784,9 @@ components:
         bet_amount: { type: integer, format: int64 }
         win_amount: { type: integer, format: int64 }
         rollback_amount: { type: integer, format: int64 }
-        bet_provider_tx_id: { type: string }
-        win_provider_tx_id: { type: string }
-        rollback_provider_tx_id: { type: string }
+        bet_provider_tx_id: { type: string, maxLength: 255 }
+        win_provider_tx_id: { type: string, maxLength: 255 }
+        rollback_provider_tx_id: { type: string, maxLength: 255 }
       required: [session_id, game_id, provider_id, provider_game_id, asset_code, mode, status, launched_at]
     AdminRound:
       allOf:
@@ -5779,7 +5809,7 @@ components:
             ledger_transaction_ids:
               type: array
               items: { type: string, format: uuid }
-            provider_round_id: { type: string, description: "Empty when no casino_provider_rounds binding exists yet for this round's session." }
+            provider_round_id: { type: string, maxLength: 255, description: "Empty when no casino_provider_rounds binding exists yet for this round's session." }
           required: [player_account_id, brand_id, decimal_exponent, ledger_transaction_ids, provider_round_id]
     CasinoReconciliationRun:
       type: object
@@ -5815,10 +5845,10 @@ components:
         id: { type: string, format: uuid }
         provider_id: { type: string }
         event_type: { type: string, enum: [bet, win, rollback] }
-        provider_tx_id: { type: string }
-        original_provider_tx_id: { type: string, nullable: true, description: "Rollback only." }
-        round_id: { type: string, nullable: true }
-        asset_code: { type: string, nullable: true }
+        provider_tx_id: { type: string, maxLength: 255 }
+        original_provider_tx_id: { type: string, nullable: true, maxLength: 255, description: "Rollback only." }
+        round_id: { type: string, nullable: true, maxLength: 255 }
+        asset_code: { type: string, nullable: true, maxLength: 255 }
         amount: { type: string, nullable: true, description: "Provider-asserted minor units as a decimal string (NUMERIC(38,0)); null for a rollback." }
         reason_class:
           type: string
@@ -5833,7 +5863,7 @@ components:
       description: Response envelope shared by the wager/win/rollback play-simulation endpoints.
       properties:
         outcome: { type: string, enum: [succeeded, declined, ambiguous, pending] }
-        provider_tx_id: { type: string, description: "This event's own provider reference - save it to name in a later rollback" }
+        provider_tx_id: { type: string, maxLength: 255, description: "This event's own provider reference - save it to name in a later rollback" }
         ledger_transaction_id: { type: string, format: uuid }
         tombstoned: { type: boolean }
         decline_reason: { type: string }

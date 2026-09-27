@@ -13,6 +13,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/audit"
 	"github.com/Diansalas/igaming-platform/internal/identity"
 	"github.com/Diansalas/igaming-platform/internal/ledger"
+	"github.com/Diansalas/igaming-platform/internal/providerref"
 )
 
 // Settlement lifecycle for cash-funded single bets, IN-HOUSE MOCK MODE
@@ -218,6 +219,13 @@ func validateSettlementEvent(ev SettlementEvent) error {
 		}
 		if ev.ClaimAssetCode == "" {
 			return fmt.Errorf("%w: asset_code is required for settle", ErrInvalidInput)
+		}
+		// PROVIDER-REF-BOUND-1: the claimed asset code is provider-
+		// supplied and lands in audit metadata; bounded before anything
+		// is read, locked, posted or audited. Keeps the existing
+		// VALIDATION_FAILED class (ErrInvalidInput).
+		if err := providerref.Validate("asset_code", ev.ClaimAssetCode); err != nil {
+			return fmt.Errorf("%w: %w: %w", ErrInvalidInput, ErrProviderReferenceInvalid, err)
 		}
 		if ev.VoidReason != "" {
 			return fmt.Errorf("%w: void_reason is forbidden for settle", ErrInvalidInput)

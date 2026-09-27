@@ -19,6 +19,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/jurisdiction"
 	"github.com/Diansalas/igaming-platform/internal/ledger"
 	"github.com/Diansalas/igaming-platform/internal/observability"
+	"github.com/Diansalas/igaming-platform/internal/providerref"
 	"github.com/Diansalas/igaming-platform/internal/rg"
 	"github.com/Diansalas/igaming-platform/internal/risk"
 	"github.com/Diansalas/igaming-platform/internal/wallet"
@@ -726,6 +727,13 @@ func (o *Orchestrator) ReceiveVerifiedCallback(ctx context.Context, tx pgx.Tx, t
 		return ReceiveCallbackResult{}, fmt.Errorf("casino: handle callback: %w", err)
 	}
 
+	// PROVIDER-REF-BOUND-1: every provider-supplied reference is bounded
+	// BEFORE any domain statement (lock, read, write, tombstone, audit).
+	// Deterministic, non-retryable; never truncated.
+	if err := validateCallbackReferences(event); err != nil {
+		return ReceiveCallbackResult{}, err
+	}
+
 	// (d) Stage 10.3 CAS-CAP-ROLLBACK-1 (docs/plans/stage-10.3-planning/
 	// 02-casino-financial-analysis.md §1.3/§1.4, ADR 0025 Stage 10.3
 	// amendment): the tenant-wide (brand_id NULL) pre-dispatch capability/
@@ -782,6 +790,27 @@ func (o *Orchestrator) ReceiveVerifiedCallback(ctx context.Context, tx pgx.Tx, t
 		// that falls through to a 500 for a verified caller.
 		return ReceiveCallbackResult{}, fmt.Errorf("%w: unsupported callback event type %q", ErrCallbackMalformedBody, event.EventType)
 	}
+}
+
+// validateCallbackReferences applies the platform provider-reference bound
+// (internal/providerref) to every provider-supplied identifier of a
+// verified casino callback. Required-ness stays the adapter's/postX's own
+// decision (an absent optional field is accepted here); only a PRESENT
+// value must satisfy the bound. The returned error wraps both
+// ErrProviderReferenceInvalid and the *providerref.Error (never the
+// value).
+func validateCallbackReferences(event CallbackEvent) error {
+	err := providerref.ValidateAll(
+		providerref.Field{Name: "provider_tx_id", Value: event.ProviderTxID, Required: true},
+		providerref.Field{Name: "original_provider_tx_id", Value: event.OriginalProviderTxID},
+		providerref.Field{Name: "round_id", Value: event.RoundID},
+		providerref.Field{Name: "provider_game_id", Value: event.ProviderGameID},
+		providerref.Field{Name: "asset_code", Value: event.AssetCode},
+	)
+	if err != nil {
+		return fmt.Errorf("%w: %w", ErrProviderReferenceInvalid, err)
+	}
+	return nil
 }
 
 // mapReplayPayloadMismatch turns ledger.ErrIdempotencyPayloadMismatch from
