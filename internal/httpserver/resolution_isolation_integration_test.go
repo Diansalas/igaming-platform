@@ -256,7 +256,10 @@ func (w *isoWorld) casinoEventFor(it *isoTenant, p isoPlayer, key []byte, ev cas
 	return in
 }
 
-// deposit creates a pending intent and returns its signed success callback.
+// deposit creates a pending intent (with a matching payment_attempts row -
+// PRH-payments-callback-cutover, ADR 0095 §6.1: the callback path now
+// resolves every deposit event through payment_attempts, INV-IO-14) and
+// returns its signed success callback.
 func (w *isoWorld) deposit(it *isoTenant, amount int64) payments.InboundCallback {
 	w.t.Helper()
 	return w.depositFor(it, it.main(), amount)
@@ -265,17 +268,38 @@ func (w *isoWorld) deposit(it *isoTenant, amount int64) payments.InboundCallback
 func (w *isoWorld) depositFor(it *isoTenant, p isoPlayer, amount int64) payments.InboundCallback {
 	w.t.Helper()
 	var intent payments.DepositIntent
+	providerRef := "iso-ref-" + uuid.NewString()
 	if err := w.pool.WithTenant(context.Background(), it.tenant.ID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
 		intent, err = w.payOrch.InitiateDeposit(ctx, tx, payments.InitiateDepositParams{
 			Scope:     payments.DepositScope{TenantID: it.tenant.ID, BrandID: it.brandID, PlayerAccountID: p.id, WalletID: p.walletID},
 			AssetCode: "EUR", Amount: amount, PaymentMethod: "card", IdempotencyKey: "iso-" + uuid.NewString(),
 		})
-		return err
+		if err != nil {
+			return err
+		}
+		// Legacy InitiateDeposit creates no payment_attempts row (it is not
+		// reachable from any live HTTP path any more; only this test
+		// harness's synthetic-callback helper still calls it). Drive a
+		// matching attempt through the SAME T1+T2/T4 transitions
+		// InitiateDepositAttempt would have produced, so the callback below
+		// resolves and posts exactly like a real one - this test is about
+		// pool/tenant isolation under the resolver, not about the deposit
+		// state machine itself.
+		attempt, err := payments.InsertSubmittingAttempt(ctx, tx, payments.NewSubmittingAttempt{
+			ID: uuid.New(), TenantID: it.tenant.ID, Operation: payments.AttemptOperationDeposit,
+			DepositIntentID: &intent.ID, ProviderID: "mock-psp", PaymentMethod: "card",
+			AssetCode: "EUR", Amount: amount, Interactive: false,
+			ClaimToken: uuid.New(), LeaseOwner: "iso-test", LeaseUntil: time.Now().Add(time.Minute),
+		})
+		if err != nil {
+			return err
+		}
+		return payments.MarkAccepted(ctx, tx, attempt.ID, payments.EvidenceSync, providerRef, time.Now().Add(time.Minute))
 	}); err != nil {
 		w.t.Fatalf("InitiateDeposit: %v", err)
 	}
-	in := w.payMock.CallbackPayload(it.tenant.ID, payments.CallbackEventDeposit, *intent.ProviderReference, "", payments.OutcomeSucceeded, amount, "EUR", "", false)
+	in := w.payMock.CallbackPayload(it.tenant.ID, payments.CallbackEventDeposit, providerRef, "", payments.OutcomeSucceeded, amount, "EUR", "", false)
 	in.Header = in.Header.Clone()
 	webhookauth.PaymentsScheme().SetHeaders(in.Header, webhookauth.MockKeyID,
 		webhookauth.PaymentsScheme().Sign(it.pay, it.tenant.ID, "mock-psp", webhookauth.MockKeyID, in.Body))
