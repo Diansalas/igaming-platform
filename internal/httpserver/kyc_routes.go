@@ -39,6 +39,12 @@ func registerKYCRoutes(mux *http.ServeMux, deps Deps) {
 	mux.Handle("GET /v1/admin/kyc/documents/{id}/content",
 		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(auth.RequirePermission(auth.PermVerificationRead)(newGetDocumentContentHandler(deps)))))
 
+	// PRH-I3 (ADR 0096 §6, security condition 7): compliance/platform_admin
+	// only - never RoleTenantAdmin, even though it holds the broader
+	// PermVerificationRead.
+	mux.Handle("GET /v1/admin/kyc/enforcement-decisions",
+		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(auth.RequirePermission(auth.PermKYCEnforcementDecisionRead)(newListKYCEnforcementDecisionsHandler(deps)))))
+
 	// KYC-WH-1 (Stage 10.2, ADR 0091, ruling J7): registered only when
 	// BOTH conditions hold - see Deps.KYCWebhookEnabled's own doc comment.
 	// Absent means the mux returns a genuine 404, never a 503 from inside

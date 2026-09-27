@@ -355,6 +355,15 @@ const (
 	// docs/plans/stage-4i-jurisdiction-implementation-plan.md Phase A.
 	PermTenantLicenceAssign Permission = "tenant_licence:assign"
 
+	// PermKYCEnforcementDecisionRead gates the ADR 0096 (PRH-I3) staff
+	// read of kyc_enforcement_decisions (GET /v1/admin/kyc/enforcement-
+	// decisions). Deliberately separate from PermVerificationRead
+	// (RoleTenantAdmin holds that one, but ADR 0096 §6/§13 condition 7 is
+	// explicit: "compliance and platform_admin only", never
+	// RoleTenantAdmin) - granted to RoleCompliance and RolePlatformAdmin
+	// only.
+	PermKYCEnforcementDecisionRead Permission = "kyc_enforcement_decision:read"
+
 	// PermPlayerResidenceRead gates reading a player's declared or verified
 	// residence VALUE on a staff-facing surface (presence/provenance fields
 	// are NOT gated by this - they ride on PermVerificationRead/PermPlayerRead
@@ -608,6 +617,11 @@ var rolePermissions = map[Role]map[Permission]bool{
 		// completion" rule warns against. See CreateStaffRestriction's own
 		// doc comment for the full reasoning and the recorded OPEN DECISION.
 		PermProviderCredentialRead, PermProviderCredentialRequest, PermProviderCredentialApprove, PermProviderCredentialRevoke,
+		// PRH-I3 (ADR 0096 §6/§13 condition 7): the staff KYC enforcement
+		// decision read - granted here AND to RoleCompliance only. Never
+		// RoleTenantAdmin, even though RoleTenantAdmin holds the broader
+		// PermVerificationRead.
+		PermKYCEnforcementDecisionRead,
 	),
 	// Stage 3D business decision #4/#5: tenant_admin (a broad
 	// administrative role that also holds PermStaffManage) deliberately
@@ -746,6 +760,9 @@ var rolePermissions = map[Role]map[Permission]bool{
 		PermCasinoTransactionRead,
 		// Stage 10.3 W2b: see PermCasinoReconciliationRead's own doc comment.
 		PermCasinoReconciliationRead,
+		// PRH-I3 (ADR 0096 §6/§13 condition 7): see
+		// PermKYCEnforcementDecisionRead's own doc comment.
+		PermKYCEnforcementDecisionRead,
 	),
 	// finance is Stage 3B's own role, dedicated solely to withdrawal
 	// governance - it holds all four withdrawal permissions and nothing

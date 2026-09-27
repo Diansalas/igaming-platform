@@ -183,20 +183,41 @@ func EvaluateEnforcement(ctx context.Context, tx pgx.Tx, params EnforcementParam
 		return EnforcementDecision{}, fmt.Errorf("kyc: person id is required")
 	}
 
-	licensingJurisdictionID, err := resolveLicensingJurisdictionID(ctx, tx, params.TenantID)
-	if err != nil {
-		// A jurisdiction that cannot be resolved is a policy-lookup
-		// failure, not "no policy configured" - unavailable, never
-		// not_required (§2.6(c)).
-		return unavailableDecision("jurisdiction_unresolved"), nil
-	}
-
+	// Withdrawal's structural rule (§3.2 point 1) needs NO policy-table
+	// lookup and therefore no jurisdiction resolution at all (§5:
+	// "withdrawal_hold/withdrawal_payout need no policy-table lookup and
+	// no withdrawal_requests history query") - resolved lazily below,
+	// only for the two operations that actually consult a policy row, so
+	// a tenant with no licence bound (a perfectly ordinary fixture/test
+	// state, or an as-yet-unlicensed tenant) never turns every withdrawal
+	// into a spurious `unavailable`.
 	switch {
 	case isWithdrawalOperation(params.Operation):
 		return evaluateWithdrawalStructuralRule(ctx, tx, params)
 	case params.Operation == EnforcementDeposit:
+		licensingJurisdictionID, hasLicence, err := resolveLicensingJurisdictionID(ctx, tx, params.TenantID)
+		if err != nil {
+			// A genuine query error is a policy-lookup failure, not "no
+			// policy configured" - unavailable, never not_required
+			// (§2.6(c)).
+			return unavailableDecision("jurisdiction_unresolved"), nil
+		}
+		if !hasLicence {
+			// No licence bound means no jurisdiction-keyed policy could
+			// possibly have been activated for this tenant (activation is
+			// inherently jurisdiction-keyed) - not_required, not
+			// unavailable. Distinct from a genuine query error above.
+			return notRequiredDecision(params.Operation, "tenant has no licence bound"), nil
+		}
 		return evaluateDepositThreshold(ctx, tx, params, licensingJurisdictionID)
 	case isPlayOperation(params.Operation):
+		licensingJurisdictionID, hasLicence, err := resolveLicensingJurisdictionID(ctx, tx, params.TenantID)
+		if err != nil {
+			return unavailableDecision("jurisdiction_unresolved"), nil
+		}
+		if !hasLicence {
+			return notRequiredDecision(params.Operation, "tenant has no licence bound"), nil
+		}
 		return evaluatePlayTrigger(ctx, tx, params, licensingJurisdictionID)
 	default:
 		return unavailableDecision("unhandled_operation"), nil
@@ -213,19 +234,36 @@ func unavailableDecision(code string) EnforcementDecision {
 	}
 }
 
-func resolveLicensingJurisdictionID(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID) (uuid.UUID, error) {
+func notRequiredDecision(op EnforcementOperation, message string) EnforcementDecision {
+	return EnforcementDecision{
+		Outcome:       OutcomeNotRequired,
+		Allowed:       true,
+		Code:          "kyc_" + string(op) + ":not_required",
+		Message:       message,
+		PolicyVersion: PolicyVersion,
+	}
+}
+
+// resolveLicensingJurisdictionID returns (jurisdictionID, true, nil) when
+// the tenant has a bound licence resolving to a jurisdiction; (uuid.Nil,
+// false, nil) when the tenant simply has no licence bound (a valid,
+// non-error state - a not-yet-licensed tenant, or an ordinary test
+// fixture); and a non-nil error only for a genuine query failure. Callers
+// MUST treat these three cases differently (§2.6(c)): "no licence" is
+// not_required, a query failure is unavailable - never conflated.
+func resolveLicensingJurisdictionID(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID) (uuid.UUID, bool, error) {
 	var licenceID *uuid.UUID
 	if err := tx.QueryRow(ctx, `SELECT licence_id FROM tenants WHERE id = $1`, tenantID).Scan(&licenceID); err != nil {
-		return uuid.Nil, fmt.Errorf("kyc: read tenant licence: %w", err)
+		return uuid.Nil, false, fmt.Errorf("kyc: read tenant licence: %w", err)
 	}
 	if licenceID == nil {
-		return uuid.Nil, fmt.Errorf("kyc: tenant %s has no licence bound", tenantID)
+		return uuid.Nil, false, nil
 	}
 	var jurisdictionID uuid.UUID
 	if err := tx.QueryRow(ctx, `SELECT jurisdiction_id FROM licences WHERE id = $1`, *licenceID).Scan(&jurisdictionID); err != nil {
-		return uuid.Nil, fmt.Errorf("kyc: read licence jurisdiction: %w", err)
+		return uuid.Nil, false, fmt.Errorf("kyc: read licence jurisdiction: %w", err)
 	}
-	return jurisdictionID, nil
+	return jurisdictionID, true, nil
 }
 
 // latestVerificationState is the §2.6(a)/(b) read: the single latest row,
@@ -260,24 +298,25 @@ func (s latestVerificationState) effectiveOutcome(expired bool) EnforcementOutco
 	}
 }
 
-// readLatestVerificationByPerson is the ONE read key every enforcement
-// point uses (security re-verification N1, 2026-09-27): latest row for
-// (tenant_id, person_id), across every brand/PlayerAccount that Person
-// holds within the tenant, ordered (created_at DESC, id DESC) so a newer
-// row (a rejection or expiry) is never masked by an older approval -
-// never per wallet/PlayerAccount. This is what makes the withdrawal
-// structural rule (§3.2 point 1) unbypassable by opening a new wallet or
-// PlayerAccount under the same Person, and is now applied uniformly to
-// deposit/play as well, closing the inconsistency the original draft had
-// (withdrawal per-Person, deposit/play per-PlayerAccount).
-func readLatestVerificationByPerson(ctx context.Context, tx pgx.Tx, tenantID, personID uuid.UUID) (latestVerificationState, bool, error) {
+// readLatestVerificationByPlayerAccount is the PRIMARY read key every
+// enforcement point uses (security re-verification N1, 2026-09-27,
+// resolving the original draft's self-contradiction the same way §2.6(a)/
+// HD-KYC-6 already state it): the gated account's own latest row for
+// (tenant_id, brand_id, player_account_id), ordered (created_at DESC, id
+// DESC). PersonID is NOT used as the primary key anywhere - it is used
+// ONLY as an additional, deny-only cross-account overlay for the
+// withdrawal structural rule (crossAccountRejectedOverlay below), so a
+// newer approval on one brand/account can never mask a rejection on a
+// DIFFERENT brand/account of the same Person, without a stale approval on
+// account A ever being able to authorize a withdrawal FROM account B.
+func readLatestVerificationByPlayerAccount(ctx context.Context, tx pgx.Tx, tenantID, brandID, playerAccountID uuid.UUID) (latestVerificationState, bool, error) {
 	var status string
 	var expiresAt *time.Time
 	err := tx.QueryRow(ctx, `
 		SELECT status, expires_at FROM kyc_verifications
-		 WHERE tenant_id = $1 AND person_id = $2
+		 WHERE tenant_id = $1 AND brand_id = $2 AND player_account_id = $3
 		 ORDER BY created_at DESC, id DESC LIMIT 1`,
-		tenantID, personID,
+		tenantID, brandID, playerAccountID,
 	).Scan(&status, &expiresAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return latestVerificationState{}, false, nil
@@ -289,17 +328,57 @@ func readLatestVerificationByPerson(ctx context.Context, tx pgx.Tx, tenantID, pe
 	return latestVerificationState{found: true, status: VerificationStatus(status)}, expired, nil
 }
 
+// crossAccountRejectedOverlay implements security re-verification N1's
+// exact prescription: "PersonID is used, if at all, only as an
+// additional deny-only check: failed if any other PlayerAccount of the
+// same Person in the same tenant has a latest row that is rejected."
+// Applied ONLY to the withdrawal structural rule (ADR 0096 §3.2 point 1)
+// - never to deposit/play, which stay purely per-PlayerAccount per
+// §2.6(a)/HD-KYC-6. A "latest row" here means each OTHER account's own
+// most-recent verification, not any historical row of theirs.
+func crossAccountRejectedOverlay(ctx context.Context, tx pgx.Tx, tenantID, personID, excludePlayerAccountID uuid.UUID) (bool, error) {
+	var rejected bool
+	err := tx.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM kyc_verifications v1
+			 WHERE v1.tenant_id = $1 AND v1.person_id = $2 AND v1.player_account_id <> $3
+			   AND v1.status = 'rejected'
+			   AND v1.id = (
+			       SELECT v2.id FROM kyc_verifications v2
+			        WHERE v2.tenant_id = v1.tenant_id AND v2.player_account_id = v1.player_account_id
+			        ORDER BY v2.created_at DESC, v2.id DESC LIMIT 1
+			   )
+		)`,
+		tenantID, personID, excludePlayerAccountID,
+	).Scan(&rejected)
+	if err != nil {
+		return false, err
+	}
+	return rejected, nil
+}
+
 // evaluateWithdrawalStructuralRule implements ADR 0096 §3.2 point 1: every
-// withdrawal request/payout dispatch requires the player's CURRENT latest
-// verification, scoped per Person, to be passed and unexpired - full
-// stop, no policy row, no "already withdrawn once" exemption, no
-// jurisdiction override.
+// withdrawal request/payout dispatch requires the gated account's CURRENT
+// latest verification to be passed and unexpired - full stop, no policy
+// row, no "already withdrawn once" exemption, no jurisdiction override -
+// PLUS the deny-only cross-account overlay (crossAccountRejectedOverlay)
+// so a rejection recorded against a DIFFERENT PlayerAccount of the same
+// Person cannot be sidestepped by withdrawing from this one.
 func evaluateWithdrawalStructuralRule(ctx context.Context, tx pgx.Tx, params EnforcementParams) (EnforcementDecision, error) {
-	state, expired, err := readLatestVerificationByPerson(ctx, tx, params.TenantID, params.PersonID)
+	state, expired, err := readLatestVerificationByPlayerAccount(ctx, tx, params.TenantID, params.BrandID, params.PlayerAccountID)
 	if err != nil {
 		return unavailableDecision("verification_lookup_failed"), nil
 	}
 	outcome := state.effectiveOutcome(expired)
+	if outcome == OutcomePassed {
+		crossRejected, err := crossAccountRejectedOverlay(ctx, tx, params.TenantID, params.PersonID, params.PlayerAccountID)
+		if err != nil {
+			return unavailableDecision("cross_account_overlay_failed"), nil
+		}
+		if crossRejected {
+			outcome = OutcomeFailed
+		}
+	}
 	return EnforcementDecision{
 		Outcome:        outcome,
 		Allowed:        outcome == OutcomePassed,
@@ -313,9 +392,9 @@ func evaluateWithdrawalStructuralRule(ctx context.Context, tx pgx.Tx, params Enf
 // activePolicyRow is the subset of a kyc_enforcement_policies row
 // EvaluateEnforcement needs.
 type activePolicyRow struct {
-	id                   uuid.UUID
-	thresholdMinorUnits  *string // NUMERIC read as text to preserve exact precision
-	assetCode            *string
+	id                  uuid.UUID
+	thresholdMinorUnits *string // NUMERIC read as text to preserve exact precision
+	assetCode           *string
 }
 
 // readActivePolicies returns EVERY active row for
@@ -427,7 +506,7 @@ func evaluateDepositThreshold(ctx context.Context, tx pgx.Tx, params Enforcement
 		}, nil
 	}
 
-	state, expired, err := readLatestVerificationByPerson(ctx, tx, params.TenantID, params.PersonID)
+	state, expired, err := readLatestVerificationByPlayerAccount(ctx, tx, params.TenantID, params.BrandID, params.PlayerAccountID)
 	if err != nil {
 		return unavailableDecision("verification_lookup_failed"), nil
 	}
@@ -505,7 +584,7 @@ func evaluatePlayTrigger(ctx context.Context, tx pgx.Tx, params EnforcementParam
 		}, nil
 	}
 
-	state, expired, err := readLatestVerificationByPerson(ctx, tx, params.TenantID, params.PersonID)
+	state, expired, err := readLatestVerificationByPlayerAccount(ctx, tx, params.TenantID, params.BrandID, params.PlayerAccountID)
 	if err != nil {
 		return unavailableDecision("verification_lookup_failed"), nil
 	}
