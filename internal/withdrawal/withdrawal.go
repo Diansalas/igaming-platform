@@ -27,6 +27,7 @@ import (
 
 	"github.com/Diansalas/igaming-platform/internal/audit"
 	"github.com/Diansalas/igaming-platform/internal/db"
+	"github.com/Diansalas/igaming-platform/internal/kyc"
 	"github.com/Diansalas/igaming-platform/internal/ledger"
 )
 
@@ -121,6 +122,32 @@ var (
 	// workflow-layer equivalent of ledger.ErrIdempotencyKeyReused.
 	ErrIdempotencyKeyReused = errors.New("withdrawal: idempotency key reused with a different wallet/asset/amount")
 )
+
+// KYCDeniedError is returned by RequestWithdrawal when ADR 0096's
+// structural withdrawal rule (§3.2 point 1) denies the request - no
+// withdrawal_requests row is inserted and no ledger effect is posted.
+// The caller's transaction (db.Pool.WithTenant/WithPlayerScope) rolls
+// back on this non-nil error, per this codebase's own established
+// pattern for a verified-but-declined domain action (internal/casino's
+// *CallbackRejectedError, wrapRejection): the CALLER is responsible for
+// then opening a FRESH, separately-committed transaction and calling
+// kyc.RecordDecision in it, so the denial's decision/audit rows survive
+// the rollback (ADR 0096 §3.6 "Commit discipline, corrected" / security
+// condition 5) even though the withdrawal-request attempt itself did not.
+type KYCDeniedError struct {
+	Params   kyc.EnforcementParams
+	Decision kyc.EnforcementDecision
+}
+
+func (e *KYCDeniedError) Error() string {
+	return fmt.Sprintf("withdrawal: kyc enforcement denied (%s)", e.Decision.Code)
+}
+
+// ErrKYCUnavailable wraps a hard failure evaluating the KYC gate itself
+// (a DB error, not a business denial) - also fail-closed, also rolls back
+// with no domain effect, distinguished from KYCDeniedError only so a
+// caller can log it differently (an outage, not a compliance decision).
+var ErrKYCUnavailable = errors.New("withdrawal: kyc enforcement evaluation unavailable")
 
 // WithdrawalRequest mirrors the withdrawal_requests row
 // (withdrawal-state-machine.md §2). Amount is int64 minor units, matching
@@ -248,8 +275,13 @@ type RequestParams struct {
 	TenantID        uuid.UUID
 	BrandID         uuid.UUID
 	PlayerAccountID uuid.UUID
-	WalletID        uuid.UUID
-	AssetCode       string
+	// PersonID is required (ADR 0096 §3.2 point 1 / §5): the KYC
+	// structural withdrawal rule is scoped per Person, not per wallet or
+	// PlayerAccount, resolved server-side exactly like every other
+	// identity field here - never accepted from a client.
+	PersonID  uuid.UUID
+	WalletID  uuid.UUID
+	AssetCode string
 	// Amount is strictly positive minor units.
 	Amount int64
 	// IdempotencyKey is the client/session-supplied value deduplicating a
@@ -292,6 +324,9 @@ func RequestWithdrawal(ctx context.Context, tx pgx.Tx, params RequestParams) (Wi
 	if params.TenantID == uuid.Nil || params.BrandID == uuid.Nil || params.PlayerAccountID == uuid.Nil || params.WalletID == uuid.Nil {
 		return WithdrawalRequest{}, fmt.Errorf("%w: tenant/brand/player/wallet ids are required", ErrInvalidInput)
 	}
+	if params.PersonID == uuid.Nil {
+		return WithdrawalRequest{}, fmt.Errorf("%w: person id is required", ErrInvalidInput)
+	}
 	if params.AssetCode == "" {
 		return WithdrawalRequest{}, fmt.Errorf("%w: asset code is required", ErrInvalidInput)
 	}
@@ -300,6 +335,40 @@ func RequestWithdrawal(ctx context.Context, tx pgx.Tx, params RequestParams) (Wi
 	}
 	if params.IdempotencyKey == "" {
 		return WithdrawalRequest{}, fmt.Errorf("%w: idempotency key is required", ErrInvalidInput)
+	}
+
+	// ADR 0096 §8 item 3 / ledger-finance N2: a REPLAY of an existing
+	// idempotency key is checked FIRST, read-only, before the KYC gate
+	// ever runs - a retried call after a successful hold must not
+	// re-evaluate KYC (a status change between the original request and
+	// its replay must never turn an already-placed hold into a denial).
+	if existing, lookupErr := getByTenantPlayerIdempotencyKey(ctx, tx, params.TenantID, params.PlayerAccountID, params.IdempotencyKey); lookupErr == nil {
+		if existing.WalletID != params.WalletID || existing.AssetCode != params.AssetCode || existing.Amount != params.Amount {
+			return WithdrawalRequest{}, fmt.Errorf("%w: existing request %s", ErrIdempotencyKeyReused, existing.ID)
+		}
+		return existing, nil
+	} else if !errors.Is(lookupErr, ErrNotFound) {
+		return WithdrawalRequest{}, fmt.Errorf("withdrawal: look up existing request for idempotency key: %w", lookupErr)
+	}
+
+	// ADR 0096 §5 exact placement: immediately after the idempotency-
+	// replay lookup, before the first statement that could need undoing
+	// (IdempotentInsert). correlationID is generated up front so the
+	// decision row (written on deny, in a caller-opened fresh transaction
+	// - see KYCDeniedError's doc) and, on allow, the request itself
+	// (written below) share one correlation id.
+	correlationID := uuid.New()
+	kycParams := kyc.EnforcementParams{
+		TenantID: params.TenantID, BrandID: params.BrandID, PlayerAccountID: params.PlayerAccountID,
+		PersonID: params.PersonID, Operation: kyc.EnforcementWithdrawalHold,
+		AssetCode: params.AssetCode, Amount: params.Amount, CorrelationID: correlationID,
+	}
+	decision, err := kyc.EvaluateEnforcement(ctx, tx, kycParams)
+	if err != nil {
+		return WithdrawalRequest{}, fmt.Errorf("%w: %w", ErrKYCUnavailable, err)
+	}
+	if !decision.Allowed {
+		return WithdrawalRequest{}, &KYCDeniedError{Params: kycParams, Decision: decision}
 	}
 
 	requestID := uuid.New()
@@ -418,6 +487,12 @@ func RequestWithdrawal(ctx context.Context, tx pgx.Tx, params RequestParams) (Wi
 		},
 	}); err != nil {
 		return WithdrawalRequest{}, fmt.Errorf("withdrawal: audit: %w", err)
+	}
+
+	// ADR 0096 §3.6: on allow, the kyc_enforcement_decisions row commits
+	// WITH the domain effect - same transaction as the hold just posted.
+	if err := kyc.RecordDecision(ctx, tx, kycParams, decision); err != nil {
+		return WithdrawalRequest{}, err
 	}
 
 	return GetByID(ctx, tx, requestID)
@@ -869,6 +944,119 @@ func LockApprovedForSubmission(ctx context.Context, tx pgx.Tx, requestID uuid.UU
 		return WithdrawalRequest{}, fmt.Errorf("%w: request %s is in state %q, expected %q", ErrStateConflict, requestID, wr.State, StateApproved)
 	}
 	return wr, nil
+}
+
+// DenyForCompliance implements ADR 0096 §8 item 3 / §12.2 C2 (ledger-
+// finance): the KYC payout-dispatch gate's DENY path. It is legal ONLY
+// from `approved` (pre-dispatch) - the caller MUST call this inside the
+// SAME transaction LockApprovedForSubmission already holds the L1 row
+// lock in, BEFORE ever contacting a PaymentProvider, and MUST NOT call
+// MarkSubmitted/RouteProvider/Withdraw if this returns nil (the request
+// is now `rejected`, terminal for this attempt).
+//
+// Unlike RequestWithdrawal's deny (ADR 0096 §3.6 "on deny: zero domain
+// effect"), THIS enforcement point's denial is a CARVE-OUT (ledger-
+// finance re-verification N1, 2026-09-27): a committed deny here
+// necessarily INCLUDES the withdrawal_rejected reversal posting and the
+// approved->rejected state transition - there is no "decision + audit
+// only, nothing else" version of releasing an already-placed hold, since
+// leaving the hold in place would strand the player's funds with no
+// release path. The whole thing (reversal, transition, decision, audit)
+// commits together in ONE transaction, exactly like Reject/Fail already
+// do - this is not a rollback-then-retry-in-a-fresh-transaction case.
+//
+// Posting mirrors Reject/Fail exactly: accounts resolved (hold, cash);
+// entries debit player_withdrawal_hold, credit player_cash for
+// wr.Amount; TransactionType = withdrawal_rejected;
+// ReversesTransactionID = wr.HoldLedgerTransactionID; CorrelationID =
+// requestID. Idempotency key requestID+":kyc_denied", distinct from
+// ":rejected"/":failed". Exactly-once release via the L1 lock the caller
+// already holds PLUS the conditional
+// `UPDATE ... WHERE state = 'approved'` below (ledger-finance
+// re-verification N3: release_ledger_transaction_id is set in that SAME
+// conditional UPDATE, exactly like every other release path -
+// RowsAffected()==0 => ErrStateConflict, which rolls back the posting).
+//
+// No reason_code on the ledger transaction (migration 0021's CHECK
+// allows one only for manual_adjustment) - the compliance reason lives on
+// the audit entry only. No withdrawal_approvals row (this is not a
+// four-eyes decision).
+//
+// ADR 0095 coordination (§5/§12.2 C5): once ADR 0095 lands, this function
+// must be called from the same claim transaction that performs
+// approved -> the first dispatch state (T1p), and from the SAME claim
+// transaction a sweeper uses to re-claim a "prepared, not yet sent"
+// payout for its first send (ADR 0095's M3 re-claim path) - never once a
+// request has possibly reached the provider. This function itself has no
+// dependency on ADR 0095 and requires only that its caller hold the L1
+// lock LockApprovedForSubmission already takes.
+func DenyForCompliance(ctx context.Context, tx pgx.Tx, requestID uuid.UUID, decision kyc.EnforcementDecision, kycParams kyc.EnforcementParams) (WithdrawalRequest, error) {
+	wr, err := lockRequestForUpdate(ctx, tx, requestID)
+	if err != nil {
+		return WithdrawalRequest{}, err
+	}
+	if wr.State != StateApproved {
+		return WithdrawalRequest{}, fmt.Errorf("%w: request %s is in state %q, expected %q", ErrStateConflict, requestID, wr.State, StateApproved)
+	}
+
+	accounts, err := ledger.GetOrCreateAccounts(ctx, tx, wr.TenantID,
+		ledger.AccountSpec{WalletID: &wr.WalletID, AccountType: ledger.AccountPlayerWithdrawalHold, AssetCode: wr.AssetCode},
+		ledger.AccountSpec{WalletID: &wr.WalletID, AccountType: ledger.AccountPlayerCash, AssetCode: wr.AssetCode},
+	)
+	if err != nil {
+		return WithdrawalRequest{}, fmt.Errorf("withdrawal: resolve hold/cash ledger accounts: %w", err)
+	}
+	holdAccountID, cashAccountID := accounts[0], accounts[1]
+
+	postResult, err := ledger.Post(ctx, tx, ledger.TransactionInput{
+		TenantID:              wr.TenantID,
+		TransactionType:       ledger.TxWithdrawalRejected,
+		IdempotencyKey:        requestID.String() + ":kyc_denied",
+		CorrelationID:         requestID,
+		ReversesTransactionID: wr.HoldLedgerTransactionID,
+		Entries: []ledger.EntryInput{
+			{LedgerAccountID: holdAccountID, Direction: ledger.Debit, Amount: wr.Amount},
+			{LedgerAccountID: cashAccountID, Direction: ledger.Credit, Amount: wr.Amount},
+		},
+	})
+	if err != nil {
+		return WithdrawalRequest{}, fmt.Errorf("withdrawal: post kyc denial reversal: %w", err)
+	}
+
+	tag, err := tx.Exec(ctx,
+		`UPDATE withdrawal_requests SET state = $1, release_ledger_transaction_id = $2, updated_at = now()
+		 WHERE id = $3 AND state = $4`,
+		StateRejected, postResult.TransactionID, requestID, StateApproved,
+	)
+	if err != nil {
+		return WithdrawalRequest{}, fmt.Errorf("withdrawal: transition to rejected (kyc): %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return WithdrawalRequest{}, ErrStateConflict
+	}
+
+	if err := audit.Record(ctx, tx, audit.Entry{
+		TenantID:   wr.TenantID,
+		ActorType:  audit.ActorSystem,
+		Action:     "withdrawal.rejected_kyc",
+		TargetType: "withdrawal_request",
+		TargetID:   requestID.String(),
+		Outcome:    audit.OutcomeSuccess,
+		Metadata: map[string]any{
+			"outcome":                    string(decision.Outcome),
+			"policy_version":             decision.PolicyVersion,
+			"hold_ledger_transaction":    wr.HoldLedgerTransactionID,
+			"release_ledger_transaction": postResult.TransactionID.String(),
+		},
+	}); err != nil {
+		return WithdrawalRequest{}, fmt.Errorf("withdrawal: audit: %w", err)
+	}
+
+	if err := kyc.RecordDecision(ctx, tx, kycParams, decision); err != nil {
+		return WithdrawalRequest{}, err
+	}
+
+	return GetByID(ctx, tx, requestID)
 }
 
 // LockSubmittedForResolution takes the row lock on requestID and
