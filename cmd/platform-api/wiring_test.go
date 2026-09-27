@@ -200,6 +200,41 @@ func TestCasinoOutboundResolver_FollowsWiring(t *testing.T) {
 	}
 }
 
+// TestKYCOutboundResolver_FollowsWiring is
+// TestCasinoOutboundResolver_FollowsWiring's KYC twin (RV-PRH-I2 KYC
+// security review C2 - this exact wiring-level test was the reviewer's own
+// named gap): a TRUE nil interface when off, and a working MOCK resolver -
+// reached ONLY via kycOutboundCredentials()'s kind split, not merely
+// because b.KYCOutboundResolver is set - when on. The kind split's own
+// routing-by-adapter-identity logic is unit-tested directly in
+// internal/kyc (TestKYCOutboundKindSplitResolver_*); this test only proves
+// the wiring itself reaches the mock adapter's own provider id.
+func TestKYCOutboundResolver_FollowsWiring(t *testing.T) {
+	for _, cfg := range wiringOffConfigs {
+		b := buildProviderBundle(mockProviderWiring(cfg))
+		if b.KYCOutboundResolver != nil {
+			t.Fatalf("env=%s explicit=%v flag=%v: expected no kyc outbound MOCK resolver in the bundle", cfg.Environment, cfg.EnvironmentExplicit, cfg.TestSupportEndpointsEnabled)
+		}
+		if r := b.kycOutboundCredentials(); r != nil {
+			t.Fatalf("env=%s explicit=%v flag=%v: expected a nil outbound resolver interface, got %T", cfg.Environment, cfg.EnvironmentExplicit, cfg.TestSupportEndpointsEnabled, r)
+		}
+	}
+
+	b := buildProviderBundle(mockProviderWiring(wiringOnConfig))
+	r := b.kycOutboundCredentials()
+	if r == nil {
+		t.Fatal("expected the outbound MOCK resolver with test support on")
+	}
+	tenantID := uuid.New()
+	cred, err := r.Resolve(context.Background(), nil, tenantID, "mock")
+	if err != nil || cred.TenantID != tenantID || cred.ProviderID != "mock" || cred.Domain != "kyc" {
+		t.Fatalf("outbound MOCK resolver must resolve its own registered synthetic provider, got %v / %v", cred, err)
+	}
+	if _, err := r.Resolve(context.Background(), nil, tenantID, "other-provider"); err == nil {
+		t.Fatal("outbound MOCK resolver must fail closed for an unregistered provider id")
+	}
+}
+
 // TestPaymentsWebhookResolver_FollowsWiring proves the resolver actually
 // injected follows the wiring value: a TRUE nil interface when off (so the
 // Orchestrator's nil-resolver branch rejects every callback as

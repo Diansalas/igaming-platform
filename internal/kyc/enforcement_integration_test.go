@@ -222,6 +222,136 @@ func TestEvaluateEnforcement_WithdrawalCrossAccountRejectedOverlayDenies(t *test
 	}
 }
 
+// --- ADR 0096 §2.6(g), RV-PRH-I2 KYC review F1: never-submitted orphan
+// rows are excluded from "latest" enforcement selection ---
+
+// setOrphanVerification inserts a kyc_verifications row shaped exactly like
+// CreateVerification's own phase-A orphan (ADR 0095 §15.2):
+// status='unverified', provider_reference NULL - a row that never received
+// ANY decision (phase B/C never completed a provider round-trip for it).
+func setOrphanVerification(t *testing.T, pool *db.Pool, f fixture) {
+	t.Helper()
+	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx,
+			`INSERT INTO kyc_verifications (id, tenant_id, brand_id, player_account_id, person_id, status, provider_id, provider_reference)
+			 VALUES ($1, $2, $3, $4, $5, 'unverified', 'mock', NULL)`,
+			uuid.New(), f.tenantID, f.brandID, f.playerID, f.personID)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("seed orphan verification: %v", err)
+	}
+}
+
+// TestEvaluateEnforcement_OrphanAfterApproval_StillPassed is F1's own
+// required test (RV-PRH-I2 KYC code review/security review): an approved
+// player who starts a re-verification (a routine renewal, or one triggered
+// by a fresh threshold) while the vendor happens to be unreachable commits
+// a harmless orphan row (ADR 0095 §15.2's own documented failure mode) -
+// this orphan being NEWER than the approval must never, on its own, turn
+// withdrawal enforcement from passed to failed. Before the fix, this test
+// reproduced code review's own P3 finding exactly.
+func TestEvaluateEnforcement_OrphanAfterApproval_StillPassed(t *testing.T) {
+	pool := testPool(t)
+	f := seedFixture(t, pool)
+	setVerification(t, pool, f, StatusApproved, nil)
+	time.Sleep(10 * time.Millisecond)
+	setOrphanVerification(t, pool, f)
+
+	d := evalWithdrawal(t, pool, f)
+	if d.Outcome != OutcomePassed || !d.Allowed {
+		t.Fatalf("F1: expected a newer, never-decided orphan to never mask an existing approval, got %+v", d)
+	}
+}
+
+// TestEvaluateEnforcement_OrphanOnAnotherAccount_DoesNotMaskRejection is
+// F1's cross-account shape: account B's latest DECIDED row is rejected;
+// account B then accumulates a newer orphan (a later re-verification
+// attempt whose vendor call failed). Account A's withdrawal must still be
+// DENIED by the cross-account overlay - B's orphan must never mask B's own
+// rejection just by being newer.
+func TestEvaluateEnforcement_OrphanOnAnotherAccount_DoesNotMaskRejection(t *testing.T) {
+	pool := testPool(t)
+	f := seedFixture(t, pool)
+	setVerification(t, pool, f, StatusApproved, nil)
+
+	var secondBrandID, secondPlayerID uuid.UUID
+	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		secondBrandID = uuid.New()
+		if _, err := tx.Exec(ctx, `INSERT INTO brands (id, tenant_id, slug, name) VALUES ($1, $2, $3, 'Second Brand')`,
+			secondBrandID, f.tenantID, "b2-"+secondBrandID.String()[:8]); err != nil {
+			return err
+		}
+		secondPlayerID = uuid.New()
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO player_accounts (id, tenant_id, brand_id, person_id, email, password_hash, status)
+			 VALUES ($1, $2, $3, $4, $5, 'x', 'active')`,
+			secondPlayerID, f.tenantID, secondBrandID, f.personID, secondPlayerID.String()+"@example.com"); err != nil {
+			return err
+		}
+		// Account B's DECIDED latest row: rejected.
+		_, err := tx.Exec(ctx,
+			`INSERT INTO kyc_verifications (id, tenant_id, brand_id, player_account_id, person_id, status, provider_id)
+			 VALUES ($1, $2, $3, $4, $5, 'rejected', 'mock')`,
+			uuid.New(), f.tenantID, secondBrandID, secondPlayerID, f.personID)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("seed second player/rejected verification: %v", err)
+	}
+	time.Sleep(10 * time.Millisecond)
+	// Account B accumulates a NEWER, never-decided orphan (a later
+	// re-verification attempt whose vendor call failed) - this must not
+	// mask B's own decided rejection from the cross-account overlay.
+	secondFixture := fixture{tenantID: f.tenantID, brandID: secondBrandID, personID: f.personID, playerID: secondPlayerID}
+	setOrphanVerification(t, pool, secondFixture)
+
+	d := evalWithdrawal(t, pool, f)
+	if d.Allowed {
+		t.Fatalf("F1: expected account B's decided rejection to still deny account A's withdrawal despite B's newer orphan, got %+v", d)
+	}
+	if d.Outcome != OutcomeFailed {
+		t.Fatalf("expected outcome failed from the overlay, got %+v", d)
+	}
+}
+
+// TestEvaluateEnforcement_OrphanOnly_TreatedAsNoVerification proves the
+// "changes nothing when every row is an orphan" case: an account with
+// ONLY never-decided orphan rows is denied exactly like an account with NO
+// verification row at all (found=false), never treated as some other
+// state.
+func TestEvaluateEnforcement_OrphanOnly_TreatedAsNoVerification(t *testing.T) {
+	pool := testPool(t)
+	f := seedFixture(t, pool)
+	setOrphanVerification(t, pool, f)
+	setOrphanVerification(t, pool, f)
+
+	d := evalWithdrawal(t, pool, f)
+	if d.Outcome != OutcomeFailed || d.Allowed {
+		t.Fatalf("expected orphan-only rows to evaluate exactly like no verification at all, got %+v", d)
+	}
+}
+
+// TestEvaluateEnforcement_DecidedOrderingIgnoresInterveningOrphans proves
+// ordering by DECISION time survives an orphan landing in between two
+// decided rows: approved, then an orphan, then rejected - the latest
+// DECIDED row (rejected) must still govern, exactly as if the orphan were
+// never there.
+func TestEvaluateEnforcement_DecidedOrderingIgnoresInterveningOrphans(t *testing.T) {
+	pool := testPool(t)
+	f := seedFixture(t, pool)
+	setVerification(t, pool, f, StatusApproved, nil)
+	time.Sleep(10 * time.Millisecond)
+	setOrphanVerification(t, pool, f)
+	time.Sleep(10 * time.Millisecond)
+	setVerification(t, pool, f, StatusRejected, nil)
+
+	d := evalWithdrawal(t, pool, f)
+	if d.Outcome != OutcomeFailed || d.Allowed {
+		t.Fatalf("expected the latest DECIDED row (rejected) to govern despite an intervening orphan, got %+v", d)
+	}
+}
+
 // --- Cross-tenant isolation (§2.6(f)) ---
 
 // TestEvaluateEnforcement_CrossTenant_NeverEvaluatesAnotherTenantsRows

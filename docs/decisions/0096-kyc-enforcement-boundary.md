@@ -345,6 +345,40 @@ left to "the obvious query," because the obvious query is the bug:
   A's `player_account_id`, and assert the caller-visible result is a
   rejection or not-found — never that the evaluation silently ran against
   tenant A's own rows under tenant B's authorization context.
+- **(g) A never-decided orphan is excluded from "latest" (§19 below, RV-PRH-I2
+  KYC code review F1, 2026-09-27; ADR 0095 §15.3.3).** ADR 0095 §15.2's `CreateVerification`
+  phase A commits an intent row — `status='unverified'`,
+  `provider_reference IS NULL` — *before* the provider is ever called; a
+  phase-B/C failure (a vendor outage, a resolver failure, a crash) leaves
+  that row exactly as committed, forever if nothing retries it. Such a row
+  received **no decision at all** — not a vendor decision, not a staff
+  decision — and (a)'s "latest row, deterministically ordered" rule must
+  not treat it as this account's current state merely because it is
+  newest: a transient vendor outage would then manufacture a `failed`
+  outcome for an already-`approved` player starting a routine
+  re-verification, and, via crossAccountRejectedOverlay's identical
+  "each OTHER account's own latest row" read, would let such an orphan on
+  one account mask an already-decided rejection on that SAME account by
+  simply being newer. **Both** `readLatestVerificationByPlayerAccount`'s
+  own selection **and** `crossAccountRejectedOverlay`'s per-other-account
+  subquery therefore add `NOT (status = 'unverified' AND
+  provider_reference IS NULL)` to their own predicate — the row is invisible
+  to "latest DECIDED row" selection, not merely re-classified once selected.
+  An account whose only rows are such orphans is treated identically to an
+  account with no verification row at all (`found=false`, `OutcomeFailed`
+  either way — this rule changes nothing in that case). A row that
+  *did* receive a decision — the provider round-trip completed (whatever
+  the resulting status, including a non-terminal one like `pending`), a
+  callback applied, or a staff review applied — is never excluded by this
+  rule, however non-terminal that decision is; (a)'s original latest-row
+  ordering is otherwise completely unchanged. See §19 below and ADR 0095 §15.3.3 for the
+  cross-ADR implementation record (identity-compliance is the owner of
+  both ADRs and is explicitly authorized to make this specific,
+  coordinated change to `internal/kyc/enforcement.go`'s read semantics —
+  this is not a weakening of enforcement, it removes a spurious DENY that
+  a transient failure elsewhere in the system could otherwise manufacture,
+  and every genuine deny this ADR's structural rule requires is preserved
+  byte for byte).
 
 ---
 
@@ -2798,3 +2832,93 @@ compliance`'s scope to fix).
   closed, but §16.2's other still-open items (LF-I3-4/5, F4/F5, B7) and
   the deposit/payout call-site wiring (PRH-I1's scope) remain, so the
   header does not yet move to a plain `IMPLEMENTED`.
+
+## 19. Fix round 5 (2026-09-27) — RV-PRH-I2 KYC review F1: orphan-row enforcement masking
+
+Scope: `identity-compliance`'s own PRH-I2 (KYC part) code review
+(`docs/plans/payment-readiness/rv-prh-i2-kyc-code-review.md`, finding F1) and security review
+(`docs/plans/payment-readiness/rv-prh-i2-kyc-security.md`, cross-account overlay note in §4
+item 1) both flagged the same gap in this ADR's own §2.6 read semantics, surfaced by ADR
+0095's KYC create/submit split (§15.2's orphan row). `identity-compliance` owns both ADRs and
+is the specialist explicitly authorized (by the orchestrating task that requested this round)
+to change `internal/kyc/enforcement.go`'s read semantics for this one, narrowly-scoped case,
+coordinated with §2.6 and with security's own N1 text (§2.6 already cites N1 for the
+cross-account overlay itself; this round extends that same overlay's own "latest row" read,
+never replaces it).
+
+### 19.1 The gap
+
+ADR 0095 §15.2's `CreateVerification` commits its phase-A intent row — `status='unverified'`,
+`provider_reference IS NULL` — *before* calling the provider, specifically so a phase-B/C
+failure (vendor outage, resolver failure, a crash) leaves a harmless, documented orphan rather
+than losing the request entirely. §15.2's own text asserted this orphan "has no enforcement
+effect" — true only when the orphan happens to be OLDER than the account's real, decided
+state. §2.6(a)'s existing "latest row, deterministically ordered" rule takes the single newest
+row for `(tenant_id, brand_id, player_account_id)` with no other filter — so a NEWER orphan
+becomes the enforcement-visible "latest" row the moment one exists, and `effectiveOutcome`
+maps `unverified` to `failed`. Code review's own reproduction: an approved player who starts a
+routine re-verification (a renewal, or one triggered by crossing a fresh threshold) while the
+vendor happens to be unreachable is denied withdrawals — and play, wherever a jurisdiction
+requires `passed` — until a LATER retry actually reaches the vendor, purely because of a
+transient failure that, before ADR 0095's split, would have rolled back the whole transaction
+and left the approval as the latest row untouched. The identical mechanism applies to
+`crossAccountRejectedOverlay`'s own "each OTHER account's own latest row" subquery: an orphan
+on account B, newer than B's own decided rejection, would mask that rejection from account A's
+withdrawal check.
+
+This is a **fail-closed** defect in the sense that it never lets a real deny through as an
+allow — it manufactures a spurious DENY, never a spurious ALLOW. It is nonetheless a
+correctness defect: `internal-only` outages must not be able to interrupt a player's own
+already-decided, still-valid compliance state.
+
+### 19.2 The fix
+
+§2.6 gains point (g) (full text there, not duplicated here): both `readLatestVerificationByPlayerAccount`
+and `crossAccountRejectedOverlay`'s inner "latest row per other account" subquery add the
+identical predicate — `NOT (status = 'unverified' AND provider_reference IS NULL)` — excluding
+a row that never received ANY decision (no vendor round-trip ever completed for it, no staff
+review, no callback) from "latest" selection outright. A row that DID receive a decision, of
+whatever kind — a non-terminal `pending` from a completed vendor round-trip included, per the
+pre-existing, unchanged "the success path already supersedes an approval with a pending row"
+behaviour this ADR's original design always intended — is never excluded. An account whose
+every row happens to be such an orphan evaluates identically to an account with no
+verification row at all (`found=false`, `OutcomeFailed` either way): the predicate changes
+nothing in that all-orphan case, and every genuine deny §2.6(a)-(f) and §3.2 already require is
+preserved byte for byte — this is strictly a narrowing of what counts as "latest", never a
+loosening of any deny condition.
+
+Implementation: `internal/kyc/enforcement.go`, `orphanRowExclusionSQL` (a documented SQL
+predicate constant) is added to `readLatestVerificationByPlayerAccount`'s own `WHERE` clause
+and to `crossAccountRejectedOverlay`'s inner subquery. No migration: both predicates read
+`kyc_verifications.provider_reference`/`.status`, existing columns since migration 0040/ADR
+0095's own §15.2 scope; no schema change is needed.
+
+### 19.3 Tests
+
+`internal/kyc/enforcement_integration_test.go` gained four tests (a new `setOrphanVerification`
+helper seeds a row shaped exactly like `CreateVerification`'s own phase-A orphan):
+`TestEvaluateEnforcement_OrphanAfterApproval_StillPassed` (an orphan committed AFTER an
+approval must never turn `passed` into `failed`), `TestEvaluateEnforcement_
+OrphanOnAnotherAccount_DoesNotMaskRejection` (account B's newer orphan must never mask B's own
+decided rejection from account A's cross-account overlay check), `TestEvaluateEnforcement_
+OrphanOnly_TreatedAsNoVerification` (an account with only orphan rows evaluates exactly like
+no verification at all), and `TestEvaluateEnforcement_DecidedOrderingIgnoresInterveningOrphans`
+(approved → orphan → rejected: the latest DECIDED row, rejected, still governs despite the
+intervening orphan). All four pass; the full pre-existing `TestEvaluateEnforcement_*` suite
+(exercised via `setVerification`, which never seeds a `status='unverified'` row and so is
+completely unaffected by this predicate) was re-run and remains green, against a private
+database migrated to head (0104).
+
+### 19.4 Labels (round 5 summary)
+
+- **F1 (RV-PRH-I2 KYC code review):** IMPLEMENTED — `internal/kyc/enforcement.go`'s
+  `readLatestVerificationByPlayerAccount`/`crossAccountRejectedOverlay` now exclude never-decided
+  orphan rows from "latest" selection; ADR 0096 §2.6 gains point (g); ADR 0095 §15.2's own
+  "no enforcement effect" claim is corrected there (§15.3.3).
+- **Cross-account overlay masking (security review, §4 item 1's own note):** the SAME fix
+  closes the specific "an orphan masks a rejection" shape that note names; the note's own
+  broader framing ("any newer row on the rejected account masks the rejection") is otherwise
+  unchanged — a genuinely NEW DECIDED row on the rejected account (e.g. a fresh, still-pending
+  re-verification) still supersedes the rejection exactly as §2.6(a)'s ordinary "latest row"
+  rule intends, which is correct, not a residual gap this round leaves open.
+- **Everything else in this ADR** (§14-§18's own labels) is unchanged by this round.

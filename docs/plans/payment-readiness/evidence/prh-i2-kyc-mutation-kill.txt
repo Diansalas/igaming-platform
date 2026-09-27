@@ -8,29 +8,44 @@ SubmitVerification/gatherSubmissionDocuments/applySubmissionResult/
 submissionIdempotencyKey, internal/kyc/callcontext.go CallContext/
 OutboundCredentialResolver/MockOutboundResolver/OutboundKindSplitResolver,
 internal/kyc/provider.go ReceiveVerifiedCallback's ErrVerificationReferenceUnknown
-typing, internal/httpserver/kyc_handlers.go and kyc_admin_handlers.go's corresponding
-wiring/response-mapping changes). Does not cover casino (PRH-I2 casino part, already
-landed and separately evidenced in prh-i2-casino-mutation-kill.txt) or payments (PRH-I1).
-Does not touch internal/kyc/enforcement*.go or migrations 0100/0103 (out of this task's
-scope; another agent is editing KYC enforcement concurrently).
+typing plus the new shared applyForwardOnlyStatus, internal/httpserver/kyc_handlers.go
+and kyc_admin_handlers.go's corresponding wiring/response-mapping changes) PLUS the
+fix round below (RV-PRH-I2 KYC code review NOT READY R1/F1-F5, security review APPROVE
+WITH CONDITIONS C1-C5), which additionally, narrowly touches
+internal/kyc/enforcement.go's two read-semantics functions (explicitly authorized for
+this one task; coordinated with ADR 0096 §2.6(g)/§19). Does not cover casino (PRH-I2
+casino part, already landed and separately evidenced in
+prh-i2-casino-mutation-kill.txt) or payments (PRH-I1). Does not touch
+internal/kyc/enforcement_admin.go/enforcement_decisions_read.go/enforcement_dormancy.go
+or migrations 0100/0103/0104 (out of this task's scope; another agent may be editing
+KYC enforcement concurrently).
 
-Harness: manual, scratchpad-copy-mutate-test-restore, mirroring PRH-I2 casino part's own
-documented method exactly - each mutant is one anchored, verified-unique string
-replacement in the target file, applied via a small Python script; the killing test
-command is run against the target's own private/shared test database
-(TEST_DATABASE_URL, the CI-equivalent local Postgres); a non-zero exit (test failure or
-panic) means KILLED; the file is then restored from a saved copy (verified byte-identical
-to the pre-mutation source via `git diff` afterward, since every mutated file except
-callcontext.go - a new, untracked file this task adds - is already tracked).
+Harness: manual, scratchpad-copy-mutate-test-restore - each mutant is one anchored,
+verified-unique string replacement in the target file, applied via a small Python
+script; the killing test command is run against a PRIVATE test database (created via
+TEST_ADMIN_DATABASE_URL, migrated to head with `go run ./cmd/migrate up`, never the
+shared CI-local instance - see the environment note below for why); a non-zero exit
+(test failure or panic) means KILLED; the file is then restored from a saved copy,
+verified byte-identical to the pre-mutation source via `diff` afterward (git diff for
+every tracked file; direct byte comparison for internal/kyc/callcontext.go, which
+became a tracked file only once the original PRH-I2 KYC commit landed).
 
-Environment: local PostgreSQL at 127.0.0.1:5432 (igaming_platform_ci_local, the shared
-sandbox's own pre-provisioned CI-equivalent database, migrated up already). Go 1.26.8.
-Base: worktree HEAD 9e68b9d plus this task's PRH-I2 (KYC part) change.
+Environment: local PostgreSQL at 127.0.0.1:5432. Two private databases,
+`kyc_r1_fix_priv` (internal/kyc) and `kyc_r1_fix_priv2` (internal/httpserver,
+cmd/platform-api), both created fresh via TEST_ADMIN_DATABASE_URL and migrated to head
+(0104) for this fix round - NOT the shared `igaming_platform_ci_local` instance, which
+this sandbox's own prior sessions have left at migration 100 (short of migration 101's
+own pre-flight guard on pre-existing, unrelated dirty `deposit_intents` rows - the same
+pre-existing data-hygiene issue ADR 0096 §18.4 already documents for the identical
+reason). Go 1.26.8. Base: branch claude/focused-wright-jw88w9 at commit dffdab3 (the
+merged original PRH-I2 KYC submission, commit 8a52969, plus this fix round's own
+changes).
 
-Result: 11/11 killed, 0 equivalent.
+Result: 17/17 killed, 0 equivalent (11 from the original submission, re-verified
+unchanged this round, plus 6 new/corrected mutants: R1, MB, MC, MD, ME, MF).
 
 ===========================================================================================
-Mutants
+§1. Original submission mutants (2026-09-27) - re-verified unchanged this round
 ===========================================================================================
 
 M1 CreateVerification's nil-provider guard removed (a nil KYCProvider would reach
@@ -38,14 +53,14 @@ provider.ID() and panic instead of returning ErrProviderUnavailable):
 KILLED [internal/kyc/verification_service.go] by
 `go test -tags=integration ./internal/kyc/ -run TestCreateVerification_NilProviderFailsClosedWithoutPanic`
     first failure: panic: runtime error: invalid memory address or nil pointer dereference
-                   (verification_service.go:214, CreateVerification)
+                   (verification_service.go, CreateVerification)
 
 M2 CreateVerification's nil-pool guard removed (a nil pool would reach
 pool.WithTenant(...) in phase A and panic instead of returning ErrProviderUnavailable):
 KILLED [internal/kyc/verification_service.go] by
 `go test -tags=integration ./internal/kyc/ -run TestCreateVerification_NilPoolFailsClosedWithoutPanic`
     first failure: panic: runtime error: invalid memory address or nil pointer dereference
-                   (verification_service.go:220, CreateVerification)
+                   (verification_service.go, CreateVerification)
 
 M3 CreateVerification's nil-outbound-resolver guard removed (a nil outbound resolver
 would reach outbound.Resolve(...) on a true nil interface and panic instead of returning
@@ -53,21 +68,21 @@ ErrProviderUnavailable, leaving phase A's harmless orphan row as the only trace)
 KILLED [internal/kyc/verification_service.go] by
 `go test -tags=integration ./internal/kyc/ -run TestCreateVerification_NilOutboundResolverLeavesHarmlessOrphanRow`
     first failure: panic: runtime error: invalid memory address or nil pointer dereference
-                   (verification_service.go:240, CreateVerification)
+                   (verification_service.go, CreateVerification)
 
 M4 CreateVerification's outbound-credential tenant/provider/domain binding check removed
 (a resolver returning a credential for the WRONG tenant would still be used to call the
 provider - ADR 0095 §9.1/S95-C8(b) defence-in-depth): KILLED
 [internal/kyc/verification_service.go] by
 `go test -tags=integration ./internal/kyc/ -run TestCreateVerification_CredentialBindingMismatchFailsClosed`
-    first failure: --- FAIL: TestCreateVerification_CredentialBindingMismatchFailsClosed (0.04s)
+    first failure: --- FAIL: TestCreateVerification_CredentialBindingMismatchFailsClosed
                        "expected ErrProviderUnavailable for a mismatched credential, got <nil>"
 
 M5 CreateVerification's IdempotencyKey prefix changed from "kv:" to "xx:" (the
 deterministic external reference ADR 0095 §15.2 names): KILLED
 [internal/kyc/verification_service.go] by
 `go test -tags=integration ./internal/kyc/ -run TestCreateVerification_CallContextFieldsPassedToProvider`
-    first failure: --- FAIL: TestCreateVerification_CallContextFieldsPassedToProvider (0.03s)
+    first failure: --- FAIL: TestCreateVerification_CallContextFieldsPassedToProvider
                        Call.IdempotencyKey mismatch ("kv:..." wanted, "xx:..." got)
 
 M6 applySubmissionResult's IC-condition-2 ProviderError early-return removed (a
@@ -75,7 +90,7 @@ definitive ProviderError outcome would fall through to statusForOutcome, which d
 recognize it, instead of leaving kyc_verifications.status untouched): KILLED
 [internal/kyc/document_service.go] by
 `go test -tags=integration ./internal/kyc/ -run TestSubmitVerification_ProviderErrorOutcomeLeavesStatusUnchanged`
-    first failure: --- FAIL: TestSubmitVerification_ProviderErrorOutcomeLeavesStatusUnchanged (0.03s)
+    first failure: --- FAIL: TestSubmitVerification_ProviderErrorOutcomeLeavesStatusUnchanged
                        "SubmitVerification: kyc: submit verification: apply result: kyc:
                        provider returned an unrecognized outcome \"error\""
 
@@ -85,7 +100,7 @@ failure would silently proceed into phase C with a zero-value ProviderResult ins
 returning ErrProviderUnavailable and leaving status untouched): KILLED
 [internal/kyc/document_service.go] by
 `go test -tags=integration ./internal/kyc/ -run TestSubmitVerification_AmbiguousResultLeavesStatusUnchanged`
-    first failure: --- FAIL: TestSubmitVerification_AmbiguousResultLeavesStatusUnchanged (0.03s)
+    first failure: --- FAIL: TestSubmitVerification_AmbiguousResultLeavesStatusUnchanged
                        "expected ErrProviderUnavailable, got kyc: submit verification: apply
                        result: kyc: provider returned an unrecognized outcome \"\""
 
@@ -93,7 +108,7 @@ M8 gatherSubmissionDocuments' terminal-status guard removed (an already-terminal
 verification would still be resubmitted to the provider instead of being a documented
 no-op): KILLED [internal/kyc/document_service.go] by
 `go test -tags=integration ./internal/kyc/ -run TestSubmitVerification_TerminalVerificationIsANoOp`
-    first failure: --- FAIL: TestSubmitVerification_TerminalVerificationIsANoOp (0.04s)
+    first failure: --- FAIL: TestSubmitVerification_TerminalVerificationIsANoOp
                        "SubmitVerification: kyc: provider unavailable: submit verification to
                        provider: kyc: unknown provider reference ..." (the mock rejects a
                        resubmission of a reference no test fixture told it to expect,
@@ -104,7 +119,7 @@ racing CreateVerification's own phase C, or referencing a genuinely unknown refe
 would fall back to the bare, terminal ErrNotFound instead of the retryable sentinel -
 IC-Q1/ADR 0095 §15.2): KILLED [internal/kyc/provider.go] by
 `go test -tags=integration ./internal/kyc/ -run TestKYCWebhook_VerifiedUnknownReference_NotFound`
-    first failure: --- FAIL: TestKYCWebhook_VerifiedUnknownReference_NotFound (0.03s)
+    first failure: --- FAIL: TestKYCWebhook_VerifiedUnknownReference_NotFound
                        "expected ErrVerificationReferenceUnknown, got kyc: not found"
 
 M10 the HTTP layer's ErrVerificationReferenceUnknown -> 503 branch removed from
@@ -113,7 +128,7 @@ generic 500 internal-error branch instead of the required retryable 503, and wou
 be a bare 404 or a 200 either - the specific required behaviour this condition tests):
 KILLED [internal/httpserver/kyc_admin_handlers.go] by
 `go test -tags=integration ./internal/httpserver/ -run TestKYC_WebhookCallbackAuthentication`
-    first failure: --- FAIL: TestKYC_WebhookCallbackAuthentication (0.25s)
+    first failure: --- FAIL: TestKYC_WebhookCallbackAuthentication
                        "expected 503 (retryable) for an unresolvable provider_reference, got 500"
 
 M11 CallContext.callContextRedacted appends `string(c.Credential.Secret())` to its own
@@ -121,20 +136,148 @@ output (the reviewer's own canonical redaction-defeating mutation, mirrored from
 RV-PRH-I2 C2 finding, applied here to KYC's own CallContext copy): KILLED
 [internal/kyc/callcontext.go] by
 `go test -tags=integration ./internal/kyc/ -run TestCallContext_NeverRendersSecret`
-    first failure: --- FAIL: TestCallContext_NeverRendersSecret (0.00s)
+    first failure: --- FAIL: TestCallContext_NeverRendersSecret
                        "CallContext rendered the secret: ...mock-outbound-credential-not-a-real-secret"
 
-11/11 killed, 0 equivalent.
+11/11 killed, 0 equivalent (original submission).
+
+Correction (this fix round, code review F3): the original submission's own claim that M4/MB's
+"the credential-binding check" and MD's "the idempotency-key shape" were adequately covered
+overstated matters - M4 above covers ONLY CreateVerification's own copy of that check;
+SubmitVerification carries a SEPARATE copy (MB below), which had NO test. The original
+idempotency-key test submitted only an EMPTY document set and computed its own "expected"
+value by calling submissionIdempotencyKey itself (tautological for ordering purposes) - see MD
+below for the corrected test. Two further branches (CreateVerification's own phase-C CAS
+predicate, MC; SubmitVerification's nil-outbound-resolver guard, ME) had no test at all. None
+of M1-M11 above are themselves wrong or newly broken; §2 closes the FOUR SEPARATE gaps code
+review's own mutation pass found, plus R1 (the round's own blocking finding) and MF (security's
+own C2 finding).
+
+===========================================================================================
+§2. Fix round mutants (2026-09-27) - RV-PRH-I2 KYC code review R1/F1-F5, security C1-C5
+===========================================================================================
+
+R1 (BLOCKING, code review + security C1) - SubmitVerification's phase-C status write reverted
+to the pre-fix blind UPDATE (no forward-only CAS at all - applyForwardOnlyStatus's call
+replaced with an unconditional `UPDATE ... WHERE id = $3`, mirroring EXACTLY what the code
+before this fix round did): KILLED [internal/kyc/document_service.go] by
+`go test -tags=integration ./internal/kyc/ -run TestSubmitVerification_StaffRejectDuringProviderCall_Survives|TestSubmitVerification_CallbackApprovalDuringProviderCall_NotDemoted`
+    first failure (P1): --- FAIL: TestSubmitVerification_StaffRejectDuringProviderCall_Survives
+                       "R1 (P1): expected the staff REJECT decision to survive a concurrent
+                       provider approval, got \"approved\"" - the EXACT defect security review
+                       reproduced (a staff rejection silently overwritten by a later provider
+                       approval)
+    second failure (P2): --- FAIL: TestSubmitVerification_CallbackApprovalDuringProviderCall_NotDemoted
+                       "R1 (P2): expected the concurrent callback's approval to survive a
+                       lower-rank submission result, got \"review_required\"" - the EXACT
+                       defect code review reproduced (a callback's approved demoted by a
+                       lower-rank submission result)
+
+MB (code review F3) - SubmitVerification's OWN copy of the tenant/provider/domain credential-
+binding check removed: KILLED [internal/kyc/document_service.go] by
+`go test -tags=integration ./internal/kyc/ -run TestSubmitVerification_CredentialBindingMismatchFailsClosed`
+    first failure: --- FAIL: TestSubmitVerification_CredentialBindingMismatchFailsClosed
+                       "expected ErrProviderUnavailable for a mismatched credential, got <nil>"
+    NOTE (methodology correction made while producing this evidence): the test's own provider
+    fixture was originally a FRESH *MockKYCProvider that never had the verification's own
+    provider_reference registered in its `created` map, so the test passed for the WRONG
+    reason (an unrelated "unknown provider reference" error, not the binding check) both with
+    and without the mutation - a false-negative-proof test. Corrected by reusing the SAME
+    provider instance the verification's own reference was created against (`provider.created
+    [ref] = true`), so the call genuinely WOULD reach and succeed against the provider if the
+    binding check were removed - re-verified: passes unmutated, fails (returns nil error) with
+    the mutation applied.
+
+MC (code review F3) - CreateVerification's phase-C CAS predicate (`provider_reference IS NULL
+AND status = $6`) removed from applyCreateVerificationResult's own UPDATE, leaving only
+`WHERE id = $4 AND tenant_id = $5`: KILLED [internal/kyc/verification_service.go] by
+`go test -tags=integration ./internal/kyc/ -run TestCreateVerification_PhaseCCASRejectsAlreadyAppliedRow`
+    first failure: --- FAIL: TestCreateVerification_PhaseCCASRejectsAlreadyAppliedRow
+                       "MC: expected the phase-C CAS to refuse re-applying onto a row that
+                       already left the pre-reference state" (a second, stale-state call to
+                       applyCreateVerificationResult, which the CAS predicate should refuse,
+                       instead silently re-applied and returned no error)
+
+MD (code review F3) - submissionIdempotencyKey's `sort.Strings(ids)` call disabled (wrapped in
+`if false { ... }`, keeping the "sort" import used so the mutant compiles):
+KILLED [internal/kyc/document_service.go] by
+`go test -tags=integration ./internal/kyc/ -run TestSubmissionIdempotencyKey_SortsDocumentIDs`
+    first failure: --- FAIL: TestSubmissionIdempotencyKey_SortsDocumentIDs
+                       "expected the SAME idempotency key regardless of input order, got
+                       \"ks:...:c7b7c2...\" vs \"ks:...:fdd981...\""
+    NOTE (methodology correction made while producing this evidence): the FIRST replacement
+    test written for this gap, TestSubmitVerification_IdempotencyKeyStableForMultiDocumentSet
+    (a 3-document INTEGRATION test, still present and passing, kept for its own value - it
+    proves document_count=3 reaches the provider and the key is stable across two real calls),
+    did NOT kill this mutant on its own: gatherSubmissionDocuments' own SQL already reads
+    documents `ORDER BY id`, and for standard UUIDs that byte/column order is identical to
+    sort.Strings' own string-sorted order regardless of upload sequence - so the documents
+    silently arrive at submissionIdempotencyKey PRE-SORTED via that unrelated SQL clause,
+    making the integration test alone unable to distinguish "the function sorts its own input"
+    from "its caller already handed it sorted input" (a genuinely SURVIVING mutant against
+    that test alone, confirmed by re-running it with the mutation applied - it still passed).
+    Closed with a direct, DB-free unit test (added above,
+    TestSubmissionIdempotencyKey_SortsDocumentIDs) that calls submissionIdempotencyKey twice
+    with the SAME three document ids in two DELIBERATELY different orders and requires an
+    identical key - this cannot rely on any caller's own pre-sorting.
+
+ME (code review F3) - SubmitVerification's nil-outbound-resolver guard removed (a nil
+resolver would reach outbound.Resolve(...) on a true nil interface and panic):
+KILLED [internal/kyc/document_service.go] by
+`go test -tags=integration ./internal/kyc/ -run TestSubmitVerification_NilOutboundResolverFailsClosedWithoutPanic`
+    first failure: panic: runtime error: invalid memory address or nil pointer dereference
+                   (document_service.go, SubmitVerification)
+
+MF (security review C2) - OutboundKindSplitResolver.Resolve hard-coded to always prefer the
+mock resolver (`target := s.mock` unconditionally, `isSynthetic` discarded), reproducing
+security review's own spot-check mutant C, which the review recorded as SURVIVING the full
+`internal/kyc`/`cmd/platform-api` suites at the time of that review (no test exercised this
+routing logic directly): KILLED, now, by the NEW tests this fix round adds -
+`go test ./internal/kyc/ -run TestKYCOutboundKindSplitResolver_NonSyntheticAdapterUsesRealOnly`
+    first failure: --- FAIL: TestKYCOutboundKindSplitResolver_NonSyntheticAdapterUsesRealOnly
+                       "expected the real resolver called exactly once, got 0"
+    (internal/kyc/outbound_kindsplit_test.go, new - ports internal/casino/
+    outbound_kindsplit_test.go's five cases for KYC; cmd/platform-api/wiring_test.go also
+    gained TestKYCOutboundResolver_FollowsWiring, casino's own
+    TestCasinoOutboundResolver_FollowsWiring's KYC twin, proving the WIRING itself, not merely
+    the resolver's own logic, reaches the mock adapter's registered provider id)
+
+6/6 killed this round, 0 equivalent.
+
+===========================================================================================
+§3. F1 (orphan-row enforcement masking) - regression tests, not mutation-tested
+===========================================================================================
+
+F1 (code review; ADR 0096 §2.6(g)/§19) is a query-semantics fix to
+internal/kyc/enforcement.go's readLatestVerificationByPlayerAccount and
+crossAccountRejectedOverlay (excluding a never-decided orphan row -
+status='unverified' AND provider_reference IS NULL - from "latest row" selection). This is
+recorded as regression tests rather than a mutation-kill exercise (removing the new predicate
+is trivially equivalent to "revert the diff", which the four new tests already prove fails
+without the fix - reverting orphanRowExclusionSQL's addition to either query call site makes
+TestEvaluateEnforcement_OrphanAfterApproval_StillPassed and
+TestEvaluateEnforcement_OrphanOnAnotherAccount_DoesNotMaskRejection fail immediately, since
+without it the newer orphan becomes each query's own "latest" row):
+TestEvaluateEnforcement_OrphanAfterApproval_StillPassed,
+TestEvaluateEnforcement_OrphanOnAnotherAccount_DoesNotMaskRejection,
+TestEvaluateEnforcement_OrphanOnly_TreatedAsNoVerification,
+TestEvaluateEnforcement_DecidedOrderingIgnoresInterveningOrphans (all
+internal/kyc/enforcement_integration_test.go) - all pass; the full pre-existing
+TestEvaluateEnforcement_* suite (28 tests, none of which ever seeds a status='unverified' row
+via the existing setVerification helper, so none are affected by this predicate) was re-run in
+full and remains green.
 
 ===========================================================================================
 Post-restoration verification
 ===========================================================================================
 
-After each mutant was reverted from its saved backup, `git diff --stat` over every
-mutated TRACKED file (internal/kyc/verification_service.go, internal/kyc/document_service.go,
-internal/kyc/provider.go, internal/httpserver/kyc_admin_handlers.go) showed exactly this
-task's own production diff and nothing else (no residual mutant), and the full targeted
-suite (`go test -tags=integration ./internal/kyc/... ./internal/httpserver/... -run
-"KYC|CreateVerification|SubmitVerification|CallContext"`) passed cleanly. internal/kyc/
-callcontext.go is a new, untracked file this task adds, so its restoration was verified by
-direct byte comparison against the pre-mutation saved copy instead of `git diff`.
+After each mutant in §1 and §2 was reverted from its saved backup, `diff` against the
+pre-mutation saved copy showed byte-identical content for every mutated file
+(internal/kyc/verification_service.go, document_service.go, provider.go, callcontext.go,
+enforcement.go, internal/httpserver/kyc_admin_handlers.go, kyc_handlers.go), and the full
+targeted suite - `go test -tags=integration -race -count=1 ./internal/kyc/...`,
+`go test -tags=integration -count=1 ./internal/httpserver/... -run 'KYC|Kyc'`, and
+`go test -tags=integration -count=1 ./cmd/platform-api/...` - passed cleanly against the
+private databases. `gofmt -l .`, `go vet ./...`, `go vet -tags=integration ./...`, and
+`golangci-lint run ./...` (v2.9.0, no build tags, matching this repository's own CI
+invocation in .github/workflows/ci.yml) all report clean/0 issues.

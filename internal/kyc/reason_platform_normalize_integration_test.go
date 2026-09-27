@@ -137,6 +137,7 @@ func TestPlatformNormalizesReason_SubmitVerification(t *testing.T) {
 	pool := testPool(t)
 	f := seedFixture(t, pool)
 	adapter, v := createWithRawAdapter(t, pool, f)
+	seedDocument(t, pool, f, v.ID, DocumentPassport, "p.png") // C4: an empty document set is now a no-op, never reaching the provider
 
 	_, err := SubmitVerification(context.Background(), pool, NewMockOutboundResolver(), adapter, f.tenantID, v.ID)
 	if err != nil {

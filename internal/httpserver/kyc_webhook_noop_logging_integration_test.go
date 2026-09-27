@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -127,5 +128,75 @@ func TestKYCWebhook_NoopLogging_ReplayLogsAllowListedLine_AppliedDoesNot(t *test
 	}
 	if got, _ := line.attrs["provider_id"].(string); got != "mock" {
 		t.Errorf("expected provider_id=%q, got %q", "mock", got)
+	}
+}
+
+// findKYCReferenceUnknownLines returns every "kyc_webhook_reference_unknown"
+// line - the allow-listed operator signal RV-PRH-I2 KYC security review
+// C3/F2 required for the ErrVerificationReferenceUnknown 503 branch.
+func findKYCReferenceUnknownLines(lines []capturedLogLine) []capturedLogLine {
+	var matches []capturedLogLine
+	for _, l := range lines {
+		if l.msg == "kyc_webhook_reference_unknown" {
+			matches = append(matches, l)
+		}
+	}
+	return matches
+}
+
+var kycReferenceUnknownAllowedLogKeys = map[string]bool{
+	"request_id":  true,
+	"tenant_id":   true,
+	"provider_id": true,
+}
+
+// TestKYCWebhook_ReferenceUnknownLogging_AllowListOnly is RV-PRH-I2 KYC
+// security review C3/F2's required test: a callback whose provider_reference
+// this platform cannot resolve logs exactly one allow-listed
+// "kyc_webhook_reference_unknown" line (request_id/tenant_id/provider_id
+// only - NEVER the provider_reference itself or the callback body).
+func TestKYCWebhook_ReferenceUnknownLogging_AllowListOnly(t *testing.T) {
+	pool, issuer := testEnv(t)
+	logger, captured := newCapturingLogger()
+	srv, mockProvider := newKYCNoopTestServer(t, pool, issuer, logger)
+
+	tenant := mustCreateTenant(t, pool)
+	const secretLookingReference = "no-such-reference-secret-abc123"
+	in := mockProvider.CallbackPayload(tenant.ID, secretLookingReference, kyc.ProviderApproved, "x")
+
+	resp := rawPostKYCCallback(t, srv, "/v1/webhooks/kyc/"+tenant.Slug+"/mock", in)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 for an unresolvable provider_reference, got %d", resp.StatusCode)
+	}
+
+	lines := findKYCReferenceUnknownLines(captured())
+	if len(lines) != 1 {
+		t.Fatalf("expected exactly 1 kyc_webhook_reference_unknown line, got %d: %+v", len(lines), lines)
+	}
+	line := lines[0]
+	for k := range line.attrs {
+		if !kycReferenceUnknownAllowedLogKeys[k] {
+			t.Errorf("kyc_webhook_reference_unknown carries a NON-allow-listed field %q (value %v)", k, line.attrs[k])
+		}
+	}
+	for _, want := range []string{"request_id", "tenant_id", "provider_id"} {
+		if _, present := line.attrs[want]; !present {
+			t.Errorf("kyc_webhook_reference_unknown is missing the required field %q", want)
+		}
+	}
+	if got, _ := line.attrs["tenant_id"].(string); got != tenant.ID.String() {
+		t.Errorf("expected tenant_id=%s, got %q", tenant.ID, got)
+	}
+	if got, _ := line.attrs["provider_id"].(string); got != "mock" {
+		t.Errorf("expected provider_id=%q, got %q", "mock", got)
+	}
+	// The reference itself (which could be a vendor-issued opaque string
+	// carrying no PII in the mock, but is treated as sensitive by policy)
+	// must never appear anywhere in this log line's own values.
+	for k, v := range line.attrs {
+		if s, ok := v.(string); ok && strings.Contains(s, secretLookingReference) {
+			t.Errorf("kyc_webhook_reference_unknown field %q leaked the provider_reference: %q", k, s)
+		}
 	}
 }
