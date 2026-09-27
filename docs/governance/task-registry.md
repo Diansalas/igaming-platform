@@ -3926,8 +3926,9 @@ requires green GitHub CI (CI-BILLING-1 is an external prerequisite; never bypass
 Allocations (to avoid collisions between parallel specialists): ADR 0095 payments/provider-I/O
 boundary (F-POOL-2 + PROV-OUTBOUND-CRED-1 + payment contract + capability/kill switch + payment
 reconciliation), ADR 0096 KYC enforcement, ADR 0097 webhook admission/rate limiting. Migrations:
-0099 provider-reference bound; 0100 payment intents / provider-operation state; 0101 KYC enforcement
-policy + decision audit; 0102 capability manifest + kill switch; 0103 payment statement reconciliation
+0099 provider-reference bound; 0100 KYC enforcement policy + decision audit (re-allocated 2026-09-27,
+was 0101 — KYC is implemented first and migrations must be gap-free); 0101 payment attempts / provider-operation
+state (was 0100); 0102 capability manifest + kill switch; 0103 payment statement reconciliation
 (MOCK). A migration number is re-allocated only by the Orchestrator.
 
 | ID | Owner (reviewers) | Status | Scope | Depends on |
@@ -3940,7 +3941,7 @@ policy + decision audit; 0102 capability manifest + kill switch; 0103 payment st
 | PRH-REF | ledger-finance (casino, payments, security) | Not started | PROVIDER-REF-BOUND-1: platform maximum, boundary validation, migration 0099 with pre-flight, no truncation | — |
 | PRH-I1 | payments + ledger-finance (security, code-reviewer, qa) | Not started | Implement ADR 0095 payments (intents/state machine/outbox/sweeper/contract/capability/kill switch/outbound creds) | PRH-D1, PRH-REF |
 | PRH-I2 | casino + identity-compliance | Not started | Implement ADR 0095 casino-launch/KYC-submission boundary (scope per ADR) | PRH-D1 |
-| PRH-I3 | identity-compliance (+ payments, casino, withdrawal owners via dependency requests) | Not started | Implement ADR 0096 KYC enforcement | PRH-D2 |
+| PRH-I3 | identity-compliance (+ payments, casino, withdrawal owners via dependency requests) | Not started | Implement ADR 0096 KYC enforcement: service, migration 0100, withdrawal-request + casino/sportsbook play gates, staff read API, DenyForCompliance. The deposit gate (InitiateDeposit phase A) and payout gate (T1p) are wired by PRH-I1 calling the service, because PRH-I1 rewrites those functions | PRH-D2 |
 | PRH-I4 | security + backend | Not started | Implement ADR 0097 webhook rate limiting | PRH-D3 |
 | PRH-I5 | payments + ledger-finance | Not started | Payment reconciliation stream with MOCK source (migration 0103) | PRH-I1 |
 | PRH-REV | all mandatory reviewers | Not started | Architect, security, payments, ledger-finance, backend, QA, code-reviewer reviews; Orchestrator synthesis | PRH-I* |
