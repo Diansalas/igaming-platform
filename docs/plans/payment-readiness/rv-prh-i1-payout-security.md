@@ -248,3 +248,59 @@ The kill switch, which is evaluated inside the claim statement, remains the emer
 - the tracked R5/CP-W1 and HD-0095-1 items.
 
 Launch authorization itself remains the human's decision.
+
+---
+
+# Re-verification 1 — payout-callback findings on the callback branch (`worktree-agent-adce273a3a5339f77` @ `0a96a01`)
+
+- Date: 2026-09-27.
+- Scope: the callback agent's payment commits on that branch (`be15a11`, `7641332`, `dd44d04`, `0a96a01`): `receipt.go`, `drive.go`, `sweeper.go`, `cascade.go`, and small edits in `orchestrator.go`/`types.go`.
+- Checked against the claims: S-H1 closed, S-M1 closed (pinned by the branch's "SM10" test), R4(a)–(d) intact, and the new reversal pending/ambiguous rule plus decline-reason bounding.
+- Method:
+  - detached worktree at `0a96a01`; private DB `secpay_i1_cb` via `priv_db.sh`, with the harness's configured credentials only (no role or password changes);
+  - probes re-run, then removed;
+  - 9 anchored mutants against the payments receipt/callback/payout/reversal/deferred subset (baseline green). Each was reverted and the tree confirmed clean. The three first-pass results that looked like environment noise were re-run one at a time.
+- Cleanup:
+  - the worktree has been removed;
+  - `secpay_i1_cb` **and** the round-1 leftover `secpay_i1_payout` have both been dropped (0 `secpay%` databases remain).
+
+## Verdict
+
+**The payout-callback path (R4) is APPROVED WITH CONDITIONS from `security`.** S-H1 and S-M1 are closed. The remaining conditions are test pinning and a review of the future route/adapter wiring. No finding blocks it.
+
+This is not an enablement decision:
+- payout-typed callbacks are still refused at the route (`ReceiveCallback` accepts only `deposit`/`deposit_reversal`);
+- no adapter emits them (**PROVIDER DEPENDENT**).
+
+## Results
+
+| Item | Result | Evidence |
+|---|---|---|
+| **S-H1** (deferred deposit receipt replayed onto a payout) | **CLOSED** | `ApplyDeferredReceiptsForAttempt` now derives the `event_type` filter from `attempt.Operation` (unknown operation → no replay). Probe SP-B2: the withdrawal stays `submitted`, the attempt goes to `ambiguous` (from the payout-typed evidence only), and the deposit-typed receipt is not applied. The merchant-reference-T4 variant (SP-B), which became reachable once the stale-copy re-read was fixed, is also safe. Mutant MH1 (filter reverted to `'deposit'`) is KILLED by `TestRVLF_N3_DeferredApplyNeverReplaysADepositDeclineAsPayoutEvidence`. MH1b (filter removed) is KILLED (6+ tests). |
+| **S-M1** (callback success with a conflicting reference) | **CLOSED** | Probe SP-A: attempt `disputed` (`provider_reference_mismatch`), withdrawal `submitted`, reference unchanged, ledger balanced, mismatch audit written. MM1 (check disabled) is KILLED by `TestRVLF_SM10_PayoutSuccessProviderReferenceMismatchDisputes`. **MM1b SURVIVED**: removing the fallback to the withdrawal's reference passes, so the attempt-reference-NULL shape is unpinned. |
+| My SM10 (callback amount/asset check disabled) | **KILLED** | `TestRVLF_P4_MismatchedSuccessOnTerminalAttempt` |
+| R4(b) allow-list (unknown `event_type` → anomaly) | **Present, but unpinned** | **MA SURVIVED**: reverting to the old deny-list passes the subset. The first-pass "kill" was environmental; the single re-run exited 0. It is defence in depth while the route rejects unknown types. |
+| R4(a)–(d) | Intact | The payout decline and success branches still go through `applyPayoutDecline`/`applyPayoutSuccess` (the success branch now behind the S-M1 check). Baseline subset green. |
+| Reversal pending/ambiguous (ledger H1 rule 2) | Correct | Stored as an anomaly under the real wire outcome, resolved, P1-audited; no post, no tombstone, no lock. MR is KILLED by `TestRVLF_P1_NonFinalReversalOutcomeNeverPosts`. **MRF SURVIVED**: the rule-3 fingerprint over the raw outcome (`RawOutcome`) is unpinned. The effect is only whether a `succeeded` and a `declined`-carrier delivery of the same reversal dedupe to one. That is not a double-post: the reversal posting keeps its own idempotency. |
+| Decline-reason bounding before persistence | Correct; callback F2 closed from `security`'s side | Bounded at the top of `ApplyReceiptEvidence`, **after** `validateReceiptReferences`, so the audit `target_id` built from the reference is already validated. An oversized reason writes a redacted audit entry (byte length plus a 16-hex SHA-256 prefix, never the text). The same applies in `drive.go`/`sweeper.go`. MD is KILLED by 3 tests (`TestRVLF_F2_*`, `TestRVLF2_Q3_*`). |
+| Webhook tenant binding, verification, idempotency, replay | **Not weakened** | No change to `internal/httpserver`, webhook signature verification, `ReceiveVerifiedCallback`'s provider/tenant binding, `ResolveAttemptForEvidence` (INV-IO-14), or `validateReceiptReferences`. Receipt dedup is unchanged, `ON CONFLICT (tenant_id, provider_id, event_fingerprint)`. The reversal branch now inserts R0 before the lock and returns early on a duplicate. That is safe: a committed first delivery committed its effect atomically, and a concurrent duplicate waits on the unique index. The fingerprint change affects `deposit_reversal` only. The httpserver `Webhook\|Callback\|Deposit\|Withdrawal` tests pass on the private DB. |
+
+## Residuals (LOW, non-blocking)
+
+- **Pin MA and MM1b.** Add two tests:
+  - an unknown `event_type` (e.g. `payout_returned`) resolving to either operation → anomaly with no effect;
+  - a payout success-reference mismatch where the attempt reference is NULL but the withdrawal's is set → dispute.
+- **Pin MRF**, preferably in the same change.
+- **A cross-operation deferred receipt is left unresolved forever**, not resolved as an anomaly. It is skipped by the operation filter and counts toward the 10 000 per-(tenant, provider) deferred cap. Resolve it as `anomaly_other` when an attempt of the other operation learns the reference.
+- **The sync phase-C success path still lacks the reference rule.** `ApplyPayoutResult`'s `ErrorClassSucceeded` calls `applyPayoutSuccess` without the S-M1 comparison: a T12 resend returning a different reference settles against it. That evidence comes from our own idempotent request, so the risk is low. Moving the comparison into `applyPayoutSuccess`, as recommended in S-M1, would cover every source with one rule.
+- **Informational:**
+  - a payout `pending` receipt (T4) records the reference on the attempt but not on the withdrawal;
+  - SP-A's dispute returns disposition `applied` (the response body is disposition-only, per §6.2).
+
+## Conditions still standing before payout callbacks are enabled for a provider
+
+1. Pin MA and MM1b (above).
+2. A `security` review of the change that makes the route and an adapter accept `payout` events. That wiring does not exist yet and is where tenant binding and verification for payout webhooks will actually be exercised.
+3. The other reviewers' open conditions on the callback cutover (ledger H1-R etc.) are theirs, not decided here.
+
+The S-L1–S-L4 dispatch conditions from the original review are unchanged.

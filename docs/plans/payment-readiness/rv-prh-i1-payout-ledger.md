@@ -585,3 +585,113 @@ callback agent and which this round does not touch. My probe L still reproduces 
   - The receipt path never checks the event type against the attempt's operation.
 - **Tracked:** CP-W1 (§27.12 launch condition for non-idempotent providers); HD-0095-1
   (M1/M2 BLOCKED).
+
+---
+
+# FH-6 payout production fixes and S-L2/SP-C ruling (`4b544f5`)
+
+Same environment as `rv-a7-tests.md`'s FH-6 section: a private DB and a detached worktree, both
+removed. The suites, `-race` subset and lint are green.
+
+## Production fixes
+
+- **Escalate (T16) CAS: correct, but untested.** It adds `AND state NOT IN
+  ('succeeded','declined','rejected','disputed')`. `escalateAmbiguousPayout` treats
+  `ErrAttemptStateConflict` as a no-op, which is right for both a concurrent escalation and a
+  concurrent terminal transition. `gateAndEscalateOnDeny` still returns the conflict, which rolls
+  back the claim tx; that is fail-closed. My mutant removing the predicate **survived** the payout,
+  sweeper and A7 tests. It is money-safe, because the table CHECK (terminal ⇒ `next_action_at IS
+  NULL`) still refuses the write, so the predicate only turns an error into a clean no-op. Add a
+  test that escalates on a stale snapshot after the attempt went terminal (Low; condition P-C3).
+- **Sweeper-batch lease owner: correct.** `SweeperBatchLeaseOwner = "sweeper-batch"` is used by
+  `claimBatch`, the `PollPayoutStatus` in-flight check and the lease-respecting T6 CAS. The
+  deposit T2 claim (`drive.go`) keeps `"sweeper"`, so it is no longer exempt, which is intended.
+  Deployment note: any row leased under the old `'sweeper'` literal at cutover is treated as
+  in-flight until its ≤60 s lease expires. That is harmless.
+- **`payoutResolveAudit` (S-M2): meets the substance.** It records `attempt_id`, evidence class,
+  attempt before/after, withdrawal before/after and `terminal_reason`, with `Outcome=failure` on a
+  dispute. Tests: `TestPayoutResolveAudit_SM2_*`. Low residuals, left for security to accept or
+  not:
+  - `withdrawal_state_before` is hard-coded to `submitted`, and `attempt_state_before` comes from
+    the handler's pre-transaction snapshot. Neither is read under the withdrawal lock, so a
+    concurrent transition can make "before" inaccurate. Read both inside the transaction after
+    `LockForPayoutEvidence`.
+  - A no-op still records `Outcome=success`. S-M2 asked for the outcome to reflect a no-op, though
+    before == after in the metadata does make it distinguishable.
+
+## Ruling: S-L2 / SP-C
+
+**I reproduced SP-C on `4b544f5`:**
+1. Ambiguous payout with a reference.
+2. A T12 claim commits (lease `sweeper-payout-resubmit`, 2 min).
+3. `/resolve`'s `PollPayoutStatus` on the stale `ambiguous` snapshot reschedules.
+4. `next_action_at` falls below the live lease.
+5. `RunOnce` claims the row, relabels it `sweeper-batch`, and T6s it to `ambiguous` while the
+   resend's phase B is notionally still in flight.
+
+It remains money-safe, since T12 only runs with `IdempotentSubmission` and the same key, and
+phase C converges from `ambiguous` (R1).
+
+**The disclosed regression is not inherent to the fix.** The note attributes the 7 failures to
+T2/T12 setting `next_action_at` earlier than `lease_until`. At `4b544f5`, both
+`ClaimCreatedForSubmission` and `ResubmitAmbiguous` set `next_action_at = lease_until`. What does
+keep a live lease with an earlier `next_action_at` is **phase C moving the row out of
+`submitting`** (to `ambiguous`/`pending`/`created`) without clearing the lease. A `claimBatch`
+exclusion that is not restricted to `state = 'submitting'` would therefore regress exactly the
+listed tests. I tested both candidate fixes on the private DB:
+
+- **V1 (the security review's primary): passes.** In `claimBatch`, add
+  `AND NOT (state = 'submitting' AND lease_until > now() AND lease_owner IS DISTINCT FROM
+  'sweeper-batch')`. The full `internal/payments` suite passes, including all 7 of the listed
+  tests, and my SP-C probe goes green (the row stays `submitting`).
+- **V2 (the alternative): passes.** In `RescheduleNonTerminal`, set
+  `next_action_at = CASE WHEN state = 'submitting' AND lease_until > now() AND lease_owner IS
+  DISTINCT FROM 'sweeper-batch' THEN GREATEST($2, lease_until) ELSE $2 END`. The full suite and the
+  SP-C probe both pass.
+
+Neither change was committed; both were reverted in the scratch worktree.
+
+**Ruling:**
+1. **As a registered condition: acceptable, but only as a gate on wiring.** Carrying SP-C as
+   `PAY-SEC-S-L2` open is acceptable **only** as a hard condition that **no binary constructs a
+   payout `Sweeper` until it is fixed**. It is not acceptable as a launch-time item deferred past
+   wiring. Today nothing in `cmd/` constructs a payout sweeper, so there is no live exposure.
+2. **Required fix: V1**, restricted to `state = 'submitting'` as above. It is the structural
+   control: it guards every writer of `next_action_at` at the single point of claim. That covers
+   `RescheduleNonTerminal`, `Escalate`, `Touch` (T17) and any future writer.
+3. **V2 is optional defence in depth, not a substitute.** It closes only the `RescheduleNonTerminal`
+   path. `Escalate` and `Touch` write `next_action_at` with no lease awareness either.
+4. Land V1 together with the SP-C reproduction as a permanent test. The removed probe should be
+   restored in that form, not left out.
+5. Correct the addendum in `prh-i1-payout-launch-conditions.md` so its root-cause statement
+   matches the code.
+
+## Conditions from this round
+
+- **P-C1 (before any binary wires the payout sweeper):** V1 plus the permanent SP-C test.
+- **P-C2:** correct the root-cause text in the launch-conditions addendum.
+- **P-C3 (Low):** add a test for Escalate on a terminal attempt; read `payoutResolveAudit`'s
+  "before" state under the lock.
+
+Unchanged: R5/CP-W1, HD-0095-1 (BLOCKED), and the S-L1/S-L3/S-L4/destination-binding launch
+conditions.
+
+---
+
+# FH-6 round 2 confirmation (`b7f84ec`)
+
+- Environment: a detached worktree and a private DB `igaming_lf_fh6r2` (migrated 1→106), both
+  removed. No sudo, no role or password changes.
+- Results: full `internal/payments` and `internal/withdrawal` suites and the `internal/httpserver`
+  withdrawal tests pass; the A7/R0/SL2/PC3/SM2 subset passes under `-race -count=2`; pinned lint
+  reports 0 issues (untagged and `integration`).
+
+| Condition | Result |
+|---|---|
+| **P-C1** | **Closed.** The V1 predicate is in `claimBatch` (`AND NOT (state = 'submitting' AND lease_until > now() AND lease_owner IS DISTINCT FROM $3)`, bound to `SweeperBatchLeaseOwner`). My SP-C probe now passes: the stale-`/resolve` reschedule is not claimed (`claimed=0`) and the row stays `submitting` under its T12 lease. Removing V1 fails both my probe and the permanent `payout_security_round_test.go:TestClaimBatch_SL2_SPC_StaleSnapshotNeverRelabelsALiveSubmittingLease`. |
+| **P-C2** | **Closed.** The launch-conditions addendum now gives the correct root cause (phase C leaves `submitting` with the lease still live) and the fix restricted to `submitting`. |
+| **P-C3** | **Closed.** `TestEscalate_PC3_RefusesOnATerminalAttempt_StaleSnapshot` kills the mutant that removes the Escalate terminal-state predicate. `payoutResolveAudit` now reads the before-state (attempt and withdrawal) inside the transaction after `LockForPayoutEvidence`, and records `no_op`. The no-reference branch of `PollPayoutStatus` now also locks the withdrawal before the attempt. The conflict handling in `escalateAmbiguousPayout` now re-reads the attempt and treats the conflict as a no-op only when the attempt is terminal or already escalated. |
+
+S-L2/SP-C is closed. The payout-sweeper wiring gate from my FH-6 ruling is lifted as far as SP-C
+is concerned. R5/CP-W1, HD-0095-1 (BLOCKED) and the S-L1/S-L3/S-L4/destination-binding launch
+conditions are unchanged.
