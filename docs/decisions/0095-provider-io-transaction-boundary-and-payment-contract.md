@@ -902,7 +902,7 @@ CREATE TABLE payment_attempts (
                                                           'succeeded','declined','rejected','disputed')),
   ever_possibly_sent       BOOLEAN NOT NULL DEFAULT false,
   CHECK (state <> 'created' OR NOT ever_possibly_sent),               -- INV-IO-9
-  CHECK (state = 'created' OR provider_id IS NOT NULL),
+  CHECK (state IN ('created','rejected') OR provider_id IS NOT NULL),   -- rejected may be unrouted (no_routable_provider); T15 sets provider_id from the evidence
   CHECK (state <> 'pending' OR provider_reference IS NOT NULL),
   submit_count             INT NOT NULL DEFAULT 0,
   claim_token              UUID NULL, lease_owner TEXT NULL, lease_until TIMESTAMPTZ NULL,
