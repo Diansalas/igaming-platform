@@ -559,6 +559,27 @@ const (
 	PermProviderCredentialRevoke  Permission = "provider_credential:revoke"
 )
 
+// Payment kill-switch permissions (PRH-I1, ADR 0095 §10.4/§10.5). Three
+// permissions, granted identically to RolePlatformAdmin and RoleTenantAdmin
+// (see payments_kill_switch_handlers.go's own doc comment for why this is
+// ONE route family rather than the ADR's literal two-permission-family
+// split): the database, not the permission grant, is what stops a tenant
+// session from touching a platform-engaged switch or from a single
+// principal completing its own four-eyes release.
+//
+//   - PermPaymentsKillSwitchEngage: single-actor engage (§10.4 "the safe
+//     direction").
+//   - PermPaymentsKillSwitchRelease: file, approve or cancel a release
+//     request. Holding it alone never bypasses the DB's distinct-principal
+//     check - approving one's own request is refused regardless.
+//   - PermPaymentsKillSwitchRead: list/read switches and release requests,
+//     including a platform-engaged row (read-only).
+const (
+	PermPaymentsKillSwitchEngage  Permission = "payments_kill_switch:engage"
+	PermPaymentsKillSwitchRelease Permission = "payments_kill_switch:release"
+	PermPaymentsKillSwitchRead    Permission = "payments_kill_switch:read"
+)
+
 // rolePermissions is a static, in-code role -> permission-set mapping.
 // Stage 2 does not make this database-driven/partner-configurable - that
 // would be a Stage 6 partner-console feature (custom roles), premature
@@ -622,6 +643,10 @@ var rolePermissions = map[Role]map[Permission]bool{
 		// RoleTenantAdmin, even though RoleTenantAdmin holds the broader
 		// PermVerificationRead.
 		PermKYCEnforcementDecisionRead,
+		// PRH-I1 (ADR 0095 §10.4/§10.5): platform reach over every
+		// tenant's kill switches, through the same route family
+		// RoleTenantAdmin uses for its own tenant (canActOnTenant).
+		PermPaymentsKillSwitchEngage, PermPaymentsKillSwitchRelease, PermPaymentsKillSwitchRead,
 	),
 	// Stage 3D business decision #4/#5: tenant_admin (a broad
 	// administrative role that also holds PermStaffManage) deliberately
@@ -712,6 +737,14 @@ var rolePermissions = map[Role]map[Permission]bool{
 		PermProviderCredentialRead, PermProviderCredentialRevoke,
 		// Stage 10.3 W2b: see PermCasinoReconciliationRead's own doc comment.
 		PermCasinoReconciliationRead,
+		// PRH-I1 (ADR 0095 §10.4/§10.5): a tenant admin may engage/release
+		// its OWN tenant's kill switches. Unlike PermProviderCredentialRequest/
+		// Approve (platform-admin only), release here is deliberately also
+		// granted at tenant scope - the database's own four-eyes and
+		// platform-lock rules (migration 0105) are what stop a tenant
+		// session from self-approving or touching a platform-engaged row,
+		// not the permission grant.
+		PermPaymentsKillSwitchEngage, PermPaymentsKillSwitchRelease, PermPaymentsKillSwitchRead,
 	),
 	RoleSupport: permSet(
 		PermPlayerRead,

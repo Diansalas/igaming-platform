@@ -428,6 +428,7 @@ func NewWithAdmission(deps Deps) (http.Handler, WebhookAdmissionRuntime) {
 	registerBonusRoutes(mux, deps)
 	registerJurisdictionRoutes(mux, deps)
 	registerProviderCredentialRoutes(mux, deps)
+	registerPaymentsKillSwitchRoutes(mux, deps)
 
 	instrumented := otelhttp.NewHandler(mux, deps.ServiceName)
 

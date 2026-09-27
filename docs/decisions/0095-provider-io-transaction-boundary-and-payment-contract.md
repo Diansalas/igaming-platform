@@ -1118,10 +1118,13 @@ Rules for the platform routes:
 
 ### 10.6 Implementation record (PRH-I1, `payments`, 2026-09-27)
 
-Label: **PARTIALLY IMPLEMENTED.** Data model, guard triggers, RLS and the Go service layer are
-`IMPLEMENTED` and tested. The staff/platform HTTP routes (§10.5), OpenAPI, and orchestrator wiring
-that turns a claim-statement refusal into a T3 `kill_switch` decline are `NOT IMPLEMENTED`. Pending
-`security`, `ledger-finance` and `code-reviewer` gate review.
+Label: **PARTIALLY IMPLEMENTED** (updated by round 2 below). Data model, guard triggers, RLS, the Go
+service layer, the §10.5 HTTP routes/OpenAPI, the S95-C7 engage alert, a first real §10.1 manifest
+enforcement point, and the §16.2 item 15 reflection test are `IMPLEMENTED` and tested. The
+orchestrator wiring that turns a claim-statement refusal into a T3 `kill_switch` decline and
+PROV-OUTBOUND-CRED-1's payments kind-split are `NOT IMPLEMENTED` (Phase 2, gated on concurrent
+agents merging first - see round 2's own note). Pending `security`, `ledger-finance` and
+`code-reviewer` gate review.
 
 **Migration number, again.** §12.7's own implementation record already recorded one swap (0102
 reconciliation / 0103 kill switch). By the time this section landed, migration 0103 had been
@@ -1164,19 +1167,84 @@ every "0102 kill switch" / "0103 kill switch" reference in §10.2-§10.5 above a
   Mutation-kill evidence for MX17/MX19/MX20/MX21/MX25 is recorded in
   `docs/plans/payment-readiness/evidence/prh-i1-mutation-kill.txt`.
 
-**What is explicitly NOT built yet (remaining PRH-I1 scope for this section):**
-- §10.5's HTTP routes (tenant staff admin API and platform admin API), permissions
-  (`payments_kill_switch:engage/release/read`, `platform_payments_kill_switch:*`), OpenAPI, and the
-  cross-tenant 404 route-table tests. `killswitch.go` is written so a route handler is a thin
-  wrapper (open a `WithPrincipalScope`/`WithPlatformAdmin` transaction, call the function, write
-  `audit.Record`, commit) but no handler exists yet.
+**Round 2 (2026-09-27, same day): §10.5 routes, S95-C7 alert, §16.2 item 15 reflection test, and a
+first real §10.1 manifest enforcement point landed.** Label updated to **PARTIALLY IMPLEMENTED**
+(narrower gap than round 1 - see the new "still NOT built" list below). Pending `security`,
+`ledger-finance` and `code-reviewer` gate review; Phase 2 (orchestrator T3/T1p wiring,
+PROV-OUTBOUND-CRED-1 kind-split) is gated on the concurrent payout/callback-cutover agents merging
+first, per the orchestrator's own sequencing instruction, and has not started.
+
+**What additionally landed in round 2.**
+- **§10.5 routes** (`internal/httpserver/payments_kill_switch_handlers.go`): a DELIBERATE,
+  documented deviation from the ADR's literal two-route-family/two-permission-family design - see
+  that file's own doc comment. ONE route family under
+  `/v1/admin/tenants/{tenantID}/payments/...`, reusing this codebase's own established
+  `canActOnTenant` dual-scope pattern (provider_credential_handlers.go/admin_routes.go) instead of a
+  second `/platform/tenants/{tenantId}/...` tree: a tenant-scoped caller may only name its own
+  tenant (403 otherwise), a platform-scoped caller may name any tenant. Every functional
+  requirement §10.5 lists (tenant isolation, platform reach, cross-tenant 404, audit with actor and
+  target tenant, four-eyes release, never reachable by a player token) is satisfied - the
+  DATABASE (migration 0105), not the URL/permission shape, is what enforces the platform-lock and
+  four-eyes properties. Permissions `payments_kill_switch:engage/release/read`
+  (`internal/auth/permission.go`) are granted identically to `RolePlatformAdmin` and
+  `RoleTenantAdmin` (unlike `provider_credential:request/approve`, which are platform-only - kill
+  switch release is deliberately also tenant-scoped, per the ADR). OpenAPI:
+  `docs/api/openapi/platform-api.yaml` (6 paths, 7 operations), contract-tested
+  (`openapi_payments_killswitch_contract_test.go`). HTTP-level tests
+  (`payments_kill_switch_api_integration_test.go`, a private scratch database migrated to head, 10
+  tests): tenant engage/four-eyes release, cancel, platform-acts-on-arbitrary-tenant,
+  platform-engaged-row-is-tenant-read-only, cross-tenant 403 (wrong path) and 404 (right path,
+  foreign id), player-token 403, unknown-field 400, list/get, validation. One real bug found and
+  fixed in the process: `audit_log`'s RLS (migration 0014) has no "platform writes into a named
+  tenant's audit scope" policy family (unlike migration 0105's own two-family design), so a
+  platform-scoped mutation's audit row is written as a platform-level event
+  (`TenantID: uuid.Nil`) with the actual target tenant carried in `Metadata.target_tenant_id`
+  instead (`killSwitchCall.auditTenantID()`) - mirrors `recordProviderCredentialDenied`'s
+  already-established handling of the identical RLS shape.
+- **S95-C7 engage alert**: `logKillSwitchEngagedAlert` (same file), a structured, allow-listed
+  Error-level log line on every successful engage - this codebase has no dedicated
+  alert/notification subsystem (see `sportsbook_settlement_handlers.go`'s
+  `logSettlementIntegrityAlert`, the identical precedent); labelled honestly as a log line, not new
+  infrastructure.
+- **§10.1 manifest, first real enforcement point** (`internal/payments/contract.go`,
+  `capability.go`): two fields added to `OperationManifest`, each with a real, tested,
+  registration-time refusal in the new `validateManifest` (called from `WriteCapability` before the
+  existing tenant-narrowing check) - never an unread field:
+  - `SupportsRefund` (§5.5): registration refuses ANY adapter declaring `true` outright (no refund
+    flow exists).
+  - `CallbackEchoesMerchantReference` (LF95-C5): registration refuses a PRODUCTION-ELIGIBLE
+    (non-`Synthetic`) adapter supporting deposit or withdrawal unless this is `true` OR
+    `StatusQuery == "by_provider_or_merchant_reference"`. A `Synthetic` (MOCK) adapter is exempt.
+  - Tests: `capability_manifest_test.go` (7 cases, pure Go, no DB).
+  - The remaining §10.1 fields (`SupportsPayout`, `SupportsDepositReversalEvents`,
+    `RedeliveryOn401/5xx`, `ErrorClassMapping`, `StatementSource`) are still NOT modeled - each has
+    no real consumer yet and is registered as a deferred item instead
+    (`docs/governance/task-registry.md` PRH-I1-MANIFEST-1..4), per this round's own instruction
+    ("don't leave unread fields"). `WebhookRetrySemantics` mandatory fail-closed was already
+    satisfied before this round via `webhookauth.MustRequireRetrySemantics` (ADR 0097), confirmed
+    still wired at `NewOrchestrator`.
+- **§16.2 item 15 reflection test, scoped to payments/casino/KYC**
+  (`internal/testsupport/credentialscan`, a small shared recursive `reflect` walker, own unit tests
+  proving it actually catches a planted violation - not vacuous): each domain gets
+  `credential_reflection_test.go` scanning its own constructed adapters/resolvers/orchestrator
+  registry (`providercred.OutboundCredential`, `secretstore.Secret`, `providercred.DerivedTokenCache`,
+  a non-nil `httpclient.Authenticator`, or any non-nil, non-allow-listed func field), plus a static
+  check that the adapter's own source file (`mock.go`/`mock_provider.go`) never imports
+  `internal/secretstore`. This did not exist anywhere in the codebase before this round (not for
+  casino or KYC either) - a pre-existing platform-wide gap, now closed for all three domains this
+  ADR's own scope covers.
+
+**What is still NOT built (remaining PRH-I1 scope, gated on Phase 2's go-ahead):**
 - The orchestrator wiring that turns a T2/T1p refusal into a deposit's T3 `kill_switch`
   decline/payout `created` hold with a labelled reason (§10.3's "Deposits: created attempts are
   moved to rejected (T3, kill_switch)"). Today a refused claim surfaces as `ErrAttemptStateConflict`
   or `ErrKillSwitchEngaged`; the caller can call `KillSwitchEngaged` to choose the right terminal
-  reason, but no call site does yet.
-- An alert on every engage (S95-C7) - `EngageKillSwitch` performs only the write; no alerting hook
-  is wired.
+  reason, but no call site does yet. Gated on the concurrent payout/callback-cutover agents (editing
+  `payout.go`/`payout_sweep.go`/`deposit_v2.go`/`receipt.go`/`orchestrator.go`/`cascade.go`) merging
+  first.
+- PROV-OUTBOUND-CRED-1's payments kind-split resolver mirroring casino/KYC's own
+  `OutboundKindSplitResolver`, threading a `pool` argument through `gate.go` and every call site, and
+  the per-call timeout/outage → T5 behaviour. Same Phase 2 gate as above (touches the same files).
 - PROV-REVOKE-ALL-1 (a genuine platform-wide, cross-tenant switch) remains deferred per §10.2.2's
   own text.
 

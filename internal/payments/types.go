@@ -154,6 +154,12 @@ var (
 	// declared capability (docs/decisions/0022 §2.1: "may only narrow...
 	// never widen").
 	ErrCapabilityWidensAdapter = errors.New("payments: capability configuration widens beyond the adapter's declared capability")
+	// ErrManifestRegistrationRefused is returned by WriteCapability when
+	// the ADAPTER's own declared OperationManifest is internally
+	// inconsistent per ADR 0095 §10.1's "registration also refuses" rules
+	// (validateManifest, capability.go) - never a tenant-configuration
+	// problem (that is ErrCapabilityWidensAdapter's own, distinct case).
+	ErrManifestRegistrationRefused = errors.New("payments: adapter manifest refused at registration")
 	// ErrDepositIntentNotFound is returned when a callback's
 	// (provider_id, provider_reference) pair matches no deposit_intents
 	// row visible in the current tenant scope.

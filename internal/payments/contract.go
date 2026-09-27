@@ -153,15 +153,20 @@ func (c CallContext) MarshalJSON() ([]byte, error) {
 }
 
 // OperationManifest is the code-declared, adapter-owned subset of ADR
-// 0095 §10.1 this step needs to drive deposit initiation. It is
-// intentionally a STRICT SUBSET of the full manifest §10.1 specifies:
-// SupportsPayout, SupportsRefund, SupportsDepositReversalEvents, the
-// remaining WebhookRetrySemantics fields, RedeliveryOn401/5xx,
-// ErrorClassMapping and StatementSource are NOT modeled here because no
-// code in this step reads them - the capability fail-closed-at-
-// registration behaviour §10.1 also specifies is PRH-I1 step (d)'s scope
-// (kill switch and capability persistence), not this one. Adding those
-// fields later is additive, never a breaking change to this type.
+// 0095 §10.1. It is still NOT the full manifest §10.1 specifies:
+// SupportsPayout, SupportsDepositReversalEvents, the remaining
+// WebhookRetrySemantics fields (already covered separately - see
+// webhookauth.WebhookRetrySemantics/MustRequireRetrySemantics, wired at
+// NewOrchestrator), RedeliveryOn401/5xx, ErrorClassMapping and
+// StatementSource are deliberately still NOT modeled here (PRH-I1 round 2):
+// none of them yet has a real, tested enforcement point that reads the
+// field - adding an unread struct field would be exactly the "capability
+// nothing can actually use" CLAUDE.md's no-fake-completion rule warns
+// against. Each is registered as a deferred item in
+// docs/governance/task-registry.md (PRH-I1-MANIFEST-*) instead of being
+// added here unread. SupportsRefund and CallbackEchoesMerchantReference ARE
+// added below because each gets a real registration-time refusal
+// (validateManifest, capability.go) that is unit-tested.
 type OperationManifest struct {
 	SupportsDeposit bool
 	// StatusQuery mirrors §10.1's enum as a string for now
@@ -180,6 +185,22 @@ type OperationManifest struct {
 	Interactive      bool
 	CallTimeout      time.Duration
 	SettlementWindow time.Duration
+	// SupportsRefund is ADR 0095 §5.5: NOT IMPLEMENTED, and not built by
+	// PRH. Registration (validateManifest) refuses ANY adapter declaring
+	// true, regardless of anything else about it - "the contract reserves
+	// Refund(...), and the manifest has supports_refund = false for every
+	// adapter. Registration refuses an adapter declaring true until a flow
+	// exists."
+	SupportsRefund bool
+	// CallbackEchoesMerchantReference is §10.1's LF95-C5 field: true means
+	// this adapter's callback always carries back the merchant_reference
+	// the platform sent it, so a success can always be convergeable even if
+	// the provider_reference alone is ambiguous. Registration
+	// (validateManifest) refuses a PRODUCTION-ELIGIBLE (non-Synthetic)
+	// adapter that supports deposit or withdrawal unless this is true OR
+	// StatusQuery is "by_provider_or_merchant_reference" - a MOCK/Synthetic
+	// adapter is exempt (there is no real vendor contract to check yet).
+	CallbackEchoesMerchantReference bool
 }
 
 // DefaultCallTimeout/DefaultSettlementWindow are §7.3's referenced

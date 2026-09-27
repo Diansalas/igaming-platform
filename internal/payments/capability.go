@@ -210,6 +210,11 @@ type CapabilityConfig struct {
 // per-field merge with any existing row.
 func WriteCapability(ctx context.Context, tx pgx.Tx, provider PaymentProvider, tenantID uuid.UUID, brandID *uuid.UUID, cfg CapabilityConfig) (uuid.UUID, error) {
 	declared := provider.Capabilities()
+	// ADR 0095 §10.1 "order of refusal" step 1: an inconsistent manifest
+	// refuses AT REGISTRATION, before any tenant-narrowing check even runs.
+	if err := validateManifest(provider, declared); err != nil {
+		return uuid.Nil, err
+	}
 	if err := validateNarrowing(declared, cfg); err != nil {
 		return uuid.Nil, err
 	}
@@ -315,6 +320,49 @@ func derefOrNilBrand(brandID *uuid.UUID) uuid.UUID {
 		return uuid.Nil
 	}
 	return *brandID
+}
+
+// syntheticPaymentsAdapter restates providerkind.Synthetic structurally,
+// mirroring casino.syntheticCasinoAdapter/webhookauth.syntheticMarker's
+// identical role - a MOCK adapter marks itself this way (mock.go's
+// SyntheticComponent method) and is exempt from the production-only
+// manifest rule below (there is no real vendor contract to check yet).
+type syntheticPaymentsAdapter interface{ SyntheticComponent() }
+
+// validateManifest enforces ADR 0095 §10.1's "registration also refuses"
+// rules that this step models a real field for (contract.go's
+// OperationManifest doc comment explains why the remaining §10.1 fields are
+// not modeled here yet). Called by WriteCapability BEFORE the tenant-
+// narrowing check (validateNarrowing) - order of refusal step 1, "at
+// registration".
+func validateManifest(provider PaymentProvider, declared AdapterCapability) error {
+	m := declared.Manifest
+
+	// §5.5: no refund flow exists. An adapter declaring true is refused
+	// outright, regardless of anything else about it.
+	if m.SupportsRefund {
+		return fmt.Errorf("%w: adapter %s declares supports_refund=true, but no refund flow exists (ADR 0095 §5.5)",
+			ErrManifestRegistrationRefused, declared.ProviderID)
+	}
+
+	// LF95-C5: a PRODUCTION-ELIGIBLE (non-Synthetic) adapter supporting
+	// deposit or withdrawal must be able to converge a success even when the
+	// provider_reference alone is ambiguous - either its callback always
+	// echoes the merchant_reference back, or its StatusQuery can look a
+	// payment up BY merchant_reference. A Synthetic (MOCK) adapter is
+	// exempt: there is no real vendor contract to check yet, and every
+	// registered adapter in this codebase today is Synthetic (the
+	// TestOutboundPrecondition_EveryWiredAdapterIsSynthetic tripwire, ADR
+	// 0093/0095 §11, keeps it that way until a real one is reviewed in).
+	if _, synthetic := provider.(syntheticPaymentsAdapter); !synthetic {
+		if (declared.SupportsDeposit || declared.SupportsWithdrawal) &&
+			!m.CallbackEchoesMerchantReference && m.StatusQuery != "by_provider_or_merchant_reference" {
+			return fmt.Errorf("%w: production-eligible adapter %s supports deposit or withdrawal but neither echoes merchant_reference on callback nor supports StatusQuery by_provider_or_merchant_reference (LF95-C5)",
+				ErrManifestRegistrationRefused, declared.ProviderID)
+		}
+	}
+
+	return nil
 }
 
 // validateNarrowing enforces docs/decisions/0022 §2.1: a tenant
