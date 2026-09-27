@@ -1,11 +1,18 @@
 # Withdrawal State Machine
 
-Status: `IMPLEMENTED` (Stage 3B core state machine) /
+Status: `IMPLEMENTED` (Stage 3B core state machine; the ADR-0095 payout
+dispatch cutover - T1p/phase-B/phase-C via `internal/payments.
+ClaimForDispatch`/`DispatchWithdraw`/`ApplyPayoutResult`, replacing the
+old in-transaction `provider.Withdraw` call, plus sweeper-driven T2
+re-claim and T12 resubmission - see P95-C2, §2/§4) /
 `PARTIALLY IMPLEMENTED` (self-approval enforcement, hardened in Stage
 3C but dependent on optional staff identity linkage - §5 item 2; the
-`submitted`-stuck recovery path, manual not automated - §3), with one
-documented exception noted in §3 (the invariant-#12 open-hold
-reconciliation check is `NOT IMPLEMENTED`). Designed in Stage 3A
+`submitted`-stuck recovery path is now sweeper-driven for T2/T12 but
+still relies on `LockSubmittedForResolution` + manual `/resolve` for a
+request whose attempt has itself reached a terminal
+disputed/escalated state - §3), with one documented exception noted in
+§3 (the invariant-#12 open-hold reconciliation check is
+`NOT IMPLEMENTED`). Designed in Stage 3A
 (Financial Architecture Freeze), built in Stage 3B (migration `0026`:
 `withdrawal_requests`, `withdrawal_approvals`; RLS tightened by `0028`;
 `internal/withdrawal`; player/staff HTTP handlers in
@@ -27,7 +34,7 @@ stateDiagram-v2
     requested --> pending_review: KYC/velocity/risk checks queued
     pending_review --> approved: passes checks (auto or four-eyes)
     pending_review --> rejected: fails checks / risk decision
-    approved --> rejected: KYC compliance denial (DenyForCompliance, ADR 0096 §8 item 3) - system-driven, pre-dispatch only, never after MarkSubmitted
+    approved --> rejected: KYC compliance denial (DenyForCompliance, ADR 0096 §8 item 3) - system-driven, pre-dispatch only, never after the T1p claim (internal/payments.ClaimForDispatch) commits approved->submitted
     approved --> submitted: sent to PSP/custodian
     submitted --> completed: provider confirms sent
     submitted --> failed: provider declines/fails after submission
@@ -54,8 +61,15 @@ stateDiagram-v2
   §5), not a single `approved_by` column.
 - `rejected`: checks fail, or a reviewer denies it. Ledger effect: Flow 4
   (pre-submission variant) reverses the hold back to `player_cash`.
-- `submitted`: orchestrator has sent the payout instruction to the PSP/
-  custodian adapter. No ledger effect yet — submission is not confirmation.
+- `submitted`: the orchestrator has CLAIMED the payout for dispatch (ADR
+  0095 T1p, `internal/payments.ClaimForDispatch`) - this transition now
+  commits BEFORE the outbound provider call is ever made (see P95-C2, §2),
+  not after a successful send as an earlier design assumed; "submitted"
+  therefore means "committed to attempt this payout, provider call
+  pending or in flight", not "provider confirmed receipt" (that is
+  `pending`/`completed` territory at the `payment_attempts` level, folded
+  back into this same `submitted` withdrawal state until a definite
+  outcome). No ledger effect yet — submission is not confirmation.
 - `completed`: provider confirms funds sent. Ledger effect: Flow 3 Step B
   posts (`player_withdrawal_hold` → `psp_clearing`/custodian account).
 - `failed`: provider declines/fails post-submission. Ledger effect: Flow 4
@@ -111,7 +125,20 @@ itself has no "pending" concept). This table is the thing
 `pending_review`/`approved` actually live on; the ledger only sees the two
 or three atomic postings that correspond to specific transitions. There is
 no separate `WithdrawalIntent` table: `provider_id`/`provider_reference`
-sit on this row directly (migration `0026`), carrying the role
+sit on this row directly (migration `0026`). **P95-C2 (ADR 0095 payout
+dispatch, PRH-I1):** `submitted` may be reached with `provider_reference`
+still NULL - `provider_id` is set at T1p
+(`internal/payments.ClaimForDispatch`/`withdrawal.MarkSubmittedPending`),
+which commits BEFORE the provider is ever called, so there is nothing to
+record yet. `provider_reference` is attached afterward
+(`withdrawal.AttachProviderReference`, set-once) once phase B/C actually
+receives one from the provider - or never, if the request reaches a
+definite outcome (`completed`/`failed`) without the provider ever
+returning one. A staff/system reader must not treat a NULL
+`provider_reference` on a `submitted` row as a data-integrity defect;
+`LockSubmittedForResolution`'s own manual-resolution path (§3) still
+requires one to be present before calling `QueryStatus`, and correctly
+refuses otherwise. Carrying the role
 `payment-orchestration.md`'s `DepositIntent` plays for deposits. This
 mirrors the general principle stated in `ledger-accounting-model.md` §4:
 provider/workflow state machines track pending state externally and call
