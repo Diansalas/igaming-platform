@@ -1,0 +1,103 @@
+PRH-I1 (ADR 0095) mutation-kill evidence
+=========================================
+
+Scope of this file so far: PRH-I1 step (a) only (migration 0101 -
+payment_attempts, payment_provider_events, guard triggers, RLS,
+backfill). Steps (b) through (i) are NOT IMPLEMENTED yet; their mutations
+(MX1-MX6, MX8-MX15, MX17-MX21, MX24) are out of scope for this file until
+those steps land and are appended here.
+
+Harness: a temporary, verified-anchored source substitution directly on
+migrations/0101_payment_attempts.up.sql (the migration file itself, since
+step (a) is schema/trigger only - there is no compiled Go mutant to build
+for these two). Each mutation:
+  1. is applied via a Python one-shot `str.replace` on an exact,
+     `assert count == 1`-verified anchor string (never a fuzzy/regex
+     match, so a mismatch fails loudly instead of silently mutating
+     nothing or something else);
+  2. is proven present via `grep` for the mutation's own marker comment;
+  3. is exercised by running the SPECIFIC test named for it in ADR 0095
+     §16.4, against a fresh scratch database (internal/testsupport/
+     scratchdb, via TEST_ADMIN_DATABASE_URL - never the shared
+     TEST_DATABASE_URL);
+  4. the original file is restored byte-for-byte from a pre-mutation copy
+     and `git status --porcelain`/`git diff --stat` confirmed clean
+     before continuing.
+
+Environment: local PostgreSQL (CI-local container), scratch databases via
+internal/testsupport/scratchdb using TEST_ADMIN_DATABASE_URL. Go per
+go.mod. Base: worktree branch worktree-agent-a048d85a077316518, on top of
+commit 142348f ("feat(payments): PRH-I1 step (a) - migration 0101 payment
+attempts state machine").
+
+Result: 2/2 killed (the two step-(a) rows the orchestrator named:
+MX22, MX23). MX24 (lock ordering, N1) is orchestrator wiring, not
+introduced in step (a)'s schema, and is deferred to whichever later step
+adds the deposit T2 per-item claim transaction.
+
+MX22 (remove the payment_attempts INSERT guard, RV-0095 ledger N2):
+    Mutation: deleted the `CREATE TRIGGER payment_attempts_insert_guard
+    BEFORE INSERT ON payment_attempts FOR EACH ROW EXECUTE FUNCTION
+    payment_attempts_guard();` statement (the trigger attach only - the
+    guard FUNCTION itself, and its BEFORE UPDATE attachment, were left
+    intact), replacing it with a comment marker.
+    Killed by: TestMigration0101_InsertGuard_RejectsForbiddenShapes
+        (go test -tags=integration -count=1 ./internal/payments/...
+         -run TestMigration0101_InsertGuard_RejectsForbiddenShapes)
+    First failure observed:
+        --- FAIL: TestMigration0101_InsertGuard_RejectsForbiddenShapes/state=declined
+            migration_0101_integration_test.go:566: expected the INSERT
+            guard to reject "state=declined", got <nil>
+        --- FAIL: TestMigration0101_InsertGuard_RejectsForbiddenShapes
+            migration_0101_integration_test.go:578: a legitimate T1
+            (created) insert must succeed: ERROR: duplicate key value
+            violates unique constraint "payment_attempts_tenant_intent_
+            attempt_no" (a downstream symptom of the mutant accepting an
+            illegal earlier insert into the same intent's attempt_no=1
+            slot)
+    Restored: migrations/0101_payment_attempts.up.sql byte-identical to
+    HEAD (git diff --stat: no output).
+
+MX23 (drop the succeeded-sibling predicate from T12, RV-0095 ledger N3):
+    Mutation: deleted the guard trigger's own N3 block (the
+    `IF OLD.state = 'ambiguous' AND NEW.state = 'submitting' AND
+    OLD.operation = 'deposit' AND EXISTS (SELECT 1 FROM payment_attempts
+    sib WHERE sib.deposit_intent_id = OLD.deposit_intent_id AND
+    sib.state = 'succeeded' AND sib.id <> OLD.id) THEN RAISE EXCEPTION
+    ... END IF;` block), replacing it with a comment marker. The
+    application-level predicate in ResubmitAmbiguous (internal/payments/
+    attempt.go) was left intact, so this mutation isolates the TRIGGER's
+    own, independent copy of the N3 rule specifically.
+    Killed by: TestMigration0101_T12_RefusedWhenSiblingSucceeded
+        (go test -tags=integration -count=1 ./internal/payments/...
+         -run TestMigration0101_T12_RefusedWhenSiblingSucceeded)
+    First failure observed:
+        --- FAIL: TestMigration0101_T12_RefusedWhenSiblingSucceeded
+            migration_0101_integration_test.go:837: direct SQL T12 on
+            sib2 must be rejected by the trigger, got <nil>
+    (The test's FIRST assertion - T12 via ResubmitAmbiguous - still
+    passed under this mutant, exactly as expected: it is defended by the
+    Go-level CAS predicate, a second, independent control. Only the
+    direct-SQL assertion, which exists specifically to prove the
+    trigger's OWN copy of the rule is load-bearing rather than
+    decorative, failed - which is the correct, expected result for this
+    mutation.)
+    Restored: migrations/0101_payment_attempts.up.sql byte-identical to
+    HEAD (git diff --stat: no output).
+
+Not run in this file (deferred to their owning PRH-I1 step, since the
+code they mutate does not exist yet on this branch):
+    MX1, MX2, MX3, MX4, MX5, MX6, MX8, MX9, MX10, MX11, MX12, MX13, MX14,
+    MX15, MX17, MX18, MX19, MX20, MX21, MX24.
+
+MX7 and MX16 are step-(a) schema invariants (the partial unique index
+INV-IO-8 depends on, and the last_evidence_kind trigger check LF95-C2
+depends on) that ARE present in this step's migration and ARE exercised
+by existing tests (TestMigration0101_UpdateGuard_TransitionWhitelist for
+MX16's evidence-kind gating; the unique-index-backed
+payment_attempts_one_live_per_intent/payment_attempts_one_per_withdrawal
+constraints are relied on implicitly by every backfill test and by
+INV-IO-8's own definition), but a formal mutation-kill run for them was
+not performed in this session and is recorded here as outstanding, to be
+done alongside MX1-MX21/MX24 when the fuller PRH-I1 test suite (ADR 0095
+§16.2 items 1-22) is built in later steps.
