@@ -10,8 +10,13 @@
 package casino
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	"log/slog"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -19,8 +24,10 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Diansalas/igaming-platform/internal/db"
+	"github.com/Diansalas/igaming-platform/internal/ledger"
 	"github.com/Diansalas/igaming-platform/internal/providercred"
 	"github.com/Diansalas/igaming-platform/internal/providercred/providercredtest"
+	"github.com/Diansalas/igaming-platform/internal/secretstore/memstore"
 	"github.com/Diansalas/igaming-platform/internal/testsupport/phasecapture"
 	"github.com/Diansalas/igaming-platform/internal/webhookauth"
 )
@@ -34,6 +41,10 @@ type recheckWorld struct {
 	secret     []byte
 	session    uuid.UUID
 	principals providercredtest.Principals
+	sub        *providercred.Subsystem
+	mem        *memstore.Store
+	logs       *bytes.Buffer
+	logMu      *sync.Mutex
 }
 
 func newRecheckWorld(t *testing.T) *recheckWorld {
@@ -44,12 +55,32 @@ func newRecheckWorld(t *testing.T) *recheckWorld {
 	registerCasinoCapability(t, pool, w.f, w.provider, 100)
 	w.session = mintSession(t, pool, w.f, "mock-casino", "EUR")
 	sub, mem := realCredentialSubsystem(t)
+	w.sub, w.mem = sub, mem
 	w.principals = providercredtest.SeedPrincipals(t, pool)
 	w.handle, w.secret = providercredtest.Register(t, pool, sub, mem.Put, w.principals, providercredtest.Spec{
 		TenantID: w.f.tenantID, Domain: "casino", ProviderID: "mock-casino", Purpose: providercred.PurposeWebhookVerify, KeyID: webhookauth.MockKeyID,
 	})
 	w.orch = NewOrchestrator(map[string]CasinoProvider{"mock-casino": w.provider}, sub.Resolver("casino"))
+	w.logs, w.logMu = &bytes.Buffer{}, &sync.Mutex{}
+	w.orch.SetWebhookLogger(slog.New(slog.NewJSONHandler(lockedBuf{w.logMu, w.logs}, nil)))
 	return w
+}
+
+type lockedBuf struct {
+	mu *sync.Mutex
+	b  *bytes.Buffer
+}
+
+func (l lockedBuf) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
+}
+
+func (w *recheckWorld) logText() string {
+	w.logMu.Lock()
+	defer w.logMu.Unlock()
+	return w.logs.String()
 }
 
 func (w *recheckWorld) bet(ref string) webhookauth.Inbound {
@@ -259,4 +290,131 @@ func TestVerifiedCallback_ZeroOrMismatchRejected_Casino(t *testing.T) {
 			t.Fatalf("want exactly one posting, got %d", n)
 		}
 	})
+}
+
+// TestVerifyCallback_InsideTxRefused_Casino is security review 17, S-2 /
+// code review R-4: the casino VerifyCallback called while the caller holds
+// a pooled transaction fails closed as credential_unavailable before any
+// read, nested acquisition or store call, and logs one
+// secret_fetch_with_tx_held line naming its own entry point.
+func TestVerifyCallback_InsideTxRefused_Casino(t *testing.T) {
+	w := newRecheckWorld(t)
+	in := w.bet("guard-1")
+	calls := w.mem.Calls()
+	var err error
+	var nested int64
+	_ = w.pool.WithTenant(context.Background(), w.f.tenantID, func(ctx context.Context, _ pgx.Tx) error {
+		acq := w.pool.Raw().Stat().AcquireCount()
+		_, err = w.orch.VerifyCallback(ctx, w.pool, w.f.tenantID, "mock-casino", in)
+		nested = w.pool.Raw().Stat().AcquireCount() - acq
+		return nil
+	})
+	wantCredentialUnavailable(t, err)
+	if nested != 0 || w.mem.Calls() != calls {
+		t.Fatalf("a refused VerifyCallback acquired %d nested connections and made %d store calls", nested, w.mem.Calls()-calls)
+	}
+	if n := strings.Count(w.logText(), `"entry_point":"casino.Orchestrator.VerifyCallback"`); n != 1 {
+		t.Fatalf("want exactly one secret_fetch_with_tx_held line from the casino guard, got %d", n)
+	}
+	if _, err := w.orch.VerifyCallback(context.Background(), w.pool, w.f.tenantID, "mock-casino", in); err != nil {
+		t.Fatalf("VerifyCallback with no transaction held: %v", err)
+	}
+}
+
+// TestVerifyCallback_BodyMutationBetweenPhases_Casino is security review
+// 17, S-1: the bytes phase 2 handles are the private copy that verified;
+// mutating the caller's body and headers after phase 1 changes nothing -
+// the verified stake is what posts.
+func TestVerifyCallback_BodyMutationBetweenPhases_Casino(t *testing.T) {
+	w := newRecheckWorld(t)
+	in := w.bet("mut-1")
+	v := w.verify(t, in)
+	for i := range in.Body {
+		in.Body[i] = ' '
+	}
+	in.Header.Set(webhookauth.CasinoSignatureHeader, "v1=00")
+	if _, err := w.receive(w.f.tenantID, w.f.tenantID, v, nil); err != nil {
+		t.Fatalf("phase 2 must handle the verified copy, not the mutated caller bytes: %v", err)
+	}
+	if n := w.ledgerRows(t, "mut-1"); n != 1 {
+		t.Fatalf("want exactly one posting, got %d", n)
+	}
+	if b := cashBalance(t, w.pool, w.f); b != 4000 {
+		t.Fatalf("balance %d, want the verified stake debited (4000)", b)
+	}
+}
+
+// TestReceiveVerified_RevokedThenRestoredRedeliveryPostsOnce is
+// ledger-finance LF-R1: a bet verified, then rejected because its handle
+// was revoked between the phases, is later redelivered by the provider
+// after the tenant's credential is restored (a new handle; the vendor
+// re-signs with it). It posts exactly once, SUM(debits) == SUM(credits),
+// and every projection equals its rebuild from ledger_entries.
+func TestReceiveVerified_RevokedThenRestoredRedeliveryPostsOnce(t *testing.T) {
+	w := newRecheckWorld(t)
+	v := w.verify(t, w.bet("lf-r1"))
+	providercredtest.Revoke(t, w.pool, w.f.tenantID, w.handle.ID, w.principals.Requester)
+	_, err := w.receive(w.f.tenantID, w.f.tenantID, v, nil)
+	wantCredentialUnavailable(t, err)
+	w.assertNothingWritten(t, "lf-r1")
+
+	// Restore: a new active handle for the same binding (a revoked handle
+	// is terminal; the key id must be new - duplicate_key_id).
+	_, secret2 := providercredtest.Register(t, w.pool, w.sub, w.mem.Put, w.principals, providercredtest.Spec{
+		TenantID: w.f.tenantID, Domain: "casino", ProviderID: "mock-casino", Purpose: providercred.PurposeWebhookVerify, KeyID: "mock-v2",
+	})
+	redeliver := func() {
+		t.Helper()
+		in := w.provider.CallbackPayload(w.f.tenantID, CallbackEventBet, "lf-r1", "", "round-lf-r1", "game-1",
+			1000, "EUR", OutcomeSucceeded, "", w.f.playerAccountID, w.session)
+		in.Header = in.Header.Clone()
+		webhookauth.CasinoScheme().SetHeaders(in.Header, "mock-v2",
+			webhookauth.CasinoScheme().Sign(secret2, w.f.tenantID, "mock-casino", "mock-v2", in.Body))
+		if _, err := w.receive(w.f.tenantID, w.f.tenantID, w.verify(t, in), nil); err != nil {
+			t.Fatalf("redelivery after the credential was restored: %v", err)
+		}
+	}
+	redeliver()
+	redeliver() // a second redelivery is a replay
+	if n := w.ledgerRows(t, "lf-r1"); n != 1 {
+		t.Fatalf("the redelivered bet posted %d times, want exactly once", n)
+	}
+	if b := cashBalance(t, w.pool, w.f); b != 4000 {
+		t.Fatalf("balance %d, want 4000", b)
+	}
+	if debits, credits := sumDebitsCredits(t, w.pool, w.f.tenantID); debits != credits {
+		t.Fatalf("SUM(debits)=%d != SUM(credits)=%d", debits, credits)
+	}
+	if err := w.pool.WithTenant(context.Background(), w.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, `SELECT id FROM ledger_accounts WHERE tenant_id = $1`, w.f.tenantID)
+		if err != nil {
+			return err
+		}
+		var ids []uuid.UUID
+		for rows.Next() {
+			var id uuid.UUID
+			if err := rows.Scan(&id); err != nil {
+				rows.Close()
+				return err
+			}
+			ids = append(ids, id)
+		}
+		rows.Close()
+		for _, id := range ids {
+			proj, err := ledger.GetProjectedBalance(ctx, tx, id)
+			if err != nil {
+				return err
+			}
+			reb, err := ledger.RebuildBalance(ctx, tx, id)
+			if err != nil {
+				return err
+			}
+			if proj.DebitTotal != reb.DebitTotal || proj.CreditTotal != reb.CreditTotal {
+				return fmt.Errorf("account %s: projection %d/%d != rebuild %d/%d", id, proj.DebitTotal, proj.CreditTotal, reb.DebitTotal, reb.CreditTotal)
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
 }

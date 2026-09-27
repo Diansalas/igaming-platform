@@ -52,7 +52,7 @@ func newVerifiedFixture(t *testing.T) verifiedFixture {
 
 func (f verifiedFixture) seal(t *testing.T, domain string) *VerifiedCallback {
 	t.Helper()
-	v, cred, authErr := VerifyAndSeal(domain, f.scheme, f.creds, CloneInbound(f.in), f.m, time.Now())
+	v, cred, authErr := verifyAndSeal(domain, f.scheme, f.creds, CloneInbound(f.in), f.m, time.Now())
 	if authErr != nil || v == nil {
 		t.Fatalf("seal: %v", authErr)
 	}
@@ -73,7 +73,7 @@ func TestVerifyAndSeal_OnlyOnSuccessfulVerification(t *testing.T) {
 	f := newVerifiedFixture(t)
 	bad := CloneInbound(f.in)
 	bad.Body = []byte(`{"amount":9999}`)
-	if v, _, authErr := VerifyAndSeal("casino", f.scheme, f.creds, bad, f.m, time.Now()); v != nil || authErr == nil || authErr.Reason != ReasonSignatureInvalid {
+	if v, _, authErr := verifyAndSeal("casino", f.scheme, f.creds, bad, f.m, time.Now()); v != nil || authErr == nil || authErr.Reason != ReasonSignatureInvalid {
 		t.Fatalf("a failed verification must not seal: %v %v", v, authErr)
 	}
 }
@@ -211,7 +211,7 @@ func TestVerifiedCallback_PredecessorHandleRechecked(t *testing.T) {
 	scheme := spyScheme{name: "x", props: SchemeProperties{Binding: BindingPerMerchantKey, KeySelection: KeyImplicit, SignedTimestamp: true, MaxSkew: time.Minute, Replay: ReplayTimestampWindow},
 		verify: func(CredentialSet, Inbound, AuthMaterial, time.Time) (string, error) { return "k-old", nil }, verifyRuns: runs, lastCreds: new(CredentialSet)}
 	in := Inbound{TenantID: tenant, ProviderID: "vendor-a", Header: nil, Body: []byte("x")}
-	v, cred, authErr := VerifyAndSeal("casino", scheme, CredentialSet{Active: active, Previous: &prev}, CloneInbound(in), NewAuthMaterial("", nil), now)
+	v, cred, authErr := verifyAndSeal("casino", scheme, CredentialSet{Active: active, Previous: &prev}, CloneInbound(in), NewAuthMaterial("", nil), now)
 	if authErr != nil || cred.HandleID != prev.HandleID {
 		t.Fatalf("the predecessor verified: %v %v", cred, authErr)
 	}
@@ -231,7 +231,9 @@ func TestVerifiedCallback_BytesArePrivateCopy(t *testing.T) {
 	f := newVerifiedFixture(t)
 	orig := CloneInbound(f.in)
 	callerIn := CloneInbound(f.in)
-	v, _, authErr := VerifyAndSeal("casino", f.scheme, f.creds, CloneInbound(callerIn), f.m, time.Now())
+	// Through the real entry point, with the caller's own slices: the copy
+	// is ResolveAndSeal's job (security review 17, S-1).
+	v, _, authErr := ResolveAndSeal(context.Background(), nil, "casino", f.scheme, &countingResolver{cred: f.creds.Active}, callerIn, f.m)
 	if authErr != nil {
 		t.Fatal(authErr)
 	}
@@ -250,6 +252,38 @@ func TestVerifiedCallback_BytesArePrivateCopy(t *testing.T) {
 	c.Header.Set("X-Other", "1")
 	if orig.Body[0] == 'Z' || orig.Header.Get("X-Other") != "" {
 		t.Fatal("CloneInbound aliased its input")
+	}
+}
+
+// TestResolveAndSeal_ResolvesItsOwnCredentials is security review 17,
+// S-3 option (a): the only constructor resolves the credential set itself
+// through the resolver it is given; there is no way to seal a caller-made
+// CredentialSet, and a resolver error seals nothing.
+func TestResolveAndSeal_ResolvesItsOwnCredentials(t *testing.T) {
+	f := newVerifiedFixture(t)
+	r := &countingResolver{cred: f.creds.Active}
+	v, cred, authErr := ResolveAndSeal(context.Background(), nil, "casino", f.scheme, r, f.in, f.m)
+	if authErr != nil || v == nil || r.calls != 1 || cred.HandleID != f.creds.Active.HandleID {
+		t.Fatalf("ResolveAndSeal must resolve through the resolver exactly once: calls=%d err=%v", r.calls, authErr)
+	}
+	if v, _, authErr := ResolveAndSeal(context.Background(), nil, "casino", f.scheme, &countingResolver{err: ErrCredentialUnavailable}, f.in, f.m); v != nil || authErr == nil {
+		t.Fatalf("a resolver error must seal nothing: %v %v", v, authErr)
+	}
+}
+
+// TestMockRecheck_BindsSecretToFingerprint is security review 17, S-3
+// option (b) for the MOCK: a credential whose secret is not the one its
+// fingerprint names fails the re-check.
+func TestMockRecheck_BindsSecretToFingerprint(t *testing.T) {
+	tenant, key := uuid.New(), testKey(t)
+	c := credFor(tenant, "vendor-a", key)
+	if err := MockRecheck(tenant, "vendor-a", c); err != nil {
+		t.Fatalf("a genuine MOCK credential must pass: %v", err)
+	}
+	forged := c
+	forged.Secret = testKey(t)
+	if err := MockRecheck(tenant, "vendor-a", forged); err == nil {
+		t.Fatal("a secret that does not match the fingerprint must fail the re-check")
 	}
 }
 

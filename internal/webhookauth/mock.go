@@ -90,9 +90,17 @@ func (r MockResolver) Recheck(_ context.Context, _ pgx.Tx, tenantID uuid.UUID, c
 // MockRecheck is the shared MOCK Recheck rule: a handle-less credential,
 // bound to tenantID and providerID, for MockKeyID. Anything else - in
 // particular a credential carrying a real handle id - fails closed.
+//
+// It also binds the secret to the credential's fingerprint (the MOCK
+// fingerprint is the unkeyed Fingerprint): a credential carrying a secret
+// other than the one its fingerprint names fails closed (security review
+// 17, S-3 option (b)).
 func MockRecheck(tenantID uuid.UUID, providerID string, c Credential) error {
 	if c.HandleID != uuid.Nil || tenantID == uuid.Nil || c.TenantID != tenantID ||
 		providerID == "" || c.ProviderID != providerID || c.KeyID != MockKeyID {
+		return ErrCredentialUnavailable
+	}
+	if !hmac.Equal([]byte(Fingerprint(c.Secret)), []byte(c.Fingerprint)) {
 		return ErrCredentialUnavailable
 	}
 	return nil

@@ -2,6 +2,7 @@ package providercred
 
 import (
 	"context"
+	"crypto/hmac"
 	"errors"
 	"time"
 
@@ -211,6 +212,13 @@ func (r *Resolver) Resolve(ctx context.Context, reader webhookauth.TenantReader,
 func (r *Resolver) Recheck(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, c webhookauth.Credential) error {
 	if r == nil || tx == nil || tenantID == uuid.Nil || c.HandleID == uuid.Nil || c.TenantID != tenantID ||
 		!webhookauth.ValidProviderID(c.ProviderID) || !ValidFingerprint(c.Fingerprint) {
+		return webhookauth.ErrCredentialUnavailable
+	}
+	// The credential's secret must be the one its fingerprint - which
+	// HandleRecheckSQL binds to the row - names (security review 17, S-3
+	// option (b)): a VerifiedCallback can then carry only a secret the
+	// store holds for this handle, never one chosen by in-process code.
+	if r.sub == nil || !hmac.Equal([]byte(r.sub.key.Fingerprint(c.Secret)), []byte(c.Fingerprint)) {
 		return webhookauth.ErrCredentialUnavailable
 	}
 	var one int

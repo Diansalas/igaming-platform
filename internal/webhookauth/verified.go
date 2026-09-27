@@ -37,8 +37,9 @@ const MaxVerifiedCallbackAge = 30 * time.Second
 var sinceVerified = time.Since
 
 // VerifiedCallback is the opaque proof that one inbound callback verified
-// (ADR 0094 §4.1). It is created only by VerifyAndSeal, after
-// VerifyInbound succeeded, and is consumed by the FIRST Redeem call:
+// (ADR 0094 §4.1). It is created only by ResolveAndSeal - which resolves
+// the credentials itself through the domain's Resolver and runs
+// VerifyInbound - and is consumed by the FIRST Redeem call:
 //
 //   - single use (C1): the consumed flag is shared by every copy, so a
 //     copied value cannot be redeemed twice either;
@@ -63,8 +64,8 @@ type VerifiedCallback struct {
 }
 
 // CloneInbound returns a deep copy of in: a fresh body slice and cloned
-// headers (C3). A domain's VerifyCallback calls it first and works only
-// on the copy from then on.
+// headers (C3). ResolveAndSeal calls it first - the single chokepoint
+// (security review 17, S-1) - and verifies and stores only the copy.
 func CloneInbound(in Inbound) Inbound {
 	out := Inbound{TenantID: in.TenantID, ProviderID: in.ProviderID}
 	if in.Body != nil {
@@ -79,13 +80,34 @@ func CloneInbound(in Inbound) Inbound {
 	return out
 }
 
-// VerifyAndSeal runs VerifyInbound and, only on success, seals the result
-// for domain. in must be the caller's private clone (CloneInbound) with
-// TenantID/ProviderID already overwritten from the route; it is stored as
-// is, so the bytes that verified are the bytes that are later handled. It
-// returns the credential that verified (Active or the verify_only
-// predecessor), whose HandleID phase 2 re-checks (C4).
-func VerifyAndSeal(domain string, scheme VerificationScheme, creds CredentialSet, in Inbound, m AuthMaterial, now time.Time) (*VerifiedCallback, Credential, *AuthError) {
+// ResolveAndSeal is phase 1's resolve-verify-seal step and the ONLY way to
+// obtain a VerifiedCallback (security review 17, S-3 option (a)):
+//
+//  1. it copies in (CloneInbound - the one chokepoint for C3, S-1): the
+//     bytes verified and stored are a private copy no caller slice or
+//     header map aliases;
+//  2. it resolves the credential set itself, through resolver and r
+//     (ResolveCredentials), so a caller cannot hand in a CredentialSet of
+//     its choosing;
+//  3. it runs VerifyInbound on the copy and seals the result for domain.
+//
+// in must already carry the route TenantID/ProviderID. It returns the
+// credential that verified (Active or the verify_only predecessor), whose
+// HandleID phase 2 re-checks (C4). The real resolver's Recheck also binds
+// the credential's secret to the fingerprint the handle row pins (S-3
+// option (b)), so a sealed token carries only a secret the store holds.
+func ResolveAndSeal(ctx context.Context, r TenantReader, domain string, scheme VerificationScheme, resolver Resolver, in Inbound, m AuthMaterial) (*VerifiedCallback, Credential, *AuthError) {
+	in = CloneInbound(in)
+	creds, authErr := ResolveCredentials(ctx, r, scheme, resolver, in, m)
+	if authErr != nil {
+		return nil, Credential{}, authErr
+	}
+	return verifyAndSeal(domain, scheme, creds, in, m, time.Now())
+}
+
+// verifyAndSeal runs VerifyInbound on in (already the private copy) and,
+// only on success, seals it for domain.
+func verifyAndSeal(domain string, scheme VerificationScheme, creds CredentialSet, in Inbound, m AuthMaterial, now time.Time) (*VerifiedCallback, Credential, *AuthError) {
 	cred, authErr := VerifyInbound(scheme, creds, in, m, now)
 	if authErr != nil {
 		return nil, Credential{}, authErr

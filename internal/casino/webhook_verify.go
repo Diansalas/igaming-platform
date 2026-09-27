@@ -3,7 +3,6 @@ package casino
 import (
 	"context"
 	"log/slog"
-	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -54,8 +53,8 @@ type VerifiedCallback = webhookauth.VerifiedCallback
 // resolver issues none). It must be called with NO transaction held - a
 // txscope-marked ctx fails closed (INV-POOL):
 //
-//	(0) clone the inbound (security C3) and overwrite TenantID/ProviderID
-//	    from the route values - the single source of the tenant;
+//	(0) overwrite TenantID/ProviderID from the route values - the single
+//	    source of the tenant (the C3 copy happens in ResolveAndSeal);
 //	(a) the adapter (and its validated scheme) must be registered, else
 //	    ReasonProviderUnregistered;
 //	(a') scheme.Extract (signature_missing / signature_invalid);
@@ -78,7 +77,9 @@ func (o *Orchestrator) VerifyCallback(ctx context.Context, r webhookauth.TenantR
 	if tenantID == uuid.Nil {
 		return nil, &webhookauth.AuthError{Reason: webhookauth.ReasonCredentialUnavailable}
 	}
-	in = webhookauth.CloneInbound(in)
+	// in is a value copy; its body and headers are deep-copied by
+	// webhookauth.ResolveAndSeal before verification (the single C3
+	// chokepoint) and nothing here mutates them.
 	in.TenantID = tenantID
 	in.ProviderID = providerID
 
@@ -120,17 +121,16 @@ func (o *Orchestrator) redeemVerified(ctx context.Context, tx pgx.Tx, tenantID u
 // the matched-key log can be tested with a KeyImplicit test scheme that is
 // never registered (security gate W2 condition W2A-SEC-2): resolve the
 // single credential binding, run the ORCHESTRATOR-ENFORCED VerifyInbound
-// (sealing the result), and on success log which key_id verified
+// (webhookauth.ResolveAndSeal: copy, resolve, verify, seal), and on success log which key_id verified
 // (webhookauth.LogVerifiedKey: KeyImplicit schemes only; request_id,
 // tenant_id, provider_id and key_id only - never the secret or its
 // fingerprint). VerifyCallback is its only production caller, after the
 // registration lookup and Extract.
 func (o *Orchestrator) resolveAndVerify(ctx context.Context, r webhookauth.TenantReader, scheme webhookauth.VerificationScheme, in webhookauth.Inbound, m webhookauth.AuthMaterial) (*VerifiedCallback, webhookauth.Credential, *webhookauth.AuthError) {
-	creds, authErr := webhookauth.ResolveCredentials(ctx, r, scheme, o.webhookCredentialResolver, in, m)
-	if authErr != nil {
-		return nil, webhookauth.Credential{}, authErr
-	}
-	v, cred, authErr := webhookauth.VerifyAndSeal(WebhookDomain, scheme, creds, in, m, time.Now())
+	// ResolveAndSeal is the single chokepoint: it copies the inbound,
+	// resolves the credentials through this domain's resolver, verifies
+	// the copy and seals it (security review 17, S-1/S-3).
+	v, cred, authErr := webhookauth.ResolveAndSeal(ctx, r, WebhookDomain, scheme, o.webhookCredentialResolver, in, m)
 	if authErr != nil {
 		return nil, webhookauth.Credential{}, authErr
 	}

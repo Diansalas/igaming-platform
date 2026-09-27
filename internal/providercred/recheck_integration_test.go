@@ -40,11 +40,7 @@ func TestRecheck_KeyImplicitPredecessorRevokedBetweenPhases(t *testing.T) {
 				t.Fatal(authErr)
 			}
 			resolver := f.sub.Resolver("casino")
-			set, authErr := webhookauth.ResolveCredentials(context.Background(), f.rt, scheme, resolver, in, m)
-			if authErr != nil {
-				t.Fatal(authErr)
-			}
-			v, cred, authErr := webhookauth.VerifyAndSeal("casino", scheme, set, webhookauth.CloneInbound(in), m, time.Now())
+			v, cred, authErr := webhookauth.ResolveAndSeal(context.Background(), f.rt, "casino", scheme, resolver, in, m)
 			if authErr != nil || cred.KeyID != "k1" || cred.HandleID != h1.ID {
 				t.Fatalf("the predecessor must verify with its own handle id: %v %v", cred, authErr)
 			}
@@ -100,5 +96,39 @@ func TestOutboundResolve_InsideTenantTxRefused(t *testing.T) {
 	// Outside a transaction the same call resolves.
 	if _, err := o.Resolve(context.Background(), f.rt, tenant, "psp-a"); err != nil {
 		t.Fatalf("outbound resolve with no transaction held: %v", err)
+	}
+}
+
+// TestRecheck_BindsSecretToFingerprint is security review 17, S-3 option
+// (b): the real Recheck recomputes the keyed fingerprint of the
+// credential's secret and requires it to equal the fingerprint the handle
+// row pins. In-process code that reads a live handle's id and fingerprint
+// and pairs them with a secret of its own choosing is refused.
+func TestRecheck_BindsSecretToFingerprint(t *testing.T) {
+	f := newFx(t)
+	tenant := f.tenant()
+	f.register(f.spec(tenant, "acme", "k1"))
+	set, err := f.resolve("casino", tenant, "acme", "k1", webhookauth.KeyFromHeader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolver := f.sub.Resolver("casino")
+	recheck := func(c webhookauth.Credential) error {
+		var out error
+		if err := f.rt.WithTenant(context.Background(), tenant, func(ctx context.Context, tx pgx.Tx) error {
+			out = resolver.Recheck(ctx, tx, tenant, c)
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	if err := recheck(set.Active); err != nil {
+		t.Fatalf("the genuine credential must pass the re-check: %v", err)
+	}
+	forged := set.Active
+	forged.Secret = randBytes(t, 32)
+	if err := recheck(forged); !errors.Is(err, webhookauth.ErrCredentialUnavailable) {
+		t.Fatalf("a secret that does not match the row's fingerprint must fail the re-check, got %v", err)
 	}
 }
