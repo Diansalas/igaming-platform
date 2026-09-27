@@ -79,6 +79,31 @@ const (
 // (ADR 0095 §4.3 T13t, LF95-C6(d)).
 const TerminalReasonTombstonePrecedesSuccess = "reversal_tombstone_precedes_success"
 
+// killSwitchNotEngagedSQL returns the ADR 0095 §10.3 kill-switch predicate
+// as a boolean SQL expression, evaluated INSIDE the same claim statement
+// that would otherwise submit to a provider - never as a separate
+// check-then-act query. tenantExpr/providerExpr/operationExpr are SQL
+// expressions (a column reference or a bound parameter placeholder), never
+// caller-supplied data interpolated as a literal, so this composes safely
+// into the surrounding CAS statement. Because the switch table's tenant
+// SELECT policy shares payment_attempts' own tenant predicate
+// (tenant_staff_scope), a claim running under any context that cannot see
+// payment_attempts (a wrong tenant, an unset tenant, a player-scoped
+// session, or a platform session) also sees zero switch rows and always
+// evaluates this to true - it never fails OPEN (RV-0095 L1, §16.2 item 20).
+func killSwitchNotEngagedSQL(tenantExpr, providerExpr, operationExpr string) string {
+	return fmt.Sprintf(
+		`NOT EXISTS (
+			SELECT 1 FROM payment_kill_switches k
+			WHERE k.tenant_id = %s
+			  AND k.engaged
+			  AND k.provider_scope IN ('*', %s)
+			  AND k.operation_scope IN ('*', %s)
+		)`,
+		tenantExpr, providerExpr, operationExpr,
+	)
+}
+
 // ErrAttemptStateConflict is returned by every CAS transition function
 // below when its UPDATE affects zero rows - either the id does not
 // exist (in this tenant's RLS scope) or the row is no longer in the
@@ -268,18 +293,33 @@ func InsertCreatedAttempt(ctx context.Context, tx pgx.Tx, in NewCreatedAttempt) 
 	// rows - interactive rows are found the same way and then expired
 	// (T3) once older than the presence window, never resubmitted.
 	// Without this, a cascade row (§4.6) would never be picked up at all.
-	_, err := tx.Exec(ctx,
+	//
+	// This T1 insert has not chosen a provider_id yet (it is NULL until a
+	// later T2 claim, which carries its own full kill-switch check), so
+	// this INSERT ... SELECT form can only refuse against a wildcard
+	// provider_scope='*' switch - defence in depth so a cascade never even
+	// creates a new row while the tenant/operation is wholesale contained,
+	// on top of T2's own full (provider-specific) check at claim time.
+	tag, err := tx.Exec(ctx,
 		`INSERT INTO payment_attempts (
 			id, tenant_id, operation, deposit_intent_id, withdrawal_request_id, attempt_no,
 			excluded_provider_ids, payment_method, asset_code, amount, interactive,
 			merchant_reference, external_idempotency_key, state, last_evidence_kind, next_action_at
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'created','platform', now())`,
+		)
+		SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'created','platform', now()
+		WHERE NOT EXISTS (
+			SELECT 1 FROM payment_kill_switches k
+			WHERE k.tenant_id = $2 AND k.engaged AND k.provider_scope = '*' AND k.operation_scope IN ('*', $3)
+		)`,
 		in.ID, in.TenantID, in.Operation, in.DepositIntentID, in.WithdrawalRequestID, in.AttemptNo,
 		in.ExcludedProviderIDs, in.PaymentMethod, in.AssetCode, in.Amount, in.Interactive,
 		MerchantReferenceFor(in.ID), ExternalIdempotencyKeyFor(in.ID),
 	)
 	if err != nil {
 		return PaymentAttempt{}, fmt.Errorf("payments: insert created payment attempt (T1): %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return PaymentAttempt{}, fmt.Errorf("payments: insert created payment attempt (T1): %w", ErrKillSwitchEngaged)
 	}
 	return GetAttemptByID(ctx, tx, in.ID)
 }
@@ -304,14 +344,29 @@ type NewSubmittingAttempt struct {
 	LeaseUntil          time.Time
 }
 
+// ErrKillSwitchEngaged is returned by InsertSubmittingAttempt when a
+// payment_kill_switches row matching (tenant, provider, operation) is
+// engaged (§10.3): the combined T1+T2 (deposit)/T1p (payout) INSERT ...
+// SELECT form has no prior 'created' row to fall back into, so a refused
+// insert is reported directly rather than through ErrAttemptStateConflict.
+var ErrKillSwitchEngaged = errors.New("payments: refused, a matching payment kill switch is engaged")
+
 func InsertSubmittingAttempt(ctx context.Context, tx pgx.Tx, in NewSubmittingAttempt) (PaymentAttempt, error) {
-	_, err := tx.Exec(ctx,
+	// INSERT ... SELECT (not a plain INSERT ... VALUES): the ADR 0095
+	// §10.3 kill-switch predicate must be evaluated INSIDE this statement,
+	// atomically with the insert itself, for the T1+T2/T1p forms that have
+	// no separate 'created' row for a later T2 claim to refuse - see
+	// killSwitchNotEngagedSQL's own doc comment for why a wrong tenant
+	// context inserts nothing here too.
+	tag, err := tx.Exec(ctx,
 		`INSERT INTO payment_attempts (
 			id, tenant_id, operation, deposit_intent_id, withdrawal_request_id, attempt_no,
 			provider_id, payment_method, asset_code, amount, interactive,
 			merchant_reference, external_idempotency_key, state, last_evidence_kind,
 			claim_token, lease_owner, lease_until, submit_count, last_sent_at, first_submitted_at
-		) VALUES ($1,$2,$3,$4,$5,1,$6,$7,$8,$9,$10,$11,$12,'submitting','platform',$13,$14,$15,1,now(),now())`,
+		)
+		SELECT $1,$2,$3,$4,$5,1,$6,$7,$8,$9,$10,$11,$12,'submitting','platform',$13,$14,$15,1,now(),now()
+		WHERE `+killSwitchNotEngagedSQL("$2", "$6", "$3"),
 		in.ID, in.TenantID, in.Operation, in.DepositIntentID, in.WithdrawalRequestID,
 		in.ProviderID, in.PaymentMethod, in.AssetCode, in.Amount, in.Interactive,
 		MerchantReferenceFor(in.ID), ExternalIdempotencyKeyFor(in.ID),
@@ -319,6 +374,9 @@ func InsertSubmittingAttempt(ctx context.Context, tx pgx.Tx, in NewSubmittingAtt
 	)
 	if err != nil {
 		return PaymentAttempt{}, fmt.Errorf("payments: insert submitting payment attempt (T1+T2/T1p): %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return PaymentAttempt{}, fmt.Errorf("payments: insert submitting payment attempt (T1+T2/T1p): %w", ErrKillSwitchEngaged)
 	}
 	return GetAttemptByID(ctx, tx, in.ID)
 }
@@ -353,7 +411,8 @@ func ClaimCreatedForSubmission(ctx context.Context, tx pgx.Tx, attemptID uuid.UU
 		     submit_count = submit_count + 1, last_sent_at = now(),
 		     first_submitted_at = COALESCE(first_submitted_at, now()),
 		     state = 'submitting', last_evidence_kind = 'platform', updated_at = now()
-		 WHERE id = $1 AND state = 'created' AND (provider_id IS NULL OR provider_id = $2)`,
+		 WHERE id = $1 AND state = 'created' AND (provider_id IS NULL OR provider_id = $2)
+		   AND `+killSwitchNotEngagedSQL("payment_attempts.tenant_id", "$2", "payment_attempts.operation"),
 		attemptID, providerID, claimToken, leaseOwner, leaseUntil,
 	)
 }
@@ -452,7 +511,8 @@ func ResubmitAmbiguous(ctx context.Context, tx pgx.Tx, attemptID uuid.UUID, clai
 		     JOIN payment_attempts self ON self.id = $1
 		     WHERE self.operation = 'deposit' AND sib.deposit_intent_id = self.deposit_intent_id
 		       AND sib.state = 'succeeded' AND sib.id <> $1
-		   )`,
+		   )
+		   AND `+killSwitchNotEngagedSQL("payment_attempts.tenant_id", "payment_attempts.provider_id", "payment_attempts.operation"),
 		attemptID, claimToken, leaseOwner, leaseUntil,
 	)
 }
