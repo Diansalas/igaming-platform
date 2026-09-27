@@ -262,3 +262,193 @@ No action beyond the existing hard precondition.
 - F1's claim corrected (or the owner decision recorded).
 
 F2–F5 are follow-ups and may be tracked in `docs/governance/task-registry.md`.
+
+---
+
+# Re-review: fix round `492cb20` (merged at `b9db031`)
+
+Reviewer: `code-reviewer` (independent). Date: 2026-09-27. I read the diff `492cb20^..492cb20`
+directly, then ran the suites and my own mutants in a detached scratch worktree at `b9db031`,
+against a private database (`rr_i2kyc_cr_28463`, migrated to 104, runtime grants applied,
+dropped afterwards).
+
+## Verdict: **READY once N1 is corrected** (R1 and F1 are fixed; N1 is a small, required correction to a test and to the evidence file)
+
+R1 is fixed properly, and so is F1. The fixes for C2–C5 and F2–F4 are present. However, C4
+quietly removed the only test that killed mutant M8, and the evidence file still claims M8
+is "re-verified unchanged, KILLED". That claim is false today (N1). It takes one line in a
+test and one edit to the evidence file. Once both are done, this change is READY from a
+code-review standpoint. The security and identity-compliance sign-offs are still their
+owners' decisions.
+
+## 1. Verification
+
+- `go vet -tags=integration` for `internal/kyc`, `internal/httpserver` and
+  `cmd/platform-api`: clean. `gofmt -l`: clean.
+- `go test -race -tags=integration ./internal/kyc/ ./cmd/platform-api/`: pass.
+- `go test -tags=integration ./internal/httpserver/ -run 'KYC|Kyc'`: pass.
+- `go test -tags=integration ./internal/withdrawal/`: pass.
+- Unrelated observation: `TestResolutionIsolation_*` failed on the fresh private DB with no
+  mutation applied. This change does not touch those tests, and I did not investigate.
+- Mutants (each run over the full `internal/kyc` suite unless noted; tree restored with
+  `git checkout` after each):
+
+  | Id | Mutation | Result |
+  |---|---|---|
+  | R1a | `applyForwardOnlyStatus` UPDATE loses `AND status = $5` (blind write) | killed (P1 + P2) |
+  | R1b | forward-only check `<=` → `<` (same-rank terminal overwrite) | killed (P1) |
+  | R1c | `maxAttempts` 3 → 1 (no re-read after a lost CAS) | killed (P1 + P2) |
+  | R1e | `status_applied` audit flag hard-wired `true` | **survived** (N4) |
+  | MA | `SubmitVerification` phase C uses `ctx`, not `WithoutCancel` | killed |
+  | MF | `CreateVerification` phase C uses `ctx`, not `WithoutCancel` | killed |
+  | MB | `SubmitVerification` credential-binding check → `if false` | killed, for the right reason ("got \<nil\>") |
+  | MC | `applyCreateVerificationResult` CAS predicate removed | killed |
+  | MD | `sort.Strings` dropped: multi-document integration test only | **survived** (as the implementer disclosed) |
+  | MD | `sort.Strings` dropped: full suite | killed (`TestSubmissionIdempotencyKey_SortsDocumentIDs`) |
+  | ME | `SubmitVerification` nil-outbound guard → `if false` | killed (panic) |
+  | C4 | empty-set skip → `if false && …` | killed |
+  | **M8** | `gatherSubmissionDocuments` terminal guard → `if false && …` | **survived** (N1) |
+  | M8 + C4 off | same, with the empty-set skip also disabled | killed, which proves C4 is what masks it |
+  | F1a | orphan predicate removed from `readLatestVerificationByPlayerAccount` | killed |
+  | F1b | orphan predicate removed from `crossAccountRejectedOverlay` | killed |
+  | F1c | predicate loosened to `NOT (status='unverified')` | survived. Equivalent in practice: `statusForOutcome` never produces `unverified`, so no decided `unverified` row exists. |
+  | C2 | kind-split `target := s.mock` unconditionally | killed |
+  | C5 | `RedactedProviderErrorDetail` default returns `err.Error()` | **survived** in `kyc` and `httpserver -run 'KYC\|Kyc\|Verification\|Document\|Redact'` (N3) |
+
+- **Implementer's methodology disclosures: both confirmed.**
+  - **MB.** I removed the `provider.created[ref] = true` registration from the MB test and
+    re-applied the MB mutant. The test then **passes** under the mutant, because the mock's
+    "unknown reference" error produces `ErrProviderUnavailable` by coincidence. The
+    corrected test, which reuses the registered instance, fails with "got \<nil\>". So the
+    correction is real and necessary.
+  - **MD.** `gatherSubmissionDocuments` reads `ORDER BY id`. PostgreSQL compares `uuid`
+    values bytewise, and that order matches lowercase-hex string order. So the integration
+    test always receives pre-sorted input and cannot kill MD on its own. I confirmed it
+    survives. The DB-free unit test is what kills MD.
+
+## 2. Prior findings: status
+
+| Prior | Status | Evidence |
+|---|---|---|
+| **R1** (blocking) | **FIXED** | Phase C now goes through `applyForwardOnlyStatus`: a CAS on phase A's status, then on a miss it re-reads and applies the rank rule. The blind `updateVerificationStatus` is deleted, and grep finds no other status writer without a predicate. P1 and P2 exist as regression tests and exercise the lost-CAS path: phase A reads `pending`, and a concurrent commit moves the row off `pending`. The R1a/b/c mutants each kill them. Wording in the doc comment and ADR 0095 §15.3/§15.3.1 is corrected. The remaining "terminal-guarded" at ADR line ~2092 refers to phase A, where it is accurate. |
+| **F1** | **FIXED** | `orphanRowExclusionSQL` is applied to the primary read and, separately, to the overlay's inner subquery. Four tests cover it. F1a and F1b are each killed by their own test. Every enforcement "latest" read goes through these two functions (I grepped), so no other reader was missed. ADR 0096 §19 records the change. |
+| **F2** | **ADDRESSED** | The allow-listed `kyc_webhook_reference_unknown` line is added, with Retry-After set through `writeAdmissionRejection`. An allow-list test checks that the reference is not leaked. The stuck-reference problem is recorded under KYC-SUBMIT-OUTBOX-1. |
+| **F3** (MB/MC/MD/ME) | **FIXED** | All four are killed now (table above). The tautological `emptyDocSetSHA256` is removed. The key is now computed independently. |
+| **F4** | **FIXED** | `TestKYCOutboundResolver_FollowsWiring` covers off → true nil, on → resolves `mock`/`Domain=="kyc"`, and fail-closed for an unregistered id. It passes. |
+| **F5** | Note only, unchanged | n/a |
+| **C1** (security) | Same as R1 | |
+| **C2** (security) | **FIXED** | Five kind-split unit tests. The C2 mutant is killed. |
+| **C3** (security) | **FIXED** | Same change as F2. |
+| **C4** (security) | **FIXED, but it introduced N1** | The skip is implemented and `TestSubmitVerification_EmptyDocumentSetIsANoOp` kills its removal. |
+| **C5** (security) | **Implemented, untested** (N3) | Both handler log lines now go through `RedactedProviderErrorDetail`. Whether C5 needs a test is for `security` to decide. |
+
+## 3. New findings (most severe first)
+
+### N1: REQUIRED. C4 made `TestSubmitVerification_TerminalVerificationIsANoOp` vacuous, and the evidence file's M8 claim is now false
+
+The fix round added `seedDocument` to every pre-existing `SubmitVerification` test that
+needed the provider call to happen, **except** `TestSubmitVerification_TerminalVerificationIsANoOp`
+(`internal/kyc/kyc_two_phase_integration_test.go` ~L436). That test seeds no document and
+asserts `called == false`.
+
+- **Why it no longer tests anything.** If the terminal guard in
+  `gatherSubmissionDocuments` is removed, execution now falls through to the new
+  `len(submitted) == 0` skip and still makes no provider call. `applyForwardOnlyStatus`
+  also keeps the status `approved`. So the test passes whether or not the guard exists.
+- **Confirmed by mutants.** M8, run exactly as the evidence file specifies (`-run
+  TestSubmitVerification_TerminalVerificationIsANoOp`), **survives**, and it also survives
+  the full `internal/kyc` suite. With C4's skip also disabled, the same test kills it.
+- **Why it matters.** `docs/plans/payment-readiness/evidence/prh-i2-kyc-mutation-kill.txt`
+  §1 says the original 11 mutants were "re-verified unchanged this round". It still lists M8
+  as KILLED, quoting a first-failure message ("unknown provider reference") that cannot
+  occur any more. So "17/17 killed" is not true as of `492cb20`.
+- **Failure scenario.** A future refactor drops the terminal guard. An approved (or
+  staff-rejected) verification whose player uploads another document then gets resubmitted
+  to the vendor. That is an unnecessary vendor call, plus a `kyc.verification_submitted_to_provider`
+  audit row against a closed case. The status stays correct only because R1's rank rule
+  happens to backstop it. No test would fail.
+- **Fix.**
+  1. Add `seedDocument(t, pool, f, verificationID, DocumentPassport, "p.png")` to that test
+     before the review step (while the verification is still non-terminal).
+  2. Re-run M8.
+  3. Correct the evidence file's M8 entry and the count.
+
+  None of the other pre-existing tests was weakened. I checked every `SubmitVerification(`
+  call site in tests:
+  - Cross-tenant fails in phase A, before the skip.
+  - `reason_platform_normalize` gained a document.
+  - The four two-phase tests that need a provider call gained one.
+  - The idempotency test was replaced with a stronger one.
+
+### N2: Low. A misleading comment in the multi-document idempotency test
+
+`TestSubmitVerification_IdempotencyKeyStableForMultiDocumentSet` (~L566–569) says that if
+`sort.Strings` were dropped, the independently computed expectation "would no longer
+match". That is false for the reason the implementer's own MD disclosure gives (`ORDER BY
+id`), and I confirmed it: MD survives that test. In addition, the doc comments for
+`independentSubmissionIdempotencyKey` and `TestSubmissionIdempotencyKey_SortsDocumentIDs`
+have been merged into one block above the unit test. Fix: rewrite the inline comment so it
+says the integration test only proves stability across calls and `document_count=3`, and
+that the unit test is what pins the sort.
+
+### N3: Low (for security to decide). C5 redaction has no test
+
+Changing `RedactedProviderErrorDetail`'s default branch back to `err.Error()` survives
+every KYC-related test. The helper is 15 lines and easy to read as correct. But a later
+"improvement" that logs `%v` again would pass CI. A table unit test covering timeout,
+canceled, `ErrProviderUnavailable`, and an arbitrary error containing a sentinel string
+would close this. It is security's call whether C5 requires it.
+
+### N4: Low. `status_applied` audit flag is untested
+
+This is the only audit signal that distinguishes a superseded submission from one that
+actually changed the row. Hard-wiring it to `true` survives. P1 and P2 could assert
+`status_applied=false` on the submission's audit row at almost no cost.
+
+### N5: Low, pre-existing from the original split (not introduced by this round). Submitting against an orphan calls the vendor with an empty reference
+
+The upload handler takes `verification_id` from the client and only checks that the player
+owns the row. So a player can upload to their own orphan row (`unverified`,
+`provider_reference NULL`). `SubmitVerification` then calls
+`provider.SubmitVerification(ctx, "", …)`.
+- With the mock, the call fails closed (unknown reference → `ErrProviderUnavailable`).
+- With a real vendor, the call is malformed, and its behaviour is PROVIDER DEPENDENT.
+
+Suggested follow-up: a no-op or fail-closed guard in `SubmitVerification` when
+`v.ProviderReference == ""`. It fits naturally next to the C4 skip.
+
+### N6: Simplification / accuracy. `applyForwardOnlyStatus` is a second copy of the loop, not a shared one
+
+The commit message says the new function is "shared", and the doc comment in
+`verification_service.go` says both the callback step "(via applyCallbackOutcome)" and
+phase C use it. In fact, `applyCallbackOutcome` still has its own identical rank/CAS loop
+(`provider.go` ~L564–606) and does not call `applyForwardOnlyStatus`. This is correct
+today, but it means the two loops can drift apart. Either make `applyCallbackOutcome` call
+`applyForwardOnlyStatus` (its audit row is written only when `applied` is true), or fix the
+comment. Also cosmetic: `insertOrphanVerification` and `CreateVerification`
+(`verification_service.go` ~L100, ~L191) still justify "no enforcement effect" with "only
+allows on passed". The claim is now true, but for a different reason (the orphan
+exclusion).
+
+## 4. Surfaced to other owners (not adjudicated)
+
+1. **`identity-compliance` / `security`, pre-existing: the mirror image of R1.**
+   `ReviewVerification` reads the row, checks it is not terminal, then runs a blind
+   `UPDATE … WHERE id`. If `SubmitVerification`'s phase C or a callback commits `approved`
+   between the staff read and the staff write, a staff `review_required` overwrites a
+   terminal `approved`, moving it backward. "Staff wins last" may be the intended policy for
+   `approved`/`rejected`. It is doubtful for `review_required` over a terminal status. This
+   round did not change `ReviewVerification`. The same `WHERE status = $current` CAS would
+   close it.
+2. **`identity-compliance`: accepted behaviour change.** Phase C no longer lowers a
+   status. For example, if a row is `review_required` (staff asked for more documents) and a
+   re-submission's vendor result is `pending`, the row now stays `review_required` with the
+   staff reason, where it used to drop to `pending`. This is consistent with J11. Recorded so
+   the owner can see it.
+
+## 5. Required before READY
+
+- **N1:** add `seedDocument` to `TestSubmitVerification_TerminalVerificationIsANoOp`,
+  re-run M8, and correct the M8 entry and the "17/17" count in the evidence file.
+
+N2–N6 are follow-ups.
