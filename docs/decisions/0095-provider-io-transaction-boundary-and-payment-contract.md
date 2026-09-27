@@ -1327,7 +1327,13 @@ finding. Residual, accepted evasion (inherent to a type-based scan, not fixed): 
 adapter, per the review's own ruling.
 
 **M6 (untested single-point checks) - CLOSED for K10/K11/K14; K19 could not be demonstrated as a live
-bypass.** Tests: `TestMigration0105_M6_K10_RequestMustBindToItsOwnSwitch`,
+bypass.** **CORRECTION (see §10.8): this claim did not hold.** All of this section's
+`TestMigration0105_*` tests ran against a scratch database pinned to exactly migration 0105
+(`migration0105Scratch`), which migration 0106 (this same fix round, above) supersedes with
+`CREATE OR REPLACE FUNCTION` on the very three trigger functions these tests exist to cover. The
+"K10/K11/K14 killed" result below was therefore measured against dead code, not what runs in
+production. §10.8 fixes the harness and re-runs every one of these mutations against the live
+bodies. Tests: `TestMigration0105_M6_K10_RequestMustBindToItsOwnSwitch`,
 `TestMigration0105_M6_K11_ExpiredRequestCannotRelease`,
 `TestMigration0105_M6_K14_ExpiresAtCappedAt24Hours` (all three mutation-killed - K10 and K11 required
 combining the approve and release UPDATE into ONE transaction in the test, since the
@@ -1344,22 +1350,116 @@ second layer for this specific property. Recorded here rather than silently clai
 killed.
 
 **Lows.** L1-L4 above (migration 0106). **L5** (audit-on-refusal, error class, 5xx-vs-409): partially
-closed - `writeKillSwitchError` now classifies a trigger `RAISE EXCEPTION` (SQLSTATE `P0001`) as 409
-with a logged class and message, and any OTHER error as a genuine 500 (previously always 409, silently
-under-logged); a separately-committed `OutcomeDenied` audit row for a refused mutation (self-approval,
-platform-lock, etc., beyond the existing foreign-tenant case) is **NOT IMPLEMENTED**. **L6** (platform
-engage against a nonexistent tenant) - CLOSED, `beginKillSwitchCall` checks `tenants` existence for a
-platform-scoped caller (`tenants` carries no RLS); test:
-`TestPaymentsKillSwitchAPI_PlatformCallerAgainstNonexistentTenantIs404`. **L7** (alert label) -
-relabelled here and in the task registry: engage **event IMPLEMENTED** (test:
+closed this round, **CLOSED in §10.8** - `writeKillSwitchError` now classifies a trigger `RAISE
+EXCEPTION` (SQLSTATE `P0001`) as 409 with a logged class and message, and any OTHER error as a genuine
+500 (previously always 409, silently under-logged); a separately-committed `OutcomeDenied` audit row
+for a refused mutation (self-approval, platform-lock, etc., beyond the existing foreign-tenant case)
+was **NOT IMPLEMENTED** this round - see §10.8 for the closure. **L6** (platform engage against a
+nonexistent tenant) - CLOSED, `beginKillSwitchCall` checks `tenants` existence for a platform-scoped
+caller (`tenants` carries no RLS); test: `TestPaymentsKillSwitchAPI_PlatformCallerAgainstNonexistentTenantIs404`.
+**L7** (alert label) - relabelled here and in the task registry: engage **event IMPLEMENTED** (test:
 `TestLogKillSwitchEngagedAlert_EmitsPinnedEventAndFields`), alert **delivery NOT IMPLEMENTED**
 (launch-blocking); runbook entry added (`docs/runbooks/observability-and-alerting.md` §2 item 12).
-**L8** (route-table test) - CLOSED, `TestPaymentsKillSwitchAPI_RouteTable` enumerates all 7 routes and
-asserts 403 (player token) / 401 (no token) on every one.
+K21 (the engage handler's call SITE to that function) survived this round's mutation set - see §10.8
+for the HTTP-level closure. **L8** (route-table test) - CLOSED, `TestPaymentsKillSwitchAPI_RouteTable`
+enumerates all 7 routes and asserts 403 (player token) / 401 (no token) on every one.
 
 **I1-I6 (informational).** Not addressed this round beyond what the fixes above happen to touch (I2's
 policy-shape note and I4's `validateManifest` timing note are unchanged; both are accepted per the
 review's own text, not launch-blocking).
+
+---
+
+### 10.8 Fix round 1c (`payments`, 2026-09-27): RV-PRH-I1 security re-verification 1 (N1) response
+
+Responds to `docs/plans/payment-readiness/rv-prh-i1-killswitch-security.md`'s "Re-verification 1 - fix
+round 1b at `33d4d9e`" section (reviewed against migration 0106). Verdict there: CHANGES REQUIRED,
+narrower - every §10.7 behaviour fix (H1, M1, M2, M3, the M4 test, the M5 scope, L1-L4, L6, L8) is
+confirmed correct on the LIVE code; one new finding, **N1 (HIGH, blocks completion)**, plus the
+already-known-remaining L5/L7/M5 items, are closed here.
+
+**N1 (blocks completion) - CLOSED.** Root cause: migration 0106 `CREATE OR REPLACE`s
+`payment_kill_switches_guard()`, `payment_kill_switch_release_requests_guard()` and
+`payment_kill_switch_session()`, but `migration0105Scratch` (used by every test in
+`migration_0105_integration_test.go`, `killswitch_integration_test.go` and
+`killswitch_claim_predicate_coverage_test.go`) built a scratch database pinned to exactly 0105,
+exercising the SUPERSEDED bodies. `migration0105Scratch` is now repointed to migrate a fresh scratch
+database all the way to HEAD (`pool.MigrateUp(ctx, realMigrationsDir(t))` - the same mechanism
+`migration0106Scratch` already used), exactly the review's own suggested fix. No test in these files
+turned out to be about migration 0105's own history in isolation, so nothing needed to move rather
+than be repointed; the now-dead `migration0105Version`/`findMigrationVersion` helpers (only used to
+compute the pin) were removed along with it. A rule for future migrations is recorded here and should
+be treated as project policy: **any migration that `CREATE OR REPLACE`s a guard/trigger function
+covered by an existing test must repoint that test's scratch harness at HEAD in the SAME change**,
+never leave it pinned below the migration that redefines the function.
+
+Two additional tests close the review's specific "K19's current test uses a tenant staff id, which
+RLS hides anyway" note - the broader probe, a UUID matching NO `staff_users` row at all (immune to
+that RLS side effect), plus the suspended-platform-staff variant it also asked for:
+`TestMigration0105_N1_K19_RandomUUIDInPlatformGUCIsRefused` (with a positive control - a genuine
+platform staff principal in the same GUC still succeeds) and
+`TestMigration0105_N1_K19_SuspendedPlatformStaffUUIDIsRefused`.
+
+**Mutation re-run against the LIVE 0106 bodies (K5, K10, K11, K12, K13, K14, K19).** Each mutation was
+applied directly to `migrations/0106_payment_attempts_platform_guc_hardening.up.sql` on disk (the file
+that now defines these three functions via `CREATE OR REPLACE`), a fresh scratch database was built
+from it, the target test was run with `-count=1`, and the file was restored and verified
+byte-identical (`md5sum` match) before the next mutation. Full transcript:
+`docs/plans/payment-readiness/evidence/prh-i1-mutation-kill.txt`, "Kill-switch fix round 1c" section.
+
+| Mutant | What was removed | Result | Killed by |
+|---|---|---|---|
+| K5 | KS-L6 takeover cancel (true→true engage) | Killed | `TestMigration0105_PlatformTakeoverCancelsOpenTenantRequest` |
+| K10 | `v_req.kill_switch_id <> OLD.id` | Killed | `TestMigration0105_M6_K10_RequestMustBindToItsOwnSwitch` |
+| K11 | `now() >= v_req.expires_at` | Killed | `TestMigration0105_M6_K11_ExpiredRequestCannotRelease` |
+| K12 | `v_req.expected_version <> OLD.version` | Killed | `TestMigration0105_StaleVersionCannotRelease` |
+| K13 | tenant-lock check on a platform-engaged row | Killed | `TestMigration0105_TenantCannotTouchPlatformEngagedRow` |
+| K14 | 24h cap (`LEAST(...)` → plain `COALESCE`) | Killed | `TestMigration0105_M6_K14_ExpiresAtCappedAt24Hours` |
+| K19 | whole principal predicate in `payment_kill_switch_session()` | Killed | `TestMigration0105_N1_K19_RandomUUIDInPlatformGUCIsRefused`, `TestMigration0105_M6_K19_PlatformGUCRequiresGenuinePlatformStaff`, `TestMigration0105_N1_K19_SuspendedPlatformStaffUUIDIsRefused` |
+
+All seven are now genuinely mutation-killed against the code that actually runs. Full-suite
+confirmation after the harness fix: `internal/payments` (all `TestMigration0105`, `TestMigration0106`
+and `TestKillSwitch*` tests, 30/30 pass) and the full `internal/payments -tags integration` suite,
+both against a private database.
+
+**L5 (denied-audit row for a refused mutation) - CLOSED.** `writeKillSwitchError` now writes an
+`audit.OutcomeDenied` row for both refusal classes (`cas_conflict`, `trigger_refusal`) via
+`recordKillSwitchRefusalAudit`, dispatched through `runKillSwitchTx` - a FRESH transaction, dispatched
+exactly like the mutation itself, independent of the failed attempt (which already rolled back,
+discarding anything `audit.Record` would have written inside it). A genuine internal/database error
+(the 500 class) gets no denied-audit row - it is not a considered refusal, and recording an
+infrastructure failure as a "denial" would corrupt the audit trail's meaning. Tests:
+`TestPaymentsKillSwitchAPI_TenantAdminEngageAndFourEyesRelease` (extended - the self-approve refusal
+now asserts exactly one `denied`-outcome `approve_release` audit row with
+`denied_class: "trigger_refusal"`, alongside the later successful approval's own row) and
+`TestPaymentsKillSwitchAPI_CancelReleaseRequest` (extended - the second, already-terminal cancel
+attempt asserts its own denied row). Mutation-killed: deleting both
+`recordKillSwitchRefusalAudit` call sites fails both tests.
+
+**L7/K21 (HTTP-level alert assertion) - CLOSED.** `TestPaymentsKillSwitchAPI_TenantAdminEngageAndFourEyesRelease`
+now also asserts, over the real HTTP stack (a `syncBuffer`-backed `slog.Logger` wired into the test
+server's `Deps.Logger`), that a genuine engage call emits the `payments_kill_switch_engaged_alert` log
+line - not merely that `logKillSwitchEngagedAlert` does so in isolation
+(`TestLogKillSwitchEngagedAlert_EmitsPinnedEventAndFields`, which cannot notice its own call site
+being deleted from the handler). Mutation-killed: deleting the `logKillSwitchEngagedAlert(...)` call
+in `newEngageKillSwitchHandler` fails this test. Alert delivery itself remains **NOT IMPLEMENTED** and
+launch-blocking, unchanged from §10.7.
+
+**M5 residual #1 (addressability gate) - CLOSED.** `credentialscan.Scan`'s pointer-receiver
+`Authenticator` check was gated on `rv.CanAddr()`, but `reflect.PointerTo(t).Implements(...)` needs no
+addressability - it is a pure type-level check. A value-typed adapter stored in a `map[string]any` or
+an `interface{}` (exactly the shape `paymentsAdapters()` returns) is never addressable, so the gate let
+a pointer-receiver `Authenticator` held by value inside such a container slip through undetected. The
+`rv.CanAddr()` condition is removed. Test: `TestScan_CatchesPointerReceiverAuthenticatorInMap`,
+reproducing the review's own probe (`map[string]any{"p": valueAdapter{...}}` reported 0 violations
+before the fix, 1 after - verified both ways). M5 residual #2 (raw `string`/`[]byte` secrets) remains
+inherent to a type-based scan and is unchanged from §10.7; the **PARTIALLY IMPLEMENTED** label stands.
+
+**Verification.** `go build ./...`; `go vet -tags=integration ./...`; `gofmt -l` on every touched
+file; golangci-lint 2.9.0 (`--allow-parallel-runners`) on `internal/payments`, `internal/httpserver`,
+`internal/testsupport/credentialscan` - 0 issues. `internal/payments -tags=integration -race
+-count=1` and `internal/httpserver -tags=integration -race -count=1`, both against a private database
+(never the shared CI database) - green.
 
 ---
 
