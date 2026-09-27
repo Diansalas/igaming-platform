@@ -178,6 +178,75 @@ func TestReceiveCallback_ConcurrentDuplicateCallbacksOnlyOnePosts(t *testing.T) 
 	}
 }
 
+// TestReceiveCallback_ConcurrentDuplicateCallbacks_SecondBlocksOnReceiptKey
+// strengthens the N=8 uncontrolled race above (A7-TESTS-1 R0 hardening):
+// this is a deterministic, two-party version that proves WHERE the second
+// identical delivery actually blocks - R0's own (tenant_id, provider_id,
+// event_fingerprint) unique index on payment_provider_events (ADR 0082 A7
+// §(7); the receipt insert is ApplyReceiptEvidence's first write, before
+// the parent/attempt lock). The first delivery is held open (uncommitted)
+// via loHoldWith so its receipt row is a real, in-flight, not-yet-visible
+// unique-index entry; the second, identical delivery must queue on that
+// row (the standard "wait to see if the conflicting inserter commits"
+// behavior for ON CONFLICT), not race ahead and post a second time.
+func TestReceiveCallback_ConcurrentDuplicateCallbacks_SecondBlocksOnReceiptKey(t *testing.T) {
+	pool := testPool(t)
+	f := seedOrchFixture(t, pool)
+	provider := NewMockProvider("mock-psp-r0", "EUR")
+	registerCapability(t, pool, f, provider, 100)
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-psp-r0": provider}, MultiWebhookCredentialResolver{"mock-psp-r0": NewMockWebhookCredentials(provider)})
+
+	var intent DepositIntent
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		var err error
+		intent, err = initiateDepositWithAttempt(ctx, tx, orch, InitiateDepositParams{
+			Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
+			AssetCode: "EUR", Amount: 9000, PaymentMethod: "card", IdempotencyKey: "dep-r0-block",
+		})
+		return err
+	}); err != nil {
+		t.Fatalf("InitiateDeposit: %v", err)
+	}
+	payload := provider.CallbackPayload(f.tenantID, CallbackEventDeposit, *intent.ProviderReference, "", OutcomeSucceeded, 9000, "EUR", "", false)
+
+	// Blocker: the FIRST delivery, held open (uncommitted) right after its
+	// R0 receipt insert (and everything after it, in the same tx) so a
+	// second, identical delivery has a real, in-flight conflicting row to
+	// queue on.
+	blocker := loHoldWith(t, pool, f.tenantID, "first-delivery", func(ctx context.Context, tx pgx.Tx) error {
+		_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-psp-r0", payload)
+		return err
+	})
+
+	// Racer: the SECOND, identical delivery.
+	racer := loStartRacer(t, pool, f.tenantID, "second-delivery", func(ctx context.Context, tx pgx.Tx) error {
+		_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-psp-r0", payload)
+		return err
+	})
+	blockingPIDs, ok := loWaitBlocked(t, pool, racer.pid, racer.done)
+	if !ok {
+		blocker.release()
+		<-racer.done
+		t.Fatalf("the second, identical delivery never blocked - R0's unique index is not serializing concurrent identical deliveries")
+	}
+	if !loContains(blockingPIDs, blocker.pid) {
+		blocker.release()
+		<-racer.done
+		t.Fatalf("the second delivery is blocked by someone other than the first delivery (pid %d), blocked by %v", blocker.pid, blockingPIDs)
+	}
+
+	blocker.release()
+	<-racer.done
+	if racer.err != nil {
+		t.Fatalf("the second, identical delivery must not error once unblocked: %v", racer.err)
+	}
+
+	if balance := cashBalance(t, pool, f); balance != 9000 {
+		t.Fatalf("expected exactly one deposit's worth (9000) after the second delivery unblocked, got %d", balance)
+	}
+	loAssertBalanced(t, pool, f.tenantID)
+}
+
 // --- Item 4: same key, different payload -----------------------------------
 
 // TestInitiateDeposit_RetryWithDifferentAmountRejected proves a retried
