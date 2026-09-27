@@ -253,6 +253,13 @@ type Bet struct {
 	JurisdictionCode string
 }
 
+// ErrProviderReferenceInvalid (PROVIDER-REF-BOUND-1): a provider-supplied
+// reference (a catalogue external_ref, a settlement claim's asset code)
+// breaks the platform bound (internal/providerref). Deterministic, never
+// retryable; checked before any write. The wrapped *providerref.Error
+// never carries the value.
+var ErrProviderReferenceInvalid = errors.New("sportsbook: provider reference rejected")
+
 // Sentinel errors. Mirrors internal/casino's "specific, distinguishable
 // sentinel" convention throughout this codebase.
 var (

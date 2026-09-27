@@ -381,6 +381,19 @@ func newCasinoWebhookHandler(deps Deps) http.HandlerFunc {
 			apierror.Write(w, requestID, apierror.CodeValidation, "callback rejected")
 			return
 		}
+		if errors.Is(err, casino.ErrProviderReferenceInvalid) {
+			// PROVIDER-REF-BOUND-1: a VERIFIED callback whose provider
+			// reference breaks the platform bound (internal/providerref).
+			// Deterministic and non-retryable: the same 400 class as a
+			// malformed verified body; nothing was read or written. No
+			// casino_callback_rejections row (the value cannot be stored in
+			// its bounded columns) - this log line is the evidence. It
+			// carries field, reason, byte length and a hash prefix only,
+			// never the value (no log amplification).
+			logProviderReferenceRejected(logger, "casino_webhook_provider_reference_rejected", err, providerID, t.ID.String(), requestID)
+			apierror.Write(w, requestID, apierror.CodeValidation, "callback rejected")
+			return
+		}
 		if errors.Is(err, casino.ErrProviderUnavailable) {
 			// The tenant's own CasinoProviderCapability is disabled (or
 			// never configured) - a kill switch, not a platform failure.

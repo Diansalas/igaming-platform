@@ -46,6 +46,21 @@ func TestMapReceiveCallbackError_PostVerificationMappings(t *testing.T) {
 			wantMessage: "failed to simulate deposit callback",
 		},
 		{
+			// PROVIDER-REF-BOUND-1: deterministic, non-retryable 400.
+			name:        "provider_reference_invalid/public_webhook",
+			err:         fmt.Errorf("%w: providerref: provider_reference rejected (too_long, 4096 bytes, sha256 0123456789ab)", payments.ErrProviderReferenceInvalid),
+			kind:        callbackRoutePublicWebhook,
+			wantCode:    apierror.CodeValidation,
+			wantMessage: "callback rejected",
+		},
+		{
+			name:        "provider_reference_invalid/simulate",
+			err:         fmt.Errorf("%w: providerref: provider_reference rejected (too_long, 4096 bytes, sha256 0123456789ab)", payments.ErrProviderReferenceInvalid),
+			kind:        callbackRouteSimulate,
+			wantCode:    apierror.CodeValidation,
+			wantMessage: "invalid provider reference",
+		},
+		{
 			name:        "provider_mismatch/public_webhook",
 			err:         fmt.Errorf("%w: intent expected 5000 EUR, provider confirmed 9999 EUR", payments.ErrCallbackProviderMismatch),
 			kind:        callbackRoutePublicWebhook,

@@ -13,6 +13,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/audit"
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/ledger"
+	"github.com/Diansalas/igaming-platform/internal/providerref"
 	"github.com/Diansalas/igaming-platform/internal/rg"
 	"github.com/Diansalas/igaming-platform/internal/webhookauth"
 )
@@ -924,6 +925,17 @@ func (o *Orchestrator) ReceiveVerifiedCallback(ctx context.Context, tx pgx.Tx, t
 		// 0022 §4.1 applies to the pre-verification, unauthenticated case;
 		// this branch is unreachable before verification succeeds).
 		return ReceiveCallbackResult{}, fmt.Errorf("payments: handle callback: %w", err)
+	}
+
+	// PROVIDER-REF-BOUND-1: bound every provider-supplied reference before
+	// any domain statement. Kept to this one call at the verified-callback
+	// boundary (the orchestrator is redesigned under ADR 0095).
+	if err := providerref.ValidateAll(
+		providerref.Field{Name: "provider_reference", Value: event.ProviderReference, Required: true},
+		providerref.Field{Name: "original_provider_reference", Value: event.OriginalProviderReference},
+		providerref.Field{Name: "asset_code", Value: event.AssetCode},
+	); err != nil {
+		return ReceiveCallbackResult{}, fmt.Errorf("%w: %w", ErrProviderReferenceInvalid, err)
 	}
 
 	switch event.EventType {
