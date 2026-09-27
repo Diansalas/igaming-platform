@@ -9,7 +9,11 @@ package kyc
 
 import (
 	"context"
+	"fmt"
+	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -28,6 +32,87 @@ func migration0100MigrationsDir(t *testing.T) string {
 	return dir
 }
 
+const migration0100Version = int64(100)
+
+// migrationFileVersion parses the 4-digit numeric version prefix off a
+// migration filename (mirrors internal/ledger's own helper of the same
+// name/shape - each package needing this keeps its own unexported copy).
+func migrationFileVersion(name string) (int64, error) {
+	if len(name) < 4 {
+		return 0, fmt.Errorf("migration filename %q is too short to carry a version prefix", name)
+	}
+	v, err := strconv.ParseInt(name[:4], 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("migration filename %q has no numeric version prefix: %w", name, err)
+	}
+	return v, nil
+}
+
+// stagedMigrations0100 copies the real migrations directory into a temp
+// dir, holding back EVERY migration numbered ABOVE 100 - dynamically, by
+// parsing each file's version prefix, never a hand-maintained list of
+// specific later version numbers (internal/ledger's own
+// stagedMigrations0092 precedent, added after migrations 0101/0102
+// broke this package's own hardcoded "down 1 step = migration 100"
+// assumption twice). This keeps TestMigration0100_UpDownUpRoundTrip and
+// TestMigration0100_DownRefusesWhileDecisionsHoldRows exercising 0100's
+// own up/down mechanics in isolation, so 100 is always the actual chain
+// tip in their scratch database regardless of what lands above it later
+// (0101, 0102, 0103, ...) - "MigrateDown(dir, 1)" then always targets
+// 0100 itself, never whatever migration happens to sit above it at HEAD,
+// and can never be defeated by a LATER migration's own down-guard
+// refusing first. When includeMigration100 is false, 0100 itself is also
+// held back (used by tests that need to observe a pre-0100 database,
+// none currently in this file, kept symmetrical with the 0092 precedent
+// for whoever adds one next).
+func stagedMigrations0100(t *testing.T, includeMigration100 bool) (dir string, addHeld func()) {
+	t.Helper()
+	src := migration0100MigrationsDir(t)
+	dir = t.TempDir()
+
+	entries, err := os.ReadDir(src)
+	if err != nil {
+		t.Fatalf("read migrations dir: %v", err)
+	}
+	var held []string
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".sql") {
+			continue
+		}
+		version, err := migrationFileVersion(e.Name())
+		if err != nil {
+			t.Fatalf("%v", err)
+		}
+		heldBack := version > migration0100Version
+		if !includeMigration100 && version == migration0100Version {
+			heldBack = true
+		}
+		if heldBack {
+			held = append(held, e.Name())
+			continue
+		}
+		copyMigrationFile0100(t, src, dir, e.Name())
+	}
+	return dir, func() {
+		for _, name := range held {
+			if strings.HasPrefix(name, "0100_") {
+				copyMigrationFile0100(t, src, dir, name)
+			}
+		}
+	}
+}
+
+func copyMigrationFile0100(t *testing.T, src, dst, name string) {
+	t.Helper()
+	content, err := os.ReadFile(filepath.Join(src, name))
+	if err != nil {
+		t.Fatalf("read %s: %v", name, err)
+	}
+	if err := os.WriteFile(filepath.Join(dst, name), content, 0o644); err != nil {
+		t.Fatalf("write %s: %v", name, err)
+	}
+}
+
 func migration0100ScratchPool(t *testing.T) *db.Pool {
 	t.Helper()
 	url := scratchdb.New(t, "kyc_m0100_")
@@ -37,28 +122,6 @@ func migration0100ScratchPool(t *testing.T) *db.Pool {
 	}
 	t.Cleanup(pool.Close)
 	return pool
-}
-
-// stepsThrough100 returns how many MigrateDown steps are needed, from the
-// current tip, to roll back migration 0100 itself (inclusive) - NOT a
-// hardcoded 1. Later migrations (e.g. 0101, merged in by another
-// workstream after 0100 was applied) can move ahead of 0100 in the
-// chain; a hardcoded "down 1" would then roll back the wrong migration
-// and silently pass a guard test for the wrong reason. applied is the
-// (ascending, per db.Pool.MigrateUp's contract) list of migration
-// numbers just applied to a fresh scratch database.
-func stepsThrough100(t *testing.T, applied []int64) int {
-	t.Helper()
-	steps := 0
-	for _, n := range applied {
-		if n >= 100 {
-			steps++
-		}
-	}
-	if steps == 0 {
-		t.Fatalf("migration 100 not found in the applied chain %v", applied)
-	}
-	return steps
 }
 
 func regclassExists(t *testing.T, pool *db.Pool, name string) bool {
@@ -77,11 +140,10 @@ func regclassExists(t *testing.T, pool *db.Pool, name string) bool {
 // cleanly on a fresh database (QA gap 2 / ADR 0096 §7.2).
 func TestMigration0100_UpDownUpRoundTrip(t *testing.T) {
 	pool := migration0100ScratchPool(t)
-	dir := migration0100MigrationsDir(t)
+	dir, _ := stagedMigrations0100(t, true)
 
-	appliedUp, err := pool.MigrateUp(context.Background(), dir)
-	if err != nil {
-		t.Fatalf("migrate up the full chain: %v", err)
+	if _, err := pool.MigrateUp(context.Background(), dir); err != nil {
+		t.Fatalf("migrate up the full (held-at-0100) chain: %v", err)
 	}
 	if !regclassExists(t, pool, "kyc_enforcement_policies") {
 		t.Fatal("expected kyc_enforcement_policies to exist after migrating up")
@@ -90,19 +152,12 @@ func TestMigration0100_UpDownUpRoundTrip(t *testing.T) {
 		t.Fatal("expected kyc_enforcement_decisions to exist after migrating up")
 	}
 
-	steps := stepsThrough100(t, appliedUp)
-	rolledBack, err := pool.MigrateDown(context.Background(), dir, steps)
+	rolledBack, err := pool.MigrateDown(context.Background(), dir, 1)
 	if err != nil {
-		t.Fatalf("migrate down through 0100: %v", err)
+		t.Fatalf("migrate down 1 (0100): %v", err)
 	}
-	found100 := false
-	for _, n := range rolledBack {
-		if n == 100 {
-			found100 = true
-		}
-	}
-	if !found100 {
-		t.Fatalf("expected migration 100 to be among the rolled-back migrations, got %v", rolledBack)
+	if len(rolledBack) != 1 || rolledBack[0] != 100 {
+		t.Fatalf("expected exactly migration 100 to be rolled back, got %v", rolledBack)
 	}
 	if regclassExists(t, pool, "kyc_enforcement_policies") {
 		t.Fatal("expected kyc_enforcement_policies to be dropped after rolling back migration 0100")
@@ -113,16 +168,10 @@ func TestMigration0100_UpDownUpRoundTrip(t *testing.T) {
 
 	rolledUp, err := pool.MigrateUp(context.Background(), dir)
 	if err != nil {
-		t.Fatalf("re-apply migration 0100 (and anything else rolled back with it): %v", err)
+		t.Fatalf("re-apply migration 0100: %v", err)
 	}
-	foundReapplied100 := false
-	for _, n := range rolledUp {
-		if n == 100 {
-			foundReapplied100 = true
-		}
-	}
-	if !foundReapplied100 {
-		t.Fatalf("expected migration 100 to be among the re-applied migrations, got %v", rolledUp)
+	if len(rolledUp) != 1 || rolledUp[0] != 100 {
+		t.Fatalf("expected exactly migration 100 to be re-applied, got %v", rolledUp)
 	}
 	if !regclassExists(t, pool, "kyc_enforcement_policies") || !regclassExists(t, pool, "kyc_enforcement_decisions") {
 		t.Fatal("expected both tables to exist again after re-applying migration 0100")
@@ -135,15 +184,13 @@ func TestMigration0100_UpDownUpRoundTrip(t *testing.T) {
 // audit trail, mirroring migrations 0048/0052/0075's own precedent.
 func TestMigration0100_DownRefusesWhileDecisionsHoldRows(t *testing.T) {
 	pool := migration0100ScratchPool(t)
-	dir := migration0100MigrationsDir(t)
-	appliedUp, err := pool.MigrateUp(context.Background(), dir)
-	if err != nil {
+	dir, _ := stagedMigrations0100(t, true)
+	if _, err := pool.MigrateUp(context.Background(), dir); err != nil {
 		t.Fatalf("migrate up: %v", err)
 	}
-	steps := stepsThrough100(t, appliedUp)
 
 	tenantID, brandID, playerID, personID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
-	err = pool.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
+	err := pool.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, `INSERT INTO tenants (id, slug, name, licensing_model) VALUES ($1, $2, 'T', 'under_platform_licence')`, tenantID, "t-"+tenantID.String()[:8]); err != nil {
 			return err
 		}
@@ -171,8 +218,8 @@ func TestMigration0100_DownRefusesWhileDecisionsHoldRows(t *testing.T) {
 		t.Fatalf("seed decision row: %v", err)
 	}
 
-	if _, err := pool.MigrateDown(context.Background(), dir, steps); err == nil {
-		t.Fatal("expected migrating down through 0100 to be refused while kyc_enforcement_decisions holds rows")
+	if _, err := pool.MigrateDown(context.Background(), dir, 1); err == nil {
+		t.Fatal("expected migrating down 0100 to be refused while kyc_enforcement_decisions holds rows")
 	}
 	if !regclassExists(t, pool, "kyc_enforcement_decisions") {
 		t.Fatal("expected kyc_enforcement_decisions to still exist after the refused rollback")
@@ -391,14 +438,40 @@ func TestMigration0100_PolicyLifecycleTransitions(t *testing.T) {
 		t.Fatal("expected active -> draft to be refused")
 	}
 
-	// active -> withdrawn, by a different principal, succeeds.
+	// Security F3 (ADR 0096 §17.3, migration 0103): active -> withdrawn
+	// with NO superseded_by_policy_id is refused, even by a different
+	// principal.
 	withdrawer := uuid.New()
 	err = pool.WithPlatformAdmin(context.Background(), withdrawer, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := tx.Exec(ctx, `UPDATE kyc_enforcement_policies SET status = 'withdrawn' WHERE id = $1`, id)
 		return err
 	})
+	if err == nil {
+		t.Fatal("expected active -> withdrawn with no superseded_by_policy_id to be refused (security F3)")
+	}
+
+	// active -> withdrawn WITH a genuine, active, key-matching successor
+	// named in the SAME transaction succeeds.
+	var successorID uuid.UUID
+	err = pool.WithPlatformAdmin(context.Background(), creator, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `
+			INSERT INTO kyc_enforcement_policies
+				(licensing_jurisdiction_id, trigger_type, status, threshold_minor_units, asset_code, legal_review_reference, reason_code, created_by_actor_type, created_by_actor_id)
+			VALUES ($1, 'cumulative_deposit', 'draft', 200, 'EUR', 'legal-ref-2', 'test', 'platform_admin', $2)
+			RETURNING id`, jurisdictionID, creator).Scan(&successorID)
+	})
 	if err != nil {
-		t.Fatalf("expected active -> withdrawn to succeed: %v", err)
+		t.Fatalf("seed successor draft policy: %v", err)
+	}
+	err = pool.WithPlatformAdmin(context.Background(), withdrawer, func(ctx context.Context, tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `UPDATE kyc_enforcement_policies SET status = 'withdrawn', superseded_by_policy_id = $2 WHERE id = $1`, id, successorID); err != nil {
+			return err
+		}
+		_, err := tx.Exec(ctx, `UPDATE kyc_enforcement_policies SET status = 'active' WHERE id = $1`, successorID)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("expected active -> withdrawn with a genuine same-transaction successor to succeed: %v", err)
 	}
 
 	// withdrawn is terminal: no reopening.

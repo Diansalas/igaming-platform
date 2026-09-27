@@ -133,7 +133,8 @@ const (
 // line_count CHECK. MaxPaymentStatementBodyBytes binds a REAL source that
 // reads a statement over the wire: it must stop reading and fail at this
 // many bytes rather than buffer an unbounded body (the MOCK source has no
-// wire body).
+// wire body). Both are enforced while streaming by the helpers in
+// payment_limits.go (security condition C1), which every source must use.
 const (
 	MaxPaymentStatementLines     = 1_000_000
 	MaxPaymentStatementBodyBytes = 256 << 20
@@ -207,6 +208,11 @@ type PaymentStatementSource interface {
 	// whole import (ADR 0095 INV-IO-14, S95-C1).
 	ProviderID() string
 	// Fetch returns the statement for req. It must not be called, and
-	// must refuse, while a database transaction is held.
+	// must refuse, while a database transaction is held. A source that
+	// reads a wire body MUST read it through LimitPaymentStatementBody and
+	// collect lines with a PaymentLineCollector (or use
+	// DecodePaymentStatementJSONLines), returning their sentinels
+	// unwrapped-compatible (errors.Is) so the stream refuses the import
+	// (security condition C1).
 	Fetch(ctx context.Context, req PaymentFetchRequest) (PaymentStatement, error)
 }

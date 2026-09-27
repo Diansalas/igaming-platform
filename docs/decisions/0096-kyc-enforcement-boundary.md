@@ -2616,3 +2616,185 @@ round's time budget. Targeted `-race -tags=integration` run for the
 - **F4, F5:** unchanged from §16.2 — NOT IMPLEMENTED, still open.
 - **ADR 0096 header:** remains `ACCEPTED — PARTIALLY IMPLEMENTED`
   pending F3's full closure and §16.2's other still-open items.
+
+## 18. Fix round 4 (2026-09-27) — security F3 DB-level closure (migration 0103) and a migration-test robustness fix
+
+Migration number **0103** was allocated by the orchestrator specifically
+for §17.3's proposed design (the kill switch, previously expected at
+0103, moved to 0104). This round implements it. Migration 0100's
+`up.sql` was NOT edited (still checksummed, still applied) - 0103 only
+adds a column and does `CREATE OR REPLACE FUNCTION` on 0100's own
+trigger function name, exactly as §17.3 proposed.
+
+### 18.1 Security F3 — CLOSED at the database level
+
+`migrations/0103_kyc_enforcement_policy_supersession.{up,down}.sql`:
+
+- Adds a nullable `kyc_enforcement_policies.superseded_by_policy_id UUID
+  REFERENCES kyc_enforcement_policies(id)`.
+- `CREATE OR REPLACE FUNCTION kyc_enforcement_policies_enforce_lifecycle`
+  (same function, same BEFORE-UPDATE triggers 0100 already attached to
+  it - no new trigger object bound here) now additionally: (a) excludes
+  `superseded_by_policy_id` from the "only status may change" immutability
+  check, alongside `status` itself; (b) requires
+  `superseded_by_policy_id` to be set if and only if the transition is
+  specifically `active -> withdrawn` (draft->withdrawn, a policy that was
+  never enforced, carries no successor requirement); (c) forbids it being
+  set a second time once set; (d) refuses a policy naming itself.
+- A NEW, separate, `DEFERRABLE INITIALLY DEFERRED` **constraint trigger**,
+  `kyc_enforcement_policies_check_supersession`, fires AFTER UPDATE and is
+  checked at COMMIT time (not statement time): it re-reads the named
+  successor's row as of commit and requires it to (i) exist, (ii) be
+  `'active'`, (iii) share the withdrawn row's EXACT enforcement key
+  (`licensing_jurisdiction_id`, `trigger_type`, `play_operation`,
+  `asset_code`). Deferred checking is required, not optional: the
+  partial unique index `kyc_enforcement_policies_one_active` forbids two
+  simultaneously-'active' rows for the same key, so
+  `kyc.SupersedeEnforcementPolicy`'s sanctioned ordering (author the
+  replacement as 'draft', THEN withdraw the old row naming it, THEN
+  activate the replacement) means the successor is genuinely not yet
+  'active' at the moment the withdrawal statement itself runs - only by
+  commit.
+- `kyc.WithdrawEnforcementPolicy` (`internal/kyc/enforcement_admin.go`)
+  is now REFUSED BY THE DATABASE ITSELF when called against an ACTIVE
+  row, because it never sets `superseded_by_policy_id`. There is no
+  longer any argument, flag, or code path that lets a caller withdraw an
+  active policy through this function without the database blocking it -
+  this is no longer a documented convention, it is a schema-enforced
+  fact. Withdrawing a still-`draft` row (never enforced) is unaffected.
+- `kyc.SupersedeEnforcementPolicy`'s step ordering was changed to match
+  the schema's actual requirement: create the replacement (draft) FIRST,
+  THEN withdraw the original naming the replacement's id as
+  `superseded_by_policy_id`, THEN activate the replacement. (Round 3's
+  version withdrew first, which cannot satisfy 0103's immediate
+  NOT-NULL requirement on `superseded_by_policy_id` at all, since the
+  replacement didn't exist yet at that point - round 3 predates 0103 and
+  never needed to set that column.) A new unexported helper,
+  `withdrawEnforcementPolicyWithSuccessor`, is `SupersedeEnforcementPolicy`'s
+  own withdrawal step; the public, standalone `WithdrawEnforcementPolicy`
+  deliberately never has access to set that column.
+- Approver != requester (four-eyes) for both the withdrawal step and the
+  replacement's own creation/activation is UNCHANGED - still 0100's own
+  acting-principal-vs-created_by_actor_id check, itself untouched by
+  0103, still derived only from the `app.platform_admin_principal_id`
+  session GUC, never an application-supplied column.
+
+Tests (`internal/kyc/migration_0103_integration_test.go`, new file):
+`TestMigration0103_WithdrawActiveRefusedWithNoSuccessor` (the literal
+ask - standalone withdrawal of an active row fails against the DB),
+`TestMigration0103_SupersessionRefusedIfSuccessorNeverActivated` (closes
+the "point at an arbitrary/draft row" gap the orchestrator named),
+`TestMigration0103_SupersessionRefusedIfSuccessorKeyDiffers` (closes the
+"point at an arbitrary row" gap for a row that IS active but for the
+wrong key), `TestMigration0103_SupersessionRefusedIfSelfReferencing`,
+`TestMigration0103_DraftWithdrawalCarriesNoSuccessorRequirement` (the
+negative-negative: confirm the never-enforced-draft path is NOT
+gated). `TestMigration0100_PolicyLifecycleTransitions`
+(`internal/kyc/migration_0100_integration_test.go`) was updated: its
+former "active -> withdrawn by a different principal succeeds" assertion
+now first proves a BARE active->withdrawn (no successor) is refused,
+then proves an active->withdrawn WITH a genuine, same-transaction,
+active, key-matching successor succeeds.
+`TestSupersedeEnforcementPolicy_AtomicWithdrawAndActivateReplacement` and
+`TestSupersedeEnforcementPolicy_RollsBackAtomically`
+(`internal/kyc/migration_0100_integration_test.go`, from round 3) needed
+no test-body changes - `kyc.SupersedeEnforcementPolicy`'s own
+re-ordering keeps them passing unmodified, which is itself a small proof
+the public contract didn't change shape, only its internal step order.
+
+Mutation-kill (`docs/plans/payment-readiness/evidence/prh-i3-migration-
+0103-mutation-kill.txt`): 3 of 4 candidate mutations against the new
+trigger logic (drop the NOT-NULL requirement; drop the "must be active"
+check; drop the key-match check) are independently killed by a dedicated
+test; the 4th (drop the explicit self-reference check) does not survive
+as an actual bypass - a self-referencing row's own status is 'withdrawn'
+by the time the deferred trigger re-checks it, so the "must be active"
+check (mutation 2, still intact) already refuses it. Disclosed as
+redundant defense-in-depth, not silently claimed as an independent kill.
+
+**Label: Security F3 IMPLEMENTED** (full DB-level closure - supersedes
+§17.3/§17.6's "PARTIALLY IMPLEMENTED, Go-level mitigation only" status;
+`DR-PRHI3-07` in the task registry is now resolved).
+
+### 18.2 Migration-test robustness fix (orchestrator-reported regression, not self-discovered)
+
+The orchestrator reported that two reviewers found
+`TestMigration0100_UpDownUpRoundTrip` and
+`TestMigration0100_DownRefusesWhileDecisionsHoldRows`
+(`internal/kyc/migration_0100_integration_test.go`) still failing on
+origin after migration 0102 landed - round 3's own fix (§17.4,
+`stepsThrough100`, deriving the MigrateDown step COUNT from the applied
+chain) was insufficient: it correctly rolled back the right NUMBER of
+migrations to reach 100, but 0102's own down-guard can refuse first
+(while 0102's own guarded rows exist), breaking the roll-back sequence
+before it ever reaches 100 - and every future migration added above 100
+carries the same risk indefinitely, however its own down-migration
+happens to be guarded.
+
+Replaced with the robust pattern `internal/ledger` already established
+for this exact problem, `stagedMigrations0092`
+(`internal/ledger/migration_0092_integration_test.go`): a new
+`stagedMigrations0100` helper (`internal/kyc/migration_0100_integration_
+test.go`) copies the real migrations directory into a throwaway temp
+directory, **holding back every migration file numbered ABOVE 100**,
+dynamically, by parsing each filename's version prefix - never a
+hand-maintained list of specific later version numbers, so a migration
+inserted, reordered, or removed above 100 in the future (101, 102, 103,
+104, ...) needs no edit here to keep being handled correctly. Both tests
+now migrate up against this staged, truncated-at-100 chain, so 100 is
+GUARANTEED to be the actual chain tip in their own scratch database
+regardless of what exists in the real repository at HEAD - "MigrateDown
+(dir, 1)" then always targets 0100 itself, and can never be pre-empted by
+a later migration's own down-guard, whatever that guard's own trigger
+condition happens to be. Verified on a fresh, privately created database
+migrated all the way to head (0103): both tests pass, and
+`go test -tags=integration ./internal/kyc/... ./internal/withdrawal/...
+./internal/httpserver/... ./internal/casino/... ./internal/sportsbook/...`
+passes in full against that same head-migrated database.
+
+This is the SAME class of "hardcoded assumption about the chain tip"
+mistake round 3 already made once (§17.4) and is now fixed with the
+actually-robust pattern instead of a second symptom-level patch - future
+migrations landing above 0100 (or above 0103) cannot break these two
+tests again.
+
+### 18.3 F4/F5
+
+Not attempted this round - the F3 schema work, its test suite, and the
+mutation-kill exercise consumed this round's time budget; F4 (richer
+policy-write audit records) and F5 (EvaluateEnforcement independently
+asserting PersonID against PlayerAccountID's own record, rather than
+trusting the caller) both remain open exactly as disclosed in §16.2, not
+re-attempted or re-scoped here.
+
+### 18.4 Verification (fix round 4)
+
+`gofmt`, `go build ./...`, `go vet ./...` and `go vet -tags=integration
+./...` — all clean. `go run ./cmd/migrate verify` against a freshly
+migrated database — all 103 migrations OK, no version gaps, 0100's
+checksum unchanged. `go test -tags=integration -count=1
+./internal/kyc/... ./internal/withdrawal/... ./internal/httpserver/...
+./internal/casino/... ./internal/sportsbook/...` — all pass, against a
+private database created fresh and migrated to head (0103) for this
+round's verification (the long-lived shared `TEST_DATABASE_URL` instance
+this sandbox reuses across many prior sessions currently cannot itself
+migrate past 0100 - migration 0101's own pre-flight guard refuses on
+pre-existing, unrelated dirty `deposit_intents` rows accumulated by other
+past sessions' test runs against that same shared instance; this is a
+pre-existing data-hygiene issue in a reused local sandbox database, not a
+regression introduced by this round, and is outside `identity-
+compliance`'s scope to fix).
+
+### 18.5 Labels (round 4 summary)
+
+- **Security F3:** IMPLEMENTED (full DB-level closure via migration
+  0103; `DR-PRHI3-07` resolved).
+- **Migration-test chain-tip robustness (0100's own tests):** IMPLEMENTED
+  (staged-migrations pattern, immune to future migrations landing above
+  0100).
+- **F4, F5:** unchanged - NOT IMPLEMENTED, still open, disclosed.
+- **LF-I3-3, LF-I3-1:** unchanged from round 3 - IMPLEMENTED.
+- **ADR 0096 header:** `ACCEPTED — PARTIALLY IMPLEMENTED` - F3 is now
+  closed, but §16.2's other still-open items (LF-I3-4/5, F4/F5, B7) and
+  the deposit/payout call-site wiring (PRH-I1's scope) remain, so the
+  header does not yet move to a plain `IMPLEMENTED`.

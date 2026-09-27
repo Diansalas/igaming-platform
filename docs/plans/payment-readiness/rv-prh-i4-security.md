@@ -159,3 +159,202 @@ The implementer's M1–M6 evidence is consistent with the code as it stands. The
 - C1 and C4 must be closed before any non-MOCK webhook adapter is registered.
 - WEBHOOK-EDGE-1 (R1) is still required before real-money launch.
 - Nothing in this review asserts that the control is "secure" beyond the scope listed above.
+
+## 6. Re-verification (round 3, scoped to C1–C4, Lows, T4/T6/T10/T11)
+
+- **Reviewer:** `security`. **Subject:** round 3 as merged at `aefad6f`: `f3308cd`, `923f205`,
+  `bb0a375`, `82253a1`, `304a925`, `7fc1daf`, `55b719b`, `46e08be`, `ef473e6`. ADR 0097 §21.7/§21.8,
+  evidence M7–M11, registry PRH-I4-SECREVIEW-1. The admission code is byte-identical at the current
+  branch head (`5d900c0`): `git diff aefad6f HEAD -- internal/httpserver internal/webhookauth
+  internal/providercred` is empty.
+- **Environment:** a private scratch DB `sec_prh_i4_rv3`, created through `TEST_ADMIN_DATABASE_URL`
+  and owned by `igaming`, with all 102 migrations and the `deploy/init-app-role.sql` runtime grants.
+  It was dropped afterwards. I ran the mutations in a private `git worktree` at `aefad6f`, so they
+  could not collide with the concurrent merges into the shared tree. Every mutation was reverted,
+  `git diff` was clean after each one, and the worktree was removed.
+- **Not in scope:** anything outside the round-3 diffs listed above. No load test and no
+  penetration test were run.
+
+### 6.1 Baseline
+
+The targeted suites were run at `aefad6f` with `-tags=integration`: `TestAdmission_*`,
+`TestWebhookRouteGuard*`, `TestGatedReader*`, `TestRLF4*`, `TestWebhookTenantDirectory*` and
+`TestOpenAPI_WebhookRateLimit*`, plus the unit suites for `providercred`, `webhookauth`,
+`admission` and `config`. **Two tests are RED on the merged branch:**
+`TestAdmission_T6c_CasinoBetLimitedThenRollbackReorder` and `TestAdmission_T6d_CasinoWinBeforeBet`.
+Both fail in setup with "expected 201 launching the game, got 503", and the log shows
+`casino_launch_failed reason=credential_unavailable`.
+
+Both pass at the round-3 commit `ef473e6` itself. This is a semantic merge break with the PRH-I2
+casino launch-path rework, not a defect in the admission code. However:
+- T6c/T6d currently prove nothing;
+- M11, whose kill was recorded by T6c, cannot be reproduced on the merged branch, because T6c now
+  fails before reaching the assertion that M11 is supposed to trip.
+
+### 6.2 Mutation results
+
+| # | Mutation | Result |
+|---|---|---|
+| S1 (payments, re-run) | `admitPreAuth` block moved after `webhookPreamble` in `deposit_handlers.go` | **KILLED** by T10/payments ("body was read before admission rejected…") and also by T11 |
+| S1 (kyc, new domain) | same mutation in `kyc_admin_handlers.go` | **KILLED** by T10/kyc |
+| S2 (re-run) | gate removed from `gatedGetTenantBySlug` | **KILLED** by `TestAdmission_T4_GatedGetTenantBySlug_RespectsSaturation` |
+| N1 | `newGatedReader` not used in the payments **and** casino handlers, so `deps.DB` is passed to `VerifyCallback` (a gatedReader bypass; §4's T4 said it "must kill") | **SURVIVED** the whole admission suite, including the real-pool T4 test. That test drives `gatedReader` directly, never through the HTTP handlers. |
+| N2 | a fourth webhook route (`POST /v1/webhooks/sportsbook/…`) whose handler calls `webhookPreamble` with no `admitPreAuth` | **SURVIVED** `TestWebhookRouteGuard_*`. The guard checks only three hard-coded constructor names and never enumerates route registrations. |
+| N3 | the casino handler's `authErr.Reason == ReasonAdmissionUnavailable` → 503 branch deleted (the C1 fix at the handler hop) | **SURVIVED** everything: the admission suite, including all three `TestAdmission_C1_*`, plus the `providercred` and `webhookauth` unit tests |
+| N4 | the `ErrTenantReaderUnavailable` case deleted from `webhookauth.reasonForResolveError`, so the error falls into `default → ReasonCredentialUnavailable` (**this re-creates the C1 uniform-401 defect exactly**) | **SURVIVED** everything: the admission suite and the unit suites for `webhookauth`, `providercred`, `payments`, `casino` and `kyc` |
+| N5 | the A3 adapter-declared 503 switch disabled (`false && declared && !allows`) | **SURVIVED**. There is no A3 test for a `Retries429=false` provider; T14 covers B1 only. |
+
+N3 and N4 ran alongside the pre-existing T6c/T6d red. No other test failed, which is what I counted
+as "survived".
+
+### 6.3 Per-condition ruling
+
+- **C1: OPEN.** The fix is correct, verified by reading the code along the whole path:
+  - `gatedReader` returns `webhookauth.ErrTenantReaderUnavailable` (`errDBGateUnavailable` is now the
+    same value);
+  - `providercred.Resolver.Resolve` checks for it before the fold and returns it unwrapped;
+  - `reasonForResolveError` maps it to `ReasonAdmissionUnavailable`;
+  - `ResolveAndSeal`, `resolveAndVerify` and each domain's `VerifyCallback` pass the `*AuthError`
+    through unchanged;
+  - each handler's `AuthError` branch answers 503 with `Retry-After` before the uniform 401;
+  - payments' first read hits the bare `errors.Is` branch;
+  - B1/B2 and `WithTenant` are skipped because `err != nil`;
+  - `recordCasinoCallbackRejection` does nothing for an `AuthError`.
+
+  **Ruling on the implementer's disclosure:** `resolver_gate_unavailable_test.go` on its own is
+  **not sufficient**. It pins one of four hops (Resolve), whereas N3 and N4 show that the other two
+  code hops can each be deleted in one line with every test green. N4 in particular silently
+  restores the exact High-severity 401. §2 C1 required a test with the real resolver and a
+  saturated gate, per domain, asserting 503 rather than 401. The existing `TestAdmission_C1_*`
+  tests never reach the resolver, so that requirement is unmet.
+
+  **Required to close:**
+  - (a) An **isolating HTTP-level test per domain** (payments, casino, kyc). It needs a test seam on
+    the A4b gate, for example an acquire hook or counter that admits the first *k* acquisitions for
+    a key and refuses the next one: k=1 for casino/kyc (the slug lookup), k=2 for payments (slug
+    lookup plus `ProviderAcceptsWebhook`). The test must use the real `providercred.Resolver`, and
+    must assert:
+    - 503, not 401;
+    - a `Retry-After` header;
+    - one `webhook_admission_rejected tier=db_gate` line;
+    - zero rows.
+
+    It must kill N3 (in each domain) and N4.
+  - (b) A table-driven unit test on `reasonForResolveError` / `ResolveCredentials`, in both key
+    selections, that also kills N4 cheaply.
+  - The same gate seam closes T4's N1 gap (below).
+
+- **C2: CLOSED for the code.** Every A4b 503 goes through `writeDBGateUnavailable`, which writes
+  `Retry-After: 1` and a `db_gate` line. The two sites are the slug lookup in `webhook_preamble.go`
+  and the three handlers' `errors.Is` and `ReasonAdmissionUnavailable` branches. The HTTP-level
+  `Retry-After` assertion exists only for the slug-lookup site. The credential-resolution site
+  becomes pinned by C1(a).
+  - Residual (Low, L7): no test asserts the `db_gate` log line.
+  - Info: on this tier the log line has `tenant_key=""`, so suppression is per
+    (domain, provider), not per tenant. It is bounded, and `provider_key` is always a registered id
+    here, because the preamble has already refused unregistered providers.
+
+- **C3: OPEN, narrowed.**
+  - Part 1 (T10 kills S1) is **met**: S1 was killed in payments and kyc, and M10 covers the
+    remaining domain the same way.
+  - Part 2 (route completeness) is **not met**. The AST guard scans the three named constructors,
+    so it pins "these three handlers keep calling `admitPreAuth`", but it does not force a *new*
+    webhook route through admission, which was the point of the condition. N2 survives.
+
+  **Required:** make the guard enumerate route registrations. Scan the package's non-test files for
+  `HandleFunc`/`Handle` calls whose pattern literal contains `/v1/webhooks/`. Require the handler
+  argument to be a call to a constructor that is itself checked for `admitPreAuth` and
+  `markWebhookRouteForLogging`, and fail on any pattern it cannot resolve. Record a mutation that
+  adds an unguarded fourth route. The runtime stamp alternative from §2 also closes this.
+
+- **C4: CLOSED.**
+  - `RequireRetrySemantics` refuses `{Retries429:false, Retries503:false}`, with a unit test.
+  - All three domains' orchestrator constructors call `MustRequireRetrySemantics`, and I found no
+    registration path after construction.
+  - The ADR §6.1/§6.3 amendments match the code: A3 uses the adapter-declared status, keyed on
+    `providerKey`, which is a registered id or `_unknown`. The URL provider id is public, so this is
+    not a signature oracle.
+  - New Low **L6**: the A3 half has no test (N5 survived). Add a T14-style A3 test that kills N5.
+    This must land **before any non-MOCK adapter declaring `Retries429=false` is registered**.
+
+- **Lows:**
+  - **L1: CLOSED.** There is an explicit `!Loaded()` → 503 gate in `admitPreAuth`, and T9 asserts
+    503.
+  - **L2: CLOSED for the log line.** `webhook_admission_limiter_overflow` is emitted and
+    `TestAdmission_OverflowLogged` covers it. PRH-I4-METRICS-1 is still open.
+  - **L3: CLOSED for the orchestrator-nil branch.** `markWebhookRouteForLogging` is the first
+    statement in each handler, and `TestRLF4_OrchestratorDisabled_StillRedactsPath` covers it. The
+    unmatched `/v1/webhooks/*` 404/405 residual is **still open**, as Low and non-blocking, bounded
+    by `MaxHeaderBytes`. §21.8's "both leftovers fixed" overstates this.
+  - **L4, L5, I1–I4:** not addressed. They were never blocking, but they are **not registered** in
+    the task registry either. Register them, or record them in the ADR, so they are tracked rather
+    than dropped.
+
+- **T4: OPEN.**
+  - What is met: the real 10-connection pool, 200 concurrent callers, the barrier, the concurrent
+    holders never exceeding the cap, an unrelated `Acquire` that doesn't wait, zero statements for
+    rejected callers, and the S2 kill.
+  - What is not met: the test drives `gatedReader` directly instead of HTTP requests with a valid
+    slug. It therefore does not kill a gatedReader bypass (N1 survived), which §4 required
+    explicitly.
+  - **Required:** the C1(a) gate seam, plus an assertion that a request reaching `VerifyCallback`
+    makes at least one A4b acquisition on its key after the slug lookup (or an equivalent). It must
+    kill N1 in each domain.
+
+- **T10: CLOSED, with an accepted deviation.** Statement capture and A2/A4a variants were not
+  implemented. I accept the zero-body-byte canary as sufficient because:
+  - all three tiers run inside the single `admitPreAuth` call, so ordering is a property of the call
+    site, not of the tier;
+  - the only pre-admission DB path, the slug lookup, sits inside `webhookPreamble` after the body
+    read.
+
+  S1 is killed per domain.
+
+- **T6: OPEN.**
+  - The matrix exists (T6a–f) and asserts zero rows on a limited attempt, exactly one posting on
+    redelivery, idempotent duplicates, `SUM(debits)=SUM(credits)`, and a clean
+    `RunLedgerVsProjection`.
+  - However, T6c/T6d are **red on the merged branch** (§6.1), so the casino half of the matrix and
+    M11 are currently unproven.
+  - The §4 requirement to kill a "B1/B2 moved inside `WithTenant`" mutation directly has no
+    evidence entry in M7–M11. It is still covered only indirectly, through T2b.
+
+  **Required:**
+  - fix the T6c/T6d harness for the PRH-I2 launch path, then re-run M11 on the merged branch;
+  - record the B1/B2-inside-`WithTenant` mutation against the T6 matrix.
+
+- **T11: CLOSED.** The virtualized deadline seam (`armBodyReadDeadline`) is the preferred option
+  under my §4 ruling. It asserts that the A4a slot is held while the read is pending and released
+  at the deadline. It makes no latency claim, so it stays in the main lane.
+
+### 6.4 Final verdict
+
+**APPROVE WITH CONDITIONS: still not closed.**
+
+- **Closed:** C2, C4, L1, L2, L3 (orchestrator-nil), T10, T11.
+- **Open:**
+  - **C1** (isolating test; N3/N4 survive);
+  - **C3** (route-completeness guard; N2 survives);
+  - **T4** (gatedReader-bypass kill; N1 survives);
+  - **T6** (T6c/T6d red on the merged branch; the B1/B2-inside-`WithTenant` mutation is not
+    evidenced).
+- **New:**
+  - **L6** gates any `Retries429=false` adapter;
+  - **L7**: add a `db_gate` log assertion;
+  - register L3's residual, L4, L5 and I1–I4.
+
+Consequences:
+- PAYWH-RL-1 and PRH-I4-SECREVIEW-1 stay open.
+- ADR 0097 stays `ACCEPTED – IMPLEMENTED WITH CONDITIONS`.
+- The registry's PRH-I4 status "all C1–C4 conditions and Lows closed" is inaccurate and should be
+  corrected to reflect this section.
+- **C1 still blocks registering any non-MOCK webhook adapter, and therefore real-money launch.**
+  The production code is correct today, but a one-line regression back to the High-severity 401 is
+  undetected. WEBHOOK-EDGE-1 (R1) is still required before real-money launch.
+
+The next re-verification can be scoped to:
+- the C1(a)/(b) tests and their shared gate seam (which also closes T4);
+- the C3 guard extension;
+- the T6c/T6d fix.
+
+I will re-run N1–N5 and M11 against them.
