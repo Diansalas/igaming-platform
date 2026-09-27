@@ -348,3 +348,106 @@ Not re-reviewed:
 - payments, casino and sportsbook, beyond confirming their `EvaluateEnforcement` operations
 
 No penetration testing was done.
+
+---
+
+## Re-verification 3: KYC fix round 3 (`3671e0e`, merged at `24a9dad`)
+
+- Reviewer: `security` specialist
+- Date: 2026-09-27
+- Reviewed at: `24a9dad`, in a detached worktree.
+- Verdict: **N-1 and N-1b are CLOSED.** The full probe matrix is correct and the tests pin it.
+  - A new finding, **N-3 (MEDIUM, introduced by this round)**: the new staff-sticky `review_required` gate also discards a vendor **rejection**, silently. It must be narrowed before the sticky-gate change (KYC-REVIEWREQ-FORWARD-1) is marked complete.
+  - N-3 is also a launch blocker until fixed.
+  - The rest of this round (the create-side no-reference guard, the 409s, the R2-2 redaction test) is verified.
+
+### Method
+
+- Database: private DB `sec_rv_kyc_i2_r4`, migrated to 105, with `deploy/init-app-role.sql` grants applied (minus `CREATE ROLE igaming`, DB name adapted).
+- Baseline passed: kyc, platform-api and withdrawal, plus `httpserver -run 'KYC|Kyc'`.
+- Probe: an uncommitted probe test.
+  - Matrix cases start with account A approved. Account B (same Person) is rejected via the real `CreateVerification` path plus a verified `rejected` callback.
+  - Each variant row is then created with `CreateVerification` and driven through `receiveCallbackInTx`, except where noted as seeded.
+- The worktree and DB were removed afterwards, and the main tree is clean.
+
+### N-1 / N-1b probe matrix (withdrawal from A)
+
+| Sequence on B | Withdrawal from A | Correct? |
+|---|---|---|
+| rejected → fresh create (`pending`) | denied | yes |
+| rejected → `review_required` callback | denied | yes |
+| rejected → orphan | denied | yes |
+| rejected → `expired` callback | denied | yes (N-1b fixed) |
+| rejected → `expired` seeded directly | denied | yes (N-1b fixed) |
+| rejected → `approved` callback (control) | allowed | yes |
+| rejected → `expired` → `approved` | allowed | yes (the later approval lifts it) |
+| rejected → `approved` → `expired` | allowed | yes (`expired` is ignored; the approval stands) |
+| rejected → `approved` → `rejected` | denied | yes |
+
+### Mutants (each a scripted single edit, reverted afterwards)
+
+| Mutant | Result |
+|---|---|
+| `expired` put back into `finalStatusesSQL` | **KILLED**: `..._N1b_ExpiredOnRejectedAccountDoesNotLiftRejection_ViaCallback`, `..._SeededDirectly` |
+| Sticky gate removed (SQL predicate plus re-read short-circuit) | **KILLED**: `TestApplyForwardOnlyStatus_StaffSetReviewRequiredIsStickyAgainstProviderApproval` |
+| Sticky gate narrowed to `newStatus = approved` only, so a rejection still applies | **SURVIVED**. The rejection-blocking behaviour is not pinned by any test. This is also the N-3 fix. |
+| Create-side "unrecognized outcome with no reference" guard disabled | **KILLED**: `TestCreateVerification_UnrecognizedOutcomeWithNoReferenceLeavesOrphanUntouched` |
+
+### Sticky-gate abuse analysis
+
+**Can a player influence `reviewed_by`? No.**
+- The only writer is `ReviewVerification`. The only route to it is the back-office endpoint behind `auth.RequirePermission(auth.PermVerificationReview)` plus `RequireTenantScope`.
+- No player route, callback path, `applyForwardOnlyStatus`, or create/submit path writes it.
+- A player also cannot set `review_required` with a non-NULL `reviewed_by`.
+
+**Can a staff `review_required` block a legitimate REJECTION? Yes. Finding N-3.**
+
+Reproduced:
+1. A is approved. B has a new verification with a reference, and a compliance officer sets it to `review_required`.
+2. The vendor then sends a verified `rejected` callback for B.
+3. Result:
+   - B stays `review_required`.
+   - **Zero** `kyc.provider_callback` audit rows are written, because `applyCallbackOutcome` writes no audit row when `applied=false`.
+   - The webhook is acknowledged as a no-op, so the vendor does not redeliver.
+   - **Withdrawal from A is ALLOWED.**
+4. Control: the same sequence with a *provider*-set `review_required` ends with B `rejected`, 2 audit rows, and withdrawal from A **denied**.
+
+### N-3: MEDIUM, introduced by `3671e0e`; blocks completing KYC-REVIEWREQ-FORWARD-1, and blocks production launch until fixed
+
+The gate added to `applyForwardOnlyStatus` is `AND NOT (status='review_required' AND reviewed_by IS NOT NULL)`, plus a matching re-read no-op. It blocks *every* provider-driven forward move, including `rejected` and `expired`.
+
+Identity-compliance Ruling 2's title and rationale concern only automated moves to **`approved`**, which is a vendor overriding a human escalation. Blocking a vendor **rejection** weakens enforcement instead:
+
+1. **Cross-account deny lost.** A vendor rejection of the Person is discarded, so the N-1 overlay never sees a `rejected` row on B. Withdrawals from the Person's other approved accounts stay allowed for as long as the case sits in review. Account B itself stays denied, because `review_required` maps to pending.
+2. **Silent evidence loss.** No audit row records the discarded rejection. The vendor stops redelivering, and nothing surfaces the rejection to the officer. The officer can later `approve` the case without ever knowing the vendor rejected it.
+3. **Insider vector.** One officer with `PermVerificationReview` can escalate a case to `review_required` just before an expected vendor rejection. That suppresses the rejection with no trace of it. The escalation itself is audited; the discarded rejection is not.
+
+**Required fix:**
+- Apply the sticky rule only when `newStatus = approved`. Let `rejected` (and `expired`, which the overlay now ignores anyway) apply through the normal forward-only CAS.
+- Add a test: staff `review_required` → vendor `rejected` callback → row is `rejected`, and a withdrawal from the Person's other approved account is denied. That test must kill the approved-only mutant's inverse.
+- Separately, even for the blocked-approval case, write an audit row (for example `kyc.provider_callback` with `status_applied=false` and the provider outcome) whenever a provider result is discarded on a staff-sticky row, so the officer sees the vendor's view.
+
+This is a correction to the implementation's scope, not to Ruling 2.
+
+### Other items
+
+- **Create-side no-reference guard: VERIFIED.** An unrecognized outcome with no reference returns `ErrProviderUnavailable` inside the phase-C transaction, which rolls back and leaves the orphan untouched. It is test-pinned.
+  - LOW, informational: `kyc_create_verification_phase_c_failed` logs `err.Error()`, which now embeds the adapter-supplied outcome string via `%q`. That value is unbounded vendor-controlled text in operator logs. Bound or classify it before a real adapter lands, as with C5.
+- **HTTP 409s and the R2-2 redaction test:** present and passing in the baseline. I did not mutation-test them individually this round.
+- **Primary-account read:** unchanged. The overlay can still only turn an allow into a deny, and only for withdrawal hold and payout. That dispatch is the same as in re-verification 2.
+
+### Launch-blocking flags (updated)
+
+- **N-3** blocks production launch.
+- **N-1 and N-1b** are closed.
+- **KYC-SUBMIT-OUTBOX-1** still blocks registering a real KYC adapter.
+
+### Scope
+
+In scope: the `3671e0e` diff to `internal/kyc/{enforcement,provider,verification_service}.go` and its tests, plus Ruling 2 as it relates to the gate.
+
+Not re-reviewed:
+- ADR 0096 §21 prose, beyond the overlay semantics
+- `kyc_round3_http_test.go`, beyond confirming it passes
+
+No penetration testing was done.
