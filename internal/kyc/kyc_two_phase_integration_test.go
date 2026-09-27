@@ -319,6 +319,74 @@ func TestCreateVerification_CredentialBindingMismatchFailsClosed(t *testing.T) {
 	}
 }
 
+// TestCreateVerification_UnrecognizedOutcomeWithNoReferenceLeavesOrphanUntouched
+// is the code re-review 2 "pre-existing, low" note's own required test
+// (RV-PRH-I2 KYC code re-review 2, 2026-09-27; ADR 0096 §20.5): a PROVIDER
+// DEPENDENT phase-B outcome - an unrecognized ProviderOutcome (e.g.
+// ProviderError) returned WITHOUT a Go error AND with no reference - must
+// leave the phase-A orphan EXACTLY as committed ('unverified', NULL
+// reference), never write a `pending` row with no reference (which would
+// both supersede an existing approval under the primary read and become a
+// permanent upload/submit dead end under N5).
+func TestCreateVerification_UnrecognizedOutcomeWithNoReferenceLeavesOrphanUntouched(t *testing.T) {
+	pool := testPoolSized(t, 1)
+	f := seedFixture(t, pool)
+	base := NewMockKYCProvider()
+	provider := &spyKYCProvider{MockKYCProvider: base}
+	provider.onCreateVerification = func(ctx context.Context, in CreateVerificationInput) (ProviderResult, error) {
+		return ProviderResult{Outcome: ProviderError, Reason: "vendor_ambiguous"}, nil
+	}
+
+	_, err := CreateVerification(context.Background(), pool, NewMockOutboundResolver(), provider, CreateVerificationParams{
+		TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerID, PersonID: f.personID,
+	})
+	if !errors.Is(err, ErrProviderUnavailable) {
+		t.Fatalf("expected ErrProviderUnavailable for an unrecognized outcome with no reference, got %v", err)
+	}
+
+	var status string
+	var ref *string
+	if dbErr := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT status, provider_reference FROM kyc_verifications WHERE tenant_id = $1 AND player_account_id = $2`,
+			f.tenantID, f.playerID).Scan(&status, &ref)
+	}); dbErr != nil {
+		t.Fatalf("read verification: %v", dbErr)
+	}
+	if status != string(StatusUnverified) || ref != nil {
+		t.Fatalf("expected the orphan to be left untouched (unverified, NULL reference), got status=%q reference=%v", status, ref)
+	}
+}
+
+// TestCreateVerification_UnrecognizedOutcomeWithReferenceStillBecomesPending
+// is the control case: an unrecognized outcome WITH a genuine reference
+// (the vendor accepted the request and gave back an id, but its own
+// status code isn't one this platform recognizes yet) is UNAFFECTED by the
+// fix above - it still becomes `pending`, since a real reference exists
+// for a future callback/re-submission to resolve, unlike the no-reference
+// case.
+func TestCreateVerification_UnrecognizedOutcomeWithReferenceStillBecomesPending(t *testing.T) {
+	pool := testPoolSized(t, 1)
+	f := seedFixture(t, pool)
+	base := NewMockKYCProvider()
+	provider := &spyKYCProvider{MockKYCProvider: base}
+	provider.onCreateVerification = func(ctx context.Context, in CreateVerificationInput) (ProviderResult, error) {
+		return ProviderResult{Outcome: ProviderError, Reason: "vendor_ambiguous", ProviderReference: "mock-ref-still-issued"}, nil
+	}
+
+	v, err := CreateVerification(context.Background(), pool, NewMockOutboundResolver(), provider, CreateVerificationParams{
+		TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerID, PersonID: f.personID,
+	})
+	if err != nil {
+		t.Fatalf("CreateVerification: %v", err)
+	}
+	if v.Status != StatusPending {
+		t.Fatalf("expected an unrecognized outcome WITH a reference to still become pending, got %q", v.Status)
+	}
+	if v.ProviderReference != "mock-ref-still-issued" {
+		t.Fatalf("expected the reference to be stored, got %q", v.ProviderReference)
+	}
+}
+
 // TestCreateVerification_CallContextFieldsPassedToProvider pins the exact
 // shape ADR 0095 §15.2/§9.1 specifies: TenantID/ProviderID match the
 // verification, Credential.Domain is "kyc", and IdempotencyKey is "kv:" +
@@ -1105,6 +1173,109 @@ func TestSubmitVerification_AuditRecordsStatusAppliedFlag(t *testing.T) {
 			t.Fatalf("N4: expected status_applied=false on a superseded submission's audit row, got %v (present=%v)", m["status_applied"], ok)
 		}
 	})
+}
+
+// TestApplyForwardOnlyStatus_StaffSetReviewRequiredIsStickyAgainstProviderApproval
+// is KYC-REVIEWREQ-FORWARD-1's own required test (identity-compliance
+// domain ruling, `rv-prh-i2-kyc-identity-compliance.md` Ruling 2,
+// 2026-09-27): a review_required row that a STAFF member set (reviewed_by
+// IS NOT NULL) must NEVER be advanced to approved by a later provider
+// result arriving on its own - only another explicit staff
+// ReviewVerification call may move it forward. A provider result landing
+// on such a row is a documented no-op (status_applied=false), never an
+// error.
+func TestApplyForwardOnlyStatus_StaffSetReviewRequiredIsStickyAgainstProviderApproval(t *testing.T) {
+	pool := testPoolSized(t, 1)
+	f := seedFixture(t, pool)
+	verificationID := seedVerification(t, pool, f)
+	seedDocument(t, pool, f, verificationID, DocumentPassport, "p.png")
+	staffID := seedComplianceStaff(t, pool, f)
+
+	// A compliance officer escalates to review_required - a deliberate
+	// human judgment call, stamping reviewed_by.
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := ReviewVerification(ctx, tx, ReviewVerificationParams{
+			VerificationID: verificationID, StaffID: staffID, NewStatus: StatusReviewRequired, Reason: "needs additional evidence",
+		})
+		return err
+	}); err != nil {
+		t.Fatalf("seed staff review_required: %v", err)
+	}
+
+	// A later provider result, with NO staff actor involved, tries to move
+	// the row forward to approved on its own (statusRank alone would allow
+	// this: review_required(2) < approved's terminal rank(3)) - it must be
+	// refused.
+	provider := NewMockKYCProvider()
+	ref := mustGetProviderReference(t, pool, f.tenantID, verificationID)
+	provider.created[ref] = true
+	provider.SetOutcome(ref, ProviderResult{Outcome: ProviderApproved, Reason: "auto_approved"})
+
+	v, err := SubmitVerification(context.Background(), pool, NewMockOutboundResolver(), provider, f.tenantID, verificationID)
+	if err != nil {
+		t.Fatalf("SubmitVerification: %v", err)
+	}
+	if v.Status != StatusReviewRequired {
+		t.Fatalf("KYC-REVIEWREQ-FORWARD-1: expected a staff-set review_required to stay review_required against a provider approval, got %q", v.Status)
+	}
+	if got := mustGetStatus(t, pool, f.tenantID, verificationID); got != StatusReviewRequired {
+		t.Fatalf("KYC-REVIEWREQ-FORWARD-1: expected the PERSISTED status to still be review_required, got %q", got)
+	}
+	if v.ReviewedBy != staffID {
+		t.Fatalf("KYC-REVIEWREQ-FORWARD-1: expected the staff reviewer's own reviewed_by to survive untouched, got %s (want %s)", v.ReviewedBy, staffID)
+	}
+	m := latestAuditMetadata(t, pool, f.tenantID, "kyc.verification_submitted_to_provider", verificationID)
+	if applied, ok := m["status_applied"].(bool); !ok || applied {
+		t.Fatalf("KYC-REVIEWREQ-FORWARD-1: expected status_applied=false (a documented no-op, not an error) on the sticky-blocked submission, got %v (present=%v)", m["status_applied"], ok)
+	}
+}
+
+// TestApplyForwardOnlyStatus_ProviderSetReviewRequiredStillAdvancesToApproved
+// is KYC-REVIEWREQ-FORWARD-1's own required control case: a
+// PROVIDER-set review_required (no staff actor - reviewed_by is still
+// uuid.Nil, the vendor's own "needs manual review" signal) is UNAFFECTED
+// by the sticky rule above - the ordinary forward-only behaviour (a later
+// vendor `approved` proceeding automatically) still applies, since no
+// human judgment is being silently overridden.
+func TestApplyForwardOnlyStatus_ProviderSetReviewRequiredStillAdvancesToApproved(t *testing.T) {
+	pool := testPoolSized(t, 1)
+	f := seedFixture(t, pool)
+	verificationID := seedVerification(t, pool, f)
+	seedDocument(t, pool, f, verificationID, DocumentPassport, "p.png")
+
+	// First submission: the PROVIDER's own outcome sets review_required -
+	// no staff actor involved, reviewed_by stays uuid.Nil.
+	provider := NewMockKYCProvider()
+	ref := mustGetProviderReference(t, pool, f.tenantID, verificationID)
+	provider.created[ref] = true
+	provider.SetOutcome(ref, ProviderResult{Outcome: ProviderReviewRequired, Reason: "needs_more_evidence"})
+	v, err := SubmitVerification(context.Background(), pool, NewMockOutboundResolver(), provider, f.tenantID, verificationID)
+	if err != nil {
+		t.Fatalf("SubmitVerification (first, provider review_required): %v", err)
+	}
+	if v.Status != StatusReviewRequired {
+		t.Fatalf("test setup: expected the first submission to reach review_required, got %q", v.Status)
+	}
+	if v.ReviewedBy != uuid.Nil {
+		t.Fatalf("test setup: expected a PROVIDER-set review_required to leave reviewed_by uuid.Nil, got %s", v.ReviewedBy)
+	}
+
+	// Second submission: a later provider result reaches a genuine
+	// approved outcome. With no staff actor ever having touched this row,
+	// the ordinary forward-only rule applies and it proceeds.
+	seedDocument(t, pool, f, verificationID, DocumentProofOfAddress, "addr.png")
+	provider.SetOutcome(ref, ProviderResult{Outcome: ProviderApproved, Reason: "auto_approved"})
+	v, err = SubmitVerification(context.Background(), pool, NewMockOutboundResolver(), provider, f.tenantID, verificationID)
+	if err != nil {
+		t.Fatalf("SubmitVerification (second, provider approved): %v", err)
+	}
+	if v.Status != StatusApproved {
+		t.Fatalf("KYC-REVIEWREQ-FORWARD-1: expected a PROVIDER-set review_required to still advance to approved on a later provider decision, got %q", v.Status)
+	}
+	m := latestAuditMetadata(t, pool, f.tenantID, "kyc.verification_submitted_to_provider", verificationID)
+	if applied, ok := m["status_applied"].(bool); !ok || !applied {
+		t.Fatalf("KYC-REVIEWREQ-FORWARD-1: expected status_applied=true for the provider-to-provider forward move, got %v (present=%v)", m["status_applied"], ok)
+	}
 }
 
 // seedOrphanVerificationID creates a genuine phase-A-only orphan row (no

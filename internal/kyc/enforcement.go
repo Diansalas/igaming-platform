@@ -375,35 +375,63 @@ func readLatestVerificationByPlayerAccount(ctx context.Context, tx pgx.Tx, tenan
 // newer; the inner subquery's own predicate is what enforces this per
 // OTHER account, independent of the outer query's tenant/person scope.
 // finalStatusesSQL is N-1's own predicate (RV-PRH-I2 KYC security
-// re-verification, HIGH, pre-existing): the set of statuses that
-// constitute a FINAL, terminal decision - exactly statusRank's own
-// terminal tier (unverified(0) < pending(1) < review_required(2) <
-// terminal(3), provider.go). Used ONLY by crossAccountRejectedOverlay's
-// own "latest row per OTHER account" subquery - never by the primary read
-// (readLatestVerificationByPlayerAccount), whose own "latest row"
-// semantics (§2.6(a)) are unchanged, non-final rows (pending,
-// review_required) included, per the primary-account rule.
-const finalStatusesSQL = `('approved', 'rejected', 'expired')`
+// re-verification, HIGH, pre-existing), CORRECTED by N-1b (security
+// re-verification 2, `rv-prh-i2-kyc-security.md`, and identity-compliance's
+// own domain ruling, `rv-prh-i2-kyc-identity-compliance.md` Ruling 1, both
+// 2026-09-27 - the two independently confirmed the same gap): this is NOT
+// simply "every terminal/final status" (statusRank's own terminal tier,
+// unverified(0) < pending(1) < review_required(2) < terminal(3),
+// provider.go, includes `expired` there). It is deliberately NARROWER -
+// only the two statuses that can ever count as evidence for THIS overlay's
+// own question ("has this other account's rejection been superseded by a
+// later genuine clearance?"). `expired` was wrongly included in an earlier
+// revision of this constant: `expired` is a distinct terminal PROVIDER
+// decision (ADR 0028 §2, `ProviderExpired`), never a status the platform
+// derives from `approved.expires_at` lapsing (§2.6(b) - an approved row
+// stays `status='approved'` forever unless a provider delivers an actual
+// `expired` outcome), and ADR 0096 §2.3 folds `expired` into the SAME deny
+// bucket as `rejected` ("Covers 'never verified', rejected, and expired
+// uniformly"). Including it here let a fresh `expired` row on the rejected
+// account silently become that account's "latest final row" in place of
+// the earlier `rejected` row, which cleared the overlay's deny exactly
+// like N-1's original `pending` exploit did - reproduced by security as
+// N-1b. Excluding `expired` from this set entirely (rather than adding a
+// third branch to reason about) means `expired` is simply invisible to
+// this subquery, so the latest row among ONLY {approved, rejected} is
+// exactly "has this account's most recent REAL decision between those two
+// been a clearance or a rejection" - unaffected by however many `expired`
+// attempts land at any point in between. Used ONLY by
+// crossAccountRejectedOverlay's own "latest row per OTHER account"
+// subquery - never by the primary read (readLatestVerificationByPlayerAccount),
+// whose own "latest row" semantics (§2.6(a)) are unchanged, non-final rows
+// (pending, review_required) included, per the primary-account rule.
+const finalStatusesSQL = `('approved', 'rejected')`
 
 // crossAccountRejectedOverlay implements security re-verification N1's
 // original prescription, NARROWED by N-1 (security re-verification of fix
-// round 492cb20, HIGH, pre-existing - not introduced by that round): "a
-// rejection on another account of the same Person denies a withdrawal"
-// held only until the FIRST reproduction of a fresh, merely-pending
-// CreateVerification on the rejected account - a `pending` row counted as
-// "decided" under the F1 fix, so a player could neutralise the overlay
-// with one ordinary API call (start a new verification; it need not ever
-// be approved). N-1's fix: the overlay is now computed from each OTHER
-// account's latest FINAL/terminal row (finalStatusesSQL above) ONLY -
-// unverified, pending, review_required and any never-decided orphan are
+// round 492cb20, HIGH, pre-existing - not introduced by that round) and
+// CORRECTED by N-1b (security re-verification 2 + identity-compliance
+// Ruling 1, both 2026-09-27): "a rejection on another account of the same
+// Person denies a withdrawal" held only until the FIRST reproduction of a
+// fresh, merely-pending CreateVerification on the rejected account - a
+// `pending` row counted as "decided" under the F1 fix, so a player could
+// neutralise the overlay with one ordinary API call (start a new
+// verification; it need not ever be approved). N-1's fix: the overlay is
+// now computed from each OTHER account's latest row among ONLY
+// finalStatusesSQL's two statuses (approved, rejected) - unverified,
+// pending, review_required, `expired`, and any never-decided orphan are
 // ALL ignored when deciding whether a rejection has been superseded. A
-// rejection on another account is lifted ONLY by a LATER final `approved`
-// (or, symmetrically, superseded by a later final `expired`/`rejected`
-// re-decision) on that SAME account - never by a merely-in-progress
-// re-verification attempt. The primary-account rule (§2.6(a), the gated
-// account's own latest row, non-final rows included) is UNCHANGED - this
-// predicate applies only inside this function's own subquery, scoped to
-// OTHER accounts.
+// rejection on another account is lifted ONLY by a LATER genuine
+// `approved` decision on that SAME account - NEVER by a merely-in-progress
+// re-verification attempt (pending/review_required), and NEVER by a later
+// `expired` outcome either (N-1b's own correction - `expired` is not
+// evidence of a clearance; ADR 0096 §2.3 treats it as a deny, identically
+// to `rejected` - so it must not be able to supersede anything here, and
+// is excluded from the set outright rather than reasoned about as a
+// third case). The primary-account rule (§2.6(a), the gated account's own
+// latest row, non-final rows included) is UNCHANGED - this predicate
+// applies only inside this function's own subquery, scoped to OTHER
+// accounts.
 func crossAccountRejectedOverlay(ctx context.Context, tx pgx.Tx, tenantID, personID, excludePlayerAccountID uuid.UUID) (bool, error) {
 	var rejected bool
 	err := tx.QueryRow(ctx, `

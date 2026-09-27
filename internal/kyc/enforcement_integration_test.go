@@ -353,6 +353,111 @@ func TestEvaluateEnforcement_N1_OrphanOnRejectedAccountDoesNotLiftRejection(t *t
 	}
 }
 
+// --- N-1b (security re-verification 2 + identity-compliance Ruling 1,
+// 2026-09-27): `expired` must never supersede an earlier rejection on the
+// SAME other account. finalStatusesSQL is now restricted to
+// ('approved', 'rejected') - `expired` is excluded from the "latest final
+// row" selection entirely, not merely disallowed from "lifting". ---
+
+// seedVerificationThenCallback creates a fresh, real verification for f
+// (through CreateVerification, exactly like a player's own
+// re-verification) and then delivers a REAL, signature-verified callback
+// with the given terminal outcome through the SAME orchestrator/provider
+// pair the verification was created against - this is "seeded via
+// callback" (as opposed to setVerification's direct SQL write, "seeded
+// directly"), matching security's own N-1 probe methodology
+// (`rv-prh-i2-kyc-security.md`, "Method": "driven by a verified callback
+// through receiveCallbackInTx, not seeded directly").
+func seedVerificationThenCallback(t *testing.T, pool *db.Pool, f fixture, outcome ProviderOutcome, reason string) {
+	t.Helper()
+	provider := NewMockKYCProvider()
+	orch := NewOrchestrator(map[string]KYCProvider{"mock": provider}, NewMockWebhookCredentials(provider))
+	v, err := CreateVerification(context.Background(), pool, NewMockOutboundResolver(), provider, CreateVerificationParams{
+		TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerID, PersonID: f.personID,
+	})
+	if err != nil {
+		t.Fatalf("seedVerificationThenCallback: create verification: %v", err)
+	}
+	in := provider.CallbackPayload(f.tenantID, v.ProviderReference, outcome, reason)
+	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, _, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock", in)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("seedVerificationThenCallback: deliver %s callback: %v", outcome, err)
+	}
+}
+
+// TestEvaluateEnforcement_N1b_ExpiredOnRejectedAccountDoesNotLiftRejection_ViaCallback
+// is N-1b's own exact reproduction, seeded via a real callback (the shape
+// most likely to match a real vendor's own delivery): B's rejection is
+// followed by a NEWER `expired` row, reached through a genuine
+// CreateVerification + verified-callback round trip, not raw SQL. The
+// overlay must still deny - `expired` is not evidence of a clearance
+// (ADR 0096 §2.3 folds it into the same deny bucket as `rejected`) and
+// must never be able to supersede the earlier rejection.
+func TestEvaluateEnforcement_N1b_ExpiredOnRejectedAccountDoesNotLiftRejection_ViaCallback(t *testing.T) {
+	pool := testPool(t)
+	f := seedFixture(t, pool)
+	setVerification(t, pool, f, StatusApproved, nil)
+	second := seedSecondAccount(t, pool, f)
+	setVerification(t, pool, second, StatusRejected, nil)
+	time.Sleep(10 * time.Millisecond)
+	seedVerificationThenCallback(t, pool, second, ProviderExpired, "abandoned")
+
+	d := evalWithdrawal(t, pool, f)
+	if d.Allowed {
+		t.Fatalf("N-1b: expected a callback-delivered `expired` row on the rejected account to NEVER lift the overlay's deny, got %+v", d)
+	}
+}
+
+// TestEvaluateEnforcement_N1b_ExpiredOnRejectedAccountDoesNotLiftRejection_SeededDirectly
+// is the same scenario, seeded directly with setVerification (the same
+// convention every other N-1 test in this file already uses) - both
+// seeding paths must agree, since the fix lives entirely in the read
+// (crossAccountRejectedOverlay's finalStatusesSQL), never in how a row
+// was written.
+func TestEvaluateEnforcement_N1b_ExpiredOnRejectedAccountDoesNotLiftRejection_SeededDirectly(t *testing.T) {
+	pool := testPool(t)
+	f := seedFixture(t, pool)
+	setVerification(t, pool, f, StatusApproved, nil)
+	second := seedSecondAccount(t, pool, f)
+	setVerification(t, pool, second, StatusRejected, nil)
+	time.Sleep(10 * time.Millisecond)
+	setVerification(t, pool, second, StatusExpired, nil)
+
+	d := evalWithdrawal(t, pool, f)
+	if d.Allowed {
+		t.Fatalf("N-1b: expected a directly-seeded `expired` row on the rejected account to NEVER lift the overlay's deny, got %+v", d)
+	}
+}
+
+// TestEvaluateEnforcement_N1b_ApprovedAfterExpiredStillLiftsRejection is the
+// coordinator's own required "walk-back doesn't get stuck" case
+// (identity-compliance addendum, `rv-prh-i2-kyc-identity-compliance.md`):
+// rejected(B) -> expired(B) -> approved(B) must still ALLOW. Excluding
+// `expired` from finalStatusesSQL's set means it is invisible to the
+// "latest row among {approved, rejected}" subquery, so a LATER genuine
+// approved is found and lifts the deny regardless of an `expired` attempt
+// landing in between - the fix must not accidentally get the overlay
+// "stuck" denying forever once an `expired` row has ever appeared.
+func TestEvaluateEnforcement_N1b_ApprovedAfterExpiredStillLiftsRejection(t *testing.T) {
+	pool := testPool(t)
+	f := seedFixture(t, pool)
+	setVerification(t, pool, f, StatusApproved, nil)
+	second := seedSecondAccount(t, pool, f)
+	setVerification(t, pool, second, StatusRejected, nil)
+	time.Sleep(10 * time.Millisecond)
+	setVerification(t, pool, second, StatusExpired, nil)
+	time.Sleep(10 * time.Millisecond)
+	setVerification(t, pool, second, StatusApproved, nil)
+
+	d := evalWithdrawal(t, pool, f)
+	if d.Outcome != OutcomePassed || !d.Allowed {
+		t.Fatalf("N-1b: expected a LATER approved (even after an intervening expired) to lift the overlay, got %+v", d)
+	}
+}
+
 // --- ADR 0096 §2.6(g), RV-PRH-I2 KYC review F1: never-submitted orphan
 // rows are excluded from "latest" enforcement selection ---
 
