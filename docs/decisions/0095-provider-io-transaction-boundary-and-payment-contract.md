@@ -1364,3 +1364,45 @@ This ADR is `NOT IMPLEMENTED` in its entirety. After PRH-I1, I2 and I5:
 - real-vendor behaviour (manifest values, error mapping, statement semantics, redelivery) stays
   `PROVIDER DEPENDENT`;
 - M1 and M2 are `BLOCKED`.
+
+---
+
+## 26. Casino review
+
+**Verdict: APPROVE WITH CONDITIONS**
+
+Reviewed as casino-integration owner, scoped to §15.1 (`casino.LaunchGame`) and CAS-STMT-IO-1
+only.
+
+**§15.1 launch split.** Agreed. Phase A commits the `casino_launch_sessions` intent
+(`status='active'`, `expires_at`-bounded) with no lock and no transaction held across the
+vendor `Launch` call in phase B — consistent with the no-lock-across-I/O principle in §14 and
+the general split pattern in §12. Phase C's CAS on `RevokeLaunchSession`
+(`status='active'` guard, exists today) correctly handles both an explicit vendor failure and
+an ambiguous outcome by revoking rather than assuming success, so a launch token is never
+minted or handed out for a session the platform can't account for. Orphaned-session handling
+is correct and matches this agent's non-negotiable: a crash on either side of the vendor call
+leaves the session `active` and unresolved-to-the-player; it simply expires, and a bet against
+an unknown/expired/revoked session returns `ErrLaunchSessionRequired` with no ledger effect —
+no money moves without a verified bet on a resolvable session. Idempotency is sound: `SessionID`
+is the deterministic external reference/key for phase A, retries after a crash mint a new
+session (existing behaviour, no new state), and there is no path where a duplicate `Launch`
+call or a duplicate token can be produced from the same intent. Launch-token minting itself
+(single-use, opaque, bound to player/provider/game/currency/mode, short TTL, never the brand
+session token) is unchanged by this ADR and is out of scope here — no new review trigger for
+`security`. No objection to §15.1 as specified; no redesign needed on this agent's surface.
+
+**CAS-STMT-IO-1.** Severity agreed: Low, not reachable today. The mock `CasinoStatementSource`
+is in-memory and single-process, so the provider-I/O-inside-a-tx hazard this finding names does
+not exist yet — there is no real vendor call to hold a transaction open across. Fix timing
+agreed: no redesign now; the fetch → ingest → match split from §12.1 is a hard precondition
+before wiring any real casino statement/reconciliation source, not before this stage's mock
+work. This agent will treat "first real casino statement source" as the trigger and will not
+build or accept a real statement-source adapter that reads inside the reconciliation
+transaction — that adapter must land already split per §12.1, gated on `architect` and
+`ledger-finance` sign-off, consistent with this agent's mock-only-without-a-commercial-
+relationship constraint.
+
+**Conditions for full APPROVE:** none blocking merge of this ADR's casino sections as written;
+tracking condition only — CAS-STMT-IO-1's remediation must be verified (not just referenced) at
+the time a real casino statement source is proposed, before that adapter is accepted.

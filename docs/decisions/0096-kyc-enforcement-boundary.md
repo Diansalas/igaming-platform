@@ -43,7 +43,7 @@ is not an engineering call.
 |---|---|---|---|---|---|---|
 | 1 | Deposit initiation | `internal/payments/orchestrator.go:474` `InitiateDeposit`, RG at `:551`, provider call `attemptDeposit` `:581` | **Enters** (external PSP funds the wallet) | RG (`rg.EvaluateEligibility`, `:551`) → provider routing/call. No Risk (ADR 0031 §13 table: payments `NOT IMPLEMENTED`). No KYC. | **ENFORCE** (threshold-gated; see §3) | BLUEPRINT §4.7 "tiered KYC … cumulative deposit thresholds"; registry KYC-ENFORCE-1 explicitly names "deposit … play" |
 | 2 | Deposit callback / crediting | `internal/payments/orchestrator.go` `ReceiveCallback` → settlement of a pending intent | **Enters** (confirms funds already received) | Verify-before-parse webhook trust (ADR 0022/0094); no RG/Risk/KYC re-check at settlement | **NOT-ENFORCE** | The gate belongs at *initiation* (row 1), before the provider is ever called. Re-gating at settlement cannot un-receive funds already sent by the PSP and would only decide what to do with money already inbound — a different, already-covered problem (deposits are never blocked from being *credited*, only from being *initiated*) |
-| 3 | Withdrawal request (hold placement) | `internal/withdrawal/withdrawal.go:291` `RequestWithdrawal` | **Internal** (places a hold; no funds leave yet) | None (no RG, no Risk, no KYC) — confirmed by reading the function; only balance sufficiency is checked | **ENFORCE** (early player-facing check) | BLUEPRINT §4.7 "first withdrawal"; registry KYC-ENFORCE-1 |
+| 3 | Withdrawal request (hold placement) | `internal/withdrawal/withdrawal.go:291` `RequestWithdrawal` | **Internal** (places a hold; no funds leave yet) | None (no RG, no Risk, no KYC) — confirmed by reading the function; only balance sufficiency is checked | **ENFORCE — every withdrawal, not only the first** (revised per security condition 1 / ledger-finance C3, §3.2) | BLUEPRINT §4.7 names "first withdrawal" as the tier at which KYC becomes mandatory; this ADR's mechanism enforces it as "mandatory from the first withdrawal **onward**," never as a one-time exemption a later `rejected`/`expired` status could ride through — see §3.2 for why the original "wallet with zero prior completed withdrawals" framing was a security defect, not a faithful reading of Blueprint's own tier |
 | 4 | Withdrawal promotion to review | `internal/withdrawal/withdrawal.go:429` `MoveToPendingReview` | Internal (state transition only) | None; the function's own doc comment says this is exactly where "automated KYC/velocity/risk checks are queued (owned by identity-compliance, not this package)" | **NOT-ENFORCE at this exact call** — the doc comment's promise is honored by gate #3 running before this state is ever reached, not by adding a second check inside this transition itself, so a request already past a KYC deny never reaches `pending_review` in the first place | Avoids a second read of the same fact for no new information — see §3 for why one early gate is sufficient given #5 is the hard backstop |
 | 5 | Withdrawal payout dispatch | `internal/withdrawal/withdrawal.go:863` `LockApprovedForSubmission` (locks the row; caller then calls the provider and `:1006` `MarkSubmitted`) | **Leaves** (this is the point the platform hands funds to an external payout rail) | Four-eyes `Approve`/`Reject` (policy.go); no RG, no Risk, no KYC | **ENFORCE — the hard backstop** ("at minimum before payout submission", registry KYC-ENFORCE-1) | BLUEPRINT §4.7; CLAUDE.md "enforcement is our code, not the vendor's" |
 | 6 | Withdrawal reject/cancel/reverse | `withdrawal.go:731,892` `Reject`, `LockSubmittedForResolution` | Internal (reverses the hold; no leave) | Existing state machine | **NOT-ENFORCE** | A correction path, not a new leave-the-platform event; nothing to gate |
@@ -277,17 +277,37 @@ is deliberately its own, narrower vocabulary.
 
 Blueprint §4.7's tiered list has two different characters:
 
-1. **Structural — "first withdrawal."** This is a binary fact ("has this
-   wallet ever completed a withdrawal before"), not a legally-reviewed
-   numeric threshold. It requires no jurisdiction-specific value to be
-   safe and Blueprint-faithful. This ADR ships it as a **compiled-in,
-   always-on rule** — every withdrawal payout dispatch (row #5) and
-   every withdrawal request (row #3) for a wallet with zero prior
-   `completed` withdrawals requires `passed`, in every jurisdiction,
-   with no policy row needed. A jurisdiction wanting a *different*
-   structural rule needs its own recorded human decision (§4), never a
-   silent per-tenant override — matching the Authority constraint in
-   §2.3.
+1. **Structural — "KYC passed is mandatory for every withdrawal, from the
+   first one onward."** REVISED (security condition 1, ledger-finance
+   C3): the original sketch computed this as a one-time exemption
+   ("has this wallet ever completed a withdrawal before") — a player who
+   passed once, withdrew once, and was later found `rejected`/`expired`
+   (a forged document, a chargeback investigation) could withdraw a
+   second and every subsequent time completely ungated whenever no
+   `edd_amount` policy happened to be active, because the exemption
+   never re-checked current status. That is value leaving the platform
+   against a known negative KYC state, and it is a bug in the design,
+   not a defensible reading of Blueprint §4.7's "first withdrawal" tier.
+   Blueprint names *when KYC becomes mandatory* (the first withdrawal
+   attempt), not *when it stops applying*. The corrected rule, compiled
+   in and always-on with no policy row needed, in every jurisdiction:
+   **every withdrawal request (row #3) and every withdrawal payout
+   dispatch (row #5) requires the player's current, latest verification
+   to be `passed` and unexpired (§3.6 point (b)), full stop — there is
+   no "already withdrawn once" exemption.** It is scoped **per `Person`
+   identity, not per wallet or per `PlayerAccount`** (ADR 0007's
+   multi-wallet model; ADR 0028's own `person_id` anchor on
+   `kyc_verifications`) so that opening a new wallet, or a new
+   `PlayerAccount` under the same `Person`, cannot reset or bypass it —
+   correcting the sketch's original per-wallet framing, which security
+   separately flagged as a scoping gap even before the exemption defect.
+   A jurisdiction wanting a genuinely different structural rule (e.g.
+   relaxing this) needs its own recorded human decision (§4, HD-KYC-5),
+   never a silent per-tenant override — matching the Authority
+   constraint in §2.3. There is accordingly **no `first_withdrawal`
+   `trigger_type`** in migration 0101 (§3.6) — this rule is not a
+   configurable row at all, exactly as the original sketch already
+   stated, now applied correctly (always-on, not a one-time gate).
 2. **Threshold — cumulative deposit amount, EDD amount, registration
    tier.** These are exactly the values HDR-J-6 and legal review have
    not yet supplied. The mechanism (migration 0101, below) exists and
