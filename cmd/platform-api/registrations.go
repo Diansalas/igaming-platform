@@ -241,6 +241,24 @@ func (b providerBundle) casinoOutboundCredentials() casino.OutboundCredentialRes
 	return b.Credentials.Outbound("casino")
 }
 
+// paymentsOutboundCredentials is InitiateDepositAttempt's phase B
+// credential resolver (ADR 0095 §9.1/§11, PROV-OUTBOUND-CRED-1) -
+// casinoOutboundCredentials' payments twin. PROV-OUTBOUND-CRED-1 (the real
+// per-tenant credential-resolution subsystem) is not built yet
+// (contract.go's own package doc comment), so this always returns the
+// synthetic, non-secret MOCK resolver while only the MOCK payments
+// adapter is wired - never a real vendor credential. A real payments
+// adapter needs the same kind-split-by-adapter-identity pattern
+// casinoOrchestratorResolver already uses for inbound credentials, added
+// when one is actually registered (no commercial PSP relationship exists
+// today - CLAUDE.md's provider-abstraction rule).
+func (b providerBundle) paymentsOutboundCredentials() payments.OutboundCredentialResolver {
+	if b.Payments != nil {
+		return payments.MockCredentialResolver{}
+	}
+	return nil
+}
+
 // kycOrchestratorResolver is the KYC Orchestrator's resolver: the bundle's
 // MOCK resolver directly (KYC wires one provider, design §B2), or a TRUE
 // nil interface when wiring left it unset.

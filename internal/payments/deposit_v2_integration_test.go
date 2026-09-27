@@ -226,7 +226,7 @@ func TestDenyingKYCGate_DeniesBeforeAnyAttempt(t *testing.T) {
 
 type denyingKYCGate struct{}
 
-func (denyingKYCGate) EvaluateDeposit(context.Context, pgx.Tx, uuid.UUID, uuid.UUID, int64, string) (bool, string, error) {
+func (denyingKYCGate) EvaluateDeposit(context.Context, pgx.Tx, uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID, int64, string) (bool, string, error) {
 	return false, "kyc_test_deny", nil
 }
 

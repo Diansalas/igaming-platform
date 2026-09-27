@@ -244,7 +244,7 @@ func (s *Sweeper) processCreated(ctx context.Context, tenantID uuid.UUID, attemp
 	// any further cascade this decline is eligible for (§4.6 case (b)).
 	current := attempt
 	for {
-		updatedIntent, updatedAttempt, child, err := s.Orchestrator.driveCreatedAttempt(ctx, s.Pool, s.KYCGate, s.CredResolver, loadedIntent, current, true)
+		updatedIntent, updatedAttempt, child, _, _, err := s.Orchestrator.driveCreatedAttempt(ctx, s.Pool, s.KYCGate, s.CredResolver, loadedIntent, current, true)
 		if err != nil {
 			return err
 		}

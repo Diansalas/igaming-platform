@@ -42,13 +42,13 @@ import (
 func newFinancialTestServerWithMockSettlement(t *testing.T, pool *db.Pool, issuer *auth.Issuer, orchestrator *payments.Orchestrator) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(New(Deps{
-		Logger:                        slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
-		DB:                            pool,
-		AuthIssuer:                    issuer,
-		ServiceName:                   "platform-api-test",
-		AccessTokenTTL:                5 * time.Minute,
-		RefreshTokenTTL:               time.Hour,
-		PaymentOrchestrator:           orchestrator,
+		Logger:              slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
+		DB:                  pool,
+		AuthIssuer:          issuer,
+		ServiceName:         "platform-api-test",
+		AccessTokenTTL:      5 * time.Minute,
+		RefreshTokenTTL:     time.Hour,
+		PaymentOrchestrator: orchestrator, PaymentsOutboundCredentials: payments.MockCredentialResolver{},
 		PaymentsMockSettlementEnabled: true,
 		PersonResolver:                identityresolution.NewMockPersonResolver(),
 	}))
