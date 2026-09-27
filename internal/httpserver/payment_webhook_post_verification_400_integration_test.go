@@ -16,6 +16,7 @@ package httpserver
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -181,5 +182,94 @@ func TestWebhook_ProviderMismatchAfterVerification_IsDisputedNotRejected(t *test
 	if walletResp.CashBalance != 0 {
 		t.Fatalf("expected NO credit from a mismatched callback, got cash_balance=%d", walletResp.CashBalance)
 	}
-	_ = captured
+	// F6 (independent code review): restores the log-redaction assertion
+	// this test used to make before it moved from 400/rejected to
+	// 200/disputed (ADR 0095 §27.10 inaccurately claimed no assertion was
+	// weakened - this WAS dropped). No log line emitted for this request
+	// may carry the mismatched amount or the provider reference in ANY
+	// attribute value, string-typed or otherwise.
+	for _, l := range captured() {
+		for k, v := range l.attrs {
+			s := fmt.Sprintf("%v", v)
+			if strings.Contains(s, "9999") || strings.Contains(s, providerRef) {
+				t.Errorf("log line %q field %q leaked mismatch content: %v", l.msg, k, v)
+			}
+		}
+	}
+}
+
+// TestWebhook_ReversalAmountMismatchAfterVerification_Maps400 (F5/M12,M13,
+// independent code review): a reversal callback whose declared amount
+// contradicts the ORIGINAL deposit it names (ErrCallbackProviderMismatch,
+// applyReversalReceiptEvidence) is a DIFFERENT §6.2 case from a deposit
+// amount mismatch above - it is still mapped to 400 "callback rejected",
+// never posted, and the log line for it must never carry the raw
+// mismatched amounts or provider references (a surviving mutant here would
+// let ErrCallbackProviderMismatch's branch fall through to the generic
+// 500 path, which logs "error", err - and err's own text embeds both
+// amounts, per applyReversalReceiptEvidence's own doc comment).
+func TestWebhook_ReversalAmountMismatchAfterVerification_Maps400(t *testing.T) {
+	pool, issuer := testEnv(t)
+	orchestrator, mockProvider := newMockOrchestrator()
+	logger, captured := newCapturingLogger()
+	srv := newFinancialTestServerWithLogger(t, pool, issuer, orchestrator, logger)
+
+	tenant := mustCreateTenant(t, pool)
+	brand := mustCreateBrand(t, pool, tenant)
+	mustRegisterCapability(t, pool, tenant.ID, mockProvider)
+
+	player := mustRegisterPlayer(t, srv, brand.Slug)
+	mustActivatePlayer(t, pool, tenant.ID, player.ID)
+
+	const depositAmount int64 = 7000
+	resp := postJSON(t, srv, "/v1/me/deposits", player.Tokens.AccessToken, map[string]any{
+		"asset_code": "EUR", "amount": depositAmount, "payment_method": "card", "idempotency_key": "m12-reversal-mismatch",
+	})
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("expected 201 initiating deposit, got %d", resp.StatusCode)
+	}
+	var intent depositIntentResponse
+	decodeBody(t, resp, &intent)
+	providerRef := strings.TrimPrefix(intent.RedirectURL, "https://mock-psp.invalid/pay/")
+
+	success := mockProvider.CallbackPayload(tenant.ID, payments.CallbackEventDeposit, providerRef, "", payments.OutcomeSucceeded, depositAmount, "EUR", "", false)
+	resp = rawPostCallback(t, srv, "/v1/webhooks/payments/"+tenant.Slug+"/mock", success)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("deposit success callback: expected 200, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	const mismatchedAmount int64 = 1234
+	reversal := mockProvider.CallbackPayload(tenant.ID, payments.CallbackEventDepositReversal, "m12-reversal-ref", providerRef, payments.OutcomeSucceeded, mismatchedAmount, "EUR", "", false)
+	resp = rawPostCallback(t, srv, "/v1/webhooks/payments/"+tenant.Slug+"/mock", reversal)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("F5/M12,M13: a reversal amount mismatch must map to 400, got %d", resp.StatusCode)
+	}
+	var body apierror.Error
+	decodeBody(t, resp, &body)
+	if body.Message != "callback rejected" {
+		t.Fatalf("expected the generic \"callback rejected\" message, got %+v", body)
+	}
+
+	// No ledger effect: the mismatched reversal must never have posted.
+	resp2 := getJSON(t, srv, "/v1/me/wallets/EUR", player.Tokens.AccessToken)
+	var walletResp walletSummaryResponse
+	decodeBody(t, resp2, &walletResp)
+	resp2.Body.Close()
+	if walletResp.CashBalance != depositAmount {
+		t.Fatalf("expected the balance untouched by the rejected reversal, got %d want %d", walletResp.CashBalance, depositAmount)
+	}
+
+	// The log line for this denial must never carry the raw mismatched
+	// amounts or the provider references in any attribute value.
+	for _, l := range captured() {
+		for k, v := range l.attrs {
+			s := fmt.Sprintf("%v", v)
+			if strings.Contains(s, fmt.Sprintf("%d", mismatchedAmount)) || strings.Contains(s, fmt.Sprintf("%d", depositAmount)) ||
+				strings.Contains(s, providerRef) || strings.Contains(s, "m12-reversal-ref") {
+				t.Errorf("log line %q field %q leaked reversal-mismatch content: %v", l.msg, k, v)
+			}
+		}
+	}
 }

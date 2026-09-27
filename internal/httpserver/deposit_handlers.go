@@ -496,17 +496,9 @@ func newPaymentWebhookHandler(deps Deps) http.HandlerFunc {
 		if errors.Is(err, payments.ErrCallbackProviderMismatch) {
 			// Security review P3 (S-5, optional): err's own text embeds the
 			// callback's claimed amount/asset and the deposit's real ones
-			// (see receiveDepositReversalCallback/postDepositSuccess's own
-			// comments) - never pass it to the logger.
+			// (see applyReversalReceiptEvidence/postDepositSuccess in
+			// internal/payments' own comments) - never pass it to the logger.
 			logger.Error("payment_webhook_provider_mismatch", "provider_id", providerID, "tenant_id", t.ID.String())
-			code, msg := mapReceiveCallbackError(err, callbackRoutePublicWebhook)
-			apierror.Write(w, requestID, code, msg)
-			return
-		}
-		if errors.Is(err, payments.ErrDepositIntentNotFound) {
-			// Only reachable by a caller who already passed verification -
-			// see this handler's own doc comment: NOT another enumeration
-			// oracle.
 			code, msg := mapReceiveCallbackError(err, callbackRoutePublicWebhook)
 			apierror.Write(w, requestID, code, msg)
 			return

@@ -441,6 +441,16 @@ func casUpdate(ctx context.Context, tx pgx.Tx, op string, sql string, args ...an
 // itself, it does not evaluate any gate (that is orchestrator wiring,
 // steps b/c). providerID may differ from a prior excluded set only
 // insofar as the caller has already chosen a not-yet-excluded provider.
+// ClaimCreatedForSubmission's T2 predicate refuses a claim once a sibling
+// attempt of the SAME deposit intent has already succeeded (RV-PRH-I1
+// ledger-finance H4/ADR 0095 §4.3 T2's own "NOT EXISTS(succeeded attempt
+// for the same intent)" requirement, mirroring ResubmitAmbiguous's
+// identical T12 guard below): without this, a cascade child left
+// 'created' after a late T13 success on a DIFFERENT sibling could still be
+// claimed and driven to a second, independent provider call for money
+// that is already captured. A payout attempt has no deposit_intent_id, so
+// the EXISTS subquery is vacuously false for it and never refuses a
+// payout claim.
 func ClaimCreatedForSubmission(ctx context.Context, tx pgx.Tx, attemptID uuid.UUID, providerID string, claimToken uuid.UUID, leaseOwner string, leaseUntil time.Time) error {
 	return casUpdate(ctx, tx, "T2 claim created->submitting",
 		`UPDATE payment_attempts
@@ -450,6 +460,12 @@ func ClaimCreatedForSubmission(ctx context.Context, tx pgx.Tx, attemptID uuid.UU
 		     state = 'submitting', last_evidence_kind = 'platform', updated_at = now(),
 		     next_action_at = $5 -- B2/H3: visible to the sweeper even if phase C never runs.
 		 WHERE id = $1 AND state = 'created' AND (provider_id IS NULL OR provider_id = $2)
+		   AND NOT EXISTS (
+		     SELECT 1 FROM payment_attempts sib
+		     WHERE payment_attempts.operation = 'deposit'
+		       AND sib.deposit_intent_id = payment_attempts.deposit_intent_id
+		       AND sib.state = 'succeeded' AND sib.id <> payment_attempts.id
+		   )
 		   AND `+killSwitchNotEngagedSQL("payment_attempts.tenant_id", "$2", "payment_attempts.operation"),
 		attemptID, providerID, claimToken, leaseOwner, leaseUntil,
 	)
@@ -778,8 +794,14 @@ func InsertReceipt(ctx context.Context, tx pgx.Tx, ev ProviderEvent) (uuid.UUID,
 
 // ResolveReceipt is the one-shot (attempt_id, resolution, resolved_at)
 // update (§14 "Receipt one-shot updates"). The caller must already hold
-// the resolved attempt's parent and attempt locks.
-func ResolveReceipt(ctx context.Context, tx pgx.Tx, receiptID uuid.UUID, attemptID uuid.UUID, resolution string) error {
+// the resolved attempt's parent and attempt locks. attemptID is a POINTER:
+// nil means "no single attempt to attach to" (a precondition anomaly, a
+// reversal with no resolvable original, or a non-succeeded reversal's own
+// anomaly - RV-PRH-I1), written as SQL NULL. payment_provider_events.
+// attempt_id is `UUID NULL REFERENCES payment_attempts (id)` - passing
+// uuid.Nil (the all-zero UUID) here instead of NULL would violate that
+// foreign key, since no payment_attempts row ever has that id.
+func ResolveReceipt(ctx context.Context, tx pgx.Tx, receiptID uuid.UUID, attemptID *uuid.UUID, resolution string) error {
 	return casUpdate(ctx, tx, "resolve payment provider event receipt",
 		`UPDATE payment_provider_events SET attempt_id = $2, resolution = $3, resolved_at = now()
 		 WHERE id = $1 AND resolved_at IS NULL`,
