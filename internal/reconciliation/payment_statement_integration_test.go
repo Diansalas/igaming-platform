@@ -306,7 +306,7 @@ func payLineFor(provider, ref, merchant, kind, status string, amount int64) stat
 // wideCoverage is a window covering everything this test creates.
 func wideCoverage(lines ...statement.PaymentStatementLine) statement.PaymentStatement {
 	return statement.PaymentStatement{
-		CoverageStart: time.Now().Add(-time.Hour).UTC(), CoverageEnd: time.Now().Add(time.Hour).UTC(), Lines: lines,
+		CoverageStart: time.Now().Add(-time.Hour).UTC(), CoverageEnd: time.Now().Add(time.Minute).UTC(), Lines: lines,
 	}
 }
 

@@ -46,6 +46,16 @@ var ErrStatementFetchUnderTx = errors.New("payments: statement fetch refused: a 
 type MockStatementSource struct {
 	provider *MockProvider
 	resolver OutboundCredentialResolver
+	// maxLines is the streaming line cap (0 = statement.MaxPaymentStatementLines).
+	maxLines int
+}
+
+// WithMaxLines returns a copy of s with a smaller streaming line cap (tests
+// only; the default is statement.MaxPaymentStatementLines).
+func (s *MockStatementSource) WithMaxLines(n int) *MockStatementSource {
+	c := *s
+	c.maxLines = n
+	return &c
 }
 
 // NewMockStatementSource binds the source to provider (the same instance
@@ -83,20 +93,30 @@ func (s *MockStatementSource) Fetch(ctx context.Context, req statement.PaymentFe
 	if req.ProviderID != s.provider.providerID {
 		return statement.PaymentStatement{}, fmt.Errorf("payments: mock statement source for %q asked for provider %q", s.provider.providerID, req.ProviderID)
 	}
+	// capErr keeps a line-cap sentinel intact: the gate redacts adapter
+	// errors, and the stream must see ErrPaymentStatementTooManyLines.
+	var capErr error
 	gr := callProvider(ctx, s.resolver, callProviderInput{
 		TenantID: req.TenantID, ProviderID: req.ProviderID, ReadOnly: true, Domain: "payments",
 	}, func(_ context.Context, cc CallContext) (statement.PaymentStatement, ErrorClass, error) {
-		return s.provider.statementFor(cc), ErrorClassSucceeded, nil
+		out, err := s.provider.statementFor(cc, s.maxLines)
+		capErr = err
+		return out, ErrorClassSucceeded, nil
 	})
 	if gr.Err != nil {
 		return statement.PaymentStatement{}, gr.Err
+	}
+	if capErr != nil {
+		return statement.PaymentStatement{}, capErr
 	}
 	return gr.Value, nil
 }
 
 // statementFor renders the provider's own records for cc's tenant,
-// sorted by provider reference (deterministic).
-func (m *MockProvider) statementFor(cc CallContext) statement.PaymentStatement {
+// sorted by provider reference (deterministic), through a
+// statement.PaymentLineCollector (security C1: the same streaming line cap
+// a real source must apply; the MOCK has no wire body to byte-limit).
+func (m *MockProvider) statementFor(cc CallContext, maxLines int) (statement.PaymentStatement, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -105,8 +125,9 @@ func (m *MockProvider) statementFor(cc CallContext) statement.PaymentStatement {
 		out.CoverageEnd = out.CoverageStart.Add(time.Microsecond)
 	}
 	if cc.ProviderID != m.providerID {
-		return out
+		return out, nil
 	}
+	lines := statement.NewPaymentLineCollector(maxLines)
 	for ref, a := range m.attempts {
 		if !a.tenantTagged || a.tenantID != cc.TenantID {
 			continue
@@ -122,13 +143,16 @@ func (m *MockProvider) statementFor(cc CallContext) statement.PaymentStatement {
 		case OutcomeDeclined:
 			status = statement.PaymentStatusDeclined
 		}
-		out.Lines = append(out.Lines, statement.PaymentStatementLine{
+		if err := lines.Add(statement.PaymentStatementLine{
 			ProviderID: m.providerID, ProviderReference: ref, MerchantReference: a.merchantReference,
 			Kind: kind, Status: status, Amount: a.amount, AssetCode: a.assetCode, OccurredAt: a.createdAt,
-		})
+		}); err != nil {
+			return statement.PaymentStatement{}, err
+		}
 	}
+	out.Lines = lines.Lines()
 	sort.Slice(out.Lines, func(i, j int) bool { return out.Lines[i].ProviderReference < out.Lines[j].ProviderReference })
-	return out
+	return out, nil
 }
 
 type callContextKey struct{}

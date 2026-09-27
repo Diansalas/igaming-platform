@@ -199,6 +199,17 @@ flowchart LR
   sweeper's `QueryStatus`, proven end to end. Deviations and residuals:
   ADR 0095 §12.7.
 
+  **Interim exclusion (fix round, ADR 0095 §12.7.1).** Until the payments
+  cutover, a `deposit` / `withdrawal_completed` posting linked from an
+  intent or withdrawal request that has no `payment_attempts` row at all
+  (the live legacy path) is not a point-6 mismatch. It is counted as
+  `legacy_unattempted` in every run's audit record. This keeps an
+  expected, per-posting P1 flood out of the signal. An unlinked posting, or
+  one whose intent or request has attempts, is still a P1. The rule
+  retires itself: `legacy_unattempted` must stop growing after the
+  cutover. Until then the ledger join is `PARTIALLY IMPLEMENTED` for
+  legacy-path postings.
+
 ### 2.3 Wallet ↔ casino provider — `BLUEPRINT`
 
 - **Reconciliation key**: `(provider_id, provider_tx_id)` for bet/win/
