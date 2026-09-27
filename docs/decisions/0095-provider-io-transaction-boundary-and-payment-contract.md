@@ -1116,6 +1116,70 @@ Rules for the platform routes:
 **For both surfaces:** the request/response shapes are pinned in OpenAPI with a conformance test
 (§16.2 item 20).
 
+### 10.6 Implementation record (PRH-I1, `payments`, 2026-09-27)
+
+Label: **PARTIALLY IMPLEMENTED.** Data model, guard triggers, RLS and the Go service layer are
+`IMPLEMENTED` and tested. The staff/platform HTTP routes (§10.5), OpenAPI, and orchestrator wiring
+that turns a claim-statement refusal into a T3 `kill_switch` decline are `NOT IMPLEMENTED`. Pending
+`security`, `ledger-finance` and `code-reviewer` gate review.
+
+**Migration number, again.** §12.7's own implementation record already recorded one swap (0102
+reconciliation / 0103 kill switch). By the time this section landed, migration 0103 had been
+claimed by ADR 0096's KYC enforcement policy supersession migration (parallel branch,
+`migrations/0103_kyc_enforcement_policy_supersession.{up,down}.sql`) and 0104 by the PRH-I5
+security follow-up (`migrations/0104_payment_statement_line_charset.{up,down}.sql`). The kill
+switch is therefore **migration 0105** (`migrations/0105_payment_kill_switch.{up,down}.sql`). Read
+every "0102 kill switch" / "0103 kill switch" reference in §10.2-§10.5 above as 0105.
+
+**What landed.**
+- Migration 0105: `payment_kill_switches` and `payment_kill_switch_release_requests`, exactly per
+  §10.2/§10.2.1/§10.2.2 - `payment_kill_switch_session()` derives the acting principal and scope
+  from the transaction's own GUCs (`app.tenant_id`/`app.principal_id`/
+  `app.platform_admin_principal_id`/`app.player_account_id`, the same ones
+  `db.WithPrincipalScope`/`db.WithPlatformAdmin` set) and independently re-validates it against
+  `staff_users`, the migration 0044 pattern; nothing is ever read from an application-supplied
+  column. Both tables: FORCE RLS with the tenant/platform policy family, `DELETE` denied, scope
+  columns (`id`/`tenant_id`/`provider_scope`/`operation_scope`) immutable, `version` forced
+  strictly monotonic on every UPDATE, engage is single-actor, release requires an approved request
+  decided in the SAME transaction (`decided_txid = txid_current()`) by a distinct principal, a
+  platform-engaged row is untouchable from a tenant session, and KS-L6 (a platform takeover cancels
+  any open tenant release request for that switch) is implemented in the same trigger.
+- `internal/payments/killswitch.go`: `EngageKillSwitch` (idempotent single-actor engage/re-engage),
+  `GetKillSwitch`/`ListKillSwitches`, `RequestKillSwitchRelease`, `ApproveAndReleaseKillSwitch`
+  (approval and release in one transaction), `CancelKillSwitchRelease`, and a read-only
+  `KillSwitchEngaged` helper for orchestration code that needs to CHOOSE a terminal reason after an
+  atomic claim-statement refusal (never a substitute for the in-statement predicate).
+- The §10.3 predicate, evaluated **inside** the claim statement itself, exactly as specified:
+  `attempt.go`'s `ClaimCreatedForSubmission` (T2), `InsertSubmittingAttempt` (T1+T2/T1p, converted
+  to an `INSERT ... SELECT ... WHERE NOT EXISTS (...)` form so the combined insert-and-claim path
+  has the same atomicity as the CAS `UPDATE` forms), `ResubmitAmbiguous` (T12), and
+  `InsertCreatedAttempt` (the cascade T1 insert, checked against `provider_scope = '*'` switches
+  only, since no provider is chosen yet at T1 - defence in depth on top of T2's own full check at
+  claim time). `ErrKillSwitchEngaged` is returned by the two `INSERT ... SELECT` forms, which have
+  no prior `created` row to fall back into.
+- `deploy/init-app-role.sql`: `igaming_runtime` gets `SELECT, INSERT, UPDATE` (never `DELETE`) on
+  both new tables, re-asserted on every run, mirroring the 0102/reconciliation grant block.
+- Tests: `internal/payments/migration_0105_integration_test.go` (schema/trigger invariants, scratch
+  databases only) and `internal/payments/killswitch_integration_test.go` (the Go service layer).
+  Mutation-kill evidence for MX17/MX19/MX20/MX21/MX25 is recorded in
+  `docs/plans/payment-readiness/evidence/prh-i1-mutation-kill.txt`.
+
+**What is explicitly NOT built yet (remaining PRH-I1 scope for this section):**
+- §10.5's HTTP routes (tenant staff admin API and platform admin API), permissions
+  (`payments_kill_switch:engage/release/read`, `platform_payments_kill_switch:*`), OpenAPI, and the
+  cross-tenant 404 route-table tests. `killswitch.go` is written so a route handler is a thin
+  wrapper (open a `WithPrincipalScope`/`WithPlatformAdmin` transaction, call the function, write
+  `audit.Record`, commit) but no handler exists yet.
+- The orchestrator wiring that turns a T2/T1p refusal into a deposit's T3 `kill_switch`
+  decline/payout `created` hold with a labelled reason (§10.3's "Deposits: created attempts are
+  moved to rejected (T3, kill_switch)"). Today a refused claim surfaces as `ErrAttemptStateConflict`
+  or `ErrKillSwitchEngaged`; the caller can call `KillSwitchEngaged` to choose the right terminal
+  reason, but no call site does yet.
+- An alert on every engage (S95-C7) - `EngageKillSwitch` performs only the write; no alerting hook
+  is wired.
+- PROV-REVOKE-ALL-1 (a genuine platform-wide, cross-tenant switch) remains deferred per §10.2.2's
+  own text.
+
 ---
 
 ## 11. PROV-OUTBOUND-CRED-1 (approved scope)

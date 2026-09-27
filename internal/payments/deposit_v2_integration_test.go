@@ -34,6 +34,13 @@ func depositV2ScratchPool(t *testing.T) *db.Pool {
 	t.Helper()
 	v := migration0101Version(t)
 	pool, _ := migration0101Scratch(t, "m0101v2_", v)
+	// PRH-I1 kill switch (migration 0105): every claim-path CAS function
+	// (ClaimCreatedForSubmission/InsertSubmittingAttempt/ResubmitAmbiguous)
+	// now evaluates the kill-switch predicate unconditionally, so any
+	// scratch database exercising them needs that table too, not just 0101's.
+	if _, err := pool.MigrateUp(context.Background(), realMigrationsDir(t)); err != nil {
+		t.Fatalf("migrate up to latest: %v", err)
+	}
 	return pool
 }
 
