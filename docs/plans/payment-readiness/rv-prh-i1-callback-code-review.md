@@ -436,3 +436,120 @@ It needs a **live** sibling declining after the intent has succeeded, as in the 
 3. Pin F1's remaining halves (kill N1, N4b, N5b and N5c), M7 (kill N12) and in-callback H2 (kill N15).
 4. Get ledger-finance rulings on the H1 and M1 flags above.
 5. Complete F6. Finish F7, or record what remains as deliberate.
+
+---
+
+## Re-review 2: FH-5 callback security round at `0a96a01` (range `9dab8f3..0a96a01`, 2026-09-27)
+
+- Commits in scope: `be15a11`, `bf5813f`, `7641332`, `dd44d04`, `0a96a01`. INV-DEP-1 is not in this range;
+  it follows as FH-3.
+- I read the source diff (`receipt.go`, `orchestrator.go`, `drive.go`, `sweeper.go`, `cascade.go`,
+  `attempt.go`, `types.go`) and the new tests directly.
+- Environment: a detached worktree at `0a96a01` and a private DB `rv_prhi1cb3_scratch`, built with
+  `priv_db.sh`. All four test URLs pointed at that DB.
+  - `deploy/init-app-role.sql` was **not** re-applied this round, because it contains a (guarded)
+    `CREATE ROLE`. No role, password or shared-infrastructure change was made at any point.
+- Baseline results:
+  - `go test -tags=integration ./internal/payments/` passed (304 s).
+  - The payments/webhook subset of `./internal/httpserver/` passed.
+- Environment incident, not a code finding:
+  - Partway through the mutation run, the shared host ran out of disk. Postgres went into crash
+    recovery, and later the container restarted.
+  - Every mutant whose run hit `No space left on device`, `recovery mode` or `Terminated` was discarded
+    and re-run once access returned. The re-runs used the same private DB, with no credential or role
+    changes. One killed run had left a mutated `receipt.go` in the worktree; it was reverted with
+    `git checkout` before resuming.
+  - Every verdict below comes from a clean run. `git status` was clean after every batch. The DB was
+    dropped and the worktree removed afterwards.
+  - The cluster now holds 143 `m0101%` scratch databases created by `depositV2ScratchPool` (99 before my
+    runs). I cannot tell mine from other agents', so I did not drop any. These leftovers are a plausible
+    contributor to the disk exhaustion, and whoever owns shared test infrastructure should look at them.
+- Mutant method:
+  - Byte-exact anchors, each verified to occur exactly once, with the file restored after each run.
+  - First pass used `-run 'RVLF|Receipt|PayoutDispatch|PollPayout'`.
+  - Every survivor was then re-run against the **full** `internal/payments` package, and still survived.
+
+### Verdict: READY WITH CONDITIONS (the code findings are closed; test pinning gaps remain)
+
+All previously blocking correctness items are now fixed, and each is pinned by a test that fails when the
+fix is removed: R1/F2, R2/F3, F4, F1 (reversal, precondition-anomaly and cross-operation receipts), and
+H4. S-M1 and S-H1's deferred-apply half are also pinned.
+
+The conditions below are all test-pinning gaps on behaviours that are either correct today or reachable
+only through a race or a future code path. None is a live correctness bug that I could reproduce.
+Financial and security sign-off remain with `ledger-finance` and `security`.
+
+### Previous items
+
+| Item | Status | Evidence |
+|---|---|---|
+| **R1/F2** bounded decline reason, all 3 paths + multibyte | **CLOSED, pinned** | The bounding now runs once at the top of `ApplyReceiptEvidence`, before the receipt insert and before the branch to the reversal handler. `drive.go` and `sweeper.go` call `boundedDeclineReasonAudited`. My original probe was re-run with five deliveries: 83-byte ASCII, 80-byte/40-rune multibyte, unresolved (deferred), posting reversal and tombstone reversal. All five returned no error (4× `applied`, 1× `deferred_unresolved`) and wrote 5 redacted `payment.decline_reason_bounded` audits (length plus SHA-256 prefix only). Mutants: Q1 (receipt path) killed by `TestRVLF2_Q3`; Q2 (drive) killed by `TestRVLF_F2_DriveGo_*`; Q3 (sweeper) killed by `TestRVLF_F2_SweeperGo_*`; Q4 (redacted audit dropped) killed by `TestRVLF_F2_OversizeDeclineReasonBounded`. |
+| **R2/F3** live-sibling probe replacing the vacuous test | **CLOSED, pinned** | `finalizeDeclined` and `finalizeAmbiguous` now set `intent.Status = actual` on the sticky path. My live-sibling probe (A1 declines, A2 claimed and pending, A1 late success, A2 cascadable decline) now ends with `1:succeeded,2:declined`, the intent `succeeded`, and no A3. The new `TestRVLF_F3_LiveSiblingDeclineAfterT13NeverCreatesOrphanCascade` really does drive a live A2, through `InitiateDepositAttempt`'s synchronous cascade. Mutants: Q5 (no `intent.Status = actual`) killed by `TestRVLF2_Q2`; N7 (provider_reference not sticky) killed by `TestRVLF_F3_LiveSibling...:661`; N8 (sticky guard removed) killed by `TestRVLF2_Q2`. |
+| **N1** event_type filter | **CLOSED** | The filter is now an allow-list derived from `attempt.Operation`. N1 is killed by `TestRVLF_N1_*` and `TestRVLF_N3_*`. SH1b (the payout filter accepting deposit receipts) is killed by `TestRVLF_N3_DeferredApplyNeverReplaysADepositDeclineAsPayoutEvidence`. |
+| **N4b** precondition anomaly resolved | **CLOSED** | Killed by `TestRVLF_N4b_*` (`:1344`). |
+| **N5b** reference-conflict anomaly resolved | **SURVIVED (full package), effectively equivalent.** See C1. | — |
+| **N5c** cross-operation anomaly resolved | **CLOSED** | Killed by `TestRVLF_N5c_*` (`:1425`). |
+| **N12** (M7) deferred-path recompute | **SURVIVED (full package).** See C2. | — |
+| **N14** T2 succeeded-sibling guard | **CLOSED** | Killed by `TestRVLF_F3_T2ClaimRefusesCreatedSiblingOfSucceededIntent`. |
+| **N15** in-callback deferred apply | **SURVIVED (full package).** See C3. | — |
+| **H2** post-transition attempt | **Fixed in code, unpinned.** | `ApplyReceiptEvidence` re-reads the attempt under lock before `ApplyDeferredReceiptsForAttempt`. Mutant H2r (re-read removed) **SURVIVED** the full package. See C3. |
+| **F6** ADR / evidence corrections | **CLOSED** | ADR 0095 now carries an explicit "Corrections to §27.10" block. It retracts "no test was deleted, skipped, or weakened", corrects the §27.10(a) lock-ordering claim for payout references, discloses that the "6 scenarios" test covers only 3 distinct dispositions (and records that as still open), corrects the stale "migrations 1-104" citations, and relabels the ambiguous-callback adaptation as changed-intent. Original text is kept, and the corrections are appended rather than edited in. |
+| **F7** dead and stale code | **Still partial** | (a) `mapReceiveCallbackError`'s public-route `ErrDepositIntentNotFound` → 404 branch (`payment_callback_errors.go:51-60`) is still present; nothing on the public route can produce it any more, and it would contradict the OpenAPI if reached. (b) `payment_deposit_simulation_handlers.go:172` still names `receiveDepositCallback`. `orchestrator.go:1088` also still names it, but that line describes history, which is acceptable. (c) `setIntentAttempt` still carries two stacked doc comments. (d) The legacy `InitiateDeposit` → `attemptDeposit` → `handleDecline`/`resolveAmbiguous` chain is **not** labelled test-only. Its doc comment still reads as a live entry point, even though it has no non-test caller. |
+
+### S-H1 / S-M1 / H1 / M1 / N2 (security and ledger items in this range)
+
+- **S-M1** (payout receipt reference mismatch disputes): **pinned.** SM1 is killed by
+  `TestRVLF_SM10_PayoutSuccessProviderReferenceMismatchDisputes`, which asserts state `disputed`, a
+  withdrawal that was not completed, and one audit record.
+- **S-H1 deferred-apply half** (a deposit decline never replayed as payout evidence): **pinned** (SH1b
+  killed, see above).
+- **S-H1 event_type allow-list in `ApplyReceiptEvidence`**: **unpinned.** Mutant SH1a
+  (`!known || op != …` changed to `known && op != …`, so an unknown event_type slips through)
+  **SURVIVED** the full package. Today it is equivalent in production, because no caller produces an
+  event type other than `deposit`/`deposit_reversal` (reversal diverts earlier), and `payout` receipts
+  are only built in tests. It is still the stated S-H1 control. See C4.
+- **H1 rule 2** (pending/ambiguous reversal never posts or tombstones): **pinned.** H1a is killed by
+  `TestRVLF_P1_NonFinalReversalOutcomeNeverPosts`.
+- **H1 rule 3** (raw wire outcome kept in the fingerprint): **unpinned.** H1b (`ev.RawOutcome` never set)
+  **SURVIVED** the full package. See C5.
+- **M1** (terminal amount/asset mismatch is audited): **pinned** for the `succeeded` cell (M1a killed).
+- **N2** (a success after a tombstone disputes instead of hitting the unique-index error, in drive and
+  sweeper): **pinned.** N2d and N2s are both killed.
+
+### Conditions (test pinning; none is a reproduced live bug)
+
+- **C1 (N5b, Low).** `TestRVLF_N5b_ReferenceConflictAnomalyReceiptResolved` does not exercise the
+  branch it is named for. The evidence combines provider-ref A with merchant-ref B, so
+  `ResolveAttemptForEvidence` already returns `Anomaly/ReferenceConflict`, and the precondition-anomaly
+  branch (N4b's) resolves the receipt. The precondition-2 block (`receipt.go` around line 510, "provider
+  reference already bound to a DIFFERENT attempt") can only be reached in a READ COMMITTED race: the
+  reference becomes bound between the two reads. Either delete it and rely on the resolver, or cover it
+  with a deliberately interleaved test. Rename the existing test either way.
+- **C2 (M7/N12, Low).** Nothing asserts the intent-status projection after
+  `ApplyDeferredReceiptsForAttempt` applies a state-changing receipt (ambiguous or dispute).
+  `TestRVLF_P8` asserts only the success path, where `postDepositSuccess` writes the status directly.
+  Add a deferred ambiguous- or mismatch-evidence case that asserts `deposit_intents.status`.
+- **C3 (H2/N15/H2r, Low).** The in-callback `ApplyDeferredReceiptsForAttempt` call and its
+  post-transition re-read are unpinned. The only path that makes them matter is a receipt resolved by
+  merchant reference that performs T4. The live callback path never sets `MerchantReference`, so this
+  is latent in production, but `ApplyReceiptEvidence` is exported and tests drive it that way.
+  Suggested test: a submitting attempt, a stored deferred success for reference R, then
+  `ApplyReceiptEvidence{MerchantReference: attempt, ProviderReference: R, Outcome: pending}`. Assert the
+  deferred success was applied. That kills both N15 and H2r.
+- **C4 (S-H1 allow-list/SH1a, Low; for `security` to confirm).** Add one test that sends an unrecognized
+  `EventType` (for example `payout_returned`) through `ApplyReceiptEvidence` against a resolvable
+  attempt, and asserts `DispositionAnomaly`, no state change, and a resolved receipt.
+- **C5 (H1 rule 3/H1b, Low; for `ledger-finance` to confirm).** Add a test that delivers the same
+  reversal twice with different final wire outcomes (`succeeded`, then `declined`-as-carrier). Assert two
+  distinct receipt rows, exactly one ledger reversal, and both wire outcomes present in audit metadata.
+- **C6 (F7 remainder, Low).** Remove the dead public-route `ErrDepositIntentNotFound` mapper branch, fix
+  the stale simulation-handler comment, merge the duplicated `setIntentAttempt` doc comment, and label the
+  legacy `InitiateDeposit` chain test-support-only (or retire it).
+
+Observations, not conditions:
+
+- `boundedDeclineReasonAudited` on the receipt path writes one audit per delivery, including exact
+  duplicates. That is acceptable (append-only and redacted), but noisy under PSP redelivery storms.
+- Collapsing every oversized reason to one sentinel means two deliveries that differ only in their long
+  reason text produce the same fingerprint. That is acceptable, because the reason is not an effect-bearing
+  field.
