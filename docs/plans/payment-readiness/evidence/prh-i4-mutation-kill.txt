@@ -138,3 +138,139 @@ report to the orchestrator repeats this list):
     exercised at the httpserver layer with a real statement-counting harness (ADR 0022 §3
     point 9's existing TestPointNineCapture_* family lives in internal/casino/payments/kyc,
     not httpserver, and was not extended for admission in this round).
+
+--- Round 3 (security review rv-prh-i4-security.md, APPROVE WITH CONDITIONS) ---
+
+M7 C1 "DB-gate rejection during real credential resolution surfaces as 503, never the
+   uniform 401" -> internal/providercred/resolver_gate_unavailable_test.go's
+   TestResolve_GateUnavailable_PropagatesDistinctSentinel: KILLED (removing the
+   errors.Is(err, ErrTenantReaderUnavailable) branch in internal/providercred/resolver.go's
+   Resolve, so a DB-gate rejection folds into the generic ErrCredentialUnavailable like any
+   other resolver error).
+    File: internal/providercred/resolver.go, Resolver.Resolve.
+    Diff:
+      - if errors.Is(err, webhookauth.ErrTenantReaderUnavailable) {
+      -     return webhookauth.CredentialSet{}, webhookauth.ErrTenantReaderUnavailable
+      - }
+      - return webhookauth.CredentialSet{}, webhookauth.ErrCredentialUnavailable
+      + return webhookauth.CredentialSet{}, webhookauth.ErrCredentialUnavailable
+    Command: go test ./internal/providercred/... -run TestResolve_GateUnavailable -v
+    Result: FAIL - "want errors.Is(err, ErrTenantReaderUnavailable), got webhookauth: no
+    webhook credential available for this tenant/provider/key" - with the mutation applied
+    the distinct sentinel is lost and every DB-gate rejection folds into the generic
+    credential-unavailable error, reproducing the security review's HIGH finding exactly.
+    Confirmed reverted and green afterward (go test ./internal/providercred/...).
+    Scope note (recorded honestly, not silently smoothed over): the THREE httpserver-level
+    end-to-end tests added alongside this
+    (webhook_admission_credential_resolution_integration_test.go,
+    TestAdmission_C1_{Payments,Casino,KYC}CredentialResolutionGateRejection_Maps503) do NOT
+    themselves isolate this specific code path - checked by deliberately re-running this
+    exact mutation against them (`go test ./internal/httpserver/... -run TestAdmission_C1
+    -tags=integration`): all three still PASSED with the mutation applied. Root cause: the
+    tenant-slug lookup (webhook_preamble.go's gatedTenantLookup) and credential resolution
+    share the identical A4b gate key (domain|tenantKey|providerKey, computed the same way
+    both times from the request's slug/providerID), so forcing DBGatePerKey/DBGateUnknown
+    to 0 makes the gate refuse at the FIRST read (tenant-slug lookup, already correctly
+    503-mapped before this round) and the request never reaches
+    providercred.Resolver.Resolve at all. Those three tests are still valid, useful
+    end-to-end coverage of "a saturated A4b gate never surfaces as the uniform 401, with
+    real orchestrators, in all three domains" - they are simply not, by themselves, C1's
+    isolating regression test; that file's own doc comment has been corrected to say so
+    plainly rather than overclaim. TestResolve_GateUnavailable_PropagatesDistinctSentinel
+    above is the actual isolating proof for the C1 code change.
+
+M8 S2 "the A4b gate is removed from the tenant-slug lookup path (gatedGetTenantBySlug)":
+   KILLED.
+    File: internal/httpserver/webhook_admission.go, gatedGetTenantBySlug.
+    Diff: removed the gate.Acquire(...)/defer gate.Release(...) pair, calling
+    getTenantBySlug directly against the pool.
+    Command: go test ./internal/httpserver/... -run TestAdmission_T4_GatedGetTenantBySlug -v
+    -tags=integration
+    Result: FAIL - "expected gatedGetTenantBySlug to fail once the gate key is already
+    saturated" (the call succeeded straight through the saturated gate).
+
+M9 C3 "a webhook handler's own body no longer directly names admitPreAuth" (casino_
+   handlers.go, extracted into a same-file top-level helper function instead): KILLED.
+    File: internal/httpserver/casino_handlers.go, newCasinoWebhookHandler.
+    Diff: replaced the direct `deps.webhookAdmission.admitPreAuth(...)` call inside the
+    handler closure with a call to a new, differently-named top-level function
+    (`casinoAdmitHelperMutationTest(deps, w, r, retries429)`) that itself calls
+    admitPreAuth - i.e. the literal identifier "admitPreAuth" no longer appears anywhere in
+    newCasinoWebhookHandler's own AST.
+    Command: go test ./internal/httpserver/... -run TestWebhookRouteGuard -v -tags=integration
+    Result: FAIL - "newCasinoWebhookHandler (casino_handlers.go): missing a call to
+    admitPreAuth" (the OTHER two domains' subtests, untouched, still passed - confirming the
+    guard's per-handler scope).
+    Note (recorded honestly): a DIFFERENT candidate mutation was tried first and did NOT
+    fail the guard - wrapping the call in a closure LITERAL defined and invoked inline,
+    still textually inside newCasinoWebhookHandler's own body
+    (`callAdmitPreAuth := func() (...) { return ...admitPreAuth(...) }; ...:=
+    callAdmitPreAuth()`). That is not a guard gap: go/ast.Inspect walks into a nested
+    *ast.FuncLit*'s body as part of the enclosing *ast.FuncDecl*'s own tree, so the
+    identifier is genuinely still present in newCasinoWebhookHandler's AST - the guard
+    correctly still finds it. Only extraction to a genuinely separate, differently-named
+    top-level function (M9's actual mutation above) removes the identifier from the
+    handler's own body, which is exactly the boundary this AST-based guard is scoped to
+    police (a future refactor deleting the call outright, or routing it through some other
+    package's differently-named function, both look identical to this mutation from the
+    guard's point of view).
+
+M10 S1 "admission runs AFTER the body has already been read / the slug already looked up"
+   (deposit_handlers.go): KILLED.
+    File: internal/httpserver/deposit_handlers.go, newPaymentWebhookHandler.
+    Diff: swapped the order of the webhookPreamble(...) block (which reads the body) and
+    the admitPreAuth(...) call, so the body is read before admission runs.
+    Command: go test ./internal/httpserver/... -run TestAdmission_T10 -v -tags=integration
+    Result: FAIL - "body was read before admission rejected the request - ORD-2 violated
+    (possible S1 mutation)" (all three domain subtests reuse this same canary shape; only
+    the mutated domain's subtest failed, confirming the guard is per-handler, not global).
+
+M11 T6 idempotency matrix's own tombstone-decline assertion (T6c, security's exact "bet ->
+   rollback" ordering requirement): KILLED.
+    File: internal/casino/orchestrator.go, postBet's E3 tombstone check.
+    Diff:
+      - } else if tombstoned {
+      + } else if false && tombstoned {
+    Command: go test ./internal/httpserver/... -run TestAdmission_T6c -v -tags=integration
+    Result: FAIL - the late-arriving bet, which must be declined (200 ack, zero rows)
+    against its own tombstone, instead attempted to post and errored on the ledger's own
+    idempotency-key lookup (500), proving T6c's assertions actually depend on postBet's E3
+    tombstone check rather than passing vacuously.
+
+Every Round 3 mutation above was reverted and the affected test(s) re-confirmed green
+before moving to the next (git status --short showed only the mutation's own diff at the
+time each was applied, per this file's established discipline).
+
+T6 (financial idempotency matrix, security's exact specification) - status:
+internal/httpserver/webhook_admission_t6_idempotency_integration_test.go implements, through
+the REAL ADR 0097 admission layer (both pre-auth and B1 verified tiers enabled, never
+bypassed):
+  - T6a: payments deposit, B1-limited first attempt (zero rows) -> redelivered (exactly one
+    row) -> a third, duplicate delivery (still exactly one row) -> wallet balance check.
+  - T6b: the payments deposit backlog-replay B2 load scenario - 20 concurrent, distinct,
+    already-created legitimate deposit callbacks, well within every tier's burst and the
+    A4b DB gate/bulkhead's caps, asserting ZERO 503s and exactly one posting each.
+  - T6c: casino bet B1-limited (zero rows) -> rollback of the SAME reference admitted
+    (writes a tombstone) -> the retried original bet declines against its own tombstone
+    (200 ack, zero NEW rows - one total row, the tombstone itself).
+  - T6d: casino win-before-bet (zero rows) -> bet posts -> redelivered win posts exactly
+    once.
+  - T6e: payments deposit reversal, B1-limited (zero rows) -> redelivered (exactly one row)
+    -> a third, duplicate delivery (still exactly one row).
+  - T6f: payments reversal-before-deposit (the distinct ordering security named separately
+    from T6e) - accepted as a tombstone keyed by the ORIGINAL deposit reference; the
+    late-arriving deposit is then permanently rejected against that same
+    (provider_id, provider_tx_id).
+Every variant ends with assertLedgerBalancedAndReconciled: SUM(debits) == SUM(credits)
+directly over ledger_entries, AND reconciliation.RunLedgerVsProjection (the projection
+rebuilt fresh from the ledger) reports StatusClean with zero mismatches - security's
+explicit "each variant asserting SUM(debits)==SUM(credits) and projection == rebuild"
+requirement.
+
+Not attempted this round (documented gap, not silently dropped):
+  - T4's ≥200-concurrent-request/AcquiredConns-bound variant and T10's zero-DB-statement
+    variant (as opposed to the zero-body-bytes variant T10 already implements) both use a
+    real 10-connection pool (phasecapture.Pool10) and were built/verified in this same
+    round (webhook_admission_dbgate_integration_test.go,
+    webhook_admission_t10_integration_test.go) - listed here only because M8/M10 above
+    reuse those same files' mutation-kill evidence rather than duplicating it.

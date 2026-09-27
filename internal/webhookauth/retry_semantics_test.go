@@ -71,6 +71,24 @@ func TestMustRequireRetrySemantics_Panics(t *testing.T) {
 	MustRequireRetrySemantics("payments", map[string]any{"real": retrySemanticsUndeclared{}})
 }
 
+type retrySemanticsRetriesNeither struct{}
+
+func (retrySemanticsRetriesNeither) WebhookRetrySemantics() (WebhookRetrySemantics, bool) {
+	return WebhookRetrySemantics{Retries429: false, Retries503: false}, true
+}
+
+// TestRequireRetrySemantics_RetriesNeitherFailsClosed is security review
+// C4 of PRH-I4: an adapter that declares it retries NEITHER 429 nor 503
+// must be refused outright, since this implementation does not build the
+// §6.3 LF-C1(b) reconciliation backstop that would otherwise justify
+// registering it anyway.
+func TestRequireRetrySemantics_RetriesNeitherFailsClosed(t *testing.T) {
+	adapters := map[string]any{"real": retrySemanticsRetriesNeither{}}
+	if err := RequireRetrySemantics("payments", adapters); err == nil {
+		t.Fatal("an adapter declaring it retries neither 429 nor 503 must fail registration")
+	}
+}
+
 // TestNilAdapterSkipped: a nil registration (a domain with no adapter
 // wired) is not "undeclared" - it is skipped, mirroring
 // NewAdapterSchemeSet's identical nil handling.

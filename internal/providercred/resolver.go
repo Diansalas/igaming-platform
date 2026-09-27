@@ -144,6 +144,19 @@ func (r *Resolver) Resolve(ctx context.Context, reader webhookauth.TenantReader,
 		return err
 	})
 	if err != nil {
+		// Security review C1 of PRH-I4 (HIGH): a capacity rejection from
+		// the ADR 0097 pre-verification DB admission gate must NEVER be
+		// folded into ErrCredentialUnavailable (which the uniform-401
+		// contract treats identically to "no credential exists") - checked
+		// FIRST, with errors.Is, and propagated distinctly so the eventual
+		// caller answers a retryable 503, never the uniform 401. Every
+		// OTHER WithTenantReadOnly error (a genuine DB failure) still folds
+		// into ErrCredentialUnavailable exactly as before (C5's "any other
+		// DB error fails closed as credential_unavailable" rule is
+		// unchanged for real errors).
+		if errors.Is(err, webhookauth.ErrTenantReaderUnavailable) {
+			return webhookauth.CredentialSet{}, webhookauth.ErrTenantReaderUnavailable
+		}
 		return webhookauth.CredentialSet{}, webhookauth.ErrCredentialUnavailable
 	}
 	// The read-only transaction has committed: from here on no pooled

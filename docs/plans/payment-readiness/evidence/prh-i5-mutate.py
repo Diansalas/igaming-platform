@@ -19,6 +19,9 @@ import sys
 PS = "internal/reconciliation/payment_statement.go"
 SCHED = "internal/reconciliation/scheduler.go"
 MOCK = "internal/payments/mock_statement_source.go"
+LIM = "internal/reconciliation/statement/payment_limits.go"
+M104 = "migrations/0104_payment_statement_line_charset.up.sql"
+M104D = "migrations/0104_payment_statement_line_charset.down.sql"
 PKG = "./internal/reconciliation/"
 
 # (id, description, file, old, new, test regex)
@@ -35,8 +38,8 @@ SOURCE_MUTATIONS = [
      "_ = l",
      "TestPaymentStatement_Kind_MissingPlatformRecord$"),
     ("PM4", "pay_missing_provider_record: a succeeded attempt with no line is not flagged", PS,
-     'case a.state == "succeeded":\n\t\t\tm.r.add(MismatchKindPayMissingProviderRecord',
-     'case a.state == "never":\n\t\t\tm.r.add(MismatchKindPayMissingProviderRecord',
+     'case a.state == "succeeded" && m.inCoverage(a.sentAt):',
+     'case a.state == "never":',
      "TestPaymentStatement_Kind_MissingProviderRecord$"),
     ("PM5", "pay_amount_mismatch: amounts never compared", PS,
      "} else if a.amount.Cmp(l.amount) != 0 {", "} else if false && a.amount.Cmp(l.amount) != 0 {",
@@ -66,15 +69,15 @@ SOURCE_MUTATIONS = [
      "AND disposition_at_receipt = 'deferred_unresolved' AND received_at < $3 AND false",
      "TestPaymentStatement_UnresolvedDeferredReceipt$"),
     ("PM12", "coverage window ignored for unmatched attempts", PS,
-     "if _, ok := m.matchedBy[a.id]; ok || !m.inCoverage(a.sentAt) {",
-     "if _, ok := m.matchedBy[a.id]; ok {",
+     'case a.state == "succeeded" && m.inCoverage(a.sentAt):',
+     'case a.state == "succeeded":',
      "TestPaymentStatement_CoverageWindow_RestartIsNotAFalseAlarm$"),
     ("PM13", "LF95-C13 (a): a succeeded payout without its posting is not flagged", PS,
      "if a.releaseTx == nil || !a.releaseIsCompletion {\n\t\t\t\tm.r.add(MismatchKindPayStatusMismatch",
      "if false {\n\t\t\t\tm.r.add(MismatchKindPayStatusMismatch",
      "TestPaymentStatement_LedgerJoin_SucceededPayoutWithoutPosting$"),
     ("PM14", "LF95-C13 (b): a posting with no succeeded attempt is not flagged", PS,
-     "if n := succeededFor[t.id]; n != 1 {", "if n := succeededFor[t.id]; n > 1 {",
+     "\t\tif n != 1 {\n\t\t\tm.r.add(", "\t\tif n > 1 {\n\t\t\tm.r.add(",
      "TestPaymentStatement_LedgerJoin_PostingWithNoAttempt$|TestPaymentStatement_SnapshotConsistency"),
     ("PM15", "LF95-C13: payout lines no longer match on the settlement reference", PS,
      "a = m.bySettlement[l.ref]", "a = nil",
@@ -119,6 +122,86 @@ SOURCE_MUTATIONS = [
     ("PM25", "MOCK source renders every tenant's records (tenant tag ignored)", MOCK,
      "if !a.tenantTagged || a.tenantID != cc.TenantID {", "if !a.tenantTagged {",
      "TestPaymentStatement_RLS_CrossTenant$"),
+    # --- fix round (RV-PRH-I5 RM2-RM6, F1-F5; security C1/C2) ---
+    ("PM29", "RM2: posted reversal vs provider reversal still pending/declined not flagged", PS,
+     "if l.status == statement.PaymentStatusPending || l.status == statement.PaymentStatusDeclined {",
+     "if false {",
+     "TestPaymentStatement_Reversal_PostedButProviderPendingAndAsset$"),
+    ("PM30", "RM3: two lines resolving one attempt are both matched (duplicate_match removed)", PS,
+     "if first, seen := m.matchedBy[a.id]; seen {", "if first, seen := m.matchedBy[a.id]; seen && false {",
+     "TestPaymentStatement_Payout_TwoLinesForOneAttemptIsDuplicate$"),
+    ("PM31", "RM4: payout lookup via the separate SettlementReference field removed", PS,
+     'if a == nil && l.settlement != "" {', 'if false && a == nil && l.settlement != "" {',
+     "TestPaymentStatement_Payout_SettlementReferenceField$"),
+    ("PM32", "RM5: reversal asset never compared", PS,
+     "\tif rev.asset != l.asset {", "\tif false && rev.asset != l.asset {",
+     "TestPaymentStatement_Reversal_PostedButProviderPendingAndAsset$"),
+    ("PM33", "RM6: ledger join (b) ignores withdrawal_completed postings", PS,
+     'if (t.txType != "deposit" && t.txType != "withdrawal_completed") || !m.inCoverage(t.postedAt) {',
+     'if t.txType != "deposit" || !m.inCoverage(t.postedAt) {',
+     "TestPaymentStatement_AttemptLinkedPostingsStayFullyChecked$"),
+    ("PM34", "F1: legacy exclusion widened to every posting with no succeeded attempt", PS,
+     "if n == 0 && t.legacyUnattempted {", "if n == 0 {",
+     "TestPaymentStatement_LedgerJoin_PostingWithNoAttempt$|TestPaymentStatement_AttemptLinkedPostingsStayFullyChecked$"),
+    ("PM35", "F1: legacy exclusion removed (every legacy posting a P1 again)", PS,
+     "if n == 0 && t.legacyUnattempted {", "if false {",
+     "TestPaymentStatement_LegacyUnattemptedPostingsAreCountedNotFlagged$"),
+    ("PM36", "F1: a withdrawal with a payout attempt still counted as legacy", PS,
+     "\t\t              AND NOT EXISTS (SELECT 1 FROM payment_attempts pa WHERE pa.tenant_id = wr.tenant_id AND pa.withdrawal_request_id = wr.id))",
+     "\t\t              AND true)",
+     "TestPaymentStatement_AttemptLinkedPostingsStayFullyChecked$"),
+    ("PM37", "F2: ageing coverage-gated again", PS,
+     "\t\tcase inFlight(a.state) && m.aged(a):", "\t\tcase inFlight(a.state) && m.aged(a) && m.inCoverage(a.sentAt):",
+     "TestPaymentStatement_Unresolved_NotCoverageGated$"),
+    ("PM38", "F3: unposted declined/pending reversal flagged again", PS,
+     "if l.status == statement.PaymentStatusSucceeded || l.status == statement.PaymentStatusReversed {",
+     "if true {",
+     "TestPaymentStatement_Reversal_UnpostedDeclinedOrPendingIsNotAFinding$"),
+    ("PM39", "F4: payout settlement_reference never compared with the ledger", PS,
+     'if op == "payout" && l.settlement != "" && a.settlementRef != "" && l.settlement != a.settlementRef {',
+     'if false {',
+     "TestPaymentStatement_Payout_SettlementReferenceField$"),
+    ("PM40", "F5: coverage end not bounded at fetch", PS,
+     "stmt.CoverageEnd.After(limit) {", "stmt.CoverageEnd.After(limit.Add(24 * time.Hour)) {",
+     "TestPaymentStatement_CoverageEndBoundedAtFetch$"),
+    ("PM41", "C2: merchant_reference control-character rule removed", PS,
+     'if err := providerref.ValidateOptional("merchant_reference", l.MerchantReference); err != nil {',
+     'if err := error(nil); err != nil {',
+     "TestPaymentStatement_ControlCharactersRefused$"),
+    ("PM42", "C2: asset_code shape loosened to any 1..16 bytes", PS,
+     "var paymentAssetCodeRE = regexp.MustCompile(`^[A-Z0-9]{1,16}$`)",
+     "var paymentAssetCodeRE = regexp.MustCompile(`^(?s:.{1,16})$`)",
+     "TestPaymentStatement_ControlCharactersRefused$"),
+    ("PM43", "C1: a source's streaming-cap sentinel is not treated as over-cap", PS,
+     "if errors.Is(err, statement.ErrPaymentStatementBodyTooLarge) || errors.Is(err, statement.ErrPaymentStatementTooManyLines) {",
+     "if false {",
+     "TestPaymentStatement_SourceStreamingCapRefuses$"),
+    ("PM44", "C1: the MOCK ignores its configured streaming line cap", MOCK,
+     "lines := statement.NewPaymentLineCollector(maxLines)", "lines := statement.NewPaymentLineCollector(0)",
+     "TestPaymentStatement_SourceStreamingCapRefuses$"),
+    ("PM45", "C1: the body limiter truncates silently instead of failing", LIM,
+     "\tif b.read > b.max {", "\tif false && b.read > b.max {",
+     "TestLimitPaymentStatementBody_|TestDecodePaymentStatementJSONLines_", "./internal/reconciliation/statement/"),
+    ("PM46", "C1: the line collector never refuses", LIM,
+     "\tif len(c.lines) >= c.max {", "\tif false && len(c.lines) >= c.max {",
+     "TestPaymentLineCollector_|TestDecodePaymentStatementJSONLines_", "./internal/reconciliation/statement/"),
+    # --- migration 0104 (security C2, database half); scratch-database tests ---
+    ("PM47", "0104: merchant_reference CHECK drops the control-character rule", M104,
+     "AND merchant_reference !~ '[\\x01-\\x1F\\x7F-\\x9F]')),", "AND true)),",
+     "TestMigration0104_ChecksRefuseBadCharsetDirectly$"),
+    ("PM48", "0104: asset_code CHECK loosened", M104,
+     "        CHECK (asset_code ~ '^[A-Z0-9]{1,16}$');", "        CHECK (asset_code ~ '^.{1,16}$');",
+     "TestMigration0104_ChecksRefuseBadCharsetDirectly$"),
+    ("PM49", "0104: pre-flight never aborts", M104,
+     "    IF total_merchant + total_asset > 0 THEN", "    IF false THEN",
+     "TestMigration0104_PreflightCountsAndChangesNothing$"),
+    ("PM50", "0104: pre-flight counts without scoping each tenant (blinded by FORCE RLS)", M104,
+     "        PERFORM set_config('app.tenant_id', tenant_rec.id::text, true);\n", "",
+     "TestMigration0104_PreflightCountsAndChangesNothing$"),
+    ("PM51", "0104 down: the asset_code CHECK is left behind", M104D,
+     "    DROP CONSTRAINT payment_statement_lines_merchant_reference_charset,\n    DROP CONSTRAINT payment_statement_lines_asset_code_shape;",
+     "    DROP CONSTRAINT payment_statement_lines_merchant_reference_charset;",
+     "TestMigration0104_UpDownUpRoundTrip$"),
 ]
 
 MX9_IMPORT_OLD = '\t"github.com/Diansalas/igaming-platform/internal/providerref"\n'
@@ -141,8 +224,14 @@ DB_MUTATIONS = [
 ]
 
 
-def go_test(regex):
-    r = subprocess.run(["go", "test", "-tags=integration", PKG, "-run", regex, "-count=1"],
+def builds(pkg):
+    """Code review note: a mutant that does not compile must not count as
+    killed. go vet compiles the package and its integration tests."""
+    return subprocess.run(["go", "vet", "-tags=integration", pkg], capture_output=True, text=True).returncode == 0
+
+
+def go_test(regex, pkg=PKG):
+    r = subprocess.run(["go", "test", "-tags=integration", pkg, "-run", regex, "-count=1"],
                        capture_output=True, text=True)
     out = r.stdout + r.stderr
     detail = [ln.strip() for ln in out.splitlines() if "_test.go:" in ln][:2]
@@ -155,7 +244,9 @@ def psql(sql):
 
 def main():
     killed = survived = 0
-    for mid, desc, path, old, new, regex in SOURCE_MUTATIONS:
+    for mut in SOURCE_MUTATIONS:
+        mid, desc, path, old, new, regex = mut[:6]
+        pkg = mut[6] if len(mut) > 6 else PKG
         orig = open(path).read()
         if orig.count(old) != 1:
             print(f"{mid} ANCHOR-NOT-UNIQUE ({orig.count(old)}): {desc}")
@@ -166,7 +257,11 @@ def main():
             mutated = mutated.replace(MX9_IMPORT_OLD, MX9_IMPORT_NEW, 1)
         open(path, "w").write(mutated)
         try:
-            rc, detail = go_test(regex)
+            if not builds(pkg):
+                print(f"{mid} BUILD-FAIL (not counted as killed): {desc}")
+                survived += 1
+                continue
+            rc, detail = go_test(regex, pkg)
         finally:
             open(path, "w").write(orig)
         status = "KILLED" if rc != 0 else "SURVIVED"
@@ -187,7 +282,9 @@ def main():
         print(f"{mid} {status}: {desc}\n    sql: {drop}\n    test: {regex}")
         for d in detail:
             print(f"    fail: {d}")
-    rc, _ = go_test("PaymentStatement|Migration0102")
+    rc, _ = go_test("PaymentStatement|Migration0102|Migration0104")
+    rc2, _ = go_test(".", "./internal/reconciliation/statement/")
+    rc = rc or rc2
     print(f"\nbaseline after restore: {'PASS' if rc == 0 else 'FAIL'}")
     print(f"total: {killed} killed, {survived} survived")
     sys.exit(0 if survived == 0 and rc == 0 else 1)

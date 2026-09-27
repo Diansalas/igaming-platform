@@ -315,9 +315,29 @@ func newPaymentWebhookHandler(deps Deps) http.HandlerFunc {
 		requestID := observability.RequestIDFromContext(r.Context())
 		logger := observability.LoggerFromContext(r.Context(), deps.Logger)
 
+		// RL-F4 (security review Low "leftover"): redact BEFORE the
+		// orchestrator-nil check below, which is itself reachable with
+		// arbitrary attacker-chosen path segments.
+		markWebhookRouteForLogging(r)
+
 		if deps.PaymentOrchestrator == nil {
 			apierror.Write(w, requestID, apierror.CodeUnavailable, "payment webhooks are not enabled on this deployment")
 			return
+		}
+
+		// retries429 is the adapter's declared retry semantics (ADR 0097
+		// §6.3/§20 AC6), shared by A3 (security review C4: a registered
+		// adapter's declaration is a static fact, known even before
+		// verification) and B1 below.
+		retries429 := func(providerID string) (allows, declared bool) {
+			if deps.PaymentOrchestrator == nil {
+				return true, false
+			}
+			sem, ok := deps.PaymentOrchestrator.WebhookRetrySemantics(providerID)
+			if !ok {
+				return true, false
+			}
+			return sem.Retries429, true
 		}
 
 		// ADR 0097 A2/A3/A4a (PAYWH-RL-1): the FIRST thing any webhook route
@@ -329,7 +349,7 @@ func newPaymentWebhookHandler(deps Deps) http.HandlerFunc {
 			}
 			_, ok := deps.PaymentOrchestrator.WebhookScheme(id)
 			return ok
-		})
+		}, retries429)
 		if !admitted {
 			return
 		}
@@ -367,7 +387,13 @@ func newPaymentWebhookHandler(deps Deps) http.HandlerFunc {
 		var result payments.ReceiveCallbackResult
 		verified, err := deps.PaymentOrchestrator.VerifyCallback(r.Context(), reader, t.ID, providerID, payments.InboundCallback{Header: r.Header, Body: body})
 		if errors.Is(err, errDBGateUnavailable) {
-			apierror.Write(w, requestID, apierror.CodeUnavailable, "service temporarily unavailable; retry later")
+			// Security review C2 of PRH-I4: every DB-gate 503 gets
+			// Retry-After and a db_gate log line - this is payments'
+			// FIRST read (ProviderAcceptsWebhook), which already propagated
+			// the raw sentinel unwrapped even before the C1 fix; the
+			// SECOND read (credential resolution) is handled below via the
+			// wrapped AuthError branch.
+			deps.webhookAdmission.writeAdmissionUnavailableAuthError(w, r, domainPayments, t.ID, providerID)
 			return
 		}
 		// ADR 0097 B1/B2 (ORD-3/ORD-4): admitted ONLY off the just-verified
@@ -379,13 +405,7 @@ func newPaymentWebhookHandler(deps Deps) http.HandlerFunc {
 		var releaseDomainTx func()
 		if err == nil {
 			var admittedVerified bool
-			releaseDomainTx, admittedVerified = deps.webhookAdmission.admitVerified(w, r, domainPayments, t.ID, providerID, func(providerID string) (allows, declared bool) {
-				sem, ok := deps.PaymentOrchestrator.WebhookRetrySemantics(providerID)
-				if !ok {
-					return true, false
-				}
-				return sem.Retries429, true
-			})
+			releaseDomainTx, admittedVerified = deps.webhookAdmission.admitVerified(w, r, domainPayments, t.ID, providerID, retries429)
 			if !admittedVerified {
 				return
 			}
@@ -405,6 +425,16 @@ func newPaymentWebhookHandler(deps Deps) http.HandlerFunc {
 
 		var authErr *payments.CallbackAuthError
 		if errors.As(err, &authErr) {
+			// Security review C1 of PRH-I4 (HIGH): a DB-gate rejection
+			// DURING credential resolution (the second read inside
+			// VerifyCallback) surfaces as an AuthError with Reason ==
+			// ReasonAdmissionUnavailable, not a real authentication
+			// failure - it must answer 503+Retry-After (C2: with its own
+			// db_gate log line), never the uniform 401.
+			if authErr.Reason == webhookauth.ReasonAdmissionUnavailable {
+				deps.webhookAdmission.writeAdmissionUnavailableAuthError(w, r, domainPayments, t.ID, providerID)
+				return
+			}
 			logCallbackAuthFailure(logger, r, requestID, authErr.Reason, &t.ID, providerID, true, authErr.KeyID, authErr.CredentialFingerprint, len(body))
 			code, msg := mapReceiveCallbackError(err, callbackRoutePublicWebhook)
 			apierror.Write(w, requestID, code, msg)

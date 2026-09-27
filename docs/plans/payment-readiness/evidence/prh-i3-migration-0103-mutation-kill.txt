@@ -1,0 +1,52 @@
+PRH-I3 fix round 4 (security F3, DR-PRHI3-07, migration 0103) - mutation-kill evidence
+========================================================================================
+
+Method: for each mutation, a fresh scratch database was migrated up
+through 0102 (using a temp migrations dir holding 0103 back), then the
+mutated 0103 up.sql was applied by hand (via psql, followed by a manual
+schema_migrations insert), then the specific Go integration test(s) named
+below were run against that database. The real, on-disk
+migrations/0103_kyc_enforcement_policy_supersession.up.sql was NEVER
+edited in place - every mutation was applied to a throwaway copy. Diffed
+byte-for-byte against the committed file after this exercise; unchanged.
+
+Mutation 1: removed the BEFORE-trigger requirement that
+superseded_by_policy_id must be set on an active->withdrawn transition
+(kept only the self-reference check).
+  Killed by: TestMigration0100_PolicyLifecycleTransitions,
+             TestMigration0103_WithdrawActiveRefusedWithNoSuccessor
+  Both FAIL with the mutation applied (both correctly expect a bare
+  active->withdrawn to be refused and it was not); both PASS with the
+  real migration.
+
+Mutation 2: removed the deferred (commit-time) constraint trigger's
+"successor.status <> 'active'" check.
+  Killed by: TestMigration0103_SupersessionRefusedIfSuccessorNeverActivated
+  FAILS with the mutation applied (a still-draft successor is wrongly
+  accepted); PASSES with the real migration.
+
+Mutation 3: removed the deferred trigger's enforcement-key-matching
+check (jurisdiction/trigger_type/play_operation/asset_code).
+  Killed by: TestMigration0103_SupersessionRefusedIfSuccessorKeyDiffers
+  FAILS with the mutation applied (an active-but-wrong-key policy is
+  wrongly accepted as a successor); PASSES with the real migration.
+
+Mutation 4: removed the explicit "successor.id = NEW.id" self-reference
+check.
+  NOT independently killed - TestMigration0103_SupersessionRefusedIfSelfReferencing
+  still PASSES with this mutation applied. This is disclosed, not hidden:
+  the explicit self-reference check is redundant, not a gap. A
+  self-referencing withdrawal sets the SAME row's status to 'withdrawn'
+  in the very statement being checked; by the time the deferred
+  constraint trigger re-reads that row at commit, its own status is
+  'withdrawn', not 'active' - so mutation 2's still-intact
+  "successor.status <> 'active'" check independently refuses it. The
+  explicit self-reference check is retained in the shipped migration as
+  defense-in-depth / a clearer error message ("a policy cannot supersede
+  itself" vs. a generic "must be active by commit"), not because removing
+  it opens a real bypass.
+
+Net: 3 of 4 candidate mutations against the new trigger logic are killed
+by a dedicated test; the 4th is provably unreachable as an actual bypass
+given the other still-intact check, and is disclosed as such rather than
+claimed as an independently-verified kill.

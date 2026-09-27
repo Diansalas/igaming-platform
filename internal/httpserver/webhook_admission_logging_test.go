@@ -29,7 +29,7 @@ func TestRLF4_AccessLogRedactsWebhookPath(t *testing.T) {
 		// call, and it marks RequestState.LogPath even when admission
 		// itself is disabled (nil runtime).
 		var rt *webhookAdmissionRuntime
-		release, ok := rt.admitPreAuth(w, r, domainPayments, 0, func(string) bool { return true })
+		release, ok := rt.admitPreAuth(w, r, domainPayments, 0, func(string) bool { return true }, nil)
 		if ok {
 			release()
 		}
@@ -86,7 +86,7 @@ func TestRLF4_PanicRecoveryRedactsWebhookPath(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/webhooks/casino/{tenantSlug}/{providerID}", func(w http.ResponseWriter, r *http.Request) {
 		var rt *webhookAdmissionRuntime
-		rt.admitPreAuth(w, r, domainCasino, 0, func(string) bool { return true })
+		rt.admitPreAuth(w, r, domainCasino, 0, func(string) bool { return true }, nil)
 		panic("boom")
 	})
 

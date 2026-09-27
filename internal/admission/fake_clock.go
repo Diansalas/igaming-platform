@@ -69,6 +69,17 @@ func (f *FakeClock) Advance(d time.Duration) {
 	}
 }
 
+// PendingTimers returns the number of timers currently registered but not
+// yet fired or stopped - test synchronization only (callers poll this to
+// know it is safe to call Advance without racing the goroutine that is
+// about to wait on the timer), never a correctness signal the code under
+// test itself should depend on.
+func (f *FakeClock) PendingTimers() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.timers)
+}
+
 // NewTimer returns a virtual timer that fires the next time Advance moves
 // the clock at or past now+d. d<=0 fires on the very next Advance call
 // (even Advance(0)) so callers using a zero/negative wait get an
