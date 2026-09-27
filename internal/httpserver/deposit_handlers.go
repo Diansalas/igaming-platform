@@ -38,6 +38,7 @@ var paymentWebhookRoute = webhookRoute{
 		return deps.PaymentOrchestrator.WebhookScheme(providerID)
 	},
 	maxBody:                 maxWebhookBodyBytes,
+	domain:                  domainPayments,
 	authFailedEvent:         "payment_webhook_auth_failed",
 	tenantLookupFailedEvent: "payment_webhook_tenant_lookup_failed",
 }
@@ -280,6 +281,21 @@ func newPaymentWebhookHandler(deps Deps) http.HandlerFunc {
 			return
 		}
 
+		// ADR 0097 A2/A3/A4a (PAYWH-RL-1): the FIRST thing any webhook route
+		// does - no DB, no body read (ORD-1/ORD-2). A nil admission runtime
+		// (disabled) always admits.
+		releaseInflight, admitted := deps.webhookAdmission.admitPreAuth(w, r, domainPayments, deps.TrustedProxyCount, func(id string) bool {
+			if deps.PaymentOrchestrator == nil {
+				return false
+			}
+			_, ok := deps.PaymentOrchestrator.WebhookScheme(id)
+			return ok
+		})
+		if !admitted {
+			return
+		}
+		defer releaseInflight()
+
 		// Steps 1-5 (provider_id charset, bounded body read, header format
 		// - all before any tenant/DB work, ruling 5 / security review
 		// P2-1 - then the platform-wide tenant lookup and active check) are
@@ -287,7 +303,8 @@ func newPaymentWebhookHandler(deps Deps) http.HandlerFunc {
 		// 10.2, ADR 0091, architect R2 / ruling J4). Every rejection there
 		// is the IDENTICAL 401 "callback rejected" with one allow-listed
 		// payment_webhook_auth_failed line - an oversized body or a bad
-		// slug is never a distinguishable 400/404 (T9).
+		// slug is never a distinguishable 400/404 (T9). ADR 0097 A4b gates
+		// the platform-wide tenant lookup this now performs.
 		t, providerID, body, ok := webhookPreamble(w, r, deps, paymentWebhookRoute)
 		if !ok {
 			return
@@ -296,9 +313,49 @@ func newPaymentWebhookHandler(deps Deps) http.HandlerFunc {
 		// ADR 0094 §4.1: phase 1 (verification) holds NO transaction - its
 		// reads run in short READ ONLY transactions that commit before any
 		// secret-store fetch; the domain transaction opens only after it
-		// succeeded, and re-checks the verified handle first.
+		// succeeded, and re-checks the verified handle first. ADR 0097
+		// §5.3: VerifyCallback's own WithTenantReadOnly calls are gated by
+		// the SAME A4b bulkhead GetTenantBySlug used, via gatedReader in
+		// place of deps.DB when admission is enabled.
+		var reader webhookauth.TenantReader = deps.DB
+		if deps.webhookAdmission != nil {
+			tenantKey, providerKey := deps.webhookAdmission.preAuthKeys(t.Slug, providerID, func(id string) bool {
+				_, ok := deps.PaymentOrchestrator.WebhookScheme(id)
+				return ok
+			})
+			reader = deps.webhookAdmission.newGatedReader(deps.DB, domainPayments, tenantKey, providerKey)
+		}
 		var result payments.ReceiveCallbackResult
-		verified, err := deps.PaymentOrchestrator.VerifyCallback(r.Context(), deps.DB, t.ID, providerID, payments.InboundCallback{Header: r.Header, Body: body})
+		verified, err := deps.PaymentOrchestrator.VerifyCallback(r.Context(), reader, t.ID, providerID, payments.InboundCallback{Header: r.Header, Body: body})
+		if errors.Is(err, errDBGateUnavailable) {
+			apierror.Write(w, requestID, apierror.CodeUnavailable, "service temporarily unavailable; retry later")
+			return
+		}
+		// ADR 0097 B1/B2 (ORD-3/ORD-4): admitted ONLY off the just-verified
+		// (tenant_id, provider_id) - never off preKey/URL values - and
+		// STRICTLY before deps.DB.WithTenant opens the domain transaction.
+		// The B2 release is held (ledger-finance C1) through the
+		// reversal-rejection-audit transaction below, released exactly once
+		// at the end of this handler.
+		var releaseDomainTx func()
+		if err == nil {
+			var admittedVerified bool
+			releaseDomainTx, admittedVerified = deps.webhookAdmission.admitVerified(w, r, domainPayments, t.ID, providerID, func(providerID string) (allows, declared bool) {
+				sem, ok := deps.PaymentOrchestrator.WebhookRetrySemantics(providerID)
+				if !ok {
+					return true, false
+				}
+				return sem.Retries429, true
+			})
+			if !admittedVerified {
+				return
+			}
+			defer func() {
+				if releaseDomainTx != nil {
+					releaseDomainTx()
+				}
+			}()
+		}
 		if err == nil {
 			err = deps.DB.WithTenant(r.Context(), t.ID, func(ctx context.Context, tx pgx.Tx) error {
 				var err error

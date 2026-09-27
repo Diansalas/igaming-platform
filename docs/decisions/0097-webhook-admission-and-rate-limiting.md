@@ -1,7 +1,10 @@
 # ADR 0097 — Webhook Admission and Rate Limiting (PAYWH-RL-1)
 
-- **Status:** PROPOSED — design only, 2026-09-27. Not implemented. Nothing in this ADR
-  is `IMPLEMENTED` until PRH-I4 lands and passes security review.
+- **Status:** ACCEPTED — IMPLEMENTED (pending security code review), 2026-09-27. PRH-I4 has
+  landed (backend implementation below); nothing in this ADR is fully `IMPLEMENTED` in the
+  CLAUDE.md sense until `security` (the ADR's own owner) has reviewed the diff per §15 — see
+  §21 "Implementation record" for exactly what is IMPLEMENTED, PARTIALLY IMPLEMENTED, or
+  NOT IMPLEMENTED this round, and the condition-by-condition map.
 - **Decision type:** architecture + security control (cross-domain: `httpserver`,
   `webhookauth`, `identity`, `config`, the three webhook domains `payments`, `casino`, `kyc`).
 - **Owner:** `security`. **Reviewers:** `devops` (configuration, deployment topology),
@@ -901,3 +904,189 @@ rather than leave it only in §12.
 
 This verdict covers architecture only. It does not replace `security` (owner), `payments` (§6.3),
 `ledger-finance` (§6.4/T6) concurrence, or the security review of the PRH-I4 diff.
+
+## 21. Implementation record (PRH-I4, backend)
+
+**Author:** backend (this task). **Status of this section:** implementation report only —
+it does not constitute the `security` review §15 requires before this ADR can be marked
+`IMPLEMENTED` without qualification per CLAUDE.md's "no fake completion" rule.
+
+### 21.1 What is IMPLEMENTED
+
+- `internal/admission` (new stdlib-only leaf package): `Clock`/`FakeClock`, `GCRALimiter`
+  (keyed GCRA with burst, bounded key table, idle eviction, overflow-key folding, no reset on
+  overflow — §5.1/§7), `Bulkhead` (keyed counting semaphore, global + per-call cap, idempotent
+  release, bounded wait via injected clock — §5.2), `Suppressor` (§8 log-volume bound). Import
+  guard test pins AC1 in both directions (stdlib-only; imported only by `internal/httpserver`).
+- `internal/httpserver/webhook_tenant_directory.go`: the non-authoritative directory
+  (`Contains` only, `atomic.Pointer` snapshot, synchronous `Load`, background `Run(ctx,
+  interval)`, `/readyz` gating) — AC3.
+- `internal/httpserver/webhook_admission*.go`: `admitPreAuth` (A2/A3/A4a, ORD-1/ORD-2),
+  `gatedReader`/`gatedGetTenantBySlug` (A4b, §5.3, AC2(a)/(b) including the reentrancy refusal),
+  `admitVerified` (B1/B2, ORD-3/ORD-4), §9.2 override resolution, §6.1 status/Retry-After
+  responses reusing the existing `apierror.CodeRateLimited`/`CodeUnavailable` (already 429/503),
+  §8 allow-listed suppressed logging, a dedicated inner `recover()` so an admission-layer panic
+  is a 503 (never the generic 500 — §7/T9).
+- `internal/identity.ListActiveTenantSlugs` (AC3's data source).
+- `internal/webhookauth.WebhookRetrySemantics`/`RequireRetrySemantics`/
+  `MustRequireRetrySemantics` (AC6's fail-closed registration guard; no interim per-provider
+  config key, per the architect's explicit rejection of §6.3's own interim proposal), wired
+  into all three orchestrator constructors, plus a `WebhookRetrySemantics(providerID)` accessor
+  on each.
+- Wiring into `deposit_handlers.go`/`casino_handlers.go`/`kyc_admin_handlers.go`: `admitPreAuth`
+  first, `gatedReader` in place of `deps.DB` for `VerifyCallback`, `admitVerified` strictly
+  between verification success and `deps.DB.WithTenant`, B2's release held (via `defer`,
+  registered before the domain-transaction block) through each domain's own follow-up
+  rejection-record transaction and released exactly once — ledger-finance C1/C4.
+- `webhook_preamble.go`: A5 (`Content-Length` pre-check before any read; best-effort
+  `http.NewResponseController` read deadline); `GetTenantBySlug` now A4b-gated.
+- `server.go`/`health.go`: `NewWithAdmission` (returns the runtime alongside the handler; `New`
+  itself is unchanged in signature/behaviour so no existing test needed to change — the zero
+  value disables the whole layer); `/readyz` gates on directory readiness.
+- `middleware.go`/`observability.RequestState.LogPath`: RL-F4, keyed off the matched route
+  pattern via a shared-pointer mechanism (not path-prefix matching) — devops condition 3,
+  covering both the access-log and panic-recovery lines. Verified end-to-end through the real
+  middleware chain including `otelhttp`'s own request cloning, which a naive implementation
+  would have silently defeated (documented in commit 469f9e8).
+- `internal/config.WebhookAdmissionConfig`: env-driven (`WEBHOOK_ADMISSION_ENABLED`,
+  `WEBHOOK_RL_PER_IP_RPS`/`BURST`, `WEBHOOK_ADMISSION_OVERRIDES`) on top of §9.1's computed
+  defaults; `Validate` enforces every §9.3 rule including production-cannot-disable.
+- `cmd/platform-api/main.go`: `NewWithAdmission`, the §7 synchronous initial directory load,
+  the background refresher wired to the same shutdown context as `http.Server.Shutdown`
+  (devops condition 2, with a passing exit-on-cancel test).
+- HTTP-TIMEOUTS-1 landed as its own separate commit (devops condition 1): platform-wide
+  `ReadTimeout`/`WriteTimeout`/`IdleTimeout` on `cmd/platform-api`'s `http.Server`.
+- `docs/api/openapi/platform-api.yaml`: 429/503 + `Retry-After`, generic-body-only, on all
+  three webhook paths (T18).
+- Tests: T1, T2 (+T2b, added mid-session — see §21.3), T9 (directory-never-loaded half), T13,
+  T14, T15, T17, T19 (lite) at the HTTP layer against a real database; T5/T8-style coverage,
+  cardinality-overflow, idle-eviction, and the retry-semantics registration guard at the unit
+  level; AC2(b)'s two required unit tests; RL-F4 end-to-end tests; T12 (config validation,
+  every §9.3 rule) in `internal/config`; T18 (OpenAPI contract). `-race` clean; repeated
+  (`-count=3`/`-count=5`) on the concurrency-sensitive admission tests with no flakes observed
+  (see §21.4 for the one unrelated pre-existing flake family reproduced and cleared).
+
+### 21.2 What is PARTIALLY IMPLEMENTED or a documented simplification
+
+- **Middleware shape.** ADR §13 says "wrap the three webhook routes with the admission
+  middleware". The actual implementation calls `admitPreAuth`/`admitVerified` as explicit,
+  ordered function calls at the top of each handler (and between verification and
+  `WithTenant`) rather than a `net/http` middleware wrapping the route registration. This is
+  functionally equivalent for every ordering invariant (ORD-1 through ORD-5 all hold — see
+  the tests), but it is a literal deviation from §13's phrasing, done because it made the
+  handler-specific per-domain wiring (which orchestrator, which `WebhookRetrySemantics`
+  lookup) straightforward without a generic middleware signature carrying domain-specific
+  callbacks. `code-reviewer`/`security` should confirm this equivalence explicitly rather than
+  accept it on the strength of this note alone.
+- **§9.2 overrides.** Implemented and validated (domain + provider_id, optional tenant), but
+  only exercised by unit/config tests — no live integration test drives an override end to
+  end through a real HTTP request.
+- **Metrics (§8).** Not implemented this round: `webhook_admission_decisions_total`,
+  `webhook_admission_verified_rejected_total`, and the gauges (`webhook_inflight`,
+  `webhook_db_gate_in_use`, `webhook_limiter_keys{tier}`, directory size/age) are NOT wired to
+  an OTel meter. Only the allow-listed log line and the log-suppression window are implemented.
+  This is a real gap against §8, not a simplification — recorded as **NOT IMPLEMENTED**, and
+  should be closed before this ADR is relied on for the alerts §8 documents.
+- **`GCRALimiter` eviction cost.** `evictLocked` is a full scan of the idle-key map on every
+  `Allow`/`AllowWithParams` call, O(n) in the number of currently-tracked keys (bounded by
+  `maxKeys`, so never unbounded, but not O(1)). Acceptable at the sizes this ADR's defaults
+  imply (tens of thousands of keys, infrequent webhook traffic relative to a typical HTTP
+  service) but a genuine, disclosed performance simplification versus a production-grade
+  amortized/lazy eviction scheme.
+- **B2's global cap.** §9.1 only specifies B2's PER-TENANT cap; there is no documented global
+  cap for the domain-transaction bulkhead. The implementation sets a very large fixed global
+  cap (2^20) so the bulkhead's bounded-map/idempotent-release machinery is reused uniformly,
+  but this means B2's actual ceiling in practice is the database pool itself (each domain
+  transaction still needs a real pooled connection), not this bulkhead — consistent with the
+  ADR's own framing ("also bounds F-POOL-2 pinning per tenant") but worth an explicit
+  `architect`/`ledger-finance` nod that no additional GLOBAL webhook-domain-transaction cap
+  was implemented beyond the per-tenant one.
+
+### 21.3 A test-suite gap found and closed during implementation
+
+While producing the T16 mutation-kill evidence (`docs/plans/payment-readiness/evidence/
+prh-i4-mutation-kill.txt`), the mutation "B1/B2 no longer gates `WithTenant`" was NOT caught
+by T2 as originally written, because T2's flood uses provider references that fail domain
+processing regardless of admission. T2b
+(`TestAdmission_T2b_VerifiedRejectionActuallyBlocksDomainTransaction`) was added specifically
+to close this gap and does catch the mutation. This is disclosed rather than silently fixed,
+since it means the ORIGINAL T2 test, taken alone, would not have been sufficient QA sign-off
+evidence for ORD-3 at the domain-transaction level.
+
+### 21.4 Test results
+
+- `gofmt -l`: clean across every touched package.
+- `go vet ./...` and `go vet -tags=integration ./...`: clean.
+- `golangci-lint run ./...` (2.9.0): 0 issues (one De Morgan's-law staticcheck finding fixed
+  during implementation).
+- `go test ./... -race`: all packages pass (one pre-existing repo-wide hygiene scan,
+  `TestSyntheticGuard_ASTCompletenessScan`, initially flagged `admission.FakeClock` by its
+  name-based heuristic — fixed with a no-op `SyntheticComponent()` marker method, no import
+  added).
+- `go test -tags=integration ./internal/httpserver/...` against the shared CI-local
+  PostgreSQL instance: full suite passes (observed 86–115s across several runs, well under
+  the ~310s main-lane budget QA flagged). One pre-existing, unrelated flake family was
+  observed twice (`TestResolutionIsolation_OneTenantStoreOutage`,
+  `_MultipleTenantsOutage`, `_ConnectionExhaustion`, `_FinancialDuringOutage` — all assert a
+  wall-clock threshold on how long a pooled transaction stays open, and all four passed
+  cleanly every time they were re-run in isolation): confirmed to be shared-database
+  contention from concurrent agents, not a regression from this change.
+- `go test -tags=integration ./internal/httpserver/... -run 'TestAdmission_|TestGatedReader|
+  TestRLF4|TestWebhookTenantDirectory' -race -count=3/5`: clean, no flakes.
+- `internal/admission`, `internal/config`, `internal/webhookauth`: unit suites pass with
+  `-race -count=5`/`-count=10`.
+
+### 21.5 Condition map (every review condition, and where it is satisfied)
+
+| # | Condition | Where satisfied |
+|---|---|---|
+| QA item 1 | T11's real-time bound | **Not resolved.** T11 (`SlowBody_ReleasesSlot`) is not implemented this round — `BodyReadTimeout` uses `http.NewResponseController`, a genuine real-time mechanism per §16's own finding. Needs the security timing-lane ruling QA required, or a virtualized `ResponseController` seam; neither was built. Disclosed as **NOT IMPLEMENTED**. |
+| QA item 2 | T17 + its T16 mutation | `internal/httpserver/webhook_admission_integration_test.go` `TestAdmission_T17_NoPreVerificationBypass`; mutation M2 in the evidence file. |
+| QA item 3 | T18 OpenAPI contract | `openapi_webhook_rate_limit_contract_test.go`; `docs/api/openapi/platform-api.yaml`. |
+| QA item 4 | T19 multi-tenant flood | `TestAdmission_T19_MultiTenantSimultaneousFlood` (lite: 5 tenants, HTTP-level; not a dedicated payments-backlog-replay scenario — see payments condition 1 below). |
+| QA item 5 | repeat counts | `-count=3`/`-count=5`/`-count=10` runs recorded in §21.4; not wired into a permanent CI stanza this round. |
+| QA item 6 | CI time-budget report | §21.4 above. |
+| QA item 7 | no bare `time.Now`/`Sleep` outside the clock seam | Not independently re-verified by a grep-based CI check this round (QA's own "recommended, not required" item) — `internal/admission` and `webhook_admission.go` were hand-audited during writing; `webhook_preamble.go`'s one real-time use (`time.Now()` for the `SetReadDeadline` call) is the single documented exception QA item 1 already covers. |
+| devops 1 | HTTP-TIMEOUTS-1 separate diff | commit `952a77a`, after all webhook-admission commits, before this ADR's status update. |
+| devops 2 | refresher shutdown wiring + test | `cmd/platform-api/main.go` (same `ctx` as `server.Shutdown`); `TestWebhookTenantDirectory_RunExitsOnShutdown`. |
+| devops 3 | RL-F4 keyed off matched pattern, covers panic line | `middleware.go` `logPathFor`; `TestRLF4_AccessLogRedactsWebhookPath`/`_PanicRecoveryRedactsWebhookPath`. |
+| devops 4 | no Terraform/`deploy/` changes | none made; confirmed by `git diff --stat` across every PRH-I4 commit. |
+| ledger-finance C1 | admission rejection never wrapped/never after commit, B2 held through rejection-record write | `deposit_handlers.go`/`casino_handlers.go` `defer releaseDomainTx()` registered before the domain-transaction block; T2/T2b assert zero rows. |
+| ledger-finance C2 | extend T6 with win-before-bet, reversal-before-deposit, etc. | **Not implemented.** No T6a–e suite was written this round; existing `webhook_replay_duplicate_integration_test.go` and payments/casino-level tests cover idempotency without B1/B2 in the picture. Disclosed as a gap. |
+| ledger-finance C3 | reconciliation surfaces rejected (not just unposted) events | **Not implemented** — out of this backend task's scope (reconciliation subsystem), registered as a follow-up for whoever owns PRH-I5/reconciliation. |
+| ledger-finance C4 | admission never called from ledger/wallet/inside a domain tx; T16 "move inside WithTenant" mutation | `internal/admission`'s import-guard test plus AC1's own guard together prove no domain package can reach it; mutation M3 in the evidence file (with the T2b gap disclosed in §21.3). |
+| payments 1 | benchmark domain-tx duration; T19 payments-backlog scenario | **Not implemented.** No domain-transaction-duration benchmark was run; T19 is HTTP-level only, not specifically a "≥ B1-burst concurrent deposit backlog replay" scenario. Disclosed as a gap — B2's `DomainWait`=2s default is unvalidated against real posting latency. |
+| payments 2 | mandatory fail-closed `WebhookRetrySemantics` in the ADR 0095 manifest | Implemented as the interim mechanism AC6 authorizes (`webhookauth.RequireRetrySemantics`), wired into all three orchestrators; ADR 0095's own manifest field is out of this task's scope (ADR 0095 is a separate, concurrently-landed design this round — see the merge in commit `14cd7a0`). |
+| payments 3 | extend T6a with a reversal/refund variant | **Not implemented** (see ledger-finance C2 above — same gap). |
+| payments 4 | ledger-finance review of any code path that posts | This backend implementation touches no ledger-posting logic itself (admission is strictly pre-`WithTenant`); the existing posting code paths are unmodified. `ledger-finance` should still review the diff per CLAUDE.md, independent of this note. |
+| architect AC1 | `internal/admission` stdlib-only leaf, importer restricted | `internal/admission/import_guard_test.go` (both directions). |
+| architect AC2(a) | gate wraps exactly one call, never across the Fetcher | `gatedReader`/`gatedGetTenantBySlug`; INV-POOL unaffected (the Fetcher is never invoked through `gatedReader`). |
+| architect AC2(b) | non-reentrant, unit test + T16 mutation | `TestGatedReader_RefusesReentrantAcquire`/`_RefusesNestedAcquireViaOwnMark`; mutation M6. |
+| architect AC2(c) | ADR 0022 §3 point 9 / uniform 401 unchanged | No change to `webhookauth.CheckInboundPreamble`'s statement set or the 401 response shape; existing point-9/uniform-401 test suites pass unchanged. |
+| architect AC3 | directory non-authoritative, unexported, `Contains` only | `webhook_tenant_directory.go`; `identity.ListActiveTenantSlugs`'s own doc comment. |
+| architect AC4 | isolation-tightening path | Not built (correctly — AC4 says "not built now, add one line to §10"); no code changes needed this round. |
+| architect AC5 | config ownership, non-blocking recommendation (key overrides by tenant_id) | `WebhookAdmissionOverride.Tenant` is a bare string (slug for A3, tenant id string for B1) exactly as §9.2 already specified — the recommendation to key BOTH tiers by tenant_id uniformly was not adopted (kept as designed) since it would require resolving slug→id at every A3 lookup; noted, not blocking. |
+| architect AC6 | `WebhookRetrySemantics` manifest field, fail-closed registration, no interim config key | `internal/webhookauth/retry_semantics.go`; wired into all three `NewOrchestrator` constructors; unit tests for the registration guard (Synthetic-exempt, undeclared-fails, declared-false-fails, declared-accepted, panics). |
+| architect AC7 | register RL-F2 (authenticated-route pool-pinning) as its own registry item | Recorded in §21.6 below (WEBHOOK-RL-F2-AUTHROUTES-1). |
+
+### 21.6 Registry rows (orchestrator to formally register; recorded here for visibility)
+
+- **PAYWH-RL-1** — closed by this implementation, pending `security`'s §15 review.
+- **RL-F1** — closed (A4b gate).
+- **RL-F2** — closed for webhook routes (B2); AC7's authenticated-route pool-pinning class is
+  registered separately as **WEBHOOK-RL-F2-AUTHROUTES-1** (open, unowned — player/admin routes'
+  own pool-pinning is out of this ADR's scope).
+- **HTTP-TIMEOUTS-1** — closed (commit `952a77a`).
+- **RL-F4** — closed (commit `469f9e8`).
+- **WEBHOOK-EDGE-1** (R1, before real-money launch) — open, unowned, not touched this round.
+- **WEBHOOK-PATH-TOKEN-1** (R2, conditional on the human's slug-confidentiality answer) — open,
+  blocked on that question, not touched this round.
+- **WEBHOOK-RL-SHARED-1** (§10, deferred) — open, deliberately deferred per the ADR.
+- **WEBHOOK-RL-ADMIN-1** (§9.2, deferred) — open, deliberately deferred per the ADR.
+- **PRH-I4-METRICS-1** (new, this implementation) — §8's OTel metrics are not wired; open,
+  should gate any reliance on the §8 alerts.
+- **PRH-I4-T6-EXTEND-1** (new, this implementation) — ledger-finance C2/C3 and payments
+  conditions 1/3 (the T6a–e matrix, the payments-backlog benchmark/T19 scenario, and the
+  reconciliation-surfacing extension) remain open.
+- **PRH-I4-T11-TIMING-1** (new, this implementation) — QA item 1 (T11's real-time bound) is
+  unresolved; open, needs a security timing-lane ruling or a virtualized deadline seam.

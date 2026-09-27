@@ -267,6 +267,15 @@ type Config struct {
 	// Closes S9.1-LAUNCH-1 (docs/security/security-architecture.md).
 	TrustedProxyCount int
 
+	// WebhookAdmission is ADR 0097's transport-layer admission/rate-limit
+	// configuration for the three provider-facing webhook routes
+	// (PAYWH-RL-1). Loaded from WEBHOOK_ADMISSION_ENABLED,
+	// WEBHOOK_RL_PER_IP_RPS/BURST and WEBHOOK_ADMISSION_OVERRIDES on top
+	// of ADR 0097 §9.1's technical defaults (computed from
+	// DatabaseMaxConns); validated by WebhookAdmissionConfig.Validate
+	// (§9.3) below, including "production cannot disable".
+	WebhookAdmission WebhookAdmissionConfig
+
 	// CORSAllowedOrigins is the exact-match allowlist of browser Origins
 	// permitted to make cross-origin requests (comma-separated in
 	// CORS_ALLOWED_ORIGINS, e.g. "https://staging.example.com,https://
@@ -629,6 +638,20 @@ func Load() (Config, error) {
 
 	// Stage 10.3 W2a (ADR 0093 A3; security review §3/§4.1).
 	if err := cfg.validateProviderCredentialFingerprintKey(); err != nil {
+		return Config{}, err
+	}
+
+	// ADR 0097 PRH-I4: webhook admission/rate limiting. Loaded after
+	// DatabaseMaxConns is resolved, since its technical defaults are
+	// computed from the pool size (§9.1); validated with GuardEnvironment()
+	// so a missing APP_ENV is treated as production here too, exactly like
+	// the synthetic-adapter guard (§9.3 "production cannot disable").
+	webhookAdmission, err := loadWebhookAdmissionConfig(cfg.DatabaseMaxConns)
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.WebhookAdmission = webhookAdmission
+	if err := cfg.WebhookAdmission.Validate(cfg.GuardEnvironment() == "production", cfg.DatabaseMaxConns); err != nil {
 		return Config{}, err
 	}
 	for _, scheme := range cfg.SecretStoreBackends {

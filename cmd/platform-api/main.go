@@ -258,7 +258,7 @@ func run() error {
 	}
 	logger.Info("sportsbook catalogue synced")
 
-	handler := httpserver.New(httpserver.Deps{
+	handler, webhookAdmission := httpserver.NewWithAdmission(httpserver.Deps{
 		Logger:              logger,
 		DB:                  pool,
 		AuthIssuer:          issuer,
@@ -267,6 +267,10 @@ func run() error {
 		RefreshTokenTTL:     cfg.RefreshTokenTTL,
 		PaymentOrchestrator: orchestrator,
 		CasinoOrchestrator:  casinoOrchestrator,
+		// ADR 0097 PRH-I4 (PAYWH-RL-1): mapped field by field from
+		// config.WebhookAdmissionConfig - internal/httpserver never imports
+		// internal/config (architect review AC1).
+		WebhookAdmission: toWebhookAdmissionSettings(cfg.WebhookAdmission),
 		// S9.1-LAUNCH-1/S9.1-LAUNCH-2 (docs/security/security-
 		// architecture.md): both plumbed straight from environment-sourced
 		// config, with no hardcoded default overriding cfg's own (0/0 -
@@ -352,6 +356,23 @@ func run() error {
 		ProviderCredentials: providers.Credentials,
 	})
 
+	// ADR 0097 §7 (PRH-I4): startup waits for the webhook tenant
+	// directory's first successful load before serving any traffic - a
+	// failure here does not fail startup (a down DB is already surfaced by
+	// /readyz and by the earlier db.Connect/HealthCheck calls above); it
+	// logs and leaves the directory not-Loaded(), so /readyz stays
+	// not-ready and every webhook route answers 503 until a later
+	// background refresh succeeds (never falls back to unbounded/raw-slug
+	// keying).
+	if err := webhookAdmission.LoadDirectory(ctx); err != nil {
+		logger.Error("webhook_tenant_directory_initial_load_failed", "error", err)
+	}
+	// devops condition 2 (ADR 0097 §17): the refresher goroutine is wired
+	// to the SAME ctx signal.NotifyContext cancels on shutdown, so it stops
+	// cleanly and never logs after the deferred pool.Close()/tracing/
+	// metrics shutdowns above run.
+	go webhookAdmission.RunDirectoryRefresh(ctx)
+
 	// Stage 3C directive item 4: operationalize the ledger-vs-projection
 	// reconciliation stream, which Stage 3B built but never actually
 	// scheduled - every tenant is swept on cfg.ReconciliationInterval
@@ -423,6 +444,34 @@ func run() error {
 		Addr:              cfg.HTTPAddr,
 		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
+		// HTTP-TIMEOUTS-1 (RL-F3, registered by ADR 0097 §1/§13; devops
+		// condition 1: a SEPARATE, platform-wide fix, not folded into the
+		// webhook-admission change set). Before this, only
+		// ReadHeaderTimeout was set, so a slow body sender (or a
+		// never-responding client on any route, not only webhooks) held a
+		// goroutine indefinitely.
+		//
+		// ReadTimeout/WriteTimeout apply to EVERY route, including the
+		// admin/back-office/reconciliation/statement handlers devops's own
+		// review flagged as the ones needing headroom analysis (none of
+		// them declare an explicit per-request deadline today - see
+		// internal/httpserver's own health.go's 2s readyz timeout for the
+		// only existing precedent, which is far too short for a bulk
+		// admin/report query). 60s is a deliberately generous, NON-GATING
+		// estimate (CLAUDE.md "technical default, not measured"): no admin/
+		// report handler in this codebase streams or holds a connection
+		// open, they are all bounded, synchronous JSON responses, so this
+		// bounds a genuinely stuck request without being tight enough to
+		// abort a legitimate large reconciliation/statement query under
+		// normal load. Revisit with real measurement before this is relied
+		// on as a production SLA (registered as HTTP-TIMEOUTS-1's own
+		// follow-up, not re-litigated by this ADR 0097 commit).
+		//
+		// IdleTimeout bounds a keep-alive connection sitting open between
+		// requests - unrelated to any single handler's duration.
+		ReadTimeout:  15 * time.Second,
+		WriteTimeout: 60 * time.Second,
+		IdleTimeout:  120 * time.Second,
 	}
 
 	serveErr := make(chan error, 1)

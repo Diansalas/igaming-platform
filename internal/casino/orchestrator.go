@@ -66,6 +66,10 @@ type Orchestrator struct {
 // Stage 10.3 W1a: every adapter's WebhookScheme() is validated here - a bad
 // declaration panics, so the process refuses to start.
 func NewOrchestrator(providers map[string]CasinoProvider, resolver webhookauth.Resolver) *Orchestrator {
+	// ADR 0097 §6.3/§20 AC6: fail-closed registration for undeclared
+	// non-MOCK webhook adapters (see payments.NewOrchestrator's identical
+	// comment).
+	webhookauth.MustRequireRetrySemantics("casino", providers)
 	return &Orchestrator{providers: providers, webhookCredentialResolver: resolver, webhookSchemes: mustCasinoSchemeSet(providers)}
 }
 

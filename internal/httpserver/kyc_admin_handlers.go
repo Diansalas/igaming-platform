@@ -418,6 +418,7 @@ var kycWebhookRoute = webhookRoute{
 		return deps.KYCOrchestrator.WebhookScheme(providerID)
 	},
 	maxBody:                 maxKYCWebhookBodyBytes,
+	domain:                  domainKYC,
 	authFailedEvent:         "kyc_webhook_auth_failed",
 	tenantLookupFailedEvent: "kyc_webhook_tenant_lookup_failed",
 }
@@ -448,11 +449,26 @@ func newKYCWebhookHandler(deps Deps) http.HandlerFunc {
 			return
 		}
 
+		// ADR 0097 A2/A3/A4a: the FIRST thing any webhook route does - no
+		// DB, no body read (ORD-1/ORD-2).
+		releaseInflight, admitted := deps.webhookAdmission.admitPreAuth(w, r, domainKYC, deps.TrustedProxyCount, func(id string) bool {
+			if deps.KYCOrchestrator == nil {
+				return false
+			}
+			_, ok := deps.KYCOrchestrator.WebhookScheme(id)
+			return ok
+		})
+		if !admitted {
+			return
+		}
+		defer releaseInflight()
+
 		// Steps 1-5 (provider_id charset, bounded body read, header format
 		// - all before any tenant/DB work - then the platform-wide tenant
 		// lookup and active check) are the shared webhook preamble. Every
 		// rejection there is the IDENTICAL 401 "callback rejected" with one
-		// allow-listed kyc_webhook_auth_failed line.
+		// allow-listed kyc_webhook_auth_failed line. ADR 0097 A4b gates the
+		// platform-wide tenant lookup this now performs.
 		t, providerID, body, ok := webhookPreamble(w, r, deps, kycWebhookRoute)
 		if !ok {
 			return
@@ -461,9 +477,44 @@ func newKYCWebhookHandler(deps Deps) http.HandlerFunc {
 		// ADR 0094 §4.1: phase 1 (verification) holds NO transaction - its
 		// handle read runs in a short READ ONLY transaction that commits
 		// before any secret-store fetch; the domain transaction opens only
-		// after it succeeded, and re-checks the verified handle first.
+		// after it succeeded, and re-checks the verified handle first. ADR
+		// 0097 §5.3: gatedReader gates VerifyCallback's own
+		// WithTenantReadOnly calls under the same A4b bulkhead.
+		var reader webhookauth.TenantReader = deps.DB
+		if deps.webhookAdmission != nil {
+			tenantKey, providerKey := deps.webhookAdmission.preAuthKeys(t.Slug, providerID, func(id string) bool {
+				_, ok := deps.KYCOrchestrator.WebhookScheme(id)
+				return ok
+			})
+			reader = deps.webhookAdmission.newGatedReader(deps.DB, domainKYC, tenantKey, providerKey)
+		}
 		var applied bool
-		verified, err := deps.KYCOrchestrator.VerifyCallback(r.Context(), deps.DB, t.ID, providerID, webhookauth.Inbound{Header: r.Header, Body: body})
+		verified, err := deps.KYCOrchestrator.VerifyCallback(r.Context(), reader, t.ID, providerID, webhookauth.Inbound{Header: r.Header, Body: body})
+		if errors.Is(err, errDBGateUnavailable) {
+			apierror.Write(w, requestID, apierror.CodeUnavailable, "service temporarily unavailable; retry later")
+			return
+		}
+		// ADR 0097 B1/B2 (ORD-3/ORD-4): admitted ONLY off the just-verified
+		// (tenant_id, provider_id), strictly before deps.DB.WithTenant.
+		var releaseDomainTx func()
+		if err == nil {
+			var admittedVerified bool
+			releaseDomainTx, admittedVerified = deps.webhookAdmission.admitVerified(w, r, domainKYC, t.ID, providerID, func(providerID string) (allows, declared bool) {
+				sem, ok := deps.KYCOrchestrator.WebhookRetrySemantics(providerID)
+				if !ok {
+					return true, false
+				}
+				return sem.Retries429, true
+			})
+			if !admittedVerified {
+				return
+			}
+			defer func() {
+				if releaseDomainTx != nil {
+					releaseDomainTx()
+				}
+			}()
+		}
 		if err == nil {
 			err = deps.DB.WithTenant(r.Context(), t.ID, func(ctx context.Context, tx pgx.Tx) error {
 				var err error

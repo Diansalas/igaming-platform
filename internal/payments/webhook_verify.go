@@ -27,6 +27,24 @@ func (o *Orchestrator) WebhookScheme(providerID string) (webhookauth.Verificatio
 	return o.webhookSchemes.Lookup(providerID)
 }
 
+// WebhookRetrySemantics returns the registered adapter's declared retry
+// behaviour (ADR 0097 §6.3/§20 AC6), if any. false means "no declaration"
+// - reachable today only for a MOCK adapter (NewOrchestrator already
+// refuses to register any other undeclared adapter), so the admission
+// layer treats false as "MOCK: 429/503 as the §6.1 default", never as an
+// unknown/unsafe state.
+func (o *Orchestrator) WebhookRetrySemantics(providerID string) (webhookauth.WebhookRetrySemantics, bool) {
+	p, ok := o.Provider(providerID)
+	if !ok {
+		return webhookauth.WebhookRetrySemantics{}, false
+	}
+	src, ok := any(p).(webhookauth.RetrySemanticsSource)
+	if !ok {
+		return webhookauth.WebhookRetrySemantics{}, false
+	}
+	return src.WebhookRetrySemantics()
+}
+
 // WebhookDomain is the domain tag a payments VerifiedCallback is sealed
 // for; ReceiveVerifiedCallback refuses a token sealed for any other domain.
 const WebhookDomain = "payments"

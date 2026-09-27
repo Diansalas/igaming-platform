@@ -35,6 +35,20 @@ const requestStateKey contextKey = "request_state"
 type RequestState struct {
 	RequestID string
 	TenantID  string
+
+	// LogPath overrides what loggingMiddleware/recoverMiddleware
+	// (internal/httpserver/middleware.go) record as the request path
+	// (RL-F4, ADR 0097 §8/§17 devops condition 3). Empty means "log
+	// r.URL.Path as before". Set by a webhook handler, keyed off the
+	// MATCHED ROUTE PATTERN (r.Pattern) - never a path-prefix string
+	// match, which a crafted path could spoof - because r.Pattern is
+	// reliably populated only by the time net/http's ServeMux has
+	// dispatched to the terminal handler; a middleware wrapping the mux
+	// from outside cannot read it directly (a request may be cloned via
+	// r.WithContext between there and here, e.g. by otelhttp), which is
+	// exactly the visibility problem this shared-pointer RequestState
+	// exists to solve for TenantID above.
+	LogPath string
 }
 
 // NewLogger returns a JSON structured logger. JSON output (rather than
