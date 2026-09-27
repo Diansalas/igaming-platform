@@ -331,7 +331,71 @@ Blueprint §4.7's tiered list has two different characters:
      Blueprint states the trigger unconditionally and no legal value is
      needed to honor it.
 
-### 3.3 Migration 0101 — sketch
+### 3.5 A third kind of trigger: policy-driven "play" (casino/sportsbook bet placement)
+
+The orchestrator's amendment (2026-09-27) is explicit that casino bets
+are a named enforcement surface and must not be dropped silently, even
+though this ADR's own default analysis (§1 rows #7/#10, ADR 0026 §14 and
+ADR 0031's precedent that KYC ties to registration/deposit/withdrawal/EDD
+tiers, not to every stake) remains correct as the **default**. The
+resolution is a third trigger kind, distinct from both "structural"
+(point 1) and "threshold" (point 2):
+
+- **`play` is neither compiled-in nor amount-shaped.** Unlike the
+  first-withdrawal rule, it carries **no safe default value to ship
+  unconditionally** — no Blueprint text states "every jurisdiction
+  requires KYC before any bet," so this ADR does not compile that in.
+  Unlike `cumulative_deposit`/`edd_amount`, it has no numeric threshold at
+  all — it is a pure on/off fact per `(licensing_jurisdiction_id,
+  operation)`. It exists as its own `trigger_type` (§3.3/migration 0101)
+  precisely so the *capability* to require KYC-before-play is real and
+  reviewable the moment a jurisdiction needs it, without a schema or code
+  change — the same "mechanism now, values later" contract as every
+  other trigger in this ADR.
+- **Default: `not_required`.** With no active `play` policy row for a
+  given `(licensing_jurisdiction_id, casino_play)` or
+  `(licensing_jurisdiction_id, sportsbook_play)` pair,
+  `EvaluateEnforcement` returns `not_required`, and today's behaviour
+  (RG → Risk, no KYC call's outcome ever denies) is unchanged in
+  practice. This mirrors the deposit default's reasoning (point 2 above)
+  and is deliberately **not** given the withdrawal default's
+  fail-closed-by-structural-rule treatment, because — unlike a
+  withdrawal — a bet never moves value off the platform; the eventual
+  withdrawal gate (§3.2 point 1) is still the backstop that decides
+  whether any winnings can ever actually leave.
+- **Fail-closed only once configured.** The instant a jurisdiction
+  authors an `active` `play` row (with its own required
+  `legal_review_reference`/`reason_code`, exactly like every other active
+  policy row), `EvaluateEnforcement` for that jurisdiction's
+  `casino_play`/`sportsbook_play` operation starts returning `passed`/
+  `pending`/`failed`/`unavailable` from the player's real
+  `kyc_verifications` state, and §2.3's ordinary mapping applies with no
+  exception: `pending`/`failed`/`unavailable` all deny, uniformly, the
+  same as every other enforcement point in this ADR.
+- **Ordering and lock class (§2.4, §5).** The KYC call for
+  `casino_play`/`sportsbook_play` sits **after** RG and after Risk, inside
+  the same domain transaction, immediately before the balance lock/ledger
+  post — the exact position ADR 0031 §7 already documents RG/Risk
+  occupying relative to the balance lock, so KYC is appended as a third,
+  final read-only step rather than inserted between two already-tested
+  steps. It is a plain `SELECT` (no lock acquired, §5), so it adds no new
+  entry to ADR 0082's canonical lock-class ordering and, on the
+  overwhelmingly common `not_required` (no active policy) path, costs one
+  cheap indexed lookup against `kyc_enforcement_policies` per bet — a
+  cost this ADR judges acceptable given the alternative (silently
+  omitting a directed enforcement surface) is not available. If that
+  per-bet lookup cost is ever found material at production bet volume,
+  the caller may cache the *policy* (not the player's KYC state) for the
+  duration of a `casino_launch_sessions` row, the same way
+  `JurisdictionCode`/`LicensingMode` are already denormalized onto the
+  session (ADR 0031 §9) — not designed here, flagged as a future
+  optimization if profiling shows it is needed, never assumed.
+- **HD-KYC-8 (§4).** Whether any jurisdiction actually requires KYC
+  before play, and at what tier, is not decided here — recorded as its
+  own human decision, tied to HDR-J-6 and legal review, independent of
+  HD-KYC-1/2/3.
+
+### 3.6 Migration 0101 — sketch
 
 Two tables, both platform-wide (no `tenant_id`), mirroring
 `jurisdiction_precedence_configs`'s RLS posture (readable everywhere,
@@ -367,6 +431,12 @@ CREATE TABLE kyc_enforcement_policies (
     -- which has no meaning for a boolean/tier trigger (ADR 0031 §12's own
     -- "a new kind needs its own column, not a repurposed one" discipline).
     required_tier               TEXT CHECK (required_tier IS NULL OR required_tier IN ('basic', 'full')),
+    -- play_operation is for the 'play' trigger only (§3.5, HD-KYC-8) — a
+    -- KYC-before-play policy is authored per surface (casino vs.
+    -- sportsbook), never both implicitly from one row, so a jurisdiction
+    -- that only wants sportsbook gated does not accidentally also gate
+    -- casino.
+    play_operation               TEXT CHECK (play_operation IS NULL OR play_operation IN ('casino_play', 'sportsbook_play')),
     effective_from               TIMESTAMPTZ NOT NULL DEFAULT now(),
     legal_review_reference       TEXT CHECK (legal_review_reference IS NULL OR btrim(legal_review_reference) <> ''),
     reason_code                  TEXT NOT NULL CHECK (btrim(reason_code) <> ''),
@@ -379,8 +449,9 @@ CREATE TABLE kyc_enforcement_policies (
     -- carrying an unused threshold_minor_units that a future reader might
     -- misinterpret).
     CHECK (
-        (trigger_type IN ('cumulative_deposit','edd_amount') AND threshold_minor_units IS NOT NULL AND asset_code IS NOT NULL AND required_tier IS NULL)
-        OR (trigger_type = 'registration_tier' AND required_tier IS NOT NULL AND threshold_minor_units IS NULL AND asset_code IS NULL)
+        (trigger_type IN ('cumulative_deposit','edd_amount') AND threshold_minor_units IS NOT NULL AND asset_code IS NOT NULL AND required_tier IS NULL AND play_operation IS NULL)
+        OR (trigger_type = 'registration_tier' AND required_tier IS NOT NULL AND threshold_minor_units IS NULL AND asset_code IS NULL AND play_operation IS NULL)
+        OR (trigger_type = 'play' AND play_operation IS NOT NULL AND threshold_minor_units IS NULL AND asset_code IS NULL AND required_tier IS NULL)
     ),
     -- 'active' rows require a legal review reference — mirrors ADR 0043's
     -- identical requirement for jurisdiction evaluation policy.
@@ -388,10 +459,12 @@ CREATE TABLE kyc_enforcement_policies (
 );
 
 CREATE UNIQUE INDEX kyc_enforcement_policies_one_active
-    ON kyc_enforcement_policies (licensing_jurisdiction_id, trigger_type)
+    ON kyc_enforcement_policies (licensing_jurisdiction_id, trigger_type, COALESCE(play_operation, ''))
     WHERE status = 'active';
-    -- Only one active row per (jurisdiction, trigger_type) at a time —
-    -- ADR 0043's own "no ON CONFLICT DO UPDATE, append a new active row
+    -- Only one active row per (jurisdiction, trigger_type, play_operation)
+    -- at a time — the COALESCE lets casino_play and sportsbook_play each
+    -- have their own independently active 'play' row for the same
+    -- jurisdiction. ADR 0043's own "no ON CONFLICT DO UPDATE, append a new active row
     -- and withdraw the old one" discipline applies unchanged; a full
     -- effective-dated history is read via ORDER BY effective_from.
 
@@ -424,7 +497,7 @@ CREATE TABLE kyc_enforcement_decisions (
     tenant_id            UUID NOT NULL,
     brand_id             UUID NOT NULL,
     player_account_id    UUID NOT NULL,
-    operation            TEXT NOT NULL CHECK (operation IN ('deposit','withdrawal_hold','withdrawal_payout')),
+    operation            TEXT NOT NULL CHECK (operation IN ('deposit','withdrawal_hold','withdrawal_payout','casino_play','sportsbook_play')),
     outcome              TEXT NOT NULL CHECK (outcome IN ('not_required','passed','pending','failed','unavailable')),
     allowed              BOOLEAN NOT NULL,
     matched_trigger      TEXT, -- e.g. 'first_withdrawal' or a policy row id; NULL for not_required with nothing configured
@@ -456,7 +529,7 @@ mirroring the existing `payments.deposit_denied_by_rg` pattern exactly).
 Both are written in the same transaction as the decision itself, never
 after the fact.
 
-### 3.4 No test-only or production default values
+### 3.7 No test-only or production default values
 
 No row is seeded by migration 0101 — the same discipline ADR 0043 §
 (Stage 4I Phase D) already followed for its own PC-GAP-1/PC-GAP-2
