@@ -308,3 +308,206 @@ F-POOL-1's mechanism is removed, and that ADR 0094's conditions are met, with th
     where the cache is the only owner, through an unexported helper. It does not belong on the
     public `Secret` API.
 - **Hygiene F-2 status: PARTIALLY RESOLVED.** The residual is S-4 (Low).
+
+---
+
+## Addendum (2026-09-27): K1 failure on CI #360, fix round, re-ruling
+
+- **Reviewer:** `security`. **HEAD:** `49ee4ec`.
+- **Commits reviewed:** `cb7fb92`, `4ab399f`, `9799406`, `962c16d`, `94162f9`, and `49ee4ec`, which
+  is the ADR 0094 "Fix round" record.
+- **Method:**
+  - I reproduced and instrumented the failure myself.
+  - I ran the timing lane with the CI commands.
+  - I ran 3 throwaway mutations. Each was reverted, and `git status` was clean afterwards.
+  - I made no code changes. I committed nothing.
+
+### A. K1 root cause and the test change (`cb7fb92`): **ACCEPTED**
+
+**Root cause: confirmed by my own reproduction.** I added throwaway instrumentation to the kept
+test, then reverted it. Pool statistics at the start of the burst:
+
+| Variant | Connections when the burst starts | New connections dialled during the burst |
+|---|---|---|
+| Pool 20 | 1 | 19 |
+| Pool 10 | 1 | 9 |
+
+Counts of long callers (over the 400 ms `longSlack`) under each span definition, run under `-race`:
+
+| CPUs | Pool | Callers > 400 ms, whole call (the `4779958` span) | Callers > 400 ms, new span | Acquisition p50 / max |
+|---|---|---|---|---|
+| 1 (`taskset -c 0`), 3 runs | 20 | **50, 50, 50** | 4, 4, 4 | 248–260 / 258–280 ms |
+| 1 (`taskset -c 0`), 3 runs | 10 | 4, 4, 4 | 4, 4, 4 | 124–130 / 134–144 ms |
+| 2 (`taskset -c 0-1`), 2 runs | 20 | **15, 48** | 4, 4 | 139–178 / 159–192 ms |
+| 2 (`taskset -c 0-1`), 2 runs | 10 | 4, 4 | 4, 4 | 72–76 / 81–87 ms |
+
+`maxConcurrent` was 4 in every run.
+- **Reproduced locally:** the pool-20 CI failure mode.
+- **Not reproduced locally:** CI's pool-10 figure (43 long callers). It is consistent with a runner
+  slower than my 1-CPU setting, where pool-10 acquisition is about 190–290 ms, inferred from CI's
+  438–543 ms fast callers. It is not directly verified, because CI #360 printed no split.
+- The final K1 condition below covers this gap.
+
+**Is the tested claim identical to or stronger than the pre-ADR-0094 test?** Yes. That test
+(`4779958^`) started `start := time.Now()` as the first statement inside `WithTenant`'s `fn`, which
+is after pool acquisition, BEGIN and `set_config`.
+
+| Aspect | Before ADR 0094 | After `cb7fb92` |
+|---|---|---|
+| Where the clock starts | first statement inside `WithTenant`'s `fn` | first statement of `WithTenantReadOnly`'s `fn` (same point) |
+| What the span covers | handle read and store wait | handle read, **COMMIT**, and slot/flight/store wait |
+| `longSlack` | 400 ms | 400 ms |
+| Long-caller bound | ≤ 4 | ≤ 4 |
+| Unrelated-query bound | 500 ms | 500 ms |
+| Pool sizes | 20 | 20 and 10 |
+| No pre-verification tx held > `longSlack` (criterion 4) | not present | present |
+| No store call with a tx held (criterion 5) | not present | present |
+
+The human's rule is met: no timing threshold is weakened, and no concurrency or security coverage
+is removed against the reviewed baseline.
+- **Relative to `4779958`:** the per-caller count no longer includes the outage tenant's own callers
+  queueing for a connection. That version never passed CI. Its extra coverage was not a §5 property.
+- **Where §5 pool starvation is tested:** the other tenant's end-to-end latency, which is the
+  unchanged unrelated-query bound.
+
+**My mutation 1 (bypass (a′) from §1).** Inside `Resolver.Resolve`'s `WithTenantReadOnly` closure,
+I called `credentialFor` with the captured **outer** ctx. That is a store call made while the read
+transaction is held, and the `txscope` guard cannot see it.
+- Result: **KILLED** on 2 CPUs.
+  - Pool 20: 46 long callers.
+  - Pool 10: the unrelated query took 1.44 s.
+- The new span and the pool-starvation bound both still catch the F-POOL-1 mechanism even when
+  criterion 5 is blind.
+
+**M9a (`SlotWait` 250 → 350 ms): ACCEPTED as caught only by `TestStoreConstants_PinnedToSecurityReview`.**
+- **My runs (mutation 2), 2 CPUs:** the kept test failed at pool 20 in 2 of 2 runs and at pool 10
+  in 1 of 2 runs.
+  - The result is not deterministic. The losers' span is 350 ms plus the commit, which gives
+    355–470 ms and straddles 400 ms.
+  - The ADR's "no longer caught" is slightly pessimistic, but the conclusion stands: the long
+    bucket is **not a reliable** detector of a SlotWait shift of +100 ms.
+- **The reliable kill is the constant pin.** It is deterministic and runs in the main lane, and it
+  failed on M9a, as expected.
+- **Why this is acceptable:** it matches the pre-ADR baseline (ruling 15 §1: mutation (c) passed
+  2/2 at pool 20). The long bucket's purpose is to catch regressions of about 400 ms or more, and
+  M22 and M1 are both killed.
+- **Condition:** `TestStoreConstants_PinnedToSecurityReview` must stay in the main lane and must
+  pin `SlotWait` to the literal 250 ms.
+
+**Residual (Info, disclosed, no action now).** The span starts at the first statement of the handle
+read. Anything `Resolve` does **before** that read is outside the per-caller count.
+- Today nothing precedes the read except argument checks and the `txscope` guard (`resolver.go`,
+  lines 119–141).
+- If `Resolve` ever gains a wait or admission step before the handle read, the test's measurement
+  argument must be re-reviewed. The kept test would not see such a wait.
+
+**CI headroom.** On 2 CPUs the slot-wait losers run about 251–300 ms in the new span, against
+400 ms.
+
+### B. R-3, `FailureStreakTTL` = 15 s: **ACCEPTED, with one ADR-text condition**
+
+**Code checked:**
+- `streakLive` is only consulted for a **closed** breaker. Open and half-open breakers stay degraded
+  until a successful probe.
+- An expired streak restarts at 1 on the next counting failure.
+- Pruning uses `!streakLive`, so the breaker map stays bounded by tenants with *recent* failures.
+- The warning count uses `degradedLocked`, so old blips no longer count.
+- The value is pinned in `TestStoreConstants_PinnedToSecurityReview`.
+- `TestFetcher_DegradedStateExpires` covers the expiry and "failures spread > TTL do not trip".
+
+The trade-off is sound. Without expiry, one old blip made a tenant permanently degraded and able to
+fail fast.
+
+**Consequence for ADR 0094 §6 / §4.2 item 2, which the text understates.** With the expiry, a tenant
+whose counting failures come **≥ 15 s apart** re-enters as *healthy* each time, so every such
+failure is a fresh onset. That has two effects:
+1. **Healthy slots are not always reserved.** The reservation of S − D slots for healthy tenants
+   holds only while a streak is live. At each re-onset the tenant can hold up to P = 2 *healthy*
+   slots for up to `StoreCallTimeout` × (1 + `StoreMaxRetries`). Two such tenants, staggered, can
+   briefly occupy all S = 4 slots.
+   - This is the same bounded behaviour as the simultaneous-onset case: #3b means healthy callers
+     fail fast within `SlotWait` + 150 ms.
+   - Concurrency is still ≤ S.
+2. **14 N is not a bound for every arrival pattern.** 14 N over 120 s holds for sustained arrival,
+   and both rate tests use 1 s ticks. With sparse arrival the ceiling is about
+   P × (1 + `StoreMaxRetries`) = 4 attempts per tenant per 15 s. That is about 32 N over 120 s,
+   against a tripped tenant's 1 probe per cooldown.
+   - It is bounded by the tenant's own (low) arrival rate, and it is capped by S.
+
+Neither effect can be triggered from request input alone, because it needs the store to fail for a
+tenant. Neither re-opens connection pinning.
+
+**Condition B1 (ADR text; before Stage 10.3 is closed):**
+- In ADR 0094 §4.2 item 2 and §6, state that the D-reserve and the 14 N bound apply within a live
+  streak.
+- State that a tenant with failures ≥ 15 s apart re-onsets as healthy, with the per-tenant ceiling
+  above.
+- Replace "S = 4 and D = 2 still bound concurrency" with "S bounds concurrency; D bounds it within
+  a live streak".
+- No code change is required.
+
+### C. K2 and K3 closure
+
+| ID | Verdict | Evidence |
+|---|---|---|
+| S-1 | **CLOSED** | `CloneInbound` is called once, as the first statement of `ResolveAndSeal`; there are no production callers elsewhere. **My mutation 3** (drop that clone) was **KILLED** by 4 tests: `TestVerifiedCallback_BytesArePrivateCopy` and `TestVerifyCallback_BodyMutationBetweenPhases{,_Casino,_KYC}`. |
+| S-2 | **CLOSED** | `TestVerifyCallback_InsideTxRefused_Casino` and `_KYC` exist and pass, alongside payments. |
+| S-3 | **CLOSED** | See the notes after this table. |
+| S-4 | **CLOSED** | `LogValue` and `MarshalJSON` are on `derivedTokenBytes` and `derivedEntry`. `TestDerivedTokenCache_SlogAndJSONRedactToken` covers slog text, slog JSON, `json.Marshal` of the token, the entry (value and pointer) and a map, and checks for plaintext and base64. Hygiene F-2 is now **RESOLVED**. |
+| S-5 | **CLOSED** | ADR 0094 §2 item 2 now says the capture tests are primary, and that `READ ONLY` does not stop advisory locks or read-only function calls. |
+| S-6 | **CLOSED** | §6 states N × (3 + P − 1) × 2 + probes = 14 N. `TestFetcher_GlobalOutageRateBound_Concurrent` asserts ≤ 14 N and max concurrency ≤ S. The arrival-pattern caveat from R-3 is B1, above. |
+| S-7 | **CLOSED** | The admission-loss branch calls `pruneBreakerLocked`. |
+
+**S-3 detail:**
+- `VerifyAndSeal` is removed. Only the unexported `verifyAndSeal` remains, called from
+  `ResolveAndSeal` and from unit tests in the package.
+- `ResolveAndSeal` still accepts a caller-chosen `Resolver`, so option (a) alone would not be
+  enough. Option (b) closes the gap:
+  - `Redeem` rechecks with the **domain's** configured resolver (`o.webhookCredentialResolver`).
+  - The real `Recheck` requires `hmac.Equal(keyedFingerprint(c.Secret), c.Fingerprint)` before
+    `HandleRecheckSQL` binds that fingerprint to the row.
+- `TestRecheck_BindsSecretToFingerprint` and `TestMockRecheck_BindsSecretToFingerprint` cover
+  both implementations.
+- Residual: a MOCK-configured domain can still be forged by in-process code (the MOCK fingerprint is
+  unkeyed). That is inherent to MOCK, and MOCK is not a production credential path.
+
+The main lane of the touched packages passes under `-race -tags=integration`, with the two
+timing-lane tests skipped. The packages are `webhookauth/...`, `secretstore/...`, `providercred`,
+`casino`, `kyc` and `payments`.
+
+### What I ran
+
+**Timing lane:** the exact CI commands (two `go test` invocations, `-race -tags=integration
+-count=1`), under `taskset -c 0-1`, 3 times. Result: **24/24 PASS**.
+
+| Measurement | Range |
+|---|---|
+| Kept-test acquisition max (diagnostic) | 75–184 ms |
+| Store-side span max (the slot holders) | 2.00–2.11 s |
+| `NormalOperation` worst callback | 303–341 ms |
+| Oldest pooled transaction in the outage scenarios | ≤ 95.6 ms |
+| `ConnectionExhaustion` B worst | 103–125 ms |
+
+**Mutations:**
+
+| # | Mutation | Result |
+|---|---|---|
+| 1 | Store call with the read tx held, via the outer ctx | KILLED |
+| 2 | M9a | Constant pin: KILLED. Kept test: intermittent. |
+| 3 | S-1 clone removed | KILLED |
+
+### Updated F-POOL-1 status: **CLOSED WITH CONDITIONS** (re-closed; the verdict at the top of this file still applies with the conditions below)
+
+- **K1, final and blocking for the closure to stand:** the **next** GitHub CI run of the
+  timing-lane step must pass all 8 tests by name. There are **no reruns**.
+  - If any lane test fails, F-POOL-1 re-opens and is investigated under ruling B.
+  - `longSlack`, ≤ 4, 500 ms and both pool sizes must not change.
+  - The span definition in `cb7fb92` must not be widened further, for example to exclude the
+    handle read or the commit.
+- **K2:** met (S-1, S-2, S-3).
+- **K3:** met (S-5, S-6). Condition **B1** (ADR text on the `FailureStreakTTL` re-onset) is added
+  and must be done before Stage 10.3 is closed.
+- **Launch-blocking status is unchanged:** once K1 holds, F-POOL-1 no longer blocks launch.
+  F-POOL-2 and PAYWH-RL-1 remain launch-blocking.
+- **Scope of this addendum:** the fix-round commits listed above. It does not cover GitHub CI
+  execution, F-POOL-2, PAYWH-RL-1, production load, or penetration testing.

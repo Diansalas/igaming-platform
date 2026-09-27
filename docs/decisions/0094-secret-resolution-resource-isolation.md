@@ -250,8 +250,12 @@ Accounting is per **(scheme, tenant)**, under the existing `Fetcher.mu`.
      cold fetch hours later could then be refused at once while the degraded budget was busy,
      and old blips kept counting towards `secret_store_multi_tenant_degraded`.
    - Consequence: counting failures spread more than 15 s apart never trip the breaker. That is
-     acceptable, because the breaker exists for sustained outages. S = 4 and D = 2 still bound
-     concurrency.
+     acceptable, because the breaker exists for sustained outages. S bounds concurrency; D bounds
+     it within a live streak (security B1, file 17 addendum). A tenant whose failures are ≥ 15 s
+     apart is healthy again at each failure, so each failure is a fresh onset: it can take up to
+     P = 2 healthy slots at that moment (the S − D reserve holds only while a streak is live).
+     Total concurrency never exceeds S = 4, and neither effect is reachable from request input
+     alone.
    - The value is a new platform constant, pinned by `TestStoreConstants_PinnedToSecurityReview`.
      **`security` must agree to it** (ADR 0093 A4).
 3. **Admission for a store call.** The owner of a flight needs:
@@ -400,6 +404,10 @@ C9. The earlier claim "lower than today's 4" was misleading.
       the sequential bound of 12 N.
     - `TestFetcher_GlobalOutageRateBound_Concurrent` (P callers per tenant arriving together,
       asserting 14 N and max concurrency ≤ S): 614 attempts measured, against 700.
+  - *Scope of the bound (security B1):* 14 N holds for **sustained** arrival. With sparse arrival
+    (failures ≥ `FailureStreakTTL` = 15 s apart) every failure is a fresh onset, so the ceiling
+    is about 4 attempts per tenant per 15 s — roughly **32 N** over 120 s. Still linear in N,
+    and concurrency stays ≤ S.
 - **Visibility:** when at least 3 distinct tenants on one backend are degraded at the same time,
   one rate-limited `warn` line, `secret_store_multi_tenant_degraded`, is logged at most once
   a minute per backend. A real backend-wide outage is therefore visible as one event.
