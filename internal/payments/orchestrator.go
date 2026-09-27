@@ -61,6 +61,12 @@ type Orchestrator struct {
 	// MaxCascadeDepth bounds cascade-on-decline (payment-orchestration.md
 	// §5). Defaults to defaultMaxCascadeDepth when <= 0.
 	MaxCascadeDepth int
+	// breaker is the ADR 0095 §9.6 orchestrator-owned breaker (PRH-I1
+	// step (c), breaker.go). Set by NewOrchestrator; a nil value (an
+	// Orchestrator constructed some other way, e.g. a zero-value literal
+	// in an older test) never blocks routing (Breaker.Allow's own nil
+	// receiver handling).
+	breaker *Breaker
 }
 
 // NewOrchestrator constructs an Orchestrator over the given adapter
@@ -82,6 +88,7 @@ func NewOrchestrator(providers map[string]PaymentProvider, resolver WebhookCrede
 	return &Orchestrator{
 		providers: providers, webhookCredentialResolver: resolver, MaxCascadeDepth: defaultMaxCascadeDepth,
 		webhookSchemes: mustPaymentsSchemeSet(providers),
+		breaker:        NewBreaker(),
 	}
 }
 
@@ -168,7 +175,29 @@ func (o *Orchestrator) RouteProvider(ctx context.Context, tx pgx.Tx, req Routing
 	if err != nil {
 		return nil, ProviderCapability{}, err
 	}
+	// NOTE (PRH-I1 step (c), ADR 0095 §9.6): this convenience wrapper is
+	// kept ONLY for the existing (pre-step-(b)) InitiateDeposit/
+	// attemptDeposit call sites, which still call HealthStatus while
+	// holding tx - the exact gap §9.6 exists to close, not yet fixed on
+	// that path because that path is not cut over to the two-phase
+	// pattern in this step (deposit_v2.go's own doc comment names the
+	// cutover as later PRH-I1 work). RankRoutingCandidates below is the
+	// tx-free replacement InitiateDepositAttempt actually uses.
+	return RankRoutingCandidates(ctx, candidates, o.providers, o.breaker, req)
+}
 
+// RankRoutingCandidates is ADR 0095 §9.6's "Rank(candidates, health)":
+// filters and ranks an already-loaded candidate list against live
+// health/circuit state, taking NO transaction and NO tx parameter at
+// all, so it is structurally impossible to call it while holding a
+// pooled connection. HealthStatus is itself contracted to be an
+// in-memory snapshot with no I/O (§9.6) - calling it here rather than
+// inside ListRoutingCandidates' tx is what makes RouteProvider's split
+// meaningful for a real (non-MOCK) adapter, whose snapshot may still be
+// backed by a mutex or an atomic read that a static analyzer, and a
+// human reviewer, should never have to also prove is "fast enough to run
+// under a transaction" - it simply never runs under one.
+func RankRoutingCandidates(ctx context.Context, candidates []ProviderCapability, providers map[string]PaymentProvider, breaker *Breaker, req RoutingRequest) (PaymentProvider, ProviderCapability, error) {
 	excluded := make(map[string]struct{}, len(req.ExcludeProviderIDs))
 	for _, id := range req.ExcludeProviderIDs {
 		excluded[id] = struct{}{}
@@ -205,8 +234,14 @@ func (o *Orchestrator) RouteProvider(ctx context.Context, tx pgx.Tx, req Routing
 			continue
 		}
 
-		provider, registered := o.providers[candidate.ProviderID]
+		provider, registered := providers[candidate.ProviderID]
 		if !registered {
+			continue
+		}
+		// §9.6: an open breaker removes the candidate from routing
+		// without a DB transaction being held - Allow is a plain
+		// in-memory check, called here with no tx in scope.
+		if !breaker.Allow(req.TenantID, candidate.ProviderID) {
 			continue
 		}
 		health, err := provider.HealthStatus(ctx)

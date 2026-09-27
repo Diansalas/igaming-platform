@@ -157,6 +157,19 @@ const (
 	MockAmountPlayerDeclineNoCascade int64 = 111
 	MockAmountProviderDeclineCascade int64 = 222
 	MockAmountAmbiguous              int64 = 333
+	// MockAmountSyncSuccess (PRH-I1 step (c)) is EXPLICITLY TEST-SCOPED:
+	// no real PSP returns a synchronous, definite success for a hosted-
+	// redirect deposit (docs/decisions/0022 §6, DepositResult's own doc
+	// comment: "Outcome is never OutcomeSucceeded here"). This magic
+	// amount exists ONLY so a test can exercise T7's ledger-posting path
+	// (ledger.Post, SUM(debits)==SUM(credits), projection==rebuild)
+	// against a REAL (if synthetic) adapter call, instead of unit-testing
+	// applyEvidence's success branch in isolation. It requires the
+	// caller's manifest to declare SyncSuccessPossible=true (§4.4
+	// precondition 3 / §8) - without that, this same amount still comes
+	// back as Ambiguous, exactly like any other adapter's unsanctioned
+	// sync success would.
+	MockAmountSyncSuccess int64 = 444
 )
 
 type mockAttempt struct {
@@ -219,6 +232,27 @@ func (m *MockProvider) SetHealth(h ProviderHealth) {
 	defer m.mu.Unlock()
 	h.ProviderID = m.providerID
 	m.health = h
+}
+
+// AttemptCount reports how many Deposit/Withdraw calls this mock has
+// recorded so far - a test-only call counter (PRH-I1 step (b) onward)
+// used to assert "the provider was never called" for a gate refusal or a
+// pre-call denial.
+func (m *MockProvider) AttemptCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.attempts)
+}
+
+// SetManifest lets a test (PRH-I1 step (b) onward) drive the ADR 0095
+// §10.1 operation manifest this mock declares, since a real adapter's
+// manifest is a deployment-time fact, not something InitiateDepositAttempt
+// can infer. Additive: every pre-existing test that never calls this gets
+// the zero-value OperationManifest, exactly as before this method existed.
+func (m *MockProvider) SetManifest(manifest OperationManifest) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.capability.Manifest = manifest
 }
 
 // Resolve lets a test simulate a delayed provider-side resolution of a
@@ -358,6 +392,9 @@ func (m *MockProvider) Deposit(_ context.Context, req DepositRequest) (DepositRe
 	case MockAmountAmbiguous:
 		m.attempts[ref] = &mockAttempt{kind: "deposit", amount: req.Amount, assetCode: req.AssetCode, outcome: OutcomeAmbiguous}
 		return DepositResult{Outcome: OutcomeAmbiguous, ProviderReference: ref}, nil
+	case MockAmountSyncSuccess:
+		m.attempts[ref] = &mockAttempt{kind: "deposit", amount: req.Amount, assetCode: req.AssetCode, outcome: OutcomeSucceeded}
+		return DepositResult{Outcome: OutcomeSucceeded, ProviderReference: ref}, nil
 	default:
 		m.attempts[ref] = &mockAttempt{kind: "deposit", amount: req.Amount, assetCode: req.AssetCode, outcome: OutcomePending}
 		return DepositResult{Outcome: OutcomePending, ProviderReference: ref, RedirectURL: "https://mock-psp.invalid/pay/" + ref}, nil
