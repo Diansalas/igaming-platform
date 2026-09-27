@@ -1248,6 +1248,118 @@ first, per the orchestrator's own sequencing instruction, and has not started.
 - PROV-REVOKE-ALL-1 (a genuine platform-wide, cross-tenant switch) remains deferred per §10.2.2's
   own text.
 
+### 10.7 Fix round 1b (`payments`, 2026-09-27): RV-PRH-I1 security review CHANGES REQUIRED response
+
+Responds to `docs/plans/payment-readiness/rv-prh-i1-killswitch-security.md` (reviewed at `be0d899`).
+Label: still **PARTIALLY IMPLEMENTED**; the gaps this round closes are H1, M1-M3, M6 and most of the
+Lows. M4 and M5 are closed to the review's own "before stage gate" bar; both remain
+**launch-blocking** per the review's explicit ruling (M4's regulator-traceability architect decision
+and M5's evadability are accepted-with-a-registered-follow-up, not resolved outright). Ledger-finance
+H3 (the callback/poll/drive.go decline paths) is **out of this section's scope** - it belongs to the
+concurrent callback-cutover agent, per `rv-prh-i1-callback-ledger.md`.
+
+**H1 (blocks completion) - CLOSED.** `internal/payments/killswitch_claim_predicate_coverage_test.go`:
+one permanent test per claim form (T1+T2 deposit, T1p payout, T12, cascade T1), each with a positive
+control (a non-matching provider/operation still succeeds), plus the §16.2 item 20 player-scoped-
+context pin. Mutation-killed: K2 (`InsertSubmittingAttempt`), K3 (`ResubmitAmbiguous`), K4 (cascade
+`InsertCreatedAttempt`) - adapted directly from the review's own probe P2. Evidence:
+`docs/plans/payment-readiness/evidence/prh-i1-mutation-kill.txt`.
+
+**M1 (fail-open) - CLOSED, migration 0107.** `migrations/0107_payment_attempts_platform_guc_
+hardening.{up,down}.sql` (0106 is the callback agent's; reserved 0107 per the orchestrator's
+allocation). Option (a) from the review: `payment_attempts`/`payment_provider_events`'s
+`tenant_staff_scope` policies now also require `app.platform_admin_principal_id` unset, aligning them
+with `payment_kill_switches.tenant_scope`. `TestMigration0107_MixedGUCContextClaimsNothing` is the
+adapted, permanent version of probe P1 and is mutation-killed. The ADR's own §10.3 L1 claim ("the same
+GUC predicate") is corrected by this fix, not merely documented as wrong.
+
+Migration 0107 additionally folds in, in the same reviewed change (`CREATE OR REPLACE FUNCTION` on
+the three migration 0105 trigger functions, additive per CLAUDE.md - migration 0105 itself is
+untouched):
+- **L1** (a tenant cannot cancel/change the status of a platform-filed request, or one against a
+  platform-engaged switch) - test: `TestMigration0107_L1_TenantCannotCancelPlatformRequest`.
+- **L2** (`expected_version` forced to the switch's real current version at request INSERT, closing
+  R3; a request may only be filed against a currently-`engaged` switch, closing half of R2) - tests:
+  `TestMigration0107_L2_FutureVersionRequestIsForcedToCurrent`,
+  `TestMigration0107_L2_RequestRequiresEngagedSwitch`,
+  `TestMigration0107_L2_EngageCancelsPreexistingOpenRequest`.
+- **L3** (`changed_at` forced from the clock, never client-supplied) - test:
+  `TestMigration0107_L3_ChangedAtIsForced`.
+- **L4** (`payment_kill_switch_session()` additionally requires `staff_users.status = 'active'`) -
+  test: `TestMigration0107_L4_SuspendedStaffRejectedAsActor`.
+
+**M2 (unvalidated `provider_scope`) - CLOSED.** `newEngageKillSwitchHandler`
+(`payments_kill_switch_handlers.go`) rejects leading/trailing whitespace and any `provider_scope`
+other than `'*'` that is not registered in `deps.PaymentOrchestrator` (the CODE-level registry, never
+tenant-editable capability config) - 400, never a silent no-op. Test:
+`TestPaymentsKillSwitchAPI_ProviderScopeValidation`.
+
+**M3 (no before/after in audit) - CLOSED.** Every mutation's `audit.Record` now carries `before`/
+`after` objects (engage additionally records `is_platform_takeover` and, when true,
+`ks_l6_cancelled_request_id` - detected by the handler reading the pre-existing open request id
+before calling `EngageKillSwitch`, the "reliable option" the review named). Tests:
+`TestPaymentsKillSwitchAPI_AuditRecordsCarryBeforeAfterAndTargetTenant`,
+`TestPaymentsKillSwitchAPI_AuditRecordsPlatformTakeover`.
+
+**M4 (platform traceability) - test added, architect decision registered, launch-blocking.**
+`TestPaymentsKillSwitchAPI_AuditRecordsCarryBeforeAfterAndTargetTenant` pins `target_tenant_id` on a
+platform-scoped mutation's audit row (K18). The schema-level fix (an `audit_log` platform INSERT-only
+policy family, or a first-class indexed column) is registered as **KS-AUDIT-TENANT-1**
+(`docs/governance/task-registry.md`), an `architect` decision per the review's own instruction - not
+implemented here.
+
+**M5 (reflection test scope/evadability) - substantially closed; relabelled PARTIALLY IMPLEMENTED
+per the review's own instruction.** `internal/testsupport/credentialscan` now additionally: detects
+`atomic.Pointer[T]` holding a forbidden type (via the type parameter, which survives even when the
+pointer is nil); flags `chan` of a forbidden/`Authenticator`-implementing type structurally (never
+receives from it); flags `unsafe.Pointer` unconditionally (its target type is unrecoverable);
+and checks `reflect.PointerTo(t).Implements(authenticatorType)` for addressable values (a pointer-
+receiver `Authenticator` held by value). `CheckPackageImports`/`CheckPackageLevelVars` make the
+static half PACKAGE-WIDE (every non-test file, not one hand-picked adapter file) and add the
+package-level-var rule. New `cmd/platform-api/credential_reflection_test.go` scans
+`buildProviderBundle(allOnWiring)` itself - the actual `paymentsAdapters()`/`casinoAdapters()`/
+`kycAdapters()` registries and outbound/webhook resolvers `main()` wires - not a skeletal mock a
+domain test builds separately, closing the review's central "does not scan what production wires"
+finding. Residual, accepted evasion (inherent to a type-based scan, not fixed): a raw `string`/
+`[]byte` holding secret-shaped data has no distinguishing type to catch. Relabelled honestly:
+**PARTIALLY IMPLEMENTED**, launch-blocking before the Synthetic tripwire is ever relaxed for a real
+adapter, per the review's own ruling.
+
+**M6 (untested single-point checks) - CLOSED for K10/K11/K14; K19 could not be demonstrated as a live
+bypass.** Tests: `TestMigration0105_M6_K10_RequestMustBindToItsOwnSwitch`,
+`TestMigration0105_M6_K11_ExpiredRequestCannotRelease`,
+`TestMigration0105_M6_K14_ExpiresAtCappedAt24Hours` (all three mutation-killed - K10 and K11 required
+combining the approve and release UPDATE into ONE transaction in the test, since the
+`decided_txid = txid_current()` rule already refuses a separate-transaction release for an unrelated
+reason, which had been silently masking whether the mutation under test did anything).
+`TestMigration0105_M6_K19_PlatformGUCRequiresGenuinePlatformStaff` pins the observable property (a
+tenant-scoped staff id in the platform GUC is refused) and passes on correct code, but a byte-level
+mutation removing only the trigger's own `staff_users.tenant_id IS NULL` clause could not be shown to
+create a live bypass in testing: `staff_users`' own RLS (`dual_scope_isolation`) already makes a
+tenant-scoped row invisible to a query run under a platform-only GUC context (no `app.tenant_id` set),
+and the `role = 'platform_admin' <=> tenant_id IS NULL` CHECK constraint means anything visible under
+that RLS view is already genuinely platform-scoped - RLS is acting as an independent, sufficient
+second layer for this specific property. Recorded here rather than silently claimed as mutation-
+killed.
+
+**Lows.** L1-L4 above (migration 0107). **L5** (audit-on-refusal, error class, 5xx-vs-409): partially
+closed - `writeKillSwitchError` now classifies a trigger `RAISE EXCEPTION` (SQLSTATE `P0001`) as 409
+with a logged class and message, and any OTHER error as a genuine 500 (previously always 409, silently
+under-logged); a separately-committed `OutcomeDenied` audit row for a refused mutation (self-approval,
+platform-lock, etc., beyond the existing foreign-tenant case) is **NOT IMPLEMENTED**. **L6** (platform
+engage against a nonexistent tenant) - CLOSED, `beginKillSwitchCall` checks `tenants` existence for a
+platform-scoped caller (`tenants` carries no RLS); test:
+`TestPaymentsKillSwitchAPI_PlatformCallerAgainstNonexistentTenantIs404`. **L7** (alert label) -
+relabelled here and in the task registry: engage **event IMPLEMENTED** (test:
+`TestLogKillSwitchEngagedAlert_EmitsPinnedEventAndFields`), alert **delivery NOT IMPLEMENTED**
+(launch-blocking); runbook entry added (`docs/runbooks/observability-and-alerting.md` §2 item 12).
+**L8** (route-table test) - CLOSED, `TestPaymentsKillSwitchAPI_RouteTable` enumerates all 7 routes and
+asserts 403 (player token) / 401 (no token) on every one.
+
+**I1-I6 (informational).** Not addressed this round beyond what the fixes above happen to touch (I2's
+policy-shape note and I4's `validateManifest` timing note are unchanged; both are accepted per the
+review's own text, not launch-blocking).
+
 ---
 
 ## 11. PROV-OUTBOUND-CRED-1 (approved scope)

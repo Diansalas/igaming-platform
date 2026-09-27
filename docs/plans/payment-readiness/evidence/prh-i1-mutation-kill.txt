@@ -803,3 +803,124 @@ golangci-lint (2.9.0, --build-tags=integration): 0 issues on
 test file carries the same unchecked-resp.Body.Close() errcheck style
 already present in ~590 pre-existing call sites across this package's test
 suite (not a new debt class).
+
+===========================================================================
+Kill-switch fix round 1b (RV-PRH-I1 security review response), 2026-09-27
+===========================================================================
+
+Responds to docs/plans/payment-readiness/rv-prh-i1-killswitch-security.md
+(reviewed at be0d899). Scope: H1 (blocks completion) and M6 (before stage
+gate), each "mutation-killed" per the coordinator's explicit instruction.
+M1-M5 and the Lows got tests but were not all individually mutation-killed
+(M1 was, as a security-critical fix; see below) - see ADR 0095 §10.7 for
+the full per-finding record.
+
+Harness: identical technique to the earlier entries in this file - a
+verified-anchored Python str.replace directly on the target .go/.sql file
+(count==1 asserted before writing), each mutation proven present via grep
+for its own marker, exercised against a scratch/private database, then the
+file restored byte-for-byte (md5sum/diff-verified identical) before
+continuing to the next mutation.
+
+H1 - killswitch_claim_predicate_coverage_test.go (attempt.go mutations):
+
+K2 (remove the predicate from InsertSubmittingAttempt, T1+T2/T1p):
+    Killed by TestKillSwitchPredicate_T1T2_Deposit_InsertSubmittingAttempt
+    AND TestKillSwitchPredicate_T1p_Payout_InsertSubmittingAttempt (both
+    call this one function). First failure: "expected InsertSubmittingAttempt
+    (T1+T2, deposit) to be refused for a matching engaged switch" /
+    "...(T1p, payout)...". Restored byte-identical.
+
+K3 (remove the predicate from ResubmitAmbiguous, T12):
+    Killed by TestKillSwitchPredicate_T12_ResubmitAmbiguous. First failure:
+    "expected ResubmitAmbiguous (T12) to be refused for a matching engaged
+    switch". Restored byte-identical.
+
+K4 (remove the predicate from cascade InsertCreatedAttempt, T1):
+    Killed by TestKillSwitchPredicate_CascadeT1_InsertCreatedAttempt. First
+    failure: "expected cascade InsertCreatedAttempt to be refused under a
+    wildcard-engaged switch". Restored byte-identical.
+
+Full-suite confirmation after all three reverts: go test -tags=integration
+-count=1 ./internal/payments/... -run TestKillSwitchPredicate -> 5/5 pass
+(the three above plus T1p's positive control and the §16.2 item 20
+player-scoped pin). Full internal/payments under -race also green
+(166.399s, background run, priv db).
+
+M1 (fail-open, migration 0107) - migrations/0105_payment_kill_switch.up.sql
+mutation (reverting 0107's own policy fix to the pre-fix shape):
+
+    Mutation: removed the "AND NULLIF(current_setting('app.platform_
+    admin_principal_id', true), '') IS NULL" clause from payment_attempts'
+    tenant_staff_scope policy (both USING and WITH CHECK).
+    Killed by: TestMigration0107_MixedGUCContextClaimsNothing. First
+    failure: "M1: a mixed tenant+platform GUC context claimed past an
+    engaged switch (fail-open)". Restored byte-identical (md5sum matched).
+
+M6 - migration_0105_integration_test.go tests, migrations/
+0105_payment_kill_switch.up.sql mutations:
+
+K19 (drop staff_users.tenant_id IS NULL from the platform-GUC check in
+payment_kill_switch_session()):
+    Mutation applied and TestMigration0105_M6_K19_PlatformGUCRequires
+    GenuinePlatformStaff re-run (-count=1, cache-busted). Test STILL
+    PASSED under the mutation - not a test bug: staff_users' own RLS
+    (dual_scope_isolation) makes a tenant-scoped staff row INVISIBLE to a
+    query run under a platform-only GUC context (no app.tenant_id set),
+    and the role='platform_admin' <=> tenant_id IS NULL CHECK constraint
+    means anything visible under that RLS view is already genuinely
+    platform-scoped. RLS is acting as an independent, sufficient second
+    layer for this specific property, so a byte-level deletion of the
+    trigger's own explicit check does not create a live bypass. This
+    mirrors the security review's own finding (K19 SURVIVED their
+    mutation too - for the same underlying reason, not because no test
+    existed). Recorded honestly rather than claimed as mutation-killed.
+    Restored byte-identical.
+
+K10 (drop v_req.kill_switch_id <> OLD.id from the release check):
+    First attempt: test passed under the mutation because the test
+    approved and released in SEPARATE transactions, and the unrelated
+    decided_txid = txid_current() rule already refuses a separate-
+    transaction release - masking whether K10 did anything. Fixed by
+    combining approve+release into ONE transaction (matching how the real
+    HTTP handler and killswitch.go's ApproveAndReleaseKillSwitch always do
+    it). Re-verified the corrected test PASSES on clean code, then killed:
+    TestMigration0105_M6_K10_RequestMustBindToItsOwnSwitch failed with "K10:
+    a request approved for switch X released a different switch Y".
+    Restored byte-identical.
+
+K11 (drop the expires_at check at release): same separate-transaction
+    masking bug found and fixed identically. Corrected test passes on
+    clean code; killed after the mutation:
+    TestMigration0105_M6_K11_ExpiredRequestCannotRelease failed with "K11:
+    an expired request still released the switch". Restored byte-identical.
+
+K14 (drop the 24h cap on expires_at, using COALESCE alone instead of
+    LEAST(..., now()+24h)):
+    Killed by TestMigration0105_M6_K14_ExpiresAtCappedAt24Hours: "K14:
+    expires_at = 2027-01-05 ..., expected capped at <= now()+24h".
+    Restored byte-identical.
+
+Full-suite confirmation after all reverts: go test -tags=integration
+-count=1 ./internal/payments/... -run TestMigration0105 -> 16/16 pass.
+
+Other fixes this round (M2, M3, L1-L8) got positive-path and negative-path
+tests (see ADR 0095 §10.7 for the full list: TestPaymentsKillSwitchAPI_
+ProviderScopeValidation, _AuditRecordsCarryBeforeAfterAndTargetTenant,
+_AuditRecordsPlatformTakeover, _PlatformCallerAgainstNonexistentTenantIs404,
+_RouteTable, TestLogKillSwitchEngagedAlert_EmitsPinnedEventAndFields, and
+migration_0107_integration_test.go's L1-L4 tests) but were not individually
+mutation-killed in this round, per the coordinator's scope ("each mutation-
+killed" was specified for H1 and M6 only).
+
+Final verification: go build ./...; go vet -tags=integration ./...; gofmt
+-l on every touched package - all clean. golangci-lint (2.9.0,
+--allow-parallel-runners, both with and without --build-tags=integration)
+on internal/payments, internal/httpserver, internal/casino, internal/kyc,
+internal/auth, internal/testsupport, cmd/platform-api - 0 issues in any
+file this round touched (one pre-existing staticcheck finding in
+internal/kyc/enforcement_integration_test.go, not introduced here). Full
+internal/payments -tags=integration -race -count=1 against a private
+database (PRIV_DB, migrated via cmd/migrate, never the shared CI database):
+green, 166.399s. Full internal/httpserver under the same conditions: see
+this file's own next entry (background run at the time this was written).
