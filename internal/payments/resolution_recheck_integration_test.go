@@ -70,7 +70,7 @@ func (w *payRecheckWorld) deposit(t *testing.T, key string, amount int64) Inboun
 	var intent DepositIntent
 	if err := w.pool.WithTenant(context.Background(), w.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		intent, err = w.orch.InitiateDeposit(ctx, tx, InitiateDepositParams{
+		intent, err = initiateDepositWithAttempt(ctx, tx, w.orch, InitiateDepositParams{
 			Scope:     DepositScope{TenantID: w.f.tenantID, BrandID: w.f.brandID, PlayerAccountID: w.f.playerAccountID, WalletID: w.f.walletID},
 			AssetCode: "EUR", Amount: amount, PaymentMethod: "card", IdempotencyKey: key,
 		})

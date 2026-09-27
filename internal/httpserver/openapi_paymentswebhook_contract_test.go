@@ -62,10 +62,38 @@ func TestOpenAPI_PaymentsWebhook_ContractMatchesHandler(t *testing.T) {
 
 	// Response codes: the handler's actually-reachable outcomes per
 	// deposit_handlers.go/payment_callback_errors.go (mapReceiveCallbackError)
-	// - 200/400/401/404/409/500/503.
-	for _, code := range []string{`"200":`, `"400":`, `"401":`, `"404":`, `"409":`, `"500":`, `"503":`} {
+	// - 200/400/401/409/500/503. PRH-payments-callback-cutover (ADR 0095
+	// §6.2/S95-C4): 404 is NO LONGER part of this route's contract - an
+	// unresolved deposit callback now defers (200, durable receipt) instead
+	// of erroring; ErrDepositIntentNotFound is unreachable from
+	// ReceiveVerifiedCallback's deposit/reversal branches.
+	for _, code := range []string{`"200":`, `"400":`, `"401":`, `"409":`, `"500":`, `"503":`} {
 		if !strings.Contains(block, code) {
 			t.Errorf("payments webhook OpenAPI entry missing response code %s", code)
+		}
+	}
+	if strings.Contains(block, `"404":`) {
+		t.Error(`the payments webhook OpenAPI entry must NOT document a 404 response (ADR 0095 §6.2/S95-C4: an unresolved callback now defers instead of erroring)`)
+	}
+
+	// S95-C4: the 200 body must be the uniform, disposition-free shape
+	// (request_id + received) - never a disposition- or resource-revealing
+	// field such as deposit_intent_id/status/tombstoned.
+	const responses200Marker = `"200":`
+	idx200 := strings.Index(block, responses200Marker)
+	idx400ForBlock := strings.Index(block, `"400":`)
+	if idx200 < 0 || idx400ForBlock < 0 || idx400ForBlock < idx200 {
+		t.Fatalf("expected the %q response block to precede %q", responses200Marker, `"400":`)
+	}
+	block200 := block[idx200:idx400ForBlock]
+	for _, want := range []string{"request_id", "received"} {
+		if !strings.Contains(block200, want) {
+			t.Errorf("payments webhook 200 response schema missing uniform field %q", want)
+		}
+	}
+	for _, mustNotAppear := range []string{"deposit_intent_id", "tombstoned"} {
+		if strings.Contains(block200, mustNotAppear) {
+			t.Errorf("payments webhook 200 response schema must not reveal disposition-specific field %q (S95-C4)", mustNotAppear)
 		}
 	}
 

@@ -3875,3 +3875,107 @@ Migration 0101 must be implemented against this revision, not revision 2. In par
 T13t pair, the INSERT guard (created after the backfill), the `legacy` CHECK and the N4 backfill
 columns.
 
+### 27.10 PRH-payments-callback-cutover implementation record (`payments`, 2026-09-27)
+
+**Scope of this round.** Cuts `ReceiveVerifiedCallback`'s deposit and reversal branches over from
+the pre-cutover, `deposit_intents`-only path (`receiveDepositCallback`/`receiveDepositReversalCallback`,
+now removed) onto the ADR 0095 §6.1 receipt path (`internal/payments/receipt.go`
+`ApplyReceiptEvidence`), adds the deposit_reversal cell to that receipt path (§5.4, LF95-C6(b)/(d)),
+and implements the ADR 0097/§6.2 HTTP contract (uniform 200 body; `deferred_unresolved` → 200; the
+unapplied-receipt cap → 503 + `Retry-After`) in `internal/httpserver/deposit_handlers.go`. Payout
+dispatch (withdrawal claim T1p/T2/T12) is out of scope for this round and was being built
+concurrently by another agent; `drive.go`/`sweeper.go` were not touched.
+
+**(a) deposit_reversal in the receipt-path matrix.** New `applyReversalReceiptEvidence`
+(receipt.go): resolves the ORIGINAL deposit attempt by `(verifiedProviderID,
+OriginalProviderReference)` against `payment_attempts` - never by the reversal's own
+`ProviderReference`, never against `deposit_intents` directly (LF95-C6(b)). No matching attempt, or
+one with no `ledger_transaction_id` yet, takes the tombstone branch (`postDepositReversalTombstone`,
+refactored to take explicit fields instead of a `CallbackEvent`). A resolved attempt is locked in
+ADR 0082/§14 order (parent `deposit_intents` row, then re-read the attempt) before the integrity
+check, the amount/asset cross-check, the second-distinct-reversal check (Stage 10.1 PAY-REV-1's S2/S4
+steps, kept verbatim) and `ledger.Post`. The receipt's stored/fingerprinted `Outcome` is normalized
+to `succeeded` for every persisted reversal receipt (both branches): the wire `Outcome` field is
+historically reused by some callers as a chargeback-reason carrier (`declined` + `DeclineReason:
+"chargeback"`), which is not a §4.4 attempt-decline concept and would otherwise violate
+`payment_provider_events_check1`/`..._decline_stage_check` (which require `cascadable`/`decline_stage`
+whenever `outcome='declined'`, a deposit-ATTEMPT-decline-only pair a reversal never has). Typed
+reversal rejections (`ErrDepositAlreadyReversed`, `ErrCallbackPayloadMismatch`,
+`ErrDepositReversalIntegrity`, `ErrCallbackProviderMismatch`) are unchanged: they propagate as Go
+errors, the callback transaction rolls back (including any receipt-insert attempt), and the HTTP
+layer records the denial in a separate transaction via `RecordDepositReversalRejection` exactly as
+before (§6.2 "typed reversal rejections... unchanged").
+
+**(b) one evidence-application rule.** `ReceiveVerifiedCallback`'s `CallbackEventDeposit` and
+`CallbackEventDepositReversal` branches both now call `receiveCallbackViaReceiptPath`, which builds
+a `ReceiptEvidence` from the adapter's `CallbackEvent` and calls `ApplyReceiptEvidence` (dispatching
+internally to the deposit matrix or `applyReversalReceiptEvidence` by `EventType`). Removed:
+`receiveDepositCallback`, `receiveDepositReversalCallback`, `providerExclusionSoFar` (the last was
+only used by the removed function; the synchronous, pre-cutover `InitiateDeposit`/`handleDecline`/
+`resolveAmbiguous` cascade - itself already legacy and unreachable from any live HTTP path per the
+prior cutover round - is untouched, since it still resolves cascade exclusion in-process rather than
+via a callback). `ReceiveCallbackResult` gained a `Disposition ReceiptDisposition` field; its other
+fields (`DepositIntentID`/`Status`/`LedgerTransactionID`/`Tombstoned`) are now best-effort
+enrichment only, populated by re-reading the intent/attempt after `ApplyReceiptEvidence` returns,
+never part of the public webhook HTTP contract (see (c)).
+
+**(c) §6.2 HTTP contract.** `newPaymentWebhookHandler` now writes ONE uniform 200 body
+(`{"request_id","received":true}`) for every disposition (`applied`, `duplicate_effect`,
+`deferred_unresolved`, `anomaly`) - the disposition itself is logged at `Info` for operator
+observability only, never returned. `payments.ErrDeferredReceiptCapExceeded` (the §6.1 step 5 /
+S95-C2(i) cap) maps to 503 + `Retry-After: 1` with a P1 log line, before the generic 500 fallback.
+ADR 0097's admission → verification → binding → parsing order (webhook_admission.go,
+webhook_preamble.go) was not touched. OpenAPI (`docs/api/openapi/platform-api.yaml`) updated: the
+200 schema is now `{request_id, received}`; 404 removed from the route's documented responses; 503's
+description and `Retry-After` note extended to the cap case.
+`openapi_paymentswebhook_contract_test.go` extended to assert 404 is absent and the 200 schema is
+the uniform shape.
+
+**(d) old→new behaviour changes and the tests adapted for them** (LF95-C3, §6.2; no financial
+assertion was weakened - each adaptation below either keeps the exact same invariant under a new,
+ADR-mandated status code, or fixes the test's own setup to match the post-cutover on-disk shape):
+
+| Clause | Old | New | Test(s) adapted |
+|---|---|---|---|
+| §6.2 `deferred_unresolved` | An unresolved deposit callback (`ErrDepositIntentNotFound`) was a 404 | 200 after a durable receipt; the callback is retried later (phase C/sweeper) or stays deferred | `financial_flow_integration_test.go` `TestPaymentWebhook_UnsignedPayloadRejected` (its own trailing "signed but unknown reference" probe) |
+| §6.2 `anomaly` (mismatched success, LF95-C3) | `ErrCallbackProviderMismatch` rolled back the tx, mapped to 400 | The attempt moves to `disputed` (T10, `terminal_reason=callback_amount_asset_mismatch`) and that state change is COMMITTED with its receipt; response is the uniform 200 | `payment_webhook_post_verification_400_integration_test.go`: `TestWebhook_ProviderMismatchAfterVerification_Maps400` replaced by `TestWebhook_ProviderMismatchAfterVerification_IsDisputedNotRejected`, which asserts the uniform body AND queries `payment_attempts` directly for the `disputed`/`callback_amount_asset_mismatch` state - the "no ledger effect" and "no amount/asset/reference echoed" assertions are unchanged |
+| §4.4 tombstone cell / LF95-C6(d) (T10 from a live state) | A deposit success colliding with an existing reversal tombstone rolled back to a non-200 | Committed terminally as `disputed` (`reversal_tombstone_precedes_success`); uniform 200 | `webhook_admission_t6_idempotency_integration_test.go` `TestAdmission_T6f_PaymentsReversal_BeforeDeposit_ThenDepositArrives`: now asserts 200 plus the `disputed`/`reversal_tombstone_precedes_success` attempt state (previously only asserted "not 200" and the ledger row count, which is unchanged and still asserted) |
+| INV-IO-14 (attempt-based resolution) applied to test fixtures that predate it | Several existing integration tests built their deposit fixture with the pre-cutover `Orchestrator.InitiateDeposit` (no `payment_attempts` row) and then drove a callback through it - this is exactly the on-disk shape §6.1 step 4 now requires a resolvable attempt for, so those callbacks became `deferred_unresolved` (silently not posted) instead of posting | `resolution_isolation_integration_test.go`'s `depositFor` helper now also drives a matching `payment_attempts` row through the SAME exported T1+T2/T4 functions (`InsertSubmittingAttempt`, `MarkAccepted`) `InitiateDepositAttempt` itself would have produced, so its callback resolves and posts exactly as before; `internal/reconciliation/payment_statement_fixround_integration_test.go`'s `legacyDeposit` helper (which exists SPECIFICALLY to prove reconciliation's F1 `legacy_unattempted` exclusion for attempt-less historical data) now constructs that on-disk shape directly (`InitiateDeposit` for the intent row, then a raw `ledger.Post` + `UPDATE deposit_intents`) instead of driving it through today's callback path, which no longer accepts an attempt-less deposit at all - this is the correct fix, since the whole point of that test is to exercise the RECONCILIATION exclusion rule against attempt-less data, independent of how such data is produced |
+
+**Round 2 (2026-09-27): full migration completed.** All ~13 `internal/payments` test files named
+above are migrated, using a shared test bridge (`internal/payments/receive_bridge_test.go`,
+`initiateDepositWithAttempt`/`backfillAttemptForIntent`): after `Orchestrator.InitiateDeposit`, in
+the SAME transaction, it drives a matching `payment_attempts` row through the SAME exported
+T1+T2/T4/T6/T7/T8/T9/T11 transitions `InitiateDepositAttempt`'s own real path would have produced,
+keyed off the intent's resulting final state (idempotent - it backfills only if the intent has no
+attempt yet, so it composes safely with a retried/idempotent `InitiateDeposit` call). Two genuine
+defects were found and fixed during migration, each with its own mutation-kill evidence recorded in
+`docs/plans/payment-readiness/evidence/prh-i1-mutation-kill.txt` (round 2 section): (1) the
+reversal-enrichment lookup in `receiveCallbackViaReceiptPath` used the wrong key for the tombstone
+case (fixed to resolve which of the two rows applies, exactly as `applyReversalReceiptEvidence`
+itself does); (2) `deposit_intents.status` was never recomputed as an attempt projection for
+anything other than the two terminal cases already written directly by
+`applyDepositSuccessAndPost`/`finalizeDeclined` - fixed with a new `recomputeDepositIntentProjection`
+(receipt.go) implementing LF95-C7's exact rule, called from both the live path and the
+`ApplyDeferredReceiptsForAttempt` sweeper backstop. Three tests' original intent could no longer be
+expressed as written (old→new behaviour) and were adapted with strictly equal-or-stronger
+assertions (documented in-line and in the mutation-kill evidence):
+`TestReceiveCallback_UnknownProviderReferenceRejected` (404→`deferred_unresolved`/200, now also
+asserting the durable unresolved receipt row exists),
+`TestReceiveCallback_ReversalOfNeverPostedDepositWritesTombstone`'s tombstone-collision case (hard
+error→committed `disputed`, now also asserting the attempt's terminal state), and
+`TestReceiveCallback_AmbiguousCallbackResolvedViaQueryStatus_NotCascaded` (synchronous
+`QueryStatus`-in-transaction→zero provider calls plus a scheduled `next_action_at` for the sweeper,
+per §6.5's own "no cascade I/O, no QueryStatus" rule). The previously-disclosed Outcome-
+normalization mutation gap is closed at the HTTP layer too
+(`internal/httpserver/payment_webhook_contract_integration_test.go`
+`TestPaymentWebhook_ReversalOutcomeDeclinedWireCarrier_PersistedAsSucceeded`), alongside a
+direct §6.2/S95-C4 uniform-response-body HTTP test
+(`TestPaymentWebhook_UniformResponseAcrossDispositions`) and a real cap-exceeded HTTP test
+(`TestPaymentWebhook_DeferredReceiptCapExceeded_503RetryAfter`). Full confirmation: `go test -race
+-tags=integration` is green across `internal/payments`, `internal/httpserver` and
+`internal/reconciliation` (main lane), and the ci-local.sh timing-lane tests pass in isolation (two
+showed the wall-clock-threshold flakiness their own doc comments already disclose under this host's
+concurrent multi-agent load during the combined run, and passed cleanly re-run alone - neither
+touches any code path this round changed). No test was deleted, skipped, or weakened.
+

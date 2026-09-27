@@ -14,9 +14,13 @@
 package httpserver
 
 import (
+	"context"
+	"encoding/json"
 	"net/http"
 	"strings"
 	"testing"
+
+	"github.com/jackc/pgx/v5"
 
 	"github.com/Diansalas/igaming-platform/internal/apierror"
 	"github.com/Diansalas/igaming-platform/internal/payments"
@@ -87,13 +91,26 @@ func TestWebhook_MalformedBodyAfterVerification_Maps400(t *testing.T) {
 	}
 }
 
-// TestWebhook_ProviderMismatchAfterVerification_Maps400 is N3's second
-// case: a GENUINELY verified callback (correct signature, well-formed
-// JSON) whose own declared amount contradicts the deposit intent its
-// provider_reference resolves to - payments.ErrCallbackProviderMismatch,
-// raised by postDepositSuccess's amount/asset cross-check
-// (orchestrator.go), not by HandleCallback itself.
-func TestWebhook_ProviderMismatchAfterVerification_Maps400(t *testing.T) {
+// TestWebhook_ProviderMismatchAfterVerification_IsDisputedNotRejected is
+// N3's second case, adapted for the PRH-payments-callback-cutover (ADR 0095
+// §6.2, LF95-C3): a GENUINELY verified callback (correct signature,
+// well-formed JSON) whose own declared amount contradicts the payment
+// attempt its provider_reference resolves to.
+//
+// Old->new (ADR 0095 §6.2 "anomaly" row, superseding the pre-cutover
+// rollback-and-409 for ErrCallbackProviderMismatch): before the cutover,
+// postDepositSuccess's amount/asset cross-check returned a Go error that
+// rolled back the whole transaction and mapped to 400 "callback rejected".
+// After the cutover, a mismatched success is §4.4's T10 cell
+// ("succeeded (mismatch)"): the attempt moves to `disputed`
+// (terminal_reason "callback_amount_asset_mismatch") and that state change
+// is COMMITTED together with its receipt - never rolled back to produce an
+// error code (LF95-C3) - so the HTTP response is the SAME uniform 200 as
+// every other disposition (S95-C4), never a 400. The security property
+// this test originally pinned (no amount/asset/reference ever echoed to
+// the caller) still holds, and is now trivially true: the uniform body
+// carries no disposition-specific content at all.
+func TestWebhook_ProviderMismatchAfterVerification_IsDisputedNotRejected(t *testing.T) {
 	pool, issuer := testEnv(t)
 	orchestrator, mockProvider := newMockOrchestrator()
 	logger, captured := newCapturingLogger()
@@ -118,38 +135,43 @@ func TestWebhook_ProviderMismatchAfterVerification_Maps400(t *testing.T) {
 	providerRef := strings.TrimPrefix(intent.RedirectURL, "https://mock-psp.invalid/pay/")
 
 	// Genuinely signed for THIS tenant/provider_reference, but the
-	// declared amount (9999) does not match the intent's own amount
+	// declared amount (9999) does not match the attempt's own amount
 	// (5000) - the signature verifies fine; the CONTENT is wrong.
 	mismatched := mockProvider.CallbackPayload(tenant.ID, payments.CallbackEventDeposit, providerRef, "", payments.OutcomeSucceeded, 9999, "EUR", "", false)
 
 	resp = rawPostCallback(t, srv, "/v1/webhooks/payments/"+tenant.Slug+"/mock", mismatched)
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("expected 400, got %d", resp.StatusCode)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 (uniform body; the mismatch is committed as a disputed attempt, not rolled back to an error), got %d", resp.StatusCode)
 	}
-	var body apierror.Error
+	var body map[string]any
 	decodeBody(t, resp, &body)
-	if body.Code != apierror.CodeValidation || body.Message != "callback rejected" {
-		t.Fatalf("expected generic validation_error/\"callback rejected\" (no amount/asset/reference echoed), got %+v", body)
+	if _, ok := body["received"]; !ok {
+		t.Fatalf("expected the uniform webhook body (received/request_id), got %+v", body)
 	}
-	if strings.Contains(body.Message, "9999") || strings.Contains(body.Message, "5000") || strings.Contains(body.Message, providerRef) {
+	raw, _ := json.Marshal(body)
+	if strings.Contains(string(raw), "9999") || strings.Contains(string(raw), "5000") || strings.Contains(string(raw), providerRef) {
 		t.Fatalf("response body must never echo the mismatched amounts or the provider reference, got %+v", body)
 	}
 
-	var line *capturedLogLine
-	for _, l := range captured() {
-		if l.msg == "payment_webhook_provider_mismatch" {
-			l := l
-			line = &l
-		}
+	// The state change is durable and correctly classified: the attempt is
+	// `disputed` with the exact terminal_reason applyResolvedReceiptEvidence
+	// assigns for this cell (receipt.go), never silently dropped and never
+	// posted.
+	var state, terminalReason string
+	if err := pool.WithTenant(context.Background(), tenant.ID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx,
+			`SELECT state, terminal_reason FROM payment_attempts WHERE provider_id = 'mock' AND provider_reference = $1`,
+			providerRef,
+		).Scan(&state, &terminalReason)
+	}); err != nil {
+		t.Fatalf("query attempt state: %v", err)
 	}
-	if line == nil {
-		t.Fatalf("expected a payment_webhook_provider_mismatch log line")
+	if state != "disputed" {
+		t.Fatalf("expected attempt state 'disputed' after a mismatched success, got %q", state)
 	}
-	for _, forbidden := range []string{"err", "error"} {
-		if _, present := line.attrs[forbidden]; present {
-			t.Errorf("payment_webhook_provider_mismatch must never carry a %q field (err's text embeds the mismatched amounts)", forbidden)
-		}
+	if terminalReason != "callback_amount_asset_mismatch" {
+		t.Fatalf("expected terminal_reason 'callback_amount_asset_mismatch', got %q", terminalReason)
 	}
 
 	// No ledger effect: the mismatch must not have posted anything.
@@ -159,4 +181,5 @@ func TestWebhook_ProviderMismatchAfterVerification_Maps400(t *testing.T) {
 	if walletResp.CashBalance != 0 {
 		t.Fatalf("expected NO credit from a mismatched callback, got cash_balance=%d", walletResp.CashBalance)
 	}
+	_ = captured
 }
