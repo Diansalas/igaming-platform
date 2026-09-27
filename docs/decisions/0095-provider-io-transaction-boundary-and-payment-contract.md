@@ -1342,6 +1342,92 @@ intent's **first** posting (LF95-C6(a)), not the new one. Result: the verified s
 and redelivered forever. `TestPaymentStatement_Kind_DuplicatePlatformSuccess` builds the T13 state
 directly for that reason.
 
+#### 12.7.1 Fix round (reviews RV-PRH-I5 code NOT READY / security APPROVE with C1, C2)
+
+**F1 (blocking): live legacy postings. `ledger-finance` ruling: option (b), interim exclusion,
+disclosed and self-retiring.** Until the payments cutover, the live deposit path
+(`Orchestrator.InitiateDeposit`) and live withdrawal completion (`withdrawal.Complete`) create no
+`payment_attempts` row. As wired, every such posting was a `pay_missing_platform_record` P1 on
+every hourly run: a saturated signal, which is worse than none.
+
+Rule (in `checkLedgerJoin`, direction (b) only): a `deposit` or `withdrawal_completed` posting with
+**zero** succeeded attempts is **not** a mismatch when it is linked from a deposit intent
+(`deposit_intents.ledger_transaction_id`) or a withdrawal request
+(`withdrawal_requests.release_ledger_transaction_id`) that has **no `payment_attempts` row at all**.
+It is counted instead as `legacy_unattempted`, in `PaymentStatementInfo` and the audit record of
+every run.
+
+What stays a P1:
+- a posting linked from nothing (the orphan / dual-write class);
+- a posting whose intent or request has any attempt but no succeeded one;
+- a posting mapped to more than one succeeded attempt;
+- every direction-(a) and statement-side rule.
+
+The exclusion is keyed on the absence of attempts, not on a flag or a date. So it retires itself:
+once the cutover makes every new intent and request carry an attempt, new postings are fully
+checked and `legacy_unattempted` stops growing. Postings made on the legacy path between 0101 and
+the cutover stay excluded (the 0101 backfill already gave earlier ones attempts). **Cutover
+acceptance criterion for `payments`:** `legacy_unattempted` must not increase after the cutover. An
+increase means a live path still bypasses `payment_attempts`.
+
+Label: stream `IMPLEMENTED` against the `MOCK`. The LF95-C13 ledger join is `PARTIALLY
+IMPLEMENTED` for legacy-path postings until the cutover.
+
+Tests:
+- `TestPaymentStatement_LegacyUnattemptedPostingsAreCountedNotFlagged` runs the real live deposit
+  path and a live-style completion against the wired MOCK source. Result: no mismatch,
+  `legacy_unattempted=2`, audited.
+- `TestPaymentStatement_AttemptLinkedPostingsStayFullyChecked`: a v2 deposit is clean with
+  legacy 0, and a completion whose withdrawal has a non-succeeded payout attempt is still a P1.
+
+**F2 (Medium).** In-flight ageing (`pay_unresolved`, no line) is no longer coverage-gated. The
+coverage window now protects only `pay_missing_provider_record`. `aged()` still implies
+`sent_at < coverage_end`. Before this change, a window no longer than the horizon could never
+flag.
+
+**F3 (Low).** A `pending` or `declined` `deposit_reversal` line with no posting is not a finding,
+because no posting is expected (for example, a chargeback the merchant won). A `succeeded` or
+`reversed` one still is.
+
+**F4 (Low).** When a payout line carries `settlement_reference` and the attempt's
+`withdrawal_completed` has one, they must be equal. Otherwise the line is a
+`pay_reference_mismatch check=settlement_reference`.
+
+**F5 (Low).** `FetchPaymentStatement` refuses a `CoverageEnd` later than the fetch time plus
+`PaymentCoverageMaxClockSkew` (5 min).
+
+**Security C1.** `internal/reconciliation/statement/payment_limits.go` adds three enforcement
+primitives that a source must use:
+- `LimitPaymentStatementBody`: reads through `io.LimitReader(body, max+1)` and fails with
+  `ErrPaymentStatementBodyTooLarge` rather than truncating;
+- `PaymentLineCollector`: refuses line `max+1` with `ErrPaymentStatementTooManyLines`;
+- `DecodePaymentStatementJSONLines`: a streaming NDJSON decoder that applies both.
+
+The interface doc makes their use mandatory for a wire source. The stream maps either sentinel
+from `Fetch` to `ErrPaymentStatementTooLarge`: refused, nothing stored, P1. The MOCK collects
+through the line collector. The unit tests use an endless body to prove the decoder streams: it
+stops at each cap after reading only a bounded prefix. `security` still verifies C1 in the first
+real adapter's code.
+
+**Security C2.**
+- `merchant_reference` is checked in Go with the `providerref` rule (valid UTF-8, no C0, DEL or C1
+  character) plus the 64-byte bound.
+- `asset_code` must match `^[A-Z0-9]{1,16}$`, the Asset registry's code shape.
+- A NUL, newline or escape therefore refuses the import at fetch, before any insert.
+
+**Not done:** the matching DB CHECK needs a forward migration. 0103 and 0104 are already
+allocated, so the orchestrator must allocate a number. It still blocks the first real source, as
+C2 says. The Go check is the control today.
+
+**Mutation evidence.** The surviving mutants RM2 to RM6 now have tests and are killed. The harness
+rejects build failures, so a mutant that does not compile no longer counts as killed. The result
+is 46/46 killed (`evidence/prh-i5-mutation-kill.txt`).
+
+**Pre-existing failures, registered here (not PRH-I5):**
+- `TestMigration0100_UpDownUpRoundTrip` and `TestMigration0100_DownRefusesWhileDecisionsHoldRows`
+  hard-code the chain tip at 100;
+- `TestMigration0082_DepositIntentsDenyTruncate` fails because of the foreign key from 0101.
+
 ---
 
 ## 13. Data model sketch

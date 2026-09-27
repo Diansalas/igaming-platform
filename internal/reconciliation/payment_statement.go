@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"regexp"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -103,6 +104,13 @@ import (
 // today. Every other kind escalates; any credit goes only through
 // LEDGER-MANUAL-ADJ-4EYES-1 (BLOCKED).
 //
+// Interim exclusion (ADR 0095 §12.7.1, ledger-finance ruling on code
+// review F1): until the payments cutover, a deposit / withdrawal_completed
+// posting linked from an intent or withdrawal request with NO
+// payment_attempts row (the live legacy path) is counted as
+// legacy_unattempted instead of raising pay_missing_platform_record. It
+// retires itself once every new intent/request carries an attempt.
+//
 // Disclosed limits:
 //   - disputed attempts are excluded from status comparison: T10/T13t/T14
 //     already made them a payments P1 with no automated remedy, and the
@@ -130,6 +138,15 @@ const (
 	MismatchKindPayDuplicate             MismatchKind = "pay_duplicate"
 	MismatchKindPayUnresolved            MismatchKind = "pay_unresolved"
 )
+
+// paymentAssetCodeRE is the asset code shape a statement line may carry
+// (security C2): the Asset registry's codes are upper-case alphanumerics.
+var paymentAssetCodeRE = regexp.MustCompile(`^[A-Z0-9]{1,16}$`)
+
+// PaymentCoverageMaxClockSkew bounds how far past the fetch time a
+// statement's CoverageEnd may lie (code review F5): a later end would move
+// the unresolved horizon forward and flag in-flight attempts early.
+const PaymentCoverageMaxClockSkew = 5 * time.Minute
 
 // DefaultPaymentUnresolvedHorizon is the age past which an in-flight
 // attempt or a deferred receipt becomes pay_unresolved. It equals
@@ -213,6 +230,11 @@ func FetchPaymentStatement(ctx context.Context, source statement.PaymentStatemen
 	stmt, err := source.Fetch(ctx, statement.PaymentFetchRequest{
 		TenantID: tenantID, ProviderID: providerID, PeriodStart: periodStart, PeriodEnd: periodEnd,
 	})
+	if errors.Is(err, statement.ErrPaymentStatementBodyTooLarge) || errors.Is(err, statement.ErrPaymentStatementTooManyLines) {
+		// Security C1: the source hit a streaming cap; same refusal as the
+		// stream's own line cap (nothing stored, P1).
+		return statement.PaymentStatement{}, fmt.Errorf("%w: source %q: %w", ErrPaymentStatementTooLarge, source.Label(), err)
+	}
 	if err != nil {
 		return statement.PaymentStatement{}, fmt.Errorf("reconciliation: payment statement source %q: %w", source.Label(), err)
 	}
@@ -223,6 +245,9 @@ func FetchPaymentStatement(ctx context.Context, source statement.PaymentStatemen
 	stmt.CoverageEnd = stmt.CoverageEnd.UTC().Truncate(time.Microsecond)
 	if stmt.CoverageStart.IsZero() || !stmt.CoverageEnd.After(stmt.CoverageStart) {
 		return statement.PaymentStatement{}, fmt.Errorf("%w: coverage window [%s, %s) is empty", ErrPaymentStatementInvalid, stmt.CoverageStart, stmt.CoverageEnd)
+	}
+	if limit := time.Now().UTC().Add(PaymentCoverageMaxClockSkew); stmt.CoverageEnd.After(limit) {
+		return statement.PaymentStatement{}, fmt.Errorf("%w: coverage end %s is later than the fetch time plus %s", ErrPaymentStatementInvalid, stmt.CoverageEnd, PaymentCoverageMaxClockSkew)
 	}
 	for i := range stmt.Lines {
 		l := &stmt.Lines[i]
@@ -248,11 +273,18 @@ func validatePaymentLine(providerID string, l statement.PaymentStatementLine) er
 	if err := providerref.ValidateOptional("settlement_reference", l.SettlementReference); err != nil {
 		return err
 	}
-	if len(l.MerchantReference) > 64 || !utf8.ValidString(l.MerchantReference) {
-		return fmt.Errorf("merchant_reference must be at most 64 bytes of UTF-8")
+	// Security C2 (rv-prh-i5-security.md): the providerref rule (valid
+	// UTF-8, no C0/DEL/C1 control character - so no NUL that would fail the
+	// text insert and force a P1 every run, and no newline/escape into the
+	// mismatch detail strings) plus the 64-byte merchant bound.
+	if err := providerref.ValidateOptional("merchant_reference", l.MerchantReference); err != nil {
+		return err
 	}
-	if l.AssetCode == "" || len(l.AssetCode) > 16 || !utf8.ValidString(l.AssetCode) {
-		return fmt.Errorf("asset_code must be 1..16 bytes of UTF-8")
+	if len(l.MerchantReference) > 64 {
+		return fmt.Errorf("merchant_reference must be at most 64 bytes")
+	}
+	if !paymentAssetCodeRE.MatchString(l.AssetCode) {
+		return fmt.Errorf("asset_code must match %s", paymentAssetCodeRE)
 	}
 	switch l.Kind {
 	case statement.PaymentLineDeposit, statement.PaymentLineDepositReversal, statement.PaymentLinePayout:
@@ -397,6 +429,12 @@ type PaymentStatementInfo struct {
 	CoverageStart, CoverageEnd time.Time
 	Lines                      int
 	ImportReused               bool
+	// LegacyUnattempted counts deposit / withdrawal_completed postings in
+	// the window that the LF95-C13 ledger join did NOT flag because they
+	// come from the legacy, pre-cutover path: the posting is linked from a
+	// deposit intent or withdrawal request that has no payment_attempts row
+	// at all. Information, never a mismatch; see checkLedgerJoin.
+	LegacyUnattempted int
 }
 
 // AuditMetadata renders i for the run's audit record (ADR 0095 §12.1
@@ -411,6 +449,9 @@ func (i PaymentStatementInfo) AuditMetadata() map[string]any {
 		"coverage_end":     i.CoverageEnd.UTC().Format(time.RFC3339Nano),
 		"statement_lines":  i.Lines,
 		"import_reused":    i.ImportReused,
+		// Disclosed interim exclusion (ADR 0095 §12.7): expected to stop
+		// growing once live deposits and withdrawals create attempts.
+		"legacy_unattempted": i.LegacyUnattempted,
 	}
 }
 
@@ -478,6 +519,7 @@ func runPaymentStatementUnchecked(ctx context.Context, tx pgx.Tx, tenantID, impo
 	m.matchLines(lines)
 	m.checkUnmatchedAttempts()
 	m.checkLedgerJoin()
+	info.LegacyUnattempted = m.legacyUnattempted
 	if err := m.checkPlatformDuplicates(ctx, tx); err != nil {
 		return Run{}, nil, PaymentStatementInfo{}, fmt.Errorf("reconciliation: payment duplicate check: %w", err)
 	}
@@ -533,6 +575,12 @@ type payLedgerTx struct {
 	postedAt time.Time
 	amount   *big.Int // the psp_clearing leg(s)
 	asset    string
+	// legacyUnattempted: the posting is linked from a deposit intent
+	// (deposit_intents.ledger_transaction_id) or a withdrawal request
+	// (release_ledger_transaction_id) that has NO payment_attempts row -
+	// the legacy, pre-cutover path. A posting linked from nothing is not
+	// legacy (it is the orphan class and stays a P1).
+	legacyUnattempted bool
 }
 
 type payMatcher struct {
@@ -552,6 +600,8 @@ type payMatcher struct {
 	ledger      []*payLedgerTx
 	ledgerByRef map[string]*payLedgerTx // type + "\x00" + provider_tx_id
 	ledgerByID  map[uuid.UUID]*payLedgerTx
+
+	legacyUnattempted int
 }
 
 func (m *payMatcher) key(parts ...string) string {
@@ -648,7 +698,17 @@ func (m *payMatcher) loadPlatform(ctx context.Context, tx pgx.Tx) error {
 		       (SELECT CASE WHEN count(DISTINCT la.asset_code) = 1 THEN min(la.asset_code)
 		                    WHEN count(DISTINCT la.asset_code) = 0 THEN '<none>' ELSE '<multiple>' END
 		          FROM ledger_entries e JOIN ledger_accounts la ON la.id = e.ledger_account_id
-		         WHERE e.ledger_transaction_id = t.id)
+		         WHERE e.ledger_transaction_id = t.id),
+		       CASE t.transaction_type
+		         WHEN 'deposit' THEN EXISTS (
+		           SELECT 1 FROM deposit_intents di
+		            WHERE di.tenant_id = t.tenant_id AND di.ledger_transaction_id = t.id
+		              AND NOT EXISTS (SELECT 1 FROM payment_attempts pa WHERE pa.tenant_id = di.tenant_id AND pa.deposit_intent_id = di.id))
+		         WHEN 'withdrawal_completed' THEN EXISTS (
+		           SELECT 1 FROM withdrawal_requests wr
+		            WHERE wr.tenant_id = t.tenant_id AND wr.release_ledger_transaction_id = t.id
+		              AND NOT EXISTS (SELECT 1 FROM payment_attempts pa WHERE pa.tenant_id = wr.tenant_id AND pa.withdrawal_request_id = wr.id))
+		         ELSE false END
 		  FROM ledger_transactions t
 		 WHERE t.tenant_id = $1 AND t.provider_id = $2 AND t.provider_tx_id IS NOT NULL
 		   AND t.transaction_type IN ('deposit', 'withdrawal_completed', 'deposit_reversal', 'tombstone')
@@ -661,7 +721,7 @@ func (m *payMatcher) loadPlatform(ctx context.Context, tx pgx.Tx) error {
 	for rows.Next() {
 		t := &payLedgerTx{}
 		var amount string
-		if err := rows.Scan(&t.id, &t.txType, &t.ref, &t.postedAt, &amount, &t.asset); err != nil {
+		if err := rows.Scan(&t.id, &t.txType, &t.ref, &t.postedAt, &amount, &t.asset, &t.legacyUnattempted); err != nil {
 			return err
 		}
 		if t.amount, err = parseBig(amount); err != nil {
@@ -743,8 +803,12 @@ func (m *payMatcher) matchReversal(lk string, l payLine) {
 				return // rollback of an unseen original: the tombstone is the platform's record
 			}
 		}
-		m.r.add(MismatchKindPayMissingPlatformRecord, lk+" check=reversal", "ledger: a deposit_reversal under this reference or a tombstone under its original",
-			m.label+l.render())
+		if l.status == statement.PaymentStatusSucceeded || l.status == statement.PaymentStatusReversed {
+			// A pending or declined reversal (e.g. a chargeback the
+			// merchant won) expects no posting (code review F3).
+			m.r.add(MismatchKindPayMissingPlatformRecord, lk+" check=reversal", "ledger: a deposit_reversal under this reference or a tombstone under its original",
+				m.label+l.render())
+		}
 		return
 	}
 	if rev.asset != l.asset {
@@ -792,6 +856,12 @@ func (m *payMatcher) matchPayment(lk string, l payLine) {
 	if byMerchant && a.providerRef != "" && a.providerRef != l.ref {
 		m.r.add(MismatchKindPayReferenceMismatch, ak+" check=reference", "platform: "+a.render(), m.label+l.render())
 	}
+	if op == "payout" && l.settlement != "" && a.settlementRef != "" && l.settlement != a.settlementRef {
+		// Code review F4: the provider's stated settlement reference
+		// contradicts the ledger's withdrawal_completed provider_tx_id.
+		m.r.add(MismatchKindPayReferenceMismatch, ak+" check=settlement_reference",
+			"ledger: withdrawal_completed provider_tx_id="+a.settlementRef, m.label+l.render())
+	}
 	if a.asset != l.asset {
 		m.r.add(MismatchKindPayAssetMismatch, ak+" check=asset", "platform: "+a.render(), m.label+l.render())
 	} else if a.amount.Cmp(l.amount) != 0 {
@@ -816,12 +886,16 @@ func (m *payMatcher) matchPayment(lk string, l payLine) {
 // matched.
 func (m *payMatcher) checkUnmatchedAttempts() {
 	for _, a := range m.attempts {
-		if _, ok := m.matchedBy[a.id]; ok || !m.inCoverage(a.sentAt) {
+		if _, ok := m.matchedBy[a.id]; ok {
 			continue
 		}
 		k := m.key("attempt="+a.id.String(), "provider_reference="+orNone(a.providerRef))
 		switch {
-		case a.state == "succeeded":
+		// The coverage window protects only the "missing provider record"
+		// rule. Ageing is not coverage-gated (code review F2): with a
+		// window no longer than the horizon an in-flight attempt would
+		// otherwise never be flagged. aged() implies sentAt < coverage_end.
+		case a.state == "succeeded" && m.inCoverage(a.sentAt):
 			m.r.add(MismatchKindPayMissingProviderRecord, k+" check=unmatched", "statement: a line for this attempt", m.label+"no statement line; platform: "+a.render())
 		case inFlight(a.state) && m.aged(a):
 			m.r.add(MismatchKindPayUnresolved, k+" check=unresolved",
@@ -875,7 +949,21 @@ func (m *payMatcher) checkLedgerJoin() {
 		if (t.txType != "deposit" && t.txType != "withdrawal_completed") || !m.inCoverage(t.postedAt) {
 			continue
 		}
-		if n := succeededFor[t.id]; n != 1 {
+		n := succeededFor[t.id]
+		if n == 0 && t.legacyUnattempted {
+			// Interim exclusion (ledger-finance ruling on code review F1,
+			// ADR 0095 §12.7): the live deposit and withdrawal-completion
+			// paths are not yet cut over to payment_attempts, so their
+			// postings have no attempt BY CONSTRUCTION. Flagging them would
+			// raise a P1 per posting per run. They are counted instead
+			// (legacy_unattempted, audited on every run). The rule is
+			// self-retiring: a posting whose intent/request has ANY attempt
+			// is fully checked, and once the cutover makes every new intent
+			// and request carry an attempt the count stops growing.
+			m.legacyUnattempted++
+			continue
+		}
+		if n != 1 {
 			m.r.add(MismatchKindPayMissingPlatformRecord,
 				m.key("provider_tx_id="+t.ref, "type="+t.txType, "check=ledger_join"),
 				"platform: exactly one succeeded attempt for this posting",
