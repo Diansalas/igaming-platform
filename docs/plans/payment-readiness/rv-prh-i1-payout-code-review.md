@@ -273,3 +273,212 @@ but it is not a mutation of the implementation.
 6. B6: staff audit inside the T1p tx.
 7. B7: decided, or explicitly deferred with a recorded decision.
 8. `ledger-finance` ruling on B1/B3, and `security` sign-off on B1/B5/B6.
+
+---
+
+# Re-review — fix round (HEAD `9324189`)
+
+- Commits reviewed: `c8a2b76` (fixes), `0154459` (kill-switch wiring), `9be59bb` (tests + evidence),
+  `3be159d` (ADR 0095 §27.11), `73e0a77` (B5 end-to-end test), `f99d940` (post-merge build/lint)
+- Date: 2026-09-27
+- Method:
+  - detached worktree at `9324189` under the session scratchpad;
+  - `go build ./...`;
+  - `go vet -tags=integration` on payments/httpserver/withdrawal;
+  - pinned `golangci-lint` 2.9.0, untagged and `--build-tags=integration`: **0 issues** both ways;
+  - full `internal/payments`, `internal/withdrawal` and `internal/httpserver` integration suites on
+    a private database (created via `TEST_ADMIN_DATABASE_URL`, migrated to 0105, grants from
+    `deploy/init-app-role.sql`), plus the harness's own per-test scratch databases. **All
+    pass.** All 29 payout tests pass.
+  - my original probes re-run;
+  - two new probes;
+  - 12 anchored mutants, each reverted with `git checkout`.
+- The private database and the worktree have been dropped/removed. No probe code was committed.
+
+## Re-review verdict
+
+**NOT READY — narrow rework only.**
+
+The critical finding is fixed: B1 re-probed gives 1 `Withdraw` call, not 5. B2–B7 are fixed in
+code, and my original probes now all pass. One new correctness defect (N1) remains, and it sits
+in the very mechanism the B1 fix relies on. It makes the "poll before resend" design, as recorded
+in ADR §27.11 item 1, unreachable for the most common ambiguous case.
+
+Test coverage has improved, but several fix branches are still unpinned (9 of 12 mutants
+survive). Among them is the B6 audit, which was a named review finding. The verification counts
+in the evidence file and the ADR are overstated. None of this is a double-payout risk any more.
+The remaining work is small.
+
+## Status of the original findings
+
+| # | Status | Evidence |
+|---|---|---|
+| B1 | **Fixed.** T12 is gated on `IdempotentSubmission`, with a `max_resubmits` bound in Go and in the CAS. Phase B runs on a context detached from the request. | Probe `TestProbe_T12_ResendsNonIdempotentPayout`: **1** `Withdraw`, `submit_count=1`, escalated (was 5). Killed by `TestSweeper_T12_NonIdempotentManifest_NeverResends` (PM-PAYOUT-10). But see N1. |
+| B2 | **Fixed.** `next_action_at = lease_until` at T1p, T2 and T12. A lease-expired `submitting` attempt with no reference goes to T6. | `TestClaimForDispatch_NextActionAtSet_CrashRecovery`. My probe shows `next_action_at` non-NULL. |
+| B3 | **Fixed.** `applyPayoutSuccessCheckedFromStatus` routes a mismatch to T10 and audits it. | Probe: amount ×100 in USD now leaves the withdrawal `submitted` (was `completed`). Mutant M6 is **killed** by both mismatch tests. |
+| B4 | **Fixed.** `applyPayoutStatusEvidence` is state-aware, and a NotSent result on a resend goes to T6. | Probe: still-pending poll gives no error and `poll_count=1`. PM-PAYOUT-9 is killed. The NotSent-on-resend branch is **untested** (M8 survives). |
+| B5 | **Fixed.** `callProvider` keeps the `*providerref.Error` chain via `%w`. That error's `Error()` output is already redacted, so nothing leaks. | Probe: `AsError-ok=true`, audit reason `invalid_provider_reference:too_long`. My original surviving mutant (M1) and a gate-chain revert (M2) are **both killed** by `TestDispatchWithdraw_OversizeReference_ParksThroughRealAdapterPath`. |
+| B6 | **Fixed in code, untested.** The staff audit is written inside the T1p and deny transactions, with the correct outcome. | Mutant M5 (the allow-path `withdrawal.submit.http` audit made a no-op) **survives** the full payments suite and the full httpserver suite. No test anywhere asserts this audit row. |
+| B7 | **Fixed.** `/resolve` reads without a lock, then calls `PollPayoutStatus` (QueryStatus outside any transaction, attempt and withdrawal transitioned together). | httpserver suite passes on the private DB, including `TestWithdrawalResolve_ProviderAmountMismatchRejected`. See N2 and N3 for new side effects. |
+| B8 | **Mostly fixed.** Repeated KYC deny is idempotent. Decline reasons go through an allow-list. The kill switch is wired into the T1p/T2/T12 claim statements. Attempt-transition audit remains disclosed as open (§27.11). | Both new branches are **untested**: M11 (raw vendor reason passed through) and M12 (repeated-deny idempotence removed) survive. |
+
+## Checks the coordinator asked for
+
+1. **Vacuous Reject-vs-claim race replaced: partly.** A real claim-vs-claim race was added
+   (`TestConcurrentClaimForDispatch_ExactlyOneWithdraws`: 5 concurrent claims × 50 reps, exactly one
+   attempt row and exactly one `Withdraw`). That is good. But
+   `TestConcurrent_RejectVsClaimForDispatch_ExactlyOneWins` is still in the file, unchanged, and
+   still vacuous. Its name still claims a race it cannot lose. Delete it or rename it.
+2. **"Never calls provider before commit" made falsifiable: not done.**
+   `TestClaimForDispatch_NeverCallsProviderBeforeCommit` is byte-identical apart from the new
+   `actor` argument. It still cannot fail, because `ClaimForDispatch` has no way to reach
+   `Withdraw`. The new `TestClaimForDispatch_GateRunsUnderOuterLock` is a real test, but of a
+   different property (the gate waits for the L1 lock).
+3. **T12 resend branch and `PollPayoutStatus` have tests: partly.**
+   - `PollPayoutStatus` now has direct tests for amount mismatch, asset mismatch and still-pending.
+   - T12 has a non-idempotent test (which pins "never resend") and an idempotent test. The
+     idempotent test only asserts an **upper bound** (`Withdraw ≤ 3`, `submit_count ≤ 3`).
+     Mutant M3 (`if true || !manifest.IdempotentSubmission`, so T12 *never* resends) **survives**.
+     The positive resend is therefore not pinned.
+   - Mutant M4, which deletes the poll-before-resend block entirely, also **survives**. That
+     block is unreachable in every test (see N1).
+   - The idempotent test's comment says "1 + MaxResubmits(=2) = 3 total". With `SubmitCount >=
+     maxResubmits` counting the T1p send, the real total is 2. The loose `≤ 3` bound hides this.
+4. **My extra mutants now die: yes for the B5 pair (M1, M2).** New mutants against the fix
+   branches:
+
+| Mutant | Result |
+|---|---|
+| M1 `payoutAdapterCall` validation disabled | killed |
+| M2 `callProvider` providerref `%w` special case removed | killed |
+| M3 T12 never resends (always escalate) | **survived** |
+| M4 poll-before-resend block removed | **survived** |
+| M5 B6 allow-path staff audit made a no-op | **survived** (payments and httpserver suites) |
+| M6 amount/asset cross-check removed | killed |
+| M7 no-reference `submitting` → reschedule instead of T6 | **survived** (the crash-recovery test only asserts `Claimed>0` and no errors, not the resulting state) |
+| M8 NotSent-on-resend → T6 removed | **survived** |
+| M9 `payoutHandleContradiction` late-evidence routing removed | **survived** |
+| M10 T14 late-success-after-decline routing removed | **survived** |
+| M11 `canonicalDeclineReason` passes raw vendor text | **survived** |
+| M12 repeated-KYC-deny idempotence removed | **survived** |
+
+## New findings
+
+### N1 — HIGH: an ambiguous payout's provider reference is stored only on the withdrawal, so the attempt is never polled and "poll before resend" is dead code
+
+`ApplyPayoutResult`'s ambiguous branch now "persists" the reference returned with an Ambiguous
+result, but only via `withdrawal.AttachProviderReference`. `MarkAmbiguousFromSubmitting` does not
+set `payment_attempts.provider_reference`. Two places decide whether to poll from
+`attempt.ProviderReference`:
+- `resubmitPayoutAmbiguous` (`if attempt.ProviderID != nil && attempt.ProviderReference != nil`);
+- `PollPayoutStatus` (`attempt.ProviderReference == nil` → reschedule).
+
+So an ambiguous attempt that came from a sync Ambiguous result is **never polled**, even though
+the platform holds the reference. The only way an attempt reaches `ambiguous` with a reference is
+pending→ambiguous (T11).
+
+Failure scenario, probe `TestProbe_N1_AmbiguousRefNeverPolled`:
+1. Mock `Withdraw` returns Ambiguous with a reference. The manifest is non-idempotent (the
+   default).
+2. The provider later settles the payout (outcome set to `Succeeded`).
+3. After 4 sweeper ticks: the withdrawal has the reference, the attempt has
+   `provider_reference=NULL`, and **`QueryStatus` calls = 0**. The attempt is `ambiguous` and
+   escalated, and the withdrawal is still `submitted`.
+
+`/resolve` cannot help either: it goes through the same `PollPayoutStatus`, which just
+reschedules. The hold therefore stays until M2, which is BLOCKED (HD-0095-1), even though one
+status query would settle the payout. With an idempotent provider, the same path resends without
+polling first.
+
+This makes two recorded claims false:
+- ADR §27.11 item 1: "poll first, unconditionally, if a reference exists at all";
+- the "C1/B1 … reference … is PERSISTED" comment in `ApplyPayoutResult`.
+
+Required:
+- Record the reference on the attempt at T6 (`provider_reference = COALESCE(provider_reference,
+  $ref)` in `MarkAmbiguousFromSubmitting`, if the 0101 guard allows NULL→value there), **or**
+  have `PollPayoutStatus` fall back to `withdrawal_requests.provider_reference` (safe: INV-IO-8
+  allows exactly one payout attempt per withdrawal).
+- Add a test where an ambiguous-with-reference payout converges by poll with zero resends. That
+  test would also kill M4.
+- Correct §27.11.
+
+### N2 — LOW: `/resolve` forces T6 on an attempt that is still in flight
+
+`PollPayoutStatus` does not check the lease. Staff pressing `/resolve` while the submit
+handler's phase B is still running (up to the 60 s outbound bound) moves the fresh `submitting`
+attempt straight to `ambiguous`, with `ever_possibly_sent=true`.
+
+Probe `TestProbe_N2_…`: state becomes `ambiguous`. The original phase C still converges
+(`MarkAccepted` from `ambiguous` → `pending`), so there is no financial effect. But:
+- the attempt is permanently marked possibly-sent;
+- on an idempotent manifest, a T12 resend can race the in-flight original (same key).
+
+Suggested fix: when there is no reference and the lease has not expired, `PollPayoutStatus` (or
+`/resolve`) should return "in flight" and change nothing.
+
+### N3 — LOW: `/resolve`'s staff audit now runs after the effect commits
+
+The effect is committed inside `PollPayoutStatus` (`withdrawal.completed`/`failed` as system).
+`withdrawal.resolve_attempted.http` is then written in a separate transaction afterwards. If
+that transaction fails, the payout was resolved with no staff attribution. This is the same
+class of defect as B6, now on `/resolve`, where the audit used to be in the same transaction.
+The outcome is dictated by provider evidence, not staff discretion, hence LOW. Pass the actor
+into `PollPayoutStatus`, as was done for `ClaimForDispatch`.
+
+### N4 — LOW: mixed lock order after the M3 reversal
+
+`applyPayoutSuccess`/`applyPayoutDecline` now lock the attempt before the withdrawal. But:
+- `ApplyPayoutResult`'s ambiguous branch and `applyPayoutStatusEvidence`'s submitting-ambiguous
+  branch call `AttachProviderReference` (which locks the withdrawal) **before** the attempt CAS;
+- T2/T12 lock the withdrawal first.
+
+ADR §4.3/§14 still say "parent before attempt". Opposite orders on the same pair of rows can
+deadlock, for example T12 against a late phase C after N2. Postgres aborts one side and the
+sweeper retries, so this heals itself, but the order should be made consistent. The lock-order
+ruling itself belongs to `ledger-finance`. I am flagging it to them, not adjudicating it.
+
+### N5 — LOW: the verification claims are overstated
+
+- `9be59bb` and the evidence file say the fix-round file has "20 tests". It has **15**.
+- ADR §27.11 claims "44 payout-specific tests". There are 29 (14 + 15), or 32 counting the 3
+  deposit-sweeper regressions.
+- The evidence file says H2/B3 and H3/B2 were "not independently re-mutated". That is fair for
+  H2/B3, whose mutant I confirmed is killed. For H3/B2, the crash-recovery test does not pin the
+  T6 outcome (M7 survives).
+
+Correct the numbers. Under the no-fake-completion rule, a verification summary must be exact.
+
+### N6 — observation: evidence reference mismatch is still not disputed
+
+`applyPayoutSuccess` settles with the *echoed* `QueryStatus` reference when it differs from the
+attempt's stored reference. `AttachProviderReference` is a set-once no-op, so the ledger
+`provider_tx_id` then differs from both reference columns. ADR §4.4 routes a reference mismatch to
+T10. This was not in my original list. Route it to `ledger-finance` together with N4.
+
+## Environment notes
+
+- My first, broad `-run` pattern accidentally matched 7 non-payout `internal/payments` tests that
+  use the **shared** `TEST_DATABASE_URL`. That database has no migration 0101, so they failed at
+  once (`relation "payment_attempts" does not exist`). All 7 pass on the private DB. This is an
+  environment gap already disclosed in the fix-round evidence, not a product defect.
+- In one full httpserver run, three `TestResolutionIsolation_*` tests failed. They passed on the
+  baseline run and twice when run on their own. They are timing-sensitive under load, so I treat
+  them as a flake.
+- 22 `m0101v2_*` harness scratch databases were present afterwards (13 before this session's
+  re-review). Other agents are active concurrently and I cannot attribute them, so I did not drop
+  them.
+
+## Required before sign-off
+
+1. Fix N1 and add a test: an ambiguous payout with a reference converges by poll, with zero
+   resends.
+2. Assertions that kill M3 (a positive T12 resend on an idempotent manifest, with an exact
+   count), M5 (the `withdrawal.submit.http` staff audit row: actor, outcome, same transaction) and
+   M7 (the crash-recovery test asserts `ambiguous`). M8–M12 should also be pinned; they are
+   cheap.
+3. Delete or rename the vacuous Reject-vs-claim test. Either make
+   `NeverCallsProviderBeforeCommit` falsifiable (drive the handler with a spy that records whether
+   the T1p row was committed when `Withdraw` was called) or delete it.
+4. Correct the test counts in the evidence file and in §27.11.
+5. N2/N3 can be follow-ups if recorded. N4/N6 go to `ledger-finance`.
