@@ -358,3 +358,12 @@ CI-BILLING-1 is closed (§9.5).
 This review is a code-level and design-level review of one commit. It is not a penetration test, and it
 does not certify the payment paths as secure.
 
+
+## Erratum (orchestrator, 2026-09-27)
+
+A code-review follow-up corrected stale comments inside `migrations/0099_provider_reference_bound.up.sql`
+(including the claim that `tenants` has no RLS). The orchestrator reverted that edit: an applied migration
+file must stay byte-identical, because `migrate verify` checksums it and any database that already applied
+0099 would otherwise report drift. The corrections stand here instead: `tenants` IS covered by RLS; the
+pre-flight satisfies every tenant-table RLS policy by setting the tenant per tenant (it never disables RLS);
+the step counts in the file header are approximate. The SQL behaviour of 0099 is unchanged either way.
