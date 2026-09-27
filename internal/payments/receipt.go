@@ -28,6 +28,14 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/withdrawal"
 )
 
+// testHookBeforeReferenceConflictRecheck is a test-only interleaving seam
+// (code-review C1, rv-prh-i1-callback-code-review.md ad476d6). Production
+// code never sets it, so it is always nil and this is always a pure no-op
+// there; only a dedicated deliberate-interleaving test in the payments
+// package assigns and clears it, single-threaded, before and after driving
+// the one call site that reads it in ApplyReceiptEvidence.
+var testHookBeforeReferenceConflictRecheck func()
+
 // ReceiptDisposition mirrors payment_provider_events.disposition_at_receipt.
 type ReceiptDisposition string
 
@@ -553,9 +561,28 @@ func ApplyReceiptEvidence(ctx context.Context, tx pgx.Tx, o *Orchestrator, tenan
 		return DispositionAnomaly, nil
 	}
 
+	// Code-review C1 (rv-prh-i1-callback-code-review.md, ad476d6): this
+	// hook exists ONLY so a deliberate-interleaving test can land another
+	// transaction's COMMIT inside this precondition's own natural READ
+	// COMMITTED gap - the byRef lookup inside ResolveAttemptForEvidence
+	// above already ran (and found nothing, or this call would already
+	// have anomalied out at line ~404), so a second attempt binding
+	// ev.ProviderReference between that read and the re-read just below
+	// is the ONLY way this branch is ever reached; ordinary sequential
+	// delivery cannot trigger it (see TestRVLF_ResolveConflict_
+	// ByRefByMerchantMismatchAnomalyReceiptResolved for the ordinary,
+	// non-race conflict, which resolves at ResolveAttemptForEvidence
+	// itself and never reaches here). Nil (a no-op) outside tests.
+	if testHookBeforeReferenceConflictRecheck != nil {
+		testHookBeforeReferenceConflictRecheck()
+	}
+
 	// §4.4 precondition 2: a provider reference already bound to a
 	// DIFFERENT attempt than the one just resolved is an anomaly, never
-	// a unique-violation-then-5xx-redelivery-loop (LF95-C3).
+	// a unique-violation-then-5xx-redelivery-loop (LF95-C3). Reachable
+	// ONLY via the READ COMMITTED race described above (code-review C1) -
+	// resolved.Found=true and resolved.Anomaly=false already ruled out
+	// the ordinary byRef/byMerchant conflict above.
 	if ev.ProviderReference != "" {
 		other, err := GetAttemptByProviderReference(ctx, tx, verifiedProviderID, ev.ProviderReference)
 		if err == nil && other.ID != attempt.ID {

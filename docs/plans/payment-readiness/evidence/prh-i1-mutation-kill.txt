@@ -1982,3 +1982,68 @@ statement) suites pass under `-tags=integration -race -count=1` against a
 freshly rebuilt PRIV_DB (fh3_invdep1_qa, migrated through 0107, seeded with
 QA's own adjudication-corrected inv_dep1_matrix/inv_dep1_recon files).
 
+
+Code-review re-review 2 of FH-5 (rv-prh-i1-callback-code-review.md,
+ad476d6), condition C1, 2026-09-27
+======================================================================
+
+C1 - "the N5b branch is only reachable in a READ COMMITTED race":
+
+Investigation: the ORIGINAL TestRVLF_N5b_ReferenceConflictAnomalyReceipt
+Resolved (named after the code comment "§4.4 precondition-2 reference-
+conflict branch") in fact resolves via ResolveAttemptForEvidence's OWN
+byRef/byMerchant conflict check (receipt.go's `case byRef != nil &&
+byMerchant != nil: if byRef.ID != byMerchant.ID { ... }`, ~line 404) - the
+delivery names attempt A's already-bound provider_reference alongside
+attempt B's merchant reference, and A's binding is already visible to
+ResolveAttemptForEvidence's OWN, single byRef read, so it never reaches
+the SEPARATE, later re-check at receipt.go's "§4.4 precondition 2" branch
+(`if err == nil && other.ID != attempt.ID { ... }`, ~line 588). That later
+branch is reachable ONLY if: (1) ResolveAttemptForEvidence's byRef read
+for ev.ProviderReference finds NOTHING (so resolution proceeds via
+byMerchant alone), and (2) a DIFFERENT attempt claims that exact
+provider_reference in a separately-committed transaction, landing between
+that first read and this function's own second read of the same
+reference - a genuine READ COMMITTED race, never reachable through
+ordinary sequential delivery.
+
+Actions taken:
+  1. Renamed the mislabelled test to
+     TestRVLF_ResolveConflict_ByRefByMerchantMismatchAnomalyReceiptResolved,
+     with an updated doc comment explaining what it actually tests (the
+     ResolveAttemptForEvidence-level conflict, not the later
+     precondition-2 re-check).
+  2. Added a minimal, nil-by-default test-only interleaving seam,
+     `testHookBeforeReferenceConflictRecheck func()`, called once,
+     immediately before the precondition-2 re-check in
+     ApplyReceiptEvidence. Nil (a pure no-op) outside tests; only ever
+     assigned by the one test below, single-threaded, and cleared via
+     t.Cleanup.
+  3. Added TestRVLF_C1_PreconditionTwoReferenceConflict_
+     OnlyReachableViaReadCommittedRace: constructs the genuine race
+     deterministically (no goroutine, no timing dependency) by running a
+     second, independently-committed transaction from inside the hook
+     itself - between ApplyReceiptEvidence's own two reads of the same
+     provider reference - binding that reference to an unrelated attempt
+     C via MarkAccepted. Asserts the delivery resolves as
+     DispositionAnomaly, the anomaly receipt is itself resolved (F1), and
+     the originally-targeted attempt B is left untouched.
+
+Mutation-kill: the precondition-2 branch's own conflict check (`if err ==
+nil && other.ID != attempt.ID {`) was mutated to `if err == nil && false
+&& other.ID != attempt.ID {` (never true). TestRVLF_C1_
+PreconditionTwoReferenceConflict_OnlyReachableViaReadCommittedRace FAILED:
+"raced delivery: payments: T7/T13 ->succeeded: ERROR: duplicate key value
+violates unique constraint \"payment_attempts_tenant_provider_ref\"" - the
+mutant lets the raced delivery fall through to apply success evidence
+against attempt B using a provider_reference the DB itself now refuses (it
+already belongs to attempt C), proving the guard is load-bearing exactly
+as designed. Reverted via targeted Edit; confirmed `git diff` shows no
+residual change to that line.
+
+Verification: `go build -tags=integration ./internal/payments/...` clean;
+TestRVLF_C1_PreconditionTwoReferenceConflict_OnlyReachableViaReadCommitted
+Race and TestRVLF_ResolveConflict_ByRefByMerchantMismatchAnomalyReceipt
+Resolved both pass individually and as part of the full
+internal/payments + internal/reconciliation suite under -race (see the run
+recorded above, which includes both).

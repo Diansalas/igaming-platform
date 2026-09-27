@@ -1294,9 +1294,17 @@ func TestRVLF_N4b_PreconditionAnomalyReceiptResolved(t *testing.T) {
 	}
 }
 
-// N5b: the §4.4 precondition-2 reference-conflict branch must also
-// resolve its own receipt.
-func TestRVLF_N5b_ReferenceConflictAnomalyReceiptResolved(t *testing.T) {
+// Renamed per code-review C1 (rv-prh-i1-callback-code-review.md, ad476d6):
+// this was originally labelled "N5b: the §4.4 precondition-2 reference-
+// conflict branch", but it actually resolves via ResolveAttemptForEvidence's
+// OWN byRef/byMerchant conflict check (receipt.go ~line 404) - refA already
+// belongs to attempt A by the time ResolveAttemptForEvidence's single byRef
+// read runs, so this never reaches the SEPARATE, later precondition-2
+// re-check at receipt.go ~line 570 (the one genuinely reachable only via a
+// READ COMMITTED race - see TestRVLF_C1_PreconditionTwoReferenceConflict_
+// OnlyReachableViaReadCommittedRace below for that one, and
+// testHookBeforeReferenceConflictRecheck's doc comment in receipt.go).
+func TestRVLF_ResolveConflict_ByRefByMerchantMismatchAnomalyReceiptResolved(t *testing.T) {
 	pool := depositV2ScratchPool(t)
 	f := seedOrchFixture(t, pool)
 	p := NewMockProvider("mock-n5b", "EUR")
@@ -1327,7 +1335,138 @@ func TestRVLF_N5b_ReferenceConflictAnomalyReceiptResolved(t *testing.T) {
 		t.Fatal(err)
 	}
 	if n != 0 {
-		t.Errorf("N5b: the reference-conflict anomaly receipt must be resolved, CountUnappliedReceipts=%d", n)
+		t.Errorf("ResolveConflict: the byRef/byMerchant conflict anomaly receipt must be resolved, CountUnappliedReceipts=%d", n)
+	}
+}
+
+// Code-review C1 (rv-prh-i1-callback-code-review.md, ad476d6): the §4.4
+// precondition-2 re-check at receipt.go's own "other.ID != attempt.ID"
+// branch (~line 570, immediately after the testHookBeforeReferenceConflict
+// Recheck call) is reachable ONLY via a genuine READ COMMITTED gap between
+// ResolveAttemptForEvidence's byRef read (which must find NOTHING for this
+// exact reference, or the earlier byRef/byMerchant conflict check would
+// already have anomalied out) and this function's own, later, second read
+// of the SAME reference. This test manufactures that exact gap
+// deterministically - no goroutine, no timing dependency - by running a
+// second, independently-committed transaction from inside the test-only
+// hook itself, between ApplyReceiptEvidence's two reads.
+func TestRVLF_C1_PreconditionTwoReferenceConflict_OnlyReachableViaReadCommittedRace(t *testing.T) {
+	pool := depositV2ScratchPool(t)
+	f := seedOrchFixture(t, pool)
+	p := NewMockProvider("mock-c1race", "EUR")
+	registerCapability(t, pool, f, p, 100)
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-c1race": p}, MultiWebhookCredentialResolver{"mock-c1race": NewMockWebhookCredentials(p)})
+
+	// Attempt B: the one this delivery resolves via MERCHANT reference.
+	// Left in 'submitting' (no provider_reference yet) so
+	// ResolveAttemptForEvidence's byRef lookup for refX finds nothing at
+	// the time of its own, first read. deposit_intent_id is required by
+	// payment_attempts_check for a deposit-operation row, so a real seed
+	// intent is created (and its own seed attempt declined, per
+	// payment_attempts_one_live_per_intent/INV-IO-8) exactly as the C2
+	// DFR/DFS tests above do.
+	seedB := rvInit(t, pool, orch, f, 3000, "c1race-seed-b")
+	if _, err := rvCallback(pool, orch, f, "mock-c1race", p.CallbackPayload(f.tenantID, CallbackEventDeposit, *seedB.Attempt.ProviderReference, "", OutcomeDeclined, 0, "", "insufficient_funds", false)); err != nil {
+		t.Fatalf("decline seed B: %v", err)
+	}
+	var attemptBID uuid.UUID
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		a, err := InsertCreatedAttempt(ctx, tx, NewCreatedAttempt{
+			ID: uuid.New(), TenantID: f.tenantID, Operation: AttemptOperationDeposit,
+			DepositIntentID: &seedB.Intent.ID, AttemptNo: 2, ExcludedProviderIDs: []string{}, PaymentMethod: "card", AssetCode: "EUR", Amount: 3000,
+		})
+		attemptBID = a.ID
+		return err
+	}); err != nil {
+		t.Fatalf("insert attempt B: %v", err)
+	}
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `SELECT id FROM deposit_intents WHERE id = $1 FOR UPDATE`, seedB.Intent.ID); err != nil {
+			return err
+		}
+		return ClaimCreatedForSubmission(ctx, tx, attemptBID, "mock-c1race", uuid.New(), "rv-c1race-b", time.Now().Add(time.Minute))
+	}); err != nil {
+		t.Fatalf("claim attempt B: %v", err)
+	}
+
+	// Attempt C: an entirely unrelated attempt (different intent) that
+	// will race to claim refX for ITSELF, between ApplyReceiptEvidence's
+	// two reads.
+	seedC := rvInit(t, pool, orch, f, 4000, "c1race-seed-c")
+	if _, err := rvCallback(pool, orch, f, "mock-c1race", p.CallbackPayload(f.tenantID, CallbackEventDeposit, *seedC.Attempt.ProviderReference, "", OutcomeDeclined, 0, "", "insufficient_funds", false)); err != nil {
+		t.Fatalf("decline seed C: %v", err)
+	}
+	var attemptCID uuid.UUID
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		a, err := InsertCreatedAttempt(ctx, tx, NewCreatedAttempt{
+			ID: uuid.New(), TenantID: f.tenantID, Operation: AttemptOperationDeposit,
+			DepositIntentID: &seedC.Intent.ID, AttemptNo: 2, ExcludedProviderIDs: []string{}, PaymentMethod: "card", AssetCode: "EUR", Amount: 4000,
+		})
+		attemptCID = a.ID
+		return err
+	}); err != nil {
+		t.Fatalf("insert attempt C: %v", err)
+	}
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `SELECT id FROM deposit_intents WHERE id = $1 FOR UPDATE`, seedC.Intent.ID); err != nil {
+			return err
+		}
+		return ClaimCreatedForSubmission(ctx, tx, attemptCID, "mock-c1race", uuid.New(), "rv-c1race-c", time.Now().Add(time.Minute))
+	}); err != nil {
+		t.Fatalf("claim attempt C: %v", err)
+	}
+
+	const refX = "c1race-refX-not-yet-bound"
+
+	// Installed only for the duration of this one call: fires exactly
+	// once, between ApplyReceiptEvidence's own byRef read (inside
+	// ResolveAttemptForEvidence, already run by the time this hook fires)
+	// and its second, later read of the same reference. Binds refX to
+	// attempt C in its OWN, separately-committed transaction - visible to
+	// the outer (still-open) transaction's next READ COMMITTED read.
+	hookFired := false
+	testHookBeforeReferenceConflictRecheck = func() {
+		hookFired = true
+		if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+			return MarkAccepted(ctx, tx, attemptCID, EvidenceCallback, refX, time.Now().Add(time.Minute))
+		}); err != nil {
+			t.Fatalf("interleaved bind of refX to attempt C: %v", err)
+		}
+	}
+	t.Cleanup(func() { testHookBeforeReferenceConflictRecheck = nil })
+
+	disp, err := rvApplyReceipt(pool, orch, f.tenantID, "mock-c1race", ReceiptEvidence{
+		EventType: string(CallbackEventDeposit), MerchantReference: attemptBID.String(), ProviderReference: refX,
+		Outcome: OutcomeSucceeded, Amount: 3000, AssetCode: "EUR",
+	})
+	if err != nil {
+		t.Fatalf("raced delivery: %v", err)
+	}
+	if !hookFired {
+		t.Fatal("setup: the interleaving hook never fired - the precondition-2 re-check was not reached")
+	}
+	if disp != DispositionAnomaly {
+		t.Errorf("C1: expected disposition=anomaly for the raced reference-conflict, got %s", disp)
+	}
+
+	// F1: the anomaly receipt must itself be resolved, never left to count
+	// toward the unapplied-receipt cap forever.
+	var n int
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		var err error
+		n, err = CountUnappliedReceipts(ctx, tx, f.tenantID, "mock-c1race", DeferredReceiptCap)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Errorf("C1: the raced reference-conflict anomaly receipt must be resolved, CountUnappliedReceipts=%d", n)
+	}
+
+	// B itself must be untouched by the raced, anomalied delivery.
+	finalB := mustGetAttempt(t, pool, f.tenantID, attemptBID)
+	if finalB.State != AttemptSubmitting {
+		t.Errorf("C1: attempt B must be untouched by the raced anomaly, got state=%s", finalB.State)
 	}
 }
 
