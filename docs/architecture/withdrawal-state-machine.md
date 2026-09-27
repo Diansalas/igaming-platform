@@ -27,6 +27,7 @@ stateDiagram-v2
     requested --> pending_review: KYC/velocity/risk checks queued
     pending_review --> approved: passes checks (auto or four-eyes)
     pending_review --> rejected: fails checks / risk decision
+    approved --> rejected: KYC compliance denial (DenyForCompliance, ADR 0096 §8 item 3) - system-driven, pre-dispatch only, never after MarkSubmitted
     approved --> submitted: sent to PSP/custodian
     submitted --> completed: provider confirms sent
     submitted --> failed: provider declines/fails after submission
@@ -191,6 +192,18 @@ into the ledger only when there is a fact to post.
   $expected` clause) so two concurrent reviewers, or a reviewer and a
   timeout-driven auto-reject, cannot both apply conflicting transitions —
   full detail in `docs/decisions/0020-financial-idempotency-and-concurrency-control.md`.
+- `approved` → `rejected` (`withdrawal.DenyForCompliance`, ADR 0096 §8
+  item 3, ledger-finance C2/C7) is a SECOND, distinct edge into
+  `rejected`, alongside the human `Reject` from `pending_review` above -
+  system-driven (no `withdrawal_approvals` row, `ActorSystem`), fired when
+  a payout-dispatch-time KYC re-check (`kyc.EvaluateEnforcement`,
+  `EnforcementWithdrawalPayout`) denies a request that already passed
+  `pending_review`/`approved`. It takes the SAME L1 row lock
+  `LockApprovedForSubmission` holds, uses its own idempotency key
+  (`requestID + ":kyc_denied"`, distinct from `:rejected`/`:failed`), and
+  is legal ONLY from `approved` - never once the request may have reached
+  the provider (`submitted`, or ADR 0095's own in-flight states once that
+  ADR is implemented).
 
 ## 5. Four-eyes approval — `ARCHITECTURAL DECISION` (CLAUDE.md requires four-eyes approval for *manual balance adjustments* above a configurable threshold; extending the same control to withdrawal approval is this document's decision, not a Blueprint requirement)
 

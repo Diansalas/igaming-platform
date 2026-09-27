@@ -173,3 +173,59 @@ func TestInitAppRole_RerunKeepsCasinoCallbackRejectionsGrants(t *testing.T) {
 		}
 	}
 }
+
+// TestInitAppRole_RerunKeepsPaymentStatementGrants: the same proof for
+// migration 0102's append-only payment statement store (PRH-I5, ADR 0095
+// §12/§13.3): re-running deploy/init-app-role.sql leaves
+// payment_statement_imports and payment_statement_lines at SELECT and
+// INSERT only (its blanket "GRANT ... ON ALL TABLES" would otherwise
+// silently re-grant UPDATE/DELETE), and a second run changes nothing.
+func TestInitAppRole_RerunKeepsPaymentStatementGrants(t *testing.T) {
+	w := newScratchWorld(t, "pst_initrole_", "")
+	tables := []string{"payment_statement_imports", "payment_statement_lines"}
+	isPST := func(k string) bool {
+		for _, tb := range tables {
+			if strings.Contains(k, ":"+tb+":") {
+				return true
+			}
+		}
+		return false
+	}
+	afterMigration := runtimePrivileges(t, w)
+
+	runInitAppRoleTail(t, w)
+	afterFirst := runtimePrivileges(t, w)
+	for k := range afterFirst {
+		if isPST(k) && !afterMigration[k] {
+			t.Errorf("init-app-role.sql widened %s", k)
+		}
+	}
+	for k := range afterMigration {
+		if isPST(k) && !afterFirst[k] {
+			t.Errorf("init-app-role.sql removed %s", k)
+		}
+	}
+	for _, tb := range tables {
+		for _, must := range []string{"SELECT", "INSERT"} {
+			if !afterFirst["table:"+tb+":"+must] {
+				t.Errorf("missing expected grant %s on %s", must, tb)
+			}
+		}
+		for _, mustNot := range []string{"UPDATE", "DELETE", "TRUNCATE"} {
+			if afterFirst["table:"+tb+":"+mustNot] {
+				t.Errorf("unexpected grant %s on %s", mustNot, tb)
+			}
+		}
+	}
+
+	runInitAppRoleTail(t, w)
+	afterSecond := runtimePrivileges(t, w)
+	if len(afterSecond) != len(afterFirst) {
+		t.Fatalf("a second run changed the privilege count %d -> %d", len(afterFirst), len(afterSecond))
+	}
+	for k := range afterFirst {
+		if !afterSecond[k] {
+			t.Fatalf("a second run removed %s", k)
+		}
+	}
+}

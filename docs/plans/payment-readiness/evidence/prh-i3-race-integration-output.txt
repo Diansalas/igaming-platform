@@ -1,0 +1,61 @@
+=== RUN   TestRequestWithdrawal_SameKeyConcurrentRequestsRaceTheGate
+--- PASS: TestRequestWithdrawal_SameKeyConcurrentRequestsRaceTheGate (0.24s)
+=== RUN   TestDenyForCompliance_ExactlyOnceRelease_Concurrent
+=== RUN   TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-0
+=== RUN   TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-1
+=== RUN   TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-2
+=== RUN   TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-3
+=== RUN   TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-4
+=== RUN   TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-5
+=== RUN   TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-6
+=== RUN   TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-7
+=== RUN   TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-8
+=== RUN   TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-9
+=== RUN   TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-10
+=== RUN   TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-11
+=== RUN   TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-12
+=== RUN   TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-13
+=== RUN   TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-14
+=== RUN   TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-15
+=== RUN   TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-16
+=== RUN   TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-17
+=== RUN   TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-18
+=== RUN   TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-19
+--- PASS: TestDenyForCompliance_ExactlyOnceRelease_Concurrent (1.74s)
+    --- PASS: TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-0 (0.28s)
+    --- PASS: TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-1 (0.13s)
+    --- PASS: TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-2 (0.11s)
+    --- PASS: TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-3 (0.12s)
+    --- PASS: TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-4 (0.10s)
+    --- PASS: TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-5 (0.06s)
+    --- PASS: TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-6 (0.09s)
+    --- PASS: TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-7 (0.07s)
+    --- PASS: TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-8 (0.06s)
+    --- PASS: TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-9 (0.05s)
+    --- PASS: TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-10 (0.17s)
+    --- PASS: TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-11 (0.10s)
+    --- PASS: TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-12 (0.05s)
+    --- PASS: TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-13 (0.04s)
+    --- PASS: TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-14 (0.04s)
+    --- PASS: TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-15 (0.05s)
+    --- PASS: TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-16 (0.05s)
+    --- PASS: TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-17 (0.05s)
+    --- PASS: TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-18 (0.04s)
+    --- PASS: TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-19 (0.04s)
+PASS
+ok  	github.com/Diansalas/igaming-platform/internal/withdrawal	3.051s
+testing: warning: no tests to run
+PASS
+ok  	github.com/Diansalas/igaming-platform/internal/kyc	1.099s [no tests to run]
+=== RUN   TestReceiveCallback_BetDeniedByKYCPlayPolicy_NoLedgerEffect
+--- PASS: TestReceiveCallback_BetDeniedByKYCPlayPolicy_NoLedgerEffect (0.09s)
+=== RUN   TestReceiveCallback_BetAllowedByKYCPlayPolicy_WhenApproved
+--- PASS: TestReceiveCallback_BetAllowedByKYCPlayPolicy_WhenApproved (0.13s)
+PASS
+ok  	github.com/Diansalas/igaming-platform/internal/casino	1.314s
+=== RUN   TestPlaceBet_DeniedByKYCPlayPolicy_NoLedgerEffect
+--- PASS: TestPlaceBet_DeniedByKYCPlayPolicy_NoLedgerEffect (0.09s)
+=== RUN   TestPlaceBet_AllowedByKYCPlayPolicy_WhenApproved
+--- PASS: TestPlaceBet_AllowedByKYCPlayPolicy_WhenApproved (0.11s)
+PASS
+ok  	github.com/Diansalas/igaming-platform/internal/sportsbook	1.302s

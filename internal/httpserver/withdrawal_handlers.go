@@ -132,6 +132,18 @@ func newRequestWithdrawalHandler(deps Deps) http.HandlerFunc {
 			}); recErr != nil {
 				logger.Error("kyc_denial_record_failed", "error", recErr)
 			}
+			// B1 (code review rv-prh-i3-code-review.md): OutcomeUnavailable
+			// means EvaluateEnforcement itself could not determine an
+			// outcome (a DB failure, a malformed policy row) - a transient
+			// server condition, never a real compliance decision. It MUST
+			// map to a retryable 503, never the same 409 a genuine
+			// pending/failed denial gets, so a brief KYC-store outage is
+			// never presented to the player as "you need to verify your
+			// identity".
+			if kycDenied.Decision.Outcome == kyc.OutcomeUnavailable {
+				apierror.Write(w, requestID, apierror.CodeUnavailable, "verification check is temporarily unavailable, please retry")
+				return
+			}
 			// Player-facing surface: status only, never matched_trigger/
 			// policy_version/an amount (security condition 8) - a closed
 			// enum drawn from the decision's own Outcome.
@@ -139,7 +151,12 @@ func newRequestWithdrawalHandler(deps Deps) http.HandlerFunc {
 			return
 		}
 		if errors.Is(err, withdrawal.ErrKYCUnavailable) {
-			apierror.Write(w, requestID, apierror.CodeInternal, "verification check is temporarily unavailable, please retry")
+			// ErrKYCUnavailable wraps a STRUCTURALLY INVALID call to
+			// EvaluateEnforcement (a caller bug - a missing tenant/brand/
+			// player/person id), never a business or transient-outage
+			// condition - CodeInternal (500), non-retryable, is correct
+			// here (distinct from the OutcomeUnavailable 503 branch above).
+			apierror.Write(w, requestID, apierror.CodeInternal, "failed to evaluate identity verification requirements")
 			return
 		}
 		if errors.Is(err, identity.ErrNotFound) {

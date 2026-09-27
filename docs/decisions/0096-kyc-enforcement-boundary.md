@@ -2173,3 +2173,190 @@ ADR's text, since code already existed by the time they landed:
   `ledger-finance` review of `DenyForCompliance` against §12.2 C1/C2/C7 in
   full, and `security` review of the admin route/RLS/raw-guard gap, before
   this is marked complete without qualification.
+
+---
+
+## 16. Fix round 2 (2026-09-27) — code review, security, ledger-finance re-review responses
+
+Three independent reviews of the §15 implementation landed after it was
+first marked complete: `code-reviewer`'s `rv-prh-i3-code-review.md`
+(verdict NOT READY), `security`'s `rv-prh-i3-security.md` (APPROVE WITH
+CONDITIONS), and `ledger-finance`'s `rv-prh-i3-ledger.md` (SIGN-OFF WITH
+CONDITIONS) — all under `docs/plans/payment-readiness/`. **Labels
+corrected: PRH-I3 and `KYC-ENFORCE-1`'s ADR-0096-implemented portion are
+`PARTIALLY IMPLEMENTED`, not `IMPLEMENTED`** (§16.4) until the items still
+open below land and every mandatory reviewer signs off clean.
+
+### 16.1 Closed this round
+
+- **Call-site negative tests (code review T1/T2, security F2).**
+  `internal/withdrawal/kyc_gate_integration_test.go` (new):
+  `RequestWithdrawal` denies for pending/rejected/no-row, each with zero
+  `withdrawal_requests` rows and zero ledger postings; the fresh-
+  transaction decision/audit commit path (security condition 5) is
+  proven directly; replay-after-revocation is not re-gated; the same-key
+  concurrent race is proven. `internal/casino/kyc_play_integration_test.go`
+  and `internal/sportsbook/kyc_play_integration_test.go` (new): the play
+  gate is exercised at the REAL call site (`postBet`/`PlaceBet`) against a
+  genuinely licensed tenant with an active `play` policy authored and
+  activated through the real four-eyes admin path
+  (`CreateEnforcementPolicy`/`ActivateEnforcementPolicy`, two distinct
+  principals) - both deny (no verification) and allow (approved) are
+  proven, closing the "zero tests with an active play policy on a
+  licensed tenant" gap. `internal/kyc/enforcement_integration_test.go`
+  gained the deposit-threshold suite (security F2): licensed-dormant,
+  below-threshold, at-threshold boundary (both denied-then-approved),
+  asset-not-covered → `unavailable`, and the play operation-scoping test.
+  **MX1 and MX2 (the code review's two surviving mutations) were
+  re-applied and re-verified KILLED** - see
+  `docs/plans/payment-readiness/evidence/prh-i3-mutation-kill.txt`'s
+  addendum.
+- **`DenyForCompliance` C7 tests (code review R3, ledger-finance
+  LF-I3-1).** New tests prove: the exact posting shape (accounts, entries,
+  `TransactionType`, `ReversesTransactionID`, `CorrelationID`); the
+  `:kyc_denied` idempotency key is distinct from `:rejected`/`:failed`;
+  `SUM(DEBITS)==SUM(CREDITS)` after a denial; projection equals a fresh
+  rebuild from `ledger_entries`; exactly-once release under 5 concurrent
+  callers, **repeated 20 times** under `-race` (ledger-finance asked for
+  ≥50 - 20 is a disclosed time-budget compromise, not the full ask - see
+  `docs/plans/payment-readiness/evidence/prh-i3-race-integration.txt`).
+  `DenyForCompliance` is therefore now labelled **IMPLEMENTED** for the
+  function itself (posting/idempotency/concurrency all tested), still
+  **NOT WIRED** to any live payout call site (PRH-I1/ADR 0095's own
+  scope, unchanged from §15).
+- **B1 (withdrawal handler error mapping).** `Decision.Outcome ==
+  OutcomeUnavailable` now maps to `503` (retryable), distinct from a real
+  pending/failed denial's `409`; `ErrKYCUnavailable` (a caller bug) maps
+  to a non-retryable `500` with no outcome-shaped message.
+- **B2 (migration 0100 down guard).** The down migration now refuses,
+  loudly, while EITHER `kyc_enforcement_decisions` or
+  `kyc_enforcement_policies` holds rows, mirroring migrations 0048/0052/
+  0075. Implementing this surfaced a REAL, independent bug the review
+  didn't name: `kyc_enforcement_decisions` carries tenant-scoped `FORCE`
+  RLS, so the naive `EXISTS` guard silently saw zero rows unconditionally
+  (FORCE applies to the table owner too, and the migration role has
+  `NOBYPASSRLS` per `deploy/init-app-role.sql`) - fixed by an in-transaction
+  `ALTER TABLE ... DISABLE ROW LEVEL SECURITY` before the check, which
+  rolls back with the rest of the transaction if the guard fires. Tested
+  (`TestMigration0100_DownRefusesWhileDecisionsHoldRows`), which caught
+  the bug before it shipped.
+- **B3 (staff read API cursor).** The handler now accepts `next_before`
+  in the EXACT shape it emits it (previously it only read
+  `before_decided_at`/`before_id` separately, which no client could ever
+  populate from the response), and rejects a malformed cursor or `limit`
+  with `400` instead of silently returning page 1 forever. Tested end to
+  end via `internal/httpserver/kyc_enforcement_handlers_integration_test.go`
+  (new): compliance-role success, tenant_admin `403`, cross-tenant and
+  nonexistent-player identical `404`, a genuine 3-page round trip over 5
+  rows with no id repeated or skipped, and a malformed-cursor `400` -
+  closing security F1's staff-API test requirement in the same pass.
+- **B4 (dormancy report omits `play`).**
+  `ListDormantJurisdictionTriggers` now reports `play` per surface
+  (`casino_play`/`sportsbook_play` each independently), not only
+  `cumulative_deposit`.
+- **B5 (doc comments contradict the read key).**
+  `kyc.EnforcementParams.PersonID` and `withdrawal.RequestParams.PersonID`
+  now describe the ACTUAL implemented read key (per-PlayerAccount primary,
+  Person-scoped deny-only overlay) - the stale "per Person" prose PRH-I1
+  would have read while wiring the deposit/payout gates is gone.
+- **B6 (`DenyForCompliance` trusts its input).** Now rejects (`ErrInvalidInput`)
+  a decision with `Allowed == true` or `kycParams.Operation !=
+  EnforcementWithdrawalPayout` before touching the ledger or the request
+  row.
+- **F7 (security: players must not see `unavailable` or an internal KYC
+  code).** `internal/httpserver/sportsbook_handlers.go`'s
+  `toPlaceBetRejectionResponse` now collapses every `RejectionKYCDenied`
+  result to one static, closed-enum player response
+  (`"verification_required"` / "this bet requires identity verification"),
+  never `kyc.EnforcementDecision.Code` verbatim. The withdrawal handler's
+  B1 fix separately ensures `unavailable` is never distinguishable from an
+  ordinary retryable failure on that surface.
+- **LF-I3-2 (state-machine doc).**
+  `docs/architecture/withdrawal-state-machine.md` gained the
+  `approved → rejected` (`DenyForCompliance`) edge, both in the diagram and
+  in prose distinguishing it from the human `Reject` edge.
+- **Chain-tip pin test nit (T5).** Not unified into one shared helper
+  (disclosed as a follow-up, not done this round - the triplication is a
+  readability nit, not a correctness gap per the review's own verdict).
+
+### 16.2 Still open (disclosed, not silently dropped)
+
+- **LF-I3-3 (request-deny commit shape).** Ledger-finance's preferred fix
+  - making the handler commit the decision in the SAME transaction as a
+  typed result, rather than rolling back and writing it in a fresh
+  transaction - is **not implemented this round**. The accepted
+  alternative the condition itself names ("or disclose it... for a
+  security ruling") is taken instead: the roll-back-then-fresh-transaction
+  pattern (mirroring `internal/casino`'s own CAS-RECON-1 precedent) is
+  retained, tested (`TestRequestWithdrawal_DenialCommitsDecisionAndAudit`
+  proves the decision/audit DO survive), and the residual risk is exactly
+  the narrow window between the rollback and the fresh transaction's own
+  commit, during which a decision could theoretically be lost if the
+  process crashes - a gap identical in shape to B7 below. A future
+  `security` ruling should confirm this is acceptable or require the
+  same-transaction redesign.
+- **LF-I3-4 (partial unique index backstop).** Deferred, as ledger-finance's
+  own condition text allows: migration 0100 is already applied and
+  migrations 0101-0103 are allocated to other in-flight work, so this
+  backstop cannot land without editing an already-shipped migration.
+  Registered as its own follow-up, owned by `ledger-finance`.
+- **LF-I3-5 (casino/sportsbook decision loss on DB error).** Recorded here,
+  not fixed: if `kyc.EvaluateEnforcement` or `kyc.RecordDecision` returns a
+  genuine error (not a `not_required`/`unavailable` outcome) inside
+  `postBet`/`PlaceBet`, the whole bet-placement transaction rolls back -
+  correctly fail-closed for the bet itself (no stake is posted), but,
+  unlike withdrawal's own separately-committed-decision pattern, NO
+  decision/audit row survives for that attempt. This is the same class of
+  gap security condition 5 closed for withdrawal, not yet closed for play.
+- **B7 (same-key concurrent retry can report a denial for a hold that
+  exists).** Not fixed - the narrow TOCTOU window code review named
+  (KYC state changes between two concurrent same-key requests, one of
+  which already placed the hold) remains, documented in
+  `RequestWithdrawal`'s own doc comment; closing it would require
+  re-checking for an existing request specifically on the deny path,
+  which is deferred as a follow-up rather than built under this round's
+  time budget.
+- **Security F3 (four-eyes on WITHDRAWING an active policy).** Not
+  additionally tested this round beyond what §15.1's C3 already covers
+  (the lifecycle trigger's creator≠transitioner check applies uniformly to
+  every transition, including `active→withdrawn`) -
+  `TestMigration0100_PolicyLifecycleTransitions` already exercises
+  `active→withdrawn` by a different principal, but no NEW test specifically
+  targets "smaller correct design" alternatives security raised (a
+  dedicated request/approve pair for withdrawal specifically). Disclosed
+  as not separately re-verified against F3's exact wording.
+- **Security F4 (richer policy-write audit records) and F5 (derive/assert
+  PersonID server-side).** Not implemented this round. F5 is partially
+  true already: every enforcement point's caller resolves `PersonID` from
+  the authenticated player's own account server-side (never a request
+  body), but `EvaluateEnforcement` itself does not independently assert
+  the value it is given matches `PlayerAccountID`'s own person - it trusts
+  the caller. Registered as a follow-up.
+- **Ledger-finance's ≥50-repeat ask (LF-I3-1).** Delivered at 20 repeats,
+  disclosed as a time-budget compromise, not the full ask (§16.1).
+- **Casino/sportsbook chain-tip helper unification and the deposit call
+  site's `Amount <= 0` rejection requirement.** Not built here; the latter
+  is explicitly PRH-I1's own scope (recorded per the orchestrator's own
+  instruction to keep it recorded for that task).
+
+### 16.3 Verification (fix round 2)
+
+`gofmt`, `go vet` (plain and `-tags=integration`),
+`golangci-lint run ./...` (0 issues), `go test -race ./...` (all unit
+suites pass), `go test -tags=integration ./...` (all packages pass,
+including every package this round touched:
+`internal/kyc`, `internal/withdrawal`, `internal/casino`,
+`internal/sportsbook`, `internal/httpserver`), and a targeted
+`-race -tags=integration` run of the new concurrency-sensitive tests (see
+`docs/plans/payment-readiness/evidence/prh-i3-race-integration.txt`).
+
+### 16.4 Labels (corrected)
+
+- **ADR 0096 header:** `ACCEPTED — PARTIALLY IMPLEMENTED`, pending
+  security/ledger-finance/code review sign-off on §16.2's open items.
+- **`DenyForCompliance`:** IMPLEMENTED and tested (C7 closed); NOT WIRED
+  to a live call site (PRH-I1/ADR 0095 scope).
+- **Withdrawal-request and play gates:** IMPLEMENTED, now WITH call-site
+  tests (T1/T2 closed).
+- **Deposit gate, payout-dispatch call site:** unchanged from §15 -
+  NOT IMPLEMENTED here, PRH-I1's scope.

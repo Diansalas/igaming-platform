@@ -105,12 +105,13 @@ type OutboundCredentialResolver interface {
 // wired to a real provider.
 type MockCredentialResolver struct{}
 
-// SyntheticComponent implements providerkind.Synthetic (PRH-I1 deposit
-// cutover: this type is now reachable from cmd/platform-api's production
-// wiring, paymentsOutboundCredentials, whenever only the MOCK payments
-// adapter is registered) - RefuseSyntheticInProduction's own completeness
-// scan requires every mock-like type to declare this marker, mirroring
-// casino.MockOutboundResolver's identical declaration.
+// SyntheticComponent implements providerkind.Synthetic. This type is
+// reachable from cmd/platform-api's production wiring on two independent
+// paths: paymentsOutboundCredentials (PRH-I1 deposit cutover, whenever
+// only the MOCK payments adapter is registered) and the MOCK payment
+// statement source (PRH-I5, MOCK-ADAPTER-PROD-1) - RefuseSyntheticInProduction's
+// own completeness scan requires every mock-like type to declare this
+// marker, mirroring casino.MockOutboundResolver's identical declaration.
 func (MockCredentialResolver) SyntheticComponent() {}
 
 func (MockCredentialResolver) Resolve(cc CallContext, domain string) (OutboundCredential, error) {

@@ -93,6 +93,54 @@ func TestMigration0100_UpDownUpRoundTrip(t *testing.T) {
 	}
 }
 
+// TestMigration0100_DownRefusesWhileDecisionsHoldRows proves B2 (code
+// review rv-prh-i3-code-review.md): the down migration must refuse,
+// loudly, rather than silently destroying the append-only KYC decision
+// audit trail, mirroring migrations 0048/0052/0075's own precedent.
+func TestMigration0100_DownRefusesWhileDecisionsHoldRows(t *testing.T) {
+	pool := migration0100ScratchPool(t)
+	dir := migration0100MigrationsDir(t)
+	if _, err := pool.MigrateUp(context.Background(), dir); err != nil {
+		t.Fatalf("migrate up: %v", err)
+	}
+
+	tenantID, brandID, playerID, personID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	err := pool.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `INSERT INTO tenants (id, slug, name, licensing_model) VALUES ($1, $2, 'T', 'under_platform_licence')`, tenantID, "t-"+tenantID.String()[:8]); err != nil {
+			return err
+		}
+		_, err := tx.Exec(ctx, `INSERT INTO persons (id) VALUES ($1)`, personID)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("seed tenant: %v", err)
+	}
+	err = pool.WithTenant(context.Background(), tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `INSERT INTO brands (id, tenant_id, slug, name) VALUES ($1, $2, $3, 'B')`, brandID, tenantID, "b-"+brandID.String()[:8]); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO player_accounts (id, tenant_id, brand_id, person_id, email, password_hash, status) VALUES ($1, $2, $3, $4, $5, 'x', 'active')`,
+			playerID, tenantID, brandID, personID, playerID.String()+"@example.com"); err != nil {
+			return err
+		}
+		_, err := tx.Exec(ctx, `
+			INSERT INTO kyc_enforcement_decisions (tenant_id, brand_id, player_account_id, operation, outcome, allowed, policy_version, correlation_id)
+			VALUES ($1, $2, $3, 'withdrawal_hold', 'failed', false, 'test', $4)`,
+			tenantID, brandID, playerID, uuid.New())
+		return err
+	})
+	if err != nil {
+		t.Fatalf("seed decision row: %v", err)
+	}
+
+	if _, err := pool.MigrateDown(context.Background(), dir, 1); err == nil {
+		t.Fatal("expected migrating down 0100 to be refused while kyc_enforcement_decisions holds rows")
+	}
+	if !regclassExists(t, pool, "kyc_enforcement_decisions") {
+		t.Fatal("expected kyc_enforcement_decisions to still exist after the refused rollback")
+	}
+}
+
 // TestMigration0100_ForceRLSOnBothTables proves FORCE ROW LEVEL SECURITY
 // is set on both new tables (security condition 2's own required test:
 // "a superuser-equivalent bypass would otherwise silently defeat every

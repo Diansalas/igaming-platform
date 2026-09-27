@@ -198,3 +198,34 @@ BEGIN
     END IF;
 END
 $$;
+
+-- PRH-I5 (migration 0102, payment_statement_imports/payment_statement_lines;
+-- ADR 0095 §12/§13.3): the same treatment as casino_callback_rejections
+-- above, re-asserted on every run. The blanket backfill GRANT above ("ALL
+-- TABLES IN SCHEMA public") would otherwise silently re-grant table-level
+-- UPDATE/DELETE on these append-only statement tables every time this
+-- idempotent script is re-run against an already-migrated database;
+-- migration 0102 itself runs only once. The statements are EXACTLY
+-- migration 0102's own grant: REVOKE ALL, then SELECT/INSERT only - never
+-- UPDATE, DELETE or TRUNCATE. The deny triggers created by migration 0102
+-- remain the binding control; this is defence in depth. Guarded per table
+-- because the tables do not exist yet on a fresh docker-entrypoint-initdb.d
+-- run (migrations run after this script).
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM information_schema.tables
+        WHERE table_schema = 'public' AND table_name = 'payment_statement_imports'
+    ) THEN
+        EXECUTE 'REVOKE ALL ON payment_statement_imports FROM igaming_runtime';
+        EXECUTE 'GRANT SELECT, INSERT ON payment_statement_imports TO igaming_runtime';
+    END IF;
+    IF EXISTS (
+        SELECT 1 FROM information_schema.tables
+        WHERE table_schema = 'public' AND table_name = 'payment_statement_lines'
+    ) THEN
+        EXECUTE 'REVOKE ALL ON payment_statement_lines FROM igaming_runtime';
+        EXECUTE 'GRANT SELECT, INSERT ON payment_statement_lines TO igaming_runtime';
+    END IF;
+END
+$$;
