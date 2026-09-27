@@ -630,7 +630,7 @@ applies to the test plan as written; it does not constitute sign-off on PRH-I4's
 eventual implementation, which requires its own QA gate review against §11 as amended
 by items 1–6 above, plus `security`'s review per §15.
 
-## 16. Devops review
+## 17. Devops review
 
 Verified at `24cbde1` against `cmd/platform-api/main.go`, `internal/httpserver/health.go`,
 `internal/httpserver/middleware.go`, `internal/config/config.go`, and `deploy/aws/`.
@@ -710,7 +710,7 @@ exactly when an attacker-chosen path is most likely to be present (Condition 3).
    WEBHOOK-RL-SHARED-1), that requires its own ADR and devops review — do not introduce
    infrastructure changes under this ADR's implementation ticket.
 
-## 17. Ledger-finance review
+## 18. Ledger-finance review
 
 **Reviewer:** `ledger-finance`. **Scope:** §3 ORD-3, §5.2 B2, §6.4, T2/T6 only. I checked
 these against the code at `dcddb2b`: `casino_handlers.go` and `deposit_handlers.go` webhook
@@ -770,7 +770,7 @@ paths, `casino/rejections.go`, the `casino.postBet`/`postWin`/`postRollback` tom
 This is sign-off on the financial design only. PRH-I4's diff needs its own ledger-finance
 review before it is marked `IMPLEMENTED`.
 
-## 17. Payments review
+## 19. Payments review
 
 **Reviewer:** `payments`. **Scope:** section 9.1 payments burst defaults vs. real PSP callback
 patterns, section 6.3 retry/status-code mechanism, section 6.4 idempotency, B2 (per-tenant
@@ -830,7 +830,7 @@ as 6.3 specifies, both before and after 0095 lands.
    processing) requires `ledger-finance` review per CLAUDE.md, independent of this admission
    review -- this ADR's 6.4/idempotency framing does not substitute for that review.
 
-## 18. Architect review
+## 20. Architect review
 
 **Reviewer:** `architect`. **Scope:** cross-domain boundaries, ADR 0094/0091/0022 consistency,
 tenant directory, config ownership, isolation-tightening path, ADR 0095 interface. Verified at
