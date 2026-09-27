@@ -567,3 +567,91 @@ Low items that can be follow-ups:
   `m0101v2_*` databases seen in earlier rounds. It is a harness/role limitation, not this
   change's fault.
 - My own `rvprhi1_*` databases: 0 remain.
+
+---
+
+# Re-review 3 — payout round 4 (`bfb075e`, merged at `4977d26`)
+
+- Method:
+  - detached worktree at `4977d26`, build, `go vet -tags=integration`;
+  - pinned `golangci-lint` 2.9.0: untagged, 0 issues on payments/httpserver/withdrawal;
+    `--build-tags=integration`, 0 issues on `internal/payments`. The integration-tag run on
+    `internal/httpserver` reports pre-existing `errcheck` issues (`resp.Body.Close`) in older test
+    files this round did not touch;
+  - full `internal/payments` and `internal/withdrawal` suites **pass** on a private database
+    (via `TEST_ADMIN_DATABASE_URL`, migrated to 0106, grants from `deploy/init-app-role.sql`);
+  - `internal/httpserver` passes except the 3 `TestResolutionIsolation_*` INV-POOL timing tests.
+    Re-review 2 showed they also fail on the unchanged baseline, so they are environmental;
+  - probes re-run;
+  - 22 anchored mutants (my 12, the earlier new-code ones, and 7 new ones for this round), each
+    reverted with `git checkout`, tree confirmed clean.
+- The worktree and the private DB are removed. No probe code was committed.
+
+## Verdict
+
+**APPROVE — code review has no remaining blockers.**
+
+This covers code review only. Under CLAUDE.md, the financial and security domain sign-offs
+(`ledger-finance`, `security`) are still required and are not decided here.
+
+## Verification of claimed fixes
+
+| Claim | Result |
+|---|---|
+| **N7:** in-flight guard exempts only `lease_owner='sweeper'`, in the Go check and in the CAS; `NewSweeper` test | **Fixed.** My N7 probe (`NewSweeper` defaults, `Lease=1m`): `claimed=1 processed=1 errs=[] state=ambiguous` (was `processed=0`, error every tick). `TestSweeper_N7_CrashRecoveryWithRealLease_ActuallyRecovers` asserts `Processed==1` and `ambiguous`. The live-dispatch refusal still holds (`TestSweeper_N7_LiveDispatchLease_StillRefusesResolve`; my N2 probe still gets `ErrPayoutDispatchInFlight`). All sweeper-driven payout tests now set `Lease: SweeperDefaultLease` or use `NewSweeper`. |
+| **N3:** `/resolve` staff audit in the same tx | **Fixed** (verified by reading the code). `PollPayoutStatus` takes `*SubmitActor`. `payoutResolveAudit` runs inside the same `WithTenant` closure as the state change, on the evidence path (`applyPayoutStatusEvidence` wrapper) and on the no-reference fallback. The handler's post-hoc `audit.Record` is removed; that closure is now read-only. Sweeper calls pass `nil`, which is a no-op. Minor: the refusal paths (409 in-flight, 409 `created`) write no staff audit, and the audit row no longer carries `withdrawal_state` metadata. Neither is a regression that matters. |
+| **R1:** early-return test | **Pinned.** R_R1 is killed by `TestPayoutDispatch_R1_StrayEvidenceAgainstTerminalAttempt_IsNoOp`. |
+| **N6:** comparison against the withdrawal-reference fallback | **Fixed and pinned.** N6_fallback is killed by `TestPollPayoutStatus_N6_MismatchAgainstFallbackWithdrawalReference_Disputes`. |
+
+## Mutants: 22 of 22 killed
+
+M1–M12 are all killed. So are R_N6, R_R2 and R_R1, and the new ones:
+
+| Mutant | Result |
+|---|---|
+| N7_go_exempt: the Go-check `sweeper` exemption removed, which reverts to the round-3 bug | killed |
+| N7_cas_exempt: `OR lease_owner='sweeper'` removed from the CAS | killed |
+| N7_overbroad: exemption applied to every owner, so a live dispatch is never refused | killed |
+| N3_audit_noop | killed |
+| N3_fallback_branch_audit | killed |
+| N6_fallback | killed |
+
+## Can `lease_owner` be spoofed, and who else writes `'sweeper'`?
+
+- **Not client-controllable.** Every `lease_owner` write takes a string literal from server code:
+  - `InsertSubmittingAttempt` (`payout-dispatch`, `player-request`);
+  - `ClaimCreatedForSubmission` / `ResubmitAmbiguous` (`sweeper-payout-reclaim`,
+    `sweeper-payout-resubmit`, `player-request-cascade`, `sweeper`);
+  - `claimBatch` (`'sweeper'`).
+
+  No HTTP input, payload or provider evidence reaches that column. Forging it would need direct
+  DB write access as the runtime role, which is outside this threat model and would bypass far
+  more than this guard. Rows are tenant-scoped under RLS.
+- **The only other `'sweeper'` writer is `drive.go`'s `driveCreatedAttempt`.** It uses
+  `leaseOwner = "sweeper"` for a sweeper-driven **deposit** T2 claim, which is a live dispatch
+  lease under the same literal. It is deposit-only (it takes a `DepositIntent`), and
+  `PollPayoutStatus` only ever sees payout attempts, so the exemption cannot be triggered by it
+  today.
+- **Latent coupling, LOW.** The literal `"sweeper"` now means both "batch claim lease, never in
+  flight" (claimBatch) and "live dispatch lease" (drive.go). If a future change routes a payout
+  through a `sweeper`-owned T2 claim, the in-flight guard silently stops protecting it.
+  Recommendation: give claimBatch a distinct owner (e.g. `sweeper-batch`) and key both the Go
+  check and the CAS on that constant.
+- **Owner NULL, LOW.** When `lease_owner` is NULL (legacy-backfill rows only), the Go check
+  treats the attempt as not in flight, but the CAS still refuses while the lease is live. The
+  result is an `ErrAttemptStateConflict` rather than the 409. This is fail-closed and
+  legacy-only.
+- **Residual, inherent to the lease design.** The sweeper only picks up a `submitting` row after
+  `next_action_at = lease_until`, which is 2 min after T1p. The dispatch path is bounded by 60 s
+  (outbound) plus 5 s (phase C). Only a submit handler stalled for more than about 55 s beyond
+  those bounds could see its in-flight attempt moved to T6 underneath it. Phase C then converges
+  (`MarkAccepted`/`ApplySuccess` both accept `ambiguous`), so the effect is at most a spurious
+  `ever_possibly_sent`. Not a blocker.
+
+## Open items (non-blocking)
+
+1. The overloaded `"sweeper"` lease-owner literal (above). Recommended hardening.
+2. The environment: the `TestResolutionIsolation_*` timing flakes under load, and pre-existing
+   integration-tag `errcheck` noise in older httpserver tests. Neither comes from this change.
+3. Domain sign-offs from `ledger-finance` and `security` (the N4/N6 lock and reference rulings are
+   theirs) before PRH-I1 payout dispatch is labelled `IMPLEMENTED`.

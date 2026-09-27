@@ -348,3 +348,224 @@ after one spurious 500. Taking the intent lock when an attempt resolves would re
 - **Not blocking:** L2 to L5.
 
 My M1/M2 resolution rights under HD-0095-1 are unaffected.
+
+---
+
+# Re-review 1: fix round (`08b84d1`, `91ead85`, `d25a3fd`, `158ac86`; merged `b3563c8`)
+
+- Reviewed at local HEAD `27de492`, in a detached worktree. Between `27de492` and `9ae3980`,
+  `receipt.go`, `drive.go`, `sweeper.go`, `cascade.go`, `attempt.go` and `orchestrator.go` are
+  byte-identical, so every finding below also holds at `9ae3980`.
+- Private database created with `priv_db.sh`, migrated to head (0106). It is dropped and the
+  worktree removed.
+- The implementer produced no mutate/revert transcripts this round. All 24 mutants below are my
+  own:
+  - I applied each one with an anchor-count-checked string replacement, ran it, and restored the
+    source with `git checkout`.
+  - Every survivor was re-run against the **full** `internal/payments` integration suite.
+  - The two mutants that concern webhook behaviour were also run against the
+    `internal/httpserver` Webhook, Payment, Deposit, Reversal and PayRev tests.
+- Baseline: the full `internal/payments` suite is green at HEAD (261 s).
+
+## Verdict: NOT READY. REJECT stands on H1-R and F2; H2, H3 and H4 are closed
+
+- **Closed:** H2, H3, H4 (money-safe, verified by probe), M2, M4, R4(a) to R4(d), and both
+  surviving mutants from round 1.
+- **Blocking:**
+  - My H1 ruling (below) needs a code change.
+  - F2 is **not** closed on the callback path, which is the path real vendors use. An oversized
+    decline reason still 500-loops (probe Q3).
+- **Not blocking, but required before the stage gate:** several fixes have no test that notices
+  their removal (see the mutation table).
+
+## RULING H1: deposit_reversal semantics (binding; ledger-finance authority)
+
+**Option (a), tightened:** the `deposit_reversal` event **type** is the settlement signal. The
+wire `Outcome` is not a status, except that values meaning "not final" may never move money.
+
+Why this is the fail-closed choice for the ledger:
+
+- A chargeback, or a completed refund, is money the PSP has already taken back from the
+  merchant.
+- If a final debit is not posted, `player_cash` is overstated. The player can withdraw it, and
+  that loss cannot be recovered.
+- If a reversal is posted wrongly, `player_cash` is understated. That is detectable (the
+  reconciliation `pay_status_mismatch` below) and correctable with a four-eyes compensating entry.
+- Option (b), non-final reversals never post, would require a new contract status field. Every
+  adapter mis-mapping would then fail open, towards the unrecoverable loss.
+
+"Tightened" means only the values that name a final reversal may post. `pending` and `ambiguous`
+say, by their own meaning, that the reversal is not final, and no reading of this contract makes
+them a debit.
+
+Rules. These are code and contract changes, owned by `payments`; I review them.
+
+1. **Posting outcomes.**
+   - `succeeded`, and the legacy reason-carrier `declined`, post a reversal, or write a tombstone
+     for an unseen or unposted original. This is the current behaviour, kept.
+   - `declined` is **deprecated**. New adapters send `succeeded` and put the reason in
+     `DeclineReason`. The 14 existing `declined` fixtures may stay until they are migrated.
+2. **`pending` and `ambiguous` never post or tombstone.** Such an event is:
+   - stored with its real wire outcome (the CHECK allows it);
+   - given disposition `anomaly`, resolved `anomaly_other` with `attempt_id` = the original
+     attempt if one resolved;
+   - answered with the uniform 200;
+   - reported as a P1 alert, `reversal_non_final_outcome`.
+   Never a 4xx: a vendor may treat 4xx as terminal and lose the event.
+3. **The wire outcome must be preserved, even under this reading.** This answers the
+   coordinator's question: yes.
+   - `computeEventFingerprint` must use the **raw** wire outcome. Deliveries that differ only in
+     outcome are then distinct receipts. That is safe, because a repeated reversal reference
+     still collapses on ledger idempotency (`AlreadyPosted`), and a different reference hits
+     PAY-REV-1.
+   - The raw wire outcome and the bounded reason code must be written to the
+     `deposit.reversed` / `deposit.reversal_tombstoned` audit metadata.
+   - The bounded reason must be stored in the receipt's `decline_reason` column. The CHECK allows
+     `decline_reason` for any outcome.
+   - The stored receipt `outcome` may stay normalized to `succeeded` for posting reversals: it
+     means "applied", and this must be documented on the column. Nothing may be persisted as a
+     bare `succeeded` with no trace of what the PSP actually sent.
+4. **The declined-reversal-on-pending-deposit tombstone (old P1b) is correct and is kept.**
+   - Under this ruling, a `declined`/`succeeded` reversal is a statement by the PSP that the
+     capture was taken back. Refusing to credit a later success for the same reference is the
+     fail-closed outcome: net money at the PSP is zero.
+   - The success becomes T10/T13t `disputed` (P1, M1 queue), exactly as now.
+   - A `pending`/`ambiguous` reversal must **not** tombstone (rule 2).
+5. **Adapter contract.**
+   - ADR 0095 §9.3 and the `CallbackEvent` doc comment in `types.go` must state it: "a
+     `deposit_reversal` event asserts that the PSP has **finally** debited the merchant for
+     `original_provider_reference`."
+   - Adapters must not emit it for:
+     - refund requested/pending;
+     - a chargeback inquiry, retrieval request or pre-arbitration notice;
+     - a chargeback **won** by the merchant (funds returned).
+   - A "chargeback won" is a re-credit, or reversal-of-reversal. That is NOT IMPLEMENTED: it maps
+     to `unsupported_event` with a P1, and is resolved by a four-eyes compensating entry. Record
+     it as a deferred decision.
+   - Vendor intake (#28) must record each PSP's reversal lifecycle mapping. That item is PROVIDER
+     DEPENDENT.
+6. **Reconciliation `matchReversal` needs no code change.** The statement line carries the PSP's
+   own settlement status, which is independent of the callback `Outcome`. Under this ruling, a
+   posted reversal whose line is `pending`/`declined` is exactly the detector for two cases:
+   - an adapter contract violation;
+   - a chargeback the merchant later won, which needs a manual re-credit.
+   Only the comment needs updating to say so. The contradiction I reported in H1 is resolved by
+   rule 2 plus this reading, not by changing reconciliation.
+
+Tests:
+
+- The current `TestRVLF_P1_ReversalPostsRegardlessOfWireOutcomeReasonCarrier` asserts that
+  `pending` and `ambiguous` **post**. That contradicts rule 2 and must be inverted for those two
+  values.
+- New tests are needed for the raw-outcome fingerprint and for the audit-metadata preservation.
+
+## RULING M1: mismatched-amount success on a terminal attempt
+
+- **This is a P1 anomaly with no state change, not a dispute.**
+  - `succeeded → *` is forbidden (§4.3).
+  - `declined → disputed` exists only as T13t (tombstone) and T14 (payout).
+  - So §4.4's "P1 anomaly, receipt `anomaly`, no change" is the only legal cell for:
+    - `succeeded` × mismatch;
+    - deposit `declined` × mismatch.
+- Required behaviour:
+  - receipt disposition `anomaly`, resolution `anomaly_other`;
+  - a P1 alert `callback_amount_asset_mismatch_terminal` with no amounts in the log line
+    (security S-5);
+  - an audit record;
+  - the uniform 200;
+  - no posting.
+- Current code fails this in two ways:
+  - `succeeded` returns `ResolutionApplied` **before** the mismatch check, so it is mislabelled
+    `applied`/`duplicate_effect`.
+  - `declined` is a silent `anomaly_other` with no alert.
+- Both are open (M1-R below). The 500-loop part of M1 is closed.
+
+## Status of round-1 findings
+
+| Item | Status | Evidence |
+|---|---|---|
+| H1 | superseded by RULING H1; code change required (rules 2, 3, 5) | reading of `applyReversalReceiptEvidence` |
+| H2 | **CLOSED (wired at all 3 sites)**. Only the phase C site is pinned: DFD is killed by P8. The callback-path site (DFR) and the sweeper T9 site (DFS) survive the full suite. | mutants DFD/DFR/DFS |
+| H3 | **CLOSED, and all 3 sites have tests**: KSR killed by P2, KSD by `TestRVLF_H3_DriveGo_*`, KSS by `TestRVLF_H3_SweeperGo_*` | mutants |
+| H4 | **CLOSED, money-safe.** The T2 predicate works: probe Q2 shows a direct T2 claim on a paid intent → CAS conflict. Sibling rejection on the receipt path is pinned (SIBR killed by P3). But the T2 guard itself (T2G) and sibling rejection in drive/sweeper (SIBD, SIBS) survive the full suite. See also new finding N1. | probe Q2, mutants |
+| M1 | 500-loop **CLOSED** (P4, P7 pass). Terminal-mismatch semantics **OPEN** per RULING M1. The live-state mismatch → T10 is pinned only at the HTTP layer: M1C survives `internal/payments` and is killed by `TestWebhook_ProviderMismatchAfterVerification_IsDisputedNotRejected`. | mutants |
+| M2 | **CLOSED** (RVRS killed by P5). The `event_type='deposit'` filter in the deferred backstop (DFT) survives; see N3. | mutants |
+| M3 | Deposit branch and reversal posting branch **CLOSED** (R0 before L1). The reversal **tombstone** branch now takes `deposit_intents FOR UPDATE` **before** its receipt insert: the L5 fix reintroduced the A7 violation there. **OPEN (Low).** Insert the receipt first, then lock. | `receipt.go` ~L794–L803 |
+| M4 | **CLOSED** (M4 mutant killed) | |
+| M5 / F3 | The sticky guard is implemented in `setIntentAttempt`, but **untested**: FRZ (status freeze) and FRZP (provider-reference freeze) survive the full suite. `TestRVLF_F3_*` sends its late decline to an attempt that is already `declined`, which is a no-op cell, so `finalizeDeclined` never runs. The projection is still not a single writer: drive/sweeper decline paths still write status directly. **OPEN.** | mutants |
+| F2 | **NOT CLOSED on the callback path.** `insertReceiptDeduped` stores the raw `ev.DeclineReason` before `boundedDeclineReason` runs. Probe Q3: a 99-byte vendor reason on a decline callback → `payment_provider_events_decline_reason_check` violation → rollback → 500, forever. BDR (bound disabled) survives the full payments suite and the httpserver subset. **BLOCKING.** Apply `boundedDeclineReason` inside `insertReceiptDeduped` (and to `ev` before the matrix), and add Q3 as a test. | probe Q3, mutant BDR |
+| R4(a) | **CLOSED**: payout decline → `applyPayoutDecline`, the hold is released (PDEC killed) | |
+| R4(b) | **CLOSED**: event_type vs operation cross-check (XOP killed). A bypass exists via the deferred backstop; see N3. | |
+| R4(c) | **CLOSED**: payout-typed decline populates the check1 columns (PCOL killed) | |
+| R4(d) | **CLOSED**: payout success → `applyPayoutSuccess` | |
+| R4 reachability | **Not live**: `MockProvider.HandleCallback` emits only `deposit`/`deposit_reversal`, so R4 is reachable only by calling `ApplyReceiptEvidence` directly. Label PROVIDER DEPENDENT until an adapter emits `payout` events. | `mock.go` |
+| L1 mutants | **Both KILLED**: M1 (first-capture reversal) by `TestRVLF_P6_*`; M2 (disputed→declined projection) by `TestRVLF_P7_*` | mutants |
+
+## New findings
+
+**N1 (Low, money-safe): a cascade child is still inserted for an intent that already succeeded.**
+
+`finalizeDeclined` returns its **input** intent when the sticky guard turns the write into a
+no-op. The receipt path passes `DepositIntent{ID, TenantID}`, whose `Status` is `""`, so
+`cascadeEligible` sees "not succeeded" and inserts a child. Phase C passes a stale pre-lock intent,
+with the same effect. Probe Q2:
+
+1. A1 declines (cascadable) → A2 is driven to PSP B.
+2. A1's late success (T13) → the intent is `succeeded`.
+3. A2's cascadable decline → **attempt 3 is `created`**.
+
+The T2 guard then refuses a claim of attempt 3 (verified), and in this 2-provider set-up the
+sweeper rejects it as `no_routable_provider`. So no second charge happens. The fix: set
+`intent.Status = actual` on the no-op branch.
+
+**N2 (Medium, pre-existing, now reachable): phase C and sweeper successes do not check for a tombstone.**
+
+`drive.go` and `sweeper.go` success branches call `postDepositSuccess` directly. A reversal
+tombstone that holds `(provider_id, provider_reference)` therefore produces an untyped
+unique-index error on every poll and phase C. The attempt never reaches T10
+`reversal_tombstone_precedes_success`. That contradicts §4.3 T7 ("…T10 instead, with no posting
+and no error"). It is money-safe, but it loops. Route both paths through the same tombstone check
+as `applyResolvedReceiptEvidence`.
+
+**N3 (Low): the deferred backstop has no event-type-vs-operation check.**
+
+`ApplyDeferredReceiptsForAttempt` filters `event_type='deposit'` but runs for **payout** attempts
+too (`receipt.go` L489, after any changed payout receipt). A deferred deposit-typed receipt whose
+reference equals a payout attempt's reference would be applied through the matrix to the payout
+(for example → `applyPayoutSuccess`), bypassing the R4(b) cross-check. The filter itself (DFT) is
+also unpinned. Filter by the attempt's own operation, and add a test.
+
+**N4 (Low): `rejectCreatedSiblings` always records `EvidenceCallback`.**
+
+This is true even when it is called from phase C (`sync`) or the sweeper (`query_status`). The
+audit and `last_evidence_kind` are mislabelled. Pass the caller's evidence kind.
+
+## Surviving mutants (full `internal/payments` suite; each needs a test)
+
+| Mutant | What it removes | Required test |
+|---|---|---|
+| T2G | the succeeded-sibling predicate in `ClaimCreatedForSubmission` | a direct T2 claim on a paid intent → CAS conflict (probe Q2's final step) |
+| SIBD / SIBS | `rejectCreatedSiblings` in `drive.go` / `sweeper.go` success | T13 via phase C and via sweeper poll with a `created` sibling |
+| DFR / DFS | deferred-receipt application at the callback T4/T9 site / sweeper T9 site | a callback-pending race and a sweeper-poll race, like P8 |
+| DFT | `event_type='deposit'` filter in the backstop | a stored reversal receipt sharing a later deposit attempt's reference is not applied |
+| FRZ / FRZP | sticky freeze of status / provider_reference on a succeeded intent | a decline on a **live** sibling after success (probe Q2 shape) |
+| BDR | `boundedDeclineReason` | probe Q3, over callback, phase C and sweeper |
+
+Killed (for the record): M1, M2, SIBR, KSR, KSD, KSS, DFD, XOP, M4, RVRS, PDEC, PCOL, and M1C (by
+the httpserver tests only).
+
+## Conditions for sign-off (this round)
+
+- **Blocking:**
+  - RULING H1, rules 2, 3 and 5 (code, contract doc, and inverted P1 for `pending`/`ambiguous`).
+  - F2 on the callback path, with probe Q3 as a test.
+- **Before the stage gate:**
+  - RULING M1 (terminal mismatch → anomaly + P1);
+  - N1, N2, N3;
+  - the M3 tombstone-branch ordering;
+  - M5 (single writer);
+  - a test for every surviving mutant above.
+- **Not blocking:** N4, and the §27.10/evidence-file corrections (F6).
+
+Probe sources (scratch, not committed):
+`/tmp/claude-0/-home-user-igaming-platform/82298384-cc24-5365-b2fc-220688ed9969/scratchpad/rvlf2-probe_integration_test.go.txt`
