@@ -39,8 +39,8 @@ func (a rawReasonAdapter) CreateVerification(ctx context.Context, in CreateVerif
 	return r, err
 }
 
-func (a rawReasonAdapter) SubmitVerification(ctx context.Context, ref string, docs []SubmittedDocument) (ProviderResult, error) {
-	r, err := a.MockKYCProvider.SubmitVerification(ctx, ref, docs)
+func (a rawReasonAdapter) SubmitVerification(ctx context.Context, ref string, docs []SubmittedDocument, call CallContext) (ProviderResult, error) {
+	r, err := a.MockKYCProvider.SubmitVerification(ctx, ref, docs, call)
 	r.Reason, r.ReasonTruncated = rawReason, false
 	return r, err
 }
@@ -114,13 +114,8 @@ func assertTruncatedFlag(t *testing.T, where string, m map[string]any) {
 func createWithRawAdapter(t *testing.T, pool *db.Pool, f fixture) (rawReasonAdapter, Verification) {
 	t.Helper()
 	adapter := rawReasonAdapter{NewMockKYCProvider()}
-	var v Verification
-	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		var err error
-		v, err = CreateVerification(ctx, tx, adapter, CreateVerificationParams{
-			TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerID, PersonID: f.personID,
-		})
-		return err
+	v, err := CreateVerification(context.Background(), pool, NewMockOutboundResolver(), adapter, CreateVerificationParams{
+		TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerID, PersonID: f.personID,
 	})
 	if err != nil {
 		t.Fatalf("CreateVerification with an unnormalized adapter reason must succeed (never a CHECK-constraint 500), got %v", err)
@@ -143,9 +138,7 @@ func TestPlatformNormalizesReason_SubmitVerification(t *testing.T) {
 	f := seedFixture(t, pool)
 	adapter, v := createWithRawAdapter(t, pool, f)
 
-	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		return submitVerificationDocuments(ctx, tx, adapter, v.ID)
-	})
+	_, err := SubmitVerification(context.Background(), pool, NewMockOutboundResolver(), adapter, f.tenantID, v.ID)
 	if err != nil {
 		t.Fatalf("submission with an unnormalized adapter reason must succeed, got %v", err)
 	}

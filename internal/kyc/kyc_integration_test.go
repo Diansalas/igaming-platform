@@ -87,18 +87,13 @@ func seedFixture(t *testing.T, pool *db.Pool) fixture {
 
 func seedVerification(t *testing.T, pool *db.Pool, f fixture) uuid.UUID {
 	t.Helper()
-	var verificationID uuid.UUID
-	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		v, err := CreateVerification(ctx, tx, NewMockKYCProvider(), CreateVerificationParams{
-			TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerID, PersonID: f.personID,
-		})
-		verificationID = v.ID
-		return err
+	v, err := CreateVerification(context.Background(), pool, NewMockOutboundResolver(), NewMockKYCProvider(), CreateVerificationParams{
+		TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerID, PersonID: f.personID,
 	})
 	if err != nil {
 		t.Fatalf("seed verification: %v", err)
 	}
-	return verificationID
+	return v.ID
 }
 
 const pgRLSViolation = "42501"
@@ -122,7 +117,7 @@ func TestKYCDocuments_CoreFieldsAreImmutable(t *testing.T) {
 
 	var docID uuid.UUID
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		d, err := UploadDocument(ctx, tx, NewMockDocumentStorageProvider(), NewMockMalwareScanner(), nil, UploadDocumentParams{
+		d, err := UploadDocument(ctx, tx, NewMockDocumentStorageProvider(), NewMockMalwareScanner(), UploadDocumentParams{
 			TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerID, PersonID: f.personID,
 			VerificationID: verificationID, DocumentType: DocumentPassport, Filename: "p.png", Content: tinyPNGBytes,
 		})
@@ -223,7 +218,7 @@ func TestKYCDocuments_ConcurrentUploadsNeverDuplicateVersion(t *testing.T) {
 	for i := 0; i < concurrency; i++ {
 		go func(i int) {
 			errs[i] = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-				_, err := UploadDocument(ctx, tx, NewMockDocumentStorageProvider(), NewMockMalwareScanner(), nil, UploadDocumentParams{
+				_, err := UploadDocument(ctx, tx, NewMockDocumentStorageProvider(), NewMockMalwareScanner(), UploadDocumentParams{
 					TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerID, PersonID: f.personID,
 					VerificationID: verificationID, DocumentType: DocumentSelfie, Filename: "s.png", Content: tinyPNGBytes,
 				})
@@ -284,7 +279,7 @@ func TestUploadDocument_FailsClosedOnScannerError(t *testing.T) {
 	verificationID := seedVerification(t, pool, f)
 
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := UploadDocument(ctx, tx, NewMockDocumentStorageProvider(), erroringScanner{}, nil, UploadDocumentParams{
+		_, err := UploadDocument(ctx, tx, NewMockDocumentStorageProvider(), erroringScanner{}, UploadDocumentParams{
 			TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerID, PersonID: f.personID,
 			VerificationID: verificationID, DocumentType: DocumentPassport, Filename: "p.png", Content: tinyPNGBytes,
 		})
@@ -363,7 +358,7 @@ func TestKYC_ActionsProduceAuditRecords(t *testing.T) {
 
 	var docID uuid.UUID
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		d, err := UploadDocument(ctx, tx, storage, NewMockMalwareScanner(), nil, UploadDocumentParams{
+		d, err := UploadDocument(ctx, tx, storage, NewMockMalwareScanner(), UploadDocumentParams{
 			TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerID, PersonID: f.personID,
 			VerificationID: verificationID, DocumentType: DocumentPassport, Filename: "p.png", Content: tinyPNGBytes,
 		})

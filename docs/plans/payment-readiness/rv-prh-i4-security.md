@@ -358,3 +358,153 @@ The next re-verification can be scoped to:
 - the T6c/T6d fix.
 
 I will re-run N1–N5 and M11 against them.
+
+## 7. Re-verification #2 (round 4)
+
+- **Reviewer:** `security`. **Subject:** round 4, commit `0f6310c`, as merged at `68f1470`
+  (`claude/focused-wright-jw88w9`). ADR 0097 §21.9, evidence M12–M17.
+- **Environment:** a private scratch DB `sec_prh_i4_rv4`, created through
+  `TEST_ADMIN_DATABASE_URL` and owned by `igaming`, with all 104 migrations and the
+  `deploy/init-app-role.sql` grants. The roles already existed, so the script's `CREATE ROLE`
+  was refused as expected. The DB was dropped afterwards. I ran the mutations in a private detached
+  `git worktree` at `68f1470`. Every mutation was reverted with `git checkout -- .` (plus removal of
+  the one added file), `git status --short` was empty after each one, and the worktree was removed.
+  I did not use the shared test DB.
+- **Not in scope:** anything outside the round-4 diff. That includes the unrelated KYC and
+  withdrawal changes merged between `0f6310c` and `68f1470`. I did read the KYC webhook handler
+  diff and confirmed it does not touch admission. No load test and no penetration test were run.
+
+### 7.1 Production path (item 1)
+
+The only non-test change in round 4 is in `internal/httpserver/webhook_admission.go`: 16
+insertions and 3 deletions. It changes the type of `webhookAdmissionRuntime.dbGate`, of
+`gatedReader.gate` and of `gatedGetTenantBySlug`'s `gate` parameter from `*admission.Bulkhead` to
+the unexported interface `dbGateAcquirer`. The interface has the identical `Acquire` signature.
+
+- **Production wiring is unchanged.** The only non-test assignment is
+  `dbGate: admission.NewBulkhead(settings.DBGateGlobal)` in `newWebhookAdmission`, and
+  `NewBulkhead` never returns nil.
+- **Nothing outside the package can substitute the gate.** The field and the interface are both
+  unexported, and the exported `WebhookAdmissionRuntime` wraps `rt` in an unexported field. Its
+  methods (`LoadDirectory`, `RunDirectoryRefresh`, `DirectoryReady`) expose neither the gate nor a
+  setter.
+- **The only writes to `rt.dbGate` outside the constructor are in tests.** All three are in
+  `webhook_admission_c1_isolating_integration_test.go`, which has the `integration` build tag.
+- **No behavioural change.** The call sites and the semantics are the same; dispatching through
+  the interface adds no path that skips the gate.
+
+**Verdict: no bypass introduced.** The baseline suite is green at `68f1470`: 40 PASS and 0 SKIP
+across the admission, route-guard, gatedReader, RLF4 and directory tests, plus the unit suites for
+`webhookauth`, `providercred`, `admission` and `config`. T6c and T6d now pass, so the §6.1 red is
+fixed.
+
+### 7.2 Mutation results (item 2), all security-run
+
+| # | Mutation | Result |
+|---|---|---|
+| N1-payments | `newGatedReader` replaced by bare `deps.DB` in `deposit_handlers.go` | **KILLED** by `TestAdmission_C1a_Payments…` (401 instead of 503) |
+| N1-casino | same, in `casino_handlers.go` | **KILLED** by `TestAdmission_C1a_Casino…` |
+| N1-kyc (new) | same, in `kyc_admin_handlers.go` | **KILLED** by `TestAdmission_C1a_KYC…` |
+| N3-payments (new) | the handler's `ReasonAdmissionUnavailable` branch disabled | **KILLED** by `C1a_Payments`. This confirms that its 503 comes from the credential-resolution hop (call 3), not from an earlier gated read. |
+| N3-casino | same, in the casino handler | **KILLED** by `C1a_Casino` |
+| N3-kyc (new) | same, in the KYC handler | **KILLED** by `C1a_KYC` |
+| N4 | the `ErrTenantReaderUnavailable` case removed from `reasonForResolveError` | **KILLED** by `TestReasonForResolveError_AdmissionUnavailable` and `TestResolveCredentials_AdmissionUnavailable_BothKeySelections` (both key selections) |
+| N5 | `false && declared && !allows` in the A3 branch | **KILLED** by `TestAdmission_T14b_A3AdapterDeclaredStatus_No429Retry` |
+| N2 | a fourth route with a literal pattern (`POST /v1/webhooks/sportsbook/…`) whose handler calls `webhookPreamble` without `admitPreAuth` | **KILLED** by `TestWebhookRouteGuard_…` (both required calls reported missing) |
+| **N2b** (new) | the same fourth route, but its pattern is a package `const` (`mux.HandleFunc(secSportsbookPattern, newSecSportsbookHandler(deps))`) | **SURVIVED.** The guard only considers a first argument that is an `*ast.BasicLit` and silently skips anything else. |
+| **N2c** (new) | the same fourth route, registered through a helper `secRoute(mux, "POST /v1/webhooks/sportsbook/…", h)` that calls `m.HandleFunc(p, h)` | **SURVIVED**, for the same reason: the helper's inner `HandleFunc` has a non-literal pattern. |
+| B1-payments (M12 re-run) | `admitVerified` moved inside the `deps.DB.WithTenant` closure in `deposit_handlers.go` | **KILLED**, but only by T6g ("delta (3) was not strictly less than … (3)") |
+| **B1-casino** (new) | the same move in `casino_handlers.go` | **SURVIVED** the whole `TestAdmission_*` suite, including T6c/T6d and T2b |
+| **B1-kyc** (new) | the same move in `kyc_admin_handlers.go` | **SURVIVED** `TestAdmission_*` plus every KYC-named integration test in the package |
+
+### 7.3 Route-discovery evasion (item 3)
+
+The rewritten guard does discover routes structurally, and it fails closed on an unresolvable
+**handler**, whether that handler is a variable, a method value, an `http.HandlerFunc(...)`
+conversion or a wrapper from another package. It does **not** fail closed on an unresolvable
+**pattern**, which is what my §6.3 requirement said: "fail on any pattern it cannot resolve". N2b and
+N2c show that a const or a registration helper is enough to evade it. Both are ordinary Go style,
+not contrived.
+
+Fixing this costs nothing today. All 152 `Handle`/`HandleFunc` calls in the package's non-test files
+use a string-literal first argument. The fix:
+- fail the guard on **any** `Handle`/`HandleFunc` call in the package whose first argument is not a
+  `BasicLit`. That kills both N2b and N2c.
+- Optionally, also flag any other function that takes an `*http.ServeMux` together with a pattern
+  parameter.
+
+The package-local scope is acceptable: the mux is not exposed outside `httpserver`.
+
+### 7.4 T6g soundness (item 4)
+
+- **Not flaky.** The test passed 60 times in a row (`-count=30`, twice) on the private pool. That
+  pool is `phasecapture.Pool10`, private to the test. Nothing in the test starts
+  `RunDirectoryRefresh`, and the pgxpool health check (60 s period) does not run within the
+  test's window.
+- **Not vacuous today.** At baseline the admitted delta is 3 and the limited delta is 2. The
+  B1-payments mutation raises the limited delta to 3, and the test kills it.
+- **Info I5, fragile.** The test asserts only `limited < admitted`, and the margin is exactly one
+  acquisition. If a future change adds an acquisition to the admitted path only (for example a
+  post-commit read), the margin grows and the mutation survives silently. Pin exact expected
+  deltas, or assert `limited == admitted - 1`, so that drift fails loudly.
+- **Scope gap, which is the T6 finding below.** T6g covers payments only. The same ordering
+  regression in casino or KYC is undetected (§7.2).
+
+### 7.5 Per-condition ruling
+
+- **C1: CLOSED.**
+  - C1(a) has isolating HTTP tests for all three domains. They use the real
+    `providercred.Resolver` and a call-counting gate, and assert 503, `Retry-After`, a `db_gate`
+    log line and zero ledger rows.
+  - C1(b) has the unit test in both key selections.
+  - N3 (all three domains) and N4 are killed.
+  - **C1 no longer blocks registering a non-MOCK webhook adapter.**
+  - Info I6: `countingGate` ignores the key. It would not catch a regression that gates credential
+    resolution on the *wrong* A4b key.
+  - Info I7: for KYC, the zero-ledger-rows assertion is vacuous, because KYC never writes ledger
+    rows. The status and log assertions carry that test.
+  - Neither I6 nor I7 blocks closure.
+- **C2 / L7: CLOSED.** The `db_gate` log line is now asserted, in `assertC1Isolated`.
+- **T4: CLOSED.** N1 is killed in all three domains through the HTTP handlers.
+- **L6 / N5: CLOSED.** Killed by T14b.
+- **C3: OPEN, narrowed to Low (L8).** N2 is killed. The N2b/N2c evasions survive, contrary to the
+  explicit fail-closed-on-unresolvable-pattern requirement. The one-line fix is in §7.3.
+- **T6: OPEN, narrowed.** T6c/T6d are green, and M11 is valid again. The B1-inside-`WithTenant`
+  mutation is killed for payments only; casino and KYC survive. My §4 T6 requirement named the
+  casino scenarios explicitly.
+  - Impact of the uncaught regression: a limited *verified* callback would take a pool connection
+    and open (then roll back) a domain transaction before its 429/503. That defeats ORD-3/ORD-4 and
+    B1's purpose of protecting the pool from a provider retry storm.
+  - It needs valid provider signatures, so it is not an unauthenticated attack path.
+  - Severity: **Medium** as a regression-detection gap. No defect exists today; I verified by
+    reading all three handlers that `admitVerified` precedes `WithTenant`.
+  - **Required:** extend T6g (table-driven by domain) to casino and KYC, and kill the B1-casino and
+    B1-kyc mutations.
+- **Unchanged from §6:**
+  - L3 residual (unmatched `/v1/webhooks/*` 404/405 path) stays Low, now registered;
+  - L4, L5 and I1–I4 are registered, as §6 asked;
+  - PRH-I4-METRICS-1 is still open.
+
+### 7.6 Verdict
+
+**APPROVE WITH CONDITIONS.** The High finding C1 is closed with real evidence, and the production
+code is correct and unchanged in behaviour. Two test-completeness conditions remain. Neither is a
+present defect. They must be closed before PRH-I4 / PRH-I4-SECREVIEW-1 are marked closed, and before
+ADR 0097 moves off `IMPLEMENTED WITH CONDITIONS`:
+
+1. **T6 (Medium):** a per-domain T6g covering casino and KYC, killing B1-casino and B1-kyc.
+2. **C3 / L8 (Low):** the route guard must fail on any non-literal `Handle`/`HandleFunc` pattern,
+   killing N2b and N2c.
+
+Info items I5–I7 are recommended but not required.
+
+Launch relevance:
+- C1 no longer blocks non-MOCK webhook adapters.
+- Conditions 1 and 2 do not block launch on their own, but they must be closed before real-money
+  launch so that a regression in these controls is detectable.
+- WEBHOOK-EDGE-1 (R1) is still required before real-money launch.
+- The claim in ADR §21.9 and the registry that T6 and C3 are "closed" is inaccurate to the extent
+  described above, and should be corrected.
+
+The next re-verification can be limited to those two test diffs. I will re-run B1-casino, B1-kyc,
+N2b and N2c.

@@ -53,6 +53,14 @@ type CreateVerificationInput struct {
 	BrandID         uuid.UUID
 	PlayerAccountID uuid.UUID
 	PersonID        uuid.UUID
+
+	// Call is phase B's outbound call context (ADR 0095 §15.2/§9.1),
+	// resolved OUTSIDE any database transaction, immediately before this
+	// call - never cached, never reused across calls. Zero-value
+	// (CallContext{}) is never passed by CreateVerification itself; it is
+	// exported only so a caller exercising a KYCProvider directly (a unit
+	// test, the conformance suite's own fixtures) can construct one.
+	Call CallContext
 }
 
 // SubmittedDocument references a document already stored by this
@@ -120,7 +128,11 @@ type KYCProvider interface {
 	ID() string
 	CreateVerification(ctx context.Context, input CreateVerificationInput) (ProviderResult, error)
 	GetVerification(ctx context.Context, providerReference string) (ProviderResult, error)
-	SubmitVerification(ctx context.Context, providerReference string, documents []SubmittedDocument) (ProviderResult, error)
+	// SubmitVerification's call parameter is phase B's outbound call
+	// context (ADR 0095 §15.3/§9.1), resolved OUTSIDE any database
+	// transaction, immediately before this call - never cached, never
+	// reused across calls.
+	SubmitVerification(ctx context.Context, providerReference string, documents []SubmittedDocument, call CallContext) (ProviderResult, error)
 	// HandleCallback verifies in's authentication against cred (over the
 	// raw bytes, BEFORE any parsing - ADR 0022 §3 point 7, extracted into
 	// internal/webhookauth by Stage 10.2/ADR 0091), then parses the
@@ -142,6 +154,16 @@ type KYCProvider interface {
 	HealthStatus(ctx context.Context) error
 }
 
+// ErrProviderUnavailable is returned by CreateVerification/SubmitVerification
+// (ADR 0095 §15.2/§15.3) when phase B cannot reach the provider at all: no
+// outbound credential resolver configured, credential resolution failure, a
+// credential/tenant/provider binding mismatch, or the provider call itself
+// transport-failing. Mirrors casino.ErrProviderUnavailable's identical role
+// and HTTP mapping (503) - never returned for a legitimate provider
+// decision (rejected/review_required/etc), only for "the platform could not
+// even ask".
+var ErrProviderUnavailable = errors.New("kyc: provider unavailable")
+
 var (
 	// ErrCallbackSignatureInvalid is returned by a KYCProvider's
 	// HandleCallback for any authentication failure over the raw body -
@@ -162,6 +184,19 @@ var (
 	// webhookauth.ErrAuthFailed, so a caller can use either name with
 	// errors.Is/errors.As to *CallbackAuthError.
 	ErrCallbackAuthFailed = webhookauth.ErrAuthFailed
+
+	// ErrVerificationReferenceUnknown is ADR 0095 §15.2/IC-Q1's retryable
+	// disposition for a VERIFIED callback whose provider_reference this
+	// platform cannot resolve to a row - see ReceiveVerifiedCallback's own
+	// comment on step (d) for why this is never conflated with ErrNotFound
+	// (which stays 404/terminal for every OTHER "not found" case in this
+	// package, e.g. GetVerificationByID). The HTTP layer maps this to a
+	// retryable 5xx, never a 200 and never the terminal 404 ErrNotFound
+	// gets: a 200 here would durably discard the only copy of a real
+	// vendor decision. Whether the vendor actually redelivers on a 5xx is
+	// PROVIDER DEPENDENT, confirmed at real-vendor intake (same discipline
+	// as §6.6/LF-C1).
+	ErrVerificationReferenceUnknown = errors.New("kyc: provider_reference not known to this platform (retry)")
 )
 
 // CallbackAuthReason is the closed, allow-listed reason enum behind
@@ -310,8 +345,19 @@ func (o *Orchestrator) ReceiveVerifiedCallback(ctx context.Context, tx pgx.Tx, t
 	}
 
 	// (d) explicit tenant-scoped lookup (architect R4/J6) - reachable only
-	// by a VERIFIED caller.
+	// by a VERIFIED caller. ADR 0095 §15.2/IC-Q1: KYC has NO receipt table
+	// (unlike payments), so a callback whose provider_reference this
+	// platform does not (yet) know - genuinely unknown, OR racing
+	// CreateVerification's own phase C (which has not yet CAS'd the
+	// reference onto its row) - is INDISTINGUISHABLE from here. Both map to
+	// the SAME retryable ErrVerificationReferenceUnknown, never a bare
+	// ErrNotFound: a definitive 404 here could permanently discard the
+	// only copy of a real vendor decision that simply arrived a moment
+	// too early.
 	verification, err := getVerificationByProviderReference(ctx, tx, tenantID, providerID, providerResult.ProviderReference)
+	if errors.Is(err, ErrNotFound) {
+		return Verification{}, false, fmt.Errorf("%w: provider_reference not yet known to this platform", ErrVerificationReferenceUnknown)
+	}
 	if err != nil {
 		return Verification{}, false, err
 	}

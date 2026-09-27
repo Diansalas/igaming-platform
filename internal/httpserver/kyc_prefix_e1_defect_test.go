@@ -60,15 +60,16 @@ func TestKYCWebhook_PlayerComputedSignature_Rejected(t *testing.T) {
 	mockProvider := kyc.NewMockKYCProvider()
 
 	srv := httptest.NewServer(New(Deps{
-		Logger:            slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
-		DB:                pool,
-		AuthIssuer:        issuer,
-		ServiceName:       "platform-api-test",
-		AccessTokenTTL:    5 * time.Minute,
-		RefreshTokenTTL:   time.Hour,
-		PersonResolver:    identityresolution.NewMockPersonResolver(),
-		KYCOrchestrator:   kyc.NewOrchestrator(map[string]kyc.KYCProvider{"mock": mockProvider}, kyc.NewMockWebhookCredentials(mockProvider)),
-		KYCWebhookEnabled: true,
+		Logger:                 slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
+		DB:                     pool,
+		AuthIssuer:             issuer,
+		ServiceName:            "platform-api-test",
+		AccessTokenTTL:         5 * time.Minute,
+		RefreshTokenTTL:        time.Hour,
+		PersonResolver:         identityresolution.NewMockPersonResolver(),
+		KYCOrchestrator:        kyc.NewOrchestrator(map[string]kyc.KYCProvider{"mock": mockProvider}, kyc.NewMockWebhookCredentials(mockProvider)),
+		KYCWebhookEnabled:      true,
+		KYCOutboundCredentials: kyc.NewMockOutboundResolver(),
 	}))
 	t.Cleanup(srv.Close)
 

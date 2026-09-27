@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/google/uuid"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/Diansalas/igaming-platform/internal/audit"
 	"github.com/Diansalas/igaming-platform/internal/jurisdiction"
+	"github.com/Diansalas/igaming-platform/internal/providercred"
 	"github.com/Diansalas/igaming-platform/internal/validation"
 )
 
@@ -79,58 +81,214 @@ type CreateVerificationParams struct {
 	PersonID        uuid.UUID
 }
 
-// CreateVerification starts a new verification attempt: calls the named
-// provider's CreateVerification (obtaining a ProviderReference before any
-// row exists, mirroring casino.LaunchGame's own "call the provider, then
-// persist" ordering), then inserts the kyc_verifications row. tx must
-// already be tenant-scoped (db.WithTenant).
-func CreateVerification(ctx context.Context, tx pgx.Tx, provider KYCProvider, params CreateVerificationParams) (Verification, error) {
+// createVerificationCallTimeout bounds phase B's CreateVerification call.
+const createVerificationCallTimeout = defaultProviderCallTimeout
+
+// phaseCTimeout bounds CreateVerification/SubmitVerification's own phase-C
+// transactions - mirrors casino.phaseCTimeout exactly, including running on
+// context.WithoutCancel(ctx) so a cancelled request context can never
+// silently skip the CAS apply (ADR 0095 §15.1.2/security review RV-PRH-I2
+// C1, applied here for the same reason: this codebase has exactly one
+// documented fix for "phase C must survive a cancelled request ctx", and
+// KYC's own phase C is exposed to the identical hazard once a real adapter
+// performs I/O).
+const phaseCTimeout = 5 * time.Second
+
+// insertOrphanVerification is phase A: a kyc_verifications row with
+// status='unverified' and provider_reference NULL, plus the
+// "kyc.verification_requested" audit record (ADR 0095 §15.2) - committed
+// BEFORE any provider call. This row has no enforcement effect on its own
+// (ADR 0096's EvaluateEnforcement only allows on 'passed'), so an orphan
+// left behind by a phase B/C failure is harmless by construction.
+func insertOrphanVerification(ctx context.Context, tx pgx.Tx, params CreateVerificationParams, providerID string) (Verification, error) {
+	v := Verification{
+		ID: uuid.New(), TenantID: params.TenantID, BrandID: params.BrandID,
+		PlayerAccountID: params.PlayerAccountID, PersonID: params.PersonID,
+		Status: StatusUnverified, ProviderID: providerID,
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	_, err := tx.Exec(ctx,
+		`INSERT INTO kyc_verifications (id, tenant_id, brand_id, player_account_id, person_id, status, provider_id, provider_reference, reason)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, NULL, NULL)`,
+		v.ID, v.TenantID, v.BrandID, v.PlayerAccountID, v.PersonID, v.Status, v.ProviderID,
+	)
+	if err != nil {
+		return Verification{}, fmt.Errorf("kyc: insert verification: %w", err)
+	}
+	if err := audit.Record(ctx, tx, audit.Entry{
+		TenantID: params.TenantID, ActorType: audit.ActorPlayer, ActorID: params.PlayerAccountID,
+		Action: "kyc.verification_requested", TargetType: "kyc_verification", TargetID: v.ID.String(),
+		Outcome: audit.OutcomeSuccess, Metadata: map[string]any{"provider_id": v.ProviderID},
+	}); err != nil {
+		return Verification{}, fmt.Errorf("kyc: audit create verification: %w", err)
+	}
+	return v, nil
+}
+
+// applyCreateVerificationResult is phase C: a CAS UPDATE onto the phase-A
+// row (ADR 0095 §15.2) - it only ever applies to the SAME orphan row this
+// call's own phase A inserted (id AND provider_reference IS NULL AND
+// status='unverified' in the WHERE clause; not a forward-only rank
+// transition like the callback path, since this is the row's very first
+// transition), plus the "kyc.verification_submitted" audit record (the
+// existing action name, moved here from the old single-transaction
+// CreateVerification per ADR 0095 §15.2's own table).
+func applyCreateVerificationResult(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, v Verification, result ProviderResult) (Verification, error) {
+	result, reasonTruncated := normalizeProviderResult(result)
+	status, ok := statusForOutcome(result.Outcome)
+	if !ok {
+		status = StatusPending
+	}
+	tag, err := tx.Exec(ctx,
+		`UPDATE kyc_verifications SET provider_reference = NULLIF($1, ''), status = $2, reason = NULLIF($3, ''), updated_at = now()
+		 WHERE id = $4 AND tenant_id = $5 AND provider_reference IS NULL AND status = $6`,
+		result.ProviderReference, status, result.Reason, v.ID, tenantID, StatusUnverified,
+	)
+	if err != nil {
+		return Verification{}, fmt.Errorf("kyc: apply create verification result: %w", err)
+	}
+	if tag.RowsAffected() != 1 {
+		// Unreachable in this codebase's own call pattern (this function is
+		// only ever invoked once, immediately after phase A committed
+		// exactly this row, under this same verification id) - but never
+		// assumed: a future caller violating that must fail closed rather
+		// than silently double-apply or apply to the wrong row.
+		return Verification{}, fmt.Errorf("kyc: apply create verification result: verification %s was not in the expected pre-reference state", v.ID)
+	}
+	updated, err := GetVerificationByID(ctx, tx, v.ID)
+	if err != nil {
+		return Verification{}, err
+	}
+	if err := audit.Record(ctx, tx, audit.Entry{
+		TenantID: tenantID, ActorType: audit.ActorPlayer, ActorID: v.PlayerAccountID,
+		Action: "kyc.verification_submitted", TargetType: "kyc_verification", TargetID: v.ID.String(),
+		Outcome: audit.OutcomeSuccess, Metadata: withReasonTruncated(map[string]any{"provider_id": updated.ProviderID, "status": string(updated.Status)}, reasonTruncated),
+	}); err != nil {
+		return Verification{}, fmt.Errorf("kyc: audit create verification: %w", err)
+	}
+	return updated, nil
+}
+
+// CreateVerification starts a new verification attempt (ADR 0095 §15.2,
+// PRH-I2): phase A commits the intent (an orphan 'unverified' row with no
+// provider_reference, plus its own audit record) BEFORE any provider call;
+// phase B calls the provider with NO database transaction/pooled connection
+// held (the per-call outbound credential is resolved via outbound,
+// PROV-OUTBOUND-CRED-1, immediately before the call); phase C applies the
+// result under a CAS on a short, bounded transaction.
+//
+// pool is the tenant-scoped transaction runner (*db.Pool satisfies it,
+// mirroring casino.LaunchGame's identical parameter); outbound is the KYC
+// domain's outbound-credential resolver (a MOCK for a synthetic adapter,
+// providercred's real *(*Subsystem).Outbound("kyc") for a real one). Both
+// nil fail closed with ErrProviderUnavailable, the same nil-resolver
+// convention LaunchGame's own parameters use - never a silent fallback.
+//
+// A phase B failure (no resolver, credential resolution failure, a
+// credential binding mismatch, or the provider call itself failing) leaves
+// the phase-A orphan row exactly as phase A committed it: 'unverified',
+// provider_reference NULL. ADR 0096's EvaluateEnforcement only allows on
+// 'passed' status, so this orphan has no enforcement effect - it is
+// harmless by construction, exactly like a genuine crash in the same
+// window (ADR 0095 §15.2 "Failure recovery"). There is no automatic retry;
+// a player retry calls CreateVerification again and gets a brand-new row
+// (existing behaviour, unchanged by this split).
+//
+// CreateVerification vendor idempotency is PROVIDER DEPENDENT: the vendor
+// idempotency key this call's phase B passes via CallContext.IdempotencyKey
+// ("kv:" + the new row's own id) is honored only if the vendor supports
+// idempotency keys at all. Where it does not, a player retry issued before
+// the orphan from a prior attempt is known creates a second, unrelated
+// vendor-side verification under a second platform row - not a financial or
+// enforcement hazard (each row is evaluated independently on its own
+// merits), but never silently assumed deduplicated; this must be confirmed
+// and recorded at real-vendor intake (ADR 0095 §25 identity-compliance
+// review).
+func CreateVerification(ctx context.Context, pool providercred.TenantTxRunner, outbound OutboundCredentialResolver, provider KYCProvider, params CreateVerificationParams) (Verification, error) {
 	if params.TenantID == uuid.Nil || params.BrandID == uuid.Nil || params.PlayerAccountID == uuid.Nil || params.PersonID == uuid.Nil {
 		return Verification{}, fmt.Errorf("%w: tenant_id, brand_id, player_account_id, and person_id are all required", ErrInvalidTransition)
 	}
+	if provider == nil {
+		return Verification{}, fmt.Errorf("%w: no KYC provider configured", ErrProviderUnavailable)
+	}
+	if pool == nil {
+		return Verification{}, fmt.Errorf("%w: KYC verification has no transaction runner configured", ErrProviderUnavailable)
+	}
+	providerID := provider.ID()
 
+	// Phase A: one committed transaction for the orphan row plus its own
+	// audit record - this releases the pooled connection before phase B
+	// ever runs.
+	var v Verification
+	txErr := pool.WithTenant(ctx, params.TenantID, func(ctx context.Context, tx pgx.Tx) error {
+		var err error
+		v, err = insertOrphanVerification(ctx, tx, params, providerID)
+		return err
+	})
+	if txErr != nil {
+		return Verification{}, txErr
+	}
+
+	// Phase B: resolve the per-call outbound credential (PROV-OUTBOUND-
+	// CRED-1) OUTSIDE any transaction, then call CreateVerification - the
+	// one call in this function that may perform real provider I/O, with
+	// no pooled connection held across it. A failure here leaves v exactly
+	// as phase A committed it (see doc comment above) - it is never
+	// retried automatically and never rolled back (there is nothing to
+	// roll back: the orphan row is the intended, harmless artifact of this
+	// failure mode).
+	if outbound == nil {
+		return Verification{}, fmt.Errorf("%w: no outbound credential resolver configured", ErrProviderUnavailable)
+	}
+	cred, err := outbound.Resolve(ctx, pool, params.TenantID, providerID)
+	if err != nil {
+		slog.Default().Warn("kyc_create_verification_credential_unavailable",
+			"tenant_id", params.TenantID.String(), "verification_id", v.ID.String(), "provider_id", providerID)
+		return Verification{}, fmt.Errorf("%w: resolve outbound credential: %v", ErrProviderUnavailable, err)
+	}
+	// Defense in depth (ADR 0095 §9.1/S95-C8(b), mirrors casino.LaunchGame's
+	// identical check): the credential this call just resolved must bind to
+	// the SAME tenant/provider/domain this verification belongs to.
+	if cred.TenantID != params.TenantID || cred.ProviderID != providerID || cred.Domain != "kyc" {
+		return Verification{}, fmt.Errorf("%w: outbound credential binding mismatch", ErrProviderUnavailable)
+	}
+
+	call := CallContext{
+		TenantID: params.TenantID, ProviderID: providerID, Credential: cred,
+		IdempotencyKey: "kv:" + v.ID.String(), Deadline: time.Now().Add(createVerificationCallTimeout),
+	}
 	// An explicit field-by-field literal, not a type conversion, so a field
 	// later added to CreateVerificationParams is never passed to the
 	// provider interface by accident.
 	result, err := provider.CreateVerification(ctx, CreateVerificationInput{ //nolint:staticcheck // S1016: see comment above
 		TenantID: params.TenantID, BrandID: params.BrandID,
-		PlayerAccountID: params.PlayerAccountID, PersonID: params.PersonID,
+		PlayerAccountID: params.PlayerAccountID, PersonID: params.PersonID, Call: call,
 	})
 	if err != nil {
-		return Verification{}, fmt.Errorf("kyc: create verification with provider: %w", err)
-	}
-	// Security S-5: the platform bounds the adapter's reason itself before
-	// it is persisted (idempotent over an adapter that already did).
-	result, reasonTruncated := normalizeProviderResult(result)
-
-	status, ok := statusForOutcome(result.Outcome)
-	if !ok {
-		status = StatusPending
+		slog.Default().Warn("kyc_create_verification_provider_call_failed",
+			"tenant_id", params.TenantID.String(), "verification_id", v.ID.String(), "provider_id", providerID)
+		return Verification{}, fmt.Errorf("%w: create verification with provider: %v", ErrProviderUnavailable, err)
 	}
 
-	v := Verification{
-		ID: uuid.New(), TenantID: params.TenantID, BrandID: params.BrandID,
-		PlayerAccountID: params.PlayerAccountID, PersonID: params.PersonID,
-		Status: status, ProviderID: provider.ID(), ProviderReference: result.ProviderReference,
-		Reason: result.Reason, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
-	}
-	_, err = tx.Exec(ctx,
-		`INSERT INTO kyc_verifications (id, tenant_id, brand_id, player_account_id, person_id, status, provider_id, provider_reference, reason)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, NULLIF($8, ''), NULLIF($9, ''))`,
-		v.ID, v.TenantID, v.BrandID, v.PlayerAccountID, v.PersonID, v.Status, v.ProviderID, v.ProviderReference, v.Reason,
-	)
-	if err != nil {
-		return Verification{}, fmt.Errorf("kyc: insert verification: %w", err)
-	}
-
-	if err := audit.Record(ctx, tx, audit.Entry{
-		TenantID: params.TenantID, ActorType: audit.ActorPlayer, ActorID: params.PlayerAccountID,
-		Action: "kyc.verification_submitted", TargetType: "kyc_verification", TargetID: v.ID.String(),
-		Outcome: audit.OutcomeSuccess, Metadata: withReasonTruncated(map[string]any{"provider_id": v.ProviderID, "status": string(v.Status)}, reasonTruncated),
+	// Phase C: a short, bounded transaction applies the result under CAS.
+	// context.WithoutCancel(ctx) plus phaseCTimeout, never the caller's own
+	// ctx, mirroring casino.LaunchGame's identical phase-C treatment
+	// (security review RV-PRH-I2 C1): the provider has already accepted
+	// this verification by the time we reach here, so a cancelled request
+	// context must never silently skip recording that.
+	phaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), phaseCTimeout)
+	defer cancel()
+	var applied Verification
+	if err := pool.WithTenant(phaseCtx, params.TenantID, func(ctx context.Context, tx pgx.Tx) error {
+		var err error
+		applied, err = applyCreateVerificationResult(ctx, tx, params.TenantID, v, result)
+		return err
 	}); err != nil {
-		return Verification{}, fmt.Errorf("kyc: audit create verification: %w", err)
+		slog.Default().Error("kyc_create_verification_phase_c_failed",
+			"tenant_id", params.TenantID.String(), "verification_id", v.ID.String(), "error", err.Error())
+		return Verification{}, fmt.Errorf("kyc: create verification: apply result: %w", err)
 	}
-	return v, nil
+	return applied, nil
 }
 
 // GetVerificationByID reads one verification, RLS-scoped to the caller's

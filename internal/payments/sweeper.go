@@ -1,6 +1,11 @@
-// PRH-I1 step (c): the sweeper (ADR 0095 §7), deposit path only (payout
-// dispatch is a later PRH-I1 step). Scope explicitly bounded for this
-// step, named here rather than silently assumed:
+// PRH-I1 step (c): the sweeper (ADR 0095 §7), deposit path. Payout-attempt
+// sweeping (T2 re-claim, T12 resubmission, QueryStatus resolution) is
+// implemented in payout_sweep.go, a separate file kept deliberately
+// minimal-diff against this one (this task's own payout-scoped-edits
+// instruction) - processAttempt below dispatches to it for
+// operation='payout' rows; every other function in THIS file remains
+// deposit-only, unchanged. Scope explicitly bounded for the deposit path,
+// named here rather than silently assumed:
 //
 //   - Batch lease claim uses FOR UPDATE SKIP LOCKED per tenant (§7.2
 //     point 2) and writes only lease columns, exactly as specified.
@@ -60,6 +65,12 @@ type Sweeper struct {
 	Orchestrator *Orchestrator
 	KYCGate      DepositKYCGate
 	CredResolver OutboundCredentialResolver
+	// PayoutKYCGate enables payout-attempt sweeping (payout_sweep.go, this
+	// task's items 5/8) when non-nil - a nil value leaves any payout
+	// payment_attempts row exactly as leased (processPayoutAttempt's own
+	// no-op), matching this file's existing convention for scope this
+	// sweeper is not configured to drive.
+	PayoutKYCGate PayoutKYCGate
 
 	BatchPerTenant  int
 	Lease           time.Duration
@@ -122,7 +133,7 @@ func (s *Sweeper) claimBatch(ctx context.Context, tenantID uuid.UUID) ([]uuid.UU
 	err := s.Pool.WithTenant(ctx, tenantID, func(actx context.Context, tx pgx.Tx) error {
 		rows, err := tx.Query(actx,
 			`SELECT id FROM payment_attempts
-			 WHERE tenant_id = $1 AND operation = 'deposit' AND next_action_at IS NOT NULL AND next_action_at <= now()
+			 WHERE tenant_id = $1 AND next_action_at IS NOT NULL AND next_action_at <= now()
 			 ORDER BY next_action_at
 			 LIMIT $2
 			 FOR UPDATE SKIP LOCKED`,
@@ -192,9 +203,12 @@ func (s *Sweeper) processAttempt(ctx context.Context, tenantID, attemptID uuid.U
 	if err != nil {
 		return err
 	}
+	if attempt.Operation == AttemptOperationPayout {
+		return s.processPayoutAttempt(ctx, tenantID, attempt)
+	}
 	if attempt.Operation != AttemptOperationDeposit || attempt.DepositIntentID == nil {
-		// Out of this step's scope (payout dispatch is a later step);
-		// leave it exactly as leased - it will be reconsidered next tick.
+		// Out of this step's scope; leave it exactly as leased - it will
+		// be reconsidered next tick.
 		return nil
 	}
 

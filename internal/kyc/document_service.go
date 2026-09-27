@@ -6,11 +6,15 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
+	"sort"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Diansalas/igaming-platform/internal/audit"
+	"github.com/Diansalas/igaming-platform/internal/providercred"
 )
 
 // ErrMalwareDetected is returned by UploadDocument when the configured
@@ -69,26 +73,22 @@ type UploadDocumentParams struct {
 }
 
 // UploadDocument validates (size/content-sniffing/extension consistency),
-// malware-scans, stores (via storage), records a new kyc_documents row -
+// malware-scans, stores (via storage), and records a new kyc_documents row -
 // a version-incremented NEW row if this player_account_id already has a
 // document of this DocumentType (directive §5: never overwrite history),
-// version 1 otherwise - and then, when provider is non-nil, calls
-// KYCProvider.SubmitVerification with the verification's CURRENT full
-// document set (not just the one just uploaded - a real vendor evaluates
-// the accumulated evidence, not one file in isolation) and applies the
-// normalized outcome to the verification's own status exactly like
-// CreateVerification/the Orchestrator's callback handling already do
-// (adversarial/integrations specialist review finding, Stage 4F: an
-// earlier version of this stage defined SubmitVerification on the
-// KYCProvider interface but never actually called it from anywhere,
-// leaving it and GetVerification untested dead code - directive §9
-// explicitly named SubmitVerification as a method to implement, not
-// merely declare). provider may be nil (mirrors PersonResolver/
-// PaymentOrchestrator's own nil-tolerant callers) - a caller that hasn't
-// wired a KYCProvider still gets a stored, reviewable document, just
-// without the provider-side submission step. tx must already be
-// tenant-scoped.
-func UploadDocument(ctx context.Context, tx pgx.Tx, storage DocumentStorageProvider, scanner MalwareScanner, provider KYCProvider, params UploadDocumentParams) (Document, error) {
+// version 1 otherwise. tx must already be tenant-scoped.
+//
+// ADR 0095 §15.3 (PRH-I2): this function is phase A ONLY now - it no longer
+// calls KYCProvider.SubmitVerification itself. That call (phase B, with no
+// database transaction held across it) is the separate, pool-based
+// SubmitVerification function below; a caller that wants the pre-split
+// "upload, then submit to the provider" behaviour calls UploadDocument
+// (inside its own short transaction) and then SubmitVerification
+// (pool-based) afterward - exactly how internal/httpserver's upload handler
+// is wired. This split is what actually removes the DB-transaction-held-
+// across-a-provider-call hazard §1 of ADR 0095 named; the previous single-
+// transaction shape is superseded, not merely renamed.
+func UploadDocument(ctx context.Context, tx pgx.Tx, storage DocumentStorageProvider, scanner MalwareScanner, params UploadDocumentParams) (Document, error) {
 	if params.VerificationID == uuid.Nil {
 		return Document{}, fmt.Errorf("%w: verification_id is required", ErrInvalidTransition)
 	}
@@ -154,56 +154,75 @@ func UploadDocument(ctx context.Context, tx pgx.Tx, storage DocumentStorageProvi
 		return Document{}, fmt.Errorf("kyc: audit document upload: %w", err)
 	}
 
-	if provider != nil {
-		if err := submitVerificationDocuments(ctx, tx, provider, params.VerificationID); err != nil {
-			return Document{}, err
-		}
-	}
-
 	return scanDocument(tx.QueryRow(ctx, `SELECT `+documentColumns+` FROM kyc_documents WHERE id = $1`, d.ID))
 }
 
-// submitVerificationDocuments gathers verificationID's CURRENT full set of
-// non-rejected documents and calls KYCProvider.SubmitVerification with
-// them, then applies the normalized result exactly like
-// updateVerificationStatus/the Orchestrator's callback handling already
-// do - idempotent (a verification already in a terminal status is left
-// untouched) and never overwrites reviewed_at/reviewed_by (a provider
-// submission is not a staff review - see updateVerificationStatus's own
-// doc comment).
-func submitVerificationDocuments(ctx context.Context, tx pgx.Tx, provider KYCProvider, verificationID uuid.UUID) error {
-	v, err := GetVerificationByID(ctx, tx, verificationID)
+// gatherSubmissionDocuments is SubmitVerification's phase-A read: the
+// verification (terminal-guard) and its CURRENT full set of non-rejected
+// documents (not just the one just uploaded - a real vendor evaluates the
+// accumulated evidence, not one file in isolation), read in a short,
+// read-only, tenant-scoped transaction. Returns ok=false (no error) when
+// the verification is already terminal - SubmitVerification's own no-op
+// case, mirroring updateVerificationStatus's identical idempotency
+// convention.
+func gatherSubmissionDocuments(ctx context.Context, tx pgx.Tx, verificationID uuid.UUID) (v Verification, submitted []SubmittedDocument, ok bool, err error) {
+	v, err = GetVerificationByID(ctx, tx, verificationID)
 	if err != nil {
-		return err
+		return Verification{}, nil, false, err
 	}
 	if isTerminal(v.Status) {
-		return nil
+		return v, nil, false, nil
 	}
 
-	rows, err := tx.Query(ctx, `SELECT id, document_type FROM kyc_documents WHERE verification_id = $1 AND status <> $2`,
+	rows, err := tx.Query(ctx, `SELECT id, document_type FROM kyc_documents WHERE verification_id = $1 AND status <> $2 ORDER BY id`,
 		verificationID, DocumentRejected)
 	if err != nil {
-		return fmt.Errorf("kyc: list documents for submission: %w", err)
+		return Verification{}, nil, false, fmt.Errorf("kyc: list documents for submission: %w", err)
 	}
-	var submitted []SubmittedDocument
 	for rows.Next() {
 		var sd SubmittedDocument
 		if err := rows.Scan(&sd.DocumentID, &sd.DocumentType); err != nil {
 			rows.Close()
-			return fmt.Errorf("kyc: scan document for submission: %w", err)
+			return Verification{}, nil, false, fmt.Errorf("kyc: scan document for submission: %w", err)
 		}
 		submitted = append(submitted, sd)
 	}
 	if err := rows.Err(); err != nil {
-		return fmt.Errorf("kyc: list documents for submission: %w", err)
+		return Verification{}, nil, false, fmt.Errorf("kyc: list documents for submission: %w", err)
 	}
+	return v, submitted, true, nil
+}
 
-	result, err := provider.SubmitVerification(ctx, v.ProviderReference, submitted)
-	if err != nil {
-		return fmt.Errorf("kyc: submit verification to provider: %w", err)
+// submissionIdempotencyKey is ADR 0095 §15.3's content-derived idempotency
+// key: "ks:" + verification_id + ":" + sha256(sorted document ids) - the
+// SAME document set always derives the SAME key, so a retry submitting an
+// unchanged set is recognizable to a vendor that honors idempotency keys,
+// while a set that has since grown or shrunk (a new upload, a document
+// rejected) derives a genuinely different key.
+func submissionIdempotencyKey(verificationID uuid.UUID, docs []SubmittedDocument) string {
+	ids := make([]string, len(docs))
+	for i, d := range docs {
+		ids[i] = d.DocumentID.String()
 	}
-	// Security S-5: platform-side bound before the audit row and the
-	// status UPDATE below (idempotent over an adapter that already did).
+	sort.Strings(ids)
+	h := sha256.New()
+	for _, id := range ids {
+		_, _ = h.Write([]byte(id))
+		_, _ = h.Write([]byte{0})
+	}
+	return "ks:" + verificationID.String() + ":" + hex.EncodeToString(h.Sum(nil))
+}
+
+// applySubmissionResult is SubmitVerification's phase C: an ambiguous,
+// timeout, or transport-error result (ProviderError - IC condition 2, ADR
+// 0095 §15.3) is mapped to the SAME "no state change, one failure audit
+// row" handling document_service.go's pre-split code already used - it is
+// NEVER passed to statusForOutcome and NEVER read as a definitive outcome,
+// so kyc_verifications.status is left exactly as it was. A definitive
+// outcome applies the existing terminal-guarded updateVerificationStatus
+// plus its own success audit row - identical to the pre-split behaviour,
+// just moved into its own short, bounded transaction.
+func applySubmissionResult(ctx context.Context, tx pgx.Tx, v Verification, submitted []SubmittedDocument, result ProviderResult) (Verification, error) {
 	result, reasonTruncated := normalizeProviderResult(result)
 
 	auditOutcome := audit.OutcomeSuccess
@@ -216,18 +235,126 @@ func submitVerificationDocuments(ctx context.Context, tx pgx.Tx, provider KYCPro
 		Outcome:  auditOutcome,
 		Metadata: withReasonTruncated(map[string]any{"provider_id": v.ProviderID, "document_count": len(submitted), "provider_outcome": string(result.Outcome), "reason": result.Reason}, reasonTruncated),
 	}); err != nil {
-		return fmt.Errorf("kyc: audit provider submission: %w", err)
+		return Verification{}, fmt.Errorf("kyc: audit provider submission: %w", err)
 	}
 
 	if result.Outcome == ProviderError {
-		return nil
+		// IC condition 2: an ambiguous/timeout/transport-error result is
+		// NEVER read by statusForOutcome, and kyc_verifications.status is
+		// left exactly as it was - identical to today's ProviderError
+		// handling. The next document upload re-submits the full current
+		// set under a new content-derived key (KYC-SUBMIT-OUTBOX-1 stays
+		// deferred, ADR 0095 §15.3/§25 condition 5: a durable submission
+		// outbox is a HARD PRECONDITION on the first real KYC adapter, not
+		// merely a flagged future item - no real adapter is accepted into
+		// this or any later stage without one landing first).
+		return v, nil
 	}
 	newStatus, ok := statusForOutcome(result.Outcome)
 	if !ok {
-		return fmt.Errorf("kyc: provider returned an unrecognized outcome %q", result.Outcome)
+		return Verification{}, fmt.Errorf("kyc: provider returned an unrecognized outcome %q", result.Outcome)
 	}
-	_, err = updateVerificationStatus(ctx, tx, v.ID, newStatus, result.Reason)
-	return err
+	return updateVerificationStatus(ctx, tx, v.ID, newStatus, result.Reason)
+}
+
+// SubmitVerification is ADR 0095 §15.3's phase A(read)/B/C split of the
+// former inline submitVerificationDocuments step (PRH-I2): a short,
+// read-only transaction gathers the verification's terminal-guard and its
+// current non-rejected document set (phase A); the provider is called with
+// NO database transaction/pooled connection held, using a per-call outbound
+// credential resolved via outbound (PROV-OUTBOUND-CRED-1) and a
+// content-derived idempotency key (phase B); the result is applied under a
+// short, bounded, ctx-independent transaction (phase C).
+//
+// IC condition 2 (ADR 0095 §25): an ambiguous, timeout, or transport-error
+// result leaves kyc_verifications.status UNCHANGED - see
+// applySubmissionResult's own doc comment. Callers: internal/httpserver's
+// document-upload handler, after UploadDocument's own transaction has
+// already committed the new document row.
+//
+// pool/outbound/provider follow CreateVerification's identical nil-fails-
+// closed convention. A verification already in a terminal status, or one
+// with no current non-rejected documents to submit at all (the caller races
+// a rejection, or has none yet), is a documented no-op returning the
+// verification unchanged and a nil error - never an error for "nothing to
+// do".
+// tenantID must be the caller's own server-resolved tenant (the same scope
+// the verification row belongs to) - never client-supplied; it scopes every
+// transaction this function opens via pool.WithTenant, mirroring every
+// other tenant-scoped entry point in this codebase.
+func SubmitVerification(ctx context.Context, pool providercred.TenantTxRunner, outbound OutboundCredentialResolver, provider KYCProvider, tenantID uuid.UUID, verificationID uuid.UUID) (Verification, error) {
+	if provider == nil {
+		return Verification{}, fmt.Errorf("%w: no KYC provider configured", ErrProviderUnavailable)
+	}
+	if pool == nil {
+		return Verification{}, fmt.Errorf("%w: KYC submission has no transaction runner configured", ErrProviderUnavailable)
+	}
+	if tenantID == uuid.Nil {
+		return Verification{}, fmt.Errorf("%w: tenant_id is required", ErrInvalidTransition)
+	}
+
+	var (
+		v         Verification
+		submitted []SubmittedDocument
+		proceed   bool
+	)
+	if err := pool.WithTenant(ctx, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		var err error
+		v, submitted, proceed, err = gatherSubmissionDocuments(ctx, tx, verificationID)
+		return err
+	}); err != nil {
+		return Verification{}, err
+	}
+	if !proceed {
+		return v, nil
+	}
+	providerID := provider.ID()
+
+	if outbound == nil {
+		return Verification{}, fmt.Errorf("%w: no outbound credential resolver configured", ErrProviderUnavailable)
+	}
+	cred, err := outbound.Resolve(ctx, pool, tenantID, providerID)
+	if err != nil {
+		slog.Default().Warn("kyc_submit_verification_credential_unavailable",
+			"tenant_id", tenantID.String(), "verification_id", v.ID.String(), "provider_id", providerID)
+		return Verification{}, fmt.Errorf("%w: resolve outbound credential: %v", ErrProviderUnavailable, err)
+	}
+	if cred.TenantID != tenantID || cred.ProviderID != providerID || cred.Domain != "kyc" {
+		return Verification{}, fmt.Errorf("%w: outbound credential binding mismatch", ErrProviderUnavailable)
+	}
+
+	call := CallContext{
+		TenantID: tenantID, ProviderID: providerID, Credential: cred,
+		IdempotencyKey: submissionIdempotencyKey(v.ID, submitted), Deadline: time.Now().Add(defaultProviderCallTimeout),
+	}
+	result, err := provider.SubmitVerification(ctx, v.ProviderReference, submitted, call)
+	if err != nil {
+		// A transport-level failure here is IC condition 2's own case,
+		// applied without ever reaching applySubmissionResult (there is no
+		// ProviderResult to apply): kyc_verifications.status is left
+		// completely untouched, exactly like a returned ProviderError
+		// outcome, since neither ever reaches statusForOutcome. No audit
+		// row is written for this specific failure (mirrors
+		// CreateVerification's identical phase-B-failure silence) - the
+		// next upload re-submits the current document set.
+		slog.Default().Warn("kyc_submit_verification_provider_call_failed",
+			"tenant_id", tenantID.String(), "verification_id", v.ID.String(), "provider_id", providerID)
+		return v, fmt.Errorf("%w: submit verification to provider: %v", ErrProviderUnavailable, err)
+	}
+
+	phaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), phaseCTimeout)
+	defer cancel()
+	var applied Verification
+	if err := pool.WithTenant(phaseCtx, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		var err error
+		applied, err = applySubmissionResult(ctx, tx, v, submitted, result)
+		return err
+	}); err != nil {
+		slog.Default().Error("kyc_submit_verification_phase_c_failed",
+			"tenant_id", tenantID.String(), "verification_id", v.ID.String(), "error", err.Error())
+		return Verification{}, fmt.Errorf("kyc: submit verification: apply result: %w", err)
+	}
+	return applied, nil
 }
 
 func derefOrEmpty(s *string) string {

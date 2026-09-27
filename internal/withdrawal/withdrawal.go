@@ -1226,10 +1226,111 @@ func ListSubmittedForTenant(ctx context.Context, tx pgx.Tx) ([]WithdrawalRequest
 	return out, rows.Err()
 }
 
+// MarkSubmittedPending performs the ADR 0095 T1p companion transition on
+// the withdrawal_requests side: approved -> submitted, recording the
+// provider the payout was routed to, but WITHOUT a provider reference yet
+// (P95-C2, withdrawal-state-machine.md §2/§3: `submitted` may lack a
+// provider reference at the moment this commits, because ADR 0095's whole
+// point is that this transition commits BEFORE the provider is ever
+// called - the old MarkSubmitted, which requires a non-empty reference,
+// modeled the pre-ADR-0095 world where the provider call already happened
+// in the same transaction). AttachProviderReference (below) records the
+// reference once phase B/C actually receives one, or never, if the
+// provider never returns one before a definite outcome.
+func MarkSubmittedPending(ctx context.Context, tx pgx.Tx, requestID uuid.UUID, providerID string) error {
+	if providerID == "" {
+		return fmt.Errorf("%w: provider id is required", ErrInvalidInput)
+	}
+
+	wr, err := lockRequestForUpdate(ctx, tx, requestID)
+	if err != nil {
+		return err
+	}
+	if wr.State != StateApproved {
+		return fmt.Errorf("%w: request %s is in state %q, expected %q", ErrStateConflict, requestID, wr.State, StateApproved)
+	}
+
+	tag, err := tx.Exec(ctx,
+		`UPDATE withdrawal_requests SET state = $1, provider_id = $2, updated_at = now()
+		 WHERE id = $3 AND state = $4`,
+		StateSubmitted, providerID, requestID, StateApproved,
+	)
+	if err != nil {
+		return fmt.Errorf("withdrawal: mark submitted (pending reference): %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrStateConflict
+	}
+
+	return audit.Record(ctx, tx, audit.Entry{
+		TenantID:   wr.TenantID,
+		ActorType:  audit.ActorSystem,
+		Action:     "withdrawal.dispatch_claimed",
+		TargetType: "withdrawal_request",
+		TargetID:   requestID.String(),
+		Outcome:    audit.OutcomeSuccess,
+		Metadata: map[string]any{
+			"provider_id": providerID,
+		},
+	})
+}
+
+// AttachProviderReference records the PSP/custodian's own reference for an
+// already-`submitted` payout, once phase B/C actually receives one
+// (MarkSubmittedPending leaves it NULL). A no-op, never an error and never
+// an overwrite, if a reference is already recorded - provider_reference is
+// set-once, mirroring payment_attempts.provider_reference's identical
+// immutability rule, since a caller might call this more than once for the
+// same request (e.g. a QueryStatus-driven resolution after a Pending
+// acceptance already attached one).
+func AttachProviderReference(ctx context.Context, tx pgx.Tx, requestID uuid.UUID, providerReference string) error {
+	if providerReference == "" {
+		return fmt.Errorf("%w: provider reference is required", ErrInvalidInput)
+	}
+
+	wr, err := lockRequestForUpdate(ctx, tx, requestID)
+	if err != nil {
+		return err
+	}
+	if wr.State != StateSubmitted {
+		return fmt.Errorf("%w: request %s is in state %q, expected %q", ErrStateConflict, requestID, wr.State, StateSubmitted)
+	}
+	if wr.ProviderReference != nil {
+		return nil
+	}
+
+	tag, err := tx.Exec(ctx,
+		`UPDATE withdrawal_requests SET provider_reference = $1, updated_at = now()
+		 WHERE id = $2 AND state = $3 AND provider_reference IS NULL`,
+		providerReference, requestID, StateSubmitted,
+	)
+	if err != nil {
+		return fmt.Errorf("withdrawal: attach provider reference: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrStateConflict
+	}
+	return nil
+}
+
 // MarkSubmitted transitions a request from `approved` to `submitted` once
 // the orchestrator has sent the payout instruction to the PSP/custodian
 // adapter (payment-orchestration.md). No ledger effect yet - submission
 // is not confirmation (withdrawal-state-machine.md §1).
+//
+// SUPERSEDED for the ADR-0095 payout dispatch path (internal/payments'
+// ClaimForDispatch/ApplyPayoutResult, PRH-I1): that path uses
+// MarkSubmittedPending (before any provider call) plus AttachProviderReference
+// (once one is available) instead of this single combined call, because
+// this function's precondition - a non-empty providerReference already in
+// hand - can only be satisfied by calling the provider BEFORE this
+// transition commits, which is exactly the double-payout hazard ADR 0095
+// exists to remove (security review prh-ref-provider-reference-bound.md
+// §10 C1). Retained for this package's existing tests and any caller that
+// already has a confirmed, non-empty provider reference in hand at
+// transition time: it is still a perfectly correct atomic transition,
+// just not the one the payout dispatch call site (internal/payments'
+// ClaimForDispatch/ApplyPayoutResult) uses.
 func MarkSubmitted(ctx context.Context, tx pgx.Tx, requestID uuid.UUID, providerID, providerReference string) error {
 	if providerID == "" || providerReference == "" {
 		return fmt.Errorf("%w: provider id and provider reference are required", ErrInvalidInput)

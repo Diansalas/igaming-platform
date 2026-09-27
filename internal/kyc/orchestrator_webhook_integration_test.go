@@ -602,9 +602,13 @@ func TestKYCWebhook_8ConcurrentTerminalCallbacks_ExactlyOneWins(t *testing.T) {
 	}
 }
 
-// K9: verified caller, unknown reference -> ErrNotFound (404 at the HTTP
-// layer); bad outcome/non-JSON -> ErrCallbackMalformedBody, no audit row;
-// outcome "error" -> no state change, one failure audit row.
+// K9/ADR 0095 §15.2/IC-Q1: verified caller, unknown reference ->
+// ErrVerificationReferenceUnknown (a retryable 5xx at the HTTP layer, never
+// ErrNotFound's 404 and never a 200 - see provider.go's own comment on
+// ReceiveVerifiedCallback step (d) for why KYC's lack of a receipt table
+// makes this indistinguishable from a callback racing CreateVerification's
+// own phase C); bad outcome/non-JSON -> ErrCallbackMalformedBody, no audit
+// row; outcome "error" -> no state change, one failure audit row.
 func TestKYCWebhook_VerifiedUnknownReference_NotFound(t *testing.T) {
 	pool := testPool(t)
 	f, provider, orch, _ := newWebhookFixture(t, pool)
@@ -613,8 +617,11 @@ func TestKYCWebhook_VerifiedUnknownReference_NotFound(t *testing.T) {
 		_, _, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock", in)
 		return err
 	})
-	if !errors.Is(err, ErrNotFound) {
-		t.Fatalf("expected ErrNotFound, got %v", err)
+	if !errors.Is(err, ErrVerificationReferenceUnknown) {
+		t.Fatalf("expected ErrVerificationReferenceUnknown, got %v", err)
+	}
+	if errors.Is(err, ErrNotFound) {
+		t.Fatalf("ErrVerificationReferenceUnknown must NOT also satisfy errors.Is(err, ErrNotFound) - the HTTP layer must route these to different response classes (5xx vs 404)")
 	}
 }
 
