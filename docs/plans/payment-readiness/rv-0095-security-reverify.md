@@ -208,3 +208,122 @@ existence oracle and a data-integrity gap.
 
 None of this is a claim that anything is secure or launch-ready. Production launch
 authorization remains the human's decision.
+
+---
+
+## Revision 3 addendum
+
+Reviewer: `security`, 2026-09-27, against ADR 0095 revision 3 (commit `3c88e13`). I checked the
+design text of §10.2, §10.2.1, §10.2.2, §10.3, §10.4, §10.5, §13.1 (receipt columns), §13.2,
+§16.2 items 15 and 20, §16.4 MX17–MX21 and §27.8. As before, I did not take the §27.8 "Where
+satisfied" column as evidence. No code exists, so this is a design-level review only. PRH-I1,
+I2 and I5 still each need their own `security` code review, and the outbound tripwire stays in
+place.
+
+### Status of the rev-2 findings
+
+| Finding | Status | Evidence in rev 3 |
+|---|---|---|
+| N1 (re-scope an engaged row) | **CLOSED** | §10.2.2 point 2 makes `id`, `tenant_id`, `provider_scope` and `operation_scope` immutable; §13.2 guard comment; item 20 direct-SQL test; MX19. |
+| N2 (app-written, mutable scope columns) | **CLOSED** | §10.2.1: actor and scope are forced from session GUCs and verified against `staff_users` (tenant: `tenant_id = app.tenant_id`; platform: `tenant_id IS NULL`, with tenant and player GUCs unset). Any other shape raises. CHECK enums are on every scope column. §10.2.2 point 5: never `platform→tenant`, and no tenant UPDATE of a platform-engaged row. Item 20 tests; MX20. |
+| N3 (platform path unbuildable, no routes) | **CLOSED** | §10.2.1 adds a platform RLS family (platform GUC set, tenant and player GUCs unset; SELECT/INSERT/UPDATE; no DELETE or `FOR ALL`). This family is unreachable from the tenant-context claim path. §10.5 adds platform routes with distinct `platform_payments_kill_switch:*` permissions, the path-tenant rule restricted to platform principals, cross-surface 403s, and audit carrying both actor and target tenant. Item 20 tests. |
+| N4 (release binding had no mechanism) | **CLOSED, except for N5 below** | §10.2.2 point 6: `release_request_id` with composite FK and `UNIQUE`; `kill_switch_id = id`; `expected_version = OLD.version`; not expired; `decided_txid = txid_current()`. Approve and release happen in one tx. Item 20; MX21. |
+| L1 | **CLOSED** | §10.3 states the coupling as binding: no other `payment_attempts` write policy without `security` re-review. Item 20 tests player and platform contexts. |
+| L2 | **CLOSED** | Item 15 now includes the recursive test, the static test, a `Domain` mismatch, and the gate-alone and adapter-alone cases. |
+| L3 | **CLOSED** | §13.1: `received_at` and `resolved_at` are forced by trigger. Item 20 tests it. |
+| L4 | **CLOSED** | §13.2 composite FK `(tenant_id, kill_switch_id)` → `(tenant_id, id)`. Item 20 tests it. |
+
+### New findings
+
+#### N5 — Medium, launch-blocking (C5 precision): release-request column write moments are unspecified, which permits a single-actor release
+
+**Where:** §10.2.1 first paragraph, §10.2.2 "Release-request guard trigger", and the §13.2
+session-actor comment ("overwrites every `*_by` / `*_by_scope` column with it").
+
+The text forces `requested_by*` and `approved_by*` "from the session" on INSERT/UPDATE. It does
+**not** say which column is forced at which transition. The request guard also does not freeze
+the request's other columns: it constrains only `status`, `created_at`, `expires_at`,
+`decided_at` and `decided_txid`.
+
+That leaves two readings, and both are defects:
+
+- **Literal reading.** `requested_by` is overwritten with the approver on the approve UPDATE.
+  `approved_by = requested_by` then always holds, the CHECK refuses, and no release can ever
+  succeed. This fails closed, but the positive release tests in item 20 will fail, and that
+  pushes the implementer to "fix" it ad hoc.
+- **Likely "fix" reading.** `requested_by*` is forced only at INSERT and `approved_by*` only at
+  approval, but `requested_by*` is not frozen afterwards. Then, in a single session:
+  1. Actor A creates a request (`requested_by = A`).
+  2. In the approve transaction, A sends
+     `UPDATE … SET status='approved', requested_by = <any other staff uuid>`.
+  3. `approved_by` is forced to A. The CHECK `approved_by IS DISTINCT FROM requested_by` passes.
+  4. The §10.2.2 point 6 guard sees a "distinct" approver, and A alone releases the switch.
+
+  The same approach works on a platform-engaged row: A can set `requested_by_scope`
+  indirectly by choosing any platform staff UUID.
+
+Also unfrozen: `kill_switch_id`, `expected_version`, `reason_code` and `tenant_id` can be edited
+on an `open` request after the requester created it. The approver then approves something the
+requester never asked for. Terminal (`approved`, `cancelled`, `expired`) rows are not stated to
+be immutable either.
+
+**Fix (text, §10.2.2 request guard, §13.2 comment, item 20, one new mutation):**
+- `id`, `tenant_id`, `kill_switch_id`, `expected_version`, `reason_code`, `requested_by`,
+  `requested_by_scope`, `created_at` and `expires_at` are set at INSERT (the actor and time
+  columns are forced) and are immutable afterwards.
+- `approved_by`, `approved_by_scope`, `decided_at` and `decided_txid` are forced at
+  `open→approved` only, and are NULL and unwritable otherwise.
+- Every column of a row in a terminal status is immutable.
+- Item 20 test: an approve UPDATE that also sets `requested_by`, `requested_by_scope` or
+  `expected_version` is refused, or those values are ignored; either way a single actor cannot
+  release.
+- New mutation MX25: allow a `requested_by` UPDATE. It must be caught by item 20.
+
+#### L5 — Low: tenant sessions can obstruct platform release, and INSERT can pre-consume a `release_request_id`
+
+Both issues fail in the safe direction: the switch stays engaged. They are reliability gaps,
+not bypasses.
+
+**(a) A tenant can block the platform's release request.** §10.5 refuses release requests on
+platform-engaged rows only in the application. At the DB level, a tenant session may still
+INSERT an `open` request for a platform-engaged switch. The partial unique index
+(`kill_switch_id WHERE status='open'`) then blocks the platform's own request until someone
+cancels the tenant's request.
+
+**Fix:** the request guard refuses a tenant-scope INSERT when the switch has
+`engaged_by_scope = 'platform'`.
+
+**(b) INSERT can pre-consume a `release_request_id`.** §10.2.2 point 7 governs
+`release_request_id` on transitions but not on INSERT. A tenant can INSERT a disengaged switch
+row with `release_request_id = <another switch's open request>`. `UNIQUE (release_request_id)`
+then makes that switch's legitimate release fail.
+
+**Fix:** force `release_request_id := NULL` on every INSERT.
+
+### Per-condition status (revision 3)
+
+| Condition | Status | Remaining |
+|---|---|---|
+| **S95-C5** (launch-blocking) | **OPEN (narrow, text-only)** | N5. Everything else in C5 (N1, N4, DELETE, monotonic version, same-tx binding) is closed in the text. |
+| **S95-C7** | **CLOSED** (design) | None. Platform scope is derived from the session and verified against `staff_users`, cannot be downgraded, and the platform path is buildable. The N5 fix also protects the platform-engaged case. |
+| **S95-C13** (launch-blocking) | **CLOSED** (design) | None. Both surfaces are specified with permissions, the target-tenant rule, cross-surface refusals, audit and OpenAPI conformance. |
+| C1, C2, C3, C4, C6, C8, C9, C10, C11, C12 | Unchanged: **CLOSED** (design) | L1–L3 notes are now also written in. |
+
+### Overall launch-blocking status of the ADR 0095 design
+
+**Still launch-blocking, on N5 alone.** It is a one-paragraph text fix in §10.2.2, §13.2 and
+§16.2 item 20, plus MX25.
+
+- **Must land before:** migration 0102 or the kill-switch routes are implemented. It does not
+  block the parts of PRH-I1 that do not touch 0102: §3–§9, §11, and migration 0101.
+- **After it lands:** every S95 condition is closed at design level. Security can confirm that
+  by checking only the N5 text; a full re-review is not needed.
+- **L5:** an implementing-review item for PRH-I1. Fold it into the same edit if convenient.
+
+The first non-MOCK payments adapter stays blocked until all of the following hold:
+- N5 is written in;
+- PRH-I1, I2 and I5 pass `security` code review against this design;
+- the item 20 tests and the MX17–MX21 (+MX25) mutations are shown passing and killed.
+
+This addendum does not state that anything is secure or launch-ready. Production launch
+authorization remains the human's decision.
