@@ -508,3 +508,104 @@ Launch relevance:
 
 The next re-verification can be limited to those two test diffs. I will re-run B1-casino, B1-kyc,
 N2b and N2c.
+
+## 8. Re-verification #3 (round 5)
+
+- **Reviewer:** `security`. **Subject:** round 5, commit `d32e7c6`, as merged at `de16cb9`. ADR 0097
+  §21.9 (corrected) and §21.10, and the corrected registry rows for PRH-I4 and PRH-I4-SECREVIEW-1.
+- **Environment:** a private scratch DB `sec_prh_i4_rv5`, with 104 migrations and the
+  `init-app-role.sql` grants. The roles already existed, so the script's `CREATE ROLE` was refused
+  as expected. The DB was dropped afterwards. I ran the mutations in a detached worktree at
+  `de16cb9`, which I then removed. Every mutation was reverted, and `git status --short` was empty
+  after each one.
+- **Not in scope:** anything outside the round-5 diff. That excludes the unrelated payout-dispatch
+  test. No load test and no penetration test were run.
+
+### 8.1 Production path
+
+Round 5 touches no production Go code. The only Go changes between `3b744c8` and `de16cb9` are in
+`_test.go` files. The §7.1 conclusion therefore still holds unchanged: the only non-test assignment
+of `dbGate` is `admission.NewBulkhead`, and nothing outside the package can substitute it.
+
+The baseline is green: 40 PASS and 0 SKIP/FAIL across the admission, route-guard, gatedReader,
+RLF4 and directory tests. All three T6g subtests pass.
+
+### 8.2 Mutation results (security-run)
+
+| # | Mutation | Result |
+|---|---|---|
+| B1-casino | `admitVerified` moved inside the `WithTenant` closure in `casino_handlers.go` | **KILLED** by T6g/casino ("B1-limited acquisition delta = 2, want exactly 1") |
+| B1-kyc | the same move in `kyc_admin_handlers.go` | **KILLED** by T6g/kyc ("delta = 2, want exactly 1") |
+| B1-payments (re-run) | the same move in `deposit_handlers.go` | **KILLED** by T6g/payments ("delta = 3, want exactly 2") |
+| N2 (re-run) | a fourth route with a literal pattern and no `admitPreAuth` | **KILLED** by the route guard |
+| N2b | a fourth route whose pattern is a package `const` | **KILLED** by the new non-literal-pattern rule |
+| N2c | a fourth route registered through a helper that calls `m.HandleFunc(p, h)` | **KILLED** by the same rule, which reports the helper's inner call |
+| I6-casino (my choice) | the casino `newGatedReader` given the tenant and provider keys swapped, i.e. credential resolution gated on the wrong A4b key | **KILLED** by `TestAdmission_C1a_Casino…` (`countingGate` key mismatch) |
+
+### 8.3 Stability and fragility of the pinned deltas
+
+- **Stable.** `TestAdmission_T6g` and `TestAdmission_C1a_*` passed with `-count=25`, and T6g also
+  passed with `-count=10 -race`, with no failures.
+- **Each subtest is isolated.** It owns a private `phasecapture.Pool10`. Nothing in the test starts
+  `RunDirectoryRefresh` or runs in parallel.
+- **What the measured counts consist of:**
+
+  | Domain | Admitted | Limited | Composition |
+  |---|---|---|---|
+  | payments | 3 | 2 | slug lookup, `ProviderAcceptsWebhook`, then `WithTenant` |
+  | casino | 2 | 1 | slug lookup, then `WithTenant` |
+  | kyc | 2 | 1 | slug lookup, then `WithTenant` |
+
+  Credential resolution makes no DB acquisition here, because the harness uses MOCK webhook
+  credentials.
+- **The fragility is acceptable.**
+  - Any added or removed acquisition on these paths now fails **loudly** rather than silently. That
+    is the intended tripwire, and I accept its maintenance cost.
+  - Switching the harness to the real `providercred` resolver would shift every pin. That too would
+    fail loudly, and the numbers would simply need re-deriving.
+- **Info I8, documentation only.** The test's header comment says that payments' three admitted
+  acquisitions are "tenant-slug lookup, ProviderAcceptsWebhook and credential resolution". It also
+  says that for casino and KYC, credential resolution is "its only pre-verification read". Both
+  statements are wrong: the pinned numbers include `WithTenant` and exclude credential resolution.
+  The numbers themselves are correct. Only the rationale should be fixed, so that whoever next
+  re-derives the pins is not misled.
+
+### 8.4 ADR and registry accuracy
+
+- **§21.9:** corrected in place. The T6 and C3 "closed" claims are now explicitly marked
+  inaccurate, with a pointer to §21.10. The history was not rewritten silently. **Accurate.**
+- **§21.10:** the T6, C3/L8, I5 and I6 statements match what I verified. **Accurate.**
+- **§21.10 on I7: overstated.**
+  - The new `kyc_verifications` check sits in T6g/kyc, not in `TestAdmission_C1a_KYC…`. That C1a
+    test still asserts the ledger-row count, which is vacuous for KYC.
+  - The T6g check is also vacuous. The harness never creates a verification, and an
+    unknown-reference KYC callback returns `ErrVerificationReferenceUnknown` without writing a row
+    (`internal/kyc/provider.go`). So that assertion cannot fail whatever the admission ordering.
+  - This does not block anything. For KYC, the pinned delta and the status assertions carry the
+    property. I7 stays an open **Info** item. Either seed a verification and assert that it is
+    unchanged, or drop the "done" wording.
+- **Registry:** the PRH-I4 and PRH-I4-SECREVIEW-1 rows describe §7's findings and round 5 accurately.
+  Update them to reflect this section.
+
+### 8.5 Condition status and verdict
+
+- **All conditions closed.** Each one is backed by a security-run mutation kill or by reading the
+  code:
+  - **C1 / C2 / L7 / T4 / L6-N5:** closed in §7, still hold.
+  - **T6:** closed now (B1-casino, B1-kyc and B1-payments killed).
+  - **C3 / L8:** closed now (N2, N2b and N2c killed).
+  - **C4, L1, L2 (log line), L3 (orchestrator-nil), T10, T11:** closed in §6.
+- **Info:**
+  - I5 and I6 are done and verified;
+  - I7 is open (see §8.4);
+  - I8 is new (see §8.3).
+- **Still open but tracked, and non-blocking:**
+  - L3's unmatched-path residual;
+  - L4, L5 and I1–I4;
+  - PRH-I4-METRICS-1.
+
+**Verdict: APPROVE.** I have no remaining security conditions on PRH-I4 / PAYWH-RL-1 within the
+scope of this review. PRH-I4-SECREVIEW-1 may be closed.
+
+This does not mean the webhook edge is "secure" beyond the scope listed. WEBHOOK-EDGE-1 (R1) is
+still required before real-money launch. Launch authorization is still the human's decision.
