@@ -280,7 +280,7 @@ func TestPayoutDispatch_EndToEnd_Success(t *testing.T) {
 		t.Fatalf("ClaimForDispatch: %v", err)
 	}
 	adapter, _ := orch.Provider(claim.Capability.ProviderID)
-	gr := DispatchWithdraw(context.Background(), MockCredentialResolver{}, adapter, claim.Attempt)
+	gr := DispatchWithdraw(context.Background(), nil, MockCredentialResolver{}, adapter, claim.Attempt)
 	if err := ApplyPayoutResult(context.Background(), pool, f.tenantID, wr.ID, claim.Attempt, gr, EvidenceSync); err != nil {
 		t.Fatalf("ApplyPayoutResult: %v", err)
 	}
@@ -934,7 +934,7 @@ func TestClaimForDispatch_NeverCallsProviderBeforeCommit(t *testing.T) {
 	// already happened, not merely that Go had already returned from the
 	// function call.
 	visSpy := &commitVisibilitySpyProvider{MockProvider: inner, pool: pool, tenantID: f.tenantID, attemptID: claim.Attempt.ID}
-	gr := DispatchWithdraw(context.Background(), MockCredentialResolver{}, visSpy, claim.Attempt)
+	gr := DispatchWithdraw(context.Background(), nil, MockCredentialResolver{}, visSpy, claim.Attempt)
 	if !visSpy.called {
 		t.Fatalf("test setup: the spy's Withdraw was never invoked")
 	}

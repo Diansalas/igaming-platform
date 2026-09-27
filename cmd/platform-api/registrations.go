@@ -70,6 +70,13 @@ type providerBundle struct {
 	// wiring.KYCOutboundResolver enables it.
 	KYCOutboundResolver kyc.OutboundCredentialResolver
 
+	// PaymentsOutboundResolver is payments' own OUTBOUND-credential MOCK
+	// (ADR 0095 §9.1/§11, PROV-OUTBOUND-CRED-1, phase 2 orchestrator
+	// wiring) - CasinoOutboundResolver's payments twin, built HERE for the
+	// same reason. A true nil interface unless
+	// wiring.PaymentsOutboundResolver enables it.
+	PaymentsOutboundResolver payments.OutboundCredentialResolver
+
 	// Credentials is the REAL provider-credential subsystem (Stage 10.3
 	// W2a, ADR 0093): the handle-table resolver, outbound resolution and
 	// the four-eyes lifecycle. Nil unless BOTH a fingerprint key and a
@@ -178,6 +185,21 @@ func buildProviderBundle(wiring mockWiring) providerBundle {
 		MalwareScanner:  kyc.NewMockMalwareScanner(),
 		Email:           email.NewMockProvider(),
 	}
+	// PROV-OUTBOUND-CRED-1 phase 2 code review C2: this is the one
+	// DELIBERATE hard-wired MockCredentialResolver{} in this file, never
+	// the kind-split resolver - the reconciliation MOCK statement source
+	// only ever fetches the MockProvider's OWN in-process records
+	// (payments.MockStatementSourceLabel's own doc comment), so it must
+	// never resolve a real credential regardless of what real adapters are
+	// registered alongside it. If this is ever rewired to
+	// b.paymentsOutboundCredentials() (the kind split) for a real payments
+	// adapter, that adapter's provider id is not synthetic, so the split
+	// would route it to the REAL resolver - reaching an actual vendor
+	// credential-store call, and a real HTTP fetch, from what is
+	// documented and audited as a MOCK-only source. Pinned, not merely a
+	// comment: internal/payments/mock_statement_source.go's own Fetch
+	// passes gate.go's callProvider a nil pool for this exact reason
+	// (s.resolver is always MockCredentialResolver, which ignores it).
 	b.PaymentsStmt = payments.NewMockStatementSource(b.Payments, payments.MockCredentialResolver{})
 	if wiring.PaymentsWebhookResolver {
 		b.PaymentsWebhookResolver = payments.NewMockWebhookCredentials(b.Payments)
@@ -194,6 +216,9 @@ func buildProviderBundle(wiring mockWiring) providerBundle {
 	}
 	if wiring.KYCOutboundResolver {
 		b.KYCOutboundResolver = kyc.NewMockOutboundResolver()
+	}
+	if wiring.PaymentsOutboundResolver {
+		b.PaymentsOutboundResolver = payments.MockCredentialResolver{}
 	}
 	return b
 }
@@ -281,22 +306,30 @@ func (b providerBundle) casinoOutboundCredentials() casino.OutboundCredentialRes
 	return casino.NewOutboundKindSplitResolver(b.casinoAdapters(), mock, real)
 }
 
-// paymentsOutboundCredentials is InitiateDepositAttempt's phase B
-// credential resolver (ADR 0095 §9.1/§11, PROV-OUTBOUND-CRED-1) -
-// casinoOutboundCredentials' payments twin. PROV-OUTBOUND-CRED-1 (the real
-// per-tenant credential-resolution subsystem) is not built yet
-// (contract.go's own package doc comment), so this always returns the
-// synthetic, non-secret MOCK resolver while only the MOCK payments
-// adapter is wired - never a real vendor credential. A real payments
-// adapter needs the same kind-split-by-adapter-identity pattern
-// casinoOrchestratorResolver already uses for inbound credentials, added
-// when one is actually registered (no commercial PSP relationship exists
-// today - CLAUDE.md's provider-abstraction rule).
+// paymentsOutboundCredentials is InitiateDepositAttempt/DispatchWithdraw's
+// phase B credential resolver (ADR 0095 §9.1/§11, PROV-OUTBOUND-CRED-1,
+// phase 2 orchestrator wiring) - casinoOutboundCredentials' payments twin,
+// mirroring it exactly (including its kind-split discipline and its
+// nil-concrete-pointer-to-true-nil-interface conversion). The choice is
+// keyed on the ADAPTER's own kind (payments.NewOutboundKindSplitResolver),
+// never on "is any mock wired anywhere in this process" - a real payments
+// adapter registered alongside the mock would reach the real
+// b.Credentials.Outbound("payments") resolver, not the synthetic one; in
+// production the mock adapter itself is refused at boot regardless
+// (MOCK-ADAPTER-PROD-1), so this is defense in depth, not the only guard.
+// No commercial PSP relationship exists today (CLAUDE.md's provider-
+// abstraction rule), so only the MOCK path is reachable in this
+// deployment - the real path is wired, not fabricated.
 func (b providerBundle) paymentsOutboundCredentials() payments.OutboundCredentialResolver {
-	if b.Payments != nil {
-		return payments.MockCredentialResolver{}
+	var mock payments.OutboundCredentialResolver
+	if b.PaymentsOutboundResolver != nil && b.Payments != nil {
+		mock = b.PaymentsOutboundResolver
 	}
-	return nil
+	var real payments.OutboundCredentialResolver
+	if or := b.Credentials.Outbound("payments"); or != nil {
+		real = or
+	}
+	return payments.NewOutboundKindSplitResolver(b.paymentsAdapters(), mock, real)
 }
 
 // kycOrchestratorResolver is the KYC Orchestrator's resolver: the bundle's
@@ -365,6 +398,10 @@ func buildRegistrations(_ config.Config, b providerBundle) []providerkind.Regist
 		// a nil one (wiring off) is skipped by the guard, same as every
 		// other MOCK resolver above.
 		providerkind.Registration{Domain: "kyc", Name: "outbound_resolver", Component: b.KYCOutboundResolver},
+		// The payments OUTBOUND-credential MOCK (ADR 0095 §9.1/§11, PRH-I1
+		// phase 2 orchestrator wiring) - a nil one (wiring off) is skipped
+		// by the guard, same as every other MOCK resolver above.
+		providerkind.Registration{Domain: "payments", Name: "outbound_resolver", Component: b.PaymentsOutboundResolver},
 	)
 	// The real credential subsystem (production-eligible) and each
 	// secret-store backend: awssm is ProductionEligible (W3b); devfile has

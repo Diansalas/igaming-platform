@@ -23,11 +23,18 @@ func TestCredentialReflection_NoConstructedAdapterHoldsACredential(t *testing.T)
 		map[string]PaymentProvider{"credscan-mock": mock},
 		MultiWebhookCredentialResolver{"credscan-mock": NewMockWebhookCredentials(mock)},
 	)
+	// PROV-OUTBOUND-CRED-1, phase 2 orchestrator wiring: the kind-split
+	// resolver itself (holding both the mock and, in a real deployment,
+	// the real providercred-backed resolver) must never carry a
+	// credential/secret-shaped field either - it is a long-lived,
+	// constructed value, not a per-call CallContext.
+	kindSplit := NewOutboundKindSplitResolver(map[string]PaymentProvider{"credscan-mock": mock}, resolver, resolver)
 
 	for name, v := range map[string]any{
-		"MockProvider":            mock,
-		"MockCredentialResolver":  resolver,
-		"Orchestrator (registry)": orchestrator,
+		"MockProvider":              mock,
+		"MockCredentialResolver":    resolver,
+		"Orchestrator (registry)":   orchestrator,
+		"OutboundKindSplitResolver": kindSplit,
 	} {
 		if violations := credentialscan.Scan(v); len(violations) > 0 {
 			t.Errorf("%s holds a credential/secret-shaped field:\n%s", name, strings.Join(violations, "\n"))

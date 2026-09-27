@@ -955,7 +955,7 @@ func newSubmitWithdrawalHandler(deps Deps) http.HandlerFunc {
 		}
 
 		// Phase B: no transaction held.
-		gr := payments.DispatchWithdraw(r.Context(), deps.PaymentsOutboundCredentials, provider, claim.Attempt)
+		gr := payments.DispatchWithdraw(r.Context(), deps.DB, deps.PaymentsOutboundCredentials, provider, claim.Attempt)
 
 		// Phase C: applies under its own context.WithoutCancel-bound
 		// transaction, so it commits even if r.Context() is cancelled by

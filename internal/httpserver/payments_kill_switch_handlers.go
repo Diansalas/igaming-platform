@@ -85,6 +85,30 @@ type killSwitchCall struct {
 	tc        tenant.Context
 	subject   uuid.UUID
 	target    uuid.UUID
+	// ipAddress/userAgent (RV-PRH-I1 security re-verification 2, L2) are
+	// captured from the request in beginKillSwitchCall so every denied-
+	// audit row (foreign-tenant, and every mutation refusal) carries them,
+	// exactly like every SUCCESS audit row in this file already does via
+	// clientIP(r)/r.UserAgent() - there is no reason a denial should be
+	// less traceable than a success.
+	ipAddress string
+	userAgent string
+}
+
+// deniedAuditCtx (RV-PRH-I1 security re-verification 2, L1) detaches a
+// denied-audit write from the caller's own request context and bounds it
+// with a short timeout: a client disconnect (or any other r.Context()
+// cancellation) must never silently skip recording a refusal - the
+// request that caused the refusal is already over by the time this runs,
+// so there is nothing left for cancellation to usefully abort, and
+// letting it propagate would make an audit gap depend on how fast a
+// caller closes its own connection. Mirrors the ADR 0095 phase-C pattern
+// (casino.orchestrator's phaseCTimeout, payout.go's payoutPhaseCTimeout)
+// applied to an audit-only write instead of a domain phase C.
+const deniedAuditTimeout = 5 * time.Second
+
+func deniedAuditCtx(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), deniedAuditTimeout)
 }
 
 // observabilityLogger is the minimal logging surface these handlers need,
@@ -103,6 +127,8 @@ func beginKillSwitchCall(deps Deps, w http.ResponseWriter, r *http.Request, op s
 	c := killSwitchCall{
 		requestID: observability.RequestIDFromContext(r.Context()),
 		logger:    observability.LoggerFromContext(r.Context(), deps.Logger),
+		ipAddress: clientIP(r),
+		userAgent: r.UserAgent(),
 	}
 	tc, err := tenant.FromContext(r.Context())
 	if err != nil {
@@ -153,15 +179,19 @@ func recordKillSwitchDenied(ctx context.Context, deps Deps, c killSwitchCall, op
 	entry := audit.Entry{
 		TenantID: c.tc.TenantID, ActorType: audit.ActorStaff, ActorID: c.subject,
 		Action: "payments_kill_switch." + op, TargetType: "payment_kill_switch",
-		Outcome: audit.OutcomeDenied, RequestID: c.requestID,
+		Outcome: audit.OutcomeDenied, IPAddress: c.ipAddress, UserAgent: c.userAgent, RequestID: c.requestID,
 		Metadata: map[string]any{"denied": "foreign_tenant"},
 	}
 	record := func(ctx context.Context, tx pgx.Tx) error { return audit.Record(ctx, tx, entry) }
+	// RV-PRH-I1 security re-verification 2, L1: detached and bounded, so a
+	// client disconnect never skips this write.
+	dctx, cancel := deniedAuditCtx(ctx)
+	defer cancel()
 	var err error
 	if c.tc.TenantID == uuid.Nil {
-		err = deps.DB.WithPlatformAdmin(ctx, c.subject, record)
+		err = deps.DB.WithPlatformAdmin(dctx, c.subject, record)
 	} else {
-		err = deps.DB.WithTenant(ctx, c.tc.TenantID, record)
+		err = deps.DB.WithTenant(dctx, c.tc.TenantID, record)
 	}
 	if err != nil {
 		c.logger.Error("payments_kill_switch_denied_audit_failed", "op", op)
@@ -180,7 +210,18 @@ func runKillSwitchTx(ctx context.Context, deps Deps, c killSwitchCall, fn func(c
 	if c.tc.TenantID == uuid.Nil {
 		return deps.DB.WithPlatformAdmin(ctx, c.subject, fn)
 	}
-	return deps.DB.WithPrincipalScope(ctx, c.target, c.subject, fn)
+	// Architect review AM-1 (rv-prh-architect.md §1, fbb779e): a
+	// tenant-scoped transaction's GUC scope is always the AUTHENTICATED
+	// c.tc.TenantID, never the path-supplied c.target. canActOnTenant
+	// (beginKillSwitchCall) already refuses any tenant-scoped caller whose
+	// path tenant doesn't match its own, so the two values are equal on
+	// every request that reaches here today - this is defense in depth
+	// against that guard ever regressing, not a live bypass fix. c.target
+	// remains correct to use as a plain query PARAMETER (ListKillSwitches,
+	// GetKillSwitchByID, etc.) since those run inside the GUC this line
+	// sets and RLS still filters by the real session tenant regardless of
+	// what value is passed as an argument.
+	return deps.DB.WithPrincipalScope(ctx, c.tc.TenantID, c.subject, fn)
 }
 
 // killSwitchSessionScope is c.tc's scope as a string, for audit metadata
@@ -284,10 +325,15 @@ func recordKillSwitchRefusalAudit(ctx context.Context, deps Deps, c killSwitchCa
 	entry := audit.Entry{
 		TenantID: c.auditTenantID(), ActorType: audit.ActorStaff, ActorID: c.subject,
 		Action: "payments_kill_switch." + op, TargetType: targetType, TargetID: targetID,
-		Outcome: audit.OutcomeDenied, RequestID: c.requestID,
+		Outcome: audit.OutcomeDenied, IPAddress: c.ipAddress, UserAgent: c.userAgent, RequestID: c.requestID,
 		Metadata: map[string]any{"actor_scope": c.sessionScopeLabel(), "target_tenant_id": c.target.String(), "denied_class": class},
 	}
-	if err := runKillSwitchTx(ctx, deps, c, func(ctx context.Context, tx pgx.Tx) error {
+	// RV-PRH-I1 security re-verification 2, L1: detached and bounded,
+	// exactly like recordKillSwitchDenied's identical fix - a client
+	// disconnect must never skip this write.
+	dctx, cancel := deniedAuditCtx(ctx)
+	defer cancel()
+	if err := runKillSwitchTx(dctx, deps, c, func(ctx context.Context, tx pgx.Tx) error {
 		return audit.Record(ctx, tx, entry)
 	}); err != nil {
 		c.logger.Error("payments_kill_switch_denied_audit_failed", "op", op, "class", class)
