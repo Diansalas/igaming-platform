@@ -288,3 +288,151 @@ production-dead legacy `InitiateDeposit`/`attemptDeposit`/`handleDecline`/`resol
    - a header key-set equality check across dispositions;
    - an HTTP reversal-mismatch test asserting the status and the absence of `error` on the log line.
 4. Correct the §27.10 and evidence claims (F6).
+
+---
+
+## Re-review 1: fix round merged at `b3563c8` (2026-09-27)
+
+- Commits reviewed: `08b84d1`, `91ead85`, `d25a3fd`, `158ac86`. I read the diff `b3563c8^1..b3563c8`
+  directly rather than relying on the commit messages.
+- Environment: a detached worktree at `b3563c8` and a private DB `rv_prhi1cb2_scratch`, built with
+  `priv_db.sh` plus the grants from `deploy/init-app-role.sql`.
+  - All four test URLs, including `TEST_ADMIN_DATABASE_URL`, pointed at that DB.
+  - The DB was dropped and the worktree removed afterwards.
+- Baseline results:
+  - `go test -tags=integration ./internal/payments/` passed (228 s).
+  - The payments/webhook subset of `./internal/httpserver/` passed.
+- Mutants: the implementer supplied no transcripts this round, so every mutant below is my own.
+  - Each edit was applied to a byte-exact anchor and the file restored afterwards. `git status` was clean
+    after every batch.
+  - Payments mutants ran against the full `internal/payments` package. HTTP mutants ran against the named
+    webhook tests.
+  - Four first-attempt mutants did not compile. They were redone as N2b–N5b and are not counted.
+
+### Verdict: still NOT READY
+
+F1 (reversal half), F4 and F5's M4/M6b/M10–M13 are genuinely closed and pinned. Two points block:
+
+- **F2 is not fixed.** My original probe fails byte-for-byte the same way as before.
+- **F3 is only half-fixed.** The sticky status/reference part works, but the receipt path still creates
+  a cascade child for an intent that has already succeeded. The new F3 regression test cannot detect
+  either half.
+
+### Per-finding status
+
+| Finding | Status | Evidence |
+|---|---|---|
+| **F1** resolved receipts + `event_type` filter | **Partially closed.** Reversal receipts: closed. Anomaly receipts and the event_type filter: fixed in code but **unpinned**. | Probe: `CountUnappliedReceipts` stayed at 0 after two declines, and the reversal cases pass P5. N2b (posting-branch resolve removed) and N3b (tombstone-branch resolve removed) are KILLED by `TestRVLF_P5`. **N4b, N5b and N5c SURVIVED**: removing `ResolveReceipt` from the precondition-anomaly, reference-conflict or cross-operation anomaly branches passes the whole package, so the anomaly half of F1 has no test. **N1 SURVIVED**: dropping `AND event_type = 'deposit'` from `ApplyDeferredReceiptsForAttempt` passes the whole package. |
+| **F2** bounded decline reason | **OPEN (not fixed).** | See R1 below. N6 (make `boundedDeclineReason` the identity function) **SURVIVED**. No test anywhere references `vendor_reason_too_long` or `boundedDeclineReason`. |
+| **F3** cascade ordering + sticky reference | **Half-fixed.** The sticky status/provider_reference and audit suppression work. The cascade guard is still defeated on the receipt path. | See R2 below. N7 (provider_reference no longer sticky) and N8 (`finalizeDeclined`'s no-audit guard removed) both **SURVIVED**. |
+| **F4** payout-reference reversal | **Closed and pinned.** | The integrity check now runs before the tombstone branch. N9 (guard disabled) is KILLED by `TestRVLF_M4_ReversalNamingPayoutReferenceNeverTombstoned`, which asserts both the `ErrDepositReversalIntegrity` error and that zero tombstones are written. |
+| **F5 / M10** exact cap | **Closed.** | N16 (`>=`) is KILLED by `TestPaymentWebhook_DeferredReceiptCapExceeded_ExactBoundary` (fills exactly `cap` rows, expects 200). |
+| **F5 / M11** header allow-list | **Closed.** | N17 (`X-Receipt` header) is KILLED by the allow-list plus key-set equality check. |
+| **F5 / M12, M13** reversal-mismatch HTTP | **Closed.** | N18 (`"error", err` on the log line) is KILLED at `payment_webhook_post_verification_400_integration_test.go:271`. N19 (branch removed, now returns 500) is KILLED at `:247`. The restored deposit-mismatch redaction loop is present. |
+| **F5 / M4** (not claimed) | **Closed.** | N10 (reverse the intent's ledger transaction) is KILLED by `TestRVLF_P6_ReversalOfSecondCaptureReversesItsOwnTransaction`. |
+| **F5 / M6b** (not claimed) | **Closed.** | N11 (disputed no longer projects to ambiguous) is KILLED by `TestRVLF_P7_ReplayOrderings` (`intent=declined`). |
+| **F5 / M7** (not claimed) | **Still OPEN.** | N12 (projection recompute removed from `ApplyDeferredReceiptsForAttempt`) **SURVIVED**. `TestRVLF_P8` exercises the deferred path but never asserts intent status. |
+| **F6** ADR §27.10 / evidence corrections | **NOT DONE**, as the implementer disclosed. | The §27.10 inaccuracies remain. Commit `d25a3fd`'s tests were labelled "NOT executed against a live database". They pass on my private DB, but three of them are vacuous for the property they claim to pin (see R2 and the F1 row). |
+| **F7** dead/stale code | **Partial**, as disclosed. | The dead `ErrDepositIntentNotFound`→404 handler branch is removed, and the OpenAPI 400 text and simulation-handler rationale are corrected. Still left: `mapReceiveCallbackError`'s public-route `ErrDepositIntentNotFound` branch (dead); `orchestrator.go:1077` and `payment_deposit_simulation_handlers.go:172` still name the removed functions, as do three test comments; `setIntentAttempt` now carries two stacked, overlapping doc comments; the legacy `InitiateDeposit` chain is unchanged. |
+| H2 / H4 (new code, reviewed incidentally) | H4 pinned. **H2 in-callback path unpinned.** | N13 (`rejectCreatedSiblings` removed from the receipt T13 branch) is KILLED by `TestRVLF_P3`. **N14 SURVIVED**: the new T2 `NOT EXISTS(succeeded sibling)` claim predicate is untested, because P3's child is already `rejected`, so the claim CAS fails on state alone. **N15 SURVIVED**: removing the new `ApplyDeferredReceiptsForAttempt` call from `ApplyReceiptEvidence` passes everything. |
+
+### R1 (High, confirmed): F2 is not fixed. The receipt insert still stores the raw vendor reason, so it still hits the CHECK.
+
+`boundedDeclineReason` is applied only where the reason is passed to `finalizeDeclined` and `ApplyDecline`.
+`insertReceiptDeduped` still stores `ev.DeclineReason` verbatim. This fix round also moved that insert
+to be the transaction's **first** write (R0), so it runs before any bounding.
+
+I re-ran my original probe on `b3563c8`: a deposit `declined` callback with the same 83-byte issuer
+text, plus a second one with an 80-byte, 40-rune multibyte reason. Both fail:
+
+```
+payments: insert receipt: ERROR: new row for relation "payment_provider_events" violates check
+constraint "payment_provider_events_decline_reason_check" (SQLSTATE 23514)
+```
+
+The failure scenario is unchanged from F2: 500 → identical PSP redelivery → permanent loop. N6 surviving
+shows there is no test of bounding on any path.
+
+Two more points:
+
+- Replacing the reason with a sentinel is defensible. But the raw text is then discarded entirely: it
+  appears in no audit metadata and no redacted hash. Ops lose the vendor's reason with no record.
+- Required fix:
+  - bound `ev.DeclineReason` once, at the top of `receiveCallbackViaReceiptPath` or `ApplyReceiptEvidence`,
+    before any fingerprint or insert;
+  - add a test for an oversized reason on the receipt path, and one on each of the drive/sweeper paths.
+
+### R2 (High, confirmed; ledger-finance to adjudicate): F3's cascade guard is still dead on the receipt path
+
+`finalizeDeclined` now returns early when the sticky no-op fires. But on that early return it hands back
+the caller's `intent` argument **unchanged**. In `applyResolvedReceiptEvidence` that argument is a stub,
+`DepositIntent{ID, TenantID}`, so `updated.Status == ""`. `cascadeEligible(attempt, "", ...)` then
+returns true, and `insertCascadeAttemptIfEligible` runs.
+
+The same shape exists in `drive.go` and `sweeper.go`: there the argument is whatever `intent` was loaded
+earlier, which can be stale if a sibling's T13 success committed in between.
+
+Probe on `b3563c8`:
+
+1. A1 declines (cascadable), which creates A2.
+2. A2 is claimed and accepted while A1 is still declined.
+3. A late T13 success lands on A1. `rejectCreatedSiblings` finds nothing, because A2 is already live.
+4. A2 then declines (cascadable).
+
+```
+attempts=1:succeeded,2:declined,3:created intent.status=succeeded
+intent.provider_reference==A1's ref: true   deposit.declined audits=1   cash=5000
+```
+
+The sticky reference and the audit suppression work: only A1's pre-success decline was audited. But
+attempt 3 is still created for a credited deposit.
+
+The new T2 predicate means A3 can never be claimed, so there is no second charge. From reading
+`drive.go:133`, though, every sweeper tick will then fail A3's claim CAS and return the error. The
+result is a permanent `created` orphan plus a recurring error on an intent that has succeeded. N14
+survived, so that T2 backstop itself has no test either.
+
+Required fix:
+
+- in `finalizeDeclined` and `finalizeAmbiguous`, set `intent.Status = actual` before returning on the
+  sticky path, or decide cascade eligibility from `actual` directly;
+- add the probe above as a regression test.
+
+`TestRVLF_F3_SucceededInputNeverRegressedByLaterDeclineOnAnotherSibling` does not pin F3. Its parent
+attempt was synchronously declined at submission, so the late decline callback lands on an attempt that
+is already `declined`. That hits `applyResolvedReceiptEvidence`'s terminal no-op before `setIntentAttempt`
+or `finalizeDeclined` ever runs. The test would also pass on the pre-fix code, and N7 and N8 confirm it.
+It needs a **live** sibling declining after the intent has succeeded, as in the probe above.
+
+### Flags for ledger-finance (not ruled on here)
+
+- **H1 (unconditional reversal-outcome normalization).** Every `deposit_reversal` that resolves a posted
+  deposit posts a full-amount debit, whatever its wire `Outcome` value. That includes `pending` and
+  `ambiguous`, which a real PSP could plausibly use for "chargeback opened / not yet final".
+  - The wire value is not preserved anywhere after normalization. The receipt stores `succeeded`, and
+    neither the `deposit.reversed` nor the `deposit.reversal_tombstoned` audit metadata records it.
+  - The fingerprint also collapses deliveries that differ only in wire outcome.
+  - If the reason-carrier reading is upheld, recommend recording the raw wire outcome in the audit
+    metadata, and pinning the adapter contract (or rejecting `pending`/`ambiguous` for this event type).
+- **M1 rewrite, two new silent cells.**
+  - A **mismatched-amount success on a `declined` deposit attempt** returns `(false, anomaly_other)`. That
+    is a resolved receipt with no dispute, no alert and no state change, even though money of a different
+    amount may have been captured. The previous code attempted a dispute; it failed on the CAS, but it
+    was not silent.
+  - A **mismatched-amount success on a `succeeded` attempt** is classified `ResolutionApplied`, because the
+    `AttemptSucceeded` case returns before the mismatch is checked. That mislabels the receipt, and the
+    mismatch leaves no trace.
+- **H2 stale attempt copy.** `ApplyReceiptEvidence` calls `ApplyDeferredReceiptsForAttempt(attempt)` with
+  the pre-transition copy. The function returns 0 if `attempt.ProviderReference` is nil, which is exactly
+  the T4-by-merchant-reference case H2 describes. This is latent today, because the callback path never
+  populates `MerchantReference`, but it will matter when that is wired. N15 surviving shows the
+  in-callback H2 call has no test.
+
+### Required before this can be marked complete
+
+1. Fix R1 (F2) at the receipt insert, with tests on all three paths so that N6 is killed.
+2. Fix R2 (F3's stub/stale intent status), and replace the vacuous F3 test with the live-sibling probe so
+   that N7, N8 and the R2 scenario are all killed. Add a T2 succeeded-sibling claim test to kill N14.
+3. Pin F1's remaining halves (kill N1, N4b, N5b and N5c), M7 (kill N12) and in-callback H2 (kill N15).
+4. Get ledger-finance rulings on the H1 and M1 flags above.
+5. Complete F6. Finish F7, or record what remains as deliberate.
