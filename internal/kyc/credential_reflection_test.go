@@ -5,7 +5,6 @@
 package kyc
 
 import (
-	"os"
 	"strings"
 	"testing"
 
@@ -33,12 +32,22 @@ func TestCredentialReflection_NoConstructedAdapterHoldsACredential(t *testing.T)
 	}
 }
 
-func TestCredentialReflection_AdapterFileImportsNoSecretStore(t *testing.T) {
-	src, err := os.ReadFile("mock_provider.go")
+func TestCredentialReflection_PackageImportsNoSecretStore(t *testing.T) {
+	violations, err := credentialscan.CheckPackageImports(".")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(src), `"github.com/Diansalas/igaming-platform/internal/secretstore"`) {
-		t.Error("mock_provider.go (the adapter file) must never import internal/secretstore - a real adapter receives an already-resolved credential, it never resolves one itself")
+	if len(violations) > 0 {
+		t.Errorf("package internal/kyc must never import internal/secretstore directly:\n%s", strings.Join(violations, "\n"))
+	}
+}
+
+func TestCredentialReflection_NoPackageLevelCredentialVars(t *testing.T) {
+	violations, err := credentialscan.CheckPackageLevelVars(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(violations) > 0 {
+		t.Errorf("package internal/kyc must have no package-level var of a forbidden credential type:\n%s", strings.Join(violations, "\n"))
 	}
 }
