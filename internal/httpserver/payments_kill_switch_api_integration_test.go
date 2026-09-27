@@ -66,6 +66,18 @@ type ksAPI struct {
 	pool   *db.Pool
 	issuer *auth.Issuer
 	srv    *httptest.Server
+	// logBuf mirrors every log line the server's slog.Logger emits (see
+	// newKSAPI below) - RV-PRH-I1 security review L7's K21 requires an
+	// HTTP-level assertion that a real engage call, over the whole stack,
+	// actually emits logKillSwitchEngagedAlert's line, not merely that the
+	// function itself does (the unit test in
+	// payments_kill_switch_alert_test.go calls the function directly and
+	// so does not notice the CALL SITE in the engage handler being
+	// deleted - that is exactly what K21 SURVIVED against).
+	// syncBuffer (provider_credential_api_integration_test.go) is a trivial
+	// mutex-guarded io.Writer - httptest.Server serves each request on its
+	// own goroutine, so a plain bytes.Buffer would race under -race.
+	logBuf *syncBuffer
 }
 
 func newKSAPI(t *testing.T) *ksAPI {
@@ -79,8 +91,9 @@ func newKSAPI(t *testing.T) *ksAPI {
 	mock := payments.NewMockProvider("mock", "EUR", "USD")
 	orchestrator := payments.NewOrchestrator(map[string]payments.PaymentProvider{"mock": mock},
 		payments.MultiWebhookCredentialResolver{"mock": payments.NewMockWebhookCredentials(mock)})
+	logBuf := &syncBuffer{}
 	srv := httptest.NewServer(New(Deps{
-		Logger:              slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
+		Logger:              slog.New(slog.NewTextHandler(io.MultiWriter(os.Stderr, logBuf), &slog.HandlerOptions{Level: slog.LevelError})),
 		DB:                  pool,
 		AuthIssuer:          issuer,
 		ServiceName:         "ks-test",
@@ -90,7 +103,7 @@ func newKSAPI(t *testing.T) *ksAPI {
 		PaymentOrchestrator: orchestrator,
 	}))
 	t.Cleanup(srv.Close)
-	return &ksAPI{t: t, pool: pool, issuer: issuer, srv: srv}
+	return &ksAPI{t: t, pool: pool, issuer: issuer, srv: srv, logBuf: logBuf}
 }
 
 func (a *ksAPI) tenant() uuid.UUID {
@@ -234,6 +247,39 @@ func (a *ksAPI) platformAuditMetadata(platformPrincipal, targetTenant uuid.UUID,
 	return m
 }
 
+// auditMetadataByOutcome is auditMetadata's outcome-filtered twin, needed
+// for RV-PRH-I1 security review L5's denied-audit rows: a refused mutation
+// and (often) a subsequent successful retry share the same
+// (tenantID, action) pair, so the plain-action lookup is ambiguous once
+// both exist.
+func (a *ksAPI) auditMetadataByOutcome(tenantID uuid.UUID, action, outcome string) map[string]any {
+	a.t.Helper()
+	var raw []byte
+	err := a.pool.WithTenant(context.Background(), tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT metadata FROM audit_log WHERE tenant_id=$1 AND action=$2 AND outcome=$3`, tenantID, action, outcome).Scan(&raw)
+	})
+	if err != nil {
+		a.t.Fatalf("read audit metadata for %s/%s: %v", action, outcome, err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		a.t.Fatalf("decode audit metadata: %v", err)
+	}
+	return m
+}
+
+func (a *ksAPI) auditCountByOutcome(tenantID uuid.UUID, action, outcome string) int {
+	a.t.Helper()
+	var n int
+	err := a.pool.WithTenant(context.Background(), tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT count(*) FROM audit_log WHERE tenant_id=$1 AND action=$2 AND outcome=$3`, tenantID, action, outcome).Scan(&n)
+	})
+	if err != nil {
+		a.t.Fatal(err)
+	}
+	return n
+}
+
 func (a *ksAPI) auditCount(tenantID uuid.UUID, action string) int {
 	a.t.Helper()
 	var n int
@@ -272,6 +318,14 @@ func TestPaymentsKillSwitchAPI_TenantAdminEngageAndFourEyesRelease(t *testing.T)
 	if a.auditCount(tenant, "payments_kill_switch.engage") != 1 {
 		t.Fatal("expected exactly one engage audit row")
 	}
+	// RV-PRH-I1 security review L7/K21: a real engage call, over the whole
+	// HTTP stack, must actually emit logKillSwitchEngagedAlert's line - not
+	// merely the function in isolation (payments_kill_switch_alert_test.go's
+	// unit test), which does not notice the call site itself being deleted.
+	if logged := a.logBuf.String(); !strings.Contains(logged, "payments_kill_switch_engaged_alert") ||
+		!strings.Contains(logged, tenant.String()) || !strings.Contains(logged, "incident_123") {
+		t.Fatalf("expected the engage call to emit the payments_kill_switch_engaged_alert log line for tenant %s, got log output: %s", tenant, logged)
+	}
 
 	reqResp := a.do("POST", base+"/kill-switches/"+ks.ID+"/release-requests", tokA, map[string]any{"reason_code": "resolved"})
 	if reqResp.status != http.StatusCreated {
@@ -288,6 +342,16 @@ func TestPaymentsKillSwitchAPI_TenantAdminEngageAndFourEyesRelease(t *testing.T)
 	if selfApprove.status != http.StatusConflict {
 		t.Fatalf("self-approve status = %d, want 409, body=%s", selfApprove.status, selfApprove.body)
 	}
+	// RV-PRH-I1 security review L5: the refused self-approval writes its
+	// own denied-audit row, in a transaction separate from the failed
+	// approve attempt (which rolled back).
+	if a.auditCountByOutcome(tenant, "payments_kill_switch.approve_release", "denied") != 1 {
+		t.Fatal("expected exactly one denied approve_release audit row for the self-approve refusal")
+	}
+	deniedMeta := a.auditMetadataByOutcome(tenant, "payments_kill_switch.approve_release", "denied")
+	if deniedMeta["denied_class"] != "trigger_refusal" {
+		t.Fatalf("denied audit metadata denied_class = %v, want trigger_refusal", deniedMeta["denied_class"])
+	}
 
 	// A distinct principal approves and releases in one call.
 	approve := a.do("POST", base+"/kill-switch-release-requests/"+relReq.ID+"/approve", tokB, nil)
@@ -299,8 +363,14 @@ func TestPaymentsKillSwitchAPI_TenantAdminEngageAndFourEyesRelease(t *testing.T)
 	if released.Engaged {
 		t.Fatal("expected switch to be released")
 	}
-	if a.auditCount(tenant, "payments_kill_switch.approve_release") != 1 {
-		t.Fatal("expected exactly one approve_release audit row")
+	if a.auditCountByOutcome(tenant, "payments_kill_switch.approve_release", "success") != 1 {
+		t.Fatal("expected exactly one successful approve_release audit row")
+	}
+	// The denied row from the self-approve attempt above must still be
+	// present alongside the successful one - a refusal is never
+	// overwritten or lost once a later attempt succeeds.
+	if a.auditCount(tenant, "payments_kill_switch.approve_release") != 2 {
+		t.Fatal("expected both the denied and the successful approve_release audit rows to be present")
 	}
 }
 
@@ -329,6 +399,11 @@ func TestPaymentsKillSwitchAPI_CancelReleaseRequest(t *testing.T) {
 	cancelAgain := a.do("POST", base+"/kill-switch-release-requests/"+req.ID+"/cancel", tok, nil)
 	if cancelAgain.status != http.StatusConflict {
 		t.Fatalf("second cancel status = %d, want 409, body=%s", cancelAgain.status, cancelAgain.body)
+	}
+	// RV-PRH-I1 security review L5: the refused second cancel writes its
+	// own denied-audit row alongside the first, successful one.
+	if a.auditCountByOutcome(tenant, "payments_kill_switch.cancel_release", "denied") != 1 {
+		t.Fatal("expected exactly one denied cancel_release audit row for the second, refused cancel")
 	}
 }
 
