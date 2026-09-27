@@ -211,12 +211,17 @@ func TestAdmission_T9_DirectoryNeverLoaded_FailsClosed(t *testing.T) {
 	payload := mockProvider.CallbackPayload(tenant.ID, payments.CallbackEventDeposit, "irrelevant", "", payments.OutcomeSucceeded, 100, "EUR", "", false)
 	resp := rawPostCallback(t, srv, "/v1/webhooks/payments/"+tenant.Slug+"/mock", payload)
 	defer resp.Body.Close()
-	// Directory unloaded means tenantKey ALWAYS "_unknown" - the request
-	// is still admitted or rejected by the (tighter) unknown-bucket
-	// limits, never crashes and never bypasses admission; it must not be
-	// a 2xx success for a request that should have been keyed as known.
-	if resp.StatusCode == http.StatusOK {
-		t.Fatal("a request processed while the directory was never loaded must not silently succeed as if the tenant were known")
+	// Security review Low ("T9 must assert the actual status; make code
+	// match the comment: 503 when the directory is unloaded"): ADR 0097
+	// §7's fail-safe table is an EXPLICIT gate, not merely "fall through
+	// to the _unknown bucket" - even a real, active tenant with a
+	// correctly-signed callback must get 503 while the admission
+	// subsystem's own directory has never completed its first load.
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("a request processed while the directory was never loaded must get 503, got %d", resp.StatusCode)
+	}
+	if resp.Header.Get("Retry-After") == "" {
+		t.Fatal("expected a Retry-After header")
 	}
 }
 

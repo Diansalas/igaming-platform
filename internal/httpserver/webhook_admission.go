@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -47,6 +48,28 @@ type webhookAdmissionRuntime struct {
 	directory *webhookTenantDirectory
 
 	suppress *admission.Suppressor
+
+	// overflowLogged latches, per limiter tier key, whether the ADR 0097
+	// §7 "the configured bound is misestimated -> _overflow shared bucket
+	// + error" log line has already been emitted - so a sustained
+	// overflow logs exactly once, not once per request (security review
+	// Low: "emit the overflow error log", previously
+	// admission.GCRALimiter.OverflowOccurred() was computed but never
+	// actually checked/logged anywhere).
+	overflowLogged sync.Map // map[string]struct{}
+}
+
+// logOverflowOnce emits webhook_admission_limiter_overflow exactly once
+// per tier key, the first time lim reports it has ever folded a key into
+// its shared overflow bucket.
+func (rt *webhookAdmissionRuntime) logOverflowOnce(tierKey string, lim *admission.GCRALimiter) {
+	if lim == nil || !lim.OverflowOccurred() {
+		return
+	}
+	if _, already := rt.overflowLogged.LoadOrStore(tierKey, struct{}{}); already {
+		return
+	}
+	rt.logger.Error("webhook_admission_limiter_overflow", "tier", tierKey)
 }
 
 // newWebhookAdmission constructs the runtime from settings. pool feeds the
@@ -345,9 +368,23 @@ func (rt *webhookAdmissionRuntime) admitPreAuth(w http.ResponseWriter, r *http.R
 	requestID := observability.RequestIDFromContext(ctx)
 	clientIP := trustedProxyClientIP(r, trustedProxyCount)
 
+	// ADR 0097 §7/T9 (security review Low, "make code match the comment"):
+	// "Directory never loaded... webhook routes return 503 if called
+	// anyway" - an EXPLICIT fail-closed gate, not merely letting every
+	// tenant fall through to the non-authoritative "_unknown" bucket
+	// (which could otherwise still admit and process a genuinely
+	// well-formed, correctly-signed callback for a real tenant while the
+	// admission subsystem itself is not yet ready).
+	if rt.directory != nil && !rt.directory.Loaded() {
+		rt.logRejected(ctx, "directory_unloaded", domain, "", "", nil, http.StatusServiceUnavailable, time.Second, clientIP)
+		writeAdmissionRejection(w, requestID, apierror.CodeUnavailable, time.Second)
+		return nil, false
+	}
+
 	// A2: per-source-IP tier, off by default (§4.4).
 	if rt.perIP != nil {
 		if admitted, retryAfter := rt.perIP.Allow(clientIP); !admitted {
+			rt.logOverflowOnce("ip", rt.perIP)
 			rt.logRejected(ctx, "ip", domain, "", "", nil, http.StatusTooManyRequests, retryAfter, clientIP)
 			writeAdmissionRejection(w, requestID, apierror.CodeRateLimited, retryAfter)
 			return nil, false
@@ -360,14 +397,18 @@ func (rt *webhookAdmissionRuntime) admitPreAuth(w http.ResponseWriter, r *http.R
 
 	// A3: pre-auth bucket (domain, tenantKey, providerKey).
 	limiter := rt.preAuthKnown[domain]
+	tierKey := "preauth_known_" + string(domain)
 	def := rt.settings.PreAuthRate[string(domain)]
 	if tenantKey == unknownComponent {
 		limiter = rt.preAuthUnknown[domain]
+		tierKey = "preauth_unknown_" + string(domain)
 		def = rt.settings.PreAuthUnknownRate[string(domain)]
 	}
 	rb := rt.rateBurstFor(def, domain, providerKey, tenantKey)
 	preKey := string(domain) + "|" + tenantKey + "|" + providerKey
-	if admitted, retryAfter := limiter.AllowWithParams(preKey, rb.Rate, rb.Burst); !admitted {
+	admitted, retryAfter := limiter.AllowWithParams(preKey, rb.Rate, rb.Burst)
+	rt.logOverflowOnce(tierKey, limiter)
+	if !admitted {
 		status := http.StatusTooManyRequests
 		code := apierror.CodeRateLimited
 		if retries429 != nil {
@@ -490,7 +531,9 @@ func (rt *webhookAdmissionRuntime) admitVerified(w http.ResponseWriter, r *http.
 	key := tenantID.String() + "|" + providerID
 	def := rt.settings.VerifiedRate[string(domain)]
 	rb := rt.rateBurstFor(def, domain, providerID, tenantID.String())
-	if admitted, retryAfter := rt.verified[domain].AllowWithParams(key, rb.Rate, rb.Burst); !admitted {
+	admitted, retryAfter := rt.verified[domain].AllowWithParams(key, rb.Rate, rb.Burst)
+	rt.logOverflowOnce("verified_"+string(domain), rt.verified[domain])
+	if !admitted {
 		status := http.StatusTooManyRequests
 		code := apierror.CodeRateLimited
 		if retries429 != nil {
