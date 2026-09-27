@@ -133,6 +133,69 @@ func TestAdmission_T2_CrossTenantStarvation_Verified(t *testing.T) {
 	}
 }
 
+// T2b (T16 mutation-kill target: "move B1/B2 inside/around WithTenant so
+// they no longer gate it"): unlike T2 above (which uses provider
+// references that would fail domain processing anyway, so it cannot by
+// itself distinguish "B1 correctly blocked this" from "domain processing
+// would have rejected it regardless"), this drives TWO real, individually
+// postable deposits for the SAME tenant with B1's burst set to exactly 1:
+// the first callback must post (exactly one ledger row); the second,
+// beyond B1's burst, must be REJECTED and post NOTHING. If a mutation
+// makes the B1/B2 decision stop gating deps.DB.WithTenant, this test
+// (not T2) is what catches it - recorded in the PRH-I4 mutation-kill
+// evidence file.
+func TestAdmission_T2b_VerifiedRejectionActuallyBlocksDomainTransaction(t *testing.T) {
+	pool, issuer := testEnv(t)
+	orchestrator, mockProvider := newMockOrchestrator()
+
+	tenant := mustCreateTenant(t, pool)
+	brand := mustCreateBrand(t, pool, tenant)
+	mustRegisterCapability(t, pool, tenant.ID, mockProvider)
+
+	settings := testAdmissionSettings()
+	settings.VerifiedRate["payments"] = WebhookRateBurst{Rate: 0.01, Burst: 1}
+	srv := newAdmissionTestServer(t, pool, issuer, orchestrator, nil, settings, false)
+
+	player := mustRegisterPlayer(t, srv, brand.Slug)
+	mustActivatePlayer(t, pool, tenant.ID, player.ID)
+
+	createDeposit := func(amount int64) string {
+		resp := postJSON(t, srv, "/v1/me/deposits", player.Tokens.AccessToken, map[string]any{
+			"asset_code": "EUR", "amount": amount, "payment_method": "card", "idempotency_key": uuid.NewString(),
+		})
+		if resp.StatusCode != http.StatusCreated {
+			t.Fatalf("expected 201 creating a deposit intent, got %d", resp.StatusCode)
+		}
+		var intent depositIntentResponse
+		decodeBody(t, resp, &intent)
+		return providerReferenceFromRedirectURL(intent.RedirectURL)
+	}
+
+	ref1 := createDeposit(1000)
+	ref2 := createDeposit(2000)
+
+	resp1 := rawPostCallback(t, srv, "/v1/webhooks/payments/"+tenant.Slug+"/mock",
+		mockProvider.CallbackPayload(tenant.ID, payments.CallbackEventDeposit, ref1, "", payments.OutcomeSucceeded, 1000, "EUR", "", false))
+	resp1.Body.Close()
+	if resp1.StatusCode != http.StatusOK {
+		t.Fatalf("first callback (within B1 burst=1) must post, got %d", resp1.StatusCode)
+	}
+
+	resp2 := rawPostCallback(t, srv, "/v1/webhooks/payments/"+tenant.Slug+"/mock",
+		mockProvider.CallbackPayload(tenant.ID, payments.CallbackEventDeposit, ref2, "", payments.OutcomeSucceeded, 2000, "EUR", "", false))
+	resp2.Body.Close()
+	if resp2.StatusCode == http.StatusOK {
+		t.Fatal("second callback (beyond B1 burst=1) must be rejected, not posted")
+	}
+
+	if got := ledgerTransactionCountForProviderRef(t, pool, tenant.ID, ref1); got != 1 {
+		t.Fatalf("the admitted deposit must post exactly once: got %d rows", got)
+	}
+	if got := ledgerTransactionCountForProviderRef(t, pool, tenant.ID, ref2); got != 0 {
+		t.Fatalf("the B1-rejected deposit must post ZERO rows - if this is >0, B1 stopped gating the domain transaction: got %d rows", got)
+	}
+}
+
 // T9 (live half): the webhook tenant directory never loaded (startup
 // still waiting, or the DB was down at boot) - every webhook route must
 // answer 503, never fall back to unbounded/raw-slug keying.
