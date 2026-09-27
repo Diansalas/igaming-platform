@@ -9,7 +9,10 @@
   `docs/plans/stage-10.3-planning/00-roadmap-reconciliation.md`, `docs/governance/task-registry.md`
   ("Stage 10.3"), ADRs 0006, 0007, 0008, 0009, 0019, 0022, 0025, 0028, 0085, 0089, 0092, 0093,
   `docs/architecture/reconciliation-model.md`, `docs/architecture/crypto-custody-boundary.md`, and the
-  Blueprint (`iGaming-Platform-Blueprint.pdf`, 20 pages).
+  Blueprint (`iGaming-Platform-Blueprint.pdf`, 20 pages). Update round: ADR 0094,
+  `docs/plans/stage-10.3-planning/19-f-pool-1-ledger-finance-review.md`, registry rows KYC-ENFORCE-1,
+  F-POOL-2, PAYWH-RL-1, BRANCH-PROTECTION-1, ACCESS-ANALYZER-CHECK-1, CR-CHECKLIST-HMAC-1,
+  CODE-HYGIENE-10.3-1.
 - **Rules for this paper:**
   - No vendor is selected.
   - No vendor-specific fact is stated. Every vendor property is an intake question.
@@ -54,7 +57,25 @@ No production readiness, provider readiness, licensing or regulatory approval is
 
 ## 3. F-POOL-1 resolution
 
-[PENDING: F-POOL-1 implementation + review]
+**Fixed by ADR 0094:**
+- two-phase webhook verification;
+- no pooled connection held across secret-store I/O;
+- per-(scheme, tenant) breaker;
+- per-tenant in-flight cap P=2 and degraded budget D=2;
+- txscope fail-closed guards.
+
+| Review | Verdict |
+|---|---|
+| `security` (design) | CO-SIGN WITH CONDITIONS C1–C11 |
+| `qa` | CONFIRMED WITH CHANGES |
+| `security` (implementation) | CLOSED WITH CONDITIONS K1–K3 |
+| `code-reviewer` | READY WITH FOLLOW-UPS |
+| `ledger-finance` | SIGN-OFF WITH CONDITIONS (LF-C1 → §6 row 28; LF-C2 → F-POOL-2 constraints, §14) |
+
+[PENDING: K1 — first CI run of the timing lane failed (CI #360); under investigation; final status to be recorded]
+
+Security C11 split the vendor-I/O half of the problem out as **F-POOL-2** (§4, §14). F-POOL-1 does
+not cover it.
 
 ## 4. Remaining launch blockers
 
@@ -63,10 +84,11 @@ whether the item needs a selected vendor.
 
 | ID | Blocker | Owner | Vendor? | Blocks |
 |---|---|---|---|---|
-| F-POOL-1 | Store outage pins the pool at production pool size | architect + security | No | Any real provider go-live (§3 pending) |
+| KYC-ENFORCE-1 | KYC status is not enforced on withdrawal, deposit or bet paths (`internal/kyc` exists but is not called from them); `NOT IMPLEMENTED` | identity-compliance (+ payments, casino, `security` review) | No | Real-money go-live |
+| F-POOL-1 | Store outage pins the pool at production pool size. Fixed by ADR 0094; K1 pending (§3) | architect + security | No | Any real provider go-live until K1 is recorded |
+| F-POOL-2 | Vendor HTTP I/O inside the tenant tx: payments `Deposit`/`QueryStatus`/cascade, casino `Launch`, KYC `CreateVerification`/`SubmitVerification`, `HealthStatus`. Dual-write risk rated **High (P1-class) once reachable** by `ledger-finance`; `NOT IMPLEMENTED`, unreachable while every adapter is MOCK | architect + security + ledger-finance | No | **Per domain:** that domain's first non-MOCK adapter |
 | PROV-OUTBOUND-CRED-1 | Outbound calls (`Deposit`, `Withdraw`, `QueryStatus`, `Launch`, `CreateVerification`) run inside a domain DB tx; tenant + credential not in adapter request types. Tripwire `TestOutboundPrecondition_EveryWiredAdapterIsSynthetic` | architect + ledger-finance + payments/casino/identity-compliance | No | Registering **any** non-synthetic payments, casino or KYC adapter |
 | PROVIDER-REF-BOUND-1 | No length bound on provider reference columns | ledger-finance + casino + payments | No | Real-provider go-live |
-| CODE-HYGIENE-10.3-1 item 2 | `DerivedTokenCache` unbounded | architect + security | No | Its first production caller |
 | WH-VENDOR-SCHEME-1 (residual) | Domain callback-fixture hook `NOT IMPLEMENTED`; any non-mock adapter fails the domain conformance suites | architect | Partly | The first real adapter in each domain |
 | DEPLOY-FPKEY-1 | Fingerprint HMAC key delivery to AWS | devops + security; **human** | No | Staging with the real resolver |
 | HD-10.3-2 follow-ups | IAM/KMS for `awssm`, VPC endpoint vs `HTTPS_PROXY`, IRSA, account pinning | **human** (infrastructure decision) | No | `awssm` on AWS |
@@ -76,9 +98,11 @@ whether the item needs a selected vendor.
 | Free-round / jackpot conformance case | `NOT IMPLEMENTED` (ADR 0025 amendment item 8) | casino | Yes | First real casino adapter |
 | LEDGER-MANUAL-ADJ-4EYES-1 | No four-eyes manual adjustment / mismatch resolution | ledger-finance + security; own stage; **human** | No | Real-money go-live; casino key-compromise recovery |
 | Payments statement reconciliation | Wallet ↔ PSP stream is `BLUEPRINT` design only (`reconciliation-model.md` §2.2); no stream in `internal/reconciliation` | payments + ledger-finance | Yes (file/API shape) | Real PSP go-live (`CLAUDE.md`: daily reconciliation per integration) |
-| PAYWH-TS-1, PAYWH-RL-1, PAYWH-BRAND-1 | Deferred (ADR 0092) | payments + security | — | RL-1 pre-launch; BRAND-1 when a tenant has per-brand merchant accounts |
+| PAYWH-RL-1 | No public webhook rate limiting. `security`: after F-POOL-1, the main remaining cross-tenant noisy-neighbour vector | payments + devops (+ security) | No | The first real provider (§14) |
+| PAYWH-TS-1, PAYWH-BRAND-1 | Deferred (ADR 0092) | payments + security | — | BRAND-1 when a tenant has per-brand merchant accounts |
 | PAY-SB-REPLAY-AUDIT-1 | Audit row ungated on `AlreadyPosted` | payments; sportsbook | No | Confirm or gate before real PSP |
 | Earlier-stage blockers | Roadmap reconciliation §7: PLAT-ROLESPLIT-1 production step, KMS signing (ADR 0018), staff MFA (ADR 0017), audit client IP, backup/DR "NOT MET", no metrics backend, sportsbook items | various | No | Production launch |
+| BRANCH-PROTECTION-1, ACCESS-ANALYZER-CHECK-1 | Repository and AWS admin actions (§15) | **human** | No | Merge to `main`; the next staging deployment |
 | Human/legal | §15 of this paper | human | — | Launch |
 
 ## 5. A — Recommended provider-integration sequence
@@ -155,6 +179,7 @@ platform cannot integrate without an answer, or without a further ADR.
 | 25 | Certification | Whether the vendor certifies our integration before go-live; GLI evidence it supplies (BLUEPRINT §8) | Release discipline; evidence pack | Human |
 | 26 | Crypto specifics (if any) | Confirmations, reorgs, memo/tag, wrong-network deposits (BLUEPRINT §4.6) | Crypto rail blocked on `crypto-custody-boundary.md` §4.1 | Yes (crypto) |
 | 27 | Shared-vendor privilege | If the vendor also does custody: separately scoped credentials? | ADR 0022 §4.2: a vendor that cannot issue them is a `security` vendor-selection finding | Yes (if applicable) |
+| 28 | Redelivery on 401 and 5xx (LF-C1) | Does the vendor redeliver a callback (win, rollback, reversal, payment status) after our 401? After a 5xx? Schedule and give-up point | ADR 0094 maps a post-verification re-check DB error to 401. If 401 is terminal, then either (a) return a retryable 5xx for post-verification re-check DB errors (needs `security` agreement), or (b) reconciliation must catch provider-settled, platform-unposted items with a P1 alert | Yes (payments, casino) |
 
 ## 7. C — Adapter boundary
 
@@ -186,7 +211,7 @@ Rules carried from ADRs 0022/0025/0028 and binding on the first adapter:
 | Secret lookup | Resolver + `Fetcher` (breaker, singleflight, caches); `devfile`; `awssm` code | `awssm` on AWS (HD-10.3-2, DEPLOY-FPKEY-1); F-POOL-1 (§3) |
 | Tenant/provider binding | Per-tenant route, `vendor_account_id` → `BoundAccountID`, SC3/SC4/SC8 | The vendor's real account binding (intake #7) |
 | Health checks | `HealthStatus` on every provider interface; `/readyz` | A real implementation; routing failover on health is not verified here |
-| Timeout / retry | `httpclient`: per-attempt timeout (default 10 s), bounded retry only when idempotent, `Sent` flag on timeout | Per-vendor values; outbound calls moved out of the DB tx (PROV-OUTBOUND-CRED-1) |
+| Timeout / retry | `httpclient`: per-attempt timeout (default 10 s), bounded retry only when idempotent, `Sent` flag on timeout | Per-vendor values; outbound calls moved out of the DB tx (PROV-OUTBOUND-CRED-1, F-POOL-2) |
 | Webhook verification | `VerificationScheme`, orchestrator-enforced `Verify`, SC1–SC13, synthetic/production split | The vendor scheme, its known-answer vector, and the manifest entry |
 | Replay protection | Idempotency constraint; `timestamp_out_of_window`; SC7 mandatory for real schemes | The vendor's signed timestamp (intake #6); PAYWH-TS-1 stays open |
 | Idempotency | DB-enforced `(provider_id, provider_tx_id)`; casino `postBet` short-circuit | CAS-WIN-IDEMP-1 (before G-6); outbound idempotency key (intake #11); PAY-SB-REPLAY-AUDIT-1 |
@@ -207,7 +232,7 @@ casino `supports_*` (ADR 0025 §4, 0094), KYC `Capabilities`, and scheme `Proper
 `RECOMMENDATION`: add one adapter-declared **integration capability manifest** per adapter. It is
 code-declared and never tenant-editable (ADR 0022 §2.1). It sits alongside the existing
 tenant-narrowing rows and does not replace them. Not registered; proposed ID `PROV-CAP-MATRIX-1`
-(architect).
+(architect). First scope: the category chosen in §5 only (§14).
 
 | Capability | Where it lives today | Fail-safe when the vendor does not support it (`RECOMMENDATION`) |
 |---|---|---|
@@ -230,7 +255,7 @@ tenant-narrowing rows and does not replace them. Not registered; proposed ID `PR
 2. at new-activity time (gate new bets, deposits or verifications); and
 3. never at settlement time.
 
-The platform never emulates a missing capability silently.
+`RECOMMENDATION`: the platform never emulates a missing capability silently.
 
 ## 10. F — Multi-tenant credential model
 
@@ -308,10 +333,12 @@ Checked against the registry at `2876fa5`. "Authorization" column:
 
 | ID (registry) | Work | Owner | Authorization |
 |---|---|---|---|
-| F-POOL-1 | See §3 (being fixed now) | architect + security | Per §3 |
+| **KYC-ENFORCE-1** | Server-side, fail-closed KYC gate on withdrawal (at least before payout submission), deposit and play, driven by per-jurisdiction configuration. Threshold **values** depend on HDR-J-6 + legal review; the mechanism and a conservative fail-closed default do not | identity-compliance (+ payments, casino, `security` review) | ARCH-OK (values: **HUMAN**) |
+| F-POOL-1 | Fixed by ADR 0094; K1 pending (§3) | architect + security | Per §3 |
+| F-POOL-2 | Move vendor I/O out of the tenant tx, per domain, before that domain's first non-MOCK adapter. **Prerequisite wave of the first-provider plan:** with payments first, the payments fix precedes the adapter. `ledger-finance` constraints (LF-C2), all required: (1) intent/attempt committed in `submitting` in its own short tx before the call; the call runs with no tx held; (2) PSP reference / idempotency key derived from the committed intent id, never regenerated; a player retry resumes the intent; (3) compare-and-set state machine, every transition audited; (4) callbacks resolve by merchant reference and accept `submitting`; (5) sweeper resolves `submitting`/`ambiguous` via `QueryStatus` with no tx held, never auto-declines or cascades on an unknown outcome; (6) cascade through an outbox, not inline; (7) ledger posting in one locked domain tx (ADR 0082 order) with no external I/O; (8) tests: crash after PSP acceptance, callback before result commit, player retry in flight, duplicate/concurrent callbacks, sweeper, concurrent cascade, each ending Σ debits = Σ credits and projection = rebuild; (9) same claim-before-call rule for withdrawal payout dispatch | architect + security + ledger-finance (+ payments/casino/identity-compliance) | **NEW-ADR** (under ADR 0094's INV-POOL rule; `ledger-finance` sign-off before implementation). `RECOMMENDATION`: design it together with PROV-OUTBOUND-CRED-1 |
+| PAYWH-RL-1 | Public webhook rate limiting | payments + devops (+ security) | The human's deferral stands until the provider wave. `RECOMMENDATION`: schedule it inside that wave, no later than the first real provider |
 | PROV-OUTBOUND-CRED-1 | Move `Deposit`, `Withdraw`, `QueryStatus`, `Launch`, `CreateVerification` outside the domain DB tx; tenant + credential through adapter request types. Payout needs an intent-then-call-then-record design | architect + ledger-finance + payments/casino/identity-compliance | **NEW-ADR** (financial flow restructuring; ADR 0093 §5 records it as a design decision) |
-| CODE-HYGIENE-10.3-1 (item 2) | Bound/sweep `DerivedTokenCache` | architect + security | ARCH-OK (retention value to `security`) |
-| CODE-HYGIENE-10.3-1 (items 1, 3–7) | Low hygiene | architect + security + ledger-finance | ARCH-OK |
+| CODE-HYGIENE-10.3-1 | Closed (cache now bounded) except the S-4 residual, which is being fixed | architect + security | — |
 | PROVIDER-REF-BOUND-1 | Platform maximum, adapter validation, later CHECK migration with pre-flight | ledger-finance + casino + payments (+ security) | ARCH-OK (the value needs `ledger-finance` + `security` agreement) |
 | CAS-RECON-SCALE-1 | Incremental/watermarked checks, bounded parallelism, row retention | ledger-finance + architect (+ devops) | **NEW-ADR** (registry says "design + ADR"; touches ADR 0023 observability rule) |
 | CAS-WIN-IDEMP-1 | `postWin` already-posted short-circuit | casino + ledger-finance | ARCH-OK (required before G-6; G-6 itself stays unauthorized) |
@@ -319,20 +346,24 @@ Checked against the registry at `2876fa5`. "Authorization" column:
 | PAY-SB-REPLAY-AUDIT-1 | Confirm or gate audit on `AlreadyPosted` | payments; sportsbook | ARCH-OK |
 | PROV-REVOKE-ALL-1 | Cross-tenant revoke per provider | security + architect | ARCH-OK (trigger not reached; optional) |
 | WH-VENDOR-SCHEME-1 residual (no own ID) | Domain callback-fixture hook: optional fixture interface signing with the adapter's own `Sign` | architect | ARCH-OK, but ADR 0022 says it is reviewed together with the first adapter that needs it. `RECOMMENDATION`: build the interface now against the MOCK and review it again with the first adapter |
-| Not registered — proposed `PROV-CAP-MATRIX-1` | Integration capability manifest + fail-safe rule (§9) | architect | **NEW-ADR** |
+| Not registered — proposed `PROV-CAP-MATRIX-1` | Integration capability manifest + fail-safe rule (§9), **first chosen category only** | architect | **NEW-ADR** |
 | Not registered — proposed `PAY-RECON-STMT-1` | Provider-neutral PSP statement source + `payments_statement` stream with a MOCK source (mirrors CAS-RECON-STMT-1) | payments + ledger-finance | ARCH-OK (`reconciliation-model.md` §2.2 is `BLUEPRINT` design) |
 | Not registered — proposed `PROV-CONTRACT-HARNESS-1` | Recorded-exchange contract-test harness (fixture format, provenance, no credentials) | qa + architect | ARCH-OK |
-| Not registered — proposed `PROV-OBS-1` | Per-provider latency/error metric instruments (OTel) | devops + architect | ARCH-OK for instruments; the metrics **backend** is **HUMAN** (roadmap §7 "OTel exporter PROVIDER DEPENDENT") |
-| Not registered — proposed `PROV-KILLSWITCH-RUNBOOK-1` | One operator runbook per category: capability disable, revoke, expected stranded exposure | architect + security + casino/payments | ARCH-OK (docs) |
+| Not registered — proposed `PROV-OBS-1` | Per-provider latency/error metric instruments (OTel), **first chosen category only** | devops + architect | ARCH-OK for instruments; the metrics **backend** is **HUMAN** (roadmap §7 "OTel exporter PROVIDER DEPENDENT") |
+| Not registered — proposed `PROV-KILLSWITCH-RUNBOOK-1` | Operator runbook for the **first chosen category only**: capability disable, revoke, expected stranded exposure | architect + security + casino/payments | ARCH-OK (docs) |
 | LEDGER-MANUAL-ADJ-4EYES-1 | Four-eyes manual adjustment | ledger-finance + security | **HUMAN** (registered as its own later stage) |
 | KYC-SANCTIONS-IF-1, KYC-HOSTED-SESSION-1 | Vendor-agnostic interfaces | identity-compliance | ARCH-OK, but only useful once the KYC vendor shape is known. `RECOMMENDATION`: defer to vendor intake |
 | KYC-DOC-REJECTION-BOUND-1 | Bound + player visibility | identity-compliance | **HUMAN** for player visibility (HD-10.3-3 precedent) |
-| PAYWH-TS-1 / PAYWH-RL-1 / PAYWH-BRAND-1 | Deferred per ADR 0092 | payments + security | Stay deferred unless the human reopens them |
+| PAYWH-TS-1 / PAYWH-BRAND-1 | Deferred per ADR 0092 | payments + security | Stay deferred unless the human reopens them |
 | DEPLOY-FPKEY-1, HD-10.3-2 follow-ups | Infrastructure | devops + security | **HUMAN** |
-| CR-CHECKLIST-HMAC-1 | Agent-configuration edit | human | **HUMAN** |
+| CR-CHECKLIST-HMAC-1 | Done: checklist item in `.claude/agents/code-reviewer.md` | orchestrator | `IMPLEMENTED` |
 
 Proposed IDs above are **not** in the registry. They must be registered by the orchestrator
 before any work starts.
+
+**Future item (recorded, not built now):** the kill-switch runbook, capability manifest and metric
+instruments for each further category, written when that category gets its first real adapter
+(same pattern as the callback-fixture hook).
 
 ## 15. Human decisions (carried forward, unchanged)
 
@@ -355,13 +386,16 @@ before any work starts.
 | Vendor selection (PSP, KYC/AML, casino aggregator, sportsbook, crypto custodian); production credentials; commercial pricing | OPEN |
 | Bonus Engine Wave 4 | **Not authorized** |
 | AI agents | **Not authorized**; ADR 0089 is architecture only |
+| BRANCH-PROTECTION-1: enable protection on `main` (require PR, the six CI checks, Code Owner review; block force-push/deletion). Admin-only; verified NOT ENABLED | OPEN — human action, before any merge to `main` |
+| ACCESS-ANALYZER-CHECK-1: IAM Access Analyzer check after the 2026-09-26 teardown (deployer credential is denied by design) | OPEN — human action, before the next staging deployment |
 | Also open, relevant to this plan | Q1-derived rail choice (fiat vs crypto payment gateway); `crypto-custody-boundary.md` §4.1 (ledger-finance decision); ADR 0022 §4.2 one vendor in two roles (business/risk); DEPLOY-FPKEY-1; staging deployment authorization; production launch authorization |
 
 ## 16. Dependencies
 
 | Item | Depends on |
 |---|---|
-| Any non-synthetic adapter registered | PROV-OUTBOUND-CRED-1 complete; F-POOL-1 resolved (§3) |
+| Any non-synthetic adapter registered | PROV-OUTBOUND-CRED-1 complete; F-POOL-1 resolved (§3, K1); F-POOL-2 fixed for that domain; PAYWH-RL-1 (`RECOMMENDATION`) |
+| Real-money go-live | KYC-ENFORCE-1 (values: HDR-J-6 + legal) |
 | Real scheme production-eligible | SC1–SC13 with a vendor vector; manifest entry; callback-fixture hook |
 | Real PSP go-live | The above + PSP statement stream + PROVIDER-REF-BOUND-1 + LEDGER-MANUAL-ADJ-4EYES-1 + staging acceptance + earlier-stage blockers (§4) |
 | Crypto payment gateway | `crypto-custody-boundary.md` §4.1 decided |
@@ -375,8 +409,8 @@ before any work starts.
 
 | Wave | Content | Needs vendor? | Exit gate |
 |---|---|---|---|
-| **P-W0 Vendor intake** | Human selects the first vendor (category per §5). Complete the §6 checklist from documentation and contract only. An architect paper maps the vendor onto §7–§10. An ADR is written wherever intake hits a "not integrable without an ADR" clause (ADR 0022 §3 points 3/10). `security` vendor-selection review (ADR 0022 §4.2) | Yes | Intake complete; no unanswered "Blocks = Yes" row; ADRs accepted |
-| **P-W1 Vendor-independent prerequisites** (may run before or during P-W0) | F-POOL-1 (if not closed by §3); PROV-OUTBOUND-CRED-1 restructuring (new ADR first); `DerivedTokenCache` bound; PROVIDER-REF-BOUND-1; callback-fixture hook; PROV-CAP-MATRIX-1 ADR; PAY-RECON-STMT-1 (MOCK source) if payments is first; contract-test harness; per-provider metric instruments; kill-switch runbooks | No | CI green; mutation evidence; `security` + `ledger-finance` + `code-reviewer` + `qa` reviews; tripwire replaced by the real precondition test |
+| **P-W0 Vendor intake** | Human selects the first vendor (category per §5). Complete the §6 checklist from documentation and contract only. An architect paper maps the vendor onto §7–§10. An ADR is written wherever intake hits a "not integrable without an ADR" clause (ADR 0022 §3 points 3/10). `security` vendor-selection review (ADR 0022 §4.2) | Yes | Per-candidate API documentation and sandbox access terms gathered, with the relationship owner named; intake complete, including row 28 (LF-C1); no unanswered "Blocks = Yes" row; ADRs accepted |
+| **P-W1 Vendor-independent prerequisites** (may run before or during P-W0) | KYC-ENFORCE-1; F-POOL-1 K1 (§3); F-POOL-2 for the first category + PROV-OUTBOUND-CRED-1 (new ADR first; payments first ⇒ payments F-POOL-2 fix precedes the adapter); PAYWH-RL-1; PROVIDER-REF-BOUND-1; callback-fixture hook; PROV-CAP-MATRIX-1 ADR, metric instruments and kill-switch runbook for the first category; PAY-RECON-STMT-1 (MOCK source) if payments is first; contract-test harness | No | CI green; mutation evidence; `security` + `ledger-finance` + `code-reviewer` + `qa` reviews; tripwire replaced by the real precondition test |
 | **P-W2 Adapter against recorded fixtures** | Vendor scheme + known-answer vector; adapter mapping; error/decline taxonomy; state-machine mapping; capability manifest; conformance with fixture hook. Still unregistered in production | Documentation + recordings | SC1–SC13 and domain suite green; `MarkProductionEligible()` **not** yet added |
 | **P-W3 Sandbox integration** | Human-authorized sandbox credentials (non-production) through four-eyes handles on `devfile`; outbound calls to the sandbox; inbound via the staging endpoint (P-W4) | Sandbox | Recorded evidence; no production credential anywhere |
 | **P-W4 Governed staging deployment** | `awssm` IAM (HD-10.3-2), DEPLOY-FPKEY-1, vendor callbacks to staging, drills, alarms, latency | Sandbox | Human-authorized; completion report §9 items closed |
@@ -389,13 +423,14 @@ Order: P-W0 ∥ P-W1 → P-W2 → P-W3 ↔ P-W4 → P-W5. Controls from P-W1 are
 **GATE: NEXT-PROVIDER-PLANNING — STOP for human authorization.** Nothing in this paper has started.
 
 The human is asked to:
-1. Acknowledge §3 once the F-POOL-1 fix and review land (or accept the gap explicitly).
+1. Acknowledge §3 once K1 is recorded (or accept the gap explicitly).
 2. Choose the first category (§5: `RECOMMENDATION` payments; alternative KYC).
-3. Authorize P-W1 (vendor-independent prerequisites), in full or by row of §14. The
-   PROV-OUTBOUND-CRED-1 ADR is its first item.
-4. Start P-W0 by supplying the information in §19.
-5. Decide separately, not implied by 2–4: staging authorization, HD-10.3-2 follow-ups and
-   DEPLOY-FPKEY-1.
+3. Authorize P-W1 (vendor-independent prerequisites), in full or by row of §14. KYC-ENFORCE-1
+   and the F-POOL-2 / PROV-OUTBOUND-CRED-1 ADR for the first category lead it.
+4. Start P-W0 by supplying the decisions in §19. Gathering per-candidate API documentation and
+   sandbox terms is P-W0 work (§17 exit criteria).
+5. Decide separately, not implied by 2–4: staging authorization, HD-10.3-2 follow-ups,
+   DEPLOY-FPKEY-1, and the BRANCH-PROTECTION-1 / ACCESS-ANALYZER-CHECK-1 actions (§15).
 
 ## 19. Exact information needed from the human to select the first real provider
 
@@ -407,18 +442,19 @@ The human is asked to:
 4. **Currencies/assets** the first brand will accept.
 5. **Shortlist** of 1–3 candidate vendors in the chosen category that you have, or can get, a
    commercial conversation with. The platform will not pick one.
-6. **Per candidate:** API documentation and sandbox access terms (whether a contract or NDA is
-   needed first), and who on your side owns the relationship.
-7. **Licensing shape** for this vendor: our Anjouan licence only, or also future tenant/BYOL use,
+6. **Licensing shape** for this vendor: our Anjouan licence only, or also future tenant/BYOL use,
    and the vendor's answer to "sub-operators under our credentials?" (BLUEPRINT §5).
-8. **Permission** to hold vendor **sandbox** (non-production) credentials in the development
+7. **Permission** to hold vendor **sandbox** (non-production) credentials in the development
    `devfile` store under four-eyes activation. Production credentials stay out of scope.
-9. **Whether** vendor sandbox callbacks may reach us before a staging deployment is authorized
+8. **Whether** vendor sandbox callbacks may reach us before a staging deployment is authorized
    (default: no; recorded fixtures only).
 
 ---
 
 ## Product-owner review
+
+**Status: applied (2026-09-26).** Item 1 → §9, §14 (first category only; future item recorded) and
+§17. Item 5 → §9. Item 6 → §17 P-W0 exit criteria and §18; removed from §19.
 
 Verdict: **P-W1 should be trimmed to the first chosen category; the rest of the plan is right-sized.** No security/compliance/ledger requirement is deferred here — good.
 
