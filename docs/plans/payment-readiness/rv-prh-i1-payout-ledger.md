@@ -304,3 +304,197 @@ documented remediation path, recorded as a runbook, not as an edit to 0101.**
 4. The M3/M4 mutants are killed, a lock-presence test kills M1, and the vacuous Reject-vs-Claim race
    is replaced by a CP-W4 claim-vs-claim test.
 5. The 0101 remediation runbook is written.
+
+---
+
+# Re-review (fix round): HEAD `9324189`
+
+- Fix commits reviewed: `c8a2b76`, `0154459`, `9be59bb`, `3be159d` (ADR 0095 §27.11), `73e0a77`,
+  plus the coordinator's post-merge `f99d940`. The review also covers code that now shares these
+  files: the kill-switch predicates (migration 0105, `attempt.go`) and the callback cutover
+  (`receipt.go`).
+- Environment: a detached worktree and a private database `igaming_lf_rr_payout`. It was created
+  via `TEST_ADMIN_DATABASE_URL`, given the `deploy/init-app-role.sql` runtime-role grants, and
+  migrated 1→105. Both the worktree and the database have been removed. Per-test `scratchdb`
+  databases drop themselves on cleanup.
+- Suites on the private DB: `internal/payments`, `internal/withdrawal` and the `internal/httpserver`
+  withdrawal tests all pass. The pinned `golangci-lint` 2.9.0 reports 0 issues, both untagged and
+  with `integration`.
+
+## Re-review verdict: APPROVE WITH CONDITIONS
+
+The veto on C1 is lifted. My original probes show every original Critical and High finding fixed,
+and the mutants that previously survived are now killed. No path I could construct pays out twice,
+or moves money twice or with the wrong amount.
+
+This round introduced one new High finding (R1) and two Mediums (R2, R3), which all come from how
+the new phase-C late-evidence routing interacts with the callback cutover and `/resolve`. None of
+them moves money incorrectly. They leave a held withdrawal stranded (hold not released, or parked
+as `disputed`) with no automated or manual exit while M2 is BLOCKED. For that reason they are
+conditions to fix before the payout path is enabled for real traffic, not grounds to reject again.
+
+## Original findings: verified status
+
+| Finding | Claim | Evidence (re-run probe or mutant) | Status |
+|---|---|---|---|
+| C1 unguarded T12 resend | Poll first, then T12 only if `IdempotentSubmission` and under the cap | Probe A, non-idempotent: **1** `Withdraw` over 8 sweeps, then escalated. Probe A, idempotent: **3** calls (1 + 2 resends), then escalated. Mutant MC (manifest check removed) killed by `TestSweeper_T12_NonIdempotentManifest_NeverResends`. MF+MG (both cap checks removed) killed by `…StopsAtMaxResubmits`. The kill-switch predicate is inside the T12/T2/T1p CAS statements. | **Fixed** |
+| H1 resend outcome rejected by the guard | `EvidenceSync` | Probe B: a T2 resend decline gives withdrawal `failed`, cash back to 100 000, hold 0. Mutants MA/MB (Complete/Fail removed) killed by the concrete-balance tests. | **Fixed** |
+| H2 no amount check on QueryStatus success | `applyPayoutSuccessCheckedFromStatus` disputes on mismatch | Probe D: confirmed 400 vs 500, and confirmed 50 000 vs 500 (×100). Both give `disputed` with `amount_asset_mismatch`, the withdrawal stays `submitted`, and nothing posts. Mutant ME killed. | **Fixed** |
+| H3 stranded claim | `next_action_at` set; no-reference `submitting` becomes `ambiguous` | Probe E: `next_action_at = lease_until` at T1p. After lease expiry the sweeper moves it to `ambiguous`, then escalates it (non-idempotent), with 0 `Withdraw` calls and the hold held. That is fail-closed. The attempt remains unresolvable until CP-W1 (merchant-reference query) or M2 exists; see residual R5. | **Fixed (with disclosed residual)** |
+| H4 `/resolve` held a tx across QueryStatus and bypassed attempts | `PollPayoutStatus` is the single entry point | Code: the handler reads and commits, then calls `PollPayoutStatus`, which uses no tx across the call. Attempt and withdrawal now transition together. The Stage 3C resolve tests still pass. See R2 for a new timing defect. | **Fixed (see R2)** |
+| M1 pending poll errors | State-aware handling | Probe C: a pending poll reschedules (`poll_count` 0→1), with no error. | **Fixed** |
+| M2 NotSent on a resend | Routed by `EverPossiblySent` | Probe I: T12 plus a credential failure goes back to `ambiguous` with 0 calls. Mutant MH (branch disabled) **survives**: no test covers it. | **Fixed, untested (condition C-T1)** |
+| M3 lock order | "attempt CAS before the ledger" | Attempt CAS now precedes the posting, but the leading withdrawal `FOR UPDATE` was **dropped**, which inverts parent and attempt. See R3. | **Regressed (R3)** |
+| M4 late contradicting evidence | T14 / T10 with a P1 audit | Probe G: a sync success after a sync decline gives `disputed`, no money moved, and an audit record. | **Fixed for the sync path (see R1 for over-reach)** |
+| M5 kill switch | Fail-closed at T1p/T2/T12 | Code: an in-statement `NOT EXISTS` in `InsertSubmittingAttempt`, `ClaimCreatedForSubmission` and `ResubmitAmbiguous`. A T1p refusal rolls back `MarkSubmittedPending` (the withdrawal stays `approved`). A T2/T12 block reschedules. Covered by `TestClaimForDispatch_KillSwitchEngaged_FailsClosedNoWithdraw` and `…T2Reclaim_KillSwitchEngaged…`. | **Fixed** |
+| Outer lock pinned | Lock-presence test added | `TestClaimForDispatch_GateRunsUnderOuterLock` kills mutant MD. But when it fails it calls `t.Fatalf` without releasing its lock-holder goroutine, so the run hangs until `go test`'s timeout instead of failing fast (minor; condition C-T3). | **Fixed** |
+| Double submit | n/a | Probe F: 50 reps of concurrent submit+dispatch give 1 success and 1 `Withdraw` per rep; balanced; projection = rebuild. | **Holds** |
+
+Mutant summary for this round: MA, MB, MC, MD, ME and MF+MG are killed. MF alone and MG alone
+survive, which is acceptable because they are redundant copies of the same cap (DB CAS and Go
+check). MH survives.
+
+## New findings from this round
+
+### R1 (High): a routine async payout is parked as `disputed` when a provider callback arrives during phase B
+
+`payoutHandleContradiction` → `applyPayoutLateEvidence` routes **any** `ErrAttemptStateConflict`
+from `MarkAccepted`/`MarkAmbiguousFromSubmitting` on a non-terminal attempt to T10 `disputed`
+(§27.11 item 4: "T10 (any other unexpected state)"). The callback cutover makes that conflict
+routine: a verified `pending` webhook often arrives before the synchronous `Withdraw` response.
+- Probe J: callback `pending` moves the attempt `submitting→pending`. The sync `Pending` result
+  then fails `MarkAccepted` (it does not accept `pending`) and the attempt ends **`disputed`**.
+- Probe K: the same, but the sync call times out (`Ambiguous`). The attempt again ends
+  **`disputed`**.
+
+In both cases the provider holds a healthy accepted payout, while the platform has terminally
+parked the attempt, left the hold held, and made it unresolvable except by M2 (BLOCKED). If the
+payout then settles, the success callback finds a `disputed` attempt and cannot settle it. The
+money has left, and the hold is never debited to clearing, so the ledger and the PSP drift apart.
+Probe M shows `/resolve` (R2) produces the same outcome.
+
+Required: a weaker-or-equal piece of evidence arriving after a stronger non-terminal state is
+**not** a contradiction. Specifically:
+- Sync `Pending` on `pending`: no-op or reschedule.
+- Sync `Ambiguous`/timeout on `pending` or `ambiguous`: no-op or reschedule. Transport silence is
+  not the provider "forgetting".
+- Sync `NotSent` on a non-`submitting` attempt: no-op.
+
+Only definite outcomes that contradict a **terminal** state (success after decline gives T14;
+decline or success conflicting with a different terminal state) should dispute. Add probes J/K/M as
+tests.
+
+### R2 (Medium): `/resolve` transitions an in-lease `submitting` attempt, racing its own phase B
+
+`PollPayoutStatus`, for `submitting` with no reference, runs `MarkAmbiguousFromSubmitting` without
+checking `lease_until`. The sweeper only reaches such a row after its lease is due, but `/resolve`
+calls it at any time (probe M). A staff member pressing Resolve while phase B is in flight:
+- moves the attempt to `ambiguous` and sets `ever_possibly_sent`;
+- then, if phase C's result is `Ambiguous`, parks it as `disputed` (R1);
+- if the result is `NotSent` (provably never sent), phase C fails its CAS and the attempt stays
+  `ambiguous` with `ever_possibly_sent=true`. A never-sent payout thereby loses M3 eligibility and,
+  on a non-idempotent provider, any resend path.
+
+Required: a `submitting` attempt whose `lease_until > now()` must be refused by `/resolve` (409,
+"dispatch in progress") and left untouched by `PollPayoutStatus`, as a predicate inside the T6 CAS
+statement.
+
+### R3 (Medium): phase C now takes attempt → withdrawal, inverting A7's parent-before-attempt; a real deadlock
+
+ADR 0082 A7 fixes payout evidence as "withdrawal `FOR UPDATE` → attempt CAS → L3 → L4". My original
+M3 asked for the attempt CAS to move before the **posting**, not before the **parent lock**.
+`ApplyPayoutResult`/`applyPayoutStatusEvidence` no longer lock the withdrawal first, and the branch
+order is inconsistent: success, decline and pending lock the attempt first, while the ambiguous
+branch locks the withdrawal first. The receipt path and the T2/T12 claims both take
+withdrawal → attempt.
+- Probe N: one tx held the withdrawal row (the receipt-path order) and then updated the attempt,
+  while phase C applied a sync success. Result: **`deadlock detected (40P01)`**; phase C was the
+  victim.
+- The money stays correct, because the tx is atomic. But the aborted phase C loses the sync
+  success and its reference. The attempt then falls to lease expiry, then `ambiguous`, then
+  escalation, even though the provider paid, unless a callback happens to rescue it.
+
+Required: restore `SELECT … FROM withdrawal_requests WHERE id = $1 FOR UPDATE` as the first
+statement of both phase-C functions, then the attempt CAS, then the posting. §27.11 item 4's
+wording ("A7's attempt-before-posting lock order") should be corrected to state the full order.
+
+### R4 (High, callback cutover coexistence): a payout decline delivered by callback never releases the hold
+
+`applyResolvedReceiptEvidence`'s `OutcomeDeclined` branch calls `ApplyDecline` on a payout attempt
+but never `withdrawal.Fail`. Its success branch still records `payout_success_not_yet_wired`
+(disputed), so payout settlement via callback is still unwired.
+- Probe L, event type `deposit` naming a payout reference: the attempt becomes `declined`
+  (terminal, `next_action_at` NULL) while the withdrawal stays `submitted` with the hold of 500
+  held. `GetLiveAttemptForWithdrawalRequest` then finds nothing, so `/resolve` answers "will be
+  picked up automatically", which never happens, and the sweeper never sees the row. The hold is
+  permanently stranded. The receipt path also never checks `ev.EventType` against
+  `attempt.Operation`.
+- Probe L, event type `payout`: the receipt INSERT violates `payment_provider_events_check1`
+  (decline fields are populated only for `deposit` events). The callback returns an error, is
+  redelivered forever, and nothing is recorded (INV-IO-10).
+
+This is the code the orchestrator asked me to check for coexistence. The payout phase-C logic is
+right, but the callback path bypasses it. Required, before payout callbacks are enabled for any
+provider:
+- route payout receipts through the same `applyPayoutDecline`/`applyPayoutSuccess` (withdrawal lock
+  first, per R3);
+- reject or record-as-anomaly any event whose type does not match `attempt.Operation`;
+- make the payout receipt row satisfy its CHECK.
+
+### R5 (Medium, disclosed residual): a crash after T1p ends escalated but unresolvable
+
+This is the H3 path (probe E). A payout that was never actually sent ends `ambiguous` and escalated
+with `ever_possibly_sent=true`, so it is not M3-eligible. On a non-idempotent provider it cannot be
+resent, and without a reference it cannot be polled. Its only exits are CP-W1 (merchant-reference
+QueryStatus, disclosed NOT IMPLEMENTED in §27.11) and M2 (BLOCKED on HD-0095-1). This is correct
+fail-closed behaviour, but the orchestrator must track it: CP-W1 is a launch condition for any
+provider whose manifest is non-idempotent, and HD-0095-1 remains a human decision.
+
+### R6 (Low): the ambiguous branch records the reference on the withdrawal, not the attempt
+
+When the adapter returns a reference alongside an ambiguous outcome, `ApplyPayoutResult` attaches
+it to the withdrawal only. `MarkAmbiguousFromSubmitting` never stores it on the attempt (probe A
+shows the attempt's `provider_reference` is NULL). T12's poll-first step reads
+`attempt.ProviderReference`, so it cannot poll and goes straight to escalation or resend. Store the
+reference on the attempt too (it is set-once on NULL).
+
+## Runbook check: `docs/runbooks/migration-0101-payment-attempts-remediation.md`
+
+**Policy matches the ruling:** fail-closed, no bypass flag, 0101 never edited, lost-link repair
+through a four-eyes audited script, missing credit handled as P1 via the normal posting path, test
+databases rebuilt rather than patched, and the down/up consequence stated. **The procedure has
+defects that would mislead an operator.** Fix them in the runbook (it is not a migration):
+
+1. **§3(a)'s query is wrong and cannot run pre-0101.** It filters on `NOT EXISTS (… FROM
+   payment_attempts …)`, but that table does not exist before 0101. It also does not mirror the
+   pre-flight predicate, which is `status = 'succeeded' AND (ledger_transaction_id IS NULL OR
+   provider_reference IS NULL)`. §1 also describes the check as "no provider reference **and** no
+   ledger link"; it is **or**.
+2. **Wrong RLS setting.** "`SET app.current_tenant_id` per tenant" should be `app.tenant_id`, with
+   `app.player_account_id` cleared, as 0101 itself does. With the wrong setting, FORCE RLS returns
+   zero rows, so the operator sees a false "nothing to fix". That is exactly the 0048 lesson that
+   0101's own comments cite.
+3. **§3(b-i) covers only a missing ledger link.** Rows with a ledger link but a NULL
+   `provider_reference` are also flagged, and the runbook sends them to "investigate" with no
+   procedure. Add one: attach `provider_reference` from the matched transaction's `provider_tx_id`.
+   The column is mutable per 0082, and the same four-eyes/audit rules apply. Also drop the
+   "if this column exists on your checkout" hedge: `deposit_intents.ledger_transaction_id` has
+   existed since 0025.
+4. **§3(c) names a non-existent status.** It says "e.g. `disputed`", but `deposit_intents.status`
+   allows only `pending|succeeded|declined|ambiguous|failed`. After PSP confirmation that nothing
+   was captured, the target is `failed` (or `declined`), with evidence.
+5. **Pre-flights 1 and 3 are not covered.** They are pending/ambiguous intents with neither
+   provider id nor reference, and `submitted` withdrawals with no reference. Add a line for each
+   (classify with the PSP; never guess), and correct §4's wording: the NULL-reference `submitted`
+   shape is pre-flight 3's **withdrawal** check, not "the shape … for a deposit intent".
+
+## Conditions for final sign-off on the payout money path
+
+- **C-R1:** R1, R2, R3 fixed, with probes J, K, M and N converted to tests.
+- **C-R4:** R4 fixed before any payout callback is accepted from a real provider. Until then, payout
+  callbacks must be refused or recorded as anomalies.
+- **C-T1:** a test for NotSent after a resend (mutant MH must be killed).
+- **C-T3:** the lock-presence test must release its holder before `t.Fatalf`.
+- **C-RB:** runbook items 1 to 5 corrected.
+- Tracked (orchestrator): R5 (CP-W1 as a launch condition for non-idempotent providers;
+  HD-0095-1 still BLOCKED), R6 (Low).
