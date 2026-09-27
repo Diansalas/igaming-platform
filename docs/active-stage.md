@@ -1,6 +1,6 @@
 # Active Stage
 
-> **Current stage:** see ["## Current stage"](#current-stage-stage-103--complete-awaiting-human-authorization) section (Stage 10.3 complete, MOCK/local only; all gates passed with open findings carried; awaiting human authorization; staging OFF). Sections below are kept in their historical order.
+> **Current stage:** see ["## Current stage"](#current-stage-stage-103-accepted-post-acceptance-close-out-done-awaiting-human-authorization) section (Stage 10.3 ACCEPTED by the human 2026-09-26; post-acceptance close-out done: F-POOL-1 fixed (ADR 0094, CLOSED WITH CONDITIONS, K1 outstanding — CI blocked by billing), hygiene reconciled, real-provider planning gate prepared; awaiting human authorization; staging OFF). Sections below are kept in their historical order.
 
 ## Stage 4H-B0-R7 — Final Financial/Bonus Implementation Gate — Complete
 
@@ -1486,7 +1486,33 @@ none authorized for implementation yet.
 
 *Status note 2026-09-26: all four items were answered by the human in `docs/decisions/0042-human-decision-response.md` Part 2 — G-2: configurable per brand, default (b) route to `player_cash`; `OpenBetSelfExclusionPolicy` default: `VOID_ON_SELF_EXCLUSION`; mixed/bonus-funded cashout: "Not cashout-eligible"; FD-1: "Nullifying" (inactive while bonus-funded bets are not cashout-eligible). Implementation of G-2 brand configurability and of the self-exclusion default/auto-void consumer remains outstanding (ADR 0042 G-2 notes; `docs/plans/stage-10-planning-gate-proposal.md` §5).*
 
-## Current stage: Stage 10.3 — complete; awaiting human authorization
+## Current stage: Stage 10.3 accepted; post-acceptance close-out done; awaiting human authorization
+
+**Human acceptance (2026-09-26, "MASTER ORCHESTRATOR — CLOSE STAGE 10.3 AND PREPARE THE NEXT PRODUCT
+PHASE"):** Stage 10.3 ACCEPTED AS COMPLETE (code baseline `103b033`, docs `2876fa5`). F-POOL-1 not
+accepted as a risk — must be fixed. Hygiene to reconcile; next real-provider planning gate to prepare.
+Staging OFF; no AWS deployment; no production/provider-readiness claim.
+
+Post-acceptance work (all on this branch):
+- **F-POOL-1 — CLOSED WITH CONDITIONS** (ADR 0094, `ACCEPTED — IMPLEMENTED`): two-phase webhook
+  verification (no pooled connection held across secret-store I/O; single-use `VerifiedCallback`
+  with handle re-check in the domain tx), per-(scheme,tenant) breaker, per-tenant in-flight cap P=2,
+  degraded budget D=2, `txscope` fail-closed guards, `FailureStreakTTL` 15 s. Reviews: security
+  design CO-SIGN WITH CONDITIONS; QA CONFIRMED WITH CHANGES; implementation security CLOSED WITH
+  CONDITIONS (+ addendum after the K1 root cause); code review READY WITH FOLLOW-UPS (all addressed);
+  ledger-finance SIGN-OFF WITH CONDITIONS. **Outstanding K1:** next GitHub CI run of the isolated
+  timing lane must pass all 8 tests — blocked because GitHub Actions jobs are not starting
+  (account billing, CI-BILLING-1). Local substitute: full CI replay at `8fec18f` passed.
+- **New/raised findings:** F-POOL-2 (external provider calls inside the tenant tx; dual-write High
+  once reachable; launch-blocking per domain before its first non-MOCK adapter); KYC-ENFORCE-1 (KYC
+  status not enforced on withdrawal/deposit/bet; launch-blocking; vendor-independent).
+- **Hygiene:** CODE-HYGIENE-10.3-1 closed (review F-1..F-5, security S-4); CR-CHECKLIST-HMAC-1
+  IMPLEMENTED; `.github/CODEOWNERS` added; BRANCH-PROTECTION-1 (main unprotected) and
+  ACCESS-ANALYZER-CHECK-1 (deployer denied) need the human.
+- **Next planning gate:** `docs/plans/next-real-provider-integration-planning-gate.md`
+  (RECOMMENDATION: payments first; vendor NOT selected; no provider implemented).
+
+### Stage 10.3 (as completed before acceptance)
 
 Real Provider Trust & Casino Financial Readiness, AUTHORIZED 2026-09-26 (ADR 0092). The human
 authorized the full scope against baseline `207c922` (proposal §22). W0–W3 are delivered for MOCK

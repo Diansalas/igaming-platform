@@ -72,7 +72,7 @@ No production readiness, provider readiness, licensing or regulatory approval is
 | `code-reviewer` | READY WITH FOLLOW-UPS |
 | `ledger-finance` | SIGN-OFF WITH CONDITIONS (LF-C1 → §6 row 28; LF-C2 → F-POOL-2 constraints, §14) |
 
-[PENDING: K1 — first CI run of the timing lane failed (CI #360); under investigation; final status to be recorded]
+**Status: CLOSED WITH CONDITIONS (security, file 17 + addendum, 2026-09-27).** CI #360–#364 failed the isolated timing lane on the first version of the kept test; root cause (reproduced by the architect and independently by security): after the redesign the per-caller clock started before the handle-read transaction had a pooled connection, so it measured connection establishment under `-race` on a slow runner, not store waiting. Fixed in `cb7fb92` (clock starts when the pre-verification transaction runs on its connection); every bound and pool size unchanged; security ACCEPTED the argument as identical-or-stronger, plus the fix round (K2/K3 closed; `FailureStreakTTL` 15 s accepted with ADR wording B1, done). **Outstanding K1:** the next GitHub CI run of the timing lane must pass all 8 tests by name, no reruns. It cannot run yet: GitHub Actions jobs are not starting because of account billing (CI-BILLING-1, human). Local substitute evidence at `8fec18f`: full CI replay passed (3× main lane, 41 packages, + timing lane 3×); timing lane 24/24 under `taskset -c 0-1` (security). Until K1 holds, F-POOL-1 remains launch-blocking.
 
 Security C11 split the vendor-I/O half of the problem out as **F-POOL-2** (§4, §14). F-POOL-1 does
 not cover it.

@@ -1,8 +1,8 @@
 # Project Progress
 
-Last updated: 2026-09-26 (Stage 10.3 complete; awaiting human authorization)
+Last updated: 2026-09-27 (Stage 10.3 accepted; post-acceptance close-out done; awaiting human authorization)
 
-## Status: Stage 10.3 COMPLETE (MOCK providers / local backends only); awaiting human authorization. Gate 10.3-W2/W3 PASSED with open findings carried (F-POOL-1 Medium, launch-blocking); completion report `docs/governance/stage-10.3-completion-report.md`. AWS staging OFF (torn down 2026-09-26, `docs/governance/staging-teardown-2026-09-26.md`). Next stage NOT started — awaiting human authorization.
+## Status: Stage 10.3 ACCEPTED AS COMPLETE by the human (2026-09-26). Post-acceptance close-out done: F-POOL-1 fixed (ADR 0094) and CLOSED WITH CONDITIONS — final condition K1 (green GitHub CI timing lane) outstanding because GitHub Actions jobs are not starting (billing, CI-BILLING-1); hygiene reconciled; next real-provider planning gate prepared (`docs/plans/next-real-provider-integration-planning-gate.md`). MOCK providers / local backends only; AWS staging OFF; no production or real-provider readiness claimed. Next stage NOT started — awaiting human authorization.
 
 *Status note 2026-09-26: the "(approved-pending)" labels on the Stage 3C, 3D, 4A, 4D-RG, 4E, 4F, 4G, 4G-FINAL, 4H-B0-R7 and Stage 7 headers below are historical, recorded at the time each stage stopped for review. Later stages proceeded on explicit human authorization recorded in the subsequent stage sections (for example Stage 4H-B1 Wave 2 "human-authorized", Stage 9.1 "authorized by the human", and ADRs 0087/0090/0091 for Stages 10, 10.1 and 10.2). The headers are left unedited. Source: `docs/plans/stage-10.3-planning/00-roadmap-reconciliation.md` "Discrepancies" item 12.*
 
@@ -8249,3 +8249,22 @@ permission probes.
 - AWS/staging untouched; staging OFF. No real provider supported; no production or provider
   readiness claimed. **Stop: Stage 10.3 completion gate — next stage requires explicit human
   authorization** (decisions listed in the completion report).
+
+## Stage 10.3 — human acceptance and post-acceptance close-out (2026-09-26/27)
+
+- **Accepted:** human instruction "MASTER ORCHESTRATOR — CLOSE STAGE 10.3 AND PREPARE THE NEXT PRODUCT
+  PHASE": Stage 10.3 ACCEPTED AS COMPLETE (code `103b033`, docs `2876fa5`). F-POOL-1 must be fixed.
+- **F-POOL-1:** ADR 0094 designed (architect), co-signed with conditions C1–C11 (security), test plan
+  confirmed with changes (QA), implemented (`7773649`..`f85c0b8`), reviewed (security 17, code 18,
+  ledger-finance 19). First CI run of the timing lane (#360) failed; root cause was the test's
+  measurement span after the redesign (pool connection establishment), fixed in `cb7fb92` with every
+  bound unchanged; security accepted and re-closed WITH CONDITIONS; fix round `4ab399f`..`49ee4ec`,
+  ADR wording B1 `8fec18f`. **K1 outstanding** (CI-BILLING-1). Local CI replay at `8fec18f`: gofmt,
+  vet, lint 0 issues, build, migrate up/verify, unit race 37 ok, 3× integration race (41 packages,
+  0 skips) each followed by the 8-test timing lane, reversibility — ALL PASSED.
+- **Registered:** F-POOL-2 (Medium; dual-write High once reachable), KYC-ENFORCE-1 (launch-blocking,
+  vendor-independent), BRANCH-PROTECTION-1, ACCESS-ANALYZER-CHECK-1, CI-BILLING-1.
+- **Hygiene:** CODE-HYGIENE-10.3-1 closed; CR-CHECKLIST-HMAC-1 IMPLEMENTED; CODEOWNERS added.
+- **Planning gate:** `docs/plans/next-real-provider-integration-planning-gate.md` (PO-reviewed).
+- Not done by design: no vendor selected; no real provider implemented; no AWS deployment; Bonus Wave 4,
+  AI agents not started; ADR 0089 architecture only; HD-10.3-2 infrastructure follow-ups documented only.
