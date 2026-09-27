@@ -2,6 +2,7 @@ package httpserver
 
 import (
 	"errors"
+	"io"
 	"net/http"
 	"time"
 
@@ -10,6 +11,23 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/observability"
 	"github.com/Diansalas/igaming-platform/internal/webhookauth"
 )
+
+// armBodyReadDeadline enforces A5's per-request body read deadline
+// (ADR 0097 §5.4). Production leaves body untouched and relies on the
+// real OS-level connection deadline (http.NewResponseController,
+// best-effort - ignored on a ResponseWriter that doesn't support it, e.g.
+// httptest.ResponseRecorder in unit tests). Tests may replace this
+// package-level var with a fake driven by an injected admission.Clock
+// instead of real time (QA review item 1(a): "parameterize BodyReadTimeout
+// behind the same clock/timer abstraction... keeping T11 fully
+// deterministic and in the main lane" - see webhook_admission_deadline_
+// test.go's clockBoundedReader). A test that swaps this var MUST restore
+// it before returning (defer) - it is not safe under t.Parallel with
+// another test that also swaps it.
+var armBodyReadDeadline = func(w http.ResponseWriter, body io.Reader, deadline time.Time) io.Reader {
+	_ = http.NewResponseController(w).SetReadDeadline(deadline)
+	return body
+}
 
 // webhookRoute is the per-domain parameter set of the shared webhook
 // preamble (Stage 10.2, ADR 0091; design §A "Shared HTTP preamble";
@@ -78,12 +96,14 @@ func webhookPreamble(w http.ResponseWriter, r *http.Request, deps Deps, route we
 		return identity.Tenant{}, "", nil, false
 	}
 	bodyReadTimeout := 10 * time.Second
+	now := time.Now()
 	if deps.webhookAdmission != nil {
 		bodyReadTimeout = deps.webhookAdmission.settings.BodyReadTimeout
+		now = deps.webhookAdmission.clock.Now()
 	}
-	_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(bodyReadTimeout))
+	bodyReader := armBodyReadDeadline(w, r.Body, now.Add(bodyReadTimeout))
 
-	pre, ok := webhookauth.CheckInboundPreamble(providerID, r.Header, r.Body, route.maxBody, func(id string) (webhookauth.VerificationScheme, bool) {
+	pre, ok := webhookauth.CheckInboundPreamble(providerID, r.Header, bodyReader, route.maxBody, func(id string) (webhookauth.VerificationScheme, bool) {
 		if route.schemeFor == nil {
 			return nil, false
 		}
