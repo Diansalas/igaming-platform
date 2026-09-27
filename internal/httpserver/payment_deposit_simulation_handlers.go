@@ -38,14 +38,15 @@ import (
 // Orchestrator.ReceiveCallback - byte-for-byte the SAME parse-verify-post
 // pipeline the public webhook uses. Nothing here bypasses HandleCallback's
 // signature verification or constructs a CallbackEvent directly; nothing
-// in internal/payments' postDepositSuccess/receiveDepositCallback changes.
+// in internal/payments' postDepositSuccess/receipt.go evidence-application
+// path changes.
 //
 // CRITICAL TRUST-BOUNDARY WARNING (mirrors casino_play_handlers.go's own,
 // independently-reviewed finding exactly): the mock adapter's signature is
 // minted by THIS PROCESS on the AUTHENTICATED PLAYER's own behalf, so
 // unlike a real provider webhook it authenticates nothing about which
-// deposit/amount/outcome is being named. receiveDepositCallback/
-// postDepositSuccess correctly trust a signed payload's identifying fields
+// deposit/amount/outcome is being named. receipt.go's evidence-application
+// path/postDepositSuccess correctly trust a signed payload's identifying fields
 // when the signer is an independent, credentialed provider - they were
 // never designed to be handed a payload whose signer is the platform
 // acting on an untrusted caller's instructions. Every field this handler
@@ -70,15 +71,17 @@ import (
 //     below) and must still be DepositIntentPending (requireDepositAwaitingCallback
 //     below) - a deposit already succeeded/declined/failed/ambiguous is
 //     rejected. This second check matters beyond mere workflow hygiene:
-//     receiveDepositCallback's own terminal-state short-circuit (line
-//     ~894 of orchestrator.go) only fires when the incoming outcome is NOT
-//     Succeeded; postDepositSuccess's own idempotency short-circuit only
-//     fires when the intent is ALREADY Succeeded. Neither guards against a
-//     Succeeded-outcome callback landing on an intent already resolved to
-//     Declined/Failed, which would otherwise post a real ledger credit for
-//     a deposit the platform had already told the player was declined -
-//     so this handler's own pending-only gate is the operative defense,
-//     not a redundant one.
+//     ADR 0095 §4.4/T13 (receipt.go's applyResolvedReceiptEvidence) treats a
+//     matched-amount Succeeded outcome landing on an already-DECLINED
+//     attempt as a genuine second capture and DOES post it (the money is
+//     real - a cascaded sibling may have already been charged at another
+//     provider); postDepositSuccess's own idempotency short-circuit only
+//     fires when the SAME provider_reference already posted. Neither is a
+//     guard against the SIMULATE endpoint itself manufacturing a fake
+//     second capture for an intent it forced to Declined earlier - so this
+//     handler's own pending-only gate is the operative defense that keeps
+//     a simulated callback from ever reaching that branch at all, not a
+//     redundant one.
 //
 // Deliberately restricted to *payments.MockProvider (never any other
 // PaymentProvider implementation) - see requireMockPaymentProvider's own

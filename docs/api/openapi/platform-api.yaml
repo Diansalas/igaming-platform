@@ -2633,8 +2633,13 @@ paths:
         provider pair from an unknown one). 400 is reachable ONLY after
         verification succeeds: a verified body that is still structurally
         malformed (a required field missing, or an unrecognized
-        event_type/outcome value), or whose declared facts (amount/asset)
-        contradict the deposit intent it claims to resolve. 409 covers two
+        event_type/outcome value), or a deposit_reversal event whose
+        declared amount/asset contradicts the ORIGINAL deposit it names
+        (ErrCallbackProviderMismatch). PRH-payments-callback-cutover: a
+        plain `deposit` event's amount/asset mismatch against the attempt
+        it resolves is NOT a 400 - ADR 0095 §4.4 records it as a committed
+        anomaly receipt and still returns 200 (see below), exactly like
+        every other disposition. 409 covers two
         distinct, generically-reported causes (a provider reference already
         posted with a different payload, or a distinct-reference reversal
         naming an already-reversed deposit) - intentionally collapsed to one
