@@ -1709,48 +1709,147 @@ rather than duplicated).
   session.ID`, the deterministic external reference this section already named.
   Defense-in-depth binding check (S95-C8(b)): LaunchGame itself, not just the resolver,
   refuses a credential whose `TenantID`/`ProviderID`/`Domain` don't match the launch.
-- **Phase C** (a second, separate `pool.WithTenant` transaction): success audits
-  `casino.launched`; a transport failure, a non-`Succeeded` outcome, a circuit-open
-  health snapshot, a nil/failing credential resolution, or a credential-binding mismatch
-  all share one `launchFailed` path - `RevokeLaunchSession` (CAS on `status='active'`)
-  plus audit `casino.launch_failed`, wrapping the triggering cause with `%w` so
-  `errors.Is(err, ErrProviderUnavailable)` still holds for the health/credential/
-  registry branches exactly as before the split.
+- **Phase C** (a second, separate transaction): success audits `casino.launched`; a
+  transport failure, a non-`Succeeded` outcome, a circuit-open health snapshot, a
+  nil/failing credential resolution, or a credential-binding mismatch all share one
+  `launchFailed` path - `RevokeLaunchSession` (CAS on `status='active'`) plus audit
+  `casino.launch_failed`. Every phase-C transaction (both the success audit and
+  `launchFailed`) runs on `context.WithTimeout(context.WithoutCancel(ctx), phaseCTimeout)`
+  (5s), never the caller's own request `ctx` - see §15.1.2 below (RV-PRH-I2 R1/C1: a
+  cancelled request context, the ordinary trigger once a real adapter does I/O, must never
+  silently skip the revoke and the audit). `errors.Is(err, ErrProviderUnavailable)` holds
+  for the nil-pool, registry, circuit-open, nil-resolver, resolver-error and
+  binding-mismatch branches; the transport-error and provider-decline branches wrap the
+  adapter's own error/decline reason instead (no sentinel existed for either "before the
+  split", since neither branch is new).
 - **Wiring**: `httpserver.Deps` gained `CasinoOutboundCredentials
   casino.OutboundCredentialResolver`; `cmd/platform-api/registrations.go` gained
   `providerBundle.casinoOutboundCredentials()` (`casinoOrchestratorResolver`'s outbound
-  twin) - it returns the MOCK resolver whenever the MOCK adapter is wired, or
-  `b.Credentials.Outbound("casino")` otherwise (nil-receiver-safe, fails every real
-  launch closed with no real subsystem configured). A real casino adapter would need the
-  same by-adapter-kind split `casinoOrchestratorResolver` already uses for inbound
-  credentials (`webhookauth.NewKindSplitResolver`); building that generic split now,
-  with only one MOCK adapter ever registered, was judged premature and is deferred to
-  when a real adapter is actually proposed - tracked the same way as CAS-STMT-IO-1.
+  twin). As of §15.1.2 (RV-PRH-I2 C3) it is keyed on the ADAPTER's own kind via the new
+  `casino.OutboundKindSplitResolver` (mirroring `webhookauth.KindSplitResolver` exactly),
+  never on "is any mock wired anywhere" - `b.Credentials.Outbound("casino")` serves every
+  non-synthetic adapter, so a real adapter registered alongside the mock (e.g. in staging)
+  reaches the real resolver, not the synthetic one.
 - **Import-cycle note**: `internal/casino` now imports `internal/providercred` (for
-  `TenantTxRunner`/`OutboundCredential`), which forced one existing in-package
-  `providercred` test (`TestOutbound_NoCredentialOnLongLivedTypes`, which itself imports
-  `casino`) to move to a new external test file
-  (`internal/providercred/outbound_credential_bearing_test.go`, `package
-  providercred_test`) - Go's standard mechanism for exactly this shape of test-only
-  cycle. No production import graph changed.
-- **Tests**: `internal/casino/launch_two_phase_integration_test.go` (five new tests: no
-  connection held across `HealthStatus`/`Launch`, proven with a one-connection pool and a
-  spy provider; nil-pool and nil-outbound-resolver fail closed without panicking;
-  credential-binding mismatch fails closed; `CallContext` field shape pinned) plus two
-  new tests in `failure_mode_matrix_integration_test.go` /
-  `launch_two_phase_integration_test.go` for provider-decline-revokes-session and the
-  two separate phase-A/phase-C audit records. One pre-existing test
+  `TenantTxRunner`/`OutboundCredential`) - a new production import edge, verified acyclic
+  (code review). This forced one existing in-package `providercred` test
+  (`TestOutbound_NoCredentialOnLongLivedTypes`, which itself imports `casino`) to move to
+  a new external test file (`internal/providercred/outbound_credential_bearing_test.go`,
+  `package providercred_test`) - Go's standard mechanism for exactly this shape of
+  test-only cycle; the move itself changes no production import.
+- **Tests (original submission)**: all seven tests below were added in
+  `internal/casino/launch_two_phase_integration_test.go` (not split across two files as
+  an earlier draft of this record miscounted): no connection held across
+  `HealthStatus`/`Launch` (a one-connection pool and a spy provider); nil-pool and
+  nil-outbound-resolver fail closed without panicking; credential-binding mismatch fails
+  closed; `CallContext` field shape pinned; provider-decline revokes the session; the two
+  separate phase-A/phase-C audit records. One pre-existing test
   (`TestFailureModeMatrix_F_ProviderTransportFailureAtLaunchLeavesNoTrace`, renamed
-  `..._RevokesSessionNoTrace`) had its own assertion corrected: the two-phase split's own
-  behavior change is that a failed launch now leaves exactly one **revoked** session row,
-  not zero rows, because phase A already committed the mint before phase B's failure -
-  this is the intended, documented tombstone behavior, not a regression. Mutation
-  evidence: `docs/plans/payment-readiness/evidence/prh-i2-casino-mutation-kill.txt`
-  (10/10 killed, one judged equivalent).
+  `..._RevokesSessionNoTrace`, in `failure_mode_matrix_integration_test.go`) had its own
+  assertion corrected: the two-phase split's own behavior change is that a failed launch
+  now leaves exactly one **revoked** session row, not zero, because phase A already
+  committed the mint before phase B's failure - the intended tombstone behavior, not a
+  regression. Original mutation result: 9/9 killed, 1 (M9, the transport-error branch)
+  judged equivalent - the original evidence file's own header said "10/10", which was
+  wrong (code review F1); corrected below. §16.2 item 18 ("Launch: crash after phase A,
+  and crash after vendor accept") had no dedicated test in the original submission beyond
+  the revoked-session-rejects-a-bet case - addressed in §15.1.2.
+
+#### 15.1.2 Fix record (code/security review rework, 2026-09-27)
+
+Both reviews (`docs/plans/payment-readiness/rv-prh-i2-casino-security.md`, APPROVE WITH
+CONDITIONS C1-C4; `docs/plans/payment-readiness/rv-prh-i2-casino-code-review.md`, NOT
+READY on R1) are addressed as follows.
+
+- **R1/C1 (blocking) - phase C skipped on a cancelled request ctx.** Both reproduced the
+  same defect: `launchFailed`, and the phase-C success transaction, ran on the caller's
+  own `ctx`. A cancelled request context (a client disconnect mid-`Launch`, the realistic
+  trigger once a real adapter performs I/O - not merely the ADR's accepted "process crash"
+  window) makes `pool.WithTenant(ctx, ...)` fail to even begin, silently discarding both
+  the revoke and the audit (the error was `_ = `'d). Fixed: both phase-C transactions now
+  run on `context.WithTimeout(context.WithoutCancel(ctx), phaseCTimeout)`
+  (`phaseCTimeout` = 5s); `RevokeLaunchSession` now returns `(bool, error)` (whether the
+  CAS actually matched a row), recorded in the `launch_failed` audit metadata as
+  `revoked`; a phase-C transaction failure is logged at error level via
+  `Orchestrator.phaseCLogger()` (reuses `webhookLogger`, never silently discarded); the
+  phase-C **success** path, if its own audit write fails, now calls `launchFailed` too
+  (attempts a revoke rather than leaving a vendor-accepted, unaudited launch). Tests:
+  `TestLaunchGame_CtxCancelledDuringLaunch_StillRevokesAndAudits` (cancels ctx inside a
+  stub `Launch` returning a transport error; asserts revoked + audited + a subsequent bet
+  rejected with the ledger exactly balanced before/after) and
+  `TestLaunchGame_CtxCancelledAfterVendorAccept_StillAuditsLaunched` (cancels ctx right
+  after a successful `Launch` returns; asserts `casino.launched` still commits and the
+  session still accepts its bet) - together these are §16.2 item 18's "crash after
+  phase A[/mid-Launch]" and "crash after vendor accept" cases, using ctx-cancellation as
+  this codebase's practical proxy for a real crash (which cannot be simulated in-process).
+  Both mutation-killed: removing `context.WithoutCancel` from either phase-C transaction
+  fails the corresponding test.
+- **Item 2 (casino/ledger-finance follow-up; security I3) - `postBet` never enforced
+  expiry.** §15.1's original "an orphaned/never-resolved `active` session is harmless"
+  claim depended on expiry bounding bet acceptance, but `postBet` rejected only
+  `status='revoked'` - an `active` (or a lazily-flipped `expired`) session accepted a bet
+  indefinitely. Fixed: `postBet` now allow-lists `status IN ('active','consumed')` (fails
+  closed on `revoked`, `expired`, and any future status) **and** rejects
+  `now() > expires_at` regardless of status - closing the exposure window to at most
+  `DefaultLaunchTokenTTL` in every case, not merely "no legitimate vendor would call
+  back". `postWin`/`postRollback` are unaffected (they resolve accounts via
+  `correlation_id` from the ledger's own prior entries, never this session lookup), so a
+  bet placed *before* expiry still settles after the session has since expired - this
+  section's own doc comment ("harmless") is corrected accordingly. Tests:
+  `TestReceiveCallback_NewBetRejectedOnExpiredStatus_LedgerBalanced`,
+  `TestReceiveCallback_NewBetRejectedPastExpiresAtEvenIfStillActive` (a session whose
+  status was never flipped away from `active`, past its own `expires_at`), and
+  `TestReceiveCallback_WinSettlesForPreExpiryBetAfterSessionExpires` (win posts, ledger
+  balanced, after the session has since been marked expired) - all in
+  `internal/casino/postbet_session_expiry_integration_test.go`.
+- **C2 - `CallContext` redaction untested.** `internal/casino/callcontext_redaction_test.go`
+  (new) builds a `CallContext`/`LaunchRequest` around a known sentinel secret and asserts
+  its absence from `%v`/`%+v`/`%#v`/`%s`/`%q`, `slog` text and JSON handler output,
+  `json.Marshal`, and `fmt.Errorf("%v", ...)`, with a negative control (a plain,
+  non-redacting type proving the sentinel is detectable at all). Confirmed to kill the
+  reviewer's own mutation A (appending `string(c.Credential.Secret())` to
+  `callContextRedacted`'s output).
+- **C3 - outbound resolver chosen by "is any mock wired", not by adapter kind.** Fixed
+  with `casino.OutboundKindSplitResolver` (`internal/casino/launch.go`), mirroring
+  `webhookauth.KindSplitResolver` exactly, including its fail-closed-on-unregistered-id
+  behavior. `cmd/platform-api`: a new `mockWiring.CasinoOutboundResolver` field and
+  `providerBundle.CasinoOutboundResolver` component, registered with the synthetic guard
+  (`providerkind.Registration{Domain:"casino", Name:"outbound_resolver", ...}`) exactly
+  like the inbound MOCK resolvers. Tests:
+  `internal/casino/outbound_kindsplit_test.go` (synthetic adapter → mock only; real
+  adapter → real only; unregistered id fails closed; both nil yields a true nil interface;
+  a synthetic adapter with no mock wired fails closed rather than falling back to real) and
+  `cmd/platform-api/wiring_test.go`'s `TestCasinoOutboundResolver_FollowsWiring`. Fixing
+  this also surfaced a latent nil-interface bug: `providercred.Subsystem.Outbound` returns
+  the CONCRETE `*OutboundResolver` type (unlike `.Resolver`, which already returns the
+  `webhookauth.Resolver` interface), so passing a nil `*OutboundResolver` straight into
+  `OutboundKindSplitResolver`'s interface parameter produced a non-nil interface wrapping
+  a nil pointer - `casinoOutboundCredentials()` now converts it to a true nil interface
+  explicitly before passing it in.
+- **C4 - revoke CAS misses a vendor-consumed session.** Not changed structurally: item 2's
+  fix (expiry enforced at bet-placement time, independent of status) is judged sufficient
+  - a session the revoke's CAS missed because the vendor had already moved it to
+  `consumed` is now bounded by the same `expires_at` check regardless, closing the
+  exposure to at most `DefaultLaunchTokenTTL` rather than requiring the CAS itself to
+  widen. Recorded here per C4's own "or record the decision" option, rather than widening
+  `RevokeLaunchSession`'s `WHERE` clause.
+- **Security informational I1/I2/I3** (jurisdiction denials write no audit; a
+  `HealthStatus` error fails open; a bet racing a concurrent revoke can still commit) are
+  pre-existing (not introduced by this diff) and are registered as their own tracking rows
+  in `docs/governance/task-registry.md` (`CAS-JURIS-AUDIT-1`, `CAS-HEALTH-FAILOPEN-1`,
+  `CAS-REVOKE-BET-RACE-1`), owner `casino`, rather than fixed silently inside this record.
+- **Mutation evidence, corrected**: `docs/plans/payment-readiness/evidence/
+  prh-i2-casino-mutation-kill.txt` now reads **9/9 killed, 1 equivalent** for the original
+  submission (correcting F1's "10/10" miscount) plus a second section for this fix
+  record's own mutants (ctx-cancellation removed from either phase-C transaction; the
+  `postBet` status allow-list removed; the `postBet` expiry check removed; the
+  resolver-error `ErrProviderUnavailable` wrap removed) - all killed by the tests named
+  above.
 - **Not done here** (explicitly out of this task's scope): the payments (PRH-I1) and KYC
   (identity-compliance's own PRH-I2 slice) implementations; F-POOL-2's kill-switch/
   capability-manifest payment-only scope (§10); CAS-STMT-IO-1's remediation (still Low,
-  still not reachable - the MOCK statement source is unchanged).
+  still not reachable - the MOCK statement source is unchanged); widening
+  `RevokeLaunchSession`'s CAS to include `consumed` (C4, judged unnecessary given item 2).
 
 ### 15.2 KYC `CreateVerification`
 

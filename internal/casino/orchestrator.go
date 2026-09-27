@@ -52,9 +52,30 @@ type Orchestrator struct {
 	// 10.3 W1a; webhook_verify.go).
 	webhookSchemes *webhookauth.SchemeSet
 	// webhookLogger receives the matched-key_id line after a successful
-	// callback verification (webhook_verify.go, W2A-SEC-2). Nil means
-	// slog.Default().
+	// callback verification (webhook_verify.go, W2A-SEC-2), and (security
+	// review RV-PRH-I2 C1/F3) LaunchGame's own phase-C-transaction-itself-
+	// failed line - the one operator-facing log point this package wires,
+	// reused rather than duplicated. Nil means slog.Default().
 	webhookLogger *slog.Logger
+}
+
+// phaseCTimeout bounds LaunchGame's own phase-C transactions (revoke +
+// casino.launch_failed, or the casino.launched audit) - these run on
+// context.WithoutCancel(ctx) specifically so a cancelled request context
+// can never skip them (security review RV-PRH-I2 C1), so they need their
+// OWN bound instead of inheriting the caller's deadline.
+const phaseCTimeout = 5 * time.Second
+
+// phaseCLogger is the redaction-safe, operator-only log point for a
+// phase-C transaction failure (security review RV-PRH-I2 C1/F3: this must
+// never be a silently discarded `_ =`) - reuses webhookLogger rather than
+// adding a second logger field, mirroring VerifyCallback's identical
+// nil-means-slog.Default() convention.
+func (o *Orchestrator) phaseCLogger() *slog.Logger {
+	if o.webhookLogger != nil {
+		return o.webhookLogger
+	}
+	return slog.Default()
 }
 
 // NewOrchestrator constructs an Orchestrator over the given adapter
@@ -151,13 +172,28 @@ type LaunchGameResult struct {
 // transaction: success audits "casino.launched"; a failed or ambiguous
 // outcome revokes the session (CAS on status='active') and audits
 // "casino.launch_failed" - so a launch token is never left usable for a
-// round the platform can't account for. A crash on either side of the
-// vendor call leaves the session 'active' and unconsumed; it simply
-// expires (harmless - no ledger effect without a verified bet on a
-// resolvable, non-revoked session; see ErrLaunchSessionRequired). Retries
-// are the existing behaviour (no automatic retry; a player retry mints a
-// brand-new session/token) - there is no code path that mints a second
-// token for the same session.
+// round the platform can't account for. Phase C runs on a request-ctx-
+// independent, bounded timeout (context.WithoutCancel plus a short
+// deadline, not the caller's own ctx) specifically so a cancelled request
+// context (a client disconnect mid-Launch, the ordinary real-world trigger
+// once a real adapter does I/O) can never silently skip the revoke and the
+// audit (security review RV-PRH-I2 C1 / code review R1) - a phase-C
+// transaction failure is logged (never discarded) and the success path
+// attempts a revoke too if its own audit write fails, rather than leaving
+// a vendor-accepted launch un-auditable.
+//
+// A crash on either side of the vendor call (a genuine process crash, not
+// a ctx cancellation, which phase C's own timeout now survives) leaves the
+// session 'active' and unconsumed. This is harmless SPECIFICALLY because
+// postBet itself rejects a bet placed against a non-active/non-consumed OR
+// expired session (ErrLaunchSessionRequired) - the platform's own
+// expires_at bound, not merely "no legitimate vendor would call back",
+// closes the exposure window to at most DefaultLaunchTokenTTL regardless
+// of session status (security review RV-PRH-I2, casino/ledger-finance
+// follow-up on §15.1's original wording, which incorrectly relied on
+// expiry never being checked at all). Retries are the existing behaviour
+// (no automatic retry; a player retry mints a brand-new session/token) -
+// there is no code path that mints a second token for the same session.
 //
 // pool is the tenant-scoped transaction runner (*db.Pool satisfies it,
 // mirroring providercred.TenantTxRunner's identical shape); outbound is the
@@ -401,24 +437,47 @@ func (o *Orchestrator) LaunchGame(ctx context.Context, pool providercred.TenantT
 		return *denied, nil
 	}
 
-	// launchFailed runs phase C's failure path in its own short
-	// transaction (RevokeLaunchSession's CAS on status='active', plus the
-	// "casino.launch_failed" audit record) and returns the caller-facing
-	// error. It never re-panics on a revoke failure - the session simply
-	// expires on its own (harmless; see this function's own doc comment).
+	// launchFailed runs phase C's failure path - RevokeLaunchSession's CAS
+	// on status='active', plus the "casino.launch_failed" audit record -
+	// and returns the caller-facing error.
+	//
+	// Security review RV-PRH-I2 C1 / code review R1: this MUST NOT run on
+	// the request's own ctx. If the request context is already cancelled
+	// (a client disconnect mid-Launch, the ordinary real-world trigger once
+	// a real adapter does I/O), pool.WithTenant(ctx, ...) would fail to
+	// even begin a transaction, silently skipping BOTH the revoke and the
+	// audit - leaving the session 'active' and bet-eligible while the
+	// player was told the launch failed. context.WithoutCancel detaches
+	// from the request's own cancellation/deadline; the bounded timeout
+	// this function adds back is phaseCTimeout, never the caller's.
+	//
+	// A failure of phase C itself (not the triggering cause) is logged at
+	// error level - never discarded - since it can leave a live, bet-
+	// eligible session with no trace in the audit table (F3).
 	launchFailed := func(cause error) (LaunchGameResult, error) {
-		_ = pool.WithTenant(ctx, params.TenantID, func(ctx context.Context, tx pgx.Tx) error {
-			_ = RevokeLaunchSession(ctx, tx, session.ID)
+		phaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), phaseCTimeout)
+		defer cancel()
+		var revoked bool
+		phaseErr := pool.WithTenant(phaseCtx, params.TenantID, func(ctx context.Context, tx pgx.Tx) error {
+			var err error
+			revoked, err = RevokeLaunchSession(ctx, tx, session.ID)
+			if err != nil {
+				return err
+			}
 			return audit.Record(ctx, tx, audit.Entry{
 				TenantID: params.TenantID, ActorType: audit.ActorPlayer, ActorID: params.PlayerAccountID,
 				Action: "casino.launch_failed", TargetType: "casino_launch_session", TargetID: session.ID.String(),
 				Outcome: audit.OutcomeFailure,
 				Metadata: map[string]any{
 					"game_id": params.GameID.String(), "provider_id": providerID, "provider_game_id": providerGameID,
-					"reason": cause.Error(),
+					"reason": cause.Error(), "revoked": revoked,
 				},
 			})
 		})
+		if phaseErr != nil {
+			o.phaseCLogger().Error("casino_launch_phase_c_failed", "tenant_id", params.TenantID.String(),
+				"session_id", session.ID.String(), "action", "casino.launch_failed", "error", phaseErr.Error())
+		}
 		return LaunchGameResult{}, fmt.Errorf("casino: %w", cause)
 	}
 
@@ -450,7 +509,12 @@ func (o *Orchestrator) LaunchGame(ctx context.Context, pool providercred.TenantT
 	}
 	cred, err := outbound.Resolve(ctx, pool, params.TenantID, providerID)
 	if err != nil {
-		return launchFailed(fmt.Errorf("resolve outbound credential: %w", err))
+		// Code review F2.1: a credential-resolution failure is "provider
+		// unavailable" to the player (an unconfigured or rotated vendor
+		// credential is not something the player caused or can retry
+		// around any differently), so it maps to 503 exactly like every
+		// other phase-B/phase-A-registry failure - not a generic 500.
+		return launchFailed(fmt.Errorf("%w: resolve outbound credential: %v", ErrProviderUnavailable, err))
 	}
 	// Defense in depth (ADR 0095 §9.1/S95-C8(b)): the credential this call
 	// just resolved must bind to the SAME tenant/provider/domain LaunchGame
@@ -483,8 +547,12 @@ func (o *Orchestrator) LaunchGame(ctx context.Context, pool providercred.TenantT
 
 	// Phase C success: a second short transaction for the "casino.launched"
 	// audit record only - still no transaction held during, or across, the
-	// Launch call above.
-	if err := pool.WithTenant(ctx, params.TenantID, func(ctx context.Context, tx pgx.Tx) error {
+	// Launch call above. Same ctx-independence as launchFailed (security
+	// review RV-PRH-I2 C1): a cancelled request ctx must not silently skip
+	// this audit either.
+	successCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), phaseCTimeout)
+	defer cancel()
+	if err := pool.WithTenant(successCtx, params.TenantID, func(ctx context.Context, tx pgx.Tx) error {
 		return audit.Record(ctx, tx, audit.Entry{
 			TenantID: params.TenantID, ActorType: audit.ActorPlayer, ActorID: params.PlayerAccountID,
 			Action: "casino.launched", TargetType: "casino_launch_session", TargetID: session.ID.String(),
@@ -495,11 +563,13 @@ func (o *Orchestrator) LaunchGame(ctx context.Context, pool providercred.TenantT
 			},
 		})
 	}); err != nil {
-		// The vendor already accepted the launch; the player simply loses
-		// this URL and the session expires on its own (harmless - see this
-		// function's own doc comment) rather than this function silently
-		// claiming success without its own audit trail.
-		return LaunchGameResult{}, fmt.Errorf("casino: audit launch: %w", err)
+		// The vendor already accepted the launch, so this is NOT a harmless
+		// expiry case - the platform cannot prove it audited the accepted
+		// launch. Security review RV-PRH-I2 C1 / code review R1: attempt a
+		// revoke too (never leave the session silently active with an
+		// unaudited "launched" that the caller was just told failed),
+		// through the SAME ctx-independent, logged path launchFailed uses.
+		return launchFailed(fmt.Errorf("%w: audit launch: %v", ErrProviderUnavailable, err))
 	}
 
 	return LaunchGameResult{LaunchURL: result.LaunchURL, SessionID: session.ID, ExpiresAt: session.ExpiresAt}, nil
@@ -1268,8 +1338,26 @@ func (o *Orchestrator) postBet(ctx context.Context, tx pgx.Tx, tenantID uuid.UUI
 	if session.ProviderID != providerID {
 		return ReceiveCallbackResult{}, fmt.Errorf("%w: session belongs to a different provider", ErrLaunchSessionRequired)
 	}
-	if session.Status == LaunchSessionRevoked {
-		return ReceiveCallbackResult{}, fmt.Errorf("%w: session has been revoked", ErrLaunchSessionRequired)
+	// Security review RV-PRH-I2 (I3/item 2, casino/ledger-finance
+	// follow-up on ADR 0095 §15.1's "expires, harmless" argument): a NEW
+	// bet is only ever accepted against a session that is 'active' or
+	// 'consumed' (the two states a normal, in-progress round can be in -
+	// 'consumed' is the ordinary post-token-bootstrap state, not an edge
+	// case) AND not yet past its own expires_at. An allow-list (rather than
+	// "reject only 'revoked'") fails closed on 'expired' and on any future
+	// status this package doesn't know about yet, not just the ones named
+	// today. This is what makes §15.1's "an orphaned/never-resolved active
+	// session is harmless" claim actually true: without this, a session
+	// left 'active' by a crash or a phase-C failure would accept a bet
+	// indefinitely. postWin/postRollback are UNAFFECTED - they resolve
+	// their accounts from the ledger's own prior entries (correlation_id),
+	// never from this session lookup, so a bet placed BEFORE expiry still
+	// settles (win/rollback) after the session has since expired.
+	if session.Status != LaunchSessionActive && session.Status != LaunchSessionConsumed {
+		return ReceiveCallbackResult{}, fmt.Errorf("%w: session is not eligible to accept a new bet (status=%s)", ErrLaunchSessionRequired, session.Status)
+	}
+	if time.Now().UTC().After(session.ExpiresAt) {
+		return ReceiveCallbackResult{}, fmt.Errorf("%w: session has expired", ErrLaunchSessionRequired)
 	}
 	if session.Mode != ModeReal {
 		return ReceiveCallbackResult{}, fmt.Errorf("%w: session is demo-mode, cannot post a real financial effect", ErrLaunchSessionRequired)

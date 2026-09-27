@@ -55,6 +55,15 @@ type providerBundle struct {
 	CasinoWebhookResolver   webhookauth.Resolver
 	KYCWebhookResolver      webhookauth.Resolver
 
+	// CasinoOutboundResolver is casino's own OUTBOUND-credential MOCK
+	// (ADR 0095 §15.1, PROV-OUTBOUND-CRED-1; security review RV-PRH-I2
+	// C3) - built HERE, exactly like the inbound MOCK resolvers above, so
+	// buildRegistrations can hand it to the synthetic guard as its own
+	// component rather than it existing only as an anonymous value inside
+	// casinoOutboundCredentials(). A true nil interface unless
+	// wiring.CasinoOutboundResolver enables it.
+	CasinoOutboundResolver casino.OutboundCredentialResolver
+
 	// Credentials is the REAL provider-credential subsystem (Stage 10.3
 	// W2a, ADR 0093): the handle-table resolver, outbound resolution and
 	// the four-eyes lifecycle. Nil unless BOTH a fingerprint key and a
@@ -170,6 +179,9 @@ func buildProviderBundle(wiring mockWiring) providerBundle {
 	if wiring.CasinoWebhookResolver {
 		b.CasinoWebhookResolver = casino.NewMockWebhookCredentials(b.Casino)
 	}
+	if wiring.CasinoOutboundResolver {
+		b.CasinoOutboundResolver = casino.NewMockOutboundResolver()
+	}
 	if wiring.KYCWebhookEnabled {
 		b.KYC = kyc.NewMockKYCProvider()
 		b.KYCWebhookResolver = kyc.NewMockWebhookCredentials(b.KYC)
@@ -228,22 +240,36 @@ func (b providerBundle) casinoOrchestratorResolver() webhookauth.Resolver {
 
 // casinoOutboundCredentials is LaunchGame's phase B credential resolver
 // (ADR 0095 §15.1/§9.1, PROV-OUTBOUND-CRED-1) - casinoOrchestratorResolver's
-// OUTBOUND twin. Stage 4A ships a MOCK casino adapter only (CLAUDE.md's
-// scope gate), so this returns the synthetic in-memory resolver whenever
-// the mock adapter is wired; a real casino adapter would need the same
-// kind-split-by-adapter-identity pattern casinoOrchestratorResolver already
-// uses for INBOUND credentials, added when one is actually registered (no
-// commercial relationship exists today - CLAUDE.md's provider-abstraction
-// rule). b.Credentials.Outbound("casino") is nil-receiver-safe and returns
-// nil itself when the real subsystem is not constructed, so a deployment
-// with the mock disabled and no real subsystem configured fails every
-// launch closed via LaunchGame's own nil-resolver check - never a silent
-// fallback.
+// OUTBOUND twin. Security review RV-PRH-I2 C3: the choice is keyed on the
+// ADAPTER's own kind (casino.NewOutboundKindSplitResolver), exactly like
+// casinoOrchestratorResolver already does for INBOUND credentials - never
+// on "is any mock wired anywhere in this process". A real casino adapter
+// registered alongside the mock (e.g. in staging) therefore reaches the
+// real b.Credentials.Outbound("casino") resolver, not the synthetic one;
+// in production the mock adapter itself is refused at boot regardless
+// (MOCK-ADAPTER-PROD-1), so this is defense in depth, not the only guard.
+// b.Credentials.Outbound("casino") is nil-receiver-safe, so a deployment
+// with the mock disabled and no real subsystem configured still fails
+// every launch closed via LaunchGame's own nil-resolver check.
 func (b providerBundle) casinoOutboundCredentials() casino.OutboundCredentialResolver {
-	if b.Casino != nil {
-		return casino.NewMockOutboundResolver()
+	var mock casino.OutboundCredentialResolver
+	if b.CasinoOutboundResolver != nil && b.Casino != nil {
+		mock = b.CasinoOutboundResolver
 	}
-	return b.Credentials.Outbound("casino")
+	// b.Credentials.Outbound returns *providercred.OutboundResolver, a
+	// CONCRETE type, unlike Resolver's identical-looking method (which
+	// already returns the webhookauth.Resolver INTERFACE, so a nil there
+	// is already a true nil interface). Converting a nil *OutboundResolver
+	// straight into the OutboundCredentialResolver interface parameter
+	// below would produce the classic non-nil-interface-wrapping-a-nil-
+	// pointer value, which NewOutboundKindSplitResolver's own `mock == nil
+	// && real == nil` check would then never see as nil. This explicit
+	// concrete-pointer nil check is what keeps that check meaningful.
+	var real casino.OutboundCredentialResolver
+	if or := b.Credentials.Outbound("casino"); or != nil {
+		real = or
+	}
+	return casino.NewOutboundKindSplitResolver(b.casinoAdapters(), mock, real)
 }
 
 // kycOrchestratorResolver is the KYC Orchestrator's resolver: the bundle's
@@ -287,6 +313,10 @@ func buildRegistrations(_ config.Config, b providerBundle) []providerkind.Regist
 		providerkind.Registration{Domain: "payments", Name: "webhook_resolver", Component: b.PaymentsWebhookResolver},
 		providerkind.Registration{Domain: "casino", Name: "webhook_resolver", Component: b.CasinoWebhookResolver},
 		providerkind.Registration{Domain: "kyc", Name: "webhook_resolver", Component: b.KYCWebhookResolver},
+		// The casino OUTBOUND-credential MOCK (security review RV-PRH-I2
+		// C3) - a nil one (wiring off) is skipped by the guard, same as
+		// every other MOCK resolver above.
+		providerkind.Registration{Domain: "casino", Name: "outbound_resolver", Component: b.CasinoOutboundResolver},
 	)
 	// The real credential subsystem (production-eligible) and each
 	// secret-store backend: awssm is ProductionEligible (W3b); devfile has

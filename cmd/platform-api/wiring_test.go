@@ -166,6 +166,40 @@ func TestCasinoWebhookResolver_FollowsWiring(t *testing.T) {
 	}
 }
 
+// TestCasinoOutboundResolver_FollowsWiring is security review RV-PRH-I2
+// C3's fix, casino's OUTBOUND twin of TestCasinoWebhookResolver_
+// FollowsWiring: a TRUE nil interface when off, and a working MOCK
+// resolver - reached ONLY via casinoOutboundCredentials()'s kind split, not
+// merely because b.CasinoOutboundResolver is set - when on. The kind
+// split's own routing-by-adapter-identity logic is unit-tested directly in
+// internal/casino (TestOutboundKindSplitResolver_*); this test only proves
+// the wiring itself reaches the mock adapter's own provider id.
+func TestCasinoOutboundResolver_FollowsWiring(t *testing.T) {
+	for _, cfg := range wiringOffConfigs {
+		b := buildProviderBundle(mockProviderWiring(cfg))
+		if b.CasinoOutboundResolver != nil {
+			t.Fatalf("env=%s explicit=%v flag=%v: expected no casino outbound MOCK resolver in the bundle", cfg.Environment, cfg.EnvironmentExplicit, cfg.TestSupportEndpointsEnabled)
+		}
+		if r := b.casinoOutboundCredentials(); r != nil {
+			t.Fatalf("env=%s explicit=%v flag=%v: expected a nil outbound resolver interface, got %T", cfg.Environment, cfg.EnvironmentExplicit, cfg.TestSupportEndpointsEnabled, r)
+		}
+	}
+
+	b := buildProviderBundle(mockProviderWiring(wiringOnConfig))
+	r := b.casinoOutboundCredentials()
+	if r == nil {
+		t.Fatal("expected the outbound MOCK resolver with test support on")
+	}
+	tenantID := uuid.New()
+	cred, err := r.Resolve(context.Background(), nil, tenantID, "mock-casino")
+	if err != nil || cred.TenantID != tenantID || cred.ProviderID != "mock-casino" || cred.Domain != "casino" {
+		t.Fatalf("outbound MOCK resolver must resolve its own registered synthetic provider, got %v / %v", cred, err)
+	}
+	if _, err := r.Resolve(context.Background(), nil, tenantID, "other-provider"); err == nil {
+		t.Fatal("outbound MOCK resolver must fail closed for an unregistered provider id")
+	}
+}
+
 // TestPaymentsWebhookResolver_FollowsWiring proves the resolver actually
 // injected follows the wiring value: a TRUE nil interface when off (so the
 // Orchestrator's nil-resolver branch rejects every callback as
