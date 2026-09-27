@@ -1162,3 +1162,210 @@ balance `UPDATE`, and no money path without an idempotency key. No veto
 applies. C1 is a correctness defect in the proposed design and **must**
 be fixed in the ADR text before PRH-I3 starts. C2–C7 are implementation
 gates.
+
+---
+
+## 10. Security review
+
+Reviewer: `security`, 2026-09-27. Reviewed at the working tree's actual
+`HEAD 3d50b3c` (the review request cited `07c8103`; this ADR's own baseline
+line says `1560ad0`; §1's file:line citations were not all re-verified).
+**Scope:** this design paper only. Checked against migrations 0040
+(`kyc_verifications`) and 0075 (`jurisdiction_precedence_configs`, the
+precedent it says it follows), `internal/db/platform_service.go`,
+`internal/identity/staff_user.go`, `internal/casino/orchestrator.go`
+(denial-audit pattern), and the withdrawal submit path
+(`internal/httpserver/withdrawal_handlers.go:827-850`). **Out of scope:** no
+code exists to review yet. There was no penetration testing and no legal
+review. The HD-KYC-* values are not a security call. PRH-I3's implementation
+needs its own review (§8 already lists it); this approval does not carry
+over to it.
+
+### Verdict: **APPROVE WITH CONDITIONS**
+
+What holds up well: the enforcement mechanism is its own boundary,
+separate from RG/Risk. It never calls a vendor. It performs its own read
+instead of accepting a pre-computed outcome. The five-valued outcome has
+no policy-configurable path from `pending`/`failed`/`unavailable` to
+allow. The first-withdrawal rule is compiled in, and `first_withdrawal`
+is deliberately not a `trigger_type`, so no policy row can switch it
+off. The decisions table stores no sensitive content, and players see
+status only. The conditions below fix places where the sketch is
+**weaker than the precedent it cites** or where the stated backstop does
+not hold as written.
+
+### Ruling on the flagged design choice: deposits ALLOWED when no threshold policy is configured
+
+**Accepted, but only together with C1 and C6.** The justification
+"value cannot leave through a deposit, and the withdrawal gate is the
+backstop" holds only if the backstop runs on *every* way value can
+leave. As written, §3.2 point 1 gates only the *first* withdrawal (see
+C1), so the backstop has a hole and the ruling depends on closing it.
+Also:
+- (a) This covers today's paths only. No refund-to-source execution
+  path exists in `internal/payments` today (only type references).
+  Crypto (row #19) is different: funds can arrive with no initiation
+  step to gate. Either of those, once built, must be re-reviewed
+  against this ruling and cannot inherit it.
+- (b) **Launch flag for the orchestrator/human:** "dormant" describes
+  how the mechanism behaves. It is not a compliance position. Going
+  live with real money in any jurisdiction that has no active
+  `cumulative_deposit` policy means unverified players can deposit
+  without limit, and funds can be *placed* (the first AML stage) even
+  if they can never be extracted. Whether that is acceptable for
+  Anjouan or any later market is HD-KYC-1 plus legal review. It must be
+  signed off explicitly before launch and must not be inherited by
+  default.
+- (c) Dormancy must be visible to operations. See C9.
+
+### Conditions (each must be met before PRH-I3 is marked complete; C1, C2, C4 and C5 also block launch)
+
+1. **[HIGH — launch-blocking] Every withdrawal must require `passed`,
+   not only the first.** As written, the rule fires only for a wallet
+   with zero prior `completed` withdrawals. Failure scenario: a player
+   is approved, completes one withdrawal, and is later `rejected`
+   (forged document found) or `expired`. With no `edd_amount` row
+   active, the second withdrawal evaluates `not_required` and is paid
+   out. The same hole lets every player who completed a withdrawal
+   before this gate shipped withdraw without ever being verified. The
+   rule must read: "a withdrawal request or payout dispatch requires
+   the player's current verification to be `passed`." The first
+   withdrawal is the point where KYC becomes mandatory; it does not
+   stop being mandatory afterwards. Replace §7's test "a player with
+   one prior completed withdrawal is exempt" with the opposite
+   assertion. Also scope the rule per player, not per wallet (ADR
+   0007), so opening a new wallet cannot reset it.
+2. **[HIGH — launch-blocking] Migration 0101 RLS and immutability must
+   copy migration 0075 exactly. The sketch does not.** The sketch's
+   write policy is
+   `current_setting('app.tenant_id', true) IS NULL`. That check (i) has
+   no `NULLIF`, (ii) does not require
+   `app.platform_admin_principal_id`, and (iii) comes with no
+   `FORCE ROW LEVEL SECURITY` and no UPDATE policy. Failure scenario:
+   any platform-scoped connection that leaves the tenant unset (for
+   example `WithPlatformService` jobs) can `INSERT` an `active` policy,
+   or a relaxed one, for any jurisdiction. Required:
+   - `FORCE` RLS.
+   - INSERT and UPDATE policies that require
+     `NULLIF(current_setting('app.platform_admin_principal_id', true), '')::uuid IS NOT NULL`
+     and `NULLIF` of `app.tenant_id` and `app.player_account_id` to be
+     `NULL`, verbatim from 0075 lines 207-225.
+   - No DELETE policy and no FOR ALL policy.
+   - A table-specific append-only trigger plus a `BEFORE TRUNCATE`
+     guard. The sketch's `enforce_append_only_status_transition` and
+     `reject_mutation` do not exist in `migrations/`. The trigger must
+     permit exactly `draft→active`, `draft→withdrawn` and
+     `active→withdrawn`, with every other column immutable. The sketch
+     permits only `→withdrawn`, which makes `draft→active`
+     impossible.
+   - `created_by_actor_id NOT NULL`, checked to equal the principal
+     GUC, so provenance cannot be forged.
+   - The same `FORCE`, `NULLIF` and TRUNCATE-guard treatment for
+     `kyc_enforcement_decisions`.
+
+   **Can a tenant admin change enforcement?** Only if this condition is
+   ignored. `StaffRoleCompliance` is a *tenant-bound* staff role
+   (`staff_users.tenant_id`). The sketch's "compliance/platform_admin
+   role check at the handler" would let tenant A's compliance officer
+   write platform-wide policy that governs every tenant sharing the
+   licensing jurisdiction, including tenant B. Writes must be limited to
+   the platform-admin principal, enforced by the database. A tenant
+   role must never grant write access. Required tests: tenant-scoped
+   compliance and tenant admin get a DB-level rejection on
+   INSERT/UPDATE; the platform-service scope is rejected; the
+   platform-admin scope succeeds.
+3. **[MEDIUM] Every policy write is audited, and relaxing changes need
+   two people.** Each create, activate or withdraw writes
+   `audit.Record` in the same transaction, containing: actor (platform
+   principal), jurisdiction, before/after row, IP, `reason_code`,
+   `legal_review_reference`. Withdrawing an active row, or activating a
+   higher threshold than the one it replaces, relaxes enforcement for
+   every tenant in that jurisdiction. That needs four-eyes approval (a
+   second platform principal), in line with CLAUDE.md's rule for
+   high-impact administrative actions. If four-eyes is deferred, record
+   the deferral as a decision; do not drop it silently.
+4. **[HIGH — launch-blocking] Pin down the read semantics so the player
+   cannot influence the result.**
+   - (a) `kyc_verifications` has no per-player uniqueness (migration
+     0040). Evaluate only the **latest** row for (tenant, brand,
+     player), ordered deterministically (`created_at DESC, id DESC`).
+     An older `approved` row must never satisfy the check when a newer
+     row is `pending`/`rejected`/`expired`. An `EXISTS(status='approved')`
+     query is the bug to avoid.
+   - (b) Treat `expires_at <= now()` as `failed` even when `status` is
+     still `approved`. `expired` status is set only by a provider
+     update, and a missed callback must not extend a verification's
+     validity.
+   - (c) A policy-lookup error must return `unavailable`/deny.
+     "Query failed" must never be mapped to "no rows", which would give
+     `not_required`.
+   - (d) Select policies **only** by `LicensingJurisdictionID`, taken
+     from the tenant's licence. `JurisdictionCode` (derived from geo or
+     player evidence, and so player-influenceable through a VPN or a
+     declared country) must not select or relax a policy. The table has
+     no column it could match anyway. Remove it from
+     `EnforcementParams`, or document it as unused until a recorded
+     decision says otherwise.
+   - (e) `Amount`/`AssetCode` are player-chosen, so threshold triggers
+     invite structuring. When HD-KYC-1/2 are implemented, compute
+     cumulative totals server-side from ledger/intent history. Include
+     in-flight (initiated, not yet settled) deposits, and evaluate
+     across all of the player's assets or wallets, not only the asset
+     of the current request.
+   - (f) The §7 cross-tenant test must use a *valid* token for tenant B
+     with a tenant A `player_account_id`. The expected result is a
+     rejected or not-found outcome from the caller, never an evaluation
+     against A's rows.
+5. **[HIGH — launch-blocking] Denial audit records must survive the
+   rollback.** §3.6 says the decision row and the `audit.Record` are
+   written "in the same transaction as the domain effect", and §7 says
+   a KYC-denied withdrawal request's "transaction rolls back". Together
+   these delete the only record of the denial. Denials must be durably
+   committed, either by committing a transaction that contains only the
+   audit/decision rows, or by the separately committed pattern
+   `internal/casino/orchestrator.go:757` already uses. Test: after a
+   denial there is exactly one decision row and one audit row, and zero
+   ledger or hold effect.
+6. **[MEDIUM] The payout gate must cover every path to provider
+   submission.** Today the only caller is
+   `withdrawal_handlers.go:827`, followed by `MarkSubmitted` at `:850`.
+   Any future retry, re-submit-after-timeout or admin force-submit path
+   must also pass through the KYC check. Add a test or raw-guard (in the
+   style of `raw_guard_test.go`) asserting that `MarkSubmitted` is
+   reachable only after a KYC evaluation in the same transaction.
+7. **[MEDIUM] Staff read API
+   (`GET /v1/admin/kyc/enforcement-decisions`).**
+   - Tenant comes from the authenticated staff context
+     (`db.WithTenant(staff.TenantID)`), never from a query parameter.
+   - A `player_account_id` belonging to another tenant returns the same
+     404 as a nonexistent one.
+   - Roles: `compliance` and `platform_admin` only.
+   - A platform-admin cross-tenant read needs an explicit tenant path
+     parameter, and the access itself is audited.
+   - Pagination is keyset on `(decided_at, id)`, with a server-enforced
+     maximum page size and a default when none is supplied.
+   - Response fields are exactly those §6 lists. No
+     `kyc_verifications.reason`, no person or document data, no amount.
+   - Required tests: a valid tenant B token asking for a tenant A
+     player gets 404 and no rows; a tenant-bound role other than
+     compliance gets 403.
+8. **[MEDIUM] Players see status only (HD-10.3-3).**
+   - The player-facing decline must never include `matched_trigger`,
+     policy ids, `policy_version`, or anything that implies a threshold
+     or its value. Revealing that a cumulative-deposit trigger fired, or
+     where, lets a player structure deposits around it.
+   - `unavailable` appears to the player as a generic retryable failure.
+   - If `DepositIntent.reason` (`"kyc_required:<code>"`) is ever
+     returned verbatim to players, `<code>` must be a closed enum that
+     reveals no more than the player's own verification status.
+   - `kyc_enforcement_policies` is readable by every tenant through
+     `USING (true)`. That is acceptable, since it is not tenant-secret,
+     but no player-reachable API may return its rows.
+9. **[LOW] Make dormancy observable.** Provide a platform-admin read,
+   or an ops report, listing each licensing jurisdiction that has live
+   tenants and no `active` row per `trigger_type`. That supports the
+   launch decision in ruling (b) and keeps "unconfigured" from being
+   invisible.
+10. **[LOW] Fixture values.** The §3.7 fixture-value discipline is
+    endorsed. At implementation, `security` will check that no numeric
+    threshold appears in non-test Go or in migration SQL.
