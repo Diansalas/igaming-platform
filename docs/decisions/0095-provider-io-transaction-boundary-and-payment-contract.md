@@ -1838,13 +1838,29 @@ READY on R1) are addressed as follows.
   pre-existing (not introduced by this diff) and are registered as their own tracking rows
   in `docs/governance/task-registry.md` (`CAS-JURIS-AUDIT-1`, `CAS-HEALTH-FAILOPEN-1`,
   `CAS-REVOKE-BET-RACE-1`), owner `casino`, rather than fixed silently inside this record.
+- **Item 5 (orchestrator follow-up) - raw `cause.Error()` in append-only audit.**
+  `casino.launch_failed`'s audit metadata stored `cause.Error()` verbatim - a real
+  adapter's transport error (`*url.Error`) can embed the full request URL, including a
+  query-string credential, which append-only `audit_log.metadata` must never receive.
+  Fixed with a closed `LaunchFailureReason` enum (`provider_unavailable`, `declined`,
+  `circuit_open`, `credential_unavailable`, `credential_binding_mismatch`,
+  `ctx_cancelled`, `internal`) stored in place of the raw text; the cause itself reaches
+  an operator only through `phaseCLogger`'s log line, via the new
+  `redactedLaunchFailureDetail` (mirrors `internal/payments/gate.go`'s `redactedReason`
+  without importing it). Grepped the whole package for other `.Error()` writes into audit
+  metadata - this was the only one. Test:
+  `TestLaunchGame_TransportErrorAuditNeverStoresRawErrorText` builds a `*url.Error`
+  carrying a secret-looking query string, calls `LaunchGame`, and reads the actual
+  persisted `audit_log.metadata` row back via SQL to assert the secret's absence and the
+  bounded reason's presence.
 - **Mutation evidence, corrected**: `docs/plans/payment-readiness/evidence/
   prh-i2-casino-mutation-kill.txt` now reads **9/9 killed, 1 equivalent** for the original
   submission (correcting F1's "10/10" miscount) plus a second section for this fix
   record's own mutants (ctx-cancellation removed from either phase-C transaction; the
   `postBet` status allow-list removed; the `postBet` expiry check removed; the
-  resolver-error `ErrProviderUnavailable` wrap removed) - all killed by the tests named
-  above.
+  resolver-error `ErrProviderUnavailable` wrap removed) and a third section for item 5
+  (the audit `"reason"` reverted to `cause.Error()`) - **15/15 killed, 1 equivalent**
+  overall.
 - **Not done here** (explicitly out of this task's scope): the payments (PRH-I1) and KYC
   (identity-compliance's own PRH-I2 slice) implementations; F-POOL-2's kill-switch/
   capability-manifest payment-only scope (§10); CAS-STMT-IO-1's remediation (still Low,
