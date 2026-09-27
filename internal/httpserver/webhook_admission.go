@@ -307,6 +307,21 @@ func (rt *webhookAdmissionRuntime) admitPreAuth(w http.ResponseWriter, r *http.R
 	if rt == nil {
 		return noop, true
 	}
+
+	// ADR 0097 §6.1/§7/T9: "limiter panic or internal error: 503 (the
+	// admission layer recovers itself; it is never a 500 from
+	// recoverMiddleware)". This is a SEPARATE, inner recover from the
+	// generic outer recoverMiddleware (middleware.go), specific to
+	// admission's own bounded, fail-closed contract.
+	defer func() {
+		if rec := recover(); rec != nil {
+			requestID := observability.RequestIDFromContext(r.Context())
+			rt.logger.Error("webhook_admission_panic_recovered", "panic", rec, "domain", string(domain))
+			writeAdmissionRejection(w, requestID, apierror.CodeUnavailable, time.Second)
+			release, ok = nil, false
+		}
+	}()
+
 	ctx := r.Context()
 	requestID := observability.RequestIDFromContext(ctx)
 	clientIP := trustedProxyClientIP(r, trustedProxyCount)
@@ -402,6 +417,18 @@ func (rt *webhookAdmissionRuntime) admitVerified(w http.ResponseWriter, r *http.
 	if rt == nil {
 		return noop, true
 	}
+
+	// ADR 0097 §6.1/§7/T9: a panic inside B1/B2 is also recovered here as
+	// a 503, never a 500 (see admitPreAuth's identical comment).
+	defer func() {
+		if rec := recover(); rec != nil {
+			requestID := observability.RequestIDFromContext(r.Context())
+			rt.logger.Error("webhook_admission_panic_recovered", "panic", rec, "domain", string(domain))
+			writeAdmissionRejection(w, requestID, apierror.CodeUnavailable, time.Second)
+			release, ok = nil, false
+		}
+	}()
+
 	ctx := r.Context()
 	requestID := observability.RequestIDFromContext(ctx)
 
