@@ -164,6 +164,13 @@ func approvedWithdrawal(t *testing.T, pool *db.Pool, f payoutFixture, amount int
 	return wr
 }
 
+// testSubmitActor is a fresh, valid-shaped SubmitActor for tests that don't
+// care about the specific staff identity recorded (B6's own tests assert
+// on the actor explicitly where it matters).
+func testSubmitActor() SubmitActor {
+	return SubmitActor{StaffID: uuid.New(), IPAddress: "127.0.0.1", UserAgent: "test-agent", RequestID: uuid.New().String()}
+}
+
 func countAttempts(t *testing.T, pool *db.Pool, tenantID uuid.UUID, withdrawalRequestID uuid.UUID) int {
 	t.Helper()
 	var n int
@@ -195,7 +202,7 @@ func TestClaimForDispatch_KYCDeny_NoAttemptRowHoldReleased(t *testing.T) {
 	wr := approvedWithdrawal(t, pool, f, 500, "payout-kyc-deny")
 	revokeVerification(t, pool, f)
 
-	claim, err := orch.ClaimForDispatch(context.Background(), pool, KYCEnforcementPayoutGate{}, f.tenantID, wr.ID, "bank_transfer")
+	claim, err := orch.ClaimForDispatch(context.Background(), pool, KYCEnforcementPayoutGate{}, f.tenantID, wr.ID, "bank_transfer", testSubmitActor())
 	if err != nil {
 		t.Fatalf("ClaimForDispatch: %v", err)
 	}
@@ -228,7 +235,7 @@ func TestClaimForDispatch_Allow_CommitsBeforeAnyProviderCall(t *testing.T) {
 
 	wr := approvedWithdrawal(t, pool, f, 500, "payout-allow-claim")
 
-	claim, err := orch.ClaimForDispatch(context.Background(), pool, KYCEnforcementPayoutGate{}, f.tenantID, wr.ID, "bank_transfer")
+	claim, err := orch.ClaimForDispatch(context.Background(), pool, KYCEnforcementPayoutGate{}, f.tenantID, wr.ID, "bank_transfer", testSubmitActor())
 	if err != nil {
 		t.Fatalf("ClaimForDispatch: %v", err)
 	}
@@ -268,7 +275,7 @@ func TestPayoutDispatch_EndToEnd_Success(t *testing.T) {
 
 	wr := approvedWithdrawal(t, pool, f, 500, "payout-e2e-success")
 
-	claim, err := orch.ClaimForDispatch(context.Background(), pool, KYCEnforcementPayoutGate{}, f.tenantID, wr.ID, "bank_transfer")
+	claim, err := orch.ClaimForDispatch(context.Background(), pool, KYCEnforcementPayoutGate{}, f.tenantID, wr.ID, "bank_transfer", testSubmitActor())
 	if err != nil {
 		t.Fatalf("ClaimForDispatch: %v", err)
 	}
@@ -316,7 +323,7 @@ func TestPayoutDispatch_OversizeProviderReference_Parks(t *testing.T) {
 	orch := NewOrchestrator(map[string]PaymentProvider{"mock-payout-d": provider}, MultiWebhookCredentialResolver{"mock-payout-d": NewMockWebhookCredentials(provider)})
 
 	wr := approvedWithdrawal(t, pool, f, 500, "payout-oversize-ref")
-	claim, err := orch.ClaimForDispatch(context.Background(), pool, KYCEnforcementPayoutGate{}, f.tenantID, wr.ID, "bank_transfer")
+	claim, err := orch.ClaimForDispatch(context.Background(), pool, KYCEnforcementPayoutGate{}, f.tenantID, wr.ID, "bank_transfer", testSubmitActor())
 	if err != nil {
 		t.Fatalf("ClaimForDispatch: %v", err)
 	}
@@ -371,7 +378,7 @@ func TestPayoutDispatch_NoDefiniteDeclineNeverFails(t *testing.T) {
 	orch := NewOrchestrator(map[string]PaymentProvider{"mock-payout-e": provider}, MultiWebhookCredentialResolver{"mock-payout-e": NewMockWebhookCredentials(provider)})
 
 	wr := approvedWithdrawal(t, pool, f, 500, "payout-ambiguous")
-	claim, err := orch.ClaimForDispatch(context.Background(), pool, KYCEnforcementPayoutGate{}, f.tenantID, wr.ID, "bank_transfer")
+	claim, err := orch.ClaimForDispatch(context.Background(), pool, KYCEnforcementPayoutGate{}, f.tenantID, wr.ID, "bank_transfer", testSubmitActor())
 	if err != nil {
 		t.Fatalf("ClaimForDispatch: %v", err)
 	}
@@ -407,7 +414,7 @@ func TestPayoutDispatch_NotSent_ReclaimNeverDoubleSends(t *testing.T) {
 	orch := NewOrchestrator(map[string]PaymentProvider{"mock-payout-f": provider}, MultiWebhookCredentialResolver{"mock-payout-f": NewMockWebhookCredentials(provider)})
 
 	wr := approvedWithdrawal(t, pool, f, 500, "payout-notsent")
-	claim, err := orch.ClaimForDispatch(context.Background(), pool, KYCEnforcementPayoutGate{}, f.tenantID, wr.ID, "bank_transfer")
+	claim, err := orch.ClaimForDispatch(context.Background(), pool, KYCEnforcementPayoutGate{}, f.tenantID, wr.ID, "bank_transfer", testSubmitActor())
 	if err != nil {
 		t.Fatalf("ClaimForDispatch: %v", err)
 	}
@@ -491,7 +498,7 @@ func TestSweeper_T2Reclaim_KYCDeny_EscalatesNeverResends(t *testing.T) {
 	orch := NewOrchestrator(map[string]PaymentProvider{"mock-payout-g": provider}, MultiWebhookCredentialResolver{"mock-payout-g": NewMockWebhookCredentials(provider)})
 
 	wr := approvedWithdrawal(t, pool, f, 500, "payout-t2-deny")
-	claim, err := orch.ClaimForDispatch(context.Background(), pool, KYCEnforcementPayoutGate{}, f.tenantID, wr.ID, "bank_transfer")
+	claim, err := orch.ClaimForDispatch(context.Background(), pool, KYCEnforcementPayoutGate{}, f.tenantID, wr.ID, "bank_transfer", testSubmitActor())
 	if err != nil {
 		t.Fatalf("ClaimForDispatch: %v", err)
 	}
@@ -553,7 +560,7 @@ func TestSweeper_T2Reclaim_Allow_ResendsAndSucceeds(t *testing.T) {
 	orch := NewOrchestrator(map[string]PaymentProvider{"mock-payout-h": provider}, MultiWebhookCredentialResolver{"mock-payout-h": NewMockWebhookCredentials(provider)})
 
 	wr := approvedWithdrawal(t, pool, f, 500, "payout-t2-allow")
-	claim, err := orch.ClaimForDispatch(context.Background(), pool, KYCEnforcementPayoutGate{}, f.tenantID, wr.ID, "bank_transfer")
+	claim, err := orch.ClaimForDispatch(context.Background(), pool, KYCEnforcementPayoutGate{}, f.tenantID, wr.ID, "bank_transfer", testSubmitActor())
 	if err != nil {
 		t.Fatalf("ClaimForDispatch: %v", err)
 	}
@@ -602,7 +609,7 @@ func TestSweeper_T2Reclaim_Allow_ResendsAndSucceeds(t *testing.T) {
 func notSentPayoutAttempt(t *testing.T, pool *db.Pool, orch *Orchestrator, f payoutFixture, amount int64, idemKey string) (withdrawal.WithdrawalRequest, PaymentAttempt) {
 	t.Helper()
 	wr := approvedWithdrawal(t, pool, f, amount, idemKey)
-	claim, err := orch.ClaimForDispatch(context.Background(), pool, KYCEnforcementPayoutGate{}, f.tenantID, wr.ID, "bank_transfer")
+	claim, err := orch.ClaimForDispatch(context.Background(), pool, KYCEnforcementPayoutGate{}, f.tenantID, wr.ID, "bank_transfer", testSubmitActor())
 	if err != nil {
 		t.Fatalf("ClaimForDispatch: %v", err)
 	}
@@ -720,7 +727,7 @@ func TestSweeper_T12Resubmit_KYCDeny_EscalatesNeverResends(t *testing.T) {
 	orch := NewOrchestrator(map[string]PaymentProvider{"mock-payout-j": provider}, MultiWebhookCredentialResolver{"mock-payout-j": NewMockWebhookCredentials(provider)})
 
 	wr := approvedWithdrawal(t, pool, f, 500, "payout-t12-deny")
-	claim, err := orch.ClaimForDispatch(context.Background(), pool, KYCEnforcementPayoutGate{}, f.tenantID, wr.ID, "bank_transfer")
+	claim, err := orch.ClaimForDispatch(context.Background(), pool, KYCEnforcementPayoutGate{}, f.tenantID, wr.ID, "bank_transfer", testSubmitActor())
 	if err != nil {
 		t.Fatalf("ClaimForDispatch: %v", err)
 	}
@@ -835,7 +842,7 @@ func TestClaimForDispatch_NeverCallsProviderBeforeCommit(t *testing.T) {
 	// does any work at all.
 	cctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := orch.ClaimForDispatch(cctx, pool, KYCEnforcementPayoutGate{}, f.tenantID, wr.ID, "bank_transfer"); err == nil {
+	if _, err := orch.ClaimForDispatch(cctx, pool, KYCEnforcementPayoutGate{}, f.tenantID, wr.ID, "bank_transfer", testSubmitActor()); err == nil {
 		t.Fatalf("expected the cancelled-context claim to fail")
 	}
 	if spy.count() != 0 {
@@ -845,7 +852,7 @@ func TestClaimForDispatch_NeverCallsProviderBeforeCommit(t *testing.T) {
 	// Crash point 2: the payout KYC gate itself fails (not a business
 	// DENY) - ClaimForDispatch must return the error before ever reaching
 	// MarkSubmittedPending/InsertSubmittingAttempt.
-	if _, err := orch.ClaimForDispatch(context.Background(), pool, erroringPayoutKYCGate{}, f.tenantID, wr.ID, "bank_transfer"); err == nil {
+	if _, err := orch.ClaimForDispatch(context.Background(), pool, erroringPayoutKYCGate{}, f.tenantID, wr.ID, "bank_transfer", testSubmitActor()); err == nil {
 		t.Fatalf("expected the gate-evaluation-error claim to fail")
 	}
 	if spy.count() != 0 {
@@ -871,7 +878,7 @@ func TestClaimForDispatch_NeverCallsProviderBeforeCommit(t *testing.T) {
 	// Crash point 3 (the successful commit path itself): ClaimForDispatch's
 	// OWN commit must not call Withdraw either - only a caller's later,
 	// separate DispatchWithdraw call may.
-	claim, err := orch.ClaimForDispatch(context.Background(), pool, KYCEnforcementPayoutGate{}, f.tenantID, wr.ID, "bank_transfer")
+	claim, err := orch.ClaimForDispatch(context.Background(), pool, KYCEnforcementPayoutGate{}, f.tenantID, wr.ID, "bank_transfer", testSubmitActor())
 	if err != nil {
 		t.Fatalf("ClaimForDispatch: %v", err)
 	}
@@ -907,7 +914,7 @@ func TestConcurrent_RejectVsClaimForDispatch_ExactlyOneWins(t *testing.T) {
 		wg.Add(2)
 		go func() {
 			defer wg.Done()
-			_, claimErr = orch.ClaimForDispatch(context.Background(), pool, KYCEnforcementPayoutGate{}, f.tenantID, wr.ID, "bank_transfer")
+			_, claimErr = orch.ClaimForDispatch(context.Background(), pool, KYCEnforcementPayoutGate{}, f.tenantID, wr.ID, "bank_transfer", testSubmitActor())
 		}()
 		go func() {
 			defer wg.Done()
@@ -971,7 +978,7 @@ func TestConcurrent_DenyForComplianceVsClaimForDispatch_ExactlyOneWins(t *testin
 		wg.Add(2)
 		go func() {
 			defer wg.Done()
-			_, claimErr = orch.ClaimForDispatch(context.Background(), pool, KYCEnforcementPayoutGate{}, f.tenantID, wr.ID, "bank_transfer")
+			_, claimErr = orch.ClaimForDispatch(context.Background(), pool, KYCEnforcementPayoutGate{}, f.tenantID, wr.ID, "bank_transfer", testSubmitActor())
 		}()
 		go func() {
 			defer wg.Done()

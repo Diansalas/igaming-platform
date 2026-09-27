@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -16,7 +17,6 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/kyc"
 	"github.com/Diansalas/igaming-platform/internal/observability"
 	"github.com/Diansalas/igaming-platform/internal/payments"
-	"github.com/Diansalas/igaming-platform/internal/providerref"
 	"github.com/Diansalas/igaming-platform/internal/tenant"
 	"github.com/Diansalas/igaming-platform/internal/validation"
 	"github.com/Diansalas/igaming-platform/internal/wallet"
@@ -902,8 +902,13 @@ func newSubmitWithdrawalHandler(deps Deps) http.HandlerFunc {
 			return
 		}
 
+		// B6 (RV-PRH-I1 code review): the staff-attribution audit
+		// ("withdrawal.submit.http") is now written BY ClaimForDispatch
+		// itself, inside the SAME transaction as the deny/allow outcome -
+		// never a best-effort, discardable call made after the fact.
+		actor := payments.SubmitActor{StaffID: submitterID, IPAddress: clientIP(r), UserAgent: r.UserAgent(), RequestID: requestID}
 		claim, err := deps.PaymentOrchestrator.ClaimForDispatch(
-			r.Context(), deps.DB, payments.KYCEnforcementPayoutGate{}, tc.TenantID, id, req.PaymentMethod,
+			r.Context(), deps.DB, payments.KYCEnforcementPayoutGate{}, tc.TenantID, id, req.PaymentMethod, actor,
 		)
 		if errors.Is(err, withdrawal.ErrNotFound) {
 			apierror.Write(w, requestID, apierror.CodeNotFound, "withdrawal not found")
@@ -927,22 +932,6 @@ func newSubmitWithdrawalHandler(deps Deps) http.HandlerFunc {
 			return
 		}
 
-		// Audit the human trigger regardless of the KYC outcome - this is
-		// the ONLY record anywhere that attributes the actual payout-
-		// triggering action to a human (Stage 3B security review P2-4).
-		_ = deps.DB.WithTenant(r.Context(), tc.TenantID, func(ctx context.Context, tx pgx.Tx) error {
-			meta := map[string]any{"denied_by_kyc": claim.Denied}
-			if !claim.Denied {
-				meta["provider_id"] = claim.Capability.ProviderID
-			}
-			return audit.Record(ctx, tx, audit.Entry{
-				TenantID: tc.TenantID, ActorType: audit.ActorStaff, ActorID: submitterID,
-				Action: "withdrawal.submit.http", TargetType: "withdrawal_request", TargetID: id.String(),
-				Outcome: audit.OutcomeSuccess, IPAddress: clientIP(r), UserAgent: r.UserAgent(), RequestID: requestID,
-				Metadata: meta,
-			})
-		})
-
 		wr := claim.Request
 		if claim.Denied {
 			resp := submitWithdrawalResponse{withdrawalRequestResponse: toWithdrawalRequestResponse(wr)}
@@ -964,8 +953,16 @@ func newSubmitWithdrawalHandler(deps Deps) http.HandlerFunc {
 		// transaction, so it commits even if r.Context() is cancelled by
 		// now (payout.go's own doc comment).
 		if err := payments.ApplyPayoutResult(r.Context(), deps.DB, tc.TenantID, id, claim.Attempt, gr, payments.EvidenceSync); err != nil {
+			// B2 (RV-PRH-I1 code review): this is no longer a dead end.
+			// ClaimForDispatch (T1p) already committed next_action_at =
+			// lease_until on the attempt row, so - whatever failed here -
+			// the sweeper will pick this payout back up on its own and
+			// converge it (T2/T12/QueryStatus), with no further staff
+			// action required. The OLD "check /resolve" message was false:
+			// /resolve refused any `submitted` row with no provider
+			// reference yet, which is exactly this shape (P95-C2).
 			logger.Error("submit_withdrawal_apply_result_failed", "error", err)
-			apierror.Write(w, requestID, apierror.CodeInternal, "withdrawal dispatch outcome could not be recorded - check /resolve")
+			apierror.Write(w, requestID, apierror.CodeInternal, "withdrawal dispatch outcome could not be recorded immediately - it will be retried automatically")
 			return
 		}
 
@@ -1035,25 +1032,43 @@ func newListSubmittedWithdrawalsHandler(deps Deps) http.HandlerFunc {
 
 // newResolveWithdrawalHandler is the Stage 3C stranded-hold recovery
 // mechanism: for a `submitted` withdrawal, queries the SAME provider and
-// reference MarkSubmitted already recorded - never a second Withdraw
-// call (no resubmission) and never a different provider (no cascade) -
-// and transitions to `completed`/`failed` accordingly, or leaves the
-// request at `submitted` if the provider itself is still unresolved.
-// Safe to call any number of times, by any number of concurrent callers,
-// for the same request: LockSubmittedForResolution's row lock serializes
-// concurrent attempts exactly like LockApprovedForSubmission does for
-// submission (see that function's doc comment for the identical race
-// this closes), QueryStatus is a pure read with no side effect of its
-// own to duplicate, and Complete/Fail each re-check state == `submitted`
-// before acting, so a resolution that already happened (by a concurrent
-// caller, or a prior call once the provider later confirms) is reported
-// back accurately rather than double-posted.
+// reference already recorded - never a second Withdraw call (no
+// resubmission) and never a different provider (no cascade) - and
+// transitions to `completed`/`failed` accordingly, or leaves the request
+// at `submitted` if the provider itself is still unresolved.
+//
+// H4/B7 (RV-PRH-I1 ledger-finance + code review): this handler no longer
+// calls provider.QueryStatus itself, and no longer calls
+// withdrawal.Complete/Fail directly. Both broke INV-IO-1 (QueryStatus ran
+// INSIDE deps.DB.WithTenant, holding the withdrawal_requests L1 lock
+// across outbound I/O) and left the payment_attempts row permanently out
+// of sync with the withdrawal (attempt stuck pending/ambiguous forever
+// while the withdrawal itself moved to completed/failed, which then broke
+// every later sweeper tick on the same attempt). This handler now:
+//  1. reads (no lock) the withdrawal and its live attempt;
+//  2. delegates to payments.PollPayoutStatus - the SAME phase-B (QueryStatus,
+//     no transaction held, on a bounded/detached context)/phase-C (the
+//     state-aware evidence function, amount/asset cross-check included)
+//     the sweeper itself uses, so staff-triggered and automatic resolution
+//     can never diverge;
+//  3. re-reads and audits the outcome.
+//
+// Safe to call any number of times, by any number of concurrent callers:
+// PollPayoutStatus's own phase-C CAS guards make a resolution that already
+// happened (by a concurrent caller, the sweeper, or a prior call) a no-op
+// rather than a double-post.
+// errResolveNoLiveAttempt is a local sentinel: a `submitted` withdrawal
+// with no live payment_attempts row is a data shape this handler cannot
+// resolve (there is nothing to poll QueryStatus against) - distinct from
+// every other error path so it maps to its own, honest response.
+var errResolveNoLiveAttempt = errors.New("httpserver: no live payment attempt for this withdrawal")
+
 func newResolveWithdrawalHandler(deps Deps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		requestID := observability.RequestIDFromContext(r.Context())
 		logger := observability.LoggerFromContext(r.Context(), deps.Logger)
 
-		if deps.PaymentOrchestrator == nil {
+		if deps.PaymentOrchestrator == nil || deps.PaymentsOutboundCredentials == nil {
 			apierror.Write(w, requestID, apierror.CodeUnavailable, "withdrawal resolution is not enabled on this deployment")
 			return
 		}
@@ -1075,6 +1090,7 @@ func newResolveWithdrawalHandler(deps Deps) http.HandlerFunc {
 		}
 
 		var wr withdrawal.WithdrawalRequest
+		var attempt payments.PaymentAttempt
 		err = deps.DB.WithTenant(r.Context(), tc.TenantID, func(ctx context.Context, tx pgx.Tx) error {
 			// Same rationale as newSubmitWithdrawalHandler's identical
 			// check: resolving a stranded `submitted` withdrawal is the
@@ -1093,91 +1109,25 @@ func newResolveWithdrawalHandler(deps Deps) http.HandlerFunc {
 				return withdrawal.ErrApproverInactive
 			}
 
-			wr, err = withdrawal.LockSubmittedForResolution(ctx, tx, id)
-			if err != nil {
-				return err
-			}
-			if wr.ProviderID == nil || wr.ProviderReference == nil {
-				// Structurally unreachable: MarkSubmitted always sets both
-				// atomically with the transition to `submitted` - fail
-				// closed rather than calling QueryStatus with an empty
-				// reference if this invariant is ever violated.
-				return fmt.Errorf("withdrawal: resolve: submitted request %s has no provider reference recorded", id)
-			}
-			provider, ok := deps.PaymentOrchestrator.Provider(*wr.ProviderID)
-			if !ok {
-				return fmt.Errorf("%w: provider %s", payments.ErrUnknownProvider, *wr.ProviderID)
-			}
-
-			status, err := provider.QueryStatus(ctx, *wr.ProviderReference)
-			if err != nil {
-				return fmt.Errorf("payments: query status: %w", err)
-			}
-			// Security review prh-ref-provider-reference-bound.md §10 C1 /
-			// this task's item 3: validate every provider-returned
-			// reference, including QueryStatus's own echo, before it is
-			// ever trusted for a Complete/Fail call. An over-bound/invalid
-			// value here would otherwise reach ledger_transactions.
-			// provider_tx_id (withdrawal.Complete) and fail the 0099 CHECK
-			// AFTER Complete/Fail's ledger.Post already ran - left at
-			// `submitted` instead, never resolved to a definite outcome
-			// from an untrustworthy reference.
-			if status.ProviderReference != "" {
-				if verr := providerref.ValidateOptional("query_status.provider_reference", status.ProviderReference); verr != nil {
-					return fmt.Errorf("%w: %w", payments.ErrProviderCallRefused, verr)
-				}
-			}
-
-			// Stage 3C specialist review (payments/ledger-finance P1):
-			// QueryStatus's own contract (payments.StatusResult's doc
-			// comment) is that Amount/AssetCode let a caller cross-check
-			// the provider's own confirmed facts against what was
-			// requested, rather than trusting the reference match alone -
-			// exactly what the deposit-reversal path already does via
-			// ErrCallbackProviderMismatch. Completing on a succeeded
-			// outcome without this check would release the withdrawal
-			// hold and post the ORIGINALLY REQUESTED amount even if the
-			// provider is now reporting a different confirmed amount/asset
-			// for that reference (partial settlement, a fee-adjusted
-			// figure, or a provider-side data error) - a silent ledger/
-			// provider drift, never surfaced or reconciled.
-			if status.Outcome == payments.OutcomeSucceeded &&
-				(status.Amount != wr.Amount || status.AssetCode != wr.AssetCode) {
-				return fmt.Errorf("%w: withdrawal %s requested amount=%d asset=%s, provider confirmed amount=%d asset=%s",
-					payments.ErrCallbackProviderMismatch, id, wr.Amount, wr.AssetCode, status.Amount, status.AssetCode)
-			}
-
-			switch status.Outcome {
-			case payments.OutcomeSucceeded:
-				if err := withdrawal.Complete(ctx, tx, id, *wr.ProviderID, *wr.ProviderReference); err != nil {
-					return err
-				}
-			case payments.OutcomeDeclined:
-				reason := status.DeclineReason
-				if reason == "" {
-					reason = "provider_declined"
-				}
-				if err := withdrawal.Fail(ctx, tx, id, reason); err != nil {
-					return err
-				}
-			case payments.OutcomePending, payments.OutcomeAmbiguous:
-				// Still unresolved at the provider - left at `submitted`.
-				// Deliberately NOT a retry (no Withdraw call) and NOT a
-				// cascade (no other provider considered) - see this
-				// handler's own doc comment.
-			}
-
-			if err := audit.Record(ctx, tx, audit.Entry{
-				TenantID: tc.TenantID, ActorType: audit.ActorStaff, ActorID: resolverID,
-				Action: "withdrawal.resolve_attempted.http", TargetType: "withdrawal_request", TargetID: id.String(),
-				Outcome: audit.OutcomeSuccess, IPAddress: clientIP(r), UserAgent: r.UserAgent(), RequestID: requestID,
-				Metadata: map[string]any{"provider_outcome": string(status.Outcome)},
-			}); err != nil {
-				return err
-			}
-
+			// Read-only (no lock, no I/O held): H4 requires no transaction
+			// held across the QueryStatus call, which now happens entirely
+			// outside this closure.
 			wr, err = withdrawal.GetByID(ctx, tx, id)
-			return err
+			if err != nil {
+				return err
+			}
+			if wr.State != withdrawal.StateSubmitted {
+				return withdrawal.ErrStateConflict
+			}
+			var found bool
+			attempt, found, err = payments.GetLiveAttemptForWithdrawalRequest(ctx, tx, id)
+			if err != nil {
+				return err
+			}
+			if !found {
+				return errResolveNoLiveAttempt
+			}
+			return nil
 		})
 		if errors.Is(err, withdrawal.ErrNotFound) {
 			apierror.Write(w, requestID, apierror.CodeNotFound, "withdrawal not found")
@@ -1195,30 +1145,52 @@ func newResolveWithdrawalHandler(deps Deps) http.HandlerFunc {
 			apierror.Write(w, requestID, apierror.CodeForbidden, "this staff account is not active")
 			return
 		}
-		if errors.Is(err, payments.ErrCallbackProviderMismatch) {
-			// A real data-integrity conflict requiring investigation, not
-			// a routine retry - see the amount/asset cross-check above.
-			// The request is deliberately left at `submitted` (this error
-			// is returned before either Complete or Fail runs), so a
-			// human can resolve it once the discrepancy is understood.
-			logger.Error("resolve_withdrawal_provider_amount_mismatch", "error", err)
-			apierror.Write(w, requestID, apierror.CodeConflict, "provider-confirmed amount/asset does not match the withdrawal request")
+		if errors.Is(err, errResolveNoLiveAttempt) {
+			apierror.Write(w, requestID, apierror.CodeConflict, "no live payment attempt found for this withdrawal - it will be picked up automatically once one exists")
 			return
 		}
-		if errors.Is(err, payments.ErrProviderCallRefused) {
-			// providerref.Validate rejected QueryStatus's own echoed
-			// reference (security review §10 C1) - left at `submitted`,
-			// never trusted for Complete/Fail. Logged with the allow-listed
-			// providerref.Error fields only (never the value itself).
-			var perr *providerref.Error
-			if errors.As(err, &perr) {
-				logger.Error("resolve_withdrawal_invalid_provider_reference", perr.LogAttrs()...)
-			} else {
-				logger.Error("resolve_withdrawal_invalid_provider_reference", "error", err)
+		if err != nil {
+			logger.Error("resolve_withdrawal_read_failed", "error", err)
+			apierror.Write(w, requestID, apierror.CodeInternal, "failed to resolve withdrawal")
+			return
+		}
+		if attempt.State == payments.AttemptCreated {
+			// A `created` payout attempt (a NotSent re-claim candidate)
+			// has nothing for QueryStatus to look up yet - the sweeper's
+			// own T2 re-claim is the correct path forward, not this
+			// handler (never a resend from here).
+			apierror.Write(w, requestID, apierror.CodeConflict, "this withdrawal is awaiting automatic re-claim, not yet resolvable via QueryStatus")
+			return
+		}
+
+		// Phase B+C: no transaction held (H4/INV-IO-1); PollPayoutStatus
+		// applies the state-aware evidence matrix including the amount/
+		// asset cross-check (B3/H2), and transitions the attempt row
+		// alongside the withdrawal (H4's "bypasses payment_attempts" fix).
+		if err := payments.PollPayoutStatus(r.Context(), deps.DB, deps.PaymentOrchestrator, deps.PaymentsOutboundCredentials, tc.TenantID, attempt, time.Now().Add(30*time.Second)); err != nil {
+			if errors.Is(err, payments.ErrSweeperProviderNotRegistered) {
+				logger.Error("resolve_withdrawal_unknown_provider", "error", err)
+				apierror.Write(w, requestID, apierror.CodeUnavailable, "the provider recorded on this withdrawal is not available on this deployment")
+				return
 			}
-			apierror.Write(w, requestID, apierror.CodeConflict, "provider returned an invalid reference - left unresolved for investigation")
+			logger.Error("resolve_withdrawal_poll_failed", "error", err)
+			apierror.Write(w, requestID, apierror.CodeInternal, "failed to resolve withdrawal")
 			return
 		}
+
+		err = deps.DB.WithTenant(r.Context(), tc.TenantID, func(ctx context.Context, tx pgx.Tx) error {
+			var err error
+			wr, err = withdrawal.GetByID(ctx, tx, id)
+			if err != nil {
+				return err
+			}
+			return audit.Record(ctx, tx, audit.Entry{
+				TenantID: tc.TenantID, ActorType: audit.ActorStaff, ActorID: resolverID,
+				Action: "withdrawal.resolve_attempted.http", TargetType: "withdrawal_request", TargetID: id.String(),
+				Outcome: audit.OutcomeSuccess, IPAddress: clientIP(r), UserAgent: r.UserAgent(), RequestID: requestID,
+				Metadata: map[string]any{"withdrawal_state": string(wr.State)},
+			})
+		})
 		if errors.Is(err, payments.ErrUnknownProvider) {
 			// Realistic ops scenario (a provider deregistered/renamed
 			// between submission and resolution) rather than the
