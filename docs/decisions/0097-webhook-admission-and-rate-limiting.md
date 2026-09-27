@@ -533,6 +533,103 @@ Security authors this design. Before it moves to ACCEPTED it needs concurrence f
 (§6.4 / T6), and QA confirmation of §11. This document does not declare the control secure:
 the security review of the PRH-I4 diff is still required.
 
+## 16. QA test-plan review
+
+**Reviewer:** `qa`. **Scope:** §11 test plan (T1–T16) only — not implementation, not
+security correctness of the mechanisms themselves.
+
+**Mapping check.** Every human-stated requirement has a named test with a measurable
+(count/status-code/row-count, not elapsed-time) pass criterion: cross-tenant starvation
+(T1 pre-auth, T2 verified, T13 domain independence), bounded (T3 cardinality, T8
+high-water marks, table-cap tests folded into T3/T9), fail-safe (T9), no DB/pool
+exhaustion (T4), legitimate bursts (T5), safe observability (T7), idempotency (T6a/b/c),
+ordering (T10 for ORD-1/ORD-2, T6 for ORD-3, T4 for ORD-5 — see item 2 below for the
+ORD-4 gap). The general PRH list is covered — unit (T5, T8, T9, T12, T15), integration/
+PostgreSQL-backed (T4, T6, T10), race (T8, `-race`), concurrency (T1, T2, T4, T8, T13),
+negative/security (T1, T2, T3, T7, T15), tenant isolation (T1, T2, T13), idempotency
+(T6), failure injection (T9), timeout (T11, T4's gate-wait bound), retry (T6, T14),
+duplicate callback (T6), connection-pool (T4) — with the gaps below.
+
+**Verdict: CONFIRMED WITH CHANGES**
+
+1. **T11 embeds a real wall-clock bound, contradicting §11's blanket "no wall-clock
+   latency assertions" claim for the main lane.** `BodyReadTimeout` is enforced via
+   `http.NewResponseController(w).SetReadDeadline`, which cannot be driven by the
+   injected `clock` interface (§5.1) — unlike GCRA, bulkheads and suppression. T11
+   therefore necessarily sleeps/waits on real time ("short test deadline... generous
+   upper bound"). Per the human's requirement, any test with a real timing bound needs
+   an explicit security ruling to run in a timing lane; it cannot silently stay in the
+   unqualified main lane alongside the deterministic tests. Resolve one of two ways
+   before PRH-I4: (a) parameterize `BodyReadTimeout` behind the same clock/timer
+   abstraction if `net/http`'s deadline can be virtualized in tests (e.g. inject a
+   fake `ResponseController`-like seam), keeping T11 fully deterministic and in the
+   main lane; or (b) if that's not feasible, keep T11's real-time bound small and
+   fixed (e.g. ≤ 200 ms), state that bound explicitly in §11, and route it through
+   the CI timing lane with the security ruling the human's instruction requires — do
+   not leave it merged into the "no wall-clock" main-lane set as currently written.
+
+2. **No named test for ORD-4** ("limiting never admits more than verification would";
+   B1/B2 key only off a `VerifiedCallback`). T1/T2 test the *outcome* of starvation but
+   not the *invariant* that B1/B2 cannot be reached or keyed except through a
+   successful `VerifyCallback`. Add `T17 NoPreVerificationBypass`: assert there is no
+   code path (known IP, known provider, replayed pre-auth key, etc.) that reaches B1,
+   B2 or the domain transaction without a `VerifyCallback` success in the same request,
+   and that the B1/B2 key is read only from the `VerifiedCallback` value, never from
+   `preKey`/URL values. Add a matching T16 mutation ("derive B1 key from `preKey`
+   instead of `VerifiedCallback` → T17 fails").
+
+3. **OpenAPI contract test is described in §13 but not present in the T1–T16 table.**
+   §13 lists `openapi_*webhook_contract_test.go` for 429/503 + `Retry-After` on the
+   three webhook paths, but nothing in §11 asserts it will exist or pass. Add
+   `T18 OpenAPIContract_WebhookRateLimit`: the spec documents 429 and 503 (with
+   `Retry-After`) on all three webhook paths, and representative admission responses
+   from T1/T2/T9 validate against that schema (status, headers, and the generic §6.1
+   body shape — no domain-specific fields leaking into the documented error body).
+
+4. **No dedicated multi-tenant simultaneous-flood / connection-pool test for R3.**
+   R3 ("k attacked tenants hold up to k × per-key share... until the global caps")
+   is disclosed as a residual risk but never exercised. T4 tests one flood against the
+   global pool bound, T13 tests domain isolation; neither drives several tenants past
+   their per-key shares concurrently to confirm the *global* A4a/A4b/B2 caps (not just
+   per-tenant caps) hold and that tenants outside the attacked set are unaffected. Add
+   `T19 MultiTenantSimultaneousFlood`: k tenants (k × per-tenant share > global cap)
+   flood concurrently; assert in-use A4a/A4b/B2 slots never exceed the documented
+   global caps, excess requests get 503 with zero statements/rows, and a control
+   tenant outside the k is admitted throughout. This turns R3 from an asserted-only
+   risk into a measured one, consistent with the human's "bounded" requirement.
+
+5. **"Repeated runs for concurrency" is not stated for the concurrency-sensitive
+   tests.** §11 says "unit tests: fake clock, no DB, `-race`" but does not require
+   T1, T2, T4, T8, T13 (and the new T17/T19) to run with a repeat count to catch
+   flaky interleavings, as the PRH testing list requires. Add to §11: these tests run
+   under `-race -count=N` (N ≥ 10, matching the project's existing stress-run
+   convention) in CI, not just once.
+
+6. **No stated CI time-budget check against the `internal/httpserver` main-lane
+   budget (~310 s under the 10-min timeout).** T3 (100,000 synthetic values) and T4
+   (200 concurrent requests) should stay sub-second to low-single-digit seconds since
+   both use fake clocks and blocking-hook barriers rather than sleeps, but this is not
+   verified anywhere in the ADR. Require PRH-I4 to record measured wall time for the
+   full new webhook-admission suite (T1–T19) in `internal/httpserver` and flag to the
+   orchestrator if the main lane's total approaches the 310 s figure. Recommend T1–T10,
+   T12–T19 stay in the existing main-lane file(s); T11 is placed per item 1's outcome.
+
+7. **Determinism claim needs a verification hook, not just a design statement.** §5.1
+   asserts every bucket, bulkhead wait and suppression window takes the injected
+   `clock`; T5's frozen-clock stepping and T9's refresh-error assertions depend on this
+   being true everywhere, not just in the primitives under direct test. Recommend a
+   lightweight check (grep-based CI check or a `code-reviewer` checklist item) that
+   `internal/admission` and `internal/httpserver/webhook_admission.go` contain no bare
+   `time.Now()` / `time.Sleep()` outside the clock abstraction and the one documented
+   real deadline from item 1.
+
+**Not blocking, noted for the record:** T6a/b/c, T14 and T16's five listed mutations are
+adequate and well-targeted (each pins a specific invariant to a specific test failure).
+Tenant-isolation and idempotency coverage (T1, T2, T6, T13) is sound. This verdict
+applies to the test plan as written; it does not constitute sign-off on PRH-I4's
+eventual implementation, which requires its own QA gate review against §11 as amended
+by items 1–6 above, plus `security`'s review per §15.
+
 ## 16. Devops review
 
 Verified at `24cbde1` against `cmd/platform-api/main.go`, `internal/httpserver/health.go`,
