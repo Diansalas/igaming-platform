@@ -274,3 +274,116 @@ Not attempted this round (documented gap, not silently dropped):
     round (webhook_admission_dbgate_integration_test.go,
     webhook_admission_t10_integration_test.go) - listed here only because M8/M10 above
     reuse those same files' mutation-kill evidence rather than duplicating it.
+
+--- Round 4 (security re-verification rv-prh-i4-security.md section 6, still APPROVE WITH
+    CONDITIONS: C1/C3/T4/T6 open, N1-N5 survived) ---
+
+Item 0, CI-red fix: TestAdmission_T6c/T6d failed on the merged branch (PRH-I2's casino
+launch-path rework requires Deps.CasinoOutboundCredentials for LaunchGame, which the ADR
+0097 test harness, webhook_admission_harness_test.go's newAdmissionTestServer, did not wire).
+Fixed by adding CasinoOutboundCredentials: casino.NewMockOutboundResolver() alongside the
+existing CasinoOrchestrator field. T6c/T6d are green again; re-ran and re-confirmed M11 on
+the merged branch (removing postBet's E3 tombstone check, "} else if tombstoned {" to
+"} else if false && tombstoned {"): FAILS as before (expected 200 ack, got 500); reverted,
+confirmed green.
+
+M12 T6's own explicit "kill a B1/B2-inside-WithTenant mutation directly" requirement: KILLED.
+   New test: internal/httpserver/webhook_admission_t6_pool_ordering_integration_test.go,
+   TestAdmission_T6g_B1RunsBeforeWithTenant_NoPoolAcquisitionOnLimitedAttempt. Uses the real
+   10-connection pool (phasecapture.Pool10) and pool.Raw().Stat().AcquireCount(); compares
+   the acquisition-count delta of an admitted callback against a B1-limited one, since a raw
+   "AcquireCount must not grow at all" assertion is wrong (the tenant-slug lookup and
+   VerifyCallback's own A4b-gated read both legitimately acquire connections regardless of
+   B1's outcome) - the actual invariant is that a limited callback's delta is strictly
+   smaller than an admitted one's, by exactly WithTenant's own connection.
+    File: internal/httpserver/deposit_handlers.go, newPaymentWebhookHandler.
+    Diff: moved the admitVerified call from before deps.DB.WithTenant to inside its closure
+    (opening the domain transaction unconditionally first, then deciding admission).
+    Command: go test ./internal/httpserver/... -run TestAdmission_T6g -tags=integration -v
+    Result: FAIL - "a B1-limited callback's pool-acquisition delta (3) was not strictly less
+    than an admitted callback's (3)". Reverted; confirmed green (full T6 suite -count=3 too).
+
+M13 C1(a)/T4-N1 "gatedReader bypass" (deps.DB passed to VerifyCallback instead of a real
+   gatedReader), both payments and casino: KILLED.
+   New file: internal/httpserver/webhook_admission_c1_isolating_integration_test.go,
+   introducing dbGateAcquirer (a small interface satisfied by *admission.Bulkhead in
+   production, webhook_admission.go) so a test can substitute a call-COUNTING fake
+   (countingGate: admits exactly its first "allowed" Acquire calls, refuses every one after)
+   for webhookAdmissionRuntime.dbGate - the real Bulkhead is a concurrent-holder cap and
+   cannot express "the Nth sequential call on this key fails, the first N-1 succeed", which
+   is what isolating the credential-resolution hop from the tenant-lookup hop requires, since
+   both use the identical A4b key.
+    Files: internal/httpserver/deposit_handlers.go and casino_handlers.go, each's
+    newXWebhookHandler.
+    Diff (each file): replaced the gated-reader construction block with a bare
+    "var reader webhookauth.TenantReader = deps.DB" (deps.DB passed straight to
+    VerifyCallback, ungated).
+    Command (each): go test ./internal/httpserver/... -run TestAdmission_C1a_Payments (or
+    _Casino) -tags=integration -v
+    Result (each): FAIL - "a DB-gate rejection during credential resolution must NEVER
+    surface as the uniform 401" - with the bypass applied, VerifyCallback's reads never touch
+    the countingGate, so credential resolution succeeds through the ungated deps.DB.
+    Reverted (each); confirmed green.
+
+M14 C1(a)-N3 "the casino handler's ReasonAdmissionUnavailable -> 503 branch deleted" (the C1
+   fix at the HANDLER hop, distinct from M7's resolver-hop pin): KILLED.
+    File: internal/httpserver/casino_handlers.go, newCasinoWebhookHandler.
+    Diff: removed the "if authErr.Reason == webhookauth.ReasonAdmissionUnavailable { ...
+    return }" branch entirely, falling through to the uniform-401 path.
+    Command: go test ./internal/httpserver/... -run TestAdmission_C1a_Casino -tags=integration -v
+    Result: FAIL - the mutated code now answers 401 exactly as N3 describes.
+    Reverted; confirmed green.
+
+M15 C1(a)/(b)-N4 "the ErrTenantReaderUnavailable case deleted from
+   webhookauth.reasonForResolveError" (security's own N4 mutation, re-creating the exact
+   High-severity 401 defect): KILLED, at both the isolating HTTP layer and a new, cheap unit
+   layer.
+    File: internal/webhookauth/resolver.go, reasonForResolveError.
+    Diff: removed the "case errors.Is(err, ErrTenantReaderUnavailable): return
+    ReasonAdmissionUnavailable" case.
+    Command 1 (unit, cheap - the C1(b) requirement): go test ./internal/webhookauth/... -run
+    TestReasonForResolveError_AdmissionUnavailable -v (and
+    TestResolveCredentials_AdmissionUnavailable_BothKeySelections)
+    Result 1: FAIL - both new tests fail (reasonForResolveError itself, and
+    ResolveCredentials in both KeyFromHeader and KeyImplicit modes).
+    Command 2 (HTTP, all three domains - the C1(a) requirement):
+    go test ./internal/httpserver/... -run TestAdmission_C1a -tags=integration -v
+    Result 2: FAIL (all three: payments, casino, kyc) surface the uniform 401 again.
+    Reverted; confirmed green on both suites.
+
+M16 C3/N2 "a fourth, unguarded /v1/webhooks/ route" (the scenario the round-3 guard, which
+   only checked three named constructors, could not catch): KILLED.
+   The route guard (webhook_admission_route_guard_test.go) was rewritten to discover every
+   /v1/webhooks/ route by walking HandleFunc/Handle call sites across the package's own
+   non-test files, resolving each handler argument to a named, in-package constructor, and
+   checking that function's body - rather than trusting a maintained list of three names.
+    File: internal/httpserver/casino_routes.go.
+    Diff: added a fourth route registration
+    (POST /v1/webhooks/sportsbook/{tenantSlug}/{providerID}) whose handler never calls
+    admitPreAuth or markWebhookRouteForLogging.
+    Command: go test ./internal/httpserver/... -run TestWebhookRouteGuard -v
+    Result: FAIL - the new route's own subtest fails ("missing a call to admitPreAuth" and
+    "markWebhookRouteForLogging"); the other three routes' subtests still passed.
+    Reverted; confirmed green (three routes discovered, as before).
+
+M17 N5/L6 "A3's adapter-declared 503 switch disabled for a no-429-retry provider": KILLED.
+   New test: internal/httpserver/webhook_admission_integration_test.go,
+   TestAdmission_T14b_A3AdapterDeclaredStatus_No429Retry (T14's own A3 mirror: B1's burst set
+   far higher than A3's, so every rejection observed is genuinely A3's, not B1's).
+    File: internal/httpserver/webhook_admission.go, admitPreAuth's A3 rejection branch.
+    Diff: "if allows, declared := retries429(providerKey); declared && !allows {" changed to
+    add "false &&" before "declared".
+    Command: go test ./internal/httpserver/... -run TestAdmission_T14b -tags=integration -v
+    Result: FAIL - "a no-429-retry adapter's exhausted A3 bucket must answer 503, not 429".
+    Reverted; confirmed green.
+
+L7 (assert the db_gate log line): closed as part of M13/M14/M15's own assertions -
+   assertC1Isolated (webhook_admission_c1_isolating_integration_test.go) checks the JSON log
+   buffer for tier=db_gate on every one of the three C1a tests, alongside status/Retry-After/
+   zero-rows.
+
+Summary: every mutation the security round-3 re-verification named as surviving (N1, N2, N3,
+N4, N5) is now KILLED by a new, dedicated test, and T6c/T6d are green on the merged branch
+with M11 re-confirmed. The full targeted suite (go test -tags=integration
+./internal/httpserver/... plus the internal/webhookauth, internal/admission,
+internal/providercred, internal/config unit suites) is green.

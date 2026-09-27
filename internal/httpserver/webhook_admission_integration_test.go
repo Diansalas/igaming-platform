@@ -435,3 +435,48 @@ func TestAdmission_T19_MultiTenantSimultaneousFlood(t *testing.T) {
 		t.Fatalf("control tenant must be admitted throughout a k-tenant simultaneous flood, got %d", resp.StatusCode)
 	}
 }
+
+// TestAdmission_T14b_A3AdapterDeclaredStatus_No429Retry is T14's A3 twin
+// (security re-verification round 3, L6/N5): a no-429-retry adapter's
+// exhausted A3 (pre-auth) bucket must also answer 503, not 429 - the ADR
+// 0097 §6 text amendment (round 3, C4's related design note) applies to
+// A3 exactly like B1, and had no test until now (N5 survived the whole
+// admission suite in the security review's own mutation run).
+func TestAdmission_T14b_A3AdapterDeclaredStatus_No429Retry(t *testing.T) {
+	pool, issuer := testEnv(t)
+	mock := payments.NewMockProvider("mock", "EUR", "USD")
+	declared := declaredRetryMockProvider{MockProvider: mock, sem: webhookauth.WebhookRetrySemantics{Retries429: false, Retries503: true, HonorsRetryAfter: true}}
+	orchestrator := payments.NewOrchestrator(map[string]payments.PaymentProvider{"mock": declared}, payments.MultiWebhookCredentialResolver{"mock": payments.NewMockWebhookCredentials(mock)})
+
+	tenant := mustCreateTenant(t, pool)
+	mustCreateBrand(t, pool, tenant)
+	mustRegisterCapability(t, pool, tenant.ID, mock)
+
+	// B1's own burst is set much higher than A3's here, the mirror image
+	// of T14's own comment: the point of THIS test is A3's
+	// adapter-declared status mapping, which only shows up if a request
+	// is rejected at A3 BEFORE it could ever reach B1.
+	settings := testAdmissionSettings()
+	settings.PreAuthRate["payments"] = WebhookRateBurst{Rate: 0.01, Burst: 3}
+	settings.VerifiedRate["payments"] = WebhookRateBurst{Rate: 0.01, Burst: 50}
+	srv := newAdmissionTestServer(t, pool, issuer, orchestrator, nil, settings, false)
+
+	saw503, saw429 := false, false
+	for i := 0; i < 10; i++ {
+		payload := mock.CallbackPayload(tenant.ID, payments.CallbackEventDeposit, "t14b-"+uuid.NewString(), "", payments.OutcomeSucceeded, 100, "EUR", "", false)
+		resp := rawPostCallback(t, srv, "/v1/webhooks/payments/"+tenant.Slug+"/mock", payload)
+		resp.Body.Close()
+		switch resp.StatusCode {
+		case http.StatusServiceUnavailable:
+			saw503 = true
+		case http.StatusTooManyRequests:
+			saw429 = true
+		}
+	}
+	if !saw503 {
+		t.Fatal("a no-429-retry adapter's exhausted A3 bucket must answer 503, not 429")
+	}
+	if saw429 {
+		t.Fatal("a no-429-retry adapter must never see a 429 from A3 either")
+	}
+}

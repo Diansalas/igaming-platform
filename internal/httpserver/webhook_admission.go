@@ -42,7 +42,7 @@ type webhookAdmissionRuntime struct {
 	verified       map[webhookDomain]*admission.GCRALimiter
 
 	inflight *admission.Bulkhead // A4a, shared across domains (key includes domain)
-	dbGate   *admission.Bulkhead // A4b, shared across domains (key includes domain)
+	dbGate   dbGateAcquirer      // A4b, shared across domains (key includes domain)
 	domainTx *admission.Bulkhead // B2, keyed by tenant_id only (shared across domains)
 
 	directory *webhookTenantDirectory
@@ -200,6 +200,19 @@ func (rt *webhookAdmissionRuntime) rateBurstFor(def WebhookRateBurst, domain web
 // layer checks for, and propagates, the SAME sentinel value.
 var errDBGateUnavailable = webhookauth.ErrTenantReaderUnavailable
 
+// dbGateAcquirer is the A4b gate's own interface, satisfied by
+// *admission.Bulkhead in production. Security review round 4 (C1(a)/T4's
+// N1): tests need a seam that can admit a KEY's first k acquisitions and
+// then refuse, regardless of whether the earlier ones have already been
+// released - a real Bulkhead cannot do that (it is a concurrent-holder
+// cap, not a call counter), so this interface lets a test substitute a
+// call-counting fake in place of the real Bulkhead for exactly this
+// purpose, without weakening or reimplementing the real gate's own
+// concurrency semantics anywhere production code runs.
+type dbGateAcquirer interface {
+	Acquire(key string, perKeyCap int, clock admission.Clock, wait time.Duration) (release func(), ok bool)
+}
+
 // gatedReaderMarkKey marks a context as already holding an A4b slot
 // acquired by THIS gatedReader chain, so a nested call (architect review
 // AC2(b): "gatedReader is non-reentrant... fails closed instead of
@@ -216,7 +229,7 @@ type gatedReaderMarkKey struct{}
 // of deps.DB to VerifyCallback.
 type gatedReader struct {
 	db         *db.Pool
-	gate       *admission.Bulkhead
+	gate       dbGateAcquirer
 	key        string
 	perKeyCap  int
 	clock      admission.Clock
@@ -249,7 +262,7 @@ func (g gatedReader) WithTenantReadOnly(ctx context.Context, tenantID uuid.UUID,
 // gatedGetTenantBySlug wraps identity.GetTenantBySlug in the same A4b
 // gate gatedReader uses (ADR 0097 §5.3: "webhookPreamble wraps its
 // GetTenantBySlug call in gate.Acquire(tenantKey)").
-func gatedGetTenantBySlug(ctx context.Context, gate *admission.Bulkhead, key string, perKeyCap int, clock admission.Clock, wait time.Duration, pool *db.Pool, slug string) (identity.Tenant, error) {
+func gatedGetTenantBySlug(ctx context.Context, gate dbGateAcquirer, key string, perKeyCap int, clock admission.Clock, wait time.Duration, pool *db.Pool, slug string) (identity.Tenant, error) {
 	release, ok := gate.Acquire(key, perKeyCap, clock, wait)
 	if !ok {
 		return identity.Tenant{}, errDBGateUnavailable

@@ -33,9 +33,9 @@ func newAdmissionTestServer(t *testing.T, pool *db.Pool, issuer *auth.Issuer, pa
 		AccessTokenTTL:      5 * time.Minute,
 		RefreshTokenTTL:     time.Hour,
 		PaymentOrchestrator: paymentOrch, PaymentsOutboundCredentials: payments.MockCredentialResolver{},
-		CasinoOrchestrator: casinoOrch,
-		PersonResolver:     identityresolution.NewMockPersonResolver(),
-		WebhookAdmission:   settings,
+		CasinoOrchestrator: casinoOrch, CasinoOutboundCredentials: casino.NewMockOutboundResolver(),
+		PersonResolver:   identityresolution.NewMockPersonResolver(),
+		WebhookAdmission: settings,
 	})
 	if !skipDirectoryLoad {
 		if err := rt.LoadDirectory(context.Background()); err != nil {
