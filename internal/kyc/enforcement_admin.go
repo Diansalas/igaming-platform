@@ -105,15 +105,18 @@ func CreateEnforcementPolicy(ctx context.Context, tx pgx.Tx, p CreateEnforcement
 
 // transitionEnforcementPolicy is Activate/Withdraw's shared shape: an
 // UPDATE ... WHERE id = $1 AND status = $2, relying entirely on migration
-// 0100's lifecycle trigger (draft/active/withdrawn legality AND the
-// four-eyes creator-vs-activator check) to reject anything illegal - this
-// function adds no duplicate business logic, only the audit record.
-func transitionEnforcementPolicy(ctx context.Context, tx pgx.Tx, id uuid.UUID, fromStatus, toStatus, action string) error {
+// 0100/0103's lifecycle trigger (draft/active/withdrawn legality, the
+// four-eyes creator-vs-activator check, and - since migration 0103 -
+// the supersession requirement on active->withdrawn) to reject anything
+// illegal - this function adds no duplicate business logic, only the
+// audit record. successorID is NULL for every transition except
+// active->withdrawn done via SupersedeEnforcementPolicy.
+func transitionEnforcementPolicy(ctx context.Context, tx pgx.Tx, id uuid.UUID, fromStatus, toStatus, action string, successorID *uuid.UUID) error {
 	principal, err := assertPlatformAdminScope(ctx, tx)
 	if err != nil {
 		return err
 	}
-	tag, err := tx.Exec(ctx, `UPDATE kyc_enforcement_policies SET status = $1 WHERE id = $2 AND status = $3`, toStatus, id, fromStatus)
+	tag, err := tx.Exec(ctx, `UPDATE kyc_enforcement_policies SET status = $1, superseded_by_policy_id = $4 WHERE id = $2 AND status = $3`, toStatus, id, fromStatus, successorID)
 	if err != nil {
 		return fmt.Errorf("kyc: transition enforcement policy: %w", err)
 	}
@@ -136,32 +139,33 @@ func transitionEnforcementPolicy(ctx context.Context, tx pgx.Tx, id uuid.UUID, f
 // row (migration 0100's lifecycle trigger enforces this at the
 // database).
 func ActivateEnforcementPolicy(ctx context.Context, tx pgx.Tx, id uuid.UUID) error {
-	return transitionEnforcementPolicy(ctx, tx, id, "draft", "active", "kyc_enforcement_policy.activated")
+	return transitionEnforcementPolicy(ctx, tx, id, "draft", "active", "kyc_enforcement_policy.activated", nil)
 }
 
-// WithdrawEnforcementPolicy withdraws a draft or active row. Withdrawing
-// an active row is a relaxation of enforcement and requires the same
-// four-eyes (different-principal) DB check as activation.
+// WithdrawEnforcementPolicy withdraws a draft or active row, WITHOUT
+// naming a successor.
 //
-// SECURITY F3 (rv-prh-i3-security.md, 2026-09-27): called standalone,
-// this withdraws an active row with only "the acting principal differs
-// from the row's own creator" enforced (migration 0100's lifecycle
-// trigger) - a single actor's decision, not a genuine two-person
-// request/approve workflow, and nothing here or in the database refuses
-// a withdrawal that leaves NO active successor for the key. Closing that
-// gap fully (either a DB-enforced two-step request/approve, or a trigger
-// that refuses active->withdrawn unless a successor is activated
-// atomically) needs a schema change - migration 0100 is already applied
-// and cannot be edited, and no later migration number has been allocated
-// for this yet. SupersedeEnforcementPolicy below is the SANCTIONED,
-// smaller-scope mitigation available without one: it makes "withdraw
-// without ever authoring and activating a replacement in the very same
-// transaction" require a caller to deliberately bypass it (call this
-// function directly instead), rather than being the ordinary path. This
-// is disclosed as a PARTIAL mitigation, not full closure of F3, in ADR
-// 0096 §16.
+// SECURITY F3 (rv-prh-i3-security.md, 2026-09-27; closed at the DB level
+// by migration 0103, ADR 0096 §17.3): withdrawing a DRAFT row (never
+// having been enforced) works exactly as before. Withdrawing an ACTIVE
+// row through this function is now REFUSED BY THE DATABASE ITSELF -
+// migration 0103's extended lifecycle trigger requires
+// superseded_by_policy_id to be set on every active->withdrawn
+// transition, and this function never sets it. There is no longer any
+// standalone way to withdraw an active policy and leave the key with no
+// active successor; SupersedeEnforcementPolicy below is the only path
+// the database accepts for that transition.
 func WithdrawEnforcementPolicy(ctx context.Context, tx pgx.Tx, id uuid.UUID, fromStatus string) error {
-	return transitionEnforcementPolicy(ctx, tx, id, fromStatus, "withdrawn", "kyc_enforcement_policy.withdrawn")
+	return transitionEnforcementPolicy(ctx, tx, id, fromStatus, "withdrawn", "kyc_enforcement_policy.withdrawn", nil)
+}
+
+// withdrawEnforcementPolicyWithSuccessor is SupersedeEnforcementPolicy's
+// own withdrawal step: it names successorID in the SAME UPDATE statement
+// that transitions the row to 'withdrawn'. Migration 0103's deferred
+// constraint trigger confirms, at commit time, that successorID is by
+// then 'active' and shares the withdrawn row's enforcement key.
+func withdrawEnforcementPolicyWithSuccessor(ctx context.Context, tx pgx.Tx, id uuid.UUID, fromStatus string, successorID uuid.UUID) error {
+	return transitionEnforcementPolicy(ctx, tx, id, fromStatus, "withdrawn", "kyc_enforcement_policy.withdrawn", &successorID)
 }
 
 // SupersedeEnforcementPolicyParams is SupersedeEnforcementPolicy's input.
@@ -189,26 +193,34 @@ type SupersedeEnforcementPolicyParams struct {
 // leave an active policy withdrawn with no successor also committed in
 // that same atomic unit. tx must already be a platform-admin-scoped
 // transaction (db.Pool.WithPlatformAdmin); this function itself changes
-// the acting-principal GUC between steps (WithdrawnBy -> CreatedBy ->
+// the acting-principal GUC between steps (CreatedBy -> WithdrawnBy ->
 // ActivatedBy) so each step's own four-eyes check is evaluated against
 // the RIGHT principal, not whichever one opened the transaction.
 //
-// Disclosed limitation (security F3, ADR 0096 §16): this is the
-// SANCTIONED path, not a database-level prohibition on calling
-// WithdrawEnforcementPolicy alone - see that function's own doc comment.
+// Order matters and is NOT arbitrary: the replacement is authored as
+// 'draft' FIRST (the unique partial index
+// kyc_enforcement_policies_one_active forbids two simultaneously-active
+// rows for the same key, so the replacement cannot already be 'active'
+// while the original still is), THEN the original is withdrawn NAMING
+// the replacement's id as its successor, THEN the replacement is
+// activated. Migration 0103's deferred (commit-time) constraint trigger
+// confirms the named successor really did reach 'active', for the same
+// enforcement key, by the time this transaction commits - closing
+// security F3 at the database level, not merely by convention (ADR 0096
+// §17.3).
 func SupersedeEnforcementPolicy(ctx context.Context, tx pgx.Tx, p SupersedeEnforcementPolicyParams) (uuid.UUID, error) {
-	if err := setActingPrincipal(ctx, tx, p.WithdrawnBy); err != nil {
-		return uuid.Nil, err
-	}
-	if err := WithdrawEnforcementPolicy(ctx, tx, p.WithdrawID, p.WithdrawFromStatus); err != nil {
-		return uuid.Nil, err
-	}
-
 	if err := setActingPrincipal(ctx, tx, p.CreatedBy); err != nil {
 		return uuid.Nil, err
 	}
 	newID, err := CreateEnforcementPolicy(ctx, tx, p.NewPolicy)
 	if err != nil {
+		return uuid.Nil, err
+	}
+
+	if err := setActingPrincipal(ctx, tx, p.WithdrawnBy); err != nil {
+		return uuid.Nil, err
+	}
+	if err := withdrawEnforcementPolicyWithSuccessor(ctx, tx, p.WithdrawID, p.WithdrawFromStatus, newID); err != nil {
 		return uuid.Nil, err
 	}
 
