@@ -142,6 +142,94 @@ func ActivateEnforcementPolicy(ctx context.Context, tx pgx.Tx, id uuid.UUID) err
 // WithdrawEnforcementPolicy withdraws a draft or active row. Withdrawing
 // an active row is a relaxation of enforcement and requires the same
 // four-eyes (different-principal) DB check as activation.
+//
+// SECURITY F3 (rv-prh-i3-security.md, 2026-09-27): called standalone,
+// this withdraws an active row with only "the acting principal differs
+// from the row's own creator" enforced (migration 0100's lifecycle
+// trigger) - a single actor's decision, not a genuine two-person
+// request/approve workflow, and nothing here or in the database refuses
+// a withdrawal that leaves NO active successor for the key. Closing that
+// gap fully (either a DB-enforced two-step request/approve, or a trigger
+// that refuses active->withdrawn unless a successor is activated
+// atomically) needs a schema change - migration 0100 is already applied
+// and cannot be edited, and no later migration number has been allocated
+// for this yet. SupersedeEnforcementPolicy below is the SANCTIONED,
+// smaller-scope mitigation available without one: it makes "withdraw
+// without ever authoring and activating a replacement in the very same
+// transaction" require a caller to deliberately bypass it (call this
+// function directly instead), rather than being the ordinary path. This
+// is disclosed as a PARTIAL mitigation, not full closure of F3, in ADR
+// 0096 §16.
 func WithdrawEnforcementPolicy(ctx context.Context, tx pgx.Tx, id uuid.UUID, fromStatus string) error {
 	return transitionEnforcementPolicy(ctx, tx, id, fromStatus, "withdrawn", "kyc_enforcement_policy.withdrawn")
+}
+
+// SupersedeEnforcementPolicyParams is SupersedeEnforcementPolicy's input.
+type SupersedeEnforcementPolicyParams struct {
+	// WithdrawID/WithdrawFromStatus identify the currently-active (or
+	// draft) row being replaced.
+	WithdrawID         uuid.UUID
+	WithdrawFromStatus string
+	// WithdrawnBy is the platform-admin principal performing the
+	// withdrawal step - must differ from WithdrawID's own
+	// created_by_actor_id (migration 0100's trigger enforces this).
+	WithdrawnBy uuid.UUID
+	// NewPolicy is the replacement row's content. CreatedBy is the
+	// principal authoring it.
+	NewPolicy CreateEnforcementPolicyParams
+	CreatedBy uuid.UUID
+	// ActivatedBy is the principal activating the replacement - must
+	// differ from CreatedBy (migration 0100's trigger enforces this).
+	ActivatedBy uuid.UUID
+}
+
+// SupersedeEnforcementPolicy withdraws an existing policy row and
+// authors+activates its replacement, ALL IN THE SAME database
+// transaction (tx) - so a caller using this sanctioned path can never
+// leave an active policy withdrawn with no successor also committed in
+// that same atomic unit. tx must already be a platform-admin-scoped
+// transaction (db.Pool.WithPlatformAdmin); this function itself changes
+// the acting-principal GUC between steps (WithdrawnBy -> CreatedBy ->
+// ActivatedBy) so each step's own four-eyes check is evaluated against
+// the RIGHT principal, not whichever one opened the transaction.
+//
+// Disclosed limitation (security F3, ADR 0096 §16): this is the
+// SANCTIONED path, not a database-level prohibition on calling
+// WithdrawEnforcementPolicy alone - see that function's own doc comment.
+func SupersedeEnforcementPolicy(ctx context.Context, tx pgx.Tx, p SupersedeEnforcementPolicyParams) (uuid.UUID, error) {
+	if err := setActingPrincipal(ctx, tx, p.WithdrawnBy); err != nil {
+		return uuid.Nil, err
+	}
+	if err := WithdrawEnforcementPolicy(ctx, tx, p.WithdrawID, p.WithdrawFromStatus); err != nil {
+		return uuid.Nil, err
+	}
+
+	if err := setActingPrincipal(ctx, tx, p.CreatedBy); err != nil {
+		return uuid.Nil, err
+	}
+	newID, err := CreateEnforcementPolicy(ctx, tx, p.NewPolicy)
+	if err != nil {
+		return uuid.Nil, err
+	}
+
+	if err := setActingPrincipal(ctx, tx, p.ActivatedBy); err != nil {
+		return uuid.Nil, err
+	}
+	if err := ActivateEnforcementPolicy(ctx, tx, newID); err != nil {
+		return uuid.Nil, err
+	}
+	return newID, nil
+}
+
+// setActingPrincipal changes app.platform_admin_principal_id for the
+// remainder of THIS transaction - tx must already be platform-admin
+// scoped (the tenant/player GUCs stay unset throughout).
+func setActingPrincipal(ctx context.Context, tx pgx.Tx, principalID uuid.UUID) error {
+	if principalID == uuid.Nil {
+		return fmt.Errorf("%w: acting principal id is required", ErrPolicyInvalidInput)
+	}
+	if _, err := tx.Exec(ctx, `SELECT set_config('app.platform_admin_principal_id', $1, true)`, principalID.String()); err != nil {
+		return fmt.Errorf("kyc: set acting principal: %w", err)
+	}
+	return nil
 }

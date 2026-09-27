@@ -1,5 +1,5 @@
 === RUN   TestRequestWithdrawal_SameKeyConcurrentRequestsRaceTheGate
---- PASS: TestRequestWithdrawal_SameKeyConcurrentRequestsRaceTheGate (0.24s)
+--- PASS: TestRequestWithdrawal_SameKeyConcurrentRequestsRaceTheGate (0.11s)
 === RUN   TestDenyForCompliance_ExactlyOnceRelease_Concurrent
 === RUN   TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-0
 === RUN   TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-1
@@ -21,41 +21,101 @@
 === RUN   TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-17
 === RUN   TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-18
 === RUN   TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-19
---- PASS: TestDenyForCompliance_ExactlyOnceRelease_Concurrent (1.74s)
-    --- PASS: TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-0 (0.28s)
-    --- PASS: TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-1 (0.13s)
-    --- PASS: TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-2 (0.11s)
-    --- PASS: TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-3 (0.12s)
-    --- PASS: TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-4 (0.10s)
+=== RUN   TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-20
+=== RUN   TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-21
+=== RUN   TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-22
+=== RUN   TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-23
+=== RUN   TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-24
+=== RUN   TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-25
+=== RUN   TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-26
+=== RUN   TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-27
+=== RUN   TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-28
+=== RUN   TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-29
+=== RUN   TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-30
+=== RUN   TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-31
+=== RUN   TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-32
+=== RUN   TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-33
+=== RUN   TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-34
+=== RUN   TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-35
+=== RUN   TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-36
+=== RUN   TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-37
+=== RUN   TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-38
+=== RUN   TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-39
+=== RUN   TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-40
+=== RUN   TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-41
+=== RUN   TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-42
+=== RUN   TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-43
+=== RUN   TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-44
+=== RUN   TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-45
+=== RUN   TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-46
+=== RUN   TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-47
+=== RUN   TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-48
+=== RUN   TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-49
+--- PASS: TestDenyForCompliance_ExactlyOnceRelease_Concurrent (2.45s)
+    --- PASS: TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-0 (0.14s)
+    --- PASS: TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-1 (0.07s)
+    --- PASS: TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-2 (0.08s)
+    --- PASS: TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-3 (0.06s)
+    --- PASS: TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-4 (0.09s)
     --- PASS: TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-5 (0.06s)
-    --- PASS: TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-6 (0.09s)
-    --- PASS: TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-7 (0.07s)
-    --- PASS: TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-8 (0.06s)
-    --- PASS: TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-9 (0.05s)
-    --- PASS: TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-10 (0.17s)
-    --- PASS: TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-11 (0.10s)
-    --- PASS: TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-12 (0.05s)
+    --- PASS: TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-6 (0.04s)
+    --- PASS: TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-7 (0.05s)
+    --- PASS: TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-8 (0.10s)
+    --- PASS: TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-9 (0.03s)
+    --- PASS: TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-10 (0.04s)
+    --- PASS: TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-11 (0.04s)
+    --- PASS: TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-12 (0.04s)
     --- PASS: TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-13 (0.04s)
-    --- PASS: TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-14 (0.04s)
-    --- PASS: TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-15 (0.05s)
-    --- PASS: TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-16 (0.05s)
-    --- PASS: TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-17 (0.05s)
-    --- PASS: TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-18 (0.04s)
-    --- PASS: TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-19 (0.04s)
+    --- PASS: TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-14 (0.05s)
+    --- PASS: TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-15 (0.04s)
+    --- PASS: TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-16 (0.04s)
+    --- PASS: TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-17 (0.04s)
+    --- PASS: TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-18 (0.05s)
+    --- PASS: TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-19 (0.03s)
+    --- PASS: TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-20 (0.03s)
+    --- PASS: TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-21 (0.06s)
+    --- PASS: TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-22 (0.04s)
+    --- PASS: TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-23 (0.03s)
+    --- PASS: TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-24 (0.04s)
+    --- PASS: TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-25 (0.04s)
+    --- PASS: TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-26 (0.04s)
+    --- PASS: TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-27 (0.03s)
+    --- PASS: TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-28 (0.04s)
+    --- PASS: TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-29 (0.05s)
+    --- PASS: TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-30 (0.08s)
+    --- PASS: TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-31 (0.06s)
+    --- PASS: TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-32 (0.06s)
+    --- PASS: TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-33 (0.04s)
+    --- PASS: TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-34 (0.04s)
+    --- PASS: TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-35 (0.04s)
+    --- PASS: TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-36 (0.04s)
+    --- PASS: TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-37 (0.04s)
+    --- PASS: TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-38 (0.04s)
+    --- PASS: TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-39 (0.03s)
+    --- PASS: TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-40 (0.03s)
+    --- PASS: TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-41 (0.05s)
+    --- PASS: TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-42 (0.03s)
+    --- PASS: TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-43 (0.03s)
+    --- PASS: TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-44 (0.04s)
+    --- PASS: TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-45 (0.05s)
+    --- PASS: TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-46 (0.04s)
+    --- PASS: TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-47 (0.03s)
+    --- PASS: TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-48 (0.05s)
+    --- PASS: TestDenyForCompliance_ExactlyOnceRelease_Concurrent/iter-49 (0.03s)
 PASS
-ok  	github.com/Diansalas/igaming-platform/internal/withdrawal	3.051s
+ok  	github.com/Diansalas/igaming-platform/internal/withdrawal	3.608s
 testing: warning: no tests to run
 PASS
-ok  	github.com/Diansalas/igaming-platform/internal/kyc	1.099s [no tests to run]
+ok  	github.com/Diansalas/igaming-platform/internal/kyc	1.065s [no tests to run]
 === RUN   TestReceiveCallback_BetDeniedByKYCPlayPolicy_NoLedgerEffect
---- PASS: TestReceiveCallback_BetDeniedByKYCPlayPolicy_NoLedgerEffect (0.09s)
+--- PASS: TestReceiveCallback_BetDeniedByKYCPlayPolicy_NoLedgerEffect (0.10s)
 === RUN   TestReceiveCallback_BetAllowedByKYCPlayPolicy_WhenApproved
---- PASS: TestReceiveCallback_BetAllowedByKYCPlayPolicy_WhenApproved (0.13s)
+--- PASS: TestReceiveCallback_BetAllowedByKYCPlayPolicy_WhenApproved (0.10s)
 PASS
-ok  	github.com/Diansalas/igaming-platform/internal/casino	1.314s
+ok  	github.com/Diansalas/igaming-platform/internal/casino	1.281s
 === RUN   TestPlaceBet_DeniedByKYCPlayPolicy_NoLedgerEffect
 --- PASS: TestPlaceBet_DeniedByKYCPlayPolicy_NoLedgerEffect (0.09s)
 === RUN   TestPlaceBet_AllowedByKYCPlayPolicy_WhenApproved
---- PASS: TestPlaceBet_AllowedByKYCPlayPolicy_WhenApproved (0.11s)
+--- PASS: TestPlaceBet_AllowedByKYCPlayPolicy_WhenApproved (0.10s)
 PASS
-ok  	github.com/Diansalas/igaming-platform/internal/sportsbook	1.302s
+ok  	github.com/Diansalas/igaming-platform/internal/sportsbook	1.249s

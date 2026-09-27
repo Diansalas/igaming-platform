@@ -2360,3 +2360,259 @@ including every package this round touched:
   tests (T1/T2 closed).
 - **Deposit gate, payout-dispatch call site:** unchanged from §15 -
   NOT IMPLEMENTED here, PRH-I1's scope.
+
+## 17. Fix round 3 (2026-09-27) — F3, LF-I3-3, and the 50-repeat race ask
+
+Orchestrator instruction for this round named exactly three
+non-deferrable items (merge origin first; origin was at e927ed4).
+F4/F5 were welcome if small; not attempted this round (still open, see
+§16.2 - untouched).
+
+### 17.1 LF-I3-3 — CLOSED (preferred design implemented)
+
+§16.2 disclosed the roll-back-then-fresh-transaction pattern as the
+accepted alternative. This round replaces it with ledger-finance's
+actually-preferred design:
+
+- `withdrawal.RequestWithdrawal` (`internal/withdrawal/withdrawal.go`) now
+  calls `kyc.RecordDecision` to write the decision + audit rows **in the
+  same transaction** as the withdrawal attempt itself, then returns the
+  typed `*KYCDeniedError` — it no longer relies on a caller rolling back
+  and reopening a second transaction to persist anything.
+- Every caller that opens the transaction (`db.Pool.WithTenant`, which
+  rolls back on any non-nil returned error) now catches
+  `*KYCDeniedError` via `errors.As` **inside** the closure and returns
+  `nil` so the transaction — decision, audit, and all — commits exactly
+  once, then re-raises the captured error for post-commit response
+  mapping. Fixed at all three call sites: the HTTP handler
+  (`internal/httpserver/withdrawal_handlers.go`), and the shared test
+  helper used by the whole existing withdrawal test suite
+  (`internal/withdrawal/withdrawal_integration_test.go`'s
+  `requestWithdrawal`), which had to be updated in lockstep — otherwise
+  every pre-existing test using that helper would have silently started
+  rolling back the very rows `RequestWithdrawal` now writes before
+  returning.
+- The old "fresh transaction" `kyc.RecordDecision` call in the HTTP
+  handler is deleted entirely; the handler's B1 status-code mapping
+  (503 for `unavailable`, 409 otherwise) is unchanged.
+- Tests: `TestRequestWithdrawal_DenialCommitsDecisionAndAudit`
+  (`internal/withdrawal/kyc_gate_integration_test.go`) rewritten to
+  assert the same-transaction contract directly (no manual
+  post-rollback `RecordDecision` call in the test itself anymore). New:
+  `TestRequestWithdrawalHandler_KYCDenyCommitsExactlyOnceAndNothingElse`
+  (`internal/httpserver/kyc_enforcement_handlers_integration_test.go`)
+  proves the same property end-to-end through the real HTTP handler —
+  exactly 1 new `kyc_enforcement_decisions` row, exactly 1 new
+  `audit_log` row, 0 `withdrawal_requests` rows, 0
+  `withdrawal_requested` ledger postings, for a single denied request.
+
+Residual: B7's narrow same-key-concurrent-retry TOCTOU window (§16.2) is
+unaffected by this change and remains open, disclosed as before.
+
+**Label: LF-I3-3 IMPLEMENTED** (the preferred design, not the
+alternative §16.2 described).
+
+### 17.2 Ledger-finance's ≥50-repeat concurrency ask (LF-I3-1) — CLOSED
+
+`TestDenyForCompliance_ExactlyOnceRelease_Concurrent`
+(`internal/withdrawal/kyc_gate_integration_test.go`) bumped from 20 to
+50 repetitions, each iteration using a fresh request/fixture so no run
+can be masked by a previous iteration's state. Run:
+
+```
+go test -race -tags=integration -count=1 \
+  ./internal/withdrawal/... ./internal/kyc/... ./internal/casino/... ./internal/sportsbook/... \
+  -run 'TestDenyForCompliance_ExactlyOnceRelease_Concurrent|TestRequestWithdrawal_SameKeyConcurrentRequestsRaceTheGate|TestReceiveCallback_.*KYCPlayPolicy|TestPlaceBet_.*KYCPlayPolicy'
+```
+
+Result: PASS, all 50 iterations, no data races detected. Recorded in
+`docs/plans/payment-readiness/evidence/prh-i3-race-integration.txt` and
+`prh-i3-race-integration-output.txt` (updated this round, superseding
+round 2's 20-repeat numbers).
+
+**Label: LF-I3-1 IMPLEMENTED (closed in full — the ">=50" ask is met).**
+
+### 17.3 Security F3 (four-eyes on withdrawing an ACTIVE policy) — PARTIAL, schema change needed for full closure
+
+**Explicit migration constraint honored:** migration 0100 is applied and
+its `up.sql` is checksummed — it was NOT edited. No schema change was
+made this round. Per the orchestrator's own instruction ("If a schema
+change is needed, tell me before writing it and I'll allocate a number;
+prefer a design that needs no schema change... if not, report"), this
+section is that report.
+
+**Why no schema-change-free design can fully close F3.** F3 asks for
+one of two things: (a) a DB-enforced two-step request/approve workflow
+for withdrawing an active policy (approver ≠ requester, both derived
+from session GUCs, not app-written columns), or (b) a trigger that
+refuses `active → withdrawn` except as an atomic supersede by an
+approved successor. Both were evaluated against migration 0100's actual
+schema as applied:
+
+- Migration 0100's lifecycle trigger already enforces "the transitioning
+  principal differs from the row's own `created_by_actor_id`" for every
+  transition, including `active → withdrawn` (§15.1 C3; exercised by
+  `TestMigration0100_PolicyLifecycleTransitions`). That is real
+  four-eyes on the withdrawal *action itself*, but it is not a
+  request/approve *workflow* — a single transaction, one call, can still
+  withdraw an active policy and leave the key with no active row at all.
+- A trigger-level "refuse `active → withdrawn` unless a successor is
+  activated atomically" (design (b)) needs the trigger to know, at the
+  moment it fires on the withdrawal `UPDATE`, that a specific
+  replacement row already exists and is `active` for the same key
+  (`licensing_jurisdiction_id` + `trigger_type` + discriminating
+  columns) — but nothing in the current schema links a withdrawn row to
+  its replacement. Without a linkage column (e.g. a nullable
+  `superseded_by_policy_id uuid REFERENCES kyc_enforcement_policies(id)`
+  set in the same statement/transaction), the trigger has no way to
+  distinguish "withdrawn because a successor was just activated" from
+  "withdrawn and now nothing is enforced" — it would have to either
+  always refuse standalone withdrawal (breaking every legitimate
+  emergency-withdraw-with-no-immediate-replacement case, e.g. voluntarily
+  turning a control off pending legal review) or never refuse it
+  (achieving nothing).
+- A request/approve workflow (design (a)) needs its own persisted
+  "requested, not yet approved" state — either a new status value
+  inserted into `kyc_enforcement_policies.status`'s CHECK constraint (a
+  DDL change to that constraint, which counts as editing 0100's schema
+  even done in a later migration against the same column) or an entirely
+  new table (e.g. `kyc_enforcement_policy_withdrawal_requests`) to hold
+  the pending request row, its requester, and a later approver GUC
+  comparison. Either way this is a genuine schema addition, not
+  something expressible in 0100's existing tables/triggers.
+- `kyc_enforcement_policies_one_active`, the uniqueness that guarantees
+  at most one active row per key, is a plain `CREATE UNIQUE INDEX`, not
+  a `DEFERRABLE` `UNIQUE CONSTRAINT` — so even a same-transaction
+  supersede done purely in application code (see below) can never
+  produce a moment where two rows are simultaneously active for the
+  same key; the old row's `UPDATE ... SET status = 'withdrawn'` and the
+  new row's `INSERT ... status = 'active'` must be ordered
+  withdraw-then-activate (which the sanctioned helper below does) or the
+  unique index itself would reject the insert. This is a genuine
+  strength of 0100's existing design, not a gap - but it is enforced only
+  as an ordering constraint, not as evidence that a "successor" was ever
+  authored, so it does not by itself close F3.
+
+**What was actually shipped this round: `SupersedeEnforcementPolicy`**
+(`internal/kyc/enforcement_admin.go`) — a Go-level, no-schema-change
+partial mitigation. It withdraws an existing policy and authors +
+activates its replacement **in one database transaction**, changing the
+acting-principal GUC between each of the three steps
+(`WithdrawnBy` → `CreatedBy` → `ActivatedBy`, three distinct required
+principals) so migration 0100's existing four-eyes trigger evaluates
+each step against the correct actor. Because all three steps share one
+transaction, a caller using this function can never commit a withdrawn
+policy with no successor also committed atomically alongside it — if
+the replacement's creation or activation is refused (e.g. `CreatedBy ==
+ActivatedBy`, violating the existing trigger), the whole transaction,
+including the withdrawal step that ran first, rolls back, leaving the
+original policy still `active`.
+
+**What this does NOT do, disclosed plainly:** it is a *sanctioned path*,
+not a *database-level prohibition*. Nothing in the schema stops a
+caller from invoking `WithdrawEnforcementPolicy` directly, standalone,
+outside of `SupersedeEnforcementPolicy` — that call still succeeds
+today with only the existing creator≠transitioner check applied, exactly
+as before this round, and can still leave an active policy withdrawn
+with zero replacement. Full closure of F3 requires the schema change
+described above (most likely: a nullable
+`superseded_by_policy_id` linkage column set only by
+`SupersedeEnforcementPolicy`'s own withdrawal step, plus a trigger
+condition on `kyc_enforcement_policies` that refuses a **standalone**
+`active → withdrawn` transition unless `superseded_by_policy_id` is set
+in the very same statement to a row that is simultaneously being
+activated) — a genuinely small, additive migration, but a migration
+nonetheless, and migration 0100 cannot carry it.
+
+**Proposed minimal migration (for the orchestrator to allocate a number
+to, if full closure is wanted):**
+
+```sql
+ALTER TABLE kyc_enforcement_policies
+  ADD COLUMN superseded_by_policy_id uuid
+    REFERENCES kyc_enforcement_policies(id);
+
+-- Extend the existing lifecycle trigger (not a new one) so that, on an
+-- active -> withdrawn transition specifically, it additionally requires
+-- NEW.superseded_by_policy_id to reference a row that is 'active' as of
+-- the same statement (checked via a deferred constraint trigger, or by
+-- re-querying inside the existing trigger body after the successor's
+-- own INSERT/UPDATE has already run earlier in the same transaction).
+```
+
+This was **not written** this round (no schema change without an
+allocated number, per the explicit constraint) — it is a proposal only.
+
+**Tests + mutations for what WAS shipped, per the orchestrator's "tests
++ mutations" instruction:**
+`TestSupersedeEnforcementPolicy_AtomicWithdrawAndActivateReplacement` and
+`TestSupersedeEnforcementPolicy_RollsBackAtomically`
+(`internal/kyc/migration_0100_integration_test.go`) prove, respectively,
+the happy path (three distinct principals, old row withdrawn, new row
+active) and the atomic-rollback property (activation refused because
+`CreatedBy == ActivatedBy` → the whole transaction, including the
+withdrawal that ran first, rolls back, leaving the old row still
+`active` — never stranded withdrawn-with-no-successor). A manual
+mutation check was applied: `SupersedeEnforcementPolicy`'s create step
+was changed to set the acting principal to `p.ActivatedBy` instead of
+`p.CreatedBy` (collapsing the create+activate steps onto one effective
+principal even when the caller supplied three genuinely distinct
+values) — confirmed this makes
+`TestSupersedeEnforcementPolicy_AtomicWithdrawAndActivateReplacement`
+fail (migration 0100's own four-eyes trigger correctly refuses the
+resulting same-principal activation), then the mutation was reverted and
+both tests re-confirmed passing — the mutation is killed.
+
+**Label: Security F3 PARTIALLY IMPLEMENTED.** The Go-level atomic
+supersede helper is IMPLEMENTED and tested; full DB-level enforcement
+(refusing bare `WithdrawEnforcementPolicy` on an active row with no
+atomic successor) is NOT IMPLEMENTED and requires the schema change
+proposed above. This is reported, not silently deferred: launch
+readiness with any active policy should treat F3 as open until either
+the schema change lands or a `security`/`architect` ruling accepts the
+Go-level mitigation as sufficient given operational controls (e.g.
+restricting who can call `WithdrawEnforcementPolicy` directly at the API
+layer — itself not yet built, since no admin-facing withdraw endpoint
+exists yet; only the Go functions do).
+
+### 17.4 Incidental fix: migration-count assumption in existing 0100 tests
+
+`TestMigration0100_UpDownUpRoundTrip` and
+`TestMigration0100_DownRefusesWhileDecisionsHoldRows` both used to call
+`pool.MigrateDown(ctx, dir, 1)` and assert exactly migration 100 was the
+one rolled back. Origin's merge (bringing in PRH-I1's migration 0101)
+made that assumption false — with 0101 now ahead of 0100 in the chain,
+"down 1 step" rolls back 0101, not 0100, silently invalidating both
+tests' intent (the second one in particular then reported false
+success: rolling back 0101, which has no data guard concerning
+`kyc_enforcement_decisions`, "succeeded" where the test expected a
+refusal, masking the very guard it exists to prove). Fixed with a new
+helper, `stepsThrough100`, that computes the correct step count from the
+actual list of applied migrations at test-run time rather than assuming
+0100 is the chain tip. Both tests re-verified passing after the fix.
+This is a pre-existing-test fix, not new functional scope, and was
+necessary to keep this round's own verification pass ("run the full
+suite, confirm no regressions") honest.
+
+### 17.5 Verification (fix round 3)
+
+`gofmt`, `go build ./...`, `go vet ./...` and `go vet -tags=integration
+./...` — all clean. `go test -tags=integration -count=1
+./internal/kyc/... ./internal/withdrawal/... ./internal/httpserver/...`
+— all pass (including the migration-count fix in §17.4). Full-repo
+`go test -tags=integration -count=1 ./...` run separately; see the
+commit's accompanying report for its result if it completed within this
+round's time budget. Targeted `-race -tags=integration` run for the
+50-repeat concurrency ask: see §17.2 and the evidence files.
+
+### 17.6 Labels (round 3 summary)
+
+- **LF-I3-3:** IMPLEMENTED (preferred design; supersedes §16.2's
+  disclosure of the alternative).
+- **LF-I3-1 (≥50 repeats):** IMPLEMENTED (closed in full).
+- **Security F3:** PARTIALLY IMPLEMENTED — Go-level atomic supersede
+  helper shipped and tested; DB-level enforcement needs the schema
+  change proposed in §17.3, reported to the orchestrator, not built.
+- **F4, F5:** unchanged from §16.2 — NOT IMPLEMENTED, still open.
+- **ADR 0096 header:** remains `ACCEPTED — PARTIALLY IMPLEMENTED`
+  pending F3's full closure and §16.2's other still-open items.

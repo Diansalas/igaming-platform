@@ -104,6 +104,18 @@ func newRequestWithdrawalHandler(deps Deps) http.HandlerFunc {
 		}
 
 		var wr withdrawal.WithdrawalRequest
+		// LF-I3-3 (ledger-finance's preferred fix, 2026-09-27): a KYC deny
+		// must commit its decision + audit rows in THIS SAME transaction,
+		// never roll back and rely on a second, separately-committed
+		// transaction (the earlier design, which left a real window where
+		// a process crash between the rollback and the fresh commit could
+		// lose the denial record - see ADR 0096 §16.2's own disclosure of
+		// that gap, now closed). RequestWithdrawal itself already wrote
+		// the decision/audit rows before returning *KYCDeniedError - this
+		// closure detects that specific error, captures it, and returns
+		// nil so WithTenant COMMITS rather than rolling back. Every OTHER
+		// error still propagates and rolls back normally.
+		var kycDenied *withdrawal.KYCDeniedError
 		err = deps.DB.WithTenant(r.Context(), tc.TenantID, func(ctx context.Context, tx pgx.Tx) error {
 			account, err := identity.GetPlayerAccountByID(ctx, tx, playerAccountID)
 			if err != nil {
@@ -117,21 +129,12 @@ func newRequestWithdrawalHandler(deps Deps) http.HandlerFunc {
 				TenantID: tc.TenantID, BrandID: account.BrandID, PlayerAccountID: playerAccountID, PersonID: account.PersonID, WalletID: wl.ID,
 				AssetCode: req.AssetCode, Amount: req.Amount, IdempotencyKey: req.IdempotencyKey,
 			})
+			if errors.As(err, &kycDenied) {
+				return nil
+			}
 			return err
 		})
-		// ADR 0096 §3.6/§8 item 3: a KYCDeniedError rolled back the
-		// transaction above with zero domain effect (no request row, no
-		// ledger posting) - the decision/audit rows are committed here, in
-		// a FRESH transaction, so the denial itself survives durably
-		// (security condition 5), mirroring internal/casino's own
-		// separately-committed-rejection pattern (CAS-RECON-1).
-		var kycDenied *withdrawal.KYCDeniedError
-		if errors.As(err, &kycDenied) {
-			if recErr := deps.DB.WithTenant(r.Context(), tc.TenantID, func(ctx context.Context, tx pgx.Tx) error {
-				return kyc.RecordDecision(ctx, tx, kycDenied.Params, kycDenied.Decision)
-			}); recErr != nil {
-				logger.Error("kyc_denial_record_failed", "error", recErr)
-			}
+		if kycDenied != nil {
 			// B1 (code review rv-prh-i3-code-review.md): OutcomeUnavailable
 			// means EvaluateEnforcement itself could not determine an
 			// outcome (a DB failure, a malformed policy row) - a transient

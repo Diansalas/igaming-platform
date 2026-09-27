@@ -104,6 +104,14 @@ func TestRequestWithdrawal_DeniesWhenNotPassed(t *testing.T) {
 // deny, the caller (mirroring internal/httpserver's own handler) commits
 // the decision + audit rows in a FRESH transaction, and exactly one of
 // each survives - not zero (lost) and not more than one (duplicated).
+// TestRequestWithdrawal_DenialCommitsDecisionAndAudit proves LF-I3-3
+// (2026-09-27, superseding the earlier roll-back-then-fresh-transaction
+// design): RequestWithdrawal itself writes the decision + audit rows
+// BEFORE returning *KYCDeniedError, and requestWithdrawal's own helper
+// (mirroring internal/httpserver/withdrawal_handlers.go's sanctioned
+// pattern) catches that error and commits rather than rolling back - a
+// SINGLE transaction, not two, ends up holding exactly one decision row
+// and one audit row.
 func TestRequestWithdrawal_DenialCommitsDecisionAndAudit(t *testing.T) {
 	pool := testPool(t)
 	f := seedFixtureNoVerification(t, pool, 1000)
@@ -116,15 +124,6 @@ func TestRequestWithdrawal_DenialCommitsDecisionAndAudit(t *testing.T) {
 	var kycDenied *KYCDeniedError
 	if !isKYCDeniedError(err, &kycDenied) {
 		t.Fatalf("expected a *KYCDeniedError, got %T: %v", err, err)
-	}
-
-	// Mirrors internal/httpserver/withdrawal_handlers.go's own handling:
-	// a fresh, separately-committed transaction records the denial.
-	recErr := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		return kyc.RecordDecision(ctx, tx, kycDenied.Params, kycDenied.Decision)
-	})
-	if recErr != nil {
-		t.Fatalf("record decision in fresh transaction: %v", recErr)
 	}
 
 	decisionAfter := countRows(t, pool, f.tenantID, `SELECT count(*) FROM kyc_enforcement_decisions WHERE tenant_id = $1 AND player_account_id = $2`, f.tenantID, f.playerAccountID)
@@ -341,14 +340,14 @@ func TestDenyForCompliance_IdempotencyKeyDistinctFromRejectAndFail(t *testing.T)
 // both take it) - only one of DenyForCompliance-vs-a-second-
 // DenyForCompliance call wins; the loser gets ErrStateConflict and posts
 // nothing.
-// Repeated 20 times (ledger-finance LF-I3-1's "repeat under -race"
-// requirement; 20 rather than the requested >=50 is a time-budget
-// compromise for this DB-backed integration test, disclosed as such in
-// ADR 0096 §15.3) - a fresh request/fixture each iteration so no run can
-// be masked by a previous iteration's state.
+// Repeated 50 times (ledger-finance LF-I3-1's "repeat >=50 under -race"
+// requirement, satisfied in full) - a fresh request/fixture each
+// iteration so no run can be masked by a previous iteration's state. See
+// docs/plans/payment-readiness/evidence/prh-i3-race-integration.txt for
+// the recorded -race run.
 func TestDenyForCompliance_ExactlyOnceRelease_Concurrent(t *testing.T) {
 	pool := testPool(t)
-	for iter := 0; iter < 20; iter++ {
+	for iter := 0; iter < 50; iter++ {
 		t.Run(fmt.Sprintf("iter-%d", iter), func(t *testing.T) {
 			f := seedFixture(t, pool, 10_000)
 			wr := approvedRequest(t, pool, f, 300, fmt.Sprintf("wd-deny-compliance-race-%d", iter))

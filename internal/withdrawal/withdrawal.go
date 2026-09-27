@@ -126,14 +126,20 @@ var (
 // KYCDeniedError is returned by RequestWithdrawal when ADR 0096's
 // structural withdrawal rule (§3.2 point 1) denies the request - no
 // withdrawal_requests row is inserted and no ledger effect is posted.
-// The caller's transaction (db.Pool.WithTenant/WithPlayerScope) rolls
-// back on this non-nil error, per this codebase's own established
-// pattern for a verified-but-declined domain action (internal/casino's
-// *CallbackRejectedError, wrapRejection): the CALLER is responsible for
-// then opening a FRESH, separately-committed transaction and calling
-// kyc.RecordDecision in it, so the denial's decision/audit rows survive
-// the rollback (ADR 0096 §3.6 "Commit discipline, corrected" / security
-// condition 5) even though the withdrawal-request attempt itself did not.
+//
+// LF-I3-3 (ledger-finance's preferred fix, 2026-09-27, superseding the
+// original roll-back-then-fresh-transaction design): the decision row and
+// the audit record are ALREADY WRITTEN, in the SAME transaction, by the
+// time RequestWithdrawal returns this error - see the call site just
+// above. The CALLER MUST NOT let this error propagate as the return value
+// of a db.Pool.WithTenant/WithPlayerScope closure, because that would
+// roll back the transaction and discard those very rows. The sanctioned
+// pattern (internal/httpserver/withdrawal_handlers.go's own
+// newRequestWithdrawalHandler): detect *KYCDeniedError via errors.As
+// INSIDE the closure, capture it in an outer variable, and return nil so
+// the transaction commits exactly "decision + audit, nothing else"; after
+// the WithTenant call returns (with a nil error), check the captured
+// variable and map it to the player-facing response.
 type KYCDeniedError struct {
 	Params   kyc.EnforcementParams
 	Decision kyc.EnforcementDecision
@@ -373,6 +379,21 @@ func RequestWithdrawal(ctx context.Context, tx pgx.Tx, params RequestParams) (Wi
 		return WithdrawalRequest{}, fmt.Errorf("%w: %w", ErrKYCUnavailable, err)
 	}
 	if !decision.Allowed {
+		// LF-I3-3 (ledger-finance's preferred fix, superseding the earlier
+		// roll-back-then-fresh-transaction pattern): the decision + audit
+		// rows are written HERE, in THIS transaction, before returning the
+		// typed KYCDeniedError. The caller MUST NOT propagate this error
+		// as its own return from a db.Pool.WithTenant closure (that would
+		// roll back and discard these very rows) - it must detect
+		// *KYCDeniedError via errors.As, capture it, and return nil so the
+		// transaction commits exactly what was written here: the decision
+		// row, the audit record, and NOTHING else (no withdrawal_requests
+		// row, no ledger posting) - see internal/httpserver/
+		// withdrawal_handlers.go's own handling for the sanctioned
+		// pattern.
+		if err := kyc.RecordDecision(ctx, tx, kycParams, decision); err != nil {
+			return WithdrawalRequest{}, err
+		}
 		return WithdrawalRequest{}, &KYCDeniedError{Params: kycParams, Decision: decision}
 	}
 

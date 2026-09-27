@@ -177,9 +177,18 @@ func mustRunTx(t *testing.T, pool *db.Pool, tenantID uuid.UUID, fn func(ctx cont
 	}
 }
 
+// requestWithdrawal implements the LF-I3-3 sanctioned calling pattern
+// (mirroring internal/httpserver/withdrawal_handlers.go's own handling):
+// a *KYCDeniedError is caught INSIDE the closure and converted to a nil
+// return so the transaction COMMITS the decision/audit rows
+// RequestWithdrawal already wrote before returning it, rather than
+// rolling them back. The caught error is still returned to this
+// function's own caller unchanged, so every existing assertion on the
+// returned error is unaffected - only the transaction's fate changes.
 func requestWithdrawal(t *testing.T, pool *db.Pool, f fixture, amount int64, idemKey string) (WithdrawalRequest, error) {
 	t.Helper()
 	var wr WithdrawalRequest
+	var kycDenied *KYCDeniedError
 	err := runTx(pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
 		wr, err = RequestWithdrawal(ctx, tx, RequestParams{
@@ -191,8 +200,14 @@ func requestWithdrawal(t *testing.T, pool *db.Pool, f fixture, amount int64, ide
 			Amount:         amount,
 			IdempotencyKey: idemKey,
 		})
+		if errors.As(err, &kycDenied) {
+			return nil
+		}
 		return err
 	})
+	if kycDenied != nil {
+		return wr, kycDenied
+	}
 	return wr, err
 }
 
