@@ -529,12 +529,24 @@ func newKYCWebhookHandler(deps Deps) http.HandlerFunc {
 			apierror.Write(w, requestID, apierror.CodeUnauthorized, "callback rejected")
 			return
 		}
+		if errors.Is(err, kyc.ErrVerificationReferenceUnknown) {
+			// ADR 0095 §15.2/IC-Q1: KYC has NO receipt table, so a callback
+			// whose provider_reference is not (yet) known to this platform
+			// is INDISTINGUISHABLE from one racing CreateVerification's own
+			// phase C - a bare 404 (or worse, a 200) could permanently
+			// discard the only copy of a real vendor decision that simply
+			// arrived a moment too early. Always a retryable 5xx, never a
+			// 200 - whether the vendor actually redelivers on it is
+			// PROVIDER DEPENDENT, confirmed at real-vendor intake.
+			apierror.Write(w, requestID, apierror.CodeUnavailable, "verification not yet available; retry")
+			return
+		}
 		if errors.Is(err, kyc.ErrNotFound) {
-			// A callback for a provider_reference this platform never
-			// created - never a platform failure. Reachable only by a
-			// VERIFIED caller (never an enumeration oracle for an
-			// unauthenticated one - see ReceiveCallback's own doc
-			// comment).
+			// Every OTHER "not found" case reaching this dispatch (never
+			// this specific provider_reference lookup, handled above) -
+			// never a platform failure. Reachable only by a VERIFIED caller
+			// (never an enumeration oracle for an unauthenticated one - see
+			// ReceiveCallback's own doc comment).
 			apierror.Write(w, requestID, apierror.CodeNotFound, "verification not found")
 			return
 		}

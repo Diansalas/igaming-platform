@@ -50,6 +50,16 @@ type mockWiring struct {
 	// configured") rather than falling back to the real, unconfigured
 	// resolver.
 	CasinoOutboundResolver bool
+
+	// KYCOutboundResolver wires the KYC MOCK outbound-credential resolver
+	// CreateVerification/SubmitVerification's phase B uses (ADR 0095
+	// §15.2/§15.3, PROV-OUTBOUND-CRED-1) - CasinoOutboundResolver's KYC
+	// twin. Chosen by ADAPTER KIND via kycOutboundCredentials()'s
+	// kyc.NewOutboundKindSplitResolver, which serves it only to a
+	// registered SYNTHETIC kyc adapter. When false, a call against a
+	// synthetic adapter fails closed rather than falling back to the real,
+	// unconfigured resolver.
+	KYCOutboundResolver bool
 }
 
 // mockProviderWiring is a pure function of cfg - no I/O, no globals - so it
@@ -69,6 +79,7 @@ func mockProviderWiring(cfg config.Config) mockWiring {
 		KYCWebhookEnabled:       testSupport,
 		CasinoWebhookResolver:   testSupport,
 		CasinoOutboundResolver:  testSupport,
+		KYCOutboundResolver:     testSupport,
 	}
 }
 

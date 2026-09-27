@@ -32,18 +32,19 @@ func newKYCNoopTestServer(t *testing.T, pool *db.Pool, issuer *auth.Issuer, logg
 	t.Helper()
 	mockProvider := kyc.NewMockKYCProvider()
 	srv := httptest.NewServer(New(Deps{
-		Logger:            logger,
-		DB:                pool,
-		AuthIssuer:        issuer,
-		ServiceName:       "platform-api-test",
-		AccessTokenTTL:    5 * time.Minute,
-		RefreshTokenTTL:   time.Hour,
-		PersonResolver:    identityresolution.NewMockPersonResolver(),
-		KYCOrchestrator:   kyc.NewOrchestrator(map[string]kyc.KYCProvider{"mock": mockProvider}, kyc.NewMockWebhookCredentials(mockProvider)),
-		KYCWebhookEnabled: true,
-		DocumentStorage:   kyc.NewMockDocumentStorageProvider(),
-		MalwareScanner:    kyc.NewMockMalwareScanner(),
-		EmailProvider:     email.NewMockProvider(),
+		Logger:                 logger,
+		DB:                     pool,
+		AuthIssuer:             issuer,
+		ServiceName:            "platform-api-test",
+		AccessTokenTTL:         5 * time.Minute,
+		RefreshTokenTTL:        time.Hour,
+		PersonResolver:         identityresolution.NewMockPersonResolver(),
+		KYCOrchestrator:        kyc.NewOrchestrator(map[string]kyc.KYCProvider{"mock": mockProvider}, kyc.NewMockWebhookCredentials(mockProvider)),
+		KYCWebhookEnabled:      true,
+		DocumentStorage:        kyc.NewMockDocumentStorageProvider(),
+		MalwareScanner:         kyc.NewMockMalwareScanner(),
+		KYCOutboundCredentials: kyc.NewMockOutboundResolver(),
+		EmailProvider:          email.NewMockProvider(),
 	}))
 	t.Cleanup(srv.Close)
 	return srv, mockProvider

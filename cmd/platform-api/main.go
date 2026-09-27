@@ -341,10 +341,11 @@ func run() error {
 		// (design §B3/§D): there is no real KYC vendor to fall back to.
 		// KYCWebhookEnabled below gates the ROUTE itself identically, so
 		// route registration and orchestrator wiring cannot diverge (K11).
-		KYCOrchestrator:   kycOrchestrator(wiring, providers, logger),
-		KYCWebhookEnabled: wiring.KYCWebhookEnabled,
-		DocumentStorage:   providers.DocumentStorage,
-		MalwareScanner:    providers.MalwareScanner,
+		KYCOrchestrator:        kycOrchestrator(wiring, providers, logger),
+		KYCWebhookEnabled:      wiring.KYCWebhookEnabled,
+		DocumentStorage:        providers.DocumentStorage,
+		MalwareScanner:         providers.MalwareScanner,
+		KYCOutboundCredentials: providers.kycOutboundCredentials(),
 
 		// Stage 4F: no real email-delivery vendor is contracted yet
 		// (docs/decisions/0030 §4) - email.MockProvider records what would

@@ -52,17 +52,18 @@ func newRawReasonKYCServer(t *testing.T, pool *db.Pool, issuer *auth.Issuer) (*h
 	t.Helper()
 	adapter := httpRawReasonKYCAdapter{kyc.NewMockKYCProvider()}
 	srv := httptest.NewServer(New(Deps{
-		Logger:            slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
-		DB:                pool,
-		AuthIssuer:        issuer,
-		ServiceName:       "platform-api-test",
-		AccessTokenTTL:    5 * time.Minute,
-		RefreshTokenTTL:   time.Hour,
-		PersonResolver:    identityresolution.NewMockPersonResolver(),
-		KYCOrchestrator:   kyc.NewOrchestrator(map[string]kyc.KYCProvider{"mock": adapter}, kyc.NewMockWebhookCredentials(adapter.MockKYCProvider)),
-		KYCWebhookEnabled: true,
-		DocumentStorage:   kyc.NewMockDocumentStorageProvider(),
-		MalwareScanner:    kyc.NewMockMalwareScanner(),
+		Logger:                 slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
+		DB:                     pool,
+		AuthIssuer:             issuer,
+		ServiceName:            "platform-api-test",
+		AccessTokenTTL:         5 * time.Minute,
+		RefreshTokenTTL:        time.Hour,
+		PersonResolver:         identityresolution.NewMockPersonResolver(),
+		KYCOrchestrator:        kyc.NewOrchestrator(map[string]kyc.KYCProvider{"mock": adapter}, kyc.NewMockWebhookCredentials(adapter.MockKYCProvider)),
+		KYCWebhookEnabled:      true,
+		DocumentStorage:        kyc.NewMockDocumentStorageProvider(),
+		MalwareScanner:         kyc.NewMockMalwareScanner(),
+		KYCOutboundCredentials: kyc.NewMockOutboundResolver(),
 	}))
 	t.Cleanup(srv.Close)
 	return srv, adapter

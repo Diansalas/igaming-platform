@@ -1,0 +1,140 @@
+PRH-I2 (KYC part, identity-compliance) mutation-kill evidence
+===============================================================
+
+Scope: ADR 0095 §15.2/§15.3 KYC CreateVerification/SubmitVerification phase A/B/C
+split (internal/kyc/verification_service.go CreateVerification/insertOrphanVerification/
+applyCreateVerificationResult, internal/kyc/document_service.go UploadDocument/
+SubmitVerification/gatherSubmissionDocuments/applySubmissionResult/
+submissionIdempotencyKey, internal/kyc/callcontext.go CallContext/
+OutboundCredentialResolver/MockOutboundResolver/OutboundKindSplitResolver,
+internal/kyc/provider.go ReceiveVerifiedCallback's ErrVerificationReferenceUnknown
+typing, internal/httpserver/kyc_handlers.go and kyc_admin_handlers.go's corresponding
+wiring/response-mapping changes). Does not cover casino (PRH-I2 casino part, already
+landed and separately evidenced in prh-i2-casino-mutation-kill.txt) or payments (PRH-I1).
+Does not touch internal/kyc/enforcement*.go or migrations 0100/0103 (out of this task's
+scope; another agent is editing KYC enforcement concurrently).
+
+Harness: manual, scratchpad-copy-mutate-test-restore, mirroring PRH-I2 casino part's own
+documented method exactly - each mutant is one anchored, verified-unique string
+replacement in the target file, applied via a small Python script; the killing test
+command is run against the target's own private/shared test database
+(TEST_DATABASE_URL, the CI-equivalent local Postgres); a non-zero exit (test failure or
+panic) means KILLED; the file is then restored from a saved copy (verified byte-identical
+to the pre-mutation source via `git diff` afterward, since every mutated file except
+callcontext.go - a new, untracked file this task adds - is already tracked).
+
+Environment: local PostgreSQL at 127.0.0.1:5432 (igaming_platform_ci_local, the shared
+sandbox's own pre-provisioned CI-equivalent database, migrated up already). Go 1.26.8.
+Base: worktree HEAD 9e68b9d plus this task's PRH-I2 (KYC part) change.
+
+Result: 11/11 killed, 0 equivalent.
+
+===========================================================================================
+Mutants
+===========================================================================================
+
+M1 CreateVerification's nil-provider guard removed (a nil KYCProvider would reach
+provider.ID() and panic instead of returning ErrProviderUnavailable):
+KILLED [internal/kyc/verification_service.go] by
+`go test -tags=integration ./internal/kyc/ -run TestCreateVerification_NilProviderFailsClosedWithoutPanic`
+    first failure: panic: runtime error: invalid memory address or nil pointer dereference
+                   (verification_service.go:214, CreateVerification)
+
+M2 CreateVerification's nil-pool guard removed (a nil pool would reach
+pool.WithTenant(...) in phase A and panic instead of returning ErrProviderUnavailable):
+KILLED [internal/kyc/verification_service.go] by
+`go test -tags=integration ./internal/kyc/ -run TestCreateVerification_NilPoolFailsClosedWithoutPanic`
+    first failure: panic: runtime error: invalid memory address or nil pointer dereference
+                   (verification_service.go:220, CreateVerification)
+
+M3 CreateVerification's nil-outbound-resolver guard removed (a nil outbound resolver
+would reach outbound.Resolve(...) on a true nil interface and panic instead of returning
+ErrProviderUnavailable, leaving phase A's harmless orphan row as the only trace):
+KILLED [internal/kyc/verification_service.go] by
+`go test -tags=integration ./internal/kyc/ -run TestCreateVerification_NilOutboundResolverLeavesHarmlessOrphanRow`
+    first failure: panic: runtime error: invalid memory address or nil pointer dereference
+                   (verification_service.go:240, CreateVerification)
+
+M4 CreateVerification's outbound-credential tenant/provider/domain binding check removed
+(a resolver returning a credential for the WRONG tenant would still be used to call the
+provider - ADR 0095 §9.1/S95-C8(b) defence-in-depth): KILLED
+[internal/kyc/verification_service.go] by
+`go test -tags=integration ./internal/kyc/ -run TestCreateVerification_CredentialBindingMismatchFailsClosed`
+    first failure: --- FAIL: TestCreateVerification_CredentialBindingMismatchFailsClosed (0.04s)
+                       "expected ErrProviderUnavailable for a mismatched credential, got <nil>"
+
+M5 CreateVerification's IdempotencyKey prefix changed from "kv:" to "xx:" (the
+deterministic external reference ADR 0095 §15.2 names): KILLED
+[internal/kyc/verification_service.go] by
+`go test -tags=integration ./internal/kyc/ -run TestCreateVerification_CallContextFieldsPassedToProvider`
+    first failure: --- FAIL: TestCreateVerification_CallContextFieldsPassedToProvider (0.03s)
+                       Call.IdempotencyKey mismatch ("kv:..." wanted, "xx:..." got)
+
+M6 applySubmissionResult's IC-condition-2 ProviderError early-return removed (a
+definitive ProviderError outcome would fall through to statusForOutcome, which does not
+recognize it, instead of leaving kyc_verifications.status untouched): KILLED
+[internal/kyc/document_service.go] by
+`go test -tags=integration ./internal/kyc/ -run TestSubmitVerification_ProviderErrorOutcomeLeavesStatusUnchanged`
+    first failure: --- FAIL: TestSubmitVerification_ProviderErrorOutcomeLeavesStatusUnchanged (0.03s)
+                       "SubmitVerification: kyc: submit verification: apply result: kyc:
+                       provider returned an unrecognized outcome \"error\""
+
+M7 SubmitVerification's phase-B transport-error guard removed (`if err != nil { ...
+return }` after provider.SubmitVerification dropped, so a transport/timeout/ambiguous
+failure would silently proceed into phase C with a zero-value ProviderResult instead of
+returning ErrProviderUnavailable and leaving status untouched): KILLED
+[internal/kyc/document_service.go] by
+`go test -tags=integration ./internal/kyc/ -run TestSubmitVerification_AmbiguousResultLeavesStatusUnchanged`
+    first failure: --- FAIL: TestSubmitVerification_AmbiguousResultLeavesStatusUnchanged (0.03s)
+                       "expected ErrProviderUnavailable, got kyc: submit verification: apply
+                       result: kyc: provider returned an unrecognized outcome \"\""
+
+M8 gatherSubmissionDocuments' terminal-status guard removed (an already-terminal
+verification would still be resubmitted to the provider instead of being a documented
+no-op): KILLED [internal/kyc/document_service.go] by
+`go test -tags=integration ./internal/kyc/ -run TestSubmitVerification_TerminalVerificationIsANoOp`
+    first failure: --- FAIL: TestSubmitVerification_TerminalVerificationIsANoOp (0.04s)
+                       "SubmitVerification: kyc: provider unavailable: submit verification to
+                       provider: kyc: unknown provider reference ..." (the mock rejects a
+                       resubmission of a reference no test fixture told it to expect,
+                       proving the provider WAS called when it must not have been)
+
+M9 ReceiveVerifiedCallback's ErrVerificationReferenceUnknown wrap removed (a callback
+racing CreateVerification's own phase C, or referencing a genuinely unknown reference,
+would fall back to the bare, terminal ErrNotFound instead of the retryable sentinel -
+IC-Q1/ADR 0095 §15.2): KILLED [internal/kyc/provider.go] by
+`go test -tags=integration ./internal/kyc/ -run TestKYCWebhook_VerifiedUnknownReference_NotFound`
+    first failure: --- FAIL: TestKYCWebhook_VerifiedUnknownReference_NotFound (0.03s)
+                       "expected ErrVerificationReferenceUnknown, got kyc: not found"
+
+M10 the HTTP layer's ErrVerificationReferenceUnknown -> 503 branch removed from
+kyc_admin_handlers.go's webhook dispatch (the sentinel would then fall through to the
+generic 500 internal-error branch instead of the required retryable 503, and would never
+be a bare 404 or a 200 either - the specific required behaviour this condition tests):
+KILLED [internal/httpserver/kyc_admin_handlers.go] by
+`go test -tags=integration ./internal/httpserver/ -run TestKYC_WebhookCallbackAuthentication`
+    first failure: --- FAIL: TestKYC_WebhookCallbackAuthentication (0.25s)
+                       "expected 503 (retryable) for an unresolvable provider_reference, got 500"
+
+M11 CallContext.callContextRedacted appends `string(c.Credential.Secret())` to its own
+output (the reviewer's own canonical redaction-defeating mutation, mirrored from casino's
+RV-PRH-I2 C2 finding, applied here to KYC's own CallContext copy): KILLED
+[internal/kyc/callcontext.go] by
+`go test -tags=integration ./internal/kyc/ -run TestCallContext_NeverRendersSecret`
+    first failure: --- FAIL: TestCallContext_NeverRendersSecret (0.00s)
+                       "CallContext rendered the secret: ...mock-outbound-credential-not-a-real-secret"
+
+11/11 killed, 0 equivalent.
+
+===========================================================================================
+Post-restoration verification
+===========================================================================================
+
+After each mutant was reverted from its saved backup, `git diff --stat` over every
+mutated TRACKED file (internal/kyc/verification_service.go, internal/kyc/document_service.go,
+internal/kyc/provider.go, internal/httpserver/kyc_admin_handlers.go) showed exactly this
+task's own production diff and nothing else (no residual mutant), and the full targeted
+suite (`go test -tags=integration ./internal/kyc/... ./internal/httpserver/... -run
+"KYC|CreateVerification|SubmitVerification|CallContext"`) passed cleanly. internal/kyc/
+callcontext.go is a new, untracked file this task adds, so its restoration was verified by
+direct byte comparison against the pre-mutation saved copy instead of `git diff`.

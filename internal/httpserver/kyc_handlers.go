@@ -143,30 +143,43 @@ func newCreateMyVerificationHandler(deps Deps) http.HandlerFunc {
 			return
 		}
 
-		var v kyc.Verification
+		// ADR 0095 §15.2 (PRH-I2): CreateVerification now owns its own
+		// transaction boundaries (phase A commits before any provider
+		// call), so only the identity/provider-selection resolution below
+		// still needs its own short tenant-scoped transaction (a cheap,
+		// no-vendor-I/O read) - mirrors casino_handlers.go's identical
+		// LaunchGame wiring.
+		var brandID, personID uuid.UUID
+		var provider kyc.KYCProvider
 		err = deps.DB.WithTenant(r.Context(), tc.TenantID, func(ctx context.Context, tx pgx.Tx) error {
 			account, err := identity.GetPlayerAccountByID(ctx, tx, playerAccountID)
 			if err != nil {
 				return err
 			}
+			brandID, personID = account.BrandID, account.PersonID
 			// O4 (Stage 10.3 W2a): the provider comes from the tenant's own
 			// configuration, never a hard-coded id, and selection fails
 			// closed when none is configured (kyc.SelectProvider).
-			provider, err := deps.KYCOrchestrator.SelectProvider(ctx, tx, tc.TenantID)
-			if err != nil {
-				return err
-			}
-			v, err = kyc.CreateVerification(ctx, tx, provider, kyc.CreateVerificationParams{
-				TenantID: tc.TenantID, BrandID: account.BrandID, PlayerAccountID: account.ID, PersonID: account.PersonID,
-			})
+			provider, err = deps.KYCOrchestrator.SelectProvider(ctx, tx, tc.TenantID)
 			return err
 		})
+		var v kyc.Verification
+		if err == nil {
+			v, err = kyc.CreateVerification(r.Context(), deps.DB, deps.KYCOutboundCredentials, provider, kyc.CreateVerificationParams{
+				TenantID: tc.TenantID, BrandID: brandID, PlayerAccountID: playerAccountID, PersonID: personID,
+			})
+		}
 		if errors.Is(err, identity.ErrNotFound) {
 			apierror.Write(w, requestID, apierror.CodeNotFound, "player not found")
 			return
 		}
 		if errors.Is(err, kyc.ErrNoKYCProviderConfigured) || errors.Is(err, kyc.ErrKYCProviderAmbiguous) {
 			logger.Warn("kyc_provider_not_selected", "reason", err.Error())
+			apierror.Write(w, requestID, apierror.CodeUnavailable, "identity verification is temporarily unavailable")
+			return
+		}
+		if errors.Is(err, kyc.ErrProviderUnavailable) {
+			logger.Warn("create_verification_provider_unavailable", "error", err)
 			apierror.Write(w, requestID, apierror.CodeUnavailable, "identity verification is temporarily unavailable")
 			return
 		}
@@ -271,7 +284,13 @@ func newUploadMyDocumentHandler(deps Deps) http.HandlerFunc {
 			return
 		}
 
+		// ADR 0095 §15.3 (PRH-I2): UploadDocument is phase A only (document
+		// insert + audit, committed here); the provider submission step
+		// (phase B/C, kyc.SubmitVerification) runs SEPARATELY below, after
+		// this transaction has already committed - no database transaction
+		// is held across the provider call.
 		var doc kyc.Document
+		var provider kyc.KYCProvider
 		err = deps.DB.WithTenant(r.Context(), tc.TenantID, func(ctx context.Context, tx pgx.Tx) error {
 			account, err := identity.GetPlayerAccountByID(ctx, tx, playerAccountID)
 			if err != nil {
@@ -284,17 +303,26 @@ func newUploadMyDocumentHandler(deps Deps) http.HandlerFunc {
 			if verification.PlayerAccountID != account.ID {
 				return kyc.ErrNotFound
 			}
-			var provider kyc.KYCProvider
 			if deps.KYCOrchestrator != nil {
 				provider, _ = deps.KYCOrchestrator.Provider(verification.ProviderID)
 			}
-			doc, err = kyc.UploadDocument(ctx, tx, deps.DocumentStorage, deps.MalwareScanner, provider, kyc.UploadDocumentParams{
+			doc, err = kyc.UploadDocument(ctx, tx, deps.DocumentStorage, deps.MalwareScanner, kyc.UploadDocumentParams{
 				TenantID: tc.TenantID, BrandID: account.BrandID, PlayerAccountID: account.ID, PersonID: account.PersonID,
 				VerificationID: verificationID, DocumentType: kyc.DocumentType(documentType),
 				IssuingCountry: r.FormValue("issuing_country"), Filename: header.Filename, Content: content,
 			})
 			return err
 		})
+		if err == nil && provider != nil {
+			if _, submitErr := kyc.SubmitVerification(r.Context(), deps.DB, deps.KYCOutboundCredentials, provider, tc.TenantID, verificationID); submitErr != nil {
+				// A phase-B/C submission failure never invalidates the
+				// document upload that already committed (ADR 0095 §15.3:
+				// the verification's status is simply left as it was, and
+				// the next upload re-submits) - logged, never surfaced as
+				// upload failure to the player.
+				logger.Warn("submit_verification_failed", "error", submitErr)
+			}
+		}
 		if errors.Is(err, kyc.ErrNotFound) || errors.Is(err, identity.ErrNotFound) {
 			apierror.Write(w, requestID, apierror.CodeNotFound, "verification not found")
 			return

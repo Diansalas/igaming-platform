@@ -171,6 +171,16 @@ type Deps struct {
 	DocumentStorage kyc.DocumentStorageProvider
 	MalwareScanner  kyc.MalwareScanner
 
+	// KYCOutboundCredentials is the KYC domain's outbound-credential
+	// resolver (ADR 0095 §15.2/§15.3/§9.1, PROV-OUTBOUND-CRED-1) - a MOCK
+	// synthetic credential behind a synthetic/MOCK provider adapter, or the
+	// real provider-credential subsystem's Outbound("kyc") once a real
+	// adapter exists. Nil fails every CreateVerification/SubmitVerification
+	// call closed, mirroring CasinoOutboundCredentials' identical
+	// nil-resolver convention - never a silent fallback to an
+	// unauthenticated or cached credential.
+	KYCOutboundCredentials kyc.OutboundCredentialResolver
+
 	// KYCWebhookEnabled gates registration of the KYC provider-callback
 	// route (POST /v1/webhooks/kyc/{tenantSlug}/{providerID}) - Stage
 	// 10.2, ADR 0091, architect ruling R5/J7: KYC-WH-1 found this route
