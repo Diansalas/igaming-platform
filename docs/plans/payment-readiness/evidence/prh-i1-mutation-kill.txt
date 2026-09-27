@@ -333,3 +333,83 @@ full internal/payments/internal/withdrawal/internal/httpserver/internal/kyc
 suites together under `-race` on GitHub CI (CI-BILLING-1 still open per
 prior evidence files in this directory) - only local runs are recorded
 here, per this task's own instruction to record local evidence.
+
+================================================================================
+PAYOUT DISPATCH follow-up round (orchestrator-requested: ledger-balance/
+projection assertions in every payout test, a Sweeper.RunOnce end-to-end
+test, two concurrent-race tests, a dedicated T12 KYC-deny test, a
+crash-point-proxy test). Same environment/method as the section above.
+Date: 2026-09-27.
+
+New tests added (internal/payments/payout_dispatch_integration_test.go):
+TestSweeper_RunOnce_PayoutEndToEnd_BatchCapAndLease,
+TestSweeper_T12Resubmit_KYCDeny_EscalatesNeverResends,
+TestClaimForDispatch_NeverCallsProviderBeforeCommit,
+TestConcurrent_RejectVsClaimForDispatch_ExactlyOneWins (50 reps),
+TestConcurrent_DenyForComplianceVsClaimForDispatch_ExactlyOneWins (50 reps).
+loAssertBalanced/loAssertProjectionMatchesRebuild (lockorder_harness_test.go,
+same package) appended to all 14 payout tests. All 14 pass under
+`-tags=integration`; the two concurrent-race tests additionally pass under
+`-race` (both observed to have BOTH sides win at least once across their
+50 reps in some runs, confirming genuine contention, not a scheduling
+artifact - not asserted as a hard requirement since either distribution is
+still correct).
+
+PM-PAYOUT-5 (item a): loAssertProjectionMatchesRebuild's own load-bearing-
+ness. ledger.Post's balance invariant is enforced by a DEFERRABLE
+CONSTRAINT TRIGGER on ledger_entries (migration 0021/0022,
+`ledger_entries_balanced`) - an applied migration file, never mutated here
+- so no payments/withdrawal-layer code path can construct a genuinely
+unbalanced ledger_entries set to prove SUM(debits)==SUM(credits) failing
+via a source mutation. Instead, temporarily appended a raw
+`UPDATE wallet_balance_projection SET debit_total = debit_total + 1 ...`
+(never reachable through application code - simulating a projection-
+trigger defect) after TestPayoutDispatch_EndToEnd_Success's own assertions,
+followed by a second loAssertProjectionMatchesRebuild call.
+KILLED:
+    payout_dispatch_integration_test.go:315: projection vs. rebuild:
+    account <id> projection drifted from the ledger
+Restored: internal/payments/payout_dispatch_integration_test.go byte-
+identical (git diff clean) - the injected corruption/second-assertion
+block was never committed.
+
+PM-PAYOUT-6 (item c): removed BOTH layers of protection simultaneously -
+ClaimForDispatch's own initial row lock (LockApprovedForSubmission
+replaced with a plain GetByID plus a stale Go-level state check) AND
+MarkSubmittedPending's own internal lock/CAS guard (lockRequestForUpdate
+replaced with GetByID; the UPDATE's `AND state = $4` predicate removed).
+    go test -tags=integration -race -run TestConcurrent_DenyForComplianceVsClaimForDispatch_ExactlyOneWins ./internal/payments/...
+KILLED on rep 1/50:
+    payout_dispatch_integration_test.go:993: rep 1: expected exactly one
+    of {ClaimForDispatch, DenyForCompliance} to win, got claimed=true
+    (err=<nil>) denied=true (err=<nil>)
+Restored: internal/payments/payout.go and internal/withdrawal/withdrawal.go
+byte-identical (git diff clean).
+NOTE (disclosed, not a gap): removing ONLY ClaimForDispatch's OWN initial
+lock (leaving MarkSubmittedPending's internal lockRequestForUpdate/CAS
+guard intact) does NOT kill either concurrent-race test - Postgres's own
+implicit row lock on the later `UPDATE ... WHERE id = $x AND state = $y`
+statement, plus that conditional predicate, still serializes the two
+writers correctly. This is a genuine defense-in-depth property of the
+existing design (the row lock is taken redundantly at multiple points
+before any write), not a weakness in the new tests: the ACTUAL invariant
+those two tests protect is the CAS guard on the final UPDATE, which
+PM-PAYOUT-6 kills directly.
+
+PM-PAYOUT-7 (item d): the T2/T12 shared-gate mutation already on record
+above (payout_sweep.go's `if decision.Allowed` -> `if true`) re-run
+specifically against the NEW T12 test.
+    go test -tags=integration -run TestSweeper_T12Resubmit_KYCDeny_EscalatesNeverResends ./internal/payments/...
+KILLED:
+    payout_dispatch_integration_test.go:769: expected the attempt to
+    remain ambiguous (no resend), got pending
+Restored: internal/payments/payout_sweep.go byte-identical (git diff clean).
+Confirms the shared gate helper (gateAndEscalateOnDeny) is exercised, and
+would be missed by a regression, from BOTH the T2 and T12 call sites
+independently, not only the one this file's earlier PM-PAYOUT-2 entry
+happened to test first.
+
+Full confirmation after every revert: `git status --short`/`git diff
+--stat` show no diff on any touched file; all 14 payout tests plus
+internal/withdrawal's full suite pass under `-tags=integration`; the two
+concurrent-race tests additionally pass under `-race`.
