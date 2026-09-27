@@ -1367,6 +1367,111 @@ This ADR is `NOT IMPLEMENTED` in its entirety. After PRH-I1, I2 and I5:
 
 ---
 
+## 24. QA test-plan review
+
+**Verdict: CONFIRMED WITH CHANGES.**
+
+Scope of this review is §16 only (crash points, adversarial groups, reconciliation tests,
+mutations) plus the invariant table (§2) as the checkable contract those tests must close.
+
+### What is solid
+
+- The plan is invariant-first, not scenario-first: every adversarial group (§16.2 items 1–18)
+  and every crash point (§16.1 CP-D1..CP-W6) states a **converged outcome**, which is a
+  measurable pass/fail (state, posting count, call count), not "it worked." This is the right
+  shape for financial code and satisfies "no fake completion."
+- Crash injection is specified as **hooks in the MOCK adapter and orchestrator seams,
+  test-only** (§16.1 heading), not timing/sleep races. The one place a sleep appears (item 14's
+  pool-starvation variant, "N concurrent slow MOCK calls (sleep > 1 s)") is a deliberate
+  connection-holding fixture reused from F-POOL-1, not a race-dependent assertion — acceptable,
+  but it should be called out explicitly as the one intentional exception so a future reviewer
+  doesn't read it as a stray sleep.
+- Every financial adversarial test is required to end with INV-IO-13 (SUM(debits)==SUM(credits)
+  plus projection==rebuild), which is exactly "prove no double credit/debit" made checkable
+  rather than asserted.
+- Tests run against real Postgres (triggers, RLS, `FOR UPDATE`, REPEATABLE READ, `pg_stat_activity`
+  checks in item 14) rather than in-process mocks of the DB layer, which satisfies "do not rely
+  solely on mock unit tests for financial correctness" — the MOCK is only the *provider*, never
+  the ledger or the transaction boundary.
+- The human's specific list is each directly covered: no double credit (#1, INV-IO-13), no
+  double debit/payout (#2, CP-W4/W5), no lost successful payment (#3, three independent
+  convergence paths: poll-only, callback-only, reconciliation+T17), no lost callback (#4,
+  INV-IO-10), no unsafe retry (#5), ambiguous never silently success (#6, #9), duplicate
+  callback idempotent (#7), callback before/after internal transition (#8, §6.4 both orders),
+  timeout not auto-failure (#9), reconciliation detects divergence (§16.3, one fixture per
+  mismatch kind).
+- Repeated-run discipline exists at least for lock ordering ("no deadlock across 500
+  iterations," item 16) and duplicate-callback ("sequentially and concurrently," item 7).
+
+### Required changes before this test plan can gate `IMPLEMENTED`
+
+1. **Mutation coverage is incomplete against the invariant list.** §16.4's MX1–MX9 map cleanly
+   to INV-IO-1, 3, 6/7, 8, 10, 12, and the kill switch, but there is no mutation exercising
+   INV-IO-2 (calling the provider without a *committed* `submitting` claim token — distinct from
+   MX1, which is calling before an attempt exists at all), INV-IO-4 (bypass the CAS predicate
+   itself in application code, as opposed to the trigger-rejection direct-SQL test in item 17),
+   INV-IO-5 (post the ledger effect from inside phase B, or out of ADR 0082 lock order), INV-IO-9
+   (flip `ever_possibly_sent` without a real send), or INV-IO-11 (let an adapter cache a
+   credential across two calls). Add MX10–MX14 (or fold into existing IDs) so every INV-IO row
+   has at least one mutation and a named failing test, per the ADR's own "checkable contract for
+   qa" framing in §2.
+2. **No migration up/down test, and no explicit 0100-backfill pass/fail test.** The PRH list
+   requires migration up/down including the 0100 backfill; §13.1 describes the backfill's
+   abort-on-violation behavior in prose but §16 never turns it into a test. Add: (a) up/down/up
+   round-trip for 0100, 0102, 0103 leaves no orphaned constraints or triggers; (b) backfill over
+   a fixture set with a pre-existing two-live-attempt violation aborts and lists the offending
+   ids without partial writes; (c) backfill over clean synthetic data produces exactly the
+   states §13.1 specifies.
+3. **No RLS cross-tenant test named for the four new tables.** `payment_attempts`,
+   `payment_provider_events`, `payment_kill_switches`/`_release_requests`, and
+   `payment_statement_imports`/`_lines` are all `FORCE RLS` (§13), but §16 has no item asserting
+   that a session scoped to tenant A cannot read or affect tenant B's rows in any of them (the
+   existing `tenant_staff_scope` pattern presumably has a reusable harness — reuse it here by
+   name).
+4. **No API/OpenAPI conformance test for the new staff-admin surface.** The kill-switch
+   engage/release endpoints (§10.4) are new HTTP surface with new permissions
+   (`payments_kill_switch:engage/release`); §16.2 item 12 tests the domain effect and the
+   route-table exclusion for players, but nothing pins the request/response shape or an OpenAPI
+   diff for these routes plus the `T17` re-verify endpoint.
+5. **Deterministic mechanism for "connection lost" fault points is unstated.** CP-D5 ("Phase C
+   COMMIT connection lost") and the general "DB error causes a rollback" cases in §16.2 item 4
+   need a named, deterministic injection mechanism (e.g., a `pgx` connection wrapper or
+   `net.Conn` proxy that severs after the wire bytes for COMMIT are sent but before the ack is
+   read) — otherwise this is either untestable or accidentally timing-dependent. Name the hook
+   before implementation, not during.
+6. **No breaker state-transition test.** §9.6 defines a closed/open/half-open breaker per
+   (tenant, provider), fed by `ErrorClass`, and §16.2's list has no adversarial case forcing it
+   through open → half-open → closed, verifying a tenant-A breaker does not affect tenant B, or
+   that `DefiniteDecline` does not count against it. This is the "provider outage" case from the
+   PRH list and is currently only implied by CP-W6 (credential outage, not transport outage).
+7. **CI lane/time budget and package placement are not stated.** §16.2 item 14 says the
+   pool-starvation variant runs "in its own isolated CI lane," which is right, but no time
+   budget is given anywhere in §16, and no package location is proposed for the new suite.
+   Given the existing `internal/httpserver` (~310 s) and full-suite (~600 s) budgets, propose:
+   state-machine/evidence-matrix and mutation tests in `internal/payments` (fast, no adapter
+   I/O, should not materially move the `internal/payments` budget); the crash-point and
+   adversarial suite in a new `internal/payments/ioboundary` package sharing the existing
+   Postgres test harness; the pool-starvation and `pg_stat_activity` capture tests
+   (§16.2 item 14) in their own CI lane, budgeted separately and **not** counted against the
+   `internal/httpserver` 310 s figure, since they intentionally hold slow connections. Reconciliation
+   tests (§16.3) belong under `internal/reconciliation/payment_statement` alongside the existing
+   casino_statement suite. This needs a number from `qa`/`payments` before I1-i lands, not an
+   open-ended "isolated lane."
+8. **Repeat-run / flake bound not stated for most concurrency cases.** Only the lock-order
+   harness (500 iterations) and duplicate-callback ("sequentially and concurrently") specify a
+   repetition count. CP-W4/W5, the concurrent-cascade case (item 11), and the concurrent
+   duplicate-success-callback case (item 1) should each state a minimum iteration count (e.g.
+   ≥100 runs in CI, `-race` enabled) so "no double X" is a statistically meaningful claim rather
+   than a single lucky interleaving.
+
+None of the above blocks starting PRH-I1 work — items 1–8 are additions to I1-i (§18) and to
+§16 itself, not redesigns of the boundary. This ADR stays `NOT IMPLEMENTED`; when I1-i is
+written, it must close items 1–8 and this section's verdict updates. `qa` does not sign off
+`IMPLEMENTED` for PRH-I1 until they are closed or a specialist explicitly accepts the gap in
+writing.
+
+---
+
 ## 26. Casino review
 
 **Verdict: APPROVE WITH CONDITIONS**

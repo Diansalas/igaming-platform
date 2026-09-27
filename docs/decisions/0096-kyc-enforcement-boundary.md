@@ -325,31 +325,51 @@ Blueprint §4.7's tiered list has two different characters:
      mechanism does not newly weaken anything; it adds the capability to
      turn the gate on the moment HDR-J-6 is answered, without a code
      change). **This "allow when unconfigured" default is an explicit
-     design choice, flagged here for `security` review, not an
-     unexamined default**: it is safe specifically *because* value
-     cannot leave the platform through a deposit — the structural
-     first-withdrawal gate in point 1 above is the actual backstop that
-     prevents an unverified player from ever extracting funds, deposited
-     or otherwise. If a future reviewer finds a reason deposits need
-     their own fail-closed-when-unconfigured posture independent of that
-     backstop (e.g. a jurisdiction where accepting funds at all, not
-     just paying them out, carries independent legal exposure), that is
-     a new finding for this ADR to absorb, not something this default
+     design choice, submitted here for `security` review, not an
+     unexamined default** — `security`'s review (§13) accepted it
+     conditionally, "only together with C1 and C6": the justification
+     that "value cannot leave through a deposit, and the withdrawal gate
+     is the backstop" holds only because point 1 above now gates **every**
+     withdrawal (not only the first — the defect `security` condition 1
+     and `ledger-finance` C3 found and this revision fixes), so the
+     backstop this ruling depends on has no hole left in it. It is safe
+     specifically *because* value cannot leave the platform through a
+     deposit — the structural rule in point 1 above is the actual
+     backstop that prevents an unverified player from ever extracting
+     funds, deposited or otherwise. `security` further noted this ruling
+     (a) covers only today's paths (no `internal/payments` refund-to-
+     source execution path exists yet, and a future crypto rail, row
+     #19, can receive funds with no initiation step to gate at all — both
+     must be re-reviewed against this ruling, not assumed to inherit it)
+     and (b) is a mechanism description, not a compliance position: going
+     live in a jurisdiction with no active `cumulative_deposit` policy
+     means unverified players can deposit without limit and *place*
+     funds (the first AML stage) even though they can never extract them
+     — that is HD-KYC-1 plus legal review to accept or reject before
+     launch, not something this default pre-decides. See condition 9
+     (§13) for the operational-visibility requirement ("make dormancy
+     observable") this ruling is also conditioned on. If a future
+     reviewer finds a reason deposits need their own
+     fail-closed-when-unconfigured posture independent of the withdrawal
+     backstop, that is a new finding for this ADR to absorb, not something
+     this default
      silently forecloses.
    - For **rows #3/#5 (withdrawal)**, the threshold triggers are
-     genuinely optional refinements on top of the always-on structural
-     rule in point 1 above — "dormant" only ever means "no *additional*
-     EDD tier is active beyond the first-withdrawal gate," never "no
-     gate at all." Withdrawal is never left ungated purely because a
-     threshold value is missing, which is the fail-closed-for-
-     value-leaving-the-platform posture this ADR is asked to justify
-     explicitly. **This is a security/human-review design choice,
-     recorded here, not an automatic consequence of the schema**: a
-     future reviewer could instead choose to make even the structural
-     "first withdrawal" rule itself jurisdiction-configurable and
-     dormant-by-default; this ADR recommends against that, because
-     Blueprint states the trigger unconditionally and no legal value is
-     needed to honor it.
+     genuinely optional refinements **on top of** the always-on
+     structural rule in point 1 above — "dormant" only ever means "no
+     *additional* EDD tier is active beyond the mandatory `passed`
+     check every withdrawal already requires," never "no gate at all."
+     Withdrawal is never left ungated purely because a threshold value
+     is missing, which is the fail-closed-for-value-leaving-the-platform
+     posture this ADR is asked to justify explicitly, and which no
+     longer depends on the withdrawal being the player's *first* one.
+     **This is a security/human-review design choice, recorded here, not
+     an automatic consequence of the schema**: a future reviewer could
+     instead choose to make even the structural "passed required on
+     every withdrawal" rule itself jurisdiction-configurable and
+     dormant-by-default; this ADR recommends against that (HD-KYC-5),
+     because Blueprint states the tier unconditionally and no legal
+     value is needed to honor it.
 
 ### 3.5 A third kind of trigger: policy-driven "play" (casino/sportsbook bet placement)
 
@@ -573,7 +593,7 @@ at implementation time.
 | **HD-KYC-2** | EDD amount threshold value(s), per jurisdiction/asset, and whether EDD also scores sportsbook/casino stake size (row #10) or only deposit/withdrawal amounts | HDR-J-6 + legal review |
 | **HD-KYC-3** | Whether any jurisdiction requires KYC at registration (`registration_tier`), and at what tier | HDR-J-6 + legal review |
 | **HD-KYC-4** | Whether bonus conversion (row #15) should be its own KYC/AML checkpoint independent of the eventual withdrawal gate | identity-compliance + legal, not decided by this ADR |
-| **HD-KYC-5** | Whether a jurisdiction may ever relax the structural "first withdrawal" rule (§3.2 point 1) — this ADR's default answer is no, recorded as a design choice, not a foreclosed option | Authority constraint, CLAUDE.md Compliance section |
+| **HD-KYC-5** | Whether a jurisdiction may ever relax the structural "`passed` required on every withdrawal" rule (§3.2 point 1, revised per security condition 1 / ledger-finance C3 from the original one-time "first withdrawal" exemption) — this ADR's default answer is no, recorded as a design choice, not a foreclosed option | Authority constraint, CLAUDE.md Compliance section |
 | **HD-KYC-6** | Cross-tenant/cross-brand reuse of an approved verification (ADR 0028 §7's own still-open decision) — this ADR does not change that answer; `EvaluateEnforcement` reads `kyc_verifications` scoped exactly as narrowly as today (tenant/brand), so a decision to widen reuse is a change to `internal/kyc`'s read, not to this enforcement boundary | ADR 0028 §7 |
 | **HD-KYC-7** | Whether wallet-to-wallet `ConversionOperation` (row #18) or a future affiliate payout (row #21) need their own gate, once built | Deferred, not designed here |
 | **HD-KYC-8** | Does any jurisdiction require KYC before play (casino and/or sportsbook bet placement, rows #7/#10), and at what tier — the `play` trigger (§3.5) ships with no active row and no default value; this decides whether one is ever authored, and for which surface(s) | HDR-J-6 + legal review |
@@ -672,7 +692,8 @@ registry's KYC-ENFORCE-1 row already states).
 | Integration | Deposit initiation: RG-denied player never reaches KYC evaluation (order preserved); KYC-denied player never reaches `attemptDeposit`/the provider | #1 |
 | Integration | Withdrawal request: KYC-denied player's hold is never posted (transaction rolls back to before the ledger lock, mirroring `TestRequestWithdrawal_InsufficientFundsRejectedAndAtomic`'s atomicity proof) | #3 |
 | Integration | Withdrawal payout dispatch: an approved-but-since-KYC-rejected request is denied at `LockApprovedForSubmission`, never reaching `MarkSubmitted`/the provider — the actual "before payout submission" backstop | #5 |
-| Integration | A player who has one prior `completed` withdrawal is exempt from the structural first-withdrawal rule on a second withdrawal, but a jurisdiction's `edd_amount` trigger (if active) still applies independently | #3, #5 |
+| Integration | **Revised per security condition 1 / ledger-finance C3** (replaces the original, defective "exempt after one prior completed withdrawal" row): a `Person` with one prior `completed` withdrawal whose *current* latest verification is `rejected`/`expired` is denied on a second withdrawal request and at payout dispatch — the structural rule never expires after a first pass, and a jurisdiction's `edd_amount` trigger (if active) still applies independently, additively, on top of it | #3, #5 |
+| Integration | The structural rule is scoped per `Person`, not per wallet or `PlayerAccount`: a `rejected`/`expired` player cannot bypass it by opening a new wallet or a second `PlayerAccount` under the same `Person` | #3, #5 |
 | RLS | A `db.WithPlayerScope` connection cannot read another tenant's `kyc_enforcement_decisions`; a tenant-scoped write attempt to `kyc_enforcement_policies` is rejected (platform-wide write only) | schema |
 | Concurrency | Two concurrent deposit attempts racing a staff KYC approval that commits between them each see a consistent, individually-correct outcome (no torn read) — mirrors `TestRequestWithdrawal_ConcurrentRequestsOnlyOneSucceeds`'s pattern applied to a read-then-decide check | #1, #3, #5 |
 | Negative/security | A client-supplied field cannot influence `Outcome` (fuzz `EnforcementParams` for any player-controllable path into the decision); cross-tenant `player_account_id` cannot be evaluated against a different tenant's `kyc_verifications` row | all |
