@@ -387,6 +387,48 @@ func TestCreateVerification_UnrecognizedOutcomeWithReferenceStillBecomesPending(
 	}
 }
 
+// TestCreateVerification_PhaseCFailureLog_NeverLeaksRawVendorOutcomeText is
+// the security re-verification 3 LOW finding's own required test: phase
+// C's own "kyc_create_verification_phase_c_failed" log line used to log
+// err.Error() directly, which embeds the RAW, vendor-controlled outcome
+// string via applyCreateVerificationResult's own "%q" formatting (the
+// unrecognized-outcome-with-no-reference error, §21.8) - unbounded
+// adapter-supplied text in operator logs. Now bounded via
+// RedactedProviderErrorDetail.
+func TestCreateVerification_PhaseCFailureLog_NeverLeaksRawVendorOutcomeText(t *testing.T) {
+	pool := testPoolSized(t, 1)
+	f := seedFixture(t, pool)
+	base := NewMockKYCProvider()
+	provider := &spyKYCProvider{MockKYCProvider: base}
+	const sentinelOutcome = ProviderOutcome("SUPER-SECRET-VENDOR-OUTCOME-CODE-xyz789")
+	provider.onCreateVerification = func(ctx context.Context, in CreateVerificationInput) (ProviderResult, error) {
+		return ProviderResult{Outcome: sentinelOutcome, Reason: "vendor_ambiguous"}, nil
+	}
+
+	var logBuf bytes.Buffer
+	prevLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prevLogger) })
+
+	_, err := CreateVerification(context.Background(), pool, NewMockOutboundResolver(), provider, CreateVerificationParams{
+		TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerID, PersonID: f.personID,
+	})
+	if !errors.Is(err, ErrProviderUnavailable) {
+		t.Fatalf("expected ErrProviderUnavailable, got %v", err)
+	}
+
+	logged := logBuf.String()
+	if !strings.Contains(logged, "kyc_create_verification_phase_c_failed") {
+		t.Fatalf("expected the phase_c_failed log line, got: %s", logged)
+	}
+	if strings.Contains(logged, string(sentinelOutcome)) {
+		t.Fatalf("kyc_create_verification_phase_c_failed leaked the raw vendor outcome string: %s", logged)
+	}
+	if !strings.Contains(logged, `detail="provider unavailable"`) {
+		t.Fatalf(`expected detail="provider unavailable" in the log line, got: %s`, logged)
+	}
+}
+
 // TestCreateVerification_CallContextFieldsPassedToProvider pins the exact
 // shape ADR 0095 §15.2/§9.1 specifies: TenantID/ProviderID match the
 // verification, Credential.Domain is "kyc", and IdempotencyKey is "kv:" +

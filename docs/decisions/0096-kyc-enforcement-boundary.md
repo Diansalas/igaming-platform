@@ -3181,6 +3181,15 @@ correct implementation).
 
 ### 21.2 `KYC-REVIEWREQ-FORWARD-1` — ruled by identity-compliance, implemented this round
 
+**CORRECTED by §22.1 (security re-verification 3, N-3, MEDIUM, 2026-09-27):** the mechanism
+described below, as implemented in THIS round, was too broad - it blocked every provider-driven
+forward move off a staff-sticky row, including a genuine vendor `rejected` outcome, which
+Ruling 2 never asked for and which itself weakened enforcement (§22.1 has the full analysis and
+fix). The ruling itself (a staff escalation must not be silently overridden by an AUTOMATED
+APPROVAL) is unchanged and correct; only this round's own implementation of it was too broad.
+Read this section as the historical record of the first implementation, and §22.1 as the
+corrected, currently-accurate one.
+
 `identity-compliance`'s own domain ruling (Ruling 2, within its Authority per CLAUDE.md - an
 internal case-management control, not a jurisdiction-varying legal threshold): **a
 `review_required` verification that a STAFF member set must be sticky against an automated
@@ -3329,8 +3338,10 @@ and `./cmd/platform-api/...`, against private databases.
   coordinator's own separate dispatch of an architect/identity-compliance review of this as an
   orchestrator engineering decision per §20.2's own framing (unchanged by this round).
 - **KYC-REVIEWREQ-FORWARD-1:** RULED (identity-compliance, Ruling 2) and IMPLEMENTED this round
-  — `applyForwardOnlyStatus` gates on `reviewed_by IS NOT NULL`. Registry row updated to
-  "ruled and implemented".
+  — `applyForwardOnlyStatus` gates on `reviewed_by IS NOT NULL`. **CORRECTED by §22 (security
+  re-verification 3, N-3, MEDIUM): this round's own gate was too broad (blocked deny-direction
+  outcomes too, not just approvals) - see §22.1 for the fix. This label is superseded; the
+  registry row stays OPEN pending security's re-verification of the §22 fix, not "closed".**
 - **R2-2, R2-3, R2-4:** IMPLEMENTED — HTTP-level tests added for both, mutation-killed; stale
   comments corrected.
 - **R2-5:** IMPLEMENTED — evidence file's mutant count corrected.
@@ -3344,3 +3355,114 @@ and `./cmd/platform-api/...`, against private databases.
   the record; no commit history rewrite performed.
 - **Everything else in this ADR** (§14-§20's own labels, except §20.2's `finalStatusesSQL`
   content itself, corrected by §21.1 above) is unchanged by this round.
+
+## 22. Fix round 8 (2026-09-27) — N-3: the sticky-review gate also swallowed a vendor rejection
+
+Scope: security re-verification 3 (`rv-prh-i2-kyc-security.md`, N-3, MEDIUM, production-launch
+blocker) of fix round 7's own `3671e0e` (§21.2's `KYC-REVIEWREQ-FORWARD-1` implementation).
+
+### 22.1 The defect and the fix
+
+**The defect:** §21.2's own implementation of `applyForwardOnlyStatus`'s sticky guard
+(`AND NOT (status = 'review_required' AND reviewed_by IS NOT NULL)`) blocked EVERY
+provider-driven forward move off a staff-escalated `review_required` row - not only an
+automated `approved`, which is all identity-compliance's Ruling 2 ever asked to be blocked, but
+also a genuine vendor `rejected` (and `expired`, though the overlay already ignores that
+regardless). Security's own reproduction: staff escalates B to `review_required`; the vendor
+then delivers a verified `rejected` callback for B; B stays `review_required` FOREVER (the
+vendor does not redeliver once its own webhook is acknowledged), ZERO audit rows are written
+(because `applyCallbackOutcome` writes no row when `applied=false`, the ordinary "a replay is
+silent" convention - not distinguishing this from a genuine, policy-blocked discard), and a
+withdrawal from the SAME Person's OTHER, approved account stays ALLOWED, because the
+cross-account overlay (§20.2/§21.1) never sees B's own rejection. Security additionally named
+an insider-abuse vector: one officer with `PermVerificationReview` could escalate a case to
+`review_required` specifically to suppress an expected vendor rejection, with only the
+escalation itself audited, never the suppression. This is a correction to the SCOPE of §21.2's
+own implementation, not to Ruling 2 itself - Ruling 2's own title and rationale are about a
+vendor overriding a human escalation with an automated APPROVAL, never about blocking a deny.
+
+**The fix, in two parts:**
+
+1. **Narrow the sticky guard to `newStatus = approved` only.** `internal/kyc/enforcement.go`'s
+   sibling `finalStatusesSQL` fix (§21.1) already established the pattern of narrowing rather
+   than special-casing; the same discipline applies here. `applyForwardOnlyStatus`'s own CAS
+   `UPDATE` predicate is now `AND NOT (status = 'review_required' AND reviewed_by IS NOT NULL
+   AND $1 = 'approved')` (`$1` is the incoming `newStatus`), and the matching Go re-read
+   short-circuit that detects the sticky case (rather than an ordinary lost race) now requires
+   `newStatus == StatusApproved` too. A deny-direction result (`rejected`, `expired`) on a
+   staff-sticky row now applies through the ORDINARY forward-only CAS, exactly as it would on
+   any other row.
+2. **Write an explicit audit row whenever a result IS discarded by the sticky guard.**
+   `applyForwardOnlyStatus` gained a fourth return value, `heldForReview bool` - true ONLY when
+   the no-op was specifically the sticky guard firing (never for an ordinary replay/lower-rank
+   race, which stays silent per B7's existing, unchanged convention). `applyCallbackOutcome`
+   (`internal/kyc/provider.go`), which otherwise writes NO audit row on any `applied=false`
+   outcome, now writes one new action, `kyc.provider_result_held_for_review`, when
+   `heldForReview` is true - carrying `provider_outcome` and `discarded_status` so an officer
+   reviewing the case can see exactly what the vendor said, even though it did not take effect.
+   `applySubmissionResult` (`internal/kyc/document_service.go`, SubmitVerification's own phase
+   C) already wrote an UNCONDITIONAL audit row regardless of `applied` - it did not have N-3's
+   "silent evidence loss" defect - but now also carries a `held_for_review` boolean in that same
+   row's metadata for consistency and to make the discard visible without cross-referencing
+   `status_applied` and `provider_outcome` by hand.
+
+### 22.2 Tests (mutation-verified, `internal/kyc/enforcement_integration_test.go`)
+
+- `TestEvaluateEnforcement_N3_StaffReviewRequiredThenVendorRejected_StillApplies` - the
+  coordinator's own required regression test: staff escalates B to `review_required`, a REAL,
+  verified `rejected` callback is delivered for B, and the test asserts B reaches `rejected`
+  (not stuck at `review_required`), exactly ONE `kyc.provider_callback` audit row exists, and a
+  withdrawal from the Person's OTHER, approved account is DENIED via the cross-account overlay -
+  the exact deny N-3 found was being lost.
+- `TestEvaluateEnforcement_N3_StaffReviewRequiredThenVendorApproved_HeldForReviewAudited` - the
+  control/audit case: staff escalates to `review_required`, a vendor `approved` callback is
+  correctly still blocked (row stays `review_required`), NO `kyc.provider_callback` row is
+  written (unchanged from before - an ordinary blocked no-op), but exactly ONE
+  `kyc.provider_result_held_for_review` row IS written, naming the discarded `approved` status.
+
+Mutation-killed in three directions: (a) reverting the guard to its unconditional §21.2 shape
+(blocking every forward move) is killed by the rejection test - the row stays stuck at
+`review_required` instead of reaching `rejected`; (b) removing the guard predicate entirely
+(the widening inverse) is killed by BOTH the approval-control test above and §21's own
+pre-existing `TestApplyForwardOnlyStatus_StaffSetReviewRequiredIsStickyAgainstProviderApproval`
+- the row wrongly reaches `approved`; (c) removing the `heldForReview` audit-write block in
+`applyCallbackOutcome` entirely is killed by the approval-control test's own audit-count
+assertion - zero `kyc.provider_result_held_for_review` rows are found where exactly one is
+required.
+
+### 22.3 LOW: phase C's own failure log no longer embeds raw vendor outcome text
+
+Security also flagged, informationally: `kyc_create_verification_phase_c_failed`
+(`internal/kyc/verification_service.go`, CreateVerification's phase C) logged `err.Error()`
+directly, which can embed the RAW, vendor-controlled outcome string via §21.8's own
+"unrecognized outcome %q with no reference" error - unbounded adapter-supplied text in operator
+logs, the same class of gap C5/N-2/R2-2 already closed for the KYC package's other log lines.
+Fixed by logging `RedactedProviderErrorDetail(err)` instead - since this error path always
+wraps `ErrProviderUnavailable`, it now logs the fixed string `"provider unavailable"`, never the
+underlying outcome text. Test: `TestCreateVerification_PhaseCFailureLog_NeverLeaksRawVendorOutcomeText`
+(`internal/kyc/kyc_two_phase_integration_test.go`, a sentinel-based capturing-logger test in the
+same style as the package's other redaction tests), mutation-killed.
+
+### 22.4 Verification (fix round 8)
+
+`gofmt -l .`, `go build ./...`, `go vet ./...`, `go vet -tags integration ./...` all clean.
+`golangci-lint run ./...` (pinned 2.9.0 binary, untagged, matching CI) - 0 issues.
+`go test -tags integration -race -count=1` all green for `./internal/kyc/...`,
+`./internal/httpserver/... -run 'KYC|Kyc'`, `./internal/withdrawal/...`, and
+`./cmd/platform-api/...`, against private databases.
+
+### 22.5 Labels (round 8 summary)
+
+- **N-3 (security re-verification 3, MEDIUM, production-launch blocker):** IMPLEMENTED - the
+  sticky guard is narrowed to `newStatus = approved` only; a deny-direction result always
+  applies; an explicit `kyc.provider_result_held_for_review` audit row records every discard.
+  Regression tests mutation-killed in all three directions above. **Registry row
+  `KYC-REVIEWREQ-FORWARD-1` stays OPEN, not closed, until security independently re-verifies
+  this fix** - per the coordinator's own explicit instruction, this round's own testing is not
+  a substitute for that re-verification.
+- **LOW (phase C failure log):** IMPLEMENTED - bounded via `RedactedProviderErrorDetail`,
+  mutation-killed.
+- **§21.2's own "closed"/"ruled and implemented" framing:** SUPERSEDED by this section - see
+  §21.2's own correction note and §21.10's corrected bullet.
+- **Everything else in this ADR** (§14-§21's own labels, except the §21.2/§21.10 corrections
+  above) is unchanged by this round.

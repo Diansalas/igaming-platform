@@ -458,6 +458,109 @@ func TestEvaluateEnforcement_N1b_ApprovedAfterExpiredStillLiftsRejection(t *test
 	}
 }
 
+// --- N-3 (security re-verification 3, MEDIUM, production-launch blocker):
+// KYC-REVIEWREQ-FORWARD-1's original, unconditional sticky-guard shape
+// blocked EVERY provider-driven forward move off a staff-escalated
+// review_required row, including a genuine vendor REJECTION - not just an
+// automated approval, which is all identity-compliance's Ruling 2 ever
+// asked to be blocked. Narrowed so only an `approved` result is held. ---
+
+// TestEvaluateEnforcement_N3_StaffReviewRequiredThenVendorRejected_StillApplies
+// is the coordinator's own required regression test: a staff escalation to
+// review_required must NEVER suppress a later genuine vendor rejection -
+// the row must end up `rejected` (not stuck at review_required), the
+// kyc.provider_callback audit row must be written (not silently dropped),
+// and a withdrawal from the SAME Person's other, approved account must be
+// DENIED via the cross-account overlay (ADR 0096 §20.2/§21.1) - exactly
+// the deny that N-3 found was being lost.
+func TestEvaluateEnforcement_N3_StaffReviewRequiredThenVendorRejected_StillApplies(t *testing.T) {
+	pool := testPool(t)
+	f := seedFixture(t, pool)
+	setVerification(t, pool, f, StatusApproved, nil)
+	second := seedSecondAccount(t, pool, f)
+
+	provider := NewMockKYCProvider()
+	orch := NewOrchestrator(map[string]KYCProvider{"mock": provider}, NewMockWebhookCredentials(provider))
+	v, err := CreateVerification(context.Background(), pool, NewMockOutboundResolver(), provider, CreateVerificationParams{
+		TenantID: second.tenantID, BrandID: second.brandID, PlayerAccountID: second.playerID, PersonID: second.personID,
+	})
+	if err != nil {
+		t.Fatalf("seed second account's verification: %v", err)
+	}
+
+	staffID := seedComplianceStaff(t, pool, second)
+	if err := pool.WithTenant(context.Background(), second.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := ReviewVerification(ctx, tx, ReviewVerificationParams{
+			VerificationID: v.ID, StaffID: staffID, NewStatus: StatusReviewRequired, Reason: "needs additional evidence",
+		})
+		return err
+	}); err != nil {
+		t.Fatalf("staff escalate to review_required: %v", err)
+	}
+
+	in := provider.CallbackPayload(second.tenantID, v.ProviderReference, ProviderRejected, "document_fraud_suspected")
+	if err := pool.WithTenant(context.Background(), second.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, _, err := orch.receiveCallbackInTx(ctx, tx, second.tenantID, "mock", in)
+		return err
+	}); err != nil {
+		t.Fatalf("deliver rejected callback: %v", err)
+	}
+
+	if got := mustGetStatus(t, pool, second.tenantID, v.ID); got != StatusRejected {
+		t.Fatalf("N-3: expected the staff-escalated row to still reach rejected on a genuine vendor rejection, got %q", got)
+	}
+	assertAuditCount(t, pool, second.tenantID, "kyc.provider_callback", v.ID.String(), 1)
+
+	d := evalWithdrawal(t, pool, f)
+	if d.Allowed {
+		t.Fatalf("N-3: expected the Person's OTHER account to be denied once B's rejection actually applied, got %+v", d)
+	}
+}
+
+// TestEvaluateEnforcement_N3_StaffReviewRequiredThenVendorApproved_HeldForReviewAudited
+// is the coordinator's own required audit test for the (still correctly
+// blocked) approval case: the vendor's discarded `approved` outcome must
+// be visible to the officer via a
+// kyc.provider_result_held_for_review audit row, naming the discarded
+// status - never silently vanish the way it did before this fix (N-3's
+// own "silent evidence loss" point 2).
+func TestEvaluateEnforcement_N3_StaffReviewRequiredThenVendorApproved_HeldForReviewAudited(t *testing.T) {
+	pool := testPool(t)
+	f := seedFixture(t, pool)
+
+	provider := NewMockKYCProvider()
+	orch := NewOrchestrator(map[string]KYCProvider{"mock": provider}, NewMockWebhookCredentials(provider))
+	v, err := CreateVerification(context.Background(), pool, NewMockOutboundResolver(), provider, CreateVerificationParams{
+		TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerID, PersonID: f.personID,
+	})
+	if err != nil {
+		t.Fatalf("seed verification: %v", err)
+	}
+	staffID := seedComplianceStaff(t, pool, f)
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := ReviewVerification(ctx, tx, ReviewVerificationParams{
+			VerificationID: v.ID, StaffID: staffID, NewStatus: StatusReviewRequired, Reason: "needs additional evidence",
+		})
+		return err
+	}); err != nil {
+		t.Fatalf("staff escalate to review_required: %v", err)
+	}
+
+	in := provider.CallbackPayload(f.tenantID, v.ProviderReference, ProviderApproved, "auto_approved")
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, _, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock", in)
+		return err
+	}); err != nil {
+		t.Fatalf("deliver approved callback: %v", err)
+	}
+
+	if got := mustGetStatus(t, pool, f.tenantID, v.ID); got != StatusReviewRequired {
+		t.Fatalf("N-3 control: expected the staff-escalated row to STAY review_required against a vendor approval, got %q", got)
+	}
+	assertAuditCount(t, pool, f.tenantID, "kyc.provider_callback", v.ID.String(), 0)
+	assertAuditCount(t, pool, f.tenantID, "kyc.provider_result_held_for_review", v.ID.String(), 1)
+}
+
 // --- ADR 0096 §2.6(g), RV-PRH-I2 KYC review F1: never-submitted orphan
 // rows are excluded from "latest" enforcement selection ---
 

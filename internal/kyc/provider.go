@@ -461,24 +461,40 @@ func statusForOutcome(o ProviderOutcome) (VerificationStatus, bool) {
 // replaces as SubmitVerification's phase-C status writer).
 //
 // KYC-REVIEWREQ-FORWARD-1 (identity-compliance domain ruling,
-// `rv-prh-i2-kyc-identity-compliance.md` Ruling 2, 2026-09-27): a
-// review_required row that a STAFF member set (reviewed_by IS NOT NULL - the
-// column is written ONLY by the staff ReviewVerification path, never by
-// this function or by applyCallbackOutcome) is STICKY against this
-// function's own forward-only rule - a later provider result or callback
-// arriving while the row sits in that state must NEVER advance it to
-// approved/rejected on its own, even though that would ordinarily be a
-// legal forward move under statusRank alone. Only another explicit staff
-// ReviewVerification call may move such a row forward. A PROVIDER-set
-// review_required (no staff actor - reviewed_by is still uuid.Nil) is
-// UNAFFECTED by this rule: the ordinary forward-only behavior (a later
-// vendor approved proceeding automatically) still applies there, since no
-// human judgment is being silently overridden. This is enforced as a
-// documented no-op (applied=false), never an error - "keep the forward-only
-// no-op semantics" (Ruling 2's own required mechanism), so a provider
-// result landing on a staff-sticky row is recorded/audited by the caller
-// exactly like any other superseded result, not treated as a failure.
-func applyForwardOnlyStatus(ctx context.Context, tx pgx.Tx, tenantID, id uuid.UUID, expectedCurrent, newStatus VerificationStatus, reason string) (updated Verification, applied bool, err error) {
+// `rv-prh-i2-kyc-identity-compliance.md` Ruling 2, 2026-09-27, NARROWED by
+// N-3 - security re-verification 3, MEDIUM, `rv-prh-i2-kyc-security.md`,
+// 2026-09-27): a review_required row that a STAFF member set (reviewed_by
+// IS NOT NULL - the column is written ONLY by the staff ReviewVerification
+// path, never by this function or by applyCallbackOutcome) is STICKY
+// against this function's own forward-only rule ONLY when the incoming
+// result is itself an `approved` outcome - a later provider result or
+// callback arriving while the row sits in that state must NEVER advance it
+// to approved on its own, even though that would ordinarily be a legal
+// forward move under statusRank alone. Only another explicit staff
+// ReviewVerification call may move such a row to approved. A DENY-direction
+// result (rejected, or expired - which the cross-account overlay ignores
+// regardless) is NEVER blocked by this rule: N-3 found that the original,
+// unconditional "block every forward move off a staff-sticky
+// review_required row" shape silently discarded a genuine vendor
+// REJECTION too, which (a) let the ADR 0096 §20.2/§21.1 cross-account
+// overlay miss a real rejection entirely (a Person's OTHER accounts stayed
+// wrongly ALLOWED), (b) wrote no audit trail of the discarded rejection at
+// all (an "insider vector": a compliance officer could escalate a case
+// to review_required specifically to suppress an expected vendor
+// rejection, with only the escalation itself audited, never the
+// suppression), and (c) is not what Ruling 2 itself ever asked for -
+// Ruling 2's own title and rationale are about a vendor overriding a
+// human escalation with an AUTOMATED APPROVAL, never about blocking a
+// deny. A PROVIDER-set review_required (no staff actor - reviewed_by is
+// still uuid.Nil) is UNAFFECTED by this rule regardless of direction: the
+// ordinary forward-only behavior still applies there, since no human
+// judgment is being silently overridden. Blocking an approval is enforced
+// as a documented no-op (applied=false, heldForReview=true - N-3's own
+// required signal so the caller can write an explicit audit trail of the
+// discarded outcome, never silence it); heldForReview is ALWAYS false for
+// every other no-op reason (an ordinary replay/lower-rank race, B7's
+// existing "a replay writes no audit row" convention, unchanged).
+func applyForwardOnlyStatus(ctx context.Context, tx pgx.Tx, tenantID, id uuid.UUID, expectedCurrent, newStatus VerificationStatus, reason string) (updated Verification, applied bool, heldForReview bool, err error) {
 	newRank := statusRank(newStatus)
 	current := expectedCurrent
 	const maxAttempts = 3
@@ -486,45 +502,47 @@ func applyForwardOnlyStatus(ctx context.Context, tx pgx.Tx, tenantID, id uuid.UU
 		if newRank <= statusRank(current) {
 			reread, err := GetVerificationByID(ctx, tx, id)
 			if err != nil {
-				return Verification{}, false, err
+				return Verification{}, false, false, err
 			}
-			return reread, false, nil
+			return reread, false, false, nil
 		}
 		tag, err := tx.Exec(ctx,
 			`UPDATE kyc_verifications SET status = $1, reason = NULLIF($2, ''), updated_at = now()
 			 WHERE id = $3 AND tenant_id = $4 AND status = $5
-			   AND NOT (status = 'review_required' AND reviewed_by IS NOT NULL)`,
+			   AND NOT (status = 'review_required' AND reviewed_by IS NOT NULL AND $1 = 'approved')`,
 			newStatus, reason, id, tenantID, current,
 		)
 		if err != nil {
-			return Verification{}, false, fmt.Errorf("kyc: apply forward-only status: %w", err)
+			return Verification{}, false, false, fmt.Errorf("kyc: apply forward-only status: %w", err)
 		}
 		if tag.RowsAffected() == 1 {
 			reread, err := GetVerificationByID(ctx, tx, id)
 			if err != nil {
-				return Verification{}, false, err
+				return Verification{}, false, false, err
 			}
-			return reread, true, nil
+			return reread, true, false, nil
 		}
 		// No row matched. Re-read (RLS-scoped) to find out why: either a
 		// genuine lost race (the row's status has since moved - re-evaluate
 		// on the next iteration, mirrors applyCallbackOutcome's identical
 		// retry loop), or KYC-REVIEWREQ-FORWARD-1's own sticky guard fired
 		// (the row's status is UNCHANGED at review_required with a staff
-		// reviewed_by set) - in which case this is a documented, immediate
-		// no-op, not a race to retry: retrying would only hit the identical
-		// guard again and, after 3 attempts, misreport a deliberate policy
-		// block as "exhausted retries".
+		// reviewed_by set, AND the incoming result was itself `approved` -
+		// N-3's own narrowing, matching the SQL predicate above exactly) -
+		// in which case this is a documented, immediate no-op with
+		// heldForReview=true, not a race to retry: retrying would only hit
+		// the identical guard again and, after 3 attempts, misreport a
+		// deliberate policy block as "exhausted retries".
 		reread, err := GetVerificationByID(ctx, tx, id)
 		if err != nil {
-			return Verification{}, false, err
+			return Verification{}, false, false, err
 		}
-		if reread.Status == current && reread.Status == StatusReviewRequired && reread.ReviewedBy != uuid.Nil {
-			return reread, false, nil
+		if reread.Status == current && reread.Status == StatusReviewRequired && reread.ReviewedBy != uuid.Nil && newStatus == StatusApproved {
+			return reread, false, true, nil
 		}
 		current = reread.Status
 	}
-	return Verification{}, false, fmt.Errorf("kyc: exhausted retries applying forward-only status transition for verification %s", id)
+	return Verification{}, false, false, fmt.Errorf("kyc: exhausted retries applying forward-only status transition for verification %s", id)
 }
 
 // applyCallbackOutcome is B7's forward-only replay/idempotency rule,
@@ -597,12 +615,31 @@ func applyCallbackOutcome(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, v 
 	// drifted from the other one over time. Equal-or-backward (a replay,
 	// or any callback arriving after a terminal status or after a staff
 	// decision that already reached/exceeded this rank, J11) is
-	// applied==false: no audit row (B7).
-	updated, applied, err := applyForwardOnlyStatus(ctx, tx, tenantID, v.ID, v.Status, newStatus, result.Reason)
+	// applied==false: no audit row (B7) - UNLESS heldForReview is true
+	// (N-3, security re-verification 3, MEDIUM): a genuine vendor outcome
+	// was discarded specifically because of KYC-REVIEWREQ-FORWARD-1's own
+	// staff-sticky guard (an approved result arriving on a staff-escalated
+	// review_required row), which is NOT an ordinary silent replay - the
+	// vendor's own view must never disappear from the record just because
+	// a human escalation is currently blocking it from taking effect.
+	updated, applied, heldForReview, err := applyForwardOnlyStatus(ctx, tx, tenantID, v.ID, v.Status, newStatus, result.Reason)
 	if err != nil {
 		return Verification{}, false, fmt.Errorf("kyc: update verification status: %w", err)
 	}
 	if !applied {
+		if heldForReview {
+			if err := audit.Record(ctx, tx, audit.Entry{
+				TenantID: tenantID, ActorType: audit.ActorSystem,
+				Action: "kyc.provider_result_held_for_review", TargetType: "kyc_verification", TargetID: updated.ID.String(),
+				Outcome: audit.OutcomeSuccess,
+				Metadata: withReasonTruncated(map[string]any{
+					"provider_id": updated.ProviderID, "provider_outcome": string(result.Outcome),
+					"discarded_status": string(newStatus), "reason": result.Reason,
+				}, reasonTruncated),
+			}); err != nil {
+				return Verification{}, false, fmt.Errorf("kyc: audit callback held-for-review: %w", err)
+			}
+		}
 		return updated, false, nil
 	}
 	if err := audit.Record(ctx, tx, audit.Entry{

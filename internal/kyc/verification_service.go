@@ -345,8 +345,16 @@ func CreateVerification(ctx context.Context, pool providercred.TenantTxRunner, o
 		applied, err = applyCreateVerificationResult(ctx, tx, params.TenantID, v, result)
 		return err
 	}); err != nil {
+		// LOW (security re-verification 3, 2026-09-27): this branch's own
+		// applyCreateVerificationResult can return an error embedding the
+		// RAW, vendor-controlled outcome string via %q (the "unrecognized
+		// outcome %q with no reference" case, R2/§21.8) - unbounded
+		// adapter-supplied text in operator logs, same class as C5.
+		// RedactedProviderErrorDetail bounds it to a fixed, closed-class
+		// string, exactly like every other provider-facing log line in
+		// this package.
 		slog.Default().Error("kyc_create_verification_phase_c_failed",
-			"tenant_id", params.TenantID.String(), "verification_id", v.ID.String(), "error", err.Error())
+			"tenant_id", params.TenantID.String(), "verification_id", v.ID.String(), "detail", RedactedProviderErrorDetail(err))
 		return Verification{}, fmt.Errorf("kyc: create verification: apply result: %w", err)
 	}
 	return applied, nil
