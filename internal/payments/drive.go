@@ -257,6 +257,29 @@ func (o *Orchestrator) applyDepositCallResult(
 		return intent, nil, nil
 
 	case ErrorClassSucceeded:
+		// RV-PRH-I1 ledger-finance N2: a reversal tombstone already
+		// occupying (provider_id, provider_reference) must route to T10
+		// (ADR 0095 §4.3's own "…T10 instead, with no posting and no
+		// error"), never straight into postDepositSuccess - that call's
+		// own ledger idempotency-key insert would otherwise hit the
+		// tombstone's unique index and surface as an untyped error, which
+		// the caller cannot distinguish from a real failure and which
+		// retries identically forever. This attempt is always 'submitting'
+		// here (phase C dispatches immediately after ClaimCreatedForSubmission),
+		// so the non-terminal dispute path applies, exactly as the receipt
+		// path's OutcomeSucceeded/{submitting,pending,ambiguous} cell does.
+		if res.ProviderReference != "" {
+			tombstoned, err := tombstoneExists(ctx, tx, attempt.TenantID, capability.ProviderID, res.ProviderReference)
+			if err != nil {
+				return intent, nil, err
+			}
+			if tombstoned {
+				if err := ApplyDisputeFromNonTerminal(ctx, tx, attempt.ID, evidence, "reversal_tombstone_precedes_success"); err != nil {
+					return intent, nil, err
+				}
+				return intent, nil, nil
+			}
+		}
 		// postedTxID (never updated.LedgerTransactionID - PRH-I5 finding,
 		// LF95-C6(a)/T13): a concurrent sibling could have already posted
 		// the intent's FIRST capture between this attempt's own phase B
@@ -279,7 +302,7 @@ func (o *Orchestrator) applyDepositCallResult(
 		// PRIOR decline of a different sibling, driven concurrently) - any
 		// such leftover 'created' sibling must never reach T2 and place a
 		// second real PSP charge now that the intent has succeeded.
-		if err := rejectCreatedSiblings(ctx, tx, attempt); err != nil {
+		if err := rejectCreatedSiblings(ctx, tx, attempt, evidence); err != nil {
 			return intent, nil, err
 		}
 		return updated, nil, nil

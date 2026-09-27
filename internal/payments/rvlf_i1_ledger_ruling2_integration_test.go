@@ -1,6 +1,12 @@
 //go:build integration
 
-// RV-PRH-I1 callback re-review probes (scratch only, never committed).
+// RV-PRH-I1 callback re-review 1 (ledger-finance) - N1/BDR permanent
+// regression tests. TestRVLF2_Q2_* pins N1's fix (finalizeDeclined's
+// no-op branch must report the intent's ACTUAL status, so a decline of a
+// still-live sibling arriving after a T13 success never inserts a new
+// cascade child - the FRZ/FRZP mutant). TestRVLF2_Q3_* pins F2/BDR on the
+// callback path specifically (an oversized vendor decline_reason must
+// never 500-loop a decline callback).
 package payments
 
 import (

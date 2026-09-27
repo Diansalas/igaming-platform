@@ -376,6 +376,28 @@ func (s *Sweeper) applyStatusEvidence(ctx context.Context, tx pgx.Tx, intent Dep
 		return err
 
 	case ErrorClassSucceeded:
+		// RV-PRH-I1 ledger-finance N2: see drive.go's identical comment -
+		// a QueryStatus success naming a (provider_id, provider_reference)
+		// a reversal tombstone already occupies must route to T10/T13t,
+		// never straight into postDepositSuccess's own ledger insert
+		// (which would otherwise surface the tombstone's unique index as
+		// an untyped error, retried identically forever by the poll loop).
+		// Unlike phase C, the sweeper CAN reach this with attempt.State
+		// already 'declined' (a T13 second-capture re-drive), so both the
+		// declined (T13t) and live (T10) tombstone cells apply here,
+		// exactly as the receipt path's own matrix distinguishes them.
+		if res.ProviderReference != "" {
+			tombstoned, err := tombstoneExists(ctx, tx, attempt.TenantID, *attempt.ProviderID, res.ProviderReference)
+			if err != nil {
+				return err
+			}
+			if tombstoned {
+				if attempt.State == AttemptDeclined {
+					return ApplyTombstonePrecedesSuccess(ctx, tx, attempt.ID, EvidenceQueryStatus)
+				}
+				return ApplyDisputeFromNonTerminal(ctx, tx, attempt.ID, EvidenceQueryStatus, "reversal_tombstone_precedes_success")
+			}
+		}
 		// postedTxID, not updated.LedgerTransactionID - PRH-I5 finding
 		// (LF95-C6(a)/T13); see drive.go's identical comment.
 		_, postedTxID, err := s.Orchestrator.postDepositSuccess(ctx, tx, intent, *attempt.ProviderID, res.ProviderReference, attempt.Amount, attempt.AssetCode)
@@ -388,7 +410,7 @@ func (s *Sweeper) applyStatusEvidence(ctx context.Context, tx pgx.Tx, intent Dep
 			return err
 		}
 		// RV-PRH-I1 ledger-finance H4: see drive.go's identical comment.
-		return rejectCreatedSiblings(ctx, tx, attempt)
+		return rejectCreatedSiblings(ctx, tx, attempt, EvidenceQueryStatus)
 
 	case ErrorClassDefiniteDecline:
 		var refPtr *string
