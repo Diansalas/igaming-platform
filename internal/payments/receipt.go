@@ -328,6 +328,17 @@ func ApplyReceiptEvidence(ctx context.Context, tx pgx.Tx, o *Orchestrator, tenan
 		return "", fmt.Errorf("%w: %w", ErrProviderReferenceInvalid, err)
 	}
 
+	// RV-PRH-I1 code review F2 fix, corrected: bounding ev.DeclineReason
+	// only inside applyResolvedReceiptEvidence's OutcomeDeclined branch
+	// was too late - the R0 receipt insert below (ADR 0082 A7) runs
+	// BEFORE that function is ever called, using this SAME ev value, and
+	// payment_provider_events.decline_reason carries the identical
+	// 64-byte CHECK as payment_attempts.decline_reason. Bounded here,
+	// once, at the top of this function, so every persisted copy (the
+	// receipt AND the attempt) is bounded identically and the fingerprint
+	// computed below is stable across identical-payload redeliveries.
+	ev.DeclineReason = boundedDeclineReason(ev.DeclineReason)
+
 	// PRH-payments-callback-cutover / ADR 0095 §5.4, LF95-C6(b): a
 	// deposit_reversal event is a fact about the ORIGINAL deposit attempt's
 	// ledger posting, never a transition of that attempt's own state
@@ -786,6 +797,24 @@ func applyReversalReceiptEvidence(ctx context.Context, tx pgx.Tx, tenantID uuid.
 	}
 
 	if unresolved || original.LedgerTransactionID == nil {
+		// RV-PRH-I1 ledger-finance L4: a wire reversal payload that omits
+		// amount/asset (some PSPs' "reverse the whole deposit" chargeback
+		// shape never states either) previously left the STORED receipt's
+		// amount/asset_code at their zero values even when a resolved-but-
+		// never-posted original attempt (this branch) already knows the
+		// true ones. Backfilled here, before the receipt insert, only when
+		// an original attempt actually resolved and the wire itself left
+		// the field unset - never overwrites a wire-declared value, and
+		// never invents a value for the genuinely-unresolved case (no
+		// attempt to backfill from at all).
+		if !unresolved {
+			if ev.Amount == 0 {
+				ev.Amount = original.Amount
+			}
+			if ev.AssetCode == "" {
+				ev.AssetCode = original.AssetCode
+			}
+		}
 		// RV-PRH-I1 ledger-finance L5: the parent lock, when there is a
 		// resolved (but never-posted) original attempt, is cheap and
 		// closes the "spurious 500 before this became safe" gap noted by

@@ -104,3 +104,50 @@ func backfillAttemptForIntent(ctx context.Context, tx pgx.Tx, intent DepositInte
 		return fmt.Errorf("payments test bridge: unhandled deposit intent status %q for attempt backfill", intent.Status)
 	}
 }
+
+// backfillCascadeAttemptsForIntent is L2's bridge extension (RV-PRH-I1
+// ledger review): backfillAttemptForIntent above only ever builds ONE
+// attempt per intent, so no test using it could exercise a callback
+// naming an EARLIER cascade provider's own reference, or a genuine T13
+// second capture. This builds a real two-attempt cascade shape (attempt
+// 1: created -> submitting -> declined, cascadable; attempt 2: the
+// cascade child, inserted via cascade.go's own insertCascadeAttempt in
+// 'created' state, left UNCLAIMED) through the SAME exported T1/T2/T4/T8
+// transitions the live cascade path uses - never through the legacy
+// InitiateDeposit's own in-process cascade recursion, which has no way
+// to report which intermediate provider/reference it tried and declined
+// (this is exactly why the single-attempt bridge above cannot be
+// extended to a cascade shape by reading intent alone).
+func backfillCascadeAttemptsForIntent(ctx context.Context, tx pgx.Tx, intent DepositIntent, firstProviderID string) (first PaymentAttempt, second PaymentAttempt, err error) {
+	first, err = InsertCreatedAttempt(ctx, tx, NewCreatedAttempt{
+		ID: uuid.New(), TenantID: intent.TenantID, Operation: AttemptOperationDeposit,
+		DepositIntentID: &intent.ID, AttemptNo: 1, ExcludedProviderIDs: []string{},
+		PaymentMethod: intent.PaymentMethod, AssetCode: intent.AssetCode, Amount: intent.Amount,
+	})
+	if err != nil {
+		return first, second, fmt.Errorf("payments test bridge: insert first cascade attempt: %w", err)
+	}
+	if err = ClaimCreatedForSubmission(ctx, tx, first.ID, firstProviderID, uuid.New(), "test-bridge", time.Now().Add(time.Minute)); err != nil {
+		return first, second, fmt.Errorf("payments test bridge: claim first cascade attempt: %w", err)
+	}
+	firstRef := "bridge-cascade-first-" + first.ID.String()
+	if err = MarkAccepted(ctx, tx, first.ID, EvidenceSync, firstRef, time.Now().Add(time.Minute)); err != nil {
+		return first, second, fmt.Errorf("payments test bridge: mark first cascade attempt accepted: %w", err)
+	}
+	cascadable := true
+	if err = ApplyDecline(ctx, tx, first.ID, DeclineEvidence{
+		Evidence: EvidenceSync, Reason: "test_backfill_decline", Stage: DeclineAfterAcceptance,
+		Cascadable: &cascadable, ProviderRef: &firstRef,
+	}); err != nil {
+		return first, second, fmt.Errorf("payments test bridge: decline first cascade attempt: %w", err)
+	}
+	first, err = GetAttemptByID(ctx, tx, first.ID)
+	if err != nil {
+		return first, second, fmt.Errorf("payments test bridge: reread first cascade attempt: %w", err)
+	}
+	second, err = insertCascadeAttempt(ctx, tx, first)
+	if err != nil {
+		return first, second, fmt.Errorf("payments test bridge: insert cascade child: %w", err)
+	}
+	return first, second, nil
+}
