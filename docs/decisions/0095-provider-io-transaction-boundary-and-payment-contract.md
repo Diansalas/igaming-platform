@@ -1,6 +1,30 @@
 # ADR 0095 — Provider-I/O Transaction Boundary and Provider-Neutral Payment Contract
 
-- **Status:** **ACCEPTED (design) — NOT IMPLEMENTED** (revision 2, 2026-09-27).
+- **Current status (architect, 2026-09-27, revision 4): ACCEPTED — PARTIALLY IMPLEMENTED.**
+  Amended by §28 (AM-2, INV-DEP-1, NOT IMPLEMENTED), §29 (F-POOL-2 durable-state definition)
+  and §30 (AM-1, kill-switch route family). Per part, on this branch:
+
+  | Part | Label | Evidence / gate still open |
+  |---|---|---|
+  | §4/§5.1 deposit attempts, receipts, callback cutover (migration 0101) | PARTIALLY IMPLEMENTED | Callback cutover: `ledger-finance` and `code-reviewer` both NOT READY (`rv-prh-i1-callback-ledger.md`, `rv-prh-i1-callback-code-review.md`). **§28 INV-DEP-1 NOT IMPLEMENTED** (PAY-DOUBLE-CREDIT-1, HIGH): until it lands, the as-built T13/T7 can credit one intent twice. |
+  | §5.2 payout T1p / phase C / sweeper | PARTIALLY IMPLEMENTED | `code-reviewer` APPROVE; `ledger-finance` APPROVE WITH CONDITIONS; `security` sign-off pending. |
+  | §7 sweeper | PARTIALLY IMPLEMENTED | LF95-R1 automatic re-drive NOT IMPLEMENTED (operator T17 path only). |
+  | §10.2–§10.5 kill switch (0105, 0106) | PARTIALLY IMPLEMENTED | Data model, triggers, routes (as amended by §30) IMPLEMENTED. Phase 2 wiring (deposit T3 `kill_switch`, labelled payout hold) is on the unmerged branch `d4520da` (security APPROVE WITH CONDITIONS), NOT on this branch yet. Alert delivery NOT IMPLEMENTED (launch-blocking). KS-AUDIT-TENANT-1 NOT IMPLEMENTED (launch-blocking). |
+  | §10.1 manifest | PARTIALLY IMPLEMENTED | `SupportsRefund`, `CallbackEchoesMerchantReference` enforced; PRH-I1-MANIFEST-1..4 deferred. |
+  | §11 PROV-OUTBOUND-CRED-1 | PARTIALLY IMPLEMENTED | Casino/KYC kind split IMPLEMENTED; payments kind split on the unmerged branch `d4520da`. |
+  | §12 payment reconciliation (0102, 0104) | MOCK | Real PSP statement PROVIDER DEPENDENT; `code-reviewer` NOT READY; §28.9 kind NOT IMPLEMENTED. |
+  | §15 casino launch, KYC create/submit | IMPLEMENTED against MOCK adapters | Casino `code-reviewer` NOT READY (R1); IO-1B/IO-1C closed (`0ca1193`). |
+  | INV-IO-1 (a)–(d) | IMPLEMENTED | (c) is `internal/txscope/no_provider_call_in_tx_closure_static_test.go`. |
+  | §4.8 M1/M2 | BLOCKED | HD-0095-1, LEDGER-MANUAL-ADJ-4EYES-1. |
+  | §5.5 outbound refund | NOT IMPLEMENTED | By design (no flow). |
+
+  **Migration numbers (authoritative; supersedes every other number in this document):**
+  0101 payment attempts and receipts; 0102 payment statement reconciliation (MOCK); 0104
+  payment-statement line CHECKs; 0105 kill switch; 0106 payment-attempts platform-GUC hardening
+  (redefines the three 0105 kill-switch functions); **0107 INV-DEP-1 backstops (§28.8; number to
+  be recorded in the registry allocation line by the orchestrator)**. 0099 (provider-reference
+  bound), 0100 and 0103 (ADR 0096 KYC) are not this ADR's.
+- **Original status line (revision 2; SUPERSEDED by "Current status" above):** **ACCEPTED (design) — NOT IMPLEMENTED** (revision 2, 2026-09-27).
   - Revision 1 was PROPOSED. Six reviews followed (§21 ledger-finance, §22 security, §23
     payments, §24 QA, §25 identity-compliance, §26 casino).
   - Revision 2 writes every condition into the design text. §27 maps each condition ID to the
@@ -22,7 +46,8 @@
   - `payments`: covers §4 through §12.
   - `casino` and `identity-compliance`: cover §15 only.
   - `qa`: covers §16.
-- **Migration numbers (orchestrator re-allocation, 2026-09-27):** 0101 payment attempts and
+- **Migration numbers (orchestrator re-allocation, 2026-09-27; SUPERSEDED by the authoritative
+  map in "Current status" above):** 0101 payment attempts and
   receipts (was 0100; 0100 is now ADR 0096's KYC enforcement migration), 0102 kill switch, 0103
   payment statement reconciliation.
 - **Registry rows closed by implementing this ADR** (each one per domain, only after review):
@@ -223,6 +248,9 @@ database transaction closure regardless of gate-shape parity.
 
 \* `declined → succeeded` exists only for deposits, only on verified matching success
 evidence, and always raises P1 `contradictory_provider_outcome` (§4.4, T13).
+*[AMENDED by §28 (AM-2): `declined → succeeded` is now allowed only as the intent's FIRST
+success; otherwise T13d `declined → disputed` (`multiple_success_for_intent`). `disputed` also
+covers "matching success for an intent that is already financially resolved" (T10/T13d).]*
 
 Mapping of the human's vocabulary:
 
@@ -239,7 +267,7 @@ Mapping of the human's vocabulary:
 | ambiguous provider result | `ambiguous` |
 | retry | T5 (NotSent), T12 (idempotent resubmit of the same key), player retry resume (§5.1) |
 | duplicate callback | receipt dedupe plus no-op evidence (§6.3) |
-| callback after timeout | `ambiguous→*` (T7–T9); `declined→succeeded` anomaly (T13) |
+| callback after timeout | `ambiguous→*` (T7–T9); `declined→succeeded` anomaly (T13) *[AMENDED by §28: T13 first success only, else T13d; the full durable-state definition is §29]* |
 | reconciliation | §12 (detection) plus T17 re-verify (operator or the payments re-drive job, §12.5) |
 | manual intervention | M1–M3 (§4.8) |
 
@@ -282,13 +310,13 @@ The "Allowed from" column is exactly the CAS predicate. Every transition sets
 | T4 | `submitting` → `pending` | Sync `Pending` with a reference | Phase C | `state='submitting'` | Sets `provider_reference`, `accepted_at`; applies deferred receipts (§6.4); withdrawal `provider_reference` set | `payment.attempt_accepted` |
 | T5 | `submitting` → `created` | `ErrorClassNotSent` on a first send (provably not dispatched: credential unavailable, gate refusal, connection refused before write), or a `NotProcessed` code the vendor documents as leaving no trace (§8) | Phase C (same claimant) | `state='submitting' AND claim_token=$t AND NOT ever_possibly_sent` | `next_action_at` = backoff | `payment.attempt_not_sent` |
 | T6 | `submitting` → `ambiguous` | Sync `Ambiguous`; `ErrorClassAmbiguous` (timeout after a possible send, reset after write, unmapped 5xx); a `NotProcessed` code that may leave a trace (§8); lease expired and `QueryStatus` not definitive; **`NotSent` on a T12 resend** (`ever_possibly_sent` already true, LF95-C1) | Phase C or sweeper | `state='submitting'`; sets `ever_possibly_sent=true` | `next_action_at` = poll backoff (`now()` for `NotProcessed`) | `payment.attempt_ambiguous` (+cause `timeout`/`not_processed`/`resend_not_sent`/…) |
-| T7 | `submitting`/`pending`/`ambiguous` → `succeeded` | Verified success evidence **from the attempt's own provider** with amount = attempt amount, asset = attempt asset, and a non-empty provider reference in the evidence or already on the attempt (callback, `QueryStatus`, or sync where the manifest allows sync success) | Phase C, callback tx or sweeper | `state = ANY('{submitting,pending,ambiguous}')`; trigger requires `last_evidence_kind ∈ {sync, callback, query_status}` | **Deposit:** `ledger.Post` Flow 1 with `provider_tx_id = provider_reference` (idempotent on `(tenant, provider_id, provider_tx_id)`); `payment_attempts.ledger_transaction_id` set; the intent's `ledger_transaction_id` set only while NULL; intent → `succeeded`. If a tombstone already occupies `(provider_id, provider_reference)`, T10 (`reversal_tombstone_precedes_success`) instead, with no posting and no error. **Payout:** `withdrawal.Complete` (Flow 3 Step B). | `deposit.posted` / `withdrawal.completed`, `payment.attempt_succeeded` |
+| T7 | `submitting`/`pending`/`ambiguous` → `succeeded` | Verified success evidence **from the attempt's own provider** with amount = attempt amount, asset = attempt asset, and a non-empty provider reference in the evidence or already on the attempt (callback, `QueryStatus`, or sync where the manifest allows sync success) | Phase C, callback tx or sweeper | `state = ANY('{submitting,pending,ambiguous}')`; trigger requires `last_evidence_kind ∈ {sync, callback, query_status}` *[AMENDED by §28.4: for a deposit, if the intent is already financially resolved (INV-DEP-1), T10 `multiple_success_for_intent` instead, no posting.]* **Deposit:** `ledger.Post` Flow 1 with `provider_tx_id = provider_reference` (idempotent on `(tenant, provider_id, provider_tx_id)`); `payment_attempts.ledger_transaction_id` set; the intent's `ledger_transaction_id` set only while NULL; intent → `succeeded`. If a tombstone already occupies `(provider_id, provider_reference)`, T10 (`reversal_tombstone_precedes_success`) instead, with no posting and no error. **Payout:** `withdrawal.Complete` (Flow 3 Step B). | `deposit.posted` / `withdrawal.completed`, `payment.attempt_succeeded` |
 | T8 | `submitting`/`pending`/`ambiguous` → `declined` | Definite decline evidence from the attempt's own provider (sync `Declined`, verified decline callback, `QueryStatus` declined, or a deposit authoritative not-found, §4.5) | Phase C, callback tx or sweeper | `state = ANY('{submitting,pending,ambiguous}')`; trigger: payout requires `last_evidence_kind ∈ {sync, callback, query_status}`, deposit requires `≠ operator` | **Deposit:** cascade row (T1) if eligible (§4.6), else intent projection recomputed. **Payout:** `withdrawal.Fail` (hold released). | `payment.attempt_declined`, `withdrawal.failed` |
 | T9 | `ambiguous` → `pending` | Evidence that the provider holds it and has not finished | Callback or sweeper | `state='ambiguous'` | Sets `provider_reference` if it was unknown; applies deferred receipts (§6.4) | `payment.attempt_accepted` |
 | T10 | `submitting`/`pending`/`ambiguous` → `disputed` | Mismatched success (amount, asset or reference), a provider-reference conflict (§6.1), or a tombstone preceding the success (LF95-C6(d)) | Any evidence path. The state change is **committed** with its receipt, whatever HTTP code is returned (LF95-C3). | `state = ANY('{submitting,pending,ambiguous}')` | none; P1 | `payment.attempt_disputed` |
 | T11 | `pending` → `ambiguous` | Explicit "unknown" or not-found evidence for an accepted attempt (the provider forgot it) | Sweeper | `state='pending'` | none; P1 anomaly | `payment.attempt_ambiguous` |
 | T12 | `ambiguous` → `submitting` | Idempotent resubmission of the **same** attempt with the **same** key. Only if the manifest has `IdempotentSubmission=true`, `submit_count < max_resubmits` and `NOT legacy_backfill`. For a payout the per-item tx re-runs the payout KYC gate first; a non-pass means no resend and the attempt stays `ambiguous`, resolvable only by poll or callback (LF95-C10(c)). | Sweeper (per-item tx, parent locked first) | `state='ambiguous' AND submit_count < $max AND NOT legacy_backfill AND NOT EXISTS(engaged switch)`, and for a deposit also `NOT EXISTS(succeeded attempt for the same intent)` (RV-0095 ledger N3: a paid intent is never re-sent; the attempt stays `ambiguous`, resolved by poll or callback only); new `claim_token`, lease, `last_sent_at` | none | `payment.attempt_resubmitted` |
-| T13 | `declined` → `succeeded` | **Deposit only.** Verified matching success from the attempt's own provider after a decline, with a provider reference | Callback or sweeper | `state='declined' AND operation='deposit'` | Flow 1 posted to `player_cash` (the money is real; LF-Q1 ruling), linked on the attempt; the intent's link is left alone if already set; intent → `succeeded`; any sibling `created` attempt → `rejected` (T3, `intent_succeeded`); P1 `contradictory_provider_outcome`. If another attempt of the intent is already `succeeded`, also P1 `multiple_success_for_intent`. A sibling already `submitting` is a stated residual under the same P1 (§20). If a tombstone already holds `(provider_id, provider_reference)`: **T13t** instead. | `payment.attempt_succeeded_after_decline` |
+| T13 | `declined` → `succeeded` | **Deposit only.** Verified matching success from the attempt's own provider after a decline, with a provider reference | Callback or sweeper | `state='declined' AND operation='deposit'` | *[SUPERSEDED by §28.4 (AM-2): T13 is the intent's FIRST success only; a matching success on a resolved intent is T13d, no posting. The second-capture and third-capture text below is historical.]* Flow 1 posted to `player_cash` (the money is real; LF-Q1 ruling), linked on the attempt; the intent's link is left alone if already set; intent → `succeeded`; any sibling `created` attempt → `rejected` (T3, `intent_succeeded`); P1 `contradictory_provider_outcome`. If another attempt of the intent is already `succeeded`, also P1 `multiple_success_for_intent`. A sibling already `submitting` is a stated residual under the same P1 (§20). If a tombstone already holds `(provider_id, provider_reference)`: **T13t** instead. | `payment.attempt_succeeded_after_decline` |
 | T13t | `declined` → `disputed` | **Deposit only.** Verified matching success after a decline, but a reversal tombstone already holds `(provider_id, provider_reference)` (LF95-C6(d); RV-0095 ledger). | Callback or sweeper | `state='declined' AND operation='deposit'`; `terminal_reason='reversal_tombstone_precedes_success'` | **No posting, no error**: committed terminally, so there is no trigger rejection and no 5xx loop; P1; the attempt sits in the M1 queue. | `payment.attempt_disputed` |
 | T14 | `declined` → `disputed` | **Payout only.** Success evidence after `withdrawal.Fail` released the hold (a double payout has already happened) | Callback or sweeper | `state='declined' AND operation='payout'` | none; P1 | `payment.attempt_disputed` |
 | T15 | `created`/`rejected` → `disputed` | Success evidence **from the attempt's own `provider_id`** for an attempt the platform never sent (adapter misclassification or a hostile verified sender). Evidence from any other provider, or for an attempt with a NULL `provider_id`, is an `anomaly` receipt with **no** state change (S95-C1). | Callback | `state = ANY('{created,rejected}') AND provider_id = $verified_provider` | **Nothing posted**; P1 | `payment.attempt_disputed` |
@@ -302,7 +330,8 @@ The "Allowed from" column is exactly the CAS predicate. Every transition sets
 - `rejected → *`, except T15;
 - `succeeded → *` (a reversal is a separate ledger fact, §5.4);
 - `disputed → *`, except M1/M2;
-- `declined → disputed`, except T13t (deposit) and T14 (payout);
+- `declined → disputed`, except T13t (deposit) and T14 (payout); *[AMENDED by §28.4: and T13d
+  (deposit, `multiple_success_for_intent`)]*;
 - `ambiguous → declined` with `last_evidence_kind='operator'`;
 - any `*→declined` for a payout unless `last_evidence_kind ∈ {sync, callback, query_status}`;
 - any `→succeeded` unless `last_evidence_kind ∈ {sync, callback, query_status}`;
@@ -338,7 +367,7 @@ state; columns are the evidence outcome. Every cell is also audited.
 | `pending` | no-op (reschedule) | T7 (tombstone → T10) | T10 | T8 | no-op | T11 |
 | `ambiguous` | T9 | T7 (tombstone → T10) | T10 | T8 | no-op (reschedule) | §4.5 |
 | `succeeded` | no-op | no-op (duplicate; the ledger is idempotent) | P1 anomaly, receipt `anomaly`, no change | P1 anomaly (a reversal needs a reversal event), no change | no-op | P1 anomaly |
-| `declined` | no-op | deposit T13 (tombstone → T13t `disputed`, no posting) / payout T14 | P1 anomaly | no-op | no-op | no-op |
+| `declined` | no-op | deposit T13 (tombstone → T13t `disputed`, no posting) / payout T14 *[AMENDED by §28.5: deposit on a resolved intent → T13d]* | P1 anomaly | no-op | no-op | no-op |
 | `rejected` | anomaly log | T15 | T15 | no-op | no-op | no-op |
 | `disputed` | recorded only | recorded only | recorded only | recorded only | recorded only | recorded only |
 
@@ -354,10 +383,16 @@ state; columns are the evidence outcome. Every cell is also audited.
   `withdrawal.Complete` allows today.
 - **LF-Q1, ruled by ledger-finance (§21.2):** T13 posts to `player_cash`; no suspense account.
   The ruling holds with LF95-C6, which is written into T7/T13 and §5.1/§5.4 above and below.
+  *[SUPERSEDED for the multiple-success case by §28.7 (ledger-finance
+  `lf-q1-supersession.md`, `17e5ffc`): a second or later matching success for one intent is
+  never posted.]*
+- *[AMENDED by §28.5: the `submitting`/`pending`/`ambiguous` × `succeeded (match)` cells read
+  "T7 (tombstone → T10; intent already resolved → T10 `multiple_success_for_intent`)".]*
 
 ### 4.5 Deposit/payout asymmetry (binding)
 
-- **Deposit failure is money-safe to assume; a late success still posts (T13).** On
+- **Deposit failure is money-safe to assume; a late success still posts (T13).** *[AMENDED by
+  §28: only if it is the intent's first success; otherwise T13d, no posting.]* On
   `not_found`, a deposit moves to `declined` (`decline_stage=at_submission`,
   `reason=not_received`, **`cascadable=false` enforced in code**) only if **all** of these hold
   (LF95-C8):
@@ -453,7 +488,7 @@ All operations share these properties. Idempotency is DB-enforced. Audit goes in
 | Aspect | Specification |
 |---|---|
 | Intent | `deposit_intents` row (unchanged table, status set unchanged). Its status is a projection of its attempts, updated in the same tx as every attempt transition, evaluated in this order: any `succeeded` → `succeeded` (sticky); any `disputed` (and no `succeeded`) → `ambiguous`, never `declined`, because funds may have been captured (LF95-C7); a live attempt that is `ambiguous` → `ambiguous`; any other live attempt → `pending`; none live → `declined`. `failed` stays unused. RG denial keeps today's behaviour: intent → `declined` with `rg_ineligible:*` and no attempt, in phase A. A KYC deposit deny (ADR 0096) is the same shape. |
-| Ledger link (LF95-C6(a)) | Every deposit posting is linked on `payment_attempts.ledger_transaction_id`. `deposit_intents.ledger_transaction_id` is written only while it is NULL (the migration 0082 trigger already forbids repointing it), so it keeps pointing at the **first** posting. Bonus deposit detection (`internal/bonus/deposit_sweep.go`) therefore sees only the first capture; `bonus-engine` confirms that is intended (LF95-R2, §20). |
+| Ledger link (LF95-C6(a)) | Every deposit posting is linked on `payment_attempts.ledger_transaction_id`. `deposit_intents.ledger_transaction_id` is written only while it is NULL (the migration 0082 trigger already forbids repointing it), so it keeps pointing at the **first** posting. Bonus deposit detection (`internal/bonus/deposit_sweep.go`) therefore sees only the first capture; `bonus-engine` confirms that is intended (LF95-R2, §20). *[AMENDED by §28: there is now at most one deposit posting per intent (INV-DEP-1), so the intent link and the succeeded attempt's link always name the same posting.]* |
 | Provider reference | `payment_attempts.provider_reference`: set once by T4, T7 or T9, bounded by `PROVIDER_REF_MAX` (0099), and unique per `(tenant, provider_id)`. `deposit_intents.provider_id/provider_reference` keep mirroring the latest routed attempt for existing readers; `TestMigration0082_DepositIntentsProviderColumnsStayMutable` must keep passing, and a new test asserts the mirror through a cascade (P95-C1). |
 | Idempotency keys | **Player:** `UNIQUE(tenant, player, idempotency_key)` on the intent (exists). A retry **resumes**: it returns the intent; if its live attempt is `created`, the retry drives it (T2 CAS in a per-item tx that first re-runs RG and the KYC deposit gate, then locks the intent and attempt, per ADR 0082 R8; concurrent retries yield exactly one claimant and a stale eligibility is never reused); if `submitting`/`pending`/`ambiguous`, it returns the status (the redirect URL is not persisted; it is re-obtained only by T12 when `IdempotentSubmission`). **External:** `external_idempotency_key = "pa:" + attempt.id`, `merchant_reference = attempt.id` (INV-IO-3). **Ledger:** `(tenant, provider_id, provider_tx_id = provider_reference)` plus `idempotency_key = provider_id:provider_reference` (exists). |
 | Flow (player request) | Phase A0 (read-only tx): load candidates → health filter **outside** the tx (§9.6) → pick a provider. Phase A (**one** tx): RG check and the ADR 0096 KYC deposit gate (a deny commits the intent as `declined` with no attempt) → insert intent plus attempt 1 directly in `submitting` (T1+T2, kill-switch predicate inside the INSERT statement) → commit. There is therefore no player-path `created` row; `created` exists only for cascade rows and NotSent reverts (LF95-C12, CP-D1). Phase B: resolve credential, `Deposit(CallContext, req)`. Phase C: `applyEvidence` (T4/T6/T8/T7), with a synchronous cascade loop (§4.6), each step its own A/B/C. The handler no longer wraps the call in `WithTenant`; `InitiateDeposit` takes `*db.Pool` (INV-IO-1a). |
@@ -508,7 +543,7 @@ PRH-I3), called with operation `withdrawal_payout`. This ADR names it only gener
 | Aspect | Specification |
 |---|---|
 | Intent | None. The reversal is a provider-initiated fact about a `succeeded` deposit attempt. The attempt state does **not** change: the reversal is the ledger's `reverses_transaction_id` fact (Flow 2; PAY-REV-1 L2 lock unchanged). |
-| Reference | The reversal's own `provider_reference` plus `original_provider_reference`. The original is resolved through `payment_attempts (provider_id = verified provider, provider_reference = original_provider_reference)` → **the attempt's** `ledger_transaction_id`, never the intent's; otherwise a reversal of a second capture (T13) would reverse the first (LF95-C6(b)). No matching attempt, or an attempt with no posting, takes the existing tombstone branch. |
+| Reference | The reversal's own `provider_reference` plus `original_provider_reference`. The original is resolved through `payment_attempts (provider_id = verified provider, provider_reference = original_provider_reference)` → **the attempt's** `ledger_transaction_id`, never the intent's; otherwise a reversal of a second capture (T13) would reverse the first (LF95-C6(b)). No matching attempt, or an attempt with no posting, takes the existing tombstone branch. *[AMENDED by §28.6: a second capture is no longer posted, so a reversal naming a T13d/T10 `multiple_success_for_intent` attempt always takes the tombstone branch (no ledger effect). The attempt-own-link rule stays as defence in depth.]* |
 | Idempotency | Existing ledger uniqueness plus INV-PAY-REV-1 (migration 0092) plus the receipt dedupe. |
 | Callback | The same receipt path. An unseen original still writes the tombstone (exists). |
 | Reconciliation | Line kind `deposit_reversal`. |
@@ -605,7 +640,7 @@ the parent lock, and the matrix decides.
 | Callback arrives while the attempt is `submitting` (phase C not yet committed) | With a merchant-reference echo, it resolves by merchant reference (same provider only) and T7/T8 applies. Phase C later finds `succeeded`/`declined`, and its CAS from `submitting` fails. The late sync result is then passed to `applyEvidence` against the new state and is a no-op or anomaly (reference cross-checked). |
 | The same race without a merchant-reference echo | `deferred_unresolved`. Phase C's T4/T9 (which sets `provider_reference`), **in the same tx and holding the parent and attempt locks**, selects deferred receipts for `(provider_id = attempt.provider_id, provider_reference)` and applies them in ascending receipt id (LF95-C9(b)). A receipt is applied **only if `received_at >= attempt.first_submitted_at`** (both from the DB clock); an earlier receipt cannot describe this submission, so it is resolved as `anomaly_predates_submission` and alerts, and is never applied (S95-C3). The sweeper backstop does the same, locking the parent and attempt first. Both orders converge to the same final state. |
 | Callback after timeout (the attempt is `ambiguous`) | T7/T8/T9 per the matrix. This is the normal resolution path. |
-| Callback after the sweeper declined a deposit on an authoritative not-found | T13 (post plus P1). |
+| Callback after the sweeper declined a deposit on an authoritative not-found | T13 (post plus P1). *[AMENDED by §28: only if the intent is not already resolved; otherwise T13d, no posting.]* |
 | Callback for an attempt the platform never sent, from that attempt's own provider | T15 (no post, P1). From any other provider: `anomaly`, no change. |
 | A deferred receipt is never claimed | After the manifest `SettlementWindow` (24 h if undeclared) it raises a P1 "unmatched verified callback" and is reported by the §12 stream as `pay_unresolved` (LF95-C5, S95-C2(ii)). It never creates an attempt. |
 
@@ -1063,6 +1098,11 @@ routes (§10.5).
 
 ### 10.4 Authority
 
+*[PARTLY SUPERSEDED by §30 (AM-1): the first bullet's "and the platform admin API (platform
+scope, §10.5)" and the last bullet ("A platform principal cannot act through the tenant API…")
+are replaced by §30's single dual-scope route family. Engage, release, four-eyes and the
+platform lock are unchanged.]*
+
 - The switch is exposed only on the staff admin API (tenant scope) and the platform admin API
   (platform scope, §10.5). It is never exposed on a player route; a route-table test asserts
   this.
@@ -1079,6 +1119,12 @@ routes (§10.5).
   through the platform API.
 
 ### 10.5 New and changed staff and platform routes (S95-C13)
+
+*[PARTLY SUPERSEDED by §30 (AM-1) for the kill-switch rows only: the separate "Platform admin
+API" table, its `platform_payments_kill_switch:*` permission family, the tenant-route rules
+"No tenant id is taken from the path or body" and "A platform-scoped principal is refused with
+403", and the platform "Target-tenant rule" route location. The T17, attempt read, M3 and
+withdrawal rows are unchanged.]*
 
 **Tenant staff admin API:**
 
@@ -1533,7 +1579,7 @@ For each line, in sorted `(provider_id, provider_reference, kind, line_no)` orde
 
 | Kind | Condition |
 |---|---|
-| `pay_duplicate` | More than one line with the same `(provider_id, provider_reference, kind)` in an import (reported once per key); or more than one `succeeded` attempt for one intent (platform side) |
+| `pay_duplicate` | More than one line with the same `(provider_id, provider_reference, kind)` in an import (reported once per key); or more than one `succeeded` attempt for one intent (platform side) *[AMENDED by §28.9: the platform-side half is now structurally unreachable (migration 0107) and kept as an integrity detector; a new kind `pay_captured_unposted` is added]* |
 | `pay_missing_platform_record` | A line (any status) with no attempt resolvable by `(provider_id, provider_reference)` or `merchant_reference`; or a `deposit_reversal` line with no ledger reversal or tombstone under its reference |
 | `pay_reference_mismatch` | Resolved by merchant reference, but `attempt.provider_reference` is non-NULL and differs |
 | `pay_asset_mismatch` | Asset differs (checked before amount) |
@@ -1589,7 +1635,7 @@ statement — renders the MockProvider's own records, not the platform DB; non-p
 
 | Kind | Remediation path (authoritative mechanisms only) |
 |---|---|
-| `pay_status_mismatch` (provider succeeded) | A `payments`-owned re-drive job (not the reconciliation stream) reads new `pay_status_mismatch` rows and requests T17 on the named attempts, so a dropped success converges without waiting for an operator (LF95-R1, adopted). An operator may also request T17. Either way: `QueryStatus` → matrix → T7/T13 posting through the normal idempotent path. The stream itself still writes nothing. |
+| `pay_status_mismatch` (provider succeeded) | A `payments`-owned re-drive job (not the reconciliation stream) reads new `pay_status_mismatch` rows and requests T17 on the named attempts, so a dropped success converges without waiting for an operator (LF95-R1, adopted). An operator may also request T17. Either way: `QueryStatus` → matrix → T7/T13 posting through the normal idempotent path. The stream itself still writes nothing. *[AMENDED by §28.9: every such posting goes through the INV-DEP-1 choke point, so a re-drive can never post for a resolved intent (T10/T13d instead); T17 never changes a terminal attempt other than `declined`; the re-drive job never acts on `pay_captured_unposted`.]* |
 | `pay_missing_platform_record` | Investigate: the dual-write orphan class this ADR removes, or foreign or forged activity. Credit only via LEDGER-MANUAL-ADJ-4EYES-1 (BLOCKED). |
 | `pay_missing_provider_record`, `pay_amount_mismatch`, `pay_asset_mismatch`, `pay_reference_mismatch`, `pay_duplicate` | Escalate; never auto-resolve (reconciliation-model §2.2(a)); compensation via LEDGER-MANUAL-ADJ-4EYES-1 |
 | `pay_unresolved` | The sweeper is already polling; the escalation (T16) alert is the same incident |
@@ -1694,7 +1740,8 @@ reference in this ADR as swapped.
 `applyDepositSuccessAndPost` links the attempt to `updated.LedgerTransactionID`, which is the
 intent's **first** posting (LF95-C6(a)), not the new one. Result: the verified success is rolled back
 and redelivered forever. `TestPaymentStatement_Kind_DuplicatePlatformSuccess` builds the T13 state
-directly for that reason.
+directly for that reason. *[SUPERSEDED by §28: a second capture is no longer posted, so this
+unique-violation path disappears; the test is inverted per §28.12.]*
 
 #### 12.7.1 Fix round (reviews RV-PRH-I5 code NOT READY / security APPROVE with C1, C2)
 
@@ -2886,7 +2933,9 @@ timing-based fault injection is used anywhere except the one intentional excepti
       not every lease period; a later pass resumes via T2; the M3 path audits `kyc_denied`
       (L3).
     - A reversal of a T13 second capture reverses the second capture, not the first
-      (LF95-C6(b)).
+      (LF95-C6(b)). *[SUPERSEDED by §28.12: re-stated as "a reversal naming the disputed
+      second capture's reference is tombstoned (no ledger effect); a reversal naming the posted
+      capture reverses that attempt's own posting".]*
     - `P95-C1`: `TestMigration0082_DepositIntentsProviderColumnsStayMutable` keeps passing, and
       a new test asserts the intent's provider columns mirror the latest attempt through a
       cascade.
@@ -3133,7 +3182,7 @@ may force-resolve (M1/M2), above what amount four-eyes applies, and whether a pa
 
 | ID | Owner | Ruling | Where written |
 |---|---|---|---|
-| LF-Q1 | `ledger-finance` | T13 posts to `player_cash`; no suspense account (§21.2), with LF95-C6 | §4.3 T13, §4.4 |
+| LF-Q1 | `ledger-finance` | T13 posts to `player_cash`; no suspense account (§21.2), with LF95-C6 *[SUPERSEDED for the multiple-success case by §28.7]* | §4.3 T13, §4.4 |
 | LF-Q2 | `ledger-finance` | A7 accepted; R0 between L0 and L1, with LF95-C9 scope rules (§21.3) | §14 |
 | LF-Q3 | `ledger-finance` | §2.2(b) amendment accepted, with the ledger join LF95-C13 (§21.4) | §12.3, §12.6 |
 | S-Q1 | `security` | Engage single actor; release four-eyes, not relaxed (§22.1) | §10.2, §10.4 |
@@ -3175,7 +3224,9 @@ may force-resolve (M1/M2), above what amount four-eyes applies, and whether a pa
 
 - **In-flight window.** A revoke, rotation or kill switch committed after a claim affects the
   next call, not the one already in flight (ADR 0093 precision 1).
-- **Contradictory providers.** A provider that contradicts itself can still cause a double
+- **Contradictory providers.** *[AMENDED by §28.10: a double deposit capture is still possible
+  at the PSP, but it is never credited; it is held `disputed` and reported as
+  `pay_captured_unposted`. The double-payout (T14) half stands.]* A provider that contradicts itself can still cause a double
   capture (T13) or a double payout (T14). The platform detects it (P1) but cannot prevent the
   provider's own behaviour. Remediation is BLOCKED on HD-0095-1 and
   LEDGER-MANUAL-ADJ-4EYES-1.
@@ -3185,7 +3236,8 @@ may force-resolve (M1/M2), above what amount four-eyes applies, and whether a pa
   criterion.
 - **MOCK reconciliation.** It is single-process and in-memory. Its evidence proves the
   matching and plumbing only, never agreement with any real provider (`MOCK`).
-- **T13 with a sibling already `submitting`.** T13 rejects a `created` sibling, but a sibling
+- *[WITHDRAWN by §28.10: no longer an accepted residual. A third (or any later) real capture
+  takes the same no-credit path as the second.]* **T13 with a sibling already `submitting`.** T13 rejects a `created` sibling, but a sibling
   already `submitting` may still capture a third time; it is detected under the same P1
   (`multiple_success_for_intent`), with remediation BLOCKED on LEDGER-MANUAL-ADJ-4EYES-1
   (LF95-C6(c)).
@@ -3202,12 +3254,14 @@ may force-resolve (M1/M2), above what amount four-eyes applies, and whether a pa
 | **CAS-STMT-IO-1** | Finding, Low, not reachable today | `CasinoStatementSource.Statement(ctx, tx, …)` reads inside the run's transaction. A real casino statement source would be provider I/O inside a tx (the INV-IO-1 class). It must adopt the fetch → ingest → match split of §12.1 before the first real casino statement source; `casino` verifies the remediation (not just a reference) when that source is proposed, with `architect` and `ledger-finance` sign-off (§26). No redesign now. |
 | KYC-SUBMIT-OUTBOX-1 | Deferred, **hard precondition** | Durable KYC submission outbox. No real KYC adapter is accepted without it (IC condition 5). Owner `identity-compliance`. |
 | PAY-ATTEMPT-RETENTION-1 | Deferred | Retention and partitioning of `payment_attempts`/`payment_provider_events`. Trigger: a volume threshold. Binding constraint: never delete receipts of non-terminal attempts, or receipts younger than the longest declared `WebhookRetrySemantics.RetryWindow`; `security` reviews the design (S95-C3). |
-| BONUS-T13-ELIGIBILITY-1 | Confirmation, owner `bonus-engine` | Confirm that a T13 second capture is intentionally not bonus-eligible (the intent link keeps pointing at the first posting) (LF95-R2). |
+| BONUS-T13-ELIGIBILITY-1 | Confirmation, owner `bonus-engine` | Confirm that a T13 second capture is intentionally not bonus-eligible (the intent link keeps pointing at the first posting) (LF95-R2). *[MOOT after §28: a second capture is never posted.]* |
 | VENDOR-INTAKE-REF-PII-1 | Intake item, owner `payments` + `security` | Add to the planning-gate §6 intake checklist: "the vendor's reference formats contain no cardholder or payer-identifying data", and each `NotProcessed` code's documentation source (S95-C10, S95-C12(ii)). |
 | PAY-PAYOUT-CASCADE-1 | Deferred | Product decision: payout cascade. Not needed now. |
 | PROV-REVOKE-ALL-1 | Existing | Cross-tenant kill switch or revoke. |
 
 ### Labels
+
+*[SUPERSEDED by the "Current status" table in the header (revision 4).]*
 
 This ADR is `NOT IMPLEMENTED` in its entirety. After PRH-I1, I2 and I5:
 
@@ -3260,6 +3314,11 @@ PRH-I1/PRH-I5 being labelled `IMPLEMENTED`.** No redesign is needed.
 | #9 same rule for payout dispatch | **Met, subject to the KYC gate** | T1p puts the claim and `approved→submitted` in one tx under L1. Staff double-submit gets `ErrStateConflict` before any call. The L1 lock is no longer held across `Withdraw`. The ADR 0096 C5 placement needs explicit text (LF95-C10). |
 
 ### 21.2 LF-Q1: T13 posts to `player_cash`, not a suspense account
+
+*[SUPERSEDED for the multiple-success case by §28.7, citing `ledger-finance`'s ruling
+`docs/plans/payment-readiness/lf-q1-supersession.md` (`17e5ffc`). T13 as the intent's first
+success still posts to `player_cash`. The text below is kept verbatim as the historical
+ruling.]*
 
 **Ruling: post to `player_cash`. No new account type.**
 
@@ -3391,7 +3450,9 @@ The audit record carries the same value.
   stream reports them as a platform-side kind (reuse `pay_unresolved`, or add one) so a lost
   success is never silent.
 
-**LF95-C6 (T13 and posting integrity; conditions of the LF-Q1 ruling).**
+**LF95-C6 (T13 and posting integrity; conditions of the LF-Q1 ruling).** *[(a) and (b) stand
+as defence in depth; (c)'s "sibling already `submitting`" residual is WITHDRAWN by §28.10; (d)
+stands and takes precedence over the INV-DEP-1 check (§28.4).]*
 
 - (a) Each deposit posting is linked on `payment_attempts.ledger_transaction_id`. The intent's
   `ledger_transaction_id` is written only while it is NULL; the 0082 trigger already forbids
@@ -3524,7 +3585,7 @@ Any miss is a P1 mismatch.
   writes nothing.
 - **LF95-R2.** `bonus-engine` should confirm that a T13 second capture is intentionally not
   bonus-eligible. `deposit_sweep.go` finds deposits via `deposit_intents.ledger_transaction_id`,
-  which LF95-C6(a) keeps pointing at the first posting.
+  which LF95-C6(a) keeps pointing at the first posting. *[MOOT after §28.]*
 - **LF95-R3.** The §9.2 `Amount int64` carries forward the existing platform-wide int64 amount
   path (the same as `ledger.EntryInput`). This is not new here, but it is noted for any
   18-exponent asset routed through `PaymentProvider`. Custody-asset precision stays with ADR 0008
@@ -3834,7 +3895,8 @@ requiring resequencing: the migration-0082 mirror-invariant regression (I1-d/e, 
   a suspense account): `payments` prefers the ADR's stated default — post and raise P1 — over a
   new suspense-account type at this stage, since it keeps the ledger reflecting real received
   funds without adding an account type outside this ADR's scope. This is `ledger-finance`'s
-  decision to make; recorded here only as the requesting domain's preference.
+  decision to make; recorded here only as the requesting domain's preference. *[SUPERSEDED by §28.7: ledger-finance ruled no posting for a
+  second capture; HD-LEDGER-UNALLOC-1 chose (A) now, (B) later.]*
 
 None of these conditions require a redesign of §4–§12; all four are documentation or test
 additions to sections already inside this ADR's scope. Payments sign-off is granted on that
@@ -4620,3 +4682,619 @@ freshly migrated to head (the shared `TEST_DATABASE_URL` run still fails on the 
 disclosed migration-0101 gap, confirmed unrelated). `golangci-lint` (2.9.0,
 `--build-tags=integration --allow-parallel-runners`): 0 issues on every file this round touched.
 
+
+### 27.14 Revision 4 (`architect`, 2026-09-27) — AM-2, the durable-state definition, AM-1 and the status correction
+
+This revision is authorised by the human under the Financial Hardening workstream. It adds
+three sections and corrects the header, and it rewrites no earlier text: each passage it changes
+is kept verbatim with an in-place *[SUPERSEDED / AMENDED by §N]* note.
+
+| New text | What it does | Source of authority |
+|---|---|---|
+| Header "Current status" | Replaces "NOT IMPLEMENTED" with PARTIALLY IMPLEMENTED plus a per-part table and one authoritative migration map | `rv-prh-architect.md` §5–§6 |
+| §28 AM-2 | INV-DEP-1 / PAY-DOUBLE-CREDIT-1: T7 guard, T13 first success only, new T13d, in-flight siblings, migration 0107, reconciliation, audit | Human invariant; `ledger-finance` `lf-q1-supersession.md` (`17e5ffc`); HD-LEDGER-UNALLOC-1 (`079c5f2`); `double-credit-reconciliation.md` |
+| §29 | F-POOL-2 durable-state definition and the operational rules | Human requirement (Financial Hardening) |
+| §30 AM-1 | Kill-switch single dual-scope route family (supersedes parts of §10.4/§10.5) | `security` ruling (`rv-prh-i1-killswitch-security.md`, condition 1); `rv-prh-architect.md` §1 |
+
+---
+
+## 28. Amendment AM-2 — INV-DEP-1: at most one success and one posting per deposit intent (PAY-DOUBLE-CREDIT-1)
+
+- **Status:** ACCEPTED (design). **NOT IMPLEMENTED.** Owner of the state machine: `architect`.
+  Financial invariants, the ledger schema and the accounting treatment are ruled by
+  `ledger-finance` in `docs/plans/payment-readiness/lf-q1-supersession.md` (`17e5ffc`); this
+  section restates those rulings and does not override them. If this section and that ruling
+  ever disagree on a financial point, the ruling governs.
+- **Trigger:** registry PAY-DOUBLE-CREDIT-1 (HIGH); analysis in
+  `docs/plans/payment-readiness/double-credit-reconciliation.md`.
+- **Implementers:** `payments`/`backend` (state machine, choke point), `ledger-finance` (ledger
+  index, sentinel, migration 0107 ledger half), `qa` (§28.12), `security` (§28.11).
+
+### 28.1 The old behaviour and why it is unsafe
+
+The old behaviour, as specified by §4.3 T13 and §21.2 (LF-Q1) and as built:
+
+- **T13** (`declined → succeeded`, deposit) posted Flow 1 to `player_cash` even when another
+  attempt of the same intent had already succeeded. This was the "second capture". It raised P1
+  `multiple_success_for_intent` and wrote `deposit.second_capture_posted`.
+- **T7** (`submitting/pending/ambiguous → succeeded`) posted without checking whether the intent
+  was already resolved. `postDepositSuccess` then took its second-capture branch.
+- **§20** accepted a further residual: a sibling already `submitting` could capture a third
+  time.
+
+Why it is unsafe (`ledger-finance` ruling §1):
+
+1. **One purchase intent is credited more than once.** The player asked to deposit X once and
+   receives 2X or 3X of withdrawable `player_cash`. The P1 arrives after the money can already
+   be wagered or withdrawn. The correction path (LEDGER-MANUAL-ADJ-4EYES-1) is BLOCKED, so
+   "detect and correct" means "detect and hope".
+2. **It confuses evidence with authorization.** A second capture is a PSP or cascade
+   malfunction, or a player paying twice by mistake. It is not an instruction to fund the
+   wallet.
+3. **No concurrency is needed.** A fallback succeeds, then the original's late success
+   arrives. That is purely sequential, so it is a state-machine rule, not a race that locking can
+   fix.
+4. **It trades a recoverable hold for an unrecoverable over-credit,** which is the wrong
+   direction for a fail-closed ledger.
+
+It was introduced by this ADR's F-POOL-2 design. Stage 10.3 under-credited such a capture, but
+never double-credited it (`double-credit-reconciliation.md` §2).
+
+### 28.2 INV-DEP-1 (binding)
+
+> For every `deposit_intents` row there is at most ONE `payment_attempts` row with
+> `operation = 'deposit'` in state `succeeded`, and at most ONE `ledger_transactions` row with
+> `transaction_type = 'deposit'` and `correlation_id = deposit_intents.id`. Once an intent has
+> a succeeded attempt or a deposit posting, it is **financially resolved for ever**. A
+> `deposit_reversal` or a tombstone does not reopen it. A verified provider success never, by
+> itself, authorizes a posting for a financially resolved intent.
+
+**Definition used by every check below.** For an intent `I`, a candidate attempt `A` (NULL on
+the legacy intent-without-attempt path) and a candidate ledger idempotency key `K`
+(`provider_id:provider_reference`):
+
+```
+resolved_for_other(I, A, K) :=
+     EXISTS (SELECT 1 FROM payment_attempts
+              WHERE tenant_id = I.tenant_id AND deposit_intent_id = I.id
+                AND operation = 'deposit' AND state = 'succeeded'
+                AND id IS DISTINCT FROM A)
+  OR EXISTS (SELECT 1 FROM ledger_transactions
+              WHERE tenant_id = I.tenant_id AND transaction_type = 'deposit'
+                AND correlation_id = I.id AND idempotency_key <> K)
+```
+
+An exact redelivery of the posting success (same attempt, same `K`) is therefore **not**
+"resolved for other". It keeps today's replay semantics: `succeeded × succeeded(match)` is a
+no-op in the matrix, and `ledger.Post` returns `AlreadyPosted`.
+
+**Contract amendment (binding; `ledger-finance` ruling §3(ii)).** For
+`transaction_type = 'deposit'`, `correlation_id` IS the `deposit_intents.id`. Any future deposit
+vehicle not driven by an intent must mint a real intent first, or use a distinct
+`transaction_type`. An example is unsolicited crypto deposits to a custodial address (ADR 0008).
+`architect` records this as a precondition on the ADR 0008 custody deposit design.
+
+### 28.3 Single choke point
+
+`(*Orchestrator).postDepositSuccess` (`internal/payments/orchestrator.go`) is the only
+production `TxDeposit` poster (`ledger-finance` checked every `ledger.TxDeposit` use). Every
+caller already holds `deposit_intents … FOR UPDATE`:
+
+- the receipt path (T7, T13);
+- phase C (`drive.go`);
+- the sweeper poll;
+- T17 re-drive;
+- the legacy `InitiateDeposit`.
+
+Rules:
+
+1. **Check order inside the evidence application**, all in the same tx and under the intent
+   lock (the existing ADR 0082 A7 order: parent → attempt; no new lock):
+   1. the §4.4 preconditions (provider binding, reference conflicts);
+   2. amount/asset mismatch → T10 (mismatch reasons, unchanged);
+   3. **tombstone** on `(provider_id, provider_reference)` → T10/T13t
+      `reversal_tombstone_precedes_success` (unchanged, LF95-C6(d));
+   4. **`resolved_for_other(I, A, K)` → the no-post branch (§28.4)**;
+   5. otherwise post (Flow 1) and apply T7/T13.
+
+   The tombstone check precedes the INV-DEP-1 check deliberately. A tombstone means the PSP
+   reversed that capture, which nets to zero, so it must not be reported as
+   `pay_captured_unposted` (§28.9).
+2. `postDepositSuccess` itself re-evaluates `resolved_for_other` immediately before
+   `ledger.Post`. On true it posts nothing and returns the typed sentinel
+   **`payments.ErrDepositIntentAlreadyResolved`**. The check in 1.4 and this re-check are the
+   same predicate. The re-check exists so that no caller, including the legacy path and any
+   future one, can reach `ledger.Post` for a resolved intent.
+3. **Caller mapping of `ErrDepositIntentAlreadyResolved`, and of the ledger backstop sentinel
+   `ledger.ErrDepositAlreadyPostedForIntent` (§28.8):**
+
+   | Caller | Mapping |
+   |---|---|
+   | T7 site (receipt, phase C, sweeper, T17) | T10 → `disputed`, `multiple_success_for_intent` (§28.4) |
+   | T13 site (receipt, sweeper, T17) | T13d → `disputed`, `multiple_success_for_intent` (§28.4) |
+   | Legacy `InitiateDeposit` (no attempt row) | Returns the sentinel. Nothing is posted and nothing is committed for the success. P1 plus a `deposit.multiple_success_refused` audit row in a separate tx. The legacy path stays scheduled for removal (security P2-L2); it must never post for a resolved intent. |
+
+   The ledger sentinel reaching any caller means the choke point was bypassed. It gets the
+   same mapping plus an additional P1 `deposit_intent_index_backstop_fired` (a defect signal).
+4. **Deleted:** the `if intent.Status == DepositIntentSucceeded { … "deposit.second_capture_posted" … }`
+   branch of `postDepositSuccess`.
+   - After rule 2 it is dead code.
+   - The only way to reach it with `AlreadyPosted` is an exact replay, which returns the
+     existing transaction id unchanged.
+   - The audit action name `deposit.second_capture_posted` is retired and must never be reused.
+   - No test asserts it (`ledger-finance` ruling §5).
+
+### 28.4 Transitions: T7 guard, T13 first success only, new T13d
+
+These rows replace the corresponding §4.3 rows. They are the implementation spec. Both T10 and
+T13d are committed with their receipt: no error, no rollback, no 5xx loop (LF95-C3).
+
+| T | From → To | Trigger / evidence | CAS guard (in addition to `id = $1`) | Ledger / domain effect (same tx) | Audit |
+|---|---|---|---|---|---|
+| T7 (amended) | `submitting`/`pending`/`ambiguous` → `succeeded` | Verified matching success from the attempt's own provider, with a provider reference, **and, for a deposit, `NOT resolved_for_other(I, A, K)`** | `state = ANY('{submitting,pending,ambiguous}')`; trigger `last_evidence_kind ∈ {sync, callback, query_status}`; DB backstop: `payment_attempts_one_succeeded_deposit_per_intent` | Unchanged (Flow 1 posting, attempt link, intent link while NULL, intent → `succeeded`, `created` siblings → T3 `intent_succeeded`). Payout unchanged. | `deposit.posted`, `payment.attempt_succeeded` |
+| T10 (amended) | `submitting`/`pending`/`ambiguous` → `disputed` | Existing causes **plus**: deposit matching success while `resolved_for_other(I, A, K)` (the T7 guard) | `state = ANY('{submitting,pending,ambiguous}')`; `terminal_reason = 'multiple_success_for_intent'` for the new cause | **No posting.** The attempt stores the matched provider reference (and the evidence's amount/asset already equal the attempt's). P1. The intent stays `succeeded` (§5.1 projection: any succeeded → succeeded). | `payment.attempt_disputed` (§28.11) |
+| T13 (amended) | `declined` → `succeeded` | **Deposit only.** Verified matching success after a decline, **only if `NOT resolved_for_other(I, A, K)`**, i.e. this is the intent's FIRST success | `state='declined' AND operation='deposit'`; DB backstop as T7 | Flow 1 to `player_cash` (the first and only posting); intent link set (it was NULL); intent → `succeeded`; `created` siblings → T3 `intent_succeeded`; P1 `contradictory_provider_outcome`. In-flight siblings: §28.6. Tombstone → T13t (unchanged). | `payment.attempt_succeeded_after_decline`, `deposit.posted` |
+| **T13d (new)** | `declined` → `disputed` | **Deposit only.** Verified matching success after a decline while `resolved_for_other(I, A, K)` | `state='declined' AND operation='deposit'`; `terminal_reason='multiple_success_for_intent'`; trigger `last_evidence_kind ∈ {sync, callback, query_status}` | **No posting, no error, no rollback.** P1 `multiple_success_for_intent`. On the callback path: an `anomaly` receipt, resolved with `attempt_id`, answered with the uniform 200 (§6.2). On a poll (sweeper/T17): no receipt, audit and P1 only. The attempt sits in the M1 queue (BLOCKED) and is reported by `pay_captured_unposted` (§28.9). | `payment.attempt_disputed` (§28.11) |
+
+**Forbidden-list amendment (trigger, migration 0107):**
+- deposit `declined → disputed` is allowed only with `terminal_reason ∈
+  {reversal_tombstone_precedes_success, multiple_success_for_intent}`;
+- payout `declined → disputed` (T14) is unchanged.
+
+The "at most one succeeded deposit attempt per intent" half is enforced by the partial unique
+index (§28.8), not by the trigger.
+
+**T14/payout:** unchanged. A payout has exactly one attempt per withdrawal, so INV-DEP-1 has no
+payout analogue.
+
+### 28.5 §4.4 matrix rows (replacing the deposit cells of the `succeeded (match)` column)
+
+| Current \ Evidence | `succeeded` (match), deposit |
+|---|---|
+| `created` | T15 → `disputed` (unchanged) |
+| `submitting` | tombstone → T10 (`reversal_tombstone_precedes_success`); else resolved-for-other → **T10 (`multiple_success_for_intent`)**; else T7 |
+| `pending` | same as `submitting` |
+| `ambiguous` | same as `submitting` |
+| `succeeded` | no-op (exact duplicate; `ledger.Post` idempotent) |
+| `declined` | tombstone → T13t; else resolved-for-other → **T13d**; else T13 (first success) |
+| `rejected` | T15 (unchanged) |
+| `disputed` | recorded only (unchanged; includes `multiple_success_for_intent` attempts) |
+
+Every other cell of §4.4 is unchanged. The dispositions:
+- **T10 and T13d from a callback:** `anomaly` (uniform 200 after durable receipt, §6.2).
+- **A plain replay onto an already-disputed attempt:** `duplicate_effect`.
+
+### 28.6 In-flight siblings (and reversals)
+
+1. **At the success that resolves the intent (T7 or T13):**
+   - `created` siblings → T3 `intent_succeeded` (unchanged).
+   - `submitting`/`pending`/`ambiguous` siblings are **not** force-transitioned, because the
+     provider may still capture them. They keep their `next_action_at` and are polled normally.
+     - T12 is already refused for them (`NOT EXISTS(succeeded attempt for the same intent)`).
+     - Their later matching success hits the T7 guard → T10 `multiple_success_for_intent`.
+     - Their later decline → T8 `declined`. Cascade is ineligible because the intent is
+       `succeeded` (§4.6).
+     - Their timeout → escalation (T16) as today.
+2. **Cascade** never creates a new attempt for a resolved intent (§4.6, unchanged). T2's
+   `NOT EXISTS(succeeded attempt)` CAS predicate stays.
+3. **Reversals:**
+   - A `deposit_reversal` naming the posted attempt's reference reverses that attempt's own
+     posting (LF95-C6(b), unchanged).
+   - A reversal naming a `multiple_success_for_intent` attempt's reference resolves an attempt
+     with `ledger_transaction_id IS NULL`. It therefore takes the **tombstone** branch: no ledger
+     effect, net zero at the PSP. That is correct under HD-LEDGER-UNALLOC-1 (A) (`ledger-finance`
+     ruling §2.2).
+   - A reversed deposit still occupies the INV-DEP-1 slot. A later sibling success after a
+     reversal is T10/T13d, never a fresh credit.
+4. **Lock order:** unchanged (ADR 0082 A7). All checks run under the parent → attempt locks the
+   evidence tx already holds. The ledger index is an L4-class insertion under `ledger.Post`'s
+   existing savepoint. No new lock class or exception.
+
+### 28.7 §21.2 LF-Q1 supersession
+
+`ledger-finance`'s ruling `docs/plans/payment-readiness/lf-q1-supersession.md` (commit
+`17e5ffc`, §1) supersedes §21.2 **for the multiple-success case only**:
+- a second or later matching success on a financially resolved intent is never posted to
+  `player_cash`;
+- T13 as the intent's first success still posts to `player_cash`, and §21.2's reasoning stands
+  for it;
+- LF95-C6 (a), (b) and (d) stand;
+- the (c) residual is withdrawn (§28.10).
+
+A matching success remains evidence that real money moved. What changes is the consequence: it
+is evidence to be **accounted for** (§28.13), not a credit. §21.2 is kept verbatim with an
+in-place note.
+
+### 28.8 Migration impact — migration 0107 (both backstops, ruled by `ledger-finance` §3)
+
+Migration **0107** (number to be recorded in the registry allocation line by the orchestrator).
+One reviewed change: `ledger-finance` owns the ledger half, `payments` the attempts half.
+Contents:
+
+1. **`payment_attempts_one_succeeded_deposit_per_intent`:** `CREATE UNIQUE INDEX … ON
+   payment_attempts (tenant_id, deposit_intent_id) WHERE operation = 'deposit' AND state =
+   'succeeded'`. It enforces the state-machine half of INV-DEP-1 for every transition source,
+   including a future M1 `disputed → succeeded` on a resolved intent.
+2. **`ledger_transactions_one_deposit_per_intent`:** `CREATE UNIQUE INDEX … ON
+   ledger_transactions (tenant_id, correlation_id) WHERE transaction_type = 'deposit'`. It is
+   required because the legacy path posts with no attempt row, `postDepositSuccess` posts
+   **before** `ApplySuccess`, and only the ledger is authoritative for money. Reversals
+   (`deposit_reversal`), tombstones (`tombstone`, random correlation id) and any future
+   HD-LEDGER-UNALLOC-1 (B) posting (distinct type) are outside the predicate.
+3. **`CREATE OR REPLACE FUNCTION payment_attempts_guard()`:** the deposit
+   `declined → disputed` branch accepts `terminal_reason ∈ {reversal_tombstone_precedes_success,
+   multiple_success_for_intent}` (T13d). Nothing else in the 0101 body changes.
+   - **Project rule** (`rv-prh-architect.md` §5): every behaviour test of `payment_attempts_guard`
+     (`internal/payments/migration_0101_integration_test.go` and siblings) must run against a
+     HEAD-migrated scratch DB in the same change. Only tests of 0101's own up/down history may
+     stay pinned, and each must say so.
+4. **`reconciliation_mismatches_mismatch_kind_check`:** a strict superset of 0102's list, plus
+   `'pay_captured_unposted'`.
+
+**Fail-closed pre-flights (no bypass).**
+- **Pattern: 0092's, not a `SELECT … GROUP BY` pre-check.** Each index build is itself the
+  check, inside `DO $$ BEGIN CREATE UNIQUE INDEX …; EXCEPTION WHEN unique_violation THEN RAISE
+  EXCEPTION '<runbook text>'; END $$`.
+- **Why:** both tables carry `FORCE ROW LEVEL SECURITY` and the migration connection sets no
+  `app.tenant_id`, so a `SELECT` pre-check would see zero rows and let duplicates through (the
+  migration 0048 / 0092 lesson). An index build scans every row regardless of RLS.
+- **Runbook text:**
+  - attempts index: "more than one succeeded deposit attempt exists for a deposit intent";
+  - ledger index: "more than one deposit posting exists for a deposit intent";
+  - both: "never delete ledger or attempt rows; escalate to the human; synthetic dev/scratch
+    databases produced by pre-§28 T13 tests are the expected place this refuses, so recreate
+    them".
+- `ledger-finance`'s ruling phrased the ledger pre-flight as a `GROUP BY … HAVING count(*) > 1`
+  query. That query is the **diagnostic the runbook tells the operator to run** (as a role that
+  sees all tenants), not the migration's gate.
+
+**Reversible.** `0107….down.sql`:
+- drops both indexes;
+- restores 0101's `payment_attempts_guard()` body verbatim;
+- restores 0102's kind CHECK. If `pay_captured_unposted` rows exist, the CHECK restore fails
+  closed with a clear message. It is wrapped like the index builds, never by deleting rows.
+
+Rolling back leaves any `multiple_success_for_intent` attempts in place (append-only history).
+The restored trigger does not re-validate existing rows.
+
+**`ledger.ErrDepositAlreadyPostedForIntent`** (new, `internal/ledger`), following the 0092
+`ErrReversalAlreadyExists` pattern exactly:
+- a constant `ledgerOneDepositPerIntentConstraint = "ledger_transactions_one_deposit_per_intent"`;
+- in `Post`'s conflict path, **the idempotency key is looked up first** (the P2-A rule). An
+  existing row under the same key is a replay: `AlreadyPosted`, or payload mismatch, exactly
+  as today.
+- The sentinel is returned **only** when no row exists for the request's key **and** the
+  reported constraint is this index.
+- `db.IdempotentInsert`'s savepoint leaves the tx usable, so the caller can commit T10/T13d in
+  the same tx (§28.3 rule 3).
+
+**Attempt-index violation.** It happens only if the choke point and the ledger index were both
+bypassed. The `ApplySuccess` UPDATE is not in a savepoint, so the tx aborts: 5xx, nothing
+committed, fail closed, P1 on the error class.
+
+**Fixture that must change (not the index):** `internal/idempotency/integration_test.go`
+`TestIntegration_LegitimateSecondOccurrenceDoesNotCollapse`. It must give each occurrence its
+own correlation id (`ledger-finance` ruling §3).
+
+### 28.9 Reconciliation impact
+
+- **New kind `pay_captured_unposted`** ("provider captured, platform disputed, not posted").
+  - Emitted for each attempt with `state = 'disputed' AND terminal_reason =
+    'multiple_success_for_intent'`, when all of these hold:
+    - the statement line for it (if any) is `succeeded`;
+    - there is no `deposit_reversal` line naming its reference;
+    - no ledger tombstone holds `(provider_id, provider_reference)`.
+  - It is reported on **every** run until it clears (ageing, with amount and asset in the
+    mismatch row, never in log lines).
+  - It clears when a reversal or tombstone appears (the PSP refunded), or when M1/allocation
+    occurs (BLOCKED).
+  - `reversal_tombstone_precedes_success` disputes are excluded (net zero at the PSP).
+  - `matchPayment` must stop skipping `disputed` attempts **for this reason code only**. Other
+    disputed attempts remain payments-owned P1s, not reconciliation rows.
+  - Remediation (§12.5 row): escalate; never auto-resolve; **never** a T17/re-drive trigger.
+- **`pay_duplicate` / `checkPlatformDuplicates` is kept as an integrity detector.** After
+  migration 0107 the platform-side half is structurally unreachable for new data. Any occurrence
+  means an index was dropped or the data predates 0107: a P1 integrity alert. The ledger-join
+  `pay_missing_platform_record` "maps to more than one succeeded attempt" branch is likewise
+  kept as a detector.
+- **T17 / `pay_status_mismatch` re-drive (§12.5, LF95-R1 when built):**
+  - evidence only: `QueryStatus` → §28.5 matrix → the §28.3 choke point, so it can never post
+    for a resolved intent;
+  - **T17 never state-changes a terminal attempt** except `declined` (T13 first success or
+    T13d). On `succeeded`, `disputed` and `rejected` it is a read-only re-verify whose result is
+    recorded as evidence for the M1 queue;
+  - the re-drive job must not select `pay_captured_unposted` rows.
+- **Under HD-LEDGER-UNALLOC-1 (B), later:** the kind becomes "unallocated receipt still open",
+  and the ledger join (LF95-C13) must include the (B) postings mapped to their disputed attempt.
+- `docs/architecture/reconciliation-model.md` gains the kind. `ledger-finance` edits it.
+
+### 28.10 §20 residuals
+
+- **Withdrawn:** "T13 with a sibling already `submitting` may still capture a third time", and
+  "a second capture posts". Neither is an accepted residual any more. A third or later real
+  capture takes the same no-credit path (T10/T13d) as the second.
+- **Stands, re-worded:** a self-contradicting PSP can still **capture** twice at the PSP; the
+  platform cannot prevent that. It is never credited, and it stays visible as `disputed` plus
+  `pay_captured_unposted` until refunded. The refund is PSP-initiated: platform-initiated refund
+  is NOT IMPLEMENTED (§5.5), and dispute resolution is BLOCKED (HD-0095-1,
+  LEDGER-MANUAL-ADJ-4EYES-1).
+- The payout T14 residual is unchanged.
+
+### 28.11 Audit impact
+
+- **T10 and T13d with `multiple_success_for_intent`:** `payment.attempt_disputed` in the same tx.
+  - Metadata: `terminal_reason`, `last_evidence_kind`, `provider_id`, `provider_reference`,
+    `deposit_intent_id`, the succeeded sibling's attempt id (NULL if the resolution came from a
+    legacy posting), and the existing deposit `ledger_transaction_id`.
+  - Actor: `system` (callback or sweeper), or the named system principal (re-drive), or staff
+    (T17).
+- **P1 alert:** a structured, allow-listed Error-level log line
+  `payments_multiple_success_for_intent_alert`. It carries tenant, intent and attempt ids only:
+  **no amounts, no references in the log line** (security S-5). Delivery beyond the log line is
+  NOT IMPLEMENTED, the same status as the kill-switch alert.
+- **Backstop fired:** an additional `payments_deposit_intent_index_backstop_fired` P1 log line.
+- **Legacy path refusal:** `deposit.multiple_success_refused` (separate tx; §28.3).
+- **Retired:** `deposit.second_capture_posted` (§28.3 rule 4).
+- **The uniform 200 discloses nothing** (S95-C4). The disposition lives only in the receipt,
+  the audit record and metrics.
+
+### 28.12 Tests (for `qa`; invert, never delete)
+
+The binding lists are `ledger-finance` ruling §5 (items 1–5, and "new tests required") and
+`double-credit-reconciliation.md` §5 (matrix A–O). Every scenario ends with
+`SUM(debits) == SUM(credits)`, projection == rebuild, audit asserted, and **at most one
+`deposit` posting per intent** (INV-IO-13 + INV-DEP-1).
+
+Architect additions:
+- **Choke-point placement:** the T10 guard reached from each of receipt, phase C, sweeper poll
+  and T17, one test each.
+- **Precedence:** tombstone plus resolved intent → `reversal_tombstone_precedes_success`, not
+  `multiple_success_for_intent`, and no `pay_captured_unposted`.
+- **Exact redelivery:** replay of the posted success after 0107 → `duplicate_effect`, one
+  posting, **not** T10.
+- **Trigger:** a deposit `declined → disputed` with any other `terminal_reason` is refused (run
+  against HEAD).
+- **Migration 0107:**
+  - up/down/up on a clean scratch DB;
+  - up refuses on a DB seeded, below 0107, with two succeeded attempts for one intent, and
+    separately with two deposit postings sharing a correlation id, in each case with a
+    non-privileged role so RLS is in force;
+  - down refuses while a `pay_captured_unposted` row exists.
+- **Mutation kills:**
+  - drop the choke-point check;
+  - drop the re-check inside `postDepositSuccess`;
+  - drop each index;
+  - swap the tombstone/INV-DEP-1 order;
+  - let T17 act on a terminal non-`declined` attempt;
+  - remove `pay_captured_unposted` emission.
+- **§16.2 item 19** ("a reversal of a T13 second capture…") is re-stated per §28.6 point 3.
+
+`payments` re-states the PRH-I5 T13 mutant in `evidence/prh-i1-mutation-kill.txt` against the
+inverted tests.
+
+### 28.13 HD-LEDGER-UNALLOC-1 — "A now, B later" (human decision, 2026-09-27, registry `079c5f2`)
+
+- **Now (A), and this is what §28 specifies:** the second real capture is held off-ledger as a
+  `disputed` attempt. There is no posting of any kind, a P1, audit, and `pay_captured_unposted`.
+  The player is never credited. The ledger is deliberately incomplete for these receipts until
+  (B), and each case is a standing, reported reconciliation exception. This is the accepted
+  cost of (A).
+- **Later (B), deferred as LEDGER-SUSPENSE-B-1** (`ledger-finance`, separately authorised
+  stage; NOT IMPLEMENTED, not in scope here):
+  - a new unallocated/suspense liability account type and a distinct non-`deposit`
+    `transaction_type`, so INV-DEP-1's ledger index is untouched;
+  - the reversal path mirrors those postings instead of debiting `player_cash`;
+  - a one-time forward-only backfill of one posting per unrefunded
+    `multiple_success_for_intent` attempt, keyed `unallocated:<provider_id>:<provider_reference>`.
+
+  (A) was chosen as the interim because it writes no ledger rows, so moving to (B) needs no
+  compensating entries.
+- **Unchanged and still BLOCKED:** resolving the dispute (M1, HD-0095-1), allocating to the
+  player (LEDGER-MANUAL-ADJ-4EYES-1), and platform-initiated refund (§5.5).
+
+### 28.14 Consumers unaffected (checked by `ledger-finance`)
+
+- **Bonus** (`internal/bonus/deposit_sweep.go` joins `deposit_intents.ledger_transaction_id`):
+  no change; it only ever saw the first posting.
+- **KYC `sumSettledDeposits`:** it stops over-counting second captures. This is a correction,
+  not a regression.
+- **Tenant isolation:** unchanged. Every check runs inside the evidence tx's `WithTenant`, and
+  cross-tenant evidence is refused at binding (INV-IO-14).
+
+---
+
+## 29. F-POOL-2 durable states — definition (human requirement, Financial Hardening)
+
+This section defines the durable states the human named. Each maps onto the **existing**
+schema: the 8 `payment_attempts` states (§4.1), the `deposit_intents` projection (§5.1) and the
+`withdrawal_requests` states (§4.7). **No new DB state is introduced.** "Reconciliation-required"
+is a derived predicate, not a column (§29.2).
+
+### 29.1 State map
+
+| Durable state (human) | Deposit: attempt state (+ columns) | Deposit: intent projection | Payout: attempt / withdrawal | Terminal? |
+|---|---|---|---|---|
+| **intent** | The committed `deposit_intents` row plus an attempt committed **before** any call (INV-IO-2): `created` (cascade row or NotSent revert; `ever_possibly_sent = false`), or `submitting` from the player path's T1+T2 phase-A commit | `pending` | Withdrawal `approved` (approved to pay; no attempt yet). The T1p commit creates the attempt in `submitting`. | no |
+| **submitted** | `submitting` with a committed `claim_token`, `first_submitted_at`/`last_sent_at` set. The provider **may** hold it. | `pending` | Attempt `submitting`; withdrawal `submitted` | no |
+| **accepted** | `pending` with `accepted_at` set and a `provider_reference` (T4/T9). Provider-neutrally identical to "pending" (§4.1). | `pending` | Attempt `pending`; withdrawal `submitted` | no |
+| **pending** | `pending` (as accepted). "Pending" at the **intent** level means "some live attempt, outcome unknown and not ambiguous". | `pending` | as accepted | no |
+| **succeeded** | `succeeded`, posted in the same tx (INV-IO-5/6). **At most one per intent (INV-DEP-1, §28).** | `succeeded` (sticky) | Attempt `succeeded`; withdrawal `completed` (Flow 3 Step B) | yes |
+| **failed** | `declined` with `decline_stage = 'after_acceptance'` | `declined` (when none live; the intent status `failed` stays unused, §5.1) | Attempt `declined` → withdrawal `failed` (T8 `withdrawal.Fail`), or M3 from `created` | yes* |
+| **declined** | `declined` with `decline_stage = 'at_submission'` (provider refused, or a §4.5 authoritative not-found). Platform-side refusal before any call is `rejected` (never sent). | `declined` (none live) | Attempt `declined`; withdrawal `failed`. Pre-dispatch KYC deny: withdrawal `rejected`, no attempt (W-KYC). | yes* |
+| **ambiguous** | `ambiguous` (`ever_possibly_sent = true`); never a failure, never a success | `ambiguous` | Attempt `ambiguous`; withdrawal `submitted` | no |
+| **disputed** | `disputed` with a `terminal_reason` (mismatch, reference conflict, `reversal_tombstone_precedes_success`, `multiple_success_for_intent`, T15). Exit is manual only (M1/M2, BLOCKED). | `ambiguous` if nothing succeeded; `succeeded` if another attempt did | Attempt `disputed`; withdrawal `submitted` (T10) or `failed` (T14: the double payout already happened) | yes (for automation) |
+| **reconciliation-required** | Derived: §29.2 | — | Derived: §29.2 | n/a |
+
+\* `declined` is terminal for automation. Only verified matching success evidence moves a
+deposit out of it: T13 as the first success, or T13d/T13t to `disputed`. A payout leaves it
+only through T14.
+
+### 29.2 "Reconciliation-required" (derived; no new column)
+
+An attempt is **reconciliation-required** when any of these holds:
+
+- **(R1)** `state = 'disputed'` (any `terminal_reason`). This is the M1/M2 queue.
+- **(R2)** it is non-terminal and `escalated_at IS NOT NULL` (T16: past the `SettlementWindow`,
+  or a gate-blocked payout `created`).
+- **(R3)** it is named by a `pay_*` row of the tenant's **latest completed** `payment_statement`
+  reconciliation run. This includes `pay_captured_unposted`, `pay_status_mismatch`,
+  `pay_unresolved` and every mismatch kind.
+- **(R4)** it has a verified receipt still unresolved after the `SettlementWindow` (the §6.4 P1).
+
+(R1) and (R2) are durable attempt columns. (R3) and (R4) are durable in
+`reconciliation_mismatches` and `payment_provider_events`. So the predicate is fully
+reconstructible from the DB after a crash, with nothing in memory.
+
+A read-only SQL view or staff API exposing this predicate is a `RECOMMENDATION` (NOT
+IMPLEMENTED), to be built with the M1 queue. It is not a new state, and nothing may write it.
+
+### 29.3 Rules
+
+- **No external call inside the authoritative financial tx.** Every provider call runs in phase
+  B with no DB transaction, no pooled connection, no row, advisory or projection lock held
+  (D1, INV-IO-1 (a)–(d), INV-IO-5). Phase A commits the intent to call; phase C applies evidence
+  under CAS in a short tx that holds the ADR 0082 locks and reads the authoritative balance in
+  that same tx. The sequence "tx → provider call succeeds → tx rolls back → customer charged,
+  platform unaware" is impossible: the committed attempt row exists before the call, and phase C
+  and the sweeper converge it.
+- **Idempotency.**
+  - Player: `UNIQUE(tenant, player, idempotency_key)` on the intent; a retry resumes the intent.
+  - External: `merchant_reference = attempt.id`, `external_idempotency_key = "pa:" + attempt.id`,
+    identical on every send (INV-IO-3).
+  - Ledger: `(tenant, provider_id, provider_tx_id)` plus `idempotency_key = provider_id:provider_reference`.
+  - Per intent: INV-DEP-1 (migration 0107).
+  - Callbacks: receipt dedupe `(tenant, provider_id, event_fingerprint)`.
+  - Every state change is one CAS, so a replay is a no-op.
+- **Retries.**
+  - `NotSent` → T5, same attempt, first send only.
+  - `Ambiguous`/`NotProcessed` → never a blind resend; only T12 (same key, manifest
+    `IdempotentSubmission`, `submit_count < max_resubmits`, never for a resolved intent).
+  - A decline is never retried. Cascade creates a **new** attempt (§4.6).
+  - Phase C itself is retryable at any time (CAS).
+- **Callbacks.**
+  - Verified, bound to the verified provider (INV-IO-14), durably receipted in the same tx as
+    their effect (INV-IO-10), applied through the single §4.4 matrix.
+  - Never a provider call, never a new attempt except the cascade row.
+  - Unresolvable-yet callbacks are deferred (capped) and applied later only if received after
+    first submission (§6.4).
+- **Timeout.**
+  - Before dispatch: `NotSent`.
+  - After a possible dispatch: `ambiguous` (T6), **never a failure** for a payout and never a
+    success for anything.
+  - No outcome within the `SettlementWindow`: escalation (T16, reconciliation-required R2), not a
+    state change.
+- **Late success.**
+  - On `ambiguous`/`pending`/`submitting`: T7, or T10 if the intent is already resolved (§28).
+  - On a deposit `declined`: T13 only as the intent's first success, else T13d; tombstone → T13t.
+  - On a payout `declined`: T14 (P1).
+  - On `created`/`rejected`: T15.
+  - A late success never credits a resolved intent (INV-DEP-1).
+- **Fallback (cascade).** Deposits only, and only after a **definite** decline:
+  - `cascadable = true`;
+  - `attempt_no < MaxCascadeDepth`;
+  - the intent is not `succeeded`;
+  - no other live attempt;
+  - the kill switch is not engaged;
+  - either a synchronous decline or a non-interactive attempt.
+
+  Never after `ambiguous`, `not_found` or a timeout. A fallback that succeeds resolves the
+  intent. The original's later success is T13d/T10 (§28.6). No payout cascade.
+- **Reconciliation.**
+  - It detects, never remediates (INV-IO-12; §12.5). Remediation happens only through fresh
+    provider evidence applied by the state machine (T17 → the choke point) or through
+    LEDGER-MANUAL-ADJ-4EYES-1 (BLOCKED).
+  - `pay_captured_unposted` keeps every held real capture visible (§28.9).
+
+---
+
+## 30. Amendment AM-1 — one dual-scope route family for the payment kill switch (supersedes parts of §10.4/§10.5)
+
+- **Status:** ACCEPTED. Recorded at `security`'s request (`rv-prh-i1-killswitch-security.md`,
+  "Ruling on the route deviation", condition 1). Drafted in `rv-prh-architect.md` §1.
+- **Supersedes:**
+  - §10.4 bullet 1's "tenant scope … and the platform admin API (platform scope, §10.5)";
+  - §10.4 last bullet ("A platform principal cannot act through the tenant API, and a tenant
+    principal cannot act through the platform API");
+  - §10.5's "Platform admin API" table and its `platform_payments_kill_switch:*` permission
+    family;
+  - §10.5's tenant-route rules "A platform-scoped principal is refused with 403" and "No tenant
+    id is taken from the path or body" (kill-switch routes only);
+  - the platform "Target-tenant rule" route location.
+- **What stands:** everything else in §10.3–§10.5:
+  - engage is single-actor with a reason code;
+  - release is four-eyes, with approve-and-release in one tx;
+  - a platform-engaged row is read-only to tenants;
+  - the switch is never exposed on a player route;
+  - OpenAPI is pinned by a conformance test.
+
+  Read every "0102/0103 kill switch" reference as migration **0105**, with its three guard
+  functions as **redefined by migration 0106**.
+
+**Routes (the only kill-switch surface).** All are under `/v1/admin/tenants/{tenantID}/payments/`:
+
+| Operation | Route | Permission |
+|---|---|---|
+| List | `GET kill-switches` | `payments_kill_switch:read` |
+| Read | `GET kill-switches/{killSwitchID}` | `payments_kill_switch:read` |
+| Engage | `POST kill-switches` | `payments_kill_switch:engage` |
+| Request release | `POST kill-switches/{killSwitchID}/release-requests` | `payments_kill_switch:release` |
+| Read request | `GET kill-switch-release-requests/{requestID}` | `payments_kill_switch:read` |
+| Approve (+ release, one tx) | `POST kill-switch-release-requests/{requestID}/approve` | `payments_kill_switch:release` |
+| Cancel request | `POST kill-switch-release-requests/{requestID}/cancel` | `payments_kill_switch:release` |
+
+The three permissions are granted only to `platform_admin` and `tenant_admin`.
+
+**Scope derivation (normative).**
+
+1. The acting scope comes only from the authenticated token. `TenantID == nil` means platform
+   scope. Anything else means tenant scope. The path `{tenantID}` is never a source of scope.
+2. *Tenant principal.* `{tenantID}` must equal the token's tenant, or the call gets 403 plus a
+   denied audit row in the caller's own scope. The transaction runs under
+   `WithPrincipalScope(<token tenant>, principal)`, never the path value.
+   - As of this revision, the `<token tenant>` rule is implemented on the unmerged branch
+     `ea7910a` (`TestRunKillSwitchTx_UsesAuthenticatedTenantNeverThePathValue`).
+   - On this branch the path value is used, after `canActOnTenant` has proven it equal to the
+     token's tenant. That is equivalent while `canActOnTenant` holds (mutant K16 killed).
+3. *Platform principal.* `{tenantID}` names the target tenant.
+   - The handler verifies the tenant exists, or returns 404 (L6).
+   - The transaction runs under `WithPlatformAdmin(principal)`.
+   - Every statement is predicated on `tenant_id = {tenantID}` under the §10.2.1 platform RLS
+     family.
+4. An object id belonging to another tenant, under the caller's own path, returns 404, never
+   data.
+5. Player, service and unauthenticated callers get 403/401 on all seven operations. The
+   route-table test (L8) pins this.
+
+**Safety invariants (binding; changing any of them requires `security` re-review before
+merge).**
+
+- **SI-1.** Only `platform_admin` may ever hold a nil-tenant staff token. Today this rests on
+  the `staff_users` CHECK (`role = 'platform_admin'` ⇔ `tenant_id IS NULL`, migration 0011) and
+  on token issuance. Any change that lets another role hold a nil tenant invalidates this
+  amendment.
+- **SI-2.** Platform lock, four-eyes, `engaged_by_scope`/`changed_by_scope` derivation and KS-L6
+  are enforced by the database (`payment_kill_switch_session()` and both guard triggers, 0105 as
+  redefined by 0106). They are never enforced by the URL or the permission name. Moving any of
+  them into handler code is a violation.
+- **SI-3.** Granting any `payments_kill_switch:*` permission to a role other than
+  `platform_admin` or `tenant_admin`, or introducing a second platform-scoped role, requires
+  `security` re-review. A second platform role is also the trigger to reconsider a separate
+  platform permission family, for example read-only platform operations versus engage.
+
+**Audit.** Every mutation writes its audit row in the same transaction. Every considered refusal
+(`cas_conflict`, `trigger_refusal`) writes a denied row in a separate transaction. Both carry
+actor, before/after, IP, UA, reason code and `target_tenant_id`.
+
+Until KS-AUDIT-TENANT-1 lands, a platform-scoped row is written with `tenant_id NULL` and the
+target tenant in metadata only. §10.5's audit rule is therefore met for the platform actor but
+**not yet for the target tenant's own audit view**. This is launch-blocking, as registered; the
+structural fix (a platform INSERT-only `audit_log` policy family with a provenance trigger and a
+typed `actor_scope` column, amending ADR 0013) is designed in `rv-prh-architect.md` §2 and needs
+its own ADR.
+
+**Rationale and reversibility.**
+- The single family is functionally equivalent to the two-tree design. Both permission families
+  would map to exactly one role each today.
+- It is consistent with the existing `canActOnTenant` precedent (`provider_credential_handlers.go`,
+  `admin_routes.go`), and it keeps one OpenAPI surface.
+- Splitting later is additive (new paths and permissions, no data change).
