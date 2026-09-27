@@ -444,6 +444,34 @@ func run() error {
 		Addr:              cfg.HTTPAddr,
 		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
+		// HTTP-TIMEOUTS-1 (RL-F3, registered by ADR 0097 §1/§13; devops
+		// condition 1: a SEPARATE, platform-wide fix, not folded into the
+		// webhook-admission change set). Before this, only
+		// ReadHeaderTimeout was set, so a slow body sender (or a
+		// never-responding client on any route, not only webhooks) held a
+		// goroutine indefinitely.
+		//
+		// ReadTimeout/WriteTimeout apply to EVERY route, including the
+		// admin/back-office/reconciliation/statement handlers devops's own
+		// review flagged as the ones needing headroom analysis (none of
+		// them declare an explicit per-request deadline today - see
+		// internal/httpserver's own health.go's 2s readyz timeout for the
+		// only existing precedent, which is far too short for a bulk
+		// admin/report query). 60s is a deliberately generous, NON-GATING
+		// estimate (CLAUDE.md "technical default, not measured"): no admin/
+		// report handler in this codebase streams or holds a connection
+		// open, they are all bounded, synchronous JSON responses, so this
+		// bounds a genuinely stuck request without being tight enough to
+		// abort a legitimate large reconciliation/statement query under
+		// normal load. Revisit with real measurement before this is relied
+		// on as a production SLA (registered as HTTP-TIMEOUTS-1's own
+		// follow-up, not re-litigated by this ADR 0097 commit).
+		//
+		// IdleTimeout bounds a keep-alive connection sitting open between
+		// requests - unrelated to any single handler's duration.
+		ReadTimeout:  15 * time.Second,
+		WriteTimeout: 60 * time.Second,
+		IdleTimeout:  120 * time.Second,
 	}
 
 	serveErr := make(chan error, 1)
