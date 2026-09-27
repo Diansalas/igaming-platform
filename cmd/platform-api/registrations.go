@@ -185,6 +185,21 @@ func buildProviderBundle(wiring mockWiring) providerBundle {
 		MalwareScanner:  kyc.NewMockMalwareScanner(),
 		Email:           email.NewMockProvider(),
 	}
+	// PROV-OUTBOUND-CRED-1 phase 2 code review C2: this is the one
+	// DELIBERATE hard-wired MockCredentialResolver{} in this file, never
+	// the kind-split resolver - the reconciliation MOCK statement source
+	// only ever fetches the MockProvider's OWN in-process records
+	// (payments.MockStatementSourceLabel's own doc comment), so it must
+	// never resolve a real credential regardless of what real adapters are
+	// registered alongside it. If this is ever rewired to
+	// b.paymentsOutboundCredentials() (the kind split) for a real payments
+	// adapter, that adapter's provider id is not synthetic, so the split
+	// would route it to the REAL resolver - reaching an actual vendor
+	// credential-store call, and a real HTTP fetch, from what is
+	// documented and audited as a MOCK-only source. Pinned, not merely a
+	// comment: internal/payments/mock_statement_source.go's own Fetch
+	// passes gate.go's callProvider a nil pool for this exact reason
+	// (s.resolver is always MockCredentialResolver, which ignores it).
 	b.PaymentsStmt = payments.NewMockStatementSource(b.Payments, payments.MockCredentialResolver{})
 	if wiring.PaymentsWebhookResolver {
 		b.PaymentsWebhookResolver = payments.NewMockWebhookCredentials(b.Payments)
