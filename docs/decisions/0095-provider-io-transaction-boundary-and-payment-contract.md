@@ -192,8 +192,17 @@ It:
    string and userinfo. Vendor response bodies never reach logs, errors, audit or receipts.
 9. Feeds the orchestrator-owned breaker (§9.6).
 
-Casino and KYC use the same gate shape (steps 1, 3, 4, 5, 6 and 8) through a small shared helper.
-They do not import payments.
+Casino and KYC mirror the SAME gate shape at their own phase-B call sites (LaunchGame;
+CreateVerification/SubmitVerification) - steps 1, 3, 4, 5, 6 and 8 - but each as its OWN
+independent, duplicated implementation, never through a shared helper: they do not import
+payments, and there is no cross-domain gate function either. This was corrected 2026-09-27
+(architect review `rv-prh-architect.md`, IO-1B/IO-1C): an earlier revision of this line
+claimed "through a small shared helper", which was never true, and additionally overstated
+step 1 for casino/KYC specifically - see §15.1.2/§15.2/§15.3 below for the exact record of
+when step 1 (the runtime `txscope.Held(ctx)` refusal) actually landed for each domain, and
+`internal/txscope`'s own `TestINV_IO_1c_NoAdapterCallInsideTxClosure` for INV-IO-1(c)'s
+static-scan proof that no domain's phase-B call site can be reached lexically inside a
+database transaction closure regardless of gate-shape parity.
 
 ---
 
@@ -1467,7 +1476,7 @@ file; golangci-lint 2.9.0 (`--allow-parallel-runners`) on `internal/payments`, `
 
 | Concern | Rule |
 |---|---|
-| Resolution point | In phase B only: `providercred.OutboundResolver.Resolve(ctx, pool, tenantID, providerID)` in its own short committed tx (exists). It already refuses under `txscope.Held`. A MOCK uses a `Synthetic` credential source with the **same** refusal, so tests exercise the rule. |
+| Resolution point | In phase B only: `providercred.OutboundResolver.Resolve(ctx, pool, tenantID, providerID)` in its own short committed tx (exists). It already refuses under `txscope.Held`. A MOCK uses a `Synthetic` credential source with the **same** refusal, so tests exercise the rule. **Correction (2026-09-27, architect review `rv-prh-architect.md` IO-1B, since fixed):** this line's "same refusal" claim was TRUE for payments only until this date - casino's and KYC's own `MockOutboundResolver.Resolve` ignored `ctx` entirely and never refused. Both now refuse under `txscope.Held(ctx)` too (`internal/casino/mock.go`, `internal/kyc/callcontext.go`), and each domain's phase-B call site (`LaunchGame`; `CreateVerification`/`SubmitVerification`) additionally gained its OWN direct `txscope.Held(ctx)` refusal immediately before the adapter call, mirroring `payments/gate.go`'s own step 1 - defence in depth behind the resolver's refusal, not a replacement for it. See §3.2's own correction above and `internal/txscope`'s `TestINV_IO_1c_NoAdapterCallInsideTxClosure` for INV-IO-1(c)'s static-scan proof. |
 | Passing | Through `CallContext.Credential` in every request type (payments §9.1; casino `LaunchRequest.Call`; KYC `CreateVerificationInput.Call` and the `SubmitVerification` call context). The adapter builds a per-call `httpclient.Authenticator` and drops it on return (exists, ADR 0093 §5). |
 | Caching | None for `OutboundCredential` beyond one call. Derived tokens are cached only in `DerivedTokenCache`, keyed (tenant, handle, fingerprint) and served only after this call's handle read (exists). The secret value cache stays inside the `Fetcher` (ADR 0094, unchanged). |
 | Invalidation and rotation | A handle read happens on every call, so a revoke takes effect from the next call. The in-flight exposure is one call (ADR 0093 precision 1, accepted). Rotation activates a new handle (four-eyes, exists). `DerivedTokenCache.Put` evicts the old fingerprint (exists). |
@@ -2304,6 +2313,26 @@ READY on R1) are addressed as follows.
   still not reachable - the MOCK statement source is unchanged); widening
   `RevokeLaunchSession`'s CAS to include `consumed` (C4, judged unnecessary given item 2).
 
+#### 15.1.3 Fix record (IO-1B/IO-1C, architect review, 2026-09-27)
+
+Architect review (`rv-prh-architect.md`) found `LaunchGame`'s phase B had no in-gate
+`txscope.Held(ctx)` refusal at all (only the real `providercred.OutboundResolver`'s own
+refusal, indirectly), and `MockOutboundResolver.Resolve` (`mock.go`) ignored `ctx` entirely -
+contradicting this ADR's own §3.2/§11 claims. **Fixed**: `LaunchGame`'s phase B now refuses
+with `ErrProviderCallRefused` (a new sentinel, `types.go`, mirroring `payments.
+ErrProviderCallRefused` exactly) immediately before `provider.Launch`, under a new
+`LaunchFailureTxHeld` reason; `MockOutboundResolver.Resolve` now refuses under
+`txscope.Held(ctx)` too, exactly like the real resolver. Tests (`internal/casino/
+launch_two_phase_integration_test.go`): `TestLaunchGame_RefusesUnderTxscopeHeld` (calls
+`LaunchGame` from inside a `pool.WithTenant` closure using a resolver that does NOT itself
+refuse, isolating the call-site guard; asserts `ErrProviderCallRefused` and that the
+adapter's own `Launch` method is called zero times) and
+`TestMockOutboundResolver_RefusesUnderTxscopeHeld` (the resolver's own refusal, directly).
+Both mutation-killed. INV-IO-1(c)'s own static scan (previously NOT IMPLEMENTED, contrary to
+this ADR's own reference to it) is now `internal/txscope`'s
+`TestINV_IO_1c_NoAdapterCallInsideTxClosure` - see §15.3.5 for the full record, since it
+covers casino, KYC and payments together in one guard.
+
 ### 15.2 KYC `CreateVerification`
 
 | Aspect | Specification |
@@ -2638,6 +2667,54 @@ they correct/extend this section's own phase-C description:
   judgment call, not a replayable provider transition, so a lost race must surface as a visible
   conflict the staff member can see and retry with fresh information. Full record: ADR 0096 §20.3.
 
+#### 15.3.5 Fix record (IO-1B/IO-1C, architect review, 2026-09-27)
+
+Architect review (`rv-prh-architect.md`) found the same two gaps for KYC that §15.1.3 records
+for casino: `CreateVerification`'s and `SubmitVerification`'s own phase B had no in-gate
+`txscope.Held(ctx)` refusal, and `MockOutboundResolver.Resolve` (`internal/kyc/callcontext.go`)
+ignored `ctx` entirely - contradicting §3.2's and §11's own claims (both corrected above).
+
+**IO-1B fix.** A new sentinel, `kyc.ErrProviderCallRefused` (`provider.go`), mirroring
+`payments.ErrProviderCallRefused`/`casino.ErrProviderCallRefused` exactly. Both
+`CreateVerification` (`verification_service.go`) and `SubmitVerification`
+(`document_service.go`) now refuse with it immediately before their own adapter call
+(`provider.CreateVerification`/`provider.SubmitVerification` respectively) if
+`txscope.Held(ctx)`. `MockOutboundResolver.Resolve` now refuses under `txscope.Held(ctx)` too,
+exactly like the real `providercred.OutboundResolver`. Tests (`internal/kyc/
+kyc_two_phase_integration_test.go`): `TestCreateVerification_RefusesUnderTxscopeHeld` and
+`TestSubmitVerification_RefusesUnderTxscopeHeld` (each calls the function from inside a
+`pool.WithTenant` closure using a resolver that does NOT itself refuse, isolating the
+call-site guard; asserts `ErrProviderCallRefused` and that the adapter's own method is called
+zero times), and `TestMockOutboundResolver_RefusesUnderTxscopeHeld` (the resolver's own
+refusal, directly). All mutation-killed.
+
+**IO-1C fix.** INV-IO-1(c)'s own static scan - referenced by this ADR (§2989/I1-c, "static
+scan") but, per architect review, never actually implemented - now exists:
+`internal/txscope/no_provider_call_in_tx_closure_static_test.go`,
+`TestINV_IO_1c_NoAdapterCallInsideTxClosure`. Pure `go/ast` + `go/parser` (no `go/types`,
+matching this codebase's own established convention for this class of guard -
+`internal/providerkind/completeness_scan.go`'s identical note - and this ADR's own
+`internal/ledger/lockorder_static_test.go` precedent), placed in `internal/txscope` (neutral
+ground: it scans `internal/casino`, `internal/kyc` AND `internal/payments` together, and
+belongs to none of them individually). It detects a database-transaction closure
+STRUCTURALLY - any function literal whose own parameter list declares a `pgx.Tx` parameter,
+regardless of which function it is passed to (so it does not need updating every time
+`db.Pool` grows a new `With*` method) - and fails if any of the three provider interfaces'
+own outbound-network methods (`casino.CasinoProvider`: `Catalogue`/`Launch`/`Balance`/`Bet`/
+`Win`/`Rollback`; `kyc.KYCProvider`: `CreateVerification`/`SubmitVerification`/
+`GetVerification`; `payments.PaymentProvider`: `Deposit`/`Withdraw`/`QueryStatus`) is called
+LEXICALLY inside that closure's own body - deliberately not a call-graph analysis (a call
+inside a same-package helper function the closure invokes is out of scope, stated rather than
+papered over, the same convention `internal/ledger`'s own INV-LOCK-E1 guard uses for its
+one-level callee-expansion limit). Each interface's own metadata/in-memory methods (`ID`,
+`Capabilities`, `WebhookScheme`, `HealthStatus`, `HandleCallback`) are deliberately excluded -
+none perform real network I/O, per each interface's own doc comment, so flagging them would be
+noise, not a finding. Proven with a planted-violation test
+(`TestINV_IO_1c_GuardCatchesPlantedViolation`) and a caller-name-independence test
+(`TestINV_IO_1c_DetectsTxClosureRegardlessOfCallerName`), both passing; the real-tree scan
+itself finds zero violations across all three domains today (confirming IO-1B's own phase-B
+call sites are, and remain, correctly outside every transaction closure).
+
 ---
 
 ## 16. Failure injection and required tests
@@ -2725,9 +2802,16 @@ timing-based fault injection is used anywhere except the one intentional excepti
     {terminal, unknown}` and no statement source. An unsupported operation at new activity
     gives T3 or 503. An unsupported event gives `unsupported_event`.
 14. **INV-IO-1.**
-    - The gate refuses under `txscope` (unit test).
+    - The gate refuses under `txscope` (unit test). **IMPLEMENTED for all three domains as of
+      2026-09-27 (IO-1B, architect review `rv-prh-architect.md`)** - payments'
+      `gate.go` had this from the start; casino's `LaunchGame` and KYC's
+      `CreateVerification`/`SubmitVerification` did not, until this fix (§15.1.3/§15.3.5).
     - A static scan finds no adapter-method call inside a `With*` closure (repo-wide, including
-      casino and KYC).
+      casino and KYC). **IMPLEMENTED as of 2026-09-27 (IO-1C, architect review)**:
+      `internal/txscope/no_provider_call_in_tx_closure_static_test.go`,
+      `TestINV_IO_1c_NoAdapterCallInsideTxClosure` - this row's own reference to a static scan
+      was, per that review, referring to a test that did not yet exist; it does now (§15.3.5's
+      own fuller record).
     - A capture test: while the MOCK's `Deposit`/`Withdraw`/`QueryStatus`/`Launch`/
       `CreateVerification`/`SubmitVerification` executes, `pg_stat_activity` shows no
       `idle in transaction` backend for the test's application name, and the pool's acquired

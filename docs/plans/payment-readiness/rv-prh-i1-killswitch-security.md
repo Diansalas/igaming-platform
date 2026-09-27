@@ -495,3 +495,78 @@ On K19, §10.7's argument (that `staff_users` RLS makes the narrower `tenant_id 
 | Ledger-finance H3 at all three sites | Open |
 | L5 denied-audit rows | Required before the stage gate |
 | Launch-blocking for production | KS-AUDIT-TENANT-1 (M4), the real-adapter M5 residuals, and alert delivery (L7) |
+
+---
+
+## Re-verification 2 — fix round 1c at `f4d7dce` (ADR 0095 §10.8)
+
+- Date: 2026-09-27. I used a detached worktree at `f4d7dce` and a private database `secrv_ks_i1c`, migrated to 106 with the `deploy/init-app-role.sql` grant tail. Both have been dropped and removed.
+- **Verdict: N1, L5, L7 and the M5 residual are CLOSED. No blocking kill-switch security finding remains in this series.** From a `security` standpoint, completion is now gated only by the items listed at the end of this section.
+
+### N1 — CLOSED
+
+`migration0105Scratch` now migrates to HEAD, so the trigger and session tests exercise the live 0106 bodies. I re-ran the live-body mutants against 0106; the baseline full `internal/payments` suite is green:
+
+| Mutant | Result | Killed by |
+|---|---|---|
+| **K13** (tenant lock on platform-engaged rows) | KILLED | `TestMigration0105_TenantCannotTouchPlatformEngagedRow` |
+| **K19** (whole principal predicate in `payment_kill_switch_session()`) | KILLED | `…_M6_K19_PlatformGUCRequiresGenuinePlatformStaff`, `…_N1_K19_RandomUUIDInPlatformGUCIsRefused`, `…_N1_K19_SuspendedPlatformStaffUUIDIsRefused` |
+| K5 (KS-L6) | KILLED | |
+| K10 (request→switch binding) | KILLED | |
+| K11 (expiry) | KILLED | |
+| K12 (`expected_version`) | KILLED | |
+| K14 (24 h cap) | KILLED | |
+| K8, K9, K16, K18 (regression spot-check) | KILLED | |
+
+K13 and K19 were the two live bypasses demonstrated in re-verification 1.
+
+### L7 — CLOSED (event)
+
+K21, which deletes the `logKillSwitchEngagedAlert` call in the engage handler, is now KILLED by the HTTP-level assertion in `TestPaymentsKillSwitchAPI_TenantAdminEngageAndFourEyesRelease`. Alert **delivery** remains NOT IMPLEMENTED and launch-blocking, as labelled.
+
+### M5 residual — CLOSED
+
+- The addressability gate is gone.
+- **Probe:** a value-typed adapter holding a pointer-receiver `Authenticator`, stored in `map[string]any` (the `paymentsAdapters()` shape), now reports 1 violation. It reported 0 in re-verification 1. The same holds for a by-value root and for a slice of values.
+- A zero-valued adapter correctly reports 0.
+- K33 (remove the pointer-receiver branch) is KILLED by `TestScan_CatchesPointerReceiverAuthenticator` and `…InMap`.
+- Raw `string`/`[]byte` secrets remain out of reach of a type-based scan, as labelled PARTIAL.
+
+### L5 — CLOSED
+
+A denied-audit row is now written in a separate transaction for the `cas_conflict` and `trigger_refusal` classes.
+- **Mutation coverage:** K35 (no denied row for `cas_conflict`) and K36 (no denied row for `trigger_refusal`) are both KILLED.
+- **Abuse probe** (`TestSECKS_L5Abuse`, HTTP stack on a scratch DB, not committed):
+
+| Check | Result |
+|---|---|
+| **Unauthorised callers cannot write denied rows.** 30 approve calls against tenant A: 5 each from no token, a garbage token, a player token, a service-principal token, a `support`-role staff token, and tenant B's `tenant_admin` | 401/403 each, **0** rows added to tenant A's audit. The refusal-audit path sits behind `auth.Middleware`, `RequireStaffPrincipal`, `RequirePermission`, `canActOnTenant` and tenant existence. Tenant B's 5 rows are the pre-existing `foreign_tenant` denials, in B's **own** scope and attributed to B's admin, unchanged since round 1. |
+| **Unknown or foreign object id** | 404, 0 rows. The lookup is tenant-predicated before any mutation, so no existence oracle is created. |
+| **Authorised flood** | 20 self-approve attempts by a real `tenant_admin` produce 20 denied rows, each attributed to that admin. Flooding needs valid release-permission credentials and incriminates the actor, the same exposure as successful mutations. Accepted (Info). Rate limiting of admin routes is a platform-wide concern, not this change's. |
+| **Contents** | `actor_id` is the caller. Metadata is exactly `{actor_scope, target_tenant_id, denied_class}`. No request body, `reason_code`, error text, token or header is recorded. `target_id` is a server-parsed UUID. **No sensitive data.** The raw trigger error text goes only to the Warn log line; for these triggers it contains principal and request UUIDs only. |
+
+### New residuals (Low, not blocking completion)
+
+- **RV2-L1 — the denied audit can be skipped by the caller cancelling the request.**
+  - `recordKillSwitchRefusalAudit` runs on `r.Context()`. Probe: invoking it with an already-cancelled context writes **0** rows and only logs `payments_kill_switch_denied_audit_failed`.
+  - Go's HTTP server cancels `r.Context()` when the client disconnects. A caller who drops the connection after the refusing statement, but before the separate audit transaction, leaves no denied row. The window is small but client-controllable.
+  - Fix: run the denied-audit transaction on `context.WithoutCancel(r.Context())` with a short timeout, following the codebase's ctx-independent, bounded phase-C pattern.
+  - Required before the stage gate.
+- **RV2-L2 — denied rows omit IP address and user agent.**
+  - Success rows carry both. CLAUDE.md's audit rule lists IP.
+  - Add `IPAddress: clientIP(r)` and `UserAgent`, which means threading `r` or those values into `writeKillSwitchError`.
+  - The pre-existing `foreign_tenant` denial row has the same gap.
+  - Required before the stage gate.
+
+### Status
+
+| Item | Status |
+|---|---|
+| H1, M1–M3, M6, N1, L1–L8 | Closed |
+| M4 test | Closed |
+| RV2-L1, RV2-L2 | Open (Low), before the stage gate |
+| Route deviation: architect amendment to §10.4/§10.5 | Still to be recorded; condition of the ruling |
+| Ledger-finance H3 (three call sites) | Not re-verified here; tracked by `ledger-finance` |
+| Launch-blocking for production | KS-AUDIT-TENANT-1 (M4); alert delivery (L7); M5 real-adapter residual (raw-string secrets, reviewed per adapter); the Synthetic tripwire stays until each real adapter's own `security` review |
+
+Scope note: this review covers the kill switch as changed through `f4d7dce`. It is not a general declaration that the payments subsystem is secure.

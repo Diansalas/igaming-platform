@@ -126,6 +126,83 @@ func TestLaunchGame_NoConnectionHeldAcrossHealthAndLaunchCalls(t *testing.T) {
 	}
 }
 
+// ctxObliviousResolver is a resolver that (unlike MockOutboundResolver)
+// does NOT itself check txscope.Held(ctx) - it always succeeds, exactly
+// like a hypothetical resolver bug or a resolver that predates IO-1B's own
+// fix. Used ONLY to isolate LaunchGame's own phase-B call-site guard
+// (orchestrator.go, immediately before provider.Launch) from
+// MockOutboundResolver's OWN, separate refusal, so
+// TestLaunchGame_RefusesUnderTxscopeHeld proves the call-site guard
+// specifically, not merely "some refusal happened somewhere upstream".
+type ctxObliviousResolver struct{}
+
+func (ctxObliviousResolver) Resolve(_ context.Context, _ providercred.TenantTxRunner, tenantID uuid.UUID, providerID string) (providercred.OutboundCredential, error) {
+	return providercred.NewMockOutboundCredential(tenantID, "casino", providerID), nil
+}
+
+// TestLaunchGame_RefusesUnderTxscopeHeld is IO-1B's own required test
+// (architect review `rv-prh-architect.md`, INV-IO-1(b)): calling LaunchGame
+// with a ctx that already carries txscope's held marker (as it would if,
+// despite the API shape, some future caller invoked it from inside its own
+// WithTenant closure) must refuse BEFORE ever reaching the adapter's own
+// Launch method - phase A itself still runs (its own nested WithTenant call
+// is legal; txscope.Mark is idempotent on an already-marked ctx), but phase
+// B's own txscope.Held(ctx) check fires on the SAME outer ctx the test
+// itself marked, refusing with ErrProviderCallRefused and never invoking
+// the adapter at all. Uses ctxObliviousResolver (not MockOutboundResolver)
+// so this test isolates the call-site guard itself, not the resolver's own
+// separate refusal (which TestMockOutboundResolver_RefusesUnderTxscopeHeld,
+// below, covers directly).
+func TestLaunchGame_RefusesUnderTxscopeHeld(t *testing.T) {
+	pool := testPool(t)
+	f := seedCasinoFixture(t, pool)
+	game := seedGame(t, pool, "mock-casino", "EUR")
+	enableGameForTenant(t, pool, f, game.ID)
+
+	base := NewMockCasinoProvider("mock-casino", "EUR")
+	registerCasinoCapability(t, pool, f, base, 100)
+
+	var launchCalls int
+	provider := &spyLaunchProvider{MockCasinoProvider: base}
+	provider.onLaunch = func(ctx context.Context, req LaunchRequest) (LaunchResult, error) {
+		launchCalls++
+		return base.Launch(ctx, req)
+	}
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(base))
+
+	var launchErr error
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, launchErr = orch.LaunchGame(ctx, pool, ctxObliviousResolver{}, LaunchGameParams{
+			TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID,
+			GameID: game.ID, AssetCode: "EUR", Mode: ModeReal,
+		})
+		return nil
+	}); err != nil {
+		t.Fatalf("outer WithTenant (test scaffolding only): %v", err)
+	}
+
+	if !errors.Is(launchErr, ErrProviderCallRefused) {
+		t.Fatalf("expected ErrProviderCallRefused, got %v", launchErr)
+	}
+	if launchCalls != 0 {
+		t.Fatalf("expected the adapter's own Launch method to be called ZERO times, got %d", launchCalls)
+	}
+}
+
+// TestMockOutboundResolver_RefusesUnderTxscopeHeld is IO-1B's own required
+// coverage of the MOCK resolver's own, separate refusal (ADR 0095 §11's
+// "a MOCK uses a Synthetic credential source with the SAME refusal" claim,
+// which was previously false for casino): MockOutboundResolver.Resolve
+// itself must refuse a txscope-held ctx, independent of LaunchGame's own
+// call-site guard.
+func TestMockOutboundResolver_RefusesUnderTxscopeHeld(t *testing.T) {
+	held := txscope.Mark(context.Background())
+	_, err := MockOutboundResolver{}.Resolve(held, nil, uuid.New(), "mock-casino")
+	if !errors.Is(err, ErrProviderCallRefused) {
+		t.Fatalf("expected ErrProviderCallRefused, got %v", err)
+	}
+}
+
 // tryAcquireConnection proves a pooled connection is genuinely free by
 // actually taking it (a short WithTenant round trip), not by inspecting
 // pool statistics - on a pool sized to one connection this can only
