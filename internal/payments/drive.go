@@ -289,7 +289,10 @@ func (o *Orchestrator) applyDepositCallResult(
 		if res.ProviderReference != "" {
 			refPtr = &res.ProviderReference
 		}
-		reason := boundedDeclineReason(res.DeclineReason)
+		reason, err := boundedDeclineReasonAudited(ctx, tx, attempt.TenantID, "payment_attempt", attempt.ID.String(), capability.ProviderID, res.DeclineReason)
+		if err != nil {
+			return intent, nil, err
+		}
 		updated, err := o.finalizeDeclined(ctx, tx, intent, &capability.ProviderID, refPtr, reason)
 		if err != nil {
 			return intent, nil, err

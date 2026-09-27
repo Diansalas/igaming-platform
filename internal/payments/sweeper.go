@@ -395,7 +395,14 @@ func (s *Sweeper) applyStatusEvidence(ctx context.Context, tx pgx.Tx, intent Dep
 		if res.ProviderReference != "" {
 			refPtr = &res.ProviderReference
 		}
-		reason := boundedDeclineReason(res.DeclineReason)
+		providerIDStr := ""
+		if attempt.ProviderID != nil {
+			providerIDStr = *attempt.ProviderID
+		}
+		reason, err := boundedDeclineReasonAudited(ctx, tx, attempt.TenantID, "payment_attempt", attempt.ID.String(), providerIDStr, res.DeclineReason)
+		if err != nil {
+			return err
+		}
 		updated, err := s.Orchestrator.finalizeDeclined(ctx, tx, intent, attempt.ProviderID, refPtr, reason)
 		if err != nil {
 			return err

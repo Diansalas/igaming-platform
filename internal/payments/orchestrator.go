@@ -769,12 +769,20 @@ func (o *Orchestrator) finalizeDeclined(ctx context.Context, tx pgx.Tx, intent D
 		return intent, err
 	}
 	if actual == DepositIntentSucceeded {
-		// RV-PRH-I1 code review F3: the intent already succeeded (a T13
-		// success on a sibling attempt landed first) - setIntentAttempt's
-		// own sticky guard made this write a no-op on every column, so
-		// nothing here may claim to have declined it: no local mutation,
-		// and no spurious "deposit.declined" audit record against an
-		// intent that never moved.
+		// RV-PRH-I1 code review F3/R2: the intent already succeeded (a
+		// T13 success on a sibling attempt landed first) -
+		// setIntentAttempt's own sticky guard made this write a no-op on
+		// every column, so nothing here may claim to have declined it: no
+		// spurious "deposit.declined" audit record against an intent that
+		// never moved. Critically, intent.Status is set to the ACTUAL
+		// resulting status (not left as whatever stub/stale value the
+		// caller passed in as `intent`) before returning - receipt.go's
+		// own call site passes a bare DepositIntent{ID, TenantID} stub
+		// whose Status is "", and cascadeEligible's
+		// "intentStatus == DepositIntentSucceeded" guard would silently
+		// never fire against that empty string, letting a cascade child
+		// be inserted for an intent that has already been credited.
+		intent.Status = actual
 		return intent, nil
 	}
 	intent.ProviderID, intent.ProviderReference, intent.Status = providerID, providerReference, DepositIntentDeclined
@@ -797,7 +805,10 @@ func (o *Orchestrator) finalizeAmbiguous(ctx context.Context, tx pgx.Tx, intent 
 		return intent, err
 	}
 	if actual == DepositIntentSucceeded {
-		// See finalizeDeclined's identical F3 guard above.
+		// See finalizeDeclined's identical F3/R2 guard above - intent.Status
+		// must be the ACTUAL resulting status, never the caller's stub/stale
+		// value, so cascadeEligible (and any other caller) sees 'succeeded'.
+		intent.Status = actual
 		return intent, nil
 	}
 	intent.ProviderID, intent.ProviderReference, intent.Status = providerID, providerReference, DepositIntentAmbiguous

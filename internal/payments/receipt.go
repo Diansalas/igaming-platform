@@ -14,6 +14,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"time"
@@ -76,6 +77,35 @@ func boundedDeclineReason(reason string) string {
 		return reason
 	}
 	return boundedDeclineReasonSentinel
+}
+
+// boundedDeclineReasonAudited is boundedDeclineReason plus the independent
+// code review's follow-up requirement: the raw vendor text must never
+// reach a CHECK'd column, but discarding it with no record at all leaves
+// operators unable to correlate a repeated "vendor_reason_too_long"
+// sentinel back to what the vendor actually said. When (and only when)
+// the reason is actually oversized, this records a REDACTED audit entry -
+// never the raw text itself, only its byte length and a truncated SHA-256
+// prefix (enough to notice "the same long reason keeps recurring" without
+// ever storing or logging the vendor's free text). targetType/targetID
+// name whatever this decline is about (an attempt id once one is
+// resolved, or a (provider,reference) pair before one is).
+func boundedDeclineReasonAudited(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, targetType, targetID, providerID, reason string) (string, error) {
+	if len(reason) <= maxDeclineReasonBytes {
+		return reason, nil
+	}
+	sum := sha256.Sum256([]byte(reason))
+	if err := audit.Record(ctx, tx, audit.Entry{
+		TenantID: tenantID, ActorType: audit.ActorSystem, Action: "payment.decline_reason_bounded",
+		TargetType: targetType, TargetID: targetID, Outcome: audit.OutcomeDenied,
+		Metadata: map[string]any{
+			"provider_id": providerID, "original_byte_length": len(reason),
+			"original_sha256_prefix": hex.EncodeToString(sum[:])[:16],
+		},
+	}); err != nil {
+		return "", fmt.Errorf("payments: audit oversize decline reason: %w", err)
+	}
+	return boundedDeclineReasonSentinel, nil
 }
 
 // ReceiptEvidence is this step's canonical, adapter-agnostic evidence
@@ -336,8 +366,19 @@ func ApplyReceiptEvidence(ctx context.Context, tx pgx.Tx, o *Orchestrator, tenan
 	// 64-byte CHECK as payment_attempts.decline_reason. Bounded here,
 	// once, at the top of this function, so every persisted copy (the
 	// receipt AND the attempt) is bounded identically and the fingerprint
-	// computed below is stable across identical-payload redeliveries.
-	ev.DeclineReason = boundedDeclineReason(ev.DeclineReason)
+	// computed below is stable across identical-payload redeliveries. An
+	// oversized reason is redacted-audited (never the raw text) BEFORE
+	// bounding, so ops are never left with a silently-discarded vendor
+	// reason and no record at all - the attempt this is about is not
+	// resolved yet at this point, so the target names (provider,
+	// reference) instead.
+	if ev.DeclineReason != "" {
+		bounded, err := boundedDeclineReasonAudited(ctx, tx, tenantID, "payment_provider_event", verifiedProviderID+":"+ev.ProviderReference, verifiedProviderID, ev.DeclineReason)
+		if err != nil {
+			return "", err
+		}
+		ev.DeclineReason = bounded
+	}
 
 	// PRH-payments-callback-cutover / ADR 0095 §5.4, LF95-C6(b): a
 	// deposit_reversal event is a fact about the ORIGINAL deposit attempt's
@@ -496,7 +537,22 @@ func ApplyReceiptEvidence(ctx context.Context, tx pgx.Tx, o *Orchestrator, tenan
 	// (provider_id, provider_reference) - the ordinary "webhook beats phase
 	// C" race this callback itself might have just resolved for a sibling
 	// delivery. Runs under the SAME parent+attempt locks already held.
+	//
+	// Independent code review H2 (latent): `attempt` here is still the
+	// PRE-transition copy read above, before applyResolvedReceiptEvidence
+	// ran - if THIS callback resolved by MerchantReference (an attempt
+	// with no ProviderReference yet) and the evidence itself just assigned
+	// one (T4), that new reference only exists on the DATABASE row, not on
+	// this stale local copy. ApplyDeferredReceiptsForAttempt's own
+	// `attempt.ProviderReference == nil` guard would then always return 0
+	// for exactly the T4-by-merchant-reference case this backstop exists
+	// for. Re-read the attempt fresh, under the locks already held, before
+	// calling it.
 	if changed {
+		attempt, err = GetAttemptByID(ctx, tx, attempt.ID)
+		if err != nil {
+			return "", err
+		}
 		if _, err := ApplyDeferredReceiptsForAttempt(ctx, tx, o, attempt); err != nil {
 			return "", err
 		}
@@ -790,52 +846,66 @@ func applyReversalReceiptEvidence(ctx context.Context, tx pgx.Tx, tenantID uuid.
 	// withdrawal reference and making this integrity check permanently
 	// unreachable for payouts (and later making a genuine
 	// withdrawal.Complete for that reference fail forever, looking up an
-	// idempotency key that can never exist).
+	// idempotency key that can never exist). This check is unconditional
+	// either way (locked or not), so it is safe to run on the unlocked
+	// read below.
 	if !unresolved && (original.Operation != AttemptOperationDeposit || original.DepositIntentID == nil) {
 		return "", fmt.Errorf("%w: attempt %s resolved by a deposit_reversal event is not a deposit attempt with a parent intent",
 			ErrDepositReversalIntegrity, original.ID)
 	}
 
-	if unresolved || original.LedgerTransactionID == nil {
-		// RV-PRH-I1 ledger-finance L4: a wire reversal payload that omits
-		// amount/asset (some PSPs' "reverse the whole deposit" chargeback
-		// shape never states either) previously left the STORED receipt's
-		// amount/asset_code at their zero values even when a resolved-but-
-		// never-posted original attempt (this branch) already knows the
-		// true ones. Backfilled here, before the receipt insert, only when
-		// an original attempt actually resolved and the wire itself left
-		// the field unset - never overwrites a wire-declared value, and
-		// never invents a value for the genuinely-unresolved case (no
-		// attempt to backfill from at all).
-		if !unresolved {
-			if ev.Amount == 0 {
-				ev.Amount = original.Amount
-			}
-			if ev.AssetCode == "" {
-				ev.AssetCode = original.AssetCode
-			}
+	// RV-PRH-I1 ledger-finance L4: a wire reversal payload that omits
+	// amount/asset (some PSPs' "reverse the whole deposit" chargeback
+	// shape never states either) previously left the STORED receipt's
+	// amount/asset_code at their zero values even when a resolved-but-
+	// never-posted original attempt already knows the true ones.
+	// Backfilled here, from the UNLOCKED read (cosmetic only - never a
+	// financial effect, and re-decided under lock below regardless) -
+	// only when an original attempt actually resolved and the wire itself
+	// left the field unset; never overwrites a wire-declared value.
+	if !unresolved {
+		if ev.Amount == 0 {
+			ev.Amount = original.Amount
 		}
-		// RV-PRH-I1 ledger-finance L5: the parent lock, when there is a
-		// resolved (but never-posted) original attempt, is cheap and
-		// closes the "spurious 500 before this became safe" gap noted by
-		// the review - taken here, before the tombstone write, mirroring
-		// the posting branch's own lock below.
-		if !unresolved && original.DepositIntentID != nil {
-			if _, err := tx.Exec(ctx, `SELECT id FROM deposit_intents WHERE id = $1 FOR UPDATE`, *original.DepositIntentID); err != nil {
-				return "", fmt.Errorf("payments: lock deposit intent for reversal tombstone: %w", err)
-			}
+		if ev.AssetCode == "" {
+			ev.AssetCode = original.AssetCode
 		}
-		// RV-PRH-I1 ledger-finance M3 (ADR 0082 A7): the receipt insert is
-		// this transaction's own first write for this branch - moved
-		// ahead of the tombstone/ledger write and the audit record below,
-		// rather than after them.
-		receiptID, duplicate, err := insertReceiptDeduped(ctx, tx, tenantID, verifiedProviderID, ev, DispositionApplied)
+	}
+
+	// A7-TOMB-1 (architect review): R0, the receipt insert, is this
+	// transaction's FIRST write - unconditionally, before ANY lock, and
+	// before the tombstone-vs-posting branch is decided. The unlocked
+	// `original` read above is used only for the integrity check (a hard
+	// reject either way) and the L4 cosmetic backfill; it is NEVER used to
+	// choose the tombstone/posting branch. That choice is made ONLY from a
+	// FRESH read taken AFTER the lock just below - closing a race where
+	// two concurrent deliveries of the IDENTICAL reversal event, reading
+	// `original` at different moments, could otherwise each independently
+	// commit to a stale branch decision (one seeing "not yet posted", the
+	// other "posted", from two different snapshots of the same row).
+	receiptID, duplicate, err := insertReceiptDeduped(ctx, tx, tenantID, verifiedProviderID, ev, DispositionApplied)
+	if err != nil {
+		return "", err
+	}
+	if duplicate {
+		return DispositionDuplicateEffect, nil
+	}
+
+	// Lock the parent BEFORE deciding the branch (never after) - every
+	// concurrent delivery naming the same original now serializes on this
+	// ONE lock, in this ONE order, before either branch's own further work
+	// begins.
+	if !unresolved {
+		if _, err := tx.Exec(ctx, `SELECT id FROM deposit_intents WHERE id = $1 FOR UPDATE`, *original.DepositIntentID); err != nil {
+			return "", fmt.Errorf("payments: lock deposit intent for reversal: %w", err)
+		}
+		original, err = GetAttemptByID(ctx, tx, original.ID)
 		if err != nil {
 			return "", err
 		}
-		if duplicate {
-			return DispositionDuplicateEffect, nil
-		}
+	}
+
+	if unresolved || original.LedgerTransactionID == nil {
 		txID, err := postDepositReversalTombstone(ctx, tx, tenantID, verifiedProviderID, ev.OriginalProviderReference)
 		if err != nil {
 			return "", err
@@ -860,34 +930,10 @@ func applyReversalReceiptEvidence(ctx context.Context, tx pgx.Tx, tenantID uuid.
 		return DispositionApplied, nil
 	}
 
-	// RV-PRH-I1 ledger-finance M3 (ADR 0082 A7): R0, this transaction's
-	// first write for the posting branch, sits before the parent lock -
-	// mirroring the deposit branch's own R0 placement in
-	// ApplyReceiptEvidence above. A typed rejection further down (a
-	// mismatch, an integrity failure, or DepositAlreadyReversedError)
-	// still rolls back this entire transaction including this insert,
-	// exactly as this function's own doc comment already describes -
-	// the HTTP layer's separate-tx RecordDepositReversalRejection is
-	// unaffected either way.
-	receiptID, duplicate, err := insertReceiptDeduped(ctx, tx, tenantID, verifiedProviderID, ev, DispositionApplied)
-	if err != nil {
-		return "", err
-	}
-
-	// ADR 0095 §14 lock order: parent (deposit_intents) FOR UPDATE, then
-	// the attempt, then re-read under the lock - mirrors the deposit
-	// branch's own ordering in ApplyReceiptEvidence above, and Stage 10.1
-	// PAY-REV-1's S2 step (docs/plans/stage-10.1-planning-gate-proposal.md
-	// §E): two distinct-reference reversal callbacks for the SAME original
-	// deposit must serialize on this lock, or both could observe
-	// "not yet reversed" and both post, over-debiting player_cash.
-	if _, err := tx.Exec(ctx, `SELECT id FROM deposit_intents WHERE id = $1 FOR UPDATE`, *original.DepositIntentID); err != nil {
-		return "", fmt.Errorf("payments: lock deposit intent for reversal: %w", err)
-	}
-	original, err = GetAttemptByID(ctx, tx, original.ID)
-	if err != nil {
-		return "", err
-	}
+	// R0 (the receipt insert) and the parent lock both already happened
+	// above, before this branch was even chosen (A7-TOMB-1) - `original`
+	// here is the FRESH, locked read taken just above, not the earlier
+	// unlocked one.
 
 	// A missing ledger_transactions row, or one whose type is not
 	// 'deposit', is an INTEGRITY failure - reaching here at all means the
