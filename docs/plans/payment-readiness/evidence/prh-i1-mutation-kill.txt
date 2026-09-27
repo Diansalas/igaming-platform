@@ -395,3 +395,140 @@ full internal/payments/internal/withdrawal/internal/httpserver/internal/kyc
 suites together under `-race` on GitHub CI (CI-BILLING-1 still open per
 prior evidence files in this directory) - only local runs are recorded
 here, per this task's own instruction to record local evidence.
+
+--- PRH-payments-callback-cutover round 2 (2026-09-27): full internal/payments test migration + gap closure ---
+
+Migrated all ~13 remaining internal/payments test files off the legacy
+Orchestrator.InitiateDeposit (no payment_attempts row) fixture pattern,
+using the new shared test bridge initiateDepositWithAttempt/
+backfillAttemptForIntent (internal/payments/receive_bridge_test.go): drives
+InitiateDeposit's existing synchronous flow AND a matching payment_attempts
+row through the same exported T1+T2/T4/T6/T7/T8/T9/T11 transitions
+InitiateDepositAttempt's own real path would have produced, keyed off the
+resulting intent's own final state. Full internal/payments suite (all
+files) now passes under `-tags=integration` and under `-race`.
+
+Files migrated (mechanical initiateDepositWithAttempt substitution unless
+noted): adversarial_test.go, lockorder_integration_test.go,
+orchestrator_integration_test.go, orchestrator_verify_enforced_integration_test.go
+(also strengthened to assert the genuine callback actually posts, not just
+that HandleCallback ran once), payrev1_concurrency_integration_test.go,
+payrev1_defect_repro_integration_test.go,
+payrev1_tenant_isolation_integration_test.go (corruption target moved from
+deposit_intents.ledger_transaction_id to payment_attempts.ledger_transaction_id
+- see finding below), provider_reference_bound_integration_test.go,
+replay_f7_integration_test.go, resolution_recheck_integration_test.go,
+stage9_concurrency_integration_test.go, webhook_replay_duplicate_integration_test.go,
+webhook_tenant_binding_integration_test.go (also strengthened
+TestWebhook_DisabledCapability_StillAccepted to assert the deposit actually
+posts, not just that no error was returned).
+Confirmed unaffected, no change needed: migration_0082_immutability_integration_test.go,
+rg_enforcement_integration_test.go (both exercise paths - raw SQL triggers,
+RG pre-call denial with no attempt at all - that predate/bypass attempt
+resolution entirely).
+
+FINDING (fixed, not just worked around): orchestrator.go's reversal
+enrichment (receiveCallbackViaReceiptPath) initially looked up the
+REVERSAL's own posted ledger transaction using the wrong key for the
+tombstone case (event.ProviderReference instead of
+event.OriginalProviderReference, which is what postDepositReversalTombstone
+actually stores as provider_tx_id) - caught by
+TestF7Payments_ConcurrentTombstoneRedeliveryIsIdempotent during migration,
+not a pre-existing bug (introduced by round 1 of this cutover). Fixed by
+resolving which of the two rows (tombstone vs real reversal posting)
+applies from the re-read original attempt, exactly as applyReversalReceiptEvidence
+itself does, rather than guessing from one key.
+
+FINDING (fixed): deposit_intents.status was not being recomputed as an
+attempt-projection for any transition OTHER than the two terminal ones
+(succeeded/declined) already written directly by
+applyDepositSuccessAndPost/finalizeDeclined - an ambiguous callback (T6/T9)
+left the intent status stale at 'pending' instead of projecting to
+'ambiguous' (ADR 0095 §5.1/LF95-C7). Caught by
+TestReceiveCallback_AmbiguousCallbackResolvedViaQueryStatus_NotCascaded.
+Fixed with a new recomputeDepositIntentProjection (receipt.go),
+implementing LF95-C7's exact rule (succeeded sticky; disputed/ambiguous ->
+ambiguous; any other live attempt -> pending; none live -> declined),
+called from both ApplyReceiptEvidence's live path and
+ApplyDeferredReceiptsForAttempt's sweeper-backstop path whenever a deposit
+attempt actually changes state.
+
+Mutation kill for the projection fix:
+  go test -tags=integration -count=1 -run TestReceiveCallback_AmbiguousCallbackResolvedViaQueryStatus_NotCascaded ./internal/payments/...
+With recomputeDepositIntentProjection's call site removed from
+ApplyReceiptEvidence: FAILS -
+    adversarial_test.go:406: an ambiguous callback must never be silently
+    treated as success or failure, got pending
+Restored: receipt.go byte-identical (verified via `go build` and the test
+passing again).
+
+Two tests' original intent could no longer be expressed as written and
+were adapted with equally strict (never weaker) assertions, each
+documented in-line and in ADR 0095 §27.10:
+  - TestReceiveCallback_UnknownProviderReferenceRejected: old
+    ErrDepositIntentNotFound/404 -> new deferred_unresolved/200. Adapted to
+    assert: no error, disposition=deferred_unresolved, zero ledger rows,
+    AND a durable unresolved receipt row exists for exactly that
+    reference (disposition_at_receipt='deferred_unresolved',
+    resolved_at IS NULL) - strictly more assertions than the original.
+  - TestReceiveCallback_ReversalOfNeverPostedDepositWritesTombstone's late-
+    arriving-original-after-tombstone case: old hard error -> new committed
+    disputed (T10, `reversal_tombstone_precedes_success`), uniform 200.
+    Adapted to assert: no error, disposition=applied, exactly 1 ledger row
+    (the tombstone, never a second posting - unchanged from the original
+    test), AND the attempt is durably 'disputed' with the correct
+    terminal_reason.
+  - TestReceiveCallback_AmbiguousCallbackResolvedViaQueryStatus_NotCascaded:
+    old inline/synchronous QueryStatus call (itself the provider-I/O-in-
+    transaction anti-pattern ADR 0095 removes) -> new: zero synchronous
+    provider calls, the attempt scheduled (next_action_at set) for the
+    sweeper to resolve later. Adapted to assert QueryStatus called ZERO
+    times (proving the anti-pattern is gone) plus the attempt's durable
+    'ambiguous' state and scheduled next_action_at (proving it is not a
+    dead end) - the no-cascade/no-posting assertions are unchanged.
+
+Gap closure (per coordinator instruction):
+- TestPaymentWebhook_ReversalOutcomeDeclinedWireCarrier_PersistedAsSucceeded
+  (internal/httpserver/payment_webhook_contract_integration_test.go) closes
+  the previously-disclosed gap: the Outcome-normalization mutant
+  (`ev.Outcome = OutcomeSucceeded` in applyReversalReceiptEvidence) is now
+  killed at the HTTP layer too.
+    go test -tags=integration -count=1 -run TestPaymentWebhook_ReversalOutcomeDeclinedWireCarrier_PersistedAsSucceeded ./internal/httpserver/...
+  With the normalization line disabled: FAILS - the reversal callback
+  returns 500 (payment_provider_events_check1 violation rolls back the
+  whole transaction) instead of the 200 this test asserts, and the
+  persisted-outcome assertion never even runs. Restored: receipt.go
+  byte-identical (verified via `go build`).
+- TestPaymentWebhook_UniformResponseAcrossDispositions: 6 scenarios
+  (applied, duplicate_effect, deferred_unresolved, anomaly/mismatch,
+  reversal-tombstone-applied, tombstone-collision-disputed) all produce a
+  byte-identical {request_id, received} body (request_id excluded from the
+  comparison) and no disposition-revealing response header.
+- TestPaymentWebhook_DeferredReceiptCapExceeded_503RetryAfter: fills the
+  real unapplied-receipt cap (10,000 rows, direct SQL - driving that many
+  through the real HTTP path would be prohibitively slow) for (tenant,
+  mock), then asserts a new unresolvable callback gets 503 + Retry-After
+  with nothing new stored.
+
+Full-suite confirmation (private scratch database, migrations 1-104,
+after merging origin/claude/focused-wright-jw88w9's PRH-I4 round 4 +
+security re-verification, which fixed TestAdmission_T6c/T6d):
+`go test -race -tags=integration -count=1 -skip '<the 6 ci-local.sh
+timing-lane names>' ./internal/payments/... ./internal/httpserver/...
+./internal/reconciliation/...` -> ALL GREEN (internal/payments 128s,
+internal/httpserver 354s, internal/reconciliation 102s +
+internal/reconciliation/statement 1s). The 6 timing-lane tests
+(TestResolutionIsolation_NormalOperation/OneTenantStoreOutage/
+MultipleTenantsOutage/SimultaneousOnset_Bounded/ConnectionExhaustion/
+FinancialDuringOutage) were run separately per ci-local.sh's own
+convention; two (NormalOperation, FinancialDuringOutage) showed the
+wall-clock-threshold flakiness their own doc comments already disclose
+("pure pool throughput... not a resolution effect") under this host's
+concurrent multi-agent load, and passed cleanly when re-run in isolation -
+neither test's code path touches anything this round changed (depositFor's
+new attempt-backfill runs entirely OUTSIDE their timed sections).
+golangci-lint (2.9.0, --build-tags=integration): 0 issues on
+./internal/payments/... (including tests); ./internal/httpserver/...'s new
+test file carries the same unchecked-resp.Body.Close() errcheck style
+already present in ~590 pre-existing call sites across this package's test
+suite (not a new debt class).
