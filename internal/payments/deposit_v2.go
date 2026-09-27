@@ -61,6 +61,14 @@ type InitiateDepositAttemptResult struct {
 	Intent         DepositIntent
 	Attempt        PaymentAttempt
 	AttemptCreated bool
+	// RedirectURL/HostedFieldToken are phase B's DepositResult redirect
+	// detail for THIS synchronous call only (whichever attempt - the
+	// first, or the last cascaded one - ended up interactive/pending) -
+	// transient, never persisted to deposit_intents, mirroring the
+	// pre-cutover InitiateDeposit/attemptDeposit path's identical
+	// in-memory-only fields.
+	RedirectURL      string
+	HostedFieldToken string
 }
 
 // InitiateDepositAttempt runs phase A (commit-intent), phase B
@@ -190,7 +198,7 @@ func (o *Orchestrator) InitiateDepositAttempt(
 		}
 
 		// KYC deposit gate (ADR 0096 seam - kycgate.go).
-		allowed, denyReason, err := kycGate.EvaluateDeposit(actx, tx, intent.TenantID, intent.PlayerAccountID, intent.Amount, intent.AssetCode)
+		allowed, denyReason, err := kycGate.EvaluateDeposit(actx, tx, intent.TenantID, intent.BrandID, intent.PlayerAccountID, eligibility.PersonID, intent.Amount, intent.AssetCode)
 		if err != nil {
 			return fmt.Errorf("payments: evaluate deposit kyc gate: %w", err)
 		}
@@ -256,6 +264,7 @@ func (o *Orchestrator) InitiateDepositAttempt(
 	if gr.Attempted {
 		o.breaker.RecordResult(attempt.TenantID, capability.ProviderID, gr.Class)
 	}
+	redirectURL, hostedFieldToken := gr.Value.RedirectURL, gr.Value.HostedFieldToken
 
 	// --- Phase C: apply the evidence, CAS, in a fresh tx ---------------
 	var cascadeChild *PaymentAttempt
@@ -285,12 +294,15 @@ func (o *Orchestrator) InitiateDepositAttempt(
 	// decline.
 	for cascadeChild != nil {
 		var driven *PaymentAttempt
-		intent, updatedAttempt, driven, err = o.driveCreatedAttempt(ctx, pool, kycGate, credResolver, intent, *cascadeChild, false)
+		intent, updatedAttempt, driven, redirectURL, hostedFieldToken, err = o.driveCreatedAttempt(ctx, pool, kycGate, credResolver, intent, *cascadeChild, false)
 		if err != nil {
 			return InitiateDepositAttemptResult{}, err
 		}
 		cascadeChild = driven
 	}
 
-	return InitiateDepositAttemptResult{Intent: intent, Attempt: updatedAttempt, AttemptCreated: true}, nil
+	return InitiateDepositAttemptResult{
+		Intent: intent, Attempt: updatedAttempt, AttemptCreated: true,
+		RedirectURL: redirectURL, HostedFieldToken: hostedFieldToken,
+	}, nil
 }

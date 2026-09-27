@@ -55,8 +55,8 @@ func newAccountActivationTestServer(t *testing.T, pool *db.Pool, issuer *auth.Is
 		PersonResolver:                      identityresolution.NewMockPersonResolver(),
 		EmailProvider:                       email.NewMockProvider(),
 		AccountActivationTestSupportEnabled: activationEnabled,
-		PaymentOrchestrator:                 orchestrator,
-		PaymentsMockSettlementEnabled:       activationEnabled,
+		PaymentOrchestrator:                 orchestrator, PaymentsOutboundCredentials: payments.MockCredentialResolver{},
+		PaymentsMockSettlementEnabled: activationEnabled,
 	}))
 	t.Cleanup(srv.Close)
 	return srv
@@ -348,7 +348,7 @@ func TestAccountActivationDevToken_MultiReplica_RequestOnReplicaA_ConfirmOnRepli
 		PersonResolver:                      identityresolution.NewMockPersonResolver(),
 		EmailProvider:                       email.NewMockProvider(),
 		AccountActivationTestSupportEnabled: true,
-		PaymentOrchestrator:                 orchestrator,
+		PaymentOrchestrator:                 orchestrator, PaymentsOutboundCredentials: payments.MockCredentialResolver{},
 	}))
 	t.Cleanup(replicaA.Close)
 
@@ -362,7 +362,7 @@ func TestAccountActivationDevToken_MultiReplica_RequestOnReplicaA_ConfirmOnRepli
 		PersonResolver:                      identityresolution.NewMockPersonResolver(),
 		EmailProvider:                       email.NewMockProvider(),
 		AccountActivationTestSupportEnabled: true,
-		PaymentOrchestrator:                 orchestrator,
+		PaymentOrchestrator:                 orchestrator, PaymentsOutboundCredentials: payments.MockCredentialResolver{},
 	}))
 	t.Cleanup(replicaB.Close)
 

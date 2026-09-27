@@ -201,13 +201,28 @@ func seedStandaloneLedgerTransaction(t *testing.T, pool *db.Pool, f orchFixture,
 	return id
 }
 
+// TestMigration0082_DepositIntentsDenyTruncate proves the BEFORE TRUNCATE
+// deny trigger (ledger_deny_mutation) is still the reason TRUNCATE is
+// refused, not merely a side effect of migration 0101's payment_attempts
+// FK to deposit_intents. A bare `TRUNCATE deposit_intents` is refused by
+// PostgreSQL itself before any trigger ever runs ("cannot truncate a
+// table referenced in a foreign key constraint") now that payment_attempts
+// references it - a real, independent refusal, but not the one this test
+// exists to prove. `CASCADE` extends the truncate to the referencing
+// tables too, which clears that FK-level refusal and lets the BEFORE
+// TRUNCATE trigger on deposit_intents itself fire and deny the whole
+// statement with its own append-only message - the actual control this
+// test asserts. Either shape is a genuine refusal (defense in depth), so
+// this loosens nothing: the assertion positively confirms the TRIGGER's
+// own message, which only the CASCADE form can still exercise now that
+// migration 0101 exists.
 func TestMigration0082_DepositIntentsDenyTruncate(t *testing.T) {
 	pool := testPool(t)
 	f := seedOrchFixture(t, pool)
 	seedDepositIntent(t, pool, f, "mig0082-truncate")
 
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `TRUNCATE deposit_intents`)
+		_, err := tx.Exec(ctx, `TRUNCATE deposit_intents CASCADE`)
 		return err
 	})
 	if err == nil {

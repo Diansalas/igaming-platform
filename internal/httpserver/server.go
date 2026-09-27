@@ -49,6 +49,14 @@ type Deps struct {
 	// to wire one up.
 	PaymentOrchestrator *payments.Orchestrator
 
+	// PaymentsOutboundCredentials is InitiateDepositAttempt's phase B
+	// credential resolver (ADR 0095 §9.1/§11, PROV-OUTBOUND-CRED-1,
+	// PRH-I1 deposit cutover) - CasinoOutboundCredentials' payments twin.
+	// Nil fails every deposit initiation closed (InitiateDepositAttempt's
+	// own gate.go check), never falling back to an unauthenticated or
+	// cached credential.
+	PaymentsOutboundCredentials payments.OutboundCredentialResolver
+
 	// PaymentsMockSettlementEnabled gates the Stage 9.3 mock-provider
 	// deposit-settlement-simulation route (POST /v1/me/deposits/{id}/
 	// simulate-callback - payment_deposit_simulation_handlers.go). This

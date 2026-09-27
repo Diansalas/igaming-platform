@@ -1,27 +1,24 @@
 // PRH-I1 step (b): the deposit KYC gate seam (ADR 0095 §4.3 T1+T2 "the
 // KYC deposit gate (ADR 0096)"; T2 "the KYC deposit gate (LF95-C10(e))").
 //
-// STATUS: this is an interface seam, not the finished gate. ADR 0096's
-// enforcement function is being built by `identity-compliance` in PRH-I3,
-// in parallel with this work, and is named generically by ADR 0095 §27
-// as "the ADR 0096 enforcement function exported by internal/kyc". At
-// the time this step was written it was not yet merged to
-// origin/claude/focused-wright-jw88w9. Per the orchestrator's instruction,
-// this package therefore defines the interface its own call site needs
-// and ships a clearly-named, explicitly-labeled stand-in
-// (AllowAllDepositKYCGate) - not a TODO comment - so that wiring the real
-// PRH-I3 function in is a one-line adapter-construction change, never a
-// call-site rewrite. AllowAllDepositKYCGate must NEVER be used outside a
-// test or a MOCK-only environment; InitiateDepositAttempt takes the gate
-// as a required constructor argument specifically so the caller (the
-// eventual httpserver wiring) cannot forget to pass a real one.
+// CUTOVER (PRH-I1 deposit cutover, ADR 0095 §27): the real gate,
+// KYCEnforcementDepositGate, wraps internal/kyc.EvaluateEnforcement (ADR
+// 0096 §15 implementation record) and is now the ONLY production
+// DepositKYCGate constructed by cmd/platform-api (registrations.go). The
+// earlier explicitly-labeled stand-in, AllowAllDepositKYCGate, has been
+// moved to a _test.go file in this package (kycgate_mock_test.go) - it
+// must never be reachable from non-test code, since it is not "no KYC
+// required by policy", it is "KYC deposit enforcement is NOT ACTIVE".
 package payments
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+
+	"github.com/Diansalas/igaming-platform/internal/kyc"
 )
 
 // DepositKYCGate is the payments-side seam for ADR 0096's deposit
@@ -30,20 +27,42 @@ import (
 // kill-switch predicate, so a deny commits the intent as declined with no
 // attempt row and no provider call - exactly like the existing RG check
 // today.
+//
+// personID is the RG-resolved Person for this deposit (ADR 0096's
+// enforcement key is per Person, not per PlayerAccount - see
+// kyc.EnforcementParams.PersonID's own doc comment) - both call sites
+// (InitiateDepositAttempt's phase A, driveCreatedAttempt's cascade T2)
+// already compute it via rg.EvaluateEligibility immediately before this
+// call, so the gate never needs its own extra identity lookup.
 type DepositKYCGate interface {
 	// EvaluateDeposit reports whether playerAccountID may deposit amount
 	// of assetCode right now. A false result must carry a non-empty,
 	// canonical (never free-text) denyReason.
-	EvaluateDeposit(ctx context.Context, tx pgx.Tx, tenantID, playerAccountID uuid.UUID, amount int64, assetCode string) (allowed bool, denyReason string, err error)
+	EvaluateDeposit(ctx context.Context, tx pgx.Tx, tenantID, brandID, playerAccountID, personID uuid.UUID, amount int64, assetCode string) (allowed bool, denyReason string, err error)
 }
 
-// AllowAllDepositKYCGate is the explicit, clearly-named stand-in used
-// until PRH-I3's real gate lands. It is NOT a default - callers must
-// choose it deliberately, and every constructor that accepts a
-// DepositKYCGate documents that this value means "KYC deposit
-// enforcement is NOT ACTIVE", never "no KYC required by policy".
-type AllowAllDepositKYCGate struct{}
+// KYCEnforcementDepositGate is the real DepositKYCGate, wired to ADR
+// 0096's EvaluateEnforcement. It never calls a KYCProvider/vendor itself
+// (EvaluateEnforcement is a pure DB read plus in-process comparison) and
+// takes no row lock beyond what EvaluateEnforcement's own plain SELECTs
+// take.
+//
+// Any non-nil error from EvaluateEnforcement, or a decision whose Outcome
+// is OutcomeUnavailable, is a DENY (ADR 0096 §2.2/§2.6(c): "any non-nil
+// error is a DENY at the call site"; OutcomeUnavailable already carries
+// Allowed=false), never treated as "no KYC required".
+type KYCEnforcementDepositGate struct{}
 
-func (AllowAllDepositKYCGate) EvaluateDeposit(context.Context, pgx.Tx, uuid.UUID, uuid.UUID, int64, string) (bool, string, error) {
+func (KYCEnforcementDepositGate) EvaluateDeposit(ctx context.Context, tx pgx.Tx, tenantID, brandID, playerAccountID, personID uuid.UUID, amount int64, assetCode string) (bool, string, error) {
+	decision, err := kyc.EvaluateEnforcement(ctx, tx, kyc.EnforcementParams{
+		TenantID: tenantID, BrandID: brandID, PlayerAccountID: playerAccountID, PersonID: personID,
+		Operation: kyc.EnforcementDeposit, AssetCode: assetCode, Amount: amount, CorrelationID: uuid.New(),
+	})
+	if err != nil {
+		return false, "", fmt.Errorf("payments: evaluate kyc enforcement: %w", err)
+	}
+	if !decision.Allowed {
+		return false, decision.Code, nil
+	}
 	return true, "", nil
 }

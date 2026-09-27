@@ -27,6 +27,14 @@ import (
 // a further cascade insert if the outcome is itself an eligible
 // decline). sweeperDriven controls §4.6's interactive-cascade rule (case
 // (a) vs (b)) and is also this call's audit/lease-owner label.
+// redirectURL/hostedFieldToken carry phase B's DepositResult redirect
+// detail back to a SYNCHRONOUS player-request caller (deposit_v2.go) so an
+// interactive (redirect/hosted-field) pending outcome from a cascaded
+// attempt is still returned to the player who made the original HTTP
+// request - the sweeper (sweeperDriven=true) has no synchronous caller and
+// simply ignores these two return values. Neither is persisted: exactly
+// like the pre-cutover InitiateDeposit/attemptDeposit path, they are
+// transient, this-request-only detail, never read back from deposit_intents.
 func (o *Orchestrator) driveCreatedAttempt(
 	ctx context.Context,
 	pool *db.Pool,
@@ -35,7 +43,7 @@ func (o *Orchestrator) driveCreatedAttempt(
 	intent DepositIntent,
 	created PaymentAttempt,
 	sweeperDriven bool,
-) (DepositIntent, PaymentAttempt, *PaymentAttempt, error) {
+) (DepositIntent, PaymentAttempt, *PaymentAttempt, string, string, error) {
 	leaseOwner := "player-request-cascade"
 	if sweeperDriven {
 		leaseOwner = "sweeper"
@@ -48,7 +56,7 @@ func (o *Orchestrator) driveCreatedAttempt(
 		candidates, err = ListRoutingCandidates(actx, tx, intent.TenantID, intent.BrandID)
 		return err
 	}); err != nil {
-		return intent, created, nil, fmt.Errorf("payments: load routing candidates (cascade): %w", err)
+		return intent, created, nil, "", "", fmt.Errorf("payments: load routing candidates (cascade): %w", err)
 	}
 	routedProvider, routedCapability, routeErr := RankRoutingCandidates(ctx, candidates, o.providers, o.breaker, RoutingRequest{
 		TenantID: intent.TenantID, BrandID: intent.BrandID, AssetCode: created.AssetCode,
@@ -88,7 +96,7 @@ func (o *Orchestrator) driveCreatedAttempt(
 			intent, err = o.finalizeDeclined(actx, tx, intent, nil, nil, "rg_ineligible:"+eligibility.Code)
 			return err
 		}
-		allowed, denyReason, err := kycGate.EvaluateDeposit(actx, tx, intent.TenantID, intent.PlayerAccountID, intent.Amount, intent.AssetCode)
+		allowed, denyReason, err := kycGate.EvaluateDeposit(actx, tx, intent.TenantID, intent.BrandID, intent.PlayerAccountID, eligibility.PersonID, intent.Amount, intent.AssetCode)
 		if err != nil {
 			return fmt.Errorf("payments: evaluate deposit kyc gate (cascade T2): %w", err)
 		}
@@ -131,7 +139,7 @@ func (o *Orchestrator) driveCreatedAttempt(
 		return err
 	})
 	if err != nil {
-		return intent, created, nil, err
+		return intent, created, nil, "", "", err
 	}
 	if !claimed {
 		// Rejected pre-call (RG/KYC deny, or no routable provider) - T3,
@@ -139,9 +147,9 @@ func (o *Orchestrator) driveCreatedAttempt(
 		// tx. Re-read the attempt for the caller's own bookkeeping.
 		final, gerr := getAttemptInTenant(ctx, pool, created.TenantID, created.ID)
 		if gerr != nil {
-			return intent, created, nil, gerr
+			return intent, created, nil, "", "", gerr
 		}
-		return intent, final, nil, nil
+		return intent, final, nil, "", "", nil
 	}
 
 	// Phase B.
@@ -154,6 +162,7 @@ func (o *Orchestrator) driveCreatedAttempt(
 	if gr.Attempted {
 		o.breaker.RecordResult(attempt.TenantID, capability.ProviderID, gr.Class)
 	}
+	redirectURL, hostedFieldToken := gr.Value.RedirectURL, gr.Value.HostedFieldToken
 
 	// Phase C, with a possible further cascade insert.
 	var cascadeChild *PaymentAttempt
@@ -167,13 +176,13 @@ func (o *Orchestrator) driveCreatedAttempt(
 		return err
 	})
 	if err != nil {
-		return intent, attempt, nil, err
+		return intent, attempt, nil, "", "", err
 	}
 	final, err := getAttemptInTenant(ctx, pool, attempt.TenantID, attempt.ID)
 	if err != nil {
-		return intent, attempt, nil, err
+		return intent, attempt, nil, "", "", err
 	}
-	return intent, final, cascadeChild, nil
+	return intent, final, cascadeChild, redirectURL, hostedFieldToken, nil
 }
 
 // depositAdapterCall builds the AdapterCall closure Deposit's phase B
@@ -235,12 +244,20 @@ func (o *Orchestrator) applyDepositCallResult(
 		return intent, nil, nil
 
 	case ErrorClassSucceeded:
-		updated, err := o.postDepositSuccess(ctx, tx, intent, capability.ProviderID, res.ProviderReference, attempt.Amount, attempt.AssetCode)
+		// postedTxID (never updated.LedgerTransactionID - PRH-I5 finding,
+		// LF95-C6(a)/T13): a concurrent sibling could have already posted
+		// the intent's FIRST capture between this attempt's own phase B
+		// and this phase C, in which case updated.LedgerTransactionID
+		// still names that first posting while THIS attempt's own
+		// posting (a genuine T13 second capture) got its own, different
+		// transaction id - linking the attempt to the wrong one would
+		// collide with payment_attempts_tenant_ledger_tx.
+		updated, postedTxID, err := o.postDepositSuccess(ctx, tx, intent, capability.ProviderID, res.ProviderReference, attempt.Amount, attempt.AssetCode)
 		if err != nil {
 			return intent, nil, err
 		}
 		if err := ApplySuccess(ctx, tx, attempt.ID, SuccessEvidence{
-			Evidence: evidence, ProviderReference: res.ProviderReference, LedgerTransactionID: updated.LedgerTransactionID,
+			Evidence: evidence, ProviderReference: res.ProviderReference, LedgerTransactionID: &postedTxID,
 		}); err != nil {
 			return intent, nil, err
 		}

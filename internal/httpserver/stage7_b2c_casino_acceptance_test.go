@@ -39,13 +39,13 @@ import (
 func newStage7B2CTestServer(t *testing.T, pool *db.Pool, issuer *auth.Issuer, paymentOrch *payments.Orchestrator, casinoOrch *casino.Orchestrator) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(New(Deps{
-		Logger:                      slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
-		DB:                          pool,
-		AuthIssuer:                  issuer,
-		ServiceName:                 "platform-api-test",
-		AccessTokenTTL:              5 * time.Minute,
-		RefreshTokenTTL:             time.Hour,
-		PaymentOrchestrator:         paymentOrch,
+		Logger:              slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
+		DB:                  pool,
+		AuthIssuer:          issuer,
+		ServiceName:         "platform-api-test",
+		AccessTokenTTL:      5 * time.Minute,
+		RefreshTokenTTL:     time.Hour,
+		PaymentOrchestrator: paymentOrch, PaymentsOutboundCredentials: payments.MockCredentialResolver{},
 		CasinoOrchestrator:          casinoOrch,
 		CasinoOutboundCredentials:   casino.NewMockOutboundResolver(),
 		CasinoPlaySimulationEnabled: true,

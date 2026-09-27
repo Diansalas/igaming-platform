@@ -76,6 +76,20 @@ func toDepositIntentResponse(d payments.DepositIntent) depositIntentResponse {
 	return resp
 }
 
+// toDepositAttemptResponse is toDepositIntentResponse's twin for the
+// InitiateDepositAttempt (ADR 0095 two-phase) cutover path: the response
+// shape is UNCHANGED (the handler contract this task preserves) but
+// RedirectURL/HostedFieldToken now come from InitiateDepositAttemptResult
+// itself (this synchronous call's own phase B DepositResult), never from
+// the intent row, since the new path does not persist them onto
+// deposit_intents (drive.go/deposit_v2.go's own doc comments).
+func toDepositAttemptResponse(res payments.InitiateDepositAttemptResult) depositIntentResponse {
+	resp := toDepositIntentResponse(res.Intent)
+	resp.RedirectURL = res.RedirectURL
+	resp.HostedFieldToken = res.HostedFieldToken
+	return resp
+}
+
 // newInitiateDepositHandler resolves the player's own wallet (creating it
 // on first use for this asset) and drives PaymentOrchestrator.InitiateDeposit.
 // Per payment-orchestration.md §3, every identifying field (tenant, brand,
@@ -126,7 +140,25 @@ func newInitiateDepositHandler(deps Deps) http.HandlerFunc {
 			return
 		}
 
-		var intent payments.DepositIntent
+		if deps.PaymentsOutboundCredentials == nil {
+			// Fail closed (mirrors LaunchGame's identical nil-resolver
+			// convention) - InitiateDepositAttempt's own gate would also
+			// refuse the call, but refusing here avoids opening the
+			// wallet-resolution transaction for a request that can never
+			// succeed.
+			logger.Error("initiate_deposit_no_outbound_credential_resolver")
+			apierror.Write(w, requestID, apierror.CodeUnavailable, "deposits are not enabled on this deployment")
+			return
+		}
+
+		// ADR 0095 §15.1-style split (PRH-I1 deposit cutover): only the
+		// identity/wallet resolution below still needs its own short
+		// tenant-scoped transaction (a cheap, no-vendor-I/O read/get-or-
+		// create) - InitiateDepositAttempt owns its own transaction
+		// boundaries (phase A commits before any provider call; phase B
+		// runs with no transaction held), so it is no longer called from
+		// inside a WithTenant callback.
+		var brandID, walletID uuid.UUID
 		err = deps.DB.WithTenant(r.Context(), tc.TenantID, func(ctx context.Context, tx pgx.Tx) error {
 			account, err := identity.GetPlayerAccountByID(ctx, tx, playerAccountID)
 			if err != nil {
@@ -136,14 +168,21 @@ func newInitiateDepositHandler(deps Deps) http.HandlerFunc {
 			if err != nil {
 				return err
 			}
-			intent, err = deps.PaymentOrchestrator.InitiateDeposit(ctx, tx, payments.InitiateDepositParams{
-				Scope: payments.DepositScope{
-					TenantID: tc.TenantID, BrandID: account.BrandID, PlayerAccountID: playerAccountID, WalletID: wl.ID,
-				},
-				AssetCode: req.AssetCode, Amount: req.Amount, PaymentMethod: req.PaymentMethod, IdempotencyKey: req.IdempotencyKey,
-			})
-			return err
+			brandID, walletID = account.BrandID, wl.ID
+			return nil
 		})
+		var result payments.InitiateDepositAttemptResult
+		if err == nil {
+			result, err = deps.PaymentOrchestrator.InitiateDepositAttempt(
+				r.Context(), deps.DB, payments.KYCEnforcementDepositGate{}, deps.PaymentsOutboundCredentials,
+				payments.InitiateDepositParams{
+					Scope: payments.DepositScope{
+						TenantID: tc.TenantID, BrandID: brandID, PlayerAccountID: playerAccountID, WalletID: walletID,
+					},
+					AssetCode: req.AssetCode, Amount: req.Amount, PaymentMethod: req.PaymentMethod, IdempotencyKey: req.IdempotencyKey,
+				},
+			)
+		}
 		if errors.Is(err, identity.ErrNotFound) {
 			apierror.Write(w, requestID, apierror.CodeNotFound, "player account not found")
 			return
@@ -161,7 +200,7 @@ func newInitiateDepositHandler(deps Deps) http.HandlerFunc {
 			apierror.Write(w, requestID, apierror.CodeInternal, "failed to initiate deposit")
 			return
 		}
-		writeJSON(w, http.StatusCreated, toDepositIntentResponse(intent))
+		writeJSON(w, http.StatusCreated, toDepositAttemptResponse(result))
 	}
 }
 
