@@ -1219,9 +1219,11 @@ closes every one of those:
   `webhook_admission_harness_test.go`'s `newAdmissionTestServer` did not wire. Fixed by
   adding `casino.NewMockOutboundResolver()`. Both tests are green again; M11 was re-run and
   re-confirmed on the merged branch.
-- **T6, closed** (the last named gap): the "B1/B2 moved inside `WithTenant`" mutation is now
-  killed directly, not only through T2b — see M12 (a new pool-acquisition-delta test using
-  the real 10-connection pool).
+- **T6, claimed closed here — corrected by round 5 (see §21.10): this claim was
+  inaccurate.** The "B1/B2 moved inside `WithTenant`" mutation was killed directly for
+  PAYMENTS only (M12); security's round-4 re-verification (§7.2/§7.5) found the identical
+  mutation SURVIVED for casino and KYC, since M12/T6g only covered payments. §21.10 records
+  round 5's fix (extending T6g to all three domains).
 - **C1, closed.** A test-only `dbGateAcquirer` interface (satisfied by `*admission.Bulkhead`
   in production) lets a new isolating HTTP-level test per domain
   (`webhook_admission_c1_isolating_integration_test.go`) substitute a call-counting fake gate
@@ -1234,11 +1236,14 @@ closes every one of those:
   `ReasonAdmissionUnavailable` branch) and, together with a new cheap unit test in
   `internal/webhookauth`, N4 (the `reasonForResolveError` case). The same seam's payments/
   casino tests also kill N1 (a `gatedReader` bypass), closing T4's own remaining gap.
-- **C3, closed** (part 2, route completeness). The route guard now DISCOVERS every
-  `/v1/webhooks/` route by walking `HandleFunc`/`Handle` call sites in the package's own
-  non-test files and resolving each handler argument to a named, in-package constructor,
-  instead of checking a maintained list of three names. This kills N2 (a fourth, unguarded
-  webhook route).
+- **C3, claimed closed here — corrected by round 5 (see §21.10): this claim was
+  inaccurate.** The route guard was rewritten to DISCOVER every `/v1/webhooks/` route by
+  walking `HandleFunc`/`Handle` call sites instead of checking a maintained list of three
+  names, and this killed N2 (a fourth, unguarded webhook route with a literal pattern).
+  Security's round-4 re-verification (§7.3/§7.5) found the guard only fails closed on an
+  unresolvable HANDLER, not an unresolvable PATTERN — N2b (the same route behind a package
+  `const`) and N2c (registered through a helper whose own inner call uses a non-literal
+  pattern) both evaded it. Narrowed to Low (L8). §21.10 records round 5's one-line fix.
 - **L6/N5, closed.** A3's own adapter-declared-503 switch (the ADR's §6.1/§6.3 amendment from
   round 3) now has its own test, `TestAdmission_T14b_A3AdapterDeclaredStatus_No429Retry`
   (T14's A3 mirror), killing N5.
@@ -1252,3 +1257,45 @@ closes every one of those:
 
 Full mutation-kill evidence: `docs/plans/payment-readiness/evidence/prh-i4-mutation-kill.txt`
 (M12–M17, round 4 section, plus the CI-red fix and the re-confirmed M11).
+
+**Correction (round 5):** security's second re-verification (`rv-prh-i4-security.md` §7)
+found this section's T6 and C3 "closed" claims to be inaccurate: T6g's B1-inside-`WithTenant`
+kill covered payments only (casino and KYC mutants survived), and the C3 route guard failed
+to fail closed on a non-literal route pattern (N2b/N2c). §21.10 records round 5's fix for
+both.
+
+### 21.10 Round 5 follow-up (security re-verification #2, `rv-prh-i4-security.md` §7, APPROVE WITH CONDITIONS)
+
+Security's second re-verification found round 4's own "T6 closed" and "C3 closed" claims
+(§21.9) did not fully hold:
+
+- **T6 (Medium), now closed.** `TestAdmission_T6g_B1RunsBeforeWithTenant_ExactPoolAcquisitionCounts`
+  is now table-driven across all three domains (payments, casino, kyc), each with its own
+  setup, and the B1-inside-`WithTenant` mutation is killed in casino and KYC exactly as it
+  already was in payments. Per security's Info I5, the test no longer asserts a bare
+  `limited < admitted` inequality: it pins the EXACT expected acquisition delta per domain
+  (payments: 3 admitted / 2 limited; casino: 2 admitted / 1 limited; kyc: 2 admitted / 1
+  limited), measured empirically against the real 10-connection pool, so a future change that
+  widens the margin (e.g. adding an acquisition to the admitted path only) fails loudly
+  instead of silently.
+- **C3 / L8 (Low), now closed.** The route guard additionally scans EVERY
+  `HandleFunc`/`Handle` call in the package's own non-test files (not only the ones whose
+  pattern already resolved to a literal containing `/v1/webhooks/`) and fails the whole test
+  if any such call's first argument is not a string literal. This kills both N2b (a route
+  pattern behind a package `const`) and N2c (a route registered through a helper whose own
+  inner call forwards a non-literal pattern) - both are `HandleFunc`/`Handle` calls with a
+  non-literal first argument, so the one additional, package-wide rule catches both without
+  needing to specifically resolve a const's value or trace a helper's parameter.
+- **Info I5 (recommended, done):** exact deltas pinned per domain, as above.
+- **Info I6 (recommended, done):** `countingGate` (the C1-isolating tests' fake gate) now
+  asserts every `Acquire` call uses the EXACT expected key
+  (`domain|tenantSlug|providerID`), failing immediately on a mismatch - closes the gap where
+  the fake would previously admit/refuse purely by call count, regardless of key, and so
+  could not have caught a regression that gated credential resolution on the wrong A4b key.
+- **Info I7 (recommended, done):** the KYC subtest's zero-row assertion now checks
+  `kyc_verifications` directly (no row created/changed for a B1-limited callback's own
+  reference) instead of the vacuous ledger-row check KYC never exercises (KYC writes no
+  ledger rows at all).
+
+Full mutation-kill evidence: `docs/plans/payment-readiness/evidence/prh-i4-mutation-kill.txt`
+(round 5 section: B1-casino, B1-kyc, N2b, N2c).

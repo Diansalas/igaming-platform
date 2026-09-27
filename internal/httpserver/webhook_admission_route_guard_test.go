@@ -15,6 +15,24 @@
 // argument to a named, in-package constructor function, and checks THAT
 // function's own body - so a fourth route is caught at its very first
 // registration, with no list to remember to update.
+//
+// Security re-verification #2 (rv-prh-i4-security.md §7.3/§7.5, C3
+// narrowed to Low L8): the round-4 guard above only considered a first
+// argument that is an *ast.BasicLit and silently SKIPPED anything else -
+// which N2b (a route pattern behind a package `const`) and N2c (a route
+// registered through a helper that itself calls `m.HandleFunc(p, h)` with
+// a non-literal `p`) both evade, since neither one's pattern is a literal
+// AT THE POINT this guard used to look. Per security's explicit
+// requirement ("fail on any pattern it cannot resolve" - not just skip
+// it), this version additionally scans EVERY HandleFunc/Handle call in
+// the package's own non-test files - not only the ones whose (already
+// resolved) pattern happens to contain "/v1/webhooks/" - and fails the
+// whole test outright if any such call's first argument is not a literal
+// string. Security's own audit found all 152 current registrations use a
+// literal pattern, so this costs nothing today and closes both evasions:
+// N2b's direct call and N2c's helper's own inner call are both
+// HandleFunc/Handle calls with a non-literal first argument, so both are
+// caught by this one additional, package-wide rule.
 package httpserver
 
 import (
@@ -99,6 +117,7 @@ func TestWebhookRouteGuard_EveryHandlerCallsAdmissionAndRedaction(t *testing.T) 
 	}
 
 	var routes []discoveredWebhookRoute
+	var nonLiteralFailures int
 	for name, f := range files {
 		ast.Inspect(f, func(n ast.Node) bool {
 			call, ok := n.(*ast.CallExpr)
@@ -114,6 +133,19 @@ func TestWebhookRouteGuard_EveryHandlerCallsAdmissionAndRedaction(t *testing.T) 
 			}
 			lit, ok := call.Args[0].(*ast.BasicLit)
 			if !ok || lit.Kind != token.STRING {
+				// Security re-verification #2 (§7.3, L8): a HandleFunc/
+				// Handle call whose pattern is not a string literal - a
+				// package const (N2b) or a variable/parameter forwarded by
+				// a registration helper (N2c) - cannot be resolved to a
+				// concrete route pattern by this guard at all, so it
+				// fails CLOSED here instead of silently skipping the call
+				// (which is exactly how N2b/N2c evaded the round-4 guard).
+				t.Errorf("%s: a %s call's first argument is not a string literal - this guard cannot "+
+					"determine whether it registers a /v1/webhooks/ route, and per security review C3/L8 "+
+					"an unresolvable route-registration pattern fails this guard closed rather than being "+
+					"silently skipped (use a literal string pattern, or extend this guard to resolve the "+
+					"const/variable in question)", name, sel.Sel.Name)
+				nonLiteralFailures++
 				return true
 			}
 			pattern := strings.Trim(lit.Value, "\"`")
@@ -129,6 +161,10 @@ func TestWebhookRouteGuard_EveryHandlerCallsAdmissionAndRedaction(t *testing.T) 
 			routes = append(routes, route)
 			return true
 		})
+	}
+	if nonLiteralFailures > 0 {
+		t.Fatalf("%d HandleFunc/Handle call(s) with an unresolvable (non-literal) pattern - see the errors "+
+			"above; this guard cannot verify those routes go through admission (security review C3/L8)", nonLiteralFailures)
 	}
 
 	if len(routes) == 0 {
