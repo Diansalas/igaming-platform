@@ -101,3 +101,27 @@ now present and substantive (1b, 3, 4, 5a, 5b), plus #2 with a precision gap. Wh
 5. A `ledger-finance` gate review of the deposit-side lock sequence, once items 1 and 2 land. The
    payout side is already reviewed.
 6. Correct the ADR's status line from "NOT IMPLEMENTED" to "PARTIALLY IMPLEMENTED".
+
+---
+
+# FH-6 round 2 confirmation (`b7f84ec`)
+
+Same environment as the payout confirmation in `rv-prh-i1-payout-ledger.md`.
+
+- **A7-C1: closed.** All three #2 tests now assert that the blocked backend's query contains
+  `INSERT INTO payment_provider_events` (`loBackendQuery`), and each ends with
+  `loAssertProjectionMatchesRebuild`. Mutation check: moving the deposit receipt insert after the
+  intent `FOR UPDATE` fails
+  `TestReceiveCallback_ConcurrentDuplicateCallbacks_SecondBlocksOnReceiptKey` and
+  `TestWebhook_ConcurrentDuplicates_SecondBlocksOnReceiptKey`. The F7 reversal test covers the
+  separate reversal path, which that mutant does not touch.
+- **§1.6/§1.7 as-built rows: present.** They cover `InitiateDepositAttempt`,
+  `driveCreatedAttempt`, `ApplyReceiptEvidence`, `ClaimForDispatch` (T1p), `claimBatch` (with V1)
+  and the withdrawal-side locks. I checked the `ApplyReceiptEvidence` row against the code at
+  `b7f84ec`: R0 is inserted before the parent `FOR UPDATE`, which matches the row.
+- **Status line: now `PARTIALLY IMPLEMENTED`. Confirmed.**
+- **Still open before `IMPLEMENTED`:**
+  1. #1a (deposit-intent sweeper/callback/phase-C race), owned by the double-credit fix.
+  2. #5c for the tombstone branch, together with the A7-TOMB-1 fix. The mutation check above
+     covers the main deposit receipt path only, not the tombstone branch.
+  3. The `ledger-finance` gate review of the deposit-side sequence, once 1 and 2 land.

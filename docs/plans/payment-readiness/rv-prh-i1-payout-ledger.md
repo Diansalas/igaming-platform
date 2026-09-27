@@ -675,3 +675,23 @@ Neither change was committed; both were reverted in the scratch worktree.
 
 Unchanged: R5/CP-W1, HD-0095-1 (BLOCKED), and the S-L1/S-L3/S-L4/destination-binding launch
 conditions.
+
+---
+
+# FH-6 round 2 confirmation (`b7f84ec`)
+
+- Environment: a detached worktree and a private DB `igaming_lf_fh6r2` (migrated 1→106), both
+  removed. No sudo, no role or password changes.
+- Results: full `internal/payments` and `internal/withdrawal` suites and the `internal/httpserver`
+  withdrawal tests pass; the A7/R0/SL2/PC3/SM2 subset passes under `-race -count=2`; pinned lint
+  reports 0 issues (untagged and `integration`).
+
+| Condition | Result |
+|---|---|
+| **P-C1** | **Closed.** The V1 predicate is in `claimBatch` (`AND NOT (state = 'submitting' AND lease_until > now() AND lease_owner IS DISTINCT FROM $3)`, bound to `SweeperBatchLeaseOwner`). My SP-C probe now passes: the stale-`/resolve` reschedule is not claimed (`claimed=0`) and the row stays `submitting` under its T12 lease. Removing V1 fails both my probe and the permanent `payout_security_round_test.go:TestClaimBatch_SL2_SPC_StaleSnapshotNeverRelabelsALiveSubmittingLease`. |
+| **P-C2** | **Closed.** The launch-conditions addendum now gives the correct root cause (phase C leaves `submitting` with the lease still live) and the fix restricted to `submitting`. |
+| **P-C3** | **Closed.** `TestEscalate_PC3_RefusesOnATerminalAttempt_StaleSnapshot` kills the mutant that removes the Escalate terminal-state predicate. `payoutResolveAudit` now reads the before-state (attempt and withdrawal) inside the transaction after `LockForPayoutEvidence`, and records `no_op`. The no-reference branch of `PollPayoutStatus` now also locks the withdrawal before the attempt. The conflict handling in `escalateAmbiguousPayout` now re-reads the attempt and treats the conflict as a no-op only when the attempt is terminal or already escalated. |
+
+S-L2/SP-C is closed. The payout-sweeper wiring gate from my FH-6 ruling is lifted as far as SP-C
+is concerned. R5/CP-W1, HD-0095-1 (BLOCKED) and the S-L1/S-L3/S-L4/destination-binding launch
+conditions are unchanged.
