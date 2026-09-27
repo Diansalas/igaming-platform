@@ -293,6 +293,16 @@ func (rt *webhookAdmissionRuntime) logRejected(ctx context.Context, tier string,
 //
 // A nil receiver always admits (admission disabled) with a no-op release.
 func (rt *webhookAdmissionRuntime) admitPreAuth(w http.ResponseWriter, r *http.Request, domain webhookDomain, trustedProxyCount int, schemeRegistered func(string) bool) (release func(), ok bool) {
+	// RL-F4 (ADR 0097 §8/§17 devops condition 3): every webhook request,
+	// admission enabled or not, gets its access-log/panic-recovery path
+	// redacted to the matched route pattern - see RequestState.LogPath's
+	// own doc comment for why this must be set here (r.Pattern is
+	// reliably populated at this point) rather than read directly by the
+	// outer logging middleware.
+	if rs := observability.RequestStateFromContext(r.Context()); rs != nil {
+		rs.LogPath = r.Pattern
+	}
+
 	noop := func() {}
 	if rt == nil {
 		return noop, true

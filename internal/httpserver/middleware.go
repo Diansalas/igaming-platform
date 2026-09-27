@@ -60,6 +60,22 @@ func (r *statusRecorder) WriteHeader(status int) {
 	r.ResponseWriter.WriteHeader(status)
 }
 
+// logPathFor returns the value the access log (and the panic-recovery
+// line below) should record for r's path (RL-F4, ADR 0097 §8/§17 devops
+// condition 3). admitPreAuth (webhook_admission.go) sets
+// RequestState.LogPath to the MATCHED ROUTE PATTERN (r.Pattern, e.g.
+// "POST /v1/webhooks/payments/{tenantSlug}/{providerID}") for every
+// webhook request - never a path-prefix string match, which a crafted
+// path could bypass - because the attacker-chosen {tenantSlug}/
+// {providerID} segments are bounded only by MaxHeaderBytes. Every other
+// route keeps logging the real r.URL.Path unchanged.
+func logPathFor(r *http.Request) string {
+	if rs := observability.RequestStateFromContext(r.Context()); rs != nil && rs.LogPath != "" {
+		return rs.LogPath
+	}
+	return r.URL.Path
+}
+
 // loggingMiddleware emits one structured log line per request. This is
 // intentionally simple (method, path, status, duration, request/tenant
 // id) - richer request/response tracing comes from OpenTelemetry spans,
@@ -72,7 +88,7 @@ func loggingMiddleware(logger *slog.Logger) func(http.Handler) http.Handler {
 			next.ServeHTTP(rec, r)
 			observability.LoggerFromContext(r.Context(), logger).Info("http_request",
 				"method", r.Method,
-				"path", r.URL.Path,
+				"path", logPathFor(r),
 				"status", rec.status,
 				"duration_ms", time.Since(start).Milliseconds(),
 			)
@@ -91,7 +107,7 @@ func recoverMiddleware(logger *slog.Logger) func(http.Handler) http.Handler {
 					requestID := observability.RequestIDFromContext(r.Context())
 					observability.LoggerFromContext(r.Context(), logger).Error("panic_recovered",
 						"panic", rec,
-						"path", r.URL.Path,
+						"path", logPathFor(r),
 					)
 					apierror.Write(w, requestID, apierror.CodeInternal, "internal server error")
 				}
