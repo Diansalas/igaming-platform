@@ -3935,7 +3935,7 @@ boundary (F-POOL-2 + PROV-OUTBOUND-CRED-1 + payment contract + capability/kill s
 reconciliation), ADR 0096 KYC enforcement, ADR 0097 webhook admission/rate limiting. Migrations:
 0099 provider-reference bound; 0100 KYC enforcement policy + decision audit (re-allocated 2026-09-27,
 was 0101 — KYC is implemented first and migrations must be gap-free); 0101 payment attempts / provider-operation
-state (was 0100); 0102 payment statement reconciliation (MOCK); **0103 KYC policy supersession (security F3 DB-level closure, DR-PRHI3-07; allocated 2026-09-27)**; **0104 capability manifest + kill switch** (moved from 0103 because the kill switch is not built yet and migrations must be gap-free; originally swapped 2026-09-27 so PRH-I5 can proceed in parallel with the payments cutover without a migration gap; ADR 0095 text still says 0102 kill switch / 0103 reconciliation — read as swapped)
+state (was 0100); 0102 payment statement reconciliation (MOCK); **0103 KYC policy supersession (security F3 DB-level closure, DR-PRHI3-07; allocated 2026-09-27)**; **0104 payment-statement DB CHECKs for merchant_reference/asset_code (PRH-I5 security C2 DB half; allocated 2026-09-27)**; **0105 capability manifest + kill switch** (moved again from 0104, then originally from 0103 because the kill switch is not built yet and migrations must be gap-free; originally swapped 2026-09-27 so PRH-I5 can proceed in parallel with the payments cutover without a migration gap; ADR 0095 text still says 0102 kill switch / 0103 reconciliation — read as swapped)
 (MOCK). A migration number is re-allocated only by the Orchestrator.
 
 | ID | Owner (reviewers) | Status | Scope | Depends on |
