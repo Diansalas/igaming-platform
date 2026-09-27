@@ -182,6 +182,23 @@ flowchart LR
   proving the run writes nothing outside `reconciliation_runs` /
   `reconciliation_mismatches`.
 
+  **Implementation status (PRH-I5, 2026-09-27, `ledger-finance`):
+  `IMPLEMENTED` against a `MOCK` source; real PSP statement matching
+  `PROVIDER DEPENDENT`; pending gate review.** Stream
+  `internal/reconciliation/payment_statement.go`, **migration 0102** (the
+  orchestrator swapped 0102/0103; the amendment's "migration 0103" reads as
+  0102), source `payments.MockStatementSource` (the MockProvider's own
+  per-tenant records, never the platform DB; refused in production). Points
+  1–7 above are enforced in code. The LF95-C13 ledger join and the
+  statement-capture test are covered by tests (the per-tenant advisory lock
+  of point 5 reuses the other streams' pattern and has no dedicated
+  contention test for this stream); 28/28 mutations killed
+  (`docs/plans/payment-readiness/evidence/prh-i5-mutation-kill.txt`). Point 2's
+  automatic re-drive job (LF95-R1) is `NOT IMPLEMENTED` (deferred, owner
+  `payments`); remediation today is an operator T17 followed by the
+  sweeper's `QueryStatus`, proven end to end. Deviations and residuals:
+  ADR 0095 §12.7.
+
 ### 2.3 Wallet ↔ casino provider — `BLUEPRINT`
 
 - **Reconciliation key**: `(provider_id, provider_tx_id)` for bet/win/

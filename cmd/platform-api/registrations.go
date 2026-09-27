@@ -29,12 +29,16 @@ import (
 // what main() actually wires (Stage 10.3, MOCK-ADAPTER-PROD-1; security
 // condition C13 point 3, "coverage must be all-of-main").
 type providerBundle struct {
-	Payments        *payments.MockProvider
-	Casino          *casino.MockCasinoProvider
-	KYC             *kyc.MockKYCProvider // nil unless wiring.KYCWebhookEnabled (ADR 0085 "absent", not merely unwired)
-	Sportsbook      *sportsbook.MockSportsbookProvider
-	SettlementStmt  sportsbook.MockSettlementStatementSource
-	CasinoStmt      casino.MockStatementSource // Stage 10.3 W3a, CAS-RECON-STMT-1 (MOCK)
+	Payments       *payments.MockProvider
+	Casino         *casino.MockCasinoProvider
+	KYC            *kyc.MockKYCProvider // nil unless wiring.KYCWebhookEnabled (ADR 0085 "absent", not merely unwired)
+	Sportsbook     *sportsbook.MockSportsbookProvider
+	SettlementStmt sportsbook.MockSettlementStatementSource
+	CasinoStmt     casino.MockStatementSource // Stage 10.3 W3a, CAS-RECON-STMT-1 (MOCK)
+	// PaymentsStmt is the payment_statement stream's source (PRH-I5, ADR
+	// 0095 §12.4; MOCK): the Payments MockProvider's own records, fetched
+	// through the provider-call gate with the MOCK outbound credential.
+	PaymentsStmt    *payments.MockStatementSource
 	PersonResolver  *identityresolution.MockPersonResolver
 	DocumentStorage *kyc.MockDocumentStorageProvider
 	MalwareScanner  kyc.MockMalwareScanner
@@ -159,6 +163,7 @@ func buildProviderBundle(wiring mockWiring) providerBundle {
 		MalwareScanner:  kyc.NewMockMalwareScanner(),
 		Email:           email.NewMockProvider(),
 	}
+	b.PaymentsStmt = payments.NewMockStatementSource(b.Payments, payments.MockCredentialResolver{})
 	if wiring.PaymentsWebhookResolver {
 		b.PaymentsWebhookResolver = payments.NewMockWebhookCredentials(b.Payments)
 	}
@@ -267,6 +272,7 @@ func buildRegistrations(_ config.Config, b providerBundle) []providerkind.Regist
 		{Domain: "sportsbook", Name: "catalogue_provider", Component: b.Sportsbook},
 		{Domain: "sportsbook", Name: "settlement_statement_source", Component: b.SettlementStmt},
 		{Domain: "casino", Name: "statement_source", Component: b.CasinoStmt},
+		{Domain: "payments", Name: "statement_source", Component: b.PaymentsStmt},
 		{Domain: "identity_resolution", Name: "person_resolver", Component: b.PersonResolver},
 		{Domain: "kyc", Name: "document_storage", Component: b.DocumentStorage},
 		{Domain: "kyc", Name: "malware_scanner", Component: b.MalwareScanner},

@@ -1,0 +1,148 @@
+PRH-I5 (ADR 0095 §12, §16.3/§16.4; payment_statement stream) mutation-kill evidence
+==================================================================================
+
+Method: committed, re-runnable harness docs/plans/payment-readiness/evidence/prh-i5-mutate.py.
+One anchored, exact-match mutation at a time. Source mutations restore the original file
+content afterwards (including for untracked files); DB mutations drop a trigger on
+TEST_DATABASE_URL and re-create it. Each named test must FAIL; the full PRH-I5 suite
+(PaymentStatement|Migration0102) is re-run after the last restore and must PASS.
+
+Environment: private PostgreSQL database igaming_prh_i5 (created with the CI-only
+igaming_test_admin role, owned by igaming, migrated through 0102, runtime-role grants applied
+from deploy/init-app-role.sql), plus scratch databases for the 0102 migration tests. Go 1.26.8.
+Date: 2026-09-27.
+
+MX9 (ADR 0095 §16.4, "let the reconciliation stream call ledger.Post") = PM23 below.
+PM24 is its attempt-table twin: the stream re-driving attempts itself (LF95-R1 done inside
+the stream, which §12.5 forbids).
+
+Equivalent mutant, recorded and not counted: the first PM22 ("ON CONFLICT DO NOTHING" with no
+conflict target) SURVIVED because it absorbs the same unique violation, so it behaves
+identically. It was replaced by removing the clause (PM22 below).
+
+Harness output (second, complete run):
+
+PM1 KILLED: pay_duplicate: never detect a duplicate statement line
+    file: internal/reconciliation/payment_statement.go
+    test: TestPaymentStatement_Kind_Duplicate$
+    fail: payment_statement_integration_test.go:512: expected exactly one pay_duplicate mismatch, got 2:
+PM2 KILLED: pay_duplicate: drop the platform-side >1 succeeded attempt per intent check
+    file: internal/reconciliation/payment_statement.go
+    test: TestPaymentStatement_Kind_DuplicatePlatformSuccess$
+    fail: payment_statement_integration_test.go:549: expected exactly one pay_duplicate mismatch, got 0:
+PM3 KILLED: pay_missing_platform_record: an unresolvable line is silently skipped
+    file: internal/reconciliation/payment_statement.go
+    test: TestPaymentStatement_Kind_MissingPlatformRecord$
+    fail: payment_statement_integration_test.go:560: expected exactly one pay_missing_platform_record mismatch, got 0:
+PM4 KILLED: pay_missing_provider_record: a succeeded attempt with no line is not flagged
+    file: internal/reconciliation/payment_statement.go
+    test: TestPaymentStatement_Kind_MissingProviderRecord$
+    fail: payment_statement_integration_test.go:572: expected exactly one pay_missing_provider_record mismatch, got 0:
+PM5 KILLED: pay_amount_mismatch: amounts never compared
+    file: internal/reconciliation/payment_statement.go
+    test: TestPaymentStatement_Kind_AmountMismatch_MockNative$
+    fail: payment_statement_integration_test.go:583: expected exactly one pay_amount_mismatch mismatch, got 0:
+PM6 KILLED: pay_asset_mismatch: amount checked before asset (asset only when amounts agree)
+    file: internal/reconciliation/payment_statement.go
+    test: TestPaymentStatement_Kind_AssetMismatch_CheckedBeforeAmount$
+    fail: payment_statement_integration_test.go:593: expected kind pay_asset_mismatch, got pay_amount_mismatch:
+PM7 KILLED: pay_reference_mismatch: merchant-reference resolution never compares references
+    file: internal/reconciliation/payment_statement.go
+    test: TestPaymentStatement_Kind_ReferenceMismatch$
+    fail: payment_statement_integration_test.go:604: expected exactly one pay_reference_mismatch mismatch, got 0:
+PM8 KILLED: pay_status_mismatch: provider-succeeded vs platform-unposted not flagged (LF-C1(b))
+    file: internal/reconciliation/payment_statement.go
+    test: TestPaymentStatement_Kind_StatusMismatch_DroppedSuccessCallback$|TestPaymentStatement_LFC1b_
+    fail: payment_statement_integration_test.go:613: expected exactly one pay_status_mismatch mismatch, got 0:
+    fail: payment_statement_integration_test.go:1138: expected exactly one pay_status_mismatch mismatch, got 0:
+PM9 KILLED: pay_status_mismatch: provider declined vs platform succeeded not flagged
+    file: internal/reconciliation/payment_statement.go
+    test: TestPaymentStatement_Kind_StatusMismatch_ProviderDeclinedPlatformSucceeded$
+    fail: payment_statement_integration_test.go:622: expected exactly one pay_status_mismatch mismatch, got 0:
+PM10 KILLED: pay_unresolved: the horizon gate removed (in-flight flagged at once)
+    file: internal/reconciliation/payment_statement.go
+    test: TestPaymentStatement_Kind_Unresolved_OnlyPastHorizon$|TestPaymentStatement_CleanMockRunOverMixedHistory$
+    fail: payment_statement_integration_test.go:469: expected a clean payment_statement run for mock-psp-recon-a, got mismatches_found with 1 mismatches:
+    fail: payment_statement_integration_test.go:628: expected a clean payment_statement run for mock-psp-recon-a, got mismatches_found with 1 mismatches:
+PM11 KILLED: pay_unresolved: deferred verified receipts never checked (LF95-C5)
+    file: internal/reconciliation/payment_statement.go
+    test: TestPaymentStatement_UnresolvedDeferredReceipt$
+    fail: payment_statement_integration_test.go:655: expected exactly one pay_unresolved mismatch, got 0:
+PM12 KILLED: coverage window ignored for unmatched attempts
+    file: internal/reconciliation/payment_statement.go
+    test: TestPaymentStatement_CoverageWindow_RestartIsNotAFalseAlarm$
+    fail: payment_statement_integration_test.go:857: expected a clean payment_statement run for mock-psp-recon-a, got mismatches_found with 1 mismatches:
+PM13 KILLED: LF95-C13 (a): a succeeded payout without its posting is not flagged
+    file: internal/reconciliation/payment_statement.go
+    test: TestPaymentStatement_LedgerJoin_SucceededPayoutWithoutPosting$
+    fail: payment_statement_integration_test.go:768: expected exactly one pay_status_mismatch mismatch, got 0:
+PM14 KILLED: LF95-C13 (b): a posting with no succeeded attempt is not flagged
+    file: internal/reconciliation/payment_statement.go
+    test: TestPaymentStatement_LedgerJoin_PostingWithNoAttempt$|TestPaymentStatement_SnapshotConsistency
+    fail: payment_statement_integration_test.go:792: expected exactly one pay_missing_platform_record mismatch, got 0:
+    fail: payment_statement_integration_test.go:932: expected exactly one pay_missing_platform_record mismatch, got 0:
+PM15 KILLED: LF95-C13: payout lines no longer match on the settlement reference
+    file: internal/reconciliation/payment_statement.go
+    test: TestPaymentStatement_Payout_SettlementReferenceOnlyIsAMatch$
+    fail: payment_statement_integration_test.go:758: expected a clean payment_statement run for mock-psp-recon-a, got mismatches_found with 2 mismatches:
+PM16 KILLED: INV-IO-14/S95-C1 (MX15 analogue): attempts of every provider are resolvable
+    file: internal/reconciliation/payment_statement.go
+    test: TestPaymentStatement_CrossProviderLineNeverMatches$
+    fail: payment_statement_integration_test.go:833: expected exactly one pay_missing_platform_record mismatch, got 0:
+PM17 KILLED: reversal: a tombstone no longer pairs with a provider reversal line
+    file: internal/reconciliation/payment_statement.go
+    test: TestPaymentStatement_Reversal$
+    fail: payment_statement_integration_test.go:809: expected a clean payment_statement run for mock-psp-recon-a, got mismatches_found with 1 mismatches:
+PM18 KILLED: INV-IO-1: the stream calls Fetch under a held transaction
+    file: internal/reconciliation/payment_statement.go
+    test: TestPaymentStatement_FetchRunsWithNoTransactionHeld$
+    fail: payment_statement_integration_test.go:894: stream fetch under tx: expected ErrPaymentFetchUnderTx, got <nil>
+PM19 KILLED: INV-IO-1: the sweep fetches inside the ingest transaction
+    file: internal/reconciliation/scheduler.go
+    test: TestPaymentStatement_FetchRunsWithNoTransactionHeld$
+    fail: payment_statement_integration_test.go:886: expected a clean run, got {... Err:reconciliation: payment_statement fetch phase: reconciliation: payment statement fetch refused: a database transaction is held (INV-IO-1)}
+PM20 KILLED: REPEATABLE READ no longer required
+    file: internal/reconciliation/payment_statement.go
+    test: TestPaymentStatement_RefusesOutsideRepeatableRead$
+    fail: payment_statement_integration_test.go:876: expected a READ COMMITTED run to be refused, got <nil>
+PM21 KILLED: S95-C11: the per-import line cap is not enforced
+    file: internal/reconciliation/payment_statement.go
+    test: TestPaymentStatement_LineCapRefusesAndStoresNothing$
+    fail: payment_statement_integration_test.go:1040: expected ErrPaymentStatementTooLarge, got <nil>
+PM22 KILLED: ingest not idempotent: the re-fetch of identical content is not absorbed
+    file: internal/reconciliation/payment_statement.go
+    test: TestPaymentStatement_IngestIsIdempotent$
+    fail: payment_statement_integration_test.go:990: IngestPaymentStatement: reconciliation: insert payment statement import: ERROR: duplicate key value violates unique constraint "payment_statement_imports_tenant_id_provider_id_source_labe_key" (SQLSTATE 23505)
+PM23 KILLED: MX9: the stream writes the ledger (ledger.Post from the match)
+    file: internal/reconciliation/payment_statement.go
+    test: TestPaymentStatement_NoFinancialEffect$
+    fail: payment_statement_integration_test.go:487: INV-IO-12: ledger written by the match: tx 5->6 entries 8->8
+PM24 KILLED: INV-IO-12: the stream re-drives attempts itself (writes payment_attempts)
+    file: internal/reconciliation/payment_statement.go
+    test: TestPaymentStatement_NoFinancialEffect$
+    fail: payment_statement_integration_test.go:487: INV-IO-12: an attempt, intent, receipt or withdrawal row changed during the match
+PM25 KILLED: MOCK source renders every tenant's records (tenant tag ignored)
+    file: internal/payments/mock_statement_source.go
+    test: TestPaymentStatement_RLS_CrossTenant$
+    fail: payment_statement_integration_test.go:977: expected a clean payment_statement run for mock-psp-recon-a, got mismatches_found with 1 mismatches:
+PM26 KILLED: append-only: the lines UPDATE/DELETE trigger dropped
+    sql: DROP TRIGGER payment_statement_lines_immutable ON payment_statement_lines
+    test: TestPaymentStatement_StoreIsAppendOnly$
+    fail: payment_statement_integration_test.go:1024: expected "UPDATE payment_statement_lines SET amount = 2 WHERE import_id = $1" to be refused
+    fail: payment_statement_integration_test.go:1024: expected "DELETE FROM payment_statement_lines WHERE import_id = $1" to be refused
+PM27 KILLED: line count not bound to stored rows (statement-level cap trigger dropped)
+    sql: DROP TRIGGER payment_statement_lines_count_cap ON payment_statement_lines
+    test: TestPaymentStatement_StoreIsAppendOnly$
+    fail: payment_statement_integration_test.go:1024: expected "INSERT INTO payment_statement_lines (...) SELECT ... 99 ... 'late' ..." to be refused
+PM28 KILLED: short import accepted (deferred exact-count trigger dropped)
+    sql: DROP TRIGGER payment_statement_imports_count_exact ON payment_statement_imports
+    test: TestPaymentStatement_OversizedFieldsRefused$
+    fail: payment_statement_integration_test.go:1094: short_line_count: expected the database to refuse
+
+baseline after restore: PASS
+total: 28 killed, 0 survived
+
+Not mutated (and why): the MOCK label/`providerkind` guard is a pure structural check covered by
+TestPaymentStatement_MockSourceRefusedInProduction and cmd/platform-api's
+TestBuildRegistrations_RegistersResolversAndSchemes (removing SyntheticComponent from
+MockStatementSource also trips internal/providerkind's completeness scan).

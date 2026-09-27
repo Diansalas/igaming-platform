@@ -163,7 +163,10 @@ func safeCall[T any](ctx context.Context, cc CallContext, fn AdapterCall[T]) (re
 			result, class, err = zero, ErrorClassAmbiguous, fmt.Errorf("payments: adapter panic recovered: %v", r)
 		}
 	}()
-	return fn(ctx, cc)
+	// PRH-I5: the CallContext also rides on ctx so a MOCK adapter can tag
+	// its own records with the calling tenant (MockStatementSource). A
+	// real adapter uses the cc argument; nothing reads this for routing.
+	return fn(withCallContext(ctx, cc), cc)
 }
 
 // redactedReason returns an allow-listed description of err: for a

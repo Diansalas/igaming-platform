@@ -334,7 +334,9 @@ jobs:
                    TestInitAppRole_RerunKeepsProviderCredentialGrants TestPCMigration_RuntimeGrantsMinimal \
                    TestMigration0097_DownRefusesOnceARejectionRowExists TestMigration0097_DownRefusesOnceACasinoMismatchExists \
                    TestMigration0098_DownRefusesOnceAStatementMismatchExists TestMigration0098_CleanDatabaseDownThenUpRoundTrip \
-                   TestMigration0099_UpEnforcesBoundDownDropsItRoundTrip TestMigration0099_PreflightFailsLoudlyWithCountsAndChangesNothing; do
+                   TestMigration0099_UpEnforcesBoundDownDropsItRoundTrip TestMigration0099_PreflightFailsLoudlyWithCountsAndChangesNothing \
+                   TestMigration0102_CleanDatabaseDownThenUpRoundTrip TestMigration0102_DownRefusesOnceAStatementExists \
+                   TestInitAppRole_RerunKeepsPaymentStatementGrants TestPaymentStatement_NoFinancialEffect; do
             grep -q -- "--- PASS: $t " integration-test.log || { echo "expected $t to PASS"; exit 1; }
           done
           echo "packages ok:  $(grep -cE '^ok[[:space:]]' integration-test.log)"
