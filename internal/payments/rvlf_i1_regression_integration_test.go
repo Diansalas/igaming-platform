@@ -530,7 +530,14 @@ func TestRVLF_F3_SucceededInputNeverRegressedByLaterDeclineOnAnotherSibling(t *t
 		return tx.QueryRow(ctx, `SELECT count(*) FROM audit_log WHERE action = 'deposit.declined' AND target_id = $1`, res.Intent.ID.String()).Scan(&auditBefore)
 	})
 
-	// A late DECLINE on the PARENT sibling must never regress the intent.
+	// A REDELIVERED decline on the now-terminal PARENT sibling (it already
+	// declined during the initial cascade) must never regress the intent -
+	// see this test's own package-level note (rvlf_i1_regression_
+	// integration_test.go's F3 mutation-kill entry in the evidence file)
+	// on why a FIRST-time decline racing an already-succeeded sibling is
+	// architecturally unreachable for deposits (payment_attempts_one_
+	// live_per_intent), so this redelivery-safety case is what remains
+	// testable.
 	if _, err := rvCallback(pool, orch, f, "mock-f3-a", pa.CallbackPayload(f.tenantID, CallbackEventDeposit, parentRef, "", OutcomeDeclined, 0, "", "provider_unavailable", false)); err != nil {
 		t.Fatalf("late decline on succeeded sibling: %v", err)
 	}

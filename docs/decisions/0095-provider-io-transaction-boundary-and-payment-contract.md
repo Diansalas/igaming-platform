@@ -4358,7 +4358,7 @@ by the private-database run passing all 30). `golangci-lint` (2.9.0, `--build-ta
 issues on every file this round touched. 3 anchored mutants for this round (PM-PAYOUT-11/12/13),
 each reverted to byte-identical source - full detail in the mutation-kill evidence file.
 
-### 27.13 PRH-I1 callback-cutover fix round (`payments`, 2026-09-27): H1 misclassification and revert, R4 payout receipt evidence, F5 mutant kills, corrections to §27.10
+### 27.14 PRH-I1 callback-cutover fix round (`payments`, 2026-09-27): H1 misclassification and revert, R4 payout receipt evidence, F5 mutant kills, corrections to §27.10
 
 **Scope.** A fix round responding to two independent reviews of the §27.10 cutover
 (`docs/plans/payment-readiness/rv-prh-i1-callback-ledger.md`, REJECT with a veto on money paths;
@@ -4512,11 +4512,45 @@ records the mutation-kill detail for the receipt-fidelity test added.
 
 **L2 (bridge support for multiple attempts per intent).** `receive_bridge_integration_test.go`'s
 `backfillAttemptForIntent` previously built exactly one attempt per intent, so no migrated test
-exercised a callback naming an EARLIER cascade provider's own reference, or a genuine T13 second
-capture, through the bridge. Extended to backfill a full cascade chain (a `created`->`declined`
-first attempt plus a `created`->`succeeded` second, when the intent's final status implies a
-cascade happened) - see `docs/plans/payment-readiness/evidence/prh-i1-mutation-kill.txt` for the
-specific tests this unlocked.
+exercised a genuine T13 second capture, or a cascade child left `created`, through the bridge. Added
+`backfillCascadeAttemptsForIntent`, which builds a real two-attempt shape through the SAME exported
+T1/T2/T4/T8 transitions the live cascade path uses (never through the legacy `InitiateDeposit`'s own
+in-process cascade recursion, which has no way to report which intermediate provider/reference it
+tried and declined): attempt 1 goes `created`->`submitting`->`declined` (cascadable) via a REAL
+provider claim, attempt 2 is the cascade child inserted via `cascade.go`'s own `insertCascadeAttempt`
+and deliberately left `created` (unclaimed). `TestRVLF_L2_BridgeCascadeThenT13SecondCapture` then
+delivers a genuine T13 success on attempt 1's own reference and confirms attempt 2 is rejected
+(`intent_succeeded`) and unclaimable - H4's guard exercised through the bridge's own multi-attempt
+shape, not only through a live-provider-driven cascade.
+
+**F3 (setIntentAttempt's provider_id/provider_reference sticky-guard extension) - mutation attempted,
+NOT killed; disclosed rather than claimed.** The obvious regression test (a redelivered decline on an
+already-terminal sibling after another sibling succeeded) turned out not to exercise this guard at
+all: `applyResolvedReceiptEvidence`'s `OutcomeDeclined` branch short-circuits to a no-op for any
+attempt that is not `submitting`/`pending`/`ambiguous`, BEFORE ever calling `finalizeDeclined`/
+`setIntentAttempt` - a terminal sibling's redelivered decline never reaches the mutated code at all.
+A rewritten test constructing two SIMULTANEOUSLY-LIVE attempts under one intent (the only way to
+reach `setIntentAttempt` with a genuine FIRST-time decline after a DIFFERENT sibling already
+succeeded) failed at setup with a `payment_attempts_one_live_per_intent` unique-constraint violation
+(migration 0101). **Conclusion, stated openly:** for deposits, the exact sequence this guard's
+provider_id/reference extension protects against is architecturally unreachable today - only one
+attempt per intent may ever be live at once, and a sibling can only reach `succeeded` (via T13) after
+the attempt it supersedes is already terminal, never while a DIFFERENT live attempt is mid-decline.
+The fix is retained as defence in depth (it costs nothing and closes a theoretical gap if that
+constraint is ever relaxed), but this record does NOT claim it is proven to close a live bug, unlike
+every other item in this section. Full transcript (including the exact failed alternative attempt) is
+in `docs/plans/payment-readiness/evidence/prh-i1-mutation-kill.txt`.
+
+**L4 (receipt field fidelity, ledger-finance L4/L5): tombstone receipts now backfill the reversal's
+real amount/asset from the original attempt when the wire payload omits them.** The tombstone branch
+of `applyReversalReceiptEvidence` builds its `ReceiptEvidence` before any original attempt is known to
+exist, so `ev.Amount`/`ev.AssetCode` were left at their zero values (`0`/`""`) even when a
+resolved-but-never-posted original attempt (this branch's own case) already knows the true ones -
+some PSPs' "reverse the whole deposit" chargeback shape never states either on the wire. Fixed: when
+an original attempt DID resolve (not the genuinely-unresolved case, where there is nothing to backfill
+from) and the wire left a field unset, it is backfilled from the original attempt's own declared
+value before the receipt is stored - never overwrites a wire-declared value.
+`TestRVLF_L4_TombstoneReceiptBackfillsAmountAssetFromOriginalAttempt` pins this.
 
 **Verification.** `internal/payments` fully green under `-race -tags=integration` on a private
 database migrated to head (through migration 0106), repeated runs, no flakes. `internal/reconciliation`
@@ -4527,13 +4561,19 @@ untouched by this round; 2-5 of its ~8 subtests fail non-deterministically even 
 repeatably, all real-time latency-threshold assertions sensitive to race-detector overhead) - not a
 regression introduced here, disclosed rather than silently excluded. `golangci-lint` (pinned 2.9.0
 binary, untagged, exactly as CI runs it): 0 issues. `gofmt`: clean. Mutation-kill transcripts for
-this round's fixes (H2, H3 x3 sites, H4, M1, M4, F2, F3, R4(a)/(b)/(d)) are filed in
-`docs/plans/payment-readiness/evidence/prh-i1-mutation-kill.txt` ("PRH-I1 callback cutover fix
-round, 2026-09-27").
+this round's fixes (H2, H3 x3 sites, H4, M1, M4, F2, R4(a)/(b)/(d) - 10 of 11 attempted, F3 disclosed
+as not killed above) are filed in `docs/plans/payment-readiness/evidence/prh-i1-mutation-kill.txt`
+("PRH-I1 callback cutover fix round, 2026-09-27"). The F2 mutation-kill exercise itself surfaced a
+genuine bug this round introduced and fixed in the same commit: `boundedDeclineReason` was only
+applied inside `applyResolvedReceiptEvidence`'s `OutcomeDeclined` branch, AFTER the R0 receipt insert
+(ADR 0082 A7) had already run with the raw, unbounded `ev.DeclineReason` -
+`payment_provider_events.decline_reason` carries the identical 64-byte CHECK as
+`payment_attempts.decline_reason`. Fixed by bounding once, at the top of `ApplyReceiptEvidence`.
 
 **Not implemented, disclosed:** the DB-trigger-level mirror of H4's T2 sibling-succeeded guard
 (optional defence in depth; migration 0107 reserved, unused). The "6 scenarios" evidence-file
 overstatement noted above (still 3 distinct disposition values demonstrated over HTTP, not yet a
 real `anomaly` case). H1's ledger-finance ruling on the revert is pending at the time of this
-record; this section will need its own follow-up correction if that ruling disagrees.
+record; this section will need its own follow-up correction if that ruling disagrees. F3's mutation
+was not killed (see above) - retained as defence in depth, not as a proven fix for a reachable bug.
 

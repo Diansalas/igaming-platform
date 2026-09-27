@@ -1123,3 +1123,207 @@ shared TEST_DATABASE_URL. The shared TEST_DATABASE_URL's pre-existing,
 unrelated migration-0101/0103 gap (documented in the runbook and in prior
 rounds) reproduces identically before and after this round's diff and is
 not caused by it.
+
+PRH-I1 callback cutover fix round, 2026-09-27 (ADR 0095 §27.14)
+=================================================================
+
+Harness: PRIV_DB/PRIV_SRC + priv_db.sh/priv_test.sh (the coordinator's
+approved private-database scripts) against igaming_prhcb_r4, migrated to
+head (through migration 0106). Each mutation below: applied via a Python
+one-shot str.replace on an exact, assert-count==1-verified anchor string;
+built (`go build ./...`); the SPECIFIC named test run
+(`-tags=integration`, no -race for the mutation loop itself - the earlier
+full-suite runs already covered -race); confirmed FAIL; reverted via
+`git checkout -- <file>`; confirmed `git status --porcelain <file>` empty
+before proceeding to the next mutation. Never more than one file mutated
+at a time.
+
+H2 (ApplyDeferredReceiptsForAttempt never called from drive.go's own T4
+site):
+  File: internal/payments/drive.go
+  Mutation: `if _, err := ApplyDeferredReceiptsForAttempt(ctx, tx, o, attempt); err != nil { return intent, nil, err }`
+  replaced with `if false { return intent, nil, nil }`.
+  Killed by: TestRVLF_P8_DeferredReceiptAppliedByPhaseC
+    go test -tags=integration -count=1 -run TestRVLF_P8_DeferredReceiptAppliedByPhaseC ./internal/payments/...
+  Failure: "attempt=pending balance=0 unresolved_receipts=1" (the raced
+  success stayed unresolved instead of being applied by phase C).
+  Reverted: git checkout -- internal/payments/drive.go (byte-identical,
+  confirmed via `git status --porcelain`).
+
+H3, site 1 (receipt.go's callback path - insertCascadeAttemptIfEligible's
+kill-switch downgrade):
+  File: internal/payments/receipt.go
+  Mutation: `insertCascadeAttemptIfEligible(ctx, tx, attempt)` -> bare
+  `insertCascadeAttempt(ctx, tx, attempt)`.
+  Killed by: TestRVLF_P2_KillSwitch_CascadableDeclineCallback
+    go test -tags=integration -count=1 -run TestRVLF_P2_KillSwitch_CascadableDeclineCallback ./internal/payments/...
+  Failure: the decline callback itself returned
+  "payments: refused, a matching payment kill switch is engaged" instead
+  of committing (§10.3 violation reproduced exactly).
+  Reverted: git checkout -- internal/payments/receipt.go.
+
+H3, site 2 (drive.go's synchronous-decline-for-a-call-already-sent path):
+  File: internal/payments/drive.go
+  Mutation: the `child, err := insertCascadeAttemptIfEligible(ctx, tx, attempt)` /
+  `return updated, child, nil` pair replaced with a direct
+  `insertCascadeAttempt` call (`childV, err := insertCascadeAttempt(...)`,
+  `return updated, &childV, nil`).
+  Killed by: TestRVLF_H3_DriveGo_SyncCascadableDeclineUnderKillSwitch
+    go test -tags=integration -count=1 -run TestRVLF_H3_DriveGo_SyncCascadableDeclineUnderKillSwitch ./internal/payments/...
+  Failure: identical kill-switch-refused error surfacing from
+  applyDepositCallResult instead of committing.
+  Reverted: git checkout -- internal/payments/drive.go.
+
+H3, site 3 (sweeper.go's poll-decline path):
+  File: internal/payments/sweeper.go
+  Mutation: `insertCascadeAttemptIfEligible(ctx, tx, attempt)` -> bare
+  `insertCascadeAttempt(ctx, tx, attempt)`.
+  Killed by: TestRVLF_H3_SweeperGo_PollCascadableDeclineUnderKillSwitch
+    go test -tags=integration -count=1 -run TestRVLF_H3_SweeperGo_PollCascadableDeclineUnderKillSwitch ./internal/payments/...
+  Failure: sweeper.RunOnce's Stats.Errors carried the kill-switch-refused
+  error instead of an empty slice.
+  Reverted: git checkout -- internal/payments/sweeper.go.
+
+H4 (rejectCreatedSiblings never called from the T13 success branch):
+  File: internal/payments/receipt.go
+  Mutation: the `if err := rejectCreatedSiblings(ctx, tx, attempt); err != nil { return false, "", err }` call
+  in the AttemptDeclined/OutcomeSucceeded (T13) branch replaced with
+  `_ = rejectCreatedSiblings` (a no-op reference keeping the identifier
+  used, so the mutant still compiles).
+  Killed by (two tests, both FAIL):
+    go test -tags=integration -count=1 -run 'TestRVLF_P3_T13RejectsCreatedSibling|TestRVLF_L2_BridgeCascadeThenT13SecondCapture' ./internal/payments/...
+  Failure: both report the cascade child's state stayed "created" instead
+  of moving to "rejected".
+  Reverted: git checkout -- internal/payments/receipt.go.
+
+M1 (the §4.4 AttemptDeclined/mismatched-success cell CAS-conflicts instead
+of recording a committed anomaly):
+  File: internal/payments/receipt.go
+  Mutation: `case AttemptDeclined: if mismatched { return false, ResolutionAnomalyOther, nil }`
+  replaced with `return true, ResolutionAnomalyOther, ApplyDisputeFromNonTerminal(ctx, tx, attempt.ID, EvidenceCallback, "mutant_m1")`
+  (ApplyDisputeFromNonTerminal's own CAS predicate only accepts
+  submitting/pending/ambiguous, never declined - forces a genuine
+  ErrAttemptStateConflict).
+  Killed by: TestRVLF_P4_MismatchedSuccessOnTerminalAttempt
+    go test -tags=integration -count=1 -run TestRVLF_P4_MismatchedSuccessOnTerminalAttempt ./internal/payments/...
+  Failure: "payments: T10 ->disputed: payments: payment_attempts CAS
+  transition conflict" surfaced as a real error instead of the uniform
+  200/anomaly this cell requires.
+  Reverted: git checkout -- internal/payments/receipt.go.
+
+M4 (the not-a-deposit integrity check disabled, restoring the
+tombstone-before-integrity-check ordering bug):
+  File: internal/payments/receipt.go
+  Mutation: `if !unresolved && (original.Operation != AttemptOperationDeposit || original.DepositIntentID == nil) { return "", fmt.Errorf(...) }`
+  replaced with `if false { return "", fmt.Errorf(...) }`.
+  Killed by: TestRVLF_M4_ReversalNamingPayoutReferenceNeverTombstoned
+    go test -tags=integration -count=1 -run TestRVLF_M4_ReversalNamingPayoutReferenceNeverTombstoned ./internal/payments/...
+  Failure: "must be rejected as ErrDepositReversalIntegrity, got <nil>" and
+  a tombstone was actually written (found 1) - both assertions failed.
+  Reverted: git checkout -- internal/payments/receipt.go.
+
+F2 (boundedDeclineReason disabled - raw vendor text reaches the CHECK'd
+columns):
+  File: internal/payments/receipt.go
+  Mutation: `func boundedDeclineReason(reason string) string { if len(reason) <= maxDeclineReasonBytes { return reason }; return boundedDeclineReasonSentinel }`
+  replaced with `func boundedDeclineReason(reason string) string { return reason }`.
+  Killed by: TestRVLF_F2_OversizeDeclineReasonBounded
+    go test -tags=integration -count=1 -run TestRVLF_F2_OversizeDeclineReasonBounded ./internal/payments/...
+  Failure: "payments: insert receipt: ERROR: new row for relation
+  "payment_provider_events" violates check constraint
+  "payment_provider_events_decline_reason_check" (SQLSTATE 23514)" - the
+  exact permanent-redelivery-loop failure mode F2 exists to prevent.
+  Reverted: git checkout -- internal/payments/receipt.go.
+  Note: this mutation-kill exercise is what SURFACED a genuine bug this
+  round introduced and then fixed in the same commit - see "F2 receipt-
+  level bounding" below.
+
+F3 (setIntentAttempt's sticky guard extended to provider_id/
+provider_reference, not just status) - NOT mutation-killed, disclosed:
+  Attempted mutation: the CASE-guarded `provider_id = CASE WHEN status =
+  'succeeded' THEN provider_id ELSE $2 END` / `provider_reference = CASE
+  WHEN status = 'succeeded' THEN provider_reference ELSE $3 END` clauses
+  in setIntentAttempt's UPDATE (internal/payments/orchestrator.go)
+  replaced with unconditional `provider_id = $2`/`provider_reference =
+  $3` (status left guarded).
+  Result: the original TestRVLF_F3_SucceededInputNeverRegressedByLater
+  DeclineOnAnotherSibling test PASSED against this mutant (did not kill
+  it). Root cause found on investigation: that test's own scenario (a
+  REDELIVERED decline on an already-terminal sibling) never reaches
+  setIntentAttempt at all - applyResolvedReceiptEvidence's OutcomeDeclined
+  branch short-circuits to a no-op for any attempt not in
+  {submitting,pending,ambiguous} BEFORE calling finalizeDeclined. A
+  rewritten test constructing two SIMULTANEOUSLY-LIVE sibling attempts
+  under one intent (to reach setIntentAttempt with a genuine FIRST-time
+  decline after a DIFFERENT sibling already succeeded) failed at setup
+  with `duplicate key value violates unique constraint
+  "payment_attempts_one_live_per_intent"` - confirmed via the existing
+  migration-0101 unique index, not this round's code. Conclusion: for
+  DEPOSITS, the sequence this guard's provider_id/reference extension
+  protects against - a live attempt receiving its first decline evidence
+  after some OTHER sibling of the same intent already succeeded - is
+  architecturally unreachable, because only one attempt per intent may
+  ever be live at a time (the DB's own one-live-per-intent constraint),
+  and a sibling can only succeed via T13 AFTER the attempt it supersedes
+  is already declined (terminal), not while a fresh decline for a
+  DIFFERENT live attempt is in flight. The status-only half of this same
+  guard (present before this round) remains real defense-in-depth
+  (protects against a hypothetical future relaxation of the one-live-per-
+  intent constraint, or a caller bypassing setIntentAttempt's normal
+  callers), but is not exercised by a currently-reachable production
+  sequence either - recorded here rather than claiming a false kill.
+  Reverted: git checkout -- internal/payments/orchestrator.go.
+
+R4(a) (payout decline via the receipt path stranding the hold):
+  File: internal/payments/receipt.go
+  Mutation: the `applyPayoutDecline(ctx, tx, *attempt.WithdrawalRequestID, ...)`
+  call in the payout branch of OutcomeDeclined replaced with a bare
+  `ApplyDecline(ctx, tx, attempt.ID, DeclineEvidence{...})` call (no
+  withdrawal.Fail).
+  Killed by: TestRVLF_R4a_PayoutDeclineViaReceiptPathReleasesHold
+    go test -tags=integration -count=1 -run TestRVLF_R4a_PayoutDeclineViaReceiptPathReleasesHold ./internal/payments/...
+  Failure: "the withdrawal request's hold must be released via
+  withdrawal.Fail (state=failed), got "submitted" - a stranded hold".
+  Reverted: git checkout -- internal/payments/receipt.go.
+
+R4(b) (event_type-vs-operation cross-check removed):
+  File: internal/payments/receipt.go
+  Mutation: the `if (ev.EventType == string(CallbackEventDeposit) &&
+  attempt.Operation != AttemptOperationDeposit) || (...) {` guard in
+  ApplyReceiptEvidence replaced with `if false {`.
+  Killed by: TestRVLF_R4b_EventTypeOperationMismatchIsAnomaly
+    go test -tags=integration -count=1 -run TestRVLF_R4b_EventTypeOperationMismatchIsAnomaly ./internal/payments/...
+  Failure: both cross-operation cases resolved to disposition "applied"
+  (a real, wrongly-typed state change) instead of "anomaly" - the payout
+  attempt was wrongly marked succeeded by a mislabeled "deposit" event,
+  and vice versa.
+  Reverted: git checkout -- internal/payments/receipt.go.
+
+R4(d) (payout success via the receipt path left unwired):
+  File: internal/payments/receipt.go
+  Mutation: the `applyPayoutSuccess(ctx, tx, *attempt.WithdrawalRequestID, ...)`
+  call replaced with the original stub,
+  `return true, ResolutionAnomalyOther, ApplyDisputeFromNonTerminal(ctx, tx, attempt.ID, EvidenceCallback, "payout_success_not_yet_wired")`.
+  Killed by: TestRVLF_R4d_PayoutSuccessViaReceiptPathSettles
+    go test -tags=integration -count=1 -run TestRVLF_R4d_PayoutSuccessViaReceiptPathSettles ./internal/payments/...
+  Failure: attempt state "disputed" instead of "succeeded"; withdrawal
+  state "submitted" instead of "completed".
+  Reverted: git checkout -- internal/payments/receipt.go.
+
+F2 receipt-level bounding (a genuine bug found while writing the F2
+mutation-kill test above, fixed in the same commit): boundedDeclineReason
+was only applied inside applyResolvedReceiptEvidence's OutcomeDeclined
+branch, AFTER the R0 receipt insert (ADR 0082 A7) in ApplyReceiptEvidence
+had already run with the RAW, unbounded ev.DeclineReason -
+payment_provider_events.decline_reason carries the identical 64-byte
+CHECK as payment_attempts.decline_reason. Fixed: ev.DeclineReason is now
+bounded once, at the top of ApplyReceiptEvidence, before any insert.
+TestRVLF_F2_OversizeDeclineReasonBounded (added this round) exercises the
+FIXED code path directly (an 83-byte decline reason on a live callback)
+and passes; the mutation-kill above (disabling boundedDeclineReason
+entirely) confirms the test would have caught the pre-fix bug too.
+
+Verification after all mutations reverted: `git status --porcelain` clean
+across internal/payments/{receipt.go,drive.go,sweeper.go,orchestrator.go};
+`go build ./...` clean; full TestRVLF_* suite green
+(19 tests, `go test -tags=integration -race -count=1 -run TestRVLF ./internal/payments/...`).
