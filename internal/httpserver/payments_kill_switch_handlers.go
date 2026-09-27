@@ -39,10 +39,12 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/Diansalas/igaming-platform/internal/apierror"
 	"github.com/Diansalas/igaming-platform/internal/audit"
@@ -124,6 +126,26 @@ func beginKillSwitchCall(deps Deps, w http.ResponseWriter, r *http.Request, op s
 		apierror.Write(w, c.requestID, apierror.CodeForbidden, "insufficient permissions for this operation")
 		return c, false
 	}
+	// L6 (RV-PRH-I1 security review): §10.5 says "the handler verifies that
+	// the tenant exists" - only reachable for a platform-scoped caller
+	// (tc.TenantID == uuid.Nil), since a tenant-scoped caller can only ever
+	// name its own, already-real tenant (canActOnTenant, above). `tenants`
+	// carries no RLS, so a plain existence check needs no tenant/platform
+	// GUC context.
+	if tc.TenantID == uuid.Nil {
+		var exists bool
+		if err := deps.DB.WithoutTenant(r.Context(), func(ctx context.Context, tx pgx.Tx) error {
+			return tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM tenants WHERE id=$1)`, target).Scan(&exists)
+		}); err != nil {
+			c.logger.Error("payments_kill_switch_tenant_lookup_failed", "op", op)
+			apierror.Write(w, c.requestID, apierror.CodeInternal, "internal error")
+			return c, false
+		}
+		if !exists {
+			apierror.Write(w, c.requestID, apierror.CodeNotFound, "not found")
+			return c, false
+		}
+	}
 	return c, true
 }
 
@@ -192,22 +214,42 @@ func (c killSwitchCall) auditTenantID() uuid.UUID {
 // writeProviderCredentialError convention: never the raw trigger/Postgres
 // error text (which could carry no secret here, but the convention is
 // still "one fixed body per class", not an ad hoc passthrough).
+// writeKillSwitchError maps an error to a response class and logs an
+// allow-listed error CLASS (RV-PRH-I1 security review L5): a trigger
+// refusal (self-approval, a platform-engaged row touched by a tenant
+// session, a stale version, an expired or already-decided request - always
+// Postgres SQLSTATE P0001, raised by a plain RAISE EXCEPTION with no other
+// code path in this schema using that SQLSTATE) is a 409 conflict; any
+// other error is a genuine internal/database failure and is a 500, never
+// mis-reported as "conflict" (an operator retrying an engage that failed on
+// a transient DB error must not be told "already engaged"). The raw
+// message is logged server-side for diagnosis - these are internal
+// database errors, never user-controlled input, so logging them carries no
+// secret-leak risk (S95-C8(a)'s redaction concern is specific to vendor
+// HTTP transport errors, not this package).
 func writeKillSwitchError(w http.ResponseWriter, c killSwitchCall, op string, err error) {
 	switch {
 	case errors.Is(err, payments.ErrAttemptStateConflict):
+		c.logger.Warn("payments_kill_switch_refused", "op", op, "class", "cas_conflict")
+		apierror.Write(w, c.requestID, apierror.CodeConflict, "conflict")
+	case isKillSwitchTriggerRefusal(err):
+		c.logger.Warn("payments_kill_switch_refused", "op", op, "class", "trigger_refusal", "err", err.Error())
 		apierror.Write(w, c.requestID, apierror.CodeConflict, "conflict")
 	default:
-		// Every other failure this package can produce here is a
-		// migration-0105 trigger RAISE EXCEPTION (self-approval, a
-		// platform-engaged row touched by a tenant session, a stale
-		// version, an expired or already-decided request) or a genuine
-		// database error. All are reported as 409 conflict - the request
-		// was syntactically valid but the current state of the switch/
-		// request does not allow it - never the raw exception text, which
-		// is logged server-side only for diagnosis.
-		c.logger.Error("payments_kill_switch_failed", "op", op)
-		apierror.Write(w, c.requestID, apierror.CodeConflict, "conflict")
+		c.logger.Error("payments_kill_switch_failed", "op", op, "class", "internal_error", "err", err.Error())
+		apierror.Write(w, c.requestID, apierror.CodeInternal, "internal error")
 	}
+}
+
+// isKillSwitchTriggerRefusal reports whether err is a plain RAISE EXCEPTION
+// from one of migration 0105/0106's own trigger functions (SQLSTATE
+// P0001) - a semantic refusal, not an infrastructure failure.
+func isKillSwitchTriggerRefusal(err error) bool {
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) {
+		return false
+	}
+	return pgErr.Code == "P0001"
 }
 
 // logKillSwitchEngagedAlert is S95-C7's "alert on every engage": a
@@ -225,6 +267,29 @@ func logKillSwitchEngagedAlert(logger observabilityLogger, ks payments.KillSwitc
 		"changed_by_scope", string(ks.ChangedByScope),
 		"request_id", requestID,
 	)
+}
+
+// scopeOrNil renders a *payments.KillSwitchSessionScope as a plain string
+// pointer for JSON metadata (nil stays nil, never "").
+func scopeOrNil(s *payments.KillSwitchSessionScope) any {
+	if s == nil {
+		return nil
+	}
+	return string(*s)
+}
+
+// engageAuditBeforeState renders the pre-engage state for M3's audit
+// before/after requirement. found=false (first-ever engage of this
+// provider/operation pair) is itself meaningful and recorded explicitly,
+// never silently omitted.
+func engageAuditBeforeState(before payments.KillSwitch, found bool) map[string]any {
+	if !found {
+		return map[string]any{"existed": false}
+	}
+	return map[string]any{
+		"existed": true, "engaged": before.Engaged, "engaged_by_scope": scopeOrNil(before.EngagedByScope),
+		"version": before.Version, "reason_code": before.ReasonCode,
+	}
 }
 
 // --- DTOs -------------------------------------------------------------
@@ -412,21 +477,74 @@ func newEngageKillSwitchHandler(deps Deps) http.HandlerFunc {
 			apierror.Write(w, c.requestID, apierror.CodeValidation, "operation_scope must be deposit, payout or *")
 			return
 		}
+		// M2 (RV-PRH-I1 security review): provider_scope is validated
+		// against the CODE-level provider registry (never tenant-editable
+		// capability config, which a tenant could otherwise widen) so a
+		// typo or trailing whitespace can never engage a switch that
+		// matches nothing - a false-assurance containment that returns 200
+		// but blocks no real traffic.
+		if body.ProviderScope != strings.TrimSpace(body.ProviderScope) {
+			apierror.Write(w, c.requestID, apierror.CodeValidation, "provider_scope must not have leading or trailing whitespace")
+			return
+		}
+		if body.ProviderScope != "*" {
+			if _, registered := deps.PaymentOrchestrator.Provider(body.ProviderScope); !registered {
+				apierror.Write(w, c.requestID, apierror.CodeValidation, "provider_scope must be '*' or a provider id registered in this deployment")
+				return
+			}
+		}
 		var ks payments.KillSwitch
 		err := runKillSwitchTx(r.Context(), deps, c, func(ctx context.Context, tx pgx.Tx) error {
-			var err error
+			// M3: capture the prior state (natural-key lookup - engage has
+			// no id yet on a first-ever engage of this provider/operation
+			// pair) BEFORE mutating, so the audit row carries a real
+			// before/after, not just the after-state reason_code.
+			before, foundBefore, err := payments.GetKillSwitch(ctx, tx, c.target, body.ProviderScope, payments.KillSwitchOperationScope(body.OperationScope))
+			if err != nil {
+				return err
+			}
+			// M3: KS-L6 detection. At most one request can be open per
+			// switch (the DB's own partial unique index), so this is the
+			// one KS-L6 could cancel if this engage turns out to be a
+			// platform takeover.
+			var preexistingOpenRequestID *string
+			if foundBefore {
+				var openID uuid.UUID
+				scanErr := tx.QueryRow(ctx,
+					`SELECT id FROM payment_kill_switch_release_requests WHERE kill_switch_id=$1 AND status='open'`, before.ID,
+				).Scan(&openID)
+				if scanErr == nil {
+					s := openID.String()
+					preexistingOpenRequestID = &s
+				} else if !errors.Is(scanErr, pgx.ErrNoRows) {
+					return scanErr
+				}
+			}
+
 			ks, err = payments.EngageKillSwitch(ctx, tx, c.target, body.ProviderScope, payments.KillSwitchOperationScope(body.OperationScope), body.ReasonCode)
 			if err != nil {
 				return err
 			}
+
+			isTakeover := foundBefore && before.Engaged && before.EngagedByScope != nil && *before.EngagedByScope == payments.KillSwitchScopeTenant &&
+				ks.EngagedByScope != nil && *ks.EngagedByScope == payments.KillSwitchScopePlatform
+
+			metadata := map[string]any{
+				"reason_code": body.ReasonCode, "provider_scope": body.ProviderScope, "operation_scope": body.OperationScope,
+				"actor_scope": c.sessionScopeLabel(), "target_tenant_id": c.target.String(),
+				"before":               engageAuditBeforeState(before, foundBefore),
+				"after":                map[string]any{"engaged": ks.Engaged, "engaged_by_scope": scopeOrNil(ks.EngagedByScope), "version": ks.Version, "reason_code": ks.ReasonCode},
+				"is_platform_takeover": isTakeover,
+			}
+			if isTakeover && preexistingOpenRequestID != nil {
+				metadata["ks_l6_cancelled_request_id"] = *preexistingOpenRequestID
+			}
+
 			return audit.Record(ctx, tx, audit.Entry{
 				TenantID: c.auditTenantID(), ActorType: audit.ActorStaff, ActorID: c.subject,
 				Action: "payments_kill_switch.engage", TargetType: "payment_kill_switch", TargetID: ks.ID.String(),
 				Outcome: audit.OutcomeSuccess, IPAddress: clientIP(r), UserAgent: r.UserAgent(), RequestID: c.requestID,
-				Metadata: map[string]any{
-					"reason_code": body.ReasonCode, "provider_scope": body.ProviderScope, "operation_scope": body.OperationScope,
-					"actor_scope": c.sessionScopeLabel(), "target_tenant_id": c.target.String(),
-				},
+				Metadata: metadata,
 			})
 		})
 		if err != nil {
@@ -486,7 +604,11 @@ func newRequestKillSwitchReleaseHandler(deps Deps) http.HandlerFunc {
 				TenantID: c.auditTenantID(), ActorType: audit.ActorStaff, ActorID: c.subject,
 				Action: "payments_kill_switch.request_release", TargetType: "payment_kill_switch_release_request", TargetID: req.ID.String(),
 				Outcome: audit.OutcomeSuccess, IPAddress: clientIP(r), UserAgent: r.UserAgent(), RequestID: c.requestID,
-				Metadata: map[string]any{"reason_code": body.ReasonCode, "kill_switch_id": killSwitchID.String(), "actor_scope": c.sessionScopeLabel(), "target_tenant_id": c.target.String()},
+				Metadata: map[string]any{
+					"reason_code": body.ReasonCode, "kill_switch_id": killSwitchID.String(), "actor_scope": c.sessionScopeLabel(), "target_tenant_id": c.target.String(),
+					"before": map[string]any{"engaged": ks.Engaged, "version": ks.Version},
+					"after":  map[string]any{"status": req.Status, "expected_version": req.ExpectedVersion},
+				},
 			})
 		})
 		if notFound {
@@ -532,6 +654,11 @@ func newApproveKillSwitchReleaseHandler(deps Deps) http.HandlerFunc {
 				notFound = true
 				return nil
 			}
+			// M3: capture the switch's state before release.
+			before, foundBefore, err := payments.GetKillSwitchByID(ctx, tx, c.target, req.KillSwitchID)
+			if err != nil {
+				return err
+			}
 			ks, err = payments.ApproveAndReleaseKillSwitch(ctx, tx, c.target, req.KillSwitchID, requestID)
 			if err != nil {
 				return err
@@ -540,7 +667,11 @@ func newApproveKillSwitchReleaseHandler(deps Deps) http.HandlerFunc {
 				TenantID: c.auditTenantID(), ActorType: audit.ActorStaff, ActorID: c.subject,
 				Action: "payments_kill_switch.approve_release", TargetType: "payment_kill_switch", TargetID: ks.ID.String(),
 				Outcome: audit.OutcomeSuccess, IPAddress: clientIP(r), UserAgent: r.UserAgent(), RequestID: c.requestID,
-				Metadata: map[string]any{"release_request_id": requestID.String(), "actor_scope": c.sessionScopeLabel(), "target_tenant_id": c.target.String()},
+				Metadata: map[string]any{
+					"release_request_id": requestID.String(), "actor_scope": c.sessionScopeLabel(), "target_tenant_id": c.target.String(),
+					"before": engageAuditBeforeState(before, foundBefore),
+					"after":  map[string]any{"engaged": ks.Engaged, "engaged_by_scope": scopeOrNil(ks.EngagedByScope), "version": ks.Version},
+				},
 			})
 		})
 		if notFound {
@@ -583,7 +714,11 @@ func newCancelKillSwitchReleaseHandler(deps Deps) http.HandlerFunc {
 				TenantID: c.auditTenantID(), ActorType: audit.ActorStaff, ActorID: c.subject,
 				Action: "payments_kill_switch.cancel_release", TargetType: "payment_kill_switch_release_request", TargetID: req.ID.String(),
 				Outcome: audit.OutcomeSuccess, IPAddress: clientIP(r), UserAgent: r.UserAgent(), RequestID: c.requestID,
-				Metadata: map[string]any{"actor_scope": c.sessionScopeLabel(), "target_tenant_id": c.target.String()},
+				Metadata: map[string]any{
+					"actor_scope": c.sessionScopeLabel(), "target_tenant_id": c.target.String(),
+					"before": map[string]any{"status": req.Status},
+					"after":  map[string]any{"status": "cancelled"},
+				},
 			})
 		})
 		if notFound {

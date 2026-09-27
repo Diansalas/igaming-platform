@@ -285,6 +285,28 @@ against real traffic.
     job" surface today (see §1's Queue/event failures section); a
     failure here means a whole tenant's scheduled compliance/financial
     sweep silently did not run this cycle.
+12. **Payment kill-switch engaged (P1/P2, page or urgent ticket per
+    tenant policy).** Any `payments_kill_switch_engaged_alert` occurrence
+    (`internal/httpserver/payments_kill_switch_handlers.go`,
+    `logKillSwitchEngagedAlert`, ADR 0095 §10.2/S95-C7) - a matching
+    payment provider/operation has just stopped accepting new deposits or
+    payouts for a tenant. Threshold: > 0, always page/notify - this is an
+    operator-INITIATED containment action (most likely a live incident:
+    PSP outage, suspected compromise, or a manual test), never expected
+    background traffic. Fields: `tenant_id`, `provider_scope`,
+    `operation_scope`, `reason_code`, `changed_by`, `changed_by_scope`,
+    `request_id` - route the page to whoever owns the named
+    `provider_scope` (or the whole tenant, for `*`).
+    **Status (RV-PRH-I1 security review L7): the EVENT is emitted
+    (IMPLEMENTED, pinned by
+    `TestLogKillSwitchEngagedAlert_EmitsPinnedEventAndFields`); actual
+    alert ROUTING/delivery to a paging system is NOT IMPLEMENTED - see
+    "Metrics backend" in Known gaps below. This is launch-blocking per the
+    security review (real alert delivery must exist before production
+    launch); do not treat the log line alone as an operational alert.
+    Recommended follow-up (not built): emit the equivalent event on
+    RELEASE too - lifting a containment is at least as alert-worthy as
+    engaging one.
 
 ## Known gaps (recorded honestly, not silently deferred)
 

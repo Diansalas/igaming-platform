@@ -621,3 +621,159 @@ func TestMigration0105_RequestIdentityColumnsAreImmutable(t *testing.T) {
 		t.Fatal("expected reason_code to be immutable even across a legitimate status transition")
 	}
 }
+
+// TestMigration0105_M6_K19_PlatformGUCRequiresGenuinePlatformStaff is the
+// direct RV-PRH-I1 security review K19 mutation target: the session
+// resolver must independently re-validate that the id placed in
+// app.platform_admin_principal_id resolves to a genuine platform-scoped
+// (tenant_id IS NULL) staff_users row, not merely accept any value present
+// in that GUC. A tenant-scoped staff id placed there must be refused.
+func TestMigration0105_M6_K19_PlatformGUCRequiresGenuinePlatformStaff(t *testing.T) {
+	pool := migration0105Scratch(t, "m0105_k19")
+	f := seedM0105Fixture(t, pool)
+
+	err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `SELECT set_config('app.platform_admin_principal_id', $1, true)`, f.tenantPrincipalA.String()); err != nil {
+			return err
+		}
+		_, err := insertKillSwitchRow(ctx, tx, f.tenantID, "*", "deposit", "x", true)
+		return err
+	})
+	if err == nil {
+		t.Fatal("K19: a tenant-scoped staff id in app.platform_admin_principal_id was accepted as a platform actor")
+	}
+}
+
+// TestMigration0105_M6_K10_RequestMustBindToItsOwnSwitch is the direct K10
+// mutation target: an approved request for switch X must never release a
+// DIFFERENT switch Y, even one belonging to the same tenant.
+func TestMigration0105_M6_K10_RequestMustBindToItsOwnSwitch(t *testing.T) {
+	pool := migration0105Scratch(t, "m0105_k10")
+	f := seedM0105Fixture(t, pool)
+
+	var switchX, switchY uuid.UUID
+	var versionX int64
+	err := pool.WithPrincipalScope(context.Background(), f.tenantID, f.tenantPrincipalA, func(ctx context.Context, tx pgx.Tx) error {
+		x, err := insertKillSwitchRow(ctx, tx, f.tenantID, "provider-x", "deposit", "x", true)
+		if err != nil {
+			return err
+		}
+		switchX = x
+		y, err := insertKillSwitchRow(ctx, tx, f.tenantID, "provider-y", "deposit", "y", true)
+		if err != nil {
+			return err
+		}
+		switchY = y
+		return tx.QueryRow(ctx, `SELECT version FROM payment_kill_switches WHERE id=$1`, x).Scan(&versionX)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var reqID uuid.UUID
+	err = pool.WithPrincipalScope(context.Background(), f.tenantID, f.tenantPrincipalA, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx,
+			`INSERT INTO payment_kill_switch_release_requests (id, tenant_id, kill_switch_id, expected_version, reason_code, expires_at)
+			 VALUES ($1,$2,$3,$4,$5, now() + interval '1 hour') RETURNING id`,
+			uuid.New(), f.tenantID, switchX, versionX, "resolved").Scan(&reqID)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Approve and attempt to release switch Y with it IN THE SAME
+	// transaction (the decided_txid = txid_current() rule requires this
+	// regardless of K10 - approving and releasing in separate transactions
+	// would already be refused for that unrelated reason, masking whether
+	// the kill_switch_id binding check is doing anything).
+	err = pool.WithPrincipalScope(context.Background(), f.tenantID, f.tenantPrincipalB, func(ctx context.Context, tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `UPDATE payment_kill_switch_release_requests SET status='approved' WHERE id=$1`, reqID); err != nil {
+			return err
+		}
+		_, err := tx.Exec(ctx, `UPDATE payment_kill_switches SET engaged=false, release_request_id=$2 WHERE id=$1`, switchY, reqID)
+		return err
+	})
+	if err == nil {
+		t.Fatal("K10: a request approved for switch X released a different switch Y")
+	}
+}
+
+// TestMigration0105_M6_K11_ExpiredRequestCannotRelease is the direct K11
+// mutation target.
+func TestMigration0105_M6_K11_ExpiredRequestCannotRelease(t *testing.T) {
+	pool := migration0105Scratch(t, "m0105_k11")
+	f := seedM0105Fixture(t, pool)
+
+	var switchID uuid.UUID
+	var version int64
+	err := pool.WithPrincipalScope(context.Background(), f.tenantID, f.tenantPrincipalA, func(ctx context.Context, tx pgx.Tx) error {
+		id, err := insertKillSwitchRow(ctx, tx, f.tenantID, "*", "deposit", "manual", true)
+		if err != nil {
+			return err
+		}
+		switchID = id
+		return tx.QueryRow(ctx, `SELECT version FROM payment_kill_switches WHERE id=$1`, id).Scan(&version)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var reqID uuid.UUID
+	err = pool.WithPrincipalScope(context.Background(), f.tenantID, f.tenantPrincipalA, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx,
+			`INSERT INTO payment_kill_switch_release_requests (id, tenant_id, kill_switch_id, expected_version, reason_code, expires_at)
+			 VALUES ($1,$2,$3,$4,$5, now() - interval '1 minute') RETURNING id`,
+			uuid.New(), f.tenantID, switchID, version, "resolved").Scan(&reqID)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Approve and release in the SAME transaction (decided_txid requires it
+	// regardless of K11).
+	err = pool.WithPrincipalScope(context.Background(), f.tenantID, f.tenantPrincipalB, func(ctx context.Context, tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `UPDATE payment_kill_switch_release_requests SET status='approved' WHERE id=$1`, reqID); err != nil {
+			return err
+		}
+		_, err := tx.Exec(ctx, `UPDATE payment_kill_switches SET engaged=false, release_request_id=$2 WHERE id=$1`, switchID, reqID)
+		return err
+	})
+	if err == nil {
+		t.Fatal("K11: an expired request still released the switch")
+	}
+}
+
+// TestMigration0105_M6_K14_ExpiresAtCappedAt24Hours is the direct K14
+// mutation target.
+func TestMigration0105_M6_K14_ExpiresAtCappedAt24Hours(t *testing.T) {
+	pool := migration0105Scratch(t, "m0105_k14")
+	f := seedM0105Fixture(t, pool)
+
+	var switchID uuid.UUID
+	var version int64
+	err := pool.WithPrincipalScope(context.Background(), f.tenantID, f.tenantPrincipalA, func(ctx context.Context, tx pgx.Tx) error {
+		id, err := insertKillSwitchRow(ctx, tx, f.tenantID, "*", "deposit", "manual", true)
+		if err != nil {
+			return err
+		}
+		switchID = id
+		return tx.QueryRow(ctx, `SELECT version FROM payment_kill_switches WHERE id=$1`, id).Scan(&version)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var expiresAt time.Time
+	err = pool.WithPrincipalScope(context.Background(), f.tenantID, f.tenantPrincipalA, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx,
+			`INSERT INTO payment_kill_switch_release_requests (id, tenant_id, kill_switch_id, expected_version, reason_code, expires_at)
+			 VALUES ($1,$2,$3,$4,$5, now() + interval '100 days') RETURNING expires_at`,
+			uuid.New(), f.tenantID, switchID, version, "resolved").Scan(&expiresAt)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if expiresAt.After(time.Now().Add(24*time.Hour + time.Minute)) {
+		t.Fatalf("K14: expires_at = %v, expected capped at <= now()+24h", expiresAt)
+	}
+}
