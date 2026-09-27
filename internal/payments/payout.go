@@ -612,6 +612,40 @@ func applyPayoutSuccess(ctx context.Context, tx pgx.Tx, requestID uuid.UUID, att
 	if ref == "" {
 		return fmt.Errorf("%w: a definite success has no provider reference to settle against (attempt %s)", ErrInvalidPayoutEvidence, attempt.ID)
 	}
+	// FH-5 security re-verification gap (c): N6's provider-reference-
+	// mismatch rule, centralized here so every source (sync dispatch,
+	// receipt/callback, QueryStatus poll) that ever calls
+	// applyPayoutSuccess gets the SAME check, rather than each caller
+	// re-implementing its own copy. "The one already on file" is the
+	// attempt's own stored reference if it has one, else the
+	// withdrawal's own (applyPayoutSuccessCheckedFromStatus's identical,
+	// now-redundant-but-harmless N6 comment explains the fallback
+	// further). A non-empty echoed reference that CONFLICTS with it is
+	// fail-closed disputed (T10), never silently settled.
+	if providerReference != "" {
+		wr, err := withdrawal.GetByID(ctx, tx, requestID)
+		if err != nil {
+			return err
+		}
+		storedRef := attempt.ProviderReference
+		if storedRef == nil || *storedRef == "" {
+			storedRef = wr.ProviderReference
+		}
+		if storedRef != nil && *storedRef != "" && providerReference != *storedRef {
+			if err := ApplyDisputeFromNonTerminal(ctx, tx, attempt.ID, evidence, "provider_reference_mismatch"); err != nil {
+				return payoutHandleContradiction(ctx, tx, attempt, evidence, ErrorClassSucceeded, err)
+			}
+			return audit.Record(ctx, tx, audit.Entry{
+				TenantID: attempt.TenantID, ActorType: audit.ActorSystem, Action: "payments.payout_provider_reference_mismatch",
+				TargetType: "payment_attempt", TargetID: attempt.ID.String(), Outcome: audit.OutcomeDenied,
+				Metadata: map[string]any{
+					"withdrawal_request_id": requestID.String(),
+					"stored_reference":      *storedRef,
+					"echoed_reference":      providerReference,
+				},
+			})
+		}
+	}
 
 	if err := ApplySuccess(ctx, tx, attempt.ID, SuccessEvidence{Evidence: evidence, ProviderReference: ref}); err != nil {
 		if errors.Is(err, ErrAttemptStateConflict) {

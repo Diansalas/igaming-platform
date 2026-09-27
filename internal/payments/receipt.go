@@ -1426,6 +1426,51 @@ func ApplyDeferredReceiptsForAttempt(ctx context.Context, tx pgx.Tx, o *Orchestr
 	}
 	rows.Close()
 
+	// FH-5 security re-verification gap (b): a stored receipt sharing this
+	// (provider_id, provider_reference) but naming a DIFFERENT operation's
+	// event_type (e.g. a "payout" receipt deferred against what is now a
+	// deposit attempt) must never be silently left unresolved by this
+	// function - the allow-list above only ever SELECTS the matching
+	// type, so a cross-operation row would otherwise never be resolved by
+	// anything and would count toward the §6.1 step 5 unapplied-receipt
+	// cap forever. Resolved here as an anomaly, attached to THIS attempt
+	// so it stops counting. deposit_reversal is deliberately EXCLUDED:
+	// that event_type has its own resolution path
+	// (applyReversalReceiptEvidence, keyed on OriginalProviderReference,
+	// never on this attempt's own reference) and must stay untouched here
+	// regardless of operation (N1's own protection).
+	crossOpFilter := "deposit"
+	if eventTypeFilter == "deposit" {
+		crossOpFilter = "payout"
+	}
+	crossRows, err := tx.Query(ctx,
+		`SELECT id FROM payment_provider_events
+		 WHERE tenant_id = $1 AND provider_id = $2 AND provider_reference = $3 AND resolved_at IS NULL
+		   AND event_type = $4`,
+		attempt.TenantID, *attempt.ProviderID, *attempt.ProviderReference, crossOpFilter,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("payments: query cross-operation deferred receipts: %w", err)
+	}
+	var crossOpIDs []uuid.UUID
+	for crossRows.Next() {
+		var id uuid.UUID
+		if err := crossRows.Scan(&id); err != nil {
+			crossRows.Close()
+			return 0, err
+		}
+		crossOpIDs = append(crossOpIDs, id)
+	}
+	if err := crossRows.Err(); err != nil {
+		return 0, err
+	}
+	crossRows.Close()
+	for _, id := range crossOpIDs {
+		if err := ResolveReceipt(ctx, tx, id, &attempt.ID, string(ResolutionAnomalyOther)); err != nil {
+			return 0, err
+		}
+	}
+
 	applied := 0
 	for _, d := range deferred {
 		if attempt.FirstSubmittedAt != nil && d.receivedAt.Before(*attempt.FirstSubmittedAt) {

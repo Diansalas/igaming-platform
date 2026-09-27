@@ -1836,3 +1836,64 @@ the whole repository; `gofmt -l .` clean; `golangci-lint run ./...`
 (pinned 2.9.0, untagged): 0 issues; `go run ./cmd/migrate verify` against
 a fresh scratch DB migrated through 0107: "all applied migrations verified
 clean, no version gaps".
+
+
+FH-5 security re-verification follow-up (rv-prh-i1-payout-security.md,
+cb1330f), gaps (a)/(b)/(c), 2026-09-27
+======================================================================
+
+Gap (a) item 1 - unknown event_type allow-list:
+  File: internal/payments/receipt.go
+  Mutation: `if op, known := eventTypeOperation[ev.EventType]; !known || op != attempt.Operation {`
+  guarded with `false &&`.
+  Killed by: TestRVLF_SecGapA1_UnknownEventTypeIsAnomaly (a "payout_returned"
+  event, valid per the DB CHECK but absent from the allow-list, naming an
+  existing deposit attempt's reference).
+  Failure: disposition "applied" instead of "anomaly".
+  Reverted: git checkout (targeted).
+
+Gap (a) item 2 - S-M1 fallback to the withdrawal's own reference:
+  File: internal/payments/receipt.go
+  Mutation: the `if storedRef == nil || *storedRef == "" { ... }` fallback
+  block guarded with `if false`.
+  Result: TestRVLF_SecGapA2_SM1FallsBackToWithdrawalReference STILL
+  PASSES. Not a failed kill - gap (c)'s centralization (the SAME fallback
+  now lives in applyPayoutSuccess itself, called at the end of this same
+  branch when receipt.go's own check no-ops) independently catches it -
+  real, working defense in depth from landing (c) in the same round.
+  Disclosed rather than claimed as a kill via this test.
+  Reverted: git checkout (targeted); confirmed clean.
+
+Gap (a) item 3 - reversal fingerprint uses the raw wire outcome:
+  File: internal/payments/receipt.go
+  Mutation: `computeEventFingerprint`'s `if ev.RawOutcome != "" { fingerprintOutcome = ev.RawOutcome }`
+  removed (falls back to always using the normalized ev.Outcome).
+  Killed by: TestRVLF_SecGapA3_ReversalFingerprintUsesRawWireOutcome.
+  Failure: both "two different RawOutcome values produce different
+  fingerprints" and "matches the real stored value" assertions fail.
+  Reverted: git checkout (targeted).
+
+Gap (b) - cross-operation deferred receipt resolved as anomaly:
+  File: internal/payments/receipt.go
+  Mutation: the new cross-operation query's `AND event_type = $4`
+  appended with `AND false` (never matches any row).
+  Killed by: TestRVLF_SecGapB_CrossOperationDeferredReceiptResolvedAsAnomaly.
+  Failure: scan error ("cannot scan NULL into *string") reading the
+  now-permanently-unresolved receipt's resolution column - i.e. it stays
+  unresolved forever, exactly the defect this gap describes.
+  Reverted: git checkout (targeted).
+
+Gap (c) - the reference-mismatch rule centralized in applyPayoutSuccess
+(minimal payout.go hunk, reported to the coordinator separately):
+  File: internal/payments/payout.go
+  Mutation: the new `if providerReference != "" { ... N6 check ... }`
+  block's condition replaced with `if false`.
+  Killed by: TestPayoutDispatch_SecGapC_SyncSuccessProviderReferenceMismatchDisputes
+  (the SYNC dispatch path, which had NO reference check of its own before
+  this fix - the gap this item exists to close).
+  Failure: attempt state "succeeded" instead of "disputed".
+  Reverted: git checkout (targeted).
+
+Verification after all gap (a)/(b)/(c) mutations reverted: `git status
+--porcelain` clean; `go build ./...`, `go vet -tags=integration ./...`,
+`gofmt -l .` clean; `golangci-lint run ./...` (pinned 2.9.0): 0 issues.

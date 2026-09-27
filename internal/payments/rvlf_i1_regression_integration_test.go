@@ -22,6 +22,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Diansalas/igaming-platform/internal/db"
+	"github.com/Diansalas/igaming-platform/internal/withdrawal"
 )
 
 func rvInit(t *testing.T, pool *db.Pool, orch *Orchestrator, f orchFixture, amount int64, key string) InitiateDepositAttemptResult {
@@ -1509,6 +1510,8 @@ func TestRVLF_A7Tomb1_ConcurrentIdenticalTombstoneReversalsNoDeadlockExactlyOneE
 // probe SP-B2 found the SUCCESS variant releasing a hold - this pins the
 // DECLINE variant: the withdrawal must stay exactly where it was
 // (submitted/held), never released, never failed, by this backstop alone.
+// Updated for gap (b): the mislabeled receipt is no longer left
+// unresolved forever - it is resolved as an anomaly (never applied).
 func TestRVLF_N3_DeferredApplyNeverReplaysADepositDeclineAsPayoutEvidence(t *testing.T) {
 	pool := depositV2ScratchPool(t)
 	f := seedPayoutFixture(t, pool, 100_000, true)
@@ -1565,14 +1568,27 @@ func TestRVLF_N3_DeferredApplyNeverReplaysADepositDeclineAsPayoutEvidence(t *tes
 	if wrState == "failed" || wrState == "completed" {
 		t.Errorf("N3/S-H1: the withdrawal hold must never be released by a mislabeled deferred receipt, got state=%q", wrState)
 	}
-	var stillUnresolved int64
+	// FH-5 security re-verification gap (b): the mislabeled deposit-typed
+	// receipt must no longer be left permanently unresolved (it would
+	// otherwise count toward the §6.1 step 5 unapplied-receipt cap
+	// forever) - ApplyDeferredReceiptsForAttempt now RESOLVES a cross-
+	// operation deferred receipt as an anomaly instead, attached to the
+	// payout attempt whose reference it collided with. It is never
+	// applied/replayed (the payout attempt and withdrawal are untouched,
+	// asserted above) - only resolved so it stops counting.
+	var resolvedAt *time.Time
+	var resolution string
 	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		return tx.QueryRow(ctx, `SELECT count(*) FROM payment_provider_events WHERE provider_reference = $1 AND event_type = 'deposit' AND resolved_at IS NULL`, ref).Scan(&stillUnresolved)
+		return tx.QueryRow(ctx, `SELECT resolved_at, resolution FROM payment_provider_events WHERE provider_reference = $1 AND event_type = 'deposit'`, ref).
+			Scan(&resolvedAt, &resolution)
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if stillUnresolved != 1 {
-		t.Errorf("N3/S-H1: the mislabeled deposit-typed receipt must remain unresolved, not silently consumed, got %d", stillUnresolved)
+	if resolvedAt == nil {
+		t.Error("N3/S-H1 (gap b): the mislabeled deposit-typed receipt must be resolved (as an anomaly), not left unresolved forever")
+	}
+	if resolution != string(ResolutionAnomalyOther) {
+		t.Errorf("N3/S-H1 (gap b): expected resolution=anomaly_other, got %q", resolution)
 	}
 }
 
@@ -1806,5 +1822,206 @@ func TestRVLF_N2_SweeperGo_SuccessAfterTombstoneDisputesNotIndexError(t *testing
 	}
 	if b := cashBalance(t, pool, f); b != 0 {
 		t.Errorf("N2: a tombstoned poll success must never post; balance=%d", b)
+	}
+}
+
+// security re-verification (cb1330f) gap (b): a stored, unresolved
+// "payout"-typed receipt sharing a DEPOSIT attempt's own (provider_id,
+// provider_reference) must be RESOLVED as an anomaly by
+// ApplyDeferredReceiptsForAttempt, not silently left unresolved forever
+// (it would otherwise count toward the §6.1 step 5 unapplied-receipt cap
+// indefinitely, since the allow-list filter never selects it for
+// replay).
+func TestRVLF_SecGapB_CrossOperationDeferredReceiptResolvedAsAnomaly(t *testing.T) {
+	pool := depositV2ScratchPool(t)
+	f := seedOrchFixture(t, pool)
+	p := NewMockProvider("mock-secgapb", "EUR")
+	registerCapability(t, pool, f, p, 100)
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-secgapb": p}, MultiWebhookCredentialResolver{"mock-secgapb": NewMockWebhookCredentials(p)})
+
+	res := rvInit(t, pool, orch, f, 5000, "secgapb")
+	ref := *res.Attempt.ProviderReference
+
+	var receiptID uuid.UUID
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		receiptID = uuid.New()
+		_, err := tx.Exec(ctx,
+			`INSERT INTO payment_provider_events (id, tenant_id, provider_id, event_type, provider_reference, outcome, amount, asset_code, event_fingerprint, disposition_at_receipt)
+			 VALUES ($1, $2, $3, 'payout', $4, 'succeeded', 5000, 'EUR', $5, 'deferred_unresolved')`,
+			receiptID, f.tenantID, "mock-secgapb", ref, []byte("secgapb-fingerprint-0000000000001"))
+		return err
+	}); err != nil {
+		t.Fatalf("seed cross-operation deferred receipt: %v", err)
+	}
+
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `SELECT id FROM deposit_intents WHERE id = $1 FOR UPDATE`, res.Intent.ID); err != nil {
+			return err
+		}
+		_, err := ApplyDeferredReceiptsForAttempt(ctx, tx, orch, res.Attempt)
+		return err
+	}); err != nil {
+		t.Fatalf("ApplyDeferredReceiptsForAttempt: %v", err)
+	}
+
+	var resolvedAt *time.Time
+	var resolution, attemptID string
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT resolved_at, resolution, COALESCE(attempt_id::text, '') FROM payment_provider_events WHERE id = $1`, receiptID).
+			Scan(&resolvedAt, &resolution, &attemptID)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if resolvedAt == nil {
+		t.Fatal("sec-gap-b: the cross-operation receipt must be resolved, not left unresolved forever")
+	}
+	if resolution != string(ResolutionAnomalyOther) {
+		t.Errorf("sec-gap-b: expected resolution=anomaly_other, got %q", resolution)
+	}
+	if attemptID != res.Attempt.ID.String() {
+		t.Errorf("sec-gap-b: expected attempt_id=%s, got %q", res.Attempt.ID, attemptID)
+	}
+	// The deposit attempt itself must be untouched.
+	final := mustGetAttempt(t, pool, f.tenantID, res.Attempt.ID)
+	if final.State == AttemptSucceeded {
+		t.Errorf("sec-gap-b: the deposit attempt must never be marked succeeded by a mislabeled payout receipt")
+	}
+}
+
+// security re-verification (cb1330f) gap (a), item 1: an UNRECOGNIZED
+// event_type (neither "deposit" nor "payout") naming an existing attempt's
+// reference must be an anomaly via the allow-list in ApplyReceiptEvidence
+// - never silently passed through because it fails to match either of the
+// two explicit negative comparisons an older version of this check used.
+func TestRVLF_SecGapA1_UnknownEventTypeIsAnomaly(t *testing.T) {
+	pool := depositV2ScratchPool(t)
+	f := seedOrchFixture(t, pool)
+	p := NewMockProvider("mock-secgapa1", "EUR")
+	registerCapability(t, pool, f, p, 100)
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-secgapa1": p}, MultiWebhookCredentialResolver{"mock-secgapa1": NewMockWebhookCredentials(p)})
+
+	res := rvInit(t, pool, orch, f, 5000, "secgapa1")
+	ref := *res.Attempt.ProviderReference
+
+	// "payout_returned" is a VALID payment_provider_events.event_type per
+	// the DB CHECK, but is NOT in ApplyReceiptEvidence's own
+	// eventTypeOperation allow-list (only "deposit" and "payout" are) -
+	// exactly the "a future payout_returned" case the allow-list's own
+	// doc comment names.
+	disp, err := rvApplyReceipt(pool, orch, f.tenantID, "mock-secgapa1", ReceiptEvidence{
+		EventType: "payout_returned", ProviderReference: ref, Outcome: OutcomeSucceeded, Amount: 5000, AssetCode: "EUR",
+	})
+	if err != nil {
+		t.Fatalf("an unrecognized event_type must not error: %v", err)
+	}
+	if disp != DispositionAnomaly {
+		t.Errorf("sec-gap-a1: an unrecognized event_type must be an anomaly, got %s", disp)
+	}
+	final := mustGetAttempt(t, pool, f.tenantID, res.Attempt.ID)
+	if final.State == AttemptSucceeded {
+		t.Errorf("sec-gap-a1: the attempt must never be marked succeeded by an unrecognized event_type")
+	}
+}
+
+// security re-verification (cb1330f) gap (a), item 2: S-M1's provider-
+// reference-mismatch check must fall back to the WITHDRAWAL's own stored
+// reference when the attempt itself has none yet (e.g. it reached
+// 'ambiguous' before ever learning one) - never comparing against nothing
+// just because the attempt-level column happens to be empty.
+func TestRVLF_SecGapA2_SM1FallsBackToWithdrawalReference(t *testing.T) {
+	pool := depositV2ScratchPool(t)
+	f := seedPayoutFixture(t, pool, 100_000, true)
+	p := NewMockProvider("mock-secgapa2", "EUR")
+	registerCapability(t, pool, f.orchFixture, p, 100)
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-secgapa2": p}, MultiWebhookCredentialResolver{"mock-secgapa2": NewMockWebhookCredentials(p)})
+
+	wr, attempt := notSentPayoutAttempt(t, pool, orch, f, 5000, "secgapa2")
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return ClaimCreatedForSubmission(ctx, tx, attempt.ID, "mock-secgapa2", uuid.New(), "rv-secgapa2", time.Now().Add(time.Minute))
+	}); err != nil {
+		t.Fatalf("claim for submission: %v", err)
+	}
+	// The withdrawal itself learns a reference (e.g. AttachProviderReference
+	// via an ambiguous QueryStatus round), but the ATTEMPT row's own
+	// provider_reference column is left NULL on purpose, to isolate the
+	// fallback.
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return withdrawal.AttachProviderReference(ctx, tx, wr.ID, "secgapa2-withdrawal-ref")
+	}); err != nil {
+		t.Fatalf("attach withdrawal reference: %v", err)
+	}
+
+	disp, err := rvApplyReceipt(pool, orch, f.tenantID, "mock-secgapa2", ReceiptEvidence{
+		EventType: "payout", ProviderReference: "secgapa2-DIFFERENT-ref", MerchantReference: attempt.ID.String(),
+		Outcome: OutcomeSucceeded, Amount: 5000, AssetCode: "EUR",
+	})
+	if err != nil {
+		t.Fatalf("mismatched success must not error: %v", err)
+	}
+	if disp != DispositionApplied {
+		t.Errorf("sec-gap-a2: expected disposition=applied (the dispute IS the applied effect), got %s", disp)
+	}
+	final := mustGetAttempt(t, pool, f.tenantID, attempt.ID)
+	if final.State != AttemptDisputed {
+		t.Errorf("sec-gap-a2: a payout success echoing a different WITHDRAWAL-level reference must dispute, got %s", final.State)
+	}
+}
+
+// security re-verification (cb1330f) gap (a), item 3: a reversal's stored
+// event_fingerprint must reflect the RAW wire outcome (RawOutcome), not
+// the normalized 'succeeded' value every posting/tombstoning reversal
+// shares - two deliveries of the SAME reversal reference with DIFFERENT
+// raw wire outcomes (one genuinely succeeded, one the legacy
+// declined-as-reason-carrier) must never collapse into one deduplicated
+// receipt row.
+func TestRVLF_SecGapA3_ReversalFingerprintUsesRawWireOutcome(t *testing.T) {
+	pool := depositV2ScratchPool(t)
+	f := seedOrchFixture(t, pool)
+	p := NewMockProvider("mock-secgapa3", "EUR")
+	registerCapability(t, pool, f, p, 100)
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-secgapa3": p}, MultiWebhookCredentialResolver{"mock-secgapa3": NewMockWebhookCredentials(p)})
+
+	res := rvInit(t, pool, orch, f, 5000, "secgapa3")
+	ref := *res.Attempt.ProviderReference
+	if _, err := rvCallback(pool, orch, f, "mock-secgapa3", p.CallbackPayload(f.tenantID, CallbackEventDeposit, ref, "", OutcomeSucceeded, 5000, "EUR", "", false)); err != nil {
+		t.Fatalf("success: %v", err)
+	}
+
+	// Two DISTINCT reversal deliveries, same event shape EXCEPT the raw
+	// wire outcome (succeeded vs the legacy declined-as-reason-carrier) -
+	// same reversal provider_reference, same original, same amount/asset.
+	if _, err := rvCallback(pool, orch, f, "mock-secgapa3", p.CallbackPayload(f.tenantID, CallbackEventDepositReversal, "secgapa3-rev", ref, OutcomeSucceeded, 5000, "EUR", "", false)); err != nil {
+		t.Fatalf("first reversal (succeeded): %v", err)
+	}
+	var firstFingerprint []byte
+	var firstOutcome string
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT event_fingerprint, outcome FROM payment_provider_events WHERE provider_reference = 'secgapa3-rev'`).Scan(&firstFingerprint, &firstOutcome)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if firstOutcome != string(OutcomeSucceeded) {
+		t.Fatalf("setup: expected the stored outcome column normalized to succeeded, got %q", firstOutcome)
+	}
+
+	// Directly exercise computeEventFingerprint with the SAME field shape
+	// the real reversal path builds (EventType, ProviderReference,
+	// OriginalProviderReference, Amount, AssetCode all matching what the
+	// stored row above was posted with) except for RawOutcome - two
+	// different RawOutcome values must never collapse to the same
+	// fingerprint, and the one matching what was ACTUALLY delivered
+	// (RawOutcome=succeeded) must reproduce the real stored value exactly.
+	base := ReceiptEvidence{EventType: string(CallbackEventDepositReversal), ProviderReference: "secgapa3-rev", OriginalProviderReference: ref, Amount: 5000, AssetCode: "EUR"}
+	evSucceeded := base
+	evSucceeded.RawOutcome = OutcomeSucceeded
+	evDeclined := base
+	evDeclined.RawOutcome = OutcomeDeclined
+	fpSucceeded := computeEventFingerprint(evSucceeded)
+	fpDeclined := computeEventFingerprint(evDeclined)
+	if string(fpSucceeded) == string(fpDeclined) {
+		t.Error("sec-gap-a3: two different RawOutcome values must produce different fingerprints")
+	}
+	if string(fpSucceeded) != string(firstFingerprint) {
+		t.Error("sec-gap-a3: the stored fingerprint must match computeEventFingerprint's own RawOutcome-based value")
 	}
 }
