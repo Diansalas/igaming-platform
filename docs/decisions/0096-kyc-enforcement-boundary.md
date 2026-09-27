@@ -743,7 +743,7 @@ asserted. No vendor is selected. No regulatory approval is claimed.
 
 ---
 
-## 10. QA test-plan review (`qa`, §7 only)
+## 11. QA test-plan review (`qa`, §7 only)
 
 **Verdict: CONFIRMED WITH CHANGES.**
 
@@ -954,3 +954,211 @@ rationale" claim (§2.4) inaccurate for sportsbook.
 
 None of these require a design change to §2/§3.5's mechanism; all are
 either documentation precision or a missing test-plan line item.
+
+---
+
+## 10. Ledger-finance review
+
+**Reviewer:** `ledger-finance`. **Verdict: SIGN-OFF WITH CONDITIONS.**
+**Scope:** the financial parts only: §2.4/§3.2/§5 withdrawal enforcement
+points #3/#5, the hold-reversal posting at a payout-time denial, deposit
+gate placement (#1), play gate placement relative to the balance lock and
+ADR 0082 (#7/#10), and TOCTOU. Checked against code at `07c8103`:
+`internal/withdrawal/withdrawal.go` (`RequestWithdrawal` :291,
+`Reject` :731, `LockApprovedForSubmission` :863, `Fail` :1150),
+`internal/httpserver/withdrawal_handlers.go` (request :106-120, submit
+:801-880), `internal/payments/orchestrator.go` `InitiateDeposit`
+:474-570, migrations 0021/0026/0034/0092, ADR 0082 §2.1. ADR 0095 is
+not yet written (registry PRH-D1 "Not started"). C5 below states what it
+must preserve and does not guess its design.
+
+### 10.1 What is sound
+
+- **Deposit (#1).** The gate goes after RG, inside the transaction that
+  inserted the intent, and before `RouteProvider`/`provider.Deposit`. A
+  denial creates only a `declined` `deposit_intents` row. It writes no
+  ledger posting and makes no provider call. An idempotent replay returns
+  the declined intent and does not re-evaluate, which is correct. Not
+  gating the callback (#2) is also correct. Funds a PSP has already sent
+  must be credited, or they strand in `psp_clearing` with no owner. Using
+  "allow when unconfigured" is financially safe only because C3's
+  withdrawal backstop holds.
+- **Play (#7/#10).** A plain `SELECT` after RG→Risk and before
+  `LockProjectionsForPosting` (L3) takes no row or advisory lock, so ADR
+  0082's L0–L4 order is unchanged. It is also placed after L0.1, and
+  after L0.4/L0.5 where RG/Risk take them. Not gating win, rollback,
+  settlement or void (#8/#9/#11) is **required, not just acceptable**.
+  If a correction could be denied, liabilities would strand and tombstone
+  semantics would break.
+- **No gate-less posting on the hold path.** Once C1 is applied, no
+  `withdrawal_requested` posting can happen without an evaluated,
+  in-transaction gate. Replaying an existing idempotency key returns the
+  original request and posts nothing, so it correctly skips the gate.
+- **Money representation.** `threshold_minor_units NUMERIC(38,0)` plus
+  `asset_code REFERENCES assets(code)` follows CLAUDE.md. See C6 for how
+  it is compared.
+
+### 10.2 Conditions (all must hold before PRH-I3 is marked IMPLEMENTED)
+
+**C1 — A denial must commit, never roll back (blocking design defect).**
+Test-plan row "KYC-denied player's hold is never posted (transaction
+rolls back…)" contradicts §3.6: the `kyc_enforcement_decisions` row and
+`audit.Record` are "written in the same transaction". Both
+`withdrawal_handlers.go` closures roll back on any non-nil error.
+`InitiateDeposit`'s own comment (:540-551) records this bug class
+already. Required shape:
+- **`RequestWithdrawal`:** do a read-only lookup of an existing request
+  by `(tenant, player, idempotency_key)` first and return a replay if one
+  exists. Then evaluate KYC. **On deny:** write the decision row and audit,
+  with no `withdrawal_requests` insert and no posting, and return a typed
+  result (for example `ErrKYCRequired`) that the handler **commits**
+  before it maps the result to the response. **On allow:** continue with
+  the existing `IdempotentInsert` → accounts → L3 → `Post`. Do not insert
+  the request row and then deny. That leaves a `requested` row without a
+  hold, which breaks withdrawal-state-machine.md §4 unless it is undone
+  through a savepoint.
+- **`LockApprovedForSubmission`:** a deny must return a result the caller
+  **commits** and that can never flow into `RouteProvider`/`Withdraw`. A
+  `nil` error with the row already transitioned would reach the provider
+  call. A non-nil error would roll back the reversal. Use a distinct
+  return, for example `(wr, ErrKYCDeniedCommitted)`, with the handler
+  changed to commit on it. Add a test that proves the reversal, the state
+  change, the decision row and the audit all survive the handler's
+  transaction.
+
+**C2 — Payout-time denial posting shape.** The ADR's "the same way
+`Reject` does" must not mean *calling* `Reject`. `Reject` requires
+`pending_review`, a staff principal, `ApproverEligibility` and a
+`withdrawal_approvals` insert. The governance trigger (migration 0034)
+refuses a non-staff, non-automated principal. Required:
+- A new function, for example `withdrawal.DenyForCompliance(ctx, tx,
+  requestID, correlationID)`. It runs inside the same L1
+  `lockRequestForUpdate` that `LockApprovedForSubmission` holds, and adds
+  a new edge `approved → rejected` (withdrawal-state-machine.md must be
+  amended to record it).
+- The posting mirrors `Reject`/`Fail` exactly. Accounts are resolved
+  `(hold, cash)` through `GetOrCreateAccounts`. The entries debit
+  `player_withdrawal_hold` and credit `player_cash` for `wr.Amount`, with
+  `TransactionType = withdrawal_rejected`, `ReversesTransactionID =
+  wr.HoldLedgerTransactionID` and `CorrelationID = requestID`.
+  `ledger.Post` takes its own L3 pre-lock, and L1 already comes before
+  L3, so the lock order is compliant with no new lock.
+- **Idempotency key `requestID + ":kyc_denied"`**, kept separate from
+  `:rejected`/`:failed`. Exactly-once release still depends on L1 plus
+  the conditional `UPDATE … WHERE state = 'approved'`, which is how every
+  existing release path works. Set `release_ledger_transaction_id` in the
+  same `UPDATE`. Treat `RowsAffected()==0` as `ErrStateConflict`, which
+  rolls back the posting.
+- Put no `reason_code` on the ledger transaction. The migration 0021
+  CHECK allows one only for `manual_adjustment`. `kyc_denied` belongs in
+  the audit entry (`ActorSystem`, action `withdrawal.rejected_kyc`,
+  metadata: outcome, `policy_version`, `hold_ledger_transaction`,
+  `release_ledger_transaction`). Write no `withdrawal_approvals` row,
+  because this is not a four-eyes decision.
+- Releasing to `player_cash` is the correct financial default: no held
+  value is left stranded without an owner. Whether funds should instead
+  stay in a compliance hold (an AML freeze) is an `identity-compliance`
+  and legal decision. It is **not** decided here and must be recorded as
+  its own HD if anyone wants it. It would need a new state, not a
+  repurposed one.
+- **Recommended, not blocking:** as a DB backstop for exactly-once
+  release, add a partial unique index `(tenant_id,
+  reverses_transaction_id) WHERE transaction_type IN
+  ('withdrawal_rejected','withdrawal_failed')`, mirroring migration 0092.
+  This is a ledger-finance-owned follow-up. Register it; it is not part of
+  migration 0101.
+
+**C3 — The structural first-withdrawal exemption must not let a known
+`failed` status pay out.** In §3.2 point 1, any wallet with a prior
+`completed` withdrawal is exempt. As written, a player whose latest
+verification is now `rejected`/`expired` (for example after a fraud
+finding) could withdraw a second time, ungated, whenever no threshold row
+is active. That is value leaving the platform against a known negative
+KYC state. Required: for `withdrawal_hold`/`withdrawal_payout`, a latest
+verification in `rejected`/`expired` status returns `failed` whatever the
+withdrawal history. The exemption covers only "never required since the
+last pass". If `identity-compliance` disagrees, it must be recorded as an
+explicit HD, not left implied. Also note the EXISTS is scoped
+**per wallet**. That is stricter, since each new asset wallet needs
+another first-withdrawal pass, and so acceptable, but it should be stated.
+
+**C4 — TOCTOU: accept it, but bound it explicitly.** Under READ
+COMMITTED, the gate reads `kyc_verifications` without a lock. A
+revocation that commits after that read but before the gated transaction
+commits is not seen. **Acceptable**, on three conditions:
+- (a) The gate result is always computed inside the transaction that
+  performs the gated transition or posting, and is never passed between
+  transactions. `EvaluateEnforcement` accepts no precomputed decision, as
+  §2.5 already requires.
+- (b) Every re-entry re-evaluates: retry, sweeper, resubmission after
+  rollback.
+- (c) The window is documented as ≤ one transaction's duration.
+
+Closing the window completely (`FOR SHARE` on the verification row) would
+add a new lock class to ADR 0082 and a contention point between KYC
+callbacks and payouts. That is not warranted here. A revocation that
+lands inside the window is handled like any post-dispatch compliance
+finding (C5).
+
+**C5 — ADR 0095 interplay (a binding constraint on PRH-D1).** Today the
+provider call runs inside the lock transaction. ADR 0095 will split this
+into intent/claim → provider I/O → result. The KYC payout gate must sit
+in **the last transaction that commits before the first outbound
+`Withdraw` call for that intent**. In practice that is the transaction
+that moves `approved` to the first dispatch state. If ADR 0095 adds a
+"prepared, not yet sent" state that a sweeper sends later, the sweeper's
+claim transaction must re-run the gate before that first send. After a
+request has possibly reached the provider (`submitted`, or any
+ambiguous/in-flight intent state):
+- no KYC outcome may trigger `Fail`, a hold reversal, or any other
+  automated release;
+- only provider evidence (`QueryStatus` → `Complete`/`Fail`) may resolve
+  it.
+
+Reversing the hold on KYC grounds while the PSP might still pay would
+create a real double-spend: the player's cash is restored and the payout
+also completes. A KYC revocation after dispatch goes to a compliance
+case, not a ledger action. The denial edge is legal **only from
+`approved`** (and from `requested`/`pending_review`, if later chosen).
+ADR 0095's state machine must keep that edge and must list
+`DenyForCompliance` among its pre-dispatch terminal transitions.
+
+**C6 — Threshold arithmetic.** Compare `threshold_minor_units` against
+amounts in exact integers: SQL `NUMERIC` or Go `big.Int`/`int64` with an
+overflow check, never `float64`. Compare only within the same
+`asset_code`. Aggregating cumulative deposits across assets would need an
+FX/`ConversionOperation` basis, which is a human decision (extend
+HD-KYC-1), not an implicit sum. The cumulative-deposit figure must come
+from ledger postings (settled `deposit_completed` credits to the player's
+wallets for that asset), not from `deposit_intents.amount`, which
+includes declined and pending intents. Whether reversals are netted off
+is also part of HD-KYC-1.
+
+**C7 — Tests (ledger-finance's suite, added to §7).** The following
+tests are required:
+- A deny at request posts nothing, and the decision row and audit are
+  committed.
+- A deny at payout commits exactly one `withdrawal_rejected` reversal,
+  and `SUM(DEBITS)==SUM(CREDITS)` still holds.
+- The projection matches the recomputed-from-ledger balance, with zero
+  drift from the reconciliation job.
+- A concurrent `Reject`/`Cancel` racing `DenyForCompliance` on one
+  request produces exactly one release.
+- A replayed submit after a payout deny gets `ErrStateConflict` and never
+  reaches the provider.
+- A replayed request idempotency key after a successful hold does not
+  re-gate.
+- A KYC revocation committed after dispatch causes no automated reversal
+  (C5).
+- A `rejected`/`expired` player with a prior completed withdrawal is
+  denied (C3).
+- The ADR 0082 lock-order harness passes unmodified on all five gated
+  paths.
+
+### 10.3 Veto check
+
+No floating point, no mutation of historical ledger entries, no direct
+balance `UPDATE`, and no money path without an idempotency key. No veto
+applies. C1 is a correctness defect in the proposed design and **must**
+be fixed in the ADR text before PRH-I3 starts. C2–C7 are implementation
+gates.
