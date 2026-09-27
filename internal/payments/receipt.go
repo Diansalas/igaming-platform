@@ -160,14 +160,27 @@ func insertReceiptDeduped(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, pr
 	fingerprint := computeEventFingerprint(ev)
 	var declineStage, declineReason *string
 	var cascadable *bool
-	// decline_stage/cascadable are §4.4 deposit-ATTEMPT-decline concepts
-	// (the CHECK constraint only accepts 'at_submission'/'after_acceptance',
-	// never an empty string) - a deposit_reversal event reuses the wire
-	// Outcome field for historical reasons (some callers still send
-	// "declined" as a chargeback-reason carrier) but is never itself a
-	// §4.4 decline cell, so it must never populate these columns.
-	if ev.Outcome == OutcomeDeclined && ev.EventType == string(CallbackEventDeposit) {
+	// decline_stage/cascadable are §4.4 deposit/payout-ATTEMPT-decline
+	// concepts (the CHECK constraint only accepts 'at_submission'/
+	// 'after_acceptance', never an empty string) - a deposit_reversal
+	// event reuses the wire Outcome field for historical reasons (some
+	// callers still send "declined" as a chargeback-reason carrier) but
+	// is never itself a §4.4 decline cell, so it must never populate
+	// these columns. RV-PRH-I1 ledger-finance R4(c): a payout-typed
+	// decline (ev.EventType == "payout") IS a genuine attempt-decline
+	// cell with the SAME taxonomy - excluding it here (as an earlier
+	// version of this function did) left decline_stage/cascadable NULL
+	// for a payout decline while outcome='declined' was still stored,
+	// which payment_provider_events_check1 rejects outright (a permanent
+	// redelivery loop, never merely "no effect"). decline_stage defaults
+	// to 'after_acceptance' (this file's own receipt-path decline
+	// branch's own hardcoded ApplyDecline stage) when the caller left it
+	// unset, rather than storing an empty string the CHECK also rejects.
+	if ev.Outcome == OutcomeDeclined && (ev.EventType == string(CallbackEventDeposit) || ev.EventType == "payout") {
 		ds := string(ev.DeclineStage)
+		if ds == "" {
+			ds = string(DeclineAfterAcceptance)
+		}
 		declineStage = &ds
 		if ev.DeclineReason != "" {
 			declineReason = &ev.DeclineReason
@@ -370,6 +383,28 @@ func ApplyReceiptEvidence(ctx context.Context, tx pgx.Tx, o *Orchestrator, tenan
 
 	attempt := resolved.Attempt
 
+	// RV-PRH-I1 ledger-finance R4(b) (payout re-review): the resolved
+	// attempt's OWN operation must match what this event claims to
+	// describe - a "deposit"-typed event resolving (by provider_reference
+	// or merchant_reference collision) to a PAYOUT attempt, or the
+	// reverse, is cross-operation contamination, never applied to either
+	// operation's state machine. This is deliberately checked here, not
+	// inside applyResolvedReceiptEvidence's own operation-specific
+	// branches below, so it applies uniformly regardless of ev.Outcome.
+	if (ev.EventType == string(CallbackEventDeposit) && attempt.Operation != AttemptOperationDeposit) ||
+		(ev.EventType == "payout" && attempt.Operation != AttemptOperationPayout) {
+		receiptID, duplicate, err := insertReceiptDeduped(ctx, tx, tenantID, verifiedProviderID, ev, DispositionAnomaly)
+		if err != nil {
+			return "", err
+		}
+		if !duplicate {
+			if err := ResolveReceipt(ctx, tx, receiptID, nil, string(ResolutionAnomalyOther)); err != nil {
+				return "", err
+			}
+		}
+		return DispositionAnomaly, nil
+	}
+
 	// §4.4 precondition 2: a provider reference already bound to a
 	// DIFFERENT attempt than the one just resolved is an anomaly, never
 	// a unique-violation-then-5xx-redelivery-loop (LF95-C3).
@@ -555,11 +590,22 @@ func applyResolvedReceiptEvidence(ctx context.Context, tx pgx.Tx, o *Orchestrato
 				}
 				return true, ResolutionApplied, nil
 			}
-			// Payout success (T7 via withdrawal.Complete) is wired in a
-			// later PRH-I1 step (payout dispatch); until then a payout
-			// success receipt is recorded as a disputed anomaly rather
-			// than silently dropped or, worse, guessed at.
-			return true, ResolutionAnomalyOther, ApplyDisputeFromNonTerminal(ctx, tx, attempt.ID, EvidenceCallback, "payout_success_not_yet_wired")
+			// RV-PRH-I1 ledger-finance R4(d): a payout success is wired
+			// through the SAME tx-scoped apply function ApplyPayoutResult's
+			// own ErrorClassSucceeded branch uses (payout.go), so the hold
+			// is settled (withdrawal.Complete) exactly once, never
+			// duplicated by a second, receipt-path-only implementation.
+			// The amount/asset cross-check already ran above (mismatched),
+			// uniformly for both deposit and payout - R4(d)'s own
+			// requirement, made "small" by reusing that existing check
+			// rather than adding a payout-specific one.
+			if attempt.WithdrawalRequestID == nil {
+				return false, "", fmt.Errorf("payments: payout success evidence for attempt %s with no withdrawal_request_id", attempt.ID)
+			}
+			if err := applyPayoutSuccess(ctx, tx, *attempt.WithdrawalRequestID, attempt, ev.ProviderReference, EvidenceCallback); err != nil {
+				return false, "", err
+			}
+			return true, ResolutionApplied, nil
 		default:
 			return false, ResolutionAnomalyOther, nil
 		}
@@ -574,18 +620,34 @@ func applyResolvedReceiptEvidence(ctx context.Context, tx pgx.Tx, o *Orchestrato
 			// are a no-op for decline evidence, never a CAS attempt.
 			return false, ResolutionAnomalyOther, nil
 		}
+		reason := boundedDeclineReason(ev.DeclineReason)
+
+		// RV-PRH-I1 ledger-finance R4(a): a payout decline is routed
+		// through applyPayoutDecline (payout.go) - the SAME tx-scoped
+		// function ApplyPayoutResult's own ErrorClassDefiniteDecline
+		// branch uses - so ApplyDecline (T8) and withdrawal.Fail (the
+		// hold-release posting) happen together, exactly once. The
+		// earlier version of this branch called the shared ApplyDecline
+		// directly for EVERY operation, which declined a payout attempt
+		// but never released its hold - a stranded-funds bug, not merely
+		// a missed cascade.
+		if attempt.Operation != AttemptOperationDeposit {
+			if attempt.WithdrawalRequestID == nil {
+				return false, "", fmt.Errorf("payments: payout decline evidence for attempt %s with no withdrawal_request_id", attempt.ID)
+			}
+			if err := applyPayoutDecline(ctx, tx, *attempt.WithdrawalRequestID, attempt, ev.ProviderReference, reason, ev.Cascadable, EvidenceCallback); err != nil {
+				return false, "", err
+			}
+			return true, ResolutionApplied, nil
+		}
+
 		var refPtr *string
 		if ev.ProviderReference != "" {
 			refPtr = &ev.ProviderReference
 		}
-		reason := boundedDeclineReason(ev.DeclineReason)
-		var updated DepositIntent
-		var err error
-		if attempt.Operation == AttemptOperationDeposit {
-			updated, err = o.finalizeDeclined(ctx, tx, DepositIntent{ID: *attempt.DepositIntentID, TenantID: attempt.TenantID}, attempt.ProviderID, refPtr, reason)
-			if err != nil {
-				return false, "", err
-			}
+		updated, err := o.finalizeDeclined(ctx, tx, DepositIntent{ID: *attempt.DepositIntentID, TenantID: attempt.TenantID}, attempt.ProviderID, refPtr, reason)
+		if err != nil {
+			return false, "", err
 		}
 		cascadable := ev.Cascadable
 		if err := ApplyDecline(ctx, tx, attempt.ID, DeclineEvidence{
@@ -594,22 +656,20 @@ func applyResolvedReceiptEvidence(ctx context.Context, tx pgx.Tx, o *Orchestrato
 		}); err != nil {
 			return false, "", err
 		}
-		if attempt.Operation == AttemptOperationDeposit {
-			// RV-PRH-I1 code review F3: cascade eligibility is decided
-			// from updated.Status - finalizeDeclined's OWN return value,
-			// which is a no-op (and so still reports 'succeeded') when a
-			// sibling already succeeded - never from a fresh read taken
-			// after finalizeDeclined ran, which would otherwise always
-			// observe whatever finalizeDeclined itself just wrote.
-			if cascadeEligible(attempt, updated.Status, cascadable, o.maxCascadeDepth(), true) {
-				// RV-PRH-I1 ledger-finance H3 (ADR 0095 §10.3): an
-				// engaged kill switch must never turn this callback into
-				// a 500 - insertCascadeAttemptIfEligible downgrades
-				// ErrKillSwitchEngaged to "no child, audited", the
-				// decline itself (already applied above) still commits.
-				if _, err := insertCascadeAttemptIfEligible(ctx, tx, attempt); err != nil {
-					return false, "", err
-				}
+		// RV-PRH-I1 code review F3: cascade eligibility is decided from
+		// updated.Status - finalizeDeclined's OWN return value, which is
+		// a no-op (and so still reports 'succeeded') when a sibling
+		// already succeeded - never from a fresh read taken after
+		// finalizeDeclined ran, which would otherwise always observe
+		// whatever finalizeDeclined itself just wrote.
+		if cascadeEligible(attempt, updated.Status, cascadable, o.maxCascadeDepth(), true) {
+			// RV-PRH-I1 ledger-finance H3 (ADR 0095 §10.3): an engaged
+			// kill switch must never turn this callback into a 500 -
+			// insertCascadeAttemptIfEligible downgrades
+			// ErrKillSwitchEngaged to "no child, audited", the decline
+			// itself (already applied above) still commits.
+			if _, err := insertCascadeAttemptIfEligible(ctx, tx, attempt); err != nil {
+				return false, "", err
 			}
 		}
 		return true, ResolutionApplied, nil
@@ -682,23 +742,26 @@ func applyDepositSuccessAndPost(ctx context.Context, tx pgx.Tx, o *Orchestrator,
 // a SEPARATE, freshly-opened transaction via RecordDepositReversalRejection
 // exactly as it did before the cutover.
 func applyReversalReceiptEvidence(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, verifiedProviderID string, ev ReceiptEvidence) (ReceiptDisposition, error) {
-	// RV-PRH-I1 ledger-finance H1: wireOutcome is the UNMODIFIED evidence
-	// as it arrived. Only a reversal whose wire outcome is actually
-	// 'succeeded' may ever debit player_cash or write a tombstone -
-	// anything else (declined/pending/ambiguous, or any other non-success
-	// value some PSP sends) is recorded with no ledger effect whatsoever,
-	// never silently normalized to a claimed success. See
-	// applyNonSucceededReversalEvidence's own doc comment for the storage
-	// compromise this requires.
-	wireOutcome := ev.Outcome
-	if wireOutcome != OutcomeSucceeded {
-		return applyNonSucceededReversalEvidence(ctx, tx, tenantID, verifiedProviderID, ev, wireOutcome)
-	}
-	// Normalize the stored/fingerprinted outcome to 'succeeded' for every
-	// deposit_reversal receipt this function actually persists (both the
-	// tombstone and posting branches below) - already true here since
-	// wireOutcome == OutcomeSucceeded, kept explicit for readability and
-	// so the fingerprint computed below is stable across redeliveries.
+	// RV-PRH-I1 H1, CORRECTED after the coordinator's own -race run against
+	// the real adapter contract: a deposit_reversal event's wire Outcome
+	// field is NOT a "did this reversal itself succeed" signal - there is
+	// no such concept on this event type today. MockProvider.HandleCallback
+	// requires Outcome to be one of the four enumerated values for EVERY
+	// event (an empty/unrecognized value is ErrCallbackMalformedBody, never
+	// silently accepted), and the field is deliberately reused as a
+	// chargeback/refund REASON carrier for a reversal - see every existing
+	// reversal fixture in this package (e.g. OutcomeDeclined with
+	// DeclineReason "chargeback"/"chargeback_lost"), which has always meant
+	// "this deposit WAS reversed, for this reason", never "the attempted
+	// reversal failed". My original H1 fix treated a non-succeeded wire
+	// Outcome as "must not post", which broke every genuine reversal
+	// (TestReceiveCallback_DepositReversalPostsFlow2 and siblings) - the
+	// adapter contract provides no field today that distinguishes a
+	// genuinely-inapplicable reversal event from a real one, so every
+	// deposit_reversal event that resolves an attempt here IS one to
+	// apply, exactly as before this fix round. Normalized to 'succeeded'
+	// for storage/fingerprinting, as originally: the wire value itself
+	// carries a reason, not a disposition.
 	ev.Outcome = OutcomeSucceeded
 	original, err := GetAttemptByProviderReference(ctx, tx, verifiedProviderID, ev.OriginalProviderReference)
 	if err != nil && !errors.Is(err, ErrAttemptNotFound) {
@@ -948,61 +1011,6 @@ func applyReversalReceiptEvidence(ctx context.Context, tx pgx.Tx, tenantID uuid.
 		return DispositionDuplicateEffect, nil
 	}
 	return DispositionApplied, nil
-}
-
-// applyNonSucceededReversalEvidence implements RV-PRH-I1 ledger-finance H1:
-// a deposit_reversal callback whose WIRE outcome is not 'succeeded' (a
-// declined/pending/ambiguous value, including PSPs that reuse this field
-// as a chargeback/refund-reason carrier) must never debit player_cash and
-// must never write a reversal tombstone. It is recorded as an anomaly
-// receipt with NO ledger effect and no attempt/intent state change, so a
-// genuinely successful, later reversal (or a still-pending original
-// deposit's genuine success) is never blocked by this one.
-//
-// Storage note (disclosed limitation, not full ADR fidelity): 'pending'
-// and 'ambiguous' wire outcomes are stored verbatim - no CHECK constraint
-// restricts them. A 'declined' wire outcome cannot be stored verbatim
-// today: payment_provider_events_check1 requires cascadable+decline_stage
-// whenever outcome='declined', and those are deposit-ATTEMPT-decline
-// columns a reversal event has no value for; populating them here would
-// misrepresent this as a deposit-attempt decline, which it is not.
-// Storing a false outcome='succeeded' (silently claiming money-safety this
-// event never had) would be strictly worse, so a 'declined' wire outcome
-// is instead stored as 'ambiguous' - a disclosed stopgap pending a schema
-// change (e.g. a reversal-specific outcome shape, or relaxing the CHECK
-// for event_type='deposit_reversal') that must not be created as a new
-// migration without confirming the next free migration number first. The
-// TRUE wire value is preserved in the audit record either way, so nothing
-// is silently lost even though the stored `outcome` column itself is not
-// byte-for-byte faithful for this one case.
-func applyNonSucceededReversalEvidence(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, verifiedProviderID string, ev ReceiptEvidence, wireOutcome Outcome) (ReceiptDisposition, error) {
-	storedOutcome := wireOutcome
-	if wireOutcome == OutcomeDeclined {
-		storedOutcome = OutcomeAmbiguous
-	}
-	ev.Outcome = storedOutcome
-
-	receiptID, duplicate, err := insertReceiptDeduped(ctx, tx, tenantID, verifiedProviderID, ev, DispositionAnomaly)
-	if err != nil {
-		return "", err
-	}
-	if duplicate {
-		return DispositionDuplicateEffect, nil
-	}
-	if err := audit.Record(ctx, tx, audit.Entry{
-		TenantID: tenantID, ActorType: audit.ActorSystem, Action: "deposit.reversal_non_succeeded_evidence",
-		TargetType: "payment_provider_event", TargetID: receiptID.String(), Outcome: audit.OutcomeDenied,
-		Metadata: map[string]any{
-			"provider_id": verifiedProviderID, "original_provider_reference": ev.OriginalProviderReference,
-			"reversal_provider_reference": ev.ProviderReference, "wire_outcome": string(wireOutcome),
-		},
-	}); err != nil {
-		return "", fmt.Errorf("payments: audit non-succeeded reversal evidence: %w", err)
-	}
-	if err := ResolveReceipt(ctx, tx, receiptID, nil, string(ResolutionAnomalyOther)); err != nil {
-		return "", err
-	}
-	return DispositionAnomaly, nil
 }
 
 // recomputeDepositIntentProjection implements ADR 0095 §5.1's intent

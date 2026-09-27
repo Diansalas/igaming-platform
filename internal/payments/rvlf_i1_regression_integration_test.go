@@ -54,17 +54,27 @@ func rvQueryInt(t *testing.T, pool *db.Pool, f orchFixture, sql string, args ...
 	return n
 }
 
-// P1 (H1): a deposit_reversal whose wire outcome is declined/pending/
-// ambiguous must never debit player_cash, and must never be stored as a
-// claimed outcome='succeeded'.
-func TestRVLF_P1_NonSucceededReversalOutcomes(t *testing.T) {
+// P1 (H1, CORRECTED): a deposit_reversal event's wire Outcome field is NOT
+// a "did this reversal succeed" signal on the current adapter contract -
+// MockProvider.HandleCallback requires it to be one of the four enumerated
+// values for every event, and it is deliberately reused as a chargeback/
+// refund REASON carrier for a reversal (every existing reversal fixture in
+// this package sends OutcomeDeclined with a DeclineReason like
+// "chargeback"/"chargeback_lost" for a reversal that DID happen and must
+// be applied). An earlier version of this fix round misread H1 as "gate
+// posting on wireOutcome == succeeded", which broke every genuine
+// reversal (TestReceiveCallback_DepositReversalPostsFlow2 and its
+// siblings). This test pins the CORRECTED behavior: a reversal posts
+// (debits player_cash, stored as outcome=succeeded) regardless of which
+// of the four wire Outcome values carries the reason.
+func TestRVLF_P1_ReversalPostsRegardlessOfWireOutcomeReasonCarrier(t *testing.T) {
 	pool := depositV2ScratchPool(t)
 	f := seedOrchFixture(t, pool)
 	p := NewMockProvider("mock-rv1", "EUR")
 	registerCapability(t, pool, f, p, 100)
 	orch := NewOrchestrator(map[string]PaymentProvider{"mock-rv1": p}, MultiWebhookCredentialResolver{"mock-rv1": NewMockWebhookCredentials(p)})
 
-	for i, oc := range []Outcome{OutcomeDeclined, OutcomePending, OutcomeAmbiguous} {
+	for i, oc := range []Outcome{OutcomeDeclined, OutcomePending, OutcomeAmbiguous, OutcomeSucceeded} {
 		res := rvInit(t, pool, orch, f, 5000, "p1-"+string(oc))
 		ref := *res.Attempt.ProviderReference
 		if _, err := rvCallback(pool, orch, f, "mock-rv1", p.CallbackPayload(f.tenantID, CallbackEventDeposit, ref, "", OutcomeSucceeded, 5000, "EUR", "", false)); err != nil {
@@ -82,22 +92,25 @@ func TestRVLF_P1_NonSucceededReversalOutcomes(t *testing.T) {
 			return tx.QueryRow(ctx, `SELECT outcome FROM payment_provider_events WHERE provider_reference = $1`, revRef).Scan(&stored)
 		})
 		t.Logf("case %d wire outcome=%s: disposition=%s balance %d -> %d stored_outcome=%q", i, oc, r.Disposition, before, after, stored)
-		if after != before {
-			t.Errorf("H1: a deposit_reversal with wire outcome %q debited player_cash (%d -> %d), stored outcome=%q", oc, before, after, stored)
+		if after != before-5000 {
+			t.Errorf("H1 (corrected): a deposit_reversal carrying wire outcome %q must post (debit 5000), got %d -> %d", oc, before, after)
 		}
-		if stored == string(OutcomeSucceeded) {
-			t.Errorf("H1: a deposit_reversal with wire outcome %q must never be stored as outcome=%q", oc, OutcomeSucceeded)
+		if stored != string(OutcomeSucceeded) {
+			t.Errorf("H1 (corrected): an applied reversal must be stored as outcome=succeeded regardless of the wire reason-carrier value, got %q", stored)
 		}
-		if r.Disposition == DispositionApplied {
-			t.Errorf("H1: a non-succeeded reversal wire outcome must never resolve to disposition=applied, got %s", r.Disposition)
+		if r.Disposition != DispositionApplied {
+			t.Errorf("H1 (corrected): a genuine reversal must resolve to disposition=applied, got %s", r.Disposition)
 		}
 	}
 	assertLedgerBalanced(t, pool, f.tenantID)
 }
 
-// P1b (H1): a declined reversal for a still-pending (never posted) deposit
-// must NOT write a tombstone - the genuine later success still posts.
-func TestRVLF_P1b_DeclinedReversalDoesNotTombstonePendingDeposit(t *testing.T) {
+// P1b (H1, CORRECTED): a reversal for a still-pending (never posted)
+// deposit legitimately writes a tombstone regardless of which wire Outcome
+// value it carries as its reason - this is Flow 2's intended defense
+// against a late-arriving original deposit success being posted after the
+// deposit was already reversed, not a bug.
+func TestRVLF_P1b_ReversalOfNeverPostedDepositTombstonesRegardlessOfReasonCarrier(t *testing.T) {
 	pool := depositV2ScratchPool(t)
 	f := seedOrchFixture(t, pool)
 	p := NewMockProvider("mock-rv1b", "EUR")
@@ -106,16 +119,16 @@ func TestRVLF_P1b_DeclinedReversalDoesNotTombstonePendingDeposit(t *testing.T) {
 	res := rvInit(t, pool, orch, f, 5000, "p1b")
 	ref := *res.Attempt.ProviderReference
 	if _, err := rvCallback(pool, orch, f, "mock-rv1b", p.CallbackPayload(f.tenantID, CallbackEventDepositReversal, "rev-p1b", ref, OutcomeDeclined, 0, "", "chargeback_lost", false)); err != nil {
-		t.Fatalf("declined reversal: %v", err)
+		t.Fatalf("reversal: %v", err)
 	}
 	if _, err := rvCallback(pool, orch, f, "mock-rv1b", p.CallbackPayload(f.tenantID, CallbackEventDeposit, ref, "", OutcomeSucceeded, 5000, "EUR", "", false)); err != nil {
-		t.Fatalf("genuine success: %v", err)
+		t.Fatalf("late success after tombstone: %v", err)
 	}
 	a := mustGetAttempt(t, pool, f.tenantID, res.Attempt.ID)
 	bal := cashBalance(t, pool, f)
-	t.Logf("after declined reversal then genuine success: attempt=%s balance=%d", a.State, bal)
-	if bal != 5000 || a.State != AttemptSucceeded {
-		t.Errorf("H1: a DECLINED reversal must never tombstone a live deposit; the genuine success must still be credited (state=%s balance=%d)", a.State, bal)
+	t.Logf("after reversal-precedes-deposit then late success: attempt=%s balance=%d", a.State, bal)
+	if bal != 0 || a.State != AttemptDisputed {
+		t.Errorf("H1 (corrected): a reversal preceding the original deposit must tombstone it, blocking the late success (state=%s balance=%d)", a.State, bal)
 	}
 	assertLedgerBalanced(t, pool, f.tenantID)
 }
@@ -452,7 +465,7 @@ func TestRVLF_M4_ReversalNamingPayoutReferenceNeverTombstoned(t *testing.T) {
 		}
 		_, err := InsertCreatedAttempt(ctx, tx, NewCreatedAttempt{
 			ID: payoutAttemptID, TenantID: f.tenantID, Operation: AttemptOperationPayout,
-			WithdrawalRequestID: &wr, AttemptNo: 1, PaymentMethod: "card", AssetCode: "EUR", Amount: 5000,
+			WithdrawalRequestID: &wr, AttemptNo: 1, ExcludedProviderIDs: []string{}, PaymentMethod: "card", AssetCode: "EUR", Amount: 5000,
 		})
 		if err != nil {
 			return err
@@ -541,4 +554,326 @@ func TestRVLF_F3_SucceededInputNeverRegressedByLaterDeclineOnAnotherSibling(t *t
 		t.Errorf("F3: no spurious deposit.declined audit record must be written against an already-succeeded intent (before=%d after=%d)", auditBefore, auditAfter)
 	}
 	assertLedgerBalanced(t, pool, f.tenantID)
+}
+
+// rvEngageWildcardDepositKillSwitch seeds a staff principal and engages a
+// tenant-wide ("*"), deposit-scoped kill switch - the shared setup for the
+// three H3 kill-switch-site tests below (security review rv-prh-i1-
+// killswitch-security.md: receipt.go/drive.go/sweeper.go each insert a
+// cascade child and must each be probed separately).
+func rvEngageWildcardDepositKillSwitch(t *testing.T, pool *db.Pool, f orchFixture) {
+	t.Helper()
+	principal := uuid.New()
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `INSERT INTO staff_users (id, tenant_id, email, password_hash, role, status) VALUES ($1,$2,$3,'x','tenant_admin','active')`,
+			principal, f.tenantID, principal.String()+"@rv.example")
+		return err
+	}); err != nil {
+		t.Fatalf("seed staff: %v", err)
+	}
+	if err := pool.WithPrincipalScope(context.Background(), f.tenantID, principal, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := EngageKillSwitch(ctx, tx, f.tenantID, "*", KillSwitchOperationDeposit, "incident")
+		return err
+	}); err != nil {
+		t.Fatalf("engage kill switch: %v", err)
+	}
+}
+
+// H3 (drive.go site, security review rv-prh-i1-killswitch-security.md):
+// applyDepositCallResult's ErrorClassDefiniteDecline branch - "recording a
+// synchronous decline for a call already sent" - must commit the decline
+// and skip only the cascade child when the switch becomes engaged AFTER
+// the provider was already called (T2's own claim CAS is what correctly
+// blocks a NEW dispatch while engaged; this is the separate, narrower
+// guarantee that a decline for a call already in flight before the switch
+// engaged is never rolled back). Calls applyDepositCallResult directly
+// (same package) on an attempt already claimed/dispatched BEFORE the
+// switch was engaged, exactly the ordering that could occur in production
+// between a provider call returning and this transaction committing.
+func TestRVLF_H3_DriveGo_SyncCascadableDeclineUnderKillSwitch(t *testing.T) {
+	pool := depositV2ScratchPool(t)
+	f := seedOrchFixture(t, pool)
+	p := NewMockProvider("mock-h3-drive", "EUR")
+	registerCapability(t, pool, f, p, 100)
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-h3-drive": p}, MultiWebhookCredentialResolver{"mock-h3-drive": NewMockWebhookCredentials(p)})
+
+	// Dispatch normally (no switch engaged yet) - lands on 'pending', a
+	// live state ApplyDecline accepts, standing in for "submitting" (both
+	// are pre-decline live states; the CAS predicate treats them alike).
+	res := rvInit(t, pool, orch, f, 5000, "h3-drive")
+	attemptID, intentID := res.Attempt.ID, res.Intent.ID
+
+	rvEngageWildcardDepositKillSwitch(t, pool, f)
+
+	capability := ProviderCapability{AdapterCapability: AdapterCapability{ProviderID: "mock-h3-drive"}}
+	gr := GateResult[DepositResult]{
+		Class: ErrorClassDefiniteDecline,
+		Value: DepositResult{Outcome: OutcomeDeclined, ProviderReference: "h3-drive-declined-ref", DeclineReason: "provider_unavailable", Cascadable: true},
+	}
+	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `SELECT id FROM deposit_intents WHERE id = $1 FOR UPDATE`, intentID); err != nil {
+			return err
+		}
+		attempt, err := GetAttemptByID(ctx, tx, attemptID)
+		if err != nil {
+			return err
+		}
+		intent, err := GetDepositIntentByID(ctx, tx, intentID)
+		if err != nil {
+			return err
+		}
+		_, _, err = orch.applyDepositCallResult(ctx, tx, intent, attempt, capability, uuid.New(), gr, EvidenceSync, false)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("H3 (drive.go): a synchronous cascadable decline must never fail while the kill switch is engaged: %v", err)
+	}
+	final := mustGetAttempt(t, pool, f.tenantID, attemptID)
+	if final.State != AttemptDeclined {
+		t.Errorf("H3 (drive.go): the decline itself must still commit, got state=%s", final.State)
+	}
+	var childCount int64
+	_ = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT count(*) FROM payment_attempts WHERE deposit_intent_id = $1 AND attempt_no = 2`, intentID).Scan(&childCount)
+	})
+	if childCount != 0 {
+		t.Errorf("H3 (drive.go): no cascade child may be inserted while the kill switch is engaged, got %d", childCount)
+	}
+	var skipped int64
+	_ = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT count(*) FROM audit_log WHERE action = 'payment.cascade_skipped_kill_switch' AND target_id = $1`, attemptID.String()).Scan(&skipped)
+	})
+	if skipped != 1 {
+		t.Errorf("H3 (drive.go): the skipped cascade must be labelled with an audit record, got %d", skipped)
+	}
+}
+
+// H3 (sweeper.go site, security review rv-prh-i1-killswitch-security.md):
+// a QueryStatus poll that resolves to a cascadable decline must commit the
+// decline and skip only the cascade child while the switch is engaged -
+// today (pre-fix) this rolled back and re-polled forever instead.
+func TestRVLF_H3_SweeperGo_PollCascadableDeclineUnderKillSwitch(t *testing.T) {
+	pool := depositV2ScratchPool(t)
+	f := seedOrchFixture(t, pool)
+	p := NewMockProvider("mock-h3-sweep", "EUR")
+	registerCapability(t, pool, f, p, 100)
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-h3-sweep": p}, MultiWebhookCredentialResolver{"mock-h3-sweep": NewMockWebhookCredentials(p)})
+
+	res, err := orch.InitiateDepositAttempt(context.Background(), pool, AllowAllDepositKYCGate{}, MockCredentialResolver{}, InitiateDepositParams{
+		Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
+		AssetCode: "EUR", Amount: 5000, PaymentMethod: "card", IdempotencyKey: "h3-sweep",
+	})
+	if err != nil {
+		t.Fatalf("InitiateDepositAttempt: %v", err)
+	}
+	ref := *res.Attempt.ProviderReference
+	setNextActionNow(t, pool, f.tenantID, res.Attempt.ID)
+	p.Resolve(ref, OutcomeDeclined, "provider_unavailable", true)
+
+	rvEngageWildcardDepositKillSwitch(t, pool, f)
+
+	sweeper := NewSweeper(pool, orch, AllowAllDepositKYCGate{}, MockCredentialResolver{})
+	stats := sweeper.RunOnce(context.Background(), []uuid.UUID{f.tenantID})
+	if len(stats.Errors) != 0 {
+		t.Fatalf("H3 (sweeper.go): a cascadable decline poll must never error while the kill switch is engaged: %v", stats.Errors)
+	}
+	final := mustGetAttempt(t, pool, f.tenantID, res.Attempt.ID)
+	if final.State != AttemptDeclined {
+		t.Errorf("H3 (sweeper.go): the decline itself must still commit, got state=%s", final.State)
+	}
+	var childCount int64
+	_ = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT count(*) FROM payment_attempts WHERE deposit_intent_id = $1 AND attempt_no = 2`, res.Intent.ID).Scan(&childCount)
+	})
+	if childCount != 0 {
+		t.Errorf("H3 (sweeper.go): no cascade child may be inserted while the kill switch is engaged, got %d", childCount)
+	}
+	var skipped int64
+	_ = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT count(*) FROM audit_log WHERE action = 'payment.cascade_skipped_kill_switch' AND target_id = $1`, res.Attempt.ID.String()).Scan(&skipped)
+	})
+	if skipped != 1 {
+		t.Errorf("H3 (sweeper.go): the skipped cascade must be labelled with an audit record, got %d", skipped)
+	}
+}
+
+// R4(a)/(c) (ledger-finance payout re-review rv-prh-i1-payout-ledger.md):
+// a payout decline delivered through the receipt path (ApplyReceiptEvidence
+// resolving to a PAYOUT attempt, EventType "payout") must release the hold
+// via withdrawal.Fail in the SAME transaction as the attempt's own decline
+// - never decline the attempt while stranding the hold - and must not
+// violate payment_provider_events_check1 (an earlier version of this fix
+// only populated decline_stage/cascadable for EventType=="deposit").
+func TestRVLF_R4a_PayoutDeclineViaReceiptPathReleasesHold(t *testing.T) {
+	pool := depositV2ScratchPool(t)
+	f := seedPayoutFixture(t, pool, 100_000, true)
+	p := NewMockProvider("mock-r4a", "EUR")
+	registerCapability(t, pool, f.orchFixture, p, 100)
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-r4a": p}, MultiWebhookCredentialResolver{"mock-r4a": NewMockWebhookCredentials(p)})
+
+	wr, attempt := notSentPayoutAttempt(t, pool, orch, f, 5000, "r4a")
+	// notSentPayoutAttempt leaves the attempt 'created' (NotSent, never
+	// reached the provider) - claim it to 'submitting' as the real
+	// dispatch path would before any evidence arrives.
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return ClaimCreatedForSubmission(ctx, tx, attempt.ID, "mock-r4a", uuid.New(), "rv-r4a", time.Now().Add(time.Minute))
+	}); err != nil {
+		t.Fatalf("claim for submission: %v", err)
+	}
+	ref := "r4a-payout-declined-ref"
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return MarkAccepted(ctx, tx, attempt.ID, EvidencePlatform, ref, time.Now().Add(time.Minute))
+	}); err != nil {
+		t.Fatalf("mark accepted: %v", err)
+	}
+
+	disp, err := rvApplyReceipt(pool, orch, f.tenantID, "mock-r4a", ReceiptEvidence{
+		EventType: "payout", ProviderReference: ref, Outcome: OutcomeDeclined,
+		DeclineReason: "provider_unavailable", Cascadable: false,
+	})
+	if err != nil {
+		t.Fatalf("R4(a)/(c): a payout decline via the receipt path must not error (CHECK violation or otherwise): %v", err)
+	}
+	if disp != DispositionApplied {
+		t.Errorf("expected disposition=applied, got %s", disp)
+	}
+
+	final := mustGetAttempt(t, pool, f.tenantID, attempt.ID)
+	if final.State != AttemptDeclined {
+		t.Errorf("R4(a): the payout attempt must decline, got %s", final.State)
+	}
+	var wrState string
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT state FROM withdrawal_requests WHERE id = $1`, wr.ID).Scan(&wrState)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if wrState != "failed" {
+		t.Errorf("R4(a): the withdrawal request's hold must be released via withdrawal.Fail (state=failed), got %q - a stranded hold", wrState)
+	}
+	assertLedgerBalanced(t, pool, f.tenantID)
+}
+
+// R4(d): a payout SUCCESS delivered through the receipt path must settle
+// the withdrawal (withdrawal.Complete) via the SAME applyPayoutSuccess
+// function payout dispatch's own success path uses, with the amount/asset
+// cross-check applied uniformly (§4.4's existing "mismatched" precondition
+// covers both operations).
+func TestRVLF_R4d_PayoutSuccessViaReceiptPathSettles(t *testing.T) {
+	pool := depositV2ScratchPool(t)
+	f := seedPayoutFixture(t, pool, 100_000, true)
+	p := NewMockProvider("mock-r4d", "EUR")
+	registerCapability(t, pool, f.orchFixture, p, 100)
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-r4d": p}, MultiWebhookCredentialResolver{"mock-r4d": NewMockWebhookCredentials(p)})
+
+	wr, attempt := notSentPayoutAttempt(t, pool, orch, f, 5000, "r4d")
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return ClaimCreatedForSubmission(ctx, tx, attempt.ID, "mock-r4d", uuid.New(), "rv-r4d", time.Now().Add(time.Minute))
+	}); err != nil {
+		t.Fatalf("claim for submission: %v", err)
+	}
+	ref := "r4d-payout-success-ref"
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return MarkAccepted(ctx, tx, attempt.ID, EvidencePlatform, ref, time.Now().Add(time.Minute))
+	}); err != nil {
+		t.Fatalf("mark accepted: %v", err)
+	}
+
+	disp, err := rvApplyReceipt(pool, orch, f.tenantID, "mock-r4d", ReceiptEvidence{
+		EventType: "payout", ProviderReference: ref, Outcome: OutcomeSucceeded, Amount: 5000, AssetCode: "EUR",
+	})
+	if err != nil {
+		t.Fatalf("R4(d): a payout success via the receipt path must not error: %v", err)
+	}
+	if disp != DispositionApplied {
+		t.Errorf("expected disposition=applied, got %s", disp)
+	}
+	final := mustGetAttempt(t, pool, f.tenantID, attempt.ID)
+	if final.State != AttemptSucceeded {
+		t.Errorf("R4(d): the payout attempt must succeed, got %s", final.State)
+	}
+	var wrState string
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT state FROM withdrawal_requests WHERE id = $1`, wr.ID).Scan(&wrState)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if wrState != "completed" {
+		t.Errorf("R4(d): the withdrawal request must be completed via withdrawal.Complete, got %q", wrState)
+	}
+	assertLedgerBalanced(t, pool, f.tenantID)
+}
+
+// R4(b): a "deposit"-typed event naming a PAYOUT attempt's own
+// provider_reference (or the reverse - a "payout"-typed event naming a
+// DEPOSIT attempt's reference) must be an anomaly with NO effect on
+// either state machine.
+func TestRVLF_R4b_EventTypeOperationMismatchIsAnomaly(t *testing.T) {
+	pool := depositV2ScratchPool(t)
+	f := seedPayoutFixture(t, pool, 100_000, true)
+	p := NewMockProvider("mock-r4b", "EUR")
+	registerCapability(t, pool, f.orchFixture, p, 100)
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-r4b": p}, MultiWebhookCredentialResolver{"mock-r4b": NewMockWebhookCredentials(p)})
+
+	// A payout attempt, submitting, with its own provider_reference.
+	_, payoutAttempt := notSentPayoutAttempt(t, pool, orch, f, 5000, "r4b-payout")
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return ClaimCreatedForSubmission(ctx, tx, payoutAttempt.ID, "mock-r4b", uuid.New(), "rv-r4b", time.Now().Add(time.Minute))
+	}); err != nil {
+		t.Fatalf("claim payout for submission: %v", err)
+	}
+	payoutRef := "r4b-payout-ref"
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return MarkAccepted(ctx, tx, payoutAttempt.ID, EvidencePlatform, payoutRef, time.Now().Add(time.Minute))
+	}); err != nil {
+		t.Fatalf("mark payout accepted: %v", err)
+	}
+
+	// A deposit attempt with its own provider_reference.
+	res := rvInit(t, pool, orch, f.orchFixture, 5000, "r4b-deposit")
+	depositRef := *res.Attempt.ProviderReference
+
+	// A "deposit"-typed event naming the PAYOUT's reference.
+	disp, err := rvApplyReceipt(pool, orch, f.tenantID, "mock-r4b", ReceiptEvidence{
+		EventType: string(CallbackEventDeposit), ProviderReference: payoutRef, Outcome: OutcomeSucceeded, Amount: 5000, AssetCode: "EUR",
+	})
+	if err != nil {
+		t.Fatalf("deposit-typed event naming a payout reference: %v", err)
+	}
+	if disp != DispositionAnomaly {
+		t.Errorf("R4(b): a deposit-typed event naming a payout reference must be an anomaly, got %s", disp)
+	}
+	if final := mustGetAttempt(t, pool, f.tenantID, payoutAttempt.ID); final.State != AttemptSubmitting && final.State != AttemptPending {
+		t.Errorf("R4(b): the payout attempt must be untouched, got %s", final.State)
+	}
+
+	// A "payout"-typed event naming the DEPOSIT's reference.
+	disp2, err := rvApplyReceipt(pool, orch, f.tenantID, "mock-r4b", ReceiptEvidence{
+		EventType: "payout", ProviderReference: depositRef, Outcome: OutcomeSucceeded, Amount: 5000, AssetCode: "EUR",
+	})
+	if err != nil {
+		t.Fatalf("payout-typed event naming a deposit reference: %v", err)
+	}
+	if disp2 != DispositionAnomaly {
+		t.Errorf("R4(b): a payout-typed event naming a deposit reference must be an anomaly, got %s", disp2)
+	}
+	final2 := mustGetAttempt(t, pool, f.tenantID, res.Attempt.ID)
+	if final2.State == AttemptSucceeded {
+		t.Errorf("R4(b): the deposit attempt must never be marked succeeded by a mislabeled payout event")
+	}
+}
+
+// rvApplyReceipt calls ApplyReceiptEvidence directly inside a fresh
+// tenant-scoped transaction - the receipt path's own entry point,
+// independent of any live HTTP route (R4's payout branches, like F1's
+// EventType=="payout" cross-check, exercise ApplyReceiptEvidence directly
+// since no live webhook route yet produces a "payout"-typed CallbackEvent).
+func rvApplyReceipt(pool *db.Pool, orch *Orchestrator, tenantID uuid.UUID, providerID string, ev ReceiptEvidence) (ReceiptDisposition, error) {
+	var disp ReceiptDisposition
+	err := pool.WithTenant(context.Background(), tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		var err error
+		disp, err = ApplyReceiptEvidence(ctx, tx, orch, tenantID, providerID, ev)
+		return err
+	})
+	return disp, err
 }

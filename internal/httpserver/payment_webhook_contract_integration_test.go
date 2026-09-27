@@ -222,17 +222,91 @@ func TestPaymentWebhook_UniformResponseAcrossDispositions(t *testing.T) {
 		}
 	}
 
-	// No disposition-revealing header either (only generic framework
-	// headers - Content-Type, Content-Length, Date, and whatever the test
-	// harness's own transport adds - are expected to vary or repeat; none
-	// of them may ever be named after a disposition).
-	forbidden := []string{"X-Disposition", "X-Payment-Disposition", "X-Applied", "X-Tombstoned", "X-Anomaly", "X-Duplicate"}
+	// F5/M11 (independent code review): a hardcoded deny-list of invented
+	// header names (the original version of this check) would never catch
+	// a mutant that adds some OTHER new header (e.g. a real
+	// "X-Receipt-Disposition" or even just "X-Receipt") - only a full
+	// allow-list of every header key actually permitted on this response
+	// closes that gap. Every response's header KEY SET (case-insensitive,
+	// canonicalized by net/http) must be a subset of this allow-list, and
+	// none may vary disposition-to-disposition.
+	allowed := map[string]bool{
+		"Content-Type": true, "Content-Length": true, "Date": true,
+		"Connection": true, "Vary": true, "X-Request-Id": true,
+	}
+	var firstKeys map[string]bool
 	for i, h := range headers {
-		for _, name := range forbidden {
-			if h.Get(name) != "" {
-				t.Fatalf("response %d leaked disposition via header %q", i, name)
+		keys := map[string]bool{}
+		for name := range h {
+			canonical := http.CanonicalHeaderKey(name)
+			if !allowed[canonical] {
+				t.Fatalf("response %d has a header %q outside the allow-list %v - a new, disposition-revealing header must never leak here", i, canonical, allowed)
+			}
+			keys[canonical] = true
+		}
+		if firstKeys == nil {
+			firstKeys = keys
+			continue
+		}
+		if len(keys) != len(firstKeys) {
+			t.Fatalf("response %d's header key set %v differs in size from the first response's %v - disposition must never be distinguishable by which headers are present", i, keys, firstKeys)
+		}
+		for k := range firstKeys {
+			if !keys[k] {
+				t.Fatalf("response %d is missing header %q that the first response had - disposition must never be distinguishable by header presence", i, k)
 			}
 		}
+	}
+}
+
+// TestPaymentWebhook_DeferredReceiptCapExceeded_ExactBoundary kills F5/M10
+// (independent code review): a mutant changing CountUnappliedReceipts'
+// cap check from `n > DeferredReceiptCap` to `n >= DeferredReceiptCap`
+// survived the existing cap test above, which only fills cap+1 rows -
+// both operators reject at cap+1. This test fills EXACTLY cap rows first
+// (never cap+1), and asserts the delivery is still ACCEPTED (200,
+// deferred_unresolved) - only `>` accepts at exactly the boundary; `>=`
+// would wrongly reject one delivery early.
+func TestPaymentWebhook_DeferredReceiptCapExceeded_ExactBoundary(t *testing.T) {
+	pool, issuer := testEnv(t)
+	orchestrator, mockProvider := newMockOrchestrator()
+	srv := newFinancialTestServer(t, pool, issuer, orchestrator)
+
+	tenant := mustCreateTenant(t, pool)
+	mustCreateBrand(t, pool, tenant)
+	mustRegisterCapability(t, pool, tenant.ID, mockProvider)
+
+	const cap = payments.DeferredReceiptCap
+	if err := pool.WithTenant(context.Background(), tenant.ID, func(ctx context.Context, tx pgx.Tx) error {
+		batch := &pgx.Batch{}
+		for i := 0; i < cap; i++ {
+			ref := fmt.Sprintf("cap-exact-%d", i)
+			fingerprint, _ := hex.DecodeString(fmt.Sprintf("%032x", i+1))
+			batch.Queue(
+				`INSERT INTO payment_provider_events (
+					id, tenant_id, provider_id, event_type, provider_reference,
+					outcome, amount, asset_code, event_fingerprint, disposition_at_receipt
+				) VALUES (gen_random_uuid(), $1, 'mock', 'deposit', $2, 'succeeded', 1000, 'EUR', $3, 'deferred_unresolved')`,
+				tenant.ID, ref, fingerprint,
+			)
+		}
+		br := tx.SendBatch(ctx, batch)
+		defer br.Close()
+		for i := 0; i < cap; i++ {
+			if _, err := br.Exec(); err != nil {
+				return fmt.Errorf("insert cap-filler %d: %w", i, err)
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("fill exactly the cap: %v", err)
+	}
+
+	resp := rawPostCallback(t, srv, "/v1/webhooks/payments/"+tenant.Slug+"/mock",
+		mockProvider.CallbackPayload(tenant.ID, payments.CallbackEventDeposit, "cap-exact-boundary-new-ref", "", payments.OutcomeSucceeded, 1000, "EUR", "", false))
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("F5/M10: exactly %d existing unapplied receipts must still ACCEPT one more (only exceeding the cap rejects), got %d", cap, resp.StatusCode)
 	}
 }
 
