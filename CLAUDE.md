@@ -172,6 +172,13 @@ credentials, real customer data, production payment/wallet credentials,
 private crypto keys, or production databases without explicit later
 authorization.
 
+No sub-agent may alter shared database roles, passwords, global test
+infrastructure, or shared credential state — not even on local/dev
+instances. If database access fails, STOP AND REPORT to the orchestrator.
+Never attempt privilege escalation (`sudo`, superuser sessions,
+`ALTER ROLE`/`CREATE ROLE`, password changes) to work around it. See
+`docs/governance/incident-2026-09-27-local-db-credential-mutation.md`.
+
 ## When to stop and ask
 
 Stop and ask the human (never guess) for: gambling licence decisions,

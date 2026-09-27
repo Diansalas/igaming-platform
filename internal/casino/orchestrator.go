@@ -24,6 +24,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/providerref"
 	"github.com/Diansalas/igaming-platform/internal/rg"
 	"github.com/Diansalas/igaming-platform/internal/risk"
+	"github.com/Diansalas/igaming-platform/internal/txscope"
 	"github.com/Diansalas/igaming-platform/internal/wallet"
 	"github.com/Diansalas/igaming-platform/internal/webhookauth"
 )
@@ -98,6 +99,9 @@ const (
 	LaunchFailureCredentialBindingMismatch LaunchFailureReason = "credential_binding_mismatch"
 	LaunchFailureCtxCancelled              LaunchFailureReason = "ctx_cancelled"
 	LaunchFailureInternal                  LaunchFailureReason = "internal"
+	// LaunchFailureTxHeld (IO-1B): phase B's own txscope.Held(ctx) refusal
+	// fired - see ErrProviderCallRefused's own doc comment (types.go).
+	LaunchFailureTxHeld LaunchFailureReason = "tx_held"
 )
 
 // redactedLaunchFailureDetail is the ONLY place cause.Error() text is ever
@@ -611,6 +615,16 @@ func (o *Orchestrator) LaunchGame(ctx context.Context, pool providercred.TenantT
 	call := CallContext{
 		TenantID: params.TenantID, ProviderID: providerID, Credential: cred,
 		IdempotencyKey: "cas:" + session.ID.String(), Deadline: time.Now().Add(defaultLaunchCallTimeout),
+	}
+	// IO-1B (architect review, INV-IO-1(b)): defence in depth behind the
+	// primary API-shape control (no function that can reach
+	// CasinoProvider.Launch takes a pgx.Tx) - refuse the adapter outbound
+	// call itself if ctx is, despite that, marked as holding a pooled
+	// database transaction. See ErrProviderCallRefused's own doc comment
+	// (types.go) for why this exists as a SECOND control, not the primary
+	// one.
+	if txscope.Held(ctx) {
+		return launchFailed(LaunchFailureTxHeld, ErrProviderCallRefused)
 	}
 	result, err := provider.Launch(ctx, LaunchRequest{
 		ProviderGameID: providerGameID, PlayerAccountID: params.PlayerAccountID,
