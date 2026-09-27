@@ -52,6 +52,16 @@ type fixture struct {
 // work against.
 func seedFixture(t *testing.T, pool *db.Pool, initialBalance int64) fixture {
 	t.Helper()
+	return seedFixtureRaw(t, pool, initialBalance, true)
+}
+
+// seedFixtureRaw is seedFixture's implementation, parameterized on
+// whether to seed a default APPROVED verification. withVerification=false
+// is used by kyc_gate_integration_test.go's own tests, which need to
+// control the verification state themselves rather than inherit the
+// default "everyone passes KYC" fixture.
+func seedFixtureRaw(t *testing.T, pool *db.Pool, initialBalance int64, withVerification bool) fixture {
+	t.Helper()
 	f := fixture{
 		tenantID:        uuid.New(),
 		brandID:         uuid.New(),
@@ -96,17 +106,20 @@ func seedFixture(t *testing.T, pool *db.Pool, initialBalance int64) fixture {
 		// ADR 0096 §3.2 point 1 (PRH-I3): every withdrawal now requires the
 		// player's current, latest verification to be `passed` and
 		// unexpired. This fixture seeds one `approved`, non-expiring
-		// verification so every OTHER pre-existing withdrawal test in this
-		// package - none of which are testing KYC - continues to exercise
-		// its own behavior rather than universally hitting the new KYC
-		// gate. Tests that specifically exercise the KYC gate seed their
-		// own, different verification state instead (see
-		// kyc_enforcement_integration_test.go).
-		if _, err := tx.Exec(ctx,
-			`INSERT INTO kyc_verifications (id, tenant_id, brand_id, player_account_id, person_id, status, provider_id)
-			 VALUES ($1, $2, $3, $4, $5, 'approved', 'mock')`,
-			uuid.New(), f.tenantID, f.brandID, f.playerAccountID, personID); err != nil {
-			return err
+		// verification (unless withVerification is false) so every OTHER
+		// pre-existing withdrawal test in this package - none of which are
+		// testing KYC - continues to exercise its own behavior rather than
+		// universally hitting the new KYC gate. Tests that specifically
+		// exercise the KYC gate use seedFixtureRaw(..., false) instead and
+		// seed their own verification state (see
+		// kyc_gate_integration_test.go).
+		if withVerification {
+			if _, err := tx.Exec(ctx,
+				`INSERT INTO kyc_verifications (id, tenant_id, brand_id, player_account_id, person_id, status, provider_id)
+				 VALUES ($1, $2, $3, $4, $5, 'approved', 'mock')`,
+				uuid.New(), f.tenantID, f.brandID, f.playerAccountID, personID); err != nil {
+				return err
+			}
 		}
 		f.walletID = uuid.New()
 		if _, err := tx.Exec(ctx,

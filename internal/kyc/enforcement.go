@@ -120,16 +120,21 @@ type EnforcementParams struct {
 	TenantID        uuid.UUID
 	BrandID         uuid.UUID
 	PlayerAccountID uuid.UUID
-	// PersonID is REQUIRED for every operation (security re-verification
-	// N1, 2026-09-27): the KYC read key is per Person, latest verification
-	// row across every PlayerAccount that Person holds under this tenant,
-	// ordered (created_at DESC, id DESC) so a newer rejection/expiry is
-	// never masked by an older approval - not per wallet/PlayerAccount.
-	// This closes the original inconsistency (withdrawal scoped per
-	// Person, deposit/play scoped per PlayerAccount) security's
-	// re-verification flagged; HD-KYC-6 (cross-tenant/cross-brand reuse)
-	// text is updated to match: reuse is per Person WITHIN a tenant, never
-	// across tenants, unchanged from ADR 0028 §7's own open decision.
+	// PersonID is REQUIRED for every operation, but is NOT the primary
+	// read key (corrected per security re-verification N1, 2026-09-27,
+	// which found the original draft self-contradictory - see
+	// readLatestVerificationByPlayerAccount's own doc comment for the
+	// full reasoning). The primary key for every operation, including
+	// withdrawal, is the gated account's own latest row for
+	// (tenant_id, brand_id, player_account_id), ordered (created_at DESC,
+	// id DESC). PersonID is used ONLY as an additional, deny-only
+	// cross-account overlay on the withdrawal structural rule
+	// (crossAccountRejectedOverlay): a rejection recorded against a
+	// DIFFERENT PlayerAccount of the same Person, in the same tenant,
+	// denies a withdrawal from THIS account - never the reverse (an
+	// approval on one account can never authorize a withdrawal from
+	// another). HD-KYC-6 (cross-tenant/cross-brand reuse) is unaffected:
+	// the overlay never widens visibility past the tenant boundary.
 	PersonID  uuid.UUID
 	Operation EnforcementOperation
 	AssetCode string

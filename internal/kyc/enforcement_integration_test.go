@@ -17,6 +17,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Diansalas/igaming-platform/internal/db"
+	"github.com/Diansalas/igaming-platform/internal/jurisdiction"
 )
 
 func setVerification(t *testing.T, pool *db.Pool, f fixture, status VerificationStatus, expiresAt *time.Time) {
@@ -405,4 +406,237 @@ func mustSeedJurisdiction(t *testing.T, pool *db.Pool) uuid.UUID {
 		t.Fatalf("seed jurisdiction: %v", err)
 	}
 	return id
+}
+
+// mustLicenseTenant binds f.tenantID to a fresh licence in a fresh
+// jurisdiction, returning the jurisdiction id - required for every
+// deposit/play test below, since EvaluateEnforcement resolves
+// LicensingJurisdictionID from tenants.licence_id -> licences.
+// jurisdiction_id and treats "no licence bound" as not_required (§15.2),
+// never reaching the policy lookup at all.
+func mustLicenseTenant(t *testing.T, pool *db.Pool, f fixture) uuid.UUID {
+	t.Helper()
+	jurisdictionID := mustSeedJurisdiction(t, pool)
+	err := pool.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
+		lic, err := jurisdiction.CreateLicence(ctx, tx, jurisdiction.CreateLicenceParams{
+			JurisdictionID: jurisdictionID, Licensee: "platform", LicenceNumber: "LIC-" + f.tenantID.String()[:8],
+			Actor: jurisdiction.ActorContext{ActorID: uuid.New(), ReasonCode: "test"},
+		})
+		if err != nil {
+			return err
+		}
+		_, err = jurisdiction.AssignTenantLicence(ctx, tx, jurisdiction.AssignTenantLicenceParams{
+			TenantID: f.tenantID, LicenceID: &lic.ID, Actor: jurisdiction.ActorContext{ActorID: uuid.New(), ReasonCode: "test"},
+		})
+		return err
+	})
+	if err != nil {
+		t.Fatalf("license tenant: %v", err)
+	}
+	return jurisdictionID
+}
+
+// mustActivePolicy creates a draft kyc_enforcement_policies row (by one
+// principal) and activates it (by a DIFFERENT principal, satisfying the
+// four-eyes lifecycle trigger), returning its id.
+func mustActivePolicy(t *testing.T, pool *db.Pool, p CreateEnforcementPolicyParams) uuid.UUID {
+	t.Helper()
+	p.LegalReviewReference = "test-legal-ref"
+	if p.ReasonCode == "" {
+		p.ReasonCode = "test"
+	}
+	var id uuid.UUID
+	creator := uuid.New()
+	err := pool.WithPlatformAdmin(context.Background(), creator, func(ctx context.Context, tx pgx.Tx) error {
+		var err error
+		id, err = CreateEnforcementPolicy(ctx, tx, p)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("create policy: %v", err)
+	}
+	err = pool.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
+		return ActivateEnforcementPolicy(ctx, tx, id)
+	})
+	if err != nil {
+		t.Fatalf("activate policy: %v", err)
+	}
+	return id
+}
+
+func strPtr(s string) *string { return &s }
+
+// --- Deposit threshold trigger: full outcome coverage (R2, T2) ---
+
+func TestEvaluateEnforcement_Deposit_LicensedButDormant(t *testing.T) {
+	pool := testPool(t)
+	f := seedFixture(t, pool)
+	mustLicenseTenant(t, pool, f)
+	d := evalDeposit(t, pool, f, 1_000_000_000)
+	if d.Outcome != OutcomeNotRequired || !d.Allowed {
+		t.Fatalf("expected not_required/allow with a licence bound but no active policy, got %+v", d)
+	}
+}
+
+func TestEvaluateEnforcement_Deposit_BelowThreshold_NotRequired(t *testing.T) {
+	pool := testPool(t)
+	f := seedFixture(t, pool)
+	jurisdictionID := mustLicenseTenant(t, pool, f)
+	mustActivePolicy(t, pool, CreateEnforcementPolicyParams{
+		LicensingJurisdictionID: jurisdictionID, TriggerType: "cumulative_deposit",
+		ThresholdMinorUnits: strPtr("100000"), AssetCode: strPtr("EUR"),
+	})
+	d := evalDeposit(t, pool, f, 500) // well below threshold, no prior deposits
+	if d.Outcome != OutcomeNotRequired || !d.Allowed {
+		t.Fatalf("expected not_required/allow below threshold, got %+v", d)
+	}
+}
+
+// TestEvaluateEnforcement_Deposit_AtThreshold_RequiresVerification proves
+// the boundary: a deposit that reaches the threshold exactly requires a
+// passed verification (>= threshold triggers, per evaluateDepositThreshold's
+// total.Cmp(threshold) < 0 check).
+func TestEvaluateEnforcement_Deposit_AtThreshold_RequiresVerification(t *testing.T) {
+	pool := testPool(t)
+	f := seedFixture(t, pool)
+	jurisdictionID := mustLicenseTenant(t, pool, f)
+	mustActivePolicy(t, pool, CreateEnforcementPolicyParams{
+		LicensingJurisdictionID: jurisdictionID, TriggerType: "cumulative_deposit",
+		ThresholdMinorUnits: strPtr("100000"), AssetCode: strPtr("EUR"),
+	})
+
+	denied := evalDeposit(t, pool, f, 100000)
+	if denied.Outcome != OutcomeFailed || denied.Allowed {
+		t.Fatalf("expected failed/deny at the threshold with no verification, got %+v", denied)
+	}
+
+	setVerification(t, pool, f, StatusApproved, nil)
+	allowed := evalDeposit(t, pool, f, 100000)
+	if allowed.Outcome != OutcomePassed || !allowed.Allowed {
+		t.Fatalf("expected passed/allow at the threshold with an approved verification, got %+v", allowed)
+	}
+}
+
+// TestEvaluateEnforcement_Deposit_AssetNotCovered_Unavailable proves
+// security N2: an active cumulative_deposit policy exists for this
+// jurisdiction (a different asset), so the requested asset's deposit
+// fails closed as `unavailable`, never `not_required` (MX2's own target).
+func TestEvaluateEnforcement_Deposit_AssetNotCovered_Unavailable(t *testing.T) {
+	pool := testPool(t)
+	f := seedFixture(t, pool)
+	jurisdictionID := mustLicenseTenant(t, pool, f)
+	mustActivePolicy(t, pool, CreateEnforcementPolicyParams{
+		LicensingJurisdictionID: jurisdictionID, TriggerType: "cumulative_deposit",
+		ThresholdMinorUnits: strPtr("100000"), AssetCode: strPtr("EUR"),
+	})
+	setVerification(t, pool, f, StatusApproved, nil) // approved, but must not matter here
+	d := evalDeposit2(t, pool, f, 100_000_000, "USD")
+	if d.Outcome != OutcomeUnavailable || d.Allowed {
+		t.Fatalf("expected unavailable/deny for an asset with no covering policy row, got %+v", d)
+	}
+}
+
+func evalDeposit2(t *testing.T, pool *db.Pool, f fixture, amount int64, assetCode string) EnforcementDecision {
+	t.Helper()
+	var decision EnforcementDecision
+	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		var err error
+		decision, err = EvaluateEnforcement(ctx, tx, EnforcementParams{
+			TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerID, PersonID: f.personID,
+			Operation: EnforcementDeposit, AssetCode: assetCode, Amount: amount, CorrelationID: uuid.New(),
+		})
+		return err
+	})
+	if err != nil {
+		t.Fatalf("EvaluateEnforcement: %v", err)
+	}
+	return decision
+}
+
+// --- Play trigger: full outcome coverage (R1/R2, T2) ---
+
+func evalPlay(t *testing.T, pool *db.Pool, f fixture, op EnforcementOperation) EnforcementDecision {
+	t.Helper()
+	var decision EnforcementDecision
+	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		var err error
+		decision, err = EvaluateEnforcement(ctx, tx, EnforcementParams{
+			TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerID, PersonID: f.personID,
+			Operation: op, AssetCode: "EUR", Amount: 1000, CorrelationID: uuid.New(),
+		})
+		return err
+	})
+	if err != nil {
+		t.Fatalf("EvaluateEnforcement: %v", err)
+	}
+	return decision
+}
+
+func TestEvaluateEnforcement_Play_NoActivePolicy_NotRequired(t *testing.T) {
+	pool := testPool(t)
+	f := seedFixture(t, pool)
+	mustLicenseTenant(t, pool, f)
+	d := evalPlay(t, pool, f, EnforcementCasinoPlay)
+	if d.Outcome != OutcomeNotRequired || !d.Allowed {
+		t.Fatalf("expected not_required/allow with no active play policy, got %+v", d)
+	}
+}
+
+func TestEvaluateEnforcement_Play_ActivePolicy_DeniesUnverified(t *testing.T) {
+	pool := testPool(t)
+	f := seedFixture(t, pool)
+	jurisdictionID := mustLicenseTenant(t, pool, f)
+	mustActivePolicy(t, pool, CreateEnforcementPolicyParams{
+		LicensingJurisdictionID: jurisdictionID, TriggerType: "play", PlayOperation: strPtr("casino_play"),
+	})
+	d := evalPlay(t, pool, f, EnforcementCasinoPlay)
+	if d.Outcome != OutcomeFailed || d.Allowed {
+		t.Fatalf("expected failed/deny with an active casino_play policy and no verification, got %+v", d)
+	}
+}
+
+func TestEvaluateEnforcement_Play_ActivePolicy_AllowsApproved(t *testing.T) {
+	pool := testPool(t)
+	f := seedFixture(t, pool)
+	jurisdictionID := mustLicenseTenant(t, pool, f)
+	mustActivePolicy(t, pool, CreateEnforcementPolicyParams{
+		LicensingJurisdictionID: jurisdictionID, TriggerType: "play", PlayOperation: strPtr("casino_play"),
+	})
+	setVerification(t, pool, f, StatusApproved, nil)
+	d := evalPlay(t, pool, f, EnforcementCasinoPlay)
+	if d.Outcome != OutcomePassed || !d.Allowed {
+		t.Fatalf("expected passed/allow with an approved verification, got %+v", d)
+	}
+}
+
+func TestEvaluateEnforcement_Play_ActivePolicy_PendingDenies(t *testing.T) {
+	pool := testPool(t)
+	f := seedFixture(t, pool)
+	jurisdictionID := mustLicenseTenant(t, pool, f)
+	mustActivePolicy(t, pool, CreateEnforcementPolicyParams{
+		LicensingJurisdictionID: jurisdictionID, TriggerType: "play", PlayOperation: strPtr("casino_play"),
+	})
+	setVerification(t, pool, f, StatusPending, nil)
+	d := evalPlay(t, pool, f, EnforcementCasinoPlay)
+	if d.Outcome != OutcomePending || d.Allowed {
+		t.Fatalf("expected pending/deny, got %+v", d)
+	}
+}
+
+// TestEvaluateEnforcement_Play_OperationScoped proves play_operation is
+// enforced, not advisory: a casino_play policy never governs
+// sportsbook_play.
+func TestEvaluateEnforcement_Play_OperationScoped(t *testing.T) {
+	pool := testPool(t)
+	f := seedFixture(t, pool)
+	jurisdictionID := mustLicenseTenant(t, pool, f)
+	mustActivePolicy(t, pool, CreateEnforcementPolicyParams{
+		LicensingJurisdictionID: jurisdictionID, TriggerType: "play", PlayOperation: strPtr("casino_play"),
+	})
+	// No verification at all - would deny under casino_play, but
+	// sportsbook_play has no active policy of its own and must allow.
+	d := evalPlay(t, pool, f, EnforcementSportsbookPlay)
+	if d.Outcome != OutcomeNotRequired || !d.Allowed {
+		t.Fatalf("expected sportsbook_play to be unaffected by a casino_play-only policy, got %+v", d)
+	}
 }
