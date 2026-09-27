@@ -9,9 +9,9 @@
   | §4/§5.1 deposit attempts, receipts, callback cutover (migration 0101) | PARTIALLY IMPLEMENTED | Callback cutover: `ledger-finance` and `code-reviewer` both NOT READY (`rv-prh-i1-callback-ledger.md`, `rv-prh-i1-callback-code-review.md`). **§28 INV-DEP-1 NOT IMPLEMENTED** (PAY-DOUBLE-CREDIT-1, HIGH): until it lands, the as-built T13/T7 can credit one intent twice. |
   | §5.2 payout T1p / phase C / sweeper | PARTIALLY IMPLEMENTED | `code-reviewer` APPROVE; `ledger-finance` APPROVE WITH CONDITIONS; `security` sign-off pending. |
   | §7 sweeper | PARTIALLY IMPLEMENTED | LF95-R1 automatic re-drive NOT IMPLEMENTED (operator T17 path only). |
-  | §10.2–§10.5 kill switch (0105, 0106) | PARTIALLY IMPLEMENTED | Data model, triggers, routes (as amended by §30) IMPLEMENTED. Phase 2 wiring (deposit T3 `kill_switch`, labelled payout hold) is on the unmerged branch `d4520da` (security APPROVE WITH CONDITIONS), NOT on this branch yet. Alert delivery NOT IMPLEMENTED (launch-blocking). KS-AUDIT-TENANT-1 NOT IMPLEMENTED (launch-blocking). |
+  | §10.2–§10.5 kill switch (0105, 0106) | PARTIALLY IMPLEMENTED | Data model, triggers, routes (as amended by §30) IMPLEMENTED. Phase 2 wiring (deposit kill-switch decline, labelled payout hold) IMPLEMENTED on `worktree-agent-aa2bb3c6bdd6d51eb` @ `4e04f4e`; merge approved by the architect (§10.9), and this label applies to this branch once that merge lands. Residual KS-DEP-T2-T3-1 (§10.9.3) NOT IMPLEMENTED. Alert delivery NOT IMPLEMENTED (launch-blocking). KS-AUDIT-TENANT-1 NOT IMPLEMENTED (launch-blocking). |
   | §10.1 manifest | PARTIALLY IMPLEMENTED | `SupportsRefund`, `CallbackEchoesMerchantReference` enforced; PRH-I1-MANIFEST-1..4 deferred. |
-  | §11 PROV-OUTBOUND-CRED-1 | PARTIALLY IMPLEMENTED | Casino/KYC kind split IMPLEMENTED; payments kind split on the unmerged branch `d4520da`. |
+  | §11 PROV-OUTBOUND-CRED-1 | PARTIALLY IMPLEMENTED | Casino/KYC kind split IMPLEMENTED. Payments kind split and pool threading IMPLEMENTED on `4e04f4e`, with code-review C1/C2 closed by `ce77bac`/`50b595d`; merge approved (§10.9). Legacy `InitiateDeposit` path bypasses the gate: PROV-OUTBOUND-CRED-1-LEGACY-PATH, open, a precondition on any real payments adapter. |
   | §12 payment reconciliation (0102, 0104) | MOCK | Real PSP statement PROVIDER DEPENDENT; `code-reviewer` NOT READY; §28.9 kind NOT IMPLEMENTED. |
   | §15 casino launch, KYC create/submit | IMPLEMENTED against MOCK adapters | Casino `code-reviewer` NOT READY (R1); IO-1B/IO-1C closed (`0ca1193`). |
   | INV-IO-1 (a)–(d) | IMPLEMENTED | (c) is `internal/txscope/no_provider_call_in_tx_closure_static_test.go`. |
@@ -1085,7 +1085,10 @@ routes (§10.5).
     `security`. §16.2 item 20 pins it: T1+T2 run under a player-scoped context fails and calls
     nothing.
 - Deposits: `created` attempts are moved to `rejected` (T3, `kill_switch`) and the player sees
-  "unavailable".
+  "unavailable". *[AMENDED by §10.9.2: on the player path (T1+T2) no attempt row exists, so the
+  intent is finalized `declined` and the player gets the generic decline response. For a
+  cascade `created` attempt this bullet stands, and its implementation is residual
+  KS-DEP-T2-T3-1.]*
 - Payouts: `created` attempts are **left** in `created`. Their holds stay; they are neither
   failed nor claimed until release.
 - A payout claim (T1p) is refused, and the withdrawal stays `approved`.
@@ -1289,7 +1292,9 @@ first, per the orchestrator's own sequencing instruction, and has not started.
   casino or KYC either) - a pre-existing platform-wide gap, now closed for all three domains this
   ADR's own scope covers.
 
-**What is still NOT built (remaining PRH-I1 scope, gated on Phase 2's go-ahead):**
+**What is still NOT built (remaining PRH-I1 scope, gated on Phase 2's go-ahead):** *[Built by
+Phase 2 (`d4520da`) and its fix round (`4e04f4e`), except KS-DEP-T2-T3-1 and PROV-REVOKE-ALL-1;
+see §10.9.]*
 - The orchestrator wiring that turns a T2/T1p refusal into a deposit's T3 `kill_switch`
   decline/payout `created` hold with a labelled reason (§10.3's "Deposits: created attempts are
   moved to rejected (T3, kill_switch)"). Today a refused claim surfaces as `ErrAttemptStateConflict`
@@ -1515,6 +1520,123 @@ file; golangci-lint 2.9.0 (`--allow-parallel-runners`) on `internal/payments`, `
 `internal/testsupport/credentialscan` - 0 issues. `internal/payments -tags=integration -race
 -count=1` and `internal/httpserver -tags=integration -race -count=1`, both against a private database
 (never the shared CI database) - green.
+
+### 10.9 Phase 2 architect review record (`architect`, 2026-09-27)
+
+This section records the architect's review of Phase 2, which covers the orchestrator wiring
+and the payments kind split for PROV-OUTBOUND-CRED-1. It folds in the implementer's notes
+(`docs/plans/payment-readiness/killswitch-phase2-adr-notes.md`) and the ruling in
+`docs/plans/payment-readiness/rv-prh-i1-killswitch-phase2-architect.md`.
+
+- **Branch:** `worktree-agent-aa2bb3c6bdd6d51eb` @ `4e04f4e`.
+- **Commits:** `ea7910a`, `d4520da`, and the fix round `ce77bac`, `50b595d`, `533f85f`,
+  `f5e96c4`, `4e04f4e`.
+- **Other reviews:**
+  - `security`: APPROVE WITH CONDITIONS (`rv-prh-i1-killswitch-phase2-security.md`).
+  - `code-reviewer`: APPROVE WITH CONDITIONS (`rv-prh-i1-killswitch-phase2-code-review.md`).
+    C1–C5 were addressed by the fix round; the code-reviewer has not yet re-reviewed it.
+
+**10.9.1 Merge ordering (confirmed).** Phase 2 merges **before** the PAY-DOUBLE-CREDIT-1 fix
+(§28).
+
+- Both reviews checked the branch hunk by hunk. It touches no success, credit,
+  decline-with-posting or cascade path:
+  - `receipt.go`, `orchestrator.go`'s `postDepositSuccess` and `applyDepositCallResult` /
+    `applyStatusEvidence` are unchanged;
+  - the only hunks in `drive.go`, `sweeper.go` and `payout_sweep.go` add a `pool` argument.
+- The deposit kill-switch decline happens before any attempt exists, so no success evidence can
+  ever arrive for it.
+- Merging this branch first means the §28 fix is written against the final `callProvider` /
+  `DispatchWithdraw` / `Resolve(ctx, pool, tenantID, providerID)` signatures, so it needs no
+  rebase afterwards.
+
+Conditions on the §28 fix, which lands second:
+- every call site it adds or moves passes `pool` and the kind-split resolver, never a nil
+  resolver;
+- it adds no provider call to any evidence transaction (INV-IO-1; the static scan
+  `internal/txscope/no_provider_call_in_tx_closure_static_test.go` must stay green);
+- it routes no deposit success through the legacy `InitiateDeposit` / `attemptDeposit` path
+  (PROV-OUTBOUND-CRED-1-LEGACY-PATH);
+- it re-runs the full `internal/payments` suite, `killswitch_claim_predicate_coverage_test.go`
+  and `pool_threading_integration_test.go` on the combined tree.
+
+**10.9.2 Player-facing result of a kill-switched deposit (C5), ruled: amend the ADR, not the
+code.** On the player path (T1+T2 in one phase-A transaction), the kill-switch predicate
+refuses inside the `INSERT … SELECT`, so **no attempt row exists**. The *intent* is finalized
+`declined` in the same transaction through `finalizeDeclined`. This is the same shape as an RG
+or KYC phase-A denial, which likewise creates no attempt.
+
+- The player receives the generic decline response. `status = "declined"` carries no reason,
+  exactly as for every other decline.
+- The reason `kill_switch` and the routed `provider_id` are recorded for operators:
+  - in the `deposit.declined` audit metadata;
+  - `provider_id` also on `deposit_intents.provider_id` (C5 second half, `f5e96c4`).
+- The decline is terminal for that player idempotency key. A retry needs a new key. That is
+  intended: a deposit is never left parked `pending` across an operator containment.
+
+Rationale:
+- "unavailable" was a description of meaning, not a response contract. No distinct response
+  shape was ever specified.
+- A reason-specific player response would reveal an operator containment state that the
+  platform shows for no other decline cause.
+- It would also turn one of several pre-attempt declines into a separate API contract.
+
+No human decision is needed: this is not a licence, legal or commercial question, and the
+player's funds are untouched. If product later wants distinct player copy (for example
+"payments temporarily unavailable"), that is a UI/brand-configuration change mapped from an
+operator-visible reason. It needs no change to this state machine. It is recorded as a
+deferred consideration, not built.
+
+**10.9.3 Residual KS-DEP-T2-T3-1 (new; payments; NOT IMPLEMENTED; required before PRH-I1 is
+marked complete and before a `payments.Sweeper` is wired in `cmd/platform-api`).**
+
+- **Where the ADR text still stands:** §10.3's "created attempts are moved to `rejected` (T3,
+  `kill_switch`)" still governs **cascade** `created` deposit attempts.
+- **What is built instead:** at `4e04f4e`, a provider-scoped switch that covers the cascade
+  target makes `ClaimCreatedForSubmission` (T2) match zero rows. `drive.go` returns that as an
+  error. The attempt stays `created` and the intent stays `pending`.
+- **What goes wrong:** on the synchronous player cascade, the request fails with an error
+  instead of a clean decline. Nothing is sent and no money moves, so this fails closed. But with
+  no sweeper constructed, the intent is stuck.
+- **Required fix:** in the same per-item transaction, classify the refusal with
+  `KillSwitchEngaged` (reading only; the in-statement predicate stays the control), then:
+  - `RejectCreated(…, 'kill_switch')` (T3);
+  - recompute the intent projection (`declined` when nothing is live);
+  - audit;
+  - add one test plus a mutant.
+- A wildcard (`'*'`) switch is already handled at cascade T1 (`payment.cascade_skipped_kill_switch`).
+
+**10.9.4 Kind split and pool threading: consistent with casino/KYC and ADR 0094/§11.**
+
+- `payments.OutboundKindSplitResolver` is structurally identical to casino's and KYC's:
+  - it routes by adapter identity (`SyntheticComponent()`), not by what is wired;
+  - an unregistered provider fails closed;
+  - a nil target fails closed;
+  - it returns a nil interface when neither half is wired.
+
+  It is duplicated per domain on purpose (§3.2: no cross-domain import).
+- `callProvider` order is: nil-resolver guard (P2-L3) → `txscope.Held` refusal → committed-claim
+  check → `Resolve(ctx, pool, …)` in the resolver's own short transaction (ADR 0094 §4.1) →
+  tenant/provider/domain binding check. This matches §3.2 steps 1–4.
+- Pinned by:
+  - `outbound_kindsplit_test.go` (C1);
+  - `pool_threading_integration_test.go`, covering all five call sites (C2);
+  - `TestCallProvider_CredentialForWrongTenant_RefusedByBindingCheck` (P2-L1).
+- The one deliberate hard-wired `MockCredentialResolver{}` is the MOCK statement source (§12.4).
+  It is documented in `registrations.go`, and it must never be rewired to the kind split.
+- **C4** (the MOCK half is wired only when test-support endpoints are enabled, matching
+  casino/KYC) is accepted. It is documented in `production-configuration-checklist.md` item 7.
+  When a sweeper is wired, add a boot-time refusal for "synthetic payments adapter registered,
+  no mock resolver wired", so parked rows cannot accumulate silently.
+- **C3/P2-L4** (payout hold audit detached from the request context and logged on failure) is
+  closed in `533f85f`.
+
+**Labels.**
+- Phase 2 wiring and the payments kind split: IMPLEMENTED on `4e04f4e`, pending merge and the
+  code-reviewer's re-review of the fix round.
+- KS-DEP-T2-T3-1: NOT IMPLEMENTED.
+- PROV-OUTBOUND-CRED-1-LEGACY-PATH: open.
+- Alert delivery and KS-AUDIT-TENANT-1: NOT IMPLEMENTED, launch-blocking (unchanged).
 
 ---
 
