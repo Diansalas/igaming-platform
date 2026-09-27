@@ -1,7 +1,17 @@
 # ADR 0095 — Provider-I/O Transaction Boundary and Provider-Neutral Payment Contract
 
-- **Status:** PROPOSED (design only, 2026-09-27). Nothing in this ADR is implemented. Every
-  deliverable below is `NOT IMPLEMENTED` until an implementing change lands and is reviewed.
+- **Status:** **ACCEPTED (design) — NOT IMPLEMENTED** (revision 2, 2026-09-27).
+  - Revision 1 was PROPOSED. Six reviews followed (§21 ledger-finance, §22 security, §23
+    payments, §24 QA, §25 identity-compliance, §26 casino).
+  - Revision 2 writes every condition into the design text. §27 maps each condition ID to the
+    section that satisfies it; none is dropped.
+  - The acceptance bar set by the orchestrator is met in text: ledger-finance LF95-C1..C12, and
+    the launch-blocking security conditions S95-C1, C5, C6, C8 and C13.
+  - LF95-C13/C14 and QA changes 1–8 gate `IMPLEMENTED`, not acceptance; they are specified in
+    §12, §16 and §18.
+  - Acceptance of the design is not a claim that anything is built, secure or launch-ready.
+    Every deliverable below stays `NOT IMPLEMENTED` until an implementing change lands and passes
+    its own reviews.
 - **Decision type:** architecture, cross-domain. It touches `payments`, `withdrawal`, `ledger`
   (lock-class inventory only), `reconciliation`, `providercred`, `casino` (launch only), `kyc`
   (create and submit only), `httpserver` and `cmd/platform-api`.
@@ -12,6 +22,9 @@
   - `payments`: covers §4 through §12.
   - `casino` and `identity-compliance`: cover §15 only.
   - `qa`: covers §16.
+- **Migration numbers (orchestrator re-allocation, 2026-09-27):** 0101 payment attempts and
+  receipts (was 0100; 0100 is now ADR 0096's KYC enforcement migration), 0102 kill switch, 0103
+  payment statement reconciliation.
 - **Registry rows closed by implementing this ADR** (each one per domain, only after review):
   - F-POOL-2;
   - the "not implemented" half of PROV-OUTBOUND-CRED-1;
@@ -31,8 +44,9 @@
   - **ADR 0022 §2 and §6.** The `PaymentProvider` interface and canonical shapes change (§9).
     The adapter-declared capability layer gains an operation manifest (§10). The conformance
     suite gains cases (§16).
-  - **ADR 0082 §2.1.** Proposed Amendment A7, which `ledger-finance` owns and must accept (§14).
-    It adds two L1 tables and places the callback-receipt insert before L1.
+  - **ADR 0082 §2.1.** Amendment A7, owned by `ledger-finance`: accepted in §21.3 with the
+    LF95-C9 scope rules (§14), and written into ADR 0082 by `ledger-finance` now that this ADR is
+    ACCEPTED. It adds two L1 tables and places the callback-receipt insert (R0) between L0 and L1.
   - **ADR 0093 §5.** The resolution point and the adapter request types are fixed (§11).
   - **`docs/architecture/reconciliation-model.md` §2.2.** Mismatch state (b) no longer auto-posts
     from a statement line (§12.6).
@@ -427,7 +441,7 @@ All operations share these properties. Idempotency is DB-enforced. Audit goes in
 | Intent | `deposit_intents` row (unchanged table, status set unchanged). Its status is a projection of its attempts, updated in the same tx as every attempt transition, evaluated in this order: any `succeeded` → `succeeded` (sticky); any `disputed` (and no `succeeded`) → `ambiguous`, never `declined`, because funds may have been captured (LF95-C7); a live attempt that is `ambiguous` → `ambiguous`; any other live attempt → `pending`; none live → `declined`. `failed` stays unused. RG denial keeps today's behaviour: intent → `declined` with `rg_ineligible:*` and no attempt, in phase A. A KYC deposit deny (ADR 0096) is the same shape. |
 | Ledger link (LF95-C6(a)) | Every deposit posting is linked on `payment_attempts.ledger_transaction_id`. `deposit_intents.ledger_transaction_id` is written only while it is NULL (the migration 0082 trigger already forbids repointing it), so it keeps pointing at the **first** posting. Bonus deposit detection (`internal/bonus/deposit_sweep.go`) therefore sees only the first capture; `bonus-engine` confirms that is intended (LF95-R2, §20). |
 | Provider reference | `payment_attempts.provider_reference`: set once by T4, T7 or T9, bounded by `PROVIDER_REF_MAX` (0099), and unique per `(tenant, provider_id)`. `deposit_intents.provider_id/provider_reference` keep mirroring the latest routed attempt for existing readers; `TestMigration0082_DepositIntentsProviderColumnsStayMutable` must keep passing, and a new test asserts the mirror through a cascade (P95-C1). |
-| Idempotency keys | **Player:** `UNIQUE(tenant, player, idempotency_key)` on the intent (exists). A retry **resumes**: it returns the intent; if its live attempt is `created`, the retry drives it (T2 CAS in a per-item tx that re-runs RG and the KYC deposit gate, so concurrent retries yield exactly one claimant and a stale eligibility is never reused); if `submitting`/`pending`/`ambiguous`, it returns the status (the redirect URL is not persisted; it is re-obtained only by T12 when `idempotent_submission`). **External:** `external_idempotency_key = "pa:" + attempt.id`, `merchant_reference = attempt.id` (INV-IO-3). **Ledger:** `(tenant, provider_id, provider_tx_id = provider_reference)` plus `idempotency_key = provider_id:provider_reference` (exists). |
+| Idempotency keys | **Player:** `UNIQUE(tenant, player, idempotency_key)` on the intent (exists). A retry **resumes**: it returns the intent; if its live attempt is `created`, the retry drives it (T2 CAS in a per-item tx that re-runs RG and the KYC deposit gate, so concurrent retries yield exactly one claimant and a stale eligibility is never reused); if `submitting`/`pending`/`ambiguous`, it returns the status (the redirect URL is not persisted; it is re-obtained only by T12 when `IdempotentSubmission`). **External:** `external_idempotency_key = "pa:" + attempt.id`, `merchant_reference = attempt.id` (INV-IO-3). **Ledger:** `(tenant, provider_id, provider_tx_id = provider_reference)` plus `idempotency_key = provider_id:provider_reference` (exists). |
 | Flow (player request) | Phase A0 (read-only tx): load candidates → health filter **outside** the tx (§9.6) → pick a provider. Phase A (**one** tx): RG check and the ADR 0096 KYC deposit gate (a deny commits the intent as `declined` with no attempt) → insert intent plus attempt 1 directly in `submitting` (T1+T2, kill-switch predicate inside the INSERT statement) → commit. There is therefore no player-path `created` row; `created` exists only for cascade rows and NotSent reverts (LF95-C12, CP-D1). Phase B: resolve credential, `Deposit(CallContext, req)`. Phase C: `applyEvidence` (T4/T6/T8/T7), with a synchronous cascade loop (§4.6), each step its own A/B/C. The handler no longer wraps the call in `WithTenant`; `InitiateDeposit` takes `*db.Pool` (INV-IO-1a). |
 | State / retryability | §4.3. `NotSent` → T5 (the driver retries within its request budget, else the sweeper takes over if non-interactive; for an interactive attempt the player sees "temporarily unavailable" and the attempt expires via T3). `Ambiguous` → T6, never cascaded, T12 only if the manifest allows it. |
 | Callback | §6. Resolution by `(provider_id, provider_reference)` **or** `merchant_reference`, both bound to the verified provider (INV-IO-14). Accepted in `submitting`. |
@@ -697,7 +711,7 @@ one indexed range scan per tenant per tick (`idx_payment_attempts_due`).
 ### 7.4 Why at-most-one concurrent money call per attempt
 
 A money-moving call requires the claimant to hold `state = submitting` with its `claim_token`.
-Entering `submitting` is T2 or T12, which are CAS from `created`/`ambiguous`. The lease only
+Entering `submitting` is T1+T2, T1p (guarded inserts), T2 or T12 (CAS from `created`/`ambiguous`). The lease only
 governs *re-polling*: an expired `submitting` lease leads to `QueryStatus`, never to a second
 submission. The one exception is T12, which re-sends the **same key**, and only when the
 provider deduplicates it.
@@ -713,7 +727,7 @@ The adapter maps every outcome of an outbound call to exactly one of:
 | `NotSent` | Provably never dispatched | Credential unavailable; gate refusal; `httpclient` `Sent=false` (build error, dial refused before write, breaker open) | First send (`ever_possibly_sent=false`): T5. **On a T12 resend** (`ever_possibly_sent` already true): T6, back to `ambiguous`, never T5 (LF95-C1) | Yes, same attempt, first send only (INV-IO-9) |
 | `NotProcessed` | Dispatched, but the vendor **documents** that this response means "not processed" (for example a specific 4xx or 429). Each code cites its vendor-documentation source in the intake (S95-C12(ii)). | The vendor error model (intake #20). **Adapter-declared per code.** Anything undocumented is `Ambiguous`. | If the vendor documents that the request **left no trace**: exactly `NotSent` (T5 on a first send). Otherwise: **T6** (`ambiguous`, `ever_possibly_sent=true`, `next_action_at=now()`) (LF95-C1). | Only through T12, which requires `IdempotentSubmission`, for deposits **and** payouts. Registration refuses a payout `NotProcessed` mapping without `IdempotentSubmission`. |
 | `DefiniteDecline` | The vendor definitively refused (canonical `Declined`, with `Cascadable` and `decline_stage`) | Business decline, validation 4xx the vendor documents as final | T8 | No (cascade is a new attempt, §4.6) |
-| `Ambiguous` | Anything else: timeout after a possible send, reset, unmapped 5xx, malformed response, panic | `httpclient` `Sent=true`, `ErrProviderMalformedResponse` | T6 | Only T12 (same key, `idempotent_submission`) |
+| `Ambiguous` | Anything else: timeout after a possible send, reset, unmapped 5xx, malformed response, panic | `httpclient` `Sent=true`, `ErrProviderMalformedResponse` | T6 | Only T12 (same key, `IdempotentSubmission`) |
 | `Pending` | Accepted, with a reference | — | T4 | — |
 | `Succeeded` (sync) | Definite success, only where the manifest has `SyncSuccessPossible` and a provider reference is returned | — | T7 | — |
 
@@ -1414,7 +1428,7 @@ timing-based fault injection is used anywhere except the one intentional excepti
    receipt and T4, and the sweeper backstop applies it. A DB error causes a rollback and a 5xx,
    and the redelivery applies it.
 5. **No unsafe retry.**
-   - `Ambiguous` never re-calls `Deposit`/`Withdraw` unless `idempotent_submission`.
+   - `Ambiguous` never re-calls `Deposit`/`Withdraw` unless `IdempotentSubmission`.
    - `NotSent` after `ever_possibly_sent=true` is refused by the trigger (direct SQL attempt).
    - A payout is never re-routed.
 6. **Ambiguous never treated as success.** An ambiguous sync result, poll or callback is never
@@ -2675,3 +2689,127 @@ relationship constraint.
 **Conditions for full APPROVE:** none blocking merge of this ADR's casino sections as written;
 tracking condition only — CAS-STMT-IO-1's remediation must be verified (not just referenced) at
 the time a real casino statement source is proposed, before that adapter is accepted.
+
+---
+
+## 27. Revision record
+
+**Revision 2 (2026-09-27, `architect`).** Folded every review condition into the design text,
+reordered the review sections numerically (§21–§26, text unchanged), applied the orchestrator's
+migration renumbering, and set the status to ACCEPTED (design) — NOT IMPLEMENTED.
+
+**Migration renumbering (orchestrator, 2026-09-27).** Payment attempts, receipts, triggers and
+backfill moved from **0100 to 0101**, because 0100 is now ADR 0096's KYC enforcement migration.
+0102 (kill switch) and 0103 (payment statement reconciliation) are unchanged. The body uses the
+new numbers throughout (header, §0 D2, §2, §4.2, §13, §16.2 item 22, §18). The review sections
+§21–§26 are quoted as written, so where they say "migration 0100" for payment attempts they mean
+0101.
+
+**Cross-ADR consistency with ADR 0096** (read at its current working-tree text):
+
+- T1p is named as THE payout KYC hook, and `DenyForCompliance` (W-KYC) is listed as a
+  pre-dispatch withdrawal transition, legal only from `approved`, in T1p's tx (§4.3, §5.2,
+  §5.2.1).
+- ADR 0096 §12 C5 asks for the gate to be re-run on any sweeper dispatch; this ADR does so at
+  the T2 re-claim and at T12 (§5.2.1).
+- IC condition 4 (ADR 0096 must name the T2-reclaim case and route it to M3) is **ADR 0096's
+  side, owned by `identity-compliance`**. This ADR's side is written (§4.8 M3, §5.2.1). At the
+  time of this revision ADR 0096's text does not yet name it. Re-check when its revision lands
+  (LF95-C10(f)).
+- The KYC function is named generically as "the ADR 0096 enforcement function exported by
+  `internal/kyc` (PRH-I3)".
+
+### 27.1 Ledger-finance (§21)
+
+| ID | Status | Where satisfied |
+|---|---|---|
+| LF95-C1 | Satisfied | §8 `NotSent`/`NotProcessed` rows; §4.3 T5 and T6 (resend `NotSent` → T6) |
+| LF95-C2 | Satisfied | §4.2 `last_evidence_kind`; §2 INV-IO-7; §4.3 forbidden list; §13.1 column and trigger |
+| LF95-C3 | Satisfied | §4.4 preconditions 1–2; §6.1 step 4; §6.2 `anomaly` row (T10 committed) |
+| LF95-C4 | Satisfied | §4.4 precondition 3; T7; §4.6 persisted `cascadable`; §6.1 step 6; §13.1 receipt columns and CHECKs |
+| LF95-C5 | Satisfied | §10.1 `CallbackEchoesMerchantReference` plus registration rule; §6.4 last row; §7.1; §12.3 `pay_unresolved` |
+| LF95-C6 (a)–(d) | Satisfied | (a) §5.1 "Ledger link", T7, §13.1; (b) §5.4 "Reference"; (c) T2 predicate, T13, T3 `intent_succeeded`, §20 residual; (d) T7/T13, §4.4 tombstone cells |
+| LF95-C7 | Satisfied | §5.1 intent projection |
+| LF95-C8 (a)–(d) | Satisfied | §4.5; §4.2 `last_sent_at`; §10.1 registration rule; §4.6 |
+| LF95-C9 (a)–(e) | Satisfied | §14; §7.2; §4.3 preamble; §6.4 |
+| LF95-C10 (a)–(f) | Satisfied (f: re-check pending ADR 0096 revision) | §5.2 flow; §5.2.1; §4.3 T1p, W-KYC, T2, T12; §4.8 M3; §16.1 CP-W7/W8 |
+| LF95-C11 (a)–(g) | Satisfied | §13.1 backfill table and post-checks; `legacy_backfill` and trigger; §16.2 item 22 |
+| LF95-C12 | Satisfied | §5.1 flow (T1+T2 in one tx); §16.1 CP-D1 restated |
+| LF95-C13 | Specified; gates `IMPLEMENTED` (PRH-I5) | §12.3 ledger join; §12.1 step 3; §16.3 |
+| LF95-C14 | Specified; gates `IMPLEMENTED` (PRH-I1-i) | §16.2 items 19 and 22 |
+| LF95-R1 | Adopted | §12.5 `payments` re-drive job; §18 I5-c |
+| LF95-R2 | Deferred, owner `bonus-engine` | §20 BONUS-T13-ELIGIBILITY-1; §5.1 |
+| LF95-R3 | Noted | §9.2 |
+| LF-Q1/Q2/Q3 rulings | Applied | §19.2; §4.4; §14; §12.6 |
+
+### 27.2 Security (§22)
+
+| ID | Status | Where satisfied |
+|---|---|---|
+| **S95-C1 (High, launch-blocking)** | Satisfied | §2 INV-IO-14; §4.3 T7/T8/T15; §4.4 precondition 1; §6.1 step 4; §6.4; §6.5; §7.1; §12.3; tests §16.2 item 20; mutation MX15 |
+| S95-C2 (i)–(iii) | Satisfied | §6.1 step 5 cap; §6.2 cap and CHECK rows; §6.4; §7.3; §13 intro; §13.1 index |
+| S95-C3 | Satisfied | §4.2 `first_submitted_at`; §6.4; §13.1 `resolution`; §20 PAY-ATTEMPT-RETENTION-1 constraint; MX18 |
+| S95-C4 | Satisfied | §6.2 uniform 200 body; §16.2 item 20 |
+| **S95-C5 (launch-blocking)** | Satisfied | §10.2 trigger; §13.2 guard; §16.2 item 20; MX17 |
+| **S95-C6 (launch-blocking)** | Satisfied | §10.3 in-statement `NOT EXISTS`; §2 INV-IO-15; §4.3 T1+T2/T1p/T2/T12; §16.2 item 20 |
+| S95-C7 | Satisfied | §10.2 `engaged_by_scope`, engage alert; §10.4; §13.2 |
+| **S95-C8 (a)–(c) (launch-blocking)** | Satisfied | §3.2 steps 4 and 8; §9.1; §11 rows; §16.2 items 15 and 20 |
+| S95-C9 (i)–(iii) | Satisfied | §3.2 step 3; §7.2 step 6; §11 "Observability" |
+| S95-C10 | Satisfied | §9.3; §13.1 CHECKs; §20 VENDOR-INTAKE-REF-PII-1; §16.2 item 20 |
+| S95-C11 | Satisfied | §9.5 `Fetch(CallContext)`; §12.1 step 1; §13.3 CHECKs; §16.3 |
+| S95-C12 (i)–(iii) | Satisfied | §10.1 registration refusals and `WebhookRetrySemantics`; §8 `NotProcessed` |
+| **S95-C13 (launch-blocking)** | Satisfied | §10.5 routes; §4.8 M3 CAS; §13.1 trigger; §16.2 item 20 |
+| S-Q1 / S-Q2 / S-Q3 rulings | Applied | §10.4; §6.2; §6.6 option (a), §15.1, §15.2 |
+| §22.5 tests 1–10 | Specified | §16.2 item 20 |
+
+### 27.3 Payments (§23)
+
+| ID | Status | Where satisfied |
+|---|---|---|
+| P95-C1 | Specified | §5.1 "Provider reference"; §16.2 item 19 |
+| P95-C2 | Specified (due by I1-f) | §4.7; §18 I1-f and specialist documents |
+| P95-C3 | Satisfied | §10.1 `WebhookRetrySemantics` (mandatory, fail-closed); §6.6 |
+| P95-C4 | Informational; consistent with the LF-Q1 ruling | §4.4 |
+
+### 27.4 QA (§24)
+
+| Change | Status | Where satisfied |
+|---|---|---|
+| 1 Mutation per invariant | Specified | §16.4 MX10–MX18 |
+| 2 Migration up/down and backfill tests | Specified | §16.2 item 22 |
+| 3 RLS cross-tenant tests, new tables | Specified | §16.2 item 22 |
+| 4 API/OpenAPI conformance | Specified | §10.5; §16.2 item 20 |
+| 5 Deterministic connection-loss hook | Specified | §16.1 preamble (`pgfault` proxy) |
+| 6 Breaker state-transition test | Specified | §16.2 item 21 |
+| 7 CI lanes, budgets and placement | Specified (`RECOMMENDATION` numbers; `qa` confirms in I1-i) | §16.5 |
+| 8 Repeat-run bounds | Specified | §16.2 items 1, 2 and 11 (≥ 100 with `-race`) |
+| Intentional sleep called out | Done | §16.2 item 14 |
+
+### 27.5 Identity-compliance (§25)
+
+| Condition | Status | Where satisfied |
+|---|---|---|
+| 1 KYC race → retryable 5xx; redelivery PROVIDER DEPENDENT | Satisfied | §15.2 "Callbacks"; §16.2 item 18 |
+| 2 Ambiguous `SubmitVerification` leaves status unchanged, own test | Satisfied | §15.3; §16.2 item 18 |
+| 3 T1p named as the payout KYC hook, shared L1 guard | Satisfied | §4.3 T1p and W-KYC; §5.2; §5.2.1 |
+| 4 T2-reclaim KYC deny → M3 | This ADR's side satisfied (§4.8 M3, §5.2.1); **ADR 0096's side owned by `identity-compliance`**, pending in its revision | §18 specialist documents |
+| 5 KYC-SUBMIT-OUTBOX-1 as a hard precondition | Satisfied | §15.3; §18; §20 |
+| CreateVerification vendor idempotency PROVIDER DEPENDENT | Satisfied | §15.2 |
+
+### 27.6 Casino (§26)
+
+| Condition | Status | Where satisfied |
+|---|---|---|
+| CAS-STMT-IO-1 remediation verified (not referenced) when a real casino statement source is proposed | Tracking condition, owner `casino` (+ `architect`, `ledger-finance`) | §15.1 "Reconciliation"; §20 |
+
+### 27.7 Not satisfiable in this ADR
+
+These are escalated or deferred, and none is silently dropped:
+
+| Item | Status |
+|---|---|
+| HD-0095-1: M1/M2 manual resolution authority and thresholds | Human decision, not taken; M1/M2 stay BLOCKED (§19.1) |
+| LEDGER-MANUAL-ADJ-4EYES-1 (compensation mechanism) | Registry item, not built; remediation of `disputed` and of several `pay_*` kinds is BLOCKED on it |
+| ADR 0096 naming of the T2-reclaim → M3 route | Owner `identity-compliance` (§27.5) |
+| Re-verification of LF95-C10 against ADR 0096's landed revision | Owner `ledger-finance` (LF95-C10(f)) |
+
