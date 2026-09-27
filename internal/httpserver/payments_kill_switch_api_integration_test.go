@@ -192,6 +192,48 @@ func (r ksResp) decode(t *testing.T, v any) {
 	}
 }
 
+// auditMetadata returns the metadata JSONB of the single audit_log row for
+// (tenantID, action), read under a tenant-scoped transaction. Fails the
+// test if there isn't exactly one such row.
+func (a *ksAPI) auditMetadata(tenantID uuid.UUID, action string) map[string]any {
+	a.t.Helper()
+	var raw []byte
+	err := a.pool.WithTenant(context.Background(), tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT metadata FROM audit_log WHERE tenant_id=$1 AND action=$2`, tenantID, action).Scan(&raw)
+	})
+	if err != nil {
+		a.t.Fatalf("read audit metadata for %s: %v", action, err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		a.t.Fatalf("decode audit metadata: %v", err)
+	}
+	return m
+}
+
+// platformAuditMetadata is auditMetadata's platform-scope twin: platform-
+// attributed mutation audit rows carry tenant_id = NULL (M4's interim
+// measure - audit_log's own RLS has no "platform writes into a named
+// tenant's scope" policy family), so reading them requires a platform-
+// scoped transaction, filtering explicitly on metadata->>'target_tenant_id'.
+func (a *ksAPI) platformAuditMetadata(platformPrincipal, targetTenant uuid.UUID, action string) map[string]any {
+	a.t.Helper()
+	var raw []byte
+	err := a.pool.WithPlatformAdmin(context.Background(), platformPrincipal, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx,
+			`SELECT metadata FROM audit_log WHERE tenant_id IS NULL AND action=$1 AND metadata->>'target_tenant_id'=$2 ORDER BY created_at DESC LIMIT 1`,
+			action, targetTenant.String()).Scan(&raw)
+	})
+	if err != nil {
+		a.t.Fatalf("read platform audit metadata for %s: %v", action, err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		a.t.Fatalf("decode audit metadata: %v", err)
+	}
+	return m
+}
+
 func (a *ksAPI) auditCount(tenantID uuid.UUID, action string) int {
 	a.t.Helper()
 	var n int
@@ -449,5 +491,205 @@ func TestPaymentsKillSwitchAPI_ReleaseRequestAgainstNonEngagedSwitchConflicts(t 
 	resp := a.do("POST", base+"/kill-switches/"+uuid.New().String()+"/release-requests", tok, map[string]any{"reason_code": "x"})
 	if resp.status != http.StatusNotFound {
 		t.Fatalf("unknown switch id status = %d, want 404, body=%s", resp.status, resp.body)
+	}
+}
+
+// TestPaymentsKillSwitchAPI_ProviderScopeValidation is the RV-PRH-I1
+// security review M2 fix: an unregistered provider_scope (a typo, or one
+// with trailing whitespace) must be a 400, never a silently-accepted
+// containment that matches nothing.
+func TestPaymentsKillSwitchAPI_ProviderScopeValidation(t *testing.T) {
+	a := newKSAPI(t)
+	tenant := a.tenant()
+	admin := a.tenantStaff(tenant, "tenant_admin")
+	tok := a.token(admin, tenant, auth.RoleTenantAdmin, auth.PrincipalStaff)
+	base := "/v1/admin/tenants/" + tenant.String() + "/payments"
+
+	unregistered := a.do("POST", base+"/kill-switches", tok, map[string]any{"provider_scope": "Mock-Payments", "operation_scope": "deposit", "reason_code": "x"})
+	if unregistered.status != http.StatusBadRequest {
+		t.Fatalf("unregistered provider_scope status = %d, want 400, body=%s", unregistered.status, unregistered.body)
+	}
+
+	trailingWhitespace := a.do("POST", base+"/kill-switches", tok, map[string]any{"provider_scope": "mock ", "operation_scope": "deposit", "reason_code": "x"})
+	if trailingWhitespace.status != http.StatusBadRequest {
+		t.Fatalf("trailing-whitespace provider_scope status = %d, want 400, body=%s", trailingWhitespace.status, trailingWhitespace.body)
+	}
+
+	registered := a.do("POST", base+"/kill-switches", tok, map[string]any{"provider_scope": "mock", "operation_scope": "deposit", "reason_code": "x"})
+	if registered.status != http.StatusOK {
+		t.Fatalf("registered provider_scope status = %d, want 200, body=%s", registered.status, registered.body)
+	}
+
+	wildcard := a.do("POST", base+"/kill-switches", tok, map[string]any{"provider_scope": "*", "operation_scope": "payout", "reason_code": "x"})
+	if wildcard.status != http.StatusOK {
+		t.Fatalf("'*' provider_scope status = %d, want 200, body=%s", wildcard.status, wildcard.body)
+	}
+}
+
+// TestPaymentsKillSwitchAPI_PlatformCallerAgainstNonexistentTenantIs404 is
+// the RV-PRH-I1 security review L6 fix.
+func TestPaymentsKillSwitchAPI_PlatformCallerAgainstNonexistentTenantIs404(t *testing.T) {
+	a := newKSAPI(t)
+	platAdmin := a.platformAdmin()
+	tok := a.token(platAdmin, uuid.Nil, auth.RolePlatformAdmin, auth.PrincipalStaff)
+
+	resp := a.do("POST", "/v1/admin/tenants/"+uuid.New().String()+"/payments/kill-switches", tok,
+		map[string]any{"provider_scope": "*", "operation_scope": "deposit", "reason_code": "x"})
+	if resp.status != http.StatusNotFound {
+		t.Fatalf("nonexistent-tenant platform engage status = %d, want 404, body=%s", resp.status, resp.body)
+	}
+}
+
+// TestPaymentsKillSwitchAPI_RouteTable is the RV-PRH-I1 security review L8
+// fix (§10.4's own route-table requirement): every kill-switch route
+// refuses a player token and a service token with 403, and none is
+// reachable without authentication.
+func TestPaymentsKillSwitchAPI_RouteTable(t *testing.T) {
+	a := newKSAPI(t)
+	tenant := a.tenant()
+	player := a.player(tenant)
+	playerTok := a.token(player, tenant, auth.RolePlayer, auth.PrincipalPlayer)
+	base := "/v1/admin/tenants/" + tenant.String() + "/payments"
+
+	routes := []struct {
+		method, path string
+		body         any
+	}{
+		{"GET", base + "/kill-switches", nil},
+		{"GET", base + "/kill-switches/" + uuid.New().String(), nil},
+		{"POST", base + "/kill-switches", map[string]any{"provider_scope": "*", "operation_scope": "deposit", "reason_code": "x"}},
+		{"GET", base + "/kill-switch-release-requests/" + uuid.New().String(), nil},
+		{"POST", base + "/kill-switches/" + uuid.New().String() + "/release-requests", map[string]any{"reason_code": "x"}},
+		{"POST", base + "/kill-switch-release-requests/" + uuid.New().String() + "/approve", nil},
+		{"POST", base + "/kill-switch-release-requests/" + uuid.New().String() + "/cancel", nil},
+	}
+	if len(routes) != 7 {
+		t.Fatalf("expected exactly 7 kill-switch routes enumerated, got %d - update this table if a route was added or removed", len(routes))
+	}
+
+	for _, rt := range routes {
+		resp := a.do(rt.method, rt.path, playerTok, rt.body)
+		if resp.status != http.StatusForbidden {
+			t.Errorf("%s %s with a player token: status = %d, want 403, body=%s", rt.method, rt.path, resp.status, resp.body)
+		}
+		noAuth := a.do(rt.method, rt.path, "", rt.body)
+		if noAuth.status != http.StatusUnauthorized {
+			t.Errorf("%s %s with no token: status = %d, want 401, body=%s", rt.method, rt.path, noAuth.status, noAuth.body)
+		}
+	}
+}
+
+// TestPaymentsKillSwitchAPI_AuditRecordsCarryBeforeAfterAndTargetTenant is
+// the RV-PRH-I1 security review M3 (before/after) and M4 (target_tenant_id
+// present on every platform-attributed mutation, K18) fix: every mutation's
+// audit row must carry a "before" and "after" object, and a platform-
+// scoped mutation's audit row must carry target_tenant_id equal to the path
+// tenant.
+func TestPaymentsKillSwitchAPI_AuditRecordsCarryBeforeAfterAndTargetTenant(t *testing.T) {
+	a := newKSAPI(t)
+	tenant := a.tenant()
+	adminA := a.tenantStaff(tenant, "tenant_admin")
+	adminB := a.tenantStaff(tenant, "tenant_admin")
+	tokA := a.token(adminA, tenant, auth.RoleTenantAdmin, auth.PrincipalStaff)
+	tokB := a.token(adminB, tenant, auth.RoleTenantAdmin, auth.PrincipalStaff)
+	base := "/v1/admin/tenants/" + tenant.String() + "/payments"
+
+	var ks killSwitchDTO
+	a.do("POST", base+"/kill-switches", tokA, map[string]any{"provider_scope": "*", "operation_scope": "deposit", "reason_code": "incident-1"}).decode(t, &ks)
+	engageMeta := a.auditMetadata(tenant, "payments_kill_switch.engage")
+	for _, key := range []string{"before", "after", "target_tenant_id"} {
+		if _, ok := engageMeta[key]; !ok {
+			t.Errorf("engage audit metadata missing %q: %v", key, engageMeta)
+		}
+	}
+	if before, ok := engageMeta["before"].(map[string]any); !ok || before["existed"] != false {
+		t.Errorf("engage before-state should record existed=false for a first-ever engage, got %v", engageMeta["before"])
+	}
+
+	var relReq killSwitchReleaseRequestDTO
+	a.do("POST", base+"/kill-switches/"+ks.ID+"/release-requests", tokA, map[string]any{"reason_code": "resolved"}).decode(t, &relReq)
+	reqMeta := a.auditMetadata(tenant, "payments_kill_switch.request_release")
+	for _, key := range []string{"before", "after", "target_tenant_id"} {
+		if _, ok := reqMeta[key]; !ok {
+			t.Errorf("request_release audit metadata missing %q: %v", key, reqMeta)
+		}
+	}
+
+	a.do("POST", base+"/kill-switch-release-requests/"+relReq.ID+"/approve", tokB, nil)
+	approveMeta := a.auditMetadata(tenant, "payments_kill_switch.approve_release")
+	for _, key := range []string{"before", "after", "target_tenant_id"} {
+		if _, ok := approveMeta[key]; !ok {
+			t.Errorf("approve_release audit metadata missing %q: %v", key, approveMeta)
+		}
+	}
+
+	// Cancel a second, freshly re-engaged switch's request.
+	a.do("POST", base+"/kill-switches", tokA, map[string]any{"provider_scope": "mock", "operation_scope": "payout", "reason_code": "x"})
+	var ks2 killSwitchDTO
+	listResp := a.do("GET", base+"/kill-switches", tokA, nil)
+	var listed struct {
+		KillSwitches []killSwitchDTO `json:"kill_switches"`
+	}
+	listResp.decode(t, &listed)
+	for _, s := range listed.KillSwitches {
+		if s.ProviderScope == "mock" {
+			ks2 = s
+		}
+	}
+	var relReq2 killSwitchReleaseRequestDTO
+	a.do("POST", base+"/kill-switches/"+ks2.ID+"/release-requests", tokA, map[string]any{"reason_code": "y"}).decode(t, &relReq2)
+	a.do("POST", base+"/kill-switch-release-requests/"+relReq2.ID+"/cancel", tokA, nil)
+	cancelMeta := a.auditMetadata(tenant, "payments_kill_switch.cancel_release")
+	for _, key := range []string{"before", "after", "target_tenant_id"} {
+		if _, ok := cancelMeta[key]; !ok {
+			t.Errorf("cancel_release audit metadata missing %q: %v", key, cancelMeta)
+		}
+	}
+
+	// Platform-scoped engage: target_tenant_id must be present and equal to
+	// the path tenant, even though the audit row's own tenant_id column is
+	// NULL (M4's interim measure).
+	platAdmin := a.platformAdmin()
+	platResp := a.do("POST", base+"/kill-switches", a.token(platAdmin, uuid.Nil, auth.RolePlatformAdmin, auth.PrincipalStaff),
+		map[string]any{"provider_scope": "*", "operation_scope": "*", "reason_code": "platform_takeover_test"})
+	if platResp.status != http.StatusOK {
+		t.Fatalf("platform engage status = %d, body=%s", platResp.status, platResp.body)
+	}
+	platMeta := a.platformAuditMetadata(platAdmin, tenant, "payments_kill_switch.engage")
+	if platMeta["target_tenant_id"] != tenant.String() {
+		t.Errorf("K18: platform engage audit metadata target_tenant_id = %v, want %s", platMeta["target_tenant_id"], tenant.String())
+	}
+}
+
+// TestPaymentsKillSwitchAPI_AuditRecordsPlatformTakeover is M3's explicit
+// "record takeover and KS-L6 cancellations" requirement: a platform re-
+// engage of an already tenant-engaged switch, with an open tenant release
+// request outstanding, must audit is_platform_takeover=true and the
+// cancelled request's id.
+func TestPaymentsKillSwitchAPI_AuditRecordsPlatformTakeover(t *testing.T) {
+	a := newKSAPI(t)
+	tenant := a.tenant()
+	adminA := a.tenantStaff(tenant, "tenant_admin")
+	tokA := a.token(adminA, tenant, auth.RoleTenantAdmin, auth.PrincipalStaff)
+	base := "/v1/admin/tenants/" + tenant.String() + "/payments"
+
+	var ks killSwitchDTO
+	a.do("POST", base+"/kill-switches", tokA, map[string]any{"provider_scope": "*", "operation_scope": "deposit", "reason_code": "incident-1"}).decode(t, &ks)
+	var relReq killSwitchReleaseRequestDTO
+	a.do("POST", base+"/kill-switches/"+ks.ID+"/release-requests", tokA, map[string]any{"reason_code": "resolved"}).decode(t, &relReq)
+
+	platAdmin := a.platformAdmin()
+	platTok := a.token(platAdmin, uuid.Nil, auth.RolePlatformAdmin, auth.PrincipalStaff)
+	takeover := a.do("POST", base+"/kill-switches", platTok, map[string]any{"provider_scope": "*", "operation_scope": "deposit", "reason_code": "platform_incident"})
+	if takeover.status != http.StatusOK {
+		t.Fatalf("platform takeover status = %d, body=%s", takeover.status, takeover.body)
+	}
+
+	meta := a.platformAuditMetadata(platAdmin, tenant, "payments_kill_switch.engage")
+	if meta["is_platform_takeover"] != true {
+		t.Errorf("is_platform_takeover = %v, want true", meta["is_platform_takeover"])
+	}
+	if meta["ks_l6_cancelled_request_id"] != relReq.ID {
+		t.Errorf("ks_l6_cancelled_request_id = %v, want %s", meta["ks_l6_cancelled_request_id"], relReq.ID)
 	}
 }
