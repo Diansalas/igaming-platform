@@ -2107,3 +2107,97 @@ all clean; full internal/payments + internal/reconciliation +
 internal/httpserver suites run under -tags=integration -race -count=1
 against PRIV_DB=fh3_invdep1_qa.
 
+
+A7 items (rv-a7-tests.md, 1944de0), #1a and #5c, 2026-09-27
+======================================================================
+
+#1a - TestA7_1a_SweeperClaimVsCallbackPhaseC_SameDepositIntent
+(internal/payments/a7_1a_integration_test.go, kept separate from the
+payout agent's own a7_lockorder_integration_test.go on its FH-6 branch to
+avoid a merge conflict):
+
+Landed the scratchpad's reproduction (scratchpad/a7_1a_double_capture_
+test.go.txt) adapted in two ways:
+  1. a7HoldRow/a7WaitAnyLockWaiter are a local, self-contained copy (this
+     file's own helpers), built on the SAME primitives lockorder_harness_
+     test.go already exposes (loHoldWith, loBlockingPIDs) - the real
+     a7HoldRow/a7WaitAnyLockWaiter live in the payout agent's own
+     a7_lockorder_integration_test.go, not present on this branch.
+  2. The final assertion ("attempt 1 stays declined or disputed") was
+     adapted to "exactly one of attempt 1/attempt 2 ends up succeeded, the
+     other disputed" - the original assumed attempt 1 must be the one
+     left declined/disputed, but under ADR 0095 §28 AM-2/INV-DEP-1 (FH-3,
+     8ce538c, landed after this scratchpad was written) whichever success
+     posts FIRST legitimately succeeds (here, attempt 1's late callback,
+     since T13(c) treats it as a legitimate second capture) and the OTHER
+     loses the resolvedForOtherDeposit race and is disputed - the
+     load-bearing invariant is "exactly one succeeded, one disputed",
+     not which specific attempt.
+
+Confirmed PASSING against current HEAD: at most one ledger posting for
+the whole intent (asserted via the distinct-ledger_transaction_id count
+query), the waiter-blocks assertions (a7WaitAnyLockWaiter finding the
+sweeper's per-item claim genuinely blocked on the held deposit_intents
+row) hold, loAssertBalanced and loAssertProjectionMatchesRebuild both
+pass. Stable across 5 reps under -race (no flake observed).
+
+Mutation-kill (disclosed, not a clean single-mutation kill): mutated
+postDepositSuccessOrDispute's own resolvedForOtherDeposit call site by
+forcing `resolved = false` immediately after the real check runs (i.e.,
+simulating the pre-check being bypassed entirely). The test STILL PASSED:
+migration 0107's own DB-level unique-index backstop
+(payment_attempts_one_succeeded_deposit_per_intent /
+ledger_transactions_one_deposit_per_intent) caught the second posting
+attempt instead, surfacing as ErrDepositIntentAlreadyResolved from
+postDepositSuccess itself, which postDepositSuccessOrDispute's own
+fallback branch maps to the identical disputed outcome (plus the
+additional payments_deposit_intent_index_backstop_fired P1 alert,
+confirmed in the test log). This is disclosed as genuine defense-in-depth
+working as designed, not claimed as a kill via this specific test - the
+DB backstop's own dedicated kill coverage already lives in
+inv_dep1_matrix_integration_test.go (QA's own matrix) and
+migration_0107_integration_test.go's TestMigration0107_LedgerBackstop_
+ErrDepositAlreadyPostedForIntent, not duplicated here. Reverted; confirmed
+`git diff` clean.
+
+#5c - mutation check for "receipt insert after an L1 lock" on the
+reversal tombstone branch (A7-TOMB-1):
+
+Mutation: in applyReversalReceiptEvidence (receipt.go), moved the R0
+receipt insert (insertReceiptDeduped) to AFTER the `deposit_intents FOR
+UPDATE` lock instead of before it - i.e. exactly the ordering violation
+A7-TOMB-1's own doc comment says must never happen ("R0 ... is this
+transaction's FIRST write - unconditionally, before ANY lock").
+
+Result: NOT KILLED by any existing test, including the test that doc
+comment names as the reason for the rule
+(TestRVLF_A7Tomb1_ConcurrentIdenticalTombstoneReversalsNoDeadlockExactly
+OneEffect - 5/5 reps still pass), nor by the package's full suite (go
+test -tags=integration -race ./internal/payments/...) run with the
+mutation in place. Investigated why, rather than accept a false negative:
+ADR 0095 §14/LF95-C9(a) states R0 is "an index-insertion wait that
+serializes duplicate deliveries, analogous to L0.1" - its deadlock-
+avoidance property (the binding rule "nothing that already holds an L1+
+lock ever inserts a receipt") is only exploitable as a genuine ABBA
+deadlock between TWO DIFFERENT code paths that disagree on lock order for
+the SAME pair of resources (an L1 lock and an R0 index-insertion wait on
+the SAME event_fingerprint). A single, uniform code mutation applied to
+ONE function is run identically by BOTH sides of any concurrent race
+constructed FROM that same function (e.g. two identical reversal
+deliveries), so both take the SAME (now-wrong) order and simply serialize
+on the lock instead of deadlocking - there is no "correct-order" opponent
+left to race against once the one function that would have been the
+correct side is itself mutated. A genuine kill would require pitting this
+mutated function against a SEPARATE, still-correctly-ordered code path
+that also inserts a receipt with the SAME event_fingerprint while already
+holding this SAME deposit_intents row's L1 lock - no such second call
+site exists (only ONE function ever inserts a reversal receipt for a
+given (tenant, provider) fingerprint), so this specific ordering rule, in
+isolation, is a static/architectural invariant this test suite cannot
+exercise as a dynamic deadlock reproduction without inventing a second,
+artificial call site whose only purpose would be to fail differently -
+which would not be a permanent, meaningful regression test.
+
+STATUS: reported to the coordinator as BLOCKED-ON-DESIGN rather than
+claimed as a kill. Mutation applied and reverted per instructions (`git
+diff` confirmed clean after revert); no fabricated pass.
