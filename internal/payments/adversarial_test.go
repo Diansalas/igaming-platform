@@ -15,6 +15,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -140,7 +141,7 @@ func TestReceiveCallback_ConcurrentDuplicateCallbacksOnlyOnePosts(t *testing.T) 
 	var intent DepositIntent
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		intent, err = orch.InitiateDeposit(ctx, tx, InitiateDepositParams{
+		intent, err = initiateDepositWithAttempt(ctx, tx, orch, InitiateDepositParams{
 			Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
 			AssetCode: "EUR", Amount: 9000, PaymentMethod: "card", IdempotencyKey: "dep-concurrent-callback",
 		})
@@ -366,6 +367,25 @@ func TestInitiateDeposit_AmbiguousOutcomeCallsQueryStatusBeforeNotCascading(t *t
 // itself carries Outcome=ambiguous. Confirms ReceiveCallback also calls
 // QueryStatus rather than treating the callback's ambiguity as a final
 // answer, never silently posts a ledger entry, and never cascades.
+// TestReceiveCallback_AmbiguousCallbackResolvedViaQueryStatus_NotCascaded
+// name kept for history; behaviour adapted for the
+// PRH-payments-callback-cutover (ADR 0095 §6.5, receipt.go's own package
+// doc comment: "what a callback may never do - no cascade I/O, no
+// QueryStatus"). Old->new: the pre-cutover callback path called
+// provider.QueryStatus SYNCHRONOUSLY, inline, to try to resolve an
+// ambiguous callback before returning - itself an instance of the
+// provider-I/O-inside-a-transaction anti-pattern ADR 0095 eliminates.
+// The receipt path never makes a provider call at all: an ambiguous
+// callback moves the attempt to `ambiguous` with a scheduled
+// next_action_at for the SWEEPER (asynchronous, outside this
+// transaction) to resolve later - QueryStatus is therefore correctly
+// called ZERO times here now. This test's original intent (an ambiguous
+// callback must be actively tracked for resolution, never silently
+// dropped, never treated as success/failure, never cascaded) is
+// expressed by the equally strong replacement checks below: the attempt
+// is durably `ambiguous` with a next_action_at scheduled (proving it is
+// NOT a dead end), QueryStatus was NOT called synchronously (proving the
+// I/O-in-transaction defect is gone), no cascade, no posting.
 func TestReceiveCallback_AmbiguousCallbackResolvedViaQueryStatus_NotCascaded(t *testing.T) {
 	pool := testPool(t)
 	f := seedOrchFixture(t, pool)
@@ -379,7 +399,7 @@ func TestReceiveCallback_AmbiguousCallbackResolvedViaQueryStatus_NotCascaded(t *
 	var intent DepositIntent
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		intent, err = orch.InitiateDeposit(ctx, tx, InitiateDepositParams{
+		intent, err = initiateDepositWithAttempt(ctx, tx, orch, InitiateDepositParams{
 			Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
 			AssetCode: "EUR", Amount: 4700, PaymentMethod: "card", IdempotencyKey: "dep-cb-ambiguous",
 		})
@@ -405,14 +425,34 @@ func TestReceiveCallback_AmbiguousCallbackResolvedViaQueryStatus_NotCascaded(t *
 	if result.Status != DepositIntentAmbiguous {
 		t.Fatalf("an ambiguous callback must never be silently treated as success or failure, got %v", result.Status)
 	}
-	if got := a.QueryStatusCallCount(); got != 1 {
-		t.Fatalf("expected QueryStatus to be called exactly once to attempt resolving the ambiguous callback, got %d", got)
+	if got := a.QueryStatusCallCount(); got != 0 {
+		t.Fatalf("ADR 0095 §6.5: a callback must never make a provider call (no cascade I/O, no QueryStatus) - expected 0 synchronous QueryStatus calls, got %d", got)
 	}
 	if got := b.DepositCallCount(); got != 0 {
 		t.Fatalf("an ambiguous callback must never auto-cascade to another provider, but mock-b's Deposit was called %d times", got)
 	}
 	if balance := cashBalance(t, pool, f); balance != 0 {
 		t.Fatalf("an unresolved ambiguous callback must never post a ledger entry, got balance %d", balance)
+	}
+
+	// The attempt is durably tracked for LATER (asynchronous, sweeper-
+	// driven) resolution, not a silent dead end: state 'ambiguous' with a
+	// next_action_at scheduled.
+	var attemptState string
+	var nextActionAt *time.Time
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx,
+			`SELECT state, next_action_at FROM payment_attempts WHERE provider_id = 'mock-a' AND provider_reference = $1`,
+			*intent.ProviderReference,
+		).Scan(&attemptState, &nextActionAt)
+	}); err != nil {
+		t.Fatalf("query attempt state: %v", err)
+	}
+	if attemptState != "ambiguous" {
+		t.Fatalf("expected the attempt itself to be 'ambiguous', got %q", attemptState)
+	}
+	if nextActionAt == nil {
+		t.Fatal("expected next_action_at to be scheduled so the sweeper resolves this ambiguity later")
 	}
 }
 
@@ -439,7 +479,7 @@ func TestInitiateDeposit_ProviderSwapDoesNotRequireWalletOrLedgerCodeChange(t *t
 	var intentA DepositIntent
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		intentA, err = orch.InitiateDeposit(ctx, tx, InitiateDepositParams{
+		intentA, err = initiateDepositWithAttempt(ctx, tx, orch, InitiateDepositParams{
 			Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
 			AssetCode: "EUR", Amount: 3300, PaymentMethod: "card", IdempotencyKey: "dep-swap-a",
 		})
@@ -484,7 +524,7 @@ func TestInitiateDeposit_ProviderSwapDoesNotRequireWalletOrLedgerCodeChange(t *t
 	var intentB DepositIntent
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		intentB, err = orch.InitiateDeposit(ctx, tx, InitiateDepositParams{
+		intentB, err = initiateDepositWithAttempt(ctx, tx, orch, InitiateDepositParams{
 			Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
 			AssetCode: "EUR", Amount: 2200, PaymentMethod: "card", IdempotencyKey: "dep-swap-b",
 		})
