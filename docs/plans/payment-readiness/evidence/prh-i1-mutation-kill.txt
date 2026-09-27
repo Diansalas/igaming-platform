@@ -2201,3 +2201,99 @@ which would not be a permanent, meaningful regression test.
 STATUS: reported to the coordinator as BLOCKED-ON-DESIGN rather than
 claimed as a kill. Mutation applied and reverted per instructions (`git
 diff` confirmed clean after revert); no fabricated pass.
+
+
+FH-3b: security review of FH-3 (rv-fh3-security.md, 81dd4b7), F-M1/F-M2/
+F-L1/F-L2/F-L3, 2026-09-27
+======================================================================
+
+F-M1 - migration 0107's payment_attempts_guard() T13t/T13d predicate
+accepted a NULL terminal_reason:
+  File: migrations/0107_deposit_intent_double_credit_backstop.up.sql
+  Mutation: reverted the fix, i.e. `AND (NEW.terminal_reason IS NULL OR
+  NEW.terminal_reason NOT IN (...))` narrowed back to the original bug,
+  `AND NEW.terminal_reason NOT IN (...)`.
+  Killed by: TestMigration0107_T13tT13d_TerminalReasonTrigger_HEAD, case
+  (c).
+  Failure: "(c) F-M1: expected the trigger to refuse a NULL
+  terminal_reason, got err=<nil> state=disputed reason=<nil>".
+  Reverted: targeted Edit; confirmed `git diff` clean. Private DB rebuilt
+  (fh3b_mut, dropped after use) since 0107's checksum changes with this
+  fix; fh3b (the main working private DB for this session) already
+  carried the fix throughout.
+
+F-M2 - the guard's own behaviour tests ran against 0101, not HEAD:
+  Moved TestMigration0101_InsertGuard_RejectsForbiddenShapes,
+  TestMigration0101_UpdateGuard_TransitionWhitelist,
+  TestMigration0101_T13t_TombstonePrecedesSuccess_RequiresNamedTerminalReason
+  and TestMigration0101_RLS_CrossTenantIsolation to depositV2ScratchPool
+  (HEAD). No mutation applicable (this is a test-relocation fix, not a
+  code fix) - verified instead by confirming all four pass at HEAD (they
+  do; the T13t test in particular is now exercising 0107's REPLACED guard
+  body for the first time). The remaining 0101-pinned tests in that file
+  (UpDownUpRoundTrip, the Backfill_* pre-flight tests) are genuine
+  migration-boundary/backfill-history tests with nothing to exercise at
+  HEAD, now labelled as such.
+
+F-L1 - the choke point's tenant binding (MT) and both application-level
+checks (MC) were unpinned - the DB backstop produces the identical
+disputed outcome either way:
+  File: internal/payments/orchestrator.go
+  Mutation MT: postDepositSuccessOrDispute's own
+  `resolvedForOtherDeposit(ctx, tx, attempt.TenantID, ...)` call changed
+  to pass `uuid.Nil` instead of `attempt.TenantID`.
+  Killed by: TestINVDEP1_FL1_ApplicationChokePointCatchesItBeforeTheDBBackstop.
+  Failure: "the DB backstop must NOT have fired for a correctly-tenanted,
+  correctly-checked delivery ..." - the backstop-fired log line DID fire.
+  Reverted: targeted Edit; confirmed clean.
+
+  Mutation MC: both application-level checks guarded with `if false &&
+  resolved` - postDepositSuccessOrDispute's own pre-check AND
+  postDepositSuccess's internal re-check, simultaneously.
+  Killed by: the SAME test (TestINVDEP1_FL1_...), identical failure mode
+  (the backstop-fired line fired because both application checks were
+  bypassed and the ledger's own unique index caught the second posting
+  instead).
+  Reverted: targeted Edit (both sites); confirmed clean.
+
+F-L2 - the P1 alert log content (payments_multiple_success_for_intent_
+alert) was unpinned:
+  File: internal/payments/orchestrator.go
+  Mutation: added `"amount", attempt.Amount` to the
+  payments_multiple_success_for_intent_alert slog.Default().Error(...)
+  call.
+  Killed by: TestINVDEP1_FL2_MultipleSuccessAlertLogContentIsPinned.
+  Failure: "the alert line must never carry \"amount=\"" and "... must
+  never carry \"5000\"" (the real attempt amount).
+  Reverted: targeted Edit; confirmed clean.
+
+F-L3 - testHookBeforeReferenceConflictRecheck's residual "could a future
+non-test file assign it" hardening:
+  File: internal/payments/receipt.go
+  Mutation: planted a real `testHookBeforeReferenceConflictRecheck =
+  func() {}` assignment inside a new helper function directly in
+  receipt.go (a non-test file), simulating exactly the residual the
+  reviewer flagged.
+  Killed by: TestFL3_TestHookBeforeReferenceConflictRecheck_
+  NeverAssignedOutsideTests.
+  Failure: "F-L3: testHookBeforeReferenceConflictRecheck must never be
+  assigned outside a _test.go file: .../receipt.go:39:27".
+  Reverted: targeted Edit; confirmed clean. (This is a static/AST-based
+  test, not a DB-backed one - no PRIV_DB involved; verified with plain
+  `go test`, no build tag.)
+
+Verification after all FH-3b mutations reverted: `git status --porcelain`
+clean; `go build ./...`, `go vet -tags=integration ./...`, `gofmt -l .`
+clean; `golangci-lint run ./...` (pinned 2.9.0): 0 issues; `go run
+./cmd/migrate verify` against a fresh scratch DB (fh3b) migrated through
+0107: "all applied migrations verified clean, no version gaps"; full
+internal/payments + internal/reconciliation (+ internal/reconciliation/
+statement) suites pass under -tags=integration -race -count=1 against
+PRIV_DB=fh3b; plain `go test ./internal/payments/...` (no build tag,
+covers the new F-L3 static guard) also green.
+
+Private DBs: every stale fh3_* scratch database from the FH-3/FH-3a
+session (fh3_final_verify, fh3_full_1, fh3_invdep1_1, fh3_invdep1_2,
+fh3_invdep1_final, fh3_invdep1_qa) was dropped, since 0107's checksum
+changed with the F-M1 fix. fh3b is the fresh replacement used throughout
+this session.
