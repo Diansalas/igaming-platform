@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -595,6 +596,75 @@ func TestPollPayoutStatus_AssetMismatch_Disputes(t *testing.T) {
 	}
 	if got.State == withdrawal.StateCompleted {
 		t.Fatalf("completed on an asset mismatch (INV-IO-6)")
+	}
+	loAssertBalanced(t, pool, f.tenantID)
+	loAssertProjectionMatchesRebuild(t, pool, f.tenantID)
+}
+
+// --- B5: oversize provider reference through the REAL adapter-call path -----
+
+// oversizeRefWithdrawProvider returns a definite success with an over-bound
+// provider reference DIRECTLY from Withdraw - unlike
+// TestPayoutDispatch_OversizeProviderReference_Parks (which hand-builds a
+// GateResult and never exercises payoutAdapterCall/callProvider at all),
+// this drives the oversize value through the REAL DispatchWithdraw path,
+// so disabling providerref.Validate in payoutAdapterCall would be caught.
+type oversizeRefWithdrawProvider struct{ *MockProvider }
+
+func (p *oversizeRefWithdrawProvider) Withdraw(_ context.Context, _ WithdrawRequest) (WithdrawResult, error) {
+	return WithdrawResult{Outcome: OutcomeSucceeded, ProviderReference: string(make([]byte, 400))}, nil
+}
+
+// TestDispatchWithdraw_OversizeReference_ParksThroughRealAdapterPath is
+// B5's required end-to-end test.
+func TestDispatchWithdraw_OversizeReference_ParksThroughRealAdapterPath(t *testing.T) {
+	pool := depositV2ScratchPool(t)
+	f := seedPayoutFixture(t, pool, 10_000, true)
+	inner := NewMockProvider("mock-fix-oversize", "EUR")
+	provider := &oversizeRefWithdrawProvider{MockProvider: inner}
+	registerCapability(t, pool, f.orchFixture, provider, 100)
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-fix-oversize": provider}, MultiWebhookCredentialResolver{"mock-fix-oversize": NewMockWebhookCredentials(inner)})
+
+	wr := approvedWithdrawal(t, pool, f, 500, "payout-fix-oversize-real")
+	claim, err := orch.ClaimForDispatch(context.Background(), pool, KYCEnforcementPayoutGate{}, f.tenantID, wr.ID, "bank_transfer", testSubmitActor())
+	if err != nil {
+		t.Fatalf("ClaimForDispatch: %v", err)
+	}
+
+	// The REAL phase B call - through payoutAdapterCall/callProvider, not
+	// a hand-built GateResult.
+	gr := DispatchWithdraw(context.Background(), MockCredentialResolver{}, provider, claim.Attempt)
+	if gr.Class != ErrorClassProviderRefInvalid {
+		t.Fatalf("expected ErrorClassProviderRefInvalid from the real adapter-call path, got %s (err=%v)", gr.Class, gr.Err)
+	}
+	if gr.Err == nil {
+		t.Fatalf("expected a non-nil error from the gate")
+	}
+
+	if err := ApplyPayoutResult(context.Background(), pool, f.tenantID, wr.ID, claim.Attempt, gr, EvidenceSync); err != nil {
+		t.Fatalf("ApplyPayoutResult: %v", err)
+	}
+	var got withdrawal.WithdrawalRequest
+	var attempt PaymentAttempt
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		var err error
+		got, err = withdrawal.GetByID(ctx, tx, wr.ID)
+		if err != nil {
+			return err
+		}
+		attempt, err = GetAttemptByID(ctx, tx, claim.Attempt.ID)
+		return err
+	}); err != nil {
+		t.Fatalf("reread: %v", err)
+	}
+	if got.State != withdrawal.StateSubmitted {
+		t.Fatalf("expected the withdrawal to remain submitted (hold never released), got %s", got.State)
+	}
+	if attempt.State != AttemptDisputed {
+		t.Fatalf("expected the attempt to be parked as disputed via the real adapter-call path, got %s", attempt.State)
+	}
+	if attempt.TerminalReason == nil || !strings.HasPrefix(*attempt.TerminalReason, "invalid_provider_reference:") {
+		t.Fatalf("expected a specific invalid_provider_reference:<reason> terminal_reason, got %v", attempt.TerminalReason)
 	}
 	loAssertBalanced(t, pool, f.tenantID)
 	loAssertProjectionMatchesRebuild(t, pool, f.tenantID)
