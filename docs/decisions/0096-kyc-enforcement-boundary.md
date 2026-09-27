@@ -129,15 +129,36 @@ const (
 // never accepted from a request body — identical to
 // rg.EligibilityParams/risk.RiskRequest's own binding contract.
 type EnforcementParams struct {
-	TenantID           uuid.UUID
-	BrandID            uuid.UUID
-	PlayerAccountID    uuid.UUID
-	Operation          EnforcementOperation
-	AssetCode          string // required for amount-shaped operations
-	Amount             int64  // minor units; required for deposit/withdrawal
-	JurisdictionCode   string // caller's own trusted context, same contract as risk.RiskRequest.JurisdictionCode (ADR 0031 §9) — empty means "no jurisdiction resolved", matches only jurisdiction-unscoped policy
-	LicensingJurisdictionID uuid.UUID // resolved from tenants.licence_id -> licences.jurisdiction_id, exactly as jurisdiction.ResolveEvaluationPolicy already does internally (ADR 0043 Decision 2) — the KYC policy table is keyed the same way, for the same bootstrap-circularity reason
-	CorrelationID      uuid.UUID
+	TenantID        uuid.UUID
+	BrandID         uuid.UUID
+	PlayerAccountID uuid.UUID
+	PersonID        uuid.UUID // required for the withdrawal structural rule (§3.2 point 1), which is scoped per Person, not per wallet/PlayerAccount — resolved server-side exactly like every other identity field, never accepted from a client
+	Operation       EnforcementOperation
+	AssetCode       string // required for amount-shaped operations
+	Amount          int64  // minor units; required for deposit/withdrawal; player-chosen, so §12.2 C6/§13 condition 4(e) require the server to recompute cumulative totals independently rather than trust this field for anything beyond the current transaction's own amount check
+	// LicensingJurisdictionID is the ONLY jurisdiction selector this
+	// mechanism reads, resolved from tenants.licence_id ->
+	// licences.jurisdiction_id exactly as jurisdiction.
+	// ResolveEvaluationPolicy already does internally (ADR 0043 Decision
+	// 2) — the KYC policy table is keyed the same way, for the same
+	// bootstrap-circularity reason.
+	LicensingJurisdictionID uuid.UUID
+	// JurisdictionCode is REMOVED (security condition 4(d), §13). The
+	// original sketch carried it as a second, player-influenceable
+	// jurisdiction signal (derived from geolocation or declared country,
+	// the same value risk.RiskRequest.JurisdictionCode carries per ADR
+	// 0031 §9) alongside LicensingJurisdictionID. migration 0101's
+	// kyc_enforcement_policies table has no column it could ever match
+	// against, so it was dead weight at best — but a future
+	// implementer adding one "for symmetry with risk.Evaluate" would
+	// create a real vector: a player influencing their own declared
+	// country (VPN, self-reported location) to select a laxer KYC
+	// policy than their actual licensing jurisdiction governs. This ADR
+	// forecloses that explicitly rather than leaving it to be
+	// rediscovered at implementation time: KYC policy selection reads
+	// LicensingJurisdictionID only, never a player-influenceable
+	// location signal, full stop.
+	CorrelationID uuid.UUID
 }
 
 // EnforcementOutcome is one of exactly five normalized values — never a
@@ -152,10 +173,10 @@ type EnforcementOutcome string
 
 const (
 	OutcomeNotRequired EnforcementOutcome = "not_required" // policy does not currently require KYC for this operation/amount/jurisdiction
-	OutcomePassed       EnforcementOutcome = "passed"        // required, and the player has an approved kyc_verifications row
-	OutcomePending       EnforcementOutcome = "pending"       // required; verification exists but is pending/review_required
-	OutcomeFailed        EnforcementOutcome = "failed"        // required; no verification, or the latest is rejected/expired
-	OutcomeUnavailable    EnforcementOutcome = "unavailable"   // the evaluator itself could not determine an outcome (DB error, malformed policy row) — NEVER a legitimate business state
+	OutcomePassed       EnforcementOutcome = "passed"        // required, and the player's LATEST kyc_verifications row (§2.6) is approved AND unexpired
+	OutcomePending       EnforcementOutcome = "pending"       // required; the latest row is pending/review_required
+	OutcomeFailed        EnforcementOutcome = "failed"        // required; no verification exists, or the latest row is rejected, OR the latest row is approved but its expires_at has passed (§2.6(b)) — expiry is folded into failed, not its own outcome value
+	OutcomeUnavailable    EnforcementOutcome = "unavailable"   // the evaluator itself could not determine an outcome (a DB/query error, or a malformed policy row) — NEVER "no rows found"; never a legitimate business state; a query failure must never be interpreted as not_required (§2.6(c))
 )
 
 type EnforcementDecision struct {
@@ -236,6 +257,64 @@ caller's own tenant-scoped transaction, subject to existing RLS) and the
 policy table in §3 — never from a request header, a client-asserted
 "verified" flag, or a cached value. `EvaluateEnforcement` performs its
 own read; it does not accept a pre-computed `Outcome` from any caller.
+
+### 2.6 Read semantics (security condition 4, §13 — binding, not advisory)
+
+`kyc_verifications` carries no per-player uniqueness constraint
+(migration 0040) — a player can accumulate several rows over time
+(a rejected attempt, a later approved one, a future re-verification).
+`EvaluateEnforcement`'s read must therefore be pinned down exactly, not
+left to "the obvious query," because the obvious query is the bug:
+
+- **(a) Latest row only, deterministically ordered.** The query selects
+  the single row for `(tenant_id, brand_id, player_account_id)` ordered
+  `created_at DESC, id DESC` and takes the first result. An
+  `EXISTS(status = 'approved')`-shaped query is explicitly the wrong
+  design — it would let an old, superseded `approved` row satisfy the
+  check even when a newer row for the same player is `pending`,
+  `rejected`, or `expired`. Only the latest row's status is ever
+  consulted.
+- **(b) Expiry is enforced independently of stored status.** If the
+  latest row's `expires_at <= now()`, the outcome is `failed` even when
+  its stored `status` column still literally reads `approved` — `kyc_
+  verifications.status` only transitions to `expired` when a provider
+  delivers that update (ADR 0028 §2's state machine), and a missed or
+  never-sent callback must not silently extend a verification's real-world
+  validity. This requires `kyc_verifications` to carry (or `Evaluate
+  Enforcement` to otherwise resolve) an `expires_at` value; if the column
+  does not yet exist on that table, adding it is part of this ADR's own
+  implementation scope (PRH-I3), not a follow-up.
+- **(c) A lookup error is `unavailable`, never `not_required`.** A failed
+  query (connection error, malformed row, an unrecognized policy shape)
+  must propagate as `OutcomeUnavailable` (deny). "No rows returned" and
+  "the query itself failed" are different states and must never be
+  conflated — mapping a query failure to "no policy, no verification,
+  therefore not required" would turn an outage into a silent bypass,
+  exactly the inversion CLAUDE.md's fail-closed rule forbids.
+- **(d) Policy selection key.** `kyc_enforcement_policies` is selected
+  **only** by `LicensingJurisdictionID` (§2.2) — never by a player-
+  influenceable location signal. See §2.2's removal of `JurisdictionCode`
+  for the full reasoning.
+- **(e) Threshold amounts are computed server-side, from settled ledger
+  postings, across the player's relevant activity — never from the
+  current request's own `Amount` alone.** Once HD-KYC-1/HD-KYC-2 supply
+  real values, the `cumulative_deposit`/`edd_amount` comparison must sum
+  **settled** deposit postings (ledger `deposit_completed` credits, per
+  ledger-finance C6 in §12.2 — never `deposit_intents.amount`, which
+  includes declined and still-pending intents) for the player, in the
+  trigger's own `asset_code`, and must **include in-flight (initiated,
+  not yet settled) amounts** in whatever way HD-KYC-1 specifies, so a
+  player cannot structure around the threshold by keeping one deposit
+  perpetually "pending." `Amount`/`AssetCode` on `EnforcementParams`
+  remain player-influenceable inputs (they are the current request's own
+  amount) and are never trusted as the sole basis for a cumulative
+  comparison — only as the amount of the transaction being gated right
+  now, checked against a total the server computed independently.
+- **(f) Cross-tenant negative test shape.** Any test proving cross-tenant
+  isolation must use a genuinely valid token for tenant B carrying tenant
+  A's `player_account_id`, and assert the caller-visible result is a
+  rejection or not-found — never that the evaluation silently ran against
+  tenant A's own rows under tenant B's authorization context.
 
 ---
 
