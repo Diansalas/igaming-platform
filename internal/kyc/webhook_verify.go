@@ -33,6 +33,21 @@ func (o *Orchestrator) WebhookScheme(providerID string) (webhookauth.Verificatio
 	return o.webhookSchemes.Lookup(providerID)
 }
 
+// WebhookRetrySemantics returns the registered adapter's declared retry
+// behaviour (ADR 0097 §6.3/§20 AC6); see payments.Orchestrator's
+// identical method doc comment for the false/"MOCK default" contract.
+func (o *Orchestrator) WebhookRetrySemantics(providerID string) (webhookauth.WebhookRetrySemantics, bool) {
+	p, ok := o.Provider(providerID)
+	if !ok {
+		return webhookauth.WebhookRetrySemantics{}, false
+	}
+	src, ok := any(p).(webhookauth.RetrySemanticsSource)
+	if !ok {
+		return webhookauth.WebhookRetrySemantics{}, false
+	}
+	return src.WebhookRetrySemantics()
+}
+
 // WebhookDomain is the domain tag a kyc VerifiedCallback is sealed for;
 // ReceiveVerifiedCallback refuses a token sealed for any other domain.
 const WebhookDomain = "kyc"

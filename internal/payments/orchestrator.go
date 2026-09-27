@@ -74,6 +74,10 @@ type Orchestrator struct {
 // (webhookauth.MustSchemeSet) - a bad scheme declaration panics, so the
 // process refuses to start rather than serving with it.
 func NewOrchestrator(providers map[string]PaymentProvider, resolver WebhookCredentialResolver) *Orchestrator {
+	// ADR 0097 §6.3/§20 AC6: a non-Synthetic webhook adapter without a
+	// declared WebhookRetrySemantics refuses registration - fail closed,
+	// since admission (B1) cannot answer 429 vs 503 safely otherwise.
+	webhookauth.MustRequireRetrySemantics("payments", providers)
 	return &Orchestrator{
 		providers: providers, webhookCredentialResolver: resolver, MaxCascadeDepth: defaultMaxCascadeDepth,
 		webhookSchemes: mustPaymentsSchemeSet(providers),

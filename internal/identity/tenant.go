@@ -82,6 +82,41 @@ func GetTenantBySlug(ctx context.Context, pool *db.Pool, slug string) (Tenant, e
 	return t, nil
 }
 
+// ListActiveTenantSlugs returns up to limit active tenant slugs, ordered
+// by slug (ADR 0097 §4.2, PAYWH-RL-1). This is a platform-scope catalogue
+// read (WithoutTenant, `tenants_read USING (true))`, exactly like
+// GetTenantBySlug - it exists ONLY to feed httpserver's webhook tenant
+// directory, a non-authoritative limiter-key hint. It must never be used
+// for authorization, tenant resolution, or any decision other than "which
+// rate-limiter bucket does this slug get" (architect review AC3): it
+// returns bare slugs, never tenant id, status detail beyond "active", or
+// licensing model, and callers must not treat its result as proof a
+// tenant is reachable - GetTenantBySlug plus the active check plus
+// signature verification remain the sole authority.
+func ListActiveTenantSlugs(ctx context.Context, pool *db.Pool, limit int) ([]string, error) {
+	var slugs []string
+	err := pool.WithoutTenant(ctx, func(ctx context.Context, tx pgx.Tx) error {
+		rows, err := tx.Query(ctx,
+			`SELECT slug FROM tenants WHERE status = 'active' ORDER BY slug LIMIT $1`, limit)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var s string
+			if err := rows.Scan(&s); err != nil {
+				return err
+			}
+			slugs = append(slugs, s)
+		}
+		return rows.Err()
+	})
+	if err != nil {
+		return nil, fmt.Errorf("identity: list active tenant slugs: %w", err)
+	}
+	return slugs, nil
+}
+
 // GetTenantByID resolves a tenant within an already-open transaction -
 // unlike GetTenantBySlug (used before any tenant context exists, e.g.
 // staff-login resolution), this is for a caller that already holds a
