@@ -7,9 +7,6 @@ package payments
 
 import (
 	"context"
-	"os"
-	"strconv"
-	"strings"
 	"testing"
 	"time"
 
@@ -17,41 +14,34 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Diansalas/igaming-platform/internal/db"
+	"github.com/Diansalas/igaming-platform/internal/testsupport/scratchdb"
 )
 
-// findMigrationVersion derives a migration's version number from the real
-// on-disk migrations/ directory by filename suffix, rather than hard-coding
-// an integer literal - the same rationale as migration0101Version's own
-// doc comment (a sibling-branch numbering gap must never make a test
-// assert the wrong migration ran).
-func findMigrationVersion(t *testing.T, suffix string) int64 {
-	t.Helper()
-	dir := realMigrationsDir(t)
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, e := range entries {
-		if strings.HasSuffix(e.Name(), suffix) {
-			v, err := strconv.ParseInt(e.Name()[:4], 10, 64)
-			if err != nil {
-				t.Fatal(err)
-			}
-			return v
-		}
-	}
-	t.Fatalf("no migration file with suffix %q found under %s", suffix, dir)
-	return 0
-}
-
-func migration0105Version(t *testing.T) int64 {
-	t.Helper()
-	return findMigrationVersion(t, "_payment_kill_switch.up.sql")
-}
-
+// migration0105Scratch is named after the migration that introduced the
+// kill switch, but it deliberately migrates a fresh scratch database all
+// the way to HEAD (the real on-disk migrations/ directory), not just
+// through 0105. This is the fix for RV-PRH-I1 security re-verification 1's
+// N1 finding: migration 0106 `CREATE OR REPLACE`s the three kill-switch
+// trigger functions, so a scratch DB pinned at exactly 0105 exercises the
+// SUPERSEDED function bodies, not the live ones - the fix round's original
+// "K10/K11/K14/K19 killed" claim was measured against dead code as a
+// result. None of this file's tests are about migration 0105's own history
+// in isolation; they are behavioural tests of the kill switch as a whole,
+// so there is no reason to pin them below head. Any future migration that
+// further CREATE OR REPLACEs a guard function covered here must not
+// reintroduce a pin - see the "future migrations" rule this comment
+// documents.
 func migration0105Scratch(t *testing.T, prefix string) *db.Pool {
 	t.Helper()
-	pool, _, _ := migration0101ScratchApply(t, prefix, migration0105Version(t))
+	url := scratchdb.New(t, prefix)
+	pool, err := db.Connect(context.Background(), url, 10, 5_000_000_000)
+	if err != nil {
+		t.Fatalf("connect scratch: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	if _, err := pool.MigrateUp(context.Background(), realMigrationsDir(t)); err != nil {
+		t.Fatalf("migrate scratch up to latest: %v", err)
+	}
 	return pool
 }
 
@@ -628,6 +618,18 @@ func TestMigration0105_RequestIdentityColumnsAreImmutable(t *testing.T) {
 // app.platform_admin_principal_id resolves to a genuine platform-scoped
 // (tenant_id IS NULL) staff_users row, not merely accept any value present
 // in that GUC. A tenant-scoped staff id placed there must be refused.
+//
+// RV-PRH-I1 re-verification 1's N1 finding notes this test alone is a
+// narrow probe: staff_users' own RLS already hides a tenant-scoped staff
+// row from a platform-only (WithoutTenant) session for a reason unrelated
+// to payment_kill_switch_session()'s own WHERE clause, so this test does
+// not by itself demonstrate that the function's tenant_id IS NULL / status
+// = 'active' predicate is what is doing the work. See
+// TestMigration0105_N1_K19_RandomUUIDInPlatformGUCIsRefused immediately
+// below for the broader probe (a UUID matching no staff_users row at all)
+// that is unaffected by that RLS interaction and therefore kills the
+// mutation that drops the WHOLE principal check, not just the tenant_id
+// clause.
 func TestMigration0105_M6_K19_PlatformGUCRequiresGenuinePlatformStaff(t *testing.T) {
 	pool := migration0105Scratch(t, "m0105_k19")
 	f := seedM0105Fixture(t, pool)
@@ -641,6 +643,77 @@ func TestMigration0105_M6_K19_PlatformGUCRequiresGenuinePlatformStaff(t *testing
 	})
 	if err == nil {
 		t.Fatal("K19: a tenant-scoped staff id in app.platform_admin_principal_id was accepted as a platform actor")
+	}
+}
+
+// TestMigration0105_N1_K19_RandomUUIDInPlatformGUCIsRefused is the broader
+// K19 probe RV-PRH-I1 re-verification 1 required: a UUID that matches NO
+// staff_users row at all (not merely a tenant-scoped one) must still be
+// refused as a platform actor. Unlike the tenant-staff-id variant above,
+// no row exists for this id under ANY RLS visibility, in ANY session
+// scope, so a green result here can only mean the session resolver's
+// EXISTS(...) check itself is running - it cannot be explained away by an
+// RLS side effect. This directly kills "K19: drop the whole principal
+// predicate in payment_kill_switch_session()".
+func TestMigration0105_N1_K19_RandomUUIDInPlatformGUCIsRefused(t *testing.T) {
+	pool := migration0105Scratch(t, "m0105_n1_k19a")
+	f := seedM0105Fixture(t, pool)
+
+	randomActor := uuid.New()
+	err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `SELECT set_config('app.platform_admin_principal_id', $1, true)`, randomActor.String()); err != nil {
+			return err
+		}
+		_, err := insertKillSwitchRow(ctx, tx, f.tenantID, "*", "deposit", "x", true)
+		return err
+	})
+	if err == nil {
+		t.Fatal("K19: a random UUID matching no staff_users row was accepted as a platform actor")
+	}
+
+	// Positive control: a genuine platform staff row in the same GUC must
+	// still succeed, so this test cannot be satisfied by the resolver
+	// simply refusing everything.
+	err = pool.WithPlatformAdmin(context.Background(), f.platformPrincipal, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := insertKillSwitchRow(ctx, tx, f.tenantID, "*", "payout", "y", true)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("expected a genuine platform staff principal to still succeed: %v", err)
+	}
+}
+
+// TestMigration0105_N1_K19_SuspendedPlatformStaffUUIDIsRefused is the
+// "non-platform staff UUID" half of RV-PRH-I1 re-verification 1's N1
+// requirement: a UUID that DOES match a staff_users row, and one that IS
+// platform-scoped (tenant_id IS NULL), but is not active (suspended), must
+// still be refused. This is distinct from the L4 attempt-side suspension
+// test - it exercises payment_kill_switch_session() specifically, which is
+// also called from the release-request path, not just the attempt-claim
+// path.
+func TestMigration0105_N1_K19_SuspendedPlatformStaffUUIDIsRefused(t *testing.T) {
+	pool := migration0105Scratch(t, "m0105_n1_k19b")
+	f := seedM0105Fixture(t, pool)
+
+	suspendedPlatformStaff := uuid.New()
+	if err := pool.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx,
+			`INSERT INTO staff_users (id, tenant_id, email, password_hash, role, status) VALUES ($1, NULL, $2, 'x', 'platform_admin', 'suspended')`,
+			suspendedPlatformStaff, "m0105-n1-k19b-"+suspendedPlatformStaff.String()+"@test.example")
+		return err
+	}); err != nil {
+		t.Fatalf("seed suspended platform staff: %v", err)
+	}
+
+	err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `SELECT set_config('app.platform_admin_principal_id', $1, true)`, suspendedPlatformStaff.String()); err != nil {
+			return err
+		}
+		_, err := insertKillSwitchRow(ctx, tx, f.tenantID, "*", "deposit", "x", true)
+		return err
+	})
+	if err == nil {
+		t.Fatal("K19/L4: a suspended platform-scoped staff id in app.platform_admin_principal_id was accepted as a platform actor")
 	}
 }
 
