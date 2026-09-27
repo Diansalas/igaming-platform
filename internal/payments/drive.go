@@ -10,6 +10,7 @@ package payments
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -131,6 +132,46 @@ func (o *Orchestrator) driveCreatedAttempt(
 		manifest = provider.Capabilities().Manifest
 		claimToken = uuid.New()
 		if err := ClaimCreatedForSubmission(actx, tx, created.ID, capability.ProviderID, claimToken, leaseOwner, time.Now().Add(depositAttemptClaimLease)); err != nil {
+			// KS-DEP-T2-T3-1 (architect review rv-prh-i1-killswitch-phase2-
+			// architect.md): ClaimCreatedForSubmission's CAS predicate
+			// folds "kill switch engaged for this provider/operation" and
+			// every OTHER zero-row cause (a race on state='created', the
+			// sibling-succeeded guard, a provider_id mismatch) into the
+			// SAME ErrAttemptStateConflict - the in-statement predicate is
+			// what actually enforces the safety property atomically, so
+			// this cannot and must not try to distinguish causes by
+			// reparsing the CAS itself. KillSwitchEngaged is a SEPARATE,
+			// read-only, best-effort classification read (its own doc
+			// comment: "for orchestration code that needs to CHOOSE a
+			// terminal reason... never a substitute for the in-statement
+			// predicate") used ONLY to pick the terminal reason label - a
+			// TOCTOU between the CAS and this read can at worst mislabel
+			// the decline reason, never bypass the claim predicate itself.
+			if !errors.Is(err, ErrAttemptStateConflict) {
+				return err
+			}
+			engaged, kerr := KillSwitchEngaged(actx, tx, intent.TenantID, capability.ProviderID, AttemptOperationDeposit)
+			if kerr != nil {
+				return kerr
+			}
+			if !engaged {
+				// A genuine, unrelated CAS conflict (a race, or the
+				// sibling-succeeded guard) - preserve the pre-existing
+				// behaviour: surface it as an error, never silently
+				// reinterpret it as a kill-switch decline.
+				return err
+			}
+			if err := audit.Record(actx, tx, audit.Entry{
+				TenantID: intent.TenantID, ActorType: audit.ActorSystem, Action: "payments.cascade_rejected_kill_switch",
+				TargetType: "payment_attempt", TargetID: created.ID.String(), Outcome: audit.OutcomeDenied,
+				Metadata: map[string]any{"provider_id": capability.ProviderID, "reason_code": "kill_switch", "deposit_intent_id": intent.ID.String()},
+			}); err != nil {
+				return err
+			}
+			if err := RejectCreated(actx, tx, created.ID, EvidencePlatform, "kill_switch"); err != nil {
+				return err
+			}
+			intent, err = o.finalizeDeclined(actx, tx, intent, &capability.ProviderID, nil, "kill_switch")
 			return err
 		}
 		claimed = true

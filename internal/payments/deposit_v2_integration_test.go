@@ -246,6 +246,95 @@ func TestInitiateDepositAttempt_KillSwitchEngaged_DeclinesCleanly_T3(t *testing.
 	}
 }
 
+// TestDriveCreatedAttemptCascade_KillSwitchOnFallbackProvider_DeclinesCleanly_T3
+// is KS-DEP-T2-T3-1 (architect review rv-prh-i1-killswitch-phase2-
+// architect.md, §"New finding"): a kill switch scoped to the FALLBACK
+// provider only (not the original, cascadable-declining one) makes the
+// cascade's own T2 claim (ClaimCreatedForSubmission, driven from
+// driveCreatedAttempt) match zero rows. Before this fix, that surfaced as
+// a plain Go error from InitiateDepositAttempt - the player's synchronous
+// request failed outright, the cascade attempt was stuck in 'created' and
+// the intent stuck 'pending' forever (no sweeper is wired in
+// cmd/platform-api to ever pick it back up). This must instead be a
+// clean, terminal T3 decline: no error, the cascade attempt rejected with
+// reason "kill_switch", the intent finalized declined, and no provider
+// call ever made against the switched-off fallback.
+func TestDriveCreatedAttemptCascade_KillSwitchOnFallbackProvider_DeclinesCleanly_T3(t *testing.T) {
+	pool := depositV2ScratchPool(t)
+	f := seedOrchFixture(t, pool)
+	decliningInner := NewMockProvider("mock-ks-t2t3-a", "EUR")
+	declining := newSpyProvider(decliningInner)
+	fallbackInner := NewMockProvider("mock-ks-t2t3-b", "EUR")
+	fallbackInner.AcceptAllAmounts = true
+	fallback := newSpyProvider(fallbackInner)
+	registerCapability(t, pool, f, declining, 10)
+	registerCapability(t, pool, f, fallback, 20)
+	orch := NewOrchestrator(
+		map[string]PaymentProvider{"mock-ks-t2t3-a": declining, "mock-ks-t2t3-b": fallback},
+		MultiWebhookCredentialResolver{"mock-ks-t2t3-a": NewMockWebhookCredentials(decliningInner), "mock-ks-t2t3-b": NewMockWebhookCredentials(fallbackInner)},
+	)
+
+	// Engage the switch on the FALLBACK provider only - the original,
+	// cascadably-declining provider is untouched, so routing still
+	// proceeds past it into the cascade exactly as it would without any
+	// switch engaged.
+	principal := depositKillSwitchStaffPrincipal(t, pool, f.tenantID)
+	if err := pool.WithPrincipalScope(context.Background(), f.tenantID, principal, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := EngageKillSwitch(ctx, tx, f.tenantID, "mock-ks-t2t3-b", KillSwitchOperationDeposit, "ks-dep-t2-t3-1-test")
+		return err
+	}); err != nil {
+		t.Fatalf("engage kill switch: %v", err)
+	}
+
+	res, err := orch.InitiateDepositAttempt(context.Background(), pool, AllowAllDepositKYCGate{}, MockCredentialResolver{}, InitiateDepositParams{
+		Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
+		AssetCode: "EUR", Amount: MockAmountProviderDeclineCascade, PaymentMethod: "card", IdempotencyKey: "ks-t2-t3-1",
+	})
+	if err != nil {
+		t.Fatalf("expected a clean decline, not an error: %v", err)
+	}
+	if res.Intent.Status != DepositIntentDeclined {
+		t.Fatalf("expected intent status declined (T3), got %s", res.Intent.Status)
+	}
+	if declining.DepositCallCount() != 1 {
+		t.Fatalf("expected exactly 1 Deposit call to the original (cascadably-declining) provider, got %d", declining.DepositCallCount())
+	}
+	if fallback.DepositCallCount() != 0 {
+		t.Fatalf("expected 0 Deposit calls to the switched-off fallback provider, got %d", fallback.DepositCallCount())
+	}
+
+	// The cascade child (attempt_no=2) must be terminally rejected, never
+	// stuck in 'created'.
+	var cascadeState, terminalReason string
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx,
+			`SELECT state, coalesce(terminal_reason, '') FROM payment_attempts WHERE deposit_intent_id = $1 AND attempt_no = 2`,
+			res.Intent.ID,
+		).Scan(&cascadeState, &terminalReason)
+	}); err != nil {
+		t.Fatalf("read cascade attempt: %v", err)
+	}
+	if cascadeState != string(AttemptRejected) {
+		t.Fatalf("expected the cascade attempt to be rejected (never stuck in created), got %s", cascadeState)
+	}
+	if terminalReason != "kill_switch" {
+		t.Fatalf("expected terminal_reason = kill_switch, got %q", terminalReason)
+	}
+
+	// Audited, with the provider whose switch actually fired.
+	var auditProviderID string
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx,
+			`SELECT metadata->>'provider_id' FROM audit_log WHERE action = 'payments.cascade_rejected_kill_switch' AND target_type = 'payment_attempt'`,
+		).Scan(&auditProviderID)
+	}); err != nil {
+		t.Fatalf("read cascade kill-switch audit: %v", err)
+	}
+	if auditProviderID != "mock-ks-t2t3-b" {
+		t.Fatalf("expected the cascade kill-switch audit to name the fallback provider, got %q", auditProviderID)
+	}
+}
+
 // mismatchedDomainResolver deliberately returns a credential whose Domain
 // never matches what the gate expects, so the gate's own binding check
 // (step 4, S95-C8(b)) refuses the call with ErrorClassNotSent - exercising
