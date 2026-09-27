@@ -151,3 +151,31 @@ environment with `APP_ENV=production`:
    itself partial evidence, but verify the deployment template directly
    too (never assume the fail-closed check will always catch it before
    `APP_ENV` itself is ever fixed to be correct).
+7. **PROV-OUTBOUND-CRED-1 payments non-production behaviour change**
+   (RV-PRH-I1 kill-switch phase 2 code review C4, before this branch:
+   `paymentsOutboundCredentials()` always returned the MOCK outbound
+   resolver, since the only registered payments adapter was always
+   `mock-payments`). It now returns the MOCK resolver only when
+   `TestSupportEndpointsEnabled` is also true (the same kind-split
+   pattern casino and KYC already use). This is only reachable in a
+   non-production deployment (`TEST_SUPPORT_ENDPOINTS_ENABLED=false`,
+   `APP_ENV!=production`, e.g. a staging-like environment with the flag
+   turned off) where a synthetic `mock-payments` adapter is still the
+   only one registered:
+   - If the real `providercred` subsystem is not configured either,
+     deposits/withdrawal submit/poll all return `503` ("not enabled") -
+     no behaviour change from before.
+   - If the real subsystem IS configured, every payments call against
+     `mock-payments` now becomes `NotSent` (T5) instead of succeeding:
+     deposit intents/attempts commit and then revert to
+     `created`/`pending`, and a payout claim commits
+     `approved`→`submitted` and parks in `created`. `cmd/platform-api`
+     constructs no `Sweeper` today, so nothing currently retries these
+     rows automatically.
+   - No currently-deployed environment is affected: staging sets
+     `test_support_endpoints_enabled = true`
+     (`deploy/aws/environments/staging`), and production never wires the
+     synthetic adapter kind-split's MOCK half at all
+     (`MOCK-ADAPTER-PROD-1`). Record this explicitly if a future
+     environment sets `TEST_SUPPORT_ENDPOINTS_ENABLED=false` while still
+     relying on the MOCK payments adapter for anything.

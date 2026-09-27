@@ -348,7 +348,7 @@ func (s *Sweeper) processViaQueryStatus(ctx context.Context, tenantID uuid.UUID,
 	// comment on ReadOnly) - everything else the gate does (txscope
 	// refusal, credential binding, deadline, panic recovery, redaction)
 	// still applies identically.
-	gr := callProvider(ctx, s.CredResolver, in, func(callCtx context.Context, cc CallContext) (StatusResult, ErrorClass, error) {
+	gr := callProvider(ctx, s.Pool, s.CredResolver, in, func(callCtx context.Context, cc CallContext) (StatusResult, ErrorClass, error) {
 		res, err := provider.QueryStatus(callCtx, *attempt.ProviderReference)
 		if err != nil {
 			return res, ErrorClassAmbiguous, err

@@ -2,25 +2,28 @@
 // ADR 0095 §9 (CallContext, the closed ErrorClass set, and the
 // operation manifest), plus the provider-call gate (§3.2, gate.go).
 //
-// PROV-OUTBOUND-CRED-1 STATUS (S95-C8, INV-IO-11): OutboundCredential and
-// OutboundCredentialResolver here are a SEAM, not the finished
-// credential-resolution subsystem. ADR 0095 §11 requires the credential
-// to be resolved per call, outside any transaction, never held in an
-// adapter, and refused while a financial lock is held - none of that
-// storage/rotation/derivation machinery is built yet (it lands in a
-// later PRH-I1 step). What IS load-bearing now, and tested now: the gate
-// (gate.go) calls Resolve() OUTSIDE any transaction (txscope.Held
-// enforced), and independently re-checks the binding
-// (Credential.TenantID/ProviderID/Domain) before ever calling an
-// adapter - so wiring a real resolver in later than this seam is a
-// drop-in replacement, not a redesign.
+// PROV-OUTBOUND-CRED-1 (phase 2 orchestrator wiring): OutboundCredential
+// resolution now goes through the REAL internal/providercred subsystem,
+// mirroring casino/KYC's identical wiring - a payments-domain
+// providercred.OutboundResolver for a real adapter, MockOutboundResolver
+// (outbound_resolver.go) for a `MOCK`/synthetic one, chosen per adapter
+// kind by OutboundKindSplitResolver (never by "is any mock wired anywhere
+// in this process"). The gate (gate.go) still calls Resolve() OUTSIDE any
+// transaction (txscope.Held enforced) and independently re-checks the
+// binding (Credential.TenantID/ProviderID/Domain) before ever calling an
+// adapter. The REAL credential STORE itself (secretstore) remains MOCK/
+// sandbox in this deployment - no real vendor credentials, no IRSA/KMS/
+// proxy infrastructure - only the resolution PATH is now the real one.
 package payments
 
 import (
+	"context"
 	"encoding/json"
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/Diansalas/igaming-platform/internal/providercred"
 )
 
 // ErrorClass is ADR 0095 §8's closed outcome set. Every outbound call is
@@ -56,46 +59,20 @@ const (
 	ErrorClassSucceeded ErrorClass = "succeeded"
 )
 
-// OutboundCredential is the per-call, resolved-outside-any-tx credential
-// handle ADR 0095 §9.1/§11 describes. SEE THE PACKAGE-LEVEL NOTE ABOVE:
-// this is a seam. Secret material never appears on this type - only the
-// redacted handle/key/fingerprint a real resolver would also expose.
-type OutboundCredential struct {
-	TenantID   uuid.UUID
-	ProviderID string
-	// Domain is the caller's own domain name ("payments", "casino" or
-	// "kyc" per §3.2 step 4) - never inferred from ProviderID.
-	Domain      string
-	HandleID    string
-	KeyID       string
-	Fingerprint string
-}
-
-// String/GoString/MarshalJSON never render anything beyond the already-
-// redacted fields (S95-C8(c)) - there is no secret field to redact
-// FROM on this seam type, but the contract is written the same way a
-// real resolver's type must satisfy, so a future swap-in cannot
-// regress it.
-func (c OutboundCredential) String() string {
-	return "OutboundCredential{provider=" + c.ProviderID + " handle=" + c.HandleID + " key=" + c.KeyID + " fp=" + c.Fingerprint + "}"
-}
-func (c OutboundCredential) GoString() string { return c.String() }
-func (c OutboundCredential) MarshalJSON() ([]byte, error) {
-	return json.Marshal(struct {
-		ProviderID  string `json:"provider_id"`
-		HandleID    string `json:"handle_id"`
-		KeyID       string `json:"key_id"`
-		Fingerprint string `json:"fingerprint"`
-	}{c.ProviderID, c.HandleID, c.KeyID, c.Fingerprint})
-}
-
 // OutboundCredentialResolver resolves the credential for one outbound
-// call. A real implementation (PROV-OUTBOUND-CRED-1, a later PRH-I1
-// step) must resolve outside any transaction and never cache the secret
-// itself across calls (INV-IO-11); MockCredentialResolver below is the
-// synthetic stand-in the MOCK adapter path uses today.
+// call - the payments package's own copy of casino.OutboundCredentialResolver
+// / kyc.OutboundCredentialResolver's identical contract (PROV-OUTBOUND-
+// CRED-1, phase 2 orchestrator wiring). pool is threaded through from the
+// caller's own *db.Pool (never held across the provider call itself - the
+// real providercred.OutboundResolver's own short, committed-before-return
+// tenant-scoped transaction is the only DB access this makes). A real
+// resolver (providercred.Subsystem.Outbound("payments")) and
+// MockOutboundResolver below (the MOCK/sandbox stand-in) are both chosen
+// per adapter kind by OutboundKindSplitResolver, never by "is any mock
+// wired anywhere in this process" - mirrors casino/KYC's identical
+// resolver-selection rule exactly.
 type OutboundCredentialResolver interface {
-	Resolve(ctx CallContext, domain string) (OutboundCredential, error)
+	Resolve(ctx context.Context, pool providercred.TenantTxRunner, tenantID uuid.UUID, providerID string) (providercred.OutboundCredential, error)
 }
 
 // MockCredentialResolver is a `MOCK` OutboundCredentialResolver: it
@@ -114,22 +91,24 @@ type MockCredentialResolver struct{}
 // marker, mirroring casino.MockOutboundResolver's identical declaration.
 func (MockCredentialResolver) SyntheticComponent() {}
 
-func (MockCredentialResolver) Resolve(cc CallContext, domain string) (OutboundCredential, error) {
-	return OutboundCredential{
-		TenantID: cc.TenantID, ProviderID: cc.ProviderID, Domain: domain,
-		HandleID: "mock-handle:" + cc.ProviderID, KeyID: "mock-key:" + cc.ProviderID,
-		Fingerprint: "mockfp",
-	}, nil
+// Resolve ignores pool entirely (never any real I/O) - it is accepted
+// only to satisfy OutboundCredentialResolver's shape, exactly like
+// casino.MockOutboundResolver.Resolve's identical signature.
+func (MockCredentialResolver) Resolve(_ context.Context, _ providercred.TenantTxRunner, tenantID uuid.UUID, providerID string) (providercred.OutboundCredential, error) {
+	return providercred.NewMockOutboundCredential(tenantID, "payments", providerID), nil
 }
 
 // CallContext is ADR 0095 §9.1: every outbound request type embeds one.
 // TenantID and ProviderID MUST come from the committed attempt row the
 // caller just loaded (never a payload, never a cache, never an earlier
-// attempt - S95-C9(i)).
+// attempt - S95-C9(i)). Credential is the REAL providercred.OutboundCredential
+// type (not a package-local seam type) - its own String/GoString/
+// MarshalJSON already redact the secret (S95-C8(c)), so this type's own
+// render methods need no special handling for it.
 type CallContext struct {
 	TenantID       uuid.UUID
 	ProviderID     string
-	Credential     OutboundCredential
+	Credential     providercred.OutboundCredential
 	IdempotencyKey string
 	Deadline       time.Time
 }
@@ -144,11 +123,11 @@ func (c CallContext) String() string {
 func (c CallContext) GoString() string { return c.String() }
 func (c CallContext) MarshalJSON() ([]byte, error) {
 	return json.Marshal(struct {
-		TenantID       uuid.UUID          `json:"tenant_id"`
-		ProviderID     string             `json:"provider_id"`
-		Credential     OutboundCredential `json:"credential"`
-		IdempotencyKey string             `json:"idempotency_key,omitempty"`
-		Deadline       time.Time          `json:"deadline"`
+		TenantID       uuid.UUID                       `json:"tenant_id"`
+		ProviderID     string                          `json:"provider_id"`
+		Credential     providercred.OutboundCredential `json:"credential"`
+		IdempotencyKey string                          `json:"idempotency_key,omitempty"`
+		Deadline       time.Time                       `json:"deadline"`
 	}{c.TenantID, c.ProviderID, c.Credential, c.IdempotencyKey, c.Deadline})
 }
 

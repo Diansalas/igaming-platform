@@ -74,7 +74,7 @@ func TestSweeper_N1_AmbiguousWithReference_ConvergesByPollZeroResends(t *testing
 	if err != nil {
 		t.Fatalf("ClaimForDispatch: %v", err)
 	}
-	gr := DispatchWithdraw(context.Background(), MockCredentialResolver{}, provider, claim.Attempt)
+	gr := DispatchWithdraw(context.Background(), nil, MockCredentialResolver{}, provider, claim.Attempt)
 	if err := ApplyPayoutResult(context.Background(), pool, f.tenantID, wr.ID, claim.Attempt, gr, EvidenceSync); err != nil {
 		t.Fatalf("ApplyPayoutResult: %v", err)
 	}
@@ -315,7 +315,7 @@ func TestPollPayoutStatus_R2_LeaseStillLive_RefusesInFlight(t *testing.T) {
 
 	// The ORIGINAL phase B/C then completes normally - proving the refused
 	// poll above didn't corrupt anything.
-	gr := DispatchWithdraw(context.Background(), MockCredentialResolver{}, provider, claim.Attempt)
+	gr := DispatchWithdraw(context.Background(), nil, MockCredentialResolver{}, provider, claim.Attempt)
 	if err := ApplyPayoutResult(context.Background(), pool, f.tenantID, wr.ID, claim.Attempt, gr, EvidenceSync); err != nil {
 		t.Fatalf("ApplyPayoutResult after the refused /resolve poll: %v", err)
 	}
@@ -368,7 +368,7 @@ func TestPayoutDispatch_R3_LockOrderConsistentAcrossConcurrentEvidence_NoDeadloc
 	var applyErr error
 	go func() {
 		defer close(applyDone)
-		gr := DispatchWithdraw(context.Background(), MockCredentialResolver{}, provider, claim.Attempt)
+		gr := DispatchWithdraw(context.Background(), nil, MockCredentialResolver{}, provider, claim.Attempt)
 		applyErr = ApplyPayoutResult(context.Background(), pool, f.tenantID, wr.ID, claim.Attempt, gr, EvidenceSync)
 	}()
 
@@ -419,7 +419,7 @@ func TestPayoutDispatch_CT1_NotSentOnResendRoutesToAmbiguousNotCreated(t *testin
 	if err != nil {
 		t.Fatalf("ClaimForDispatch: %v", err)
 	}
-	gr := DispatchWithdraw(context.Background(), MockCredentialResolver{}, provider, claim.Attempt)
+	gr := DispatchWithdraw(context.Background(), nil, MockCredentialResolver{}, provider, claim.Attempt)
 	if err := ApplyPayoutResult(context.Background(), pool, f.tenantID, wr.ID, claim.Attempt, gr, EvidenceSync); err != nil {
 		t.Fatalf("ApplyPayoutResult: %v", err)
 	}
@@ -501,7 +501,7 @@ func TestPollPayoutStatus_ProviderReferenceMismatch_Disputes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ClaimForDispatch: %v", err)
 	}
-	gr := DispatchWithdraw(context.Background(), MockCredentialResolver{}, provider, claim.Attempt)
+	gr := DispatchWithdraw(context.Background(), nil, MockCredentialResolver{}, provider, claim.Attempt)
 	if err := ApplyPayoutResult(context.Background(), pool, f.tenantID, wr.ID, claim.Attempt, gr, EvidenceSync); err != nil {
 		t.Fatalf("ApplyPayoutResult: %v", err)
 	}
@@ -619,7 +619,7 @@ func TestPayoutDispatch_M10_SuccessAfterDecline_DisputesT14(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ClaimForDispatch: %v", err)
 	}
-	gr := DispatchWithdraw(context.Background(), MockCredentialResolver{}, provider, claim.Attempt)
+	gr := DispatchWithdraw(context.Background(), nil, MockCredentialResolver{}, provider, claim.Attempt)
 	if err := ApplyPayoutResult(context.Background(), pool, f.tenantID, wr.ID, claim.Attempt, gr, EvidenceSync); err != nil {
 		t.Fatalf("ApplyPayoutResult (decline): %v", err)
 	}
@@ -693,7 +693,7 @@ func TestPollPayoutStatus_M9_DefiniteMismatchAfterTerminal_StillDisputes(t *test
 	if err != nil {
 		t.Fatalf("ClaimForDispatch: %v", err)
 	}
-	gr := DispatchWithdraw(context.Background(), MockCredentialResolver{}, provider, claim.Attempt)
+	gr := DispatchWithdraw(context.Background(), nil, MockCredentialResolver{}, provider, claim.Attempt)
 	if err := ApplyPayoutResult(context.Background(), pool, f.tenantID, wr.ID, claim.Attempt, gr, EvidenceSync); err != nil {
 		t.Fatalf("ApplyPayoutResult (decline): %v", err)
 	}
@@ -769,7 +769,7 @@ func TestPayoutDispatch_M11_RawVendorDeclineReasonNeverPersisted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ClaimForDispatch: %v", err)
 	}
-	gr := DispatchWithdraw(context.Background(), MockCredentialResolver{}, provider, claim.Attempt)
+	gr := DispatchWithdraw(context.Background(), nil, MockCredentialResolver{}, provider, claim.Attempt)
 	if err := ApplyPayoutResult(context.Background(), pool, f.tenantID, wr.ID, claim.Attempt, gr, EvidenceSync); err != nil {
 		t.Fatalf("ApplyPayoutResult: %v", err)
 	}

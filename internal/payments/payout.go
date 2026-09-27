@@ -25,6 +25,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/google/uuid"
@@ -34,6 +35,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/identity"
 	"github.com/Diansalas/igaming-platform/internal/kyc"
+	"github.com/Diansalas/igaming-platform/internal/providercred"
 	"github.com/Diansalas/igaming-platform/internal/providerref"
 	"github.com/Diansalas/igaming-platform/internal/withdrawal"
 )
@@ -153,6 +155,49 @@ var ErrPayoutKYCUnavailable = errors.New("payments: payout kyc enforcement evalu
 // the switch is released - the CAS predicate re-evaluates it fresh on
 // every attempt, there is nothing to reset.
 var ErrPayoutKillSwitchEngaged = errors.New("payments: payout claim refused, kill switch engaged")
+
+// recordPayoutKillSwitchHoldAudit labels a payout claim refused by an
+// engaged kill switch as a "hold" - a Denied audit row, so an operator can
+// see WHY a request stayed `approved` instead of only inferring it from
+// the absence of a payment_attempts row. Runs in its OWN transaction,
+// separate from ClaimForDispatch's rolled-back attempt (the whole claim
+// transaction is undone on ErrPayoutKillSwitchEngaged - see that error's
+// own doc comment - so nothing inside it could have durably recorded
+// this). Mirrors recordKillSwitchRefusalAudit's identical pattern
+// (internal/httpserver/payments_kill_switch_handlers.go, RV-PRH-I1
+// security review L5): a refusal committed independently of the failed
+// attempt. Best-effort: a failure to write this label is swallowed, never
+// surfaced as a different error than the kill-switch refusal itself - the
+// caller (httpserver) already logs the refusal on its own
+// (submit_withdrawal_kill_switch_engaged), and the in-statement predicate,
+// not this audit row, is what actually blocks the call.
+func recordPayoutKillSwitchHoldAudit(ctx context.Context, pool *db.Pool, tenantID, requestID uuid.UUID, providerID string, actor SubmitActor) {
+	// C3 (RV-PRH-I1 kill-switch phase 2 code review): this repeats the
+	// exact RV2-L1 defect internal/httpserver's own denied-audit writers
+	// were just fixed for - writing under the caller's own (cancellable)
+	// request context would let a client disconnect silently drop this
+	// label. Detached and bounded, exactly like
+	// internal/httpserver's deniedAuditCtx.
+	dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), payoutPhaseCTimeout)
+	defer cancel()
+	if err := pool.WithTenant(dctx, tenantID, func(actx context.Context, tx pgx.Tx) error {
+		return audit.Record(actx, tx, audit.Entry{
+			TenantID: tenantID, ActorType: audit.ActorStaff, ActorID: actor.StaffID,
+			Action: "withdrawal.submit.http", TargetType: "withdrawal_request", TargetID: requestID.String(),
+			Outcome: audit.OutcomeDenied, IPAddress: actor.IPAddress, UserAgent: actor.UserAgent, RequestID: actor.RequestID,
+			Metadata: map[string]any{"denied_by_kill_switch": true, "provider_id": providerID, "reason_code": "kill_switch"},
+		})
+	}); err != nil {
+		// Never surfaced as a different error than the kill-switch
+		// refusal itself (ClaimForDispatch already returns
+		// ErrPayoutKillSwitchEngaged regardless of this outcome) - logged
+		// so the label's own durability failure is at least visible,
+		// mirroring payments_kill_switch_denied_audit_failed's identical
+		// convention in internal/httpserver.
+		slog.Default().Error("payments_payout_kill_switch_hold_audit_failed",
+			"tenant_id", tenantID.String(), "withdrawal_request_id", requestID.String(), "provider_id", providerID, "error", err.Error())
+	}
+}
 
 // SubmitActor is the staff identity/request context ClaimForDispatch must
 // have to record the "which staff member triggered this payout" audit
@@ -320,6 +365,9 @@ func (o *Orchestrator) ClaimForDispatch(ctx context.Context, pool *db.Pool, kycG
 		return nil
 	})
 	if err != nil {
+		if errors.Is(err, ErrPayoutKillSwitchEngaged) {
+			recordPayoutKillSwitchHoldAudit(ctx, pool, tenantID, requestID, routedCapability.ProviderID, actor)
+		}
 		return ClaimResult{}, err
 	}
 	return result, nil
@@ -374,8 +422,10 @@ func payoutAdapterCall(provider PaymentProvider, attempt PaymentAttempt) Adapter
 // other outbound call in this package uses. attempt MUST have been loaded
 // AFTER ClaimForDispatch's own commit (state='submitting', a non-nil
 // ClaimToken/ProviderID) - callProvider's own step 2 (INV-IO-2) refuses
-// otherwise.
-func DispatchWithdraw(ctx context.Context, credResolver OutboundCredentialResolver, provider PaymentProvider, attempt PaymentAttempt) GateResult[WithdrawResult] {
+// otherwise. pool (PROV-OUTBOUND-CRED-1, phase 2 orchestrator wiring) is
+// threaded through to the credential resolver only - never used for
+// anything else here, and never held across the call itself.
+func DispatchWithdraw(ctx context.Context, pool providercred.TenantTxRunner, credResolver OutboundCredentialResolver, provider PaymentProvider, attempt PaymentAttempt) GateResult[WithdrawResult] {
 	if attempt.ProviderID == nil || attempt.ClaimToken == nil {
 		return GateResult[WithdrawResult]{Class: ErrorClassNotSent,
 			Err: fmt.Errorf("%w: payout attempt %s has no committed provider_id/claim_token", ErrProviderCallRefused, attempt.ID)}
@@ -394,7 +444,7 @@ func DispatchWithdraw(ctx context.Context, credResolver OutboundCredentialResolv
 		AttemptState: attempt.State, ClaimToken: *attempt.ClaimToken, ExpectedClaim: *attempt.ClaimToken,
 		IdempotencyKey: attempt.ExternalIdempotencyKey, Domain: "payments", Manifest: manifest,
 	}
-	return callProvider(dispatchCtx, credResolver, in, payoutAdapterCall(provider, attempt))
+	return callProvider(dispatchCtx, pool, credResolver, in, payoutAdapterCall(provider, attempt))
 }
 
 // ApplyPayoutResult is phase C: applies DispatchWithdraw's GateResult under
@@ -1185,6 +1235,6 @@ func PollPayoutStatus(ctx context.Context, pool *db.Pool, orch *Orchestrator, cr
 		AttemptState: attempt.State, ClaimToken: uuid.Nil, ExpectedClaim: uuid.Nil, ReadOnly: true,
 		Domain: "payments", Manifest: manifest,
 	}
-	gr := callProvider(dispatchCtx, credResolver, in, payoutStatusQuery(provider, *ref))
+	gr := callProvider(dispatchCtx, pool, credResolver, in, payoutStatusQuery(provider, *ref))
 	return applyPayoutStatusEvidence(ctx, pool, tenantID, requestID, attempt, gr, EvidenceQueryStatus, nextPoll, actor)
 }

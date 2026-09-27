@@ -355,7 +355,7 @@ func (s *Sweeper) dispatchPayoutAttempt(ctx context.Context, tenantID uuid.UUID,
 	if !ok {
 		return fmt.Errorf("%w: %q", ErrSweeperProviderNotRegistered, *attempt.ProviderID)
 	}
-	gr := DispatchWithdraw(ctx, s.CredResolver, provider, attempt)
+	gr := DispatchWithdraw(ctx, s.Pool, s.CredResolver, provider, attempt)
 	return ApplyPayoutResult(ctx, s.Pool, tenantID, *attempt.WithdrawalRequestID, attempt, gr, EvidenceSync)
 }
 

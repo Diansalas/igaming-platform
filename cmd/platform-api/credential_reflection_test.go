@@ -36,6 +36,17 @@ func TestCredentialReflection_ProductionWiringHoldsNoCredential(t *testing.T) {
 		"KYCWebhookResolver":      b.KYCWebhookResolver,
 		"KYCOutboundResolver":     b.KYCOutboundResolver,
 		"PaymentsStmt":            b.PaymentsStmt,
+		// PaymentsOutboundResolver (PROV-OUTBOUND-CRED-1, phase 2
+		// orchestrator wiring) - payments' own OUTBOUND-credential MOCK,
+		// CasinoOutboundResolver's twin.
+		"PaymentsOutboundResolver": b.PaymentsOutboundResolver,
+		// The REAL kind-split resolver InitiateDepositAttempt/
+		// DispatchWithdraw actually receive - not merely the bundle field
+		// above, so a future change to paymentsOutboundCredentials()'s own
+		// composition (e.g. wrapping the real b.Credentials.Outbound
+		// resolver in something that accidentally captures a secret) is
+		// scanned too, not just the MOCK half.
+		"paymentsOutboundCredentials()": b.paymentsOutboundCredentials(),
 	}
 	for name, v := range targets {
 		if v == nil {
