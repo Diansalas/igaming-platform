@@ -258,3 +258,66 @@ truncate to payment_attempts/payment_provider_events and lets the deny
 trigger on deposit_intents itself fire and refuse the whole statement -
 verified directly via psql before editing the test. The assertion (the
 trigger's own append-only message) is unchanged and unweakened.
+
+--- PRH-payments-callback-cutover (2026-09-27): deposit_reversal receipt path + §6.2 HTTP contract ---
+
+Mutation A: resolve the reversal's original attempt by ev.ProviderReference
+(the reversal's OWN reference) instead of ev.OriginalProviderReference
+(receipt.go applyReversalReceiptEvidence, line with
+GetAttemptByProviderReference).
+  go test -tags=integration -count=1 -run TestPaymentWebhookHandler_DepositReversalAlreadyReversed_Maps409 ./internal/httpserver/...
+Kill: FAILS as expected -
+  payrev1_webhook_integration_test.go:77: expected 200 for the first
+  (genuine) reversal, got 500
+(TestAdmission_T6f_PaymentsReversal_BeforeDeposit_ThenDepositArrives does
+NOT catch this mutation: its reversal arrives before any deposit ever
+posts, so both the mutated and correct reference resolve to "not found"
+and fall into the same tombstone branch by coincidence - the mutation is
+only observable once a real, already-posted deposit exists to reverse.
+Recorded so a future reviewer does not rely on T6f alone for this
+invariant.)
+Restored: receipt.go byte-identical to its post-fix state (verified via
+`go build` succeeding and the two tests above passing again).
+
+Mutation B: disable the reversal receipt's Outcome normalization
+(`ev.Outcome = OutcomeSucceeded` in applyReversalReceiptEvidence).
+  go test -tags=integration -count=1 -run 'TestReceiveCallback_ReversalAmountCannotExceedOriginal|TestReceiveCallback_SecondReversalOfSameDepositRejected|TestReceiveCallback_ReversalOfNeverPostedDepositWritesTombstone' ./internal/payments/...
+Kill: reproduces the exact defect this normalization fixes -
+  payments: insert receipt: ERROR: new row for relation
+  "payment_provider_events" violates check constraint
+  "payment_provider_events_check1" (SQLSTATE 23514)
+GAP (disclosed, not hidden): the internal/httpserver main-lane suite does
+NOT catch this mutation, because every reversal payload built by the
+current httpserver test helpers uses Outcome=succeeded on the wire
+already (the CHECK this normalization guards against is only reached when
+a caller reuses Outcome=declined as a chargeback-reason carrier - see
+receipt.go's own doc comment on this line). The kill test above is one of
+the ~13 internal/payments files this round's implementation record (ADR
+0095 §27.10) lists as NOT YET migrated off the legacy InitiateDeposit
+fixture, so it is currently red for an UNRELATED reason (no
+payment_attempts row for its deposit fixture) - reverting the mutation
+under a fixture PATCHED with InsertSubmittingAttempt+MarkAccepted (the
+proven pattern from resolution_isolation_integration_test.go) reproduces
+the kill above; the full file was not migrated this round. Recorded as a
+gap for the next pass: either add an httpserver-level reversal test that
+exercises Outcome=declined on the wire, or prioritize migrating
+orchestrator_integration_test.go first (it is the most direct oracle for
+this normalization).
+Restored: receipt.go byte-identical to its post-fix state (verified via
+`go build` succeeding).
+
+Full-suite confirmation after this round's fix (private scratch database,
+migrations 1-104): internal/httpserver and internal/reconciliation (incl.
+internal/reconciliation/statement) pass under
+`-race -tags=integration -count=1`, excluding the pre-existing timing-lane
+skip list (TestStoreOutage_*, TestResolutionIsolation_NormalOperation/
+OneTenantStoreOutage/MultipleTenantsOutage/SimultaneousOnset_Bounded/
+ConnectionExhaustion/FinancialDuringOutage - already excluded from the
+main lane by ci-local.sh) and TestAdmission_T6c_CasinoBetLimitedThenRollbackReorder/
+TestAdmission_T6d_CasinoWinBeforeBet (casino-domain, already red on the
+merged branch per RV-PRH-I4, unrelated to this round's payments diff).
+internal/payments' receipt-path-migrated tests (receipt_integration_test.go,
+sweeper_integration_test.go, deposit_v2_integration_test.go,
+kyc_gate_cutover_integration_test.go) pass under `-race`. The ~13
+internal/payments files still built on the legacy InitiateDeposit fixture
+are NOT green this round - see ADR 0095 §27.10's precise remaining list.
