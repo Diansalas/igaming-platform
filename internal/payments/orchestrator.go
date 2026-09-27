@@ -1075,14 +1075,36 @@ func (o *Orchestrator) receiveCallbackViaReceiptPath(ctx context.Context, tx pgx
 			result.DepositIntentID, result.Status, result.LedgerTransactionID = intent.ID, intent.Status, intent.LedgerTransactionID
 		}
 	case CallbackEventDepositReversal:
+		// Best-effort enrichment only (see this function's doc comment).
+		// Which row to look up depends on which branch applyReversalReceiptEvidence
+		// took: the tombstone branch posts a TxTombstone keyed by the
+		// ORIGINAL reference (postDepositReversalTombstone); a real
+		// reversal posts a TxDepositReversal keyed by THIS EVENT'S OWN
+		// reference. Re-resolving the original attempt here (read-only,
+		// already committed by ApplyReceiptEvidence above) tells us which
+		// one applies - never a guess from the disposition string alone.
 		original, aerr := GetAttemptByProviderReference(ctx, tx, providerID, event.OriginalProviderReference)
 		if aerr != nil || original.LedgerTransactionID == nil {
-			result.Tombstoned = true
+			var txID uuid.UUID
+			if err := tx.QueryRow(ctx,
+				`SELECT id FROM ledger_transactions WHERE tenant_id = $1 AND provider_id = $2 AND provider_tx_id = $3 AND transaction_type = 'tombstone'`,
+				tenantID, providerID, event.OriginalProviderReference,
+			).Scan(&txID); err == nil {
+				result.LedgerTransactionID = &txID
+				result.Tombstoned = true
+			}
 			break
+		}
+		var txID uuid.UUID
+		if err := tx.QueryRow(ctx,
+			`SELECT id FROM ledger_transactions WHERE tenant_id = $1 AND provider_id = $2 AND provider_tx_id = $3 AND transaction_type = 'deposit_reversal'`,
+			tenantID, providerID, event.ProviderReference,
+		).Scan(&txID); err == nil {
+			result.LedgerTransactionID = &txID
 		}
 		if original.DepositIntentID != nil {
 			if intent, ferr := GetDepositIntentByID(ctx, tx, *original.DepositIntentID); ferr == nil {
-				result.DepositIntentID, result.Status, result.LedgerTransactionID = intent.ID, intent.Status, intent.LedgerTransactionID
+				result.DepositIntentID, result.Status = intent.ID, intent.Status
 			}
 		}
 	}

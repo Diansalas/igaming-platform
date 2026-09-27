@@ -367,6 +367,20 @@ func ApplyReceiptEvidence(ctx context.Context, tx pgx.Tx, o *Orchestrator, tenan
 		return "", err
 	}
 
+	// ADR 0095 §5.1 "Ledger link" / LF95-C7: deposit_intents.status is a
+	// projection of its attempts, recomputed in the SAME tx as every
+	// attempt transition - not just the terminal succeeded/declined cases
+	// applyDepositSuccessAndPost/finalizeDeclined already write directly.
+	// Without this, a callback that only moves the ATTEMPT to pending/
+	// ambiguous/disputed (T4, T6/T9/T11, T10, T13t) would leave the
+	// intent's own status stale - e.g. still 'pending' after its one live
+	// attempt actually went ambiguous.
+	if changed && attempt.Operation == AttemptOperationDeposit && attempt.DepositIntentID != nil {
+		if err := recomputeDepositIntentProjection(ctx, tx, *attempt.DepositIntentID); err != nil {
+			return "", err
+		}
+	}
+
 	if !duplicate {
 		resolution := string(ResolutionApplied)
 		if err := ResolveReceipt(ctx, tx, receiptID, attempt.ID, resolution); err != nil {
@@ -772,6 +786,61 @@ func applyReversalReceiptEvidence(ctx context.Context, tx pgx.Tx, tenantID uuid.
 // tombstoneExists reports whether a reversal tombstone already occupies
 // (providerID, providerReference) - postDepositReversalTombstone's own
 // key shape (orchestrator.go), read-only here.
+// recomputeDepositIntentProjection implements ADR 0095 §5.1's intent
+// projection rule (LF95-C7), evaluated in this order over every
+// payment_attempts row for intentID: any 'succeeded' -> 'succeeded'
+// (naturally sticky - a succeeded attempt is never un-succeeded, so this
+// value never regresses); any 'disputed' (and no 'succeeded') ->
+// 'ambiguous', never 'declined', because funds may already have been
+// captured; a live attempt that is 'ambiguous' -> 'ambiguous'; any other
+// live attempt ('created','submitting','pending') -> 'pending'; none
+// live -> 'declined'.
+func recomputeDepositIntentProjection(ctx context.Context, tx pgx.Tx, intentID uuid.UUID) error {
+	rows, err := tx.Query(ctx, `SELECT state FROM payment_attempts WHERE deposit_intent_id = $1`, intentID)
+	if err != nil {
+		return fmt.Errorf("payments: recompute intent projection: query attempts: %w", err)
+	}
+	var anySucceeded, anyDisputed, anyAmbiguous, anyOtherLive bool
+	for rows.Next() {
+		var state string
+		if err := rows.Scan(&state); err != nil {
+			rows.Close()
+			return fmt.Errorf("payments: recompute intent projection: scan state: %w", err)
+		}
+		switch AttemptState(state) {
+		case AttemptSucceeded:
+			anySucceeded = true
+		case AttemptDisputed:
+			anyDisputed = true
+		case AttemptAmbiguous:
+			anyAmbiguous = true
+		case AttemptCreated, AttemptSubmitting, AttemptPending:
+			anyOtherLive = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return fmt.Errorf("payments: recompute intent projection: rows: %w", err)
+	}
+	rows.Close()
+
+	var status DepositIntentStatus
+	switch {
+	case anySucceeded:
+		status = DepositIntentSucceeded
+	case anyDisputed, anyAmbiguous:
+		status = DepositIntentAmbiguous
+	case anyOtherLive:
+		status = DepositIntentPending
+	default:
+		status = DepositIntentDeclined
+	}
+	if _, err := tx.Exec(ctx, `UPDATE deposit_intents SET status = $1 WHERE id = $2`, status, intentID); err != nil {
+		return fmt.Errorf("payments: recompute intent projection: update: %w", err)
+	}
+	return nil
+}
+
 func tombstoneExists(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, providerID, providerReference string) (bool, error) {
 	var exists bool
 	err := tx.QueryRow(ctx,
@@ -871,8 +940,14 @@ func ApplyDeferredReceiptsForAttempt(ctx context.Context, tx pgx.Tx, o *Orchestr
 		if err != nil {
 			return applied, err
 		}
-		if _, err := applyResolvedReceiptEvidence(ctx, tx, o, current, ev); err != nil {
+		changed, err := applyResolvedReceiptEvidence(ctx, tx, o, current, ev)
+		if err != nil {
 			return applied, err
+		}
+		if changed && current.Operation == AttemptOperationDeposit && current.DepositIntentID != nil {
+			if err := recomputeDepositIntentProjection(ctx, tx, *current.DepositIntentID); err != nil {
+				return applied, err
+			}
 		}
 		if err := ResolveReceipt(ctx, tx, d.id, attempt.ID, string(ResolutionApplied)); err != nil {
 			return applied, err
