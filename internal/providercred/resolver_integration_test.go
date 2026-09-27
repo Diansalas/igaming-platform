@@ -406,8 +406,29 @@ type recordingReader struct {
 	durations []time.Duration
 }
 
+// callerSpan is one caller's timeline through a resolve, filled by
+// recordingReader when the caller's ctx carries it (withCallerSpan).
+type callerSpan struct {
+	// connHeld is when the caller's pre-verification transaction first
+	// ran on its pooled connection (after pool acquisition, BEGIN and
+	// set_config): everything the caller does from here on - the handle
+	// read, the commit, and any slot/flight/store wait - is what the
+	// pre-ADR-0094 test measured, because that test started its clock
+	// inside WithTenant, after the connection was acquired.
+	connHeld time.Time
+}
+
+type callerSpanKey struct{}
+
+func withCallerSpan(ctx context.Context, sp *callerSpan) context.Context {
+	return context.WithValue(ctx, callerSpanKey{}, sp)
+}
+
 func (r *recordingReader) WithTenantReadOnly(ctx context.Context, tenantID uuid.UUID, fn db.TxFunc) error {
 	return r.pool.WithTenantReadOnly(ctx, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		if sp, ok := ctx.Value(callerSpanKey{}).(*callerSpan); ok && sp.connHeld.IsZero() {
+			sp.connHeld = time.Now()
+		}
 		var ro string
 		if err := tx.QueryRow(ctx, `SELECT current_setting('transaction_read_only')`).Scan(&ro); err != nil {
 			return err
@@ -560,6 +581,18 @@ func TestResolver_CacheRevokeRace(t *testing.T) {
 // handlers do. The old shape (Resolve inside WithTenant) is now refused -
 // TestStoreOutage_ResolveInsideTenantTxRefused.
 //
+// What "waited on the store" measures (CI #360 root cause, ADR 0094
+// implementation record "K1"): each caller's clock starts when its
+// pre-verification transaction first runs on its pooled connection and
+// stops when Resolve returns - the handle read, the commit, and every
+// slot/flight/store wait. That is the span the pre-ADR-0094 test measured
+// (its clock started inside WithTenant, after the pool had handed out the
+// connection), plus the commit. It deliberately excludes waiting for the
+// pool to hand out a connection - including dialling the cold pool's
+// connections, which under -race on a slow runner took 125-270 ms per
+// caller and made CI #360 count every caller as "long". Pool admission
+// has its own assertion: the unrelated-query bound.
+//
 // longSlack is this test's own measurement tolerance around the reviewed
 // 250 ms slot-wait bound (not itself a security-reviewed number - §5's
 // literal spec is "250 ms" and "4", with no slack figure). It stays at its
@@ -615,7 +648,13 @@ func runStoreOutageDoesNotPinPool(t *testing.T, f *fx) {
 	const reviewBound = 4
 
 	var wg sync.WaitGroup
+	// durations[i]: from the caller's connection being in use to Resolve
+	// returning (see the doc comment) - the asserted "waited on the store"
+	// span. acquire[i]: from calling Resolve to that point (pool
+	// acquisition, BEGIN, set_config) - diagnostic only; pool admission is
+	// asserted end to end by the unrelated-query bound.
 	durations := make([]time.Duration, 50)
+	acquire := make([]time.Duration, 50)
 	launch := make([]time.Duration, 50)
 	t0 := time.Now()
 	for i := 0; i < 50; i++ {
@@ -624,9 +663,17 @@ func runStoreOutageDoesNotPinPool(t *testing.T, f *fx) {
 			defer wg.Done()
 			tenant := tenants[i%len(tenants)]
 			launch[i] = time.Since(t0)
+			sp := &callerSpan{}
 			start := time.Now()
-			_, _ = f.sub.Resolver("casino").Resolve(context.Background(), reader, tenant, "acme", "k1", webhookauth.KeyFromHeader)
-			durations[i] = time.Since(start)
+			_, _ = f.sub.Resolver("casino").Resolve(withCallerSpan(context.Background(), sp), reader, tenant, "acme", "k1", webhookauth.KeyFromHeader)
+			end := time.Now()
+			if sp.connHeld.IsZero() {
+				// Never reached the database (cannot happen here): count the
+				// whole call, never less.
+				sp.connHeld = start
+			}
+			durations[i] = end.Sub(sp.connHeld)
+			acquire[i] = sp.connHeld.Sub(start)
 		}(i)
 	}
 	time.Sleep(400 * time.Millisecond)
@@ -646,12 +693,12 @@ func runStoreOutageDoesNotPinPool(t *testing.T, f *fx) {
 		wg.Wait()
 		_, _, txd := reader.snapshot()
 		t.Fatalf("an unrelated tenant query took %s (connection acquire took %s) during the store outage, want < 500ms; "+
-			"maxConcurrent=%d longSlack=%s durations=%v launch=%v txDurations=%v",
-			d, qAcquire, f.mem.MaxConcurrent(), longSlack, durations, launch, txd)
+			"maxConcurrent=%d longSlack=%s durations=%v acquire=%v launch=%v txDurations=%v",
+			d, qAcquire, f.mem.MaxConcurrent(), longSlack, durations, acquire, launch, txd)
 	}
 	wg.Wait()
 	if m := f.mem.MaxConcurrent(); m > reviewBound {
-		t.Fatalf("%d concurrent store calls, want <= %d; durations=%v launch=%v", m, reviewBound, durations, launch)
+		t.Fatalf("%d concurrent store calls, want <= %d; durations=%v acquire=%v launch=%v", m, reviewBound, durations, acquire, launch)
 	}
 	long := 0
 	var longDurations []time.Duration
@@ -663,9 +710,11 @@ func runStoreOutageDoesNotPinPool(t *testing.T, f *fx) {
 	}
 	if long > reviewBound {
 		t.Fatalf("%d resolves waited on the store for > 250 ms (longSlack=%s), want <= %d; "+
-			"over-bound durations=%v; maxConcurrent=%d; all durations=%v launch=%v",
-			long, longSlack, reviewBound, longDurations, f.mem.MaxConcurrent(), durations, launch)
+			"over-bound durations=%v; maxConcurrent=%d; all durations=%v acquire=%v launch=%v",
+			long, longSlack, reviewBound, longDurations, f.mem.MaxConcurrent(), durations, acquire, launch)
 	}
+	t.Logf("pool acquisition per caller (diagnostic, not asserted): max %s; store-side span max %s",
+		maxDuration(acquire), maxDuration(durations))
 	// ADR 0094 criterion (4): no pre-verification transaction - the only
 	// connection a resolve holds - is held beyond longSlack.
 	_, ro, txd := reader.snapshot()
@@ -781,4 +830,14 @@ func (implicitTestScheme) Verify(creds webhookauth.CredentialSet, in webhookauth
 func (implicitTestScheme) Properties() webhookauth.SchemeProperties {
 	return webhookauth.SchemeProperties{Binding: webhookauth.BindingPerMerchantKey, KeySelection: webhookauth.KeyImplicit,
 		SignedTimestamp: true, MaxSkew: time.Minute, Replay: webhookauth.ReplayTimestampWindow}
+}
+
+func maxDuration(ds []time.Duration) time.Duration {
+	var m time.Duration
+	for _, d := range ds {
+		if d > m {
+			m = d
+		}
+	}
+	return m
 }
