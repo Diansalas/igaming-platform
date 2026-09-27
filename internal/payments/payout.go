@@ -855,6 +855,23 @@ func applyPayoutStatusEvidence(ctx context.Context, pool *db.Pool, tenantID, req
 	defer cancel()
 
 	return pool.WithTenant(phaseCtx, tenantID, func(actx context.Context, tx pgx.Tx) error {
+		// P-C3 (FH-6 ledger-finance ruling, rv-prh-i1-payout-ledger.md):
+		// take the SAME withdrawal lock applyPayoutStatusEvidenceInTx below
+		// takes (re-locking an already-held row lock inside the SAME
+		// transaction is a harmless no-op in Postgres) and re-read the
+		// attempt HERE, under that lock, before anything below can change
+		// it - this is the staff audit's own "before" snapshot, never the
+		// caller's outer, pre-transaction one (which can be stale relative
+		// to a concurrent transition that landed between the caller's read
+		// and this transaction's start).
+		wrBefore, err := withdrawal.LockForPayoutEvidence(actx, tx, requestID)
+		if err != nil {
+			return err
+		}
+		lockedBefore, err := GetAttemptByID(actx, tx, attempt.ID)
+		if err != nil {
+			return fmt.Errorf("payments: apply payout status evidence: re-read attempt under lock: %w", err)
+		}
 		if err := applyPayoutStatusEvidenceInTx(actx, tx, tenantID, requestID, attempt, gr, evidence, nextPoll); err != nil {
 			return err
 		}
@@ -863,7 +880,7 @@ func applyPayoutStatusEvidence(ctx context.Context, pool *db.Pool, tenantID, req
 		// state change above, never a separate best-effort call after the
 		// fact - the same B6 rule, now on /resolve. A nil actor (every
 		// sweeper-driven call) is a no-op.
-		return payoutResolveAudit(actx, tx, tenantID, requestID, attempt, string(gr.Class), actor)
+		return payoutResolveAudit(actx, tx, tenantID, requestID, lockedBefore, wrBefore.State, string(gr.Class), actor)
 	})
 }
 
@@ -877,7 +894,8 @@ func applyPayoutStatusEvidenceInTx(actx context.Context, tx pgx.Tx, tenantID, re
 		// R3 (RV-PRH-I1 ledger re-review, ADR 0082 A7): withdrawal FIRST,
 		// unconditionally - see ApplyPayoutResult's identical top-of-tx
 		// lock. applyPayoutSuccess/applyPayoutDecline below re-take it
-		// defensively.
+		// defensively. Re-locking the same row the wrapper above already
+		// locked, inside the SAME transaction, is a harmless no-op.
 		if _, err := withdrawal.LockForPayoutEvidence(actx, tx, requestID); err != nil {
 			return err
 		}
@@ -994,19 +1012,19 @@ func applyPayoutStatusEvidenceInTx(actx context.Context, tx pgx.Tx, tenantID, re
 // /resolve call - a reschedule no-op, a T6, a T10 dispute, a completion or
 // a failure - wrote the SAME row (Outcome: success, no metadata), so an
 // investigator could not tell from the staff row what the action actually
-// did. before is the attempt as read BEFORE this call's own state change
-// (the caller's own pre-transition copy - both call sites already have
-// it); the withdrawal's own before-state is always `submitted` at every
-// call site (the /resolve handler's own precondition, `wr.State !=
-// withdrawal.StateSubmitted` is rejected before either call site can run;
-// the sweeper's callers only reach PollPayoutStatus for a submitted
-// withdrawal's live attempt too), so it is not re-queried here.
-// evidenceClass names what evidence this call actually processed
-// (ErrorClass for the QueryStatus matrix path, or a plain description for
-// the no-reference reschedule fallback). Outcome reflects a dispute
-// (failure) distinctly from every other, non-anomalous result (success),
-// per the finding's "reflect a dispute or no-op".
-func payoutResolveAudit(ctx context.Context, tx pgx.Tx, tenantID, requestID uuid.UUID, before PaymentAttempt, evidenceClass string, actor *SubmitActor) error {
+// did. P-C3/code-review (rv-prh-i1-payout-code-review.md): before and
+// wrStateBefore are both read under the withdrawal lock by the caller
+// (LockForPayoutEvidence's own return value, and a fresh GetAttemptByID
+// right after it) - never the caller's own outer, pre-transaction
+// snapshot, and never a hard-coded `submitted` - so both are exact even
+// under a concurrent transition landing in the gap between the caller's
+// original read and this transaction's start. evidenceClass names what
+// evidence this call actually processed (ErrorClass for the QueryStatus
+// matrix path, or a plain description for the no-reference reschedule
+// fallback). Outcome reflects a dispute (failure) distinctly from every
+// other, non-anomalous result (success), per the finding's "reflect a
+// dispute or no-op".
+func payoutResolveAudit(ctx context.Context, tx pgx.Tx, tenantID, requestID uuid.UUID, before PaymentAttempt, wrStateBefore withdrawal.State, evidenceClass string, actor *SubmitActor) error {
 	if actor == nil {
 		return nil
 	}
@@ -1018,6 +1036,16 @@ func payoutResolveAudit(ctx context.Context, tx pgx.Tx, tenantID, requestID uuid
 	if err != nil {
 		return fmt.Errorf("payments: payout resolve audit: re-read withdrawal: %w", err)
 	}
+	// P-C3 (FH-6 ledger-finance ruling): Outcome is limited to the three
+	// values the audit_log table's own CHECK constraint allows
+	// (success/failure/denied - migration 0014) - there is no honest
+	// fourth value to add here without a schema migration, well outside
+	// this fix's scope. A genuine no-op (before == after: a bare
+	// reschedule that changed nothing) still records Outcome=success
+	// (procedurally, the /resolve action itself completed without error
+	// or anomaly), but metadata now carries an explicit, unambiguous
+	// "no_op" boolean rather than requiring a reader to compare the two
+	// state strings themselves.
 	outcome := audit.OutcomeSuccess
 	if after.State == AttemptDisputed {
 		outcome = audit.OutcomeFailure
@@ -1027,8 +1055,9 @@ func payoutResolveAudit(ctx context.Context, tx pgx.Tx, tenantID, requestID uuid
 		"evidence_class":          evidenceClass,
 		"attempt_state_before":    string(before.State),
 		"attempt_state_after":     string(after.State),
-		"withdrawal_state_before": string(withdrawal.StateSubmitted),
+		"withdrawal_state_before": string(wrStateBefore),
 		"withdrawal_state_after":  string(wr.State),
+		"no_op":                   before.State == after.State,
 	}
 	if after.TerminalReason != nil {
 		metadata["terminal_reason"] = *after.TerminalReason
@@ -1212,6 +1241,18 @@ func PollPayoutStatus(ctx context.Context, pool *db.Pool, orch *Orchestrator, cr
 
 	if attempt.ProviderID == nil || ref == nil || *ref == "" {
 		return pool.WithTenant(ctx, tenantID, func(actx context.Context, tx pgx.Tx) error {
+			// P-C3 (FH-6 ledger-finance ruling): take the same withdrawal
+			// lock the other call site uses and re-read the attempt under
+			// it, for the SAME reason - this branch's staff-audit "before"
+			// must not come from the caller's own pre-transaction snapshot.
+			wrBefore, err := withdrawal.LockForPayoutEvidence(actx, tx, requestID)
+			if err != nil {
+				return err
+			}
+			lockedBefore, err := GetAttemptByID(actx, tx, attempt.ID)
+			if err != nil {
+				return fmt.Errorf("payments: poll payout status (no-reference fallback): re-read attempt under lock: %w", err)
+			}
 			if attempt.State == AttemptSubmitting {
 				if err := payoutMarkAmbiguousFromSubmittingIfLeaseExpired(actx, tx, attempt.ID, EvidencePlatform, nextPoll); err != nil {
 					return err
@@ -1220,7 +1261,7 @@ func PollPayoutStatus(ctx context.Context, pool *db.Pool, orch *Orchestrator, cr
 				return err
 			}
 			// N3: same transaction as the state change above.
-			return payoutResolveAudit(actx, tx, tenantID, requestID, attempt, "no_reference_reschedule", actor)
+			return payoutResolveAudit(actx, tx, tenantID, requestID, lockedBefore, wrBefore.State, "no_reference_reschedule", actor)
 		})
 	}
 	provider, ok := orch.Provider(*attempt.ProviderID)

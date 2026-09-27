@@ -89,55 +89,62 @@ project's "when to stop and ask" rule already requires for major,
 irreversible architecture decisions - not something the payments
 specialist decides unilaterally.
 
-## Addendum: S-L2/SP-C attempted and reverted this round
+## Addendum: S-L2/SP-C - FIXED (FH-6 round 2, corrected per P-C2)
 
 Not one of this note's own four items (S-L2 is tracked separately in
 `docs/governance/task-registry.md`, `PAY-SEC-S-L2`), but recorded here for
 anyone reading this file for full payout-sweeper launch context, since it
 bears directly on "required before any binary wires the payout sweeper":
 
-The `sweeper-batch` lease_owner constant itself (S-L2's first half) IS
-implemented. SP-C (the stale-snapshot relabel path) is NOT: the natural
-fix - `claimBatch`'s own SELECT excluding any row under a live,
-non-batch-owned lease - was implemented, confirmed to close a direct SP-C
-reproduction, but then found (full suite run, `-race`) to regress 7
-existing tests spanning BOTH the deposit and payout sweeper suites
-(`TestSweeper_T12_NonIdempotentManifest_NeverResends`,
-`TestSweeper_T12_IdempotentManifest_StopsAtMaxResubmits`,
-`TestSweeper_RunOnce_PayoutEndToEnd_BatchCapAndLease`,
-`TestSweeper_N1_AmbiguousWithReference_ConvergesByPollZeroResends`,
-`TestPollPayoutStatus_ProviderReferenceMismatch_Disputes`,
-`TestRVLF_H3_SweeperGo_PollCascadableDeclineUnderKillSwitch`,
-`TestSweeper_PendingConvergesToSucceeded_T7_LedgerBalanced`,
-`TestSweeper_PendingDeclineCascades_ThenSweptAttemptConvergesOnSecondProvider`).
+**P-C2 correction (FH-6 ledger-finance ruling, `rv-prh-i1-payout-ledger.md`):**
+an earlier version of this addendum attributed the 7-test regression below
+to "T2/T12 setting `next_action_at` earlier than `lease_until`". That
+statement was wrong and is struck through by this correction, not left
+standing: at the commit in question, both `ClaimCreatedForSubmission` (T2)
+and `ResubmitAmbiguous` (T12) set `next_action_at = lease_until` exactly -
+there is no gap between them at claim/resend time. The REAL cause ledger-
+finance's own reproduction isolated: **phase C moving a row OUT of
+`submitting`** (to `ambiguous`/`pending`/`created`) without clearing its
+lease. A `claimBatch` exclusion that checked lease liveness for EVERY
+state (not just `submitting`) would then wrongly refuse to reclaim a
+NON-submitting row still carrying an old, technically-live lease from a
+PRIOR claim - exactly the shape of the 7 regressed tests, none of which
+involve a live lease on a `submitting` row at the point they call
+`claimBatch` again.
 
-Root cause of the regression: a per-item claim/resend (T2's
-`ClaimCreatedForSubmission`, T12's `ResubmitAmbiguous`) deliberately sets
-`next_action_at` EARLIER than its own `lease_until` - the lease exists to
-detect an abandoned/crashed claim, not to defer the SAME sweeper's own
-legitimate next look at a row it is itself still driving forward across
-ticks. From `lease_owner`/`lease_until`/`next_action_at` alone, `claimBatch`
-cannot distinguish "the sweeper revisiting its own in-flight claim, exactly
-as designed" from "a genuinely different, concurrent actor's stale-snapshot
-reschedule" (SP-C's actual shape) - both look identical: a live,
-non-batch-owned lease with a due `next_action_at`. The change was reverted
-in full (`git diff --stat` confirmed byte-clean); the test that reproduced
-SP-C directly was removed rather than left pointing at unimplemented
-behavior.
+The fix (**V1**, restricted to `state = 'submitting'`, ledger-finance's own
+required condition) is now implemented in `claimBatch`
+(`internal/payments/sweeper.go`):
 
-The security review's own alternative - "`RescheduleNonTerminal` must never
-set `next_action_at` below a live `lease_until`" - was not attempted this
-round. It is scoped more narrowly (one function, not `claimBatch`'s general
-selection), and is less obviously exposed to the same false-positive
-(the sweeper's own per-item claim functions set `next_action_at` directly
-in their own CAS UPDATEs, not through `RescheduleNonTerminal`, which is
-used for "still pending/still ambiguous, no state change" polls - so it
-may not intersect the same legitimate early-reschedule pattern that broke
-the `claimBatch` approach). It still needs its own careful audit against
-every `RescheduleNonTerminal` call site before landing, given the blast
-radius just demonstrated. Left as an explicit next step, not implemented
-here for lack of remaining time to verify it as thoroughly as this finding
-deserves.
+```sql
+AND NOT (state = 'submitting' AND lease_until > now()
+         AND lease_owner IS DISTINCT FROM 'sweeper-batch')
+```
+
+This closes SP-C (a `submitting` row under a live, non-batch lease - e.g.
+a T12 resend's own claim - is never relabelled as the batch's own lease
+while it may still be in flight) without touching any non-`submitting`
+row's ordinary cross-tick continuation, which is exactly what the
+over-broad first attempt (state-independent) regressed. Verified: the full
+`internal/payments` suite passes (including all 7 previously-regressed
+tests), a permanent SP-C reproduction test
+(`TestClaimBatch_SL2_SPC_StaleSnapshotNeverRelabelsALiveSubmittingLease`,
+`internal/payments/payout_security_round_test.go`) passes, and ledger-
+finance's own V1 probe (run independently on their own private DB) also
+passed.
+
+**V2** (`RescheduleNonTerminal` clamping `next_action_at` to
+`GREATEST($2, lease_until)` when a live, non-batch lease is held) is
+ledger-finance's own documented "optional defence in depth, not a
+substitute" - it closes only the `RescheduleNonTerminal` path, while
+`Escalate` and `Touch` (T17) write `next_action_at` with no lease
+awareness either. Not implemented this round; V1 alone is the required,
+structural fix (it guards every writer of `next_action_at` at the single
+point of claim, which V2 alone would not).
+
+**S-L2 is no longer a registered condition against the launch conditions
+below** - it is fixed and tested. `PAY-SEC-S-L2` in the task registry
+reflects this.
 
 ## Status
 

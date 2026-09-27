@@ -164,14 +164,38 @@ func (s *Sweeper) escalateAmbiguousPayout(ctx context.Context, tenantID uuid.UUI
 			// A7-TESTS-1 item #1b: Escalate's own CAS now excludes every
 			// terminal state (payment_attempts_check9's own invariant -
 			// next_action_at must be NULL once terminal). A conflict here
-			// means a concurrent resolution (e.g. a real payout success/
-			// decline callback) already reached a terminal state for this
-			// SAME attempt between this call's caller giving up on resend
-			// and this Escalate attempt - there is nothing left to
-			// escalate, and rescheduling a terminal attempt is nonsensical.
-			// A benign no-op, never a bubbled-up 500/repeating conflict.
+			// USUALLY means a concurrent resolution (e.g. a real payout
+			// success/decline callback) already reached a terminal state
+			// for this SAME attempt between this call's caller giving up
+			// on resend and this Escalate attempt - there is nothing left
+			// to escalate, and rescheduling a terminal attempt is
+			// nonsensical, so that case is a benign no-op.
+			//
+			// Code review (rv-prh-i1-payout-code-review.md, e48c8e7):
+			// blindly swallowing EVERY ErrAttemptStateConflict here also
+			// covers an UNINTENDED case - 0 rows matched because the row
+			// was not visible to this CAS at all (e.g. a wrong tenant
+			// under RLS, or the row is simply gone) - which would then be
+			// silently skipped with no error, no audit and no escalation,
+			// re-leased again every subsequent tick forever. Re-read the
+			// attempt and swallow the conflict ONLY when it confirms one
+			// of the two legitimate reasons (already terminal, or already
+			// escalated by a concurrent caller) - otherwise return the
+			// error, loud, exactly like gateAndEscalateOnDeny already does
+			// for its own conflicts.
 			if errors.Is(err, ErrAttemptStateConflict) {
-				return nil
+				reread, rereadErr := GetAttemptByID(actx, tx, attempt.ID)
+				if rereadErr != nil {
+					return rereadErr
+				}
+				switch reread.State {
+				case AttemptSucceeded, AttemptDeclined, AttemptRejected, AttemptDisputed:
+					return nil
+				}
+				if reread.EscalatedAt != nil {
+					return nil
+				}
+				return err
 			}
 			return err
 		}

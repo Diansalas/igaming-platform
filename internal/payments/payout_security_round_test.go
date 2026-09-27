@@ -20,6 +20,7 @@ package payments
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -208,7 +209,7 @@ func TestResubmitPayoutAmbiguous_SM2a_KillSwitchReschedulesNeverEscalates(t *tes
 	if err != nil {
 		t.Fatalf("ClaimForDispatch: %v", err)
 	}
-	gr := DispatchWithdraw(context.Background(), MockCredentialResolver{}, idem, claim.Attempt)
+	gr := DispatchWithdraw(context.Background(), nil, MockCredentialResolver{}, idem, claim.Attempt)
 	if err := ApplyPayoutResult(context.Background(), pool, f.tenantID, wr.ID, claim.Attempt, gr, EvidenceSync); err != nil {
 		t.Fatalf("ApplyPayoutResult: %v", err)
 	}
@@ -278,13 +279,95 @@ func TestResubmitPayoutAmbiguous_SM2a_KillSwitchReschedulesNeverEscalates(t *tes
 	}
 }
 
-// --- S-L2: the sweeper-batch lease_owner constant -------------------------
+// --- S-L2/SP-C: the sweeper-batch lease_owner constant, and the V1 fix ----
+
+// TestClaimBatch_SL2_SPC_StaleSnapshotNeverRelabelsALiveSubmittingLease is
+// the permanent SP-C reproduction (FH-6 ledger-finance ruling,
+// rv-prh-i1-payout-ledger.md, restoring the probe an earlier round removed
+// when its first, over-broad fix regressed 7 other tests and was
+// reverted): claimBatch's V1 predicate -
 //
-// NOTE: SP-C (the stale-snapshot relabel path) is NOT fixed by this round -
-// see sweeper.go's claimBatch doc comment and
-// docs/plans/payment-readiness/prh-i1-payout-launch-conditions.md for why
-// the naive fix regressed a wide swath of the sweeper suite and was
-// reverted. Only the distinct lease_owner constant below is implemented.
+//	AND NOT (state = 'submitting' AND lease_until > now()
+//	         AND lease_owner IS DISTINCT FROM 'sweeper-batch')
+//
+// - restricted to state='submitting', closes SP-C without touching any
+// non-submitting row's ordinary cross-tick continuation. Reproduction,
+// exactly as ledger-finance's own probe:
+//  1. An ambiguous payout with a reference (a real ClaimForDispatch +
+//     DispatchWithdraw + ApplyPayoutResult round trip, MockAmountAmbiguous).
+//  2. A T12 claim commits for real (ResubmitAmbiguous itself, not a
+//     hand-rolled UPDATE): state->submitting, lease_owner=
+//     "sweeper-payout-resubmit", lease_until 2 minutes out - ResubmitAmbiguous
+//     itself sets next_action_at = lease_until, so nothing is stale yet.
+//  3. /resolve's own stale-snapshot reschedule is simulated directly (the
+//     narrow, deterministic way to reproduce a race that would otherwise
+//     need real concurrency): next_action_at is pulled back to now(),
+//     leaving state/lease_owner/lease_until exactly as T12 left them - the
+//     exact artifact a PollPayoutStatus call working from an in-memory
+//     read taken BEFORE the T12 commit would produce.
+//  4. claimBatch must NOT claim this row: it must stay `submitting`, still
+//     owned by "sweeper-payout-resubmit", with its original lease_until -
+//     the resend's own phase B/C is still nominally in flight.
+func TestClaimBatch_SL2_SPC_StaleSnapshotNeverRelabelsALiveSubmittingLease(t *testing.T) {
+	pool := depositV2ScratchPool(t)
+	f := seedPayoutFixture(t, pool, 100_000, true)
+	provider := NewMockProvider("mock-spc", "EUR")
+	registerCapability(t, pool, f.orchFixture, provider, 100)
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-spc": provider}, MultiWebhookCredentialResolver{"mock-spc": NewMockWebhookCredentials(provider)})
+
+	wr := approvedWithdrawal(t, pool, f, MockAmountAmbiguous, "payout-spc")
+	claim, err := orch.ClaimForDispatch(context.Background(), pool, KYCEnforcementPayoutGate{}, f.tenantID, wr.ID, "bank_transfer", testSubmitActor())
+	if err != nil {
+		t.Fatalf("ClaimForDispatch: %v", err)
+	}
+	gr := DispatchWithdraw(context.Background(), nil, MockCredentialResolver{}, provider, claim.Attempt)
+	if err := ApplyPayoutResult(context.Background(), pool, f.tenantID, wr.ID, claim.Attempt, gr, EvidenceSync); err != nil {
+		t.Fatalf("ApplyPayoutResult: %v", err)
+	}
+	ambiguous := mustGetAttempt(t, pool, f.tenantID, claim.Attempt.ID)
+	if ambiguous.State != AttemptAmbiguous {
+		t.Fatalf("setup: expected ambiguous, got %s", ambiguous.State)
+	}
+
+	liveLeaseUntil := time.Now().Add(2 * time.Minute)
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		// Step 2: a REAL T12 claim commit.
+		if err := ResubmitAmbiguous(ctx, tx, ambiguous.ID, uuid.New(), "sweeper-payout-resubmit", liveLeaseUntil, 0); err != nil {
+			return err
+		}
+		// Step 3: the stale-snapshot reschedule artifact - next_action_at
+		// pulled back to now(), lease left exactly as T12 committed it.
+		_, err := tx.Exec(ctx, `UPDATE payment_attempts SET next_action_at = now() WHERE id = $1`, ambiguous.ID)
+		return err
+	}); err != nil {
+		t.Fatalf("simulate T12 claim + stale reschedule: %v", err)
+	}
+
+	resubmitted := mustGetAttempt(t, pool, f.tenantID, ambiguous.ID)
+	if resubmitted.State != AttemptSubmitting {
+		t.Fatalf("setup: expected T12 to move the attempt to submitting, got %s", resubmitted.State)
+	}
+
+	sweeper := &Sweeper{Pool: pool, Lease: SweeperDefaultLease, BatchPerTenant: SweeperDefaultBatchPerTenant}
+	claimed, err := sweeper.claimBatch(context.Background(), f.tenantID)
+	if err != nil {
+		t.Fatalf("claimBatch: %v", err)
+	}
+	if a7ContainsUUID(claimed, ambiguous.ID) {
+		t.Fatalf("SP-C regression: claimBatch claimed a `submitting` row under a LIVE non-batch lease (lease_until=%v)", liveLeaseUntil)
+	}
+
+	after := mustGetAttempt(t, pool, f.tenantID, ambiguous.ID)
+	if after.State != AttemptSubmitting {
+		t.Fatalf("SP-C regression: expected the attempt to remain submitting, got %s", after.State)
+	}
+	if after.LeaseOwner == nil || *after.LeaseOwner != "sweeper-payout-resubmit" {
+		t.Fatalf("SP-C regression: expected lease_owner to remain \"sweeper-payout-resubmit\", got %v", after.LeaseOwner)
+	}
+	if after.LeaseUntil == nil || after.LeaseUntil.Sub(liveLeaseUntil).Abs() > time.Millisecond {
+		t.Fatalf("SP-C regression: expected lease_until to remain unchanged (%v), got %v", liveLeaseUntil, after.LeaseUntil)
+	}
+}
 
 // TestClaimBatch_SL2_UsesDistinctBatchLeaseOwnerConstant pins the other
 // half of S-L2: claimBatch must write the distinct SweeperBatchLeaseOwner
@@ -312,5 +395,240 @@ func TestClaimBatch_SL2_UsesDistinctBatchLeaseOwnerConstant(t *testing.T) {
 	}
 	if SweeperBatchLeaseOwner == "sweeper" {
 		t.Fatalf("S-L2 regression: SweeperBatchLeaseOwner must be distinct from the bare \"sweeper\" literal")
+	}
+}
+
+// TestPayoutResolveAudit_CodeReview_WithdrawalStateAfterAndEvidenceClass
+// pins the two S-M2 audit fields the code review found unpinned (mutants
+// SURVIVED): `withdrawal_state_after` hard-coded/dropped, and
+// `evidence_class` blanked on the QueryStatus path. Drives a real
+// resolve-to-completion round trip and asserts both fields concretely.
+func TestPayoutResolveAudit_CodeReview_WithdrawalStateAfterAndEvidenceClass(t *testing.T) {
+	pool := depositV2ScratchPool(t)
+	f := seedPayoutFixture(t, pool, 100_000, true)
+	provider := NewMockProvider("mock-cr-audit", "EUR")
+	registerCapability(t, pool, f.orchFixture, provider, 100)
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-cr-audit": provider}, MultiWebhookCredentialResolver{"mock-cr-audit": NewMockWebhookCredentials(provider)})
+
+	wr := approvedWithdrawal(t, pool, f, 500, "payout-cr-audit")
+	claim, err := orch.ClaimForDispatch(context.Background(), pool, KYCEnforcementPayoutGate{}, f.tenantID, wr.ID, "bank_transfer", testSubmitActor())
+	if err != nil {
+		t.Fatalf("ClaimForDispatch: %v", err)
+	}
+	gr := DispatchWithdraw(context.Background(), nil, MockCredentialResolver{}, provider, claim.Attempt)
+	if err := ApplyPayoutResult(context.Background(), pool, f.tenantID, wr.ID, claim.Attempt, gr, EvidenceSync); err != nil {
+		t.Fatalf("ApplyPayoutResult: %v", err)
+	}
+	pending := mustGetAttempt(t, pool, f.tenantID, claim.Attempt.ID)
+	if pending.State != AttemptPending || pending.ProviderReference == nil {
+		t.Fatalf("setup: expected a real pending dispatch with a reference, got state=%s ref=%v", pending.State, pending.ProviderReference)
+	}
+
+	provider.Resolve(*pending.ProviderReference, OutcomeSucceeded, "", false)
+	actor := &SubmitActor{StaffID: uuid.New(), IPAddress: "203.0.113.30", UserAgent: "resolve-test-agent", RequestID: "req-cr-audit"}
+	if err := PollPayoutStatus(context.Background(), pool, orch, MockCredentialResolver{}, f.tenantID, pending, time.Now().Add(30*time.Second), actor); err != nil {
+		t.Fatalf("PollPayoutStatus: %v", err)
+	}
+
+	final := mustGetAttempt(t, pool, f.tenantID, claim.Attempt.ID)
+	if final.State != AttemptSucceeded {
+		t.Fatalf("setup: expected the attempt to succeed, got %s", final.State)
+	}
+	gotWR := mustGetWithdrawal(t, pool, f.tenantID, wr.ID)
+	if gotWR.State != withdrawal.StateCompleted {
+		t.Fatalf("setup: expected the withdrawal to complete, got %s", gotWR.State)
+	}
+
+	var wrStateAfter, evidenceClass string
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx,
+			`SELECT metadata->>'withdrawal_state_after', metadata->>'evidence_class'
+			 FROM audit_log WHERE action = 'withdrawal.resolve_attempted.http' AND target_id = $1`,
+			wr.ID.String()).Scan(&wrStateAfter, &evidenceClass)
+	}); err != nil {
+		t.Fatalf("query audit_log metadata: %v", err)
+	}
+	if wrStateAfter != string(withdrawal.StateCompleted) {
+		t.Fatalf("code review regression: expected withdrawal_state_after=completed, got %q", wrStateAfter)
+	}
+	if evidenceClass != string(ErrorClassSucceeded) {
+		t.Fatalf("code review regression: expected evidence_class=succeeded, got %q", evidenceClass)
+	}
+}
+
+// --- P-C3 (Low, FH-6 ledger-finance ruling): Escalate on a terminal -------
+// --- attempt; payoutResolveAudit's locked "before" and honest no-op ------
+
+// TestEscalate_PC3_RefusesOnATerminalAttempt_StaleSnapshot pins the CAS
+// predicate ledger-finance found "correct, but untested" - a mutant
+// removing `AND state NOT IN (...)` survived the whole payout/sweeper/A7
+// suite. Simulates the exact scenario the predicate exists for: a caller
+// holding a stale, pre-transition snapshot (escalated_at still NULL in its
+// own copy) calls Escalate AFTER the attempt has already reached a
+// terminal state for real - Escalate must refuse (ErrAttemptStateConflict),
+// never write next_action_at on a terminal row (payment_attempts_check9's
+// own invariant) and never touch escalated_at.
+func TestEscalate_PC3_RefusesOnATerminalAttempt_StaleSnapshot(t *testing.T) {
+	pool := depositV2ScratchPool(t)
+	f := seedPayoutFixture(t, pool, 100_000, true)
+	provider := NewMockProvider("mock-pc3-escalate", "EUR")
+	registerCapability(t, pool, f.orchFixture, provider, 100)
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-pc3-escalate": provider}, MultiWebhookCredentialResolver{"mock-pc3-escalate": NewMockWebhookCredentials(provider)})
+
+	wr := approvedWithdrawal(t, pool, f, 500, "payout-pc3-escalate")
+	claim, err := orch.ClaimForDispatch(context.Background(), pool, KYCEnforcementPayoutGate{}, f.tenantID, wr.ID, "bank_transfer", testSubmitActor())
+	if err != nil {
+		t.Fatalf("ClaimForDispatch: %v", err)
+	}
+	// The attempt's OWN stale, pre-transition snapshot (never re-read after
+	// this) still shows escalated_at=nil, state=submitting - exactly like a
+	// caller who read the row before a concurrent success landed.
+	staleSnapshot := claim.Attempt
+	gr := DispatchWithdraw(context.Background(), nil, MockCredentialResolver{}, provider, claim.Attempt)
+	if err := ApplyPayoutResult(context.Background(), pool, f.tenantID, wr.ID, claim.Attempt, gr, EvidenceSync); err != nil {
+		t.Fatalf("ApplyPayoutResult: %v", err)
+	}
+	pending := mustGetAttempt(t, pool, f.tenantID, claim.Attempt.ID)
+	if pending.State != AttemptPending || pending.ProviderReference == nil {
+		t.Fatalf("setup: expected a real pending dispatch with a reference, got state=%s ref=%v", pending.State, pending.ProviderReference)
+	}
+	// Converge to a REAL terminal success via QueryStatus (the mock never
+	// synchronously succeeds a Withdraw call, per its own doc comment).
+	provider.Resolve(*pending.ProviderReference, OutcomeSucceeded, "", false)
+	if err := PollPayoutStatus(context.Background(), pool, orch, MockCredentialResolver{}, f.tenantID, pending, time.Now().Add(time.Minute), nil); err != nil {
+		t.Fatalf("PollPayoutStatus (converge to success): %v", err)
+	}
+	succeeded := mustGetAttempt(t, pool, f.tenantID, claim.Attempt.ID)
+	if succeeded.State != AttemptSucceeded {
+		t.Fatalf("setup: expected a real terminal success, got %s", succeeded.State)
+	}
+	if staleSnapshot.State == AttemptSucceeded {
+		t.Fatalf("setup: the stale snapshot must NOT already show the terminal state")
+	}
+
+	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return Escalate(ctx, tx, staleSnapshot.ID, time.Now().Add(time.Minute))
+	})
+	if !errors.Is(err, ErrAttemptStateConflict) {
+		t.Fatalf("P-C3 regression: expected Escalate to refuse on an already-terminal attempt with ErrAttemptStateConflict, got %v", err)
+	}
+
+	after := mustGetAttempt(t, pool, f.tenantID, staleSnapshot.ID)
+	if after.State != AttemptSucceeded {
+		t.Fatalf("P-C3 regression: expected the attempt to remain succeeded, got %s", after.State)
+	}
+	if after.EscalatedAt != nil {
+		t.Fatalf("P-C3 regression: expected escalated_at to remain NULL on a refused Escalate, got %v", *after.EscalatedAt)
+	}
+	if after.NextActionAt != nil {
+		t.Fatalf("P-C3 regression: expected next_action_at to remain NULL (terminal), got %v", *after.NextActionAt)
+	}
+}
+
+// TestPayoutResolveAudit_PC3_BeforeStateReadUnderTheLock pins the other
+// half of P-C3: payoutResolveAudit's "before" attempt/withdrawal state
+// must come from a read taken under the withdrawal lock at the START of
+// the SAME transaction that then performs the state change - not the
+// caller's own outer, pre-transaction snapshot, which can already be
+// stale by the time the transaction actually starts. A real, concurrent
+// transition (T11, pending->ambiguous) lands in the gap between the
+// caller's own stale read and applyPayoutStatusEvidence's own transaction:
+// the caller's own switch logic still (deliberately, unchanged by this
+// fix) decides on the STALE state, but the CAS it reaches
+// (RescheduleNonTerminal, whose predicate is state-agnostic) still
+// succeeds against the REAL row - and the audit's own "before" must show
+// the REAL state (ambiguous), never the caller's stale one (pending).
+func TestPayoutResolveAudit_PC3_BeforeStateReadUnderTheLock(t *testing.T) {
+	pool := depositV2ScratchPool(t)
+	f := seedPayoutFixture(t, pool, 100_000, true)
+	provider := NewMockProvider("mock-pc3-audit", "EUR")
+	registerCapability(t, pool, f.orchFixture, provider, 100)
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-pc3-audit": provider}, MultiWebhookCredentialResolver{"mock-pc3-audit": NewMockWebhookCredentials(provider)})
+
+	wr := approvedWithdrawal(t, pool, f, 500, "payout-pc3-audit")
+	claim, err := orch.ClaimForDispatch(context.Background(), pool, KYCEnforcementPayoutGate{}, f.tenantID, wr.ID, "bank_transfer", testSubmitActor())
+	if err != nil {
+		t.Fatalf("ClaimForDispatch: %v", err)
+	}
+	gr := DispatchWithdraw(context.Background(), nil, MockCredentialResolver{}, provider, claim.Attempt)
+	if err := ApplyPayoutResult(context.Background(), pool, f.tenantID, wr.ID, claim.Attempt, gr, EvidenceSync); err != nil {
+		t.Fatalf("ApplyPayoutResult: %v", err)
+	}
+	// The caller's own stale snapshot: a real, pending dispatch.
+	staleSnapshot := mustGetAttempt(t, pool, f.tenantID, claim.Attempt.ID)
+	if staleSnapshot.State != AttemptPending {
+		t.Fatalf("setup: expected a real pending dispatch, got %s", staleSnapshot.State)
+	}
+
+	// A REAL concurrent transition (T11) lands BEFORE the call below's own
+	// transaction starts - the caller never sees it.
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return MarkAmbiguousFromPending(ctx, tx, staleSnapshot.ID, EvidenceQueryStatus, time.Now().Add(time.Minute))
+	}); err != nil {
+		t.Fatalf("simulate concurrent T11: %v", err)
+	}
+	afterConcurrentTransition := mustGetAttempt(t, pool, f.tenantID, staleSnapshot.ID)
+	if afterConcurrentTransition.State != AttemptAmbiguous {
+		t.Fatalf("setup: expected the concurrent transition to move the attempt to ambiguous, got %s", afterConcurrentTransition.State)
+	}
+
+	// applyPayoutStatusEvidence is called with the STALE snapshot (still
+	// `pending`) and a "still pending" QueryStatus result - its own switch
+	// decides on the stale `pending` case (RescheduleNonTerminal, a
+	// state-agnostic CAS), which still succeeds against the now-`ambiguous`
+	// row without error.
+	actor := &SubmitActor{StaffID: uuid.New(), IPAddress: "203.0.113.20", UserAgent: "resolve-test-agent", RequestID: "req-pc3-audit"}
+	gr2 := GateResult[StatusResult]{Value: StatusResult{ProviderReference: *staleSnapshot.ProviderReference, Outcome: OutcomePending}, Class: ErrorClassPending}
+	if err := applyPayoutStatusEvidence(context.Background(), pool, f.tenantID, wr.ID, staleSnapshot, gr2, EvidenceQueryStatus, time.Now().Add(30*time.Second), actor); err != nil {
+		t.Fatalf("applyPayoutStatusEvidence: %v", err)
+	}
+
+	final := mustGetAttempt(t, pool, f.tenantID, staleSnapshot.ID)
+	if final.State != AttemptAmbiguous {
+		t.Fatalf("expected the attempt to remain ambiguous (RescheduleNonTerminal never changes state), got %s", final.State)
+	}
+
+	var before, after, noOp string
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx,
+			`SELECT metadata->>'attempt_state_before', metadata->>'attempt_state_after', metadata->>'no_op'
+			 FROM audit_log WHERE action = 'withdrawal.resolve_attempted.http' AND target_id = $1`,
+			wr.ID.String()).Scan(&before, &after, &noOp)
+	}); err != nil {
+		t.Fatalf("query audit_log metadata: %v", err)
+	}
+	if before != string(AttemptAmbiguous) {
+		t.Fatalf("P-C3 regression: expected attempt_state_before=ambiguous (read under the lock, matching the REAL pre-transaction state), got %q (the caller's stale snapshot said %q)", before, staleSnapshot.State)
+	}
+	if after != string(AttemptAmbiguous) {
+		t.Fatalf("P-C3 regression: expected attempt_state_after=ambiguous (RescheduleNonTerminal is a genuine no-op), got %q", after)
+	}
+	if noOp != "true" {
+		t.Fatalf("P-C3 regression: expected metadata no_op=true for a before==after resolve, got %q", noOp)
+	}
+}
+
+// TestEscalateAmbiguousPayout_CodeReview_UnintendedConflictIsLoud pins the
+// code review's own hardening (rv-prh-i1-payout-code-review.md, e48c8e7):
+// escalateAmbiguousPayout must swallow Escalate's ErrAttemptStateConflict
+// ONLY when a re-read confirms one of the two legitimate reasons (the
+// attempt is already terminal, or already escalated) - never for any
+// OTHER reason a 0-row CAS can occur (e.g. the row is simply gone). A
+// nonexistent attempt ID reproduces exactly that unintended case
+// deterministically: Escalate's own CAS matches 0 rows (conflict), and the
+// re-read must surface a real, loud error (never a silent nil that would
+// otherwise re-lease and skip this row forever).
+func TestEscalateAmbiguousPayout_CodeReview_UnintendedConflictIsLoud(t *testing.T) {
+	pool := depositV2ScratchPool(t)
+	f := seedPayoutFixture(t, pool, 100_000, true)
+
+	sweeper := &Sweeper{Pool: pool}
+	ghost := PaymentAttempt{ID: uuid.New(), TenantID: f.tenantID}
+	err := sweeper.escalateAmbiguousPayout(context.Background(), f.tenantID, ghost, time.Now().Add(time.Minute), "test-ghost")
+	if err == nil {
+		t.Fatalf("code review regression: expected a loud error for an unintended (nonexistent-row) conflict, got nil")
+	}
+	if !errors.Is(err, ErrAttemptNotFound) {
+		t.Fatalf("expected ErrAttemptNotFound from the re-read, got %v", err)
 	}
 }

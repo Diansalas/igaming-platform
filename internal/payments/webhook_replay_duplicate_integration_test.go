@@ -13,6 +13,7 @@ package payments
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 
@@ -272,6 +273,19 @@ func TestWebhook_ConcurrentDuplicates_SecondBlocksOnReceiptKey(t *testing.T) {
 		<-racer.done
 		t.Fatalf("the second delivery is blocked by someone other than the first delivery (pid %d), blocked by %v", blocker.pid, blockingPIDs)
 	}
+	// A7-C1 (FH-6): the blocker holds BOTH the R0 receipt row and, later in
+	// the same held transaction, the deposit_intents parent lock -
+	// "blocked by blocker.pid" alone does not prove WHICH of the two the
+	// racer queued on, since pg_locks represents both kinds of row-lock
+	// contention identically (locktype='transactionid', relation IS NULL -
+	// a plain pg_locks/pg_class relation join cannot tell them apart). The
+	// query text does: confirm the racer is still executing R0's own
+	// INSERT specifically.
+	if q := loBackendQuery(t, pool, racer.pid); !strings.Contains(q, "INSERT INTO payment_provider_events") {
+		blocker.release()
+		<-racer.done
+		t.Fatalf("the second delivery is blocked on something other than the R0 receipt insert: %q", q)
+	}
 
 	blocker.release()
 	<-racer.done
@@ -283,4 +297,5 @@ func TestWebhook_ConcurrentDuplicates_SecondBlocksOnReceiptKey(t *testing.T) {
 		t.Fatalf("expected exactly 1 ledger transaction after the second delivery unblocked, got %d", got)
 	}
 	loAssertBalanced(t, pool, f.tenantID)
+	loAssertProjectionMatchesRebuild(t, pool, f.tenantID)
 }

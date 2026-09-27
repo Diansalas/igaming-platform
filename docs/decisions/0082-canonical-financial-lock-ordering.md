@@ -189,6 +189,28 @@ struck through, not deleted, below.)*
 | deposit reversal (`orchestrator.go:989`) | ~~implicit projections **`player_cash` → `psp_clearing`**~~ **L2** `ledger_transactions` row `FOR UPDATE` on the ORIGINAL deposit (`receiveDepositReversalCallback`'s S2 step) → implicit projections **`player_cash` → `psp_clearing`** | ~~no~~ **yes — the new S2 lock, taken before `GetOrCreateAccounts`/L3/`Post`** |
 | `postDepositReversalTombstone` (`orchestrator.go:1027`) | no entries — no projection locks | — |
 
+*(Rows added 2026-09-27, Amendment A7, as-built update per (7)'s own
+promise — "the §1.6 / §1.7 inventory rows are updated to the as-built
+sequence when PRH-I1 lands" — PRH-I1's payout dispatch path, `payment_attempts`,
+T1p and R0 as they exist in the codebase today, not the (6) design table's
+own restatement of the same paths.)*
+
+| Site | Locks, in order | Outside `Post`? |
+| --- | --- | --- |
+| `InitiateDepositAttempt` (T1, `deposit_v2.go`) | L0.4 RG / KYC deposit gate (plain reads, no lock) → `deposit_intents` INSERT → `payment_attempts` INSERT → commit; no provider call in this tx | n/a — no `Post` here |
+| `driveCreatedAttempt` (T2 per-item claim, `drive.go`) | L0.4 RG + KYC deposit gate (before any lock, per rule R8/(5)) → `deposit_intents` `FOR UPDATE` → `ClaimCreatedForSubmission` (`payment_attempts` CAS) → commit; phase B/C run in SEPARATE, later transactions, never holding this lock across the provider call | n/a — no `Post` here |
+| `ApplyReceiptEvidence` (deposit branch, `receipt.go`) | R0 `payment_provider_events` INSERT (this transaction's first write, unconditionally, before any lock) → `deposit_intents` `FOR UPDATE` → attempt re-read + CAS → `postDepositSuccess`'s own `Post` (ledger key insert, then implicit projections) | yes — R0 and the parent/attempt locks are before `Post`; `Post` itself is unchanged from its own §1.6 row above |
+| `ClaimForDispatch` (T1p, `payout.go`) | A0 routing (read-only, no lock, outside any tx) → `withdrawal.LockApprovedForSubmission` (`withdrawal_requests` `FOR UPDATE`) → payout KYC gate (plain read) → kill-switch `NOT EXISTS` predicate (no lock) → either `withdrawal.DenyForCompliance` (hold reversal: implicit projections, no L2) or `withdrawal.MarkSubmittedPending` + `InsertSubmittingAttempt`; no provider call in this tx | n/a — a deny posts via `Post`; an allow posts nothing here (phase B/C, later) |
+| `applyPayoutStatusEvidence` / `PollPayoutStatus` (T6/T10/T11/T12 evidence, `payout.go`) | `withdrawal.LockForPayoutEvidence` (`withdrawal_requests` `FOR UPDATE`, taken by the WRAPPER transaction and re-taken, a harmless no-op, by the inner evidence-mapping function) → attempt re-read (staff-audit "before" snapshot, FH-6/P-C3) → attempt CAS (state-dependent) → `payoutResolveAudit` (staff actor only) | success/decline branches post via `Post`; a reschedule/dispute/no-op does not |
+| `resubmitPayoutAmbiguous` (T12, `payout_sweep.go`) | `PollPayoutStatus` first (its own lock, above), read-only otherwise until still-ambiguous → `withdrawal.lockSubmittedRequest` (`withdrawal_requests` `FOR UPDATE`) → kill-switch predicate (no lock) → payout KYC gate (plain read) → `ResubmitAmbiguous` (attempt CAS) | n/a — no `Post` on this path (a resend, not a posting) |
+| `claimBatch` (sweeper batch lease, `sweeper.go`) | `payment_attempts` `FOR UPDATE SKIP LOCKED`, lease columns only (`lease_owner`/`lease_until`/`next_action_at`) — **as of FH-6's V1 fix (`AND NOT (state = 'submitting' AND lease_until > now() AND lease_owner IS DISTINCT FROM 'sweeper-batch')`), the SELECT additionally excludes a `submitting` row under a live non-batch lease (SP-C)**; no parent lock, by design (the one exception to "parent before attempt", per §1.6's own rule) | n/a — no `Post` here |
+
+**Finding (FH-6, informational, not a new defect):** `ClaimForDispatch`
+takes `withdrawal_requests` before ever touching `payment_attempts` (L1
+before the child row), matching Amendment A7's own rule that a
+`payment_attempts` row lock is always preceded by its parent's. R0
+precedes L1 in every receipt-path row above, matching the same rule.
+
 **Finding LOCK-1b (new, this inventory):** a deposit and a reversal of a
 *different* deposit for the same wallet+asset, running concurrently, take
 `(psp_clearing, player_cash)` in exactly opposite orders. This is the
@@ -205,6 +227,19 @@ previously recorded.
 | `Fail` (:1139, `Post` at :1169) | request row `FOR UPDATE`; implicit projections `player_withdrawal_hold` → `player_cash` | yes |
 | `Cancel` (:1228, `Post` at :1246) | request row `FOR UPDATE`; implicit projections `player_withdrawal_hold` → `player_cash` | yes |
 | `Approve` / `MarkSubmitted` / `LockApprovedForSubmission` / `LockSubmittedForResolution` | request row `FOR UPDATE` only, no posting | — |
+
+*(Row added 2026-09-27, Amendment A7, as-built update per (7)'s own
+promise: `LockApprovedForSubmission` and the newer `LockForPayoutEvidence`
+are the withdrawal-side locks `internal/payments`'s T1p/T6/T10/T11/T12
+paths actually take today - see §1.6's own new rows for the full
+sequence each is embedded in. Listed here too since this table is
+`internal/withdrawal`'s own inventory and these functions live in that
+package, even though the callers are in `internal/payments`.)*
+
+| Site | Locks, in order | Outside `Post`? |
+| --- | --- | --- |
+| `LockApprovedForSubmission` (called from `payments.ClaimForDispatch`, T1p) | request row `FOR UPDATE` only, no posting in this call - a deny (KYC/kill-switch) posts via `DenyForCompliance`'s own implicit projections in the SAME caller transaction | posting is the caller's, not this function's |
+| `LockForPayoutEvidence` (called from `payments.applyPayoutStatusEvidence`/`PollPayoutStatus`'s no-reference fallback, T6/T10/T11/T12) | request row `FOR UPDATE` only, no posting in this call - a success/decline posts via `applyPayoutSuccess`/`applyPayoutDecline`'s own `Post` call in the SAME caller transaction, after this lock | posting is the caller's, not this function's |
 
 **Finding LOCK-1c (new, this inventory):** `RequestWithdrawal` takes
 `(player_cash, player_withdrawal_hold)`; `Reject`, `Fail` and `Cancel`
@@ -1719,6 +1754,26 @@ the waiter blocks, and each ending with the ledger balance invariant:
 The §1.6 / §1.7 inventory rows are updated to the as-built sequence when
 PRH-I1 lands, as A4 and A6 did.
 
-**Status.** Design `ACCEPTED`. `NOT IMPLEMENTED` (target PRH-I1,
-`payments` + `ledger-finance`). `IMPLEMENTED` requires the tests in (7)
-and a `ledger-finance` gate review of the as-built lock sequence.
+*(Updated 2026-09-27, FH-6/FH-6 round 2: the §1.6/§1.7 rows above ARE now
+updated to the as-built sequence, per the promise directly above. Status
+revised accordingly - see below.)*
+
+**Status.** Design `ACCEPTED`. `PARTIALLY IMPLEMENTED` (`payments` +
+`ledger-finance`, as of 2026-09-27). What holds: T1p, R0, and the deposit
+T1/T2/evidence paths match the (6) design table and the as-built §1.6/§1.7
+rows above; the sweeper batch lease (`claimBatch`) now also closes SP-C
+(FH-6 ledger-finance ruling, V1: `AND NOT (state = 'submitting' AND
+lease_until > now() AND lease_owner IS DISTINCT FROM 'sweeper-batch')`,
+plus its own permanent reproduction test); most of (7)'s required tests
+exist and pass (sweeper-vs-callback on a withdrawal; a deferred receipt vs.
+a fresh callback; N1 self-exclusion; the RG-gate-after-parent-lock and
+SKIP-LOCKED mutation checks; the two `SecondBlocksOnReceiptKey` R0 tests,
+now asserting the block is specifically on the receipt-key insert, not
+merely "blocked by the right pid"). What is still open, `NOT IMPLEMENTED`:
+the sweeper-vs-callback test on the SAME DEPOSIT intent (#1a) is owned by
+the double-credit/A7-TOMB-1 fix and deliberately excluded from this
+branch (see `PAY-DOUBLE-CREDIT-1`, `docs/plans/payment-readiness/
+double-credit-reconciliation.md`); the receipt-after-L1-lock mutation
+check (#5c) belongs to the same owner. `IMPLEMENTED` requires both of
+those, plus a final `ledger-finance` gate review of the complete, as-built
+lock sequence including their fix.

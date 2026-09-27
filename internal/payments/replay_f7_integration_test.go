@@ -12,6 +12,7 @@ package payments
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 
@@ -184,6 +185,19 @@ func TestF7Payments_ConcurrentIdenticalReversalRedelivery_SecondBlocksOnReceiptK
 		<-racer.done
 		t.Fatalf("the second delivery is blocked by someone other than the first delivery (pid %d), blocked by %v", blocker.pid, blockingPIDs)
 	}
+	// A7-C1 (FH-6): the blocker holds BOTH the R0 receipt row and, later in
+	// the same held transaction, the deposit_intents parent lock (see
+	// applyReversalReceiptEvidence's own posting-branch ordering: R0 first,
+	// then `SELECT ... FOR UPDATE`) - "blocked by blocker.pid" alone does
+	// not prove WHICH of the two the racer queued on, since pg_locks
+	// represents both kinds of row-lock contention identically
+	// (locktype='transactionid', relation IS NULL). The query text does:
+	// confirm the racer is still executing R0's own INSERT specifically.
+	if q := loBackendQuery(t, e.pool, racer.pid); !strings.Contains(q, "INSERT INTO payment_provider_events") {
+		blocker.release()
+		<-racer.done
+		t.Fatalf("the second delivery is blocked on something other than the R0 receipt insert: %q", q)
+	}
 
 	blocker.release()
 	<-racer.done
@@ -195,6 +209,7 @@ func TestF7Payments_ConcurrentIdenticalReversalRedelivery_SecondBlocksOnReceiptK
 		t.Fatalf("player_cash = %d, want 0 (reversed exactly once)", got)
 	}
 	loAssertBalanced(t, e.pool, e.f.tenantID)
+	loAssertProjectionMatchesRebuild(t, e.pool, e.f.tenantID)
 }
 
 // Site #21: concurrent reversals naming one never-posted original all

@@ -13,6 +13,7 @@ package payments
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -234,6 +235,23 @@ func TestReceiveCallback_ConcurrentDuplicateCallbacks_SecondBlocksOnReceiptKey(t
 		<-racer.done
 		t.Fatalf("the second delivery is blocked by someone other than the first delivery (pid %d), blocked by %v", blocker.pid, blockingPIDs)
 	}
+	// A7-C1 (FH-6): pg_locks/pg_class cannot distinguish this wait from any
+	// OTHER row-lock wait the same blocker might also hold (a `FOR UPDATE`
+	// row wait is locktype='transactionid' with relation IS NULL - see
+	// a7_lockorder_integration_test.go's own doc comment on this exact
+	// Postgres behavior) - the blocker here holds BOTH the R0 receipt row
+	// AND, later in the same held transaction, the parent lock, so a bare
+	// "blocked by blocker.pid" check does not by itself prove WHICH of the
+	// two the racer queued on. The query text does: the racer's own
+	// backend, while blocked, must still be executing R0's own
+	// payment_provider_events INSERT specifically, not e.g. a later
+	// deposit_intents FOR UPDATE this same delivery would only reach AFTER
+	// that insert returns.
+	if q := loBackendQuery(t, pool, racer.pid); !strings.Contains(q, "INSERT INTO payment_provider_events") {
+		blocker.release()
+		<-racer.done
+		t.Fatalf("the second delivery is blocked on something other than the R0 receipt insert: %q", q)
+	}
 
 	blocker.release()
 	<-racer.done
@@ -245,6 +263,7 @@ func TestReceiveCallback_ConcurrentDuplicateCallbacks_SecondBlocksOnReceiptKey(t
 		t.Fatalf("expected exactly one deposit's worth (9000) after the second delivery unblocked, got %d", balance)
 	}
 	loAssertBalanced(t, pool, f.tenantID)
+	loAssertProjectionMatchesRebuild(t, pool, f.tenantID)
 }
 
 // --- Item 4: same key, different payload -----------------------------------

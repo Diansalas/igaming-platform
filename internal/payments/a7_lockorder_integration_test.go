@@ -457,7 +457,7 @@ func TestA7_1b_SweeperClaimVsCallbackPhaseC_SameWithdrawal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ClaimForDispatch: %v", err)
 	}
-	gr := DispatchWithdraw(context.Background(), MockCredentialResolver{}, provider, claim.Attempt)
+	gr := DispatchWithdraw(context.Background(), nil, MockCredentialResolver{}, provider, claim.Attempt)
 	if err := ApplyPayoutResult(context.Background(), pool, f.tenantID, wr.ID, claim.Attempt, gr, EvidenceSync); err != nil {
 		t.Fatalf("ApplyPayoutResult: %v", err)
 	}
@@ -653,15 +653,25 @@ func TestA7_3_DeferredReceiptAppliedVsFreshCallback_SameAttempt(t *testing.T) {
 		t.Fatalf("expected the attempt to converge to succeeded exactly once, got %s", final.State)
 	}
 
+	// Code review (rv-prh-i1-payout-code-review.md, e48c8e7): the original
+	// check here - `SELECT count(DISTINCT ledger_transaction_id) FROM
+	// payment_attempts WHERE id = $1` - reads one column of ONE row, so it
+	// can never exceed 1 regardless of how many times evidence was
+	// applied; it proved nothing about double-posting. Count actual
+	// `ledger_transactions` rows for the deposit instead, keyed by
+	// `correlation_id` (postDepositSuccess's own `CorrelationID:
+	// intent.ID` - see orchestrator.go) - the real, structural signal for
+	// "how many deposit postings exist for this intent".
 	var postingCount int
 	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		return tx.QueryRow(ctx, `SELECT count(DISTINCT ledger_transaction_id) FROM payment_attempts
-			WHERE id = $1 AND ledger_transaction_id IS NOT NULL`, res.Attempt.ID).Scan(&postingCount)
+		return tx.QueryRow(ctx, `SELECT count(*) FROM ledger_transactions
+			WHERE tenant_id = $1 AND transaction_type = 'deposit' AND correlation_id = $2`,
+			f.tenantID, *res.Attempt.DepositIntentID).Scan(&postingCount)
 	}); err != nil {
-		t.Fatalf("count distinct ledger postings: %v", err)
+		t.Fatalf("count deposit ledger transactions for the intent: %v", err)
 	}
 	if postingCount != 1 {
-		t.Fatalf("expected exactly 1 ledger posting for the attempt, got %d", postingCount)
+		t.Fatalf("expected exactly 1 ledger posting for the deposit intent, got %d", postingCount)
 	}
 
 	assertLedgerBalanced(t, pool, f.tenantID)

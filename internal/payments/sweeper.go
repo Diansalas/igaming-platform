@@ -147,24 +147,25 @@ func (s *Sweeper) RunOnce(ctx context.Context, tenantIDs []uuid.UUID) SweepStats
 // lock - SKIP LOCKED guarantees that. This is the one exception to
 // "parent before attempt" (ADR 0095 §14).
 //
-// PAY-SEC-S-L2 (rv-prh-i1-payout-security.md): this selects (and re-leases)
-// purely by next_action_at, same as before - it does NOT additionally
-// exclude a row under a live non-batch lease. An attempt tried (and
-// reverted after regressing a wide swath of the sweeper suite): filtering
-// the SELECT on "no live non-batch lease" broke the sweeper's own ORDINARY
-// cross-tick continuation, since a per-item claim/resend deliberately sets
-// next_action_at EARLIER than its own lease_until (the lease is a
-// crash-recovery safety net, not "do not look again before this expires")
-// - the same sweeper legitimately revisiting a row it is itself still
-// driving forward is indistinguishable, from lease_owner/lease_until/
-// next_action_at alone, from SP-C's genuinely adversarial stale-snapshot
-// race. SP-C itself therefore remains UNFIXED here; see
-// docs/plans/payment-readiness/prh-i1-payout-launch-conditions.md for the
-// honest status and the two alternatives the security review offered
-// (this file's own SELECT vs. RescheduleNonTerminal never regressing
-// next_action_at below a live lease_until) - the second was not attempted
-// this round given the first's demonstrated blast radius and the risk of
-// a similarly subtle regression without much more extensive testing.
+// PAY-SEC-S-L2/SP-C (rv-prh-i1-payout-security.md; FH-6 ledger-finance
+// ruling on `4b544f5`, docs/plans/payment-readiness/rv-prh-i1-payout-ledger.md):
+// V1. An earlier attempt at this same fix excluded any row under a live
+// non-batch lease REGARDLESS of state, which regressed a wide swath of the
+// sweeper suite - a per-item claim/resend deliberately sets next_action_at
+// EARLIER than its own lease_until while still `submitting` (H3/B2's own
+// crash-recovery pattern: the lease is there to detect an abandoned claim,
+// not to defer the sweeper's own ordinary next look), so a bare
+// lease-liveness check could not tell that apart from SP-C's actual shape.
+// The real distinguishing fact ledger-finance's reproduction isolated:
+// SP-C's own race requires the row to STILL be `submitting` with a live,
+// non-batch lease AND a stale (already-due) next_action_at - every one of
+// the regressed tests instead had phase C already move the row OUT of
+// `submitting` (to `ambiguous`/`pending`/`created`) before the next claim,
+// which this predicate does not touch at all. Restricting the exclusion to
+// `state = 'submitting'` closes SP-C (a T12 resend's phase B is never
+// mistaken for exhausted crash-recovery while it may still be running)
+// without regressing the ordinary cross-tick continuation of a
+// NON-submitting row.
 func (s *Sweeper) claimBatch(ctx context.Context, tenantID uuid.UUID) ([]uuid.UUID, error) {
 	leaseUntil := time.Now().Add(s.Lease)
 	var ids []uuid.UUID
@@ -172,10 +173,11 @@ func (s *Sweeper) claimBatch(ctx context.Context, tenantID uuid.UUID) ([]uuid.UU
 		rows, err := tx.Query(actx,
 			`SELECT id FROM payment_attempts
 			 WHERE tenant_id = $1 AND next_action_at IS NOT NULL AND next_action_at <= now()
+			   AND NOT (state = 'submitting' AND lease_until > now() AND lease_owner IS DISTINCT FROM $3)
 			 ORDER BY next_action_at
 			 LIMIT $2
 			 FOR UPDATE SKIP LOCKED`,
-			tenantID, s.batchSize())
+			tenantID, s.batchSize(), SweeperBatchLeaseOwner)
 		if err != nil {
 			return fmt.Errorf("select due attempts: %w", err)
 		}
