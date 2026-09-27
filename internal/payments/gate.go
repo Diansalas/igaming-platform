@@ -51,6 +51,13 @@ type GateResult[T any] struct {
 	// with the raw adapter error's message when that message could carry
 	// vendor response detail - only allow-listed reason text.
 	Err error
+	// Attempted is true only once fn was actually invoked (step 6) - a
+	// pre-flight refusal (steps 1-4) never sets it. Callers use this to
+	// decide whether to feed the breaker (breaker.go's own doc comment:
+	// "never for a pre-flight refusal the gate itself made"), since a
+	// gate-level refusal proves nothing about the provider's own
+	// transport health.
+	Attempted bool
 }
 
 // AdapterCall is the shape of a single outbound adapter method, already
@@ -63,11 +70,20 @@ type AdapterCall[T any] func(ctx context.Context, call CallContext) (T, ErrorCla
 // attempt and domain, without importing payment_attempts' own richer
 // PaymentAttempt type into every call site's signature.
 type callProviderInput struct {
-	TenantID       uuid.UUID
-	ProviderID     string
-	AttemptState   AttemptState
-	ClaimToken     uuid.UUID
-	ExpectedClaim  uuid.UUID
+	TenantID      uuid.UUID
+	ProviderID    string
+	AttemptState  AttemptState
+	ClaimToken    uuid.UUID
+	ExpectedClaim uuid.UUID
+	// ReadOnly must be set true ONLY for a read-only call (QueryStatus,
+	// §5.3: "Always retryable... concurrent duplicates are harmless"),
+	// which does not need the committed-submitting-claim check step 2
+	// enforces for Deposit/Withdraw (INV-IO-2 exists specifically to
+	// prevent an uncommitted MONEY-MOVING call, not a status read). The
+	// zero value (false) is the strict, money-moving check - a caller
+	// that forgets to set this for an actual read-only call simply fails
+	// closed into the stricter check, never the reverse.
+	ReadOnly       bool
 	IdempotencyKey string
 	Domain         string // "payments", "casino" or "kyc" (S95-C8(b))
 	Manifest       OperationManifest
@@ -86,9 +102,11 @@ func callProvider[T any](ctx context.Context, resolver OutboundCredentialResolve
 			Err: fmt.Errorf("%w: provider_call_refused_tx_held", ErrProviderCallRefused)}
 	}
 
-	// Step 2 (INV-IO-2): the caller must present the state/claim-token it
-	// read AFTER its own committed claim.
-	if in.AttemptState != AttemptSubmitting || in.ClaimToken == uuid.Nil || in.ClaimToken != in.ExpectedClaim {
+	// Step 2 (INV-IO-2): for a money-moving call, the caller must present
+	// the state/claim-token it read AFTER its own committed claim. A
+	// read-only call (QueryStatus) is exempt - see ReadOnly's own doc
+	// comment.
+	if !in.ReadOnly && (in.AttemptState != AttemptSubmitting || in.ClaimToken == uuid.Nil || in.ClaimToken != in.ExpectedClaim) {
 		return GateResult[T]{Value: zero, Class: ErrorClassNotSent,
 			Err: fmt.Errorf("%w: no committed submitting claim for this call", ErrProviderCallRefused)}
 	}
@@ -133,7 +151,7 @@ func callProvider[T any](ctx context.Context, resolver OutboundCredentialResolve
 	if callErr != nil {
 		callErr = fmt.Errorf("provider call error: %s", redactedReason(callErr))
 	}
-	return GateResult[T]{Value: result, Class: class, Err: callErr}
+	return GateResult[T]{Value: result, Class: class, Err: callErr, Attempted: true}
 }
 
 // safeCall isolates the panic recovery so callProvider's own control flow

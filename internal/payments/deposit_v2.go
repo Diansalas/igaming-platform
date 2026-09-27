@@ -81,6 +81,24 @@ func (o *Orchestrator) InitiateDepositAttempt(
 		return InitiateDepositAttemptResult{}, err
 	}
 
+	// --- Phase A0: load routing candidates (read-only tx), then rank ---
+	// OUTSIDE any transaction (ADR 0095 §9.6/§5.1: "health filter outside
+	// the tx"). RankRoutingCandidates takes no tx parameter at all, so
+	// this is a structural guarantee, not a comment - see breaker.go and
+	// RankRoutingCandidates' own doc comment.
+	var candidates []ProviderCapability
+	if err := pool.WithTenantReadOnly(ctx, params.Scope.TenantID, func(actx context.Context, tx pgx.Tx) error {
+		var err error
+		candidates, err = ListRoutingCandidates(actx, tx, params.Scope.TenantID, params.Scope.BrandID)
+		return err
+	}); err != nil {
+		return InitiateDepositAttemptResult{}, fmt.Errorf("payments: load routing candidates: %w", err)
+	}
+	routedProvider, routedCapability, routeErr := RankRoutingCandidates(ctx, candidates, o.providers, o.breaker, RoutingRequest{
+		TenantID: params.Scope.TenantID, BrandID: params.Scope.BrandID, AssetCode: params.AssetCode,
+		PaymentMethod: params.PaymentMethod, Amount: params.Amount, Operation: OperationDeposit,
+	})
+
 	// --- Phase A: commit the intent to call (or a pre-call denial) ----
 	var (
 		intent         DepositIntent
@@ -188,21 +206,13 @@ func (o *Orchestrator) InitiateDepositAttempt(
 			return err
 		}
 
-		// Route. NOTE (residual, explicitly named): RouteProvider still
-		// runs its health filter INSIDE this tx, which is a known,
-		// pre-existing gap against §9.6's "outside a tx" requirement -
-		// splitting ListRoutingCandidates/Rank fully is not repeated here
-		// and stays open for the step that rebuilds routing/breaker
-		// (§9.6) on top of this one.
-		p, cap2, err := o.RouteProvider(actx, tx, RoutingRequest{
-			TenantID: intent.TenantID, BrandID: intent.BrandID, AssetCode: intent.AssetCode,
-			PaymentMethod: intent.PaymentMethod, Amount: intent.Amount, Operation: OperationDeposit,
-		})
-		if err != nil {
+		// Routing was already decided in phase A0, entirely outside any
+		// transaction - this tx only ever reads the RESULT.
+		if routeErr != nil {
 			intent, err = o.finalizeDeclined(actx, tx, intent, nil, nil, "no_routable_provider")
 			return err
 		}
-		provider, capability = p, cap2
+		provider, capability = routedProvider, routedCapability
 
 		claimToken = uuid.New()
 		// Manifest is read from the ADAPTER's own declared capability
@@ -238,105 +248,48 @@ func (o *Orchestrator) InitiateDepositAttempt(
 		AttemptState: attempt.State, ClaimToken: claimToken, ExpectedClaim: claimToken,
 		IdempotencyKey: attempt.ExternalIdempotencyKey, Domain: "payments", Manifest: manifest,
 	}
-	gr := callProvider(ctx, credResolver, in, func(callCtx context.Context, cc CallContext) (DepositResult, ErrorClass, error) {
-		res, err := provider.Deposit(callCtx, DepositRequest{
-			MerchantReference: attempt.MerchantReference, Amount: attempt.Amount,
-			AssetCode: attempt.AssetCode, PaymentMethod: attempt.PaymentMethod,
-		})
-		if err != nil {
-			return res, ErrorClassAmbiguous, err
-		}
-		switch res.Outcome {
-		case OutcomePending:
-			return res, ErrorClassPending, nil
-		case OutcomeSucceeded:
-			if !manifest.SyncSuccessPossible || res.ProviderReference == "" {
-				// §4.4 precondition 3 / §8: a manifest without
-				// SyncSuccessPossible, or a success with no reference,
-				// is never trusted as a definite synchronous success.
-				return res, ErrorClassAmbiguous, nil
-			}
-			return res, ErrorClassSucceeded, nil
-		case OutcomeDeclined:
-			return res, ErrorClassDefiniteDecline, nil
-		default:
-			return res, ErrorClassAmbiguous, nil
-		}
-	})
+	gr := callProvider(ctx, credResolver, in, depositAdapterCall(provider, attempt, manifest))
+
+	// Feed the breaker (§9.6) - plain in-memory, no tx, no I/O - but only
+	// for a result that actually reached the adapter's own transport
+	// (gr.Attempted), never for a gate-level pre-flight refusal.
+	if gr.Attempted {
+		o.breaker.RecordResult(attempt.TenantID, capability.ProviderID, gr.Class)
+	}
 
 	// --- Phase C: apply the evidence, CAS, in a fresh tx ---------------
+	var cascadeChild *PaymentAttempt
 	err = pool.WithTenant(ctx, attempt.TenantID, func(actx context.Context, tx pgx.Tx) error {
 		// Lock parent before attempt (ADR 0095 §14).
 		if _, err := tx.Exec(actx, `SELECT id FROM deposit_intents WHERE id = $1 FOR UPDATE`, intent.ID); err != nil {
 			return fmt.Errorf("payments: lock deposit intent: %w", err)
 		}
-
-		nextPoll := time.Now().Add(30 * time.Second)
-		res := gr.Value
-		switch gr.Class {
-		case ErrorClassNotSent:
-			return MarkNotSent(actx, tx, attempt.ID, claimToken, nextPoll)
-
-		case ErrorClassPending:
-			if err := MarkAccepted(actx, tx, attempt.ID, EvidenceSync, res.ProviderReference, nextPoll); err != nil {
-				return err
-			}
-			return setIntentAttempt(actx, tx, intent.ID, &capability.ProviderID, &res.ProviderReference, DepositIntentPending)
-
-		case ErrorClassSucceeded:
-			updated, err := o.postDepositSuccess(actx, tx, intent, capability.ProviderID, res.ProviderReference, attempt.Amount, attempt.AssetCode)
-			if err != nil {
-				return err
-			}
-			intent = updated
-			return ApplySuccess(actx, tx, attempt.ID, SuccessEvidence{
-				Evidence: EvidenceSync, ProviderReference: res.ProviderReference, LedgerTransactionID: intent.LedgerTransactionID,
-			})
-
-		case ErrorClassDefiniteDecline:
-			var refPtr *string
-			if res.ProviderReference != "" {
-				refPtr = &res.ProviderReference
-			}
-			updated, err := o.finalizeDeclined(actx, tx, intent, &capability.ProviderID, refPtr, res.DeclineReason)
-			if err != nil {
-				return err
-			}
-			intent = updated
-			cascadable := res.Cascadable
-			return ApplyDecline(actx, tx, attempt.ID, DeclineEvidence{
-				Evidence: EvidenceSync, Reason: res.DeclineReason, Stage: DeclineAtSubmission,
-				Cascadable: &cascadable, ProviderRef: refPtr,
-			})
-
-		default: // ErrorClassAmbiguous and anything unclassified
-			var refPtr *string
-			if res.ProviderReference != "" {
-				refPtr = &res.ProviderReference
-			}
-			updated, err := o.finalizeAmbiguous(actx, tx, intent, &capability.ProviderID, refPtr, "sync_ambiguous")
-			if err != nil {
-				return err
-			}
-			intent = updated
-			return MarkAmbiguousFromSubmitting(actx, tx, attempt.ID, EvidenceSync, nextPoll)
-		}
+		updated, child, err := o.applyDepositCallResult(actx, tx, intent, attempt, capability, claimToken, gr, EvidenceSync, false)
+		intent = updated
+		cascadeChild = child
+		return err
 	})
 	if err != nil {
 		return InitiateDepositAttemptResult{}, err
 	}
 
-	updatedAttempt, err := func() (PaymentAttempt, error) {
-		var a PaymentAttempt
-		err := pool.WithTenant(ctx, attempt.TenantID, func(actx context.Context, tx pgx.Tx) error {
-			var err error
-			a, err = GetAttemptByID(actx, tx, attempt.ID)
-			return err
-		})
-		return a, err
-	}()
+	updatedAttempt, err := getAttemptInTenant(ctx, pool, attempt.TenantID, attempt.ID)
 	if err != nil {
 		return InitiateDepositAttemptResult{}, err
+	}
+
+	// §4.6 case (a): a cascade-eligible SYNCHRONOUS decline is driven
+	// immediately by this same request's own driver - a bounded loop
+	// across cascade attempts, each its own A0/T2/B/C cycle, never an
+	// inline call inside the tx that just committed the previous
+	// decline.
+	for cascadeChild != nil {
+		var driven *PaymentAttempt
+		intent, updatedAttempt, driven, err = o.driveCreatedAttempt(ctx, pool, kycGate, credResolver, intent, *cascadeChild, false)
+		if err != nil {
+			return InitiateDepositAttemptResult{}, err
+		}
+		cascadeChild = driven
 	}
 
 	return InitiateDepositAttemptResult{Intent: intent, Attempt: updatedAttempt, AttemptCreated: true}, nil

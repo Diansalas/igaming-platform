@@ -262,12 +262,18 @@ type NewCreatedAttempt struct {
 }
 
 func InsertCreatedAttempt(ctx context.Context, tx pgx.Tx, in NewCreatedAttempt) (PaymentAttempt, error) {
+	// next_action_at is set to now() unconditionally (PRH-I1 step (c)):
+	// the sweeper's claim query (sweeper.go) only ever looks at
+	// next_action_at, for BOTH interactive and non-interactive 'created'
+	// rows - interactive rows are found the same way and then expired
+	// (T3) once older than the presence window, never resubmitted.
+	// Without this, a cascade row (§4.6) would never be picked up at all.
 	_, err := tx.Exec(ctx,
 		`INSERT INTO payment_attempts (
 			id, tenant_id, operation, deposit_intent_id, withdrawal_request_id, attempt_no,
 			excluded_provider_ids, payment_method, asset_code, amount, interactive,
-			merchant_reference, external_idempotency_key, state, last_evidence_kind
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'created','platform')`,
+			merchant_reference, external_idempotency_key, state, last_evidence_kind, next_action_at
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'created','platform', now())`,
 		in.ID, in.TenantID, in.Operation, in.DepositIntentID, in.WithdrawalRequestID, in.AttemptNo,
 		in.ExcludedProviderIDs, in.PaymentMethod, in.AssetCode, in.Amount, in.Interactive,
 		MerchantReferenceFor(in.ID), ExternalIdempotencyKeyFor(in.ID),
@@ -575,6 +581,21 @@ func Escalate(ctx context.Context, tx pgx.Tx, attemptID uuid.UUID, nextActionAt 
 	return casUpdate(ctx, tx, "T16 escalate",
 		`UPDATE payment_attempts SET escalated_at = now(), next_action_at = $2, updated_at = now()
 		 WHERE id = $1 AND escalated_at IS NULL`,
+		attemptID, nextActionAt,
+	)
+}
+
+// RescheduleNonTerminal performs a same-state write (no ADR 0095 §4.3
+// transition at all - the guard trigger allows OLD.state = NEW.state
+// unconditionally): it bumps next_action_at (poll backoff) and
+// poll_count for an attempt whose evidence this round was inconclusive
+// (still pending, still ambiguous, or a transport error on QueryStatus
+// itself). Refuses on a terminal attempt (next_action_at is already NULL
+// there, per the table's own CHECK).
+func RescheduleNonTerminal(ctx context.Context, tx pgx.Tx, attemptID uuid.UUID, nextActionAt time.Time) error {
+	return casUpdate(ctx, tx, "reschedule (no-op state change)",
+		`UPDATE payment_attempts SET next_action_at = $2, poll_count = poll_count + 1, updated_at = now()
+		 WHERE id = $1 AND next_action_at IS NOT NULL`,
 		attemptID, nextActionAt,
 	)
 }

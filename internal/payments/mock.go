@@ -157,6 +157,19 @@ const (
 	MockAmountPlayerDeclineNoCascade int64 = 111
 	MockAmountProviderDeclineCascade int64 = 222
 	MockAmountAmbiguous              int64 = 333
+	// MockAmountSyncSuccess (PRH-I1 step (c)) is EXPLICITLY TEST-SCOPED:
+	// no real PSP returns a synchronous, definite success for a hosted-
+	// redirect deposit (docs/decisions/0022 §6, DepositResult's own doc
+	// comment: "Outcome is never OutcomeSucceeded here"). This magic
+	// amount exists ONLY so a test can exercise T7's ledger-posting path
+	// (ledger.Post, SUM(debits)==SUM(credits), projection==rebuild)
+	// against a REAL (if synthetic) adapter call, instead of unit-testing
+	// applyEvidence's success branch in isolation. It requires the
+	// caller's manifest to declare SyncSuccessPossible=true (§4.4
+	// precondition 3 / §8) - without that, this same amount still comes
+	// back as Ambiguous, exactly like any other adapter's unsanctioned
+	// sync success would.
+	MockAmountSyncSuccess int64 = 444
 )
 
 type mockAttempt struct {
@@ -379,6 +392,9 @@ func (m *MockProvider) Deposit(_ context.Context, req DepositRequest) (DepositRe
 	case MockAmountAmbiguous:
 		m.attempts[ref] = &mockAttempt{kind: "deposit", amount: req.Amount, assetCode: req.AssetCode, outcome: OutcomeAmbiguous}
 		return DepositResult{Outcome: OutcomeAmbiguous, ProviderReference: ref}, nil
+	case MockAmountSyncSuccess:
+		m.attempts[ref] = &mockAttempt{kind: "deposit", amount: req.Amount, assetCode: req.AssetCode, outcome: OutcomeSucceeded}
+		return DepositResult{Outcome: OutcomeSucceeded, ProviderReference: ref}, nil
 	default:
 		m.attempts[ref] = &mockAttempt{kind: "deposit", amount: req.Amount, assetCode: req.AssetCode, outcome: OutcomePending}
 		return DepositResult{Outcome: OutcomePending, ProviderReference: ref, RedirectURL: "https://mock-psp.invalid/pay/" + ref}, nil
