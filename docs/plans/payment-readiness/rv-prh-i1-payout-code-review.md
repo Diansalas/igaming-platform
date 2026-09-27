@@ -482,3 +482,88 @@ T10. This was not in my original list. Route it to `ledger-finance` together wit
    the T1p row was committed when `Withdraw` was called) or delete it.
 4. Correct the test counts in the evidence file and in §27.11.
 5. N2/N3 can be follow-ups if recorded. N4/N6 go to `ledger-finance`.
+
+---
+
+# Re-review 2 — payout round 3 (`efc63f5`, merged at `07094a3`)
+
+- Method:
+  - detached worktree at `07094a3`, build, `go vet -tags=integration`;
+  - pinned `golangci-lint` 2.9.0, untagged and `--build-tags=integration`: **0 issues**;
+  - full `internal/payments` and `internal/withdrawal` suites **pass** on a private database
+    (created via `TEST_ADMIN_DATABASE_URL`, migrated to 0106, grants from
+    `deploy/init-app-role.sql`);
+  - `internal/httpserver`: everything passes except the 3 `TestResolutionIsolation_*` INV-POOL
+    timing tests. These also fail on the **unchanged `9324189` baseline**, run in a second
+    worktree on its own private DB (machine load average about 6–7), so they are environmental
+    and not caused by this round;
+  - probes from `probe2_copy.go.txt` re-run, plus one new probe;
+  - 16 anchored mutants, each reverted with `git checkout`, tree confirmed clean.
+- Both worktrees and both private DBs are removed. No probe code was committed.
+
+## Verdict
+
+**NOT READY — one regression (N7), plus N3 still open.**
+
+Every mutant from my list now dies, N1 is fixed, and the test-quality items are closed. But the
+R2 in-flight guard added this round breaks crash recovery under the sweeper's production lease.
+That re-opens B2. All 41 payout tests use `Sweeper{…}` with `Lease: 0`, which hides this.
+
+## Claimed items
+
+| Claim | Result |
+|---|---|
+| N1: reference on the attempt, converges by poll with zero resends | **Fixed.** `payoutMarkAmbiguousFromSubmitting` sets the reference with COALESCE, and `PollPayoutStatus` falls back to the withdrawal's reference. My N1 probe: 1 `QueryStatus`, attempt `succeeded`, withdrawal `completed`, 1 `Withdraw`. `TestSweeper_N1_…` kills M4. |
+| Mutant-pinning tests | **Done.** All of M1–M12 are **killed**. So are the new-code mutants R_N6 (reference-mismatch dispute), R_R2 (in-flight refusal) and R_N1_ref. R_N1_ref is killed partly because the SQL breaks, and the N1 test's attempt-reference assertion would catch it anyway. One minor survivor: R1's `isPayoutAttemptTerminal` early return. Stray non-definite evidence on a terminal attempt then falls through to `RescheduleNonTerminal`, which conflicts and returns an error instead of `nil`. Not a money issue; worth one test. |
+| Vacuous Reject-vs-claim test deleted | **Done.** |
+| "Never calls provider before commit" made falsifiable | **Done, with a narrow scope.** `commitVisibilitySpyProvider` reads the attempt from a separate connection when `Withdraw` runs, so a claim that returned without committing would fail. The test itself still sequences claim → dispatch, so it does not cover a handler that reorders them. Acceptable. |
+| Counts corrected to 41 | **Correct** (13 + 15 + 13). |
+| N2: lease refusal | **Fixed** for `/resolve`: `ErrPayoutDispatchInFlight` maps to 409, and the CAS predicate respects the lease. My N2 probe now gets the refusal. **But see N7.** |
+| N3: `/resolve` audit in the same tx | **Not addressed.** Neither `efc63f5` nor its commit message mentions N3. At `07094a3`, `withdrawal_handlers.go` still calls `PollPayoutStatus` (which commits `Complete`/`Fail`), then writes `withdrawal.resolve_attempted.http` in a **separate** `WithTenant` afterwards (around lines 1178 and 1218). The claim is not supported by the code. |
+| N6: echoed-reference mismatch disputes | **Fixed** (T10 plus audit; R_N6 killed). One small gap: the check compares against `attempt.ProviderReference` only. When the poll used the withdrawal-reference fallback (attempt reference NULL), an echo that conflicts with the withdrawal's reference is not compared. Low. |
+| R3 lock order | Withdrawal `FOR UPDATE` is now first in both phase-C transactions and in `applyPayoutSuccess`/`applyPayoutDecline`. That is consistent with T2/T12, which closes N4. `ledger-finance` owns that ruling. |
+
+## N7 — HIGH (regression of B2): the R2 guard refuses the sweeper's own crash recovery
+
+`claimBatch` leases every due row with `lease_until = now() + s.Lease`. `processAttempt` then
+re-reads the attempt, so `PollPayoutStatus` receives a `submitting` attempt whose `LeaseUntil`
+is the sweeper's **fresh** lease, in the future. The new guard (`attempt.State ==
+AttemptSubmitting && attempt.LeaseUntil.After(time.Now())`) then returns
+`ErrPayoutDispatchInFlight`. The doc comment says "the sweeper never hits this", which is wrong.
+Each tick re-leases the row, so a crashed dispatch never converges. It stays `submitting` and the
+sweeper logs an error every tick.
+
+Probe `TestProbe_N7_CrashRecoveryWithDefaultLease` (the `NewSweeper` defaults, `Lease=1m`, plus
+`PayoutKYCGate`, on a lease-expired `submitting` attempt with no reference):
+`claimed=1 processed=0 errs=[… payout dispatch is still in flight, its lease has not expired]
+state=submitting`.
+
+`TestClaimForDispatch_NextActionAtSet_CrashRecovery` passes only because it builds
+`&Sweeper{…}` with `Lease` zero, so the sweeper's lease is `now()`. No payout test uses a
+non-zero lease.
+
+Required:
+- Make the in-flight test distinguish the dispatch claimant's lease from the sweeper's. For
+  example, check `lease_owner` (T1p `payout-dispatch` / `sweeper-payout-*` against the batch
+  lease owner `sweeper`), or have `/resolve` alone apply the check, or have `claimBatch` not
+  overwrite a live claimant lease.
+- Change the crash-recovery test (and ideally every sweeper-driven payout test) to use
+  `NewSweeper` defaults or a non-zero `Lease`.
+
+## Required before sign-off
+
+1. Fix N7, with a crash-recovery test that runs under a non-zero sweeper lease.
+2. Fix N3 (the staff actor recorded in `PollPayoutStatus`'s own transaction), or record it as an
+   explicitly deferred decision. Either way, correct the claim that it was addressed.
+
+Low items that can be follow-ups:
+- the R1 terminal early-return test;
+- the N6 comparison against the effective (fallback) reference.
+
+## Environment notes
+
+- The harness logged `scratch database … left behind (drop failed: permission denied to
+  terminate process)` when a drop raced another session. This explains the leftover
+  `m0101v2_*` databases seen in earlier rounds. It is a harness/role limitation, not this
+  change's fault.
+- My own `rvprhi1_*` databases: 0 remain.
