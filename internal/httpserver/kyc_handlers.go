@@ -179,7 +179,10 @@ func newCreateMyVerificationHandler(deps Deps) http.HandlerFunc {
 			return
 		}
 		if errors.Is(err, kyc.ErrProviderUnavailable) {
-			logger.Warn("create_verification_provider_unavailable", "error", err)
+			// Security review RV-PRH-I2 KYC C5: err may wrap the adapter's
+			// or resolver's own raw error text - redacted here, never
+			// logged verbatim.
+			logger.Warn("create_verification_provider_unavailable", "detail", kyc.RedactedProviderErrorDetail(err))
 			apierror.Write(w, requestID, apierror.CodeUnavailable, "identity verification is temporarily unavailable")
 			return
 		}
@@ -319,8 +322,11 @@ func newUploadMyDocumentHandler(deps Deps) http.HandlerFunc {
 				// document upload that already committed (ADR 0095 §15.3:
 				// the verification's status is simply left as it was, and
 				// the next upload re-submits) - logged, never surfaced as
-				// upload failure to the player.
-				logger.Warn("submit_verification_failed", "error", submitErr)
+				// upload failure to the player. Security review RV-PRH-I2
+				// KYC C5: submitErr may wrap the adapter's or resolver's
+				// own raw error text - redacted here, never logged
+				// verbatim.
+				logger.Warn("submit_verification_failed", "detail", kyc.RedactedProviderErrorDetail(submitErr))
 			}
 		}
 		if errors.Is(err, kyc.ErrNotFound) || errors.Is(err, identity.ErrNotFound) {

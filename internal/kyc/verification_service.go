@@ -427,22 +427,18 @@ func getVerificationByProviderReference(ctx context.Context, tx pgx.Tx, tenantID
 	))
 }
 
-// updateVerificationStatus applies a new status+reason with no reviewer
-// (a provider-driven, not staff-driven, transition) - the Orchestrator's
-// own callback-application step. reviewed_at/reviewed_by are deliberately
-// left untouched: those two columns record a STAFF review specifically
-// (ReviewVerification below), never an automated provider decision - see
-// migration 0040's own column comments.
-func updateVerificationStatus(ctx context.Context, tx pgx.Tx, id uuid.UUID, status VerificationStatus, reason string) (Verification, error) {
-	_, err := tx.Exec(ctx,
-		`UPDATE kyc_verifications SET status = $1, reason = NULLIF($2, ''), updated_at = now() WHERE id = $3`,
-		status, reason, id,
-	)
-	if err != nil {
-		return Verification{}, fmt.Errorf("kyc: update verification status: %w", err)
-	}
-	return GetVerificationByID(ctx, tx, id)
-}
+// applyForwardOnlyStatus (provider.go) is this package's own provider-
+// driven, not staff-driven, status writer - both the Orchestrator's
+// callback-application step (via applyCallbackOutcome) and
+// SubmitVerification's own phase C (RV-PRH-I2 KYC R1 fix) apply a status
+// under its forward-only CAS rule; reviewed_at/reviewed_by are deliberately
+// left untouched by both - those two columns record a STAFF review
+// specifically (ReviewVerification below), never an automated provider
+// decision - see migration 0040's own column comments. There is no longer a
+// blind, non-CAS status writer in this package (the R1 finding: a blind
+// UPDATE here is exactly what let a concurrent staff decision or callback
+// be silently overwritten during SubmitVerification's own provider
+// round-trip).
 
 // ReviewVerificationParams is ReviewVerification's input.
 type ReviewVerificationParams struct {
@@ -472,7 +468,7 @@ type ReviewVerificationParams struct {
 
 // ReviewVerification is the STAFF-driven review action
 // (PermVerificationReview) - distinct from the Orchestrator's own
-// provider-driven updateVerificationStatus: this one always stamps
+// provider-driven applyForwardOnlyStatus: this one always stamps
 // reviewed_at/reviewed_by, recording that a HUMAN made this call.
 func ReviewVerification(ctx context.Context, tx pgx.Tx, params ReviewVerificationParams) (Verification, error) {
 	if params.NewStatus != StatusApproved && params.NewStatus != StatusRejected && params.NewStatus != StatusReviewRequired {

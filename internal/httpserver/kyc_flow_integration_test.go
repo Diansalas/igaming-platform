@@ -862,6 +862,11 @@ func TestKYC_WebhookCallbackAuthentication(t *testing.T) {
 	if unknownResp.StatusCode != http.StatusServiceUnavailable {
 		t.Fatalf("expected 503 (retryable) for an unresolvable provider_reference, got %d", unknownResp.StatusCode)
 	}
+	// Security review RV-PRH-I2 KYC C3/F2: every webhook 503 in this
+	// codebase carries Retry-After, and this one is no exception.
+	if unknownResp.Header.Get("Retry-After") == "" {
+		t.Fatal("expected a Retry-After header on the 503 for an unresolvable provider_reference")
+	}
 }
 
 // --- 15. RLS adversarial: direct SQL cross-tenant access to

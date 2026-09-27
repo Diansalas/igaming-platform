@@ -154,6 +154,39 @@ type KYCProvider interface {
 	HealthStatus(ctx context.Context) error
 }
 
+// RedactedProviderErrorDetail returns an allow-listed, bounded
+// classification of err - never its raw text - for operator-facing logs
+// that sit downstream of a CreateVerification/SubmitVerification failure
+// (RV-PRH-I2 KYC security review C5): a real adapter's own error can embed
+// vendor response bodies, request URLs (potentially credential-bearing
+// query strings), or other content that must never reach a log line
+// verbatim before that adapter's own error shapes are reviewed at intake.
+// Mirrors casino.redactedLaunchFailureDetail/internal/payments/gate.go's
+// redactedReason exactly (duplicated, not imported/exported cross-package,
+// per those two packages' own identical "must not import each other"
+// discipline) - this is KYC's own copy for the same reason. Exported so
+// internal/httpserver's handler-level logging (which only ever sees the
+// error THIS package already wrapped, never a raw adapter error directly)
+// can use the same bound.
+func RedactedProviderErrorDetail(err error) string {
+	if err == nil {
+		return ""
+	}
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		return "timeout"
+	case errors.Is(err, context.Canceled):
+		return "canceled"
+	case errors.Is(err, ErrProviderUnavailable):
+		return "provider unavailable"
+	default:
+		// Never echo unrecognized error text verbatim - it may originate
+		// from a real adapter's transport layer or vendor SDK and embed
+		// response bytes, headers or a credential-bearing URL.
+		return "internal error (redacted)"
+	}
+}
+
 // ErrProviderUnavailable is returned by CreateVerification/SubmitVerification
 // (ADR 0095 §15.2/§15.3) when phase B cannot reach the provider at all: no
 // outbound credential resolver configured, credential resolution failure, a
@@ -409,6 +442,61 @@ func statusForOutcome(o ProviderOutcome) (VerificationStatus, bool) {
 	}
 }
 
+// applyForwardOnlyStatus applies newStatus to verification id under the SAME
+// forward-only rank rule applyCallbackOutcome enforces for the callback path
+// (RV-PRH-I2 KYC code review R1 / security review C1): the CAS starts from
+// expectedCurrent (the caller's own most recent read - phase A's read, for
+// SubmitVerification's phase C), and on a lost race re-reads the row and
+// re-evaluates, up to 3 attempts, exactly like applyCallbackOutcome's own
+// loop. If the row's CURRENT rank is already at or above newStatus's rank -
+// a concurrent staff ReviewVerification, or a concurrent verified callback's
+// own CAS transition, already moved the row forward (including to a
+// terminal status) while the caller's own provider round-trip was in
+// flight - this is a documented no-op: applied=false, and the row's
+// CURRENT value is returned, never overwritten and never moved backward
+// (e.g. review_required -> pending, or away from a terminal status).
+// reviewed_at/reviewed_by are never touched here - this applies a
+// PROVIDER-driven transition, never a staff one (mirrors
+// updateVerificationStatus's identical convention, which this function
+// replaces as SubmitVerification's phase-C status writer).
+func applyForwardOnlyStatus(ctx context.Context, tx pgx.Tx, tenantID, id uuid.UUID, expectedCurrent, newStatus VerificationStatus, reason string) (updated Verification, applied bool, err error) {
+	newRank := statusRank(newStatus)
+	current := expectedCurrent
+	const maxAttempts = 3
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		if newRank <= statusRank(current) {
+			reread, err := GetVerificationByID(ctx, tx, id)
+			if err != nil {
+				return Verification{}, false, err
+			}
+			return reread, false, nil
+		}
+		tag, err := tx.Exec(ctx,
+			`UPDATE kyc_verifications SET status = $1, reason = NULLIF($2, ''), updated_at = now()
+			 WHERE id = $3 AND tenant_id = $4 AND status = $5`,
+			newStatus, reason, id, tenantID, current,
+		)
+		if err != nil {
+			return Verification{}, false, fmt.Errorf("kyc: apply forward-only status: %w", err)
+		}
+		if tag.RowsAffected() == 1 {
+			reread, err := GetVerificationByID(ctx, tx, id)
+			if err != nil {
+				return Verification{}, false, err
+			}
+			return reread, true, nil
+		}
+		// Lost race: re-read (RLS-scoped) and re-evaluate on the next
+		// iteration - mirrors applyCallbackOutcome's identical retry loop.
+		reread, err := GetVerificationByID(ctx, tx, id)
+		if err != nil {
+			return Verification{}, false, err
+		}
+		current = reread.Status
+	}
+	return Verification{}, false, fmt.Errorf("kyc: exhausted retries applying forward-only status transition for verification %s", id)
+}
+
 // applyCallbackOutcome is B7's forward-only replay/idempotency rule,
 // applied to an already-verified, already-tenant-scoped-looked-up
 // verification v. The returned bool reports whether this call actually
@@ -507,7 +595,7 @@ func applyCallbackOutcome(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, v 
 			return updated, true, nil
 		}
 		// Lost race: re-read the row (RLS-scoped, mirroring
-		// updateVerificationStatus's own post-update re-read) and
+		// applyForwardOnlyStatus's own post-update re-read) and
 		// re-evaluate on the next iteration.
 		reread, err := GetVerificationByID(ctx, tx, current.ID)
 		if err != nil {
