@@ -829,3 +829,75 @@ as 6.3 specifies, both before and after 0095 lands.
 4. Any code path in the eventual PRH-I4 diff that posts a ledger entry (the `D` step, domain
    processing) requires `ledger-finance` review per CLAUDE.md, independent of this admission
    review -- this ADR's 6.4/idempotency framing does not substitute for that review.
+
+## 18. Architect review
+
+**Reviewer:** `architect`. **Scope:** cross-domain boundaries, ADR 0094/0091/0022 consistency,
+tenant directory, config ownership, isolation-tightening path, ADR 0095 interface. Verified at
+`dcddb2b`. ADR 0095 is not yet in the repo at this commit; item AC6 states what it must provide.
+Editorial: there are two `## 16` headings (QA, devops); renumber devops to §17 when accepted.
+
+**Verdict: APPROVE WITH CONDITIONS**
+
+**AC1 — `internal/admission` boundary.** Accepted as a stdlib-only leaf (no cycles possible).
+Allowed importers: `internal/httpserver` (and its tests) only. It must not be imported by
+`webhookauth`, `payments`, `casino`, `kyc`, `ledger`, `db`, `identity` or `config`: admission is a
+transport-layer control and domain packages stay unaware of it. `internal/config` produces plain
+values; `httpserver` maps them to admission types. PRH-I4 adds an import-guard test (same style
+as the `db` raw-guard test) that pins both directions. No change to any domain package's public
+API or to `webhookauth.TenantReader` is authorized under this ADR.
+
+**AC2 — ADR 0094 consistency (INV-POOL, txscope).** Consistent: A4b wraps only
+`GetTenantBySlug` (a `WithoutTenant` read) and the `WithTenantReadOnly` calls, and
+`gatedReader` delegates to `*db.Pool`, so txscope marking is unchanged. Conditions:
+(a) the gate is held exactly for the duration of one `WithTenantReadOnly`/`GetTenantBySlug`
+call, acquired before and released after it returns, never across the Fetcher;
+(b) `gatedReader` is non-reentrant: if `txscope.Held(ctx)` is true, or the request already holds
+an A4b slot, it fails closed (503) instead of acquiring again, since nested acquire at per-key
+cap 2 is a hold-and-wait self-deadlock; add a unit test and a T16 mutation for it;
+(c) the ADR 0022 §3 point-9 statement set and uniform 401 (ADR 0091) are unchanged, as §5.3/§6.2 state.
+
+**AC3 — tenant-slug directory.** Accepted as **non-authoritative**. It is a limiter-key hint only.
+Conditions: it stays unexported in `httpserver`, exposes only `Contains(slug) bool` (no tenant id,
+status or licensing model), and is used by no other route or for tenant resolution (staff login,
+player routes). `code-reviewer` checks this. `identity.ListActiveTenantSlugs`'s doc comment states it
+is a platform-scope catalogue read that must never be used for authorization.
+Authority stays with `GetTenantBySlug` + active check + `VerifyCallback`, and the trusted binding is
+only the `VerifiedCallback`.
+
+**AC4 — isolation-tightening path.** Keying B1/B2 on `tenant_id` survives schema/db/cluster-per-tenant.
+Two constraints recorded for the path:
+(i) the directory and `GetTenantBySlug` both assume a platform-scope `tenants` catalogue. Under
+db-per-tenant, that catalogue must stay in a control-plane store, not move into tenant databases.
+(ii) A4b/B2 caps and §9.3's `W_db < N` / `B2 < N` are defined against one shared pool. When pools
+become per tenant, the caps are computed per routed pool. Not built now; add one line to §10.
+
+**AC5 — config ownership.** Agree with §9.2: this is platform-operator configuration, not
+brand/tenant configuration. It is owned by `security` (values) and `devops` (delivery) through
+`internal/config`, and it is never partner-console editable. Recommendation (non-blocking): key
+tenant overrides by `tenant_id` for both tiers, mapping to slug via the directory for A3. Slug
+renames then cannot silently detach an override.
+
+**AC6 — interface ADR 0095 must provide (blocking for ACCEPTED status of any non-MOCK webhook
+adapter, not for PRH-I4).**
+- `WebhookRetrySemantics{Retries429, Retries503, HonorsRetryAfter bool; RetryWindow time.Duration}`
+  is a static, per-adapter declaration in the capability manifest. It is a vendor property: no DB,
+  no per-tenant variance, and tenant config may never relax it.
+- The type lives in the manifest/`webhookauth`-level package, not in `admission` or `httpserver`.
+  It is exposed by the domain orchestrator's existing process-global registry beside
+  `WebhookScheme(providerID)`, e.g. `WebhookRetrySemantics(providerID) (WebhookRetrySemantics, bool)`.
+  `httpserver` maps it to the B1 status (§6.3).
+- MOCK vs non-MOCK is decided by the `providerkind.Synthetic` / `ProductionEligible` markers, never
+  by name or config. A non-`Synthetic` webhook adapter without a declaration fails registration at
+  startup, alongside `RefuseSyntheticInProduction`.
+- The §6.3 interim "per-provider config key" is **rejected** as a second source of truth for a vendor
+  property. No `ProductionEligible` adapter exists today, so PRH-I4 ships MOCK behaviour plus the
+  fail-closed registration check, and ADR 0095 supplies the manifest field.
+- `RetryWindow` feeds alerting (§8) only, never admission decisions.
+
+**AC7 — R5 scope.** Accepted as out of scope. The orchestrator should register the
+authenticated-route pool-pinning class (RL-F2 for player/admin routes) as a separate registry item
+rather than leave it only in §12.
+
+This verdict covers architecture only. It does not replace `security` (owner), `payments` (§6.3),
+`ledger-finance` (§6.4/T6) concurrence, or the security review of the PRH-I4 diff.
