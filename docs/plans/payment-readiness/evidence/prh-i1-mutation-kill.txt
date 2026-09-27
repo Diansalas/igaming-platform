@@ -2047,3 +2047,63 @@ Race and TestRVLF_ResolveConflict_ByRefByMerchantMismatchAnomalyReceipt
 Resolved both pass individually and as part of the full
 internal/payments + internal/reconciliation suite under -race (see the run
 recorded above, which includes both).
+
+
+Code-review re-review 2 of FH-5 (rv-prh-i1-callback-code-review.md,
+ad476d6), condition C2 (N12/M7) and C6, 2026-09-27
+======================================================================
+
+C2 (N12/M7) - the deferred-apply backstop's own
+recomputeDepositIntentProjection call:
+
+First attempt (disclosed, not claimed as a kill): mutated the backstop's
+`if changed && current.Operation == AttemptOperationDeposit &&
+current.DepositIntentID != nil { recomputeDepositIntentProjection(...) }`
+with a leading `false &&`. TestRVLF_P8_DeferredReceiptAppliedByPhaseC's
+own pre-existing N12 assertion (a SUCCESS transition) STILL PASSED -
+postDepositSuccess (orchestrator.go) already writes deposit_intents.status
+= 'succeeded' directly as part of posting, independent of this call, so
+that assertion cannot distinguish the mutant from the real code. A second
+attempt using a DECLINE transition (TestRVLF_C2N12_Deferred
+DeclineBackstop..., an earlier draft, not committed) ALSO still passed:
+finalizeDeclined (orchestrator.go), called from applyResolvedReceiptEvidence's
+own OutcomeDeclined branch BEFORE the backstop's recompute call runs, also
+writes deposit_intents.status directly.
+
+Genuine kill: TestRVLF_C2N12_DeferredAmbiguousBackstopAlsoRecomputes
+IntentProjection uses an AMBIGUOUS transition (MarkAmbiguousFromPending),
+which has NO redundant direct deposit_intents write anywhere in the
+codebase - the intent's status can only move from 'pending' to 'ambiguous'
+via recomputeDepositIntentProjection. With the same mutation applied, this
+test FAILED: "the deferred-apply backstop must recompute the intent's own
+projection on an ambiguous transition too ..., got status=\"pending\"".
+Reverted via targeted Edit; confirmed `git diff` clean.
+
+C6 - four small cleanups, all doc/dead-code, no mutation applicable:
+  (i)   Removed the dead ErrDepositIntentNotFound 404 branch in
+        internal/httpserver/payment_callback_errors.go's
+        mapReceiveCallbackError - confirmed by reading
+        ReceiveVerifiedCallback/receiveCallbackViaReceiptPath
+        (orchestrator.go) that the receipt path never returns that
+        sentinel; the old deposit_intents-only lookup path that could is
+        gone. Updated the function's own doc comment to match.
+  (ii)  Fixed the stale "receiveDepositCallback" reference in
+        internal/httpserver/payment_deposit_simulation_handlers.go's
+        recordDepositSimulationAudit doc comment (that function no longer
+        exists) to name the real, current call chain
+        (ApplyReceiptEvidence/receiveCallbackViaReceiptPath).
+  (iii) Merged the two stacked setIntentAttempt doc comments in
+        orchestrator.go into one.
+  (iv)  Labelled InitiateDeposit (orchestrator.go) TEST-ONLY in its doc
+        comment - confirmed via grep that no non-test caller invokes it
+        anywhere in the repository; InitiateDepositAttempt is the real,
+        current production chain. Left in place (not moved to test code)
+        per the coordinator's own "smaller safe option" guidance, since
+        several pre-cutover regression tests still construct fixtures
+        through it.
+
+Verification: go build ./..., go vet -tags=integration ./..., gofmt -l .
+all clean; full internal/payments + internal/reconciliation +
+internal/httpserver suites run under -tags=integration -race -count=1
+against PRIV_DB=fh3_invdep1_qa.
+

@@ -877,3 +877,90 @@ func TestRVLF_Le_OversizeDeclineReasonAuditedOnceNotOnRedelivery(t *testing.T) {
 		t.Errorf("L-e: expected exactly 1 audit record across 3 identical redeliveries, got %d", auditCount)
 	}
 }
+
+// TestRVLF_C2N12_DeferredAmbiguousBackstopAlsoRecomputesIntentProjection
+// closes code-review C2 (rv-prh-i1-callback-code-review.md, ad476d6):
+// N12/M7 requires the deferred-apply backstop's own
+// recomputeDepositIntentProjection call to be genuinely pinned. The
+// pre-existing TestRVLF_P8's own N12 assertion checks a SUCCESS
+// transition, and an earlier draft of this test checked a DECLINE
+// transition - but BOTH postDepositSuccess (orchestrator.go) and
+// finalizeDeclined (called from applyResolvedReceiptEvidence's own
+// OutcomeDeclined branch, BEFORE the backstop's recompute call ever runs)
+// already write deposit_intents.status directly, so both assertions pass
+// even with recomputeDepositIntentProjection removed from the backstop
+// entirely (confirmed by mutation against each - see the evidence file).
+// An AMBIGUOUS transition (MarkAmbiguousFromPending) has NO such
+// redundant direct deposit_intents write anywhere - the intent's status
+// can only move from 'pending' to 'ambiguous' via
+// recomputeDepositIntentProjection, making this the genuine kill.
+func TestRVLF_C2N12_DeferredAmbiguousBackstopAlsoRecomputesIntentProjection(t *testing.T) {
+	pool := depositV2ScratchPool(t)
+	f := seedOrchFixture(t, pool)
+	p := NewMockProvider("mock-c2n12", "EUR")
+	registerCapability(t, pool, f, p, 100)
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-c2n12": p}, MultiWebhookCredentialResolver{"mock-c2n12": NewMockWebhookCredentials(p)})
+
+	res := rvInit(t, pool, orch, f, 5000, "c2n12-seed")
+	// payment_attempts_one_live_per_intent (INV-IO-8): decline the seed
+	// attempt first so the isolated second attempt below can be inserted
+	// 'created' for the same intent.
+	if _, err := rvCallback(pool, orch, f, "mock-c2n12", p.CallbackPayload(f.tenantID, CallbackEventDeposit, *res.Attempt.ProviderReference, "", OutcomeDeclined, 0, "", "insufficient_funds", false)); err != nil {
+		t.Fatalf("decline seed attempt: %v", err)
+	}
+	var attemptID uuid.UUID
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		a, err := InsertCreatedAttempt(ctx, tx, NewCreatedAttempt{
+			ID: uuid.New(), TenantID: f.tenantID, Operation: AttemptOperationDeposit,
+			DepositIntentID: &res.Intent.ID, AttemptNo: 2, ExcludedProviderIDs: []string{"mock-c2n12"},
+			PaymentMethod: "card", AssetCode: "EUR", Amount: 5000,
+		})
+		attemptID = a.ID
+		return err
+	}); err != nil {
+		t.Fatalf("insert isolated attempt: %v", err)
+	}
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `SELECT id FROM deposit_intents WHERE id = $1 FOR UPDATE`, res.Intent.ID); err != nil {
+			return err
+		}
+		return ClaimCreatedForSubmission(ctx, tx, attemptID, "mock-c2n12", uuid.New(), "rv-c2n12", time.Now().Add(time.Minute))
+	}); err != nil {
+		t.Fatalf("claim for submission: %v", err)
+	}
+
+	// Callback #1: an AMBIGUOUS outcome naming a provider reference no
+	// attempt has yet - deferred, unresolved.
+	if _, err := rvApplyReceipt(pool, orch, f.tenantID, "mock-c2n12", ReceiptEvidence{
+		EventType: "deposit", ProviderReference: "c2n12-ref", Outcome: OutcomeAmbiguous,
+	}); err != nil {
+		t.Fatalf("deferred ambiguous callback: %v", err)
+	}
+
+	// Callback #2: resolved by MERCHANT reference - a T4 transition that
+	// learns provider_reference="c2n12-ref" for THIS attempt (moving both
+	// the attempt AND, via setIntentAttempt, the intent itself to
+	// 'pending'), whose own deferred-apply backstop must then resolve and
+	// apply callback #1's deferred ambiguous outcome (MarkAmbiguousFrom
+	// Pending) in the SAME transaction.
+	if _, err := rvApplyReceipt(pool, orch, f.tenantID, "mock-c2n12", ReceiptEvidence{
+		EventType: "deposit", ProviderReference: "c2n12-ref", MerchantReference: attemptID.String(), Outcome: OutcomePending,
+	}); err != nil {
+		t.Fatalf("T4 callback: %v", err)
+	}
+
+	final := mustGetAttempt(t, pool, f.tenantID, attemptID)
+	if final.State != AttemptAmbiguous {
+		t.Fatalf("setup: expected the deferred ambiguous outcome to be applied, got state=%s", final.State)
+	}
+
+	var intentStatus string
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT status FROM deposit_intents WHERE id = $1`, res.Intent.ID).Scan(&intentStatus)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if intentStatus != string(DepositIntentAmbiguous) {
+		t.Errorf("C2/N12: the deferred-apply backstop must recompute the intent's own projection on an ambiguous transition too (no direct write does this), got status=%q", intentStatus)
+	}
+}

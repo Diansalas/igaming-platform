@@ -479,17 +479,17 @@ func loadDepositIntentByProviderRef(ctx context.Context, tx pgx.Tx, providerID, 
 // deposit's intent status). 'succeeded' is sticky by construction
 // everywhere else in this codebase (LF95-C7); this CASE makes that true
 // here too, independent of caller order.
-// setIntentAttempt updates the intent's current provider_id/
-// provider_reference and status. RV-PRH-I1 ledger-finance M5 / code-review
-// F3: once the intent's status is already 'succeeded' (a T13 success on
-// ANY attempt already posted, LF95-C7's sticky rule), this function is a
-// pure no-op on every column - provider_id, provider_reference AND status
-// all stay exactly what they were. Without freezing provider_id/reference
-// too, a later decline/ambiguous callback for a DIFFERENT (already-
-// rejected-or-cascaded) sibling attempt could repoint a succeeded intent's
-// provider_reference at a losing attempt, corrupting the "which provider
-// actually holds this player's money" record even though status itself
-// stayed correct. Returns the row's ACTUAL resulting status (not just the
+//
+// RV-PRH-I1 ledger-finance M5 / code-review F3 (follow-up): once the
+// intent's status is already 'succeeded' (a T13 success on ANY attempt
+// already posted, LF95-C7's sticky rule), this function is a pure no-op on
+// EVERY column - provider_id, provider_reference AND status all stay
+// exactly what they were. Without freezing provider_id/reference too, a
+// later decline/ambiguous callback for a DIFFERENT (already-rejected-or-
+// cascaded) sibling attempt could repoint a succeeded intent's provider_
+// reference at a losing attempt, corrupting the "which provider actually
+// holds this player's money" record even though status itself stayed
+// correct. Returns the row's ACTUAL resulting status (not just the
 // caller's intended one) so callers can detect a no-op and skip writing a
 // misleading "declined"/"ambiguous" audit record against an intent that
 // never moved.
@@ -536,6 +536,15 @@ func validateInitiateDepositParams(p InitiateDepositParams) error {
 // ambiguous-outcome resolution (payment-orchestration.md §5, §7). tx must
 // already be tenant-scoped via db.Pool.WithTenant(params.Scope.TenantID,
 // ...).
+//
+// Code-review C6 (rv-prh-i1-callback-code-review.md, ad476d6): TEST-ONLY.
+// This is the pre-ADR-0095 (pre-InitiateDepositAttempt) deposit-creation
+// chain, superseded everywhere in production by
+// InitiateDepositAttempt/the attempt-driven state machine (attempt.go,
+// drive.go). No non-test caller invokes InitiateDeposit anymore; kept only
+// because some pre-cutover regression tests still construct fixtures
+// through it. Do not add a new production call site - use
+// InitiateDepositAttempt instead.
 //
 // Idempotency (payment-orchestration.md §8): a retried call with the same
 // (tenant_id, player_account_id, idempotency_key) returns the ORIGINAL

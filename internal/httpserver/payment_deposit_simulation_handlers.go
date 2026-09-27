@@ -169,10 +169,11 @@ func requireDepositAwaitingCallback(intent payments.DepositIntent) error {
 }
 
 // recordDepositSimulationAudit adds a PLAYER-attributed audit record
-// alongside whatever ActorSystem record receiveDepositCallback itself
-// already wrote (orchestrator.go's own audit calls are correct and
-// unchanged for their real intended caller, a provider webhook, and are
-// not touched here) - mirrors recordCasinoPlaySimulationAudit's identical
+// alongside whatever ActorSystem record the receipt path itself already
+// wrote (ApplyReceiptEvidence/receiveCallbackViaReceiptPath, orchestrator.go/
+// receipt.go - correct and unchanged for their real intended caller, a
+// provider webhook, and not touched here) - mirrors
+// recordCasinoPlaySimulationAudit's identical
 // rationale: without this, a player-triggered financial mutation is
 // indistinguishable in audit_log from a genuine provider callback, which
 // would make an abuse investigation of this simulation seam impossible
