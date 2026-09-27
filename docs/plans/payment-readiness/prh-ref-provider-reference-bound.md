@@ -123,6 +123,18 @@ The runner (`internal/db/migrate.go`) runs each file in one transaction, so the 
 held until commit either way. If a production-sized table ever needs the split, it must be two migrations.
 That is a deployment decision for real-provider go-live.
 
+### Comment correction after merge (code review F6)
+
+The 0099 header comment originally claimed "tenants has no RLS". That was wrong: `tenants` carries
+FORCE RLS since 0077, and the loop lists every tenant only because `tenants_read` is `USING (true)`.
+The comment now says so, including the consequence if that policy is ever narrowed: no per-column
+report, but the migration still fails closed through ADD CONSTRAINT (23514).
+
+This is a comment-only edit. It does change the file's SHA-256, so `migrate verify` reports a checksum
+mismatch on any database that already applied the earlier 0099 bytes. Only local/dev databases can be
+affected (CI builds fresh databases, staging is off). Rebuild those databases, or re-run
+`migrate up` on a fresh one.
+
 ### Down migration
 
 The down migration drops all 27 constraints. It is unconditionally reversible, because dropping a CHECK
@@ -190,7 +202,7 @@ loses no data.
   - The pre-flight test covers one FORCE-RLS tenant table and one platform table. It checks the loud
     per-column counts, and that no constraint was added, 0099 was not recorded, and the rows are untouched.
 
-**Mutation evidence:** `docs/plans/payment-readiness/evidence/prh-ref-mutation-kill.txt`.
+**Mutation evidence:** `docs/plans/payment-readiness/evidence/prh-ref-mutation-kill.txt` (33/33 killed; re-runnable with the committed harness `docs/plans/payment-readiness/evidence/prh-ref-mutate.py`).
 
 ## 8. Security agreement (value and charset)
 
@@ -229,12 +241,30 @@ The proposal to `security`:
 
 ## 9. Residuals (not built here, recorded rather than silently skipped)
 
-1. **Payments outbound responses (for PRH-I1 / ADR 0095).** `DepositResult.ProviderReference` and
-   `WithdrawResult.ProviderReference` come back from the adapter and are written to `deposit_intents` and
-   `withdrawal_requests` without app-level validation. The 0099 CHECK makes an over-bound value fail closed,
-   but as a generic 500. The redesign must call `providerref.Validate` at the adapter-response boundary and
-   treat a violation as a deterministic provider-protocol failure. The same applies to `QueryStatus` inputs.
-   This call was deliberately not added to the current orchestrator, per the coordination instruction.
+1. **Payments outbound responses (for PRH-I1 / ADR 0095; security C1, code review F2).**
+   `DepositResult.ProviderReference` and `WithdrawResult.ProviderReference` come back from the adapter
+   without app-level validation. They are written to `deposit_intents`, `withdrawal_requests`
+   (`MarkSubmitted`) and `ledger_transactions.provider_tx_id` (`withdrawal.Complete`).
+
+   An over-bound value makes the 0099 CHECK fail, with a generic 500. That is **not** "fail closed" on
+   every path.
+   - **Deposit initiation:** nothing has moved yet, so the transaction rollback is safe.
+   - **Withdrawal payout:** `withdrawal_handlers.go` calls `provider.Withdraw` **inside** the domain
+     transaction. The CHECK then fails **after** the PSP has executed the payout. The rollback leaves the
+     request unsubmitted while the money has left. A staff retry calls `Withdraw` again, which is a
+     **double-payout** path whenever the PSP does not deduplicate on `MerchantReference`.
+
+   The root cause (provider I/O inside the transaction) predates 0099 and is ADR 0095's subject. 0099
+   adds a new deterministic trigger for it, where before only a reference over about 2.7 KB or one with
+   NUL triggered it. The ADR 0095 redesign must:
+   - call `providerref.Validate` on every adapter-response reference: `Deposit`, `Withdraw`,
+     `QueryStatus` inputs and KYC `CreateVerification`;
+   - treat a violation as a durable, non-retryable provider-protocol failure that parks the operation
+     for manual reconciliation, never rolling back to a state from which the payout can be resubmitted.
+
+   This blocks real-PSP/KYC go-live and the PRH-I1 close-out (security C1); it does not block closing
+   PROVIDER-REF-BOUND-1. The call was deliberately not added to the current orchestrator, per the
+   coordination instruction.
 2. **KYC.** KYC has the DB CHECK only. The KYC callback just looks the reference up, and an oversize lookup
    finds nothing, which is deterministic. The KYC outbound `CreateVerification` reference has the same
    residual as item 1. Owner: `identity-compliance`.

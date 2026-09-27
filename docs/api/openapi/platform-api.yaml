@@ -1539,7 +1539,7 @@ paths:
             schema:
               type: object
               properties:
-                original_provider_tx_id: { type: string, minLength: 1, maxLength: 255, description: "The bet's or win's own provider_tx_id being reversed. Provider reference bound (PROVIDER-REF-BOUND-1): 1..255 BYTES of valid UTF-8, no control characters; enforced in bytes, so fewer characters are allowed for multibyte text. Over-bound is a 400." }
+                original_provider_tx_id: { type: string, minLength: 1, maxLength: 255, description: "The bet's or win's own provider_tx_id being reversed. Provider reference bound (PROVIDER-REF-BOUND-1): 1..255 BYTES of valid UTF-8, no control characters; enforced in bytes, so fewer characters are allowed for multibyte text (maxLength counts characters and is only an upper bound; the server enforces 255 bytes). Over-bound is a 400." }
               required: [original_provider_tx_id]
       responses:
         "200":
@@ -5050,6 +5050,10 @@ components:
             reference in this body. A verified callback that breaks it is a
             deterministic, non-retryable 400; the reference is never
             truncated.
+            Note: JSON Schema maxLength counts characters (code
+            points), so maxLength: 255 is only an upper bound; the
+            server enforces 255 BYTES, and a 255-character multibyte
+            value that passes schema validation can still be rejected.
         original_provider_reference:
           type: string
           maxLength: 255
@@ -5104,6 +5108,10 @@ components:
             asset_code. A verified callback that breaks it is a
             deterministic, non-retryable 400 with nothing written; the
             reference is never truncated.
+            Note: JSON Schema maxLength counts characters (code
+            points), so maxLength: 255 is only an upper bound; the
+            server enforces 255 BYTES, and a 255-character multibyte
+            value that passes schema validation can still be rejected.
         original_provider_tx_id:
           type: string
           maxLength: 255
@@ -5845,7 +5853,7 @@ components:
         id: { type: string, format: uuid }
         provider_id: { type: string }
         event_type: { type: string, enum: [bet, win, rollback] }
-        provider_tx_id: { type: string, maxLength: 255 }
+        provider_tx_id: { type: string, maxLength: 255, description: "Provider references in this schema are bounded to 255 BYTES (PROVIDER-REF-BOUND-1); maxLength counts characters and is only an upper bound." }
         original_provider_tx_id: { type: string, nullable: true, maxLength: 255, description: "Rollback only." }
         round_id: { type: string, nullable: true, maxLength: 255 }
         asset_code: { type: string, nullable: true, maxLength: 255 }

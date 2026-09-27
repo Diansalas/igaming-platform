@@ -135,6 +135,25 @@ func TestMigration0099_UpEnforcesBoundDownDropsItRoundTrip(t *testing.T) {
 	if err := insertRejectionRow(t, pool, f, strings.Repeat("a", 255)); err != nil {
 		t.Fatalf("255-byte provider_tx_id must be accepted: %v", err)
 	}
+	// Code review F3: pin both edges of the SQL control-character range and
+	// the minimum length, so a changed SQL literal (e.g. [\x80-\x9F] or
+	// [\x7F-\xA0], or BETWEEN 0 AND 255) fails a test. The Go rule and the
+	// SQL rule are independent literals; this is what proves their parity.
+	if err := insertRejectionRow(t, pool, f, "ref\u007fdel"); !isCheckViolation(err, "casino_callback_rejections_provider_tx_id_ref_bound") {
+		t.Fatalf("DEL (U+007F, lower edge of the DEL/C1 range) must violate the CHECK, got %v", err)
+	}
+	if err := insertRejectionRow(t, pool, f, "ref\u009fc1"); !isCheckViolation(err, "casino_callback_rejections_provider_tx_id_ref_bound") {
+		t.Fatalf("U+009F (upper edge of the C1 range) must violate the CHECK, got %v", err)
+	}
+	if err := insertRejectionRow(t, pool, f, "ref nbsp"); err != nil {
+		t.Fatalf("U+00A0 (first code point after the C1 range) must be accepted: %v", err)
+	}
+	if err := insertRejectionRow(t, pool, f, "ref\x1fus"); !isCheckViolation(err, "casino_callback_rejections_provider_tx_id_ref_bound") {
+		t.Fatalf("U+001F (upper edge of the C0 range) must violate the CHECK, got %v", err)
+	}
+	if err := insertRejectionRow(t, pool, f, "ref space~tilde"); err != nil {
+		t.Fatalf("U+0020 and U+007E (just outside the control ranges) must be accepted: %v", err)
+	}
 	// The ledger's own column is bounded too.
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := tx.Exec(ctx, `INSERT INTO ledger_transactions (tenant_id, transaction_type, idempotency_key, provider_id, provider_tx_id, correlation_id)
@@ -143,6 +162,17 @@ func TestMigration0099_UpEnforcesBoundDownDropsItRoundTrip(t *testing.T) {
 	})
 	if !isCheckViolation(err, "ledger_transactions_provider_tx_id_ref_bound") {
 		t.Fatalf("256-byte ledger provider_tx_id must violate the CHECK, got %v", err)
+	}
+	// F3: the minimum length. ledger_transactions has no other non-empty
+	// check on provider_tx_id, so only the 0099 bound can refuse "" here
+	// (casino_callback_rejections' own 0097 "<> ''" check would mask it).
+	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `INSERT INTO ledger_transactions (tenant_id, transaction_type, idempotency_key, provider_id, provider_tx_id, correlation_id)
+			VALUES ($1, 'deposit', 'm0099-ledger-empty', 'mock-psp', '', gen_random_uuid())`, f.tenantID)
+		return err
+	})
+	if !isCheckViolation(err, "ledger_transactions_provider_tx_id_ref_bound") {
+		t.Fatalf("an empty ledger provider_tx_id must violate the 0099 CHECK, got %v", err)
 	}
 
 	down, err := pool.MigrateDown(context.Background(), dir, 1)
