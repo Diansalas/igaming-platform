@@ -223,17 +223,26 @@ func TestInitiateDepositAttempt_KillSwitchEngaged_DeclinesCleanly_T3(t *testing.
 		t.Fatalf("expected 0 provider.Deposit calls while the kill switch was engaged, got %d", provider.DepositCallCount())
 	}
 
-	var reason string
+	var reason, auditProviderID string
 	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		return tx.QueryRow(ctx,
-			`SELECT metadata->>'decline_reason' FROM audit_log WHERE action = 'deposit.declined' AND target_id = $1`,
+			`SELECT metadata->>'decline_reason', coalesce(metadata->>'provider_id', '') FROM audit_log WHERE action = 'deposit.declined' AND target_id = $1`,
 			res.Intent.ID.String(),
-		).Scan(&reason)
+		).Scan(&reason, &auditProviderID)
 	}); err != nil {
 		t.Fatalf("read decline audit: %v", err)
 	}
 	if reason != "kill_switch" {
 		t.Fatalf("expected decline_reason = kill_switch, got %q", reason)
+	}
+	// C5 (RV-PRH-I1 kill-switch phase 2 code review): the audit row (and
+	// the intent's own provider_id column) must show WHICH provider's
+	// switch fired.
+	if auditProviderID != "mock-psp-v2-ks" {
+		t.Fatalf("expected the decline audit to carry provider_id, got %q", auditProviderID)
+	}
+	if res.Intent.ProviderID == nil || *res.Intent.ProviderID != "mock-psp-v2-ks" {
+		t.Fatalf("expected the declined intent's own provider_id column to be set, got %v", res.Intent.ProviderID)
 	}
 }
 
@@ -407,5 +416,71 @@ func TestOutboundKindSplitResolver_UnregisteredProviderFailsClosed_NoAdapterCall
 	}
 	if atomic.LoadInt32(&adapterCalls) != 0 {
 		t.Fatal("expected the adapter function to never be invoked for an unregistered provider id")
+	}
+}
+
+// wrongTenantResolver returns a correctly-SHAPED credential (right
+// provider, right domain) but for a DIFFERENT tenant than the one it was
+// asked to resolve for - simulating a future caching/derived-token
+// resolver bug, never today's real or MOCK resolver.
+type wrongTenantResolver struct{ wrongTenant uuid.UUID }
+
+func (r wrongTenantResolver) Resolve(_ context.Context, _ providercred.TenantTxRunner, _ uuid.UUID, providerID string) (providercred.OutboundCredential, error) {
+	return providercred.OutboundCredential{TenantID: r.wrongTenant, ProviderID: providerID, Domain: "payments"}, nil
+}
+
+// TestCallProvider_CredentialForWrongTenant_RefusedByBindingCheck is
+// RV-PRH-I1 kill-switch phase 2 review P2-L1's required test: the gate's
+// own step-4 binding check (S95-C8(b)) must independently refuse a
+// credential resolved for the WRONG tenant, even though nothing in this
+// codebase's real or MOCK resolver can produce one today - this is the
+// gate's own defence-in-depth layer, not merely documentation of an
+// already-impossible case.
+func TestCallProvider_CredentialForWrongTenant_RefusedByBindingCheck(t *testing.T) {
+	claimToken := uuid.New()
+	requestedTenant := uuid.New()
+	in := callProviderInput{
+		TenantID: requestedTenant, ProviderID: "mock-psp-wrong-tenant",
+		AttemptState: AttemptSubmitting, ClaimToken: claimToken, ExpectedClaim: claimToken,
+		Domain: "payments", Manifest: OperationManifest{CallTimeout: time.Second},
+	}
+	resolver := wrongTenantResolver{wrongTenant: uuid.New()}
+	var adapterCalls int32
+	gr := callProvider(context.Background(), nil, resolver, in, func(context.Context, CallContext) (DepositResult, ErrorClass, error) {
+		atomic.AddInt32(&adapterCalls, 1)
+		return DepositResult{}, ErrorClassSucceeded, nil
+	})
+	if gr.Class != ErrorClassNotSent {
+		t.Fatalf("expected a wrong-tenant credential to map to NotSent (binding refusal), got %s", gr.Class)
+	}
+	if atomic.LoadInt32(&adapterCalls) != 0 {
+		t.Fatal("expected the adapter function to never be invoked for a wrong-tenant credential")
+	}
+}
+
+// TestCallProvider_NilResolver_RefusesCleanly_NeverPanics is RV-PRH-I1
+// kill-switch phase 2 security review P2-L3's required test:
+// NewOutboundKindSplitResolver returns a true nil interface when nothing
+// is wired, and calling Resolve on a nil interface would otherwise panic
+// (resolver.Resolve runs before step 6's safeCall, so a panic there is
+// NOT recovered) - callProvider's own step 0 must refuse cleanly with
+// NotSent instead.
+func TestCallProvider_NilResolver_RefusesCleanly_NeverPanics(t *testing.T) {
+	claimToken := uuid.New()
+	in := callProviderInput{
+		TenantID: uuid.New(), ProviderID: "mock-psp-nil-resolver",
+		AttemptState: AttemptSubmitting, ClaimToken: claimToken, ExpectedClaim: claimToken,
+		Domain: "payments", Manifest: OperationManifest{CallTimeout: time.Second},
+	}
+	var adapterCalls int32
+	gr := callProvider(context.Background(), nil, nil, in, func(context.Context, CallContext) (DepositResult, ErrorClass, error) {
+		atomic.AddInt32(&adapterCalls, 1)
+		return DepositResult{}, ErrorClassSucceeded, nil
+	})
+	if gr.Class != ErrorClassNotSent {
+		t.Fatalf("expected a nil resolver to map to NotSent, got %s", gr.Class)
+	}
+	if atomic.LoadInt32(&adapterCalls) != 0 {
+		t.Fatal("expected the adapter function to never be invoked with a nil resolver")
 	}
 }

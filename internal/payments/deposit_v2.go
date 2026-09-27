@@ -251,7 +251,19 @@ func (o *Orchestrator) InitiateDepositAttempt(
 				// never surfaces decline_reason, only status="declined" -
 				// the "kill_switch" label lives only in
 				// deposit.declined's own audit metadata, for operators.
-				intent, err = o.finalizeDeclined(actx, tx, intent, nil, nil, "kill_switch")
+				//
+				// C5 (RV-PRH-I1 kill-switch phase 2 code review): the
+				// provider capability we had just routed to (BEFORE the
+				// kill-switch claim refused it) is passed as providerID,
+				// exactly like every other post-routing decline
+				// (drive.go/orchestrator.go/receipt.go/sweeper.go's own
+				// finalizeDeclined calls that already had a resolved
+				// capability) - the operator can see WHICH provider's
+				// switch fired, wildcard and provider-scoped alike, both
+				// in deposit_intents.provider_id and in the audit row's
+				// own metadata.provider_id. No provider_reference exists
+				// (no call was ever made), so that stays nil.
+				intent, err = o.finalizeDeclined(actx, tx, intent, &capability.ProviderID, nil, "kill_switch")
 				return err
 			}
 			return err

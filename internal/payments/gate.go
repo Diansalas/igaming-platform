@@ -102,6 +102,21 @@ type callProviderInput struct {
 func callProvider[T any](ctx context.Context, pool providercred.TenantTxRunner, resolver OutboundCredentialResolver, in callProviderInput, fn AdapterCall[T]) GateResult[T] {
 	var zero T
 
+	// Step 0 (RV-PRH-I1 kill-switch phase 2 security review P2-L3):
+	// NewOutboundKindSplitResolver (and any other constructor) can return
+	// a TRUE nil interface when nothing is wired. resolver.Resolve is
+	// called outside safeCall's recover (it runs before step 6), so
+	// calling it on a nil interface would PANIC rather than refuse - a
+	// crash instead of the ordinary NotSent every other pre-flight
+	// refusal in this function produces. Every production caller happens
+	// to check for nil first today, but this checks it here too, at the
+	// one place that can never be skipped by a future call site that
+	// forgets to.
+	if resolver == nil {
+		return GateResult[T]{Value: zero, Class: ErrorClassNotSent,
+			Err: fmt.Errorf("%w: no outbound credential resolver configured", ErrProviderCallRefused)}
+	}
+
 	// Step 1 (INV-IO-1(b)): defence in depth behind the API-shape
 	// control (no function that can reach fn takes a pgx.Tx).
 	if txscope.Held(ctx) {
