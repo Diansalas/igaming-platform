@@ -237,10 +237,23 @@ func (o *Orchestrator) applyDepositCallResult(
 		if err := MarkAccepted(ctx, tx, attempt.ID, evidence, res.ProviderReference, nextPoll); err != nil {
 			return intent, nil, err
 		}
-		if err := setIntentAttempt(ctx, tx, intent.ID, &capability.ProviderID, &res.ProviderReference, DepositIntentPending); err != nil {
+		if _, err := setIntentAttempt(ctx, tx, intent.ID, &capability.ProviderID, &res.ProviderReference, DepositIntentPending); err != nil {
 			return intent, nil, err
 		}
 		intent.ProviderID, intent.ProviderReference, intent.Status = &capability.ProviderID, &res.ProviderReference, DepositIntentPending
+		// RV-PRH-I1 ledger-finance H2 / S-Q2 (ADR 0095 §6.4): this attempt
+		// JUST learned its provider_reference (T4, above) - a verified
+		// success callback that raced this same phase C call and arrived
+		// first would have been stored as a deferred, unresolved receipt
+		// (this attempt had no provider_reference to resolve it against
+		// yet). Applying every such deferred receipt for THIS attempt now,
+		// under the parent+attempt locks this call already holds, is the
+		// backstop that makes that race converge instead of leaving the
+		// success permanently unapplied.
+		attempt.ProviderID, attempt.ProviderReference = &capability.ProviderID, &res.ProviderReference
+		if _, err := ApplyDeferredReceiptsForAttempt(ctx, tx, o, attempt); err != nil {
+			return intent, nil, err
+		}
 		return intent, nil, nil
 
 	case ErrorClassSucceeded:
@@ -261,6 +274,14 @@ func (o *Orchestrator) applyDepositCallResult(
 		}); err != nil {
 			return intent, nil, err
 		}
+		// RV-PRH-I1 ledger-finance H4: this success may itself be a T13
+		// second capture (a sibling cascade child left 'created' from a
+		// PRIOR decline of a different sibling, driven concurrently) - any
+		// such leftover 'created' sibling must never reach T2 and place a
+		// second real PSP charge now that the intent has succeeded.
+		if err := rejectCreatedSiblings(ctx, tx, attempt); err != nil {
+			return intent, nil, err
+		}
 		return updated, nil, nil
 
 	case ErrorClassDefiniteDecline:
@@ -268,23 +289,24 @@ func (o *Orchestrator) applyDepositCallResult(
 		if res.ProviderReference != "" {
 			refPtr = &res.ProviderReference
 		}
-		updated, err := o.finalizeDeclined(ctx, tx, intent, &capability.ProviderID, refPtr, res.DeclineReason)
+		reason := boundedDeclineReason(res.DeclineReason)
+		updated, err := o.finalizeDeclined(ctx, tx, intent, &capability.ProviderID, refPtr, reason)
 		if err != nil {
 			return intent, nil, err
 		}
 		cascadable := res.Cascadable
 		if err := ApplyDecline(ctx, tx, attempt.ID, DeclineEvidence{
-			Evidence: evidence, Reason: res.DeclineReason, Stage: DeclineAtSubmission,
+			Evidence: evidence, Reason: reason, Stage: DeclineAtSubmission,
 			Cascadable: &cascadable, ProviderRef: refPtr,
 		}); err != nil {
 			return intent, nil, err
 		}
 		if cascadeEligible(attempt, updated.Status, cascadable, o.maxCascadeDepth(), sweeperDriven) {
-			child, err := insertCascadeAttempt(ctx, tx, attempt)
+			child, err := insertCascadeAttemptIfEligible(ctx, tx, attempt)
 			if err != nil {
 				return updated, nil, err
 			}
-			return updated, &child, nil
+			return updated, child, nil
 		}
 		return updated, nil, nil
 

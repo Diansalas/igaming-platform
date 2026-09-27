@@ -363,7 +363,14 @@ func (s *Sweeper) applyStatusEvidence(ctx context.Context, tx pgx.Tx, intent Dep
 		if err := MarkAccepted(ctx, tx, attempt.ID, EvidenceQueryStatus, res.ProviderReference, nextPoll); err != nil {
 			return err
 		}
-		return setIntentAttempt(ctx, tx, intent.ID, attempt.ProviderID, &res.ProviderReference, DepositIntentPending)
+		if _, err := setIntentAttempt(ctx, tx, intent.ID, attempt.ProviderID, &res.ProviderReference, DepositIntentPending); err != nil {
+			return err
+		}
+		// RV-PRH-I1 ledger-finance H2: see drive.go's identical comment -
+		// this poll is the sweeper's own T9 site.
+		attempt.ProviderReference = &res.ProviderReference
+		_, err := ApplyDeferredReceiptsForAttempt(ctx, tx, s.Orchestrator, attempt)
+		return err
 
 	case ErrorClassSucceeded:
 		// postedTxID, not updated.LedgerTransactionID - PRH-I5 finding
@@ -372,28 +379,33 @@ func (s *Sweeper) applyStatusEvidence(ctx context.Context, tx pgx.Tx, intent Dep
 		if err != nil {
 			return err
 		}
-		return ApplySuccess(ctx, tx, attempt.ID, SuccessEvidence{
+		if err := ApplySuccess(ctx, tx, attempt.ID, SuccessEvidence{
 			Evidence: EvidenceQueryStatus, ProviderReference: res.ProviderReference, LedgerTransactionID: &postedTxID,
-		})
+		}); err != nil {
+			return err
+		}
+		// RV-PRH-I1 ledger-finance H4: see drive.go's identical comment.
+		return rejectCreatedSiblings(ctx, tx, attempt)
 
 	case ErrorClassDefiniteDecline:
 		var refPtr *string
 		if res.ProviderReference != "" {
 			refPtr = &res.ProviderReference
 		}
-		updated, err := s.Orchestrator.finalizeDeclined(ctx, tx, intent, attempt.ProviderID, refPtr, res.DeclineReason)
+		reason := boundedDeclineReason(res.DeclineReason)
+		updated, err := s.Orchestrator.finalizeDeclined(ctx, tx, intent, attempt.ProviderID, refPtr, reason)
 		if err != nil {
 			return err
 		}
 		cascadable := res.Cascadable
 		if err := ApplyDecline(ctx, tx, attempt.ID, DeclineEvidence{
-			Evidence: EvidenceQueryStatus, Reason: res.DeclineReason, Stage: DeclineAfterAcceptance,
+			Evidence: EvidenceQueryStatus, Reason: reason, Stage: DeclineAfterAcceptance,
 			Cascadable: &cascadable, ProviderRef: refPtr,
 		}); err != nil {
 			return err
 		}
 		if cascadeEligible(attempt, updated.Status, cascadable, s.Orchestrator.maxCascadeDepth(), true) {
-			_, err := insertCascadeAttempt(ctx, tx, attempt)
+			_, err := insertCascadeAttemptIfEligible(ctx, tx, attempt)
 			return err
 		}
 		return nil

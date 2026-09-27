@@ -479,19 +479,36 @@ func loadDepositIntentByProviderRef(ctx context.Context, tx pgx.Tx, providerID, 
 // deposit's intent status). 'succeeded' is sticky by construction
 // everywhere else in this codebase (LF95-C7); this CASE makes that true
 // here too, independent of caller order.
-func setIntentAttempt(ctx context.Context, tx pgx.Tx, intentID uuid.UUID, providerID, providerReference *string, status DepositIntentStatus) error {
-	_, err := tx.Exec(ctx,
+// setIntentAttempt updates the intent's current provider_id/
+// provider_reference and status. RV-PRH-I1 ledger-finance M5 / code-review
+// F3: once the intent's status is already 'succeeded' (a T13 success on
+// ANY attempt already posted, LF95-C7's sticky rule), this function is a
+// pure no-op on every column - provider_id, provider_reference AND status
+// all stay exactly what they were. Without freezing provider_id/reference
+// too, a later decline/ambiguous callback for a DIFFERENT (already-
+// rejected-or-cascaded) sibling attempt could repoint a succeeded intent's
+// provider_reference at a losing attempt, corrupting the "which provider
+// actually holds this player's money" record even though status itself
+// stayed correct. Returns the row's ACTUAL resulting status (not just the
+// caller's intended one) so callers can detect a no-op and skip writing a
+// misleading "declined"/"ambiguous" audit record against an intent that
+// never moved.
+func setIntentAttempt(ctx context.Context, tx pgx.Tx, intentID uuid.UUID, providerID, providerReference *string, status DepositIntentStatus) (DepositIntentStatus, error) {
+	var actual DepositIntentStatus
+	err := tx.QueryRow(ctx,
 		`UPDATE deposit_intents
-		    SET provider_id = $2, provider_reference = $3,
+		    SET provider_id = CASE WHEN status = 'succeeded' THEN provider_id ELSE $2 END,
+		        provider_reference = CASE WHEN status = 'succeeded' THEN provider_reference ELSE $3 END,
 		        status = CASE WHEN status = 'succeeded' THEN status ELSE $4 END,
 		        updated_at = now()
-		  WHERE id = $1`,
+		  WHERE id = $1
+		  RETURNING status`,
 		intentID, providerID, providerReference, status,
-	)
+	).Scan(&actual)
 	if err != nil {
-		return fmt.Errorf("payments: update deposit intent attempt: %w", err)
+		return "", fmt.Errorf("payments: update deposit intent attempt: %w", err)
 	}
-	return nil
+	return actual, nil
 }
 
 func validateInitiateDepositParams(p InitiateDepositParams) error {
@@ -666,7 +683,7 @@ func (o *Orchestrator) attemptDeposit(ctx context.Context, tx pgx.Tx, intent Dep
 			return intent, fmt.Errorf("payments: adapter %s returned OutcomePending with no provider reference", providerID)
 		}
 		ref := result.ProviderReference
-		if err := setIntentAttempt(ctx, tx, intent.ID, &providerID, &ref, DepositIntentPending); err != nil {
+		if _, err := setIntentAttempt(ctx, tx, intent.ID, &providerID, &ref, DepositIntentPending); err != nil {
 			return intent, err
 		}
 		intent.ProviderID, intent.ProviderReference, intent.Status = &providerID, &ref, DepositIntentPending
@@ -747,8 +764,18 @@ func (o *Orchestrator) resolveAmbiguous(ctx context.Context, tx pgx.Tx, intent D
 }
 
 func (o *Orchestrator) finalizeDeclined(ctx context.Context, tx pgx.Tx, intent DepositIntent, providerID, providerReference *string, reason string) (DepositIntent, error) {
-	if err := setIntentAttempt(ctx, tx, intent.ID, providerID, providerReference, DepositIntentDeclined); err != nil {
+	actual, err := setIntentAttempt(ctx, tx, intent.ID, providerID, providerReference, DepositIntentDeclined)
+	if err != nil {
 		return intent, err
+	}
+	if actual == DepositIntentSucceeded {
+		// RV-PRH-I1 code review F3: the intent already succeeded (a T13
+		// success on a sibling attempt landed first) - setIntentAttempt's
+		// own sticky guard made this write a no-op on every column, so
+		// nothing here may claim to have declined it: no local mutation,
+		// and no spurious "deposit.declined" audit record against an
+		// intent that never moved.
+		return intent, nil
 	}
 	intent.ProviderID, intent.ProviderReference, intent.Status = providerID, providerReference, DepositIntentDeclined
 	meta := map[string]any{"decline_reason": reason}
@@ -765,8 +792,13 @@ func (o *Orchestrator) finalizeDeclined(ctx context.Context, tx pgx.Tx, intent D
 }
 
 func (o *Orchestrator) finalizeAmbiguous(ctx context.Context, tx pgx.Tx, intent DepositIntent, providerID, providerReference *string, reason string) (DepositIntent, error) {
-	if err := setIntentAttempt(ctx, tx, intent.ID, providerID, providerReference, DepositIntentAmbiguous); err != nil {
+	actual, err := setIntentAttempt(ctx, tx, intent.ID, providerID, providerReference, DepositIntentAmbiguous)
+	if err != nil {
 		return intent, err
+	}
+	if actual == DepositIntentSucceeded {
+		// See finalizeDeclined's identical F3 guard above.
+		return intent, nil
 	}
 	intent.ProviderID, intent.ProviderReference, intent.Status = providerID, providerReference, DepositIntentAmbiguous
 	meta := map[string]any{"reason": reason}
@@ -1131,9 +1163,9 @@ func (o *Orchestrator) receiveCallbackViaReceiptPath(ctx context.Context, tx pgx
 // HTTP layer can record it in a SEPARATE, freshly-opened tenant-scoped
 // transaction (Stage 10.1 PAY-REV-1, ADR 0090; ADR 0088 §4.7's pattern,
 // mirrored exactly, per sportsbook's own RecordSettlementRejection): the
-// transaction that ran receiveDepositReversalCallback has already been
-// rolled back by db.Pool.WithTenant because it returned a non-nil error,
-// so nothing recorded on tx itself would ever be committed.
+// transaction that ran applyReversalReceiptEvidence (receipt.go) has
+// already been rolled back by db.Pool.WithTenant because it returned a
+// non-nil error, so nothing recorded on tx itself would ever be committed.
 //
 // ledger-finance P2-B / security P2-2 / code review F2 (Stage 10.1
 // review): the record now names the ORIGINAL deposit_intent as its

@@ -743,8 +743,14 @@ func InsertReceipt(ctx context.Context, tx pgx.Tx, ev ProviderEvent) (uuid.UUID,
 
 // ResolveReceipt is the one-shot (attempt_id, resolution, resolved_at)
 // update (§14 "Receipt one-shot updates"). The caller must already hold
-// the resolved attempt's parent and attempt locks.
-func ResolveReceipt(ctx context.Context, tx pgx.Tx, receiptID uuid.UUID, attemptID uuid.UUID, resolution string) error {
+// the resolved attempt's parent and attempt locks. attemptID is a POINTER:
+// nil means "no single attempt to attach to" (a precondition anomaly, a
+// reversal with no resolvable original, or a non-succeeded reversal's own
+// anomaly - RV-PRH-I1), written as SQL NULL. payment_provider_events.
+// attempt_id is `UUID NULL REFERENCES payment_attempts (id)` - passing
+// uuid.Nil (the all-zero UUID) here instead of NULL would violate that
+// foreign key, since no payment_attempts row ever has that id.
+func ResolveReceipt(ctx context.Context, tx pgx.Tx, receiptID uuid.UUID, attemptID *uuid.UUID, resolution string) error {
 	return casUpdate(ctx, tx, "resolve payment provider event receipt",
 		`UPDATE payment_provider_events SET attempt_id = $2, resolution = $3, resolved_at = now()
 		 WHERE id = $1 AND resolved_at IS NULL`,
