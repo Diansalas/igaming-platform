@@ -353,3 +353,145 @@ M3 and M6 are required before the stage gate. The route deviation is accepted, s
   | Survived | K2, K3, K4, K6, K7, K10, K11, K14, K15, K18, K19, K20, K21 |
 
   Baseline green: the full `internal/payments` integration suite, the kill-switch HTTP and OpenAPI tests, and the auth permission tests.
+
+---
+
+## Re-verification 1 — fix round 1b at `33d4d9e` (migration 0106, ADR 0095 §10.7)
+
+- Date: 2026-09-27. Detached worktree at `33d4d9e`. Private database `secrv_ks_i1b`, migrated to 106 with the `deploy/init-app-role.sql` grant tail. Both have been dropped and removed.
+- **Verdict: CHANGES REQUIRED (narrower).** Every behaviour fix is correct on the live code:
+  - H1 coverage;
+  - M1, M2, M3;
+  - the M4 test;
+  - M5 scope;
+  - L1 to L4, L6, L8.
+
+  One new finding blocks completion.
+- **N1 (blocks completion):** the guard-trigger tests exercise the superseded 0105 function bodies, not the 0106 bodies that run in production. The "M6 closed" and platform-lock coverage claims therefore do not hold for live code.
+
+### Mixed-GUC reproduction (M1) — CLOSED
+
+- **Probe P1, re-run at head (106).** With `'*'/'*'` engaged, a claim inside a `WithTenant` transaction after `set_config('app.platform_admin_principal_id', …)` is now refused, the same as the control.
+- **Permanent test.** `TestMigration0106_MixedGUCContextClaimsNothing` kills K22, which reverts the `payment_attempts` policy.
+- **Minor (Info).** K22b, reverting the same hardening on `payment_provider_events`, SURVIVES. That table is not read by the claim predicate, so it has no fail-open consequence, but a one-line test would pin it.
+
+### 0106 RLS and legitimate platform-scoped paths — no regression
+
+- **Policies.** `payment_attempts` and `payment_provider_events` carry only `tenant_staff_scope`. A `WithPlatformAdmin` or `WithPlatformService` session never had visibility, because `app.tenant_id` is unset. The added `platform_admin_principal_id IS NULL` clause therefore changes only the mixed tenant+platform shape.
+- **Code grep at `33d4d9e` and at current `35a7c35`.** Every reader and writer uses `WithTenant`, `WithTenantReadOnly`, `WithTenantSnapshot` or `WithPlayerScope`. The readers and writers checked were:
+  - sweepers (`sweeper.go`, `payout_sweep.go`);
+  - drive, payout and deposit_v2;
+  - receipt callbacks;
+  - `reconciliation/payment_statement.go`;
+  - `withdrawal_handlers.go`.
+
+  No code sets the platform GUC inside a tenant transaction. The only in-transaction switch, KYC `setActingPrincipal`, runs in a platform transaction with no tenant set.
+- **Clean-tree runs at 106, all green:**
+  - the full `internal/payments` integration suite (baseline of the mutation run);
+  - `internal/reconciliation`, `internal/withdrawal`, `cmd/platform-api`, `internal/db`;
+  - `internal/httpserver` filtered to `Withdraw|Payout|Deposit|Webhook|Payment|Reconcil`.
+
+### Live-behaviour probes (SQL as `igaming_runtime`, 0106)
+
+All of the following are correct on live code:
+
+| Probe | Result |
+|---|---|
+| Q1 | Actor and scope still forced. `changed_at` is now `now()`, so L3 is closed. |
+| Q2 | Tenant staff id in the platform GUC is refused |
+| Q3, Q3b, Q5, Q6 | Unchanged, correct |
+| Q4 | Suspended principal refused (L4 closed) |
+| R1c | Tenant cancel of a platform-filed request refused (L1 closed) |
+| R1d, R1e, R1g | Unchanged, correct |
+| R2 | Request on a non-engaged switch refused |
+| R3 | Future `expected_version` forced to current, so the stale-intent release is refused (L2 closed) |
+| R2b | KS-L6 takeover cancels the open request |
+| R4 | Cross-switch request refused |
+
+### Mutation re-run (34 mutants; original 21 retargeted to the live 0106 bodies where the guard moved, plus 13 for the new fixes)
+
+**Killed:**
+
+| Mutant | What was removed | Status |
+|---|---|---|
+| K1–K4 | Claim predicates on T2, T1+T2/T1p, T12, cascade T1 | H1 **CLOSED** |
+| K8 | L5(a) request INSERT refusal | killed |
+| K9 | Both four-eyes checks | killed |
+| K16 | `canActOnTenant` | killed |
+| K17 | Approve audit | killed |
+| K18 | `target_tenant_id` in the platform engage audit | M4 test **CLOSED** |
+| K22 | M1 policy on `payment_attempts` | killed |
+| K23b | Both L1 checks together | killed |
+| K24, K25 | L2 forced version / requires engaged | killed |
+| K27 | L3 `changed_at` | killed |
+| K28 | L4 `status = 'active'` | killed |
+| K29 | M2 provider registry check | killed |
+| K30 | L6 tenant exists | killed |
+| K31 | M3 engage before-state | killed |
+| K32 | L5 refusal classification | killed |
+| K33 | M5 pointer-receiver check | killed |
+| K34 | M5 chan check | killed |
+
+**Survived:**
+
+| Mutant | What was removed, in the live 0106 body | Consequence |
+|---|---|---|
+| K5 | KS-L6 takeover cancel | Untested on live code |
+| K10 | Request→switch binding | M6 claim does not hold for live code |
+| K11 | Expiry check at release | M6 claim does not hold for live code |
+| K12 | `expected_version` at release | Untested on live code |
+| **K13** | Tenant lock on platform-engaged rows | Live bypass, demonstrated below |
+| K14 | 24 h cap | M6 claim does not hold for live code |
+| **K19** | Platform staff check in `payment_kill_switch_session()` | Live bypass, demonstrated below |
+| K6, K7, K20 | Platform-pair / status-change layers | Redundant layers, Info (I6) |
+| K23 alone | L1 platform-filed check | Covered by the platform-engaged check |
+| K26 | L2 false→true cancel | Unreachable once K25's rule holds, Info |
+| K15 | Staff gate | `RequirePermission` still returns 403, defence in depth, Info |
+| K21 | Engage alert **call site** | L7 residual |
+| K22b | `payment_provider_events` policy | Info |
+
+### N1 — HIGH (blocks completion): live trigger bodies are untested; the platform lock and four-eyes binding can be silently removed
+
+**Cause.** Migration 0106 `CREATE OR REPLACE`s `payment_kill_switches_guard()`, `payment_kill_switch_release_requests_guard()` and `payment_kill_switch_session()`. The following test suites all build their databases with `migration0105Scratch`, which stops at 105 and so exercises the **superseded** 0105 bodies:
+- `migration_0105_integration_test.go`, including the new `TestMigration0105_M6_K10/K11/K14/K19` tests;
+- `killswitch_integration_test.go`;
+- `killswitch_claim_predicate_coverage_test.go`.
+
+Only the seven `TestMigration0106_*` tests and the HTTP tests run the live bodies. The fix round's "K10/K11/K14 killed" was measured against dead code.
+
+**Demonstrated on the private DB** by applying the mutated live function and then restoring it:
+
+| Mutant applied to the live 0106 body | Effect | Tests that notice |
+|---|---|---|
+| K13: remove the tenant lock | A tenant session re-engages a platform-engaged switch. `engaged_by_scope` becomes `'tenant'`: the platform containment is **downgraded** and becomes tenant-releasable by two tenant admins. | none |
+| K19: drop the whole principal predicate in `payment_kill_switch_session()` | A random UUID in `app.platform_admin_principal_id` is accepted as a **`'platform'` actor** and engages another tenant's switch | none |
+
+On K19, §10.7's argument (that `staff_users` RLS makes the narrower `tenant_id IS NULL` removal harmless) is correct for that narrow edit. It does not cover the broader edit, and no test exercises the live function at all.
+
+**Required:**
+- Run every kill-switch trigger, four-eyes and session test against **head**, for example by pointing `migration0105Scratch` at `realMigrationsDir` or `migration0106Scratch`. Keep 0105-only runs only where a test is explicitly about 0105's own history.
+- Add a test that a random or non-staff UUID in the platform GUC is refused. The current K19 test uses a tenant staff id, which RLS hides anyway.
+- Re-run K5, K10–K14 and K19 against the live bodies. They must be killed.
+- Rule for future migrations: any migration that redefines a guard function must move that function's tests to head in the same change.
+
+### Remaining items (non-blocking for completion, as ruled before)
+
+- **L5, partial.** Trigger refusals are now classified (409 + logged class; genuine errors → 500; K32 killed). The separately committed `OutcomeDenied` audit row for refused self-approval or platform-lock attempts is still NOT IMPLEMENTED; §10.7 labels this honestly. It stays required before the stage gate. Note that the log line now includes the raw `err.Error()`. For these triggers that is principal and request UUIDs only, with no secrets. That is acceptable, but keep it allow-listed if other trigger messages are added.
+- **L7.** The label is now correct and the event function is pinned by a test. **K21**, deleting the `logKillSwitchEngagedAlert` **call** in the engage handler, SURVIVES because the test calls the function directly. Add an HTTP-level assertion that engage emits the event. Real delivery remains launch-blocking.
+- **M4.** The test is closed (K18 killed). The structural fix is registered as KS-AUDIT-TENANT-1 (architect), still launch-blocking, which is accepted as registered.
+- **M5.** Substantially closed. The scan now covers the real `buildProviderBundle(allOnWiring)`; atomic.Pointer, chan and unsafe.Pointer are flagged; the static checks are package-wide. The PARTIAL label is correct. Two residuals remain:
+  1. **Addressability gate (Low).** The pointer-receiver check is gated on `rv.CanAddr()`. A **value-typed** adapter stored in an interface or map is not addressable, and that is exactly the shape `paymentsAdapters()` returns. Probe: `map[string]any{"p": valueAdapter{auth: ptrRecvAuth{…}}}` reports 0 violations; the same value behind a pointer reports 1. `reflect.PointerTo(t).Implements` needs no addressability, so drop the `CanAddr()` condition.
+  2. **Raw strings and `[]byte` (inherent).** These are out of reach for a type-based scan, as labelled.
+- **Route deviation.** The ruling stands. The architect amendment to §10.4/§10.5 is still to be recorded, and §10.7 does not show it.
+- **Ledger-finance H3 (three sites).** Out of scope for this round. Only `sweeper.go` changed (+3 lines), and I have not re-verified it. It remains blocking per the original review.
+
+### Launch-blocking summary (updated)
+
+| Item | Status |
+|---|---|
+| H1, M1, M2, L1–L4, L6, L8 | Closed |
+| M3 | Closed |
+| N1 | **Open, blocks completion** |
+| Ledger-finance H3 at all three sites | Open |
+| L5 denied-audit rows | Required before the stage gate |
+| Launch-blocking for production | KS-AUDIT-TENANT-1 (M4), the real-adapter M5 residuals, and alert delivery (L7) |
