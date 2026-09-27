@@ -22,14 +22,18 @@
 // still false) - a KYC outcome, allow or deny, never itself releases a
 // hold once dispatch may have happened (ADR 0095 §5).
 //
-// M5 (RV-PRH-I1 ledger-finance review, informational): the INV-IO-15 kill
-// switch is NOT implemented anywhere in this file. Another agent is
-// building it (migration 0105, the capability manifest kill-switch
-// project) - this file deliberately does not touch that work. The three
-// claim/resend points that will need the switch predicate once it lands
-// are marked below with "KILL-SWITCH HOOK" comments, and DR-PRHI-KS-1 is
-// registered in docs/governance/task-registry.md so the orchestrator can
-// track wiring it in after both branches merge.
+// M5 (RV-PRH-I1 ledger-finance review): the INV-IO-15 kill switch
+// (migration 0105, another agent's work - killswitch.go/attempt.go's own
+// CAS predicates, never edited here) is now checked at every claim/resend
+// point via checkPayoutKillSwitch: T2 (reclaimPayoutCreated) and T12
+// (resubmitPayoutAmbiguous) check it explicitly before the claim/resend
+// (so a block reschedules rather than looking like an ordinary CAS
+// conflict); T1p (payout.go's ClaimForDispatch) relies on
+// InsertSubmittingAttempt's own INSERT ... SELECT ... WHERE predicate and
+// surfaces ErrPayoutKillSwitchEngaged distinctly. Every path fails closed:
+// no Withdraw call, no state change (the hold/hold-adjacent state is left
+// exactly where it was), and the identical claim/resend is safe to retry
+// once the switch is released - there is no separate "unblock" action.
 package payments
 
 import (
@@ -93,11 +97,10 @@ func (s *Sweeper) processPayoutAttempt(ctx context.Context, tenantID uuid.UUID, 
 // NULL`) would otherwise fail every lease period once escalated, forcing
 // the caller to treat "still denied, still escalated" as an ERROR.
 func (s *Sweeper) gateAndEscalateOnDeny(ctx context.Context, tx pgx.Tx, wr withdrawal.WithdrawalRequest, attempt PaymentAttempt, nextActionAt time.Time) (allowed bool, err error) {
-	// KILL-SWITCH HOOK (M5, DR-PRHI-KS-1): once migration 0105's kill
-	// switch lands, a re-claim/resend must also check the INV-IO-15
-	// predicate here (and inside the CAS itself) before ever reaching the
-	// KYC gate or a provider call - not implemented in this file by
-	// instruction; another agent owns that migration.
+	// Kill-switch check is the CALLER's job (checkPayoutKillSwitch, run
+	// BEFORE this function - see reclaimPayoutCreated/resubmitPayoutAmbiguous),
+	// deliberately not duplicated here: unlike a KYC deny, a kill-switch
+	// block is transient and must reschedule, not Escalate.
 	decision, _, err := evaluatePayoutGate(ctx, tx, s.PayoutKYCGate, wr)
 	if err != nil {
 		return false, err
@@ -122,6 +125,31 @@ func (s *Sweeper) gateAndEscalateOnDeny(ctx context.Context, tx pgx.Tx, wr withd
 		return false, err
 	}
 	return false, nil
+}
+
+// checkPayoutKillSwitch is T2/T12's shared pre-check (the kill-switch
+// migration, 0105, is another agent's work - this file only reacts to an
+// already-engaged switch, never engages/releases one). Called BEFORE
+// attempting a re-claim/resend, inside the SAME transaction that will
+// perform it, so the decision is made against a fresh read. Distinct from
+// gateAndEscalateOnDeny's KYC-deny handling: a kill switch is a TRANSIENT,
+// operator-controlled pause, not a permanent compliance denial - blocking
+// here reschedules the attempt (a plain backoff, never Escalate/T16), so
+// the exact same claim/resend is retried automatically, with no special
+// "release" action required beyond the switch itself being released
+// (idempotent: the CAS predicate re-evaluates it fresh every tick).
+func checkPayoutKillSwitch(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, providerID string, attempt PaymentAttempt, nextActionAt time.Time) (blocked bool, err error) {
+	engaged, err := KillSwitchEngaged(ctx, tx, tenantID, providerID, AttemptOperationPayout)
+	if err != nil {
+		return false, err
+	}
+	if !engaged {
+		return false, nil
+	}
+	if err := RescheduleNonTerminal(ctx, tx, attempt.ID, nextActionAt); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // escalateAmbiguousPayout is resubmitPayoutAmbiguous's non-idempotent-or-
@@ -168,11 +196,15 @@ func (s *Sweeper) reclaimPayoutCreated(ctx context.Context, tenantID uuid.UUID, 
 	nextPoll := s.backoff(attempt.PollCount)
 	var claimed PaymentAttempt
 	var allowed bool
-	// KILL-SWITCH HOOK (M5, DR-PRHI-KS-1): a NOT EXISTS(engaged switch)
-	// predicate belongs in this same transaction's CAS, before the claim.
 	err := s.Pool.WithTenant(ctx, tenantID, func(actx context.Context, tx pgx.Tx) error {
 		wr, err := lockSubmittedRequest(actx, tx, *attempt.WithdrawalRequestID)
 		if err != nil {
+			return err
+		}
+		// Kill switch (migration 0105): checked BEFORE the KYC gate/claim,
+		// fail closed, transient - a plain reschedule, never Escalate.
+		blocked, err := checkPayoutKillSwitch(actx, tx, tenantID, *attempt.ProviderID, attempt, nextPoll)
+		if err != nil || blocked {
 			return err
 		}
 		allowed, err = s.gateAndEscalateOnDeny(actx, tx, wr, attempt, nextPoll)
@@ -247,11 +279,17 @@ func (s *Sweeper) resubmitPayoutAmbiguous(ctx context.Context, tenantID uuid.UUI
 
 	var claimed PaymentAttempt
 	var allowed bool
-	// KILL-SWITCH HOOK (M5, DR-PRHI-KS-1): a NOT EXISTS(engaged switch)
-	// predicate belongs in this same transaction's CAS, before the resend.
 	err := s.Pool.WithTenant(ctx, tenantID, func(actx context.Context, tx pgx.Tx) error {
 		wr, err := lockSubmittedRequest(actx, tx, *attempt.WithdrawalRequestID)
 		if err != nil {
+			return err
+		}
+		// Kill switch (migration 0105): checked BEFORE the KYC gate/resend,
+		// fail closed, transient - a plain reschedule, never Escalate (a
+		// kill-switch pause must not permanently park the payout the way
+		// exhausting max_resubmits or a non-idempotent manifest does).
+		blocked, err := checkPayoutKillSwitch(actx, tx, tenantID, *attempt.ProviderID, attempt, nextPoll)
+		if err != nil || blocked {
 			return err
 		}
 		allowed, err = s.gateAndEscalateOnDeny(actx, tx, wr, attempt, nextPoll)

@@ -926,6 +926,14 @@ func newSubmitWithdrawalHandler(deps Deps) http.HandlerFunc {
 			apierror.Write(w, requestID, apierror.CodeUnavailable, "verification check is temporarily unavailable, please retry")
 			return
 		}
+		if errors.Is(err, payments.ErrPayoutKillSwitchEngaged) {
+			// Fail-closed, transient (migration 0105): the request is left
+			// exactly `approved` (the whole T1p transaction rolled back) -
+			// safe and expected to retry once the switch is released.
+			logger.Error("submit_withdrawal_kill_switch_engaged", "error", err)
+			apierror.Write(w, requestID, apierror.CodeUnavailable, "payouts are temporarily paused for this provider - please retry shortly")
+			return
+		}
 		if err != nil {
 			logger.Error("submit_withdrawal_claim_failed", "error", err)
 			apierror.Write(w, requestID, apierror.CodeInternal, "failed to submit withdrawal")

@@ -144,6 +144,16 @@ func evaluatePayoutGate(ctx context.Context, tx pgx.Tx, kycGate PayoutKYCGate, w
 // pending_review-time gate.
 var ErrPayoutKYCUnavailable = errors.New("payments: payout kyc enforcement evaluation unavailable")
 
+// ErrPayoutKillSwitchEngaged wraps a payout claim/resend refused by the
+// ADR 0095 §10 kill switch (migration 0105, another agent's work - this
+// file never engages/releases a switch itself, only reacts to one already
+// engaged). Every claim/resend point (T1p, T2, T12) fails closed on it:
+// no Withdraw call, the hold/state left exactly as it was (the whole claim
+// transaction rolls back), and the SAME claim/resend is safe to retry once
+// the switch is released - the CAS predicate re-evaluates it fresh on
+// every attempt, there is nothing to reset.
+var ErrPayoutKillSwitchEngaged = errors.New("payments: payout claim refused, kill switch engaged")
+
 // SubmitActor is the staff identity/request context ClaimForDispatch must
 // have to record the "which staff member triggered this payout" audit
 // entry INSIDE the T1p (or W-KYC-deny) transaction (B6, RV-PRH-I1 code
@@ -279,6 +289,15 @@ func (o *Orchestrator) ClaimForDispatch(ctx context.Context, pool *db.Pool, kycG
 			LeaseUntil: time.Now().Add(payoutAttemptClaimLease),
 		})
 		if err != nil {
+			if errors.Is(err, ErrKillSwitchEngaged) {
+				// Kill switch (migration 0105): fail closed, whole tx rolls
+				// back - MarkSubmittedPending's own approved->submitted
+				// transition above is undone with it, so the hold stays
+				// exactly where it was and the request is left `approved`,
+				// unchanged, for an idempotent retry once the switch is
+				// released (no partial claim, never a Withdraw call).
+				return fmt.Errorf("%w: payout T1p claim refused: %w", ErrPayoutKillSwitchEngaged, err)
+			}
 			return err
 		}
 
