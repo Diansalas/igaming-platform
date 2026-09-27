@@ -9,8 +9,10 @@
 package payments
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"os"
 	"strings"
 	"testing"
@@ -1046,5 +1048,160 @@ func TestRVLF_C2N12_DeferredAmbiguousBackstopAlsoRecomputesIntentProjection(t *t
 	}
 	if intentStatus != string(DepositIntentAmbiguous) {
 		t.Errorf("C2/N12: the deferred-apply backstop must recompute the intent's own projection on an ambiguous transition too (no direct write does this), got status=%q", intentStatus)
+	}
+}
+
+// TestINVDEP1_FL1_ApplicationChokePointCatchesItBeforeTheDBBackstop closes
+// security review F-L1 (rv-fh3-security.md, 81dd4b7): two mutants
+// survived the FH-3 subset because migration 0107's ledger index produces
+// the SAME disputed outcome regardless of which layer actually caught the
+// second success -
+//
+//	MT: resolvedForOtherDeposit queried with the wrong tenant (always
+//	    returns false, since a wrong-tenant read finds nothing under RLS);
+//	MC: both application-level checks (postDepositSuccessOrDispute's own
+//	    pre-check AND postDepositSuccess's internal re-check) disabled.
+//
+// In BOTH cases, migration 0107's unique index still refuses the second
+// ledger posting, mapped to the identical T13d disputed state - but
+// reaching that DB-level refusal at all is itself a defect signal
+// (auditMultipleSuccessForIntent's own backstopFired=true branch, which
+// fires the ADDITIONAL payments_deposit_intent_index_backstop_fired P1).
+// This test captures slog output around the SAME real T13d scenario
+// TestINVDEP1_O2 uses and asserts the backstop-fired line did NOT fire -
+// proving the application-level choke point (not the DB backstop) is what
+// actually caught this specific, correctly-tenanted delivery. Under
+// either MT or MC, this assertion fails (the backstop-fired line WOULD
+// fire), independent of migration 0107's own index tests
+// (TestMigration0107_LedgerBackstop_ErrDepositAlreadyPostedForIntent),
+// which exercise the index directly and are not affected by either
+// mutant.
+func TestINVDEP1_FL1_ApplicationChokePointCatchesItBeforeTheDBBackstop(t *testing.T) {
+	pool := depositV2ScratchPool(t)
+	f := seedOrchFixture(t, pool)
+	pa := NewMockProvider("m-fl1-a", "EUR")
+	pb := NewMockProvider("m-fl1-b", "EUR")
+	pb.AcceptAllAmounts = true
+	registerCapability(t, pool, f, pa, 100)
+	registerCapability(t, pool, f, pb, 200)
+	orch := NewOrchestrator(map[string]PaymentProvider{"m-fl1-a": pa, "m-fl1-b": pb},
+		MultiWebhookCredentialResolver{"m-fl1-a": NewMockWebhookCredentials(pa), "m-fl1-b": NewMockWebhookCredentials(pb)})
+
+	res := rvInit(t, pool, orch, f, 5000, "fl1")
+	ref := *res.Attempt.ProviderReference
+	childID := declineCascadableAndFindChild(t, pool, orch, f, "m-fl1-a", pa, ref)
+	child := dispatchViaSweeper(t, pool, orch, f, childID)
+	childRef := *child.ProviderReference
+
+	// The fallback resolves the intent FIRST (the real, first capture) -
+	// not captured, only setup.
+	if _, err := rvCallback(pool, orch, f, "m-fl1-b", pb.CallbackPayload(f.tenantID, CallbackEventDeposit, childRef, "", OutcomeSucceeded, 5000, "EUR", "", false)); err != nil {
+		t.Fatalf("fallback success: %v", err)
+	}
+
+	var logBuf bytes.Buffer
+	prevLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prevLogger) })
+
+	// The original's LATE success (T13d) - the delivery under test.
+	if _, err := rvCallback(pool, orch, f, "m-fl1-a", pa.CallbackPayload(f.tenantID, CallbackEventDeposit, ref, "", OutcomeSucceeded, 5000, "EUR", "", false)); err != nil {
+		t.Fatalf("late original success (T13d): %v", err)
+	}
+
+	disputed := mustGetAttempt(t, pool, f.tenantID, res.Attempt.ID)
+	if disputed.State != AttemptDisputed || disputed.TerminalReason == nil || *disputed.TerminalReason != TerminalReasonMultipleSuccessForIntent {
+		t.Fatalf("setup: expected disputed/multiple_success_for_intent, got state=%s reason=%v", disputed.State, disputed.TerminalReason)
+	}
+
+	logged := logBuf.String()
+	if !strings.Contains(logged, "payments_multiple_success_for_intent_alert") {
+		t.Fatalf("F-L1: expected the multiple_success_for_intent alert to fire, got: %s", logged)
+	}
+	if strings.Contains(logged, "payments_deposit_intent_index_backstop_fired") {
+		t.Fatalf("F-L1: the DB backstop must NOT have fired for a correctly-tenanted, correctly-checked delivery - the application-level choke point must catch this BEFORE the ledger index ever needs to; got: %s", logged)
+	}
+
+	// Independent corroboration: exactly one dispute audit record exists
+	// (the application path) - never a second one from the ledger path.
+	var disputeAuditCount int64
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT count(*) FROM audit_log WHERE action = 'payment.attempt_disputed' AND target_id = $1`, disputed.ID.String()).Scan(&disputeAuditCount)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if disputeAuditCount != 1 {
+		t.Errorf("F-L1: expected exactly one payment.attempt_disputed audit record (the application path), got %d", disputeAuditCount)
+	}
+}
+
+// TestINVDEP1_FL2_MultipleSuccessAlertLogContentIsPinned closes security
+// review F-L2 (rv-fh3-security.md, 81dd4b7): the "ML SURVIVED" mutant
+// (adding `amount` to payments_multiple_success_for_intent_alert) passed
+// the FH-3 subset because no test captured this line's exact attribute
+// set. Pins tenant_id/deposit_intent_id/attempt_id present and asserts NO
+// amount or provider-reference key ever appears in either P1 log line, on
+// the SAME real T13d scenario TestINVDEP1_FL1 uses.
+func TestINVDEP1_FL2_MultipleSuccessAlertLogContentIsPinned(t *testing.T) {
+	pool := depositV2ScratchPool(t)
+	f := seedOrchFixture(t, pool)
+	pa := NewMockProvider("m-fl2-a", "EUR")
+	pb := NewMockProvider("m-fl2-b", "EUR")
+	pb.AcceptAllAmounts = true
+	registerCapability(t, pool, f, pa, 100)
+	registerCapability(t, pool, f, pb, 200)
+	orch := NewOrchestrator(map[string]PaymentProvider{"m-fl2-a": pa, "m-fl2-b": pb},
+		MultiWebhookCredentialResolver{"m-fl2-a": NewMockWebhookCredentials(pa), "m-fl2-b": NewMockWebhookCredentials(pb)})
+
+	res := rvInit(t, pool, orch, f, 5000, "fl2")
+	ref := *res.Attempt.ProviderReference
+	childID := declineCascadableAndFindChild(t, pool, orch, f, "m-fl2-a", pa, ref)
+	child := dispatchViaSweeper(t, pool, orch, f, childID)
+	childRef := *child.ProviderReference
+
+	if _, err := rvCallback(pool, orch, f, "m-fl2-b", pb.CallbackPayload(f.tenantID, CallbackEventDeposit, childRef, "", OutcomeSucceeded, 5000, "EUR", "", false)); err != nil {
+		t.Fatalf("fallback success: %v", err)
+	}
+
+	var logBuf bytes.Buffer
+	prevLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prevLogger) })
+
+	if _, err := rvCallback(pool, orch, f, "m-fl2-a", pa.CallbackPayload(f.tenantID, CallbackEventDeposit, ref, "", OutcomeSucceeded, 5000, "EUR", "", false)); err != nil {
+		t.Fatalf("late original success (T13d): %v", err)
+	}
+
+	disputed := mustGetAttempt(t, pool, f.tenantID, res.Attempt.ID)
+
+	logged := logBuf.String()
+	var alertLine string
+	for _, line := range strings.Split(logged, "\n") {
+		if strings.Contains(line, "payments_multiple_success_for_intent_alert") {
+			alertLine = line
+			break
+		}
+	}
+	if alertLine == "" {
+		t.Fatalf("F-L2: expected the multiple_success_for_intent alert line, got: %s", logged)
+	}
+	// Pinned: exactly tenant_id, deposit_intent_id and attempt_id - no
+	// amount, asset_code, provider_id or provider_reference key, and the
+	// real values must be present (proving these are not just absent by
+	// coincidence of the log format).
+	if !strings.Contains(alertLine, "tenant_id="+f.tenantID.String()) {
+		t.Errorf("F-L2: expected tenant_id=%s in the alert line, got: %s", f.tenantID, alertLine)
+	}
+	if disputed.DepositIntentID == nil || !strings.Contains(alertLine, "deposit_intent_id="+disputed.DepositIntentID.String()) {
+		t.Errorf("F-L2: expected deposit_intent_id in the alert line, got: %s", alertLine)
+	}
+	if !strings.Contains(alertLine, "attempt_id="+disputed.ID.String()) {
+		t.Errorf("F-L2: expected attempt_id=%s in the alert line, got: %s", disputed.ID, alertLine)
+	}
+	forbidden := []string{"amount=", "asset_code=", "provider_id=", "provider_reference=", "5000"}
+	for _, key := range forbidden {
+		if strings.Contains(alertLine, key) {
+			t.Errorf("F-L2: the alert line must never carry %q, got: %s", key, alertLine)
+		}
 	}
 }
