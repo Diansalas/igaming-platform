@@ -743,7 +743,7 @@ asserted. No vendor is selected. No regulatory approval is claimed.
 
 ---
 
-## 11. QA test-plan review (`qa`, §7 only)
+## 10. QA test-plan review (`qa`, §7 only)
 
 **Verdict: CONFIRMED WITH CHANGES.**
 
@@ -851,7 +851,7 @@ test coverage for this ADR's implementation as `IMPLEMENTED`.
 
 ---
 
-## 10. Casino review (`casino`, 2026-09-27)
+## 11. Casino review (`casino`, 2026-09-27)
 
 Reviewed against live code at `HEAD 3d50b3c` (`internal/casino/
 orchestrator.go`, `internal/sportsbook/orchestrator.go`), scoped strictly
@@ -957,7 +957,7 @@ either documentation precision or a missing test-plan line item.
 
 ---
 
-## 10. Ledger-finance review
+## 12. Ledger-finance review
 
 **Reviewer:** `ledger-finance`. **Verdict: SIGN-OFF WITH CONDITIONS.**
 **Scope:** the financial parts only: §2.4/§3.2/§5 withdrawal enforcement
@@ -972,7 +972,7 @@ ADR 0082 (#7/#10), and TOCTOU. Checked against code at `07c8103`:
 not yet written (registry PRH-D1 "Not started"). C5 below states what it
 must preserve and does not guess its design.
 
-### 10.1 What is sound
+### 12.1 What is sound
 
 - **Deposit (#1).** The gate goes after RG, inside the transaction that
   inserted the intent, and before `RouteProvider`/`provider.Deposit`. A
@@ -998,7 +998,7 @@ must preserve and does not guess its design.
   `asset_code REFERENCES assets(code)` follows CLAUDE.md. See C6 for how
   it is compared.
 
-### 10.2 Conditions (all must hold before PRH-I3 is marked IMPLEMENTED)
+### 12.2 Conditions (all must hold before PRH-I3 is marked IMPLEMENTED)
 
 **C1 — A denial must commit, never roll back (blocking design defect).**
 Test-plan row "KYC-denied player's hold is never posted (transaction
@@ -1155,7 +1155,7 @@ tests are required:
 - The ADR 0082 lock-order harness passes unmodified on all five gated
   paths.
 
-### 10.3 Veto check
+### 12.3 Veto check
 
 No floating point, no mutation of historical ledger entries, no direct
 balance `UPDATE`, and no money path without an idempotency key. No veto
@@ -1165,7 +1165,7 @@ gates.
 
 ---
 
-## 10. Security review
+## 13. Security review
 
 Reviewer: `security`, 2026-09-27. Reviewed at the working tree's actual
 `HEAD 3d50b3c` (the review request cited `07c8103`; this ADR's own baseline
