@@ -54,6 +54,13 @@ func countPoliciesFor(t *testing.T, pool *db.Pool, table string) int {
 	return count
 }
 
+// migration0099Version (PRH-REF, PROVIDER-REF-BOUND-1: provider reference
+// CHECK constraints) is the chain's tip for this file's full-chain
+// scenario. migration_0075_integration_test.go stages its own directory
+// ending at 0098 and never sees it. Its down only drops CHECK
+// constraints, so it is unconditionally reversible.
+const migration0099Version = int64(99)
+
 // TestMigration0077_EnablesAndForcesRLSOnTenantsLicencesAndJurisdictions
 // proves the schema-level baseline directly against pg_class - all three
 // tables must carry ENABLE + FORCE ROW LEVEL SECURITY after migrating up.
@@ -212,7 +219,8 @@ func TestMigration0077_RestoresPreMigrationRLSPostureOnDownThenFailsOnDirtyDatab
 		t.Fatalf("migrate up the full chain: %v", err)
 	}
 
-	// (a) Roll back 0098 (Stage 10.3 W3a's casino_statement mismatch kind,
+	// (a) Roll back 0099 (PRH-REF's provider reference CHECK constraints,
+	// whose down only drops constraints) then 0098 (Stage 10.3 W3a's casino_statement mismatch kind,
 	// whose down refuses only once a casino_statement mismatch exists,
 	// which this scenario never creates) then 0097 (Stage 10.3 W2b's casino rejection record and
 	// reconciliation kinds, whose down refuses only once casino
@@ -241,12 +249,12 @@ func TestMigration0077_RestoresPreMigrationRLSPostureOnDownThenFailsOnDirtyDatab
 	// brand-pinning fix) then 0078 (Stage 6's sportsbook foundation), all
 	// now sitting on the chain's tip and reversible in this scenario, then 0077, and confirm 0077's own EXACT pre-migration
 	// posture is restored.
-	rolledBack, err := pool.MigrateDown(context.Background(), dir, 22)
+	rolledBack, err := pool.MigrateDown(context.Background(), dir, 23)
 	if err != nil {
-		t.Fatalf("down migrations 0098/0097/0096/0095/0094/0093/0092/0091/0090/0089/0088/0087/0086/0085/0084/0083/0082/0081/0080/0079/0078/0077 on a clean database: %v", err)
+		t.Fatalf("down migrations 0099/0098/0097/0096/0095/0094/0093/0092/0091/0090/0089/0088/0087/0086/0085/0084/0083/0082/0081/0080/0079/0078/0077 on a clean database: %v", err)
 	}
 	wantDown := []int64{
-		migration0098Version, migration0097Version, migration0096Version, migration0095Version, migration0094Version, migration0093Version, migration0092Version, migration0091Version, migration0090Version, migration0089Version, migration0088Version, migration0087Version, migration0086Version, migration0085Version, migration0084Version, migration0083Version,
+		migration0099Version, migration0098Version, migration0097Version, migration0096Version, migration0095Version, migration0094Version, migration0093Version, migration0092Version, migration0091Version, migration0090Version, migration0089Version, migration0088Version, migration0087Version, migration0086Version, migration0085Version, migration0084Version, migration0083Version,
 		migration0082Version, migration0081Version, migration0080Version, migration0079Version, migration0078Version, migration0077Version,
 	}
 	if len(rolledBack) != len(wantDown) {

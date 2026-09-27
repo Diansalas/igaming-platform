@@ -82,10 +82,15 @@ flowchart LR
 - **Mismatch states**: (a) ledger has a transaction the PSP file doesn't
   show (possible fraud/integrity issue — escalate immediately, do not
   auto-resolve); (b) PSP file shows a settlement the ledger never posted
-  (a missed/lost webhook — the reconciliation job itself becomes the
-  trigger to post the missing transaction, going through the *same*
-  idempotent posting path a live webhook would, not a special "backfill"
-  code path, so invariants #1–#4 still apply uniformly).
+  (a missed/lost webhook). The reconciliation job **flags** it; the
+  posting happens only through fresh provider evidence (`QueryStatus`)
+  applied by the payments state machine. *(Amended 2026-09-27 by
+  `ledger-finance` per ADR 0095 §12.6 and LF-Q3 (§21.4); see "Amendment
+  (ADR 0095)" below. Original text, preserved: "~~the reconciliation job
+  itself becomes the trigger to post the missing transaction, going
+  through the *same* idempotent posting path a live webhook would, not a
+  special "backfill" code path, so invariants #1–#4 still apply
+  uniformly~~".)*
 - **Tolerance**: zero count mismatch; a monetary rounding tolerance may
   exist **only** if a specific PSP's settlement file is contractually
   known to round differently (e.g. FX-converted settlement) — `OPEN
@@ -103,6 +108,79 @@ flowchart LR
   reason-coded, fully audited action, because it is otherwise an
   unreviewed path to arbitrary credits. This document does not grant that
   capability; Stage 3B must not add it without an explicit decision.
+
+  *(Note, 2026-09-27, ADR 0095: after the (b) amendment below, the
+  reconciliation stream no longer mints credits at all, so this
+  requirement now applies to the statement fetch (it is still provider
+  I/O under the tenant's own credential, and still must not take a tenant
+  id from the file) and to the separate `payments`-owned re-drive job, not
+  to a reconciliation posting path. The manual-upload `OPEN DECISION`
+  stands unchanged: an uploaded file would still be detection input only,
+  never posting authority.)*
+
+  **Amendment (ADR 0095, 2026-09-27, `ledger-finance`; LF-Q3 / §21.4,
+  §12.6; design `ACCEPTED`, stream `NOT IMPLEMENTED` — target PRH-I5,
+  `MOCK` source only until a real PSP contract exists).** Binding on the
+  `payment_statement` stream (migration 0103):
+
+  1. **Never writes the ledger.** The stream writes exactly one
+     `reconciliation_runs` row plus its `reconciliation_mismatches` rows
+     (`persistRun`) and nothing else (ADR 0095 INV-IO-12, MX9). No
+     `ledger_transactions`, `ledger_entries`, projection, attempt or intent
+     write, and no call into `ledger.Post`. A bulk statement line is not
+     verified evidence of one payment; posting from it would be the
+     unreviewed path to arbitrary credits this section warns about.
+  2. **Remediation of (b) is outside the stream.** A `payments`-owned
+     re-drive job reads new `pay_status_mismatch` rows and requests T17 on
+     the named attempt; T17 calls `QueryStatus`, and only that fresh,
+     provider-bound evidence, applied by `applyEvidence`, may post (T7/T13)
+     through the normal idempotent path under the `(provider_id,
+     provider_tx_id)` unique constraint. An operator may also request T17.
+     Any credit not backed by such evidence goes only through
+     LEDGER-MANUAL-ADJ-4EYES-1 (`BLOCKED`).
+  3. **Fetch outside any transaction.** `Fetch` is provider I/O and runs
+     with no tx open (ADR 0095 INV-IO-1), through the provider-call gate,
+     with the tenant's own outbound credential, a capped body and a
+     per-import line cap (over the cap: refuse, store nothing, P1).
+  4. **Append-only statement store.** The fetched statement is ingested in
+     a short tx into `payment_statement_imports` and
+     `payment_statement_lines`, both append-only by trigger, idempotent on
+     `(tenant, provider, source_label, coverage_start, coverage_end,
+     content_digest)`. Matching reads only the stored copy, never the live
+     provider.
+  5. **Match under REPEATABLE READ.** The match tx runs under
+     `WithTenantSnapshot` with REPEATABLE READ required and enforced, plus
+     the per-tenant transaction-scoped advisory lock used by the other
+     streams, so every read (lines, `payment_attempts`, unresolved
+     `payment_provider_events`, ledger) sees one snapshot.
+  6. **The key is the ledger's `(provider_id, provider_tx_id)`.** Matching
+     statement lines against `payment_attempts` alone is not sufficient. In
+     the same match tx the stream also joins the ledger, independently of
+     the statement:
+     - a `deposit` or `withdrawal_completed` ledger transaction in the
+       window, carrying a `provider_id`, that maps to no `succeeded`
+       attempt (or to more than one) → `pay_missing_platform_record`;
+     - a `succeeded` attempt without exactly one ledger transaction whose
+       `(provider_id, provider_tx_id)` equals the deposit's
+       `provider_reference` or the payout's Step B settlement reference →
+       `pay_status_mismatch`.
+     A statement line of provider P resolves only records with
+     `provider_id = P` (ADR 0095 INV-IO-14). Join paths (ADR 0095 §12.3,
+     revision 3, RV-0095 L4): deposit via
+     `payment_attempts.ledger_transaction_id`; payout via
+     `payment_attempts.withdrawal_request_id →
+     withdrawal_requests.release_ledger_transaction_id` (migration 0026)
+     with `transaction_type = 'withdrawal_completed'`.
+  7. **Classification and tolerance.** Kinds and remediation per ADR 0095
+     §12.3/§12.5; amounts compared as integers (`big.Int`), zero
+     tolerance (§1); every mismatch is a P1; no auto-resolution of (a).
+     Platform records outside the import's coverage window are never
+     flagged as missing.
+
+  Gates on `IMPLEMENTED` (not on this amendment): LF95-C13 (ledger join)
+  and the §16.3 reconciliation tests, including a statement-capture test
+  proving the run writes nothing outside `reconciliation_runs` /
+  `reconciliation_mismatches`.
 
 ### 2.3 Wallet ↔ casino provider — `BLUEPRINT`
 
@@ -197,7 +275,12 @@ migration `0097`), on the existing run/mismatch tables:
     shared helper).
   - **Provider reference length is unbounded** (security R-2):
     registered as PROVIDER-REF-BOUND-1, platform-wide; no migration in
-    this round.
+    this round. **Update (PRH-REF, 2026-09-27):** the bound is now
+    implemented: 255 bytes, validated at the verified callback boundary,
+    plus migration 0099's CHECKs. A casino callback over the bound gets
+    no rejection row (its value cannot be stored); the evidence is a log
+    line with the length and a hash prefix. See
+    `docs/plans/payment-readiness/prh-ref-provider-reference-bound.md`.
 - Read-only staff views: `GET /v1/admin/casino/reconciliation/runs`,
   `GET /v1/admin/casino/reconciliation/mismatches`,
   `GET /v1/admin/casino/callback-rejections`

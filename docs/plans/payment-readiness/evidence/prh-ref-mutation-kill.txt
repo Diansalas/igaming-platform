@@ -1,0 +1,85 @@
+PRH-REF (PROVIDER-REF-BOUND-1) mutation-kill evidence
+=====================================================
+
+Harness (committed, code review F6): docs/plans/payment-readiness/evidence/prh-ref-mutate.py.
+It applies exactly one source mutant at a time (an anchored string replacement that must
+match exactly once), runs that mutant's killing test command, and restores the file.
+A non-zero exit means KILLED. Re-run it with the five DB/JWT variables it names, pointed
+at a private/local test database; see the script header.
+
+Environment: local PostgreSQL 16, private database igaming_prhref_local (never the shared
+CI database). Scratch databases come from internal/testsupport/scratchdb. Go 1.26.8.
+GitHub CI evidence is unavailable while CI-BILLING-1 is open.
+
+Run 1 (commit 43f5071): M1-M28, 28/28 killed.
+Run 2 (code review follow-ups, below): M1-M33, 33/33 killed. M29-M33 are new and cover
+code review F3: the SQL control-range edges (DEL, U+009F, U+001F, and U+00A0 accepted)
+and the minimum length.
+
+M1 bound off-by-one (> becomes >=: exact max rejected): KILLED [internal/providerref/providerref.go] by `go test -count=1 ./internal/providerref/`
+    first failure: --- FAIL: TestValidate_ExactMaxAccepted (0.00s)
+M2 bound widened (MaxBytes+1 accepted): KILLED [internal/providerref/providerref.go] by `go test -count=1 ./internal/providerref/`
+    first failure: --- FAIL: TestValidate_MaxPlusOneRejected (0.00s)
+M3 UTF-8 validity check removed: KILLED [internal/providerref/providerref.go] by `go test -count=1 ./internal/providerref/`
+    first failure: --- FAIL: TestValidate_InvalidUTF8Rejected (0.00s)
+M4 C1 control range dropped: KILLED [internal/providerref/providerref.go] by `go test -count=1 ./internal/providerref/`
+    first failure: --- FAIL: TestValidate_ControlCharsRejected (0.00s)
+M5 required empty accepted: KILLED [internal/providerref/providerref.go] by `go test -count=1 ./internal/providerref/`
+    first failure: --- FAIL: TestValidate_EmptyRequiredVsOptional (0.00s)
+M6 value leaks into the error (Field carries value): KILLED [internal/providerref/providerref.go] by `go test -count=1 ./internal/providerref/`
+    first failure: --- FAIL: TestValidate_MaxPlusOneRejected (0.00s)
+M7 Fingerprint not a hash prefix: KILLED [internal/providerref/providerref.go] by `go test -count=1 ./internal/providerref/`
+    first failure: --- FAIL: TestFingerprint (0.00s)
+M8 casino boundary call removed: KILLED [internal/casino/orchestrator.go] by `go test -count=1 -tags=integration ./internal/casino/ -run ProviderRefBound`
+    first failure: --- FAIL: TestProviderRefBound_OversizeReferencesRejectedWithNothingWritten (0.12s)
+M9 casino round_id not validated: KILLED [internal/casino/orchestrator.go] by `go test -count=1 ./internal/casino/ -run ValidateCallbackReferences`
+    first failure: --- FAIL: TestValidateCallbackReferences (0.00s)
+M10 casino original ref not validated: KILLED [internal/casino/orchestrator.go] by `go test -count=1 -tags=integration ./internal/casino/ -run ProviderRefBound`
+    first failure: --- FAIL: TestProviderRefBound_OversizeReferencesRejectedWithNothingWritten (0.08s)
+M11 casino error not wrapped in domain sentinel: KILLED [internal/casino/orchestrator.go] by `go test -count=1 ./internal/casino/ -run ValidateCallbackReferences`
+    first failure: --- FAIL: TestValidateCallbackReferences (0.00s)
+M12 casino webhook 400 branch removed (falls to 500): KILLED [internal/httpserver/casino_handlers.go] by `go test -count=1 -tags=integration ./internal/httpserver/ -run OversizeProviderReference|OversizeOriginalReference|MapReceiveCallbackError`
+    first failure: --- FAIL: TestCasinoWebhook_OversizeProviderReference_400_LogBounded_NothingWritten (0.38s)
+M13 rejection log line carries err text: KILLED [internal/httpserver/provider_reference_log.go] by `go test -count=1 -tags=integration ./internal/httpserver/ -run OversizeProviderReference|OversizeOriginalReference|MapReceiveCallbackError`
+    first failure: --- FAIL: TestCasinoWebhook_OversizeProviderReference_400_LogBounded_NothingWritten (0.34s)
+M14 payments boundary call removed: KILLED [internal/payments/orchestrator.go] by `go test -count=1 -tags=integration ./internal/payments/ -run ProviderRefBound`
+    first failure: --- FAIL: TestProviderRefBound_Payments_OversizeRejectedNothingWritten_ExactMaxAccepted (0.07s)
+M15 payments original reference not validated: KILLED [internal/payments/orchestrator.go] by `go test -count=1 -tags=integration ./internal/payments/ -run ProviderRefBound`
+    first failure: --- FAIL: TestProviderRefBound_Payments_OversizeRejectedNothingWritten_ExactMaxAccepted (0.07s)
+M16 payments mapping case removed (500): KILLED [internal/httpserver/payment_callback_errors.go] by `go test -count=1 -tags=integration ./internal/httpserver/ -run OversizeProviderReference|OversizeOriginalReference|MapReceiveCallbackError`
+    first failure: --- FAIL: TestMapReceiveCallbackError_PostVerificationMappings (0.00s)
+M17 payments webhook branch removed (no allow-listed log): KILLED [internal/httpserver/deposit_handlers.go] by `go test -count=1 -tags=integration ./internal/httpserver/ -run OversizeProviderReference|OversizeOriginalReference|MapReceiveCallbackError`
+    first failure: --- FAIL: TestPaymentWebhook_OversizeProviderReference_400_LogBounded_NothingWritten (0.03s)
+M18 casino play rollback pre-validation removed: KILLED [internal/httpserver/casino_play_handlers.go] by `go test -count=1 -tags=integration ./internal/httpserver/ -run OversizeProviderReference|OversizeOriginalReference|MapReceiveCallbackError`
+    first failure: --- FAIL: TestCasinoPlayRollback_OversizeOriginalReference_400 (0.14s)
+M19 sportsbook sync pre-validation removed: KILLED [internal/sportsbook/catalogue.go] by `go test -count=1 -tags=integration ./internal/sportsbook/ -run SyncCatalogue_OverBound|SettlementValidation_FieldMatrix`
+    first failure: --- FAIL: TestSyncCatalogue_OverBoundExternalRefWritesNothing (0.02s)
+M20 sportsbook selection level not validated: KILLED [internal/sportsbook/catalogue.go] by `go test -count=1 ./internal/sportsbook/ -run ValidateCatalogueReferences|ValidateSettlementEvent`
+    first failure: --- FAIL: TestValidateCatalogueReferences_EveryLevel (0.00s)
+M21 sportsbook settlement asset code not validated: KILLED [internal/sportsbook/settlement.go] by `go test -count=1 ./internal/sportsbook/ -run ValidateCatalogueReferences|ValidateSettlementEvent`
+    first failure: --- FAIL: TestValidateSettlementEvent_AssetCodeBound (0.00s)
+M22 migration CHECK widened to 256 (rejections.provider_tx_id): KILLED [migrations/0099_provider_reference_bound.up.sql] by `go test -count=1 -tags=integration ./internal/casino/ -run Migration0099`
+    first failure: --- FAIL: TestMigration0099_UpEnforcesBoundDownDropsItRoundTrip (1.36s)
+M23 migration CHECK control-char clause dropped (rejections.provider_tx_id): KILLED [migrations/0099_provider_reference_bound.up.sql] by `go test -count=1 -tags=integration ./internal/casino/ -run Migration0099`
+    first failure: --- FAIL: TestMigration0099_UpEnforcesBoundDownDropsItRoundTrip (1.02s)
+M24 migration ledger CHECK removed: KILLED [migrations/0099_provider_reference_bound.up.sql] by `go test -count=1 -tags=integration ./internal/casino/ -run Migration0099`
+    first failure: --- FAIL: TestMigration0099_UpEnforcesBoundDownDropsItRoundTrip (1.15s)
+M25 pre-flight RLS-blind (no per-tenant app.tenant_id): KILLED [migrations/0099_provider_reference_bound.up.sql] by `go test -count=1 -tags=integration ./internal/casino/ -run Migration0099`
+    first failure: --- FAIL: TestMigration0099_UpEnforcesBoundDownDropsItRoundTrip (1.15s)
+M26 pre-flight predicate widened (300 bytes not counted): KILLED [migrations/0099_provider_reference_bound.up.sql] by `go test -count=1 -tags=integration ./internal/casino/ -run Migration0099`
+    first failure: --- FAIL: TestMigration0099_UpEnforcesBoundDownDropsItRoundTrip (1.49s)
+M27 pre-flight never raises: KILLED [migrations/0099_provider_reference_bound.up.sql] by `go test -count=1 -tags=integration ./internal/casino/ -run Migration0099`
+    first failure: --- FAIL: TestMigration0099_UpEnforcesBoundDownDropsItRoundTrip (1.40s)
+M28 down leaves a constraint behind: KILLED [migrations/0099_provider_reference_bound.down.sql] by `go test -count=1 -tags=integration ./internal/casino/ -run Migration0099`
+    first failure: --- FAIL: TestMigration0099_UpEnforcesBoundDownDropsItRoundTrip (1.48s)
+M29 SQL C1 range widened to U+00A0 (rejections.provider_tx_id): KILLED [migrations/0099_provider_reference_bound.up.sql] by `go test -count=1 -tags=integration ./internal/casino/ -run Migration0099`
+    first failure: --- FAIL: TestMigration0099_UpEnforcesBoundDownDropsItRoundTrip (1.35s)
+M30 SQL DEL dropped (rejections.provider_tx_id): KILLED [migrations/0099_provider_reference_bound.up.sql] by `go test -count=1 -tags=integration ./internal/casino/ -run Migration0099`
+    first failure: --- FAIL: TestMigration0099_UpEnforcesBoundDownDropsItRoundTrip (1.41s)
+M31 SQL C1 upper edge narrowed to U+009E (rejections.provider_tx_id): KILLED [migrations/0099_provider_reference_bound.up.sql] by `go test -count=1 -tags=integration ./internal/casino/ -run Migration0099`
+    first failure: --- FAIL: TestMigration0099_UpEnforcesBoundDownDropsItRoundTrip (1.41s)
+M32 SQL C0 upper edge narrowed to U+001E (rejections.provider_tx_id): KILLED [migrations/0099_provider_reference_bound.up.sql] by `go test -count=1 -tags=integration ./internal/casino/ -run Migration0099`
+    first failure: --- FAIL: TestMigration0099_UpEnforcesBoundDownDropsItRoundTrip (1.31s)
+M33 SQL minimum length dropped (ledger provider_tx_id): KILLED [migrations/0099_provider_reference_bound.up.sql] by `go test -count=1 -tags=integration ./internal/casino/ -run Migration0099`
+    first failure: --- FAIL: TestMigration0099_UpEnforcesBoundDownDropsItRoundTrip (1.39s)
+33/33 killed (2026-09-27T09:14:33.691422+00:00)
