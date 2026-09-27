@@ -3133,3 +3133,214 @@ databases (never the shared `igaming_platform_ci_local` instance). Full mutation
   `docs/governance/task-registry.md` — not a new human decision unilaterally.
 - **Everything else in this ADR** (§14-§19's own labels, except the §19.1/§19.4 corrections
   above) is unchanged by this round.
+
+## 21. Fix round 7 (2026-09-27) — N-1b (`expired` re-opened the overlay bypass), `KYC-REVIEWREQ-FORWARD-1` ruled and implemented, R2-2 to R2-5, and the create-side `ProviderError`/no-reference fix
+
+Scope: security re-verification 2 (`rv-prh-i2-kyc-security.md`, N-1b, HIGH, production-launch
+blocker), `identity-compliance`'s own domain ruling
+(`rv-prh-i2-kyc-identity-compliance.md`, Rulings 1-4, plus its addendum confirming the exact
+predicate shape), and code re-review's own re-verification 2
+(`rv-prh-i2-kyc-code-review.md`, R2-1 through R2-5 and the pre-existing create-side note).
+
+### 21.1 N-1b — `expired` excluded entirely from the cross-account overlay's "latest final row" selection, not merely disallowed from lifting
+
+**The regression:** §20.2's own `finalStatusesSQL` (`('approved', 'rejected', 'expired')`)
+included `expired` as one of the statuses whose LATEST occurrence on another account is
+selected and tested for `= 'rejected'`. This re-opened exactly the shape N-1 itself closed: a
+player with a rejection on account B could start a fresh re-verification on B and, if it
+happened to reach a vendor's own `expired` outcome (an attempt that lapsed/was abandoned -
+`ProviderExpired`, PROVIDER DEPENDENT reachability with a real adapter, not reachable with
+today's mock) rather than `pending`, B's latest FINAL row became the `expired` one instead of
+the earlier `rejected` one, and the overlay's `EXISTS` predicate (which requires the RETRIEVED
+latest-final row itself to be `status = 'rejected'`) returned false. Withdrawal from A became
+ALLOWED. Both security's own re-verification and `identity-compliance`'s independent domain
+ruling (Ruling 1) reproduced this on a scratch database and concurred: `expired` is not
+evidence of a clearance (ADR 0028 §2 treats it as a distinct terminal provider decision, never
+one the platform derives from `approved.expires_at` lapsing; ADR 0096 §2.3 folds it into the
+SAME deny bucket as `rejected`, "covers 'never verified', rejected, and expired uniformly") -
+it must never be able to supersede anything in this overlay.
+
+**The fix, per the coordinator's explicit fail-closed instruction and identity-compliance's
+own confirming addendum:** `finalStatusesSQL` is narrowed to `('approved', 'rejected')` -
+`expired` is excluded from the "latest final row" SELECTION entirely (not selected, then
+special-cased in application logic - the addendum's own explicit warning against that shape,
+since a special-case can fall through to allow). This means a `rejected` row on another
+account is superseded ONLY by a LATER genuine `approved` row on that SAME account; any
+`expired` rows are simply invisible to this subquery's own "latest row among
+{approved, rejected}" selection, wherever they fall in time - so an `expired` attempt landing
+BETWEEN a rejection and a later approval does not "get the walk-back stuck": the later approval
+is still found and still lifts the deny (identity-compliance's own required test,
+`TestEvaluateEnforcement_N1b_ApprovedAfterExpiredStillLiftsRejection`, §21.3 below).
+
+Implementation: `internal/kyc/enforcement.go`, `finalStatusesSQL` constant and its own doc
+comment, plus `crossAccountRejectedOverlay`'s own doc comment - both corrected to state the
+`expired`-exclusion rationale explicitly, replacing the retracted "or, symmetrically,
+superseded by a later final `expired`/`rejected` re-decision" language §20.2 originally
+carried (that language was itself part of the defect, not merely imprecise wording about a
+correct implementation).
+
+### 21.2 `KYC-REVIEWREQ-FORWARD-1` — ruled by identity-compliance, implemented this round
+
+`identity-compliance`'s own domain ruling (Ruling 2, within its Authority per CLAUDE.md - an
+internal case-management control, not a jurisdiction-varying legal threshold): **a
+`review_required` verification that a STAFF member set must be sticky against an automated
+forward move to `approved` by a later provider result or callback alone.** Only another
+explicit staff `ReviewVerification` call may move such a case forward. A **provider-set**
+`review_required` (the vendor's own "needs manual review" signal, no staff actor involved) is
+UNAFFECTED - the existing forward-only behavior (a later vendor `approved` proceeding
+automatically) still applies there, since no human judgment is being silently overridden.
+
+**Mechanism (per Ruling 2's own specified mechanism):** `internal/kyc/provider.go`'s
+`applyForwardOnlyStatus` (the SAME shared function §20.4/N6 already consolidated both the
+submission and callback paths onto) now gates its own CAS `UPDATE` with an additional
+predicate: `AND NOT (status = 'review_required' AND reviewed_by IS NOT NULL)`. `reviewed_by`
+is written ONLY by the staff `ReviewVerification` path (confirmed by grep, per Ruling 2's own
+verification) - never by `applyForwardOnlyStatus` or its callers - so this is a sufficient,
+already-existing signal requiring no schema change. On a lost race caused specifically by this
+guard (the re-read shows the SAME status, still `review_required`, with a non-nil
+`reviewed_by`), the function returns immediately as a documented no-op (`applied=false`, no
+error) rather than retrying into `applyForwardOnlyStatus`'s own bounded 3-attempt loop and
+misreporting a deliberate policy block as "exhausted retries" - per Ruling 2's own explicit
+"keep the forward-only no-op semantics" requirement, so a provider result landing on a
+staff-sticky row is recorded/audited by the caller exactly like any other superseded result,
+never treated as a failure.
+
+**Tests, both mutation-killed (`internal/kyc/kyc_two_phase_integration_test.go`):**
+`TestApplyForwardOnlyStatus_StaffSetReviewRequiredIsStickyAgainstProviderApproval` (a staff
+`review_required` survives a later provider `approved` unchanged, with `reviewed_by` intact
+and `status_applied=false` on the blocked submission's own audit row) and
+`TestApplyForwardOnlyStatus_ProviderSetReviewRequiredStillAdvancesToApproved` (the control
+case - a PROVIDER-set `review_required`, `reviewed_by` still `uuid.Nil`, still advances to
+`approved` on a later provider decision, exactly as before).
+
+**Ruling 3 (ReviewVerification's 409-on-lost-race design) and Ruling 4 (no human decision
+required for any of the above):** both CONFIRMED by identity-compliance, no code change
+required for either.
+
+### 21.3 Regression tests for N-1b (`internal/kyc/enforcement_integration_test.go`)
+
+Per the coordinator's explicit ask (seeded both via a real, verified callback and directly),
+plus identity-compliance's own required "walk-back" case:
+
+- `TestEvaluateEnforcement_N1b_ExpiredOnRejectedAccountDoesNotLiftRejection_ViaCallback` -
+  B's rejection followed by a NEW verification (real `CreateVerification` + a genuine, signed
+  callback delivering `expired`) - withdrawal from A still denies.
+- `TestEvaluateEnforcement_N1b_ExpiredOnRejectedAccountDoesNotLiftRejection_SeededDirectly` -
+  the same scenario, seeded with the file's own `setVerification` direct-SQL convention - both
+  seeding paths must agree, since the fix lives entirely in the read.
+- `TestEvaluateEnforcement_N1b_ApprovedAfterExpiredStillLiftsRejection` - rejected(B) →
+  expired(B) → approved(B) still ALLOWS (the required "walk-back doesn't get stuck" case).
+
+Mutation-verified against BOTH directions (`docs/plans/payment-readiness/evidence/prh-i2-kyc-mutation-kill.txt`,
+§2.6): re-adding `expired` to the set (the exact regression) is killed by the two "does not
+lift" tests; removing `approved` from the set (the inverse - breaking the walk-back) is killed
+by the "still lifts" test.
+
+### 21.4 R2-2 — upload handler's own `submit_verification_failed` redaction, unit-pinned
+
+The upload handler's log line already used `kyc.RedactedProviderErrorDetail` correctly (no code
+defect), but had no test of its own proving it end to end over HTTP - the create-path's own
+test does not exercise this second call site. Closed with
+`TestKYC_UploadSubmitFailureLog_NeverLeaksRawErrorText`
+(`internal/httpserver/kyc_round3_http_test.go`, new), mutation-killed (reverting the log line
+to `submitErr.Error()` makes the sentinel leak, caught immediately).
+
+### 21.5 R2-3 — both new 409 mappings now have HTTP-level tests
+
+Neither `kyc.ErrVerificationStatusConflict`'s mapping in `newReviewVerificationHandler` nor
+`kyc.ErrVerificationNotSubmitted`'s mapping in `newUploadMyDocumentHandler` had a test proving
+the 409 contract itself (as opposed to the underlying domain behaviour, which was already
+pinned) - removing either branch silently fell through to a 500 with no test failing.
+
+- `TestKYC_ReviewVerificationConflict_Returns409NotInternalError` drives a genuine concurrent
+  read/write race through two real HTTP requests (bounded retries against fresh verifications,
+  since cross-package tests cannot reach `internal/kyc`'s own package-private
+  `reviewVerificationTestRaceHook` the way `internal/kyc`'s own mirror-race test does) and
+  requires the EXACT `ErrVerificationStatusConflict` message to appear on the losing 409, not
+  merely any 409 (the pre-existing `ErrInvalidTransition` 409 has a different message and would
+  not prove this specific branch). Mutation-killed: removing the branch produces a 500.
+- `TestKYC_UploadOrphanVerification_Returns409NotInternalError` uploads to an orphan
+  verification a player legitimately discovers through their own
+  `GET /v1/me/kyc/verifications` listing. Mutation-killed: removing the branch produces a 500.
+
+### 21.6 R2-4 — stale "only allows on 'passed'" orphan comments corrected
+
+`insertOrphanVerification`'s and `CreateVerification`'s own doc comments
+(`internal/kyc/verification_service.go`) still attributed the orphan's harmlessness to
+"EvaluateEnforcement only allows on 'passed'" - the exact framing RV-PRH-I2 KYC review F1
+(§19 above) proved false in the deny direction. Corrected to state the ACTUAL mechanism:
+`orphanRowExclusionSQL`'s explicit exclusion from `readLatestVerificationByPlayerAccount`'s own
+"latest row" read (§2.6(g)) and from the cross-account overlay's `finalStatusesSQL`-scoped
+subquery (§20.2/§21.1) - not any general "only passed matters" property.
+
+### 21.7 R2-5 — evidence-file mutant count corrected
+
+The prior round's evidence file claimed "23/23", double-counting M8 (superseded in §1, then
+re-counted as M8-reverify in §2.5 - only ONE of those two entries is a currently-valid mutant).
+The correct distinct count is 22 from that round, PLUS this round's own new mutants (§2.6,
+below) - see the evidence file itself for the corrected running total.
+
+### 21.8 Pre-existing, PROVIDER DEPENDENT: create-side `ProviderError`/no-reference now leaves the orphan untouched instead of writing an unresolvable `pending` row
+
+**The gap (code re-review's own "pre-existing, low" note):** `applyCreateVerificationResult`
+mapped ANY unrecognized `ProviderOutcome` (including `ProviderError` returned WITHOUT a Go
+error - a real adapter's own "the request was ambiguous/undecided" signal, PROVIDER DEPENDENT,
+never produced by the mock) to `StatusPending`, storing `NULLIF(reference, '')` regardless of
+whether the vendor actually returned one. When the vendor's response carries NO reference, this
+produced a `pending` row with a NULL `provider_reference` - a row that (a) counts as "decided"
+under the primary read (§2.6(a) - `pending` is non-final but still supersedes an account's own
+prior approval, unlike an excluded orphan), so a transient/ambiguous vendor response could turn
+an existing ALLOW into a spurious DENY, and (b) is a PERMANENT dead end under N5 - a row with no
+reference can never be uploaded to or submitted (`ErrVerificationNotSubmitted` on every
+attempt), and no reference will ever arrive to change that.
+
+**The fix (fail-closed in the direction that cannot turn an allow into a deny, nor a deny into
+an allow):** `applyCreateVerificationResult` now leaves the phase-A orphan row EXACTLY as
+committed - `unverified`, NULL reference - when the outcome is unrecognized AND no reference
+was returned, returning `ErrProviderUnavailable` instead of writing anything. This is IDENTICAL
+in shape to a phase-B failure (no resolver, credential failure, or the provider call itself
+erroring) and to `SubmitVerification`'s own IC condition 2 ("an ambiguous/timeout result leaves
+status unchanged", ADR 0095 §15.3) - a genuinely undecided vendor response is treated as "the
+platform could not obtain a decision," never silently upgraded to a worse-than-orphan
+unresolvable `pending` state. An unrecognized outcome WITH a genuine reference is UNAFFECTED -
+it still becomes `pending`, since a real reference exists for a future callback or
+re-submission to resolve.
+
+**Tests, both in `internal/kyc/kyc_two_phase_integration_test.go`, the first mutation-killed:**
+`TestCreateVerification_UnrecognizedOutcomeWithNoReferenceLeavesOrphanUntouched` (asserts
+`ErrProviderUnavailable` and that the row is still exactly `unverified`/NULL) and
+`TestCreateVerification_UnrecognizedOutcomeWithReferenceStillBecomesPending` (the control case).
+
+### 21.9 Verification (fix round 7)
+
+`gofmt -l .`, `go build ./...`, `go vet ./...`, `go vet -tags integration ./...` all clean.
+`golangci-lint run ./...` (pinned binary, untagged, matching CI) — see the evidence file for
+the exact invocation and result. `go test -tags integration -race -count=1` all green for
+`./internal/kyc/...`, `./internal/httpserver/... -run 'KYC|Kyc'`, `./internal/withdrawal/...`,
+and `./cmd/platform-api/...`, against private databases.
+
+### 21.10 Labels (round 7 summary)
+
+- **N-1b (security re-verification 2, HIGH, production-launch blocker):** IMPLEMENTED —
+  `finalStatusesSQL` narrowed to `('approved', 'rejected')`; `expired` excluded from the
+  overlay's "latest final row" selection entirely. Confirmed by identity-compliance's own
+  independent domain ruling (concurring, not merely reviewing). Regression tests
+  mutation-killed in both directions. N-1/N-1b together are now CLOSED, pending the
+  coordinator's own separate dispatch of an architect/identity-compliance review of this as an
+  orchestrator engineering decision per §20.2's own framing (unchanged by this round).
+- **KYC-REVIEWREQ-FORWARD-1:** RULED (identity-compliance, Ruling 2) and IMPLEMENTED this round
+  — `applyForwardOnlyStatus` gates on `reviewed_by IS NOT NULL`. Registry row updated to
+  "ruled and implemented".
+- **R2-2, R2-3, R2-4:** IMPLEMENTED — HTTP-level tests added for both, mutation-killed; stale
+  comments corrected.
+- **R2-5:** IMPLEMENTED — evidence file's mutant count corrected.
+- **Pre-existing create-side `ProviderError`/no-reference note:** IMPLEMENTED — orphan left
+  untouched instead of writing an unresolvable `pending` row; mutation-killed.
+- **Known mislabel (not a history rewrite):** commit `be423c3`'s own message says
+  "identity-compliance: rule on N-1 fix..." but its diff carries security's own re-verification
+  2 section of `rv-prh-i2-kyc-security.md` (two concurrent agents' commits crossed in the same
+  window). The actual identity-compliance ruling is commit `6621326` (same message, correct
+  diff — `rv-prh-i2-kyc-identity-compliance.md`) plus its addendum `c80103b`. Recorded here for
+  the record; no commit history rewrite performed.
+- **Everything else in this ADR** (§14-§20's own labels, except §20.2's `finalStatusesSQL`
+  content itself, corrected by §21.1 above) is unchanged by this round.

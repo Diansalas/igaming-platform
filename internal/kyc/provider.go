@@ -459,6 +459,25 @@ func statusForOutcome(o ProviderOutcome) (VerificationStatus, bool) {
 // PROVIDER-driven transition, never a staff one (mirrors
 // updateVerificationStatus's identical convention, which this function
 // replaces as SubmitVerification's phase-C status writer).
+//
+// KYC-REVIEWREQ-FORWARD-1 (identity-compliance domain ruling,
+// `rv-prh-i2-kyc-identity-compliance.md` Ruling 2, 2026-09-27): a
+// review_required row that a STAFF member set (reviewed_by IS NOT NULL - the
+// column is written ONLY by the staff ReviewVerification path, never by
+// this function or by applyCallbackOutcome) is STICKY against this
+// function's own forward-only rule - a later provider result or callback
+// arriving while the row sits in that state must NEVER advance it to
+// approved/rejected on its own, even though that would ordinarily be a
+// legal forward move under statusRank alone. Only another explicit staff
+// ReviewVerification call may move such a row forward. A PROVIDER-set
+// review_required (no staff actor - reviewed_by is still uuid.Nil) is
+// UNAFFECTED by this rule: the ordinary forward-only behavior (a later
+// vendor approved proceeding automatically) still applies there, since no
+// human judgment is being silently overridden. This is enforced as a
+// documented no-op (applied=false), never an error - "keep the forward-only
+// no-op semantics" (Ruling 2's own required mechanism), so a provider
+// result landing on a staff-sticky row is recorded/audited by the caller
+// exactly like any other superseded result, not treated as a failure.
 func applyForwardOnlyStatus(ctx context.Context, tx pgx.Tx, tenantID, id uuid.UUID, expectedCurrent, newStatus VerificationStatus, reason string) (updated Verification, applied bool, err error) {
 	newRank := statusRank(newStatus)
 	current := expectedCurrent
@@ -473,7 +492,8 @@ func applyForwardOnlyStatus(ctx context.Context, tx pgx.Tx, tenantID, id uuid.UU
 		}
 		tag, err := tx.Exec(ctx,
 			`UPDATE kyc_verifications SET status = $1, reason = NULLIF($2, ''), updated_at = now()
-			 WHERE id = $3 AND tenant_id = $4 AND status = $5`,
+			 WHERE id = $3 AND tenant_id = $4 AND status = $5
+			   AND NOT (status = 'review_required' AND reviewed_by IS NOT NULL)`,
 			newStatus, reason, id, tenantID, current,
 		)
 		if err != nil {
@@ -486,11 +506,21 @@ func applyForwardOnlyStatus(ctx context.Context, tx pgx.Tx, tenantID, id uuid.UU
 			}
 			return reread, true, nil
 		}
-		// Lost race: re-read (RLS-scoped) and re-evaluate on the next
-		// iteration - mirrors applyCallbackOutcome's identical retry loop.
+		// No row matched. Re-read (RLS-scoped) to find out why: either a
+		// genuine lost race (the row's status has since moved - re-evaluate
+		// on the next iteration, mirrors applyCallbackOutcome's identical
+		// retry loop), or KYC-REVIEWREQ-FORWARD-1's own sticky guard fired
+		// (the row's status is UNCHANGED at review_required with a staff
+		// reviewed_by set) - in which case this is a documented, immediate
+		// no-op, not a race to retry: retrying would only hit the identical
+		// guard again and, after 3 attempts, misreport a deliberate policy
+		// block as "exhausted retries".
 		reread, err := GetVerificationByID(ctx, tx, id)
 		if err != nil {
 			return Verification{}, false, err
+		}
+		if reread.Status == current && reread.Status == StatusReviewRequired && reread.ReviewedBy != uuid.Nil {
+			return reread, false, nil
 		}
 		current = reread.Status
 	}
