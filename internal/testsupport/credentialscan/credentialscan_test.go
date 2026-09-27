@@ -103,6 +103,27 @@ type fakePointerReceiverAuthenticator struct{ apiKey string }
 func (a *fakePointerReceiverAuthenticator) Authenticate(*http.Request) error { return nil }
 func (a *fakePointerReceiverAuthenticator) RedactionValues() []string        { return nil }
 
+// TestScan_CatchesPointerReceiverAuthenticatorInMap is the RV-PRH-I1
+// security re-verification 1 M5 residual: the pointer-receiver check used
+// to be gated on rv.CanAddr(), but reflect.PointerTo(t).Implements needs no
+// addressability at all - it is a pure type-level check. A value-typed
+// adapter stored in a map[string]any or interface{} is NOT addressable
+// (exactly the shape paymentsAdapters() returns, per the review), so the
+// old gate let a pointer-receiver Authenticator held by VALUE inside such a
+// container slip through undetected. This is the review's own probe:
+// map[string]any{"p": valueAdapter{...}} used to report 0 violations; the
+// same value behind a pointer already reported 1 (TestScan_
+// CatchesPointerReceiverAuthenticator, above).
+func TestScan_CatchesPointerReceiverAuthenticatorInMap(t *testing.T) {
+	type valueAdapter struct {
+		auth fakePointerReceiverAuthenticator
+	}
+	bundle := map[string]any{"p": valueAdapter{auth: fakePointerReceiverAuthenticator{apiKey: "x"}}}
+	if got := Scan(bundle); len(got) == 0 {
+		t.Fatal("expected a violation for a pointer-receiver Authenticator held by value inside a map, got none")
+	}
+}
+
 // TestScan_CatchesUnsafePointer is the RV-PRH-I1 security review M5
 // evasion note: unsafe.Pointer is not walked by a naive type-based scan at
 // all - its target type is unrecoverable via reflection, so it is flagged

@@ -274,7 +274,7 @@ func TestPayoutDispatch_T2Resend_SyncSuccess_SettlesConcreteBalances(t *testing.
 
 	wr, attempt := notSentPayoutAttempt(t, pool, orch, f, 500, "payout-fix-t2-success")
 
-	sweeper := &Sweeper{Pool: pool, Orchestrator: orch, PayoutKYCGate: KYCEnforcementPayoutGate{}, CredResolver: MockCredentialResolver{}}
+	sweeper := &Sweeper{Pool: pool, Orchestrator: orch, PayoutKYCGate: KYCEnforcementPayoutGate{}, CredResolver: MockCredentialResolver{}, Lease: SweeperDefaultLease}
 	if err := sweeper.reclaimPayoutCreated(context.Background(), f.tenantID, attempt); err != nil {
 		t.Fatalf("reclaimPayoutCreated: %v", err)
 	}
@@ -316,7 +316,7 @@ func TestPayoutDispatch_T2Resend_SyncDecline_ReleasesConcreteBalances(t *testing
 
 	wr, attempt := notSentPayoutAttempt(t, pool, orch, f, 500, "payout-fix-t2-decline")
 
-	sweeper := &Sweeper{Pool: pool, Orchestrator: orch, PayoutKYCGate: KYCEnforcementPayoutGate{}, CredResolver: MockCredentialResolver{}}
+	sweeper := &Sweeper{Pool: pool, Orchestrator: orch, PayoutKYCGate: KYCEnforcementPayoutGate{}, CredResolver: MockCredentialResolver{}, Lease: SweeperDefaultLease}
 	if err := sweeper.reclaimPayoutCreated(context.Background(), f.tenantID, attempt); err != nil {
 		t.Fatalf("reclaimPayoutCreated: %v", err)
 	}
@@ -371,7 +371,7 @@ func TestSweeper_T12_NonIdempotentManifest_NeverResends(t *testing.T) {
 		t.Fatalf("expected exactly 1 Withdraw call from T1p itself, got %d", spy.count())
 	}
 
-	sweeper := &Sweeper{Pool: pool, Orchestrator: orch, PayoutKYCGate: KYCEnforcementPayoutGate{}, CredResolver: MockCredentialResolver{}}
+	sweeper := &Sweeper{Pool: pool, Orchestrator: orch, PayoutKYCGate: KYCEnforcementPayoutGate{}, CredResolver: MockCredentialResolver{}, Lease: SweeperDefaultLease}
 	for i := 0; i < 6; i++ {
 		if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 			return Touch(ctx, tx, claim.Attempt.ID)
@@ -433,7 +433,7 @@ func TestSweeper_T12_IdempotentManifest_StopsAtMaxResubmits(t *testing.T) {
 		t.Fatalf("ApplyPayoutResult: %v", err)
 	}
 
-	sweeper := &Sweeper{Pool: pool, Orchestrator: orch, PayoutKYCGate: KYCEnforcementPayoutGate{}, CredResolver: MockCredentialResolver{}, MaxResubmits: 2}
+	sweeper := &Sweeper{Pool: pool, Orchestrator: orch, PayoutKYCGate: KYCEnforcementPayoutGate{}, CredResolver: MockCredentialResolver{}, MaxResubmits: 2, Lease: SweeperDefaultLease}
 	for i := 0; i < 8; i++ {
 		if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 			return Touch(ctx, tx, claim.Attempt.ID)
@@ -533,7 +533,7 @@ func TestPollPayoutStatus_AmountMismatch_Disputes(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("reread: %v", err)
 	}
-	if err := PollPayoutStatus(context.Background(), pool, orch, MockCredentialResolver{}, f.tenantID, attempt, time.Now().Add(time.Minute)); err != nil {
+	if err := PollPayoutStatus(context.Background(), pool, orch, MockCredentialResolver{}, f.tenantID, attempt, time.Now().Add(time.Minute), nil); err != nil {
 		t.Fatalf("PollPayoutStatus: %v", err)
 	}
 
@@ -593,7 +593,7 @@ func TestPollPayoutStatus_AssetMismatch_Disputes(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("reread: %v", err)
 	}
-	if err := PollPayoutStatus(context.Background(), pool, orch, MockCredentialResolver{}, f.tenantID, attempt, time.Now().Add(time.Minute)); err != nil {
+	if err := PollPayoutStatus(context.Background(), pool, orch, MockCredentialResolver{}, f.tenantID, attempt, time.Now().Add(time.Minute), nil); err != nil {
 		t.Fatalf("PollPayoutStatus: %v", err)
 	}
 	var got withdrawal.WithdrawalRequest
@@ -716,7 +716,7 @@ func TestPollPayoutStatus_StillPending_Reschedules(t *testing.T) {
 	}
 	pollCountBefore := attempt.PollCount
 
-	if err := PollPayoutStatus(context.Background(), pool, orch, MockCredentialResolver{}, f.tenantID, attempt, time.Now().Add(time.Minute)); err != nil {
+	if err := PollPayoutStatus(context.Background(), pool, orch, MockCredentialResolver{}, f.tenantID, attempt, time.Now().Add(time.Minute), nil); err != nil {
 		t.Fatalf("PROBE-C regression: still-pending poll errored instead of rescheduling: %v", err)
 	}
 
@@ -777,7 +777,7 @@ func TestClaimForDispatch_NextActionAtSet_CrashRecovery(t *testing.T) {
 		t.Fatalf("simulate crash: %v", err)
 	}
 
-	sweeper := &Sweeper{Pool: pool, Orchestrator: orch, PayoutKYCGate: KYCEnforcementPayoutGate{}, CredResolver: MockCredentialResolver{}}
+	sweeper := &Sweeper{Pool: pool, Orchestrator: orch, PayoutKYCGate: KYCEnforcementPayoutGate{}, CredResolver: MockCredentialResolver{}, Lease: SweeperDefaultLease}
 	st := sweeper.RunOnce(context.Background(), []uuid.UUID{f.tenantID})
 	if st.Claimed == 0 {
 		t.Fatalf("expected the sweeper to claim the crashed attempt, got 0")
@@ -1084,7 +1084,7 @@ func TestSweeper_T2Reclaim_KillSwitchEngaged_ReschedulesNeverEscalates(t *testin
 	_, attempt := notSentPayoutAttempt(t, pool, orch, f, 500, "payout-fix-ks-t2")
 	engageKillSwitchForTest(t, pool, f, "mock-fix-ks-t2")
 
-	sweeper := &Sweeper{Pool: pool, Orchestrator: orch, PayoutKYCGate: KYCEnforcementPayoutGate{}, CredResolver: MockCredentialResolver{}}
+	sweeper := &Sweeper{Pool: pool, Orchestrator: orch, PayoutKYCGate: KYCEnforcementPayoutGate{}, CredResolver: MockCredentialResolver{}, Lease: SweeperDefaultLease}
 	if err := sweeper.reclaimPayoutCreated(context.Background(), f.tenantID, attempt); err != nil {
 		t.Fatalf("reclaimPayoutCreated: %v", err)
 	}

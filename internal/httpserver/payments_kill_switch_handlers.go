@@ -209,6 +209,23 @@ func (c killSwitchCall) auditTenantID() uuid.UUID {
 	return c.target
 }
 
+// killSwitchErrorClass classifies err into the class both
+// writeKillSwitchError and recordKillSwitchRefusalAudit use: "cas_conflict"
+// and "trigger_refusal" are genuine administrative refusals (409, and -
+// RV-PRH-I1 security review L5 - a denied-audit row); anything else is
+// "internal_error" (500, no denied-audit row - a transient DB/infra
+// failure is not a considered refusal and must never be recorded as one).
+func killSwitchErrorClass(err error) string {
+	switch {
+	case errors.Is(err, payments.ErrAttemptStateConflict):
+		return "cas_conflict"
+	case isKillSwitchTriggerRefusal(err):
+		return "trigger_refusal"
+	default:
+		return "internal_error"
+	}
+}
+
 // writeKillSwitchError maps a killswitch.go/DB error to one fixed response
 // per class, mirroring provider_credential_handlers.go's
 // writeProviderCredentialError convention: never the raw trigger/Postgres
@@ -227,17 +244,53 @@ func (c killSwitchCall) auditTenantID() uuid.UUID {
 // database errors, never user-controlled input, so logging them carries no
 // secret-leak risk (S95-C8(a)'s redaction concern is specific to vendor
 // HTTP transport errors, not this package).
-func writeKillSwitchError(w http.ResponseWriter, c killSwitchCall, op string, err error) {
-	switch {
-	case errors.Is(err, payments.ErrAttemptStateConflict):
-		c.logger.Warn("payments_kill_switch_refused", "op", op, "class", "cas_conflict")
+//
+// It also writes the RV-PRH-I1 security review L5 denied-audit row for the
+// two refusal classes, in a transaction SEPARATE from the mutation attempt
+// that failed - that transaction already rolled back, discarding anything
+// audit.Record would have written inside it, so a refused self-approval,
+// platform-lock violation, stale-version or expired-request release
+// attempt would otherwise leave no audit trail at all. A genuine internal
+// error gets no denied-audit row: it is not a considered refusal, and
+// mis-recording infrastructure failures as denials would corrupt the
+// audit trail's meaning.
+func writeKillSwitchError(ctx context.Context, deps Deps, w http.ResponseWriter, c killSwitchCall, op, targetType, targetID string, err error) {
+	class := killSwitchErrorClass(err)
+	switch class {
+	case "cas_conflict":
+		c.logger.Warn("payments_kill_switch_refused", "op", op, "class", class)
+		recordKillSwitchRefusalAudit(ctx, deps, c, op, class, targetType, targetID)
 		apierror.Write(w, c.requestID, apierror.CodeConflict, "conflict")
-	case isKillSwitchTriggerRefusal(err):
-		c.logger.Warn("payments_kill_switch_refused", "op", op, "class", "trigger_refusal", "err", err.Error())
+	case "trigger_refusal":
+		c.logger.Warn("payments_kill_switch_refused", "op", op, "class", class, "err", err.Error())
+		recordKillSwitchRefusalAudit(ctx, deps, c, op, class, targetType, targetID)
 		apierror.Write(w, c.requestID, apierror.CodeConflict, "conflict")
 	default:
-		c.logger.Error("payments_kill_switch_failed", "op", op, "class", "internal_error", "err", err.Error())
+		c.logger.Error("payments_kill_switch_failed", "op", op, "class", class, "err", err.Error())
 		apierror.Write(w, c.requestID, apierror.CodeInternal, "internal error")
+	}
+}
+
+// recordKillSwitchRefusalAudit writes the OutcomeDenied audit row for a
+// kill-switch mutation refused by a database trigger or a CAS conflict
+// (RV-PRH-I1 security review L5). Uses runKillSwitchTx - a fresh
+// transaction dispatched exactly like the mutation itself - so this write
+// commits independently of the failed attempt. A failure to write the
+// audit row itself is logged, never surfaced to the caller: the original
+// refusal response (409) already told the caller what happened, and the
+// caller must not receive a DIFFERENT status because audit logging had a
+// problem.
+func recordKillSwitchRefusalAudit(ctx context.Context, deps Deps, c killSwitchCall, op, class, targetType, targetID string) {
+	entry := audit.Entry{
+		TenantID: c.auditTenantID(), ActorType: audit.ActorStaff, ActorID: c.subject,
+		Action: "payments_kill_switch." + op, TargetType: targetType, TargetID: targetID,
+		Outcome: audit.OutcomeDenied, RequestID: c.requestID,
+		Metadata: map[string]any{"actor_scope": c.sessionScopeLabel(), "target_tenant_id": c.target.String(), "denied_class": class},
+	}
+	if err := runKillSwitchTx(ctx, deps, c, func(ctx context.Context, tx pgx.Tx) error {
+		return audit.Record(ctx, tx, entry)
+	}); err != nil {
+		c.logger.Error("payments_kill_switch_denied_audit_failed", "op", op, "class", class)
 	}
 }
 
@@ -383,7 +436,7 @@ func newListKillSwitchesHandler(deps Deps) http.HandlerFunc {
 			return err
 		})
 		if err != nil {
-			writeKillSwitchError(w, c, "list", err)
+			writeKillSwitchError(r.Context(), deps, w, c, "list", "payment_kill_switch", "", err)
 			return
 		}
 		dtos := make([]killSwitchDTO, 0, len(out))
@@ -412,7 +465,7 @@ func newGetKillSwitchHandler(deps Deps) http.HandlerFunc {
 			return err
 		})
 		if err != nil {
-			writeKillSwitchError(w, c, "get", err)
+			writeKillSwitchError(r.Context(), deps, w, c, "get", "payment_kill_switch", id.String(), err)
 			return
 		}
 		if !found {
@@ -441,7 +494,7 @@ func newGetKillSwitchReleaseRequestHandler(deps Deps) http.HandlerFunc {
 			return err
 		})
 		if err != nil {
-			writeKillSwitchError(w, c, "get_release_request", err)
+			writeKillSwitchError(r.Context(), deps, w, c, "get_release_request", "payment_kill_switch_release_request", id.String(), err)
 			return
 		}
 		if !found {
@@ -548,7 +601,7 @@ func newEngageKillSwitchHandler(deps Deps) http.HandlerFunc {
 			})
 		})
 		if err != nil {
-			writeKillSwitchError(w, c, "engage", err)
+			writeKillSwitchError(r.Context(), deps, w, c, "engage", "payment_kill_switch", "", err)
 			return
 		}
 		logKillSwitchEngagedAlert(c.logger, ks, c.requestID)
@@ -620,7 +673,7 @@ func newRequestKillSwitchReleaseHandler(deps Deps) http.HandlerFunc {
 			return
 		}
 		if err != nil {
-			writeKillSwitchError(w, c, "request_release", err)
+			writeKillSwitchError(r.Context(), deps, w, c, "request_release", "payment_kill_switch", killSwitchID.String(), err)
 			return
 		}
 		writeJSON(w, http.StatusCreated, toKillSwitchReleaseRequestDTO(req))
@@ -679,7 +732,7 @@ func newApproveKillSwitchReleaseHandler(deps Deps) http.HandlerFunc {
 			return
 		}
 		if err != nil {
-			writeKillSwitchError(w, c, "approve_release", err)
+			writeKillSwitchError(r.Context(), deps, w, c, "approve_release", "payment_kill_switch_release_request", requestID.String(), err)
 			return
 		}
 		writeJSON(w, http.StatusOK, toKillSwitchDTO(ks))
@@ -726,7 +779,7 @@ func newCancelKillSwitchReleaseHandler(deps Deps) http.HandlerFunc {
 			return
 		}
 		if err != nil {
-			writeKillSwitchError(w, c, "cancel_release", err)
+			writeKillSwitchError(r.Context(), deps, w, c, "cancel_release", "payment_kill_switch_release_request", requestID.String(), err)
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)

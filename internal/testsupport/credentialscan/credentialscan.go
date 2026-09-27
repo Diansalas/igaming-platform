@@ -121,11 +121,18 @@ func Scan(v any) []string {
 				violations = append(violations, fmt.Sprintf("%s: holds a non-nil httpclient.Authenticator (%s)", path, t.String()))
 				return
 			}
-		} else if t.Kind() != reflect.Interface && t.Kind() != reflect.Ptr && rv.CanAddr() && reflect.PointerTo(t).Implements(authenticatorType) {
+		} else if t.Kind() != reflect.Interface && t.Kind() != reflect.Ptr && reflect.PointerTo(t).Implements(authenticatorType) {
 			// Pointer-receiver implementation: T itself does not satisfy
-			// Authenticator, only *T does. Still flag when addressable and
-			// populated - a real adapter could store this as a value field
-			// specifically to dodge a naive t.Implements check.
+			// Authenticator, only *T does. reflect.PointerTo(t).Implements
+			// needs no addressability - it is a pure type-level check - so
+			// this must never be gated on rv.CanAddr(). RV-PRH-I1 security
+			// review M5 residual #1: a value-typed adapter stored in an
+			// interface or map (exactly the shape paymentsAdapters()
+			// returns) is NOT addressable, so the old rv.CanAddr() gate let
+			// a pointer-receiver Authenticator held by value inside a
+			// map[string]any or interface{} slip through undetected. Flag
+			// when populated - a real adapter could store this as a value
+			// field specifically to dodge a naive t.Implements check.
 			if !rv.IsZero() {
 				violations = append(violations, fmt.Sprintf("%s: holds a value whose pointer type implements httpclient.Authenticator (%s, pointer-receiver)", path, t.String()))
 				return

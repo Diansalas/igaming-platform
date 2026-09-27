@@ -1124,6 +1124,292 @@ unrelated migration-0101/0103 gap (documented in the runbook and in prior
 rounds) reproduces identically before and after this round's diff and is
 not caused by it.
 
+================================================================================
+--- PRH-I1 payout round 4, narrow (2026-09-27): N7, N3 (actually fixed), N6 extension, R1 LOW ---
+
+Coordinator's fourth-round instruction, following the code re-review's own
+re-review 2 (rv-prh-i1-payout-code-review.md): N7 (HIGH, reopens B2), N3
+(reported fixed in round 3, but never actually touched - corrected in ADR
+0095, see the correction note immediately before this section's own §27.13),
+a LOW test for R1's other branch, and N6 extended to compare against the
+fallback withdrawal reference.
+
+N7 root cause and fix: `payout_sweep.go`'s sweeper claims a due row via
+`claimBatch` (sweeper.go), which unconditionally sets `lease_owner =
+'sweeper'` and a FRESH, future `lease_until` on every row it claims -
+including a crashed, long-expired `submitting` payout with no reference
+(exactly H3/B2's own crash-recovery scenario), immediately before routing
+it to `resolvePayoutViaQueryStatus` -> `PollPayoutStatus`. `PollPayoutStatus`'s
+own R2 in-flight guard could not tell that fresh, sweeper-owned lease apart
+from a genuinely live T1p/T2/T12 DISPATCH lease (`lease_owner =
+"payout-dispatch"`), so with a REAL, non-zero `Sweeper.Lease` (NewSweeper's
+own default, `SweeperDefaultLease = 60s`), the guard refused the sweeper's
+own recovery attempt every tick. EVERY payout sweeper test in this package
+built `&Sweeper{}` directly, leaving `Lease` at its Go zero value (0s) - so
+the freshly-set `lease_until` (`now()+0`) was already in the past by the
+time the guard ran, and none of them ever caught this. Fixed by checking
+`attempt.LeaseOwner` too (payout.go's `PollPayoutStatus` and
+`payoutMarkAmbiguousFromSubmittingIfLeaseExpired`): only a lease NOT owned
+by `"sweeper"` can mean a live dispatch is in flight.
+
+Anchored mutation for N7 (reverted to byte-identical source):
+- PM-PAYOUT-14: `attempt.LeaseOwner != nil && *attempt.LeaseOwner !=
+  "sweeper" &&` deleted from `PollPayoutStatus`'s in-flight guard
+  (reverting to the exact original N7 bug). Killed by
+  `TestSweeper_N7_CrashRecoveryWithRealLease_ActuallyRecovers`: `[payments:
+  sweeper process attempt ...: payments: payout dispatch is still in
+  flight, its lease has not expired]` - the EXACT N7 failure mode,
+  reproduced and then confirmed fixed.
+
+Test-hygiene fix required by the coordinator: every `&Sweeper{...}`
+literal across payout_dispatch_integration_test.go,
+payout_dispatch_fixround_test.go and payout_dispatch_round3_test.go (13
+call sites) now sets an explicit `Lease: SweeperDefaultLease`, and a new
+dedicated test (`TestSweeper_N7_CrashRecoveryWithRealLease_
+ActuallyRecovers`, payout_dispatch_round4_test.go) uses `NewSweeper` itself
+(real defaults) and asserts `Processed == 1`, not merely `Claimed == 1` -
+the exact assertion gap that let the zero-Lease tests mask N7 for two full
+review rounds. `TestSweeper_N7_LiveDispatchLease_StillRefusesResolve`
+proves the fix did not overcorrect: a genuine `lease_owner =
+"payout-dispatch"` lease still refuses.
+
+N3 (fixed for real this round, corrected in ADR 0095 rather than silently
+re-labeled): `PollPayoutStatus`/`applyPayoutStatusEvidence` now take an
+`actor *SubmitActor` parameter; `applyPayoutStatusEvidence`'s existing
+evidence-mapping switch was extracted verbatim into
+`applyPayoutStatusEvidenceInTx` so a single `payoutResolveAudit` call sits
+after it, inside the SAME `pool.WithTenant` transaction, covering every one
+of that switch's many return branches without duplicating the audit call
+into each of them; `PollPayoutStatus`'s own no-reference fallback branch
+gets the identical treatment. `internal/httpserver`'s `/resolve` handler no
+longer writes a separate, post-hoc audit record at all - it just builds the
+`actor` and passes it through.
+
+Anchored mutations for N3 (each reverted to byte-identical source):
+- PM-PAYOUT-15: the `payoutResolveAudit` call removed from
+  `applyPayoutStatusEvidence`'s wrapper (the full-evidence-matrix call
+  site). First run against `TestPollPayoutStatus_N3_
+  StaffAuditSameTransactionAsStateChange` alone: SURVIVED (that test only
+  exercises PollPayoutStatus's OWN no-reference-fallback audit call, a
+  different code path) - a genuine coverage gap, caught by checking the
+  mutant's result rather than assuming the existing test covered it. Fixed
+  by adding `TestPollPayoutStatus_N3_FullEvidencePath_
+  StaffAuditSameTransaction` (drives a real Pending->Succeeded QueryStatus
+  round trip with a real actor). Re-run: killed (`expected exactly 1
+  withdrawal.resolve_attempted.http audit row via the full evidence path,
+  got 0`). Also confirmed to survive the full `internal/httpserver`
+  `TestWithdrawalResolve_*` suite on a private database before the new test
+  was added, proving the gap was real, not merely theoretical.
+- PM-PAYOUT-16: the `payoutResolveAudit` call removed from
+  `PollPayoutStatus`'s own no-reference fallback branch. Killed by
+  `TestPollPayoutStatus_N3_StaffAuditSameTransactionAsStateChange`
+  (`expected exactly 1 withdrawal.resolve_attempted.http audit row, got
+  0`).
+
+N6 extension: `applyPayoutSuccessCheckedFromStatus`'s reference-mismatch
+check now falls back to `wr.ProviderReference` when `attempt.
+ProviderReference` is nil/empty (the N1/R6 fallback shape) before deciding
+there is nothing to compare against.
+
+Anchored mutation for the N6 extension (reverted to byte-identical
+source):
+- PM-PAYOUT-17: the `storedRef = wr.ProviderReference` fallback line
+  deleted. Killed by `TestPollPayoutStatus_N6_
+  MismatchAgainstFallbackWithdrawalReference_Disputes` (`expected a
+  provider_reference_mismatch dispute even when comparing against the
+  FALLBACK withdrawal reference, got state=succeeded reason=<nil>` - i.e.
+  without the fix, the mismatched payout silently SETTLES instead of
+  disputing).
+
+R1 LOW: `TestPayoutDispatch_R1_StrayEvidenceAgainstTerminalAttempt_IsNoOp`
+added, proving a stray non-definite result against an already-terminal
+attempt is a pure no-op (no error, no state change, no duplicate dispute/
+audit record).
+
+Verification: `go build -tags=integration ./...` clean; `gofmt -l` clean;
+`golangci-lint` 2.9.0 (`--build-tags=integration --allow-parallel-runners`):
+0 issues on every touched file. Full payout test set - now 49 tests (13 +
+15 + 13 + 8 across the four payout_dispatch_*_test.go files) - green under
+`go test -tags=integration` and under `-race`, on a fresh private scratch
+database migrated to head (106, migration 0106 having landed from a
+concurrent agent's own kill-switch-phase-1 work). `internal/withdrawal`
+green on the shared `TEST_DATABASE_URL`; `internal/httpserver`'s 30
+withdrawal tests green on a private database freshly migrated to head
+(confirmed the same, pre-existing, disclosed migration-0101 gap on the
+shared `TEST_DATABASE_URL` reproduces identically and is unrelated). 4
+anchored mutants for this round (PM-PAYOUT-14/15/16/17), each reverted to
+byte-identical source, one of which (PM-PAYOUT-15) exposed and led to
+fixing a genuine coverage gap rather than just confirming an existing test.
+================================================================================
+--- Kill-switch fix round 1c (2026-09-27): N1 harness fix + K5/K10-K14/K19 re-run ---
+
+Responds to rv-prh-i1-killswitch-security.md's "Re-verification 1" finding N1
+(HIGH, blocks completion): migration_0105_integration_test.go,
+killswitch_integration_test.go and killswitch_claim_predicate_coverage_test.go
+all built their scratch DB via migration0105Scratch, pinned to exactly
+migration 0105 - but migration 0106 (fix round 1b) CREATE OR REPLACEs the
+three trigger functions these tests cover. Round 1b's "K10/K11/K14 killed"
+claim was measured against the SUPERSEDED bodies.
+
+Harness fix: migration0105Scratch now migrates a fresh scratch database to
+HEAD (pool.MigrateUp(ctx, realMigrationsDir(t))), identically to
+migration0106Scratch's own mechanism, rather than pinning via
+migration0101ScratchApply(t, prefix, migration0105Version(t)). The now-dead
+migration0105Version/findMigrationVersion helpers (only used to compute the
+pin) were removed. No test in these three files turned out to be about
+migration 0105's own history in isolation, so nothing needed to be moved,
+only repointed.
+
+Two new tests close the review's own note that the existing K19 test uses a
+tenant staff id, which staff_users' RLS hides from a platform-only session
+anyway (masking whether the trigger's own EXISTS check matters):
+  - TestMigration0105_N1_K19_RandomUUIDInPlatformGUCIsRefused: a UUID
+    matching NO staff_users row at all, immune to that RLS side effect, plus
+    a positive control (a genuine platform staff principal in the same GUC
+    still succeeds).
+  - TestMigration0105_N1_K19_SuspendedPlatformStaffUUIDIsRefused: a UUID
+    that IS a platform-scoped staff_users row, but suspended.
+
+Mutation re-run against the LIVE 0106 bodies. Each mutation was applied
+directly to migrations/0106_payment_attempts_platform_guc_hardening.up.sql
+on disk (verified anchor via Python str.replace, count==1 before
+replacing), a fresh scratch database was built from the mutated file via
+the (now-fixed) migration0105Scratch, the target test was run with
+-tags=integration -count=1 -v, and the file was restored and verified
+byte-identical (md5sum match against the pre-mutation copy) before the next
+mutation:
+
+K5 (remove the KS-L6 takeover-cancel block on a true->true engage,
+    payment_kill_switches_guard()):
+    Killed by TestMigration0105_PlatformTakeoverCancelsOpenTenantRequest:
+    "open tenant request status = open, want cancelled (KS-L6)". Restored
+    byte-identical.
+
+K10 (drop "OR v_req.kill_switch_id <> OLD.id" from the release check,
+    payment_kill_switches_guard()):
+    Killed by TestMigration0105_M6_K10_RequestMustBindToItsOwnSwitch: "K10:
+    a request approved for switch X released a different switch Y".
+    Restored byte-identical. (This is the same test round 1b already wrote
+    and mutation-tested against the WRONG - superseded 0105 - body; the
+    test itself needed no change, only the harness fix above.)
+
+K11 (drop "OR now() >= v_req.expires_at" from the release check):
+    Killed by TestMigration0105_M6_K11_ExpiredRequestCannotRelease: "K11:
+    an expired request still released the switch". Restored
+    byte-identical.
+
+K12 (drop "OR v_req.expected_version <> OLD.version" from the release
+    check - the review's own new target, not covered by name in round 1b):
+    Killed by TestMigration0105_StaleVersionCannotRelease (a round-1
+    test, now finally exercising the live body): "expected release against
+    a stale expected_version to be refused". Restored byte-identical.
+
+K13 (remove the tenant-lock check - "IF OLD.engaged_by_scope = 'platform'
+    AND v_scope <> 'platform' THEN RAISE EXCEPTION" - from
+    payment_kill_switches_guard(), the review's own demonstrated live
+    bypass: a tenant session re-engaging a platform-engaged switch would
+    downgrade engaged_by_scope to 'tenant'):
+    Killed by TestMigration0105_TenantCannotTouchPlatformEngagedRow:
+    "expected a tenant session to be refused on a platform-engaged row".
+    Restored byte-identical.
+
+K14 (drop the 24h cap - replace
+    "LEAST(COALESCE(NEW.expires_at, now()+24h), now()+24h)" with plain
+    "COALESCE(NEW.expires_at, now()+24h)"):
+    Killed by TestMigration0105_M6_K14_ExpiresAtCappedAt24Hours: "K14:
+    expires_at = 2027-01-05 ..., expected capped at <= now()+24h".
+    Restored byte-identical.
+
+K19 (drop the WHOLE principal predicate in payment_kill_switch_session()'s
+    platform branch - the review's own demonstrated live bypass: a random
+    UUID in app.platform_admin_principal_id accepted as a 'platform'
+    actor):
+    Killed by THREE tests simultaneously: TestMigration0105_M6_K19_
+    PlatformGUCRequiresGenuinePlatformStaff ("a tenant-scoped staff id...
+    was accepted as a platform actor"), the new TestMigration0105_N1_K19_
+    RandomUUIDInPlatformGUCIsRefused ("a random UUID matching no
+    staff_users row was accepted as a platform actor"), and the new
+    TestMigration0105_N1_K19_SuspendedPlatformStaffUUIDIsRefused ("a
+    suspended platform-scoped staff id ... was accepted as a platform
+    actor"). Unlike round 1b's honest non-finding (the narrower tenant_id
+    IS NULL clause alone could not be shown to create a live bypass because
+    staff_users' RLS already hides that row), removing the WHOLE predicate
+    is a genuine, demonstrated bypass and IS caught - by all three tests,
+    since none of them depend on the specific clause removed, only on the
+    EXISTS check running at all. Restored byte-identical.
+
+All seven mutants (K5, K10, K11, K12, K13, K14, K19) are killed against the
+code that actually runs in production. Full-suite confirmation after the
+harness fix and all restores: go test -tags=integration -count=1 -v
+./internal/payments/... -run 'TestMigration0105|TestMigration0106|
+TestKillSwitch' -> 30/30 pass (71.5s). Full internal/payments -tags=
+integration suite: pass (against ks_1c_n1, a private database).
+
+L5 (denied-audit row for a refused mutation) - HTTP-level mutation kill:
+    Mutation: removed both recordKillSwitchRefusalAudit(...) call sites
+    from writeKillSwitchError (payments_kill_switch_handlers.go).
+    Killed by TWO tests: TestPaymentsKillSwitchAPI_
+    TenantAdminEngageAndFourEyesRelease ("expected exactly one denied
+    approve_release audit row for the self-approve refusal") and
+    TestPaymentsKillSwitchAPI_CancelReleaseRequest ("expected exactly one
+    denied cancel_release audit row for the second, refused cancel").
+    Restored byte-identical (md5sum matched against the pre-mutation
+    handler file).
+
+L7/K21 (engage handler's alert call site) - HTTP-level mutation kill:
+    Mutation: removed the "logKillSwitchEngagedAlert(c.logger, ks,
+    c.requestID)" line from newEngageKillSwitchHandler.
+    Killed by TestPaymentsKillSwitchAPI_TenantAdminEngageAndFourEyesRelease
+    (new assertion, backed by a syncBuffer-captured slog.Logger wired into
+    the test server): "expected the engage call to emit the
+    payments_kill_switch_engaged_alert log line ..., got log output: "
+    (empty). This is the review's own K21 finding - the pre-existing unit
+    test (TestLogKillSwitchEngagedAlert_EmitsPinnedEventAndFields) calls
+    the function directly and so cannot notice its own call site being
+    deleted; this new HTTP-level test can. Restored byte-identical.
+
+M5 residual #1 (pointer-receiver Authenticator addressability gate) -
+    reproduced both ways, not a live-code mutation (this is a
+    testsupport/credentialscan fix, not a production trigger/handler):
+    the review's exact probe, map[string]any{"p": valueAdapter{auth:
+    ptrRecvAuth{...}}}, was run against the PRE-fix Scan (rv.CanAddr()
+    still gating the pointer-receiver check) and reported 0 violations,
+    confirming the gap; against the POST-fix Scan it reports 1 violation.
+    New test: TestScan_CatchesPointerReceiverAuthenticatorInMap. Verified
+    the test itself fails against the pre-fix code (sed-reintroduced the
+    rv.CanAddr() condition temporarily, ran the test alone, confirmed
+    failure, restored via the saved original file, re-verified the full
+    credentialscan suite passes).
+
+Final verification: go build ./...; go vet -tags=integration
+./internal/payments/... ./internal/httpserver/...; gofmt -l on every
+touched file - all clean. golangci-lint (2.9.0, --allow-parallel-runners)
+on internal/payments, internal/httpserver, internal/testsupport/
+credentialscan - 0 issues.
+
+internal/payments -tags=integration -race -count=1 against a private
+database: green, 299.645s.
+
+internal/httpserver -tags=integration -race -count=1 against a private
+database: FAILED on TestResolutionIsolation_NormalOperation,
+TestResolutionIsolation_OneTenantStoreOutage and
+TestResolutionIsolation_FinancialDuringOutage (a 400ms pooled-transaction
+threshold tripped under load) - resolution_isolation_integration_test.go is
+untouched by this round (git diff --stat confirms no modification) and this
+exact class of failure is already independently documented as pre-existing,
+load-dependent flakiness unrelated to any one round's changes by THREE
+prior reviews: rv-prh-i1-payout-code-review.md ("three
+TestResolutionIsolation_* tests failed... passed on the[ir own]"),
+rv-prh-i2-kyc-security.md ("load flakiness and has nothing to do with the
+KYC change"), and rv-prh-i5-code-review.md ("timing-lane tests that CI runs
+alone. Not related to PRH-I5."). Reproduced independently of this round: the
+same tests fail even WITHOUT -race when run alone under load
+(TestResolutionIsolation_OneTenantStoreOutage,
+TestResolutionIsolation_MultipleTenantsOutage), and every
+TestPaymentsKillSwitchAPI_* test (16/16, including the new L5/L7 assertions)
+passes cleanly under -race in isolation (28.5s). Not fixed here: out of
+this round's assigned scope (migrations tests, killswitch*.go, the
+kill-switch handler, credentialscan and docs only).
 PRH-I1 callback cutover fix round, 2026-09-27 (ADR 0095 §27.14)
 =================================================================
 
