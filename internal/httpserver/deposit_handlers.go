@@ -276,6 +276,11 @@ func newPaymentWebhookHandler(deps Deps) http.HandlerFunc {
 		requestID := observability.RequestIDFromContext(r.Context())
 		logger := observability.LoggerFromContext(r.Context(), deps.Logger)
 
+		// RL-F4 (security review Low "leftover"): redact BEFORE the
+		// orchestrator-nil check below, which is itself reachable with
+		// arbitrary attacker-chosen path segments.
+		markWebhookRouteForLogging(r)
+
 		if deps.PaymentOrchestrator == nil {
 			apierror.Write(w, requestID, apierror.CodeUnavailable, "payment webhooks are not enabled on this deployment")
 			return

@@ -315,6 +315,24 @@ func (rt *webhookAdmissionRuntime) logRejected(ctx context.Context, tier string,
 	rt.logger.Warn(admissionLogEvent, fields...)
 }
 
+// markWebhookRouteForLogging is RL-F4's redaction hook (ADR 0097 §8/§17
+// devops condition 3): every webhook request - including one rejected
+// BEFORE admitPreAuth ever runs (e.g. the "webhooks not enabled on this
+// deployment" 503 short-circuit every handler checks first, which is
+// still reachable with arbitrary attacker-chosen path segments) - must
+// have its access-log/panic-recovery path redacted to the matched route
+// pattern. Security review Low ("two RL-F4 leftovers"): this was
+// previously set only inside admitPreAuth, so a request that returned
+// before admitPreAuth was ever called leaked the raw path. Every one of
+// the three webhook handlers now calls this as its OWN first statement,
+// before even the orchestrator-nil check; admitPreAuth also calls it
+// (harmless, idempotent) for any caller that reaches it directly (tests).
+func markWebhookRouteForLogging(r *http.Request) {
+	if rs := observability.RequestStateFromContext(r.Context()); rs != nil {
+		rs.LogPath = r.Pattern
+	}
+}
+
 // admitPreAuth runs A2 (if enabled), A3 and A4a (ADR 0097 §3). It is the
 // FIRST thing a webhook handler calls - strictly before any body read or
 // DB work (ORD-1/ORD-2). On admission it returns a release func for the
@@ -335,15 +353,7 @@ func (rt *webhookAdmissionRuntime) logRejected(ctx context.Context, tier string,
 // declaration B1 does, so a no-429-retry adapter never gets a 429 at
 // EITHER tier).
 func (rt *webhookAdmissionRuntime) admitPreAuth(w http.ResponseWriter, r *http.Request, domain webhookDomain, trustedProxyCount int, schemeRegistered func(string) bool, retries429 func(providerID string) (allows, declared bool)) (release func(), ok bool) {
-	// RL-F4 (ADR 0097 §8/§17 devops condition 3): every webhook request,
-	// admission enabled or not, gets its access-log/panic-recovery path
-	// redacted to the matched route pattern - see RequestState.LogPath's
-	// own doc comment for why this must be set here (r.Pattern is
-	// reliably populated at this point) rather than read directly by the
-	// outer logging middleware.
-	if rs := observability.RequestStateFromContext(r.Context()); rs != nil {
-		rs.LogPath = r.Pattern
-	}
+	markWebhookRouteForLogging(r)
 
 	noop := func() {}
 	if rt == nil {
