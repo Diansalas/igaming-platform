@@ -1171,11 +1171,17 @@ func newResolveWithdrawalHandler(deps Deps) http.HandlerFunc {
 			return
 		}
 
+		// N3 (RV-PRH-I1 re-review 2): the staff-attribution audit is now
+		// written BY PollPayoutStatus itself, inside the SAME transaction
+		// as whatever state change it performs - never a separate,
+		// best-effort call after the fact (the same B6 rule, now here).
+		actor := &payments.SubmitActor{StaffID: resolverID, IPAddress: clientIP(r), UserAgent: r.UserAgent(), RequestID: requestID}
+
 		// Phase B+C: no transaction held (H4/INV-IO-1); PollPayoutStatus
 		// applies the state-aware evidence matrix including the amount/
 		// asset cross-check (B3/H2), and transitions the attempt row
 		// alongside the withdrawal (H4's "bypasses payment_attempts" fix).
-		if err := payments.PollPayoutStatus(r.Context(), deps.DB, deps.PaymentOrchestrator, deps.PaymentsOutboundCredentials, tc.TenantID, attempt, time.Now().Add(30*time.Second)); err != nil {
+		if err := payments.PollPayoutStatus(r.Context(), deps.DB, deps.PaymentOrchestrator, deps.PaymentsOutboundCredentials, tc.TenantID, attempt, time.Now().Add(30*time.Second), actor); err != nil {
 			if errors.Is(err, payments.ErrPayoutDispatchInFlight) {
 				// R2 (RV-PRH-I1 ledger re-review): the attempt's own lease
 				// has not expired - its phase B may be running right now.
@@ -1215,18 +1221,13 @@ func newResolveWithdrawalHandler(deps Deps) http.HandlerFunc {
 			return
 		}
 
+		// Re-read only - the staff audit itself already committed inside
+		// PollPayoutStatus's own transaction (N3, above), so this closure
+		// no longer needs to write anything.
 		err = deps.DB.WithTenant(r.Context(), tc.TenantID, func(ctx context.Context, tx pgx.Tx) error {
 			var err error
 			wr, err = withdrawal.GetByID(ctx, tx, id)
-			if err != nil {
-				return err
-			}
-			return audit.Record(ctx, tx, audit.Entry{
-				TenantID: tc.TenantID, ActorType: audit.ActorStaff, ActorID: resolverID,
-				Action: "withdrawal.resolve_attempted.http", TargetType: "withdrawal_request", TargetID: id.String(),
-				Outcome: audit.OutcomeSuccess, IPAddress: clientIP(r), UserAgent: r.UserAgent(), RequestID: requestID,
-				Metadata: map[string]any{"withdrawal_state": string(wr.State)},
-			})
+			return err
 		})
 		if errors.Is(err, payments.ErrUnknownProvider) {
 			// Realistic ops scenario (a provider deregistered/renamed

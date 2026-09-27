@@ -4358,3 +4358,81 @@ by the private-database run passing all 30). `golangci-lint` (2.9.0, `--build-ta
 issues on every file this round touched. 3 anchored mutants for this round (PM-PAYOUT-11/12/13),
 each reverted to byte-identical source - full detail in the mutation-kill evidence file.
 
+**Correction (RV-PRH-I1 re-review 2, 2026-09-27): N3 was NOT fixed by this round, despite this
+record's own framing implying the round-3 finding set was closed.** N3 (`/resolve`'s staff audit
+committing in a SEPARATE transaction after `PollPayoutStatus` had already committed the state
+change - the same class of defect as B6) was correctly identified by the ORIGINAL code review as a
+LOW, and the ledger re-review's own "Remaining conditions" explicitly deferred it as a follow-up,
+not a round-3 requirement - but this ADR record did not carry that deferral forward explicitly
+enough, and the re-review read it as a closed item. It was not touched in round 3's diff at all:
+`newResolveWithdrawalHandler` still called `audit.Record` in its own separate
+`deps.DB.WithTenant(...)` block, after `PollPayoutStatus` had already returned successfully. Fixed
+in round 4 - see §27.13.
+
+### 27.13 PRH-I1 payout dispatch round 4, narrow (`payments`, 2026-09-27): N7, N3, N6 extension, R1 LOW
+
+**Scope.** A fourth, narrow re-review (`code-reviewer`, "NOT READY") found one HIGH regression of
+H3/B2 (N7) plus confirmed N3 was still open (the §27.12 correction immediately above), a LOW
+request to pin R1's other branch with a test, and an extension to N6 (compare against the fallback
+withdrawal reference too, not only the attempt's own). Filed at
+`docs/plans/payment-readiness/rv-prh-i1-payout-code-review.md` ("Re-review 2"). Full fix detail and
+the anchored mutation evidence for this round are in `docs/plans/payment-readiness/evidence/
+prh-i1-mutation-kill.txt` ("PRH-I1 payout round 4").
+
+**N7 (HIGH, a regression of H3/B2).** `PollPayoutStatus`'s R2 in-flight guard
+(`attempt.LeaseUntil.After(time.Now())`) could not distinguish a genuinely live DISPATCH lease
+(set once, by `ClaimForDispatch`'s own `InsertSubmittingAttempt`, `lease_owner = "payout-dispatch"`)
+from the SWEEPER'S OWN fresh batch-claim lease (`claimBatch` sets `lease_owner = 'sweeper'` and a
+brand-new, future `lease_until` on EVERY row it claims, including a crashed, long-expired
+`submitting` payout with no reference - H3/B2's own crash-recovery case - immediately before
+routing it to `resolvePayoutViaQueryStatus`/`PollPayoutStatus`). With `Sweeper{}`'s zero-value
+`Lease` (every payout test in this package until this round), the freshly-set `lease_until` was
+`now() + 0`, already in the past by the time the guard ran, masking the bug entirely. With a REAL,
+non-zero `Lease` (`NewSweeper`'s own default, `SweeperDefaultLease = 60s` - what any real deployment
+would actually run), the guard wrongly refused the sweeper's own recovery attempt every tick
+(`claimed=1, processed=0, ErrPayoutDispatchInFlight`), permanently reproducing H3/B2's exact
+"crashed payout never recovered" failure mode this platform had already fixed once. Fixed by
+checking `attempt.LeaseOwner` too: only a lease NOT owned by `"sweeper"` can mean a live dispatch is
+in flight; `payoutMarkAmbiguousFromSubmittingIfLeaseExpired`'s own defence-in-depth CAS predicate
+carries the identical `lease_owner = 'sweeper'` exemption. The doc comment that incorrectly claimed
+"the sweeper never hits this path" (in two places: `PollPayoutStatus`'s own doc and
+`ErrPayoutDispatchInFlight`'s) is corrected. Every payout test in this package that constructs a
+`&Sweeper{}` literal now sets an explicit `Lease: SweeperDefaultLease`, and a new dedicated test
+(`TestSweeper_N7_CrashRecoveryWithRealLease_ActuallyRecovers`) uses `NewSweeper` itself and asserts
+`Processed == 1`, not merely `Claimed == 1` - the exact assertion gap that let the original,
+zero-Lease tests mask this for two full review rounds.
+
+**N3 (fixed for real this round).** `/resolve`'s staff-attribution audit
+(`withdrawal.resolve_attempted.http`) now commits inside the SAME transaction as
+`PollPayoutStatus`'s own state change, for every branch (the no-reference fallback AND the full
+QueryStatus evidence matrix) - `PollPayoutStatus`/`applyPayoutStatusEvidence` both now take an
+`actor *SubmitActor` parameter (nil for every sweeper-driven call, which has no staff to attribute
+to and writes no audit row), and `applyPayoutStatusEvidence`'s existing evidence-mapping switch was
+extracted verbatim into `applyPayoutStatusEvidenceInTx` so the audit call sits ONCE, after it,
+inside the same `pool.WithTenant` closure, rather than duplicated into every one of that switch's
+many return points. `internal/httpserver`'s `/resolve` handler no longer writes its own,
+separate-transaction audit record at all.
+
+**N6 extension.** The reference-mismatch check now compares against the attempt's own stored
+reference if it has one, else (the N1/R6 fallback shape - an attempt that reached `ambiguous`
+before that fix persisted the reference directly on it) the withdrawal's own - the original N6 fix
+only ever compared against `attempt.ProviderReference`, which is nil in exactly the fallback shape
+N1/R6 exists to cover.
+
+**LOW: R1's "already terminal" branch, pinned.** `TestPayoutDispatch_R1_
+StrayEvidenceAgainstTerminalAttempt_IsNoOp` proves a stray non-definite result arriving for an
+attempt that already reached a terminal state is a pure no-op (no error, no state change, no
+duplicate dispute/audit) - the other half of R1's branch (a non-terminal attempt racing a faster
+piece of evidence) was already covered by the round-3 R1 tests.
+
+**Not implemented, disclosed (unchanged):** CP-W1, payout cascade, full attempt-transition audit
+coverage, M1/M2 BLOCKED, R4 (callback agent's own scope, untouched here).
+
+**Verification.** 8 new tests this round
+(`payout_dispatch_round4_test.go`), for a running total of 49 payout-specific tests, pass under
+`-tags=integration` and under `-race` on a private database freshly migrated to head (106);
+`internal/withdrawal` and `internal/httpserver`'s 30 withdrawal tests pass on a private database
+freshly migrated to head (the shared `TEST_DATABASE_URL` run still fails on the same pre-existing,
+disclosed migration-0101 gap, confirmed unrelated). `golangci-lint` (2.9.0,
+`--build-tags=integration --allow-parallel-runners`): 0 issues on every file this round touched.
+

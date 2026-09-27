@@ -252,7 +252,7 @@ func (s *Sweeper) resubmitPayoutAmbiguous(ctx context.Context, tenantID uuid.UUI
 	nextPoll := s.backoff(attempt.PollCount)
 
 	if attempt.ProviderID != nil {
-		if err := PollPayoutStatus(ctx, s.Pool, s.Orchestrator, s.CredResolver, tenantID, attempt, nextPoll); err != nil {
+		if err := PollPayoutStatus(ctx, s.Pool, s.Orchestrator, s.CredResolver, tenantID, attempt, nextPoll, nil); err != nil {
 			return err
 		}
 		refreshed, err := getAttemptInTenant(ctx, s.Pool, tenantID, attempt.ID)
@@ -354,7 +354,7 @@ func (s *Sweeper) dispatchPayoutAttempt(ctx context.Context, tenantID uuid.UUID,
 // mapping or the amount/asset cross-check).
 func (s *Sweeper) resolvePayoutViaQueryStatus(ctx context.Context, tenantID uuid.UUID, attempt PaymentAttempt) error {
 	nextPoll := s.backoff(attempt.PollCount)
-	return PollPayoutStatus(ctx, s.Pool, s.Orchestrator, s.CredResolver, tenantID, attempt, nextPoll)
+	return PollPayoutStatus(ctx, s.Pool, s.Orchestrator, s.CredResolver, tenantID, attempt, nextPoll, nil)
 }
 
 // lockSubmittedRequest locks and returns a WithdrawalRequest in `submitted`

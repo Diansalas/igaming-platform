@@ -509,7 +509,7 @@ func TestSweeper_T2Reclaim_KYCDeny_EscalatesNeverResends(t *testing.T) {
 	// Revoke KYC before the sweeper's T2 re-claim.
 	revokeVerification(t, pool, f)
 
-	sweeper := &Sweeper{Pool: pool, Orchestrator: orch, PayoutKYCGate: KYCEnforcementPayoutGate{}, CredResolver: MockCredentialResolver{}}
+	sweeper := &Sweeper{Pool: pool, Orchestrator: orch, PayoutKYCGate: KYCEnforcementPayoutGate{}, CredResolver: MockCredentialResolver{}, Lease: SweeperDefaultLease}
 	var attempt PaymentAttempt
 	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
@@ -568,7 +568,7 @@ func TestSweeper_T2Reclaim_Allow_ResendsAndSucceeds(t *testing.T) {
 		t.Fatalf("ApplyPayoutResult (NotSent): %v", err)
 	}
 
-	sweeper := &Sweeper{Pool: pool, Orchestrator: orch, PayoutKYCGate: KYCEnforcementPayoutGate{}, CredResolver: MockCredentialResolver{}}
+	sweeper := &Sweeper{Pool: pool, Orchestrator: orch, PayoutKYCGate: KYCEnforcementPayoutGate{}, CredResolver: MockCredentialResolver{}, Lease: SweeperDefaultLease}
 	var attempt PaymentAttempt
 	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
@@ -659,6 +659,7 @@ func TestSweeper_RunOnce_PayoutEndToEnd_BatchCapAndLease(t *testing.T) {
 	sweeper := &Sweeper{
 		Pool: pool, Orchestrator: orch, PayoutKYCGate: KYCEnforcementPayoutGate{}, CredResolver: MockCredentialResolver{},
 		BatchPerTenant: 2, // per-tenant cap: strictly less than `total`.
+		Lease:          SweeperDefaultLease,
 	}
 	stats := sweeper.RunOnce(context.Background(), []uuid.UUID{f.tenantID})
 	if len(stats.Errors) != 0 {
@@ -751,7 +752,7 @@ func TestSweeper_T12Resubmit_KYCDeny_EscalatesNeverResends(t *testing.T) {
 	// Revoke KYC before the sweeper's T12 resubmission.
 	revokeVerification(t, pool, f)
 
-	sweeper := &Sweeper{Pool: pool, Orchestrator: orch, PayoutKYCGate: KYCEnforcementPayoutGate{}, CredResolver: MockCredentialResolver{}}
+	sweeper := &Sweeper{Pool: pool, Orchestrator: orch, PayoutKYCGate: KYCEnforcementPayoutGate{}, CredResolver: MockCredentialResolver{}, Lease: SweeperDefaultLease}
 	if err := sweeper.resubmitPayoutAmbiguous(context.Background(), f.tenantID, attempt); err != nil {
 		t.Fatalf("resubmitPayoutAmbiguous: %v", err)
 	}

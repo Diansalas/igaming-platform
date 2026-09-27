@@ -1123,3 +1123,120 @@ shared TEST_DATABASE_URL. The shared TEST_DATABASE_URL's pre-existing,
 unrelated migration-0101/0103 gap (documented in the runbook and in prior
 rounds) reproduces identically before and after this round's diff and is
 not caused by it.
+
+================================================================================
+--- PRH-I1 payout round 4, narrow (2026-09-27): N7, N3 (actually fixed), N6 extension, R1 LOW ---
+
+Coordinator's fourth-round instruction, following the code re-review's own
+re-review 2 (rv-prh-i1-payout-code-review.md): N7 (HIGH, reopens B2), N3
+(reported fixed in round 3, but never actually touched - corrected in ADR
+0095, see the correction note immediately before this section's own §27.13),
+a LOW test for R1's other branch, and N6 extended to compare against the
+fallback withdrawal reference.
+
+N7 root cause and fix: `payout_sweep.go`'s sweeper claims a due row via
+`claimBatch` (sweeper.go), which unconditionally sets `lease_owner =
+'sweeper'` and a FRESH, future `lease_until` on every row it claims -
+including a crashed, long-expired `submitting` payout with no reference
+(exactly H3/B2's own crash-recovery scenario), immediately before routing
+it to `resolvePayoutViaQueryStatus` -> `PollPayoutStatus`. `PollPayoutStatus`'s
+own R2 in-flight guard could not tell that fresh, sweeper-owned lease apart
+from a genuinely live T1p/T2/T12 DISPATCH lease (`lease_owner =
+"payout-dispatch"`), so with a REAL, non-zero `Sweeper.Lease` (NewSweeper's
+own default, `SweeperDefaultLease = 60s`), the guard refused the sweeper's
+own recovery attempt every tick. EVERY payout sweeper test in this package
+built `&Sweeper{}` directly, leaving `Lease` at its Go zero value (0s) - so
+the freshly-set `lease_until` (`now()+0`) was already in the past by the
+time the guard ran, and none of them ever caught this. Fixed by checking
+`attempt.LeaseOwner` too (payout.go's `PollPayoutStatus` and
+`payoutMarkAmbiguousFromSubmittingIfLeaseExpired`): only a lease NOT owned
+by `"sweeper"` can mean a live dispatch is in flight.
+
+Anchored mutation for N7 (reverted to byte-identical source):
+- PM-PAYOUT-14: `attempt.LeaseOwner != nil && *attempt.LeaseOwner !=
+  "sweeper" &&` deleted from `PollPayoutStatus`'s in-flight guard
+  (reverting to the exact original N7 bug). Killed by
+  `TestSweeper_N7_CrashRecoveryWithRealLease_ActuallyRecovers`: `[payments:
+  sweeper process attempt ...: payments: payout dispatch is still in
+  flight, its lease has not expired]` - the EXACT N7 failure mode,
+  reproduced and then confirmed fixed.
+
+Test-hygiene fix required by the coordinator: every `&Sweeper{...}`
+literal across payout_dispatch_integration_test.go,
+payout_dispatch_fixround_test.go and payout_dispatch_round3_test.go (13
+call sites) now sets an explicit `Lease: SweeperDefaultLease`, and a new
+dedicated test (`TestSweeper_N7_CrashRecoveryWithRealLease_
+ActuallyRecovers`, payout_dispatch_round4_test.go) uses `NewSweeper` itself
+(real defaults) and asserts `Processed == 1`, not merely `Claimed == 1` -
+the exact assertion gap that let the zero-Lease tests mask N7 for two full
+review rounds. `TestSweeper_N7_LiveDispatchLease_StillRefusesResolve`
+proves the fix did not overcorrect: a genuine `lease_owner =
+"payout-dispatch"` lease still refuses.
+
+N3 (fixed for real this round, corrected in ADR 0095 rather than silently
+re-labeled): `PollPayoutStatus`/`applyPayoutStatusEvidence` now take an
+`actor *SubmitActor` parameter; `applyPayoutStatusEvidence`'s existing
+evidence-mapping switch was extracted verbatim into
+`applyPayoutStatusEvidenceInTx` so a single `payoutResolveAudit` call sits
+after it, inside the SAME `pool.WithTenant` transaction, covering every one
+of that switch's many return branches without duplicating the audit call
+into each of them; `PollPayoutStatus`'s own no-reference fallback branch
+gets the identical treatment. `internal/httpserver`'s `/resolve` handler no
+longer writes a separate, post-hoc audit record at all - it just builds the
+`actor` and passes it through.
+
+Anchored mutations for N3 (each reverted to byte-identical source):
+- PM-PAYOUT-15: the `payoutResolveAudit` call removed from
+  `applyPayoutStatusEvidence`'s wrapper (the full-evidence-matrix call
+  site). First run against `TestPollPayoutStatus_N3_
+  StaffAuditSameTransactionAsStateChange` alone: SURVIVED (that test only
+  exercises PollPayoutStatus's OWN no-reference-fallback audit call, a
+  different code path) - a genuine coverage gap, caught by checking the
+  mutant's result rather than assuming the existing test covered it. Fixed
+  by adding `TestPollPayoutStatus_N3_FullEvidencePath_
+  StaffAuditSameTransaction` (drives a real Pending->Succeeded QueryStatus
+  round trip with a real actor). Re-run: killed (`expected exactly 1
+  withdrawal.resolve_attempted.http audit row via the full evidence path,
+  got 0`). Also confirmed to survive the full `internal/httpserver`
+  `TestWithdrawalResolve_*` suite on a private database before the new test
+  was added, proving the gap was real, not merely theoretical.
+- PM-PAYOUT-16: the `payoutResolveAudit` call removed from
+  `PollPayoutStatus`'s own no-reference fallback branch. Killed by
+  `TestPollPayoutStatus_N3_StaffAuditSameTransactionAsStateChange`
+  (`expected exactly 1 withdrawal.resolve_attempted.http audit row, got
+  0`).
+
+N6 extension: `applyPayoutSuccessCheckedFromStatus`'s reference-mismatch
+check now falls back to `wr.ProviderReference` when `attempt.
+ProviderReference` is nil/empty (the N1/R6 fallback shape) before deciding
+there is nothing to compare against.
+
+Anchored mutation for the N6 extension (reverted to byte-identical
+source):
+- PM-PAYOUT-17: the `storedRef = wr.ProviderReference` fallback line
+  deleted. Killed by `TestPollPayoutStatus_N6_
+  MismatchAgainstFallbackWithdrawalReference_Disputes` (`expected a
+  provider_reference_mismatch dispute even when comparing against the
+  FALLBACK withdrawal reference, got state=succeeded reason=<nil>` - i.e.
+  without the fix, the mismatched payout silently SETTLES instead of
+  disputing).
+
+R1 LOW: `TestPayoutDispatch_R1_StrayEvidenceAgainstTerminalAttempt_IsNoOp`
+added, proving a stray non-definite result against an already-terminal
+attempt is a pure no-op (no error, no state change, no duplicate dispute/
+audit record).
+
+Verification: `go build -tags=integration ./...` clean; `gofmt -l` clean;
+`golangci-lint` 2.9.0 (`--build-tags=integration --allow-parallel-runners`):
+0 issues on every touched file. Full payout test set - now 49 tests (13 +
+15 + 13 + 8 across the four payout_dispatch_*_test.go files) - green under
+`go test -tags=integration` and under `-race`, on a fresh private scratch
+database migrated to head (106, migration 0106 having landed from a
+concurrent agent's own kill-switch-phase-1 work). `internal/withdrawal`
+green on the shared `TEST_DATABASE_URL`; `internal/httpserver`'s 30
+withdrawal tests green on a private database freshly migrated to head
+(confirmed the same, pre-existing, disclosed migration-0101 gap on the
+shared `TEST_DATABASE_URL` reproduces identically and is unrelated). 4
+anchored mutants for this round (PM-PAYOUT-14/15/16/17), each reverted to
+byte-identical source, one of which (PM-PAYOUT-15) exposed and led to
+fixing a genuine coverage gap rather than just confirming an existing test.

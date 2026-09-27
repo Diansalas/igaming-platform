@@ -99,7 +99,7 @@ func TestSweeper_N1_AmbiguousWithReference_ConvergesByPollZeroResends(t *testing
 	}); err != nil {
 		t.Fatalf("touch: %v", err)
 	}
-	sweeper := &Sweeper{Pool: pool, Orchestrator: orch, PayoutKYCGate: KYCEnforcementPayoutGate{}, CredResolver: MockCredentialResolver{}}
+	sweeper := &Sweeper{Pool: pool, Orchestrator: orch, PayoutKYCGate: KYCEnforcementPayoutGate{}, CredResolver: MockCredentialResolver{}, Lease: SweeperDefaultLease}
 	st := sweeper.RunOnce(context.Background(), []uuid.UUID{f.tenantID})
 	if len(st.Errors) != 0 {
 		t.Fatalf("unexpected sweep errors: %v", st.Errors)
@@ -293,7 +293,7 @@ func TestPollPayoutStatus_R2_LeaseStillLive_RefusesInFlight(t *testing.T) {
 	}
 
 	// Staff presses /resolve WHILE phase B is (conceptually) still running.
-	err = PollPayoutStatus(context.Background(), pool, orch, MockCredentialResolver{}, f.tenantID, claim.Attempt, time.Now().Add(30*time.Second))
+	err = PollPayoutStatus(context.Background(), pool, orch, MockCredentialResolver{}, f.tenantID, claim.Attempt, time.Now().Add(30*time.Second), nil)
 	if !errors.Is(err, ErrPayoutDispatchInFlight) {
 		t.Fatalf("R2 regression: expected ErrPayoutDispatchInFlight for a live-lease submitting attempt, got %v", err)
 	}
@@ -523,7 +523,7 @@ func TestPollPayoutStatus_ProviderReferenceMismatch_Disputes(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("touch: %v", err)
 	}
-	sweeper := &Sweeper{Pool: pool, Orchestrator: orch, PayoutKYCGate: KYCEnforcementPayoutGate{}, CredResolver: MockCredentialResolver{}}
+	sweeper := &Sweeper{Pool: pool, Orchestrator: orch, PayoutKYCGate: KYCEnforcementPayoutGate{}, CredResolver: MockCredentialResolver{}, Lease: SweeperDefaultLease}
 	st := sweeper.RunOnce(context.Background(), []uuid.UUID{f.tenantID})
 	if len(st.Errors) != 0 {
 		t.Fatalf("unexpected sweep errors: %v", st.Errors)
@@ -723,7 +723,7 @@ func TestPollPayoutStatus_M9_DefiniteMismatchAfterTerminal_StillDisputes(t *test
 	// This is exactly the shape a real caller sees: it read the attempt
 	// before calling QueryStatus, and the row moved on underneath it.
 	statusGR := GateResult[StatusResult]{Class: ErrorClassSucceeded, Value: StatusResult{Outcome: OutcomeSucceeded, Amount: 50_000, AssetCode: "EUR", ProviderReference: "m9-mismatch-ref"}}
-	if err := applyPayoutStatusEvidence(context.Background(), pool, f.tenantID, wr.ID, claim.Attempt, statusGR, EvidenceQueryStatus, time.Now().Add(30*time.Second)); err != nil {
+	if err := applyPayoutStatusEvidence(context.Background(), pool, f.tenantID, wr.ID, claim.Attempt, statusGR, EvidenceQueryStatus, time.Now().Add(30*time.Second), nil); err != nil {
 		t.Fatalf("applyPayoutStatusEvidence: %v", err)
 	}
 
@@ -813,7 +813,7 @@ func TestSweeper_M12_RepeatedKYCDenyOnEscalatedAttempt_IsIdempotent(t *testing.T
 	}
 	revokeVerification(t, pool, f)
 
-	sweeper := &Sweeper{Pool: pool, Orchestrator: orch, PayoutKYCGate: KYCEnforcementPayoutGate{}, CredResolver: MockCredentialResolver{}}
+	sweeper := &Sweeper{Pool: pool, Orchestrator: orch, PayoutKYCGate: KYCEnforcementPayoutGate{}, CredResolver: MockCredentialResolver{}, Lease: SweeperDefaultLease}
 	var attempt PaymentAttempt
 	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
