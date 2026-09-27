@@ -28,6 +28,14 @@
 --      terminal_reason IN ('reversal_tombstone_precedes_success',
 --      'multiple_success_for_intent') instead of only the former. Nothing
 --      else in the 0101 body changes.
+--      Security review F-M1 (rv-fh3-security.md, 81dd4b7): a bare
+--      `NOT IN (...)` is NULL, not TRUE, for a NULL terminal_reason -
+--      unlike 0101's `IS DISTINCT FROM`, which is NULL-safe - so the
+--      line below is written as `terminal_reason IS NULL OR
+--      terminal_reason NOT IN (...)` to preserve 0101's NULL-refusing
+--      behavior. This migration is unmerged and has never been applied
+--      to any shared database, so it is edited in place rather than
+--      patched by a follow-up migration.
 --
 -- Refusal, not a pre-check (the 0092 pattern, ledger-finance ruling §3,
 -- confirmed by the architect's AM-2 revision-4 note correcting the
@@ -230,8 +238,18 @@ BEGIN
         -- Any other reason on a deposit declined->disputed move is
         -- refused - this is the ONLY line in this function that changed
         -- from its 0101 body.
+        --
+        -- Security review F-M1 (rv-fh3-security.md, 81dd4b7): SQL's
+        -- `x NOT IN (...)` is NULL (neither true nor false), never TRUE,
+        -- whenever x is NULL - so a bare `NEW.terminal_reason NOT IN
+        -- (...)` would let a NULL terminal_reason through this IF
+        -- entirely (the 0101 predicate this replaces used `IS DISTINCT
+        -- FROM`, which IS NULL-safe: NULL IS DISTINCT FROM 'x' is TRUE).
+        -- Explicit NULL branch restores that NULL-safety while still
+        -- accepting exactly the two named reasons.
         IF OLD.state = 'declined' AND NEW.state = 'disputed' AND OLD.operation = 'deposit'
-            AND NEW.terminal_reason NOT IN ('reversal_tombstone_precedes_success', 'multiple_success_for_intent')
+            AND (NEW.terminal_reason IS NULL
+                 OR NEW.terminal_reason NOT IN ('reversal_tombstone_precedes_success', 'multiple_success_for_intent'))
         THEN
             RAISE EXCEPTION 'payment_attempts: a deposit declined->disputed transition (T13t/T13d) requires terminal_reason in (reversal_tombstone_precedes_success, multiple_success_for_intent), got % (id=%)', NEW.terminal_reason, OLD.id;
         END IF;

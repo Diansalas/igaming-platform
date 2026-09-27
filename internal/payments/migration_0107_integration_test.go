@@ -314,6 +314,90 @@ func TestMigration0107_LedgerBackstop_ErrDepositAlreadyPostedForIntent(t *testin
 
 func strPtr(s string) *string { return &s }
 
+// TestMigration0107_T13tT13d_TerminalReasonTrigger_HEAD closes security
+// review F-M1/F-M2 (rv-fh3-security.md, 81dd4b7): migration 0107's
+// CREATE OR REPLACE of payment_attempts_guard() changed the T13t/T13d
+// terminal_reason check from `IS DISTINCT FROM` (0101, NULL-safe) to
+// `NOT IN (...)` (originally NULL-unsafe: `NULL NOT IN (...)` is NULL,
+// never TRUE, so the IF never raised for a NULL terminal_reason - F-M1).
+// This is the required HEAD trigger test with all three cases, run
+// directly against the raw SQL trigger (not through any application-code
+// helper, since ApplyMultipleSuccessForIntent/ApplyTombstonePrecedesSuccess
+// always set a real reason - this test is the guard's OWN defense in
+// depth, independent of what application code currently does):
+//
+//	(a) terminal_reason='multiple_success_for_intent' (T13d) is accepted;
+//	(b) terminal_reason='some_other_reason' is refused;
+//	(c) terminal_reason left NULL is refused - the exact F-M1 regression;
+//	    this case FAILS against the pre-fix 0107 body (confirmed: reverting
+//	    the fix locally and rerunning this test reproduces "expected the
+//	    trigger to refuse a NULL terminal_reason, got state=disputed
+//	    reason=<nil>").
+func TestMigration0107_T13tT13d_TerminalReasonTrigger_HEAD(t *testing.T) {
+	pool := depositV2ScratchPool(t)
+	f := seedM0101Fixture(t, pool)
+
+	newDeclinedAttempt := func(ref string) uuid.UUID {
+		intentID := insertDepositIntent(t, pool, f, "declined", ptr("mock-psp"), ptr(ref), nil)
+		id := uuid.New()
+		if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+			_, err := tx.Exec(ctx,
+				`INSERT INTO payment_attempts (id, tenant_id, operation, deposit_intent_id, attempt_no, provider_id, payment_method, asset_code, amount, interactive, merchant_reference, external_idempotency_key, state, last_evidence_kind)
+				 VALUES ($1,$2,'deposit',$3,1,'mock-psp','card','EUR',1000,true,$4,$5,'submitting','platform')`,
+				id, f.tenantID, intentID, id.String(), "pa:"+id.String())
+			return err
+		}); err != nil {
+			t.Fatalf("seed submitting attempt: %v", err)
+		}
+		if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+			_, err := tx.Exec(ctx, `UPDATE payment_attempts SET state='declined', last_evidence_kind='sync', decline_stage='after_acceptance', cascadable=false, provider_reference=$2, resolved_at=now() WHERE id=$1`, id, ref)
+			return err
+		}); err != nil {
+			t.Fatalf("submitting->declined: %v", err)
+		}
+		return id
+	}
+
+	toDisputed := func(id uuid.UUID, reason *string) error {
+		return pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+			_, err := tx.Exec(ctx, `UPDATE payment_attempts SET state='disputed', last_evidence_kind='callback', terminal_reason=$2 WHERE id=$1`, id, reason)
+			return err
+		})
+	}
+
+	// (a) T13d: multiple_success_for_intent is accepted.
+	accepted := newDeclinedAttempt("t13d-head-accepted-ref")
+	if err := toDisputed(accepted, strPtr(TerminalReasonMultipleSuccessForIntent)); err != nil {
+		t.Fatalf("(a) T13d with terminal_reason=%s must be accepted, got %v", TerminalReasonMultipleSuccessForIntent, err)
+	}
+	var state string
+	var reason *string
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT state, terminal_reason FROM payment_attempts WHERE id=$1`, accepted).Scan(&state, &reason)
+	}); err != nil || state != "disputed" || reason == nil || *reason != TerminalReasonMultipleSuccessForIntent {
+		t.Fatalf("(a) expected disputed/%s, got %s/%v (err=%v)", TerminalReasonMultipleSuccessForIntent, state, reason, err)
+	}
+
+	// (b) another (unrecognized) reason is refused.
+	otherReason := newDeclinedAttempt("t13d-head-other-ref")
+	if err := toDisputed(otherReason, strPtr("some_other_reason")); !isCheckOrTriggerViolation(err) {
+		t.Fatalf("(b) expected the trigger to refuse an unrecognized terminal_reason, got %v", err)
+	}
+
+	// (c) F-M1: a NULL terminal_reason is refused. This is the case that
+	// FAILS against the pre-fix 0107 body (NULL NOT IN (...) is NULL, not
+	// TRUE, so the old code's IF never raised).
+	nullReason := newDeclinedAttempt("t13d-head-null-ref")
+	if err := toDisputed(nullReason, nil); !isCheckOrTriggerViolation(err) {
+		var gotState string
+		var gotReason *string
+		_ = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+			return tx.QueryRow(ctx, `SELECT state, terminal_reason FROM payment_attempts WHERE id=$1`, nullReason).Scan(&gotState, &gotReason)
+		})
+		t.Fatalf("(c) F-M1: expected the trigger to refuse a NULL terminal_reason, got err=%v state=%s reason=%v", err, gotState, gotReason)
+	}
+}
+
 // migration0101ScratchApplyThroughPrev migrates a fresh scratch database to
 // everything through migration (through-1) - i.e. right before the
 // migration under test - and returns a migrations DIR that includes
