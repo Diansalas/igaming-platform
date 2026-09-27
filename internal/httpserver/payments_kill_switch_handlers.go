@@ -242,7 +242,7 @@ func writeKillSwitchError(w http.ResponseWriter, c killSwitchCall, op string, er
 }
 
 // isKillSwitchTriggerRefusal reports whether err is a plain RAISE EXCEPTION
-// from one of migration 0105/0107's own trigger functions (SQLSTATE
+// from one of migration 0105/0106's own trigger functions (SQLSTATE
 // P0001) - a semantic refusal, not an infrastructure failure.
 func isKillSwitchTriggerRefusal(err error) bool {
 	var pgErr *pgconn.PgError

@@ -847,13 +847,13 @@ Full-suite confirmation after all three reverts: go test -tags=integration
 player-scoped pin). Full internal/payments under -race also green
 (166.399s, background run, priv db).
 
-M1 (fail-open, migration 0107) - migrations/0105_payment_kill_switch.up.sql
-mutation (reverting 0107's own policy fix to the pre-fix shape):
+M1 (fail-open, migration 0106) - migrations/0105_payment_kill_switch.up.sql
+mutation (reverting 0106's own policy fix to the pre-fix shape):
 
     Mutation: removed the "AND NULLIF(current_setting('app.platform_
     admin_principal_id', true), '') IS NULL" clause from payment_attempts'
     tenant_staff_scope policy (both USING and WITH CHECK).
-    Killed by: TestMigration0107_MixedGUCContextClaimsNothing. First
+    Killed by: TestMigration0106_MixedGUCContextClaimsNothing. First
     failure: "M1: a mixed tenant+platform GUC context claimed past an
     engaged switch (fail-open)". Restored byte-identical (md5sum matched).
 
@@ -909,7 +909,7 @@ tests (see ADR 0095 §10.7 for the full list: TestPaymentsKillSwitchAPI_
 ProviderScopeValidation, _AuditRecordsCarryBeforeAfterAndTargetTenant,
 _AuditRecordsPlatformTakeover, _PlatformCallerAgainstNonexistentTenantIs404,
 _RouteTable, TestLogKillSwitchEngagedAlert_EmitsPinnedEventAndFields, and
-migration_0107_integration_test.go's L1-L4 tests) but were not individually
+migration_0106_integration_test.go's L1-L4 tests) but were not individually
 mutation-killed in this round, per the coordinator's scope ("each mutation-
 killed" was specified for H1 and M6 only).
 

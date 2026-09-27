@@ -1,4 +1,4 @@
--- Reverts migration 0107 to migration 0105/0101's own original function and
+-- Reverts migration 0106 to migration 0105/0101's own original function and
 -- policy bodies, verbatim.
 
 DROP POLICY tenant_staff_scope ON payment_attempts;

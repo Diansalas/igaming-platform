@@ -1265,28 +1265,29 @@ context pin. Mutation-killed: K2 (`InsertSubmittingAttempt`), K3 (`ResubmitAmbig
 `InsertCreatedAttempt`) - adapted directly from the review's own probe P2. Evidence:
 `docs/plans/payment-readiness/evidence/prh-i1-mutation-kill.txt`.
 
-**M1 (fail-open) - CLOSED, migration 0107.** `migrations/0107_payment_attempts_platform_guc_
-hardening.{up,down}.sql` (0106 is the callback agent's; reserved 0107 per the orchestrator's
-allocation). Option (a) from the review: `payment_attempts`/`payment_provider_events`'s
+**M1 (fail-open) - CLOSED, migration 0106.** `migrations/0106_payment_attempts_platform_guc_
+hardening.{up,down}.sql` (renumbered from an initial 0107 to 0106 by the orchestrator before merge,
+since 0106 was still free and `migrate verify` rejects version gaps; the callback agent's migration is
+0107). Option (a) from the review: `payment_attempts`/`payment_provider_events`'s
 `tenant_staff_scope` policies now also require `app.platform_admin_principal_id` unset, aligning them
-with `payment_kill_switches.tenant_scope`. `TestMigration0107_MixedGUCContextClaimsNothing` is the
+with `payment_kill_switches.tenant_scope`. `TestMigration0106_MixedGUCContextClaimsNothing` is the
 adapted, permanent version of probe P1 and is mutation-killed. The ADR's own §10.3 L1 claim ("the same
 GUC predicate") is corrected by this fix, not merely documented as wrong.
 
-Migration 0107 additionally folds in, in the same reviewed change (`CREATE OR REPLACE FUNCTION` on
+Migration 0106 additionally folds in, in the same reviewed change (`CREATE OR REPLACE FUNCTION` on
 the three migration 0105 trigger functions, additive per CLAUDE.md - migration 0105 itself is
 untouched):
 - **L1** (a tenant cannot cancel/change the status of a platform-filed request, or one against a
-  platform-engaged switch) - test: `TestMigration0107_L1_TenantCannotCancelPlatformRequest`.
+  platform-engaged switch) - test: `TestMigration0106_L1_TenantCannotCancelPlatformRequest`.
 - **L2** (`expected_version` forced to the switch's real current version at request INSERT, closing
   R3; a request may only be filed against a currently-`engaged` switch, closing half of R2) - tests:
-  `TestMigration0107_L2_FutureVersionRequestIsForcedToCurrent`,
-  `TestMigration0107_L2_RequestRequiresEngagedSwitch`,
-  `TestMigration0107_L2_EngageCancelsPreexistingOpenRequest`.
+  `TestMigration0106_L2_FutureVersionRequestIsForcedToCurrent`,
+  `TestMigration0106_L2_RequestRequiresEngagedSwitch`,
+  `TestMigration0106_L2_EngageCancelsPreexistingOpenRequest`.
 - **L3** (`changed_at` forced from the clock, never client-supplied) - test:
-  `TestMigration0107_L3_ChangedAtIsForced`.
+  `TestMigration0106_L3_ChangedAtIsForced`.
 - **L4** (`payment_kill_switch_session()` additionally requires `staff_users.status = 'active'`) -
-  test: `TestMigration0107_L4_SuspendedStaffRejectedAsActor`.
+  test: `TestMigration0106_L4_SuspendedStaffRejectedAsActor`.
 
 **M2 (unvalidated `provider_scope`) - CLOSED.** `newEngageKillSwitchHandler`
 (`payments_kill_switch_handlers.go`) rejects leading/trailing whitespace and any `provider_scope`
@@ -1342,7 +1343,7 @@ that RLS view is already genuinely platform-scoped - RLS is acting as an indepen
 second layer for this specific property. Recorded here rather than silently claimed as mutation-
 killed.
 
-**Lows.** L1-L4 above (migration 0107). **L5** (audit-on-refusal, error class, 5xx-vs-409): partially
+**Lows.** L1-L4 above (migration 0106). **L5** (audit-on-refusal, error class, 5xx-vs-409): partially
 closed - `writeKillSwitchError` now classifies a trigger `RAISE EXCEPTION` (SQLSTATE `P0001`) as 409
 with a logged class and message, and any OTHER error as a genuine 500 (previously always 409, silently
 under-logged); a separately-committed `OutcomeDenied` audit row for a refused mutation (self-approval,

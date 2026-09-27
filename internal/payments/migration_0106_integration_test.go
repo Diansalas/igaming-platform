@@ -1,6 +1,6 @@
 //go:build integration
 
-// Migration 0107 (RV-PRH-I1 kill-switch security review fix round):
+// Migration 0106 (RV-PRH-I1 kill-switch security review fix round):
 // M1 (fail-open on a mixed tenant+platform GUC context), L1 (tenant
 // cancelling a platform request), L2 (expected_version/engaged-at-INSERT
 // and KS-L6 on false->true engage), L3 (changed_at forced), L4 (suspended
@@ -19,10 +19,10 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/testsupport/scratchdb"
 )
 
-// migration0107Scratch migrates a fresh scratch database all the way to the
+// migration0106Scratch migrates a fresh scratch database all the way to the
 // latest on-disk migration (0105's own tests intentionally stop at exactly
-// 105; the M1/L1-L4 fixes this file exercises live in 0107).
-func migration0107Scratch(t *testing.T, prefix string) *db.Pool {
+// 105; the M1/L1-L4 fixes this file exercises live in 0106).
+func migration0106Scratch(t *testing.T, prefix string) *db.Pool {
 	t.Helper()
 	url := scratchdb.New(t, prefix)
 	pool, err := db.Connect(context.Background(), url, 10, 5_000_000_000)
@@ -36,20 +36,20 @@ func migration0107Scratch(t *testing.T, prefix string) *db.Pool {
 	return pool
 }
 
-// TestMigration0107_MixedGUCContextClaimsNothing is the adapted, permanent
+// TestMigration0106_MixedGUCContextClaimsNothing is the adapted, permanent
 // version of the security review's probe P1 (finding M1): a transaction
 // with BOTH app.tenant_id and app.platform_admin_principal_id set must see
 // the same switch state (and therefore claim nothing extra) as a plain
 // tenant transaction - it must never fail OPEN by seeing zero switch rows
 // while still being able to write payment_attempts.
-func TestMigration0107_MixedGUCContextClaimsNothing(t *testing.T) {
-	pool := migration0107Scratch(t, "m0107_m1")
+func TestMigration0106_MixedGUCContextClaimsNothing(t *testing.T) {
+	pool := migration0106Scratch(t, "m0106_m1")
 	f := seedM0101Fixture(t, pool)
 	staff := seedKillSwitchStaff(t, pool, f.tenantID)
 	platformAdmin := uuid.New()
 	if err := pool.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
 		_, err := tx.Exec(ctx, `INSERT INTO staff_users (id, tenant_id, email, password_hash, role, status) VALUES ($1,NULL,$2,'x','platform_admin','active')`,
-			platformAdmin, "m0107-plat-"+platformAdmin.String()+"@test.example")
+			platformAdmin, "m0106-plat-"+platformAdmin.String()+"@test.example")
 		return err
 	}); err != nil {
 		t.Fatalf("seed platform admin: %v", err)
@@ -93,7 +93,7 @@ func TestMigration0107_MixedGUCContextClaimsNothing(t *testing.T) {
 	}
 
 	// The fix under test: a MIXED session (both app.tenant_id and
-	// app.platform_admin_principal_id set) must ALSO be refused - pre-0107
+	// app.platform_admin_principal_id set) must ALSO be refused - pre-0106
 	// this context saw zero switch rows and claimed successfully.
 	err = pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, `SELECT set_config('app.tenant_id', $1, true)`, f.tenantID.String()); err != nil {
@@ -109,15 +109,15 @@ func TestMigration0107_MixedGUCContextClaimsNothing(t *testing.T) {
 	}
 }
 
-// TestMigration0107_L1_TenantCannotCancelPlatformRequest.
-func TestMigration0107_L1_TenantCannotCancelPlatformRequest(t *testing.T) {
-	pool := migration0107Scratch(t, "m0107_l1")
+// TestMigration0106_L1_TenantCannotCancelPlatformRequest.
+func TestMigration0106_L1_TenantCannotCancelPlatformRequest(t *testing.T) {
+	pool := migration0106Scratch(t, "m0106_l1")
 	f := seedM0101Fixture(t, pool)
 	tenantStaff := seedKillSwitchStaff(t, pool, f.tenantID)
 	platformAdmin := uuid.New()
 	if err := pool.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
 		_, err := tx.Exec(ctx, `INSERT INTO staff_users (id, tenant_id, email, password_hash, role, status) VALUES ($1,NULL,$2,'x','platform_admin','active')`,
-			platformAdmin, "m0107-l1-plat-"+platformAdmin.String()+"@test.example")
+			platformAdmin, "m0106-l1-plat-"+platformAdmin.String()+"@test.example")
 		return err
 	}); err != nil {
 		t.Fatalf("seed platform admin: %v", err)
@@ -155,9 +155,9 @@ func TestMigration0107_L1_TenantCannotCancelPlatformRequest(t *testing.T) {
 	}
 }
 
-// TestMigration0107_L2_FutureVersionRequestIsForcedToCurrent (R3).
-func TestMigration0107_L2_FutureVersionRequestIsForcedToCurrent(t *testing.T) {
-	pool := migration0107Scratch(t, "m0107_l2a")
+// TestMigration0106_L2_FutureVersionRequestIsForcedToCurrent (R3).
+func TestMigration0106_L2_FutureVersionRequestIsForcedToCurrent(t *testing.T) {
+	pool := migration0106Scratch(t, "m0106_l2a")
 	f := seedM0101Fixture(t, pool)
 	staff := seedKillSwitchStaff(t, pool, f.tenantID)
 
@@ -192,9 +192,9 @@ func TestMigration0107_L2_FutureVersionRequestIsForcedToCurrent(t *testing.T) {
 	}
 }
 
-// TestMigration0107_L2_RequestRequiresEngagedSwitch (part of R2/L2).
-func TestMigration0107_L2_RequestRequiresEngagedSwitch(t *testing.T) {
-	pool := migration0107Scratch(t, "m0107_l2b")
+// TestMigration0106_L2_RequestRequiresEngagedSwitch (part of R2/L2).
+func TestMigration0106_L2_RequestRequiresEngagedSwitch(t *testing.T) {
+	pool := migration0106Scratch(t, "m0106_l2b")
 	f := seedM0101Fixture(t, pool)
 	staff := seedKillSwitchStaff(t, pool, f.tenantID)
 
@@ -219,17 +219,17 @@ func TestMigration0107_L2_RequestRequiresEngagedSwitch(t *testing.T) {
 	}
 }
 
-// TestMigration0107_L2_EngageCancelsPreexistingOpenRequest (R2, false->true
+// TestMigration0106_L2_EngageCancelsPreexistingOpenRequest (R2, false->true
 // half): a request filed while disengaged must not squat the one-open slot
 // across a later platform engage.
-func TestMigration0107_L2_EngageCancelsPreexistingOpenRequest(t *testing.T) {
-	pool := migration0107Scratch(t, "m0107_l2c")
+func TestMigration0106_L2_EngageCancelsPreexistingOpenRequest(t *testing.T) {
+	pool := migration0106Scratch(t, "m0106_l2c")
 	f := seedM0101Fixture(t, pool)
 	staff := seedKillSwitchStaff(t, pool, f.tenantID)
 	platformAdmin := uuid.New()
 	if err := pool.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
 		_, err := tx.Exec(ctx, `INSERT INTO staff_users (id, tenant_id, email, password_hash, role, status) VALUES ($1,NULL,$2,'x','platform_admin','active')`,
-			platformAdmin, "m0107-l2c-plat-"+platformAdmin.String()+"@test.example")
+			platformAdmin, "m0106-l2c-plat-"+platformAdmin.String()+"@test.example")
 		return err
 	}); err != nil {
 		t.Fatalf("seed platform admin: %v", err)
@@ -295,9 +295,9 @@ func TestMigration0107_L2_EngageCancelsPreexistingOpenRequest(t *testing.T) {
 	}
 }
 
-// TestMigration0107_L3_ChangedAtIsForced.
-func TestMigration0107_L3_ChangedAtIsForced(t *testing.T) {
-	pool := migration0107Scratch(t, "m0107_l3")
+// TestMigration0106_L3_ChangedAtIsForced.
+func TestMigration0106_L3_ChangedAtIsForced(t *testing.T) {
+	pool := migration0106Scratch(t, "m0106_l3")
 	f := seedM0101Fixture(t, pool)
 	staff := seedKillSwitchStaff(t, pool, f.tenantID)
 
@@ -320,15 +320,15 @@ func TestMigration0107_L3_ChangedAtIsForced(t *testing.T) {
 	}
 }
 
-// TestMigration0107_L4_SuspendedStaffRejectedAsActor.
-func TestMigration0107_L4_SuspendedStaffRejectedAsActor(t *testing.T) {
-	pool := migration0107Scratch(t, "m0107_l4")
+// TestMigration0106_L4_SuspendedStaffRejectedAsActor.
+func TestMigration0106_L4_SuspendedStaffRejectedAsActor(t *testing.T) {
+	pool := migration0106Scratch(t, "m0106_l4")
 	f := seedM0101Fixture(t, pool)
 
 	suspended := uuid.New()
 	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := tx.Exec(ctx, `INSERT INTO staff_users (id, tenant_id, email, password_hash, role, status) VALUES ($1,$2,$3,'x','tenant_admin','suspended')`,
-			suspended, f.tenantID, "m0107-l4-"+suspended.String()+"@test.example")
+			suspended, f.tenantID, "m0106-l4-"+suspended.String()+"@test.example")
 		return err
 	}); err != nil {
 		t.Fatalf("seed suspended staff: %v", err)
