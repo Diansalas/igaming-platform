@@ -2720,10 +2720,20 @@ paths:
                 $ref: "#/components/schemas/Error"
         "409":
           $ref: "#/components/responses/Conflict"
+        "429":
+          $ref: "#/components/responses/WebhookRateLimited"
         "500":
           $ref: "#/components/responses/InternalError"
         "503":
-          description: Payment webhooks are not enabled on this deployment
+          description: >
+            Payment webhooks are not enabled on this deployment, OR an ADR
+            0097 admission-layer capacity rejection (A4a/A4b/B2), OR a
+            no-429-retry adapter's B1 rejection - see
+            WebhookAdmissionUnavailable.
+          headers:
+            Retry-After:
+              description: Present only for the ADR 0097 admission-layer cause.
+              schema: { type: integer, minimum: 1, maximum: 60 }
           content:
             application/json:
               schema:
@@ -2832,8 +2842,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+        "429":
+          $ref: "#/components/responses/WebhookRateLimited"
         "500":
           $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/WebhookAdmissionUnavailable"
 
   /v1/webhooks/casino/{tenantSlug}/{providerID}:
     post:
@@ -2994,25 +3008,34 @@ paths:
                 $ref: "#/components/schemas/Error"
         "409":
           $ref: "#/components/responses/Conflict"
+        "429":
+          $ref: "#/components/responses/WebhookRateLimited"
         "500":
           $ref: "#/components/responses/InternalError"
         "503":
           description: >
-            Two distinct causes share this status. (1) Casino webhooks are
-            not enabled on this deployment at all (the casino Orchestrator
-            is nil) - this is checked FIRST, before the shared preamble
-            even runs, so it PRECEDES signature verification and is
-            reachable by any caller, verified or not. (2) A verified NEW
-            BET while the tenant/brand's own capability is not active,
-            does not support bet, or no longer supports the session's own
-            asset - a deliberate, POST-verification kill switch on NEW
-            EXPOSURE ONLY (Stage 10.3 CAS-CAP-ROLLBACK-1), reachable ONLY
-            after signature verification succeeds. Cause (2) is NEVER
-            returned for a win or rollback callback - settlement of
-            exposure the ledger already holds is never blocked by
-            capability/status. The two causes carry different error
-            messages; the post-verification one is only ever returned to a
-            verified caller.
+            Three distinct causes share this status. (1) Casino webhooks
+            are not enabled on this deployment at all (the casino
+            Orchestrator is nil) - this is checked FIRST, before the
+            shared preamble even runs, so it PRECEDES signature
+            verification and is reachable by any caller, verified or not.
+            (2) A verified NEW BET while the tenant/brand's own capability
+            is not active, does not support bet, or no longer supports the
+            session's own asset - a deliberate, POST-verification kill
+            switch on NEW EXPOSURE ONLY (Stage 10.3 CAS-CAP-ROLLBACK-1),
+            reachable ONLY after signature verification succeeds. Cause
+            (2) is NEVER returned for a win or rollback callback -
+            settlement of exposure the ledger already holds is never
+            blocked by capability/status. (3) ADR 0097 (PAYWH-RL-1): an
+            admission-layer capacity rejection (A4a/A4b/B2), a recovered
+            admission-layer panic, or a no-429-retry adapter's B1
+            rejection - see WebhookAdmissionUnavailable. The three causes
+            carry different error messages; cause (2) is only ever
+            returned to a verified caller.
+          headers:
+            Retry-After:
+              description: Present only for cause (3) above (ADR 0097).
+              schema: { type: integer, minimum: 1, maximum: 60 }
           content:
             application/json:
               schema:
@@ -6224,6 +6247,45 @@ components:
             $ref: "#/components/schemas/Error"
     InternalError:
       description: Unexpected server error
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    WebhookRateLimited:
+      description: >
+        ADR 0097 (PAYWH-RL-1, PRH-I4). Rejected by the pre-admission rate
+        limiter (A2 per-source-IP, off by default; A3 the pre-auth
+        (domain, tenant, provider) bucket; or B1 the post-verification
+        (domain, tenant_id, provider_id) bucket). This is a NEW response
+        class, distinct from the pre-verification uniform-401 contract:
+        with the same limiter-bucket state, a validly-signed and an
+        invalidly-signed request get a byte-identical 429 (status,
+        headers, generic body) - Retry-After is computed only from
+        limiter state, never from anything the signature proves.
+        Deliberately generic: request id only, never a domain-specific
+        field.
+      headers:
+        Retry-After:
+          description: Seconds to wait before retrying, clamped to [1, 60].
+          schema: { type: integer, minimum: 1, maximum: 60 }
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    WebhookAdmissionUnavailable:
+      description: >
+        ADR 0097 (PAYWH-RL-1, PRH-I4). Rejected by a capacity bulkhead
+        (A4a webhook in-flight; A4b the pre-verification DB gate; B2 the
+        per-tenant domain-transaction bulkhead) - or, for a provider
+        adapter declared not to retry 429 (WebhookRetrySemantics), a B1
+        rejection mapped to 503 instead. Also returned if an admission-
+        layer panic is recovered internally (never a bare 500), or if the
+        webhook tenant directory has not yet completed its first load.
+        Always retryable; generic body, request id only.
+      headers:
+        Retry-After:
+          description: Seconds to wait before retrying (1 for a capacity rejection, 2 for the domain-transaction bulkhead).
+          schema: { type: integer, minimum: 1, maximum: 60 }
       content:
         application/json:
           schema:
