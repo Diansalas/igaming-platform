@@ -1012,7 +1012,7 @@ func TestClaimForDispatch_KillSwitchEngaged_FailsClosedNoWithdraw(t *testing.T) 
 		t.Fatalf("request kill switch release: %v", err)
 	}
 	if err := pool.WithPrincipalScope(context.Background(), f.tenantID, approver, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := ApproveAndReleaseKillSwitch(ctx, tx, ksID, reqID)
+		_, err := ApproveAndReleaseKillSwitch(ctx, tx, f.tenantID, ksID, reqID)
 		return err
 	}); err != nil {
 		t.Fatalf("release kill switch: %v", err)
