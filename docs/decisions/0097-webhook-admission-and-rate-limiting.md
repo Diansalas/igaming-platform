@@ -1,0 +1,534 @@
+# ADR 0097 — Webhook Admission and Rate Limiting (PAYWH-RL-1)
+
+- **Status:** PROPOSED — design only, 2026-09-27. Not implemented. Nothing in this ADR
+  is `IMPLEMENTED` until PRH-I4 lands and passes security review.
+- **Decision type:** architecture + security control (cross-domain: `httpserver`,
+  `webhookauth`, `identity`, `config`, the three webhook domains `payments`, `casino`, `kyc`).
+- **Owner:** `security`. **Reviewers:** `devops` (configuration, deployment topology),
+  `payments` (retry semantics, LF-C1), `architect` (cross-domain; dependency on ADR 0095's
+  adapter manifest), `ledger-finance` (idempotency / no-side-effect guarantee), `qa` (§11).
+- **Registry:** PRH-D3 (this ADR), PRH-I4 (implementation). Closes PAYWH-RL-1 when
+  implemented and reviewed.
+- **Related:** ADR 0022 §3 (callback contract, point 9 / I1), ADR 0091 (webhook trust
+  hardening, uniform 401), ADR 0094 (two-phase `VerifyCallback`, INV-POOL; §4.3 explicitly
+  deferred "general request-volume overload" to rate limiting — this ADR), ADR 0095
+  (provider-I/O boundary, adapter capability manifest — dependency in §6.3), F-POOL-2,
+  LF-C1.
+- **Labels used below:** every default in §9 is a **technical default** chosen by
+  engineering, not a legal, regulatory or contractual value. Nothing here is a Blueprint
+  requirement unless stated; the control itself is required by CLAUDE.md "Security" and
+  by the human's PRH instruction (PAYWH-RL-1 in scope).
+
+## 1. Context — what exists today (verified at `1560ad0`)
+
+Three unauthenticated provider-facing routes:
+
+| Route | Handler | Body cap |
+|---|---|---|
+| `POST /v1/webhooks/payments/{tenantSlug}/{providerID}` | `deposit_handlers.go` `newPaymentWebhookHandler` | 1 MiB |
+| `POST /v1/webhooks/casino/{tenantSlug}/{providerID}` | `casino_handlers.go` `newCasinoWebhookHandler` | 1 MiB |
+| `POST /v1/webhooks/kyc/{tenantSlug}/{providerID}` (only when `KYCWebhookEnabled`) | `kyc_admin_handlers.go` `newKYCWebhookHandler` | 256 KiB |
+
+Per-request pipeline today (`webhook_preamble.go`, then the handler):
+
+1. path values present;
+2. `webhookauth.CheckInboundPreamble`: provider-id charset → bounded body read
+   (`io.LimitReader`, maxBody+1) → scheme lookup in the process-global adapter registry →
+   `scheme.Extract` (headers only). **No DB.**
+3. `identity.GetTenantBySlug` — **one pooled connection, platform-wide, unauthenticated.**
+4. tenant `status == active`.
+5. `VerifyCallback(ctx, deps.DB, …)` — one or two short `WithTenantReadOnly` transactions
+   (payments: `ProviderAcceptsWebhook` + `HandleReadSQL`; casino/KYC: `HandleReadSQL`),
+   then the secret-store Fetcher with **no** connection held (ADR 0094 INV-POOL).
+6. `deps.DB.WithTenant` → `ReceiveVerifiedCallback` (re-check, parse, domain, ledger).
+
+Gaps this ADR closes (security findings, severity against the dev-stage platform):
+
+- **RL-F1 (Medium, pre-existing):** steps 3 and 5 run for any unauthenticated caller who
+  names an active slug and a registered provider with well-formed headers. There is no rate
+  or concurrency bound on this DB work. ADR 0094 made its *duration* independent of the
+  secret store; its *volume* is unbounded. The existing per-IP limiter (`ratelimit.go`)
+  covers only the auth endpoints.
+- **RL-F2 (Medium, pre-existing):** a verified tenant (or a compromised tenant credential)
+  can open unbounded concurrent domain transactions. A domain transaction waiting on a row
+  lock (e.g. many callbacks for one wallet) holds a pooled connection while it waits
+  (pool `DatabaseMaxConns` = 10). One tenant can therefore pin the pool for every tenant.
+  That is the same cross-tenant impact class as F-POOL-1, from request volume.
+- **RL-F3 (Medium, pre-existing, platform-wide):** `cmd/platform-api/main.go` sets only
+  `ReadHeaderTimeout: 5s`. There is no `ReadTimeout` or `IdleTimeout`, so a slow body sender
+  holds a goroutine (and, after this ADR, an admission slot) indefinitely. This ADR fixes it
+  for webhook routes (§5 step A5). The platform-wide fix is registered separately as
+  **HTTP-TIMEOUTS-1** (proposed; see §13).
+- **RL-F4 (Low):** `loggingMiddleware` logs `r.URL.Path` verbatim. On webhook routes the
+  path segments are attacker-chosen, and their length is bounded only by `MaxHeaderBytes`
+  (1 MiB default). This amplifies log volume, and random-slug floods write attacker strings
+  into every `http_request` line. Fix in §8.
+
+## 2. Requirements (from the human, PRH-D3) → where each is met
+
+| Requirement | Met by |
+|---|---|
+| tenant-aware, provider-aware, endpoint-aware | keys in §4 (domain × tenant × provider, at both tiers) |
+| bounded memory and **key cardinality before verification** | §4.2: pre-auth keys come only from finite, server-owned sets; unknown values are collapsed |
+| fail-safe | §7 |
+| no tenant can starve another | §4, §6.4; residual R1 is stated honestly in §12 |
+| does not bypass signature verification | §3: limiting only ever *rejects*; there is no allow-list, no "trusted source skips verify" path |
+| no DB connection or resource-exhaustion vector; no DB work before admission | §3 ordering; A4 DB gate; test T4 |
+| legitimate provider bursts | GCRA token bucket with burst (§5.1) |
+| safe observability | §8 allow-listed fields, bounded labels, log suppression |
+| preserves idempotency; a limited callback is retryable and has no side effects | §6: every rejection precedes the domain transaction; test T6 |
+
+## 3. Decision — ordering (normative)
+
+```
+ network admission / rate control      A1..A5  (no DB, no body parse; body read only after A1-A3)
+   -> authentication / verification    preamble + GetTenantBySlug + VerifyCallback, DB under A4 gate
+   -> tenant/provider binding          VerifiedCallback (tenant_id, provider_id) = verified identity
+        -> verified admission          B1 bucket, B2 per-tenant domain bulkhead
+   -> parsing                          ReceiveVerifiedCallback: Recheck, HandleCallback (payload parse)
+   -> domain processing                ledger / state machine / audit (same WithTenant tx)
+```
+
+Concrete order per request (each step runs only if the previous one admitted):
+
+| # | Step | DB? | Body read? | Rejection |
+|---|---|---|---|---|
+| A0 | net/http: `ReadHeaderTimeout` (exists); route match | no | no | — |
+| A1 | derive pre-auth key (§4.2): pure map lookups | no | no | — |
+| A2 | per-source-IP bucket (**disabled by default**, §4.4) | no | no | 429 |
+| A3 | pre-auth bucket `(domain, tenantKey, providerKey)` | no | no | 429 |
+| A4a | webhook in-flight bulkhead acquire (global + per-tenantKey share), non-blocking | no | no | 503 |
+| A5 | `Content-Length > maxBody` → reject without reading; body read under a per-request read deadline | no | yes (bounded) | uniform 401 (`body_too_large`, as today) |
+| — | provider-id charset, scheme lookup, `Extract` (unchanged preamble) | no | — | uniform 401 |
+| A4b | **pre-verification DB gate** (global + per-tenantKey), bounded wait, wraps `GetTenantBySlug` and every `TenantReader.WithTenantReadOnly` call made by `VerifyCallback` | gate first, then DB | — | 503 |
+| V | `GetTenantBySlug`, active check, `VerifyCallback` (unchanged semantics) | yes, gated | — | uniform 401 |
+| B1 | verified bucket `(domain, tenant_id, provider_id)` | no | — | 429 (or adapter-declared, §6.3) |
+| B2 | per-tenant domain-transaction bulkhead, bounded wait, **no connection held while waiting** | no | — | 503 |
+| D | `WithTenant` → `ReceiveVerifiedCallback` (Recheck → parse → domain) | yes | — | existing codes |
+
+Invariants (each is pinned by a test in §11):
+
+- **ORD-1.** No DB statement is issued for a request rejected at A1–A4a. Tests: statement
+  capture (T10), plus a pool counter.
+- **ORD-2.** No byte of the body is read for a request rejected at A1–A4a (T10).
+- **ORD-3.** Every rate or capacity rejection happens strictly before `deps.DB.WithTenant`
+  opens the domain transaction. No limiter runs inside or after the domain transaction.
+  A 429 or 503 therefore never follows a commit (T6).
+- **ORD-4.** Limiting never admits more than verification would. There is no bypass,
+  allow-list or "known provider IP skips verification" path. B1/B2 run only on a
+  `VerifiedCallback` produced by `VerifyCallback`.
+- **ORD-5.** The number of concurrently held pooled connections attributable to
+  pre-verification webhook work is ≤ `W_db` (A4b), whatever the request volume or
+  store latency (T4).
+
+"Binding" note. `GetTenantBySlug` runs before verification only to *select the credential*.
+The slug→tenant result is untrusted until the signature (which covers the tenant, ADR 0022
+§3) verifies. The trusted tenant/provider binding is the `VerifiedCallback`, and only B1/B2
+key on it. The slug lookup is gated by A4b like any other pre-verification DB work.
+
+## 4. Keying and cardinality
+
+### 4.1 Why URL values cannot be keys as-is
+
+`{tenantSlug}` and `{providerID}` are attacker-chosen. Keying a limiter on them directly
+gives an attacker unbounded map growth, and a per-value fresh budget (random slugs = infinite
+budget). Collapsing everything into one shared bucket per endpoint lets a flood aimed at
+tenant A (or at non-existent tenants) exhaust tenant B's admission. Both are rejected.
+
+**Keyed-hash shards rejected.** Keying by `HMAC(k, slug) mod K` bounds cardinality, but a
+random-slug flood spreads over *all* shards and starves every tenant. It fails the
+cardinality-attack test by construction.
+
+### 4.2 Pre-auth key (A3) — bounded by server-owned sets
+
+`preKey = (domain, tenantKey, providerKey)` where
+
+- `domain` ∈ {`payments`, `casino`, `kyc`} — fixed by the route, never from input.
+- `providerKey` = `providerID` **iff** `ValidProviderID(providerID)` and the domain
+  orchestrator's `WebhookScheme(providerID)` is registered. That registry is process-global
+  and built at startup, so the set is finite. Otherwise `providerKey = "_unknown"`.
+- `tenantKey` = `tenantSlug` **iff** `len(tenantSlug) ≤ 128` and the slug is present in the
+  **webhook tenant directory**. Otherwise `tenantKey = "_unknown"`.
+- If either component is `_unknown`, the whole key collapses to `(domain, "_unknown",
+  "_unknown")`. There is **one** unknown bucket per domain.
+
+**Webhook tenant directory** (new, `httpserver`): an in-memory, copy-on-write snapshot
+(`atomic.Pointer[map[string]struct{}]`) of active tenant slugs.
+
+- Loaded once, synchronously, at startup. It is refreshed every `DirectoryRefresh` (30 s) by
+  one background goroutine, using one `WithoutTenant` query:
+  `SELECT slug FROM tenants WHERE status = 'active' ORDER BY slug LIMIT $cap`.
+  `tenants_read` is `USING (true)`, as `GetTenantBySlug` already relies on.
+- **Not request-driven:** no request can trigger a refresh, so it is not an attacker-reachable
+  DB vector.
+- **Non-authoritative:** the directory is used *only* to choose a limiter key. It never
+  authorizes anything, and `GetTenantBySlug` + the active check + verification remain the
+  authority. A suspended tenant still in a stale snapshot gets its own bucket and then the
+  uniform 401. A tenant created since the last refresh is keyed `_unknown` for ≤ 30 s. Its
+  callbacks are still processed if the unknown bucket admits them, and are otherwise
+  retryable 429s (§6).
+- `cap` = 10 000. Tenants beyond the cap are keyed `_unknown`, with one `error` log line per
+  refresh (`webhook_tenant_directory_truncated`). This is misconfiguration territory, not a
+  normal state.
+
+**Cardinality bound (pre-auth):** `|keys| ≤ Σ_domain (T_dir × P_domain + 1)`. `T_dir` ≤ 10 000
+directory slugs; `P_domain` = registered adapters in that domain. The bound does not depend
+on request input. Entries are created lazily and evicted after `IdleEvict` (10 min) at full
+tokens. With GCRA (§5.1) each entry is one `int64`, plus the key.
+
+### 4.3 Verified key (B1, B2)
+
+- B1: `(domain, tenant_id, provider_id)` taken from the `VerifiedCallback`.
+- B2: `tenant_id`.
+
+These keys exist only after a successful signature verification, so an unauthenticated
+caller cannot create them. Hard cap `VerifiedMaxKeys` = 30 000. Beyond it, new keys share one
+`_overflow` bucket with the unknown-bucket parameters and one `error` log. The table is
+**never reset**: the existing auth limiter's reset-on-full fail-open is deliberately **not**
+copied (§7).
+
+### 4.4 Per-source-IP tier (A2) — present, disabled by default
+
+It uses `trustedProxyClientIP(r, TrustedProxyCount)`, the same trust model as `ratelimit.go`.
+It is **off by default** (`WEBHOOK_RL_PER_IP_RPS=0`) for two reasons:
+
+1. **Behind a load balancer with `TRUSTED_PROXY_COUNT=0`**, every request has the LB's
+   address. A per-IP bucket then becomes one *global* bucket, which is exactly the
+   cross-tenant starvation lever this ADR removes.
+2. **Providers send callbacks for all their tenants from a small shared egress-IP set.** A
+   per-IP budget must therefore cover a provider's aggregate across every tenant, and at that
+   size it barely limits an attacker.
+
+It is enabled only by deployment configuration once the edge topology is known (WEBHOOK-EDGE-1,
+§13). When enabled it runs first, so an IP-limited request consumes no tenant tokens. Its
+map is bounded (`PerIPMaxKeys` = 50 000). Beyond that, new IPs skip **only this tier**, with a
+logged `error`. A3/A4/B1/B2 still bound everything, so this one tier failing open never
+removes the DB or tenant bounds.
+
+## 5. Mechanisms
+
+### 5.1 Token bucket: GCRA with burst
+
+Each key stores one theoretical arrival time (TAT, `int64` ns). The emission interval is
+`T = 1s / rate` and the burst tolerance is `τ = T × (burst − 1)`. A request is admitted iff
+`now ≥ TAT − τ`; then `TAT = max(TAT, now) + T`. On rejection,
+`Retry-After = ceil((TAT − τ − now) / 1s)`, clamped to [1, 60].
+
+GCRA is exactly a token bucket (rate, burst). It uses integer arithmetic, so there is no
+float drift. It is O(1), and it is deterministic under an injected clock: every bucket,
+bulkhead wait and suppression window takes a `clock` interface (`Now()`,
+`NewTimer(d)`), and tests use a fake clock.
+
+### 5.2 Keyed bulkhead (A4a, A4b, B2)
+
+This is one primitive: a counting semaphore with a global cap `G`, a per-key cap `K ≤ G`,
+and a separate cap `U` for the `_unknown` key.
+
+- A4a is non-blocking.
+- A4b waits at most `DBGateWait` (100 ms).
+- B2 waits at most `DomainWait` (2 s).
+
+Waiting is goroutine time only. A4b is acquired **before** the pool acquire and released
+**after** the transaction commits or rolls back. B2 is acquired **before**
+`deps.DB.WithTenant`. Per-key counters exist only while > 0, so their cardinality is ≤ `G`.
+Release is idempotent (`sync.Once` per acquisition). A double release is a test failure,
+never a negative count.
+
+### 5.3 A4b wiring (no new pre-verification statement)
+
+- `webhookPreamble` wraps its `GetTenantBySlug` call in `gate.Acquire(tenantKey)`.
+- The handlers pass `gatedReader{db: deps.DB, gate, tenantKey}` (it implements
+  `webhookauth.TenantReader`) to `VerifyCallback` instead of `deps.DB`.
+
+The ADR 0022 §3 point-9 statement set is unchanged. The `TestPointNineCapture_*` tests stay
+the primary I1 control, and the directory refresh is not a per-request statement. INV-POOL
+still holds: the gate wraps only the read-only transactions, never the secret-store fetch.
+
+### 5.4 Body (A5)
+
+- If `Content-Length` is present and exceeds `maxBody`, the request is rejected before any
+  read (same uniform 401 / `body_too_large` as today: no new oracle).
+- Chunked bodies keep today's `LimitReader(maxBody+1)`.
+- `http.NewResponseController(w).SetReadDeadline(now + BodyReadTimeout)` is set at
+  admission, with `BodyReadTimeout` = 10 s. A slow sender loses its A4a slot at the deadline.
+- Memory bound: `G_inflight × maxBody` = 64 × 1 MiB = 64 MiB worst case for webhook bodies.
+
+## 6. Status codes, retries and idempotency
+
+### 6.1 Codes
+
+| Rejection | Status | Retry-After | Body |
+|---|---|---|---|
+| A2/A3 bucket empty | **429** `rate_limited` | computed (§5.1) | generic `"too many requests; retry later"`, request id only |
+| A4a / A4b capacity | **503** `service_unavailable` | 1 s | generic |
+| B1 verified bucket | **429** (default) or adapter-declared (§6.3) | computed | generic |
+| B2 domain bulkhead | **503** | 2 s | generic |
+| limiter panic or internal error | **503** (the admission layer recovers itself; it is never a 500 from `recoverMiddleware`) | 1 s | generic |
+
+**Never** 400, 401, 404 or 409 for limiting. Those collide with the uniform-401 contract and
+with terminal client-error semantics. **Never** 200/2xx: acknowledging an unprocessed event
+is silent event loss.
+
+### 6.2 Relation to the uniform-401 contract (ADR 0091, T9)
+
+A3/A4 responses are a new **pre-verification** response class. Their outcome depends only on
+limiter state for `preKey`, never on signature validity, key id, or anything verification
+computes. With the same bucket state, a validly signed and an invalidly signed request get
+byte-identical responses, request id aside (test T15). They are therefore not a signature
+oracle. The one information leak (whether a slug is in the active directory) is residual R2.
+
+B1/B2 responses reach only verified callers.
+
+### 6.3 Provider retry semantics (LF-C1)
+
+A limited callback is only safe if the provider redelivers it. The platform cannot assume
+this: vendors differ, and some may treat a 4xx as terminal for win, rollback or reversal.
+
+- **MOCK adapters:** 429 / 503 as in §6.1.
+- **Every non-MOCK adapter must declare, before registration,**
+  `WebhookRetrySemantics{Retries429, Retries503, HonorsRetryAfter, RetryWindow}`. This
+  belongs in the adapter capability manifest that ADR 0095 designs (dependency; `architect`
+  to place it). Until ADR 0095 lands, it is a per-provider config key.
+  - If the adapter does not retry 429, B1 answers with **503** for that provider.
+  - If it retries neither 429 nor 503, the adapter must not be registered for webhook
+    delivery without LF-C1 option (b): daily reconciliation that detects provider-settled,
+    platform-unposted events with a P1 alert.
+  - A non-MOCK adapter with no declaration fails registration (fail closed).
+- **`RetryWindow`:** sustained limiting longer than a vendor's retry window loses the event
+  from the push channel. Reconciliation (LF-C1 (b), PRH-I5 for payments) is the backstop,
+  and the `webhook_admission_rejected` metric per verified key feeds an alert (§8).
+
+This ADR does not assert any real vendor's behaviour. Each value is recorded at that
+vendor's integration gate.
+
+### 6.4 Idempotency and ordering effects
+
+- **No side effects.** By ORD-3, a limited request writes nothing: no ledger entry,
+  tombstone, audit row, casino rejection record, KYC state change or intent transition. The
+  redelivery is processed as a first delivery. If an earlier delivery *did* commit (a
+  provider retrying for its own reasons), the existing `(provider_id, provider_tx_id)`
+  unique constraint and payload-mismatch checks apply unchanged.
+- **Signature timestamp:** a redelivery of the same signed bytes after `Retry-After` (≤ 60 s)
+  stays well inside the ≤ 10 min skew window (ADR 0094 §5). Most vendors re-sign anyway.
+- **Reordering:** limiting can delay an original past its rollback (casino: bet 429'd,
+  rollback admitted → tombstone → the retried bet is rejected). That is the existing,
+  ledger-correct tombstone semantics, not a new failure. It is listed so `casino` and
+  `ledger-finance` confirm it (test T6c).
+
+## 7. Fail-safe behaviour
+
+| Condition | Behaviour | Rationale |
+|---|---|---|
+| Directory never loaded (startup) | startup waits for the first load; `/readyz` not-ready until then; webhook routes return 503 if called anyway | no traffic runs with unknown keying |
+| Directory refresh fails | keep last snapshot; `error` log; metric `webhook_tenant_directory_age_seconds`; alert > 10 min | known tenants keep their buckets; never fall back to raw slug keys |
+| Pre-auth key table cap (§4.2) | cannot be exceeded by input; if the configured bound is misestimated → `_overflow` shared bucket + `error` | degrade to bounded, never unbounded, never reset |
+| Verified table cap | `_overflow` bucket + `error` | same |
+| Per-IP table cap | only A2 skips; others still apply | §4.4 |
+| Limiter panic | recovered inside admission → 503 | fail closed, retryable |
+| Invalid configuration | **startup fails** (§9.3 validation) | no silently-unlimited deployment |
+| Disabling | `WEBHOOK_ADMISSION_ENABLED=false` accepted **only** when test-support routes are enabled (non-production), mirroring existing gates; rejected in production config | an incident is handled by raising overrides, not by removing the control |
+
+Deliberate contrast with `ratelimit.go` (auth). Its reset-on-full fails **open** by design,
+and that is correct for auth: keys are real TCP source addresses, and an outage of login is
+worse. Here, pre-auth keys are bounded by construction, so "full" means a bug. Failing open
+would remove the DB bound exactly when it is under attack.
+
+## 8. Observability (safe by construction)
+
+**Logs.** One allow-listed `warn` event, `webhook_admission_rejected`, with exactly these fields:
+- `request_id`, `domain`, `tier` (`ip|preauth|inflight|db_gate|verified|domain_bulkhead`);
+- `tenant_key` (a directory slug or `_unknown`, **never** the raw path value when unknown);
+- `provider_key` (a registered id or `_unknown`);
+- `tenant_id` (tiers B1/B2 only);
+- `status`, `retry_after_s`, `client_ip`, `suppressed` (count).
+
+**Never logged:** headers, signature values, key material, raw body, body excerpts, unknown
+path values, query strings.
+
+**Suppression.** At most one line per `(tier, key)` per 10 s. The next emitted line carries
+`suppressed=N`. The suppression state lives in the same bounded key space, so under a flood
+log volume is ≤ keys / 10 s.
+
+**`http_request` access line (RL-F4).** On webhook routes it logs `r.Pattern`
+(`POST /v1/webhooks/payments/{tenantSlug}/{providerID}`) instead of `r.URL.Path`. The
+existing auth-failure line already logs only the charset-validated provider id.
+
+**Metrics** (OTel meter; no-op if unset). Label sets are bounded:
+- `webhook_admission_decisions_total{domain, tier, outcome}`;
+- `webhook_admission_verified_rejected_total{domain, provider_key}`. Per-tenant detail goes
+  only to logs, because a `tenant_id` label would grow with tenant count;
+- gauges `webhook_inflight{domain}`, `webhook_db_gate_in_use`, `webhook_limiter_keys{tier}`,
+  `webhook_tenant_directory_size`, `webhook_tenant_directory_age_seconds`.
+
+**Alerts** (documented for devops, not built here): sustained verified-tier rejections for a
+key (> 5 min), which risks the vendor retry window; directory age > 10 min.
+
+## 9. Configuration
+
+### 9.1 Defaults (technical, reversible; to be re-measured in PRH-I4)
+
+Basis: pool `N = DatabaseMaxConns = 10`; pre-verification DB work ≈ 2–3 short read-only
+transactions of about 1–3 ms each (ADR 0094 §6); a single-tenant dev-stage deployment. The
+per-key rates are "no single (tenant, provider) may take more than a modest fraction of
+estimated pool throughput". They are **not** vendor volumes. PRH-I4 records a non-gating
+benchmark, and the defaults are revisited before any real-provider gate.
+
+| Parameter | payments | casino | kyc | Rationale |
+|---|---|---|---|---|
+| A3 pre-auth rate / burst per known key | 50/s / 200 | 300/s / 1000 | 10/s / 50 | ≥ 2× B1 so legitimate traffic is bounded by the verified tier (which attackers cannot drain), and A3 is a DB-cost backstop; casino carries synchronous bet traffic |
+| A3 `_unknown` per domain | 2/s / 10 | 2/s / 10 | 2/s / 10 | absorbs directory lag for new tenants; bounds random-slug DB lookups to ≤ 2/s/domain |
+| B1 verified rate / burst per (tenant, provider) | 25/s / 100 | 200/s / 800 | 5/s / 50 | burst covers a provider replaying a backlog after its own outage |
+
+| Parameter | value | Rationale |
+|---|---|---|
+| A4a in-flight global / per tenantKey / `_unknown` | 64 / 16 / 4 | memory ≤ 64 × maxBody; one tenant ≤ 25 % |
+| A4b DB gate `W_db` / per tenantKey / `_unknown` / wait | `max(1, ⌊0.3N⌋)` = 3 / `min(2, W_db)` / 1 / 100 ms | unauthenticated work holds ≤ 30 % of the pool; one tenant ≤ 2 connections |
+| B2 per-tenant domain transactions / wait | `max(1, ⌊0.3N⌋)` = 3 / 2 s | one tenant's verified traffic holds ≤ 3 of 10 connections (also bounds F-POOL-2 pinning per tenant until ADR 0095 lands) |
+| A2 per-IP | 0 (off) | §4.4 |
+| `BodyReadTimeout` | 10 s | above any sane 1 MiB upload; bounds slowloris |
+| `DirectoryRefresh` / cap | 30 s / 10 000 | new-tenant lag ≤ 30 s |
+| `IdleEvict` / `VerifiedMaxKeys` / `PerIPMaxKeys` | 10 min / 30 000 / 50 000 | memory bound |
+
+### 9.2 Overrides
+
+Overrides are platform-operator configuration (env `WEBHOOK_ADMISSION_OVERRIDES`, JSON),
+keyed by `domain` + `provider_id` and optionally `tenant` (slug for A3, id for B1). They set
+rate and burst only.
+
+They are **not** tenant/brand configuration rows and **not** partner-console editable. A
+tenant raising its own limit would defeat cross-tenant fairness. This is a platform
+operational control, not brand configuration, so the CLAUDE.md "brand differences are config
+rows" rule does not apply. A staff-editable, audited store is deferred (WEBHOOK-RL-ADMIN-1)
+until an operator actually needs runtime changes.
+
+### 9.3 Validation (startup fails on violation)
+
+- rate > 0 and burst ≥ 1;
+- A3 rate ≥ B1 rate for the same (domain, provider) (otherwise legitimate traffic competes
+  with attackers at A3);
+- `0 < K ≤ G` for every bulkhead;
+- `W_db < N`;
+- B2 cap < N;
+- overrides reference only known domains and charset-valid ids;
+- no disabling in production.
+
+## 10. Multi-instance
+
+- A4a, A4b and B2 protect **per-process** resources (goroutines, memory, that process's pool),
+  so per-process state is *correct*, not a compromise.
+- A2, A3 and B1 per process give an effective platform limit of (limit × replicas), the same
+  disclosure as `ratelimit.go`. That is acceptable now: there is one replica, and the goal is
+  resource protection, not a contractual quota.
+- CLAUDE.md's "Redis never holds an authoritative balance" rule concerns balances. It does
+  not forbid a shared limiter.
+- A shared limiter is **deferred, not built** (WEBHOOK-RL-SHARED-1). The trigger is either a
+  need for a platform-wide per-tenant quota or uneven LB distribution observed across
+  replicas. If built, it must degrade to the local limiter when the shared store is
+  unavailable, and it must never sit on the balance path.
+
+## 11. Adversarial test plan (QA to confirm)
+
+All tests are **main lane**:
+- unit tests: fake clock, no DB, `-race`;
+- integration tests: `-tags=integration`, real DB;
+- no wall-clock latency assertions.
+
+Capacity properties are asserted by **counts under barriers** (blocking hooks inside the gated
+section), not by elapsed time. Nothing joins the isolated timing lane: per the CI-342
+ruling B, a new test there needs its own security ruling, and none is needed.
+
+| # | Test | Asserts |
+|---|---|---|
+| T1 | `CrossTenantStarvation_PreAuth` | flood tenant A's valid slug with garbage signatures at 10× A3 burst; every one of B's correctly signed callbacks in the same interval → 200 and processed; A sees only 401/429/503 |
+| T2 | `CrossTenantStarvation_Verified` | A sends *validly signed* callbacks beyond B1 and B2; A gets 429/503; B's callbacks are all admitted; A's rejected callbacks wrote zero rows (ledger, tombstone, audit, rejection record) |
+| T3 | `CardinalityAttack_RandomPathValues` | 100 000 random slug/provider values (random length ≤ 4 KiB, unicode, charset-invalid): limiter key count ≤ §4.2 bound (exact); all logged as `_unknown`; `GetTenantBySlug` invocations ≤ unknown-bucket allowance under the fake clock; B's callbacks admitted |
+| T4 | `UnauthFlood_DoesNotConsumePool` | real pool N = 10; a hook blocks inside the gated section; 200 concurrent unauthenticated requests with a valid slug; while blocked, `pool.Stat().AcquiredConns` attributable to webhooks ≤ `W_db` (gate counter plus pool stat), and an unrelated `pool.Acquire` succeeds without waiting on the barrier; requests beyond the gate get 503 and executed **zero** statements |
+| T5 | `BurstAccommodation` | fake clock frozen: exactly `burst` admitted; `burst+1` → 429 with `Retry-After = ceil(1/rate)`; advance by one emission interval → exactly one more admitted; sustained `rate` never rejected |
+| T6a/b/c | `RetryAfter429_Idempotent` (payments deposit; casino win; casino bet-then-rollback reorder) | limited attempt → zero rows; advance the fake clock past Retry-After; redeliver → 200 with exactly one posting; redeliver again → idempotent duplicate, no second posting; `SUM(debits)==SUM(credits)`, projection == rebuild; (c) tombstone semantics as §6.4 |
+| T7 | `NoSecretOrRawInputInLogs` | canary secret in body, signature headers, random slugs; the captured logs contain none of them; admission log lines ≤ keys × (duration / 10 s) + 1 |
+| T8 | `Races` (`-race`) | concurrent acquire/release per key; in-flight max (atomic high-water mark) ≤ cap; GCRA admitted count ≤ burst + rate × fake elapsed; directory swap concurrent with lookups; eviction concurrent with admission; release exactly once |
+| T9 | `FailSafe` | refresh error → old snapshot kept; nil directory → 503 and `/readyz` not-ready; injected limiter panic → 503, not 500; table cap reached → `_overflow` used, no reset |
+| T10 | `Ordering_NoDBNoBodyBeforeAdmission` | extends `TestPointNineCapture_*`: a request rejected at A2/A3/A4a issues zero statements and reads zero body bytes (instrumented reader); the point-9 statement set is unchanged for admitted requests |
+| T11 | `SlowBody_ReleasesSlot` | a stalled body sender loses its A4a slot at the read deadline (short test deadline; asserts release with a generous upper bound, no latency claim) |
+| T12 | `ConfigValidation` | each §9.3 violation fails startup; production cannot disable |
+| T13 | `DomainIndependence` | a casino flood does not consume payments/KYC buckets or in-flight shares beyond the A4a global cap |
+| T14 | `AdapterDeclaredStatus` | provider declared "no 429 retry" → B1 answers 503; undeclared non-MOCK adapter → registration fails |
+| T15 | `PreAuthResponse_Indistinguishable` | same bucket state: valid- and invalid-signature requests → identical status, headers and body except request id |
+| T16 | Mutations (recorded like ADR 0094 §9.4) | drop tenant from `preKey` → T1 fails; move B1/B2 inside `WithTenant` → T6 fails; remove collapse → T3 fails; remove A4b → T4 fails; log raw path → T7 fails |
+
+Existing suites: high-concurrency integration tests (e.g. `stage9_concurrency_integration_test.go`)
+must pass unchanged at the defaults. B2 queues rather than rejects within `DomainWait`. Any
+test that needs larger limits sets them explicitly through `Deps` and records why.
+
+## 12. Residual risks (disclosed, not hidden)
+
+- **R1 — targeted pre-auth denial of one tenant (Medium, needs an edge decision before
+  real-money launch).**
+  - An unauthenticated attacker who floods tenant B's *own* valid URL drains B's A3 bucket
+    and per-tenant A4 shares. Before verification, the attacker is indistinguishable from B's
+    provider except by source address.
+  - Other tenants are unaffected: that is the fairness guarantee.
+  - B's callbacks are delayed, not lost, while the vendor retries, and reconciliation backs
+    this up.
+  - Real mitigation is at the edge: provider source-IP allow-lists, a WAF, or mTLS where the
+    vendor supports it. That is WEBHOOK-EDGE-1 (devops + human; AWS is out of PRH scope).
+- **R2 — directory-membership oracle (Low).**
+  - With the per-domain `_unknown` bucket drained, a probe that is *not* 429'd reveals that
+    a slug is an active tenant.
+  - Accepted if tenant slugs are not confidential (they are configured at vendors and likely
+    visible in brand URLs). **Question for the human:** are slugs confidential?
+  - If yes, the mitigation is opaque per-tenant webhook path tokens, deferred as
+    WEBHOOK-PATH-TOKEN-1.
+- **R3 — simultaneous floods on many tenants.** k attacked tenants hold up to
+  k × per-key share of A4a/A4b until the global caps. Healthy tenants then see 503s for the
+  duration. Bounded, retryable, zero side effects; the same class as the ADR 0094 onset
+  residual.
+- **R4 — per-process limits × replicas** (§10).
+- **R5 — player-facing and admin routes** are outside this ADR. B2 bounds only the webhook
+  domain transactions, and RL-F2's pool-pinning class still exists for authenticated API
+  routes. It is recorded as a scope note for the architect, not claimed as covered.
+
+## 13. Implementation breakdown (PRH-I4; security + backend; devops for config)
+
+| File | Change |
+|---|---|
+| `internal/admission/` (new leaf package; imports stdlib only) | `clock.go` (interface + fake), `gcra.go` (keyed GCRA, bounded map, idle eviction, overflow key), `bulkhead.go` (global/per-key/unknown caps, non-blocking + bounded wait, idempotent release), `suppress.go` (log suppression); unit + race tests |
+| `internal/httpserver/webhook_admission.go` (new) | config struct and defaults, `preKey` derivation, A2/A3/A4a middleware, `gatedReader` (A4b), `admitVerified` (B1/B2), response writer (§6.1), allow-listed logging, metrics |
+| `internal/httpserver/webhook_tenant_directory.go` (new) | snapshot, synchronous initial load, refresher lifecycle |
+| `internal/identity/tenant.go` | `ListActiveTenantSlugs(ctx, pool, limit)` |
+| `internal/httpserver/webhook_preamble.go` | A5 `Content-Length` check and read deadline; `GetTenantBySlug` under A4b; accept tenantKey |
+| `deposit_handlers.go`, `casino_handlers.go`, `kyc_admin_handlers.go` | pass `gatedReader` to `VerifyCallback`; call `admitVerified` before `WithTenant`; hold B2 across any follow-up denial-audit transaction |
+| `financial_routes.go`, `casino_routes.go`, `kyc_routes.go` | wrap the three webhook routes with the admission middleware (domain constant) |
+| `server.go`, `health.go` | `Deps` fields; `/readyz` includes directory loaded |
+| `middleware.go` | `r.Pattern` for webhook routes (RL-F4) |
+| `internal/config/config.go`, `cmd/platform-api/main.go` | env vars, overrides JSON, §9.3 validation, refresher goroutine with shutdown |
+| payments/casino/kyc adapter registration | `WebhookRetrySemantics` declaration (placement per ADR 0095; config key until then) |
+| `docs/api/openapi/platform-api.yaml` + `openapi_*webhook_contract_test.go` | 429/503 + `Retry-After` on the three webhook paths |
+| `docs/security/` | threat-model entry for webhook admission (security, at implementation review) |
+
+**Lane:** main lane only (§11). Estimated as one change set, with no migration.
+
+**Registry follow-ups** (orchestrator to register; not edited by this ADR):
+- HTTP-TIMEOUTS-1 (RL-F3, platform-wide `ReadTimeout`/`IdleTimeout`);
+- WEBHOOK-EDGE-1 (R1, before real-money launch);
+- WEBHOOK-PATH-TOKEN-1 (R2, conditional on the human's answer);
+- WEBHOOK-RL-SHARED-1 (§10, deferred);
+- WEBHOOK-RL-ADMIN-1 (§9.2, deferred).
+
+## 14. Consequences
+
+- Unauthenticated webhook traffic has a rate bound (A3) and a connection bound (A4b)
+  independent of volume. This closes the gap ADR 0094 §4.3 deferred.
+- A verified tenant cannot take more than ~30 % of the pool through webhooks (B2).
+- New response class: 429/503 with `Retry-After` on webhook routes. Vendors must retry them;
+  that is enforced at adapter registration (§6.3).
+- One background DB query every 30 s (directory). One new leaf package.
+- **Launch-relevant:** R1 needs an edge-control decision (WEBHOOK-EDGE-1) before real-money
+  launch. RL-F3 should be fixed platform-wide before any public exposure.
+
+## 15. Review status
+
+Security authors this design. Before it moves to ACCEPTED it needs concurrence from `devops`,
+`payments` (§6.3), `architect` (the ADR 0095 manifest dependency; R5 scope), `ledger-finance`
+(§6.4 / T6), and QA confirmation of §11. This document does not declare the control secure:
+the security review of the PRH-I4 diff is still required.

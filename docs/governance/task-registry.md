@@ -3945,3 +3945,17 @@ policy + decision audit; 0102 capability manifest + kill switch; 0103 payment st
 | PRH-I5 | payments + ledger-finance | Not started | Payment reconciliation stream with MOCK source (migration 0103) | PRH-I1 |
 | PRH-REV | all mandatory reviewers | Not started | Architect, security, payments, ledger-finance, backend, QA, code-reviewer reviews; Orchestrator synthesis | PRH-I* |
 | PRH-GATE | orchestrator | Not started | Local full CI replay; GitHub CI green (needs CI-BILLING-1); docs/governance/payment-readiness-completion-report.md; STOP | all |
+
+PRH findings registered 2026-09-27 (from ADR 0097 design, security):
+
+| ID | Owner | Status | Scope | Target |
+|---|---|---|---|---|
+| RL-F1 | security + backend | Registered — Medium; **addressed by PRH-I4** (pre-auth admission + DB gate) | Unauthenticated webhook requests can trigger the tenant-slug lookup and 1–2 read-only verification transactions with no rate limit | PRH-I4 |
+| RL-F2 | security + backend | Registered — Medium; **addressed by PRH-I4** (per-tenant concurrent domain-tx cap) | A verified tenant can hold unbounded concurrent domain transactions; those waiting on row locks can pin the 10-connection pool | PRH-I4 |
+| HTTP-TIMEOUTS-1 (RL-F3) | devops + security | Registered — Medium, platform-wide; **in PRH-I4 scope** | `http.Server` has no `ReadTimeout`/`ReadHeaderTimeout`/`IdleTimeout`; slow senders are never cut off | PRH-I4 |
+| RL-F4 | devops + security | Registered — Low; **in PRH-I4 scope** | Access log writes the raw attacker-chosen URL path (log amplification / injection) | PRH-I4 |
+| WEBHOOK-EDGE-1 | devops + security | Registered — Medium residual (ADR 0097 R1); should be decided before real-money launch; **STAGING/INFRA REQUIRED** | Flooding tenant B's own webhook URL can delay B's callbacks (other tenants unaffected); only an edge control (WAF/CDN rate rule or per-tenant secret path) closes it | before real-money launch |
+| WEBHOOK-PATH-TOKEN-1 | security | Registered — conditional on the human's answer to HD-PRH-1 | Unguessable per-tenant webhook path token, only if tenant slugs are confidential | after HD-PRH-1 |
+| WEBHOOK-RL-SHARED-1 | devops | Deferred (not built) | Shared (multi-instance) webhook limiter; per-process limits are correct for the caps today | multi-instance deployment |
+| WEBHOOK-RL-ADMIN-1 | security + backend | Deferred (not built) | Rate limiting for player/admin API routes (ADR 0097 residual) | later hardening |
+| HD-PRH-1 | **human** | **HUMAN DECISION (new)** | Are tenant slugs confidential? Rate-limit behaviour can reveal whether a slug is an active tenant (ADR 0097 R2, Low). Slugs appear in provider-facing webhook URLs; if they are not confidential, R2 is accepted as-is | — |
