@@ -229,24 +229,29 @@ func (s *Sweeper) reclaimPayoutCreated(ctx context.Context, tenantID uuid.UUID, 
 // the earlier revision, which resent unconditionally, this now follows
 // ADR 0095 §4.3 T12/§16.1 item 2 exactly:
 //
-//  1. If the attempt already carries a provider reference, POLL it via
-//     QueryStatus first (payments.PollPayoutStatus) - the ADR's default
-//     convergence path, and the only way a NON-idempotent provider's
-//     ambiguous send can ever resolve without a resend. If the poll
-//     resolves the attempt (succeeded/declined/still-pending), this
-//     function returns without ever considering a resend.
-//  2. Only if the attempt is STILL `ambiguous` after that poll (or never
-//     had a reference to poll at all) does this function consider
-//     resending - and ONLY when the routed provider's manifest declares
-//     IdempotentSubmission=true AND submit_count is below the configured
-//     cap (s.maxResubmits()). ResubmitAmbiguous's own CAS repeats the cap
-//     independently (defense in depth).
+//  1. ALWAYS poll first via QueryStatus (payments.PollPayoutStatus) -
+//     the ADR's default convergence path, and the only way a NON-
+//     idempotent provider's ambiguous send can ever resolve without a
+//     resend. N1/R6 (RV-PRH-I1 re-review): PollPayoutStatus itself now
+//     resolves the effective reference to query (the attempt's own, or -
+//     defence in depth - the withdrawal's), so this no longer needs its
+//     own `attempt.ProviderReference != nil` gate to decide whether
+//     polling is possible; an attempt with genuinely no reference
+//     anywhere is a cheap no-op reschedule inside PollPayoutStatus, not a
+//     wasted resend. If the poll resolves the attempt (succeeded,
+//     declined, or moved to pending), this function returns without ever
+//     considering a resend.
+//  2. Only if the attempt is STILL `ambiguous` after that poll does this
+//     function consider resending - and ONLY when the routed provider's
+//     manifest declares IdempotentSubmission=true AND submit_count is
+//     below the configured cap (s.maxResubmits()). ResubmitAmbiguous's own
+//     CAS repeats the cap independently (defense in depth).
 //  3. A non-idempotent provider, or a cap already reached, is escalated
 //     (T16) - never resent, no matter how many sweeper ticks pass.
 func (s *Sweeper) resubmitPayoutAmbiguous(ctx context.Context, tenantID uuid.UUID, attempt PaymentAttempt) error {
 	nextPoll := s.backoff(attempt.PollCount)
 
-	if attempt.ProviderID != nil && attempt.ProviderReference != nil {
+	if attempt.ProviderID != nil {
 		if err := PollPayoutStatus(ctx, s.Pool, s.Orchestrator, s.CredResolver, tenantID, attempt, nextPoll); err != nil {
 			return err
 		}

@@ -1176,6 +1176,14 @@ func newResolveWithdrawalHandler(deps Deps) http.HandlerFunc {
 		// asset cross-check (B3/H2), and transitions the attempt row
 		// alongside the withdrawal (H4's "bypasses payment_attempts" fix).
 		if err := payments.PollPayoutStatus(r.Context(), deps.DB, deps.PaymentOrchestrator, deps.PaymentsOutboundCredentials, tc.TenantID, attempt, time.Now().Add(30*time.Second)); err != nil {
+			if errors.Is(err, payments.ErrPayoutDispatchInFlight) {
+				// R2 (RV-PRH-I1 ledger re-review): the attempt's own lease
+				// has not expired - its phase B may be running right now.
+				// Refuse rather than forcing it to ambiguous and racing the
+				// original dispatch's own phase C.
+				apierror.Write(w, requestID, apierror.CodeConflict, "dispatch is still in progress for this withdrawal - try again shortly")
+				return
+			}
 			if errors.Is(err, payments.ErrSweeperProviderNotRegistered) {
 				logger.Error("resolve_withdrawal_unknown_provider", "error", err)
 				apierror.Write(w, requestID, apierror.CodeUnavailable, "the provider recorded on this withdrawal is not available on this deployment")
