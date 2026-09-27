@@ -425,17 +425,19 @@ func ApplyPayoutResult(ctx context.Context, pool *db.Pool, tenantID, requestID u
 	defer cancel()
 
 	return pool.WithTenant(phaseCtx, tenantID, func(actx context.Context, tx pgx.Tx) error {
-		// A7 (RV-PRH-I1 ledger review M3): the attempt row is CAS'd BEFORE
-		// any ledger-affecting call (withdrawal.Complete/Fail, which
-		// itself locks withdrawal_requests and the ledger accounts) - the
-		// opposite order from an earlier revision, which locked
-		// withdrawal_requests FIRST via an explicit SELECT ... FOR UPDATE
-		// here. That earlier order would deadlock against a future
-		// payout-success callback that locks attempt-then-withdrawal
-		// (receipt.go), once that callback is wired to Complete. No
-		// explicit withdrawal-row lock is taken by this function itself
-		// any more - Complete/Fail/AttachProviderReference each take their
-		// own via lockRequestForUpdate.
+		// R3 (RV-PRH-I1 ledger re-review, ADR 0082 A7): withdrawal FIRST,
+		// unconditionally, as the very first statement of this
+		// transaction - ONE lock order for this pair everywhere (matching
+		// the T2/T12 claim statements and the receipt path), not "lock it
+		// only on the branches that happen to need it". applyPayoutSuccess/
+		// applyPayoutDecline below take the SAME lock again defensively
+		// (a harmless re-lock within one transaction/session), since they
+		// are also reached from applyPayoutStatusEvidence's own
+		// transaction, which repeats this same top-of-tx lock.
+		if _, err := withdrawal.LockForPayoutEvidence(actx, tx, requestID); err != nil {
+			return err
+		}
+
 		res := gr.Value
 		nextPoll := time.Now().Add(payoutNextPollInterval)
 
@@ -445,7 +447,7 @@ func ApplyPayoutResult(ctx context.Context, pool *db.Pool, tenantID, requestID u
 				reason = "invalid_provider_reference:" + string(perr.Reason)
 			}
 			if err := ApplyDisputeFromNonTerminal(actx, tx, attempt.ID, evidence, reason); err != nil {
-				return err
+				return payoutHandleContradiction(actx, tx, attempt, evidence, gr.Class, err)
 			}
 			return audit.Record(actx, tx, audit.Entry{
 				TenantID: tenantID, ActorType: audit.ActorSystem, Action: "payments.payout_parked_invalid_reference",
@@ -467,13 +469,25 @@ func ApplyPayoutResult(ctx context.Context, pool *db.Pool, tenantID, requestID u
 			// ever_possibly_sent`, fail-closed, but this branch now takes
 			// the CORRECT transition instead of erroring every tick).
 			if attempt.EverPossiblySent {
-				return MarkAmbiguousFromSubmitting(actx, tx, attempt.ID, evidence, nextPoll)
+				if err := payoutMarkAmbiguousFromSubmitting(actx, tx, attempt.ID, evidence, res.ProviderReference, nextPoll); err != nil {
+					return payoutHandleContradiction(actx, tx, attempt, evidence, gr.Class, err)
+				}
+				return nil
 			}
-			return MarkNotSent(actx, tx, attempt.ID, *attempt.ClaimToken, nextPoll)
+			// R1 (ledger re-review): a CAS conflict here means SOME other
+			// evidence (most plausibly a callback) already advanced this
+			// attempt past `submitting` before this NotSent result was
+			// applied - that is not a contradiction for a NotSent result,
+			// which by definition means "this call never reached the
+			// provider" and has nothing left to correct.
+			if err := MarkNotSent(actx, tx, attempt.ID, *attempt.ClaimToken, nextPoll); err != nil {
+				return payoutHandleContradiction(actx, tx, attempt, evidence, gr.Class, err)
+			}
+			return nil
 
 		case ErrorClassPending:
 			if err := MarkAccepted(actx, tx, attempt.ID, evidence, res.ProviderReference, nextPoll); err != nil {
-				return payoutHandleContradiction(actx, tx, attempt, evidence, err)
+				return payoutHandleContradiction(actx, tx, attempt, evidence, gr.Class, err)
 			}
 			if res.ProviderReference != "" {
 				if err := withdrawal.AttachProviderReference(actx, tx, requestID, res.ProviderReference); err != nil {
@@ -494,17 +508,21 @@ func ApplyPayoutResult(ctx context.Context, pool *db.Pool, tenantID, requestID u
 
 		default: // ErrorClassAmbiguous and anything unclassified - never a
 			// failure without a definite decline (task item 4).
-			// C1/B1 (RV-PRH-I1 review): the reference returned alongside
-			// an Ambiguous result is PERSISTED, not dropped - dropping it
-			// makes a later QueryStatus resolution impossible and pushes
-			// every case toward an unbounded resend.
+			// C1/B1/N1/R6 (RV-PRH-I1 review rounds): the reference returned
+			// alongside an Ambiguous result is PERSISTED on BOTH the
+			// attempt itself (payoutMarkAmbiguousFromSubmitting - required
+			// so T12's poll-first step and PollPayoutStatus can ever query
+			// it) and, as defence in depth, on the withdrawal
+			// (AttachProviderReference) - dropping it makes a later
+			// QueryStatus resolution impossible and pushes every case
+			// toward an unbounded resend.
+			if err := payoutMarkAmbiguousFromSubmitting(actx, tx, attempt.ID, evidence, res.ProviderReference, nextPoll); err != nil {
+				return payoutHandleContradiction(actx, tx, attempt, evidence, gr.Class, err)
+			}
 			if res.ProviderReference != "" {
 				if err := withdrawal.AttachProviderReference(actx, tx, requestID, res.ProviderReference); err != nil {
 					return err
 				}
-			}
-			if err := MarkAmbiguousFromSubmitting(actx, tx, attempt.ID, evidence, nextPoll); err != nil {
-				return payoutHandleContradiction(actx, tx, attempt, evidence, err)
 			}
 			return nil
 		}
@@ -522,6 +540,14 @@ func ApplyPayoutResult(ctx context.Context, pool *db.Pool, tenantID, requestID u
 // back and losing the signal that a payout the platform already reversed
 // may in fact have been executed twice.
 func applyPayoutSuccess(ctx context.Context, tx pgx.Tx, requestID uuid.UUID, attempt PaymentAttempt, providerReference string, evidence EvidenceKind) error {
+	// R3 (RV-PRH-I1 ledger re-review, ADR 0082 A7): withdrawal FIRST - a
+	// harmless re-lock when the caller (ApplyPayoutResult/
+	// applyPayoutStatusEvidence) already took it at the top of its own
+	// transaction, and essential defence in depth otherwise, since this
+	// function is the one that eventually calls withdrawal.Complete.
+	if _, err := withdrawal.LockForPayoutEvidence(ctx, tx, requestID); err != nil {
+		return err
+	}
 	// L2 (RV-PRH-I1 ledger review): an empty echoed reference on a
 	// definite success (e.g. a QueryStatus success reporting no reference
 	// itself) falls back to the attempt's OWN already-stored reference -
@@ -557,6 +583,11 @@ func applyPayoutSuccess(ctx context.Context, tx pgx.Tx, requestID uuid.UUID, att
 // decline: ApplyDecline (T8, attempt) FIRST, then withdrawal.Fail (the
 // release posting). Same M4 late-evidence handling on a CAS conflict.
 func applyPayoutDecline(ctx context.Context, tx pgx.Tx, requestID uuid.UUID, attempt PaymentAttempt, providerReference, reason string, cascadable bool, evidence EvidenceKind) error {
+	// R3 (RV-PRH-I1 ledger re-review, ADR 0082 A7): withdrawal FIRST - see
+	// applyPayoutSuccess's identical comment.
+	if _, err := withdrawal.LockForPayoutEvidence(ctx, tx, requestID); err != nil {
+		return err
+	}
 	var refPtr *string
 	if providerReference != "" {
 		refPtr = &providerReference
@@ -612,15 +643,54 @@ func applyPayoutLateEvidence(ctx context.Context, tx pgx.Tx, attempt PaymentAtte
 	})
 }
 
-// payoutHandleContradiction is applyPayoutSuccess/applyPayoutDecline's
-// shared tail for the Pending/Ambiguous branches above, which do not have
-// their own dedicated helper: on a CAS conflict, route through the same
-// late-evidence handling rather than surfacing a bare, repeating error.
-func payoutHandleContradiction(ctx context.Context, tx pgx.Tx, attempt PaymentAttempt, evidence EvidenceKind, err error) error {
-	if errors.Is(err, ErrAttemptStateConflict) && attempt.WithdrawalRequestID != nil {
-		return applyPayoutLateEvidence(ctx, tx, attempt, evidence, "late_contradicting_evidence", *attempt.WithdrawalRequestID)
+// isPayoutAttemptTerminal reports whether s is one of the four states ADR
+// 0095 §4.1 treats as final for a payout attempt - used by
+// payoutHandleContradiction (R1) to tell "this attempt already resolved,
+// stray evidence has nothing left to do" from "this attempt is still open,
+// a conflict here is worth recording".
+func isPayoutAttemptTerminal(s AttemptState) bool {
+	switch s {
+	case AttemptSucceeded, AttemptDeclined, AttemptDisputed, AttemptRejected:
+		return true
+	default:
+		return false
 	}
-	return err
+}
+
+// payoutHandleContradiction is the shared tail for every phase-C branch
+// above on an attempt CAS conflict (a 0-row UPDATE, `ErrAttemptStateConflict`).
+//
+// R1 (RV-PRH-I1 ledger re-review, HIGH): NOT every CAS conflict is
+// contradicting evidence. The callback cutover makes a verified `pending`
+// webhook arriving before phase C's own synchronous `Withdraw` response an
+// everyday race, not an anomaly - phase C's own attempt to also apply
+// `Pending`/`Ambiguous`/`NotSent` then loses the CAS simply because a
+// FASTER, weaker-or-equal piece of evidence already got there first. Only a
+// DEFINITE result (`Succeeded`/`DefiniteDecline`) reaching an attempt that
+// is ALREADY terminal is real late/contradicting evidence (T14/T10, a P1) -
+// resultClass is the ErrorClass of the evidence phase C was trying to apply
+// when the conflict happened.
+func payoutHandleContradiction(ctx context.Context, tx pgx.Tx, attempt PaymentAttempt, evidence EvidenceKind, resultClass ErrorClass, err error) error {
+	if !errors.Is(err, ErrAttemptStateConflict) || attempt.WithdrawalRequestID == nil {
+		return err
+	}
+	if resultClass != ErrorClassSucceeded && resultClass != ErrorClassDefiniteDecline {
+		current, gerr := GetAttemptByID(ctx, tx, attempt.ID)
+		if gerr != nil {
+			return gerr
+		}
+		if isPayoutAttemptTerminal(current.State) {
+			// Stray non-definite evidence after the attempt already
+			// resolved (e.g. a delayed sync Pending arriving after a
+			// callback already settled it) - nothing to do, not a P1.
+			return nil
+		}
+		// Some OTHER non-definite evidence already advanced the attempt
+		// (the routine race R1 describes) - just reschedule the next
+		// look; this is convergence, not a contradiction.
+		return RescheduleNonTerminal(ctx, tx, attempt.ID, time.Now().Add(payoutNextPollInterval))
+	}
+	return applyPayoutLateEvidence(ctx, tx, attempt, evidence, "late_contradicting_evidence", *attempt.WithdrawalRequestID)
 }
 
 // ErrInvalidPayoutEvidence is returned when a definite outcome carries no
@@ -644,6 +714,67 @@ func canonicalDeclineReason(reason string) string {
 	}
 }
 
+// payoutMarkAmbiguousFromSubmitting performs T6 for every payout call site
+// applying REAL evidence just received (a synchronous Withdraw result in
+// ApplyPayoutResult, or a QueryStatus result in applyPayoutStatusEvidence) -
+// this file only; the deposit path's own T6 call sites in drive.go and
+// receipt.go are unmodified and keep calling the shared, generic
+// MarkAmbiguousFromSubmitting in attempt.go. N1/R6 (RV-PRH-I1 re-review):
+// persists a provider reference the adapter returned alongside the
+// Ambiguous/no-evidence result directly onto payment_attempts (set-once via
+// COALESCE/NULLIF, exactly like MarkAccepted's own reference handling). The
+// earlier revision only attached it to withdrawal_requests (kept as
+// defence in depth by callers), which left T12's poll-first step and
+// PollPayoutStatus with nothing of their own to query for the single most
+// common ambiguous shape. Deliberately carries NO lease predicate: this
+// function fires immediately after phase B's own response actually
+// arrives, regardless of how much of the lease window is left - see
+// payoutMarkAmbiguousFromSubmittingIfLeaseExpired for the ONE call site
+// (PollPayoutStatus's own no-reference fallback) that must NOT touch a
+// still-live lease (R2).
+func payoutMarkAmbiguousFromSubmitting(ctx context.Context, tx pgx.Tx, attemptID uuid.UUID, evidence EvidenceKind, providerReference string, nextActionAt time.Time) error {
+	return casUpdate(ctx, tx, "T6 submitting->ambiguous (payout, reference-preserving)",
+		`UPDATE payment_attempts
+		 SET state = 'ambiguous', last_evidence_kind = $2, ever_possibly_sent = true,
+		     provider_reference = COALESCE(provider_reference, NULLIF($3, '')),
+		     next_action_at = $4, poll_count = poll_count + 1, updated_at = now()
+		 WHERE id = $1 AND state = 'submitting'`,
+		attemptID, evidence, providerReference, nextActionAt,
+	)
+}
+
+// payoutMarkAmbiguousFromSubmittingIfLeaseExpired is PollPayoutStatus's own
+// no-reference fallback transition ONLY (R2, ledger re-review): the CAS
+// predicate itself refuses (0 rows affected -> ErrAttemptStateConflict)
+// when the attempt's OWN lease is still live, so a submitting attempt whose
+// phase B may be running RIGHT NOW is left completely untouched. This is
+// defence in depth behind PollPayoutStatus's own Go-level pre-check for the
+// exact same condition (ErrPayoutDispatchInFlight) - by the time this
+// function is ever called, that check has already passed, so this
+// predicate should never actually reject anything in practice; it exists
+// so a future caller of this function alone cannot reintroduce R2.
+func payoutMarkAmbiguousFromSubmittingIfLeaseExpired(ctx context.Context, tx pgx.Tx, attemptID uuid.UUID, evidence EvidenceKind, nextActionAt time.Time) error {
+	return casUpdate(ctx, tx, "T6 submitting->ambiguous (payout, no reference, lease-respecting)",
+		`UPDATE payment_attempts
+		 SET state = 'ambiguous', last_evidence_kind = $2, ever_possibly_sent = true,
+		     next_action_at = $3, poll_count = poll_count + 1, updated_at = now()
+		 WHERE id = $1 AND state = 'submitting' AND (lease_until IS NULL OR lease_until <= now())`,
+		attemptID, evidence, nextActionAt,
+	)
+}
+
+// ErrPayoutDispatchInFlight is PollPayoutStatus's refusal (R2, ledger
+// re-review) when a `submitting` attempt's own lease has not yet expired -
+// its phase B outbound call may be running RIGHT NOW. Forcing it to
+// `ambiguous` here would race the original dispatch's own phase C and, on
+// a NotSent result, permanently strip the attempt's T2/M3 eligibility for
+// a payout that in fact never reached the provider. Never touches the
+// attempt at all; the caller (internal/httpserver's /resolve handler) maps
+// this to a 409 "dispatch in progress, try again shortly" - the sweeper
+// itself never hits this path, because claimBatch's own next_action_at
+// predicate already only selects a `submitting` row once its lease is due.
+var ErrPayoutDispatchInFlight = errors.New("payments: payout dispatch is still in flight, its lease has not expired")
+
 // applyPayoutStatusEvidence applies a QueryStatus-derived outcome to a
 // payout attempt whose CURRENT state may be `submitting` (lease expired,
 // never got evidence), `pending` (already accepted) or `ambiguous` (T6) -
@@ -661,13 +792,21 @@ func applyPayoutStatusEvidence(ctx context.Context, pool *db.Pool, tenantID, req
 	defer cancel()
 
 	return pool.WithTenant(phaseCtx, tenantID, func(actx context.Context, tx pgx.Tx) error {
+		// R3 (RV-PRH-I1 ledger re-review, ADR 0082 A7): withdrawal FIRST,
+		// unconditionally - see ApplyPayoutResult's identical top-of-tx
+		// lock. applyPayoutSuccess/applyPayoutDecline below re-take it
+		// defensively.
+		if _, err := withdrawal.LockForPayoutEvidence(actx, tx, requestID); err != nil {
+			return err
+		}
+
 		if gr.Class == ErrorClassProviderRefInvalid {
 			reason := "invalid_provider_reference"
 			if perr, ok := providerref.AsError(gr.Err); ok {
 				reason = "invalid_provider_reference:" + string(perr.Reason)
 			}
 			if err := ApplyDisputeFromNonTerminal(actx, tx, attempt.ID, evidence, reason); err != nil {
-				return payoutHandleContradiction(actx, tx, attempt, evidence, err)
+				return payoutHandleContradiction(actx, tx, attempt, evidence, gr.Class, err)
 			}
 			return audit.Record(actx, tx, audit.Entry{
 				TenantID: tenantID, ActorType: audit.ActorSystem, Action: "payments.payout_parked_invalid_reference",
@@ -690,7 +829,7 @@ func applyPayoutStatusEvidence(ctx context.Context, pool *db.Pool, tenantID, req
 			switch gr.Class {
 			case ErrorClassPending:
 				if err := MarkAccepted(actx, tx, attempt.ID, evidence, res.ProviderReference, nextPoll); err != nil {
-					return payoutHandleContradiction(actx, tx, attempt, evidence, err)
+					return payoutHandleContradiction(actx, tx, attempt, evidence, gr.Class, err)
 				}
 				if res.ProviderReference != "" {
 					return withdrawal.AttachProviderReference(actx, tx, requestID, res.ProviderReference)
@@ -702,13 +841,14 @@ func applyPayoutStatusEvidence(ctx context.Context, pool *db.Pool, tenantID, req
 				return applyPayoutDecline(actx, tx, requestID, attempt, res.ProviderReference, res.DeclineReason, res.Cascadable, evidence)
 			default: // Ambiguous - a status QUERY result, never a Withdraw
 				// NotSent, so this is never routed through MarkNotSent.
+				// N1/R6: the reference is persisted on the attempt itself.
+				if err := payoutMarkAmbiguousFromSubmitting(actx, tx, attempt.ID, evidence, res.ProviderReference, nextPoll); err != nil {
+					return payoutHandleContradiction(actx, tx, attempt, evidence, gr.Class, err)
+				}
 				if res.ProviderReference != "" {
 					if err := withdrawal.AttachProviderReference(actx, tx, requestID, res.ProviderReference); err != nil {
 						return err
 					}
-				}
-				if err := MarkAmbiguousFromSubmitting(actx, tx, attempt.ID, evidence, nextPoll); err != nil {
-					return payoutHandleContradiction(actx, tx, attempt, evidence, err)
 				}
 				return nil
 			}
@@ -727,7 +867,7 @@ func applyPayoutStatusEvidence(ctx context.Context, pool *db.Pool, tenantID, req
 			default: // Ambiguous/NotSent: the provider "forgot" an accepted
 				// attempt - T11, a real anomaly, not a plain reschedule.
 				if err := MarkAmbiguousFromPending(actx, tx, attempt.ID, evidence, nextPoll); err != nil {
-					return payoutHandleContradiction(actx, tx, attempt, evidence, err)
+					return payoutHandleContradiction(actx, tx, attempt, evidence, gr.Class, err)
 				}
 				return nil
 			}
@@ -736,7 +876,7 @@ func applyPayoutStatusEvidence(ctx context.Context, pool *db.Pool, tenantID, req
 			switch gr.Class {
 			case ErrorClassPending:
 				if err := MarkAccepted(actx, tx, attempt.ID, evidence, res.ProviderReference, nextPoll); err != nil {
-					return payoutHandleContradiction(actx, tx, attempt, evidence, err)
+					return payoutHandleContradiction(actx, tx, attempt, evidence, gr.Class, err)
 				}
 				if res.ProviderReference != "" {
 					return withdrawal.AttachProviderReference(actx, tx, requestID, res.ProviderReference)
@@ -773,7 +913,7 @@ func applyPayoutSuccessCheckedFromStatus(ctx context.Context, tx pgx.Tx, request
 	if status.Amount != wr.Amount || status.AssetCode != wr.AssetCode {
 		reason := "amount_asset_mismatch"
 		if err := ApplyDisputeFromNonTerminal(ctx, tx, attempt.ID, evidence, reason); err != nil {
-			return payoutHandleContradiction(ctx, tx, attempt, evidence, err)
+			return payoutHandleContradiction(ctx, tx, attempt, evidence, ErrorClassSucceeded, err)
 		}
 		return audit.Record(ctx, tx, audit.Entry{
 			TenantID: attempt.TenantID, ActorType: audit.ActorSystem, Action: "payments.payout_amount_asset_mismatch",
@@ -782,6 +922,28 @@ func applyPayoutSuccessCheckedFromStatus(ctx context.Context, tx pgx.Tx, request
 				"withdrawal_request_id": requestID.String(),
 				"requested_amount":      wr.Amount, "requested_asset": wr.AssetCode,
 				"provider_amount": status.Amount, "provider_asset": status.AssetCode,
+			},
+		})
+	}
+	// N6 (RV-PRH-I1 ledger re-review, ADR 0095 §4.4): a QueryStatus success
+	// that echoes a DIFFERENT non-empty reference from the one already on
+	// file is fail-closed disputed (T10), never silently settled with the
+	// echoed value - applyPayoutSuccess's own L2 fallback exists for the
+	// OPPOSITE case (an empty echo, not a conflicting one), and must never
+	// be reached for a genuine mismatch.
+	if status.ProviderReference != "" && attempt.ProviderReference != nil && *attempt.ProviderReference != "" &&
+		status.ProviderReference != *attempt.ProviderReference {
+		reason := "provider_reference_mismatch"
+		if err := ApplyDisputeFromNonTerminal(ctx, tx, attempt.ID, evidence, reason); err != nil {
+			return payoutHandleContradiction(ctx, tx, attempt, evidence, ErrorClassSucceeded, err)
+		}
+		return audit.Record(ctx, tx, audit.Entry{
+			TenantID: attempt.TenantID, ActorType: audit.ActorSystem, Action: "payments.payout_provider_reference_mismatch",
+			TargetType: "payment_attempt", TargetID: attempt.ID.String(), Outcome: audit.OutcomeDenied,
+			Metadata: map[string]any{
+				"withdrawal_request_id": requestID.String(),
+				"stored_reference":      *attempt.ProviderReference,
+				"echoed_reference":      status.ProviderReference,
 			},
 		})
 	}
@@ -829,16 +991,53 @@ func payoutStatusQuery(provider PaymentProvider, providerReference string) Adapt
 // (H3/B2): a `submitting` attempt in that shape is moved to `ambiguous`
 // (T6, fail-closed - the platform cannot prove the original send never
 // reached the provider), never rescheduled forever.
+//
+// R2 (RV-PRH-I1 ledger re-review, MEDIUM): a `submitting` attempt whose
+// OWN lease has not yet expired is left completely untouched and this
+// function returns ErrPayoutDispatchInFlight instead - its phase B may be
+// running RIGHT NOW. The sweeper never hits this: claimBatch's own
+// next_action_at predicate already only selects a `submitting` row once
+// its lease is due. Only a caller with no such natural gate of its own
+// (internal/httpserver's /resolve handler) can reach it.
 func PollPayoutStatus(ctx context.Context, pool *db.Pool, orch *Orchestrator, credResolver OutboundCredentialResolver, tenantID uuid.UUID, attempt PaymentAttempt, nextPoll time.Time) error {
 	if attempt.WithdrawalRequestID == nil {
 		return fmt.Errorf("payments: poll payout status: attempt %s has no withdrawal_request_id", attempt.ID)
 	}
 	requestID := *attempt.WithdrawalRequestID
 
-	if attempt.ProviderID == nil || attempt.ProviderReference == nil {
+	if attempt.State == AttemptSubmitting && attempt.LeaseUntil != nil && attempt.LeaseUntil.After(time.Now()) {
+		return ErrPayoutDispatchInFlight
+	}
+
+	// N1/R6 (RV-PRH-I1 re-review): the attempt's own reference is now
+	// persisted directly by payoutMarkAmbiguousFromSubmitting, but fall
+	// back to the withdrawal's own reference as defence in depth for any
+	// attempt that reached `ambiguous` before that fix, or by any other
+	// path this file has not anticipated - INV-IO-8 guarantees exactly one
+	// payout attempt per withdrawal request, so this can never resolve the
+	// wrong attempt's reference.
+	ref := attempt.ProviderReference
+	if ref == nil || *ref == "" {
+		var wrRef *string
+		if err := pool.WithTenant(ctx, tenantID, func(actx context.Context, tx pgx.Tx) error {
+			wr, err := withdrawal.GetByID(actx, tx, requestID)
+			if err != nil {
+				return err
+			}
+			wrRef = wr.ProviderReference
+			return nil
+		}); err != nil {
+			return err
+		}
+		if wrRef != nil && *wrRef != "" {
+			ref = wrRef
+		}
+	}
+
+	if attempt.ProviderID == nil || ref == nil || *ref == "" {
 		return pool.WithTenant(ctx, tenantID, func(actx context.Context, tx pgx.Tx) error {
 			if attempt.State == AttemptSubmitting {
-				return MarkAmbiguousFromSubmitting(actx, tx, attempt.ID, EvidencePlatform, nextPoll)
+				return payoutMarkAmbiguousFromSubmittingIfLeaseExpired(actx, tx, attempt.ID, EvidencePlatform, nextPoll)
 			}
 			return RescheduleNonTerminal(actx, tx, attempt.ID, nextPoll)
 		})
@@ -855,6 +1054,6 @@ func PollPayoutStatus(ctx context.Context, pool *db.Pool, orch *Orchestrator, cr
 		AttemptState: attempt.State, ClaimToken: uuid.Nil, ExpectedClaim: uuid.Nil, ReadOnly: true,
 		Domain: "payments", Manifest: manifest,
 	}
-	gr := callProvider(dispatchCtx, credResolver, in, payoutStatusQuery(provider, *attempt.ProviderReference))
+	gr := callProvider(dispatchCtx, credResolver, in, payoutStatusQuery(provider, *ref))
 	return applyPayoutStatusEvidence(ctx, pool, tenantID, requestID, attempt, gr, EvidenceQueryStatus, nextPoll)
 }

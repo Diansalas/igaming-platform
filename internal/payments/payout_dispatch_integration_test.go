@@ -822,12 +822,48 @@ func (erroringPayoutKYCGate) EvaluatePayout(context.Context, pgx.Tx, kyc.Enforce
 	return kyc.EnforcementDecision{}, fmt.Errorf("erroringPayoutKYCGate: simulated evaluation failure")
 }
 
+// commitVisibilitySpyProvider is TestClaimForDispatch_NeverCallsProviderBeforeCommit's
+// falsifiable check (RV-PRH-I1 re-review: "ClaimForDispatch has no code
+// path to Withdraw at all, so the old version of this test could not
+// fail - it proved nothing about ordering"). At the moment Withdraw is
+// called, it re-reads the attempt through the SAME pool but a brand-new
+// connection/transaction - if ClaimForDispatch's own transaction had not
+// ACTUALLY committed yet (e.g. a regression that called Withdraw from
+// inside T1p's own transaction, or before it committed), this read would
+// not see the row (MVCC visibility across sessions), not merely "the
+// in-memory struct Go already happened to have".
+type commitVisibilitySpyProvider struct {
+	*MockProvider
+	pool      *db.Pool
+	tenantID  uuid.UUID
+	attemptID uuid.UUID
+	sawRow    bool
+	readErr   error
+	called    bool
+}
+
+func (p *commitVisibilitySpyProvider) Withdraw(ctx context.Context, req WithdrawRequest) (WithdrawResult, error) {
+	p.called = true
+	p.readErr = p.pool.WithTenant(ctx, p.tenantID, func(actx context.Context, tx pgx.Tx) error {
+		_, err := GetAttemptByID(actx, tx, p.attemptID)
+		return err
+	})
+	p.sawRow = p.readErr == nil
+	return p.MockProvider.Withdraw(ctx, req)
+}
+
 // TestClaimForDispatch_NeverCallsProviderBeforeCommit proves item (e): no
 // step ClaimForDispatch performs before its own commit - a cancelled
 // context, or a hard KYC-gate evaluation error - ever reaches
 // provider.Withdraw, and neither does ClaimForDispatch's own successful
 // commit path (Withdraw is only ever called by a caller's later, separate
-// DispatchWithdraw call).
+// DispatchWithdraw call). The successful-commit case is made falsifiable
+// (RV-PRH-I1 re-review) via commitVisibilitySpyProvider: a mutant that
+// called Withdraw from inside ClaimForDispatch's own still-open
+// transaction, or before that transaction committed, would make the
+// spy's separate-connection read fail to find the row - this is a real
+// assertion about ORDERING, not just about which Go function called
+// Withdraw.
 func TestClaimForDispatch_NeverCallsProviderBeforeCommit(t *testing.T) {
 	pool := depositV2ScratchPool(t)
 	f := seedPayoutFixture(t, pool, 10_000, true)
@@ -888,69 +924,44 @@ func TestClaimForDispatch_NeverCallsProviderBeforeCommit(t *testing.T) {
 	if spy.count() != 0 {
 		t.Fatalf("provider.Withdraw was called by ClaimForDispatch's own successful commit")
 	}
-	loAssertBalanced(t, pool, f.tenantID)
-	loAssertProjectionMatchesRebuild(t, pool, f.tenantID)
-}
 
-// TestConcurrent_RejectVsClaimForDispatch_ExactlyOneWins proves item (c):
-// racing withdrawal.Reject (illegal from `approved` - its own precondition
-// requires `pending_review`) against ClaimForDispatch on the SAME approved
-// request never lets Reject "sneak through" under concurrency - Reject
-// deterministically loses every rep (ErrStateConflict), ClaimForDispatch
-// deterministically wins, and the ledger stays balanced throughout.
-func TestConcurrent_RejectVsClaimForDispatch_ExactlyOneWins(t *testing.T) {
-	pool := depositV2ScratchPool(t)
-	f := seedPayoutFixture(t, pool, 1_000_000, true)
-	provider := NewMockProvider("mock-payout-l", "EUR")
-	registerCapability(t, pool, f.orchFixture, provider, 100)
-	orch := NewOrchestrator(map[string]PaymentProvider{"mock-payout-l": provider}, MultiWebhookCredentialResolver{"mock-payout-l": NewMockWebhookCredentials(provider)})
-
-	const reps = 50
-	for i := 0; i < reps; i++ {
-		wr := approvedWithdrawal(t, pool, f, 500, fmt.Sprintf("payout-race-reject-%d", i))
-
-		var wg sync.WaitGroup
-		var claimErr, rejectErr error
-		wg.Add(2)
-		go func() {
-			defer wg.Done()
-			_, claimErr = orch.ClaimForDispatch(context.Background(), pool, KYCEnforcementPayoutGate{}, f.tenantID, wr.ID, "bank_transfer", testSubmitActor())
-		}()
-		go func() {
-			defer wg.Done()
-			rejectErr = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-				return withdrawal.Reject(ctx, tx, wr.ID, uuid.New(), "race_test", alwaysEligible)
-			})
-		}()
-		wg.Wait()
-
-		if claimErr != nil {
-			t.Fatalf("rep %d: ClaimForDispatch must always win against an illegal Reject, got: %v", i, claimErr)
-		}
-		if rejectErr == nil {
-			t.Fatalf("rep %d: expected Reject to fail (request is approved, not pending_review)", i)
-		}
-
-		var got withdrawal.WithdrawalRequest
-		if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-			var err error
-			got, err = withdrawal.GetByID(ctx, tx, wr.ID)
-			return err
-		}); err != nil {
-			t.Fatalf("rep %d: reread: %v", i, err)
-		}
-		if got.State != withdrawal.StateSubmitted {
-			t.Fatalf("rep %d: expected submitted, got %s", i, got.State)
-		}
+	// Falsifiable check (RV-PRH-I1 re-review): drive the ONLY legitimate
+	// path to Withdraw (a caller's own, separate DispatchWithdraw call,
+	// exactly like the real submit handler) through a spy that proves the
+	// T1p row is visible from a DIFFERENT connection/transaction at the
+	// moment Withdraw is invoked - i.e. the claim's commit had genuinely
+	// already happened, not merely that Go had already returned from the
+	// function call.
+	visSpy := &commitVisibilitySpyProvider{MockProvider: inner, pool: pool, tenantID: f.tenantID, attemptID: claim.Attempt.ID}
+	gr := DispatchWithdraw(context.Background(), MockCredentialResolver{}, visSpy, claim.Attempt)
+	if !visSpy.called {
+		t.Fatalf("test setup: the spy's Withdraw was never invoked")
+	}
+	if visSpy.readErr != nil {
+		t.Fatalf("the attempt row committed by ClaimForDispatch was not visible from a separate connection at the moment Withdraw was called: %v", visSpy.readErr)
+	}
+	if !visSpy.sawRow {
+		t.Fatalf("expected the committed attempt row to be visible from a separate connection before any Withdraw call")
+	}
+	if err := ApplyPayoutResult(context.Background(), pool, f.tenantID, wr.ID, claim.Attempt, gr, EvidenceSync); err != nil {
+		t.Fatalf("ApplyPayoutResult: %v", err)
 	}
 	loAssertBalanced(t, pool, f.tenantID)
 	loAssertProjectionMatchesRebuild(t, pool, f.tenantID)
 }
 
-// alwaysEligible is a permissive ApproverEligibility for the race test
-// above - Reject is expected to fail on its OWN state precondition, never
-// on eligibility, so eligibility itself must never be the reason it loses.
-func alwaysEligible(uuid.UUID) (linked, active bool, err error) { return true, true, nil }
+// TestConcurrent_RejectVsClaimForDispatch_ExactlyOneWins was deleted
+// (RV-PRH-I1 re-review, "delete the vacuous Reject-vs-claim test, or
+// rename it and give it a real purpose"): withdrawal.Reject is illegal
+// from `approved` regardless of timing (its own precondition requires
+// `pending_review`), so this test would pass identically with NO locking
+// at all - it exercised a business-rule precondition, not a race. The real
+// claim-vs-claim race (two concurrent ClaimForDispatch calls on the SAME
+// approved request, CP-W4) is covered by
+// TestConcurrentClaimForDispatch_ExactlyOneWithdraws below, and the real
+// compliance-vs-claim race is covered by
+// TestConcurrent_DenyForComplianceVsClaimForDispatch_ExactlyOneWins, which
+// remains.
 
 // TestConcurrent_DenyForComplianceVsClaimForDispatch_ExactlyOneWins proves
 // item (c)'s second pairing: an EXTERNAL, direct withdrawal.DenyForCompliance

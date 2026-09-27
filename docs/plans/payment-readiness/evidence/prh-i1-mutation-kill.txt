@@ -803,3 +803,203 @@ golangci-lint (2.9.0, --build-tags=integration): 0 issues on
 test file carries the same unchecked-resp.Body.Close() errcheck style
 already present in ~590 pre-existing call sites across this package's test
 suite (not a new debt class).
+
+================================================================================
+--- PRH-I1 payout round 3 (2026-09-27): N1/R6, R1, R2, R3, N6, N5 correction ---
+
+N5 correction (RV-PRH-I1 code re-review, "the verification claims are
+overstated"): the round-2 entry above claims "the full new fix-round test
+file (payout_dispatch_fixround_test.go, 20 tests)" and "44 total" payout
+tests. Both are wrong. Recounted with `grep -c '^func Test'`:
+payout_dispatch_fixround_test.go has 15 tests (not 20);
+payout_dispatch_integration_test.go had 14 at that point (now 13, after
+this round deletes the vacuous TestConcurrent_RejectVsClaimForDispatch_
+ExactlyOneWins - see below); the true payout-specific total at the END of
+round 2 was 14 + 15 = 29 (matching the code re-review's own recount), not
+44 (44 apparently double-counted the 3 deposit-sweeper regression tests
+that were separately re-verified, not newly added). This entry is the
+correction; the round-2 entry itself is left as originally written
+(append-only) rather than edited in place.
+
+Fixes this round, each addressed via new code + at least one dedicated
+test (all in internal/payments/payout_dispatch_round3_test.go unless
+noted):
+
+- N1/R6: the ambiguous branch (ApplyPayoutResult's default case,
+  applyPayoutStatusEvidence's submitting-Ambiguous case) now calls a new
+  payoutMarkAmbiguousFromSubmitting (payout.go), which persists the
+  provider reference directly onto payment_attempts (COALESCE/NULLIF,
+  set-once), in addition to the existing withdrawal-level
+  AttachProviderReference (kept as defence in depth).
+  TestSweeper_N1_AmbiguousWithReference_ConvergesByPollZeroResends proves
+  an ambiguous-with-reference payout now converges via QueryStatus with
+  ZERO resends (Withdraw call count stays 1).
+- R1: payoutHandleContradiction (payout.go) now takes a resultClass
+  ErrorClass parameter and only routes a CAS conflict to
+  applyPayoutLateEvidence (dispute) when resultClass is Succeeded or
+  DefiniteDecline; every other (non-definite) conflict either reschedules
+  (attempt still non-terminal) or no-ops (attempt already terminal).
+  TestPayoutDispatch_R1_SyncPendingAfterCallbackPending_ConvergesNoDispute,
+  ..._SyncTimeoutAfterCallbackPending_ConvergesNoDispute, and
+  ..._NotSentAfterCallbackPending_IsNoOp simulate a racing callback (via a
+  direct MarkAccepted call - receipt.go itself untouched) and prove all
+  three non-definite races converge instead of disputing.
+- R2: PollPayoutStatus (payout.go) now refuses immediately
+  (ErrPayoutDispatchInFlight) for a `submitting` attempt whose LeaseUntil
+  is still in the future, touching nothing; a NEW, separate CAS variant
+  (payoutMarkAmbiguousFromSubmittingIfLeaseExpired) carries the same
+  lease predicate as defence in depth for PollPayoutStatus's own
+  no-reference fallback branch ONLY (this predicate must NOT be on the
+  reference-carrying payoutMarkAmbiguousFromSubmitting used by
+  ApplyPayoutResult/applyPayoutStatusEvidence for REAL evidence just
+  received - an early version of this fix accidentally put the lease
+  predicate on that shared function and broke the ordinary T1p-Ambiguous
+  path, since the lease is deliberately still live at that exact moment;
+  caught immediately by TestSweeper_N1_..., see "problem solving" below).
+  internal/httpserver/withdrawal_handlers.go's /resolve handler now maps
+  ErrPayoutDispatchInFlight to 409. TestPollPayoutStatus_R2_LeaseStillLive_
+  RefusesInFlight is the dedicated test (a live-lease submitting attempt
+  is left untouched, then the ORIGINAL phase B/C still completes cleanly
+  afterward).
+- R3: applyPayoutSuccess and applyPayoutDecline (payout.go) now take
+  withdrawal.LockForPayoutEvidence (a new, state-precondition-free
+  exported lock in internal/withdrawal/withdrawal.go, wrapping the
+  existing private lockRequestForUpdate) as their OWN first statement;
+  ApplyPayoutResult and applyPayoutStatusEvidence ALSO take the same lock
+  unconditionally at the very top of their own transactions, before
+  dispatching on evidence class - ONE lock order (withdrawal, then
+  attempt) for every payout evidence-application code path, matching the
+  T2/T12 claim statements and the receipt path.
+  TestPayoutDispatch_R3_LockOrderConsistentAcrossConcurrentEvidence_
+  NoDeadlock reproduces probe N's exact shape (a concurrent transaction
+  taking withdrawal-then-attempt, like the receipt path) and asserts NO
+  40P01 - both sides serialize instead.
+- N6: applyPayoutSuccessCheckedFromStatus (payout.go) now also compares
+  status.ProviderReference against the attempt's own stored reference (if
+  both are non-empty) and disputes (terminal_reason
+  "provider_reference_mismatch") on a mismatch, distinct from L2's
+  existing "empty echo falls back to the stored reference" case.
+  TestPollPayoutStatus_ProviderReferenceMismatch_Disputes is the dedicated
+  test.
+- C-T1 (mutant MH, "NotSent-on-resend branch disabled survives"):
+  TestPayoutDispatch_CT1_NotSentOnResendRoutesToAmbiguousNotCreated drives
+  a real T12 resend via ResubmitAmbiguous, then applies a NotSent result
+  on the resent (ever_possibly_sent=true) attempt and asserts it lands on
+  `ambiguous`, not `created`.
+- C-T3: TestClaimForDispatch_GateRunsUnderOuterLock's failure branch now
+  closes the lock-release channel and drains both goroutines BEFORE
+  calling t.Fatalf, so a real regression fails fast instead of hanging
+  until the whole `go test` run times out.
+- M3 (exact T12 resend count, not an upper bound):
+  TestSweeper_T12_IdempotentManifest_StopsAtMaxResubmits now asserts
+  spy.count()==2 and attempt.SubmitCount==2 EXACTLY (MaxResubmits=2), with
+  the corrected arithmetic explained inline (submit_count reaches exactly
+  MaxResubmits via MaxResubmits-1 resends, not "1+MaxResubmits" as the
+  original comment wrongly claimed - itself part of the N5 correction).
+- M5 (B6 staff audit row, untested): TestClaimForDispatch_M5_
+  AllowPathWritesStaffAuditRow asserts exactly one withdrawal.submit.http
+  audit_log row for the claimed withdrawal, with the real staff actor_id
+  and outcome=success.
+- M7 (crash-recovery test only asserted Claimed>0):
+  TestClaimForDispatch_NextActionAtSet_CrashRecovery (payout_dispatch_
+  fixround_test.go) now also re-reads the recovered attempt and asserts
+  State==ambiguous and EverPossiblySent==true.
+- M9/M10 (late-evidence routing removed):
+  TestPayoutDispatch_M10_SuccessAfterDecline_DisputesT14 pins the direct
+  applyPayoutSuccess->applyPayoutLateEvidence path (T14, with its P1
+  audit record). TestPollPayoutStatus_M9_DefiniteMismatchAfterTerminal_
+  StillDisputes pins the OTHER entry point - a definite mismatch's own
+  dispute-CAS conflicting against an already-terminal (declined) attempt,
+  routed through payoutHandleContradiction's definite branch.
+- M11 (raw vendor decline text passed through):
+  TestPayoutDispatch_M11_RawVendorDeclineReasonNeverPersisted asserts
+  decline_reason is the canonical fallback "provider_declined", never the
+  raw vendor string, for an unrecognized reason code.
+- M12 (repeated-KYC-deny idempotence removed):
+  TestSweeper_M12_RepeatedKYCDenyOnEscalatedAttempt_IsIdempotent drives
+  two additional T2 re-claims after the first denial has already
+  escalated the attempt and asserts neither errors.
+- Vacuous-test cleanup (code re-review, "delete or rename"):
+  TestConcurrent_RejectVsClaimForDispatch_ExactlyOneWins deleted (Reject
+  is illegal from approved regardless of timing - it never exercised a
+  race). TestClaimForDispatch_NeverCallsProviderBeforeCommit's successful-
+  commit assertion is now falsifiable via a new
+  commitVisibilitySpyProvider, which re-reads the claimed attempt through
+  a SEPARATE connection/transaction at the moment Withdraw is called -
+  proving the T1p commit had genuinely already happened, not merely that
+  Go had already returned from the function call.
+- Runbook (C-RB, all 5 listed defects): docs/runbooks/migration-0101-
+  payment-attempts-remediation.md rewritten - §3(a)'s query no longer
+  references payment_attempts and matches the pre-flight's exact OR
+  predicate; every RLS-scoping instruction now says app.tenant_id (not
+  app.current_tenant_id); a new §3(b-ii) covers a ledger-linked row with a
+  NULL provider_reference; §3(c) no longer suggests `disputed` (not a
+  valid deposit_intents.status) and uses `failed` instead; pre-flights 1
+  and 3 are now covered in §3(a)/(c) alongside pre-flight 2 (pre-flight 3
+  is correctly identified as a WITHDRAWAL shape, not a deposit-intent
+  shape, per the review's own correction).
+- R5/CP-W1: registered as a launch condition (docs/decisions/0095, §27.11
+  addendum) rather than implemented - merchant-reference QueryStatus
+  remains NOT IMPLEMENTED; any provider whose manifest is
+  IdempotentSubmission=false must not go live until CP-W1 exists or an
+  equivalent operational mitigation is in place.
+
+Problem solving worth recording: the FIRST attempt at R2's lease predicate
+put it directly on the SAME CAS function the ordinary T1p-ambiguous path
+uses (payoutMarkAmbiguousFromSubmitting), reasoning that it was "defence
+in depth" everywhere. TestSweeper_N1_AmbiguousWithReference_
+ConvergesByPollZeroResends immediately failed with "expected ambiguous
+after the sync Withdraw, got submitting" - the T1p claim's own 2-minute
+lease is, by definition, still live at the exact moment phase C applies a
+REAL synchronous Ambiguous result, so the predicate silently blocked the
+CAS and the conflict fell through to a plain reschedule (no test-visible
+error, just the wrong resulting state). Fixed by splitting into two
+functions: payoutMarkAmbiguousFromSubmitting (no lease predicate - used
+whenever REAL evidence just arrived) and
+payoutMarkAmbiguousFromSubmittingIfLeaseExpired (the lease predicate - used
+ONLY by PollPayoutStatus's own no-reference fallback, where the Go-level
+ErrPayoutDispatchInFlight check has already guaranteed the lease is
+expired before this is ever called, making the CAS predicate pure defence
+in depth there and nowhere else). This is recorded because it is exactly
+the kind of "the fix that fixes one review comment breaks another code
+path" mistake CLAUDE.md's testing discipline exists to catch before
+merge - it was caught by re-running the FULL affected test, not just the
+new one.
+
+Anchored mutations for this round (each reverted to byte-identical source,
+confirmed via `git diff --stat`/`git status --short` after revert):
+
+- PM-PAYOUT-11: `payoutHandleContradiction`'s `resultClass != ErrorClassSucceeded
+  && resultClass != ErrorClassDefiniteDecline` condition inverted (so every
+  conflict disputes, including the routine races). Killed by
+  TestPayoutDispatch_R1_SyncPendingAfterCallbackPending_ConvergesNoDispute
+  (state became `disputed` instead of the expected `pending`).
+- PM-PAYOUT-12: `payoutMarkAmbiguousFromSubmitting`'s reference COALESCE
+  argument replaced with a literal empty string (so the reference is never
+  actually persisted on the attempt). Killed by
+  TestSweeper_N1_AmbiguousWithReference_ConvergesByPollZeroResends
+  (attempt.ProviderReference was nil after the sync Ambiguous result, so
+  the poll-first step had nothing to query and the test's own explicit
+  nil-check failed before the resend-count assertion was even reached).
+- PM-PAYOUT-13: the withdrawal lock call removed from the top of
+  applyPayoutSuccess (leaving only ApplyPayoutResult's own top-of-tx
+  lock). Full suite still passed (this call path is always reached via
+  ApplyPayoutResult, which already locks) - confirming the redundant
+  lock inside applyPayoutSuccess is genuinely defence in depth for THIS
+  call path specifically, not load-bearing for it; it remains load-bearing
+  for applyPayoutStatusEvidence's applyPayoutSuccessCheckedFromStatus ->
+  applyPayoutSuccess path, which ALSO already locks at its own top, so
+  this mutant is a true negative, not evidence of missing coverage.
+  Reverted; the lock is kept per the ledger review's own instruction to
+  "restore SELECT ... FOR UPDATE as the first statement of BOTH phase-C
+  functions" regardless.
+
+Verification: `go build -tags=integration ./...` clean; full payout test
+set (13 + 15 + 13 = 41 tests across payout_dispatch_integration_test.go,
+payout_dispatch_fixround_test.go, payout_dispatch_round3_test.go) green
+under `go test -tags=integration` and under `-race`, on a fresh private
+scratch database migrated to head (105); internal/withdrawal green on the
+shared TEST_DATABASE_URL. The shared TEST_DATABASE_URL's pre-existing,
+unrelated migration-0101/0103 gap (documented in the runbook and in prior
+rounds) reproduces identically before and after this round's diff and is
+not caused by it.

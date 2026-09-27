@@ -4152,3 +4152,96 @@ rounds, each killed and reverted to byte-identical source) is filed at
 remediation runbook ledger-finance's review required is filed at `docs/runbooks/migration-0101-
 payment-attempts-remediation.md`.
 
+**N5 correction (RV-PRH-I1 re-review, 2026-09-27): the "44 tests" count above is wrong.** The
+actual count at the end of the round this section describes was 14 (`payout_dispatch_integration_
+test.go`) + 15 (`payout_dispatch_fixround_test.go`) = 29 payout-specific tests, not 44 - see §27.12
+below for the corrected running total. Left uncorrected in place (append-only) rather than edited,
+per the no-fake-completion rule's own spirit: the mistake and its correction should both be
+visible, not silently smoothed over.
+
+### 27.12 PRH-I1 payout dispatch round 3 (`payments`, 2026-09-27): N1/R6, R1, R2, R3, N6
+
+**Scope.** A third review round (`code-reviewer`, "NOT READY, narrow rework"; `ledger-finance`,
+"APPROVE WITH CONDITIONS", veto on C1 lifted) found one new HIGH finding shared between both
+reviews (N1 = R6: the ambiguous branch never stored the provider reference on the attempt itself,
+only on the withdrawal) plus three more from the ledger re-review alone (R1: routine non-definite
+evidence racing a faster piece of evidence - most commonly a callback - was disputed instead of
+converging; R2: `/resolve` had no lease check and could force a still-in-flight `submitting`
+attempt to `ambiguous`; R3: phase C's lock order regressed to attempt-then-withdrawal after the
+earlier M3 fix, a genuine deadlock risk against the receipt path/T2/T12's withdrawal-then-attempt
+order) and one observational finding from the code re-review (N6: a QueryStatus success echoing a
+DIFFERENT, non-empty reference from the one already on file was never disputed). Filed at
+`docs/plans/payment-readiness/rv-prh-i1-payout-code-review.md` ("Re-review — fix round") and
+`rv-prh-i1-payout-ledger.md` ("Re-review (fix round)"). Full fix detail and the anchored mutation
+evidence for this round are in `docs/plans/payment-readiness/evidence/prh-i1-mutation-kill.txt`
+("PRH-I1 payout round 3").
+
+**Corrections to §27.11 above:**
+- Item 1's "poll first, unconditionally, if a reference exists at all" claim was **false in
+  practice**: the reference from an Ambiguous result was only ever attached to
+  `withdrawal_requests`, never to `payment_attempts` itself, so `resubmitPayoutAmbiguous`'s own
+  `attempt.ProviderReference != nil` gate meant the poll-first step was UNREACHABLE for the single
+  most common ambiguous shape (a sync Ambiguous result with a reference, from T1p or T2). Fixed
+  this round (N1/R6): the reference is now persisted directly on the attempt
+  (`payoutMarkAmbiguousFromSubmitting`), and `resubmitPayoutAmbiguous`/`PollPayoutStatus` no longer
+  gate on the attempt's own reference alone (`PollPayoutStatus` resolves a withdrawal-level
+  fallback too, defence in depth for any attempt that reached `ambiguous` before this fix).
+- The verification counts in §27.11 ("44 tests", "10 mutants") were overstated - see the N5
+  correction immediately above.
+
+**Fail-closed choices made where this ADR is silent, this round:**
+
+6. **A non-definite piece of evidence (Pending/Ambiguous/NotSent/a transport error) CAS-conflicting
+   against an attempt some FASTER piece of evidence already advanced.** Neither this ADR nor the
+   original §27.11 record distinguishes "this conflict is a genuine contradiction" from "this
+   conflict is just routine convergence, because something else got there first." Chosen: only a
+   DEFINITE result (`Succeeded`/`DefiniteDecline`) reaching an ALREADY-TERMINAL attempt is treated
+   as late/contradicting evidence (T14/T10, a P1 audit record); every other conflict either
+   reschedules (the attempt is still non-terminal - the routine race) or no-ops (the attempt is
+   already terminal and the arriving evidence is weaker-or-equal - nothing left to correct). This
+   matters concretely once payout callbacks are wired (the callback cutover's own concurrent work):
+   a verified `pending` webhook arriving before phase C's own synchronous `Withdraw` response is now
+   an everyday, non-alarming race, not a P1.
+2. **A `submitting` attempt whose lease has not yet expired, polled by a caller with no natural
+   lease-respecting gate of its own.** The sweeper never reaches a `submitting` row until its lease
+   is due (`claimBatch`'s own `next_action_at` predicate), but `internal/httpserver`'s `/resolve`
+   handler has no such gate. Chosen: `PollPayoutStatus` refuses immediately
+   (`ErrPayoutDispatchInFlight`, mapped to HTTP 409) and touches nothing at all in that case, rather
+   than forcing the attempt to `ambiguous` and racing the dispatch that may still be in flight.
+3. **The A7 lock order for phase C, restated precisely.** §27.11 item 4 said "A7's attempt-before-
+   posting lock order" without stating the FULL order; this round's own implementation had, in the
+   meantime, dropped the leading withdrawal lock entirely (a regression the ledger re-review
+   caught via a real 40P01 deadlock probe). Restated and fixed: **withdrawal `FOR UPDATE` first,
+   then the attempt CAS, then the L3/L4 posting** - the same order the T2/T12 claim statements and
+   the receipt path already use. A new `withdrawal.LockForPayoutEvidence` (state-precondition-free,
+   payments-only) is the one lock every phase-C entry point now takes as its first statement.
+4. **A QueryStatus success echoing a reference that conflicts with (not merely omits) the one
+   already on file.** §4.4's matrix does not separately name "reference conflict" as its own
+   evidence shape. Chosen: dispute (`terminal_reason = "provider_reference_mismatch"`), the same
+   fail-closed default as the amount/asset mismatch (H2/B3) - a settlement is never recorded against
+   a reference the platform did not itself request confirmation for.
+
+**Newly registered launch condition (R5, tracked by the orchestrator, not implemented here):** any
+payment provider whose manifest declares `IdempotentSubmission = false` must not be enabled for
+real traffic until CP-W1 (merchant-reference `QueryStatus`) exists, or an equivalent operational
+mitigation (e.g. mandatory manual resolution SLA) is agreed - a payout that crashes/times out after
+T1p with no reference and a non-idempotent provider is fail-closed escalated (T6, then T16) but has
+NO automated resolution path today, only M2 (BLOCKED on HD-0095-1) or a human confirming the
+outcome with the PSP directly.
+
+**Not implemented, disclosed (unchanged from §27.11, still open):** CP-W1 merchant-reference
+QueryStatus; payout cascade-on-decline (`PAY-PAYOUT-CASCADE-1`); full attempt-transition audit
+coverage; M1/M2 BLOCKED on HD-0095-1. R4 (payout callbacks through the receipt path) is explicitly
+a separate agent's work (`receipt.go`, not touched here) and is tracked by the orchestrator, not by
+this record.
+
+**Verification.** 41 payout-specific tests (13 + 15 + 13 across `payout_dispatch_integration_
+test.go`, `payout_dispatch_fixround_test.go`, and the new `payout_dispatch_round3_test.go`) pass
+under `-tags=integration` and under `-race` on a private database freshly migrated to head (105);
+`internal/withdrawal` and `internal/httpserver`'s 30 withdrawal tests pass on the same private
+database (`internal/httpserver`'s run against the shared `TEST_DATABASE_URL` still fails 4 of them
+on the pre-existing, disclosed migration-0101 gap documented in the runbook - confirmed unrelated
+by the private-database run passing all 30). `golangci-lint` (2.9.0, `--build-tags=integration`): 0
+issues on every file this round touched. 3 anchored mutants for this round (PM-PAYOUT-11/12/13),
+each reverted to byte-identical source - full detail in the mutation-kill evidence file.
+
