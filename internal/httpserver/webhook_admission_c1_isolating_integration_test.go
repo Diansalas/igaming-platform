@@ -62,19 +62,34 @@ import (
 )
 
 // countingGate admits exactly the first `allowed` Acquire calls it ever
-// sees (across any key - every test in this file drives a single request
-// through a single tenant/provider pair, so all of its gate calls share
-// one key in practice) and refuses every call after. Unlike the real
-// admission.Bulkhead (a concurrent-holder cap), this counts total CALLS,
-// which is what is needed to let an earlier, already-released acquisition
-// (the tenant-slug lookup) succeed while a LATER one (credential
-// resolution) on the very same key is refused.
+// sees on its own expected key and refuses every call after. Unlike the
+// real admission.Bulkhead (a concurrent-holder cap), this counts total
+// CALLS, which is what is needed to let an earlier, already-released
+// acquisition (the tenant-slug lookup) succeed while a LATER one
+// (credential resolution) on the very same key is refused.
+//
+// Security re-verification #2 (rv-prh-i4-security.md §7.5, Info I6):
+// earlier versions of this fake ignored the key entirely, so they would
+// not have caught a regression that gated credential resolution on the
+// WRONG A4b key (a distinct bug from the one C1 fixes - it would let one
+// tenant's saturated gate leak capacity to, or steal capacity from,
+// another tenant/provider pair). wantKey pins the exact key every Acquire
+// call on this gate must use; a mismatched key fails the test immediately
+// via t.Fatalf, rather than silently admitting or refusing based on call
+// count alone.
 type countingGate struct {
+	t       *testing.T
+	wantKey string
 	allowed int32
 	calls   int32
 }
 
 func (g *countingGate) Acquire(key string, perKeyCap int, clock admission.Clock, wait time.Duration) (func(), bool) {
+	g.t.Helper()
+	if key != g.wantKey {
+		g.t.Fatalf("countingGate.Acquire: key = %q, want %q (security Info I6: the gate must always be "+
+			"consulted on the SAME key for a given tenant+provider+domain, at every hop)", key, g.wantKey)
+	}
 	n := atomic.AddInt32(&g.calls, 1)
 	if n <= g.allowed {
 		return func() {}, true
@@ -125,7 +140,7 @@ func TestAdmission_C1a_PaymentsCredentialResolutionGateRejection_Isolated(t *tes
 	if err := rt.LoadDirectory(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	rt.rt.dbGate = &countingGate{allowed: 2}
+	rt.rt.dbGate = &countingGate{t: t, wantKey: string(domainPayments) + "|" + tenant.Slug + "|" + "mock", allowed: 2}
 
 	srv := httptest.NewServer(handler)
 	t.Cleanup(srv.Close)
@@ -158,7 +173,7 @@ func TestAdmission_C1a_CasinoCredentialResolutionGateRejection_Isolated(t *testi
 	if err := rt.LoadDirectory(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	rt.rt.dbGate = &countingGate{allowed: 1}
+	rt.rt.dbGate = &countingGate{t: t, wantKey: string(domainCasino) + "|" + tenant.Slug + "|" + "mock-casino", allowed: 1}
 
 	srv := httptest.NewServer(handler)
 	t.Cleanup(srv.Close)
@@ -192,7 +207,7 @@ func TestAdmission_C1a_KYCCredentialResolutionGateRejection_Isolated(t *testing.
 	if err := rt.LoadDirectory(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	rt.rt.dbGate = &countingGate{allowed: 1}
+	rt.rt.dbGate = &countingGate{t: t, wantKey: string(domainKYC) + "|" + tenant.Slug + "|" + "mock-kyc", allowed: 1}
 
 	srv := httptest.NewServer(handler)
 	t.Cleanup(srv.Close)

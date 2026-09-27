@@ -387,3 +387,75 @@ N4, N5) is now KILLED by a new, dedicated test, and T6c/T6d are green on the mer
 with M11 re-confirmed. The full targeted suite (go test -tags=integration
 ./internal/httpserver/... plus the internal/webhookauth, internal/admission,
 internal/providercred, internal/config unit suites) is green.
+
+--- Round 5 (security re-verification #2, rv-prh-i4-security.md section 7, still APPROVE WITH
+    CONDITIONS: T6/C3 narrowed to Medium/Low, N1-N5 all confirmed killed, B1-casino/B1-kyc and
+    N2b/N2c newly found surviving) ---
+
+TestAdmission_T6g_B1RunsBeforeWithTenant_NoPoolAcquisitionOnLimitedAttempt was rewritten as
+TestAdmission_T6g_B1RunsBeforeWithTenant_ExactPoolAcquisitionCounts, table-driven across all
+three domains (webhook_admission_t6_pool_ordering_integration_test.go), pinning the EXACT
+measured acquisition delta per domain (security Info I5) instead of a bare inequality:
+  - payments: 3 admitted, 2 limited (unchanged from round 4, re-confirmed).
+  - casino: 2 admitted, 1 limited (new).
+  - kyc: 2 admitted, 1 limited (new).
+Values were measured empirically against the real 10-connection pool (t.Logf of the delta at
+each step, then hardcoded once confirmed stable across repeated runs), not derived by code
+inspection alone.
+
+M18 B1-casino "admitVerified moved inside deps.DB.WithTenant" (security's own named gap - the
+   round-4 T6g test covered payments only): KILLED.
+    File: internal/httpserver/casino_handlers.go, newCasinoWebhookHandler.
+    Diff: moved the admitVerified call from before deps.DB.WithTenant to inside its closure
+    (opens the domain transaction unconditionally first, then decides admission).
+    Command: go test ./internal/httpserver/... -run TestAdmission_T6g -tags=integration -v
+    Result: FAIL - "casino: B1-limited acquisition delta = 2, want exactly 1". Reverted;
+    confirmed green.
+
+M19 B1-kyc, same mutation, kyc_admin_handlers.go's newKYCWebhookHandler: KILLED.
+    Diff: identical shape, moving admitVerified inside deps.DB.WithTenant's closure.
+    Command: go test ./internal/httpserver/... -run TestAdmission_T6g -tags=integration -v
+    Result: FAIL - "kyc: B1-limited acquisition delta = 2, want exactly 1". Reverted; confirmed
+    green (full T6g suite -count=3 clean afterward).
+
+The route guard (webhook_admission_route_guard_test.go) was extended per security's exact
+§7.3 requirement: it now fails the WHOLE test if ANY HandleFunc/Handle call in the package's
+non-test files has a non-literal (non-string-literal) first argument, in addition to its
+existing per-route admission/redaction check.
+
+M20 N2b "a fourth route registered via a package const pattern"
+   (mux.HandleFunc(constPattern, handler)): KILLED.
+    File: internal/httpserver/casino_routes.go.
+    Diff: added a package const `n2bMutationTestPattern = "POST /v1/webhooks/sportsbook/..."`
+    and `mux.HandleFunc(n2bMutationTestPattern, n2bMutationTestUnguardedHandler(deps))`.
+    Command: go test ./internal/httpserver/... -run TestWebhookRouteGuard -v
+    Result: FAIL - "casino_routes.go: a HandleFunc call's first argument is not a string
+    literal". Reverted; confirmed green.
+
+M21 N2c "a fourth route registered through a helper whose own inner HandleFunc call uses a
+   non-literal (parameter) pattern": KILLED.
+    File: internal/httpserver/casino_routes.go.
+    Diff: added `n2cMutationTestHelper(m *http.ServeMux, p string, h http.HandlerFunc) {
+    m.HandleFunc(p, h) }` and called it as
+    `n2cMutationTestHelper(mux, "POST /v1/webhooks/sportsbook/...", handler)`.
+    Command: go test ./internal/httpserver/... -run TestWebhookRouteGuard -v
+    Result: FAIL - same "not a string literal" error, this time pointing at the helper's own
+    inner m.HandleFunc(p, h) call (p is a parameter, not a literal). Reverted; confirmed green
+    (three real routes still discovered correctly afterward).
+
+Info I6 (recommended, done): countingGate
+(webhook_admission_c1_isolating_integration_test.go) now asserts every Acquire call's key
+against an exact expected value (domain|tenantSlug|providerID) computed per test, failing via
+t.Fatalf on any mismatch. Re-ran the N1/N3/N4 mutations from round 4 against this updated gate
+(spot-checked N1-payments) to confirm they still fail via the INTENDED assertion (401 instead
+of 503), not via a spurious key-mismatch panic - confirmed clean.
+
+Info I7 (recommended, done): the KYC subtest of T6g now asserts
+kycVerificationExistsForRef(...) == false for the limited callback's own reference (a direct
+kyc_verifications query), replacing the vacuous ledger-row check KYC never exercises.
+
+Every round-5 mutation above was reverted and the affected test(s) re-confirmed green before
+moving to the next; git status --short showed only the mutation's own diff at the time each
+was applied. Full targeted suite (go test -tags=integration ./internal/httpserver/... plus the
+internal/webhookauth, internal/admission, internal/providercred, internal/config unit suites,
+-race on the touched tests, -count=3/-count=5 repeats on TestAdmission_T6g) is green.
