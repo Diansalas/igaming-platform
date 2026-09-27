@@ -569,3 +569,86 @@ the httpserver tests only).
 
 Probe sources (scratch, not committed):
 `/tmp/claude-0/-home-user-igaming-platform/82298384-cc24-5365-b2fc-220688ed9969/scratchpad/rvlf2-probe_integration_test.go.txt`
+
+---
+
+# Re-review 2: FH-5 callback security round (`dd44d04`, `0a96a01` on top of `7641332`, `be15a11`, `bf5813f`, `9dab8f3`)
+
+- Reviewed AT `0a96a01` (branch `worktree-agent-adce273a3a5339f77`), in a detached worktree.
+- Private DB via `priv_db.sh` (`rv_lf_cb3_*`, migrated to 0106). It is dropped and the worktree
+  removed.
+- **No `sudo`, no role or password change.** DB access worked throughout.
+- A container restart interrupted the run once. The interrupted mutant (SIBS) was restored with
+  `git checkout` and re-run from scratch; no result below comes from a partial run.
+- INV-DEP-1 (FH-3) is out of this range and was not reviewed here.
+- **Baseline:** the full `internal/payments` suite is green (303 s), and `internal/reconciliation`
+  is green (43 s).
+- **Mutation method:** 21 mutants, each applied with an anchor-checked replacement and restored
+  with `git checkout`.
+  - Every failure was re-run alone twice before it counted as a kill. The machine was shared with
+    other agents' suites, and contention produced spurious failures under load.
+  - Every survivor was re-run against the **full** `internal/payments` suite.
+  - Survivors that touch webhook behaviour were also run against the `internal/httpserver`
+    webhook, payment and reversal tests.
+
+## Verdict: APPROVE WITH CONDITIONS
+
+The callback REJECT is lifted:
+
+- The two blocking items from re-review 1 are fixed and pinned by tests: H1 rule 2 (non-final
+  reversals never post) and F2 on the callback path.
+- Every money-path finding is closed and pinned. None of the open items below lets money move
+  wrongly.
+- **Conditions, before the stage gate and not blocking FH-3:** add tests for four surviving
+  mutants (H2 ×2, SIBS, H1 rule 3), plus the Low items below.
+
+## Item-by-item
+
+| Item | Status | Evidence |
+|---|---|---|
+| H1 rule 1/4 (final reversal: `succeeded` or legacy `declined` posts or tombstones) | **CLOSED** | `applyReversalReceiptEvidence`; `TestRVLF_P1_ReversalPostsRegardlessOfWireOutcomeReasonCarrier` (narrowed to the two final outcomes) and `P1b` |
+| H1 rule 2 (`pending`/`ambiguous` never post or tombstone) | **CLOSED** | Receipt kept under its real outcome, disposition `anomaly`, resolution `anomaly_other` (with `attempt_id` when resolved), P1 audit `payments.reversal_non_final_outcome`, uniform 200. Mutant **H1R2 killed** by `TestRVLF_P1_NonFinalReversalOutcomeNeverPosts`. |
+| H1 rule 3 (wire outcome preserved) | **CLOSED in code, fingerprint untested** | `ReceiptEvidence.RawOutcome` feeds `computeEventFingerprint`. `wire_outcome` and `reason` are in the `deposit.reversed`/`deposit.reversal_tombstoned` audit. Mutant **H1R3 (fingerprint ignores RawOutcome) SURVIVES** the full payments suite and the httpserver tests. Condition C1. Minor gap: the bounded reason is kept in audit only, not in the receipt's `decline_reason` column as ruled. That is acceptable (the audit is append-only and durable). Low L-a. |
+| H1 rule 5 (contract docs) | **CLOSED (code docs)** | `types.go` `CallbackEvent.Outcome` and `HandleCallback` doc comments state it, with "chargeback won" mapped to unsupported (PROVIDER DEPENDENT). ADR 0095 §9.3's own text is not amended: the rule is recorded in the §27 implementation record instead. That is `architect`'s to fold in; Low L-b. |
+| H1 rule 6 (reconciliation) | **CLOSED (doc-only)** | The comment in `payment_statement.go` covers the "no posting expected" half. It omits the other half: a *posted* reversal against a `pending`/`declined` line is the detector for a contract violation or a won chargeback. Low L-c. |
+| M1 (terminal amount/asset mismatch) | **CLOSED** | Both terminal cells call `auditTerminalAmountAssetMismatch` (stable P1 action `payments.callback_amount_asset_mismatch_terminal`). Amounts go in the audit only; no state change; no posting; 200. Mutants **M1S and M1D killed** by `TestRVLF_P4_*`. Residual Low L-d: because R0 precedes the matrix, the receipt's `disposition_at_receipt` stays `applied`, and the returned disposition is `duplicate_effect`. The truth is carried by `resolution = anomaly_other` plus the audit. That is acceptable given A7, and must be documented for operators. The live-state mismatch → T10 (M1C) is still pinned only at the HTTP layer: it survives `internal/payments`, and is killed by `TestWebhook_ProviderMismatchAfterVerification_IsDisputedNotRejected` and `TestPaymentWebhook_UniformResponseAcrossDispositions`. That is acceptable. |
+| F2 (reason bounded before R0, multibyte-safe) | **CLOSED** | `boundedDeclineReasonAudited` runs at the top of `ApplyReceiptEvidence`, before any receipt insert. Oversize text is replaced by an ASCII sentinel, never truncated, so it is multibyte-safe. The audit carries the byte length and a SHA-256 prefix, never the raw text. Phase C and sweeper sites are also bounded. Mutants **BDR** and **F2R** (the callback-site bound) **killed** by the `TestRVLF_F2_*` tests and my Q3/Q2 probes (committed as `rvlf_i1_ledger_ruling2_integration_test.go`). Low L-e: the oversize audit is written before R0, and is repeated on each redelivery. The audit insert takes no L1 lock, so there is no deadlock risk. |
+| H2 (deferred backstop at 3 sites) | **CLOSED in code; 2 of 3 sites untested** | Phase C (DFD) was killed last round by P8. **DFR** (callback-site call) and **DFS** (sweeper T9 site) still **SURVIVE** the full payments suite. Condition C2. |
+| H4 (T2 guard, sibling rejection) | **CLOSED** | **T2G killed** by `TestRVLF_F3_T2ClaimRefusesCreatedSiblingOfSucceededIntent`. **SIBD killed** (`TestRVLF_N4_*`). SIBR was killed last round. **SIBS** (sweeper-success sibling rejection) **SURVIVES** the full suite; the T2 guard makes it money-safe. Condition C3. |
+| M3 / A7-TOMB-1 | **CLOSED** | The reversal R0 is now the first write (after the payout integrity check), before the parent lock, in both branches, and the branch is decided from the locked re-read. Pinned by `TestRVLF_A7Tomb1_ConcurrentIdenticalTombstoneReversalsNoDeadlockExactlyOneEffect`. My re-review-1 finding about the tombstone branch locking before R0 is fixed. The only earlier write is L-e's audit row. |
+| M5 / F3 (sticky freeze; stub status) | **CLOSED** | `finalizeDeclined`/`finalizeAmbiguous` set `intent.Status = actual` (my N1). **FRZ**, **FRZP** and **F3R2 killed** by `TestRVLF_F3_LiveSiblingDeclineAfterT13NeverCreatesOrphanCascade` and my Q2. The single-writer projection concern remains (drive/sweeper still write status directly), but it is money-safe and superseded by FH-3's choke point. Carried to FH-3. |
+| N2 (success after tombstone → dispute, phase C and sweeper) | **CLOSED** | Phase C goes to T10. The sweeper goes to T13t from `declined`, else T10. **N2D** and **N2S killed** by the `TestRVLF_N2_*` tests. |
+| N3 / S-H1 (event_type allow-list in the deferred replay) | **CLOSED** | The filter is derived from `attempt.Operation`. **DFT** (filter removed) killed by N1 and N3. **DFTX** (payout mapped to deposit) killed by `TestRVLF_N3_DeferredApplyNeverReplaysADepositDeclineAsPayoutEvidence`. The main-path cross-check is now an allow-list too (an unknown `payout_returned` becomes an anomaly). |
+| N4 (caller evidence kind) | **CLOSED** | **N4 killed** by `TestRVLF_N4_RejectCreatedSiblingsRecordsCallerEvidenceKind` |
+| S-M1 (payout success with a different reference → dispute) | **CLOSED** | T10 `provider_reference_mismatch` plus audit, with the stored reference falling back to the withdrawal's. **SM1 killed** by `TestRVLF_SM10_PayoutSuccessProviderReferenceMismatchDisputes`. That mutant was confirmed by an isolated re-run after contention noise. The payout receipt path is still not live (no adapter emits `payout` events): PROVIDER DEPENDENT. |
+
+## Mutant table, re-run (the survivors from re-review 1, plus this round's fixes)
+
+| Mutant | Result | Mutant | Result |
+|---|---|---|---|
+| T2G | killed | BDR | killed |
+| SIBD | killed | F2R | killed |
+| **SIBS** | **survives** (full suite) | M1C | survives payments, killed by httpserver |
+| **DFR** | **survives** (full suite) | M1S / M1D | killed |
+| **DFS** | **survives** (full suite) | H1R2 | killed |
+| DFT / DFTX | killed | **H1R3** | **survives** (full payments suite and httpserver) |
+| FRZ / FRZP | killed | N2D / N2S | killed |
+| F3R2 | killed | SM1 / N4 | killed |
+
+## Conditions (before the stage gate; not blocking FH-3)
+
+- **C1:** a test that two deliveries of one reversal reference differing only in wire outcome
+  (`declined` then `succeeded`) produce two receipts and exactly one ledger effect. This kills
+  H1R3.
+- **C2:** a callback-path race (callback T4 by merchant reference while a deposit-typed receipt
+  is deferred), and a sweeper-poll race, each asserting the deferred receipt is applied and
+  resolved. This kills DFR and DFS.
+- **C3:** a T13 success through a sweeper poll with a `created` sibling, asserting the sibling is
+  `rejected` (`intent_succeeded`, evidence `query_status`). This kills SIBS.
+- **Low (L-a to L-e):**
+  - L-a: store the bounded reason in the reversal receipt's `decline_reason`.
+  - L-b: `architect` folds rule 5 into ADR §9.3.
+  - L-c: complete the rule-6 comment.
+  - L-d: document that `disposition_at_receipt` is fixed at R0 and that `resolution` is
+    authoritative.
+  - L-e: skip the oversize audit when the receipt is a duplicate, and move it after R0.
