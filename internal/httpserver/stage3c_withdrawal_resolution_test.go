@@ -139,6 +139,232 @@ func TestWithdrawalResolve_DelayedSuccessAfterTimeout(t *testing.T) {
 	}
 }
 
+// TestWithdrawalResolve_UnlinkedStaffAccountRejected kills SM7
+// (rv-prh-i1-payout-security.md/registry PAY-SEC-TESTS-1): submit already
+// has TestWithdrawalSubmit_UnlinkedStaffAccountRejected pinning the same
+// approverEligibilityCheck call, but /resolve had no equivalent test - the
+// mutation "remove the linked-staff check from /resolve" passed the whole
+// httpserver suite. A staff account with no confirmed Person linkage must
+// get 403 on /resolve, exactly like submit, and must cause no state
+// change or effect.
+func TestWithdrawalResolve_UnlinkedStaffAccountRejected(t *testing.T) {
+	f := setupStage3CResolutionFixture(t, 10000)
+	submitted := mustSubmitWithdrawal(t, f.srv, f.financeToken.AccessToken, f.withdrawalID)
+	if submitted.State != "submitted" {
+		t.Fatalf("expected state submitted after submit, got %q", submitted.State)
+	}
+
+	unlinked := mustCreateUnlinkedStaff(t, f.pool, f.tenant.ID, identity.StaffRoleFinance, "a-decent-password-3")
+	unlinkedToken := mustLoginStaff(t, f.srv, f.tenant.Slug, unlinked.Email, "a-decent-password-3")
+
+	resp := postJSON(t, f.srv, "/v1/admin/withdrawals/"+f.withdrawalID+"/resolve", unlinkedToken.AccessToken, nil)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		var apiErr apierror.Error
+		decodeBody(t, resp, &apiErr)
+		t.Fatalf("expected 403 for an unlinked staff account resolving, got %d: %+v", resp.StatusCode, apiErr)
+	}
+
+	// No effect: the withdrawal must still be exactly `submitted`, resolvable
+	// by a genuinely eligible actor afterward (proving the refused attempt
+	// left no partial state behind).
+	f.mock.Resolve(submitted.ProviderReference, payments.OutcomeSucceeded, "", false)
+	resolved := mustResolve(t, f)
+	if resolved.State != "completed" {
+		t.Fatalf("expected the withdrawal to still resolve normally afterward (no residual effect from the refused attempt), got %q", resolved.State)
+	}
+}
+
+// TestWithdrawalResolve_SuspendedStaffAccountRejected is SM7's other half:
+// a linked, otherwise-eligible finance staff account whose status is
+// changed to suspended AFTER its token was issued must still be refused on
+// /resolve, exactly like TestWithdrawalApprove_InactiveStaffAccountRejected
+// proves for approve.
+func TestWithdrawalResolve_SuspendedStaffAccountRejected(t *testing.T) {
+	f := setupStage3CResolutionFixture(t, 10000)
+	submitted := mustSubmitWithdrawal(t, f.srv, f.financeToken.AccessToken, f.withdrawalID)
+	if submitted.State != "submitted" {
+		t.Fatalf("expected state submitted after submit, got %q", submitted.State)
+	}
+
+	resolver := mustCreateStaff(t, f.pool, f.tenant.ID, identity.StaffRoleFinance, "a-decent-password-4")
+	resolverToken := mustLoginStaff(t, f.srv, f.tenant.Slug, resolver.Email, "a-decent-password-4")
+	if err := f.pool.WithTenant(context.Background(), f.tenant.ID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `UPDATE staff_users SET status = 'suspended' WHERE id = $1`, resolver.ID)
+		return err
+	}); err != nil {
+		t.Fatalf("suspend staff account: %v", err)
+	}
+
+	resp := postJSON(t, f.srv, "/v1/admin/withdrawals/"+f.withdrawalID+"/resolve", resolverToken.AccessToken, nil)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		var apiErr apierror.Error
+		decodeBody(t, resp, &apiErr)
+		t.Fatalf("expected 403 for a suspended staff account resolving with an already-issued token, got %d: %+v", resp.StatusCode, apiErr)
+	}
+}
+
+// --- Permanent cross-tenant tests for submit and /resolve (PAY-SEC-TESTS-1,
+// probe HP1) -----------------------------------------------------------------
+
+// TestWithdrawalSubmit_CrossTenantDenied is HP1's submit half, made
+// permanent: tenant B's approved withdrawal must be completely invisible
+// to tenant A's finance staff - 404, zero effect, never a leaked 403/409
+// that would confirm the id exists in another tenant.
+func TestWithdrawalSubmit_CrossTenantDenied(t *testing.T) {
+	pool, issuer := testEnv(t)
+	orchestrator, mock := newMockOrchestrator()
+	srv := newFinancialTestServer(t, pool, issuer, orchestrator)
+
+	tenantA := mustCreateTenant(t, pool)
+	tenantB := mustCreateTenant(t, pool)
+	brandB := mustCreateBrand(t, pool, tenantB)
+	mustRegisterCapability(t, pool, tenantB.ID, mock)
+
+	financeA := mustCreateStaff(t, pool, tenantA.ID, identity.StaffRoleFinance, "finance-a-submit-pw-1")
+	financeATokens := mustLoginStaff(t, srv, tenantA.Slug, financeA.Email, "finance-a-submit-pw-1")
+	financeB := mustCreateStaff(t, pool, tenantB.ID, identity.StaffRoleFinance, "finance-b-submit-pw-1")
+	financeBTokens := mustLoginStaff(t, srv, tenantB.Slug, financeB.Email, "finance-b-submit-pw-1")
+
+	var playerAccountB uuid.UUID
+	if err := pool.WithTenant(context.Background(), tenantB.ID, func(ctx context.Context, tx pgx.Tx) error {
+		account, err := identity.RegisterPlayer(ctx, tx, brandB, "cross-tenant-submit-wd@example.com", "hash")
+		playerAccountB = account.ID
+		return err
+	}); err != nil {
+		t.Fatalf("seed player B: %v", err)
+	}
+	walletB := fundWallet(t, pool, tenantB.ID, brandB.ID, playerAccountB, "EUR", 100000)
+	wrB := mustCreateWithdrawalRequest(t, pool, tenantB.ID, brandB.ID, playerAccountB, walletB.ID, "EUR", 5000)
+
+	if err := pool.WithTenant(context.Background(), tenantB.ID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx,
+			`INSERT INTO withdrawal_policies (tenant_id, asset_code, approval_threshold_minor_units, required_approvals, effective_from)
+			 VALUES ($1, 'EUR', 1000000, 1, now() - interval '1 hour')`,
+			tenantB.ID,
+		)
+		return err
+	}); err != nil {
+		t.Fatalf("configure withdrawal policy (tenant B): %v", err)
+	}
+
+	mustOpenReviewQueue(t, srv, financeBTokens.AccessToken)
+	resp := postJSON(t, srv, "/v1/admin/withdrawals/"+wrB.ID.String()+"/approve", financeBTokens.AccessToken, nil)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("approve withdrawal (tenant B): status %d", resp.StatusCode)
+	}
+
+	auditBefore := countRows(t, pool, tenantB.ID, `SELECT count(*) FROM audit_log WHERE action LIKE 'withdrawal.submit%' AND target_id = $1`, wrB.ID.String())
+
+	resp = postJSON(t, srv, "/v1/admin/withdrawals/"+wrB.ID.String()+"/submit", financeATokens.AccessToken, map[string]string{"payment_method": "card"})
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		var apiErr apierror.Error
+		decodeBody(t, resp, &apiErr)
+		t.Fatalf("expected 404 for tenant A's finance staff submitting tenant B's withdrawal, got %d: %+v", resp.StatusCode, apiErr)
+	}
+
+	auditAfter := countRows(t, pool, tenantB.ID, `SELECT count(*) FROM audit_log WHERE action LIKE 'withdrawal.submit%' AND target_id = $1`, wrB.ID.String())
+	if auditAfter != auditBefore {
+		t.Fatalf("expected no new submit audit row from the cross-tenant attempt, before=%d after=%d", auditBefore, auditAfter)
+	}
+	if got := countRows(t, pool, tenantB.ID, `SELECT count(*) FROM payment_attempts WHERE withdrawal_request_id = $1`, wrB.ID); got != 0 {
+		t.Fatalf("expected zero payment attempts after a cross-tenant submit attempt, got %d", got)
+	}
+
+	// The withdrawal must still submit normally afterward for the RIGHT
+	// tenant's own staff - proving the refused cross-tenant attempt left
+	// no state change or lock behind.
+	resp = postJSON(t, srv, "/v1/admin/withdrawals/"+wrB.ID.String()+"/submit", financeBTokens.AccessToken, map[string]string{"payment_method": "card"})
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		var apiErr apierror.Error
+		decodeBody(t, resp, &apiErr)
+		t.Fatalf("expected tenant B's own finance staff to still submit successfully afterward, got %d: %+v", resp.StatusCode, apiErr)
+	}
+}
+
+// TestWithdrawalResolve_CrossTenantDenied is HP1's /resolve half, made
+// permanent: tenant B's submitted withdrawal must be completely invisible
+// to tenant A's finance staff on /resolve too - 404, zero audit rows, no
+// state change.
+func TestWithdrawalResolve_CrossTenantDenied(t *testing.T) {
+	pool, issuer := testEnv(t)
+	orchestrator, mock := newMockOrchestrator()
+	srv := newFinancialTestServer(t, pool, issuer, orchestrator)
+
+	tenantA := mustCreateTenant(t, pool)
+	tenantB := mustCreateTenant(t, pool)
+	brandB := mustCreateBrand(t, pool, tenantB)
+	mustRegisterCapability(t, pool, tenantB.ID, mock)
+
+	financeA := mustCreateStaff(t, pool, tenantA.ID, identity.StaffRoleFinance, "finance-a-resolve-pw-1")
+	financeATokens := mustLoginStaff(t, srv, tenantA.Slug, financeA.Email, "finance-a-resolve-pw-1")
+	financeB := mustCreateStaff(t, pool, tenantB.ID, identity.StaffRoleFinance, "finance-b-resolve-pw-1")
+	financeBTokens := mustLoginStaff(t, srv, tenantB.Slug, financeB.Email, "finance-b-resolve-pw-1")
+
+	var playerAccountB uuid.UUID
+	if err := pool.WithTenant(context.Background(), tenantB.ID, func(ctx context.Context, tx pgx.Tx) error {
+		account, err := identity.RegisterPlayer(ctx, tx, brandB, "cross-tenant-resolve-wd@example.com", "hash")
+		playerAccountB = account.ID
+		return err
+	}); err != nil {
+		t.Fatalf("seed player B: %v", err)
+	}
+	walletB := fundWallet(t, pool, tenantB.ID, brandB.ID, playerAccountB, "EUR", 100000)
+	wrB := mustCreateWithdrawalRequest(t, pool, tenantB.ID, brandB.ID, playerAccountB, walletB.ID, "EUR", 5000)
+
+	if err := pool.WithTenant(context.Background(), tenantB.ID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx,
+			`INSERT INTO withdrawal_policies (tenant_id, asset_code, approval_threshold_minor_units, required_approvals, effective_from)
+			 VALUES ($1, 'EUR', 1000000, 1, now() - interval '1 hour')`,
+			tenantB.ID,
+		)
+		return err
+	}); err != nil {
+		t.Fatalf("configure withdrawal policy (tenant B): %v", err)
+	}
+
+	mustOpenReviewQueue(t, srv, financeBTokens.AccessToken)
+	resp := postJSON(t, srv, "/v1/admin/withdrawals/"+wrB.ID.String()+"/approve", financeBTokens.AccessToken, nil)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("approve withdrawal (tenant B): status %d", resp.StatusCode)
+	}
+	submitted := mustSubmitWithdrawal(t, srv, financeBTokens.AccessToken, wrB.ID.String())
+	if submitted.State != "submitted" {
+		t.Fatalf("expected state submitted after submit, got %q", submitted.State)
+	}
+
+	auditBefore := countRows(t, pool, tenantB.ID, `SELECT count(*) FROM audit_log WHERE action = 'withdrawal.resolve_attempted.http' AND target_id = $1`, wrB.ID.String())
+
+	resp = postJSON(t, srv, "/v1/admin/withdrawals/"+wrB.ID.String()+"/resolve", financeATokens.AccessToken, nil)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		var apiErr apierror.Error
+		decodeBody(t, resp, &apiErr)
+		t.Fatalf("expected 404 for tenant A's finance staff resolving tenant B's withdrawal, got %d: %+v", resp.StatusCode, apiErr)
+	}
+
+	auditAfter := countRows(t, pool, tenantB.ID, `SELECT count(*) FROM audit_log WHERE action = 'withdrawal.resolve_attempted.http' AND target_id = $1`, wrB.ID.String())
+	if auditAfter != auditBefore {
+		t.Fatalf("expected no new resolve audit row from the cross-tenant attempt, before=%d after=%d", auditBefore, auditAfter)
+	}
+
+	// The withdrawal must still resolve normally afterward for the RIGHT
+	// tenant's own staff.
+	mock.Resolve(submitted.ProviderReference, payments.OutcomeSucceeded, "", false)
+	resp = postJSON(t, srv, "/v1/admin/withdrawals/"+wrB.ID.String()+"/resolve", financeBTokens.AccessToken, nil)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		var apiErr apierror.Error
+		decodeBody(t, resp, &apiErr)
+		t.Fatalf("expected tenant B's own finance staff to still resolve successfully afterward, got %d: %+v", resp.StatusCode, apiErr)
+	}
+}
+
 // TestWithdrawalResolve_DelayedFailureAfterTimeout is adversarial test
 // 8.I: the mirror image of 8.H - a delayed DECLINE must fail the
 // withdrawal (releasing the hold back to the player), never leave it

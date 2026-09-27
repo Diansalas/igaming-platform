@@ -44,6 +44,15 @@ import (
 // pg_locks as locktype = 'transactionid' with relation IS NULL - the waiter
 // waits on the lock-holder's XID, not a relation-scoped lock row - and
 // advisory locks likewise carry relation = NULL.
+//
+// Scoped to pg_stat_activity.datname = current_database(): this suite runs
+// against a private, per-test scratch database on a Postgres CLUSTER that
+// may be shared with other agents' concurrent test runs (their own,
+// unrelated scratch/private databases on the same instance) - an
+// unscoped, cluster-wide `pg_locks` scan can otherwise pick up a
+// completely unrelated backend's not-granted lock and misidentify it as
+// this test's own racer, an observed source of flakiness once multiple
+// agents run concurrently on the same Postgres instance.
 func a7WaitAnyLockWaiter(t *testing.T, pool *db.Pool, exclude map[int]bool, timeout time.Duration) (int, bool) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
@@ -51,7 +60,10 @@ func a7WaitAnyLockWaiter(t *testing.T, pool *db.Pool, exclude map[int]bool, time
 		var pid int
 		found := false
 		err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
-			rows, err := tx.Query(ctx, `SELECT pid FROM pg_locks WHERE NOT granted`)
+			rows, err := tx.Query(ctx,
+				`SELECT l.pid FROM pg_locks l
+				 JOIN pg_stat_activity a ON a.pid = l.pid
+				 WHERE NOT l.granted AND a.datname = current_database()`)
 			if err != nil {
 				return err
 			}
@@ -77,6 +89,17 @@ func a7WaitAnyLockWaiter(t *testing.T, pool *db.Pool, exclude map[int]bool, time
 		time.Sleep(10 * time.Millisecond)
 	}
 	return 0, false
+}
+
+// a7ContainsUUID reports whether ids contains id - the uuid.UUID analogue
+// of lockorder_harness_test.go's loContains ([]int only).
+func a7ContainsUUID(ids []uuid.UUID, id uuid.UUID) bool {
+	for _, x := range ids {
+		if x == id {
+			return true
+		}
+	}
+	return false
 }
 
 // a7HoldRow holds a FOR UPDATE row lock on table WHERE id = rowID until
@@ -274,6 +297,127 @@ func TestA7_4_N1_SweeperDepositReclaimVsSelfExclusion_SamePerson(t *testing.T) {
 
 	loAssertBalanced(t, pool, f.tenantID)
 	loAssertProjectionMatchesRebuild(t, pool, f.tenantID)
+}
+
+// TestA7_5a_SweeperDepositClaim_RGGateBlocksBeforeParentLock is a mutation
+// check (#5a) for the same ordering TestA7_4_N1 above exercises: RG's
+// EvaluateEligibility MUST run, and be observably blockable, BEFORE
+// driveCreatedAttempt ever takes the deposit_intents parent lock. Both
+// rg's own L0.4 advisory lock AND the deposit_intents row are held
+// externally, by two DIFFERENT blockers, before the sweeper's claim
+// starts; the claim must queue on the L0.4 blocker specifically, never on
+// the deposit_intents blocker. Killed by hand (see
+// docs/plans/payment-readiness/evidence/prh-i1-mutation-kill.txt, mutation
+// #5a): moving the parent lock ahead of the RG gate in drive.go made this
+// test's own goroutine dispatch never even reach RG - the claim instead
+// queued on the deposit_intents blocker, which this test's own
+// loContains/pid check catches directly.
+func TestA7_5a_SweeperDepositClaim_RGGateBlocksBeforeParentLock(t *testing.T) {
+	pool := depositV2ScratchPool(t)
+	f := seedOrchFixture(t, pool)
+	spy := &a7DepositCallCountingProvider{MockProvider: NewMockProvider("a7-5a", "EUR")}
+	registerCapability(t, pool, f, spy, 100)
+	orch := NewOrchestrator(map[string]PaymentProvider{"a7-5a": spy}, MultiWebhookCredentialResolver{"a7-5a": NewMockWebhookCredentials(spy.MockProvider)})
+
+	intentID := insertRawDepositIntent(t, pool, f, "pending")
+	_ = insertRawCreatedAttempt(t, pool, f.tenantID, intentID, false, time.Now())
+	personID := a7PersonID(t, pool, f.tenantID, f.playerAccountID)
+
+	// Two DIFFERENT blockers: rg's own L0.4 lock, and the deposit intent's
+	// own parent row. The claim must queue on the FIRST, never the second.
+	l04Blocker := a7HoldPersonLock(t, pool, f.tenantID, personID, "blocker-L0.4")
+	intentBlocker := a7HoldRow(t, pool, f.tenantID, "deposit_intents", intentID, "blocker-intent")
+
+	doneA := make(chan struct{})
+	var statsA SweepStats
+	go func() {
+		defer close(doneA)
+		sweeper := NewSweeper(pool, orch, AllowAllDepositKYCGate{}, MockCredentialResolver{})
+		statsA = sweeper.RunOnce(context.Background(), []uuid.UUID{f.tenantID})
+	}()
+
+	pidA, ok := a7WaitAnyLockWaiter(t, pool, map[int]bool{l04Blocker.pid: true, intentBlocker.pid: true}, loLockWaitTimeout)
+	if !ok {
+		l04Blocker.release()
+		intentBlocker.release()
+		<-doneA
+		t.Fatalf("the sweeper's claim never blocked on anything (statsA=%+v)", statsA)
+	}
+	blockedBy := loBlockingPIDs(t, pool, pidA)
+	if loContains(blockedBy, intentBlocker.pid) {
+		l04Blocker.release()
+		intentBlocker.release()
+		<-doneA
+		t.Fatalf("A7/5a regression: the claim queued on the deposit_intents parent lock BEFORE the RG gate (blocked by %v, intent blocker pid %d) - the parent lock must never precede RG", blockedBy, intentBlocker.pid)
+	}
+	if !loContains(blockedBy, l04Blocker.pid) {
+		l04Blocker.release()
+		intentBlocker.release()
+		<-doneA
+		t.Fatalf("expected the claim to be blocked by the L0.4 (RG) blocker (pid %d), got blocked by %v", l04Blocker.pid, blockedBy)
+	}
+
+	l04Blocker.release()
+	intentBlocker.release()
+	<-doneA
+	if len(statsA.Errors) != 0 {
+		t.Fatalf("sweeper errors: %v", statsA.Errors)
+	}
+
+	loAssertBalanced(t, pool, f.tenantID)
+	loAssertProjectionMatchesRebuild(t, pool, f.tenantID)
+}
+
+// TestA7_5b_ClaimBatch_SkipLockedNeverWaitsOnALockedAttemptRow is a
+// mutation check (#5b): claimBatch's own doc comment says its `FOR UPDATE
+// SKIP LOCKED` "never waits on a lock" - this test holds one of two due
+// attempts locked externally and proves claimBatch (a) returns promptly
+// (never blocks) and (b) claims only the OTHER, unlocked attempt. Killed
+// by hand (see docs/plans/payment-readiness/evidence/prh-i1-mutation-kill.txt,
+// mutation #5b): dropping SKIP LOCKED from sweeper.go's claimBatch query
+// made this call block on the externally-held row for the full duration
+// of the held lock, which this test's own wall-clock deadline catches.
+func TestA7_5b_ClaimBatch_SkipLockedNeverWaitsOnALockedAttemptRow(t *testing.T) {
+	pool := depositV2ScratchPool(t)
+	f := seedOrchFixture(t, pool)
+	provider := NewMockProvider("a7-5b", "EUR")
+	registerCapability(t, pool, f, provider, 100)
+	orch := NewOrchestrator(map[string]PaymentProvider{"a7-5b": provider}, MultiWebhookCredentialResolver{"a7-5b": NewMockWebhookCredentials(provider)})
+
+	lockedIntentID := insertRawDepositIntent(t, pool, f, "pending")
+	freeIntentID := insertRawDepositIntent(t, pool, f, "pending")
+	lockedAttemptID := insertRawCreatedAttempt(t, pool, f.tenantID, lockedIntentID, false, time.Now())
+	freeAttemptID := insertRawCreatedAttempt(t, pool, f.tenantID, freeIntentID, false, time.Now())
+
+	blocker := a7HoldRow(t, pool, f.tenantID, "payment_attempts", lockedAttemptID, "blocker-locked-attempt")
+	defer blocker.release()
+
+	sweeper := NewSweeper(pool, orch, AllowAllDepositKYCGate{}, MockCredentialResolver{})
+	type result struct {
+		ids []uuid.UUID
+		err error
+	}
+	resultCh := make(chan result, 1)
+	go func() {
+		ids, err := sweeper.claimBatch(context.Background(), f.tenantID)
+		resultCh <- result{ids: ids, err: err}
+	}()
+
+	const mustCompleteWithin = 500 * time.Millisecond
+	select {
+	case r := <-resultCh:
+		if r.err != nil {
+			t.Fatalf("claimBatch: %v", r.err)
+		}
+		if a7ContainsUUID(r.ids, lockedAttemptID) {
+			t.Fatalf("A7/5b regression: claimBatch claimed the externally-locked attempt %s - SKIP LOCKED is not excluding it", lockedAttemptID)
+		}
+		if !a7ContainsUUID(r.ids, freeAttemptID) {
+			t.Fatalf("expected claimBatch to claim the free attempt %s, got %v", freeAttemptID, r.ids)
+		}
+	case <-time.After(mustCompleteWithin):
+		t.Fatalf("A7/5b regression: claimBatch did not return within %s - it is waiting on the externally-locked attempt row instead of skipping it", mustCompleteWithin)
+	}
 }
 
 // --- #1a: sweeper lease + per-item claim vs. a real callback + phase C, ---

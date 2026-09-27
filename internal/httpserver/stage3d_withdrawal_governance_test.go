@@ -495,3 +495,67 @@ func TestStaffPersonLink_CannotRelinkOnceSet(t *testing.T) {
 		t.Fatalf("expected person_id to remain %s, got %s - the append-only invariant was violated", *staff.PersonID, currentPersonID)
 	}
 }
+
+// TestWithdrawalSubmit_PendingReviewBypassRejected is SM13
+// (rv-prh-i1-payout-security.md/registry PAY-SEC-TESTS-1): the four-eyes
+// bypass mutant weakens LockApprovedForSubmission's own state check to
+// also accept `pending_review` (before any approval at all) - this
+// mutant was confirmed, on a working database, to SURVIVE the full
+// withdrawal/payments/httpserver suites. A withdrawal that has only been
+// promoted to the review queue (mustOpenReviewQueue's own
+// requested->pending_review side effect), with ZERO approvals, must be
+// refused on submit exactly like any other non-approved state - proving
+// the four-eyes gate is actually load-bearing at the one call site that
+// matters (payments.ClaimForDispatch -> withdrawal.LockApprovedForSubmission),
+// not merely asserted in review prose.
+func TestWithdrawalSubmit_PendingReviewBypassRejected(t *testing.T) {
+	pool, issuer := testEnv(t)
+	orchestrator, mock := newMockOrchestrator()
+	srv := newFinancialTestServer(t, pool, issuer, orchestrator)
+
+	tenant := mustCreateTenant(t, pool)
+	brand := mustCreateBrand(t, pool, tenant)
+	mustRegisterCapability(t, pool, tenant.ID, mock)
+
+	player := mustRegisterPlayer(t, srv, brand.Slug)
+	finance := mustCreateStaff(t, pool, tenant.ID, identity.StaffRoleFinance, "sm13-finance-pw-1")
+	financeToken := mustLoginStaff(t, srv, tenant.Slug, finance.Email, "sm13-finance-pw-1")
+
+	fundWallet(t, pool, tenant.ID, brand.ID, player.ID, "EUR", 100000)
+	wr := mustCreateWithdrawalRequest(t, pool, tenant.ID, brand.ID, player.ID, walletIDFor(t, pool, tenant.ID, player.ID, "EUR"), "EUR", 5000)
+
+	// Promote requested -> pending_review, WITHOUT any approval at all -
+	// the exact shape SM13's mutant would let through.
+	mustOpenReviewQueue(t, srv, financeToken.AccessToken)
+
+	var stateBefore string
+	if err := pool.WithTenant(context.Background(), tenant.ID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT state FROM withdrawal_requests WHERE id = $1`, wr.ID).Scan(&stateBefore)
+	}); err != nil {
+		t.Fatalf("read state before: %v", err)
+	}
+	if stateBefore != "pending_review" {
+		t.Fatalf("setup: expected pending_review after opening the review queue, got %q", stateBefore)
+	}
+
+	resp := postJSON(t, srv, "/v1/admin/withdrawals/"+wr.ID.String()+"/submit", financeToken.AccessToken, map[string]string{"payment_method": "card"})
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusConflict {
+		var apiErr apierror.Error
+		decodeBody(t, resp, &apiErr)
+		t.Fatalf("SM13 regression: expected 409 submitting a pending_review (zero-approval) withdrawal, got %d: %+v", resp.StatusCode, apiErr)
+	}
+
+	var stateAfter string
+	if err := pool.WithTenant(context.Background(), tenant.ID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT state FROM withdrawal_requests WHERE id = $1`, wr.ID).Scan(&stateAfter)
+	}); err != nil {
+		t.Fatalf("read state after: %v", err)
+	}
+	if stateAfter != "pending_review" {
+		t.Fatalf("SM13 regression: expected the withdrawal to remain pending_review after a rejected submit, got %q", stateAfter)
+	}
+	if count := countRows(t, pool, tenant.ID, `SELECT count(*) FROM payment_attempts WHERE withdrawal_request_id = $1`, wr.ID); count != 0 {
+		t.Fatalf("SM13 regression: expected zero payment attempts after a rejected pending_review submit, got %d", count)
+	}
+}

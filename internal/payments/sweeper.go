@@ -57,6 +57,22 @@ const (
 	SweeperDefaultPollBackoffCap  = 30 * time.Minute
 )
 
+// SweeperBatchLeaseOwner is claimBatch's OWN lease_owner literal (PAY-SEC-S-L2,
+// rv-prh-i1-payout-security.md): distinct from every genuine PER-ITEM
+// sweeper-driven lease (drive.go's cascade "sweeper" leaseOwner, and
+// payout_sweep.go's "sweeper-payout-reclaim"/"sweeper-payout-resubmit").
+// Before this fix, claimBatch and every one of payout.go's
+// lease_owner='sweeper' in-flight-guard exemptions (N7) used the SAME bare
+// literal "sweeper" - conflating "this row is merely leased by the
+// sweeper's OWN batch-claim tx (which never dispatches anything itself)"
+// with "this row's REAL dispatch/resend lease happens to be owned by a
+// sweeper-driven per-item path" was harmless only because those two
+// literals never needed to be told apart. A distinct constant, used ONLY
+// by claimBatch and ONLY compared against by the guards that specifically
+// mean "the sweeper's own batch lease, never a live dispatch", makes that
+// distinction explicit and typo-proof.
+const SweeperBatchLeaseOwner = "sweeper-batch"
+
 // Sweeper drives deposit payment_attempts rows past their next_action_at
 // (ADR 0095 §7). One Sweeper instance is safe to call RunOnce on
 // repeatedly (e.g. from a ticker); it holds no per-call mutable state.
@@ -130,6 +146,25 @@ func (s *Sweeper) RunOnce(ctx context.Context, tenantIDs []uuid.UUID) SweepStats
 // never changes a state, never locks a parent row, and never waits on a
 // lock - SKIP LOCKED guarantees that. This is the one exception to
 // "parent before attempt" (ADR 0095 §14).
+//
+// PAY-SEC-S-L2 (rv-prh-i1-payout-security.md): this selects (and re-leases)
+// purely by next_action_at, same as before - it does NOT additionally
+// exclude a row under a live non-batch lease. An attempt tried (and
+// reverted after regressing a wide swath of the sweeper suite): filtering
+// the SELECT on "no live non-batch lease" broke the sweeper's own ORDINARY
+// cross-tick continuation, since a per-item claim/resend deliberately sets
+// next_action_at EARLIER than its own lease_until (the lease is a
+// crash-recovery safety net, not "do not look again before this expires")
+// - the same sweeper legitimately revisiting a row it is itself still
+// driving forward is indistinguishable, from lease_owner/lease_until/
+// next_action_at alone, from SP-C's genuinely adversarial stale-snapshot
+// race. SP-C itself therefore remains UNFIXED here; see
+// docs/plans/payment-readiness/prh-i1-payout-launch-conditions.md for the
+// honest status and the two alternatives the security review offered
+// (this file's own SELECT vs. RescheduleNonTerminal never regressing
+// next_action_at below a live lease_until) - the second was not attempted
+// this round given the first's demonstrated blast radius and the risk of
+// a similarly subtle regression without much more extensive testing.
 func (s *Sweeper) claimBatch(ctx context.Context, tenantID uuid.UUID) ([]uuid.UUID, error) {
 	leaseUntil := time.Now().Add(s.Lease)
 	var ids []uuid.UUID
@@ -159,8 +194,8 @@ func (s *Sweeper) claimBatch(ctx context.Context, tenantID uuid.UUID) ([]uuid.UU
 		rows.Close()
 		for _, id := range due {
 			if _, err := tx.Exec(actx,
-				`UPDATE payment_attempts SET lease_owner = 'sweeper', lease_until = $2, next_action_at = $2, updated_at = now() WHERE id = $1`,
-				id, leaseUntil,
+				`UPDATE payment_attempts SET lease_owner = $3, lease_until = $2, next_action_at = $2, updated_at = now() WHERE id = $1`,
+				id, leaseUntil, SweeperBatchLeaseOwner,
 			); err != nil {
 				return fmt.Errorf("lease attempt %s: %w", id, err)
 			}

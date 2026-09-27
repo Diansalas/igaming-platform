@@ -755,20 +755,23 @@ func payoutMarkAmbiguousFromSubmitting(ctx context.Context, tx pgx.Tx, attemptID
 // reject anything in practice; it exists so a future caller of this
 // function alone cannot reintroduce R2.
 //
-// N7 (RV-PRH-I1 re-review 2): the lease_owner = 'sweeper' exemption
-// mirrors PollPayoutStatus's own Go-level check exactly - the sweeper's
-// OWN batch-claim lease (set by claimBatch immediately before routing a
-// due `submitting` row to QueryStatus resolution) must never be mistaken
-// for a live dispatch lease, or the sweeper could never recover a crashed
-// payout with a real (non-zero) Lease configured (H3/B2's own scenario).
+// N7 (RV-PRH-I1 re-review 2): the lease_owner = SweeperBatchLeaseOwner
+// exemption mirrors PollPayoutStatus's own Go-level check exactly - the
+// sweeper's OWN batch-claim lease (set by claimBatch immediately before
+// routing a due `submitting` row to QueryStatus resolution) must never be
+// mistaken for a live dispatch lease, or the sweeper could never recover a
+// crashed payout with a real (non-zero) Lease configured (H3/B2's own
+// scenario). PAY-SEC-S-L2: this now names the distinct SweeperBatchLeaseOwner
+// constant, never the bare "sweeper" literal, since claimBatch itself no
+// longer writes that literal.
 func payoutMarkAmbiguousFromSubmittingIfLeaseExpired(ctx context.Context, tx pgx.Tx, attemptID uuid.UUID, evidence EvidenceKind, nextActionAt time.Time) error {
 	return casUpdate(ctx, tx, "T6 submitting->ambiguous (payout, no reference, lease-respecting)",
 		`UPDATE payment_attempts
 		 SET state = 'ambiguous', last_evidence_kind = $2, ever_possibly_sent = true,
 		     next_action_at = $3, poll_count = poll_count + 1, updated_at = now()
 		 WHERE id = $1 AND state = 'submitting'
-		   AND (lease_until IS NULL OR lease_until <= now() OR lease_owner = 'sweeper')`,
-		attemptID, evidence, nextActionAt,
+		   AND (lease_until IS NULL OR lease_until <= now() OR lease_owner = $4)`,
+		attemptID, evidence, nextActionAt, SweeperBatchLeaseOwner,
 	)
 }
 
@@ -810,7 +813,7 @@ func applyPayoutStatusEvidence(ctx context.Context, pool *db.Pool, tenantID, req
 		// state change above, never a separate best-effort call after the
 		// fact - the same B6 rule, now on /resolve. A nil actor (every
 		// sweeper-driven call) is a no-op.
-		return payoutResolveAudit(actx, tx, tenantID, requestID, actor)
+		return payoutResolveAudit(actx, tx, tenantID, requestID, attempt, string(gr.Class), actor)
 	})
 }
 
@@ -936,14 +939,55 @@ func applyPayoutStatusEvidenceInTx(actx context.Context, tx pgx.Tx, tenantID, re
 // is then written in a separate transaction afterwards"). A nil actor
 // (every sweeper-driven call - the sweeper has no staff to attribute to)
 // is a deliberate no-op.
-func payoutResolveAudit(ctx context.Context, tx pgx.Tx, tenantID, requestID uuid.UUID, actor *SubmitActor) error {
+//
+// PAY-SEC-S-M2 (rv-prh-i1-payout-security.md): before this fix, every
+// /resolve call - a reschedule no-op, a T6, a T10 dispute, a completion or
+// a failure - wrote the SAME row (Outcome: success, no metadata), so an
+// investigator could not tell from the staff row what the action actually
+// did. before is the attempt as read BEFORE this call's own state change
+// (the caller's own pre-transition copy - both call sites already have
+// it); the withdrawal's own before-state is always `submitted` at every
+// call site (the /resolve handler's own precondition, `wr.State !=
+// withdrawal.StateSubmitted` is rejected before either call site can run;
+// the sweeper's callers only reach PollPayoutStatus for a submitted
+// withdrawal's live attempt too), so it is not re-queried here.
+// evidenceClass names what evidence this call actually processed
+// (ErrorClass for the QueryStatus matrix path, or a plain description for
+// the no-reference reschedule fallback). Outcome reflects a dispute
+// (failure) distinctly from every other, non-anomalous result (success),
+// per the finding's "reflect a dispute or no-op".
+func payoutResolveAudit(ctx context.Context, tx pgx.Tx, tenantID, requestID uuid.UUID, before PaymentAttempt, evidenceClass string, actor *SubmitActor) error {
 	if actor == nil {
 		return nil
+	}
+	after, err := GetAttemptByID(ctx, tx, before.ID)
+	if err != nil {
+		return fmt.Errorf("payments: payout resolve audit: re-read attempt: %w", err)
+	}
+	wr, err := withdrawal.GetByID(ctx, tx, requestID)
+	if err != nil {
+		return fmt.Errorf("payments: payout resolve audit: re-read withdrawal: %w", err)
+	}
+	outcome := audit.OutcomeSuccess
+	if after.State == AttemptDisputed {
+		outcome = audit.OutcomeFailure
+	}
+	metadata := map[string]any{
+		"attempt_id":              before.ID.String(),
+		"evidence_class":          evidenceClass,
+		"attempt_state_before":    string(before.State),
+		"attempt_state_after":     string(after.State),
+		"withdrawal_state_before": string(withdrawal.StateSubmitted),
+		"withdrawal_state_after":  string(wr.State),
+	}
+	if after.TerminalReason != nil {
+		metadata["terminal_reason"] = *after.TerminalReason
 	}
 	return audit.Record(ctx, tx, audit.Entry{
 		TenantID: tenantID, ActorType: audit.ActorStaff, ActorID: actor.StaffID,
 		Action: "withdrawal.resolve_attempted.http", TargetType: "withdrawal_request", TargetID: requestID.String(),
-		Outcome: audit.OutcomeSuccess, IPAddress: actor.IPAddress, UserAgent: actor.UserAgent, RequestID: actor.RequestID,
+		Outcome: outcome, IPAddress: actor.IPAddress, UserAgent: actor.UserAgent, RequestID: actor.RequestID,
+		Metadata: metadata,
 	})
 }
 
@@ -1061,30 +1105,32 @@ func payoutStatusQuery(provider PaymentProvider, providerReference string) Adapt
 // predicate already only selects a submitting row once its lease is due."
 // That is false. claimBatch's SELECT predicate is on next_action_at, not
 // lease_until, and it then OVERWRITES lease_until with a FRESH lease
-// (lease_owner='sweeper') for every row it claims - including a crashed,
-// long-expired `submitting` payout attempt with no reference (exactly
-// H3/B2's own crash-recovery case). With a real (non-zero) Sweeper.Lease,
-// that fresh lease_until is now in the future, so a naive
+// (lease_owner=SweeperBatchLeaseOwner) for every row it claims - including
+// a crashed, long-expired `submitting` payout attempt with no reference
+// (exactly H3/B2's own crash-recovery case). With a real (non-zero)
+// Sweeper.Lease, that fresh lease_until is now in the future, so a naive
 // `attempt.LeaseUntil.After(time.Now())` check WOULD wrongly refuse the
 // sweeper's own attempt to resolve the very row it just claimed for that
 // purpose - reproducing H3/B2 (claimed=1, processed=0, erroring every
 // tick, no recovery). Fixed by checking `attempt.LeaseOwner` too: only a
-// lease NOT owned by "sweeper" (i.e. `lease_owner = "payout-dispatch"`,
-// set by ClaimForDispatch's own InsertSubmittingAttempt - the ONLY writer
-// of a live dispatch lease on a `submitting` row) can mean "phase B may be
-// running right now". A lease_owner of "sweeper" always means "the batch
-// claim itself, about to resolve this via QueryStatus", never an in-flight
-// outbound call - refusing on that lease would starve the sweeper's own
-// recovery path forever. internal/httpserver's /resolve handler never
-// re-leases before calling this function, so it is unaffected by this
-// distinction and still correctly refuses a genuinely in-flight dispatch.
+// lease NOT owned by SweeperBatchLeaseOwner (i.e. `lease_owner =
+// "payout-dispatch"`, set by ClaimForDispatch's own InsertSubmittingAttempt
+// - the ONLY writer of a live dispatch lease on a `submitting` row) can
+// mean "phase B may be running right now". SweeperBatchLeaseOwner always
+// means "the batch claim itself, about to resolve this via QueryStatus",
+// never an in-flight outbound call - refusing on that lease would starve
+// the sweeper's own recovery path forever. internal/httpserver's /resolve
+// handler never re-leases before calling this function, so it is
+// unaffected by this distinction and still correctly refuses a genuinely
+// in-flight dispatch. PAY-SEC-S-L2: this now names the distinct
+// SweeperBatchLeaseOwner constant, never the bare "sweeper" literal.
 func PollPayoutStatus(ctx context.Context, pool *db.Pool, orch *Orchestrator, credResolver OutboundCredentialResolver, tenantID uuid.UUID, attempt PaymentAttempt, nextPoll time.Time, actor *SubmitActor) error {
 	if attempt.WithdrawalRequestID == nil {
 		return fmt.Errorf("payments: poll payout status: attempt %s has no withdrawal_request_id", attempt.ID)
 	}
 	requestID := *attempt.WithdrawalRequestID
 
-	if attempt.State == AttemptSubmitting && attempt.LeaseOwner != nil && *attempt.LeaseOwner != "sweeper" &&
+	if attempt.State == AttemptSubmitting && attempt.LeaseOwner != nil && *attempt.LeaseOwner != SweeperBatchLeaseOwner &&
 		attempt.LeaseUntil != nil && attempt.LeaseUntil.After(time.Now()) {
 		return ErrPayoutDispatchInFlight
 	}
@@ -1124,7 +1170,7 @@ func PollPayoutStatus(ctx context.Context, pool *db.Pool, orch *Orchestrator, cr
 				return err
 			}
 			// N3: same transaction as the state change above.
-			return payoutResolveAudit(actx, tx, tenantID, requestID, actor)
+			return payoutResolveAudit(actx, tx, tenantID, requestID, attempt, "no_reference_reschedule", actor)
 		})
 	}
 	provider, ok := orch.Provider(*attempt.ProviderID)

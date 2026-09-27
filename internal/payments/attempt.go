@@ -704,10 +704,23 @@ func ApplyDisputeFromNeverSent(ctx context.Context, tx pgx.Tx, attemptID uuid.UU
 
 // Escalate performs T16: no state change, escalated_at set (past the
 // manifest SettlementWindow, or a payout created blocked by a gate).
+//
+// The state predicate below (found by TestA7_1b_SweeperClaimVsCallbackPhaseC_SameWithdrawal,
+// A7-TESTS-1 item #1b) is required, not defense in depth: without it, a
+// concurrent resolution (e.g. a real payout success callback landing
+// between resubmitPayoutAmbiguous's own CAS refusal and this call) can
+// still match `escalated_at IS NULL` on an attempt that has ALREADY moved
+// to a terminal state, and this UPDATE's own next_action_at write then
+// violates the payment_attempts_check9 CHECK (every terminal state
+// requires next_action_at IS NULL) - a hard 500, not a benign no-op. The
+// caller (escalateAmbiguousPayout) treats the resulting
+// ErrAttemptStateConflict as exactly that: the attempt already resolved
+// concurrently, nothing left to escalate.
 func Escalate(ctx context.Context, tx pgx.Tx, attemptID uuid.UUID, nextActionAt time.Time) error {
 	return casUpdate(ctx, tx, "T16 escalate",
 		`UPDATE payment_attempts SET escalated_at = now(), next_action_at = $2, updated_at = now()
-		 WHERE id = $1 AND escalated_at IS NULL`,
+		 WHERE id = $1 AND escalated_at IS NULL
+		   AND state NOT IN ('succeeded','declined','rejected','disputed')`,
 		attemptID, nextActionAt,
 	)
 }

@@ -152,6 +152,51 @@ func TestF7Payments_ConcurrentIdenticalReversalRedelivery(t *testing.T) {
 	}
 }
 
+// TestF7Payments_ConcurrentIdenticalReversalRedelivery_SecondBlocksOnReceiptKey
+// strengthens the N=6 uncontrolled race above (A7-TESTS-1 R0 hardening): a
+// deterministic, two-party version proving WHERE the second identical
+// reversal delivery actually blocks - R0's own (tenant_id, provider_id,
+// event_fingerprint) unique index on payment_provider_events. The first
+// delivery is held open (uncommitted) via loHoldWith so the second,
+// identical delivery has a real, in-flight conflicting row to queue on.
+func TestF7Payments_ConcurrentIdenticalReversalRedelivery_SecondBlocksOnReceiptKey(t *testing.T) {
+	e := newF7PaymentsEnv(t)
+	dep := e.succeededDeposit(t, "f7-conc-rev-block", 2_500)
+	payload := e.reversal("f7-rev-conc-block", dep, 2_500)
+
+	blocker := loHoldWith(t, e.pool, e.f.tenantID, "first-reversal-delivery", func(ctx context.Context, tx pgx.Tx) error {
+		_, err := e.orch.receiveCallbackInTx(ctx, tx, e.f.tenantID, "mock-psp", payload)
+		return err
+	})
+
+	racer := loStartRacer(t, e.pool, e.f.tenantID, "second-reversal-delivery", func(ctx context.Context, tx pgx.Tx) error {
+		_, err := e.orch.receiveCallbackInTx(ctx, tx, e.f.tenantID, "mock-psp", payload)
+		return err
+	})
+	blockingPIDs, ok := loWaitBlocked(t, e.pool, racer.pid, racer.done)
+	if !ok {
+		blocker.release()
+		<-racer.done
+		t.Fatalf("the second, identical reversal delivery never blocked - R0's unique index is not serializing concurrent identical deliveries")
+	}
+	if !loContains(blockingPIDs, blocker.pid) {
+		blocker.release()
+		<-racer.done
+		t.Fatalf("the second delivery is blocked by someone other than the first delivery (pid %d), blocked by %v", blocker.pid, blockingPIDs)
+	}
+
+	blocker.release()
+	<-racer.done
+	if racer.err != nil {
+		t.Fatalf("the second, identical reversal delivery must not error once unblocked: %v", racer.err)
+	}
+
+	if got := cashBalance(t, e.pool, e.f); got != 0 {
+		t.Fatalf("player_cash = %d, want 0 (reversed exactly once)", got)
+	}
+	loAssertBalanced(t, e.pool, e.f.tenantID)
+}
+
 // Site #21: concurrent reversals naming one never-posted original all
 // resolve to the one tombstone (fresh tombstone correlation per call -
 // relies on the TxTombstone correlation exemption).

@@ -161,6 +161,18 @@ func (s *Sweeper) escalateAmbiguousPayout(ctx context.Context, tenantID uuid.UUI
 			return RescheduleNonTerminal(actx, tx, attempt.ID, nextPoll)
 		}
 		if err := Escalate(actx, tx, attempt.ID, nextPoll); err != nil {
+			// A7-TESTS-1 item #1b: Escalate's own CAS now excludes every
+			// terminal state (payment_attempts_check9's own invariant -
+			// next_action_at must be NULL once terminal). A conflict here
+			// means a concurrent resolution (e.g. a real payout success/
+			// decline callback) already reached a terminal state for this
+			// SAME attempt between this call's caller giving up on resend
+			// and this Escalate attempt - there is nothing left to
+			// escalate, and rescheduling a terminal attempt is nonsensical.
+			// A benign no-op, never a bubbled-up 500/repeating conflict.
+			if errors.Is(err, ErrAttemptStateConflict) {
+				return nil
+			}
 			return err
 		}
 		wrID := ""
