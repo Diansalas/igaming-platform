@@ -4896,9 +4896,73 @@ applied inside `applyResolvedReceiptEvidence`'s `OutcomeDeclined` branch, AFTER 
 **Not implemented, disclosed:** the DB-trigger-level mirror of H4's T2 sibling-succeeded guard
 (optional defence in depth; migration 0107 reserved, unused). The "6 scenarios" evidence-file
 overstatement noted above (still 3 distinct disposition values demonstrated over HTTP, not yet a
-real `anomaly` case). H1's ledger-finance ruling on the revert is pending at the time of this
-record; this section will need its own follow-up correction if that ruling disagrees. F3's mutation
-was not killed (see above) - retained as defence in depth, not as a proven fix for a reachable bug.
+real `anomaly` case). ~~H1's ledger-finance ruling on the revert is pending at the time of this
+record; this section will need its own follow-up correction if that ruling disagrees.~~
+**[SUPERSEDED - see the FH-5 follow-up below: ledger-finance's binding ruling arrived and the
+revert described above was itself further corrected.]** F3's mutation was not killed (see above) -
+retained as defence in depth, not as a proven fix for a reachable bug.
+
+**FH-5 follow-up (`payments`, 2026-09-27): ledger-finance's binding H1 ruling and M1, N2-N4,
+security S-H1/S-M1** (Financial Hardening workstream, `docs/plans/payment-readiness/rv-prh-i1-
+callback-ledger.md` "Re-review 1: fix round", and `rv-prh-i1-payout-security.md`).
+
+- **H1 is further corrected, not merely reverted.** The straight revert described above (every
+  wire outcome posts identically) was itself a defect: ledger-finance's binding ruling draws a line
+  the revert missed. **Rule 1/4**: `succeeded` and the legacy `declined`-as-reason-carrier wire
+  outcomes both post/tombstone exactly as the revert already did. **Rule 2**: `pending`/`ambiguous`
+  are NOT final reversal decisions and must never post or tombstone - `applyReversalReceiptEvidence`
+  now branches on the real wire outcome before any lock: a non-final outcome is stored under its
+  OWN real value (never normalized), disposition `anomaly`, resolution `anomaly_other`, a new P1
+  audit action `payments.reversal_non_final_outcome`, and a uniform 200 (never a 4xx/5xx
+  redelivery loop). `TestRVLF_P1_NonFinalReversalOutcomeNeverPosts` pins this; the pre-existing
+  `TestRVLF_P1_ReversalPostsRegardlessOfWireOutcomeReasonCarrier` is narrowed to the two FINAL
+  outcomes only, since asserting all four posted identically was exactly the gap this rule closes.
+  **Rule 3**: `computeEventFingerprint` now uses the real wire outcome (`ReceiptEvidence.RawOutcome`)
+  for a posting/tombstoning reversal, even though the STORED `payment_provider_events.outcome`
+  column stays normalized to `succeeded` for that case (documented on the `ReceiptEvidence.Outcome`
+  field and via `CallbackEvent.Outcome`'s own doc comment in `types.go`); the raw outcome and the
+  already-bounded reason are also now carried in the `deposit.reversed`/`deposit.reversal_tombstoned`
+  audit metadata. **Rule 5**: `types.go`'s `CallbackEvent`/`PaymentProvider.HandleCallback` doc
+  comments now state the contract explicitly: a `deposit_reversal` event asserts a FINAL debit; an
+  adapter must never emit it for a pending-refund/chargeback-inquiry-open signal; a "chargeback won"
+  event has no mapping today and falls into `ReceiveVerifiedCallback`'s existing "unsupported
+  callback event type" error path - PROVIDER DEPENDENT, deferred pending a real vendor contract.
+  **Rule 6**: `internal/reconciliation/payment_statement.go`'s `matchReversal` needed a doc
+  comment only (no code change) - its existing pending/declined statement-line branches already
+  correctly reflect "no posting expected yet" for this case.
+- **RULING M1 (terminal amount/asset mismatch)**: a mismatched success on an ALREADY-terminal
+  attempt (succeeded OR declined) now records a P1 audit
+  (`payments.callback_amount_asset_mismatch_terminal`, via the new `auditTerminalAmountAssetMismatch`
+  helper) in both cells - the succeeded case used to silently treat a mismatch as an ordinary
+  idempotent duplicate with no record at all, and the declined case used to silently return
+  `anomaly_other` with no audit trail either. Neither cell changes state or posts.
+- **N2** (drive.go/sweeper.go): a success naming an already-tombstoned reference now routes through
+  the same T10 (`applyDepositCallResult`'s `ErrorClassSucceeded` branch, phase C, always
+  non-terminal) / T10-or-T13t (the sweeper's `applyStatusEvidence`, which can also reach a
+  `declined` attempt on a T13 re-drive) tombstone check `applyResolvedReceiptEvidence` already used,
+  instead of calling `postDepositSuccess` directly and surfacing the tombstone's own unique index as
+  an untyped error that would otherwise retry identically forever.
+- **N3** was already closed by this round's own S-H1 fix (below) - the deferred backstop's
+  `event_type` filter is derived from the resolved attempt's OWN operation (an allow-list, not a
+  hardcoded `'deposit'`), so a stored `deposit`-typed receipt can never be replayed against a
+  payout attempt or vice versa.
+- **N4**: `rejectCreatedSiblings` now takes the caller's own `EvidenceKind` parameter instead of
+  hardcoding `EvidenceCallback`, fixed at all three call sites (`receipt.go`, `drive.go`,
+  `sweeper.go`).
+- **Security S-H1** (`rv-prh-i1-payout-security.md`, probe SP-B2): confirmed fixed by the same N3
+  change above - `TestRVLF_N3_DeferredApplyNeverReplaysADepositDeclineAsPayoutEvidence` pins the
+  decline variant (the security review's own probe found the success variant).
+- **Security S-M1** (probe SM10): a payout success callback echoing a DIFFERENT, non-empty provider
+  reference than the one already on file (the attempt's own, falling back to the withdrawal's) now
+  disputes (T10, `provider_reference_mismatch`) instead of settling, mirroring the QueryStatus
+  path's own N6 rule (`payout.go`) - `TestRVLF_SM10_PayoutSuccessProviderReferenceMismatchDisputes`.
+- **Verification**: `go build ./...` and `go vet -tags=integration ./...` clean across the whole
+  repository. The `internal/payments` suite under `-race` against a fresh private database
+  (`fh5_pay_20260927`, migrated to head including 0106/0107) and mutation-kill transcripts for this
+  round's new fixes are recorded separately (see the evidence file's own FH-5 entry).
+- **Deferred, on explicit coordinator instruction**: the double-credit/INV-DEP-1 fix (ADR 0095 §28,
+  `docs/plans/payment-readiness/lf-q1-supersession.md`) is FH-3, a LATER phase gated on kill-switch
+  phase 2's `callProvider`/`Resolve` signature changes and QA's A-O matrix. Not started here.
 
 
 ### 27.14 Revision 4 (`architect`, 2026-09-27) — AM-2, the durable-state definition, AM-1 and the status correction

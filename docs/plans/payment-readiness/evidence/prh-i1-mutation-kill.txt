@@ -1613,3 +1613,103 @@ Verification after all mutations reverted: `git status --porcelain` clean
 across internal/payments/{receipt.go,drive.go,sweeper.go,orchestrator.go};
 `go build ./...` clean; full TestRVLF_* suite green
 (19 tests, `go test -tags=integration -race -count=1 -run TestRVLF ./internal/payments/...`).
+
+
+PRH-I1 / Financial Hardening FH-5 callback security round, 2026-09-27
+======================================================================
+Ledger-finance's binding H1 ruling (rv-prh-i1-callback-ledger.md "Re-review
+1: fix round"), RULING M1, N2/N3/N4, and the payout security review's
+S-H1/S-M1 (rv-prh-i1-payout-security.md). All mutations below applied via
+byte-exact `str.replace`, run under
+`PRIV_DB=fh5_pay_20260927 PRIV_SRC=<worktree> bash priv_test.sh -tags=integration -count=1 -run <test> ./internal/payments/...`,
+confirmed FAIL, then reverted with `git checkout -- <file>` and `git status
+--porcelain` confirmed clean before moving to the next mutation.
+
+H1 rule 2 (non-final reversal outcome must never post):
+  File: internal/payments/receipt.go
+  Mutation: `if rawOutcome == OutcomePending || rawOutcome == OutcomeAmbiguous {`
+  replaced with `if false {`.
+  Killed by: TestRVLF_P1_NonFinalReversalOutcomeNeverPosts
+  Failure: both pending and ambiguous wire outcomes posted (balance moved
+  5000 -> 0), disposition "applied" instead of "anomaly", stored outcome
+  normalized to "succeeded" instead of the real wire value, resolution
+  "applied" instead of "anomaly_other".
+  Reverted: git checkout -- internal/payments/receipt.go.
+
+M1 (succeeded x mismatch must audit):
+  File: internal/payments/receipt.go
+  Mutation: the AttemptSucceeded case's `if mismatched { auditTerminal...;
+  return false, ResolutionAnomalyOther, nil }` branch removed (falls
+  through to the unconditional duplicate return).
+  Killed by: TestRVLF_P4_MismatchedSuccessOnTerminalAttempt
+  Failure: "expected 2 P1 audit records ..., got 1".
+  Reverted: git checkout -- internal/payments/receipt.go.
+
+M1 (declined x mismatch must audit):
+  File: internal/payments/receipt.go
+  Mutation: the AttemptDeclined case's mismatched-branch audit call
+  removed (kept the bare `return false, ResolutionAnomalyOther, nil`).
+  Killed by: TestRVLF_P4_MismatchedSuccessOnTerminalAttempt
+  Failure: "expected 2 P1 audit records ..., got 1".
+  Reverted: git checkout -- internal/payments/receipt.go.
+
+N2 (drive.go, tombstone check before postDepositSuccess):
+  File: internal/payments/drive.go
+  Mutation: `if res.ProviderReference != "" {` (the tombstone-check guard)
+  replaced with `if false {`.
+  Killed by: TestRVLF_N2_DriveGo_SuccessAfterTombstoneDisputesNotIndexError
+  Failure: "payments: post deposit: ledger: look up existing transaction
+  for idempotency key: no rows in result set" - exactly the untyped-error
+  failure mode N2 describes, reproduced live.
+  Reverted: git checkout -- internal/payments/drive.go.
+
+N2 (sweeper.go, same defect on the poll path):
+  File: internal/payments/sweeper.go
+  Mutation: `if res.ProviderReference != "" {` replaced with `if false {`.
+  Killed by: TestRVLF_N2_SweeperGo_SuccessAfterTombstoneDisputesNotIndexError
+  Failure: same untyped ledger idempotency-key lookup error.
+  Reverted: git checkout -- internal/payments/sweeper.go.
+
+N3 / security S-H1 (deferred backstop event-type-vs-operation filter):
+  File: internal/payments/receipt.go
+  Mutation: the `switch attempt.Operation { ... }` deriving eventTypeFilter
+  replaced with the pre-fix hardcoded `eventTypeFilter := string(CallbackEventDeposit)`.
+  Killed by: TestRVLF_N3_DeferredApplyNeverReplaysADepositDeclineAsPayoutEvidence
+  Failure: the payout attempt was wrongly moved to "declined" and its
+  withdrawal hold released ("failed") by a deposit-typed deferred receipt -
+  the exact SP-B2-shaped regression the security review found.
+  Reverted: git checkout -- internal/payments/receipt.go.
+
+N4 (rejectCreatedSiblings records the caller's evidence kind):
+  File: internal/payments/cascade.go
+  Mutation: `RejectCreated(ctx, tx, id, evidence, "intent_succeeded")`
+  reverted to the pre-fix hardcoded `RejectCreated(ctx, tx, id,
+  EvidenceCallback, "intent_succeeded")`.
+  Killed by: TestRVLF_N4_RejectCreatedSiblingsRecordsCallerEvidenceKind
+  Failure: "expected ... evidence kind \"sync\", got \"callback\"".
+  Reverted: git checkout -- internal/payments/cascade.go.
+
+Security S-M1 / SM10 (payout success provider-reference mismatch must
+dispute, not settle):
+  File: internal/payments/receipt.go
+  Mutation: the `if ev.ProviderReference != "" && storedRef != nil && ...`
+  mismatch-detection guard replaced with `if false {`.
+  Killed by: TestRVLF_SM10_PayoutSuccessProviderReferenceMismatchDisputes
+  Failure: the mismatched-reference success settled the withdrawal
+  ("completed") instead of disputing it; 0 audit records instead of 1.
+  Reverted: git checkout -- internal/payments/receipt.go.
+
+Verification after all FH-5 mutations reverted: `git status --porcelain`
+clean; `go build ./...` and `go vet -tags=integration ./...` clean across
+the whole repository; `gofmt -l` clean; `golangci-lint run ./...` (pinned
+2.9.0, untagged): 0 issues. Full `internal/payments` suite green under
+`-race` against a fresh private database (`fh5_pay_20260927`, migrated to
+head including 0106/0107; 346.9s). `internal/reconciliation` (+
+`internal/reconciliation/statement`) green under `-race` (80.7s).
+`internal/httpserver` under `-race`: two pre-existing, previously-disclosed
+flaky tests (`TestResolutionIsolation_OneTenantStoreOutage`,
+`TestResolutionIsolation_FinancialDuringOutage`, real-time latency
+assertions sensitive to race-detector overhead, untouched by this round -
+see §27.14's original disclosure) failed non-deterministically; every
+other httpserver test, including every payments/webhook/payout/kill-
+switch/reversal-named test, passed.

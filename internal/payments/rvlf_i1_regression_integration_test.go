@@ -1653,8 +1653,19 @@ func TestRVLF_SM10_PayoutSuccessProviderReferenceMismatchDisputes(t *testing.T) 
 		t.Fatalf("mark accepted: %v", err)
 	}
 
+	// The callback resolves the attempt via MerchantReference (this
+	// attempt's own id, MerchantReferenceFor's convention - INV-IO-14's
+	// merchant-reference binding still requires the resolved attempt's own
+	// provider id to equal verifiedProviderID, which holds here), while
+	// ProviderReference carries a DIFFERENT value than what is already on
+	// file - exactly the shape a callback resolved-by-merchant-reference
+	// but echoing a stale/wrong provider reference would have. Resolving
+	// by ProviderReference alone (INV-IO-14's other resolution path) could
+	// never reach this cell: a callback naming an unknown provider
+	// reference simply would not resolve to this attempt at all.
 	disp, err := rvApplyReceipt(pool, orch, f.tenantID, "mock-sm10", ReceiptEvidence{
-		EventType: "payout", ProviderReference: "sm10-DIFFERENT-echoed-ref", Outcome: OutcomeSucceeded, Amount: 5000, AssetCode: "EUR",
+		EventType: "payout", ProviderReference: "sm10-DIFFERENT-echoed-ref", MerchantReference: attempt.ID.String(),
+		Outcome: OutcomeSucceeded, Amount: 5000, AssetCode: "EUR",
 	})
 	if err != nil {
 		t.Fatalf("SM10: a mismatched-reference payout success must not error: %v", err)
@@ -1729,6 +1740,79 @@ func TestRVLF_N2_DriveGo_SuccessAfterTombstoneDisputesNotIndexError(t *testing.T
 	}
 	if b := cashBalance(t, pool, f); b != 0 {
 		t.Errorf("N2: a tombstoned success must never post; balance=%d", b)
+	}
+}
+
+// N4: rejectCreatedSiblings must record the CALLER's own evidence kind on
+// the rejected sibling, not a hardcoded EvidenceCallback - a T13 second
+// capture driven synchronously by phase C (drive.go) rejects its stray
+// 'created' sibling with last_evidence_kind='sync', never 'callback'.
+func TestRVLF_N4_RejectCreatedSiblingsRecordsCallerEvidenceKind(t *testing.T) {
+	pool := depositV2ScratchPool(t)
+	f := seedOrchFixture(t, pool)
+	p := NewMockProvider("mock-n4", "EUR")
+	registerCapability(t, pool, f, p, 100)
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-n4": p}, MultiWebhookCredentialResolver{"mock-n4": NewMockWebhookCredentials(p)})
+
+	res := rvInit(t, pool, orch, f, 5000, "n4")
+	attemptID, intentID := res.Attempt.ID, res.Intent.ID
+	ref := *res.Attempt.ProviderReference
+	// Decline A1 (via callback, for setup only) so it is 'declined' before
+	// the late T13 success below.
+	if _, err := rvCallback(pool, orch, f, "mock-n4", p.CallbackPayload(f.tenantID, CallbackEventDeposit, ref, "", OutcomeDeclined, 0, "", "insufficient_funds", false)); err != nil {
+		t.Fatalf("decline A1: %v", err)
+	}
+	// A stray 'created' sibling of the same intent (standing in for a real
+	// cascade child, isolating rejectCreatedSiblings itself).
+	var strayID uuid.UUID
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		stray, err := InsertCreatedAttempt(ctx, tx, NewCreatedAttempt{
+			ID: uuid.New(), TenantID: f.tenantID, Operation: AttemptOperationDeposit,
+			DepositIntentID: &intentID, AttemptNo: 2, ExcludedProviderIDs: []string{"mock-n4"},
+			PaymentMethod: "card", AssetCode: "EUR", Amount: 5000,
+		})
+		strayID = stray.ID
+		return err
+	}); err != nil {
+		t.Fatalf("insert stray created sibling: %v", err)
+	}
+
+	// A1's late T13 success, driven SYNCHRONOUSLY (EvidenceSync) via
+	// applyDepositCallResult directly - the same shape phase C's own
+	// re-drive of a declined attempt would take.
+	capability := ProviderCapability{AdapterCapability: AdapterCapability{ProviderID: "mock-n4"}}
+	gr := GateResult[DepositResult]{Class: ErrorClassSucceeded, Value: DepositResult{Outcome: OutcomeSucceeded, ProviderReference: ref}}
+	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `SELECT id FROM deposit_intents WHERE id = $1 FOR UPDATE`, intentID); err != nil {
+			return err
+		}
+		attempt, err := GetAttemptByID(ctx, tx, attemptID)
+		if err != nil {
+			return err
+		}
+		intent, err := GetDepositIntentByID(ctx, tx, intentID)
+		if err != nil {
+			return err
+		}
+		_, _, err = orch.applyDepositCallResult(ctx, tx, intent, attempt, capability, uuid.New(), gr, EvidenceSync, false)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("N4 setup: T13 success via phase C: %v", err)
+	}
+
+	stray := mustGetAttempt(t, pool, f.tenantID, strayID)
+	if stray.State != AttemptRejected {
+		t.Fatalf("N4 setup: expected the stray sibling rejected, got %s", stray.State)
+	}
+	var lastEvidence string
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT last_evidence_kind FROM payment_attempts WHERE id = $1`, strayID).Scan(&lastEvidence)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if lastEvidence != string(EvidenceSync) {
+		t.Errorf("N4: expected the rejected sibling's last_evidence_kind to be the CALLER's own evidence kind %q, got %q", EvidenceSync, lastEvidence)
 	}
 }
 

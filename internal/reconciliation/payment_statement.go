@@ -795,6 +795,18 @@ func (m *payMatcher) matchLines(lines []payLine) {
 	}
 }
 
+// matchReversal's statement-side l.status values (succeeded/pending/
+// declined/reversed) come from the PSP's OWN statement-line status field,
+// independent of the wire callback Outcome ADR 0095's callback path
+// receives for the same event. RV-PRH-I1 ledger-finance H1 RULING
+// (rule 6, doc-only - no code change here): a callback whose wire outcome
+// was pending/ambiguous never posts or tombstones on the platform side
+// (payments.applyReversalReceiptEvidence rule 2), so a statement line for
+// that same reference, if the PSP's reconciliation feed ever reports one
+// before its own final state, correctly falls into the "no posting yet
+// expected" `PaymentStatusPending`/`PaymentStatusDeclined` branches below -
+// this matcher does not need, and must not gain, its own separate
+// pending/ambiguous carve-out for that case.
 func (m *payMatcher) matchReversal(lk string, l payLine) {
 	rev, posted := m.ledgerByRef[string("deposit_reversal")+"\x00"+l.ref]
 	if !posted {

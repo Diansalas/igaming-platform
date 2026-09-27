@@ -125,13 +125,13 @@ func auditTerminalAmountAssetMismatch(ctx context.Context, tx pgx.Tx, attempt Pa
 		Action:     "payments.callback_amount_asset_mismatch_terminal",
 		TargetType: "payment_attempt", TargetID: attempt.ID.String(), Outcome: audit.OutcomeDenied,
 		Metadata: map[string]any{
-			"attempt_state":     string(attempt.State),
-			"provider_id":       attempt.ProviderID,
+			"attempt_state":      string(attempt.State),
+			"provider_id":        attempt.ProviderID,
 			"provider_reference": ev.ProviderReference,
-			"stored_amount":     attempt.Amount,
-			"stored_asset_code": attempt.AssetCode,
-			"echoed_amount":     ev.Amount,
-			"echoed_asset_code": ev.AssetCode,
+			"stored_amount":      attempt.Amount,
+			"stored_asset_code":  attempt.AssetCode,
+			"echoed_amount":      ev.Amount,
+			"echoed_asset_code":  ev.AssetCode,
 		},
 	}); err != nil {
 		return fmt.Errorf("payments: audit terminal amount/asset mismatch: %w", err)
