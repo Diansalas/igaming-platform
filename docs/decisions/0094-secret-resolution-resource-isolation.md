@@ -77,9 +77,15 @@ Paths verified, with their status:
    - payments: `ProviderAcceptsWebhook` EXISTS plus `HandleReadSQL`;
    - KYC and casino: `HandleReadSQL` only.
 
-   They now run in a **`READ ONLY`** transaction, so the database itself refuses any write
-   before verification. That is stronger than the statement-capture discipline alone. No ledger
-   read, lock, write, tombstone or audit row happens before verification.
+   They now run in a **`READ ONLY`** transaction. *Corrected per security condition C7
+   (review 17, S-5):*
+   - The statement-capture tests (`TestPointNineCapture_*`) remain the **primary** I1 control.
+   - `READ ONLY` is defence in depth only. PostgreSQL refuses writes, `nextval` and
+     `SELECT … FOR UPDATE/SHARE` in it, but it does **not** refuse advisory locks
+     (`pg_advisory_xact_lock`) or read-only function calls. Only the capture tests keep those
+     out of the pre-verification transaction.
+
+   No ledger read, lock, write, tombstone or audit row happens before verification.
 3. **Financial correctness.**
    - The domain transaction and everything in it are unchanged: ledger posting, idempotency on
      `(provider_id, provider_tx_id)`, tombstones and audit.
@@ -235,6 +241,19 @@ Accounting is per **(scheme, tenant)**, under the existing `Fetcher.mu`.
    - `BreakerState(scheme)` becomes `BreakerState(scheme, tenant)`.
 2. **Degraded tenant.** A tenant counts as degraded when its (scheme, tenant) breaker is not
    closed, or its consecutive counting failures are ≥ 1.
+   - *Amended (code review 18, R-3; implemented):* on a **closed** breaker the failure streak
+     expires `FailureStreakTTL` (= `BreakerInitialCooldown`, 15 s) after its last counting
+     failure. After that the tenant is healthy again, and the next failure starts a new streak.
+   - An open or half-open breaker is unaffected. It stays degraded until a probe succeeds, which
+     closes the breaker.
+   - Without the expiry, one transient timeout left a tenant permanently "degraded". Its next
+     cold fetch hours later could then be refused at once while the degraded budget was busy,
+     and old blips kept counting towards `secret_store_multi_tenant_degraded`.
+   - Consequence: counting failures spread more than 15 s apart never trip the breaker. That is
+     acceptable, because the breaker exists for sustained outages. S = 4 and D = 2 still bound
+     concurrency.
+   - The value is a new platform constant, pinned by `TestStoreConstants_PinnedToSecurityReview`.
+     **`security` must agree to it** (ADR 0093 A4).
 3. **Admission for a store call.** The owner of a flight needs:
    - (a) a per-tenant token, with at most P in flight for the tenant;
    - (b) a global slot out of S;
@@ -365,16 +384,22 @@ C9. The earlier claim "lower than today's 4" was misleading.
   are protected against a stampede.
 - **Rate** is **linear in the number of tenants N**. That is higher than today, where one
   backend breaker brings the load down to about one probe per 15–60 s.
-  - To trip every tenant's breaker costs at most N × 3 × (1 + `StoreMaxRetries`) attempts.
+  - To trip every tenant's breaker costs at most N × (3 + P − 1) × (1 + `StoreMaxRetries`)
+    attempts. *Corrected per security review 17, S-6:* with callers arriving concurrently, up to
+    P − 1 more counting calls can already be in flight when the third failure crosses the
+    threshold. With sequential arrival it is exactly N × 3 × 2.
   - After that, each tenant is allowed one probe per cooldown, and each probe is at most
     1 + `StoreMaxRetries` attempts.
   - Over 120 s the cooldown schedule is 15 s, 30 s and 60 s, which allows 3 probes.
-  - The bound over 120 s is therefore N × 3 × 2 + N × 3 × 2 = 12 N attempts. That is 600 for
-    N = 50.
+  - The bound over 120 s is therefore N × (3 + P − 1) × 2 + N × 3 × 2 = **14 N** attempts at
+    P = 2. That is 700 for N = 50.
   - In steady state this is about N / 60 probe calls per second at the 60 s cooldown cap: about
     17–33 req/s for N = 1000.
-  - `TestFetcher_GlobalOutageRateBound` pins it. It measured exactly 600 attempts against the
-    computed bound of 600: every allowed attempt was made, and none more.
+  - Two tests pin it:
+    - `TestFetcher_GlobalOutageRateBound` (sequential arrival): exactly 600 attempts, which is
+      the sequential bound of 12 N.
+    - `TestFetcher_GlobalOutageRateBound_Concurrent` (P callers per tenant arriving together,
+      asserting 14 N and max concurrency ≤ S): 614 attempts measured, against 700.
 - **Visibility:** when at least 3 distinct tenants on one backend are degraded at the same time,
   one rate-limited `warn` line, `secret_store_multi_tenant_degraded`, is logged at most once
   a minute per backend. A real backend-wide outage is therefore visible as one event.
@@ -963,7 +988,9 @@ review):
    `TestVerifiedCallback_ZeroOrMismatchRejected` covers "other domain".
    - Security (3) described "each domain has its own type" as a compile-time property. Here it is a
      runtime check. Forgery from outside is still impossible: the fields are unexported, and the
-     only constructor, `VerifyAndSeal`, runs `VerifyInbound`.
+     only constructor, `VerifyAndSeal`, runs `VerifyInbound`. *(Superseded in the fix round: the
+     only constructor is now `ResolveAndSeal`, which resolves the credentials itself, and
+     `Recheck` binds the secret to the fingerprint; see "Fix round", S-3.)*
    - **Flagged for the security implementation review.**
 4. **The constant check runs at package init.** It panics unless 0 < P ≤ D < S. The design said
    `NewFetcher` would panic.
@@ -1069,4 +1096,161 @@ per-domain financial suites cover it, and they still run through the test bridge
 - The workflow has not been executed on GitHub CI.
 - F-POOL-2 is registered but not started.
 - PAYWH-RL-1 is not started.
+
+## Fix round (2026-09-27): K1 root cause, K2/K3, code review, ledger-finance
+
+**Status:** F-POOL-1 is re-opened by K1 (GitHub CI #360). This fix round is done. The finding
+stays open until `security` rules on the K1 measurement argument below and a CI run of the timing
+lane is green.
+
+### K1: why CI #360 failed
+
+**What CI showed.** Both kept-test variants failed only the "more than 4 resolves over 250 ms"
+count. `maxConcurrent` was 4 in both, and the new "no transaction held over 400 ms" criterion did
+not fire.
+- Pool 20: 8 long callers, which were 4 slot holders at about 2.0–2.09 s plus 4 slot-wait losers
+  at about 402 ms. The fast callers took 362–402 ms.
+- Pool 10: 43 long callers. The fast callers took 438–543 ms.
+
+**Reproduction.** I restricted the CPU with `taskset` under `-race` on the same local database:
+- `-c 0` (1 CPU): pool 20 reported 50 long callers.
+- `-c 0-1` (2 CPUs): 16 long callers.
+- 4 CPUs: it passed.
+
+**Where the time goes.** I used a throwaway instrumented copy of the test to split each caller's
+Resolve into pool acquisition (including BEGIN and `set_config`), the handle-read transaction, and
+everything after the commit (the commit, the slot or flight wait, and the store call):
+
+| CPUs | Pool | Acquisition p50 / max | Handle-read tx max | After commit p50 | Callers > 400 ms in total | Callers > 400 ms after commit |
+|---|---|---|---|---|---|---|
+| 1 | 20 | 228 / 239 ms | 55 ms | 251 ms | **50** | **4** |
+| 1 | 10 | 125 / 134 ms | 58 ms | 251 ms | 4 | 4 |
+| 2 | 20 | 147 / 156 ms | 80 ms | 251 ms | **21** | **4** |
+| 2 | 10 | 86 / 94 ms | 66 ms | 251 ms | 4 | 4 |
+| 4 | 20 | 94 / 115 ms | 23 ms | 251 ms | 4 | 4 |
+| 4 | 10 | 47 / 55 ms | 6 ms | 251 ms | 4 | 4 |
+
+Acquisition is slower at pool 20 than at pool 10 because of **connection establishment**:
+- The fixture pool holds 1 connection when the burst starts. Under `-race`, dialling and
+  authenticating up to 19 (or 9) new connections is CPU-bound, and every caller waits for it.
+- With the pool pre-warmed on 1 CPU, acquisition drops to 18–24 ms, the total p50 to 265–274 ms,
+  and the long count to exactly 4 at both pool sizes.
+
+**Root cause.**
+- In `4779958` I wrote each caller's `durations[i]` as the whole `Resolve` call. After the split,
+  the whole call includes acquiring a pooled connection for the `READ ONLY` handle read.
+- The pre-ADR-0094 test started its clock **inside `WithTenant`**, after the connection had been
+  acquired.
+- So the "waited on the store" count had become a measure of pool acquisition plus the store wait.
+  On a slower runner, the cold-pool dial cost pushed every slot-wait loser (250 ms + commit) past
+  `longSlack`.
+- The part §5 actually bounds (the time a caller spends waiting on the store) was exactly 4 callers
+  over 400 ms in every configuration: the 4 slot holders.
+- No code path is slower than `SlotWait` allows. No code change was needed.
+
+**Fix (`cb7fb92`), test only.**
+- Each caller's clock now starts when its pre-verification transaction first runs on its pooled
+  connection. That is the first statement of `fn`, after acquisition, BEGIN and `set_config`.
+- It stops when `Resolve` returns.
+- Pool acquisition is still recorded per caller and printed as a diagnostic, but it is not asserted.
+- `longSlack` (400 ms), `reviewBound` (4), the 500 ms unrelated-query bound and both pool sizes
+  (20 and 10) are unchanged.
+
+**Why the claim tested is identical or stronger.** This argument is for `security` to rule on.
+1. **Same span as before ADR 0094, plus the commit.**
+   - The pre-ADR clock covered the handle read and the store wait, inside an already-acquired
+     transaction.
+   - The new clock covers the handle read, the COMMIT, and the slot, flight and store wait,
+     starting at the same point: the connection is already acquired and the transaction is
+     running.
+   - For the same code, any caller the old test counted as "long" is also long here.
+2. **Pool acquisition is not "waiting on the store."** A caller queued for a connection holds
+   nothing and waits on the pool, not on the store. §5 bounds pool starvation separately, through
+   the unrelated-query assertion. That assertion is unchanged, and it is the one that catches
+   F-POOL-1 end to end: mutation M1 made it take 1.41 s at pool 10.
+3. **The two ADR 0094 criteria are unchanged.** Criterion (4) is that no pre-verification
+   transaction is held over `longSlack`. Criterion (5) is that no store call runs with a
+   transaction held.
+4. **Mutation evidence against the new span** (see the evidence file, "Fix round"):
+
+   | Mutation | Result against the new span |
+   |---|---|
+   | M1: fetch inside the transaction | KILLED. Pool 10: the unrelated query took 1.41 s. Pool 20: 43 long callers. |
+   | M22: healthy waiters wait `StoreCallTimeout` instead of `SlotWait` (the shape of ruling mutation (a)) | KILLED. 50 long callers at both pool sizes. |
+   | M9b: S = 8 | KILLED (8 concurrent store calls). |
+
+5. **Disclosed limit.** Mutation M9a (`SlotWait` 350 ms), which is ruling mutation (c), is no
+   longer caught by the long bucket at pool 20 or 10.
+   - A 350 ms wait plus the commit stays under 400 ms once the cold-pool dial cost is no longer in
+     the span.
+   - This matches the pre-ADR behaviour at pool 20. Ruling 15 §1 measured mutation (c) passing 2/2
+     at pool 20.
+   - `TestStoreConstants_PinnedToSecurityReview` kills M9a.
+   - The long bucket still catches regressions of about 400 ms or more, including M22.
+
+**Numbers after the fix.** All runs were `-race`, each test run alone.
+
+| Run | Result | Measurements |
+|---|---|---|
+| All 8 timing-lane tests, 5× on 2 CPUs (`taskset -c 0-1`) | **40/40 PASS** | Kept-test acquisition max 82–193 ms (diagnostic); store-side span max 2.00–2.11 s (the slot holders); `NormalOperation` worst callback 312–374 ms; oldest pooled transaction in the outage scenarios ≤ 104 ms; `ConnectionExhaustion` B worst 117–145 ms |
+| Kept tests, 5× on 1 CPU (`taskset -c 0`) | **10/10 PASS** | Acquisition max 140–266 ms, not asserted |
+| The 6 httpserver lane tests, once on 1 CPU | **6/6 PASS** | — |
+
+### K2 and S-4
+
+- **S-3 (a).** `webhookauth.VerifyAndSeal` is removed.
+  - The only constructor of a `VerifiedCallback` is now `webhookauth.ResolveAndSeal(ctx, r,
+    domain, scheme, resolver, in, m)`.
+  - It copies the inbound, resolves the credential set itself through the given resolver, runs
+    `VerifyInbound` on the copy and seals it.
+  - The domains call it from `resolveAndVerify`.
+- **S-3 (b).** Both `Recheck` implementations now bind the secret to the fingerprint the row pins.
+  - `providercred.Resolver.Recheck` requires `hmac.Equal(key.Fingerprint(c.Secret),
+    c.Fingerprint)` before `HandleRecheckSQL`.
+  - `webhookauth.MockRecheck` does the same with the MOCK's unkeyed fingerprint.
+  - Result: a sealed token can only carry a secret the store holds for that handle.
+- **S-1.** The C3 copy lives in `ResolveAndSeal`, one chokepoint. The per-domain `CloneInbound`
+  calls are removed. Casino and KYC now have body-mutation tests alongside payments.
+- **S-2.** Casino and KYC now have a test for `VerifyCallback` called inside a transaction.
+- **S-4.** `derivedTokenBytes` and `derivedEntry` implement `slog.LogValuer` and
+  `json.Marshaler`. The new test checks slog text, slog JSON and `json.Marshal`.
+- **S-7** (optional). An admission loss now prunes a closed, clean breaker entry.
+
+### K3 (ADR text)
+
+- **S-5:** §2 item 2 is reworded. The capture tests are the primary I1 control, and `READ ONLY`
+  does not stop advisory locks.
+- **S-6:** §6 states the rate bound as N × (3 + P − 1) × 2 + probes, which is **14 N** over 120 s.
+  `TestFetcher_GlobalOutageRateBound_Concurrent` asserts it: 614 attempts measured, against 700.
+
+### Code review 18 and ledger-finance 19
+
+- **R-1:** `TestResolutionIsolation_CrossTenant` (main lane) checks outcomes only, with no
+  wall-clock bound.
+- **R-2:** the `TestFetcher_PerTenantCap` upper bound is now `SlotWait` + 500 ms. The lower bound
+  is unchanged.
+- **R-3:** decided and implemented. See the amended §4.2 item 2, `FailureStreakTTL` = 15 s.
+  **`security` must agree to the new constant.**
+- **R-4:**
+  - `depositSimulationBetweenPhasesHook` is a new test seam, nil in production.
+  - `TestSimulateDepositCallback_IntentRevalidatedInDomainTx` covers a deposit the provider
+    declines between the phases: it is not settled.
+  - The casino and KYC guard tests are shared with S-2.
+- **LF-R1:** `TestReceiveVerified_RevokedThenRestoredRedeliveryPostsOnce` (casino).
+  1. The handle is revoked between the phases, so the callback is rejected with no effect.
+  2. A new handle restores the credential, and the provider redelivers.
+  3. The redelivery posts exactly once, and a second redelivery is a replay.
+  4. SUM(debits) == SUM(credits), and every projection equals its rebuild.
+- **LF-C1** and **LF-C2** (constraints, and High-once-reachable) are recorded in the F-POOL-2
+  registry row.
+
+**Mutations for this round:** M22–M32 in the evidence file. All are KILLED except M28, which is
+equivalent.
+- M28 makes `ResolveAndSeal` ignore a resolver error.
+- An empty `CredentialSet` fails `VerifyInbound`'s `credentialUsable`, so nothing is sealed anyway.
+
+**Not satisfied / open:**
+- The `security` ruling on the K1 argument, and on `FailureStreakTTL`.
+- A green GitHub CI run: nothing is pushed.
+- F-POOL-2 and PAYWH-RL-1 are not started.
 

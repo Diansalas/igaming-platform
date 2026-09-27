@@ -57,7 +57,7 @@ func (f verifiedFixture) seal(t *testing.T, domain string) *VerifiedCallback {
 		t.Fatalf("seal: %v", authErr)
 	}
 	if cred.HandleID != f.creds.Active.HandleID {
-		t.Fatal("VerifyAndSeal must return the credential that verified, with its handle id")
+		t.Fatal("verifyAndSeal must return the credential that verified, with its handle id")
 	}
 	return v
 }
