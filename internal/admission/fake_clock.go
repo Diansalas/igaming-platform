@@ -22,6 +22,14 @@ func NewFakeClock(start time.Time) *FakeClock {
 	return &FakeClock{now: start}
 }
 
+// SyntheticComponent is a structural, no-import marker satisfying
+// providerkind's repo-wide mock-naming hygiene scan (internal/providerkind/
+// completeness_scan.go) - FakeClock is a test double for time, never a
+// wired provider.Registration, but the scan is name-based and package-
+// agnostic. This package stays stdlib-only (no import of internal/
+// providerkind is needed or added) - only the method shape matters.
+func (f *FakeClock) SyntheticComponent() {}
+
 func (f *FakeClock) Now() time.Time {
 	f.mu.Lock()
 	defer f.mu.Unlock()
