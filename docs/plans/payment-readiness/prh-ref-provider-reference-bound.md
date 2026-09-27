@@ -6,7 +6,7 @@ Registry: `PROVIDER-REF-BOUND-1` / `PRH-REF` in `docs/governance/task-registry.m
 Migration: 0099 (allocated by the orchestrator).
 
 Status: **IMPLEMENTED** for code and tests. Two items are still open:
-- `security` agreement on the value and charset rule (§8) is **PENDING**.
+- `security` agreement on the value and charset rule (§8): **AGREED** (2026-09-27); security review verdict in §10: **APPROVE WITH CONDITIONS**.
 - The gate review is **PENDING**.
 
 ## 1. The problem
@@ -201,9 +201,31 @@ The proposal to `security`:
 - 400 non-retryable after verification;
 - log length plus a 12-hex SHA-256 prefix only.
 
-**Status: PENDING.** `ledger-finance` cannot record another specialist's agreement on that specialist's
-behalf. The orchestrator must obtain `security`'s ruling and record it here (verbatim or by reference to a
-review file) before PROVIDER-REF-BOUND-1 is closed.
+**Status: AGREED by `security` (2026-09-27).** Ruling:
+
+1. **Value.** 255 bytes, counted as octets (`len()` in Go, `octet_length()` in SQL), minimum 1 for a
+   present value. This bound is agreed. It keeps every composite UNIQUE/idempotency key under about a
+   quarter of the btree tuple limit, including the 521-byte `tombstone:<provider_id>:<ref>` key. It also
+   stays well above every opaque identifier format the platform issues or expects. Raising it follows the
+   §2 procedure, and `security` sign-off is part of that procedure.
+2. **Charset.** Valid UTF-8, and no U+0000–U+001F, U+007F or U+0080–U+009F. This is agreed as the minimum
+   rule. The rule rejects CR/LF/TAB and the C1 controls, which closes log-line and CSV/report injection
+   through a reference. It deliberately does **not** reject Unicode format characters (for example
+   U+200B–U+200F, U+202A–U+202E, U+2066–U+2069) or confusables. That is acceptable, for two reasons:
+   references are opaque, compared byte-exactly and never normalised, and they are never used for display
+   authorisation. Any **display** surface (back office, partner console, exported reports) must
+   render or escape them as untrusted text. That is an output-encoding obligation, not a change to this
+   rule.
+3. **Never truncated.** Agreed and mandatory. Truncation would turn two distinct provider events that
+   share a prefix into an idempotency collision, so one event would be silently swallowed as a replay.
+4. **Rejection.** A deterministic, non-retryable 400, raised only **after** webhook verification. It is
+   agreed that nothing is written, including no evidence row. The request is authenticated, so this is
+   not a pre-authentication oracle. The uniform-401 contract for unauthenticated failures is unaffected.
+5. **Logging.** Agreed: log only field, reason, byte length and the first 12 hex characters of SHA-256.
+   48 bits is enough to correlate redeliveries. It is not a confidentiality control, and it does not need
+   to be one: references are provider identifiers, not secrets. It must never be described as one.
+   Neither the value nor the error text may be logged. `providerref.Error` does not hold the value, so this
+   holds by construction.
 
 ## 9. Residuals (not built here, recorded rather than silently skipped)
 
@@ -220,3 +242,89 @@ review file) before PROVIDER-REF-BOUND-1 is closed.
 4. **`sportsbook_bets.provider_bet_reference`** has no writer yet. It is bounded by CHECK only. The future
    bet-placement adapter must validate at its boundary.
 5. **GitHub CI evidence** is unavailable while CI-BILLING-1 is open. The evidence here is local runs only.
+
+## 10. Security review of commit 43f5071: verdict APPROVE WITH CONDITIONS
+
+Reviewer: `security`, 2026-09-27. Reviewed `git show 43f5071` at HEAD 28baca0.
+
+### What was verified
+
+- **Placement.** In both `casino.Orchestrator.ReceiveVerifiedCallback` and
+  `payments.Orchestrator.ReceiveVerifiedCallback`, the only statements before the bound are the ADR 0094
+  Redeem/Recheck of the verified handle and the adapter's `HandleCallback`. The bound runs before
+  dispatch, which means before any lock, read, write, tombstone or audit in the domain. On a rejection,
+  `WithTenant` rolls the transaction back, so the Redeem is not committed either.
+  `recordCasinoCallbackRejection` is a no-op, because the error is not a `*casino.CallbackRejectedError`.
+  In the payments handler, no earlier `errors.Is` branch matches the new sentinel, so the error cannot
+  fall through to the generic 500.
+- **Responses.** Both webhooks return a fixed-body 400 `callback rejected`. The simulate and play routes
+  also use fixed messages. The value is never echoed.
+- **Logs.** `logProviderReferenceRejected` emits allow-listed attributes only and never `err`. The
+  `Error()` text of a wrapped error names the field, reason, length and hash, never the value. The length
+  check runs first, so an oversize value is never scanned by the UTF-8 or control-character checks.
+- **Migration 0099.**
+  - The CHECK predicate matches the Go rule.
+  - The pre-flight sets `app.tenant_id` for each tenant and never touches FORCE RLS or `row_security`.
+  - The pre-flight only counts, and it raises an exception on any violation. It contains no UPDATE and no
+    DELETE.
+  - The RLS-independent `ADD CONSTRAINT` validation backs the pre-flight up. If a table's policy ever hid
+    rows from the pre-flight, the migration still fails closed (with 23514); it never proceeds.
+  - The down migration only drops constraints.
+- **Mutation spot-checks.** Both were novel (not in the M1–M28 list), reverted, and left `git diff` clean.
+  1. **Bound counted in runes instead of bytes** (`len(value)` became `utf8.RuneCountInString(value)`):
+     **KILLED** by `TestValidate_MultibyteAtBoundary`.
+  2. **Casino `asset_code` dropped from `validateCallbackReferences`:** **KILLED** by
+     `TestValidateCallbackReferences`.
+
+  The baseline unit tests for providerref, casino, payments and httpserver pass. I had no credentials for
+  the local PostgreSQL, so I did not re-run the integration and migration tests. For those I relied on the
+  implementer's local evidence (`evidence/prh-ref-mutation-kill.txt`).
+
+### Conditions
+
+**C1: blocks real-PSP/KYC go-live and the PRH-I1 / ADR 0095 close-out. It does not block closing
+PROVIDER-REF-BOUND-1.**
+
+The §9.1 residual is broader than the note states. Consider `withdrawal_handlers.go`:
+1. It calls `provider.Withdraw` **inside** the domain transaction.
+2. It then writes `result.ProviderReference` to `withdrawal_requests` (`MarkSubmitted`) and to
+   `ledger_transactions.provider_tx_id` (`withdrawal.Complete`).
+
+If a real PSP returns an over-bound reference after executing the payout, the 0099 CHECK fails. The
+transaction rolls back and the request stays unsubmitted, although the money has left. A staff retry then
+calls `Withdraw` again, which is a **double-payout** path whenever the PSP does not deduplicate on
+`MerchantReference`.
+
+The root cause is pre-existing: provider I/O inside the transaction, which is already ADR 0095's subject.
+Migration 0099 adds a new deterministic trigger for it. The ADR 0095 redesign must do both of the
+following:
+- call `providerref.Validate` on every adapter-response reference: `Deposit`, `Withdraw`, `QueryStatus`
+  inputs, and KYC `CreateVerification`;
+- treat a violation as a durable, non-retryable provider-protocol failure that parks the operation for
+  manual reconciliation. It must never roll back to a state from which the payout can be resubmitted.
+
+§9.1 should also name `ledger_transactions.provider_tx_id` (through `withdrawal.Complete`) alongside
+`deposit_intents` and `withdrawal_requests`.
+
+**C2: before go-live.** For an over-bound casino callback, the only evidence is the log line (§9.3). The
+following must be true:
+- the retention of `casino_webhook_provider_reference_rejected` and
+  `payment_webhook_provider_reference_rejected` meets the evidence-retention requirement for callback
+  rejections;
+- both events are alertable by rate per provider. A verified sender repeatedly hitting the bound is a
+  provider-integration fault or a compromised credential.
+
+**C3: before go-live.** Re-run the 0099 integration, migration and mutation evidence on GitHub CI once
+CI-BILLING-1 is closed (§9.5).
+
+### Out of scope for this review
+
+- The OpenAPI changes.
+- The sportsbook catalogue and settlement paths, beyond confirming that they call the same package.
+- KYC callback behaviour, beyond the §9.2 reasoning.
+- Production lock and duration impact of the non-split `ADD CONSTRAINT`, which is a deployment decision.
+- Display-side escaping of references (§8 point 2).
+
+This review is a code-level and design-level review of one commit. It is not a penetration test, and it
+does not certify the payment paths as secure.
+
