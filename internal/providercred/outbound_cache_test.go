@@ -1,7 +1,11 @@
 package providercred
 
 import (
+	"bytes"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"testing"
@@ -216,6 +220,51 @@ func TestDerivedTokenCache_FormattingRedactsToken(t *testing.T) {
 		}
 		if !strings.Contains(r, redactedDerivedToken) {
 			t.Fatalf("expected the redaction marker %q in formatted output, got: %q", redactedDerivedToken, r)
+		}
+	}
+}
+
+// TestDerivedTokenCache_SlogAndJSONRedactToken is security review 17, S-4:
+// slog's text handler prints a []byte-kind value in plaintext and slog's
+// JSON handler / json.Marshal base64-encode it, unless the type is a
+// slog.LogValuer / json.Marshaler. Neither the token nor its entry may
+// leak through any of them.
+func TestDerivedTokenCache_SlogAndJSONRedactToken(t *testing.T) {
+	const plaintext = "super-secret-derived-token-bytes"
+	tok := newDerivedTokenBytes([]byte(plaintext))
+	entry := &derivedEntry{
+		key:     derivedKey{tenant: uuid.New(), handle: uuid.New(), fingerprint: "fp"},
+		token:   tok,
+		expires: time.Now().Add(time.Hour),
+	}
+	var text, js bytes.Buffer
+	for _, l := range []*slog.Logger{
+		slog.New(slog.NewTextHandler(&text, nil)),
+		slog.New(slog.NewJSONHandler(&js, nil)),
+	} {
+		l.Info("x", "token", tok, "entry", entry, "entry_value", *entry)
+		l.Info("y", slog.Any("token", tok))
+	}
+	j1, err := json.Marshal(tok)
+	if err != nil {
+		t.Fatal(err)
+	}
+	j2, err := json.Marshal(entry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	j3, err := json.Marshal(map[string]any{"token": tok, "entry": *entry})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b64 := base64.StdEncoding.EncodeToString([]byte(plaintext))
+	for name, out := range map[string]string{"slog text": text.String(), "slog json": js.String(),
+		"json token": string(j1), "json entry": string(j2), "json map": string(j3)} {
+		if strings.Contains(out, plaintext) || strings.Contains(out, b64) || strings.Contains(out, b64[:16]) {
+			t.Fatalf("%s leaked the derived token: %s", name, out)
+		}
+		if !strings.Contains(out, redactedDerivedToken) {
+			t.Fatalf("%s must carry the redaction marker, got: %s", name, out)
 		}
 	}
 }

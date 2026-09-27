@@ -247,6 +247,16 @@ func (derivedTokenBytes) GoString() string { return redactedDerivedToken }
 
 func (derivedTokenBytes) Format(f fmt.State, _ rune) { _, _ = f.Write([]byte(redactedDerivedToken)) }
 
+// LogValue implements slog.LogValuer. It matters beyond fmt: slog's text
+// handler special-cases any []byte-kind value and would print it in
+// plaintext, and a LogValuer is resolved before that special case
+// (security review 17, S-4).
+func (derivedTokenBytes) LogValue() slog.Value { return slog.StringValue(redactedDerivedToken) }
+
+// MarshalJSON implements json.Marshaler (json.Marshal and slog's JSON
+// handler would otherwise base64-encode the raw bytes).
+func (derivedTokenBytes) MarshalJSON() ([]byte, error) { return json.Marshal(redactedDerivedToken) }
+
 type derivedEntry struct {
 	key     derivedKey
 	token   derivedTokenBytes
@@ -272,6 +282,12 @@ func (e derivedEntry) String() string {
 func (e derivedEntry) GoString() string { return e.String() }
 
 func (e derivedEntry) Format(f fmt.State, _ rune) { _, _ = f.Write([]byte(e.String())) }
+
+// LogValue implements slog.LogValuer (security review 17, S-4).
+func (e derivedEntry) LogValue() slog.Value { return slog.StringValue(e.String()) }
+
+// MarshalJSON implements json.Marshaler (never the token).
+func (e derivedEntry) MarshalJSON() ([]byte, error) { return json.Marshal(e.String()) }
 
 // NewDerivedTokenCache builds an empty, bounded cache (now nil means
 // time.Now).
