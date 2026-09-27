@@ -435,16 +435,22 @@ func ApplyReceiptEvidence(ctx context.Context, tx pgx.Tx, o *Orchestrator, tenan
 
 	attempt := resolved.Attempt
 
-	// RV-PRH-I1 ledger-finance R4(b) (payout re-review): the resolved
-	// attempt's OWN operation must match what this event claims to
-	// describe - a "deposit"-typed event resolving (by provider_reference
-	// or merchant_reference collision) to a PAYOUT attempt, or the
-	// reverse, is cross-operation contamination, never applied to either
-	// operation's state machine. This is deliberately checked here, not
-	// inside applyResolvedReceiptEvidence's own operation-specific
-	// branches below, so it applies uniformly regardless of ev.Outcome.
-	if (ev.EventType == string(CallbackEventDeposit) && attempt.Operation != AttemptOperationDeposit) ||
-		(ev.EventType == "payout" && attempt.Operation != AttemptOperationPayout) {
+	// RV-PRH-I1 ledger-finance R4(b) (payout re-review), tightened per
+	// security S-H1: this is an ALLOW-LIST, not two negative comparisons -
+	// the resolved attempt's OWN operation must match what this event
+	// claims to describe, and any event_type this map does not name
+	// (e.g. a future "payout_returned") is ALSO an anomaly for either
+	// operation, never silently passed through by a two-negative check
+	// that only rejects "deposit-for-payout" and "payout-for-deposit"
+	// while letting an unrecognized third type slip past both. Checked
+	// here, not inside applyResolvedReceiptEvidence's own operation-
+	// specific branches below, so it applies uniformly regardless of
+	// ev.Outcome.
+	eventTypeOperation := map[string]AttemptOperation{
+		string(CallbackEventDeposit): AttemptOperationDeposit,
+		"payout":                     AttemptOperationPayout,
+	}
+	if op, known := eventTypeOperation[ev.EventType]; !known || op != attempt.Operation {
 		receiptID, duplicate, err := insertReceiptDeduped(ctx, tx, tenantID, verifiedProviderID, ev, DispositionAnomaly)
 		if err != nil {
 			return "", err
@@ -668,6 +674,40 @@ func applyResolvedReceiptEvidence(ctx context.Context, tx pgx.Tx, o *Orchestrato
 			// rather than adding a payout-specific one.
 			if attempt.WithdrawalRequestID == nil {
 				return false, "", fmt.Errorf("payments: payout success evidence for attempt %s with no withdrawal_request_id", attempt.ID)
+			}
+			// Security review S-M1: applyPayoutSuccess itself checks
+			// amount/asset but not the provider reference - the
+			// QueryStatus path (applyPayoutSuccessCheckedFromStatus, N6)
+			// disputes a success that echoes a DIFFERENT, non-empty
+			// reference from the one already on file (the attempt's own,
+			// falling back to the withdrawal's) rather than settling
+			// against it; the receipt path must apply the SAME rule so a
+			// settlement is never recorded against a reference the
+			// platform never itself had on file, regardless of which
+			// evidence source it arrived through.
+			storedRef := attempt.ProviderReference
+			if storedRef == nil || *storedRef == "" {
+				wr, err := withdrawal.GetByID(ctx, tx, *attempt.WithdrawalRequestID)
+				if err != nil {
+					return false, "", err
+				}
+				storedRef = wr.ProviderReference
+			}
+			if ev.ProviderReference != "" && storedRef != nil && *storedRef != "" && ev.ProviderReference != *storedRef {
+				if err := ApplyDisputeFromNonTerminal(ctx, tx, attempt.ID, EvidenceCallback, "provider_reference_mismatch"); err != nil {
+					return false, "", err
+				}
+				if err := audit.Record(ctx, tx, audit.Entry{
+					TenantID: attempt.TenantID, ActorType: audit.ActorSystem, Action: "payments.payout_provider_reference_mismatch",
+					TargetType: "payment_attempt", TargetID: attempt.ID.String(), Outcome: audit.OutcomeDenied,
+					Metadata: map[string]any{
+						"withdrawal_request_id": attempt.WithdrawalRequestID.String(),
+						"stored_reference":      *storedRef, "echoed_reference": ev.ProviderReference,
+					},
+				}); err != nil {
+					return false, "", fmt.Errorf("payments: audit payout reference mismatch: %w", err)
+				}
+				return true, ResolutionAnomalyOther, nil
 			}
 			if err := applyPayoutSuccess(ctx, tx, *attempt.WithdrawalRequestID, attempt, ev.ProviderReference, EvidenceCallback); err != nil {
 				return false, "", err
@@ -1170,21 +1210,34 @@ func ApplyDeferredReceiptsForAttempt(ctx context.Context, tx pgx.Tx, o *Orchestr
 	if attempt.ProviderID == nil || attempt.ProviderReference == nil {
 		return 0, nil
 	}
-	// RV-PRH-I1 ledger-finance M2 / code-review F1: this backstop applies
-	// evidence through the DEPOSIT §4.4 matrix below - a stored
-	// deposit_reversal receipt sharing this attempt's (provider_id,
-	// provider_reference) must never be picked up and replayed here as
-	// deposit evidence (a reversal's Outcome is normalized to 'succeeded'
-	// for storage, see applyReversalReceiptEvidence, which would otherwise
-	// look exactly like a deposit success to the code below).
+	// RV-PRH-I1 ledger-finance M2/N3, code-review F1, security S-H1: this
+	// backstop must only ever apply evidence shaped for THIS attempt's OWN
+	// operation - an allow-list, not "not deposit"/"not payout": a stored
+	// deposit_reversal (or any other/future event_type) receipt sharing
+	// this attempt's (provider_id, provider_reference) must never be
+	// picked up and replayed here regardless of operation. S-H1's own
+	// probe: a stored "deposit"-typed decline, deferred because nothing
+	// held its reference yet, was later replayed against a PAYOUT attempt
+	// that came to hold that same reference - releasing that payout's
+	// hold on deposit evidence. The event_type this query accepts is
+	// derived from attempt.Operation, never independent of it.
+	var eventTypeFilter string
+	switch attempt.Operation {
+	case AttemptOperationDeposit:
+		eventTypeFilter = string(CallbackEventDeposit)
+	case AttemptOperationPayout:
+		eventTypeFilter = "payout"
+	default:
+		return 0, nil
+	}
 	rows, err := tx.Query(ctx,
 		`SELECT id, event_type, provider_reference, original_provider_reference, merchant_reference,
 		        settlement_reference, outcome, amount, asset_code, decline_reason, decline_stage, cascadable, received_at
 		 FROM payment_provider_events
 		 WHERE tenant_id = $1 AND provider_id = $2 AND provider_reference = $3 AND resolved_at IS NULL
-		   AND event_type = 'deposit'
+		   AND event_type = $4
 		 ORDER BY id`,
-		attempt.TenantID, *attempt.ProviderID, *attempt.ProviderReference,
+		attempt.TenantID, *attempt.ProviderID, *attempt.ProviderReference, eventTypeFilter,
 	)
 	if err != nil {
 		return 0, fmt.Errorf("payments: query deferred receipts: %w", err)
