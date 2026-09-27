@@ -1198,3 +1198,57 @@ now closed, plus the T4/T10/T6/T11 items security specified exactly:
 
 Full mutation-kill evidence for every claim above:
 `docs/plans/payment-readiness/evidence/prh-i4-mutation-kill.txt` (M7–M11, round 3 section).
+
+**Correction (round 4):** security's re-verification of round 3
+(`rv-prh-i4-security.md` §6) found this §21.8 section's "all C1–C4 conditions and Lows
+closed" claim to be inaccurate: C1, C3, T4 and T6 were still open, and five named
+mutations (N1–N5) survived the full admission suite untouched. §21.9 below records
+round 4's fix for each.
+
+### 21.9 Round 4 follow-up (security re-verification `rv-prh-i4-security.md` §6, still APPROVE WITH CONDITIONS)
+
+Security's round-3 re-verification found that round 3's own "all conditions closed" claim
+(§21.8) did not hold: C1, C3, T4 and T6 were still open, five mutations (N1–N5) survived,
+and `TestAdmission_T6c`/`TestAdmission_T6d` were red on the branch as actually merged (a
+casino launch-path dependency the ADR-0097 test harness had not been updated for). Round 4
+closes every one of those:
+
+- **CI-red fix (item 0).** `TestAdmission_T6c`/`TestAdmission_T6d` failed on the merged
+  branch because PRH-I2's casino launch-path rework requires
+  `Deps.CasinoOutboundCredentials` for `LaunchGame`, which
+  `webhook_admission_harness_test.go`'s `newAdmissionTestServer` did not wire. Fixed by
+  adding `casino.NewMockOutboundResolver()`. Both tests are green again; M11 was re-run and
+  re-confirmed on the merged branch.
+- **T6, closed** (the last named gap): the "B1/B2 moved inside `WithTenant`" mutation is now
+  killed directly, not only through T2b — see M12 (a new pool-acquisition-delta test using
+  the real 10-connection pool).
+- **C1, closed.** A test-only `dbGateAcquirer` interface (satisfied by `*admission.Bulkhead`
+  in production) lets a new isolating HTTP-level test per domain
+  (`webhook_admission_c1_isolating_integration_test.go`) substitute a call-counting fake gate
+  that admits a key's first *k* acquisitions and refuses the rest — the real Bulkhead, a
+  concurrent-holder cap, cannot express that shape, since the tenant-slug lookup and
+  credential-resolution reads share one A4b key and run sequentially, never overlapping. This
+  isolates the C1 fix at the actual credential-resolution hop, for real, in all three
+  domains, with the real `providercred.Resolver`, asserting 503, `Retry-After`, a `db_gate`
+  log line (L7), and zero rows — and kills N3 (the casino handler's own
+  `ReasonAdmissionUnavailable` branch) and, together with a new cheap unit test in
+  `internal/webhookauth`, N4 (the `reasonForResolveError` case). The same seam's payments/
+  casino tests also kill N1 (a `gatedReader` bypass), closing T4's own remaining gap.
+- **C3, closed** (part 2, route completeness). The route guard now DISCOVERS every
+  `/v1/webhooks/` route by walking `HandleFunc`/`Handle` call sites in the package's own
+  non-test files and resolving each handler argument to a named, in-package constructor,
+  instead of checking a maintained list of three names. This kills N2 (a fourth, unguarded
+  webhook route).
+- **L6/N5, closed.** A3's own adapter-declared-503 switch (the ADR's §6.1/§6.3 amendment from
+  round 3) now has its own test, `TestAdmission_T14b_A3AdapterDeclaredStatus_No429Retry`
+  (T14's A3 mirror), killing N5.
+- **L7, closed** as part of C1's own new tests (the `db_gate` log line is asserted on every
+  C1-isolating test).
+- **L4, L5, I1–I4 registered** in `docs/governance/task-registry.md`
+  (`PRH-I4-L4-1`, `PRH-I4-L5-1`, `PRH-I4-I1-1`..`PRH-I4-I4-1`, `PRH-I4-L3-RESIDUAL-1`), each
+  with an owner, rather than left untracked.
+- The registry's PRH-I4 row is corrected to state plainly that round 3's "all closed" claim
+  was inaccurate, per security's own re-verification, before describing round 4's fix.
+
+Full mutation-kill evidence: `docs/plans/payment-readiness/evidence/prh-i4-mutation-kill.txt`
+(M12–M17, round 4 section, plus the CI-red fix and the re-confirmed M11).
