@@ -208,7 +208,8 @@ func validProviderIDCharset(id string) bool {
 		return false
 	}
 	for _, r := range id {
-		if !(r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '_' || r == '-') {
+		valid := (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_' || r == '-'
+		if !valid {
 			return false
 		}
 	}
