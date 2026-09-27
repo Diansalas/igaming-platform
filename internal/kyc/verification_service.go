@@ -28,6 +28,23 @@ var ErrNotFound = errors.New("kyc: not found")
 // current status is not eligible for review.
 var ErrInvalidTransition = errors.New("kyc: invalid status transition")
 
+// ErrVerificationStatusConflict is returned by ReviewVerification when the
+// verification's status changed between this call's own read and its write
+// (the "mirror race" of R1/C1, surfaced to other owners by RV-PRH-I2 KYC
+// code re-review: ReviewVerification's write was, until this fix, a blind
+// `UPDATE ... WHERE id = $4` with no status predicate - so a concurrent
+// SubmitVerification phase C, or a concurrent verified callback, committing
+// between this call's read and its write could be silently overwritten,
+// including moving a terminal `approved` backward to a staff
+// `review_required`). Unlike applyForwardOnlyStatus's own no-op-on-lost-
+// race convention (a provider-driven transition, safe to silently defer to
+// whichever forward transition won), a STAFF decision is deliberate: on a
+// lost race this call does NOT retry and does NOT silently no-op - it
+// fails closed with this sentinel, so the caller (an operator) sees an
+// explicit conflict and can re-review the verification's own CURRENT
+// state rather than believing a decision was recorded when it was not.
+var ErrVerificationStatusConflict = errors.New("kyc: verification status changed before this review could be applied")
+
 // ErrEvidenceCollectionInactive is returned by ReviewVerification when a
 // caller attempts to record a verified-residence determination
 // (ReviewVerificationParams.VerifiedResidenceCountry != nil) while
@@ -466,6 +483,11 @@ type ReviewVerificationParams struct {
 	VerifiedResidenceCountry *string
 }
 
+// reviewVerificationTestRaceHook is a TEST-ONLY seam (always nil in
+// production - never set outside test code) - see its call site inside
+// ReviewVerification for what it is for.
+var reviewVerificationTestRaceHook func(verificationID uuid.UUID)
+
 // ReviewVerification is the STAFF-driven review action
 // (PermVerificationReview) - distinct from the Orchestrator's own
 // provider-driven applyForwardOnlyStatus: this one always stamps
@@ -502,6 +524,17 @@ func ReviewVerification(ctx context.Context, tx pgx.Tx, params ReviewVerificatio
 	if isTerminal(current.Status) {
 		return Verification{}, fmt.Errorf("%w: verification %s is already in a terminal status %q", ErrInvalidTransition, params.VerificationID, current.Status)
 	}
+	// reviewVerificationTestRaceHook: TEST-ONLY (nil in production, never
+	// set outside test code). Lets a test commit a concurrent transition -
+	// a SubmitVerification phase C, or a verified callback - in the exact
+	// window between this call's own read (current, above) and its CAS
+	// write below, reproducing the mirror-race finding directly (RV-PRH-I2
+	// KYC code review), the same way the R1 P1/P2 tests use
+	// spyKYCProvider.onSubmitVerification to commit a concurrent decision
+	// mid-provider-call.
+	if reviewVerificationTestRaceHook != nil {
+		reviewVerificationTestRaceHook(params.VerificationID)
+	}
 
 	// Stage 4I Phase B's activation boundary: only checked (and only
 	// capable of failing the WHOLE call) when a residence determination is
@@ -518,6 +551,16 @@ func ReviewVerification(ctx context.Context, tx pgx.Tx, params ReviewVerificatio
 		}
 	}
 
+	// Mirror race fix (RV-PRH-I2 KYC code review, surfaced finding): this
+	// write is now a CAS on `current.Status`, the status THIS call's own
+	// read above just saw - never a blind, unconditional UPDATE. A
+	// concurrent SubmitVerification phase C or verified callback committing
+	// between that read and this write makes the WHERE clause miss (zero
+	// rows, surfaced by QueryRow as pgx.ErrNoRows below), and this call
+	// fails closed with ErrVerificationStatusConflict - it never retries
+	// and never silently no-ops, because a staff decision is deliberate,
+	// not a replayable provider transition (see ErrVerificationStatusConflict's
+	// own doc comment).
 	var hadPreviousResidence, residenceChanged bool
 	var newSetAt *time.Time
 	err = tx.QueryRow(ctx, `
@@ -533,12 +576,15 @@ func ReviewVerification(ctx context.Context, tx pgx.Tx, params ReviewVerificatio
 		       verified_residence_set_at  = CASE WHEN $5 IS NULL THEN verified_residence_set_at  ELSE now() END,
 		       updated_at  = now()
 		  FROM prev
-		 WHERE kyc_verifications.id = $4
+		 WHERE kyc_verifications.id = $4 AND kyc_verifications.status = $6
 		RETURNING (prev.before_value IS NOT NULL) AS had_previous,
 		          (prev.before_value IS DISTINCT FROM COALESCE($5, prev.before_value)) AS changed,
 		          kyc_verifications.verified_residence_set_at`,
-		params.NewStatus, params.Reason, params.StaffID, params.VerificationID, params.VerifiedResidenceCountry,
+		params.NewStatus, params.Reason, params.StaffID, params.VerificationID, params.VerifiedResidenceCountry, current.Status,
 	).Scan(&hadPreviousResidence, &residenceChanged, &newSetAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Verification{}, fmt.Errorf("%w: verification %s (expected status %q)", ErrVerificationStatusConflict, params.VerificationID, current.Status)
+	}
 	if err != nil {
 		return Verification{}, fmt.Errorf("kyc: review verification: %w", err)
 	}

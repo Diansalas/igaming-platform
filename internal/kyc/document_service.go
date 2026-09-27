@@ -22,6 +22,22 @@ import (
 // refused outright, nothing is stored, nothing is inserted.
 var ErrMalwareDetected = errors.New("kyc: uploaded content failed malware scanning")
 
+// ErrVerificationNotSubmitted is returned by UploadDocument and
+// SubmitVerification when the target verification is a never-decided
+// orphan (ADR 0095 §15.2: CreateVerification's phase A committed the row,
+// but phase B/C never obtained a live provider reference for it - a vendor
+// outage, resolver failure, or a crash left it "orphaned", status
+// 'unverified' with provider_reference NULL). N5 (RV-PRH-I2 KYC code
+// review): a player must never be able to upload documents to, or submit,
+// a verification the platform has no live provider-side reference for -
+// doing so would either accumulate evidence attached to an attempt no
+// vendor ever agreed to evaluate, or (worse, for SubmitVerification) send
+// a real vendor an EMPTY reference, which is malformed and whose behaviour
+// is PROVIDER DEPENDENT. Fail closed instead, with a clear, typed error:
+// the player must retry CreateVerification (a fresh attempt/row) rather
+// than uploading against, or submitting, a dead one.
+var ErrVerificationNotSubmitted = errors.New("kyc: verification has no live provider reference (orphaned) - retry creating a new verification")
+
 const documentColumns = `id, tenant_id, brand_id, player_account_id, person_id, verification_id,
 	document_type, issuing_country, version, status, storage_provider, storage_reference,
 	content_type, size_bytes, original_filename, checksum_sha256, document_expires_at,
@@ -91,6 +107,19 @@ type UploadDocumentParams struct {
 func UploadDocument(ctx context.Context, tx pgx.Tx, storage DocumentStorageProvider, scanner MalwareScanner, params UploadDocumentParams) (Document, error) {
 	if params.VerificationID == uuid.Nil {
 		return Document{}, fmt.Errorf("%w: verification_id is required", ErrInvalidTransition)
+	}
+
+	// N5 (RV-PRH-I2 KYC code review): fail closed against an orphan
+	// verification (no live provider reference) - see ErrVerificationNotSubmitted's
+	// own doc comment. This read is cheap (already-open tx, RLS-scoped) and
+	// runs BEFORE the malware scan/storage write below, so a rejected
+	// upload never touches storage at all.
+	verification, err := GetVerificationByID(ctx, tx, params.VerificationID)
+	if err != nil {
+		return Document{}, err
+	}
+	if verification.ProviderReference == "" {
+		return Document{}, ErrVerificationNotSubmitted
 	}
 
 	sniffedType, sanitizedName, err := ValidateUpload(params.Filename, params.Content)
@@ -336,6 +365,16 @@ func SubmitVerification(ctx context.Context, pool providercred.TenantTxRunner, o
 	}
 	if !proceed {
 		return v, nil
+	}
+	// N5 (RV-PRH-I2 KYC code review): a non-terminal verification with NO
+	// live provider reference is an orphan (ADR 0095 §15.2) - fail closed
+	// rather than ever calling provider.SubmitVerification with an EMPTY
+	// reference, which is malformed and PROVIDER DEPENDENT with a real
+	// vendor. Checked here, defense in depth, independent of the identical
+	// guard in UploadDocument - SubmitVerification is itself an exported,
+	// independently callable entry point.
+	if v.ProviderReference == "" {
+		return v, ErrVerificationNotSubmitted
 	}
 	if len(submitted) == 0 {
 		// C4 (RV-PRH-I2 KYC code review): this function's own doc comment

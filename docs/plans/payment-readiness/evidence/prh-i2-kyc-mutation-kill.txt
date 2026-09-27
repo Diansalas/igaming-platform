@@ -11,14 +11,16 @@ internal/kyc/provider.go ReceiveVerifiedCallback's ErrVerificationReferenceUnkno
 typing plus the new shared applyForwardOnlyStatus, internal/httpserver/kyc_handlers.go
 and kyc_admin_handlers.go's corresponding wiring/response-mapping changes) PLUS the
 fix round below (RV-PRH-I2 KYC code review NOT READY R1/F1-F5, security review APPROVE
-WITH CONDITIONS C1-C5), which additionally, narrowly touches
-internal/kyc/enforcement.go's two read-semantics functions (explicitly authorized for
-this one task; coordinated with ADR 0096 §2.6(g)/§19). Does not cover casino (PRH-I2
-casino part, already landed and separately evidenced in
+WITH CONDITIONS C1-C5) PLUS a SECOND fix round (§2.5 below: code re-review N1-N6, a
+mirror ReviewVerification race, and security re-verification N-1/N-2), which
+additionally, narrowly touches internal/kyc/enforcement.go's two read-semantics
+functions (explicitly authorized for this one task; coordinated with ADR 0096
+§2.6(g)/§19/§19.1/§19.4) and internal/kyc/verification_service.go's ReviewVerification.
+Does not cover casino (PRH-I2 casino part, already landed and separately evidenced in
 prh-i2-casino-mutation-kill.txt) or payments (PRH-I1). Does not touch
 internal/kyc/enforcement_admin.go/enforcement_decisions_read.go/enforcement_dormancy.go
-or migrations 0100/0103/0104 (out of this task's scope; another agent may be editing
-KYC enforcement concurrently).
+or migrations 0100/0103/0104/0105 (out of this task's scope; another agent may be
+editing KYC enforcement concurrently).
 
 Harness: manual, scratchpad-copy-mutate-test-restore - each mutant is one anchored,
 verified-unique string replacement in the target file, applied via a small Python
@@ -41,8 +43,19 @@ reason). Go 1.26.8. Base: branch claude/focused-wright-jw88w9 at commit dffdab3 
 merged original PRH-I2 KYC submission, commit 8a52969, plus this fix round's own
 changes).
 
-Result: 17/17 killed, 0 equivalent (11 from the original submission, re-verified
-unchanged this round, plus 6 new/corrected mutants: R1, MB, MC, MD, ME, MF).
+Result: 23/23 killed, 0 equivalent (11 from the original submission, re-verified
+unchanged across BOTH fix rounds; 6 from the first fix round: R1, MB, MC, MD, ME, MF;
+6 new mutants from this SECOND fix round, §2.5 below: M8-reverify (correcting the
+original submission's own false M8 claim - see the CORRECTION note right above §2.5),
+N3/C5 (RedactedProviderErrorDetail), N4 (status_applied audit flag), N5 (orphan
+verification fail-closed, two call sites, one combined mutant/two tests), the
+ReviewVerification mirror-race CAS, and N-1 (crossAccountRejectedOverlay's
+finalStatusesSQL narrowing). The prior round's own "17/17" claim is corrected here:
+it was arithmetically right for its own 17 mutants, but M8 (counted inside the
+"11 from the original submission, re-verified unchanged" bucket) was NOT actually a
+valid re-verification, per the CORRECTION note above §2.5 - it is re-counted as a new,
+CORRECTED result in §2.5 instead, and the original §1 M8 entry below is marked
+superseded rather than deleted, to preserve an honest record of the mistake.
 
 ===========================================================================================
 §1. Original submission mutants (2026-09-27) - re-verified unchanged this round
@@ -106,9 +119,23 @@ returning ErrProviderUnavailable and leaving status untouched): KILLED
 
 M8 gatherSubmissionDocuments' terminal-status guard removed (an already-terminal
 verification would still be resubmitted to the provider instead of being a documented
-no-op): KILLED [internal/kyc/document_service.go] by
-`go test -tags=integration ./internal/kyc/ -run TestSubmitVerification_TerminalVerificationIsANoOp`
-    first failure: --- FAIL: TestSubmitVerification_TerminalVerificationIsANoOp
+no-op): SUPERSEDED - see the second fix round's own M8-reverify entry in §2.5 below.
+This entry's own original "KILLED" claim was WRONG at the time it was written: after
+the FIRST fix round's own C4 change (gatherSubmissionDocuments returns ok=false for an
+empty document set, a separate and legitimate no-op path), the SAME test
+(TestSubmitVerification_TerminalVerificationIsANoOp) had, unnoticed, become vacuous -
+it seeded NO document, so it passed identically whether the terminal guard existed or
+not (the empty-document-set no-op alone was enough to make `called == false`, with or
+without the terminal guard). The mutation-kill "first failure" transcript below IS
+genuine (captured before C4 landed, when the test still had discriminating power), but
+the CLAIM that this entry remained valid "unchanged" through the first fix round (the
+§1 header's "re-verified unchanged" language) was never actually re-checked against
+the post-C4 code, and was FALSE. Caught by code re-review (RV-PRH-I2 KYC code
+re-review, N1) in the second fix round; corrected there (a document is now seeded
+before the terminal transition) and RE-VERIFIED as genuinely killing a live mutant -
+§2.5's M8-reverify entry is the accurate, current record for this guard.
+    original (now-superseded) first failure transcript, kept for the record:
+    --- FAIL: TestSubmitVerification_TerminalVerificationIsANoOp
                        "SubmitVerification: kyc: provider unavailable: submit verification to
                        provider: kyc: unknown provider reference ..." (the mock rejects a
                        resubmission of a reference no test fixture told it to expect,
@@ -139,7 +166,11 @@ RV-PRH-I2 C2 finding, applied here to KYC's own CallContext copy): KILLED
     first failure: --- FAIL: TestCallContext_NeverRendersSecret
                        "CallContext rendered the secret: ...mock-outbound-credential-not-a-real-secret"
 
-11/11 killed, 0 equivalent (original submission).
+11/11 killed, 0 equivalent (original submission) - CORRECTED (second fix round): M8's
+own "KILLED" line above is superseded, not deleted (see M8's entry text); the accurate,
+currently-valid mutant for that guard is §2.5's M8-reverify. The other 10 (M1-M7, M9-M11)
+were independently re-checked against the post-C4/post-second-fix-round code during this
+second fix round and remain valid, unaffected re-verifications.
 
 Correction (this fix round, code review F3): the original submission's own claim that M4/MB's
 "the credential-binding check" and MD's "the idempotency-key shape" were adequately covered
@@ -245,6 +276,148 @@ routing logic directly): KILLED, now, by the NEW tests this fix round adds -
 6/6 killed this round, 0 equivalent.
 
 ===========================================================================================
+§2.5. SECOND fix round mutants (2026-09-27) - RV-PRH-I2 KYC code re-review N1-N6 +
+mirror ReviewVerification race, security re-verification N-1/N-2
+===========================================================================================
+
+Base for this section: this same branch/worktree, on top of §1/§2's own fix round
+(commit f7a0da0 code re-review, commit b4b225e security re-verification, both merged
+before this round began). Same harness (manual scratchpad-copy-mutate-test-restore,
+private database `kyc_r2_fix`, `diff`-verified byte-identical restoration after every
+mutant below).
+
+M8-reverify (code re-review N1) - gatherSubmissionDocuments' terminal-status guard
+(`if isTerminal(v.Status) { return v, nil, false, nil }`) removed, WITH
+TestSubmitVerification_TerminalVerificationIsANoOp corrected first (N1's own required
+fix: a document is now seeded on the verification BEFORE it is moved to a terminal
+status, closing the vacuousness the original M8 entry above did not catch - see that
+entry's own corrected text): KILLED [internal/kyc/document_service.go] by
+`go test -tags=integration ./internal/kyc/ -run TestSubmitVerification_TerminalVerificationIsANoOp`
+    first failure: --- FAIL: TestSubmitVerification_TerminalVerificationIsANoOp
+                       "SubmitVerification: kyc: provider unavailable: submit verification to
+                       provider: kyc: unknown provider reference \"mock-ref-...\"" (with a
+                       document now seeded, the mock genuinely rejects the resubmission
+                       attempt as an unregistered reference, proving the guard - not the
+                       unrelated empty-document-set no-op - is what the test is now
+                       actually exercising)
+
+N3/C5/N-2 (code re-review N3, security re-verification C5/N-2 - same finding, both
+specialists independently flagged the same gap) - RedactedProviderErrorDetail's default
+branch changed from returning the fixed string `"internal error (redacted)"` to
+`return err.Error()` (the exact "leak the raw vendor/adapter error text" defect both
+reviews warned an untested default branch could hide): KILLED
+[internal/kyc/provider.go] by
+`go test -tags=integration ./internal/kyc/ -run TestRedactedProviderErrorDetail`
+    first failure: --- FAIL: TestRedactedProviderErrorDetail_UnclassifiedErrorNeverEchoesRawText
+                       "RedactedProviderErrorDetail leaked the sentinel:
+                       \"POST https://vendor.example/verify?api_key=SUPER-SECRET-VENDOR-
+                       RESPONSE-BODY-abc123: unexpected response body ...\"" (the planted
+                       sentinel string, which must never appear in the function's output,
+                       appeared verbatim)
+    (internal/kyc/redacted_provider_error_detail_test.go, new this round; the httpserver
+    end-to-end companion, TestKYC_CreateVerificationProviderFailureLog_NeverLeaksRawErrorText
+    in internal/httpserver/kyc_create_verification_log_redaction_test.go, additionally
+    proves the redaction survives all the way through to the CreateVerification handler's
+    own structured log line, not merely the helper function in isolation)
+
+N4 (code re-review N4) - applySubmissionResult's audit metadata hard-wired to
+`"status_applied": true` regardless of applyForwardOnlyStatus's own returned `applied`
+value (a mutant that would hide every future "the write was silently superseded" case
+from the audit trail): KILLED [internal/kyc/document_service.go] by
+`go test -tags=integration ./internal/kyc/ -run TestSubmitVerification_AuditRecordsStatusAppliedFlag`
+    first failure: --- FAIL: TestSubmitVerification_AuditRecordsStatusAppliedFlag/false_when_a_concurrent_staff_decision_supersedes_the_submission
+                       "N4: expected status_applied=false on a superseded submission's audit
+                       row, got true (present=true)"
+
+N5 (code re-review N5) - both of UploadDocument's and SubmitVerification's own
+`if verification.ProviderReference == "" { return ..., ErrVerificationNotSubmitted }` /
+`if v.ProviderReference == "" { return v, ErrVerificationNotSubmitted }` orphan guards
+removed together (an orphan verification - provider_reference NULL, never submitted -
+would otherwise accept a document upload, or be "submitted" with an EMPTY reference
+string sent to the provider, which is malformed and PROVIDER DEPENDENT with a real
+vendor): KILLED [internal/kyc/document_service.go] by
+`go test -tags=integration ./internal/kyc/ -run "TestUploadDocument_OrphanVerificationFailsClosed|TestSubmitVerification_OrphanVerificationFailsClosed"`
+    first failure (upload): --- FAIL: TestUploadDocument_OrphanVerificationFailsClosed
+                       "N5: expected ErrVerificationNotSubmitted uploading against an orphan
+                       verification, got <nil>"
+    first failure (submit): --- FAIL: TestSubmitVerification_OrphanVerificationFailsClosed
+                       "N5: expected ErrVerificationNotSubmitted submitting an orphan
+                       verification, got <nil>"
+
+Mirror race (assigned directly to identity-compliance, "you own the KYC code") -
+ReviewVerification's own CAS predicate (`AND kyc_verifications.status = $6`, added this
+round specifically to close this gap) neutralized while keeping the query's own
+parameter count unchanged (`AND ($6 = $6 OR TRUE)`, so the mutation is a genuine
+"predicate always true" rather than a trivial argument-count crash - verified as a
+separate, ruled-out failure mode first, see the note below): KILLED
+[internal/kyc/verification_service.go] by
+`go test -tags=integration ./internal/kyc/ -run TestReviewVerification_ConcurrentSubmissionDuringReview_ReturnsConflict`
+    first failure: --- FAIL: TestReviewVerification_ConcurrentSubmissionDuringReview_ReturnsConflict
+                       "mirror race: expected ErrVerificationStatusConflict, got <nil>" (the
+                       concurrent SubmitVerification's own lost-race write silently
+                       overwrote the staff's own deliberate review decision instead of the
+                       staff's write failing closed with a conflict)
+    NOTE (methodology): a first mutation attempt (bare `AND $4 = $4`-style removal of the
+    predicate while ALSO dropping the now-unused `current.Status` argument) produced only
+    a pgx "expected 5 arguments, got 6" error - a real kill, but for the wrong reason (an
+    argument-count mismatch, not the intended "the race is no longer prevented" defect).
+    Corrected to the `($6 = $6 OR TRUE)` form above, which keeps the argument list intact
+    and lets the UPDATE always match, genuinely reproducing the silent-overwrite defect
+    the test is meant to catch; re-verified this way.
+
+N-1 (security re-verification, HIGH, pre-existing - not introduced by either fix round)
+- crossAccountRejectedOverlay's inner "latest row per OTHER account" subquery predicate
+narrowed this round from `NOT (v2.status = 'unverified' AND v2.provider_reference IS
+NULL)` (the first fix round's own F1 predicate, which still counted a merely `pending`
+or `review_required` re-verification as "decided") back to that SAME F1-round predicate,
+reproducing exactly the defect N-1 describes (a player neutralising a cross-account
+rejection overlay with one ordinary "start a new verification" API call, without ever
+needing it approved): KILLED (by two of the four-test regression group; see below for
+why the other two are expected to pass unmutated) [internal/kyc/enforcement.go] by
+`go test -tags=integration ./internal/kyc/ -run "TestEvaluateEnforcement_N1_"`
+    first failure (fresh pending): --- FAIL: TestEvaluateEnforcement_N1_FreshPendingVerificationDoesNotLiftRejection
+                       "N-1: expected a fresh PENDING re-verification on the rejected
+                       account to NEVER lift the overlay's deny, got {Outcome:passed
+                       Allowed:true ...}"
+    first failure (review_required): --- FAIL: TestEvaluateEnforcement_N1_ReviewRequiredDoesNotLiftRejection
+                       "N-1: expected a review_required re-verification on the rejected
+                       account to NEVER lift the overlay's deny, got {Outcome:passed
+                       Allowed:true ...}"
+    (the other two tests in this group, TestEvaluateEnforcement_N1_LaterFinalApprovedLiftsRejection
+    and TestEvaluateEnforcement_N1_OrphanOnRejectedAccountDoesNotLiftRejection, correctly
+    PASS unmutated as well as under this specific mutant - by design: this mutant only
+    reintroduces the "non-final row counts as decided" gap, and neither of those two
+    cases turns on that distinction, so their continuing to pass under this one mutant is
+    expected, not a coverage gap. Together, all four form the regression suite for N-1;
+    two are this mutant's own kill witnesses, the other two guard the surrounding,
+    unaffected behaviour the fix must not break.)
+
+6/6 killed this round (M8-reverify, N3/C5/N-2, N4, N5, mirror race, N-1), 0 equivalent.
+
+Consumer-path check (N-1's explicit ask): crossAccountRejectedOverlay is called from
+EXACTLY ONE place - evaluateWithdrawalStructuralRule, itself reached only when
+EvaluateEnforcement's own dispatch sees isWithdrawalOperation(params.Operation) true
+(internal/kyc/enforcement.go). internal/payments/kycgate.go (deposit),
+internal/casino/orchestrator.go and internal/sportsbook/orchestrator.go (play) all call
+EvaluateEnforcement too, but for deposit/play operations, which route to
+evaluateDepositThreshold/evaluatePlayTrigger instead - neither of which calls
+crossAccountRejectedOverlay. N-1's fix and its regression tests are therefore complete
+for every consumer of EvaluateEnforcement; deposit and play were never affected by N-1
+(confirmed by reading every EvaluateEnforcement call site, not merely grep for the
+overlay function's own name).
+
+N6 verification (code re-review N6, refactor only, no new mutant required) -
+applyCallbackOutcome now calls the SAME applyForwardOnlyStatus helper
+SubmitVerification's own phase C uses, instead of a second, hand-maintained copy of the
+identical forward-only rank/CAS loop. This is a refactor, not new enforcement behaviour
+- verified by re-running the FULL pre-existing callback test suite
+(`go test -tags=integration ./internal/kyc/... -run TestKYCWebhook`) after the change,
+all green, plus the full `./internal/kyc/...` suite (see "Post-restoration verification"
+below), confirming no regression. Not separately mutation-tested because it introduces
+no new logic; the shared function's own forward-only CAS behaviour is already covered
+by R1's P1/P2 mutants (§2 above) and by this round's mirror-race mutant.
+
+===========================================================================================
 §3. F1 (orphan-row enforcement masking) - regression tests, not mutation-tested
 ===========================================================================================
 
@@ -268,16 +441,38 @@ via the existing setVerification helper, so none are affected by this predicate)
 full and remains green.
 
 ===========================================================================================
+§3.5. N-1 (cross-account overlay non-final-row masking) - regression tests, mutation-tested
+===========================================================================================
+
+N-1 (security re-verification, HIGH, pre-existing) is documented as its own mutant in §2.5
+above (KILLED by 2 of its 4 regression tests, the other 2 guarding unaffected surrounding
+behaviour), unlike F1 in §3, which was not separately mutation-tested. Listed here again
+for completeness of this file's own "everything the second fix round touched" index:
+TestEvaluateEnforcement_N1_FreshPendingVerificationDoesNotLiftRejection,
+TestEvaluateEnforcement_N1_ReviewRequiredDoesNotLiftRejection,
+TestEvaluateEnforcement_N1_LaterFinalApprovedLiftsRejection,
+TestEvaluateEnforcement_N1_OrphanOnRejectedAccountDoesNotLiftRejection (all
+internal/kyc/enforcement_integration_test.go, new this round). The fix itself (§2.5's own
+N-1 entry) narrows crossAccountRejectedOverlay's inner subquery to each OTHER account's
+latest FINAL row only (finalStatusesSQL: approved/rejected/expired); the primary-account
+read (readLatestVerificationByPlayerAccount, F1's own predicate) is UNCHANGED.
+
+===========================================================================================
 Post-restoration verification
 ===========================================================================================
 
-After each mutant in §1 and §2 was reverted from its saved backup, `diff` against the
-pre-mutation saved copy showed byte-identical content for every mutated file
+After each mutant in §1, §2, and §2.5 was reverted from its saved backup, `diff` against
+the pre-mutation saved copy showed byte-identical content for every mutated file
 (internal/kyc/verification_service.go, document_service.go, provider.go, callcontext.go,
 enforcement.go, internal/httpserver/kyc_admin_handlers.go, kyc_handlers.go), and the full
 targeted suite - `go test -tags=integration -race -count=1 ./internal/kyc/...`,
-`go test -tags=integration -count=1 ./internal/httpserver/... -run 'KYC|Kyc'`, and
+`go test -tags=integration -count=1 ./internal/httpserver/... -run 'KYC|Kyc'`,
+`go test -tags=integration -count=1 ./internal/withdrawal/...`, and
 `go test -tags=integration -count=1 ./cmd/platform-api/...` - passed cleanly against the
-private databases. `gofmt -l .`, `go vet ./...`, `go vet -tags=integration ./...`, and
-`golangci-lint run ./...` (v2.9.0, no build tags, matching this repository's own CI
-invocation in .github/workflows/ci.yml) all report clean/0 issues.
+private databases (`kyc_r1_fix_priv`/`kyc_r1_fix_priv2` for the first fix round;
+`kyc_r2_fix`/`kyc_r2_fix2` for this second fix round, both created fresh via
+TEST_ADMIN_DATABASE_URL and migrated to head, never the shared `igaming_platform_ci_local`
+instance, for the same reason given in the Environment note above). `gofmt -l .`,
+`go vet ./...`, `go vet -tags=integration ./...`, and `golangci-lint run ./...` (no build
+tags, matching this repository's own CI invocation in .github/workflows/ci.yml) all report
+clean/0 issues after this second fix round as well.

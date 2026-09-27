@@ -222,6 +222,137 @@ func TestEvaluateEnforcement_WithdrawalCrossAccountRejectedOverlayDenies(t *test
 	}
 }
 
+// seedSecondAccount creates a second brand/PlayerAccount under the SAME
+// Person and tenant as f, returning a fixture-shaped value that
+// setVerification/setOrphanVerification can be called with directly (they
+// only ever read f.tenantID/f.brandID/f.playerID/f.personID) - factored out
+// of TestEvaluateEnforcement_WithdrawalCrossAccountRejectedOverlayDenies/
+// OrphanOnAnotherAccount's own identical inline SQL, reused by N-1's own
+// tests below.
+func seedSecondAccount(t *testing.T, pool *db.Pool, f fixture) fixture {
+	t.Helper()
+	second := fixture{tenantID: f.tenantID, personID: f.personID}
+	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		second.brandID = uuid.New()
+		if _, err := tx.Exec(ctx, `INSERT INTO brands (id, tenant_id, slug, name) VALUES ($1, $2, $3, 'Second Brand')`,
+			second.brandID, f.tenantID, "b2-"+second.brandID.String()[:8]); err != nil {
+			return err
+		}
+		second.playerID = uuid.New()
+		_, err := tx.Exec(ctx,
+			`INSERT INTO player_accounts (id, tenant_id, brand_id, person_id, email, password_hash, status)
+			 VALUES ($1, $2, $3, $4, $5, 'x', 'active')`,
+			second.playerID, f.tenantID, second.brandID, f.personID, second.playerID.String()+"@example.com")
+		return err
+	})
+	if err != nil {
+		t.Fatalf("seed second account: %v", err)
+	}
+	return second
+}
+
+// --- N-1 (RV-PRH-I2 KYC security re-verification of fix round 492cb20,
+// HIGH, pre-existing - not introduced by that round): the cross-account
+// rejected overlay must be computed from each OTHER account's latest
+// FINAL/terminal decision only, never its latest merely-decided row. A
+// player could otherwise neutralise the overlay with one ordinary API
+// call: start a fresh CreateVerification on the rejected account (it goes
+// `pending`, which the pre-N-1 predicate counted as "decided" and
+// therefore as superseding the rejection) - reproduced exactly below. ---
+
+// TestEvaluateEnforcement_N1_FreshPendingVerificationDoesNotLiftRejection is
+// N-1's own EXACT reproduction sequence (security re-verification): account
+// A approved, account B (same Person) rejected - a withdrawal from A is
+// denied. The player then starts an ordinary new verification on B, which
+// goes `pending` (MockKYCProvider's own CreateVerification outcome) - a
+// withdrawal from A must STILL be denied, because a merely-pending
+// re-verification is not a final decision and must never supersede B's own
+// still-standing rejection.
+func TestEvaluateEnforcement_N1_FreshPendingVerificationDoesNotLiftRejection(t *testing.T) {
+	pool := testPool(t)
+	f := seedFixture(t, pool)
+	setVerification(t, pool, f, StatusApproved, nil)
+	second := seedSecondAccount(t, pool, f)
+	setVerification(t, pool, second, StatusRejected, nil)
+
+	// Precondition: the overlay denies before B's fresh verification.
+	if d := evalWithdrawal(t, pool, f); d.Allowed {
+		t.Fatalf("test setup: expected the overlay to deny before B's fresh verification, got %+v", d)
+	}
+
+	time.Sleep(10 * time.Millisecond)
+	// The player starts an ordinary new verification on B - MockKYCProvider's
+	// own CreateVerification outcome is 'pending', a NON-final status.
+	setVerification(t, pool, second, StatusPending, nil)
+
+	d := evalWithdrawal(t, pool, f)
+	if d.Allowed {
+		t.Fatalf("N-1: expected a fresh PENDING re-verification on the rejected account to NEVER lift the overlay's deny, got %+v", d)
+	}
+	if d.Outcome != OutcomeFailed {
+		t.Fatalf("N-1: expected outcome failed, got %+v", d)
+	}
+}
+
+// TestEvaluateEnforcement_N1_ReviewRequiredDoesNotLiftRejection is N-1's
+// review_required variant: B's fresh re-verification reaches
+// review_required (still non-final) - the overlay must still deny.
+func TestEvaluateEnforcement_N1_ReviewRequiredDoesNotLiftRejection(t *testing.T) {
+	pool := testPool(t)
+	f := seedFixture(t, pool)
+	setVerification(t, pool, f, StatusApproved, nil)
+	second := seedSecondAccount(t, pool, f)
+	setVerification(t, pool, second, StatusRejected, nil)
+	time.Sleep(10 * time.Millisecond)
+	setVerification(t, pool, second, StatusReviewRequired, nil)
+
+	d := evalWithdrawal(t, pool, f)
+	if d.Allowed {
+		t.Fatalf("N-1: expected a review_required re-verification on the rejected account to NEVER lift the overlay's deny, got %+v", d)
+	}
+}
+
+// TestEvaluateEnforcement_N1_LaterFinalApprovedLiftsRejection is N-1's own
+// explicit "lifted" case: only a LATER FINAL decision - here, approved -
+// on the same OTHER account supersedes its own earlier rejection. This is
+// the one path that SHOULD allow A's withdrawal.
+func TestEvaluateEnforcement_N1_LaterFinalApprovedLiftsRejection(t *testing.T) {
+	pool := testPool(t)
+	f := seedFixture(t, pool)
+	setVerification(t, pool, f, StatusApproved, nil)
+	second := seedSecondAccount(t, pool, f)
+	setVerification(t, pool, second, StatusRejected, nil)
+	time.Sleep(10 * time.Millisecond)
+	// A LATER FINAL decision on B - e.g. a compliance officer's own
+	// approval following a genuine re-verification - lifts the overlay.
+	setVerification(t, pool, second, StatusApproved, nil)
+
+	d := evalWithdrawal(t, pool, f)
+	if d.Outcome != OutcomePassed || !d.Allowed {
+		t.Fatalf("N-1: expected a LATER FINAL approved on the other account to lift the overlay, got %+v", d)
+	}
+}
+
+// TestEvaluateEnforcement_N1_OrphanOnRejectedAccountDoesNotLiftRejection is
+// N-1's orphan variant: B's rejection is followed by a newer orphan (a
+// re-verification whose vendor call failed, ADR 0095 §15.2) - the overlay
+// must still deny, exactly like the review_required and pending cases
+// above (an orphan is even less of a decision than either of those).
+func TestEvaluateEnforcement_N1_OrphanOnRejectedAccountDoesNotLiftRejection(t *testing.T) {
+	pool := testPool(t)
+	f := seedFixture(t, pool)
+	setVerification(t, pool, f, StatusApproved, nil)
+	second := seedSecondAccount(t, pool, f)
+	setVerification(t, pool, second, StatusRejected, nil)
+	time.Sleep(10 * time.Millisecond)
+	setOrphanVerification(t, pool, second)
+
+	d := evalWithdrawal(t, pool, f)
+	if d.Allowed {
+		t.Fatalf("N-1: expected an orphan on the rejected account to NEVER lift the overlay's deny, got %+v", d)
+	}
+}
+
 // --- ADR 0096 §2.6(g), RV-PRH-I2 KYC review F1: never-submitted orphan
 // rows are excluded from "latest" enforcement selection ---
 

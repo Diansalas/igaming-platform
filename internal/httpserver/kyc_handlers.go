@@ -337,6 +337,14 @@ func newUploadMyDocumentHandler(deps Deps) http.HandlerFunc {
 			apierror.Write(w, requestID, apierror.CodeValidation, "uploaded file failed a security scan")
 			return
 		}
+		if errors.Is(err, kyc.ErrVerificationNotSubmitted) {
+			// N5 (RV-PRH-I2 KYC code review): the verification is a
+			// never-decided orphan (no live provider reference) - a clear,
+			// fail-closed conflict, never surfaced as a generic 500 or
+			// silently accepted.
+			apierror.Write(w, requestID, apierror.CodeConflict, "verification has not been submitted to a provider yet; start a new verification")
+			return
+		}
 		if errors.Is(err, kyc.ErrUploadInvalid) || errors.Is(err, kyc.ErrInvalidTransition) {
 			apierror.Write(w, requestID, apierror.CodeValidation, err.Error())
 			return
