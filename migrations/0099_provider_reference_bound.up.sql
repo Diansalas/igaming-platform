@@ -46,12 +46,17 @@
 -- Every tenant-owned table here carries FORCE ROW LEVEL SECURITY, and the
 -- migration connection has no app.tenant_id: a plain count(*) would see
 -- ZERO rows and silently pass (migration 0048's lesson). The pre-flight
--- therefore iterates over every tenant (tenants has no RLS) and sets
--- app.tenant_id to it - satisfying each table's staff-scope policy,
--- never bypassing it, never toggling FORCE (migration 0095's pattern).
--- Platform tables (casino_games, sb_*) are readable as-is (FOR SELECT
--- USING (true)). The ADD CONSTRAINT statements below are the second,
--- RLS-independent line: constraint validation scans the physical table.
+-- therefore iterates over every tenant and sets app.tenant_id to it -
+-- satisfying each table's staff-scope policy, never bypassing it, never
+-- toggling FORCE (migration 0095's pattern). tenants itself carries FORCE
+-- RLS since migration 0077; the loop can list every tenant only because
+-- its tenants_read policy is USING (true). If that policy is ever
+-- narrowed, the loop sees zero tenants and loses the per-column report -
+-- the migration still fails closed, through the ADD CONSTRAINT
+-- validation (SQLSTATE 23514) below. Platform tables (casino_games,
+-- sb_*) are readable as-is (FOR SELECT USING (true)). The ADD CONSTRAINT
+-- statements below are the second, RLS-independent line: constraint
+-- validation scans the physical table.
 DO $$
 DECLARE
     pred CONSTANT TEXT := '(%1$I IS NOT NULL AND (octet_length(%1$I) NOT BETWEEN 1 AND 255 OR %1$I ~ ''[\x01-\x1F\x7F-\x9F]''))';

@@ -369,7 +369,7 @@ func TestWave3Phase2Migrations_FullChainUpDownUpRoundTrip(t *testing.T) {
 		t.Fatal("bonus_grants.expires_at does not exist after migrating up")
 	}
 
-	// Roll back exactly the thirty-one most recently applied migrations
+	// Roll back exactly the thirty-two most recently applied migrations
 	// (0099, 0098, 0097, 0096, 0095, 0094, 0093, 0092, 0091, 0090, 0089, 0088, 0087, 0086, 0085, 0084, 0083, 0082, 0081, 0080,
 	// 0079, 0078, 0077, 0076, 0075, 0074, 0073, 0072, 0071, 0070, 0069,
 	// 0068, in that order - MigrateDown orders by applied_at DESC).

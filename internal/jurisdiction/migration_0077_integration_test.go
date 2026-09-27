@@ -54,9 +54,6 @@ func countPoliciesFor(t *testing.T, pool *db.Pool, table string) int {
 	return count
 }
 
-// TestMigration0077_EnablesAndForcesRLSOnTenantsLicencesAndJurisdictions
-// proves the schema-level baseline directly against pg_class - all three
-// tables must carry ENABLE + FORCE ROW LEVEL SECURITY after migrating up.
 // migration0099Version (PRH-REF, PROVIDER-REF-BOUND-1: provider reference
 // CHECK constraints) is the chain's tip for this file's full-chain
 // scenario. migration_0075_integration_test.go stages its own directory
@@ -64,6 +61,9 @@ func countPoliciesFor(t *testing.T, pool *db.Pool, table string) int {
 // constraints, so it is unconditionally reversible.
 const migration0099Version = int64(99)
 
+// TestMigration0077_EnablesAndForcesRLSOnTenantsLicencesAndJurisdictions
+// proves the schema-level baseline directly against pg_class - all three
+// tables must carry ENABLE + FORCE ROW LEVEL SECURITY after migrating up.
 func TestMigration0077_EnablesAndForcesRLSOnTenantsLicencesAndJurisdictions(t *testing.T) {
 	scratchURL := migration0075ScratchDatabase(t)
 	pool := migration0075ScratchPool(t, scratchURL)

@@ -374,7 +374,7 @@ func TestMigration0076_RestoresPreMigrationRLSPostureAndRefusesNonNullCountryCod
 	}
 	// Roll back 0099, 0098, 0097, 0096, 0095, 0094, 0093, 0092, 0091, 0090, 0089, 0088, 0087, 0086, 0085, 0084, 0083, 0082,
 	// 0081, 0080, 0079, 0078, 0077, then 0076 - see migration0077Version's
-	// through migration0098Version's own comments for why all twenty-one
+	// through migration0099Version's own comments for why all twenty-four
 	// must be accounted for explicitly here.
 	if _, err := pool.MigrateDown(context.Background(), dir, 24); err != nil {
 		t.Fatalf("down migration on a clean database: %v", err)
