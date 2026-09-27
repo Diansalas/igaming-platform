@@ -1251,6 +1251,97 @@ authority is exactly the "unreviewed path to arbitrary credits" §2.2 itself war
 Accepted by `ledger-finance` (LF-Q3, §21.4); `ledger-finance` edits `reconciliation-model.md`
 when this ADR is ACCEPTED, together with the ledger-join rule above.
 
+### 12.7 Implementation record (PRH-I5, `ledger-finance`, 2026-09-27)
+
+Label: **IMPLEMENTED (stream, statement store, matcher, ledger join, tests) against a `MOCK`
+source; real PSP statement matching `PROVIDER DEPENDENT`.** Pending `security`, `code-reviewer`
+and `qa` gate review.
+
+**Migration number swap.** This section and §13.3 say "migration 0103". The orchestrator swapped the
+allocation on 2026-09-27 (commit 07b354b, task registry): payment statement reconciliation is
+**migration 0102** (`migrations/0102_payment_statement_reconciliation.{up,down}.sql`), and the kill
+switch (§10.2, §13.2) moves to **0103**. Read every "0102 kill switch / 0103 reconciliation"
+reference in this ADR as swapped.
+
+**What landed.**
+- `statement.PaymentStatementSource`, `PaymentStatementLine`, `PaymentStatement`,
+  `PaymentFetchRequest` and the caps `MaxPaymentStatementLines` (1 000 000) /
+  `MaxPaymentStatementBodyBytes` (real adapters) in `internal/reconciliation/statement`.
+- `internal/reconciliation/payment_statement.go`: `FetchPaymentStatement` (no tx; refused under
+  `txscope.Held`; line cap; every field validated with `providerref` and the §13.3 bounds; a line of
+  another provider refuses the whole import), `IngestPaymentStatement` (short tx, idempotent on
+  the §12.1 key, batched INSERTs because COPY is unavailable under RLS), `RunPaymentStatement`
+  (REPEATABLE READ enforced; the eight kinds; the LF95-C13 ledger join both directions; payout
+  match on instruction **or** settlement reference; provider-bound resolution; coverage window;
+  deferred-receipt check; writes only `persistRun`). `TryRunPaymentStatementForTenant` (advisory
+  lock `reconciliation:payment_statement:<tenant>`), `ReconcilePaymentStatementForTenant` (the three
+  phases, run audit carrying `import_id`, label, `is_mock`, coverage and line count; any phase
+  failure is audited in a fresh tx with `severity=P1` and logged at Error level), and sweep wiring
+  (`RunSweep`/`RunSweepTenants`/`RunSchedulerLoop` take trailing payment sources;
+  `cmd/platform-api` wires the MOCK).
+- Migration 0102: both tables append-only (UPDATE/DELETE/TRUNCATE denied, owner included), FORCE
+  RLS with `tenant_staff_scope`, all §13.3 CHECKs, `line_count` bound to the stored rows (statement
+  trigger refuses an over-count append; deferred constraint trigger refuses a short import at
+  commit), a `CHECK` that a MOCK import's label contains `MOCK`, the pay_* kinds as a strict
+  superset of 0098, and runtime grants SELECT/INSERT only (re-asserted in `deploy/init-app-role.sql`).
+  The down migration refuses once any import or pay_* mismatch exists (constraint-validation
+  technique, not blinded by RLS).
+- `payments.MockStatementSource` (`internal/payments/mock_statement_source.go`, `Synthetic`,
+  refused in production by the startup guard): renders the MockProvider's own per-tenant records,
+  coverage start = the MockProvider's construction time, fetched through the provider-call gate as a
+  read-only call with the MOCK outbound credential. Two narrow, additive edits outside that file:
+  the gate also carries its `CallContext` on the adapter's ctx (`gate.go`), and the MockProvider
+  tags each record with that tenant, the merchant reference and the time (`mock.go`).
+  `MockCredentialResolver` gained its `SyntheticComponent` marker (now wired into the bundle).
+- Tests: `internal/reconciliation/payment_statement_integration_test.go` (§16.3 list, including a
+  statement-capture test, a REPEATABLE READ snapshot test with a READ COMMITTED kill control, RLS
+  cross-tenant, migration up/down and grants) and
+  `TestInitAppRole_RerunKeepsPaymentStatementGrants`. Mutation evidence: 28/28 killed
+  (`docs/plans/payment-readiness/evidence/prh-i5-mutation-kill.txt`, harness `prh-i5-mutate.py`;
+  MX9 = PM23).
+
+**Deviations from the design text, recorded.**
+1. **§9.5 `Fetch(ctx, CallContext, …)`.** The leaf cannot import `internal/payments` (import cycle),
+   so `Fetch` takes a `PaymentFetchRequest` carrying only the server-side tenant and provider. The
+   real `CallContext` is built inside `payments` by the gate (credential resolved, binding checked,
+   deadline applied). S95-C11's "`CallContextLike` is looser" concern is met by keeping the leaf
+   type credential-free rather than a look-alike: nothing credential-shaped crosses the leaf.
+2. **Status rules the §12.3 table leaves open**, decided conservatively and disclosed in the code:
+   a provider `reversed` deposit line counts as provider-succeeded; a `disputed` attempt is excluded
+   from status comparison (already a payments P1, no automated remedy); provider-declined versus a
+   platform in-flight attempt is age-gated as `pay_unresolved`, like provider-pending.
+3. **Provider-succeeded versus platform in-flight is not age-gated**, exactly as §12.3 says. A
+   near-real-time real source may need a short grace for callback latency; `PROVIDER DEPENDENT`,
+   decided with the first real source.
+4. **Horizon reference time** is the import's `coverage_end`, not the wall clock, so a run is
+   deterministic for a given import and snapshot. `DefaultPaymentUnresolvedHorizon` = 24 h =
+   `payments.DefaultSettlementWindow` (asserted by a test).
+5. **Deferred receipts:** only `disposition_at_receipt = 'deferred_unresolved'` receipts count
+   toward `pay_unresolved`; anomaly/unsupported receipts are surfaced by the payments anomaly path.
+
+**Not implemented / deferred.**
+- **LF95-R1 automatic re-drive job: `NOT IMPLEMENTED` (deferred).** It is `payments`-owned and
+  would have to be built inside `internal/payments` while the deposit cutover is in flight there.
+  Remediation today is the existing path: an operator T17 (`payments.Touch`) then the sweeper's
+  `QueryStatus` → evidence → T7 posting. The end-to-end §16.3 test proves exactly that path
+  (flagged → T17 → sweeper posts → next run clean). Mismatch keys carry `attempt=<uuid>` so the
+  job can consume them without parsing free text beyond that token.
+- **MOCK payouts:** payout dispatch through the gate is not wired yet (PRH-I1), so the MOCK lists no
+  payouts today; payout matching (instruction and settlement reference) and the payout ledger join
+  are proven with fixture sources.
+- **MOCK limits:** in-process, single-replica, reset on restart, lists no reversals; records from
+  the legacy gate-less deposit path are untagged and appear on no tenant's statement. Each hourly run
+  stores the MOCK's all-time statement again (new coverage end, new import): dev-only growth.
+- Scale: O(tenant history) per run, like every stream (CAS-RECON-SCALE-1).
+
+**Finding for `payments` (not fixed here, outside PRH-I5 scope).** A late success receipt on a
+`declined` deposit attempt whose sibling already succeeded (T13, a second capture) fails in
+`ApplyReceiptEvidence` with a `payment_attempts_tenant_ledger_tx` unique violation:
+`applyDepositSuccessAndPost` links the attempt to `updated.LedgerTransactionID`, which is the
+intent's **first** posting (LF95-C6(a)), not the new one. Result: the verified success is rolled back
+and redelivered forever. `TestPaymentStatement_Kind_DuplicatePlatformSuccess` builds the T13 state
+directly for that reason.
+
 ---
 
 ## 13. Data model sketch

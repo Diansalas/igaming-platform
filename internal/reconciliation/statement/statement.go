@@ -112,3 +112,101 @@ type CasinoStatementSource interface {
 	// records that. It must not write.
 	Statement(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, periodStart, periodEnd time.Time) ([]CasinoStatementLine, []CasinoStatementTotal, error)
 }
+
+// Payment statement line kinds (PaymentStatementLine.Kind) and statuses
+// (PaymentStatementLine.Status) - ADR 0095 §9.5, PRH-I5.
+const (
+	PaymentLineDeposit         = "deposit"
+	PaymentLineDepositReversal = "deposit_reversal"
+	PaymentLinePayout          = "payout"
+
+	PaymentStatusPending   = "pending"
+	PaymentStatusSucceeded = "succeeded"
+	PaymentStatusDeclined  = "declined"
+	PaymentStatusReversed  = "reversed"
+)
+
+// Size caps a payment statement is held to (ADR 0095 §12.1 step 1,
+// S95-C11). MaxPaymentStatementLines is enforced by the payment_statement
+// stream after Fetch (above it the import is refused, nothing is stored,
+// and the failure is audited and logged as a P1) and by migration 0102's
+// line_count CHECK. MaxPaymentStatementBodyBytes binds a REAL source that
+// reads a statement over the wire: it must stop reading and fail at this
+// many bytes rather than buffer an unbounded body (the MOCK source has no
+// wire body).
+const (
+	MaxPaymentStatementLines     = 1_000_000
+	MaxPaymentStatementBodyBytes = 256 << 20
+)
+
+// PaymentStatementLine is one line of a payment provider statement: the
+// provider's view of one deposit, deposit reversal or payout (ADR 0095
+// §9.5). References are the provider's own; MerchantReference is the
+// platform's attempt merchant reference as the provider echoes it;
+// SettlementReference is a payout's Step B settlement (send-confirmation)
+// reference when the provider reports one (LF95-C13).
+type PaymentStatementLine struct {
+	ProviderID                string
+	ProviderReference         string
+	MerchantReference         string
+	OriginalProviderReference string
+	SettlementReference       string
+	// Kind is PaymentLineDeposit, PaymentLineDepositReversal or
+	// PaymentLinePayout.
+	Kind string
+	// Status is PaymentStatusPending, _Succeeded, _Declined or _Reversed.
+	Status string
+	// Amount is minor units; the stream compares it as big.Int.
+	Amount     int64
+	AssetCode  string
+	OccurredAt time.Time
+}
+
+// PaymentStatement is one fetched statement. [CoverageStart, CoverageEnd)
+// is the window the provider vouches for: platform records outside it are
+// never flagged as missing (ADR 0095 §12.3 "Coverage window").
+type PaymentStatement struct {
+	CoverageStart, CoverageEnd time.Time
+	Lines                      []PaymentStatementLine
+}
+
+// PaymentFetchRequest is what the payment_statement stream hands a source.
+// TenantID and ProviderID come from the server-side sweep (the tenant
+// being reconciled and the source's own provider), never from a statement.
+type PaymentFetchRequest struct {
+	TenantID               uuid.UUID
+	ProviderID             string
+	PeriodStart, PeriodEnd time.Time
+}
+
+// PaymentStatementSource supplies one provider's statement for one tenant
+// to the payment_statement reconciliation stream (ADR 0095 §9.5, §12).
+//
+// Unlike CasinoStatementSource it takes NO transaction: Fetch is provider
+// I/O and the stream calls it with no transaction held (ADR 0095
+// INV-IO-1; the stream refuses to call it under txscope.Held, and a
+// source must also refuse). The fetched statement is persisted by the
+// stream in its own short ingest transaction and matched later from the
+// stored copy only (§12.1). This is the CAS-STMT-IO-1 fix applied to
+// payments.
+//
+// Deviation from the ADR 0095 §9.5 sketch, recorded in the ADR's
+// implementation record: the sketch passes a payments.CallContext. This
+// leaf cannot import internal/payments (import cycle, see the package
+// comment), so the request carries only the server-side tenant and
+// provider; an implementation in internal/payments builds the real
+// CallContext itself, resolving the tenant's outbound credential through
+// the provider-call gate (§3.2, §11). payments.MockStatementSource does.
+type PaymentStatementSource interface {
+	// Label names the source in import rows, reconciliation records, audit
+	// metadata and logs. A synthetic source's label must contain "MOCK"
+	// (the stream and migration 0102 both refuse otherwise).
+	Label() string
+	// ProviderID is the one provider whose statement this source fetches.
+	// Every line must carry it; a line of any other provider refuses the
+	// whole import (ADR 0095 INV-IO-14, S95-C1).
+	ProviderID() string
+	// Fetch returns the statement for req. It must not be called, and
+	// must refuse, while a database transaction is held.
+	Fetch(ctx context.Context, req PaymentFetchRequest) (PaymentStatement, error)
+}

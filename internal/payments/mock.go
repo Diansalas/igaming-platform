@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -78,6 +79,11 @@ type MockProvider struct {
 	// WebhookCredentialResolver's real - NOT IMPLEMENTED - resolver), never
 	// derived from a single shared platform-side secret.
 	masterSecret []byte
+
+	// createdAt is this instance's construction time: the start of the
+	// MOCK statement's coverage window (a restarted process starts a new
+	// window, so pre-restart platform records are never flagged missing).
+	createdAt time.Time
 }
 
 // deriveKey computes this instance's per-(tenantID, providerID) webhook
@@ -179,6 +185,31 @@ type mockAttempt struct {
 	outcome       Outcome
 	declineReason string
 	cascadable    bool
+
+	// PRH-I5 (MockStatementSource): the provider's own bookkeeping of who
+	// called and when. tenantTagged is true only when the call came
+	// through the provider-call gate (gate.go), which carries the
+	// committed attempt's tenant; an untagged record (a legacy direct
+	// call) never appears on any tenant's statement.
+	tenantID          uuid.UUID
+	tenantTagged      bool
+	merchantReference string
+	createdAt         time.Time
+}
+
+// tagRecord stamps the record just created under ref with the calling
+// tenant (from the gate's CallContext on ctx), the merchant reference and
+// the time. Called with m.mu held.
+func (m *MockProvider) tagRecord(ctx context.Context, ref, merchantReference string) {
+	a, ok := m.attempts[ref]
+	if !ok {
+		return
+	}
+	a.merchantReference = merchantReference
+	a.createdAt = time.Now().UTC()
+	if cc, ok := callContextFrom(ctx); ok && cc.ProviderID == m.providerID && cc.TenantID != uuid.Nil {
+		a.tenantID, a.tenantTagged = cc.TenantID, true
+	}
 }
 
 // NewMockProvider constructs a mock adapter registered under providerID
@@ -221,7 +252,8 @@ func NewMockProvider(providerID string, fiatCurrencies ...string) *MockProvider 
 			RollingLatencyP99Ms: 50,
 			CircuitState:        CircuitClosed,
 		},
-		attempts: make(map[string]*mockAttempt),
+		attempts:  make(map[string]*mockAttempt),
+		createdAt: time.Now().UTC(),
 	}
 }
 
@@ -373,11 +405,12 @@ func (m *MockProvider) nextReference() string {
 }
 
 // Deposit implements PaymentProvider.
-func (m *MockProvider) Deposit(_ context.Context, req DepositRequest) (DepositResult, error) {
+func (m *MockProvider) Deposit(ctx context.Context, req DepositRequest) (DepositResult, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	ref := m.nextReference()
+	defer m.tagRecord(ctx, ref, req.MerchantReference)
 	if m.AcceptAllAmounts {
 		m.attempts[ref] = &mockAttempt{kind: "deposit", amount: req.Amount, assetCode: req.AssetCode, outcome: OutcomePending}
 		return DepositResult{Outcome: OutcomePending, ProviderReference: ref, RedirectURL: "https://mock-psp.invalid/pay/" + ref}, nil
@@ -405,11 +438,12 @@ func (m *MockProvider) Deposit(_ context.Context, req DepositRequest) (DepositRe
 // this stage (withdrawal orchestration is NOT IMPLEMENTED yet) but
 // implemented fully so the conformance suite covers it for whichever
 // future stage wires it up.
-func (m *MockProvider) Withdraw(_ context.Context, req WithdrawRequest) (WithdrawResult, error) {
+func (m *MockProvider) Withdraw(ctx context.Context, req WithdrawRequest) (WithdrawResult, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	ref := m.nextReference()
+	defer m.tagRecord(ctx, ref, req.MerchantReference)
 	switch req.Amount {
 	case MockAmountPlayerDeclineNoCascade:
 		m.attempts[ref] = &mockAttempt{kind: "withdraw", amount: req.Amount, assetCode: req.AssetCode, outcome: OutcomeDeclined, declineReason: "account_closed"}

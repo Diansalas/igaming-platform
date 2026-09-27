@@ -105,6 +105,12 @@ type OutboundCredentialResolver interface {
 // wired to a real provider.
 type MockCredentialResolver struct{}
 
+// SyntheticComponent implements providerkind.Synthetic (MOCK-ADAPTER-PROD-1):
+// PRH-I5 wires this resolver into the MOCK payment statement source, and
+// providerkind's completeness scan requires every Mock* type to carry the
+// marker.
+func (MockCredentialResolver) SyntheticComponent() {}
+
 func (MockCredentialResolver) Resolve(cc CallContext, domain string) (OutboundCredential, error) {
 	return OutboundCredential{
 		TenantID: cc.TenantID, ProviderID: cc.ProviderID, Domain: domain,

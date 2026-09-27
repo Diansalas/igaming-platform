@@ -399,8 +399,11 @@ func run() error {
 		// casino_statement stream's source is likewise the MOCK in-house
 		// source (Stage 10.3 W3a, CAS-RECON-STMT-1): tautological against
 		// the ledger it renders from; real casino statement matching is
-		// PROVIDER DEPENDENT.
-		reconciliation.RunSchedulerLoop(ctx, pool, logger, cfg.ReconciliationInterval, providers.SettlementStmt, providers.CasinoStmt)
+		// PROVIDER DEPENDENT. The payment_statement stream's source is the
+		// MOCK payments statement source (PRH-I5, ADR 0095 §12.4): the
+		// MockProvider's own records, fetched with no transaction held;
+		// real PSP statement matching is PROVIDER DEPENDENT.
+		reconciliation.RunSchedulerLoop(ctx, pool, logger, cfg.ReconciliationInterval, providers.SettlementStmt, providers.CasinoStmt, providers.PaymentsStmt)
 	}()
 
 	// Stage 4H-B0-R7 directive item 4: operationalize the self-exclusion
