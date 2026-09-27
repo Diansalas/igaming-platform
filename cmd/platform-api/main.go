@@ -258,7 +258,7 @@ func run() error {
 	}
 	logger.Info("sportsbook catalogue synced")
 
-	handler := httpserver.New(httpserver.Deps{
+	handler, webhookAdmission := httpserver.NewWithAdmission(httpserver.Deps{
 		Logger:              logger,
 		DB:                  pool,
 		AuthIssuer:          issuer,
@@ -267,6 +267,10 @@ func run() error {
 		RefreshTokenTTL:     cfg.RefreshTokenTTL,
 		PaymentOrchestrator: orchestrator,
 		CasinoOrchestrator:  casinoOrchestrator,
+		// ADR 0097 PRH-I4 (PAYWH-RL-1): mapped field by field from
+		// config.WebhookAdmissionConfig - internal/httpserver never imports
+		// internal/config (architect review AC1).
+		WebhookAdmission: toWebhookAdmissionSettings(cfg.WebhookAdmission),
 		// S9.1-LAUNCH-1/S9.1-LAUNCH-2 (docs/security/security-
 		// architecture.md): both plumbed straight from environment-sourced
 		// config, with no hardcoded default overriding cfg's own (0/0 -
@@ -351,6 +355,23 @@ func run() error {
 		// secret-store backend are configured.
 		ProviderCredentials: providers.Credentials,
 	})
+
+	// ADR 0097 §7 (PRH-I4): startup waits for the webhook tenant
+	// directory's first successful load before serving any traffic - a
+	// failure here does not fail startup (a down DB is already surfaced by
+	// /readyz and by the earlier db.Connect/HealthCheck calls above); it
+	// logs and leaves the directory not-Loaded(), so /readyz stays
+	// not-ready and every webhook route answers 503 until a later
+	// background refresh succeeds (never falls back to unbounded/raw-slug
+	// keying).
+	if err := webhookAdmission.LoadDirectory(ctx); err != nil {
+		logger.Error("webhook_tenant_directory_initial_load_failed", "error", err)
+	}
+	// devops condition 2 (ADR 0097 §17): the refresher goroutine is wired
+	// to the SAME ctx signal.NotifyContext cancels on shutdown, so it stops
+	// cleanly and never logs after the deferred pool.Close()/tracing/
+	// metrics shutdowns above run.
+	go webhookAdmission.RunDirectoryRefresh(ctx)
 
 	// Stage 3C directive item 4: operationalize the ledger-vs-projection
 	// reconciliation stream, which Stage 3B built but never actually
