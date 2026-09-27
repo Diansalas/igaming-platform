@@ -31,6 +31,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/identityresolution"
 	"github.com/Diansalas/igaming-platform/internal/payments"
+	"github.com/Diansalas/igaming-platform/internal/tenant"
 	"github.com/Diansalas/igaming-platform/internal/testsupport/scratchdb"
 )
 
@@ -268,6 +269,23 @@ func (a *ksAPI) auditMetadataByOutcome(tenantID uuid.UUID, action, outcome strin
 	return m
 }
 
+// auditIPAndUserAgentByOutcome is RV-PRH-I1 security re-verification 2's
+// L2 check: a denied-audit row must carry IP address and user agent, same
+// as a success row.
+func (a *ksAPI) auditIPAndUserAgentByOutcome(tenantID uuid.UUID, action, outcome string) (ip, ua string) {
+	a.t.Helper()
+	err := a.pool.WithTenant(context.Background(), tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx,
+			`SELECT coalesce(host(ip_address), ''), coalesce(user_agent, '') FROM audit_log WHERE tenant_id=$1 AND action=$2 AND outcome=$3`,
+			tenantID, action, outcome,
+		).Scan(&ip, &ua)
+	})
+	if err != nil {
+		a.t.Fatalf("read audit ip/user_agent for %s/%s: %v", action, outcome, err)
+	}
+	return ip, ua
+}
+
 func (a *ksAPI) auditCountByOutcome(tenantID uuid.UUID, action, outcome string) int {
 	a.t.Helper()
 	var n int
@@ -351,6 +369,11 @@ func TestPaymentsKillSwitchAPI_TenantAdminEngageAndFourEyesRelease(t *testing.T)
 	deniedMeta := a.auditMetadataByOutcome(tenant, "payments_kill_switch.approve_release", "denied")
 	if deniedMeta["denied_class"] != "trigger_refusal" {
 		t.Fatalf("denied audit metadata denied_class = %v, want trigger_refusal", deniedMeta["denied_class"])
+	}
+	// RV-PRH-I1 security re-verification 2, L2: a denied row must carry
+	// IP/user agent, same as a success row.
+	if ip, ua := a.auditIPAndUserAgentByOutcome(tenant, "payments_kill_switch.approve_release", "denied"); ip == "" || ua == "" {
+		t.Fatalf("expected the denied audit row to carry a non-empty ip_address/user_agent, got ip=%q ua=%q", ip, ua)
 	}
 
 	// A distinct principal approves and releases in one call.
@@ -651,6 +674,111 @@ func TestPaymentsKillSwitchAPI_RouteTable(t *testing.T) {
 		if noAuth.status != http.StatusUnauthorized {
 			t.Errorf("%s %s with no token: status = %d, want 401, body=%s", rt.method, rt.path, noAuth.status, noAuth.body)
 		}
+	}
+}
+
+// TestRunKillSwitchTx_UsesAuthenticatedTenantNeverThePathValue is the
+// architect review's AM-1 fix (rv-prh-architect.md §1): a tenant-scoped
+// kill-switch transaction must open under the AUTHENTICATED
+// c.tc.TenantID, never the path-supplied c.target. canActOnTenant
+// (beginKillSwitchCall) already refuses any request where these two
+// differ, so this test constructs a killSwitchCall directly - bypassing
+// that guard - to force them apart and prove which one actually becomes
+// the transaction's app.tenant_id GUC.
+func TestRunKillSwitchTx_UsesAuthenticatedTenantNeverThePathValue(t *testing.T) {
+	a := newKSAPI(t)
+	authenticatedTenant := a.tenant()
+	pathTenant := a.tenant() // a different, real tenant - deliberately mismatched
+	staff := a.tenantStaff(authenticatedTenant, "tenant_admin")
+
+	c := killSwitchCall{
+		requestID: "test-req",
+		logger:    &capturingKillSwitchLogger{},
+		tc:        tenant.Context{TenantID: authenticatedTenant, Subject: staff.String(), Role: "tenant_admin", PrincipalType: "staff"},
+		subject:   staff,
+		target:    pathTenant,
+	}
+	deps := Deps{DB: a.pool}
+
+	var gucTenant string
+	err := runKillSwitchTx(context.Background(), deps, c, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT current_setting('app.tenant_id', true)`).Scan(&gucTenant)
+	})
+	if err != nil {
+		t.Fatalf("runKillSwitchTx: %v", err)
+	}
+	if gucTenant != authenticatedTenant.String() {
+		t.Fatalf("expected the transaction's app.tenant_id to be the AUTHENTICATED tenant %s, got %s (the mismatched path value was %s)",
+			authenticatedTenant, gucTenant, pathTenant)
+	}
+}
+
+// TestRecordKillSwitchDenied_WritesDespiteCancelledRequestContext is
+// RV-PRH-I1 security re-verification 2's L1 fix: the foreign-tenant
+// denied-audit row must still be written even when the caller's own
+// request context is already cancelled (a client disconnect) by the time
+// this runs - recordKillSwitchDenied detaches from ctx (context.
+// WithoutCancel) and applies its own short timeout before writing, rather
+// than inheriting the caller's cancellation.
+func TestRecordKillSwitchDenied_WritesDespiteCancelledRequestContext(t *testing.T) {
+	a := newKSAPI(t)
+	authenticatedTenant := a.tenant()
+	staff := a.tenantStaff(authenticatedTenant, "tenant_admin")
+
+	c := killSwitchCall{
+		requestID: "cancelled-req",
+		logger:    &capturingKillSwitchLogger{},
+		tc:        tenant.Context{TenantID: authenticatedTenant, Subject: staff.String(), Role: "tenant_admin", PrincipalType: "staff"},
+		subject:   staff,
+		target:    authenticatedTenant,
+		ipAddress: "203.0.113.7",
+		userAgent: "test-agent",
+	}
+	deps := Deps{DB: a.pool}
+
+	cancelledCtx, cancel := context.WithCancel(context.Background())
+	cancel() // simulate an already-disconnected client
+
+	recordKillSwitchDenied(cancelledCtx, deps, c, "engage")
+
+	if a.auditCountByOutcome(authenticatedTenant, "payments_kill_switch.engage", "denied") != 1 {
+		t.Fatal("expected the foreign-tenant denied-audit row to be written despite an already-cancelled request context")
+	}
+	if ip, ua := a.auditIPAndUserAgentByOutcome(authenticatedTenant, "payments_kill_switch.engage", "denied"); ip != "203.0.113.7" || ua != "test-agent" {
+		t.Fatalf("expected the denied row to carry the call's ip/user_agent, got ip=%q ua=%q", ip, ua)
+	}
+}
+
+// TestRecordKillSwitchRefusalAudit_WritesDespiteCancelledRequestContext is
+// recordKillSwitchDenied's identical L1 fix, for the OTHER denied-audit
+// writer (a trigger refusal or CAS conflict on an actual mutation, not
+// the foreign-tenant path).
+func TestRecordKillSwitchRefusalAudit_WritesDespiteCancelledRequestContext(t *testing.T) {
+	a := newKSAPI(t)
+	authenticatedTenant := a.tenant()
+	staff := a.tenantStaff(authenticatedTenant, "tenant_admin")
+
+	c := killSwitchCall{
+		requestID: "cancelled-req-2",
+		logger:    &capturingKillSwitchLogger{},
+		tc:        tenant.Context{TenantID: authenticatedTenant, Subject: staff.String(), Role: "tenant_admin", PrincipalType: "staff"},
+		subject:   staff,
+		target:    authenticatedTenant,
+		ipAddress: "203.0.113.8",
+		userAgent: "test-agent-2",
+	}
+	deps := Deps{DB: a.pool}
+
+	cancelledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	recordKillSwitchRefusalAudit(cancelledCtx, deps, c, "engage", "trigger_refusal", "payment_kill_switch", "")
+
+	if a.auditCountByOutcome(authenticatedTenant, "payments_kill_switch.engage", "denied") != 1 {
+		t.Fatal("expected the mutation-refusal denied-audit row to be written despite an already-cancelled request context")
+	}
+	if ip, ua := a.auditIPAndUserAgentByOutcome(authenticatedTenant, "payments_kill_switch.engage", "denied"); ip != "203.0.113.8" || ua != "test-agent-2" {
+		t.Fatalf("expected the denied row to carry the call's ip/user_agent, got ip=%q ua=%q", ip, ua)
 	}
 }
 
