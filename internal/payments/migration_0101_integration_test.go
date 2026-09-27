@@ -760,7 +760,7 @@ func TestMigration0101_T12_RefusedOnLegacyBackfillRow(t *testing.T) {
 	}
 
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		return ResubmitAmbiguous(ctx, tx, attemptID, uuid.New(), "sweeper-1", time.Now().Add(time.Hour))
+		return ResubmitAmbiguous(ctx, tx, attemptID, uuid.New(), "sweeper-1", time.Now().Add(time.Hour), 0)
 	})
 	if !errors.Is(err, ErrAttemptStateConflict) {
 		t.Fatalf("T12 on a legacy_backfill row must be refused, got %v", err)
@@ -829,7 +829,7 @@ func TestMigration0101_T12_RefusedWhenSiblingSucceeded(t *testing.T) {
 	}
 
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		return ResubmitAmbiguous(ctx, tx, sib2, uuid.New(), "sweeper-1", time.Now().Add(time.Hour))
+		return ResubmitAmbiguous(ctx, tx, sib2, uuid.New(), "sweeper-1", time.Now().Add(time.Hour), 0)
 	})
 	if !errors.Is(err, ErrAttemptStateConflict) {
 		t.Fatalf("T12 on sib2 must be refused once sib1 succeeded, got %v", err)

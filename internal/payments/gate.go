@@ -32,6 +32,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/Diansalas/igaming-platform/internal/providerref"
 	"github.com/Diansalas/igaming-platform/internal/txscope"
 )
 
@@ -147,9 +148,21 @@ func callProvider[T any](ctx context.Context, resolver OutboundCredentialResolve
 	result, class, callErr := safeCall(callCtx, cc, fn)
 
 	// Step 8 (S95-C8(a)): redact any transport error before it can reach
-	// a log line, an audit record, or a receipt.
+	// a log line, an audit record, or a receipt. A *providerref.Error is a
+	// SPECIAL case (B5.2, RV-PRH-I1 code review): its own Error() string is
+	// already redacted (field/reason/length/hash-prefix only, never the
+	// raw value - providerref.Error's own doc comment), so it is wrapped
+	// with %w instead of stringified, preserving the errors.As chain a
+	// caller needs (providerref.AsError) to recover the specific reason
+	// code for audit/terminal_reason. Every other error keeps the
+	// %s-only, chain-breaking redaction unchanged.
 	if callErr != nil {
-		callErr = fmt.Errorf("provider call error: %s", redactedReason(callErr))
+		var perr *providerref.Error
+		if errors.As(callErr, &perr) {
+			callErr = fmt.Errorf("provider call error: %w", perr)
+		} else {
+			callErr = fmt.Errorf("provider call error: %s", redactedReason(callErr))
+		}
 	}
 	return GateResult[T]{Value: result, Class: class, Err: callErr, Attempted: true}
 }

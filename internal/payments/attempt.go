@@ -262,6 +262,31 @@ func ListLiveAttemptForDepositIntent(ctx context.Context, tx pgx.Tx, depositInte
 	return a, true, nil
 }
 
+// GetLiveAttemptForWithdrawalRequest returns the single live (non-terminal)
+// attempt for a payout, if any - the payout analog of
+// ListLiveAttemptForDepositIntent, used by /resolve (B7/H4, RV-PRH-I1) to
+// find the attempt row that must transition ALONGSIDE the withdrawal
+// request, instead of that handler calling withdrawal.Complete/Fail
+// directly with no matching attempt transition. `created` is included
+// (unlike the deposit version's exact state list, reused verbatim) because
+// a payout attempt returned to `created` by a NotSent result is still
+// "live" - just not currently pollable via QueryStatus.
+func GetLiveAttemptForWithdrawalRequest(ctx context.Context, tx pgx.Tx, withdrawalRequestID uuid.UUID) (PaymentAttempt, bool, error) {
+	row := tx.QueryRow(ctx,
+		`SELECT `+paymentAttemptColumns+` FROM payment_attempts
+		 WHERE withdrawal_request_id = $1 AND state IN ('created','submitting','pending','ambiguous')
+		 ORDER BY attempt_no DESC LIMIT 1`,
+		withdrawalRequestID)
+	a, err := scanPaymentAttempt(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return PaymentAttempt{}, false, nil
+	}
+	if err != nil {
+		return PaymentAttempt{}, false, fmt.Errorf("payments: get live attempt for withdrawal request: %w", err)
+	}
+	return a, true, nil
+}
+
 // MerchantReferenceFor and ExternalIdempotencyKeyFor are the two pure
 // functions INV-IO-3 requires: deterministic functions of the attempt
 // id, computed once and persisted, never regenerated per try.
@@ -358,14 +383,26 @@ func InsertSubmittingAttempt(ctx context.Context, tx pgx.Tx, in NewSubmittingAtt
 	// no separate 'created' row for a later T2 claim to refuse - see
 	// killSwitchNotEngagedSQL's own doc comment for why a wrong tenant
 	// context inserts nothing here too.
+	//
+	// B2/H3 (RV-PRH-I1 code/ledger review): next_action_at is ALSO set to
+	// LeaseUntil unconditionally (reusing the $15 placeholder), not left
+	// NULL - claimBatch's own query only ever looks at next_action_at, so
+	// a row left NULL here is invisible to the sweeper forever if nothing
+	// else transitions it (a process crash during phase B, a phase-C
+	// error, or an unregistered provider). This is additive/safe for the
+	// deposit T1+T2 path too: phase B/C always runs synchronously right
+	// after this insert there, and every phase-C transition (MarkAccepted/
+	// ApplySuccess/ApplyDecline/MarkAmbiguousFromSubmitting/MarkNotSent)
+	// already sets its own next_action_at (or NULL for a terminal state)
+	// immediately afterward.
 	tag, err := tx.Exec(ctx,
 		`INSERT INTO payment_attempts (
 			id, tenant_id, operation, deposit_intent_id, withdrawal_request_id, attempt_no,
 			provider_id, payment_method, asset_code, amount, interactive,
 			merchant_reference, external_idempotency_key, state, last_evidence_kind,
-			claim_token, lease_owner, lease_until, submit_count, last_sent_at, first_submitted_at
+			claim_token, lease_owner, lease_until, submit_count, last_sent_at, first_submitted_at, next_action_at
 		)
-		SELECT $1,$2,$3,$4,$5,1,$6,$7,$8,$9,$10,$11,$12,'submitting','platform',$13,$14,$15,1,now(),now()
+		SELECT $1,$2,$3,$4,$5,1,$6,$7,$8,$9,$10,$11,$12,'submitting','platform',$13,$14,$15,1,now(),now(),$15
 		WHERE `+killSwitchNotEngagedSQL("$2", "$6", "$3"),
 		in.ID, in.TenantID, in.Operation, in.DepositIntentID, in.WithdrawalRequestID,
 		in.ProviderID, in.PaymentMethod, in.AssetCode, in.Amount, in.Interactive,
@@ -410,7 +447,8 @@ func ClaimCreatedForSubmission(ctx context.Context, tx pgx.Tx, attemptID uuid.UU
 		 SET provider_id = $2, claim_token = $3, lease_owner = $4, lease_until = $5,
 		     submit_count = submit_count + 1, last_sent_at = now(),
 		     first_submitted_at = COALESCE(first_submitted_at, now()),
-		     state = 'submitting', last_evidence_kind = 'platform', updated_at = now()
+		     state = 'submitting', last_evidence_kind = 'platform', updated_at = now(),
+		     next_action_at = $5 -- B2/H3: visible to the sweeper even if phase C never runs.
 		 WHERE id = $1 AND state = 'created' AND (provider_id IS NULL OR provider_id = $2)
 		   AND `+killSwitchNotEngagedSQL("payment_attempts.tenant_id", "$2", "payment_attempts.operation"),
 		attemptID, providerID, claimToken, leaseOwner, leaseUntil,
@@ -493,19 +531,32 @@ func MarkAmbiguousFromPending(ctx context.Context, tx pgx.Tx, attemptID uuid.UUI
 }
 
 // ResubmitAmbiguous performs T12: ambiguous -> submitting, the idempotent
-// resend of the SAME attempt with the SAME external key. The caller must
-// have already checked the manifest (IdempotentSubmission, submit_count
-// < max_resubmits - not this function's job) and, for a deposit,
-// re-verified no sibling has succeeded (N3; the guard trigger repeats
-// this check independently). legacy_backfill rows are refused by both
-// the CAS predicate here and the guard trigger (defense in depth).
-func ResubmitAmbiguous(ctx context.Context, tx pgx.Tx, attemptID uuid.UUID, claimToken uuid.UUID, leaseOwner string, leaseUntil time.Time) error {
+// resend of the SAME attempt with the SAME external key. The caller MUST
+// have already checked the manifest's IdempotentSubmission flag (this
+// function has no manifest to consult) - C1/B1 (RV-PRH-I1 ledger/code
+// review): the payout call site (payout_sweep.go's resubmitPayoutAmbiguous)
+// now does this before ever calling ResubmitAmbiguous. maxSubmits is this
+// function's own defense-in-depth copy of the same bound, enforced in the
+// CAS predicate itself (`submit_count < maxSubmits`) so a caller bug can
+// never resend past the configured cap even if it forgets its own check -
+// pass <= 0 to mean "no additional bound beyond the caller's own check"
+// (only ever used by a test that wants to isolate the manifest check).
+// For a deposit, the caller must also re-verify no sibling has succeeded
+// (N3; the guard trigger repeats this check independently).
+// legacy_backfill rows are refused by both the CAS predicate here and the
+// guard trigger (defense in depth). next_action_at is set to leaseUntil
+// (B2/H3), matching every other claim transition.
+func ResubmitAmbiguous(ctx context.Context, tx pgx.Tx, attemptID uuid.UUID, claimToken uuid.UUID, leaseOwner string, leaseUntil time.Time, maxSubmits int) error {
+	if maxSubmits <= 0 {
+		maxSubmits = 1 << 30 // effectively unbounded - see doc comment.
+	}
 	return casUpdate(ctx, tx, "T12 ambiguous->submitting",
 		`UPDATE payment_attempts
 		 SET state = 'submitting', last_evidence_kind = 'platform',
 		     claim_token = $2, lease_owner = $3, lease_until = $4,
-		     submit_count = submit_count + 1, last_sent_at = now(), updated_at = now()
-		 WHERE id = $1 AND state = 'ambiguous' AND NOT legacy_backfill
+		     submit_count = submit_count + 1, last_sent_at = now(), updated_at = now(),
+		     next_action_at = $4
+		 WHERE id = $1 AND state = 'ambiguous' AND NOT legacy_backfill AND submit_count < $5
 		   AND NOT EXISTS (
 		     SELECT 1 FROM payment_attempts sib
 		     JOIN payment_attempts self ON self.id = $1
@@ -513,7 +564,7 @@ func ResubmitAmbiguous(ctx context.Context, tx pgx.Tx, attemptID uuid.UUID, clai
 		       AND sib.state = 'succeeded' AND sib.id <> $1
 		   )
 		   AND `+killSwitchNotEngagedSQL("payment_attempts.tenant_id", "payment_attempts.provider_id", "payment_attempts.operation"),
-		attemptID, claimToken, leaseOwner, leaseUntil,
+		attemptID, claimToken, leaseOwner, leaseUntil, maxSubmits,
 	)
 }
 
