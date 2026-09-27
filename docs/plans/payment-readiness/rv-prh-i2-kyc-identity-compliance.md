@@ -283,3 +283,45 @@ would need one:
 - **Ruling 4 (Q4, human decisions):** none of the above require one; this document does not invent
   any threshold or legal interpretation, and does not claim any regulatory approval or
   certification (CLAUDE.md "No fake completion" / "Compliance").
+
+## Ruling 5 (L-1, security re-verification 4, `59a7dbc`) — a vendor `expired` on a staff-escalated `review_required` row should be HELD, exactly like `approved`, not applied
+
+**Rule: `expired` must be added to the staff-sticky guard alongside `approved`.** The guard
+predicate in `applyForwardOnlyStatus` (`internal/kyc/provider.go:512`,
+`... AND NOT (status = 'review_required' AND reviewed_by IS NOT NULL AND $1 = 'approved')`) should
+read `$1 IN ('approved', 'expired')`. `rejected` must remain unblocked, exactly as N-3 requires.
+
+**Why this is not the same question N-3 already answered.** N-3 forced `rejected` to always apply
+because blocking it would suppress a real finding from `crossAccountRejectedOverlay` — a
+staff-escalated account's own confirmed rejection is the one signal that must propagate to deny a
+Person's *other* accounts, and only an applied `rejected` row does that. `expired` is different in
+exactly the respect that matters here: N-1b already excludes `expired` from
+`finalStatusesSQL` (`enforcement.go:408`) — it is never a cross-account signal, applied or not.
+Holding it therefore costs nothing on the propagation side N-3 was protecting, and this account's
+own gating is unaffected either way: a held row stays `review_required` (`OutcomePending`,
+`Allowed=false`), an applied row becomes `expired` (`OutcomeFailed`, `Allowed=false`) — identical
+enforcement outcome, confirmed by reading §2.3's outcome table (both rows map to deny).
+
+**Why HOLD is still the right call given the enforcement effect is identical.** This is a
+case-management/audit-integrity question, not an enforcement-bypass question — the same category
+Ruling 2 was about. A vendor `expired` is not a decision; ADR 0028 §2 and this document's own
+Ruling 1 already establish it means "the vendor's own round-trip lapsed without reaching
+`approved` or `rejected`," not "the person was cleared or newly found bad." Auto-applying it to a
+row a compliance officer deliberately escalated for their own judgment closes that officer's open
+case, attributes the closure to nobody, and leaves the record showing a generic vendor timeout
+rather than whatever the officer would actually have decided (e.g. an explicit `rejected` with a
+SAR-relevant reason). CLAUDE.md's audit requirement ("every compliance-relevant action" logged
+with actor/before/after) and this specialist's ownership of "immutable logging for every
+compliance-relevant action" both point the same way: a case a human opened for decision should be
+closed by a human decision, not by the vendor's inability to reach one — the enforcement gate not
+changing is precisely what makes it safe to hold.
+
+**Mechanism, for the implementer:** widen the SQL predicate as above; the existing
+`heldForReview`/audit plumbing (`document_service.go:300-321`, `provider.go:619-641`) already
+writes an unconditional or held-for-review audit row for exactly this case with no new field
+needed — a vendor `expired` arriving on a staff-sticky row becomes a documented no-op
+(`applied=false, heldForReview=true`), identical in shape to today's `approved`-held case, and the
+row stays `review_required` for the officer to close explicitly.
+
+**Not a human decision** — same reasoning as Ruling 2: an internal case-management/audit design
+choice inside this specialist's authority, not a threshold or legal interpretation.

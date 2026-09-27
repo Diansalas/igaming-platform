@@ -266,6 +266,26 @@ func lockRequestForUpdate(ctx context.Context, tx pgx.Tx, id uuid.UUID) (Withdra
 	return scanRequest(row)
 }
 
+// LockForPayoutEvidence takes the row lock on requestID (SELECT ... FOR
+// UPDATE) with NO state precondition. R3 (RV-PRH-I1 ledger re-review):
+// ADR 0082 A7 fixes ONE lock order for the withdrawal/attempt pair -
+// withdrawal FIRST, then the attempt CAS, then any ledger-affecting
+// posting - matching the T2/T12 claim statements
+// (withdrawal.LockSubmittedForResolution) and the receipt path. Phase C
+// (internal/payments) must take this lock as its very first statement,
+// even when the row has already left `submitted` (a legitimate race
+// against an earlier, faster piece of evidence): the state check still
+// happens downstream, in the attempt CAS and in Complete/Fail/
+// AttachProviderReference's own preconditions, exactly as before this
+// lock was added - this function only fixes WHEN the lock is taken, not
+// what is allowed once it is held. Exported for internal/payments only;
+// every other caller with a state expectation should use
+// LockApprovedForSubmission or LockSubmittedForResolution instead, which
+// both call this same underlying lock.
+func LockForPayoutEvidence(ctx context.Context, tx pgx.Tx, requestID uuid.UUID) (WithdrawalRequest, error) {
+	return lockRequestForUpdate(ctx, tx, requestID)
+}
+
 // RequestParams is everything RequestWithdrawal needs to create a
 // WithdrawalRequest and post its hold.
 //

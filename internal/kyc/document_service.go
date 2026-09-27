@@ -297,7 +297,14 @@ func applySubmissionResult(ctx context.Context, tx pgx.Tx, v Verification, submi
 		return Verification{}, fmt.Errorf("kyc: provider returned an unrecognized outcome %q", result.Outcome)
 	}
 
-	updated, applied, err := applyForwardOnlyStatus(ctx, tx, v.TenantID, v.ID, v.Status, newStatus, result.Reason)
+	// N-3 (security re-verification 3, MEDIUM): heldForReview is true only
+	// when this result was discarded specifically by
+	// KYC-REVIEWREQ-FORWARD-1's own staff-sticky guard (an approved result
+	// arriving on a staff-escalated review_required row) - recorded below
+	// in this SAME unconditional audit row (unlike the callback path,
+	// applyCallbackOutcome, which otherwise writes NO row on an ordinary
+	// no-op and therefore needs its own separate held-for-review row).
+	updated, applied, heldForReview, err := applyForwardOnlyStatus(ctx, tx, v.TenantID, v.ID, v.Status, newStatus, result.Reason)
 	if err != nil {
 		return Verification{}, err
 	}
@@ -307,7 +314,7 @@ func applySubmissionResult(ctx context.Context, tx pgx.Tx, v Verification, submi
 		Outcome: audit.OutcomeSuccess,
 		Metadata: withReasonTruncated(map[string]any{
 			"provider_id": v.ProviderID, "document_count": len(submitted), "provider_outcome": string(result.Outcome),
-			"reason": result.Reason, "status_applied": applied,
+			"reason": result.Reason, "status_applied": applied, "held_for_review": heldForReview,
 		}, reasonTruncated),
 	}); err != nil {
 		return Verification{}, fmt.Errorf("kyc: audit provider submission: %w", err)

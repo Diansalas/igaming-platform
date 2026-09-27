@@ -114,9 +114,19 @@ const phaseCTimeout = 5 * time.Second
 // insertOrphanVerification is phase A: a kyc_verifications row with
 // status='unverified' and provider_reference NULL, plus the
 // "kyc.verification_requested" audit record (ADR 0095 §15.2) - committed
-// BEFORE any provider call. This row has no enforcement effect on its own
-// (ADR 0096's EvaluateEnforcement only allows on 'passed'), so an orphan
-// left behind by a phase B/C failure is harmless by construction.
+// BEFORE any provider call. This row has no enforcement effect on its own:
+// NOT because "EvaluateEnforcement only allows on 'passed'" (that claim is
+// false in the deny direction - a naive "latest row" read would still map
+// an unverified row to `failed` and could mask an existing approval/
+// mislead an overlay, ADR 0096 §19/RV-PRH-I2 KYC review F1, R2-4 comment
+// correction) but because ADR 0096's own read semantics explicitly
+// EXCLUDE this exact shape (status='unverified' AND provider_reference IS
+// NULL, orphanRowExclusionSQL) from "latest row" selection in BOTH
+// readLatestVerificationByPlayerAccount and crossAccountRejectedOverlay's
+// finalStatusesSQL-scoped subquery (ADR 0096 §2.6(g), §20.2) - so an
+// orphan left behind by a phase B/C failure is harmless by construction,
+// via that specific exclusion, not via any general "only passed matters"
+// property.
 func insertOrphanVerification(ctx context.Context, tx pgx.Tx, params CreateVerificationParams, providerID string) (Verification, error) {
 	v := Verification{
 		ID: uuid.New(), TenantID: params.TenantID, BrandID: params.BrandID,
@@ -154,6 +164,34 @@ func applyCreateVerificationResult(ctx context.Context, tx pgx.Tx, tenantID uuid
 	result, reasonTruncated := normalizeProviderResult(result)
 	status, ok := statusForOutcome(result.Outcome)
 	if !ok {
+		if result.ProviderReference == "" {
+			// R2 (RV-PRH-I2 KYC code re-review 2, "pre-existing, low: create-
+			// side ProviderError/empty reference", 2026-09-27): an
+			// unrecognized outcome (e.g. ProviderError returned WITHOUT a Go
+			// error - PROVIDER DEPENDENT, the mock never does this) with NO
+			// reference must NEVER be written as a `pending` row. Doing so
+			// would create a row that (a) counts as "decided" under ADR
+			// 0096's primary read (§2.6(a) - `pending` is non-final but
+			// still supersedes an existing approval, unlike an excluded
+			// orphan), turning a transient vendor ambiguity into a spurious
+			// DENY for an already-approved player, and (b) is a PERMANENT
+			// dead end under N5 - a `pending` row with no reference can
+			// never be uploaded to or submitted (ErrVerificationNotSubmitted
+			// fires on every attempt, and no reference will ever arrive to
+			// change that). This mirrors SubmitVerification's own IC
+			// condition 2 ("an ambiguous/timeout result leaves status
+			// unchanged", ADR 0095 §15.3): the phase-A orphan row is left
+			// EXACTLY as committed (still 'unverified', still NULL
+			// reference) rather than accepting a worse-than-orphan
+			// "pending-but-never-resolvable" state - fail closed in the ONE
+			// direction that matters here (never let a transient vendor
+			// ambiguity turn an existing allow into a deny, nor a deny into
+			// an allow; leaving the row exactly as phase A committed it
+			// does neither). The caller (CreateVerification) treats this
+			// identically to a phase-B failure - ErrProviderUnavailable,
+			// 503, no state change, no retry - see ADR 0096 §20.5.
+			return Verification{}, fmt.Errorf("%w: provider returned an unrecognized outcome %q with no reference", ErrProviderUnavailable, result.Outcome)
+		}
 		status = StatusPending
 	}
 	tag, err := tx.Exec(ctx,
@@ -204,12 +242,18 @@ func applyCreateVerificationResult(ctx context.Context, tx pgx.Tx, tenantID uuid
 // A phase B failure (no resolver, credential resolution failure, a
 // credential binding mismatch, or the provider call itself failing) leaves
 // the phase-A orphan row exactly as phase A committed it: 'unverified',
-// provider_reference NULL. ADR 0096's EvaluateEnforcement only allows on
-// 'passed' status, so this orphan has no enforcement effect - it is
-// harmless by construction, exactly like a genuine crash in the same
-// window (ADR 0095 §15.2 "Failure recovery"). There is no automatic retry;
-// a player retry calls CreateVerification again and gets a brand-new row
-// (existing behaviour, unchanged by this split).
+// provider_reference NULL. This orphan has no enforcement effect - not
+// because "EvaluateEnforcement only allows on 'passed'" (R2-4 correction:
+// that framing is false in the deny direction and was the exact defect ADR
+// 0096 §19/RV-PRH-I2 KYC review F1 fixed) but because ADR 0096's own
+// "latest row" reads explicitly exclude this shape outright
+// (orphanRowExclusionSQL, §2.6(g); the cross-account overlay's own
+// finalStatusesSQL-scoped subquery excludes it too, §20.2) - it is
+// harmless by construction via that specific exclusion, exactly like a
+// genuine crash in the same window (ADR 0095 §15.2 "Failure recovery").
+// There is no automatic retry; a player retry calls CreateVerification
+// again and gets a brand-new row (existing behaviour, unchanged by this
+// split).
 //
 // CreateVerification vendor idempotency is PROVIDER DEPENDENT: the vendor
 // idempotency key this call's phase B passes via CallContext.IdempotencyKey
@@ -301,8 +345,16 @@ func CreateVerification(ctx context.Context, pool providercred.TenantTxRunner, o
 		applied, err = applyCreateVerificationResult(ctx, tx, params.TenantID, v, result)
 		return err
 	}); err != nil {
+		// LOW (security re-verification 3, 2026-09-27): this branch's own
+		// applyCreateVerificationResult can return an error embedding the
+		// RAW, vendor-controlled outcome string via %q (the "unrecognized
+		// outcome %q with no reference" case, R2/§21.8) - unbounded
+		// adapter-supplied text in operator logs, same class as C5.
+		// RedactedProviderErrorDetail bounds it to a fixed, closed-class
+		// string, exactly like every other provider-facing log line in
+		// this package.
 		slog.Default().Error("kyc_create_verification_phase_c_failed",
-			"tenant_id", params.TenantID.String(), "verification_id", v.ID.String(), "error", err.Error())
+			"tenant_id", params.TenantID.String(), "verification_id", v.ID.String(), "detail", RedactedProviderErrorDetail(err))
 		return Verification{}, fmt.Errorf("kyc: create verification: apply result: %w", err)
 	}
 	return applied, nil

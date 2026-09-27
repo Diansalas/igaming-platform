@@ -443,9 +443,19 @@ func TestSweeper_T12_IdempotentManifest_StopsAtMaxResubmits(t *testing.T) {
 		sweeper.RunOnce(context.Background(), []uuid.UUID{f.tenantID})
 	}
 
-	// 1 initial (T1p) + up to MaxResubmits(=2) T12 resends = 3 total.
-	if spy.count() > 3 {
-		t.Fatalf("expected at most 3 total Withdraw calls (1 + MaxResubmits=2), got %d", spy.count())
+	// N5 (RV-PRH-I1 re-review): the CAS predicate is `submit_count <
+	// maxSubmits`, evaluated BEFORE the increment, starting from
+	// submit_count=1 after T1p - so submit_count can reach EXACTLY
+	// MaxResubmits (not "1 + MaxResubmits"), via exactly
+	// MaxResubmits-1 resends. With MaxResubmits=2: 1 initial Withdraw (T1p)
+	// + 1 resend = 2 total, submit_count stops at 2. An earlier revision of
+	// this test asserted only a loose upper bound ("<= 3"), which does not
+	// distinguish a correct cap from a mutant that removes the cap check
+	// entirely on a short run, or one that resends one time fewer/more than
+	// the real formula (M3, RV-PRH-I1 code re-review: "a positive T12
+	// resend on an idempotent manifest, with an EXACT count").
+	if spy.count() != 2 {
+		t.Fatalf("expected EXACTLY 2 total Withdraw calls (1 initial + MaxResubmits-1=1 resend), got %d", spy.count())
 	}
 	var attempt PaymentAttempt
 	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
@@ -455,8 +465,8 @@ func TestSweeper_T12_IdempotentManifest_StopsAtMaxResubmits(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("reread: %v", err)
 	}
-	if attempt.SubmitCount > 3 {
-		t.Fatalf("expected submit_count to stop at 3 (cap reached), got %d", attempt.SubmitCount)
+	if attempt.SubmitCount != 2 {
+		t.Fatalf("expected submit_count to stop at EXACTLY 2 (cap reached), got %d", attempt.SubmitCount)
 	}
 	if attempt.EscalatedAt == nil {
 		t.Fatalf("expected the attempt to be escalated once the cap is reached")
@@ -775,6 +785,27 @@ func TestClaimForDispatch_NextActionAtSet_CrashRecovery(t *testing.T) {
 	if len(st.Errors) != 0 {
 		t.Fatalf("unexpected sweep errors: %v", st.Errors)
 	}
+
+	// M7 (RV-PRH-I1 re-review: "the crash-recovery test only asserts
+	// Claimed>0 and no errors, not the resulting state"): a lease-expired,
+	// no-reference `submitting` attempt must specifically land on
+	// `ambiguous` (T6) with ever_possibly_sent set, not merely "claimed and
+	// no error" - a mutant that routed it to a plain reschedule instead
+	// would still pass the assertions above.
+	var recovered PaymentAttempt
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		var err error
+		recovered, err = GetAttemptByID(ctx, tx, claim.Attempt.ID)
+		return err
+	}); err != nil {
+		t.Fatalf("reread: %v", err)
+	}
+	if recovered.State != AttemptAmbiguous {
+		t.Fatalf("M7 regression: expected the crashed, lease-expired attempt to land on ambiguous (T6), got %s", recovered.State)
+	}
+	if !recovered.EverPossiblySent {
+		t.Fatalf("M7 regression: expected ever_possibly_sent to be set once T6 fires")
+	}
 	loAssertBalanced(t, pool, f.tenantID)
 	loAssertProjectionMatchesRebuild(t, pool, f.tenantID)
 }
@@ -886,6 +917,16 @@ func TestClaimForDispatch_GateRunsUnderOuterLock(t *testing.T) {
 
 	select {
 	case <-gateInvoked:
+		// C-T3 (RV-PRH-I1 ledger re-review): release the lock holder BEFORE
+		// t.Fatalf - Fatalf calls runtime.Goexit on this goroutine only, so
+		// without this the holder goroutine (blocked on <-lockRelease) and
+		// the claim goroutine (blocked waiting for the row lock) would both
+		// hang for the rest of the process's life, and the test would only
+		// fail once the whole `go test` run times out instead of failing
+		// fast with a clear message.
+		close(lockRelease)
+		<-claimDone
+		<-holderDone
 		t.Fatalf("the KYC gate was invoked while a concurrent transaction still held the withdrawal row lock")
 	case <-time.After(300 * time.Millisecond):
 		// Expected: ClaimForDispatch is blocked waiting for the lock.

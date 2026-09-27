@@ -1248,6 +1248,119 @@ first, per the orchestrator's own sequencing instruction, and has not started.
 - PROV-REVOKE-ALL-1 (a genuine platform-wide, cross-tenant switch) remains deferred per §10.2.2's
   own text.
 
+### 10.7 Fix round 1b (`payments`, 2026-09-27): RV-PRH-I1 security review CHANGES REQUIRED response
+
+Responds to `docs/plans/payment-readiness/rv-prh-i1-killswitch-security.md` (reviewed at `be0d899`).
+Label: still **PARTIALLY IMPLEMENTED**; the gaps this round closes are H1, M1-M3, M6 and most of the
+Lows. M4 and M5 are closed to the review's own "before stage gate" bar; both remain
+**launch-blocking** per the review's explicit ruling (M4's regulator-traceability architect decision
+and M5's evadability are accepted-with-a-registered-follow-up, not resolved outright). Ledger-finance
+H3 (the callback/poll/drive.go decline paths) is **out of this section's scope** - it belongs to the
+concurrent callback-cutover agent, per `rv-prh-i1-callback-ledger.md`.
+
+**H1 (blocks completion) - CLOSED.** `internal/payments/killswitch_claim_predicate_coverage_test.go`:
+one permanent test per claim form (T1+T2 deposit, T1p payout, T12, cascade T1), each with a positive
+control (a non-matching provider/operation still succeeds), plus the §16.2 item 20 player-scoped-
+context pin. Mutation-killed: K2 (`InsertSubmittingAttempt`), K3 (`ResubmitAmbiguous`), K4 (cascade
+`InsertCreatedAttempt`) - adapted directly from the review's own probe P2. Evidence:
+`docs/plans/payment-readiness/evidence/prh-i1-mutation-kill.txt`.
+
+**M1 (fail-open) - CLOSED, migration 0106.** `migrations/0106_payment_attempts_platform_guc_
+hardening.{up,down}.sql` (renumbered from an initial 0107 to 0106 by the orchestrator before merge,
+since 0106 was still free and `migrate verify` rejects version gaps; the callback agent's migration is
+0107). Option (a) from the review: `payment_attempts`/`payment_provider_events`'s
+`tenant_staff_scope` policies now also require `app.platform_admin_principal_id` unset, aligning them
+with `payment_kill_switches.tenant_scope`. `TestMigration0106_MixedGUCContextClaimsNothing` is the
+adapted, permanent version of probe P1 and is mutation-killed. The ADR's own §10.3 L1 claim ("the same
+GUC predicate") is corrected by this fix, not merely documented as wrong.
+
+Migration 0106 additionally folds in, in the same reviewed change (`CREATE OR REPLACE FUNCTION` on
+the three migration 0105 trigger functions, additive per CLAUDE.md - migration 0105 itself is
+untouched):
+- **L1** (a tenant cannot cancel/change the status of a platform-filed request, or one against a
+  platform-engaged switch) - test: `TestMigration0106_L1_TenantCannotCancelPlatformRequest`.
+- **L2** (`expected_version` forced to the switch's real current version at request INSERT, closing
+  R3; a request may only be filed against a currently-`engaged` switch, closing half of R2) - tests:
+  `TestMigration0106_L2_FutureVersionRequestIsForcedToCurrent`,
+  `TestMigration0106_L2_RequestRequiresEngagedSwitch`,
+  `TestMigration0106_L2_EngageCancelsPreexistingOpenRequest`.
+- **L3** (`changed_at` forced from the clock, never client-supplied) - test:
+  `TestMigration0106_L3_ChangedAtIsForced`.
+- **L4** (`payment_kill_switch_session()` additionally requires `staff_users.status = 'active'`) -
+  test: `TestMigration0106_L4_SuspendedStaffRejectedAsActor`.
+
+**M2 (unvalidated `provider_scope`) - CLOSED.** `newEngageKillSwitchHandler`
+(`payments_kill_switch_handlers.go`) rejects leading/trailing whitespace and any `provider_scope`
+other than `'*'` that is not registered in `deps.PaymentOrchestrator` (the CODE-level registry, never
+tenant-editable capability config) - 400, never a silent no-op. Test:
+`TestPaymentsKillSwitchAPI_ProviderScopeValidation`.
+
+**M3 (no before/after in audit) - CLOSED.** Every mutation's `audit.Record` now carries `before`/
+`after` objects (engage additionally records `is_platform_takeover` and, when true,
+`ks_l6_cancelled_request_id` - detected by the handler reading the pre-existing open request id
+before calling `EngageKillSwitch`, the "reliable option" the review named). Tests:
+`TestPaymentsKillSwitchAPI_AuditRecordsCarryBeforeAfterAndTargetTenant`,
+`TestPaymentsKillSwitchAPI_AuditRecordsPlatformTakeover`.
+
+**M4 (platform traceability) - test added, architect decision registered, launch-blocking.**
+`TestPaymentsKillSwitchAPI_AuditRecordsCarryBeforeAfterAndTargetTenant` pins `target_tenant_id` on a
+platform-scoped mutation's audit row (K18). The schema-level fix (an `audit_log` platform INSERT-only
+policy family, or a first-class indexed column) is registered as **KS-AUDIT-TENANT-1**
+(`docs/governance/task-registry.md`), an `architect` decision per the review's own instruction - not
+implemented here.
+
+**M5 (reflection test scope/evadability) - substantially closed; relabelled PARTIALLY IMPLEMENTED
+per the review's own instruction.** `internal/testsupport/credentialscan` now additionally: detects
+`atomic.Pointer[T]` holding a forbidden type (via the type parameter, which survives even when the
+pointer is nil); flags `chan` of a forbidden/`Authenticator`-implementing type structurally (never
+receives from it); flags `unsafe.Pointer` unconditionally (its target type is unrecoverable);
+and checks `reflect.PointerTo(t).Implements(authenticatorType)` for addressable values (a pointer-
+receiver `Authenticator` held by value). `CheckPackageImports`/`CheckPackageLevelVars` make the
+static half PACKAGE-WIDE (every non-test file, not one hand-picked adapter file) and add the
+package-level-var rule. New `cmd/platform-api/credential_reflection_test.go` scans
+`buildProviderBundle(allOnWiring)` itself - the actual `paymentsAdapters()`/`casinoAdapters()`/
+`kycAdapters()` registries and outbound/webhook resolvers `main()` wires - not a skeletal mock a
+domain test builds separately, closing the review's central "does not scan what production wires"
+finding. Residual, accepted evasion (inherent to a type-based scan, not fixed): a raw `string`/
+`[]byte` holding secret-shaped data has no distinguishing type to catch. Relabelled honestly:
+**PARTIALLY IMPLEMENTED**, launch-blocking before the Synthetic tripwire is ever relaxed for a real
+adapter, per the review's own ruling.
+
+**M6 (untested single-point checks) - CLOSED for K10/K11/K14; K19 could not be demonstrated as a live
+bypass.** Tests: `TestMigration0105_M6_K10_RequestMustBindToItsOwnSwitch`,
+`TestMigration0105_M6_K11_ExpiredRequestCannotRelease`,
+`TestMigration0105_M6_K14_ExpiresAtCappedAt24Hours` (all three mutation-killed - K10 and K11 required
+combining the approve and release UPDATE into ONE transaction in the test, since the
+`decided_txid = txid_current()` rule already refuses a separate-transaction release for an unrelated
+reason, which had been silently masking whether the mutation under test did anything).
+`TestMigration0105_M6_K19_PlatformGUCRequiresGenuinePlatformStaff` pins the observable property (a
+tenant-scoped staff id in the platform GUC is refused) and passes on correct code, but a byte-level
+mutation removing only the trigger's own `staff_users.tenant_id IS NULL` clause could not be shown to
+create a live bypass in testing: `staff_users`' own RLS (`dual_scope_isolation`) already makes a
+tenant-scoped row invisible to a query run under a platform-only GUC context (no `app.tenant_id` set),
+and the `role = 'platform_admin' <=> tenant_id IS NULL` CHECK constraint means anything visible under
+that RLS view is already genuinely platform-scoped - RLS is acting as an independent, sufficient
+second layer for this specific property. Recorded here rather than silently claimed as mutation-
+killed.
+
+**Lows.** L1-L4 above (migration 0106). **L5** (audit-on-refusal, error class, 5xx-vs-409): partially
+closed - `writeKillSwitchError` now classifies a trigger `RAISE EXCEPTION` (SQLSTATE `P0001`) as 409
+with a logged class and message, and any OTHER error as a genuine 500 (previously always 409, silently
+under-logged); a separately-committed `OutcomeDenied` audit row for a refused mutation (self-approval,
+platform-lock, etc., beyond the existing foreign-tenant case) is **NOT IMPLEMENTED**. **L6** (platform
+engage against a nonexistent tenant) - CLOSED, `beginKillSwitchCall` checks `tenants` existence for a
+platform-scoped caller (`tenants` carries no RLS); test:
+`TestPaymentsKillSwitchAPI_PlatformCallerAgainstNonexistentTenantIs404`. **L7** (alert label) -
+relabelled here and in the task registry: engage **event IMPLEMENTED** (test:
+`TestLogKillSwitchEngagedAlert_EmitsPinnedEventAndFields`), alert **delivery NOT IMPLEMENTED**
+(launch-blocking); runbook entry added (`docs/runbooks/observability-and-alerting.md` §2 item 12).
+**L8** (route-table test) - CLOSED, `TestPaymentsKillSwitchAPI_RouteTable` enumerates all 7 routes and
+asserts 403 (player token) / 401 (no token) on every one.
+
+**I1-I6 (informational).** Not addressed this round beyond what the fixes above happen to touch (I2's
+policy-shape note and I4's `validateManifest` timing note are unchanged; both are accepted per the
+review's own text, not launch-blocking).
+
 ---
 
 ## 11. PROV-OUTBOUND-CRED-1 (approved scope)
@@ -4151,4 +4264,97 @@ rounds, each killed and reverted to byte-identical source) is filed at
 `docs/plans/payment-readiness/evidence/prh-i1-mutation-kill.txt`. The migration-0101 pre-flight
 remediation runbook ledger-finance's review required is filed at `docs/runbooks/migration-0101-
 payment-attempts-remediation.md`.
+
+**N5 correction (RV-PRH-I1 re-review, 2026-09-27): the "44 tests" count above is wrong.** The
+actual count at the end of the round this section describes was 14 (`payout_dispatch_integration_
+test.go`) + 15 (`payout_dispatch_fixround_test.go`) = 29 payout-specific tests, not 44 - see §27.12
+below for the corrected running total. Left uncorrected in place (append-only) rather than edited,
+per the no-fake-completion rule's own spirit: the mistake and its correction should both be
+visible, not silently smoothed over.
+
+### 27.12 PRH-I1 payout dispatch round 3 (`payments`, 2026-09-27): N1/R6, R1, R2, R3, N6
+
+**Scope.** A third review round (`code-reviewer`, "NOT READY, narrow rework"; `ledger-finance`,
+"APPROVE WITH CONDITIONS", veto on C1 lifted) found one new HIGH finding shared between both
+reviews (N1 = R6: the ambiguous branch never stored the provider reference on the attempt itself,
+only on the withdrawal) plus three more from the ledger re-review alone (R1: routine non-definite
+evidence racing a faster piece of evidence - most commonly a callback - was disputed instead of
+converging; R2: `/resolve` had no lease check and could force a still-in-flight `submitting`
+attempt to `ambiguous`; R3: phase C's lock order regressed to attempt-then-withdrawal after the
+earlier M3 fix, a genuine deadlock risk against the receipt path/T2/T12's withdrawal-then-attempt
+order) and one observational finding from the code re-review (N6: a QueryStatus success echoing a
+DIFFERENT, non-empty reference from the one already on file was never disputed). Filed at
+`docs/plans/payment-readiness/rv-prh-i1-payout-code-review.md` ("Re-review — fix round") and
+`rv-prh-i1-payout-ledger.md` ("Re-review (fix round)"). Full fix detail and the anchored mutation
+evidence for this round are in `docs/plans/payment-readiness/evidence/prh-i1-mutation-kill.txt`
+("PRH-I1 payout round 3").
+
+**Corrections to §27.11 above:**
+- Item 1's "poll first, unconditionally, if a reference exists at all" claim was **false in
+  practice**: the reference from an Ambiguous result was only ever attached to
+  `withdrawal_requests`, never to `payment_attempts` itself, so `resubmitPayoutAmbiguous`'s own
+  `attempt.ProviderReference != nil` gate meant the poll-first step was UNREACHABLE for the single
+  most common ambiguous shape (a sync Ambiguous result with a reference, from T1p or T2). Fixed
+  this round (N1/R6): the reference is now persisted directly on the attempt
+  (`payoutMarkAmbiguousFromSubmitting`), and `resubmitPayoutAmbiguous`/`PollPayoutStatus` no longer
+  gate on the attempt's own reference alone (`PollPayoutStatus` resolves a withdrawal-level
+  fallback too, defence in depth for any attempt that reached `ambiguous` before this fix).
+- The verification counts in §27.11 ("44 tests", "10 mutants") were overstated - see the N5
+  correction immediately above.
+
+**Fail-closed choices made where this ADR is silent, this round:**
+
+6. **A non-definite piece of evidence (Pending/Ambiguous/NotSent/a transport error) CAS-conflicting
+   against an attempt some FASTER piece of evidence already advanced.** Neither this ADR nor the
+   original §27.11 record distinguishes "this conflict is a genuine contradiction" from "this
+   conflict is just routine convergence, because something else got there first." Chosen: only a
+   DEFINITE result (`Succeeded`/`DefiniteDecline`) reaching an ALREADY-TERMINAL attempt is treated
+   as late/contradicting evidence (T14/T10, a P1 audit record); every other conflict either
+   reschedules (the attempt is still non-terminal - the routine race) or no-ops (the attempt is
+   already terminal and the arriving evidence is weaker-or-equal - nothing left to correct). This
+   matters concretely once payout callbacks are wired (the callback cutover's own concurrent work):
+   a verified `pending` webhook arriving before phase C's own synchronous `Withdraw` response is now
+   an everyday, non-alarming race, not a P1.
+2. **A `submitting` attempt whose lease has not yet expired, polled by a caller with no natural
+   lease-respecting gate of its own.** The sweeper never reaches a `submitting` row until its lease
+   is due (`claimBatch`'s own `next_action_at` predicate), but `internal/httpserver`'s `/resolve`
+   handler has no such gate. Chosen: `PollPayoutStatus` refuses immediately
+   (`ErrPayoutDispatchInFlight`, mapped to HTTP 409) and touches nothing at all in that case, rather
+   than forcing the attempt to `ambiguous` and racing the dispatch that may still be in flight.
+3. **The A7 lock order for phase C, restated precisely.** §27.11 item 4 said "A7's attempt-before-
+   posting lock order" without stating the FULL order; this round's own implementation had, in the
+   meantime, dropped the leading withdrawal lock entirely (a regression the ledger re-review
+   caught via a real 40P01 deadlock probe). Restated and fixed: **withdrawal `FOR UPDATE` first,
+   then the attempt CAS, then the L3/L4 posting** - the same order the T2/T12 claim statements and
+   the receipt path already use. A new `withdrawal.LockForPayoutEvidence` (state-precondition-free,
+   payments-only) is the one lock every phase-C entry point now takes as its first statement.
+4. **A QueryStatus success echoing a reference that conflicts with (not merely omits) the one
+   already on file.** §4.4's matrix does not separately name "reference conflict" as its own
+   evidence shape. Chosen: dispute (`terminal_reason = "provider_reference_mismatch"`), the same
+   fail-closed default as the amount/asset mismatch (H2/B3) - a settlement is never recorded against
+   a reference the platform did not itself request confirmation for.
+
+**Newly registered launch condition (R5, tracked by the orchestrator, not implemented here):** any
+payment provider whose manifest declares `IdempotentSubmission = false` must not be enabled for
+real traffic until CP-W1 (merchant-reference `QueryStatus`) exists, or an equivalent operational
+mitigation (e.g. mandatory manual resolution SLA) is agreed - a payout that crashes/times out after
+T1p with no reference and a non-idempotent provider is fail-closed escalated (T6, then T16) but has
+NO automated resolution path today, only M2 (BLOCKED on HD-0095-1) or a human confirming the
+outcome with the PSP directly.
+
+**Not implemented, disclosed (unchanged from §27.11, still open):** CP-W1 merchant-reference
+QueryStatus; payout cascade-on-decline (`PAY-PAYOUT-CASCADE-1`); full attempt-transition audit
+coverage; M1/M2 BLOCKED on HD-0095-1. R4 (payout callbacks through the receipt path) is explicitly
+a separate agent's work (`receipt.go`, not touched here) and is tracked by the orchestrator, not by
+this record.
+
+**Verification.** 41 payout-specific tests (13 + 15 + 13 across `payout_dispatch_integration_
+test.go`, `payout_dispatch_fixround_test.go`, and the new `payout_dispatch_round3_test.go`) pass
+under `-tags=integration` and under `-race` on a private database freshly migrated to head (105);
+`internal/withdrawal` and `internal/httpserver`'s 30 withdrawal tests pass on the same private
+database (`internal/httpserver`'s run against the shared `TEST_DATABASE_URL` still fails 4 of them
+on the pre-existing, disclosed migration-0101 gap documented in the runbook - confirmed unrelated
+by the private-database run passing all 30). `golangci-lint` (2.9.0, `--build-tags=integration`): 0
+issues on every file this round touched. 3 anchored mutants for this round (PM-PAYOUT-11/12/13),
+each reverted to byte-identical source - full detail in the mutation-kill evidence file.
 

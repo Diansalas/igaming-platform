@@ -1,15 +1,15 @@
 // PRH-I1 round 2, ADR 0095 §16.2 item 15 (PROV-OUTBOUND-CRED-1, "no
 // credential held by an adapter", S95-C8(c)): a recursive reflection walk
 // over this domain's own constructed, registered adapters/resolvers, plus a
-// static check that the adapter source file never imports the secret store.
-// See internal/testsupport/credentialscan for the shared implementation and
-// its own scope note (a CONSTRUCTED adapter/resolver value, never a
-// per-call CallContext, which is deliberately excluded - it is built fresh
-// per call and never stored).
+// PACKAGE-WIDE static check that no file in this package imports the secret
+// store, and no package-level var has a forbidden credential type. See
+// internal/testsupport/credentialscan for the shared implementation and its
+// own scope note (a CONSTRUCTED adapter/resolver value, never a per-call
+// CallContext, which is deliberately excluded - it is built fresh per call
+// and never stored).
 package payments
 
 import (
-	"os"
 	"strings"
 	"testing"
 
@@ -35,17 +35,28 @@ func TestCredentialReflection_NoConstructedAdapterHoldsACredential(t *testing.T)
 	}
 }
 
-// TestCredentialReflection_AdapterFileImportsNoSecretStore is the static
-// half of the same condition: the adapter source file (mock.go - the only
-// PaymentProvider implementation this stage ships) never imports the
-// secret store directly. A real adapter resolves nothing itself; it
-// receives an already-resolved credential through CallContext.
-func TestCredentialReflection_AdapterFileImportsNoSecretStore(t *testing.T) {
-	src, err := os.ReadFile("mock.go")
+// TestCredentialReflection_PackageImportsNoSecretStore is the static half
+// of the same condition, PACKAGE-WIDE (RV-PRH-I1 security review M5):
+// every non-test .go file in this package, not just mock.go - a real
+// adapter resolves nothing itself; it receives an already-resolved
+// credential through CallContext.
+func TestCredentialReflection_PackageImportsNoSecretStore(t *testing.T) {
+	violations, err := credentialscan.CheckPackageImports(".")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(src), `"github.com/Diansalas/igaming-platform/internal/secretstore"`) {
-		t.Error("mock.go (the adapter file) must never import internal/secretstore - a real adapter receives an already-resolved credential, it never resolves one itself")
+	if len(violations) > 0 {
+		t.Errorf("package internal/payments must never import internal/secretstore directly:\n%s", strings.Join(violations, "\n"))
+	}
+}
+
+// TestCredentialReflection_NoPackageLevelCredentialVars (M5).
+func TestCredentialReflection_NoPackageLevelCredentialVars(t *testing.T) {
+	violations, err := credentialscan.CheckPackageLevelVars(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(violations) > 0 {
+		t.Errorf("package internal/payments must have no package-level var of a forbidden credential type:\n%s", strings.Join(violations, "\n"))
 	}
 }

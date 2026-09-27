@@ -452,3 +452,151 @@ exclusion).
   re-run M8, and correct the M8 entry and the "17/17" count in the evidence file.
 
 N2–N6 are follow-ups.
+
+---
+
+# Re-review 2: KYC fix round 2 `ed6d3e8` (merged at `9324189`)
+
+Reviewer: `code-reviewer` (independent). Date: 2026-09-27. I read the diff `ed6d3e8^..ed6d3e8`
+directly. I ran the suites, the pinned linter and my own mutants in a detached scratch
+worktree at `9324189`, against a private database (`rr2_i2kyc_cr_13934`, migrated to 105,
+runtime grants applied, dropped afterwards). While I was working, HEAD moved to `c80103b`
+(docs only: the identity-compliance and security review files). No code changed.
+
+## Verdict: **READY for N1–N6 and the ReviewVerification mirror race. The N-1 overlay fix is NOT complete (N-1b).**
+
+N1–N6 and the mirror-race CAS are correctly fixed, and each fix is pinned by a test that I
+confirmed kills a mutant. The N-1 narrowing still lets a later vendor `expired` row on the
+rejected account lift the rejection. I reproduced this myself through the real
+Create → verified-callback path. Security (N-1b) and identity-compliance (Ruling 1) reached
+the same result independently, so I am confirming their finding, not ruling on it. The
+fix and its severity belong to those owners and the orchestrator (ADR 0096 §20). From a
+code-correctness standpoint, the N-1 item is not closed until `finalStatusesSQL` drops
+`expired`, which is the `('approved','rejected')` shape, and a test kills that mutant.
+
+## 1. Verification
+
+- `gofmt -l`: clean.
+- `go vet -tags=integration` for `kyc`, `httpserver`, `cmd/platform-api` and `withdrawal`:
+  clean.
+- Pinned `golangci-lint` 2.9.0 (go1.26.0 build), `run ./...` with
+  `--allow-parallel-runners`: **0 issues**. The commit message says lint could not run.
+  With the pinned binary it now runs and is clean.
+- `go test -race -tags=integration`: pass for these packages:
+  - `internal/kyc`
+  - `cmd/platform-api`
+  - `internal/withdrawal`
+  - `internal/httpserver -run 'KYC|Kyc|Verification|Document'`
+- Mutants. Each was run over the full `internal/kyc` suite unless noted, and the tree was
+  restored with `git checkout` after each:
+
+  | Id | Mutation | Result |
+  |---|---|---|
+  | **M8** | terminal guard in `gatherSubmissionDocuments` → `if false && …`, run as the evidence file specifies (`-run TestSubmitVerification_TerminalVerificationIsANoOp`) | **killed** |
+  | M8 (full suite) | same | killed (N1 closed) |
+  | N4 | `status_applied` hard-wired `applied \|\| true` | killed (the `false` subtest) |
+  | N5-upload | `UploadDocument` orphan guard removed | killed |
+  | N5-submit | `SubmitVerification` orphan guard removed | killed |
+  | MR1 | `ReviewVerification` CAS predicate `AND status = $6` removed | killed |
+  | MR2 | `ErrNoRows` → `ErrVerificationStatusConflict` mapping disabled | killed |
+  | N6a | `applyCallbackOutcome` writes its audit row even when `!applied` | killed (replay, 8-concurrent and after-staff-decision webhook tests) |
+  | C5 | `RedactedProviderErrorDetail` default branch returns `err.Error()` | killed (N3 closed) |
+  | C5-http-create | create handler logs `err.Error()` | killed (`TestKYC_CreateVerificationProviderFailureLog_NeverLeaksRawErrorText`) |
+  | **C5-http-upload** | upload handler's `submit_verification_failed` logs `submitErr.Error()` | **survived** (R2-2) |
+  | NM1a | overlay reverted to F1's orphan-only predicate (the pre-N-1 state) | killed (pending and review_required tests) |
+  | NM1b | `'approved'` dropped from `finalStatusesSQL` | killed (`LaterFinalApprovedLiftsRejection`) |
+  | **NM1c** | `'expired'` dropped from `finalStatusesSQL` | **survived**. This mutant is the correct fix; see R2-1. |
+  | **409-review** | handler branch `ErrVerificationStatusConflict` → 409 disabled | **survived** (R2-3) |
+  | **409-upload** | handler branch `ErrVerificationNotSubmitted` → 409 disabled | **survived** (R2-3) |
+
+- **Scratch probe** (a temporary in-package test, run, then deleted, never committed):
+  1. Account A is approved and account B (same Person) is rejected. A withdrawal from A is
+     denied.
+  2. `CreateVerification` runs on B. The row goes `pending` with a live reference.
+  3. A verified callback reports `expired` for that reference. The rank rule applies it.
+  4. A withdrawal from A is now **allowed** (`outcome=passed`).
+
+## 2. Round-1 findings: status
+
+| Item | Status | Evidence |
+|---|---|---|
+| **N1** (required) | **FIXED** | `seedDocument` is added to the terminal test before the review step. M8 is killed both targeted and over the full suite. |
+| **N2** | **FIXED** | The false inline claim is replaced with an accurate NOTE. The merged doc comments are separated again. |
+| **N3** | **Mostly FIXED** | The helper has a table and sentinel unit test, and there is an end-to-end create-handler log test. Both are killed by their mutants. The upload-path log line is still unpinned (R2-2). |
+| **N4** | **FIXED** | `TestSubmitVerification_AuditRecordsStatusAppliedFlag` asserts both `true` and `false`, through the P1 race shape. |
+| **N5** | **FIXED** | There is a guard in both `UploadDocument` (before the scan or any storage write) and `SubmitVerification`, with a typed `ErrVerificationNotSubmitted`. Orphans are seeded through the real nil-resolver failure mode, not raw SQL. Each guard is killed by its own test. The HTTP 409 mapping is untested (R2-3). |
+| **N6** | **FIXED (code); cosmetic leftovers** | `applyCallbackOutcome` now calls `applyForwardOnlyStatus`, and its audit row is written only when `applied` is true. N6a is killed by three existing webhook tests. The only behaviour change is an extra re-read on a no-op, which is harmless. The two stale "only allows on 'passed'" comments (`verification_service.go` ~L117, ~L207) are still there (R2-4). |
+| **Mirror race** (§4 item 1) | **FIXED** | The CAS is `AND kyc_verifications.status = $6` (the status this call read). A miss maps to `ErrVerificationStatusConflict` → 409. It never retries or silently does nothing, which is the right choice for a deliberate staff action. The regression test commits a real `SubmitVerification` approval inside the read/write window through the test hook, and asserts both the conflict and that `approved` survives. MR1 and MR2 are killed. The hook is a nil package var and no `internal/kyc` test uses `t.Parallel`, so there is no `-race` hazard today. |
+| **N-1** (security; orchestrator decision, ADR 0096 §20) | **Incomplete (N-1b)** | See R2-1. |
+| **Evidence file "23/23"** | **Substantively honest; arithmetic slightly off** | See R2-5. |
+
+## 3. New findings (most severe first)
+
+### R2-1: HIGH (owned by security / identity-compliance; confirming N-1b). `expired` in `finalStatusesSQL` re-opens the N-1 bypass
+
+`crossAccountRejectedOverlay`'s inner subquery now selects each other account's latest row
+with status in `('approved','rejected','expired')`. The outer query matches only when that
+row is `rejected`. So any **newer `expired`** row on B hides B's rejection.
+
+- **Where `expired` comes from.** Only `statusForOutcome(ProviderExpired)` writes it; no
+  platform job writes it. `applyForwardOnlyStatus` lets it land only on a non-terminal row,
+  because `approved → expired` has the same rank and is a no-op. So an `expired` row always
+  means "an attempt lapsed without a decision". It never means "an approval ran out".
+- **Failure scenario (reproduced).** The player starts a new verification on the rejected
+  account B and abandons it. The vendor sends `expired`. Withdrawals from the approved
+  account A are then allowed. Whether the vendor emits `expired` on abandonment is
+  PROVIDER DEPENDENT. It is not reachable with the mock today.
+- **Why the tests miss it.** NM1c (dropping `expired`) survives, so no test pins the
+  `expired` behaviour either way. The `crossAccountRejectedOverlay` doc comment and ADR
+  0096 §20 both describe `expired` as a "re-decision". That is inaccurate.
+- **Fix.** Use `('approved','rejected')`: only a later approval lifts a rejection. Add the
+  test `rejected(B) → Create + expired callback on B → A still denied`. NM1c must then be
+  killed by that test.
+
+### R2-2: Low. The upload handler's `submit_verification_failed` redaction is unpinned
+
+Changing that log line back to `submitErr.Error()` survives every KYC, Verification and
+Document test in httpserver. The create-path twin is pinned. A matching capture test on the
+upload path would close this.
+
+### R2-3: Low. Neither new 409 mapping has an HTTP test
+
+If the `ErrVerificationStatusConflict` branch in `newReviewVerificationHandler` or the
+`ErrVerificationNotSubmitted` branch in `newUploadMyDocumentHandler` is removed, both
+errors fall through to 500 with `review_verification_failed` / generic logging. No test
+fails. The domain behaviour is pinned; the API contract (409 and message) is not. Each
+needs one handler test.
+
+### R2-4: Cosmetic. Stale orphan rationale
+
+`insertOrphanVerification` and `CreateVerification` still say orphans have no enforcement
+effect because "EvaluateEnforcement only allows on 'passed'". The actual reason is now
+`orphanRowExclusionSQL`, and in the overlay, the final-status filter.
+
+### R2-5: Low. The evidence-file count double-counts M8
+
+The file says 23 = 11 (§1, "re-verified unchanged") + 6 (round 1) + 6 (round 2). It also
+says the §1 M8 entry is SUPERSEDED and re-counted in §2.5 as M8-reverify. That makes §1
+contribute 10 valid mutants, so the total is 22 distinct mutants. Every listed live mutant
+I re-ran (M8, N3/C5, N4, N5, mirror race, N-1 revert) is genuinely killed. Separately,
+§2.5 and §3.5 describe the N-1 mutant as killed without noting that the `expired`
+membership is unpinned (R2-1). The evidence file should record that as a surviving mutant,
+or as open under N-1b, until R2-1 lands.
+
+### Note: pre-existing, low. Create-side ProviderError / empty reference
+
+`applyCreateVerificationResult` maps an unrecognised outcome (including `ProviderError`
+returned without a Go error) to `pending`, and stores `NULLIF(reference,'')`. A real
+adapter that returns `ProviderError` with no reference would produce a `pending` row with
+a NULL reference. That row counts as "decided" for F1: it would supersede an existing
+approval in the primary read. Under N5 it is also a permanent upload and submit dead end
+(409). The mock never does this, so this is PROVIDER DEPENDENT. IC condition 2's
+"no state change on ambiguity" rule could be applied to create as well (treat it like a
+phase-B failure and leave the orphan). Suggested for real-adapter intake.
+
+## 4. Required
+
+- **R2-1 / N-1b.** Owned by security, identity-compliance and the orchestrator. It must
+  land before N-1 is marked closed. It does not block the N1–N6 or mirror-race items.
+
+R2-2 to R2-5 and the note are follow-ups.

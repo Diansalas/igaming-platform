@@ -43,19 +43,32 @@ reason). Go 1.26.8. Base: branch claude/focused-wright-jw88w9 at commit dffdab3 
 merged original PRH-I2 KYC submission, commit 8a52969, plus this fix round's own
 changes).
 
-Result: 23/23 killed, 0 equivalent (11 from the original submission, re-verified
-unchanged across BOTH fix rounds; 6 from the first fix round: R1, MB, MC, MD, ME, MF;
-6 new mutants from this SECOND fix round, §2.5 below: M8-reverify (correcting the
-original submission's own false M8 claim - see the CORRECTION note right above §2.5),
-N3/C5 (RedactedProviderErrorDetail), N4 (status_applied audit flag), N5 (orphan
-verification fail-closed, two call sites, one combined mutant/two tests), the
-ReviewVerification mirror-race CAS, and N-1 (crossAccountRejectedOverlay's
-finalStatusesSQL narrowing). The prior round's own "17/17" claim is corrected here:
-it was arithmetically right for its own 17 mutants, but M8 (counted inside the
-"11 from the original submission, re-verified unchanged" bucket) was NOT actually a
-valid re-verification, per the CORRECTION note above §2.5 - it is re-counted as a new,
-CORRECTED result in §2.5 instead, and the original §1 M8 entry below is marked
-superseded rather than deleted, to preserve an honest record of the mistake.
+Result: 33 distinct mutants killed, 0 equivalent, across four fix rounds. Breakdown:
+10 from the original submission (§1: M1-M7, M9-M11 - M8's OWN entry is SUPERSEDED, not a
+distinct 11th mutant, R2-5 correction below) + 6 from the first fix round (§2: R1, MB, MC,
+MD, ME, MF) + 6 from the second fix round (§2.5: M8-reverify, N3/C5, N4, N5, the
+ReviewVerification mirror-race CAS, N-1) + 7 from the THIRD fix round (§2.6: N-1b in both
+directions - re-adding `expired` and, separately, removing `approved` to test the
+"walk-back" case, counted as one mutant/two directions here - R2-2's upload-log-redaction
+mutant, R2-3's two 409-mapping mutants, KYC-REVIEWREQ-FORWARD-1's sticky-guard mutant AND
+its own inverse (the control case), and the create-side ProviderError/no-reference
+mutant) + 4 from this FOURTH fix round (§2.7: N-3's narrowing/widening/audit-write mutants,
+counted as one entry with three sub-parts, plus the phase-C failure log LOW fix). Note:
+KYC-REVIEWREQ-FORWARD-1's own sticky-guard mutant from the third round (§2.6) exercises the
+gate's PRE-N-3 (unconditional) shape, which the fourth round's own N-3 fix (§2.7) has since
+narrowed - both remain independently valid, currently-passing mutation evidence for the
+CURRENT code (the third round's own test still passes against the narrowed gate, since an
+`approved` target is still blocked either way).
+
+CORRECTIONS this round (R2-5, code re-review's own re-verification 2,
+`rv-prh-i2-kyc-code-review.md`): the previous "23/23" claim double-counted M8 - it counted
+BOTH the superseded §1 entry and the corrected §2.5 M8-reverify entry as two separate
+mutants in its "11 from the original submission" + "6 new mutants" arithmetic, when M8 is
+ONE mutant with ONE currently-valid result (§2.5's M8-reverify; §1's own entry is
+superseded, not a second, additional kill). The correct distinct count through the second
+fix round was 22 (10 + 6 + 6), not 23. This file no longer states a running "N/N" total in
+this header for that reason - see each section's own tally instead, and treat the count
+above (29 distinct mutants, three rounds) as the current, arithmetically-checked total.
 
 ===========================================================================================
 §1. Original submission mutants (2026-09-27) - re-verified unchanged this round
@@ -418,6 +431,103 @@ no new logic; the shared function's own forward-only CAS behaviour is already co
 by R1's P1/P2 mutants (§2 above) and by this round's mirror-race mutant.
 
 ===========================================================================================
+§2.6. THIRD fix round mutants (2026-09-27) - security re-verification 2 N-1b, code
+re-review 2 R2-1 to R2-5, identity-compliance Ruling 2 (KYC-REVIEWREQ-FORWARD-1), and the
+pre-existing create-side ProviderError/no-reference note
+===========================================================================================
+
+Base for this section: this same branch/worktree, on top of §2.5's own second fix round
+(commit be423c3/6621326 security re-verification 2 + identity-compliance ruling, commit
+c80103b identity-compliance addendum, commit 2447e5e code re-review 2, all merged before
+this round began). Same harness (manual scratchpad-copy-mutate-test-restore, private
+database `kyc_r2_fix`/`kyc_r2_fix2`, `diff`-verified byte-identical restoration after
+every mutant below).
+
+N-1b (security re-verification 2, HIGH, production-launch blocker; identity-compliance
+Ruling 1 independently concurred) - two directions tested:
+  (a) `finalStatusesSQL` reverted to include `expired`
+      (`('approved', 'rejected', 'expired')`, the exact §2.5-round defect): KILLED
+      [internal/kyc/enforcement.go] by
+      `go test -tags=integration ./internal/kyc/ -run "TestEvaluateEnforcement_N1b_ExpiredOnRejectedAccountDoesNotLiftRejection_ViaCallback|TestEvaluateEnforcement_N1b_ExpiredOnRejectedAccountDoesNotLiftRejection_SeededDirectly"`
+          first failure (callback-seeded): --- FAIL: TestEvaluateEnforcement_N1b_ExpiredOnRejectedAccountDoesNotLiftRejection_ViaCallback
+                             "N-1b: expected a callback-delivered `expired` row on the
+                             rejected account to NEVER lift the overlay's deny, got
+                             {Outcome:passed Allowed:true ...}"
+          first failure (directly seeded): --- FAIL: TestEvaluateEnforcement_N1b_ExpiredOnRejectedAccountDoesNotLiftRejection_SeededDirectly
+                             "N-1b: expected a directly-seeded `expired` row on the
+                             rejected account to NEVER lift the overlay's deny, got
+                             {Outcome:passed Allowed:true ...}"
+  (b) the inverse - `finalStatusesSQL` narrowed to `('rejected')` only (removing
+      `approved`, breaking the "walk-back" case identity-compliance's addendum required a
+      test for): KILLED [internal/kyc/enforcement.go] by
+      `go test -tags=integration ./internal/kyc/ -run "TestEvaluateEnforcement_N1_LaterFinalApprovedLiftsRejection|TestEvaluateEnforcement_N1b_ApprovedAfterExpiredStillLiftsRejection"`
+          first failure: --- FAIL: TestEvaluateEnforcement_N1b_ApprovedAfterExpiredStillLiftsRejection
+                             "N-1b: expected a LATER approved (even after an intervening
+                             expired) to lift the overlay, got {Outcome:failed
+                             Allowed:false ...}" (TestEvaluateEnforcement_N1_LaterFinalApprovedLiftsRejection
+                             also failed identically, as expected - it exercises the same
+                             "approved must be in the set" property without the
+                             intervening expired row)
+
+R2-2 (code re-review 2) - the upload handler's own "submit_verification_failed" log line
+reverted to `submitErr.Error()`: KILLED [internal/httpserver/kyc_handlers.go] by
+`go test -tags=integration ./internal/httpserver/ -run TestKYC_UploadSubmitFailureLog_NeverLeaksRawErrorText`
+    first failure: --- FAIL: TestKYC_UploadSubmitFailureLog_NeverLeaksRawErrorText
+                       "submit_verification_failed field \"detail\" leaked raw provider
+                       error text: \"kyc: provider unavailable: submit verification to
+                       provider: POST https://vendor.example/submit?token=VENDOR-SUBMIT-
+                       TRANSPORT-SECRET-qrs456\""
+
+R2-3a (code re-review 2) - the `ErrVerificationStatusConflict` -> 409 branch removed from
+`newReviewVerificationHandler`: KILLED [internal/httpserver/kyc_admin_handlers.go] by
+`go test -tags=integration ./internal/httpserver/ -run TestKYC_ReviewVerificationConflict_Returns409NotInternalError`
+    first failure: --- FAIL: TestKYC_ReviewVerificationConflict_Returns409NotInternalError
+                       "R2-3: expected every concurrent review response to be 200 or 409,
+                       got 500" (the conflict fell through to the generic
+                       review_verification_failed/500 branch)
+
+R2-3b (code re-review 2) - the `ErrVerificationNotSubmitted` -> 409 branch removed from
+`newUploadMyDocumentHandler`: KILLED [internal/httpserver/kyc_handlers.go] by
+`go test -tags=integration ./internal/httpserver/ -run TestKYC_UploadOrphanVerification_Returns409NotInternalError`
+    first failure: --- FAIL: TestKYC_UploadOrphanVerification_Returns409NotInternalError
+                       "R2-3: expected 409 uploading to an orphan verification, got 500"
+
+KYC-REVIEWREQ-FORWARD-1 (identity-compliance Ruling 2) - two directions tested:
+  (a) `applyForwardOnlyStatus`'s new sticky-guard predicate
+      (`AND NOT (status = 'review_required' AND reviewed_by IS NOT NULL)`) removed
+      entirely: KILLED [internal/kyc/provider.go] by
+      `go test -tags=integration ./internal/kyc/ -run TestApplyForwardOnlyStatus_StaffSetReviewRequiredIsStickyAgainstProviderApproval`
+          first failure: --- FAIL: TestApplyForwardOnlyStatus_StaffSetReviewRequiredIsStickyAgainstProviderApproval
+                             "KYC-REVIEWREQ-FORWARD-1: expected a staff-set
+                             review_required to stay review_required against a provider
+                             approval, got \"approved\""
+  (b) the inverse - the guard widened to block EVERY review_required row regardless of
+      `reviewed_by` (`AND NOT (status = 'review_required')`), breaking the
+      PROVIDER-set control case: KILLED [internal/kyc/provider.go] by
+      `go test -tags=integration ./internal/kyc/ -run TestApplyForwardOnlyStatus_ProviderSetReviewRequiredStillAdvancesToApproved`
+          first failure: --- FAIL: TestApplyForwardOnlyStatus_ProviderSetReviewRequiredStillAdvancesToApproved
+                             "kyc: exhausted retries applying forward-only status
+                             transition" (the re-read-based sticky-detection in
+                             applyForwardOnlyStatus only recognizes reviewed_by != Nil
+                             as the sticky signal, so widening the SQL guard beyond that
+                             causes the retry loop to spin uselessly against a row it can
+                             never distinguish as "genuinely stuck" - correctly surfaced
+                             as a failure, not a silent wrong answer)
+
+Pre-existing create-side ProviderError/no-reference note (code re-review 2) - the new
+no-reference guard in `applyCreateVerificationResult` removed, reverting to the original
+"any unrecognized outcome becomes pending" behaviour regardless of whether a reference was
+returned: KILLED [internal/kyc/verification_service.go] by
+`go test -tags=integration ./internal/kyc/ -run TestCreateVerification_UnrecognizedOutcomeWithNoReferenceLeavesOrphanUntouched`
+    first failure: --- FAIL: TestCreateVerification_UnrecognizedOutcomeWithNoReferenceLeavesOrphanUntouched
+                       "expected ErrProviderUnavailable for an unrecognized outcome with
+                       no reference, got <nil>"
+
+7/7 killed this round (N-1b in both directions, R2-2, R2-3a, R2-3b,
+KYC-REVIEWREQ-FORWARD-1 in both directions, and the create-side ProviderError/no-reference
+fix), 0 equivalent.
+
+===========================================================================================
 §3. F1 (orphan-row enforcement masking) - regression tests, not mutation-tested
 ===========================================================================================
 
@@ -458,21 +568,114 @@ latest FINAL row only (finalStatusesSQL: approved/rejected/expired); the primary
 read (readLatestVerificationByPlayerAccount, F1's own predicate) is UNCHANGED.
 
 ===========================================================================================
+§2.7. FOURTH fix round mutants (2026-09-27) - security re-verification 3, N-3 (sticky-review
+gate also swallowed a vendor rejection)
+===========================================================================================
+
+Base for this section: this same branch/worktree, on top of §2.6's own third fix round
+(commit 7e329e8 security re-verification 3, merged before this round began). Same harness
+(manual scratchpad-copy-mutate-test-restore, private database `kyc_r2_fix`, `diff`-verified
+byte-identical restoration after every mutant below).
+
+N-3 (security re-verification 3, MEDIUM, production-launch blocker) - three directions
+tested:
+  (a) the narrowing mutant - the sticky guard's SQL predicate and its matching Go re-read
+      check both reverted to their §21.2 (pre-fix) unconditional shape (blocking every
+      forward move off a staff-sticky row, not only `approved`): KILLED
+      [internal/kyc/provider.go] by
+      `go test -tags=integration ./internal/kyc/ -run TestEvaluateEnforcement_N3_StaffReviewRequiredThenVendorRejected_StillApplies`
+          first failure: --- FAIL: TestEvaluateEnforcement_N3_StaffReviewRequiredThenVendorRejected_StillApplies
+                             "N-3: expected the staff-escalated row to still reach rejected
+                             on a genuine vendor rejection, got \"review_required\""
+  (b) the widening mutant (the inverse) - the sticky guard's SQL predicate removed entirely
+      (so even a genuine vendor `approved` is no longer blocked): KILLED
+      [internal/kyc/provider.go] by
+      `go test -tags=integration ./internal/kyc/ -run "TestEvaluateEnforcement_N3_StaffReviewRequiredThenVendorApproved_HeldForReviewAudited|TestApplyForwardOnlyStatus_StaffSetReviewRequiredIsStickyAgainstProviderApproval"`
+          first failure: --- FAIL: TestEvaluateEnforcement_N3_StaffReviewRequiredThenVendorApproved_HeldForReviewAudited
+                             "N-3 control: expected the staff-escalated row to STAY
+                             review_required against a vendor approval, got \"approved\""
+                             (§21's own pre-existing TestApplyForwardOnlyStatus_
+                             StaffSetReviewRequiredIsStickyAgainstProviderApproval fails
+                             identically, confirming both the old and new tests cover this
+                             direction)
+  (c) the held-for-review audit-write block removed from applyCallbackOutcome entirely
+      (heldForReview computed but discarded, `_ = heldForReview`): KILLED
+      [internal/kyc/provider.go] by
+      `go test -tags=integration ./internal/kyc/ -run TestEvaluateEnforcement_N3_StaffReviewRequiredThenVendorApproved_HeldForReviewAudited`
+          first failure: --- FAIL: TestEvaluateEnforcement_N3_StaffReviewRequiredThenVendorApproved_HeldForReviewAudited
+                             "expected 1 audit_log row(s) for action
+                             \"kyc.provider_result_held_for_review\"/target ..., got 0"
+
+LOW (security re-verification 3, phase C failure log) - the
+"kyc_create_verification_phase_c_failed" log line reverted from
+`RedactedProviderErrorDetail(err)` to `err.Error()`: KILLED
+[internal/kyc/verification_service.go] by
+`go test -tags=integration ./internal/kyc/ -run TestCreateVerification_PhaseCFailureLog_NeverLeaksRawVendorOutcomeText`
+    first failure: --- FAIL: TestCreateVerification_PhaseCFailureLog_NeverLeaksRawVendorOutcomeText
+                       "kyc_create_verification_phase_c_failed leaked the raw vendor outcome
+                       string: ...error=\"kyc: provider unavailable: provider returned an
+                       unrecognized outcome \\\"SUPER-SECRET-VENDOR-OUTCOME-CODE-xyz789\\\"
+                       with no reference\""
+
+4/4 killed this round (N-3 in three directions counted as one entry with sub-parts (a)/(b)/(c),
+plus the phase-C log LOW fix), 0 equivalent.
+
+===========================================================================================
+§2.8. FIFTH fix round mutants (2026-09-27) - security re-verification 4 L-1/L-2, identity-
+compliance Ruling 5 (`expired` held on a staff-sticky row)
+===========================================================================================
+
+Base for this section: this same branch/worktree, on top of §2.7's own fourth fix round
+(commit 52a61aa identity-compliance Ruling 5 + security re-verification 4, merged before
+this round began). Same harness (manual scratchpad-copy-mutate-test-restore, private
+database `kyc_r2_fix`, `diff`-verified byte-identical restoration after every mutant
+below).
+
+L-1 (security re-verification 4, LOW; identity-compliance Ruling 5) - the sticky guard's
+SQL predicate and its matching Go re-read check both narrowed BACK to `approved` only
+(security's OWN "gate widened to approved or expired" mutant from re-verification 4, which
+SURVIVED at that time because no test existed - this IS that same mutant, now genuinely
+killed): KILLED [internal/kyc/provider.go] by
+`go test -tags=integration ./internal/kyc/ -run TestEvaluateEnforcement_L1_StaffReviewRequiredThenVendorExpired_HeldForReviewAudited`
+    first failure: --- FAIL: TestEvaluateEnforcement_L1_StaffReviewRequiredThenVendorExpired_HeldForReviewAudited
+                       "L-1: expected the staff-escalated row to STAY review_required
+                       against a vendor expired, got \"expired\""
+    (TestEvaluateEnforcement_N3_StaffReviewRequiredThenVendorRejected_StillApplies remains
+    green throughout this mutant, confirming `rejected` is unaffected by the L-1 widening,
+    exactly as N-3 requires)
+
+L-2 (security re-verification 4, LOW) - the held-for-review de-duplication check
+(`SELECT EXISTS (...)` against audit_log) removed, reverting to an unconditional write on
+every discard: KILLED [internal/kyc/provider.go] by
+`go test -tags=integration ./internal/kyc/ -run TestEvaluateEnforcement_L2_RedeliveredHeldOutcome_DoesNotDuplicateAudit`
+    first failure: --- FAIL: TestEvaluateEnforcement_L2_RedeliveredHeldOutcome_DoesNotDuplicateAudit
+                       "expected 1 audit_log row(s) for action
+                       \"kyc.provider_result_held_for_review\"/target ..., got 3"
+
+2/2 killed this round (L-1, L-2), 0 equivalent.
+
+===========================================================================================
 Post-restoration verification
 ===========================================================================================
 
-After each mutant in §1, §2, and §2.5 was reverted from its saved backup, `diff` against
-the pre-mutation saved copy showed byte-identical content for every mutated file
-(internal/kyc/verification_service.go, document_service.go, provider.go, callcontext.go,
-enforcement.go, internal/httpserver/kyc_admin_handlers.go, kyc_handlers.go), and the full
-targeted suite - `go test -tags=integration -race -count=1 ./internal/kyc/...`,
-`go test -tags=integration -count=1 ./internal/httpserver/... -run 'KYC|Kyc'`,
-`go test -tags=integration -count=1 ./internal/withdrawal/...`, and
-`go test -tags=integration -count=1 ./cmd/platform-api/...` - passed cleanly against the
-private databases (`kyc_r1_fix_priv`/`kyc_r1_fix_priv2` for the first fix round;
-`kyc_r2_fix`/`kyc_r2_fix2` for this second fix round, both created fresh via
-TEST_ADMIN_DATABASE_URL and migrated to head, never the shared `igaming_platform_ci_local`
-instance, for the same reason given in the Environment note above). `gofmt -l .`,
-`go vet ./...`, `go vet -tags=integration ./...`, and `golangci-lint run ./...` (no build
-tags, matching this repository's own CI invocation in .github/workflows/ci.yml) all report
-clean/0 issues after this second fix round as well.
+After each mutant in §1, §2, §2.5, §2.6, §2.7, and §2.8 was reverted from its saved backup,
+`diff` against the pre-mutation saved copy showed byte-identical content for every mutated
+file (internal/kyc/verification_service.go, document_service.go, provider.go,
+callcontext.go, enforcement.go, internal/httpserver/kyc_admin_handlers.go,
+kyc_handlers.go), and the full targeted suite - `go test -tags=integration -race -count=1
+./internal/kyc/...`, `go test -tags=integration -race -count=1 ./internal/httpserver/...
+-run 'KYC|Kyc'`, `go test -tags=integration -race -count=1 ./internal/withdrawal/...`, and
+`go test -tags=integration -race -count=1 ./cmd/platform-api/...` - passed cleanly against
+the private databases (`kyc_r1_fix_priv`/`kyc_r1_fix_priv2` for the first fix round;
+`kyc_r2_fix`/`kyc_r2_fix2` for the second through fifth fix rounds, reused after
+re-migrating to head; `kyc_r2_withdrawal`/`kyc_r2_cmd` for the withdrawal/cmd suites - all
+created via TEST_ADMIN_DATABASE_URL, never the shared `igaming_platform_ci_local` instance,
+for the same reason given in the Environment note above). `gofmt -l .`, `go vet ./...`,
+`go vet -tags=integration ./...`, and `golangci-lint run ./...` (the pinned
+golangci-lint-2.9.0-linux-amd64 binary, untagged, matching this repository's own CI
+invocation in .github/workflows/ci.yml) all report clean/0 issues after this fifth fix
+round as well.
+
+Running distinct-mutant total: 33 (through the fourth fix round, §2.7's own header note) +
+2 (§2.8, this fifth round) = 35 distinct mutants killed, 0 equivalent, across five fix
+rounds.
