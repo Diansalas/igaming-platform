@@ -916,9 +916,17 @@ RLS is two policy families (§10.2.1), both requiring `app.player_account_id` un
 #### 10.2.1 Who the database believes the actor is (S95-C7, RV-0095 N2/N3)
 
 No actor or scope column is trusted from the application. BEFORE INSERT/UPDATE triggers on both
-0102 tables **force** `changed_by`/`changed_by_scope`, `requested_by`/`requested_by_scope` and
-`approved_by`/`approved_by_scope` from the session. Client values are ignored (the ADR 0093 A1
-B5 pattern). The session scope is derived as follows:
+0102 tables **force** each actor column from the session, **at one defined step only**; client
+values are ignored (the ADR 0093 A1 B5 pattern; RV-0095 N5).
+
+| Column | Forced from the session at | Afterwards |
+|---|---|---|
+| `payment_kill_switches.changed_by`, `changed_by_scope` | every INSERT and UPDATE of the switch row | rewritten at each change (it records the last actor) |
+| `payment_kill_switches.engaged_by_scope` | engage (false→true), or a platform take-over while engaged (§10.2.2 point 5) | never `platform→tenant` |
+| `release_requests.requested_by`, `requested_by_scope` | INSERT of the request | immutable |
+| `release_requests.approved_by`, `approved_by_scope` | the `open→approved` UPDATE only | NULL and unwritable in every other state or transition; immutable once set |
+
+The session scope is derived as follows:
 
 | Session scope | Required GUCs | Principal check (trigger, as migration 0044 does) |
 |---|---|---|
@@ -975,13 +983,28 @@ session. A tenant connection cannot write it.
 7. **`release_request_id` is written only by transition 6.** It is forced to NULL on engage and
    is otherwise immutable.
 
-**Release-request guard trigger:**
+8. **`release_request_id := NULL` is forced on every INSERT** of a switch row (RV-0095 L5(b)). A
+   new row can therefore never pre-consume another switch's request through
+   `UNIQUE (release_request_id)`.
 
-- Status moves only `open→approved|cancelled|expired`.
-- `created_at`, `decided_at` and `decided_txid` (= `txid_current()` at the `open→approved`
-  UPDATE) are forced.
-- `expires_at` is forced to `≤ created_at + 24 h`.
-- `requested_by*`/`approved_by*` come from the session (§10.2.1).
+**Release-request guard trigger (RV-0095 N5, L5(a)):**
+
+- **Columns set at INSERT only, and immutable afterwards:** `id`, `tenant_id`, `kill_switch_id`,
+  `expected_version`, `reason_code`, `requested_by`, `requested_by_scope`, `created_at` and
+  `expires_at`.
+  - `requested_by*` and `created_at` are forced from the session and the clock.
+  - `expires_at` is forced to `≤ created_at + 24 h`.
+  - An UPDATE that changes any of them is refused, so an approver can never approve something
+    the requester did not ask for, and a single actor can never rewrite `requested_by` to
+    manufacture a "distinct" approver.
+- **Columns written at `open→approved` only:** `approved_by`, `approved_by_scope`, `decided_at`
+  and `decided_txid` (= `txid_current()`). All are forced and never client-supplied. They must be
+  NULL in `open`, stay NULL on `open→cancelled|expired`, and are immutable once set.
+- **Status** moves only `open→approved|cancelled|expired`. A row in a terminal status
+  (`approved`, `cancelled`, `expired`) is **fully immutable**.
+- **INSERT by a tenant session** is refused when the target switch has
+  `engaged_by_scope = 'platform'` (L5(a)). A tenant can therefore never hold the one `open` slot
+  and block the platform's own release request.
 - Approval is refused when the approver's session scope is not `'platform'` but the switch has
   `engaged_by_scope = 'platform'`.
 - There is no DELETE.
@@ -1444,9 +1467,13 @@ CREATE UNIQUE INDEX ON payment_kill_switch_release_requests (kill_switch_id) WHE
 --   platform-engaged row; true→false requires NEW.release_request_id → request with kill_switch_id = id,
 --   status 'approved', expected_version = OLD.version, approved_by <> requested_by, now() < expires_at,
 --   decided_txid = txid_current(), and (OLD.engaged_by_scope = 'platform' ⇒ both request scopes 'platform');
---   release_request_id is otherwise immutable.
--- release_requests guard: status only open→approved|cancelled|expired; created_at, expires_at, decided_at,
---   decided_txid forced; approval refused for a non-platform approver when the switch is platform-engaged; no DELETE.
+--   release_request_id is forced to NULL on every INSERT (L5(b)) and is otherwise immutable.
+-- release_requests guard (N5, L5(a)): id, tenant_id, kill_switch_id, expected_version, reason_code, requested_by,
+--   requested_by_scope, created_at, expires_at set at INSERT (actor/time forced; expires_at <= created_at + 24 h)
+--   and immutable; approved_by, approved_by_scope, decided_at, decided_txid forced at open→approved only, NULL
+--   otherwise, immutable once set; status only open→approved|cancelled|expired; terminal rows fully immutable;
+--   tenant-session INSERT refused for a platform-engaged switch; approval refused for a non-platform approver
+--   when the switch is platform-engaged; no DELETE.
 -- RLS, both tables (FORCE): tenant family (tenant_id = app.tenant_id; app.player_account_id and
 --   app.platform_admin_principal_id unset) and platform family (migration 0075 precedent:
 --   app.platform_admin_principal_id set; app.tenant_id and app.player_account_id unset); each SELECT, INSERT,
@@ -1759,6 +1786,14 @@ timing-based fault injection is used anywhere except the one intentional excepti
         values are ignored (N4).
       - A release request referencing another tenant's switch id is refused by the composite FK
         (L4).
+      - **Request-row immutability (N5):** an approve UPDATE that also sets `requested_by`,
+        `requested_by_scope`, `kill_switch_id`, `expected_version` or `reason_code` is refused.
+        A single actor who created the request cannot release through it by any sequence of
+        statements. A client-supplied `approved_by*`/`decided_*` at INSERT or on cancel is
+        refused or ignored. Any UPDATE of a terminal request is refused.
+      - **L5:** a tenant session cannot INSERT a request for a platform-engaged switch, and the
+        platform's own request succeeds. A switch INSERT carrying a `release_request_id` stores
+        NULL, and the other switch's legitimate release still succeeds.
       - A client-supplied `received_at` or `resolved_at` on a receipt is replaced by the DB
         clock (L3).
     - A platform-engaged switch cannot be released by tenant principals, and a tenant-principal
@@ -1857,6 +1892,7 @@ timing-based fault injection is used anywhere except the one intentional excepti
 | MX19 | Remove scope-column immutability from the switch guard (RV-0095 N1) | 20 (re-scope an engaged row) |
 | MX20 | Accept a client-supplied `*_by_scope` value (RV-0095 N2) | 20 (tenant writes `'platform'`) |
 | MX21 | Drop the `decided_txid = txid_current()` check (RV-0095 N4) | 20 (earlier-tx approval) |
+| MX25 | Allow an UPDATE of `release_requests.requested_by` (RV-0095 N5) | 20 (request-row immutability) |
 | MX22 | Remove the `payment_attempts` INSERT guard (RV-0095 ledger N2) | 19 (forbidden INSERT shapes) |
 | MX23 | Drop the succeeded-sibling predicate from T12 (RV-0095 ledger N3) | 19 (T12 with a succeeded sibling) |
 | MX24 | Run the deposit gates after the parent lock (RV-0095 ledger N1) | 16 (RG self-exclusion race; lock-order static check) |
@@ -3081,6 +3117,9 @@ open, with findings N1–N4 and Lows L1–L4. All are written into the text as f
 | L2 (C8): item 15 described the superseded reflection test | §16.2 item 15 (recursive test, static test, `Domain` mismatch, gate-alone and adapter-alone cases) |
 | L3 (C3): `received_at` only a DEFAULT | §13.1 (`received_at` and `resolved_at` forced by trigger); §16.2 item 20 |
 | L4: cross-tenant FK on release requests | §13.2 composite FK `(tenant_id, kill_switch_id)` → `(tenant_id, id)`; §16.2 item 20 |
+
+| N5 (C5, addendum): release-request column write moments | §10.2.1 actor-column table (which column is forced at which step); §10.2.2 request guard (INSERT-only columns immutable, approval-only columns, terminal rows immutable); §13.2 comment; §16.2 item 20; MX25 |
+| L5 (addendum): tenant obstruction of platform release; pre-consumed `release_request_id` | §10.2.2 point 8 (NULL forced on switch INSERT); request guard refuses a tenant-session INSERT on a platform-engaged switch; §13.2; §16.2 item 20 |
 
 With these, every S95 condition is closed in the design text, pending `security`'s confirmation.
 Migration 0102 and the kill-switch routes must not be implemented before that confirmation
