@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/Diansalas/igaming-platform/internal/providercred"
+	"github.com/Diansalas/igaming-platform/internal/txscope"
 )
 
 // defaultProviderCallTimeout is CallContext.Deadline's default budget for a
@@ -102,9 +103,16 @@ func (MockOutboundResolver) SyntheticComponent() {}
 func NewMockOutboundResolver() MockOutboundResolver { return MockOutboundResolver{} }
 
 // Resolve implements OutboundCredentialResolver. It ignores pool entirely -
-// there is no store to read - and never fails, matching the MOCK adapter's
-// own "never a real credential, never a real failure mode" framing.
-func (MockOutboundResolver) Resolve(_ context.Context, _ providercred.TenantTxRunner, tenantID uuid.UUID, providerID string) (providercred.OutboundCredential, error) {
+// there is no store to read - and otherwise never fails, matching the MOCK
+// adapter's own "never a real credential, never a real failure mode"
+// framing - EXCEPT for the one refusal ADR 0095 §11 requires of a MOCK
+// resolver too (IO-1B, architect review, INV-IO-1(b)): txscope.Held(ctx)
+// refuses exactly like the real providercred.OutboundResolver.Resolve
+// does, mirroring casino.MockOutboundResolver's identical fix.
+func (MockOutboundResolver) Resolve(ctx context.Context, _ providercred.TenantTxRunner, tenantID uuid.UUID, providerID string) (providercred.OutboundCredential, error) {
+	if txscope.Held(ctx) {
+		return providercred.OutboundCredential{}, ErrProviderCallRefused
+	}
 	return providercred.NewMockOutboundCredential(tenantID, "kyc", providerID), nil
 }
 

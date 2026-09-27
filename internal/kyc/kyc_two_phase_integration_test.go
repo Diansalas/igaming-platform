@@ -100,6 +100,112 @@ func auditActionExistsKYC(t *testing.T, pool *db.Pool, tenantID, targetID uuid.U
 	return n > 0
 }
 
+// ctxObliviousKYCResolver is a resolver that (unlike MockOutboundResolver)
+// does NOT itself check txscope.Held(ctx) - it always succeeds, exactly
+// like a hypothetical resolver bug or a resolver that predates IO-1B's own
+// fix. Used ONLY to isolate CreateVerification's/SubmitVerification's own
+// phase-B call-site guard (verification_service.go/document_service.go,
+// immediately before the adapter call) from MockOutboundResolver's OWN,
+// separate refusal, so the call-site tests below prove the call-site guard
+// specifically, not merely "some refusal happened somewhere upstream".
+type ctxObliviousKYCResolver struct{}
+
+func (ctxObliviousKYCResolver) Resolve(_ context.Context, _ providercred.TenantTxRunner, tenantID uuid.UUID, providerID string) (providercred.OutboundCredential, error) {
+	return providercred.NewMockOutboundCredential(tenantID, "kyc", providerID), nil
+}
+
+// TestCreateVerification_RefusesUnderTxscopeHeld is IO-1B's own required
+// test (architect review `rv-prh-architect.md`, INV-IO-1(b)): calling
+// CreateVerification with a ctx that already carries txscope's held marker
+// (as it would if, despite the API shape, some future caller invoked it
+// from inside its own WithTenant closure) must refuse BEFORE ever reaching
+// the adapter's own CreateVerification method - phase A itself still runs
+// (its own nested WithTenant call is legal; txscope.Mark is idempotent on
+// an already-marked ctx), but phase B's own txscope.Held(ctx) check fires
+// on the SAME outer ctx the test itself marked, refusing with
+// ErrProviderCallRefused and never invoking the adapter at all. Uses
+// ctxObliviousKYCResolver (not the real MockOutboundResolver) so this test
+// isolates the call-site guard itself, not the resolver's own separate
+// refusal (which TestMockOutboundResolver_RefusesUnderTxscopeHeld, below,
+// covers directly).
+func TestCreateVerification_RefusesUnderTxscopeHeld(t *testing.T) {
+	pool := testPool(t)
+	f := seedFixture(t, pool)
+
+	var createCalls int
+	provider := &spyKYCProvider{MockKYCProvider: NewMockKYCProvider()}
+	provider.onCreateVerification = func(ctx context.Context, in CreateVerificationInput) (ProviderResult, error) {
+		createCalls++
+		return provider.MockKYCProvider.CreateVerification(ctx, in)
+	}
+
+	var createErr error
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, createErr = CreateVerification(ctx, pool, ctxObliviousKYCResolver{}, provider, CreateVerificationParams{
+			TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerID, PersonID: f.personID,
+		})
+		return nil
+	}); err != nil {
+		t.Fatalf("outer WithTenant (test scaffolding only): %v", err)
+	}
+
+	if !errors.Is(createErr, ErrProviderCallRefused) {
+		t.Fatalf("expected ErrProviderCallRefused, got %v", createErr)
+	}
+	if createCalls != 0 {
+		t.Fatalf("expected the adapter's own CreateVerification method to be called ZERO times, got %d", createCalls)
+	}
+}
+
+// TestSubmitVerification_RefusesUnderTxscopeHeld is IO-1B's own required
+// test for SubmitVerification's own phase B - same shape as
+// TestCreateVerification_RefusesUnderTxscopeHeld above.
+func TestSubmitVerification_RefusesUnderTxscopeHeld(t *testing.T) {
+	pool := testPool(t)
+	f := seedFixture(t, pool)
+	verificationID := seedVerification(t, pool, f)
+	seedDocument(t, pool, f, verificationID, DocumentPassport, "p.png")
+
+	base := NewMockKYCProvider()
+	ref := mustGetProviderReference(t, pool, f.tenantID, verificationID)
+	base.created[ref] = true
+	var submitCalls int
+	provider := &spyKYCProvider{MockKYCProvider: base}
+	provider.onSubmitVerification = func(ctx context.Context, ref string, docs []SubmittedDocument, call CallContext) (ProviderResult, error) {
+		submitCalls++
+		return base.SubmitVerification(ctx, ref, docs, call)
+	}
+
+	var submitErr error
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, submitErr = SubmitVerification(ctx, pool, ctxObliviousKYCResolver{}, provider, f.tenantID, verificationID)
+		return nil
+	}); err != nil {
+		t.Fatalf("outer WithTenant (test scaffolding only): %v", err)
+	}
+
+	if !errors.Is(submitErr, ErrProviderCallRefused) {
+		t.Fatalf("expected ErrProviderCallRefused, got %v", submitErr)
+	}
+	if submitCalls != 0 {
+		t.Fatalf("expected the adapter's own SubmitVerification method to be called ZERO times, got %d", submitCalls)
+	}
+}
+
+// TestMockOutboundResolver_RefusesUnderTxscopeHeld is IO-1B's own required
+// coverage of the MOCK resolver's own, separate refusal (ADR 0095 §11's
+// "a MOCK uses a Synthetic credential source with the SAME refusal" claim,
+// which was previously false for KYC too): MockOutboundResolver.Resolve
+// itself must refuse a txscope-held ctx, independent of CreateVerification/
+// SubmitVerification's own call-site guard.
+func TestMockOutboundResolver_RefusesUnderTxscopeHeld(t *testing.T) {
+	held := txscope.Mark(context.Background())
+	_, err := MockOutboundResolver{}.Resolve(held, nil, uuid.New(), "mock")
+	if !errors.Is(err, ErrProviderCallRefused) {
+		t.Fatalf("expected ErrProviderCallRefused, got %v", err)
+	}
+}
+
 // seedDocument uploads one document under verificationID, using its own
 // short transaction (UploadDocument's own phase-A-only shape) - a helper so
 // SubmitVerification's own tests can exercise a non-empty document set (C4:
