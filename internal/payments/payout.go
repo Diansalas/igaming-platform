@@ -25,6 +25,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/google/uuid"
@@ -171,14 +172,31 @@ var ErrPayoutKillSwitchEngaged = errors.New("payments: payout claim refused, kil
 // (submit_withdrawal_kill_switch_engaged), and the in-statement predicate,
 // not this audit row, is what actually blocks the call.
 func recordPayoutKillSwitchHoldAudit(ctx context.Context, pool *db.Pool, tenantID, requestID uuid.UUID, providerID string, actor SubmitActor) {
-	_ = pool.WithTenant(ctx, tenantID, func(actx context.Context, tx pgx.Tx) error {
+	// C3 (RV-PRH-I1 kill-switch phase 2 code review): this repeats the
+	// exact RV2-L1 defect internal/httpserver's own denied-audit writers
+	// were just fixed for - writing under the caller's own (cancellable)
+	// request context would let a client disconnect silently drop this
+	// label. Detached and bounded, exactly like
+	// internal/httpserver's deniedAuditCtx.
+	dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), payoutPhaseCTimeout)
+	defer cancel()
+	if err := pool.WithTenant(dctx, tenantID, func(actx context.Context, tx pgx.Tx) error {
 		return audit.Record(actx, tx, audit.Entry{
 			TenantID: tenantID, ActorType: audit.ActorStaff, ActorID: actor.StaffID,
 			Action: "withdrawal.submit.http", TargetType: "withdrawal_request", TargetID: requestID.String(),
 			Outcome: audit.OutcomeDenied, IPAddress: actor.IPAddress, UserAgent: actor.UserAgent, RequestID: actor.RequestID,
 			Metadata: map[string]any{"denied_by_kill_switch": true, "provider_id": providerID, "reason_code": "kill_switch"},
 		})
-	})
+	}); err != nil {
+		// Never surfaced as a different error than the kill-switch
+		// refusal itself (ClaimForDispatch already returns
+		// ErrPayoutKillSwitchEngaged regardless of this outcome) - logged
+		// so the label's own durability failure is at least visible,
+		// mirroring payments_kill_switch_denied_audit_failed's identical
+		// convention in internal/httpserver.
+		slog.Default().Error("payments_payout_kill_switch_hold_audit_failed",
+			"tenant_id", tenantID.String(), "withdrawal_request_id", requestID.String(), "provider_id", providerID, "error", err.Error())
+	}
 }
 
 // SubmitActor is the staff identity/request context ClaimForDispatch must

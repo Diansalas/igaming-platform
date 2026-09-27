@@ -1037,6 +1037,7 @@ func TestClaimForDispatch_KillSwitchEngaged_FailsClosedNoWithdraw(t *testing.T) 
 	// inside that transaction could have durably recorded the refusal.
 	var deniedCount int
 	var metaJSON []byte
+	var ipAddress, userAgent string
 	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		if err := tx.QueryRow(ctx,
 			`SELECT count(*) FROM audit_log WHERE action = 'withdrawal.submit.http' AND target_id = $1 AND outcome = 'denied'`,
@@ -1045,9 +1046,9 @@ func TestClaimForDispatch_KillSwitchEngaged_FailsClosedNoWithdraw(t *testing.T) 
 			return err
 		}
 		return tx.QueryRow(ctx,
-			`SELECT metadata FROM audit_log WHERE action = 'withdrawal.submit.http' AND target_id = $1 AND outcome = 'denied'`,
+			`SELECT metadata, coalesce(host(ip_address), ''), coalesce(user_agent, '') FROM audit_log WHERE action = 'withdrawal.submit.http' AND target_id = $1 AND outcome = 'denied'`,
 			wr.ID.String(),
-		).Scan(&metaJSON)
+		).Scan(&metaJSON, &ipAddress, &userAgent)
 	}); err != nil {
 		t.Fatalf("read kill-switch hold audit: %v", err)
 	}
@@ -1060,6 +1061,15 @@ func TestClaimForDispatch_KillSwitchEngaged_FailsClosedNoWithdraw(t *testing.T) 
 	}
 	if meta["denied_by_kill_switch"] != true || meta["reason_code"] != "kill_switch" {
 		t.Fatalf("expected the hold audit metadata to label the refusal, got %v", meta)
+	}
+	// C3 (RV-PRH-I1 kill-switch phase 2 code review): provider_id and
+	// IP/user agent must be present too, same as every other audit row -
+	// M9/M10.
+	if meta["provider_id"] != "mock-fix-ks-t1p" {
+		t.Fatalf("expected the hold audit metadata to carry provider_id, got %v", meta["provider_id"])
+	}
+	if ipAddress != "127.0.0.1" || userAgent != "test-agent" {
+		t.Fatalf("expected the hold audit row to carry the actor's ip_address/user_agent, got ip=%q ua=%q", ipAddress, userAgent)
 	}
 
 	// Release (four-eyes: request and approve from two DISTINCT staff
@@ -1100,6 +1110,34 @@ func TestClaimForDispatch_KillSwitchEngaged_FailsClosedNoWithdraw(t *testing.T) 
 	}
 	loAssertBalanced(t, pool, f.tenantID)
 	loAssertProjectionMatchesRebuild(t, pool, f.tenantID)
+}
+
+// TestRecordPayoutKillSwitchHoldAudit_WritesDespiteCancelledRequestContext
+// is C3's (RV-PRH-I1 kill-switch phase 2 code review) fix, mirroring
+// internal/httpserver's identical RV2-L1 fix for the kill-switch admin
+// routes: a client disconnect must never skip the payout hold label.
+func TestRecordPayoutKillSwitchHoldAudit_WritesDespiteCancelledRequestContext(t *testing.T) {
+	pool := depositV2ScratchPool(t)
+	f := seedPayoutFixture(t, pool, 10_000, true)
+	wr := approvedWithdrawal(t, pool, f, 500, "payout-cancelled-ctx-hold")
+
+	cancelledCtx, cancel := context.WithCancel(context.Background())
+	cancel() // simulate an already-disconnected client
+
+	recordPayoutKillSwitchHoldAudit(cancelledCtx, pool, f.tenantID, wr.ID, "mock-cancelled-ctx", testSubmitActor())
+
+	var deniedCount int
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx,
+			`SELECT count(*) FROM audit_log WHERE action = 'withdrawal.submit.http' AND target_id = $1 AND outcome = 'denied'`,
+			wr.ID.String(),
+		).Scan(&deniedCount)
+	}); err != nil {
+		t.Fatalf("read hold audit: %v", err)
+	}
+	if deniedCount != 1 {
+		t.Fatal("expected the payout hold audit row to be written despite an already-cancelled request context")
+	}
 }
 
 // TestSweeper_T2Reclaim_KillSwitchEngaged_ReschedulesNeverEscalates proves
