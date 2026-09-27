@@ -240,9 +240,14 @@ func TestKYCOutboundResolver_FollowsWiring(t *testing.T) {
 // orchestrator wiring): a TRUE nil interface when off, and a working MOCK
 // resolver - reached ONLY via paymentsOutboundCredentials()'s kind split,
 // not merely because b.PaymentsOutboundResolver is set - when on. The kind
-// split's own routing-by-adapter-identity logic is unit-tested directly in
-// internal/payments; this test only proves the wiring itself reaches the
-// mock adapter's own provider id.
+// split's own routing-by-adapter-identity logic (mock vs real chosen by
+// ADAPTER KIND, with distinct mock/real fakes so the choice is observable)
+// is unit-tested directly in internal/payments/outbound_kindsplit_test.go
+// (code review RV-PRH-I1 phase 2 C1 - the prior version of this comment
+// claimed this before that file existed, when the only in-package test
+// used the same resolver for both halves and could not tell them apart);
+// this test only proves the wiring itself reaches the mock adapter's own
+// provider id.
 func TestPaymentsOutboundResolver_FollowsWiring(t *testing.T) {
 	for _, cfg := range wiringOffConfigs {
 		b := buildProviderBundle(mockProviderWiring(cfg))
