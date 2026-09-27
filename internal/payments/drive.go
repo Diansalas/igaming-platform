@@ -158,7 +158,7 @@ func (o *Orchestrator) driveCreatedAttempt(
 		AttemptState: attempt.State, ClaimToken: claimToken, ExpectedClaim: claimToken,
 		IdempotencyKey: attempt.ExternalIdempotencyKey, Domain: "payments", Manifest: manifest,
 	}
-	gr := callProvider(ctx, credResolver, in, depositAdapterCall(provider, attempt, manifest))
+	gr := callProvider(ctx, pool, credResolver, in, depositAdapterCall(provider, attempt, manifest))
 	if gr.Attempted {
 		o.breaker.RecordResult(attempt.TenantID, capability.ProviderID, gr.Class)
 	}

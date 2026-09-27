@@ -8,6 +8,7 @@ package payments
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -174,7 +175,7 @@ func TestPayoutDispatch_T1p_SyncSuccess_SettlesConcreteBalances(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ClaimForDispatch: %v", err)
 	}
-	gr := DispatchWithdraw(context.Background(), MockCredentialResolver{}, provider, claim.Attempt)
+	gr := DispatchWithdraw(context.Background(), nil, MockCredentialResolver{}, provider, claim.Attempt)
 	if err := ApplyPayoutResult(context.Background(), pool, f.tenantID, wr.ID, claim.Attempt, gr, EvidenceSync); err != nil {
 		t.Fatalf("ApplyPayoutResult: %v", err)
 	}
@@ -226,7 +227,7 @@ func TestPayoutDispatch_T1p_SyncDecline_ReleasesConcreteBalances(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ClaimForDispatch: %v", err)
 	}
-	gr := DispatchWithdraw(context.Background(), MockCredentialResolver{}, provider, claim.Attempt)
+	gr := DispatchWithdraw(context.Background(), nil, MockCredentialResolver{}, provider, claim.Attempt)
 	if err := ApplyPayoutResult(context.Background(), pool, f.tenantID, wr.ID, claim.Attempt, gr, EvidenceSync); err != nil {
 		t.Fatalf("ApplyPayoutResult: %v", err)
 	}
@@ -363,7 +364,7 @@ func TestSweeper_T12_NonIdempotentManifest_NeverResends(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ClaimForDispatch: %v", err)
 	}
-	gr := DispatchWithdraw(context.Background(), MockCredentialResolver{}, spy, claim.Attempt)
+	gr := DispatchWithdraw(context.Background(), nil, MockCredentialResolver{}, spy, claim.Attempt)
 	if err := ApplyPayoutResult(context.Background(), pool, f.tenantID, wr.ID, claim.Attempt, gr, EvidenceSync); err != nil {
 		t.Fatalf("ApplyPayoutResult: %v", err)
 	}
@@ -428,7 +429,7 @@ func TestSweeper_T12_IdempotentManifest_StopsAtMaxResubmits(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ClaimForDispatch: %v", err)
 	}
-	gr := DispatchWithdraw(context.Background(), MockCredentialResolver{}, idem, claim.Attempt)
+	gr := DispatchWithdraw(context.Background(), nil, MockCredentialResolver{}, idem, claim.Attempt)
 	if err := ApplyPayoutResult(context.Background(), pool, f.tenantID, wr.ID, claim.Attempt, gr, EvidenceSync); err != nil {
 		t.Fatalf("ApplyPayoutResult: %v", err)
 	}
@@ -520,7 +521,7 @@ func TestPollPayoutStatus_AmountMismatch_Disputes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ClaimForDispatch: %v", err)
 	}
-	gr := DispatchWithdraw(context.Background(), MockCredentialResolver{}, provider, claim.Attempt)
+	gr := DispatchWithdraw(context.Background(), nil, MockCredentialResolver{}, provider, claim.Attempt)
 	if err := ApplyPayoutResult(context.Background(), pool, f.tenantID, wr.ID, claim.Attempt, gr, EvidenceSync); err != nil {
 		t.Fatalf("ApplyPayoutResult: %v", err)
 	}
@@ -581,7 +582,7 @@ func TestPollPayoutStatus_AssetMismatch_Disputes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ClaimForDispatch: %v", err)
 	}
-	gr := DispatchWithdraw(context.Background(), MockCredentialResolver{}, provider, claim.Attempt)
+	gr := DispatchWithdraw(context.Background(), nil, MockCredentialResolver{}, provider, claim.Attempt)
 	if err := ApplyPayoutResult(context.Background(), pool, f.tenantID, wr.ID, claim.Attempt, gr, EvidenceSync); err != nil {
 		t.Fatalf("ApplyPayoutResult: %v", err)
 	}
@@ -643,7 +644,7 @@ func TestDispatchWithdraw_OversizeReference_ParksThroughRealAdapterPath(t *testi
 
 	// The REAL phase B call - through payoutAdapterCall/callProvider, not
 	// a hand-built GateResult.
-	gr := DispatchWithdraw(context.Background(), MockCredentialResolver{}, provider, claim.Attempt)
+	gr := DispatchWithdraw(context.Background(), nil, MockCredentialResolver{}, provider, claim.Attempt)
 	if gr.Class != ErrorClassProviderRefInvalid {
 		t.Fatalf("expected ErrorClassProviderRefInvalid from the real adapter-call path, got %s (err=%v)", gr.Class, gr.Err)
 	}
@@ -699,7 +700,7 @@ func TestPollPayoutStatus_StillPending_Reschedules(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ClaimForDispatch: %v", err)
 	}
-	gr := DispatchWithdraw(context.Background(), MockCredentialResolver{}, inner, claim.Attempt)
+	gr := DispatchWithdraw(context.Background(), nil, MockCredentialResolver{}, inner, claim.Attempt)
 	if err := ApplyPayoutResult(context.Background(), pool, f.tenantID, wr.ID, claim.Attempt, gr, EvidenceSync); err != nil {
 		t.Fatalf("ApplyPayoutResult: %v", err)
 	}
@@ -858,7 +859,7 @@ func TestConcurrentClaimForDispatch_ExactlyOneWithdraws(t *testing.T) {
 			t.Fatalf("rep %d: expected exactly 1 payment_attempts row, got %d", i, n)
 		}
 
-		gr := DispatchWithdraw(context.Background(), MockCredentialResolver{}, spy, winningAttempt)
+		gr := DispatchWithdraw(context.Background(), nil, MockCredentialResolver{}, spy, winningAttempt)
 		if err := ApplyPayoutResult(context.Background(), pool, f.tenantID, wr.ID, winningAttempt, gr, EvidenceSync); err != nil {
 			t.Fatalf("rep %d: ApplyPayoutResult: %v", i, err)
 		}
@@ -1028,6 +1029,37 @@ func TestClaimForDispatch_KillSwitchEngaged_FailsClosedNoWithdraw(t *testing.T) 
 	}
 	if n := countAttempts(t, pool, f.tenantID, wr.ID); n != 0 {
 		t.Fatalf("expected 0 payment_attempts rows while blocked, got %d", n)
+	}
+
+	// Phase 2 orchestrator wiring: a labelled payout hold - a Denied audit
+	// row, committed in its OWN transaction (recordPayoutKillSwitchHoldAudit),
+	// separate from ClaimForDispatch's rolled-back attempt, since nothing
+	// inside that transaction could have durably recorded the refusal.
+	var deniedCount int
+	var metaJSON []byte
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		if err := tx.QueryRow(ctx,
+			`SELECT count(*) FROM audit_log WHERE action = 'withdrawal.submit.http' AND target_id = $1 AND outcome = 'denied'`,
+			wr.ID.String(),
+		).Scan(&deniedCount); err != nil {
+			return err
+		}
+		return tx.QueryRow(ctx,
+			`SELECT metadata FROM audit_log WHERE action = 'withdrawal.submit.http' AND target_id = $1 AND outcome = 'denied'`,
+			wr.ID.String(),
+		).Scan(&metaJSON)
+	}); err != nil {
+		t.Fatalf("read kill-switch hold audit: %v", err)
+	}
+	if deniedCount != 1 {
+		t.Fatalf("expected exactly one denied withdrawal.submit.http audit row (the kill-switch hold label), got %d", deniedCount)
+	}
+	var meta map[string]any
+	if err := json.Unmarshal(metaJSON, &meta); err != nil {
+		t.Fatalf("decode hold audit metadata: %v", err)
+	}
+	if meta["denied_by_kill_switch"] != true || meta["reason_code"] != "kill_switch" {
+		t.Fatalf("expected the hold audit metadata to label the refusal, got %v", meta)
 	}
 
 	// Release (four-eyes: request and approve from two DISTINCT staff

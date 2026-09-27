@@ -96,7 +96,11 @@ func (s *MockStatementSource) Fetch(ctx context.Context, req statement.PaymentFe
 	// capErr keeps a line-cap sentinel intact: the gate redacts adapter
 	// errors, and the stream must see ErrPaymentStatementTooManyLines.
 	var capErr error
-	gr := callProvider(ctx, s.resolver, callProviderInput{
+	// pool is nil: this source only ever runs through MockCredentialResolver
+	// (the reconciliation MOCK statement path never resolves a real
+	// credential), which ignores its pool argument entirely - see that
+	// resolver's own doc comment.
+	gr := callProvider(ctx, nil, s.resolver, callProviderInput{
 		TenantID: req.TenantID, ProviderID: req.ProviderID, ReadOnly: true, Domain: "payments",
 	}, func(_ context.Context, cc CallContext) (statement.PaymentStatement, ErrorClass, error) {
 		out, err := s.provider.statementFor(cc, s.maxLines)

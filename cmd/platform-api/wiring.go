@@ -60,6 +60,17 @@ type mockWiring struct {
 	// synthetic adapter fails closed rather than falling back to the real,
 	// unconfigured resolver.
 	KYCOutboundResolver bool
+
+	// PaymentsOutboundResolver wires the payments MOCK outbound-credential
+	// resolver InitiateDepositAttempt/DispatchWithdraw's phase B uses (ADR
+	// 0095 §9.1/§11, PROV-OUTBOUND-CRED-1, phase 2 orchestrator wiring) -
+	// CasinoOutboundResolver's payments twin. Chosen by ADAPTER KIND via
+	// paymentsOutboundCredentials()'s payments.NewOutboundKindSplitResolver,
+	// which serves it only to a registered SYNTHETIC payments adapter.
+	// When false, a call against a synthetic adapter fails closed (T5,
+	// never a provider call without credentials) rather than falling back
+	// to the real, unconfigured resolver.
+	PaymentsOutboundResolver bool
 }
 
 // mockProviderWiring is a pure function of cfg - no I/O, no globals - so it
@@ -75,11 +86,12 @@ type mockWiring struct {
 func mockProviderWiring(cfg config.Config) mockWiring {
 	testSupport := cfg.TestSupportRoutesEnabled() && cfg.GuardEnvironment() != "production"
 	return mockWiring{
-		PaymentsWebhookResolver: testSupport,
-		KYCWebhookEnabled:       testSupport,
-		CasinoWebhookResolver:   testSupport,
-		CasinoOutboundResolver:  testSupport,
-		KYCOutboundResolver:     testSupport,
+		PaymentsWebhookResolver:  testSupport,
+		KYCWebhookEnabled:        testSupport,
+		CasinoWebhookResolver:    testSupport,
+		CasinoOutboundResolver:   testSupport,
+		KYCOutboundResolver:      testSupport,
+		PaymentsOutboundResolver: testSupport,
 	}
 }
 

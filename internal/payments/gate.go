@@ -32,6 +32,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/Diansalas/igaming-platform/internal/providercred"
 	"github.com/Diansalas/igaming-platform/internal/providerref"
 	"github.com/Diansalas/igaming-platform/internal/txscope"
 )
@@ -92,8 +93,13 @@ type callProviderInput struct {
 
 // callProvider is the ADR 0095 §3.2 gate, generic over the adapter
 // method's own result type. It is the ONLY function in this package that
-// may invoke fn.
-func callProvider[T any](ctx context.Context, resolver OutboundCredentialResolver, in callProviderInput, fn AdapterCall[T]) GateResult[T] {
+// may invoke fn. pool (PROV-OUTBOUND-CRED-1, phase 2 orchestrator wiring)
+// is threaded through to resolver.Resolve unchanged - it is never used
+// for anything else here, and the gate itself never holds a transaction
+// across the call (txscope.Held is enforced on ctx below, and the real
+// providercred.OutboundResolver's own read is a short, committed-before-
+// return transaction on pool, not this gate's concern).
+func callProvider[T any](ctx context.Context, pool providercred.TenantTxRunner, resolver OutboundCredentialResolver, in callProviderInput, fn AdapterCall[T]) GateResult[T] {
 	var zero T
 
 	// Step 1 (INV-IO-1(b)): defence in depth behind the API-shape
@@ -113,10 +119,17 @@ func callProvider[T any](ctx context.Context, resolver OutboundCredentialResolve
 	}
 
 	// Step 3: CallContext, TenantID/ProviderID from the caller's already-
-	// committed attempt row only.
+	// committed attempt row only. The credential is resolved through the
+	// REAL providercred subsystem (or MockOutboundResolver for a
+	// synthetic adapter) - a resolution failure (unregistered/expired/
+	// revoked handle, a transient store error, or the resolver itself
+	// timing out/erroring on an outage) is ALWAYS ErrorClassNotSent: the
+	// call provably never reached the provider, so this maps to T5 (never
+	// a provider call without credentials), retryable, exactly like every
+	// other pre-flight gate refusal.
 	cc := CallContext{TenantID: in.TenantID, ProviderID: in.ProviderID, IdempotencyKey: in.IdempotencyKey}
 
-	cred, err := resolver.Resolve(cc, in.Domain)
+	cred, err := resolver.Resolve(ctx, pool, in.TenantID, in.ProviderID)
 	if err != nil {
 		return GateResult[T]{Value: zero, Class: ErrorClassNotSent,
 			Err: fmt.Errorf("%w: credential resolution failed: %s", ErrProviderCallRefused, redactedReason(err))}

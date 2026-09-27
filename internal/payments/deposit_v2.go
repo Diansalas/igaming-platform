@@ -36,6 +36,7 @@ package payments
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -237,6 +238,22 @@ func (o *Orchestrator) InitiateDepositAttempt(
 			ClaimToken:  claimToken, LeaseOwner: "player-request", LeaseUntil: time.Now().Add(depositAttemptClaimLease),
 		})
 		if err != nil {
+			if errors.Is(err, ErrKillSwitchEngaged) {
+				// Phase 2 orchestrator wiring (ADR 0095 §10.3/§10.5): a
+				// kill-switch refusal at T1+T2 is never a caller-visible
+				// 500 - it finalizes the intent as a clean, terminal
+				// decline (T3) with reason "kill_switch", in this SAME
+				// transaction (no attempt row exists to roll back; the
+				// INSERT...SELECT's own WHERE predicate simply matched
+				// zero rows, an ordinary result, not a Postgres error -
+				// see InsertSubmittingAttempt's own doc comment). The
+				// player-facing response stays generic: depositIntentResponse
+				// never surfaces decline_reason, only status="declined" -
+				// the "kill_switch" label lives only in
+				// deposit.declined's own audit metadata, for operators.
+				intent, err = o.finalizeDeclined(actx, tx, intent, nil, nil, "kill_switch")
+				return err
+			}
 			return err
 		}
 		attempt = a
@@ -256,7 +273,7 @@ func (o *Orchestrator) InitiateDepositAttempt(
 		AttemptState: attempt.State, ClaimToken: claimToken, ExpectedClaim: claimToken,
 		IdempotencyKey: attempt.ExternalIdempotencyKey, Domain: "payments", Manifest: manifest,
 	}
-	gr := callProvider(ctx, credResolver, in, depositAdapterCall(provider, attempt, manifest))
+	gr := callProvider(ctx, pool, credResolver, in, depositAdapterCall(provider, attempt, manifest))
 
 	// Feed the breaker (§9.6) - plain in-memory, no tx, no I/O - but only
 	// for a result that actually reached the adapter's own transport
