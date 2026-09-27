@@ -210,6 +210,44 @@ flowchart LR
   cutover. Until then the ledger join is `PARTIALLY IMPLEMENTED` for
   legacy-path postings.
 
+  **Amendment (INV-DEP-1 / PAY-DOUBLE-CREDIT-1, 2026-09-27,
+  `ledger-finance`; ADR 0095 §28.9; ruling
+  `docs/plans/payment-readiness/lf-q1-supersession.md` §4; design
+  `ACCEPTED`, `NOT IMPLEMENTED`; migration 0107 widens the kind CHECK).**
+
+  1. **New kind `pay_captured_unposted`** ("provider captured, platform
+     disputed, not posted").
+     - Emitted per attempt with `state = 'disputed' AND terminal_reason =
+       'multiple_success_for_intent'`, when all of these hold:
+       - its statement line (if any) is `succeeded`;
+       - there is no `deposit_reversal` line naming its reference;
+       - no ledger tombstone holds `(provider_id, provider_reference)`.
+     - `matchPayment` stops skipping `disputed` attempts **for this reason
+       code only**. Every other disputed attempt stays a `payments` P1, not a
+       reconciliation row.
+     - `reversal_tombstone_precedes_success` disputes are excluded: the PSP
+       reversed that capture, so it nets to zero.
+  2. **Ageing.** It is re-reported on every run until it clears. The
+     amount and asset go in the mismatch row, never in log lines. It clears
+     when a reversal or tombstone appears (the PSP refunded), or on M1 /
+     allocation (both `BLOCKED`: HD-0095-1, LEDGER-MANUAL-ADJ-4EYES-1).
+  3. **Remediation.** Escalate. Never auto-resolve. **Never** a T17 or
+     re-drive trigger: the re-drive job must not select these rows. Even
+     if it did, T17 cannot post for a financially resolved intent (ADR 0095
+     §28.3 choke point).
+  4. **`pay_duplicate` is kept as an integrity detector.** After migration
+     0107, point 6's "maps to more than one succeeded attempt" branch and
+     `checkPlatformDuplicates` are structurally unreachable for new data.
+     Any occurrence is a P1 integrity alert: an index was dropped, or the
+     data predates 0107.
+  5. **HD-LEDGER-UNALLOC-1: (A) now.** Under (A) the held capture is
+     deliberately **absent from the ledger**, and this kind is its only
+     standing record. Each open row is an explained, expected difference
+     in the §2.6 `psp_clearing` reconciliation. Under (B) later
+     (LEDGER-SUSPENSE-B-1), the kind becomes "unallocated receipt still
+     open", and point 6's ledger join must include the (B) postings mapped
+     to their disputed attempt.
+
 ### 2.3 Wallet ↔ casino provider — `BLUEPRINT`
 
 - **Reconciliation key**: `(provider_id, provider_tx_id)` for bet/win/
@@ -453,6 +491,13 @@ gate 10.3-W3` as the `casino_statement` stream
   leg and its externally-settled leg accounted for; a persistently non-zero
   `psp_clearing` balance beyond the PSP's normal settlement lag is a signal
   of unreconciled transactions, not a target state.
+- **Explained difference (INV-DEP-1, 2026-09-27):** under
+  HD-LEDGER-UNALLOC-1 (A), a second real capture held as a
+  `multiple_success_for_intent` disputed attempt is settled by the PSP but
+  never debited to `psp_clearing`. Each open `pay_captured_unposted` row
+  (§2.2) is therefore an expected, itemised difference until it is
+  refunded or allocated. It is never an unexplained drift, and it is never
+  netted away.
 
 ### 2.7 PSP reserve reconciliation — `BLUEPRINT`
 

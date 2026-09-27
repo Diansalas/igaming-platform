@@ -306,3 +306,53 @@ assert the new behaviour.
   NOT IMPLEMENTED.
 - The final accounting treatment: BLOCKED on human decision HD-LEDGER-UNALLOC-1. The interim (A)
   is RULED and may be built now.
+
+---
+
+## Confirmation of ADR 0095 revision 4, §28 AM-2 / §29 (`8d04848`) — `ledger-finance`, 2026-09-27
+
+All six implementation choices are **CONFIRMED**. None needs correcting. There are two binding
+notes, on choices 2 and 6.
+
+1. **Migration 0107: guard and kind CHECK. CONFIRMED.** Without the `CREATE OR REPLACE
+   payment_attempts_guard()`, T13d would be refused by the 0101 trigger. Keeping `declined →
+   disputed` restricted to exactly `{reversal_tombstone_precedes_success,
+   multiple_success_for_intent}` is correct. The kind CHECK must be a strict superset of 0102's.
+2. **Pre-flight = the index build in `DO … EXCEPTION` (0092 pattern). CONFIRMED, and this
+   corrects my §3.** Under `FORCE ROW LEVEL SECURITY`, with no `app.tenant_id` set, my
+   `GROUP BY` pre-flight would read zero rows and pass duplicates. It is demoted to the
+   operator's diagnostic, run as a role that sees every tenant.
+   - **Operational note (binding for production):** a non-`CONCURRENTLY` build inside a
+     transaction blocks writes to `ledger_transactions` for the build's duration. That is
+     acceptable at current synthetic scale. Before any production-size ledger, `devops` must
+     plan the window, or a separate concurrent-build procedure with the same fail-closed
+     outcome.
+3. **"Resolved" = resolved by ANOTHER attempt or ANOTHER ledger idempotency key. CONFIRMED.**
+   - An exact redelivery (same attempt, same `provider_id:provider_reference`) stays
+     `AlreadyPosted` or a no-op.
+   - On the legacy path, A = NULL makes every succeeded attempt count, which is correct.
+4. **Tombstone check before INV-DEP-1. CONFIRMED.** It matches my ruling: a PSP-refunded
+   capture nets to zero and must be `reversal_tombstone_precedes_success`, not
+   `pay_captured_unposted`.
+5. **Legacy `InitiateDeposit`. CONFIRMED.**
+   - It returns the sentinel and posts nothing.
+   - P1 and `deposit.multiple_success_refused` go in a **separate** tx, because the caller's tx
+     rolls back on the error.
+   - The path stays scheduled for removal.
+6. **Poll-path T13d: audit plus P1, no receipt. CONFIRMED** (polls are not receipted, §5.3).
+   - **Binding note:** because no receipt exists, the T13d audit record must carry the matched
+     `provider_id`, `provider_reference`, amount and asset, and the evidence kind
+     (`query_status`).
+   - Security S-5 still applies: amounts go in the audit metadata, not in log lines.
+   - `pay_captured_unposted` covers it anyway, because the kind is keyed on the attempt, not on
+     a receipt.
+
+**Other checks.**
+- The §28.8 down-migration (fail closed if `pay_captured_unposted` rows exist; no row deletion)
+  is correct.
+- The attempt-index violation, which aborts the tx with a 5xx, is acceptable. It is reachable
+  only if both the choke point and the ledger index were bypassed.
+- The §29.1 durable-state map and §29.2 derived predicate are consistent with INV-DEP-1.
+
+`docs/architecture/reconciliation-model.md` §2.2 (new amendment block) and §2.6 (explained
+difference) are updated for `pay_captured_unposted` in the same commit.
