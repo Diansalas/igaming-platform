@@ -104,6 +104,66 @@ terminal outcome is expired (not approved) → withdrawal from approved A still 
 and confirmed this scenario fails against the current implementation (scratch probe, not
 committed, per Method above); it is not yet a committed regression test.
 
+### Addendum — N-1b and the coordinator's ordered fix ("only a later `approved` lifts a rejection")
+
+The coordinator relayed security's re-verification (labeled N-1b, `rv-prh-i2-kyc-security.md`,
+reviewed at commit `be423c3`) confirming the same gap this ruling found independently, and has
+ordered a fail-closed fix: **only a later `approved` on the other account lifts a rejection.**
+
+**That is the domain-correct fix, and it matches Ruling 1 above exactly — I confirm it, with no
+different treatment of `expired` needed beyond simply never letting it supersede.** To be precise
+about what "only a later `approved` lifts" should mean mechanically, so the implementation doesn't
+trade N-1b for a narrower but still-wrong variant:
+
+- **`expired` must be excluded from the "latest final row" selection entirely for this purpose**,
+  not merely excluded from the set of statuses that count as lifting. If the subquery still
+  selects `expired` as "the" latest final row and then separately special-cases "only approved
+  lifts," a `rejected → expired` sequence on B would correctly *fail to lift* the rejection, but a
+  naive implementation could still find "the latest final row is `expired`, which is not
+  `approved`, so treat as not-rejected-either" — i.e. drop the deny instead of keeping it. That
+  would still be a bypass, just a differently-shaped one (allow instead of the current allow — no
+  improvement). The safe formulation is the one in Ruling 1: `expired` is invisible to this
+  subquery, so a `rejected(B) → expired(B)` sequence still finds the `rejected` row as B's
+  effective latest-final-for-this-purpose row, and continues to deny — not merely "does not lift,"
+  but "actively still denies," which is the correct AML posture (a case that entered review again
+  and lapsed without a decision is not resolved, and must not read as neutral).
+- **A later `rejected` re-decision on B changes nothing observable** (still denies) and needs no
+  special handling — it's already covered by "only `approved` lifts."
+- **No different treatment of `expired` is warranted beyond this.** I considered and reject two
+  alternatives: (a) treating `expired` as its own signal that should *itself* independently deny
+  (even absent a prior `rejected`) — out of scope here, `crossAccountRejectedOverlay` is
+  deny-only for `rejected` specifically per its own original security prescription (§2.6/§19.2),
+  and inventing a new "expired denies too" rule is a scope expansion this document does not make;
+  (b) letting `expired` sit "neutral" (neither lifts nor keeps a deny, i.e. falls through to
+  whatever the next-older final row says) — this is functionally the same outcome as excluding it
+  from selection, which is what I'm recommending, so there is no daylight between "neutral" and
+  "invisible to the subquery" as long as the implementation walks back to the nearest
+  `approved`/`rejected` row rather than stopping at the newest final row of any kind.
+- **This remains a mechanism fix, not a human/regulatory decision** — same reasoning as the rest
+  of Ruling 1 and Ruling 4 below: it's an internal correctness question about what counts as
+  curative evidence within enforcement code this specialist already owns, not a jurisdiction value
+  or legal interpretation.
+
+I validated the recommended fix predicate ("only `approved`/`rejected` are eligible as the
+'latest final row'; `expired` excluded from selection entirely") against a second, disposable
+scratch database (`ic_rv_kyc_review2`, created/migrated/dropped the same way as the first, per
+Method) using a standalone probe query — not a change to `enforcement.go` — that implements
+exactly that predicate. Both required sequences passed:
+
+- `rejected(B) → expired(B)`: predicate still finds the `rejected` row as B's effective
+  latest-final-for-this-purpose row and **denies** — confirming the walk-back behaves as intended,
+  not merely "does not lift" but "actively still denies."
+- `rejected(B) → expired(B) → approved(B)`: predicate correctly walks forward to the later
+  genuine `approved` row and **allows** — confirming an intervening non-lifting terminal row
+  (`expired`) does not permanently freeze the account once a real approval later arrives.
+
+`pending`/`review_required`/orphan-after-rejection were already covered by the four
+`TestEvaluateEnforcement_N1_*` tests (Method, above) and are unaffected by this change. This
+gives me confidence the coordinator's ordered fix, formulated as "expired excluded from
+selection, not merely excluded from lifting," is both correct and implementable without new
+schema. The required regression tests named above should assert both the `rejected→expired`
+(deny) and `rejected→expired→approved` (allow) sequences.
+
 **Severity/labeling:** this is a residual instance of the same finding class as N-1 (HIGH,
 pre-existing) — not a new, independent defect I am naming, but a narrower reopening of the exact
 hole §20.2 was meant to close. §20.2's own claim that "this is not a weakening of enforcement...
