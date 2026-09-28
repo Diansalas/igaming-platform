@@ -964,6 +964,15 @@ func TestRVLF_C3_SIBS_SweeperSuccessRejectsCreatedSibling(t *testing.T) {
 	if stray.State != AttemptRejected {
 		t.Errorf("C3/SIBS: the sweeper's own T13 success must reject the leftover created sibling, got %s", stray.State)
 	}
+	// C3 as ruled (ledger-finance L-f, FH-7): the rejection carries the
+	// sweeper's own evidence kind and the fixed terminal reason - kills
+	// SIBSE (EvidenceQueryStatus mislabelled as EvidenceCallback).
+	if stray.LastEvidenceKind != EvidenceQueryStatus {
+		t.Errorf("C3/SIBS: rejected sibling's last_evidence_kind = %q, want %q", stray.LastEvidenceKind, EvidenceQueryStatus)
+	}
+	if stray.TerminalReason == nil || *stray.TerminalReason != "intent_succeeded" {
+		t.Errorf("C3/SIBS: rejected sibling's terminal_reason = %v, want intent_succeeded", stray.TerminalReason)
+	}
 }
 
 // TestRVLF_La_ReversalReceiptStoresBoundedDeclineReason pins ledger-

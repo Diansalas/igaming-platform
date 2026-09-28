@@ -652,3 +652,27 @@ The callback REJECT is lifted:
   - L-d: document that `disposition_at_receipt` is fixed at R0 and that `resolution` is
     authoritative.
   - L-e: skip the oversize audit when the receipt is a duplicate, and move it after R0.
+
+## FH-5 C2/C3 closure confirmation (FH-7, 2026-09-28)
+
+ledger-finance, read-only confirmation for architect item FH7-13 (`rv-fh7-architect-final.md`), verified at HEAD `ada1573` (newer than the evidence commit `f43025c`; all results are for HEAD). Private DB via the sanctioned harness; no roles, passwords or shared infrastructure touched.
+
+| Condition | Status | Code site (HEAD) | Test evidence |
+|---|---|---|---|
+| **C2 / DFR** (callback-site deferred-apply backstop) | **CLOSED** | `internal/payments/receipt.go:681-689`: when `changed`, re-read with `GetAttemptByID`, then `ApplyDeferredReceiptsForAttempt` | `TestRVLF_C2_DFR_CallbackSiteDeferredApplyBackstop` (`migration_0107_integration_test.go:748`): deferred success receipt, then T4 by merchant reference; asserts `state=succeeded` and 0 unresolved receipts |
+| **C2 / DFS** (sweeper T9 poll-site backstop) | **CLOSED** | `internal/payments/sweeper.go:437-441` | `TestRVLF_C2_DFS_SweeperSiteDeferredApplyBackstop` (:832): deferred success, then a Pending poll that learns the reference; asserts `state=succeeded` and 0 unresolved receipts |
+| **C3 / SIBS** (sweeper T13 success rejects a `created` sibling) | **CLOSED for money safety; Low gap L-f** (ruled evidence assertion missing) | `sweeper.go:526` `rejectCreatedSiblings(ctx, tx, attempt, EvidenceQueryStatus)`; helper `cascade.go:121`, terminal reason `"intent_succeeded"` at :146 | `TestRVLF_C3_SIBS_SweeperSuccessRejectsCreatedSibling` asserted only `state=rejected` |
+
+**What was run:** HEAD exported with `git archive` to a scratch copy; unmutated baseline: the three tests pass. Mutants (each applied to a unique anchor, restored byte-identical, verified with `cmp`):
+- DFR (receipt.go backstop disabled): **killed** by `TestRVLF_C2_DFR_*` and `TestRVLF_C2N12_DeferredAmbiguousBackstopAlsoRecomputesIntentProjection`.
+- DFS (sweeper T9 backstop disabled): **killed** by `TestRVLF_C2_DFS_*`.
+- SIBS (sweeper T13 `rejectCreatedSiblings` disabled): **killed** by `TestRVLF_C3_SIBS_*`.
+- SIBSE (new: `EvidenceQueryStatus` → `EvidenceCallback` at sweeper.go:526): **survived** the full `./internal/payments/...` suite.
+
+These match the implementer's evidence (`evidence/prh-i1-mutation-kill.txt`) for DFR, DFS and SIBS.
+
+**Residual L-f (Low, not stage-blocking):** SIBSE is a mislabel only (the sibling is still rejected; the T2 guard holds; no money moves). Close it by asserting `last_evidence_kind = 'query_status'` and terminal reason `intent_succeeded` in `TestRVLF_C3_SIBS_*`.
+
+### Orchestrator addendum (2026-09-28): L-f fixed
+
+The two assertions were added to `TestRVLF_C3_SIBS_SweeperSuccessRejectsCreatedSibling`. Evidence: baseline passes 5/5 under `-race`; the SIBSE mutant now **fails** the test (`last_evidence_kind = "callback", want "query_status"`); `sweeper.go` restored byte-identical (`git diff --quiet`). **C3 is CLOSED as ruled.**
