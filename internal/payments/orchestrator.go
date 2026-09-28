@@ -918,9 +918,16 @@ func applyMultipleSuccessDispute(ctx context.Context, tx pgx.Tx, attempt Payment
 // amounts, no references (security S-5); those go in the audit metadata
 // only.
 func auditMultipleSuccessForIntent(ctx context.Context, tx pgx.Tx, attempt PaymentAttempt, providerID, providerReference string, evidence EvidenceKind, backstopFired bool) error {
+	// Ledger-finance review C3 (rv-fh3-ledger.md, 076e42e): amount and
+	// asset are recoverable from the attempt row (a T10/T13d only fires on
+	// matching evidence), but the reviewer's own binding confirmation
+	// note requires them in THIS audit record too, not merely
+	// reconstructible elsewhere. Audit metadata only - never the P1 log
+	// line below, which security F-L2 pins to ids only.
 	meta := map[string]any{
 		"terminal_reason": TerminalReasonMultipleSuccessForIntent, "last_evidence_kind": string(evidence),
 		"provider_id": providerID, "provider_reference": providerReference,
+		"amount": attempt.Amount, "asset_code": attempt.AssetCode,
 	}
 	if attempt.DepositIntentID != nil {
 		meta["deposit_intent_id"] = attempt.DepositIntentID.String()
