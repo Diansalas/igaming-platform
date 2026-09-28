@@ -58,6 +58,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/Diansalas/igaming-platform/internal/admission"
 	"github.com/Diansalas/igaming-platform/internal/casino"
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/identityresolution"
@@ -83,7 +84,13 @@ func TestAdmission_T6g_B1RunsBeforeWithTenant_ExactPoolAcquisitionCounts(t *test
 		brand := mustCreateBrand(t, pool, tenant)
 		mustRegisterCapability(t, pool, tenant.ID, mockProvider)
 
+		// TEST-ADMISSION-FLAKE-1: inject a FakeClock so the two
+		// back-to-back requests below are simultaneous from B1's point
+		// of view regardless of real wall-clock time (HTTP round trip,
+		// DB latency, scheduling under concurrent load) - see
+		// newB1LimitTestSettings's doc comment.
 		settings := t6Settings()
+		settings.Clock = admission.NewFakeClock(time.Now())
 		settings.VerifiedRate["payments"] = WebhookRateBurst{Rate: 10, Burst: 1}
 		srv := newAdmissionTestServer(t, pool, issuer, orchestrator, nil, settings, false)
 
@@ -141,7 +148,13 @@ func TestAdmission_T6g_B1RunsBeforeWithTenant_ExactPoolAcquisitionCounts(t *test
 		tenant := mustCreateTenant(t, pool)
 		brand := mustCreateBrand(t, pool, tenant)
 
+		// TEST-ADMISSION-FLAKE-1: inject a FakeClock so the two
+		// back-to-back requests below are simultaneous from B1's point
+		// of view regardless of real wall-clock time (HTTP round trip,
+		// DB latency, scheduling under concurrent load) - see
+		// newB1LimitTestSettings's doc comment.
 		settings := t6Settings()
+		settings.Clock = admission.NewFakeClock(time.Now())
 		settings.VerifiedRate["casino"] = WebhookRateBurst{Rate: 10, Burst: 1}
 		srv := newAdmissionTestServer(t, pool, issuer, nil, orchestrator, settings, false)
 
@@ -194,7 +207,13 @@ func TestAdmission_T6g_B1RunsBeforeWithTenant_ExactPoolAcquisitionCounts(t *test
 		tenant := mustCreateTenant(t, pool)
 		brand := mustCreateBrand(t, pool, tenant)
 
+		// TEST-ADMISSION-FLAKE-1: inject a FakeClock so the two
+		// back-to-back requests below are simultaneous from B1's point
+		// of view regardless of real wall-clock time (HTTP round trip,
+		// DB latency, scheduling under concurrent load) - see
+		// newB1LimitTestSettings's doc comment.
 		settings := t6Settings()
+		settings.Clock = admission.NewFakeClock(time.Now())
 		settings.VerifiedRate["kyc"] = WebhookRateBurst{Rate: 10, Burst: 1}
 		logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 		handler, rt := NewWithAdmission(Deps{
