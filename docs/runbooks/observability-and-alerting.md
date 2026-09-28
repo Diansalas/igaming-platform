@@ -308,6 +308,144 @@ against real traffic.
     RELEASE too - lifting a containment is at least as alert-worthy as
     engaging one.
 
+## 3. Durable alerting (ADR 0102, PRH-2 I-core; `internal/alerting`; ALERT-DELIVERY-1)
+
+**Status: IMPLEMENTED (I-core only).** This supersedes the "Metrics
+backend"/"log-only" framing above for the specific event classes ADR 0102
+names - it does NOT replace the log-event list in §1/§2, which stays the
+day-one signal for everything not yet wired into this model. I-wire (a
+later, separate workstream) connects the real business raise sites
+(payment multiple-success, reconciliation mismatches, the kill switch,
+handler-integrity alerts) listed in ADR 0102 §8; until I-wire merges, the
+only durable alerts a real deployment will ever see are the three
+`alerting.*` meta-Kinds the dispatcher itself raises.
+
+### The model
+
+- An **alert** (`alerts` table) is a durable, deduplicated row: one open
+  row per (Kind, subject tenant, discriminator). It is **platform-owned**
+  (visible to the platform admin) or, for a platform-owned Kind raised
+  about a specific tenant, also visible **read-only** to that tenant as
+  the alert's "subject" - a tenant can never acknowledge, resolve or
+  suppress it.
+- Every successful raise appends an **occurrence** (`alert_occurrences`) -
+  the alert's own `count`/`last_seen_at` are `count(*)`/`max(raised_at)`
+  over its occurrences, never an UPDATEd counter.
+- Delivery and escalation state (`alert_deliveries`) is append-only. An
+  alert's current delivery state is its latest row.
+- Raising is durable and safe inside a business transaction
+  (`alerting.RaiseGuarded`/`alerting.InTx`): a savepoint encloses only the
+  raise, a narrow set of SQLSTATEs is swallowed, and a mandatory detached
+  retry (`Pending.Flush`) runs after the response is written. If every
+  attempt fails, a terminal fallback persists `alerting.raise_failed` so
+  even a swallowed, exhausted raise leaves a durable, alertable trace.
+  Never floating-point, never a direct balance mutation, and never
+  written inside a REPEATABLE READ snapshot - see ADR 0102 §7 for the full
+  in-transaction rule this package implements.
+
+### The no-recipients-yet state (HD-PRH2-4)
+
+**No route is ever seeded.** Migration 0110 creates `alert_routes` completely
+empty, and no code in this repository inserts a fictional recipient,
+email, phone number, or on-call rota into it. This is a deliberate human
+decision (`docs/decisions/0098-...md` §5, HD-PRH2-4): "No invented
+people, emails, phone numbers or on-call personnel."
+
+Consequently, **every alert raised today is `unrouted`** the first time
+the dispatcher processes it: the dispatcher inserts exactly one
+`unrouted` delivery row per (alert, escalation step) - re-evaluated every
+pass, never duplicated (`CHECK (event <> 'unrouted' OR attempt_no = 0)`) -
+and raises one occurrence of the shared, deduplicated
+`alerting.unrouted` meta-alert (severity p2). The original alert stays
+`open`, visible in the platform-admin's alert list, and counted
+(`alert_unrouted_total{severity}`), for as long as no route exists. This
+is the correct, honest state until a human operational decision
+(HD-PRH2-4-OPS) configures real recipients and a real channel - it is
+NOT a bug and NOT something to silence by seeding a placeholder route.
+
+### How routes will be configured (once HD-PRH2-4-OPS is answered)
+
+There is no route-authoring HTTP endpoint yet (PRH-2 I-wire/a later
+workstream builds the platform-admin-only, audited API). Today, a route
+is a plain row in `alert_routes`, insertable only by a validated
+platform-admin session (`alerting_validated_platform_admin()`, migration
+0110):
+
+```sql
+INSERT INTO alert_routes (scope, severity, escalation_step, channel_kind, recipient_ref)
+VALUES ('platform', 'p1', 0, 'log', 'log:some-operator-defined-reference');
+```
+
+- `channel_kind` is `'log'` (IMPLEMENTED - `alerting.LogSink`, writes a
+  structured log line) or `'mock'` (MOCK - `alerting.MockSink`, test/dev
+  only, configurable failure/timeout, never wired to a real vendor). A
+  real channel (email/SMS/pager/chat webhook) is **PROVIDER DEPENDENT**
+  and requires an ADR amendment plus the ADR §6.2 preconditions (four-eyes
+  or an audited `alerting.route_changed` alert on every route change;
+  superseding the last effective p1 route is refused) before it may be
+  added.
+- `recipient_ref` is an **opaque** reference (`CHECK` refuses email and
+  phone number shapes outright) - it names a recipient by an internal key
+  the eventual real channel's adapter resolves, never a literal contact
+  address stored in this table.
+- Escalation (`escalate_after`) and per-severity/step routing let a P1
+  page one rota at step 0 and a broader one at step 1, once real routes
+  exist - none are configured today.
+
+### Metrics and logs this stage adds
+
+- `alert_raise_failures_total{kind,phase}` (`phase` ∈ `in_tx`, `detached`,
+  `fallback`) - a raise that was swallowed, exhausted its detached retry,
+  or whose own terminal fallback failed. No tenant label (ADR §6.3).
+- `alert_unrouted_total{severity}`, `alert_dead_total{channel_kind}`,
+  `alert_stale_claims_total` (a `claimed` delivery row whose lease expired
+  before any outcome was recorded, and was reclaimed under a new attempt
+  number - see "Stale-claim reclaim" below). No tenant label on any of
+  these.
+- Log events: `alert_raise_invalid`, `alert_raise_failed`,
+  `alert_raise_scope_mismatch`, `alert_raise_detached_exhausted`,
+  `alert_raise_fallback`/`alert_raise_fallback_failed`,
+  `alert_raise_rr_deferred` (a raise deferred because the transaction was
+  not READ COMMITTED), `alert_delivery` (the `LogSink`'s own delivery
+  line), `alert_dispatcher_*` (dispatcher operational failures - route
+  lookup, claim, record-outcome, stale-claim reclaim, a Deliver call that
+  would have run with a transaction held).
+
+### Stale-claim reclaim (security IC-2 / code review F-1)
+
+A dispatcher process can crash, be redeployed, or OOM between claiming a
+delivery attempt (`event = 'claimed'`) and recording its outcome. Without
+a lease, that alert would be stranded forever - the dispatcher's own
+due-work query would never look at a `claimed` row again. This is fixed:
+`DispatcherConfig.ClaimLease` (technical default: 2 minutes) bounds how
+long a `claimed` row is treated as in-flight; once it expires, the alert
+becomes due again under a NEW attempt number, counted toward
+`MaxAttempts` exactly like an ordinary failed delivery, and
+`alert_stale_claims_total` increments. A permanently-wedged channel
+therefore still reaches `dead` plus `alerting.delivery_dead` eventually,
+rather than silently losing the alert.
+
+### What is stubbed / not yet wired
+
+- **I-wire** (a separate, later workstream) connects the real business
+  raise sites named in ADR 0102 §8 (payment multiple-success,
+  reconciliation mismatches, the kill switch, handler-integrity alerts,
+  `reconciliation.run_failed`). Until then, this model exists and is
+  fully tested, but the only alerts a real deployment produces are the
+  meta-Kinds.
+- **The dispatcher loop is built but NOT started anywhere**
+  (`alerting.RunDispatcherLoop` is exported, unwired - `cmd/platform-api/
+  main.go` is owned by a different workstream). No alert is delivered in
+  a running deployment until that one line is added.
+- **The platform-admin ack/resolve/route-write HTTP endpoints** do not
+  exist yet - only the `alert:manage` permission (platform scope) is
+  registered (`internal/auth/permission.go`), so K1/I-wire can sequence
+  against it. Today an admin operation is a direct, RLS-enforced SQL
+  statement, not an API call.
+- **Retention** (`alert_occurrences`/`alert_deliveries` grow without
+  bound) has no partitioning/archival policy yet - registered as
+  `ALERT-RETENTION-1`.
+
 ## Known gaps (recorded honestly, not silently deferred)
 
 - **Casino's own RG/Risk denial paths beyond launch** (the wager/win
