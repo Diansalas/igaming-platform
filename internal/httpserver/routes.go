@@ -150,4 +150,25 @@ func registerIdentityRoutes(mux *http.ServeMux, deps Deps) {
 	// run) - mirrors newCreateTenantHandler's own platform-scope pattern.
 	mux.Handle("GET /v1/admin/platform/audit-log",
 		auth.Middleware(deps.AuthIssuer)(auth.RequirePermission(auth.PermAuditRead)(newListPlatformAuditLogHandler(deps))))
+
+	// PRH-2 G1 (ADR 0104 §5.1, KS-AUDIT-TENANT-1): a tenant's read-only
+	// projection of platform-scope audit rows that concern it (today:
+	// kill-switch actions on that tenant - migration 0109's
+	// subject_tenant_id/subject_tenant_read RLS policy). RequireTenantScope
+	// (unlike the platform route above) since this is, by definition, only
+	// ever meaningful for a tenant-scoped caller. Additive: the two routes
+	// above are unchanged (AT-7).
+	mux.Handle("GET /v1/admin/audit-log/platform-actions",
+		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(auth.RequirePermission(auth.PermAuditRead)(newListPlatformActionsAuditLogHandler(deps)))))
+
+	// PRH-2 G1 (ADR 0104 §3/§5.4; security confirmation N-2): the
+	// display_name write path. "Another user" is PermStaffManage +
+	// canActOnTenant (tenant callers limited to their own tenant's staff);
+	// self-rename uses only the verified token subject and needs no
+	// staff-management permission (any authenticated staff principal may
+	// rename themselves).
+	mux.Handle("PATCH /v1/admin/tenants/{tenantID}/staff/{staffID}/display-name",
+		auth.Middleware(deps.AuthIssuer)(auth.RequirePermission(auth.PermStaffManage)(newUpdateStaffDisplayNameHandler(deps))))
+	mux.Handle("PATCH /v1/admin/staff/me/display-name",
+		auth.Middleware(deps.AuthIssuer)(auth.RequireStaffPrincipal(newSelfUpdateStaffDisplayNameHandler(deps))))
 }

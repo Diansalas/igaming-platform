@@ -16,6 +16,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/Diansalas/igaming-platform/internal/audit"
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/jurisdiction"
 )
@@ -665,6 +666,75 @@ func TestEvaluateEnforcement_L2_RedeliveredHeldOutcome_DoesNotDuplicateAudit(t *
 		t.Fatalf("deliver expired callback: %v", err)
 	}
 	assertAuditCount(t, pool, f.tenantID, "kyc.provider_result_held_for_review", v.ID.String(), 2)
+}
+
+// TestEvaluateEnforcement_L2HeldForReviewDedup_UnaffectedBySubjectRow is
+// PRH-2 G1 code review C-2: drives the REAL held-for-review de-duplication
+// path (applyCallbackOutcome's heldForReviewDedupQuery check, exercised
+// through a genuine callback delivery - not a hand-copy of its SQL text)
+// with a SUBJECT audit row (ADR 0104's platform-scope, subject_tenant_id)
+// already present that matches every OTHER predicate the dedup check
+// filters on: same tenant, same action, same target_id (this
+// verification), same provider_outcome. The tenant's own held-for-review
+// row must still be written - the dedup check's own `tenant_id = $1` can
+// never match a subject row, whose tenant_id is always NULL by migration
+// 0109's platform-only CHECK, regardless of what its subject_tenant_id
+// is set to.
+func TestEvaluateEnforcement_L2HeldForReviewDedup_UnaffectedBySubjectRow(t *testing.T) {
+	pool := testPool(t)
+	f := seedFixture(t, pool)
+
+	provider := NewMockKYCProvider()
+	orch := NewOrchestrator(map[string]KYCProvider{"mock": provider}, NewMockWebhookCredentials(provider))
+	v, err := CreateVerification(context.Background(), pool, NewMockOutboundResolver(), provider, CreateVerificationParams{
+		TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerID, PersonID: f.personID,
+	})
+	if err != nil {
+		t.Fatalf("seed verification: %v", err)
+	}
+	staffID := seedComplianceStaff(t, pool, f)
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := ReviewVerification(ctx, tx, ReviewVerificationParams{
+			VerificationID: v.ID, StaffID: staffID, NewStatus: StatusReviewRequired, Reason: "needs additional evidence",
+		})
+		return err
+	}); err != nil {
+		t.Fatalf("staff escalate to review_required: %v", err)
+	}
+
+	// A SUBJECT row matching every OTHER predicate the dedup check filters
+	// on, seeded via a genuine platform-scope session (WithPlatformAdmin -
+	// the only shape migration 0109's trigger ever accepts for a subject
+	// row).
+	platformAdmin := uuid.New()
+	if err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `INSERT INTO staff_users (id, tenant_id, email, password_hash, role) VALUES ($1, NULL, $2, 'x', 'platform_admin')`,
+			platformAdmin, "c2-admin-"+platformAdmin.String()+"@example.com")
+		return err
+	}); err != nil {
+		t.Fatalf("seed platform admin: %v", err)
+	}
+	if err := pool.WithPlatformAdmin(context.Background(), platformAdmin, func(ctx context.Context, tx pgx.Tx) error {
+		return audit.Record(ctx, tx, audit.Entry{
+			ActorType: audit.ActorStaff, ActorID: platformAdmin, Action: "kyc.provider_result_held_for_review",
+			TargetType: "kyc_verification", TargetID: v.ID.String(), Outcome: audit.OutcomeSuccess,
+			SubjectTenantID: f.tenantID, Metadata: map[string]any{"provider_outcome": string(ProviderApproved)},
+		})
+	}); err != nil {
+		t.Fatalf("seed subject audit row: %v", err)
+	}
+
+	in := provider.CallbackPayload(f.tenantID, v.ProviderReference, ProviderApproved, "auto_approved")
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, _, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock", in)
+		return err
+	}); err != nil {
+		t.Fatalf("deliver approved callback: %v", err)
+	}
+
+	// C-2: the subject row must never be mistaken for an existing
+	// held-for-review row - the tenant's own row is still written.
+	assertAuditCount(t, pool, f.tenantID, "kyc.provider_result_held_for_review", v.ID.String(), 1)
 }
 
 // --- ADR 0096 §2.6(g), RV-PRH-I2 KYC review F1: never-submitted orphan

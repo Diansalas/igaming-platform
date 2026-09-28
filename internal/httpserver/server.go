@@ -15,6 +15,7 @@ import (
 
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
+	"github.com/Diansalas/igaming-platform/internal/audit"
 	"github.com/Diansalas/igaming-platform/internal/auth"
 	"github.com/Diansalas/igaming-platform/internal/casino"
 	"github.com/Diansalas/igaming-platform/internal/db"
@@ -33,6 +34,15 @@ type Deps struct {
 	DB          *db.Pool
 	AuthIssuer  *auth.Issuer
 	ServiceName string
+
+	// AuditPresentationResolver (ADR 0104 §5.3) resolves the tenant
+	// platform-actions audit projection's presentation rules. nil means
+	// "use audit.ResolvePresentation" (the production compiled-in
+	// default) - production wiring never sets this field. Tests may
+	// inject a resolver, including one that errors, to exercise the
+	// fail-closed path (audit.ResolvePresentationOrRestrictive) without
+	// any production code change.
+	AuditPresentationResolver audit.PresentationResolver
 
 	// AccessTokenTTL/RefreshTokenTTL control session lifetime. Short
 	// access tokens limit the blast radius of a leaked one (nothing to

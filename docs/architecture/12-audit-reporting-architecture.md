@@ -18,6 +18,27 @@ four-eyes approval above a threshold. This is the first thing an auditor
 asks to see; its absence has ended platform businesses (Blueprint §4.8) —
 treated as core infrastructure, not defensive extra work.
 
+### Tenant-visible audit of platform actions (PRH-2 G1, `IMPLEMENTED (local; pending security diff review C-104-6 and orchestrator merge) — kill switch only`)
+
+A platform-scope action (e.g. an incident-response kill-switch engage or
+release) is written as a platform-level `audit_log` row and never as a
+write into the affected tenant's own scope — see ADR 0104. That tenant
+still gets read-only visibility through a first-class
+`audit_log.subject_tenant_id` column (migration 0109) and an additional,
+purely additive `FOR SELECT` RLS policy: `GET /v1/admin/audit-log/
+platform-actions` shows the tenant the identifiable platform actor
+(`staff_id` always; a mutable `display_name` resolved at read time),
+reason code, before/after and the approval chain, where recorded — never
+IP, user agent, request id, or any metadata key outside a per-action
+allowlist. The presentation is a resolver with compiled-in defaults only
+in this wave (no configurable policy table yet — see
+AUDIT-PRESENTATION-POLICY-1). Every other existing audit reader (the
+tenant's own `GET /v1/admin/audit-log`, the platform's
+`GET /v1/admin/platform/audit-log`) is unchanged. Scope today is limited
+to kill-switch actions (ADR 0104 §4); converging the platform's other
+tenant-adjacent audit writes onto the same mechanism is tracked as
+PLAT-AUDIT-SUBJECT-1.
+
 ## Back office and partner console
 
 Two distinct surfaces (see `00-system-overview.md`), both API-first,

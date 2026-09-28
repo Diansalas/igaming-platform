@@ -47,6 +47,15 @@ type Entry struct {
 	IPAddress  string
 	UserAgent  string
 	RequestID  string
+	// SubjectTenantID (ADR 0104 §4) marks a platform-scope row (TenantID
+	// must be uuid.Nil) as concerning a specific tenant, giving that
+	// tenant read-only visibility through audit_log's subject_tenant_read
+	// RLS policy (migration 0109). It must come from a route-validated
+	// target, never from a request body - see the kill-switch handlers.
+	// Record refuses an entry with both TenantID and SubjectTenantID set,
+	// mirroring the database's own audit_log_subject_tenant_platform_only
+	// CHECK, so a misuse is caught in Go before any SQL runs.
+	SubjectTenantID uuid.UUID // uuid.Nil when this entry has no subject tenant
 	// Metadata is structured extra detail. Never put secrets or
 	// authentication material here (passwords, tokens, token hashes,
 	// signing keys) - this is a code-review-enforced invariant, not a
@@ -73,6 +82,9 @@ func Record(ctx context.Context, tx pgx.Tx, entry Entry) error {
 	if entry.ActorType != ActorSystem && entry.ActorID == uuid.Nil {
 		return fmt.Errorf("audit: actor_id is required for actor_type %q", entry.ActorType)
 	}
+	if entry.TenantID != uuid.Nil && entry.SubjectTenantID != uuid.Nil {
+		return fmt.Errorf("audit: tenant_id and subject_tenant_id must not both be set")
+	}
 
 	metadata := entry.Metadata
 	if metadata == nil {
@@ -91,13 +103,17 @@ func Record(ctx context.Context, tx pgx.Tx, entry Entry) error {
 	if entry.ActorID != uuid.Nil {
 		actorID = &entry.ActorID
 	}
+	var subjectTenantID *uuid.UUID
+	if entry.SubjectTenantID != uuid.Nil {
+		subjectTenantID = &entry.SubjectTenantID
+	}
 
 	_, err = tx.Exec(ctx,
 		`INSERT INTO audit_log
-			(tenant_id, actor_type, actor_id, action, target_type, target_id, outcome, ip_address, user_agent, request_id, metadata)
-		 VALUES ($1, $2, $3, $4, NULLIF($5, ''), NULLIF($6, ''), $7, NULLIF($8, '')::inet, NULLIF($9, ''), NULLIF($10, ''), $11)`,
+			(tenant_id, actor_type, actor_id, action, target_type, target_id, outcome, ip_address, user_agent, request_id, metadata, subject_tenant_id)
+		 VALUES ($1, $2, $3, $4, NULLIF($5, ''), NULLIF($6, ''), $7, NULLIF($8, '')::inet, NULLIF($9, ''), NULLIF($10, ''), $11, $12)`,
 		tenantID, entry.ActorType, actorID, entry.Action, entry.TargetType, entry.TargetID,
-		entry.Outcome, entry.IPAddress, entry.UserAgent, entry.RequestID, metadataJSON,
+		entry.Outcome, entry.IPAddress, entry.UserAgent, entry.RequestID, metadataJSON, subjectTenantID,
 	)
 	if err != nil {
 		return fmt.Errorf("audit: insert entry: %w", err)
