@@ -783,4 +783,4 @@ These bind K2. The sources are `reviews/k1-security.md`, `reviews/k1-ledger-fina
   - (c) in-force is evaluated at `now()`; any "as of" evaluation uses `(revoked_at IS NULL OR at < revoked_at)`.
 - **LF N-2:** after K2's acting SELECT on `ledger_accounts` lands, A-4/B-16 must re-assert that a non-governed `ledger_entries` insert is refused.
 - **Migration tests:** migrate a scratch DB only through 0113 (the `scratchPoolThrough0110` pattern).
-
+- **Architect R-12 ruling, I-5:** executors select and lock `FOR SHARE` the grant **in force at `now()`** (`revoked_at IS NULL AND valid_from <= now() AND (valid_until IS NULL OR now() < valid_until)`), never "the unrevoked grant". Several unrevoked rows may exist per key once renewals are queued or grants have expired.
