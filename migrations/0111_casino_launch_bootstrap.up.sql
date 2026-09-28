@@ -1,8 +1,9 @@
 -- CAS-PLAY-BOOTSTRAP-1 (PRH-2 workstream B; ADR 0103, ACCEPTED). Adds the
 -- vendor launch-token bootstrap/consume endpoint's two backing tables.
--- Placeholder number 0115 (orchestrator instruction): 0109-0114 are
--- allocated to other in-flight lanes not yet merged onto this branch; the
--- orchestrator renumbers at merge if needed (Rule 3). No change to
+-- Migration number 0111 (orchestrator allocation, renumbered from the
+-- original placeholder 0115 once main reached 0110): 0112-0115 are
+-- allocated to other in-flight lanes (K1 0112, K2 0113, E1 0114, K3 0115)
+-- not yet merged onto this branch. No change to
 -- casino_launch_sessions or its trigger at all (workstream A owns both,
 -- ADR 0103 §5) - migration 0080 already carries the supporting
 -- UNIQUE (id, tenant_id) casino_launch_bootstraps' own composite FK below

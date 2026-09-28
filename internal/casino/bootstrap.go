@@ -35,7 +35,7 @@ import (
 )
 
 // bootstrapRequestIDPattern is ADR 0103 §3.1's own request_id charset,
-// mirrored exactly by migration 0115's CHECK constraint.
+// mirrored exactly by migration 0111's CHECK constraint.
 var bootstrapRequestIDPattern = regexp.MustCompile(`^[A-Za-z0-9_.:-]{1,128}$`)
 
 // BootstrapRefusalReason is ADR 0103 §3.6's closed, server-side-log-only
@@ -79,7 +79,7 @@ func (e *BootstrapRefusedError) Unwrap() error { return ErrBootstrapRefused }
 var ErrBootstrapInvariantBroken = errors.New("casino: launch bootstrap revoke invariant broken")
 
 // casinoLaunchBootstrapsOncePerRequestConstraint is the ONLY unique
-// constraint name (migration 0115) that db.IdempotentInsert's SAVEPOINT
+// constraint name (migration 0111) that db.IdempotentInsert's SAVEPOINT
 // retry, below, is entitled to interpret as a legitimate concurrent-race
 // replay/reject path (F-7, architect review). The table's OTHER unique
 // constraint, casino_launch_bootstraps_once_per_session (UNIQUE on
@@ -295,7 +295,7 @@ func casConsumeSessionForBootstrap(ctx context.Context, tx pgx.Tx, id, tenantID 
 // upsertProviderPlayerRef is ADR 0103 §3.5: created on first bootstrap,
 // stable thereafter. INSERT ... ON CONFLICT DO NOTHING, then always SELECT
 // - never an UPDATE (casino_provider_player_refs is append-only, migration
-// 0115; an ON CONFLICT DO UPDATE arm would fire the table's own deny-
+// 0111; an ON CONFLICT DO UPDATE arm would fire the table's own deny-
 // mutation trigger).
 func upsertProviderPlayerRef(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, providerID string, playerAccountID uuid.UUID) (uuid.UUID, error) {
 	if _, err := tx.Exec(ctx,

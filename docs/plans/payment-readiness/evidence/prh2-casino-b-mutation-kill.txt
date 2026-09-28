@@ -1,7 +1,7 @@
 PRH-2 workstream B - CAS-PLAY-BOOTSTRAP-1 - mutation-kill evidence
 ====================================================================
 
-internal/casino/bootstrap.go (Orchestrator.BootstrapLaunch); migrations/0115_casino_launch_
+internal/casino/bootstrap.go (Orchestrator.BootstrapLaunch); migrations/0111_casino_launch_
 bootstrap.{up,down}.sql. ADR 0103 §9 "MUT" list, 12 named mutants.
 
 Method: each mutant applied directly to the real file, a private database (cas_b_mut, rebuilt from
@@ -165,8 +165,8 @@ Applied directly to internal/casino/bootstrap.go, private DB cas_f4_mut rebuilt 
 priv_db.sh, confirmed FAIL, reverted and diffed byte-identical (md5sum 157a78d583f5b73bd5fd471618f59ac3
 before AND after) against the committed original.
 
-Mutant 12 (drop `UNIQUE (launch_session_id)` from migration 0115):
-KILLED [migrations/0115_casino_launch_bootstrap.up.sql] by
+Mutant 12 (drop `UNIQUE (launch_session_id)` from migration 0111):
+KILLED [migrations/0111_casino_launch_bootstrap.up.sql] by
 `PRIV_DB=cas_b_mut bash .../priv_test.sh -tags integration -run
 TestCasinoLaunchBootstraps_UniqueLaunchSessionID -v ./internal/casino/...`
     first failure: expected a second bootstrap row for the same launch_session_id to be refused

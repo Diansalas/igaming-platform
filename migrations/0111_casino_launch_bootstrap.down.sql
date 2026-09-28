@@ -1,4 +1,4 @@
--- Reverses migration 0115. Refuses while rows exist in either table
+-- Reverses migration 0111. Refuses while rows exist in either table
 -- (ADR 0103 §5 "Down: refuse while rows exist") - these are append-only
 -- idempotency/reference records; a rollback that silently discarded them
 -- could let a later re-bootstrap mint a SECOND casino_provider_player_refs
@@ -23,14 +23,14 @@ DO $$
 BEGIN
     ALTER TABLE casino_launch_bootstraps ADD CONSTRAINT casino_launch_bootstraps_refuse_drop_nonempty CHECK (false);
 EXCEPTION WHEN check_violation THEN
-    RAISE EXCEPTION 'migration 0115 down: casino_launch_bootstraps has rows; refusing to drop an append-only idempotency table with history - escalate to the human, never delete rows to force this through';
+    RAISE EXCEPTION 'migration 0111 down: casino_launch_bootstraps has rows; refusing to drop an append-only idempotency table with history - escalate to the human, never delete rows to force this through';
 END $$;
 
 DO $$
 BEGIN
     ALTER TABLE casino_provider_player_refs ADD CONSTRAINT casino_provider_player_refs_refuse_drop_nonempty CHECK (false);
 EXCEPTION WHEN check_violation THEN
-    RAISE EXCEPTION 'migration 0115 down: casino_provider_player_refs has rows; refusing to drop an append-only reference table with history - escalate to the human, never delete rows to force this through';
+    RAISE EXCEPTION 'migration 0111 down: casino_provider_player_refs has rows; refusing to drop an append-only reference table with history - escalate to the human, never delete rows to force this through';
 END $$;
 
 DROP TRIGGER IF EXISTS casino_launch_bootstraps_insert_guard ON casino_launch_bootstraps;

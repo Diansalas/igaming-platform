@@ -256,16 +256,16 @@ BEGIN
 END
 $$;
 
--- CAS-PLAY-BOOTSTRAP-1 (migration 0115, casino_launch_bootstraps/
+-- CAS-PLAY-BOOTSTRAP-1 (migration 0111, casino_launch_bootstraps/
 -- casino_provider_player_refs; ADR 0103 §5): the same treatment as
 -- casino_callback_rejections above, re-asserted on every run. The blanket
 -- backfill GRANT above ("ALL TABLES IN SCHEMA public") would otherwise
 -- silently re-grant table-level UPDATE/DELETE on these append-only tables
 -- every time this idempotent script is re-run against an already-migrated
--- database; migration 0115 itself runs only once. The statements are
--- EXACTLY migration 0115's own guarded grant: REVOKE ALL, then
+-- database; migration 0111 itself runs only once. The statements are
+-- EXACTLY migration 0111's own guarded grant: REVOKE ALL, then
 -- SELECT/INSERT only - never UPDATE, DELETE or TRUNCATE. The deny
--- triggers created by migration 0115
+-- triggers created by migration 0111
 -- (casino_launch_bootstraps_immutable/_no_truncate,
 -- casino_provider_player_refs_immutable/_no_truncate) remain the binding
 -- control; this is defence in depth (architect review F-5 /

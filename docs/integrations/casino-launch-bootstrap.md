@@ -127,11 +127,11 @@ the opacity this contract introduces holds only against a vendor that does not a
 - `internal/casino/bootstrap.go` — `Orchestrator.BootstrapLaunch`.
 - `internal/casino/mock.go` — `MockCasinoProvider.BootstrapPayload` (the MOCK client).
 - `internal/httpserver/casino_bootstrap_handlers.go` + `casino_routes.go` — the HTTP route.
-- `migrations/0115_casino_launch_bootstrap.{up,down}.sql` — `casino_launch_bootstraps` and
+- `migrations/0111_casino_launch_bootstrap.{up,down}.sql` — `casino_launch_bootstraps` and
   `casino_provider_player_refs`.
 - Tests: `internal/casino/bootstrap_integration_test.go`,
   `bootstrap_rls_integration_test.go`, `bootstrap_sb1_integration_test.go`,
-  `migration_0115_bootstrap_integration_test.go`;
+  `migration_0111_bootstrap_integration_test.go`;
   `internal/httpserver/casino_bootstrap_integration_test.go`.
 
 ## Deferred: adapter-side parse hook (F-12)

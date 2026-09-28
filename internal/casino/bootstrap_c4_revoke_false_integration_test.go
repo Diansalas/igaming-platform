@@ -57,7 +57,7 @@ func installTestC4BlockRevokeTrigger(t *testing.T, pool *db.Pool) {
 // session left completely untouched by the aborted revoke - never a
 // silent denial, never a partial write.
 func TestBootstrapLaunch_RevokeReturnsFalse_InvariantBroken(t *testing.T) {
-	pool, _ := migration0099Scratch(t, "cas_c4_", 115)
+	pool, _ := migration0099Scratch(t, "cas_c4_", 111)
 	installTestC4BlockRevokeTrigger(t, pool)
 
 	f := seedCasinoFixture(t, pool)

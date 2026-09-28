@@ -1,6 +1,6 @@
 //go:build integration
 
-// CAS-PLAY-BOOTSTRAP-1, migration 0115 (ADR 0103 §5, §9 "MIG"): the two
+// CAS-PLAY-BOOTSTRAP-1, migration 0111 (ADR 0103 §5, §9 "MIG"): the two
 // new tables' own DB-level enforcement - the BEFORE INSERT session-binding
 // guard, the request_digest format CHECK, append-only enforcement
 // (UPDATE/DELETE/TRUNCATE refused), and the down migration refusing while
@@ -210,7 +210,7 @@ func TestCasinoLaunchBootstraps_AppendOnly_RLSLayer(t *testing.T) {
 // trigger, mirroring TestMigration0097_DenyTriggerBindsEvenWithA
 // PermissiveUpdatePolicy exactly.
 func TestCasinoLaunchBootstraps_AppendOnly_TriggerLayer(t *testing.T) {
-	pool, _ := migration0099Scratch(t, "cas0115trg_", 115)
+	pool, _ := migration0099Scratch(t, "cas0111trg_", 111)
 	f := seedCasinoFixture(t, pool)
 	game := seedGame(t, pool, "mock-casino", "EUR")
 	enableGameForTenant(t, pool, f, game.ID)
@@ -256,10 +256,10 @@ func TestCasinoLaunchBootstraps_AppendOnly_TriggerLayer(t *testing.T) {
 	}
 }
 
-// TestMigration0115_DownRefusesWhileRowsExist proves the down migration
+// TestMigration0111_DownRefusesWhileRowsExist proves the down migration
 // refuses rather than silently discarding history, on a scratch database.
-func TestMigration0115_DownRefusesWhileRowsExist(t *testing.T) {
-	pool, dir := migration0099Scratch(t, "cas0115_", 115)
+func TestMigration0111_DownRefusesWhileRowsExist(t *testing.T) {
+	pool, dir := migration0099Scratch(t, "cas0111_", 111)
 
 	f := seedCasinoFixture(t, pool)
 	game := seedGame(t, pool, "mock-casino", "EUR")

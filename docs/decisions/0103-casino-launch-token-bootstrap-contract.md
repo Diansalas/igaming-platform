@@ -516,8 +516,9 @@ path** finds neither the raw token nor its hash.
 ## 13. Implementation status (2026-09-28, workstream B, branch `prh2-b-cas-play-bootstrap`)
 
 **Status: MOCK. Every line item of §3 implemented as specified**, on top of A (migration 0108,
-merged). Migration number **0115** (placeholder - the orchestrator renumbers at merge, §5/Rule 3;
-0109-0114 belong to other lanes not yet merged onto this branch).
+merged). Migration number **0111** (renumbered from the original placeholder 0115 once main reached
+0110 - orchestrator instruction, §5/Rule 3; 0112-0115 are allocated to other lanes not yet merged
+onto this branch: K1 0112, K2 0113, E1 0114, K3 0115).
 
 - `internal/casino/bootstrap.go`: `Orchestrator.BootstrapLaunch`, the exact §3.2 step order
   (Redeem+Recheck first via the existing `redeemVerified`, unmodified; the session lookup FOR
@@ -552,7 +553,7 @@ merged). Migration number **0115** (placeholder - the orchestrator renumbers at 
   0048/0092/0107 lesson already recorded in this codebase. Fixed with `ADD CONSTRAINT ... CHECK
   (false)`, which validates every existing row at the storage level unconditionally, regardless of
   RLS (the same "the check IS the check" principle as 0107's own unique-index-build guard). Found
-  by the author's own `TestMigration0115_DownRefusesWhileRowsExist`.
+  by the author's own `TestMigration0111_DownRefusesWhileRowsExist`.
 - **Mutation evidence: 10 of 12 MUT-list items killed as specified, plus 2 (mutants 10/11)
   equivalent as specified and restated as 10-PRIME/11-PRIME and killed in that form (F-4 re-run,
   2026-09-28; wording corrected per code review C-7c - not a flat "12/12", since mutants 10/11 in
@@ -624,7 +625,7 @@ merged). Migration number **0115** (placeholder - the orchestrator renumbers at 
   vendor - see `docs/integrations/casino-launch-bootstrap.md`'s own "Deferred: adapter-side parse
   hook" section.
 - **Tests:** `internal/casino/bootstrap_integration_test.go`, `bootstrap_rls_integration_test.go`,
-  `bootstrap_sb1_integration_test.go`, `migration_0115_bootstrap_integration_test.go`;
+  `bootstrap_sb1_integration_test.go`, `migration_0111_bootstrap_integration_test.go`;
   `internal/httpserver/casino_bootstrap_integration_test.go`. Mutation evidence:
   `docs/plans/payment-readiness/evidence/prh2-casino-b-mutation-kill.txt`.
 - **Registry:** proposed text reported to the orchestrator, not written directly to
