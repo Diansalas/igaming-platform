@@ -88,11 +88,18 @@ func webhookProviderKind(d webhookDomain) observability.WebhookProviderKind {
 // already written, so it can never influence that decision - see
 // observability.RecordWebhookAdmissionDecision's own doc comment for the
 // no-op/failing-exporter guarantee this depends on.
-func (rt *webhookAdmissionRuntime) recordDecision(ctx context.Context, domain webhookDomain, decision observability.WebhookAdmissionDecision, reason observability.WebhookAdmissionReason) {
+//
+// stage distinguishes the pre-auth tiers (admitPreAuth,
+// writeDBGateUnavailable) from the verified tiers (admitVerified) -
+// security review J-L2 / code review J-3: without it, a request admitted
+// at BOTH stages recorded decision=admitted twice with no way to tell
+// that apart from two distinct admitted requests, which silently doubles
+// the admitted count relative to every (single-stage) rejection reason.
+func (rt *webhookAdmissionRuntime) recordDecision(ctx context.Context, domain webhookDomain, decision observability.WebhookAdmissionDecision, reason observability.WebhookAdmissionReason, stage observability.WebhookAdmissionStage) {
 	if rt == nil {
 		return
 	}
-	observability.RecordWebhookAdmissionDecision(ctx, decision, reason, webhookProviderKind(domain))
+	observability.RecordWebhookAdmissionDecision(ctx, decision, reason, webhookProviderKind(domain), stage)
 }
 
 // logOverflowOnce emits webhook_admission_limiter_overflow exactly once
@@ -419,7 +426,7 @@ func (rt *webhookAdmissionRuntime) admitPreAuth(w http.ResponseWriter, r *http.R
 			requestID := observability.RequestIDFromContext(r.Context())
 			rt.logger.Error("webhook_admission_panic_recovered", "panic", rec, "domain", string(domain))
 			writeAdmissionRejection(w, requestID, apierror.CodeUnavailable, time.Second)
-			rt.recordDecision(r.Context(), domain, observability.WebhookAdmissionRejected, observability.WebhookAdmissionReasonPanic)
+			rt.recordDecision(r.Context(), domain, observability.WebhookAdmissionRejected, observability.WebhookAdmissionReasonPanic, observability.WebhookAdmissionStagePreAuth)
 			release, ok = nil, false
 		}
 	}()
@@ -438,7 +445,7 @@ func (rt *webhookAdmissionRuntime) admitPreAuth(w http.ResponseWriter, r *http.R
 	if rt.directory != nil && !rt.directory.Loaded() {
 		rt.logRejected(ctx, "directory_unloaded", domain, "", "", nil, http.StatusServiceUnavailable, time.Second, clientIP)
 		writeAdmissionRejection(w, requestID, apierror.CodeUnavailable, time.Second)
-		rt.recordDecision(ctx, domain, observability.WebhookAdmissionRejected, observability.WebhookAdmissionReasonDirectoryUnload)
+		rt.recordDecision(ctx, domain, observability.WebhookAdmissionRejected, observability.WebhookAdmissionReasonDirectoryUnload, observability.WebhookAdmissionStagePreAuth)
 		return nil, false
 	}
 
@@ -448,7 +455,7 @@ func (rt *webhookAdmissionRuntime) admitPreAuth(w http.ResponseWriter, r *http.R
 			rt.logOverflowOnce("ip", rt.perIP)
 			rt.logRejected(ctx, "ip", domain, "", "", nil, http.StatusTooManyRequests, retryAfter, clientIP)
 			writeAdmissionRejection(w, requestID, apierror.CodeRateLimited, retryAfter)
-			rt.recordDecision(ctx, domain, observability.WebhookAdmissionRejected, observability.WebhookAdmissionReasonIP)
+			rt.recordDecision(ctx, domain, observability.WebhookAdmissionRejected, observability.WebhookAdmissionReasonIP, observability.WebhookAdmissionStagePreAuth)
 			return nil, false
 		}
 	}
@@ -485,7 +492,7 @@ func (rt *webhookAdmissionRuntime) admitPreAuth(w http.ResponseWriter, r *http.R
 		}
 		rt.logRejected(ctx, "preauth", domain, tenantKey, providerKey, nil, status, retryAfter, clientIP)
 		writeAdmissionRejection(w, requestID, code, retryAfter)
-		rt.recordDecision(ctx, domain, observability.WebhookAdmissionRejected, observability.WebhookAdmissionReasonPreAuth)
+		rt.recordDecision(ctx, domain, observability.WebhookAdmissionRejected, observability.WebhookAdmissionReasonPreAuth, observability.WebhookAdmissionStagePreAuth)
 		return nil, false
 	}
 
@@ -498,14 +505,21 @@ func (rt *webhookAdmissionRuntime) admitPreAuth(w http.ResponseWriter, r *http.R
 	if !admitted {
 		rt.logRejected(ctx, "inflight", domain, tenantKey, providerKey, nil, http.StatusServiceUnavailable, time.Second, clientIP)
 		writeAdmissionRejection(w, requestID, apierror.CodeUnavailable, time.Second)
-		rt.recordDecision(ctx, domain, observability.WebhookAdmissionRejected, observability.WebhookAdmissionReasonInFlight)
+		rt.recordDecision(ctx, domain, observability.WebhookAdmissionRejected, observability.WebhookAdmissionReasonInFlight, observability.WebhookAdmissionStagePreAuth)
 		return nil, false
 	}
 	kind := webhookProviderKind(domain)
 	observability.WebhookAdmissionInFlightInc(ctx, kind)
-	rt.recordDecision(ctx, domain, observability.WebhookAdmissionAdmitted, observability.WebhookAdmissionReasonAdmitted)
+	rt.recordDecision(ctx, domain, observability.WebhookAdmissionAdmitted, observability.WebhookAdmissionReasonAdmitted, observability.WebhookAdmissionStagePreAuth)
+	// J-5 (code review, Info): rel() itself is idempotent (internal/
+	// admission.Bulkhead's own sync.Once), but a caller that invokes THIS
+	// wrapper more than once would otherwise call
+	// WebhookAdmissionInFlightDec every time, driving the gauge negative
+	// even though the underlying slot was only ever released once. Wrap
+	// the Dec in its own sync.Once so a double release can never do that.
+	var once sync.Once
 	return func() {
-		observability.WebhookAdmissionInFlightDec(ctx, kind)
+		once.Do(func() { observability.WebhookAdmissionInFlightDec(ctx, kind) })
 		rel()
 	}, true
 }
@@ -555,7 +569,7 @@ func (rt *webhookAdmissionRuntime) writeDBGateUnavailable(w http.ResponseWriter,
 		rt.logRejected(r.Context(), "db_gate", domain, "", providerID, tenantID, http.StatusServiceUnavailable, time.Second, "")
 	}
 	writeAdmissionRejection(w, requestID, apierror.CodeUnavailable, time.Second)
-	rt.recordDecision(r.Context(), domain, observability.WebhookAdmissionRejected, observability.WebhookAdmissionReasonDBGate)
+	rt.recordDecision(r.Context(), domain, observability.WebhookAdmissionRejected, observability.WebhookAdmissionReasonDBGate, observability.WebhookAdmissionStagePreAuth)
 }
 
 // writeAdmissionUnavailableAuthError is writeDBGateUnavailable for a
@@ -592,7 +606,7 @@ func (rt *webhookAdmissionRuntime) admitVerified(w http.ResponseWriter, r *http.
 			requestID := observability.RequestIDFromContext(r.Context())
 			rt.logger.Error("webhook_admission_panic_recovered", "panic", rec, "domain", string(domain))
 			writeAdmissionRejection(w, requestID, apierror.CodeUnavailable, time.Second)
-			rt.recordDecision(r.Context(), domain, observability.WebhookAdmissionRejected, observability.WebhookAdmissionReasonPanic)
+			rt.recordDecision(r.Context(), domain, observability.WebhookAdmissionRejected, observability.WebhookAdmissionReasonPanic, observability.WebhookAdmissionStageVerified)
 			release, ok = nil, false
 		}
 	}()
@@ -620,7 +634,7 @@ func (rt *webhookAdmissionRuntime) admitVerified(w http.ResponseWriter, r *http.
 		}
 		rt.logRejected(ctx, "verified", domain, "", providerID, &tenantID, status, retryAfter, "")
 		writeAdmissionRejection(w, requestID, code, retryAfter)
-		rt.recordDecision(ctx, domain, observability.WebhookAdmissionRejected, observability.WebhookAdmissionReasonVerified)
+		rt.recordDecision(ctx, domain, observability.WebhookAdmissionRejected, observability.WebhookAdmissionReasonVerified, observability.WebhookAdmissionStageVerified)
 		return nil, false
 	}
 
@@ -628,9 +642,9 @@ func (rt *webhookAdmissionRuntime) admitVerified(w http.ResponseWriter, r *http.
 	if !admitted {
 		rt.logRejected(ctx, "domain_bulkhead", domain, "", providerID, &tenantID, http.StatusServiceUnavailable, rt.settings.DomainWait, "")
 		writeAdmissionRejection(w, requestID, apierror.CodeUnavailable, 2*time.Second)
-		rt.recordDecision(ctx, domain, observability.WebhookAdmissionRejected, observability.WebhookAdmissionReasonDomainBulkhead)
+		rt.recordDecision(ctx, domain, observability.WebhookAdmissionRejected, observability.WebhookAdmissionReasonDomainBulkhead, observability.WebhookAdmissionStageVerified)
 		return nil, false
 	}
-	rt.recordDecision(ctx, domain, observability.WebhookAdmissionAdmitted, observability.WebhookAdmissionReasonAdmitted)
+	rt.recordDecision(ctx, domain, observability.WebhookAdmissionAdmitted, observability.WebhookAdmissionReasonAdmitted, observability.WebhookAdmissionStageVerified)
 	return rel, true
 }

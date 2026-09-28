@@ -66,6 +66,24 @@ const (
 	WebhookAdmissionReasonPanic           WebhookAdmissionReason = "panic"
 )
 
+// WebhookAdmissionStage is ADR 0097 §8's `stage` label (security review
+// J-L2 / code review J-3): a closed, two-value enum distinguishing the
+// pre-auth tiers (A2/A3/A4a/A4b - `admitPreAuth`, `writeDBGateUnavailable`)
+// from the verified tiers (B1/B2 - `admitVerified`). Without it, a
+// request that is admitted at BOTH stages recorded `decision="admitted",
+// reason="admitted"` twice with no way to distinguish "one request,
+// admitted twice (once per stage)" from "two requests, each admitted
+// once" - which silently doubles the `admitted` count relative to every
+// `rejected` reason (each rejection tier fires at exactly one stage), and
+// skews any rejection-rate dashboard/ratio built on this counter. Two
+// values, no cardinality concern.
+type WebhookAdmissionStage string
+
+const (
+	WebhookAdmissionStagePreAuth  WebhookAdmissionStage = "preauth"
+	WebhookAdmissionStageVerified WebhookAdmissionStage = "verified"
+)
+
 // WebhookProviderKind is ADR 0097 §8's `provider_kind` label. It is the
 // webhook DOMAIN (payments/casino/kyc), never a raw provider id or
 // tenant-identifying value - deliberately a closed, 3(+1)-value enum
@@ -84,14 +102,16 @@ const (
 )
 
 // webhookAdmissionDecisionsTotal is ADR 0097 §8:
-// webhook_admission_decisions_total{decision,reason,provider_kind}. The
-// creation error is intentionally discarded (matches
+// webhook_admission_decisions_total{decision,reason,provider_kind,stage}.
+// The creation error is intentionally discarded (matches
 // internal/alerting/metrics.go): a nil counter is this package's
 // documented no-op state, checked by RecordWebhookAdmissionDecision
-// before every use.
+// before every use. NOT `const`/immutable: `SetWebhookAdmissionInstrumentsForTest`
+// (test-only) substitutes it directly - see that function's doc comment
+// for why.
 var webhookAdmissionDecisionsTotal, _ = webhookMeter.Int64Counter(
 	"webhook_admission_decisions_total",
-	metric.WithDescription("Count of webhook admission decisions by decision/reason/provider_kind (ADR 0097 §8)."),
+	metric.WithDescription("Count of webhook admission decisions by decision/reason/provider_kind/stage (ADR 0097 §8)."),
 )
 
 // webhookAdmissionInFlight is ADR 0097 §8's in-flight gauge for the A4a
@@ -132,7 +152,7 @@ func safelyRecord(fn func()) {
 // written - this function's own body can never affect that decision, and
 // a nil counter (no-op meter, or a meter whose Int64Counter call itself
 // failed) makes this a true no-op.
-func RecordWebhookAdmissionDecision(ctx context.Context, decision WebhookAdmissionDecision, reason WebhookAdmissionReason, kind WebhookProviderKind) {
+func RecordWebhookAdmissionDecision(ctx context.Context, decision WebhookAdmissionDecision, reason WebhookAdmissionReason, kind WebhookProviderKind, stage WebhookAdmissionStage) {
 	if webhookAdmissionDecisionsTotal == nil {
 		return
 	}
@@ -141,6 +161,7 @@ func RecordWebhookAdmissionDecision(ctx context.Context, decision WebhookAdmissi
 			attribute.String("decision", string(decision)),
 			attribute.String("reason", string(reason)),
 			attribute.String("provider_kind", string(kind)),
+			attribute.String("stage", string(stage)),
 		))
 	})
 }
@@ -168,4 +189,40 @@ func WebhookAdmissionInFlightDec(ctx context.Context, kind WebhookProviderKind) 
 	safelyRecord(func() {
 		webhookAdmissionInFlight.Add(ctx, -1, metric.WithAttributes(attribute.String("provider_kind", string(kind))))
 	})
+}
+
+// SetWebhookAdmissionInstrumentsForTest substitutes this package's
+// counter/gauge instruments directly, bypassing OTel's global meter
+// provider entirely.
+//
+// TEST-ONLY. Never call this from production code.
+//
+// It exists because of a hard constraint in go.opentelemetry.io/otel's
+// global (delegating) meter: the FIRST call to otel.SetMeterProvider
+// anywhere in a process permanently binds every instrument already
+// created at package-init time (webhookAdmissionDecisionsTotal,
+// webhookAdmissionInFlight) to that one provider - a LATER
+// otel.SetMeterProvider call only changes what brand-new otel.Meter()
+// lookups would get, not these already-delegated instruments (code
+// review J-1: this is exactly why the original
+// `otel.SetMeterProvider(failingMP)` in
+// TestAdmission_DecisionsIdenticalRegardlessOfMeter had no effect - the
+// "failing" run still recorded into TestMain's own reader). There is no
+// way to simulate a nil, panicking, or slow/erroring instrument once a
+// real provider is already installed in a test binary except by
+// substituting the instrument value itself.
+//
+// Returns a restore func that MUST be deferred (or registered via
+// t.Cleanup) to put back whatever was installed before. This mutates
+// package-level state with no synchronization of its own - callers must
+// not run this concurrently with any other test recording through these
+// instruments (see webhook_admission_metrics_test.go's TestMain comment:
+// a future t.Parallel() admission test would make this, and every
+// exact-delta assertion built on it, racy).
+func SetWebhookAdmissionInstrumentsForTest(counter metric.Int64Counter, gauge metric.Int64UpDownCounter) (restore func()) {
+	prevCounter, prevGauge := webhookAdmissionDecisionsTotal, webhookAdmissionInFlight
+	webhookAdmissionDecisionsTotal, webhookAdmissionInFlight = counter, gauge
+	return func() {
+		webhookAdmissionDecisionsTotal, webhookAdmissionInFlight = prevCounter, prevGauge
+	}
 }
