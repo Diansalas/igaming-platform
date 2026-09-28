@@ -682,6 +682,25 @@ func TestBootstrapLaunch_EvaluationError_RollsBackNeverDenies(t *testing.T) {
 		t.Fatalf("expected a plain evaluation error, not a refusal: %v", err)
 	}
 	assertSessionUntouchedAndNoBootstrapRow(t, pool, f, session.ID, LaunchSessionActive)
+
+	// L-1 (security review of e810ece, docs/plans/prh2-hardening-round/
+	// reviews/b-security.md): this exact error VALUE is what the HTTP
+	// handler's generic 5xx branch logs verbatim
+	// (`logger.Error("casino_bootstrap_failed", "error", err, ...)`,
+	// internal/httpserver/casino_bootstrap_handlers.go) - scanning its
+	// string form here for the raw token and its hash is scanning the
+	// SAME value that path would ever put in a log line. A genuinely
+	// poisoned *db.Pool cannot be wired into the real HTTP server's Deps
+	// (Deps.DB is a concrete *db.Pool, not an interface, so swapping it
+	// for a test double is not possible without a production-code change
+	// outside this fix's scope) - this is the closest equivalent-value
+	// scan available, and is exact rather than approximate: err here is
+	// literally the same error the HTTP handler would receive from
+	// BootstrapLaunch on this path.
+	tokenHash := hashLaunchToken(token)
+	if containsSubstring(err.Error(), token) || containsSubstring(err.Error(), tokenHash) {
+		t.Fatalf("the evaluation error (the exact value the HTTP 5xx path logs) leaked the token or its hash: %v", err)
+	}
 }
 
 // --- CON: two genuinely concurrent goroutines, real Postgres row locking

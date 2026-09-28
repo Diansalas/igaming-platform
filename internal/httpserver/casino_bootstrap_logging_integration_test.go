@@ -264,6 +264,48 @@ func TestCasinoBootstrap_HTTP_GateDenial_ConstantForbidden(t *testing.T) {
 	}
 }
 
+// TestCasinoBootstrap_HTTP_ReplaySuccess_NoSecretInLogs is L-1 (security
+// review of e810ece, docs/plans/prh2-hardening-round/reviews/
+// b-security.md): the earlier secrecy scan covered the FRESH success path
+// (casino.launch_bootstrapped) but not the separate replay-success Info
+// log line (`logger.Info("casino_bootstrap_replayed", ...)`,
+// casino_bootstrap_handlers.go), which only fires on a genuine
+// byte-identical replay, never a fresh bootstrap.
+func TestCasinoBootstrap_HTTP_ReplaySuccess_NoSecretInLogs(t *testing.T) {
+	f := setupBootstrapLoggingFixture(t)
+	_, token := f.launch(t)
+
+	const requestID = "req-l1-replay-1"
+	in := f.mock.BootstrapPayload(f.tenant.ID, token, requestID, f.game.ProviderGameID, "EUR", "real")
+	first := rawPostCasinoBootstrap(t, f.srv, f.tenant.Slug, in)
+	defer first.Body.Close()
+	if first.StatusCode != http.StatusOK {
+		t.Fatalf("expected the first bootstrap to succeed, got %d", first.StatusCode)
+	}
+
+	// The exact same request, byte-identical - the genuine replay.
+	replayIn := f.mock.BootstrapPayload(f.tenant.ID, token, requestID, f.game.ProviderGameID, "EUR", "real")
+	second := rawPostCasinoBootstrap(t, f.srv, f.tenant.Slug, replayIn)
+	defer second.Body.Close()
+	if second.StatusCode != http.StatusOK {
+		t.Fatalf("expected the replay to also return 200, got %d", second.StatusCode)
+	}
+
+	var found bool
+	for _, l := range f.logs() {
+		if l.msg == "casino_bootstrap_replayed" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("expected a casino_bootstrap_replayed log line for the genuine replay")
+	}
+
+	tokenHash := hashLaunchTokenForTest(token)
+	assertNoLogLineLeaksSecret(t, f.logs(), token, "raw launch token")
+	assertNoLogLineLeaksSecret(t, f.logs(), tokenHash, "launch token hash")
+}
+
 // TestCasinoBootstrap_HTTP_Success_NoSecretInLogs closes F-6's own gap
 // directly: the success path's log line(s), not merely the audit row
 // TestBootstrapLaunch_AuditNeverCarriesTokenOrHash already covers at the

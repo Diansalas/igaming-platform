@@ -548,6 +548,25 @@ func (o *Orchestrator) BootstrapLaunch(ctx context.Context, pool providercred.Te
 			// replay would let a SECOND player_ref/response pair attach to
 			// a session that must have exactly one, so this fails closed
 			// as an invariant break (5xx) instead.
+			// This branch's own error string carries only constraint NAMES
+			// (both compile-time constants), never tokenHash, digest, or
+			// any other secret - there is no leak vector here even in
+			// principle (L-1, security review of e810ece). It is also, by
+			// construction, unreachable for any real execution of this
+			// function: reaching it requires a PRE-EXISTING
+			// casino_launch_bootstraps row whose launch_session_id already
+			// equals THIS session's id, inserted by an EARLIER,
+			// already-committed transaction - but that earlier insert's
+			// own BEFORE INSERT trigger (casino_launch_bootstraps_
+			// insert_guard) requires this SAME session to already be
+			// 'consumed' at that earlier point, and the immutability
+			// trigger (migration 0036/0042) forbids a 'consumed' session
+			// from ever reverting to 'active' - so this transaction's own
+			// step 5 CAS (WHERE status = 'active') could never have
+			// succeeded in the first place. No test exercises this branch
+			// end to end for exactly that reason - see
+			// bootstrap_f3_integration_test.go's own header comment for
+			// the identically-shaped "forced revoke false" case.
 			return fmt.Errorf("%w: launch bootstrap insert violated unexpected constraint %q (only %q is a legitimate replay/race path)",
 				ErrBootstrapInvariantBroken, constraintName, casinoLaunchBootstrapsOncePerRequestConstraint)
 		}
