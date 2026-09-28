@@ -11,6 +11,7 @@ package payments
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"os"
@@ -1270,5 +1271,385 @@ func TestINVDEP1_FL2_MultipleSuccessAlertLogContentIsPinned(t *testing.T) {
 		if strings.Contains(alertLine, key) {
 			t.Errorf("F-L2: the alert line must never carry %q, got: %s", key, alertLine)
 		}
+	}
+}
+
+// TestINVDEP1_C3_MultipleSuccessAuditRecordCarriesAmountAndAsset closes
+// ledger-finance review C3 (rv-fh3-ledger.md, 076e42e): the reviewer's own
+// binding confirmation note requires amount and asset in the
+// payment.attempt_disputed audit record's metadata - recoverable from the
+// attempt row is not the same as present in the audit trail itself. This
+// is audit-only; the P1 log line (payments_multiple_success_for_intent_
+// alert) stays ids-only per security F-L2 (TestINVDEP1_FL2, unchanged).
+func TestINVDEP1_C3_MultipleSuccessAuditRecordCarriesAmountAndAsset(t *testing.T) {
+	pool := depositV2ScratchPool(t)
+	f := seedOrchFixture(t, pool)
+	pa := NewMockProvider("m-c3-a", "EUR")
+	pb := NewMockProvider("m-c3-b", "EUR")
+	pb.AcceptAllAmounts = true
+	registerCapability(t, pool, f, pa, 100)
+	registerCapability(t, pool, f, pb, 200)
+	orch := NewOrchestrator(map[string]PaymentProvider{"m-c3-a": pa, "m-c3-b": pb},
+		MultiWebhookCredentialResolver{"m-c3-a": NewMockWebhookCredentials(pa), "m-c3-b": NewMockWebhookCredentials(pb)})
+
+	res := rvInit(t, pool, orch, f, 5000, "c3")
+	ref := *res.Attempt.ProviderReference
+	childID := declineCascadableAndFindChild(t, pool, orch, f, "m-c3-a", pa, ref)
+	child := dispatchViaSweeper(t, pool, orch, f, childID)
+	childRef := *child.ProviderReference
+
+	if _, err := rvCallback(pool, orch, f, "m-c3-b", pb.CallbackPayload(f.tenantID, CallbackEventDeposit, childRef, "", OutcomeSucceeded, 5000, "EUR", "", false)); err != nil {
+		t.Fatalf("fallback success: %v", err)
+	}
+	if _, err := rvCallback(pool, orch, f, "m-c3-a", pa.CallbackPayload(f.tenantID, CallbackEventDeposit, ref, "", OutcomeSucceeded, 5000, "EUR", "", false)); err != nil {
+		t.Fatalf("late original success (T13d): %v", err)
+	}
+	disputed := mustGetAttempt(t, pool, f.tenantID, res.Attempt.ID)
+
+	var metaJSON []byte
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT metadata FROM audit_log WHERE action = 'payment.attempt_disputed' AND target_id = $1`, disputed.ID.String()).Scan(&metaJSON)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var meta map[string]any
+	if err := json.Unmarshal(metaJSON, &meta); err != nil {
+		t.Fatalf("unmarshal audit metadata: %v", err)
+	}
+	gotAmount, ok := meta["amount"].(float64)
+	if !ok || int64(gotAmount) != disputed.Amount {
+		t.Errorf("C3: expected audit metadata amount=%d, got %v", disputed.Amount, meta["amount"])
+	}
+	if meta["asset_code"] != disputed.AssetCode {
+		t.Errorf("C3: expected audit metadata asset_code=%q, got %v", disputed.AssetCode, meta["asset_code"])
+	}
+}
+
+// TestINVDEP1_MC2_PostDepositSuccessInternalRecheck closes security's MC2
+// follow-up (post-FH-3b) and confirms ledger-finance C6/F4's PRE/RECK/BOTH
+// mutants are addressed for the internal re-check specifically:
+// postDepositSuccess's OWN rule-2 re-check (ADR 0095 §28.3), called
+// DIRECTLY here - bypassing postDepositSuccessOrDispute's rule-1.4
+// pre-check entirely - on an intent already resolved by a REAL prior
+// posting, must itself return ErrDepositIntentAlreadyResolved, never
+// falling through to ledger.Post and relying on the DB's own
+// ErrDepositAlreadyPostedForIntent sentinel. If the re-check is disabled
+// (mutant RECK, or MC2's own narrower "re-check only" variant), this call
+// still reaches ledger.Post, which the 0107 index refuses - but that
+// refusal surfaces as a DIFFERENT, DB-level error, which this test's
+// exact errors.Is assertion distinguishes from the application-level one.
+func TestINVDEP1_MC2_PostDepositSuccessInternalRecheck(t *testing.T) {
+	pool := depositV2ScratchPool(t)
+	f := seedOrchFixture(t, pool)
+	orch := NewOrchestrator(map[string]PaymentProvider{}, MultiWebhookCredentialResolver{})
+
+	var intent DepositIntent
+	var attemptB uuid.UUID
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		intentID := uuid.New()
+		if _, err := tx.Exec(ctx, `INSERT INTO deposit_intents (id, tenant_id, brand_id, player_account_id, wallet_id, asset_code, amount, payment_method, status, idempotency_key)
+			VALUES ($1,$2,$3,$4,$5,'EUR',5000,'card','pending','mc2-intent')`,
+			intentID, f.tenantID, f.brandID, f.playerAccountID, f.walletID); err != nil {
+			return err
+		}
+		intent = DepositIntent{ID: intentID, TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID, Amount: 5000, AssetCode: "EUR"}
+
+		// attemptA succeeds via a REAL ledger posting - the intent is now
+		// genuinely financially resolved, exactly as rule 1.4's own
+		// pre-check would have found it (were it not bypassed here on
+		// purpose). Inserted 'submitting' first (the guard's INSERT rule
+		// forbids inserting directly into 'succeeded' or carrying a
+		// ledger_transaction_id/provider_reference at insert time), then
+		// moved to 'succeeded' via a compliant T7 UPDATE.
+		attemptA := uuid.New()
+		if _, err := tx.Exec(ctx, `INSERT INTO payment_attempts (id, tenant_id, operation, deposit_intent_id, attempt_no, payment_method, asset_code, amount,
+			state, last_evidence_kind, ever_possibly_sent, interactive, provider_id, merchant_reference, external_idempotency_key)
+			VALUES ($1,$2,'deposit',$3,1,'card','EUR',5000,'submitting','platform',false,false,'mc2-provider',$4,$4)`,
+			attemptA, f.tenantID, intentID, attemptA.String()); err != nil {
+			return err
+		}
+		accounts, err := ledger.GetOrCreateAccounts(ctx, tx, f.tenantID,
+			ledger.AccountSpec{WalletID: &f.walletID, AccountType: ledger.AccountPlayerCash, AssetCode: "EUR"},
+			ledger.AccountSpec{AccountType: ledger.AccountPSPClearing, AssetCode: "EUR"},
+		)
+		if err != nil {
+			return err
+		}
+		p := "mc2-provider"
+		refA := "mc2-refA"
+		postResult, err := ledger.Post(ctx, tx, ledger.TransactionInput{
+			TenantID: f.tenantID, TransactionType: ledger.TxDeposit, IdempotencyKey: "mc2-provider:mc2-refA",
+			ProviderID: &p, ProviderTxID: &refA, CorrelationID: intentID,
+			Entries: []ledger.EntryInput{
+				{LedgerAccountID: accounts[1], Direction: ledger.Debit, Amount: 5000},
+				{LedgerAccountID: accounts[0], Direction: ledger.Credit, Amount: 5000},
+			},
+		})
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `UPDATE payment_attempts SET state = 'succeeded', last_evidence_kind = 'sync', provider_reference = $2, ledger_transaction_id = $3, resolved_at = now() WHERE id = $1`,
+			attemptA, refA, postResult.TransactionID); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `UPDATE deposit_intents SET status = 'succeeded', provider_id = $2, provider_reference = $3, ledger_transaction_id = $4 WHERE id = $1`,
+			intentID, p, refA, postResult.TransactionID); err != nil {
+			return err
+		}
+
+		// attemptB: a SEPARATE, still-live attempt on the SAME intent,
+		// declined -> submitting shape not needed here since
+		// postDepositSuccess is called directly, bypassing the state
+		// machine entirely (this test's whole point).
+		attemptB = uuid.New()
+		if _, err := tx.Exec(ctx, `INSERT INTO payment_attempts (id, tenant_id, operation, deposit_intent_id, attempt_no, payment_method, asset_code, amount,
+			state, last_evidence_kind, ever_possibly_sent, interactive, provider_id, merchant_reference, external_idempotency_key)
+			VALUES ($1,$2,'deposit',$3,2,'card','EUR',5000,'submitting','platform',false,false,'mc2-provider',$4,$4)`,
+			attemptB, f.tenantID, intentID, attemptB.String()); err != nil {
+			return err
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+
+	// The call under test: postDepositSuccess DIRECTLY for attemptB, a
+	// DIFFERENT provider reference (a genuinely distinct idempotency key)
+	// on the SAME already-resolved intent - bypassing
+	// postDepositSuccessOrDispute's own rule-1.4 pre-check entirely.
+	// Rule 2's OWN internal re-check must catch this itself.
+	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, _, err := orch.postDepositSuccess(ctx, tx, intent, &attemptB, "mc2-provider", "mc2-refB", 5000, "EUR")
+		return err
+	})
+	if !errors.Is(err, ErrDepositIntentAlreadyResolved) {
+		t.Fatalf("MC2: postDepositSuccess's own internal re-check must return ErrDepositIntentAlreadyResolved directly, got %v", err)
+	}
+	if errors.Is(err, ledger.ErrDepositAlreadyPostedForIntent) {
+		t.Fatalf("MC2: got the DB-level ledger sentinel instead of the application-level re-check's own error - the re-check was bypassed: %v", err)
+	}
+
+	// No second posting must have occurred.
+	if n := ledgerDepositTxCount(t, pool, f.tenantID, intent.ID); n != 1 {
+		t.Fatalf("MC2: expected exactly 1 deposit ledger posting, got %d", n)
+	}
+}
+
+// TestX5X6_LedgerBackstopMappingAndPredicateLedgerHalf closes code-review
+// R3 items X5 ("the backstop mapping") and X6 ("the ledger half of the
+// predicate"), rv-fh3-code-review.md 95a1c34.
+//
+// X5: postDepositSuccess's OWN mapping of ledger.ErrDepositAlreadyPosted
+// ForIntent to the SAME typed ErrDepositIntentAlreadyResolved sentinel
+// (so postDepositSuccessOrDispute's callers never need to know about the
+// ledger package's own error type) is proven via a GENUINE, deterministic
+// race: attemptA's own postDepositSuccess call is held open, mid-
+// transaction, AFTER its own predicate check already passed but BEFORE
+// its ledger.Post call commits (via an external hold on the psp_clearing
+// projection row, which ledger.Post's own L3 pre-lock must acquire):
+//
+//  1. attemptA's postDepositSuccess call starts, passes its own predicate
+//     check (nothing has posted yet), then blocks trying to lock the held
+//     psp_clearing projection row inside ledger.Post.
+//  2. Once attemptA is confirmed blocked there (loWaitBlocked), attemptB's
+//     postDepositSuccess call starts - ITS OWN predicate check ALSO
+//     returns false (attemptA has not committed anything yet - it is
+//     still blocked), so attemptB proceeds into ITS OWN ledger.Post call,
+//     which queues behind attemptA on the SAME held projection row
+//     (Postgres FIFO: attemptA first).
+//  3. The external blocker releases. attemptA is granted the lock first,
+//     its own INSERT into ledger_transactions commits for real.
+//  4. attemptB is granted the lock next; ITS OWN INSERT into ledger_
+//     transactions now conflicts with attemptA's just-committed row on
+//     the migration-0107 unique index - ledger.Post returns ledger.
+//     ErrDepositAlreadyPostedForIntent, which postDepositSuccess's own
+//     mapping (X5) must turn into ErrDepositIntentAlreadyResolved before
+//     returning to attemptB's caller.
+//
+// This is the ONLY way to reach X5's mapping code at all through a real,
+// unmutated call: attemptB's own predicate check (rule 2) genuinely
+// cannot see attemptA's still-uncommitted work, by design (READ
+// COMMITTED) - X5 is defense in depth for EXACTLY this window.
+func TestX5_LedgerBackstopMapping(t *testing.T) {
+	pool := depositV2ScratchPool(t)
+	f := seedOrchFixture(t, pool)
+	orch := NewOrchestrator(map[string]PaymentProvider{}, MultiWebhookCredentialResolver{})
+
+	intentID := uuid.New()
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `INSERT INTO deposit_intents (id, tenant_id, brand_id, player_account_id, wallet_id, asset_code, amount, payment_method, status, idempotency_key)
+			VALUES ($1,$2,$3,$4,$5,'EUR',5000,'card','pending','x5-intent')`,
+			intentID, f.tenantID, f.brandID, f.playerAccountID, f.walletID)
+		return err
+	}); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	intent := DepositIntent{ID: intentID, TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID, Amount: 5000, AssetCode: "EUR"}
+
+	var clearingID uuid.UUID
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		accounts, err := ledger.GetOrCreateAccounts(ctx, tx, f.tenantID,
+			ledger.AccountSpec{WalletID: &f.walletID, AccountType: ledger.AccountPlayerCash, AssetCode: "EUR"},
+			ledger.AccountSpec{AccountType: ledger.AccountPSPClearing, AssetCode: "EUR"},
+		)
+		if err != nil {
+			return err
+		}
+		clearingID = accounts[1]
+		// loHoldProjectionRow needs an EXISTING wallet_balance_projection
+		// row to lock - a fresh ledger account has none until its first
+		// posting. Seed both accounts with a tiny, unrelated (different
+		// correlation_id) throwaway posting first, purely so the real
+		// race below has a real row to contend over.
+		p := "x5-seed-provider"
+		ref := "x5-seed-" + uuid.NewString()
+		_, err = ledger.Post(ctx, tx, ledger.TransactionInput{
+			TenantID: f.tenantID, TransactionType: ledger.TxDeposit, IdempotencyKey: p + ":" + ref,
+			ProviderID: &p, ProviderTxID: &ref, CorrelationID: uuid.New(),
+			Entries: []ledger.EntryInput{
+				{LedgerAccountID: accounts[1], Direction: ledger.Debit, Amount: 1},
+				{LedgerAccountID: accounts[0], Direction: ledger.Credit, Amount: 1},
+			},
+		})
+		return err
+	}); err != nil {
+		t.Fatalf("setup: resolve/seed accounts: %v", err)
+	}
+
+	blocker := loHoldProjectionRow(t, pool, f.tenantID, clearingID, "x5-blocker")
+
+	racerA := loStartRacer(t, pool, f.tenantID, "attemptA", func(ctx context.Context, tx pgx.Tx) error {
+		_, _, err := orch.postDepositSuccess(ctx, tx, intent, nil, "x5-provider", "refA", 5000, "EUR")
+		return err
+	})
+	if _, ok := loWaitBlocked(t, pool, racerA.pid, racerA.done); !ok {
+		blocker.release()
+		<-racerA.done
+		t.Fatalf("racer A never blocked on the held psp_clearing projection row")
+	}
+
+	racerB := loStartRacer(t, pool, f.tenantID, "attemptB", func(ctx context.Context, tx pgx.Tx) error {
+		_, _, err := orch.postDepositSuccess(ctx, tx, intent, nil, "x5-provider", "refB", 5000, "EUR")
+		return err
+	})
+	if !loWaitBlockedByAnyOf(t, pool, racerB.pid, []int{racerA.pid}, racerB.done) {
+		blocker.release()
+		<-racerA.done
+		<-racerB.done
+		t.Fatalf("racer B never blocked behind racer A on the held psp_clearing projection row")
+	}
+
+	blocker.release()
+	errA := racerA.wait()
+	errB := racerB.wait()
+
+	if errA != nil {
+		t.Fatalf("attemptA (the winner) must post cleanly, got %v", errA)
+	}
+	// X5: attemptB, the loser, must see the WRAPPED sentinel, never the
+	// raw ledger error.
+	if !errors.Is(errB, ErrDepositIntentAlreadyResolved) {
+		t.Fatalf("X5: expected attemptB to receive ErrDepositIntentAlreadyResolved (the mapped sentinel), got %v", errB)
+	}
+	if !strings.Contains(errB.Error(), "ledger backstop") {
+		t.Fatalf("X5: expected the wrapped error to name the ledger backstop explicitly, got %v", errB)
+	}
+
+	if n := ledgerDepositTxCount(t, pool, f.tenantID, intentID); n != 1 {
+		t.Fatalf("expected exactly 1 deposit ledger posting after the race, got %d", n)
+	}
+	assertLedgerBalanced(t, pool, f.tenantID)
+}
+
+// TestX6_ResolvedForOtherDepositPredicate_LedgerHalfAlone closes code-review
+// R3 item X6 (rv-fh3-code-review.md, 95a1c34): resolvedForOtherDeposit's
+// OWN ledger-half EXISTS clause (checking ledger_transactions directly by
+// correlation_id), isolated from the attempts-half clause TestINVDEP1_
+// Mutation1_ResolvedForOtherDepositPredicate already covers - EVERY one of
+// that test's own cases has a REAL 'succeeded' payment_attempts row
+// present, so the attempts-half clause alone already returns true
+// regardless of the ledger clause. This test constructs the ONE shape
+// where the attempts-half clause returns false (NO payment_attempts row
+// is ever 'succeeded') while a REAL ledger_transactions posting exists for
+// the same intent under a DIFFERENT idempotency key - exactly the legacy,
+// no-attempt-row InitiateDeposit shape the ledger clause exists for
+// (ledger-finance's own AM-2 confirmation §3(iii)) - so only the ledger
+// clause can be what makes the predicate return true here.
+func TestX6_ResolvedForOtherDepositPredicate_LedgerHalfAlone(t *testing.T) {
+	pool := depositV2ScratchPool(t)
+	f := seedOrchFixture(t, pool)
+
+	intentID := uuid.New()
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `INSERT INTO deposit_intents (id, tenant_id, brand_id, player_account_id, wallet_id, asset_code, amount, payment_method, status, idempotency_key)
+			VALUES ($1,$2,$3,$4,$5,'EUR',5000,'card','pending','x6-intent')`,
+			intentID, f.tenantID, f.brandID, f.playerAccountID, f.walletID); err != nil {
+			return err
+		}
+		// attemptA exists but NEVER reaches 'succeeded' - it stays
+		// 'submitting' for the whole test, so the ATTEMPTS-half clause
+		// (state = 'succeeded') has nothing to find, ever.
+		attemptA := uuid.New()
+		if _, err := tx.Exec(ctx, `INSERT INTO payment_attempts (id, tenant_id, operation, deposit_intent_id, attempt_no, payment_method, asset_code, amount,
+			state, last_evidence_kind, ever_possibly_sent, interactive, provider_id, merchant_reference, external_idempotency_key)
+			VALUES ($1,$2,'deposit',$3,1,'card','EUR',5000,'submitting','platform',false,false,'x6-provider',$4,$4)`,
+			attemptA, f.tenantID, intentID, attemptA.String()); err != nil {
+			return err
+		}
+
+		// (1) Before any posting: false via EITHER clause.
+		resolved, err := resolvedForOtherDeposit(ctx, tx, f.tenantID, intentID, nil, "x6-provider:refLegacy")
+		if err != nil {
+			return err
+		}
+		if resolved {
+			t.Error("X6 setup: expected false before any posting exists")
+		}
+
+		// A REAL ledger posting for this intent, under a key that names
+		// NO attempt at all (the legacy, no-attempt-row shape) - never
+		// linked from attemptA (which stays 'submitting', unlinked).
+		accounts, err := ledger.GetOrCreateAccounts(ctx, tx, f.tenantID,
+			ledger.AccountSpec{WalletID: &f.walletID, AccountType: ledger.AccountPlayerCash, AssetCode: "EUR"},
+			ledger.AccountSpec{AccountType: ledger.AccountPSPClearing, AssetCode: "EUR"},
+		)
+		if err != nil {
+			return err
+		}
+		p, ref := "x6-provider", "x6-legacy-ref"
+		if _, err := ledger.Post(ctx, tx, ledger.TransactionInput{
+			TenantID: f.tenantID, TransactionType: ledger.TxDeposit, IdempotencyKey: p + ":" + ref,
+			ProviderID: &p, ProviderTxID: &ref, CorrelationID: intentID,
+			Entries: []ledger.EntryInput{
+				{LedgerAccountID: accounts[1], Direction: ledger.Debit, Amount: 5000},
+				{LedgerAccountID: accounts[0], Direction: ledger.Credit, Amount: 5000},
+			},
+		}); err != nil {
+			return err
+		}
+
+		// (2) Confirm the ATTEMPTS clause alone still sees nothing: no
+		// payment_attempts row is 'succeeded' at all, right now.
+		var anySucceeded bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM payment_attempts WHERE deposit_intent_id = $1 AND state = 'succeeded')`, intentID).Scan(&anySucceeded); err != nil {
+			return err
+		}
+		if anySucceeded {
+			t.Fatal("test setup invariant violated: a payment_attempts row is 'succeeded' - this test must isolate the LEDGER clause alone")
+		}
+
+		// (3) X6: resolvedForOtherDeposit, called for a DIFFERENT key,
+		// must now return true - and it can ONLY be the ledger-half
+		// clause, since the attempts-half clause has nothing to find.
+		resolved, err = resolvedForOtherDeposit(ctx, tx, f.tenantID, intentID, nil, "x6-provider:refOther")
+		if err != nil {
+			return err
+		}
+		if !resolved {
+			t.Error("X6: expected true via the ledger-half clause alone (a real posting exists under a different key, no attempt is succeeded)")
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("X6: %v", err)
 	}
 }
