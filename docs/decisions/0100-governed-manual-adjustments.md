@@ -1,6 +1,10 @@
 # ADR 0100 — Governed manual adjustments and financial approval policies (PRH-2 K2)
 
-- **Status:** PROPOSED — **revision 2** (`architect`, 2026-09-28). NOT IMPLEMENTED. Revision 1
+- **Status:** ACCEPTED (2026-09-28). `security` CONFIRMED WITH CONDITIONS and `ledger-finance`
+  CONFIRMED WITH CONDITIONS, both on revision 2
+  (`docs/plans/prh2-hardening-round/reviews/adr-0099-0101-{security,ledger-finance}-confirmation.md`).
+  The orchestrator wrote their conditions (LF K2-a, K2-b and K3-a; security C-2 and C-4) into this text. NOT IMPLEMENTED.
+- **Revision history:** PROPOSED — **revision 2** (`architect`, 2026-09-28). Revision 1
   (`d83a71c`) was reviewed ACCEPT WITH CONDITIONS by `product-owner-proxy`, `security` and
   `ledger-finance`. This revision applies every condition (§17). **`security` and `ledger-finance`
   confirm it before any K2 code.** K2 also waits for K1 to merge.
@@ -200,7 +204,7 @@ permanent by default.
 | Check | Rule |
 |---|---|
 | Amount | `NUMERIC(38,0)`, CHECK `amount > 0 AND amount <= 9223372036854775807` (LF-12) |
-| Asset (LF ruling 3) | `asset_code` equals the wallet's asset and exists in `assets`. **Suspended asset** (`assets.active = false OR assets.platform_authorized = false`; ledger-finance confirms this definition): `goodwill_credit` is refused; `compensating_entry`, `operational_error_correction` and `external_instruction` are allowed. The rule is re-evaluated at execution. |
+| Asset (LF ruling 3) | `asset_code` equals the wallet's asset and exists in `assets`. **Suspended asset** (`assets.active = false OR assets.platform_authorized = false`, **or** the 0045 tenant-authorization layer: the tenant's `asset_authorizations` row for the asset is absent or not in force. LF confirmation K2-b; K2 pins the exact 0045 column predicate): `goodwill_credit` is refused; `compensating_entry`, `operational_error_correction` and `external_instruction` are allowed. The rule is re-evaluated at execution. |
 | Reason code | in the catalogue (§5.4); direction allowed; causation and evidence rules satisfied |
 | **Open payment exposure (LF F4, ruling 2; PREVENTIVE)** | Every `credit_player` request, whatever its reason code, is refused with `MA020 open_payment_exposure` while `player_open_payment_exposure(tenant_id, player_account_id)` is true. It is checked at submission **and** at execution. **No override.** Debits are unaffected. |
 | Non-active tenant (C-100-3; security ruling 5) | if `tenants.status <> 'active'` (read in-tx), `goodwill_credit` is refused. The status is recorded on the request. |
@@ -221,14 +225,18 @@ SELECT EXISTS (
      AND NOT EXISTS (
        SELECT 1 FROM ledger_transactions t
         WHERE t.tenant_id = a.tenant_id
-          AND t.transaction_type IN ('tombstone', 'deposit_reversal')
+          AND t.transaction_type = 'tombstone'
           AND t.provider_id = a.provider_id
           AND t.provider_tx_id = a.provider_reference))
 ```
 
 This is the ledger-side form of the reconciliation `capturedUnposted` predicate
-(`payment_statement.go:977-979`). **`ledger-finance` pins the exact key column** that the tombstone
-and reversal writers use for the original reference, before 0112 is written. An acting session
+(`payment_statement.go:977-979`). **Key column pinned by ledger-finance (K2-a):**
+- The tombstone writer keys on the **original** reference: `ProviderID = providerID`, `ProviderTxID = originalRef` (`orchestrator.go:1526-1528`).
+- The former `deposit_reversal` arm is removed. A reversal is keyed on its own reference and needs a posted original, which a `multiple_success_for_intent` attempt never has.
+- A NULL `provider_reference` keeps the exposure true (fail-closed).
+- A refund visible only on a statement does not clear it (fail-closed, accepted).
+- B-23 includes a case where a refund produces a tombstone and the exposure clears. An acting session
 reads `payment_attempts` and `deposit_intents` through ADR 0099 §6.5.
 
 ### 5.3 Keys (LF-14)
@@ -257,8 +265,8 @@ Table `ledger_adjustment_reason_codes`, written by 0112 only:
 - Causation to a `deposit` transaction is refused for every code: `compensating_entry` via the rule
   above; the others via the "player_cash leg on this wallet" rule plus an explicit type check.
 
-**UNRESOLVED — LEDGER-FINANCE CONFIRMATION REQUIRED (a conflict between ruling 1 and ruling
-5(c)).**
+**RESOLVED (ledger-finance confirmation K3-a; security C-4): the proposal below is ADOPTED.** The
+record of the conflict follows.
 - Ruling 5(c) clears `pay_declared_paid_unconfirmed` with "a `compensating_entry` with causation =
   that Step B".
 - But Step B (`withdrawal_completed`: hold → `psp_clearing`, `withdrawal.go:1446-1449`) has **no
@@ -267,8 +275,22 @@ Table `ledger_adjustment_reason_codes`, written by 0112 only:
   a causation of type `withdrawal_completed` whose `provider_tx_id` carries the reserved M2 prefix
   (ADR 0101 §5.4) and which has a `player_withdrawal_hold` leg on this wallet in the same asset. The
   same cumulative cap applies against that leg.
-- **Until ledger-finance confirms,** 0112 implements ruling 1 literally, and ADR 0101's second
-  clearing path for that kind is disabled (fail closed: the finding stays standing).
+- **Adopted with security C-4 (a)–(e) and the ledger notes.** The causation must:
+  - satisfy `left(provider_tx_id, 27) = payment_reserved_ref_prefix() AND transaction_type = 'withdrawal_completed'`;
+  - be the `ledger_transaction_id` of an **executed `m2_declare_paid`** resolution;
+  - have its `player_withdrawal_hold` leg on **this wallet** in this asset.
+
+  Further constraints:
+  - `direction = 'credit_player'` only; a debit with this causation is refused.
+  - The cumulative cap is the hold-leg amount, taken under the L2 lock.
+  - `evidence_ref_hash` is required.
+  - The Persons counted on the M2 resolution (requester or approvers) may not initiate or count as approver. This is enforced by trigger and at execution.
+  - No other causation widens, and INV-ADJ-5 still applies.
+- **Why this is tighter than rejecting it:** `operational_error_correction` and `external_instruction` could otherwise restore the player with an uncapped, unlinked credit.
+- **Implementation:**
+  - 0112 (K2) ships ruling 1 literally, because K2 merges before 0114 exists.
+  - K3 (0114) adds this causation arm, with its tests (ADR 0101 §9, §12).
+- **The compensation does not clear** `pay_declared_paid_unconfirmed`. See ADR 0101 §9(c).
 
 ## 6. Approval and execution
 
@@ -629,7 +651,7 @@ Notes:
 | B-19 | MIG | 0112 up/down/up; down refuses with rows; the kind CHECK is restored exactly |
 | B-20 | R | Classification pinned; **a fixture policy row with `base = 0` still evaluates to 1** (LF test 8); a `base = 0` insert for the mandatory class is refused by trigger |
 | B-23 | R | **Ruling 2 (LF test 4):** a credit (any code) under an open exposure is refused at submission and at execution, with **no statement source configured**; admitted after a tombstone or reversal; debits unaffected |
-| B-24 | R | **Ruling 3 (LF test 6):** suspended asset → goodwill refused, compensation succeeds; suspension between submission and execution → `refused_at_execution` for goodwill |
+| B-24 | R | **Ruling 3 (LF test 6):** suspended asset → goodwill refused, compensation succeeds; suspension between submission and execution → `refused_at_execution` for goodwill. **K2-b:** a tenant-disabled asset (0045 layer) behaves the same. |
 | B-25 | R | **Ruling 4 (LF test 7):** a post-cutover `manual_adjustment` posted by a test fixture outside a request raises `ledger_unlinked_manual_adjustment` on the next run; a request-backed one does not |
 | B-26 | R | **C-100-3:** non-active tenant → goodwill refused; other codes allowed. **K2-1:** a non-active tenant's tenant-level tightening is ignored for `payment_force_resolve` and applied for `ledger_adjustment`. |
 
@@ -683,12 +705,12 @@ drop the deferred check; drop S-2(iii) for approvers.
 ## 16. Open items
 
 1. **HD-PRH2-8:** HUMAN DECISION REQUIRED. The interim is (b).
-2. **UNRESOLVED:** the ruling 1 vs ruling 5(c) causation conflict (§5.4). Ledger-finance confirms
-   the proposed resolution; until then it fails closed.
-3. **Ledger-finance pins:**
-   - the tombstone and reversal key column in `player_open_payment_exposure` (§5.2);
-   - the suspended-asset definition (§5.2);
-   - the A8 L2 addition (§8).
+2. **RESOLVED:** the ruling 1 vs ruling 5(c) causation conflict (§5.4). It is ADOPTED with C-4 and implemented in K3.
+3. **Ledger-finance pins: DONE.**
+   - The tombstone key, with the `deposit_reversal` arm removed (K2-a, §5.2).
+   - The suspended asset now includes the 0045 tenant layer (K2-b, §5.2). K2 pins the column predicate.
+   - The A8 L2 addition is CONFIRMED (§8).
+   - Security C-2 binds K2: B-3's K1-1 negatives, and A-19 via B-22, run in K2's real acting executor transaction.
 4. **LEDGER-MANUAL-ADJ-LINK-1** (preventive link, 19 fixtures): launch-blocking for the first
    real-money tenant.
 5. **Touches additions (orchestrator, Rule 1):** `internal/reconciliation` (the §12 check). Its

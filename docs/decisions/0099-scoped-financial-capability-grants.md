@@ -1,6 +1,9 @@
 # ADR 0099 — Scoped financial capability grants on the existing RBAC (PRH-2 K1)
 
-- **Status:** PROPOSED — **revision 2** (`architect`, 2026-09-28). NOT IMPLEMENTED. Revision 1
+- **Status:** ACCEPTED (2026-09-28). `security` CONFIRMED WITH CONDITIONS (C-1, written into §6.3, §10.1 and A-4)
+  and `ledger-finance` CONFIRMED (no K1 condition), both on revision 2
+  (`docs/plans/prh2-hardening-round/reviews/adr-0099-0101-{security,ledger-finance}-confirmation.md`). NOT IMPLEMENTED.
+- **Revision history:** PROPOSED — **revision 2** (`architect`, 2026-09-28). Revision 1
   (`d83a71c`) was reviewed ACCEPT WITH CONDITIONS by `product-owner-proxy` (ACCEPT), `security` and
   `ledger-finance`. This revision applies every condition (§18). **`security` and `ledger-finance`
   confirm this revision before any K1 code.**

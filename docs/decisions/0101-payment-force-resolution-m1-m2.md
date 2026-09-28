@@ -1,6 +1,8 @@
 # ADR 0101 — Payment force-resolution M1/M2 (PRH-2 K3; amends ADR 0095 §4.8)
 
-- **Status:** PROPOSED — **revision 2** (`architect`, 2026-09-28). NOT IMPLEMENTED. Revision 1
+- **Status:** ACCEPTED (2026-09-28). `security` CONFIRMED WITH CONDITIONS (C-3, C-4) and `ledger-finance`
+  CONFIRMED WITH CONDITIONS (K3-a), both on revision 2. The orchestrator wrote their conditions into §9, §12 and §15. NOT IMPLEMENTED.
+- **Revision history:** PROPOSED — **revision 2** (`architect`, 2026-09-28). Revision 1
   (`d83a71c`) was reviewed ACCEPT (`product-owner-proxy`) and ACCEPT WITH CONDITIONS (`security`,
   `ledger-finance`). This revision applies every condition (§16). **`security` and `ledger-finance`
   confirm it before any K3 code.** K3 also waits for K2 to merge.
@@ -372,7 +374,7 @@ stated as this exact diff, not as literal identity (F12).
 | `ledger_transactions_reserved_prefix_guard` | all sessions |
 | `ledger_transactions_governed_fence` | replaced with ADR 0099 §6.6 (a) + (b) + (c) |
 | Acting policies | §6.4. Acting SELECT on `withdrawal_requests`; acting SELECT on `payment_statement_lines` is **not** added (not needed) |
-| **Reconciliation kinds** | the `reconciliation_mismatches_mismatch_kind_check` is dropped and re-added as a strict superset of the latest definition at merge (0112's), plus **`'pay_declared_paid_unconfirmed'`** and **`'pay_declared_not_paid_but_paid'`** |
+| **Reconciliation kinds** | the `reconciliation_mismatches_mismatch_kind_check` is dropped and re-added as a strict superset of the latest definition at merge (0112's), plus **`'pay_declared_paid_unconfirmed'`**, **`'pay_declared_not_paid_but_paid'`** and **`'pay_declared_paid_compensated_but_paid'`** (LF K3-a) |
 | **Up-time refusal** | if any reserved-prefix value exists (§5.4) |
 
 ### 8.5 Down
@@ -394,11 +396,20 @@ stated as this exact diff, not as literal identity (F12).
 |---|---|
 | (a) | A reserved-prefix `withdrawal_completed` **skips the settlement-reference comparison**. Amount and asset are still compared. |
 | (b) | Statement lines for an M2-declared payout resolve **by reference, then by merchant reference**. A matching `succeeded` line is a **confirmation**, counted by the metric `payment_m2_declared_paid_confirmed_total` (no tenant label); it is not a mismatch. A `declined` line → `pay_status_mismatch`. |
-| (c) | **`pay_declared_paid_unconfirmed`**, standing and **unwindowed**, is raised for every executed `m2_declare_paid` until either a confirming `succeeded` line exists in any persisted import, **or** a `compensating_entry` with causation = that Step B exists. **The second clearing path is disabled** until ledger-finance resolves the ruling 1 vs 5(c) conflict (ADR 0100 §5.4); fail closed. |
+| (c) | **`pay_declared_paid_unconfirmed`**, standing and **unwindowed**, is raised for every executed `m2_declare_paid`. It clears **only** when (i) a confirming `succeeded` line exists in any persisted import, or (ii) a future WITHDRAWAL-REVERSAL-1 posting reverses that Step B. **A `compensating_entry` credit with causation = that Step B (ADR 0100 §5.4, adopted) does not clear it** (LF K3-a). Until a reversal exists, `psp_clearing` and the `manual_adjustment` expense stay misstated. The compensation appears only as a read-time annotation ("compensated by <request>"). |
+| (c2) | **`pay_declared_paid_compensated_but_paid`** (new kind, P1, standing, **unwindowed**; security C-4(b), LF K3-a) is raised when an executed `compensating_entry` credit whose causation is an M2 Step B is followed by a confirming `succeeded` line. The over-benefit is the compensating-credit total. It clears only when executed `compensating_entry` **debits**, whose causation is that credit's own `manual_adjustment` transaction, total **at least** the credited amount. A partial recovery, or a recovery refused for insufficient funds, leaves it standing. |
 | (d) | **`pay_declared_not_paid_but_paid`**, standing and **unwindowed**, is raised for every executed `m2_declare_not_paid` whose attempt reached T14 `disputed` **or** for which any persisted import has a `succeeded` line. It clears only when executed `compensating_entry` debits with causation = the `withdrawal_failed` transaction **total at least the withdrawn amount**. That is an architect tightening of "a recovery debit": a partial recovery must not clear it. Ledger-finance confirms. It **overrides the `:950` disputed exclusion** for these attempts. |
 | (e) | The reserved id is never expected on a statement. A line carrying the prefix is refused at import (§5.4). |
 
-`docs/architecture/reconciliation-model.md` gains both kinds (edited by ledger-finance).
+`docs/architecture/reconciliation-model.md` gains all three kinds (edited by ledger-finance).
+
+**The compensating-credit causation arm (ADR 0100 §5.4, adopted; security C-4 (a)–(e), LF K3-a)** is added to the 0112
+catalogue logic by K3 in 0114. Its conditions:
+- the reserved prefix via `left()` **and** `transaction_type = 'withdrawal_completed'`;
+- an executed `m2_declare_paid` whose `ledger_transaction_id` is that causation;
+- the hold leg on this wallet and asset;
+- credit only; the cap at the hold-leg amount, under L2; evidence required;
+- Person separation from the M2 resolution.
 
 ## 10. Proposed amendment text for ADR 0095 (the orchestrator applies it)
 
@@ -475,7 +486,16 @@ Notes:
 | C-19 | R | **F13 (LF test 12):** no reconciliation detail string says M1 clears |
 | C-20 | R | A late provider decline after "declare paid": recorded, no state change, P1 raised |
 | C-21 | R | Non-active tenant: M1 and M2 available; tenant status recorded; tenant-level tightening ignored for policy |
-| C-22 | R | `pay_declared_paid_unconfirmed` stands until a confirming line (the compensation clearing path stays disabled pending ADR 0100 §5.4) |
+| C-22 | R | Compensation **annotates but does not clear** `pay_declared_paid_unconfirmed` across N runs. It clears on a confirming line. |
+| C-23 | R | **C-4(a):** a non-prefixed `withdrawal_completed`, or a prefixed transaction of another type, is refused as causation (with a mutant) |
+| C-24 | R | A causation pointing at another wallet's Step B is refused |
+| C-25 | R | A debit with a Step B causation is refused |
+| C-26 | CC | Two concurrent credits on one Step B: the cap holds under L2 |
+| C-27 | R | A compensating credit without an evidence hash is refused |
+| C-28 | R/AZ | **C-4(c):** a Person counted on the M2 resolution is refused as initiator or approver of its compensation, both at insert and at execution |
+| C-29 | R | Compensation, then a confirming line: `pay_declared_paid_unconfirmed` clears; `pay_declared_paid_compensated_but_paid` is raised; a partial recovery does not clear it; a full recovery does |
+| C-30 | INV | SUM(D) = SUM(C), and projection = recomputed, throughout C-22..C-29 |
+| C-31 | RLS | **Security C-3:** `withdrawal.Complete`/`Fail` under an acting session succeed **only** inside the governed M2 transaction. Every table they touch is covered by an acting policy or a fence. |
 
 **Mutants:**
 
@@ -539,10 +559,9 @@ Notes:
 
 ## 15. Open items
 
-1. **Ledger-finance confirms:**
-   - the ruling 1 vs 5(c) resolution (ADR 0100 §5.4). Until then, the (c) compensation clearing is
-     disabled;
-   - the full-amount clearing tightening in §9(d).
+1. **Ledger-finance: CONFIRMED.**
+   - The ruling 1 vs 5(c) resolution is ADOPTED with C-4, and the compensation does not clear (§9(c), (c2)).
+   - The full-amount clearing tightening in §9(d) is confirmed.
 2. **`payments` confirms the basis and context vocabulary** (§5.1). Automated verification of
    `reconciliation_exhausted` against persisted statement lines is a candidate follow-up, not K3
    scope.
