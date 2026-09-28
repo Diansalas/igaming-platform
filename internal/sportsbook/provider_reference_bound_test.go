@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/Diansalas/igaming-platform/internal/providerref"
+	"github.com/Diansalas/igaming-platform/internal/txscope"
 )
 
 // PROVIDER-REF-BOUND-1: every external_ref in a provider catalogue tree is
@@ -61,6 +62,66 @@ func TestValidateCatalogueReferences_EveryLevel(t *testing.T) {
 		if strings.Contains(validateCatalogueReferences(build(level, over)).Error(), over) {
 			t.Fatalf("level %d: error text leaks the value", level)
 		}
+	}
+}
+
+// spyOverBoundProvider returns a fixed, deliberately over-bound catalogue
+// and records whether it was ever called with a txscope-held ctx - a pure,
+// no-DB spy standing in for "no transaction is opened" (code review F2):
+// FetchCatalogue never takes a pgx.Tx at all, so the strongest thing a
+// no-DB unit test can show is that the ctx it hands the provider was never
+// txscope-marked, exactly the same signal the DB-backed integration tests
+// in catalogue_io_boundary_integration_test.go check.
+type spyOverBoundProvider struct {
+	calls int
+	held  int
+}
+
+func (p *spyOverBoundProvider) Catalogue(ctx context.Context) (CatalogueResult, error) {
+	p.calls++
+	if txscope.Held(ctx) {
+		p.held++
+	}
+	over := strings.Repeat("z", providerref.MaxBytes+1)
+	return CatalogueResult{Sports: []CatalogueSport{{
+		ExternalRef: "sport", Code: "x", Name: "X",
+		Competitions: []CatalogueCompetition{{
+			ExternalRef: "comp", Name: "C",
+			Events: []CatalogueEvent{{
+				ExternalRef: "ev", Name: "E",
+				Markets: []CatalogueMarket{{
+					ExternalRef: "mkt", Name: "M",
+					Selections: []CatalogueSelection{
+						{ExternalRef: over, Name: "S", OddsNumerator: 2, OddsDenominator: 1},
+					},
+				}},
+			}},
+		}},
+	}}}, nil
+}
+
+// TestFetchCatalogue_OverBoundReferenceRejectedWithoutOpeningTransaction is
+// a pure unit test (no DB, code review F2): FetchCatalogue's own
+// validateCatalogueReferences call rejects an over-bound external_ref with
+// ErrProviderReferenceInvalid, and does so without ever seeing a
+// txscope-held ctx (FetchCatalogue never opens one itself). Kills mutant
+// X2 (validation removed from FetchCatalogue) - with that mutant, this
+// test would see a nil error instead.
+func TestFetchCatalogue_OverBoundReferenceRejectedWithoutOpeningTransaction(t *testing.T) {
+	provider := &spyOverBoundProvider{}
+
+	_, err := FetchCatalogue(context.Background(), provider)
+	if err == nil {
+		t.Fatal("expected an error for an over-bound external_ref, got nil")
+	}
+	if !errors.Is(err, ErrProviderReferenceInvalid) {
+		t.Fatalf("expected ErrProviderReferenceInvalid, got %v", err)
+	}
+	if provider.calls != 1 {
+		t.Fatalf("expected exactly 1 provider call, got %d", provider.calls)
+	}
+	if provider.held != 0 {
+		t.Fatalf("expected the provider to never observe a txscope-held ctx, got %d", provider.held)
 	}
 }
 

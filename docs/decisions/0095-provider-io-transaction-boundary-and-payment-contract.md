@@ -6067,5 +6067,65 @@ adapted to the new two-step call shape with their original assertions and bounds
 **No migration.** No change to migration 0084's RLS policies or the `platform_service_id` GUC
 mechanism - `AssertPlatformServiceScope` is unchanged.
 
-Reviewers per the plan: `architect`, `security`, `code-reviewer` (pending at merge time of this
-amendment; not yet run).
+Reviewers per the plan: `architect`, `security`, `code-reviewer`.
+
+### 33.1 Code review fix round (`sportsbook`, 2026-09-28) - `docs/plans/prh2-hardening-round/reviews/e3-code-review.md`
+
+Verdict READY WITH CONDITIONS at `33213c7`; four conditions closed on this branch, all as additive
+commits on top of `33213c7` (not squashed/rebased):
+
+- **F1 (closed).** `FetchCatalogue` being "the ONLY sanctioned caller" of `Provider.Catalogue` was,
+  before this fix, a convention rather than an enforced one: the IO-1C static guard
+  (`internal/txscope/no_provider_call_in_tx_closure_static_test.go`,
+  `TestINV_IO_1c_NoAdapterCallInsideTxClosure`) scanned only `internal/{casino,kyc,payments}`, so
+  nothing caught a future call site that moved the fetch back inside a `WithPlatformService`
+  closure using an unmarked outer ctx (mutant X5b, which the runtime `txscope.Held` check alone
+  cannot see, since that ctx was never marked). The guard's `dirs` now also include
+  `internal/sportsbook` and `cmd/platform-api`, and `ioc1FlaggedMethods` now includes
+  `FetchCatalogue` (a package-level function call is still matched, since the lexical check is on
+  the selector's final identifier regardless of receiver-vs-package qualification). This makes the
+  sole-caller rule for sportsbook's provider I/O enforced the same third, static way payments'
+  `Deposit`/casino's `Launch`/KYC's `CreateVerification` already are - not merely documented.
+  Verified: the guard stays green on the current tree, and mutant X5b (fetch moved into the
+  `WithPlatformService` closure in `main.go`, called with the outer unmarked ctx) fails
+  `TestINV_IO_1c_NoAdapterCallInsideTxClosure` before being reverted.
+- **F2 (closed).** A pure, no-DB unit test
+  (`TestFetchCatalogue_OverBoundReferenceRejectedWithoutOpeningTransaction`,
+  `provider_reference_bound_test.go`) exercises `FetchCatalogue`'s own validation step directly, with
+  a spy provider proving the ctx it was called with was never txscope-marked. Kills mutant X2
+  (validation removed from `FetchCatalogue`).
+- **F3 (closed).** An integration test (`TestSyncCatalogue_DirectOverBoundResultWritesNothing`,
+  `catalogue_io_boundary_integration_test.go`) calls `SyncCatalogue` directly inside
+  `WithPlatformService` with an over-bound `CatalogueResult` that never went through
+  `FetchCatalogue` at all, proving `SyncCatalogue`'s own re-validation is a real, independent
+  control. Kills mutant X3 (re-validation removed from `SyncCatalogue`) - with that mutant removed,
+  the same over-bound `external_ref` is instead caught one layer further in, by migration-level
+  check constraint `sb_selections_external_ref_ref_bound` (a third, DB-level backstop this round did
+  not add, discovered while confirming the kill), so the mutant is still caught, just at a different
+  layer with a different error shape than the Go-level bound.
+- **F5 (closed).** `ErrCatalogueFetchRefused` is now scoped to the tx-held gate refusal only,
+  matching payments'/casino's own sentinels exactly (each covers only its own gate-level refusal,
+  never the adapter's own error) - the prior revision's doc comment incorrectly described it as also
+  wrapping ordinary provider errors. A provider error from `FetchCatalogue` is now returned as
+  `fmt.Errorf("sportsbook: fetch catalogue: %w", err)`, plain context, never
+  `ErrCatalogueFetchRefused`. `TestFetchCatalogue_ProviderErrorWritesNothing` now asserts the
+  provider error is surfaced AND is NOT `ErrCatalogueFetchRefused`;
+  `TestFetchCatalogue_RefusesUnderTxscopeHeld` is unchanged (still asserts the sentinel).
+- **F4/F6 (not closed, per the review's own severity).** F4 (Low, pre-existing, not introduced by
+  E3) is not addressed here. **F6 (forward condition, binding on the first real sportsbook
+  adapter):** `FetchCatalogue` currently applies no deadline of its own to the provider call - it
+  runs with whatever ctx the caller supplies (the root startup signal ctx, in `main.go` today, which
+  never times out short of process shutdown). A MOCK, same-process, in-memory provider has no need
+  of one. **Before any real (network) sportsbook adapter is wired, `FetchCatalogue` (or its caller)
+  must apply a bounded per-call timeout**, the same way payments'/casino's/KYC's own manifests set a
+  `CallTimeout` per outbound call (ADR 0095 §9.1 and the payments gate's own step 5). Tracked here
+  rather than in a new ADR section, since it is a direct extension of D1/D2's existing per-call
+  timeout requirement to this call site.
+- **F7 (closed, this subsection).** This subsection records the AST allow-list change
+  (`cmd/platform-api/main_construction_ast_test.go`'s `allowedProviderCallsOutsideRegistrations` gained
+  `"sportsbook.FetchCatalogue"` alongside the pre-existing `"sportsbook.SyncCatalogue"`, both already
+  covered in the original SB-CATALOGUE-IO-1 commit `33213c7`) and states plainly: F1's IO-1C static
+  guard is what now actually enforces "`FetchCatalogue` is the sole sanctioned caller of
+  `Provider.Catalogue`" - before F1, that sentence was a doc-comment convention, not a checked
+  invariant. The registry and `docs/HANDOVER.md` rows are updated by the orchestrator at merge, per
+  this file's standing convention (the orchestrator is the single writer of those files).

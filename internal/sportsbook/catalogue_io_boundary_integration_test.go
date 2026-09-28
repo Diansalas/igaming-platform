@@ -14,12 +14,14 @@ package sportsbook
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Diansalas/igaming-platform/internal/db"
+	"github.com/Diansalas/igaming-platform/internal/providerref"
 	"github.com/Diansalas/igaming-platform/internal/txscope"
 )
 
@@ -137,9 +139,11 @@ func (p errCatalogueProvider) Catalogue(_ context.Context) (CatalogueResult, err
 }
 
 // TestFetchCatalogue_ProviderErrorWritesNothing: a provider.Catalogue
-// error surfaces from FetchCatalogue (wrapped in ErrCatalogueFetchRefused)
-// and the sync never reaches WithPlatformService at all, so nothing is
-// ever written - not even a rolled-back attempt.
+// error surfaces from FetchCatalogue wrapped with plain context (NOT
+// ErrCatalogueFetchRefused - code review F5: that sentinel is reserved for
+// the tx-held gate refusal only, never an ordinary provider/network
+// failure) and the sync never reaches WithPlatformService at all, so
+// nothing is ever written - not even a rolled-back attempt.
 func TestFetchCatalogue_ProviderErrorWritesNothing(t *testing.T) {
 	pool := testPool(t)
 	prefix := "sbio-fetcherr-" + uuid.NewString()[:8]
@@ -150,11 +154,11 @@ func TestFetchCatalogue_ProviderErrorWritesNothing(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected an error, got nil")
 	}
-	if !errors.Is(err, ErrCatalogueFetchRefused) {
-		t.Fatalf("expected ErrCatalogueFetchRefused, got %v", err)
+	if errors.Is(err, ErrCatalogueFetchRefused) {
+		t.Fatalf("an ordinary provider error must NOT be ErrCatalogueFetchRefused (that sentinel is tx-held-only), got %v", err)
 	}
 	if !errors.Is(err, providerErr) {
-		t.Fatalf("expected the underlying provider error to be wrapped, got %v", err)
+		t.Fatalf("expected the underlying provider error to be surfaced, got %v", err)
 	}
 	if n := countCatalogueRowsWithPrefix(t, pool, prefix); n != 0 {
 		t.Fatalf("a failed fetch wrote %d catalogue rows", n)
@@ -182,5 +186,40 @@ func TestFetchCatalogue_RefusesUnderTxscopeHeld(t *testing.T) {
 	}
 	if provider.calls != 0 {
 		t.Fatalf("expected the provider to never be called when ctx is txscope-held, got %d calls", provider.calls)
+	}
+}
+
+// overBoundCatalogue is minimalCatalogue with its deepest external_ref
+// (the "away" selection) pushed one byte past providerref.MaxBytes.
+func overBoundCatalogue(prefix string) CatalogueResult {
+	result := minimalCatalogue(prefix)
+	result.Sports[0].Competitions[0].Events[0].Markets[0].Selections[1].ExternalRef = prefix + strings.Repeat("z", providerref.MaxBytes)
+	return result
+}
+
+// TestSyncCatalogue_DirectOverBoundResultWritesNothing is code review F3:
+// SyncCatalogue's OWN re-validation (defence in depth, independent of
+// FetchCatalogue's) is exercised directly, by calling it inside
+// WithPlatformService with an already-over-bound CatalogueResult that
+// never went through FetchCatalogue at all - proving a caller that skips
+// FetchCatalogue still cannot write a half-validated tree. Kills mutant X3
+// (re-validation removed from SyncCatalogue): with that mutant, this test
+// would see a nil error and 6 written rows instead.
+func TestSyncCatalogue_DirectOverBoundResultWritesNothing(t *testing.T) {
+	pool := testPool(t)
+	prefix := "sbio-syncdirect-" + uuid.NewString()[:8]
+	result := overBoundCatalogue(prefix)
+
+	err := pool.WithPlatformService(context.Background(), db.ServiceSportsbookCatalogueSync, func(ctx context.Context, tx pgx.Tx) error {
+		return SyncCatalogue(ctx, tx, result)
+	})
+	if err == nil {
+		t.Fatal("expected an error, got nil")
+	}
+	if !errors.Is(err, ErrProviderReferenceInvalid) {
+		t.Fatalf("expected ErrProviderReferenceInvalid, got %v", err)
+	}
+	if n := countCatalogueRowsWithPrefix(t, pool, prefix); n != 0 {
+		t.Fatalf("a directly-called SyncCatalogue with an over-bound result wrote %d catalogue rows", n)
 	}
 }
