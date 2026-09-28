@@ -36,60 +36,14 @@ import (
 )
 
 // --- shared extensions to lockorder_harness_test.go for this file only ----
-
-// a7WaitAnyLockWaiter polls pg_locks for ANY not-granted lock request (row,
-// advisory, or otherwise) from a backend pid not already in exclude. Needed
-// (rather than a relation-scoped join, e.g. `pg_locks JOIN pg_class ON
-// relation`) because row-level `FOR UPDATE` contention is represented in
-// pg_locks as locktype = 'transactionid' with relation IS NULL - the waiter
-// waits on the lock-holder's XID, not a relation-scoped lock row - and
-// advisory locks likewise carry relation = NULL.
 //
-// Scoped to pg_stat_activity.datname = current_database(): this suite runs
-// against a private, per-test scratch database on a Postgres CLUSTER that
-// may be shared with other agents' concurrent test runs (their own,
-// unrelated scratch/private databases on the same instance) - an
-// unscoped, cluster-wide `pg_locks` scan can otherwise pick up a
-// completely unrelated backend's not-granted lock and misidentify it as
-// this test's own racer, an observed source of flakiness once multiple
-// agents run concurrently on the same Postgres instance.
-func a7WaitAnyLockWaiter(t *testing.T, pool *db.Pool, exclude map[int]bool, timeout time.Duration) (int, bool) {
-	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		var pid int
-		found := false
-		err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
-			rows, err := tx.Query(ctx,
-				`SELECT l.pid FROM pg_locks l
-				 JOIN pg_stat_activity a ON a.pid = l.pid
-				 WHERE NOT l.granted AND a.datname = current_database()`)
-			if err != nil {
-				return err
-			}
-			defer rows.Close()
-			for rows.Next() {
-				var p int
-				if err := rows.Scan(&p); err != nil {
-					return err
-				}
-				if !exclude[p] {
-					pid = p
-					found = true
-				}
-			}
-			return rows.Err()
-		})
-		if err != nil {
-			t.Fatalf("scan pg_locks: %v", err)
-		}
-		if found {
-			return pid, true
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	return 0, false
-}
+// a7WaitAnyLockWaiter and a7HoldRow used to live here. Code review
+// (rv-fh3-code-review.md, 95a1c34) found this branch's copies collided with
+// an independently-written pair on the payments/callback (FH-3) branch, and
+// designated these (FH-6's) versions canonical - they now live in
+// a7_helpers_integration_test.go, folding in FH-3's clearer "no row to
+// lock" error. Deleted here to avoid a "redeclared" build failure now that
+// both branches are merged.
 
 // a7ContainsUUID reports whether ids contains id - the uuid.UUID analogue
 // of lockorder_harness_test.go's loContains ([]int only).
@@ -100,18 +54,6 @@ func a7ContainsUUID(ids []uuid.UUID, id uuid.UUID) bool {
 		}
 	}
 	return false
-}
-
-// a7HoldRow holds a FOR UPDATE row lock on table WHERE id = rowID until
-// release() is called - the generic parent-row blocker every test below
-// uses (deposit_intents, withdrawal_requests).
-func a7HoldRow(t *testing.T, pool *db.Pool, tenantID uuid.UUID, table string, rowID uuid.UUID, name string) *loBlocker {
-	t.Helper()
-	return loHoldWith(t, pool, tenantID, name, func(ctx context.Context, tx pgx.Tx) error {
-		var id uuid.UUID
-		err := tx.QueryRow(ctx, `SELECT id FROM `+table+` WHERE id = $1 FOR UPDATE`, rowID).Scan(&id)
-		return err
-	})
 }
 
 // a7HoldPersonLock holds rg's own L0.4 advisory lock

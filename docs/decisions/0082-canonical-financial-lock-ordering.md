@@ -4,6 +4,8 @@
 
 *Status note 2026-09-26: "design only" below is historical. §4 was implemented in Stage 9.1 (LOCK-1 closed; task S91-07: `internal/ledger/lockorder.go` and call sites — Go only, no migration), and Amendment A4 was applied in Stage 10 W1 with sportsbook settlement (migration `0091_sportsbook_settlement`). See `docs/progress.md` "Stage 9.1" and "Stage 10 — W1", `docs/governance/task-registry.md` S91-07, and `docs/governance/stage-10-completion-report.md`.*
 
+*Status note 2026-09-28: Amendment A7 (PRH-I1/FH-3/FH-6, payment_attempts/T1p/R0) is now `IMPLEMENTED`, per `ledger-finance`'s closure ruling in `docs/plans/payment-readiness/rv-a7-tests.md` ("A7 closure review (FH-3c, `92f5889`)", `057587c`). See Amendment A7's own Status line at the end of this file for detail.*
+
 Accepted — **design only**. No Go source file and no migration is changed
 by this ADR's own dispatch. Implementation is delegated to
 `ledger-finance` (with `bonus-engine` for Workstream C), who must
@@ -37,7 +39,9 @@ the sweeper batch lease claims with `SKIP LOCKED` only; and rule N1 fixes
 that RG/Risk/KYC gates taking L0.x advisories run before any L1 parent
 lock in the same tx. No new named exception. See "Amendment A7" at the
 end of this file; the §2.1 L1 row and R8 are to be read with it.
-Design `ACCEPTED`; `NOT IMPLEMENTED` (target PRH-I1).
+Design `ACCEPTED`; `IMPLEMENTED` (2026-09-28, per `ledger-finance`'s
+closure ruling, `docs/plans/payment-readiness/rv-a7-tests.md`, `057587c` -
+see Amendment A7's own Status line at the end of this file).
 
 ## Context
 
@@ -1758,22 +1762,33 @@ PRH-I1 lands, as A4 and A6 did.
 updated to the as-built sequence, per the promise directly above. Status
 revised accordingly - see below.)*
 
-**Status.** Design `ACCEPTED`. `PARTIALLY IMPLEMENTED` (`payments` +
-`ledger-finance`, as of 2026-09-27). What holds: T1p, R0, and the deposit
-T1/T2/evidence paths match the (6) design table and the as-built §1.6/§1.7
-rows above; the sweeper batch lease (`claimBatch`) now also closes SP-C
-(FH-6 ledger-finance ruling, V1: `AND NOT (state = 'submitting' AND
-lease_until > now() AND lease_owner IS DISTINCT FROM 'sweeper-batch')`,
-plus its own permanent reproduction test); most of (7)'s required tests
-exist and pass (sweeper-vs-callback on a withdrawal; a deferred receipt vs.
-a fresh callback; N1 self-exclusion; the RG-gate-after-parent-lock and
-SKIP-LOCKED mutation checks; the two `SecondBlocksOnReceiptKey` R0 tests,
-now asserting the block is specifically on the receipt-key insert, not
-merely "blocked by the right pid"). What is still open, `NOT IMPLEMENTED`:
-the sweeper-vs-callback test on the SAME DEPOSIT intent (#1a) is owned by
-the double-credit/A7-TOMB-1 fix and deliberately excluded from this
-branch (see `PAY-DOUBLE-CREDIT-1`, `docs/plans/payment-readiness/
-double-credit-reconciliation.md`); the receipt-after-L1-lock mutation
-check (#5c) belongs to the same owner. `IMPLEMENTED` requires both of
-those, plus a final `ledger-finance` gate review of the complete, as-built
-lock sequence including their fix.
+*(Updated 2026-09-28: status revised from `PARTIALLY IMPLEMENTED` to
+`IMPLEMENTED`, per `ledger-finance`'s own closure ruling in
+`docs/plans/payment-readiness/rv-a7-tests.md`, "A7 closure review (FH-3c,
+`92f5889`)" section, commit `057587c` - "A7 status ruling: IMPLEMENTED...
+Owner action: the ADR 0082 status line must be updated from 'PARTIALLY
+IMPLEMENTED' to 'IMPLEMENTED', citing this section." That review found:
+all eight §(7) required tests present and substantive, each asserting
+outcome, blocking point and the balance/rebuild invariants (#1a, #1b, #2
+with A7-C1, #3, #4, #5a, #5b, #5c); the three named mutants (5a/5b/5c)
+each killed by a permanent test; the §1.6/§1.7 as-built inventory rows
+present (this file, below); both halves gate-reviewed by `ledger-finance`
+(payout in `rv-prh-i1-payout-ledger.md`, deposit in `rv-fh3-ledger.md`).
+Item #1a (the sweeper-vs-callback race on the same deposit intent) and
+#5c (the tombstone-branch receipt-after-L1-lock mutation check), both
+previously open and owned by the double-credit/A7-TOMB-1 fix (`FH-3`,
+outside this branch's scope), are now landed and verified there -
+`TestA7_1a_SweeperClaimVsCallbackPhaseC_SameDepositIntent` and
+`TestA7_5c_TombstoneBranch_SecondIdenticalReversalWaitsOnReceiptInsert`.)*
+
+**Status.** Design `ACCEPTED`. `IMPLEMENTED` (`payments` + `ledger-finance`,
+as of 2026-09-28). T1p, R0, and the deposit T1/T2/evidence paths match the
+(6) design table and the as-built §1.6/§1.7 rows above; the sweeper batch
+lease (`claimBatch`) closes SP-C (FH-6 ledger-finance ruling, V1: `AND NOT
+(state = 'submitting' AND lease_until > now() AND lease_owner IS DISTINCT
+FROM 'sweeper-batch')`, plus its own permanent reproduction test); all
+eight of (7)'s required tests exist, pass, and are gate-reviewed. The
+residual, non-blocking items (a FIFO lock-queue assumption documented in
+`#1a`'s own test, and `#5c`'s waiter being identified by query text only,
+not also `wait_event_type = 'Lock'`) do not affect this status, per the
+same ruling.
