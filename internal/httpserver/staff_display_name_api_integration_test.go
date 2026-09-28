@@ -197,11 +197,14 @@ func TestStaffDisplayNameAPI_HygieneRefusals(t *testing.T) {
 	staffTok := a.token(staff, tenant, auth.RoleSupport, auth.PrincipalStaff)
 
 	cases := map[string]string{
-		"empty":         "",
-		"too_long":      strings.Repeat("a", 101),
-		"control_char":  "Bad\u0007Name",
-		"bidi_override": "Bad" + string(rune(0x202E)) + "Name",
-		"zero_width":    "Bad" + string(rune(0x200B)) + "Name",
+		"empty":              "",
+		"too_long":           strings.Repeat("a", 101),
+		"control_char":       "Bad\u0007Name",
+		"bidi_override":      "Bad" + string(rune(0x202E)) + "Name",
+		"zero_width":         "Bad" + string(rune(0x200B)) + "Name",
+		"word_joiner":        "Bad" + string(rune(0x2060)) + "Name", // G1-C3
+		"byte_order_mark":    "Bad" + string(rune(0xFEFF)) + "Name", // G1-C3
+		"arabic_letter_mark": "Bad" + string(rune(0x061C)) + "Name", // G1-C3
 	}
 	for name, value := range cases {
 		t.Run(name, func(t *testing.T) {

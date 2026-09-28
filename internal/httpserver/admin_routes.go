@@ -1444,7 +1444,16 @@ func newSelfUpdateStaffDisplayNameHandler(deps Deps) http.HandlerFunc {
 			})
 		}
 		if tc.TenantID == uuid.Nil {
-			err = deps.DB.WithoutTenant(r.Context(), fn)
+			// G1-C2 (security review): WithPlatformAdmin, not WithoutTenant -
+			// a platform_admin self-rename is still a genuinely
+			// platform-scoped write, and WithPlatformAdmin is this
+			// codebase's own sanctioned way to make one (sets
+			// app.platform_admin_principal_id, matching every other
+			// platform-scope staff_users write in this file).
+			// WithoutTenant sets no GUC at all, which is weaker than
+			// necessary for a write path even though staff_users' own
+			// dual_scope_isolation policy happens to admit it either way.
+			err = deps.DB.WithPlatformAdmin(r.Context(), subjectID, fn)
 		} else {
 			err = deps.DB.WithTenant(r.Context(), tc.TenantID, fn)
 		}

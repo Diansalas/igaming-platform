@@ -197,10 +197,14 @@ var ErrInvalidDisplayName = errors.New("identity: invalid display_name")
 // isBidiOrZeroWidthFormatRune reports whether r is one of the Unicode
 // format characters ADR 0104's security confirmation (N-3) requires
 // display_name to refuse, on top of plain control characters: the bidi
-// overrides U+202A-U+202E, the bidi isolates U+2066-U+2069, and the
-// zero-width characters U+200B-U+200F. Any of these could make a
-// displayed name visually misrepresent a different actor's identity in
-// the tenant audit projection (ADR 0104 §5.4).
+// overrides U+202A-U+202E, the bidi isolates U+2066-U+2069, the
+// zero-width characters U+200B-U+200F, the word-joiner/invisible-operator
+// block U+2060-U+2064, the zero-width no-break space/BOM U+FEFF, and the
+// Arabic Letter Mark U+061C (G1-C3, security review 2026-09-28: the
+// original set missed these three). Any of these could make a displayed
+// name visually misrepresent a different actor's identity in the tenant
+// audit projection (ADR 0104 §5.4). Mirrors migration 0109's
+// staff_users_display_name_hygiene CHECK exactly - keep both in sync.
 func isBidiOrZeroWidthFormatRune(r rune) bool {
 	switch {
 	case r >= 0x202A && r <= 0x202E:
@@ -208,6 +212,12 @@ func isBidiOrZeroWidthFormatRune(r rune) bool {
 	case r >= 0x2066 && r <= 0x2069:
 		return true
 	case r >= 0x200B && r <= 0x200F:
+		return true
+	case r >= 0x2060 && r <= 0x2064:
+		return true
+	case r == 0xFEFF:
+		return true
+	case r == 0x061C:
 		return true
 	default:
 		return false

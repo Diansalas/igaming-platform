@@ -19,6 +19,14 @@ func TestValidateDisplayName(t *testing.T) {
 	bidiIsolate := "Bad" + string(rune(0x2066)) + "name"
 	zeroWidthSpace := "Bad" + string(rune(0x200B)) + "name"
 	zeroWidthBoundary := "Bad" + string(rune(0x200F)) + "name"
+	// G1-C3 (security review, 2026-09-28): the original N-3 set missed
+	// these three - word-joiner/invisible-operators U+2060-U+2064, the
+	// zero-width no-break space/BOM U+FEFF, and the Arabic Letter Mark
+	// U+061C.
+	wordJoiner := "Bad" + string(rune(0x2060)) + "name"
+	invisiblePlus := "Bad" + string(rune(0x2064)) + "name"
+	byteOrderMark := "Bad" + string(rune(0xFEFF)) + "name"
+	arabicLetterMark := "Bad" + string(rune(0x061C)) + "name"
 
 	cases := []struct {
 		name    string
@@ -40,6 +48,11 @@ func TestValidateDisplayName(t *testing.T) {
 		// N-3: zero-width characters U+200B-U+200F.
 		{"zero width space (U+200B)", zeroWidthSpace, true},
 		{"zero width, boundary char (U+200F)", zeroWidthBoundary, true},
+		// G1-C3: word-joiner/invisible-operators, BOM, and Arabic Letter Mark.
+		{"word joiner (U+2060)", wordJoiner, true},
+		{"invisible plus (U+2064)", invisiblePlus, true},
+		{"zero-width no-break space / BOM (U+FEFF)", byteOrderMark, true},
+		{"Arabic letter mark (U+061C)", arabicLetterMark, true},
 		// A <script> tag contains no control/bidi/zero-width characters at
 		// all - it is a valid display_name at the hygiene layer; output
 		// encoding (the JSON encoder) is what neutralizes it on the read

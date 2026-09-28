@@ -166,6 +166,50 @@ func TestMigration0109_Down_RefusesWhenDisplayNameSet(t *testing.T) {
 	}
 }
 
+// m0109SeedTenantStaff seeds a TENANT-scoped (not platform) staff_users
+// row for tenantID.
+func m0109SeedTenantStaff(t *testing.T, pool *db.Pool, tenantID uuid.UUID) uuid.UUID {
+	t.Helper()
+	id := uuid.New()
+	if err := pool.WithTenant(context.Background(), tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `INSERT INTO staff_users (id, tenant_id, email, password_hash, role) VALUES ($1, $2, $3, 'x', 'tenant_admin')`,
+			id, tenantID, "m0109-tenant-staff-"+id.String()+"@example.com")
+		return err
+	}); err != nil {
+		t.Fatalf("seed tenant staff: %v", err)
+	}
+	return id
+}
+
+// TestMigration0109_Down_RefusesWhenTenantStaffDisplayNameSet is G1-C1
+// (security review, 2026-09-28): staff_users is FORCE ROW LEVEL SECURITY,
+// and a connection with no app.tenant_id set (the shape the down
+// migration's own EXISTS check originally ran under) can see ONLY
+// platform staff (tenant_id IS NULL), per dual_scope_isolation (migration
+// 0011) - so a check that only ever looked with no GUC set would be
+// blind to a TENANT staff member's display_name and let the column be
+// dropped while real tenant data still existed. This test uses a tenant
+// (not platform) staff row specifically to catch that gap; the fix loops
+// over every tenant, setting app.tenant_id for each pass.
+func TestMigration0109_Down_RefusesWhenTenantStaffDisplayNameSet(t *testing.T) {
+	pool := m0109ScratchAllMigrations(t, "m0109tstaff_")
+	tenantID := m0109SeedTenant(t, pool)
+	staffID := m0109SeedTenantStaff(t, pool, tenantID)
+
+	if err := pool.WithTenant(context.Background(), tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `UPDATE staff_users SET display_name = 'Tenant Staffer' WHERE id = $1`, staffID)
+		return err
+	}); err != nil {
+		t.Fatalf("seed tenant staff display_name: %v", err)
+	}
+
+	if _, err := pool.MigrateDown(context.Background(), m0109RealMigrationsDir(t), 1); err == nil {
+		t.Fatal("expected the down migration to refuse with a TENANT staff display_name present")
+	} else if !strings.Contains(err.Error(), "display_name set") {
+		t.Fatalf("expected the display_name refusal message, got: %v", err)
+	}
+}
+
 func TestMigration0109_Down_SucceedsWhenNeitherPresent(t *testing.T) {
 	pool := m0109ScratchAllMigrations(t, "m0109clean_")
 	if _, err := pool.MigrateDown(context.Background(), m0109RealMigrationsDir(t), 1); err != nil {

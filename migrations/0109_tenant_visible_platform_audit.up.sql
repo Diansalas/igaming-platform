@@ -93,8 +93,12 @@ ALTER TABLE staff_users ADD COLUMN display_name TEXT NULL
         OR (
             char_length(display_name) BETWEEN 1 AND 100
             AND display_name !~ '[[:cntrl:]]'
-            -- Bidi overrides U+202A-U+202E, isolates U+2066-U+2069, and
-            -- zero-width characters U+200B-U+200F.
-            AND display_name !~ '[‪-‮⁦-⁩​-‏]'
+            -- Bidi overrides U+202A-U+202E, isolates U+2066-U+2069,
+            -- zero-width characters U+200B-U+200F, word-joiner/invisible
+            -- operators U+2060-U+2064, the zero-width no-break
+            -- space/BOM U+FEFF, and the Arabic Letter Mark U+061C
+            -- (G1-C3, security review 2026-09-28: the original set missed
+            -- these).
+            AND display_name !~ '[‪-‮⁦-⁩​-‏⁠-⁤﻿؜]'
         )
     );

@@ -1,6 +1,14 @@
 PRH-2 G1 (KS-AUDIT-TENANT-1, ADR 0104) - mutation-kill evidence
 ================================================================
 
+Count: 9 mutations total from ADR 0104 §7's MUT list - 8 KILLED (by a
+dedicated test each, confirmed FAIL-with-mutation/PASS-without) and 1
+(mutation 9, the chain-from-a-platform-scope-query candidate) disclosed as
+unreachable by construction rather than independently mutated - see its
+own entry below for why. The security review's re-run independently
+re-killed mutations 1 and 3 and confirmed this 8+1=9 count
+(g1-security.md, G1-I3).
+
 Method: two private, disposable databases (PRIV_DB=g1_audit_1 for the
 normal test suite, PRIV_DB=g1_audit_mut for live mutation) were built by
 the private harness (priv_db.sh) from this branch's on-disk migrations.
