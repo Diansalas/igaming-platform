@@ -212,9 +212,15 @@ func TestRaiseFailed_MalformedInsertsRefused(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
+			// Code review F-13/M6: each subtest uses its OWN discriminator
+			// (never the shared literal "ignored") so a subtest that
+			// somehow got past the trigger under a mutant fails on ITS OWN
+			// validation, never on a UNIQUE constraint collision with a
+			// previous subtest's row sharing the same dedup key.
+			discriminator := "malformed-" + c.name + "-" + uuid.NewString()
 			err := pool.WithPlatformService(context.Background(), db.ServiceAlertDispatcher, func(ctx context.Context, tx pgx.Tx) error {
-				_, err := tx.Exec(ctx, `INSERT INTO alerts (tenant_id, subject_tenant_id, kind, discriminator, attributes) VALUES (NULL, NULL, $1, 'ignored', $2::jsonb)`,
-					string(KindAlertingRaiseFailed), c.attrs)
+				_, err := tx.Exec(ctx, `INSERT INTO alerts (tenant_id, subject_tenant_id, kind, discriminator, attributes) VALUES (NULL, NULL, $1, $2, $3::jsonb)`,
+					string(KindAlertingRaiseFailed), discriminator, c.attrs)
 				return err
 			})
 			if err == nil {
