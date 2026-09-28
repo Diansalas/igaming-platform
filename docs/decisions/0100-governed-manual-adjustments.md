@@ -784,3 +784,10 @@ These bind K2. The sources are `reviews/k1-security.md`, `reviews/k1-ledger-fina
 - **LF N-2:** after K2's acting SELECT on `ledger_accounts` lands, A-4/B-16 must re-assert that a non-governed `ledger_entries` insert is refused.
 - **Migration tests:** migrate a scratch DB only through 0113 (the `scratchPoolThrough0110` pattern).
 - **Architect R-12 ruling, I-5:** executors select and lock `FOR SHARE` the grant **in force at `now()`** (`revoked_at IS NULL AND valid_from <= now() AND (valid_until IS NULL OR now() < valid_until)`), never "the unrevoked grant". Several unrevoked rows may exist per key once renewals are queued or grants have expired.
+- **Security K1 re-check hard gates (before K2 merges; `reviews/k1-security-recheck.md`):**
+  - **K2-G1:** A-18 false negatives fixed. Guards must be positive, `true` arms are flagged, SELECT NULL arms are allowed only for the §6.2 allowlist, plus a dynamic acting-session row-visibility check.
+  - **K2-G2:** an A-4 case where an acting session reads another tenant's grants and sees 0 (kills M9), plus a rolled-back-DDL layered test of the setter's tenant arm.
+  - **K2-G3:** an A-8 acting case: suspend the grantee after the grant; `WithPlatformActingInTenant` must give CG020 (kills M10).
+  - **K2-G4:** K2-P2..P4.
+  - The "drop the grant function from one acting policy" mutant is mandatory for every acting policy K2 adds.
+
