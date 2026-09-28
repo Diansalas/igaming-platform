@@ -372,3 +372,150 @@ mutant name, ledger-finance re-review note N-1).
     (`git diff --stat internal/alerting/guarded.go`: no output).
 
 Result for this round: 1/1 attempted mutant killed (MF).
+
+------------------------------------------------------------------------
+
+Round 5 (code re-review C-1/C-2/C-3/C-4, 2026-09-28): escalation
+positive-testing, platform-admin scope-kind coverage, principal-scope
+scope-kind + isolation coverage, stale-reclaim skip-delivery
+
+=============================================================================
+
+MB2. Escalation disabled entirely (`w.due = false` in the "sent" case of
+readDueWork, in place of the real predicate) still passes the whole
+suite (code review C-1: "escalation has no positive test").
+    File: internal/alerting/dispatcher.go, readDueWork's `case *event ==
+    "sent":` branch.
+    Mutation: `w.due = !w.acked && nextEscalationAt != nil &&
+    !now.Before(*nextEscalationAt)` replaced with `w.due = false`.
+    Killed by: TestDispatcher_EscalationFiresToRoutedStep and
+    TestDispatcher_EscalationFiresToUnroutedStep (both new this round) -
+    an un-acked alert is sent at step 0, the manual clock is advanced
+    past escalate_after, and a second pass is asserted to produce either
+    a `sent` row at step 1 (a step-1 route exists) or an `unrouted` row
+    at step 1 (no step-1 route exists).
+        (priv_test.sh -tags integration -run
+         'TestDispatcher_EscalationFiresToRoutedStep|TestDispatcher_EscalationFiresToUnroutedStep'
+         ./internal/alerting/..., PRIV_DB=ialert9)
+    Observed failure with the mutation applied:
+        dispatcher_hardening_integration_test.go:163: expected latest
+        delivery (event="sent", step=1), got (event="sent", step=0)
+        dispatcher_hardening_integration_test.go:192: expected latest
+        delivery (event="unrouted", step=1), got (event="sent", step=0)
+    Restored: dispatcher.go byte-identical to the committed version
+    (`git diff --stat internal/alerting/dispatcher.go`: no output);
+    PRIV_DB rebuilt clean before continuing.
+
+MG. The `ScopePlatformAdmin` case removed from `freshReadCommittedRunner`
+(falling through to the `default:` refusing branch) still passes the
+whole suite (code review C-2).
+    File: internal/alerting/scope.go, freshReadCommittedRunner.
+    Mutation: the `case ScopePlatformAdmin: return
+    NewPlatformAdminRunner(pool, scope.PlatformAdminID)` case deleted,
+    leaving only `default:`.
+    Killed by: TestFlush_PlatformAdminRunner_PersistsWithRaisedByScope
+    (new this round) - forces a genuine, transient in-tx swallow via a
+    subject_tenant_id FK violation (class 23, swallowable) raised through
+    NewPlatformAdminRunner, creates the missing subject tenant for real,
+    then asserts the alert persists via Flush's detached retry with
+    raised_by_scope = 'platform_admin'.
+        (priv_test.sh -tags integration -run
+         TestFlush_PlatformAdminRunner_PersistsWithRaisedByScope
+         ./internal/alerting/..., PRIV_DB=ialert9)
+    Observed failure with the mutation applied:
+        alert_raise_detached_exhausted kind=reconciliation.ledger_projection_drift
+        sqlstate_class=58 error="alerting: freshReadCommittedRunner:
+        unknown ScopeKind 2 - refusing rather than guessing a scope"
+        code_c2_c3_integration_test.go:144: read back after flush: no
+        rows in result set (mutant MG: ...)
+    Also independently confirmed via
+    TestFreshReadCommittedRunner_KnownKindsDoNotRefuse (already existing,
+    scope_test.go), which failed with "scope kind 2 unexpectedly hit the
+    refusing default case".
+    Restored: scope.go byte-identical to the committed version (`git diff
+    --stat internal/alerting/scope.go`: no output); PRIV_DB rebuilt clean
+    before continuing.
+
+MF (re-verified for the principal-scope path, code review C-3).
+`Pending.Flush`'s detached retry using `p.runner` directly instead of
+`freshReadCommittedRunner(...)` still passes
+TestFlush_PrincipalRunner_PersistsWithRaisedByScope's persistence-only
+half; the invocation-count assertion is what catches it, exactly as
+Round 4 established for the REPEATABLE READ snapshotRunner path.
+    File: internal/alerting/guarded.go, Pending.Flush.
+    Mutation: same as Round 4 - `retryRunner := freshReadCommittedRunner(
+    p.runner.Pool(), p.runner.Scope())` replaced with `retryRunner :=
+    p.runner`.
+    Killed by: TestFlush_PrincipalRunner_PersistsWithRaisedByScope (new
+    this round, code review C-3) via `spyPrincipalRunner`, which wraps a
+    real `db.WithPrincipalScope` call and records every invocation's
+    `transaction_isolation` the same way `snapshotRunner` does for the
+    REPEATABLE READ path - the test asserts the wrapped runner was
+    invoked exactly once. TestLFC2_RaiseGuardedDefersInsteadOfRaisingUnderRepeatableRead
+    (Round 4's test) also still kills the same mutation, confirmed
+    together in this round.
+        (priv_test.sh -tags integration -run
+         'TestLFC2_RaiseGuardedDefersInsteadOfRaisingUnderRepeatableRead|TestFlush_PrincipalRunner_PersistsWithRaisedByScope'
+         ./internal/alerting/..., PRIV_DB=ialert9)
+    Observed failure with the mutation applied:
+        code_c2_c3_integration_test.go:239: expected the principal runner
+        to be invoked exactly once (the original raise), got 2
+        invocations (isolations: [read committed read committed]) - the
+        detached retry must use freshReadCommittedRunner, never the
+        original runner
+        lf_c2_integration_test.go:126: expected the snapshot runner to be
+        invoked exactly once (the original raise), got 2 invocations
+        (isolations: [repeatable read repeatable read]) - ...
+    Note: for the principal-scope path both the mutated and the correct
+    runner report "read committed" (NewPrincipalRunner never opens a
+    snapshot) - unlike the REPEATABLE READ case, the isolation VALUE does
+    not distinguish the mutant here; only the invocation COUNT does. Both
+    checks are asserted in the same test per the code reviewer's request.
+    Restored: guarded.go byte-identical to the committed version (`git
+    diff --stat internal/alerting/guarded.go`: no output); PRIV_DB
+    rebuilt clean before continuing.
+
+MC4. A reclaimed stale claim whose new attempt number has already
+reached MaxAttempts is delivered anyway instead of being recorded 'dead'
+directly (code review C-4, "the stale-reclaim residuals").
+    File: internal/alerting/dispatcher.go, readDueWork's "claimed" case.
+    Mutation: `w.staleExhausted = w.attemptNo >= d.config.MaxAttempts`
+    replaced with `w.staleExhausted = false`.
+    Killed by: TestDispatcher_StaleClaimReclaimBeyondMaxAttemptsSkipsDelivery
+    (new this round) - MaxAttempts=1, the one and only attempt is
+    stranded as 'claimed' and reclaimed as attempt 1 (already past the
+    single-attempt budget); asserts the sink's Attempts is empty and the
+    alert goes straight to 'dead'.
+    Distinguished from the pre-existing TestDispatcher_StaleClaimReclaimedThenDead
+    (MaxAttempts=2, reclaim to attempt 1 is still WITHIN budget and must
+    still be delivered once, then recorded dead via the ordinary
+    recordFailedOrDead path after that delivery also fails) - both tests
+    pass against the corrected code, confirming the boundary
+    (w.attemptNo >= MaxAttempts, not w.attemptNo+1 >= MaxAttempts) is
+    exactly right.
+        (priv_test.sh -tags integration -run 'TestDispatcher_StaleClaim'
+         ./internal/alerting/..., PRIV_DB=ialert9)
+    Observed failure with the mutation applied:
+        dispatcher_hardening_integration_test.go:436: expected NO
+        delivery attempt for a reclaim that already exceeds MaxAttempts,
+        got 1
+    Restored: dispatcher.go byte-identical to the committed version
+    (`git diff --stat internal/alerting/dispatcher.go`: no output);
+    PRIV_DB rebuilt clean before continuing.
+
+Result for this round: 4/4 attempted mutants killed (MB2, MG, MF
+re-verified, MC4).
+
+C-4's other two items (bounding Deliver's context with a timeout derived
+from ClaimLease, and the idempotency-key policy decision) are
+implementation/documentation changes rather than mutants with a
+dedicated kill test - see docs/decisions/0102-durable-alerting-and-
+provider-neutral-delivery.md §16.3 for the idempotency-key justification.
+No dedicated mutation test exists for the Deliver timeout bound itself
+(it is a defence-in-depth measure against a hung Sink, not a behaviour
+the existing unit/integration suite can trigger with a MockSink that
+always returns synchronously) - this is disclosed as PARTIALLY VERIFIED:
+the timeout is wired in (`context.WithTimeout(ctx, d.config.ClaimLease/2)`
+in processOne) and the full existing suite (including -race) passes with
+it in place, but no test forces an actual slow/hung Deliver call to
+observe the timeout firing.

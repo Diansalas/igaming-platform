@@ -255,6 +255,15 @@ type dueAlert struct {
 	// repeating an INSERT ... ON CONFLICT DO NOTHING that can never
 	// insert a row.
 	wasUnrouted bool
+
+	// staleExhausted is set when this row is a reclaimed stale claim
+	// (readDueWork's "claimed" case) whose new attempt number has ALREADY
+	// reached d.config.MaxAttempts (code review C-4): processOne must
+	// record 'dead' directly, without ever calling Sink.Deliver again -
+	// a channel that is wedged badly enough to strand its lease should
+	// not get one more live delivery attempt after every retry budget is
+	// already spent; it is already dead, the reclaim just discovered it.
+	staleExhausted bool
 }
 
 // RunOnce performs exactly one dispatcher pass: read due work (a short
@@ -379,6 +388,18 @@ func (d *Dispatcher) readDueWork(ctx context.Context, tx pgx.Tx, now time.Time) 
 			if stale {
 				recordStaleClaim(ctx)
 				slog.Default().Warn("alert_dispatcher_stale_claim_reclaimed", "alert_id", w.id, "escalation_step", *step, "attempt_no", *attemptNo)
+				// Code review C-4: the reclaimed attempt number
+				// (w.attemptNo) is still a LEGITIMATE attempt as long as
+				// it is within the MaxAttempts budget - exactly like an
+				// ordinary failed delivery's last attempt (attemptNo ==
+				// MaxAttempts-1) still gets to run and only becomes
+				// 'dead' AFTER it also fails (recordFailedOrDead). Only a
+				// reclaim landing at or past the budget itself
+				// (w.attemptNo >= MaxAttempts, i.e. the whole budget was
+				// already spent by earlier attempts before this stale one
+				// was even reclaimed) skips delivery and records 'dead'
+				// directly.
+				w.staleExhausted = w.attemptNo >= d.config.MaxAttempts
 			}
 		default: // "dead", "suppressed_simulation": never due again from this loop
 			w.due = false
@@ -438,6 +459,16 @@ func (d *Dispatcher) processOne(ctx context.Context, w dueAlert, now time.Time, 
 		return // another dispatcher instance already claimed this attempt
 	}
 
+	// Code review C-4: a reclaimed stale claim whose new attempt number
+	// has already reached MaxAttempts is already dead - record it
+	// directly, with no further Deliver call, rather than spending one
+	// more live attempt against a channel that just proved it can strand
+	// a delivery past its own claim lease.
+	if w.staleExhausted {
+		d.recordDeadDirect(ctx, w, route, ErrorClassUnknown, "stale claim reclaimed past MaxAttempts; delivery not re-attempted")
+		return
+	}
+
 	// AL-5 / code review F-4: no transaction may ever be open while
 	// Deliver runs. txscope.Held is the same defence-in-depth runtime
 	// guard internal/db's other "must never run with a pooled connection
@@ -451,7 +482,18 @@ func (d *Dispatcher) processOne(ctx context.Context, w dueAlert, now time.Time, 
 		return
 	}
 
-	outcome, errClass := sink.Deliver(ctx, Delivery{
+	// Code review C-4: bound every Deliver call so a hung sink cannot
+	// hold a claimed row past its own ClaimLease indefinitely - the
+	// timeout is derived from, and kept strictly BELOW, ClaimLease so a
+	// slow-but-alive channel times out here first and gets recorded as a
+	// normal failed attempt, rather than the row sitting 'claimed' until
+	// a LATER pass's stale-claim reclaim has to notice it instead. Half
+	// the lease leaves headroom for the record-outcome round-trip that
+	// follows Deliver to still land safely inside the lease window.
+	deliverCtx, cancel := context.WithTimeout(ctx, d.config.ClaimLease/2)
+	defer cancel()
+
+	outcome, errClass := sink.Deliver(deliverCtx, Delivery{
 		IdempotencyKey:  fmt.Sprintf("%s:%d:%d", w.id, w.step, w.attemptNo),
 		AlertID:         w.id,
 		Kind:            w.kind,

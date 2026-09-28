@@ -131,6 +131,67 @@ func TestDispatcher_EscalationOnlyAfterEscalateAfterAndNeverWhenAcked(t *testing
 	assertLatestEventAndStep(t, pool, admin, alertID, "sent", 0)
 }
 
+// TestDispatcher_EscalationFiresToRoutedStep is code review C-1 (mutant
+// MB2: "disabling escalation entirely passes the suite" - there was no
+// POSITIVE test that escalation actually happens): an un-acked alert,
+// once escalate_after elapses, actually escalates to step 1 and is
+// delivered there.
+func TestDispatcher_EscalationFiresToRoutedStep(t *testing.T) {
+	pool := scratchPool(t, "adispescpos")
+	admin := seedPlatformAdmin(t, pool)
+	tenantA := seedTenant(t, pool, admin)
+	clock := newManualClock(time.Now().Add(3 * time.Second))
+
+	escalateAfter := 5 * time.Minute
+	mustAddRouteWithEscalation(t, pool, admin, SeverityP1, 0, ChannelLog, "log:step0", &escalateAfter)
+	mustAddRouteWithEscalation(t, pool, admin, SeverityP1, 1, ChannelLog, "log:step1", nil)
+
+	alertID := seedOpenAlert(t, pool, tenantA, KindReconciliationRunFailed, "stream:"+uuid.NewString())
+	disp := NewDispatcher(pool, DispatcherConfig{Clock: clock}, LogSink{})
+
+	if err := disp.RunOnce(context.Background()); err != nil {
+		t.Fatalf("pass 1 (initial send): %v", err)
+	}
+	assertLatestEventAndStep(t, pool, admin, alertID, "sent", 0)
+
+	// Never acked, and escalate_after has now elapsed: the alert MUST
+	// escalate to step 1 and be delivered there.
+	clock.Advance(escalateAfter + time.Second)
+	if err := disp.RunOnce(context.Background()); err != nil {
+		t.Fatalf("pass 2 (escalation due): %v", err)
+	}
+	assertLatestEventAndStep(t, pool, admin, alertID, "sent", 1)
+}
+
+// TestDispatcher_EscalationFiresToUnroutedStep is the same positive
+// escalation proof, for the case where step 1 has no route at all: the
+// escalation must still be ATTEMPTED (never silently skipped) and land
+// as 'unrouted' at step 1.
+func TestDispatcher_EscalationFiresToUnroutedStep(t *testing.T) {
+	pool := scratchPool(t, "adispescunr")
+	admin := seedPlatformAdmin(t, pool)
+	tenantA := seedTenant(t, pool, admin)
+	clock := newManualClock(time.Now().Add(3 * time.Second))
+
+	escalateAfter := 5 * time.Minute
+	// Only step 0 has a route - step 1 deliberately does not.
+	mustAddRouteWithEscalation(t, pool, admin, SeverityP1, 0, ChannelLog, "log:step0", &escalateAfter)
+
+	alertID := seedOpenAlert(t, pool, tenantA, KindReconciliationRunFailed, "stream:"+uuid.NewString())
+	disp := NewDispatcher(pool, DispatcherConfig{Clock: clock}, LogSink{})
+
+	if err := disp.RunOnce(context.Background()); err != nil {
+		t.Fatalf("pass 1 (initial send): %v", err)
+	}
+	assertLatestEventAndStep(t, pool, admin, alertID, "sent", 0)
+
+	clock.Advance(escalateAfter + time.Second)
+	if err := disp.RunOnce(context.Background()); err != nil {
+		t.Fatalf("pass 2 (escalation due, no step-1 route): %v", err)
+	}
+	assertLatestEventAndStep(t, pool, admin, alertID, "unrouted", 1)
+}
+
 // TestDispatcher_AckedUnroutedEscalationStepNeverEscalates is code review
 // F-8: once an alert is acked, an escalation step beyond the first
 // (step > 0) must never itself become due through the 'unrouted' branch
@@ -335,6 +396,55 @@ func ackAlert(t *testing.T, pool *db.Pool, adminID, alertID uuid.UUID) {
 	})
 	if err != nil {
 		t.Fatalf("ack alert: %v", err)
+	}
+}
+
+// TestDispatcher_StaleClaimReclaimBeyondMaxAttemptsSkipsDelivery is code
+// review C-4: when a reclaimed stale claim's new attempt number has
+// ALREADY reached MaxAttempts (the entire retry budget was consumed by
+// the one attempt that then got stranded), the dispatcher must record
+// 'dead' directly, with NO further Sink.Deliver call - unlike
+// TestDispatcher_StaleClaimReclaimedThenDead, where MaxAttempts=2 leaves
+// the reclaimed attempt (1) still within budget and it must still be
+// delivered once before becoming dead.
+func TestDispatcher_StaleClaimReclaimBeyondMaxAttemptsSkipsDelivery(t *testing.T) {
+	pool := scratchPool(t, "adispstalex")
+	admin := seedPlatformAdmin(t, pool)
+	tenantA := seedTenant(t, pool, admin)
+	clock := newManualClock(time.Now().Add(3 * time.Second))
+	addTestRoute(t, pool, admin, SeverityP2, 0, ChannelMock, "mock:stalex")
+	alertID := seedOpenAlert(t, pool, tenantA, KindPaymentKillSwitchEngaged, "switch:"+uuid.NewString())
+
+	const lease = time.Minute
+	sink := &MockSink{DeliverFunc: func(context.Context, Delivery) (Outcome, ErrorClass) { return OutcomeSent, ErrorClassNone }}
+	disp := NewDispatcher(pool, DispatcherConfig{
+		MaxAttempts: 1, // the entire budget is a single attempt
+		Clock:       clock,
+		Backoff:     func(int) time.Duration { return 0 },
+		ClaimLease:  lease,
+	}, sink)
+
+	// Simulate a crash on the one and only allowed attempt (attempt 0).
+	insertClaimedRow(t, pool, alertID, 0, 0)
+
+	clock.Advance(lease + time.Second)
+	if err := disp.RunOnce(context.Background()); err != nil {
+		t.Fatalf("pass (lease expired, budget already spent): %v", err)
+	}
+
+	if len(sink.Attempts) != 0 {
+		t.Fatalf("expected NO delivery attempt for a reclaim that already exceeds MaxAttempts, got %d", len(sink.Attempts))
+	}
+	assertLatestEventAndStep(t, pool, admin, alertID, "dead", 0)
+
+	var deadMetaCount int
+	if err := pool.WithPlatformAdmin(context.Background(), admin, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT count(*) FROM alerts WHERE kind = $1`, string(KindAlertingDeliveryDead)).Scan(&deadMetaCount)
+	}); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if deadMetaCount != 1 {
+		t.Fatalf("expected exactly 1 alerting.delivery_dead alert, got %d", deadMetaCount)
 	}
 }
 

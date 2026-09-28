@@ -101,19 +101,7 @@ func (d *Dispatcher) recordSent(ctx context.Context, w dueAlert, route *resolved
 
 func (d *Dispatcher) recordFailedOrDead(ctx context.Context, w dueAlert, route *resolvedRoute, errClass ErrorClass, now time.Time) {
 	if w.attemptNo+1 >= d.config.MaxAttempts {
-		err := d.pool.WithPlatformService(ctx, db.ServiceAlertDispatcher, func(ctx context.Context, tx pgx.Tx) error {
-			_, err := tx.Exec(ctx, `
-				INSERT INTO alert_deliveries (alert_id, escalation_step, attempt_no, event, route_id, channel_kind, last_error_class)
-				VALUES ($1, $2, $3, 'dead', $4, $5, $6)
-			`, w.id, w.step, w.attemptNo, route.id, string(route.channelKind), string(errClass))
-			return err
-		})
-		if err != nil {
-			slog.Default().Error("alert_dispatcher_record_dead_failed", "alert_id", w.id, "error", err)
-			return
-		}
-		recordDead(ctx, string(route.channelKind))
-		d.raiseMeta(ctx, KindAlertingDeliveryDead, w.kind)
+		d.recordDeadDirect(ctx, w, route, errClass, "")
 		return
 	}
 
@@ -128,6 +116,32 @@ func (d *Dispatcher) recordFailedOrDead(ctx context.Context, w dueAlert, route *
 	if err != nil {
 		slog.Default().Error("alert_dispatcher_record_failed_failed", "alert_id", w.id, "error", err)
 	}
+}
+
+// recordDeadDirect records a 'dead' delivery row for w at its CURRENT
+// (w.step, w.attemptNo) - shared by recordFailedOrDead's ordinary
+// "exhausted MaxAttempts after a failed Deliver" path and processOne's
+// code review C-4 "reclaimed stale claim already past MaxAttempts, never
+// even attempted" path. logDetail, if non-empty, is logged alongside the
+// failure for diagnosability - it carries no meaning for the DB row
+// itself (last_error_class is the only persisted classification).
+func (d *Dispatcher) recordDeadDirect(ctx context.Context, w dueAlert, route *resolvedRoute, errClass ErrorClass, logDetail string) {
+	err := d.pool.WithPlatformService(ctx, db.ServiceAlertDispatcher, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `
+			INSERT INTO alert_deliveries (alert_id, escalation_step, attempt_no, event, route_id, channel_kind, last_error_class)
+			VALUES ($1, $2, $3, 'dead', $4, $5, $6)
+		`, w.id, w.step, w.attemptNo, route.id, string(route.channelKind), string(errClass))
+		return err
+	})
+	if err != nil {
+		slog.Default().Error("alert_dispatcher_record_dead_failed", "alert_id", w.id, "error", err, "detail", logDetail)
+		return
+	}
+	if logDetail != "" {
+		slog.Default().Warn("alert_dispatcher_dead_without_delivery", "alert_id", w.id, "escalation_step", w.step, "attempt_no", w.attemptNo, "detail", logDetail)
+	}
+	recordDead(ctx, string(route.channelKind))
+	d.raiseMeta(ctx, KindAlertingDeliveryDead, w.kind)
 }
 
 func (d *Dispatcher) markUnrouted(ctx context.Context, w dueAlert) {

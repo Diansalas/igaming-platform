@@ -1242,3 +1242,121 @@ Verified again on a private database (rebuilt between runs, dropped
 after): build, vet (plain and `-tags integration`), `gofmt`, the pinned
 `golangci-lint` (0 issues), and `-race -tags integration -count=1` for
 `./internal/alerting/...` and `./internal/db/...` all pass.
+
+### 16.3 Addendum — code re-review C-1/C-2/C-3/C-4 (2026-09-28)
+
+The code re-review of `433155c` found `MA`, `MB`, and `MC` genuinely
+killed, but surfaced three new surviving mutants plus one hardening item:
+
+- **C-1 (MB2, escalation has no positive test).** Disabling escalation
+  entirely (forcing `w.due = false` in `readDueWork`'s `sent` case)
+  previously passed the whole suite - every existing escalation test only
+  proved escalation does NOT fire when it should not (never acked, before
+  `escalate_after`), never that it DOES fire when it should. Two new
+  tests, `TestDispatcher_EscalationFiresToRoutedStep` and
+  `TestDispatcher_EscalationFiresToUnroutedStep`, raise an un-acked
+  alert, advance the manual clock past `escalate_after`, run a second
+  pass, and assert the latest delivery row is `sent` at step 1 (a step-1
+  route exists) or `unrouted` at step 1 (it does not). Confirmed killing
+  MB2 (evidence file).
+- **C-2 (MG, `ScopePlatformAdmin` case unexercised in
+  `freshReadCommittedRunner`).** Removing that case (falling through to
+  the refusing `default:`) previously passed the whole suite - no test
+  drove a genuine in-tx swallow through `NewPlatformAdminRunner` followed
+  by a `Flush` that must retry through a freshly reconstructed
+  platform-admin runner. `TestFlush_PlatformAdminRunner_PersistsWithRaisedByScope`
+  forces a transient, swallowable in-tx failure (a `subject_tenant_id`
+  foreign-key violation, class 23) through a platform-admin scope, then
+  creates the missing subject tenant for real before calling `Flush`, and
+  asserts the alert persists with `raised_by_scope = 'platform_admin'`.
+  Confirmed killing MG (evidence file). This is the same structural
+  guarantee 16.2's "scope-kind hardening" item already gave `ScopeTenant`
+  and the unknown-kind case; every `ScopeKind` `freshReadCommittedRunner`
+  can see now has both an explicit `case` AND a dedicated Flush-level
+  test proving that case is load-bearing, not just reachable.
+- **C-3 (MF, re-verified for the principal-scope path).** The same `MF`
+  mutation from §16.2/N-1 (`Pending.Flush` retrying on `p.runner` instead
+  of `freshReadCommittedRunner`) is not discriminated by isolation LEVEL
+  alone for a `ScopeTenantPrincipal` runner, because `NewPrincipalRunner`
+  never opens anything other than READ COMMITTED - both the mutated and
+  the correct code report "read committed" for this scope kind.
+  `TestFlush_PrincipalRunner_PersistsWithRaisedByScope` forces a
+  transient, swallowable in-tx failure (raising from a `principalID` with
+  no `staff_users` row yet - `alerting_session_scope()`'s own `RAISE
+  EXCEPTION` defaults to SQLSTATE `P0001`, which is in the swallow
+  allowlist), creates that `staff_users` row for real before `Flush`, and
+  asserts BOTH that the alert persists with `raised_by_scope =
+  'tenant_principal'` AND, via a `spyPrincipalRunner` recording every
+  invocation of its own `Run` (mirroring `snapshotRunner`'s technique),
+  that the original runner instance was invoked exactly once - proving
+  Flush's retry used a freshly-constructed runner, not `p.runner` itself,
+  even though the isolation VALUE alone cannot tell them apart here.
+  Confirmed killing the same `MF` mutation independently of the §16.2
+  REPEATABLE READ test (evidence file).
+- **C-4 (the stale-reclaim residuals).** Three items:
+  1. *Deliver is now bounded by a context timeout derived from
+     `ClaimLease`* (`context.WithTimeout(ctx, d.config.ClaimLease/2)` in
+     `processOne`, applied to every live `Sink.Deliver` call - not the
+     direct-to-dead path below). Half the lease leaves headroom for the
+     record-outcome round-trip that follows `Deliver` to still land
+     inside the lease window, so a hung sink is recorded as an ordinary
+     failed attempt on THIS pass rather than only being noticed by a
+     later pass's stale-claim reclaim. This is a defence-in-depth measure
+     against a hung channel; disclosed as **PARTIALLY VERIFIED** - the
+     existing suite (including `-race`) passes with it wired in, but no
+     test forces an actual slow/hung `Deliver` call to observe the
+     timeout firing (`MockSink.DeliverFunc` is always synchronous in
+     every existing test).
+  2. *A reclaim that would already exceed `MaxAttempts` records `dead`
+     directly, without attempting delivery.* `readDueWork`'s `claimed`
+     case now sets `dueAlert.staleExhausted` when the reclaimed attempt
+     number (`w.attemptNo`, already incremented for the reclaim) is `>=
+     d.config.MaxAttempts` - meaning the ENTIRE retry budget was already
+     spent by the attempt that then got stranded, not merely that this
+     reclaim happens to be the last one still within budget (that case,
+     `w.attemptNo < MaxAttempts`, is still a legitimate attempt and is
+     still delivered once, exactly like `TestDispatcher_
+     StaleClaimReclaimedThenDead` already proves for `MaxAttempts=2`).
+     `processOne` checks `staleExhausted` before claiming/delivering and
+     calls the new shared `recordDeadDirect` helper (also now used by
+     `recordFailedOrDead`'s pre-existing dead branch, removing the
+     duplication) instead of ever invoking `Sink.Deliver`.
+     `TestDispatcher_StaleClaimReclaimBeyondMaxAttemptsSkipsDelivery`
+     (`MaxAttempts=1`) proves this: the single allowed attempt is
+     stranded as `claimed`, the reclaim (attempt 1) is already past
+     budget, and the sink records zero delivery attempts before the
+     alert goes straight to `dead`. Confirmed killing a mutant that
+     forces `staleExhausted = false` unconditionally (evidence file,
+     `MC4`).
+  3. *Idempotency-key decision.* `Delivery.IdempotencyKey` remains
+     **per-attempt** (`"<alert_id>:<step>:<attempt_no>"`, unchanged from
+     the original design) rather than being changed to a stable per-step
+     key (`"<alert_id>:<step>"`). Justification: PRH-2 ships only
+     `LogSink` (which never fails and is naturally idempotent - logging
+     twice is harmless) and `MockSink` (test-only); no real channel with
+     genuine at-least-once delivery semantics exists yet in this stage,
+     so there is no live code path that actually needs cross-attempt
+     dedup today. Changing the key to be stable per-step now, before a
+     real channel exists, would be speculative and would also throw away
+     the ability to distinguish individual attempts in delivery logs/
+     metrics for no present benefit (`product-owner-proxy` / "no
+     uncontrolled scope expansion" per `CLAUDE.md`). This is recorded here
+     as an explicit, reviewable precondition rather than left implicit:
+     **a real channel integration under `HD-PRH2-4-OPS` MUST dedupe
+     incoming deliveries on `<alert_id>:<step>` (collapsing across
+     `attempt_no`), never on the raw `IdempotencyKey` as currently
+     shaped** - a provider that naively keys on `IdempotencyKey` verbatim
+     would treat a retried attempt after a transient failure as a brand
+     new, undeduplicated send. Whoever builds that channel adapter must
+     either (a) strip `attempt_no` before handing the key to the
+     provider, or (b) change `IdempotencyKey`'s construction to
+     `"<alert_id>:<step>"` at that time - either is acceptable, but one of
+     them is mandatory before HD-PRH2-4-OPS ships.
+
+Verified again on a private database (rebuilt between runs, dropped
+after): build, vet (plain and `-tags integration`), `gofmt`, the pinned
+`golangci-lint` (0 issues), `-race -tags integration -count=1` for
+`./internal/alerting/...` and `./internal/db/...`, `-race -count=10` for
+`TestDispatcher_ClaimRaceIsDeterministic`, `-race -tags integration` for
+`./internal/auth/...`, and `-race -tags integration` for
+`./internal/httpserver/...` all pass.
