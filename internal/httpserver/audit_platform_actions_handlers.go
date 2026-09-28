@@ -46,16 +46,26 @@ const platformActionsAuditListQuery = `
 // (tenant_id = $1) and the tenant's subject rows (tenant_id IS NULL AND
 // subject_tenant_id = $1). It is NEVER a platform or unscoped query - no
 // WithoutTenant/WithPlatformAdmin call is involved anywhere in chain
-// assembly. Scoped to the kill-switch action family (the only actions
-// with a chain key at all today) so this stays bounded regardless of a
-// tenant's overall audit_log volume; unbounded (no LIMIT) so a chain
-// member on a DIFFERENT page than the row that names it is still found
-// (fixes ADR §5.5's "b) chains split across pages").
+// assembly.
+//
+// C-1 (code review, performance): restricted to the chain KEYS present on
+// the current PAGE ($2, a text[] of killSwitchChainKey values) - not
+// merely the kill-switch action family - so this never reads a tenant's
+// entire kill-switch history on every page view. A row here is admitted
+// only when EITHER of killSwitchChainKey's own two sources matches one of
+// those keys: metadata's own "kill_switch_id" (request_release,
+// cancel_release), or target_id when target_type is "payment_kill_switch"
+// (engage, approve_release, a denied request_release) - mirroring
+// killSwitchChainKey's own Go logic exactly, in SQL. Still unbounded in
+// TIME (no LIMIT/date filter) so a chain member on a DIFFERENT page than
+// the row that names it is still found (ADR §5.5's "b) chains split
+// across pages") - only bounded by the small, fixed number of distinct
+// switches a single page of kill-switch actions can ever name.
 const platformActionsChainSourceQuery = `
 	SELECT id, actor_type, actor_id, action, target_type, target_id, outcome, created_at, metadata
 	  FROM audit_log
-	 WHERE action LIKE 'payments_kill_switch.%'
-	   AND (tenant_id = $1 OR (tenant_id IS NULL AND subject_tenant_id = $1))`
+	 WHERE (tenant_id = $1 OR (tenant_id IS NULL AND subject_tenant_id = $1))
+	   AND (metadata->>'kill_switch_id' = ANY($2) OR (target_type = 'payment_kill_switch' AND target_id = ANY($2)))`
 
 // staffDisplayNameLookupQuery is ADR 0104 §5.4/AT-8's second, short read:
 // ONLY id and display_name, NEVER email - a mutant that adds `email` here
@@ -156,10 +166,28 @@ func newListPlatformActionsAuditLogHandler(deps Deps) http.HandlerFunc {
 				return qerr
 			}
 
+			// C-1: restrict the chain source to the keys actually present
+			// on THIS page - never the tenant's whole kill-switch history.
+			// No keys on the page means nothing can ever chain-link, so the
+			// query is skipped entirely.
+			keySet := map[string]struct{}{}
+			for _, row := range rows {
+				if key := killSwitchChainKey(row); key != "" {
+					keySet[key] = struct{}{}
+				}
+			}
+			if len(keySet) == 0 {
+				return nil
+			}
+			keys := make([]string, 0, len(keySet))
+			for k := range keySet {
+				keys = append(keys, k)
+			}
+
 			// F-5: the chain source, in the SAME tenant session, with its
 			// own explicit filter - see platformActionsChainSourceQuery's
 			// own doc comment.
-			cr, cerr := tx.Query(ctx, platformActionsChainSourceQuery, tc.TenantID)
+			cr, cerr := tx.Query(ctx, platformActionsChainSourceQuery, tc.TenantID, keys)
 			if cerr != nil {
 				return cerr
 			}

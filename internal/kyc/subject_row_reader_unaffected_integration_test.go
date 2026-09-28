@@ -2,10 +2,12 @@
 
 // PRH-2 G1 code review F-4 (ADR 0104 §7 "Readers unchanged (R)"):
 // provider.go's held-for-review de-duplication EXISTS check
-// (`WHERE tenant_id = $1 AND action = 'kyc.provider_result_held_for_review'
-// AND target_id = $2 AND metadata->>'provider_outcome' = $3`) can never
-// match a subject row - its tenant_id is always NULL by migration 0109's
-// platform-only CHECK, whatever its subject_tenant_id.
+// (heldForReviewDedupQuery) can never match a subject row - its tenant_id
+// is always NULL by migration 0109's platform-only CHECK, whatever its
+// subject_tenant_id. R-2 (security re-review): this test now calls
+// production's own heldForReviewDedupQuery constant directly, rather than
+// a hand-copied duplicate of its SQL text that could silently drift from
+// what production actually runs.
 package kyc
 
 import (
@@ -45,13 +47,12 @@ func f4SeedPlatformAdmin(t *testing.T, pool *db.Pool) uuid.UUID {
 	return id
 }
 
-// TestHeldForReviewDedup_IgnoresSubjectRowForSameTenant reproduces
-// provider.go's exact de-duplication query (copied verbatim from
-// provider.go:672's own literal SQL text) against a subject row that
-// matches every OTHER predicate (same tenant, same action, same
-// target_id, same provider_outcome) - it must still read as "not already
-// recorded", because the subject row's tenant_id is NULL, never equal to
-// a real tenant id.
+// TestHeldForReviewDedup_IgnoresSubjectRowForSameTenant runs production's
+// own heldForReviewDedupQuery against a subject row that matches every
+// OTHER predicate (same tenant, same action, same target_id, same
+// provider_outcome) - it must still read as "not already recorded",
+// because the subject row's tenant_id is NULL, never equal to a real
+// tenant id.
 func TestHeldForReviewDedup_IgnoresSubjectRowForSameTenant(t *testing.T) {
 	pool := testPool(t)
 	tenantID := f4SeedTenant(t, pool)
@@ -71,11 +72,7 @@ func TestHeldForReviewDedup_IgnoresSubjectRowForSameTenant(t *testing.T) {
 
 	var alreadyRecorded bool
 	if err := pool.WithTenant(context.Background(), tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		return tx.QueryRow(ctx,
-			`SELECT EXISTS (SELECT 1 FROM audit_log WHERE tenant_id = $1 AND action = 'kyc.provider_result_held_for_review'
-			   AND target_id = $2 AND metadata->>'provider_outcome' = $3)`,
-			tenantID, verificationID.String(), outcome,
-		).Scan(&alreadyRecorded)
+		return tx.QueryRow(ctx, heldForReviewDedupQuery, tenantID, verificationID.String(), outcome).Scan(&alreadyRecorded)
 	}); err != nil {
 		t.Fatalf("run the dedup query: %v", err)
 	}

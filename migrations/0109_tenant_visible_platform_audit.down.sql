@@ -26,7 +26,8 @@
 -- GUC set - there is no analogous per-tenant gap there.
 DO $$
 DECLARE
-    t RECORD;
+    v_ids UUID[];
+    v_id  UUID;
 BEGIN
     IF EXISTS (SELECT 1 FROM audit_log WHERE subject_tenant_id IS NOT NULL) THEN
         RAISE EXCEPTION 'migration 0109 down: refusing - audit_log has rows with subject_tenant_id set';
@@ -37,10 +38,22 @@ BEGIN
         RAISE EXCEPTION 'migration 0109 down: refusing - staff_users has rows with display_name set';
     END IF;
 
+    -- R-1 (security re-review, 2026-09-28): snapshot every tenant id
+    -- FIRST, into a plain array, rather than a `FOR ... IN SELECT`
+    -- cursor loop that would lazily re-evaluate `tenants` (and re-apply
+    -- its own RLS under whatever app.tenant_id this loop has ALREADY set
+    -- by a later iteration) each time it fetches the next row. This
+    -- works correctly either way ONLY because `tenants_read`'s own
+    -- policy (migration 0077) admits every non-player session
+    -- regardless of app.tenant_id - snapshotting first removes that
+    -- dependency from this loop's correctness entirely, so it keeps
+    -- working even if `tenants_read` ever tightens.
+    SELECT array_agg(id) INTO v_ids FROM tenants;
+
     -- Every tenant's own staff: one pass per tenant, with app.tenant_id
     -- set to make dual_scope_isolation admit that tenant's rows.
-    FOR t IN SELECT id FROM tenants LOOP
-        PERFORM set_config('app.tenant_id', t.id::text, true);
+    FOREACH v_id IN ARRAY COALESCE(v_ids, ARRAY[]::UUID[]) LOOP
+        PERFORM set_config('app.tenant_id', v_id::text, true);
         IF EXISTS (SELECT 1 FROM staff_users WHERE display_name IS NOT NULL) THEN
             PERFORM set_config('app.tenant_id', '', true);
             RAISE EXCEPTION 'migration 0109 down: refusing - staff_users has rows with display_name set';

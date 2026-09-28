@@ -609,6 +609,16 @@ func applyForwardOnlyStatus(ctx context.Context, tx pgx.Tx, tenantID, id uuid.UU
 //     anything arriving after a staff decision that already reached or
 //     exceeded that rank: no state change and NO audit row (a 204 no-op
 //     at the HTTP layer).
+//
+// heldForReviewDedupQuery is L-2's held-for-review de-duplication check
+// (applyCallbackOutcome, below). Hoisted to a package-level const (code
+// review R-2) so the ADR 0104 G1 "readers unchanged" regression test
+// (internal/kyc's TestHeldForReviewDedup_IgnoresSubjectRowForSameTenant)
+// exercises this EXACT string rather than a hand-copied duplicate that
+// could silently drift from what production actually runs.
+const heldForReviewDedupQuery = `SELECT EXISTS (SELECT 1 FROM audit_log WHERE tenant_id = $1 AND action = 'kyc.provider_result_held_for_review'
+	   AND target_id = $2 AND metadata->>'provider_outcome' = $3)`
+
 func applyCallbackOutcome(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, v Verification, result ProviderResult) (Verification, bool, error) {
 	// Security S-5: the platform bounds the adapter's reason itself before
 	// either audit row or the status UPDATE below (idempotent over an
@@ -668,9 +678,7 @@ func applyCallbackOutcome(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, v 
 			// (e.g. approved, then later expired, both while still
 			// escalated) still gets its own row, since the outcome differs.
 			var alreadyRecorded bool
-			if err := tx.QueryRow(ctx,
-				`SELECT EXISTS (SELECT 1 FROM audit_log WHERE tenant_id = $1 AND action = 'kyc.provider_result_held_for_review'
-				   AND target_id = $2 AND metadata->>'provider_outcome' = $3)`,
+			if err := tx.QueryRow(ctx, heldForReviewDedupQuery,
 				tenantID, updated.ID.String(), string(result.Outcome),
 			).Scan(&alreadyRecorded); err != nil {
 				return Verification{}, false, fmt.Errorf("kyc: check held-for-review de-duplication: %w", err)
