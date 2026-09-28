@@ -18,7 +18,9 @@ import (
 
 type fixedCatalogueProvider struct{ result CatalogueResult }
 
-func (p fixedCatalogueProvider) Catalogue() CatalogueResult { return p.result }
+func (p fixedCatalogueProvider) Catalogue(_ context.Context) (CatalogueResult, error) {
+	return p.result, nil
+}
 
 func prhrefCatalogue(prefix, selectionRef string) CatalogueResult {
 	return CatalogueResult{Sports: []CatalogueSport{{
@@ -63,9 +65,16 @@ func TestSyncCatalogue_OverBoundExternalRefWritesNothing(t *testing.T) {
 		}
 		return n
 	}
+	// SB-CATALOGUE-IO-1: fetch+validate happens first, with no transaction
+	// open at all - an over-bound reference is rejected here and never even
+	// reaches WithPlatformService, let alone the upsert loop.
 	sync := func(p Provider) error {
+		result, err := FetchCatalogue(context.Background(), p)
+		if err != nil {
+			return err
+		}
 		return pool.WithPlatformService(context.Background(), db.ServiceSportsbookCatalogueSync, func(ctx context.Context, tx pgx.Tx) error {
-			return SyncCatalogue(ctx, tx, p)
+			return SyncCatalogue(ctx, tx, result)
 		})
 	}
 

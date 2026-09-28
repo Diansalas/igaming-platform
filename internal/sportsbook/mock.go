@@ -45,8 +45,12 @@ func NewMockSportsbookProvider() *MockSportsbookProvider {
 // environment, until W1b's guard exists.
 func (m *MockSportsbookProvider) SyntheticComponent() {}
 
-// Catalogue implements Provider.
-func (m *MockSportsbookProvider) Catalogue() CatalogueResult {
+// Catalogue implements Provider. ctx is accepted (and, for this
+// same-process, in-memory mock, otherwise unused) per SB-CATALOGUE-IO-1
+// (ADR 0095 amendment, 2026-09-28) - a real network adapter would pass it
+// through to its own HTTP call and honour cancellation/deadlines; this
+// mock never performs I/O, so it never errors.
+func (m *MockSportsbookProvider) Catalogue(_ context.Context) (CatalogueResult, error) {
 	now := m.now().UTC()
 
 	return CatalogueResult{
@@ -93,7 +97,7 @@ func (m *MockSportsbookProvider) Catalogue() CatalogueResult {
 				},
 			},
 		},
-	}
+	}, nil
 }
 
 // mockMatchWinnerEvent builds a "Match Winner" (1X2) market: Home/Draw/Away.
