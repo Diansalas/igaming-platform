@@ -75,7 +75,7 @@ func TestCasinoBootstrap_MockVendorOverHTTP_FreshSuccess(t *testing.T) {
 
 	in := mock.BootstrapPayload(tenant.ID, token, "req-http-fresh-1", game.ProviderGameID, "EUR", "real")
 	resp := rawPostCasinoBootstrap(t, srv, tenant.Slug, in)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200 from the bootstrap route, got %d", resp.StatusCode)
 	}
@@ -121,7 +121,7 @@ func TestCasinoBootstrap_UnsignedRequest_UniformUnauthorized(t *testing.T) {
 	if err != nil {
 		t.Fatalf("request failed: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("expected 401 for an unsigned bootstrap request, got %d", resp.StatusCode)
 	}
@@ -142,7 +142,7 @@ func TestCasinoBootstrap_UnknownTenantSlug_UniformUnauthorized(t *testing.T) {
 
 	in := mock.BootstrapPayload(uuid.New(), "some-token", "req-f3-unknown-tenant-1", "game-1", "EUR", "real")
 	resp := rawPostCasinoBootstrap(t, srv, "does-not-exist-slug", in)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("expected 401 for an unknown tenant slug, got %d", resp.StatusCode)
 	}
@@ -207,15 +207,14 @@ func TestCasinoBootstrap_RealProviderBetWorksAfterBootstrap(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200 from the bootstrap route, got %d", resp.StatusCode)
 	}
-	resp.Body.Close()
-
+	_ = resp.Body.Close()
 	sessionID, err := uuid.Parse(launched.SessionID)
 	if err != nil {
 		t.Fatalf("parse session id: %v", err)
 	}
 	betPayload := mock.CallbackPayload(tenant.ID, casino.CallbackEventBet, "bet-after-bootstrap-1", "", "round-after-bootstrap-1", game.ProviderGameID, 500, "EUR", casino.OutcomeSucceeded, "", player.ID, sessionID)
 	betResp := rawPostCasinoCallback(t, srv, "/v1/webhooks/casino/"+tenant.Slug+"/mock-casino", betPayload)
-	defer betResp.Body.Close()
+	defer func() { _ = betResp.Body.Close() }()
 	if betResp.StatusCode != http.StatusOK {
 		var errBody map[string]any
 		decodeBody(t, betResp, &errBody)
@@ -273,7 +272,7 @@ func TestCasinoBootstrap_ConsumedSessionRefusedBySimulationWagerRoute(t *testing
 	// FreshSuccess exercises.
 	in := mock.BootstrapPayload(tenant.ID, token, "req-p2-2-pin-1", game.ProviderGameID, "EUR", "real")
 	bootstrapResp := rawPostCasinoBootstrap(t, srv, tenant.Slug, in)
-	defer bootstrapResp.Body.Close()
+	defer func() { _ = bootstrapResp.Body.Close() }()
 	if bootstrapResp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200 from the bootstrap route, got %d", bootstrapResp.StatusCode)
 	}
@@ -290,7 +289,7 @@ func TestCasinoBootstrap_ConsumedSessionRefusedBySimulationWagerRoute(t *testing
 	}
 
 	wagerResp := postJSON(t, srv, "/v1/me/casino/sessions/"+launched.SessionID+"/wager", player.Tokens.AccessToken, wagerBody(500))
-	defer wagerResp.Body.Close()
+	defer func() { _ = wagerResp.Body.Close() }()
 	if wagerResp.StatusCode != http.StatusBadRequest {
 		var body map[string]any
 		decodeBody(t, wagerResp, &body)

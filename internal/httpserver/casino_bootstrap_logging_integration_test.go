@@ -137,7 +137,7 @@ func TestCasinoBootstrap_HTTP_WrongSignature_UniformUnauthorized(t *testing.T) {
 	in.Header.Set(webhookauth.CasinoSignatureHeader, "v1="+"0000000000000000000000000000000000000000000000000000000000000000"[:64])
 
 	resp := rawPostCasinoBootstrap(t, f.srv, f.tenant.Slug, in)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("expected 401, got %d", resp.StatusCode)
 	}
@@ -165,7 +165,7 @@ func TestCasinoBootstrap_HTTP_Step3BindingMismatch_UniformUnauthorized(t *testin
 	in := f.mock.BootstrapPayload(f.tenant.ID, token, "req-f2-step3-1", "wrong-provider-game-id", "EUR", "real")
 
 	resp := rawPostCasinoBootstrap(t, f.srv, f.tenant.Slug, in)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("expected 401, got %d", resp.StatusCode)
 	}
@@ -194,14 +194,14 @@ func TestCasinoBootstrap_HTTP_ReplayMismatch_UniformUnauthorized(t *testing.T) {
 	const sharedRequestID = "req-f2-replaymismatch-1"
 	inA := f.mock.BootstrapPayload(f.tenant.ID, tokenA, sharedRequestID, f.game.ProviderGameID, "EUR", "real")
 	respA := rawPostCasinoBootstrap(t, f.srv, f.tenant.Slug, inA)
-	defer respA.Body.Close()
+	defer func() { _ = respA.Body.Close() }()
 	if respA.StatusCode != http.StatusOK {
 		t.Fatalf("expected the first bootstrap (token A) to succeed, got %d", respA.StatusCode)
 	}
 
 	inB := f.mock.BootstrapPayload(f.tenant.ID, tokenB, sharedRequestID, f.game.ProviderGameID, "EUR", "real")
 	respB := rawPostCasinoBootstrap(t, f.srv, f.tenant.Slug, inB)
-	defer respB.Body.Close()
+	defer func() { _ = respB.Body.Close() }()
 	if respB.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("expected the second bootstrap (token B, same request_id) to be refused with 401, got %d", respB.StatusCode)
 	}
@@ -237,14 +237,14 @@ func TestCasinoBootstrap_HTTP_GateDenial_ConstantForbidden(t *testing.T) {
 	sessionID, token := f.launch(t)
 
 	selfExclResp := postJSON(t, f.srv, "/v1/me/rg/self-exclusion", f.player.Tokens.AccessToken, map[string]any{})
-	defer selfExclResp.Body.Close()
+	defer func() { _ = selfExclResp.Body.Close() }()
 	if selfExclResp.StatusCode != http.StatusCreated {
 		t.Fatalf("expected 201 self-excluding the player, got %d", selfExclResp.StatusCode)
 	}
 
 	in := f.mock.BootstrapPayload(f.tenant.ID, token, "req-f2-denial-1", f.game.ProviderGameID, "EUR", "real")
 	resp := rawPostCasinoBootstrap(t, f.srv, f.tenant.Slug, in)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("expected 403 for an RG-ineligible player, got %d", resp.StatusCode)
 	}
@@ -278,7 +278,7 @@ func TestCasinoBootstrap_HTTP_ReplaySuccess_NoSecretInLogs(t *testing.T) {
 	const requestID = "req-l1-replay-1"
 	in := f.mock.BootstrapPayload(f.tenant.ID, token, requestID, f.game.ProviderGameID, "EUR", "real")
 	first := rawPostCasinoBootstrap(t, f.srv, f.tenant.Slug, in)
-	defer first.Body.Close()
+	defer func() { _ = first.Body.Close() }()
 	if first.StatusCode != http.StatusOK {
 		t.Fatalf("expected the first bootstrap to succeed, got %d", first.StatusCode)
 	}
@@ -286,7 +286,7 @@ func TestCasinoBootstrap_HTTP_ReplaySuccess_NoSecretInLogs(t *testing.T) {
 	// The exact same request, byte-identical - the genuine replay.
 	replayIn := f.mock.BootstrapPayload(f.tenant.ID, token, requestID, f.game.ProviderGameID, "EUR", "real")
 	second := rawPostCasinoBootstrap(t, f.srv, f.tenant.Slug, replayIn)
-	defer second.Body.Close()
+	defer func() { _ = second.Body.Close() }()
 	if second.StatusCode != http.StatusOK {
 		t.Fatalf("expected the replay to also return 200, got %d", second.StatusCode)
 	}
@@ -315,7 +315,7 @@ func TestCasinoBootstrap_HTTP_Success_NoSecretInLogs(t *testing.T) {
 	_, token := f.launch(t)
 	in := f.mock.BootstrapPayload(f.tenant.ID, token, "req-f6-success-1", f.game.ProviderGameID, "EUR", "real")
 	resp := rawPostCasinoBootstrap(t, f.srv, f.tenant.Slug, in)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
