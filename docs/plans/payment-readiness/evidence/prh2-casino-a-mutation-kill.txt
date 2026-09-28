@@ -1,0 +1,82 @@
+PRH-2 workstream A - CAS-REVOKE-CONSUMED-1 - mutation-kill evidence
+====================================================================
+
+Migration 0108 (internal/casino/migrations/0108_casino_launch_session_revoke_consumed.{up,down}.sql)
+replaces casino_launch_sessions_enforce_immutable_fields()'s terminal-status block to permit exactly
+consumed -> revoked (whole-row equality otherwise). RevokeLaunchSession (internal/casino/launch.go)
+widens its own CAS from status='active' to status IN ('active','consumed').
+
+Baseline: `PRIV_DB=cas_rc1_dev bash .../priv_test.sh -tags integration -count=1 -run
+'TestMigration0108|TestRevokeLaunchSession|TestLaunchGame_FailedLaunchOnConsumedSession' -v
+./internal/casino/...` - all green (18 trigger-matrix subtests, replay, pre-revoke settlement,
+tenant isolation, migration up/down/up, and the inverted characterization test). Full package suite
+(`go test -tags integration -count=1 -skip 'TestStoreOutage_DoesNotPinPool|TestResolutionIsolation_'
+./internal/casino/...`) also green before and after every mutant below (mutants are introduced,
+confirmed FAIL, then reverted and re-confirmed green - the codebase is never left mutated between
+mutants).
+
+Each mutant was applied directly to the real migration/code file (not a copy), the private database
+was rebuilt from scratch via priv_db.sh (so the mutated trigger body was genuinely installed, not
+merely present in a file nobody loaded), the named test was run and its FAIL captured, then the file
+was reverted with a byte-for-byte diff check against the committed original before moving to the next
+mutant.
+
+Mutant 1 (drop the whole-row equality - the 0108 up migration's
+`AND (to_jsonb(NEW) - 'status') = (to_jsonb(OLD) - 'status')` clause removed, so any other column may
+change alongside a consumed -> revoked transition):
+KILLED [migrations/0108_casino_launch_session_revoke_consumed.up.sql] by
+`PRIV_DB=cas_rc1_mut bash .../priv_test.sh -tags integration -run TestMigration0108_TriggerMatrix -v
+./internal/casino/...`
+    first failures: --- FAIL: TestMigration0108_TriggerMatrix/refused/consumed_to_revoked_with_consumed_at_change
+                        migration_0108_revoke_consumed_integration_test.go:121: expected the
+                        transition to be refused, but it succeeded
+                    --- FAIL: TestMigration0108_TriggerMatrix/refused/consumed_to_revoked_with_consumed_at_null
+                        migration_0108_revoke_consumed_integration_test.go:125: expected the
+                        transition to be refused, but it succeeded
+    (consumed_at is the one column not already covered by 0042's own column-immutability block, so
+    this is the case that specifically exercises the whole-row equality rather than block 1.)
+
+Mutant 2 (allow OLD.status IN ('consumed', 'expired') - i.e. widen the source status the relaxed
+branch matches, so an expired session could also be "revoked" via the relaxed path):
+KILLED [migrations/0108_casino_launch_session_revoke_consumed.up.sql] by
+`PRIV_DB=cas_rc1_mut bash .../priv_test.sh -tags integration -run TestMigration0108_TriggerMatrix -v
+./internal/casino/...`
+    first failure: --- FAIL: TestMigration0108_TriggerMatrix/refused/expired_to_revoked
+                       migration_0108_revoke_consumed_integration_test.go:165: expected the
+                       transition to be refused, but it succeeded
+
+Mutant 3 (drop NEW.status = 'revoked' - i.e. a consumed session could transition to ANY new status,
+not only 'revoked', as long as every other column stayed the same):
+KILLED [migrations/0108_casino_launch_session_revoke_consumed.up.sql] by
+`PRIV_DB=cas_rc1_mut bash .../priv_test.sh -tags integration -run TestMigration0108_TriggerMatrix -v
+./internal/casino/...`
+    first failures: --- FAIL: TestMigration0108_TriggerMatrix/refused/consumed_to_active
+                    --- FAIL: TestMigration0108_TriggerMatrix/refused/consumed_to_expired
+                    --- FAIL: TestMigration0108_TriggerMatrix/refused/consumed_to_consumed_noop
+                        (all three) expected the transition to be refused, but it succeeded
+
+Mutant 4 (restore RevokeLaunchSession's own CAS to `WHERE id = $1 AND status = 'active'` - i.e.
+revert the application-side half of the fix, leaving the migration's relaxed trigger unused by any
+production caller):
+KILLED [internal/casino/launch.go:409] by
+`PRIV_DB=cas_rc1_mut bash .../priv_test.sh -tags integration -run
+'TestLaunchGame_FailedLaunchOnConsumedSession_RevokesAndRejectsBet|TestRevokeLaunchSession_ConsumedToRevoked_TokenReplayRefused|TestRevokeLaunchSession_PreRevokeBetsStillSettle'
+-v ./internal/casino/...`
+    first failures: --- FAIL: TestLaunchGame_FailedLaunchOnConsumedSession_RevokesAndRejectsBet
+                        launch_two_phase_integration_test.go:766: expected the session revoked
+                        (CAS-REVOKE-CONSUMED-1 closed), got "consumed"
+                    --- FAIL: TestRevokeLaunchSession_ConsumedToRevoked_TokenReplayRefused
+                        migration_0108_revoke_consumed_integration_test.go:229: expected the CAS to
+                        match the consumed session
+                    --- FAIL: TestRevokeLaunchSession_PreRevokeBetsStillSettle
+                        migration_0108_revoke_consumed_integration_test.go:306: expected the CAS to
+                        match a consumed session, got prior="consumed" revoked=false
+
+All four mutants verified by editing the real file directly, confirming `go build ./...` still
+compiled (mutants 1-3 are SQL-only, no Go build impact; mutant 4 was confirmed to build), rebuilding
+the private database (`cas_rc1_mut`) from the mutated migration set so the mutated trigger/CAS was
+actually installed and exercised, running the named test(s) with `-tags integration` against that
+database, confirming the FAIL, then reverting the file and confirming a byte-identical `git diff`
+against the committed original before re-running the full suite green.
+
+4/4 killed.

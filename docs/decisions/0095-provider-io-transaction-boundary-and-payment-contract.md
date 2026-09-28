@@ -2683,6 +2683,46 @@ bets roughly `DefaultLaunchTokenTTL` after launch, with `ErrLaunchSessionRequire
 - **I-4:** no production code consumes a launch token (`ResolveLaunchToken` has no non-test caller). So in the current wiring every `LaunchGame` session stays `active`, and bets are still refused about 2 minutes after launch (CAS-PLAY-BOOTSTRAP-1). This is correct from a security standpoint and must not be relaxed; the remedy is a vendor token-bootstrap path.
 - **C4 / CAS-REVOKE-CONSUMED-1:** MEDIUM, **deferred and launch-blocking** (option b), with the required migration-backed fix (a) specified in the security record. It must land before the first of: a non-test caller of `ResolveLaunchToken`; a non-synthetic casino adapter; or a production launch request.
 
+#### 15.1.5 amendment (CAS-REVOKE-CONSUMED-1 closed, 2026-09-28)
+
+PRH-2 workstream A (`docs/plans/prh2-hardening-round/plan.md` §5-A; security's required fix,
+`docs/plans/payment-readiness/rv-prh-i2-casino-security.md` "Re-review (FH-7, 2026-09-28)",
+"Required fix (a)"). **C4 is now closed.**
+
+- **Migration 0108** replaces `casino_launch_sessions_enforce_immutable_fields()`, keeping 0042's
+  column-immutability block byte-identical and replacing only the terminal-status block: exactly
+  `OLD.status = 'consumed' AND NEW.status = 'revoked'` is now permitted, and only when
+  `(to_jsonb(NEW) - 'status') = (to_jsonb(OLD) - 'status')` (every other column, including any
+  future one, stays frozen). Every other transition out of `consumed`, `expired` or `revoked` -
+  including `consumed -> active`, `consumed -> expired`, a `consumed -> consumed` no-op, a
+  `consumed -> revoked` combined with any other column change, and every transition at all out of
+  `expired` or `revoked` - still raises exactly as before. The down migration restores 0042's body
+  verbatim.
+- `RevokeLaunchSession` (`internal/casino/launch.go`) now does `SELECT status ... FOR UPDATE`, then
+  `UPDATE ... SET status='revoked' WHERE id=$1 AND status IN ('active','consumed')`, and returns the
+  prior status alongside whether the CAS matched. `orchestrator.go`'s `launchFailed` (phase C) now
+  writes `prior_status` into the append-only `casino.launch_failed` audit record, next to the
+  existing `revoked` field.
+- Token replay is unaffected exactly as anticipated: `ResolveLaunchToken` still accepts only
+  `active`; the relaxed trigger branch only ever admits the terminal `consumed -> revoked` move;
+  `token_hash`/`expires_at` remain immutable throughout.
+- The former characterization test (`TestLaunchGame_FailedLaunchOnConsumedSession_
+  RevokeCASMissesAndBetStillAccepted`) is inverted and renamed
+  `TestLaunchGame_FailedLaunchOnConsumedSession_RevokesAndRejectsBet`
+  (`internal/casino/launch_two_phase_integration_test.go`): the session now ends `revoked`, the
+  audit shows `revoked=true` and `prior_status="consumed"`, the follow-up bet is refused with
+  `ErrLaunchSessionRequired`, and the player's balance/ledger are unaffected by that refused bet.
+- Additional coverage (`internal/casino/migration_0108_revoke_consumed_integration_test.go`): the
+  full DB trigger matrix (one transaction per statement); token replay after
+  `consumed -> revoked` returning `ErrLaunchSessionNotActive`; a bet placed before the revoke still
+  settling via both a win and a rollback, ledger balanced throughout; tenant isolation on the
+  revoke itself (tenant B's attempt against tenant A's consumed session resolves 0 rows,
+  `ErrLaunchSessionNotFound` under RLS); and migration 0108 up/down/up on a scratch database.
+- Mutation evidence: `docs/plans/payment-readiness/evidence/prh2-casino-a-mutation-kill.txt`
+  (4/4 killed: drop the whole-row equality, allow `OLD.status IN ('consumed','expired')`, drop
+  `NEW.status='revoked'`, restore the revoke's own `WHERE status='active'`).
+- CAS-REVOKE-CONSUMED-1 (registry) closed; see `docs/governance/task-registry.md`.
+
 ### 15.2 KYC `CreateVerification`
 
 | Aspect | Specification |
