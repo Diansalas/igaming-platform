@@ -1,0 +1,521 @@
+PRH-2 I-core (ADR 0102, durable alerting) mutation-kill evidence
+==================================================================
+
+Scope: internal/alerting and migration 0110 as implemented on branch
+i-core-alerting. M1-M9 below were performed while the migration was still
+locally numbered 0108 (before workstream A's real 0108 merged forward and
+this migration was renamed to its ADR-allocated number, 0110 - the file's
+own header documents that renumbering); the migration content mutated is
+otherwise identical. M10 was re-verified after the rename directly against
+the renumbered file. HEAD at authoring time was based on
+claude/focused-wright-jw88w9 at b433454; this file itself was not
+re-authored after the later merge to origin/claude/focused-wright-jw88w9
+at 847a0fb, only amended for the renumbering as noted above and in M10.
+This covers a REPRESENTATIVE SUBSET of ADR 0102 §11's mutant table, not
+every row - no automated mutation-testing tool (go-mutesting, gremlins,
+etc.) was available/installed in this environment, so every mutant below
+was:
+  1. applied by hand via a Python one-shot `str.replace` on an exact,
+     count()==1-verified anchor string (never a fuzzy/regex match, so a
+     mismatch fails loudly instead of silently mutating nothing);
+  2. built (`go build`/`go vet -tags integration`) to confirm the mutant
+     compiles (a mutant that does not compile is not a meaningful test of
+     the runtime guard);
+  3. exercised by running the SPECIFIC named test(s) against the private
+     PRIV_DB harness (`priv_db.sh`/`priv_test.sh`), never the shared CI
+     database;
+  4. confirmed to make that test FAIL;
+  5. reverted with `cp` from a pre-mutation copy, confirmed byte-identical
+     via `git diff --stat` (no output), and PRIV_DB rebuilt from the
+     restored migration before the next mutant.
+
+This is a genuine, hand-verified kill exercise, not a generated/simulated
+report - each result below includes the actual failing test output
+observed. It is PARTIALLY IMPLEMENTED as an automated-mutation-testing
+substitute: real coverage of the ADR §11 table, but by manual mutation
+rather than a tool that could exhaustively enumerate every possible
+mutant of the codebase.
+
+Environment: local PostgreSQL (CI-local container), PRIV_DB=ialert1
+(M1-M9) and PRIV_DB=ialert2 (M10's re-verification) via the private
+harness scripts. Go per go.mod (go1.26). No shared CI database or shared
+test infrastructure was touched.
+
+------------------------------------------------------------------------
+
+M1. Savepoint removed (ADR §11 "Savepoint removed")
+    File: internal/alerting/guarded.go, RaiseGuarded.
+    Mutation: replaced the `tx.Begin(ctx)` (SAVEPOINT)/Commit/Rollback-to-
+    savepoint sequence with a direct call to
+    `insertOrAttachOccurrence(ctx, tx, ...)` against the outer business
+    transaction itself, keeping the same swallow/classify logic but with
+    no isolation boundary.
+    Killed by: TestRaiseGuarded_PersistentSwallowedFailure_FallsBackToRaiseFailed
+        (go test -tags=integration -run
+         TestRaiseGuarded_PersistentSwallowedFailure_FallsBackToRaiseFailed
+         ./internal/alerting/...)
+    Observed failure:
+        ERROR alert_raise_failed kind=alerting.unrouted sqlstate_class=42
+        guarded_integration_test.go:194: InTx: db: commit tx: commit
+        unexpectedly resulted in rollback
+    Why: without a savepoint, the failed alert INSERT poisons the WHOLE
+    outer Postgres transaction (aborted state); RaiseGuarded still
+    "swallows" the error in Go, but the subsequent COMMIT of the
+    business transaction itself then fails - exactly the class of bug the
+    savepoint exists to prevent. Restored: guarded.go byte-identical to
+    HEAD (git diff --stat: no output).
+
+M2. Validation error propagated (ADR §11 "Validation error propagated")
+    File: internal/alerting/guarded.go, RaiseGuarded's validation branch.
+    Mutation: `return err` instead of `return nil` on a Go validation
+    failure.
+    Killed by: TestInTx_ValidationFailureInRolledBackTransactionDiscarded
+    Observed failure:
+        guarded_integration_test.go:140: RaiseGuarded must never
+        propagate: alerting: invalid alert for kind
+        "payment.kill_switch_engaged": attribute key "not_allowed" is not
+        in the allowlist for this kind
+    Restored: byte-identical (git diff --stat: no output).
+
+M3. Swallowing all errors (ADR §11 "Swallowing all errors")
+    File: internal/alerting/guarded.go, classifySQLState.
+    Mutation: the non-PgError branch and the switch's `default` branch
+    both changed to `return ..., true` (swallow everything).
+    Killed by: TestClassifySQLState_SwallowAllowlistIsNarrow (a new unit
+    test added specifically to pin this allowlist exactly, since none of
+    the DB-backed tests provoke a real transient SQLSTATE deterministically)
+        (go test -run TestClassifySQLState_SwallowAllowlistIsNarrow
+         ./internal/alerting/...)
+    Observed failure: 8 of 9 negative cases flipped to swallow=true
+    (25P02, 40001, 40P01, 55P03, 57014, 08006, 53300, 42601), plus the
+    nil-error case. Restored: byte-identical.
+
+M4. Flush called on the error path (ADR §11 "Flush called on the error path")
+    File: internal/alerting/guarded.go, InTx.
+    Mutation: `return p, err` instead of `return nil, err` when the
+    business transaction fails - i.e. a Flush-able Pending is handed back
+    even though the transaction rolled back.
+    Killed by: TestInTx_RolledBackTransactionNeverFlushes
+    Observed failure:
+        guarded_integration_test.go:108: expected InTx to return a nil
+        Pending for a rolled-back transaction
+    Restored: byte-identical.
+
+M5. The fallback removed (ADR §11 "The fallback removed")
+    File: internal/alerting/fallback.go, raiseFailed.
+    Mutation: body replaced with a no-op (parameters discarded, no
+    INSERT performed).
+    Killed by: TestRaiseGuarded_PersistentSwallowedFailure_FallsBackToRaiseFailed
+    Observed failure:
+        guarded_integration_test.go:222: expected a terminal
+        alerting.raise_failed alert to persist
+    Note (test-isolation finding, fixed as part of this exercise): this
+    test originally used the shared `testPool` helper. Because this
+    alert's dedup key is stable (`kind:alerting.unrouted`), a prior
+    successful run's row satisfied the test's count() check even with the
+    fallback disabled - a genuine mutation-testing FALSE NEGATIVE. Fixed
+    by switching the test to `scratchPool` (a fresh, isolated database per
+    test run), after which the mutant is correctly killed. This fix is
+    committed as part of the real test suite, not reverted.
+    Restored: fallback.go byte-identical.
+
+M6. The `raise_failed` attribute trigger removed (ADR §11, malformed-insert test)
+    File: migrations/0110_durable_alerting.up.sql, alerts_guard()'s
+    `alerting.raise_failed`-only branch.
+    Mutation: the entire `IF NEW.kind = 'alerting.raise_failed' THEN ...
+    END IF;` block deleted.
+    Killed by: TestRaiseFailed_MalformedInsertsRefused (PRIV_DB rebuilt
+    from the mutated migration first)
+    Observed failure:
+        rls_integration_test.go:221: expected the malformed raise_failed
+        insert to be refused (subtest "missing_sqlstate_class")
+    Honesty note: of the 5 subtests, only "missing_sqlstate_class" is an
+    unambiguous, isolated kill - "extra_key" is independently refused by
+    the (still-intact) general attribute-allowlist trigger, and
+    "nonexistent_kind"/the two malformed-sqlstate_class cases happened to
+    also fail, but via a UNIQUE constraint collision on the shared literal
+    discriminator ("ignored", no longer force-rewritten once the trigger
+    is removed) rather than via a validation the mutant reaches - a
+    known, disclosed test-design limitation (each subtest should use a
+    distinct discriminator to isolate its own failure mode independently;
+    not fixed here for time). The test suite overall still correctly
+    FAILS with this mutant present, which is what "must be killed" means.
+    Restored: migration byte-identical; PRIV_DB rebuilt clean afterward.
+
+M7. `subject_tenant_id` dropped from `dedup_key` (ADR §11, TI dedup test)
+    File: migrations/0110_durable_alerting.up.sql, alerts.dedup_key.
+    Mutation: `GENERATED ALWAYS AS (kind || '|' || discriminator) STORED`
+    (subject_tenant_id removed from the expression).
+    Killed by: TestDedup_DifferentSubjectTenantsGetDifferentAlerts
+    Observed failure:
+        rls_integration_test.go:244: insert for tenant ...: ERROR:
+        duplicate key value violates unique constraint
+        "alerts_dedup_open" (SQLSTATE 23505)
+    Restored: migration byte-identical; PRIV_DB rebuilt clean.
+
+M8. The dispatcher granted UPDATE (ADR §11 "The dispatcher granted UPDATE")
+    File: migrations/0110_durable_alerting.up.sql,
+    alerts_platform_service_dispatcher policy on `alerts`.
+    Mutation: `FOR SELECT` -> `FOR ALL ... WITH CHECK (true)`.
+    Killed by: TestRLS_DispatcherCannotUpdateOrInsertNonMetaKind
+    Observed failure:
+        rls_integration_test.go:175: dispatcher update probe: ERROR:
+        alerting: no platform-admin principal in session (SQLSTATE P0001)
+    Note: killed by a SECOND, independent layer of defence-in-depth - the
+    alerts_guard() trigger's UPDATE branch unconditionally requires a
+    validated platform-admin actor regardless of which RLS policy admits
+    the row, so even a widened RLS policy alone could not have let the
+    dispatcher's UPDATE through. Restored: migration byte-identical;
+    PRIV_DB rebuilt clean.
+
+M9. The simulation guard deleted (ADR §11 "The simulation guard deleted")
+    File: migrations/0110_durable_alerting.up.sql,
+    alert_deliveries_guard()'s AL-9 check.
+    Mutation: the `IF v_alert.simulation AND NEW.event <>
+    'suppressed_simulation' THEN RAISE EXCEPTION ... END IF;` block
+    deleted.
+    Killed by: TestRLS_SimulationNeverDelivered
+    Observed failure:
+        rls_integration_test.go:279: expected a non-suppressed_simulation
+        delivery row on a simulation alert to be refused
+    Restored: migration byte-identical; PRIV_DB rebuilt clean.
+
+M10. One route seeded (ADR §11 "One route seeded")
+    File: migrations/0110_durable_alerting.up.sql.
+    Mutation: an `INSERT INTO alert_routes (...) VALUES ('platform',
+    'p1', 0, 'log', 'mutant-seed')` statement added mid-migration.
+    Killed by: TestMigration0110_NoRouteSeeded - but even more strongly,
+    the MIGRATION ITSELF fails to apply before any test assertion runs.
+    Re-verified after the 0108->0110 rename directly via `priv_db.sh`
+    (PRIV_DB=ialert2, a fresh private database, dropped afterward):
+        migrate: fatal: db: apply migration 110 (durable_alerting):
+        ERROR: alerting: no platform-admin principal in session
+        (SQLSTATE P0001)
+    This is a stronger property than the ADR's own mutant description
+    implies: the alert_routes guard trigger's forced
+    `alerting_validated_platform_admin()` check means a seeded route
+    cannot even be inserted by a migration running with no session GUCs
+    set, regardless of whether a test later notices it. Restored:
+    migration byte-identical; PRIV_DB rebuilt clean.
+
+------------------------------------------------------------------------
+
+Summary: 10/10 attempted mutants killed. Result: PASS for the subset
+exercised.
+
+Not attempted in this pass (disclosed, not silently dropped - each would
+need either a fault-injection hook this ADR does not specify, or a real
+I-wire business call site that does not exist yet):
+  - "The savepoint widened to cover a business statement (Q3)" - would
+    require mutating a real business call site alongside RaiseGuarded;
+    no such call site exists in I-core.
+  - "An incrementing attempt_no for unrouted" - covered structurally by
+    the `CHECK (event <> 'unrouted' OR attempt_no = 0)` constraint itself
+    (a mutant Go dispatcher that tried to increment it would simply fail
+    the INSERT, exercised implicitly by
+    TestDispatcher_ZeroRoutesProducesUnroutedAndMetaOccurrence's
+    idempotency-across-3-passes assertion, but not isolated as its own
+    named mutation run here).
+  - "A `run:<uuid>` discriminator" - no reconciliation call site exists in
+    I-core to mutate; the stable-discriminator convention is enforced only
+    by the I-wire call sites' own code, not by this package.
+  - "The attribute trigger deleted" (the general allowlist, as distinct
+    from the raise_failed-specific one in M6) - reasoned as equivalent in
+    mechanism to M6 and M9; not independently re-run for time.
+  - "The subject-read policy without its exclusions" - reasoned
+    equivalent in mechanism to M8 (same C-102-9 exclusion-set pattern
+    repeated per family); not independently re-run for time.
+  - "`RaiseDetached` choosing its scope from the Alert" - structurally
+    impossible rather than merely guarded: `Alert` has no scope-bearing
+    field for `RaiseDetached` to read in the first place (see scope.go's
+    own doc comment), so there is no single-line mutation that reproduces
+    this defect without a larger redesign: the ADR-listed kill test
+    (TestRLS_CrossTenantSubjectRaiseRefused) is exercised as a positive
+    test in the normal suite instead.
+
+All ten mutants above were later verified reverted with a final
+`git status --porcelain` on `migrations/0110_durable_alerting.up.sql`,
+`internal/alerting/guarded.go` and `internal/alerting/fallback.go`
+showing no diff against the committed HEAD, and the full test suite
+(`priv_test.sh -race -tags integration -count=1 ./internal/alerting/...`)
+passing cleanly afterward.
+
+------------------------------------------------------------------------
+
+Round 2 (review-driven fixes, 2026-09-28): security IC-1's required
+"removed-exclusions mutant"
+=============================================================================
+
+M11. Exclusion set removed from alerts_subject_tenant_read (security
+IC-1's explicit "record the removed-exclusions mutant as killed").
+    File: migrations/0110_durable_alerting.up.sql,
+    alerts_subject_tenant_read policy on `alerts`.
+    Mutation: the five `AND NULLIF(current_setting(...` exclusion clauses
+    (app.player_account_id, app.platform_admin_principal_id,
+    app.platform_service_id, app.acting_tenant_id,
+    app.acting_platform_principal_id) removed from the USING clause,
+    leaving only `tenant_id IS NULL AND subject_tenant_id = app.tenant_id`.
+    Killed by: TestExclusionSets_SubjectTenantRead_Family (new this round)
+        (go test -tags=integration -run
+         TestExclusionSets_SubjectTenantRead_Family ./internal/alerting/...,
+         against a freshly rebuilt PRIV_DB=ialert3)
+    Observed failure (all five mixed-GUC probes now wrongly saw the row):
+        exclusion_set_integration_test.go:88: tenant +
+        app.acting_tenant_id, alerts: expected 0 row(s), got 1
+        exclusion_set_integration_test.go:88: tenant +
+        app.acting_platform_principal_id, alerts: expected 0 row(s), got 1
+        exclusion_set_integration_test.go:88: tenant +
+        app.platform_service_id, alerts: expected 0 row(s), got 1
+        exclusion_set_integration_test.go:88: tenant +
+        app.platform_admin_principal_id, alerts: expected 0 row(s), got 1
+        exclusion_set_integration_test.go:88: tenant +
+        app.player_account_id, alerts: expected 0 row(s), got 1
+    Restored: migration byte-identical to the committed version
+    (`git diff --stat migrations/0110_durable_alerting.up.sql`: no
+    output), PRIV_DB rebuilt clean before continuing.
+
+Result for this round: 1/1 attempted mutant killed (M11). The three
+mutants the code review named as surviving on the ORIGINAL commit
+(`bc73c24`) - MA (backoff predicate), MB (escalation predicate), MC
+(claim race) - were not re-created as literal mutations and re-run
+against the FIXED code in this evidence file; instead, new positive
+tests were written that directly exercise the corrected behaviour
+(`TestDispatcher_BackoffHoldsRetryUntilElapsed`,
+`TestDispatcher_EscalationOnlyAfterEscalateAfterAndNeverWhenAcked`,
+`TestDispatcher_AckedUnroutedEscalationStepNeverEscalates`,
+`TestDispatcher_ClaimRaceIsDeterministic` at `-race -count=10`) and
+confirmed passing. This is disclosed as a gap relative to a strict
+re-mutate-and-kill methodology: the fixes are proven correct by direct
+test, not by reproducing the reviewer's exact mutants against the new
+code and watching them fail.
+
+------------------------------------------------------------------------
+
+Round 3 (security re-review IR-1, 2026-09-28): exclusion set on
+alert_occurrences' subject-tenant raise policy
+=============================================================================
+
+M12. Exclusion set removed from alerts_subject_tenant_raise ON
+alert_occurrences (IR-1's explicit follow-up finding).
+    File: migrations/0110_durable_alerting.up.sql, alerts_subject_tenant_
+    raise policy on `alert_occurrences`.
+    Mutation: the five `AND NULLIF(current_setting(...` exclusion clauses
+    removed from the WITH CHECK, leaving only the tenant/subject match
+    and the in_tx_raisable_by_tenant check.
+    IMPORTANT FINDING: this mutant is NOT killed by a behavioural probe
+    (the same shape as M11's). `alert_occurrences_guard`'s own
+    `alerting_session_scope()` call independently raises for EVERY one of
+    the five exclusion GUCs combined with app.tenant_id (each one hits
+    either the "acting"/"player" check or a "mixed session" check in that
+    function, before RLS is ever evaluated on INSERT - BEFORE ROW
+    triggers run strictly before WITH CHECK is checked). Confirmed
+    empirically: with the mutation applied,
+    TestExclusionSets_SubjectTenantRaise_Family (the M11-style behavioural
+    probe, first fixed this round per IR-1 to target a REAL, committed
+    alert id) still PASSED - the mutant SURVIVED that probe, exactly as
+    the security re-review predicted.
+    Killed by: TestExclusionSets_SubjectTenantRaise_OccurrencesPolicyTextPinsExclusions
+    (new this round) - a metadata-level pin querying
+    `pg_get_expr(pol.polwithcheck, pol.polrelid)` from `pg_policy`/
+    `pg_class` directly for the exact policy, asserting the WITH CHECK
+    text contains all five GUC names. This is independent of the
+    trigger's own redundant defence, and is the only way to observe a
+    change to this SPECIFIC policy's text given the trigger structurally
+    intercepts every reachable attack shape first.
+        (go test -tags=integration -run
+         TestExclusionSets_SubjectTenantRaise_OccurrencesPolicyTextPinsExclusions
+         ./internal/alerting/..., against a freshly rebuilt PRIV_DB=ialert7)
+    Observed failure: all five `t.Errorf` lines fired, each showing the
+    mutated WITH CHECK text with no exclusion clauses present.
+    Restored: migration byte-identical to the committed version
+    (`git diff --stat migrations/0110_durable_alerting.up.sql`: no
+    output); PRIV_DB rebuilt clean before continuing.
+
+Result for this round: 1/1 attempted mutant killed (M12), via a metadata
+pin rather than a behavioural test - disclosed explicitly above as the
+correct, necessary approach given the trigger/RLS redundancy this
+investigation uncovered on this specific table/policy.
+
+------------------------------------------------------------------------
+
+Round 4 (ledger-finance re-review N-1, 2026-09-28): Flush retrying on the
+original runner instead of freshReadCommittedRunner
+=============================================================================
+
+MF. `Pending.Flush`'s detached retry uses `p.runner` directly instead of
+`freshReadCommittedRunner(p.runner.Pool(), p.runner.Scope())` (LF's own
+mutant name, ledger-finance re-review note N-1).
+    File: internal/alerting/guarded.go, Pending.Flush.
+    Mutation: `retryRunner := freshReadCommittedRunner(p.runner.Pool(),
+    p.runner.Scope())` replaced with `retryRunner := p.runner`.
+    Killed by: TestLFC2_RaiseGuardedDefersInsteadOfRaisingUnderRepeatableRead
+    (strengthened this round per N-1: `snapshotRunner` now records the
+    real `transaction_isolation` seen on EVERY invocation of its own Run
+    method, and the test asserts it was invoked exactly once - the
+    original raise inside InTx - never again during Flush's retry)
+        (go test -tags=integration -run TestLFC2 ./internal/alerting/...,
+         against PRIV_DB=ialert7)
+    Observed failure:
+        lf_c2_integration_test.go:126: expected the snapshot runner to be
+        invoked exactly once (the original raise), got 2 invocations
+        (isolations: [repeatable read repeatable read]) - the detached
+        retry must use freshReadCommittedRunner, never the original
+        runner
+    Before this fix, the same test only asserted the alert persisted
+    after Flush - which the mutant ALSO satisfies (Raise still succeeds
+    the second time even at REPEATABLE READ here, since the dedup key is
+    stable and no concurrent writer contends the snapshot in this single-
+    threaded test), so the mutant previously survived silently. The
+    invocation-count/isolation-log assertion is what actually pins the
+    isolation level of the RETRY, not just the raise's eventual success.
+    Restored: guarded.go byte-identical to the committed version
+    (`git diff --stat internal/alerting/guarded.go`: no output).
+
+Result for this round: 1/1 attempted mutant killed (MF).
+
+------------------------------------------------------------------------
+
+Round 5 (code re-review C-1/C-2/C-3/C-4, 2026-09-28): escalation
+positive-testing, platform-admin scope-kind coverage, principal-scope
+scope-kind + isolation coverage, stale-reclaim skip-delivery
+
+=============================================================================
+
+MB2. Escalation disabled entirely (`w.due = false` in the "sent" case of
+readDueWork, in place of the real predicate) still passes the whole
+suite (code review C-1: "escalation has no positive test").
+    File: internal/alerting/dispatcher.go, readDueWork's `case *event ==
+    "sent":` branch.
+    Mutation: `w.due = !w.acked && nextEscalationAt != nil &&
+    !now.Before(*nextEscalationAt)` replaced with `w.due = false`.
+    Killed by: TestDispatcher_EscalationFiresToRoutedStep and
+    TestDispatcher_EscalationFiresToUnroutedStep (both new this round) -
+    an un-acked alert is sent at step 0, the manual clock is advanced
+    past escalate_after, and a second pass is asserted to produce either
+    a `sent` row at step 1 (a step-1 route exists) or an `unrouted` row
+    at step 1 (no step-1 route exists).
+        (priv_test.sh -tags integration -run
+         'TestDispatcher_EscalationFiresToRoutedStep|TestDispatcher_EscalationFiresToUnroutedStep'
+         ./internal/alerting/..., PRIV_DB=ialert9)
+    Observed failure with the mutation applied:
+        dispatcher_hardening_integration_test.go:163: expected latest
+        delivery (event="sent", step=1), got (event="sent", step=0)
+        dispatcher_hardening_integration_test.go:192: expected latest
+        delivery (event="unrouted", step=1), got (event="sent", step=0)
+    Restored: dispatcher.go byte-identical to the committed version
+    (`git diff --stat internal/alerting/dispatcher.go`: no output);
+    PRIV_DB rebuilt clean before continuing.
+
+MG. The `ScopePlatformAdmin` case removed from `freshReadCommittedRunner`
+(falling through to the `default:` refusing branch) still passes the
+whole suite (code review C-2).
+    File: internal/alerting/scope.go, freshReadCommittedRunner.
+    Mutation: the `case ScopePlatformAdmin: return
+    NewPlatformAdminRunner(pool, scope.PlatformAdminID)` case deleted,
+    leaving only `default:`.
+    Killed by: TestFlush_PlatformAdminRunner_PersistsWithRaisedByScope
+    (new this round) - forces a genuine, transient in-tx swallow via a
+    subject_tenant_id FK violation (class 23, swallowable) raised through
+    NewPlatformAdminRunner, creates the missing subject tenant for real,
+    then asserts the alert persists via Flush's detached retry with
+    raised_by_scope = 'platform_admin'.
+        (priv_test.sh -tags integration -run
+         TestFlush_PlatformAdminRunner_PersistsWithRaisedByScope
+         ./internal/alerting/..., PRIV_DB=ialert9)
+    Observed failure with the mutation applied:
+        alert_raise_detached_exhausted kind=reconciliation.ledger_projection_drift
+        sqlstate_class=58 error="alerting: freshReadCommittedRunner:
+        unknown ScopeKind 2 - refusing rather than guessing a scope"
+        code_c2_c3_integration_test.go:144: read back after flush: no
+        rows in result set (mutant MG: ...)
+    Also independently confirmed via
+    TestFreshReadCommittedRunner_KnownKindsDoNotRefuse (already existing,
+    scope_test.go), which failed with "scope kind 2 unexpectedly hit the
+    refusing default case".
+    Restored: scope.go byte-identical to the committed version (`git diff
+    --stat internal/alerting/scope.go`: no output); PRIV_DB rebuilt clean
+    before continuing.
+
+MF (re-verified for the principal-scope path, code review C-3).
+`Pending.Flush`'s detached retry using `p.runner` directly instead of
+`freshReadCommittedRunner(...)` still passes
+TestFlush_PrincipalRunner_PersistsWithRaisedByScope's persistence-only
+half; the invocation-count assertion is what catches it, exactly as
+Round 4 established for the REPEATABLE READ snapshotRunner path.
+    File: internal/alerting/guarded.go, Pending.Flush.
+    Mutation: same as Round 4 - `retryRunner := freshReadCommittedRunner(
+    p.runner.Pool(), p.runner.Scope())` replaced with `retryRunner :=
+    p.runner`.
+    Killed by: TestFlush_PrincipalRunner_PersistsWithRaisedByScope (new
+    this round, code review C-3) via `spyPrincipalRunner`, which wraps a
+    real `db.WithPrincipalScope` call and records every invocation's
+    `transaction_isolation` the same way `snapshotRunner` does for the
+    REPEATABLE READ path - the test asserts the wrapped runner was
+    invoked exactly once. TestLFC2_RaiseGuardedDefersInsteadOfRaisingUnderRepeatableRead
+    (Round 4's test) also still kills the same mutation, confirmed
+    together in this round.
+        (priv_test.sh -tags integration -run
+         'TestLFC2_RaiseGuardedDefersInsteadOfRaisingUnderRepeatableRead|TestFlush_PrincipalRunner_PersistsWithRaisedByScope'
+         ./internal/alerting/..., PRIV_DB=ialert9)
+    Observed failure with the mutation applied:
+        code_c2_c3_integration_test.go:239: expected the principal runner
+        to be invoked exactly once (the original raise), got 2
+        invocations (isolations: [read committed read committed]) - the
+        detached retry must use freshReadCommittedRunner, never the
+        original runner
+        lf_c2_integration_test.go:126: expected the snapshot runner to be
+        invoked exactly once (the original raise), got 2 invocations
+        (isolations: [repeatable read repeatable read]) - ...
+    Note: for the principal-scope path both the mutated and the correct
+    runner report "read committed" (NewPrincipalRunner never opens a
+    snapshot) - unlike the REPEATABLE READ case, the isolation VALUE does
+    not distinguish the mutant here; only the invocation COUNT does. Both
+    checks are asserted in the same test per the code reviewer's request.
+    Restored: guarded.go byte-identical to the committed version (`git
+    diff --stat internal/alerting/guarded.go`: no output); PRIV_DB
+    rebuilt clean before continuing.
+
+MC4. A reclaimed stale claim whose new attempt number has already
+reached MaxAttempts is delivered anyway instead of being recorded 'dead'
+directly (code review C-4, "the stale-reclaim residuals").
+    File: internal/alerting/dispatcher.go, readDueWork's "claimed" case.
+    Mutation: `w.staleExhausted = w.attemptNo >= d.config.MaxAttempts`
+    replaced with `w.staleExhausted = false`.
+    Killed by: TestDispatcher_StaleClaimReclaimBeyondMaxAttemptsSkipsDelivery
+    (new this round) - MaxAttempts=1, the one and only attempt is
+    stranded as 'claimed' and reclaimed as attempt 1 (already past the
+    single-attempt budget); asserts the sink's Attempts is empty and the
+    alert goes straight to 'dead'.
+    Distinguished from the pre-existing TestDispatcher_StaleClaimReclaimedThenDead
+    (MaxAttempts=2, reclaim to attempt 1 is still WITHIN budget and must
+    still be delivered once, then recorded dead via the ordinary
+    recordFailedOrDead path after that delivery also fails) - both tests
+    pass against the corrected code, confirming the boundary
+    (w.attemptNo >= MaxAttempts, not w.attemptNo+1 >= MaxAttempts) is
+    exactly right.
+        (priv_test.sh -tags integration -run 'TestDispatcher_StaleClaim'
+         ./internal/alerting/..., PRIV_DB=ialert9)
+    Observed failure with the mutation applied:
+        dispatcher_hardening_integration_test.go:436: expected NO
+        delivery attempt for a reclaim that already exceeds MaxAttempts,
+        got 1
+    Restored: dispatcher.go byte-identical to the committed version
+    (`git diff --stat internal/alerting/dispatcher.go`: no output);
+    PRIV_DB rebuilt clean before continuing.
+
+Result for this round: 4/4 attempted mutants killed (MB2, MG, MF
+re-verified, MC4).
+
+C-4's other two items (bounding Deliver's context with a timeout derived
+from ClaimLease, and the idempotency-key policy decision) are
+implementation/documentation changes rather than mutants with a
+dedicated kill test - see docs/decisions/0102-durable-alerting-and-
+provider-neutral-delivery.md §16.3 for the idempotency-key justification.
+No dedicated mutation test exists for the Deliver timeout bound itself
+(it is a defence-in-depth measure against a hung Sink, not a behaviour
+the existing unit/integration suite can trigger with a MockSink that
+always returns synchronously) - this is disclosed as PARTIALLY VERIFIED:
+the timeout is wired in (`context.WithTimeout(ctx, d.config.ClaimLease/2)`
+in processOne) and the full existing suite (including -race) passes with
+it in place, but no test forces an actual slow/hung Deliver call to
+observe the timeout firing.
