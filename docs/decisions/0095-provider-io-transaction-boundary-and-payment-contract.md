@@ -2683,11 +2683,14 @@ bets roughly `DefaultLaunchTokenTTL` after launch, with `ErrLaunchSessionRequire
 - **I-4:** no production code consumes a launch token (`ResolveLaunchToken` has no non-test caller). So in the current wiring every `LaunchGame` session stays `active`, and bets are still refused about 2 minutes after launch (CAS-PLAY-BOOTSTRAP-1). This is correct from a security standpoint and must not be relaxed; the remedy is a vendor token-bootstrap path.
 - **C4 / CAS-REVOKE-CONSUMED-1:** MEDIUM, **deferred and launch-blocking** (option b), with the required migration-backed fix (a) specified in the security record. It must land before the first of: a non-test caller of `ResolveLaunchToken`; a non-synthetic casino adapter; or a production launch request.
 
-#### 15.1.5 amendment (CAS-REVOKE-CONSUMED-1 closed, 2026-09-28)
+#### 15.1.5 amendment (CAS-REVOKE-CONSUMED-1, 2026-09-28)
 
 PRH-2 workstream A (`docs/plans/prh2-hardening-round/plan.md` §5-A; security's required fix,
 `docs/plans/payment-readiness/rv-prh-i2-casino-security.md` "Re-review (FH-7, 2026-09-28)",
-"Required fix (a)"). **C4 is now closed.**
+"Required fix (a)"). **Status: IMPLEMENTED; security ACCEPT
+(`docs/plans/prh2-hardening-round/reviews/a-security.md`); CLOSED on merge.** (Per CLAUDE.md's "no
+fake completion" rule, this is not marked closed here - the registry and the merge itself are the
+orchestrator's own gate, not this ADR's.)
 
 - **Migration 0108** replaces `casino_launch_sessions_enforce_immutable_fields()`, keeping 0042's
   column-immutability block byte-identical and replacing only the terminal-status block: exactly
@@ -2702,7 +2705,12 @@ PRH-2 workstream A (`docs/plans/prh2-hardening-round/plan.md` §5-A; security's 
   `UPDATE ... SET status='revoked' WHERE id=$1 AND status IN ('active','consumed')`, and returns the
   prior status alongside whether the CAS matched. `orchestrator.go`'s `launchFailed` (phase C) now
   writes `prior_status` into the append-only `casino.launch_failed` audit record, next to the
-  existing `revoked` field.
+  existing `revoked` field. **Behaviour change (code review A6):** before this fix, a session id that
+  resolved to no row returned `(false, nil)`; `RevokeLaunchSession` now returns `ErrLaunchSessionNotFound`
+  in that case (also the observed outcome of a cross-tenant revoke attempt, since RLS hides the row
+  entirely). `launchFailed` has exactly one caller with a session id it just minted in the same
+  `LaunchGame` invocation, so this path is not reachable in production today; it is exercised
+  directly by `TestRevokeLaunchSession_TenantIsolation`.
 - Token replay is unaffected exactly as anticipated: `ResolveLaunchToken` still accepts only
   `active`; the relaxed trigger branch only ever admits the terminal `consumed -> revoked` move;
   `token_hash`/`expires_at` remain immutable throughout.
@@ -2719,9 +2727,15 @@ PRH-2 workstream A (`docs/plans/prh2-hardening-round/plan.md` §5-A; security's 
   revoke itself (tenant B's attempt against tenant A's consumed session resolves 0 rows,
   `ErrLaunchSessionNotFound` under RLS); and migration 0108 up/down/up on a scratch database.
 - Mutation evidence: `docs/plans/payment-readiness/evidence/prh2-casino-a-mutation-kill.txt`
-  (4/4 killed: drop the whole-row equality, allow `OLD.status IN ('consumed','expired')`, drop
-  `NEW.status='revoked'`, restore the revoke's own `WHERE status='active'`).
-- CAS-REVOKE-CONSUMED-1 (registry) closed; see `docs/governance/task-registry.md`.
+  (author's own round, 4/4 killed: drop the whole-row equality, allow
+  `OLD.status IN ('consumed','expired')`, drop `NEW.status='revoked'`, restore the revoke's own
+  `WHERE status='active'`; code review's follow-up round added the `id`-change matrix cell and the
+  already-`expired`/already-`revoked` no-op coverage - see the same evidence file for that round).
+- Security review: **ACCEPT** (`docs/plans/prh2-hardening-round/reviews/a-security.md`). Code review:
+  **READY WITH CONDITIONS**, A1-A8 addressed in follow-up commits on this branch
+  (`docs/plans/prh2-hardening-round/reviews/a-code-review.md`).
+- CAS-REVOKE-CONSUMED-1 (registry): the orchestrator updates `docs/governance/task-registry.md` at
+  merge, per CLAUDE.md's "no fake completion" rule - not asserted here.
 
 ### 15.2 KYC `CreateVerification`
 

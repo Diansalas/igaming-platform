@@ -8,23 +8,68 @@
 // launch_two_phase_integration_test.go, next to the fixed-behind-a-
 // migration production path it replaced):
 //
-//   - the DB trigger matrix, one transaction per statement;
+//   - the DB trigger matrix, one transaction per statement, asserting
+//     SQLSTATE P0001 and the specific trigger message for every refused
+//     cell (code review A5);
 //   - token replay after consumed -> revoked;
 //   - pre-revoke bets still settle (win and rollback);
 //   - tenant isolation on the revoke itself;
-//   - migration 0108 up/down/up.
+//   - migration 0108 up/down/up;
+//   - RevokeLaunchSession as a no-op on an already-'expired' or already-
+//     'revoked' session, including a phase-C case that still audits
+//     (code review A2, kills mutant X5);
+//   - a two-connection test proving FOR UPDATE is what keeps a concurrent
+//     revoke's own reported prior_status exact (code review A3, kills
+//     mutant X4).
 package casino
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/Diansalas/igaming-platform/internal/db"
 )
+
+// The two RAISE EXCEPTION messages casino_launch_sessions_enforce_
+// immutable_fields() can produce (both SQLSTATE P0001, Postgres's generic
+// "raise_exception" code for a PL/pgSQL RAISE with no explicit SQLSTATE) -
+// asserted verbatim below rather than merely checking err != nil (code
+// review A5), so a mutant that raises for the wrong reason on the wrong
+// cell cannot hide behind a bare non-nil check.
+const (
+	msgColumnsImmutable  = "casino_launch_sessions: identity/token/expiry columns are immutable after insert"
+	msgTerminalImmutable = "casino_launch_sessions: row is immutable once consumed, expired, or revoked"
+)
+
+// requirePgError asserts err is (or wraps) a *pgconn.PgError with the
+// given SQLSTATE and message - every refused cell in this file's matrix
+// is refused by one of this table's own two BEFORE UPDATE RAISE EXCEPTION
+// blocks (migration 0036/0042/0108), never by RLS: RLS's WITH CHECK is
+// only evaluated after BEFORE ROW triggers run, and every mutation this
+// matrix attempts is already caught by one of the two blocks above (the
+// tenant_id and expires_at cells, in particular, are caught by 0042's own
+// column-immutability block, not by RLS or by 0108's new terminal-status
+// block - verified empirically with a throwaway probe, per this file's own
+// convention).
+func requirePgError(t *testing.T, err error, wantCode, wantMessage string) {
+	t.Helper()
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) {
+		t.Fatalf("expected a *pgconn.PgError, got %T: %v", err, err)
+	}
+	if pgErr.Code != wantCode {
+		t.Fatalf("expected SQLSTATE %s, got %s: %v", wantCode, pgErr.Code, err)
+	}
+	if pgErr.Message != wantMessage {
+		t.Fatalf("expected trigger message %q, got %q", wantMessage, pgErr.Message)
+	}
+}
 
 // seedLaunchSessionAtStatus mints a genuine casino_launch_sessions row via
 // CreateLaunchSession (so every FK and NOT NULL column is populated
@@ -76,65 +121,103 @@ func TestMigration0108_TriggerMatrix(t *testing.T) {
 	f := seedCasinoFixture(t, pool)
 	game := seedGame(t, pool, "mock-casino", "EUR")
 
-	attempt := func(t *testing.T, from LaunchSessionStatus, sql string, wantRefused bool) {
+	// allow runs a transition expected to succeed.
+	allow := func(t *testing.T, from LaunchSessionStatus, sql string) {
 		t.Helper()
 		id := seedLaunchSessionAtStatus(t, pool, f, game, from)
 		err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 			_, err := tx.Exec(ctx, sql, id)
 			return err
 		})
-		if wantRefused && err == nil {
-			t.Fatalf("expected the transition to be refused, but it succeeded")
-		}
-		if !wantRefused && err != nil {
+		if err != nil {
 			t.Fatalf("expected the transition to be allowed, got %v", err)
 		}
 	}
 
+	// refuse runs a transition expected to be refused by one of this
+	// table's own two RAISE EXCEPTION blocks, asserting the exact SQLSTATE
+	// and message (code review A5) rather than a bare err != nil.
+	refuse := func(t *testing.T, from LaunchSessionStatus, sql, wantMessage string) {
+		t.Helper()
+		id := seedLaunchSessionAtStatus(t, pool, f, game, from)
+		err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+			_, err := tx.Exec(ctx, sql, id)
+			return err
+		})
+		if err == nil {
+			t.Fatal("expected the transition to be refused, but it succeeded")
+		}
+		requirePgError(t, err, "P0001", wantMessage)
+	}
+
 	// --- Allowed ---
 	t.Run("allowed/consumed_to_revoked", func(t *testing.T) {
-		attempt(t, LaunchSessionConsumed, `UPDATE casino_launch_sessions SET status = 'revoked' WHERE id = $1`, false)
+		allow(t, LaunchSessionConsumed, `UPDATE casino_launch_sessions SET status = 'revoked' WHERE id = $1`)
 	})
 	t.Run("allowed/active_to_revoked", func(t *testing.T) {
-		attempt(t, LaunchSessionActive, `UPDATE casino_launch_sessions SET status = 'revoked' WHERE id = $1`, false)
+		allow(t, LaunchSessionActive, `UPDATE casino_launch_sessions SET status = 'revoked' WHERE id = $1`)
 	})
 	t.Run("allowed/active_to_expired", func(t *testing.T) {
-		attempt(t, LaunchSessionActive, `UPDATE casino_launch_sessions SET status = 'expired' WHERE id = $1`, false)
+		allow(t, LaunchSessionActive, `UPDATE casino_launch_sessions SET status = 'expired' WHERE id = $1`)
 	})
 	t.Run("allowed/active_to_consumed", func(t *testing.T) {
-		attempt(t, LaunchSessionActive, `UPDATE casino_launch_sessions SET status = 'consumed', consumed_at = now() WHERE id = $1`, false)
+		allow(t, LaunchSessionActive, `UPDATE casino_launch_sessions SET status = 'consumed', consumed_at = now() WHERE id = $1`)
 	})
 
-	// --- Refused: every transition out of 'consumed' other than -> revoked ---
+	// --- Refused: every transition out of 'consumed' other than -> revoked.
+	// These are caught by 0108's own terminal-status block: OLD.status =
+	// 'consumed' is true, but the inner "NEW.status = 'revoked'" condition
+	// is false, so it falls through to the RAISE EXCEPTION. ---
 	t.Run("refused/consumed_to_active", func(t *testing.T) {
-		attempt(t, LaunchSessionConsumed, `UPDATE casino_launch_sessions SET status = 'active' WHERE id = $1`, true)
+		refuse(t, LaunchSessionConsumed, `UPDATE casino_launch_sessions SET status = 'active' WHERE id = $1`, msgTerminalImmutable)
 	})
 	t.Run("refused/consumed_to_expired", func(t *testing.T) {
-		attempt(t, LaunchSessionConsumed, `UPDATE casino_launch_sessions SET status = 'expired' WHERE id = $1`, true)
+		refuse(t, LaunchSessionConsumed, `UPDATE casino_launch_sessions SET status = 'expired' WHERE id = $1`, msgTerminalImmutable)
 	})
 	t.Run("refused/consumed_to_consumed_noop", func(t *testing.T) {
-		attempt(t, LaunchSessionConsumed, `UPDATE casino_launch_sessions SET status = 'consumed' WHERE id = $1`, true)
+		refuse(t, LaunchSessionConsumed, `UPDATE casino_launch_sessions SET status = 'consumed' WHERE id = $1`, msgTerminalImmutable)
 	})
 
-	// --- Refused: consumed -> revoked combined with any other column change ---
+	// --- Refused: consumed -> revoked combined with any other column
+	// change. consumed_at and id are not in 0042's own column-immutability
+	// list, so these two cells are the ones that actually exercise 0108's
+	// whole-row equality (to_jsonb(NEW) - 'status' = to_jsonb(OLD) -
+	// 'status'), not the earlier column block - hence msgTerminalImmutable.
+	// expires_at and tenant_id ARE in 0042's column-immutability list, so
+	// those two cells are refused by that earlier block instead (verified
+	// empirically with a throwaway probe against this exact trigger before
+	// writing these assertions) - hence msgColumnsImmutable. Either way
+	// the transition is refused; the message pins WHICH block does it. ---
 	t.Run("refused/consumed_to_revoked_with_consumed_at_change", func(t *testing.T) {
-		attempt(t, LaunchSessionConsumed,
-			`UPDATE casino_launch_sessions SET status = 'revoked', consumed_at = consumed_at + interval '1 second' WHERE id = $1`, true)
+		refuse(t, LaunchSessionConsumed,
+			`UPDATE casino_launch_sessions SET status = 'revoked', consumed_at = consumed_at + interval '1 second' WHERE id = $1`,
+			msgTerminalImmutable)
 	})
 	t.Run("refused/consumed_to_revoked_with_consumed_at_null", func(t *testing.T) {
-		attempt(t, LaunchSessionConsumed,
-			`UPDATE casino_launch_sessions SET status = 'revoked', consumed_at = NULL WHERE id = $1`, true)
+		refuse(t, LaunchSessionConsumed,
+			`UPDATE casino_launch_sessions SET status = 'revoked', consumed_at = NULL WHERE id = $1`,
+			msgTerminalImmutable)
+	})
+	t.Run("refused/consumed_to_revoked_with_id_change", func(t *testing.T) {
+		// Code review A4: the whole-row equality was previously exercised
+		// only through consumed_at; id is this table's own primary key and
+		// was untested (mutant X9). No other row references this fixture's
+		// fresh session (no bet/win/rollback was ever posted against it),
+		// so nothing FK-related stops the UPDATE itself from reaching the
+		// trigger - the trigger's own whole-row equality is what refuses it.
+		refuse(t, LaunchSessionConsumed,
+			`UPDATE casino_launch_sessions SET status = 'revoked', id = gen_random_uuid() WHERE id = $1`,
+			msgTerminalImmutable)
 	})
 	t.Run("refused/consumed_to_revoked_with_expires_at_change", func(t *testing.T) {
-		attempt(t, LaunchSessionConsumed,
-			`UPDATE casino_launch_sessions SET status = 'revoked', expires_at = expires_at + interval '1 second' WHERE id = $1`, true)
+		refuse(t, LaunchSessionConsumed,
+			`UPDATE casino_launch_sessions SET status = 'revoked', expires_at = expires_at + interval '1 second' WHERE id = $1`,
+			msgColumnsImmutable)
 	})
 	t.Run("refused/consumed_to_revoked_with_tenant_id_change", func(t *testing.T) {
-		// Already caught by 0042's own column-immutability block (tenant_id
-		// is in that list regardless of status), and/or by this table's
-		// own RLS WITH CHECK (a tenant-scoped connection can never write a
-		// row whose tenant_id no longer matches app.tenant_id) - either
-		// way, the transition must be refused.
+		// tenant_id is caught by 0042's own column-immutability block
+		// (BEFORE ROW, so this fires before RLS's WITH CHECK is ever
+		// evaluated) - not by RLS, and not by 0108's terminal-status block.
 		id := seedLaunchSessionAtStatus(t, pool, f, game, LaunchSessionConsumed)
 		otherTenant := uuid.New()
 		err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
@@ -144,31 +227,32 @@ func TestMigration0108_TriggerMatrix(t *testing.T) {
 		if err == nil {
 			t.Fatal("expected the transition to be refused, but it succeeded")
 		}
+		requirePgError(t, err, "P0001", msgColumnsImmutable)
 	})
 
 	// --- Refused: every transition out of 'revoked' ---
 	t.Run("refused/revoked_to_active", func(t *testing.T) {
-		attempt(t, LaunchSessionRevoked, `UPDATE casino_launch_sessions SET status = 'active' WHERE id = $1`, true)
+		refuse(t, LaunchSessionRevoked, `UPDATE casino_launch_sessions SET status = 'active' WHERE id = $1`, msgTerminalImmutable)
 	})
 	t.Run("refused/revoked_to_consumed", func(t *testing.T) {
-		attempt(t, LaunchSessionRevoked, `UPDATE casino_launch_sessions SET status = 'consumed', consumed_at = now() WHERE id = $1`, true)
+		refuse(t, LaunchSessionRevoked, `UPDATE casino_launch_sessions SET status = 'consumed', consumed_at = now() WHERE id = $1`, msgTerminalImmutable)
 	})
 	t.Run("refused/revoked_to_expired", func(t *testing.T) {
-		attempt(t, LaunchSessionRevoked, `UPDATE casino_launch_sessions SET status = 'expired' WHERE id = $1`, true)
+		refuse(t, LaunchSessionRevoked, `UPDATE casino_launch_sessions SET status = 'expired' WHERE id = $1`, msgTerminalImmutable)
 	})
 	t.Run("refused/revoked_to_revoked_noop", func(t *testing.T) {
-		attempt(t, LaunchSessionRevoked, `UPDATE casino_launch_sessions SET status = 'revoked' WHERE id = $1`, true)
+		refuse(t, LaunchSessionRevoked, `UPDATE casino_launch_sessions SET status = 'revoked' WHERE id = $1`, msgTerminalImmutable)
 	})
 
 	// --- Refused: every transition out of 'expired' ---
 	t.Run("refused/expired_to_revoked", func(t *testing.T) {
-		attempt(t, LaunchSessionExpired, `UPDATE casino_launch_sessions SET status = 'revoked' WHERE id = $1`, true)
+		refuse(t, LaunchSessionExpired, `UPDATE casino_launch_sessions SET status = 'revoked' WHERE id = $1`, msgTerminalImmutable)
 	})
 	t.Run("refused/expired_to_active", func(t *testing.T) {
-		attempt(t, LaunchSessionExpired, `UPDATE casino_launch_sessions SET status = 'active' WHERE id = $1`, true)
+		refuse(t, LaunchSessionExpired, `UPDATE casino_launch_sessions SET status = 'active' WHERE id = $1`, msgTerminalImmutable)
 	})
 	t.Run("refused/expired_to_consumed", func(t *testing.T) {
-		attempt(t, LaunchSessionExpired, `UPDATE casino_launch_sessions SET status = 'consumed', consumed_at = now() WHERE id = $1`, true)
+		refuse(t, LaunchSessionExpired, `UPDATE casino_launch_sessions SET status = 'consumed', consumed_at = now() WHERE id = $1`, msgTerminalImmutable)
 	})
 }
 
@@ -340,9 +424,12 @@ func TestRevokeLaunchSession_PreRevokeBetsStillSettle(t *testing.T) {
 }
 
 // TestRevokeLaunchSession_TenantIsolation proves a revoke executed under
-// tenant B's own connection context can never touch tenant A's session -
-// RLS scopes the UPDATE to zero rows, not an error, exactly like every
-// other tenant-scoped write in this codebase.
+// tenant B's own connection context can never touch tenant A's session:
+// RLS hides the row entirely (tenant B's SELECT ... FOR UPDATE finds no
+// row to lock), so RevokeLaunchSession returns ErrLaunchSessionNotFound -
+// not a silently-zero-rows success - and nothing about tenant A's session
+// is written (security review F-1: the row count is zero, but the
+// observable outcome is this error, not a bare no-op return).
 func TestRevokeLaunchSession_TenantIsolation(t *testing.T) {
 	pool := testPool(t)
 	fA := seedCasinoFixture(t, pool)
@@ -373,6 +460,206 @@ func TestRevokeLaunchSession_TenantIsolation(t *testing.T) {
 	}
 	if status != LaunchSessionConsumed {
 		t.Fatalf("expected tenant A's session to remain 'consumed' (unaffected by B's attempt), got %q", status)
+	}
+}
+
+// TestRevokeLaunchSession_AlreadyExpiredOrRevoked_IsANoOp is code review
+// A2: nothing previously tested the contract "revoked=false means the
+// session was already 'expired' or 'revoked'". Mutant X5 (the
+// application-level CAS in RevokeLaunchSession widened to
+// WHERE status IN ('active','consumed','expired')) would make the
+// 'expired' case below hit the DB trigger's own RAISE EXCEPTION instead of
+// cleanly returning revoked=false, aborting the caller's whole
+// transaction - this test pins the correct, current behaviour (a clean,
+// no-op, no-error return) so that mutant fails it.
+func TestRevokeLaunchSession_AlreadyExpiredOrRevoked_IsANoOp(t *testing.T) {
+	pool := testPool(t)
+	f := seedCasinoFixture(t, pool)
+	game := seedGame(t, pool, "mock-casino", "EUR")
+
+	for _, status := range []LaunchSessionStatus{LaunchSessionExpired, LaunchSessionRevoked} {
+		t.Run(string(status), func(t *testing.T) {
+			id := seedLaunchSessionAtStatus(t, pool, f, game, status)
+
+			var prior LaunchSessionStatus
+			var revoked bool
+			err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+				var err error
+				prior, revoked, err = RevokeLaunchSession(ctx, tx, id)
+				return err
+			})
+			if err != nil {
+				t.Fatalf("expected RevokeLaunchSession to be a clean no-op on an already-%s session, got %v", status, err)
+			}
+			if prior != status {
+				t.Fatalf("expected prior status %q, got %q", status, prior)
+			}
+			if revoked {
+				t.Fatalf("expected revoked=false (the CAS must not match an already-%s session)", status)
+			}
+
+			// The row itself is untouched.
+			var got LaunchSessionStatus
+			err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+				return tx.QueryRow(ctx, `SELECT status FROM casino_launch_sessions WHERE id = $1`, id).Scan(&got)
+			})
+			if err != nil {
+				t.Fatalf("read session status: %v", err)
+			}
+			if got != status {
+				t.Fatalf("expected the row to remain %q, got %q", status, got)
+			}
+		})
+	}
+}
+
+// TestLaunchGame_FailedLaunchOnExpiredSession_RevokeNoOpStillAudits is code
+// review A2's second half: a genuine phase-C case where the session is
+// already 'expired' by the time the launch is recorded as failed (a slow
+// provider outliving the token's own TTL). RevokeLaunchSession's no-op
+// must not prevent the casino.launch_failed audit from being written in
+// the same transaction - exactly the failure mode mutant X5 would cause
+// (the widened CAS would hit the DB trigger's RAISE EXCEPTION, aborting
+// the whole phase-C transaction and losing this audit record).
+func TestLaunchGame_FailedLaunchOnExpiredSession_RevokeNoOpStillAudits(t *testing.T) {
+	pool := testPool(t)
+	f := seedCasinoFixture(t, pool)
+	game := seedGame(t, pool, "mock-casino", "EUR")
+	enableGameForTenant(t, pool, f, game.ID)
+
+	base := NewMockCasinoProvider("mock-casino", "EUR")
+	registerCasinoCapability(t, pool, f, base, 100)
+
+	provider := &spyLaunchProvider{MockCasinoProvider: base}
+	provider.onLaunch = func(ctx context.Context, req LaunchRequest) (LaunchResult, error) {
+		// Force the session straight to 'expired', simulating a launch
+		// call slow enough to outlive the token's own TTL (the natural
+		// lazy-expiry path only fires from ResolveLaunchToken/postBet,
+		// neither of which runs from inside a provider's own Launch call,
+		// so this drives the same end state directly).
+		if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+			_, err := tx.Exec(ctx, `UPDATE casino_launch_sessions SET status = 'expired' WHERE token_hash = $1`, hashLaunchToken(req.LaunchToken))
+			return err
+		}); err != nil {
+			t.Fatalf("force session expired from within onLaunch: %v", err)
+		}
+		return LaunchResult{}, errors.New("simulated transport failure after the session's token TTL lapsed")
+	}
+
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(base))
+	_, err := orch.LaunchGame(context.Background(), pool, NewMockOutboundResolver(), LaunchGameParams{
+		TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID,
+		GameID: game.ID, AssetCode: "EUR", Mode: ModeReal,
+	})
+	if err == nil {
+		t.Fatal("expected an error for the simulated transport failure")
+	}
+
+	var sessionID uuid.UUID
+	var status LaunchSessionStatus
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx,
+			`SELECT id, status FROM casino_launch_sessions WHERE tenant_id = $1 AND player_account_id = $2`,
+			f.tenantID, f.playerAccountID).Scan(&sessionID, &status)
+	}); err != nil {
+		t.Fatalf("read launch session: %v", err)
+	}
+	if status != LaunchSessionExpired {
+		t.Fatalf("expected the session to remain 'expired' (RevokeLaunchSession's CAS correctly missed it), got %q", status)
+	}
+
+	// The audit write must still have happened in the SAME transaction as
+	// the no-op revoke attempt - this is exactly what mutant X5 breaks.
+	if !auditActionExists(t, pool, f.tenantID, "casino.launch_failed") {
+		t.Fatal("expected a casino.launch_failed audit record even though the revoke was a no-op")
+	}
+	var metadataJSON []byte
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx,
+			`SELECT metadata FROM audit_log WHERE tenant_id = $1 AND action = 'casino.launch_failed' ORDER BY created_at DESC LIMIT 1`,
+			f.tenantID).Scan(&metadataJSON)
+	}); err != nil {
+		t.Fatalf("read casino.launch_failed audit metadata: %v", err)
+	}
+	var metadata map[string]any
+	if err := json.Unmarshal(metadataJSON, &metadata); err != nil {
+		t.Fatalf("parse casino.launch_failed audit metadata: %v (%s)", err, metadataJSON)
+	}
+	if revoked, ok := metadata["revoked"].(bool); !ok || revoked {
+		t.Fatalf("expected revoked=false in the audit metadata (the CAS correctly missed an expired session), got %s", metadataJSON)
+	}
+	if priorStatus, ok := metadata["prior_status"].(string); !ok || priorStatus != string(LaunchSessionExpired) {
+		t.Fatalf(`expected prior_status="expired" in the audit metadata, got %s`, metadataJSON)
+	}
+}
+
+// TestRevokeLaunchSession_ConcurrentRevokes_ForUpdateKeepsPriorStatusExact
+// is code review A3: what SELECT ... FOR UPDATE actually guarantees is not
+// that the CAS "is atomic" (the UPDATE's own WHERE clause already makes
+// the status transition itself atomic, with or without the SELECT's own
+// locking) - it is that the PRIOR STATUS this function REPORTS back to the
+// caller is never a stale read of a concurrently in-flight revoke.
+//
+// This reuses this package's own deterministic lock-interleaving harness
+// (lockorder_harness_test.go's loHoldWith/loStartRacer/loWaitBlocked - no
+// wall-clock sleep, no timing assertion, only a bounded poll on
+// pg_blocking_pids, exactly like every other concurrency test in this
+// package) rather than a fixed sleep: blocker A calls RevokeLaunchSession
+// and holds its transaction open (uncommitted) after the CAS has already
+// run; racer B then calls RevokeLaunchSession on the SAME session while
+// A is still uncommitted, and the harness confirms B is genuinely blocked
+// (on the row A's SELECT ... FOR UPDATE and UPDATE both lock) before A is
+// released.
+//
+// Mutant X4 (drop FOR UPDATE from RevokeLaunchSession's own SELECT) would
+// let B's plain SELECT return the STALE 'consumed' snapshot immediately
+// (read-committed MVCC, since A has not committed yet), even though B's
+// own UPDATE still correctly waits on A's row lock and still correctly
+// reports revoked=false once it re-checks the WHERE clause against the
+// now-'revoked' row. Under the real code, B's SELECT blocks until A
+// commits and so reports the EXACT prior status, 'revoked' - the
+// assertion below distinguishes the two.
+func TestRevokeLaunchSession_ConcurrentRevokes_ForUpdateKeepsPriorStatusExact(t *testing.T) {
+	pool := testPool(t)
+	f := seedCasinoFixture(t, pool)
+	game := seedGame(t, pool, "mock-casino", "EUR")
+	sessionID := seedLaunchSessionAtStatus(t, pool, f, game, LaunchSessionConsumed)
+
+	var aPrior LaunchSessionStatus
+	var aRevoked bool
+	blockerA := loHoldWith(t, pool, f.tenantID, "revoke-A", func(ctx context.Context, tx pgx.Tx) error {
+		var err error
+		aPrior, aRevoked, err = RevokeLaunchSession(ctx, tx, sessionID)
+		return err
+	})
+	if aPrior != LaunchSessionConsumed || !aRevoked {
+		t.Fatalf("expected blocker A to see prior=consumed revoked=true, got prior=%q revoked=%v", aPrior, aRevoked)
+	}
+
+	var bPrior LaunchSessionStatus
+	var bRevoked bool
+	racerB := loStartRacer(t, pool, f.tenantID, "revoke-B", func(ctx context.Context, tx pgx.Tx) error {
+		var err error
+		bPrior, bRevoked, err = RevokeLaunchSession(ctx, tx, sessionID)
+		return err
+	})
+
+	if _, blocked := loWaitBlocked(t, pool, racerB.pid, racerB.done); !blocked {
+		t.Fatalf("racer B never blocked on A's held lock; the interleaving this test depends on did not happen (err=%v)", racerB.wait())
+	}
+
+	// Release A - its transaction commits, the row is now genuinely
+	// 'revoked'.
+	blockerA.release()
+
+	if err := racerB.wait(); err != nil {
+		t.Fatalf("racer B's RevokeLaunchSession failed: %v", err)
+	}
+	if bPrior != LaunchSessionRevoked {
+		t.Fatalf("expected racer B to observe the EXACT prior status 'revoked' (FOR UPDATE waited for A's commit before reading), got %q - dropping FOR UPDATE would let this read the stale 'consumed' snapshot instead", bPrior)
+	}
+	if bRevoked {
+		t.Fatal("expected racer B's own CAS to miss (the session was already revoked by A), got revoked=true")
 	}
 }
 

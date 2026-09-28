@@ -382,14 +382,25 @@ func GetLaunchSessionByID(ctx context.Context, tx pgx.Tx, id uuid.UUID) (LaunchS
 // every other column frozen), so this CAS is widened to match.
 //
 // SELECT ... FOR UPDATE first (rather than folding the whole thing into a
-// single UPDATE ... WHERE) so the prior status is always known and
-// returned to the caller, even when the CAS itself cannot proceed (e.g. a
-// concurrent resolver flips 'active' to 'consumed' between this SELECT and
-// the UPDATE below - the UPDATE's own WHERE status IN (...) is what
-// actually makes the transition atomic; the row lock only serializes
-// concurrent revokes/reads against the same session so two callers never
-// observe two different "prior" statuses for the same physical
-// transition).
+// single UPDATE ... WHERE) so the prior status this function REPORTS is
+// always exact, never a stale read (code review A3, PRH-2 workstream A).
+// The UPDATE's own WHERE status IN (...) is what makes the status
+// transition itself atomic, with or without this SELECT's own locking -
+// that part does not depend on FOR UPDATE. What FOR UPDATE actually buys
+// is this: if another transaction is concurrently revoking the SAME
+// session and has already run its own UPDATE but not yet committed, a
+// plain (unlocked) SELECT here would return that transaction's
+// pre-update, now-stale value (ordinary read-committed MVCC), even though
+// the row's true current status is about to become something else. FOR
+// UPDATE instead blocks this SELECT until the other transaction commits or
+// rolls back, so the prior status reported back to THIS caller is always
+// the one genuinely in effect immediately before this call's own CAS
+// attempt. See TestRevokeLaunchSession_ConcurrentRevokes_
+// ForUpdateKeepsPriorStatusExact (migration_0108_revoke_consumed_
+// integration_test.go) for the two-connection proof; dropping FOR UPDATE
+// does not change whether a session gets revoked (the UPDATE's WHERE
+// clause still refuses the same cases), only whether the REPORTED prior
+// status can be stale.
 //
 // Returns the prior status and whether the CAS actually matched a row
 // (revoked=false means the session was already 'expired' or 'revoked' -
