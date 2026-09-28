@@ -5,6 +5,16 @@
   CLAUDE.md sense until `security` (the ADR's own owner) has reviewed the diff per §15 — see
   §21 "Implementation record" for exactly what is IMPLEMENTED, PARTIALLY IMPLEMENTED, or
   NOT IMPLEMENTED this round, and the condition-by-condition map.
+  - *Status note 2026-09-28 (`architect`, FH-7): the pending security review is done.*
+    - *`security`'s re-verification #3 (`docs/plans/payment-readiness/rv-prh-i4-security.md`
+      §8) returned **APPROVE**, with no remaining security condition on the admission control.*
+    - *The status is now **ACCEPTED — PARTIALLY IMPLEMENTED**, matching registry PRH-I4. It is
+      partial only because two items are open, and neither is a condition of the admission
+      control itself:*
+      - *the §8 OTel metrics (PRH-I4-METRICS-1) are NOT IMPLEMENTED;*
+      - *the R1 edge residual (WEBHOOK-EDGE-1) is open, STAGING/INFRA REQUIRED and pre-launch.*
+    - *The Low and Info follow-ups PRH-I4-L4-1, L5-1, I1-1, I2-1, I3-1, I4-1 and
+      L3-RESIDUAL-1 remain open in the registry.*
 - **Decision type:** architecture + security control (cross-domain: `httpserver`,
   `webhookauth`, `identity`, `config`, the three webhook domains `payments`, `casino`, `kyc`).
 - **Owner:** `security`. **Reviewers:** `devops` (configuration, deployment topology),

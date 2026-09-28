@@ -1,5 +1,21 @@
 # ADR 0096 — KYC Enforcement Boundary
 
+*Status note 2026-09-28 (`architect`, FH-7): the header below is stale.*
+
+- *The current status is **ACCEPTED — PARTIALLY IMPLEMENTED**. That is the label this ADR's own
+  §16–§18 records set, and the one registry row PRH-I3 carries.*
+- *Reviews on record:*
+  - *`rv-prh-i3-security.md`: APPROVE WITH CONDITIONS;*
+  - *`rv-prh-i3-ledger.md`: SIGN-OFF WITH CONDITIONS;*
+  - *`rv-prh-i3-code-review.md`: NOT READY. No code-review re-review record exists in
+    `docs/plans/payment-readiness/`.*
+- *The deposit and payout call sites the header calls "out of this task's scope" are now wired
+  by PRH-I1:*
+  - *`kycGate.EvaluateDeposit` in the deposit phase A and the cascade T2 (`drive.go`);*
+  - *`evaluatePayoutGate` in `payout.go`.*
+- *§16.2's open items (LF-I3-4/5, security F4/F5, B7) remain as recorded.*
+- *Record: `docs/plans/payment-readiness/rv-fh7-architect-final.md`.*
+
 Status: **ACCEPTED — IMPLEMENTED, pending security/ledger-finance/code
 review.** PRH-I3 (`identity-compliance`) implemented the mechanism this
 paper designs: `internal/kyc.EvaluateEnforcement`, migration 0100, the

@@ -8,6 +8,14 @@
   - **F-POOL-1 stays OPEN until `security` reviews the implementing diff**, as the co-signature
     requires. This status records that the implementation exists and passes its tests; it is
     not a security sign-off.
+  - *Status note 2026-09-28 (`architect`, FH-7):*
+    - *The bullet above is superseded. `security` has since reviewed the implementing diff:
+      F-POOL-1 is **CLOSED WITH CONDITIONS** (2026-09-27; security file 17 plus addendum; see
+      registry F-POOL-1).*
+    - *Condition **K1** is still OUTSTANDING: the next GitHub CI timing lane must pass all 8
+      tests by name with no reruns. It cannot be evaluated until CI-BILLING-1 is resolved
+      (registry PRH-FPOOL1).*
+    - *The implementation label stays IMPLEMENTED. Final F-POOL-1 closure waits on K1.*
 - **Decision type:** architecture (cross-domain: `db`, `secretstore`, `providercred`,
   `webhookauth`, `payments`, `kyc`, `casino`, `httpserver`).
 - **Owner:** `architect`. **Co-owner:** `security`.
