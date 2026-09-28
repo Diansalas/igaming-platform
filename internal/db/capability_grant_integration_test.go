@@ -1111,3 +1111,216 @@ func TestCapabilityGrant_A8_SuspendedActorRefused(t *testing.T) {
 		t.Fatalf("suspended grantee: expected CG010 (R-9), got %v", err)
 	}
 }
+
+// TestCapabilityGrant_F2_ForcedColumnsCannotBeSupplied (F-2 / architect
+// I-3): every *_by/*_by_scope/*_by_person_id/*_txid/grantee_* column that
+// the guard triggers claim to force from the live session or the
+// request/approval row must actually BE forced - a caller-supplied,
+// deliberately mismatching value must never persist. capability.
+// CreateRequest/DecideAndGrant never expose these columns as Go-level
+// inputs, so this drives raw INSERT/UPDATE statements directly (still
+// inside the normal RLS-scoped session helpers) supplying every forced
+// column explicitly with a wrong value, then reads the row back and
+// checks the resolver's own value won.
+//
+// Mutant MF-a (`requested_by_person_id := COALESCE(NEW.requested_by_person_id, v_actor.person_id)`)
+// and mutant MF-b (the same shape for `grantee_person_id`) are shown
+// killed below.
+func TestCapabilityGrant_F2_ForcedColumnsCannotBeSupplied(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+
+	t.Run("requested_by requested_by_scope requested_by_person_id", func(t *testing.T) {
+		tenantID := createTestTenant(t, pool)
+		requester := cgStaff(t, pool, tenantID, "tenant_admin")
+		finance := cgStaff(t, pool, tenantID, "finance")
+
+		var requesterPerson uuid.UUID
+		if err := pool.WithTenant(ctx, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+			return tx.QueryRow(ctx, `SELECT person_id FROM staff_users WHERE id = $1`, requester).Scan(&requesterPerson)
+		}); err != nil {
+			t.Fatalf("lookup requester person: %v", err)
+		}
+
+		bogusActor := uuid.New()
+		bogusPerson := uuid.New()
+		var requestID uuid.UUID
+		if err := pool.WithPrincipalScope(ctx, tenantID, requester, func(ctx context.Context, tx pgx.Tx) error {
+			return tx.QueryRow(ctx, `
+				INSERT INTO staff_capability_grant_requests
+					(tenant_id, grantee_staff_id, capability, valid_from, reason_code,
+					 requested_by, requested_by_scope, requested_by_person_id)
+				VALUES ($1, $2, $3, now(), 'test', $4, 'platform', $5)
+				RETURNING id`,
+				tenantID, finance, string(capability.CapabilityLedgerAdjustmentInitiate), bogusActor, bogusPerson,
+			).Scan(&requestID)
+		}); err != nil {
+			t.Fatalf("insert with bogus forced columns: %v", err)
+		}
+
+		var gotBy uuid.UUID
+		var gotScope string
+		var gotPerson uuid.UUID
+		if err := pool.WithPrincipalScope(ctx, tenantID, requester, func(ctx context.Context, tx pgx.Tx) error {
+			return tx.QueryRow(ctx,
+				`SELECT requested_by, requested_by_scope, requested_by_person_id FROM staff_capability_grant_requests WHERE id = $1`,
+				requestID).Scan(&gotBy, &gotScope, &gotPerson)
+		}); err != nil {
+			t.Fatalf("read back: %v", err)
+		}
+		if gotBy != requester {
+			t.Fatalf("requested_by: expected the real requester %s (not the supplied %s), got %s", requester, bogusActor, gotBy)
+		}
+		if gotScope != "tenant" {
+			t.Fatalf("requested_by_scope: expected 'tenant' (not the supplied 'platform'), got %q", gotScope)
+		}
+		if gotPerson != requesterPerson {
+			t.Fatalf("requested_by_person_id (MF-a): expected the real requester's Person %s (not the supplied %s), got %s", requesterPerson, bogusPerson, gotPerson)
+		}
+	})
+
+	t.Run("grantee_scope grantee_person_id", func(t *testing.T) {
+		tenantID := createTestTenant(t, pool)
+		requester := cgStaff(t, pool, tenantID, "tenant_admin")
+		finance := cgStaff(t, pool, tenantID, "finance")
+
+		var financePerson uuid.UUID
+		if err := pool.WithTenant(ctx, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+			return tx.QueryRow(ctx, `SELECT person_id FROM staff_users WHERE id = $1`, finance).Scan(&financePerson)
+		}); err != nil {
+			t.Fatalf("lookup grantee person: %v", err)
+		}
+
+		bogusPerson := uuid.New()
+		var requestID uuid.UUID
+		if err := pool.WithPrincipalScope(ctx, tenantID, requester, func(ctx context.Context, tx pgx.Tx) error {
+			return tx.QueryRow(ctx, `
+				INSERT INTO staff_capability_grant_requests
+					(tenant_id, grantee_staff_id, capability, valid_from, reason_code,
+					 grantee_scope, grantee_person_id)
+				VALUES ($1, $2, $3, now(), 'test', 'platform', $4)
+				RETURNING id`,
+				tenantID, finance, string(capability.CapabilityLedgerAdjustmentInitiate), bogusPerson,
+			).Scan(&requestID)
+		}); err != nil {
+			t.Fatalf("insert with bogus forced columns: %v", err)
+		}
+
+		var gotScope string
+		var gotPerson uuid.UUID
+		if err := pool.WithPrincipalScope(ctx, tenantID, requester, func(ctx context.Context, tx pgx.Tx) error {
+			return tx.QueryRow(ctx,
+				`SELECT grantee_scope, grantee_person_id FROM staff_capability_grant_requests WHERE id = $1`,
+				requestID).Scan(&gotScope, &gotPerson)
+		}); err != nil {
+			t.Fatalf("read back: %v", err)
+		}
+		if gotScope != "tenant" {
+			t.Fatalf("grantee_scope: expected 'tenant' (not the supplied 'platform'), got %q", gotScope)
+		}
+		if gotPerson != financePerson {
+			t.Fatalf("grantee_person_id (MF-b): expected the real grantee's Person %s (not the supplied %s), got %s", financePerson, bogusPerson, gotPerson)
+		}
+	})
+
+	t.Run("decided_by decided_by_scope decided_by_person_id decided_txid", func(t *testing.T) {
+		tenantID := createTestTenant(t, pool)
+		requester := cgStaff(t, pool, tenantID, "tenant_admin")
+		finance := cgStaff(t, pool, tenantID, "finance")
+		approver := cgStaff(t, pool, uuid.Nil, "platform_admin")
+
+		var approverPerson uuid.UUID
+		if err := pool.WithoutTenant(ctx, func(ctx context.Context, tx pgx.Tx) error {
+			return tx.QueryRow(ctx, `SELECT person_id FROM staff_users WHERE id = $1`, approver).Scan(&approverPerson)
+		}); err != nil {
+			t.Fatalf("lookup approver person: %v", err)
+		}
+
+		var requestID uuid.UUID
+		if err := pool.WithPrincipalScope(ctx, tenantID, requester, func(ctx context.Context, tx pgx.Tx) error {
+			req, err := capability.CreateRequest(ctx, tx, tenantID, capability.NewRequestInput{
+				GranteeStaffID: finance, Capability: capability.CapabilityLedgerAdjustmentInitiate,
+				ValidFrom: time.Now(), ReasonCode: "test",
+			})
+			requestID = req.ID
+			return err
+		}); err != nil {
+			t.Fatalf("create request: %v", err)
+		}
+
+		bogusActor := uuid.New()
+		bogusPerson := uuid.New()
+		const bogusTxid = int64(1)
+		var approvalID uuid.UUID
+		if err := pool.WithPlatformAdmin(ctx, approver, func(ctx context.Context, tx pgx.Tx) error {
+			if err := tx.QueryRow(ctx, `
+				INSERT INTO staff_capability_grant_approvals
+					(request_id, decision, reason_code, decided_by, decided_by_scope, decided_by_person_id, decided_txid)
+				VALUES ($1, 'approve', 'test', $2, 'platform', $3, $4)
+				RETURNING id`,
+				requestID, bogusActor, bogusPerson, bogusTxid,
+			).Scan(&approvalID); err != nil {
+				return err
+			}
+			_, err := tx.Exec(ctx, `INSERT INTO staff_capability_grants (request_id, approval_id) VALUES ($1, $2)`, requestID, approvalID)
+			return err
+		}); err != nil {
+			t.Fatalf("insert approval+grant with bogus forced columns: %v", err)
+		}
+
+		var gotBy uuid.UUID
+		var gotScope string
+		var gotPerson uuid.UUID
+		var gotTxid int64
+		if err := pool.WithPlatformAdmin(ctx, approver, func(ctx context.Context, tx pgx.Tx) error {
+			return tx.QueryRow(ctx,
+				`SELECT decided_by, decided_by_scope, decided_by_person_id, decided_txid FROM staff_capability_grant_approvals WHERE id = $1`,
+				approvalID).Scan(&gotBy, &gotScope, &gotPerson, &gotTxid)
+		}); err != nil {
+			t.Fatalf("read back: %v", err)
+		}
+		if gotBy != approver {
+			t.Fatalf("decided_by: expected the real approver %s (not the supplied %s), got %s", approver, bogusActor, gotBy)
+		}
+		if gotScope != "platform" {
+			t.Fatalf("decided_by_scope: expected 'platform', got %q", gotScope)
+		}
+		if gotPerson != approverPerson {
+			t.Fatalf("decided_by_person_id: expected the real approver's Person %s (not the supplied %s), got %s", approverPerson, bogusPerson, gotPerson)
+		}
+		if gotTxid == bogusTxid {
+			t.Fatalf("decided_txid: expected the real txid_current() (not the supplied bogus %d), got %d", bogusTxid, gotTxid)
+		}
+	})
+
+	t.Run("revoked_by revoked_by_scope", func(t *testing.T) {
+		f := mustBuildActingGrantFixtureWithCapability(t, pool, capability.CapabilityLedgerAdjustmentInitiate)
+
+		bogusActor := uuid.New()
+		if err := pool.WithPlatformAdmin(ctx, f.ApproverID, func(ctx context.Context, tx pgx.Tx) error {
+			_, err := tx.Exec(ctx, `
+				UPDATE staff_capability_grants
+				   SET revoked_at = now(), revoked_by = $2, revoked_by_scope = 'tenant', revoke_reason_code = 'test'
+				 WHERE id = $1`, f.GrantID, bogusActor)
+			return err
+		}); err != nil {
+			t.Fatalf("revoke with bogus forced columns: %v", err)
+		}
+
+		var gotBy uuid.UUID
+		var gotScope string
+		if err := pool.WithPlatformAdmin(ctx, f.ApproverID, func(ctx context.Context, tx pgx.Tx) error {
+			return tx.QueryRow(ctx,
+				`SELECT revoked_by, revoked_by_scope FROM staff_capability_grants WHERE id = $1`, f.GrantID,
+			).Scan(&gotBy, &gotScope)
+		}); err != nil {
+			t.Fatalf("read back: %v", err)
+		}
+		if gotBy != f.ApproverID {
+			t.Fatalf("revoked_by: expected the real revoker %s (not the supplied %s), got %s", f.ApproverID, bogusActor, gotBy)
+		}
+		if gotScope != "platform" {
+			t.Fatalf("revoked_by_scope: expected 'platform' (the real session's scope, not the supplied 'tenant'), got %q", gotScope)
+		}
+	})
+}
