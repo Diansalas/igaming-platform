@@ -811,16 +811,31 @@ func TestCapabilityGrant_A4_K11_RestrictiveFenceRefusals(t *testing.T) {
 		t.Fatalf("insert person fixture: %v", err)
 	}
 
-	// runRefused: the write/query itself must error (RLS or trigger
-	// refusal).
+	// login_attempts: seed a genuine row (F-6) so "read_login_attempts"
+	// below tests a real fence refusal, not zero rows for the incidental
+	// reason that the table happens to be empty.
+	if err := pool.WithoutTenant(ctx, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx,
+			`INSERT INTO login_attempts (id, principal_type, identifier, succeeded, ip_address, attempted_at)
+			 VALUES (gen_random_uuid(), 'staff', 'zz-f6-seed@test.invalid', true, '127.0.0.1', now())`)
+		return err
+	}); err != nil {
+		t.Fatalf("seed login_attempts fixture: %v", err)
+	}
+
+	// runRefused: the write itself must be refused by the RESTRICTIVE
+	// fence with EXACTLY SQLSTATE 42501 (F-6) - not merely "some error",
+	// which could otherwise be masked by an unrelated CHECK violation on a
+	// row that was never going to be accepted regardless of RLS.
 	runRefused := func(t *testing.T, name string, fn func(tx pgx.Tx) error) {
 		t.Helper()
 		t.Run(name, func(t *testing.T) {
 			err := pool.WithPlatformActingInTenant(ctx, principalID, tenantID, uuid.Nil, "", func(ctx context.Context, tx pgx.Tx) error {
 				return fn(tx)
 			})
-			if err == nil {
-				t.Fatalf("%s: expected refusal, got success", name)
+			var pgErr *pgconn.PgError
+			if !errors.As(err, &pgErr) || pgErr.Code != "42501" {
+				t.Fatalf("%s: expected exactly SQLSTATE 42501 (RLS refusal), got %v", name, err)
 			}
 		})
 	}
@@ -926,10 +941,15 @@ func TestCapabilityGrant_A4_K11_RestrictiveFenceRefusals(t *testing.T) {
 		return err
 	})
 	// risk_rules: write (a NULL-tenant, i.e. platform-level, rule).
+	// F-6: threshold_exponent (or asset_code) is required, exactly one of
+	// the two, whenever limit_kind is one of min/max/cumulative_amount
+	// (risk_rules_threshold_denomination_check) - set threshold_exponent
+	// so this row is CHECK-valid and the refusal below can only come from
+	// the RESTRICTIVE fence, never an unrelated CHECK violation.
 	runRefused(t, "write_risk_rules", func(tx pgx.Tx) error {
 		_, err := tx.Exec(context.Background(),
-			`INSERT INTO risk_rules (id, tenant_id, operation, limit_kind, time_window, threshold, created_by_actor_type, created_by_actor_id)
-			 VALUES (gen_random_uuid(), NULL, 'deposit', 'max_amount', 'transaction', 100, 'staff', $1)`,
+			`INSERT INTO risk_rules (id, tenant_id, operation, limit_kind, time_window, threshold, threshold_exponent, created_by_actor_type, created_by_actor_id)
+			 VALUES (gen_random_uuid(), NULL, 'deposit', 'max_amount', 'transaction', 100, 0, 'staff', $1)`,
 			principalID)
 		return err
 	})
