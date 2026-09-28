@@ -35,3 +35,17 @@ Exact ADR 0099 text is given for R-12, the new R-14, §7.4, §8.2, §10.3–§10
 Confirm:
 - the 5-minute hardcoded tolerance;
 - that the trigger plus advisory lock is an acceptable binding control in place of a unique index.
+
+## Security confirmation (2026-09-28, design-level; verified at the K1 re-check)
+
+1. **5-minute tolerance: CONFIRMED.** Because of the clamp and the CHECK, it grants no authority. Two checks follow:
+   - (a) the clamp, `granted_at` and the CHECK all use `now()`, never `clock_timestamp()`;
+   - (b) R-13 still bounds a clamped G-P2 grant (A-10 is extended).
+2. **Trigger + per-key advisory lock as the binding R-12 control: ACCEPTED**, with conditions:
+   - **R12-a:** refuse (`CG012`) unless the isolation level is READ COMMITTED or SERIALIZABLE; under REPEATABLE READ two overlapping approvals could both commit (write skew). Add a test. The function stays VOLATILE.
+   - **R12-b:** take the lock before the overlap SELECT, keyed on all three parts.
+   - **R12-c:** a concurrency test in which two overlapping approvals yield exactly one grant (`-race -count≥20`), plus a mutant that removes only the lock and is killed by that test.
+   - **R12-d:** whole-row UPDATE equality is kept, so INSERT is the only overlap path.
+   - **Accepted residual:** a table owner or superuser could disable the trigger. It is migration-controlled, and moves to `EXCLUDE USING gist` when the btree_gist decision (PHASE-D-ARCH/SEC-P3-2) is made.
+
+Auto-supersede rejection and "lock the grant in force at `now()`" (K2/K3) are also agreed.
