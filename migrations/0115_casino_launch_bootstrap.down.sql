@@ -38,4 +38,8 @@ DROP FUNCTION IF EXISTS casino_launch_bootstraps_insert_guard();
 DROP TABLE casino_launch_bootstraps;
 DROP TABLE casino_provider_player_refs;
 
-ALTER TABLE casino_launch_sessions DROP CONSTRAINT casino_launch_sessions_id_tenant_id_key;
+-- No ALTER on casino_launch_sessions here (security review B-C2): this
+-- migration's up side never adds a constraint to that table - migration
+-- 0080's own casino_launch_sessions_id_tenant_key (which this migration's
+-- FK resolved against) is workstream A's, and is not this migration's to
+-- drop.

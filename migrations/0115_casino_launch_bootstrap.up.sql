@@ -3,20 +3,27 @@
 -- Placeholder number 0115 (orchestrator instruction): 0109-0114 are
 -- allocated to other in-flight lanes not yet merged onto this branch; the
 -- orchestrator renumbers at merge if needed (Rule 3). No change to
--- casino_launch_sessions or its trigger (workstream A owns both) except
--- one ADDITIVE supporting UNIQUE constraint ADR 0103 §5 explicitly calls
--- for, below.
+-- casino_launch_sessions or its trigger at all (workstream A owns both,
+-- ADR 0103 §5) - migration 0080 already carries the supporting
+-- UNIQUE (id, tenant_id) casino_launch_bootstraps' own composite FK below
+-- needs (`casino_launch_sessions_id_tenant_key`); a security review
+-- (docs/plans/prh2-hardening-round/reviews/b-security.md, B-C2) caught
+-- this migration's first version re-adding a duplicate of that same
+-- constraint, which both violated §5's "no change" instruction and was
+-- redundant - removed, not merely renamed.
 --
 -- Contents:
---   1. casino_launch_sessions gets a supporting UNIQUE (id, tenant_id) -
---      it did not have one, and casino_launch_bootstraps' own composite FK
---      needs it. Never touches the immutability trigger workstream A owns.
---   2. casino_provider_player_refs: the opaque, provider-scoped player
+--   1. casino_provider_player_refs: the opaque, provider-scoped player
 --      reference (ADR 0103 §3.5) - random, stable per (tenant, provider,
 --      player), unlinkable across tenants or providers.
---   3. casino_launch_bootstraps: the idempotency record for one vendor
+--   2. casino_launch_bootstraps: the idempotency record for one vendor
 --      bootstrap call, keyed on (tenant_id, provider_id, request_id) and
---      bound to token_hash + request_digest (ADR 0103 §3.4/§5).
+--      bound to token_hash + request_digest (ADR 0103 §3.4/§5). Its
+--      composite FK to casino_launch_sessions (id, tenant_id) resolves
+--      against migration 0080's pre-existing unique constraint - Postgres
+--      matches a composite FK to any existing unique constraint covering
+--      the exact same columns, regardless of name, so no explicit
+--      constraint-name reference is needed in the FK clause itself.
 --
 -- Both new tables share ADR 0103 §5's "common properties":
 --   - FORCE ROW LEVEL SECURITY, tenant family, with app.player_account_id,
@@ -30,13 +37,7 @@
 --     0021's shared function - the SAME binding control casino_callback_
 --     rejections and payment_statement_imports already use).
 
--- 1. Supporting UNIQUE for casino_launch_bootstraps' composite FK below.
--- Additive only - the immutability trigger (migration 0036/0042/0108) is
--- untouched.
-ALTER TABLE casino_launch_sessions
-    ADD CONSTRAINT casino_launch_sessions_id_tenant_id_key UNIQUE (id, tenant_id);
-
--- 2. Opaque, provider-scoped player reference (ADR 0103 §3.5). Created on
+-- 1. Opaque, provider-scoped player reference (ADR 0103 §3.5). Created on
 -- first bootstrap (casino.BootstrapLaunch's own upsert-then-read, never an
 -- UPDATE - see the append-only note above); stable thereafter. No
 -- surrogate id: the natural key IS the row's own identity.
@@ -86,7 +87,7 @@ CREATE TRIGGER casino_provider_player_refs_no_truncate
     BEFORE TRUNCATE ON casino_provider_player_refs
     FOR EACH STATEMENT EXECUTE FUNCTION ledger_deny_mutation();
 
--- 3. The bootstrap idempotency record (ADR 0103 §3.2 step 6, §3.4, §5).
+-- 2. The bootstrap idempotency record (ADR 0103 §3.2 step 6, §3.4, §5).
 CREATE TABLE casino_launch_bootstraps (
     id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     tenant_id         UUID NOT NULL REFERENCES tenants (id),
