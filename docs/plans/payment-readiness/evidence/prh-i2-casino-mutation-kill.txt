@@ -196,3 +196,79 @@ M18 audit `"reason"` reverted from `string(reason)` to `cause.Error()`: KILLED
     bounded reason's presence)
 
 1/1 killed (fix-round item 5, 2026-09-27). Combined total: 15/15 killed, 1 equivalent.
+
+===========================================================================================
+§4. CAS-SESSION-EXPIRY-1 (code-reviewer FH-7 re-review, 2026-09-28)
+===========================================================================================
+
+Scope: §2/§3's own MEXP survives against the WHOLE casino suite because it is the
+INVERSE of what the original submission believed it was testing - the original item-2 fix
+(§2 above) applied `now() > expires_at` to a bet against EITHER `active` or `consumed`
+(`internal/casino/orchestrator.go` `postBet`). `expires_at` is the un-consumed launch
+TOKEN's own TTL (`DefaultLaunchTokenTTL`, 2 minutes, `launch.go`), never an in-play bound -
+`consumed` is the ordinary state for the entire lifetime of a real-money round, so every
+such round stopped accepting bets ~2 minutes after launch. Fixed: the expiry check now
+applies ONLY when `session.Status == LaunchSessionActive`. C4 (revoke CAS misses a
+vendor-consumed session, §15.1.2's declined-to-widen closure) is reopened by this fix -
+widening `RevokeLaunchSession`'s CAS was investigated and found blocked by the migration
+0036/0042 immutability trigger (any `UPDATE` where `OLD.status IN ('consumed','expired',
+'revoked')` is rejected, regardless of `NEW.status`) - not implemented; tracked as
+CAS-REVOKE-CONSUMED-1 (`docs/governance/task-registry.md`).
+
+Mutant M-CAS1 (MEXP, re-widen the expiry check back to both statuses - i.e. drop the
+`session.Status == LaunchSessionActive &&` guard, restoring the exact regression):
+KILLED [internal/casino/orchestrator.go:1481] by
+`PRIV_DB=casino_cas_session_expiry_1_mut bash .../priv_test.sh -tags integration -run TestReceiveCallback_ConsumedSessionAcceptsBetAfterTokenTTLExpires -v ./internal/casino/...`
+    first failure: --- FAIL: TestReceiveCallback_ConsumedSessionAcceptsBetAfterTokenTTLExpires
+                       "expected the bet on a consumed, in-play session to be accepted
+                       after its token TTL lapsed, got casino: bet callback requires a
+                       valid real-money launch session: session has expired"
+
+Mutant M-CAS2 (drop the expiry check entirely - the whole `if session.Status ==
+LaunchSessionActive && time.Now()...` block removed):
+KILLED [internal/casino/orchestrator.go:1481-1483] by
+`PRIV_DB=casino_cas_session_expiry_1_mut bash .../priv_test.sh -tags integration -run TestReceiveCallback_NewBetRejectedPastExpiresAtEvenIfStillActive -v ./internal/casino/...`
+    first failure: --- FAIL: TestReceiveCallback_NewBetRejectedPastExpiresAtEvenIfStillActive
+                       "expected ErrLaunchSessionRequired for a bet past expires_at on a
+                       still-'active' session, got <nil>"
+
+Mutant M-CAS3 (drop the status allow-list check entirely - the whole `if session.Status
+!= LaunchSessionActive && session.Status != LaunchSessionConsumed` block removed):
+KILLED [internal/casino/orchestrator.go:1478-1480] by
+`PRIV_DB=casino_cas_session_expiry_1_mut bash .../priv_test.sh -tags integration -run TestReceiveCallback_NewBetRejectedOnExpiredStatus_LedgerBalanced -v ./internal/casino/...`
+    first failure: --- FAIL: TestReceiveCallback_NewBetRejectedOnExpiredStatus_LedgerBalanced
+                       "expected ErrLaunchSessionRequired for a bet against an expired
+                       session, got <nil>"
+
+Mutant M-CAS4 ("revoke restricted back to `active` only" - i.e. widen
+`RevokeLaunchSession`'s CAS to `status IN ('active','consumed')`, the fix C4 would need):
+NOT RUN AS A MUTANT - this is the fix CAS-REVOKE-CONSUMED-1 would apply, not a mutation of
+already-shipped code (RevokeLaunchSession's CAS was, and remains, `status='active'` only;
+nothing here was widened and then reverted). Empirically confirmed blocked at the trigger
+level (not merely theorized from reading the migration) with a throwaway probe test
+(written, run once, and deleted - never committed):
+```
+err := pool.WithTenant(ctx, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+    _, err := tx.Exec(ctx,
+        `UPDATE casino_launch_sessions SET status = 'revoked' WHERE id = $1 AND status IN ('active','consumed')`,
+        consumedSessionID)
+    return err
+})
+```
+against `casino_cas_session_expiry_1_mut` (a `consumed` session): result -
+`ERROR: casino_launch_sessions: row is immutable once consumed, expired, or revoked
+(SQLSTATE P0001)`. `TestLaunchGame_FailedLaunchOnConsumedSession_RevokeCASMissesAndBetStillAccepted`
+(`internal/casino/launch_two_phase_integration_test.go`, permanent, committed) characterizes
+the resulting gap (a bet against such a session is still accepted) as a labelled, intentional
+red-test target for CAS-REVOKE-CONSUMED-1, not a mutation-kill target for this round.
+
+All three real mutants (M-CAS1, M-CAS2, M-CAS3) verified by editing
+`internal/casino/orchestrator.go` directly, confirming `go build ./...` still compiled,
+running the named test with `-tags integration` against a scratch private database
+(`casino_cas_session_expiry_1_mut`), confirming the FAIL, then reverting via `git diff`
+comparison against the intended fix (confirmed identical afterward) and re-running
+`gofmt -l .` / `go build ./...` clean.
+
+3/3 killed. CAS-SESSION-EXPIRY-1 fix-round total: 3/3 killed; C4/CAS-REVOKE-CONSUMED-1
+reopened and NOT fixed this round (database-trigger-blocked, tracked separately - see
+`docs/governance/task-registry.md`).

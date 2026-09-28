@@ -2362,7 +2362,7 @@ CREATE TABLE payment_statement_lines (
 | Flow | Phase A: all existing checks (RG, risk, jurisdiction, capability, `supports_bet`) plus `CreateLaunchSession` plus audit `casino.launch_requested` → commit (this releases the L0.4 and L0.5 advisory locks). Health: snapshot outside the tx (§9.6 contract applied to `CasinoProvider.HealthStatus`). Phase B: resolve credential → `Launch(LaunchRequest{Call: CallContext, …})`. Phase C: success → audit `casino.launched`; failure or ambiguity → `RevokeLaunchSession` (CAS `status='active'`, exists) plus audit `casino.launch_failed`. |
 | Retryability | No automatic retry. A player retry mints a new session (existing behaviour). |
 | Callbacks | Unchanged: bets resolve the session. A revoked or expired session gives `ErrLaunchSessionRequired`, and no money moves. |
-| Failure recovery | Crash after A: the session is active, the token was never delivered, and it expires. Crash after the vendor accepted: the session is active and usable by the vendor, the player lost the URL, and it expires. Both are harmless: no ledger effect without a verified bet on a resolvable session. |
+| Failure recovery | Crash after A: the session is active, the token was never delivered, and it expires. Crash after the vendor accepted: the session is active and usable by the vendor, the player lost the URL, and it expires. Both are harmless: no ledger effect without a verified bet on a resolvable session. **Amendment 2026-09-28 (CAS-SESSION-EXPIRY-1, see §15.1.5):** "it expires" here describes only the un-consumed case (`expires_at` bounds an `active` session's own token-resolvability window). A session the vendor has already `consumed` is bounded instead by `RevokeLaunchSession` at launch-failure time and by the status allow-list, not by `expires_at` - `postBet` no longer applies the expiry check to a `consumed` session. |
 | Reconciliation | casino_consistency and casino_statement are unchanged. CAS-STMT-IO-1 (§20) is a hard precondition on the first real casino statement source: that adapter must land already split per §12.1, and its remediation is verified (not just referenced) when it is proposed, gated on `architect` and `ledger-finance` sign-off (casino review §26). |
 | Webhook re-check | S-Q3 option (a) applies to casino callbacks too: a re-check DB or transport failure returns the typed `RecheckUnavailableError` → retryable 503; definitive results stay 401 (§6.6; PRH-I2). |
 | Audit | `casino.launch_requested` (new), `casino.launched` (moved to phase C), `casino.launch_failed` (new). |
@@ -2505,6 +2505,12 @@ READY on R1) are addressed as follows.
   `TestReceiveCallback_WinSettlesForPreExpiryBetAfterSessionExpires` (win posts, ledger
   balanced, after the session has since been marked expired) - all in
   `internal/casino/postbet_session_expiry_integration_test.go`.
+  **Amendment 2026-09-28 (CAS-SESSION-EXPIRY-1, regression, see §15.1.5): this "regardless
+  of status" wording was wrong** - `expires_at` is the un-consumed token's own TTL
+  (`DefaultLaunchTokenTTL`, 2 minutes), not an in-play bound, and applying it to `consumed`
+  sessions too meant every real-money round stopped accepting bets ~2 minutes after
+  launch. §15.1.5 restricts the `now() > expires_at` check back to `status='active'` only;
+  the status allow-list itself is unchanged.
 - **C2 - `CallContext` redaction untested.** `internal/casino/callcontext_redaction_test.go`
   (new) builds a `CallContext`/`LaunchRequest` around a known sentinel secret and asserts
   its absence from `%v`/`%+v`/`%#v`/`%s`/`%q`, `slog` text and JSON handler output,
@@ -2536,6 +2542,22 @@ READY on R1) are addressed as follows.
   exposure to at most `DefaultLaunchTokenTTL` rather than requiring the CAS itself to
   widen. Recorded here per C4's own "or record the decision" option, rather than widening
   `RevokeLaunchSession`'s `WHERE` clause.
+  **Amendment 2026-09-28 (CAS-SESSION-EXPIRY-1, see §15.1.5): this closure was based on the
+  now-corrected, over-broad item-2 expiry check and is WRONG as written** - now that
+  `expires_at` no longer bounds a `consumed` session's bet eligibility (§15.1.5), C4 is
+  reopened: a session the launch-failure path revoked-CAS missed because the vendor had
+  already consumed it remains bet-eligible indefinitely. §15.1.5 attempted the "properly
+  close C4" option this note declined (widen `RevokeLaunchSession`'s CAS to
+  `status IN ('active','consumed')`) and found it blocked at the database level: migration
+  0036/0042's `casino_launch_sessions_enforce_immutable_fields` trigger forbids ANY
+  transition out of a terminal status, and `consumed` is terminal - `UPDATE ... SET
+  status='revoked' WHERE status='consumed'` raises `casino_launch_sessions: row is
+  immutable once consumed, expired, or revoked` and aborts the transaction. Closing C4
+  properly therefore requires either a migration (relaxing the trigger for the specific
+  `consumed -> revoked` transition) or a different mechanism entirely, and is deferred to
+  the orchestrator as **CAS-REVOKE-CONSUMED-1** (tracked in
+  `docs/governance/task-registry.md`) rather than solved by re-widening the bet-time expiry
+  check, which regressed real-money play instead.
 - **Security informational I1/I2/I3** (jurisdiction denials write no audit; a
   `HealthStatus` error fails open; a bet racing a concurrent revoke can still commit) are
   pre-existing (not introduced by this diff) and are registered as their own tracking rows
@@ -2589,6 +2611,73 @@ Both mutation-killed. INV-IO-1(c)'s own static scan (previously NOT IMPLEMENTED,
 this ADR's own reference to it) is now `internal/txscope`'s
 `TestINV_IO_1c_NoAdapterCallInsideTxClosure` - see §15.3.5 for the full record, since it
 covers casino, KYC and payments together in one guard.
+
+#### 15.1.5 Fix record (CAS-SESSION-EXPIRY-1, code-reviewer FH-7 re-review, 2026-09-28)
+
+**Regression, HIGH.** §15.1.2 item 2's fix applied `now() > expires_at` to a bet against
+*either* `active` or `consumed`. `expires_at` is the un-consumed launch **token's** own TTL
+(`DefaultLaunchTokenTTL = 2 * time.Minute`, `launch.go`) - set once at mint, immutable
+(migration 0036/0042) - never an in-play bound. Since `consumed` is the ordinary in-play
+state for the entire lifetime of a real-money round, every such round stopped accepting
+bets roughly `DefaultLaunchTokenTTL` after launch, with `ErrLaunchSessionRequired`
+("session has expired") logged at Error - a production-breaking regression from
+`2c00e10` ("postBet expiry").
+
+- **Fix (required item 1).** `internal/casino/orchestrator.go` `postBet`: the
+  `now() > expires_at` check now applies only when `session.Status == LaunchSessionActive`.
+  A `consumed` session keeps accepting bets while otherwise eligible (status allow-list,
+  `ModeReal`, asset match - all unchanged from §15.1.2). The status allow-list itself
+  (`active`/`consumed` only, fails closed on everything else) is unchanged.
+- **C4, required item 2 (properly close, rather than re-rely on expiry).** Investigated
+  widening `RevokeLaunchSession`'s CAS (`launch.go`) from `WHERE status='active'` to
+  `WHERE status IN ('active','consumed')`, so a launch that phase C records as failed
+  revokes the session even if the vendor had already consumed the token before the failure
+  was recorded (the scenario C4 names). **Blocked at the database level, not implemented**:
+  migration 0036's `casino_launch_sessions_enforce_immutable_fields` trigger (reaffirmed
+  unchanged by migration 0042) raises an exception for *any* `UPDATE` where
+  `OLD.status IN ('consumed', 'expired', 'revoked')`, regardless of `NEW.status` - i.e. it
+  forbids every transition OUT OF a terminal status, not merely a revival back to
+  `'active'`. A `consumed -> revoked` `UPDATE` therefore aborts the whole phase-C
+  transaction (`casino_launch_sessions: row is immutable once consumed, expired, or
+  revoked`), which would silently turn every `launchFailed` call against an
+  already-consumed session into an unaudited phase-C failure (worse than today, and exactly
+  the F3 gap the phase-C error-logging was added to catch). Per this project's standing
+  rule that a new migration is allocated by the orchestrator, not authored unilaterally
+  by a specialist fixing an unrelated regression, this half of the fix is **NOT
+  IMPLEMENTED** and is tracked as **CAS-REVOKE-CONSUMED-1** (owner `casino`,
+  `docs/governance/task-registry.md`) pending a decision on whether to relax the trigger
+  for this one transition (migration) or use a different mechanism. `RevokeLaunchSession`'s
+  `WHERE` clause is unchanged (`status='active'` only); the CAS-vs-consumed exposure C4
+  originally named is real again now that item 2's over-broad expiry check no longer masks
+  it, bounded only by however long a vendor keeps a genuinely-failed launch's session
+  `consumed` and betting against it (unbounded in the worst case - the reason this is
+  tracked at HIGH, not closed).
+- **Callers/allowed-transitions check.** `RevokeLaunchSession` has exactly one production
+  caller (`orchestrator.go`'s `launchFailed`, phase C); no other caller exists that this fix
+  needed to account for.
+- **N2 (Low, doc-comment misplacement).**
+  `internal/casino/launch_two_phase_integration_test.go`: the
+  `TestLaunchGame_CircuitOpenRevokesAndAudits` doc comment was sitting directly above
+  `TestLaunchGame_TransportErrorAuditNeverStoresRawErrorText`. Moved to sit above its own
+  function.
+- **Tests** (`internal/casino/postbet_session_expiry_integration_test.go`):
+  `TestReceiveCallback_ConsumedSessionAcceptsBetAfterTokenTTLExpires` (mints a session with
+  a short TTL, consumes it via `ResolveLaunchToken` before the TTL lapses, waits past the
+  TTL, then posts a bet and asserts it succeeds and the ledger balances) - this is the
+  regression repro (kills a reintroduced "apply expiry to consumed too" mutant).
+  `TestReceiveCallback_NewBetRejectedPastExpiresAtEvenIfStillActive` (pre-existing, §15.1.2)
+  is unchanged and still passes - an `active` (never-consumed) session past `expires_at` is
+  still refused, killing the "drop the expiry check entirely" mutant.
+  `TestLaunchGame_FailedLaunchOnConsumedSession_RevokeCASMissesAndBetStillAccepted`
+  (`internal/casino/launch_two_phase_integration_test.go`) documents the now-reopened C4 gap
+  as a pinned, explicitly-labelled `NOT IMPLEMENTED` characterization test (not a silent
+  regression): a session is consumed, phase C then records the launch as failed,
+  `RevokeLaunchSession`'s CAS misses (session stays `consumed`, `revoked=false` in the audit
+  metadata), and a subsequent bet against it is accepted - asserting the exposure exists so
+  a future migration-backed fix has a red test to turn green, rather than this gap being
+  rediscovered from a production incident.
+- **Mutation evidence**: appended to `docs/plans/payment-readiness/evidence/
+  prh-i2-casino-mutation-kill.txt`, dated section "CAS-SESSION-EXPIRY-1 (2026-09-28)".
 
 ### 15.2 KYC `CreateVerification`
 
