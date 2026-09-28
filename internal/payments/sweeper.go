@@ -338,6 +338,23 @@ func (s *Sweeper) processViaQueryStatus(ctx context.Context, tenantID uuid.UUID,
 		if err != nil {
 			return err
 		}
+		// Ledger-finance review F3 (rv-fh3-ledger.md, 076e42e): attempt was
+		// read BEFORE the outbound QueryStatus call and BEFORE the parent
+		// lock above - money-safe (CAS plus INV-DEP-1 catch every stale
+		// decision regardless), but a concurrent callback that moved the
+		// attempt in the meantime made applyStatusEvidence decide from a
+		// snapshot the CAS predicates below then reject, producing pure
+		// error/alert noise (and, on phase C's identical pattern, a
+		// spurious error returned to a player whose deposit actually
+		// succeeded). Re-read under the now-held lock, exactly as
+		// ApplyReceiptEvidence already does, so this decision is made from
+		// the CURRENT row whenever nothing raced, and only genuinely
+		// concurrent evidence (arriving AFTER this fresh read) still hits
+		// the CAS-conflict path this fix cannot and should not eliminate.
+		attempt, err = GetAttemptByID(actx, tx, attempt.ID)
+		if err != nil {
+			return err
+		}
 		return s.applyStatusEvidence(actx, tx, intent, attempt, gr)
 	})
 }

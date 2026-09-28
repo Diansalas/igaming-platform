@@ -302,7 +302,17 @@ func (o *Orchestrator) InitiateDepositAttempt(
 		if _, err := tx.Exec(actx, `SELECT id FROM deposit_intents WHERE id = $1 FOR UPDATE`, intent.ID); err != nil {
 			return fmt.Errorf("payments: lock deposit intent: %w", err)
 		}
-		updated, child, err := o.applyDepositCallResult(actx, tx, intent, attempt, capability, claimToken, gr, EvidenceSync, false)
+		// Ledger-finance review F3 (rv-fh3-ledger.md, 076e42e): re-read
+		// under the now-held lock for consistency with driveCreatedAttempt's
+		// and the sweeper's own identical fix, even though the race window
+		// this closes is narrower here - this is the FIRST attempt on a
+		// brand-new intent, so no external evidence could target it before
+		// phase B (just above) ever returns its provider_reference.
+		current, err := GetAttemptByID(actx, tx, attempt.ID)
+		if err != nil {
+			return err
+		}
+		updated, child, err := o.applyDepositCallResult(actx, tx, intent, current, capability, claimToken, gr, EvidenceSync, false)
 		intent = updated
 		cascadeChild = child
 		return err

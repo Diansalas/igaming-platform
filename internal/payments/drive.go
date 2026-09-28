@@ -211,7 +211,23 @@ func (o *Orchestrator) driveCreatedAttempt(
 		if _, err := tx.Exec(actx, `SELECT id FROM deposit_intents WHERE id = $1 FOR UPDATE`, intent.ID); err != nil {
 			return fmt.Errorf("payments: lock deposit intent: %w", err)
 		}
-		updated, child, err := o.applyDepositCallResult(actx, tx, intent, attempt, capability, claimToken, gr, EvidenceSync, sweeperDriven)
+		// Ledger-finance review F3 (rv-fh3-ledger.md, 076e42e): attempt was
+		// read (line ~178) BEFORE phase B's outbound Deposit call and
+		// BEFORE the parent lock just above - money-safe (CAS plus
+		// INV-DEP-1 catch every stale decision regardless, confirmed by
+		// the reviewer's own 25-rep concurrent storm), but a concurrent
+		// callback that moved the attempt in the meantime made
+		// applyDepositCallResult decide from a stale snapshot the CAS
+		// predicates then reject as a plain error - noise today, and a
+		// spurious error surfaced to a player whose deposit actually
+		// succeeded. Re-read under the now-held lock, exactly as
+		// ApplyReceiptEvidence and the sweeper's own identical fix
+		// (processViaQueryStatus) already do.
+		current, err := GetAttemptByID(actx, tx, attempt.ID)
+		if err != nil {
+			return err
+		}
+		updated, child, err := o.applyDepositCallResult(actx, tx, intent, current, capability, claimToken, gr, EvidenceSync, sweeperDriven)
 		intent = updated
 		cascadeChild = child
 		return err
