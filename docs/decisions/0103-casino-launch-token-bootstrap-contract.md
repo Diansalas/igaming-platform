@@ -106,7 +106,10 @@ Then `deps.DB.WithTenant(tenantID, …)` opens **one** transaction:
 - The body is then parsed **only from the verified bytes** that Redeem returns.
 
 **Step 2b: look up the session and the idempotency row.**
-- `SELECT … FROM casino_launch_sessions WHERE token_hash = $h AND tenant_id = $t FOR UPDATE`.
+- `SELECT … FROM casino_launch_sessions WHERE token_hash = $h AND tenant_id = $t FOR NO KEY UPDATE`.
+  **Amended (F-1, §4):** originally specified and first implemented as `FOR UPDATE`; changed to
+  `FOR NO KEY UPDATE` to close an ABBA deadlock with `postBet`'s own FK-driven lock on this same
+  row - see §4's own amendment for the full mechanism and fix.
 - Look up the idempotency row by `(tenant_id, provider_id, request_id)`. If it exists, take the
   §3.4 replay branch.
 
@@ -146,7 +149,17 @@ Zero rows → the uniform refusal, and the transaction rolls back.
   - **`request_digest`** (SB-6, §3.4);
   - `launch_session_id`;
   - the response body.
-- A unique violation → roll back, retry **once**, and the retry takes the replay branch.
+- A unique violation → roll back, retry **once**, and the retry takes the replay branch. **Amended
+  (F-8):** implemented via `db.IdempotentInsert`'s SAVEPOINT primitive, not a second `Redeem` call -
+  the insert runs inside a nested `pgx.Tx.Begin()`/`Commit()` (a SAVEPOINT/RELEASE pair); on a unique
+  violation the savepoint alone rolls back and the OUTER transaction (and its already-consumed
+  `Redeem`) is untouched, so the single-use `Redeem` genuinely never runs twice for one incoming
+  request. This is equivalent to, and was reviewed as sound in place of, a literal
+  "roll back the whole transaction and call `VerifyCallback` again" - the token could not have
+  survived a second `Redeem` anyway. **F-7 amendment:** the retry branch is taken ONLY when the
+  violated constraint is `casino_launch_bootstraps_once_per_request` (the idempotency key above);
+  any OTHER unique violation (concretely, `casino_launch_bootstraps_once_per_session`) is treated as
+  `ErrBootstrapInvariantBroken` (5xx), never silently treated as a replay.
 
 **Step 7: audit, then commit.**
 - `casino.launch_bootstrapped`, `actor_type=system`, target = the session, metadata
@@ -183,7 +196,16 @@ Conditions from Q6 / C-103-3:
 
   | Condition | Result |
   |---|---|
-  | `token_hash` matches **and** `request_digest` matches **and** the session is currently `consumed` | Return the stored response: 200, byte-identical. No write. Log `casino_launch_bootstrap_replayed` at Info |
+  | `token_hash` matches **and** `request_digest` matches **and** the session is currently `consumed` | Return a byte-identical 200. No write. Log `casino_launch_bootstrap_replayed` at Info |
+
+  **Amended (F-8, BS-4):** "byte-identical" is NOT implemented as "read the stored `response` column
+  back and return it" - PostgreSQL's JSONB storage does not preserve the original key order or
+  whitespace of an inserted value, so a naive read-back would not reproduce the original bytes. The
+  stored `response` column is an audit/debugging copy only. The actual replayed response is
+  re-marshaled from the session's own immutable, denormalized columns (the same Go struct, same
+  field order, same `json.Marshal` call the original response used), which is what actually
+  guarantees byte-identical output. Found and fixed during implementation; pinned by
+  `TestBootstrapLaunch_Replay_ByteIdenticalNoNewAudit`.
   | The hash or the digest differs (a reused request id with a different token or different fields) | Uniform refusal. No write |
   | Same hash and digest, but the session is now `revoked` (A's `consumed → revoked`) | Uniform refusal. **The replay does not resurrect a revoked session** |
 
@@ -273,9 +295,16 @@ Conditions from Q6 / C-103-3:
 
 **`casino_launch_bootstraps`:**
 - Columns: `id`, `tenant_id`, `provider_id`, `request_id` (charset CHECK), `token_hash`,
-  **`request_digest`** (a 64-hex CHECK), `launch_session_id` (composite FK with `tenant_id`; add
-  the supporting UNIQUE on the sessions table if it is absent), `player_ref`, `response` (JSONB,
-  ≤ 1 KiB, keys ⊆ the §3.2 response keys), `created_at`.
+  **`request_digest`** (a 64-hex CHECK), `launch_session_id` (composite FK with `tenant_id`),
+  `player_ref`, `response` (JSONB, ≤ 1 KiB, keys ⊆ the §3.2 response keys), `created_at`.
+  **Amended (B-C2, security review):** migration 0080 already carries a supporting
+  `UNIQUE (id, tenant_id)` on `casino_launch_sessions`
+  (`casino_launch_sessions_id_tenant_key`) - it was NOT absent, as this section originally assumed.
+  The first implementation added a duplicate (`casino_launch_sessions_id_tenant_id_key`), which both
+  violated this section's own "no change to `casino_launch_sessions`" rule below and was redundant;
+  removed. The composite FK resolves against 0080's existing constraint automatically (Postgres
+  matches a composite FK to any existing unique constraint covering the exact same columns,
+  regardless of name).
 - Constraints: `UNIQUE (tenant_id, provider_id, request_id)` and `UNIQUE (launch_session_id)`.
 - **BEFORE INSERT trigger:** the session has the same tenant, the same provider, the same
   `token_hash`, and `status = 'consumed'`.
@@ -286,9 +315,20 @@ Conditions from Q6 / C-103-3:
 - UNIQUE on `(tenant, provider, player_account_id)` and on `(tenant, provider, player_ref)`.
 
 **Other rules:**
-- No change to `casino_launch_sessions` or its trigger; A owns them.
-- Grants: append-only lines in `deploy/init-app-role.sql`.
-- **Down:** refuse while rows exist.
+- No change to `casino_launch_sessions` or its trigger; A owns them (enforced in full after the
+  B-C2 fix above - the first implementation's duplicate UNIQUE was the one remaining violation).
+- Grants: append-only lines in `deploy/init-app-role.sql` (F-5/B-C1: added after the first
+  implementation omitted them - see `deploy/init-app-role.sql`'s own guarded block for both tables).
+- **Down:** refuse while rows exist. **Amended (F-8):** both tables carry `FORCE ROW LEVEL SECURITY`
+  with no policy admitting a migration-context connection (no `app.tenant_id` is ever set while
+  migrations run), so a plain `SELECT ... FROM casino_launch_bootstraps` "refuse while rows exist"
+  guard would see zero rows regardless of how many exist - the migration 0048/0092/0107 lesson.
+  Implemented instead as `ADD CONSTRAINT ... CHECK (false)` per table, wrapped in a
+  `DO $$ ... EXCEPTION WHEN check_violation ...` block: this validates every existing row at the
+  storage level unconditionally, bypassing RLS entirely (the same "the check IS the check" principle
+  as migration 0107's own unique-index-build guard), and is a no-op if the table is genuinely empty.
+  Recorded here as the codebase's own reusable pattern for this exact "RLS-blind down-migration
+  guard" problem.
 
 ## 6. Dependency on workstream A (migration 0108)
 
