@@ -507,27 +507,110 @@ func TestCapabilityGrant_A10Ext_ClampedGP2StillBoundedByMaxLifetime(t *testing.T
 // R12-a: under REPEATABLE READ, the grant INSERT is refused (CG012)
 // outright, regardless of whether an overlap actually exists - write skew
 // across snapshots is exactly what this refusal is protecting against.
-func TestCapabilityGrant_R12a_RepeatableReadRefused(t *testing.T) {
-	pool := testPool(t)
-	ctx := context.Background()
+// R12-a (CORRECTED by security's own re-check of the integrated head,
+// 5a27be6): only READ COMMITTED is accepted. SERIALIZABLE alone is NOT
+// safe either - a SERIALIZABLE approver that took its snapshot before a
+// concurrent READ COMMITTED approver commits can still acquire the
+// advisory lock afterward (locks are not part of a snapshot), run its own
+// overlap SELECT against its own pre-commit snapshot, see no conflict, and
+// insert an overlapping grant; Postgres's SSI only tracks
+// SERIALIZABLE-vs-SERIALIZABLE conflicts. Both REPEATABLE READ and
+// SERIALIZABLE are refused outright (CG012), regardless of whether an
+// overlap actually exists.
+func TestCapabilityGrant_R12a_NonReadCommittedRefused(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		iso  pgx.TxIsoLevel
+	}{
+		{"repeatable_read", pgx.RepeatableRead},
+		{"serializable", pgx.Serializable},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := testPool(t)
+			ctx := context.Background()
+			f := newR12Fixture(t, pool)
+
+			reqID, err := f.createRequest(t, pool, time.Now(), nil)
+			if err != nil {
+				t.Fatalf("create request: %v", err)
+			}
+
+			tx, err := pool.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: tc.iso})
+			if err != nil {
+				t.Fatalf("begin %s tx: %v", tc.name, err)
+			}
+			defer func() { _ = tx.Rollback(ctx) }()
+			if _, err := tx.Exec(ctx, `SELECT set_config('app.platform_admin_principal_id', $1, true)`, f.Approver.String()); err != nil {
+				t.Fatalf("set platform admin context: %v", err)
+			}
+			_, _, err = capability.DecideAndGrant(ctx, tx, f.TenantID, reqID, "approve", "test")
+			if !cgIsCode(err, "CG012") {
+				t.Fatalf("approve under %s: expected CG012 (R12-a), got %v", tc.name, err)
+			}
+		})
+	}
+}
+
+// R12-a mixed-isolation race (security's own reproduction of the original
+// "READ COMMITTED or SERIALIZABLE" bug, now as a regression test): one
+// approver runs under SERIALIZABLE, one under READ COMMITTED, racing an
+// overlapping grant for the same key. In a scratch DB with the R-11 index
+// dropped (the A-23 technique - two requests for the same key can coexist
+// as pending) exactly one grant must result: either the SERIALIZABLE
+// transaction is refused outright by R12-a before it ever reaches the
+// lock (the current, corrected behavior), or - if R12-a's guard were ever
+// weakened back to accepting SERIALIZABLE - the SSI gap this test exists
+// to catch would let both commit. Today's correct code refuses the
+// SERIALIZABLE side deterministically, so this also serves as an
+// end-to-end demonstration that mixing isolation levels can never produce
+// two overlapping grants.
+func TestCapabilityGrant_R12a_MixedIsolationRaceExactlyOne(t *testing.T) {
+	pool, _ := scratchPoolThrough0112(t, "cap0112r12amix")
+	dropRequestsOnePendingIndex(t, pool)
 	f := newR12Fixture(t, pool)
 
-	reqID, err := f.createRequest(t, pool, time.Now(), nil)
+	w0 := time.Now().Add(1 * time.Hour)
+	w1 := w0.Add(1 * time.Hour)
+	reqRC, err := f.createRequest(t, pool, w0, &w1)
 	if err != nil {
-		t.Fatalf("create request: %v", err)
+		t.Fatalf("create request A (read committed side): %v", err)
+	}
+	reqSER, err := f.createRequest(t, pool, w0.Add(30*time.Minute), timePtr(w1.Add(30*time.Minute)))
+	if err != nil {
+		t.Fatalf("create request B (serializable side, overlapping A): %v", err)
 	}
 
-	tx, err := pool.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead})
+	// The SERIALIZABLE approval: takes its snapshot now, before the READ
+	// COMMITTED approval below commits.
+	serTx, err := pool.pool.BeginTx(context.Background(), pgx.TxOptions{IsoLevel: pgx.Serializable})
 	if err != nil {
-		t.Fatalf("begin repeatable-read tx: %v", err)
+		t.Fatalf("begin serializable tx: %v", err)
 	}
-	defer func() { _ = tx.Rollback(ctx) }()
-	if _, err := tx.Exec(ctx, `SELECT set_config('app.platform_admin_principal_id', $1, true)`, f.Approver.String()); err != nil {
-		t.Fatalf("set platform admin context: %v", err)
+	defer func() { _ = serTx.Rollback(context.Background()) }()
+	if _, err := serTx.Exec(context.Background(), `SELECT set_config('app.platform_admin_principal_id', $1, true)`, f.Approver.String()); err != nil {
+		t.Fatalf("set platform admin context (serializable): %v", err)
 	}
-	_, _, err = capability.DecideAndGrant(ctx, tx, f.TenantID, reqID, "approve", "test")
-	if !cgIsCode(err, "CG012") {
-		t.Fatalf("approve under REPEATABLE READ: expected CG012 (R12-a), got %v", err)
+	// Touch the requests table under this snapshot so a real SERIALIZABLE
+	// snapshot is actually established before the concurrent commit below.
+	if _, err := serTx.Exec(context.Background(), `SELECT 1 FROM staff_capability_grant_requests WHERE id = $1`, reqSER); err != nil {
+		t.Fatalf("prime serializable snapshot: %v", err)
+	}
+
+	// The READ COMMITTED approval: runs and commits to completion first.
+	rcGrant, err := f.approve(t, pool, reqRC)
+	if err != nil {
+		t.Fatalf("approve request A (read committed): %v", err)
+	}
+	if rcGrant == nil {
+		t.Fatal("expected a grant from the read-committed approval")
+	}
+
+	// The SERIALIZABLE approval now proceeds, in the transaction whose
+	// snapshot predates A's commit. R12-a must refuse it (CG012) -
+	// exactly one grant results.
+	_, _, serErr := capability.DecideAndGrant(context.Background(), serTx, f.TenantID, reqSER, "approve", "test")
+	if !cgIsCode(serErr, "CG012") {
+		t.Fatalf("approve request B under SERIALIZABLE racing a committed overlap: expected CG012 (R12-a), got %v", serErr)
 	}
 }
 
@@ -577,21 +660,21 @@ func TestCapabilityGrant_I5_PlatformGranteeLiveReRead(t *testing.T) {
 	// Cases 2 and 3 need to mutate staff_users in ways ordinary RLS/CHECK
 	// rules structurally refuse for any real session (moving a row's own
 	// tenant_id, and - per migration 0034 - re-linking a non-NULL
-	// person_id): a scratch database with staff_users' RLS and the 0034
-	// append-only trigger both temporarily removed, purely to construct
-	// this otherwise-unreachable test state. This does not claim either
-	// guarantee is weakened in production; it is the documented way (per
-	// the task) to exercise these two specific defensive branches in
-	// isolation.
+	// person_id): a scratch database with the 0034 append-only trigger
+	// removed, and staff_users' RLS toggled OFF only for the instant of
+	// each mutation itself, purely to construct this otherwise-
+	// unreachable test state. This does not claim either guarantee is
+	// weakened in production. L-b (code review of `5a27be6`): RLS is
+	// re-enabled BEFORE each approval below, so the real production I-5
+	// arm - reading staff_users under normal RLS, from the platform
+	// approver's own session - is what actually gets exercised, not a
+	// bypassed one.
 	scratchPool, _ := scratchPoolThrough0112(t, "cap0112i5c23")
 	if err := scratchPool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx, `DROP TRIGGER IF EXISTS staff_users_person_id_append_only ON staff_users`); err != nil {
-			return err
-		}
-		_, err := tx.Exec(ctx, `ALTER TABLE staff_users DISABLE ROW LEVEL SECURITY`)
+		_, err := tx.Exec(ctx, `DROP TRIGGER IF EXISTS staff_users_person_id_append_only ON staff_users`)
 		return err
 	}); err != nil {
-		t.Fatalf("test isolation setup (drop 0034 trigger, disable staff_users RLS): %v", err)
+		t.Fatalf("test isolation setup (drop 0034 trigger): %v", err)
 	}
 
 	// Case 2: grantee demoted away from platform_admin between request
@@ -613,15 +696,30 @@ func TestCapabilityGrant_I5_PlatformGranteeLiveReRead(t *testing.T) {
 		t.Fatalf("create second G-P2 request: %v", err)
 	}
 	if err := scratchPool.WithoutTenant(ctx, func(ctx context.Context, tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `ALTER TABLE staff_users DISABLE ROW LEVEL SECURITY`); err != nil {
+			return err
+		}
 		// staff_users' own CHECK constraint (migration 0011) requires
 		// role='platform_admin' IFF tenant_id IS NULL, so demoting away
 		// from platform_admin must move tenant_id to a real tenant in the
 		// same statement.
-		_, err := tx.Exec(ctx, `UPDATE staff_users SET role = 'compliance', tenant_id = $2 WHERE id = $1`, granteeP2b, tenantID2)
+		if _, err := tx.Exec(ctx, `UPDATE staff_users SET role = 'compliance', tenant_id = $2 WHERE id = $1`, granteeP2b, tenantID2); err != nil {
+			return err
+		}
+		_, err := tx.Exec(ctx, `ALTER TABLE staff_users ENABLE ROW LEVEL SECURITY`)
 		return err
 	}); err != nil {
 		t.Fatalf("demote grantee: %v", err)
 	}
+	// L-b note: in production this exercises a DIFFERENT observable path
+	// than case 1's suspension - a demotion also moves tenant_id to a real
+	// tenant, and staff_users' own dual_scope_isolation policy hides any
+	// tenant-scoped row from a plain platform session entirely (the same
+	// fact this table's own grantee_person_id column doc comment relies
+	// on). So the I-5 live re-read's SELECT finds NOT FOUND (the row is
+	// invisible under RLS), not "found but ineligible" - a different
+	// reason, the same CG011 refusal. Both are asserted as just CG011
+	// here, since that is what the real arm actually returns.
 	err = scratchPool.WithPlatformAdmin(ctx, approver2, func(ctx context.Context, tx pgx.Tx) error {
 		_, _, err := capability.DecideAndGrant(ctx, tx, tenantID2, reqID2, "approve", "test")
 		return err
@@ -652,16 +750,170 @@ func TestCapabilityGrant_I5_PlatformGranteeLiveReRead(t *testing.T) {
 		if _, err := tx.Exec(ctx, `INSERT INTO persons (id) VALUES ($1)`, newPerson); err != nil {
 			return err
 		}
-		_, err := tx.Exec(ctx, `UPDATE staff_users SET person_id = $1 WHERE id = $2`, newPerson, granteeP2c)
+		if _, err := tx.Exec(ctx, `ALTER TABLE staff_users DISABLE ROW LEVEL SECURITY`); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `UPDATE staff_users SET person_id = $1 WHERE id = $2`, newPerson, granteeP2c); err != nil {
+			return err
+		}
+		_, err := tx.Exec(ctx, `ALTER TABLE staff_users ENABLE ROW LEVEL SECURITY`)
 		return err
 	}); err != nil {
 		t.Fatalf("re-link grantee to a different person (forced, test-only): %v", err)
 	}
+	// L-b note: unlike case 2, this row's tenant_id is unchanged (still
+	// NULL), so it stays visible to the platform approver's session under
+	// normal RLS - the live re-read here really does find the row and
+	// compare person_id, exercising the person_id-mismatch branch
+	// specifically (not a NOT FOUND masking it).
 	err = scratchPool.WithPlatformAdmin(ctx, approver3, func(ctx context.Context, tx pgx.Tx) error {
 		_, _, err := capability.DecideAndGrant(ctx, tx, tenantID3, reqID3, "approve", "test")
 		return err
 	})
 	if !cgIsCode(err, "CG011") {
 		t.Fatalf("approve G-P2 whose grantee's live person_id no longer matches the snapshot: expected CG011 (I-5), got %v", err)
+	}
+}
+
+// RC-2 (code review of 5a27be6, mutant M12 survived): A-8's suspended-
+// actor coverage extends to the PLATFORM branch of financial_actor_session
+// specifically - a suspended platform requester (a G-P2 request), a
+// suspended platform approver, and a suspended platform revoker, all via
+// db.WithPlatformAdmin, each expected to be refused CG001 by
+// financial_actor_session's own "platform principal % is not an active
+// platform staff member" check. Kills M12 (dropping that check's
+// `rec.status <> 'active'` arm).
+func TestCapabilityGrant_RC2_SuspendedPlatformActorRefused(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+
+	suspend := func(id uuid.UUID) {
+		t.Helper()
+		if err := pool.WithoutTenant(ctx, func(ctx context.Context, tx pgx.Tx) error {
+			_, err := tx.Exec(ctx, `UPDATE staff_users SET status = 'suspended' WHERE id = $1`, id)
+			return err
+		}); err != nil {
+			t.Fatalf("suspend platform staff %s: %v", id, err)
+		}
+	}
+
+	t.Run("suspended_platform_requester_gp2", func(t *testing.T) {
+		tenantID := createTestTenant(t, pool)
+		requester := cgStaff(t, pool, uuid.Nil, "platform_admin")
+		granteeP2 := cgStaff(t, pool, uuid.Nil, "platform_admin")
+		suspend(requester)
+		validUntil := time.Now().Add(1 * time.Hour)
+		err := pool.WithPlatformAdmin(ctx, requester, func(ctx context.Context, tx pgx.Tx) error {
+			_, err := capability.CreateRequest(ctx, tx, tenantID, capability.NewRequestInput{
+				GranteeStaffID: granteeP2, Capability: capability.CapabilityLedgerAdjustmentInitiate,
+				ValidFrom: time.Now(), ValidUntil: &validUntil, ReasonCode: "test",
+			})
+			return err
+		})
+		if !cgIsCode(err, "CG001") {
+			t.Fatalf("suspended platform requester: expected CG001, got %v", err)
+		}
+	})
+
+	t.Run("suspended_platform_approver", func(t *testing.T) {
+		f := newR12Fixture(t, pool)
+		reqID, err := f.createRequest(t, pool, time.Now(), nil)
+		if err != nil {
+			t.Fatalf("create request: %v", err)
+		}
+		suspend(f.Approver)
+		err = pool.WithPlatformAdmin(ctx, f.Approver, func(ctx context.Context, tx pgx.Tx) error {
+			_, _, err := capability.DecideAndGrant(ctx, tx, f.TenantID, reqID, "approve", "test")
+			return err
+		})
+		if !cgIsCode(err, "CG001") {
+			t.Fatalf("suspended platform approver: expected CG001, got %v", err)
+		}
+	})
+
+	t.Run("suspended_platform_revoker", func(t *testing.T) {
+		f := mustBuildActingGrantFixtureWithCapability(t, pool, capability.CapabilityLedgerAdjustmentInitiate)
+		revoker := cgStaff(t, pool, uuid.Nil, "platform_admin")
+		suspend(revoker)
+		err := pool.WithPlatformAdmin(ctx, revoker, func(ctx context.Context, tx pgx.Tx) error {
+			return capability.RevokeGrant(ctx, tx, f.TenantID, f.GrantID, "test-revoke")
+		})
+		if !cgIsCode(err, "CG001") {
+			t.Fatalf("suspended platform revoker: expected CG001, got %v", err)
+		}
+	})
+}
+
+// L-a (code review of 5a27be6): the grant-time R-13 re-check must bound
+// valid_until by the REQUESTED v_req.valid_from + max_lifetime, not by the
+// clamped NEW.valid_from - using the clamped value makes the bound more
+// permissive than intended (the clamp only ever moves valid_from forward),
+// so a request that sat pending long enough for its clamp to shift
+// valid_from far forward could otherwise get a grant whose actual duration,
+// measured from the ORIGINALLY requested start, exceeds
+// acting_grant_max_lifetime. This is simulated (rather than requiring a
+// real multi-hour wait) in a scratch DB by directly rewriting the pending
+// request's own valid_from backward via raw SQL, with the request guard
+// trigger temporarily disabled for that one UPDATE only - approximating
+// "this request has been sitting pending for a while" without an actual
+// wait.
+func TestCapabilityGrant_La_R13BoundedByRequestedValidFromNotClamped(t *testing.T) {
+	pool, _ := scratchPoolThrough0112(t, "cap0112la")
+	ctx := context.Background()
+	tenantID := createTestTenant(t, pool)
+	requester := cgStaff(t, pool, uuid.Nil, "platform_admin")
+	granteeP2 := cgStaff(t, pool, uuid.Nil, "platform_admin")
+	approver := cgStaff(t, pool, uuid.Nil, "platform_admin")
+
+	validUntil := time.Now().Add(4 * time.Hour) // exactly the max lifetime from "now"
+	var reqID uuid.UUID
+	if err := pool.WithPlatformAdmin(ctx, requester, func(ctx context.Context, tx pgx.Tx) error {
+		req, err := capability.CreateRequest(ctx, tx, tenantID, capability.NewRequestInput{
+			GranteeStaffID: granteeP2, Capability: capability.CapabilityLedgerAdjustmentInitiate,
+			ValidFrom: time.Now(), ValidUntil: &validUntil, ReasonCode: "test",
+		})
+		reqID = req.ID
+		return err
+	}); err != nil {
+		t.Fatalf("create G-P2 request: %v", err)
+	}
+
+	// Simulate "this request has been pending for 2 hours": rewrite its
+	// own valid_from 2 hours into the past, bypassing the immutability
+	// guard for this one test-only UPDATE (valid_until is untouched, so
+	// R-14's approval-time "already ended" check is unaffected).
+	// Platform scope (not WithoutTenant): the platform_scope_update RLS
+	// policy on this table requires app.platform_admin_principal_id to be
+	// set (any value) with tenant_id/player/service unset - WithoutTenant
+	// sets none of those, so the UPDATE would silently affect 0 rows.
+	if err := pool.WithPlatformAdmin(ctx, uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `ALTER TABLE staff_capability_grant_requests DISABLE TRIGGER staff_capability_grant_requests_guard`); err != nil {
+			return err
+		}
+		tag, err := tx.Exec(ctx, `UPDATE staff_capability_grant_requests SET valid_from = valid_from - interval '2 hours' WHERE id = $1`, reqID)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() != 1 {
+			t.Fatalf("expected to rewrite exactly 1 row, affected %d", tag.RowsAffected())
+		}
+		_, err = tx.Exec(ctx, `ALTER TABLE staff_capability_grant_requests ENABLE TRIGGER staff_capability_grant_requests_guard`)
+		return err
+	}); err != nil {
+		t.Fatalf("simulate long-pending request (test-only rewrite): %v", err)
+	}
+
+	// Approve now: the clamp moves valid_from forward to ~now(), so the
+	// ACTUAL grant window (valid_from=now, valid_until=original now()+4h)
+	// is a full 4h - but measured from the request's OWN (rewritten)
+	// valid_from (now-2h), the total span is 6h, exceeding the 4h max.
+	// The L-a-fixed check catches this; the pre-fix check (bounding by the
+	// clamped valid_from) would not have.
+	err := pool.WithPlatformAdmin(ctx, approver, func(ctx context.Context, tx pgx.Tx) error {
+		_, _, err := capability.DecideAndGrant(ctx, tx, tenantID, reqID, "approve", "test")
+		return err
+	})
+	if !cgIsCode(err, "CG012") {
+		t.Fatalf("approve a grant whose requested-from-based duration exceeds max lifetime: expected CG012 (R-13/L-a), got %v", err)
 	}
 }

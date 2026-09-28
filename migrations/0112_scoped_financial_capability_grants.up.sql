@@ -825,6 +825,13 @@ CREATE TABLE staff_capability_grants (
     -- ever record a validity start before the moment it was actually
     -- granted.
     CHECK (valid_from >= granted_at),
+    -- N-3 (ledger-finance, code review of `5a27be6`): restate the ordering
+    -- already implied by the request table's own identical CHECK
+    -- (staff_capability_grant_requests: valid_until IS NULL OR
+    -- valid_until > valid_from) directly on the grants table too - defence
+    -- in depth, cheap, and independent of whatever the INSERT trigger
+    -- currently copies from the request row.
+    CHECK (valid_until IS NULL OR valid_until > valid_from),
     UNIQUE (tenant_id, id)
 );
 
@@ -859,15 +866,27 @@ BEGIN
             RAISE EXCEPTION 'staff_capability_grants: request/approval mismatch' USING ERRCODE = 'CG012';
         END IF;
 
-        -- R12-a (security condition): under REPEATABLE READ, two
+        -- R12-a (security condition, CORRECTED by security's own re-check
+        -- of the integrated head): only READ COMMITTED is accepted, not
+        -- "READ COMMITTED or SERIALIZABLE". Under REPEATABLE READ, two
         -- concurrent overlapping INSERTs could each take the advisory
         -- lock in turn but neither would see the other's row (snapshot
-        -- taken at transaction start), producing write skew. Refuse
-        -- outright unless READ COMMITTED or SERIALIZABLE. This function
-        -- stays VOLATILE (the default for this trigger; never STABLE),
-        -- so it is re-evaluated per row and cannot be constant-folded.
-        IF current_setting('transaction_isolation') NOT IN ('read committed', 'serializable') THEN
-            RAISE EXCEPTION 'staff_capability_grants: grant insert is refused under isolation level % (must be read committed or serializable, R12-a)', current_setting('transaction_isolation') USING ERRCODE = 'CG012';
+        -- taken at transaction start), producing write skew - that much
+        -- was always excluded. But SERIALIZABLE alone is NOT safe either:
+        -- a SERIALIZABLE approver that took its snapshot BEFORE a
+        -- concurrent READ COMMITTED approver commits can still acquire
+        -- the advisory lock (locks are not part of the snapshot) after
+        -- that commit, run its own overlap SELECT against its OWN
+        -- (pre-commit) snapshot, see no conflict, and insert an
+        -- overlapping grant - Postgres's serializable snapshot isolation
+        -- (SSI) only tracks SERIALIZABLE-vs-SERIALIZABLE conflicts, not a
+        -- SERIALIZABLE transaction racing a READ COMMITTED one. Security
+        -- reproduced this in a scratch DB with the R-11 index dropped
+        -- (the A-23 technique). This function stays VOLATILE (the
+        -- default for this trigger; never STABLE), so it is re-evaluated
+        -- per row and cannot be constant-folded.
+        IF current_setting('transaction_isolation') <> 'read committed' THEN
+            RAISE EXCEPTION 'staff_capability_grants: grant insert is refused under isolation level % (must be read committed, R12-a)', current_setting('transaction_isolation') USING ERRCODE = 'CG012';
         END IF;
 
         -- R-12 binding control (R12-b): take the per-key advisory lock,
@@ -903,18 +922,24 @@ BEGIN
         NEW.revoked_by_scope := NULL;
         NEW.revoke_reason_code := NULL;
 
-        -- R-13 must still hold after the R-14 clamp: a clamped G-P2 grant
-        -- never ends later than the ORIGINAL requested_from + max
-        -- lifetime would have allowed. Because the clamp only ever moves
-        -- valid_from forward (never back), a clamped grant's window is
-        -- always <= the originally requested window, so this can only
-        -- ever re-confirm what the request guard already checked - but it
-        -- is re-checked here, against the live setting, as the binding
-        -- layer rather than trusting the non-binding request-time check.
+        -- R-13 must still hold after the R-14 clamp, re-checked against
+        -- the REQUESTED v_req.valid_from (L-a fix, code review of
+        -- `5a27be6`: an earlier version of this check used the CLAMPED
+        -- NEW.valid_from instead, which is wrong and was dead code - since
+        -- the clamp only ever moves valid_from FORWARD (NEW.valid_from >=
+        -- v_req.valid_from), bounding against NEW.valid_from makes the
+        -- allowed window MORE permissive than the original request-time
+        -- bound, so NEW.valid_until > NEW.valid_from + max_lifetime could
+        -- never actually fire - it would silently pass a request whose
+        -- ORIGINALLY requested duration no longer fits the CURRENT live
+        -- acting_grant_max_lifetime, if that setting was tightened by a
+        -- migration between request and grant time). Bounding against
+        -- v_req.valid_from instead makes this a live re-check against the
+        -- current setting, not a rubber stamp of the request-time check.
         IF NEW.grantee_scope = 'platform' THEN
             SELECT value_interval INTO v_max_lifetime FROM financial_capability_settings WHERE key = 'acting_grant_max_lifetime';
-            IF v_max_lifetime IS NULL OR NEW.valid_until IS NULL OR NEW.valid_until > NEW.valid_from + v_max_lifetime THEN
-                RAISE EXCEPTION 'staff_capability_grants: clamped valid_until exceeds acting_grant_max_lifetime (R-13)' USING ERRCODE = 'CG012';
+            IF v_max_lifetime IS NULL OR NEW.valid_until IS NULL OR NEW.valid_until > v_req.valid_from + v_max_lifetime THEN
+                RAISE EXCEPTION 'staff_capability_grants: valid_until exceeds acting_grant_max_lifetime measured from the requested valid_from (R-13)' USING ERRCODE = 'CG012';
             END IF;
         END IF;
 
