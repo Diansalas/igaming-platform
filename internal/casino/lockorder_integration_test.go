@@ -6,6 +6,7 @@ package casino
 
 import (
 	"context"
+	"fmt"
 	"math/big"
 	"testing"
 	"time"
@@ -16,6 +17,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/bonus"
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/ledger"
+	"github.com/Diansalas/igaming-platform/internal/rg"
 )
 
 func loCasinoAccount(t *testing.T, pool *db.Pool, f casinoFixture, walletID *uuid.UUID, at ledger.AccountType) uuid.UUID {
@@ -350,6 +352,148 @@ func TestLockOrder_ConcurrentBetAndGrantConversion_NoDeadlock(t *testing.T) {
 		loAssertBalanced(t, pool, f.tenantID)
 		loAssertProjectionMatchesRebuild(t, pool, f.tenantID)
 	})
+}
+
+// --- F-1: bootstrap vs. the first postBet of a round -----------------------
+
+// TestLockOrder_BootstrapAndFirstBetOfRound_NoDeadlock is the architect
+// review's F-1 finding (docs/plans/prh2-hardening-round/reviews/
+// b-architect-qa-pop.md), reproduced against the real locking primitives on
+// both sides:
+//
+//	BootstrapLaunch's getLaunchSessionForBootstrap locks the SAME
+//	casino_launch_sessions row bootstrap is consuming, then (via
+//	bootstrapGateDenialReason -> evaluateAndAuditEligibility) takes RG's
+//	person-scoped advisory lock (rg.go's lockPerson, called from
+//	rg.EvaluateEligibility).
+//
+//	postBet, on an active session, takes the SAME RG advisory lock FIRST
+//	(evaluateAndAuditEligibility, orchestrator.go ~:1570), and only
+//	afterwards calls BindProviderRound (~:1785), whose INSERT into
+//	casino_provider_rounds carries a foreign key to casino_launch_sessions
+//	(migration 0080) - Postgres takes an IMPLICIT FOR KEY SHARE lock on the
+//	referenced session row to enforce that FK, with no explicit SQL
+//	anywhere naming it.
+//
+// Session-then-RG vs. RG-then-session on the same two resources is the
+// textbook ABBA shape. This test drives both sides through the real
+// production functions (rg.EvaluateEligibility and BindProviderRound), not
+// stand-ins, and parameterises ONLY the session row's lock clause so the
+// SAME test proves both halves of the fix:
+//
+//   - "FOR UPDATE (mutant, pre-fix)" reproduces the deadlock (40P01) this
+//     review found - if this case ever stops failing, the fix has
+//     regressed back to the vulnerable lock mode without anyone changing
+//     the lock clause in bootstrap.go, which is exactly the regression
+//     this test exists to catch.
+//   - "FOR NO KEY UPDATE (fix)" is bootstrap.go's actual, current lock
+//     clause (getLaunchSessionForBootstrap) and must complete both racers
+//     with no deadlock at all, because FOR KEY SHARE (what the FK takes)
+//     does not conflict with FOR NO KEY UPDATE - only with FOR UPDATE and
+//     with another FOR NO KEY UPDATE holder.
+func TestLockOrder_BootstrapAndFirstBetOfRound_NoDeadlock(t *testing.T) {
+	cases := []struct {
+		name         string
+		lockClause   string
+		wantDeadlock bool
+	}{
+		{"FOR UPDATE (mutant, pre-fix)", "FOR UPDATE", true},
+		{"FOR NO KEY UPDATE (fix)", "FOR NO KEY UPDATE", false},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			pool := testPool(t)
+			f := seedCasinoFixture(t, pool)
+			fundWallet(t, pool, f, 100_000)
+			game := seedGame(t, pool, "mock-casino", "EUR")
+			session, _ := mintSessionForBootstrap(t, pool, f, game, ModeReal, "EUR", 0)
+			sessionID := session.ID
+
+			elig := rg.EligibilityParams{
+				TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID,
+			}
+
+			// blockerSession forces racer A (the bootstrap-sim) to queue on
+			// the session row before it ever reaches the RG lock - ANY
+			// conflicting mode does this, so the blocker itself always uses
+			// the strongest lock (FOR UPDATE), independently of which
+			// clause tc is testing A's OWN acquisition with below.
+			blockerSession := loHoldWith(t, pool, f.tenantID, "session row (FOR UPDATE)", func(ctx context.Context, tx pgx.Tx) error {
+				var discard uuid.UUID
+				return tx.QueryRow(ctx, `SELECT id FROM casino_launch_sessions WHERE id = $1 FOR UPDATE`, sessionID).Scan(&discard)
+			})
+			// blockerRG forces racer B (the postbet-sim) to queue on the RG
+			// advisory lock before A ever tries it, so B is first in that
+			// lock's wait queue - the ordering loRunABBA's own doc comment
+			// requires for a deterministic interleaving.
+			blockerRG := loHoldWith(t, pool, f.tenantID, "RG advisory lock", func(ctx context.Context, tx pgx.Tx) error {
+				_, err := rg.EvaluateEligibility(ctx, tx, elig)
+				return err
+			})
+
+			// A: bootstrap-sim. Locks the session row with tc's clause
+			// (mutant: FOR UPDATE: fix: FOR NO KEY UPDATE), exactly
+			// getLaunchSessionForBootstrap's own statement shape, then
+			// wants the RG advisory lock next, exactly as
+			// bootstrapGateDenialReason does via evaluateAndAuditEligibility.
+			startBootstrapSim := func() *loRacer {
+				return loStartRacer(t, pool, f.tenantID, "bootstrap-sim(session,RG)", func(ctx context.Context, tx pgx.Tx) error {
+					var discard uuid.UUID
+					if err := tx.QueryRow(ctx,
+						fmt.Sprintf(`SELECT id FROM casino_launch_sessions WHERE id = $1 %s`, tc.lockClause),
+						sessionID).Scan(&discard); err != nil {
+						return err
+					}
+					_, err := rg.EvaluateEligibility(ctx, tx, elig)
+					return err
+				})
+			}
+			// B: postbet-sim. Takes the RG advisory lock first, exactly as
+			// postBet's own evaluateAndAuditEligibility call does, then
+			// calls the REAL BindProviderRound - whose FK to
+			// casino_launch_sessions takes the IMPLICIT FOR KEY SHARE lock
+			// this whole finding is about.
+			startPostBetSim := func() *loRacer {
+				return loStartRacer(t, pool, f.tenantID, "postbet-sim(RG,session FK)", func(ctx context.Context, tx pgx.Tx) error {
+					if _, err := rg.EvaluateEligibility(ctx, tx, elig); err != nil {
+						return err
+					}
+					return BindProviderRound(ctx, tx, f.tenantID, f.brandID, f.playerAccountID, sessionID, game.ID,
+						"mock-casino", "lockorder-f1-round-"+tc.lockClause, nil)
+				})
+			}
+
+			racerA, racerB, errA, errB := loRunABBA(t, pool, startBootstrapSim, startPostBetSim, []*loBlocker{blockerSession, blockerRG})
+
+			deadlockedA, deadlockedB := loIsDeadlock(errA), loIsDeadlock(errB)
+			if tc.wantDeadlock {
+				if !deadlockedA && !deadlockedB {
+					t.Fatalf("expected a 40P01 deadlock between %q and %q under %s; got errA=%v errB=%v",
+						racerA.name, racerB.name, tc.lockClause, errA, errB)
+				}
+				// Postgres's deadlock detector aborts exactly one side; the
+				// other must then complete normally once the victim's locks
+				// are released.
+				if deadlockedA && errB != nil {
+					t.Fatalf("the non-victim racer %q must still succeed once the deadlock victim aborts: %v", racerB.name, errB)
+				}
+				if deadlockedB && errA != nil {
+					t.Fatalf("the non-victim racer %q must still succeed once the deadlock victim aborts: %v", racerA.name, errA)
+				}
+			} else {
+				loAssertNoDeadlock(t, "F-1 (bootstrap session lock vs. postBet's FK-driven lock)",
+					map[string]error{racerA.name: errA, racerB.name: errB})
+				if errA != nil {
+					t.Fatalf("%s must not error under the fix: %v", racerA.name, errA)
+				}
+				if errB != nil {
+					t.Fatalf("%s must not error under the fix: %v", racerB.name, errB)
+				}
+			}
+		})
+	}
 }
 
 // loAssertWageringContribution fails unless grantID has a

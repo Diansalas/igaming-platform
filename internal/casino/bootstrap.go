@@ -176,10 +176,49 @@ func getBootstrapByRequestID(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID,
 }
 
 // getLaunchSessionForBootstrap is ADR 0103 §3.2 step 2b's first lookup:
-// SELECT ... WHERE token_hash = $h AND tenant_id = $t FOR UPDATE - no
-// provider/mode/asset predicate here (that is step 3's job, and step 5's
-// CAS predicate again, in depth); the row lock is what serializes every
-// concurrent bootstrap attempt against the SAME token (ADR 0103 §4).
+// SELECT ... WHERE token_hash = $h AND tenant_id = $t FOR NO KEY UPDATE -
+// no provider/mode/asset predicate here (that is step 3's job, and step
+// 5's CAS predicate again, in depth); the row lock is what serializes
+// every concurrent bootstrap attempt against the SAME token, AND A's own
+// revoke (ADR 0103 §4).
+//
+// FOR NO KEY UPDATE, not FOR UPDATE (architect review F-1, code-reviewer
+// finding, 2026-09-28): postBet's first bet of a round takes the SAME
+// order this function's docstring used to claim was safe, but in the
+// OPPOSITE sequence - it takes RG's person-scoped advisory lock
+// (orchestrator.go ~:1570) BEFORE BindProviderRound's INSERT into
+// casino_provider_rounds (~:1785), whose FK to casino_launch_sessions
+// (migration 0080) takes an IMPLICIT FOR KEY SHARE lock on this SAME
+// session row. Bootstrap took the session row FOR UPDATE first, then RG's
+// lock (bootstrapGateDenialReason -> evaluateAndAuditEligibility ->
+// rg.lockPerson) - the exact ABBA shape (session-then-RG vs
+// RG-then-session) needed for a 40P01 deadlock between a bootstrap and
+// the first bet of a round on the SAME active session.
+//
+// Postgres's own row-lock compatibility table is what actually breaks the
+// cycle: FOR KEY SHARE does NOT conflict with FOR NO KEY UPDATE (it only
+// conflicts with FOR UPDATE and another FOR NO KEY UPDATE holder trying to
+// upgrade past it) - see https://www.postgresql.org/docs/current/
+// explicit-locking.html#LOCKING-ROWS. Switching this SELECT from FOR
+// UPDATE to FOR NO KEY UPDATE means postBet's FK-driven FOR KEY SHARE no
+// longer conflicts with a session row bootstrap already holds, so the
+// cycle cannot form. FOR NO KEY UPDATE still conflicts with a genuine
+// concurrent FOR UPDATE (A's own RevokeLaunchSession, launch.go, which
+// still uses a plain UPDATE taking an implicit UPDATE-strength lock) and
+// with another bootstrap's own FOR NO KEY UPDATE on the same row, so
+// serialization against a concurrent bootstrap and against A's revoke is
+// unchanged - proved by TestBootstrapLaunch_ConcurrentConsumes_* (still
+// exactly one winner) and by the ABBA reproduction test itself
+// (TestLockOrder_BootstrapAndFirstBetOfRound_NoDeadlock,
+// lockorder_integration_test.go) asserting the fix does not merely mask
+// the deadlock by dropping a needed lock: that test's own "FOR UPDATE
+// (mutant, pre-fix)" sub-test drives the SAME two real production
+// primitives (this function's own lock statement, parameterised, and the
+// real rg.EvaluateEligibility/BindProviderRound calls) and genuinely
+// reproduces the 40P01 this comment describes, while "FOR NO KEY UPDATE
+// (fix)" - this function's actual, current lock clause - completes both
+// sides with no deadlock at all. See ADR 0103 §4/§13's own amendment for
+// the full record.
 func getLaunchSessionForBootstrap(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, tokenHash string) (LaunchSession, bool, error) {
 	var s LaunchSession
 	var status LaunchSessionStatus
@@ -189,7 +228,7 @@ func getLaunchSessionForBootstrap(ctx context.Context, tx pgx.Tx, tenantID uuid.
 			asset_code, mode, jurisdiction_code, status, expires_at
 		 FROM casino_launch_sessions
 		 WHERE token_hash = $1 AND tenant_id = $2
-		 FOR UPDATE`,
+		 FOR NO KEY UPDATE`,
 		tokenHash, tenantID,
 	).Scan(&s.ID, &s.TenantID, &s.BrandID, &s.PlayerAccountID, &s.WalletID, &s.GameID, &s.ProviderID, &s.ProviderGameID,
 		&s.AssetCode, &s.Mode, &jurisdictionCode, &status, &s.ExpiresAt)
@@ -348,7 +387,7 @@ func (o *Orchestrator) BootstrapLaunch(ctx context.Context, pool providercred.Te
 		tokenHash := hashLaunchToken(body.LaunchToken)
 		digest := bootstrapRequestDigest(providerID, body.RequestID, body.ProviderGameID, body.AssetCode, body.Mode)
 
-		// Step 2b: the session lookup FOR UPDATE, then the idempotency
+		// Step 2b: the session lookup FOR NO KEY UPDATE, then the idempotency
 		// lookup (order does not affect correctness here - see
 		// bootstrap_integration_test.go's own concurrency notes - but
 		// the session lookup runs first because it is the one that
@@ -510,8 +549,11 @@ func (o *Orchestrator) BootstrapLaunch(ctx context.Context, pool providercred.Te
 			}
 			// Unreachable in normal operation: a matching hash+digest
 			// here would mean the SAME token raced past the session row
-			// lock above, which cannot happen under FOR UPDATE. Fail
-			// closed rather than guess.
+			// lock above, which cannot happen - two FOR NO KEY UPDATE
+			// holders of the same row still conflict with each other
+			// (only FOR KEY SHARE is compatible with FOR NO KEY UPDATE,
+			// per Postgres's own row-lock table). Fail closed rather than
+			// guess.
 			return fmt.Errorf("casino: launch bootstrap insert conflict for request_id=%s matched a request that should have been caught by the session row lock", body.RequestID)
 		}
 

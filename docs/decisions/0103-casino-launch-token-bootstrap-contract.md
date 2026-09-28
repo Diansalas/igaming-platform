@@ -217,13 +217,44 @@ Conditions from Q6 / C-103-3:
 
 ## 4. Concurrency and lock order
 
-- `FOR UPDATE` on the session row serializes concurrent bootstraps of one token:
+- `FOR NO KEY UPDATE` on the session row serializes concurrent bootstraps of one token:
   - a different `request_id` → the uniform refusal;
   - the same `request_id` → the replay 200;
   - **exactly one consume** either way.
 - **Lock order.** Redeem+Recheck (credential tables, read), then the session row lock, then RG's
-  advisory locks. `postBet` reads the session without `FOR UPDATE`.
-- The bootstrap is added to `casino/lockorder_harness_test.go`. If a cycle appears with
+  advisory locks.
+- **Amendment (2026-09-28, architect review F-1, `docs/plans/prh2-hardening-round/reviews/
+  b-architect-qa-pop.md`):** the original design and its first implementation (`e720001`) locked
+  the session row `FOR UPDATE`. That was refuted: `postBet`'s first bet of a round takes RG's
+  person-scoped advisory lock (`internal/rg` `lockPerson`) BEFORE it calls `BindProviderRound`,
+  whose `INSERT` into `casino_provider_rounds` carries a foreign key to `casino_launch_sessions`
+  (migration 0080) - Postgres takes an *implicit* `FOR KEY SHARE` lock on the referenced session
+  row to enforce that FK, with no explicit SQL naming it anywhere in `postBet`. Bootstrap's
+  session-row-then-RG order and `postBet`'s RG-then-session-FK order are the same two resources in
+  opposite sequence: a genuine ABBA deadlock (`40P01`) between a bootstrap and the first bet of a
+  round on the same `active` session. It is a liveness defect only - the losing side's whole
+  transaction rolls back, so there is no ledger effect, and Postgres's own deadlock detector
+  always resolves it (one side aborts, the other completes) rather than hanging forever.
+  - **Fix:** `getLaunchSessionForBootstrap`'s session lookup uses `FOR NO KEY UPDATE`, not
+    `FOR UPDATE`. Per Postgres's row-lock compatibility table, `FOR KEY SHARE` (what the FK takes)
+    does **not** conflict with `FOR NO KEY UPDATE` - only with `FOR UPDATE` and with another
+    `FOR NO KEY UPDATE` holder. The fix therefore breaks the cycle without weakening any of the
+    serialization this section originally required: two concurrent bootstraps still conflict
+    (`FOR NO KEY UPDATE` vs. `FOR NO KEY UPDATE`), and a bootstrap still conflicts with A's own
+    `RevokeLaunchSession` (`internal/casino/launch.go`, a plain `UPDATE`, which takes an implicit
+    `FOR UPDATE`-strength lock and so still conflicts with `FOR NO KEY UPDATE`).
+  - **Test:** `TestLockOrder_BootstrapAndFirstBetOfRound_NoDeadlock`
+    (`internal/casino/lockorder_integration_test.go`) drives both sides through the real
+    production primitives (this function's own lock statement, parameterised by lock clause, and
+    the real `rg.EvaluateEligibility`/`BindProviderRound` calls) rather than stand-ins. Its
+    "`FOR UPDATE` (mutant, pre-fix)" sub-test reproduces the `40P01` this amendment describes;
+    its "`FOR NO KEY UPDATE` (fix)" sub-test - the code's actual, current lock clause - completes
+    both racers with no deadlock. Security acknowledged this fix on the same review round.
+- `postBet` reads the session without any lock of its own; the FK-driven `FOR KEY SHARE` above is
+  the only lock it takes on that row, and it is implicit.
+- The bootstrap is added to `casino/lockorder_harness_test.go` (the shared interleaving primitives)
+  and exercised by `casino/lockorder_integration_test.go` (the actual `Test...` function, this
+  codebase's established split - see that file's own package comment). If a cycle reappears with
   `LaunchGame` phase C or `postBet`, the fix is to move RG ahead of the row lock, and that goes back
   to architect and security.
 
@@ -424,7 +455,8 @@ merged). Migration number **0115** (placeholder - the orchestrator renumbers at 
 
 - `internal/casino/bootstrap.go`: `Orchestrator.BootstrapLaunch`, the exact §3.2 step order
   (Redeem+Recheck first via the existing `redeemVerified`, unmodified; the session lookup FOR
-  UPDATE; the idempotency lookup; the binding check; the two Q4 gates plus RG; the binding-aware
+  NO KEY UPDATE (originally FOR UPDATE - see the §4 amendment and the "Lock order" item below); the
+  idempotency lookup; the binding check; the two Q4 gates plus RG; the binding-aware
   CAS; the player-ref upsert; the idempotency insert via `db.IdempotentInsert` (the SAVEPOINT
   primitive already used by `ledger.Post`/`withdrawal.RequestWithdrawal`/`payments.
   InitiateDeposit`) - chosen specifically because it lets the required-once-per-request `Redeem`
@@ -476,16 +508,34 @@ merged). Migration number **0115** (placeholder - the orchestrator renumbers at 
   The REAL provider path (a genuinely-signed callback through `postBet`) is unaffected and is what
   `TestCasinoBootstrap_RealProviderBetWorksAfterBootstrap` (`internal/httpserver`) exercises end to
   end over HTTP.
-- **Lock order (§4):** `BootstrapLaunch`'s own order - Redeem+Recheck (no lock), then the session
-  row `FOR UPDATE`, then RG's person-scoped `pg_advisory_xact_lock` (step 4) - was checked against
-  every other resource-acquisition order in this package and matches the ADR's own specified order
-  exactly; no other code path acquires RG's advisory lock and then a `casino_launch_sessions` row
-  lock (the only shape that could form a cycle with this one), so no synthetic two-resource ABBA
-  reproduction was constructed - doing so would have simulated a code path that does not exist. The
-  CON tests (`TestBootstrapLaunch_ConcurrentConsumes_DifferentRequestIDs`/`_SameRequestID`, `-race
-  -count=20`+) found no deadlock empirically. A formal harness entry
-  (`lockorder_harness_test.go`) is NOT added in this change; flagged as a scope decision for the
-  orchestrator, not silently skipped.
+- **Lock order (§4) - CORRECTED (2026-09-28, architect review F-1):** the analysis this item
+  originally recorded was wrong, and is kept below (struck through in spirit, not in fact - the
+  full original text is preserved so the mistake and its correction are both on the record) rather
+  than silently deleted:
+
+  > ~~`BootstrapLaunch`'s own order - Redeem+Recheck (no lock), then the session row `FOR UPDATE`,
+  > then RG's person-scoped `pg_advisory_xact_lock` (step 4) - was checked against every other
+  > resource-acquisition order in this package and matches the ADR's own specified order exactly;
+  > no other code path acquires RG's advisory lock and then a `casino_launch_sessions` row lock
+  > (the only shape that could form a cycle with this one), so no synthetic two-resource ABBA
+  > reproduction was constructed - doing so would have simulated a code path that does not exist.
+  > The CON tests (...) found no deadlock empirically. A formal harness entry
+  > (`lockorder_harness_test.go`) is NOT added in this change; flagged as a scope decision for the
+  > orchestrator, not silently skipped.~~
+
+  This missed an **implicit** lock acquisition: `postBet`'s `BindProviderRound` call inserts into
+  `casino_provider_rounds`, whose foreign key to `casino_launch_sessions` takes a `FOR KEY SHARE`
+  lock on the session row with no explicit SQL anywhere naming it. `postBet` therefore DOES acquire
+  RG's advisory lock and then (via that FK) a `casino_launch_sessions` row lock - exactly the shape
+  the original analysis said did not exist - and bootstrap's own session-row-then-RG order is the
+  same two resources in the opposite sequence: a genuine ABBA deadlock (`40P01`). The architect
+  review caught this from first principles (reading `orchestrator.go`'s lock sequence against
+  `bootstrap.go`'s), not from a failing test - the CON tests never triggered it, because they never
+  race a bootstrap against a bet on the same session, only against another bootstrap. See §4's own
+  amendment for the fix (`FOR NO KEY UPDATE`) and the now-added formal harness entry,
+  `TestLockOrder_BootstrapAndFirstBetOfRound_NoDeadlock`
+  (`internal/casino/lockorder_integration_test.go`), which this ADR no longer flags as a deferred
+  scope decision - it is done.
 - **Tests:** `internal/casino/bootstrap_integration_test.go`, `bootstrap_rls_integration_test.go`,
   `bootstrap_sb1_integration_test.go`, `migration_0115_bootstrap_integration_test.go`;
   `internal/httpserver/casino_bootstrap_integration_test.go`. Mutation evidence:
