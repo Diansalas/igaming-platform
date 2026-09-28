@@ -93,6 +93,14 @@ type Grant struct {
 // requested_by_person_id, status, created_at, expires_at, grantee_scope)
 // is forced by the migration 0112 trigger from the DB session - this
 // struct intentionally has no field for any of them.
+// ValidFrom's zero value (time.Time{}, in.ValidFrom.IsZero()) means
+// "unset": CreateRequest passes SQL NULL, and migration 0112's
+// request-guard trigger defaults it to now() itself (R-14) rather than
+// the caller stamping its own clock reading. A non-zero, caller-supplied
+// value is still accepted (e.g. a deliberately future-dated start) and is
+// checked against the trigger's own 5-minute backdating tolerance either
+// way. (Kept as time.Time rather than *time.Time so existing callers that
+// always supply a value are unaffected.)
 type NewRequestInput struct {
 	GranteeStaffID uuid.UUID
 	Capability     Capability
@@ -117,15 +125,15 @@ const (
 	// for an HTTP caller that already passed auth.RequirePermission, and
 	// is treated as an internal error if it ever does.
 	ErrClassSessionInvalid ErrClass = "session_invalid"
-	// ErrClassUniqueViolation (F-3, code review of 0f34d36) covers
-	// Postgres 23505 - the R-11/R-12 partial unique indexes (one pending
-	// request, one unrevoked grant, per (tenant, grantee, capability)).
-	// These are legitimate, expected double-submit races, not server
-	// errors: two concurrent requests for the same grantee/capability are
-	// a conflict, not a 500. The triggers' own point-in-time checks
-	// (R-11/R-12) catch the common case with CG010/CG011 first; these
-	// indexes are the race-safe backstop for the window between that
-	// check and the INSERT.
+	// ErrClassUniqueViolation (F-3, code review of 0f34d36; comment
+	// updated for the R-12 rework, k1-architect-ruling-r12.md) covers
+	// Postgres 23505 - the R-11 partial unique index (one pending request
+	// per (tenant, grantee, capability)). This is a legitimate, expected
+	// double-submit race, not a server error. R-12 ("no overlapping
+	// validity ranges") no longer has a unique index backing it: it is
+	// instead enforced by the grant INSERT trigger's own per-key
+	// pg_advisory_xact_lock plus overlap check, which surfaces as CG012
+	// (ErrClassGuardRefusal), not 23505.
 	ErrClassUniqueViolation ErrClass = "unique_violation"
 	// ErrClassCheckViolation (F-3) covers Postgres 23514 - a CHECK
 	// constraint (e.g. the G-P2 valid_until requirement restated as a
@@ -161,13 +169,20 @@ func ClassifyError(err error) ErrClass {
 // mismatched value, this is not the authoritative check.
 func CreateRequest(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, in NewRequestInput) (Request, error) {
 	var req Request
+	// See NewRequestInput.ValidFrom's own doc comment: a zero time.Time
+	// means "unset" and is passed through as SQL NULL, letting migration
+	// 0112's request-guard trigger apply its own now() default (R-14).
+	var validFrom any
+	if !in.ValidFrom.IsZero() {
+		validFrom = in.ValidFrom
+	}
 	row := tx.QueryRow(ctx, `
 		INSERT INTO staff_capability_grant_requests
 			(tenant_id, grantee_staff_id, capability, valid_from, valid_until, reason_code)
 		VALUES ($1, $2, $3, $4, $5, $6)
 		RETURNING id, tenant_id, grantee_staff_id, grantee_scope, capability, valid_from, valid_until,
 			reason_code, requested_by, requested_by_scope, requested_by_person_id, status, created_at, expires_at
-	`, tenantID, in.GranteeStaffID, string(in.Capability), in.ValidFrom, in.ValidUntil, in.ReasonCode)
+	`, tenantID, in.GranteeStaffID, string(in.Capability), validFrom, in.ValidUntil, in.ReasonCode)
 	if err := scanRequest(row, &req); err != nil {
 		return Request{}, err
 	}

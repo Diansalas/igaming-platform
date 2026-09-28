@@ -94,6 +94,7 @@ DROP TABLE IF EXISTS financial_capability_catalogue;
 DROP FUNCTION IF EXISTS financial_actor_session();
 DROP FUNCTION IF EXISTS financial_acting_session_open();
 DROP FUNCTION IF EXISTS financial_acting_session_valid();
+DROP FUNCTION IF EXISTS staff_capability_grant_overlaps(uuid, uuid, text, timestamptz, timestamptz);
 DROP FUNCTION IF EXISTS staff_capability_grant_in_force(uuid, uuid, text, timestamptz);
 DROP FUNCTION IF EXISTS financial_acting_gucs_exact();
 DROP FUNCTION IF EXISTS financial_acting_gucs_present();
