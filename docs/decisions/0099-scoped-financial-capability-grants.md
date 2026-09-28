@@ -122,7 +122,7 @@ person or a bypass for its first holder.
 
 | Grantee | Eligible for | How |
 |---|---|---|
-| `finance` staff of tenant X | all four financial capabilities | G-T or G-P1 |
+| `finance` staff of tenant X | all four financial capabilities | G-T (**not** G-P1 - see §4.1: G-P1 is DEFERRED out of PRH-2, architect ruling 2026-09-28) |
 | `platform_admin` | all four, for **one named tenant X** | G-P2 only |
 
 - `finance` is platform-minted only (`admin_routes.go:504-533`).
@@ -146,8 +146,40 @@ tables.
 | Flow | Requester (session) | Required approval (session) |
 |---|---|---|
 | **G-T:** tenant-originated grant for `finance` staff of X | `tenant_admin` of X, `capability_grant:request` (tenant) | one `platform_admin` with `capability_grant:approve` (platform) |
-| **G-P1:** platform-originated grant for `finance` staff of X | `platform_admin` (platform) | a **different** `platform_admin` with a **different** Person (platform) |
-| **G-P2:** platform-originated grant for a `platform_admin` to act in X (HD-PRH2-6) | `platform_admin` (platform) | as G-P1 |
+| **G-P1:** platform-originated grant for `finance` staff of X — **DEFERRED out of PRH-2** (§4.1) | — | — |
+| **G-P2:** platform-originated grant for a `platform_admin` to act in X (HD-PRH2-6) | `platform_admin` (platform) | a **different** `platform_admin` with a **different** Person (platform) |
+
+### 4.1 G-P1: DEFERRED out of PRH-2, refused fail-closed (architect ruling, 2026-09-28)
+
+G-P1 (a platform-originated grant for tenant X's `finance` staff) always names a tenant-scoped
+grantee. `tenant_id IS NULL` holds exactly when the role is `platform_admin`, and migration 0011's
+`dual_scope_isolation` hides every tenant-scoped `staff_users` row from a plain platform session. A
+plain platform approver can therefore never independently verify a tenant grantee's live status or
+role at approval time from its own session - only the `grantee_person_id` snapshot captured at
+request-creation time (§7.5) is available to it, which is not the same thing as re-reading the live
+row.
+
+**Options considered and the ruling:**
+
+- **A column-restricted view: REJECTED.** A view cannot bypass FORCE RLS without `SECURITY DEFINER`,
+  which 0112 forbids, and column grants cannot vary per session family. It would need a
+  platform-wide read policy on `staff_users`, whose rows include `password_hash`, email and other
+  PII - that widens tenant isolation, which is out of scope for an implementer to do unilaterally.
+  Any future proposal to do it is a **human + security decision**.
+- **A tenant co-request: this is functionally G-T**, which already exists and is the preferred shape
+  if a platform-initiated-but-tenant-countersigned grant is ever needed again.
+- **Defer: CHOSEN.** HD-PRH2-2 (c)'s own go/no-go condition is fully served by G-T (a tenant admin
+  requests, a platform approver co-approves). HD-PRH2-6 is served by G-P2. No RLS policy is widened
+  by this choice - it is strictly stricter and fully reversible. `product-owner-proxy` was informed,
+  because a flow is being removed from an ADR that had already been ACCEPTED.
+
+**Conditions (binding on K1):**
+
+- **I-1:** the fail-closed refusal for any attempted G-P1-shaped request is `CG010` (no request row,
+  no success audit) and is tested. It maps to a legible HTTP error. No G-P1 HTTP route or backoffice
+  UI is exposed.
+- **I-2:** G-P1 is labeled **NOT IMPLEMENTED (DEFERRED by architect ruling)** everywhere in this ADR
+  (see §19) - never BLOCKED, and never silently omitted.
 
 - A request goes `pending → approved | rejected | cancelled | expired`.
 - The approval row and the grant row are inserted in **one transaction**
@@ -251,6 +283,9 @@ player-unset-only SELECT policies on:
   `kyc_enforcement_policies`;
 - `platform_operations`, `platform_products`;
 - `sb_*` catalogue tables, `sb_jurisdiction_restrictions`;
+- `alert_kinds` (0110's durable-alerting reference table, `USING (true)` read policy - the same
+  shape as the other reference tables above; added to this accepted list per security's K2-P1
+  probe finding, which observed a valid acting session could read it);
 - `tenants` (`tenants_read`), `licences` and `licence_country_ceilings` (their read policies need
   `app.tenant_id` or the platform GUC, so these return nothing to an acting session).
 
@@ -382,6 +417,14 @@ OR NEW.transaction_type = 'withdrawal_failed' AND EXISTS (
   §5.4.
 - Outside acting sessions the trigger is a no-op, so existing flows are unchanged. `txid_current()`
   inside `ledger.Post`'s savepoint is the top-level xid (*not executed*; test A-4c proves it).
+- **LF C-K1-2 (binding rule for K2/K3):** the migration that adds any acting PERMISSIVE policy on
+  `ledger_transactions`, `ledger_entries`, `ledger_accounts` or `wallet_balance_projection` MUST
+  first create this section's and §6.7's fences **in that same migration** - a permissive acting
+  policy is never allowed to land ahead of, or in a separate migration from, its own governing
+  fence. Concretely: **K2 (migration 0113)** creates the fence with branch (a) only, alongside
+  whatever acting permissive policy it adds. **K3 (migration 0115)** replaces the fence function
+  with (a) + (b) + (c) (the `withdrawal.go:1442`/`:1539` keys), again in the same migration as any
+  further acting permissive policy it adds.
 
 ### 6.7 The projection fence (LF F1)
 
@@ -451,7 +494,31 @@ No `SELECT *` on either table. No further row narrowing now (security ruling 2).
      in-force, unrevoked grant at `now()`.
    - A concurrent revoke either commits first, and `FOR SHARE` then re-reads the revoked version,
      so the approval is not counted; or it waits for the execution to commit.
-5. **A cross-family visibility limit (stated).**
+   - **Live `person_id` re-check (architect ruling, G-P1/`grantee_person_id` review, 2026-09-28).**
+     The `staff_users` `FOR SHARE` re-read above must also compare the grantee's **live**
+     `person_id` against the grant's own `grantee_person_id` snapshot (§7.5); a mismatch means the
+     grant does not count, the same as a revoked or inactive grantee. This is the execution-time
+     backstop for the snapshot: migration 0034 makes a non-NULL `person_id` append-only (I-4), so
+     this comparison is a defensive re-check, not the primary control, but it is required at K2/K3
+     so a snapshot taken before any future person-unlink path exists (STAFF-LIFECYCLE-1) cannot
+     silently outlive the identity it was taken from.
+5. **The `grantee_person_id` snapshot (§7.5; architect ruling, 2026-09-28): SOUND, with
+   conditions.** `staff_capability_grant_requests.grantee_person_id` is forced from the grantee's
+   live `staff_users.person_id` at request-creation time (§10.3) and is immutable thereafter (the
+   request/approval/grant rows are themselves append-only). It exists because a plain platform
+   approval session is structurally blind to a tenant-scoped grantee's `staff_users` row (0011's
+   `dual_scope_isolation`), so the later approval-time distinct-Person check (R-4/R-8) could not
+   otherwise learn the grantee's Person at all. It is sound for R-4 **only because** migration
+   0034's `staff_users_person_id_append_only` trigger makes a non-NULL `person_id` immutable (I-4;
+   test-pinned) - a grantee with a request or grant cannot be deleted (`NO ACTION` FKs), and no
+   staff-mutation API exists that could re-link it. Enforcement at each point differs:
+   | Point | Session | Must enforce |
+   |---|---|---|
+   | Request | tenant (G-T) or platform (G-P2) | R-1, R-4, R-5, R-6 and R-9 against the **live** row; force the snapshot (present today) |
+   | Approval, tenant grantee | platform | R-4 against the **snapshot only**. Status and role cannot be verified here: a **stated residual** (security S-a). |
+   | Approval, platform grantee (G-P2) | platform | Re-read the **live** row: `active`, `platform_admin`, and `person_id` = snapshot; otherwise `CG011` (I-5, owned by the parallel R-12/R-14 branch) |
+   | Use / execution (K2/K3, §7.4) | tenant or acting | Re-read the grantee `FOR SHARE`: `active`, eligible role, tenant = the grant's tenant, **live `person_id` = `grantee_person_id`** (this section's own new bullet above). A mismatch means the grant does not count. |
+6. **A cross-family visibility limit (stated).**
    - A tenant session cannot see a platform approver's `staff_users` row (0011's policy), and an
      acting session sees only its own platform row.
    - So when an execution runs in a tenant session and an earlier approver was a platform acting
@@ -504,6 +571,19 @@ No `SELECT *` on either table. No further row narrowing now (security ruling 2).
 
 A suspended or demoted grantee fails the §7.4 check at use. The grant row is not changed.
 
+**A re-linked `person_id` (architect ruling, 2026-09-28).** Because migration 0034 makes a non-NULL
+`person_id` append-only, a grantee's `person_id` cannot actually be changed once set - so "the
+grantee's Person changed under them" is not a reachable state for an existing grantee today (I-4).
+If a future staff-lifecycle path (STAFF-LIFECYCLE-1) ever needs to re-link a Person, §7.4's live
+`person_id` = `grantee_person_id` re-check (added by this ruling) is the control that would then
+catch the mismatch and stop counting the grant - it does not depend on 0034 remaining unconditional
+forever, only on the re-check being present at execution time.
+
+Security's STAFF-LIFECYCLE-1 extension (S-b) also applies here: any future suspend, role-change,
+tenant-change or Person-unlink path must, in the same transaction, cancel that staff member's
+pending grant requests and revoke their grants - not merely rely on the next use-time re-check to
+catch it lazily.
+
 ## 9. Identity caveat (S-1) and trust roots
 
 **Under the unverified identity model, distinct-principal and distinct-Person checks do not prove
@@ -542,6 +622,10 @@ Common rules:
 - No `SECURITY DEFINER`.
 - Every RAISE uses SQLSTATE class **`CG`** (codes listed in the migration header, as 0096 does). Go
   classifies by code only.
+- **LF C-K1-2:** this migration (0112, K1) is the ledger fence's OWN home migration for §6.6/§6.7,
+  but adds no acting permissive policy on any of `ledger_transactions`, `ledger_entries`,
+  `ledger_accounts` or `wallet_balance_projection` itself - see §6.6's own binding rule for what a
+  LATER migration (K2's 0113, K3's 0115) must do before it may add one.
 
 **Family predicates used below:**
 
@@ -690,7 +774,9 @@ Scope rules:
 | INV-CAP-4 | An acting session is fenced by §6.4–§6.7 and valid only with a grant for its tenant |
 | INV-CAP-5 | Grants are append-only except for a one-way revoke |
 | INV-CAP-6 | No HTTP API creates a `platform_admin`; `seed-admin` is the only non-test inserter |
-| INV-CAP-7 | Grantees are `finance` staff (G-T/G-P1) or `platform_admin` (G-P2, time-bounded) only |
+| INV-CAP-7 | Grantees are `finance` staff (G-T only - G-P1 is DEFERRED, §4.1) or `platform_admin` (G-P2, time-bounded) only |
+| INV-CAP-11 | `grantee_person_id` is forced from the grantee's live `staff_users.person_id` at request-creation time and is thereafter immutable, because migration 0034 makes a non-NULL `person_id` append-only (I-4) - the snapshot can never silently drift from the value it was taken from (architect ruling, G-P1/snapshot review, 2026-09-28) |
+| INV-CAP-12 | A tenant grantee's live status/role is re-checked at request time and at execution time (§7.4), but NOT re-verified again at approval time (a stated residual, security S-a) - approval of a tenant grantee checks the `grantee_person_id` snapshot only; a platform grantee (G-P2) IS re-read live at approval (I-5, owned by the parallel R-12/R-14 branch) |
 
 ## 14. Tests and mutants (K1 DoD; QA W1)
 
@@ -761,7 +847,9 @@ Notes:
 ## 16. Open items
 
 1. **STAFF-LIFECYCLE-1** carries:
-   - the suspend and role-change API, which must revoke grants in the same transaction (§7.5);
+   - the suspend and role-change API, which must revoke grants in the same transaction (§7, item 6 -
+     also extended by security ruling S-b to cover a role-change to `platform_admin` and a Person
+     deletion/deactivation, not only suspend);
    - the re-attestation table, view and alert (§8.3);
    - the `platform_admin` bootstrap DB guard (§9);
    - the `finance` initial-password residual (§3.3).
@@ -773,6 +861,9 @@ Notes:
 4. **Security "not covered" items that K1 verifies in code:** the `permission.go` role sets
    (A-15); login refusal for suspended tenants (out of K1 scope, noted); `persons` RLS (now fully
    fenced for acting, §6.4).
+5. **G-P1 is DEFERRED, not BLOCKED (§4.1, architect ruling 2026-09-28).** Any future proposal to
+   restore it (e.g. a column-restricted view onto tenant-scoped `staff_users` rows) needs a human
+   decision and a security review before implementation - it is not a K1 implementer decision.
 
 **HUMAN DECISION REQUIRED:** none new in this ADR. The launch flags in §12 need human risk
 acceptance or legal review before real money; they are not new design decisions.
@@ -831,10 +922,13 @@ HANDOVER index, plan §3 Touches, and the review records.
 
 ## 19. K1 implementation status (backend-engineer, PRH-2 K1 build)
 
-**Status: PARTIALLY IMPLEMENTED.** Migration 0112 is applied, the DB-level
-invariants are tested and mutation-tested, and a working (but not fully
-audited by `security`) HTTP API exists for the G-T flow end to end. Several
-items are explicitly deferred; see below.
+**Status: PARTIALLY IMPLEMENTED.** Migration 0112 is applied and the DB-level
+invariants are tested and mutation-tested at the DB layer. A working HTTP API
+exists for the G-T flow, but (as of the pre-`prh2-k1-tests` code review, F-8)
+it had **no HTTP-level tests of its own** - DB-level testing is not the same
+claim as "tested end to end", and this ADR no longer uses that phrase for the
+HTTP layer until an HTTP test harness exists (K2-P3/F-8). Several items are
+explicitly deferred; see below.
 
 ### 19.1 What is IMPLEMENTED
 
@@ -876,12 +970,18 @@ items are explicitly deferred; see below.
   no-valid-grant refusal test, and the required sock-puppet test. All pass
   under `-race -tags integration`.
 - **Mutants**: `docs/plans/payment-readiness/evidence/prh2-k1-mutation-kill.txt`
-  - 6 independently killed, 4 honestly disclosed as masked by an
-  independent, equally-real control (not a gap), 0 undetected gaps.
+  (corrected on the `prh2-k1-tests` branch per code review F-10) - of the 9
+  required-class mutants, all 9 are now independently killed (mutants 7 and
+  10 were reclassified from "masked" to "killed" once dedicated tests
+  stopped relying on the masking control; only mutant 5, R-1 self-grant, is
+  an accepted equivalent per security's own ruling). The two new forced-
+  column mutants (MF-a, MF-b) are killed. Several additional, ADR-listed
+  mutants beyond the required list were also run or honestly disclosed as
+  not attempted - see the evidence file's addendum. 0 undetected gaps.
 
 ### 19.2 A real design gap found and fixed during K1 (disclosed, not silently patched)
 
-While building the G-T flow end to end, K1 found that migration 0011's
+While building out the G-T flow, K1 found that migration 0011's
 `dual_scope_isolation` policy leaves a **plain platform session
 structurally blind to any tenant-scoped `staff_users` row** (independently
 already documented by `newLinkPlatformStaffPersonHandler`'s own doc comment
@@ -900,22 +1000,27 @@ fully unblocks G-T (tenant admin requests a `finance` grantee; a platform
 principal approves) and G-P2 (platform grantee, itself visible to a plain
 platform session via the pre-existing NULL-tenant arm).
 
-**What remains BLOCKED / NOT IMPLEMENTED by this fix: G-P1** (a platform
-session *requesting* a grant naming a **tenant-scoped** grantee, e.g. a
-`finance` staff member, per §4's G-P1 row). At **request-creation** time a
-platform session still cannot see the tenant-scoped grantee row at all, so
+**What remains NOT IMPLEMENTED (DEFERRED by architect ruling): G-P1** (a
+platform session *requesting* a grant naming a **tenant-scoped** grantee,
+e.g. a `finance` staff member, per §4's G-P1 row - now struck from §4 and
+replaced by §4.1). At **request-creation** time a platform session still
+cannot see the tenant-scoped grantee row at all, so
 `staff_capability_grant_requests_guard`'s own grantee lookup fails
-("grantee ... does not exist") before any of R-1/R-4/R-9 can even run. **This
-needs an `architect` decision** - options include (a) a new,
-column-restricted platform-wide SELECT view onto `staff_users` (id,
-tenant_id, role, status, person_id only, mirroring the acting-session
-column-discipline precedent in §6.8), (b) requiring G-P1 to be filed as a
-tenant-side co-request instead, or (c) declaring G-P1 out of scope for PRH-2
-and relying on G-T alone for tenant-scoped grantees. **G-T and G-P2 are
-fully functional and tested end to end; G-P1 is NOT IMPLEMENTED.** No
-tenant-isolation mechanism was invented or RLS policy widened to work
-around this - per the backend-engineer role's own limits, this is escalated
-rather than decided unilaterally.
+("grantee ... does not exist") before any of R-1/R-4/R-9 can even run. This
+was escalated to `architect` (per the backend-engineer role's own limits -
+no tenant-isolation mechanism was invented or RLS policy widened to work
+around it unilaterally), who ruled on 2026-09-28 (§4.1): **defer G-P1 out of
+PRH-2, fail closed (`CG010`, no request row, no success audit).** A
+column-restricted view was considered and rejected (it cannot bypass FORCE
+RLS without `SECURITY DEFINER`, which 0112 forbids, and would otherwise need
+a platform-wide read policy on `staff_users` PII columns - a tenant-isolation
+widening that needs a human + security decision, not an implementer one). A
+tenant co-request is functionally G-T, which already exists. **G-T and G-P2
+are fully functional at the DB layer (see the "end to end" caveat in §19.1
+above for the HTTP layer); G-P1 is NOT IMPLEMENTED (DEFERRED by architect
+ruling), not BLOCKED** - HD-PRH2-2 (c) and HD-PRH2-6 are both still fully
+served by G-T and G-P2 respectively, so nothing the current stage needs is
+missing.
 
 ### 19.3 Explicitly NOT DONE / deferred (honest labels)
 
