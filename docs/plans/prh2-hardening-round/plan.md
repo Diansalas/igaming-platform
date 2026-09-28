@@ -912,3 +912,8 @@ The payments lane stays strictly serial (E2 → C → D → F-pay → H → I-wi
 **Touch-list additions (from ADR 0099/0101 drafting, Rule 1):** K1 also touches `internal/db/tenant_rls.go` (the new `WithPlatformActingInTenant` setter); K3 also touches `internal/providerref/providerref.go` (refusing the reserved `platform-operator-declared:` prefix). New human decision HD-PRH2-8 (below-threshold semantics) is registered; the stricter reading (b) is enforced in the interim, so K2 is not blocked.
 
 **K3 scope note (product-owner-proxy review of ADR 0101):** migration 0114 does **not** seed the `pending_suspense_allocation_b` finding code. It is added with LEDGER-SUSPENSE-B-1 when that item is authorized. The re-attestation table (ADR 0099 §8.3) stays, pending security's ruling on whether an audit action is enough.
+
+**Sequencing additions (ADR 0102/0104 revision 2):**
+- The `alert:manage` permission (0102 §4.2) is added to `internal/auth/permission.go` by **I-core**. I-core merges before K1 starts, and K1 then owns `permission.go`.
+- G1 also touches `internal/httpserver/admin_routes.go`, for the audited `display_name` write path (0104 §4).
+- The `tenant_snapshot.go` comment change (C-102-5) is part of I-wire.
