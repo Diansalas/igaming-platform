@@ -41,6 +41,14 @@ TestEvaluateEnforcement_DepositDormantByDefault's own not_required/
 unavailable distinction (a tenant with no licence bound resolves
 not_required; that branch IS covered), but a forced SQL-level error
 returning `unavailable` specifically is not.
+[CORRECTION 2026-09-28, code-reviewer FH-7 re-review T3/N2: the sentence
+above overstates coverage. TestEvaluateEnforcement_DepositDormantByDefault
+covers the not_required branch only; it does not exercise `unavailable`.
+`unavailable` is exercised by TestEvaluateEnforcement_Deposit_AssetNotCovered_Unavailable
+(asset-not-covered, a non-DB cause). A forced SQL-level error returning
+`unavailable` is still untested, and the reviewer's lock_timeout probe showed
+that on the withdrawal path such an error aborts the transaction before the
+decision is recorded (tracked as KYC-ENF-OUTAGE-1).]
 
 Migration 0100 CHECK constraints - manual branch-coverage checklist
 (ADR 0096 §7.1: "no mutation tool applies to a SQL CHECK constraint, use
@@ -70,3 +78,20 @@ INSERT of status='active' directly (refused - draft-only INSERT policy) | covere
 All 10 trigger-type/shape checklist rows: PASS (each shape either inserts
 cleanly or is rejected, as expected). All 6 lifecycle checklist rows:
 PASS.
+
+
+ADDENDUM 2026-09-28 (FH-7) - MX1 / MX2 re-verification
+======================================================
+ADR 0096 §16.1 cited "this file's addendum" for the MX1/MX2 re-verification,
+but no such addendum had been written (code-reviewer FH-7 re-review, N2).
+The re-verification was then performed independently by code-reviewer
+(FH-7, HEAD 0d019b2, private DB rr_fh7_cr_20260928, throwaway copy):
+
+Mutant | Change                                   | Result  | Killed by
+MX1    | RequestWithdrawal deny disabled          | KILLED  | TestRequestWithdrawal_DeniesWhenNotPassed, TestRequestWithdrawal_DenialCommitsDecisionAndAudit
+MX2    | asset-not-covered -> not_required        | KILLED  | TestEvaluateEnforcement_Deposit_AssetNotCovered_Unavailable
+MB1    | handler OutcomeUnavailable -> 503 off    | SURVIVED| (KYC-ENF-OUTAGE-1: 503 branch unreachable for a real DB outage)
+MB6    | DenyForCompliance Allowed=true guard off | SURVIVED| (KYC-ENF-TESTPINS-1)
+MPLAYREC | RecordDecision removed from casino play-deny | SURVIVED | (KYC-ENF-TESTPINS-1)
+
+Source: docs/plans/payment-readiness/rv-prh-i3-code-review.md, "Re-review (FH-7, 2026-09-28)".

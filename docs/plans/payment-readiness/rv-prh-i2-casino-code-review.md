@@ -222,3 +222,29 @@ touching the committed-intent semantics. Not required.
 | F2 | Fix §15.1.1 wording (errors.Is claim, test inventory, import-graph sentence, §15 item 18 status) | No |
 | F3 | Covered by R1's logging | — |
 | F4 | Optional pre-phase-A health fast-fail | No |
+
+## Re-review (FH-7, 2026-09-28) — code-reviewer
+
+HEAD `0d019b2`; fix commits reviewed `2c00e10` (R1/C1, item 2, C2/C3, F1/F2), `be5b828` (bounded audit reason), `0ca1193` (IO-1B txscope refusal). Private DB `rr_fh7_cr_20260928` at 0107 (dropped afterwards); `go test -race -tags=integration ./internal/casino/ ./cmd/platform-api/` ok, 0 FAIL.
+
+### Verdict: **NOT READY**. All prior findings are closed, but the item-2 fix adds a new blocking regression (N1)
+
+| # | Status | Evidence |
+|---|---|---|
+| R1 (blocking) phase C skipped on a cancelled ctx | **CLOSED** | `orchestrator.go:535`/`:660` use `context.WithTimeout(context.WithoutCancel(ctx), phaseCTimeout)`; the success-audit failure falls back to `launchFailed` (`:672-680`); `RevokeLaunchSession` returns `(bool, error)`; tests `TestLaunchGame_CtxCancelledDuringLaunch_StillRevokesAndAudits`, `..._CtxCancelledAfterVendorAccept_StillAuditsLaunched` |
+| F1 mutation count and missing mutants | **CLOSED** | evidence 15/15 + 1 equivalent; `TestLaunchGame_CircuitOpenRevokesAndAudits`, `TestLaunchGame_ResolverErrorRevokesAuditsAndMapsToProviderUnavailable`; mutant MCO independently killed |
+| F2.1 resolver error not `ErrProviderUnavailable` | **CLOSED** | `orchestrator.go:605` wraps with `%w` |
+| F2.2–F2.4 ADR wording | **CLOSED** | ADR 0095 §15.1.1/§15.1.2/§16.2 |
+| F3 phase-C failures invisible | **CLOSED** (residual Low) | Warn/Error logs with redacted detail; no test asserts the Error line (MF3 survived) |
+| F4 pre-phase-A health fast-fail | OPEN (optional) | unchanged |
+| §4 security question (raw `cause.Error()` in audit) | Addressed (`be5b828`) | closed `LaunchFailureReason` only; security to rule |
+
+Mutants: MCO killed; MF3 (phase-C Error log disabled) survived; **MEXP (expiry applied only to `active`) survived the whole casino suite**.
+
+**N1 — HIGH, BLOCKING — every real-money casino session stops accepting bets 2 minutes after launch.** `internal/casino/orchestrator.go:1466-1468` rejects a bet when `now > session.ExpiresAt`. `expires_at` is the *un-consumed launch-token* TTL (`launch.go:31-33`, `DefaultLaunchTokenTTL = 2m`), set once at mint and made immutable by the 0036 trigger. The check also applies to `consumed`, the normal in-play state. Failure: a player launches a slot; spins post for about 2 minutes; then every bet callback returns `ErrLaunchSessionRequired`, which is mapped to a validation error ("request rejected") and logged at Error level. Confirmed by a probe (TTL 400ms: bet 1 ok; after the TTL, bet 2 on the consumed session fails "session has expired"). The suite misses it because no test bets past the TTL on a consumed session; MEXP survives, so security C4's claimed closure in ADR 0095 §15.1.2 is untested. Fix direction (casino/security/ledger-finance design call): apply the token TTL to never-consumed (`active`) sessions only; close C4 properly, either by revoking `WHERE status IN ('active','consumed')` on a failed launch (C4 option 1) or with a separate explicit lifetime/idle bound for consumed sessions; correct ADR 0095 §15.1 and §15.1.2; add a consumed-session-past-TTL test.
+
+**N2 — LOW.** `launch_two_phase_integration_test.go:554-558`: the `TestLaunchGame_CircuitOpenRevokesAndAudits` doc comment sits above `TestLaunchGame_TransportErrorAuditNeverStoresRawErrorText`.
+
+Confirmed correct: `OutboundKindSplitResolver` fails closed; nil-in-interface handled in `casinoOutboundCredentials()`; `txscope.Held` refusal before `Launch`; no floats, no balance UPDATEs, no hardcoded secrets.
+
+**Required before READY:** N1 fix + test + ADR 0095 §15.1/§15.1.2 correction. Optional: MF3 assertion.

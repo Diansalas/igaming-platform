@@ -191,3 +191,22 @@ at the cost of a trivial signature fix-up.
   This review surfaces them. It does not adjudicate them.
 - `ledger-finance`: nothing new. No posting path is touched.
 - The status of PROV-OUTBOUND-CRED-1 (payments) should stay `PARTIALLY IMPLEMENTED` until C1 and C2 land.
+
+## Re-review (FH-7, 2026-09-28) — fix round `ce77bac`..`4e04f4e` and KS-DEP-T2-T3-1 delta `2da7548`
+
+code-reviewer; code read at `0d019b2` (unchanged at `62352b0`). Run on a `git archive` copy with the private-DB harness (`cr_fh7_rr`, dropped). Full `internal/payments` (291s) ok; `internal/httpserver` and `cmd/platform-api` ok with `-run 'KillSwitch|OutboundResolver|Wiring|Payments'`; 0 FAIL. Each mutant compiled (`go vet`) before counting; files restored byte-for-byte.
+
+### Verdict: **READY**
+
+| Finding | Status | Evidence |
+|---|---|---|
+| C1 (Medium) kind-split resolver untested; M1b, M3 survived | **CLOSED** | `outbound_kindsplit_test.go:38,72,95,105,112`, distinct `fakeRealPaymentResolver`; M1b killed by `NonSyntheticAdapterUsesRealOnly`, M3 by `SyntheticAdapterWithNilMockFailsClosed`; `wiring_test.go:245` comment corrected |
+| C2 (Medium) pool threading untested; M5, M6 survived | **CLOSED** | `pool_threading_integration_test.go:64,88,123,151,194`; `assertAllPoolsAre` fails on zero calls, nil pool or a different pool; deliberate nil in MOCK `Fetch` documented (`registrations.go:189-203`); fails closed for a real resolver |
+| C3 (Low) payout hold audit used a cancellable ctx and swallowed errors | **CLOSED** | `payout.go:181` `WithoutCancel` + timeout; `:197` failure log; `payout_dispatch_fixround_test.go:1068,1071,1119`; new mutant K2 (drop `WithoutCancel`) killed |
+| C4 (Low) MOCK half wired only with test-support | **CLOSED (accepted, documented)** | `production-configuration-checklist.md` item 7; ADR 0095 §10.9.4; boot-time refusal deferred to sweeper wiring (CP-W1) |
+| C5 (Low) deposit kill-switch decline lacked provider in audit | **CLOSED** | `deposit_v2.go:266`; `deposit_v2_integration_test.go:241`; mutant K3 killed |
+| security P2-L1/P2-L3 (same round) | tests bite | `gate.go:115` nil-resolver guard; mutant K5 killed by `TestCallProvider_NilResolver_RefusesCleanly_NeverPanics`; security owns closure |
+
+**KS-DEP-T2-T3-1 (`2da7548`, `drive.go:134-176`):** implemented as ADR 0095 §10.9.3 requires. It acts only on `ErrAttemptStateConflict`; a separate read-only `KillSwitchEngaged` only classifies (the in-statement `NOT EXISTS` stays the control); then audit → `RejectCreated('kill_switch')` → `finalizeDeclined` in the same per-item transaction. Money safety: `RejectCreated` requires `state='created'` (never possibly sent, T5), and `finalizeDeclined` keeps a succeeded intent succeeded (`orchestrator.go:844-859`). Test `TestDriveCreatedAttemptCascade_KillSwitchOnFallbackProvider_DeclinesCleanly_T3` (`deposit_v2_integration_test.go:262`); mutant K4 killed. Note: the sweeper-driven path (`sweeper.go:301`) also terminally declines a `created` deposit under an engaged switch, as §10.3 specifies, and differs on purpose from payouts.
+
+**N1 (Low, test gap; registered KS-CAS-DISCRIM-TEST-1):** `drive.go:157-163`, the `!engaged` discrimination has no test. Mutant K1 (never return on `!engaged`) survived `-run 'Cascade|KillSwitch|Drive|Sweeper|INVDEP1|A7'`. Scenario: a non-kill-switch CAS conflict at cascade T2 (sibling already succeeded, or a sweeper re-drive with a provider mismatch) would be recorded as `terminal_reason='kill_switch'` with a false `payments.cascade_rejected_kill_switch` audit. No money moves (sticky guard; never sent), but the audit states a false cause. Fix: a test forcing a non-kill-switch CAS conflict at T2, asserting an error (or no kill-switch reason/audit); re-run K1.

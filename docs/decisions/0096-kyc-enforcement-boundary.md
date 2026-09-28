@@ -2261,6 +2261,12 @@ open below land and every mandatory reviewer signs off clean.
   re-applied and re-verified KILLED** - see
   `docs/plans/payment-readiness/evidence/prh-i3-mutation-kill.txt`'s
   addendum.
+  *[Note 2026-09-28, FH-7: that addendum did not exist when this was
+  written (code-reviewer FH-7 re-review N2). The MX1/MX2 kills were
+  independently re-verified by code-reviewer on 2026-09-28 and are now
+  recorded in the file's "ADDENDUM 2026-09-28 (FH-7)" section; see
+  `rv-prh-i3-code-review.md` "Re-review (FH-7)". That re-review also
+  reopens B1 as partially closed (KYC-ENF-OUTAGE-1).]*
 - **`DenyForCompliance` C7 tests (code review R3, ledger-finance
   LF-I3-1).** New tests prove: the exact posting shape (accounts, entries,
   `TransactionType`, `ReversesTransactionID`, `CorrelationID`); the

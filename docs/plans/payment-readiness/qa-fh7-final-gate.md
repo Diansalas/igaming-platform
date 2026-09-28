@@ -219,3 +219,7 @@ but must be corrected in the registry as a documentation/governance follow-up, n
 implementation task.
 
 Branch: `claude/focused-wright-jw88w9`. Commit under review: `649f3ba32d8fbf6458fc4ddf3ebaaa434f17d4b3`.
+
+## Orchestrator addendum (2026-09-28)
+
+The registry staleness flagged above (PAY-DOUBLE-CREDIT-1, PAY-SEC-S-H1, PAY-SEC-S-M1) was reconciled by the architect's final review in `db2f9ec` (merged `0d019b2`), which landed after this report's base `649f3ba`. All three rows now carry dated **CLOSED** notes with evidence (`rv-fh7-architect-final.md` §3). Separately, after this QA run the FH-7 code re-reviews found a HIGH regression in the PRH-I2 casino path (`rv-prh-i2-casino-code-review.md`, "Re-review (FH-7)", N1). That is outside the FH/INV-DEP-1 matrix this report verified, and is tracked as CAS-SESSION-EXPIRY-1.

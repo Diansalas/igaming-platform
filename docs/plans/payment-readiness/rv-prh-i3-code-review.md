@@ -315,3 +315,52 @@ Nits:
 
 Follow-ups, not blocking: B3, B4, B5, B6, B7, the `ActiveRequiresLegalReview…`
 assertion, and the duplicated chain-tip helper.
+
+## Re-review (FH-7, 2026-09-28) — code-reviewer
+
+HEAD `0d019b2`. Fix rounds reviewed: `ff4cc4a`, `f7d8744`, `d129649`, `9e0bee6`, `1bfa04e`, `c757523`, `a0dbf2e` (migration 0103). PRH-I1 wiring: `deposit_v2.go:202`, `drive.go:100`, `payout.go:291`, `payout_sweep.go:99-130`. Private DB `rr_fh7_cr_20260928` at 0107 (dropped). `go test -race -tags=integration ./internal/kyc/ ./internal/withdrawal/ ./internal/sportsbook/ ./internal/payments/` ok; `./internal/httpserver/ -run 'KYC|Withdraw|Casino|Enforcement'` ok; 0 FAIL. `TestMigration0100_UpDownUpRoundTrip`, `TestMigration0100_DownRefusesWhileDecisionsHoldRows` and all 5 `TestMigration0103_*` ran and passed.
+
+### Verdict: **READY WITH CONDITIONS** for the current **PARTIALLY IMPLEMENTED** label; **NOT READY** for IMPLEMENTED
+
+Money safety is fail-closed everywhere probed. The earlier blockers T1/T2/R3 are closed; MX1 and MX2 were re-run and are killed.
+
+| Mutant | Change | Result |
+|---|---|---|
+| MX1 | `RequestWithdrawal` deny disabled | **KILLED** (`TestRequestWithdrawal_DeniesWhenNotPassed`, `..._DenialCommitsDecisionAndAudit`) |
+| MX2 | asset-not-covered → not_required | **KILLED** (`TestEvaluateEnforcement_Deposit_AssetNotCovered_Unavailable`) |
+| MB1 | handler `OutcomeUnavailable` → 503 branch disabled | SURVIVED |
+| MB6 | `DenyForCompliance` `Allowed=true` guard disabled | SURVIVED |
+| MPLAYREC | `RecordDecision` removed from casino play-deny | SURVIVED |
+
+Probe: a real DB error in the withdrawal KYC read (second connection holds `LOCK TABLE kyc_verifications IN ACCESS EXCLUSIVE MODE`; request tx `lock_timeout = '300ms'`) → `RequestWithdrawal` returned `kyc: record enforcement decision: ... current transaction is aborted (SQLSTATE 25P02)`, not `*KYCDeniedError` nor `ErrKYCUnavailable`; 0 decision rows committed.
+
+| # | Status | Evidence |
+|---|---|---|
+| T1 wired gates lacked negative tests | **CLOSED** | `withdrawal/kyc_gate_integration_test.go:55,115,150,177`; `kyc_enforcement_handlers_integration_test.go:27`; casino/sportsbook `kyc_play_integration_test.go`. Residual: play tests do not assert the decision row (MPLAYREC) |
+| T2 only withdrawal evaluator exercised | **CLOSED** | `kyc/enforcement_integration_test.go:1046-1204` |
+| R3 `DenyForCompliance` untested/unwired | **CLOSED** | C7 suite `kyc_gate_integration_test.go:265-398`; wired at T1p `payout.go:291-311`; `payout_dispatch_integration_test.go:190` |
+| B1 withdrawal handler outcome mapping | **PARTIALLY CLOSED** → N1 | mapping at `withdrawal_handlers.go:138-164`, but the 503 branch is unreachable for a real DB outage and untested |
+| B2 0100 down destroys history | **CLOSED** | down refuses while rows exist; 0103 down refuses while `superseded_by_policy_id` set |
+| B3 cursor round trip | **CLOSED** | `kyc_enforcement_handlers.go:64-96`; tests |
+| B4 dormancy omits play | **CLOSED** (residual Low) | `enforcement_dormancy.go:55-68`; untested; no `tenants.status` filter |
+| B5 read-key doc comments | **CLOSED** (nit) | stale comment `withdrawal.go:388-390` |
+| B6 `DenyForCompliance` trusts input | **CLOSED in code, untested** | guards `withdrawal.go:1046-1051`; MB6 survived |
+| B7 same-key race reports denial for existing hold | OPEN, disclosed | ADR 0096 §16.2 |
+| T3 §15.1 N2 row names wrong tests | OPEN (Low) | ADR 0096 line ~2131 |
+| T3 evidence "unavailable IS exercised … via DepositDormantByDefault" | **OPEN** | `evidence/prh-i3-mutation-kill.txt:38-43` → N2 |
+| T3 `ActiveRequiresLegalReviewReference` asserts only `err != nil` | OPEN (Low) | `enforcement_integration_test.go:967` |
+| R6 DR rows for PRH-I1 wiring | **CLOSED** | DR-PRHI3-04/05 exist; status text stale (see N3) |
+
+**N1 — MEDIUM — B1's outage → 503 is unreachable for a real KYC-store outage; it returns a generic 500 and records no decision.** For withdrawals every `unavailable` outcome is a DB query failure (`enforcement.go:464-473`) that aborts the caller's transaction; `RequestWithdrawal` then calls `kyc.RecordDecision` in the aborted tx (`withdrawal.go:414`) → 25P02 → handler 500 (`withdrawal_handlers.go:182-184`). Fail-closed (money safe), but contradicts ADR 0096 §7.6 (one decision row per evaluation) and §16.1's B1 closure. Fix: savepoint around the evaluator reads, or record the unavailable decision in a separate tx after rollback; add a fault-injection test.
+
+**N2 — MEDIUM (no-fake-completion) — ADR 0096 §16.1 cites a `prh-i3-mutation-kill.txt` addendum for MX1/MX2 that does not exist** (file unchanged since `b3e1e85`; the inaccurate lines 38-43 remain). The claim itself is true (killed here).
+
+**N3 — MEDIUM — deposit and payout call sites write no `kyc_enforcement_decisions` row except T1p deny.** `payments/kycgate.go:56-68` reduces the decision to `(bool, code)` without `kyc.RecordDecision` (both `deposit_v2.go:202` and `drive.go:100`); payout T1p allow and T2/T12 deny (`payout_sweep.go:99-130`) also skip it. Denials still write `audit_log` rows, but this contradicts ADR 0096 §7.6 and DR-PRHI3-04, and the staff decisions API shows no deposit/payout decisions. Fix or disclosed deviation (payments + identity-compliance, security informed).
+
+**N4 — LOW** — decision writes and guards not pinned (MB6, MPLAYREC survived).
+
+**N5 — LOW** — `DenyForCompliance` accepts `Outcome=unavailable` (`withdrawal.go:1046-1051`); unreachable today; refuse it or make it retryable.
+
+**Label check:** "PARTIALLY IMPLEMENTED" is accurate (N1, N3, B7, F4/F5, LF-I3-4/5 open; thresholds dormant pending HDR/legal). KYC-ENFORCE-1's prose under-claims (says `DenyForCompliance` NOT WIRED and "a player approved, then rejected before staff submit the payout, is still paid today" — T1p now denies it, `TestClaimForDispatch_KYCDeny_NoAttemptRowHoldReleased`); DR-PRHI3-04/05 should read "Resolved (wired by PRH-I1)" with -04's `RecordDecision` gap (N3) noted.
+
+**Required before IMPLEMENTED:** N1; N2; N3; N4; registry prose update and the ADR 0096 N2 row. Non-blocking: B4 test + tenant-status filter, B7, the `ActiveRequiresLegalReview` assertion, N5, stale comment `withdrawal.go:388-390`.

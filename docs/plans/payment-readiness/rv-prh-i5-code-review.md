@@ -165,3 +165,26 @@ Routed (not adjudicated here):
 
 - **`ledger-finance`:** F1 (the choice among options a, b and c), F2, F3, and the payments finding recorded in §12.7 (the T13 `payment_attempts_tenant_ledger_tx` unique violation).
 - **`security`:** nothing new from this review. The `rv-prh-i5-security.md` review is separate.
+
+## Re-review (FH-7, 2026-09-28) — fix commits `73c7aeb`, `ad2830d`, `3c3bfde` and later FH-3 additions
+
+code-reviewer; code read at `0d019b2` (unchanged at `62352b0`); private-DB harness (`cr_fh7_rr`, dropped); `internal/reconciliation` (39.8s) and `internal/reconciliation/statement` ok; 58 matching tests pass. PAY-RECON-N1 is a registered follow-up and is not re-raised.
+
+### Verdict: **READY** (was NOT READY)
+
+| Finding | Status | Evidence |
+|---|---|---|
+| F1 (High) wired stream flagged every live-path deposit/withdrawal as P1 | **CLOSED** | Legacy exclusion `payment_statement.go:719-728` applies only when no `payment_attempts` row exists and only when `n == 0` (`:1062-1073`), counted in `legacy_unattempted` and audited (`:463`); both live HTTP paths now go through `payment_attempts` (`deposit_handlers.go:176`; withdrawal handler no longer calls `withdrawal.Complete` directly); tests `…LegacyUnattemptedPostingsAreCountedNotFlagged`, `…AttemptLinkedPostingsStayFullyChecked`; both exclusion mutants killed; in CI list `ci.yml:340-341` |
+| F2 (Medium) absent-line `pay_unresolved` coverage-gated | **CLOSED** | `:1009`; `TestPaymentStatement_Unresolved_NotCoverageGated`; RM9 killed |
+| F3 (Low) unposted declined/pending reversal line was P1 | **CLOSED** | `:865`; RM10 killed |
+| F4 (Low) payout `settlement_reference` never compared | **CLOSED** | `:918-923`; RM12 killed |
+| F5 (Low) coverage window not bounded at fetch | **CLOSED** | `:258-260`; RM11 killed (very old `CoverageStart` still unbounded — PROVIDER DEPENDENT) |
+| F6 (Low) MOCK growth / idempotent ingest | ACCEPTED (disclosed, dev-only) | unchanged |
+| §3.5 RM2–RM6 survivors | **CLOSED** | all killed by the fix-round tests |
+| §3.5 harness counted build failures as kills | **CLOSED** | `evidence/prh-i5-mutate.py:227-230,260` (vet first); 51 killed, 0 survived |
+| §3.6 `TestMigration0102_RuntimeGrantsMinimal` missing from CI | **CLOSED** | `ci.yml:340`; 0104 tests at `:342` |
+| §3.7 pre-existing 0100/0082 test failures | **CLOSED** | chain held at 0100; `73c7aeb`; all pass |
+
+FH-3 additions: `pay_captured_unposted` matched-line (`:941-949`) and no-line (`:1000-1002`) cases share `capturedUnposted` (`:977-979`); mutant RM13 killed by `TestINVDEP1_C2_CapturedUnposted_StandsAcrossStatementWindow`. Migration 0104 read: pre-flight counts violations under RLS via `set_config` without toggling FORCE; CHECKs mirror `validatePaymentLine`; PM47–PM51 killed (security owns C1/C2 closure).
+
+**N1 (Low, test gap; registered RECON-PAYOUT-LIVE-TEST-1):** no committed test runs the live, attempt-based payout path against the wired MOCK statement source (all payout tests use the synthetic `payoutFixture` with `payFixedSource`). A change to MOCK payout rendering or to how `ApplyPayoutResult`/`PollPayoutStatus` write `provider_reference`/`release_ledger_transaction_id` could recreate the F1 class for payouts undetected. Probe (scratch only): `ClaimForDispatch` → `DispatchWithdraw` → `Resolve(succeeded)` → `PollPayoutStatus` → wired MOCK → 0 mismatches, `legacy_unattempted=0`. Correct today, not pinned; commit an equivalent test.
