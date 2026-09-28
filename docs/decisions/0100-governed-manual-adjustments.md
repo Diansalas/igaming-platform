@@ -767,3 +767,20 @@ K2 updates:
 
 The orchestrator updates: ADR 0082 A8; the registry (LEDGER-MANUAL-ADJ-4EYES-1, HD-PRH2-8,
 LEDGER-MANUAL-ADJ-LINK-1); the HANDOVER index; the review records.
+
+## 19. Conditions carried from K1's reviews (orchestrator, 2026-09-28)
+
+These bind K2. The sources are `reviews/k1-security.md`, `reviews/k1-ledger-finance.md` and `reviews/k1-architect-ruling-gp1.md`. **Migration number:** K2 is **0113** (re-allocation in the plan); references to "0112" in this ADR mean K2's migration.
+
+- **Security K2-P1:** A-18 (the static NULL-arm migration replay) exists and passes before K2 merges.
+- **Security K2-P2:** A-12 and A-1 (including the cross-tenant path cases) before K2.
+- **Security K2-P3:** a §6.1 call-site static test for the first `WithPlatformActingInTenant` caller. `principalID` comes from `tenant.FromContext(ctx).Subject`, and `targetTenantID` is the `canActOnTenant`-validated path value.
+- **Security K2-P4 / architect I-6:** use-time re-checks in the K2 transaction: the grantee is `active`, its role is eligible, its tenant is unchanged, and its live `person_id` = the request's `grantee_person_id`. Each check has its own mutant.
+- **LF C-K1-2:** the migration that adds any acting permissive policy on `ledger_transactions`, `ledger_entries`, `ledger_accounts` or `wallet_balance_projection` must first create, in the same migration, the ADR 0099 §6.6 and §6.7 fences (branch (a) here).
+- **LF C-K1-3:**
+  - (a) the execution-time LF-11 floor reads live `staff_users.person_id` `FOR SHARE`, never the snapshot;
+  - (b) B-7 proves `FOR SHARE` on grants and staff rows from tenant **and** acting sessions inside the real executor, and that a revoke committed first is re-read as revoked;
+  - (c) in-force is evaluated at `now()`; any "as of" evaluation uses `(revoked_at IS NULL OR at < revoked_at)`.
+- **LF N-2:** after K2's acting SELECT on `ledger_accounts` lands, A-4/B-16 must re-assert that a non-governed `ledger_entries` insert is refused.
+- **Migration tests:** migrate a scratch DB only through 0113 (the `scratchPoolThrough0110` pattern).
+
