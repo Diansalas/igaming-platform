@@ -292,7 +292,10 @@ The FH-7 code re-review verdict is READY WITH CONDITIONS for this label and NOT 
     0 DATA RACE.
 - **Timing lane on an idle machine: 40/40.** That is 8 tests × 5 rounds, exactly CI's commands,
   thresholds unchanged (`evidence/fh7-timing-lane-idle.txt`).
-- Final commit: *(filled in §12)*.
+- **Final full re-verification on the final code** (`20d3ce0`, after the casino fix), run by the orchestrator:
+  - build, vet (plain and integration) and gofmt clean; lint 0 issues;
+  - `migrate verify` clean through 0107;
+  - `-race -tags integration -count=1 -p 1 ./...` with the timing lane skipped: **45 packages ok**, 0 FAIL, 0 panic, 0 DATA RACE.
 
 ## 10. Governance
 
@@ -362,4 +365,32 @@ The FH-7 code re-review verdict is READY WITH CONDITIONS for this label and NOT 
 
 ## 12. Final state
 
-*(Completed at the final push: final commit, HEAD == origin, clean tree.)*
+- **Final code commit:** `20d3ce0`. The branch head carries this report, which is docs only on top of it.
+  HEAD == `origin/claude/focused-wright-jw88w9`, and the working tree is clean at the final push.
+- **Scratch databases:** 247 leaked per-test scratch DBs were dropped across the block, with ordinary
+  `DROP DATABASE … WITH (FORCE)` and no role or credential changes.
+- **Final gate A–R:**
+
+| Item | Result | Note |
+|---|---|---|
+| A | **PASS** | |
+| B | **PASS** | |
+| C | **PASS** | |
+| D | **PASS** | Payments IMPLEMENTED (MOCK); remaining F-POOL-2 items registered, §3 |
+| E | **PASS** | |
+| F | **PASS** | |
+| G | **PASS** | |
+| H | **PASS** | Launch conditions deferred and recorded |
+| I | **PASS** | |
+| J | **PASS** | |
+| K | **PASS** | |
+| L | **PASS** | |
+| M | **PASS** | |
+| N | **PASS** | Every review record exists with a final verdict; open conditions are registered |
+| **O** | **BLOCKED** | CI-BILLING-1 |
+| P | **PASS** | |
+| Q | **PASS** | |
+| R | **PASS** | |
+
+- **Stop:** this is the final human gate. No real provider integration was started and nothing was
+  deployed; the next step needs explicit human authorization.
