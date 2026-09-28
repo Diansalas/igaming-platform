@@ -2297,3 +2297,212 @@ session (fh3_final_verify, fh3_full_1, fh3_invdep1_1, fh3_invdep1_2,
 fh3_invdep1_final, fh3_invdep1_qa) was dropped, since 0107's checksum
 changed with the F-M1 fix. fh3b is the fresh replacement used throughout
 this session.
+
+================================================================
+FH-3c: ledger-finance C2-C8/F3/L1, security MC2/F-L2-allowlist,
+code-review R1-R6/X13/X14/X16/H1b/A7-helper-collision
+================================================================
+
+C2 - pay_captured_unposted stands across the statement window
+(checkUnmatchedAttempts, unwindowed standing case):
+  File: internal/reconciliation/payment_statement.go
+  Mutation: commented out the new standing case in checkUnmatchedAttempts
+  (`case false && a.state == "disputed" && ...`).
+  Killed by: TestINVDEP1_C2_CapturedUnposted_StandsAcrossStatementWindow
+  (run 2, the empty-statement/no-line-at-all run).
+  Reverted: targeted Edit; confirmed clean.
+
+C5 - clearing conditions (mutant RTMB, the predicate forced to `true`):
+  File: internal/reconciliation/payment_statement.go
+  Mutation: `func (m *payMatcher) capturedUnposted(a *payAttempt) bool {
+  return true }`.
+  Killed by: TestINVDEP1_C5_CapturedUnposted_ClearsOnReversalLineOrTombstone
+  (all three sub-tests fail: reversal_line, tombstone, own_line_reported_
+  reversed).
+  Reverted: targeted Edit; confirmed clean.
+
+R1/X15 - only a `succeeded` statement-line status counts as "still
+captured", never `reversed`:
+  File: internal/reconciliation/payment_statement.go
+  Mutation: reverted the matchPayment case's line-status condition from
+  `l.status == statement.PaymentStatusSucceeded` back to the wider
+  `providerSucceeded` (succeeded OR reversed).
+  Killed by: TestINVDEP1_C5_CapturedUnposted_ClearsOnReversalLineOrTombstone/
+  own_line_reported_reversed.
+  Reverted: targeted Edit; confirmed clean.
+
+X13 - reversal-line clearing removed:
+  File: internal/reconciliation/payment_statement.go
+  Mutation: `capturedUnposted` returns `m.ledgerByRef[...] == nil` only
+  (dropped the `!m.reversalOriginals[...]` term).
+  Killed by: TestINVDEP1_C5_.../reversal_line.
+  Failure: "a PSP-reported reversal line naming this reference as its
+  original must CLEAR pay_captured_unposted".
+  Reverted: targeted Edit; confirmed clean.
+
+X14 - tombstone clearing removed:
+  File: internal/reconciliation/payment_statement.go
+  Mutation: `capturedUnposted` returns `!m.reversalOriginals[...]` only
+  (dropped the tombstone term).
+  Killed by: TestINVDEP1_C5_.../tombstone.
+  Failure: "a real tombstone ledger row for this reference must CLEAR
+  pay_captured_unposted even with no statement line at all".
+  Reverted: targeted Edit; confirmed clean.
+
+X16 - terminal_reason filter dropped (every disputed attempt reported,
+including reversal_tombstone_precedes_success):
+  File: internal/reconciliation/payment_statement.go
+  Mutation: dropped `a.terminalReason == "multiple_success_for_intent"`
+  from checkUnmatchedAttempts' standing case.
+  Killed by: TestINVDEP1_X16_TerminalReasonFilter_
+  PrecedenceCaseNeverReportsCapturedUnposted (standing/unmatched sub-run).
+  Reverted: targeted Edit; confirmed clean.
+
+L1 - down migration's CHECK restore wrapped with a runbook message:
+  File: migrations/0107_deposit_intent_double_credit_backstop.down.sql
+  Mutation: unwrapped the DO/EXCEPTION block back to a bare
+  ALTER TABLE ... ADD CONSTRAINT.
+  Killed by: TestMigration0107_Down_RefusesWithRunbookMessageWhenCaptured
+  UnpostedRowExists (still refuses, but the runbook text disappears -
+  a bare SQLSTATE 23514 message instead).
+  Reverted: targeted Edit; confirmed clean via a manual down/up round-trip
+  against a fresh scratch DB.
+
+R3 - pre-flight tests assert WHICH index refused and the runbook text:
+  File: migrations/0107_deposit_intent_double_credit_backstop.up.sql
+  Mutation: swapped the two RAISE EXCEPTION message strings between the
+  attempts-index and ledger-index DO/EXCEPTION blocks.
+  Killed by: BOTH TestMigration0107_Up_DuplicateSucceededAttempts_
+  RefusedByAttemptsPreflight AND TestMigration0107_Up_DuplicateLedgerPostings_
+  RefusedByLedgerPreflight (each now asserts its OWN specific message and
+  the absence of the other's).
+  Reverted: targeted Edit; confirmed clean.
+
+C3 - amount/asset in the multiple_success_for_intent audit record:
+  File: internal/payments/orchestrator.go (auditMultipleSuccessForIntent)
+  Verified via TestINVDEP1_C3_MultipleSuccessAuditRecordCarriesAmount
+  AndAsset (positive assertion of amount/asset_code in audit_log.metadata;
+  no separate mutation needed beyond the positive test, since removing the
+  meta fields directly fails this test's own assertions).
+
+MC2 - the internal re-check inside postDepositSuccess, exercised directly
+on an already-resolved intent (security follow-up on FH-3b):
+  File: internal/payments/orchestrator.go (postDepositSuccess)
+  Verified via TestINVDEP1_MC2_PostDepositSuccessInternalRecheck, which
+  calls postDepositSuccess directly (bypassing postDepositSuccessOrDispute's
+  pre-check entirely) and asserts errors.Is(err, ErrDepositIntentAlready
+  Resolved) true, errors.Is(err, ledger.ErrDepositAlreadyPostedForIntent)
+  false - i.e. the APPLICATION re-check catches it, not the DB backstop.
+
+X5 - the ledger.ErrDepositAlreadyPostedForIntent -> sentinel mapping in
+postDepositSuccess:
+  File: internal/payments/orchestrator.go (postDepositSuccess)
+  Mutation: removed the `if errors.Is(err, ledger.ErrDepositAlready
+  PostedForIntent) { return ..., fmt.Errorf("%w (ledger backstop: %w)",
+  ErrDepositIntentAlreadyResolved, err) }` mapping.
+  Killed by: TestX5_LedgerBackstopMapping (a genuine two-transaction race,
+  external projection-row blocker forcing FIFO-ordered contention on the
+  ledger's own unique index) - errB no longer wraps ErrDepositIntentAlready
+  Resolved / "ledger backstop" once the mapping is removed.
+  Reverted: targeted Edit; confirmed clean.
+
+X6 - the ledger half of resolvedForOtherDeposit:
+  File: internal/payments/orchestrator.go (resolvedForOtherDeposit)
+  Mutation: dropped the `OR EXISTS (SELECT 1 FROM ledger_transactions ...)`
+  clause from the predicate's SQL, leaving only the attempts-half.
+  Killed by: TestX6_ResolvedForOtherDepositPredicate_LedgerHalfAlone (a
+  legacy no-attempt-row posting under a different idempotency key, no
+  attempt ever reaches 'succeeded') - the predicate now incorrectly
+  returns false.
+  Reverted: targeted Edit; confirmed clean.
+
+C4/R4 - RecordDepositMultipleSuccessRefusal wired on the legacy
+InitiateDeposit path via InitiateDepositAudited:
+  File: internal/payments/orchestrator.go
+  Verified via TestC4_ResolveAmbiguousOutcomeSucceeded_ReturnsWrappedRefusal
+  (resolveAmbiguous's OutcomeSucceeded branch returns
+  *DepositIntentAlreadyResolvedRefusal, errors.Is still true against the
+  bare sentinel) and TestC4_InitiateDepositAudited_WritesRefusalAudit
+  (RecordDepositMultipleSuccessRefusal's own audit row, direct call).
+
+C7 - A7 #1a's posting-count check, made unconditional:
+  File: internal/payments/a7_1a_integration_test.go
+  Verified via TestA7_1a_SweeperClaimVsCallbackPhaseC_SameDepositIntent's
+  own updated assertion (unconditional ledgerDepositTxCount call, no
+  longer gated on `finalChild.ProviderReference != nil` nor counting only
+  DISTINCT payment_attempts.ledger_transaction_id).
+
+C8 (A7 #5c) - runtime R0-ordering proof for the tombstone branch:
+  File: internal/payments/receipt.go (applyReversalReceiptEvidence,
+  tombstone branch)
+  Mutation: swapped the R0 (receipt INSERT)/L1 (intent lock) statement
+  order.
+  Killed by: TestA7_5c_TombstoneBranch_SecondIdenticalReversalWaitsOnReceipt
+  Insert - the second, blocked delivery's own pg_stat_activity.query text
+  switches from waiting on the receipt INSERT to waiting on the intent
+  lock.
+  Reverted: targeted Edit; confirmed clean.
+
+F3 - phase C and the sweeper re-read the attempt under the parent lock:
+  Files: internal/payments/sweeper.go, drive.go, deposit_v2.go
+  Disclosed as a money-safety hardening (removes a stale-read/conflict-
+  error window under contention, not a correctness gap the choke point
+  itself would miss) - full internal/payments suite (all Sweep*/Drive*/
+  INVDEP1* tests, 277s) re-run green under -race after the change.
+
+R6 - restored PAY-REV-1 second-reversal + reverses_transaction_id checks
+on the inverted P6 test:
+  File: internal/payments/inv_dep1_matrix_integration_test.go
+  Verified via TestINVDEP1_Inverted_RVLF_P6_
+  ReversalOfDisputedSecondCaptureTakesTombstoneBranch's own restored
+  assertions (reverses_transaction_id against the child's own posting;
+  errors.Is(err, ErrDepositAlreadyReversed) on a distinct second reversal
+  of the same original).
+
+H1b (code-review "C5 is NOT closed") - the RawOutcome assignment in
+applyReversalReceiptEvidence's final-reversal branch:
+  File: internal/payments/receipt.go
+  Mutation: dropped `ev.RawOutcome = rawOutcome` (rule 1/3's raw-wire-value
+  preservation).
+  Killed by: TestINVDEP1_H1b_ReversalFingerprintEndToEnd_RawWireOutcome
+  Preserved - both the "must reflect the RAW wire outcome" and "must not
+  fingerprint-collide with a genuine succeeded-outcome reversal" assertions
+  fail once the line is dropped (a real end-to-end delivery through
+  rvCallback, never computeEventFingerprint called directly).
+  Reverted: targeted Edit; confirmed clean.
+
+Security follow-up - F-L2 exact key allow-list:
+  File: internal/payments/migration_0107_integration_test.go
+  Strengthened TestINVDEP1_FL2_MultipleSuccessAlertLogContentIsPinned to
+  assert the alert line's keys are EXACTLY {time, level, msg, tenant_id,
+  deposit_intent_id, attempt_id} via slog's own TextHandler key=value
+  token shape, not merely the absence of a fixed forbidden list.
+
+A7 helper collision (code-review): a7HoldRow/a7WaitAnyLockWaiter existed
+as two independently-written local copies (this branch's
+a7_1a_integration_test.go and the unmerged FH-6 payout branch's
+a7_lockorder_integration_test.go, worktree-agent-a5b19b46582e95b75 @
+b7f84ec) with different argument orders/waiter-query implementations - a
+guaranteed compile conflict once both branches merge. Resolved by copying
+FH-6's canonical versions verbatim into a new, dedicated
+internal/payments/a7_helpers_integration_test.go (folding in this
+branch's own clearer "no row to lock" error), deleting the local copies
+from a7_1a_integration_test.go, and adapting its (and a7_5c's) own call
+sites to FH-6's argument order (table before rowID). No mutation-kill
+applicable (a structural/compile-collision fix, not a behavioural gap);
+verified via a full `go build ./...`/`go vet -tags=integration ./...`
+clean run and both TestA7_1a_* and TestA7_5c_* passing under -race.
+
+Verification after all FH-3c mutations reverted: `git status --porcelain`
+clean; `go build ./...`, `go vet -tags=integration ./...`, `gofmt -l .`
+clean (golangci-lint could not run in this environment - installed
+version 2.5.0 was built with go1.25, lower than this repo's targeted
+go1.26.8 toolchain; disclosed, not silently skipped); full
+internal/payments (277.981s) and internal/reconciliation (+ internal/
+reconciliation/statement) (42.916s + 1.018s) suites pass under
+-tags=integration -race -count=1 against PRIV_DB=fh3c.
+
+Private DBs: fh3c is the main working DB for this FH-3c session; fh3c_mg4
+(a throwaway scratch DB used for the MG4 mutation check; the L1 down/up
+round-trip reused fh3c's own migration0101Scratch/depositV2ScratchPool
+fixtures rather than a separate named DB) was dropped after use.
