@@ -24,86 +24,15 @@ package payments
 
 import (
 	"context"
-	"errors"
-	"fmt"
 	"testing"
-	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
-
-	"github.com/Diansalas/igaming-platform/internal/db"
 )
 
-// a7HoldRow and a7WaitAnyLockWaiter are minimal, self-contained local
-// helpers (this file's own copy, not shared with
-// a7_lockorder_integration_test.go on the payout agent's separate FH-6
-// branch - see this file's own doc comment on why it is kept separate).
-// Built on the SAME primitives lockorder_harness_test.go already uses
-// (loHoldWith, loBlockingPIDs) - a generic "hold an arbitrary row by id"
-// blocker and a "poll until some backend is waiting on one of these
-// blocker pids" helper, since this test's own row (deposit_intents) and
-// wait shape (any one of several possible waiters, not a single known
-// racer) don't fit the existing loHold*/loWaitBlocked helpers exactly.
-
-// a7HoldRow opens a tenant-scoped transaction, takes a `SELECT ... FOR
-// UPDATE` row lock by id on table, and holds it until the returned
-// blocker's release() is called (or the test ends).
-func a7HoldRow(t *testing.T, pool *db.Pool, tenantID, rowID uuid.UUID, table, name string) *loBlocker {
-	t.Helper()
-	return loHoldWith(t, pool, tenantID, name, func(ctx context.Context, tx pgx.Tx) error {
-		var id uuid.UUID
-		err := tx.QueryRow(ctx, fmt.Sprintf(`SELECT id FROM %s WHERE id = $1 FOR UPDATE`, table), rowID).Scan(&id)
-		if errors.Is(err, pgx.ErrNoRows) {
-			return fmt.Errorf("blocker %s: no %s row %s to lock", name, table, rowID)
-		}
-		return err
-	})
-}
-
-// a7WaitAnyLockWaiter polls pg_stat_activity for any backend currently
-// waiting on a lock that is held by one of blockerPIDs, returning that
-// waiter's own pid. Unlike loWaitBlocked (which watches one already-known
-// racer pid), this is for a racer whose backend pid is not directly
-// observable from the test (e.g. a driveCreatedAttempt call running
-// inside the sweeper's own goroutine) - it discovers the waiter from the
-// server side instead.
-func a7WaitAnyLockWaiter(t *testing.T, pool *db.Pool, blockerPIDs map[int]bool, timeout time.Duration) (int, bool) {
-	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		var waiting []int
-		if err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
-			rows, err := tx.Query(ctx, `SELECT pid FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND pid IS NOT NULL`)
-			if err != nil {
-				return err
-			}
-			defer rows.Close()
-			for rows.Next() {
-				var pid int
-				if err := rows.Scan(&pid); err != nil {
-					return err
-				}
-				waiting = append(waiting, pid)
-			}
-			return rows.Err()
-		}); err != nil {
-			t.Fatalf("a7WaitAnyLockWaiter: query pg_stat_activity: %v", err)
-		}
-		for _, pid := range waiting {
-			if blockerPIDs[pid] {
-				continue
-			}
-			for _, blocking := range loBlockingPIDs(t, pool, pid) {
-				if blockerPIDs[blocking] {
-					return pid, true
-				}
-			}
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	return 0, false
-}
+// a7HoldRow and a7WaitAnyLockWaiter now live in
+// a7_helpers_integration_test.go (code review, rv-fh3-code-review.md,
+// 95a1c34: FH-6's canonical versions, collision-resolved).
 
 // TestA7_1a_SweeperClaimVsCallbackPhaseC_SameDepositIntent is A7-TESTS-1
 // item #1a: a cascadable decline creates a REAL 'created' cascade-child
@@ -157,7 +86,7 @@ func TestA7_1a_SweeperClaimVsCallbackPhaseC_SameDepositIntent(t *testing.T) {
 		t.Fatalf("expected a cascade child (attempt_no=2), got %d", child.AttemptNo)
 	}
 
-	blocker := a7HoldRow(t, pool, f.tenantID, *declined.DepositIntentID, "deposit_intents", "blocker-intent")
+	blocker := a7HoldRow(t, pool, f.tenantID, "deposit_intents", *declined.DepositIntentID, "blocker-intent")
 
 	// Racer A: the sweeper's real lease + per-item claim/drive of the
 	// cascade child - a plain goroutine (driveCreatedAttempt manages its
@@ -207,7 +136,17 @@ func TestA7_1a_SweeperClaimVsCallbackPhaseC_SameDepositIntent(t *testing.T) {
 	}
 
 	// Outcome: the cascade child must have been claimed and driven to a
-	// live state on the SECOND provider (never left 'created').
+	// live state on the SECOND provider (never left 'created'). This
+	// relies on PostgreSQL's own FIFO lock queue: racer A (the sweeper's
+	// claim) was already queued on the held deposit_intents row BEFORE
+	// racer B (the late callback) even started (a7WaitAnyLockWaiter above
+	// confirms this), so when the blocker releases, Postgres grants the
+	// lock to racer A first - racer A's own claim/drive therefore always
+	// completes (routing the cascade child to the second provider) before
+	// racer B's late callback ever runs. A hypothetical scheduler that
+	// granted the lock out of queue order could route the child
+	// differently, but every currently-supported PostgreSQL version
+	// guarantees FIFO granting among waiters on the same row lock.
 	finalChild := mustGetAttempt(t, pool, f.tenantID, child.ID)
 	if finalChild.State == AttemptCreated {
 		t.Fatalf("expected the cascade child to have been claimed and driven past 'created', got %s", finalChild.State)
@@ -222,23 +161,28 @@ func TestA7_1a_SweeperClaimVsCallbackPhaseC_SameDepositIntent(t *testing.T) {
 	// the whole intent - the choke point (resolvedForOtherDeposit, called
 	// from postDepositSuccessOrDispute) must route this second success to
 	// T13d (multiple_success_for_intent, disputed), never a second post.
+	//
+	// Ledger-finance review C7 (rv-fh3-ledger.md, 076e42e): the original
+	// version of this check (a) ran only inside `if finalChild.
+	// ProviderReference != nil` and (b) counted DISTINCT payment_attempts.
+	// ledger_transaction_id, not ledger rows - an unlinked second posting
+	// (one that posted to the ledger but was never linked back to an
+	// attempt row) would have escaped it entirely. Replaced with an
+	// UNCONDITIONAL ledgerDepositTxCount call (the matrix's own helper,
+	// inv_dep1_matrix_integration_test.go) - a direct
+	// `count(*) FROM ledger_transactions WHERE transaction_type='deposit'
+	// AND correlation_id = intent` - run regardless of whether the child
+	// ever reached a provider_reference at all.
 	if finalChild.ProviderReference != nil {
 		providerB.Resolve(*finalChild.ProviderReference, OutcomeSucceeded, "", false)
 		setNextActionNow(t, pool, f.tenantID, child.ID)
 		if stats := sweeper.RunOnce(context.Background(), []uuid.UUID{f.tenantID}); len(stats.Errors) != 0 {
 			t.Logf("post-resolve sweep errors: %v", stats.Errors)
 		}
-		var postingCount int
-		if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-			return tx.QueryRow(ctx, `SELECT count(DISTINCT ledger_transaction_id) FROM payment_attempts
-				WHERE deposit_intent_id = $1 AND ledger_transaction_id IS NOT NULL`, *declined.DepositIntentID).Scan(&postingCount)
-		}); err != nil {
-			t.Fatalf("count distinct ledger postings: %v", err)
-		}
-		if postingCount != 1 {
-			t.Fatalf("A7-1a / INV-DEP-1: expected exactly 1 ledger posting for deposit_intent_id=%s, got %d",
-				*declined.DepositIntentID, postingCount)
-		}
+	}
+	if n := ledgerDepositTxCount(t, pool, f.tenantID, *declined.DepositIntentID); n != 1 {
+		t.Fatalf("A7-1a / INV-DEP-1: expected exactly 1 deposit ledger posting for deposit_intent_id=%s, got %d",
+			*declined.DepositIntentID, n)
 	}
 
 	// Adapted from the original scratchpad reproduction (which assumed
