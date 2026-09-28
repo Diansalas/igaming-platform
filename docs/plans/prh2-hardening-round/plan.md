@@ -908,3 +908,5 @@ addendum.
 The payments lane stays strictly serial (E2 → C → D → F-pay → H → I-wire → K3). There is one owner per critical file. The orchestrator is the single writer of the registry, `progress.md`, `active-stage.md`, `project-status.md` and `HANDOVER.md`.
 
 **Orchestrator decision (2026-09-28, ADR 0104 §5.4):** the identifiable actor needs a display name, and `staff_users` has none. Option **(a)** is chosen: migration 0109 adds a nullable `staff_users.display_name`, and the projection shows the staff id plus the display name when set. Options (b) (the email, which is more personal data) and (c) (the id only, which falls short of HD-PRH2-5) are rejected. Reversible.
+
+**Touch-list additions (from ADR 0099/0101 drafting, Rule 1):** K1 also touches `internal/db/tenant_rls.go` (the new `WithPlatformActingInTenant` setter); K3 also touches `internal/providerref/providerref.go` (refusing the reserved `platform-operator-declared:` prefix). New human decision HD-PRH2-8 (below-threshold semantics) is registered; the stricter reading (b) is enforced in the interim, so K2 is not blocked.
