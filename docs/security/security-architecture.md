@@ -5123,3 +5123,43 @@ not synthetic. `SEC-S92-6` should be decided before the first
 records that three specific changes were probed against the threat model
 above and that the defects found are the twelve listed, at the severities
 listed.
+
+## PRH-2 K1 — scoped financial capability grants: reference, not a new review
+
+This is a pointer, not a new security review - the `security` specialist's
+own reviews for K1 are `docs/plans/prh2-hardening-round/reviews/
+k1-security.md` (ACCEPT WITH CONDITIONS, pre-merge conditions K1-C1..C4,
+K2-P1..P4 before K2 merges) and the architect rulings on G-P1/`grantee_
+person_id` and R-12/R-14, all dated 2026-09-28. This entry exists only so
+this file's own index of security-relevant subsystems is not silently
+missing the newest one.
+
+**What K1 adds, in one paragraph:** a Person-linked, time-bounded staff
+authorization mechanism (ADR 0099) layered on top of the static
+`internal/auth` role → permission map, enforced entirely in PostgreSQL
+(triggers + per-command RLS, `FORCE ROW LEVEL SECURITY`, no `FOR ALL`
+policy, no `SECURITY DEFINER`). The core control is four-eyes: a grant
+requires a platform-session approval from a Person distinct from both the
+requester and the grantee, and the approval and grant rows are written in
+the same transaction as the request's own status transition. A fourth
+session shape, "platform acting in tenant X", is deny-by-default against
+seven pre-existing tables via a new restrictive fence, and opens only
+through one Go function.
+
+**Known residuals (see the ADR for the binding conditions):**
+- A tenant grantee's live status/role cannot be re-verified by a platform
+  approver at approval time (S-a; §13 INV-CAP-12) - the use-time re-check
+  at execution (K2/K3) is the binding backstop, not approval.
+- G-P1 is deferred, not implemented (architect ruling, §4.1) - refused
+  fail-closed (`CG010`), no route exposed.
+- STAFF-LIFECYCLE-1 (a suspend/role-change/Person-unlink path that cancels
+  pending requests and revokes grants in the same transaction) does not
+  exist yet (S-b) - it is an open dependency, not a K1 deliverable.
+
+This project's `prh2-k1-tests` branch (test/evidence/docs hardening pass)
+independently pinned R-7 (K1-C3) and the revoke-record's append-only
+property (K1-C4) at the trigger layer, closed several test gaps code
+review flagged (F-2, F-6, F-9, F-11), and added the first full-lifecycle
+audit-content test (A-12) - see that branch's own report for detail; none
+of this changes the residuals above, which remain open pending K2/K3 and
+STAFF-LIFECYCLE-1.
