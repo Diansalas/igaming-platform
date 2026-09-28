@@ -41,7 +41,7 @@ documentation phase.
 | KYC, AML, RG | [`architecture/11-kyc-aml-rg-architecture.md`](architecture/11-kyc-aml-rg-architecture.md); ADR [0096](decisions/0096-kyc-enforcement-boundary.md) |
 | Bonus, gamification, retail | [`architecture/10-bonus-engine-architecture.md`](architecture/10-bonus-engine-architecture.md), `17`–`31` and [`26-retail-operations-architecture.md`](architecture/26-retail-operations-architecture.md) |
 | Jurisdiction and licensing | [`architecture/15-jurisdiction-and-licensing-model.md`](architecture/15-jurisdiction-and-licensing-model.md) |
-| Audit and reporting | [`architecture/12-audit-reporting-architecture.md`](architecture/12-audit-reporting-architecture.md) |
+| Audit and reporting | [`architecture/12-audit-reporting-architecture.md`](architecture/12-audit-reporting-architecture.md); tenant-visible audit of platform actions: ADR [0104](decisions/0104-tenant-visible-audit-of-platform-actions.md) (kill switch only today) |
 | Privacy | [`architecture/16-privacy.md`](architecture/16-privacy.md) |
 | Webhook security | ADR [0097](decisions/0097-webhook-admission-and-rate-limiting.md) and the webhook ADRs it cites |
 | Provider credentials and secrets | ADR [0093](decisions/0093-provider-credential-model-and-secret-store.md), [0094](decisions/0094-secret-resolution-resource-isolation.md) |
