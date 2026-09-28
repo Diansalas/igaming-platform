@@ -112,8 +112,15 @@ the opacity this contract introduces holds only against a vendor that does not a
 - It does not widen the pre-existing B2C "play simulation" routes
   (`POST /v1/me/casino/sessions/{id}/wager` and siblings, `casino_play_handlers.go`), which retain
   their own, separately-reviewed `'active'`-only precondition (security finding P2-2) and are
-  therefore **not** usable against a session this endpoint has consumed. The real provider path
-  (a genuinely-signed bet callback through `postBet`) is unaffected.
+  therefore **not** usable against a session this endpoint has consumed. **This is intended, not a
+  gap:** the simulation routes are a player-driven stand-in for a vendor call, reachable only
+  outside production; a `consumed` session is owned by the vendor's signed webhook path, and
+  widening the simulation precondition would create a second, unsigned driver for the same round's
+  money. Security's final ruling (`docs/plans/prh2-hardening-round/reviews/b-security.md`) is to
+  keep `requireActiveUnexpiredSession` `active`-only. Pinned by
+  `TestCasinoBootstrap_ConsumedSessionRefusedBySimulationWagerRoute`
+  (`internal/httpserver/casino_bootstrap_integration_test.go`). The real provider path (a
+  genuinely-signed bet callback through `postBet`) is unaffected.
 
 ## Reference implementation
 
@@ -126,6 +133,19 @@ the opacity this contract introduces holds only against a vendor that does not a
   `bootstrap_rls_integration_test.go`, `bootstrap_sb1_integration_test.go`,
   `migration_0115_bootstrap_integration_test.go`;
   `internal/httpserver/casino_bootstrap_integration_test.go`.
+
+## Deferred: adapter-side parse hook (F-12)
+
+Architect review finding F-12: `bootstrapRequestBody` (`internal/casino/bootstrap.go`) decodes the
+verified webhook bytes directly against one fixed, platform-defined JSON shape
+(`DisallowUnknownFields`). A real aggregator will very likely not send exactly this shape on the
+wire — field names, nesting, or casing will differ per vendor, the same way `CasinoProvider`'s
+existing `Launch`/`Bet`/`Win`/`Rollback` methods each already have to translate a vendor's own
+payload into the platform's internal shape. This is recorded here as a **deferred** design point,
+not built now (CLAUDE.md: no vendor-specific adapter work without a confirmed commercial
+relationship): when a real vendor is onboarded, `BootstrapLaunch`'s body-parsing step will need an
+adapter-side parse hook (mirroring the existing per-provider translation pattern), rather than every
+vendor being forced to emit exactly the MOCK's own wire shape.
 
 ## Path to a real vendor
 

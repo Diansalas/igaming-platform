@@ -536,6 +536,14 @@ merged). Migration number **0115** (placeholder - the orchestrator renumbers at 
   `TestLockOrder_BootstrapAndFirstBetOfRound_NoDeadlock`
   (`internal/casino/lockorder_integration_test.go`), which this ADR no longer flags as a deferred
   scope decision - it is done.
+- **Deferred (F-12, architect review):** `bootstrapRequestBody` decodes the verified webhook bytes
+  against one fixed, platform-defined JSON shape (`DisallowUnknownFields`). A real aggregator will
+  not necessarily send exactly this shape on the wire. Recorded as deferred, not built now
+  (CLAUDE.md - no vendor-specific work without a confirmed commercial relationship): the real fix,
+  when a vendor is onboarded, is an adapter-side parse hook for the bootstrap body, mirroring the
+  translation `CasinoProvider`'s existing `Launch`/`Bet`/`Win`/`Rollback` methods already do per
+  vendor - see `docs/integrations/casino-launch-bootstrap.md`'s own "Deferred: adapter-side parse
+  hook" section.
 - **Tests:** `internal/casino/bootstrap_integration_test.go`, `bootstrap_rls_integration_test.go`,
   `bootstrap_sb1_integration_test.go`, `migration_0115_bootstrap_integration_test.go`;
   `internal/httpserver/casino_bootstrap_integration_test.go`. Mutation evidence:

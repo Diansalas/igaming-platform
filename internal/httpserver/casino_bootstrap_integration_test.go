@@ -208,3 +208,68 @@ func TestCasinoBootstrap_RealProviderBetWorksAfterBootstrap(t *testing.T) {
 		t.Fatalf("expected the session to remain consumed, got %q", status)
 	}
 }
+
+// TestCasinoBootstrap_ConsumedSessionRefusedBySimulationWagerRoute is the
+// security review's P2-2 pin (docs/plans/prh2-hardening-round/reviews/
+// b-security.md - "Recommended pin (Low): a test that a consumed session
+// is refused by the simulation wager route"), for the interaction
+// TestCasinoBootstrap_RealProviderBetWorksAfterBootstrap's own doc comment
+// already reported as a finding: a session a real bootstrap has consumed
+// is refused by the pre-existing B2C "play simulation" routes
+// (POST /v1/me/casino/sessions/{id}/wager), because
+// requireActiveUnexpiredSession (casino_play_handlers.go, security finding
+// P2-2) accepts only 'active', never 'consumed'. Both the architect/QA/POP
+// review and security's own final ruling on P2-2 confirm this is INTENDED
+// - the simulation routes are a player-driven stand-in for a vendor call,
+// reachable only outside production, and widening them to accept
+// 'consumed' would create a second, unsigned driver for the same round's
+// money. This test exists so a future change that accidentally widens
+// requireActiveUnexpiredSession is caught here, not discovered in
+// production.
+func TestCasinoBootstrap_ConsumedSessionRefusedBySimulationWagerRoute(t *testing.T) {
+	pool, issuer := testEnv(t)
+	orchestrator, mock := newMockCasinoOrchestrator()
+	srv := newCasinoTestServer(t, pool, issuer, orchestrator)
+	tenant := mustCreateTenant(t, pool)
+	brand := mustCreateBrand(t, pool, tenant)
+	mustEnableCasinoCapability(t, srv, pool, tenant)
+	game := mustSeedCasinoGame(t, pool, "mock-casino", "EUR")
+	mustEnableCasinoGameForTenant(t, pool, tenant.ID, game.ID)
+
+	player := mustRegisterPlayer(t, srv, brand.Slug)
+	mustActivatePlayer(t, pool, tenant.ID, player.ID)
+	fundWallet(t, pool, tenant.ID, brand.ID, player.ID, "EUR", 10000)
+
+	launched := mustLaunchCasinoGame(t, srv, player.Tokens.AccessToken, game.ID.String(), "EUR", "real")
+	token := extractLaunchToken(t, launched.LaunchURL)
+
+	// A real bootstrap genuinely consumes the session - not a shortcut, the
+	// same HTTP round trip TestCasinoBootstrap_MockVendorOverHTTP_
+	// FreshSuccess exercises.
+	in := mock.BootstrapPayload(tenant.ID, token, "req-p2-2-pin-1", game.ProviderGameID, "EUR", "real")
+	bootstrapResp := rawPostCasinoBootstrap(t, srv, tenant.Slug, in)
+	defer bootstrapResp.Body.Close()
+	if bootstrapResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 from the bootstrap route, got %d", bootstrapResp.StatusCode)
+	}
+
+	var status string
+	err := pool.WithTenant(context.Background(), tenant.ID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT status FROM casino_launch_sessions WHERE id = $1`, launched.SessionID).Scan(&status)
+	})
+	if err != nil {
+		t.Fatalf("read session status: %v", err)
+	}
+	if status != "consumed" {
+		t.Fatalf("precondition failed: expected the session consumed before exercising the pin, got %q", status)
+	}
+
+	wagerResp := postJSON(t, srv, "/v1/me/casino/sessions/"+launched.SessionID+"/wager", player.Tokens.AccessToken, wagerBody(500))
+	defer wagerResp.Body.Close()
+	if wagerResp.StatusCode != http.StatusBadRequest {
+		var body map[string]any
+		decodeBody(t, wagerResp, &body)
+		t.Fatalf("expected the simulation wager route to refuse a bootstrapped (consumed) session with 400, got %d: %v",
+			wagerResp.StatusCode, body)
+	}
+}
