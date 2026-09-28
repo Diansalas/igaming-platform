@@ -14,7 +14,16 @@
   invariants, the acting-family ledger and projection fences), `qa` (§14), `code-reviewer`,
   `product-owner-proxy` (the closed enum — **confirmed**).
 - **Registry:** CAP-GRANT-1; consumers HD-0095-1 and LEDGER-MANUAL-ADJ-4EYES-1; follow-up
-  STAFF-LIFECYCLE-1. Workstream K1 of `docs/plans/prh2-hardening-round/plan.md`; migration 0111.
+  STAFF-LIFECYCLE-1. Workstream K1 of `docs/plans/prh2-hardening-round/plan.md`; migration 0112.
+- **NOTE ON NUMBERING (implementation record, backend-engineer K1 build):** this ADR's text, as
+  originally drafted, numbered K1's own migration 0111 and referred to K2/K3's future migrations as
+  0112/0114. The orchestrator's allocation changed during K1's build (B, the casino bootstrap,
+  merges first and takes 0111): the final allocation is **B = 0111, K1 = 0112, K2 = 0113, E1 = 0114,
+  K3 = 0115**. Every migration-number reference in this ADR has been updated to that final
+  allocation (K1's own migration is `0112`; where the text discusses K2/K3's future tables it now
+  says `0113`/`0115`) — this is the same renumbering-disclosure pattern migration 0105's own header
+  comment uses. The actual K1 migration file on disk is
+  `migrations/0112_scoped_financial_capability_grants.{up,down}.sql`.
 - **Binding inputs:**
   - ADR 0098 §1–§3 and §5: HD-PRH2-2 = (c); HD-PRH2-5; HD-PRH2-6.
   - Plan §11.
@@ -32,7 +41,7 @@
 | Rev | Base | Change |
 |---|---|---|
 | 1 | `cabca27` → `d83a71c` | Initial draft |
-| 2 | `6864efa` | All review conditions applied. Main changes: the enumerated `AS RESTRICTIVE` acting fence on every NULL-arm table (C-99-1); grantees limited to `finance` and G-P2 `platform_admin` (C-99-2); the projection write fence (LF F1); exact ledger fence predicates (LF F2); `FOR SHARE` at execution (LF F3); acting SELECT on `payment_attempts`/`deposit_intents` (LF ruling 2); the audit actor trigger (C-99-3); INV-CAP-6 reworded (C-99-4); column-discipline test (C-99-5); G-P2 lifetime (C-99-6); re-attestation reduced to an audit action (PO Q2, security ruling 6); the setter contract (C-99-8); full 0111 content; review disposition |
+| 2 | `6864efa` | All review conditions applied. Main changes: the enumerated `AS RESTRICTIVE` acting fence on every NULL-arm table (C-99-1); grantees limited to `finance` and G-P2 `platform_admin` (C-99-2); the projection write fence (LF F1); exact ledger fence predicates (LF F2); `FOR SHARE` at execution (LF F3); acting SELECT on `payment_attempts`/`deposit_intents` (LF ruling 2); the audit actor trigger (C-99-3); INV-CAP-6 reworded (C-99-4); column-discipline test (C-99-5); G-P2 lifetime (C-99-6); re-attestation reduced to an audit action (PO Q2, security ruling 6); the setter contract (C-99-8); full 0112 content; review disposition |
 
 ---
 
@@ -170,7 +179,7 @@ tables.
 | **tenant** | `app.tenant_id = X`, `app.principal_id = S` | `db.WithPrincipalScope(X, S)` (plain `WithTenant` sets no principal and is refused by the resolver) | G-T requests, revoke, read in X; K2/K3 actions in X with its own grants |
 | **platform** | only `app.platform_admin_principal_id = P` | `db.WithPlatformAdmin` | G-P1/G-P2 requests, approvals, revokes, reads in any tenant. **No K2/K3 or ledger access.** |
 | **platform acting in X** | only `app.acting_tenant_id = X`, `app.acting_platform_principal_id = P` | `db.WithPlatformActingInTenant` (§6.1) | K2/K3 actions in X with P's grants for X; nothing else (§6) |
-| player, service, mixed | anything else | — | nothing on any 0111/0112/0114 table |
+| player, service, mixed | anything else | — | nothing on any 0112/0113/0115 table |
 
 HD-PRH2-6's interim "refuse platform scope on tenant ledgers" becomes **"refuse unless an explicit
 in-force grant for that tenant exists"**.
@@ -212,7 +221,7 @@ session leaves `app.tenant_id` unset, so it satisfies every policy arm of the fo
 The effective policy set at HEAD was recomputed by replaying every `CREATE POLICY`/`DROP POLICY` in
 `migrations/*.up.sql` in order. The results:
 
-**Exposed: a NULL arm with no other required positive GUC. All are closed by 0111's restrictive
+**Exposed: a NULL arm with no other required positive GUC. All are closed by 0112's restrictive
 policies (§6.4).**
 
 | Table | Exposed policies (effective at HEAD) | What an acting session could do without the fence |
@@ -290,10 +299,10 @@ all of `app.tenant_id`, `app.principal_id`, `app.platform_admin_principal_id`,
 therefore never matches the recursion-exempt policies. A-4's mixed-session cases cover these two
 tables.
 
-### 6.4 The restrictive fence (C-99-1) — added by 0111
+### 6.4 The restrictive fence (C-99-1) — added by 0112
 
 `financial_acting_gucs_present()` is `STABLE` and true if either acting GUC is non-empty. Here
-`acting` abbreviates that function. For each table below, 0111 adds `AS RESTRICTIVE` policies per
+`acting` abbreviates that function. For each table below, 0112 adds `AS RESTRICTIVE` policies per
 command. They are ANDed with every permissive policy, so they bind every existing and future
 permissive arm.
 
@@ -314,17 +323,17 @@ Notes:
 
 | Table | Acting access | Migration | Notes |
 |---|---|---|---|
-| `staff_users` | SELECT X rows (GUC-only); UPDATE USING X rows, WITH CHECK `false` (for `FOR SHARE`) | 0111 | own row via 0011's NULL arm, cut to the own row by §6.4 |
-| `staff_capability_grants` | SELECT X rows (GUC-only); UPDATE USING X rows, WITH CHECK `false` (for `FOR SHARE`) | 0111 | |
-| `audit_log` | INSERT `tenant_id = acting tenant` | 0111 | the actor trigger (§11) forces actor and tenant |
-| `player_accounts` | SELECT X | 0112 | column discipline (§6.8) |
-| `wallets`, `assets` (already readable) | SELECT X | 0112 | |
-| `ledger_accounts` | SELECT X; INSERT X with `account_type IN ('player_cash','manual_adjustment','player_withdrawal_hold','psp_clearing')` | 0112 | the account types the governed postings resolve |
-| `ledger_transactions`, `ledger_entries` | SELECT X; INSERT X, **fenced** (§6.6). `ledger_transactions` also has UPDATE USING X WITH CHECK `false`, only for the ADR 0100 §6.5 L2 causation lock; 0082's immutability triggers refuse real updates anyway. | 0112 | |
-| `wallet_balance_projection` | SELECT X; INSERT and UPDATE X, **fenced** (§6.7) | 0112 | UPDATE also needed for L3 `FOR UPDATE` |
-| `payment_attempts`, `deposit_intents` | SELECT X; UPDATE USING X (for `FOR UPDATE`) with the WITH CHECK in ADR 0101 §6.4 | 0112 SELECT (LF ruling 2: the `open_payment_exposure` check); 0114 UPDATE | `deposit_intents` UPDATE WITH CHECK is `false` (M1 never updates an intent) |
-| `withdrawal_requests` | SELECT X; UPDATE USING X, WITH CHECK per ADR 0101 §6.4 | 0114 | |
-| ADR 0100 §9 tables; ADR 0101 §8 tables | per those ADRs | 0112 / 0114 | |
+| `staff_users` | SELECT X rows (GUC-only); UPDATE USING X rows, WITH CHECK `false` (for `FOR SHARE`) | 0112 | own row via 0011's NULL arm, cut to the own row by §6.4 |
+| `staff_capability_grants` | SELECT X rows (GUC-only); UPDATE USING X rows, WITH CHECK `false` (for `FOR SHARE`) | 0112 | |
+| `audit_log` | INSERT `tenant_id = acting tenant` | 0112 | the actor trigger (§11) forces actor and tenant |
+| `player_accounts` | SELECT X | 0113 | column discipline (§6.8) |
+| `wallets`, `assets` (already readable) | SELECT X | 0113 | |
+| `ledger_accounts` | SELECT X; INSERT X with `account_type IN ('player_cash','manual_adjustment','player_withdrawal_hold','psp_clearing')` | 0113 | the account types the governed postings resolve |
+| `ledger_transactions`, `ledger_entries` | SELECT X; INSERT X, **fenced** (§6.6). `ledger_transactions` also has UPDATE USING X WITH CHECK `false`, only for the ADR 0100 §6.5 L2 causation lock; 0082's immutability triggers refuse real updates anyway. | 0113 | |
+| `wallet_balance_projection` | SELECT X; INSERT and UPDATE X, **fenced** (§6.7) | 0113 | UPDATE also needed for L3 `FOR UPDATE` |
+| `payment_attempts`, `deposit_intents` | SELECT X; UPDATE USING X (for `FOR UPDATE`) with the WITH CHECK in ADR 0101 §6.4 | 0113 SELECT (LF ruling 2: the `open_payment_exposure` check); 0115 UPDATE | `deposit_intents` UPDATE WITH CHECK is `false` (M1 never updates an intent) |
+| `withdrawal_requests` | SELECT X; UPDATE USING X, WITH CHECK per ADR 0101 §6.4 | 0115 | |
+| ADR 0100 §9 tables; ADR 0101 §8 tables | per those ADRs | 0113 / 0115 | |
 
 A table that `ledger.Post`, `LockProjectionsForPosting`, `GetOrCreateAccounts` or
 `withdrawal.Complete`/`Fail` touch and that is missing from this list makes the governed path fail
@@ -365,11 +374,11 @@ OR NEW.transaction_type = 'withdrawal_failed' AND EXISTS (
 
 - The keys match the code: `withdrawal.go:1442` (`providerID + ":" + providerTxID`) and `:1539`
   (`requestID + ":failed"`).
-- 0112 creates the trigger with branch (a) only. 0114 replaces the function with (a) + (b) + (c).
+- 0113 creates the trigger with branch (a) only. 0115 replaces the function with (a) + (b) + (c).
 - The same predicate, evaluated for the parent transaction row, gates acting INSERTs into
   `ledger_entries` (trigger `ledger_entries_governed_fence`). So entries can never be appended to a
   pre-existing transaction.
-- **(d) The reserved-prefix guard applies to all sessions.** It is created in 0114; see ADR 0101
+- **(d) The reserved-prefix guard applies to all sessions.** It is created in 0115; see ADR 0101
   §5.4.
 - Outside acting sessions the trigger is a no-op, so existing flows are unchanged. `txid_current()`
   inside `ledger.Post`'s savepoint is the top-level xid (*not executed*; test A-4c proves it).
@@ -408,7 +417,7 @@ No `SELECT *` on either table. No further row narrowing now (security ruling 2).
 | TM-3 | Lateral use within X, or of platform-scope NULL arms (rev 1 was wrong here, K1-1) | The §6.4 restrictive fence on all seven exposed tables; the closed §6.5 list; the kill-switch resolver raises for this shape; A-18 future-proofing; A-19 column discipline | Reads of X's `staff_users` and `grants` rows are GUC-only (recursion exception), so a session with the acting GUC shape but no valid grant could read them. It cannot be created outside the setter, which raises first. Reference-data reads (§6.2) are accepted. |
 | TM-4 | A non-governed money write | The ledger fence (§6.6); the projection fence (§6.7); `ledger_accounts` INSERT limited by account type | None known |
 | TM-5 | GUC injection | The sole setter; the static tests (§6.1); P from the token, X from the route; the validator re-reads staff | A future raw `set_config`, pinned by static test |
-| TM-6 | A mixed session (corrected) | The setters are mutually exclusive by construction (no setter sets both families' GUCs); `financial_actor_session()`, the acting validator and every 0111/0112/0114 policy require the other family's GUCs unset | Existing tenant policies elsewhere do not check the acting GUCs. A hypothetical acting + `app.tenant_id` session would have exactly its tenant half's power, and no K-table or ledger-fence power. Pinned by the static tests. |
+| TM-6 | A mixed session (corrected) | The setters are mutually exclusive by construction (no setter sets both families' GUCs); `financial_actor_session()`, the acting validator and every 0112/0113/0115 policy require the other family's GUCs unset | Existing tenant policies elsewhere do not check the acting GUCs. A hypothetical acting + `app.tenant_id` session would have exactly its tenant half's power, and no K-table or ledger-fence power. Pinned by the static tests. |
 | TM-7 | A single compromised platform account | It needs its own G-P2 (a second platform human) and an independent approver per operation (a distinct Person) | **Two colluding platform admins**, plus the `seed-admin` trust root (§9). **LAUNCH FLAG:** needs human risk acceptance before real-money K operations (security review). |
 | TM-8 | A stale JWT | In-tx re-read and `FOR SHARE` at execution (§7) | There is no suspend API (STAFF-LIFECYCLE-1). **Grant revoke is the emergency stop** (§8.1). |
 | TM-9 | Self-approval of an acting grant | R-2, R-3, R-4, R-8 | None known |
@@ -427,7 +436,7 @@ No `SELECT *` on either table. No further row narrowing now (security ruling 2).
    Anything else raises `CG001`. The actor's `status` must be `active`. A NULL `person_id` raises
    `CG002` for any K write.
 2. **Forced actor columns.** Every `*_by`, `*_by_scope` and `*_by_person_id` column on a
-   0111/0112/0114 table is overwritten by the trigger from the resolver (the `0105:88-89`
+   0112/0113/0115 table is overwritten by the trigger from the resolver (the `0105:88-89`
    precedent). A test asserts that a mismatching supplied value never persists.
 3. **In-tx role re-check.** The trigger checks the actor's current `role` against the catalogue's
    role sets (§10.1). Test A-15 pins that the Go map and the catalogue agree.
@@ -524,7 +533,7 @@ real, distinct person; that is a runbook control, not a DB property.
   STAFF-LIFECYCLE-1 deliverable, not K1.** 23 test files insert `platform_admin` fixtures directly,
   and they need a shared helper first. The static test above is mandatory in K1.
 
-## 10. Migration 0111 (K1) — content
+## 10. Migration 0112 (K1) — content
 
 Common rules:
 - **FORCE ROW LEVEL SECURITY** on every new table.
@@ -552,13 +561,13 @@ Common rules:
   timestamptz) RETURNS boolean`. A NULL capability means "any financial capability".
 - `financial_actor_session()` (§7.1).
 
-### 10.2 Reference tables (family R; rows written by 0111 itself)
+### 10.2 Reference tables (family R; rows written by 0112 itself)
 
 | Table | Columns | Rows |
 |---|---|---|
-| `financial_capability_catalogue` | `capability TEXT PK`, `operation_kind TEXT NOT NULL CHECK (operation_kind IN ('ledger_adjustment','payment_force_resolve'))` (0112 adds the FK to the classification), `action TEXT CHECK (action IN ('initiate','request','approve'))`, `eligible_tenant_roles TEXT[] NOT NULL`, `platform_grantee_allowed BOOLEAN NOT NULL` | the four §3.1 rows, `eligible_tenant_roles = '{finance}'`, `platform_grantee_allowed = true` |
+| `financial_capability_catalogue` | `capability TEXT PK`, `operation_kind TEXT NOT NULL CHECK (operation_kind IN ('ledger_adjustment','payment_force_resolve'))` (0113 adds the FK to the classification), `action TEXT CHECK (action IN ('initiate','request','approve'))`, `eligible_tenant_roles TEXT[] NOT NULL`, `platform_grantee_allowed BOOLEAN NOT NULL` | the four §3.1 rows, `eligible_tenant_roles = '{finance}'`, `platform_grantee_allowed = true` |
 | `financial_governance_permissions` | `permission TEXT PK`, `roles TEXT[] NOT NULL` | the seven §3.2 rows |
-| `financial_capability_settings` | `key TEXT PK CHECK (key IN ('acting_grant_max_lifetime'))`, `value_interval INTERVAL NOT NULL CHECK (value_interval > interval '0')` | **No row is inserted by the ADR.** K1 inserts the technical security default in 0111 and records it in its implementation record (§8.2). With no row, G-P2 requests are refused (fail closed). |
+| `financial_capability_settings` | `key TEXT PK CHECK (key IN ('acting_grant_max_lifetime'))`, `value_interval INTERVAL NOT NULL CHECK (value_interval > interval '0')` | **No row is inserted by the ADR.** K1 inserts the technical security default in 0112 and records it in its implementation record (§8.2). With no row, G-P2 requests are refused (fail closed). |
 
 ### 10.3 `staff_capability_grant_requests` (families T, P; no A)
 
@@ -632,8 +641,8 @@ Common rules:
 
 ### 10.7 Down
 
-Refuse (`CG099`) while any row exists in 0111's request, approval or grant tables. Otherwise drop, in
-reverse order: the triggers and policies on existing tables (restoring their pre-0111 effective
+Refuse (`CG099`) while any row exists in 0112's request, approval or grant tables. Otherwise drop, in
+reverse order: the triggers and policies on existing tables (restoring their pre-0112 effective
 policy sets exactly), then the new tables, then the functions.
 
 ## 11. Audit
@@ -710,7 +719,7 @@ Notes:
 | A-14b | R | Static: only `cmd/seed-admin` (plus allow-listed test support) inserts `platform_admin` |
 | A-15 | R | The Go role map equals the catalogue role sets |
 | A-16 | R | Static: no raw `set_config('app.acting_…')`; only the two packages call the setter; its P and X arguments come from the token subject and the route target |
-| A-17 | MIG | 0111 up/down/up; down refuses with rows; after down, the effective policy sets on the seven fenced tables equal pre-0111 |
+| A-17 | MIG | 0112 up/down/up; down refuses with rows; after down, the effective policy sets on the seven fenced tables equal pre-0112 |
 | A-18 | R | Static: migration replay finds no NULL-arm table without the restrictive acting fence |
 | A-19 | R | Static column discipline (§6.8) |
 
@@ -815,7 +824,7 @@ HANDOVER index, plan §3 Touches, and the review records.
 | F1 (HIGH) | §6.7, A-4b |
 | F2 | §6.6, A-4c; (d) in ADR 0101 §5.4 |
 | F3 | §7.4, A-9; ADR 0100 §8 (A8) |
-| Ruling 2 (acting SELECT for exposure) | §6.5 (`payment_attempts`, `deposit_intents` SELECT in 0112) |
+| Ruling 2 (acting SELECT for exposure) | §6.5 (`payment_attempts`, `deposit_intents` SELECT in 0113) |
 | Ruling 6 | §7.4; ADR 0100 §8 |
 | F4–F17, rulings 1, 3–5, 7 | ADR 0100 §17, ADR 0101 §16 |
 | **Orchestrator decisions** | G-P2 lifetime and re-attestation defaults are technical security defaults: §8.2, §8.3, §16.3. Registry ids used: STAFF-LIFECYCLE-1. |

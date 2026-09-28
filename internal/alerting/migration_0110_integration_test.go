@@ -110,7 +110,12 @@ func TestMigration0110_DownRefusesWithRows(t *testing.T) {
 	tenantA := seedTenant(t, pool, admin)
 	seedOpenAlert(t, pool, tenantA, KindPaymentKillSwitchEngaged, "switch:"+uuid.NewString())
 
-	_, err := pool.MigrateDown(context.Background(), realMigrationsDir(t), 1)
+	// steps=2: PRH-2 K1 (ADR 0099) added migration 0112 on top of 0110.
+	// Rolling back only 1 step now undoes 0112 (which has no rows of its
+	// own here and reverses cleanly), never reaching 0110's own down
+	// migration at all - 2 steps is what actually exercises 0110's
+	// refuse-with-rows guard this test is named for.
+	_, err := pool.MigrateDown(context.Background(), realMigrationsDir(t), 2)
 	if err == nil {
 		t.Fatal("expected migration 0110's down migration to refuse while an alerts row exists")
 	}
@@ -130,7 +135,8 @@ func TestMigration0110_DownRefusesWithRoutesOnly(t *testing.T) {
 		t.Fatalf("seed route: %v", err)
 	}
 
-	_, err = pool.MigrateDown(context.Background(), realMigrationsDir(t), 1)
+	// steps=2: see TestMigration0110_DownRefusesWithRows's identical note.
+	_, err = pool.MigrateDown(context.Background(), realMigrationsDir(t), 2)
 	if err == nil {
 		t.Fatal("expected migration 0110's down migration to refuse with a routes-only state")
 	}
@@ -156,21 +162,29 @@ func TestMigration0110_UpDownUp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("verify: %v", err)
 	}
-	// This branch legitimately shows a 108->110 version gap: G1's
-	// migration 0109 is not merged here yet. That is expected and the
-	// orchestrator resolves the final numbering at merge (see this
-	// migration's own header note) - assert every CHECKSUM result is
-	// clean (report.OK()'s other half) without requiring report.OK()
-	// itself, which would also fail on this known, disclosed gap.
+	// This branch may legitimately show ONE known, disclosed version gap,
+	// depending on which sibling branches are merged into this worktree
+	// yet: G1's migration 0109 (if not yet merged), or PRH-2 B's migration
+	// 0111 (the casino bootstrap - if not yet merged; PRH-2 K1's own
+	// migration is 0112, allocated on top of B's 0111 per the
+	// orchestrator's mid-build renumbering, see ADR 0099's own "NOTE ON
+	// NUMBERING"). Either is expected and resolved by the orchestrator at
+	// merge time - assert every CHECKSUM result is clean (report.OK()'s
+	// other half) without requiring report.OK() itself, which would also
+	// fail on either known, disclosed gap.
 	for _, res := range report.Results {
 		if res.Status == db.MigrationCheckMismatch || res.Status == db.MigrationCheckMissingFile {
 			t.Fatalf("expected no checksum drift, got %+v", res)
 		}
 	}
-	if len(report.VersionGaps) > 1 {
-		t.Fatalf("expected at most the known 108->110 gap, got %v", report.VersionGaps)
+	knownGaps := map[string]bool{
+		"missing migration version 109 (gap between 108 and 110)": true,
+		"missing migration version 111 (gap between 110 and 112)": true,
 	}
-	if len(report.VersionGaps) == 1 && report.VersionGaps[0] != "missing migration version 109 (gap between 108 and 110)" {
-		t.Fatalf("expected only the known 108->110 gap, got %v", report.VersionGaps)
+	if len(report.VersionGaps) > 1 {
+		t.Fatalf("expected at most one known gap, got %v", report.VersionGaps)
+	}
+	if len(report.VersionGaps) == 1 && !knownGaps[report.VersionGaps[0]] {
+		t.Fatalf("expected only a known gap, got %v", report.VersionGaps)
 	}
 }

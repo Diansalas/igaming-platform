@@ -594,6 +594,51 @@ const (
 	PermPaymentsKillSwitchRead    Permission = "payments_kill_switch:read"
 )
 
+// Capability-grant governance permissions (PRH-2 K1, ADR 0099 §3.2). These
+// gate the STATIC route-level authority to touch the grant workflow
+// itself; they are deliberately NOT grantable (there is no bootstrap for
+// a grantable approver capability - §3.2's own reasoning) and are held
+// identically by every role the catalogue's financial_governance_
+// permissions table (migration 0112) lists for that permission - test
+// A-15 pins the two in agreement.
+//
+// Holding one of these answers only "may this role attempt this HTTP
+// call at all". The actual grant invariants (no self-grant, distinct
+// Persons, platform co-approval, no un-revoke, etc.) are enforced by
+// migration 0112's own triggers regardless of what any caller's role is -
+// exactly the two-layer design ADR 0099 §2.1 describes for every future
+// governed financial action.
+//
+//   - PermCapabilityGrantRequest: file a grant request (a tenant_admin,
+//     for its own tenant, or a platform_admin, for any tenant/platform
+//     grantee).
+//   - PermCapabilityGrantApprove: decide (approve/reject) a request.
+//     platform_admin only - R-7 (the approval's derived scope is
+//     platform) makes this structural even if this permission were ever
+//     mis-granted elsewhere.
+//   - PermCapabilityGrantRevoke: the emergency stop (§8.1).
+//   - PermCapabilityGrantRead: list/read requests, approvals and grants.
+const (
+	PermCapabilityGrantRequest Permission = "capability_grant:request"
+	PermCapabilityGrantApprove Permission = "capability_grant:approve"
+	PermCapabilityGrantRevoke  Permission = "capability_grant:revoke"
+	PermCapabilityGrantRead    Permission = "capability_grant:read"
+)
+
+// Financial-policy governance permissions (ADR 0099 §3.2). K1 defines and
+// seeds these (financial_governance_permissions) for catalogue/Go parity
+// and bootstraps their static RBAC placement; no K1 route yet uses them -
+// they are consumed by K2 (ADR 0100, tightening ledger_adjustment policy)
+// and future financial-policy authoring surfaces. Per CLAUDE.md's
+// no-fake-completion rule, these permissions exist today ONLY as static
+// RBAC plumbing plus their catalogue row - PARTIALLY IMPLEMENTED, not a
+// working feature, until a K2+ handler checks them.
+const (
+	PermFinancialPolicyAuthor  Permission = "financial_policy:author"
+	PermFinancialPolicyTighten Permission = "financial_policy:tighten"
+	PermFinancialPolicyRead    Permission = "financial_policy:read"
+)
+
 // rolePermissions is a static, in-code role -> permission-set mapping.
 // Stage 2 does not make this database-driven/partner-configurable - that
 // would be a Stage 6 partner-console feature (custom roles), premature
@@ -664,6 +709,12 @@ var rolePermissions = map[Role]map[Permission]bool{
 		// PRH-2 I-core (ADR 0102 §4.2/C-102-7): the sole grantee of
 		// PermAlertManage. See that permission's own doc comment.
 		PermAlertManage,
+		// PRH-2 K1 (ADR 0099 §3.2): platform_admin holds every governance
+		// permission - it is the sole grantee of capability_grant:approve
+		// (R-7) and financial_policy:author, and (like every other role
+		// that requests grants) also holds :request/:revoke/:read.
+		PermCapabilityGrantRequest, PermCapabilityGrantApprove, PermCapabilityGrantRevoke, PermCapabilityGrantRead,
+		PermFinancialPolicyAuthor, PermFinancialPolicyRead,
 	),
 	// Stage 3D business decision #4/#5: tenant_admin (a broad
 	// administrative role that also holds PermStaffManage) deliberately
@@ -762,6 +813,14 @@ var rolePermissions = map[Role]map[Permission]bool{
 		// session from self-approving or touching a platform-engaged row,
 		// not the permission grant.
 		PermPaymentsKillSwitchEngage, PermPaymentsKillSwitchRelease, PermPaymentsKillSwitchRead,
+		// PRH-2 K1 (ADR 0099 §3.2, HD-PRH-2 = (c)): a tenant admin may
+		// REQUEST a grant for its own tenant's finance staff and REVOKE any
+		// grant in its own tenant (the emergency stop, §8.1), plus read.
+		// Never :approve - migration 0112's own R-7 trigger refuses a
+		// tenant-scope approval regardless, this permission grant is the
+		// static half of that same decision.
+		PermCapabilityGrantRequest, PermCapabilityGrantRevoke, PermCapabilityGrantRead,
+		PermFinancialPolicyTighten, PermFinancialPolicyRead,
 	),
 	RoleSupport: permSet(
 		PermPlayerRead,
@@ -813,6 +872,13 @@ var rolePermissions = map[Role]map[Permission]bool{
 		// PRH-I3 (ADR 0096 §6/§13 condition 7): see
 		// PermKYCEnforcementDecisionRead's own doc comment.
 		PermKYCEnforcementDecisionRead,
+		// PRH-2 K1 (ADR 0099 §3.2): read-only capability-grant/financial-
+		// policy visibility, same "compliance sees, never acts" shape as
+		// every other read-only grant on this role. Compliance is
+		// deliberately NOT a capability-grant requester/approver/revoker,
+		// and is never itself an eligible grantee (§3.3 - "compliance is
+		// not eligible in PRH-2").
+		PermCapabilityGrantRead, PermFinancialPolicyRead,
 	),
 	// finance is Stage 3B's own role, dedicated solely to withdrawal
 	// governance - it holds all four withdrawal permissions and nothing
@@ -830,6 +896,11 @@ var rolePermissions = map[Role]map[Permission]bool{
 		PermCasinoTransactionRead,
 		// Stage 10.3 W2b: see PermCasinoReconciliationRead's own doc comment.
 		PermCasinoReconciliationRead,
+		// PRH-2 K1 (ADR 0099 §3.2): finance is an eligible capability
+		// GRANTEE (§3.3), not a grant requester/approver/revoker - it holds
+		// no capability_grant:* permission, only the financial-policy read
+		// the catalogue lists it for.
+		PermFinancialPolicyRead,
 	),
 	// Stage 4G: risk_manager is dedicated solely to Risk & Limits
 	// configuration - it holds both risk_config permissions and nothing

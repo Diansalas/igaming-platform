@@ -216,6 +216,24 @@ func isP0001(err error) bool {
 	return errors.As(err, &pgErr) && pgErr.Code == "P0001"
 }
 
+// isP0001OrActingFence accepts P0001 (this file's own subject-actor guard)
+// OR CG020 (PRH-2 K1, migration 0112's audit_log_acting_actor trigger,
+// ADR 0099 §10.6/C-99-3). Both triggers are BEFORE INSERT on audit_log;
+// Postgres fires them in trigger-name order, and "audit_log_acting_actor"
+// sorts before "audit_log_subject_actor_guard" - so a shape with an acting
+// GUC set (present but not the C-1 exact shape) is now refused by the
+// NEWER, earlier-firing trigger before the older one ever runs. This is a
+// strengthening, not a regression: the same shape is still refused, only
+// the exact SQLSTATE changed for the specific cases that involve an
+// acting GUC.
+func isP0001OrActingFence(err error) bool {
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) {
+		return false
+	}
+	return pgErr.Code == "P0001" || pgErr.Code == "CG020"
+}
+
 // TestSubjectActorGuard_Refusals is ADR 0104 §7's "AZ/RLS write side"
 // list, and §7's MUT items for the trigger.
 func TestSubjectActorGuard_Refusals(t *testing.T) {
@@ -278,8 +296,8 @@ func TestSubjectActorGuard_Refusals(t *testing.T) {
 		}
 		return Record(ctx, tx, Entry{ActorType: ActorStaff, ActorID: admin, Action: "test.az5", Outcome: OutcomeSuccess, SubjectTenantID: tenantA})
 	})
-	if !isP0001(err) {
-		t.Errorf("(5) app.acting_tenant_id set: expected P0001, got %v", err)
+	if !isP0001OrActingFence(err) {
+		t.Errorf("(5) app.acting_tenant_id set: expected P0001 or CG020, got %v", err)
 	}
 
 	// (5b) app.platform_service_id set alongside the platform GUC: refused.
@@ -322,8 +340,16 @@ func TestSubjectActorGuard_Refusals(t *testing.T) {
 			}
 			return Record(ctx, tx, Entry{ActorType: ActorStaff, ActorID: admin, Action: "test.az" + gc.name, Outcome: OutcomeSuccess, SubjectTenantID: tenantA})
 		})
-		if !isP0001(err) {
-			t.Errorf("(%s) %s set alone: expected P0001, got %v", gc.name, gc.guc, err)
+		// 5e sets app.acting_platform_principal_id, which migration 0112's
+		// audit_log_acting_actor trigger (fires first - see
+		// isP0001OrActingFence's own doc comment) now also refuses, with
+		// CG020 rather than this file's own P0001.
+		ok := isP0001(err)
+		if gc.name == "5e" {
+			ok = isP0001OrActingFence(err)
+		}
+		if !ok {
+			t.Errorf("(%s) %s set alone: expected P0001 (or CG020 for 5e): got %v", gc.name, gc.guc, err)
 		}
 	}
 
