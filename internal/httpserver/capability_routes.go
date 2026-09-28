@@ -169,6 +169,28 @@ func writeCapabilityError(ctx context.Context, deps Deps, w http.ResponseWriter,
 	case capability.ErrClassGuardRefusal:
 		c.logger.Warn("capability_grant_refused", "op", op, "class", string(class))
 		recordCapabilityRefusalAudit(ctx, deps, c, op, string(class), targetType, targetID)
+		// I-1 (architect ruling on G-P1, docs/plans/prh2-hardening-round/
+		// reviews/k1-architect-ruling-gp1.md): G-P1 (a platform session
+		// requesting a grant naming a tenant-scoped grantee) is DEFERRED,
+		// refused fail-closed by migration 0112's own grantee-lookup guard
+		// (CG010 "grantee ... does not exist" - a plain platform session
+		// is structurally blind to any tenant-scoped staff_users row,
+		// migration 0011 dual_scope_isolation). A platform caller cannot
+		// be told WHY in more detail without a lookup that would itself
+		// require the very visibility that does not exist (there is no
+		// way to distinguish "this grantee is real but tenant-scoped"
+		// from "this grantee id does not exist at all" from a platform
+		// session) - so every guard refusal on the request op, from a
+		// platform-scoped caller, gets this one legible message. This is
+		// a deliberate, disclosed simplification: it may also fire for a
+		// different platform-session refusal reason (e.g. an ineligible
+		// G-P2 role or lifetime); the SQLSTATE-derived 409 Conflict class
+		// is unchanged either way, only the message text is friendlier.
+		if op == "request" && c.tc.TenantID == uuid.Nil {
+			apierror.Write(w, c.requestID, apierror.CodeConflict,
+				"platform-originated grants for tenant staff are not supported; the tenant administrator requests (G-T)")
+			return
+		}
 		apierror.Write(w, c.requestID, apierror.CodeConflict, "conflict")
 	case capability.ErrClassSessionInvalid:
 		c.logger.Error("capability_grant_session_invalid", "op", op, "err", err.Error())
