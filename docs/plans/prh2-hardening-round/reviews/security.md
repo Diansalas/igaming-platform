@@ -99,3 +99,31 @@ Reviewer: `security`, read-only. Plan at `a3547f5`; claims checked against code 
 - The "19 call sites across 9 files" count and the E3 sweep list were not verified.
 - Whether a staff suspension endpoint exists was not verified; S-4 holds either way.
 - This is a design-level review, not a pen-test.
+
+## Addendum — ruling on plan revision 2 (`d2cf040`), 2026-09-28
+
+**1. S-7 item 5 vs LF-7: the split is ACCEPTED, with conditions.**
+- Security withdraws abort-on-failure for financial evidence and posting transactions: there, the dispute or receipt record is itself the fail-closed outcome.
+- ADR 0102 may use abort-on-failure for non-financial integrity alerts.
+
+Conditions, for ADR 0102 and the I tests:
+- **(a) Narrow swallow.** Only `Raise`'s own error inside its savepoint is swallowed, and the savepoint is rolled back. An already-aborted outer transaction (25P02), a serialization failure or a deadlock propagates; it is never swallowed.
+- **(b) Post-commit retry.** After the business transaction commits, a swallowed in-transaction `Raise` gets a best-effort detached `Raise` in a fresh transaction. A log plus a metric alone would lose the durable P1 in exactly the case that needs it.
+- **(c) Error log and metric.** Log at Error and increment `alert_raise_failures_total{kind}` (bounded labels, no tenant label). Neither is a prerequisite for the money path.
+- **(d) Reconciliation backstop.** The standing reconciliation checks (`pay_captured_unposted`, `pay_duplicate`) must surface every condition whose P1 might be swallowed. ADR 0102 lists the backing check per alert Kind; for any Kind without a backstop, (b) becomes mandatory, not best-effort.
+- **(e) Tests.**
+  - An injected `Raise` failure inside T10/T13d still commits the dispute or receipt, returns the uniform 200, and fires the post-commit detached `Raise`.
+  - An already-aborted outer transaction is not masked.
+  - Mutants: no savepoint; swallowing the outer-transaction error.
+
+**2. H sweeping regardless of tenant status: ACCEPTED, with amendments.**
+- **(a) Resolution only for non-active tenants.** Allowed: `QueryStatus`, evidence application, dispute, and T17 re-drive of an already-sent attempt. Never a new money-moving call: no `created`-attempt dispatch, no cascade child, no new payout `Withdraw`. A non-active tenant is treated like an engaged kill switch for new dispatch.
+- **(b) Per-tenant safeguards.**
+  - Tenant status is read in-transaction for each tenant.
+  - The kill switch and the synthetic-adapter tripwire still apply.
+  - Credentials come only from the per-tenant resolver, never from another tenant or a platform credential.
+  - Every resolution action is audited as for active tenants.
+- **(c) Tests.**
+  - A suspended tenant's pending attempt resolves by poll.
+  - A suspended tenant's `created` attempt is not dispatched.
+  - Tenant isolation: one tenant's suspension neither affects nor exposes another.
