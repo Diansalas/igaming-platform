@@ -154,6 +154,62 @@ liveness/readiness poller already alerts on today.
 - `payment_webhook_signature_invalid` / `payment_webhook_failed` (payments
   side, see above).
 
+### Webhook admission metrics (ADR 0097 §8, PRH-I4-METRICS-1)
+
+**Status: IMPLEMENTED (local; pending orchestrator merge).** `internal/observability/
+webhook_admission_metrics.go`, wired from every decision point in `internal/httpserver/
+webhook_admission.go`'s `admitPreAuth`/`admitVerified`/`writeDBGateUnavailable`. `security`
+reviewed this and returned ACCEPT with no conditions; `code-reviewer` returned READY WITH
+CONDITIONS, closed in the same branch (`docs/plans/prh2-hardening-round/reviews/j-*.md`). This
+is not yet a registry closure - the orchestrator closes `PRH-I4-METRICS-1` at merge.
+
+- `webhook_admission_decisions_total{decision,reason,provider_kind,stage}` - an OTel counter,
+  incremented once per admission decision. `decision` is `admitted`/`rejected`. `reason` is one
+  of `admitted`, `ip`, `preauth`, `inflight`, `db_gate`, `verified`, `domain_bulkhead`,
+  `directory_unloaded`, `panic` (mirrors the existing `webhook_admission_rejected` log line's
+  `tier` field, above). `provider_kind` is the webhook domain (`payments`/`casino`/`kyc`) -
+  **never** a raw provider id and **never** a tenant identifier of any kind (HD-PRH-1, the
+  question of whether webhook paths/slugs are tenant-confidential, is still open).
+  **`stage`** is `preauth` (A2/A3/A4a/A4b) or `verified` (B1/B2) - **read `decision="admitted"`
+  per-stage, never summed across both stages as "requests admitted".** A single successfully
+  processed webhook callback is admitted TWICE - once at `stage="preauth"`, once at
+  `stage="verified"` - so `sum(decisions_total{decision="admitted",stage="preauth"})` and
+  `sum(decisions_total{decision="admitted",stage="verified"})` both approximate "successfully
+  processed requests" on their own (they should track each other closely; verified admitted can
+  be slightly lower than preauth admitted whenever a request is admitted at preauth but then
+  fails at verified/an auth failure past this admission layer). Any rejection-RATE ratio (e.g.
+  "% of preauth-stage traffic rejected") must divide by
+  `admitted{stage="preauth"} + rejected{stage="preauth",...}` for that same stage, never by a
+  decision total that mixes both stages together - mixing them was security review J-L2 / code
+  review J-3's finding (a request admitted at both stages used to double-count `admitted` with no
+  way to separate that from two distinct requests, silently understating any preauth-stage
+  rejection ratio).
+- `webhook_admission_inflight{provider_kind}` - an OTel `UpDownCounter` (gauge) tracking the A4a
+  in-flight bulkhead's current occupancy: `+1` when a request acquires its A4a slot, `-1` when
+  released (now via its own `sync.Once`, so a double release can never drive it negative - J-5).
+  At rest it reads 0 for a given `provider_kind`.
+- **No tenant label on either metric**, enforced by a permanent static test
+  (`internal/observability/webhook_admission_closed_enum_static_test.go`, security review J-L3)
+  that fails the build if any package other than `internal/observability` converts an arbitrary
+  value to one of these label types - and no metrics backend is deployed (same caveat as every
+  other metric in this document - see "Known gaps" below). Both instruments are created from the
+  OTel *global* meter (`observability.InitMetrics` in `cmd/platform-api/main.go` installs the
+  real provider; before that, or with `OTEL_EXPORTER=none`, every call is a documented no-op via
+  a nil-instrument guard) - a missing or failing metrics backend, or even an instrument whose
+  `Add()` panics, can never change an admission decision: every recording call happens strictly
+  after the decision is made and the HTTP response already written, AND is wrapped in a recover
+  of its own. `internal/observability/webhook_admission_metrics_test.go` and
+  `internal/httpserver/webhook_admission_metrics_test.go` assert this directly (identical HTTP
+  outcomes under a real meter, a nil instrument, a panicking instrument, and a slow instrument -
+  via `observability.SetWebhookAdmissionInstrumentsForTest`, a test-only seam; the OTel global
+  provider's own one-time delegate binding makes a plain second `SetMeterProvider` call
+  ineffective for this purpose, code review J-1).
+- **What this closes, and what it doesn't.** ADR 0097 §8 additionally specified
+  `webhook_db_gate_in_use`, `webhook_limiter_keys{tier}`, `webhook_tenant_directory_size`, and
+  `webhook_tenant_directory_age_seconds` gauges - those are **NOT IMPLEMENTED** (tracked as
+  `PRH-I4-METRICS-2`, non-blocking; only the decisions counter and the A4a in-flight gauge were
+  in this workstream's scope). See ADR 0097 §21.12 for the full implementation record.
+
 ### Queue / event failures
 
 - **No real message-queue/event-bus producer or consumer exists in this
@@ -307,6 +363,26 @@ against real traffic.
     Recommended follow-up (not built): emit the equivalent event on
     RELEASE too - lifting a containment is at least as alert-worthy as
     engaging one.
+13. **Webhook admission capacity rejections (P2/P3, ticket).** Rate of
+    `webhook_admission_decisions_total{decision="rejected",reason=...}`
+    (ADR 0097 §8, PRH-I4-METRICS-1) by `reason`/`provider_kind`/`stage` -
+    a sustained non-zero rate of `stage="verified"` `verified` rejections
+    for one `provider_kind` risks a vendor's own retry window (ADR 0097
+    §8's own alert note); a sustained `db_gate`/`domain_bulkhead`/
+    `inflight` rate suggests the pool-protection bulkheads are undersized
+    for real traffic, not necessarily an attack. `directory_unloaded` at
+    any rate outside a fresh deploy is itself worth paging (the admission
+    layer is failing closed on every webhook route). **Ratio queries MUST
+    stay within one `stage`:** e.g. a "% of preauth traffic rejected"
+    alert divides `rejected{stage="preauth",...}` by
+    `admitted{stage="preauth"} + rejected{stage="preauth",...}`, never by
+    a decisions total that mixes both stages - see this document's
+    "Webhook admission metrics" subsection above for why a single request
+    legitimately records `admitted` once per stage. Threshold: no tuned
+    baseline exists yet (Stage/PRH-2 addition) - start with a
+    ticket-level alert on any sustained (>5 min) non-zero rate per
+    `reason`/`stage`, promote `verified`/`directory_unloaded` to a page
+    once real provider traffic exists.
 
 ## 3. Durable alerting (ADR 0102, PRH-2 I-core; `internal/alerting`; ALERT-DELIVERY-1)
 
