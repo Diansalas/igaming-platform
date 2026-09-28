@@ -244,3 +244,39 @@ KILLED - first failure:
 Reverted and diffed byte-identical (md5sum 157a78d583f5b73bd5fd471618f59ac3 before AND after) against
 the committed original. The "harness control" sub-test was NOT re-run against this mutant - it does
 not call production code at all, by design, and re-running it would prove nothing about this finding.
+
+C-2 (code review of e810ece - the cross-token same-request_id conflict path was only exercised as a
+plain goroutine race, with no forced interleaving; reviewer mutant MC2 - "the conflict branch returns
+success instead of refusing" - survived the whole suite):
+
+Fix: TestBootstrapLaunch_CrossTokenSameRequestID_ForcedContention (internal/casino/
+bootstrap_c2_forced_contention_integration_test.go) forces the interleaving deterministically - a
+blocker holds BOTH sessions' rows FOR UPDATE, both BootstrapLaunch callers are started, the test
+polls pg_stat_activity (wait_event_type = 'Lock', query matching getLaunchSessionForBootstrap's own
+statement shape) until both are genuinely queued, THEN releases the blocker, so both proceed into
+their own step 5 CAS and the step 6 INSERT race at essentially the same instant. Run at -count=10:
+10/10 PASS on the real code (exactly one success, the loser refused BootstrapRefusalReplayMismatch,
+the loser's own session rolled back to 'active', exactly one bootstrap row for the shared
+request_id).
+
+Re-applied mutant MC2 directly to the real file (the mismatch branch reports its own success instead
+of refusing, using the same result-construction shape the real success path below it uses):
+
+  if raced.TokenHash != tokenHash || raced.RequestDigest != digest {
+      result = BootstrapResult{SessionID: session.ID, PlayerRef: playerRef, ProviderGameID: body.ProviderGameID,
+          AssetCode: body.AssetCode, Mode: mode, ResponseJSON: respJSON}
+      return nil
+  }
+
+Private DB cas_mc2_mut rebuilt from scratch via priv_db.sh, then:
+
+  PRIV_DB=cas_mc2_mut bash .../priv_test.sh -race -tags integration -run \
+    'TestBootstrapLaunch_CrossTokenSameRequestID_ForcedContention' -count=10 -v ./internal/casino/...
+
+KILLED - 10/10 FAIL, first failure:
+
+  bootstrap_c2_forced_contention_integration_test.go:112: expected exactly one of A/B to succeed
+  under forced contention, got errA=<nil> errB=<nil>
+
+Reverted and diffed byte-identical (md5sum 0c5e2ab41b2cda880023391400a61657 before AND after) against
+the committed original.
