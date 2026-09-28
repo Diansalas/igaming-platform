@@ -85,9 +85,19 @@ func testEnvWithLockTimeout(t *testing.T, lockTimeout string) *db.Pool {
 // exactly one committed `unavailable` decision row, one audit row, and no
 // withdrawal_requests row or ledger posting.
 func TestRequestWithdrawalHandler_KYCStoreOutageReturns503(t *testing.T) {
-	_, issuer := testEnv(t)
-	pool := testEnvWithLockTimeout(t, "300ms")
-	srv := newFinancialTestServer(t, pool, issuer, nil)
+	// FK-3 (code review f-kyc-code-review.md, 2026-09-28): every fixture
+	// below is seeded through the ORDINARY pool, never the lock_timeout
+	// one. The lock_timeout pool is reserved for newFinancialTestServer
+	// alone - the one thing this test actually needs a short lock_timeout
+	// on is the HANDLER's own transaction, which is the only place the
+	// KYC-store outage is being probed. Seeding fixtures through that same
+	// pool would risk a fixture statement waiting behind an unrelated
+	// lock (e.g. another package's own TRUNCATE on a shared CI database)
+	// for longer than 300ms and failing with an unrelated 55P03, which
+	// has nothing to do with what this test is actually proving.
+	pool, issuer := testEnv(t)
+	lockTimeoutPool := testEnvWithLockTimeout(t, "300ms")
+	srv := newFinancialTestServer(t, lockTimeoutPool, issuer, nil)
 	tenant := mustCreateTenant(t, pool)
 	brand := mustCreateBrand(t, pool, tenant)
 	player := mustRegisterPlayer(t, srv, brand.Slug)
@@ -117,6 +127,21 @@ func TestRequestWithdrawalHandler_KYCStoreOutageReturns503(t *testing.T) {
 	if unavailableCount != 1 {
 		t.Fatalf("expected exactly 1 kyc_enforcement_decisions row with outcome='unavailable', got %d", unavailableCount)
 	}
+	// FK-4 (code review f-kyc-code-review.md): NOT asserted here on
+	// purpose. kyc_enforcement_decisions has no `code` column at all
+	// (migration 0100 stores outcome/allowed/matched_trigger/
+	// policy_version/correlation_id only - EnforcementDecision.Code is an
+	// in-memory value, never persisted), and the player-facing HTTP
+	// response deliberately never exposes it either (security condition
+	// 8: "player-facing surface: status only, never matched_trigger/
+	// policy_version/an amount", withdrawal_handlers.go's own comment) -
+	// there is no observable surface at this layer to assert Code
+	// against. The code IS asserted directly, at the layer where it is
+	// actually observable, by
+	// TestRequestWithdrawal_KYCStoreOutage_FailsClosedWithOneUnavailableDecision
+	// (internal/withdrawal) and the casino/sportsbook play-path outage
+	// tests (§23.5), all three of which hold the real
+	// EnforcementDecision/DeclineReason/RejectionCode value directly.
 	auditAfter := countRows(t, pool, tenant.ID, `SELECT count(*) FROM audit_log WHERE action = 'kyc.enforcement_denied'`)
 	if auditAfter != auditBefore+1 {
 		t.Fatalf("expected exactly 1 new audit_log row, got %d new", auditAfter-auditBefore)

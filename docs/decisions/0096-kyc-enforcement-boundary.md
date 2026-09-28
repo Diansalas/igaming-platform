@@ -2364,11 +2364,18 @@ open below land and every mandatory reviewer signs off clean.
   unlike withdrawal's own separately-committed-decision pattern, NO
   decision/audit row survives for that attempt. This is the same class of
   gap security condition 5 closed for withdrawal, not yet closed for play.
-  **[CLOSED 2026-09-28, §23.1]** KYC-ENF-OUTAGE-1's savepoint fix to
+  **[PARTIALLY CLOSED 2026-09-28, §23.1/§23.5; corrected same day, code
+  review `f-kyc-code-review.md` FK-1]** KYC-ENF-OUTAGE-1's savepoint fix to
   `EvaluateEnforcement` applies to every call site, not only withdrawal -
-  a genuine DB-read failure no longer aborts the caller's transaction at
+  a genuine DB-READ failure no longer aborts the caller's transaction at
   all, so `postBet`/`PlaceBet`'s own subsequent `RecordDecision` call now
-  succeeds and commits exactly like withdrawal's already did. See §23.1.
+  succeeds and commits exactly like withdrawal's already did. **This
+  closes the `EvaluateEnforcement`-error half only**, pinned by a
+  dedicated casino/sportsbook fault-injection test (§23.5). The
+  `RecordDecision`-error half (that call itself failing, e.g. on the
+  INSERT) is UNTOUCHED - it still runs directly against the caller's
+  transaction and still rolls back the whole bet with no decision/audit
+  row surviving on that specific failure. See §23.1/§23.5.
 - **B7 (same-key concurrent retry can report a denial for a hold that
   exists).** Not fixed - the narrow TOCTOU window code review named
   (KYC state changes between two concurrent same-key requests, one of
@@ -3620,16 +3627,35 @@ transaction, alongside its audit row.
 
 **Scope: every call site, not only withdrawal.** The fix lives in
 `EvaluateEnforcement` itself, so it applies uniformly to withdrawal,
-deposit, casino play, and sportsbook play - not withdrawal alone. This
-also CLOSES §16.2's LF-I3-5 disclosure ("casino/sportsbook decision loss
-on DB error"): before this round, a genuine DB failure during
-`postBet`/`PlaceBet`'s KYC evaluation rolled back the WHOLE bet-placement
-transaction with no decision/audit row surviving (correctly fail-closed
-for the bet itself, but silently losing the compliance record) - since
-the read is now contained to a savepoint, the decision/audit row for a
-play-path DB failure survives exactly like withdrawal's already did.
-**LF-I3-5 is now CLOSED, superseding its "recorded here, not fixed"
-status in §16.2.**
+deposit, casino play, and sportsbook play - not withdrawal alone.
+
+**[REWORDED 2026-09-28, code review `f-kyc-code-review.md` FK-1]** §16.2's
+LF-I3-5 disclosure ("casino/sportsbook decision loss on DB error") names
+TWO distinct failure cases: `EvaluateEnforcement` itself returning a
+genuine read error, and `RecordDecision` returning one. This round's
+savepoint fix closes only the FIRST: before it, a genuine DB failure
+inside the KYC READ during `postBet`/`PlaceBet`'s evaluation rolled back
+the whole bet-placement transaction with no decision/audit row surviving;
+the read is now contained to a savepoint, so that failure mode is fixed,
+and is pinned by a dedicated play-path fault-injection test for BOTH
+casino and sportsbook (§23.5) - not merely reasoned about. The SECOND
+case - `RecordDecision` itself failing (e.g. a constraint violation, a
+connection drop, on the INSERT rather than the read) inside
+`postBet`/`PlaceBet` - is untouched by this fix: that write still runs
+directly against the caller's transaction, so its own failure still rolls
+back the whole bet with no decision/audit row surviving. This is the SAME
+class of gap security condition 5 already closed for withdrawal via
+`RequestWithdrawal`'s LF-I3-3 same-transaction-commit design (§17.1) -
+withdrawal's own `RecordDecision` call sits inside the SAME transaction as
+the request's own effects, deliberately, so a decision-write failure
+there aborts nothing it wasn't already going to abort; the play call
+sites have no equivalent design discipline documented or tested.
+**LF-I3-5 is corrected from "CLOSED" to: the evaluate-error half is
+CLOSED (§23.1, §23.5); the RecordDecision-error half remains OPEN**,
+superseding the earlier "LF-I3-5 is now CLOSED" claim in this same
+section and in §23.9's round-9 label summary. No fix for the
+RecordDecision-error half is built this round; it is registered as a
+named follow-up (see the F-kyc code review's own FK-1 finding).
 
 **Withdrawal-side handler mapping is unchanged in shape.**
 `withdrawal_handlers.go`'s existing `kycDenied.Decision.Outcome ==
@@ -3644,11 +3670,11 @@ surfaces as an ordinary `unavailable` `EnforcementDecision` with a nil
 error, handled via the normal `*KYCDeniedError` path instead).
 
 **LF-20 (ledger-finance's condition on this round, §5-F):** proved
-directly - see §23.4's fault-injection tests, which assert zero
+directly - see §23.5's fault-injection tests, which assert zero
 `withdrawal_requests` rows and zero ledger postings alongside the single
 committed `unavailable` decision/audit pair.
 
-**Mutant MB1 (the handler's 503 branch disabled): KILLED** - see §23.4.
+**Mutant MB1 (the handler's 503 branch disabled): KILLED** - see §23.5.
 
 ### 23.2 N5 — `DenyForCompliance` now refuses `Outcome = unavailable`
 
@@ -3718,20 +3744,52 @@ genuinely held - no polling, no wall-clock assertion beyond Postgres's own
 - `TestRequestWithdrawal_KYCStoreOutage_FailsClosedWithOneUnavailableDecision`
   (`internal/withdrawal/kyc_outage_fault_injection_integration_test.go`)
   drives `RequestWithdrawal` directly, with `SET LOCAL lock_timeout =
-  '300ms'` inside the request transaction.
+  '300ms'` inside the request transaction. Its LF-20 ledger assertion
+  (ledger-finance `f-kyc-ledger-finance.md` F-1, fixed in a follow-up
+  commit on this same branch) counts the tenant's WHOLE
+  `ledger_transactions` table and both the `player_cash`/
+  `player_withdrawal_hold` projection balances before/after, rather than
+  filtering by a correlation id a hold posting could never carry.
 - `TestRequestWithdrawalHandler_KYCStoreOutageReturns503`
   (`internal/httpserver/kyc_outage_503_integration_test.go`) drives the
   REAL HTTP handler end to end, via a dedicated `*db.Pool` whose
   connections are opened with `lock_timeout=300ms` as a session default
   through the connection string's own `options` parameter (a
   per-connection startup GUC - no role, database, or shared test
-  infrastructure is altered).
+  infrastructure is altered). **[FK-3, code review `f-kyc-code-review.md`]**
+  Only `newFinancialTestServer` uses this `lock_timeout`-scoped pool;
+  every fixture (`mustCreateTenant`, `mustCreateBrand`, `mustRegisterPlayer`,
+  `mustActivatePlayer`, `fundWallet`) is seeded through the ORDINARY
+  `testEnv` pool, so a fixture statement contending with another
+  package's own DDL on a shared CI database cannot spuriously fail with
+  `55P03` at a 300ms threshold that has nothing to do with what this test
+  is actually probing.
 
 Both assert: a retryable outcome (`*KYCDeniedError{Decision.Outcome:
-unavailable}` / HTTP 503), exactly one `kyc_enforcement_decisions` row
-with `outcome = 'unavailable'`, exactly one `audit_log` row, zero
-`withdrawal_requests` rows, and zero ledger postings correlated to the
-attempt (LF-20).
+unavailable}` / HTTP 503), the exact code
+`kyc_unavailable:verification_lookup_failed` (**FK-4**, not merely
+`Outcome=unavailable`), exactly one `kyc_enforcement_decisions` row with
+`outcome = 'unavailable'`, exactly one `audit_log` row, zero
+`withdrawal_requests` rows, and zero ledger postings (LF-20).
+
+**FK-1 (play-path counterparts, code review `f-kyc-code-review.md`):** the
+same lock/`lock_timeout` handshake is repeated for BOTH play surfaces,
+each with its own `lockKYCVerificationsTable` helper (package-private,
+duplicated per this repo's convention) -
+`TestReceiveCallback_KYCStoreOutage_DeclinesUnavailableWithOneDecisionRow`
+(`internal/casino/kyc_play_outage_integration_test.go`) and
+`TestPlaceBet_KYCStoreOutage_DeclinesUnavailableWithOneDecisionRow`
+(`internal/sportsbook/kyc_play_outage_integration_test.go`), each against
+a REAL active play policy (not the dormant/`not_required` default). Both
+assert: the bet declined with code
+`kyc_unavailable:verification_lookup_failed`, exactly one
+`kyc_enforcement_decisions` row with `outcome = 'unavailable'` for the
+matching operation (`casino_play`/`sportsbook_play`), the player's cash
+balance unchanged, and `SUM(debits) == SUM(credits)` with zero postings
+for the tenant. These pin the evaluate-error half of LF-I3-5 (§23.1) for
+the play surfaces specifically, closing the gap the code review named:
+before this, nothing in the repo committed a play-path outage test at
+all.
 
 ### 23.6 KYC-ENF-TESTPINS-1: B6 and MPLAYREC now pinned
 
@@ -3788,9 +3846,18 @@ MPLAYREC (both casino and sportsbook) all KILLED.
   `EvaluateEnforcement` call site; fault-injection tests pass; LF-20
   proved directly; MB1 killed. **B1 is now TRULY closed** (§16.1's fix was
   correct in shape but unreachable; this round makes it reachable).
-- **LF-I3-5 (§16.2):** CLOSED (superseded) - the same savepoint fix closes
-  the casino/sportsbook decision-loss-on-DB-error gap as a direct
-  consequence of fixing N1 at the shared `EvaluateEnforcement` level.
+- **LF-I3-5 (§16.2):** **[CORRECTED 2026-09-28, code review `f-kyc-code-
+  review.md` FK-1]** PARTIALLY CLOSED, not fully closed as this row
+  originally claimed. The evaluate-error half is CLOSED - the same
+  savepoint fix closes the casino/sportsbook decision-loss-on-DB-error gap
+  as a direct consequence of fixing N1 at the shared
+  `EvaluateEnforcement` level, pinned by a dedicated play-path
+  fault-injection test for both casino and sportsbook (§23.5). The
+  RecordDecision-error half remains OPEN: `postBet`/`PlaceBet`'s own
+  `RecordDecision` INSERT still runs directly against the caller's
+  transaction, so ITS failure still rolls back the whole bet with no
+  decision/audit row surviving - untouched by this round, registered as a
+  named follow-up.
 - **N5:** IMPLEMENTED - `DenyForCompliance` refuses `Outcome = unavailable`,
   retryable, tested.
 - **B4:** IMPLEMENTED - tenant-status filter added, three tests, one

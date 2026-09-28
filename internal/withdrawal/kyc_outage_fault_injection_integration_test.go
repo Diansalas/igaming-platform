@@ -137,6 +137,12 @@ func TestRequestWithdrawal_KYCStoreOutage_FailsClosedWithOneUnavailableDecision(
 	if kycDenied.Decision.Outcome != kyc.OutcomeUnavailable {
 		t.Fatalf("expected Decision.Outcome=%q, got %+v", kyc.OutcomeUnavailable, kycDenied.Decision)
 	}
+	// FK-4 (code review f-kyc-code-review.md): the exact code, not merely
+	// the outcome - so a future change that keeps Outcome=unavailable but
+	// silently changes/drops the specific failure code is caught here too.
+	if kycDenied.Decision.Code != "kyc_unavailable:verification_lookup_failed" {
+		t.Fatalf("expected Decision.Code=%q, got %q", "kyc_unavailable:verification_lookup_failed", kycDenied.Decision.Code)
+	}
 	if kycDenied.Decision.Allowed {
 		t.Fatalf("expected Decision.Allowed=false for an unavailable outcome, got %+v", kycDenied.Decision)
 	}
