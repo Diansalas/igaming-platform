@@ -383,3 +383,70 @@ Meanwhile, (a) applies as the documented interim.
 
 Probe source (scratch, not committed):
 `/tmp/claude-0/-home-user-igaming-platform/82298384-cc24-5365-b2fc-220688ed9969/scratchpad/fh3c-ledger-probe_integration_test.go.txt`
+
+---
+
+# Confirmation: FH3-FOLLOWUP-1 (`5ee09e4`, on `95258d7`)
+
+- **Environment:** a detached worktree and a private DB via `priv_db.sh` (`rv_lf_fu1_*`), both
+  removed.
+- **No `sudo`, `ALTER ROLE` or password change.**
+
+## Verdict: CONFIRMED. F3b, C4b and L2 are closed. FH-3 sign-off stands.
+
+### F3b (`b961bd8`, a money path): conforms to §4.4
+
+In the sweeper's `ErrorClassSucceeded` branch, the freshly re-read, under-lock attempt state is now
+decided first:
+
+- **`succeeded` × succeeded(match):** no-op, as the §4.4 row requires.
+- **`succeeded` × mismatch:** audited through `auditTerminalAmountAssetMismatch`, with no state
+  change. This matches RULING M1.
+- **`disputed`:** recorded only.
+- **Every other state** (`submitting`/`pending`/`ambiguous`, and `declined`) falls through
+  unchanged into the tombstone check and then `postDepositSuccessOrDispute`. So:
+  - a legitimate first posting (T7, or T13 from `declined`) is never skipped;
+  - INV-DEP-1 and the T10/T13d decision are never bypassed. They are taken only in the choke point,
+    which still runs for every non-terminal and `declined` state.
+- **No genuinely new state is swallowed.** Only the two terminal states whose §4.4 cell is "no
+  change" short-circuit.
+- `created` and `rejected` are not reachable on a polled attempt, because only the claimant's own
+  T5 produces `created`.
+
+Mutant results:
+
+| Mutant | Change | Result |
+|---|---|---|
+| F3S | re-read removed | **killed** (`TestINVDEP1_F3b_*` ×2) |
+| F3SW | the switch disabled | **killed** |
+| F3SD | the no-op also swallowing `declined`, which would skip a legitimate T13 first posting | **killed** (`TestRVLF_C3_SIBS_*`) |
+| F3SM | the mismatch audit disabled | **survives.** Low, non-blocking: the audit fires only for a PSP contradicting itself on a posted attempt, and no money moves either way. Add a mismatched-poll test. |
+
+**Storm (probe Q2, 25 reps, `-race`, run twice):**
+- Exactly one success and one deposit posting per intent in every rep.
+- Cash = (25 − 7) × 5000 both times; balanced; projection = rebuild.
+- **Sweeper CAS conflicts dropped from about 13 per run (FH-3c) to 0 in both runs.**
+- Probes Q1a, Q1b, Q3 and Q4 pass.
+
+**Residual (Low, pre-existing, not introduced here):**
+- The sweeper's `ErrorClassPending` / `ErrorClassAmbiguous` / `ErrorClassDefiniteDecline` branches
+  still do not short-circuit on a fresh terminal state. `MarkAccepted`, `RescheduleNonTerminal` and
+  `ApplyDecline` would CAS-conflict if a callback had just finished the attempt. That is noise
+  only. The same treatment can be applied when convenient.
+- A poll success on a *live* attempt posts `attempt.Amount` without cross-checking `res.Amount`.
+  That is pre-existing, and it is the poll-path analogue of the callback T10 mismatch rule. Register
+  it as a follow-up.
+
+### C4b (`8eaa08f`): closed
+
+`TestC4_InitiateDepositAudited_WritesRefusalAudit` now goes through `InitiateDepositAudited`, and
+mutant **C4W** is **killed**.
+
+### L2 (`430d4f7`): closed
+
+The #5c waiter must now also show `wait_event_type = 'Lock'` in the same `pg_stat_activity` row
+read. A7 stays **IMPLEMENTED**.
+
+### INV-DEP-1 mutants re-run (full `internal/payments` + `internal/reconciliation`)
+
+All killed: PRE, RECK, BOTH, IDK, AID, GNULL, C4W.
