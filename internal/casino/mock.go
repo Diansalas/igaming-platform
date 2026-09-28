@@ -436,6 +436,37 @@ func (m *MockCasinoProvider) SignRawBody(tenantID uuid.UUID, body []byte) webhoo
 	return m.signRawBody(tenantID, body)
 }
 
+// mockBootstrapRequestBody mirrors bootstrap.go's own bootstrapRequestBody
+// exactly (same JSON tags) - MOCK/TEST-ONLY, a deliberate copy per this
+// file's own convention of never importing package-private production
+// types across the test/production boundary within the same package
+// (there is none here to import; this is simply the wire shape ADR 0103
+// §3.1 fixes for every provider, never provider-specific).
+type mockBootstrapRequestBody struct {
+	LaunchToken    string `json:"launch_token"`
+	RequestID      string `json:"request_id"`
+	ProviderGameID string `json:"provider_game_id"`
+	AssetCode      string `json:"asset_code"`
+	Mode           string `json:"mode"`
+}
+
+// BootstrapPayload builds a synthetic, correctly-SIGNED vendor bootstrap
+// request (ADR 0103 §7: "MockCasinoProvider gains a bootstrap client. It
+// signs requests with the same per-tenant derived key as CallbackPayload/
+// SignRawBody"). It is a webhookauth.Inbound - the caller sends its Header
+// and Body over a REAL HTTP POST to the bootstrap route on an httptest
+// server (ADR 0103 §7: "Nothing calls BootstrapLaunch in-process as a
+// stand-in for the vendor") - this method itself performs no I/O and holds
+// no transaction.
+func (m *MockCasinoProvider) BootstrapPayload(tenantID uuid.UUID, launchToken, requestID, providerGameID, assetCode, mode string) webhookauth.Inbound {
+	body := mockBootstrapRequestBody{
+		LaunchToken: launchToken, RequestID: requestID, ProviderGameID: providerGameID,
+		AssetCode: assetCode, Mode: mode,
+	}
+	raw, _ := json.Marshal(body)
+	return m.signRawBody(tenantID, raw)
+}
+
 func (m *MockCasinoProvider) signRawBody(tenantID uuid.UUID, body []byte) webhookauth.Inbound {
 	key := m.deriveKey(tenantID, m.providerID)
 	sig := casinoScheme.Sign(key, tenantID, m.providerID, mockWebhookKeyID, body)

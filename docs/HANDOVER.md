@@ -41,7 +41,7 @@ documentation phase.
 | KYC, AML, RG | [`architecture/11-kyc-aml-rg-architecture.md`](architecture/11-kyc-aml-rg-architecture.md); ADR [0096](decisions/0096-kyc-enforcement-boundary.md) |
 | Bonus, gamification, retail | [`architecture/10-bonus-engine-architecture.md`](architecture/10-bonus-engine-architecture.md), `17`–`31` and [`26-retail-operations-architecture.md`](architecture/26-retail-operations-architecture.md) |
 | Jurisdiction and licensing | [`architecture/15-jurisdiction-and-licensing-model.md`](architecture/15-jurisdiction-and-licensing-model.md) |
-| Audit and reporting | [`architecture/12-audit-reporting-architecture.md`](architecture/12-audit-reporting-architecture.md) |
+| Audit and reporting | [`architecture/12-audit-reporting-architecture.md`](architecture/12-audit-reporting-architecture.md); tenant-visible audit of platform actions: ADR [0104](decisions/0104-tenant-visible-audit-of-platform-actions.md) (kill switch only today) |
 | Privacy | [`architecture/16-privacy.md`](architecture/16-privacy.md) |
 | Webhook security | ADR [0097](decisions/0097-webhook-admission-and-rate-limiting.md) and the webhook ADRs it cites |
 | Provider credentials and secrets | ADR [0093](decisions/0093-provider-credential-model-and-secret-store.md), [0094](decisions/0094-secret-resolution-resource-isolation.md) |
@@ -60,12 +60,12 @@ production credential exists.
 |---|---|---|
 | Payments (PSP), deposits and payouts | MOCK (`internal/payments` mock provider) | ADR 0095; PROV-OUTBOUND-CRED-1 tripwire `TestOutboundPrecondition_EveryWiredAdapterIsSynthetic`; PRH-2 C/D/E2/H; PAY-PSP-CONTRACT-INVDEP1; PAY-SEC-LAUNCH-1 |
 | Payment statements / reconciliation source | MOCK source (PRH-I5) | Real PSP statement format (provider dependent) |
-| Casino aggregator | MOCK (`internal/casino` mock) | CAS-REVOKE-CONSUMED-1 and CAS-PLAY-BOOTSTRAP-1 (PRH-2 A/B); tripwire |
-| Sportsbook provider | MOCK / in-house mock mode (ADR 0087/0088) | SB-CATALOGUE-IO-1 (PRH-2 E3); bet-placement contract unknown |
+| Casino aggregator | MOCK (`internal/casino` mock). The launch-token bootstrap endpoint (ADR 0103, migration 0111) is IMPLEMENTED against the MOCK vendor over HTTP. | CAS-REVOKE-CONSUMED-1 done (PRH-2 A, 0108). Before a real vendor: CAS-PLAYER-REF-1, a vendor-side bootstrap parse hook (ADR 0103 §13), CAS-GAME-KILL-BET-1 and CAS-BET-REQUIRES-BOOTSTRAP-1. Tripwire. |
+| Sportsbook provider | MOCK / in-house mock mode (ADR 0087/0088) | Catalogue fetch is outside any transaction (SB-CATALOGUE-IO-1, done). A bounded fetch timeout is needed before a real adapter. The bet-placement contract is unknown. |
 | KYC vendor | MOCK | KYC-SUBMIT-OUTBOX-1 (PRH-2 E1); KYC-ENFORCE-1; HD-KYC-1..8 thresholds |
 | Crypto custody | NOT IMPLEMENTED (interface only, ADR 0008) | Custodian selection (human) |
 | Email | MOCK (`internal/email` mock provider) | Vendor selection |
-| Alert delivery / paging | Log lines only today; PRH-2 I adds durable alerts and a mock sink | HD-PRH2-4-OPS (real recipients) |
+| Alert delivery / paging | Durable alerts (`internal/alerting`, migration 0110, ADR 0102): log sink IMPLEMENTED, mock sink MOCK. The dispatcher is not yet wired into `main.go` (PRH-2 I-wire). No routes or recipients are configured. | HD-PRH2-4-OPS (real recipients); a real channel adapter must dedupe on `<alert_id>:<step>` (ADR 0102 §16.3) |
 | Secret store | `devfile`/memory locally; `awssm` backend exists (AWS OFF) | ADR 0093/0094; production configuration checklist |
 
 ## Secret names inventory (names only, never values)

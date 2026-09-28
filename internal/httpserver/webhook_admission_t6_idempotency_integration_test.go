@@ -17,20 +17,59 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/Diansalas/igaming-platform/internal/admission"
 	"github.com/Diansalas/igaming-platform/internal/casino"
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/payments"
 	"github.com/Diansalas/igaming-platform/internal/reconciliation"
 )
 
-// b1ReplenishWait is how long these tests sleep, using the REAL clock,
-// between exhausting a tier-B1 (VerifiedRate) bucket and redelivering -
-// long enough for at least one token to refill at the deliberately fast
-// test-only rates configured below (10/sec => ~100ms/token), without
-// depending on a virtualized clock seam (T6 exercises admission as a real
-// dependency on the request path, not admission's own timing behavior -
-// T11 already owns that).
+// b1ReplenishWait is how far a test's injected admission.FakeClock is
+// advanced between exhausting a tier-B1 (VerifiedRate) bucket and
+// redelivering - comfortably more than one emission interval at the
+// deliberately fast test-only rates configured below (10/sec =>
+// ~100ms/token).
+//
+// TEST-ADMISSION-FLAKE-1 (root cause): this used to be a REAL time.Sleep
+// against the production RealClock. B1's admission decision for the
+// "must still be limited" request depends on the WALL-CLOCK gap between
+// it and the request that exhausted the burst token, not on anything the
+// test controls - under heavy concurrent load (this package and other
+// agents' -race suites contending for CPU) that gap can itself exceed
+// the ~100ms emission interval purely from scheduling/DB-round-trip
+// delay, so the "must not post on its first attempt" request is spuriously
+// re-admitted before the test ever calls Sleep. Reproduced deterministically
+// by inserting a forced 150ms delay between the two requests with the real
+// clock still wired: the token bucket refills, the assertion fails with
+// the exact reported message, in isolation, with no CI contention at all -
+// proving the failure is a wall-clock race between GCRA replenishment and
+// unrelated request latency, not flaky infrastructure.
+//
+// Fix: every test in this file that drives B1 into and out of its limited
+// state now injects an admission.FakeClock (ADR 0097 §5.1's own
+// determinism seam - ADR 0097 explicitly requires every limiter to take
+// an injectable clock precisely so tests are not wall-clock-dependent)
+// instead of the default RealClock. Two requests issued back-to-back with
+// no intervening Advance() are, from the limiter's point of view,
+// simultaneous regardless of how long the real HTTP round trip or Postgres
+// work between them actually takes - so "must still be limited" is now a
+// property of the fake clock's state, never of real elapsed wall time.
+// b1ReplenishWait is then a clock.Advance() argument, not a sleep duration:
+// it deterministically crosses exactly one emission interval every run.
 const b1ReplenishWait = 200 * time.Millisecond
+
+// newB1LimitTestSettings returns t6Settings() with an injected
+// admission.FakeClock wired into settings.Clock, plus the FakeClock
+// itself so the caller can Advance() it deterministically instead of
+// sleeping on the real clock (TEST-ADMISSION-FLAKE-1). Every T6 test that
+// deliberately drives a tier-B1 bucket into its limited state and then
+// expects it to replenish must use this instead of t6Settings() directly.
+func newB1LimitTestSettings() (WebhookAdmissionSettings, *admission.FakeClock) {
+	settings := t6Settings()
+	clock := admission.NewFakeClock(time.Now())
+	settings.Clock = clock
+	return settings, clock
+}
 
 // assertLedgerBalancedAndReconciled is security's explicit T6 requirement,
 // applied per variant: (1) SUM(debits) == SUM(credits) directly over
@@ -195,7 +234,7 @@ func TestAdmission_T6a_PaymentsDeposit_RetryAfter429_Idempotent(t *testing.T) {
 	brand := mustCreateBrand(t, pool, tenant)
 	mustRegisterCapability(t, pool, tenant.ID, mockProvider)
 
-	settings := t6Settings()
+	settings, clock := newB1LimitTestSettings()
 	settings.VerifiedRate["payments"] = WebhookRateBurst{Rate: 10, Burst: 1}
 	srv := newAdmissionTestServer(t, pool, issuer, orchestrator, nil, settings, false)
 
@@ -238,8 +277,11 @@ func TestAdmission_T6a_PaymentsDeposit_RetryAfter429_Idempotent(t *testing.T) {
 
 	// Redeliver (a real provider retries on 429/503) - once B1's token has
 	// replenished (Rate: 10/sec => a fresh token roughly every 100ms), it
-	// now posts exactly once.
-	time.Sleep(b1ReplenishWait)
+	// now posts exactly once. Advancing the injected FakeClock crosses
+	// exactly one emission interval deterministically, independent of how
+	// much real wall-clock time the requests above actually took
+	// (TEST-ADMISSION-FLAKE-1).
+	clock.Advance(b1ReplenishWait)
 	redelivered := rawPostCallback(t, srv, "/v1/webhooks/payments/"+tenant.Slug+"/mock",
 		mockProvider.CallbackPayload(tenant.ID, payments.CallbackEventDeposit, ref2, "", payments.OutcomeSucceeded, 2000, "EUR", "", false))
 	redelivered.Body.Close()
@@ -282,7 +324,7 @@ func TestAdmission_T6c_CasinoBetLimitedThenRollbackReorder(t *testing.T) {
 	tenant := mustCreateTenant(t, pool)
 	brand := mustCreateBrand(t, pool, tenant)
 
-	settings := t6Settings()
+	settings, clock := newB1LimitTestSettings()
 	settings.VerifiedRate["casino"] = WebhookRateBurst{Rate: 10, Burst: 1}
 	srv := newAdmissionTestServer(t, pool, issuer, nil, orchestrator, settings, false)
 
@@ -318,8 +360,10 @@ func TestAdmission_T6c_CasinoBetLimitedThenRollbackReorder(t *testing.T) {
 
 	// A rollback for the SAME provider_tx_id is admitted, once B1's shared
 	// tenant+provider bucket has replenished - the documented §6.4 reorder,
-	// not a new admission property under test.
-	time.Sleep(b1ReplenishWait)
+	// not a new admission property under test. Advancing the injected
+	// FakeClock deterministically crosses one emission interval
+	// (TEST-ADMISSION-FLAKE-1), independent of real wall-clock time.
+	clock.Advance(b1ReplenishWait)
 	rollbackPayload := mock.CallbackPayload(tenant.ID, casino.CallbackEventRollback, "t6c-rollback", betRef, round, game.ProviderGameID, 1000, "EUR", casino.OutcomeSucceeded, "", player.ID, session)
 	rr := rawPostCasinoCallback(t, srv, "/v1/webhooks/casino/"+tenant.Slug+"/mock-casino", rollbackPayload)
 	rr.Body.Close()
@@ -332,7 +376,7 @@ func TestAdmission_T6c_CasinoBetLimitedThenRollbackReorder(t *testing.T) {
 	// (a tombstone-rejected bet is a genuine, deterministic DECLINE - not
 	// a delivery failure), the webhook ack is still 200 OK; the win is
 	// that it posts zero ledger rows, verified below.
-	time.Sleep(b1ReplenishWait)
+	clock.Advance(b1ReplenishWait)
 	retry := rawPostCasinoCallback(t, srv, "/v1/webhooks/casino/"+tenant.Slug+"/mock-casino", betPayload)
 	retry.Body.Close()
 	if retry.StatusCode != http.StatusOK {
@@ -415,7 +459,7 @@ func TestAdmission_T6e_PaymentsReversal_RetryAfter429_Idempotent(t *testing.T) {
 	brand := mustCreateBrand(t, pool, tenant)
 	mustRegisterCapability(t, pool, tenant.ID, mockProvider)
 
-	settings := t6Settings()
+	settings, clock := newB1LimitTestSettings()
 	settings.VerifiedRate["payments"] = WebhookRateBurst{Rate: 10, Burst: 2}
 	srv := newAdmissionTestServer(t, pool, issuer, orchestrator, nil, settings, false)
 
@@ -459,7 +503,7 @@ func TestAdmission_T6e_PaymentsReversal_RetryAfter429_Idempotent(t *testing.T) {
 		t.Fatalf("a limited reversal must post ZERO rows: got %d", got)
 	}
 
-	time.Sleep(b1ReplenishWait)
+	clock.Advance(b1ReplenishWait)
 	redelivered := rawPostCallback(t, srv, "/v1/webhooks/payments/"+tenant.Slug+"/mock", reversalPayload)
 	redelivered.Body.Close()
 	if redelivered.StatusCode != http.StatusOK {

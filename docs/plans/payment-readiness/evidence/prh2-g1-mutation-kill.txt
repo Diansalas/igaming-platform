@@ -1,0 +1,181 @@
+PRH-2 G1 (KS-AUDIT-TENANT-1, ADR 0104) - mutation-kill evidence
+================================================================
+
+Count: 9 mutations total from ADR 0104 §7's MUT list - 8 KILLED (by a
+dedicated test each, confirmed FAIL-with-mutation/PASS-without) and 1
+(mutation 9, the chain-from-a-platform-scope-query candidate) disclosed as
+unreachable by construction rather than independently mutated - see its
+own entry below for why. The security review's re-run independently
+re-killed mutations 1 and 3 and confirmed this 8+1=9 count
+(g1-security.md, G1-I3).
+
+Method: two private, disposable databases (PRIV_DB=g1_audit_1 for the
+normal test suite, PRIV_DB=g1_audit_mut for live mutation) were built by
+the private harness (priv_db.sh) from this branch's on-disk migrations.
+Each mutation below was applied EITHER as a live SQL edit against
+g1_audit_mut (via psql - the real, on-disk migration files were never
+edited) OR as an in-place Go source edit (via sed/Edit), immediately
+followed by the named test(s), then reverted and re-verified clean
+(`git status`/`grep MUTANT`/a passing re-run of the same test) before
+moving to the next mutation. No mutation was ever left in place.
+
+ADR 0104 §7's MUT list, and disposition for each:
+
+1. Mutation: "the predicate without subject_tenant_id = app.tenant_id"
+   (dropped the equality clause from subject_tenant_read's USING).
+   Killed by: TestSubjectTenantRLS_TIHeadline
+   FAILS with the mutation applied ("expected tenant A to see NONE of
+   tenant B's subject rows, got 1", and the symmetric case); PASSES with
+   the real policy.
+
+2. Mutation: "no player exclusion" (dropped the
+   app.player_account_id IS NULL clause).
+   Killed by: TestSubjectTenantRLS_ExcludedSessions
+   FAILS with the mutation applied ("player session: expected 0 subject
+   rows, got 1"); PASSES with the real policy.
+
+3. Mutation: "no app.acting_* exclusion" (dropped both the
+   app.acting_tenant_id and app.acting_platform_principal_id clauses).
+   Killed by: TestSubjectTenantRLS_ExcludedSessions
+   FAILS with the mutation applied (both the acting_tenant_id and the
+   acting_platform_principal_id cases leak, "expected 0 subject rows, got
+   1" for each); PASSES with the real policy. The AZ/RLS write-side
+   counterpart (a session with app.acting_* set must also be refused on
+   WRITE, not just excluded from READ) is separately pinned by
+   TestSubjectActorGuard_Refusals cases (5)/(5b), which assert P0001
+   against the REAL (unmutated) trigger and policy - i.e. this is the
+   trigger's own independent enforcement of the same exclusion, confirmed
+   passing, not merely a read-side artifact.
+
+4. Mutation: "the trigger without the actor equality" (removed
+   "NEW.actor_id IS DISTINCT FROM v_platform::uuid" from
+   audit_log_subject_actor_guard, keeping only the actor_type='staff'
+   check).
+   Killed by: TestSubjectActorGuard_Refusals (case 2: "a platform actor
+   != the GUC principal")
+   FAILS with the mutation applied ("(2) actor != GUC principal: expected
+   P0001, got <nil>" - the insert wrongly succeeds); PASSES with the real
+   trigger.
+
+5. Mutation: "the policy changed to FOR ALL" (subject_tenant_read
+   recreated as `FOR ALL` instead of `FOR SELECT`, same USING clause).
+   Killed by: TestSubjectTenantReadPolicy_IsSelectOnly (a direct pg_policies
+   pin, added specifically for this mutant - the append-only triggers
+   independently block any actual mutation regardless of policy command
+   scope, so this pin is needed to catch the RLS-authority widening
+   itself, not just its would-be effect).
+   FAILS with the mutation applied ("expected subject_tenant_read to be a
+   SELECT-only policy, got cmd=\"ALL\""); PASSES with the real policy.
+
+6. Mutation: "the subject taken from tc instead of c.target"
+   (killSwitchCall.auditSubjectTenantID changed to return c.tc.TenantID
+   instead of c.target for a platform-scope caller - since a platform
+   session's tc.TenantID is always uuid.Nil, this makes SubjectTenantID
+   always uuid.Nil, i.e. no subject row is ever written for a platform
+   mutation).
+   Killed by: TestPlatformActionsAuditAPI_TIHeadline
+   FAILS with the mutation applied ("expected tenant A to see exactly its
+   3 rows..., got total=0" - no subject rows exist at all); PASSES with
+   the real code.
+
+7. Mutation: "the projection including ip_address" (toPlatformActionEntry
+   changed to unconditionally set ExtraMetadata = {"ip_address": ...},
+   regardless of Presentation).
+   Killed by: TestPlatformActionsAuditAPI_TIHeadline's AT-6 assertion (the
+   response body must never contain "ip_address"/"user_agent"/
+   "request_id").
+   FAILS with the mutation applied (the response body visibly contains
+   "ip_address":"203.0.113.1"); PASSES with the real code. Independent,
+   stronger structural note: platformActionsAuditListQuery's own SELECT
+   list never names ip_address/user_agent/request_id at all - those
+   columns are not even fetched from the database by this read path, so
+   this mutation had to introduce a NEW, synthetic value rather than
+   "unhide" a real one; a mutation that instead added those columns to
+   the SELECT and scanned them would additionally break at the Scan()
+   call (wrong argument count), a second, independent failure mode.
+
+8. Mutation: "the name lookup selecting email" (staffDisplayNameLookupQuery
+   changed to `SELECT id, display_name, email FROM staff_users ...`).
+   Killed by: TestPlatformActionsAuditAPI_NameLookupNeverSelectsEmail (a
+   pure Go string-literal assertion on the query constant - no database
+   needed to observe the failure).
+   FAILS with the mutation applied; PASSES with the real query.
+
+9. Mutation: "the chain assembled from a platform-scope query".
+   NOT independently mutated - disclosed, not hidden. The approval-chain
+   assembly (killSwitchChainKey / buildPlatformActionEntries) has no
+   second query of ANY kind: it operates purely on the `rows` slice
+   already produced by the ONE tenant-scoped, RLS-filtered SELECT
+   (platformActionsAuditListQuery, run under deps.DB.WithTenant(tc.TenantID,
+   ...)). The only OTHER query in this whole read path is the §5.4 name
+   lookup, which is scoped by actor id and returns ONLY id/display_name -
+   never an audit_log row - so there is no code path through which a
+   platform-scope (WithoutTenant/WithPlatformAdmin) query could
+   contribute a CHAIN entry, by construction, not by a check that could
+   be deleted. TestPlatformActionsAuditAPI_ApprovalChainLinksReleaseToEngage
+   and the TIHeadline test's own per-tenant reason_code assertions both
+   confirm the observed chain behavior stays tenant-scoped end to end.
+
+Additional AZ/RLS write-side cases (ADR 0104 §7), verified against the
+REAL (unmutated) trigger/policy in TestSubjectActorGuard_Refusals /
+TestSubjectActorGuard_AppendOnlyStillHolds - all PASS:
+  (1) a tenant insert of a subject -> P0001
+  (2) a platform actor != the GUC principal -> P0001 [also mutant 4 above]
+  (3) a tenant staff actor (as the GUC principal) -> P0001
+  (4) a system actor -> P0001
+  (5) app.acting_tenant_id set -> P0001
+  (5b) app.platform_service_id set -> P0001
+  (6) both tenant columns set -> CHECK or RLS violation (23514/42501)
+  (7) an unknown subject tenant -> FK violation (23503)
+  (8) a suspended platform admin can still write (Q7: no status check) -> succeeds
+  UPDATE/DELETE against a subject row -> P0001 (append-only unchanged, AT-4)
+
+MIG (migration 0109), verified via a scratch-DB up/down/up round trip
+(internal/audit/subject_tenant_migration_integration_test.go):
+  - up, then a subject row, then down -> refuses ("subject_tenant_id set")
+  - a non-NULL display_name, then down -> refuses ("display_name set")
+  - neither present -> clean down
+  - up/down/up round trip -> the subject_tenant_id column is present,
+    absent, then present again, matching each step
+
+Presentation/name/chain tests (ADR 0104 §7), all PASS against the real
+code:
+  - by default, no ip_address/user_agent/request_id/non-allowlisted key
+    appears (TestPlatformActionsAuditAPI_TIHeadline's AT-6 assertion)
+  - a forced resolver error fails closed
+    (TestResolvePresentationOrRestrictive_FailsClosed at the unit level;
+    TestPlatformActionsAuditAPI_ForcedResolverErrorFailsClosed end to end
+    over HTTP, injecting a resolver that returns a WIDER presentation
+    alongside a non-nil error and confirming the wider value is never
+    observed)
+  - the name lookup query selects no email
+    (TestPlatformActionsAuditAPI_NameLookupNeverSelectsEmail; see mutant 8)
+  - a display_name with a control character is refused, and one of 101
+    characters is refused (TestValidateDisplayName; DB CHECK confirmed by
+    TestUpdateStaffDisplayName_RejectsInvalidBeforeAnySQL and the migration
+    0109 CHECK itself, manually verified against Postgres's own regex
+    engine)
+  - a rename, including a self-rename, produces a
+    staff.display_name_changed audit row (TestStaffDisplayNameAPI_
+    AnotherUser_Succeeds, TestStaffDisplayNameAPI_SelfRename_Succeeds)
+  - a name containing <script> is returned JSON-escaped
+    (TestStaffDisplayNameAPI_ScriptTagIsJSONEscaped; Go's encoding/json
+    HTML-escapes '<'/'>'/'&' by default)
+  - N-3: bidi-override/isolate and zero-width characters are refused, in
+    both the DB CHECK (verified directly against Postgres's regex engine)
+    and Go (TestValidateDisplayName, TestStaffDisplayNameAPI_
+    HygieneRefusals)
+
+Full local suite (labelled local, per ADR 0104 §8 step 2), run with
+-race -tags integration against the private harness:
+  ok  internal/httpserver   468.532s
+  ok  internal/identity       4.645s
+  ok  internal/audit         14.618s
+  ok  internal/casino        71.683s
+  ok  cmd/platform-api        8.227s
+No FAIL/panic/DATA RACE anywhere in that run.
+
+`migrate verify` reports exactly one item: a version gap between 107 and
+109 (migration 0108, workstream A, is not present on this branch) - the
+orchestrator resolves final numbering at merge, per this task's own
+instruction. Every migration 0001-0107 and 0109 verifies OK.

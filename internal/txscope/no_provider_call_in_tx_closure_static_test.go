@@ -75,6 +75,15 @@ var ioc1FlaggedMethods = map[string]bool{
 	"CreateVerification": true, "SubmitVerification": true, "GetVerification": true,
 	// payments.PaymentProvider
 	"Deposit": true, "Withdraw": true, "QueryStatus": true,
+	// sportsbook.Provider (SB-CATALOGUE-IO-1, ADR 0095 §33): FetchCatalogue
+	// is the sole sanctioned caller of Provider.Catalogue, so flagging
+	// FetchCatalogue itself (a package-level function, not a method on an
+	// adapter value - ioc1CalleeName matches either shape, since both are
+	// `*ast.SelectorExpr`) is what actually enforces "no provider I/O
+	// lexically inside a db transaction closure" for this call site, the
+	// same way flagging Deposit/Launch/CreateVerification does for their
+	// own packages.
+	"FetchCatalogue": true,
 }
 
 // ioc1TxClosureViolation is one adapter-method call found lexically inside
@@ -200,20 +209,30 @@ func ioc1RepoRoot(t *testing.T) string {
 }
 
 // TestINV_IO_1c_NoAdapterCallInsideTxClosure is INV-IO-1(c) itself, made
-// permanent: internal/casino, internal/kyc and internal/payments' own
-// non-test source must never call a payments/casino/KYC provider adapter's
-// outbound method lexically inside a database transaction closure
+// permanent: internal/casino, internal/kyc, internal/payments,
+// internal/sportsbook and cmd/platform-api's own non-test source must
+// never call a payments/casino/KYC/sportsbook provider adapter's outbound
+// method (or, for sportsbook, FetchCatalogue - its sole sanctioned caller)
+// lexically inside a database transaction closure
 // (db.Pool.WithTenant/WithPrincipalScope/WithPlatformAdmin/WithPlayerScope/
-// WithTenantSnapshot/WithTenantReadOnly, or any other hand-written closure
-// taking a pgx.Tx parameter - matched structurally, not by the caller's
-// own name, so this does not need updating every time db.Pool grows a new
-// With* method).
+// WithTenantSnapshot/WithTenantReadOnly/WithPlatformService, or any other
+// hand-written closure taking a pgx.Tx parameter - matched structurally,
+// not by the caller's own name, so this does not need updating every time
+// db.Pool grows a new With* method).
 func TestINV_IO_1c_NoAdapterCallInsideTxClosure(t *testing.T) {
 	root := ioc1RepoRoot(t)
 	dirs := []string{
 		filepath.Join(root, "internal", "casino"),
 		filepath.Join(root, "internal", "kyc"),
 		filepath.Join(root, "internal", "payments"),
+		// SB-CATALOGUE-IO-1 (ADR 0095 §33): sportsbook's FetchCatalogue is
+		// called from both internal/sportsbook itself (helper/test
+		// composition) and cmd/platform-api/main.go (the actual startup
+		// call site) - both are in scope so the guard covers the real
+		// production caller, not just a copy of its call shape in a test
+		// file.
+		filepath.Join(root, "internal", "sportsbook"),
+		filepath.Join(root, "cmd", "platform-api"),
 	}
 
 	var violations []ioc1TxClosureViolation
@@ -233,9 +252,9 @@ func TestINV_IO_1c_NoAdapterCallInsideTxClosure(t *testing.T) {
 	}
 
 	if totalClosures == 0 {
-		t.Fatal("this guard found NO pgx.Tx-shaped closures at all across internal/casino, internal/kyc and " +
-			"internal/payments - either the tree moved or the walk/detection is broken, and a guard that inspects " +
-			"nothing proves nothing")
+		t.Fatal("this guard found NO pgx.Tx-shaped closures at all across internal/casino, internal/kyc, " +
+			"internal/payments, internal/sportsbook and cmd/platform-api - either the tree moved or the " +
+			"walk/detection is broken, and a guard that inspects nothing proves nothing")
 	}
 	if len(violations) > 0 {
 		var lines []string
