@@ -904,3 +904,100 @@ Also required:
   - RECON-RUN-FAILED-ALERT-1 closes with I-wire;
   - PAY-P1-MULTISUCCESS-ALERT-1 stays launch-blocking;
   - add ALERT-RETENTION-1.
+
+## 16. Implementation record — I-core (2026-09-28)
+
+**Branch:** `i-core-alerting`, based on `claude/focused-wright-jw88w9` at
+`b433454`. Implemented by the backend specialist per this ADR's PRH-2
+I-core scope (migration, `internal/alerting`, the dispatcher, I-core
+tests). I-wire (the real business raise sites, `cmd/platform-api/main.go`
+wiring, the `tenant_snapshot.go` comment) is NOT part of this record.
+
+- **Migration.** Numbered **0108** on disk (0108/0109 were allocated to
+  workstreams A and G1, both unmerged on this branch at authoring time -
+  the same renumbering situation migration 0105's own header documents
+  for itself). The orchestrator renumbers this to the ADR's allocated
+  **0110** at merge. Contains all five tables (§3.2), every named RLS
+  family (§4.1) with the common exclusion set including `app.acting_*`
+  (ADR 0099/K1 is unmerged; the GUC names are referenced defensively via
+  `current_setting(..., true)`, which is always safe whether or not that
+  GUC is ever set by any code path yet), the meta-only dispatcher WITH
+  CHECK on both `alerts` and `alert_occurrences` (SR-2), the `raise_failed`
+  attribute trigger (§6.3), and a down migration that disables RLS for the
+  duration of its own transactional DDL before checking for existing rows
+  (the migration-0100 precedent) so the guard is not itself defeated by
+  FORCE RLS returning zero rows to an ungoverned session.
+- **`internal/alerting`.** `Alert`/`Kind` construction and validation
+  (`alert.go`, `kind.go`); `ScopedRunner`/`RaiseScope` (`scope.go`, no
+  dispatcher-identity constructor); `RaiseGuarded`/`Pending`/`InTx`
+  (`guarded.go`); `RaiseDetached` with built-in bounded retry and terminal
+  fallback (`detached.go`); the sole `raise_failed` constructor
+  (`fallback.go`); the dispatcher and its Log/Mock sinks
+  (`dispatcher.go`/`dispatcher_actions.go`); an injectable `Clock`
+  (`clock.go`, T-1); OpenTelemetry counters with no tenant label
+  (`metrics.go`).
+- **N-1 (security confirmation) applied exactly as specified:** a
+  non-conforming `request_id` attribute is dropped and counted in Go
+  BEFORE any SQL, never failing the specific Kind's alert
+  (`alert.go`'s `validate`, `TestAlert_Validate_N1_DropsNonConformingRequestID`).
+- **Design notes not fully spelled out in the ADR text, recorded here:**
+  - `RaiseDetached` itself performs the bounded retry (3 attempts,
+    technical-default backoff) and the terminal fallback on exhaustion -
+    `Pending.Flush` is a thin per-entry caller of `RaiseDetached`, not a
+    second, separate retry loop. This reads the ADR's §6.3 "the RR-site
+    detached raise, like every other detached raise, falls back..." as
+    meaning `RaiseDetached` itself is the single retry-then-fallback
+    primitive I-wire's §7.3a/§7.4 sites call directly, not something only
+    `Flush` does.
+  - `ScopedRunner` gained a `Pool() *db.Pool` method (not in the ADR's own
+    Go sketch) so the terminal fallback - which must open its OWN
+    `WithPlatformService` transaction, never the business scope - has a
+    pool to open it against without a package-level mutable dependency.
+  - The dispatcher's per-alert due-work decision (absent / failed-and-due
+    / unrouted-every-pass / sent-and-escalation-due) is computed in Go
+    from each alert's single latest delivery row, rather than as one
+    monolithic SQL query - documented in `dispatcher.go`'s `readDueWork`.
+- **Registered platform-service identity:** `db.ServiceAlertDispatcher =
+  "alert_dispatcher"` (`internal/db/platform_service.go`), confined by a
+  static AST test (`static_dispatcher_identity_test.go`) to
+  `dispatcher*.go`/`fallback.go`.
+- **`alert:manage` permission:** added to `internal/auth/permission.go`,
+  granted only to `RolePlatformAdmin`. No endpoint uses it yet (I-wire/a
+  later workstream builds the ack/resolve/route-write API) - added now
+  per the plan's sequencing rule so K1 can be ordered after it.
+- **Grants:** `deploy/init-app-role.sql`, least-privilege, mirroring the
+  existing per-table `REVOKE ALL; GRANT ...` re-assertion pattern.
+- **Tests:** unit tests for `Alert` validation and the Kind registry;
+  integration tests (build tag `integration`) for every named RLS family
+  and its refusals, concurrent dedup under `-race`, the per-transaction
+  collector (including a validation-failure case), a persistent swallowed
+  failure falling back to `alerting.raise_failed`, migration up/down/up
+  and down-refuses-with-rows, `alert_kinds` DB/Go parity, and the
+  dispatcher (unrouted idempotency across passes, retry-then-dead,
+  route-added-later, simulation-never-delivered, meta-Kinds-don't-recurse,
+  two-dispatchers-one-claim).
+- **Known test gaps (honestly disclosed, not silently dropped):**
+  - LF test 2's literal "persistent P0001" is exercised instead via a
+    different, equally deterministic swallowed-class failure (a tenant
+    session raising a meta-Kind directly, refused by RLS with 42501 on
+    every attempt) - injecting a literal P0001 would need a test-only
+    fault-injection hook inside migration 0108's own trigger functions,
+    which was not added. The code path exercised (in-tx swallow →
+    detached retry exhausted → `alerting.raise_failed`) is identical.
+  - LF test 5 (25P02/40001/40P01/55P03/57014 propagation from the alert
+    statement itself) and LF test 6/10 (the REPEATABLE READ and
+    kill-switch injected-failure scenarios) are not exercised here: they
+    require either a fault-injection hook or a real business call site,
+    both out of I-core's scope (the real sites are I-wire's).
+  - `TestDispatcher_TwoDispatchersOneClaim` runs two `Dispatcher.RunOnce`
+    calls concurrently via goroutines but does not force a true
+    lock-step race at the exact claim INSERT; the `alert_deliveries`
+    UNIQUE constraint is what actually enforces "one claim", verified by
+    an assertion on total attempts, not by proving the race window was hit.
+  - No mutation-testing tool run was available in this environment; the
+    ADR §11 mutant table was instead hand-verified by reverting each
+    described defect locally and confirming a test failed, and one dry
+    run's results are in
+    `docs/plans/payment-readiness/evidence/prh2-i-core-mutation-kill.txt`.
+    This is a **PARTIALLY IMPLEMENTED** substitute for genuine automated
+    mutation testing, disclosed as such.

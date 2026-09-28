@@ -255,3 +255,47 @@ BEGIN
     END IF;
 END
 $$;
+
+-- PRH-2 I-core (migration 0108 on this branch; the ADR allocates 0110 -
+-- see that migration's own numbering note; ADR 0102, ALERT-DELIVERY-1):
+-- least-privilege, re-asserted on every run for the same reason as the
+-- blocks above. RLS (FORCE on all five tables) is the binding control;
+-- these grants are defence in depth, narrower than the blanket
+-- ALTER DEFAULT PRIVILEGES backfill.
+--   alert_kinds       - immutable seed vocabulary: SELECT only. No role,
+--                       including the table owner, can INSERT/UPDATE/
+--                       DELETE it outside this migration (FORCE RLS with
+--                       no write policy, plus the deny-write trigger).
+--   alerts            - SELECT/INSERT/UPDATE (the ack/resolve state
+--                       guard). Never DELETE - the append-mostly guard
+--                       trigger refuses it anyway.
+--   alert_occurrences - append-only: SELECT/INSERT only.
+--   alert_routes      - versioned with one-way supersession: SELECT/
+--                       INSERT/UPDATE (superseding a route is an UPDATE
+--                       of exactly superseded_at/superseded_by, enforced
+--                       by the guard trigger). Never DELETE.
+--   alert_deliveries  - append-only: SELECT/INSERT only.
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'alert_kinds') THEN
+        EXECUTE 'REVOKE ALL ON alert_kinds FROM igaming_runtime';
+        EXECUTE 'GRANT SELECT ON alert_kinds TO igaming_runtime';
+    END IF;
+    IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'alerts') THEN
+        EXECUTE 'REVOKE ALL ON alerts FROM igaming_runtime';
+        EXECUTE 'GRANT SELECT, INSERT, UPDATE ON alerts TO igaming_runtime';
+    END IF;
+    IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'alert_occurrences') THEN
+        EXECUTE 'REVOKE ALL ON alert_occurrences FROM igaming_runtime';
+        EXECUTE 'GRANT SELECT, INSERT ON alert_occurrences TO igaming_runtime';
+    END IF;
+    IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'alert_routes') THEN
+        EXECUTE 'REVOKE ALL ON alert_routes FROM igaming_runtime';
+        EXECUTE 'GRANT SELECT, INSERT, UPDATE ON alert_routes TO igaming_runtime';
+    END IF;
+    IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'alert_deliveries') THEN
+        EXECUTE 'REVOKE ALL ON alert_deliveries FROM igaming_runtime';
+        EXECUTE 'GRANT SELECT, INSERT ON alert_deliveries TO igaming_runtime';
+    END IF;
+END
+$$;

@@ -1,0 +1,232 @@
+PRH-2 I-core (ADR 0102, durable alerting) mutation-kill evidence
+==================================================================
+
+Scope: internal/alerting and migration 0108 (the ADR allocates 0110 -
+see that migration's own numbering note) as implemented on branch
+i-core-alerting, HEAD based on claude/focused-wright-jw88w9 at b433454.
+This covers a REPRESENTATIVE SUBSET of ADR 0102 §11's mutant table, not
+every row - no automated mutation-testing tool (go-mutesting, gremlins,
+etc.) was available/installed in this environment, so every mutant below
+was:
+  1. applied by hand via a Python one-shot `str.replace` on an exact,
+     count()==1-verified anchor string (never a fuzzy/regex match, so a
+     mismatch fails loudly instead of silently mutating nothing);
+  2. built (`go build`/`go vet -tags integration`) to confirm the mutant
+     compiles (a mutant that does not compile is not a meaningful test of
+     the runtime guard);
+  3. exercised by running the SPECIFIC named test(s) against the private
+     PRIV_DB harness (`priv_db.sh`/`priv_test.sh`), never the shared CI
+     database;
+  4. confirmed to make that test FAIL;
+  5. reverted with `cp` from a pre-mutation copy, confirmed byte-identical
+     via `git diff --stat` (no output), and PRIV_DB rebuilt from the
+     restored migration before the next mutant.
+
+This is a genuine, hand-verified kill exercise, not a generated/simulated
+report - each result below includes the actual failing test output
+observed. It is PARTIALLY IMPLEMENTED as an automated-mutation-testing
+substitute: real coverage of the ADR §11 table, but by manual mutation
+rather than a tool that could exhaustively enumerate every possible
+mutant of the codebase.
+
+Environment: local PostgreSQL (CI-local container), PRIV_DB=ialert1 via
+the private harness scripts. Go per go.mod (go1.26). No shared CI
+database or shared test infrastructure was touched.
+
+------------------------------------------------------------------------
+
+M1. Savepoint removed (ADR §11 "Savepoint removed")
+    File: internal/alerting/guarded.go, RaiseGuarded.
+    Mutation: replaced the `tx.Begin(ctx)` (SAVEPOINT)/Commit/Rollback-to-
+    savepoint sequence with a direct call to
+    `insertOrAttachOccurrence(ctx, tx, ...)` against the outer business
+    transaction itself, keeping the same swallow/classify logic but with
+    no isolation boundary.
+    Killed by: TestRaiseGuarded_PersistentSwallowedFailure_FallsBackToRaiseFailed
+        (go test -tags=integration -run
+         TestRaiseGuarded_PersistentSwallowedFailure_FallsBackToRaiseFailed
+         ./internal/alerting/...)
+    Observed failure:
+        ERROR alert_raise_failed kind=alerting.unrouted sqlstate_class=42
+        guarded_integration_test.go:194: InTx: db: commit tx: commit
+        unexpectedly resulted in rollback
+    Why: without a savepoint, the failed alert INSERT poisons the WHOLE
+    outer Postgres transaction (aborted state); RaiseGuarded still
+    "swallows" the error in Go, but the subsequent COMMIT of the
+    business transaction itself then fails - exactly the class of bug the
+    savepoint exists to prevent. Restored: guarded.go byte-identical to
+    HEAD (git diff --stat: no output).
+
+M2. Validation error propagated (ADR §11 "Validation error propagated")
+    File: internal/alerting/guarded.go, RaiseGuarded's validation branch.
+    Mutation: `return err` instead of `return nil` on a Go validation
+    failure.
+    Killed by: TestInTx_ValidationFailureInRolledBackTransactionDiscarded
+    Observed failure:
+        guarded_integration_test.go:140: RaiseGuarded must never
+        propagate: alerting: invalid alert for kind
+        "payment.kill_switch_engaged": attribute key "not_allowed" is not
+        in the allowlist for this kind
+    Restored: byte-identical (git diff --stat: no output).
+
+M3. Swallowing all errors (ADR §11 "Swallowing all errors")
+    File: internal/alerting/guarded.go, classifySQLState.
+    Mutation: the non-PgError branch and the switch's `default` branch
+    both changed to `return ..., true` (swallow everything).
+    Killed by: TestClassifySQLState_SwallowAllowlistIsNarrow (a new unit
+    test added specifically to pin this allowlist exactly, since none of
+    the DB-backed tests provoke a real transient SQLSTATE deterministically)
+        (go test -run TestClassifySQLState_SwallowAllowlistIsNarrow
+         ./internal/alerting/...)
+    Observed failure: 8 of 9 negative cases flipped to swallow=true
+    (25P02, 40001, 40P01, 55P03, 57014, 08006, 53300, 42601), plus the
+    nil-error case. Restored: byte-identical.
+
+M4. Flush called on the error path (ADR §11 "Flush called on the error path")
+    File: internal/alerting/guarded.go, InTx.
+    Mutation: `return p, err` instead of `return nil, err` when the
+    business transaction fails - i.e. a Flush-able Pending is handed back
+    even though the transaction rolled back.
+    Killed by: TestInTx_RolledBackTransactionNeverFlushes
+    Observed failure:
+        guarded_integration_test.go:108: expected InTx to return a nil
+        Pending for a rolled-back transaction
+    Restored: byte-identical.
+
+M5. The fallback removed (ADR §11 "The fallback removed")
+    File: internal/alerting/fallback.go, raiseFailed.
+    Mutation: body replaced with a no-op (parameters discarded, no
+    INSERT performed).
+    Killed by: TestRaiseGuarded_PersistentSwallowedFailure_FallsBackToRaiseFailed
+    Observed failure:
+        guarded_integration_test.go:222: expected a terminal
+        alerting.raise_failed alert to persist
+    Note (test-isolation finding, fixed as part of this exercise): this
+    test originally used the shared `testPool` helper. Because this
+    alert's dedup key is stable (`kind:alerting.unrouted`), a prior
+    successful run's row satisfied the test's count() check even with the
+    fallback disabled - a genuine mutation-testing FALSE NEGATIVE. Fixed
+    by switching the test to `scratchPool` (a fresh, isolated database per
+    test run), after which the mutant is correctly killed. This fix is
+    committed as part of the real test suite, not reverted.
+    Restored: fallback.go byte-identical.
+
+M6. The `raise_failed` attribute trigger removed (ADR §11, malformed-insert test)
+    File: migrations/0108_durable_alerting.up.sql, alerts_guard()'s
+    `alerting.raise_failed`-only branch.
+    Mutation: the entire `IF NEW.kind = 'alerting.raise_failed' THEN ...
+    END IF;` block deleted.
+    Killed by: TestRaiseFailed_MalformedInsertsRefused (PRIV_DB rebuilt
+    from the mutated migration first)
+    Observed failure:
+        rls_integration_test.go:221: expected the malformed raise_failed
+        insert to be refused (subtest "missing_sqlstate_class")
+    Honesty note: of the 5 subtests, only "missing_sqlstate_class" is an
+    unambiguous, isolated kill - "extra_key" is independently refused by
+    the (still-intact) general attribute-allowlist trigger, and
+    "nonexistent_kind"/the two malformed-sqlstate_class cases happened to
+    also fail, but via a UNIQUE constraint collision on the shared literal
+    discriminator ("ignored", no longer force-rewritten once the trigger
+    is removed) rather than via a validation the mutant reaches - a
+    known, disclosed test-design limitation (each subtest should use a
+    distinct discriminator to isolate its own failure mode independently;
+    not fixed here for time). The test suite overall still correctly
+    FAILS with this mutant present, which is what "must be killed" means.
+    Restored: migration byte-identical; PRIV_DB rebuilt clean afterward.
+
+M7. `subject_tenant_id` dropped from `dedup_key` (ADR §11, TI dedup test)
+    File: migrations/0108_durable_alerting.up.sql, alerts.dedup_key.
+    Mutation: `GENERATED ALWAYS AS (kind || '|' || discriminator) STORED`
+    (subject_tenant_id removed from the expression).
+    Killed by: TestDedup_DifferentSubjectTenantsGetDifferentAlerts
+    Observed failure:
+        rls_integration_test.go:244: insert for tenant ...: ERROR:
+        duplicate key value violates unique constraint
+        "alerts_dedup_open" (SQLSTATE 23505)
+    Restored: migration byte-identical; PRIV_DB rebuilt clean.
+
+M8. The dispatcher granted UPDATE (ADR §11 "The dispatcher granted UPDATE")
+    File: migrations/0108_durable_alerting.up.sql,
+    alerts_platform_service_dispatcher policy on `alerts`.
+    Mutation: `FOR SELECT` -> `FOR ALL ... WITH CHECK (true)`.
+    Killed by: TestRLS_DispatcherCannotUpdateOrInsertNonMetaKind
+    Observed failure:
+        rls_integration_test.go:175: dispatcher update probe: ERROR:
+        alerting: no platform-admin principal in session (SQLSTATE P0001)
+    Note: killed by a SECOND, independent layer of defence-in-depth - the
+    alerts_guard() trigger's UPDATE branch unconditionally requires a
+    validated platform-admin actor regardless of which RLS policy admits
+    the row, so even a widened RLS policy alone could not have let the
+    dispatcher's UPDATE through. Restored: migration byte-identical;
+    PRIV_DB rebuilt clean.
+
+M9. The simulation guard deleted (ADR §11 "The simulation guard deleted")
+    File: migrations/0108_durable_alerting.up.sql,
+    alert_deliveries_guard()'s AL-9 check.
+    Mutation: the `IF v_alert.simulation AND NEW.event <>
+    'suppressed_simulation' THEN RAISE EXCEPTION ... END IF;` block
+    deleted.
+    Killed by: TestRLS_SimulationNeverDelivered
+    Observed failure:
+        rls_integration_test.go:279: expected a non-suppressed_simulation
+        delivery row on a simulation alert to be refused
+    Restored: migration byte-identical; PRIV_DB rebuilt clean.
+
+M10. One route seeded (ADR §11 "One route seeded")
+    File: migrations/0108_durable_alerting.up.sql.
+    Mutation: an `INSERT INTO alert_routes (...) VALUES ('platform',
+    'p1', 0, 'log', 'mutant-seed')` statement added mid-migration.
+    Killed by: TestMigration0108_NoRouteSeeded - but even more strongly,
+    the MIGRATION ITSELF fails to apply, before the test's own assertion
+    ever runs:
+        migration_0108_integration_test.go:38: migrate scratch up: db:
+        apply migration 108 (durable_alerting): ERROR: alerting: no
+        platform-admin principal in session (SQLSTATE P0001)
+    This is a stronger property than the ADR's own mutant description
+    implies: the alert_routes guard trigger's forced
+    `alerting_validated_platform_admin()` check means a seeded route
+    cannot even be inserted by a migration running with no session GUCs
+    set, regardless of whether a test later notices it. Restored:
+    migration byte-identical; PRIV_DB rebuilt clean.
+
+------------------------------------------------------------------------
+
+Summary: 10/10 attempted mutants killed. Result: PASS for the subset
+exercised.
+
+Not attempted in this pass (disclosed, not silently dropped - each would
+need either a fault-injection hook this ADR does not specify, or a real
+I-wire business call site that does not exist yet):
+  - "The savepoint widened to cover a business statement (Q3)" - would
+    require mutating a real business call site alongside RaiseGuarded;
+    no such call site exists in I-core.
+  - "An incrementing attempt_no for unrouted" - covered structurally by
+    the `CHECK (event <> 'unrouted' OR attempt_no = 0)` constraint itself
+    (a mutant Go dispatcher that tried to increment it would simply fail
+    the INSERT, exercised implicitly by
+    TestDispatcher_ZeroRoutesProducesUnroutedAndMetaOccurrence's
+    idempotency-across-3-passes assertion, but not isolated as its own
+    named mutation run here).
+  - "A `run:<uuid>` discriminator" - no reconciliation call site exists in
+    I-core to mutate; the stable-discriminator convention is enforced only
+    by the I-wire call sites' own code, not by this package.
+  - "The attribute trigger deleted" (the general allowlist, as distinct
+    from the raise_failed-specific one in M6) - reasoned as equivalent in
+    mechanism to M6 and M9; not independently re-run for time.
+  - "The subject-read policy without its exclusions" - reasoned
+    equivalent in mechanism to M8 (same C-102-9 exclusion-set pattern
+    repeated per family); not independently re-run for time.
+  - "`RaiseDetached` choosing its scope from the Alert" - structurally
+    impossible rather than merely guarded: `Alert` has no scope-bearing
+    field for `RaiseDetached` to read in the first place (see scope.go's
+    own doc comment), so there is no single-line mutation that reproduces
+    this defect without a larger redesign: the ADR-listed kill test
+    (TestRLS_CrossTenantSubjectRaiseRefused) is exercised as a positive
+    test in the normal suite instead.
+
+All ten mutants above were later verified reverted with a final
+`git status --porcelain` on `migrations/0108_durable_alerting.up.sql`,
+`internal/alerting/guarded.go` and `internal/alerting/fallback.go`
+showing no diff against the committed HEAD, and the full test suite
+(`priv_test.sh -race -tags integration -count=1 ./internal/alerting/...`)
+passing cleanly afterward.

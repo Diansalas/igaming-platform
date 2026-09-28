@@ -25,11 +25,28 @@ type PlatformService string
 // sb_markets/sb_selections write policies.
 const ServiceSportsbookCatalogueSync PlatformService = "sportsbook_catalogue_sync"
 
+// ServiceAlertDispatcher is the ADR 0102 ("Durable Alerting and
+// Provider-Neutral Delivery", PRH-2 I-core) platform-service identity for
+// the alert dispatcher (internal/alerting): a background loop with no
+// HTTP request, no token and no human principal, that reads due alert
+// work and records delivery/escalation outcomes. Migration 0108 (the ADR
+// allocates 0110; see that migration's own numbering note) grants this
+// identity SELECT on alert_kinds/alerts/alert_occurrences/alert_routes,
+// INSERT on alert_deliveries, and - as a narrow, ADR-reviewed exception
+// (ADR 0102 §6.3, security's Q1 ruling) - INSERT of exactly the three
+// accepted meta-Kinds ('alerting.unrouted', 'alerting.delivery_dead',
+// 'alerting.raise_failed') on alerts/alert_occurrences. It never has
+// UPDATE or DELETE on any alert table. Only internal/alerting's dispatcher
+// and fallback code may use this identity (ADR 0102 AL-10; a static test
+// in internal/alerting enforces this).
+const ServiceAlertDispatcher PlatformService = "alert_dispatcher"
+
 // platformServiceAllowlist is the closed vocabulary itself - the point is
 // that the GUC value set below can never be attacker- or config-supplied,
 // only one of these compiled-in constants.
 var platformServiceAllowlist = map[PlatformService]struct{}{
 	ServiceSportsbookCatalogueSync: {},
+	ServiceAlertDispatcher:         {},
 }
 
 // ErrPlatformServiceScope is returned when a caller attempts to act as
