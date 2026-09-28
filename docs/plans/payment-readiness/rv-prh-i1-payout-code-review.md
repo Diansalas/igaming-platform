@@ -802,3 +802,31 @@ Optional hardening:
 - `escalateAmbiguousPayout` should swallow the conflict only for the terminal/already-escalated
   cases;
 - record the actual withdrawal before-state in the S-M2 audit.
+
+---
+
+# FH-6 round 2 — confirmation of code-review conditions (`b7f84ec`)
+
+- Method:
+  - detached worktree at `b7f84ec`, build, `go vet -tags=integration`;
+  - **pinned** `golangci-lint` 2.9.0: `run ./...` gives **0 issues**, and `--build-tags=integration
+    ./internal/payments/...` gives 0 issues. The round's own lint used a different binary; the
+    pinned one agrees;
+  - targeted payments tests on a private DB (created via `TEST_ADMIN_DATABASE_URL`, migrated to
+    0106, grants applied);
+  - mutants reverted with `git checkout`.
+- No role, password or privilege changes. The worktree and the private DB are removed.
+
+| # | Condition | Result |
+|---|---|---|
+| 1 | Pin `withdrawal_state_after` and `evidence_class` | **Closed.** `TestPayoutResolveAudit_CodeReview_WithdrawalStateAfterAndEvidenceClass` drives a completing resolve. Both previously surviving mutants are now **killed**. |
+| 2 | Deterministic Escalate-on-terminal test; swallow only on a confirmed terminal/escalated state | **Closed.** `TestEscalate_PC3_RefusesOnATerminalAttempt_StaleSnapshot` kills the predicate-removal mutant on a single run (it previously survived 10 runs and was caught 1 time in 40). `escalateAmbiguousPayout` now re-reads and swallows only on a terminal state or `escalated_at` set; a missing or invisible row surfaces the re-read error. The swallow-everything mutant is **killed** by `TestEscalateAmbiguousPayout_CodeReview_UnintendedConflictIsLoud`. |
+| 3 | `TestA7_3` posting count | **Closed.** It now counts `ledger_transactions` with `transaction_type='deposit' AND correlation_id = intent`. Deposit postings set `CorrelationID: intent.ID` (`orchestrator.go:877`), so the count is meaningful. |
+| 4 | Before-state read under the lock | **Closed.** Both `payoutResolveAudit` call sites take `LockForPayoutEvidence` and re-read the attempt inside the transaction. `withdrawal_state_before` comes from that locked read, not a hard-coded `submitted`. A mutant restoring the stale snapshot is **killed** by `TestPayoutResolveAudit_PC3_BeforeStateReadUnderTheLock`. |
+
+**Verdict: all four code-review conditions are closed.** Code review has no remaining conditions
+on FH-6.
+
+This round's other contents (the SP-C V1 fix, P-C1/P-C2, A7-C1, the ADR 0082 as-built rows, the
+kill-switch hold audit, credential pool threading) were outside this confirmation. They belong to
+the `ledger-finance` and `security` confirmations.

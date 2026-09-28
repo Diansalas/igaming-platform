@@ -101,3 +101,77 @@ now present and substantive (1b, 3, 4, 5a, 5b), plus #2 with a precision gap. Wh
 5. A `ledger-finance` gate review of the deposit-side lock sequence, once items 1 and 2 land. The
    payout side is already reviewed.
 6. Correct the ADR's status line from "NOT IMPLEMENTED" to "PARTIALLY IMPLEMENTED".
+
+---
+
+# FH-6 round 2 confirmation (`b7f84ec`)
+
+Same environment as the payout confirmation in `rv-prh-i1-payout-ledger.md`.
+
+- **A7-C1: closed.** All three #2 tests now assert that the blocked backend's query contains
+  `INSERT INTO payment_provider_events` (`loBackendQuery`), and each ends with
+  `loAssertProjectionMatchesRebuild`. Mutation check: moving the deposit receipt insert after the
+  intent `FOR UPDATE` fails
+  `TestReceiveCallback_ConcurrentDuplicateCallbacks_SecondBlocksOnReceiptKey` and
+  `TestWebhook_ConcurrentDuplicates_SecondBlocksOnReceiptKey`. The F7 reversal test covers the
+  separate reversal path, which that mutant does not touch.
+- **§1.6/§1.7 as-built rows: present.** They cover `InitiateDepositAttempt`,
+  `driveCreatedAttempt`, `ApplyReceiptEvidence`, `ClaimForDispatch` (T1p), `claimBatch` (with V1)
+  and the withdrawal-side locks. I checked the `ApplyReceiptEvidence` row against the code at
+  `b7f84ec`: R0 is inserted before the parent `FOR UPDATE`, which matches the row.
+- **Status line: now `PARTIALLY IMPLEMENTED`. Confirmed.**
+- **Still open before `IMPLEMENTED`:**
+  1. #1a (deposit-intent sweeper/callback/phase-C race), owned by the double-credit fix.
+  2. #5c for the tombstone branch, together with the A7-TOMB-1 fix. The mutation check above
+     covers the main deposit receipt path only, not the tombstone branch.
+  3. The `ledger-finance` gate review of the deposit-side sequence, once 1 and 2 land.
+
+---
+
+# A7 closure review (FH-3c, `92f5889`), by `ledger-finance`, 2026-09-28
+
+The environment and runs are as recorded in `rv-fh3-ledger.md`, section "Re-review 1: FH-3c".
+
+## Items that were still open
+
+- **#1a** (`TestA7_1a_SweeperClaimVsCallbackPhaseC_SameDepositIntent`): **PRESENT, meets §(7).**
+  - **Race:** the sweeper lease plus per-item claim, and a late callback, both blocked on the held
+    `deposit_intents` row (`a7WaitAnyLockWaiter`, `loBlockingPIDs`, `loWaitBlocked`). The
+    sweeper's own phase C follows the release.
+  - **Outcome:** exactly one attempt succeeded and one disputed. The **unconditional**
+    `ledgerDepositTxCount == 1` (C7) is now counted by ledger rows, keyed by `correlation_id`.
+  - **Ends with:** `assertLedgerBalanced`, `loAssertBalanced` and
+    `loAssertProjectionMatchesRebuild`.
+  - The FIFO lock-queue assumption is documented in the test.
+  - It passes `-race -count=3`. Mutants AID, PRE and RECK all fail it or its siblings.
+- **#5c** (`TestA7_5c_TombstoneBranch_SecondIdenticalReversalWaitsOnReceiptInsert`):
+  **PRESENT, and the mutant is killed.**
+  - My mutant M5C takes `deposit_intents FOR UPDATE` before the R0 insert in the reversal
+    tombstone branch.
+  - It is killed by this test, and not by any unrelated failure.
+  - The test also asserts no deadlock, one `applied` plus one `duplicate_effect`, exactly one
+    tombstone, balanced, and rebuild.
+  - Low L2 (non-blocking): the waiter is identified by query text only, not also by
+    `wait_event_type = 'Lock'`.
+- **Deposit-side gate review:** done in `rv-fh3-ledger.md` ("Ruling: deposit-side lock order",
+  `076e42e`). The as-built sequence is conformant, and the 0107 index adds no cycle. FH-3c's
+  changes add no lock:
+  - F3's re-read is a plain `SELECT` under the already-held intent lock.
+  - C2 is reconciliation-only, running under the stream's own snapshot and advisory lock.
+
+## A7 status ruling: **IMPLEMENTED**
+
+- All eight §(7) required tests are present and substantive, and each asserts outcome, blocking
+  point and the balance/rebuild invariants: #1a, #1b, #2 (with A7-C1), #3, #4, #5a, #5b, #5c.
+- The three mutants §(7) names (5a, 5b, 5c) are each killed by a permanent test.
+- The §1.6/§1.7 as-built inventory rows are present.
+- Both halves have their `ledger-finance` gate review: payout in `rv-prh-i1-payout-ledger.md`,
+  deposit in `rv-fh3-ledger.md`.
+
+A7's own closure rule is therefore met. **Owner action:** the ADR 0082 status line must be updated
+from "PARTIALLY IMPLEMENTED" to "IMPLEMENTED", citing this section. That edit belongs to the ADR's
+editor (`architect`/`payments`); I have not made it here.
+
+The residuals do not affect A7 status:
+- L2, above;
+- FH-3 F3b, which is a CAS-noise issue and not a lock-order issue.

@@ -34,8 +34,15 @@ const (
 // PAY-WH-TENANT-1's 401/503 branch are added exactly once rather than
 // hand-maintained twice in two files (backend review finding 1). Message
 // text intentionally still differs per route where it always has
-// (ErrDepositIntentNotFound, ErrCallbackPayloadMismatch,
-// ErrCallbackProviderMismatch) - only the STRUCTURE is unified.
+// (ErrCallbackPayloadMismatch, ErrCallbackProviderMismatch) - only the
+// STRUCTURE is unified.
+//
+// Code-review C6 (rv-prh-i1-callback-code-review.md, ad476d6): the former
+// ErrDepositIntentNotFound branch was removed here - PRH-payments-callback-
+// cutover's receipt path (ReceiveVerifiedCallback/receiveCallbackViaReceipt
+// Path, orchestrator.go) resolves evidence by attempt reference through
+// ApplyReceiptEvidence, which never returns that sentinel; the old
+// deposit_intents-only lookup path that could return it is gone.
 func mapReceiveCallbackError(err error, kind callbackRouteKind) (code apierror.Code, message string) {
 	var authErr *payments.CallbackAuthError
 	if errors.As(err, &authErr) {
@@ -47,16 +54,6 @@ func mapReceiveCallbackError(err error, kind callbackRouteKind) (code apierror.C
 		// ReasonProviderUnregistered/ReasonProviderInvalid, never a
 		// separate branch (ruling 5/backend finding 3).
 		return apierror.CodeUnauthorized, "callback rejected"
-	}
-	if errors.Is(err, payments.ErrDepositIntentNotFound) {
-		if kind == callbackRouteSimulate {
-			return apierror.CodeNotFound, "deposit not found"
-		}
-		// Only reachable by a caller who already passed verification - see
-		// deposit_handlers.go's own doc comment: this is NOT another
-		// enumeration oracle, since it requires a valid tenant-bound
-		// signature to reach at all.
-		return apierror.CodeNotFound, "no matching deposit for this reference"
 	}
 	if errors.Is(err, payments.ErrCallbackPayloadMismatch) {
 		if kind == callbackRouteSimulate {

@@ -75,124 +75,15 @@ func TestReceipt_ResolveByProviderReference_AppliesSuccess_LedgerBalanced(t *tes
 	}
 }
 
-// TestReceipt_T13SecondCapture_ThroughApplyReceiptEvidence_LedgerBalanced
-// is the PRH-I5 finding fix regression test (ADR 0095 §4.3 T13,
-// LF95-C6(a)): a LATE verified success for a DECLINED attempt whose
-// SIBLING on the same deposit intent has ALREADY succeeded (so the
-// intent itself is already 'succeeded', pointing at the sibling's own
-// first posting) must be applied - not rolled back with a
-// payment_attempts_tenant_ledger_tx unique violation, which would have
-// caused the provider to redeliver the callback forever
-// (docs/decisions/0095 §16.2's "finding for payments" entry).
-//
-// Cascade setup: providerA declines MockAmountProviderDeclineCascade as
-// cascadable; the cascade child (providerB, AcceptAllAmounts so it never
-// hits the same magic-amount branch) lands 'pending'. A success receipt
-// for the CHILD applies first (the ordinary T7 path, already covered
-// elsewhere - this is only fixture setup here) so the intent is
-// 'succeeded' with its own ledger_transaction_id. THEN a late success
-// receipt for the DECLINED PARENT's own provider reference is applied via
-// ApplyReceiptEvidence - the exact shape the PRH-I5 finding reported.
-func TestReceipt_T13SecondCapture_ThroughApplyReceiptEvidence_LedgerBalanced(t *testing.T) {
-	pool := depositV2ScratchPool(t)
-	f := seedOrchFixture(t, pool)
-	providerA := NewMockProvider("mock-psp-t13-a", "EUR")
-	providerB := NewMockProvider("mock-psp-t13-b", "EUR")
-	providerB.AcceptAllAmounts = true
-	registerCapability(t, pool, f, providerA, 100)
-	registerCapability(t, pool, f, providerB, 200)
-	orch := NewOrchestrator(map[string]PaymentProvider{"mock-psp-t13-a": providerA, "mock-psp-t13-b": providerB},
-		MultiWebhookCredentialResolver{"mock-psp-t13-a": NewMockWebhookCredentials(providerA), "mock-psp-t13-b": NewMockWebhookCredentials(providerB)})
-
-	res, err := orch.InitiateDepositAttempt(context.Background(), pool, AllowAllDepositKYCGate{}, MockCredentialResolver{}, InitiateDepositParams{
-		Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
-		AssetCode: "EUR", Amount: MockAmountProviderDeclineCascade, PaymentMethod: "card", IdempotencyKey: "t13-cascade",
-	})
-	if err != nil {
-		t.Fatalf("InitiateDepositAttempt: %v", err)
-	}
-	if res.Attempt.State != AttemptPending {
-		t.Fatalf("expected the cascaded child to be pending, got %s", res.Attempt.State)
-	}
-	childAttempt := res.Attempt
-	childRef := *childAttempt.ProviderReference
-
-	// Fetch the parent (attempt_no=1, declined) directly - no "list
-	// attempts for intent" helper exists, and this is the only place that
-	// needs one.
-	var parentAttemptID uuid.UUID
-	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		return tx.QueryRow(ctx, `SELECT id FROM payment_attempts WHERE deposit_intent_id = $1 AND attempt_no = 1`, res.Intent.ID).Scan(&parentAttemptID)
-	}); err != nil {
-		t.Fatalf("fetch parent attempt: %v", err)
-	}
-	parentAttempt := mustGetAttempt(t, pool, f.tenantID, parentAttemptID)
-	if parentAttempt.State != AttemptDeclined {
-		t.Fatalf("expected the parent attempt to be declined, got %s", parentAttempt.State)
-	}
-	parentRef := *parentAttempt.ProviderReference
-
-	// Fixture setup: the child's own success receipt (ordinary T7) - the
-	// intent becomes 'succeeded', linked to THIS posting.
-	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		d, err := ApplyReceiptEvidence(ctx, tx, orch, f.tenantID, "mock-psp-t13-b", ReceiptEvidence{
-			EventType: "deposit", ProviderReference: childRef, Outcome: OutcomeSucceeded,
-			Amount: MockAmountProviderDeclineCascade, AssetCode: "EUR",
-		})
-		if err != nil {
-			return err
-		}
-		if d != DispositionApplied {
-			t.Fatalf("expected the child's own success to be applied, got %s", d)
-		}
-		return nil
-	}); err != nil {
-		t.Fatalf("apply child success: %v", err)
-	}
-	childAfter := mustGetAttempt(t, pool, f.tenantID, childAttempt.ID)
-	if childAfter.State != AttemptSucceeded || childAfter.LedgerTransactionID == nil {
-		t.Fatalf("expected the child to be succeeded with a ledger link, got state=%s ledger=%v", childAfter.State, childAfter.LedgerTransactionID)
-	}
-	// The actual T13 second capture: a LATE success on the DECLINED
-	// PARENT's own reference, from its OWN provider (mock-psp-t13-a) -
-	// never the child's.
-	var disposition ReceiptDisposition
-	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		var err error
-		disposition, err = ApplyReceiptEvidence(ctx, tx, orch, f.tenantID, "mock-psp-t13-a", ReceiptEvidence{
-			EventType: "deposit", ProviderReference: parentRef, Outcome: OutcomeSucceeded,
-			Amount: MockAmountProviderDeclineCascade, AssetCode: "EUR",
-		})
-		return err
-	}); err != nil {
-		t.Fatalf("ApplyReceiptEvidence (T13 second capture) must not fail (PRH-I5 finding): %v", err)
-	}
-	if disposition != DispositionApplied {
-		t.Fatalf("expected the T13 second capture to be applied, got %s", disposition)
-	}
-
-	parentAfter := mustGetAttempt(t, pool, f.tenantID, parentAttempt.ID)
-	if parentAfter.State != AttemptSucceeded || parentAfter.LedgerTransactionID == nil {
-		t.Fatalf("expected the parent to move declined->succeeded (T13) with its own ledger link, got state=%s ledger=%v", parentAfter.State, parentAfter.LedgerTransactionID)
-	}
-	if *parentAfter.LedgerTransactionID == *childAfter.LedgerTransactionID {
-		t.Fatalf("T13 second capture must post its OWN, DISTINCT ledger transaction - got the same id %s as the sibling", parentAfter.LedgerTransactionID)
-	}
-
-	var intentLedgerTxID uuid.UUID
-	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		return tx.QueryRow(ctx, `SELECT ledger_transaction_id FROM deposit_intents WHERE id = $1`, res.Intent.ID).Scan(&intentLedgerTxID)
-	}); err != nil {
-		t.Fatalf("read intent ledger_transaction_id: %v", err)
-	}
-	if intentLedgerTxID != *childAfter.LedgerTransactionID {
-		t.Fatalf("T13: the intent's own ledger_transaction_id link must be left alone (still the FIRST posting), got %s want %s",
-			intentLedgerTxID, *childAfter.LedgerTransactionID)
-	}
-
-	assertLedgerBalanced(t, pool, f.tenantID)
-	loAssertProjectionMatchesRebuild(t, pool, f.tenantID)
-}
+// TestReceipt_T13SecondCapture_ThroughApplyReceiptEvidence_LedgerBalanced was
+// removed (ADR 0095 §28, ledger-finance ruling §5 item 1, INV-DEP-1 /
+// PAY-DOUBLE-CREDIT-1 Financial Hardening FH-3): it asserted that a T13
+// second capture POSTS its own, distinct ledger transaction - superseded
+// by INV-DEP-1, under which a second capture is disputed
+// (multiple_success_for_intent, T13d) and NEVER posted. Replaced by
+// TestINVDEP1_Inverted_T13SecondCapture_BecomesDisputed_NoSecondPosting
+// (internal/payments/inv_dep1_matrix_integration_test.go), which keeps the
+// identical fixture shape and asserts the new, inverted behaviour.
 
 func TestReceipt_MerchantReferenceCrossProvider_IsAnomaly_NoStateChange(t *testing.T) {
 	pool := depositV2ScratchPool(t)

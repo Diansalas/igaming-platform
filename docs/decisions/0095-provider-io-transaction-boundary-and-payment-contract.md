@@ -4803,7 +4803,308 @@ coverage, M1/M2 BLOCKED, R4 (callback agent's own scope, untouched here).
 freshly migrated to head (the shared `TEST_DATABASE_URL` run still fails on the same pre-existing,
 disclosed migration-0101 gap, confirmed unrelated). `golangci-lint` (2.9.0,
 `--build-tags=integration --allow-parallel-runners`): 0 issues on every file this round touched.
+### 27.14 PRH-I1 callback-cutover fix round (`payments`, 2026-09-27): H1 misclassification and revert, R4 payout receipt evidence, F5 mutant kills, corrections to §27.10
 
+**Scope.** A fix round responding to two independent reviews of the §27.10 cutover
+(`docs/plans/payment-readiness/rv-prh-i1-callback-ledger.md`, REJECT with a veto on money paths;
+`docs/plans/payment-readiness/rv-prh-i1-callback-code-review.md`, NOT READY), plus a follow-on
+ledger-finance payout re-review (`rv-prh-i1-payout-ledger.md`) covering the receipt path's payout
+branches. All changes are confined to `internal/payments/receipt.go`, `drive.go`, `sweeper.go`,
+`attempt.go`, `orchestrator.go`, `cascade.go`, and test files - the payout state machine itself
+(`payout.go`/`payout_sweep.go`/`withdrawal.go`) was owned and fixed concurrently by another agent
+(payout round 3, §27.12 continuation, not re-described here).
+
+**H1: a genuine bug was introduced, caught by the orchestrator's own `-race` run, and reverted.**
+The ledger-finance review's H1 finding read `applyReversalReceiptEvidence`'s unconditional
+`ev.Outcome = OutcomeSucceeded` normalization as "a reversal whose wire outcome is not `succeeded`
+still debits player_cash and is falsely stored as succeeded" and required gating posting/
+tombstoning on the wire outcome actually being `succeeded`. That fix was implemented and initially
+accepted. It was **wrong**: on this codebase's actual adapter contract, `MockProvider.HandleCallback`
+requires the wire `Outcome` field to be one of `succeeded`/`declined`/`ambiguous`/`pending` for
+EVERY event (an unrecognized value is `ErrCallbackMalformedBody`, never silently accepted), and
+§27.10(a) itself already documented that the field is "historically reused by some callers as a
+chargeback-reason carrier (`declined` + `DeclineReason: "chargeback"`)" for a reversal that DID
+happen and must post - there is no distinct "the attempted reversal itself failed" concept
+expressible on this wire shape today. The H1 gate broke six passing tests
+(`TestReceiveCallback_DepositReversalPostsFlow2`, `TestReceiveCallback_ReversalAmountCannotExceedOriginal`,
+`TestReceiveCallback_SecondReversalOfSameDepositRejected`,
+`TestReceiveCallback_ReversalOfNeverPostedDepositWritesTombstone`,
+`TestProviderRefBound_Payments_OversizeRejectedNothingWritten_ExactMaxAccepted`,
+`TestF7Payments_SequentialReversalRedeliveryIsIdempotent`), caught only because the coordinator ran
+the full suite under `-race` against a private database before merging. **Reverted**: the
+unconditional normalization is restored exactly as §27.10(a) originally described it;
+`applyNonSucceededReversalEvidence` (the gate) was deleted entirely. The two regression tests this
+round's earlier commit had added under the wrong assumption (`TestRVLF_P1_...`,
+`TestRVLF_P1b_...`) were rewritten to pin the CORRECTED behavior instead of deleted, so the
+regression this round almost shipped stays visible in test history rather than being quietly
+un-tested. **At the time of this record, ledger-finance's ruling on whether this revert is correct,
+and on alignment with reconciliation's own `matchReversal` handling of the same field, is still
+pending** - this record states the revert as implemented and test-verified, not as
+ledger-finance-approved.
+
+**H3 (security review `rv-prh-i1-killswitch-security.md`): all three cascade-insert sites tested,
+not just the callback's.** The kill-switch downgrade (`insertCascadeAttemptIfEligible`,
+`cascade.go`) was already wired into `receipt.go` (the callback), `drive.go` (a synchronous decline
+for a call already sent), and `sweeper.go` (a poll result that is a decline) - but only the
+callback site had a regression test. Added `TestRVLF_H3_DriveGo_SyncCascadableDeclineUnderKillSwitch`
+and `TestRVLF_H3_SweeperGo_PollCascadableDeclineUnderKillSwitch`, each asserting the decline commits,
+no cascade child is created, and the `payment.cascade_skipped_kill_switch` audit record exists.
+drive.go's site required calling `applyDepositCallResult` directly against an attempt already
+claimed/dispatched BEFORE the switch was engaged (T2's own claim CAS correctly refuses a brand-new
+dispatch while engaged, so the ordinary `InitiateDepositAttempt` entry point cannot exercise "a
+decline for a call already sent" under an engaged switch within one synchronous test call).
+
+**R4 (ledger-finance payout re-review): the receipt path's payout branches, all in `receipt.go`.**
+`applyResolvedReceiptEvidence`'s payout-operation branches previously (a) declined a payout attempt
+via the bare, attempt-only `ApplyDecline` without ever calling `withdrawal.Fail` - stranding the
+released hold - and (b) parked every payout success as an unresolved anomaly
+(`"payout_success_not_yet_wired"`), never settling the withdrawal. Fixed: both branches now call
+`payout.go`'s own `applyPayoutDecline`/`applyPayoutSuccess` - the SAME tx-scoped functions
+`ApplyPayoutResult`'s dispatch-path branches use - so the hold is released or settled exactly once,
+never duplicated by a second, receipt-path-only implementation. Also added: an event_type-vs-
+attempt.Operation cross-check in `ApplyReceiptEvidence` (a "deposit"-typed event resolving to a
+payout attempt, or the reverse, is now an anomaly with no effect - neither state machine is ever
+touched by a mislabeled event), and widened `insertReceiptDeduped`'s decline-column population
+(`decline_stage`/`cascadable`) to cover `EventType == "payout"`, not only `"deposit"` - the previous
+condition left those columns NULL for a payout decline while still storing `outcome='declined'`,
+which `payment_provider_events_check1` rejects outright (a permanent redelivery loop). No migration
+was needed for this: the CHECK constraint already accepts a decline with those columns populated:
+the bug was that the populating code excluded payout-typed events, not that the constraint itself
+was wrong. Tests: `TestRVLF_R4a_PayoutDeclineViaReceiptPathReleasesHold`,
+`TestRVLF_R4d_PayoutSuccessViaReceiptPathSettles`, `TestRVLF_R4b_EventTypeOperationMismatchIsAnomaly`.
+Because payout round 3 (concurrent, §27.12 continuation) subsequently changed
+`applyPayoutSuccess`/`applyPayoutDecline` to lock the withdrawal row first
+(`withdrawal.LockForPayoutEvidence`) before the attempt CAS, reusing those functions here means the
+receipt path's payout branches automatically inherited the corrected withdrawal-then-attempt lock
+order with no further change required in `receipt.go`.
+
+**F5 (independent code review) surviving-mutant kills, each with a new/edited passing test in
+`internal/httpserver`:**
+- **M10** (cap boundary `n > DeferredReceiptCap` vs `n >= DeferredReceiptCap`): the existing cap
+  test only filled `cap+1` rows, which both operators reject identically.
+  `TestPaymentWebhook_DeferredReceiptCapExceeded_ExactBoundary` fills exactly `cap` rows and asserts
+  the next delivery is still ACCEPTED - only `>` accepts at the exact boundary.
+- **M11** (uniform-response header leak): `TestPaymentWebhook_UniformResponseAcrossDispositions`'s
+  header check was a hardcoded 6-name deny-list (`X-Disposition`, `X-Payment-Disposition`, ...) that
+  would never catch a mutant introducing some OTHER new header. Replaced with a full allow-list/
+  key-set-equality comparison across every recorded disposition's response headers.
+- **M12/M13** (reversal amount-mismatch HTTP path unpinned): no HTTP-level test exercised
+  `applyReversalReceiptEvidence`'s amount/asset mismatch branch (`ErrCallbackProviderMismatch`) at
+  all. Added `TestWebhook_ReversalAmountMismatchAfterVerification_Maps400`: asserts 400/"callback
+  rejected", no ledger effect, and no raw amount/reference leakage in any captured log line.
+- Restored the log-redaction assertion `TestWebhook_ProviderMismatchAfterVerification_
+  IsDisputedNotRejected` had silently dropped (a bare `_ = captured` placeholder) when that test
+  moved from asserting a 400/rejected response to a 200/disputed one - see the correction to
+  §27.10's "no test was deleted, skipped, or weakened" claim below.
+
+**Corrections to §27.10 above (stated openly, per the no-fake-completion rule's own precedent at
+§27.11/§27.12's N5 correction - the original text is left in place, not edited):**
+- **"No test was deleted, skipped, or weakened" is inaccurate.** F5's independent re-review found
+  that `TestWebhook_ProviderMismatchAfterVerification_Maps400`'s replacement,
+  `..._IsDisputedNotRejected`, dropped its predecessor's log-redaction assertion entirely (replaced
+  with `_ = captured`, an unused-variable placeholder) rather than adapting it to the new 200/
+  disputed response shape. This WAS a weakened assertion, restored this round (see F5 above). No
+  other test's assertion strength was found to have regressed on re-review.
+- **§27.10(a)'s locking/ordering claim is inaccurate for a reversal naming a payout reference.**
+  §27.10(a) describes "a resolved attempt is locked... before the integrity check" as the general
+  case; what it does not say is that, PRIOR to this round's M4/F4 fix, the not-a-deposit integrity
+  check (`original.Operation != AttemptOperationDeposit`) ran AFTER, not before, the tombstone
+  branch (`unresolved || original.LedgerTransactionID == nil`) - and a payout attempt never carries
+  a `LedgerTransactionID` linking a captured DEPOSIT, so that ordering made the integrity check
+  permanently unreachable for any reversal naming a payout's own provider_reference, silently
+  tombstoning it instead (later making a genuine `withdrawal.Complete` for that reference fail
+  forever, looking up an idempotency key that could never exist). Fixed this round: the integrity
+  check now runs first. `TestRVLF_M4_ReversalNamingPayoutReferenceNeverTombstoned` pins the
+  corrected order.
+- **The evidence file's "6 scenarios" claim for `TestPaymentWebhook_UniformResponseAcrossDispositions`
+  overstates the number of DISTINCT dispositions actually exercised at the time.** F5's re-review
+  found that the test's "anomaly_mismatch" and "tombstone_collision" cases both produce
+  `DispositionApplied` (a T10 dispute still counts as `changed=true` in `ApplyReceiptEvidence`'s own
+  accounting), so only 3 distinct disposition VALUES (`applied`, `duplicate_effect`,
+  `deferred_unresolved`) were ever actually sent over HTTP by that test, not the implied 6 - no case
+  produced a real `DispositionAnomaly` response. Not fixed as part of this round's F5 work (recorded
+  here as still open, not silently corrected away): making one of those cases produce a genuine
+  `anomaly` disposition (e.g. the precondition-2 cross-attempt-reference-conflict path, or the R4(b)
+  event_type/operation cross-check added this round) remains a small follow-up.
+- **The evidence file's "migrations 1-104" citations are stale.** Both full-suite confirmation runs
+  quoted in §27.10/§27.10's round-2 addendum ("migrations 1-104") predate migrations 0105 (kill
+  switch), 0106 (kill-switch RLS hardening), and this round's own verification, which all ran on a
+  private database migrated to head including 0106. No migration was added by this round itself (see
+  the R4/H1 notes above - both turned out fixable in application code once correctly diagnosed);
+  migration 0107 remains reserved and unused for a possible future DB-trigger mirror of the H4 T2
+  sibling-succeeded guard (optional defence in depth, not attempted this round).
+- **§27.10's round-2 addendum lists `TestReceiveCallback_AmbiguousCallbackResolvedViaQueryStatus_NotCascaded`
+  among tests "adapted with strictly equal-or-stronger assertions" alongside two genuinely
+  equal-or-stronger adaptations.** On re-review this one is different in kind, not merely degree: the
+  pre-cutover version's own intent (synchronous, in-process `QueryStatus` resolution of an ambiguous
+  attempt) is no longer expressible at all post-cutover (§6.5 forbids any provider I/O from a
+  callback), so the adapted assertion (zero provider calls plus a scheduled `next_action_at` for the
+  sweeper) verifies a DIFFERENT behavior, not a strictly stronger one against the same original
+  intent. Relabeled here as a changed-intent adaptation, not an equal-or-stronger one - the
+  distinction matters because "equal-or-stronger" implies nothing was lost, and in this one case the
+  original synchronous-resolution code path this test exercised no longer exists to be tested at all
+  (it was intentionally removed by the cutover, per §6.5, not merely rewritten).
+
+**L4 (receipt field fidelity, ledger-finance L4/L5): tombstone receipts now store the reversal's
+real amount/asset instead of zero-value placeholders.** The tombstone branch of
+`applyReversalReceiptEvidence` builds its `ReceiptEvidence` before any original attempt is known to
+exist, so `ev.Amount`/`ev.AssetCode` were left at their zero values (`0`/`""`) even when the wire
+payload declared real ones - `insertReceiptDeduped` only ever populates `amount`/`asset_code` for
+`OutcomeSucceeded` evidence regardless, by design (§4.4 concepts), so this was cosmetic (never a
+financial-effect bug) but made the persisted receipt harder to reconcile by hand. Not changed this
+round in the disposition-affecting sense; `docs/plans/payment-readiness/evidence/prh-i1-mutation-kill.txt`
+records the mutation-kill detail for the receipt-fidelity test added.
+
+**L2 (bridge support for multiple attempts per intent).** `receive_bridge_integration_test.go`'s
+`backfillAttemptForIntent` previously built exactly one attempt per intent, so no migrated test
+exercised a genuine T13 second capture, or a cascade child left `created`, through the bridge. Added
+`backfillCascadeAttemptsForIntent`, which builds a real two-attempt shape through the SAME exported
+T1/T2/T4/T8 transitions the live cascade path uses (never through the legacy `InitiateDeposit`'s own
+in-process cascade recursion, which has no way to report which intermediate provider/reference it
+tried and declined): attempt 1 goes `created`->`submitting`->`declined` (cascadable) via a REAL
+provider claim, attempt 2 is the cascade child inserted via `cascade.go`'s own `insertCascadeAttempt`
+and deliberately left `created` (unclaimed). `TestRVLF_L2_BridgeCascadeThenT13SecondCapture` then
+delivers a genuine T13 success on attempt 1's own reference and confirms attempt 2 is rejected
+(`intent_succeeded`) and unclaimable - H4's guard exercised through the bridge's own multi-attempt
+shape, not only through a live-provider-driven cascade.
+
+**F3 (setIntentAttempt's provider_id/provider_reference sticky-guard extension) - mutation attempted,
+NOT killed; disclosed rather than claimed.** The obvious regression test (a redelivered decline on an
+already-terminal sibling after another sibling succeeded) turned out not to exercise this guard at
+all: `applyResolvedReceiptEvidence`'s `OutcomeDeclined` branch short-circuits to a no-op for any
+attempt that is not `submitting`/`pending`/`ambiguous`, BEFORE ever calling `finalizeDeclined`/
+`setIntentAttempt` - a terminal sibling's redelivered decline never reaches the mutated code at all.
+A rewritten test constructing two SIMULTANEOUSLY-LIVE attempts under one intent (the only way to
+reach `setIntentAttempt` with a genuine FIRST-time decline after a DIFFERENT sibling already
+succeeded) failed at setup with a `payment_attempts_one_live_per_intent` unique-constraint violation
+(migration 0101). **Conclusion, stated openly:** for deposits, the exact sequence this guard's
+provider_id/reference extension protects against is architecturally unreachable today - only one
+attempt per intent may ever be live at once, and a sibling can only reach `succeeded` (via T13) after
+the attempt it supersedes is already terminal, never while a DIFFERENT live attempt is mid-decline.
+The fix is retained as defence in depth (it costs nothing and closes a theoretical gap if that
+constraint is ever relaxed), but this record does NOT claim it is proven to close a live bug, unlike
+every other item in this section. Full transcript (including the exact failed alternative attempt) is
+in `docs/plans/payment-readiness/evidence/prh-i1-mutation-kill.txt`.
+
+**L4 (receipt field fidelity, ledger-finance L4/L5): tombstone receipts now backfill the reversal's
+real amount/asset from the original attempt when the wire payload omits them.** The tombstone branch
+of `applyReversalReceiptEvidence` builds its `ReceiptEvidence` before any original attempt is known to
+exist, so `ev.Amount`/`ev.AssetCode` were left at their zero values (`0`/`""`) even when a
+resolved-but-never-posted original attempt (this branch's own case) already knows the true ones -
+some PSPs' "reverse the whole deposit" chargeback shape never states either on the wire. Fixed: when
+an original attempt DID resolve (not the genuinely-unresolved case, where there is nothing to backfill
+from) and the wire left a field unset, it is backfilled from the original attempt's own declared
+value before the receipt is stored - never overwrites a wire-declared value.
+`TestRVLF_L4_TombstoneReceiptBackfillsAmountAssetFromOriginalAttempt` pins this.
+
+**Verification.** `internal/payments` fully green under `-race -tags=integration` on a private
+database migrated to head (through migration 0106), repeated runs, no flakes. `internal/reconciliation`
+green. Every payments/webhook/payout/kill-switch/reversal-named test in `internal/httpserver` (83
+tests) green under `-race`. `internal/httpserver`'s `TestResolutionIsolation_*` family is
+independently confirmed flaky under `-race` load regardless of this round's changes (same file,
+untouched by this round; 2-5 of its ~8 subtests fail non-deterministically even run in isolation,
+repeatably, all real-time latency-threshold assertions sensitive to race-detector overhead) - not a
+regression introduced here, disclosed rather than silently excluded. `golangci-lint` (pinned 2.9.0
+binary, untagged, exactly as CI runs it): 0 issues. `gofmt`: clean. Mutation-kill transcripts for
+this round's fixes (H2, H3 x3 sites, H4, M1, M4, F2, R4(a)/(b)/(d) - 10 of 11 attempted, F3 disclosed
+as not killed above) are filed in `docs/plans/payment-readiness/evidence/prh-i1-mutation-kill.txt`
+("PRH-I1 callback cutover fix round, 2026-09-27"). The F2 mutation-kill exercise itself surfaced a
+genuine bug this round introduced and fixed in the same commit: `boundedDeclineReason` was only
+applied inside `applyResolvedReceiptEvidence`'s `OutcomeDeclined` branch, AFTER the R0 receipt insert
+(ADR 0082 A7) had already run with the raw, unbounded `ev.DeclineReason` -
+`payment_provider_events.decline_reason` carries the identical 64-byte CHECK as
+`payment_attempts.decline_reason`. Fixed by bounding once, at the top of `ApplyReceiptEvidence`.
+
+**Not implemented, disclosed:** the DB-trigger-level mirror of H4's T2 sibling-succeeded guard
+(optional defence in depth; migration 0107 reserved, unused). The "6 scenarios" evidence-file
+overstatement noted above (still 3 distinct disposition values demonstrated over HTTP, not yet a
+real `anomaly` case). ~~H1's ledger-finance ruling on the revert is pending at the time of this
+record; this section will need its own follow-up correction if that ruling disagrees.~~
+**[SUPERSEDED - see the FH-5 follow-up below: ledger-finance's binding ruling arrived and the
+revert described above was itself further corrected.]** F3's mutation was not killed (see above) -
+retained as defence in depth, not as a proven fix for a reachable bug.
+
+**FH-5 follow-up (`payments`, 2026-09-27): ledger-finance's binding H1 ruling and M1, N2-N4,
+security S-H1/S-M1** (Financial Hardening workstream, `docs/plans/payment-readiness/rv-prh-i1-
+callback-ledger.md` "Re-review 1: fix round", and `rv-prh-i1-payout-security.md`).
+
+- **H1 is further corrected, not merely reverted.** The straight revert described above (every
+  wire outcome posts identically) was itself a defect: ledger-finance's binding ruling draws a line
+  the revert missed. **Rule 1/4**: `succeeded` and the legacy `declined`-as-reason-carrier wire
+  outcomes both post/tombstone exactly as the revert already did. **Rule 2**: `pending`/`ambiguous`
+  are NOT final reversal decisions and must never post or tombstone - `applyReversalReceiptEvidence`
+  now branches on the real wire outcome before any lock: a non-final outcome is stored under its
+  OWN real value (never normalized), disposition `anomaly`, resolution `anomaly_other`, a new P1
+  audit action `payments.reversal_non_final_outcome`, and a uniform 200 (never a 4xx/5xx
+  redelivery loop). `TestRVLF_P1_NonFinalReversalOutcomeNeverPosts` pins this; the pre-existing
+  `TestRVLF_P1_ReversalPostsRegardlessOfWireOutcomeReasonCarrier` is narrowed to the two FINAL
+  outcomes only, since asserting all four posted identically was exactly the gap this rule closes.
+  **Rule 3**: `computeEventFingerprint` now uses the real wire outcome (`ReceiptEvidence.RawOutcome`)
+  for a posting/tombstoning reversal, even though the STORED `payment_provider_events.outcome`
+  column stays normalized to `succeeded` for that case (documented on the `ReceiptEvidence.Outcome`
+  field and via `CallbackEvent.Outcome`'s own doc comment in `types.go`); the raw outcome and the
+  already-bounded reason are also now carried in the `deposit.reversed`/`deposit.reversal_tombstoned`
+  audit metadata. **Rule 5**: `types.go`'s `CallbackEvent`/`PaymentProvider.HandleCallback` doc
+  comments now state the contract explicitly: a `deposit_reversal` event asserts a FINAL debit; an
+  adapter must never emit it for a pending-refund/chargeback-inquiry-open signal; a "chargeback won"
+  event has no mapping today and falls into `ReceiveVerifiedCallback`'s existing "unsupported
+  callback event type" error path - PROVIDER DEPENDENT, deferred pending a real vendor contract.
+  **Rule 6**: `internal/reconciliation/payment_statement.go`'s `matchReversal` needed a doc
+  comment only (no code change) - its existing pending/declined statement-line branches already
+  correctly reflect "no posting expected yet" for this case.
+- **RULING M1 (terminal amount/asset mismatch)**: a mismatched success on an ALREADY-terminal
+  attempt (succeeded OR declined) now records a P1 audit
+  (`payments.callback_amount_asset_mismatch_terminal`, via the new `auditTerminalAmountAssetMismatch`
+  helper) in both cells - the succeeded case used to silently treat a mismatch as an ordinary
+  idempotent duplicate with no record at all, and the declined case used to silently return
+  `anomaly_other` with no audit trail either. Neither cell changes state or posts.
+- **N2** (drive.go/sweeper.go): a success naming an already-tombstoned reference now routes through
+  the same T10 (`applyDepositCallResult`'s `ErrorClassSucceeded` branch, phase C, always
+  non-terminal) / T10-or-T13t (the sweeper's `applyStatusEvidence`, which can also reach a
+  `declined` attempt on a T13 re-drive) tombstone check `applyResolvedReceiptEvidence` already used,
+  instead of calling `postDepositSuccess` directly and surfacing the tombstone's own unique index as
+  an untyped error that would otherwise retry identically forever.
+- **N3** was already closed by this round's own S-H1 fix (below) - the deferred backstop's
+  `event_type` filter is derived from the resolved attempt's OWN operation (an allow-list, not a
+  hardcoded `'deposit'`), so a stored `deposit`-typed receipt can never be replayed against a
+  payout attempt or vice versa.
+- **N4**: `rejectCreatedSiblings` now takes the caller's own `EvidenceKind` parameter instead of
+  hardcoding `EvidenceCallback`, fixed at all three call sites (`receipt.go`, `drive.go`,
+  `sweeper.go`).
+- **Security S-H1** (`rv-prh-i1-payout-security.md`, probe SP-B2): confirmed fixed by the same N3
+  change above - `TestRVLF_N3_DeferredApplyNeverReplaysADepositDeclineAsPayoutEvidence` pins the
+  decline variant (the security review's own probe found the success variant).
+- **Security S-M1** (probe SM10): a payout success callback echoing a DIFFERENT, non-empty provider
+  reference than the one already on file (the attempt's own, falling back to the withdrawal's) now
+  disputes (T10, `provider_reference_mismatch`) instead of settling, mirroring the QueryStatus
+  path's own N6 rule (`payout.go`) - `TestRVLF_SM10_PayoutSuccessProviderReferenceMismatchDisputes`.
+- **Verification**: `go build ./...` and `go vet -tags=integration ./...` clean across the whole
+  repository. The `internal/payments` suite under `-race` against a fresh private database
+  (`fh5_pay_20260927`, migrated to head including 0106/0107) and mutation-kill transcripts for this
+  round's new fixes are recorded separately (see the evidence file's own FH-5 entry).
+- **Deferred, on explicit coordinator instruction**: the double-credit/INV-DEP-1 fix (ADR 0095 §28,
+  `docs/plans/payment-readiness/lf-q1-supersession.md`) is FH-3, a LATER phase gated on kill-switch
+  phase 2's `callProvider`/`Resolve` signature changes and QA's A-O matrix. Not started here.
+
+**Operator note (ledger-finance L-d): `disposition_at_receipt` vs `resolution` for an M1
+terminal-mismatch anomaly.** When `applyResolvedReceiptEvidence` finds a terminal-mismatch (M1:
+a mismatched success on an already-`succeeded` or already-`declined` attempt), the receipt row's
+`disposition_at_receipt` column stays `'applied'` - it was already written as `'applied'` at R0
+(the receipt insert, before the attempt was even locked and re-read; ADR 0082 A7), and nothing
+about a terminal-mismatch changes that value after the fact. It is `resolution` -
+`payment_provider_events.resolution`, written afterwards by `ResolveReceipt` in the SAME
+transaction - that actually records the anomaly, as `'anomaly_other'`. **An operator or a
+dashboard querying only `disposition_at_receipt` will see `'applied'` for this case and must not
+read that as "no problem was found."** The M1 queue (a `disputed` attempt with no state change
+for a terminal-mismatch cell specifically - see the audit action
+`payments.callback_amount_asset_mismatch_terminal`, or `resolution = 'anomaly_other'` on the
+receipt itself) is the correct signal to alert and triage on; `disposition_at_receipt` alone is
+never sufficient to rule out an anomaly for ANY receipt whose attempt was already resolved before
+this callback arrived. This is not a defect: `disposition_at_receipt` answers "did the receipt
+pipeline apply SOME evidence-matrix cell to this event without erroring" (true here - the M1 cell
+IS the applied cell, it just happens to conclude "no state change, only an audit"), while
+`resolution` answers "what did that cell conclude." The two questions are different by design;
+this note exists so an operator reading only one of them is not misled.
 
 ### 27.14 Revision 4 (`architect`, 2026-09-27) — AM-2, the durable-state definition, AM-1 and the status correction
 
@@ -5420,3 +5721,96 @@ its own ADR.
 - It is consistent with the existing `canActOnTenant` precedent (`provider_credential_handlers.go`,
   `admin_routes.go`), and it keeps one OpenAPI surface.
 - Splitting later is additive (new paths and permissions, no data change).
+
+---
+
+## 31. §28 (AM-2, INV-DEP-1) implementation record (`payments`, 2026-09-27, Financial Hardening FH-3)
+
+**Status: IMPLEMENTED**, superseding §1/§9's "PARTIALLY IMPLEMENTED... §28 INV-DEP-1 NOT
+IMPLEMENTED" line for the code (not the accounting-treatment human decision, which stays
+BLOCKED per §28.13).
+
+- **§28.3 choke point.** `postDepositSuccess` (`internal/payments/orchestrator.go`) re-evaluates
+  `resolvedForOtherDeposit(I, A, K)` immediately before `ledger.Post` and returns the typed
+  sentinel `ErrDepositIntentAlreadyResolved` when true. Every T7/T13 evidence-application site
+  (receipt.go's two `OutcomeSucceeded` branches, drive.go's `ErrorClassSucceeded`, sweeper.go's
+  `ErrorClassSucceeded` - which also serves T17 re-drive per deposit_v2.go's own doc comment) now
+  calls the new `postDepositSuccessOrDispute` wrapper instead of `postDepositSuccess` directly:
+  it checks the SAME predicate BEFORE ever posting and routes to T10
+  (`ApplyDisputeFromNonTerminal`, `multiple_success_for_intent`) or T13d (the new
+  `ApplyMultipleSuccessForIntent`) instead. If `postDepositSuccess`'s own re-check or the ledger's
+  backstop index fires anyway, the wrapper maps it identically plus the additional
+  `payments_deposit_intent_index_backstop_fired` P1 (§28.3 rule 3). The legacy `InitiateDeposit`
+  path (`resolveAmbiguous`, no attempt row, `attemptID=nil`) returns the sentinel and posts
+  nothing; `RecordDepositMultipleSuccessRefusal` is the separate-tx audit+P1 counterpart to
+  `RecordDepositReversalRejection`'s existing pattern, for that path's caller to invoke after its
+  own transaction rolls back (this path has no production caller today - test/receive-bridge
+  only). The dead `deposit.second_capture_posted` branch is deleted; that audit action name is
+  retired.
+- **§28.4 transitions.** `ApplyMultipleSuccessForIntent` (T13d, `internal/payments/attempt.go`)
+  and the existing `ApplyDisputeFromNonTerminal` (T10, reused with the new
+  `TerminalReasonMultipleSuccessForIntent` constant) implement the new rows. `ApplyReceiptEvidence`
+  now returns `DispositionAnomaly` (not `DispositionApplied`) specifically for a T10/T13d
+  resolution, distinguishing it from the pre-existing tombstone-precedes-success T10 cell (which
+  keeps `DispositionApplied`, its own established convention, unchanged).
+- **§28.8 migration 0107** (`migrations/0107_deposit_intent_double_credit_backstop.{up,down}.sql`):
+  both partial unique indexes, each inside a `DO $$ ... EXCEPTION WHEN unique_violation$$` block
+  (the 0092 pattern, no bypass); `payment_attempts_guard()` `CREATE OR REPLACE`d with the single
+  line change accepting `terminal_reason IN (reversal_tombstone_precedes_success,
+  multiple_success_for_intent)`; `reconciliation_mismatches_mismatch_kind_check` widened with
+  `pay_captured_unposted`. `ledger.ErrDepositAlreadyPostedForIntent` follows the 0092
+  `ErrReversalAlreadyExists` pattern exactly (idempotency key looked up first; the sentinel only
+  when no row exists for the request's key and the fired constraint is the new index).
+- **§28.9 reconciliation.** `MismatchKindPayCapturedUnposted` (`pay_captured_unposted`) is emitted
+  by `payMatcher.matchPayment` for a `disputed`/`multiple_success_for_intent` attempt whose
+  statement line reports succeeded, with no reversal statement line naming its reference
+  (`payMatcher.reversalOriginals`, pre-scanned) and no ledger tombstone
+  (`m.ledgerByRef["tombstone\x00"+ref]`).
+- **Tests.** QA's test-first matrix files landed VERBATIM (with one unavoidable, documented,
+  non-assertion compile adaptation - see below) in `internal/payments/inv_dep1_matrix_integration_test.go`,
+  `internal/reconciliation/inv_dep1_recon_integration_test.go`,
+  `internal/idempotency/inv_dep1_correlation_integration_test.go`. The four legacy tests QA's own
+  header mapped for removal are removed with a pointer comment to their replacement:
+  `TestReceipt_T13SecondCapture_ThroughApplyReceiptEvidence_LedgerBalanced`,
+  `TestRVLF_P6_ReversalOfSecondCaptureReversesItsOwnTransaction`,
+  `TestPaymentStatement_Kind_DuplicatePlatformSuccess`,
+  `TestIntegration_LegitimateSecondOccurrenceDoesNotCollapse`. New
+  `internal/payments/migration_0107_integration_test.go` covers the up/down/up round trip, both
+  pre-flights' refusal on seeded duplicate data, existing-valid-data survival, the ledger
+  backstop sentinel, and a direct truth-table test of `resolvedForOtherDeposit`.
+- **Disclosed, not fixed (per "STOP and report", never edit an assertion):**
+  - `TestINVDEP1_D_ConcurrentOriginalAndFallbackSuccess_Race` and
+    `TestINVDEP1_K_ConcurrentAdversarialOrderings_Race`'s shared `invDep1RaceOnce` helper asserts
+    a per-rep wallet balance of exactly 5000 against a WALLET-CUMULATIVE `cashBalance` reused
+    across 50+ reps - arithmetically wrong from rep 1 onward, independent of INV-DEP-1. Verified
+    (via temporary debug logging, removed before commit) that `resolvedForOtherDeposit` correctly
+    detects the race for both delivery orderings on every repetition observed, and that
+    `assertInvariantAndBalanced` (correctly per-intent-scoped) passes every repetition.
+  - `TestINVDEP1_Recon_M_DuplicateDetector_LegacyDataShape`'s own doc comment says it needs a
+    pre-migration-0107 scratch DB, but it is built on `newPayWorld`/`testPool`, which migrates to
+    HEAD - so its own `ledger.Post` is (correctly) refused by 0107's backstop before the test
+    reaches its assertion. Needs a migrate-to-N-1 fixture (out of scope to add inside a file
+    QA marked verbatim); flagged for a coordinator decision on how to re-home it.
+  - One non-assertion compile adaptation: `TestINVDEP1_G_SameProviderReferenceRepeated_LedgerKeyDedupe`
+    called `postDepositSuccess` with the pre-§28.3 6-argument signature (written test-first,
+    before the `attemptID *uuid.UUID` parameter existed); updated to pass `&res.Attempt.ID` (the
+    most accurate choice for an exact-redelivery-of-a-succeeded-attempt scenario, per its own
+    comment) - the scenario, fixture and every assertion are unchanged.
+- **Mutation-kill checklist** (QA's own "N. MUTATION CHECKLIST", items 1-8): see
+  `docs/plans/payment-readiness/evidence/prh-i1-mutation-kill.txt`, "PAY-DOUBLE-CREDIT-1 /
+  INV-DEP-1, Financial Hardening FH-3" section. Items 1/2/3 revealed genuine defense-in-depth
+  (the ledger backstop index independently catches the removed pre-check, with an extra P1) and
+  were killed instead by a new direct predicate test; items 6 and 8 killed directly against new
+  targeted tests; item 4/5 covered by the new migration pre-flight-refusal tests; item 7 is
+  pre-existing structural protection this round did not introduce.
+- **Verification.** `go build ./...`, `go vet -tags=integration ./...`, `gofmt -l .` clean;
+  `golangci-lint run ./...` (pinned 2.9.0): 0 issues; `go run ./cmd/migrate verify` against a
+  scratch DB migrated through 0107: clean, no version gaps. Full `internal/payments`,
+  `internal/reconciliation`, `internal/idempotency` and `internal/ledger` suites green under
+  `-race` on a private DB except the two disclosed items above;
+  `internal/httpserver`'s pre-existing `TestResolutionIsolation_*` flakiness (tracked separately,
+  registry item TEST-RESISO-RACE-1) reproduced again this run, unrelated to and untouched by this
+  round.
+- **Deferred, per HD-LEDGER-UNALLOC-1 (§28.13):** the interim policy is (A), no posting of any
+  kind for a second real capture - implemented exactly as specified. Option (B) (an unallocated
+  suspense posting) is LEDGER-SUSPENSE-B-1, NOT IMPLEMENTED, out of scope for this round.

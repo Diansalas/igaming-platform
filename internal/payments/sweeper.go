@@ -375,6 +375,23 @@ func (s *Sweeper) processViaQueryStatus(ctx context.Context, tenantID uuid.UUID,
 		if err != nil {
 			return err
 		}
+		// Ledger-finance review F3 (rv-fh3-ledger.md, 076e42e): attempt was
+		// read BEFORE the outbound QueryStatus call and BEFORE the parent
+		// lock above - money-safe (CAS plus INV-DEP-1 catch every stale
+		// decision regardless), but a concurrent callback that moved the
+		// attempt in the meantime made applyStatusEvidence decide from a
+		// snapshot the CAS predicates below then reject, producing pure
+		// error/alert noise (and, on phase C's identical pattern, a
+		// spurious error returned to a player whose deposit actually
+		// succeeded). Re-read under the now-held lock, exactly as
+		// ApplyReceiptEvidence already does, so this decision is made from
+		// the CURRENT row whenever nothing raced, and only genuinely
+		// concurrent evidence (arriving AFTER this fresh read) still hits
+		// the CAS-conflict path this fix cannot and should not eliminate.
+		attempt, err = GetAttemptByID(actx, tx, attempt.ID)
+		if err != nil {
+			return err
+		}
 		return s.applyStatusEvidence(actx, tx, intent, attempt, gr)
 	})
 }
@@ -413,11 +430,42 @@ func (s *Sweeper) applyStatusEvidence(ctx context.Context, tx pgx.Tx, intent Dep
 		return err
 
 	case ErrorClassSucceeded:
+		// RV-PRH-I1 ledger-finance N2: see drive.go's identical comment -
+		// a QueryStatus success naming a (provider_id, provider_reference)
+		// a reversal tombstone already occupies must route to T10/T13t,
+		// never straight into postDepositSuccess's own ledger insert
+		// (which would otherwise surface the tombstone's unique index as
+		// an untyped error, retried identically forever by the poll loop).
+		// Unlike phase C, the sweeper CAN reach this with attempt.State
+		// already 'declined' (a T13 second-capture re-drive), so both the
+		// declined (T13t) and live (T10) tombstone cells apply here,
+		// exactly as the receipt path's own matrix distinguishes them.
+		if res.ProviderReference != "" {
+			tombstoned, err := tombstoneExists(ctx, tx, attempt.TenantID, *attempt.ProviderID, res.ProviderReference)
+			if err != nil {
+				return err
+			}
+			if tombstoned {
+				if attempt.State == AttemptDeclined {
+					return ApplyTombstonePrecedesSuccess(ctx, tx, attempt.ID, EvidenceQueryStatus)
+				}
+				return ApplyDisputeFromNonTerminal(ctx, tx, attempt.ID, EvidenceQueryStatus, "reversal_tombstone_precedes_success")
+			}
+		}
+		// ADR 0095 §28.3: routed through the choke-point wrapper (see
+		// drive.go's identical comment) - a poll success for an intent
+		// already financially resolved by ANOTHER attempt or posting
+		// takes T10/T13d instead of Flow 1, exactly like phase C and the
+		// receipt path. This is also T17 re-drive's own site (deposit_v2.go's
+		// doc comment: T17 re-drive reuses this same evidence application).
 		// postedTxID, not updated.LedgerTransactionID - PRH-I5 finding
 		// (LF95-C6(a)/T13); see drive.go's identical comment.
-		_, postedTxID, err := s.Orchestrator.postDepositSuccess(ctx, tx, intent, *attempt.ProviderID, res.ProviderReference, attempt.Amount, attempt.AssetCode)
+		_, postedTxID, disputed, err := s.Orchestrator.postDepositSuccessOrDispute(ctx, tx, intent, attempt, *attempt.ProviderID, res.ProviderReference, attempt.Amount, attempt.AssetCode, EvidenceQueryStatus)
 		if err != nil {
 			return err
+		}
+		if disputed {
+			return nil
 		}
 		if err := ApplySuccess(ctx, tx, attempt.ID, SuccessEvidence{
 			Evidence: EvidenceQueryStatus, ProviderReference: res.ProviderReference, LedgerTransactionID: &postedTxID,
@@ -425,14 +473,21 @@ func (s *Sweeper) applyStatusEvidence(ctx context.Context, tx pgx.Tx, intent Dep
 			return err
 		}
 		// RV-PRH-I1 ledger-finance H4: see drive.go's identical comment.
-		return rejectCreatedSiblings(ctx, tx, attempt)
+		return rejectCreatedSiblings(ctx, tx, attempt, EvidenceQueryStatus)
 
 	case ErrorClassDefiniteDecline:
 		var refPtr *string
 		if res.ProviderReference != "" {
 			refPtr = &res.ProviderReference
 		}
-		reason := boundedDeclineReason(res.DeclineReason)
+		providerIDStr := ""
+		if attempt.ProviderID != nil {
+			providerIDStr = *attempt.ProviderID
+		}
+		reason, err := boundedDeclineReasonAudited(ctx, tx, attempt.TenantID, "payment_attempt", attempt.ID.String(), providerIDStr, res.DeclineReason)
+		if err != nil {
+			return err
+		}
 		updated, err := s.Orchestrator.finalizeDeclined(ctx, tx, intent, attempt.ProviderID, refPtr, reason)
 		if err != nil {
 			return err

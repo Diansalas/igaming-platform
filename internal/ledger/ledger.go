@@ -223,6 +223,29 @@ const reversalOneDepositReversalConstraint = "ledger_transactions_one_deposit_re
 // exactly this change (Stage 10.1 review P2-1).
 var ErrReversalAlreadyExists = errors.New("ledger: a deposit_reversal transaction already exists for this original deposit")
 
+// depositOneDepositPerIntentConstraint is the name of migration 0107's
+// partial unique index (tenant_id, correlation_id) WHERE
+// transaction_type = 'deposit' - ADR 0095 §28.2 INV-DEP-1: at most one
+// deposit posting per deposit intent per tenant. For transaction_type =
+// 'deposit', correlation_id IS the deposit_intents.id (§28.2's binding
+// contract amendment).
+const depositOneDepositPerIntentConstraint = "ledger_transactions_one_deposit_per_intent"
+
+// ErrDepositAlreadyPostedForIntent is returned by Post when the INSERT
+// into ledger_transactions violates migration 0107's partial unique index
+// rather than the ordinary (tenant_id, idempotency_key) idempotency
+// constraint - i.e. this exact idempotency key was never written before
+// AND a DIFFERENT deposit posting already exists for this intent. This is
+// the §28.3 rule-2 BACKSTOP: internal/payments' postDepositSuccess choke
+// point already refuses (via its own resolved_for_other re-check) before
+// ever reaching here, so reaching this sentinel at all means that choke
+// point was bypassed - a P1 defect signal, not an ordinary business
+// outcome (§28.3 rule 3, §28.11 "backstop fired"). Routed on the
+// constraint name exactly like ErrReversalAlreadyExists (0092), for the
+// identical reason: db.IdempotentInsert's ordinary conflict path would
+// otherwise look this INSERT up by idempotency_key and find NO ROW.
+var ErrDepositAlreadyPostedForIntent = errors.New("ledger: a deposit transaction already exists for this deposit intent")
+
 // ErrInvalidEntry is returned for a structurally invalid entry (e.g. a
 // non-positive amount) caught before ever reaching the database.
 var ErrInvalidEntry = errors.New("ledger: invalid entry")
@@ -435,6 +458,9 @@ func Post(ctx context.Context, tx pgx.Tx, in TransactionInput) (PostResult, erro
 		if lookupErr != nil {
 			if errors.Is(lookupErr, pgx.ErrNoRows) && conflictConstraint == reversalOneDepositReversalConstraint {
 				return PostResult{}, fmt.Errorf("%w: reverses_transaction_id=%v", ErrReversalAlreadyExists, in.ReversesTransactionID)
+			}
+			if errors.Is(lookupErr, pgx.ErrNoRows) && conflictConstraint == depositOneDepositPerIntentConstraint {
+				return PostResult{}, fmt.Errorf("%w: correlation_id=%v", ErrDepositAlreadyPostedForIntent, in.CorrelationID)
 			}
 			return PostResult{}, fmt.Errorf("ledger: look up existing transaction for idempotency key: %w", lookupErr)
 		}
