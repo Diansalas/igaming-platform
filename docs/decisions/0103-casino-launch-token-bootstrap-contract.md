@@ -1,363 +1,415 @@
 # ADR 0103 — Casino Vendor Launch-Token Bootstrap Contract (CAS-PLAY-BOOTSTRAP-1)
 
-- **Status:** PROPOSED, 2026-09-28. Drafted by `architect` for PRH-2 W0 (workstream W0-X). Nothing
-  here is implemented. The implementation is PRH-2 workstream **B** (W2).
-- **Decision type:** cross-domain contract: the `casino` domain plus `httpserver`, `webhookauth` and
-  the ADR 0097 admission layer.
+- **Status:** PROPOSED, **revision 2**, 2026-09-28. Drafted by `architect` for PRH-2 W0 (W0-X).
+  Nothing here is implemented. The implementation is PRH-2 workstream **B** (W2).
+- **Revisions:**
+
+  | Rev | Base | Change |
+  |---|---|---|
+  | 1 | `f06818b` | Initial draft |
+  | 2 | `10e0471` | Applies `reviews/adr-0102-0104-security.md` (ACCEPT WITH CONDITIONS: SB-1..SB-8, Q4–Q6, C-103-1..6) and the orchestrator's resolutions (SB-1, SB-2, SB-3, SB-6, SB-7). Product-owner-proxy: ACCEPT. Mapped in §12 |
+
+- **Decision type:** cross-domain contract: `casino`, `httpserver`, `webhookauth`, and ADR 0097
+  admission.
 - **Owner:** `casino`. **Reviewers:**
-  - `security` (**hard gate**, S-5);
-  - `architect`, `code-reviewer`, `qa` and `product-owner-proxy`;
-  - `ledger-finance` only if the §4 lock-order note changes an ADR 0082 order.
-- **Registry:** CAS-PLAY-BOOTSTRAP-1. **It depends on CAS-REVOKE-CONSUMED-1 (workstream A,
-  migration 0108) having merged** (plan §2, security gate (i)).
-- **Binding inputs:** plan §5-B, §2 W2, §4 (the note under the table), §11; `reviews/security.md`
-  S-5 and §3 "B"; `reviews/qa.md` W2 "B"; ADR 0025 §3 (the opaque single-use launch token); ADR 0095
-  §15.1 (two-phase launch, never-consumed TTL); ADR 0097 (webhook admission); ADR 0091 (uniform 401).
-- **Labels:** every decision here is engineering and reversible. No human decision is needed. The
-  items for review are in §11.
+  - `security` (**hard gate**);
+  - `architect`, `code-reviewer`, `qa`, `product-owner-proxy`;
+  - `ledger-finance`, only if §4 changes an ADR 0082 order.
+- **Registry:** CAS-PLAY-BOOTSTRAP-1. It depends on **CAS-REVOKE-CONSUMED-1 (workstream A,
+  migration 0108) having merged**. Related rows, already registered:
+  - CAS-PLAYER-REF-1: must close **before any real vendor** (SB-8);
+  - CAS-BET-REQUIRES-BOOTSTRAP-1 (SB-5);
+  - CAS-GAME-KILL-BET-1 (SB-4): blocks real-money casino launch, but not B.
+- **Binding inputs:** plan §5-B, §2 W2, §4 note, §11; security S-5 and the revision-2 review; QA
+  W2 "B"; ADR 0025 §3; ADR 0094 §4.1/§5 (two-phase verification, Redeem+Recheck); ADR 0095 §15.1;
+  ADR 0097; ADR 0091; ADR 0099 §6 (`app.acting_*` GUCs).
+- **Labels:** engineering and reversible. No human decision is needed.
 
 ---
 
 ## 1. Context (verified at `cabca27`)
 
-- `CreateLaunchSession` (`internal/casino/launch.go:222-262`) mints a 256-bit token and stores only
-  `token_hash` (SHA-256). `casino_launch_sessions.token_hash` is **globally** `UNIQUE` (migration
-  0035:160), with FORCE RLS families `tenant_staff_scope` and `player_self_scope` (0035:182,193).
-- `ResolveLaunchToken` (`launch.go:279`) has **no non-test caller** and is unsafe for a vendor
+- `CreateLaunchSession` (`internal/casino/launch.go:222-262`) stores only `token_hash`. That column
+  is **globally** UNIQUE (0035:160), and the table has FORCE RLS families `tenant_staff_scope` and
+  `player_self_scope` (0035:182,193).
+- `ResolveLaunchToken` (`launch.go:279`) has no non-test caller, and it is unsafe for a vendor
   bootstrap (S-5):
-  - it selects by hash alone and checks no provider, mode or asset;
-  - it lazily writes `expired` (`:311`);
-  - it consumes with `WHERE id=$1 AND status='active'` only.
+  - it looks up by hash alone;
+  - it checks no provider, mode or asset;
+  - it lazily writes `expired` (**`:314`**);
+  - its consume predicate is `id` + `status` only.
+- **`postBet`** accepts bets on `active` sessions within their TTL and on `consumed` sessions
+  (`orchestrator.go:1483-1488`). On every bet it re-checks:
+  - the provider binding;
+  - capability;
+  - RG;
+  - risk, evaluated with the session's frozen `jurisdiction_code`.
 
-  Checking the binding after that call either burns the session or commits a consume that should
-  have been refused.
-- `postBet` accepts a bet on an `active` session inside its TTL and on a `consumed` session
-  (`orchestrator.go:1483-1488`).
-- The 0042 immutability trigger (`0042…up.sql:39-58`) freezes `consumed`, `expired` and `revoked`
-  rows. **Workstream A's migration 0108** adds exactly `consumed → revoked`, and makes
-  `RevokeLaunchSession` revoke `active` or `consumed`, returning `prior_status`.
-- The vendor-facing webhook route shape is `/v1/webhooks/casino/{tenantSlug}/{providerID}`:
-  - `webhookPreamble` derives the tenant from the slug and checks it is active;
-  - `VerifyCallback` authenticates with the per-tenant credential in a phase-1 read-only
-    transaction;
-  - ADR 0097 admission gates both (`casino_handlers.go:385-427`).
-- Casino has **no dedicated kill-switch table**. The platform-level brakes are:
-  - `casino_games.status` (`types.go:83`: "a PLATFORM-level kill switch");
-  - `casino_provider_capabilities.status`, `supports_launch` and `supported_assets`
-    (`LoadCapability`, used at `orchestrator.go:460-476`).
-- **RG** is `rg.EvaluateEligibility` through `evaluateAndAuditEligibility` (`orchestrator.go:706`).
-- **Current leak.** `LaunchRequest` passes the raw platform `PlayerAccountID` to the adapter
-  (`types.go:547`). This matters for §3.5.
+  It does **not** re-run jurisdiction resolution, the game blocklist or `casino_games.status`
+  (SB-3). The last gap is registered as CAS-GAME-KILL-BET-1 (SB-4).
+- The 0042 trigger freezes terminal rows. **Migration 0108 (A)** adds exactly `consumed → revoked`,
+  and `RevokeLaunchSession` then handles `active` or `consumed` and returns `prior_status`.
+- **Webhook route shape:** `/v1/webhooks/casino/{tenantSlug}/{providerID}`.
+  - `webhookPreamble` resolves the tenant.
+  - `VerifyCallback` is phase 1: no transaction, then a short read-only credential read.
+  - The domain transaction begins with **Redeem+Recheck** of the verified handle as its first
+    statement (`orchestrator.go:1020-1027`, via `webhook_verify.go:124`; ADR 0094 §5). The adapter
+    parses only the verified bytes.
+  - ADR 0097 admission gates both phases (`casino_handlers.go:385-427`).
+- **Casino has no kill-switch table.** The platform brakes are:
+  - `casino_games.status` (`types.go:83`);
+  - `casino_provider_capabilities`: `status`, `supports_launch`, `supports_bet`,
+    `supported_assets` (`orchestrator.go:460-476`).
+- RG runs through `evaluateAndAuditEligibility` (`orchestrator.go:706`).
+- `LaunchRequest` passes the raw `PlayerAccountID` to the adapter (`types.go:547`), which is
+  CAS-PLAYER-REF-1.
 
 ## 2. Decision summary
 
-- Add a new vendor-facing endpoint, the **launch bootstrap**, and a new function
-  `casino.BootstrapLaunch` in `internal/casino/bootstrap.go`. `ResolveLaunchToken` is **not
-  reused**, as-is or wrapped. It stays test-only; deleting it is §11 item 5.
-- The consume is a **binding-aware CAS**: the provider, tenant, mode, asset and expiry predicates
-  are **inside** the `UPDATE … WHERE`, never checked after it.
-- The contract, in S-5's order, is in §3.
+- Add a new vendor-facing endpoint backed by `casino.BootstrapLaunch` (`internal/casino/bootstrap.go`).
+- **`ResolveLaunchToken` is not reused**, either as-is or wrapped.
+- The consume is a **binding-aware CAS**. The provider, tenant, mode, asset, **provider game** and
+  expiry predicates all sit inside the `UPDATE … WHERE` (SB-2).
+- The transaction's **first statement is Redeem+Recheck** of the verified credential handle (SB-1).
 
 ## 3. Contract
 
-### 3.1 Request (MOCK/vendor → platform)
+### 3.1 Request
 
 - **Route:** `POST /v1/webhooks/casino/{tenantSlug}/{providerID}/launch-bootstrap`. The final path
-  string is the casino implementer's choice, but it must share the webhook preamble.
-- The tenant and provider come **from the route**, validated by the preamble and verified by
-  `webhookauth`. **The body never carries a tenant.** Unknown fields are refused.
-- **Body** (signed exactly like a callback):
-  - `launch_token`: the raw token;
-  - `request_id`: `^[A-Za-z0-9_.:-]{1,128}$`;
-  - `provider_game_id`, `asset_code`, `mode`: the vendor's view of the launch, each compared to the
-    session.
+  is the implementer's choice, but it must share the preamble.
+- The tenant and provider come from the route and are verified by `webhookauth`. **The body never
+  carries a tenant**, and unknown fields are refused.
+- **Signed body:**
+  - `launch_token`;
+  - `request_id` (`^[A-Za-z0-9_.:-]{1,128}$`);
+  - `provider_game_id`, `asset_code`, `mode`.
+- The body is parsed **only from the verified bytes** that Redeem returns (SB-1).
 
-### 3.2 The single-transaction order (S-5 steps 1–7)
+### 3.2 The single-transaction order (S-5 steps 1–7, with SB-1)
 
 **Step 1: authenticate, outside any transaction.**
-- Run the preamble (charset, bounded body, tenant by slug, tenant active), ADR 0097 admission,
-  then `VerifyCallback`-equivalent `webhookauth` verification (ADR 0094 §4.1 phase 1, short
-  read-only), then `admitVerified`.
-- Any failure → the **existing uniform 401** "callback rejected".
-- `tenantID` and `providerID` are now server-derived.
+- Run the preamble, ADR 0097 pre-auth admission, and phase-1 `webhookauth` verification (ADR 0094
+  §4.1: a short read-only credential read that commits before any secret-store fetch). Then run
+  `admitVerified`.
+- Any failure → the existing **uniform 401** "callback rejected".
 
 Then `deps.DB.WithTenant(tenantID, …)` opens **one** transaction:
 
-**Step 2: look up the session.**
-- `SELECT … FROM casino_launch_sessions WHERE token_hash = $h AND tenant_id = $t FOR UPDATE`,
-  where `$h = hashLaunchToken(raw)`.
-- RLS already scopes this to the tenant; the explicit `tenant_id` predicate is defence in depth.
-- Before the binding checks, look up the idempotency row by `(tenant_id, provider_id,
-  request_id)`. If it exists, take the §3.4 replay branch.
+**Step 2a: Redeem+Recheck first (SB-1, C-103-1).**
+- The first statement is Redeem+Recheck of the verified handle (the `redeemVerified` pattern,
+  `orchestrator.go:1027`).
+- A handle that was revoked, expired or rotated away between phase 1 and this transaction, or a
+  tenant/provider/domain mismatch, → the uniform 401. **Nothing is read or written.**
+- The body is then parsed **only from the verified bytes** that Redeem returns.
 
-**Step 3: check the binding.** Refuse **uniformly** (§3.6) unless the row exists and **all** of the
-following hold:
-- `provider_id = $providerID`;
+**Step 2b: look up the session and the idempotency row.**
+- `SELECT … FROM casino_launch_sessions WHERE token_hash = $h AND tenant_id = $t FOR UPDATE`.
+- Look up the idempotency row by `(tenant_id, provider_id, request_id)`. If it exists, take the
+  §3.4 replay branch.
+
+**Step 3: check the binding.** Refuse **uniformly** unless the row exists and **all** of these hold:
+- `provider_id = $p`;
 - `tenant_id = $t`;
-- `mode = body.mode`;
-- `asset_code = body.asset_code`;
-- `provider_game_id = body.provider_game_id`;
+- `mode`, `asset_code` and `provider_game_id` equal the body's values;
 - `status = 'active'`;
 - `expires_at > now()`.
 
-On refusal, **nothing is written**: no status change, no lazy `expired` write, no idempotency row.
-The transaction rolls back.
+On refusal, **nothing is written** (no lazy `expired`) and the transaction rolls back.
 
-**Step 4: re-check the gates.** These are read in the same transaction:
+**Step 4: re-check the gates**, in the same transaction:
 - the game is `active`;
-- the capability is `active`, with `supports_launch`, `supports_bet` when `mode = real`, and
-  `asset_code ∈ supported_assets`;
-- RG eligibility, through `evaluateAndAuditEligibility`, which audits a denial itself.
+- the capability is `active`, with `supports_launch`, `supports_bet` for `real`, and the asset in
+  `supported_assets`;
+- RG eligibility (`evaluateAndAuditEligibility`).
 
 On denial, see §3.3.
 
-**Step 5: CAS.**
+**Step 5: CAS (SB-2).**
 ```sql
 UPDATE casino_launch_sessions
    SET status = 'consumed', consumed_at = now()
  WHERE id = $id AND token_hash = $h AND tenant_id = $t AND provider_id = $p
-   AND mode = $m AND asset_code = $a AND status = 'active' AND expires_at > now()
+   AND mode = $m AND asset_code = $a AND provider_game_id = $g
+   AND status = 'active' AND expires_at > now()
 RETURNING id
 ```
 Zero rows → the uniform refusal, and the transaction rolls back.
 
 **Step 6: write the idempotency record.**
-- Upsert the provider-scoped player ref (§3.5).
-- INSERT the `casino_launch_bootstraps` row (§5), keyed `(tenant_id, provider_id, request_id)`,
-  bound to `token_hash` and `launch_session_id`, and storing the response body.
-- A unique violation (a concurrent same-`request_id` race) → the transaction rolls back; the handler
-  retries **once** and takes the replay branch (§3.4).
+- Upsert the player ref (§3.5).
+- INSERT `casino_launch_bootstraps` (§5) with:
+  - `(tenant_id, provider_id, request_id)`;
+  - `token_hash`;
+  - **`request_digest`** (SB-6, §3.4);
+  - `launch_session_id`;
+  - the response body.
+- A unique violation → roll back, retry **once**, and the retry takes the replay branch.
 
 **Step 7: audit, then commit.**
-- Write `audit.Record` with:
-  - `action = "casino.launch_bootstrapped"`, `actor_type = system`;
-  - `target_type = casino_launch_session`, `target_id = session id`;
-  - metadata `{provider_id, request_id, mode, asset_code}`.
-- The metadata contains **no raw token and no token hash** (migration 0014 metadata rule; `audit.go:50-53`).
+- `casino.launch_bootstrapped`, `actor_type=system`, target = the session, metadata
+  `{provider_id, request_id, mode, asset_code}`.
+- **No raw token and no token hash** in the audit row (`audit.go:50-53`).
+- Respond `200 {session_id, player_ref, provider_game_id, asset_code, mode}`.
 
-After the commit, respond `200 {session_id, player_ref, provider_game_id, asset_code, mode}`.
-
-### 3.3 A refusal never consumes; a gate denial **revokes**
+### 3.3 A refusal never consumes; a gate denial **revokes** (Q6 ACCEPTED with conditions, C-103-3)
 
 | Refusal | Session afterwards | Why |
 |---|---|---|
-| Steps 1–3 (auth, not found, wrong provider/tenant/mode/asset/game, not active, expired) | **Unchanged** (`active` stays `active`; nothing is written) | The caller has not proven it holds a **bound** token for its own provider. Letting it mutate the row would let one authenticated vendor burn another vendor's sessions (DoS) and would turn writes into an oracle. |
-| Step 4 gate denial (game or capability off, RG ineligible) | **`revoked`**, via `RevokeLaunchSession` (post-A: prior status `active`, `prior_status` audited), then commit | The caller **has** proven the binding, so the denial is a considered platform decision about this launch. If the session were left `active`, `postBet` would still accept bets on it for the rest of its TTL (`orchestrator.go:1483-1488`), and the vendor could retry the bootstrap until a transient gate flips. Revoking is fail-closed and costs the player only a relaunch (a new token). It is a revoke, not a consume: no idempotency row and no player ref are written. |
+| Steps 1–3, including Redeem+Recheck (auth, not found, binding mismatch, not active, expired) | **Unchanged.** Nothing is written | The caller has not yet proven that it holds a bound token for its own provider. Letting it write would allow a cross-vendor DoS and give it an oracle |
+| Step 4 **definitive** gate denial (game or capability off, RG ineligible) | **`revoked`** via `RevokeLaunchSession`, then commit | The binding has been proven, so the denial is a considered decision. If the session stayed `active`, `postBet` would still accept bets within the TTL, and the vendor could retry until a transient gate flipped |
 
-The step 4 denial returns `403 {"error":"launch not permitted"}`. It is distinguishable from the
-uniform refusal only by a caller that has already passed step 3, so it is not an existence oracle.
-**The RG, game or capability reason is never disclosed to the vendor**: RG status is player-
-sensitive. The denial reason goes only into the audit row, as the RG denial audit and the revoke
-audit.
+Conditions from Q6 / C-103-3:
+- **Only a definitive denial revokes.** An **evaluation error** (a DB error, or an RG/capability
+  lookup failure) rolls back and returns **5xx**, and the session is untouched.
+- The revoke must return `true`. A `false` return under the row lock means an invariant was broken:
+  roll back and return 5xx.
+- **Audit in the same transaction:** `casino.launch_bootstrap_denied`, `actor_type=system`, with
+  `prior_status` and a closed **reason enum** (`game_inactive`, `capability_denied`, `rg_ineligible`).
+  RG's own denial audit is also written by `evaluateAndAuditEligibility`.
+- **The 403 body is constant:** `{"error":"launch not permitted"}`. The reason is never sent to the
+  vendor, because RG status is player-sensitive.
+- The revoke writes no idempotency row and no player ref.
 
-### 3.4 Replay (bound to `token_hash` and to `consumed`)
+### 3.4 Replay (bound to `token_hash`, `request_digest` and `consumed`)
 
-For an existing `casino_launch_bootstraps` row with the same `(tenant_id, provider_id,
-request_id)`:
+- **Request digest (SB-6, C-103-4).**
+  `request_digest = SHA-256(canonical(provider_id, request_id, provider_game_id, asset_code, mode))`,
+  computed over the verified, parsed fields. The token is bound separately by `token_hash`, so the
+  digest carries no token material.
+- For an existing `(tenant_id, provider_id, request_id)` row:
 
-| Condition | Result |
-|---|---|
-| Stored `token_hash` = presented hash **and** the session is currently `consumed` | Return the **stored** response, 200, byte-identical. No write. Logged at Info `casino_launch_bootstrap_replayed`. |
-| Stored `token_hash` ≠ presented hash (a reused request id with a different token) | Uniform refusal. No write. |
-| Same hash, but the session is now `revoked` (A's `consumed → revoked`, e.g. a staff safety revoke) | Uniform refusal. **The replay does not resurrect a revoked session.** |
+  | Condition | Result |
+  |---|---|
+  | `token_hash` matches **and** `request_digest` matches **and** the session is currently `consumed` | Return the stored response: 200, byte-identical. No write. Log `casino_launch_bootstrap_replayed` at Info |
+  | The hash or the digest differs (a reused request id with a different token or different fields) | Uniform refusal. No write |
+  | Same hash and digest, but the session is now `revoked` (A's `consumed → revoked`) | Uniform refusal. **The replay does not resurrect a revoked session** |
 
-- A **different** `request_id` for an already-consumed token fails at step 3 (`status <> 'active'`)
-  and gets the uniform refusal: single use.
-- `UNIQUE (launch_session_id)` on the idempotency table means at most one successful bootstrap per
-  session exists, even if the CAS predicate regressed (§5).
+- A different `request_id` for an already-consumed token fails at step 3 (single use).
+- `UNIQUE (launch_session_id)` means at most one bootstrap row per session, even if the CAS
+  regressed.
 
 ### 3.5 Player reference: opaque and provider-scoped
 
-- The response carries `player_ref`: a random UUID from `casino_provider_player_refs`, UNIQUE per
-  `(tenant_id, provider_id, player_account_id)`. It is created on first bootstrap in step 6 with
-  `INSERT … ON CONFLICT DO NOTHING`, then read.
-- It is stable per player per provider, and unlinkable across providers and tenants.
-- It carries no PII and no platform id. It is not derived from any secret, so it needs no key
-  management and survives key rotation.
-- **Known gap (not closed by B):** phase B's `LaunchRequest` still hands the adapter the raw
-  `PlayerAccountID` (`types.go:547`, a file outside B's Touches). Until that changes, the vendor can
-  link `player_ref` to the platform id. See §11 item 1.
+- `player_ref` is a random UUID from `casino_provider_player_refs`, UNIQUE per
+  `(tenant_id, provider_id, player_account_id)`. It is created on first bootstrap.
+- It is stable per player and provider, unlinkable across providers and tenants, and derived from
+  no secret.
+- **Known gap:** phase-B `LaunchRequest` still sends the raw `PlayerAccountID` (`types.go:547`).
+  **CAS-PLAYER-REF-1 must close before any real vendor** (SB-8). Until then the opacity holds only
+  against a vendor that does not also receive the Launch call.
 
-### 3.6 Uniform refusal and secrecy
+### 3.6 Uniform refusal and secrecy (Q5 ACCEPTED)
 
-- **One response for every step 1–3 failure and every non-matching replay:** `401 {"error":
-  "callback rejected"}`, the same as the existing webhook contract (ADR 0091). Existing, wrong
-  provider, wrong tenant, expired, consumed, revoked and unknown are indistinguishable to the
-  caller.
-- **Logging.** Server-side logs may carry a closed `reason` enum (`not_found`, `binding_mismatch`,
-  `not_active`, `expired`, `replay_hash_mismatch`, `replay_revoked`) plus `tenant_id`,
+- **One response** for every step 1–3 failure (including Redeem+Recheck) and every non-matching
+  replay: `401 {"error":"callback rejected"}` (ADR 0091).
+- **Server-side logs** carry a closed `reason` enum (`not_found`, `binding_mismatch`, `not_active`,
+  `expired`, `replay_mismatch`, `replay_revoked`, `credential_unavailable`), plus `tenant_id`,
   `provider_id` and `request_id`.
-  - **The raw token is never logged, audited, traced or put in an error string.**
-  - Its hash is not logged either (`audit.go:50-53`).
-  - The request body is never logged.
-- **Timing.** No attempt is made at constant-time equivalence across refusal classes; this is a
-  residual, §11 item 4. Every step 1–3 refusal performs the same single indexed lookup and writes
-  nothing.
+  - **The raw token is never logged, audited, traced or put in an error string** (C-103-5 scans the
+    new error paths, §9).
+  - The token hash and the request body are never logged either.
+- **Timing (Q5).** Every step 1–3 refusal performs the same lookups, writes nothing and uses no
+  class-specific sleep. The residual timing difference is accepted. **Security re-rules if** the
+  endpoint ever becomes reachable without authentication, or if token entropy drops below 256 bits.
 
 ## 4. Concurrency and lock order
 
-- `FOR UPDATE` on the session row serializes concurrent bootstraps of the same token.
-  - The loser, with a different `request_id`, sees `consumed` → uniform refusal.
-  - The loser with the **same** `request_id` hits the idempotency UNIQUE or the replay branch →
-    the stored 200.
-  - **Exactly one consume.**
-- **Lock order.** Step 2 locks the session row **before** RG's advisory locks (step 4). `postBet`
-  reads the session **without** `FOR UPDATE`. The casino implementer must add the bootstrap to the
-  existing lock-order harness (`casino/lockorder_harness_test.go`) and confirm that no cycle exists
-  with `LaunchGame` phase C or `postBet`. If a cycle is found, the fix is to move RG ahead of the
-  row lock, and that goes back to architect and security before merge.
+- `FOR UPDATE` on the session row serializes concurrent bootstraps of one token:
+  - a different `request_id` → the uniform refusal;
+  - the same `request_id` → the replay 200;
+  - **exactly one consume** either way.
+- **Lock order.** Redeem+Recheck (credential tables, read), then the session row lock, then RG's
+  advisory locks. `postBet` reads the session without `FOR UPDATE`.
+- The bootstrap is added to `casino/lockorder_harness_test.go`. If a cycle appears with
+  `LaunchGame` phase C or `postBet`, the fix is to move RG ahead of the row lock, and that goes back
+  to architect and security.
 
-## 5. Migration: YES, one is needed (number NOT allocated here; the orchestrator allocates at merge, plan §3 Rule 3)
+## 5. Migration: YES (number NOT allocated here; the orchestrator allocates at merge, Rule 3)
 
-The migration adds two tables. Both have `FORCE ROW LEVEL SECURITY` and a **tenant family**:
-`tenant_id = NULLIF(current_setting('app.tenant_id',true),'')::uuid`, with `app.player_account_id`
-**and** `app.platform_admin_principal_id` unset (the 0106 mixed-GUC exclusion). Both are append-only:
-UPDATE and DELETE are denied per row, and TRUNCATE per statement (the 0014/0016 pair).
+**Common properties of both tables:**
+- `FORCE ROW LEVEL SECURITY`, **tenant family**:
+  `tenant_id = NULLIF(current_setting('app.tenant_id',true),'')::uuid`, **with all of these unset**
+  (the 0106 pattern extended; SB-7, C-103-5):
+  - `app.player_account_id`;
+  - `app.platform_admin_principal_id`;
+  - `app.platform_service_id`;
+  - `app.acting_tenant_id`;
+  - `app.acting_platform_principal_id`.
+- Append-only: UPDATE and DELETE denied per row, TRUNCATE per statement.
 
 **`casino_launch_bootstraps`:**
-
-| Column | Constraints |
-|---|---|
-| `id` | |
-| `tenant_id` | |
-| `provider_id` | |
-| `request_id` | CHECK charset/length |
-| `token_hash` | |
-| `launch_session_id` | Composite FK `(launch_session_id, tenant_id)` to the session; add the supporting UNIQUE if one is absent |
-| `player_ref` | |
-| `response` | JSONB, ≤ 1 KiB, keys ⊆ the §3.2 response keys |
-| `created_at` | |
-
-- `UNIQUE (tenant_id, provider_id, request_id)` and `UNIQUE (launch_session_id)`.
-- **BEFORE INSERT trigger** (defence in depth): the referenced session has the same `tenant_id`,
-  `provider_id = NEW.provider_id`, `token_hash = NEW.token_hash` and `status = 'consumed'`.
+- Columns: `id`, `tenant_id`, `provider_id`, `request_id` (charset CHECK), `token_hash`,
+  **`request_digest`** (a 64-hex CHECK), `launch_session_id` (composite FK with `tenant_id`; add
+  the supporting UNIQUE on the sessions table if it is absent), `player_ref`, `response` (JSONB,
+  ≤ 1 KiB, keys ⊆ the §3.2 response keys), `created_at`.
+- Constraints: `UNIQUE (tenant_id, provider_id, request_id)` and `UNIQUE (launch_session_id)`.
+- **BEFORE INSERT trigger:** the session has the same tenant, the same provider, the same
+  `token_hash`, and `status = 'consumed'`.
 
 **`casino_provider_player_refs`:**
-- Columns: `tenant_id`, `provider_id`, `player_account_id` (FK), `player_ref UUID DEFAULT
-  gen_random_uuid()`, `created_at`.
-- `UNIQUE (tenant_id, provider_id, player_account_id)` and `UNIQUE (tenant_id, provider_id,
-  player_ref)`.
+- Columns: `tenant_id`, `provider_id`, `player_account_id` (FK),
+  `player_ref UUID DEFAULT gen_random_uuid()`, `created_at`.
+- UNIQUE on `(tenant, provider, player_account_id)` and on `(tenant, provider, player_ref)`.
 
 **Other rules:**
-- No change to `casino_launch_sessions` or its trigger. A owns that, through 0108.
+- No change to `casino_launch_sessions` or its trigger; A owns them.
 - Grants: append-only lines in `deploy/init-app-role.sql`.
-- **Down:** refuse while any row exists in either table.
+- **Down:** refuse while rows exist.
 
 ## 6. Dependency on workstream A (migration 0108)
 
-B does not start until A has merged (plan §2 and §11). B relies on:
-- `RevokeLaunchSession` covering `active` and `consumed` and returning `prior_status` (the §3.3
-  gate-denial revoke and its audit);
-- `consumed → revoked` existing, so §3.4 "replay after revoke is refused" is testable;
-- A's inverted characterization test (`launch_two_phase_integration_test.go:703-795`) staying
-  green.
+B starts only after A merges. B relies on:
+- the post-A `RevokeLaunchSession` (`active` or `consumed`, returning `prior_status`);
+- `consumed → revoked` existing, which the §3.4 replay-after-revoke case needs;
+- A's inverted characterization test (`launch_two_phase_integration_test.go:703-795`) staying green.
 
 ## 7. MOCK over HTTP; no in-process shortcut
 
-- `MockCasinoProvider` (`casino/mock.go`) gains a **bootstrap client**. It builds the signed
-  bootstrap request with the same per-tenant derived key as `CallbackPayload`/`SignRawBody`, and
-  tests send it **over HTTP** to the real route on an `httptest` server.
-- No test and no production code calls `BootstrapLaunch` in-process to stand in for the vendor. The
-  only in-process calls are the function's own unit tests, and even those use a real
-  `WithTenant` transaction.
+- `MockCasinoProvider` gains a **bootstrap client**. It signs requests with the same per-tenant
+  derived key as `CallbackPayload`/`SignRawBody`, and tests send them **over HTTP** to the real
+  route on an `httptest` server.
+- Nothing calls `BootstrapLaunch` in-process as a stand-in for the vendor. Its unit tests use a
+  real `WithTenant` transaction.
 - The never-consumed TTL rule and the synthetic-adapter outbound tripwire are unchanged.
-- **Label: MOCK.** A real vendor bootstrap is PROVIDER DEPENDENT: its field names and signing
-  scheme map onto this contract in the vendor's adapter.
+- **Label: MOCK.** A real vendor is PROVIDER DEPENDENT, and needs CAS-PLAYER-REF-1 closed first.
 
-## 8. Invariants (for `qa` and `code-reviewer`)
+## 8. Invariants
 
 | ID | Invariant |
 |---|---|
-| BS-1 | The binding predicates are inside the consuming `UPDATE`. There is no read-then-check-then-consume. |
-| BS-2 | A step 1–3 refusal writes nothing. A step 4 denial only revokes (plus audits). Neither creates an idempotency row. |
-| BS-3 | At most one consume per session; at most one bootstrap row per session (the DB UNIQUE). |
-| BS-4 | A replay returns the stored response only when the hash matches and the session is `consumed`. |
-| BS-5 | The tenant and provider come from the route and credential only. The body never names a tenant. |
+| BS-0 | Redeem+Recheck is the first statement of the transaction, and the body is parsed only from verified bytes. |
+| BS-1 | The binding predicates, including `provider_game_id`, are inside the consuming UPDATE. |
+| BS-2 | A step 1–3 refusal writes nothing. A step 4 **definitive** denial only revokes and audits. An evaluation error writes nothing and returns 5xx. |
+| BS-3 | At most one consume per session, and at most one bootstrap row per session. |
+| BS-4 | A replay returns the stored response only when `token_hash` and `request_digest` both match and the session is `consumed`. |
+| BS-5 | The tenant and provider come from the route and the credential only. |
 | BS-6 | The raw token and its hash never appear in logs, audit rows, errors or traces. |
 | BS-7 | `player_ref` is opaque, random and provider-scoped. |
-| BS-8 | Every step 1–3 refusal and non-matching replay has one byte-identical response. |
+| BS-8 | Every step 1–3 refusal and every non-matching replay gets one byte-identical response. The 403 body is constant. |
+| BS-9 | The new tables' RLS excludes player, platform-admin, platform-service and `app.acting_*` sessions. |
 
-## 9. Tests (plan §5-B, QA W2 "B"; T-1/T-2 apply)
+## 9. Tests (plan §5-B; QA W2 "B"; T-1/T-2)
 
-- **ADV, one per S-5 step,** each asserting the uniform 401 and **session unchanged, no rows
-  written:**
-  - an unsigned or wrongly signed request;
-  - an unknown tenant slug;
-  - a token for tenant B presented on tenant A's route (cross-tenant);
-  - a token for provider P1 presented by authenticated provider P2 (cross-provider);
-  - a mode, asset or game mismatch;
-  - an expired token (the fixture writes `expires_at` in the past; there is no sleep);
-  - an already-consumed token with a new `request_id`;
-  - a revoked token;
-  - **replay after A's `consumed → revoked`** → refused;
-  - **a reused `request_id` with a different token hash** → refused;
-  - a body carrying a `tenant_id` field → refused as an unknown field.
-- **Refusal-does-not-consume:** every step 1–3 case above, followed by the legitimate request →
-  success.
-- **Gate denial:** the game disabled, the capability disabled, or the player RG-excluded → 403,
-  session `revoked`, `prior_status=active` audited, no bootstrap row, and a later `postBet` on that
-  session is refused.
-- **CON:** two concurrent consumes of the same token with different `request_id`s → **exactly one**
-  200 and one uniform refusal; one bootstrap row; the status is `consumed` once. Run under `-race`
-  at `-count=50`. The same test with the same `request_id` → two 200s with identical bodies and one
-  row.
-- **IDM:** replay → a byte-identical stored response and no new audit row.
-- **AU:** one `casino.launch_bootstrapped` row per success. A scan for the raw token and the
-  `token_hash` across all audit rows and captured logs finds nothing.
-- **TI:** tenant A's route never resolves B's token. `player_ref` differs across providers and
-  across tenants for the same person.
-- **MIG:** the insert trigger refuses a row whose hash or provider does not match its session, and
-  one whose session is not `consumed`; UPDATE, DELETE and TRUNCATE are refused; `down` refuses
-  while rows exist.
-- **Lock order:** the bootstrap is added to the casino lock-order harness.
-- **MUT (must be killed):**
-  - drop `provider_id` from the CAS predicate;
-  - drop `expires_at > now()` from the CAS;
-  - drop `status='active'` from the CAS;
-  - move the provider check after the CAS;
-  - replay without the hash comparison;
-  - replay without the `consumed` check;
-  - write a lazy `expired` on refusal;
-  - drop `UNIQUE (launch_session_id)`.
+**ADV.** Each of these returns the uniform 401 **with the session unchanged and no rows written**:
+- an unsigned or wrongly signed request;
+- an unknown slug;
+- cross-tenant;
+- cross-provider;
+- a mismatch of mode, asset or **provider game**;
+- an expired token (fixture timestamps, no sleep);
+- an already-consumed token with a new `request_id`;
+- a revoked token;
+- **replay after A's revoke**;
+- **a reused `request_id` with a different token hash**;
+- **a reused `request_id` with the same token but different fields** (digest mismatch, SB-6);
+- a body carrying `tenant_id` (an unknown field);
+- **SB-1:** a handle revoked between phase-1 verification and the transaction.
+
+**Refusal-does-not-consume.** Every step 1–3 case, then the legitimate request → success.
+
+**Gate denial (Q6):**
+- game disabled, capability disabled, or RG-excluded → the constant 403; the session is `revoked`;
+  the audit row carries `prior_status=active` and the reason enum; no bootstrap row; and a later
+  `postBet` on that session is refused;
+- an **injected evaluation error** → 5xx, session `active`, nothing written;
+- a revoke returning `false` (forced) → rollback and 5xx.
+
+**CON (`-race -count=50`):**
+- two concurrent consumes with different `request_id`s → **exactly one** 200, one bootstrap row,
+  `consumed` once;
+- the same `request_id` → two identical 200s and one row.
+
+**IDM:** replay → a byte-identical response and no new audit row.
+
+**AU / secrecy (C-103-5):** one `casino.launch_bootstrapped` row per success. A scan of every audit
+row, captured log, error string and trace attribute produced by **every new success and error
+path** finds neither the raw token nor its hash.
+
+**TI:**
+- A's route never resolves B's token;
+- `player_ref` differs across providers and across tenants.
+
+**RLS (SB-7):** for both new tables, sessions with player, platform-admin, platform-service or
+`app.acting_*` GUCs see and write nothing.
+
+**MIG:**
+- the insert trigger refuses a row whose hash, provider or status does not match its session;
+- the `request_digest` format CHECK;
+- UPDATE, DELETE and TRUNCATE are refused;
+- `down` refuses while rows exist.
+
+**Lock order:** the bootstrap is added to the harness.
+
+**MUT (must be killed):**
+- drop `provider_id` from the CAS;
+- **drop `provider_game_id` from the CAS (SB-2)**;
+- drop `expires_at > now()`;
+- drop `status='active'`;
+- check the provider after the CAS;
+- **move Redeem+Recheck after the session lookup (SB-1)**;
+- replay without the hash comparison;
+- **replay without the digest comparison (SB-6)**;
+- replay without the `consumed` check;
+- a lazy `expired` write on refusal;
+- revoke on an evaluation error;
+- drop `UNIQUE (launch_session_id)`.
 
 ## 10. Alternatives rejected
 
 | Alternative | Why rejected |
 |---|---|
-| Reuse `ResolveLaunchToken`, and check the binding afterwards | S-5: this burns sessions or commits a wrong consume. |
-| Leave the session `active` on a gate denial | `postBet` would still accept bets on it within its TTL, and the vendor could retry until the gate flips (§3.3). |
-| Revoke on a step 3 binding mismatch | A cross-vendor DoS and a write oracle. |
-| HMAC-derived `player_ref` | Needs a new secret with rotation that breaks stability. The stored random mapping is simpler. |
-| UUIDv5 `player_ref` over `player_account_id` | Reversible by anyone holding the platform id, which the vendor currently does (§3.5). |
-| Store the idempotency data on `casino_launch_sessions` | Needs 0042/0108 trigger changes on a table A owns in the same round. A separate append-only table is cleaner and gives `UNIQUE (launch_session_id)` for free. |
-| Player-authenticated bootstrap | The bootstrap is vendor→platform by definition (ADR 0025 §3). |
+| Reuse `ResolveLaunchToken` | S-5 |
+| Leave the session `active` on a gate denial | §3.3 |
+| Revoke on a binding mismatch | DoS, oracle |
+| Revoke on an evaluation error | Q6: a transient fault is not a decision |
+| Session lookup before Redeem+Recheck | SB-1: a revoked credential would still get a read |
+| A digest including the token | Duplicates `token_hash`, and adds token-derived material |
+| HMAC or UUIDv5 player refs | A new secret, or reversible |
+| Storing idempotency data on the session row | A owns that row's trigger this round |
+| Player-authenticated bootstrap | ADR 0025 §3 |
 
 ## 11. Open items
 
-1. **`LaunchRequest.PlayerAccountID` (`types.go:547`).** Recommend registering
-   **CAS-PLAYER-REF-1**: phase B should pass the provider-scoped `player_ref` instead of the platform
-   id. This requires minting the ref at launch rather than at bootstrap. It touches
-   `casino/types.go` and `orchestrator.go`, outside B's Touches, so the orchestrator should schedule
-   it.
-2. **`postBet` still accepts bets on a never-bootstrapped `active` session within its TTL**
-   (`orchestrator.go:1483-1488`). Whether a real-money bet should require a `consumed` session is a
-   casino and security question; it is recommended for registry review. The CAS-PLAY-BOOTSTRAP-1
-   note "do NOT relax the active-session expiry" stands.
-3. **Risk and jurisdiction** are not re-evaluated at bootstrap. They are re-evaluated on every bet
-   in `postBet`. **Security to confirm** that the S-5 step 4 set (the kill-switch equivalents,
-   capability and RG) is sufficient.
-4. **Timing side-channel** between refusal classes: disclosed residual; security to rule whether it
-   matters behind the authenticated-caller requirement.
-5. **Delete `ResolveLaunchToken`** once B lands and its tests migrate. That is casino's call, and it
-   is not required by this ADR.
+1. **CAS-PLAYER-REF-1** (registered): must close before any real vendor (SB-8).
+2. **CAS-BET-REQUIRES-BOOTSTRAP-1** (registered, SB-5): whether a real-money bet should require a
+   `consumed` session.
+3. **CAS-GAME-KILL-BET-1** (registered, SB-4): `postBet` never reads `casino_games.status`. It blocks
+   real-money casino launch, not B.
+4. **Q4 (ACCEPTED; rationale corrected, SB-3).** Bootstrap does not re-run risk or jurisdiction.
+   `postBet` re-checks risk (with the frozen jurisdiction), capability, RG and the provider binding
+   on every bet. It does **not** re-run jurisdiction resolution, the game blocklist or
+   `casino_games.status`. The last of these is CAS-GAME-KILL-BET-1, and bootstrap's own step 4 does
+   check `casino_games.status`.
+5. **Deleting `ResolveLaunchToken`** after B lands: casino's call.
+
+## 12. Review disposition (revision 2)
+
+| Finding | Resolution |
+|---|---|
+| SB-1 / C-103-1 | §3.2 step 2a; BS-0; SB-1 test; mutant |
+| SB-2 / C-103-2 | §3.2 step 5; BS-1; mutant |
+| SB-3 / C-103-6 | §1 and §11 item 4 corrected; the `:311` citation changed to `:314` |
+| SB-4 | CAS-GAME-KILL-BET-1 referenced (§1, §11 item 3) |
+| SB-5 | CAS-BET-REQUIRES-BOOTSTRAP-1 referenced (§11 item 2) |
+| SB-6 / C-103-4 | §3.4 `request_digest`; §5 column; tests; mutant |
+| SB-7 / C-103-5 | §5 exclusion list; BS-9; RLS test |
+| SB-8 | §3.5; §11 item 1 |
+| C-103-3 (Q6) | §3.3 conditions; tests |
+| C-103-5 (raw-token scan) | §9 AU/secrecy |
+| C-103-6 (registry rows) | Existing ids referenced; no new id invented |
+| Q4 | §11 item 4 |
+| Q5 | §3.6 |
+| Q6 | §3.3 |
+| Product-owner-proxy | ACCEPT; no change |
 
 **Handover/DoD:**
 - **Artefacts:**
-  - this ADR ACCEPTED after security review;
-  - A merged first;
+  - this ADR ACCEPTED;
+  - A merged;
   - B merged with the §5 migration (number allocated by the orchestrator), `casino/bootstrap.go`,
     the route, the MOCK bootstrap client and the §9 tests;
-  - a `docs/integrations/` contract page (vendor view: request, response and error classes, no
-    internals);
-  - HANDOVER mock-vs-real row: "casino bootstrap: MOCK over HTTP; real vendor PROVIDER DEPENDENT".
-- **Registry (orchestrator):** CAS-PLAY-BOOTSTRAP-1 → IMPLEMENTED (MOCK); register CAS-PLAYER-REF-1.
+  - a `docs/integrations/` contract page;
+  - HANDOVER row: "casino bootstrap: MOCK over HTTP; real vendor PROVIDER DEPENDENT (after
+    CAS-PLAYER-REF-1)".
+- **Registry (orchestrator):** CAS-PLAY-BOOTSTRAP-1 → IMPLEMENTED (MOCK).

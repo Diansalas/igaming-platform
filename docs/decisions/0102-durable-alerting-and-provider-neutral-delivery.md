@@ -1,273 +1,278 @@
 # ADR 0102 — Durable Alerting and Provider-Neutral Delivery (ALERT-DELIVERY-1)
 
-- **Status:** PROPOSED, 2026-09-28. Drafted by `architect` for PRH-2 W0 (workstream W0-X). Nothing
-  in this ADR is implemented. The implementation is PRH-2 workstreams **I-core** (W1) and
-  **I-wire** (W4).
-- **Decision type:** cross-domain architecture: the new `internal/alerting` package, migration
-  **0110**, and the `payments`, `reconciliation`, `httpserver` and `cmd/platform-api` call sites.
+- **Status:** PROPOSED, **revision 2**, 2026-09-28. Drafted by `architect` for PRH-2 W0 (W0-X).
+  Nothing here is implemented. The implementation is PRH-2 **I-core** (W1) and **I-wire** (W4).
+- **Revisions:**
+
+  | Rev | Base | Change |
+  |---|---|---|
+  | 1 | `f06818b` | Initial draft |
+  | 2 | `6864efa` | Applies all conditions from the reviews listed below, plus the orchestrator's binding resolutions and security's `raise_failed` ruling (`adr-0099-0101-security.md` Part 1). Mapped in §15 |
+
+  Reviews applied in revision 2 (all under `docs/plans/prh2-hardening-round/reviews/`):
+  - `adr-0102-ledger-finance.md`: ACCEPT WITH CONDITIONS, F1–F15 and 12 required tests;
+  - `adr-0102-0104-security.md`: ACCEPT WITH CONDITIONS, SR-1..8, Q1–Q3, C-102-1..9, and the
+    orchestrator dispositions;
+  - `adr-0102-0104-product-owner-proxy.md`: ACCEPT;
+  - `adr-0099-0101-security.md` Part 1: `alerting.raise_failed` ACCEPTED, with conditions.
+
+- **Decision type:** cross-domain architecture: new `internal/alerting`, migration **0110**, and call
+  sites in `payments`, `reconciliation`, `httpserver` and `cmd/platform-api`.
 - **Owner:** `architect` (design); `devops` and backend (implementation).
-  **Reviewers:** `security` (every section, hard gate), `ledger-finance` (§7, the in-tx rule),
-  `code-reviewer`, `qa` (§11). `product-owner-proxy` has already noted that alerting is proportionate
-  (plan §10, PO F4–F8).
-- **Registry:** ALERT-DELIVERY-1 (this ADR). PAY-P1-MULTISUCCESS-ALERT-1 closes with it,
-  **except** that it stays launch-blocking until HD-PRH2-4-OPS configures real recipients.
-- **Binding inputs:**
-  - `docs/plans/prh2-hardening-round/plan.md` §4 row 0110, §5-I, §5.0 T-1/T-2, §11 (HD-PRH2-4);
-  - ADR 0098 §5 (HD-PRH2-4);
-  - `reviews/security.md` S-7 items 1–4 and the Addendum §1, conditions (a)–(e);
-  - `reviews/ledger-finance.md` LF-7;
-  - `reviews/qa.md` F2/F3 and the W1/W4 checklists;
-  - `reviews/code-reviewer-verification.md` I4/I6.
-- **Related:** ADR 0013 (audit dual-scope RLS), ADR 0081 §3.2 (closed platform-service
-  vocabulary), migrations 0084 (`app.platform_service_id`), 0105 (validated session resolver) and
-  0106 (mixed-GUC exclusion), ADR 0095 §28.4/§28.8/§28.9, ADR 0104 (the `subject_tenant_id`
-  pattern).
-- **Labels:** every item below is a design decision (engineering, reversible) unless it is marked
-  **HUMAN DECISION** (none is new here) or **SECURITY RULING REQUESTED**. No recipient, person,
-  address, phone number or on-call rota is named or seeded anywhere (HD-PRH2-4).
+  **Reviewers:** `security` (hard gate), `ledger-finance` (§7), `code-reviewer`, `qa` (§11).
+- **Registry:** ALERT-DELIVERY-1. PAY-P1-MULTISUCCESS-ALERT-1 closes with it, except that it stays
+  launch-blocking until real recipients **and** a real channel exist (HD-PRH2-4-OPS).
+  RECON-RUN-FAILED-ALERT-1 is now **required** in I-wire (§8 row 14).
+- **Binding inputs:** plan §4 row 0110, §5-I, §5.0 T-1/T-2, §11 (HD-PRH2-4); ADR 0098 §5; security
+  S-7 and addendum §1 (a)–(e); LF-7; the revision-2 reviews above.
+- **Related:** ADR 0013, ADR 0081 §3.2, ADR 0082 (lock order; see §7.7), ADR 0094, ADR 0095
+  §28.4/§28.8/§28.9, ADR 0097, ADR 0099 §6 (`app.acting_*` GUCs), ADR 0104; migrations 0084, 0105,
+  0106.
+- **Labels:** engineering and reversible unless marked. The `alerting.raise_failed` terminal
+  fallback (§6.3) was **ACCEPTED by security** (`reviews/adr-0099-0101-security.md` Part 1) with the
+  conditions applied below. No recipient, person, address, phone number or rota is named or seeded
+  anywhere (HD-PRH2-4).
 
 ---
 
-## 1. Context (verified at `cabca27`)
+## 1. Context (verified at `cabca27`; re-checked against the reviews at `10e0471`)
 
-- Every alert today is a log line only; there is no alert table. The sites were verified by reading
-  the code, and the full list is in §8.
+**Alert sites and transactions**
+- Every alert is a log line today; there is no alert table.
 - The live multiple-success P1 is `auditMultipleSuccessForIntent`
-  (`internal/payments/orchestrator.go:989-1024`, Error log at `:1018`). It runs inside the T10/T13d
-  evidence transaction, which must commit with its receipt (LF95-C3, ADR 0095 §28.4).
-- The backstop line `payments_deposit_intent_index_backstop_fired` (`:1021`) is in the same function.
-- **Reconciliation `MISMATCH FOUND` lines (`reconciliation/scheduler.go:333-341`, `:420`, `:487`,
-  `:562`, `:719`) are emitted after the per-tenant run transaction has committed.** The windows are
-  disjoint `[now-interval, now]` (`RunSchedulerLoop`, `:600`):
-  - ledger-vs-projection drift (`reconciliation.go:108`) is a **full-state** recompute, so the next
-    run re-detects it;
-  - the sportsbook, casino-consistency, casino-statement and payment-statement streams are
-    **period-bound**. A run that is lost or rolled back for a window is not re-covered by the next
-    window.
-- The kill-switch engage alert (`payments_kill_switch_handlers.go:360`, called at `:653`) is logged
-  after the engage transaction commits.
-- The handler `*_integrity_alert_*` lines fire on the **error path**, after the callback
-  transaction has rolled back. Several of them log the raw `err` value.
-- **Correction to the plan inventory (for the orchestrator).** Three sites sit on routes that are
-  registered only behind simulation flags, not just `payment_deposit_simulation_handlers.go:240`:
-  - `casino_play_handlers.go:242-288`, behind `CasinoPlaySimulationEnabled` (`casino_routes.go:39-43`);
-  - `sportsbook_settlement_handlers.go:185`, behind `SportsbookSettlementSimulationEnabled`
-    (`sportsbook_routes.go:68-69`);
-  - `payment_deposit_simulation_handlers.go:240` itself.
+  (`internal/payments/orchestrator.go:989-1024`, log at `:1018`, backstop line at `:1021`). Its
+  callers are `:1062` and `:1072`, both after the dispute has been applied, inside the T10/T13d
+  evidence transaction. Those transactions are reached from `receipt.go:993`, `drive.go:354` and
+  `sweeper.go:513`.
+- The uniform 200 is written only after `WithTenant` returns (`deposit_handlers.go:419-423`,
+  `:583/:593`), and the ADR 0097 admission slot is released at the end of the handler (`:404-416`).
+- `WithTenant` does not retry, and returns an error whenever `Commit` fails (`tenant_rls.go:47-64`).
+- Several paths run **more than one transaction per context**: the sweeper (`:332/:370`), the
+  webhook handler (`:419`, then `:483`) and `sweepTenants`.
 
-  Plan §5-I's rule for `:240` (test-support route → simulation Kind, never paged) therefore applies
-  to all three. §8 applies it.
-- The platform-service GUC exists: `db.WithPlatformService` (`internal/db/platform_service.go:65`)
-  sets `app.platform_service_id` from a closed, compiled-in allowlist, and migration 0084's policies
-  check it. Adding a member requires an ADR plus a migration (ADR 0081 §3.2). This ADR adds one
-  (§6).
-- `internal/observability` exposes an OTel meter (`metrics.go:17`).
-- `providerref.Fingerprint` (`providerref.go:94`) yields a 12-hex-character SHA-256 prefix.
+**Reconciliation**
+- Every stream commits its own transaction and logs `MISMATCH FOUND` after the commit
+  (`scheduler.go:333-341,420,487,562,719`). The failure branches log `tenant run failed` at
+  `:314,407,473,547,647`.
+- casino_statement (`:516`) and the payment_statement match (`:683`) run under
+  **`WithTenantSnapshot` (REPEATABLE READ)**.
+- The findings are of two kinds (LF F8):
+  - **State-type, re-detected on every run:**
+    - ledger-vs-projection drift, a full-state recompute (`reconciliation.go:108`);
+    - casino_consistency findings;
+    - casino_statement, whose current MOCK source is all-time;
+    - `pay_captured_unposted`, which is unwindowed (`payment_statement.go:941-949,989-1002`).
+  - **Event-type, windowed:** the other payment-statement kinds. A lost window is not re-covered.
+    Sportsbook-stream windowing has not been verified, so it is treated as event-type.
+- `pay_duplicate` counts succeeded attempts only (`payment_statement.go:1087-1095`). T10/T13d leave
+  the attempt `disputed` (`attempt.go:655-662`), so `pay_duplicate` does **not** back the
+  multiple-success Kinds.
+
+**Kill switch**
+- The engage transaction is `payments_kill_switch_handlers.go:596-648`. Its log alert is at `:360`,
+  called post-commit at `:653`.
+
+**Handler integrity sites**
+- These run on the error path, after the callback transaction has rolled back. Several of them log
+  raw `err`.
+- The casino-play (`casino_play_handlers.go:242-288`) and sportsbook-settlement
+  (`sportsbook_settlement_handlers.go:185`) sites are reachable only through simulation-flagged
+  routes (`casino_routes.go:39-43`, `sportsbook_routes.go:68-69`), like
+  `payment_deposit_simulation_handlers.go:240`.
+
+**Inputs and existing building blocks**
+- `request_id` is caller-controlled free text (`middleware.go:28-33`) (SR-3).
+- `db.WithPlatformService` (`platform_service.go:65`) sets `app.platform_service_id` from a closed
+  allowlist (migration 0084; ADR 0081 §3.2).
+- ADR 0099 introduces `app.acting_tenant_id` and `app.acting_platform_principal_id`.
+- `providerref.Fingerprint` returns a 12-hex-character SHA-256 prefix (`providerref.go:94`).
 
 ## 2. Decision summary
 
-1. **Durability.** Alerts are durable rows. Delivery is asynchronous, through a provider-neutral
-   `Sink`. No tenant-scoped or financial transaction ever does outbound I/O for an alert.
-2. **Scope.** Every alert is either **tenant-owned** (`tenant_id = X`) or **platform-owned**
-   (`tenant_id IS NULL`).
-   - A platform-owned alert about a tenant carries `subject_tenant_id = X`, and X can read it
-     read-only. This is the ADR 0104 pattern.
-   - Every integrity P1 is platform-owned. A tenant cannot acknowledge, resolve or suppress it (S-7.2).
-3. **Dedup.** UNIQUE `(tenant_id, dedup_key)` NULLS NOT DISTINCT, over non-resolved alerts. The
-   `dedup_key` is a generated column that always embeds the Kind and the subject tenant, so it
-   cannot collide across tenants (S-7.1).
-4. **Payloads.** Each Kind has an attribute allowlist, enforced in Go and in the DB. Provider refs
-   appear only as fingerprints. There is no PII, no secret or token material and no raw error text
-   (S-7.3).
-5. **Routing (HD-PRH2-4).** A versioned `alert_routes` table maps (severity, scope, escalation step)
-   to a channel kind plus an **opaque recipient reference**.
-   - **The migration seeds no routes.**
-   - With no route, an alert is `unrouted`: visible, counted, and itself raising a platform
-     warning.
-6. **Delivery.** Delivery and escalation state are append-only rows in `alert_deliveries`. Retry
-   uses bounded backoff on an injectable clock (T-1). The dispatcher runs under
-   `WithPlatformService("alert_dispatcher")`, and has read on alerts and insert on deliveries only
-   (S-7.4). §6.3 records the one narrow exception, flagged for a security ruling.
-7. **The in-transaction rule** (LF-7 plus the security addendum (a)–(e)):
-   - a savepoint;
-   - a narrow allowlist-based swallow, where 25P02, serialization and deadlock errors propagate;
-   - a mandatory post-commit detached re-raise;
-   - the metric `alert_raise_failures_total{kind}`;
-   - a per-Kind backstop table (§7.5).
-
-   **No Kind in the PRH-2 inventory uses abort-on-failure** (§7.6).
+1. **Durability.** Alerts are durable rows. Delivery is asynchronous through a provider-neutral
+   `Sink`. No transaction ever performs alert I/O.
+2. **Scope.** An alert is **tenant-owned** or **platform-owned**. Platform-owned alerts about a
+   tenant carry `subject_tenant_id`, and that tenant can read them read-only (the ADR 0104 pattern).
+   Integrity P1s are platform-owned, and **a tenant can never ack, resolve or suppress them**.
+3. **Every raise site's real session can raise its Kind** (LF F2, C-102-1):
+   - a platform-owned Kind raised from a tenant session has subject = that session's tenant, and
+     `in_tx_raisable_by_tenant = true`;
+   - `requires_subject` is a per-Kind column, enforced by trigger;
+   - a detached re-raise reopens **exactly** the originating scope;
+   - business code never uses the dispatcher identity.
+4. **Dedup.** UNIQUE `(tenant_id, dedup_key)` NULLS NOT DISTINCT, over non-resolved alerts.
+   `dedup_key` is generated and embeds the Kind and the subject tenant. Discriminators are built
+   from **server-side stable ids only** (LF F6, SR-3).
+5. **Payloads.** Each Kind has an attribute allowlist, enforced in Go and in the DB. Provider refs
+   appear only as fingerprints. `request_id` is charset-checked. There is no PII, secret, token or
+   raw error text.
+6. **Routing (HD-PRH2-4).** Versioned `alert_routes` rows map (severity, scope, step) to a channel
+   kind plus an **opaque recipient reference**. **No seed rows.** An alert with no route is
+   `unrouted`: visible, counted and warned once (§6.1).
+7. **Delivery.** Delivery and escalation state are append-only `alert_deliveries` rows. Retry uses
+   bounded backoff on an injectable clock. The dispatcher runs under
+   `WithPlatformService("alert_dispatcher")`: SELECT on alert tables, INSERT on deliveries, plus the
+   Q1-accepted meta-Kind INSERT (§6.3).
+8. **The in-transaction rule** (LF-7, addendum (a)–(e), LF F1/F4/F5, Q3):
+   - Go validation happens before the savepoint and is never propagated;
+   - the savepoint encloses only `Raise`;
+   - a narrow SQLSTATE allowlist decides what is swallowed; transient classes propagate;
+   - a per-transaction collector flushes a mandatory detached re-raise only after a nil commit, and
+     after the response has been written;
+   - the metric `alert_raise_failures_total{kind,phase}`;
+   - a terminal fallback, `alerting.raise_failed` (security ACCEPTED, §6.3);
+   - a per-Kind backstop table.
+9. **REPEATABLE READ sites** (casino_statement and the payment_statement match) raise **post-commit
+   only, detached**, in a fresh READ COMMITTED transaction (the orchestrator's disposition). There
+   is no `ON CONFLICT` inside a snapshot (SR-5).
+10. **The kill-switch engage alert is post-commit and detached only.** An alerting failure can
+    never roll back the brake (LF F10, SR-4).
+11. **`Raise` never writes `audit_log`** (LF F14).
 
 ## 3. Model
 
 ### 3.1 Kinds, severity, scope
 
-- **Kinds.** `Kind` is a closed vocabulary. It is defined in Go (`alerting.Kinds`) and mirrored in
-  the immutable reference table `alert_kinds`, which only a migration writes. Each Kind fixes:
+`Kind` is a closed vocabulary: Go `alerting.Kinds`, mirrored in the immutable reference table
+`alert_kinds`, which only a migration writes. Each Kind fixes:
 
-  | Field | Meaning |
-  |---|---|
-  | `severity` | One of `p1`, `p2`, `p3` |
-  | `scope` | `platform` or `tenant` |
-  | `simulation` | Whether the Kind is simulation-only |
-  | `allowed_keys` | The attribute allowlist |
-  | `in_tx_raisable_by_tenant` | Whether a tenant session may raise it (§5) |
-  | `backstop` | Documentation only; see §7.5 |
+| Field | Meaning |
+|---|---|
+| `severity` | `p1`, `p2` or `p3` |
+| `scope` | `platform` or `tenant` |
+| `simulation` | Whether the Kind is simulation-only |
+| `requires_subject` | **New (C-102-1).** A trigger requires `subject_tenant_id IS NOT NULL` when true, and NULL when false |
+| `in_tx_raisable_by_tenant` | **(LF F2)** Whether a tenant session may raise it |
+| `allowed_keys` | The attribute allowlist |
+| `raise_mode` | `in_tx` \| `detached` \| `post_commit`. Documentation plus the §11 table-driven test |
 
-- **Severity** is fixed per Kind and is never chosen at the call site.
-  - `p1` means integrity or money-correctness, and follows CLAUDE.md ("any non-zero drift is a P1").
-  - `p2` means an operational safety event, such as an engaged kill switch or an alerting meta-warning.
-  - `p3` is informational. Every simulation Kind is `p3`.
-- **Simulation Kinds** are prefixed `simulation.` and are never delivered.
-  - A CHECK requires `simulation ⇒ severity = 'p3'`.
-  - A trigger on `alert_deliveries` refuses any delivery row other than `suppressed_simulation` for
-    a simulation alert (defence in depth). The dispatcher never selects them either.
-- **Adding a Kind** requires a migration row plus a Go entry plus a review. It is never a runtime
-  string.
+- **Severity:**
+  - `p1` means integrity or money-correctness (CLAUDE.md: "any non-zero drift is a P1");
+  - `p2` means an operational safety event or an alerting meta-warning;
+  - `p3` is informational.
+- **Simulation Kinds** (`simulation.` prefix) are `p3` (CHECK) and are never delivered. A trigger
+  refuses any delivery row other than `suppressed_simulation` for them.
+- **Scope/subject consistency rule** (enforced by a migration test that walks `alert_kinds`, LF F2):
+  every `scope='platform'` Kind that is raised from a tenant session has `requires_subject = true`
+  **and** `in_tx_raisable_by_tenant = true`. Only the meta-Kinds (§6.3) have
+  `requires_subject = false`.
 
 ### 3.2 Tables (migration 0110)
 
-**`alert_kinds`** is reference data.
-- Columns: `kind` PK; `severity`; `scope`; `simulation`; `allowed_keys TEXT[]`;
-  `in_tx_raisable_by_tenant BOOL`.
-- It is seeded with the §8 Kinds. Seeding vocabulary is not seeding recipients.
-- UPDATE, DELETE and TRUNCATE are denied by trigger.
-- It is SELECT-able by every session. It holds no tenant data, so it needs no RLS family. It is
-  still `ENABLE`/`FORCE` with a single `FOR SELECT USING (true)` policy, so that no write policy
-  exists.
+**`alert_kinds`**
+- Columns: the §3.1 fields, keyed by `kind`.
+- Seeded with the §8 Kinds and the §6.3 meta-Kinds. This seeds vocabulary, not recipients.
+- UPDATE, DELETE and TRUNCATE are denied.
+- RLS: `ENABLE`/`FORCE` with a single `FOR SELECT USING (true)` policy, so no write policy exists.
 
-**`alerts`**: one row per open deduplicated condition.
+**`alerts`**: one row per open, deduplicated condition.
 
 | Column | Notes |
 |---|---|
-| `id` | UUID PK |
-| `tenant_id` | UUID NULL, FK `tenants`. NULL means platform-owned |
-| `subject_tenant_id` | UUID NULL, FK `tenants`. `CHECK (subject_tenant_id IS NULL OR tenant_id IS NULL)` |
-| `kind` | TEXT NOT NULL, FK `alert_kinds` |
-| `severity` | TEXT NOT NULL; the trigger forces it from `alert_kinds` |
-| `simulation` | BOOL NOT NULL; forced from `alert_kinds` |
-| `discriminator` | TEXT NOT NULL, `^[A-Za-z0-9:_.-]{1,160}$`. Built from entity ids only (e.g. `intent:<uuid>`, `run:<uuid>`, `switch:<uuid>`), never a raw provider reference |
-| `dedup_key` | TEXT `GENERATED ALWAYS AS (kind \|\| '\|' \|\| COALESCE(subject_tenant_id::text,'-') \|\| '\|' \|\| discriminator) STORED` |
-| `attributes` | JSONB NOT NULL. A flat object of scalar values, ≤ 2 KiB, keys ⊆ `alert_kinds.allowed_keys` (trigger) |
+| `id` | |
+| `tenant_id` | UUID NULL, FK. NULL means platform-owned |
+| `subject_tenant_id` | UUID NULL, FK. `CHECK (subject_tenant_id IS NULL OR tenant_id IS NULL)` |
+| `kind` | FK to `alert_kinds` |
+| `severity`, `simulation` | Forced from `alert_kinds` by trigger |
+| `discriminator` | `^[A-Za-z0-9:_.-]{1,160}$`. Built from **server-side stable ids only** (§8), never a caller-supplied value, request id or raw provider reference |
+| `dedup_key` | `GENERATED ALWAYS AS (kind \|\| '\|' \|\| COALESCE(subject_tenant_id::text,'-') \|\| '\|' \|\| discriminator) STORED` |
+| `attributes` | JSONB. A flat scalar object of at most 2 KiB. Keys ⊆ `allowed_keys` (trigger). A `request_id` value must match `^[A-Za-z0-9_.:-]{1,128}$` (trigger, SR-3) |
 | `state` | `open` / `acked` / `resolved` |
-| `acked_by`, `acked_at`, `resolved_by`, `resolved_at`, `resolve_reason_code` | Forced by trigger from the session actor |
-| `first_seen_at` | |
-| `created_at` | |
+| `acked_by`, `acked_at`, `resolved_by`, `resolved_at`, `resolve_reason_code` | Forced by trigger from the validated session actor |
+| `first_seen_at`, `created_at` | |
 
 - **Dedup index:** `UNIQUE NULLS NOT DISTINCT (tenant_id, dedup_key) WHERE state <> 'resolved'`.
-  Raising again after a resolve creates a **new** alert row, so there is no "reopen" UPDATE path.
-- **Scope-consistency trigger:** a Kind whose scope is `platform` requires `tenant_id IS NULL`; a
-  Kind whose scope is `tenant` requires `tenant_id IS NOT NULL`.
+  Raising after a resolve creates a new row.
+- **Triggers:** scope consistency (`platform` ⇒ `tenant_id IS NULL`; `tenant` ⇒ NOT NULL) and the
+  `requires_subject` check.
 
-**`alert_occurrences`**: append-only, one row per `Raise`.
-- Columns: `id`; `alert_id` FK; `tenant_id` and `subject_tenant_id`, copied by trigger from the
-  alert; `raised_at`; `raised_by_scope` (`tenant` | `platform_admin` | `platform_service` | `system`).
-- The occurrence count is `count(*)`. `last_seen_at` is `max(raised_at)`. **There are no counter
-  UPDATEs**, which is what lets a tenant session raise a platform-owned alert without any UPDATE
-  power (§5).
+**`alert_occurrences`**: append-only, one row per successful `Raise`.
+- Columns: `id`, `alert_id` FK, **`kind`**, `tenant_id`, `subject_tenant_id`, `raised_at`,
+  `raised_by_scope`.
+  - `kind`, `tenant_id` and `subject_tenant_id` are copied from the alert by trigger (SR-2). This
+    lets the meta-only WITH CHECK be written directly on this table.
+  - `raised_by_scope` ∈ {`tenant`, `tenant_principal`, `platform_admin`, `platform_service`} is
+    **forced by trigger from the session GUCs**, never from Go (SR-1).
+- The count is `count(*)` and `last_seen_at` is `max(raised_at)`. There are no counter UPDATEs.
 
-**`alert_routes`** holds the routing configuration: versioned, effective-dated and append-only with
-supersession.
+**`alert_routes`**: versioned, effective-dated, append-only with one-way supersession.
+- Columns: `id`, `scope`, `tenant_id` (NULL; always NULL in PRH-2), `severity`, `escalation_step`,
+  `channel_kind CHECK IN ('log','mock')`, `recipient_ref`, `escalate_after`, `effective_from`,
+  `superseded_at`, `superseded_by`, `created_by` (forced from the validated platform-admin GUC),
+  `created_at`.
+- `recipient_ref` is an opaque key: `CHECK (recipient_ref ~ '^[a-z0-9][a-z0-9_.:-]{0,127}$')`. It
+  refuses email and phone shapes.
+- **No seed rows.**
 
-| Column | Notes |
-|---|---|
-| `id` | |
-| `scope` | `platform` \| `tenant` |
-| `tenant_id` | NULL, and always NULL in PRH-2 (see §4.3) |
-| `severity` | |
-| `escalation_step` | SMALLINT ≥ 0 |
-| `channel_kind` | `CHECK IN ('log','mock')` in PRH-2 (§6.2) |
-| `recipient_ref` | See below |
-| `escalate_after` | INTERVAL NULL |
-| `effective_from`, `superseded_at`, `superseded_by` | Supersession |
-| `created_by` | Forced from the validated platform-admin GUC |
-| `created_at` | |
-
-- **`recipient_ref`** is an opaque reference key, not an address:
-  `CHECK (recipient_ref ~ '^[a-z0-9][a-z0-9_.:-]{0,127}$')`. It refuses `@`, `+`, digits-only phone
-  shapes and whitespace, so an email or phone number cannot be stored here even by mistake.
-  Resolving a reference to a real contact is a `RecipientResolver` concern (§6.2), and the real
-  recipients are HD-PRH2-4-OPS.
-- **No seed rows.** A migration test asserts that `alert_routes` has zero rows after `up`.
-
-**`alert_deliveries`**: append-only. It holds delivery and escalation state.
+**`alert_deliveries`**: append-only; holds delivery and escalation state.
 
 | Column | Notes |
 |---|---|
-| `id` | |
-| `alert_id` | FK |
-| `tenant_id`, `subject_tenant_id` | Copied by trigger |
-| `escalation_step` | |
-| `attempt_no` | |
+| `id`, `alert_id`, `tenant_id`, `subject_tenant_id` | The last two are copied by trigger |
+| `escalation_step`, `attempt_no` | |
 | `event` | `claimed`, `sent`, `failed`, `unrouted`, `dead`, `suppressed_simulation` |
-| `route_id` | NULL |
-| `channel_kind` | NULL |
-| `last_error_class` | An enum, `CHECK IN ('timeout','unavailable','rejected','misconfigured','unknown')`, NULL unless `event = 'failed'`. **Never raw error text** (S-7.3) |
-| `next_attempt_at` | NULL |
-| `next_escalation_at` | NULL |
-| `recorded_at` | |
+| `route_id`, `channel_kind` | |
+| `last_error_class` | Enum: `timeout`, `unavailable`, `rejected`, `misconfigured`, `unknown`. NULL unless `failed`. Never raw error text |
+| `next_attempt_at`, `next_escalation_at`, `recorded_at` | |
 
-- `UNIQUE (alert_id, escalation_step, attempt_no, event)` makes multi-instance claims safe:
-  inserting the `claimed` row is the claim.
-- The **current delivery state** of an alert is its latest `alert_deliveries` row. It is a
-  projection, not an updated column.
+- `UNIQUE (alert_id, escalation_step, attempt_no, event)`.
+- **`CHECK (event <> 'unrouted' OR attempt_no = 0)`** (LF F9). This makes "one `unrouted` row per
+  (alert, step)" structural.
+- An alert's current delivery state is its latest row.
 
-All five tables: `ENABLE` + `FORCE ROW LEVEL SECURITY`. There are UPDATE/DELETE/TRUNCATE deny
-triggers on `alert_kinds`, `alert_occurrences`, `alert_routes` (except the one-way supersession
-columns, under a whole-row-equality guard) and `alert_deliveries`. `alerts` allows UPDATE only
-through the state-guard trigger (§4.2).
+**RLS and immutability.** All five tables are `ENABLE` + `FORCE ROW LEVEL SECURITY`. The append-only
+triggers use the 0014/0016 pair (UPDATE/DELETE per row, TRUNCATE per statement). `alerts` allows
+UPDATE only through the state guard (§4.2).
+
+**Retention (LF F13).** `alert_occurrences` and `alert_deliveries` grow without bound, and no
+retention or partitioning is designed here. This is registered as a follow-up (§14 item 6, with the
+row text).
 
 ## 4. Scope, ownership and acknowledgement
 
-### 4.1 RLS families (migration 0110; the families are named)
+### 4.1 RLS families (migration 0110; named)
 
-Every family predicate uses the `NULLIF(current_setting('<guc>', true), '')` form. Every
-non-platform family also requires `app.platform_admin_principal_id` **and**
-`app.platform_service_id` unset, and every non-player family requires `app.player_account_id`
-unset. This is the 0106 mixed-GUC exclusion.
+**Common exclusion set (C-102-9, SA-2).** Every family predicate uses the `NULLIF(current_setting(
+'<guc>', true), '')` form. Every family requires `app.acting_tenant_id` and
+`app.acting_platform_principal_id` unset (ADR 0099), plus every scope GUC not native to that family:
+`app.tenant_id`, `app.player_account_id`, `app.platform_admin_principal_id`,
+`app.platform_service_id`. This extends the 0106 mixed-GUC exclusion.
 
-| Family (policy name) | Table(s) | Predicate | Grants |
+| Family (policy name) | Tables | Predicate (beyond the exclusion set) | Grants |
 |---|---|---|---|
-| `alerts_tenant_owned` | `alerts`, `alert_occurrences`, `alert_deliveries` (SELECT only) | `tenant_id = app.tenant_id` | Tenant sessions: SELECT, INSERT, and UPDATE through the state guard (tenant-owned only) |
-| `alerts_subject_tenant_read` | `alerts`, `alert_occurrences` | `tenant_id IS NULL AND subject_tenant_id = app.tenant_id` | **FOR SELECT only.** This is the G1/ADR 0104 pattern. Tenant sessions do **not** see `alert_deliveries` for platform-owned alerts, because platform routing references are not tenant data |
-| `alerts_subject_tenant_raise` | `alerts`, `alert_occurrences` | `tenant_id IS NULL AND subject_tenant_id = app.tenant_id` | **FOR INSERT only**, WITH CHECK. The trigger additionally requires `alert_kinds.in_tx_raisable_by_tenant` and forces `state='open'` and NULL ack/resolve fields |
-| `alerts_platform_admin` | all five | Validated `app.platform_admin_principal_id` (a `staff_users` row with `tenant_id IS NULL`; the 0105 resolver pattern), with tenant, player and service unset | SELECT all. INSERT platform-owned alerts and occurrences. UPDATE the state of platform-owned alerts through the guard. INSERT and supersede `alert_routes` |
-| `alerts_platform_service_dispatcher` | all five | `app.platform_service_id = 'alert_dispatcher'`, with tenant, player and platform-admin unset | **SELECT** on `alert_kinds`, `alerts`, `alert_occurrences`, `alert_routes`; **INSERT** on `alert_deliveries`. **No UPDATE or DELETE anywhere** (S-7.4). The one exception is §6.3 |
+| `alerts_tenant_owned` | `alerts`, `alert_occurrences`, `alert_deliveries` (SELECT) | `tenant_id = app.tenant_id` | Tenant sessions: SELECT, INSERT. **No tenant UPDATE in PRH-2** (C-102-7; no tenant-owned Kind exists) |
+| `alerts_subject_tenant_read` | `alerts`, `alert_occurrences` | `tenant_id IS NULL AND subject_tenant_id = app.tenant_id` | **FOR SELECT only.** Tenants never see deliveries of platform-owned alerts |
+| `alerts_subject_tenant_raise` | `alerts`, `alert_occurrences` | as above | **FOR INSERT only.** The trigger requires `in_tx_raisable_by_tenant` and forces `state='open'` with NULL ack/resolve fields |
+| `alerts_platform_admin` | all five | Validated `app.platform_admin_principal_id` (a `staff_users` row with `tenant_id IS NULL`; the 0105 pattern) | SELECT all. INSERT platform-owned alerts and occurrences. State UPDATE on platform-owned alerts through the guard. INSERT and supersede `alert_routes` |
+| `alerts_platform_service_dispatcher` | all five | `app.platform_service_id = 'alert_dispatcher'` | SELECT on `alert_kinds`, `alerts`, `alert_occurrences`, `alert_routes`. INSERT on `alert_deliveries`. The Q1 meta-Kind INSERT (§6.3). **No UPDATE or DELETE anywhere** |
 
-- **ON CONFLICT and RLS.** `Raise` uses `INSERT … ON CONFLICT DO NOTHING`, which needs no UPDATE
-  policy. Because `dedup_key` embeds the subject tenant, a tenant session can conflict only with a
-  row that its own `alerts_subject_tenant_read` or `alerts_tenant_owned` family already exposes. So
-  the S-7.1 concern (a collision with an invisible row, leaking the key's existence or erroring in
-  a financial transaction) cannot arise. This is TI-tested (§11).
+**ON CONFLICT and RLS.** `Raise` uses `INSERT … ON CONFLICT DO NOTHING`, which needs no UPDATE
+policy. Because the key embeds the subject tenant, a session can only conflict with rows its own
+read family already exposes (S-7.1). This is TI-tested.
 
-### 4.2 Acknowledgement and resolution (S-7.2)
+### 4.2 Acknowledgement and resolution (S-7.2, C-102-7)
 
-- **Platform-owned alerts.** Only `alerts_platform_admin` may ack or resolve them.
-  - A tenant session has no UPDATE policy on them. An attempted UPDATE affects zero rows, and the
-    handler reports that as 404/403.
-  - **A tenant acknowledgement therefore can never suppress the platform's view or delivery of an
-    integrity P1.**
-- **Tenant-owned alerts.** Tenant staff may ack or resolve them through `WithPrincipalScope`, and
-  the platform may also view them. A tenant ack of a tenant-owned alert has no effect on any
-  platform-owned alert.
-- **The state guard** (a BEFORE UPDATE trigger):
+- **Platform-owned alerts** are acked and resolved only by `alerts_platform_admin`, through
+  platform-scope endpoints guarded by a named permission. The proposal is `alert:manage`, platform
+  scope only. Its addition to `auth/permission.go` is coordinated with K1, which owns that file
+  (plan §3 Rule 1).
+- **There is no tenant ack endpoint in PRH-2.**
+- **The state guard** (BEFORE UPDATE trigger):
   - identity, payload and dedup columns are immutable;
-  - the allowed transitions are `open→acked`, `open→resolved` and `acked→resolved`, and nothing
-    else;
-  - the actor is forced from the session: the validated platform principal, or the 0105-validated
-    tenant principal;
-  - `resolve_reason_code` is required on resolve.
-- **Every ack and resolve is an audited staff action.** An ack or resolve of a platform-owned alert
-  carrying `subject_tenant_id` is audited with `audit_log.subject_tenant_id` = that tenant
-  (ADR 0104), so the subject tenant sees who handled its P1.
-- **Escalation stops at ack.** The dispatcher does not escalate an `acked` alert. Resolving stops
-  all delivery.
+  - allowed transitions: `open→acked`, `open→resolved`, `acked→resolved`;
+  - **the actor must resolve to a validated platform principal** (the 0105 check), and is forced
+    into `acked_by`/`resolved_by`;
+  - a reason code is required on resolve.
+- **Every ack and resolve is audited** by the endpoint, in its own platform-admin transaction, never
+  by `Raise`. When the alert has a subject, the audit row carries `audit_log.subject_tenant_id`
+  (ADR 0104).
+- An `acked` alert does not escalate. `resolved` stops all delivery.
 
 ### 4.3 Deliberately not built in PRH-2
 
-- Tenant-authored routes (`alert_routes.scope='tenant'` rows) are not built, because no
-  tenant-owned Kind exists in the §8 inventory. The column and CHECK exist so that adding them needs
-  no schema change. A follow-up is registered in §12.
-- There is no route write API beyond platform-admin; see §12 for whether it needs four-eyes.
+- Tenant-owned Kinds, tenant-authored routes, and a tenant ack endpoint.
+- The route write API is platform-admin-only and audited. SR-7 conditions it before any real
+  channel exists (§6.2).
 
 ## 5. Raise API (I-core)
 
@@ -276,87 +281,91 @@ package alerting
 
 type Alert struct {
     Kind            Kind
-    OwnerTenantID   uuid.UUID            // uuid.Nil ⇒ platform-owned
-    SubjectTenantID uuid.UUID            // required for platform-owned tenant-subject Kinds
-    Discriminator   string               // entity ids only
-    Attributes      map[string]AttrValue // validated against the Kind allowlist before any SQL
+    SubjectTenantID uuid.UUID            // required iff Kind.RequiresSubject
+    Discriminator   string               // server-side stable ids only
+    Attributes      map[string]AttrValue
 }
 
-func Raise(ctx context.Context, tx pgx.Tx, a Alert) error        // strict; any error returned
-func RaiseGuarded(ctx context.Context, tx pgx.Tx, a Alert) error // §7 savepoint rule
-func WithDeferred(ctx context.Context) (context.Context, *Deferred)
-func (d *Deferred) Flush(ctx context.Context, r TxRunner)        // post-commit detached re-raise
-func RaiseDetached(ctx context.Context, r TxRunner, a Alert) error
+// Scope is captured from the transaction that is being opened; it is never
+// supplied by the business caller.
+type Scope struct {
+    Kind               ScopeKind // Tenant | TenantPrincipal | PlatformAdmin
+    TenantID           uuid.UUID
+    PrincipalID        uuid.UUID
+    PlatformAdminID    uuid.UUID
+}
+
+// InTx opens exactly one business transaction with a collector bound to it,
+// and flushes the collector only after a nil commit (LF F4).
+func InTx(ctx context.Context, r ScopedRunner, fn func(ctx context.Context, tx pgx.Tx) error) (*Pending, error)
+func (p *Pending) Flush(ctx context.Context) // detached re-raise in p's originating scope (§7.3)
+
+func RaiseGuarded(ctx context.Context, tx pgx.Tx, a Alert) error // §7.2
+func RaiseDetached(ctx context.Context, r ScopedRunner, a Alert) error
+func Raise(ctx context.Context, tx pgx.Tx, a Alert) error        // strict; used by RaiseDetached only
 ```
 
-- **Session scope.** `Raise` inserts into whichever family the caller's transaction already has.
-  - A tenant transaction may raise tenant-owned Kinds, and platform-owned Kinds whose subject is
-    its own tenant.
-  - A platform-admin transaction may raise platform-owned Kinds.
-  - `Raise` never opens or changes a GUC.
-- **Mechanics.** It performs `INSERT … ON CONFLICT DO NOTHING RETURNING id`. If that returns no row,
-  it SELECTs the existing non-resolved row by `(tenant_id, dedup_key)`, then INSERTs the
-  occurrence. If a concurrent resolve races the SELECT, it retries at most twice.
-- **Detached raises.** `RaiseDetached` opens a fresh transaction under `WithTenant(subject or
-  owner)`, or `WithPlatformService("alert_dispatcher")` for a platform-owned Kind with no subject
-  tenant.
-  - It uses a detached, bounded context: the `deniedAuditCtx` pattern at
-    `payments_kill_switch_handlers.go:334`, so a client disconnect never skips it.
-  - It makes at most 3 attempts, with backoff on the injected `Clock`.
-- **Attribute validation in Go** happens before any SQL:
-  - an unknown key, a non-scalar value or a value over its bound is refused;
-  - a provider-reference attribute must be of type `ProviderRefFingerprint`, which can only be
-    constructed by `providerref.Fingerprint`;
-  - there is no `error` attribute type at all.
-
-  A Go-side validation failure is a programming error: it is logged at Error, counted, and caught
-  by the per-Kind constructor unit tests (§11).
+- **Originating scope (C-102-1, SR-1).**
+  - `ScopedRunner` wraps exactly one of `WithTenant`, `WithPrincipalScope` or `WithPlatformAdmin`,
+    and records the resulting `Scope`.
+  - `Pending` and `RaiseDetached` reopen **that same scope**. The alert's contents never influence
+    the choice of scope.
+  - **Go refusal:** a platform-owned Kind raised from a tenant scope whose subject differs from the
+    scope's tenant is refused in Go before any SQL. It is counted, logged and **not retried**. The DB
+    subject-raise policy refuses it independently.
+  - **Business code never uses the dispatcher identity.** `ScopedRunner` has no service
+    constructor. A static/AST test asserts that `db.ServiceAlertDispatcher` is referenced only
+    inside `internal/alerting/dispatcher*.go` and `internal/alerting/fallback.go` (the `Flush`
+    fallback) (Q1; security Part 1).
+- **Mechanics.**
+  - `INSERT … ON CONFLICT DO NOTHING RETURNING id`.
+  - If no row is returned, `SELECT` the non-resolved row by `(tenant_id, dedup_key)`, then `INSERT`
+    the occurrence.
+  - If a concurrent resolve races the `SELECT`, retry at most twice.
+- **`Raise` never writes `audit_log`** (LF F14). ADR 0104's subject-actor trigger would raise P0001
+  outside the savepoint and abort T10. Audit rows for alert actions are written only by the ack and
+  resolve endpoints (§4.2).
+- **Go validation** covers the Kind, the attributes, the subject/scope match, the discriminator
+  charset and the `request_id` charset. It runs **before** any SQL. `ProviderRefFingerprint` can
+  only be built by `providerref.Fingerprint`. There is no `error` attribute type.
 
 ## 6. Delivery (I-core function; wired in I-wire)
 
 ### 6.1 Dispatcher
 
-- **Identity.** A new closed-allowlist member, `db.ServiceAlertDispatcher = "alert_dispatcher"`,
-  recorded here as the ADR-level decision ADR 0081 §3.2 requires. Migration 0110 widens only the
-  alert-table policies (§4.1) to accept it.
+- **Identity.** Closed-allowlist member `db.ServiceAlertDispatcher = "alert_dispatcher"`. This is
+  the ADR-level decision required by ADR 0081 §3.2.
 - **Loop.**
-  - It reads due work in a short read-only `WithPlatformService` transaction and commits.
-  - It calls `Sink.Deliver` **with no transaction open**. A txscope guard refuses otherwise, as the
-    E3/ADR 0095 adapters do.
-  - It then records the outcome in a fresh short transaction, by INSERT only.
-- **"Due" work** is any open, non-simulation alert whose latest delivery row is one of:
+  1. Read due work in a short read-only transaction.
+  2. Call `Sink.Deliver` with **no transaction open** (a txscope guard enforces it).
+  3. Record the outcome by INSERT in a fresh short transaction.
+- **Due work** is any open, non-simulation alert whose latest delivery row is one of:
   - absent;
   - `failed` with `next_attempt_at ≤ now`;
-  - `unrouted` (re-evaluated every pass, so an alert becomes deliverable as soon as a route is
-    configured);
+  - `unrouted` (re-evaluated every pass);
   - `sent` with `next_escalation_at ≤ now` and the alert not acked.
 
-  **`now` comes from the injected `Clock`**, which is passed as a query parameter and never taken
-  from the DB's `now()` (T-1). Tests set it explicitly; there is no `time.Sleep`.
-- **Retry.** Bounded exponential backoff, with the parameters in config (technical defaults,
-  reversible). After `max_attempts` for a step, it inserts `dead`, emits an Error meta-log and
-  increments `alert_dead_total{channel_kind}`. It raises the meta Kind `alerting.delivery_dead`
-  (§6.3).
-- **Escalation.** When a route for step `n` has `escalate_after`, the `sent` row carries
-  `next_escalation_at`. If the alert is still `open` at that time, step `n+1`'s route applies.
-  With no route for `n+1`, the step is recorded as `unrouted`.
-- **Unrouted (HD-PRH2-4).** With no effective route for (severity, scope, step), the dispatcher:
-  1. inserts one `unrouted` row per (alert, step), made idempotent by the UNIQUE constraint;
-  2. increments `alert_unrouted_total{severity}`;
-  3. raises the platform warning `alerting.unrouted`.
+  `now` comes from the injected `Clock`, passed as a query parameter (T-1).
+- **Retry.** Bounded exponential backoff; the parameters are technical defaults in config. After
+  `max_attempts`, the dispatcher records `dead`, emits an Error meta-log, increments
+  `alert_dead_total{channel_kind}`, and raises `alerting.delivery_dead`.
+- **Escalation.** A route with `escalate_after` sets `next_escalation_at`. If the alert is still
+  `open` at that time, step `n+1` applies. With no route for step `n+1`, that step is `unrouted`.
+- **Unrouted (HD-PRH2-4, LF F9).** With no effective route:
+  1. `INSERT` an `unrouted` row with `attempt_no = 0` (CHECK), `ON CONFLICT DO NOTHING RETURNING`.
+  2. **Only if a row was returned:** increment `alert_unrouted_total{severity}` and raise one
+     occurrence of `alerting.unrouted` (p2, platform-owned, discriminator `severity:<p1|p2|p3>`).
 
-  `alerting.unrouted` is platform-owned, p2, has discriminator `severity:<p1|p2|p3>`, and gets one
-  occurrence per newly unrouted alert. It is deliberately not one alert per unrouted alert, to
-  avoid a storm.
-
-  The original alert stays `open`, visible in the platform alert list, and counted. This is the
-  state until HD-PRH2-4-OPS configures routes.
-- **Multi-instance.** Inserting the `claimed` row is the claim; the loser of the UNIQUE race skips.
-  A crash between `claimed` and the outcome row causes one re-send after lease expiry. Sinks
-  receive the idempotency key `<alert_id>:<step>:<attempt_no>`. Delivery is therefore
-  at-least-once, and this is stated rather than hidden.
-- **Wiring.** I-core ships the dispatcher as an unwired function. I-wire adds the one `main.go` line
-  after H merges (plan §3 Rule 5).
+  So K passes over M unrouted alerts produce exactly M `unrouted` rows and M meta occurrences. The
+  original alert stays `open`, visible and counted until routes exist (HD-PRH2-4-OPS).
+- **Meta-Kinds do not recurse (SR-6).**
+  - An `alerting.*` alert that is itself unrouted gets its `unrouted` row but raises no further
+    `alerting.unrouted` occurrence.
+  - A meta-Kind that dies raises no `alerting.delivery_dead`.
+- **Multi-instance.** The `claimed` row is the claim. Delivery is at-least-once, with sink
+  idempotency key `<alert_id>:<step>:<attempt_no>`.
+- **Wiring.** I-core ships the dispatcher as an unwired function. I-wire adds one line to `main.go`
+  after H merges (Rule 5).
 
 ### 6.2 Channel interface
 
@@ -372,337 +381,524 @@ type Delivery struct {
     Severity        Severity
     Scope           Scope
     SubjectTenantID uuid.UUID
-    Attributes      map[string]AttrValue // already allowlisted
-    RecipientRef    string               // opaque; the sink resolves it via RecipientResolver
+    Attributes      map[string]AttrValue
+    RecipientRef    string
 }
 type RecipientResolver interface { Resolve(ctx context.Context, ref string) (Recipient, error) }
 ```
 
-The implementations are:
+| Component | Label |
+|---|---|
+| `LogSink` | **IMPLEMENTED on merge** |
+| `MockSink` (configurable failure and timeout) | **MOCK** |
+| Mock resolver (`mock:` references only) | **MOCK** |
+| Real channels and resolvers | **PROVIDER DEPENDENT** and out of scope (plan §8), gated by HD-PRH2-4-OPS |
 
-| Sink | Label | Behaviour |
-|---|---|---|
-| `LogSink` | **IMPLEMENTED on merge** | Structured, allowlisted Error line |
-| `MockSink` | **MOCK** | Records deliveries in memory. It can be told to fail with a given `ErrorClass` or time out, for the retry and dead tests |
+**Preconditions for adding any real `channel_kind` (SR-7, C-102-8; registered with
+ALERT-DELIVERY-1):**
+- (i) a route change needs four-eyes, **or** raises a p2 `alerting.route_changed`;
+- (ii) superseding the last effective p1 route is refused by trigger.
 
-- A real channel (email, SMS, webhook, paging vendor) is **PROVIDER DEPENDENT** and out of scope
-  (plan §8). It is added later by a migration widening the `channel_kind` CHECK, an ADR amendment,
-  and a real `RecipientResolver` once HD-PRH2-4-OPS supplies contacts.
-- No real `RecipientResolver` exists in PRH-2. The mock resolver returns a synthetic recipient and
-  refuses anything that is not a `mock:`-prefixed reference.
+Neither is built in PRH-2, because only log and mock channels exist.
 
-### 6.3 SECURITY RULING REQUESTED: the dispatcher's meta-alert insert
+### 6.3 Dispatcher meta-Kind INSERT (Q1: ACCEPTED) and the terminal fallback `alerting.raise_failed` (ACCEPTED, security Part 1)
 
-- **The conflict.** HD-PRH2-4 requires an unrouted alert to raise a platform warning, and the
-  dispatcher is what discovers that an alert is unrouted. S-7.4 limits the dispatcher to "read on
-  alerts, insert on deliveries only".
-- **Proposed default.** The `alerts_platform_service_dispatcher` family also gets **FOR INSERT** on
-  `alerts` and `alert_occurrences`, with a WITH CHECK restricted to:
+- **Meta-Kind INSERT (Q1, extended by security Part 1).** `alerts_platform_service_dispatcher` has
+  **FOR INSERT** on `alerts` **and** `alert_occurrences`, with WITH CHECK:
   - `tenant_id IS NULL AND subject_tenant_id IS NULL`;
-  - `kind IN ('alerting.unrouted','alerting.delivery_dead')`.
+  - `kind IN ('alerting.unrouted','alerting.delivery_dead','alerting.raise_failed')`. **The list is
+    exactly these three**;
+  - every other scope GUC unset, including `app.acting_*`.
 
-  It still has no UPDATE and no DELETE.
-- **Alternative.** No DB alert. The warning is only the metric, the Error log, and a derived "N
-  unrouted" figure on the platform alert list. This keeps S-7.4 literal, but the warning is then
-  not a durable alert.
-- **Security to choose before I-core merges.**
+  On `alert_occurrences`, the same restriction applies through the copied `kind` column (SR-2). A
+  trigger forces `state='open'` and `raised_by_scope='platform_service'`. There is no UPDATE, no
+  DELETE and no route write.
 
-## 7. The in-transaction rule (LF-7 plus security addendum §1 (a)–(e))
+- **Terminal fallback `alerting.raise_failed` (LF F3; ACCEPTED).**
+  - **Definition:** p1, platform-owned, `requires_subject=false`. **No subject tenant**, because a
+    subject would re-open SR-1.
+  - **Attributes: exactly `{kind, sqlstate_class}`, enforced by a trigger** (this Kind only):
+    - `kind` must be an existing `alert_kinds.kind`;
+    - `sqlstate_class` must match `^[0-9A-Z]{2}$` or equal `go_validation`;
+    - any other key, or a missing key, is refused;
+    - **the trigger forces `discriminator := 'kind:' || attributes->>'kind'`**.
 
-### 7.1 Where `RaiseGuarded` is used
+    So there is no free-text channel into this P1.
+  - **When:** an alert's attempts are **exhausted** in any of these:
+    - `Pending.Flush` (in-tx swallow, then detached);
+    - `RaiseDetached` at the §7.3a post-commit sites, **including the REPEATABLE READ reconciliation
+      sites**;
+    - the §7.4 failure-path raises.
 
-`RaiseGuarded` is used in every business transaction that raises a Kind, including:
-- the financial evidence and posting transactions (T10, T13d, any posting);
-- the reconciliation run transactions;
-- the kill-switch engage transaction.
+    It also fires for a Go validation failure (§7.2 step 1), with `sqlstate_class = go_validation`.
+  - **Who:** only `internal/alerting/fallback.go` inserts it, under
+    `WithPlatformService("alert_dispatcher")`.
+    - Its constructor can build **only** `raise_failed`: an unexported function taking
+      `(Kind, SQLStateClass)`.
+    - The static test allowlists exactly the dispatcher files and `fallback.go`.
+    - Detached re-raises of business Kinds still reopen their originating scope (§5); they never
+      use this identity.
+  - **Signals:**
+    - the Error log line `alert_raise_fallback` **may carry `tenant_id`** (the originating scope's
+      tenant) for operators;
+    - the metric `alert_raise_failures_total{kind,phase}` has **no tenant label**.
+  - **If the fallback itself fails:** log at Error and increment
+    `alert_raise_failures_total{kind,phase="fallback"}`. **No recursion**: the fallback never raises
+    about itself.
+  - **Placement:** inside LF F5's post-response budget. It runs after the response is written,
+    within the same detached, bounded context as `Flush` (§7.3).
 
-The business outcome is never made to depend on the alert row. For a financial transaction, the
-dispute or receipt record is itself the fail-closed outcome (security addendum §1).
+## 7. The in-transaction rule (LF-7; addendum (a)–(e); Q3; LF F1, F3, F4, F5, F7, F10, F11, F12)
 
-### 7.2 Mechanics (conditions (a) and (c))
+### 7.1 Where each raise mode is used
 
-1. `SAVEPOINT` (pgx nested `tx.Begin`). If creating the savepoint fails, **propagate**: the outer
-   transaction is already unusable.
-2. Run `Raise` inside the savepoint.
-3. If `Raise` fails, `ROLLBACK TO SAVEPOINT`. **If the rollback-to-savepoint fails, propagate.**
-4. **Narrow swallow (a).** The error is swallowed **only** if it is a `*pgconn.PgError` whose
-   SQLSTATE is in this allowlist:
-   - class `22` (data exception);
-   - class `23` (integrity constraint violation);
-   - `42501` (insufficient privilege, including an RLS WITH CHECK failure);
-   - `P0001` (a trigger RAISE).
+| Raise mode | Where |
+|---|---|
+| **`RaiseGuarded` (in-tx)** | Financial evidence and posting transactions (T10, T13d, any posting), and the **READ COMMITTED** reconciliation run transactions (drift, sportsbook, casino_consistency) |
+| **Post-commit, detached only** (§7.3a) | The **REPEATABLE READ** reconciliation sites (casino_statement, payment_statement match), per the orchestrator's disposition (LF F7(b), SR-5); and the **kill-switch engage** (LF F10) |
+| **Detached** (§7.4) | Failure-path P1s, including `reconciliation.run_failed` |
 
-   **Everything else propagates**, including:
-   - `25P02` (already-aborted outer transaction);
-   - `40001` (serialization);
-   - `40P01` (deadlock);
-   - `57014` (cancel);
+The business outcome never depends on the alert row.
+
+### 7.2 Mechanics
+
+1. **Validate first (LF F1).** Go validation runs **before** any SQL and before the savepoint. On
+   failure:
+   - **never propagate**;
+   - log `alert_raise_invalid` at Error with `kind` only;
+   - increment `alert_raise_failures_total{kind,phase="in_tx"}`;
+   - hand the alert straight to the §6.3 fallback with `sqlstate_class = go_validation`, after the
+     commit. Re-raising would fail validation again.
+2. `SAVEPOINT` (pgx nested `tx.Begin`). **The savepoint encloses only `Raise`**, never any business
+   statement. A mutant that widens it must be killed (Q3). If the savepoint cannot be created,
+   **propagate**.
+3. Run `Raise`. On error, `ROLLBACK TO SAVEPOINT`. **If that rollback fails, propagate.**
+4. **Narrow swallow (a).** Swallow **only** a `*pgconn.PgError` whose SQLSTATE is class `22` or
+   `23`, or exactly `42501` or `P0001`. **Everything else propagates**, including:
+   - `25P02`, `40001`, `40P01`, `55P03`, `57014`;
    - classes `08` and `53`;
    - context cancellation;
    - any non-PG error.
 
-   Propagating is safe: evidence application and reconciliation are idempotent and retried
-   (provider redelivery, sweeper, the next scheduler tick).
+   Propagating is safe: evidence application and reconciliation are idempotent and retried.
 5. **On a swallow (c):**
-   - log at Error `alert_raise_failed` with `kind` and `sqlstate_class` only;
-   - increment `alert_raise_failures_total{kind,phase="in_tx"}`. The labels are bounded, with **no
-     tenant label**; `phase` ∈ {`in_tx`, `detached`};
-   - register the alert on the context's `*Deferred`.
+   - log `alert_raise_failed` at Error with `kind` and `sqlstate_class`;
+   - increment `alert_raise_failures_total{kind,phase="in_tx"}`. Labels are bounded, with no
+     tenant label; `phase` ∈ {`in_tx`, `detached`, `fallback`};
+   - register the alert on the transaction's `Pending`.
 
-   Neither the log nor the metric is a precondition for the money path: a meter or logger failure
-   is ignored (the J pattern).
+   A meter or logger failure is ignored.
+6. **Stated plainly (Q3).** The swallowable classes are deterministic. Re-raising them in the same
+   scope normally fails again. For those failures, **the real signal is the Error log plus the
+   metric**, together with the §6.3 terminal fallback `alerting.raise_failed`, which gives them a
+   durable marker (security Part 1 revises its earlier Q3(b) note to require one). The detached retry
+   recovers transient causes only.
 
-### 7.3 Post-commit detached retry (condition (b))
+### 7.3 Post-commit detached retry (b); per-transaction collector (LF F4, F5, F12)
 
-- **Collector.** Every call site's caller establishes `ctx, deferred := alerting.WithDeferred(ctx)`
-  before opening the business transaction.
-- **After commit.** Only after `WithTenant`/`WithPlatformAdmin`/… returns nil (the transaction has
-  committed), the caller runs `deferred.Flush(detachedCtx, pool)`, which calls `RaiseDetached` for
-  each swallowed alert.
-  - If the business transaction rolled back, `Flush` is not called for **event** alerts: a
-    rolled-back event raises no alert.
-- **The detached retry is MANDATORY for every Kind in PRH-2** (see §7.5 for why this is stricter
-  than condition (b) requires).
-  - A detached failure is logged at Error and counted with `phase="detached"`.
-  - It is never retried beyond its bounded attempts.
-- **A missing collector is a programming error.** A `RaiseGuarded` swallow with no `*Deferred` on
-  the context logs `alert_detached_unscheduled` at Error and counts it. An AST/unit test asserts
-  that every I-wire call site establishes a collector.
+- **One collector per transaction.** `alerting.InTx(ctx, runner, fn)` binds a fresh `Pending` to
+  exactly one business transaction:
+  - it flushes **only if that transaction committed** (a nil return from `WithTenant` or its
+    equivalent);
+  - on any error it **discards** the collector.
+
+  A swallowed alert from a rolled-back tx1 can therefore never flush after a later tx2 in the same
+  context commits. An AST test asserts that no `Pending` spans two transactions.
+- **When `Flush` runs (LF F5, SR-8).**
+  - HTTP handlers call `Flush` **after the response has been written**, and before the handler
+    returns. It still runs **inside the ADR 0097 admission hold**, which is released in the
+    handler's deferred release, so the load stays bounded.
+  - The 200 body and its timing are unchanged.
+  - Non-HTTP callers (the sweeper and scheduler) call `Flush` right after the commit.
+  - `Flush` uses a detached, bounded context (the `deniedAuditCtx` pattern,
+    `payments_kill_switch_handlers.go:334`), makes at most 3 attempts with backoff on the injected
+    `Clock`, and then hands off to the §6.3 fallback.
+- **Mandatory.** The detached retry is **mandatory for every Kind** (§7.5).
+- **Ambiguous commit (LF F12).** If `Commit` returns an error after the server actually committed,
+  `Flush` is skipped. The §7.5 backstops and the metric cover this; it is not otherwise mitigated.
+
+**§7.3a Post-commit-only sites.** At the REPEATABLE READ reconciliation sites and the kill-switch
+engage, **no raise happens inside the business transaction**.
+- After a nil commit, the site calls `RaiseDetached` in a fresh transaction under the originating
+  scope. For RR sites that is `WithTenant`, which is READ COMMITTED, so no in-snapshot `ON CONFLICT`
+  can raise 40001 (SR-5).
+- **Required comment change (C-102-5).** I-wire updates the `WithTenantSnapshot` doc comment
+  (`internal/db/tenant_snapshot.go:20-28`) to say that a snapshot transaction must never raise
+  alerts or run `INSERT … ON CONFLICT` against rows other transactions may commit.
+- **Terminal fallback.** The RR-site detached raise, like every other detached raise, falls back to
+  `alerting.raise_failed` when its attempts are exhausted (§6.3; security Part 1).
+- **Accepted residual (security Part 1).** A process crash between the RR-site commit and the
+  post-commit raise loses that alert. No in-tx record of the intent to raise exists.
+  - **This is acceptable only because** the two RR sources are **re-detected on every run**:
+    casino_statement's all-time MOCK source, and payment_statement's state-type
+    `pay_captured_unposted`. The next run re-raises.
+  - **Revisit condition:** if an **event-type** (windowed, not re-covered) stream is ever added at
+    REPEATABLE READ, or casino_statement gains a real windowed source, this residual is no longer
+    acceptable. That stream then needs an in-tx durable marker (e.g. an outbox row committed with
+    the run) or a security re-ruling.
+  - LF F7(a) (swallowing 40001 in-snapshot) is **not adopted** (security Part 1).
 
 ### 7.4 Failure-path P1s (LF-7(2), ADR 0095 §28.8)
 
-- **These use `RaiseDetached` directly.** A failure-path P1 is one whose business transaction
-  **rolls back** because the rollback is the outcome: every handler `*_integrity_alert_*` site in
-  §8, which runs after `WithTenant` has returned the error.
-- The detached raise runs in a fresh `WithTenant(t.ID)` transaction, in the same place as the
-  existing separately committed rejection/denial records (e.g. `recordCasinoCallbackRejection`).
+- **What they are:** a P1 whose business transaction **rolls back as the outcome**. That covers:
+  - the handler `*_integrity_alert_*` sites;
+  - `reconciliation.run_failed`.
+- **How they are raised:** `RaiseDetached` in a fresh transaction of the originating scope
+  (`WithTenant(t.ID)`), after the error response is written and inside the admission hold (SR-8).
 - "A rolled-back event raises no alert" applies to **event** alerts only.
 
-### 7.5 Per-Kind reconciliation backstops (condition (d))
+### 7.5 Per-Kind reconciliation backstops (d) (corrected per LF F8)
 
-"Backstop" means a standing reconciliation check that **re-surfaces the condition by itself** if
-the P1 row is lost. A durable business record that someone can query is listed, but it does not
-count as a backstop.
+"Backstop" means a standing reconciliation check that re-surfaces the condition by itself.
 
-| Kind (§8) | Standing reconciliation backstop | Detached retry |
+| Kind | Standing backstop | Detached retry |
 |---|---|---|
-| `payment.multiple_success_for_intent` | **Conditional:** `pay_captured_unposted` and `pay_duplicate` (`reconciliation/payment_statement.go:138,148`), only for a provider/period with a wired payment-statement source. Today every source is MOCK. | **Mandatory** (the backstop is not universally present) |
-| `payment.deposit_intent_index_backstop_fired` | Same conditional backstop. The disputed attempt row (terminal reason `multiple_success_for_intent`) is durable in the same transaction. | **Mandatory** |
-| `reconciliation.ledger_projection_drift` | **Yes:** the drift sweep itself. It is a full-state recompute, so the next tick re-detects any drift that persists. | **Mandatory** in PRH-2 (uniformity; see below) |
-| `reconciliation.sportsbook_settlement_mismatch`, `.casino_consistency_mismatch`, `.casino_statement_mismatch`, `.payment_statement_mismatch` | **None.** The windows are disjoint and period-bound, so the next run does not re-cover the window. The `reconciliation_mismatches` rows are durable in the same transaction, but no check re-raises them. | **Mandatory** |
-| `payment.kill_switch_engaged` | None. The switch row and the audit row are durable in the same transaction. | **Mandatory** |
-| Handler integrity Kinds (`casino.callback_integrity.*`, `payment.webhook_integrity.*`) | Partial: `casino_consistency` `cas_*` kinds and `pay_*` statement kinds, where a source exists. Rejection and denial records exist for some (`recordCasinoCallbackRejection`; the `deposit_handlers.go:465` denial audit). | Detached is the **primary** path (§7.4), with bounded retries |
+| `payment.multiple_success_for_intent` | **Conditional:** `pay_captured_unposted` (unwindowed, state-type), only for a provider with a wired payment-statement source (MOCK today). **`pay_duplicate` does not apply** (it counts succeeded attempts only) | **Mandatory** |
+| `payment.deposit_intent_index_backstop_fired` | Same conditional `pay_captured_unposted` backstop. The disputed attempt row is durable in the same transaction | **Mandatory** |
+| `reconciliation.ledger_projection_drift` | **Yes:** the drift sweep itself (state-type, re-detected every run) | **Mandatory** (uniform rule) |
+| `reconciliation.casino_consistency_mismatch` | **Yes:** state-type, re-detected every run | **Mandatory** |
+| `reconciliation.casino_statement_mismatch` | **Yes today:** the MOCK source is all-time, so re-detected. **This must be re-assessed** when a real, windowed source exists (§7.3a revisit condition) | **Mandatory** (post-commit detached, then fallback) |
+| `reconciliation.payment_statement_mismatch` | **Partial:** `pay_captured_unposted` is state-type; the other kinds are event-type and windowed, so a lost window is not re-covered. **The §7.3a crash residual is accepted on the strength of the state-type re-detection**, and must be re-assessed if event-type kinds alone carry the signal | **Mandatory** (post-commit detached, then fallback) |
+| `reconciliation.sportsbook_settlement_mismatch` | **None assumed:** windowing not verified, so treated as event-type | **Mandatory** |
+| `reconciliation.run_failed` | **None.** This Kind is the signal for a lost run | **Detached primary**, bounded, then fallback |
+| `payment.kill_switch_engaged` | None. The switch row and the audit row are durable | **Detached primary** (post-commit), then fallback |
+| Handler integrity Kinds | Partial: `cas_*` state-type kinds, `pay_*` where a source exists, and the rejection/denial records | **Detached primary**, then fallback |
 | `simulation.*` | N/A (never delivered) | Detached, best-effort |
-| `alerting.unrouted`, `alerting.delivery_dead` | Re-derived every dispatcher pass | Re-raised by the next pass |
+| `alerting.*` meta-Kinds | Re-derived by the next dispatcher pass | Next pass |
 
-**Why every Kind is mandatory.** Condition (b) makes the detached retry mandatory only for Kinds
-without a backstop. PRH-2 makes it mandatory for every Kind, because:
-- the only true backstop (drift) exists for one Kind;
-- the payment backstop depends on a real statement source that does not exist yet.
-
-One uniform rule is also simpler to test and to mutate. This is stricter than the addendum, never
+Condition (b) requires the detached retry to be mandatory only for Kinds without a backstop. This
+ADR makes it mandatory for **every** Kind: only some Kinds have a true, unconditional backstop, and
+one uniform rule is simpler to test and to mutate. The rule is stricter than the addendum, never
 looser.
 
-### 7.6 Abort-on-failure for non-financial integrity alerts: decided NO for every PRH-2 Kind
+### 7.6 Abort-on-failure: NO for every PRH-2 Kind (Q2 CONFIRMED; text corrected per SR-4 and LF F8)
 
-The security addendum permits abort-on-failure for non-financial integrity alerts. This ADR does
-not use it for any current Kind:
-- **Reconciliation runs.** Aborting would roll back the run and its `reconciliation_mismatches`
-  rows. For the four period-bound streams, that permanently loses the durable evidence for the
-  window (§1), which is strictly worse than committing the evidence with a deferred alert. For
-  drift, it would lose the run record.
-- **The kill-switch engage.** An alerting failure must never prevent the safety brake from
-  engaging.
-- **Handler integrity sites.** Their business transaction has already rolled back (§7.4), so there
-  is nothing to abort.
+**The reason.** An alerting failure must never roll back a reconciliation run with its mismatch
+rows, a financial evidence transaction, or a safety brake. A committed run with a deferred alert is
+always better than a rolled-back run.
 
-A future Kind may use abort-on-failure only if this ADR is amended with a reason, and only for a
-business action that is (i) retried by its caller and (ii) not a safety control. **Security to
-confirm this ruling at ADR review.** It reverses security's original S-7.5 recommendation for the
-non-financial class, for the reasons above.
+**What still rolls back (stated honestly).** The **transient** classes that §7.2 propagates (25P02,
+40001, 40P01, 55P03, 57014, 08, 53, and cancellation) still roll back the enclosing business
+transaction when they surface from the alert statement at an in-tx site. That is acceptable,
+because every such site is retried:
+- T10/T13d are retried by provider redelivery, the sweeper or T17;
+- reconciliation runs are covered by `reconciliation.run_failed`, which is raised detached from the
+  failure branch, so a lost run is itself alerted. It is **required** in I-wire (RECON-RUN-FAILED-ALERT-1).
 
-## 8. I-wire site list (verified at `cabca27`)
+**The kill switch** raises post-commit only (§7.3a), so no alerting failure of any class can roll
+back an engage.
 
-**Order of wiring:** plan §5-I. **Logs are retained:** the existing log line stays, and the Raise
-is additional.
+**Future Kinds.** A future Kind may use abort-on-failure only if this ADR is amended with a reason,
+and only for a business action that is (i) retried by its caller and (ii) not a safety control.
 
-| # | Site | Kind (severity, scope) | Raise mode | Attribute allowlist |
-|---|---|---|---|---|
-| 1 | `payments/orchestrator.go:989-1024` (`auditMultipleSuccessForIntent`, log at `:1018`), post-E2 | `payment.multiple_success_for_intent` (p1, platform, subject = attempt tenant) | `RaiseGuarded` in T10/T13d | `deposit_intent_id`, `attempt_id`, `evidence_kind`, `provider_id`. **No amount, asset or reference in the alert**; those stay in the audit row, per security F-L2 |
-| 2 | `:1021` (`…_index_backstop_fired`) | `payment.deposit_intent_index_backstop_fired` (p1, platform) | `RaiseGuarded`, same tx | `deposit_intent_id`, `attempt_id` |
-| 3 | `reconciliation/scheduler.go:333-341` (drift) | `reconciliation.ledger_projection_drift` (p1, platform) | `RaiseGuarded` **moved inside** the per-tenant run tx (`:285`); the post-commit log line stays | `run_id`, `mismatch_count`, `stream` |
-| 4 | `scheduler.go:420` | `reconciliation.sportsbook_settlement_mismatch` (p1) | Same, inside that stream's run tx | `run_id`, `mismatch_count`, `stream`, `statement_source` |
-| 5 | `scheduler.go:487` | `reconciliation.casino_consistency_mismatch` (p1) | Same | `run_id`, `mismatch_count`, `stream` |
-| 6 | `scheduler.go:562` | `reconciliation.casino_statement_mismatch` (p1) | Same | `run_id`, `mismatch_count`, `stream`, `statement_source` |
-| 7 | `scheduler.go:719` | `reconciliation.payment_statement_mismatch` (p1) | Same, inside the match tx (`WithTenantSnapshot`) | `run_id`, `mismatch_count`, `statement_source`, `provider_id`, `import_id` |
-| 8 | `payments_kill_switch_handlers.go:360` (called at `:653`) | `payment.kill_switch_engaged` (**p2**, platform, subject = `c.target`, route-validated) | `RaiseGuarded` **moved inside** the engage tx (`:596`), which is platform-admin or tenant-principal scope; the log stays | `kill_switch_id`, `provider_scope`, `operation_scope`, `reason_code`, `changed_by_scope`, `is_platform_takeover`. The actor id is in the audit row, not the alert |
-| 9 | `casino_handlers.go:495,510,522,536,556` | `casino.callback_integrity.{bet_not_found, provider_round_ownership_conflict, payload_mismatch, original_tombstoned, win_origin}` (p1, platform) | `RaiseDetached` (§7.4) | `provider_id`, `request_id`. **Never `err`** |
-| 10 | `deposit_handlers.go:451,465,518` | `payment.webhook_integrity.{payload_mismatch, deposit_already_reversed, reversal_link}` (p1, platform) | `RaiseDetached` | `provider_id`, `request_id` |
-| 11 | `payment_deposit_simulation_handlers.go:240` | `simulation.payment.payload_mismatch` (p3, simulation) | `RaiseDetached`; **never delivered** | `request_id` |
-| 12 | `casino_play_handlers.go:242,252,261,276,288` (**simulation-gated**, §1) | `simulation.casino_play.<reason>` (p3, simulation) | `RaiseDetached`; never delivered | `action`, `request_id` |
-| 13 | `sportsbook_settlement_handlers.go:185` (**simulation-gated**, §1) | `simulation.sportsbook_settlement.<reason>` (p3, simulation) | `RaiseDetached`; never delivered | `bet_id`, `reason`, `event_type`, `generation`, `bet_status`, `request_id`. The ADR 0088 §4.4 set, minus the staff actor id, which stays in the log and audit |
+### 7.7 Lock order (LF F11). This is a note for an ADR 0082 amendment; the orchestrator owns amendment sections.
 
-- **Removed site.** `orchestrator.go:1509` dies with E2 and is not wired.
-- **E2 precondition.** Row 1 is wired only after E2 merges (plan §2).
+- **Alert tables are the terminal lock level.** After a `RaiseGuarded` inside a business
+  transaction, the transaction takes **no further business-row lock** on a different intent,
+  attempt, wallet, account or session.
+- In practice, the raise is the last statement before the audit/commit tail at every in-tx site.
+- The §11 `-race -count=50` test (LF test 9) checks this.
 
-## 9. Migration 0110 (I-core): content
+## 8. I-wire site list
 
-1. **`alert_kinds`**: table, seed rows for §8's Kinds plus `alerting.unrouted` and
-   `alerting.delivery_dead`, the immutability triggers, `FORCE RLS`, and a SELECT-only policy.
-2. **`alerts`**: the §3.2 columns, the CHECKs, the generated `dedup_key`, the partial UNIQUE
-   NULLS NOT DISTINCT index, the scope-consistency and forced-severity triggers, the state-guard
-   trigger, the attribute trigger (flat scalar object, ≤ 2 KiB, keys ⊆ `allowed_keys`), and the
-   indexes `(tenant_id, state, created_at)` and `(subject_tenant_id, state, created_at) WHERE
-   subject_tenant_id IS NOT NULL`.
-3. **`alert_occurrences`**, **`alert_routes`**, **`alert_deliveries`**: per §3.2, with the
-   append-only triggers (UPDATE/DELETE per row, TRUNCATE per statement, the 0014/0016 pair), the
-   `last_error_class` enum CHECK, the `recipient_ref` CHECK, and the simulation-delivery refusal
-   trigger.
-4. **`ENABLE` + `FORCE ROW LEVEL SECURITY`** on all five, and the §4.1 families by name:
-   `alerts_tenant_owned`, `alerts_subject_tenant_read`, `alerts_subject_tenant_raise`,
-   `alerts_platform_admin` and `alerts_platform_service_dispatcher`. The last includes the §6.3
-   INSERT, if security accepts it.
-5. **Grants:** append-only least-privilege lines in `deploy/init-app-role.sql` (plan §3 Rule 4). No
-   role, password or attribute change.
+Logs are retained; every raise is additional. Order: plan §5-I. Discriminators use **server-side ids
+only** (LF F6, SR-3). "Subject" is the session tenant unless stated. Every platform-owned Kind below
+has `requires_subject=true` and `in_tx_raisable_by_tenant=true` (LF F2).
+
+| # | Site | Kind (sev) | Originating scope → raise mode | Discriminator | Attributes |
+|---|---|---|---|---|---|
+| 1 | `payments/orchestrator.go:989-1024` (log `:1018`), post-E2 | `payment.multiple_success_for_intent` (p1) | tenant (T10/T13d) → `RaiseGuarded` | `intent:<deposit_intent_id>` | `attempt_id`, `evidence_kind`, `provider_id` |
+| 2 | `:1021` | `payment.deposit_intent_index_backstop_fired` (p1) | same tx → `RaiseGuarded` | `intent:<id>` | `attempt_id` |
+| 3 | `reconciliation/scheduler.go:333-341` (drift) | `reconciliation.ledger_projection_drift` (p1) | tenant RC run tx (`:285`) → `RaiseGuarded`, moved inside the tx | `stream:ledger_vs_projection` | `run_id`, `mismatch_count` |
+| 4 | `scheduler.go:420` | `reconciliation.sportsbook_settlement_mismatch` (p1) | tenant RC run tx → `RaiseGuarded` | `stream:sportsbook_settlement` | `run_id`, `mismatch_count`, `statement_source` |
+| 5 | `scheduler.go:487` | `reconciliation.casino_consistency_mismatch` (p1) | tenant RC run tx → `RaiseGuarded` | `stream:casino_consistency` | `run_id`, `mismatch_count` |
+| 6 | `scheduler.go:562` (tx at `:516`, **RR**) | `reconciliation.casino_statement_mismatch` (p1) | **post-commit detached**, `WithTenant` (RC) | `stream:casino_statement` | `run_id`, `mismatch_count`, `statement_source` |
+| 7 | `scheduler.go:719` (match tx at `:683`, **RR**) | `reconciliation.payment_statement_mismatch` (p1) | **post-commit detached**, `WithTenant` (RC) | `stream:payment_statement:provider:<id>` | `run_id`, `mismatch_count`, `statement_source`, `import_id` |
+| 8 | `payments_kill_switch_handlers.go:360` (called at `:653`) | `payment.kill_switch_engaged` (p2), subject = `c.target` (route-validated) | engage scope (`WithPlatformAdmin` or `WithPrincipalScope`) → **post-commit detached only** (LF F10) | `switch:<kill_switch_id>` | `provider_scope`, `operation_scope`, `reason_code`, `changed_by_scope`, `is_platform_takeover` |
+| 9 | `casino_handlers.go:495,510,522,536,556` | `casino.callback_integrity.<reason>` (p1) | tenant → detached (failure path) | `provider:<provider_id>:reason:<reason>` | `provider_id`, `request_id` (charset-checked) |
+| 10 | `deposit_handlers.go:451,465,518` | `payment.webhook_integrity.<reason>` (p1) | tenant → detached | `provider:<id>:reason:<reason>` | `provider_id`, `request_id` |
+| 11 | `payment_deposit_simulation_handlers.go:240` | `simulation.payment.payload_mismatch` (p3, sim) | tenant → detached; never delivered | `provider:<id>` | `request_id` |
+| 12 | `casino_play_handlers.go:242,252,261,276,288` (sim-gated) | `simulation.casino_play.<reason>` (p3, sim) | player's tenant (`WithTenant`) → detached; never delivered | `session:<session_id>:reason:<reason>` | `action`, `request_id` |
+| 13 | `sportsbook_settlement_handlers.go:185` (sim-gated) | `simulation.sportsbook_settlement.<reason>` (p3, sim) | tenant → detached; never delivered | `bet:<bet_id>:reason:<reason>` | `reason`, `event_type`, `generation`, `bet_status`, `request_id` |
+| 14 | **Required (SR-4, C-102-4; RECON-RUN-FAILED-ALERT-1):** `scheduler.go:314,407,473,547,647` (`tenant run failed`) | `reconciliation.run_failed` (p1) | tenant → detached (the run tx rolled back) | `stream:<stream>[:provider:<id>]` | `stream`, `phase`, `sqlstate_class`. **Never the error text** |
+
+- **Bounding the alert count per entity (SR-3).** Rows 9–13 use stable server-side keys. A
+  repeating provider fault is therefore **one** open alert per (tenant, provider, reason), with
+  growing occurrences, not one alert per request.
+- **Rows 3–7 and 14** use stable keys with the run id as an attribute. A persisting condition is one
+  open alert; resolving it and re-detecting creates a new alert (LF F6).
+- **The `:1509` site** dies with E2. **Row 1** is wired after E2 merges.
+
+## 9. Migration 0110: content
+
+1. **`alert_kinds`**: the §3.1 columns, including `requires_subject`, `in_tx_raisable_by_tenant` and
+   `raise_mode`; the seed rows (§8 Kinds and the two accepted meta-Kinds, plus
+   `alerting.raise_failed` (ACCEPTED, §6.3)); the immutability triggers; a SELECT-only policy.
+   Also the **`raise_failed` attribute trigger**: exactly `{kind, sqlstate_class}`, `kind` an
+   existing Kind, `sqlstate_class ~ '^[0-9A-Z]{2}$'` or `go_validation`, and the forced
+   discriminator `'kind:'||kind`.
+2. **`alerts`**: columns, CHECKs, the generated `dedup_key`, the partial UNIQUE NULLS NOT DISTINCT
+   index, and these triggers: scope consistency, `requires_subject`, forced severity, the state
+   guard (with validated actor), the attribute allowlist, and the `request_id` charset.
+3. **`alert_occurrences`**, with the copied `kind` column and forced `raised_by_scope`;
+   **`alert_routes`**; **`alert_deliveries`**, with the `attempt_no = 0` unrouted CHECK. All are
+   append-only (the 0014/0016 trigger pair). Also: the `last_error_class` enum, the `recipient_ref`
+   CHECK and the simulation-delivery refusal.
+4. **`ENABLE` + `FORCE` RLS** on all five, with the §4.1 named families and the common exclusion
+   set, including `app.acting_*` and `app.platform_service_id`.
+5. **Grants:** append-only least-privilege lines in `deploy/init-app-role.sql` (Rule 4).
 6. **No `alert_routes` rows.**
-7. **Down:** `RAISE EXCEPTION` if any row exists in `alerts`, `alert_occurrences`,
-   `alert_deliveries` or `alert_routes`. Otherwise drop in reverse order.
+7. **Down:** refuse while any row exists in `alerts`, `alert_occurrences`, `alert_deliveries` or
+   `alert_routes`.
 
-## 10. Invariants (for `qa` and `code-reviewer`)
+## 10. Invariants
 
 | ID | Invariant |
 |---|---|
-| AL-1 | An alert row, occurrence or delivery is visible only to its owner tenant, its subject tenant (read-only, and not deliveries), the validated platform admin, and the dispatcher service. RLS enforces this, not Go filters. |
-| AL-2 | No tenant session can change the state of a platform-owned alert. |
-| AL-3 | `dedup_key` always embeds the Kind and the subject tenant. The UNIQUE constraint is keyed on `tenant_id`. There is no cross-tenant conflict. |
-| AL-4 | Attributes ⊆ the Kind allowlist. Provider refs appear only as 12-hex fingerprints. There is no PII, secret or token material, and no raw error text. `last_error_class` is an enum. |
+| AL-1 | Alert rows are visible only to their owner tenant, their subject tenant (read-only, without deliveries), the validated platform admin, and the dispatcher. RLS enforces this. Sessions with mixed or acting GUCs see nothing. |
+| AL-2 | No tenant session can change any alert's state. |
+| AL-3 | `dedup_key` embeds the Kind and the subject tenant. There is no cross-tenant conflict. Discriminators contain server-side ids only. |
+| AL-4 | Attributes ⊆ the allowlist. Provider refs are fingerprints only. `request_id` is charset-checked. There is no PII, secret, token or raw error text. |
 | AL-5 | No transaction is open during `Sink.Deliver`. |
-| AL-6 | In a business transaction, `Raise` runs under a savepoint. Only allowlisted SQLSTATEs are swallowed; 25P02, 40001 and 40P01 always propagate. |
-| AL-7 | Every swallowed in-transaction raise gets a post-commit detached raise. A rolled-back business transaction never flushes its event alerts. |
-| AL-8 | No migration seeds a route or recipient. An unrouted alert stays open, counted and warned. |
+| AL-6 | In a business transaction, `Raise` runs in a savepoint that encloses only `Raise`. Only the allowlisted SQLSTATEs are swallowed. |
+| **AL-6a** | A Go validation failure is never propagated into the business transaction (LF F1). |
+| AL-7 | A swallowed alert is re-raised only after **its own** transaction commits, in **its own** originating scope. A rolled-back transaction never flushes. |
+| AL-8 | No migration seeds a route or recipient. An unrouted alert stays open and counted, with exactly one `unrouted` row per (alert, step). |
 | AL-9 | Simulation Kinds are never delivered. |
-| AL-10 | The dispatcher cannot UPDATE or DELETE any alert table. Its INSERT is limited to deliveries, plus the §6.3 meta-Kinds if accepted. |
+| AL-10 | The dispatcher cannot UPDATE or DELETE any alert table. Its alert INSERT is limited to exactly the three meta-Kinds, with no tenant and no subject. Only `internal/alerting` (the dispatcher and `fallback.go`) references its identity, and the fallback can build only `raise_failed`. |
+| AL-14 | `alerting.raise_failed` carries exactly `{kind, sqlstate_class}` with the forced discriminator. A fallback failure is logged and counted, and never recurses. |
+| AL-11 | No raise runs inside a REPEATABLE READ transaction, and none runs inside the kill-switch engage transaction. |
+| AL-12 | `Raise` never writes `audit_log`. |
+| AL-13 | Meta-Kinds never recurse. |
 
 ## 11. Tests and mutants (T-1 injectable clock; T-2 no wall-clock assertion; T-3 local runs never labelled CI)
 
-**I-core:**
-- **IDM/CON:** N concurrent raisers of the same Kind and discriminator → 1 alert row and N
-  occurrences. Raising after a resolve → a new alert row.
+### I-core tests
+
+- **IDM/CON:** N concurrent raisers of one key → 1 alert and N occurrences. After a resolve → a new
+  alert.
 - **TI:**
-  - tenant A's raise never conflicts with or reveals B's (same Kind and discriminator, different
-    subject);
-  - A cannot read B's subject alerts;
-  - A cannot see deliveries of platform-owned alerts;
-  - A cannot raise with subject = B (42501).
+  - A's raise never conflicts with or reveals B's;
+  - A cannot read B's subject alerts, or any platform deliveries;
+  - A cannot raise with subject = B (refused in Go **and** by the DB with 42501).
 - **RLS/AZ:**
-  - a tenant UPDATE of a platform-owned alert affects 0 rows;
-  - a tenant ack of a tenant-owned alert leaves platform-owned alerts untouched;
-  - a mixed-GUC session (tenant + platform admin, or tenant + service) sees nothing and writes
+  - there is no tenant UPDATE path;
+  - mixed-GUC sessions, including tenant + `app.acting_*` and tenant + service, see and write
     nothing;
-  - the dispatcher's UPDATE is refused, and so is its INSERT of a non-meta Kind;
-  - a player session sees nothing.
+  - the dispatcher's UPDATE is refused; its INSERT of a non-meta Kind is refused **on both
+    `alerts` and `alert_occurrences`** (SR-2);
+  - a player session sees nothing;
+  - the ack/resolve guard refuses an unvalidated actor.
 - **Payload:**
-  - an unknown attribute key is refused in Go and by the DB trigger;
-  - a raw provider reference cannot be constructed as `ProviderRefFingerprint` (compile-time/unit);
-  - an oversized payload is refused;
-  - `last_error_class` outside the enum is refused.
+  - an unknown key is refused (Go and DB);
+  - a raw provider reference cannot be built as a fingerprint;
+  - oversize is refused;
+  - an off-enum error class is refused;
+  - a `request_id` of `ops@x` or one containing a newline is refused by the DB (SR-3).
 - **Routing and delivery** (clock-driven):
-  - no route → an `unrouted` row, `alerting.unrouted` raised, and the metric incremented;
-  - a route added later → delivered on the next pass;
-  - `MockSink` failing → retries at clock-set times → `dead` + `alerting.delivery_dead`;
-  - not acked by `next_escalation_at` → step 1;
-  - acked → no escalation;
-  - a simulation alert → no delivery; a direct INSERT of a non-suppressed delivery row is refused;
-  - two dispatchers → one `claimed` per (alert, step, attempt);
-  - a txscope test proves no transaction is open during `Deliver`.
+  - **LF test 8:** with zero routes, K passes over M alerts → exactly M `unrouted` rows and M meta
+    occurrences;
+  - a route added later → delivered;
+  - `MockSink` failure → retries → `dead` plus `alerting.delivery_dead`;
+  - escalation when not acked; no escalation when acked;
+  - simulation alerts get no delivery;
+  - two dispatchers → one claim;
+  - no transaction is open during `Deliver`;
+  - meta-Kinds don't recurse (SR-6).
 - **MIG:**
-  - zero `alert_routes` rows after `up`;
-  - `recipient_ref` refuses `ops@example.invalid` and `+15550100`;
-  - `down` refuses while rows exist.
-- **The in-tx rule** (addendum (e) and LF I):
-  - an injected `Raise` failure (a P0001 via a test trigger) inside T10/T13d → the dispute and
-    receipt commit, the **uniform 200** is returned, `alert_raise_failures_total{kind,phase="in_tx"}`
-    increments, and **the post-commit detached `Raise` persists the alert**;
-  - an already-aborted outer transaction (25P02) → **propagates**, not masked; a 40001 or 40P01
-    injected inside the savepoint → propagates;
-  - a failure-path P1 whose business transaction rolls back → the detached alert persists;
-  - a rolled-back event → no alert.
+  - zero routes after `up`;
+  - `recipient_ref` refuses email and phone shapes;
+  - `down` refuses while rows exist;
+  - **LF test 3 / F2:** a table-driven walk of `alert_kinds` shows that every Kind's scope, subject
+    and raisable flags let **both** the in-tx raise and `RaiseDetached` succeed from its §8
+    originating session.
+- **Static tests:**
+  - `db.ServiceAlertDispatcher` is referenced only in `internal/alerting/dispatcher*.go` (and
+    `fallback.go`), and `fallback.go` can construct only `alerting.raise_failed`;
+  - no `Pending` spans two transactions.
 
-**I-wire:**
-- Every §8 site raises its Kind with exactly its allowlisted attributes. For the reconciliation
-  sites, this is asserted from within the run transaction: a run row and an alert row, or neither
-  plus a detached one.
-- The multiple-success alert is durable in the same transaction as the refusal record (QA W4).
+### In-tx rule tests (the LF required tests)
+
+| LF test | Scenario | Expected |
+|---|---|---|
+| 1 | In T10 via receipt, `drive.go:354` and `sweeper.go:513`: inject each swallowable class (22, 23, 42501, P0001) **and** a Go validation failure | The dispute and its audit commit; the 200 is byte-identical; no ledger transaction; SUM(D) = SUM(C); the in-tx metric increments |
+| 2 | A **persistent** P0001, so the detached raise also fails | `alerting.raise_failed` persists with `{kind, sqlstate_class}` and the forced discriminator, and the 200 is unchanged in body and within its budget. A forced fallback failure logs, increments `phase="fallback"` and does not recurse |
+| 4 | One context, two transactions: tx1 swallows and rolls back, tx2 commits | **No alert for tx1.** Covered for the sweeper and for webhook-plus-reversal |
+| 5 | 25P02 propagates. 40001 and 40P01 raised **by the alert statement** in a READ COMMITTED transaction propagate | The idempotent re-apply gives one dispute, one audit, no posting. 55P03 and 57014 also propagate |
+| 6 | Adapted to the disposition. At the RR sites, the stable key is committed concurrently | The run and its mismatch rows commit, **no raise statement executes inside the snapshot** (asserted), and the alert exists afterwards through the post-commit detached raise. The savepoint-snapshot survival question is moot under option (b) |
+| 7 | A condition persisting across N runs | 1 open alert and N occurrences; resolve then the next run → a new alert |
+| 9 | `-race -count=50`: two T10s on one intent plus a concurrent detached flush | One alert, no deadlock, one dispute, zero postings |
+| 10 | **Kill switch (SR-4):** inject an alert failure (persistent P0001, then 40P01) in the post-commit raise | The switch stays engaged, its audit row is committed, and the response is unchanged |
+| 12 | — | The existing LF-7 test set stays, unchanged |
+
+Also required:
+- an already-aborted outer transaction (25P02) is **not masked** (addendum (e));
+- a failure-path P1 whose business transaction rolled back → the detached alert persists;
+- a rolled-back event → no alert;
+- **`reconciliation.run_failed`:** an injected run failure produces a persisted detached alert
+  whose attributes contain no error text.
+- **`raise_failed` hygiene (security Part 1):** a dispatcher-identity insert of `raise_failed` with
+  each of the following is refused:
+  - an extra attribute key;
+  - a free-text or lowercase `sqlstate_class`;
+  - a nonexistent `kind`;
+  - a non-NULL tenant or subject;
+  - a caller-supplied discriminator (it is overwritten, not honoured).
+- **RR-site fallback:** a persistent failure of the casino_statement post-commit raise persists
+  `raise_failed`.
+
+### I-wire tests
+
+- Every §8 row raises its Kind, with exactly its discriminator and attributes, from its real
+  originating session.
+- The multiple-success alert is durable in the same transaction as the refusal record.
 - Rows 11–13 are never delivered.
-- The existing log lines still fire (**R**).
+- The existing log lines still fire.
+- The `tenant_snapshot.go` comment is updated.
 
-**Mutants (must be killed):**
+### Mutants (must be killed; LF test 11 plus earlier ones)
 
-| Mutant | Must be killed by |
+| Mutant | Killed by |
 |---|---|
-| `RaiseGuarded` without a savepoint | the injected-failure test fails with 25P02 on the next statement |
-| Swallowing every error, including 25P02, 40001 and 40P01 | the propagation tests |
-| Dropping the post-commit `Flush` | the detached-persistence test |
-| Removing `subject_tenant_id` from `dedup_key` | the TI dedup test |
-| `alerts_subject_tenant_read` without the player/platform exclusions | the mixed-GUC and player tests |
-| Granting the dispatcher UPDATE | the RLS test |
-| Deleting the simulation delivery guard | the simulation test |
-| Deleting the attribute trigger | the DB payload test |
-| Seeding one route | the MIG test |
+| Savepoint removed | the injected-failure tests |
+| Savepoint widened to cover a business statement (Q3) | the Q3 test |
+| Swallowing all errors | the propagation tests (LF test 5) |
+| **Validation error propagated** | LF test 1 |
+| **`Flush` called on the error path** | LF test 4 |
+| **A collector shared across transactions** | LF test 4 plus the static test |
+| **An incrementing `attempt_no` for `unrouted`** | LF test 8 plus the CHECK |
+| **A `run:<uuid>` discriminator** | LF test 7 |
+| **The fallback removed** | LF test 2 |
+| The `raise_failed` attribute trigger removed | the malformed-insert test below |
+| `subject_tenant_id` dropped from `dedup_key` | the TI dedup test |
+| The subject-read policy without its exclusions | the mixed-GUC tests |
+| The dispatcher granted UPDATE | the RLS tests |
+| The simulation guard deleted | the simulation test |
+| The attribute trigger deleted | the payload tests |
+| One route seeded | the MIG test |
+| **`RaiseDetached` choosing its scope from the Alert** | the SR-1 test (a wrong-subject alert is never retried in the subject's scope) |
 
 ## 12. Alternatives rejected
 
 | Alternative | Why rejected |
 |---|---|
-| Global `UNIQUE (dedup_key)` | The S-7.1 cross-tenant collision and existence leak. |
-| Counter columns on `alerts`, updated by `ON CONFLICT DO UPDATE` | A tenant session would need UPDATE on platform-owned rows, which is the S-7.2 suppression risk. An append-only occurrences table avoids it. |
-| Delivery and escalation state as UPDATEd columns on `alerts` | This contradicts S-7.4 (the dispatcher is insert-only). An append-only `alert_deliveries` projection is used instead. |
-| `SECURITY DEFINER` raise function | The app role owns the tables and FORCE RLS applies to the owner (ADR 0013), so definer rights grant nothing without a role or attribute change, which is forbidden. |
-| Dispatcher under `WithoutTenant` | The S-7.4 requirement; `WithoutTenant` is the generic platform read scope (ADR 0081 §3.2). |
-| Abort-on-failure for reconciliation and kill-switch Kinds | §7.6. |
-| Swallow by denylist (propagate only 25P02, 40001, 40P01) | Allowlisting the swallowable classes is narrower (condition (a)). |
-| Seeding placeholder routes or recipients | HD-PRH2-4 forbids fictional recipients. |
-| Implementing a real email or paging channel now | Out of scope (plan §8); PROVIDER DEPENDENT. |
+| Global `UNIQUE (dedup_key)` | The S-7.1 collision and existence leak |
+| `ON CONFLICT DO UPDATE` counters | Tenants would need UPDATE on platform rows (S-7.2) |
+| Delivery state as UPDATEd columns | Contradicts S-7.4 |
+| `SECURITY DEFINER` raise | Grants nothing under FORCE RLS without a forbidden role change |
+| Dispatcher under `WithoutTenant` | S-7.4 |
+| Abort-on-failure | §7.6 |
+| Denylist swallow | Condition (a) |
+| Seeded routes or recipients | HD-PRH2-4 |
+| Real channels now | Plan §8 |
+| **`run:<uuid>` reconciliation keys** | One new P1 per tenant and stream every hour, indefinitely (LF F6) |
+| **In-snapshot `ON CONFLICT` at RR sites, or swallowing 40001 there (LF F7(a))** | F7(a) would narrow addendum (a); option (b) is simpler (orchestrator disposition) |
+| **A context-scoped collector** | Cross-transaction flush (LF F4) |
+| **`Flush` before the response** | Delays the 200 (LF F5) |
+| **Scope chosen from the Alert** | Scope laundering (SR-1) |
+| **An in-tx kill-switch raise, placed last** | Transient classes could still roll back the brake; post-commit-only removes this entirely (LF F10) |
 
 ## 13. Consequences
 
-- P1s become durable and visible to the platform, and to the subject tenant read-only. Nobody is
-  paged until HD-PRH2-4-OPS configures routes **and** a real channel exists. PAY-P1-MULTISUCCESS-ALERT-1
-  stays launch-blocking.
-- The payments, reconciliation and kill-switch call sites gain a context collector plus a
-  post-commit flush. The business outcome of every transaction is unchanged.
-- There is one new platform-service identity and five new tables under FORCE RLS.
+- P1s become durable and visible. Nobody is paged until HD-PRH2-4-OPS configures routes **and** a
+  real channel exists (PROVIDER DEPENDENT).
+- PAY-P1-MULTISUCCESS-ALERT-1 stays launch-blocking.
+- Call sites use `alerting.InTx` plus `Flush`. Business outcomes and HTTP responses are unchanged.
+- There is one new platform-service identity and five new tables.
 
 ## 14. Open items
 
-1. **SECURITY RULING REQUESTED:** §6.3 (the dispatcher's meta-alert INSERT, or the metric-only
-   alternative).
-2. **Security to confirm §7.6** (no abort-on-failure for any PRH-2 Kind).
-3. **Orchestrator: plan inventory correction.** Rows 12 and 13 are simulation-gated routes; §1
-   applies §5-I's `:240` rule to them.
-4. **Inventory candidates not wired.** Both are registered for the orchestrator, not silently
-   added:
-   - the `reconciliation sweep: tenant run failed` Error lines (`scheduler.go:314,407,473,547`);
-   - the payment-statement failure line `tenant run failed (P1)` (`scheduler.go:647`), which the
-     code already labels a P1.
-
-   A future `reconciliation.run_failed` Kind is recommended.
-5. **Tenant-owned Kinds and tenant-authored routes:** none exist in PRH-2 (§4.3). Register a
-   follow-up if the partner console needs them.
-6. **Route write API:** platform-admin-only and audited. Whether a route change needs four-eyes is
-   for security to decide. The default is single platform admin plus audit, because routes move no
-   money.
+1. **Resolved:** `alerting.raise_failed` was ACCEPTED by security (Part 1) and applied in §6.3.
+   What remains is the §7.3a revisit condition for any future event-type stream at REPEATABLE READ.
+2. **ADR 0082 amendment text** (the orchestrator writes amendment sections): "Alert tables
+   (`alerts`, `alert_occurrences`) are the terminal lock level. After `alerting.RaiseGuarded` inside
+   a business transaction, no further business-row lock may be taken on a different intent,
+   attempt, wallet, account or session (ADR 0102 §7.7)."
+3. **The `alert:manage` permission** in `auth/permission.go` needs K1 coordination (Rule 1).
+4. **The SR-7 preconditions** before any real channel (§6.2), tracked under ALERT-DELIVERY-1.
+5. **Re-assess the casino_statement backstop** when a real, windowed source replaces the all-time
+   MOCK (§7.5).
+6. **Retention (LF F13).** Proposed registry row for the orchestrator:
+   > **ALERT-RETENTION-1** | devops + architect (review: security, ledger-finance) | OPEN — before
+   > production launch | `alert_occurrences` and `alert_deliveries` (ADR 0102, migration 0110) are
+   > append-only and grow without bound. Design a retention and partitioning policy, e.g. monthly
+   > range partitions on `raised_at`/`recorded_at`, with archival of partitions older than the
+   > regulatory audit horizon for **resolved** alerts only. Open alerts' occurrences and deliveries
+   > are never pruned. Any deletion must go through a partition detach/archive procedure consistent
+   > with the append-only triggers, never a row DELETE. The retention horizon per jurisdiction is a
+   > configuration value, not a code constant.
 7. **Real channels and resolvers:** PROVIDER DEPENDENT; HD-PRH2-4-OPS.
-8. **Retry and backoff parameters and `max_attempts`** are technical defaults in config, to be
-   reviewed by devops.
+8. **Retry and backoff parameters:** technical defaults, for devops to review.
+
+## 15. Review disposition (revision 2)
+
+**Ledger-finance (`adr-0102-ledger-finance.md`)**
+
+| Finding | Resolution |
+|---|---|
+| F1 | §7.2 step 1, AL-6a, LF test 1, mutant |
+| F2 | §2(3), §3.1 flags and scope/subject rule, §8 flags, LF test 3 |
+| F3 | §6.3 `alerting.raise_failed`, **ACCEPTED by security (Part 1)**, with its conditions; §7.2(6); AL-14; LF test 2 |
+| F4 | §7.3 `alerting.InTx` per-transaction collector; LF test 4; static test |
+| F5 | §7.3: `Flush` after the response is written |
+| F6 | §8 stable `stream:` keys, `run_id` as an attribute; LF test 7 |
+| F7 | Option (b), per the orchestrator: §7.3a; §8 rows 6–7; AL-11; LF test 6 adapted |
+| F8 | §1, §7.5, §7.6 corrected |
+| F9 | §3.2 CHECK `attempt_no = 0`; §6.1 RETURNING-gated meta occurrence; LF test 8 |
+| F10 | §8 row 8 post-commit detached only; LF test 10 |
+| F11 | §7.7; ADR 0082 amendment text in §14 item 2 |
+| F12 | §7.3 "ambiguous commit" |
+| F13 | §3.2; the registry row text in §14 item 6 |
+| F14 | §2(11), §5, AL-12 |
+| F15 | Noted (§8) |
+| Required tests 1–12 | §11 |
+
+**Security (`adr-0102-0104-security.md`)**
+
+| Finding | Resolution |
+|---|---|
+| SR-1 / C-102-1 | §5 originating scope; `requires_subject`; forced `raised_by_scope`; static test; mutant |
+| SR-2 / C-102-2 | §3.2 copied `kind` on occurrences; §6.3 WITH CHECK on both tables; RLS test |
+| SR-3 / C-102-3 | §3.2 `request_id` CHECK; §8 server-side discriminators; per-entity bounding |
+| SR-4 / C-102-4 | §7.6 corrected; §8 row 14 required; LF test 10 |
+| SR-5 / C-102-5 | §7.3a; AL-11; `tenant_snapshot.go` comment change |
+| SR-6 / C-102-6 | §6.1; AL-13 |
+| SR-7 / C-102-8 | §6.2 preconditions before any real channel |
+| SR-8 / C-102-8 | §7.3 and §7.4: within the admission hold |
+| C-102-7 | §4.1 (no tenant UPDATE); §4.2 validated actor, `alert:manage`, no tenant ack endpoint |
+| C-102-9 | §4.1 common exclusion set |
+| Q1 | §6.3 accepted as specified |
+| Q2 | §7.6 |
+| Q3 | §7.2 steps 2, 4 and 6; the originating-scope retry; the widened-savepoint mutant |
+
+**Orchestrator dispositions:** the RR sites are post-commit detached with stable keys (§7.3a, §8).
+
+**Security `adr-0099-0101-security.md` Part 1 (the `raise_failed` ruling):**
+
+| Condition | Resolution |
+|---|---|
+| Exactly three meta-Kinds, no tenant or subject, same restriction on occurrences, no UPDATE or DELETE | §6.3; AL-10 |
+| Attributes `{kind, sqlstate_class}` by trigger; forced discriminator | §6.3; §9 item 1; AL-14 |
+| No subject; the log may carry the tenant; no tenant label on the metric | §6.3 |
+| Identity limited to `internal/alerting`; the fallback builds only `raise_failed` | §5; §6.3; static test |
+| A fallback failure is logged with `phase="fallback"`, no recursion | §6.3; AL-14; LF test 2 |
+| Within the post-response budget | §6.3; §7.3 |
+| Tests: persistent P0001, malformed insert, fallback-removed mutant | §11 |
+| LF F6/SR-5 confirmed; F7(a) not adopted; RR residual and revisit condition; RR fallback | §7.3a; §7.5 |
+
+**Product-owner-proxy:** ACCEPT; no change required. The §6.3 and §7.6 rulings are closed.
 
 **Handover/DoD:**
-- **Artefacts:** this ADR ACCEPTED after security review, then:
-  - I-core merged with migration 0110, `internal/alerting` and the §11 I-core tests;
-  - I-wire merged with the §8 rows, the dispatcher line in `main.go` and the §11 I-wire tests;
-  - `docs/runbooks/observability-and-alerting.md` updated, with the routing matrix as an explicit
-    placeholder pending HD-PRH2-4-OPS;
-  - HANDOVER mock-vs-real row: `LogSink` IMPLEMENTED; `MockSink` MOCK; real channels PROVIDER
-    DEPENDENT.
-- **Registry (orchestrator):** ALERT-DELIVERY-1 → IMPLEMENTED (MOCK/log channels).
-  PAY-P1-MULTISUCCESS-ALERT-1 stays launch-blocking on HD-PRH2-4-OPS.
+- **Artefacts:**
+  - this ADR ACCEPTED;
+  - I-core merged (0110, `internal/alerting`, the §11 I-core tests);
+  - I-wire merged (the §8 rows including row 14, the dispatcher line in `main.go`, the
+    `tenant_snapshot.go` comment, the §11 tests);
+  - `docs/runbooks/observability-and-alerting.md` updated, with the routing matrix as a placeholder
+    pending HD-PRH2-4-OPS;
+  - HANDOVER rows: `LogSink` IMPLEMENTED; `MockSink` MOCK; real channels PROVIDER DEPENDENT.
+- **Registry (orchestrator):**
+  - ALERT-DELIVERY-1 → IMPLEMENTED (MOCK/log channels);
+  - RECON-RUN-FAILED-ALERT-1 closes with I-wire;
+  - PAY-P1-MULTISUCCESS-ALERT-1 stays launch-blocking;
+  - add ALERT-RETENTION-1.

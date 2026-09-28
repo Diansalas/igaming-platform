@@ -1,62 +1,70 @@
 # ADR 0104 — Tenant-Visible Audit of Platform Actions (KS-AUDIT-TENANT-1)
 
-- **Status:** PROPOSED, 2026-09-28. Drafted by `architect` for PRH-2 W0 (workstream W0-X). Nothing
-  here is implemented. The implementation is PRH-2 workstream **G1** (W1), migration **0109**.
-- **Decision type:** cross-domain architecture. It changes `audit_log`'s RLS (ADR 0013) and touches
-  the `audit` package, the kill-switch handlers and a new tenant read projection.
-- **Owner:** `architect` + `security`. **Reviewers:** `security` (hard gate, S-10), `payments`,
-  `code-reviewer`, `qa`.
-- **Registry:** KS-AUDIT-TENANT-1. It is launch-blocking before production launch or the first B2B
-  tenant.
-- **Binding inputs:**
-  - plan §4 row 0109, §5-G1 and §11 (HD-PRH2-5);
-  - ADR 0098 §5: HD-PRH2-5 and the orchestrator interpretation note;
-  - `reviews/security.md` S-10 and §1 "G1";
-  - `reviews/qa.md` W1 "G1".
+- **Status:** PROPOSED, **revision 2**, 2026-09-28. Drafted by `architect` for PRH-2 W0 (W0-X).
+  Nothing here is implemented. The implementation is PRH-2 workstream **G1** (W1), migration **0109**.
+- **Revisions:**
 
-  **Where plan §5-G1 says "pseudonymous until HD-PRH2-5 is answered", §11 supersedes it:
-  HD-PRH2-5 is answered.**
-- **Related:** ADR 0013 (audit immutability and dual-scope RLS), migrations 0014 and 0016, 0105
-  (the validated platform-principal resolver), 0106 (the mixed-GUC exclusion), ADR 0102 (which
-  reuses `subject_tenant_id` for alerts).
+  | Rev | Base | Change |
+  |---|---|---|
+  | 1 | `f06818b` | Initial draft |
+  | 2 | `10e0471` | Applies the three changes below. Mapped in §11 |
+
+  Revision 2 applies:
+  - `reviews/adr-0102-0104-security.md` (ACCEPT WITH CONDITIONS: SA-1..SA-6, Q7, C-104-1..6);
+  - `reviews/adr-0102-0104-product-owner-proxy.md` (ACCEPT WITH CONDITIONS: resolver-only, with
+    the table deferred as AUDIT-PRESENTATION-POLICY-1);
+  - the orchestrator's decision on display name (option (a), recorded at `0939c5a`).
+
+- **Decision type:** cross-domain architecture. It changes `audit_log`'s RLS (ADR 0013) and adds
+  `staff_users.display_name`.
+- **Owner:** `architect` + `security`. **Reviewers:** `security` (hard gate; diff review,
+  C-104-6), `payments`, `code-reviewer`, `qa`.
+- **Registry:** KS-AUDIT-TENANT-1 (launch-blocking before production or the first B2B tenant).
+  Related rows, already registered: PLAT-AUDIT-SUBJECT-1 and AUDIT-PRESENTATION-POLICY-1.
+- **Binding inputs:** plan §4 row 0109, §5-G1, §11 (HD-PRH2-5); ADR 0098 §5; security S-10 and the
+  revision-2 review; QA W1 "G1".
+- **Related:** ADR 0013; migrations 0011, 0014, 0016, 0105, 0106; ADR 0099 §6 (`app.acting_*`);
+  ADR 0102 (reuses `subject_tenant_id`).
 
 ---
 
 ## 1. Context (verified at `cabca27`)
 
-- `audit_log` (0014) has one `FOR ALL` dual-scope policy, `dual_scope_isolation` (0014:32-41). A row
-  with `tenant_id` set is visible only to that tenant's session. A row with `tenant_id IS NULL` is
-  visible only when `app.tenant_id` is unset.
-- Append-only is enforced by triggers: `audit_log_immutable` (0014:43-53, UPDATE/DELETE) and
-  `audit_log_deny_truncate` (0016:14-16).
-- A platform-scope kill-switch mutation is audited with `TenantID: uuid.Nil`, and the real target
-  appears only in `metadata->>'target_tenant_id'`: `auditTenantID()` at
-  `payments_kill_switch_handlers.go:246-251`, used at `:326`, `:643`, `:703`, `:766` and `:813`. The target comes from the
-  path and passes `canActOnTenant` (`:149`) plus a tenant-existence check (`:161-174`).
-- **So a tenant never sees that the platform engaged, took over or released its own kill switch.**
-- The existing tenant-context audit readers all filter explicitly on `tenant_id = $1`:
-  - `admin_routes.go:1165-1172` (`queryAuditLog`; it selects no `ip_address`, `user_agent` or
-    `metadata`);
+- `audit_log` (0014) has one `FOR ALL` dual-scope policy, `dual_scope_isolation` (0014:32-41).
+  Append-only is enforced by `audit_log_immutable` (0014:43-53) and `audit_log_deny_truncate`
+  (0016:14-16).
+- **Platform-scope kill-switch mutations** are audited with `TenantID: uuid.Nil`, and the target is
+  kept only in `metadata->>'target_tenant_id'`.
+  - `auditTenantID()`: `payments_kill_switch_handlers.go:246-251`, used at `:326`, `:643`, `:703`,
+    `:766` and `:813`.
+  - The target comes from the path, and passes `canActOnTenant` (`:149`) and an existence check
+    (`:161-174`).
+- **The tenant-context readers filter explicitly:**
+  - `admin_routes.go:1165-1172` (`queryAuditLog`; it selects no IP, user agent or metadata);
   - `kyc/provider.go:672`;
-  - `testsupport/noeffect/noeffect.go:81,197`.
-- **Surveyed divergence (not changed here).** Some platform-admin actions already write audit rows
-  **into** the target tenant's scope under `WithTenant(target)`: `admin_routes.go:277-286`
-  (`brand.created`), and similarly `:555` and `:660`. `provider_credential_handlers.go` has the same
-  `uuid.Nil` shape as the kill switch. See §10.
-- `staff_users` (0011) has **no display-name column**: only `email`, `role` and `status`. Its
-  `dual_scope_isolation` policy hides platform staff (`tenant_id IS NULL`) from tenant sessions.
+  - `testsupport/noeffect/noeffect.go:81,197`;
+  - **`casino/rejections.go:257-266`**: its `JOIN audit_log a ON a.tenant_id = t.tenant_id`, with
+    `t.tenant_id = $1` (SA-1).
+- **Surveyed divergence (registered as PLAT-AUDIT-SUBJECT-1):** `provider_credential_handlers.go`
+  uses the `uuid.Nil` shape. `admin_routes.go:277-286,555,660` write platform actions **into**
+  tenant scope.
+- `staff_users` (0011) has no display-name column, and its policy hides platform staff from tenant
+  sessions.
+- **SA-3 (owned by ADR 0099/0112, not this ADR).** ADR 0099's "platform acting in X" sessions leave
+  `app.tenant_id` unset. They therefore satisfy `dual_scope_isolation`'s `tenant_id IS NULL` arm,
+  and could read every platform audit row and insert platform rows. The fix belongs in 0099/0112.
+  This ADR's own new policy and trigger exclude `app.acting_*` (§3).
 
 ## 2. Decision
 
-Option (c) from plan §5-G1: a first-class `audit_log.subject_tenant_id`. The platform action stays
-a **platform-level** row (`tenant_id IS NULL`), and the subject tenant gets **read-only**
-visibility through an additional `FOR SELECT` policy.
+Option (c): a first-class `audit_log.subject_tenant_id`. The platform action remains a
+platform-level row. The subject tenant gets **read-only** visibility through an additional
+`FOR SELECT` policy.
 
-- There is **no new write power into tenant scope**. The write side of `dual_scope_isolation` is
-  unchanged.
-- The append-only triggers are unchanged.
-
-Rejected alternatives: (a), an INSERT into tenant scope, and (b), a non-atomic dual write (§9).
+- There is **no new write power into tenant scope**, and the append-only triggers are unchanged.
+- The tenant presentation is **resolver-only with compiled-in defaults** (product-owner-proxy): the
+  actor is identified, and network and free-form metadata are hidden. The configurable table and its
+  write API are deferred to **AUDIT-PRESENTATION-POLICY-1**.
 
 ## 3. Migration 0109: content
 
@@ -67,238 +75,292 @@ ALTER TABLE audit_log ADD CONSTRAINT audit_log_subject_tenant_platform_only
 CREATE INDEX idx_audit_log_subject_tenant_time
     ON audit_log (subject_tenant_id, created_at DESC) WHERE subject_tenant_id IS NOT NULL;
 
--- Permissive, FOR SELECT only: ORs into reads, adds nothing to INSERT/UPDATE/DELETE.
 CREATE POLICY subject_tenant_read ON audit_log
     FOR SELECT
     USING (
         tenant_id IS NULL
         AND subject_tenant_id IS NOT NULL
         AND subject_tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid
-        AND NULLIF(current_setting('app.player_account_id', true), '') IS NULL          -- players excluded
-        AND NULLIF(current_setting('app.platform_admin_principal_id', true), '') IS NULL -- 0106 mixed-GUC
+        AND NULLIF(current_setting('app.player_account_id', true), '') IS NULL
+        AND NULLIF(current_setting('app.platform_admin_principal_id', true), '') IS NULL
         AND NULLIF(current_setting('app.platform_service_id', true), '') IS NULL
+        AND NULLIF(current_setting('app.acting_tenant_id', true), '') IS NULL
+        AND NULLIF(current_setting('app.acting_platform_principal_id', true), '') IS NULL
     );
+
+-- C-104-4 / orchestrator decision (option a)
+ALTER TABLE staff_users ADD COLUMN display_name TEXT NULL
+    CONSTRAINT staff_users_display_name_hygiene
+    CHECK (display_name IS NULL OR (char_length(display_name) BETWEEN 1 AND 100
+                                    AND display_name !~ '[[:cntrl:]]'));
 ```
 
-**BEFORE INSERT trigger `audit_log_subject_actor_guard`** (S-10 item 4). When
+**BEFORE INSERT trigger `audit_log_subject_actor_guard`** (S-10(4), C-104-1, SA-2). When
 `NEW.subject_tenant_id IS NOT NULL`, all of the following are required:
-- `v := NULLIF(current_setting('app.platform_admin_principal_id', true), '')` is not NULL;
-- `app.tenant_id`, `app.player_account_id` and `app.principal_id` are unset;
+- `v := NULLIF(current_setting('app.platform_admin_principal_id', true), '')` is NOT NULL;
+- **all of these are unset:**
+  - `app.tenant_id`;
+  - `app.player_account_id`;
+  - `app.principal_id`;
+  - `app.platform_service_id`;
+  - `app.acting_tenant_id`;
+  - `app.acting_platform_principal_id`;
 - `NEW.actor_type = 'staff'` and `NEW.actor_id = v::uuid`;
-- `EXISTS (SELECT 1 FROM staff_users WHERE id = v::uuid AND tenant_id IS NULL)`. This is the 0105
-  `payment_kill_switch_session` validation (0105:32-38). A platform session can see platform staff
-  rows under `dual_scope_isolation`.
+- `EXISTS (SELECT 1 FROM staff_users WHERE id = v::uuid AND tenant_id IS NULL)` (the 0105:32-38
+  validation).
+- **No `status` check (Q7).** The audit records what happened. An account's status governs
+  authorization, and authorization is enforced elsewhere.
 
-Otherwise it raises `P0001`. When `subject_tenant_id` is NULL the trigger is a no-op, so every
-existing writer is unaffected.
+Otherwise it raises P0001. When `subject_tenant_id` is NULL, the trigger is a no-op.
 
 **Other properties of 0109:**
-- **FK behaviour.** The default is `NO ACTION`, so a tenant with subject audit rows cannot be
-  deleted. That is the intended consequence of an append-only audit trail; `ON DELETE CASCADE` would
-  be refused by the immutability trigger anyway.
-- **Unchanged:** `dual_scope_isolation`, `audit_log_immutable`, `audit_log_deny_truncate`, and
-  every existing column and index.
-- **Down:** `RAISE EXCEPTION` if `EXISTS (SELECT 1 FROM audit_log WHERE subject_tenant_id IS NOT
-  NULL)`. Otherwise drop the trigger, policy, index, constraint and column in that order.
-  **Caveat:** under FORCE RLS, the down's existence check must run in a scope that sees platform
-  rows: `app.tenant_id` unset, which is the migration runner's normal state. The MIG test pins
-  this.
-
-The optional presentation-policy table is in §5.3.
+- **FK:** `NO ACTION`. A tenant that has subject rows cannot be deleted; this is intended.
+- **Unchanged:** `dual_scope_isolation`, both append-only triggers, and every existing column and
+  index.
+- **Down:** refuse if any `subject_tenant_id` is set, or if any `staff_users.display_name` is
+  non-NULL. Otherwise drop, in reverse order: the trigger, the policy, the index, the constraint,
+  the column, and `display_name`.
+  - The existence check runs with `app.tenant_id` unset, so it can see platform rows. The MIG test
+    pins this.
+- **Not in 0109 (product-owner-proxy):** there is no `audit_presentation_policies` table
+  (AUDIT-PRESENTATION-POLICY-1).
 
 ## 4. Write path (G1)
 
-- **`audit.Entry` gains `SubjectTenantID uuid.UUID`.** `audit.Record` refuses (in Go, before SQL) an
-  entry with both `TenantID` and `SubjectTenantID` set, mirroring the CHECK.
-- **The target comes from the route (S-10 item 5).** The kill-switch handlers set `SubjectTenantID
-  = c.target` **only** when `c.tc.TenantID == uuid.Nil` (a platform session), where `c.target` has
-  already passed `canActOnTenant` and the existence check. **The value never comes from a request
-  body.** A tenant-scoped caller keeps writing `TenantID = c.target` (its own tenant), exactly as
-  today.
-- **In scope for G1:** every platform-scope kill-switch audit write:
+- **`audit.Entry.SubjectTenantID`.** `audit.Record` refuses an entry with both `TenantID` and
+  `SubjectTenantID` set, in Go, before any SQL.
+- **The target comes from the route (S-10(5)).**
+  - The kill-switch handlers set `SubjectTenantID = c.target` **only** when
+    `c.tc.TenantID == uuid.Nil`, that is, in a platform session, after `canActOnTenant` and the
+    existence check.
+  - **The value never comes from a body.**
+  - Tenant-scoped callers are unchanged.
+- **In scope:** every platform-scope kill-switch audit write:
   - engage;
   - request, approve, cancel and release;
-  - the refusal audits (`recordKillSwitchRefusalAudit`, `:324-341`).
+  - `recordKillSwitchRefusalAudit` (`:324-341`).
 
-  `metadata.target_tenant_id` stays, for backward compatibility with
-  `TestPaymentsKillSwitchAPI_AuditRecordsCarryBeforeAfterAndTargetTenant`.
-  `recordKillSwitchDenied`'s foreign-tenant denial (`:178-199`) is written in the **caller's** scope
-  and is unchanged.
-- **Out of scope for G1:** `provider_credential_handlers.go` and the `admin_routes.go` tenant-scope
-  writes. They are surveyed and registered, and are not extended without the orchestrator's go-ahead
-  (plan §5-G1).
-- **Downstream reuse:** ADR 0102 §4.2 ack/resolve audits of platform-owned alerts reuse
-  `SubjectTenantID`.
+  `metadata.target_tenant_id` stays. `recordKillSwitchDenied` (`:178-199`, which writes in the
+  caller's own scope) is unchanged.
+- **`display_name` write path (C-104-4).**
+  - It is written **only** by the existing audited staff-management handlers in `admin_routes.go`:
+    create and update of the staff user, plus a self-rename by the staff member.
+  - Every change, **self-rename included**, is audited as `staff.display_name_changed` with
+    before and after.
+  - There is no other writer.
+  - `admin_routes.go` joins G1's Touches, subject to plan §3 Rule 1; the orchestrator sequences it.
+- **Out of scope:** the `provider_credential_handlers.go` and `admin_routes.go` tenant-scope writes
+  (PLAT-AUDIT-SUBJECT-1).
+- **Reuse:** ADR 0102 §4.2 ack and resolve audits reuse `SubjectTenantID`.
 
 ## 5. Read path: the tenant projection (HD-PRH2-5)
 
 ### 5.1 Endpoint
 
-- **Route:** `GET /v1/admin/audit-log/platform-actions`, with `RequireTenantScope` and
-  `RequirePermission(PermAuditRead)`. This is the same gate as the existing tenant audit read
-  (`routes.go:140-141`). It is a **separate** endpoint, so the existing `GET /v1/admin/audit-log`
-  and every existing reader are unchanged.
+- **Route:** `GET /v1/admin/audit-log/platform-actions`, guarded by `RequireTenantScope` and
+  `RequirePermission(PermAuditRead)`. The existing `GET /v1/admin/audit-log` is unchanged.
 - **Session:** `WithTenant(tc.TenantID)`.
-- **Query:** `WHERE tenant_id IS NULL AND subject_tenant_id = $1` with `$1 = tc.TenantID`. The
-  explicit filter is defence in depth; RLS is the enforcement.
+- **Query:** `WHERE tenant_id IS NULL AND subject_tenant_id = $1`. The explicit filter is defence
+  in depth; RLS is the enforcement.
 
-### 5.2 What the tenant sees (HD-PRH2-5 as decided; orchestrator interpretation, 0098 §5)
+### 5.2 What the tenant sees
 
-| Field | Shown | Source |
+| Field | Shown by default | Source |
 |---|---|---|
 | `id`, `created_at`, `action`, `target_type`, `target_id`, `outcome` | yes | columns |
-| `actor.scope` = `"platform"`, `actor.staff_id` | **yes: identifiable, not pseudonymized** | `actor_id` |
-| `actor.display_name` | **yes, when one exists (see §5.4)** | see §5.4 |
+| `actor.scope` = `"platform"`, **`actor.staff_id`** | **yes: always shown**, identified | `actor_id` |
+| `actor.display_name` | yes when set; otherwise `null` | §5.4 |
 | `reason_code` | yes | per-action metadata allowlist |
-| `approval_chain` (requester and approver staff ids and names, and times) | yes, **where recorded** | linked rows for the same `target_id` (e.g. the kill-switch release request → approve), plus allowlisted metadata ids |
-| `before`, `after` | yes, **where recorded** | per-action metadata allowlist (for the kill switch, the existing `before`/`after` objects) |
-| `ip_address`, `user_agent` | **no, by default** | privacy-presentation setting (§5.3) |
-| Free-form `metadata` (any key not in the action's allowlist), `request_id` | **no, by default** | privacy-presentation setting (§5.3) |
+| `approval_chain` | yes, where recorded | §5.5 |
+| `before` / `after` | yes, where recorded | per-action metadata allowlist |
+| `ip_address`, `user_agent`, `request_id`, non-allowlisted metadata | **no** | compiled-in default (§5.3) |
 
-- **The allowlist lives in Go** (`audit.TenantPresentation`), keyed by `action`, and lists the
-  metadata keys that are projected. An action without an entry projects only the columns. It is
-  fail closed on disclosure.
-- **The underlying record is never altered or redacted.** IP, user agent and metadata stay in
-  `audit_log`, readable by platform audit readers.
+- **The allowlist** is `audit.TenantPresentation`, in Go, keyed by `action`. An action without an
+  entry projects only the columns: fail closed on disclosure.
+- **The underlying record is never altered.**
 
-### 5.3 The privacy-presentation setting (configurable; hidden by default)
+### 5.3 Presentation setting: resolver-only in PRH-2 (product-owner-proxy; Q7)
 
-- **What it is.** A platform-authored, append-only, effective-dated policy. It is proposed as the
-  table `audit_presentation_policies`, in 0109.
-  - Scope: platform default, jurisdiction, or tenant.
-  - Fields:
-    - `show_network_metadata BOOL` (IP and user agent);
-    - `show_free_form_metadata BOOL`;
-    - `actor_presentation` ∈ {`identified`, `pseudonymous`}, supporting HD-PRH2-5's "a different
-      presentation … required by a jurisdiction".
-- **Resolution:** the most specific effective row. **With no row, the defaults apply:** network and
-  free-form metadata hidden, actor `identified` (HD-PRH2-5).
-- **Who writes it.** Only a validated platform admin, audited: a trigger forces the actor from the
-  GUC, and the table has a FORCE RLS platform family. **A tenant cannot write it**, because the
-  setting governs disclosure of platform staff data, not tenant data.
-- **No seed row.**
-- **Minimal alternative** (product-owner-proxy to choose; see §11 item 2): ship only the resolver
-  with compiled-in defaults, and defer the table and write API to a registered follow-up. This
-  meets "hidden by default" but not "configurable" until the follow-up lands.
+- **Resolver:** `audit.ResolvePresentation(ctx, tenantID) (Presentation, error)` returns compiled-in
+  defaults:
+  - `actor_presentation = identified`;
+  - `show_network_metadata = false`;
+  - `show_free_form_metadata = false`.
+- **The seam is shaped for the deferred work.** The resolver's signature and its callers are what
+  AUDIT-PRESENTATION-POLICY-1 will back with a platform-authored, append-only, effective-dated table
+  (platform, jurisdiction or tenant scope; platform-admin writes only), with no application
+  rewrite.
+- **Fail closed:** a resolver error returns the most restrictive presentation (identified, all
+  metadata hidden). It never returns a wider one.
+- **SA-6: LEGAL/PRIVACY REVIEW REQUIRED** before any future policy enables
+  `show_network_metadata`. This is carried into AUDIT-PRESENTATION-POLICY-1.
 
-### 5.4 Actor display name: ORCHESTRATOR DECISION REQUIRED (interpretation of HD-PRH2-5)
+### 5.4 Actor display name (the orchestrator chose option (a); hygiene per C-104-3/4, SA-4)
 
-- **The problem.** `staff_users` has no display name (§1), and tenant sessions cannot read platform
-  staff rows.
-- **What this ADR fixes regardless of the choice:** the lookup happens server-side, in a second
-  short platform-scope read (`WithoutTenant`, which sees `tenant_id IS NULL` staff), restricted to
-  the `actor_id`s already returned by the RLS-filtered tenant query. It selects only `id` and the
-  chosen display field, and never widens the tenant session's RLS.
+- **Lookup (C-104-3).** A second short server-side read:
+  - it runs under `WithoutTenant`, which sees platform staff;
+  - it selects **only `id, display_name`**;
+  - it is restricted to the `actor_id`s present in the **RLS-filtered** tenant result;
+  - it **never selects `email`**, and never widens the tenant session.
+- **Hygiene (C-104-4):**
+  - 1–100 characters, with no control characters (the DB CHECK);
+  - written only by the audited path in §4;
+  - `staff_id` is always shown next to the name, because names are mutable and are resolved at read
+    time;
+  - the value is **output-encoded** by the JSON encoder, and is never interpolated into HTML or log
+    format strings.
+- An unset name gives `display_name: null`.
 
-| Option | What it means |
-|---|---|
-| (a) Recommended | 0109 adds a nullable `staff_users.display_name` (bounded length, no backfill). The platform staff-management path may set it. Until it is set, the projection shows `staff_id` with `display_name: null`. |
-| (b) | Show the platform staff **email** as the display identity. It is identifiable today, but it discloses contact data. |
-| (c) | Staff id only, until a display-name source exists. |
+### 5.5 Approval chain (SA-5, C-104-5)
 
-Options (a) and (c) disclose nothing beyond the id. (b) discloses more than the orchestrator's
-interpretation ("staff id and display name") literally requires. **Until this is decided, the
-implementation ships the id plus `display_name: null`**, which is a subset of every option.
+- The chain is built **only from rows that the tenant session's own RLS returns**:
+  - the tenant's own rows;
+  - subject rows for that tenant.
 
-## 6. Invariants (for `qa` and `code-reviewer`)
+  They are linked by `target_id` and allowlisted metadata ids, such as the kill-switch release
+  request → approve. **No second query in a wider scope is used for the chain**; only the §5.4 name
+  lookup widens, and that returns names only.
+- **Pseudonyms.** When a future presentation policy (AUDIT-PRESENTATION-POLICY-1) selects
+  `pseudonymous`, each staff id maps to a pseudonym through a **stored random mapping** (never a
+  hash of the id). The mapping is applied to the actor **and** every chain entry.
+- **Not reachable in PRH-2:** the compiled-in default is `identified`.
+- **Fail closed:** if chain assembly or name resolution fails, the entry shows `staff_id` only, or
+  the request fails. It never falls back to showing more.
+
+## 6. Invariants
 
 | ID | Invariant |
 |---|---|
-| AT-1 | A tenant session sees a platform row only when its `subject_tenant_id` equals the session's own `app.tenant_id`. A player session, or a mixed platform+tenant session, never sees one. RLS enforces this. |
-| AT-2 | Only a validated platform principal, as the row's own staff actor, can write `subject_tenant_id`. No tenant or player session can write it (the trigger, plus `dual_scope_isolation`'s WITH CHECK on `tenant_id IS NULL` rows). |
+| AT-1 | A tenant session sees a platform row only when its `subject_tenant_id` equals the session's `app.tenant_id`. Player, platform-admin, platform-service, `app.acting_*` and mixed sessions never do. |
+| AT-2 | Only a validated platform principal, as the row's own staff actor, can write `subject_tenant_id`. |
 | AT-3 | `subject_tenant_id` and `tenant_id` are never both set. |
-| AT-4 | No new INSERT, UPDATE or DELETE power anywhere. The append-only triggers are byte-identical. |
+| AT-4 | No new write power. The append-only triggers are byte-identical. |
 | AT-5 | `subject_tenant_id` comes from the route-validated target, never a body. |
-| AT-6 | By default, the tenant presentation never includes platform staff IP, user agent, `request_id` or non-allowlisted metadata. The record keeps them. |
-| AT-7 | The existing tenant audit readers keep their explicit `tenant_id = $1` filter, so they do not start returning platform rows. |
+| AT-6 | By default, the tenant presentation never includes IP, user agent, `request_id` or non-allowlisted metadata. The record keeps them. |
+| AT-7 | The existing tenant audit readers keep their explicit tenant filters. |
+| AT-8 | The name lookup returns only `id, display_name` for ids in the RLS-filtered result, never email. `staff_id` is always shown. |
+| AT-9 | The approval chain is built from RLS-filtered rows only. Every failure fails closed. |
 
-## 7. Tests (QA W1 "G1"; T-1 to T-3 apply)
+## 7. Tests (QA W1 "G1"; T-1 to T-3)
 
-- **TI (the headline test).** A platform admin engages, and then releases through four-eyes, a
-  switch on tenant A, and does the same on tenant B.
-  - Tenant A's `platform-actions` read returns exactly A's rows, with actor id, reason, before/after
-    and approval chain, and **never B's**. The same holds for B.
-  - Tenant A's raw `SELECT` on `audit_log` under `WithTenant(A)` also never returns B's rows (the
-    RLS level, not just the handler).
-- **Player exclusion:** under `WithPlayerScope(A, p)`, zero subject rows.
-- **Mixed GUC:** with `app.tenant_id=A` and `app.platform_admin_principal_id` both set, zero
-  subject rows.
-- **AZ/RLS write side:**
-  - a tenant session inserting `subject_tenant_id` → refused;
-  - a platform session whose `actor_id` ≠ the GUC principal → refused (P0001);
-  - an actor that is a tenant staff id → refused;
-  - `actor_type='system'` with a subject → refused;
-  - `tenant_id` and `subject_tenant_id` both set → CHECK violation;
-  - a nonexistent subject → FK violation.
-- **Append-only:** UPDATE, DELETE and TRUNCATE of a subject row are refused (existing triggers).
-- **Route-target test:** a platform request whose body carries a different `tenant_id` still records
-  the path tenant. The kill-switch body refuses unknown fields, so the test asserts the refusal, and
-  asserts the path target on the success path.
-- **Readers unchanged (R):**
-  - `GET /v1/admin/audit-log` for A returns no subject rows;
-  - `kyc/provider.go:672` and `noeffect` counts are unchanged by the presence of subject rows;
-  - the `TestPaymentsKillSwitchAPI_AuditRecordsCarryBeforeAfterAndTargetTenant` metadata pin still
-    passes.
-- **Presentation:**
-  - by default, no IP, user agent, `request_id` or non-allowlisted key appears;
-  - with a platform policy row enabling network metadata for a tenant, they appear for that tenant
-    only;
-  - with a jurisdiction row set to `pseudonymous`, the staff id is replaced;
-  - a tenant cannot insert a policy row.
-- **MIG:** `up`, then a subject row, then `down` → refuses; `down` with none → clean; `up` again →
-  idempotent shape.
-- **MUT (must be killed):**
-  - the RLS predicate without `subject_tenant_id = app.tenant_id`, e.g. `IS NOT NULL` only (killed
-    by the TI test);
-  - the predicate without the player exclusion;
-  - the trigger without the actor equality;
-  - the policy changed to `FOR ALL`;
-  - the handler setting the subject from `tc` instead of `c.target`;
-  - the projection including `ip_address`.
+**TI (the headline test).** A platform admin engages, and then releases through four-eyes, a switch
+on tenant A, and does the same on tenant B.
+- A's `platform-actions` read returns exactly A's rows, with actor id, display name, reason,
+  before/after and the chain, and **never B's**. The same holds for B.
+- A raw `SELECT` under `WithTenant(A)` never returns B's rows.
+
+**Excluded sessions** (zero subject rows each):
+- a player session;
+- a mixed platform + tenant session;
+- a tenant session with `app.platform_service_id` set;
+- a tenant session with `app.acting_*` set (SA-2).
+
+**AZ/RLS write side:**
+- a tenant insert of a subject → refused;
+- a platform actor ≠ the GUC principal → P0001;
+- a tenant staff actor → P0001;
+- a `system` actor → P0001;
+- a session with `app.acting_*` or `app.platform_service_id` set → P0001;
+- both tenant columns set → CHECK violation;
+- an unknown subject → FK violation;
+- **a suspended platform admin can still write** (Q7: no status check).
+
+**Append-only:** UPDATE, DELETE and TRUNCATE are refused.
+
+**Route target:** a body carrying a tenant id is refused (unknown field), and the success path
+records the path target.
+
+**Readers unchanged (R):**
+- `GET /v1/admin/audit-log`;
+- `kyc/provider.go:672`;
+- `noeffect` counts;
+- **`casino/rejections.go:257-266` (SA-1)** returns the same result with subject rows present;
+- the `TestPaymentsKillSwitchAPI_AuditRecordsCarryBeforeAfterAndTargetTenant` pin still passes.
+
+**Presentation and name:**
+- by default, no IP, user agent, `request_id` or non-allowlisted key appears;
+- a forced resolver error → the restrictive presentation;
+- the name lookup query selects no `email` (an assertion on SQL text or a query log);
+- a `display_name` with a control character is refused, and one of 101 characters is refused;
+- a rename, **including a self-rename**, produces a `staff.display_name_changed` audit row;
+- a name containing `<script>` is returned JSON-escaped.
+
+**Chain:** a chain row outside the tenant's RLS view never appears; an injected chain-assembly
+failure fails closed.
+
+**MIG:**
+- `up`, then a subject row, then `down` → refuses;
+- a non-NULL `display_name`, then `down` → refuses;
+- neither present → clean `down`.
+
+**MUT (must be killed):**
+- the predicate without `subject_tenant_id = app.tenant_id`;
+- no player exclusion;
+- **no `app.acting_*` exclusion**;
+- the trigger without the actor equality;
+- the policy changed to `FOR ALL`;
+- the subject taken from `tc` instead of `c.target`;
+- the projection including `ip_address`;
+- **the name lookup selecting `email`**;
+- **the chain assembled from a platform-scope query**.
 
 ## 8. KS-AUDIT-TENANT-1 closure path
 
-1. This ADR ACCEPTED by security. §5.4 decided by the orchestrator; §5.3's form chosen.
-2. G1 merged: 0109, `audit.Entry.SubjectTenantID`, the kill-switch handler writes (§4), the
-   read projection (§5) and the §7 tests passing locally, labelled local.
-3. Security reviews the diff (S-10 items 1–6, as superseded by HD-PRH2-5 for item 6's actor
-   identity).
-4. The orchestrator marks KS-AUDIT-TENANT-1 IMPLEMENTED and registers the §10 follow-ups.
+1. This ADR ACCEPTED by security.
+2. G1 merged: 0109, `SubjectTenantID`, the kill-switch writes, the `display_name` write path, the
+   resolver, the projection, and the §7 tests passing locally (labelled local).
+3. **Security diff review** of the implementation (C-104-6).
+4. The orchestrator marks KS-AUDIT-TENANT-1 IMPLEMENTED. PLAT-AUDIT-SUBJECT-1 and
+   AUDIT-PRESENTATION-POLICY-1 stay open. SA-3 is tracked in ADR 0099/0112.
 
 ## 9. Alternatives rejected
 
 | Alternative | Why rejected |
 |---|---|
-| (a) An INSERT-only "platform writes into tenant scope" family | New write power into tenant scope. The platform action would stop being a platform-level row, and a regulator export could not distinguish it from a tenant's own action without trusting metadata. |
-| (b) A dual write: one platform row plus one tenant row | Not atomic under separate scopes, drifts, and doubles the record. |
-| Indexing `metadata->>'target_tenant_id'` and a policy over it | An untyped JSONB with no FK, no CHECK and no actor guard. The platform writer could put anything there. |
-| Pseudonymous by default | Superseded by HD-PRH2-5 (identifiable). Pseudonymity remains available as a presentation-policy value. |
-| Extending the existing `GET /v1/admin/audit-log` | It would change the semantics of every existing tenant audit consumer. A separate endpoint keeps AT-7 trivially true. |
+| (a) An INSERT-into-tenant-scope family | New write power; indistinguishable from the tenant's own actions |
+| (b) A dual write | Not atomic, and drifts |
+| A JSONB-indexed `target_tenant_id` policy | Untyped, with no FK and no actor guard |
+| Pseudonymous by default | Superseded by HD-PRH2-5 |
+| Extending the existing endpoint | Changes existing consumers |
+| **The full presentation table in G1** | Product-owner-proxy: no consumer yet; deferred as AUDIT-PRESENTATION-POLICY-1 |
+| **Email as the display identity** | Discloses contact data (C-104-3) |
+| **A snapshot of the name into `audit_log`** | Needs a new audit column. The mutable name is mitigated by always showing `staff_id`, and by renames being audited |
+| **A status check in the trigger** | Q7: the audit records what happened |
 
 ## 10. Open items
 
-1. **ORCHESTRATOR DECISION REQUIRED:** the §5.4 display-name source ((a) recommended, (b) or (c)).
-2. **Product-owner-proxy:** the full §5.3 table plus write API in G1, or only the resolver plus
-   defaults, with the table as a registered follow-up. Either way, the defaults are hidden and
-   identified.
-3. **Register** (recommended wording for the orchestrator), **PLAT-AUDIT-SUBJECT-1**: "platform
-   actions on a tenant written with `tenant_id = NULL` outside the kill switch
-   (`provider_credential_handlers.go`), and platform actions written directly into tenant scope
-   (`admin_routes.go:277-286,555,660`), should converge on `subject_tenant_id` (ADR 0104). The
-   latter currently appear in the tenant's ordinary audit read as if they were tenant actions, apart
-   from the actor id."
-4. **Whether a suspended platform staff principal may still write subject rows.** The trigger
-   mirrors 0105, which does not check `status`. This is the same S-4 class as K1, and follows K1's
-   answer.
-5. **The platform audit reader** (`GET /v1/admin/platform/audit-log`) may add `subject_tenant_id`
-   to its output. This is additive and optional.
+1. **SA-3** (owned by ADR 0099/0112): `app.acting_*` sessions satisfy `dual_scope_isolation`'s
+   platform arm. It must be closed there, before K1/K2 code.
+2. **AUDIT-PRESENTATION-POLICY-1** (registered): the table and write API, with **SA-6 LEGAL/PRIVACY
+   REVIEW REQUIRED** before `show_network_metadata` is ever enabled.
+3. **PLAT-AUDIT-SUBJECT-1** (registered): converge the other platform-on-tenant audit writes.
+4. **`admin_routes.go` Touches:** the orchestrator sequences G1's `display_name` write-path edit
+   under Rule 1.
+5. **The platform audit reader** may add `subject_tenant_id` to its output (optional, additive).
+
+## 11. Review disposition (revision 2)
+
+| Finding | Resolution |
+|---|---|
+| SA-1 / C-104-2 | §1 and §7 readers test include `rejections.go:257-266` |
+| SA-2 / C-104-1 | §3 policy and trigger exclude `app.platform_service_id` and `app.acting_*`; tests; mutant |
+| SA-3 | Noted as owned by ADR 0099/0112 (§1, §10 item 1) |
+| SA-4 / C-104-4 | §3 CHECK; §4 audited write path; §5.4 hygiene; tests |
+| SA-5 / C-104-5 | §5.5; AT-9; tests; mutant |
+| SA-6 | §5.3; §10 item 2 |
+| C-104-3 | §5.4 lookup; AT-8; mutant |
+| C-104-6 | §8 step 3; SA-3 tracked; SA-6 flagged |
+| Q7 | §3 (no status check); §5.3 defaults identified and network hidden; the resolver fails closed |
+| Product-owner-proxy (resolver-only) | §2, §3, §5.3; AUDIT-PRESENTATION-POLICY-1 |
+| Orchestrator decision on display name (option (a)) | §3, §4, §5.4. Revision 1's former open item 4 (status) is closed by Q7; former item 1 (display name) is closed by the decision |
 
 **Handover/DoD:**
 - **Artefacts:**
   - this ADR ACCEPTED;
   - G1 merged per §8;
   - `docs/architecture/12-audit-reporting-architecture.md` and the security-architecture doc
-    updated (the subject-tenant pattern, the presentation policy);
-  - a HANDOVER row: "tenant-visible platform audit: IMPLEMENTED (kill switch only; other platform
-    actions per PLAT-AUDIT-SUBJECT-1)".
-- **Registry (orchestrator):** KS-AUDIT-TENANT-1 → IMPLEMENTED after security sign-off.
+    updated;
+  - HANDOVER row: "tenant-visible platform audit: IMPLEMENTED (kill switch only; others per
+    PLAT-AUDIT-SUBJECT-1; presentation compiled-in defaults, configurable table per
+    AUDIT-PRESENTATION-POLICY-1)".
+- **Registry (orchestrator):** KS-AUDIT-TENANT-1 → IMPLEMENTED after the security diff review.
