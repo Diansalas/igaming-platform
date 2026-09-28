@@ -1,6 +1,7 @@
 package sportsbook
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
@@ -13,7 +14,10 @@ import (
 // PROVIDER-REF-BOUND-1: every external_ref in a provider catalogue tree is
 // bounded, at every nesting level, before any write.
 func TestValidateCatalogueReferences_EveryLevel(t *testing.T) {
-	ok := NewMockSportsbookProvider().Catalogue()
+	ok, err := NewMockSportsbookProvider().Catalogue(context.Background())
+	if err != nil {
+		t.Fatalf("the mock catalogue provider must not error: %v", err)
+	}
 	if err := validateCatalogueReferences(ok); err != nil {
 		t.Fatalf("the mock catalogue must pass: %v", err)
 	}

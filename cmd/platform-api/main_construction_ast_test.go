@@ -21,15 +21,18 @@ import (
 // allowedProviderCallsOutsideRegistrations are the only provider-package
 // functions a non-test file other than registrations.go may call: the
 // three orchestrator constructors (they wrap bundle components and
-// construct none) and the startup catalogue sync (it reads the bundle's
-// sportsbook provider). Anything else - a New* constructor, a conversion
+// construct none) and the startup catalogue sync's two steps (SB-
+// CATALOGUE-IO-1: FetchCatalogue reads the bundle's sportsbook provider
+// with no transaction held, SyncCatalogue then upserts the already-fetched
+// result inside one). Anything else - a New* constructor, a conversion
 // to a provider type, any other package-level function - is refused, as
 // is every composite literal of a provider-package type.
 var allowedProviderCallsOutsideRegistrations = map[string]bool{
-	"payments.NewOrchestrator": true,
-	"casino.NewOrchestrator":   true,
-	"kyc.NewOrchestrator":      true,
-	"sportsbook.SyncCatalogue": true,
+	"payments.NewOrchestrator":  true,
+	"casino.NewOrchestrator":    true,
+	"kyc.NewOrchestrator":       true,
+	"sportsbook.SyncCatalogue":  true,
+	"sportsbook.FetchCatalogue": true,
 }
 
 // providerConstructionsIn returns one description per call to a

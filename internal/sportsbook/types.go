@@ -30,6 +30,7 @@
 package sportsbook
 
 import (
+	"context"
 	"errors"
 	"time"
 
@@ -350,8 +351,19 @@ const (
 // provider's bet-placement contract is actually known, so a future
 // reader should not read PlaceBet's continued absence of any Provider
 // call as an oversight.
+//
+// SB-CATALOGUE-IO-1 (ADR 0095 amendment, 2026-09-28): Catalogue now takes
+// ctx and returns an error, mirroring internal/casino.CasinoProvider's own
+// Catalogue(ctx) ([]CatalogueEntry, error) shape - a real network adapter
+// must be cancellable and able to fail cleanly, which a bare, ctx-less,
+// error-less method could never be. FetchCatalogue (catalogue.go) is the
+// ONLY sanctioned caller: it refuses under txscope.Held(ctx) (the same
+// defence-in-depth guard payments' gate.go and casino's orchestrator.go
+// apply to their own adapter calls) and runs with no pooled database
+// transaction held, per ADR 0094 INV-POOL / ADR 0095's no-provider-I/O-
+// with-a-connection-held rule.
 type Provider interface {
-	Catalogue() CatalogueResult
+	Catalogue(ctx context.Context) (CatalogueResult, error)
 }
 
 // CatalogueResult is Provider.Catalogue's canonical, adapter-agnostic

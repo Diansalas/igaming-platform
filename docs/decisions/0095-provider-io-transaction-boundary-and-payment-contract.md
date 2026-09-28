@@ -6019,3 +6019,53 @@ BLOCKED per §28.13).
   - the §9.3 amendment (L-b);
   - the §10.9.3 and §28 status notes;
   - this section.
+
+## 33. Amendment — SB-CATALOGUE-IO-1: sportsbook catalogue sync follows the transaction-boundary rule (`sportsbook`, 2026-09-28)
+
+PRH-2 hardening round workstream E3 (plan §11, registry item SB-CATALOGUE-IO-1). The task registry
+classification found that `internal/sportsbook.SyncCatalogue` called `Provider.Catalogue()` from
+inside the `db.Pool.WithPlatformService` transaction opened at startup - a non-financial instance
+of exactly the pattern this ADR's D1 (no provider I/O with a connection held, ADR 0094 INV-POOL)
+already forbids for payments/casino/KYC. `Provider.Catalogue()` also took no `ctx` and returned no
+`error`, so a real network adapter implementing it could be neither cancelled nor fail cleanly.
+
+**Fix, mirroring the existing payments/casino pattern exactly:**
+
+- `sportsbook.Provider`'s method is now `Catalogue(ctx context.Context) (CatalogueResult, error)`
+  (`types.go`) - the same ctx-in/error-out shape as `casino.CasinoProvider.Catalogue`.
+  `MockSportsbookProvider.Catalogue` (`mock.go`) is updated to match; it performs no I/O and never
+  errors.
+- `sportsbook.FetchCatalogue(ctx, provider)` (new, `catalogue.go`) is now the ONLY sanctioned
+  caller of `Provider.Catalogue`. It refuses under `txscope.Held(ctx)` before ever calling the
+  provider - the same defence-in-depth guard `payments.callProvider` (step 1, INV-IO-1(b)) and
+  `casino.Orchestrator.LaunchGame` (IO-1B) apply to their own adapter calls - and it never itself
+  opens a database transaction. It then validates the result with the existing
+  `validateCatalogueReferences` (PROVIDER-REF-BOUND-1), unchanged in behaviour, before returning
+  it.
+- `sportsbook.SyncCatalogue(ctx, tx, result)` (`catalogue.go`) now takes an already-fetched,
+  already-validated `CatalogueResult` instead of a `Provider` - it no longer performs any provider
+  I/O. It keeps its own `db.AssertPlatformServiceScope` check (unchanged) and, as defence in depth,
+  re-runs `validateCatalogueReferences` (pure, I/O-free) before the first upsert, so a caller that
+  skipped `FetchCatalogue` still cannot write a half-validated tree.
+- `cmd/platform-api/main.go`'s startup sequence is now two steps: `FetchCatalogue` runs first, with
+  no transaction open at all; only once it returns a validated result does
+  `pool.WithPlatformService(ctx, db.ServiceSportsbookCatalogueSync, ...)` open, to upsert that
+  result via `SyncCatalogue`. A fetch error or a validation error surfaces with the same
+  fail-the-startup wrapping as before (`fmt.Errorf("sync sportsbook catalogue: %w", err)`); nothing
+  is written in either case, and in the fetch-error/validation-error case no transaction is ever
+  opened at all - strictly stronger than the pre-fix "nothing written inside the transaction"
+  guarantee.
+
+**Tests** (`internal/sportsbook`, integration): `TestFullCatalogueSync_ProviderNeverSeesAHeldTransaction`
+(a `txscope`-asserting provider proves no pooled transaction is held for the real two-step
+production call shape and that the sync still succeeds), `TestFetchCatalogue_ProviderErrorWritesNothing`
+(a fetch error writes zero rows), `TestFetchCatalogue_RefusesUnderTxscopeHeld` (a txscope-held ctx is
+refused before the provider is ever called), plus the pre-existing `TestSyncCatalogue_RequiresPlatformServiceScope`,
+`TestSyncCatalogue_IdempotentAcrossTwoRuns` and `TestSyncCatalogue_OverBoundExternalRefWritesNothing`
+adapted to the new two-step call shape with their original assertions and bounds unchanged.
+
+**No migration.** No change to migration 0084's RLS policies or the `platform_service_id` GUC
+mechanism - `AssertPlatformServiceScope` is unchanged.
+
+Reviewers per the plan: `architect`, `security`, `code-reviewer` (pending at merge time of this
+amendment; not yet run).
