@@ -83,6 +83,48 @@ func TestMigration0107_UpDownUpRoundTrip_CleanDB(t *testing.T) {
 	assertIndexExists(true, "after re-up")
 }
 
+// TestMigration0107_Down_RefusesWithRunbookMessageWhenCapturedUnpostedRowExists
+// closes ledger-finance review L1 (rv-fh3-ledger.md, 076e42e): the down
+// migration's own restore of 0102's narrower reconciliation_mismatches_
+// mismatch_kind_check was previously an UNWRAPPED ALTER TABLE - it already
+// failed closed (Postgres itself refuses the constraint the moment a
+// 'pay_captured_unposted' row exists), but with a bare, generic
+// check-violation error rather than this migration pair's own runbook
+// text every OTHER fail-closed check here already gives an operator.
+// Wrapped in a DO/EXCEPTION block, matching the up.sql migration's own
+// style.
+func TestMigration0107_Down_RefusesWithRunbookMessageWhenCapturedUnpostedRowExists(t *testing.T) {
+	v := migration0107Version(t)
+	pool, dir := migration0101Scratch(t, "m0107down_", v)
+	f := seedM0101Fixture(t, pool)
+
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		runID := uuid.New()
+		if _, err := tx.Exec(ctx, `INSERT INTO reconciliation_runs (id, tenant_id, stream, period_start, period_end, status)
+			VALUES ($1,$2,'payments',now()-interval '1 hour',now(),'mismatches_found')`, runID, f.tenantID); err != nil {
+			return err
+		}
+		// mismatch_kind='pay_captured_unposted' is accepted by 0107's OWN
+		// (wider) CHECK, which is still in effect at this point (0107 is
+		// up, not yet rolled back) - the down migration under test is what
+		// must refuse to NARROW that check back while this row exists.
+		_, err := tx.Exec(ctx, `INSERT INTO reconciliation_mismatches (id, tenant_id, reconciliation_run_id, reconciliation_key, expected_value, actual_value, mismatch_kind)
+			VALUES (gen_random_uuid(),$1,$2,'m0107down check=captured_unposted','resolution: a PSP-initiated reversal/tombstone, or M1/allocation (BLOCKED)','platform: synthetic fixture row','pay_captured_unposted')`,
+			f.tenantID, runID)
+		return err
+	}); err != nil {
+		t.Fatalf("setup: seed a pay_captured_unposted row via 0107's own (wider) CHECK: %v", err)
+	}
+
+	down, err := pool.MigrateDown(context.Background(), dir, 1)
+	if err == nil {
+		t.Fatalf("expected the down migration to refuse with a pay_captured_unposted row present, got success (rolled back %v)", down)
+	}
+	if !strings.Contains(err.Error(), "pay_captured_unposted row exists") || !strings.Contains(err.Error(), "STOP and escalate to the human") {
+		t.Fatalf("L1: expected the runbook-style message, got: %v", err)
+	}
+}
+
 // --- up on EXISTING VALID data (one succeeded attempt, one deposit
 // posting per intent) must succeed -----------------------------------------
 
@@ -214,6 +256,20 @@ func TestMigration0107_Up_DuplicateSucceededAttempts_RefusedByAttemptsPreflight(
 	if !isCheckOrTriggerViolation(err) {
 		t.Fatalf("expected a unique-violation-class refusal, got: %v", err)
 	}
+	// Code review R3 (rv-fh3-code-review.md, 95a1c34): assert WHICH
+	// pre-flight refused (the ATTEMPTS index, not the ledger one - the two
+	// have distinct RAISE EXCEPTION messages in up.sql) and that the
+	// runbook text (never delete rows; escalate to the human) is present,
+	// not just any check/trigger-violation-class error.
+	if !strings.Contains(err.Error(), "more than one succeeded deposit attempt exists for a deposit intent") {
+		t.Fatalf("expected the ATTEMPTS pre-flight's own message, got: %v", err)
+	}
+	if strings.Contains(err.Error(), "more than one deposit posting exists for a deposit intent") {
+		t.Fatalf("expected only the ATTEMPTS pre-flight's message, not the ledger pre-flight's, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "never delete ledger or attempt rows; escalate to the human") {
+		t.Fatalf("expected the runbook text, got: %v", err)
+	}
 }
 
 // --- up on SEEDED DUPLICATE ledger postings (same correlation_id): refused
@@ -266,6 +322,17 @@ func TestMigration0107_Up_DuplicateLedgerPostings_RefusedByLedgerPreflight(t *te
 	}
 	if !isCheckOrTriggerViolation(err) {
 		t.Fatalf("expected a unique-violation-class refusal, got: %v", err)
+	}
+	// Code review R3: assert WHICH pre-flight refused (the LEDGER index,
+	// not the attempts one) and the runbook text.
+	if !strings.Contains(err.Error(), "more than one deposit posting exists for a deposit intent") {
+		t.Fatalf("expected the LEDGER pre-flight's own message, got: %v", err)
+	}
+	if strings.Contains(err.Error(), "more than one succeeded deposit attempt exists for a deposit intent") {
+		t.Fatalf("expected only the LEDGER pre-flight's message, not the attempts pre-flight's, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "never delete ledger or attempt rows; escalate to the human") {
+		t.Fatalf("expected the runbook text, got: %v", err)
 	}
 }
 

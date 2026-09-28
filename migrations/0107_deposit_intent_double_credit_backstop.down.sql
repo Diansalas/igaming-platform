@@ -9,18 +9,29 @@
 -- to make a rollback pass. If this refuses: STOP, escalate to the human,
 -- and resolve or reclassify those rows (never delete them) before
 -- retrying the rollback.
+-- Ledger-finance review L1 (rv-fh3-ledger.md, 076e42e): wrapped in a DO/
+-- EXCEPTION block, matching the up.sql migration's own runbook style, so
+-- a refusal here gives the SAME kind of actionable, human-readable
+-- message as every other fail-closed check in this migration pair,
+-- instead of a bare constraint-violation error naming only the offending
+-- rows.
 ALTER TABLE reconciliation_mismatches DROP CONSTRAINT reconciliation_mismatches_mismatch_kind_check;
-ALTER TABLE reconciliation_mismatches ADD CONSTRAINT reconciliation_mismatches_mismatch_kind_check
-    CHECK (mismatch_kind IN ('missing_projection', 'balance_mismatch',
-        'sb_locked_mismatch', 'sb_bet_net_mismatch', 'sb_orphan_ledger',
-        'sb_orphan_history', 'sb_status_mismatch', 'sb_mock_statement_mismatch',
-        'cas_round_binding_mismatch', 'cas_posting_shape_mismatch', 'cas_orphan_win',
-        'cas_rollback_linkage_mismatch', 'cas_tombstone_conflict',
-        'cas_unposted_provider_event', 'cas_tombstone_late_original',
-        'cas_mock_statement_mismatch',
-        'pay_missing_platform_record', 'pay_missing_provider_record', 'pay_amount_mismatch',
-        'pay_asset_mismatch', 'pay_reference_mismatch', 'pay_status_mismatch',
-        'pay_duplicate', 'pay_unresolved'));
+DO $$
+BEGIN
+    ALTER TABLE reconciliation_mismatches ADD CONSTRAINT reconciliation_mismatches_mismatch_kind_check
+        CHECK (mismatch_kind IN ('missing_projection', 'balance_mismatch',
+            'sb_locked_mismatch', 'sb_bet_net_mismatch', 'sb_orphan_ledger',
+            'sb_orphan_history', 'sb_status_mismatch', 'sb_mock_statement_mismatch',
+            'cas_round_binding_mismatch', 'cas_posting_shape_mismatch', 'cas_orphan_win',
+            'cas_rollback_linkage_mismatch', 'cas_tombstone_conflict',
+            'cas_unposted_provider_event', 'cas_tombstone_late_original',
+            'cas_mock_statement_mismatch',
+            'pay_missing_platform_record', 'pay_missing_provider_record', 'pay_amount_mismatch',
+            'pay_asset_mismatch', 'pay_reference_mismatch', 'pay_status_mismatch',
+            'pay_duplicate', 'pay_unresolved'));
+EXCEPTION WHEN check_violation THEN
+    RAISE EXCEPTION 'migration 0107 down: at least one pay_captured_unposted row exists (a REAL, unposted PSP capture, ADR 0095 §28.13 interim (A)); never delete or reclassify these rows to force this rollback through; STOP and escalate to the human to resolve or reclassify them (never delete) before retrying the rollback';
+END $$;
 
 -- Restores 0101's payment_attempts_guard() body verbatim (the ONE line
 -- this migration changed, reverted). Rolling back leaves any
