@@ -2679,6 +2679,10 @@ bets roughly `DefaultLaunchTokenTTL` after launch, with `ErrLaunchSessionRequire
 - **Mutation evidence**: appended to `docs/plans/payment-readiness/evidence/
   prh-i2-casino-mutation-kill.txt`, dated section "CAS-SESSION-EXPIRY-1 (2026-09-28)".
 
+**Security re-review of this fix (2026-09-28, `rv-prh-i2-casino-security.md` FH-7):** `80eda28` ACCEPTED (equal to or stricter than the pre-`2c00e10` behaviour for every status). Two qualifications:
+- **I-4:** no production code consumes a launch token (`ResolveLaunchToken` has no non-test caller). So in the current wiring every `LaunchGame` session stays `active`, and bets are still refused about 2 minutes after launch (CAS-PLAY-BOOTSTRAP-1). This is correct from a security standpoint and must not be relaxed; the remedy is a vendor token-bootstrap path.
+- **C4 / CAS-REVOKE-CONSUMED-1:** MEDIUM, **deferred and launch-blocking** (option b), with the required migration-backed fix (a) specified in the security record. It must land before the first of: a non-test caller of `ResolveLaunchToken`; a non-synthetic casino adapter; or a production launch request.
+
 ### 15.2 KYC `CreateVerification`
 
 | Aspect | Specification |

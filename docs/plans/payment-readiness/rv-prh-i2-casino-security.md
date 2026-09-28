@@ -106,3 +106,53 @@ Baseline: `go test -tags integration ./internal/casino/ -run 'TestLaunchGame|Rev
 ## Launch-blocking flag
 
 For the orchestrator: C1 and C2 must be closed before production launch authorization and before any real casino adapter is wired. None of C1–C4 affects the current MOCK-only dev and test stage.
+
+## Re-review (FH-7, 2026-09-28): CAS-SESSION-EXPIRY-1 fix and C4 disposition — security
+
+Reviewed at `81d742d` (code `80eda28`); `23516c7` is comment/doc-only (verified). Private DB `secfh7c4_rr` from a `git archive` copy (dropped). `go test -race -count=1 -tags integration ./internal/casino/...` ok; the five named casino tests and `TestOutboundPrecondition_EveryWiredAdapterIsSynthetic` pass.
+
+**Verdict on `80eda28`: ACCEPTED.** For every session status it is equal to or stricter than the code before `2c00e10`:
+
+| Status | before `2c00e10` | `2c00e10` | `80eda28` |
+|---|---|---|---|
+| `active`, before `expires_at` | accept | accept | accept |
+| `active`, past `expires_at` | accept | reject | reject |
+| `consumed` | accept | reject after 2 min (regression) | accept |
+| `expired` | accept | reject | reject |
+| `revoked` | reject | reject | reject |
+| unknown | accept | reject | reject |
+
+The status allow-list, provider match, `ModeReal`, asset match, capability gate and RG/eligibility re-check still apply to every bet, including on a `consumed` session.
+
+**Findings (non-blocking):**
+- **N-A (LOW):** the characterization test's `strings.Contains(metadata, "\"revoked\":true")` could never fail, because PostgreSQL renders JSONB as `"revoked": true`. Parse the JSON and assert `false`.
+- **N-B (LOW):** a 30 ms TTL in `mintAndConsumeSessionWithTTL` is a flake risk under `-race`; use about 1 s.
+- **I-4 (information, functional):** `ResolveLaunchToken` has no non-test caller (no vendor bootstrap endpoint; `MockCasinoProvider.Launch` does not consume). So in the current wiring no session reaches `consumed`, and bets on `LaunchGame` sessions are still refused about 2 minutes after launch. `80eda28` fixes CAS-SESSION-EXPIRY-1 only for a path that does not exist yet. Refusing expired `active` sessions is correct and must not be relaxed; the fix is building the vendor token-bootstrap path, which also makes C4 reachable.
+
+**CAS-REVOKE-CONSUMED-1 (C4 reopened): severity MEDIUM; ruling (b), deferred and launch-blocking.** Impact: a launch the player was told failed can keep being debited (fully ledgered, same player and brand, RG/eligibility/capability-gated, no cross-tenant path). Reachability today: none — no code moves a session to `consumed`, only MOCK adapters exist, the tripwire holds, and the operator can disable the capability per brand/provider. **C4 must be fixed before the first of:** (i) any non-test caller of `ResolveLaunchToken` (a vendor bootstrap endpoint), in the same change or earlier; (ii) registration of any non-synthetic casino adapter, or weakening the PROV-OUTBOUND-CRED-1 casino tripwire; (iii) any request for production launch authorization. Doing (a) now is also acceptable. The option "document that a vendor-consumed session is deliberately kept" is **withdrawn**: a launch reported as failed must never keep moving money.
+
+**Required fix (a), migration number allocated by the orchestrator:**
+- Replace `casino_launch_sessions_enforce_immutable_fields()`, keeping 0042's column-immutability block, and replace only the terminal-status block with:
+  ```sql
+  IF OLD.status IN ('consumed', 'expired', 'revoked') THEN
+      IF OLD.status = 'consumed' AND NEW.status = 'revoked'
+         AND (to_jsonb(NEW) - 'status') = (to_jsonb(OLD) - 'status') THEN
+          RETURN NEW;
+      END IF;
+      RAISE EXCEPTION 'casino_launch_sessions: row is immutable once consumed, expired, or revoked';
+  END IF;
+  ```
+  The whole-row equality keeps every other column frozen (including future ones). The down migration restores 0042's body verbatim.
+- `RevokeLaunchSession`: `SELECT status … FOR UPDATE`, then `UPDATE … SET status='revoked' WHERE id=$1 AND status IN ('active','consumed')`; return the prior status; the `casino.launch_failed` audit records `prior_status` as well as `revoked`.
+- Token replay is unaffected: `ResolveLaunchToken` accepts only `active`; the relaxed branch only allows `consumed → revoked` (terminal); `token_hash`/`expires_at` stay immutable.
+- Tests: the DB trigger matrix (allowed: consumed→revoked, active→revoked/expired/consumed; refused: consumed→active/expired/consumed, consumed→revoked with any other column change, every transition out of revoked or expired); token replay after revoke → `ErrLaunchSessionNotActive`; invert the characterization test (session `revoked`, audit `revoked=true` + `prior_status="consumed"`, bet refused, balance unchanged, ledger balanced); pre-revoke bets still settle via win and rollback; tenant isolation (tenant B cannot revoke tenant A's session); mutants: drop whole-row equality, allow `expired`, drop `NEW.status='revoked'`, restore `status='active'`.
+- Design proven by a throwaway probe on the private DB (the current trigger refused consumed→revoked; the replacement allowed it and held every refusal; replay and bet were refused after revoke). The migration's own tests are still required.
+
+Not reviewed: HTTP layer, vendor bootstrap design (does not exist), CAS-REVOKE-BET-RACE-1 (unchanged, open), real adapters.
+
+### Orchestrator addendum (2026-09-28)
+
+- N-A fixed: the test parses the JSONB and asserts `revoked == false`. A compiling mutant (`"revoked": revoked || true`) now **fails** the test (the failure output shows `"revoked": true` rendered with a space, confirming the old check was vacuous); code restored byte-identical.
+- N-B fixed: 1 s TTL and a 1.2 s wait in `TestReceiveCallback_ConsumedSessionAcceptsBetAfterTokenTTLExpires`. The active-session test keeps its short TTL (it never consumes, so it has no race).
+- I-4 recorded: CAS-SESSION-EXPIRY-1 is qualified in the registry, and the play-window limitation is registered as CAS-PLAY-BOOTSTRAP-1.
+- CAS-REVOKE-CONSUMED-1 re-labelled with the (b) gate, MEDIUM, and this required-fix spec.

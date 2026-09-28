@@ -143,10 +143,13 @@ func TestReceiveCallback_ConsumedSessionAcceptsBetAfterTokenTTLExpires(t *testin
 	fundWallet(t, pool, f, 5000)
 	provider := NewMockCasinoProvider("mock-casino", "EUR")
 	registerCasinoCapability(t, pool, f, provider, 100)
-	sessionID := mintAndConsumeSessionWithTTL(t, pool, f, "mock-casino", "EUR", 30*time.Millisecond)
+	// 1s TTL (not tens of ms): the helper must consume the token before it
+	// lapses, which a loaded -race runner may not manage in 30ms (security
+	// FH-7 N-B).
+	sessionID := mintAndConsumeSessionWithTTL(t, pool, f, "mock-casino", "EUR", time.Second)
 	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
 
-	time.Sleep(200 * time.Millisecond)
+	time.Sleep(1200 * time.Millisecond)
 
 	var status LaunchSessionStatus
 	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {

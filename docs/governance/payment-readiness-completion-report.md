@@ -34,7 +34,7 @@ adapters and local PostgreSQL unless stated otherwise.
 | Provider-reference bound (PROVIDER-REF-BOUND-1) | **IMPLEMENTED** (platform side); deposit-response validation OPEN | §8.3 |
 | Outbound credentials (PROV-OUTBOUND-CRED-1) | **PARTIALLY IMPLEMENTED** | §8.4 |
 | Payment reconciliation (PRH-I5) | **IMPLEMENTED against a MOCK source**; real statements **REAL PROVIDER REQUIRED** | §8.5 |
-| Casino launch two-phase (PRH-I2 casino) | **PARTIALLY IMPLEMENTED** — regression CAS-SESSION-EXPIRY-1 found in final review (§8.6) | §8.6 |
+| Casino launch two-phase (PRH-I2 casino) | **PARTIALLY IMPLEMENTED**; regression CAS-SESSION-EXPIRY-1 found in final review and **fixed**; C4 revoke gap DEFERRED (launch-blocking) | §8.6 |
 | GitHub CI | **BLOCKED** (CI-BILLING-1, account billing) | §9 |
 
 ## 2. PAY-DOUBLE-CREDIT-1 — CLOSED
@@ -105,7 +105,7 @@ financial transaction.
 | Area | Status |
 |---|---|
 | Payments (deposit v2, cascade, sweeper, callback, payout) | **IMPLEMENTED** (MOCK). The gate refuses provider calls with a transaction held (`txscope`). Architect-verified in code. |
-| Casino launch | **IMPLEMENTED** (PRH-I2, two-phase). See §8.6 for the regression found in its expiry change. |
+| Casino launch | **IMPLEMENTED** (PRH-I2, two-phase). See §8.6 for the expiry regression (fixed) and the deferred C4 gap. |
 | KYC submission | Phase A/B/C split IMPLEMENTED. KYC-SUBMIT-OUTBOX-1 **DEFERRED** (accepted), required before a real KYC adapter. |
 | Legacy `InitiateDeposit` (test-only caller, provider call inside a transaction) | **OPEN**: PROV-OUTBOUND-CRED-1-LEGACY-PATH (architect FH7-04). Delete before the first real PSP. |
 | Deposit-response reference validation | **OPEN**: PAY-DEP-REF-VALIDATE-1 (FH7-05, Medium latent). Before the first real PSP. |
@@ -236,16 +236,45 @@ The FH-7 code re-review verdict is READY WITH CONDITIONS for this label and NOT 
 | PAY-RECON-N1 | Open |
 | RECON-PAYOUT-LIVE-TEST-1 | Low test gap |
 
-### 8.6 Casino launch two-phase (PRH-I2 casino) — PARTIALLY IMPLEMENTED; HIGH regression
+### 8.6 Casino launch two-phase (PRH-I2 casino) — PARTIALLY IMPLEMENTED
 
-- **Implemented:** `LaunchGame` phases A/B/C, context-independent bounded phase C, redaction, and the
-  kind-split resolver. Every prior code-review finding is closed.
-- **CAS-SESSION-EXPIRY-1 (HIGH regression):** found by the FH-7 code re-review. The PRH-I2 rework
-  `2c00e10` applied the 2-minute *launch-token* TTL to consumed, in-play sessions, so every
-  real-money casino session refuses bets about 2 minutes after launch. It is not money-unsafe (bets are
-  refused and nothing is posted), but it breaks play.
-- **Status: fix IN PROGRESS** (casino specialist). This section is updated when the fix and its
-  re-review land.
+**Implemented:**
+- `LaunchGame` phases A/B/C;
+- a context-independent, bounded phase C;
+- redaction;
+- the kind-split resolver.
+
+**Review verdicts:**
+- code-reviewer re-review 2: **READY WITH CONDITIONS**;
+- security: fix **ACCEPTED** (`rv-prh-i2-casino-security.md`, FH-7).
+
+**CAS-SESSION-EXPIRY-1 (HIGH regression): fixed in `80eda28`.**
+- *Cause:* the PRH-I2 rework `2c00e10` applied the 2-minute launch-token TTL to consumed, in-play
+  sessions.
+- *Fix:* the expiry check now applies to never-consumed sessions only. The mutants M-CAS1–3,
+  M-REAPPLY and M-DROP are all killed.
+- *How it was found:* the FH-7 code re-review.
+- *Follow-ups:* the stale comments (C2) and security's test findings (N-A, a vacuous JSONB assertion,
+  now mutant-proven; N-B, a flake risk) are fixed.
+
+**Open items:**
+- **CAS-REVOKE-CONSUMED-1 (security C4 reopened): MEDIUM, DEFERRED, launch-blocking.**
+  - *Why it is open:* a failed launch cannot revoke a session the vendor has already consumed, because
+    migration 0036/0042's immutability trigger forbids leaving `consumed`.
+  - *Reachability:* not reachable today. No code consumes a token, only MOCK adapters exist, and the
+    tripwire holds.
+  - *Required fix:* a migration relaxing the trigger to exactly `consumed → revoked` (spec and tests
+    in the security record).
+  - *Deadline:* before the first of: a vendor token-bootstrap caller, a non-synthetic casino adapter,
+    or a production launch request.
+- **CAS-PLAY-BOOTSTRAP-1: functional limitation (MOCK).**
+  - *Behaviour:* because no token-bootstrap path exists, every launched session stays `active`, and
+    the B2C MOCK play route refuses new bets about 2 minutes after launch. The player must relaunch;
+    earlier bets still settle.
+  - *Security position:* this is correct and must not be relaxed. The fix is the vendor bootstrap
+    endpoint, which is next-stage design.
+  - *Behaviour change:* Stage 7's MOCK play simulation previously had no time limit.
+- **Low items:** CAS-REVOKE-BET-RACE-1 (unchanged, open) and MF3 (optional).
 
 ## 9. CI and verification
 
@@ -288,7 +317,8 @@ The FH-7 code re-review verdict is READY WITH CONDITIONS for this label and NOT 
 
 | Item | What is missing |
 |---|---|
-| CAS-SESSION-EXPIRY-1 | Until fixed and re-reviewed |
+| CAS-REVOKE-CONSUMED-1 | Before a vendor bootstrap caller, a real casino adapter, or a launch request |
+| CAS-PLAY-BOOTSTRAP-1 | Vendor token-bootstrap path (MOCK play window is 2 minutes) |
 | KS-AUDIT-TENANT-1 | — |
 | Alert delivery, incl. PAY-P1-MULTISUCCESS-ALERT-1 | Paging |
 | CP-W1 | No sweeper wired |

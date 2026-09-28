@@ -11,6 +11,7 @@ package casino
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/url"
 	"os"
@@ -773,7 +774,13 @@ func TestLaunchGame_FailedLaunchOnConsumedSession_RevokeCASMissesAndBetStillAcce
 	}); err != nil {
 		t.Fatalf("read casino.launch_failed audit metadata: %v", err)
 	}
-	if strings.Contains(string(metadataJSON), `"revoked":true`) {
+	// Parse the JSONB (PostgreSQL renders `"revoked": true` with a space, so a
+	// raw substring match could never fail - security FH-7 N-A).
+	var metadata map[string]any
+	if err := json.Unmarshal(metadataJSON, &metadata); err != nil {
+		t.Fatalf("parse casino.launch_failed audit metadata: %v (%s)", err, metadataJSON)
+	}
+	if revoked, ok := metadata["revoked"].(bool); !ok || revoked {
 		t.Fatalf("expected revoked=false in the audit metadata (the CAS missed a consumed session), got %s", metadataJSON)
 	}
 
