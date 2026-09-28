@@ -313,3 +313,36 @@ isolates each field rather than merely re-testing the same one three times.)
 
 Reverted and diffed byte-identical (md5sum 0c5e2ab41b2cda880023391400a61657 before AND after) against
 the committed original.
+
+C-4 (code review of e810ece - "revoke returns false" was argued structurally unreachable and left
+untested; the reviewer required a scratch-DB-only forcing mechanism instead. Mutant MR - the
+prior/revoked invariant check removed from BootstrapLaunch - survived the whole suite):
+
+Fix: TestBootstrapLaunch_RevokeReturnsFalse_InvariantBroken (internal/casino/
+bootstrap_c4_revoke_false_integration_test.go), on a scratch database only (migration0099Scratch,
+never the shared test database). A test-only BEFORE UPDATE trigger on casino_launch_sessions returns
+NULL exactly when NEW.status = 'revoked' - Postgres skips the write for that row - forcing
+RevokeLaunchSession's own UPDATE to affect zero rows (revoked=false) even though the row lock read
+'active' (prior='active'), with NO production code change. Drives a genuine gate denial (RG-
+ineligible via a suspended account) and asserts ErrBootstrapInvariantBroken, the session left
+completely untouched, and no denial audit row.
+
+Re-applied mutant MR directly (the prior/revoked check removed):
+
+  prior, revoked, err := RevokeLaunchSession(ctx, tx, session.ID)
+  if err != nil { return err }
+  _ = prior
+  _ = revoked   // the invariant check itself removed
+
+Ran against the same scratch-DB test:
+
+  PRIV_DB=cas_c4_dev bash .../priv_test.sh -race -tags integration -run \
+    'TestBootstrapLaunch_RevokeReturnsFalse_InvariantBroken' -count=1 -v ./internal/casino/...
+
+KILLED - first failure:
+
+  bootstrap_c4_revoke_false_integration_test.go:83: expected ErrBootstrapInvariantBroken (mapped to
+  5xx), got: <nil>
+
+Reverted and diffed byte-identical (md5sum 0c5e2ab41b2cda880023391400a61657 before AND after) against
+the committed original.
