@@ -19,6 +19,13 @@
 // exist first, or the cutover would silently orphan every non-
 // synchronous outcome.
 //
+// [deleted by E2, 2026-09-28] InitiateDeposit/attemptDeposit are gone
+// (PROV-OUTBOUND-CRED-1-LEGACY-PATH). InitiateDepositAttempt (this file)
+// is now the ONLY deposit-creation entry point in production; the
+// httpserver deposit handler calls it exclusively. The paragraph above is
+// left as a historical record of this step's own additive framing at the
+// time it was written, not a description of the current call graph.
+//
 // What IS real and tested here: phase A commits the intent+attempt in
 // one tx before any call; phase B makes the provider call with NO
 // transaction and NO pooled connection held (proven by the INV-IO-1
@@ -67,7 +74,7 @@ type InitiateDepositAttemptResult struct {
 	// first, or the last cascaded one - ended up interactive/pending) -
 	// transient, never persisted to deposit_intents, mirroring the
 	// pre-cutover InitiateDeposit/attemptDeposit path's identical
-	// in-memory-only fields.
+	// in-memory-only fields ([deleted by E2] - both are gone).
 	RedirectURL      string
 	HostedFieldToken string
 }
@@ -178,8 +185,9 @@ func (o *Orchestrator) InitiateDepositAttempt(
 			return fmt.Errorf("payments: audit deposit request: %w", err)
 		}
 
-		// RG, exactly as InitiateDeposit does today (ADR 0095 §4.3 T1+T2
-		// runs RG "after RG" - the ADR's own ordering).
+		// RG, exactly as the now-deleted InitiateDeposit used to
+		// ([deleted by E2]) (ADR 0095 §4.3 T1+T2 runs RG "after RG" -
+		// the ADR's own ordering).
 		eligibility, err := rg.EvaluateEligibility(actx, tx, rg.EligibilityParams{
 			TenantID: intent.TenantID, BrandID: intent.BrandID, PlayerAccountID: intent.PlayerAccountID, WalletID: intent.WalletID,
 		})

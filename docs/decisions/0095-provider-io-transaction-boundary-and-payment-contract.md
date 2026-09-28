@@ -39,21 +39,72 @@
     (`payout.go`/`payout_sweep.go`) paths conform to the three-phase rule. The legacy
     `Orchestrator.InitiateDeposit` path does not: it has a test-only caller and is tracked as
     PROV-OUTBOUND-CRED-1-LEGACY-PATH. *[Amendment, 2026-09-28 (`payments`, PRH-2 E2,
-    PROV-OUTBOUND-CRED-1-LEGACY-PATH): **CLOSED.** `InitiateDeposit`, `InitiateDepositAudited`,
-    `attemptDeposit`, `handleDecline`, `resolveAmbiguous` and `RecordDepositMultipleSuccessRefusal`
-    are deleted from `orchestrator.go`. `InitiateDepositAttempt` (`deposit_v2.go`) is now the only
-    deposit-creation entry point in the tree, test or production; there is no longer a legacy
-    caller for the kind-split gate to be bypassed by. The 21 test call sites of the deleted
-    functions (10 files) were migrated to `InitiateDepositAttempt` where the test's subject was
-    `InitiateDeposit`'s own behaviour, or to a TEST-ONLY bridge
-    (`initiateDepositWithAttempt`/`legacyShapeInitiateDeposit`, `receive_bridge_integration_test.go`)
-    built only from still-live building blocks (`RouteProvider`, `setIntentAttempt`,
-    `finalizeDeclined`, `finalizeAmbiguous`) where the test's subject was the receipt/callback
-    path and needed the pre-cutover on-disk shape. `TestC4_ResolveAmbiguousOutcomeSucceeded_
+    PROV-OUTBOUND-CRED-1-LEGACY-PATH), corrected 2026-09-28 per code-review E2-2 and security
+    E2-C1/F-2/F-3: **CLOSED WITH A REGRESSION GUARD (E2-C1).** `InitiateDeposit`,
+    `InitiateDepositAudited`, `attemptDeposit`, `handleDecline`, `resolveAmbiguous` and
+    `RecordDepositMultipleSuccessRefusal` are deleted from `orchestrator.go`.
+    `InitiateDepositAttempt` (`deposit_v2.go`) is now the only deposit-creation entry point in
+    **production**; it is not the only one in the tree. A second, deliberately near-verbatim
+    entry point survives as a TEST-ONLY reimplementation
+    (`legacyShapeInitiateDeposit`/`legacyShapeAttemptDeposit`/`legacyShapeHandleDecline`/
+    `legacyShapeResolveAmbiguous`, `receive_bridge_integration_test.go`) - it is, line for line,
+    close to `cabca27:orchestrator.go:555-826`, built from still-live primitives
+    (`ListRoutingCandidates`+`RankRoutingCandidates` via a TEST-ONLY `RouteProvider` wrapper now
+    relocated out of production per E2-3/F-2, `setIntentAttempt`, `finalizeDeclined`,
+    `finalizeAmbiguous`, `postDepositSuccess`) rather than a copy-paste of the deleted functions'
+    own source, but it DOES call `provider.Deposit`/`provider.QueryStatus` directly inside the
+    caller's own transaction, exactly like the deleted chain - it is never reachable from a
+    compiled binary (`_test.go`, `integration` build tag), but it is not merely a fixture for the
+    receipt/callback path: E2-1 (code review) found four `orchestrator_integration_test.go` tests
+    whose subject (the production synchronous-cascade/decline/ambiguous behaviour) had silently
+    become this copy's behaviour instead, once it stopped calling the real `InitiateDeposit`. Two
+    of those four were deleted as redundant with existing live coverage
+    (`TestInitiateDepositAttempt_DeclinedOutcome_T8`,
+    `TestDriveCreatedAttemptCascade_PoolThreadedToResolver`). One
+    (`TestInitiateDeposit_CascadeExhaustedEndsDeclined`) was migrated onto `InitiateDepositAttempt`
+    directly and strengthened with a third, spy-wrapped accepting provider so a `MaxCascadeDepth`
+    off-by-one mutant is actually observable (no live-path test already covered this exhaustion
+    behaviour). The last (`TestInitiateDeposit_AmbiguousOutcomeIsNotCascaded`) was, on a first pass,
+    also migrated directly onto `InitiateDepositAttempt` - but that migration FAILED when actually
+    run: its second half assumed a callback naming the mock's synchronously-returned ambiguous
+    reference would post a success, which is wrong for the live path (`MarkAmbiguousFromSubmitting`,
+    T6, deliberately never records a `provider_reference` on the attempt row - only the legacy,
+    no-longer-authoritative `deposit_intents` column gets it). It was deleted, not force-fitted:
+    both of its original halves are already covered, more thoroughly, by
+    `TestInitiateDepositAttempt_AmbiguousOutcome_T6` (never cascades) and
+    `TestReceipt_Unresolved_DeferredThenAppliedOnceReferenceKnown` (`receipt_integration_test.go` -
+    `deferred_unresolved` then convergence to succeeded once the reference is separately learned).
+    A companion gap this same mutant-testing pass found and closed:
+    `TestInitiateDepositAttempt_DeclinedOutcome_T8` alone registers only one provider, so a mutant
+    removing `cascadeEligible`'s own cascadable-check is not observable there (no second provider to
+    wrongly route to) - closed by a new test,
+    `TestInitiateDepositAttempt_NonCascadableDeclineNeverCascadesToAvailableFallback`
+    (`deposit_v2_integration_test.go`), registering a second, available, accepting provider.
+    Because a second, real (if test-only) call path to `provider.Deposit`/`QueryStatus` still
+    exists, and because the pre-existing `IO-1C` static guard
+    (`no_provider_call_in_tx_closure_static_test.go`) provably misses a NAMED, non-closure
+    function that calls a `PaymentProvider` outbound method directly (security review E2-C1: a
+    planted method shaped exactly like the deleted `attemptDeposit` passes IO-1C, since IO-1C
+    inspects only `*ast.FuncLit` closures with a `pgx.Tx` parameter), PROV-OUTBOUND-CRED-1-LEGACY-
+    PATH is recorded as **closed with a regression guard**, not unconditionally closed: a new, broader static test,
+    `TestPCG1_NoOutboundProviderCallOutsideTheGate`
+    (`internal/txscope/payment_provider_call_guard_static_test.go`), now forbids ANY non-test call
+    to `PaymentProvider.Deposit`/`Withdraw`/`QueryStatus`/`Refund` anywhere in the repository,
+    in any package, with or without a `pgx.Tx` parameter, outside `callProvider`'s own two
+    recognized call shapes (a named adapter-call builder, or a `FuncLit` passed directly as a
+    `callProvider` argument) - this subsumes "extend IO-1C to `ast.FuncDecl` with a `pgx.Tx`
+    parameter" for these four method names specifically, since it does not condition on a
+    `pgx.Tx` parameter existing at all. The 21 test call sites of the deleted functions
+    (10 files, per the original E2 migration) were migrated to `InitiateDepositAttempt` where the
+    test's subject was `InitiateDeposit`'s own behaviour, or to the TEST-ONLY bridge above where
+    the test's subject was the receipt/callback path and needed the pre-cutover on-disk shape (see
+    the E2-1 correction two paragraphs up for the narrower set of tests that needed
+    re-classification after the fact). `TestC4_ResolveAmbiguousOutcomeSucceeded_
     ReturnsWrappedRefusal` and `TestC4_InitiateDepositAudited_WritesRefusalAudit`
     (`migration_0107_integration_test.go`) tested only the deleted
-    `DepositIntentAlreadyResolvedRefusal`/`RecordDepositMultipleSuccessRefusal` wiring and were
-    deleted as redundant with the live T10/T13d coverage
+    `DepositIntentAlreadyResolvedRefusal`/`RecordDepositMultipleSuccessRefusal` wiring (itself also
+    deleted from `orchestrator.go`, [deleted by E2]) and were deleted as redundant with the live
+    T10/T13d coverage
     (`TestMigration0107_T13tT13d_TerminalReasonTrigger_HEAD`,
     `TestINVDEP1_FL1_ApplicationChokePointCatchesItBeforeTheDBBackstop`,
     `TestINVDEP1_FL2_MultipleSuccessAlertLogContentIsPinned`) and `TestX5_LedgerBackstopMapping`
@@ -76,7 +127,7 @@
   | §7 sweeper | PARTIALLY IMPLEMENTED | LF95-R1 automatic re-drive NOT IMPLEMENTED (operator T17 path only). |
   | §10.2–§10.5 kill switch (0105, 0106) | PARTIALLY IMPLEMENTED | Data model, triggers, routes (as amended by §30) IMPLEMENTED. Phase 2 wiring (deposit kill-switch decline, labelled payout hold) IMPLEMENTED on `worktree-agent-aa2bb3c6bdd6d51eb` @ `4e04f4e`; merge approved by the architect (§10.9), and this label applies to this branch once that merge lands. Residual KS-DEP-T2-T3-1 (§10.9.3) NOT IMPLEMENTED. Alert delivery NOT IMPLEMENTED (launch-blocking). KS-AUDIT-TENANT-1 NOT IMPLEMENTED (launch-blocking). |
   | §10.1 manifest | PARTIALLY IMPLEMENTED | `SupportsRefund`, `CallbackEchoesMerchantReference` enforced; PRH-I1-MANIFEST-1..4 deferred. |
-  | §11 PROV-OUTBOUND-CRED-1 | PARTIALLY IMPLEMENTED | Casino/KYC kind split IMPLEMENTED. Payments kind split and pool threading IMPLEMENTED on `4e04f4e`, with code-review C1/C2 closed by `ce77bac`/`50b595d`; merge approved (§10.9). Legacy `InitiateDeposit` path bypassed the gate: PROV-OUTBOUND-CRED-1-LEGACY-PATH. *[Amendment, 2026-09-28 (PRH-2 E2): CLOSED - the legacy chain is deleted; see the §29 amendment above.]* |
+  | §11 PROV-OUTBOUND-CRED-1 | PARTIALLY IMPLEMENTED | Casino/KYC kind split IMPLEMENTED. Payments kind split and pool threading IMPLEMENTED on `4e04f4e`, with code-review C1/C2 closed by `ce77bac`/`50b595d`; merge approved (§10.9). Legacy `InitiateDeposit` path bypassed the gate: PROV-OUTBOUND-CRED-1-LEGACY-PATH. *[Amendment, 2026-09-28 (PRH-2 E2), corrected 2026-09-28 per code-review/security: CLOSED WITH A REGRESSION GUARD (E2-C1) - the production legacy chain is deleted, but a near-verbatim TEST-ONLY copy survives for fixture purposes and a new tree-wide static guard (`TestPCG1_NoOutboundProviderCallOutsideTheGate`) now forbids any non-test outbound provider call outside the gate; see the §29 amendment above.]* |
   | §12 payment reconciliation (0102, 0104) | MOCK | Real PSP statement PROVIDER DEPENDENT; `code-reviewer` NOT READY; §28.9 kind NOT IMPLEMENTED. |
   | §15 casino launch, KYC create/submit | IMPLEMENTED against MOCK adapters | Casino `code-reviewer` NOT READY (R1); IO-1B/IO-1C closed (`0ca1193`). |
   | INV-IO-1 (a)–(d) | IMPLEMENTED | (c) is `internal/txscope/no_provider_call_in_tx_closure_static_test.go`. |
@@ -1748,8 +1799,12 @@ marked complete and before a `payments.Sweeper` is wired in `cmd/platform-api`).
   code-reviewer's re-review of the fix round.
 - KS-DEP-T2-T3-1: NOT IMPLEMENTED. *[Status note 2026-09-28: IMPLEMENTED (`2da7548`); see the
   note at the end of §10.9.3. Phase 2 (`4e04f4e`) is merged on this branch.]*
-- PROV-OUTBOUND-CRED-1-LEGACY-PATH: open. *[Status note 2026-09-28 (`payments`, PRH-2 E2):
-  CLOSED. See the §29 amendment above for the deletion record.]*
+- PROV-OUTBOUND-CRED-1-LEGACY-PATH: *[Status note 2026-09-28 (`payments`, PRH-2 E2): CLOSED WITH
+  REGRESSION GUARD (E2-C1). See the §29 amendment above for the deletion record and
+  `internal/txscope/payment_provider_call_guard_static_test.go` for the guard security review
+  finding E2-C1 required (a named, non-closure function calling a payments outbound provider
+  method directly, with or without a `pgx.Tx` parameter, is now caught tree-wide, closing the
+  blind spot IO-1C's own closure-only scan left).]*
 - Alert delivery and KS-AUDIT-TENANT-1: NOT IMPLEMENTED, launch-blocking (unchanged).
 
 ---
