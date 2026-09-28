@@ -963,12 +963,24 @@ explicitly deferred; see below.
   `migration_0112_integration_test.go`, `acting_setter_static_test.go`,
   `acting_grant_fixture_integration_test.go`, plus
   `internal/identity/platform_admin_insert_static_test.go`): A-2 (both
-  halves), A-4 (the K1-1 restrictive-fence cases, DB-level only - not the
-  HTTP-level A-1 matrix), A-5, A-6, A-7, A-8, A-10, A-11, A-13, A-15, A-16,
-  A-17 (both halves, using the "migrate only through 0112" scratch pattern),
-  A-14b, the C-1 exact-GUC-shape predicate test, the setter's own
-  no-valid-grant refusal test, and the required sock-puppet test. All pass
-  under `-race -tags integration`.
+  halves, now pinned to exactly CG011/CG010), A-4 (the K1-1 restrictive-fence
+  cases, DB-level, now asserting exactly SQLSTATE 42501 with CHECK-valid
+  rows), A-5, A-6, A-7, A-8, A-10, A-11, A-13 (with a re-revoke case), A-15,
+  A-16, A-17 (both halves, using the "migrate only through 0112" scratch
+  pattern, now asserting exactly CG099), A-14b (widened to SQL literals and
+  `auth.RolePlatformAdmin`), the C-1 exact-GUC-shape predicate test, the
+  setter's own no-valid-grant refusal test (now pinned to the "open acting
+  session" step, L-2), the required sock-puppet test, the K1-C3 layered
+  independent-kill test for R-7, the F-2/I-3 forced-column test, the I-4
+  migration-0034-dependency test (with its own scratch-DB negative
+  control), and the F-9 per-command-policy/service-exclusion pin.
+  **`internal/httpserver/capability_api_integration_test.go`** adds the
+  HTTP-level A-1 matrix (a representative cut, per that file's own doc
+  comment), I-1 (G-P1 fail-closed), K1-C1 (path-tenant scoping), and A-12
+  (full audit content across request/approve/reject/cancel/revoke,
+  including the HD-PRH2-5 tenant presentation - `grant.reattested` is
+  correctly excluded, being STAFF-LIFECYCLE-1/out-of-K1-scope per §8.3).
+  All pass under `-race -tags integration`.
 - **Mutants**: `docs/plans/payment-readiness/evidence/prh2-k1-mutation-kill.txt`
   (corrected on the `prh2-k1-tests` branch per code review F-10) - of the 9
   required-class mutants, all 9 are now independently killed (mutants 7 and
@@ -1029,16 +1041,18 @@ missing.
   control surface and CLAUDE.md requires explicit `security` review before
   it is "complete" - this build is a candidate for that review, not a
   substitute for it.
-- **A-1** (the full role × family × capability × action HTTP+DB matrix),
-  **A-3** (acting session opens/audits, in the context of an actual K2/K3
-  governed post - K1 has no governed post to complete), **A-4b/A-4c** (the
-  projection and ledger fences - explicitly K2's migration 0113 content per
-  ADR §6.6/§6.7, "not executed" here on purpose), **A-9** (the `FOR SHARE`
-  concurrent-revoke-vs-execution race - there is no K1 execution path to
-  race against yet; only file-level revoke-is-effective-next-read is
-  implicitly exercised), **A-12** (the full audit-content/`platform_acting`
-  tenant-presentation/`grant.reattested` test), **A-18** (the static
-  migration-replay tool that proves no future NULL-arm table ships
+- **A-1** (the full role × family × capability × action HTTP+DB matrix - a
+  representative cut is now IMPLEMENTED, `internal/httpserver/
+  capability_api_integration_test.go`'s `TestCapabilityAPI_A1_*` tests, but
+  not literally every one of the ~10 roles × 4 capabilities × routes
+  combinations), **A-3** (acting session opens/audits, in the context of an
+  actual K2/K3 governed post - K1 has no governed post to complete),
+  **A-4b/A-4c** (the projection and ledger fences - explicitly K2's
+  migration 0113 content per ADR §6.6/§6.7, "not executed" here on
+  purpose), **A-9** (the `FOR SHARE` concurrent-revoke-vs-execution race -
+  there is no K1 execution path to race against yet; only file-level
+  revoke-is-effective-next-read is implicitly exercised), **A-18** (the
+  static migration-replay tool that proves no future NULL-arm table ships
   unfenced - a real, nontrivial SQL-parsing static analysis tool, not built
   in this session for time reasons; A-17's DB-level baseline check is a
   partial substitute, not a replacement), and **A-19** (column discipline -
