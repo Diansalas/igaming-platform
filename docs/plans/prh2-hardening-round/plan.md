@@ -917,3 +917,8 @@ The payments lane stays strictly serial (E2 → C → D → F-pay → H → I-wi
 - The `alert:manage` permission (0102 §4.2) is added to `internal/auth/permission.go` by **I-core**. I-core merges before K1 starts, and K1 then owns `permission.go`.
 - G1 also touches `internal/httpserver/admin_routes.go`, for the audited `display_name` write path (0104 §4).
 - The `tenant_snapshot.go` comment change (C-102-5) is part of I-wire.
+
+**K-lane Touches additions (ADR 0099–0101 revision 2):**
+- **K1** also touches `internal/db/tenant_rls.go`.
+- **K2** also touches `internal/reconciliation`, for the `ledger_unlinked_manual_adjustment` detector. Its scheduler registration edits `reconciliation/scheduler.go`. K2 (W2) owns that file before I-wire (W4) takes it; they never overlap.
+- **K3** also touches `internal/providerref/providerref.go` (the payments-only `ValidatePaymentReference`), `internal/payments/{drive,sweeper,payout,receipt}.go`, the callback handlers, the statement import and `reconciliation/payment_statement.go`. K3 is last in the payments lane, so the payments lane stays serial.
