@@ -192,6 +192,25 @@ func writeCapabilityError(ctx context.Context, deps Deps, w http.ResponseWriter,
 			return
 		}
 		apierror.Write(w, c.requestID, apierror.CodeConflict, "conflict")
+	case capability.ErrClassUniqueViolation:
+		// F-3 (code review of 0f34d36): a double-submit race against
+		// R-11/R-12's partial unique indexes is a legitimate conflict,
+		// never a 500 - same 409 Conflict class and refusal-audit
+		// treatment as a guard refusal, distinguished only in the log/
+		// audit "class" field for diagnosis.
+		c.logger.Warn("capability_grant_refused", "op", op, "class", string(class))
+		recordCapabilityRefusalAudit(ctx, deps, c, op, string(class), targetType, targetID)
+		apierror.Write(w, c.requestID, apierror.CodeConflict, "conflict")
+	case capability.ErrClassCheckViolation:
+		// F-3: a CHECK-constraint refusal (e.g. R-13 restated at the table
+		// level) is a client-supplied-data validation failure, 400 rather
+		// than 409 - there is no concurrent second actor to retry against.
+		// This codebase's apierror.CodeValidation is its existing generic
+		// "bad input" code (no dedicated 422 code exists outside the
+		// settlement domain).
+		c.logger.Warn("capability_grant_refused", "op", op, "class", string(class))
+		recordCapabilityRefusalAudit(ctx, deps, c, op, string(class), targetType, targetID)
+		apierror.Write(w, c.requestID, apierror.CodeValidation, "invalid request")
 	case capability.ErrClassSessionInvalid:
 		c.logger.Error("capability_grant_session_invalid", "op", op, "err", err.Error())
 		apierror.Write(w, c.requestID, apierror.CodeInternal, "internal error")
@@ -351,14 +370,22 @@ func newCancelCapabilityGrantRequestHandler(deps Deps) http.HandlerFunc {
 			return
 		}
 		err = runCapabilityTx(r.Context(), deps, c, func(ctx context.Context, tx pgx.Tx) error {
-			if err := capability.CancelRequest(ctx, tx, requestID); err != nil {
+			before, err := capability.GetRequest(ctx, tx, c.target, requestID)
+			if err != nil {
+				return err
+			}
+			if err := capability.CancelRequest(ctx, tx, c.target, requestID); err != nil {
 				return err
 			}
 			return audit.Record(ctx, tx, audit.Entry{
 				TenantID: c.auditTenantID(), SubjectTenantID: c.auditSubjectTenantID(), ActorType: audit.ActorStaff, ActorID: c.subject,
 				Action: "capability_grant.cancelled", TargetType: "capability_grant_request", TargetID: requestID.String(),
 				Outcome: audit.OutcomeSuccess, IPAddress: c.ipAddress, UserAgent: c.userAgent, RequestID: c.requestID,
-				Metadata: map[string]any{"actor_scope": c.sessionScopeLabel(), "target_tenant_id": c.target.String()},
+				Metadata: map[string]any{
+					"actor_scope": c.sessionScopeLabel(), "target_tenant_id": c.target.String(),
+					"grantee_staff_id": before.GranteeStaffID.String(), "capability": string(before.Capability), "reason_code": before.ReasonCode,
+					"before_status": string(before.Status), "after_status": "cancelled",
+				},
 			})
 		})
 		if err != nil {
@@ -371,6 +398,15 @@ func newCancelCapabilityGrantRequestHandler(deps Deps) http.HandlerFunc {
 
 type decideCapabilityGrantRequestBody struct {
 	ReasonCode string `json:"reason_code"`
+}
+
+// decisionAuditAction is an explicit map (F-7, code review of 0f34d36):
+// decision + "d" produced "capability_grant.rejectd" for the reject path
+// (English's own irregular past tense, not a decision-list bug) - always
+// spell out the two known actions rather than concatenate.
+var decisionAuditAction = map[string]string{
+	"approve": "capability_grant.approved",
+	"reject":  "capability_grant.rejected",
 }
 
 func newDecideCapabilityGrantRequestHandler(deps Deps, decision string) http.HandlerFunc {
@@ -396,7 +432,11 @@ func newDecideCapabilityGrantRequestHandler(deps Deps, decision string) http.Han
 
 		var grant *capability.Grant
 		err = runCapabilityTx(r.Context(), deps, c, func(ctx context.Context, tx pgx.Tx) error {
-			_, g, txErr := capability.DecideAndGrant(ctx, tx, requestID, decision, body.ReasonCode)
+			before, err := capability.GetRequest(ctx, tx, c.target, requestID)
+			if err != nil {
+				return err
+			}
+			_, g, txErr := capability.DecideAndGrant(ctx, tx, c.target, requestID, decision, body.ReasonCode)
 			if txErr != nil {
 				return txErr
 			}
@@ -405,12 +445,18 @@ func newDecideCapabilityGrantRequestHandler(deps Deps, decision string) http.Han
 			if grant != nil {
 				targetID = grant.ID.String()
 			}
+			afterStatus := "rejected"
+			if decision == "approve" {
+				afterStatus = "approved"
+			}
 			return audit.Record(ctx, tx, audit.Entry{
 				TenantID: c.auditTenantID(), SubjectTenantID: c.auditSubjectTenantID(), ActorType: audit.ActorStaff, ActorID: c.subject,
-				Action: "capability_grant." + decision + "d", TargetType: "capability_grant_request", TargetID: requestID.String(),
+				Action: decisionAuditAction[decision], TargetType: "capability_grant_request", TargetID: requestID.String(),
 				Outcome: audit.OutcomeSuccess, IPAddress: c.ipAddress, UserAgent: c.userAgent, RequestID: c.requestID,
 				Metadata: map[string]any{
 					"actor_scope": c.sessionScopeLabel(), "target_tenant_id": c.target.String(), "grant_id": targetID,
+					"grantee_staff_id": before.GranteeStaffID.String(), "capability": string(before.Capability), "reason_code": body.ReasonCode,
+					"before_status": string(before.Status), "after_status": afterStatus,
 				},
 			})
 		})
@@ -451,14 +497,26 @@ func newRevokeCapabilityGrantHandler(deps Deps) http.HandlerFunc {
 			return
 		}
 		err = runCapabilityTx(r.Context(), deps, c, func(ctx context.Context, tx pgx.Tx) error {
-			if err := capability.RevokeGrant(ctx, tx, grantID, body.ReasonCode); err != nil {
+			before, err := capability.GetGrant(ctx, tx, c.target, grantID)
+			if err != nil {
 				return err
+			}
+			if err := capability.RevokeGrant(ctx, tx, c.target, grantID, body.ReasonCode); err != nil {
+				return err
+			}
+			beforeRevokedAt := "null"
+			if before.RevokedAt != nil {
+				beforeRevokedAt = before.RevokedAt.Format(time.RFC3339)
 			}
 			return audit.Record(ctx, tx, audit.Entry{
 				TenantID: c.auditTenantID(), SubjectTenantID: c.auditSubjectTenantID(), ActorType: audit.ActorStaff, ActorID: c.subject,
 				Action: "capability_grant.revoked", TargetType: "capability_grant", TargetID: grantID.String(),
 				Outcome: audit.OutcomeSuccess, IPAddress: c.ipAddress, UserAgent: c.userAgent, RequestID: c.requestID,
-				Metadata: map[string]any{"actor_scope": c.sessionScopeLabel(), "target_tenant_id": c.target.String()},
+				Metadata: map[string]any{
+					"actor_scope": c.sessionScopeLabel(), "target_tenant_id": c.target.String(),
+					"grantee_staff_id": before.GranteeStaffID.String(), "capability": string(before.Capability), "reason_code": body.ReasonCode,
+					"before_revoked_at": beforeRevokedAt, "after_revoked_at": "set",
+				},
 			})
 		})
 		if err != nil {
@@ -478,7 +536,7 @@ func newListCapabilityGrantRequestsHandler(deps Deps) http.HandlerFunc {
 		var reqs []capability.Request
 		err := runCapabilityTx(r.Context(), deps, c, func(ctx context.Context, tx pgx.Tx) error {
 			var txErr error
-			reqs, txErr = capability.ListRequests(ctx, tx)
+			reqs, txErr = capability.ListRequests(ctx, tx, c.target)
 			return txErr
 		})
 		if err != nil {
@@ -502,7 +560,7 @@ func newListCapabilityGrantsHandler(deps Deps) http.HandlerFunc {
 		var grants []capability.Grant
 		err := runCapabilityTx(r.Context(), deps, c, func(ctx context.Context, tx pgx.Tx) error {
 			var txErr error
-			grants, txErr = capability.ListGrants(ctx, tx)
+			grants, txErr = capability.ListGrants(ctx, tx, c.target)
 			return txErr
 		})
 		if err != nil {

@@ -50,7 +50,7 @@ func TestWithScopes_MarkTxscope(t *testing.T) {
 			// valid grant fixture first and calls it directly.
 			if m.Name == "WithPlatformActingInTenant" {
 				principalID, tenantID := mustBuildValidActingGrantFixture(t, pool)
-				if err := pool.WithPlatformActingInTenant(context.Background(), principalID, tenantID, fn); !errors.Is(err, errDone) {
+				if err := pool.WithPlatformActingInTenant(context.Background(), principalID, tenantID, uuid.Nil, "", fn); !errors.Is(err, errDone) {
 					t.Fatalf("%s did not run fn: %v", m.Name, err)
 				}
 				if !called || !marked {

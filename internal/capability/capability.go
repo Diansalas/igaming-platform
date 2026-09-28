@@ -117,6 +117,20 @@ const (
 	// for an HTTP caller that already passed auth.RequirePermission, and
 	// is treated as an internal error if it ever does.
 	ErrClassSessionInvalid ErrClass = "session_invalid"
+	// ErrClassUniqueViolation (F-3, code review of 0f34d36) covers
+	// Postgres 23505 - the R-11/R-12 partial unique indexes (one pending
+	// request, one unrevoked grant, per (tenant, grantee, capability)).
+	// These are legitimate, expected double-submit races, not server
+	// errors: two concurrent requests for the same grantee/capability are
+	// a conflict, not a 500. The triggers' own point-in-time checks
+	// (R-11/R-12) catch the common case with CG010/CG011 first; these
+	// indexes are the race-safe backstop for the window between that
+	// check and the INSERT.
+	ErrClassUniqueViolation ErrClass = "unique_violation"
+	// ErrClassCheckViolation (F-3) covers Postgres 23514 - a CHECK
+	// constraint (e.g. the G-P2 valid_until requirement restated as a
+	// table CHECK, defence in depth over the trigger's own R-13 check).
+	ErrClassCheckViolation ErrClass = "check_violation"
 	ErrClassOther          ErrClass = "other"
 )
 
@@ -131,6 +145,10 @@ func ClassifyError(err error) ErrClass {
 		return ErrClassGuardRefusal
 	case "CG001", "CG002", "CG020":
 		return ErrClassSessionInvalid
+	case "23505":
+		return ErrClassUniqueViolation
+	case "23514":
+		return ErrClassCheckViolation
 	default:
 		return ErrClassOther
 	}
@@ -156,11 +174,55 @@ func CreateRequest(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, in NewReq
 	return req, nil
 }
 
+// GetRequest reads one staff_capability_grant_requests row by (tenantID,
+// requestID), visible under the caller's own RLS scope. Returns
+// pgx.ErrNoRows if not found (including "exists, but a different
+// tenant" - K1-C1's identical 404-not-403 rationale). Used by the HTTP
+// layer to capture full "before" audit content (grantee, capability,
+// status) ahead of a decide/cancel/revoke call - see F-7, code review of
+// 0f34d36.
+func GetRequest(ctx context.Context, tx pgx.Tx, tenantID, requestID uuid.UUID) (Request, error) {
+	var req Request
+	row := tx.QueryRow(ctx, `
+		SELECT id, tenant_id, grantee_staff_id, grantee_scope, capability, valid_from, valid_until,
+			reason_code, requested_by, requested_by_scope, requested_by_person_id, status, created_at, expires_at
+		FROM staff_capability_grant_requests
+		WHERE id = $1 AND tenant_id = $2
+	`, requestID, tenantID)
+	if err := scanRequest(row, &req); err != nil {
+		return Request{}, err
+	}
+	return req, nil
+}
+
+// GetGrant reads one staff_capability_grants row by (tenantID, grantID),
+// visible under the caller's own RLS scope. Same 404-not-403 rationale as
+// GetRequest.
+func GetGrant(ctx context.Context, tx pgx.Tx, tenantID, grantID uuid.UUID) (Grant, error) {
+	var g Grant
+	row := tx.QueryRow(ctx, `
+		SELECT id, tenant_id, grantee_staff_id, grantee_scope, capability, request_id, approval_id,
+			valid_from, valid_until, granted_at, revoked_at, revoked_by, revoked_by_scope, revoke_reason_code
+		FROM staff_capability_grants
+		WHERE id = $1 AND tenant_id = $2
+	`, grantID, tenantID)
+	if err := scanGrant(row, &g); err != nil {
+		return Grant{}, err
+	}
+	return g, nil
+}
+
 // CancelRequest moves a pending request to 'cancelled'. Only the
 // request's own tenant/platform scope may do this (RLS), and only while
-// pending (the trigger refuses otherwise).
-func CancelRequest(ctx context.Context, tx pgx.Tx, requestID uuid.UUID) error {
-	tag, err := tx.Exec(ctx, `UPDATE staff_capability_grant_requests SET status = 'cancelled' WHERE id = $1`, requestID)
+// pending (the trigger refuses otherwise). tenantID must be the
+// route-validated target tenant (K1-C1, security review of 0f34d36): a
+// platform-scoped caller's RLS admits every tenant's rows, so without this
+// filter a platform token naming tenant A's path could act on tenant B's
+// request by id alone. Zero rows affected - including "the id exists but
+// belongs to a different tenant" - returns pgx.ErrNoRows, which the HTTP
+// layer maps to 404, never revealing whether the id exists elsewhere.
+func CancelRequest(ctx context.Context, tx pgx.Tx, tenantID, requestID uuid.UUID) error {
+	tag, err := tx.Exec(ctx, `UPDATE staff_capability_grant_requests SET status = 'cancelled' WHERE id = $1 AND tenant_id = $2`, requestID, tenantID)
 	if err != nil {
 		return err
 	}
@@ -170,17 +232,22 @@ func CancelRequest(ctx context.Context, tx pgx.Tx, requestID uuid.UUID) error {
 	return nil
 }
 
-// DecideAndGrant records a platform decision on requestID. For
+// DecideAndGrant records a platform decision on requestID, scoped to
+// tenantID (K1-C1 - see CancelRequest's identical rationale). For
 // decision == "approve" it ALSO inserts the corresponding
 // staff_capability_grants row in the same transaction, exactly as
 // migration 0112's deferred constraint trigger requires. For
 // decision == "reject" no grant row is inserted.
-func DecideAndGrant(ctx context.Context, tx pgx.Tx, requestID uuid.UUID, decision, reasonCode string) (approvalID uuid.UUID, grant *Grant, err error) {
+func DecideAndGrant(ctx context.Context, tx pgx.Tx, tenantID, requestID uuid.UUID, decision, reasonCode string) (approvalID uuid.UUID, grant *Grant, err error) {
 	if err := tx.QueryRow(ctx, `
 		INSERT INTO staff_capability_grant_approvals (request_id, decision, reason_code)
-		VALUES ($1, $2, $3)
+		SELECT $1, $2, $3
+		 WHERE EXISTS (SELECT 1 FROM staff_capability_grant_requests r WHERE r.id = $1 AND r.tenant_id = $4)
 		RETURNING id
-	`, requestID, decision, reasonCode).Scan(&approvalID); err != nil {
+	`, requestID, decision, reasonCode, tenantID).Scan(&approvalID); err != nil {
+		if err == pgx.ErrNoRows {
+			return uuid.Nil, nil, pgx.ErrNoRows
+		}
 		return uuid.Nil, nil, err
 	}
 
@@ -203,15 +270,16 @@ func DecideAndGrant(ctx context.Context, tx pgx.Tx, requestID uuid.UUID, decisio
 
 // RevokeGrant sets revoked_at/revoked_by/revoked_by_scope/
 // revoke_reason_code on an in-force grant (the emergency stop, ADR 0099
-// §8.1). revoked_by/revoked_by_scope are forced by the trigger from the
-// DB session, never trusted from a caller - this function does not even
-// accept them as parameters.
-func RevokeGrant(ctx context.Context, tx pgx.Tx, grantID uuid.UUID, reasonCode string) error {
+// §8.1), scoped to tenantID (K1-C1 - see CancelRequest's identical
+// rationale). revoked_by/revoked_by_scope are forced by the trigger from
+// the DB session, never trusted from a caller - this function does not
+// even accept them as parameters.
+func RevokeGrant(ctx context.Context, tx pgx.Tx, tenantID, grantID uuid.UUID, reasonCode string) error {
 	tag, err := tx.Exec(ctx, `
 		UPDATE staff_capability_grants
 		   SET revoked_at = now(), revoke_reason_code = $2
-		 WHERE id = $1
-	`, grantID, reasonCode)
+		 WHERE id = $1 AND tenant_id = $3
+	`, grantID, reasonCode, tenantID)
 	if err != nil {
 		return err
 	}
@@ -221,15 +289,19 @@ func RevokeGrant(ctx context.Context, tx pgx.Tx, grantID uuid.UUID, reasonCode s
 	return nil
 }
 
-// ListRequests returns every staff_capability_grant_requests row visible
-// under the caller's own RLS scope, most recent first.
-func ListRequests(ctx context.Context, tx pgx.Tx) ([]Request, error) {
+// ListRequests returns every staff_capability_grant_requests row for
+// tenantID, visible under the caller's own RLS scope, most recent first.
+// tenantID is required (K1-C1): without it, a platform-scoped caller's
+// list would silently include every OTHER tenant's requests too, not just
+// the path-named one.
+func ListRequests(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID) ([]Request, error) {
 	rows, err := tx.Query(ctx, `
 		SELECT id, tenant_id, grantee_staff_id, grantee_scope, capability, valid_from, valid_until,
 			reason_code, requested_by, requested_by_scope, requested_by_person_id, status, created_at, expires_at
 		FROM staff_capability_grant_requests
+		WHERE tenant_id = $1
 		ORDER BY created_at DESC
-	`)
+	`, tenantID)
 	if err != nil {
 		return nil, err
 	}
@@ -245,15 +317,17 @@ func ListRequests(ctx context.Context, tx pgx.Tx) ([]Request, error) {
 	return out, rows.Err()
 }
 
-// ListGrants returns every staff_capability_grants row visible under the
-// caller's own RLS scope, most recently granted first.
-func ListGrants(ctx context.Context, tx pgx.Tx) ([]Grant, error) {
+// ListGrants returns every staff_capability_grants row for tenantID,
+// visible under the caller's own RLS scope, most recently granted first.
+// tenantID is required (K1-C1 - see ListRequests's identical rationale).
+func ListGrants(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID) ([]Grant, error) {
 	rows, err := tx.Query(ctx, `
 		SELECT id, tenant_id, grantee_staff_id, grantee_scope, capability, request_id, approval_id,
 			valid_from, valid_until, granted_at, revoked_at, revoked_by, revoked_by_scope, revoke_reason_code
 		FROM staff_capability_grants
+		WHERE tenant_id = $1
 		ORDER BY granted_at DESC
-	`)
+	`, tenantID)
 	if err != nil {
 		return nil, err
 	}

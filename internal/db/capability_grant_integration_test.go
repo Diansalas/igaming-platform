@@ -106,7 +106,7 @@ func TestCapabilityGrant_A2_TenantScopeApprovalRefused(t *testing.T) {
 	}
 
 	err := pool.WithPrincipalScope(ctx, tenantID, otherTenantAdmin, func(ctx context.Context, tx pgx.Tx) error {
-		_, _, err := capability.DecideAndGrant(ctx, tx, requestID, "approve", "test")
+		_, _, err := capability.DecideAndGrant(ctx, tx, tenantID, requestID, "approve", "test")
 		return err
 	})
 	if err == nil {
@@ -185,7 +185,7 @@ func TestCapabilityGrant_A5_SelfAndDistinctPersonRefusals(t *testing.T) {
 		t.Fatalf("insert sock puppet approver: %v", err)
 	}
 	err = pool.WithPlatformAdmin(ctx, sockPuppetApprover, func(ctx context.Context, tx pgx.Tx) error {
-		_, _, err := capability.DecideAndGrant(ctx, tx, requestID, "approve", "test")
+		_, _, err := capability.DecideAndGrant(ctx, tx, tenantID, requestID, "approve", "test")
 		return err
 	})
 	if !cgIsCode(err, "CG011") {
@@ -195,7 +195,7 @@ func TestCapabilityGrant_A5_SelfAndDistinctPersonRefusals(t *testing.T) {
 	// A genuinely distinct approver succeeds (positive control - proves
 	// the refusal above is about Person-distinctness, not a broken test).
 	if err := pool.WithPlatformAdmin(ctx, approver, func(ctx context.Context, tx pgx.Tx) error {
-		_, grant, err := capability.DecideAndGrant(ctx, tx, requestID, "approve", "test")
+		_, grant, err := capability.DecideAndGrant(ctx, tx, tenantID, requestID, "approve", "test")
 		if err != nil {
 			return err
 		}
@@ -275,7 +275,7 @@ func TestCapabilityGrant_A7_SamePrincipalOrPersonRefused(t *testing.T) {
 
 	// R-2/R-3: the SAME principal cannot approve its own request.
 	err := pool.WithPlatformAdmin(ctx, platformPrincipal, func(ctx context.Context, tx pgx.Tx) error {
-		_, _, err := capability.DecideAndGrant(ctx, tx, requestID, "approve", "test")
+		_, _, err := capability.DecideAndGrant(ctx, tx, tenantID, requestID, "approve", "test")
 		return err
 	})
 	if !cgIsCode(err, "CG011") {
@@ -368,7 +368,7 @@ func TestCapabilityGrant_A11_DuplicatesRefused(t *testing.T) {
 
 	// Approve the first, producing an in-force grant.
 	if err := pool.WithPlatformAdmin(ctx, approver, func(ctx context.Context, tx pgx.Tx) error {
-		_, _, err := capability.DecideAndGrant(ctx, tx, firstID, "approve", "test")
+		_, _, err := capability.DecideAndGrant(ctx, tx, tenantID, firstID, "approve", "test")
 		return err
 	}); err != nil {
 		t.Fatalf("approve first: %v", err)
@@ -392,7 +392,7 @@ func TestCapabilityGrant_A13_AppendOnly(t *testing.T) {
 	f := mustBuildActingGrantFixtureWithCapability(t, pool, capability.CapabilityLedgerAdjustmentInitiate)
 
 	if err := pool.WithPlatformAdmin(ctx, f.ApproverID, func(ctx context.Context, tx pgx.Tx) error {
-		return capability.RevokeGrant(ctx, tx, f.GrantID, "test-revoke")
+		return capability.RevokeGrant(ctx, tx, f.TenantID, f.GrantID, "test-revoke")
 	}); err != nil {
 		t.Fatalf("revoke: %v", err)
 	}
@@ -414,13 +414,35 @@ func TestCapabilityGrant_A13_AppendOnly(t *testing.T) {
 		t.Fatalf("un-revoke: expected CG012, got %v", err)
 	}
 
-	// DELETE refused.
+	// DELETE refused - either by an explicit trigger exception, or (since
+	// K1-C2's per-command RLS split leaves no permissive DELETE policy on
+	// this table at all) silently by RLS filtering the row out before the
+	// BEFORE DELETE trigger ever fires, which is a 0-rows-affected,
+	// err==nil outcome in pgx, not a Postgres error - both are secure
+	// (the row is provably untouched either way, verified below).
+	var deleteRowsAffected int64
 	err = pool.WithPlatformAdmin(ctx, f.ApproverID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `DELETE FROM staff_capability_grants WHERE id = $1`, f.GrantID)
+		tag, err := tx.Exec(ctx, `DELETE FROM staff_capability_grants WHERE id = $1`, f.GrantID)
+		if err == nil {
+			deleteRowsAffected = tag.RowsAffected()
+		}
 		return err
 	})
-	if err == nil {
-		t.Fatal("expected DELETE on staff_capability_grants to be refused")
+	if err == nil && deleteRowsAffected != 0 {
+		t.Fatalf("expected DELETE on staff_capability_grants to affect zero rows (RLS or trigger refusal), affected %d", deleteRowsAffected)
+	}
+	// The row must still exist regardless of which mechanism refused it.
+	if err := pool.WithPlatformAdmin(ctx, f.ApproverID, func(ctx context.Context, tx pgx.Tx) error {
+		var n int
+		if scanErr := tx.QueryRow(ctx, `SELECT count(*) FROM staff_capability_grants WHERE id = $1`, f.GrantID).Scan(&n); scanErr != nil {
+			return scanErr
+		}
+		if n != 1 {
+			t.Fatalf("expected the grant row to still exist after the refused DELETE, found %d", n)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("verify grant row survives DELETE attempt: %v", err)
 	}
 
 	// TRUNCATE refused.
@@ -486,7 +508,7 @@ func TestActingSetter_RefusesWithoutValidGrant(t *testing.T) {
 		tenantID := createTestTenant(t, pool)
 		platformPrincipal := cgStaff(t, pool, uuid.Nil, "platform_admin")
 		called := false
-		err := pool.WithPlatformActingInTenant(ctx, platformPrincipal, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		err := pool.WithPlatformActingInTenant(ctx, platformPrincipal, tenantID, uuid.Nil, "", func(ctx context.Context, tx pgx.Tx) error {
 			called = true
 			return nil
 		})
@@ -504,11 +526,11 @@ func TestActingSetter_RefusesWithoutValidGrant(t *testing.T) {
 	t.Run("revoked grant", func(t *testing.T) {
 		f := mustBuildActingGrantFixtureWithCapability(t, pool, capability.CapabilityLedgerAdjustmentInitiate)
 		if err := pool.WithPlatformAdmin(ctx, f.ApproverID, func(ctx context.Context, tx pgx.Tx) error {
-			return capability.RevokeGrant(ctx, tx, f.GrantID, "test-revoke")
+			return capability.RevokeGrant(ctx, tx, f.TenantID, f.GrantID, "test-revoke")
 		}); err != nil {
 			t.Fatalf("revoke: %v", err)
 		}
-		err := pool.WithPlatformActingInTenant(ctx, f.GranteeID, f.TenantID, func(ctx context.Context, tx pgx.Tx) error {
+		err := pool.WithPlatformActingInTenant(ctx, f.GranteeID, f.TenantID, uuid.Nil, "", func(ctx context.Context, tx pgx.Tx) error {
 			return nil
 		})
 		if !cgIsCode(err, "CG020") {
@@ -519,7 +541,7 @@ func TestActingSetter_RefusesWithoutValidGrant(t *testing.T) {
 	t.Run("grant for a different tenant", func(t *testing.T) {
 		f := mustBuildActingGrantFixtureWithCapability(t, pool, capability.CapabilityLedgerAdjustmentInitiate)
 		otherTenant := createTestTenant(t, pool)
-		err := pool.WithPlatformActingInTenant(ctx, f.GranteeID, otherTenant, func(ctx context.Context, tx pgx.Tx) error {
+		err := pool.WithPlatformActingInTenant(ctx, f.GranteeID, otherTenant, uuid.Nil, "", func(ctx context.Context, tx pgx.Tx) error {
 			return nil
 		})
 		if !cgIsCode(err, "CG020") {
@@ -554,7 +576,7 @@ func TestCapabilityGrant_A4_K11_RestrictiveFenceRefusals(t *testing.T) {
 	runRefused := func(t *testing.T, name string, fn func(tx pgx.Tx) error) {
 		t.Helper()
 		t.Run(name, func(t *testing.T) {
-			err := pool.WithPlatformActingInTenant(ctx, principalID, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+			err := pool.WithPlatformActingInTenant(ctx, principalID, tenantID, uuid.Nil, "", func(ctx context.Context, tx pgx.Tx) error {
 				return fn(tx)
 			})
 			if err == nil {
@@ -568,7 +590,7 @@ func TestCapabilityGrant_A4_K11_RestrictiveFenceRefusals(t *testing.T) {
 		t.Helper()
 		t.Run(name, func(t *testing.T) {
 			var n int
-			err := pool.WithPlatformActingInTenant(ctx, principalID, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+			err := pool.WithPlatformActingInTenant(ctx, principalID, tenantID, uuid.Nil, "", func(ctx context.Context, tx pgx.Tx) error {
 				return tx.QueryRow(ctx, query, args...).Scan(&n)
 			})
 			if err != nil {
@@ -630,7 +652,7 @@ func TestCapabilityGrant_A4_K11_RestrictiveFenceRefusals(t *testing.T) {
 		// SELECT-policy filter would otherwise make this whole statement
 		// misleadingly look like a failure. Verified afterward from a
 		// genuinely tenant-scoped session instead.
-		err := pool.WithPlatformActingInTenant(ctx, principalID, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		err := pool.WithPlatformActingInTenant(ctx, principalID, tenantID, uuid.Nil, "", func(ctx context.Context, tx pgx.Tx) error {
 			_, err := tx.Exec(ctx,
 				`INSERT INTO audit_log (tenant_id, actor_type, actor_id, action, outcome) VALUES (NULL, 'staff', $1, $2, 'success')`,
 				principalID, marker)

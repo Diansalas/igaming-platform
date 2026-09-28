@@ -456,8 +456,32 @@ CREATE TRIGGER staff_capability_grant_requests_no_truncate
 ALTER TABLE staff_capability_grant_requests ENABLE ROW LEVEL SECURITY;
 ALTER TABLE staff_capability_grant_requests FORCE ROW LEVEL SECURITY;
 
-CREATE POLICY tenant_scope ON staff_capability_grant_requests
-    FOR ALL
+-- K1-C2 (security review of 0f34d36): per-command policies, never
+-- FOR ALL, matching ADR 0099 §10.3's own "T: SELECT, INSERT, UPDATE"
+-- (§10 preamble also states "no FOR ALL permissive policy" as a common
+-- rule). Splitting also makes the down migration's restoration exact.
+CREATE POLICY tenant_scope_select ON staff_capability_grant_requests
+    FOR SELECT
+    USING (
+        tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid
+        AND NULLIF(current_setting('app.principal_id', true), '') IS NOT NULL
+        AND NULLIF(current_setting('app.platform_admin_principal_id', true), '') IS NULL
+        AND NULLIF(current_setting('app.player_account_id', true), '') IS NULL
+        AND NULLIF(current_setting('app.platform_service_id', true), '') IS NULL
+        AND NOT financial_acting_gucs_present()
+    );
+CREATE POLICY tenant_scope_insert ON staff_capability_grant_requests
+    FOR INSERT
+    WITH CHECK (
+        tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid
+        AND NULLIF(current_setting('app.principal_id', true), '') IS NOT NULL
+        AND NULLIF(current_setting('app.platform_admin_principal_id', true), '') IS NULL
+        AND NULLIF(current_setting('app.player_account_id', true), '') IS NULL
+        AND NULLIF(current_setting('app.platform_service_id', true), '') IS NULL
+        AND NOT financial_acting_gucs_present()
+    );
+CREATE POLICY tenant_scope_update ON staff_capability_grant_requests
+    FOR UPDATE
     USING (
         tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid
         AND NULLIF(current_setting('app.principal_id', true), '') IS NOT NULL
@@ -475,8 +499,26 @@ CREATE POLICY tenant_scope ON staff_capability_grant_requests
         AND NOT financial_acting_gucs_present()
     );
 
-CREATE POLICY platform_scope ON staff_capability_grant_requests
-    FOR ALL
+CREATE POLICY platform_scope_select ON staff_capability_grant_requests
+    FOR SELECT
+    USING (
+        NULLIF(current_setting('app.platform_admin_principal_id', true), '') IS NOT NULL
+        AND NULLIF(current_setting('app.tenant_id', true), '') IS NULL
+        AND NULLIF(current_setting('app.player_account_id', true), '') IS NULL
+        AND NULLIF(current_setting('app.platform_service_id', true), '') IS NULL
+        AND NOT financial_acting_gucs_present()
+    );
+CREATE POLICY platform_scope_insert ON staff_capability_grant_requests
+    FOR INSERT
+    WITH CHECK (
+        NULLIF(current_setting('app.platform_admin_principal_id', true), '') IS NOT NULL
+        AND NULLIF(current_setting('app.tenant_id', true), '') IS NULL
+        AND NULLIF(current_setting('app.player_account_id', true), '') IS NULL
+        AND NULLIF(current_setting('app.platform_service_id', true), '') IS NULL
+        AND NOT financial_acting_gucs_present()
+    );
+CREATE POLICY platform_scope_update ON staff_capability_grant_requests
+    FOR UPDATE
     USING (
         NULLIF(current_setting('app.platform_admin_principal_id', true), '') IS NOT NULL
         AND NULLIF(current_setting('app.tenant_id', true), '') IS NULL
@@ -636,28 +678,38 @@ CREATE CONSTRAINT TRIGGER staff_capability_grant_approvals_require_grant
 ALTER TABLE staff_capability_grant_approvals ENABLE ROW LEVEL SECURITY;
 ALTER TABLE staff_capability_grant_approvals FORCE ROW LEVEL SECURITY;
 
-CREATE POLICY tenant_scope ON staff_capability_grant_approvals
+-- K1-C2 (security review of 0f34d36): per-command (T: SELECT only; P:
+-- SELECT, INSERT - never FOR ALL, per ADR 0099 §10.4), and the missing
+-- app.platform_service_id IS NULL arm added to every predicate on this
+-- table (its absence meant a platform_admin + platform_service mixed
+-- session could read every row).
+CREATE POLICY tenant_scope_select ON staff_capability_grant_approvals
     FOR SELECT
     USING (
         tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid
         AND NULLIF(current_setting('app.principal_id', true), '') IS NOT NULL
         AND NULLIF(current_setting('app.platform_admin_principal_id', true), '') IS NULL
         AND NULLIF(current_setting('app.player_account_id', true), '') IS NULL
+        AND NULLIF(current_setting('app.platform_service_id', true), '') IS NULL
         AND NOT financial_acting_gucs_present()
     );
 
-CREATE POLICY platform_scope ON staff_capability_grant_approvals
-    FOR ALL
+CREATE POLICY platform_scope_select ON staff_capability_grant_approvals
+    FOR SELECT
     USING (
         NULLIF(current_setting('app.platform_admin_principal_id', true), '') IS NOT NULL
         AND NULLIF(current_setting('app.tenant_id', true), '') IS NULL
         AND NULLIF(current_setting('app.player_account_id', true), '') IS NULL
+        AND NULLIF(current_setting('app.platform_service_id', true), '') IS NULL
         AND NOT financial_acting_gucs_present()
-    )
+    );
+CREATE POLICY platform_scope_insert ON staff_capability_grant_approvals
+    FOR INSERT
     WITH CHECK (
         NULLIF(current_setting('app.platform_admin_principal_id', true), '') IS NOT NULL
         AND NULLIF(current_setting('app.tenant_id', true), '') IS NULL
         AND NULLIF(current_setting('app.player_account_id', true), '') IS NULL
+        AND NULLIF(current_setting('app.platform_service_id', true), '') IS NULL
         AND NOT financial_acting_gucs_present()
     );
 
@@ -783,13 +835,29 @@ CREATE TRIGGER staff_capability_grants_no_truncate
 ALTER TABLE staff_capability_grants ENABLE ROW LEVEL SECURITY;
 ALTER TABLE staff_capability_grants FORCE ROW LEVEL SECURITY;
 
-CREATE POLICY tenant_scope ON staff_capability_grants
-    FOR ALL
+-- K1-C2 (security review of 0f34d36): per-command (T: SELECT, UPDATE; P:
+-- SELECT, INSERT, UPDATE - never FOR ALL, per ADR 0099 §10.5), and the
+-- missing app.platform_service_id IS NULL arm added throughout (its
+-- absence meant a platform_admin + platform_service mixed session could
+-- read/write every row).
+CREATE POLICY tenant_scope_select ON staff_capability_grants
+    FOR SELECT
     USING (
         tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid
         AND NULLIF(current_setting('app.principal_id', true), '') IS NOT NULL
         AND NULLIF(current_setting('app.platform_admin_principal_id', true), '') IS NULL
         AND NULLIF(current_setting('app.player_account_id', true), '') IS NULL
+        AND NULLIF(current_setting('app.platform_service_id', true), '') IS NULL
+        AND NOT financial_acting_gucs_present()
+    );
+CREATE POLICY tenant_scope_update ON staff_capability_grants
+    FOR UPDATE
+    USING (
+        tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid
+        AND NULLIF(current_setting('app.principal_id', true), '') IS NOT NULL
+        AND NULLIF(current_setting('app.platform_admin_principal_id', true), '') IS NULL
+        AND NULLIF(current_setting('app.player_account_id', true), '') IS NULL
+        AND NULLIF(current_setting('app.platform_service_id', true), '') IS NULL
         AND NOT financial_acting_gucs_present()
     )
     WITH CHECK (
@@ -797,21 +865,42 @@ CREATE POLICY tenant_scope ON staff_capability_grants
         AND NULLIF(current_setting('app.principal_id', true), '') IS NOT NULL
         AND NULLIF(current_setting('app.platform_admin_principal_id', true), '') IS NULL
         AND NULLIF(current_setting('app.player_account_id', true), '') IS NULL
+        AND NULLIF(current_setting('app.platform_service_id', true), '') IS NULL
         AND NOT financial_acting_gucs_present()
     );
 
-CREATE POLICY platform_scope ON staff_capability_grants
-    FOR ALL
+CREATE POLICY platform_scope_select ON staff_capability_grants
+    FOR SELECT
     USING (
         NULLIF(current_setting('app.platform_admin_principal_id', true), '') IS NOT NULL
         AND NULLIF(current_setting('app.tenant_id', true), '') IS NULL
         AND NULLIF(current_setting('app.player_account_id', true), '') IS NULL
+        AND NULLIF(current_setting('app.platform_service_id', true), '') IS NULL
+        AND NOT financial_acting_gucs_present()
+    );
+CREATE POLICY platform_scope_insert ON staff_capability_grants
+    FOR INSERT
+    WITH CHECK (
+        NULLIF(current_setting('app.platform_admin_principal_id', true), '') IS NOT NULL
+        AND NULLIF(current_setting('app.tenant_id', true), '') IS NULL
+        AND NULLIF(current_setting('app.player_account_id', true), '') IS NULL
+        AND NULLIF(current_setting('app.platform_service_id', true), '') IS NULL
+        AND NOT financial_acting_gucs_present()
+    );
+CREATE POLICY platform_scope_update ON staff_capability_grants
+    FOR UPDATE
+    USING (
+        NULLIF(current_setting('app.platform_admin_principal_id', true), '') IS NOT NULL
+        AND NULLIF(current_setting('app.tenant_id', true), '') IS NULL
+        AND NULLIF(current_setting('app.player_account_id', true), '') IS NULL
+        AND NULLIF(current_setting('app.platform_service_id', true), '') IS NULL
         AND NOT financial_acting_gucs_present()
     )
     WITH CHECK (
         NULLIF(current_setting('app.platform_admin_principal_id', true), '') IS NOT NULL
         AND NULLIF(current_setting('app.tenant_id', true), '') IS NULL
         AND NULLIF(current_setting('app.player_account_id', true), '') IS NULL
+        AND NULLIF(current_setting('app.platform_service_id', true), '') IS NULL
         AND NOT financial_acting_gucs_present()
     );
 

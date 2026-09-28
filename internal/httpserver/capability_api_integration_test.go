@@ -190,10 +190,16 @@ func (r cgResp) decode(t *testing.T, v any) {
 	}
 }
 
+// requestCount reads via WithPlatformAdmin (not plain WithTenant): K1-C2's
+// per-command RLS split requires app.principal_id to be set for the
+// TENANT-scope SELECT policy, which plain WithTenant never sets - the
+// platform-scope SELECT policy only requires the platform GUC, which
+// WithPlatformAdmin does set, and reads across any tenant, so this stays
+// correct as a pure test-assertion helper (never how a real caller reads).
 func (a *cgAPI) requestCount(tenantID, granteeID uuid.UUID) int {
 	a.t.Helper()
 	var n int
-	if err := a.pool.WithTenant(context.Background(), tenantID, func(ctx context.Context, tx pgx.Tx) error {
+	if err := a.pool.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
 		return tx.QueryRow(ctx, `SELECT count(*) FROM staff_capability_grant_requests WHERE tenant_id = $1 AND grantee_staff_id = $2`, tenantID, granteeID).Scan(&n)
 	}); err != nil {
 		a.t.Fatal(err)
@@ -415,5 +421,99 @@ func TestCapabilityAPI_A1_CrossTenantRefused(t *testing.T) {
 				t.Fatalf("%s: expected 403 for a cross-tenant attempt, got %d: %s", rc.name, resp.status, resp.body)
 			}
 		})
+	}
+}
+
+// TestCapabilityAPI_K1C1_PlatformPathTenantMismatchGives404 (security
+// review K1-C1 of 0f34d36 / F-1, F-5 of the code review): a platform
+// token naming tenant A's path, acting on an id that actually belongs to
+// tenant B, must 404 with no row change and no success audit - RLS alone
+// (which admits every tenant to a platform session) is not the
+// authorization boundary here; the id-plus-tenant filter in
+// internal/capability's own queries is.
+func TestCapabilityAPI_K1C1_PlatformPathTenantMismatchGives404(t *testing.T) {
+	a := newCGAPI(t)
+	tenantA := a.tenant()
+	tenantB := a.tenant()
+	tenantAdminOfB := a.staff(tenantB, "tenant_admin")
+	financeInB := a.staff(tenantB, "finance")
+	platformPrincipal := a.staff(uuid.Nil, "platform_admin")
+	tenantBTok := a.token(tenantAdminOfB, tenantB, auth.RoleTenantAdmin)
+	platformTok := a.token(platformPrincipal, uuid.Nil, auth.RolePlatformAdmin)
+
+	// A real request that belongs to tenant B.
+	resp := a.do(http.MethodPost, "/v1/admin/tenants/"+tenantB.String()+"/capability-grants/requests", tenantBTok, map[string]any{
+		"grantee_staff_id": financeInB.String(), "capability": "ledger_adjustment:initiate", "reason_code": "test",
+	})
+	if resp.status != http.StatusCreated {
+		t.Fatalf("seed request: expected 201, got %d: %s", resp.status, resp.body)
+	}
+	var created struct {
+		ID string `json:"id"`
+	}
+	resp.decode(t, &created)
+	requestID := created.ID
+
+	before := a.successAuditCount(decisionAuditAction["approve"])
+
+	// A platform token names TENANT A's path, but the request id is B's -
+	// the exact shape security's probe found gave 200 before the fix.
+	resp = a.do(http.MethodPost, "/v1/admin/tenants/"+tenantA.String()+"/capability-grants/requests/"+requestID+"/approve", platformTok,
+		map[string]any{"reason_code": "test"})
+	if resp.status != http.StatusNotFound {
+		t.Fatalf("approve via tenant A's path on tenant B's request: expected 404, got %d: %s", resp.status, resp.body)
+	}
+	if resp := a.do(http.MethodPost, "/v1/admin/tenants/"+tenantA.String()+"/capability-grants/requests/"+requestID+"/reject", platformTok,
+		map[string]any{"reason_code": "test"}); resp.status != http.StatusNotFound {
+		t.Fatalf("reject via tenant A's path on tenant B's request: expected 404, got %d: %s", resp.status, resp.body)
+	}
+	if resp := a.do(http.MethodPost, "/v1/admin/tenants/"+tenantA.String()+"/capability-grants/requests/"+requestID+"/cancel", platformTok, nil); resp.status != http.StatusNotFound {
+		t.Fatalf("cancel via tenant A's path on tenant B's request: expected 404, got %d: %s", resp.status, resp.body)
+	}
+
+	// The request must still be pending and unrevoked in B, untouched by
+	// any of the above.
+	if n := a.requestCount(tenantB, financeInB); n != 1 {
+		t.Fatalf("expected the original request to still be the only one in tenant B, got %d", n)
+	}
+	if after := a.successAuditCount(decisionAuditAction["approve"]); after != before {
+		t.Fatalf("expected zero new success audit rows, before=%d after=%d", before, after)
+	}
+
+	// Now revoke: approve for real (via B's own path) to get a grant id,
+	// then attempt to revoke it via A's path.
+	resp = a.do(http.MethodPost, "/v1/admin/tenants/"+tenantB.String()+"/capability-grants/requests/"+requestID+"/approve", platformTok,
+		map[string]any{"reason_code": "test"})
+	if resp.status != http.StatusOK {
+		t.Fatalf("approve via tenant B's own path: expected 200, got %d: %s", resp.status, resp.body)
+	}
+	var grant struct {
+		ID string `json:"id"`
+	}
+	resp.decode(t, &grant)
+
+	if resp := a.do(http.MethodPost, "/v1/admin/tenants/"+tenantA.String()+"/capability-grants/"+grant.ID+"/revoke", platformTok,
+		map[string]any{"reason_code": "test"}); resp.status != http.StatusNotFound {
+		t.Fatalf("revoke via tenant A's path on tenant B's grant: expected 404, got %d: %s", resp.status, resp.body)
+	}
+
+	// list_requests/list_grants via A's path must never include B's rows.
+	resp = a.do(http.MethodGet, "/v1/admin/tenants/"+tenantA.String()+"/capability-grants/requests", platformTok, nil)
+	if resp.status != http.StatusOK {
+		t.Fatalf("list_requests via A: expected 200, got %d: %s", resp.status, resp.body)
+	}
+	var reqList []map[string]any
+	resp.decode(t, &reqList)
+	if len(reqList) != 0 {
+		t.Fatalf("expected zero requests listed under tenant A's path, got %d", len(reqList))
+	}
+	resp = a.do(http.MethodGet, "/v1/admin/tenants/"+tenantA.String()+"/capability-grants", platformTok, nil)
+	if resp.status != http.StatusOK {
+		t.Fatalf("list_grants via A: expected 200, got %d: %s", resp.status, resp.body)
+	}
+	var grantList []map[string]any
+	resp.decode(t, &grantList)
+	if len(grantList) != 0 {
+		t.Fatalf("expected zero grants listed under tenant A's path, got %d", len(grantList))
 	}
 }

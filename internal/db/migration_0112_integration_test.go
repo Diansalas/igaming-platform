@@ -138,7 +138,7 @@ func TestMigration0112_A17_UpDownRefusesWithRowsThenCleanBaseline(t *testing.T) 
 	// Revoke the grant - the row still EXISTS (revoke is not delete), so
 	// down must still refuse.
 	if err := pool.WithPlatformAdmin(ctx, f.ApproverID, func(ctx context.Context, tx pgx.Tx) error {
-		return capability.RevokeGrant(ctx, tx, f.GrantID, "cleanup")
+		return capability.RevokeGrant(ctx, tx, f.TenantID, f.GrantID, "cleanup")
 	}); err != nil {
 		t.Fatalf("revoke: %v", err)
 	}

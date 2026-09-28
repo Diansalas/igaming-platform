@@ -377,7 +377,16 @@ func SetSessionInternalOpID(ctx context.Context, tx pgx.Tx, sessionID uuid.UUID)
 // Only internal/adjustment (ADR 0100, K2) and
 // internal/payments/manual_resolution.go (ADR 0101, K3) may call this -
 // pinned by the same static test.
-func (p *Pool) WithPlatformActingInTenant(ctx context.Context, principalID, targetTenantID uuid.UUID, fn TxFunc) error {
+//
+// requestID and operation (F-7, code review of 0f34d36) identify the
+// caller's own governed request/resolution row and the calling operation
+// name (e.g. "ledger_adjustment", "payment_force_resolve") - ADR 0099
+// §6.1 point 3 requires the "financial.acting_session_opened" audit row
+// to carry both. requestID may be uuid.Nil and operation may be empty for
+// a caller with no single request row to name (neither is validated here
+// - the caller's own domain trigger, e.g. the §6.6 ledger fence, is what
+// actually ties the operation to a real, executing request).
+func (p *Pool) WithPlatformActingInTenant(ctx context.Context, principalID, targetTenantID, requestID uuid.UUID, operation string, fn TxFunc) error {
 	if principalID == uuid.Nil {
 		return fmt.Errorf("db: WithPlatformActingInTenant called with nil principal id")
 	}
@@ -410,11 +419,18 @@ func (p *Pool) WithPlatformActingInTenant(ctx context.Context, principalID, targ
 	// metadata columns); migration 0112's audit_log_acting_actor trigger
 	// independently re-forces actor_type/actor_id/tenant_id/metadata from
 	// the DB session regardless of what is written here, so this cannot
-	// misreport the actor even if it tried.
+	// misreport the actor even if it tried. metadata is a jsonb object
+	// (never NULL) so the trigger's own "metadata || '{...}'::jsonb" merge
+	// works: jsonb_concat with a NULL left operand yields NULL, which
+	// would silently drop the actor_scope tag entirely.
+	var requestIDVal any
+	if requestID != uuid.Nil {
+		requestIDVal = requestID.String()
+	}
 	if _, err := tx.Exec(ctx,
 		`INSERT INTO audit_log (tenant_id, actor_type, actor_id, action, outcome, metadata)
-		 VALUES ($1, 'staff', $2, 'financial.acting_session_opened', 'success', '{}'::jsonb)`,
-		targetTenantID, principalID,
+		 VALUES ($1, 'staff', $2, 'financial.acting_session_opened', 'success', jsonb_build_object('request_id', $3::text, 'operation', $4::text))`,
+		targetTenantID, principalID, requestIDVal, operation,
 	); err != nil {
 		return fmt.Errorf("db: audit acting session open: %w", err)
 	}

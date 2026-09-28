@@ -105,7 +105,7 @@ func mustBuildActingGrantFixtureWithCapability(t *testing.T, pool *Pool, cap cap
 	}
 
 	if err := pool.WithPlatformAdmin(ctx, f.ApproverID, func(ctx context.Context, tx pgx.Tx) error {
-		_, grant, err := capability.DecideAndGrant(ctx, tx, f.RequestID, "approve", "fixture")
+		_, grant, err := capability.DecideAndGrant(ctx, tx, f.TenantID, f.RequestID, "approve", "fixture")
 		if err != nil {
 			return err
 		}
