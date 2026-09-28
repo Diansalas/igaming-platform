@@ -465,6 +465,195 @@ func TestCapabilityGrant_SockPuppet_NoCoApprovalNoGrant(t *testing.T) {
 
 func timePtr(t time.Time) *time.Time { return &t }
 
+// TestActingSetter_RefusesWithoutValidGrant is the setter's own validity
+// check (ADR 0099 §6.1 point 2, C-99-8): WithPlatformActingInTenant must
+// raise (SQLSTATE CG020) and never call fn when the (principal, tenant)
+// pair has no in-force grant at all - a random staff_users row, a real
+// tenant with no grant, and a revoked grant are each tried.
+func TestActingSetter_RefusesWithoutValidGrant(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+
+	t.Run("no grant at all", func(t *testing.T) {
+		tenantID := createTestTenant(t, pool)
+		platformPrincipal := cgStaff(t, pool, uuid.Nil, "platform_admin")
+		called := false
+		err := pool.WithPlatformActingInTenant(ctx, platformPrincipal, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+			called = true
+			return nil
+		})
+		if err == nil {
+			t.Fatal("expected the setter to refuse with no in-force grant")
+		}
+		if !cgIsCode(err, "CG020") {
+			t.Fatalf("expected CG020, got %v", err)
+		}
+		if called {
+			t.Fatal("fn must never run when the acting session fails to open")
+		}
+	})
+
+	t.Run("revoked grant", func(t *testing.T) {
+		f := mustBuildActingGrantFixtureWithCapability(t, pool, capability.CapabilityLedgerAdjustmentInitiate)
+		if err := pool.WithPlatformAdmin(ctx, f.ApproverID, func(ctx context.Context, tx pgx.Tx) error {
+			return capability.RevokeGrant(ctx, tx, f.GrantID, "test-revoke")
+		}); err != nil {
+			t.Fatalf("revoke: %v", err)
+		}
+		err := pool.WithPlatformActingInTenant(ctx, f.GranteeID, f.TenantID, func(ctx context.Context, tx pgx.Tx) error {
+			return nil
+		})
+		if !cgIsCode(err, "CG020") {
+			t.Fatalf("revoked grant: expected CG020, got %v", err)
+		}
+	})
+
+	t.Run("grant for a different tenant", func(t *testing.T) {
+		f := mustBuildActingGrantFixtureWithCapability(t, pool, capability.CapabilityLedgerAdjustmentInitiate)
+		otherTenant := createTestTenant(t, pool)
+		err := pool.WithPlatformActingInTenant(ctx, f.GranteeID, otherTenant, func(ctx context.Context, tx pgx.Tx) error {
+			return nil
+		})
+		if !cgIsCode(err, "CG020") {
+			t.Fatalf("grant for a different tenant: expected CG020, got %v", err)
+		}
+	})
+}
+
+// A-4 (K1-1 cases): with a VALID, in-force acting session (opened through
+// the sole setter, WithPlatformActingInTenant), every write/read the §6.4
+// restrictive fence must refuse on the seven exposed tables is refused.
+// This is also the mutation-kill test for "drop one restrictive policy"
+// on each of the seven tables (ADR 0099 §14 mutant list).
+func TestCapabilityGrant_A4_K11_RestrictiveFenceRefusals(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+	principalID, tenantID := mustBuildValidActingGrantFixture(t, pool)
+
+	// A real Person, created BEFORE the acting session opens (persons is
+	// fully denied to acting sessions, §6.4) - needed only as a valid FK
+	// target for the player_restrictions attempt below.
+	somePerson := uuid.New()
+	if err := pool.WithoutTenant(ctx, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `INSERT INTO persons (id) VALUES ($1)`, somePerson)
+		return err
+	}); err != nil {
+		t.Fatalf("insert person fixture: %v", err)
+	}
+
+	// runRefused: the write/query itself must error (RLS or trigger
+	// refusal).
+	runRefused := func(t *testing.T, name string, fn func(tx pgx.Tx) error) {
+		t.Helper()
+		t.Run(name, func(t *testing.T) {
+			err := pool.WithPlatformActingInTenant(ctx, principalID, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+				return fn(tx)
+			})
+			if err == nil {
+				t.Fatalf("%s: expected refusal, got success", name)
+			}
+		})
+	}
+	// runZeroRows: the query itself succeeds (SELECT with WHERE/COUNT
+	// never errors on zero matches), but RLS must make zero rows visible.
+	runZeroRows := func(t *testing.T, name, query string, args ...any) {
+		t.Helper()
+		t.Run(name, func(t *testing.T) {
+			var n int
+			err := pool.WithPlatformActingInTenant(ctx, principalID, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+				return tx.QueryRow(ctx, query, args...).Scan(&n)
+			})
+			if err != nil {
+				t.Fatalf("%s: query itself failed: %v", name, err)
+			}
+			if n != 0 {
+				t.Fatalf("%s: expected zero rows visible under RLS, got %d", name, n)
+			}
+		})
+	}
+
+	// staff_users: insert a platform_admin.
+	runRefused(t, "insert_platform_admin", func(tx pgx.Tx) error {
+		_, err := tx.Exec(context.Background(),
+			`INSERT INTO staff_users (id, tenant_id, email, password_hash, role, status) VALUES (gen_random_uuid(), NULL, $1, 'x', 'platform_admin', 'active')`,
+			"forged-"+uuid.NewString()+"@test.invalid")
+		return err
+	})
+	// staff_users: read another platform staff row (not self, not tenant X).
+	otherPlatform := cgStaff(t, pool, uuid.Nil, "platform_admin")
+	runZeroRows(t, "read_other_platform_staff", `SELECT count(*) FROM staff_users WHERE id = $1`, otherPlatform)
+	// staff_users: update/delete staff.
+	runRefused(t, "update_staff", func(tx pgx.Tx) error {
+		_, err := tx.Exec(context.Background(), `UPDATE staff_users SET status = 'suspended' WHERE id = $1`, principalID)
+		return err
+	})
+	// sessions: insert a platform session row.
+	runRefused(t, "insert_platform_session", func(tx pgx.Tx) error {
+		_, err := tx.Exec(context.Background(),
+			`INSERT INTO sessions (id, principal_type, principal_id, refresh_token_hash, expires_at) VALUES (gen_random_uuid(), 'staff', $1, 'x', now() + interval '1 day')`,
+			principalID)
+		return err
+	})
+	// login_attempts: read.
+	runZeroRows(t, "read_login_attempts", `SELECT count(*) FROM login_attempts`)
+	// audit_log: read any row (INSERT is allowed for own tenant, but
+	// SELECT is always refused).
+	runZeroRows(t, "read_audit_log", `SELECT count(*) FROM audit_log`)
+	// audit_log: an attempted platform (tenant_id NULL) insert is FORCED
+	// to the acting tenant by audit_log_acting_actor (never left as a
+	// genuine platform-scope row) - proving the trigger, not merely the
+	// restrictive policy, closes this K1-1 case.
+	t.Run("insert_audit_row_forced_to_acting_tenant_never_platform", func(t *testing.T) {
+		marker := "test.forged." + uuid.NewString()
+		// The INSERT runs plain (no RETURNING): acting_log_acting_actor's
+		// restrictive fence denies ANY SELECT to an acting session (even
+		// of the row it just inserted), so RETURNING's own implicit
+		// SELECT-policy filter would otherwise make this whole statement
+		// misleadingly look like a failure. Verified afterward from a
+		// genuinely tenant-scoped session instead.
+		err := pool.WithPlatformActingInTenant(ctx, principalID, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+			_, err := tx.Exec(ctx,
+				`INSERT INTO audit_log (tenant_id, actor_type, actor_id, action, outcome) VALUES (NULL, 'staff', $1, $2, 'success')`,
+				principalID, marker)
+			return err
+		})
+		if err != nil {
+			t.Fatalf("insert: %v", err)
+		}
+
+		var gotTenant, gotActor string
+		if err := pool.WithTenant(ctx, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+			return tx.QueryRow(ctx, `SELECT tenant_id::text, actor_id::text FROM audit_log WHERE action = $1`, marker).Scan(&gotTenant, &gotActor)
+		}); err != nil {
+			t.Fatalf("read back from a tenant session: %v", err)
+		}
+		if gotTenant != tenantID.String() {
+			t.Fatalf("expected tenant_id forced to the acting tenant %s, got %s (never platform/NULL)", tenantID, gotTenant)
+		}
+		if gotActor != principalID.String() {
+			t.Fatalf("expected actor_id forced to the acting principal %s, got %s", principalID, gotActor)
+		}
+	})
+	// persons: any access at all.
+	runZeroRows(t, "read_persons", `SELECT count(*) FROM persons`)
+	// player_restrictions: insert a NULL-tenant (platform) row.
+	runRefused(t, "insert_null_tenant_player_restriction", func(tx pgx.Tx) error {
+		_, err := tx.Exec(context.Background(),
+			`INSERT INTO player_restrictions (id, person_id, tenant_id, restriction_type, source, created_by_actor_type, created_by_actor_id)
+			 VALUES (gen_random_uuid(), $1, NULL, 'self_exclusion', 'staff', 'staff', $2)`,
+			somePerson, principalID)
+		return err
+	})
+	// risk_rules: write (a NULL-tenant, i.e. platform-level, rule).
+	runRefused(t, "write_risk_rules", func(tx pgx.Tx) error {
+		_, err := tx.Exec(context.Background(),
+			`INSERT INTO risk_rules (id, tenant_id, operation, limit_kind, time_window, threshold, created_by_actor_type, created_by_actor_id)
+			 VALUES (gen_random_uuid(), NULL, 'deposit', 'max_amount', 'transaction', 100, 'staff', $1)`,
+			principalID)
+		return err
+	})
+}
+
 // TestCapabilityGrant_C1_ExactGUCShapePredicate pins financial_acting_
 // gucs_exact() (ADR 0099 §6.3, security confirmation C-1) directly: true
 // only when BOTH acting GUCs are set AND all five other principal-shaped
