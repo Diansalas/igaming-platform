@@ -1,0 +1,54 @@
+# FH-7 idle-machine timing lane (TEST-RESISO-RACE-1, F-POOL-1 K1 local evidence) — 2026-09-28
+# Tree: 7c071c3 (code identical to 498559a). Exactly CI's two lane commands (.github/workflows/ci.yml 'Timing-sensitive security tests, run alone'), -race -count=1, thresholds unchanged.
+# DB: private igaming_orch_local rebuilt and migrated to head (0107) immediately before. Machine otherwise idle (no other go test; 2 read-only review agents).
+# Rounds 1-3: taskset -c 0-1 (2 CPUs, like a 2-vCPU runner). Rounds 4-5: taskset -c 0-3.
+# An earlier attempt against the shared igaming_platform_ci_local (at migration 0100, missing payment_attempts) failed with SQLSTATE 42P01 — an environment error, not timing; discarded and re-run on a migrated DB.
+
+== round 1 cpus 0-1
+--- PASS: TestStoreOutage_DoesNotPinPool (2.26s)
+--- PASS: TestStoreOutage_DoesNotPinPool_ProductionPoolSize (2.17s)
+--- PASS: TestResolutionIsolation_NormalOperation (2.93s)
+--- PASS: TestResolutionIsolation_OneTenantStoreOutage (3.01s)
+--- PASS: TestResolutionIsolation_MultipleTenantsOutage (4.03s)
+--- PASS: TestResolutionIsolation_SimultaneousOnset_Bounded (4.06s)
+--- PASS: TestResolutionIsolation_ConnectionExhaustion (2.65s)
+--- PASS: TestResolutionIsolation_FinancialDuringOutage (2.69s)
+== round 2 cpus 0-1
+--- PASS: TestStoreOutage_DoesNotPinPool (2.22s)
+--- PASS: TestStoreOutage_DoesNotPinPool_ProductionPoolSize (2.19s)
+--- PASS: TestResolutionIsolation_NormalOperation (2.99s)
+--- PASS: TestResolutionIsolation_OneTenantStoreOutage (2.99s)
+--- PASS: TestResolutionIsolation_MultipleTenantsOutage (4.03s)
+--- PASS: TestResolutionIsolation_SimultaneousOnset_Bounded (4.00s)
+--- PASS: TestResolutionIsolation_ConnectionExhaustion (2.66s)
+--- PASS: TestResolutionIsolation_FinancialDuringOutage (2.69s)
+== round 3 cpus 0-1
+--- PASS: TestStoreOutage_DoesNotPinPool (2.25s)
+--- PASS: TestStoreOutage_DoesNotPinPool_ProductionPoolSize (2.19s)
+--- PASS: TestResolutionIsolation_NormalOperation (2.94s)
+--- PASS: TestResolutionIsolation_OneTenantStoreOutage (2.97s)
+--- PASS: TestResolutionIsolation_MultipleTenantsOutage (4.05s)
+--- PASS: TestResolutionIsolation_SimultaneousOnset_Bounded (4.01s)
+--- PASS: TestResolutionIsolation_ConnectionExhaustion (2.65s)
+--- PASS: TestResolutionIsolation_FinancialDuringOutage (2.65s)
+== round 4 cpus 0-3
+--- PASS: TestStoreOutage_DoesNotPinPool (2.17s)
+--- PASS: TestStoreOutage_DoesNotPinPool_ProductionPoolSize (2.18s)
+--- PASS: TestResolutionIsolation_NormalOperation (2.41s)
+--- PASS: TestResolutionIsolation_OneTenantStoreOutage (2.76s)
+--- PASS: TestResolutionIsolation_MultipleTenantsOutage (3.61s)
+--- PASS: TestResolutionIsolation_SimultaneousOnset_Bounded (3.55s)
+--- PASS: TestResolutionIsolation_ConnectionExhaustion (2.48s)
+--- PASS: TestResolutionIsolation_FinancialDuringOutage (2.51s)
+== round 5 cpus 0-3
+--- PASS: TestStoreOutage_DoesNotPinPool (2.19s)
+--- PASS: TestStoreOutage_DoesNotPinPool_ProductionPoolSize (2.16s)
+--- PASS: TestResolutionIsolation_NormalOperation (2.37s)
+--- PASS: TestResolutionIsolation_OneTenantStoreOutage (2.72s)
+--- PASS: TestResolutionIsolation_MultipleTenantsOutage (3.53s)
+--- PASS: TestResolutionIsolation_SimultaneousOnset_Bounded (3.64s)
+--- PASS: TestResolutionIsolation_ConnectionExhaustion (2.50s)
+--- PASS: TestResolutionIsolation_FinancialDuringOutage (2.50s)
+PASS=40 FAIL=0
+ 04:39:42 up 20:13,  0 user,  load average: 1.16, 1.43, 1.52
+
