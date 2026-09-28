@@ -15,14 +15,19 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/txscope"
 )
 
-// ErrCatalogueFetchRefused is the sentinel FetchCatalogue wraps when it
-// refuses to call the provider at all - either because ctx is (despite the
-// API shape below) marked as holding a pooled database transaction
-// (txscope.Held), or because the provider itself returned an error.
-// Mirrors payments' ErrProviderCallRefused / casino's identical sentinel
-// (ADR 0095, defence-in-depth behind the primary API-shape control: no
-// function that can reach Provider.Catalogue takes a pgx.Tx).
-var ErrCatalogueFetchRefused = errors.New("sportsbook: provider catalogue fetch refused")
+// ErrCatalogueFetchRefused is the sentinel FetchCatalogue wraps ONLY when it
+// refuses to call the provider at all because ctx is (despite the API shape
+// below) already marked as holding a pooled database transaction
+// (txscope.Held) - a programming bug at the call site, never an ordinary
+// provider/network failure. Scoped identically to payments'
+// ErrProviderCallRefused / casino's own sentinel (ADR 0095, defence-in-depth
+// behind the primary API-shape control: no function that can reach
+// Provider.Catalogue takes a pgx.Tx): each covers only its own gate-level
+// refusal, never the adapter's own error (code review F5 - the prior
+// revision's doc comment incorrectly said this sentinel also wrapped
+// ordinary provider errors). A provider error is instead returned with
+// plain context, unwrapped by this sentinel - see FetchCatalogue below.
+var ErrCatalogueFetchRefused = errors.New("sportsbook: provider catalogue fetch refused: tx held")
 
 // catalogueUnavailableReason is the ONE opaque, player-facing reason every
 // jurisdiction-gated catalogue annotation reports (Stage 9.2, ADR 0083
@@ -56,11 +61,11 @@ const catalogueUnavailableReason = "not_available_in_your_jurisdiction"
 // inside the transaction" (SyncCatalogue's own pre-split behaviour).
 func FetchCatalogue(ctx context.Context, provider Provider) (CatalogueResult, error) {
 	if txscope.Held(ctx) {
-		return CatalogueResult{}, fmt.Errorf("%w: provider_call_refused_tx_held", ErrCatalogueFetchRefused)
+		return CatalogueResult{}, ErrCatalogueFetchRefused
 	}
 	result, err := provider.Catalogue(ctx)
 	if err != nil {
-		return CatalogueResult{}, fmt.Errorf("%w: %w", ErrCatalogueFetchRefused, err)
+		return CatalogueResult{}, fmt.Errorf("sportsbook: fetch catalogue: %w", err)
 	}
 	// PROVIDER-REF-BOUND-1: the whole tree is validated here, before any
 	// transaction is opened at all - a single bad external_ref rejects the
