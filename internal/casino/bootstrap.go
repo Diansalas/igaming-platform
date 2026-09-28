@@ -78,6 +78,17 @@ func (e *BootstrapRefusedError) Unwrap() error { return ErrBootstrapRefused }
 // roll back and return 5xx.").
 var ErrBootstrapInvariantBroken = errors.New("casino: launch bootstrap revoke invariant broken")
 
+// casinoLaunchBootstrapsOncePerRequestConstraint is the ONLY unique
+// constraint name (migration 0115) that db.IdempotentInsert's SAVEPOINT
+// retry, below, is entitled to interpret as a legitimate concurrent-race
+// replay/reject path (F-7, architect review). The table's OTHER unique
+// constraint, casino_launch_bootstraps_once_per_session (UNIQUE on
+// launch_session_id alone), can never be hit by a legitimate concurrent
+// request under this function's own lock order - reaching it would mean
+// an invariant was broken elsewhere, and is handled as a 5xx, never a
+// silent replay.
+const casinoLaunchBootstrapsOncePerRequestConstraint = "casino_launch_bootstraps_once_per_request"
+
 // BootstrapResult is BootstrapLaunch's success/denial outcome - "Denied is
 // a result, never a Go error" (LaunchGameResult's own established
 // convention in this package, reused here for ADR 0103 §3.3's identical
@@ -507,7 +518,7 @@ func (o *Orchestrator) BootstrapLaunch(ctx context.Context, pool providercred.Te
 			return fmt.Errorf("casino: marshal bootstrap response: %w", err)
 		}
 
-		conflict, _, err := db.IdempotentInsert(ctx, tx, func(stx pgx.Tx) error {
+		conflict, constraintName, err := db.IdempotentInsert(ctx, tx, func(stx pgx.Tx) error {
 			_, err := stx.Exec(ctx,
 				`INSERT INTO casino_launch_bootstraps
 					(tenant_id, provider_id, request_id, token_hash, request_digest, launch_session_id, player_ref, response)
@@ -517,6 +528,28 @@ func (o *Orchestrator) BootstrapLaunch(ctx context.Context, pool providercred.Te
 		})
 		if err != nil {
 			return err
+		}
+		if conflict && constraintName != casinoLaunchBootstrapsOncePerRequestConstraint {
+			// F-7 (architect review): the ONLY unique violation this
+			// insert's own retry logic below is entitled to interpret as
+			// "a concurrent request raced us to the same idempotency key,
+			// replay/reject accordingly" is
+			// casino_launch_bootstraps_once_per_request - the constraint
+			// keyed on (tenant_id, provider_id, request_id), which is
+			// exactly the idempotency key ADR 0103 §3.4 defines. ANY other
+			// unique violation here - concretely,
+			// casino_launch_bootstraps_once_per_session (UNIQUE on
+			// launch_session_id alone) - means this session already has a
+			// DIFFERENT bootstrap row bound to it despite step 5's CAS
+			// having just (in THIS transaction) atomically moved it from
+			// active to consumed. That can only happen if the CAS's own
+			// exclusivity guarantee has been violated somewhere upstream
+			// (a bug, not a legitimate race) - silently treating it as a
+			// replay would let a SECOND player_ref/response pair attach to
+			// a session that must have exactly one, so this fails closed
+			// as an invariant break (5xx) instead.
+			return fmt.Errorf("%w: launch bootstrap insert violated unexpected constraint %q (only %q is a legitimate replay/race path)",
+				ErrBootstrapInvariantBroken, constraintName, casinoLaunchBootstrapsOncePerRequestConstraint)
 		}
 		if conflict {
 			// ADR 0103 §3.2 step 6: "A unique violation -> roll back,
