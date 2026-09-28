@@ -177,12 +177,38 @@ func pcg1ScanFile(path string, src []byte) ([]pcg1Violation, error) {
 	return violations, nil
 }
 
-// pcg1SkipDirNames are directories this guard's whole-repository walk
-// never descends into: version control internals, and the two frontend
-// (non-Go) app trees, which contain no .go files but are large enough to
-// slow the walk down for nothing.
+// pcg1SkipDirNames are NAMED directories this guard's whole-repository
+// walk never descends into, on top of the dot-/underscore-prefix rule
+// below: the two frontend (non-Go) app trees, which contain no .go files
+// but are large enough to slow the walk down for nothing, and the
+// standard Go-tool-ignored names (vendor, node_modules, testdata).
+//
+// Coordinator finding (2026-09-28, I-core integration): a raw
+// filepath.WalkDir from the repository root also walks into
+// .claude/worktrees/, where OTHER AGENTS' own full checkouts of this same
+// repository live - their copies of this repo's own allowed call sites
+// were flagged as violations when this guard ran from the main checkout,
+// where that directory is populated. Fixed by doing what the go tool
+// itself does (see `go help packages`: "Directory and file names that
+// begin with '.' or '_' are ignored by the go tool, as are directories
+// named 'testdata'") plus the two conventional dependency-vendoring names
+// (vendor, node_modules) - not by naming .claude/worktrees specifically,
+// which would only fix this one symptom and not the general problem of a
+// nested checkout/build-output tree appearing anywhere under root.
 var pcg1SkipDirNames = map[string]bool{
-	".git": true, "b2c": true, "backoffice": true, "node_modules": true,
+	"vendor": true, "node_modules": true, "testdata": true,
+	"b2c": true, "backoffice": true,
+}
+
+// pcg1SkipDir reports whether a directory named name (not the walk's own
+// root, which is never skipped even if it happens to start with '.' or
+// '_') must never be descended into - go-tool convention (dot-/
+// underscore-prefixed, per `go help packages`) plus pcg1SkipDirNames.
+func pcg1SkipDir(name string) bool {
+	if strings.HasPrefix(name, ".") || strings.HasPrefix(name, "_") {
+		return true
+	}
+	return pcg1SkipDirNames[name]
 }
 
 // pcg1WalkNonTestGoFiles visits every non-test .go file in the entire
@@ -190,14 +216,18 @@ var pcg1SkipDirNames = map[string]bool{
 // internal/payments/casino/kyc the way IO-1C's own walk is, per the
 // security review's own "scan all non-test packages" instruction: nothing
 // stops a future caller anywhere in the tree from holding a
-// payments.PaymentProvider value.
+// payments.PaymentProvider value. Skips dot-/underscore-prefixed
+// directories and the names in pcg1SkipDirNames (see their own doc
+// comments) - in particular this keeps the walk out of any nested git
+// worktree checkout of this same repository (e.g. .claude/worktrees/ on
+// the main checkout), never assuming root itself is free of such trees.
 func pcg1WalkNonTestGoFiles(root string, visit func(path string, src []byte) error) error {
 	return filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
 		if d.IsDir() {
-			if pcg1SkipDirNames[d.Name()] {
+			if path != root && pcg1SkipDir(d.Name()) {
 				return filepath.SkipDir
 			}
 			return nil
