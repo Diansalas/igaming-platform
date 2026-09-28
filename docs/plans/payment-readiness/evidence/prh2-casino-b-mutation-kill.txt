@@ -208,3 +208,39 @@ The lock-order ABBA reproduction test (F-1, TestLockOrder_BootstrapAndFirstBetOf
 was separately run at -count=20 per the same instruction - see the F-1 fix commit's own report for
 that command and result (both sub-tests, "FOR UPDATE (mutant, pre-fix)" and "FOR NO KEY UPDATE
 (fix)", stable across all 20 iterations).
+
+B-C3 (security review of e810ece, docs/plans/prh2-hardening-round/reviews/b-security.md - the
+production lock clause was not actually pinned by the F-1 lock-order test; the test built its own
+Sprintf-parameterised query and never called getLaunchSessionForBootstrap, so security's own re-run
+of the exact mutant left every casino/httpserver bootstrap and lock-order test green):
+
+Fix: TestLockOrder_BootstrapAndFirstBetOfRound_NoDeadlock (internal/casino/
+lockorder_integration_test.go) is restructured into two sub-tests. "harness control: FOR UPDATE
+deadlocks (mutant)" keeps the earlier Sprintf-built raw query, now explicitly scoped as ONLY proving
+the harness (loRunABBA/loIsDeadlock/the blockers) can detect a 40P01 in this two-resource shape - it
+was never meant to stand in for production code, and the test's own doc comment now says so.
+"production: getLaunchSessionForBootstrap (fix)" is the sub-test that actually pins production
+behaviour: racer A calls internal/casino's own getLaunchSessionForBootstrap directly (not a
+hand-written equivalent query).
+
+Re-ran the exact mutant this finding names, applied directly to the real file:
+
+  bootstrap.go:242  `FOR NO KEY UPDATE`,  ->  `FOR UPDATE`,
+
+Private DB cas_bc3_mut rebuilt from scratch via priv_db.sh, then:
+
+  PRIV_DB=cas_bc3_mut bash .../priv_test.sh -race -tags integration -run \
+    'TestLockOrder_BootstrapAndFirstBetOfRound_NoDeadlock/production' -count=1 -v ./internal/casino/...
+
+KILLED - first failure:
+
+  --- FAIL: TestLockOrder_BootstrapAndFirstBetOfRound_NoDeadlock/production:_getLaunchSessionForBootstrap_(fix)
+      lockorder_integration_test.go:415: F-1 (bootstrap session lock vs. postBet's FK-driven lock):
+      "bootstrap-sim(session,RG)" aborted with a deadlock - the canonical lock order (ADR 0082) is
+      not being honoured on this path: SQLSTATE 40P01: deadlock detected (detail: Process 24170
+      waits for ExclusiveLock on advisory lock [...]; blocked by process 24172. Process 24172 waits
+      for ShareLock on transaction 18629029; blocked by process 24170.)
+
+Reverted and diffed byte-identical (md5sum 157a78d583f5b73bd5fd471618f59ac3 before AND after) against
+the committed original. The "harness control" sub-test was NOT re-run against this mutant - it does
+not call production code at all, by design, and re-running it would prove nothing about this finding.
