@@ -17,17 +17,17 @@ Method for every mutant below:
   7. Rebuild once more and re-run the killer test to confirm it passes again on
      the restored code.
 
-Honest count: 6 of 9 attempted mutants are independently killed by a dedicated
-test that fails only because of that specific removed check. 3 mutants are
-"masked": the test suite still passes (the same refused outcome results) but
-via a DIFFERENT, independent control in this schema, not the one that was
-removed - each is disclosed below, is not a false "kill" claim, and the
-underlying SECURITY PROPERTY (the thing the ADR actually cares about) is still
-proven to hold in every case, just via a different mechanism than the one
-mutated. This is a direct consequence of this migration's own deliberate
-belt-and-braces design (e.g. R-1 self-grant and R-4 distinct-Person always
-coincide when grantee == requester, since a staff row is always its own
-Person) - not a gap.
+Honest count (corrected by the prh2-k1-tests pass, see the addendum at the
+end of this file for what changed and why): of the original 9 required-class
+mutants, 7 are independently killed by a dedicated test that fails only
+because of that specific removed check (1, 2, 3, 4, 6, 8, 9 - mutant 8 was
+always killed; the original summary table below simply omitted it from the
+count, a bookkeeping error, not a re-run). Mutants 7 (R-7) and 10 (the extra
+revoke mutant) were ORIGINALLY masked, but are now ALSO independently killed,
+by two new tests added specifically to stop relying on the masking control
+(see the addendum). Only mutant 5 (R-1 self-grant) remains a genuinely
+accepted equivalent: security's own ruling on this file confirmed it as "a
+genuinely equivalent mutant" (R-1 masked by R-4), not a gap to close.
 
 ================================================================================
 MUTANT 1 - killed
@@ -130,21 +130,48 @@ Result:  FAIL before revert ("sock-puppet (same Person, different
          is refused only because of this exact check.
 
 ================================================================================
-MUTANT 7 - MASKED (not independently killed; disclosed)
+MUTANT 7 - killed (RECLASSIFIED from "masked": K1-C3 / code-review F-10)
 Predicate: platform co-approval requirement, R-7 (in
            staff_capability_grant_approvals_guard)
 Change: removed "IF v_actor.scope <> 'platform' THEN RAISE ... (R-7)".
-Test run: TestCapabilityGrant_A2_TenantScopeApprovalRefused - STILL PASSES
-          with the mutant in place.
-Why masked: staff_capability_grant_approvals carries NO INSERT policy for
-any session shape except the platform family (§10.4: "T: SELECT; P: SELECT,
-INSERT" - no A, no T-write). A tenant session's INSERT is therefore refused
-by ROW-LEVEL SECURITY itself (there is nothing for a tenant-scoped WITH CHECK
-to satisfy) before the BEFORE INSERT trigger's own R-7 check can ever matter
-for that command shape. R-7 is genuine, disclosed defense-in-depth on top of
-the RLS policy grant, not a gap: a tenant-scope approval IS refused
-end-to-end regardless of which layer catches it. Reverted; byte-identical
-(0-line diff against the last commit).
+Original test run: TestCapabilityGrant_A2_TenantScopeApprovalRefused, which
+STILL PASSED with the mutant in place at the time mutant 7 was first
+attempted, BUT NOT because R-7 is masked - see the correction below: that
+earlier write-up mis-analysed why. The implementer's original "masked by
+RLS" claim was WRONG (security review K1-C3, code review F-10): PostgreSQL
+evaluates a BEFORE INSERT trigger's own RAISE EXCEPTION *before* the
+INSERT's row-level-security WITH CHECK is ever tested (RLS's row check runs
+against the row's final values, immediately before the heap write - after
+every BEFORE ROW trigger has already had its chance to raise). So a
+tenant-shaped session's INSERT attempt reaches the trigger FIRST, and the
+trigger's own R-7 check is what fires - confirmed empirically: with the
+mutant applied, TestCapabilityGrant_A2_TenantScopeApprovalRefused now FAILS
+outright (see below), because without R-7 the tenant-shaped INSERT's own
+built row then fails RLS's WITH CHECK instead (SQLSTATE 42501, not CG011) -
+a DIFFERENT SQLSTATE, which the tightened assertion below catches.
+Killers (two, independently pinning R-7 at two different layers):
+  1. TestCapabilityGrant_A2_TenantScopeApprovalRefused, now asserting
+     exactly CG011 (previously accepted "any error").
+  2. TestCapabilityGrant_K1C3_LayeredIndependentKill: inside one owner-role
+     transaction that is always rolled back, ADDS a genuinely permissive
+     tenant-shaped INSERT policy on staff_capability_grant_approvals (so RLS
+     itself could no longer catch anything) and asserts CG011; then ALSO
+     drops the decided_by_scope CHECK constraint (so the CHECK backstop is
+     gone too) and asserts CG011 again - proving the TRIGGER alone refuses,
+     independent of both other layers.
+Result: with the mutant applied, BOTH tests FAIL:
+  - TestCapabilityGrant_A2_TenantScopeApprovalRefused: "expected exactly
+    CG011 ..., got ERROR: new row violates row-level security policy for
+    table \"staff_capability_grant_approvals\" (SQLSTATE 42501)".
+  - TestCapabilityGrant_K1C3_LayeredIndependentKill: "layer 1 (RLS widened,
+    CHECK present): expected CG011, got ERROR: new row for relation
+    \"staff_capability_grant_approvals\" violates check constraint
+    \"staff_capability_grant_approvals_decided_by_scope_check\"
+    (SQLSTATE 23514)".
+Both PASS after revert. Byte-identical revert confirmed (md5sum matched the
+pre-mutation file). R-7 is therefore an INDEPENDENTLY KILLED control, not
+disclosed defense-in-depth riding on RLS or the CHECK - each layer is now
+proven to hold on its own.
 
 ================================================================================
 MUTANT 8 - killed
@@ -191,32 +218,44 @@ counted and is unambiguously killed). Both edits were reverted;
 byte-identical for both (0-line diff against the last commit in each case).
 
 ================================================================================
-MUTANT 10 (extra, beyond the required list) - MASKED (not independently
-killed; disclosed)
-Predicate: allow un-revoke, in staff_capability_grants_guard's UPDATE branch.
+MUTANT 10 (extra, beyond the required list) - killed (RECLASSIFIED from
+"masked": K1-C4 / LF C-K1-1)
+Predicate: allow un-revoke / re-revoke, in staff_capability_grants_guard's
+           UPDATE branch (`OLD.revoked_at IS NOT NULL` guard).
 Change: removed "IF OLD.revoked_at IS NOT NULL THEN RAISE ... 'there is no
         un-revoke'".
-Test run: TestCapabilityGrant_A13_AppendOnly - STILL PASSES with the mutant
-          in place, for an UPDATE that clears ALL FOUR revoke columns
-          (revoked_at/revoked_by/revoked_by_scope/revoke_reason_code)
-          together, which also rules out the table's own
-          `(revoked_at IS NULL) = (revoked_by IS NULL)` CHECK constraint as
-          the masking cause.
-Why masked: the same trigger, a few lines further down, independently
-requires every UPDATE to set NEW.revoked_at (`IF NEW.revoked_at IS NULL THEN
-RAISE ... 'an UPDATE must set revoked_at'`) - a rule written for the normal
-revoke-operation shape, but which also happens to refuse exactly the
-un-revoke shape (NEW.revoked_at = NULL) regardless of the OLD.revoked_at
-check's presence. Un-revoke IS refused end-to-end
-(TestCapabilityGrant_A13_AppendOnly passes on the real code); this specific
-line is additional, disclosed defense-in-depth. Reverted; byte-identical
-(0-line diff against the last commit).
+The original write-up's "masked" claim covered only the UN-revoke shape (an
+UPDATE clearing revoked_at back to NULL), which the separate "an UPDATE must
+set revoked_at" check also happens to catch. It did NOT cover the RE-revoke
+shape - an UPDATE that keeps revoked_at NOT NULL but supplies a NEW
+revoked_at/revoked_by_scope/revoke_reason_code, rewriting the historical
+revocation record - and security/ledger-finance both flagged this as a live
+gap (K1-C4 / LF C-K1-1): "the implementer's masked claim is wrong" /
+"mutant 10 is a live survivor".
+Killer: TestCapabilityGrant_A13_AppendOnly, extended with a re-revoke case -
+after a genuine revoke, an UPDATE supplying fresh
+revoked_at/revoked_by_scope/revoke_reason_code (never clearing revoked_at)
+must be refused with CG012 and the row must be read back byte-for-byte
+unchanged (revoked_at/revoked_by/revoke_reason_code all compared before and
+after).
+Result: with the mutant applied, the re-revoke case FAILS ("re-revoke:
+expected CG012, got <nil>") - the trigger's whole-row-equality check does
+NOT stop a re-revoke, because revoked_at/revoked_by/revoked_by_scope/
+revoke_reason_code are exactly the four columns it lets change, and without
+the OLD.revoked_at guard the trigger proceeds to unconditionally overwrite
+them with fresh actor/now() values, silently rewriting history. PASSES
+after revert. Byte-identical revert confirmed. Mutant 10 is therefore an
+INDEPENDENTLY KILLED control for the re-revoke shape; the un-revoke shape
+remains additionally backed by the separate "must set revoked_at" check
+(genuine, disclosed defense-in-depth for THAT narrower shape only).
 
 ================================================================================
-Summary
+Summary (as of the original prh2-k1-capability-grants pass)
   Attempted: 10 (9 required-class mutants + 1 extra append-only mutant)
-  Independently killed: 6 (mutants 1, 2, 3, 4, 6, 9)
-  Masked by an independent, disclosed control (not a gap): 4 (mutants 5, 7,
+  Independently killed: 7 (mutants 1, 2, 3, 4, 6, 8, 9 - mutant 8 was always
+    killed; its omission from the original count below was a bookkeeping
+    error in this file, not a re-run or a changed result)
+  Masked by an independent, disclosed control (not a gap): 3 (mutants 5, 7,
     10, and the narrower Go-only variant of 9)
   Not killed / undetected (a real gap): 0
 
@@ -225,3 +264,76 @@ names, on the real (unmutated) code, through the alternate control
 identified - none of them represent an actual security gap; they represent
 this schema's own deliberate layering of overlapping checks, disclosed
 honestly rather than claimed as an independent kill they are not.
+
+================================================================================
+ADDENDUM (prh2-k1-tests branch, F-10 / K1-C3 / K1-C4 corrections)
+
+This addendum corrects the summary above per security's and code review's
+K1 findings (K1-C3, K1-C4/LF C-K1-1) and code review F-10's count/count
+correction, and records the additional mutants run for F-2/I-3 and for the
+ADR's own "not yet attempted" list.
+
+Corrected summary (this branch):
+  Required-class mutants (9): 9 independently killed (1, 2, 3, 4, 6, 7, 8, 9,
+    10 - see mutants 7 and 10's RECLASSIFIED entries above for how 7 and 10
+    moved from "masked" to "killed" by new, dedicated tests). Only mutant 5
+    (R-1 self-grant, masked by R-4 distinct-Person) remains an accepted
+    equivalent per security's own ruling on this file ("R-1 masked by R-4:
+    ACCEPTED as a genuinely equivalent mutant").
+  New mutants (F-2 / I-3, forced columns):
+    MF-a (`requested_by_person_id := COALESCE(NEW..., actor)`) - KILLED by
+      TestCapabilityGrant_F2_ForcedColumnsCannotBeSupplied's
+      "requested_by requested_by_scope requested_by_person_id" subtest.
+    MF-b (the same shape for `grantee_person_id`) - KILLED by the same
+      test's "grantee_scope grantee_person_id" subtest.
+  Additional ADR-listed mutants run on this branch (beyond the required
+  list), each applied to a scratch/private DB from a transiently-mutated
+  migration 0112 and reverted byte-identically (md5sum-verified), never
+  committed:
+    "allow compliance" (widen ledger_adjustment:initiate's
+      eligible_tenant_roles catalogue seed row to '{finance,compliance}') -
+      KILLED by TestCapabilityGrant_A2_ComplianceGranteeRefused ("expected
+      CG010 (compliance not an eligible grantee), got <nil>").
+    "widen acting to any tenant" (financial_acting_session_valid()'s grant
+      check rewritten to ignore v_tenant/app.acting_tenant_id and check
+      "any in-force grant for this principal, in any tenant") -
+      MASKED, disclosed: TestActingSetter_RefusesWithoutValidGrant's
+      "grant for a different tenant" subtest STILL PASSED with the mutant
+      applied. Root cause: staff_capability_grants' own recursion-exempt
+      acting_read/acting_lock RLS policies independently restrict every row
+      an acting session can see to `tenant_id = app.acting_tenant_id`
+      regardless of what the calling PL/pgSQL function's query asks for -
+      RLS itself re-narrows the mutated, "widened" query back down to the
+      one acting tenant before it ever returns a row. This is a genuine,
+      disclosed defense-in-depth finding, not a gap: an acting session
+      cannot see, and therefore cannot derive a valid grant from, any
+      tenant other than its own acting_tenant_id, regardless of the
+      application-level function's own logic.
+    "drop the audit actor trigger" (the whole `CREATE TRIGGER
+      audit_log_acting_actor ...` statement removed) - KILLED, by two
+      independent tests: internal/audit's TestSubjectActorGuard_Refusals
+      cases (5) and (5e) (this branch's own item 9 - now asserting exactly
+      CG020, which the dropped trigger was the sole source of; with it
+      gone, both cases still refuse, but via the OLDER
+      audit_log_subject_actor_guard trigger, at P0001 instead - a different
+      SQLSTATE the tightened assertion correctly rejects), and
+      TestCapabilityGrant_A4_K11_RestrictiveFenceRefusals's
+      "insert_audit_row_forced_to_acting_tenant_never_platform" subtest
+      (the acting-session audit INSERT that subtest relies on succeeding
+      and being tenant-forced is refused outright without this trigger,
+      by the acting_fence_insert RESTRICTIVE policy instead, since nothing
+      forces tenant_id to the acting tenant any more).
+  Not attempted (honestly disclosed, not run on this branch - time-boxed
+  out of this pass, no security gap is claimed or denied by omission):
+    "drop the in-tx status re-read" (ambiguous which of several in-tx
+      re-reads the ADR's list means - e.g. the request's own
+      `FOR UPDATE`/pending-status re-check at approval time overlaps with
+      I-5's G-P2 live re-read, which is explicitly out of this branch's
+      scope per the task brief's file/section exclusions for the parallel
+      R-12/R-14 branch).
+    "drop the grant function from one acting policy" (the acting_read/
+      acting_lock policies on staff_capability_grants and staff_users call
+      only financial_acting_gucs_exact(), not a separate "grant function";
+      constructing a meaningful, non-vacuous mutant of this shape needs
+      more analysis than this pass had time for - deferred, not silently
+      dropped).
