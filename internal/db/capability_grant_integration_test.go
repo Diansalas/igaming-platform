@@ -25,6 +25,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/Diansalas/igaming-platform/internal/capability"
+	"github.com/Diansalas/igaming-platform/internal/testsupport/scratchdb"
 )
 
 func cgIsCode(err error, code string) bool {
@@ -1449,4 +1450,108 @@ func TestCapabilityGrant_F9_PerCommandPoliciesAndServiceExclusion(t *testing.T) 
 			t.Fatalf("expected 0 approval rows visible to a mixed platform_admin+platform_service session, got %d", approvalCount)
 		}
 	})
+}
+
+// TestCapabilityGrant_I4_Migration0034DependencyPinned (architect ruling,
+// I-4): the grantee_person_id snapshot (§7.5 of ADR 0099) is sound only
+// because migration 0034's staff_users_person_id_append_only trigger makes
+// a staff row's non-NULL person_id immutable. This pins that: after a
+// grant request exists naming a grantee, an attempt to change that
+// grantee's person_id to a DIFFERENT, non-NULL value must be refused.
+//
+// The second half proves the pin is REAL, not vacuous: on a throwaway
+// scratch database (never the shared/private one this file's other tests
+// use), the 0034 trigger is dropped directly (no migration file is
+// edited), and the exact same attempt is shown to SUCCEED - i.e. this
+// test's own assertion would fail without migration 0034's trigger,
+// confirming the dependency is load-bearing, not merely assumed.
+func TestCapabilityGrant_I4_Migration0034DependencyPinned(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+	tenantID := createTestTenant(t, pool)
+	requester := cgStaff(t, pool, tenantID, "tenant_admin")
+	finance := cgStaff(t, pool, tenantID, "finance")
+
+	if err := pool.WithPrincipalScope(ctx, tenantID, requester, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := capability.CreateRequest(ctx, tx, tenantID, capability.NewRequestInput{
+			GranteeStaffID: finance, Capability: capability.CapabilityLedgerAdjustmentInitiate,
+			ValidFrom: time.Now(), ReasonCode: "test",
+		})
+		return err
+	}); err != nil {
+		t.Fatalf("create request: %v", err)
+	}
+
+	newPerson := uuid.New()
+	if err := pool.WithoutTenant(ctx, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `INSERT INTO persons (id) VALUES ($1)`, newPerson)
+		return err
+	}); err != nil {
+		t.Fatalf("insert replacement person fixture: %v", err)
+	}
+
+	err := pool.WithTenant(ctx, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `UPDATE staff_users SET person_id = $1 WHERE id = $2`, newPerson, finance)
+		return err
+	})
+	if err == nil {
+		t.Fatal("expected re-linking the grantee's non-NULL person_id to a different Person to be refused (migration 0034's append-only trigger)")
+	}
+}
+
+// TestCapabilityGrant_I4_FailsWithoutMigration0034Trigger is the required
+// negative control (I-4): on a throwaway scratch database, drop migration
+// 0034's staff_users_person_id_append_only trigger directly (no migration
+// file is edited - the trigger is simply dropped after a normal full
+// migrate-up), and show the SAME re-link attempt as above now succeeds -
+// proving TestCapabilityGrant_I4_Migration0034DependencyPinned's refusal
+// really does depend on that trigger, not on some other, incidental
+// control.
+func TestCapabilityGrant_I4_FailsWithoutMigration0034Trigger(t *testing.T) {
+	url := scratchdb.New(t, "cg_i4_")
+	pool, err := Connect(context.Background(), url, 5, 5_000_000_000)
+	if err != nil {
+		t.Fatalf("connect scratch: %v", err)
+	}
+	defer pool.Close()
+	ctx := context.Background()
+	if _, err := pool.MigrateUp(ctx, "../../migrations"); err != nil {
+		t.Fatalf("migrate scratch up: %v", err)
+	}
+
+	if err := pool.WithoutTenant(ctx, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `DROP TRIGGER staff_users_person_id_append_only ON staff_users`)
+		return err
+	}); err != nil {
+		t.Fatalf("drop migration 0034's trigger: %v", err)
+	}
+
+	tenantID := createTestTenant(t, pool)
+	requester := cgStaff(t, pool, tenantID, "tenant_admin")
+	finance := cgStaff(t, pool, tenantID, "finance")
+	if err := pool.WithPrincipalScope(ctx, tenantID, requester, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := capability.CreateRequest(ctx, tx, tenantID, capability.NewRequestInput{
+			GranteeStaffID: finance, Capability: capability.CapabilityLedgerAdjustmentInitiate,
+			ValidFrom: time.Now(), ReasonCode: "test",
+		})
+		return err
+	}); err != nil {
+		t.Fatalf("create request: %v", err)
+	}
+
+	newPerson := uuid.New()
+	if err := pool.WithoutTenant(ctx, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `INSERT INTO persons (id) VALUES ($1)`, newPerson)
+		return err
+	}); err != nil {
+		t.Fatalf("insert replacement person fixture: %v", err)
+	}
+
+	err = pool.WithTenant(ctx, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `UPDATE staff_users SET person_id = $1 WHERE id = $2`, newPerson, finance)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("expected the re-link to SUCCEED once migration 0034's trigger is gone (proving the dependency is real), got refused: %v", err)
+	}
 }
