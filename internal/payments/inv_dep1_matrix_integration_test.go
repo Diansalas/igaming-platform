@@ -118,6 +118,7 @@ package payments
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"testing"
@@ -1214,6 +1215,30 @@ func TestINVDEP1_Inverted_RVLF_P6_ReversalOfDisputedSecondCaptureTakesTombstoneB
 	if b := cashBalance(t, pool, f); b != 0 {
 		t.Errorf("balance after reversing the ONE real capture = %d, want 0", b)
 	}
+
+	// Code review R6 (rv-fh3-code-review.md, 95a1c34): restore the two
+	// assertions the original TestRVLF_P6_ReversalOfSecondCaptureReverses
+	// ItsOwnTransaction carried before this test was inverted for §28 -
+	// the reverses_transaction_id check (against the CHILD's own posting,
+	// the only one that exists in this inverted shape - the parent never
+	// posted, so its own reversal took the tombstone branch and has no
+	// reverses_transaction_id to check) and the PAY-REV-1 distinct-
+	// second-reversal-of-the-same-original refusal.
+	var reverses uuid.UUID
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT reverses_transaction_id FROM ledger_transactions WHERE provider_tx_id = 'invdep1-p6inv-rev-child'`).Scan(&reverses)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if reverses != *child.LedgerTransactionID {
+		t.Errorf("R6/L1: the child's own reversal must reverse its own posting %s, got %s", *child.LedgerTransactionID, reverses)
+	}
+	// PAY-REV-1: a distinct second reversal of the same original (the
+	// child's own capture, already reversed above) is refused.
+	if _, err := rvCallback(pool, orch, f, "invdep1-p6inv-b", pb.CallbackPayload(f.tenantID, CallbackEventDepositReversal, "invdep1-p6inv-rev-child-b", childRef, OutcomeSucceeded, amt, "EUR", "", false)); !errors.Is(err, ErrDepositAlreadyReversed) {
+		t.Errorf("R6/PAY-REV-1 not preserved on the inverted shape: %v", err)
+	}
+
 	assertLedgerBalanced(t, pool, f.tenantID)
 	loAssertProjectionMatchesRebuild(t, pool, f.tenantID)
 	_ = child
