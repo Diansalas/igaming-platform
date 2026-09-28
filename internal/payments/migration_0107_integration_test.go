@@ -13,6 +13,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"strings"
@@ -1683,15 +1684,24 @@ func TestX6_ResolvedForOtherDepositPredicate_LedgerHalfAlone(t *testing.T) {
 
 // TestC4_ResolveAmbiguousOutcomeSucceeded_ReturnsWrappedRefusal closes half
 // of ledger-finance review C4 (rv-fh3-ledger.md, 076e42e): resolveAmbiguous's
-// OutcomeSucceeded branch, called DIRECTLY here (whitebox - the legacy
-// InitiateDeposit dispatch can never itself construct this shape through
-// its own public API, since every InitiateDeposit call creates a brand
-// new deposit_intents row with uuid.New(), which cannot already be
-// resolved by anything else within that same synchronous call), must wrap
+// OutcomeSucceeded branch, called DIRECTLY here (whitebox), must wrap
 // ErrDepositIntentAlreadyResolved with DepositIntentAlreadyResolvedRefusal
-// (intent/provider/reference context InitiateDepositAudited needs),
-// while errors.Is(err, ErrDepositIntentAlreadyResolved) still reports
-// true for every EXISTING caller that only checks the bare sentinel.
+// (intent/provider/reference context InitiateDepositAudited needs), while
+// errors.Is(err, ErrDepositIntentAlreadyResolved) still reports true for
+// every EXISTING caller that only checks the bare sentinel. This
+// SUPERSEDES an earlier version of this comment, which claimed the shape
+// could never be constructed through InitiateDeposit's own public API at
+// all (every call creates a brand new deposit_intents row with
+// uuid.New(), which cannot already be resolved within that same
+// synchronous call) - code review C4b (rv-fh3-code-review.md,
+// FH3-FOLLOWUP-1) found the actual constructible path: Deposit's own
+// req.MerchantReference IS that fresh intent id (attemptDeposit's own
+// call site), so a provider stub can use it to inject a competing posting
+// for that SAME intent before ever returning Ambiguous. See
+// TestC4_InitiateDepositAudited_WritesRefusalAudit (below), which now
+// exercises the full end-to-end shape through InitiateDepositAudited's
+// own public dispatch - this whitebox test remains as the more targeted,
+// faster-to-diagnose pin on resolveAmbiguous's own wrapping behaviour.
 func TestC4_ResolveAmbiguousOutcomeSucceeded_ReturnsWrappedRefusal(t *testing.T) {
 	pool := depositV2ScratchPool(t)
 	f := seedOrchFixture(t, pool)
@@ -1770,46 +1780,100 @@ func TestC4_ResolveAmbiguousOutcomeSucceeded_ReturnsWrappedRefusal(t *testing.T)
 	}
 }
 
-// TestC4_InitiateDepositAudited_WritesRefusalAudit closes the other half
-// of ledger-finance review C4: InitiateDepositAudited must catch
-// DepositIntentAlreadyResolvedRefusal and write the P1 plus
-// deposit.multiple_success_refused audit row in a SEPARATE transaction
-// (RecordDepositMultipleSuccessRefusal, previously wired to nothing at
-// all - security's own P2-L2 finding). Calls RecordDepositMultipleSuccess
-// Refusal directly (the same function InitiateDepositAudited itself
-// calls) to prove the write it performs is correct and durable, since
-// reproducing the full ambiguous->succeeded-on-an-already-resolved-intent
-// shape through InitiateDeposit's own public dispatch is not constructible
-// (see TestC4_ResolveAmbiguousOutcomeSucceeded_ReturnsWrappedRefusal's own
-// doc comment) - InitiateDepositAudited's own error-unwrapping logic is a
-// direct, visible one-line `errors.As` in its body, reviewed by inspection
-// alongside this test of the write it performs.
+// c4bAmbiguousThenAlreadyResolvedProvider closes code-review's C4b
+// (registry FH3-FOLLOWUP-1): a PaymentProvider stub (never a second real
+// adapter - it embeds *MockProvider and overrides only Deposit/QueryStatus)
+// that makes InitiateDeposit's own legacy, no-attempt-row Ambiguous->
+// Succeeded-on-an-already-resolved-intent shape ACTUALLY REACHABLE through
+// InitiateDepositAudited's own public dispatch, which
+// TestC4_ResolveAmbiguousOutcomeSucceeded_ReturnsWrappedRefusal's own
+// now-superseded doc comment called "not constructible" - true for
+// InitiateDeposit's own random uuid.New() intent id considered alone, but
+// Deposit's own req.MerchantReference IS that intent id (attemptDeposit's
+// own call site), so this stub uses it to inject a REAL, independently
+// committed ledger posting for the SAME intent under a DIFFERENT
+// idempotency key (resolved_for_other's ledger-half shape, ADR 0095
+// §28.2/§3(iii)) BEFORE ever returning OutcomeAmbiguous - by the time
+// resolveAmbiguous's own synchronous QueryStatus call (this stub's other
+// override, always Succeeded) reaches postDepositSuccess, the intent is
+// already resolved by that OTHER posting, and postDepositSuccess refuses
+// exactly as a real concurrent race would have produced.
+type c4bAmbiguousThenAlreadyResolvedProvider struct {
+	*MockProvider
+	pool     *db.Pool
+	tenantID uuid.UUID
+	walletID uuid.UUID
+}
+
+func (p *c4bAmbiguousThenAlreadyResolvedProvider) Deposit(ctx context.Context, req DepositRequest) (DepositResult, error) {
+	intentID, err := uuid.Parse(req.MerchantReference)
+	if err != nil {
+		return DepositResult{}, fmt.Errorf("c4b stub: MerchantReference is not the intent id: %w", err)
+	}
+	if err := p.pool.WithTenant(ctx, p.tenantID, func(ictx context.Context, tx pgx.Tx) error {
+		accounts, err := ledger.GetOrCreateAccounts(ictx, tx, p.tenantID,
+			ledger.AccountSpec{WalletID: &p.walletID, AccountType: ledger.AccountPlayerCash, AssetCode: req.AssetCode},
+			ledger.AccountSpec{AccountType: ledger.AccountPSPClearing, AssetCode: req.AssetCode})
+		if err != nil {
+			return err
+		}
+		otherRef := "c4b-other-" + uuid.NewString()
+		_, err = ledger.Post(ictx, tx, ledger.TransactionInput{
+			TenantID: p.tenantID, TransactionType: ledger.TxDeposit,
+			IdempotencyKey: "c4b-other-provider:" + otherRef, ProviderID: strPtr("c4b-other-provider"),
+			ProviderTxID: &otherRef, CorrelationID: intentID,
+			Entries: []ledger.EntryInput{
+				{LedgerAccountID: accounts[1], Direction: ledger.Debit, Amount: req.Amount},
+				{LedgerAccountID: accounts[0], Direction: ledger.Credit, Amount: req.Amount},
+			},
+		})
+		return err
+	}); err != nil {
+		return DepositResult{}, fmt.Errorf("c4b stub: inject the competing posting: %w", err)
+	}
+	return DepositResult{Outcome: OutcomeAmbiguous, ProviderReference: "c4b-fixed-" + uuid.NewString()}, nil
+}
+
+func (p *c4bAmbiguousThenAlreadyResolvedProvider) QueryStatus(_ context.Context, providerReference string) (StatusResult, error) {
+	return StatusResult{ProviderReference: providerReference, Outcome: OutcomeSucceeded, Amount: 5000, AssetCode: "EUR"}, nil
+}
+
+// TestC4_InitiateDepositAudited_WritesRefusalAudit closes ledger-finance
+// review C4 and code-review C4b (registry FH3-FOLLOWUP-1, kills mutant
+// C4W): InitiateDepositAudited itself - never RecordDepositMultipleSuccess
+// Refusal called directly - must catch resolveAmbiguous's
+// *DepositIntentAlreadyResolvedRefusal and write the P1 plus
+// deposit.multiple_success_refused audit row in a SEPARATE, freshly-opened
+// transaction after the caller's own tx rolls back.
 func TestC4_InitiateDepositAudited_WritesRefusalAudit(t *testing.T) {
 	pool := depositV2ScratchPool(t)
 	f := seedOrchFixture(t, pool)
-	intentID := uuid.New()
-	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `INSERT INTO deposit_intents (id, tenant_id, brand_id, player_account_id, wallet_id, asset_code, amount, payment_method, status, idempotency_key)
-			VALUES ($1,$2,$3,$4,$5,'EUR',5000,'card','ambiguous','c4-audit-intent')`,
-			intentID, f.tenantID, f.brandID, f.playerAccountID, f.walletID)
-		return err
-	}); err != nil {
-		t.Fatalf("setup: %v", err)
+	stub := &c4bAmbiguousThenAlreadyResolvedProvider{
+		MockProvider: NewMockProvider("c4b-provider", "EUR"),
+		pool:         pool, tenantID: f.tenantID, walletID: f.walletID,
 	}
+	registerCapability(t, pool, f, stub, 100)
+	orch := NewOrchestrator(map[string]PaymentProvider{"c4b-provider": stub}, MultiWebhookCredentialResolver{"c4b-provider": NewMockWebhookCredentials(stub.MockProvider)})
 
-	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		return RecordDepositMultipleSuccessRefusal(ctx, tx, f.tenantID, intentID, "c4-mock", "c4-audit-ref")
-	}); err != nil {
-		t.Fatalf("RecordDepositMultipleSuccessRefusal: %v", err)
+	_, err := orch.InitiateDepositAudited(context.Background(), pool, InitiateDepositParams{
+		Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
+		AssetCode: "EUR", Amount: 5000, PaymentMethod: "card", IdempotencyKey: "c4b-audit-e2e",
+	})
+	var refusal *DepositIntentAlreadyResolvedRefusal
+	if !errors.As(err, &refusal) {
+		t.Fatalf("C4b: expected a *DepositIntentAlreadyResolvedRefusal from InitiateDepositAudited, got: %v", err)
+	}
+	if refusal.ProviderID != "c4b-provider" {
+		t.Errorf("C4b: unexpected refusal.ProviderID: %v", refusal)
 	}
 
 	var count int64
 	var metaJSON []byte
 	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		if err := tx.QueryRow(ctx, `SELECT count(*) FROM audit_log WHERE action = 'deposit.multiple_success_refused' AND target_id = $1`, intentID.String()).Scan(&count); err != nil {
+		if err := tx.QueryRow(ctx, `SELECT count(*) FROM audit_log WHERE action = 'deposit.multiple_success_refused' AND target_id = $1`, refusal.IntentID.String()).Scan(&count); err != nil {
 			return err
 		}
-		return tx.QueryRow(ctx, `SELECT metadata FROM audit_log WHERE action = 'deposit.multiple_success_refused' AND target_id = $1`, intentID.String()).Scan(&metaJSON)
+		return tx.QueryRow(ctx, `SELECT metadata FROM audit_log WHERE action = 'deposit.multiple_success_refused' AND target_id = $1`, refusal.IntentID.String()).Scan(&metaJSON)
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -1820,7 +1884,23 @@ func TestC4_InitiateDepositAudited_WritesRefusalAudit(t *testing.T) {
 	if err := json.Unmarshal(metaJSON, &meta); err != nil {
 		t.Fatalf("unmarshal audit metadata: %v", err)
 	}
-	if meta["provider_id"] != "c4-mock" || meta["provider_reference"] != "c4-audit-ref" {
+	if meta["provider_id"] != "c4b-provider" || meta["provider_reference"] != refusal.ProviderReference {
 		t.Errorf("C4: unexpected audit metadata: %v", meta)
+	}
+	// The caller's own tx (InitiateDeposit's) rolled back on the refusal -
+	// no deposit_intents row from THIS call should have been left behind,
+	// only the competing posting's own intent id (never created by
+	// InitiateDeposit itself - it belongs to a different, real intent in
+	// production; here it is a synthetic id the stub invented once inside
+	// Deposit, never inserted into deposit_intents at all) confirms the
+	// rollback left nothing of this attempt's own row.
+	var intentCount int64
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT count(*) FROM deposit_intents WHERE id = $1`, refusal.IntentID).Scan(&intentCount)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if intentCount != 0 {
+		t.Errorf("C4: expected the caller's own InitiateDeposit tx to have rolled back (no deposit_intents row for %s), got %d", refusal.IntentID, intentCount)
 	}
 }

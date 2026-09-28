@@ -2506,3 +2506,84 @@ Private DBs: fh3c is the main working DB for this FH-3c session; fh3c_mg4
 (a throwaway scratch DB used for the MG4 mutation check; the L1 down/up
 round-trip reused fh3c's own migration0101Scratch/depositV2ScratchPool
 fixtures rather than a separate named DB) was dropped after use.
+
+================================================================
+FH3-FOLLOWUP-1 (registry): F3b, C4b, L2
+================================================================
+
+F3b - applyStatusEvidence (sweeper.go) decides from the fresh, under-lock
+attempt state, never blindly re-running the live-attempt flow against a
+state its own CAS transitions were never meant to apply to:
+  File: internal/payments/sweeper.go (applyStatusEvidence,
+  ErrorClassSucceeded branch)
+  Mutation 1 (F3S, the sweeper's own re-read removed): deleted the
+  `attempt, err = GetAttemptByID(actx, tx, attempt.ID)` line in
+  processViaQueryStatus.
+  Killed by: BOTH TestINVDEP1_F3b_SweeperEvidenceDecidesFromFreshState_
+  SucceededXSucceededNoOp and ..._DisputedRecordedOnly - each fails with
+  the exact T7/T10 CAS-conflict error the storm probe (rv-fh3-ledger.md,
+  076e42e) reported (~13 per 25-rep run).
+  Reverted: targeted Edit; confirmed clean.
+  Mutation 2 (succeeded-cell removed): deleted the `case AttemptSucceeded`
+  branch from the new switch. Killed by the SucceededXSucceededNoOp test
+  only (the DisputedRecordedOnly test is unaffected, confirming the two
+  cells are independently tested). Reverted; confirmed clean.
+  Mutation 3 (disputed-cell removed): deleted the `case AttemptDisputed`
+  branch. Killed by the DisputedRecordedOnly test only (the
+  SucceededXSucceededNoOp test is unaffected). Reverted; confirmed clean.
+  Also corrected the misleading comment on the re-read itself (it had
+  claimed "only genuinely concurrent evidence arriving AFTER the fresh
+  read still hits the CAS-conflict path" - false, since every transition
+  takes the same intent lock).
+
+C4b - TestC4_InitiateDepositAudited_WritesRefusalAudit actually calls
+InitiateDepositAudited end to end (previously called
+RecordDepositMultipleSuccessRefusal directly, never exercising
+InitiateDepositAudited's own errors.As catch):
+  File: internal/payments/orchestrator.go (InitiateDepositAudited)
+  New test infrastructure: c4bAmbiguousThenAlreadyResolvedProvider (a
+  PaymentProvider stub embedding *MockProvider) uses Deposit's own
+  req.MerchantReference (the fresh intent id InitiateDeposit's own
+  attemptDeposit call site passes through) to inject a REAL,
+  independently committed ledger posting for that SAME intent under a
+  DIFFERENT idempotency key BEFORE ever returning OutcomeAmbiguous, then
+  its QueryStatus override always reports Succeeded - so
+  resolveAmbiguous's own synchronous QueryStatus call reaches
+  postDepositSuccess with the intent ALREADY resolved by that other
+  posting, exactly the legacy no-attempt-row race this path exists to
+  refuse. This is the constructible path
+  TestC4_ResolveAmbiguousOutcomeSucceeded_ReturnsWrappedRefusal's own
+  (now-corrected) doc comment had previously called impossible.
+  Mutation (C4W, the errors.As catch disabled): changed
+  `if errors.As(err, &refusal)` to `if false && errors.As(err, &refusal)`
+  in InitiateDepositAudited.
+  Killed by: TestC4_InitiateDepositAudited_WritesRefusalAudit fails
+  looking for the audit row (no rows in result set - the audit write
+  never happens).
+  Reverted: targeted Edit; confirmed clean (git diff --stat empty).
+
+L2 - the A7 #5c test also requires wait_event_type='Lock' on the matched
+backend, not query text alone:
+  File: internal/payments/a7_5c_integration_test.go
+  (a7c8WaitAnyQueryContains, new loBackendQueryAndWaitEventType helper)
+  No new mutation specific to L2 itself (a pure assertion-strengthening;
+  the query-text-only version could not be shown to produce a false
+  positive on this exact fixture, since the fixture's own genuine lock
+  contention always coincides with a matching query string) - instead,
+  re-verified the EXISTING A7-TOMB-1/C8 mutation (the R0 receipt-insert/L1
+  intent-lock order swapped in receipt.go's applyReversalReceiptEvidence)
+  is STILL killed by the strengthened assertion: the test fails with
+  "neither identical delivery's own query ever showed the R0 receipt
+  insert while the external L1 blocker was held" - confirming the added
+  wait_event_type check does not weaken or break the existing kill.
+  Reverted: targeted Edit; confirmed clean.
+
+Verification after all FH3-FOLLOWUP-1 mutations reverted: `git status
+--porcelain` clean; `go build ./...`, `go vet -tags=integration ./...`,
+`gofmt -l .` clean; `golangci-lint run ./internal/payments/...` using the
+PINNED 2.9.0 binary (scratchpad/golangci-lint-2.9.0-linux-amd64/
+golangci-lint, built with go1.26.0, matching this repo's targeted
+toolchain): 0 issues. Full internal/payments (370.812s) and
+internal/reconciliation (+ internal/reconciliation/statement) (50.598s +
+1.018s) suites pass under -tags=integration -race -count=1 against
+PRIV_DB=fh3c.

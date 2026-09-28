@@ -375,19 +375,30 @@ func (s *Sweeper) processViaQueryStatus(ctx context.Context, tenantID uuid.UUID,
 		if err != nil {
 			return err
 		}
-		// Ledger-finance review F3 (rv-fh3-ledger.md, 076e42e): attempt was
-		// read BEFORE the outbound QueryStatus call and BEFORE the parent
-		// lock above - money-safe (CAS plus INV-DEP-1 catch every stale
-		// decision regardless), but a concurrent callback that moved the
-		// attempt in the meantime made applyStatusEvidence decide from a
-		// snapshot the CAS predicates below then reject, producing pure
-		// error/alert noise (and, on phase C's identical pattern, a
-		// spurious error returned to a player whose deposit actually
-		// succeeded). Re-read under the now-held lock, exactly as
-		// ApplyReceiptEvidence already does, so this decision is made from
-		// the CURRENT row whenever nothing raced, and only genuinely
-		// concurrent evidence (arriving AFTER this fresh read) still hits
-		// the CAS-conflict path this fix cannot and should not eliminate.
+		// Ledger-finance review F3/F3b (rv-fh3-ledger.md, 076e42e):
+		// attempt was read BEFORE the outbound QueryStatus call and BEFORE
+		// the parent lock above - money-safe (CAS plus INV-DEP-1 catch
+		// every stale decision regardless), but a concurrent callback that
+		// moved the attempt in the meantime made applyStatusEvidence
+		// decide from a snapshot the CAS predicates below then reject,
+		// producing pure error/alert noise (and, on phase C's identical
+		// pattern, a spurious error returned to a player whose deposit
+		// actually succeeded). Re-read under the now-held lock, exactly as
+		// ApplyReceiptEvidence already does.
+		//
+		// F3b correction: every attempt transition (callback, sweeper,
+		// phase C) takes this SAME deposit_intents parent lock, so nothing
+		// can move the attempt AFTER this re-read completes while this tx
+		// still holds it - there is no "genuinely concurrent evidence
+		// arriving after the fresh read" case left to hit a CAS conflict.
+		// The re-read only fixes the decision's OWN staleness; it is
+		// applyStatusEvidence's job (below) to actually decide from this
+		// fresh state's §4.4 cell (e.g. succeeded x succeeded = no-op,
+		// disputed = recorded only) instead of blindly re-running the
+		// live-attempt flow and letting ITS OWN CAS transitions reject a
+		// state they were never meant to apply to - the gap the original,
+		// incorrect version of this comment mistook for an unavoidable
+		// race.
 		attempt, err = GetAttemptByID(actx, tx, attempt.ID)
 		if err != nil {
 			return err
@@ -430,6 +441,45 @@ func (s *Sweeper) applyStatusEvidence(ctx context.Context, tx pgx.Tx, intent Dep
 		return err
 
 	case ErrorClassSucceeded:
+		// Ledger-finance review F3b (rv-fh3-ledger.md): the attempt is
+		// re-read fresh under the intent lock above, but a poll success
+		// arriving for an attempt a CONCURRENT callback has already moved
+		// to a terminal state must be mapped onto the §4.4 matrix's own
+		// cells for that fresh state, exactly like applyResolvedReceipt
+		// Evidence (receipt.go) already does for the callback path -
+		// never blindly re-run the live-attempt flow below and let its
+		// own CAS transitions (ApplySuccess's T7, applyMultipleSuccess
+		// Dispute's T10) fail against a state they were never meant to
+		// apply to. The misleading comment this replaces claimed "only
+		// genuinely concurrent evidence arriving AFTER this fresh read
+		// still hits the CAS-conflict path" - false: every attempt
+		// transition takes this SAME intent lock, so nothing can move the
+		// attempt after this locked re-read; the CAS conflicts this fix
+		// removes were ALWAYS against evidence that raced BEFORE the
+		// re-read, and the re-read alone was never enough to prevent them
+		// (mutant F3S, the re-read removed, still survived the suite
+		// before this fix for exactly that reason).
+		switch attempt.State {
+		case AttemptSucceeded:
+			// succeeded x succeeded: a concurrent callback already
+			// applied this exact success (the common case, ledger.Post's
+			// own idempotency would make a re-post here a silent no-op
+			// too) - genuinely no-op. A MISMATCHED echo (different
+			// amount/asset than what is already on file) is the same
+			// terminal contradiction applyResolvedReceiptEvidence audits
+			// via auditTerminalAmountAssetMismatch, never a CAS attempt.
+			if attempt.Amount != res.Amount || attempt.AssetCode != res.AssetCode {
+				return auditTerminalAmountAssetMismatch(ctx, tx, attempt, ReceiptEvidence{
+					ProviderReference: res.ProviderReference, Amount: res.Amount, AssetCode: res.AssetCode,
+				})
+			}
+			return nil
+		case AttemptDisputed:
+			// disputed (any reason) is already terminal and already
+			// resolved for the whole intent - recorded only, no state
+			// change and no CAS attempt.
+			return nil
+		}
 		// RV-PRH-I1 ledger-finance N2: see drive.go's identical comment -
 		// a QueryStatus success naming a (provider_id, provider_reference)
 		// a reversal tombstone already occupies must route to T10/T13t,
