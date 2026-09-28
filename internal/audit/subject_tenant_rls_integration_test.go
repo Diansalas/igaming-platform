@@ -296,6 +296,37 @@ func TestSubjectActorGuard_Refusals(t *testing.T) {
 		t.Errorf("(5b) app.platform_service_id set: expected P0001, got %v", err)
 	}
 
+	// (5c)-(5e) F-2 (code review): app.principal_id, app.player_account_id
+	// and app.acting_platform_principal_id are each individually required
+	// to be unset - a mutant removing all three exclusions at once
+	// SURVIVED the original test suite (a probe with the platform GUC
+	// plus app.principal_id inserted a subject row). One case per GUC,
+	// each set ALONE next to a valid platform GUC.
+	guacCases := []struct {
+		name  string
+		guc   string
+		value string
+	}{
+		{"5c", "app.principal_id", uuid.NewString()},
+		{"5d", "app.player_account_id", uuid.NewString()},
+		{"5e", "app.acting_platform_principal_id", admin.String()},
+	}
+	for _, gc := range guacCases {
+		gc := gc
+		err = pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+			if _, err := tx.Exec(ctx, `SELECT set_config('app.platform_admin_principal_id', $1, true)`, admin.String()); err != nil {
+				return err
+			}
+			if _, err := tx.Exec(ctx, `SELECT set_config($1, $2, true)`, gc.guc, gc.value); err != nil {
+				return err
+			}
+			return Record(ctx, tx, Entry{ActorType: ActorStaff, ActorID: admin, Action: "test.az" + gc.name, Outcome: OutcomeSuccess, SubjectTenantID: tenantA})
+		})
+		if !isP0001(err) {
+			t.Errorf("(%s) %s set alone: expected P0001, got %v", gc.name, gc.guc, err)
+		}
+	}
+
 	// (6) Both tenant columns set: CHECK violation (audit_log_subject_
 	// tenant_platform_only), not necessarily P0001 - Postgres raises this
 	// as a check_violation (SQLSTATE 23514) via the CHECK constraint.
@@ -364,6 +395,31 @@ func TestSubjectActorGuard_AppendOnlyStillHolds(t *testing.T) {
 	})
 	if !isP0001(deleteErr) {
 		t.Errorf("expected DELETE against a subject row to fail with P0001, got %v", deleteErr)
+	}
+
+	// F-7 (code review): this test's own doc comment claimed TRUNCATE
+	// coverage without actually exercising it - added here.
+	// audit_log_deny_truncate (migration 0016) is a BEFORE TRUNCATE
+	// STATEMENT trigger that refuses unconditionally, before the TRUNCATE
+	// itself ever runs, so this is safe to run against a shared database -
+	// the table is never actually truncated (verified below).
+	truncateErr := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `TRUNCATE audit_log`)
+		return err
+	})
+	if !isP0001(truncateErr) {
+		t.Fatalf("expected TRUNCATE against audit_log to fail with P0001, got %v", truncateErr)
+	}
+	// Confirm the subject row (and by extension, the whole table) really
+	// does still exist - a refused TRUNCATE must never partially apply.
+	var stillExists bool
+	if err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM audit_log WHERE action = $1)`, action).Scan(&stillExists)
+	}); err != nil {
+		t.Fatalf("verify row survived the refused TRUNCATE: %v", err)
+	}
+	if !stillExists {
+		t.Fatal("F-7: the refused TRUNCATE must never actually truncate audit_log")
 	}
 }
 

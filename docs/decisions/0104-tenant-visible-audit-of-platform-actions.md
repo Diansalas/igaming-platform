@@ -1,6 +1,6 @@
 # ADR 0104 — Tenant-Visible Audit of Platform Actions (KS-AUDIT-TENANT-1)
 
-> **Status 2026-09-28: ACCEPTED** (revision 2). Ledger-finance and security accepted it: see `docs/plans/prh2-hardening-round/reviews/` (`adr-0102-0104-security-confirmation.md`, and for 0102 also the confirmation section of `adr-0102-ledger-finance.md`); product-owner-proxy accepted it in `adr-0102-0104-product-owner-proxy.md`. Implementation is NOT IMPLEMENTED until the PRH-2 workstream merges. The earlier PROPOSED status below is historical.
+> **Status 2026-09-28: ACCEPTED** (revision 2). Ledger-finance and security accepted it: see `docs/plans/prh2-hardening-round/reviews/` (`adr-0102-0104-security-confirmation.md`, and for 0102 also the confirmation section of `adr-0102-ledger-finance.md`); product-owner-proxy accepted it in `adr-0102-0104-product-owner-proxy.md`. **Implementation status (2026-09-28): IMPLEMENTED (local; pending security diff review C-104-6 and orchestrator merge) — kill switch only.** G1 has merged locally (branch `prh2-g1-audit-tenant`) with passing local tests; `security` reviewed it ACCEPT WITH CONDITIONS (`docs/plans/prh2-hardening-round/reviews/g1-security.md`) and `code-reviewer` is re-reviewing after the fix round below. The orchestrator sets the FINAL registry status (KS-AUDIT-TENANT-1 → IMPLEMENTED) only after the security diff review gate (§8 step 3) passes and this branch merges. The earlier PROPOSED status below is historical.
 
 - **Status:** PROPOSED, **revision 2**, 2026-09-28. Drafted by `architect` for PRH-2 W0 (W0-X).
   Nothing here is implemented. The implementation is PRH-2 workstream **G1** (W1), migration **0109**.
@@ -368,6 +368,9 @@ failure fails closed.
 - **Registry (orchestrator):** KS-AUDIT-TENANT-1 → IMPLEMENTED after the security diff review.
 
 ## 12. Implementation record (G1, 2026-09-28)
+
+**Status: IMPLEMENTED (local; pending security diff review C-104-6 and orchestrator merge) — kill switch only.**
+This agrees with the header's status line above; the orchestrator alone sets the FINAL registry status.
 
 Implemented on branch `prh2-g1-audit-tenant`, migration **0109** (`0109_tenant_visible_platform_audit`),
 exactly as specified in §3-§5, with the two review-round additions (N-2, N-3) folded in. Numbering

@@ -18,7 +18,7 @@ four-eyes approval above a threshold. This is the first thing an auditor
 asks to see; its absence has ended platform businesses (Blueprint §4.8) —
 treated as core infrastructure, not defensive extra work.
 
-### Tenant-visible audit of platform actions (PRH-2 G1, `IMPLEMENTED — kill switch only`)
+### Tenant-visible audit of platform actions (PRH-2 G1, `IMPLEMENTED (local; pending security diff review C-104-6 and orchestrator merge) — kill switch only`)
 
 A platform-scope action (e.g. an incident-response kill-switch engage or
 release) is written as a platform-level `audit_log` row and never as a

@@ -35,6 +35,28 @@ const platformActionsAuditListQuery = `
 	 ORDER BY created_at DESC
 	 LIMIT $2 OFFSET $3`
 
+// platformActionsChainSourceQuery is F-5 (code review; orchestrator
+// decision: conform to ADR §5.5, "the tenant's own rows; subject rows for
+// that tenant"): the approval chain must be built from EVERY RLS-visible
+// row for the tenant - not just the subject rows platformActionsAuditListQuery
+// returns, and not just the current PAGE. This query runs in the exact
+// SAME WithTenant(tc.TenantID) session as the page query above, with an
+// explicit filter covering both arms dual_scope_isolation/subject_tenant_read
+// already admit under that one session: the tenant's own rows
+// (tenant_id = $1) and the tenant's subject rows (tenant_id IS NULL AND
+// subject_tenant_id = $1). It is NEVER a platform or unscoped query - no
+// WithoutTenant/WithPlatformAdmin call is involved anywhere in chain
+// assembly. Scoped to the kill-switch action family (the only actions
+// with a chain key at all today) so this stays bounded regardless of a
+// tenant's overall audit_log volume; unbounded (no LIMIT) so a chain
+// member on a DIFFERENT page than the row that names it is still found
+// (fixes ADR §5.5's "b) chains split across pages").
+const platformActionsChainSourceQuery = `
+	SELECT id, actor_type, actor_id, action, target_type, target_id, outcome, created_at, metadata
+	  FROM audit_log
+	 WHERE action LIKE 'payments_kill_switch.%'
+	   AND (tenant_id = $1 OR (tenant_id IS NULL AND subject_tenant_id = $1))`
+
 // staffDisplayNameLookupQuery is ADR 0104 §5.4/AT-8's second, short read:
 // ONLY id and display_name, NEVER email - a mutant that adds `email` here
 // must be caught by TestPlatformActionsAudit_NameLookupNeverSelectsEmail's
@@ -104,19 +126,49 @@ func newListPlatformActionsAuditLogHandler(deps Deps) http.HandlerFunc {
 
 		p := parsePageParams(r)
 
-		var rows []platformActionRawRow
+		var rows, chainRows []platformActionRawRow
 		var total int
 		err = deps.DB.WithTenant(r.Context(), tc.TenantID, func(ctx context.Context, tx pgx.Tx) error {
 			qr, qerr := tx.Query(ctx, platformActionsAuditListQuery, tc.TenantID, p.Limit, p.Offset)
 			if qerr != nil {
 				return qerr
 			}
-			defer qr.Close()
 			for qr.Next() {
 				var row platformActionRawRow
 				var id uuid.UUID
 				var metadataJSON []byte
 				if err := qr.Scan(&id, &row.actorType, &row.actorID, &row.action, &row.targetType, &row.targetID, &row.outcome, &row.createdAt, &metadataJSON, &total); err != nil {
+					qr.Close()
+					return err
+				}
+				row.id = id.String()
+				if len(metadataJSON) > 0 {
+					if err := json.Unmarshal(metadataJSON, &row.metadata); err != nil {
+						qr.Close()
+						return err
+					}
+				}
+				rows = append(rows, row)
+			}
+			qerr = qr.Err()
+			qr.Close()
+			if qerr != nil {
+				return qerr
+			}
+
+			// F-5: the chain source, in the SAME tenant session, with its
+			// own explicit filter - see platformActionsChainSourceQuery's
+			// own doc comment.
+			cr, cerr := tx.Query(ctx, platformActionsChainSourceQuery, tc.TenantID)
+			if cerr != nil {
+				return cerr
+			}
+			defer cr.Close()
+			for cr.Next() {
+				var row platformActionRawRow
+				var id uuid.UUID
+				var metadataJSON []byte
+				if err := cr.Scan(&id, &row.actorType, &row.actorID, &row.action, &row.targetType, &row.targetID, &row.outcome, &row.createdAt, &metadataJSON); err != nil {
 					return err
 				}
 				row.id = id.String()
@@ -125,9 +177,9 @@ func newListPlatformActionsAuditLogHandler(deps Deps) http.HandlerFunc {
 						return err
 					}
 				}
-				rows = append(rows, row)
+				chainRows = append(chainRows, row)
 			}
-			return qr.Err()
+			return cr.Err()
 		})
 		if err != nil {
 			logger.Error("list_platform_actions_audit_log_failed", "error", err)
@@ -136,11 +188,17 @@ func newListPlatformActionsAuditLogHandler(deps Deps) http.HandlerFunc {
 		}
 
 		// §5.4/AT-8: a second, SHORT lookup restricted to the actor ids
-		// present in the RLS-filtered result above - never a wider query,
-		// never email. A failure here fails the WHOLE request (§5.5's
-		// "or the request fails") rather than silently falling back to
-		// showing no names as if that were a successful read.
-		names, err := lookupStaffDisplayNames(r.Context(), deps, rows)
+		// present in the RLS-filtered results above (both the page and the
+		// chain source - the chain source includes the tenant's OWN rows
+		// too, per F-5, whose actor may be a tenant staff member; the
+		// lookup itself still never widens beyond id/display_name, never
+		// email, and a tenant staff id simply resolves to no row under
+		// WithoutTenant, exactly like any other name this lookup cannot
+		// find - see security confirmation N-3's own note on this). A
+		// failure here fails the WHOLE request (§5.5's "or the request
+		// fails") rather than silently falling back to showing no names as
+		// if that were a successful read.
+		names, err := lookupStaffDisplayNames(r.Context(), deps, append(append([]platformActionRawRow{}, rows...), chainRows...))
 		if err != nil {
 			logger.Error("platform_actions_audit_name_lookup_failed", "error", err)
 			apierror.Write(w, requestID, apierror.CodeInternal, "failed to load audit log")
@@ -149,7 +207,7 @@ func newListPlatformActionsAuditLogHandler(deps Deps) http.HandlerFunc {
 
 		presentation := audit.ResolvePresentationOrRestrictive(r.Context(), deps.AuditPresentationResolver, tc.TenantID)
 
-		entries := buildPlatformActionEntries(rows, names, presentation)
+		entries := buildPlatformActionEntries(rows, chainRows, names, presentation)
 		writeJSON(w, http.StatusOK, newPagedResponse(entries, p, total))
 	}
 }
@@ -217,16 +275,24 @@ func killSwitchChainKey(row platformActionRawRow) string {
 	return ""
 }
 
-func buildPlatformActionEntries(rows []platformActionRawRow, names map[uuid.UUID]*string, presentation audit.Presentation) []platformActionAuditEntry {
+// buildPlatformActionEntries projects pageRows (the current page of
+// SUBJECT rows only - what this endpoint actually lists, per ADR §5.1)
+// into response entries, but builds each entry's approval_chain from
+// chainRows - EVERY RLS-visible kill-switch-action row for the tenant
+// (its own rows plus its subject rows, unbounded by pagination) - per
+// F-5/ADR §5.5. chainRows always includes pageRows' own rows too (the
+// chain source query's WHERE admits every subject row, which is exactly
+// what pageRows is), so no separate merge is needed here.
+func buildPlatformActionEntries(pageRows, chainRows []platformActionRawRow, names map[uuid.UUID]*string, presentation audit.Presentation) []platformActionAuditEntry {
 	byKey := map[string][]platformActionRawRow{}
-	for _, row := range rows {
+	for _, row := range chainRows {
 		if key := killSwitchChainKey(row); key != "" {
 			byKey[key] = append(byKey[key], row)
 		}
 	}
 
-	entries := make([]platformActionAuditEntry, 0, len(rows))
-	for _, row := range rows {
+	entries := make([]platformActionAuditEntry, 0, len(pageRows))
+	for _, row := range pageRows {
 		entries = append(entries, toPlatformActionEntry(row, names, presentation, byKey))
 	}
 	return entries

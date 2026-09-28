@@ -9,6 +9,7 @@ package httpserver
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"strings"
 	"testing"
@@ -119,6 +120,21 @@ func TestStaffDisplayNameAPI_PlatformAdmin_CanRenameAnyTenant(t *testing.T) {
 	if dn := staffDisplayName(t, a, tenant, staff); dn == nil || *dn != "Renamed By Platform" {
 		t.Fatalf("expected display_name=Renamed By Platform, got %v", dn)
 	}
+	// F-8(b) (code review): assert the audit row, with before and after.
+	// (F-8(a): this platform-rename-of-tenant-staff write lands in
+	// TENANT scope, TenantID = the target tenant, not a subject row - the
+	// PLAT-AUDIT-SUBJECT-1 divergence the code review's own finding names;
+	// tracked there, not fixed here.)
+	meta := a.auditMetadata(tenant, "staff.display_name_changed")
+	if meta["after"] != "Renamed By Platform" {
+		t.Errorf("F-8(b): expected audit metadata.after=Renamed By Platform, got %v", meta["after"])
+	}
+	if meta["before"] != nil {
+		t.Errorf("F-8(b): expected audit metadata.before=nil (no prior name), got %v", meta["before"])
+	}
+	if meta["self"] != false {
+		t.Errorf("F-8(b): expected audit metadata.self=false (renaming another user), got %v", meta["self"])
+	}
 }
 
 // TestStaffDisplayNameAPI_SelfRename_Succeeds: N-2's self-rename path -
@@ -160,6 +176,27 @@ func TestStaffDisplayNameAPI_SelfRename_PlatformAdmin(t *testing.T) {
 	}
 	if dn == nil || *dn != "Platform Self" {
 		t.Fatalf("expected display_name=Platform Self, got %v", dn)
+	}
+	// F-8(b): assert the audit row, with before and after, on the
+	// platform self-rename path too.
+	var raw []byte
+	if err := a.pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT metadata FROM audit_log WHERE tenant_id IS NULL AND action='staff.display_name_changed' AND target_id=$1`, platAdmin.String()).Scan(&raw)
+	}); err != nil {
+		t.Fatalf("read platform self-rename audit metadata: %v", err)
+	}
+	var meta map[string]any
+	if err := json.Unmarshal(raw, &meta); err != nil {
+		t.Fatalf("decode audit metadata: %v", err)
+	}
+	if meta["after"] != "Platform Self" {
+		t.Errorf("F-8(b): expected audit metadata.after=Platform Self, got %v", meta["after"])
+	}
+	if meta["before"] != nil {
+		t.Errorf("F-8(b): expected audit metadata.before=nil (no prior name), got %v", meta["before"])
+	}
+	if meta["self"] != true {
+		t.Errorf("F-8(b): expected audit metadata.self=true, got %v", meta["self"])
 	}
 }
 

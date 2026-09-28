@@ -47,7 +47,8 @@ adjustments require reason code + four-eyes approval above a configurable
 threshold.
 
 **Tenant visibility into platform-scope actions (PRH-2 G1, ADR 0104,
-`IMPLEMENTED — kill switch only`).** `audit_log`'s dual-scope RLS (ADR
+`IMPLEMENTED (local; pending security diff review C-104-6 and orchestrator
+merge) — kill switch only`).** `audit_log`'s dual-scope RLS (ADR
 0013) is unchanged: a platform-scope action is still written as a
 platform-level row (`tenant_id IS NULL`), never as a write into the
 affected tenant's own scope — there is no new write power into tenant

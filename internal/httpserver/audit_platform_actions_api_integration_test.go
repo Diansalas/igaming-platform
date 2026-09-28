@@ -97,7 +97,12 @@ type platformActionsPage struct {
 
 func getPlatformActions(t *testing.T, a *ksAPI, token string) (platformActionsPage, int) {
 	t.Helper()
-	resp := a.do("GET", "/v1/admin/audit-log/platform-actions", token, nil)
+	return getPlatformActionsPath(t, a, token, "/v1/admin/audit-log/platform-actions")
+}
+
+func getPlatformActionsPath(t *testing.T, a *ksAPI, token, path string) (platformActionsPage, int) {
+	t.Helper()
+	resp := a.do("GET", path, token, nil)
 	var page platformActionsPage
 	if resp.status == http.StatusOK {
 		resp.decode(t, &page)
@@ -211,6 +216,44 @@ func TestPlatformActionsAuditAPI_TIHeadline(t *testing.T) {
 // TestPlatformActionsAuditAPI_ApprovalChainLinksReleaseToEngage confirms
 // §5.5: the approval chain links a kill-switch's engage/request/approve
 // rows together, built only from the tenant's own RLS-filtered read.
+// chainHasAction reports whether any entry in chain has the given action -
+// a small helper so every F-3 assertion below reads the same way.
+func chainHasAction(chain []platformActionAuditChainEntry, action string) bool {
+	for _, c := range chain {
+		if c.Action == action {
+			return true
+		}
+	}
+	return false
+}
+
+// findByAction returns the FIRST item in items whose Action matches -
+// t.Fatal's if none is found, since every caller below requires exactly
+// one such row to exist.
+func findByAction(t *testing.T, items []platformActionAuditEntry, action string) platformActionAuditEntry {
+	t.Helper()
+	for _, e := range items {
+		if e.Action == action {
+			return e
+		}
+	}
+	t.Fatalf("expected an item with action=%s, got %+v", action, items)
+	return platformActionAuditEntry{}
+}
+
+// TestPlatformActionsAuditAPI_ApprovalChainLinksReleaseToEngage is F-3
+// (code review): the chain link that depends ENTIRELY on metadata's own
+// "kill_switch_id" key (request_release has no other way to be linked -
+// its own target_type is payment_kill_switch_release_request, never
+// payment_kill_switch, so killSwitchChainKey's target_id fallback can
+// never key it) was previously asserted only one-directionally (engage's
+// chain contains approve_release) - a mutant disabling the metadata
+// branch entirely (M2) SURVIVED that assertion, because engage and
+// approve_release are BOTH keyable via their own target_id
+// (payment_kill_switch), so their mutual link survives even with the
+// metadata branch gone; only request_release's OWN presence in the chain
+// actually proves that branch is alive. This test now asserts
+// request_release's membership from all three sides.
 func TestPlatformActionsAuditAPI_ApprovalChainLinksReleaseToEngage(t *testing.T) {
 	a := newAuditAPI(t, nil)
 	tenantA := a.tenant()
@@ -226,23 +269,208 @@ func TestPlatformActionsAuditAPI_ApprovalChainLinksReleaseToEngage(t *testing.T)
 	if status != http.StatusOK {
 		t.Fatalf("read: status=%d", status)
 	}
-	var engage platformActionAuditEntry
-	for _, e := range page.Items {
-		if e.Action == "payments_kill_switch.engage" {
-			engage = e
-		}
+
+	engage := findByAction(t, page.Items, "payments_kill_switch.engage")
+	requestRelease := findByAction(t, page.Items, "payments_kill_switch.request_release")
+	approveRelease := findByAction(t, page.Items, "payments_kill_switch.approve_release")
+
+	if !chainHasAction(engage.ApprovalChain, "payments_kill_switch.request_release") {
+		t.Errorf("F-3: expected the engage row's chain to include request_release, got %+v", engage.ApprovalChain)
 	}
-	if len(engage.ApprovalChain) == 0 {
-		t.Fatalf("expected the engage row's approval_chain to link its later request_release/approve_release siblings, got %+v", page.Items)
+	if !chainHasAction(engage.ApprovalChain, "payments_kill_switch.approve_release") {
+		t.Errorf("expected the engage row's chain to include approve_release, got %+v", engage.ApprovalChain)
 	}
-	var sawChainedApprove bool
-	for _, c := range engage.ApprovalChain {
-		if c.Action == "payments_kill_switch.approve_release" {
-			sawChainedApprove = true
-		}
+	if !chainHasAction(approveRelease.ApprovalChain, "payments_kill_switch.request_release") {
+		t.Errorf("F-3: expected the approve_release row's chain to include request_release, got %+v", approveRelease.ApprovalChain)
 	}
-	if !sawChainedApprove {
-		t.Errorf("expected the chain to include the approve_release sibling, got %+v", engage.ApprovalChain)
+	if !chainHasAction(approveRelease.ApprovalChain, "payments_kill_switch.engage") {
+		t.Errorf("expected the approve_release row's chain to include engage, got %+v", approveRelease.ApprovalChain)
+	}
+	if !chainHasAction(requestRelease.ApprovalChain, "payments_kill_switch.engage") {
+		t.Errorf("expected the request_release row's own chain to include engage, got %+v", requestRelease.ApprovalChain)
+	}
+	if !chainHasAction(requestRelease.ApprovalChain, "payments_kill_switch.approve_release") {
+		t.Errorf("expected the request_release row's own chain to include approve_release, got %+v", requestRelease.ApprovalChain)
+	}
+}
+
+// TestPlatformActionsAuditAPI_ApprovalChainIncludesCancelRelease is F-3's
+// second required scenario: engage -> request_release -> cancel_release
+// (instead of approve), asserting the cancel is linked into the same
+// chain as engage and request_release - cancel_release's own
+// kill_switch_id metadata key (added alongside G1) is what makes this
+// possible, since its target_type (payment_kill_switch_release_request)
+// can never be keyed via the target_id fallback either.
+func TestPlatformActionsAuditAPI_ApprovalChainIncludesCancelRelease(t *testing.T) {
+	a := newAuditAPI(t, nil)
+	tenantA := a.tenant()
+	platX := a.platformAdmin()
+	tokX := a.token(platX, uuid.Nil, auth.RolePlatformAdmin, auth.PrincipalStaff)
+	base := "/v1/admin/tenants/" + tenantA.String() + "/payments"
+
+	engageResp := a.do("POST", base+"/kill-switches", tokX, map[string]any{
+		"provider_scope": "*", "operation_scope": "deposit", "reason_code": "cancel-chain-incident",
+	})
+	if engageResp.status != http.StatusOK {
+		t.Fatalf("engage: status=%d body=%s", engageResp.status, engageResp.body)
+	}
+	var ks killSwitchDTO
+	engageResp.decode(t, &ks)
+
+	reqResp := a.do("POST", base+"/kill-switches/"+ks.ID+"/release-requests", tokX, map[string]any{"reason_code": "cancel-chain-release"})
+	if reqResp.status != http.StatusCreated {
+		t.Fatalf("request_release: status=%d body=%s", reqResp.status, reqResp.body)
+	}
+	var relReq killSwitchReleaseRequestDTO
+	reqResp.decode(t, &relReq)
+
+	cancelResp := a.do("POST", base+"/kill-switch-release-requests/"+relReq.ID+"/cancel", tokX, nil)
+	if cancelResp.status != http.StatusNoContent {
+		t.Fatalf("cancel_release: status=%d body=%s", cancelResp.status, cancelResp.body)
+	}
+
+	tenantAAdmin := a.tenantStaff(tenantA, "tenant_admin")
+	tenantATok := a.token(tenantAAdmin, tenantA, auth.RoleTenantAdmin, auth.PrincipalStaff)
+	page, status := getPlatformActions(t, a, tenantATok)
+	if status != http.StatusOK {
+		t.Fatalf("read: status=%d", status)
+	}
+
+	engage := findByAction(t, page.Items, "payments_kill_switch.engage")
+	requestRelease := findByAction(t, page.Items, "payments_kill_switch.request_release")
+	cancelRelease := findByAction(t, page.Items, "payments_kill_switch.cancel_release")
+
+	if !chainHasAction(engage.ApprovalChain, "payments_kill_switch.cancel_release") {
+		t.Errorf("F-3: expected the engage row's chain to include cancel_release, got %+v", engage.ApprovalChain)
+	}
+	if !chainHasAction(requestRelease.ApprovalChain, "payments_kill_switch.cancel_release") {
+		t.Errorf("F-3: expected the request_release row's chain to include cancel_release, got %+v", requestRelease.ApprovalChain)
+	}
+	if !chainHasAction(cancelRelease.ApprovalChain, "payments_kill_switch.engage") {
+		t.Errorf("expected the cancel_release row's own chain to include engage, got %+v", cancelRelease.ApprovalChain)
+	}
+	if !chainHasAction(cancelRelease.ApprovalChain, "payments_kill_switch.request_release") {
+		t.Errorf("expected the cancel_release row's own chain to include request_release, got %+v", cancelRelease.ApprovalChain)
+	}
+}
+
+// TestPlatformActionsAuditAPI_ChainIncludesTenantOwnRows is F-5 (code
+// review; orchestrator decision: conform to ADR §5.5 - "the tenant's own
+// rows; subject rows for that tenant"): a TENANT-requested release,
+// approved by a PLATFORM admin, must show the tenant's own engage/
+// request_release rows (ordinary tenant-scope audit rows, tenant_id =
+// tenantA - never subject rows) in the resulting subject
+// (approve_release) row's approval_chain. Before this fix, the chain was
+// built only from subject rows, so the tenant's own engage/request_release
+// rows - which the tenant can already read via GET /v1/admin/audit-log
+// today - were invisible from the platform-actions chain specifically.
+func TestPlatformActionsAuditAPI_ChainIncludesTenantOwnRows(t *testing.T) {
+	a := newAuditAPI(t, nil)
+	tenantA := a.tenant()
+	tenantAdmin := a.tenantStaff(tenantA, "tenant_admin")
+	tenantTok := a.token(tenantAdmin, tenantA, auth.RoleTenantAdmin, auth.PrincipalStaff)
+	platX := a.platformAdmin()
+	platTok := a.token(platX, uuid.Nil, auth.RolePlatformAdmin, auth.PrincipalStaff)
+	base := "/v1/admin/tenants/" + tenantA.String() + "/payments"
+
+	// (1) TENANT engage.
+	engageResp := a.do("POST", base+"/kill-switches", tenantTok, map[string]any{
+		"provider_scope": "*", "operation_scope": "deposit", "reason_code": "f5-tenant-incident",
+	})
+	if engageResp.status != http.StatusOK {
+		t.Fatalf("tenant engage: status=%d body=%s", engageResp.status, engageResp.body)
+	}
+	var ks killSwitchDTO
+	engageResp.decode(t, &ks)
+	if ks.ChangedByScope != "tenant" {
+		t.Fatalf("setup: expected a tenant-scope engage, got %+v", ks)
+	}
+
+	// (2) TENANT request_release.
+	reqResp := a.do("POST", base+"/kill-switches/"+ks.ID+"/release-requests", tenantTok, map[string]any{"reason_code": "f5-tenant-release"})
+	if reqResp.status != http.StatusCreated {
+		t.Fatalf("tenant request_release: status=%d body=%s", reqResp.status, reqResp.body)
+	}
+	var relReq killSwitchReleaseRequestDTO
+	reqResp.decode(t, &relReq)
+
+	// (3) PLATFORM approve_release - a distinct principal from the tenant
+	// requester (four-eyes), and a genuinely platform-scope caller acting
+	// on tenantA per canActOnTenant - this is what writes the SUBJECT row.
+	approveResp := a.do("POST", base+"/kill-switch-release-requests/"+relReq.ID+"/approve", platTok, nil)
+	if approveResp.status != http.StatusOK {
+		t.Fatalf("platform approve_release: status=%d body=%s", approveResp.status, approveResp.body)
+	}
+
+	page, status := getPlatformActions(t, a, tenantTok)
+	if status != http.StatusOK {
+		t.Fatalf("read: status=%d", status)
+	}
+	// Only the platform approve_release is a SUBJECT row - ADR §5.1's own
+	// item list scope (tenant-own engage/request_release are NOT platform
+	// actions and stay out of this endpoint's own item list, per AT-7 -
+	// they are reachable via the existing GET /v1/admin/audit-log).
+	if len(page.Items) != 1 {
+		t.Fatalf("expected exactly 1 subject (approve_release) row as an ITEM, got %+v", page.Items)
+	}
+	approveRelease := page.Items[0]
+	if approveRelease.Action != "payments_kill_switch.approve_release" {
+		t.Fatalf("expected the one item to be approve_release, got %+v", approveRelease)
+	}
+	if !chainHasAction(approveRelease.ApprovalChain, "payments_kill_switch.engage") {
+		t.Errorf("F-5: expected the approve_release row's chain to include the TENANT's own engage row, got %+v", approveRelease.ApprovalChain)
+	}
+	if !chainHasAction(approveRelease.ApprovalChain, "payments_kill_switch.request_release") {
+		t.Errorf("F-5: expected the approve_release row's chain to include the TENANT's own request_release row, got %+v", approveRelease.ApprovalChain)
+	}
+}
+
+// TestPlatformActionsAuditAPI_ChainSpansPages is F-5's second required
+// case: with ?limit=1, only the most recent row (approve_release) appears
+// as a page ITEM, but its approval_chain must still include the earlier
+// engage/request_release rows, which are NOT on this page at all - the
+// chain source query (platformActionsChainSourceQuery) has no LIMIT/
+// OFFSET, unlike the page query.
+func TestPlatformActionsAuditAPI_ChainSpansPages(t *testing.T) {
+	a := newAuditAPI(t, nil)
+	tenantA := a.tenant()
+	platX := a.platformAdmin()
+	platY := a.platformAdmin()
+	tokX := a.token(platX, uuid.Nil, auth.RolePlatformAdmin, auth.PrincipalStaff)
+	tokY := a.token(platY, uuid.Nil, auth.RolePlatformAdmin, auth.PrincipalStaff)
+	fourEyesEngageAndRelease(t, a, tenantA, tokX, tokY, "f5-page-incident", "f5-page-release")
+
+	tenantAAdmin := a.tenantStaff(tenantA, "tenant_admin")
+	tenantATok := a.token(tenantAAdmin, tenantA, auth.RoleTenantAdmin, auth.PrincipalStaff)
+
+	// Sanity: without pagination, all 3 rows appear.
+	full, status := getPlatformActions(t, a, tenantATok)
+	if status != http.StatusOK || full.Total != 3 {
+		t.Fatalf("setup: expected 3 total subject rows, got status=%d total=%d", status, full.Total)
+	}
+
+	// limit=1: exactly one ITEM (the most recent, approve_release, per
+	// ORDER BY created_at DESC), but its OWN chain must still name the
+	// engage and request_release rows that are NOT on this page.
+	page, status := getPlatformActionsPath(t, a, tenantATok, "/v1/admin/audit-log/platform-actions?limit=1&offset=0")
+	if status != http.StatusOK {
+		t.Fatalf("paginated read: status=%d", status)
+	}
+	if len(page.Items) != 1 {
+		t.Fatalf("expected exactly 1 item with limit=1, got %+v", page.Items)
+	}
+	if page.Total != 3 {
+		t.Fatalf("expected total=3 regardless of limit, got %d", page.Total)
+	}
+	item := page.Items[0]
+	if item.Action != "payments_kill_switch.approve_release" {
+		t.Fatalf("expected the single (most recent) item to be approve_release, got %+v", item)
+	}
+	if !chainHasAction(item.ApprovalChain, "payments_kill_switch.engage") {
+		t.Errorf("F-5: expected the chain to include engage even though it is on a DIFFERENT page, got %+v", item.ApprovalChain)
+	}
+	if !chainHasAction(item.ApprovalChain, "payments_kill_switch.request_release") {
+		t.Errorf("F-5: expected the chain to include request_release even though it is on a DIFFERENT page, got %+v", item.ApprovalChain)
 	}
 }
 
@@ -308,11 +536,98 @@ func TestPlatformActionsAuditAPI_ForcedResolverErrorFailsClosed(t *testing.T) {
 
 // TestPlatformActionsAuditAPI_NameLookupNeverSelectsEmail is C-104-3/AT-8:
 // an assertion on the exact SQL text of the name-lookup query.
+// TestExistingAuditLogAPI_UnaffectedBySubjectRows is F-4 (code review):
+// ADR 0104 §7's "Readers unchanged (R)" for GET /v1/admin/audit-log -
+// with a genuine subject row present for the SAME tenant (via a real
+// platform kill-switch engage), the existing tenant-scoped reader
+// (queryAuditLog's own `tenant_id = $1` filter) must never return it,
+// since a subject row's tenant_id is always NULL (migration 0109's
+// platform-only CHECK).
+func TestExistingAuditLogAPI_UnaffectedBySubjectRows(t *testing.T) {
+	a := newAuditAPI(t, nil)
+	tenantA := a.tenant()
+	platX := a.platformAdmin()
+	platY := a.platformAdmin()
+	tokX := a.token(platX, uuid.Nil, auth.RolePlatformAdmin, auth.PrincipalStaff)
+	tokY := a.token(platY, uuid.Nil, auth.RolePlatformAdmin, auth.PrincipalStaff)
+	fourEyesEngageAndRelease(t, a, tenantA, tokX, tokY, "f4-existing-reader-incident", "f4-existing-reader-released")
+
+	// Sanity: the subject rows really exist and are visible through the
+	// NEW platform-actions endpoint.
+	tenantAAdmin := a.tenantStaff(tenantA, "tenant_admin")
+	tenantATok := a.token(tenantAAdmin, tenantA, auth.RoleTenantAdmin, auth.PrincipalStaff)
+	page, status := getPlatformActions(t, a, tenantATok)
+	if status != http.StatusOK || page.Total == 0 {
+		t.Fatalf("setup: expected the platform-actions endpoint to see the subject rows, status=%d total=%d", status, page.Total)
+	}
+
+	// The EXISTING /v1/admin/audit-log endpoint must never see them.
+	resp := a.do("GET", "/v1/admin/audit-log", tenantATok, nil)
+	if resp.status != http.StatusOK {
+		t.Fatalf("existing audit-log read: status=%d body=%s", resp.status, resp.body)
+	}
+	var existing struct {
+		Items []struct {
+			Action string `json:"action"`
+		} `json:"items"`
+		Total int `json:"total"`
+	}
+	resp.decode(t, &existing)
+	for _, e := range existing.Items {
+		if strings.HasPrefix(e.Action, "payments_kill_switch.") {
+			t.Fatalf("F-4: expected the existing tenant audit-log reader to never see a platform-scope subject row, got %+v", e)
+		}
+	}
+}
+
 func TestPlatformActionsAuditAPI_NameLookupNeverSelectsEmail(t *testing.T) {
 	if strings.Contains(strings.ToLower(staffDisplayNameLookupQuery), "email") {
 		t.Fatalf("the staff display-name lookup query must never select email, got: %s", staffDisplayNameLookupQuery)
 	}
 	if !strings.Contains(staffDisplayNameLookupQuery, "display_name") || !strings.Contains(staffDisplayNameLookupQuery, "staff_users") {
 		t.Fatalf("expected the query to select id, display_name from staff_users, got: %s", staffDisplayNameLookupQuery)
+	}
+}
+
+// TestPlatformActionsAuditAPI_RouteTarget is F-9 (code review): a
+// dedicated "route target" test for AT-5/ADR §4 - the stored
+// subject_tenant_id must equal the PATH target (never a client-supplied
+// body value), and a body that tries to carry its own tenant_id is
+// refused (decodeJSON's unknown-field rejection, the same convention
+// payments_kill_switch_api_integration_test.go's own
+// TestPaymentsKillSwitchAPI_UnknownFieldsRefused already relies on).
+func TestPlatformActionsAuditAPI_RouteTarget(t *testing.T) {
+	a := newAuditAPI(t, nil)
+	tenantA := a.tenant()
+	platX := a.platformAdmin()
+	tokX := a.token(platX, uuid.Nil, auth.RolePlatformAdmin, auth.PrincipalStaff)
+	base := "/v1/admin/tenants/" + tenantA.String() + "/payments"
+
+	// A body carrying its own "tenant_id" is refused outright (unknown
+	// field) - the target can ONLY ever come from the path.
+	badBody := a.do("POST", base+"/kill-switches", tokX, map[string]any{
+		"provider_scope": "*", "operation_scope": "deposit", "reason_code": "f9-route-target", "tenant_id": tenantA.String(),
+	})
+	if badBody.status != http.StatusBadRequest {
+		t.Fatalf("expected a body carrying tenant_id to be refused with 400, got status=%d body=%s", badBody.status, badBody.body)
+	}
+
+	// The success path: the STORED subject_tenant_id equals the path
+	// target exactly.
+	engageResp := a.do("POST", base+"/kill-switches", tokX, map[string]any{
+		"provider_scope": "*", "operation_scope": "deposit", "reason_code": "f9-route-target-ok",
+	})
+	if engageResp.status != http.StatusOK {
+		t.Fatalf("engage: status=%d body=%s", engageResp.status, engageResp.body)
+	}
+
+	var storedSubjectTenant uuid.UUID
+	if err := a.pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT subject_tenant_id FROM audit_log WHERE tenant_id IS NULL AND action = 'payments_kill_switch.engage' AND actor_id = $1 ORDER BY created_at DESC LIMIT 1`, platX).Scan(&storedSubjectTenant)
+	}); err != nil {
+		t.Fatalf("read stored subject_tenant_id: %v", err)
+	}
+	if storedSubjectTenant != tenantA {
+		t.Fatalf("F-9: expected the stored subject_tenant_id to equal the path target %s, got %s", tenantA, storedSubjectTenant)
 	}
 }
