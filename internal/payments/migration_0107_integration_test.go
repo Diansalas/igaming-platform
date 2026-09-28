@@ -1272,6 +1272,33 @@ func TestINVDEP1_FL2_MultipleSuccessAlertLogContentIsPinned(t *testing.T) {
 			t.Errorf("F-L2: the alert line must never carry %q, got: %s", key, alertLine)
 		}
 	}
+
+	// Security review follow-up (post-FH-3b, "optional if cheap"): assert
+	// an EXACT allow-list of keys, not merely the absence of specific
+	// forbidden ones - a NEW key this test's author never thought to
+	// forbid (e.g. a future "reason" or "correlation_id") would otherwise
+	// slip through unnoticed. slog's TextHandler renders each attribute as
+	// a bare `key=value` token (none of these values ever contain a space
+	// - msg/level/time are fixed strings, the three ids are UUIDs), so a
+	// plain whitespace split is sufficient to enumerate every key on the
+	// line without needing a real key=value parser.
+	gotKeys := map[string]bool{}
+	for _, tok := range strings.Fields(alertLine) {
+		if i := strings.IndexByte(tok, '='); i > 0 {
+			gotKeys[tok[:i]] = true
+		}
+	}
+	wantKeys := map[string]bool{"time": true, "level": true, "msg": true, "tenant_id": true, "deposit_intent_id": true, "attempt_id": true}
+	for k := range wantKeys {
+		if !gotKeys[k] {
+			t.Errorf("F-L2: expected key %q in the alert line, got keys %v", k, gotKeys)
+		}
+	}
+	for k := range gotKeys {
+		if !wantKeys[k] {
+			t.Errorf("F-L2: unexpected key %q in the alert line (exact allow-list violated), got keys %v", k, gotKeys)
+		}
+	}
 }
 
 // TestINVDEP1_C3_MultipleSuccessAuditRecordCarriesAmountAndAsset closes
@@ -1651,5 +1678,149 @@ func TestX6_ResolvedForOtherDepositPredicate_LedgerHalfAlone(t *testing.T) {
 		return nil
 	}); err != nil {
 		t.Fatalf("X6: %v", err)
+	}
+}
+
+// TestC4_ResolveAmbiguousOutcomeSucceeded_ReturnsWrappedRefusal closes half
+// of ledger-finance review C4 (rv-fh3-ledger.md, 076e42e): resolveAmbiguous's
+// OutcomeSucceeded branch, called DIRECTLY here (whitebox - the legacy
+// InitiateDeposit dispatch can never itself construct this shape through
+// its own public API, since every InitiateDeposit call creates a brand
+// new deposit_intents row with uuid.New(), which cannot already be
+// resolved by anything else within that same synchronous call), must wrap
+// ErrDepositIntentAlreadyResolved with DepositIntentAlreadyResolvedRefusal
+// (intent/provider/reference context InitiateDepositAudited needs),
+// while errors.Is(err, ErrDepositIntentAlreadyResolved) still reports
+// true for every EXISTING caller that only checks the bare sentinel.
+func TestC4_ResolveAmbiguousOutcomeSucceeded_ReturnsWrappedRefusal(t *testing.T) {
+	pool := depositV2ScratchPool(t)
+	f := seedOrchFixture(t, pool)
+	mock := NewMockProvider("c4-mock", "EUR")
+	orch := NewOrchestrator(map[string]PaymentProvider{}, MultiWebhookCredentialResolver{})
+
+	var intent DepositIntent
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		intentID := uuid.New()
+		if _, err := tx.Exec(ctx, `INSERT INTO deposit_intents (id, tenant_id, brand_id, player_account_id, wallet_id, asset_code, amount, payment_method, status, idempotency_key)
+			VALUES ($1,$2,$3,$4,$5,'EUR',$6,'card','ambiguous','c4-intent')`,
+			intentID, f.tenantID, f.brandID, f.playerAccountID, f.walletID, MockAmountAmbiguous); err != nil {
+			return err
+		}
+		intent = DepositIntent{ID: intentID, TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID, Amount: MockAmountAmbiguous, AssetCode: "EUR"}
+
+		// A REAL prior posting for this SAME intent (a different provider
+		// reference/idempotency key) - makes resolvedForOtherDeposit true
+		// for the legacy path's nil-attemptID case (counts every
+		// succeeded sibling, per the ledger-finance AM-2 confirmation
+		// §3(iii)).
+		accounts, err := ledger.GetOrCreateAccounts(ctx, tx, f.tenantID,
+			ledger.AccountSpec{WalletID: &f.walletID, AccountType: ledger.AccountPlayerCash, AssetCode: "EUR"},
+			ledger.AccountSpec{AccountType: ledger.AccountPSPClearing, AssetCode: "EUR"},
+		)
+		if err != nil {
+			return err
+		}
+		p := "c4-mock"
+		refA := "c4-refA"
+		postResult, err := ledger.Post(ctx, tx, ledger.TransactionInput{
+			TenantID: f.tenantID, TransactionType: ledger.TxDeposit, IdempotencyKey: "c4-mock:c4-refA",
+			ProviderID: &p, ProviderTxID: &refA, CorrelationID: intentID,
+			Entries: []ledger.EntryInput{
+				{LedgerAccountID: accounts[1], Direction: ledger.Debit, Amount: MockAmountAmbiguous},
+				{LedgerAccountID: accounts[0], Direction: ledger.Credit, Amount: MockAmountAmbiguous},
+			},
+		})
+		if err != nil {
+			return err
+		}
+		_, err = tx.Exec(ctx, `UPDATE deposit_intents SET status = 'succeeded', provider_id = $2, provider_reference = $3, ledger_transaction_id = $4 WHERE id = $1`,
+			intentID, p, refA, postResult.TransactionID)
+		return err
+	}); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+
+	// A SEPARATE, legacy-shaped ambiguous->succeeded resolution for the
+	// SAME (already-resolved) intent - constructed directly against the
+	// mock (Deposit then Resolve), since InitiateDeposit's own dispatch
+	// can never reach this shape through its public API (see the doc
+	// comment above).
+	depRes, err := mock.Deposit(context.Background(), DepositRequest{Amount: MockAmountAmbiguous, AssetCode: "EUR"})
+	if err != nil || depRes.Outcome != OutcomeAmbiguous {
+		t.Fatalf("setup: expected the mock to accept MockAmountAmbiguous-shaped deposit, got %+v %v", depRes, err)
+	}
+	mock.Resolve(depRes.ProviderReference, OutcomeSucceeded, "", false)
+
+	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := orch.resolveAmbiguous(ctx, tx, intent, "c4-mock", mock, depRes.ProviderReference, nil)
+		return err
+	})
+	var refusal *DepositIntentAlreadyResolvedRefusal
+	if !errors.As(err, &refusal) {
+		t.Fatalf("C4: expected a *DepositIntentAlreadyResolvedRefusal, got %v", err)
+	}
+	if !errors.Is(err, ErrDepositIntentAlreadyResolved) {
+		t.Errorf("C4: errors.Is against the bare sentinel must still report true, got %v", err)
+	}
+	if refusal.IntentID != intent.ID || refusal.TenantID != f.tenantID || refusal.ProviderID != "c4-mock" || refusal.ProviderReference != depRes.ProviderReference {
+		t.Errorf("C4: unexpected refusal fields: %+v", refusal)
+	}
+	if n := ledgerDepositTxCount(t, pool, f.tenantID, intent.ID); n != 1 {
+		t.Errorf("C4: expected exactly 1 deposit ledger posting (no second one), got %d", n)
+	}
+}
+
+// TestC4_InitiateDepositAudited_WritesRefusalAudit closes the other half
+// of ledger-finance review C4: InitiateDepositAudited must catch
+// DepositIntentAlreadyResolvedRefusal and write the P1 plus
+// deposit.multiple_success_refused audit row in a SEPARATE transaction
+// (RecordDepositMultipleSuccessRefusal, previously wired to nothing at
+// all - security's own P2-L2 finding). Calls RecordDepositMultipleSuccess
+// Refusal directly (the same function InitiateDepositAudited itself
+// calls) to prove the write it performs is correct and durable, since
+// reproducing the full ambiguous->succeeded-on-an-already-resolved-intent
+// shape through InitiateDeposit's own public dispatch is not constructible
+// (see TestC4_ResolveAmbiguousOutcomeSucceeded_ReturnsWrappedRefusal's own
+// doc comment) - InitiateDepositAudited's own error-unwrapping logic is a
+// direct, visible one-line `errors.As` in its body, reviewed by inspection
+// alongside this test of the write it performs.
+func TestC4_InitiateDepositAudited_WritesRefusalAudit(t *testing.T) {
+	pool := depositV2ScratchPool(t)
+	f := seedOrchFixture(t, pool)
+	intentID := uuid.New()
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `INSERT INTO deposit_intents (id, tenant_id, brand_id, player_account_id, wallet_id, asset_code, amount, payment_method, status, idempotency_key)
+			VALUES ($1,$2,$3,$4,$5,'EUR',5000,'card','ambiguous','c4-audit-intent')`,
+			intentID, f.tenantID, f.brandID, f.playerAccountID, f.walletID)
+		return err
+	}); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return RecordDepositMultipleSuccessRefusal(ctx, tx, f.tenantID, intentID, "c4-mock", "c4-audit-ref")
+	}); err != nil {
+		t.Fatalf("RecordDepositMultipleSuccessRefusal: %v", err)
+	}
+
+	var count int64
+	var metaJSON []byte
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		if err := tx.QueryRow(ctx, `SELECT count(*) FROM audit_log WHERE action = 'deposit.multiple_success_refused' AND target_id = $1`, intentID.String()).Scan(&count); err != nil {
+			return err
+		}
+		return tx.QueryRow(ctx, `SELECT metadata FROM audit_log WHERE action = 'deposit.multiple_success_refused' AND target_id = $1`, intentID.String()).Scan(&metaJSON)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("C4: expected exactly 1 deposit.multiple_success_refused audit record, got %d", count)
+	}
+	var meta map[string]any
+	if err := json.Unmarshal(metaJSON, &meta); err != nil {
+		t.Fatalf("unmarshal audit metadata: %v", err)
+	}
+	if meta["provider_id"] != "c4-mock" || meta["provider_reference"] != "c4-audit-ref" {
+		t.Errorf("C4: unexpected audit metadata: %v", meta)
 	}
 }
