@@ -90,8 +90,14 @@ func staticWalkNonTestGoFiles(t *testing.T, root string, visit func(path string,
 			// Skip vendor/node_modules/.git and any other VCS-ish or
 			// dependency directory that could otherwise slow this test
 			// down or produce noise unrelated to this repo's own code.
+			// Like the go tool, also skip every dot- and underscore-prefixed
+			// directory and testdata: they are never part of the module's
+			// packages, and .claude/worktrees/ holds other checkouts of this
+			// same repo whose copies of the allowed files would otherwise
+			// be misread as violations.
 			base := d.Name()
-			if base == "vendor" || base == "node_modules" || base == ".git" {
+			if path != root && (base == "vendor" || base == "node_modules" || base == "testdata" ||
+				strings.HasPrefix(base, ".") || strings.HasPrefix(base, "_")) {
 				return filepath.SkipDir
 			}
 			return nil

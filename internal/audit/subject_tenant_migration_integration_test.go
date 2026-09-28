@@ -50,23 +50,52 @@ func m0109Version(t *testing.T) int64 {
 	return 0
 }
 
-// m0109ScratchAllMigrations copies every on-disk migration file (there may
-// be a gap at 0108 - another, unmerged workstream's allocation; the
-// migration runner does not require file-numeric contiguity to apply what
-// IS present) into a fresh temp dir and migrates a new scratch database up
-// through all of them.
-func m0109ScratchAllMigrations(t *testing.T, prefix string) *db.Pool {
+// m0109ScratchThrough0109 copies the on-disk migration files numbered up
+// to and including 0109 (never a later one) into a fresh temp dir and
+// migrates a new scratch database up through them, so "down one step"
+// always rolls back exactly 0109 however many later migrations exist on
+// disk (the migration_0099Scratch pattern in internal/casino). The
+// returned dir must be used for every subsequent MigrateDown/MigrateUp.
+func m0109ScratchThrough0109(t *testing.T, prefix string) (*db.Pool, string) {
 	t.Helper()
+	v := m0109Version(t)
+	src := m0109RealMigrationsDir(t)
+	dir := t.TempDir()
+	entries, err := os.ReadDir(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || len(name) < 4 {
+			continue
+		}
+		n, perr := strconv.ParseInt(name[:4], 10, 64)
+		if perr != nil || n > v {
+			continue
+		}
+		b, rerr := os.ReadFile(filepath.Join(src, name))
+		if rerr != nil {
+			t.Fatal(rerr)
+		}
+		if werr := os.WriteFile(filepath.Join(dir, name), b, 0o600); werr != nil {
+			t.Fatal(werr)
+		}
+	}
 	url := scratchdb.New(t, prefix)
 	pool, err := db.Connect(context.Background(), url, 10, 5_000_000_000)
 	if err != nil {
 		t.Fatalf("connect scratch: %v", err)
 	}
 	t.Cleanup(pool.Close)
-	if _, err := pool.MigrateUp(context.Background(), m0109RealMigrationsDir(t)); err != nil {
-		t.Fatalf("migrate scratch up: %v", err)
+	applied, err := pool.MigrateUp(context.Background(), dir)
+	if err != nil {
+		t.Fatalf("migrate scratch up through %d: %v", v, err)
 	}
-	return pool
+	if len(applied) == 0 || applied[len(applied)-1] != v {
+		t.Fatalf("expected %d to be the last applied migration, got %v", v, applied)
+	}
+	return pool, dir
 }
 
 func m0109SeedTenant(t *testing.T, pool *db.Pool) uuid.UUID {
@@ -96,7 +125,7 @@ func m0109SeedPlatformAdmin(t *testing.T, pool *db.Pool) uuid.UUID {
 }
 
 func TestMigration0109_UpDownUpRoundTrip_CleanDB(t *testing.T) {
-	pool := m0109ScratchAllMigrations(t, "m0109rt_")
+	pool, migDir := m0109ScratchThrough0109(t, "m0109rt_")
 
 	assertColumnExists := func(want bool, label string) {
 		var n int
@@ -114,21 +143,21 @@ func TestMigration0109_UpDownUpRoundTrip_CleanDB(t *testing.T) {
 	}
 	assertColumnExists(true, "after up")
 
-	down, err := pool.MigrateDown(context.Background(), m0109RealMigrationsDir(t), 1)
+	down, err := pool.MigrateDown(context.Background(), migDir, 1)
 	v := m0109Version(t)
 	if err != nil || len(down) != 1 || down[0] != v {
 		t.Fatalf("down must roll back exactly %d: %v %v", v, down, err)
 	}
 	assertColumnExists(false, "after down")
 
-	if _, err := pool.MigrateUp(context.Background(), m0109RealMigrationsDir(t)); err != nil {
+	if _, err := pool.MigrateUp(context.Background(), migDir); err != nil {
 		t.Fatalf("re-up after down: %v", err)
 	}
 	assertColumnExists(true, "after re-up")
 }
 
 func TestMigration0109_Down_RefusesWhenSubjectTenantRowExists(t *testing.T) {
-	pool := m0109ScratchAllMigrations(t, "m0109subj_")
+	pool, migDir := m0109ScratchThrough0109(t, "m0109subj_")
 	tenantID := m0109SeedTenant(t, pool)
 	adminID := m0109SeedPlatformAdmin(t, pool)
 
@@ -141,7 +170,7 @@ func TestMigration0109_Down_RefusesWhenSubjectTenantRowExists(t *testing.T) {
 		t.Fatalf("seed subject row: %v", err)
 	}
 
-	if _, err := pool.MigrateDown(context.Background(), m0109RealMigrationsDir(t), 1); err == nil {
+	if _, err := pool.MigrateDown(context.Background(), migDir, 1); err == nil {
 		t.Fatal("expected the down migration to refuse with a subject_tenant_id row present")
 	} else if !strings.Contains(err.Error(), "subject_tenant_id set") {
 		t.Fatalf("expected the subject_tenant_id refusal message, got: %v", err)
@@ -149,7 +178,7 @@ func TestMigration0109_Down_RefusesWhenSubjectTenantRowExists(t *testing.T) {
 }
 
 func TestMigration0109_Down_RefusesWhenDisplayNameSet(t *testing.T) {
-	pool := m0109ScratchAllMigrations(t, "m0109name_")
+	pool, migDir := m0109ScratchThrough0109(t, "m0109name_")
 	adminID := m0109SeedPlatformAdmin(t, pool)
 
 	if err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
@@ -159,7 +188,7 @@ func TestMigration0109_Down_RefusesWhenDisplayNameSet(t *testing.T) {
 		t.Fatalf("seed display_name: %v", err)
 	}
 
-	if _, err := pool.MigrateDown(context.Background(), m0109RealMigrationsDir(t), 1); err == nil {
+	if _, err := pool.MigrateDown(context.Background(), migDir, 1); err == nil {
 		t.Fatal("expected the down migration to refuse with a non-NULL display_name present")
 	} else if !strings.Contains(err.Error(), "display_name set") {
 		t.Fatalf("expected the display_name refusal message, got: %v", err)
@@ -192,7 +221,7 @@ func m0109SeedTenantStaff(t *testing.T, pool *db.Pool, tenantID uuid.UUID) uuid.
 // (not platform) staff row specifically to catch that gap; the fix loops
 // over every tenant, setting app.tenant_id for each pass.
 func TestMigration0109_Down_RefusesWhenTenantStaffDisplayNameSet(t *testing.T) {
-	pool := m0109ScratchAllMigrations(t, "m0109tstaff_")
+	pool, migDir := m0109ScratchThrough0109(t, "m0109tstaff_")
 	tenantID := m0109SeedTenant(t, pool)
 	staffID := m0109SeedTenantStaff(t, pool, tenantID)
 
@@ -203,7 +232,7 @@ func TestMigration0109_Down_RefusesWhenTenantStaffDisplayNameSet(t *testing.T) {
 		t.Fatalf("seed tenant staff display_name: %v", err)
 	}
 
-	if _, err := pool.MigrateDown(context.Background(), m0109RealMigrationsDir(t), 1); err == nil {
+	if _, err := pool.MigrateDown(context.Background(), migDir, 1); err == nil {
 		t.Fatal("expected the down migration to refuse with a TENANT staff display_name present")
 	} else if !strings.Contains(err.Error(), "display_name set") {
 		t.Fatalf("expected the display_name refusal message, got: %v", err)
@@ -211,8 +240,8 @@ func TestMigration0109_Down_RefusesWhenTenantStaffDisplayNameSet(t *testing.T) {
 }
 
 func TestMigration0109_Down_SucceedsWhenNeitherPresent(t *testing.T) {
-	pool := m0109ScratchAllMigrations(t, "m0109clean_")
-	if _, err := pool.MigrateDown(context.Background(), m0109RealMigrationsDir(t), 1); err != nil {
+	pool, migDir := m0109ScratchThrough0109(t, "m0109clean_")
+	if _, err := pool.MigrateDown(context.Background(), migDir, 1); err != nil {
 		t.Fatalf("expected the down migration to succeed with no subject rows/display names, got: %v", err)
 	}
 }
