@@ -65,7 +65,7 @@ production credential exists.
 | KYC vendor | MOCK | KYC-SUBMIT-OUTBOX-1 (PRH-2 E1); KYC-ENFORCE-1; HD-KYC-1..8 thresholds |
 | Crypto custody | NOT IMPLEMENTED (interface only, ADR 0008) | Custodian selection (human) |
 | Email | MOCK (`internal/email` mock provider) | Vendor selection |
-| Alert delivery / paging | Log lines only today; PRH-2 I adds durable alerts and a mock sink | HD-PRH2-4-OPS (real recipients) |
+| Alert delivery / paging | Durable alerts (`internal/alerting`, migration 0110, ADR 0102): log sink IMPLEMENTED, mock sink MOCK. The dispatcher is not yet wired into `main.go` (PRH-2 I-wire). No routes or recipients are configured. | HD-PRH2-4-OPS (real recipients); a real channel adapter must dedupe on `<alert_id>:<step>` (ADR 0102 §16.3) |
 | Secret store | `devfile`/memory locally; `awssm` backend exists (AWS OFF) | ADR 0093/0094; production configuration checklist |
 
 ## Secret names inventory (names only, never values)
