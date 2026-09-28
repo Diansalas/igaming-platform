@@ -366,18 +366,62 @@ func GetLaunchSessionByID(ctx context.Context, tx pgx.Tx, id uuid.UUID) (LaunchS
 	return s, nil
 }
 
-// RevokeLaunchSession marks an active session unusable without consuming
-// it (e.g. the launch attempt itself failed after the token was minted,
-// or a staff-initiated safety revocation) - never a DELETE, since the
-// row is the audit-visible record of a launch attempt having occurred at
-// all. Returns whether the CAS actually matched a row (revoked=false means
-// the session was already non-'active' - e.g. already revoked, or a
-// hypothetical race - so the caller can record the true outcome rather
-// than assuming success; security review RV-PRH-I2 C1/F3).
-func RevokeLaunchSession(ctx context.Context, tx pgx.Tx, id uuid.UUID) (bool, error) {
-	tag, err := tx.Exec(ctx, `UPDATE casino_launch_sessions SET status = 'revoked' WHERE id = $1 AND status = 'active'`, id)
-	if err != nil {
-		return false, fmt.Errorf("casino: revoke launch session: %w", err)
+// RevokeLaunchSession marks an active OR consumed session unusable without
+// leaving it playable - never a DELETE, since the row is the audit-visible
+// record of a launch attempt having occurred at all.
+//
+// CAS-REVOKE-CONSUMED-1 (docs/plans/payment-readiness/rv-prh-i2-casino-
+// security.md "Re-review (FH-7, 2026-09-28)", required fix; migration
+// 0108): before 0108, this CAS only matched status='active', so a launch
+// phase C recorded as failed AFTER the vendor had already consumed the
+// token left the session 'consumed' and indefinitely bet-eligible - the
+// C4 gap ADR 0095 §15.1.5 reopened and the now-inverted
+// TestLaunchGame_FailedLaunchOnConsumedSession_RevokesAndRejectsBet
+// (formerly the characterization test) pins closed. Migration 0108's
+// trigger now permits exactly the consumed -> revoked transition (with
+// every other column frozen), so this CAS is widened to match.
+//
+// SELECT ... FOR UPDATE first (rather than folding the whole thing into a
+// single UPDATE ... WHERE) so the prior status this function REPORTS is
+// always exact, never a stale read (code review A3, PRH-2 workstream A).
+// The UPDATE's own WHERE status IN (...) is what makes the status
+// transition itself atomic, with or without this SELECT's own locking -
+// that part does not depend on FOR UPDATE. What FOR UPDATE actually buys
+// is this: if another transaction is concurrently revoking the SAME
+// session and has already run its own UPDATE but not yet committed, a
+// plain (unlocked) SELECT here would return that transaction's
+// pre-update, now-stale value (ordinary read-committed MVCC), even though
+// the row's true current status is about to become something else. FOR
+// UPDATE instead blocks this SELECT until the other transaction commits or
+// rolls back, so the prior status reported back to THIS caller is always
+// the one genuinely in effect immediately before this call's own CAS
+// attempt. See TestRevokeLaunchSession_ConcurrentRevokes_
+// ForUpdateKeepsPriorStatusExact (migration_0108_revoke_consumed_
+// integration_test.go) for the two-connection proof; dropping FOR UPDATE
+// does not change whether a session gets revoked (the UPDATE's WHERE
+// clause still refuses the same cases), only whether the REPORTED prior
+// status can be stale.
+//
+// Returns the prior status and whether the CAS actually matched a row
+// (revoked=false means the session was already 'expired' or 'revoked' -
+// e.g. a hypothetical race, or a second revoke attempt - so the caller can
+// record the true outcome rather than assuming success; security review
+// RV-PRH-I2 C1/F3).
+func RevokeLaunchSession(ctx context.Context, tx pgx.Tx, id uuid.UUID) (priorStatus LaunchSessionStatus, revoked bool, err error) {
+	err = tx.QueryRow(ctx, `SELECT status FROM casino_launch_sessions WHERE id = $1 FOR UPDATE`, id).Scan(&priorStatus)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", false, ErrLaunchSessionNotFound
 	}
-	return tag.RowsAffected() == 1, nil
+	if err != nil {
+		return "", false, fmt.Errorf("casino: revoke launch session: select for update: %w", err)
+	}
+
+	tag, err := tx.Exec(ctx,
+		`UPDATE casino_launch_sessions SET status = 'revoked' WHERE id = $1 AND status IN ('active', 'consumed')`,
+		id,
+	)
+	if err != nil {
+		return priorStatus, false, fmt.Errorf("casino: revoke launch session: %w", err)
+	}
+	return priorStatus, tag.RowsAffected() == 1, nil
 }
