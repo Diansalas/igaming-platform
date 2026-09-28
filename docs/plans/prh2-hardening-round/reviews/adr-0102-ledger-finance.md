@@ -66,3 +66,24 @@ Reviewed `docs/decisions/0102-…` at `0939c5a`, plus ADR 0104 §1–4 where the
 **Not verified:** any non-MOCK statement source in production; the full lock sequence after the raise; sportsbook-stream windowing; whether any lock or statement timeout is configured; and PostgreSQL's behaviour for 40001 on ON CONFLICT and savepoint recovery at REPEATABLE READ (test 6 must establish both).
 
 **For the orchestrator:** F3 and F7(a) need a security ruling.
+
+## Confirmation: ADR 0102 revision 2 (`bc44b05`) — **ACCEPT**
+
+Every condition is met in the text:
+- F1: validation runs before the savepoint and is never propagated (§7.2 step 1, AL-6a).
+- F2: `requires_subject` / `in_tx_raisable_by_tenant` flags; the originating scope is captured by `ScopedRunner`.
+- F3: `raise_failed` (§6.3; security accepted it).
+- F4: `alerting.InTx` (§5, §7.3, AL-7).
+- F5: `Flush` runs after the response, inside the admission hold.
+- F6/F7: post-commit detached raise with stable keys at the REPEATABLE READ sites (§7.3a, rows 6–7); F7(a) rejected. The crash residual is acceptable because both sources are re-detected every run.
+- F8: the corrected backstop table (§7.5–7.6).
+- F9: `CHECK (event <> 'unrouted' OR attempt_no = 0)`; meta occurrence only on `RETURNING`.
+- F10: the kill-switch raise is post-commit only.
+- F11: §7.7 plus the ADR 0082 amendment.
+- F14: `Raise` never writes `audit_log`.
+- Tests 1–12 are all mapped (§11).
+- F12 is disclosed; F13 is registered as ALERT-RETENTION-1.
+
+Notes for I-core (not conditions):
+1. A Go-validation failure is routed through the same per-transaction `Pending`, so a rolled-back transaction discards it too. LF test 4 includes a validation-failure case.
+2. LF test 3's walk includes the principal-scope origin (row 8), since the exclusion set does not exclude `app.principal_id`.
