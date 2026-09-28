@@ -176,7 +176,7 @@ func TestInTx_ValidationFailureInRolledBackTransactionDiscarded(t *testing.T) {
 // detached retry genuinely reaches SQL on every attempt, exhausts, and
 // falls back - exactly as a persistent P0001 would. (Injecting a literal,
 // deterministic P0001 from inside a trigger would require a test-only
-// fault-injection hook in migration 0108 itself, which was not added -
+// fault-injection hook in migration 0110 itself, which was not added -
 // see the final report's noted test gaps.)
 func TestRaiseGuarded_PersistentSwallowedFailure_FallsBackToRaiseFailed(t *testing.T) {
 	// scratchPool (not the shared testPool): this alert's dedup key is

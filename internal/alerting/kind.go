@@ -7,7 +7,7 @@
 // by this package (HD-PRH2-4) - alert_routes ships and stays empty until
 // a platform admin configures it.
 //
-// This file is the Go-side mirror of migration 0108's alert_kinds seed
+// This file is the Go-side mirror of migration 0110's alert_kinds seed
 // table (ADR §3.1/§9 item 1). The two must stay in lock-step: the
 // database is the ultimate authority (every column here is independently
 // enforced by a trigger or CHECK), but Go validates BEFORE any SQL runs
@@ -106,7 +106,7 @@ func keys(ks ...string) map[string]struct{} {
 }
 
 // kindDefs is the closed registry, keyed by Kind. Every field here MUST
-// match the corresponding migration 0108 alert_kinds seed row exactly -
+// match the corresponding migration 0110 alert_kinds seed row exactly -
 // LF test 3 (a table-driven walk, kinds_migration_parity_integration_test.go)
 // asserts this at the database.
 var kindDefs = map[Kind]KindDef{

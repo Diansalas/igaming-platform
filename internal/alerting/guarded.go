@@ -15,14 +15,14 @@ import (
 
 // sqlstateClassGoValidation is the sentinel sqlstate_class the §6.3
 // fallback uses for a Go-side validation failure (never a real SQLSTATE),
-// matching migration 0108's alerting.raise_failed attribute trigger
+// matching migration 0110's alerting.raise_failed attribute trigger
 // exactly ("go_validation").
 const sqlstateClassGoValidation = "go_validation"
 
 // sqlstateClassUnknown is used only when a detached retry's final
 // attempt failed with something other than a *pgconn.PgError (e.g. a
 // context deadline or a network error) - there is no real two-character
-// SQLSTATE to report, so this stand-in satisfies migration 0108's
+// SQLSTATE to report, so this stand-in satisfies migration 0110's
 // `sqlstate_class ~ '^[0-9A-Z]{2}$'` CHECK ("58" is Postgres's own
 // System Error class, the closest real meaning available) while staying
 // honest that the last observed error was not itself a PG error.

@@ -35,7 +35,7 @@ const (
 	OutcomeFailed Outcome = "failed"
 )
 
-// ErrorClass mirrors migration 0108's alert_deliveries.last_error_class
+// ErrorClass mirrors migration 0110's alert_deliveries.last_error_class
 // enum exactly.
 type ErrorClass string
 

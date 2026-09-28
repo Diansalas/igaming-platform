@@ -908,16 +908,21 @@ Also required:
 ## 16. Implementation record — I-core (2026-09-28)
 
 **Branch:** `i-core-alerting`, based on `claude/focused-wright-jw88w9` at
-`b433454`. Implemented by the backend specialist per this ADR's PRH-2
-I-core scope (migration, `internal/alerting`, the dispatcher, I-core
-tests). I-wire (the real business raise sites, `cmd/platform-api/main.go`
-wiring, the `tenant_snapshot.go` comment) is NOT part of this record.
+`b433454`, later merged forward to `847a0fb` (bringing in workstream A's
+migration 0108 and other PRH-2 landings). Implemented by the backend
+specialist per this ADR's PRH-2 I-core scope (migration, `internal/
+alerting`, the dispatcher, I-core tests). I-wire (the real business raise
+sites, `cmd/platform-api/main.go` wiring, the `tenant_snapshot.go`
+comment) is NOT part of this record.
 
-- **Migration.** Numbered **0108** on disk (0108/0109 were allocated to
-  workstreams A and G1, both unmerged on this branch at authoring time -
-  the same renumbering situation migration 0105's own header documents
-  for itself). The orchestrator renumbers this to the ADR's allocated
-  **0110** at merge. Contains all five tables (§3.2), every named RLS
+- **Migration.** Numbered **0110**, the ADR's own allocation. It was
+  originally authored and locally verified as 0108 on a branch where
+  neither A's 0108 nor G1's 0109 existed yet, then renamed to 0110 once A's
+  0108 merged forward into this branch - the same renumbering situation
+  migration 0105's own header documents for itself. `migrate verify` on
+  this branch alone still shows a 0108->0110 gap until G1's 0109 also
+  merges; the orchestrator resolves the final numbering at the overall
+  merge. Contains all five tables (§3.2), every named RLS
   family (§4.1) with the common exclusion set including `app.acting_*`
   (ADR 0099/K1 is unmerged; the GUC names are referenced defensively via
   `current_setting(..., true)`, which is always safe whether or not that
@@ -981,7 +986,7 @@ wiring, the `tenant_snapshot.go` comment) is NOT part of this record.
     different, equally deterministic swallowed-class failure (a tenant
     session raising a meta-Kind directly, refused by RLS with 42501 on
     every attempt) - injecting a literal P0001 would need a test-only
-    fault-injection hook inside migration 0108's own trigger functions,
+    fault-injection hook inside migration 0110's own trigger functions,
     which was not added. The code path exercised (in-tx swallow →
     detached retry exhausted → `alerting.raise_failed`) is identical.
   - LF test 5 (25P02/40001/40P01/55P03/57014 propagation from the alert

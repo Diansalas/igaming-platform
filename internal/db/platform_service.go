@@ -29,9 +29,8 @@ const ServiceSportsbookCatalogueSync PlatformService = "sportsbook_catalogue_syn
 // Provider-Neutral Delivery", PRH-2 I-core) platform-service identity for
 // the alert dispatcher (internal/alerting): a background loop with no
 // HTTP request, no token and no human principal, that reads due alert
-// work and records delivery/escalation outcomes. Migration 0108 (the ADR
-// allocates 0110; see that migration's own numbering note) grants this
-// identity SELECT on alert_kinds/alerts/alert_occurrences/alert_routes,
+// work and records delivery/escalation outcomes. Migration 0110 grants
+// this identity SELECT on alert_kinds/alerts/alert_occurrences/alert_routes,
 // INSERT on alert_deliveries, and - as a narrow, ADR-reviewed exception
 // (ADR 0102 §6.3, security's Q1 ruling) - INSERT of exactly the three
 // accepted meta-Kinds ('alerting.unrouted', 'alerting.delivery_dead',

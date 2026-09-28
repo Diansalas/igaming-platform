@@ -1,12 +1,15 @@
 -- PRH-2 workstream I-core: durable, provider-neutral alerting (ADR 0102
 -- "Durable Alerting and Provider-Neutral Delivery", ALERT-DELIVERY-1,
--- revision 2, ACCEPTED). NOTE ON NUMBERING (the migration-0105 precedent):
--- the ADR allocates this migration number 0110 (after A's 0108 and G1's
--- 0109, both unmerged at the time this migration was authored). This file
--- is numbered 0108 on THIS branch because 0108/0109 are not present here
--- to verify against; the orchestrator renumbers it to 0110 at merge time,
--- exactly as migration 0105's own header documents for its own
--- renumbering. This comment is the implementation record of that.
+-- revision 2, ACCEPTED). NUMBERING (the migration-0105 precedent): the
+-- ADR allocates this migration number 0110, after A's 0108 (casino launch
+-- session revoke-consumed, merged) and G1's 0109 (tenant-visible audit,
+-- not yet merged at authoring time). This file was originally authored
+-- and locally verified as 0108 on a branch where 0108/0109 did not yet
+-- exist, then renamed to its allocated number 0110 once A's 0108 merged -
+-- see internal/alerting's own commit history and migration 0105's header
+-- for the identical renumbering precedent. `migrate verify` on this
+-- branch alone still shows a 0108->0110 gap until G1's 0109 also merges;
+-- the orchestrator resolves that at final merge.
 --
 -- Five tables, all tenant/platform scoped and RLS-hardened per ADR §3.2
 -- and §4.1:

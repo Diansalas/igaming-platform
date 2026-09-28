@@ -541,7 +541,7 @@ const (
 // PermAlertManage gates acknowledging/resolving a platform-owned durable
 // alert (ADR 0102 "Durable Alerting and Provider-Neutral Delivery",
 // PRH-2 I-core, ALERT-DELIVERY-1, §4.2/C-102-7) - platform scope only.
-// Migration 0108's alerts state guard independently re-validates the
+// Migration 0110's alerts state guard independently re-validates the
 // acting session against a platform-scoped staff_users row regardless of
 // this permission grant, but the permission is the application-layer gate
 // on the ack/resolve endpoints (built in I-wire; this permission is added

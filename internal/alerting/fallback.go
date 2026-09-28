@@ -20,7 +20,7 @@ import (
 // ORIGINAL Kind has been exhausted (in-tx swallow followed by a Go
 // validation failure, or a detached retry that exhausted its attempts).
 // It persists exactly {kind, sqlstate_class} under the alert_dispatcher
-// platform-service identity - migration 0108's attribute trigger forces
+// platform-service identity - migration 0110's attribute trigger forces
 // the discriminator to "kind:<kind>" independently, so there is no
 // free-text channel into this P1 even if this function's own discriminator
 // argument were wrong.
@@ -55,7 +55,7 @@ func raiseFailed(ctx context.Context, pool *db.Pool, kind Kind, sqlstateClass st
 
 	fallbackAlert := Alert{
 		Kind: KindAlertingRaiseFailed,
-		// Overwritten by migration 0108's raise_failed attribute trigger
+		// Overwritten by migration 0110's raise_failed attribute trigger
 		// to "kind:<attributes.kind>" regardless of what is sent here -
 		// this value is never honoured, only provided for readability.
 		Discriminator: "kind:" + string(kind),

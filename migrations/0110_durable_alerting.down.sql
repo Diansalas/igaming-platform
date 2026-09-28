@@ -1,4 +1,4 @@
--- Down migration for 0108_durable_alerting (ADR 0102 §9 item 7): refuses
+-- Down migration for 0110_durable_alerting (ADR 0102 §9 item 7): refuses
 -- while any row exists in alerts, alert_occurrences, alert_deliveries or
 -- alert_routes - alert history is never silently dropped by a rollback.
 -- alert_kinds is pure seed vocabulary and is always safe to drop.
@@ -28,19 +28,19 @@ DECLARE
 BEGIN
     SELECT count(*) INTO v_count FROM alerts;
     IF v_count > 0 THEN
-        RAISE EXCEPTION 'migration 0108 down: refusing - % row(s) exist in alerts', v_count;
+        RAISE EXCEPTION 'migration 0110 down: refusing - % row(s) exist in alerts', v_count;
     END IF;
     SELECT count(*) INTO v_count FROM alert_occurrences;
     IF v_count > 0 THEN
-        RAISE EXCEPTION 'migration 0108 down: refusing - % row(s) exist in alert_occurrences', v_count;
+        RAISE EXCEPTION 'migration 0110 down: refusing - % row(s) exist in alert_occurrences', v_count;
     END IF;
     SELECT count(*) INTO v_count FROM alert_deliveries;
     IF v_count > 0 THEN
-        RAISE EXCEPTION 'migration 0108 down: refusing - % row(s) exist in alert_deliveries', v_count;
+        RAISE EXCEPTION 'migration 0110 down: refusing - % row(s) exist in alert_deliveries', v_count;
     END IF;
     SELECT count(*) INTO v_count FROM alert_routes;
     IF v_count > 0 THEN
-        RAISE EXCEPTION 'migration 0108 down: refusing - % row(s) exist in alert_routes', v_count;
+        RAISE EXCEPTION 'migration 0110 down: refusing - % row(s) exist in alert_routes', v_count;
     END IF;
 END
 $$;

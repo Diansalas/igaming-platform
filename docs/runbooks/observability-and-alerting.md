@@ -345,8 +345,7 @@ only durable alerts a real deployment will ever see are the three
 
 ### The no-recipients-yet state (HD-PRH2-4)
 
-**No route is ever seeded.** Migration 0108 (the ADR allocates 0110 - see
-that migration's own numbering note) creates `alert_routes` completely
+**No route is ever seeded.** Migration 0110 creates `alert_routes` completely
 empty, and no code in this repository inserts a fictional recipient,
 email, phone number, or on-call rota into it. This is a deliberate human
 decision (`docs/decisions/0098-...md` §5, HD-PRH2-4): "No invented
@@ -370,7 +369,7 @@ There is no route-authoring HTTP endpoint yet (PRH-2 I-wire/a later
 workstream builds the platform-admin-only, audited API). Today, a route
 is a plain row in `alert_routes`, insertable only by a validated
 platform-admin session (`alerting_validated_platform_admin()`, migration
-0108):
+0110):
 
 ```sql
 INSERT INTO alert_routes (scope, severity, escalation_step, channel_kind, recipient_ref)

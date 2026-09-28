@@ -1,9 +1,16 @@
 PRH-2 I-core (ADR 0102, durable alerting) mutation-kill evidence
 ==================================================================
 
-Scope: internal/alerting and migration 0108 (the ADR allocates 0110 -
-see that migration's own numbering note) as implemented on branch
-i-core-alerting, HEAD based on claude/focused-wright-jw88w9 at b433454.
+Scope: internal/alerting and migration 0110 as implemented on branch
+i-core-alerting. M1-M9 below were performed while the migration was still
+locally numbered 0108 (before workstream A's real 0108 merged forward and
+this migration was renamed to its ADR-allocated number, 0110 - the file's
+own header documents that renumbering); the migration content mutated is
+otherwise identical. M10 was re-verified after the rename directly against
+the renumbered file. HEAD at authoring time was based on
+claude/focused-wright-jw88w9 at b433454; this file itself was not
+re-authored after the later merge to origin/claude/focused-wright-jw88w9
+at 847a0fb, only amended for the renumbering as noted above and in M10.
 This covers a REPRESENTATIVE SUBSET of ADR 0102 §11's mutant table, not
 every row - no automated mutation-testing tool (go-mutesting, gremlins,
 etc.) was available/installed in this environment, so every mutant below
@@ -29,9 +36,10 @@ substitute: real coverage of the ADR §11 table, but by manual mutation
 rather than a tool that could exhaustively enumerate every possible
 mutant of the codebase.
 
-Environment: local PostgreSQL (CI-local container), PRIV_DB=ialert1 via
-the private harness scripts. Go per go.mod (go1.26). No shared CI
-database or shared test infrastructure was touched.
+Environment: local PostgreSQL (CI-local container), PRIV_DB=ialert1
+(M1-M9) and PRIV_DB=ialert2 (M10's re-verification) via the private
+harness scripts. Go per go.mod (go1.26). No shared CI database or shared
+test infrastructure was touched.
 
 ------------------------------------------------------------------------
 
@@ -112,7 +120,7 @@ M5. The fallback removed (ADR §11 "The fallback removed")
     Restored: fallback.go byte-identical.
 
 M6. The `raise_failed` attribute trigger removed (ADR §11, malformed-insert test)
-    File: migrations/0108_durable_alerting.up.sql, alerts_guard()'s
+    File: migrations/0110_durable_alerting.up.sql, alerts_guard()'s
     `alerting.raise_failed`-only branch.
     Mutation: the entire `IF NEW.kind = 'alerting.raise_failed' THEN ...
     END IF;` block deleted.
@@ -135,7 +143,7 @@ M6. The `raise_failed` attribute trigger removed (ADR §11, malformed-insert tes
     Restored: migration byte-identical; PRIV_DB rebuilt clean afterward.
 
 M7. `subject_tenant_id` dropped from `dedup_key` (ADR §11, TI dedup test)
-    File: migrations/0108_durable_alerting.up.sql, alerts.dedup_key.
+    File: migrations/0110_durable_alerting.up.sql, alerts.dedup_key.
     Mutation: `GENERATED ALWAYS AS (kind || '|' || discriminator) STORED`
     (subject_tenant_id removed from the expression).
     Killed by: TestDedup_DifferentSubjectTenantsGetDifferentAlerts
@@ -146,7 +154,7 @@ M7. `subject_tenant_id` dropped from `dedup_key` (ADR §11, TI dedup test)
     Restored: migration byte-identical; PRIV_DB rebuilt clean.
 
 M8. The dispatcher granted UPDATE (ADR §11 "The dispatcher granted UPDATE")
-    File: migrations/0108_durable_alerting.up.sql,
+    File: migrations/0110_durable_alerting.up.sql,
     alerts_platform_service_dispatcher policy on `alerts`.
     Mutation: `FOR SELECT` -> `FOR ALL ... WITH CHECK (true)`.
     Killed by: TestRLS_DispatcherCannotUpdateOrInsertNonMetaKind
@@ -161,7 +169,7 @@ M8. The dispatcher granted UPDATE (ADR §11 "The dispatcher granted UPDATE")
     PRIV_DB rebuilt clean.
 
 M9. The simulation guard deleted (ADR §11 "The simulation guard deleted")
-    File: migrations/0108_durable_alerting.up.sql,
+    File: migrations/0110_durable_alerting.up.sql,
     alert_deliveries_guard()'s AL-9 check.
     Mutation: the `IF v_alert.simulation AND NEW.event <>
     'suppressed_simulation' THEN RAISE EXCEPTION ... END IF;` block
@@ -173,15 +181,16 @@ M9. The simulation guard deleted (ADR §11 "The simulation guard deleted")
     Restored: migration byte-identical; PRIV_DB rebuilt clean.
 
 M10. One route seeded (ADR §11 "One route seeded")
-    File: migrations/0108_durable_alerting.up.sql.
+    File: migrations/0110_durable_alerting.up.sql.
     Mutation: an `INSERT INTO alert_routes (...) VALUES ('platform',
     'p1', 0, 'log', 'mutant-seed')` statement added mid-migration.
-    Killed by: TestMigration0108_NoRouteSeeded - but even more strongly,
-    the MIGRATION ITSELF fails to apply, before the test's own assertion
-    ever runs:
-        migration_0108_integration_test.go:38: migrate scratch up: db:
-        apply migration 108 (durable_alerting): ERROR: alerting: no
-        platform-admin principal in session (SQLSTATE P0001)
+    Killed by: TestMigration0110_NoRouteSeeded - but even more strongly,
+    the MIGRATION ITSELF fails to apply before any test assertion runs.
+    Re-verified after the 0108->0110 rename directly via `priv_db.sh`
+    (PRIV_DB=ialert2, a fresh private database, dropped afterward):
+        migrate: fatal: db: apply migration 110 (durable_alerting):
+        ERROR: alerting: no platform-admin principal in session
+        (SQLSTATE P0001)
     This is a stronger property than the ADR's own mutant description
     implies: the alert_routes guard trigger's forced
     `alerting_validated_platform_admin()` check means a seeded route
@@ -225,7 +234,7 @@ I-wire business call site that does not exist yet):
     test in the normal suite instead.
 
 All ten mutants above were later verified reverted with a final
-`git status --porcelain` on `migrations/0108_durable_alerting.up.sql`,
+`git status --porcelain` on `migrations/0110_durable_alerting.up.sql`,
 `internal/alerting/guarded.go` and `internal/alerting/fallback.go`
 showing no diff against the committed HEAD, and the full test suite
 (`priv_test.sh -race -tags integration -count=1 ./internal/alerting/...`)

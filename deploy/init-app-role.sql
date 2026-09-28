@@ -256,8 +256,7 @@ BEGIN
 END
 $$;
 
--- PRH-2 I-core (migration 0108 on this branch; the ADR allocates 0110 -
--- see that migration's own numbering note; ADR 0102, ALERT-DELIVERY-1):
+-- PRH-2 I-core (migration 0110; ADR 0102, ALERT-DELIVERY-1):
 -- least-privilege, re-asserted on every run for the same reason as the
 -- blocks above. RLS (FORCE on all five tables) is the binding control;
 -- these grants are defence in depth, narrower than the blanket

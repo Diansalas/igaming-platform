@@ -196,7 +196,7 @@ func TestRLS_DispatcherCannotUpdateOrInsertNonMetaKind(t *testing.T) {
 // TestRaiseFailed_MalformedInsertsRefused is the security Part 1
 // hygiene test: a dispatcher-identity insert of alerting.raise_failed
 // with an extra key, a bad kind, or a malformed sqlstate_class is refused
-// by the migration 0108 attribute trigger.
+// by the migration 0110 attribute trigger.
 func TestRaiseFailed_MalformedInsertsRefused(t *testing.T) {
 	pool := testPool(t)
 

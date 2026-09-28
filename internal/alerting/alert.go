@@ -8,11 +8,11 @@ import (
 	"github.com/google/uuid"
 )
 
-// discriminatorPattern mirrors migration 0108's alerts.discriminator
+// discriminatorPattern mirrors migration 0110's alerts.discriminator
 // CHECK exactly (ADR §3.2).
 var discriminatorPattern = regexp.MustCompile(`^[A-Za-z0-9:_.-]{1,160}$`)
 
-// requestIDPattern mirrors migration 0108's request_id CHECK exactly
+// requestIDPattern mirrors migration 0110's request_id CHECK exactly
 // (SR-3, ADR §3.2/§9 item 2).
 var requestIDPattern = regexp.MustCompile(`^[A-Za-z0-9_.:-]{1,128}$`)
 
