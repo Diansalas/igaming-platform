@@ -248,3 +248,30 @@ Mutants: MCO killed; MF3 (phase-C Error log disabled) survived; **MEXP (expiry a
 Confirmed correct: `OutboundKindSplitResolver` fails closed; nil-in-interface handled in `casinoOutboundCredentials()`; `txscope.Held` refusal before `Launch`; no floats, no balance UPDATEs, no hardcoded secrets.
 
 **Required before READY:** N1 fix + test + ADR 0095 §15.1/§15.1.2 correction. Optional: MF3 assertion.
+
+## Re-review 2 (FH-7, 2026-09-28) — code-reviewer
+
+HEAD `81d742d` (fix `80eda28`, ADR amendment `622a5eb`); read-only; `git archive` copy + private DB `rr2_fh7_cr_20260928` (dropped). `go test -race -tags=integration ./internal/casino/ ./cmd/platform-api/` ok, 0 FAIL. N1 probe re-run against the fix: after the 400ms TTL, a second bet on the still-consumed session now succeeds (balance 4800); before the fix it failed with "session has expired".
+
+**Verdict: READY WITH CONDITIONS.**
+
+| Mutant | Change | Result |
+|---|---|---|
+| M-REAPPLY | expiry applied to all statuses again (the N1 regression) | **KILLED** by `TestReceiveCallback_ConsumedSessionAcceptsBetAfterTokenTTLExpires` |
+| M-DROP | expiry check removed | **KILLED** by `TestReceiveCallback_NewBetRejectedPastExpiresAtEvenIfStillActive` |
+
+| # | Status | Evidence |
+|---|---|---|
+| N1 (HIGH) consumed sessions refused bets after the 2-minute token TTL | **CLOSED** | `orchestrator.go:1481` `if session.Status == LaunchSessionActive && …After(session.ExpiresAt)`; allow-list unchanged (`:1478`) |
+| N2 (Low) misplaced doc comment | **CLOSED** | `launch_two_phase_integration_test.go:606` above `TestLaunchGame_CircuitOpenRevokesAndAudits` |
+| ADR amendment accuracy | Accurate except C2 | §15.1.5 correctly explains the semantics, reopens C4, and labels the revoke widening NOT IMPLEMENTED (0036 trigger) |
+
+**Conditions:**
+- **C1 — CAS-REVOKE-CONSUMED-1** (registered, escalated to security). A vendor-consumed session of a failed launch stays bet-eligible, unbounded. `TestLaunchGame_FailedLaunchOnConsumedSession_RevokeCASMissesAndBetStillAccepted` pins the exposure and must be inverted when the fix lands. Must be resolved before any real casino adapter.
+- **C2 — Low, doc-only:** `orchestrator.go:259` (LaunchGame doc) and `:1469-1470`, plus the ADR 0095 §15.1 "Failure recovery" amendment, claimed a consumed session is bounded (by the TTL, or by `RevokeLaunchSession`). Neither is true.
+
+Carried forward (optional): MF3 (phase-C Error log unasserted) still survives.
+
+### Orchestrator addendum (2026-09-28): C2 fixed
+
+The three texts now state that a consumed session is **not time-bounded** and point to CAS-REVOKE-CONSUMED-1: `orchestrator.go` LaunchGame doc and the postBet comment, and the ADR 0095 §15.1 Failure-recovery row (dated wording correction). Comments and docs only; `go build` ok.

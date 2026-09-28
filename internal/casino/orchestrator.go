@@ -256,8 +256,11 @@ type LaunchGameResult struct {
 // postBet itself rejects a bet placed against a non-active/non-consumed OR
 // expired session (ErrLaunchSessionRequired) - the platform's own
 // expires_at bound, not merely "no legitimate vendor would call back",
-// closes the exposure window to at most DefaultLaunchTokenTTL regardless
-// of session status (security review RV-PRH-I2, casino/ledger-finance
+// closes the exposure window to at most DefaultLaunchTokenTTL for a
+// session that stays 'active' (never consumed). A session the vendor has
+// already 'consumed' is NOT time-bounded (CAS-SESSION-EXPIRY-1, ADR 0095
+// §15.1.5): its revocation after a failed launch is the open
+// CAS-REVOKE-CONSUMED-1 (security review RV-PRH-I2, casino/ledger-finance
 // follow-up on §15.1's original wording, which incorrectly relied on
 // expiry never being checked at all). Retries are the existing behaviour
 // (no automatic retry; a player retry mints a brand-new session/token) -
@@ -1466,10 +1469,12 @@ func (o *Orchestrator) postBet(ctx context.Context, tx pgx.Tx, tenantID uuid.UUI
 	// NEVER consumed - this is what makes §15.1's "an orphaned/never-
 	// resolved active session is harmless" claim actually true, without
 	// also time-boxing genuine in-play sessions. A 'consumed' session
-	// remains bet-eligible for as long as it stays 'consumed' (bounded
-	// instead by RevokeLaunchSession at launch-failure time - see
-	// launchFailed below - and by the status allow-list itself: 'revoked'
-	// and 'expired' are still rejected).
+	// remains bet-eligible for as long as it stays 'consumed': it is NOT
+	// time-bounded, and RevokeLaunchSession (launchFailed below) matches only
+	// status='active', so a failed launch does not revoke a consumed session
+	// either - that gap is CAS-REVOKE-CONSUMED-1 (blocked by the 0036/0042
+	// immutability trigger). The status allow-list still rejects 'revoked'
+	// and 'expired'.
 	//
 	// postWin/postRollback are UNAFFECTED either way - they resolve their
 	// accounts from the ledger's own prior entries (correlation_id), never
