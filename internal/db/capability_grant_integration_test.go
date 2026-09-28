@@ -1335,3 +1335,98 @@ func TestCapabilityGrant_F2_ForcedColumnsCannotBeSupplied(t *testing.T) {
 		}
 	})
 }
+
+// TestCapabilityGrant_F9_PerCommandPoliciesAndServiceExclusion (K1-C2 /
+// F-9): a pg_policies catalogue pin that staff_capability_grant_requests,
+// staff_capability_grant_approvals and staff_capability_grants each carry
+// only per-command policies (never FOR ALL / cmd = '*'), and that every
+// one of those policies' USING/WITH CHECK clauses references
+// app.platform_service_id (the arm K1-C2 found missing). Also proves at
+// runtime that a mixed platform_admin + platform_service session (a shape
+// that should never occur in practice, but which the GUCs alone do not
+// forbid) sees zero rows on both staff_capability_grants and
+// staff_capability_grant_approvals, even though real rows exist.
+func TestCapabilityGrant_F9_PerCommandPoliciesAndServiceExclusion(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+
+	tables := []string{
+		"staff_capability_grant_requests",
+		"staff_capability_grant_approvals",
+		"staff_capability_grants",
+	}
+	for _, tbl := range tables {
+		t.Run(tbl, func(t *testing.T) {
+			type policyRow struct {
+				name      string
+				cmd       string
+				qual      string
+				withCheck string
+			}
+			var rows []policyRow
+			if err := pool.WithoutTenant(ctx, func(ctx context.Context, tx pgx.Tx) error {
+				r, err := tx.Query(ctx, `
+					SELECT policyname, cmd, COALESCE(qual, ''), COALESCE(with_check, '')
+					  FROM pg_policies WHERE tablename = $1`, tbl)
+				if err != nil {
+					return err
+				}
+				defer r.Close()
+				for r.Next() {
+					var pr policyRow
+					if err := r.Scan(&pr.name, &pr.cmd, &pr.qual, &pr.withCheck); err != nil {
+						return err
+					}
+					rows = append(rows, pr)
+				}
+				return r.Err()
+			}); err != nil {
+				t.Fatalf("query pg_policies for %s: %v", tbl, err)
+			}
+			if len(rows) == 0 {
+				t.Fatalf("expected at least one policy on %s", tbl)
+			}
+			for _, pr := range rows {
+				if pr.cmd == "ALL" || pr.cmd == "*" {
+					t.Fatalf("policy %q on %s is FOR ALL (cmd=%q); ADR 0099 §10 forbids any FOR ALL permissive policy on this table", pr.name, tbl, pr.cmd)
+				}
+				// Every T/P scope predicate (not the acting/reference
+				// policies, which have their own, GUC-only, recursion-exempt
+				// shape and are exempt from the T/P scope-predicate rule)
+				// must exclude app.platform_service_id.
+				if strings.HasPrefix(pr.name, "tenant_scope_") || strings.HasPrefix(pr.name, "platform_scope_") {
+					combined := pr.qual + pr.withCheck
+					if !strings.Contains(combined, "platform_service_id") {
+						t.Fatalf("policy %q on %s: expected its predicate to reference app.platform_service_id (K1-C2), got qual=%q with_check=%q", pr.name, tbl, pr.qual, pr.withCheck)
+					}
+				}
+			}
+		})
+	}
+
+	t.Run("mixed platform_admin+platform_service session sees 0 rows", func(t *testing.T) {
+		f := mustBuildActingGrantFixtureWithCapability(t, pool, capability.CapabilityLedgerAdjustmentInitiate)
+
+		var grantCount, approvalCount int
+		if err := pool.WithoutTenant(ctx, func(ctx context.Context, tx pgx.Tx) error {
+			if _, err := tx.Exec(ctx, `SELECT set_config('app.platform_admin_principal_id', $1, true)`, f.ApproverID.String()); err != nil {
+				return err
+			}
+			if _, err := tx.Exec(ctx, `SELECT set_config('app.platform_service_id', $1, true)`, "some-worker"); err != nil {
+				return err
+			}
+			if err := tx.QueryRow(ctx, `SELECT count(*) FROM staff_capability_grants`).Scan(&grantCount); err != nil {
+				return err
+			}
+			return tx.QueryRow(ctx, `SELECT count(*) FROM staff_capability_grant_approvals`).Scan(&approvalCount)
+		}); err != nil {
+			t.Fatalf("mixed-session query: %v", err)
+		}
+		if grantCount != 0 {
+			t.Fatalf("expected 0 grant rows visible to a mixed platform_admin+platform_service session, got %d", grantCount)
+		}
+		if approvalCount != 0 {
+			t.Fatalf("expected 0 approval rows visible to a mixed platform_admin+platform_service session, got %d", approvalCount)
+		}
+	})
+}
