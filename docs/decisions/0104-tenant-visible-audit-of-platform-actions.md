@@ -1,5 +1,7 @@
 # ADR 0104 — Tenant-Visible Audit of Platform Actions (KS-AUDIT-TENANT-1)
 
+> **Status 2026-09-28: ACCEPTED** (revision 2). Ledger-finance and security accepted it: see `docs/plans/prh2-hardening-round/reviews/` (`adr-0102-0104-security-confirmation.md`, and for 0102 also the confirmation section of `adr-0102-ledger-finance.md`); product-owner-proxy accepted it in `adr-0102-0104-product-owner-proxy.md`. Implementation is NOT IMPLEMENTED until the PRH-2 workstream merges. The earlier PROPOSED status below is historical.
+
 - **Status:** PROPOSED, **revision 2**, 2026-09-28. Drafted by `architect` for PRH-2 W0 (W0-X).
   Nothing here is implemented. The implementation is PRH-2 workstream **G1** (W1), migration **0109**.
 - **Revisions:**
