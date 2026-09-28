@@ -113,6 +113,28 @@ func (r platformAdminRunner) Run(ctx context.Context, fn db.TxFunc) error {
 }
 func (r platformAdminRunner) Pool() *db.Pool { return r.pool }
 
+// freshReadCommittedRunner reconstructs a plain, READ COMMITTED
+// ScopedRunner matching scope's tenant/principal/platform-admin identity,
+// over pool. LF C-2: the detached retry (Pending.Flush, via
+// RaiseDetached) always uses THIS, never the original runner directly -
+// so a raise whose PRIMARY attempt happened through a REPEATABLE READ (or
+// any other non-default) ScopedRunner still retries at READ COMMITTED,
+// exactly like every other detached raise. For every ordinary business
+// call site (already READ COMMITTED), this is a behaviourally-identical
+// fresh instance - never a functional change, just a structural
+// guarantee that no caller of InTx/RaiseGuarded can accidentally leak a
+// stricter isolation level into the retry path.
+func freshReadCommittedRunner(pool *db.Pool, scope RaiseScope) ScopedRunner {
+	switch scope.Kind {
+	case ScopeTenantPrincipal:
+		return NewPrincipalRunner(pool, scope.TenantID, scope.PrincipalID)
+	case ScopePlatformAdmin:
+		return NewPlatformAdminRunner(pool, scope.PlatformAdminID)
+	default: // ScopeTenant
+		return NewTenantRunner(pool, scope.TenantID)
+	}
+}
+
 // subjectTenant returns the tenant id a ScopedRunner's own scope
 // represents, for the Go-side refusal (C-102-1): "a platform-owned Kind
 // raised from a tenant scope whose subject differs from the scope's

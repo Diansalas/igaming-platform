@@ -239,3 +239,52 @@ All ten mutants above were later verified reverted with a final
 showing no diff against the committed HEAD, and the full test suite
 (`priv_test.sh -race -tags integration -count=1 ./internal/alerting/...`)
 passing cleanly afterward.
+
+------------------------------------------------------------------------
+
+Round 2 (review-driven fixes, 2026-09-28): security IC-1's required
+"removed-exclusions mutant"
+=============================================================================
+
+M11. Exclusion set removed from alerts_subject_tenant_read (security
+IC-1's explicit "record the removed-exclusions mutant as killed").
+    File: migrations/0110_durable_alerting.up.sql,
+    alerts_subject_tenant_read policy on `alerts`.
+    Mutation: the five `AND NULLIF(current_setting(...` exclusion clauses
+    (app.player_account_id, app.platform_admin_principal_id,
+    app.platform_service_id, app.acting_tenant_id,
+    app.acting_platform_principal_id) removed from the USING clause,
+    leaving only `tenant_id IS NULL AND subject_tenant_id = app.tenant_id`.
+    Killed by: TestExclusionSets_SubjectTenantRead_Family (new this round)
+        (go test -tags=integration -run
+         TestExclusionSets_SubjectTenantRead_Family ./internal/alerting/...,
+         against a freshly rebuilt PRIV_DB=ialert3)
+    Observed failure (all five mixed-GUC probes now wrongly saw the row):
+        exclusion_set_integration_test.go:88: tenant +
+        app.acting_tenant_id, alerts: expected 0 row(s), got 1
+        exclusion_set_integration_test.go:88: tenant +
+        app.acting_platform_principal_id, alerts: expected 0 row(s), got 1
+        exclusion_set_integration_test.go:88: tenant +
+        app.platform_service_id, alerts: expected 0 row(s), got 1
+        exclusion_set_integration_test.go:88: tenant +
+        app.platform_admin_principal_id, alerts: expected 0 row(s), got 1
+        exclusion_set_integration_test.go:88: tenant +
+        app.player_account_id, alerts: expected 0 row(s), got 1
+    Restored: migration byte-identical to the committed version
+    (`git diff --stat migrations/0110_durable_alerting.up.sql`: no
+    output), PRIV_DB rebuilt clean before continuing.
+
+Result for this round: 1/1 attempted mutant killed (M11). The three
+mutants the code review named as surviving on the ORIGINAL commit
+(`bc73c24`) - MA (backoff predicate), MB (escalation predicate), MC
+(claim race) - were not re-created as literal mutations and re-run
+against the FIXED code in this evidence file; instead, new positive
+tests were written that directly exercise the corrected behaviour
+(`TestDispatcher_BackoffHoldsRetryUntilElapsed`,
+`TestDispatcher_EscalationOnlyAfterEscalateAfterAndNeverWhenAcked`,
+`TestDispatcher_AckedUnroutedEscalationStepNeverEscalates`,
+`TestDispatcher_ClaimRaceIsDeterministic` at `-race -count=10`) and
+confirmed passing. This is disclosed as a gap relative to a strict
+re-mutate-and-kill methodology: the fixes are proven correct by direct
+test, not by reproducing the reviewer's exact mutants against the new
+code and watching them fail.

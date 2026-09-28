@@ -628,9 +628,17 @@ ALTER TABLE alert_routes FORCE ROW LEVEL SECURITY;
 ALTER TABLE alert_deliveries ENABLE ROW LEVEL SECURITY;
 ALTER TABLE alert_deliveries FORCE ROW LEVEL SECURITY;
 
--- --- alerts_tenant_owned (alerts, alert_occurrences write; alert_deliveries SELECT only) ---
+-- --- alerts_tenant_owned (alerts, alert_occurrences: SELECT + INSERT only;
+--     alert_deliveries SELECT only) ---
+-- Security IC-4: split into FOR SELECT + FOR INSERT (never FOR ALL/
+-- UPDATE) - ADR §4.1 states there is no tenant UPDATE path in PRH-2 at
+-- all (C-102-7; no tenant-owned Kind is even seeded). The alerts_guard
+-- trigger already refuses a tenant-owned UPDATE independently, but the
+-- RLS policy itself should not even claim UPDATE authority it is never
+-- meant to grant - a future reviewer reading `\d+ alerts` should see
+-- this structurally, not have to also read the trigger to know it.
 CREATE POLICY alerts_tenant_owned ON alerts
-    FOR ALL
+    FOR SELECT
     USING (
         tenant_id IS NOT NULL
         AND tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid
@@ -639,7 +647,10 @@ CREATE POLICY alerts_tenant_owned ON alerts
         AND NULLIF(current_setting('app.platform_service_id', true), '') IS NULL
         AND NULLIF(current_setting('app.acting_tenant_id', true), '') IS NULL
         AND NULLIF(current_setting('app.acting_platform_principal_id', true), '') IS NULL
-    )
+    );
+
+CREATE POLICY alerts_tenant_owned_insert ON alerts
+    FOR INSERT
     WITH CHECK (
         tenant_id IS NOT NULL
         AND tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid
@@ -651,7 +662,7 @@ CREATE POLICY alerts_tenant_owned ON alerts
     );
 
 CREATE POLICY alerts_tenant_owned ON alert_occurrences
-    FOR ALL
+    FOR SELECT
     USING (
         tenant_id IS NOT NULL
         AND tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid
@@ -660,7 +671,10 @@ CREATE POLICY alerts_tenant_owned ON alert_occurrences
         AND NULLIF(current_setting('app.platform_service_id', true), '') IS NULL
         AND NULLIF(current_setting('app.acting_tenant_id', true), '') IS NULL
         AND NULLIF(current_setting('app.acting_platform_principal_id', true), '') IS NULL
-    )
+    );
+
+CREATE POLICY alerts_tenant_owned_insert ON alert_occurrences
+    FOR INSERT
     WITH CHECK (
         tenant_id IS NOT NULL
         AND tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid
@@ -921,3 +935,32 @@ CREATE POLICY alerts_platform_service_dispatcher_insert ON alert_deliveries
         AND NULLIF(current_setting('app.acting_tenant_id', true), '') IS NULL
         AND NULLIF(current_setting('app.acting_platform_principal_id', true), '') IS NULL
     );
+
+-- ======================================================================
+-- 7. Runtime role grants (code review F-12): mirrored here, at the
+--    migration itself, the same way migration 0102 narrows
+--    payment_statement_imports/payment_statement_lines - never relying
+--    solely on deploy/init-app-role.sql. RLS (FORCE on all five tables)
+--    is the binding control; this is defence in depth, narrower than the
+--    blanket ALTER DEFAULT PRIVILEGES backfill deploy/init-app-role.sql's
+--    own preceding blocks otherwise leave in place.
+-- ======================================================================
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'igaming_runtime') THEN
+        EXECUTE 'REVOKE ALL ON alert_kinds FROM igaming_runtime';
+        EXECUTE 'GRANT SELECT ON alert_kinds TO igaming_runtime';
+
+        EXECUTE 'REVOKE ALL ON alerts FROM igaming_runtime';
+        EXECUTE 'GRANT SELECT, INSERT, UPDATE ON alerts TO igaming_runtime';
+
+        EXECUTE 'REVOKE ALL ON alert_occurrences FROM igaming_runtime';
+        EXECUTE 'GRANT SELECT, INSERT ON alert_occurrences TO igaming_runtime';
+
+        EXECUTE 'REVOKE ALL ON alert_routes FROM igaming_runtime';
+        EXECUTE 'GRANT SELECT, INSERT, UPDATE ON alert_routes TO igaming_runtime';
+
+        EXECUTE 'REVOKE ALL ON alert_deliveries FROM igaming_runtime';
+        EXECUTE 'GRANT SELECT, INSERT ON alert_deliveries TO igaming_runtime';
+    END IF;
+END $$;

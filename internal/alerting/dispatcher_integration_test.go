@@ -118,7 +118,7 @@ func TestDispatcher_MockSinkRetryThenDead(t *testing.T) {
 
 	alertID := seedOpenAlert(t, pool, tenantA, KindPaymentKillSwitchEngaged, "switch:"+uuid.NewString())
 
-	sink := &MockSink{DeliverFunc: func(Delivery) (Outcome, ErrorClass) { return OutcomeFailed, ErrorClassUnavailable }}
+	sink := &MockSink{DeliverFunc: func(context.Context, Delivery) (Outcome, ErrorClass) { return OutcomeFailed, ErrorClassUnavailable }}
 	disp := NewDispatcher(pool, DispatcherConfig{MaxAttempts: 2, Clock: fakeInstantClock{}, Backoff: func(int) time.Duration { return 0 }}, sink)
 
 	if err := disp.RunOnce(context.Background()); err != nil {

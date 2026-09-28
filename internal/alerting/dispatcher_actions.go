@@ -22,6 +22,16 @@ type resolvedRoute struct {
 // as of now (T-1: the clock is a query parameter, never the database's
 // own now()). alert_routes ships empty in PRH-2 (HD-PRH2-4), so this
 // returns (nil, nil) until a platform admin configures one.
+//
+// Code review F-9: `effective_from` is written by migration 0110's
+// `DEFAULT now()` - real, DB wall-clock time, NOT the injected Clock. A
+// test that sets a fake Clock's Now() to a time BEFORE a route row's
+// real insertion time will therefore never see that route (the
+// `effective_from <= $3` predicate below compares the injected `now`
+// against a DB-clock timestamp) - tests must set the fake clock to a
+// time at or after the real wall clock when a route needs to resolve.
+// This is a property of comparing two different clocks, not a bug; it is
+// documented here because it is easy to trip over.
 func (d *Dispatcher) resolveRoute(ctx context.Context, severity Severity, step int, now time.Time) (*resolvedRoute, error) {
 	var r resolvedRoute
 	var escalateAfter *time.Duration

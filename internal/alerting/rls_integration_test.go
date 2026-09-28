@@ -263,6 +263,26 @@ func TestDedup_DifferentSubjectTenantsGetDifferentAlerts(t *testing.T) {
 	}
 }
 
+// TestRLS_DispatcherAlertsPolicyIsSelectOnly is code review F-13: pins
+// the dispatcher's READ policy on `alerts` at the pg_catalog level
+// (cmd = 'SELECT') - the earlier RLS behavioural test (M8) is
+// only killed via the alerts_guard trigger's own actor check, so this
+// adds an independent pin directly on the policy metadata, which would
+// catch a widened policy even if the trigger were ever loosened too.
+func TestRLS_DispatcherAlertsPolicyIsSelectOnly(t *testing.T) {
+	pool := testPool(t)
+	var cmd string
+	err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT cmd FROM pg_policies WHERE schemaname = 'public' AND tablename = 'alerts' AND policyname = 'alerts_platform_service_dispatcher'`).Scan(&cmd)
+	})
+	if err != nil {
+		t.Fatalf("read pg_policies: %v", err)
+	}
+	if cmd != "SELECT" {
+		t.Fatalf("expected the alerts_platform_service_dispatcher policy on alerts to be SELECT-only, got %q", cmd)
+	}
+}
+
 // TestRLS_SimulationNeverDelivered is AL-9.
 func TestRLS_SimulationNeverDelivered(t *testing.T) {
 	pool := testPool(t)

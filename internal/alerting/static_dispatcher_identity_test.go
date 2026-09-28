@@ -25,12 +25,6 @@ import (
 	"testing"
 )
 
-var staticAllowedDispatcherIdentityFiles = map[string]bool{
-	"dispatcher.go":         true,
-	"dispatcher_actions.go": true,
-	"fallback.go":           true,
-}
-
 var staticAllowedRaiseFailedConstructorFiles = map[string]bool{
 	"fallback.go": true,
 }
@@ -62,32 +56,130 @@ func staticListPackageFiles(t *testing.T) []string {
 	return files
 }
 
-func TestStatic_ServiceAlertDispatcherConfinedToDispatcherAndFallback(t *testing.T) {
-	for _, name := range staticListPackageFiles(t) {
-		src, err := os.ReadFile(name)
+// staticRepoRoot mirrors internal/txscope's own identical helper: walk up
+// from the working directory to the module root (the directory
+// containing go.mod), so this test works regardless of which directory
+// `go test` is invoked from.
+func staticRepoRoot(t *testing.T) string {
+	t.Helper()
+	dir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			t.Fatal("go.mod not found")
+		}
+		dir = parent
+	}
+}
+
+// staticWalkNonTestGoFiles visits every non-test .go file under root.
+func staticWalkNonTestGoFiles(t *testing.T, root string, visit func(path string, src []byte)) {
+	t.Helper()
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
-			t.Fatalf("read %s: %v", name, err)
+			return err
+		}
+		if d.IsDir() {
+			// Skip vendor/node_modules/.git and any other VCS-ish or
+			// dependency directory that could otherwise slow this test
+			// down or produce noise unrelated to this repo's own code.
+			base := d.Name()
+			if base == "vendor" || base == "node_modules" || base == ".git" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		src, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return readErr
+		}
+		visit(path, src)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk %s: %v", root, err)
+	}
+}
+
+// staticAllowedDispatcherIdentityPaths: security IC-3. internal/db/
+// platform_service.go is where db.ServiceAlertDispatcher is DEFINED (a
+// bare identifier declaration, not a "reference" in the sense this test
+// cares about, but included explicitly so the scan does not need special
+// casing for the declaration site); the three alerting files are the only
+// ones permitted to actually USE the identity.
+var staticAllowedDispatcherIdentityPaths = map[string]bool{
+	filepath.Join("internal", "db", "platform_service.go"):         true,
+	filepath.Join("internal", "alerting", "dispatcher.go"):         true,
+	filepath.Join("internal", "alerting", "dispatcher_actions.go"): true,
+	filepath.Join("internal", "alerting", "fallback.go"):           true,
+}
+
+// TestStatic_ServiceAlertDispatcherConfinedToDispatcherAndFallback is
+// security IC-3, widened from a single-package scan to the WHOLE
+// repository (every non-test .go file): db.ServiceAlertDispatcher must
+// never be referenced by ANY business-facing code anywhere, not merely
+// within internal/alerting - and neither may a caller sidestep the named
+// constant by writing db.PlatformService("alert_dispatcher") directly
+// (a raw string conversion to the same type, which internal/db's own
+// WithPlatformService would accept identically to the real constant,
+// since Go constants of a defined string type compare equal to an
+// equivalent literal conversion).
+func TestStatic_ServiceAlertDispatcherConfinedToDispatcherAndFallback(t *testing.T) {
+	root := staticRepoRoot(t)
+	staticWalkNonTestGoFiles(t, root, func(path string, src []byte) {
+		rel, relErr := filepath.Rel(root, path)
+		if relErr != nil {
+			t.Fatalf("relativize %s: %v", path, relErr)
 		}
 		fset := token.NewFileSet()
-		file, err := parser.ParseFile(fset, name, src, parser.SkipObjectResolution)
+		file, err := parser.ParseFile(fset, path, src, parser.SkipObjectResolution)
 		if err != nil {
-			t.Fatalf("parse %s: %v", name, err)
+			t.Fatalf("parse %s: %v", path, err)
 		}
+		allowed := staticAllowedDispatcherIdentityPaths[rel]
 		ast.Inspect(file, func(n ast.Node) bool {
-			sel, ok := n.(*ast.SelectorExpr)
-			if !ok {
-				return true
+			// db.ServiceAlertDispatcher (a SelectorExpr on package "db").
+			if sel, ok := n.(*ast.SelectorExpr); ok {
+				if pkgIdent, ok := sel.X.(*ast.Ident); ok && pkgIdent.Name == "db" && sel.Sel.Name == "ServiceAlertDispatcher" {
+					if !allowed {
+						t.Errorf("%s: db.ServiceAlertDispatcher referenced outside the allowed dispatcher/fallback files (AL-10/IC-3)", rel)
+					}
+				}
 			}
-			pkgIdent, ok := sel.X.(*ast.Ident)
-			if !ok || pkgIdent.Name != "db" || sel.Sel.Name != "ServiceAlertDispatcher" {
-				return true
-			}
-			if !staticAllowedDispatcherIdentityFiles[filepath.Base(name)] {
-				t.Errorf("%s: db.ServiceAlertDispatcher referenced outside the allowed dispatcher/fallback files (AL-10)", name)
+			// db.PlatformService("alert_dispatcher") - a raw conversion
+			// that reaches the exact same runtime value without ever
+			// naming the constant.
+			if call, ok := n.(*ast.CallExpr); ok {
+				sel, ok := call.Fun.(*ast.SelectorExpr)
+				if !ok {
+					return true
+				}
+				pkgIdent, ok := sel.X.(*ast.Ident)
+				if !ok || pkgIdent.Name != "db" || sel.Sel.Name != "PlatformService" {
+					return true
+				}
+				for _, arg := range call.Args {
+					lit, ok := arg.(*ast.BasicLit)
+					if !ok || lit.Kind != token.STRING {
+						continue
+					}
+					if lit.Value == `"alert_dispatcher"` && !allowed {
+						t.Errorf("%s: db.PlatformService(\"alert_dispatcher\") conversion outside the allowed dispatcher/fallback files (AL-10/IC-3)", rel)
+					}
+				}
 			}
 			return true
 		})
-	}
+	})
 }
 
 func TestStatic_RaiseFailedConstructedOnlyInFallback(t *testing.T) {

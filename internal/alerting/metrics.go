@@ -61,3 +61,20 @@ func recordDead(ctx context.Context, channelKind string) {
 	}
 	alertDeadTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("channel_kind", channelKind)))
 }
+
+// alertStaleClaimsTotal (security IC-2 / code review F-1): a 'claimed'
+// delivery row whose lease expired before any outcome was recorded - the
+// signal that a crash, deploy, OOM or failed record-outcome INSERT
+// stranded an in-flight delivery attempt, now reclaimed under a new
+// attempt number. No tenant label, matching every other counter here.
+var alertStaleClaimsTotal, _ = meter.Int64Counter(
+	"alert_stale_claims_total",
+	metric.WithDescription("Count of stale 'claimed' delivery rows reclaimed after their lease expired (ADR 0102 §6.1, security IC-2)."),
+)
+
+func recordStaleClaim(ctx context.Context) {
+	if alertStaleClaimsTotal == nil {
+		return
+	}
+	alertStaleClaimsTotal.Add(ctx, 1)
+}

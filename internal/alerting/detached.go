@@ -37,26 +37,39 @@ import (
 // call sites are expected to log-and-continue, never treat it as a
 // business failure - see §7.6: "the business outcome never depends on the
 // alert row").
+//
+// Security IC-5 / code review F-2 / LF C-3: RaiseDetached detaches ITS
+// OWN context (the deniedAuditCtx pattern, detachedCtx in clock.go) at
+// entry, exactly once for the whole call - a caller's context being
+// cancelled (an HTTP request finishing, a shutdown signal) must never
+// silently skip the mandatory detached retry OR the terminal fallback.
+// context.WithoutCancel preserves context VALUES from the parent
+// (including a WithClockContext-injected fake Clock, which is what keeps
+// this safe for tests that need deterministic time), it only detaches
+// cancellation/deadline.
 func RaiseDetached(ctx context.Context, r ScopedRunner, a Alert) error {
+	dctx, cancel := detachedCtx(ctx)
+	defer cancel()
+
 	if err := checkSubjectMatchesScope(r.Scope(), a); err != nil {
-		recordRaiseFailure(ctx, a.Kind, "detached")
+		recordRaiseFailure(dctx, a.Kind, "detached")
 		slog.Default().Error("alert_raise_scope_mismatch", "kind", a.Kind)
 		return err
 	}
 	if _, err := a.validate(); err != nil {
-		recordRaiseFailure(ctx, a.Kind, "detached")
+		recordRaiseFailure(dctx, a.Kind, "detached")
 		slog.Default().Error("alert_raise_invalid", "kind", a.Kind)
-		raiseFailed(ctx, r.Pool(), a.Kind, sqlstateClassGoValidation)
+		raiseFailed(dctx, r.Pool(), a.Kind, sqlstateClassGoValidation)
 		return err
 	}
 
-	clock := clockFromContext(ctx)
+	clock := clockFromContext(dctx)
 	var lastErr error
 	for attempt, wait := range flushBackoff {
 		if attempt > 0 {
-			clock.Sleep(ctx, wait)
+			clock.Sleep(dctx, wait)
 		}
-		lastErr = r.Run(ctx, func(ctx context.Context, tx pgx.Tx) error {
+		lastErr = r.Run(dctx, func(ctx context.Context, tx pgx.Tx) error {
 			return Raise(ctx, tx, a)
 		})
 		if lastErr == nil {
@@ -75,9 +88,9 @@ func RaiseDetached(ctx context.Context, r ScopedRunner, a Alert) error {
 	if class == "" {
 		class = sqlstateClassUnknown
 	}
-	recordRaiseFailure(ctx, a.Kind, "detached")
+	recordRaiseFailure(dctx, a.Kind, "detached")
 	slog.Default().Error("alert_raise_detached_exhausted", "kind", a.Kind, "sqlstate_class", class, "error", lastErr)
-	raiseFailed(ctx, r.Pool(), a.Kind, class)
+	raiseFailed(dctx, r.Pool(), a.Kind, class)
 	return lastErr
 }
 

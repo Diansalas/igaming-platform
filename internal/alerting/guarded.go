@@ -19,6 +19,14 @@ import (
 // exactly ("go_validation").
 const sqlstateClassGoValidation = "go_validation"
 
+// sqlstateClassRRDeferred labels a Pending entry that was never even
+// attempted in-tx because the transaction was REPEATABLE READ or higher
+// (LF C-2/AL-11) - informational only (Flush decides purely from the
+// Alert itself via RaiseDetached, never from this label), kept distinct
+// from sqlstateClassGoValidation so a future log/metric reader is not
+// misled into thinking the Kind's payload was invalid.
+const sqlstateClassRRDeferred = "rr_deferred"
+
 // sqlstateClassUnknown is used only when a detached retry's final
 // attempt failed with something other than a *pgconn.PgError (e.g. a
 // context deadline or a network error) - there is no real two-character
@@ -163,6 +171,27 @@ func RaiseGuarded(ctx context.Context, tx pgx.Tx, a Alert) error {
 		return nil
 	}
 
+	// LF C-2 / AL-11: RaiseGuarded must never execute an alert statement
+	// inside a REPEATABLE READ (or SERIALIZABLE) transaction - an
+	// ON CONFLICT DO NOTHING against a row committed after the snapshot
+	// raises 40001 there (SR-5), which is exactly the class this
+	// function must propagate, not swallow. Checked BEFORE the savepoint
+	// is even opened: if the isolation level is not READ COMMITTED, skip
+	// the insert entirely and register the alert on Pending so the
+	// mandatory post-commit detached raise (§7.3a) picks it up in a
+	// fresh READ COMMITTED transaction instead.
+	isolation, isoErr := currentTransactionIsolation(ctx, tx)
+	if isoErr != nil {
+		// Cannot even determine the isolation level: propagate, exactly
+		// like any other unclassified failure before the savepoint.
+		return fmt.Errorf("alerting: read transaction_isolation: %w", isoErr)
+	}
+	if isolation != "read committed" {
+		slog.Default().Warn("alert_raise_rr_deferred", "kind", a.Kind, "transaction_isolation", isolation)
+		registerPending(ctx, a, sqlstateClassRRDeferred)
+		return nil
+	}
+
 	savepoint, err := tx.Begin(ctx)
 	if err != nil {
 		// Cannot even open the savepoint: propagate (§7.2 step 2).
@@ -190,6 +219,19 @@ func RaiseGuarded(ctx context.Context, tx pgx.Tx, a Alert) error {
 	slog.Default().Error("alert_raise_failed", "kind", a.Kind, "sqlstate_class", sqlstateClass)
 	registerPending(ctx, a, sqlstateClass)
 	return nil
+}
+
+// currentTransactionIsolation reads the CURRENT transaction's isolation
+// level (LF C-2) - `SHOW transaction_isolation` reflects the isolation
+// level pgx.TxOptions actually negotiated for this specific transaction,
+// never a session default, so this is accurate even if a future caller
+// changes the pool's default isolation.
+func currentTransactionIsolation(ctx context.Context, tx pgx.Tx) (string, error) {
+	var isolation string
+	if err := tx.QueryRow(ctx, `SHOW transaction_isolation`).Scan(&isolation); err != nil {
+		return "", err
+	}
+	return isolation, nil
 }
 
 func registerPending(ctx context.Context, a Alert, sqlstateClass string) {
@@ -232,9 +274,18 @@ func (p *Pending) Flush(ctx context.Context) {
 		return
 	}
 
-	dctx, cancel := detachedCtx(ctx)
-	defer cancel()
-	dctx = WithClockContext(dctx, p.clock)
+	// RaiseDetached itself now detaches its own context (security IC-5/
+	// code review F-2/LF C-3) - Flush only needs to make its Clock
+	// available on ctx; the caller's own ctx being cancelled (e.g. an
+	// HTTP request finishing right after this call, which is exactly
+	// when Flush is meant to run) can no longer skip either the retry or
+	// the terminal fallback.
+	cctx := WithClockContext(ctx, p.clock)
+
+	// LF C-2: always retry through a FRESH READ COMMITTED runner over
+	// the same scope, never p.runner directly - see
+	// freshReadCommittedRunner's own doc comment.
+	retryRunner := freshReadCommittedRunner(p.runner.Pool(), p.runner.Scope())
 
 	for _, e := range entries {
 		// RaiseDetached itself performs the mandatory bounded retry and,
@@ -243,6 +294,6 @@ func (p *Pending) Flush(ctx context.Context) {
 		// entry. The original in-tx sqlstate_class (e.sqlstateClass) was
 		// already logged/counted by RaiseGuarded; what matters here is
 		// only that every swallowed alert gets its mandatory retry.
-		_ = RaiseDetached(dctx, p.runner, e.alert)
+		_ = RaiseDetached(cctx, retryRunner, e.alert)
 	}
 }

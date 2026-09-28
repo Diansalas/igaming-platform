@@ -116,6 +116,26 @@ func TestMigration0110_DownRefusesWithRows(t *testing.T) {
 	}
 }
 
+// TestMigration0110_DownRefusesWithRoutesOnly is code review F-11: the
+// down migration must also refuse when alert_routes alone is non-empty,
+// even with zero alerts/occurrences/deliveries.
+func TestMigration0110_DownRefusesWithRoutesOnly(t *testing.T) {
+	pool := scratchPool(t, "alert0110downroutes")
+	admin := seedPlatformAdmin(t, pool)
+	err := pool.WithPlatformAdmin(context.Background(), admin, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `INSERT INTO alert_routes (scope, severity, escalation_step, channel_kind, recipient_ref) VALUES ('platform', 'p1', 0, 'log', 'ops')`)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("seed route: %v", err)
+	}
+
+	_, err = pool.MigrateDown(context.Background(), realMigrationsDir(t), 1)
+	if err == nil {
+		t.Fatal("expected migration 0110's down migration to refuse with a routes-only state")
+	}
+}
+
 // TestMigration0110_UpDownUp verifies the migration is fully reversible
 // on an otherwise-empty database.
 func TestMigration0110_UpDownUp(t *testing.T) {

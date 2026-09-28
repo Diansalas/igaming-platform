@@ -397,12 +397,33 @@ VALUES ('platform', 'p1', 0, 'log', 'log:some-operator-defined-reference');
 - `alert_raise_failures_total{kind,phase}` (`phase` ∈ `in_tx`, `detached`,
   `fallback`) - a raise that was swallowed, exhausted its detached retry,
   or whose own terminal fallback failed. No tenant label (ADR §6.3).
-- `alert_unrouted_total{severity}`, `alert_dead_total{channel_kind}`.
+- `alert_unrouted_total{severity}`, `alert_dead_total{channel_kind}`,
+  `alert_stale_claims_total` (a `claimed` delivery row whose lease expired
+  before any outcome was recorded, and was reclaimed under a new attempt
+  number - see "Stale-claim reclaim" below). No tenant label on any of
+  these.
 - Log events: `alert_raise_invalid`, `alert_raise_failed`,
   `alert_raise_scope_mismatch`, `alert_raise_detached_exhausted`,
-  `alert_raise_fallback`/`alert_raise_fallback_failed`, `alert_delivery`
-  (the `LogSink`'s own delivery line), `alert_dispatcher_*` (dispatcher
-  operational failures - route lookup, claim, record-outcome).
+  `alert_raise_fallback`/`alert_raise_fallback_failed`,
+  `alert_raise_rr_deferred` (a raise deferred because the transaction was
+  not READ COMMITTED), `alert_delivery` (the `LogSink`'s own delivery
+  line), `alert_dispatcher_*` (dispatcher operational failures - route
+  lookup, claim, record-outcome, stale-claim reclaim, a Deliver call that
+  would have run with a transaction held).
+
+### Stale-claim reclaim (security IC-2 / code review F-1)
+
+A dispatcher process can crash, be redeployed, or OOM between claiming a
+delivery attempt (`event = 'claimed'`) and recording its outcome. Without
+a lease, that alert would be stranded forever - the dispatcher's own
+due-work query would never look at a `claimed` row again. This is fixed:
+`DispatcherConfig.ClaimLease` (technical default: 2 minutes) bounds how
+long a `claimed` row is treated as in-flight; once it expires, the alert
+becomes due again under a NEW attempt number, counted toward
+`MaxAttempts` exactly like an ordinary failed delivery, and
+`alert_stale_claims_total` increments. A permanently-wedged channel
+therefore still reaches `dead` plus `alerting.delivery_dead` eventually,
+rather than silently losing the alert.
 
 ### What is stubbed / not yet wired
 

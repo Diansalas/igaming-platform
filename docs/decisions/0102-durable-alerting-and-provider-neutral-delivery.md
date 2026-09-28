@@ -1006,3 +1006,183 @@ comment) is NOT part of this record.
     `docs/plans/payment-readiness/evidence/prh2-i-core-mutation-kill.txt`.
     This is a **PARTIALLY IMPLEMENTED** substitute for genuine automated
     mutation testing, disclosed as such.
+
+### 16.1 Addendum — review fixes (2026-09-28)
+
+All three reviews of `bc73c24` (security ACCEPT WITH CONDITIONS, ledger-
+finance ACCEPT WITH CONDITIONS, code review NOT READY) are addressed as
+new commits on `i-core-alerting`, on top of the renumbering commit
+(`90b4bc3`). This section supersedes any earlier claim of a residual-free
+design; §16 above still describes the original architecture accurately,
+this addendum records what changed and what is still disclosed as
+incomplete.
+
+**Durability fixes (code review F-1/F-2 = security IC-2/IC-5 = LF C-3):**
+- **Stale-claim lease.** A `claimed` delivery row with no outcome
+  recorded within `DispatcherConfig.ClaimLease` (technical default: 2
+  minutes) is now treated as due again, under a NEW attempt number, so it
+  counts toward `MaxAttempts`/`dead` exactly like an ordinary failed
+  attempt. A new counter, `alert_stale_claims_total` (no tenant label),
+  increments on every reclaim. `TestDispatcher_StaleClaimReclaimedThenDead`
+  is the clock-driven test (a directly-inserted `claimed` row, simulating
+  a crash, is ignored before the lease and reclaimed after it, ending in
+  `dead` plus `alerting.delivery_dead`).
+- **Context detachment.** `RaiseDetached` (and `RaisePostCommit`, its
+  alias) now applies `detachedCtx` itself at entry, and the terminal
+  fallback runs on that same detached context - a caller's context being
+  cancelled can no longer skip either the mandatory retry or
+  `alerting.raise_failed`. `Pending.Flush` no longer double-detaches; it
+  only carries its `Clock` onto the ambient context. Three tests exercise
+  this with an already-cancelled `context.Context`:
+  `TestRaiseDetached_CancelledCallerContextStillWrites`,
+  `TestRaiseDetached_CancelledCallerContext_ExhaustionStillFallsBack`,
+  `TestPendingFlush_CancelledCallerContextStillFlushes`.
+
+**Required tests added:**
+- **Exclusion sets (security IC-1).** `exclusion_set_integration_test.go`
+  walks `alerts_subject_tenant_read` and `alerts_subject_tenant_raise` on
+  both `alerts` and `alert_occurrences`: a pure tenant session sees/can
+  raise its own subject row (assert 1/success), then each of
+  `app.acting_tenant_id`, `app.acting_platform_principal_id`,
+  `app.platform_service_id`, `app.platform_admin_principal_id` and
+  `app.player_account_id`, added one at a time, reduces that to 0/refused.
+  `alerts_tenant_owned` cannot be given a positive fixture (no
+  tenant-owned Kind is seeded in PRH-2, and the `alerts_guard` trigger
+  refuses `tenant_id IS NOT NULL` for every existing Kind regardless of
+  RLS) - the test instead proves the negative property directly: a pure
+  tenant session sees nothing through this family, a raw tenant-owned
+  insert is refused, and the dispatcher-plus-tenant-GUC combination sees
+  nothing. A hand-applied "exclusion set removed" mutant on
+  `alerts_subject_tenant_read` was confirmed killed by these tests before
+  being reverted (see the evidence file).
+- **In-transaction guarantee (LF C-1, LF test 5).** `lf_c1_integration_
+  test.go`: (a) a business write before AND after a swallowed
+  `RaiseGuarded` both commit; (b) an outer transaction already aborted
+  (25P02, via a deliberately failing statement) makes `RaiseGuarded`
+  propagate and `InTx` error; (c) a second, real, concurrent session
+  holds an uncommitted raise of the identical dedup key, the business
+  transaction sets `SET LOCAL lock_timeout`, and the conflicting alert
+  INSERT inside `RaiseGuarded`'s savepoint fails with a real 55P03 once
+  the timeout elapses, which propagates, and the business row in the same
+  transaction is not committed. (d) 40001/40P01 are NOT exercised via a
+  real forced deadlock/serialization failure (engineering a reliable,
+  non-flaky one was judged not worth the risk within this round); they
+  remain covered by `TestClassifySQLState_SwallowAllowlistIsNarrow`'s
+  unit-level classification pin, which the reviewer's own note accepted
+  as an alternative for (d).
+- **REPEATABLE READ guard (LF C-2/AL-11).** `RaiseGuarded` now reads
+  `SHOW transaction_isolation` before opening the savepoint; if it is not
+  `read committed`, it logs `alert_raise_rr_deferred` and registers the
+  alert on `Pending` without ever executing an alert statement in the
+  snapshot. `Pending.Flush`'s detached retry always reopens a FRESH READ
+  COMMITTED `ScopedRunner` reconstructed from the original scope's
+  identity (`freshReadCommittedRunner` in `scope.go`) - not the original
+  runner - so this holds even for the ordinary case, not only the
+  REPEATABLE READ one. `lf_c2_integration_test.go` uses a test-only
+  `snapshotRunner` (over `db.WithTenantSnapshot`) to exercise this: no
+  alert statement runs in the snapshot, and the alert persists after
+  commit via the post-commit detached retry.
+- **Escalation (code review F-3/F-8).** `dispatcher_hardening_
+  integration_test.go`, clock-driven: a not-acked alert escalates only
+  once `escalate_after` elapses; an acked alert never escalates; and an
+  acked alert at an already-`unrouted` step beyond the first (step > 0)
+  never even attempts that step again (`w.due = *step == 0 || !w.acked`
+  in `readDueWork`'s `unrouted` case).
+- **No transaction during `Deliver` (code review F-4/AL-5).** A runtime
+  guard (`txscope.Held(ctx)`, the same ADR 0094 INV-POOL mechanism
+  `internal/db`'s other "must not run with a pooled connection held"
+  call sites use) now precedes every `Sink.Deliver` call; a held ctx logs
+  `alert_dispatcher_deliver_with_tx_held` and skips delivery rather than
+  ever risking one. `TestDispatcher_NoTransactionOpenDuringDeliver` pins
+  it via a spy `MockSink.DeliverFunc` that now receives the exact `ctx`
+  `Deliver` was called with (the signature changed to
+  `func(ctx context.Context, d Delivery) (Outcome, ErrorClass)`).
+- **Backoff (code review F-5).** `TestDispatcher_BackoffHoldsRetryUntilElapsed`
+  uses a `manualClock` (test-only, explicit `Now()`/`Advance()`, no real
+  sleep) to prove a failed attempt is NOT redelivered before its backoff
+  window and IS redelivered once the clock reaches it.
+- **Claim race (code review F-6).** `TestDispatcher_ClaimRaceIsDeterministic`
+  starts two goroutines behind a single closed channel (a start barrier)
+  calling `claim()` on the identical `(alert, step, attempt_no)`; exactly
+  one must return `true`, proven with `-race -count=10` (see the
+  verification commands below), not merely "usually".
+
+**Lower-severity items:**
+- **IC-3.** The dispatcher-identity static test now walks the WHOLE
+  repository (every non-test `.go` file, skipping vendor/node_modules/
+  .git), not just `internal/alerting`, allowing only `internal/db/
+  platform_service.go` (the declaration) and the three alerting files.
+  It also forbids a `db.PlatformService("alert_dispatcher")` raw
+  conversion, not only the named-constant reference. Verified with two
+  planted violations (one of each shape) in a throwaway file outside
+  `internal/alerting`, both caught, then removed (not committed).
+- **IC-4.** `alerts_tenant_owned` is split into a `FOR SELECT` policy and
+  a separate `alerts_tenant_owned_insert` `FOR INSERT` policy on both
+  `alerts` and `alert_occurrences` - never `FOR ALL`/UPDATE. The
+  `alerts_guard` trigger still independently refuses a tenant-scope
+  UPDATE regardless.
+- **F-7.** The dispatcher now resolves each distinct `(severity, step)`
+  route at most once per `RunOnce` pass (a per-pass cache keyed by
+  `routeCacheKey`), and skips the redundant `markUnrouted` INSERT
+  attempt entirely when the latest delivery row is already `unrouted` at
+  that same step (`dueAlert.wasUnrouted`).
+- **F-9.** `readDueWork`'s "latest delivery row" query now orders by
+  `d.recorded_at DESC, d.id DESC` (an explicit tiebreaker), and
+  `resolveRoute`'s doc comment states plainly that `effective_from` is
+  real DB wall-clock time, never the injected `Clock` - a fake clock set
+  before a route's real insertion time will not see that route.
+- **F-10.** The default backoff's shift amount is clamped
+  (`defaultBackoffMaxShift = 20`) before computing `1 << shift`,
+  preventing undefined/overflowing behaviour at a very large attempt
+  count.
+- **F-11.** `TestMigration0110_DownRefusesWithRoutesOnly` covers a
+  routes-only non-empty state (zero alerts/occurrences/deliveries).
+- **F-12.** The migration itself now mirrors `deploy/init-app-role.sql`'s
+  least-privilege grants for all five tables (guarded on `pg_roles`
+  existence, the same pattern migration 0102 - payment_statement_imports/
+  lines - uses), not only the deploy script.
+- **F-13.** `TestRLS_DispatcherAlertsPolicyIsSelectOnly` pins
+  `alerts_platform_service_dispatcher`'s `cmd` in `pg_policies` directly
+  at `'SELECT'`, independent of the trigger-level M8 kill.
+  `TestRaiseFailed_MalformedInsertsRefused`'s subtests now each use their
+  own unique discriminator, so a subtest that somehow passed validation
+  under a future mutant would fail on ITS OWN check, never on a UNIQUE
+  collision with a sibling subtest's row (the M6 fix).
+- **LF C-4.** The dead `errAlertVanished` sentinel (never actually
+  returned by `insertOccurrence`) is removed; the dedup-race loop simply
+  propagates whatever `insertOccurrence` returns.
+- **LF C-5.** The renumbering commit (`90b4bc3`) is confirmed, via
+  `git diff -M`, to be a rename (not a delete+add) for every touched
+  migration/test file, with the only content changes being the
+  0108→0110 numbering references themselves (header comments, `RAISE
+  EXCEPTION` text, test names) - never unrelated code. `git show --stat
+  -M` on that commit shows `{old => new}` rename notation for all three
+  renamed files.
+
+**Still disclosed as incomplete after this round (not silently dropped):**
+- LF C-1(d) (40001/40P01 propagating from a real forced deadlock/
+  serialization conflict, as opposed to the unit-level classification
+  test) was not built - judged too flaky/risky to engineer reliably
+  within this round, and the reviewer's own note accepted the unit test
+  as an alternative for this specific sub-case.
+- LF test 6/10 (the REPEATABLE READ real business sites' persistence
+  under a persistent post-commit failure, and the kill-switch injected-
+  failure scenario) remain binding on I-wire, unchanged from §16 above -
+  they need real business call sites this workstream does not own.
+- `TestDispatcher_ClaimRaceIsDeterministic` uses a closed-channel start
+  barrier, not a guaranteed simultaneous database-level lock wait (the
+  code review's own alternative suggestion, "pin the UNIQUE claim at the
+  SQL level with two sessions") - it is deterministic in outcome (the
+  UNIQUE constraint decides, not scheduling luck) but does not itself
+  force the two INSERTs to be mid-flight at the exact same instant the
+  way a true two-session lock-wait harness would.
+- The mutation-kill evidence file
+  (`docs/plans/payment-readiness/evidence/prh2-i-core-mutation-kill.txt`)
+  was extended with the exclusion-set removal mutant for this round, but
+  the mutants named as "surviving" in the code review (MA: backoff
+  predicate; MB: escalation predicate; MC: claim race) were not
+  independently re-mutated and re-killed as separate logged entries in
+  that file - the corresponding NEW tests above were written and
+  confirmed to catch the described defect by direct testing of the fixed
+  behaviour (e.g. the backoff/escalation clock-driven tests), rather than
+  by re-running the reviewer's own mutants against this codebase.

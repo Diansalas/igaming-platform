@@ -58,9 +58,12 @@ func insertOrAttachOccurrence(ctx context.Context, tx pgx.Tx, a Alert, attrsJSON
 			continue
 		}
 		if occErr := insertOccurrence(ctx, tx, found); occErr != nil {
-			if occErr == errAlertVanished {
-				continue
-			}
+			// LF C-4: insertOccurrence always wraps a real error (or
+			// succeeds) - it never returns a distinguishable "the row
+			// vanished mid-flight" sentinel, so there is nothing to retry
+			// on here. Propagate as-is; the outer InTx/RaiseGuarded
+			// machinery classifies and swallows/retries at the right
+			// layer already.
 			return occErr
 		}
 		return nil
@@ -87,11 +90,6 @@ func findOpenAlert(ctx context.Context, tx pgx.Tx, subjectID any, kind Kind, dis
 	}
 	return id, nil
 }
-
-// errAlertVanished is a sentinel signalling "the alert row this occurrence
-// would attach to no longer exists / is no longer open", so the caller
-// retries the outer dedup loop.
-var errAlertVanished = fmt.Errorf("alerting: alert vanished")
 
 func insertOccurrence(ctx context.Context, tx pgx.Tx, alertID uuid.UUID) error {
 	_, err := tx.Exec(ctx, `INSERT INTO alert_occurrences (alert_id) VALUES ($1)`, alertID)
