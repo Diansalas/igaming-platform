@@ -182,8 +182,13 @@ Conditions from Q6 / C-103-3:
 - **Audit in the same transaction:** `casino.launch_bootstrap_denied`, `actor_type=system`, with
   `prior_status` and a closed **reason enum** (`game_inactive`, `capability_denied`, `rg_ineligible`).
   RG's own denial audit is also written by `evaluateAndAuditEligibility`.
-- **The 403 body is constant:** `{"error":"launch not permitted"}`. The reason is never sent to the
-  vendor, because RG status is player-sensitive.
+- **The 403 body is constant:** the `apierror` envelope (`internal/apierror`, `{"code", "message",
+  "request_id"}` - not a bespoke `{"error": ...}` shape), with `code = forbidden` and
+  `message = "launch not permitted"` on every gate denial, whichever gate (game, capability, RG)
+  actually denied. **Amended (C-7d, code review):** the 403 body is therefore byte-identical to
+  every OTHER 403 this endpoint ever returns apart from `request_id` (which always varies, by
+  design - it is how an operator correlates a returned error with server logs, per `apierror`'s own
+  doc comment). The reason is never sent to the vendor, because RG status is player-sensitive.
 - The revoke writes no idempotency row and no player ref.
 
 ### 3.4 Replay (bound to `token_hash`, `request_digest` and `consumed`)
@@ -226,7 +231,10 @@ Conditions from Q6 / C-103-3:
 ### 3.6 Uniform refusal and secrecy (Q5 ACCEPTED)
 
 - **One response** for every step 1–3 failure (including Redeem+Recheck) and every non-matching
-  replay: `401 {"error":"callback rejected"}` (ADR 0091).
+  replay: `401`, the `apierror` envelope (`internal/apierror`, `{"code", "message", "request_id"}`),
+  `code = unauthorized`, `message = "callback rejected"` (ADR 0091). **Amended (C-7d, code
+  review):** byte-identical to every OTHER 401 this endpoint returns apart from `request_id`, the
+  same relationship §3.3 now states for the 403 body.
 - **Server-side logs** carry a closed `reason` enum (`not_found`, `binding_mismatch`, `not_active`,
   `expired`, `replay_mismatch`, `replay_revoked`, `credential_unavailable`), plus `tenant_id`,
   `provider_id` and `request_id`.
@@ -263,8 +271,26 @@ Conditions from Q6 / C-103-3:
     `FOR NO KEY UPDATE` holder. The fix therefore breaks the cycle without weakening any of the
     serialization this section originally required: two concurrent bootstraps still conflict
     (`FOR NO KEY UPDATE` vs. `FOR NO KEY UPDATE`), and a bootstrap still conflicts with A's own
-    `RevokeLaunchSession` (`internal/casino/launch.go`, a plain `UPDATE`, which takes an implicit
-    `FOR UPDATE`-strength lock and so still conflicts with `FOR NO KEY UPDATE`).
+    `RevokeLaunchSession` (`internal/casino/launch.go:428`, which locks the row via
+    `SELECT status ... FOR UPDATE` before its own `UPDATE` - corrected here, code review C-7b: an
+    earlier version of this text said "a plain `UPDATE`", which understates the lock this
+    function's `SELECT ... FOR UPDATE` already takes explicitly - and so still conflicts with
+    `FOR NO KEY UPDATE`).
+  - **L-2 (security review, required):** the gate-denial path's OWN `RevokeLaunchSession` call
+    upgrades the row lock from the `FOR NO KEY UPDATE` this bootstrap already holds to a genuine
+    `FOR UPDATE`, WHILE bootstrap still holds the RG advisory lock (a denial is only reached after
+    the RG gate check resolves). This is a THIRD lock-acquisition shape on the same two resources,
+    not covered by the fix's own test above, and was checked separately:
+    `TestLockOrder_BootstrapGateDenialAndFirstBetOfRound_NoDeadlock`
+    (`internal/casino/lockorder_integration_test.go`) drives a real gate-denying `BootstrapLaunch`
+    call against a real first-bet-of-the-round `postBet` call, forced to queue on the session row
+    and the RG lock respectively, then released together. No cycle is possible here by
+    construction: bootstrap's own upgrade to `FOR UPDATE` happens only AFTER bootstrap itself
+    already holds RG - which, by RG's own mutual exclusivity, means `postBet` cannot simultaneously
+    be holding RG and waiting on that upgrade. `postBet`'s own `FOR KEY SHARE` step is compatible
+    with bootstrap's still-held `FOR NO KEY UPDATE` in the meantime, so it is never blocked by
+    bootstrap before RG changes hands. Verified empirically (`-race -count=20`), not merely
+    reasoned about.
   - **Test:** `TestLockOrder_BootstrapAndFirstBetOfRound_NoDeadlock`
     (`internal/casino/lockorder_integration_test.go`) drives both sides through the real
     production primitives (this function's own lock statement, parameterised by lock clause, and
@@ -527,7 +553,10 @@ merged). Migration number **0115** (placeholder - the orchestrator renumbers at 
   (false)`, which validates every existing row at the storage level unconditionally, regardless of
   RLS (the same "the check IS the check" principle as 0107's own unique-index-build guard). Found
   by the author's own `TestMigration0115_DownRefusesWhileRowsExist`.
-- **Mutation evidence: 12/12 killed (F-4 re-run, 2026-09-28).** As originally specified, MUT-list
+- **Mutation evidence: 10 of 12 MUT-list items killed as specified, plus 2 (mutants 10/11)
+  equivalent as specified and restated as 10-PRIME/11-PRIME and killed in that form (F-4 re-run,
+  2026-09-28; wording corrected per code review C-7c - not a flat "12/12", since mutants 10/11 in
+  their original form are not killable by design, not by a test gap).** As originally specified, MUT-list
   mutants 10 ("a lazy `expired` write on refusal") and 11 ("revoke on an evaluation error") are
   EQUIVALENT MUTANTS, not merely untested: `BootstrapLaunch` runs the entire contract in ONE
   transaction whose commit/rollback is driven solely by whether the closure returns nil, and both

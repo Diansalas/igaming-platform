@@ -101,9 +101,13 @@ type BootstrapResult struct {
 	AssetCode      string
 	Mode           GameMode
 	// ResponseJSON is the exact byte sequence the HTTP layer returns -
-	// marshaled once on a fresh success, or read back verbatim from
-	// casino_launch_bootstraps.response on a replay (BS-4: "a replay
-	// returns the stored response... byte-identical").
+	// marshaled once on a fresh success, or RE-MARSHALED (never read back
+	// from casino_launch_bootstraps.response, which is an audit copy only
+	// - see the §3.4 amendment) from the session's own immutable columns
+	// on a replay, from the SAME Go struct/field order, which is what
+	// actually guarantees BS-4's "byte-identical" contract - PostgreSQL's
+	// JSONB storage does not preserve the original key order/whitespace
+	// of an inserted value, so reading it back would not be byte-identical.
 	ResponseJSON []byte
 	// Replayed is true when this result came from an existing
 	// idempotency row (ADR 0103 §3.4), never a fresh CAS.
@@ -214,12 +218,17 @@ func getBootstrapByRequestID(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID,
 // UPDATE to FOR NO KEY UPDATE means postBet's FK-driven FOR KEY SHARE no
 // longer conflicts with a session row bootstrap already holds, so the
 // cycle cannot form. FOR NO KEY UPDATE still conflicts with a genuine
-// concurrent FOR UPDATE (A's own RevokeLaunchSession, launch.go, which
-// still uses a plain UPDATE taking an implicit UPDATE-strength lock) and
-// with another bootstrap's own FOR NO KEY UPDATE on the same row, so
-// serialization against a concurrent bootstrap and against A's revoke is
-// unchanged - proved by TestBootstrapLaunch_ConcurrentConsumes_* (still
-// exactly one winner) and by the ABBA reproduction test itself
+// concurrent FOR UPDATE (A's own RevokeLaunchSession, launch.go:428,
+// which locks the row via `SELECT status FROM casino_launch_sessions
+// WHERE id = $1 FOR UPDATE` before its own UPDATE - not a plain UPDATE's
+// own implicit lock, as an earlier version of this comment said
+// (code review C-7b)) and with another bootstrap's own FOR NO KEY UPDATE
+// on the same row, so serialization against a concurrent bootstrap and
+// against A's revoke is unchanged - proved by
+// TestBootstrapLaunch_ConcurrentConsumes_* (still exactly one winner),
+// TestLockOrder_BootstrapGateDenialAndFirstBetOfRound_NoDeadlock
+// (L-2 - the revoke path's OWN lock upgrade against postBet, see that
+// test's own doc comment), and the ABBA reproduction test itself
 // (TestLockOrder_BootstrapAndFirstBetOfRound_NoDeadlock,
 // lockorder_integration_test.go) asserting the fix does not merely mask
 // the deadlock by dropping a needed lock: that test's own "FOR UPDATE

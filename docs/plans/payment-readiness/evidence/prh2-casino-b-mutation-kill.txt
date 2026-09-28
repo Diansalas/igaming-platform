@@ -174,7 +174,11 @@ TestCasinoLaunchBootstraps_UniqueLaunchSessionID -v ./internal/casino/...`
     request_id so it does not collide on the (tenant,provider,request_id) key, succeeds under this
     mutant - BS-3's "at most one bootstrap row per session" is violated.)
 
-Summary (F-4 re-run, 2026-09-28): 12/12 killed.
+Summary (F-4 re-run, 2026-09-28; wording corrected per code review C-7c, 2026-09-28): 10 of the 12
+MUT-list items killed as specified, plus 2 (mutants 10 and 11) that are EQUIVALENT as originally
+specified and were separately restated as 10-PRIME/11-PRIME and killed in that form - not a flat
+"12/12", since 10 and 11 in their ORIGINAL form are not killable at all (by design, not by gap) and
+saying "12/12" without that distinction overstates what the original MUT list itself asked for.
 
 - Mutants 1-9 and 12: killed as originally recorded above.
 - Mutants 10 and 11 (as ORIGINALLY specified by the MUT list - a write/revoke added alongside the
