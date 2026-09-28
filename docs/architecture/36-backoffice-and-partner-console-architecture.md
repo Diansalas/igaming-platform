@@ -675,3 +675,30 @@ Both stages above, and every future wave adding a "coming soon" section to
 real: the UI never owns financial/business rules; permissions are enforced
 server-side only, never inferred from the UI; no brand-specific forked
 backend logic ever becomes a code path in either surface.
+
+## 11. PRH-2 K1 — scoped financial capability grants (ADR 0099): no UI yet
+
+`internal/httpserver/capability_routes.go` exposes a full admin API for
+requesting, approving/rejecting, cancelling and revoking a scoped financial
+capability grant (`/v1/admin/tenants/{tenantID}/capability-grants/...`),
+but **the Back Office has no screen for it yet** - this is a real,
+disclosed gap, not an oversight to silently work around. When it is built,
+per this document's own non-negotiables:
+
+- **Grant request/approve/reject/revoke are server-enforced,** exactly as
+  every other Back Office action - the UI only ever calls the existing API
+  and reflects its response; it never locally decides who may approve a
+  grant.
+- **G-P1 (a platform-originated grant naming a tenant's own `finance`
+  staff) has no route and must not get a UI control** - it is DEFERRED out
+  of PRH-2 (ADR 0099 §4.1, architect ruling). A Back Office control for it
+  would be a UI ahead of a backend capability that does not exist.
+- **The four-eyes shape is visible, not just enforced.** A grant always
+  shows both the requester and the approving `platform_admin` as distinct
+  identities (never "self", by construction) - the UI surfaces this rather
+  than only showing the current state, so an operator can see the
+  four-eyes control actually held.
+- **Revoke is the emergency stop** (ADR §8.1) and should be a prominent,
+  single action in whichever screen lists a tenant's active grants -
+  consistent with this codebase's existing kill-switch UI pattern
+  (§6/§8.2's Back Office wave, mirrored for grants).

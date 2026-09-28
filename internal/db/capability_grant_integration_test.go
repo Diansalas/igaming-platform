@@ -15,6 +15,8 @@ package db
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -23,6 +25,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/Diansalas/igaming-platform/internal/capability"
+	"github.com/Diansalas/igaming-platform/internal/testsupport/scratchdb"
 )
 
 func cgIsCode(err error, code string) bool {
@@ -109,13 +112,188 @@ func TestCapabilityGrant_A2_TenantScopeApprovalRefused(t *testing.T) {
 		_, _, err := capability.DecideAndGrant(ctx, tx, tenantID, requestID, "approve", "test")
 		return err
 	})
-	if err == nil {
-		t.Fatal("expected a tenant-scope approval attempt to be refused")
+	// K1-C3: exactly CG011, not merely "refused somehow". PostgreSQL
+	// evaluates a BEFORE INSERT trigger's raised exception before the
+	// INSERT's own RLS WITH CHECK is ever tested (RLS's row check runs
+	// against the final row values, immediately before the heap write,
+	// which is after every BEFORE ROW trigger has already had a chance to
+	// raise) - so staff_capability_grant_approvals_guard's own R-7 check
+	// (v_actor.scope <> 'platform') is what actually fires here, not RLS.
+	// See TestCapabilityGrant_K1C3_LayeredIndependentKill below for the
+	// case where RLS is deliberately widened, proving this is the trigger,
+	// not RLS, doing the work.
+	if !cgIsCode(err, "CG011") {
+		t.Fatalf("expected exactly CG011 (R-7, the trigger's own scope guard), got %v", err)
 	}
-	// Refused either because the tenant session cannot even see/insert
-	// into staff_capability_grant_approvals (RLS - the platform-only
-	// INSERT policy), or by the R-7 guard trigger itself if it somehow
-	// reached it; either is an acceptable refusal shape for this AZ test.
+}
+
+// TestCapabilityGrant_K1C3_LayeredIndependentKill (K1-C3, security
+// condition, code-review F-10): pins R-7 (HD-PRH2-2's core control)
+// independently at the TRIGGER layer, not merely "however it happens to be
+// refused today". Runs entirely inside one owner-role transaction that is
+// ALWAYS rolled back (via a sentinel error returned to
+// pool.WithoutTenant), using nested transactions (Postgres SAVEPOINTs, via
+// tx.Begin) around each refusal so a refused statement does not abort the
+// whole outer transaction and prevent the later steps/rollback.
+//
+// Layer 1: widen staff_capability_grant_approvals' RLS with a genuinely
+// permissive tenant-shaped INSERT policy (so if RLS were the ONLY thing
+// stopping a tenant session, this would let the INSERT through) - the
+// trigger's own R-7 check must still refuse it with CG011.
+//
+// Layer 2: with that same widened RLS AND the decided_by_scope CHECK
+// constraint also dropped, the trigger must STILL independently refuse
+// with CG011 - proving R-7 is not "masked by RLS" nor "masked by the
+// CHECK": the trigger enforces it on its own.
+//
+// This is also the mutation-kill test for mutant M4 (the trigger's
+// `IF v_actor.scope <> 'platform'` block removed): with that block
+// removed, both layers above would let the tenant-shaped INSERT succeed,
+// and this test would fail.
+func TestCapabilityGrant_K1C3_LayeredIndependentKill(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+	tenantID := createTestTenant(t, pool)
+	requester := cgStaff(t, pool, tenantID, "tenant_admin")
+	finance := cgStaff(t, pool, tenantID, "finance")
+	otherTenantAdmin := cgStaff(t, pool, tenantID, "tenant_admin")
+
+	var requestID uuid.UUID
+	if err := pool.WithPrincipalScope(ctx, tenantID, requester, func(ctx context.Context, tx pgx.Tx) error {
+		req, err := capability.CreateRequest(ctx, tx, tenantID, capability.NewRequestInput{
+			GranteeStaffID: finance, Capability: capability.CapabilityLedgerAdjustmentInitiate,
+			ValidFrom: time.Now(), ReasonCode: "test",
+		})
+		requestID = req.ID
+		return err
+	}); err != nil {
+		t.Fatalf("create request: %v", err)
+	}
+
+	sentinel := errors.New("K1C3 layered test: intentional rollback, not a real failure")
+	err := pool.WithoutTenant(ctx, func(ctx context.Context, tx pgx.Tx) error {
+		// Owner-role DDL: a genuinely permissive tenant-shaped INSERT
+		// policy, wide open (WITH CHECK (true)) - the most permissive
+		// possible widening.
+		if _, ddlErr := tx.Exec(ctx, `CREATE POLICY zz_k1c3_permissive_tenant_insert ON staff_capability_grant_approvals FOR INSERT WITH CHECK (true)`); ddlErr != nil {
+			return fmt.Errorf("add permissive tenant INSERT policy: %w", ddlErr)
+		}
+
+		// Simulate the tenant-shaped session in THIS SAME transaction
+		// (same backend, so the just-added policy is visible to it even
+		// though it is uncommitted).
+		if _, gucErr := tx.Exec(ctx, `SELECT set_config('app.tenant_id', $1, true)`, tenantID.String()); gucErr != nil {
+			return gucErr
+		}
+		if _, gucErr := tx.Exec(ctx, `SELECT set_config('app.principal_id', $1, true)`, otherTenantAdmin.String()); gucErr != nil {
+			return gucErr
+		}
+
+		// Layer 1: CHECK still present. Run inside a SAVEPOINT (tx.Begin)
+		// so the expected failure does not abort the outer transaction.
+		if attemptErr := k1c3AttemptApprove(ctx, tx, tenantID, requestID); !cgIsCode(attemptErr, "CG011") {
+			return fmt.Errorf("layer 1 (RLS widened, CHECK present): expected CG011, got %v", attemptErr)
+		}
+
+		// Layer 2: also drop the decided_by_scope CHECK.
+		if _, ddlErr := tx.Exec(ctx, `ALTER TABLE staff_capability_grant_approvals DROP CONSTRAINT staff_capability_grant_approvals_decided_by_scope_check`); ddlErr != nil {
+			return fmt.Errorf("drop decided_by_scope CHECK: %w", ddlErr)
+		}
+		if attemptErr := k1c3AttemptApprove(ctx, tx, tenantID, requestID); !cgIsCode(attemptErr, "CG011") {
+			return fmt.Errorf("layer 2 (RLS widened, CHECK also dropped): expected CG011, got %v", attemptErr)
+		}
+
+		return sentinel
+	})
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("expected the layered test to end in its own rollback sentinel (nothing persisted), got %v", err)
+	}
+}
+
+// k1c3AttemptApprove runs capability.DecideAndGrant inside a SAVEPOINT
+// (pgx's tx.Begin on an already-open tx) so a refused attempt aborts only
+// the savepoint, not the caller's outer transaction, letting the caller
+// keep going (more DDL, a second attempt, and ultimately its own
+// rollback).
+func k1c3AttemptApprove(ctx context.Context, tx pgx.Tx, tenantID, requestID uuid.UUID) error {
+	sp, err := tx.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = sp.Rollback(ctx) }()
+	_, _, err = capability.DecideAndGrant(ctx, sp, tenantID, requestID, "approve", "test")
+	return err
+}
+
+// TestCapabilityGrant_K1C3_CatalogueAssertion (K1-C3 (c)): a
+// metadata-only pin that no policy on staff_capability_grant_approvals
+// admits INSERT to a tenant-shaped session (the ONLY INSERT-capable
+// policy is platform_scope_insert, and its own WITH CHECK clause requires
+// the platform-shaped GUCs), and that the decided_by_scope = 'platform'
+// CHECK constraint exists.
+func TestCapabilityGrant_K1C3_CatalogueAssertion(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+
+	type policyRow struct {
+		name      string
+		cmd       string
+		withCheck string
+	}
+	var rows []policyRow
+	if err := pool.WithoutTenant(ctx, func(ctx context.Context, tx pgx.Tx) error {
+		r, err := tx.Query(ctx, `
+			SELECT policyname, cmd, COALESCE(with_check, '')
+			  FROM pg_policies
+			 WHERE tablename = 'staff_capability_grant_approvals'
+			   AND cmd IN ('INSERT', 'ALL', '*')`)
+		if err != nil {
+			return err
+		}
+		defer r.Close()
+		for r.Next() {
+			var pr policyRow
+			if err := r.Scan(&pr.name, &pr.cmd, &pr.withCheck); err != nil {
+				return err
+			}
+			rows = append(rows, pr)
+		}
+		return r.Err()
+	}); err != nil {
+		t.Fatalf("query pg_policies: %v", err)
+	}
+
+	if len(rows) != 1 {
+		t.Fatalf("expected exactly one INSERT-capable policy on staff_capability_grant_approvals, found %d: %+v", len(rows), rows)
+	}
+	if rows[0].name != "platform_scope_insert" {
+		t.Fatalf("expected the sole INSERT-capable policy to be platform_scope_insert, got %q", rows[0].name)
+	}
+	// A tenant-shaped session (app.tenant_id set, app.platform_admin_principal_id
+	// unset) cannot satisfy this WITH CHECK clause: it structurally
+	// requires platform_admin_principal_id IS NOT NULL and tenant_id IS
+	// NULL, which a tenant session can never both be true for at once.
+	for _, must := range []string{"platform_admin_principal_id", "app.tenant_id"} {
+		if !strings.Contains(rows[0].withCheck, must) {
+			t.Fatalf("expected platform_scope_insert's WITH CHECK to reference %q, got %q", must, rows[0].withCheck)
+		}
+	}
+
+	var checkExists bool
+	if err := pool.WithoutTenant(ctx, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `
+			SELECT EXISTS (
+				SELECT 1 FROM pg_constraint
+				 WHERE conname = 'staff_capability_grant_approvals_decided_by_scope_check'
+				   AND conrelid = 'staff_capability_grant_approvals'::regclass
+				   AND pg_get_constraintdef(oid) = $1
+			)`, `CHECK ((decided_by_scope = 'platform'::text))`).Scan(&checkExists)
+	}); err != nil {
+		t.Fatalf("query pg_constraint: %v", err)
+	}
+	if !checkExists {
+		t.Fatal("expected the decided_by_scope = 'platform' CHECK constraint to exist")
+	}
 }
 
 // A-5: self-grant, self-approval, approver == grantee, one Person under
@@ -414,6 +592,58 @@ func TestCapabilityGrant_A13_AppendOnly(t *testing.T) {
 		t.Fatalf("un-revoke: expected CG012, got %v", err)
 	}
 
+	// K1-C4 / LF C-K1-1: a RE-REVOKE - an UPDATE that keeps revoked_at
+	// NOT NULL (never clearing it, unlike the un-revoke case above) but
+	// supplies a NEW revoked_at/revoked_by/revoke_reason_code, attempting
+	// to rewrite the historical revocation record itself - must also be
+	// refused with CG012, and the row must be byte-for-byte unchanged
+	// afterward. This is the mutation-kill test for mutant M5 (the
+	// `OLD.revoked_at IS NOT NULL` guard removed): with that guard gone,
+	// the trigger's whole-row-equality check (only revoked_at/revoked_by/
+	// revoked_by_scope/revoke_reason_code may change) does NOT stop a
+	// re-revoke, because those are exactly the four columns it lets
+	// change - and the trigger unconditionally overwrites
+	// revoked_at/revoked_by/revoked_by_scope with fresh actor/now()
+	// values on any UPDATE that reaches that far, silently rewriting the
+	// reason, the timestamp and the actor.
+	var beforeRevokedAt time.Time
+	var beforeRevokedBy uuid.UUID
+	var beforeReason string
+	if err := pool.WithPlatformAdmin(ctx, f.ApproverID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx,
+			`SELECT revoked_at, revoked_by, revoke_reason_code FROM staff_capability_grants WHERE id = $1`, f.GrantID,
+		).Scan(&beforeRevokedAt, &beforeRevokedBy, &beforeReason)
+	}); err != nil {
+		t.Fatalf("read grant before re-revoke attempt: %v", err)
+	}
+
+	otherApprover := cgStaff(t, pool, uuid.Nil, "platform_admin")
+	err = pool.WithPlatformAdmin(ctx, otherApprover, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx,
+			`UPDATE staff_capability_grants
+			    SET revoked_at = now(), revoked_by_scope = 'platform', revoke_reason_code = $2
+			  WHERE id = $1`, f.GrantID, "rewritten-reason")
+		return err
+	})
+	if !cgIsCode(err, "CG012") {
+		t.Fatalf("re-revoke: expected CG012, got %v", err)
+	}
+
+	var afterRevokedAt time.Time
+	var afterRevokedBy uuid.UUID
+	var afterReason string
+	if err := pool.WithPlatformAdmin(ctx, f.ApproverID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx,
+			`SELECT revoked_at, revoked_by, revoke_reason_code FROM staff_capability_grants WHERE id = $1`, f.GrantID,
+		).Scan(&afterRevokedAt, &afterRevokedBy, &afterReason)
+	}); err != nil {
+		t.Fatalf("read grant after re-revoke attempt: %v", err)
+	}
+	if !beforeRevokedAt.Equal(afterRevokedAt) || beforeRevokedBy != afterRevokedBy || beforeReason != afterReason {
+		t.Fatalf("re-revoke: expected the revocation record unchanged, before=(%v,%v,%q) after=(%v,%v,%q)",
+			beforeRevokedAt, beforeRevokedBy, beforeReason, afterRevokedAt, afterRevokedBy, afterReason)
+	}
+
 	// DELETE refused - either by an explicit trigger exception, or (since
 	// K1-C2's per-command RLS split leaves no permissive DELETE policy on
 	// this table at all) silently by RLS filtering the row out before the
@@ -495,11 +725,31 @@ func TestCapabilityGrant_SockPuppet_NoCoApprovalNoGrant(t *testing.T) {
 
 func timePtr(t time.Time) *time.Time { return &t }
 
+// assertActingOpenRefusal (L-2, security review): checks not just that the
+// error carries SQLSTATE CG020, but that it actually comes from the
+// setter's own "open acting session" step (WithPlatformActingInTenant's
+// `db: open acting session: %w` wrap around
+// `SELECT financial_acting_session_open()`), never from some other,
+// unrelated step that happens to also raise CG020.
+func assertActingOpenRefusal(t *testing.T, err error) {
+	t.Helper()
+	if err == nil {
+		t.Fatal("expected the setter to refuse")
+	}
+	if !cgIsCode(err, "CG020") {
+		t.Fatalf("expected CG020, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "open acting session") {
+		t.Fatalf("expected the error to come from the setter's own \"open acting session\" step, got %v", err)
+	}
+}
+
 // TestActingSetter_RefusesWithoutValidGrant is the setter's own validity
 // check (ADR 0099 §6.1 point 2, C-99-8): WithPlatformActingInTenant must
-// raise (SQLSTATE CG020) and never call fn when the (principal, tenant)
-// pair has no in-force grant at all - a random staff_users row, a real
-// tenant with no grant, and a revoked grant are each tried.
+// raise (SQLSTATE CG020, from its own "open acting session" step) and
+// never call fn when the (principal, tenant) pair has no in-force grant at
+// all - a random staff_users row, a real tenant with no grant, and a
+// revoked grant are each tried.
 func TestActingSetter_RefusesWithoutValidGrant(t *testing.T) {
 	pool := testPool(t)
 	ctx := context.Background()
@@ -512,12 +762,7 @@ func TestActingSetter_RefusesWithoutValidGrant(t *testing.T) {
 			called = true
 			return nil
 		})
-		if err == nil {
-			t.Fatal("expected the setter to refuse with no in-force grant")
-		}
-		if !cgIsCode(err, "CG020") {
-			t.Fatalf("expected CG020, got %v", err)
-		}
+		assertActingOpenRefusal(t, err)
 		if called {
 			t.Fatal("fn must never run when the acting session fails to open")
 		}
@@ -533,9 +778,7 @@ func TestActingSetter_RefusesWithoutValidGrant(t *testing.T) {
 		err := pool.WithPlatformActingInTenant(ctx, f.GranteeID, f.TenantID, uuid.Nil, "", func(ctx context.Context, tx pgx.Tx) error {
 			return nil
 		})
-		if !cgIsCode(err, "CG020") {
-			t.Fatalf("revoked grant: expected CG020, got %v", err)
-		}
+		assertActingOpenRefusal(t, err)
 	})
 
 	t.Run("grant for a different tenant", func(t *testing.T) {
@@ -544,9 +787,7 @@ func TestActingSetter_RefusesWithoutValidGrant(t *testing.T) {
 		err := pool.WithPlatformActingInTenant(ctx, f.GranteeID, otherTenant, uuid.Nil, "", func(ctx context.Context, tx pgx.Tx) error {
 			return nil
 		})
-		if !cgIsCode(err, "CG020") {
-			t.Fatalf("grant for a different tenant: expected CG020, got %v", err)
-		}
+		assertActingOpenRefusal(t, err)
 	})
 }
 
@@ -571,16 +812,31 @@ func TestCapabilityGrant_A4_K11_RestrictiveFenceRefusals(t *testing.T) {
 		t.Fatalf("insert person fixture: %v", err)
 	}
 
-	// runRefused: the write/query itself must error (RLS or trigger
-	// refusal).
+	// login_attempts: seed a genuine row (F-6) so "read_login_attempts"
+	// below tests a real fence refusal, not zero rows for the incidental
+	// reason that the table happens to be empty.
+	if err := pool.WithoutTenant(ctx, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx,
+			`INSERT INTO login_attempts (id, principal_type, identifier, succeeded, ip_address, attempted_at)
+			 VALUES (gen_random_uuid(), 'staff', 'zz-f6-seed@test.invalid', true, '127.0.0.1', now())`)
+		return err
+	}); err != nil {
+		t.Fatalf("seed login_attempts fixture: %v", err)
+	}
+
+	// runRefused: the write itself must be refused by the RESTRICTIVE
+	// fence with EXACTLY SQLSTATE 42501 (F-6) - not merely "some error",
+	// which could otherwise be masked by an unrelated CHECK violation on a
+	// row that was never going to be accepted regardless of RLS.
 	runRefused := func(t *testing.T, name string, fn func(tx pgx.Tx) error) {
 		t.Helper()
 		t.Run(name, func(t *testing.T) {
 			err := pool.WithPlatformActingInTenant(ctx, principalID, tenantID, uuid.Nil, "", func(ctx context.Context, tx pgx.Tx) error {
 				return fn(tx)
 			})
-			if err == nil {
-				t.Fatalf("%s: expected refusal, got success", name)
+			var pgErr *pgconn.PgError
+			if !errors.As(err, &pgErr) || pgErr.Code != "42501" {
+				t.Fatalf("%s: expected exactly SQLSTATE 42501 (RLS refusal), got %v", name, err)
 			}
 		})
 	}
@@ -686,10 +942,15 @@ func TestCapabilityGrant_A4_K11_RestrictiveFenceRefusals(t *testing.T) {
 		return err
 	})
 	// risk_rules: write (a NULL-tenant, i.e. platform-level, rule).
+	// F-6: threshold_exponent (or asset_code) is required, exactly one of
+	// the two, whenever limit_kind is one of min/max/cumulative_amount
+	// (risk_rules_threshold_denomination_check) - set threshold_exponent
+	// so this row is CHECK-valid and the refusal below can only come from
+	// the RESTRICTIVE fence, never an unrelated CHECK violation.
 	runRefused(t, "write_risk_rules", func(tx pgx.Tx) error {
 		_, err := tx.Exec(context.Background(),
-			`INSERT INTO risk_rules (id, tenant_id, operation, limit_kind, time_window, threshold, created_by_actor_type, created_by_actor_id)
-			 VALUES (gen_random_uuid(), NULL, 'deposit', 'max_amount', 'transaction', 100, 'staff', $1)`,
+			`INSERT INTO risk_rules (id, tenant_id, operation, limit_kind, time_window, threshold, threshold_exponent, created_by_actor_type, created_by_actor_id)
+			 VALUES (gen_random_uuid(), NULL, 'deposit', 'max_amount', 'transaction', 100, 0, 'staff', $1)`,
 			principalID)
 		return err
 	})
@@ -880,5 +1141,417 @@ func TestCapabilityGrant_A8_SuspendedActorRefused(t *testing.T) {
 	})
 	if !cgIsCode(err, "CG010") {
 		t.Fatalf("suspended grantee: expected CG010 (R-9), got %v", err)
+	}
+}
+
+// TestCapabilityGrant_F2_ForcedColumnsCannotBeSupplied (F-2 / architect
+// I-3): every *_by/*_by_scope/*_by_person_id/*_txid/grantee_* column that
+// the guard triggers claim to force from the live session or the
+// request/approval row must actually BE forced - a caller-supplied,
+// deliberately mismatching value must never persist. capability.
+// CreateRequest/DecideAndGrant never expose these columns as Go-level
+// inputs, so this drives raw INSERT/UPDATE statements directly (still
+// inside the normal RLS-scoped session helpers) supplying every forced
+// column explicitly with a wrong value, then reads the row back and
+// checks the resolver's own value won.
+//
+// Mutant MF-a (`requested_by_person_id := COALESCE(NEW.requested_by_person_id, v_actor.person_id)`)
+// and mutant MF-b (the same shape for `grantee_person_id`) are shown
+// killed below.
+func TestCapabilityGrant_F2_ForcedColumnsCannotBeSupplied(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+
+	t.Run("requested_by requested_by_scope requested_by_person_id", func(t *testing.T) {
+		tenantID := createTestTenant(t, pool)
+		requester := cgStaff(t, pool, tenantID, "tenant_admin")
+		finance := cgStaff(t, pool, tenantID, "finance")
+
+		var requesterPerson uuid.UUID
+		if err := pool.WithTenant(ctx, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+			return tx.QueryRow(ctx, `SELECT person_id FROM staff_users WHERE id = $1`, requester).Scan(&requesterPerson)
+		}); err != nil {
+			t.Fatalf("lookup requester person: %v", err)
+		}
+
+		bogusActor := uuid.New()
+		bogusPerson := uuid.New()
+		var requestID uuid.UUID
+		if err := pool.WithPrincipalScope(ctx, tenantID, requester, func(ctx context.Context, tx pgx.Tx) error {
+			return tx.QueryRow(ctx, `
+				INSERT INTO staff_capability_grant_requests
+					(tenant_id, grantee_staff_id, capability, valid_from, reason_code,
+					 requested_by, requested_by_scope, requested_by_person_id)
+				VALUES ($1, $2, $3, now(), 'test', $4, 'platform', $5)
+				RETURNING id`,
+				tenantID, finance, string(capability.CapabilityLedgerAdjustmentInitiate), bogusActor, bogusPerson,
+			).Scan(&requestID)
+		}); err != nil {
+			t.Fatalf("insert with bogus forced columns: %v", err)
+		}
+
+		var gotBy uuid.UUID
+		var gotScope string
+		var gotPerson uuid.UUID
+		if err := pool.WithPrincipalScope(ctx, tenantID, requester, func(ctx context.Context, tx pgx.Tx) error {
+			return tx.QueryRow(ctx,
+				`SELECT requested_by, requested_by_scope, requested_by_person_id FROM staff_capability_grant_requests WHERE id = $1`,
+				requestID).Scan(&gotBy, &gotScope, &gotPerson)
+		}); err != nil {
+			t.Fatalf("read back: %v", err)
+		}
+		if gotBy != requester {
+			t.Fatalf("requested_by: expected the real requester %s (not the supplied %s), got %s", requester, bogusActor, gotBy)
+		}
+		if gotScope != "tenant" {
+			t.Fatalf("requested_by_scope: expected 'tenant' (not the supplied 'platform'), got %q", gotScope)
+		}
+		if gotPerson != requesterPerson {
+			t.Fatalf("requested_by_person_id (MF-a): expected the real requester's Person %s (not the supplied %s), got %s", requesterPerson, bogusPerson, gotPerson)
+		}
+	})
+
+	t.Run("grantee_scope grantee_person_id", func(t *testing.T) {
+		tenantID := createTestTenant(t, pool)
+		requester := cgStaff(t, pool, tenantID, "tenant_admin")
+		finance := cgStaff(t, pool, tenantID, "finance")
+
+		var financePerson uuid.UUID
+		if err := pool.WithTenant(ctx, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+			return tx.QueryRow(ctx, `SELECT person_id FROM staff_users WHERE id = $1`, finance).Scan(&financePerson)
+		}); err != nil {
+			t.Fatalf("lookup grantee person: %v", err)
+		}
+
+		bogusPerson := uuid.New()
+		var requestID uuid.UUID
+		if err := pool.WithPrincipalScope(ctx, tenantID, requester, func(ctx context.Context, tx pgx.Tx) error {
+			return tx.QueryRow(ctx, `
+				INSERT INTO staff_capability_grant_requests
+					(tenant_id, grantee_staff_id, capability, valid_from, reason_code,
+					 grantee_scope, grantee_person_id)
+				VALUES ($1, $2, $3, now(), 'test', 'platform', $4)
+				RETURNING id`,
+				tenantID, finance, string(capability.CapabilityLedgerAdjustmentInitiate), bogusPerson,
+			).Scan(&requestID)
+		}); err != nil {
+			t.Fatalf("insert with bogus forced columns: %v", err)
+		}
+
+		var gotScope string
+		var gotPerson uuid.UUID
+		if err := pool.WithPrincipalScope(ctx, tenantID, requester, func(ctx context.Context, tx pgx.Tx) error {
+			return tx.QueryRow(ctx,
+				`SELECT grantee_scope, grantee_person_id FROM staff_capability_grant_requests WHERE id = $1`,
+				requestID).Scan(&gotScope, &gotPerson)
+		}); err != nil {
+			t.Fatalf("read back: %v", err)
+		}
+		if gotScope != "tenant" {
+			t.Fatalf("grantee_scope: expected 'tenant' (not the supplied 'platform'), got %q", gotScope)
+		}
+		if gotPerson != financePerson {
+			t.Fatalf("grantee_person_id (MF-b): expected the real grantee's Person %s (not the supplied %s), got %s", financePerson, bogusPerson, gotPerson)
+		}
+	})
+
+	t.Run("decided_by decided_by_scope decided_by_person_id decided_txid", func(t *testing.T) {
+		tenantID := createTestTenant(t, pool)
+		requester := cgStaff(t, pool, tenantID, "tenant_admin")
+		finance := cgStaff(t, pool, tenantID, "finance")
+		approver := cgStaff(t, pool, uuid.Nil, "platform_admin")
+
+		var approverPerson uuid.UUID
+		if err := pool.WithoutTenant(ctx, func(ctx context.Context, tx pgx.Tx) error {
+			return tx.QueryRow(ctx, `SELECT person_id FROM staff_users WHERE id = $1`, approver).Scan(&approverPerson)
+		}); err != nil {
+			t.Fatalf("lookup approver person: %v", err)
+		}
+
+		var requestID uuid.UUID
+		if err := pool.WithPrincipalScope(ctx, tenantID, requester, func(ctx context.Context, tx pgx.Tx) error {
+			req, err := capability.CreateRequest(ctx, tx, tenantID, capability.NewRequestInput{
+				GranteeStaffID: finance, Capability: capability.CapabilityLedgerAdjustmentInitiate,
+				ValidFrom: time.Now(), ReasonCode: "test",
+			})
+			requestID = req.ID
+			return err
+		}); err != nil {
+			t.Fatalf("create request: %v", err)
+		}
+
+		bogusActor := uuid.New()
+		bogusPerson := uuid.New()
+		const bogusTxid = int64(1)
+		var approvalID uuid.UUID
+		if err := pool.WithPlatformAdmin(ctx, approver, func(ctx context.Context, tx pgx.Tx) error {
+			if err := tx.QueryRow(ctx, `
+				INSERT INTO staff_capability_grant_approvals
+					(request_id, decision, reason_code, decided_by, decided_by_scope, decided_by_person_id, decided_txid)
+				VALUES ($1, 'approve', 'test', $2, 'platform', $3, $4)
+				RETURNING id`,
+				requestID, bogusActor, bogusPerson, bogusTxid,
+			).Scan(&approvalID); err != nil {
+				return err
+			}
+			_, err := tx.Exec(ctx, `INSERT INTO staff_capability_grants (request_id, approval_id) VALUES ($1, $2)`, requestID, approvalID)
+			return err
+		}); err != nil {
+			t.Fatalf("insert approval+grant with bogus forced columns: %v", err)
+		}
+
+		var gotBy uuid.UUID
+		var gotScope string
+		var gotPerson uuid.UUID
+		var gotTxid int64
+		if err := pool.WithPlatformAdmin(ctx, approver, func(ctx context.Context, tx pgx.Tx) error {
+			return tx.QueryRow(ctx,
+				`SELECT decided_by, decided_by_scope, decided_by_person_id, decided_txid FROM staff_capability_grant_approvals WHERE id = $1`,
+				approvalID).Scan(&gotBy, &gotScope, &gotPerson, &gotTxid)
+		}); err != nil {
+			t.Fatalf("read back: %v", err)
+		}
+		if gotBy != approver {
+			t.Fatalf("decided_by: expected the real approver %s (not the supplied %s), got %s", approver, bogusActor, gotBy)
+		}
+		if gotScope != "platform" {
+			t.Fatalf("decided_by_scope: expected 'platform', got %q", gotScope)
+		}
+		if gotPerson != approverPerson {
+			t.Fatalf("decided_by_person_id: expected the real approver's Person %s (not the supplied %s), got %s", approverPerson, bogusPerson, gotPerson)
+		}
+		if gotTxid == bogusTxid {
+			t.Fatalf("decided_txid: expected the real txid_current() (not the supplied bogus %d), got %d", bogusTxid, gotTxid)
+		}
+	})
+
+	t.Run("revoked_by revoked_by_scope", func(t *testing.T) {
+		f := mustBuildActingGrantFixtureWithCapability(t, pool, capability.CapabilityLedgerAdjustmentInitiate)
+
+		bogusActor := uuid.New()
+		if err := pool.WithPlatformAdmin(ctx, f.ApproverID, func(ctx context.Context, tx pgx.Tx) error {
+			_, err := tx.Exec(ctx, `
+				UPDATE staff_capability_grants
+				   SET revoked_at = now(), revoked_by = $2, revoked_by_scope = 'tenant', revoke_reason_code = 'test'
+				 WHERE id = $1`, f.GrantID, bogusActor)
+			return err
+		}); err != nil {
+			t.Fatalf("revoke with bogus forced columns: %v", err)
+		}
+
+		var gotBy uuid.UUID
+		var gotScope string
+		if err := pool.WithPlatformAdmin(ctx, f.ApproverID, func(ctx context.Context, tx pgx.Tx) error {
+			return tx.QueryRow(ctx,
+				`SELECT revoked_by, revoked_by_scope FROM staff_capability_grants WHERE id = $1`, f.GrantID,
+			).Scan(&gotBy, &gotScope)
+		}); err != nil {
+			t.Fatalf("read back: %v", err)
+		}
+		if gotBy != f.ApproverID {
+			t.Fatalf("revoked_by: expected the real revoker %s (not the supplied %s), got %s", f.ApproverID, bogusActor, gotBy)
+		}
+		if gotScope != "platform" {
+			t.Fatalf("revoked_by_scope: expected 'platform' (the real session's scope, not the supplied 'tenant'), got %q", gotScope)
+		}
+	})
+}
+
+// TestCapabilityGrant_F9_PerCommandPoliciesAndServiceExclusion (K1-C2 /
+// F-9): a pg_policies catalogue pin that staff_capability_grant_requests,
+// staff_capability_grant_approvals and staff_capability_grants each carry
+// only per-command policies (never FOR ALL / cmd = '*'), and that every
+// one of those policies' USING/WITH CHECK clauses references
+// app.platform_service_id (the arm K1-C2 found missing). Also proves at
+// runtime that a mixed platform_admin + platform_service session (a shape
+// that should never occur in practice, but which the GUCs alone do not
+// forbid) sees zero rows on both staff_capability_grants and
+// staff_capability_grant_approvals, even though real rows exist.
+func TestCapabilityGrant_F9_PerCommandPoliciesAndServiceExclusion(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+
+	tables := []string{
+		"staff_capability_grant_requests",
+		"staff_capability_grant_approvals",
+		"staff_capability_grants",
+	}
+	for _, tbl := range tables {
+		t.Run(tbl, func(t *testing.T) {
+			type policyRow struct {
+				name      string
+				cmd       string
+				qual      string
+				withCheck string
+			}
+			var rows []policyRow
+			if err := pool.WithoutTenant(ctx, func(ctx context.Context, tx pgx.Tx) error {
+				r, err := tx.Query(ctx, `
+					SELECT policyname, cmd, COALESCE(qual, ''), COALESCE(with_check, '')
+					  FROM pg_policies WHERE tablename = $1`, tbl)
+				if err != nil {
+					return err
+				}
+				defer r.Close()
+				for r.Next() {
+					var pr policyRow
+					if err := r.Scan(&pr.name, &pr.cmd, &pr.qual, &pr.withCheck); err != nil {
+						return err
+					}
+					rows = append(rows, pr)
+				}
+				return r.Err()
+			}); err != nil {
+				t.Fatalf("query pg_policies for %s: %v", tbl, err)
+			}
+			if len(rows) == 0 {
+				t.Fatalf("expected at least one policy on %s", tbl)
+			}
+			for _, pr := range rows {
+				if pr.cmd == "ALL" || pr.cmd == "*" {
+					t.Fatalf("policy %q on %s is FOR ALL (cmd=%q); ADR 0099 §10 forbids any FOR ALL permissive policy on this table", pr.name, tbl, pr.cmd)
+				}
+				// Every T/P scope predicate (not the acting/reference
+				// policies, which have their own, GUC-only, recursion-exempt
+				// shape and are exempt from the T/P scope-predicate rule)
+				// must exclude app.platform_service_id.
+				if strings.HasPrefix(pr.name, "tenant_scope_") || strings.HasPrefix(pr.name, "platform_scope_") {
+					combined := pr.qual + pr.withCheck
+					if !strings.Contains(combined, "platform_service_id") {
+						t.Fatalf("policy %q on %s: expected its predicate to reference app.platform_service_id (K1-C2), got qual=%q with_check=%q", pr.name, tbl, pr.qual, pr.withCheck)
+					}
+				}
+			}
+		})
+	}
+
+	t.Run("mixed platform_admin+platform_service session sees 0 rows", func(t *testing.T) {
+		f := mustBuildActingGrantFixtureWithCapability(t, pool, capability.CapabilityLedgerAdjustmentInitiate)
+
+		var grantCount, approvalCount int
+		if err := pool.WithoutTenant(ctx, func(ctx context.Context, tx pgx.Tx) error {
+			if _, err := tx.Exec(ctx, `SELECT set_config('app.platform_admin_principal_id', $1, true)`, f.ApproverID.String()); err != nil {
+				return err
+			}
+			if _, err := tx.Exec(ctx, `SELECT set_config('app.platform_service_id', $1, true)`, "some-worker"); err != nil {
+				return err
+			}
+			if err := tx.QueryRow(ctx, `SELECT count(*) FROM staff_capability_grants`).Scan(&grantCount); err != nil {
+				return err
+			}
+			return tx.QueryRow(ctx, `SELECT count(*) FROM staff_capability_grant_approvals`).Scan(&approvalCount)
+		}); err != nil {
+			t.Fatalf("mixed-session query: %v", err)
+		}
+		if grantCount != 0 {
+			t.Fatalf("expected 0 grant rows visible to a mixed platform_admin+platform_service session, got %d", grantCount)
+		}
+		if approvalCount != 0 {
+			t.Fatalf("expected 0 approval rows visible to a mixed platform_admin+platform_service session, got %d", approvalCount)
+		}
+	})
+}
+
+// TestCapabilityGrant_I4_Migration0034DependencyPinned (architect ruling,
+// I-4): the grantee_person_id snapshot (§7.5 of ADR 0099) is sound only
+// because migration 0034's staff_users_person_id_append_only trigger makes
+// a staff row's non-NULL person_id immutable. This pins that: after a
+// grant request exists naming a grantee, an attempt to change that
+// grantee's person_id to a DIFFERENT, non-NULL value must be refused.
+//
+// The second half proves the pin is REAL, not vacuous: on a throwaway
+// scratch database (never the shared/private one this file's other tests
+// use), the 0034 trigger is dropped directly (no migration file is
+// edited), and the exact same attempt is shown to SUCCEED - i.e. this
+// test's own assertion would fail without migration 0034's trigger,
+// confirming the dependency is load-bearing, not merely assumed.
+func TestCapabilityGrant_I4_Migration0034DependencyPinned(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+	tenantID := createTestTenant(t, pool)
+	requester := cgStaff(t, pool, tenantID, "tenant_admin")
+	finance := cgStaff(t, pool, tenantID, "finance")
+
+	if err := pool.WithPrincipalScope(ctx, tenantID, requester, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := capability.CreateRequest(ctx, tx, tenantID, capability.NewRequestInput{
+			GranteeStaffID: finance, Capability: capability.CapabilityLedgerAdjustmentInitiate,
+			ValidFrom: time.Now(), ReasonCode: "test",
+		})
+		return err
+	}); err != nil {
+		t.Fatalf("create request: %v", err)
+	}
+
+	newPerson := uuid.New()
+	if err := pool.WithoutTenant(ctx, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `INSERT INTO persons (id) VALUES ($1)`, newPerson)
+		return err
+	}); err != nil {
+		t.Fatalf("insert replacement person fixture: %v", err)
+	}
+
+	err := pool.WithTenant(ctx, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `UPDATE staff_users SET person_id = $1 WHERE id = $2`, newPerson, finance)
+		return err
+	})
+	if err == nil {
+		t.Fatal("expected re-linking the grantee's non-NULL person_id to a different Person to be refused (migration 0034's append-only trigger)")
+	}
+}
+
+// TestCapabilityGrant_I4_FailsWithoutMigration0034Trigger is the required
+// negative control (I-4): on a throwaway scratch database, drop migration
+// 0034's staff_users_person_id_append_only trigger directly (no migration
+// file is edited - the trigger is simply dropped after a normal full
+// migrate-up), and show the SAME re-link attempt as above now succeeds -
+// proving TestCapabilityGrant_I4_Migration0034DependencyPinned's refusal
+// really does depend on that trigger, not on some other, incidental
+// control.
+func TestCapabilityGrant_I4_FailsWithoutMigration0034Trigger(t *testing.T) {
+	url := scratchdb.New(t, "cg_i4_")
+	pool, err := Connect(context.Background(), url, 5, 5_000_000_000)
+	if err != nil {
+		t.Fatalf("connect scratch: %v", err)
+	}
+	defer pool.Close()
+	ctx := context.Background()
+	if _, err := pool.MigrateUp(ctx, "../../migrations"); err != nil {
+		t.Fatalf("migrate scratch up: %v", err)
+	}
+
+	if err := pool.WithoutTenant(ctx, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `DROP TRIGGER staff_users_person_id_append_only ON staff_users`)
+		return err
+	}); err != nil {
+		t.Fatalf("drop migration 0034's trigger: %v", err)
+	}
+
+	tenantID := createTestTenant(t, pool)
+	requester := cgStaff(t, pool, tenantID, "tenant_admin")
+	finance := cgStaff(t, pool, tenantID, "finance")
+	if err := pool.WithPrincipalScope(ctx, tenantID, requester, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := capability.CreateRequest(ctx, tx, tenantID, capability.NewRequestInput{
+			GranteeStaffID: finance, Capability: capability.CapabilityLedgerAdjustmentInitiate,
+			ValidFrom: time.Now(), ReasonCode: "test",
+		})
+		return err
+	}); err != nil {
+		t.Fatalf("create request: %v", err)
+	}
+
+	newPerson := uuid.New()
+	if err := pool.WithoutTenant(ctx, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `INSERT INTO persons (id) VALUES ($1)`, newPerson)
+		return err
+	}); err != nil {
+		t.Fatalf("insert replacement person fixture: %v", err)
+	}
+
+	err = pool.WithTenant(ctx, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `UPDATE staff_users SET person_id = $1 WHERE id = $2`, newPerson, finance)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("expected the re-link to SUCCEED once migration 0034's trigger is gone (proving the dependency is real), got refused: %v", err)
 	}
 }

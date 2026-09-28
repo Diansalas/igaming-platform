@@ -94,3 +94,31 @@ needed.
 Operational PostgreSQL is never queried directly for reports. Change data
 capture (Debezium) feeds the event bus, which feeds ClickHouse (Blueprint
 §4.9, §7) — see `12-audit-reporting-architecture.md`.
+
+## PRH-2 K1 — scoped financial capability grants (migration 0112, ADR 0099)
+
+A worked example of "RLS, not application discipline" at a finer grain than
+plain tenant isolation: `docs/decisions/0099-scoped-financial-capability-grants.md`
+is authoritative; this is a pointer.
+
+- Three new tables (`staff_capability_grant_requests`,
+  `staff_capability_grant_approvals`, `staff_capability_grants`) plus three
+  reference tables, all `FORCE ROW LEVEL SECURITY`, no `FOR ALL` permissive
+  policy anywhere (every policy is per-command: SELECT/INSERT/UPDATE
+  split out individually), and DELETE/TRUNCATE refused by trigger — the
+  same append-only discipline as the ledger, applied to an authorization
+  record rather than a money record.
+- Introduces a fourth session shape beyond plain tenant/platform: **"a
+  platform principal acting in tenant X"** (two GUCs,
+  `app.acting_tenant_id`/`app.acting_platform_principal_id`, set by exactly
+  one function, `internal/db/tenant_rls.go`'s `WithPlatformActingInTenant`).
+  A restrictive fence denies that session shape almost everything on seven
+  pre-existing tables (`staff_users`, `audit_log`, `sessions`,
+  `login_attempts`, `persons`, `player_restrictions`, `risk_rules`) by
+  default — the opposite of the usual pattern where a new session shape is
+  additive; here it is subtractive by default, opened only where named.
+- Every forced actor column (`requested_by`, `decided_by`, `revoked_by`,
+  and their `_scope`/`_person_id` siblings) is written by a `BEFORE`
+  trigger from the DB session's own resolved identity, never trusted from
+  the inserted row - the same "forced from the session, not the payload"
+  discipline the ledger's own actor columns use.

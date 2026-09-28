@@ -129,21 +129,22 @@ func TestMigration0112_A17_UpDownRefusesWithRowsThenCleanBaseline(t *testing.T) 
 		}
 	}
 
-	// Down refuses while a row exists in any of the three new tables.
+	// Down refuses while a row exists in any of the three new tables
+	// (F-11: exactly CG099, not merely "some error").
 	f := mustBuildActingGrantFixtureWithCapability(t, pool, capability.CapabilityLedgerAdjustmentInitiate)
-	if _, err := pool.MigrateDown(ctx, migDir, 1); err == nil {
-		t.Fatal("expected migration 0112's down to refuse while grant rows exist")
+	if _, err := pool.MigrateDown(ctx, migDir, 1); !cgIsCode(err, "CG099") {
+		t.Fatalf("expected migration 0112's down to refuse with exactly CG099 while grant rows exist, got %v", err)
 	}
 
 	// Revoke the grant - the row still EXISTS (revoke is not delete), so
-	// down must still refuse.
+	// down must still refuse, still with exactly CG099.
 	if err := pool.WithPlatformAdmin(ctx, f.ApproverID, func(ctx context.Context, tx pgx.Tx) error {
 		return capability.RevokeGrant(ctx, tx, f.TenantID, f.GrantID, "cleanup")
 	}); err != nil {
 		t.Fatalf("revoke: %v", err)
 	}
-	if _, err := pool.MigrateDown(ctx, migDir, 1); err == nil {
-		t.Fatal("expected migration 0112's down to still refuse - a revoked grant row still exists")
+	if _, err := pool.MigrateDown(ctx, migDir, 1); !cgIsCode(err, "CG099") {
+		t.Fatalf("expected migration 0112's down to still refuse with exactly CG099 - a revoked grant row still exists, got %v", err)
 	}
 }
 

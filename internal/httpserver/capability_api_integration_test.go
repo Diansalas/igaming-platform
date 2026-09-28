@@ -218,6 +218,52 @@ func (a *cgAPI) successAuditCount(action string) int {
 	return n
 }
 
+// cgAuditRow is the full audit_log content A-12 needs: not just that a row
+// exists, but its tenant presentation (HD-PRH2-5) and metadata content.
+type cgAuditRow struct {
+	TenantID        *uuid.UUID
+	SubjectTenantID *uuid.UUID
+	Metadata        map[string]any
+}
+
+// latestAuditRow reads the most recent success row for action. audit_log's
+// own RLS (dual_scope_isolation, plus subject_tenant_read) means a
+// TENANT-session row (tenant_id = a real tenant) is only ever visible to a
+// session with that same app.tenant_id set, and a PLATFORM-session row
+// (tenant_id NULL) is visible to a session with app.tenant_id unset - so
+// this dispatches on scope: readAsTenantID == uuid.Nil reads via
+// WithoutTenant (for platform-session rows), otherwise via
+// WithTenant(readAsTenantID) (for tenant-session rows). This is a pure
+// test-assertion helper, never how a real caller reads audit_log.
+func (a *cgAPI) latestAuditRow(readAsTenantID uuid.UUID, action string) cgAuditRow {
+	a.t.Helper()
+	var row cgAuditRow
+	var metaRaw []byte
+	query := func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `
+			SELECT tenant_id, subject_tenant_id, metadata
+			  FROM audit_log
+			 WHERE action = $1 AND outcome = 'success'
+			 ORDER BY created_at DESC, id DESC
+			 LIMIT 1`, action).Scan(&row.TenantID, &row.SubjectTenantID, &metaRaw)
+	}
+	var err error
+	if readAsTenantID == uuid.Nil {
+		err = a.pool.WithoutTenant(context.Background(), query)
+	} else {
+		err = a.pool.WithTenant(context.Background(), readAsTenantID, query)
+	}
+	if err != nil {
+		a.t.Fatalf("read latest audit row for %s: %v", action, err)
+	}
+	if len(metaRaw) > 0 {
+		if err := json.Unmarshal(metaRaw, &row.Metadata); err != nil {
+			a.t.Fatalf("decode audit metadata for %s: %v", action, err)
+		}
+	}
+	return row
+}
+
 // --- I-1: G-P1 fail-closed, legible error, zero side effects ---
 
 func TestCapabilityAPI_I1_PlatformSessionCannotRequestForTenantGrantee(t *testing.T) {
@@ -515,5 +561,193 @@ func TestCapabilityAPI_K1C1_PlatformPathTenantMismatchGives404(t *testing.T) {
 	resp.decode(t, &grantList)
 	if len(grantList) != 0 {
 		t.Fatalf("expected zero grants listed under tenant A's path, got %d", len(grantList))
+	}
+}
+
+// TestCapabilityAPI_A12_AuditContent (F-7/A-12): the lifecycle audit rows
+// for request, approve, reject, cancel and revoke each carry the grantee,
+// the capability, the reason code, a before/after status, the correct
+// action name (in particular "capability_grant.rejected", not the
+// "capability_grant.rejectd" bug), and the HD-PRH2-5 tenant presentation:
+// a TENANT-session action audits with tenant_id = its own tenant and
+// subject_tenant_id NULL; a PLATFORM-session action audits with
+// tenant_id NULL and subject_tenant_id = the target tenant.
+//
+// grant.reattested is NOT covered here: ADR 0099 §8.3 places the
+// re-attestation table/view/alert under STAFF-LIFECYCLE-1, not K1 - it is
+// out of K1 scope, so there is no such audit action to test yet.
+func TestCapabilityAPI_A12_AuditContent(t *testing.T) {
+	a := newCGAPI(t)
+	tenantID := a.tenant()
+	tenantAdmin := a.staff(tenantID, "tenant_admin")
+	financeA := a.staff(tenantID, "finance")
+	financeB := a.staff(tenantID, "finance")
+	platformPrincipal := a.staff(uuid.Nil, "platform_admin")
+	tenantTok := a.token(tenantAdmin, tenantID, auth.RoleTenantAdmin)
+	platformTok := a.token(platformPrincipal, uuid.Nil, auth.RolePlatformAdmin)
+	base := "/v1/admin/tenants/" + tenantID.String() + "/capability-grants"
+
+	// --- request (tenant session) ---
+	resp := a.do(http.MethodPost, base+"/requests", tenantTok, map[string]any{
+		"grantee_staff_id": financeA.String(), "capability": "ledger_adjustment:initiate", "reason_code": "req-reason",
+	})
+	if resp.status != http.StatusCreated {
+		t.Fatalf("request: expected 201, got %d: %s", resp.status, resp.body)
+	}
+	var created struct {
+		ID string `json:"id"`
+	}
+	resp.decode(t, &created)
+	requestID := created.ID
+
+	reqRow := a.latestAuditRow(tenantID, "capability_grant.requested")
+	if reqRow.TenantID == nil || *reqRow.TenantID != tenantID {
+		t.Fatalf("request audit: expected tenant_id=%s (tenant session, HD-PRH2-5), got %v", tenantID, reqRow.TenantID)
+	}
+	if reqRow.SubjectTenantID != nil {
+		t.Fatalf("request audit: expected subject_tenant_id NULL for a tenant session, got %v", *reqRow.SubjectTenantID)
+	}
+	if got := reqRow.Metadata["grantee_staff_id"]; got != financeA.String() {
+		t.Fatalf("request audit: expected grantee_staff_id=%s, got %v", financeA, got)
+	}
+	if got := reqRow.Metadata["capability"]; got != "ledger_adjustment:initiate" {
+		t.Fatalf("request audit: expected capability=ledger_adjustment:initiate, got %v", got)
+	}
+
+	// --- approve (platform session) ---
+	resp = a.do(http.MethodPost, base+"/requests/"+requestID+"/approve", platformTok, map[string]any{"reason_code": "approve-reason"})
+	if resp.status != http.StatusOK {
+		t.Fatalf("approve: expected 200, got %d: %s", resp.status, resp.body)
+	}
+	var grant struct {
+		ID string `json:"id"`
+	}
+	resp.decode(t, &grant)
+
+	appRow := a.latestAuditRow(uuid.Nil, "capability_grant.approved")
+	if appRow.TenantID != nil {
+		t.Fatalf("approve audit: expected tenant_id NULL for a platform session, got %v", *appRow.TenantID)
+	}
+	if appRow.SubjectTenantID == nil || *appRow.SubjectTenantID != tenantID {
+		t.Fatalf("approve audit: expected subject_tenant_id=%s (HD-PRH2-5 platform presentation), got %v", tenantID, appRow.SubjectTenantID)
+	}
+	if got := appRow.Metadata["grantee_staff_id"]; got != financeA.String() {
+		t.Fatalf("approve audit: expected grantee_staff_id=%s, got %v", financeA, got)
+	}
+	if got := appRow.Metadata["capability"]; got != "ledger_adjustment:initiate" {
+		t.Fatalf("approve audit: expected capability, got %v", got)
+	}
+	if got := appRow.Metadata["reason_code"]; got != "approve-reason" {
+		t.Fatalf("approve audit: expected reason_code=approve-reason, got %v", got)
+	}
+	if got := appRow.Metadata["before_status"]; got != "pending" {
+		t.Fatalf("approve audit: expected before_status=pending, got %v", got)
+	}
+	if got := appRow.Metadata["after_status"]; got != "approved" {
+		t.Fatalf("approve audit: expected after_status=approved, got %v", got)
+	}
+	if got := appRow.Metadata["grant_id"]; got != grant.ID {
+		t.Fatalf("approve audit: expected grant_id=%s, got %v", grant.ID, got)
+	}
+
+	// --- reject (platform session, a second request/grantee) ---
+	resp = a.do(http.MethodPost, base+"/requests", tenantTok, map[string]any{
+		"grantee_staff_id": financeB.String(), "capability": "ledger_adjustment:initiate", "reason_code": "req-reason-2",
+	})
+	if resp.status != http.StatusCreated {
+		t.Fatalf("second request: expected 201, got %d: %s", resp.status, resp.body)
+	}
+	resp.decode(t, &created)
+	secondRequestID := created.ID
+
+	resp = a.do(http.MethodPost, base+"/requests/"+secondRequestID+"/reject", platformTok, map[string]any{"reason_code": "reject-reason"})
+	if resp.status != http.StatusNoContent {
+		t.Fatalf("reject: expected 204, got %d: %s", resp.status, resp.body)
+	}
+	// The exact action name (F-7's "capability_grant.rejectd" bugfix).
+	rejRow := a.latestAuditRow(uuid.Nil, "capability_grant.rejected")
+	if rejRow.TenantID != nil {
+		t.Fatalf("reject audit: expected tenant_id NULL for a platform session, got %v", *rejRow.TenantID)
+	}
+	if rejRow.SubjectTenantID == nil || *rejRow.SubjectTenantID != tenantID {
+		t.Fatalf("reject audit: expected subject_tenant_id=%s, got %v", tenantID, rejRow.SubjectTenantID)
+	}
+	if got := rejRow.Metadata["grantee_staff_id"]; got != financeB.String() {
+		t.Fatalf("reject audit: expected grantee_staff_id=%s, got %v", financeB, got)
+	}
+	if got := rejRow.Metadata["reason_code"]; got != "reject-reason" {
+		t.Fatalf("reject audit: expected reason_code=reject-reason, got %v", got)
+	}
+	if got := rejRow.Metadata["before_status"]; got != "pending" {
+		t.Fatalf("reject audit: expected before_status=pending, got %v", got)
+	}
+	if got := rejRow.Metadata["after_status"]; got != "rejected" {
+		t.Fatalf("reject audit: expected after_status=rejected, got %v", got)
+	}
+	// A rejectd (typo) action must never have been written.
+	if n := a.successAuditCount("capability_grant.rejectd"); n != 0 {
+		t.Fatalf("expected zero rows for the old typo'd action name, got %d", n)
+	}
+
+	// --- cancel (tenant session, a third request) ---
+	resp = a.do(http.MethodPost, base+"/requests", tenantTok, map[string]any{
+		"grantee_staff_id": financeB.String(), "capability": "payment_force_resolve:request", "reason_code": "req-reason-3",
+	})
+	if resp.status != http.StatusCreated {
+		t.Fatalf("third request: expected 201, got %d: %s", resp.status, resp.body)
+	}
+	resp.decode(t, &created)
+	thirdRequestID := created.ID
+
+	resp = a.do(http.MethodPost, base+"/requests/"+thirdRequestID+"/cancel", tenantTok, nil)
+	if resp.status != http.StatusNoContent {
+		t.Fatalf("cancel: expected 204, got %d: %s", resp.status, resp.body)
+	}
+	cxlRow := a.latestAuditRow(tenantID, "capability_grant.cancelled")
+	if cxlRow.TenantID == nil || *cxlRow.TenantID != tenantID {
+		t.Fatalf("cancel audit: expected tenant_id=%s (tenant session), got %v", tenantID, cxlRow.TenantID)
+	}
+	if cxlRow.SubjectTenantID != nil {
+		t.Fatalf("cancel audit: expected subject_tenant_id NULL for a tenant session, got %v", *cxlRow.SubjectTenantID)
+	}
+	if got := cxlRow.Metadata["grantee_staff_id"]; got != financeB.String() {
+		t.Fatalf("cancel audit: expected grantee_staff_id=%s, got %v", financeB, got)
+	}
+	if got := cxlRow.Metadata["capability"]; got != "payment_force_resolve:request" {
+		t.Fatalf("cancel audit: expected capability, got %v", got)
+	}
+	if got := cxlRow.Metadata["before_status"]; got != "pending" {
+		t.Fatalf("cancel audit: expected before_status=pending, got %v", got)
+	}
+	if got := cxlRow.Metadata["after_status"]; got != "cancelled" {
+		t.Fatalf("cancel audit: expected after_status=cancelled, got %v", got)
+	}
+
+	// --- revoke (platform session, the grant approved above) ---
+	resp = a.do(http.MethodPost, base+"/"+grant.ID+"/revoke", platformTok, map[string]any{"reason_code": "revoke-reason"})
+	if resp.status != http.StatusNoContent {
+		t.Fatalf("revoke: expected 204, got %d: %s", resp.status, resp.body)
+	}
+	revRow := a.latestAuditRow(uuid.Nil, "capability_grant.revoked")
+	if revRow.TenantID != nil {
+		t.Fatalf("revoke audit: expected tenant_id NULL for a platform session, got %v", *revRow.TenantID)
+	}
+	if revRow.SubjectTenantID == nil || *revRow.SubjectTenantID != tenantID {
+		t.Fatalf("revoke audit: expected subject_tenant_id=%s, got %v", tenantID, revRow.SubjectTenantID)
+	}
+	if got := revRow.Metadata["grantee_staff_id"]; got != financeA.String() {
+		t.Fatalf("revoke audit: expected grantee_staff_id=%s, got %v", financeA, got)
+	}
+	if got := revRow.Metadata["capability"]; got != "ledger_adjustment:initiate" {
+		t.Fatalf("revoke audit: expected capability, got %v", got)
+	}
+	if got := revRow.Metadata["reason_code"]; got != "revoke-reason" {
+		t.Fatalf("revoke audit: expected reason_code=revoke-reason, got %v", got)
+	}
+	if got := revRow.Metadata["before_revoked_at"]; got != "null" {
+		t.Fatalf("revoke audit: expected before_revoked_at=null, got %v", got)
+	}
+	if got := revRow.Metadata["after_revoked_at"]; got != "set" {
+		t.Fatalf("revoke audit: expected after_revoked_at=set, got %v", got)
 	}
 }

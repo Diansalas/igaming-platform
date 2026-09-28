@@ -76,7 +76,20 @@ func a14bWalk(root string, visit func(path string, src []byte) error) error {
 	})
 }
 
-var a14bPlatformAdminRef = regexp.MustCompile(`StaffRolePlatformAdmin\b`)
+// A-14b (F-11, widened): the guard's original form only caught the Go
+// constant identity.StaffRolePlatformAdmin. It now also catches the raw
+// SQL string literal 'platform_admin' (a hand-written INSERT could name
+// the role that way without ever touching the constant) and the
+// auth.RolePlatformAdmin Role constant (auth.Role and identity's own role
+// string share the same underlying value, and a caller could build an
+// INSERT off of auth.RolePlatformAdmin just as easily as off of
+// identity.StaffRolePlatformAdmin). Both widenings currently match ZERO
+// additional non-test, non-allow-listed files (verified: only
+// internal/providercred/providercredtest, already allow-listed, uses the
+// 'platform_admin' literal; nothing outside _test.go files references
+// auth.RolePlatformAdmin with that package-qualified spelling), so no new
+// allow-list entries were needed to land this widening.
+var a14bPlatformAdminRef = regexp.MustCompile(`StaffRolePlatformAdmin\b|'platform_admin'|auth\.RolePlatformAdmin\b`)
 
 func TestA14b_OnlySeedAdminReferencesPlatformAdminRole(t *testing.T) {
 	root := a14bRepoRoot(t)
@@ -132,5 +145,39 @@ func f() { _ = identity.StaffRoleTenantAdmin }
 `)
 	if a14bPlatformAdminRef.Match(safe) {
 		t.Fatal("an unrelated role constant was falsely flagged")
+	}
+}
+
+// TestA14b_GuardCatchesPlantedSQLLiteralAndAuthRoleConstant (F-11,
+// widened negative controls): a hand-written SQL string literal and a
+// package-qualified auth.RolePlatformAdmin reference are each caught too,
+// and an unrelated literal/constant is not falsely flagged.
+func TestA14b_GuardCatchesPlantedSQLLiteralAndAuthRoleConstant(t *testing.T) {
+	plantedSQL := []byte(`package x
+func f(tx Tx) { tx.Exec("INSERT INTO staff_users (role) VALUES ('platform_admin')") }
+`)
+	if !a14bPlatformAdminRef.Match(plantedSQL) {
+		t.Fatal("planted SQL literal 'platform_admin' was not detected")
+	}
+
+	plantedAuthRole := []byte(`package x
+func f() { _ = auth.RolePlatformAdmin }
+`)
+	if !a14bPlatformAdminRef.Match(plantedAuthRole) {
+		t.Fatal("planted auth.RolePlatformAdmin reference was not detected")
+	}
+
+	safeSQL := []byte(`package x
+func f(tx Tx) { tx.Exec("INSERT INTO staff_users (role) VALUES ('tenant_admin')") }
+`)
+	if a14bPlatformAdminRef.Match(safeSQL) {
+		t.Fatal("an unrelated SQL literal was falsely flagged")
+	}
+
+	safeAuthRole := []byte(`package x
+func f() { _ = auth.RoleTenantAdmin }
+`)
+	if a14bPlatformAdminRef.Match(safeAuthRole) {
+		t.Fatal("an unrelated auth.Role constant was falsely flagged")
 	}
 }

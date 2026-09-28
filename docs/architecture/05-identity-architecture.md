@@ -925,3 +925,39 @@ transition is consistent with the terminal-state handling every other
 disposition outcome already gets; the one open edge (late rollback of an
 already-resolved record) is `LF-10`'s to resolve, and I'll re-check its
 self-exclusion interaction once `LF-10` lands.
+
+## PRH-2 K1 — scoped financial capability grants (ADR 0099)
+
+`docs/decisions/0099-scoped-financial-capability-grants.md` is the source of
+truth; this section is a pointer into the identity model for it, not a
+restatement.
+
+- **A new Person-linked, time-bounded staff authority mechanism**, distinct
+  from the static `internal/auth` role → permission map. A `finance` staff
+  member or a `platform_admin` does not automatically hold any of the four
+  financial capabilities (`ledger_adjustment:initiate/approve`,
+  `payment_force_resolve:request/approve`) - each capability is *granted*,
+  per tenant, per staff principal, via a request/platform-co-approval flow
+  (`staff_capability_grant_requests` → `staff_capability_grant_approvals` →
+  `staff_capability_grants`), and can be revoked (a one-way, append-only
+  action) at any time.
+- **Three grant flows:** G-T (tenant-originated, for a tenant's own
+  `finance` staff), G-P2 (platform-originated, for a `platform_admin`
+  acting in a named tenant - the mechanism behind "platform principal
+  acting in tenant X", ADR §6). **G-P1** (platform-originated, for a
+  tenant's `finance` staff) is **DEFERRED out of PRH-2** by architect
+  ruling (2026-09-28, ADR §4.1) - it is not implemented and has no route.
+- **Identity invariants this depends on:** every grant request/approval
+  requires three *distinct, non-NULL* Persons (requester, approver,
+  grantee) - the sock-puppet defense, since one Person can hold multiple
+  staff principals across tenants (§9's own identity caveat). This is why
+  ADR 0099 forces and snapshots `grantee_person_id` at request time, and
+  why it depends on migration 0034's `person_id` append-only trigger
+  (once a staff row's Person is linked, it cannot be silently re-pointed
+  at a different Person to defeat that check).
+- **STAFF-LIFECYCLE-1 dependency (open):** this identity doc's own staff
+  lifecycle model does not yet have a suspend/role-change/Person-unlink
+  path that also cancels pending grant requests and revokes grants in the
+  same transaction (ADR 0099 §8.4, security ruling S-b). Until
+  STAFF-LIFECYCLE-1 exists, a suspended grantee only stops counting at the
+  next request/approval/execution-time check (ADR §7), not immediately.
