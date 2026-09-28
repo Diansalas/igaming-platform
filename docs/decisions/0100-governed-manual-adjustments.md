@@ -3,7 +3,10 @@
 - **Status:** ACCEPTED (2026-09-28). `security` CONFIRMED WITH CONDITIONS and `ledger-finance`
   CONFIRMED WITH CONDITIONS, both on revision 2
   (`docs/plans/prh2-hardening-round/reviews/adr-0099-0101-{security,ledger-finance}-confirmation.md`).
-  The orchestrator wrote their conditions (LF K2-a, K2-b and K3-a; security C-2 and C-4) into this text. NOT IMPLEMENTED.
+  The orchestrator wrote their conditions (LF K2-a, K2-b and K3-a; security C-2 and C-4) into this text.
+  **Implementation (2026-09-28): see §20 - IMPLEMENTED on the unmerged K2 branch
+  (`prh2-k2-manual-adjustments`, migration 0113), NOT YET REVIEWED by `security` /
+  `code-reviewer` / `qa`.**
 - **Revision history:** PROPOSED — **revision 2** (`architect`, 2026-09-28). Revision 1
   (`d83a71c`) was reviewed ACCEPT WITH CONDITIONS by `product-owner-proxy`, `security` and
   `ledger-finance`. This revision applies every condition (§17). **`security` and `ledger-finance`
@@ -791,3 +794,129 @@ These bind K2. The sources are `reviews/k1-security.md`, `reviews/k1-ledger-fina
   - **K2-G4:** K2-P2..P4.
   - The "drop the grant function from one acting policy" mutant is mandatory for every acting policy K2 adds.
 
+## 20. Implementation status (PRH-2 K2, `ledger-finance` owner, branch `prh2-k2-manual-adjustments`)
+
+**Label: IMPLEMENTED (engineering, on the unmerged K2 branch) — NOT YET
+REVIEWED.** Every K2 deliverable in §3–§12 and the K1 follow-up gates of §19
+are built and tested; `security`, `code-reviewer` and `qa` review of this
+diff has not happened, and CLAUDE.md does not allow a security-sensitive
+financial control to be called complete before `security` reviews it. The
+items in §20.4 are explicitly NOT IMPLEMENTED or deferred.
+
+### 20.1 What exists
+
+- **§19 hard gates (committed first, `1f45882`):** K2-G1 (A-18 hardened:
+  positive guards only, `true` arms flagged, SELECT exposures accepted only
+  on the ADR 0099 §6.2 allowlist; planted cases for all three of security's
+  false negatives; a dynamic acting-session visibility probe over every
+  public table); K2-G2 (acting X sees 0 of Y's grants - M9 killed; a
+  rolled-back-DDL layered test AND a committed scratch variant through the
+  real setter - "widen acting to any tenant" killed); K2-G3 (suspended
+  grantee → CG020 - M10 killed). K2-G4: A-1/A-12 over HTTP for K2
+  (`internal/httpserver/manual_adjustment_api_integration_test.go`), the
+  §6.1 call-site AST pin (`TestK2P3_ActingSetterCallSitePinned`), use-time
+  re-checks each with a killed mutant (active, eligible role, tenant
+  unchanged - layered, live person = grant snapshot), and "lock the grant in
+  force at `now()`" (queued-future and expired unrevoked grants never count).
+- **Migration 0113** (`migrations/0113_governed_manual_adjustments.{up,down}.sql`):
+  §10.1–§10.9 in full, with the §20.3 decisions; SQLSTATE class `MA`.
+- **`internal/adjustment`**: `SubmitInTx`, `DecideInTx` (the final approval
+  executes in its own transaction, §6.5 steps 1–10, ADR 0082 A8 order),
+  `CancelInTx`, reads, policy-change propose/decide/cancel, the ONE
+  evaluator call (`EvaluateInTx`); the single `WithPlatformActingInTenant`
+  call site (`runSession`), principal from `tenant.FromContext(ctx).Subject`,
+  target from `NewTarget` (the canActOnTenant rule on the path value).
+- **HTTP** (`internal/httpserver/manual_adjustment_routes.go`, one line in
+  `routes.go`): submit/list/get/approve/reject/cancel under
+  `/v1/admin/tenants/{tenantID}/manual-adjustments`, policy changes under
+  `/v1/admin/financial-policy-changes` (platform-family rows) and
+  `/v1/admin/tenants/{tenantID}/financial-policy-changes` (tenant/brand rows,
+  profile assignments), `GET /v1/admin/financial-policies`. Static
+  permissions `ledger_adjustment:{initiate,approve,read}` (finance,
+  platform_admin; read also compliance) in `internal/auth/permission.go`
+  and `backoffice/src/auth/permissions.ts` (flags only - no backoffice page).
+- **Detector** `ledger_unlinked_manual_adjustment` in
+  `reconciliation.RunLedgerVsProjection` (already scheduled; `scheduler.go`
+  unchanged).
+- **Docs**: ADR 0082 Amendment A8 (applied; manual-adjustment order
+  IMPLEMENTED), ADR 0099 §20 (amendments pending security), the runbook §11,
+  `reconciliation-model.md` §2.1a, `ledger-accounting-model.md` §7.K2,
+  `financial-transaction-flows.md` §16a, `06-wallet-ledger-architecture.md`,
+  `security-architecture.md`, `deploy/init-app-role.sql`.
+
+### 20.2 Tests (all under `-race -tags integration`, local private DB - never labelled CI)
+
+B-1 … B-26 (B-18 inside B-25), plus: the acting-policy grant-function probes
+(24 policies), the layered execution-count tests (a bad approval planted past
+the insert guards is never counted: stale hash, initiator's Person,
+beneficiary, policy author, no grant, one Person twice), txid-not-xmin,
+K2-G4 scratch tests, B-19 whole-schema up/down/up equality, and every test
+asserts SUM(D) = SUM(C) and projection = recomputed (`assertInvariants`).
+Mutation results: `docs/plans/payment-readiness/evidence/prh2-k2-mutation-kill.txt`
+(68 mutants including K1's M9, M10 and "widen acting": 68 killed at their
+latest run. S32 survived its first run - a real layering gap, closed by
+`TestLayered_TightenOnlyEachLayerIndependently`; the run history is
+disclosed in the evidence file).
+
+### 20.3 Implementation decisions and deviations (disclosed)
+
+1. **Proposed policy rows are typed columns**, not a JSONB blob (the same
+   CHECKs then apply at proposal time); `content_hash` is DB-computed over a
+   length-prefixed canonical encoding.
+2. **A policy row is never back-dated:** `effective_from :=
+   GREATEST(proposed, now())` at approval, so past evaluations stay
+   reproducible. Unique per (key, effective_from).
+3. **Acting `ledger_accounts` INSERT** is limited to `player_cash` /
+   `manual_adjustment` (stricter than ADR 0099 §6.5's four types).
+4. **Three acting SELECT policies beyond ADR 0099 §6.5** (`licences` own,
+   `asset_authorizations`, `staff_capability_grant_requests`) and one
+   system-tenant read (`tenant_system_read_executed`, executed requests only,
+   for the §12 detector) - see ADR 0099 §20. **Pending security review.**
+5. **K2-b pin:** suspended = `NOT (assets.active AND
+   assets.platform_authorized)` OR no `asset_authorizations` row with
+   `scope_kind = 'tenant' AND product IS NULL AND eligible`. 0045 rows carry
+   no effective dating, so "not in force" = absent or `eligible = false`.
+6. **Compensation cap pin:** the causation's cap is the SUM of its
+   `player_cash` legs on this wallet in this asset (any direction).
+7. **The note** is validated in Go and by `ledger_adjustment_note_hash()`
+   (the INSERT computes `note_hash` through it). The DB cannot prove that the
+   note written to `audit_log` hashes to `note_hash` (acting sessions cannot
+   read `audit_log`); the executor writes both in one transaction.
+8. **Counting is ONE SQL function** (`ledger_adjustment_execution_status`),
+   used by the executor after its `FOR SHARE` locks and re-run by the
+   `→ executing` guard as a backstop; there is no Go copy of any rule.
+9. **§7.6 residual as built:** see ADR 0099 §20 item 6.
+10. **The detector lives inside `RunLedgerVsProjection`** (standing,
+    unwindowed); no `scheduler.go` change was needed. Four pre-K2 test
+    assertions that required a clean ledger run on fixtures funded by raw
+    `manual_adjustment` postings now accept exactly this kind and nothing
+    else (casino consistency, two sportsbook settlement tests, wallet locked
+    split); moving those fixtures is LEDGER-MANUAL-ADJ-LINK-1.
+11. **Real defect found and fixed in 0113's own down:** FORCE RLS binds the
+    migration role, so the MA099 row checks saw zero rows and the down would
+    have silently dropped live governed data. The down now lifts FORCE on
+    the checked tables first (the 0110/0112 precedent); B-19 and mutant D01
+    pin it.
+12. **HTTP mapping:** CG020 (a platform caller without a grant for the
+    tenant) → 403; MA0xx refusals → 409 (MA001/MA003 → 403, MA014 → 409
+    "not enabled", MA020 → 409 `open_payment_exposure`). Refusals write a
+    denied audit row (tenant row for tenant callers; platform row with
+    `subject_tenant_id` for platform callers).
+13. **`evidence_ref_hash`** is accepted from the client as a hex SHA-256;
+    the evidence reference itself never reaches the platform.
+14. **Technical defaults** (not money values): request and policy-change
+    TTL 24 hours.
+
+### 20.4 NOT IMPLEMENTED / deferred / open
+
+- **K3's Step-B causation arm** (§5.4 RESOLVED, ADOPTED): NOT IMPLEMENTED
+  here by design - ruling 1 ships literally; K3 (0115) adds it.
+- **LEDGER-MANUAL-ADJ-LINK-1** (preventive link trigger for all sessions,
+  19 fixture files): NOT IMPLEMENTED (deferred; launch-blocking).
+- **HD-PRH2-8**: OPEN (human). Interim (b) enforced (`base >= 1` trigger +
+  `GREATEST(1, …)`).
+- **P1 routing** of `ledger_unlinked_manual_adjustment`: I-wire (ADR 0102).
+- **Backoffice UI pages** for requests/policies: NOT IMPLEMENTED (flags only).
+- **Reviews:** `security`, `code-reviewer`, `qa`, `ledger-finance`
+  (independent) review of this diff: NOT DONE.
+- **Launch flags unchanged:** TM-7, TM-10, HD-PRH2-8, LEDGER-MANUAL-ADJ-LINK-1.

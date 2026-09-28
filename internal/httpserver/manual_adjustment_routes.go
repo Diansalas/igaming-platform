@@ -41,18 +41,19 @@ func registerManualAdjustmentRoutes(mux *http.ServeMux, deps Deps) {
 		return auth.Middleware(deps.AuthIssuer)(auth.RequireStaffPrincipal(h))
 	}
 	svc := adjustment.NewService(deps.DB)
-	base := "/v1/admin/tenants/{tenantID}/manual-adjustments"
-	mux.Handle("POST "+base,
+	// Literal patterns only: the webhook route guard (security C3/L8) fails
+	// closed on any non-literal Handle pattern.
+	mux.Handle("POST /v1/admin/tenants/{tenantID}/manual-adjustments",
 		staff(auth.RequirePermission(auth.PermLedgerAdjustmentInitiate)(newSubmitAdjustmentHandler(deps, svc))))
-	mux.Handle("GET "+base,
+	mux.Handle("GET /v1/admin/tenants/{tenantID}/manual-adjustments",
 		staff(auth.RequirePermission(auth.PermLedgerAdjustmentRead)(newListAdjustmentsHandler(deps, svc))))
-	mux.Handle("GET "+base+"/{requestID}",
+	mux.Handle("GET /v1/admin/tenants/{tenantID}/manual-adjustments/{requestID}",
 		staff(auth.RequirePermission(auth.PermLedgerAdjustmentRead)(newGetAdjustmentHandler(deps, svc))))
-	mux.Handle("POST "+base+"/{requestID}/approve",
+	mux.Handle("POST /v1/admin/tenants/{tenantID}/manual-adjustments/{requestID}/approve",
 		staff(auth.RequirePermission(auth.PermLedgerAdjustmentApprove)(newDecideAdjustmentHandler(deps, svc, adjustment.DecisionApprove))))
-	mux.Handle("POST "+base+"/{requestID}/reject",
+	mux.Handle("POST /v1/admin/tenants/{tenantID}/manual-adjustments/{requestID}/reject",
 		staff(auth.RequirePermission(auth.PermLedgerAdjustmentApprove)(newDecideAdjustmentHandler(deps, svc, adjustment.DecisionReject))))
-	mux.Handle("POST "+base+"/{requestID}/cancel",
+	mux.Handle("POST /v1/admin/tenants/{tenantID}/manual-adjustments/{requestID}/cancel",
 		staff(auth.RequirePermission(auth.PermLedgerAdjustmentInitiate)(newCancelAdjustmentHandler(deps, svc))))
 
 	// Financial approval policy changes (HD-PRH2-7): platform-family rows

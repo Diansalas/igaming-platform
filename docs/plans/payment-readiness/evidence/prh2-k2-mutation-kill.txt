@@ -1,0 +1,1120 @@
+PRH-2 K2 (ADR 0100 governed manual adjustments) - mutation-kill evidence
+================================================================================
+Branch: prh2-k2-manual-adjustments (base 9c6c705). Author: ledger-finance (K2 owner).
+Migrations under test: migrations/0113_governed_manual_adjustments.{up,down}.sql;
+  K1 follow-up mutants on migrations/0112_scoped_financial_capability_grants.up.sql.
+Go under test: internal/adjustment/execute.go.
+DB: a PRIVATE local database (k2adj_lf_mut, and per-test scratch DBs), rebuilt from
+  this worktree's migrations; never the shared CI DB. Local runs - NOT CI.
+
+Method, every mutant (scripted: k2mutbatch.py / k2mut.py, recorded verbatim below):
+  1. Apply ONE exact textual replacement (anchor verified to occur exactly once).
+  2. SQL mutants on the shared private DB: rebuild the DB from source; mutants
+     exercised on scratch DBs need no rebuild (the scratch DB migrates the
+     mutated file itself); Go mutants run on a clean DB.
+  3. Run the named killing test(s) with -tags integration.
+  4. Restore the original bytes and verify md5(before) == md5(after).
+  5. KILLED = the killing test failed on the mutant.
+
+SUMMARY: 68 mutants run; 68 KILLED; 0 SURVIVED; 0 not run.
+(Final state; each mutant's LATEST run is shown below. Run history, disclosed:)
+  - S32 (drop MA010 at change APPROVAL) SURVIVED its first run: the policy-row
+    INSERT trigger masked it. It was a real test gap, not an equivalent
+    mutant. Fixed by adding TestLayered_TightenOnlyEachLayerIndependently
+    (disables exactly one of the two layers on a scratch DB); S32 then
+    KILLED, and S33 (the symmetric mutant on the INSERT trigger) was added
+    and KILLED. S37 (proposal pre-check) was added at the same time.
+  - G1 first run hung (the held executor goroutine was never released on the
+    failure path, so pool.Close waited); the process was killed manually and
+    the result discarded. The test was fixed to release on failure
+    (sync.Once) and G1 was rerun cleanly: KILLED.
+  - S11 first run was INVALID (private DB rebuild failed: "permission denied
+    to terminate process" from a lingering session). Its "ok" result was
+    discarded, not counted as a survivor. Rerun after a clean rebuild: KILLED.
+  - Every revert was verified md5-identical to the pre-mutation bytes.
+
+id                                               result
+M9                                               KILLED
+M10                                              KILLED
+MWA                                              KILLED
+G1                                               KILLED
+G2                                               KILLED
+G3                                               KILLED
+G4                                               KILLED
+G5                                               KILLED
+S01                                              KILLED
+S03                                              KILLED
+S06                                              KILLED
+S07                                              KILLED
+S20                                              KILLED
+S21                                              KILLED
+S08                                              KILLED
+S09                                              KILLED
+S10                                              KILLED
+S11                                              KILLED
+S13                                              KILLED
+S14                                              KILLED
+S15                                              KILLED
+S16                                              KILLED
+S17                                              KILLED
+S19                                              KILLED
+S24                                              KILLED
+S26                                              KILLED
+S27                                              KILLED
+S28                                              KILLED
+S29                                              KILLED
+S30                                              KILLED
+S35                                              KILLED
+S36                                              KILLED
+S32                                              KILLED
+S33                                              KILLED
+S37                                              KILLED
+S02                                              KILLED
+S04                                              KILLED
+S05                                              KILLED
+S18                                              KILLED
+S25                                              KILLED
+S12                                              KILLED
+S22                                              KILLED
+S23                                              KILLED
+D01                                              KILLED
+P-player_accounts.acting_read                    KILLED
+P-wallets.acting_read                            KILLED
+P-ledger_accounts.acting_read                    KILLED
+P-ledger_accounts.acting_insert                  KILLED
+P-ledger_transactions.acting_read                KILLED
+P-ledger_transactions.acting_insert              KILLED
+P-ledger_transactions.acting_lock                KILLED
+P-ledger_entries.acting_read                     KILLED
+P-ledger_entries.acting_insert                   KILLED
+P-wallet_balance_projection.acting_read          KILLED
+P-wallet_balance_projection.acting_insert        KILLED
+P-wallet_balance_projection.acting_update        KILLED
+P-payment_attempts.acting_read                   KILLED
+P-deposit_intents.acting_read                    KILLED
+P-licences.acting_read_own_licence               KILLED
+P-asset_authorizations.acting_read               KILLED
+P-staff_capability_grant_requests.acting_read    KILLED
+P-financial_approval_policies.acting_read        KILLED
+P-tenant_financial_policy_profiles.acting_read   KILLED
+P-ledger_adjustment_requests.acting_read         KILLED
+P-ledger_adjustment_requests.acting_insert       KILLED
+P-ledger_adjustment_requests.acting_update       KILLED
+P-ledger_adjustment_approvals.acting_read        KILLED
+P-ledger_adjustment_approvals.acting_insert      KILLED
+
+================================================================================
+MUTANT M9 - KILLED
+what: K1 0112: staff_capability_grants.acting_read tenant predicate removed (security K1 re-check M9)
+  file: migrations/0112_scoped_financial_capability_grants.up.sql
+  test: -run 'TestK2G2_ActingSessionCannotReadAnotherTenantsGrants|TestK2G1_ActingSessionRowVisibilityMatchesAllowlist' ./internal/db/
+  result: KILLED (go test exit 1)
+    --- FAIL: TestK2G1_ActingSessionRowVisibilityMatchesAllowlist (0.21s)
+    --- FAIL: TestK2G2_ActingSessionCannotReadAnotherTenantsGrants (0.09s)
+    first-failure: k2_gates_integration_test.go:346: M9: an acting session for X sees tenant Y's grants (by tenant: 1, by id: 1)
+  revert md5 before=bb0add970dc4a149cb7a4438708b0ba4 after=bb0add970dc4a149cb7a4438708b0ba4 identical=True
+
+MUTANT M10 - KILLED
+what: K1 0112: financial_acting_session_valid() status = 'active' check removed (security K1 re-check M10)
+  file: migrations/0112_scoped_financial_capability_grants.up.sql
+  test: -run 'TestK2G3_SuspendedGranteeActingOpenRefused' ./internal/db/
+  result: KILLED (go test exit 1)
+    --- FAIL: TestK2G3_SuspendedGranteeActingOpenRefused (0.06s)
+        k2_gates_integration_test.go:470: expected the setter to refuse
+    first-failure: k2_gates_integration_test.go:470: expected the setter to refuse
+  revert md5 before=bb0add970dc4a149cb7a4438708b0ba4 after=bb0add970dc4a149cb7a4438708b0ba4 identical=True
+
+MUTANT MWA - KILLED
+what: K1 0112: 'widen acting to any tenant' - validator's grant check ignores the tenant (previously masked by M9's RLS layer)
+  file: migrations/0112_scoped_financial_capability_grants.up.sql
+  test: -run 'TestK2G2_LayeredWidenedActingReadStillRefusesForeignGrant' ./internal/db/
+  result: KILLED (go test exit 1)
+    --- FAIL: TestK2G2_LayeredWidenedActingReadStillRefusesForeignGrant (0.07s)
+    first-failure: k2_gates_integration_test.go:399: with acting_read widened, the open step must still refuse a principal whose grant is for another tenant (CG020), got <nil>
+  revert md5 before=bb0add970dc4a149cb7a4438708b0ba4 after=bb0add970dc4a149cb7a4438708b0ba4 identical=True
+
+MUTANT G1 - KILLED
+what: drop FOR SHARE on staff rows (A8 L1)
+hunk (before):
+  - WHERE id = ANY($1) ORDER BY id FOR SHARE`, staff))
+hunk (after):
+  + WHERE id = ANY($1) ORDER BY id`, staff))
+  file: internal/adjustment/execute.go
+  test: -run 'TestB7_ForShareBlocksConcurrentRevokeAndSuspend' ./internal/adjustment/
+  result: KILLED (go test exit 1)
+    --- FAIL: TestB7_ForShareBlocksConcurrentRevokeAndSuspend (30.57s)
+    --- FAIL: TestB7_ForShareBlocksConcurrentRevokeAndSuspend/tenant (15.33s)
+    --- FAIL: TestB7_ForShareBlocksConcurrentRevokeAndSuspend/acting (15.24s)
+    first-failure: b7_concurrency_integration_test.go:111: no backend ever waited on a lock for "%UPDATE staff_users SET status%" (no real contention)
+    first-failure: b7_concurrency_integration_test.go:111: no backend ever waited on a lock for "%UPDATE staff_users SET status%" (no real contention)
+  revert md5 before=44fde222ba9bec1fc811bfc3a47c3fcd after=44fde222ba9bec1fc811bfc3a47c3fcd identical=True
+
+MUTANT G2 - KILLED
+what: drop FOR SHARE on in-force grant rows (A8 L1)
+hunk (before):
+  - ORDER BY id FOR SHARE`, req.TenantID, req.InitiatedBy, approvers))
+hunk (after):
+  + ORDER BY id`, req.TenantID, req.InitiatedBy, approvers))
+  file: internal/adjustment/execute.go
+  test: -run 'TestB7_ForShareBlocksConcurrentRevokeAndSuspend' ./internal/adjustment/
+  result: KILLED (go test exit 1)
+    --- FAIL: TestB7_ForShareBlocksConcurrentRevokeAndSuspend (30.38s)
+    --- FAIL: TestB7_ForShareBlocksConcurrentRevokeAndSuspend/tenant (15.19s)
+    --- FAIL: TestB7_ForShareBlocksConcurrentRevokeAndSuspend/acting (15.19s)
+    first-failure: b7_concurrency_integration_test.go:98: no backend ever waited on a lock for "%staff_capability_grants%" (no real contention)
+    first-failure: b7_concurrency_integration_test.go:98: no backend ever waited on a lock for "%staff_capability_grants%" (no real contention)
+  revert md5 before=44fde222ba9bec1fc811bfc3a47c3fcd after=44fde222ba9bec1fc811bfc3a47c3fcd identical=True
+
+MUTANT G3 - KILLED
+what: drop the LF-13 sufficiency check
+hunk (before):
+  - if bal.Signed() < req.Amount {
+hunk (after):
+  + if false && bal.Signed() < req.Amount {
+  file: internal/adjustment/execute.go
+  test: -run 'TestB11_NoNegativeBalance' ./internal/adjustment/
+  result: KILLED (go test exit 1)
+    --- FAIL: TestB11_NoNegativeBalance (0.23s)
+    first-failure: b11_b17_integration_test.go:31: expected refused_insufficient_funds, got {ID:29ff70b2-ab3b-445c-8405-19d97d1a5512 TenantID:ac89d75f-25cb-42de-b614-356bf9949252 WalletID:bf7cd3d7-763d-4e85-ad0b-3c0df329832f PlayerAccountID:d0556fdc-e557-463c-858f-9f477831bd60 BrandID:561dff61-137d-4107-9974-0713561dfad8 AccountType:player_cash AssetCode:K21AD408AF Direction:debit_player Amount:1001 ReasonCode:operational_error_correction CausationTransactionID:<nil> EvidenceRefHash:<nil> NoteHash:d5394dd49e35aa2c21acafe3158f53b9365decd38f23ac992cdef6d680a93a12 PayloadHash:f29ba05d2e9d9220539cec3695acbb8f0ae9d10aa7926211bfabeb5c5c056f80 InitiatedBy:7de515c7-4094-4f71-8105-4de92d895297 InitiatedByScope:tenant InitiatedByPersonID:f3dcade2-8ef8-4077-ac2a-ca7b7859a3f3 TenantStatusAtSubmit:active RequiredAtSubmission:1 ContributingPolicyIDs:[00b664c3-6e16-49ba-91d3-fc891370a3f4] State:executed ExpiresAt:2026-09-29 19:02:01.263946 +0000 UTC LedgerTransactionID:c5d5d336-1412-439d-90df-38c6440a80f2 RefusalCode:<nil> CreatedAt:2026-09-28 19:02:01.263946 +0000 UTC ClosedAt:2026-09-28 19:02:01.277536 +0000 UTC IdempotencyKey:manual_adjustment:29ff70b2-ab3b-445c-8405-19d97d1a5512 RequiredAtExecution:0x3d3a21344210 TenantStatusAtExecute:0x3d3a2132b830 ContributingAtExecute:[00b664c3-6e16-49ba-91d3-fc891370a3f4]}
+  revert md5 before=44fde222ba9bec1fc811bfc3a47c3fcd after=44fde222ba9bec1fc811bfc3a47c3fcd identical=True
+
+MUTANT G4 - KILLED
+what: drop the L2 causation lock
+hunk (before):
+  - SELECT id FROM ledger_transactions WHERE id = $1 AND tenant_id = $2 FOR UPDATE`
+hunk (after):
+  + SELECT id FROM ledger_transactions WHERE id = $1 AND tenant_id = $2`
+  file: internal/adjustment/execute.go
+  test: -run 'TestB7_ConcurrentCompensationsRespectCap' ./internal/adjustment/
+  result: KILLED (go test exit 1)
+    --- FAIL: TestB7_ConcurrentCompensationsRespectCap (0.36s)
+    first-failure: b7_concurrency_integration_test.go:267: cap breached under concurrency: executed=2 capped=0
+  revert md5 before=44fde222ba9bec1fc811bfc3a47c3fcd after=44fde222ba9bec1fc811bfc3a47c3fcd identical=True
+
+MUTANT G5 - KILLED
+what: drop the exposure refusal at execution (executor)
+hunk (before):
+  - if r != nil {
+  - 			refusal = *r
+  - 		}
+hunk (after):
+  + if r != nil && (*r)[:5] != "MA020" {
+  + 			refusal = *r
+  + 		}
+  file: internal/adjustment/execute.go
+  test: -run 'TestB23_OpenPaymentExposureRefusesCredits' ./internal/adjustment/
+  result: KILLED (go test exit 1)
+    --- FAIL: TestB23_OpenPaymentExposureRefusesCredits (0.31s)
+    first-failure: b23_b25_integration_test.go:117: ERROR: ledger_adjustment_requests: execution check failed: open_payment_exposure (SQLSTATE MA030)
+  revert md5 before=44fde222ba9bec1fc811bfc3a47c3fcd after=44fde222ba9bec1fc811bfc3a47c3fcd identical=True
+
+MUTANT S01 - KILLED
+what: drop the payload hash check at approval insert
+hunk (before):
+  - IF NEW.payload_hash IS DISTINCT FROM v_req.payload_hash THEN
+  -         RAISE EXCEPTION 'ledger_adjustment_approvals: payload_hash does not match the request' USING ERRCODE = 'MA031';
+  -     END IF;
+hunk (after):
+  + <deleted>
+  file: migrations/0113_governed_manual_adjustments.up.sql
+  test: -run 'TestB4_PayloadBindingRefusals' ./internal/adjustment/
+  result: KILLED (go test exit 1)
+    --- FAIL: TestB4_PayloadBindingRefusals (0.18s)
+    first-failure: b4_b5_adversarial_integration_test.go:60: foreign payload_hash: expected MA031, got <nil>
+  revert md5 before=2144e7a4fb79a93044558ba357fd50cd after=2144e7a4fb79a93044558ba357fd50cd identical=True
+
+MUTANT S03 - KILLED
+what: drop distinct-Person at approval insert
+hunk (before):
+  - IF v_actor.actor = v_req.initiated_by
+  -        OR v_actor.person_id = ledger_adjustment_live_person(v_req.initiated_by, v_req.initiated_by_person_id)
+  -        OR v_actor.person_id = v_req.initiated_by_person_id THEN
+hunk (after):
+  + IF v_actor.actor = v_req.initiated_by THEN
+  file: migrations/0113_governed_manual_adjustments.up.sql
+  test: -run 'TestB5_IndependenceFloorRefusals' ./internal/adjustment/
+  result: KILLED (go test exit 1)
+    --- FAIL: TestB5_IndependenceFloorRefusals (0.24s)
+    first-failure: b4_b5_adversarial_integration_test.go:119: same Person approving: expected MA031, got <nil>
+  revert md5 before=2144e7a4fb79a93044558ba357fd50cd after=2144e7a4fb79a93044558ba357fd50cd identical=True
+
+MUTANT S06 - KILLED
+what: drop in-tx grant read: revoked grants still count
+hunk (before):
+  - g.capability = p_capability
+  -            AND g.revoked_at IS NULL AND g.valid_from <= now() AND (g.valid_until IS NULL OR now() < g.valid_until)
+  -            AND s.status = 'active'
+hunk (after):
+  + g.capability = p_capability
+  +            AND g.valid_from <= now() AND (g.valid_until IS NULL OR now() < g.valid_until)
+  +            AND s.status = 'active'
+  file: migrations/0113_governed_manual_adjustments.up.sql
+  test: -run 'TestB6_K2G4_UseTimeRechecks' ./internal/adjustment/
+  result: KILLED (go test exit 1)
+    --- FAIL: TestB6_K2G4_UseTimeRechecks (5.09s)
+    --- FAIL: TestB6_K2G4_UseTimeRechecks/grant_revoked_before_execution:_not_counted (0.29s)
+    first-failure: b6_usetime_integration_test.go:122: revoked grant: the broken approval was counted (executed=true state=executed counted=2 required=2)
+  revert md5 before=2144e7a4fb79a93044558ba357fd50cd after=2144e7a4fb79a93044558ba357fd50cd identical=True
+
+MUTANT S07 - KILLED
+what: lock/count 'the unrevoked grant' instead of the grant in force at now()
+hunk (before):
+  - g.capability = p_capability
+  -            AND g.revoked_at IS NULL AND g.valid_from <= now() AND (g.valid_until IS NULL OR now() < g.valid_until)
+  -            AND s.status = 'active'
+hunk (after):
+  + g.capability = p_capability
+  +            AND g.revoked_at IS NULL
+  +            AND s.status = 'active'
+  file: migrations/0113_governed_manual_adjustments.up.sql
+  test: -run 'TestB6_K2G4_UseTimeRechecks' ./internal/adjustment/
+  result: KILLED (go test exit 1)
+    --- FAIL: TestB6_K2G4_UseTimeRechecks (5.21s)
+    --- FAIL: TestB6_K2G4_UseTimeRechecks/grant_expired_before_execution:_not_counted_(in_force_at_now()) (3.71s)
+    --- FAIL: TestB6_K2G4_UseTimeRechecks/queued_future_grant_is_not_in_force:_refused_at_insert (0.21s)
+    first-failure: b6_usetime_integration_test.go:141: expired grant: the broken approval was counted (executed=true state=executed counted=2 required=2)
+    first-failure: b6_usetime_integration_test.go:152: a not-yet-in-force (unrevoked) grant must not authorize: expected MA003, got <nil>
+  revert md5 before=2144e7a4fb79a93044558ba357fd50cd after=2144e7a4fb79a93044558ba357fd50cd identical=True
+
+MUTANT S20 - KILLED
+what: K2-G4: drop grantee active
+hunk (before):
+  - AND s.status = 'active'
+  -            AND s.person_id IS NOT NULL
+hunk (after):
+  + AND s.person_id IS NOT NULL
+  file: migrations/0113_governed_manual_adjustments.up.sql
+  test: -run 'TestB6_K2G4_UseTimeRechecks' ./internal/adjustment/
+  result: KILLED (go test exit 1)
+    --- FAIL: TestB6_K2G4_UseTimeRechecks (5.51s)
+    --- FAIL: TestB6_K2G4_UseTimeRechecks/K2-G4_grantee_active:_suspended_approver_not_counted (0.31s)
+    --- FAIL: TestB6_K2G4_UseTimeRechecks/suspended_initiator:_nothing_executes (0.27s)
+    first-failure: b6_usetime_integration_test.go:112: suspended approver: the broken approval was counted (executed=true state=executed counted=2 required=2)
+    first-failure: b6_usetime_integration_test.go:167: suspended initiator's request executed: {Request:{ID:62aaec58-1743-493e-84a2-9f9191006b09 TenantID:bef84962-698b-4048-88c7-28a63802bc41 WalletID:21355228-6f04-40d6-87ba-0be77d631585 PlayerAccountID:22d562ed-b685-4dd5-9785-fdf29f656ed5 BrandID:075b216a-0d31-4d13-9b9c-c4af4f5eabb1 AccountType:player_cash AssetCode:K2A78BD3F0 Direction:credit_player Amount:100 ReasonCode:operational_error_correction CausationTransactionID:<nil> EvidenceRefHash:<nil> NoteHash:d5394dd49e35aa2c21acafe3158f53b9365decd38f23ac992cdef6d680a93a12 PayloadHash:f58bfc337d5d57d6824672976ef366cdecd6b22b7b8426bcfe7c66dbd63b87cb InitiatedBy:6519d7dd-f8cf-4f4a-ba54-0fd4dafaf408 InitiatedByScope:tenant InitiatedByPersonID:234f0b46-9b01-4db5-bb37-6e281c7f7c70 TenantStatusAtSubmit:active RequiredAtSubmission:1 ContributingPolicyIDs:[c2e1f007-8cf2-443d-94ce-f559e1004d7b] State:executed ExpiresAt:2026-09-29 19:04:50.852987 +0000 UTC LedgerTransactionID:5bbabe3d-a0da-49fa-8d5c-d100618fdcfc RefusalCode:<nil> CreatedAt:2026-09-28 19:04:50.852987 +0000 UTC ClosedAt:2026-09-28 19:04:50.869284 +0000 UTC IdempotencyKey:manual_adjustment:62aaec58-1743-493e-84a2-9f9191006b09 RequiredAtExecution:0x3e736de13110 TenantStatusAtExecute:0x3e736df89660 ContributingAtExecute:[c2e1f007-8cf2-443d-94ce-f559e1004d7b]} ApprovalID:e7284d48-0f0f-467a-9d50-ae80bb4565da Executed:true Counted:1 Required:1}
+  revert md5 before=2144e7a4fb79a93044558ba357fd50cd after=2144e7a4fb79a93044558ba357fd50cd identical=True
+
+MUTANT S21 - KILLED
+what: K2-G4: drop eligible role
+hunk (before):
+  - s.tenant_id = g.tenant_id AND s.role = ANY (c.eligible_tenant_roles))
+hunk (after):
+  + s.tenant_id = g.tenant_id)
+  file: migrations/0113_governed_manual_adjustments.up.sql
+  test: -run 'TestB6_K2G4_UseTimeRechecks' ./internal/adjustment/
+  result: KILLED (go test exit 1)
+    --- FAIL: TestB6_K2G4_UseTimeRechecks (4.96s)
+    --- FAIL: TestB6_K2G4_UseTimeRechecks/K2-G4_eligible_role:_demoted_approver_not_counted (0.27s)
+    first-failure: b6_usetime_integration_test.go:117: demoted approver: the broken approval was counted (executed=true state=executed counted=2 required=2)
+  revert md5 before=2144e7a4fb79a93044558ba357fd50cd after=2144e7a4fb79a93044558ba357fd50cd identical=True
+
+MUTANT S08 - KILLED
+what: drop the link match
+hunk (before):
+  - PERFORM ledger_adjustment_verify_link(NEW);
+hunk (after):
+  + <deleted>
+  file: migrations/0113_governed_manual_adjustments.up.sql
+  test: -run 'TestB12_ShapeAndForgedLinkRefused' ./internal/adjustment/
+  result: KILLED (go test exit 1)
+    --- FAIL: TestB12_ShapeAndForgedLinkRefused (1.78s)
+    --- FAIL: TestB12_ShapeAndForgedLinkRefused/wrong_amount (0.04s)
+    --- FAIL: TestB12_ShapeAndForgedLinkRefused/wrong_counter_account (0.06s)
+    first-failure: b11_b17_integration_test.go:165: wrong amount: expected MA040, got <nil>
+    first-failure: b11_b17_integration_test.go:165: wrong counter account: expected MA040, got <nil>
+  revert md5 before=2144e7a4fb79a93044558ba357fd50cd after=2144e7a4fb79a93044558ba357fd50cd identical=True
+
+MUTANT S09 - KILLED
+what: use xmin as the same-transaction marker
+hunk (before):
+  - IF OLD.executed_txid IS DISTINCT FROM txid_current() OR NEW.executed_txid
+hunk (after):
+  + IF OLD.xmin::text::bigint IS DISTINCT FROM txid_current() OR NEW.executed_txid
+  file: migrations/0113_governed_manual_adjustments.up.sql
+  test: -run 'TestSameTxMarkerIsTxidNotXmin' ./internal/adjustment/
+  result: KILLED (go test exit 1)
+    --- FAIL: TestSameTxMarkerIsTxidNotXmin (0.19s)
+    first-failure: layered_counting_integration_test.go:197: an execution whose executing-step ran in a released savepoint must complete in the same top-level tx: ERROR: ledger_adjustment_requests: executing -> executed only in the executing transaction (SQLSTATE MA030)
+  revert md5 before=2144e7a4fb79a93044558ba357fd50cd after=2144e7a4fb79a93044558ba357fd50cd identical=True
+
+MUTANT S10 - KILLED
+what: evaluate most-specific-wins instead of MAX
+hunk (before):
+  - SELECT max(CASE WHEN f.threshold_minor_units IS NULL OR p_amount IS NULL OR p_amount <= f.threshold_minor_units
+  -                     THEN f.base_required_approvals ELSE f.required_approvals_above_threshold END),
+hunk (after):
+  + SELECT (array_agg(CASE WHEN f.threshold_minor_units IS NULL OR p_amount IS NULL OR p_amount <= f.threshold_minor_units
+  +                     THEN f.base_required_approvals ELSE f.required_approvals_above_threshold END
+  +                     ORDER BY CASE f.level WHEN 'brand' THEN 1 WHEN 'tenant' THEN 2 WHEN 'profile' THEN 3 WHEN 'jurisdiction' THEN 4 ELSE 5 END))[1],
+  file: migrations/0113_governed_manual_adjustments.up.sql
+  test: -run 'TestB10_PolicyGovernanceRefusals' ./internal/adjustment/
+  result: KILLED (go test exit 1)
+    --- FAIL: TestB10_PolicyGovernanceRefusals (0.19s)
+    first-failure: policy_integration_test.go:189: a less-specific floor must still bind (MAX, not most-specific): {Enabled:true Required:1 ContributingPolicyIDs:[2495ecd2-bdbb-4a09-836f-3888682fd330 75927864-469d-4d35-a064-2292991bcbe4] TenantStatus:0xc1e8cc489e0}
+  revert md5 before=2144e7a4fb79a93044558ba357fd50cd after=2144e7a4fb79a93044558ba357fd50cd identical=True
+
+MUTANT S11 - KILLED
+what: drop the platform-baseline requirement
+hunk (before):
+  - enabled := v_has_platform;
+hunk (after):
+  + enabled := true;
+  file: migrations/0113_governed_manual_adjustments.up.sql
+  test: -run 'TestB9_DisabledWithoutPlatformBaseline' ./internal/adjustment/
+  result: KILLED (go test exit 1)
+    --- FAIL: TestB9_DisabledWithoutPlatformBaseline (0.22s)
+    first-failure: policy_integration_test.go:84: no platform baseline must be disabled: {Enabled:true Required:1 ContributingPolicyIDs:[] TenantStatus:0x3eb4c5c03db0}
+  revert md5 before=2144e7a4fb79a93044558ba357fd50cd after=2144e7a4fb79a93044558ba357fd50cd identical=True
+
+MUTANT S13 - KILLED
+what: drop the exposure refusal at submission
+hunk (before):
+  - NEW.evidence_ref_hash, NEW.tenant_status_at_submission);
+  -         IF v_refusal IS NOT NULL THEN
+hunk (after):
+  + NEW.evidence_ref_hash, NEW.tenant_status_at_submission);
+  +         IF v_refusal IS NOT NULL AND v_refusal NOT LIKE 'MA020%' THEN
+  file: migrations/0113_governed_manual_adjustments.up.sql
+  test: -run 'TestB23_OpenPaymentExposureRefusesCredits' ./internal/adjustment/
+  result: KILLED (go test exit 1)
+    --- FAIL: TestB23_OpenPaymentExposureRefusesCredits (0.24s)
+    first-failure: b23_b25_integration_test.go:112: credit (operational_error_correction) under open exposure at submission: expected MA020, got <nil>
+  revert md5 before=2144e7a4fb79a93044558ba357fd50cd after=2144e7a4fb79a93044558ba357fd50cd identical=True
+
+MUTANT S14 - KILLED
+what: drop the exposure refusal everywhere (function)
+hunk (before):
+  - IF p_direction = 'credit_player' AND player_open_payment_exposure(p_tenant, p_player) THEN
+hunk (after):
+  + IF false AND player_open_payment_exposure(p_tenant, p_player) THEN
+  file: migrations/0113_governed_manual_adjustments.up.sql
+  test: -run 'TestB23_OpenPaymentExposureRefusesCredits' ./internal/adjustment/
+  result: KILLED (go test exit 1)
+    --- FAIL: TestB23_OpenPaymentExposureRefusesCredits (0.27s)
+    first-failure: b23_b25_integration_test.go:112: credit (operational_error_correction) under open exposure at submission: expected MA020, got <nil>
+  revert md5 before=2144e7a4fb79a93044558ba357fd50cd after=2144e7a4fb79a93044558ba357fd50cd identical=True
+
+MUTANT S15 - KILLED
+what: drop the compensation cap
+hunk (before):
+  - IF v_executed + p_amount > v_leg_sum THEN
+hunk (after):
+  + IF false THEN
+  file: migrations/0113_governed_manual_adjustments.up.sql
+  test: -run 'TestB13_ReasonCodeCatalogueRules' ./internal/adjustment/
+  result: KILLED (go test exit 1)
+    --- FAIL: TestB13_ReasonCodeCatalogueRules (0.56s)
+    first-failure: b11_b17_integration_test.go:268: cumulative excess: expected MA022, got <nil>
+  revert md5 before=2144e7a4fb79a93044558ba357fd50cd after=2144e7a4fb79a93044558ba357fd50cd identical=True
+
+MUTANT S16 - KILLED
+what: drop the deferred no-executing-commit check
+hunk (before):
+  - CREATE CONSTRAINT TRIGGER ledger_adjustment_requests_no_executing_commit
+  -     AFTER INSERT OR UPDATE ON ledger_adjustment_requests
+  -     DEFERRABLE INITIALLY DEFERRED
+  -     FOR EACH ROW EXECUTE FUNCTION ledger_adjustment_requests_no_executing_commit();
+hunk (after):
+  + -- mutant: deferred check dropped
+  file: migrations/0113_governed_manual_adjustments.up.sql
+  test: -run 'TestB15_CrashBetweenExecutingAndExecutedCommitsNothing' ./internal/adjustment/
+  result: KILLED (go test exit 1)
+    --- FAIL: TestB15_CrashBetweenExecutingAndExecutedCommitsNothing (0.25s)
+    first-failure: b11_b17_integration_test.go:416: committed executing: expected MA041, got <nil>
+  revert md5 before=2144e7a4fb79a93044558ba357fd50cd after=2144e7a4fb79a93044558ba357fd50cd identical=True
+
+MUTANT S17 - KILLED
+what: drop S-2(iii) for approvers (insert)
+hunk (before):
+  - IF v_actor.person_id = ANY (financial_policy_author_persons(v_req.contributing_policy_ids || v_policy.contributing_policy_ids)) THEN
+hunk (after):
+  + IF false THEN
+  file: migrations/0113_governed_manual_adjustments.up.sql
+  test: -run 'TestB10_PolicyGovernanceRefusals' ./internal/adjustment/
+  result: KILLED (go test exit 1)
+    --- FAIL: TestB10_PolicyGovernanceRefusals (0.29s)
+    first-failure: policy_integration_test.go:226: policy approver as approver: expected MA011, got <nil>
+  revert md5 before=2144e7a4fb79a93044558ba357fd50cd after=2144e7a4fb79a93044558ba357fd50cd identical=True
+
+MUTANT S19 - KILLED
+what: drop the beneficiary guard (initiator)
+hunk (before):
+  - CREATE TRIGGER ledger_adjustment_requests_beneficiary_guard
+  -     BEFORE INSERT ON ledger_adjustment_requests
+  -     FOR EACH ROW EXECUTE FUNCTION ledger_adjustment_requests_beneficiary_guard();
+hunk (after):
+  + -- mutant: request beneficiary guard dropped
+  file: migrations/0113_governed_manual_adjustments.up.sql
+  test: -run 'TestB5_IndependenceFloorRefusals' ./internal/adjustment/
+  result: KILLED (go test exit 1)
+    --- FAIL: TestB5_IndependenceFloorRefusals (0.17s)
+    first-failure: b4_b5_adversarial_integration_test.go:143: beneficiary initiating: expected MA032, got <nil>
+  revert md5 before=2144e7a4fb79a93044558ba357fd50cd after=2144e7a4fb79a93044558ba357fd50cd identical=True
+
+MUTANT S24 - KILLED
+what: drop the beneficiary guard (approver)
+hunk (before):
+  - CREATE TRIGGER ledger_adjustment_approvals_beneficiary_guard
+  -     BEFORE INSERT ON ledger_adjustment_approvals
+  -     FOR EACH ROW EXECUTE FUNCTION ledger_adjustment_approvals_beneficiary_guard();
+hunk (after):
+  + -- mutant: approval beneficiary guard dropped
+  file: migrations/0113_governed_manual_adjustments.up.sql
+  test: -run 'TestB5_IndependenceFloorRefusals' ./internal/adjustment/
+  result: KILLED (go test exit 1)
+    --- FAIL: TestB5_IndependenceFloorRefusals (0.21s)
+    first-failure: b4_b5_adversarial_integration_test.go:146: beneficiary approving: expected MA032, got <nil>
+  revert md5 before=2144e7a4fb79a93044558ba357fd50cd after=2144e7a4fb79a93044558ba357fd50cd identical=True
+
+MUTANT S26 - KILLED
+what: drop the base>=1 mandatory-class trigger
+hunk (before):
+  - IF v_class = 'mandatory_four_eyes' AND NEW.base_required_approvals < 1 THEN
+hunk (after):
+  + IF false THEN
+  file: migrations/0113_governed_manual_adjustments.up.sql
+  test: -run 'TestB20_ClassificationAndGreatestOne' ./internal/adjustment/
+  result: KILLED (go test exit 1)
+    --- FAIL: TestB20_ClassificationAndGreatestOne (0.19s)
+    first-failure: policy_integration_test.go:270: base = 0 for the mandatory class: expected MA013, got <nil>
+  revert md5 before=2144e7a4fb79a93044558ba357fd50cd after=2144e7a4fb79a93044558ba357fd50cd identical=True
+
+MUTANT S27 - KILLED
+what: drop the ledger fence
+hunk (before):
+  - CREATE TRIGGER ledger_transactions_governed_fence
+  -     BEFORE INSERT ON ledger_transactions
+  -     FOR EACH ROW EXECUTE FUNCTION ledger_transactions_governed_fence();
+hunk (after):
+  + -- mutant: ledger fence dropped
+  file: migrations/0113_governed_manual_adjustments.up.sql
+  test: -run 'TestB16_ActingFences' ./internal/adjustment/
+  result: KILLED (go test exit 1)
+    --- FAIL: TestB16_ActingFences (0.25s)
+    first-failure: b11_b17_integration_test.go:501: acting fence probes failed:
+  revert md5 before=2144e7a4fb79a93044558ba357fd50cd after=2144e7a4fb79a93044558ba357fd50cd identical=True
+
+MUTANT S28 - KILLED
+what: drop the entries fence (LF N-2)
+hunk (before):
+  - CREATE TRIGGER ledger_entries_governed_fence
+  -     BEFORE INSERT ON ledger_entries
+  -     FOR EACH ROW EXECUTE FUNCTION ledger_entries_governed_fence();
+hunk (after):
+  + -- mutant: entries fence dropped
+  file: migrations/0113_governed_manual_adjustments.up.sql
+  test: -run 'TestB16_ActingFences' ./internal/adjustment/
+  result: KILLED (go test exit 1)
+    --- FAIL: TestB16_ActingFences (0.28s)
+    first-failure: b11_b17_integration_test.go:501: acting fence probes failed:
+  revert md5 before=2144e7a4fb79a93044558ba357fd50cd after=2144e7a4fb79a93044558ba357fd50cd identical=True
+
+MUTANT S29 - KILLED
+what: drop the projection fence
+hunk (before):
+  - CREATE TRIGGER wallet_balance_projection_acting_fence
+  -     BEFORE INSERT OR UPDATE OR DELETE ON wallet_balance_projection
+  -     FOR EACH ROW EXECUTE FUNCTION wallet_balance_projection_acting_fence();
+hunk (after):
+  + -- mutant: projection fence dropped
+  file: migrations/0113_governed_manual_adjustments.up.sql
+  test: -run 'TestB16_ActingFences' ./internal/adjustment/
+  result: KILLED (go test exit 1)
+    --- FAIL: TestB16_ActingFences (0.24s)
+    first-failure: b11_b17_integration_test.go:501: acting fence probes failed:
+  revert md5 before=2144e7a4fb79a93044558ba357fd50cd after=2144e7a4fb79a93044558ba357fd50cd identical=True
+
+MUTANT S30 - KILLED
+what: drop the projection fence depth check
+hunk (before):
+  - IF pg_trigger_depth() < 2 THEN
+hunk (after):
+  + IF false THEN
+  file: migrations/0113_governed_manual_adjustments.up.sql
+  test: -run 'TestB16_ActingFences' ./internal/adjustment/
+  result: KILLED (go test exit 1)
+    --- FAIL: TestB16_ActingFences (0.20s)
+    first-failure: b11_b17_integration_test.go:501: acting fence probes failed:
+  revert md5 before=2144e7a4fb79a93044558ba357fd50cd after=2144e7a4fb79a93044558ba357fd50cd identical=True
+
+MUTANT S35 - KILLED
+what: K2-b: drop the 0045 tenant layer from the suspended-asset rule
+hunk (before):
+  - SELECT NOT EXISTS (SELECT 1 FROM assets a WHERE a.code = p_asset AND a.active AND a.platform_authorized)
+  -         OR NOT EXISTS (
+  -             SELECT 1 FROM asset_authorizations aa
+hunk (after):
+  + SELECT NOT EXISTS (SELECT 1 FROM assets a WHERE a.code = p_asset AND a.active AND a.platform_authorized)
+  +         OR false AND NOT EXISTS (
+  +             SELECT 1 FROM asset_authorizations aa
+  file: migrations/0113_governed_manual_adjustments.up.sql
+  test: -run 'TestB24_SuspendedAsset' ./internal/adjustment/
+  result: KILLED (go test exit 1)
+    --- FAIL: TestB24_SuspendedAsset (0.78s)
+    --- FAIL: TestB24_SuspendedAsset/K2-b_tenant-disabled_asset_(0045_layer) (0.23s)
+    first-failure: b23_b25_integration_test.go:214: goodwill in a tenant-disabled asset: expected MA021, got <nil>
+  revert md5 before=2144e7a4fb79a93044558ba357fd50cd after=2144e7a4fb79a93044558ba357fd50cd identical=True
+
+MUTANT S36 - KILLED
+what: drop the initiator re-check at execution
+hunk (before):
+  - IF v_init_person IS NULL OR NOT initiator_valid THEN
+  -         initiator_valid := false;
+  -     END IF;
+hunk (after):
+  + initiator_valid := true;
+  file: migrations/0113_governed_manual_adjustments.up.sql
+  test: -run 'TestB6_K2G4_UseTimeRechecks' ./internal/adjustment/
+  result: KILLED (go test exit 1)
+    --- FAIL: TestB6_K2G4_UseTimeRechecks (5.20s)
+    --- FAIL: TestB6_K2G4_UseTimeRechecks/suspended_initiator:_nothing_executes (0.27s)
+    first-failure: b6_usetime_integration_test.go:167: suspended initiator's request executed: {Request:{ID:7f80b5f6-1fe5-4051-8348-bc66fa2c8ff0 TenantID:f9a77890-2253-4dba-8280-a903f187c37e WalletID:7be4b503-58ef-4378-a974-e4d4f353479f PlayerAccountID:5bde258a-78ee-4658-8ca5-c53c1807e64b BrandID:50336107-2732-490d-b7b4-9fcf0ca57263 AccountType:player_cash AssetCode:K241FE4632 Direction:credit_player Amount:100 ReasonCode:operational_error_correction CausationTransactionID:<nil> EvidenceRefHash:<nil> NoteHash:d5394dd49e35aa2c21acafe3158f53b9365decd38f23ac992cdef6d680a93a12 PayloadHash:93d484281bf6b5c328354f2bf93b4366095a30aa239da2c0ff5e38efe945239c InitiatedBy:33a2b9b4-e1b5-4fd1-b024-644e5472a1a6 InitiatedByScope:tenant InitiatedByPersonID:14c8b003-c662-4135-8b53-902e426b1b73 TenantStatusAtSubmit:active RequiredAtSubmission:1 ContributingPolicyIDs:[4491a8e2-e1f3-4f7d-ad64-2b9c4a5c920e] State:executed ExpiresAt:2026-09-29 19:06:10.978671 +0000 UTC LedgerTransactionID:d6c09230-a5d5-42bd-841f-0e17998712c1 RefusalCode:<nil> CreatedAt:2026-09-28 19:06:10.978671 +0000 UTC ClosedAt:2026-09-28 19:06:11.010796 +0000 UTC IdempotencyKey:manual_adjustment:7f80b5f6-1fe5-4051-8348-bc66fa2c8ff0 RequiredAtExecution:0x2af4efe16cc0 TenantStatusAtExecute:0x2af4f0137860 ContributingAtExecute:[4491a8e2-e1f3-4f7d-ad64-2b9c4a5c920e]} ApprovalID:13570fae-3def-4048-b906-3888029b961f Executed:true Counted:1 Required:1}
+  revert md5 before=2144e7a4fb79a93044558ba357fd50cd after=2144e7a4fb79a93044558ba357fd50cd identical=True
+
+MUTANT S32 - KILLED
+what: drop MA010 at change approval (layered test isolates it from the policy-insert trigger)
+hunk (before):
+  - AND NOT (v_change.requested_by_scope = 'platform' AND v_actor.scope = 'platform')
+  -        AND NOT financial_approval_policy_change_tightens(v_change) THEN
+hunk (after):
+  + AND false THEN
+  file: migrations/0113_governed_manual_adjustments.up.sql
+  test: -run 'TestLayered_TightenOnlyEachLayerIndependently|TestB10_PolicyGovernanceRefusals' ./internal/adjustment/
+  result: KILLED (go test exit 1)
+    --- FAIL: TestLayered_TightenOnlyEachLayerIndependently (3.42s)
+    --- FAIL: TestLayered_TightenOnlyEachLayerIndependently/only_financial_approval_policies_guard_disabled (1.71s)
+    first-failure: layered_policy_integration_test.go:56: with financial_approval_policies_guard disabled, the other layer must still refuse the tenant-approved loosening (MA010), got <nil>
+  revert md5 before=2144e7a4fb79a93044558ba357fd50cd after=2144e7a4fb79a93044558ba357fd50cd identical=True
+
+MUTANT S33 - KILLED
+what: drop MA010 in the policy-row INSERT trigger (the binding control)
+hunk (before):
+  - IF NEW.supersedes_id IS NOT NULL AND NEW.level IN ('tenant', 'brand')
+  -        AND NOT (v_change.requested_by_scope = 'platform' AND v_appr.decided_by_scope = 'platform') THEN
+hunk (after):
+  + IF false THEN
+  file: migrations/0113_governed_manual_adjustments.up.sql
+  test: -run 'TestLayered_TightenOnlyEachLayerIndependently' ./internal/adjustment/
+  result: KILLED (go test exit 1)
+    --- FAIL: TestLayered_TightenOnlyEachLayerIndependently (5.30s)
+    --- FAIL: TestLayered_TightenOnlyEachLayerIndependently/only_financial_approval_policy_change_approvals_guard_disabled (2.52s)
+    first-failure: layered_policy_integration_test.go:56: with financial_approval_policy_change_approvals_guard disabled, the other layer must still refuse the tenant-approved loosening (MA010), got <nil>
+  revert md5 before=2144e7a4fb79a93044558ba357fd50cd after=2144e7a4fb79a93044558ba357fd50cd identical=True
+
+MUTANT S37 - KILLED
+what: drop the tenant tighten-only pre-check at proposal
+hunk (before):
+  - IF NOT financial_approval_policy_change_tightens(NEW) THEN
+hunk (after):
+  + IF false THEN
+  file: migrations/0113_governed_manual_adjustments.up.sql
+  test: -run 'TestB10_PolicyGovernanceRefusals' ./internal/adjustment/
+  result: KILLED (go test exit 1)
+    --- FAIL: TestB10_PolicyGovernanceRefusals (0.16s)
+    first-failure: policy_integration_test.go:168: tenant loosening: expected MA010, got <nil>
+  revert md5 before=2144e7a4fb79a93044558ba357fd50cd after=2144e7a4fb79a93044558ba357fd50cd identical=True
+
+MUTANT S02 - KILLED
+what: drop the payload hash filter from the execution count
+hunk (before):
+  - AND a.payload_hash = v_req.payload_hash
+hunk (after):
+  + <deleted>
+  file: migrations/0113_governed_manual_adjustments.up.sql
+  test: -run 'TestLayered_ExecutionCountIgnoresBadApprovals' ./internal/adjustment/
+  result: KILLED (go test exit 1)
+    --- FAIL: TestLayered_ExecutionCountIgnoresBadApprovals (3.31s)
+    --- FAIL: TestLayered_ExecutionCountIgnoresBadApprovals/stale_payload_hash (0.27s)
+    first-failure: layered_counting_integration_test.go:76: stale payload hash: the planted approval was COUNTED at execution (counted=2 executed=true)
+  revert md5 before=2144e7a4fb79a93044558ba357fd50cd after=2144e7a4fb79a93044558ba357fd50cd identical=True
+
+MUTANT S04 - KILLED
+what: drop distinct-Person from the execution count
+hunk (before):
+  - AND c.person IS DISTINCT FROM v_init_person
+hunk (after):
+  + <deleted>
+  file: migrations/0113_governed_manual_adjustments.up.sql
+  test: -run 'TestLayered_ExecutionCountIgnoresBadApprovals' ./internal/adjustment/
+  result: KILLED (go test exit 1)
+    --- FAIL: TestLayered_ExecutionCountIgnoresBadApprovals (2.96s)
+    --- FAIL: TestLayered_ExecutionCountIgnoresBadApprovals/same_Person_as_the_initiator (0.14s)
+    first-failure: layered_counting_integration_test.go:88: initiator's Person: the planted approval was COUNTED at execution (counted=2 executed=true)
+  revert md5 before=2144e7a4fb79a93044558ba357fd50cd after=2144e7a4fb79a93044558ba357fd50cd identical=True
+
+MUTANT S05 - KILLED
+what: count two approvals of one Person twice
+hunk (before):
+  - SELECT DISTINCT ON (c.person) c.id
+hunk (after):
+  + SELECT c.id
+  file: migrations/0113_governed_manual_adjustments.up.sql
+  test: -run 'TestLayered_ExecutionCountIgnoresBadApprovals' ./internal/adjustment/
+  result: KILLED (go test exit 1)
+    --- FAIL: TestLayered_ExecutionCountIgnoresBadApprovals (3.01s)
+    --- FAIL: TestLayered_ExecutionCountIgnoresBadApprovals/two_approvals,_one_Person (0.16s)
+    first-failure: layered_counting_integration_test.go:144: one Person under two principals must count once (want counted=2 executed), got counted=3 executed=true
+  revert md5 before=2144e7a4fb79a93044558ba357fd50cd after=2144e7a4fb79a93044558ba357fd50cd identical=True
+
+MUTANT S18 - KILLED
+what: drop S-2(iii) from the execution count
+hunk (before):
+  - AND NOT (c.person = ANY (v_authors))
+hunk (after):
+  + <deleted>
+  file: migrations/0113_governed_manual_adjustments.up.sql
+  test: -run 'TestLayered_ExecutionCountIgnoresBadApprovals' ./internal/adjustment/
+  result: KILLED (go test exit 1)
+    --- FAIL: TestLayered_ExecutionCountIgnoresBadApprovals (4.47s)
+    --- FAIL: TestLayered_ExecutionCountIgnoresBadApprovals/a_contributing_policy's_author_(S-2(iii)) (0.15s)
+    first-failure: layered_counting_integration_test.go:110: policy author: the planted approval was COUNTED at execution (counted=2 executed=true)
+  revert md5 before=2144e7a4fb79a93044558ba357fd50cd after=2144e7a4fb79a93044558ba357fd50cd identical=True
+
+MUTANT S25 - KILLED
+what: drop the beneficiary exclusion from the execution count
+hunk (before):
+  - AND c.person IS DISTINCT FROM v_player_person
+hunk (after):
+  + <deleted>
+  file: migrations/0113_governed_manual_adjustments.up.sql
+  test: -run 'TestLayered_ExecutionCountIgnoresBadApprovals' ./internal/adjustment/
+  result: KILLED (go test exit 1)
+    --- FAIL: TestLayered_ExecutionCountIgnoresBadApprovals (4.07s)
+    --- FAIL: TestLayered_ExecutionCountIgnoresBadApprovals/the_beneficiary (0.14s)
+    first-failure: layered_counting_integration_test.go:99: beneficiary: the planted approval was COUNTED at execution (counted=2 executed=true)
+  revert md5 before=2144e7a4fb79a93044558ba357fd50cd after=2144e7a4fb79a93044558ba357fd50cd identical=True
+
+MUTANT S12 - KILLED
+what: drop GREATEST(1, ...)
+hunk (before):
+  - required := GREATEST(1, COALESCE(v_max, 0));
+hunk (after):
+  + required := COALESCE(v_max, 0);
+  file: migrations/0113_governed_manual_adjustments.up.sql
+  test: -run 'TestB20_ClassificationAndGreatestOne' ./internal/adjustment/
+  result: KILLED (go test exit 1)
+    --- FAIL: TestB20_ClassificationAndGreatestOne (2.75s)
+    first-failure: policy_integration_test.go:316: GREATEST(1, ...) must hold for a base = 0 row: {Enabled:true Required:0 ContributingPolicyIDs:[fad063f3-26d0-44e6-8ed5-3bcefb65662e] TenantStatus:0x32e2a0d3990}
+  revert md5 before=2144e7a4fb79a93044558ba357fd50cd after=2144e7a4fb79a93044558ba357fd50cd identical=True
+
+MUTANT S22 - KILLED
+what: K2-G4: drop tenant unchanged
+hunk (before):
+  - (g.grantee_scope = 'tenant' AND s.tenant_id = g.tenant_id AND s.role
+hunk (after):
+  + (g.grantee_scope = 'tenant' AND s.role
+  file: migrations/0113_governed_manual_adjustments.up.sql
+  test: -run 'TestK2G4_TenantUnchangedAndLivePersonRechecks' ./internal/adjustment/
+  result: KILLED (go test exit 1)
+    --- FAIL: TestK2G4_TenantUnchangedAndLivePersonRechecks (6.15s)
+    --- FAIL: TestK2G4_TenantUnchangedAndLivePersonRechecks/tenant_unchanged:_an_approver_moved_to_another_tenant_is_not_counted (2.96s)
+    first-failure: b6_usetime_integration_test.go:282: moved approver: the broken approval was counted (executed=true state=executed counted=2 required=2)
+  revert md5 before=2144e7a4fb79a93044558ba357fd50cd after=2144e7a4fb79a93044558ba357fd50cd identical=True
+
+MUTANT S23 - KILLED
+what: K2-G4: drop live person_id = grant snapshot
+hunk (before):
+  - AND s.person_id = gr.grantee_person_id
+hunk (after):
+  + <deleted>
+  file: migrations/0113_governed_manual_adjustments.up.sql
+  test: -run 'TestK2G4_TenantUnchangedAndLivePersonRechecks' ./internal/adjustment/
+  result: KILLED (go test exit 1)
+    --- FAIL: TestK2G4_TenantUnchangedAndLivePersonRechecks (4.76s)
+    --- FAIL: TestK2G4_TenantUnchangedAndLivePersonRechecks/live_person_id_=_grant_snapshot:_a_re-linked_approver_is_not_counted (0.20s)
+    first-failure: b6_usetime_integration_test.go:312: re-linked approver: the broken approval was counted (executed=true state=executed counted=2 required=2)
+  revert md5 before=2144e7a4fb79a93044558ba357fd50cd after=2144e7a4fb79a93044558ba357fd50cd identical=True
+
+MUTANT D01 - KILLED
+what: down: drop the FORCE-RLS lift (row refusal becomes a silent no-op)
+hunk (before):
+  - ALTER TABLE ledger_adjustment_requests NO FORCE ROW LEVEL SECURITY;
+  - ALTER TABLE ledger_adjustment_approvals NO FORCE ROW LEVEL SECURITY;
+  - ALTER TABLE financial_approval_policies NO FORCE ROW LEVEL SECURITY;
+  - ALTER TABLE financial_approval_policy_changes NO FORCE ROW LEVEL SECURITY;
+  - ALTER TABLE financial_approval_policy_change_approvals NO FORCE ROW LEVEL SECURITY;
+  - ALTER TABLE tenant_financial_policy_profiles NO FORCE ROW LEVEL SECURITY;
+hunk (after):
+  + <deleted>
+  file: migrations/0113_governed_manual_adjustments.down.sql
+  test: -run 'TestB19_Migration0113UpDownUp' ./internal/adjustment/
+  result: KILLED (go test exit 1)
+    --- FAIL: TestB19_Migration0113UpDownUp (7.19s)
+    first-failure: migration_0113_integration_test.go:136: down with governed rows: expected MA099, got <nil>
+  revert md5 before=01c3f4cf4a64dd5dab30e432c6c859c5 after=01c3f4cf4a64dd5dab30e432c6c859c5 identical=True
+
+MUTANT P-player_accounts.acting_read - KILLED
+what: drop the grant function from this acting policy
+hunk (before):
+  - CREATE POLICY acting_read ON player_accounts FOR SELECT
+  -     USING (tenant_id = NULLIF(current_setting('app.acting_tenant_id', true), '')::uuid AND (SELECT financial_acting_session_valid()));
+hunk (after):
+  + CREATE POLICY acting_read ON player_accounts FOR SELECT
+  +     USING (tenant_id = NULLIF(current_setting('app.acting_tenant_id', true), '')::uuid);
+  file: migrations/0113_governed_manual_adjustments.up.sql
+  test: -run 'TestActingPolicies_EveryK2ActingPolicyRequiresTheGrantFunction' ./internal/adjustment/
+  result: KILLED (go test exit 1)
+    --- FAIL: TestActingPolicies_EveryK2ActingPolicyRequiresTheGrantFunction (3.23s)
+    first-failure: acting_policies_integration_test.go:224: acting policy probes:
+  revert md5 before=2144e7a4fb79a93044558ba357fd50cd after=2144e7a4fb79a93044558ba357fd50cd identical=True
+
+MUTANT P-wallets.acting_read - KILLED
+what: drop the grant function from this acting policy
+hunk (before):
+  - CREATE POLICY acting_read ON wallets FOR SELECT
+  -     USING (tenant_id = NULLIF(current_setting('app.acting_tenant_id', true), '')::uuid AND (SELECT financial_acting_session_valid()));
+hunk (after):
+  + CREATE POLICY acting_read ON wallets FOR SELECT
+  +     USING (tenant_id = NULLIF(current_setting('app.acting_tenant_id', true), '')::uuid);
+  file: migrations/0113_governed_manual_adjustments.up.sql
+  test: -run 'TestActingPolicies_EveryK2ActingPolicyRequiresTheGrantFunction' ./internal/adjustment/
+  result: KILLED (go test exit 1)
+    --- FAIL: TestActingPolicies_EveryK2ActingPolicyRequiresTheGrantFunction (2.94s)
+    first-failure: acting_policies_integration_test.go:224: acting policy probes:
+  revert md5 before=2144e7a4fb79a93044558ba357fd50cd after=2144e7a4fb79a93044558ba357fd50cd identical=True
+
+MUTANT P-ledger_accounts.acting_read - KILLED
+what: drop the grant function from this acting policy
+hunk (before):
+  - CREATE POLICY acting_read ON ledger_accounts FOR SELECT
+  -     USING (tenant_id = NULLIF(current_setting('app.acting_tenant_id', true), '')::uuid AND (SELECT financial_acting_session_valid()));
+hunk (after):
+  + CREATE POLICY acting_read ON ledger_accounts FOR SELECT
+  +     USING (tenant_id = NULLIF(current_setting('app.acting_tenant_id', true), '')::uuid);
+  file: migrations/0113_governed_manual_adjustments.up.sql
+  test: -run 'TestActingPolicies_EveryK2ActingPolicyRequiresTheGrantFunction' ./internal/adjustment/
+  result: KILLED (go test exit 1)
+    --- FAIL: TestActingPolicies_EveryK2ActingPolicyRequiresTheGrantFunction (2.70s)
+    first-failure: acting_policies_integration_test.go:224: acting policy probes:
+  revert md5 before=2144e7a4fb79a93044558ba357fd50cd after=2144e7a4fb79a93044558ba357fd50cd identical=True
+
+MUTANT P-ledger_accounts.acting_insert - KILLED
+what: drop the grant function from this acting policy
+hunk (before):
+  - CREATE POLICY acting_insert ON ledger_accounts FOR INSERT
+  -     WITH CHECK (tenant_id = NULLIF(current_setting('app.acting_tenant_id', true), '')::uuid
+  -                 AND account_type IN ('player_cash', 'manual_adjustment')
+  -                 AND (SELECT financial_acting_session_valid()));
+hunk (after):
+  + CREATE POLICY acting_insert ON ledger_accounts FOR INSERT
+  +     WITH CHECK (tenant_id = NULLIF(current_setting('app.acting_tenant_id', true), '')::uuid
+  +                 AND account_type IN ('player_cash', 'manual_adjustment')
+  +                );
+  file: migrations/0113_governed_manual_adjustments.up.sql
+  test: -run 'TestActingPolicies_EveryK2ActingPolicyRequiresTheGrantFunction' ./internal/adjustment/
+  result: KILLED (go test exit 1)
+    --- FAIL: TestActingPolicies_EveryK2ActingPolicyRequiresTheGrantFunction (3.43s)
+    first-failure: acting_policies_integration_test.go:224: acting policy probes:
+  revert md5 before=2144e7a4fb79a93044558ba357fd50cd after=2144e7a4fb79a93044558ba357fd50cd identical=True
+
+MUTANT P-ledger_transactions.acting_read - KILLED
+what: drop the grant function from this acting policy
+hunk (before):
+  - CREATE POLICY acting_read ON ledger_transactions FOR SELECT
+  -     USING (tenant_id = NULLIF(current_setting('app.acting_tenant_id', true), '')::uuid AND (SELECT financial_acting_session_valid()));
+hunk (after):
+  + CREATE POLICY acting_read ON ledger_transactions FOR SELECT
+  +     USING (tenant_id = NULLIF(current_setting('app.acting_tenant_id', true), '')::uuid);
+  file: migrations/0113_governed_manual_adjustments.up.sql
+  test: -run 'TestActingPolicies_EveryK2ActingPolicyRequiresTheGrantFunction' ./internal/adjustment/
+  result: KILLED (go test exit 1)
+    --- FAIL: TestActingPolicies_EveryK2ActingPolicyRequiresTheGrantFunction (3.29s)
+    first-failure: acting_policies_integration_test.go:224: acting policy probes:
+  revert md5 before=2144e7a4fb79a93044558ba357fd50cd after=2144e7a4fb79a93044558ba357fd50cd identical=True
+
+MUTANT P-ledger_transactions.acting_insert - KILLED
+what: drop the grant function from this acting policy
+hunk (before):
+  - CREATE POLICY acting_insert ON ledger_transactions FOR INSERT
+  -     WITH CHECK (tenant_id = NULLIF(current_setting('app.acting_tenant_id', true), '')::uuid AND (SELECT financial_acting_session_valid()));
+hunk (after):
+  + CREATE POLICY acting_insert ON ledger_transactions FOR INSERT
+  +     WITH CHECK (tenant_id = NULLIF(current_setting('app.acting_tenant_id', true), '')::uuid);
+  file: migrations/0113_governed_manual_adjustments.up.sql
+  test: -run 'TestActingPolicies_EveryK2ActingPolicyRequiresTheGrantFunction' ./internal/adjustment/
+  result: KILLED (go test exit 1)
+    --- FAIL: TestActingPolicies_EveryK2ActingPolicyRequiresTheGrantFunction (3.52s)
+    first-failure: acting_policies_integration_test.go:224: acting policy probes:
+  revert md5 before=2144e7a4fb79a93044558ba357fd50cd after=2144e7a4fb79a93044558ba357fd50cd identical=True
+
+MUTANT P-ledger_transactions.acting_lock - KILLED
+what: drop the grant function from this acting policy
+hunk (before):
+  - CREATE POLICY acting_lock ON ledger_transactions FOR UPDATE
+  -     USING (tenant_id = NULLIF(current_setting('app.acting_tenant_id', true), '')::uuid AND (SELECT financial_acting_session_valid()))
+  -     WITH CHECK (false);
+hunk (after):
+  + CREATE POLICY acting_lock ON ledger_transactions FOR UPDATE
+  +     USING (tenant_id = NULLIF(current_setting('app.acting_tenant_id', true), '')::uuid)
+  +     WITH CHECK (false);
+  file: migrations/0113_governed_manual_adjustments.up.sql
+  test: -run 'TestActingPolicies_EveryK2ActingPolicyRequiresTheGrantFunction' ./internal/adjustment/
+  result: KILLED (go test exit 1)
+    --- FAIL: TestActingPolicies_EveryK2ActingPolicyRequiresTheGrantFunction (3.43s)
+    first-failure: acting_policies_integration_test.go:224: acting policy probes:
+  revert md5 before=2144e7a4fb79a93044558ba357fd50cd after=2144e7a4fb79a93044558ba357fd50cd identical=True
+
+MUTANT P-ledger_entries.acting_read - KILLED
+what: drop the grant function from this acting policy
+hunk (before):
+  - CREATE POLICY acting_read ON ledger_entries FOR SELECT
+  -     USING (tenant_id = NULLIF(current_setting('app.acting_tenant_id', true), '')::uuid AND (SELECT financial_acting_session_valid()));
+hunk (after):
+  + CREATE POLICY acting_read ON ledger_entries FOR SELECT
+  +     USING (tenant_id = NULLIF(current_setting('app.acting_tenant_id', true), '')::uuid);
+  file: migrations/0113_governed_manual_adjustments.up.sql
+  test: -run 'TestActingPolicies_EveryK2ActingPolicyRequiresTheGrantFunction' ./internal/adjustment/
+  result: KILLED (go test exit 1)
+    --- FAIL: TestActingPolicies_EveryK2ActingPolicyRequiresTheGrantFunction (2.72s)
+    first-failure: acting_policies_integration_test.go:224: acting policy probes:
+  revert md5 before=2144e7a4fb79a93044558ba357fd50cd after=2144e7a4fb79a93044558ba357fd50cd identical=True
+
+MUTANT P-ledger_entries.acting_insert - KILLED
+what: drop the grant function from this acting policy
+hunk (before):
+  - CREATE POLICY acting_insert ON ledger_entries FOR INSERT
+  -     WITH CHECK (tenant_id = NULLIF(current_setting('app.acting_tenant_id', true), '')::uuid AND (SELECT financial_acting_session_valid()));
+hunk (after):
+  + CREATE POLICY acting_insert ON ledger_entries FOR INSERT
+  +     WITH CHECK (tenant_id = NULLIF(current_setting('app.acting_tenant_id', true), '')::uuid);
+  file: migrations/0113_governed_manual_adjustments.up.sql
+  test: -run 'TestActingPolicies_EveryK2ActingPolicyRequiresTheGrantFunction' ./internal/adjustment/
+  result: KILLED (go test exit 1)
+    --- FAIL: TestActingPolicies_EveryK2ActingPolicyRequiresTheGrantFunction (2.83s)
+    first-failure: acting_policies_integration_test.go:224: acting policy probes:
+  revert md5 before=2144e7a4fb79a93044558ba357fd50cd after=2144e7a4fb79a93044558ba357fd50cd identical=True
+
+MUTANT P-wallet_balance_projection.acting_read - KILLED
+what: drop the grant function from this acting policy
+hunk (before):
+  - CREATE POLICY acting_read ON wallet_balance_projection FOR SELECT
+  -     USING (tenant_id = NULLIF(current_setting('app.acting_tenant_id', true), '')::uuid AND (SELECT financial_acting_session_valid()));
+hunk (after):
+  + CREATE POLICY acting_read ON wallet_balance_projection FOR SELECT
+  +     USING (tenant_id = NULLIF(current_setting('app.acting_tenant_id', true), '')::uuid);
+  file: migrations/0113_governed_manual_adjustments.up.sql
+  test: -run 'TestActingPolicies_EveryK2ActingPolicyRequiresTheGrantFunction' ./internal/adjustment/
+  result: KILLED (go test exit 1)
+    --- FAIL: TestActingPolicies_EveryK2ActingPolicyRequiresTheGrantFunction (2.75s)
+    first-failure: acting_policies_integration_test.go:224: acting policy probes:
+  revert md5 before=2144e7a4fb79a93044558ba357fd50cd after=2144e7a4fb79a93044558ba357fd50cd identical=True
+
+MUTANT P-wallet_balance_projection.acting_insert - KILLED
+what: drop the grant function from this acting policy
+hunk (before):
+  - CREATE POLICY acting_insert ON wallet_balance_projection FOR INSERT
+  -     WITH CHECK (tenant_id = NULLIF(current_setting('app.acting_tenant_id', true), '')::uuid AND (SELECT financial_acting_session_valid()));
+hunk (after):
+  + CREATE POLICY acting_insert ON wallet_balance_projection FOR INSERT
+  +     WITH CHECK (tenant_id = NULLIF(current_setting('app.acting_tenant_id', true), '')::uuid);
+  file: migrations/0113_governed_manual_adjustments.up.sql
+  test: -run 'TestActingPolicies_EveryK2ActingPolicyRequiresTheGrantFunction' ./internal/adjustment/
+  result: KILLED (go test exit 1)
+    --- FAIL: TestActingPolicies_EveryK2ActingPolicyRequiresTheGrantFunction (2.68s)
+    first-failure: acting_policies_integration_test.go:224: acting policy probes:
+  revert md5 before=2144e7a4fb79a93044558ba357fd50cd after=2144e7a4fb79a93044558ba357fd50cd identical=True
+
+MUTANT P-wallet_balance_projection.acting_update - KILLED
+what: drop the grant function from this acting policy
+hunk (before):
+  - CREATE POLICY acting_update ON wallet_balance_projection FOR UPDATE
+  -     USING (tenant_id = NULLIF(current_setting('app.acting_tenant_id', true), '')::uuid AND (SELECT financial_acting_session_valid()))
+  -     WITH CHECK (tenant_id = NULLIF(current_setting('app.acting_tenant_id', true), '')::uuid AND (SELECT financial_acting_session_valid()));
+hunk (after):
+  + CREATE POLICY acting_update ON wallet_balance_projection FOR UPDATE
+  +     USING (tenant_id = NULLIF(current_setting('app.acting_tenant_id', true), '')::uuid)
+  +     WITH CHECK (tenant_id = NULLIF(current_setting('app.acting_tenant_id', true), '')::uuid);
+  file: migrations/0113_governed_manual_adjustments.up.sql
+  test: -run 'TestActingPolicies_EveryK2ActingPolicyRequiresTheGrantFunction' ./internal/adjustment/
+  result: KILLED (go test exit 1)
+    --- FAIL: TestActingPolicies_EveryK2ActingPolicyRequiresTheGrantFunction (2.64s)
+    first-failure: acting_policies_integration_test.go:224: acting policy probes:
+  revert md5 before=2144e7a4fb79a93044558ba357fd50cd after=2144e7a4fb79a93044558ba357fd50cd identical=True
+
+MUTANT P-payment_attempts.acting_read - KILLED
+what: drop the grant function from this acting policy
+hunk (before):
+  - CREATE POLICY acting_read ON payment_attempts FOR SELECT
+  -     USING (tenant_id = NULLIF(current_setting('app.acting_tenant_id', true), '')::uuid AND (SELECT financial_acting_session_valid()));
+hunk (after):
+  + CREATE POLICY acting_read ON payment_attempts FOR SELECT
+  +     USING (tenant_id = NULLIF(current_setting('app.acting_tenant_id', true), '')::uuid);
+  file: migrations/0113_governed_manual_adjustments.up.sql
+  test: -run 'TestActingPolicies_EveryK2ActingPolicyRequiresTheGrantFunction' ./internal/adjustment/
+  result: KILLED (go test exit 1)
+    --- FAIL: TestActingPolicies_EveryK2ActingPolicyRequiresTheGrantFunction (2.79s)
+    first-failure: acting_policies_integration_test.go:224: acting policy probes:
+  revert md5 before=2144e7a4fb79a93044558ba357fd50cd after=2144e7a4fb79a93044558ba357fd50cd identical=True
+
+MUTANT P-deposit_intents.acting_read - KILLED
+what: drop the grant function from this acting policy
+hunk (before):
+  - CREATE POLICY acting_read ON deposit_intents FOR SELECT
+  -     USING (tenant_id = NULLIF(current_setting('app.acting_tenant_id', true), '')::uuid AND (SELECT financial_acting_session_valid()));
+hunk (after):
+  + CREATE POLICY acting_read ON deposit_intents FOR SELECT
+  +     USING (tenant_id = NULLIF(current_setting('app.acting_tenant_id', true), '')::uuid);
+  file: migrations/0113_governed_manual_adjustments.up.sql
+  test: -run 'TestActingPolicies_EveryK2ActingPolicyRequiresTheGrantFunction' ./internal/adjustment/
+  result: KILLED (go test exit 1)
+    --- FAIL: TestActingPolicies_EveryK2ActingPolicyRequiresTheGrantFunction (2.54s)
+    first-failure: acting_policies_integration_test.go:224: acting policy probes:
+  revert md5 before=2144e7a4fb79a93044558ba357fd50cd after=2144e7a4fb79a93044558ba357fd50cd identical=True
+
+MUTANT P-licences.acting_read_own_licence - KILLED
+what: drop the grant function from this acting policy
+hunk (before):
+  - CREATE POLICY acting_read_own_licence ON licences FOR SELECT
+  -     USING (EXISTS (SELECT 1 FROM tenants t
+  -                     WHERE t.id = NULLIF(current_setting('app.acting_tenant_id', true), '')::uuid AND t.licence_id = licences.id)
+  -            AND (SELECT financial_acting_session_valid()));
+hunk (after):
+  + CREATE POLICY acting_read_own_licence ON licences FOR SELECT
+  +     USING (EXISTS (SELECT 1 FROM tenants t
+  +                     WHERE t.id = NULLIF(current_setting('app.acting_tenant_id', true), '')::uuid AND t.licence_id = licences.id)
+  +           );
+  file: migrations/0113_governed_manual_adjustments.up.sql
+  test: -run 'TestActingPolicies_EveryK2ActingPolicyRequiresTheGrantFunction' ./internal/adjustment/
+  result: KILLED (go test exit 1)
+    --- FAIL: TestActingPolicies_EveryK2ActingPolicyRequiresTheGrantFunction (2.76s)
+    first-failure: acting_policies_integration_test.go:224: acting policy probes:
+  revert md5 before=2144e7a4fb79a93044558ba357fd50cd after=2144e7a4fb79a93044558ba357fd50cd identical=True
+
+MUTANT P-asset_authorizations.acting_read - KILLED
+what: drop the grant function from this acting policy
+hunk (before):
+  - CREATE POLICY acting_read ON asset_authorizations FOR SELECT
+  -     USING (tenant_id = NULLIF(current_setting('app.acting_tenant_id', true), '')::uuid AND (SELECT financial_acting_session_valid()));
+hunk (after):
+  + CREATE POLICY acting_read ON asset_authorizations FOR SELECT
+  +     USING (tenant_id = NULLIF(current_setting('app.acting_tenant_id', true), '')::uuid);
+  file: migrations/0113_governed_manual_adjustments.up.sql
+  test: -run 'TestActingPolicies_EveryK2ActingPolicyRequiresTheGrantFunction' ./internal/adjustment/
+  result: KILLED (go test exit 1)
+    --- FAIL: TestActingPolicies_EveryK2ActingPolicyRequiresTheGrantFunction (2.68s)
+    first-failure: acting_policies_integration_test.go:224: acting policy probes:
+  revert md5 before=2144e7a4fb79a93044558ba357fd50cd after=2144e7a4fb79a93044558ba357fd50cd identical=True
+
+MUTANT P-staff_capability_grant_requests.acting_read - KILLED
+what: drop the grant function from this acting policy
+hunk (before):
+  - CREATE POLICY acting_read ON staff_capability_grant_requests FOR SELECT
+  -     USING (tenant_id = NULLIF(current_setting('app.acting_tenant_id', true), '')::uuid AND (SELECT financial_acting_session_valid()));
+hunk (after):
+  + CREATE POLICY acting_read ON staff_capability_grant_requests FOR SELECT
+  +     USING (tenant_id = NULLIF(current_setting('app.acting_tenant_id', true), '')::uuid);
+  file: migrations/0113_governed_manual_adjustments.up.sql
+  test: -run 'TestActingPolicies_EveryK2ActingPolicyRequiresTheGrantFunction' ./internal/adjustment/
+  result: KILLED (go test exit 1)
+    --- FAIL: TestActingPolicies_EveryK2ActingPolicyRequiresTheGrantFunction (2.80s)
+    first-failure: acting_policies_integration_test.go:224: acting policy probes:
+  revert md5 before=2144e7a4fb79a93044558ba357fd50cd after=2144e7a4fb79a93044558ba357fd50cd identical=True
+
+MUTANT P-financial_approval_policies.acting_read - KILLED
+what: drop the grant function from this acting policy
+hunk (before):
+  - CREATE POLICY acting_read ON financial_approval_policies FOR SELECT
+  -     USING ((tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.acting_tenant_id', true), '')::uuid)
+  -            AND (SELECT financial_acting_session_valid()));
+hunk (after):
+  + CREATE POLICY acting_read ON financial_approval_policies FOR SELECT
+  +     USING ((tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.acting_tenant_id', true), '')::uuid)
+  +           );
+  file: migrations/0113_governed_manual_adjustments.up.sql
+  test: -run 'TestActingPolicies_EveryK2ActingPolicyRequiresTheGrantFunction' ./internal/adjustment/
+  result: KILLED (go test exit 1)
+    --- FAIL: TestActingPolicies_EveryK2ActingPolicyRequiresTheGrantFunction (3.78s)
+    first-failure: acting_policies_integration_test.go:224: acting policy probes:
+  revert md5 before=2144e7a4fb79a93044558ba357fd50cd after=2144e7a4fb79a93044558ba357fd50cd identical=True
+
+MUTANT P-tenant_financial_policy_profiles.acting_read - KILLED
+what: drop the grant function from this acting policy
+hunk (before):
+  - CREATE POLICY acting_read ON tenant_financial_policy_profiles FOR SELECT
+  -     USING (tenant_id = NULLIF(current_setting('app.acting_tenant_id', true), '')::uuid AND (SELECT financial_acting_session_valid()));
+hunk (after):
+  + CREATE POLICY acting_read ON tenant_financial_policy_profiles FOR SELECT
+  +     USING (tenant_id = NULLIF(current_setting('app.acting_tenant_id', true), '')::uuid);
+  file: migrations/0113_governed_manual_adjustments.up.sql
+  test: -run 'TestActingPolicies_EveryK2ActingPolicyRequiresTheGrantFunction' ./internal/adjustment/
+  result: KILLED (go test exit 1)
+    --- FAIL: TestActingPolicies_EveryK2ActingPolicyRequiresTheGrantFunction (3.48s)
+    first-failure: acting_policies_integration_test.go:224: acting policy probes:
+  revert md5 before=2144e7a4fb79a93044558ba357fd50cd after=2144e7a4fb79a93044558ba357fd50cd identical=True
+
+MUTANT P-ledger_adjustment_requests.acting_read - KILLED
+what: drop the grant function from this acting policy
+hunk (before):
+  - CREATE POLICY acting_read ON ledger_adjustment_requests FOR SELECT
+  -     USING (tenant_id = NULLIF(current_setting('app.acting_tenant_id', true), '')::uuid AND (SELECT financial_acting_session_valid()));
+hunk (after):
+  + CREATE POLICY acting_read ON ledger_adjustment_requests FOR SELECT
+  +     USING (tenant_id = NULLIF(current_setting('app.acting_tenant_id', true), '')::uuid);
+  file: migrations/0113_governed_manual_adjustments.up.sql
+  test: -run 'TestActingPolicies_EveryK2ActingPolicyRequiresTheGrantFunction' ./internal/adjustment/
+  result: KILLED (go test exit 1)
+    --- FAIL: TestActingPolicies_EveryK2ActingPolicyRequiresTheGrantFunction (2.91s)
+    first-failure: acting_policies_integration_test.go:224: acting policy probes:
+  revert md5 before=2144e7a4fb79a93044558ba357fd50cd after=2144e7a4fb79a93044558ba357fd50cd identical=True
+
+MUTANT P-ledger_adjustment_requests.acting_insert - KILLED
+what: drop the grant function from this acting policy
+hunk (before):
+  - CREATE POLICY acting_insert ON ledger_adjustment_requests FOR INSERT
+  -     WITH CHECK (tenant_id = NULLIF(current_setting('app.acting_tenant_id', true), '')::uuid AND (SELECT financial_acting_session_valid()));
+hunk (after):
+  + CREATE POLICY acting_insert ON ledger_adjustment_requests FOR INSERT
+  +     WITH CHECK (tenant_id = NULLIF(current_setting('app.acting_tenant_id', true), '')::uuid);
+  file: migrations/0113_governed_manual_adjustments.up.sql
+  test: -run 'TestActingPolicies_EveryK2ActingPolicyRequiresTheGrantFunction' ./internal/adjustment/
+  result: KILLED (go test exit 1)
+    --- FAIL: TestActingPolicies_EveryK2ActingPolicyRequiresTheGrantFunction (2.91s)
+    first-failure: acting_policies_integration_test.go:224: acting policy probes:
+  revert md5 before=2144e7a4fb79a93044558ba357fd50cd after=2144e7a4fb79a93044558ba357fd50cd identical=True
+
+MUTANT P-ledger_adjustment_requests.acting_update - KILLED
+what: drop the grant function from this acting policy
+hunk (before):
+  - CREATE POLICY acting_update ON ledger_adjustment_requests FOR UPDATE
+  -     USING (tenant_id = NULLIF(current_setting('app.acting_tenant_id', true), '')::uuid AND (SELECT financial_acting_session_valid()))
+  -     WITH CHECK (tenant_id = NULLIF(current_setting('app.acting_tenant_id', true), '')::uuid AND (SELECT financial_acting_session_valid()));
+hunk (after):
+  + CREATE POLICY acting_update ON ledger_adjustment_requests FOR UPDATE
+  +     USING (tenant_id = NULLIF(current_setting('app.acting_tenant_id', true), '')::uuid)
+  +     WITH CHECK (tenant_id = NULLIF(current_setting('app.acting_tenant_id', true), '')::uuid);
+  file: migrations/0113_governed_manual_adjustments.up.sql
+  test: -run 'TestActingPolicies_EveryK2ActingPolicyRequiresTheGrantFunction' ./internal/adjustment/
+  result: KILLED (go test exit 1)
+    --- FAIL: TestActingPolicies_EveryK2ActingPolicyRequiresTheGrantFunction (2.26s)
+    first-failure: acting_policies_integration_test.go:224: acting policy probes:
+  revert md5 before=2144e7a4fb79a93044558ba357fd50cd after=2144e7a4fb79a93044558ba357fd50cd identical=True
+
+MUTANT P-ledger_adjustment_approvals.acting_read - KILLED
+what: drop the grant function from this acting policy
+hunk (before):
+  - CREATE POLICY acting_read ON ledger_adjustment_approvals FOR SELECT
+  -     USING (tenant_id = NULLIF(current_setting('app.acting_tenant_id', true), '')::uuid AND (SELECT financial_acting_session_valid()));
+hunk (after):
+  + CREATE POLICY acting_read ON ledger_adjustment_approvals FOR SELECT
+  +     USING (tenant_id = NULLIF(current_setting('app.acting_tenant_id', true), '')::uuid);
+  file: migrations/0113_governed_manual_adjustments.up.sql
+  test: -run 'TestActingPolicies_EveryK2ActingPolicyRequiresTheGrantFunction' ./internal/adjustment/
+  result: KILLED (go test exit 1)
+    --- FAIL: TestActingPolicies_EveryK2ActingPolicyRequiresTheGrantFunction (2.47s)
+    first-failure: acting_policies_integration_test.go:224: acting policy probes:
+  revert md5 before=2144e7a4fb79a93044558ba357fd50cd after=2144e7a4fb79a93044558ba357fd50cd identical=True
+
+MUTANT P-ledger_adjustment_approvals.acting_insert - KILLED
+what: drop the grant function from this acting policy
+hunk (before):
+  - CREATE POLICY acting_insert ON ledger_adjustment_approvals FOR INSERT
+  -     WITH CHECK (tenant_id = NULLIF(current_setting('app.acting_tenant_id', true), '')::uuid AND (SELECT financial_acting_session_valid()));
+hunk (after):
+  + CREATE POLICY acting_insert ON ledger_adjustment_approvals FOR INSERT
+  +     WITH CHECK (tenant_id = NULLIF(current_setting('app.acting_tenant_id', true), '')::uuid);
+  file: migrations/0113_governed_manual_adjustments.up.sql
+  test: -run 'TestActingPolicies_EveryK2ActingPolicyRequiresTheGrantFunction' ./internal/adjustment/
+  result: KILLED (go test exit 1)
+    --- FAIL: TestActingPolicies_EveryK2ActingPolicyRequiresTheGrantFunction (2.26s)
+    first-failure: acting_policies_integration_test.go:224: acting policy probes:
+  revert md5 before=2144e7a4fb79a93044558ba357fd50cd after=2144e7a4fb79a93044558ba357fd50cd identical=True
+

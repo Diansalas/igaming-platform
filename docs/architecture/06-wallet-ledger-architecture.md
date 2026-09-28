@@ -91,6 +91,19 @@ makes a repeated call a no-op returning the same answer.
 Rollbacks write compensating entries, never deletions. A rollback for a
 transaction never seen writes a tombstone.
 
+## Manual adjustments (PRH-2 K2, ADR 0100)
+
+Staff corrections to a player's balance are governed requests
+(`internal/adjustment`, migration 0113): one closed posting shape (house
+`manual_adjustment` <-> the player's `player_cash`, same asset), a closed
+reason-code catalogue, an immutable DB-hashed payload, four-eyes at every
+amount (distinct Persons; never the beneficiary; never a contributing
+policy's author), execution inside the final approval's transaction through
+`ledger.Post` only, no negative balance, and a preventive refusal of credits
+while the player has an open captured-unposted deposit exposure. Idempotency
+key `manual_adjustment:<request_id>`. See `financial-transaction-flows.md`
+§16a and `ledger-accounting-model.md` §7.K2.
+
 ## Lock ordering (see ADR 0082)
 
 Concurrency safety here is not only idempotency: every posting also

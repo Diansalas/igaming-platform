@@ -1210,3 +1210,58 @@ its appended security confirmation; k1-architect-ruling-gp1.md for I-5)
 - **NOT DONE in this round** (unchanged from §19.3): `security`/
   `code-reviewer` review of this specific round; the architecture/runbook
   doc updates listed above.
+
+## 20. K2 implementation amendments (PRH-2 K2, migration 0113) — PENDING `security` REVIEW
+
+Recorded by the K2 implementer (`ledger-finance` owner) because §6.5 says
+"Adding a table needs an amendment to this section". These are proposals
+implemented on the unmerged K2 branch, disclosed for `security` and the
+orchestrator; nothing here is claimed as reviewed.
+
+1. **§6.2 correction (K2-G1 finding).** The hardened A-18 (positive guards,
+   `true` arms, SELECT allowlist) found that
+   `asset_operation_eligibility.tenant_and_platform_read` (0045) and
+   `open_bet_self_exclusion_policies.tenant_and_platform_read` (0043) admit
+   NULL-tenant rows to any player-unset session - an acting session
+   included. §6.2 listed both tables as "checked and not exposed" on the
+   strength of their WRITE policies. 0113 adds `AS RESTRICTIVE` acting SELECT
+   fences (`acting_fence_select`) on both. The acting executor needs neither
+   table. The dynamic probe (`TestK2G1_ActingSessionRowVisibilityMatchesAllowlist`)
+   also found `schema_migrations` has no RLS (migration versions and
+   checksums only); it is allow-listed in the probe, not fenced.
+2. **§6.2 allowlist additions (family R, own reference tables):** K1's
+   `financial_capability_catalogue`, `financial_governance_permissions`,
+   `financial_capability_settings` and K2's
+   `financial_control_classifications`, `ledger_adjustment_reason_codes`
+   (`USING (true)` SELECT, no PII, no credentials).
+3. **§6.5 additions beyond the listed tables (all SELECT only, all gated by
+   `tenant_id = acting tenant AND (SELECT financial_acting_session_valid())`):**
+   - `licences` - `acting_read_own_licence`: only the licence the acting
+     tenant's `tenants.licence_id` points to. Needed so the ONE policy
+     evaluator (ADR 0100 §3.2) resolves the tenant's jurisdiction in an
+     acting session exactly as in a tenant session; without it an acting
+     evaluation with any jurisdiction row would fail closed (disabled).
+   - `asset_authorizations` - X rows. Needed by the K2-b suspended-asset rule
+     (the 0045 tenant layer); without it every acting goodwill_credit would
+     be refused as "suspended".
+   - `staff_capability_grant_requests` - X rows. Needed by the K2-G4 /
+     §7.5 use-time re-check (live `person_id` = the grant request's
+     `grantee_person_id`); without it no acting approval could ever count.
+   The 0113 `ledger_accounts` acting INSERT is restricted to
+   `player_cash` / `manual_adjustment` (stricter than the four types listed
+   in §6.5; K3 widens it with its own types).
+4. **The "drop the grant function from one acting policy" mutant is killed
+   for all 24 acting policies 0113 adds**
+   (`TestActingPolicies_EveryK2ActingPolicyRequiresTheGrantFunction`, a
+   layered, rolled-back probe per policy on a scratch DB).
+5. **§7.4 / C-K1-3(c):** K2 evaluates every grant at `now()` only (no "as of"
+   evaluation exists in K2), selecting and locking the grant in force at
+   `now()` (`revoked_at IS NULL AND valid_from <= now() AND (valid_until IS
+   NULL OR now() < valid_until)`), never "the unrevoked grant".
+6. **§7.6 residual as implemented:** a platform principal's own staff row is
+   invisible to a tenant session and to another acting principal. For such
+   an approver the execution count re-checks only its in-force grant and the
+   grant request's `grantee_person_id` against the approval-time Person
+   (`ledger_adjustment_invisible_platform_grant`); its staff status was
+   re-checked at its own approval. Tenant-scoped approvers are always
+   visible and are re-checked live (`FOR SHARE`).

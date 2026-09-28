@@ -34,6 +34,8 @@ func (w *world) waitForLockWaiter(t *testing.T, pattern string) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
+	// Fatal runs the deferred releases in the caller, so a held executor
+	// always gets its connection back.
 	t.Fatalf("no backend ever waited on a lock for %q (no real contention)", pattern)
 }
 
@@ -57,12 +59,16 @@ func TestB7_ForShareBlocksConcurrentRevokeAndSuspend(t *testing.T) {
 
 			locked := make(chan struct{})
 			proceed := make(chan struct{})
+			var release sync.Once
 			testHookAfterShareLocks = func(ctx context.Context, id uuid.UUID) {
 				if id == r.ID {
 					close(locked)
 					<-proceed
 				}
 			}
+			// Always release the held executor, even when an assertion
+			// below fails, so its connection returns to the pool.
+			defer release.Do(func() { close(proceed) })
 			defer func() { testHookAfterShareLocks = nil }()
 
 			var execOut Outcome
@@ -105,7 +111,7 @@ func TestB7_ForShareBlocksConcurrentRevokeAndSuspend(t *testing.T) {
 			w.waitForLockWaiter(t, "%UPDATE staff_users SET status%")
 
 			releasedAt := time.Now()
-			close(proceed)
+			release.Do(func() { close(proceed) })
 			wg.Wait()
 			if execErr != nil || !execOut.Executed {
 				t.Fatalf("execution: %v %+v", execErr, execOut)
@@ -156,10 +162,11 @@ func TestB7_ConcurrentFinalApprovalsPostOnce(t *testing.T) {
 	}
 	locked := make(chan struct{})
 	proceed := make(chan struct{})
-	var once sync.Once
+	var once, release sync.Once
 	testHookAfterShareLocks = func(ctx context.Context, id uuid.UUID) {
 		once.Do(func() { close(locked); <-proceed })
 	}
+	defer release.Do(func() { close(proceed) })
 	defer func() { testHookAfterShareLocks = nil }()
 
 	type res struct {
@@ -171,7 +178,7 @@ func TestB7_ConcurrentFinalApprovalsPostOnce(t *testing.T) {
 	<-locked
 	go func() { o, e := w.decide(w.F3, r, DecisionApprove); results <- res{o, e} }()
 	w.waitForLockWaiter(t, "%FROM ledger_adjustment_requests WHERE id = $1 AND tenant_id = $2 FOR UPDATE%")
-	close(proceed)
+	release.Do(func() { close(proceed) })
 	a, b := <-results, <-results
 	executed, notPending := 0, 0
 	for _, x := range []res{a, b} {

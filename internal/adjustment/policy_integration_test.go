@@ -180,6 +180,14 @@ func TestB10_PolicyGovernanceRefusals(t *testing.T) {
 	if err := w.decidePolicy(c, w.AdminB, DecisionApprove); err != nil {
 		t.Fatalf("platform/platform non-tightening: %v", err)
 	}
+	// MAX, never most-specific-wins (S-2 (ii); ADR 0100 §3.2): with the
+	// tenant row now at 1 and the platform floor raised to 2, the platform
+	// floor still governs.
+	w.approvePolicy(PolicyChangeInput{ChangeKind: ChangeKindPolicy, OperationKind: OperationKind, Level: LevelPlatform,
+		AssetCode: strPtr(w.Asset), BaseRequiredApprovals: intPtr(2)}, w.AdminA, w.AdminB)
+	if ev := w.evaluate(OperationKind, i64(1)); ev.Required != 2 || len(ev.ContributingPolicyIDs) != 2 {
+		t.Fatalf("a less-specific floor must still bind (MAX, not most-specific): %+v", ev)
+	}
 
 	// Single-Person platform change: the approver shares the requester's Person.
 	twin := mkStaff(t, w.pool, uuid.Nil, "platform_admin", w.AdminA.PersonID)
