@@ -12,7 +12,22 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/jurisdiction"
 	"github.com/Diansalas/igaming-platform/internal/providerref"
+	"github.com/Diansalas/igaming-platform/internal/txscope"
 )
+
+// ErrCatalogueFetchRefused is the sentinel FetchCatalogue wraps ONLY when it
+// refuses to call the provider at all because ctx is (despite the API shape
+// below) already marked as holding a pooled database transaction
+// (txscope.Held) - a programming bug at the call site, never an ordinary
+// provider/network failure. Scoped identically to payments'
+// ErrProviderCallRefused / casino's own sentinel (ADR 0095, defence-in-depth
+// behind the primary API-shape control: no function that can reach
+// Provider.Catalogue takes a pgx.Tx): each covers only its own gate-level
+// refusal, never the adapter's own error (code review F5 - the prior
+// revision's doc comment incorrectly said this sentinel also wrapped
+// ordinary provider errors). A provider error is instead returned with
+// plain context, unwrapped by this sentinel - see FetchCatalogue below.
+var ErrCatalogueFetchRefused = errors.New("sportsbook: provider catalogue fetch refused: tx held")
 
 // catalogueUnavailableReason is the ONE opaque, player-facing reason every
 // jurisdiction-gated catalogue annotation reports (Stage 9.2, ADR 0083
@@ -25,12 +40,49 @@ import (
 // DenialCodeJurisdictionUnresolved themselves.
 const catalogueUnavailableReason = "not_available_in_your_jurisdiction"
 
-// SyncCatalogue upserts provider's full catalogue into the platform-wide
-// sb_sports/sb_competitions/sb_events/sb_markets/sb_selections tables,
-// keyed at each level by (parent id, external_ref) - the platform mints
-// its own id once, at first insert, and never re-derives it from a
-// provider's own reference again, mirroring internal/casino.UpsertGame's
-// identical (provider_id, provider_game_id) keying discipline.
+// FetchCatalogue calls provider.Catalogue and validates the result - the
+// ONLY sanctioned way to invoke a sportsbook Provider's catalogue method
+// (SB-CATALOGUE-IO-1, ADR 0095 amendment 2026-09-28). It runs with NO
+// pooled database transaction held: it refuses outright if ctx is already
+// txscope-marked (the same defence-in-depth guard payments' callProvider
+// and casino's Orchestrator.LaunchGame apply to their own adapter calls),
+// and it never itself opens one. This keeps a provider network round-trip
+// (a real future adapter's HTTP call) off any connection/lock hold, per
+// ADR 0094 INV-POOL / ADR 0095's no-provider-I/O-with-a-connection-held
+// rule - the same rule PAY-POOL-1/F-POOL-2 apply to payments/casino/KYC,
+// now applied here even though the sync is not itself financial.
+//
+// Callers upsert FetchCatalogue's result via SyncCatalogue, inside its own
+// separate db.Pool.WithPlatformService transaction, opened only AFTER this
+// function returns - see cmd/platform-api/main.go's call site for the
+// canonical two-step sequence. A fetch error or a validation failure here
+// means nothing is ever written: no transaction is opened at all in that
+// case, which is a strictly stronger guarantee than "nothing written
+// inside the transaction" (SyncCatalogue's own pre-split behaviour).
+func FetchCatalogue(ctx context.Context, provider Provider) (CatalogueResult, error) {
+	if txscope.Held(ctx) {
+		return CatalogueResult{}, ErrCatalogueFetchRefused
+	}
+	result, err := provider.Catalogue(ctx)
+	if err != nil {
+		return CatalogueResult{}, fmt.Errorf("sportsbook: fetch catalogue: %w", err)
+	}
+	// PROVIDER-REF-BOUND-1: the whole tree is validated here, before any
+	// transaction is opened at all - a single bad external_ref rejects the
+	// fetch with nothing ever written.
+	if err := validateCatalogueReferences(result); err != nil {
+		return CatalogueResult{}, err
+	}
+	return result, nil
+}
+
+// SyncCatalogue upserts an already-fetched (FetchCatalogue) catalogue
+// result into the platform-wide sb_sports/sb_competitions/sb_events/
+// sb_markets/sb_selections tables, keyed at each level by (parent id,
+// external_ref) - the platform mints its own id once, at first insert, and
+// never re-derives it from a provider's own reference again, mirroring
+// internal/casino.UpsertGame's identical (provider_id, provider_game_id)
+// keying discipline.
 //
 // tx MUST come from db.Pool.WithPlatformService(ctx,
 // db.ServiceSportsbookCatalogueSync, ...) - migration 0084 (ADR 0081,
@@ -49,14 +101,16 @@ const catalogueUnavailableReason = "not_available_in_your_jurisdiction"
 // unchanged by which adapter produced the CatalogueResult
 // (docs/architecture/09-sportsbook-architecture.md §0's design test,
 // applied at this stage's narrower scope).
-func SyncCatalogue(ctx context.Context, tx pgx.Tx, provider Provider) error {
+//
+// result is validated again here (validateCatalogueReferences is pure and
+// I/O-free, so this costs nothing) as defence in depth: a caller other
+// than the canonical FetchCatalogue-then-SyncCatalogue sequence (e.g. a
+// test) can never get SyncCatalogue to write a half-validated tree, even
+// if it skipped FetchCatalogue's own validation step.
+func SyncCatalogue(ctx context.Context, tx pgx.Tx, result CatalogueResult) error {
 	if err := db.AssertPlatformServiceScope(ctx, tx, db.ServiceSportsbookCatalogueSync); err != nil {
 		return err
 	}
-	result := provider.Catalogue()
-	// PROVIDER-REF-BOUND-1: the whole tree is validated BEFORE the first
-	// upsert, so a single bad external_ref rejects the sync with nothing
-	// written (never a half-synced catalogue, never a truncated ref).
 	if err := validateCatalogueReferences(result); err != nil {
 		return err
 	}
