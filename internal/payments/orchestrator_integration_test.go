@@ -361,23 +361,15 @@ func TestInitiateDeposit_ClientRetryReturnsOriginalIntent_NoSecondProviderCall(t
 		AssetCode: "EUR", Amount: 3000, PaymentMethod: "card", IdempotencyKey: "dep-retry-key",
 	}
 
-	var first, second DepositIntent
-	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		var err error
-		first, err = orch.InitiateDeposit(ctx, tx, params)
-		return err
-	})
+	firstRes, err := orch.InitiateDepositAttempt(context.Background(), pool, AllowAllDepositKYCGate{}, MockCredentialResolver{}, params)
 	if err != nil {
-		t.Fatalf("first InitiateDeposit: %v", err)
+		t.Fatalf("first InitiateDepositAttempt: %v", err)
 	}
-	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		var err error
-		second, err = orch.InitiateDeposit(ctx, tx, params)
-		return err
-	})
+	secondRes, err := orch.InitiateDepositAttempt(context.Background(), pool, AllowAllDepositKYCGate{}, MockCredentialResolver{}, params)
 	if err != nil {
-		t.Fatalf("retried InitiateDeposit: %v", err)
+		t.Fatalf("retried InitiateDepositAttempt: %v", err)
 	}
+	first, second := firstRes.Intent, secondRes.Intent
 
 	if first.ID != second.ID {
 		t.Fatalf("expected the retried call to return the SAME intent, got %s vs %s", first.ID, second.ID)

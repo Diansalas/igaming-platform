@@ -174,27 +174,27 @@ func mustRegisterCapability(t *testing.T, pool *db.Pool, tenantID uuid.UUID, pro
 	}
 }
 
-// mustCreateDepositIntent creates a DepositIntent directly via the
-// orchestrator (not through HTTP) for a player who is NOT the one under
-// test - e.g. a "victim" fixture in a cross-player/cross-tenant isolation
-// test. Requires a routable capability already registered for tenantID.
+// mustCreateDepositIntent creates a DepositIntent directly via the live
+// v2 orchestrator entry point (InitiateDepositAttempt, not through HTTP)
+// for a player who is NOT the one under test - e.g. a "victim" fixture in
+// a cross-player/cross-tenant isolation test. Requires a routable
+// capability already registered for tenantID. Uses the same
+// KYCEnforcementDepositGate/MockCredentialResolver pairing the real
+// deposit handler wires (deposit_handlers.go) - a fresh test tenant has
+// no licence bound, so the KYC gate is a structural not_required pass,
+// exactly like every other fixture in this file.
 func mustCreateDepositIntent(t *testing.T, pool *db.Pool, orchestrator *payments.Orchestrator, tenantID, brandID, playerAccountID, walletID uuid.UUID, assetCode string, amount int64) payments.DepositIntent {
 	t.Helper()
-	var intent payments.DepositIntent
-	err := pool.WithTenant(context.Background(), tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		var err error
-		intent, err = orchestrator.InitiateDeposit(ctx, tx, payments.InitiateDepositParams{
-			Scope: payments.DepositScope{
-				TenantID: tenantID, BrandID: brandID, PlayerAccountID: playerAccountID, WalletID: walletID,
-			},
-			AssetCode: assetCode, Amount: amount, PaymentMethod: "card", IdempotencyKey: uuid.NewString(),
-		})
-		return err
+	res, err := orchestrator.InitiateDepositAttempt(context.Background(), pool, payments.KYCEnforcementDepositGate{}, payments.MockCredentialResolver{}, payments.InitiateDepositParams{
+		Scope: payments.DepositScope{
+			TenantID: tenantID, BrandID: brandID, PlayerAccountID: playerAccountID, WalletID: walletID,
+		},
+		AssetCode: assetCode, Amount: amount, PaymentMethod: "card", IdempotencyKey: uuid.NewString(),
 	})
 	if err != nil {
 		t.Fatalf("create deposit intent: %v", err)
 	}
-	return intent
+	return res.Intent
 }
 
 // mustCreateWithdrawalRequest creates a WithdrawalRequest directly (not

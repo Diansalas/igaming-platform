@@ -141,12 +141,31 @@ func TestInitiateDepositAttempt_DeclinedOutcome_T8(t *testing.T) {
 	}
 }
 
+// TestInitiateDepositAttempt_AmbiguousOutcome_T6 also closes
+// PROV-OUTBOUND-CRED-1-LEGACY-PATH (E2)'s own migration of the deleted
+// legacy chain's TestInitiateDeposit_AmbiguousOutcomeCallsQueryStatus
+// BeforeNotCascading: that test's subject (a synchronous, in-transaction
+// provider.QueryStatus call, made before ever finalizing an ambiguous
+// deposit ambiguous or cascading it) is the exact QueryStatus-in-tx
+// anti-pattern ADR 0095 removes (see receive_bridge_integration_test.go's
+// own doc comment on the identical, already-adapted callback-path case,
+// TestReceiveCallback_AmbiguousCallbackResolvedViaQueryStatus_NotCascaded).
+// InitiateDepositAttempt (deposit_v2.go) never calls QueryStatus at all -
+// an ambiguous synchronous Deposit outcome is left `ambiguous` for a
+// later sweeper/T17 touch, never resolved inline. This test therefore
+// asserts the STRICT OPPOSITE of the deleted test's own assertion (zero
+// QueryStatus calls, not exactly one) while keeping every one of its
+// other guarantees (no cascade to a second provider, no ledger effect) -
+// an equally strict, never weaker, replacement, not a silent drop.
 func TestInitiateDepositAttempt_AmbiguousOutcome_T6(t *testing.T) {
 	pool := depositV2ScratchPool(t)
 	f := seedOrchFixture(t, pool)
-	provider := NewMockProvider("mock-psp-v2-d", "EUR")
-	registerCapability(t, pool, f, provider, 100)
-	orch := NewOrchestrator(map[string]PaymentProvider{"mock-psp-v2-d": provider}, MultiWebhookCredentialResolver{"mock-psp-v2-d": NewMockWebhookCredentials(provider)})
+	provider := newSpyProvider(NewMockProvider("mock-psp-v2-d", "EUR"))
+	fallback := newSpyProvider(NewMockProvider("mock-psp-v2-d-fallback", "EUR"))
+	fallback.AcceptAllAmounts = true
+	registerCapability(t, pool, f, provider, 10)
+	registerCapability(t, pool, f, fallback, 20)
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-psp-v2-d": provider, "mock-psp-v2-d-fallback": fallback}, MultiWebhookCredentialResolver{"mock-psp-v2-d": NewMockWebhookCredentials(provider.MockProvider), "mock-psp-v2-d-fallback": NewMockWebhookCredentials(fallback.MockProvider)})
 
 	res, err := orch.InitiateDepositAttempt(context.Background(), pool, AllowAllDepositKYCGate{}, MockCredentialResolver{}, InitiateDepositParams{
 		Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
@@ -163,6 +182,15 @@ func TestInitiateDepositAttempt_AmbiguousOutcome_T6(t *testing.T) {
 	}
 	if res.Intent.Status != DepositIntentAmbiguous {
 		t.Fatalf("expected intent status ambiguous, got %s", res.Intent.Status)
+	}
+	if got := provider.QueryStatusCallCount(); got != 0 {
+		t.Fatalf("expected zero synchronous QueryStatus calls (resolution belongs to the sweeper, not phase B), got %d", got)
+	}
+	if got := fallback.DepositCallCount(); got != 0 {
+		t.Fatalf("an ambiguous outcome must never auto-cascade to another provider, but the fallback's Deposit was called %d times", got)
+	}
+	if balance := cashBalance(t, pool, f); balance != 0 {
+		t.Fatalf("an ambiguous outcome must post nothing, got balance %d", balance)
 	}
 }
 

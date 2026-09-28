@@ -1003,7 +1003,7 @@ func TestRVLF_L2_BridgeCascadeThenT13SecondCapture(t *testing.T) {
 	var first, second PaymentAttempt
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		intent, err = orch.InitiateDeposit(ctx, tx, InitiateDepositParams{
+		intent, err = legacyShapeInitiateDeposit(ctx, tx, orch, InitiateDepositParams{
 			Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
 			AssetCode: "EUR", Amount: 5000, PaymentMethod: "card", IdempotencyKey: "l2-cascade-t13",
 		})

@@ -80,18 +80,14 @@ func TestInitiateDeposit_DeniedWhenSelfExcludedPlatformWide_NoLedgerEffect(t *te
 		t.Fatalf("self-exclude: %v", err)
 	}
 
-	var intent DepositIntent
-	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		var err error
-		intent, err = orch.InitiateDeposit(ctx, tx, InitiateDepositParams{
-			Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
-			AssetCode: "EUR", Amount: 5000, PaymentMethod: "card", IdempotencyKey: "dep-rg-self-excluded",
-		})
-		return err
+	res, err := orch.InitiateDepositAttempt(context.Background(), pool, AllowAllDepositKYCGate{}, MockCredentialResolver{}, InitiateDepositParams{
+		Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
+		AssetCode: "EUR", Amount: 5000, PaymentMethod: "card", IdempotencyKey: "dep-rg-self-excluded",
 	})
 	if err != nil {
-		t.Fatalf("InitiateDeposit: %v", err)
+		t.Fatalf("InitiateDepositAttempt: %v", err)
 	}
+	intent := res.Intent
 
 	// --- Fail-closed: declined, never routed to a provider ---
 	if intent.Status != DepositIntentDeclined {
@@ -174,18 +170,14 @@ func TestInitiateDeposit_DeniedWhenPlayerAccountSuspended_NoLedgerEffect(t *test
 		t.Fatalf("suspend account: %v", err)
 	}
 
-	var intent DepositIntent
-	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		var err error
-		intent, err = orch.InitiateDeposit(ctx, tx, InitiateDepositParams{
-			Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
-			AssetCode: "EUR", Amount: 2500, PaymentMethod: "card", IdempotencyKey: "dep-rg-suspended",
-		})
-		return err
+	res, err := orch.InitiateDepositAttempt(context.Background(), pool, AllowAllDepositKYCGate{}, MockCredentialResolver{}, InitiateDepositParams{
+		Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
+		AssetCode: "EUR", Amount: 2500, PaymentMethod: "card", IdempotencyKey: "dep-rg-suspended",
 	})
 	if err != nil {
-		t.Fatalf("InitiateDeposit: %v", err)
+		t.Fatalf("InitiateDepositAttempt: %v", err)
 	}
+	intent := res.Intent
 	if intent.Status != DepositIntentDeclined {
 		t.Fatalf("expected DepositIntentDeclined, got %v", intent.Status)
 	}

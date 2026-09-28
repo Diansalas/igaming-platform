@@ -38,7 +38,32 @@
   - **§29 (F-POOL-2).** The deposit (`deposit_v2.go`/`drive.go`), sweeper, callback and payout
     (`payout.go`/`payout_sweep.go`) paths conform to the three-phase rule. The legacy
     `Orchestrator.InitiateDeposit` path does not: it has a test-only caller and is tracked as
-    PROV-OUTBOUND-CRED-1-LEGACY-PATH.
+    PROV-OUTBOUND-CRED-1-LEGACY-PATH. *[Amendment, 2026-09-28 (`payments`, PRH-2 E2,
+    PROV-OUTBOUND-CRED-1-LEGACY-PATH): **CLOSED.** `InitiateDeposit`, `InitiateDepositAudited`,
+    `attemptDeposit`, `handleDecline`, `resolveAmbiguous` and `RecordDepositMultipleSuccessRefusal`
+    are deleted from `orchestrator.go`. `InitiateDepositAttempt` (`deposit_v2.go`) is now the only
+    deposit-creation entry point in the tree, test or production; there is no longer a legacy
+    caller for the kind-split gate to be bypassed by. The 21 test call sites of the deleted
+    functions (10 files) were migrated to `InitiateDepositAttempt` where the test's subject was
+    `InitiateDeposit`'s own behaviour, or to a TEST-ONLY bridge
+    (`initiateDepositWithAttempt`/`legacyShapeInitiateDeposit`, `receive_bridge_integration_test.go`)
+    built only from still-live building blocks (`RouteProvider`, `setIntentAttempt`,
+    `finalizeDeclined`, `finalizeAmbiguous`) where the test's subject was the receipt/callback
+    path and needed the pre-cutover on-disk shape. `TestC4_ResolveAmbiguousOutcomeSucceeded_
+    ReturnsWrappedRefusal` and `TestC4_InitiateDepositAudited_WritesRefusalAudit`
+    (`migration_0107_integration_test.go`) tested only the deleted
+    `DepositIntentAlreadyResolvedRefusal`/`RecordDepositMultipleSuccessRefusal` wiring and were
+    deleted as redundant with the live T10/T13d coverage
+    (`TestMigration0107_T13tT13d_TerminalReasonTrigger_HEAD`,
+    `TestINVDEP1_FL1_ApplicationChokePointCatchesItBeforeTheDBBackstop`,
+    `TestINVDEP1_FL2_MultipleSuccessAlertLogContentIsPinned`) and `TestX5_LedgerBackstopMapping`
+    for the `ErrDepositIntentAlreadyResolved` sentinel itself (ledger-finance LF-16, corrected
+    premise E2d: the legacy chain was never the only path to
+    `ledger.ErrDepositAlreadyPostedForIntent` - the live `postDepositSuccess` maps it at its own
+    call site, reached by a real race and by a direct `ledger.Post` fixture). The now-orphaned
+    `DepositIntentAlreadyResolvedRefusal` wrapper type (zero constructors once `resolveAmbiguous`
+    is gone) is deleted with it. Mutant parity re-confirmed at this gate:
+    `docs/plans/payment-readiness/evidence/prh2-e2-mutant-parity.txt`.]*
   - **§14 (ADR 0082 A7): IMPLEMENTED.**
 - **Current status (architect, 2026-09-27, revision 4): ACCEPTED — PARTIALLY IMPLEMENTED.**
   Amended by §28 (AM-2, INV-DEP-1, NOT IMPLEMENTED), §29 (F-POOL-2 durable-state definition)
@@ -51,7 +76,7 @@
   | §7 sweeper | PARTIALLY IMPLEMENTED | LF95-R1 automatic re-drive NOT IMPLEMENTED (operator T17 path only). |
   | §10.2–§10.5 kill switch (0105, 0106) | PARTIALLY IMPLEMENTED | Data model, triggers, routes (as amended by §30) IMPLEMENTED. Phase 2 wiring (deposit kill-switch decline, labelled payout hold) IMPLEMENTED on `worktree-agent-aa2bb3c6bdd6d51eb` @ `4e04f4e`; merge approved by the architect (§10.9), and this label applies to this branch once that merge lands. Residual KS-DEP-T2-T3-1 (§10.9.3) NOT IMPLEMENTED. Alert delivery NOT IMPLEMENTED (launch-blocking). KS-AUDIT-TENANT-1 NOT IMPLEMENTED (launch-blocking). |
   | §10.1 manifest | PARTIALLY IMPLEMENTED | `SupportsRefund`, `CallbackEchoesMerchantReference` enforced; PRH-I1-MANIFEST-1..4 deferred. |
-  | §11 PROV-OUTBOUND-CRED-1 | PARTIALLY IMPLEMENTED | Casino/KYC kind split IMPLEMENTED. Payments kind split and pool threading IMPLEMENTED on `4e04f4e`, with code-review C1/C2 closed by `ce77bac`/`50b595d`; merge approved (§10.9). Legacy `InitiateDeposit` path bypasses the gate: PROV-OUTBOUND-CRED-1-LEGACY-PATH, open, a precondition on any real payments adapter. |
+  | §11 PROV-OUTBOUND-CRED-1 | PARTIALLY IMPLEMENTED | Casino/KYC kind split IMPLEMENTED. Payments kind split and pool threading IMPLEMENTED on `4e04f4e`, with code-review C1/C2 closed by `ce77bac`/`50b595d`; merge approved (§10.9). Legacy `InitiateDeposit` path bypassed the gate: PROV-OUTBOUND-CRED-1-LEGACY-PATH. *[Amendment, 2026-09-28 (PRH-2 E2): CLOSED - the legacy chain is deleted; see the §29 amendment above.]* |
   | §12 payment reconciliation (0102, 0104) | MOCK | Real PSP statement PROVIDER DEPENDENT; `code-reviewer` NOT READY; §28.9 kind NOT IMPLEMENTED. |
   | §15 casino launch, KYC create/submit | IMPLEMENTED against MOCK adapters | Casino `code-reviewer` NOT READY (R1); IO-1B/IO-1C closed (`0ca1193`). |
   | INV-IO-1 (a)–(d) | IMPLEMENTED | (c) is `internal/txscope/no_provider_call_in_tx_closure_static_test.go`. |
@@ -1723,7 +1748,8 @@ marked complete and before a `payments.Sweeper` is wired in `cmd/platform-api`).
   code-reviewer's re-review of the fix round.
 - KS-DEP-T2-T3-1: NOT IMPLEMENTED. *[Status note 2026-09-28: IMPLEMENTED (`2da7548`); see the
   note at the end of §10.9.3. Phase 2 (`4e04f4e`) is merged on this branch.]*
-- PROV-OUTBOUND-CRED-1-LEGACY-PATH: open.
+- PROV-OUTBOUND-CRED-1-LEGACY-PATH: open. *[Status note 2026-09-28 (`payments`, PRH-2 E2):
+  CLOSED. See the §29 amendment above for the deletion record.]*
 - Alert delivery and KS-AUDIT-TENANT-1: NOT IMPLEMENTED, launch-blocking (unchanged).
 
 ---
