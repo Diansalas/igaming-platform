@@ -81,6 +81,18 @@ func mustActiveCasinoPlayPolicy(t *testing.T, pool *db.Pool, jurisdictionID uuid
 	}
 }
 
+func countRows(t *testing.T, pool *db.Pool, tenantID uuid.UUID, query string, args ...any) int {
+	t.Helper()
+	var n int
+	err := pool.WithTenant(context.Background(), tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, query, args...).Scan(&n)
+	})
+	if err != nil {
+		t.Fatalf("count query %q: %v", query, err)
+	}
+	return n
+}
+
 func mustSeedCasinoVerification(t *testing.T, pool *db.Pool, f casinoFixture, status string) {
 	t.Helper()
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
@@ -133,6 +145,26 @@ func TestReceiveCallback_BetDeniedByKYCPlayPolicy_NoLedgerEffect(t *testing.T) {
 	debits, credits := sumDebitsCredits(t, pool, f.tenantID)
 	if debits != credits {
 		t.Fatalf("invariant #1 violated: debits=%d credits=%d", debits, credits)
+	}
+
+	// MPLAYREC (code review rv-prh-i3-code-review.md, KYC-ENF-TESTPINS-1):
+	// a REAL evaluation (an active play policy exists) must write a
+	// kyc_enforcement_decisions row for the deny, exactly like withdrawal's
+	// own deny path - this is what T1's own residual gap named ("play
+	// tests do not assert the decision row") and what MPLAYREC (removing
+	// the casino play-deny RecordDecision call) survived against before
+	// this assertion existed.
+	decisionCount := countRows(t, pool, f.tenantID,
+		`SELECT count(*) FROM kyc_enforcement_decisions WHERE tenant_id = $1 AND player_account_id = $2 AND operation = 'casino_play' AND allowed = false`,
+		f.tenantID, f.playerAccountID)
+	if decisionCount != 1 {
+		t.Fatalf("expected exactly 1 kyc_enforcement_decisions row for the denied casino_play evaluation, got %d", decisionCount)
+	}
+	auditCount := countRows(t, pool, f.tenantID,
+		`SELECT count(*) FROM audit_log WHERE tenant_id = $1 AND action = 'kyc.enforcement_denied' AND target_id = $2`,
+		f.tenantID, f.playerAccountID.String())
+	if auditCount != 1 {
+		t.Fatalf("expected exactly 1 kyc.enforcement_denied audit row, got %d", auditCount)
 	}
 }
 

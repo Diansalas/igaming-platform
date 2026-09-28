@@ -28,11 +28,15 @@ type DormantJurisdictionTrigger struct {
 }
 
 // ListDormantJurisdictionTriggers implements ADR 0096 §6's illustrative
-// query: every licensing jurisdiction with at least one active tenant and
-// no active kyc_enforcement_policies row for a given trigger_type (and,
-// for 'play', per play_operation - code review B4: the original version
-// of this query omitted 'play' entirely, contradicting its own "reports
-// every trigger_type the evaluator consults" comment). Must be called
+// query: every licensing jurisdiction with at least one LIVE tenant
+// (tenants.status = 'active' - KYC-ENF-TESTPINS-1 B4, 2026-09-28: the
+// tenant-status filter was missing entirely, so a jurisdiction whose only
+// tenant had gone 'suspended'/'closed' was still reported as needing a
+// policy decision) and no active kyc_enforcement_policies row for a given
+// trigger_type (and, for 'play', per play_operation - code review B4: the
+// original version of this query also omitted 'play' entirely,
+// contradicting its own "reports every trigger_type the evaluator
+// consults" comment). Must be called
 // under a platform-admin-scoped transaction (db.Pool.WithPlatformAdmin) -
 // it reads platform-wide reference data, mirroring every other
 // platform-admin-only read in this codebase.
@@ -46,7 +50,8 @@ func ListDormantJurisdictionTriggers(ctx context.Context, tx pgx.Tx) ([]DormantJ
 		SELECT DISTINCT l.jurisdiction_id, 'cumulative_deposit', ''
 		  FROM tenants t
 		  JOIN licences l ON l.id = t.licence_id
-		 WHERE NOT EXISTS (
+		 WHERE t.status = 'active'
+		   AND NOT EXISTS (
 		       SELECT 1 FROM kyc_enforcement_policies p
 		        WHERE p.licensing_jurisdiction_id = l.jurisdiction_id
 		          AND p.trigger_type = 'cumulative_deposit'
@@ -59,7 +64,8 @@ func ListDormantJurisdictionTriggers(ctx context.Context, tx pgx.Tx) ([]DormantJ
 		  FROM tenants t
 		  JOIN licences l ON l.id = t.licence_id
 		 CROSS JOIN (VALUES ('casino_play'), ('sportsbook_play')) AS tt(play_operation)
-		 WHERE NOT EXISTS (
+		 WHERE t.status = 'active'
+		   AND NOT EXISTS (
 		       SELECT 1 FROM kyc_enforcement_policies p
 		        WHERE p.licensing_jurisdiction_id = l.jurisdiction_id
 		          AND p.trigger_type = 'play'
