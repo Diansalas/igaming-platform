@@ -92,6 +92,17 @@ func TestRequestWithdrawal_KYCStoreOutage_FailsClosedWithOneUnavailableDecision(
 		f.tenantID, f.playerAccountID)
 	auditBefore := countRows(t, pool, f.tenantID,
 		`SELECT count(*) FROM audit_log WHERE action = 'kyc.enforcement_denied'`)
+	// LF-20 (ledger-finance F-1, 2026-09-28): count EVERY ledger_transactions
+	// row for this tenant, and the cash/hold projection balances, BEFORE the
+	// attempt - not scoped to a correlation id a hold posting would never
+	// carry (a hold posting correlates to requestID, which does not exist
+	// yet on the unavailable path; the earlier version of this assertion
+	// filtered by kycDenied.Params.CorrelationID, which a hold posting could
+	// never match, making it vacuous).
+	ledgerTxCountBefore := countRows(t, pool, f.tenantID,
+		`SELECT count(*) FROM ledger_transactions WHERE tenant_id = $1`, f.tenantID)
+	cashBalanceBefore := walletAccountBalance(t, pool, f.tenantID, f.cashAccountID)
+	holdBalanceBefore := walletAccountBalance(t, pool, f.tenantID, f.holdAccountID)
 
 	idemKey := "wd-kyc-outage-" + uuid.NewString()
 	var kycDenied *KYCDeniedError
@@ -158,10 +169,49 @@ func TestRequestWithdrawal_KYCStoreOutage_FailsClosedWithOneUnavailableDecision(
 	if reqCount != 0 {
 		t.Fatalf("expected 0 withdrawal_requests rows after a KYC-unavailable outcome, got %d", reqCount)
 	}
-	ledgerCount := countRows(t, pool, f.tenantID,
-		`SELECT count(*) FROM ledger_transactions WHERE tenant_id = $1 AND correlation_id = $2`,
-		f.tenantID, kycDenied.Params.CorrelationID)
-	if ledgerCount != 0 {
-		t.Fatalf("expected 0 ledger postings correlated to this attempt, got %d", ledgerCount)
+	// LF-20 (ledger-finance F-1): the tenant's ledger_transactions count,
+	// and both the player_cash and player_withdrawal_hold projection
+	// balances, are UNCHANGED by an unavailable-outcome attempt - no hold
+	// posting happened, full stop. This is a stronger, correctly-scoped
+	// replacement for the earlier correlation-id-filtered count, which
+	// could never have caught a hold posting in the first place (a hold
+	// posting correlates to the request id, generated only after the KYC
+	// gate passes - never to this attempt's KYC correlation id).
+	ledgerTxCountAfter := countRows(t, pool, f.tenantID,
+		`SELECT count(*) FROM ledger_transactions WHERE tenant_id = $1`, f.tenantID)
+	if ledgerTxCountAfter != ledgerTxCountBefore {
+		t.Fatalf("expected the tenant's ledger_transactions count to stay at %d after a KYC-unavailable outcome, got %d", ledgerTxCountBefore, ledgerTxCountAfter)
 	}
+	cashBalanceAfter := walletAccountBalance(t, pool, f.tenantID, f.cashAccountID)
+	if cashBalanceAfter != cashBalanceBefore {
+		t.Fatalf("expected player_cash balance to stay at %d after a KYC-unavailable outcome, got %d", cashBalanceBefore, cashBalanceAfter)
+	}
+	holdBalanceAfter := walletAccountBalance(t, pool, f.tenantID, f.holdAccountID)
+	if holdBalanceAfter != holdBalanceBefore {
+		t.Fatalf("expected player_withdrawal_hold balance to stay at %d after a KYC-unavailable outcome, got %d", holdBalanceBefore, holdBalanceAfter)
+	}
+}
+
+// walletAccountBalance reads wallet_balance_projection's signed balance
+// (credit_total - debit_total, ledger-accounting-model.md §5 - credit-
+// positive for every account type without exception) for ledgerAccountID,
+// returning 0 if no projection row exists yet (a wallet with no postings
+// at all has none).
+func walletAccountBalance(t *testing.T, pool *db.Pool, tenantID, ledgerAccountID uuid.UUID) int64 {
+	t.Helper()
+	var credit, debit int64
+	err := pool.WithTenant(context.Background(), tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		err := tx.QueryRow(ctx,
+			`SELECT credit_total, debit_total FROM wallet_balance_projection WHERE ledger_account_id = $1`,
+			ledgerAccountID).Scan(&credit, &debit)
+		if errors.Is(err, pgx.ErrNoRows) {
+			credit, debit = 0, 0
+			return nil
+		}
+		return err
+	})
+	if err != nil {
+		t.Fatalf("read wallet_balance_projection for ledger account %s: %v", ledgerAccountID, err)
+	}
+	return credit - debit
 }
