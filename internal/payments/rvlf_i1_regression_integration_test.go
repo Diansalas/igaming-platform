@@ -2164,3 +2164,95 @@ func TestRVLF_SecGapA3_ReversalFingerprintUsesRawWireOutcome(t *testing.T) {
 		t.Error("sec-gap-a3: the stored fingerprint must match computeEventFingerprint's own RawOutcome-based value")
 	}
 }
+
+// TestINVDEP1_H1b_ReversalFingerprintEndToEnd_RawWireOutcomePreserved closes
+// code review's "C5 is NOT closed" item (rv-fh3-code-review.md, 95a1c34):
+// TestRVLF_SecGapA3 above calls computeEventFingerprint DIRECTLY with an
+// already-succeeded RawOutcome, so it never exercises the real assignment
+// site (receipt.go's `ev.RawOutcome = rawOutcome`, applyReversalReceipt
+// Evidence's rule-1/rule-3 line) - a mutant dropping that ONE line
+// (H1b) survives the whole suite because nothing drives a REAL callback
+// delivery whose wire outcome differs from the normalized-for-storage
+// value. This test delivers two such real callbacks end to end (through
+// rvCallback, never computeEventFingerprint directly):
+//
+//   - a legacy declined-as-reason-carrier chargeback reversal (wire
+//     Outcome=declined, normalized to stored outcome=succeeded) - the
+//     case H1b actually affects, since dropping the RawOutcome assignment
+//     would collapse its fingerprint onto whatever a genuine succeeded-
+//     outcome reversal of the SAME reference/original/amount/asset would
+//     produce, silently deduplicating two DIFFERENT wire deliveries
+//     against each other (rule 3);
+//   - a pending reversal (wire Outcome=pending, stored un-normalized) -
+//     included per the coordinator's own instruction; RawOutcome is not
+//     assigned on this branch at all (ev.Outcome is left as the raw wire
+//     value untouched), so its fingerprint already reflects the raw value
+//     by construction and this half is a confirmation, not a new kill.
+func TestINVDEP1_H1b_ReversalFingerprintEndToEnd_RawWireOutcomePreserved(t *testing.T) {
+	pool := depositV2ScratchPool(t)
+	f := seedOrchFixture(t, pool)
+	p := NewMockProvider("mock-h1b", "EUR")
+	registerCapability(t, pool, f, p, 100)
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-h1b": p}, MultiWebhookCredentialResolver{"mock-h1b": NewMockWebhookCredentials(p)})
+
+	// --- declined (legacy chargeback carrier), the case H1b affects ------
+	res := rvInit(t, pool, orch, f, 5000, "h1b-declined")
+	ref := *res.Attempt.ProviderReference
+	if _, err := rvCallback(pool, orch, f, "mock-h1b", p.CallbackPayload(f.tenantID, CallbackEventDeposit, ref, "", OutcomeSucceeded, 5000, "EUR", "", false)); err != nil {
+		t.Fatalf("success: %v", err)
+	}
+	if _, err := rvCallback(pool, orch, f, "mock-h1b", p.CallbackPayload(f.tenantID, CallbackEventDepositReversal, "h1b-rev-declined", ref, OutcomeDeclined, 5000, "EUR", "chargeback", false)); err != nil {
+		t.Fatalf("declined-carrier reversal: %v", err)
+	}
+	var storedOutcome string
+	var storedFingerprint []byte
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT outcome, event_fingerprint FROM payment_provider_events WHERE provider_reference = 'h1b-rev-declined'`).Scan(&storedOutcome, &storedFingerprint)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if storedOutcome != string(OutcomeSucceeded) {
+		t.Fatalf("expected the stored outcome column normalized to succeeded (rule 1), got %q", storedOutcome)
+	}
+	wantDeclinedShapeFP := computeEventFingerprint(ReceiptEvidence{
+		EventType: string(CallbackEventDepositReversal), ProviderReference: "h1b-rev-declined",
+		OriginalProviderReference: ref, Amount: 5000, AssetCode: "EUR", RawOutcome: OutcomeDeclined,
+	})
+	genuineSucceededShapeFP := computeEventFingerprint(ReceiptEvidence{
+		EventType: string(CallbackEventDepositReversal), ProviderReference: "h1b-rev-declined",
+		OriginalProviderReference: ref, Amount: 5000, AssetCode: "EUR", Outcome: OutcomeSucceeded,
+	})
+	if string(storedFingerprint) != string(wantDeclinedShapeFP) {
+		t.Error("H1b: the stored fingerprint for a declined-carrier reversal must reflect the RAW wire outcome (declined), not the normalized storage value")
+	}
+	if string(storedFingerprint) == string(genuineSucceededShapeFP) {
+		t.Error("H1b: a declined-carrier reversal must NOT fingerprint-collide with a genuine succeeded-outcome reversal of the same reference/original/amount/asset - dropping the RawOutcome assignment would collapse them")
+	}
+
+	// --- pending (non-final, stored un-normalized) - confirmation --------
+	res2 := rvInit(t, pool, orch, f, 5000, "h1b-pending")
+	ref2 := *res2.Attempt.ProviderReference
+	if _, err := rvCallback(pool, orch, f, "mock-h1b", p.CallbackPayload(f.tenantID, CallbackEventDeposit, ref2, "", OutcomeSucceeded, 5000, "EUR", "", false)); err != nil {
+		t.Fatalf("second success: %v", err)
+	}
+	if _, err := rvCallback(pool, orch, f, "mock-h1b", p.CallbackPayload(f.tenantID, CallbackEventDepositReversal, "h1b-rev-pending", ref2, OutcomePending, 5000, "EUR", "", false)); err != nil {
+		t.Fatalf("pending reversal: %v", err)
+	}
+	var pendingOutcome string
+	var pendingFingerprint []byte
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT outcome, event_fingerprint FROM payment_provider_events WHERE provider_reference = 'h1b-rev-pending'`).Scan(&pendingOutcome, &pendingFingerprint)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if pendingOutcome != string(OutcomePending) {
+		t.Fatalf("expected the stored outcome column left un-normalized (rule 2), got %q", pendingOutcome)
+	}
+	wantPendingShapeFP := computeEventFingerprint(ReceiptEvidence{
+		EventType: string(CallbackEventDepositReversal), ProviderReference: "h1b-rev-pending",
+		OriginalProviderReference: ref2, Amount: 5000, AssetCode: "EUR", Outcome: OutcomePending,
+	})
+	if string(pendingFingerprint) != string(wantPendingShapeFP) {
+		t.Error("H1b: the stored fingerprint for a pending reversal must reflect the raw (un-normalized) wire outcome")
+	}
+}
