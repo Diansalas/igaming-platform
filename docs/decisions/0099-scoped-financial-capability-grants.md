@@ -280,6 +280,13 @@ Here `financial_acting_gucs_exact()` checks the GUC shape only. This avoids poli
 safe because the setter raises before `fn` runs unless the session is valid, and the setter is the
 only code that can create the shape (§6.1 static tests).
 
+**Exact GUC shape (security confirmation C-1, binding on K1).** `financial_acting_gucs_exact()` is
+true only when **both** `app.acting_tenant_id` and `app.acting_platform_principal_id` are set **and**
+all of `app.tenant_id`, `app.principal_id`, `app.platform_admin_principal_id`,
+`app.player_account_id` and `app.platform_service_id` are unset (NULL or empty). A mixed session
+therefore never matches the recursion-exempt policies. A-4's mixed-session cases cover these two
+tables.
+
 ### 6.4 The restrictive fence (C-99-1) — added by 0111
 
 `financial_acting_gucs_present()` is `STABLE` and true if either acting GUC is non-empty. Here
@@ -535,7 +542,7 @@ Common rules:
 
 ### 10.1 Functions
 
-- `financial_acting_gucs_present()` and `financial_acting_gucs_exact()`: GUC shape only, `STABLE`.
+- `financial_acting_gucs_present()` and `financial_acting_gucs_exact()`: GUC shape only, `STABLE`. `_exact()` has the exact shape pinned in §6.3 (C-1).
 - `financial_acting_session_valid()` and `financial_acting_session_open()` (the latter raises
   `CG020`).
 - `staff_capability_grant_in_force(p_tenant uuid, p_staff uuid, p_capability text, p_at
@@ -684,7 +691,7 @@ Notes:
 | A-1 | AZ | Role × family × capability × action matrix, at HTTP and DB level |
 | A-2 | ADV | **Sock-puppet refused:** tenant-minted accounts (any role) never hold a grant; a `compliance` grantee is refused (C-99-2); a tenant-scope approval is refused |
 | A-3 | RLS | An acting session with a grant opens, audits, and (in K2/K3) completes a governed post |
-| A-4 | RLS | **Acting negatives:** <br>• no grant, revoked or expired grant, or a grant for Y used on X; <br>• mixed sessions; <br>• **K1-1 cases**: insert a `platform_admin`; read another platform staff row or `password_hash` of anyone but self; update or delete staff; insert or update a platform `sessions` row; read or write `login_attempts`; read any audit row, or insert a platform (`tenant_id NULL`) audit row; any `persons` access; insert a NULL-tenant `player_restrictions` row; write `risk_rules`; <br>• writes outside §6.5 (kill switch, bonus tables, a `player_accounts` UPDATE). <br>All refused. |
+| A-4 | RLS | **Acting negatives:** <br>• no grant, revoked or expired grant, or a grant for Y used on X; <br>• mixed sessions, including on `staff_users` and `staff_capability_grants` (C-1: every non-acting GUC must be unset); <br>• **K1-1 cases**: insert a `platform_admin`; read another platform staff row or `password_hash` of anyone but self; update or delete staff; insert or update a platform `sessions` row; read or write `login_attempts`; read any audit row, or insert a platform (`tenant_id NULL`) audit row; any `persons` access; insert a NULL-tenant `player_restrictions` row; write `risk_rules`; <br>• writes outside §6.5 (kill switch, bonus tables, a `player_accounts` UPDATE). <br>All refused. |
 | A-4b | RLS | **Projection fence (LF F1):** an acting direct UPDATE, a `RebuildProjectionRow`, and a non-zero INSERT are refused; a zero-row ensure and a governed post succeed; drift = 0. This also proves `pg_trigger_depth()` semantics. |
 | A-4c | RLS | **Ledger fence (LF F2):** a W′ correlation, a mismatched `provider_tx_id` or `idempotency_key`, a `casino_bet`, a `manual_adjustment` with no executing request, and entries appended to an old transaction are all refused under acting. This proves `txid_current()` under `ledger.Post`'s savepoint. |
 | A-5 | AZ | Self-grant; self-approval; approver = grantee; one Person under two principals; a NULL Person. All refused. |
