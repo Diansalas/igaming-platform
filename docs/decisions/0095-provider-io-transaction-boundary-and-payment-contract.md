@@ -2683,6 +2683,60 @@ bets roughly `DefaultLaunchTokenTTL` after launch, with `ErrLaunchSessionRequire
 - **I-4:** no production code consumes a launch token (`ResolveLaunchToken` has no non-test caller). So in the current wiring every `LaunchGame` session stays `active`, and bets are still refused about 2 minutes after launch (CAS-PLAY-BOOTSTRAP-1). This is correct from a security standpoint and must not be relaxed; the remedy is a vendor token-bootstrap path.
 - **C4 / CAS-REVOKE-CONSUMED-1:** MEDIUM, **deferred and launch-blocking** (option b), with the required migration-backed fix (a) specified in the security record. It must land before the first of: a non-test caller of `ResolveLaunchToken`; a non-synthetic casino adapter; or a production launch request.
 
+#### 15.1.5 amendment (CAS-REVOKE-CONSUMED-1, 2026-09-28)
+
+PRH-2 workstream A (`docs/plans/prh2-hardening-round/plan.md` §5-A; security's required fix,
+`docs/plans/payment-readiness/rv-prh-i2-casino-security.md` "Re-review (FH-7, 2026-09-28)",
+"Required fix (a)"). **Status: IMPLEMENTED; security ACCEPT
+(`docs/plans/prh2-hardening-round/reviews/a-security.md`); CLOSED on merge.** (Per CLAUDE.md's "no
+fake completion" rule, this is not marked closed here - the registry and the merge itself are the
+orchestrator's own gate, not this ADR's.)
+
+- **Migration 0108** replaces `casino_launch_sessions_enforce_immutable_fields()`, keeping 0042's
+  column-immutability block byte-identical and replacing only the terminal-status block: exactly
+  `OLD.status = 'consumed' AND NEW.status = 'revoked'` is now permitted, and only when
+  `(to_jsonb(NEW) - 'status') = (to_jsonb(OLD) - 'status')` (every other column, including any
+  future one, stays frozen). Every other transition out of `consumed`, `expired` or `revoked` -
+  including `consumed -> active`, `consumed -> expired`, a `consumed -> consumed` no-op, a
+  `consumed -> revoked` combined with any other column change, and every transition at all out of
+  `expired` or `revoked` - still raises exactly as before. The down migration restores 0042's body
+  verbatim.
+- `RevokeLaunchSession` (`internal/casino/launch.go`) now does `SELECT status ... FOR UPDATE`, then
+  `UPDATE ... SET status='revoked' WHERE id=$1 AND status IN ('active','consumed')`, and returns the
+  prior status alongside whether the CAS matched. `orchestrator.go`'s `launchFailed` (phase C) now
+  writes `prior_status` into the append-only `casino.launch_failed` audit record, next to the
+  existing `revoked` field. **Behaviour change (code review A6):** before this fix, a session id that
+  resolved to no row returned `(false, nil)`; `RevokeLaunchSession` now returns `ErrLaunchSessionNotFound`
+  in that case (also the observed outcome of a cross-tenant revoke attempt, since RLS hides the row
+  entirely). `launchFailed` has exactly one caller with a session id it just minted in the same
+  `LaunchGame` invocation, so this path is not reachable in production today; it is exercised
+  directly by `TestRevokeLaunchSession_TenantIsolation`.
+- Token replay is unaffected exactly as anticipated: `ResolveLaunchToken` still accepts only
+  `active`; the relaxed trigger branch only ever admits the terminal `consumed -> revoked` move;
+  `token_hash`/`expires_at` remain immutable throughout.
+- The former characterization test (`TestLaunchGame_FailedLaunchOnConsumedSession_
+  RevokeCASMissesAndBetStillAccepted`) is inverted and renamed
+  `TestLaunchGame_FailedLaunchOnConsumedSession_RevokesAndRejectsBet`
+  (`internal/casino/launch_two_phase_integration_test.go`): the session now ends `revoked`, the
+  audit shows `revoked=true` and `prior_status="consumed"`, the follow-up bet is refused with
+  `ErrLaunchSessionRequired`, and the player's balance/ledger are unaffected by that refused bet.
+- Additional coverage (`internal/casino/migration_0108_revoke_consumed_integration_test.go`): the
+  full DB trigger matrix (one transaction per statement); token replay after
+  `consumed -> revoked` returning `ErrLaunchSessionNotActive`; a bet placed before the revoke still
+  settling via both a win and a rollback, ledger balanced throughout; tenant isolation on the
+  revoke itself (tenant B's attempt against tenant A's consumed session resolves 0 rows,
+  `ErrLaunchSessionNotFound` under RLS); and migration 0108 up/down/up on a scratch database.
+- Mutation evidence: `docs/plans/payment-readiness/evidence/prh2-casino-a-mutation-kill.txt`
+  (author's own round, 4/4 killed: drop the whole-row equality, allow
+  `OLD.status IN ('consumed','expired')`, drop `NEW.status='revoked'`, restore the revoke's own
+  `WHERE status='active'`; code review's follow-up round added the `id`-change matrix cell and the
+  already-`expired`/already-`revoked` no-op coverage - see the same evidence file for that round).
+- Security review: **ACCEPT** (`docs/plans/prh2-hardening-round/reviews/a-security.md`). Code review:
+  **READY WITH CONDITIONS**, A1-A8 addressed in follow-up commits on this branch
+  (`docs/plans/prh2-hardening-round/reviews/a-code-review.md`).
+- CAS-REVOKE-CONSUMED-1 (registry): the orchestrator updates `docs/governance/task-registry.md` at
+  merge, per CLAUDE.md's "no fake completion" rule - not asserted here.
+
 ### 15.2 KYC `CreateVerification`
 
 | Aspect | Specification |
@@ -6019,3 +6073,113 @@ BLOCKED per §28.13).
   - the §9.3 amendment (L-b);
   - the §10.9.3 and §28 status notes;
   - this section.
+
+## 33. Amendment — SB-CATALOGUE-IO-1: sportsbook catalogue sync follows the transaction-boundary rule (`sportsbook`, 2026-09-28)
+
+PRH-2 hardening round workstream E3 (plan §11, registry item SB-CATALOGUE-IO-1). The task registry
+classification found that `internal/sportsbook.SyncCatalogue` called `Provider.Catalogue()` from
+inside the `db.Pool.WithPlatformService` transaction opened at startup - a non-financial instance
+of exactly the pattern this ADR's D1 (no provider I/O with a connection held, ADR 0094 INV-POOL)
+already forbids for payments/casino/KYC. `Provider.Catalogue()` also took no `ctx` and returned no
+`error`, so a real network adapter implementing it could be neither cancelled nor fail cleanly.
+
+**Fix, mirroring the existing payments/casino pattern exactly:**
+
+- `sportsbook.Provider`'s method is now `Catalogue(ctx context.Context) (CatalogueResult, error)`
+  (`types.go`) - the same ctx-in/error-out shape as `casino.CasinoProvider.Catalogue`.
+  `MockSportsbookProvider.Catalogue` (`mock.go`) is updated to match; it performs no I/O and never
+  errors.
+- `sportsbook.FetchCatalogue(ctx, provider)` (new, `catalogue.go`) is now the ONLY sanctioned
+  caller of `Provider.Catalogue`. It refuses under `txscope.Held(ctx)` before ever calling the
+  provider - the same defence-in-depth guard `payments.callProvider` (step 1, INV-IO-1(b)) and
+  `casino.Orchestrator.LaunchGame` (IO-1B) apply to their own adapter calls - and it never itself
+  opens a database transaction. It then validates the result with the existing
+  `validateCatalogueReferences` (PROVIDER-REF-BOUND-1), unchanged in behaviour, before returning
+  it.
+- `sportsbook.SyncCatalogue(ctx, tx, result)` (`catalogue.go`) now takes an already-fetched,
+  already-validated `CatalogueResult` instead of a `Provider` - it no longer performs any provider
+  I/O. It keeps its own `db.AssertPlatformServiceScope` check (unchanged) and, as defence in depth,
+  re-runs `validateCatalogueReferences` (pure, I/O-free) before the first upsert, so a caller that
+  skipped `FetchCatalogue` still cannot write a half-validated tree.
+- `cmd/platform-api/main.go`'s startup sequence is now two steps: `FetchCatalogue` runs first, with
+  no transaction open at all; only once it returns a validated result does
+  `pool.WithPlatformService(ctx, db.ServiceSportsbookCatalogueSync, ...)` open, to upsert that
+  result via `SyncCatalogue`. A fetch error or a validation error surfaces with the same
+  fail-the-startup wrapping as before (`fmt.Errorf("sync sportsbook catalogue: %w", err)`); nothing
+  is written in either case, and in the fetch-error/validation-error case no transaction is ever
+  opened at all - strictly stronger than the pre-fix "nothing written inside the transaction"
+  guarantee.
+
+**Tests** (`internal/sportsbook`, integration): `TestFullCatalogueSync_ProviderNeverSeesAHeldTransaction`
+(a `txscope`-asserting provider proves no pooled transaction is held for the real two-step
+production call shape and that the sync still succeeds), `TestFetchCatalogue_ProviderErrorWritesNothing`
+(a fetch error writes zero rows), `TestFetchCatalogue_RefusesUnderTxscopeHeld` (a txscope-held ctx is
+refused before the provider is ever called), plus the pre-existing `TestSyncCatalogue_RequiresPlatformServiceScope`,
+`TestSyncCatalogue_IdempotentAcrossTwoRuns` and `TestSyncCatalogue_OverBoundExternalRefWritesNothing`
+adapted to the new two-step call shape with their original assertions and bounds unchanged.
+
+**No migration.** No change to migration 0084's RLS policies or the `platform_service_id` GUC
+mechanism - `AssertPlatformServiceScope` is unchanged.
+
+Reviewers per the plan: `architect`, `security`, `code-reviewer`.
+
+### 33.1 Code review fix round (`sportsbook`, 2026-09-28) - `docs/plans/prh2-hardening-round/reviews/e3-code-review.md`
+
+Verdict READY WITH CONDITIONS at `33213c7`; four conditions closed on this branch, all as additive
+commits on top of `33213c7` (not squashed/rebased):
+
+- **F1 (closed).** `FetchCatalogue` being "the ONLY sanctioned caller" of `Provider.Catalogue` was,
+  before this fix, a convention rather than an enforced one: the IO-1C static guard
+  (`internal/txscope/no_provider_call_in_tx_closure_static_test.go`,
+  `TestINV_IO_1c_NoAdapterCallInsideTxClosure`) scanned only `internal/{casino,kyc,payments}`, so
+  nothing caught a future call site that moved the fetch back inside a `WithPlatformService`
+  closure using an unmarked outer ctx (mutant X5b, which the runtime `txscope.Held` check alone
+  cannot see, since that ctx was never marked). The guard's `dirs` now also include
+  `internal/sportsbook` and `cmd/platform-api`, and `ioc1FlaggedMethods` now includes
+  `FetchCatalogue` (a package-level function call is still matched, since the lexical check is on
+  the selector's final identifier regardless of receiver-vs-package qualification). This makes the
+  sole-caller rule for sportsbook's provider I/O enforced the same third, static way payments'
+  `Deposit`/casino's `Launch`/KYC's `CreateVerification` already are - not merely documented.
+  Verified: the guard stays green on the current tree, and mutant X5b (fetch moved into the
+  `WithPlatformService` closure in `main.go`, called with the outer unmarked ctx) fails
+  `TestINV_IO_1c_NoAdapterCallInsideTxClosure` before being reverted.
+- **F2 (closed).** A pure, no-DB unit test
+  (`TestFetchCatalogue_OverBoundReferenceRejectedWithoutOpeningTransaction`,
+  `provider_reference_bound_test.go`) exercises `FetchCatalogue`'s own validation step directly, with
+  a spy provider proving the ctx it was called with was never txscope-marked. Kills mutant X2
+  (validation removed from `FetchCatalogue`).
+- **F3 (closed).** An integration test (`TestSyncCatalogue_DirectOverBoundResultWritesNothing`,
+  `catalogue_io_boundary_integration_test.go`) calls `SyncCatalogue` directly inside
+  `WithPlatformService` with an over-bound `CatalogueResult` that never went through
+  `FetchCatalogue` at all, proving `SyncCatalogue`'s own re-validation is a real, independent
+  control. Kills mutant X3 (re-validation removed from `SyncCatalogue`) - with that mutant removed,
+  the same over-bound `external_ref` is instead caught one layer further in, by migration-level
+  check constraint `sb_selections_external_ref_ref_bound` (a third, DB-level backstop this round did
+  not add, discovered while confirming the kill), so the mutant is still caught, just at a different
+  layer with a different error shape than the Go-level bound.
+- **F5 (closed).** `ErrCatalogueFetchRefused` is now scoped to the tx-held gate refusal only,
+  matching payments'/casino's own sentinels exactly (each covers only its own gate-level refusal,
+  never the adapter's own error) - the prior revision's doc comment incorrectly described it as also
+  wrapping ordinary provider errors. A provider error from `FetchCatalogue` is now returned as
+  `fmt.Errorf("sportsbook: fetch catalogue: %w", err)`, plain context, never
+  `ErrCatalogueFetchRefused`. `TestFetchCatalogue_ProviderErrorWritesNothing` now asserts the
+  provider error is surfaced AND is NOT `ErrCatalogueFetchRefused`;
+  `TestFetchCatalogue_RefusesUnderTxscopeHeld` is unchanged (still asserts the sentinel).
+- **F4/F6 (not closed, per the review's own severity).** F4 (Low, pre-existing, not introduced by
+  E3) is not addressed here. **F6 (forward condition, binding on the first real sportsbook
+  adapter):** `FetchCatalogue` currently applies no deadline of its own to the provider call - it
+  runs with whatever ctx the caller supplies (the root startup signal ctx, in `main.go` today, which
+  never times out short of process shutdown). A MOCK, same-process, in-memory provider has no need
+  of one. **Before any real (network) sportsbook adapter is wired, `FetchCatalogue` (or its caller)
+  must apply a bounded per-call timeout**, the same way payments'/casino's/KYC's own manifests set a
+  `CallTimeout` per outbound call (ADR 0095 §9.1 and the payments gate's own step 5). Tracked here
+  rather than in a new ADR section, since it is a direct extension of D1/D2's existing per-call
+  timeout requirement to this call site.
+- **F7 (closed, this subsection).** This subsection records the AST allow-list change
+  (`cmd/platform-api/main_construction_ast_test.go`'s `allowedProviderCallsOutsideRegistrations` gained
+  `"sportsbook.FetchCatalogue"` alongside the pre-existing `"sportsbook.SyncCatalogue"`, both already
+  covered in the original SB-CATALOGUE-IO-1 commit `33213c7`) and states plainly: F1's IO-1C static
+  guard is what now actually enforces "`FetchCatalogue` is the sole sanctioned caller of
+  `Provider.Catalogue`" - before F1, that sentence was a doc-comment convention, not a checked
+  invariant. The registry and `docs/HANDOVER.md` rows are updated by the orchestrator at merge, per
+  this file's standing convention (the orchestrator is the single writer of those files).

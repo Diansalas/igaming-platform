@@ -538,9 +538,10 @@ func (o *Orchestrator) LaunchGame(ctx context.Context, pool providercred.TenantT
 		phaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), phaseCTimeout)
 		defer cancel()
 		var revoked bool
+		var priorStatus LaunchSessionStatus
 		phaseErr := pool.WithTenant(phaseCtx, params.TenantID, func(ctx context.Context, tx pgx.Tx) error {
 			var err error
-			revoked, err = RevokeLaunchSession(ctx, tx, session.ID)
+			priorStatus, revoked, err = RevokeLaunchSession(ctx, tx, session.ID)
 			if err != nil {
 				return err
 			}
@@ -550,7 +551,7 @@ func (o *Orchestrator) LaunchGame(ctx context.Context, pool providercred.TenantT
 				Outcome: audit.OutcomeFailure,
 				Metadata: map[string]any{
 					"game_id": params.GameID.String(), "provider_id": providerID, "provider_game_id": providerGameID,
-					"reason": string(reason), "revoked": revoked,
+					"reason": string(reason), "revoked": revoked, "prior_status": string(priorStatus),
 				},
 			})
 		})
