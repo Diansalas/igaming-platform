@@ -415,3 +415,80 @@ path** finds neither the raw token nor its hash.
   - HANDOVER row: "casino bootstrap: MOCK over HTTP; real vendor PROVIDER DEPENDENT (after
     CAS-PLAYER-REF-1)".
 - **Registry (orchestrator):** CAS-PLAY-BOOTSTRAP-1 → IMPLEMENTED (MOCK).
+
+## 13. Implementation status (2026-09-28, workstream B, branch `prh2-b-cas-play-bootstrap`)
+
+**Status: MOCK. Every line item of §3 implemented as specified**, on top of A (migration 0108,
+merged). Migration number **0115** (placeholder - the orchestrator renumbers at merge, §5/Rule 3;
+0109-0114 belong to other lanes not yet merged onto this branch).
+
+- `internal/casino/bootstrap.go`: `Orchestrator.BootstrapLaunch`, the exact §3.2 step order
+  (Redeem+Recheck first via the existing `redeemVerified`, unmodified; the session lookup FOR
+  UPDATE; the idempotency lookup; the binding check; the two Q4 gates plus RG; the binding-aware
+  CAS; the player-ref upsert; the idempotency insert via `db.IdempotentInsert` (the SAVEPOINT
+  primitive already used by `ledger.Post`/`withdrawal.RequestWithdrawal`/`payments.
+  InitiateDeposit`) - chosen specifically because it lets the required-once-per-request `Redeem`
+  (single-use by design, `VerifiedCallback.Redeem`) stay the transaction's genuine first statement
+  even on the rare cross-token same-request_id race, rather than needing a second `VerifyCallback`
+  call the token could not survive; audit, then return).
+- `ResolveLaunchToken` is **not reused, and not deleted** in this change (§11 item 5: "casino's
+  call" - it still has test-only callers this change does not touch; a follow-up may remove it).
+- `internal/casino/mock.go`: `MockCasinoProvider.BootstrapPayload` (§7's "bootstrap client") -
+  signs with the same per-tenant derived key as `CallbackPayload`/`SignRawBody`. Every test sends
+  it over a real `net/http` round trip to the real route on an `httptest` server; nothing calls
+  `BootstrapLaunch` as a vendor stand-in.
+- `internal/httpserver/casino_bootstrap_handlers.go` + the new line in `casino_routes.go`:
+  `POST /v1/webhooks/casino/{tenantSlug}/{providerID}/launch-bootstrap`, sharing the existing
+  preamble/admission bulkhead/credential surface with the bet/win/rollback callback route (same
+  domain tag, same scheme - a distinct path, never a distinct domain).
+- **Byte-identical replay (BS-4), corrected during implementation:** PostgreSQL's JSONB storage
+  does not preserve the original key order/whitespace of an inserted value - `casino_launch_
+  bootstraps.response` is stored for audit/debugging visibility, but a replay's own response is
+  re-marshaled from the session's own denormalized columns (the same Go struct, same field order,
+  same `json.Marshal` call), which is what actually guarantees byte-identical output. Found by the
+  author's own `TestBootstrapLaunch_Replay_ByteIdenticalNoNewAudit` before this ADR's own review.
+- **Down-migration RLS blindness, corrected during implementation:** both new tables carry FORCE
+  ROW LEVEL SECURITY with no policy admitting a migration-context connection (no `app.tenant_id` is
+  ever set while migrations run), so a plain `SELECT ... FROM casino_launch_bootstraps` "refuse
+  while rows exist" guard would see zero rows regardless of how many exist - the exact migration
+  0048/0092/0107 lesson already recorded in this codebase. Fixed with `ADD CONSTRAINT ... CHECK
+  (false)`, which validates every existing row at the storage level unconditionally, regardless of
+  RLS (the same "the check IS the check" principle as 0107's own unique-index-build guard). Found
+  by the author's own `TestMigration0115_DownRefusesWhileRowsExist`.
+- **Two MUT-list mutants are structurally unreachable, not merely untested** ("a lazy `expired`
+  write on refusal"; "revoke on an evaluation error"): `BootstrapLaunch` runs the entire contract
+  in ONE transaction whose commit/rollback is driven solely by whether the closure returns nil: a
+  refusal or an evaluation error always returns non-nil, so `pool.WithTenant` always rolls back the
+  WHOLE transaction - any write attempted on that path (a lazy `expired` write; a revoke) can never
+  survive to be observed, regardless of whether the write is present in the code. Verified
+  empirically, not merely reasoned about: both were physically added, and the existing tests
+  (`TestBootstrapLaunch_ADV_Expired`; `TestBootstrapLaunch_EvaluationError_RollsBackNeverDenies`)
+  still passed with them in place (the write vanished with the rollback) - see the evidence file.
+  This is a stronger guarantee than the MUT item anticipated, not a gap.
+- **Interaction with the pre-existing B2C "play simulation" routes, reported rather than silently
+  changed:** `casino_play_handlers.go`'s `requireActiveUnexpiredSession` (documented there as
+  security review finding P2-2) accepts only `'active'`, never `'consumed'` - a session a real
+  bootstrap has consumed is not usable through `POST /v1/me/casino/sessions/{id}/wager` (or its
+  win/rollback siblings) at all, confirmed empirically. This ADR names only `postBet`'s own status
+  allow-list (already `active`/`consumed`, CAS-SESSION-EXPIRY-1); it never names
+  `casino_play_handlers.go`. Widening a named, already-reviewed security gate is outside this
+  workstream's own contract and is not done here - see the orchestrator report for this decision.
+  The REAL provider path (a genuinely-signed callback through `postBet`) is unaffected and is what
+  `TestCasinoBootstrap_RealProviderBetWorksAfterBootstrap` (`internal/httpserver`) exercises end to
+  end over HTTP.
+- **Lock order (§4):** `BootstrapLaunch`'s own order - Redeem+Recheck (no lock), then the session
+  row `FOR UPDATE`, then RG's person-scoped `pg_advisory_xact_lock` (step 4) - was checked against
+  every other resource-acquisition order in this package and matches the ADR's own specified order
+  exactly; no other code path acquires RG's advisory lock and then a `casino_launch_sessions` row
+  lock (the only shape that could form a cycle with this one), so no synthetic two-resource ABBA
+  reproduction was constructed - doing so would have simulated a code path that does not exist. The
+  CON tests (`TestBootstrapLaunch_ConcurrentConsumes_DifferentRequestIDs`/`_SameRequestID`, `-race
+  -count=20`+) found no deadlock empirically. A formal harness entry
+  (`lockorder_harness_test.go`) is NOT added in this change; flagged as a scope decision for the
+  orchestrator, not silently skipped.
+- **Tests:** `internal/casino/bootstrap_integration_test.go`, `bootstrap_rls_integration_test.go`,
+  `bootstrap_sb1_integration_test.go`, `migration_0115_bootstrap_integration_test.go`;
+  `internal/httpserver/casino_bootstrap_integration_test.go`. Mutation evidence:
+  `docs/plans/payment-readiness/evidence/prh2-casino-b-mutation-kill.txt`.
+- **Registry:** proposed text reported to the orchestrator, not written directly to
+  `docs/governance/task-registry.md` per this workstream's own instruction.

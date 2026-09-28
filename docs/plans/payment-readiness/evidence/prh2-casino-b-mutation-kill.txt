@@ -1,0 +1,141 @@
+PRH-2 workstream B - CAS-PLAY-BOOTSTRAP-1 - mutation-kill evidence
+====================================================================
+
+internal/casino/bootstrap.go (Orchestrator.BootstrapLaunch); migrations/0115_casino_launch_
+bootstrap.{up,down}.sql. ADR 0103 §9 "MUT" list, 12 named mutants.
+
+Method: each mutant applied directly to the real file, a private database (cas_b_mut, rebuilt from
+scratch via priv_db.sh so the mutation was genuinely installed) or the running binary (for Go-code
+mutants, just `go build`), the named test(s) run with `-tags integration`, the FAIL captured, then
+the file reverted and diffed byte-identical against the committed original before the next mutant.
+Baseline: `PRIV_DB=cas_b_dev bash .../priv_test.sh -tags integration -count=1 -skip
+'TestStoreOutage_DoesNotPinPool|TestResolutionIsolation_' ./internal/casino/...` - green before and
+after every mutant below.
+
+Mutant 1 (drop provider_id from the CAS - `AND provider_id = $4` replaced with a no-op
+`AND ($4::text = $4::text)`):
+KILLED [internal/casino/bootstrap.go, casConsumeSessionForBootstrap] by
+`PRIV_DB=cas_b_mut bash .../priv_test.sh -tags integration -run
+TestCasConsumeSessionForBootstrap_BindingPredicate -v ./internal/casino/...`
+    first failure: --- FAIL: TestCasConsumeSessionForBootstrap_BindingPredicate/wrong_provider_id
+                       expected the CAS to refuse a mismatched wrong_provider_id, but it consumed
+                       the session
+
+Mutant 2 (drop provider_game_id from the CAS, SB-2 - same no-op substitution):
+KILLED by the same test's wrong_provider_game_id subtest:
+    --- FAIL: TestCasConsumeSessionForBootstrap_BindingPredicate/wrong_provider_game_id
+
+Mutant 3 (drop `expires_at > now()` from the CAS):
+KILLED [internal/casino/bootstrap.go] by
+`PRIV_DB=cas_b_mut bash .../priv_test.sh -tags integration -run
+TestCasConsumeSessionForBootstrap_RefusesNonActiveAndExpired -v ./internal/casino/...`
+    first failure: --- FAIL: .../already_expired: expected the CAS to refuse an already-expired
+                       session
+
+Mutant 4 (drop `status='active'` from the CAS):
+KILLED by the same test's already_revoked subtest (the row hits the DB trigger's own immutability
+guard instead of the CAS's own predicate under this mutant - still a refusal, but via a different
+mechanism, confirming the mutant changed observable behaviour):
+    --- FAIL: .../already_revoked: casino_launch_sessions: row is immutable once consumed,
+                expired, or revoked (SQLSTATE P0001)
+
+Note on mutants 1-4: every one of provider_id/provider_game_id/asset_code/mode/status/expires_at is
+ALSO checked earlier, at step 3 (binding check), which runs first and would refuse a genuine
+mismatch before the CAS is ever reached - every one of these session columns is immutable after
+insert (migration 0036/0042) and the FOR UPDATE lock held since step 2b prevents any concurrent
+change for the transaction's lifetime, so BootstrapLaunch's own ADV tests (which go through step 3)
+cannot reach these mutants at all. TestCasConsumeSessionForBootstrap_BindingPredicate/
+_RefusesNonActiveAndExpired call casConsumeSessionForBootstrap DIRECTLY, bypassing step 3, to pin
+the CAS's own defense-in-depth predicate (ADR 0103 §3.2 step 5/SB-2) specifically.
+
+Mutant 5 (check the provider after the CAS - i.e. remove step 3's own explicit binding-mismatch
+check, relying only on the CAS's redundant predicate):
+KILLED [internal/casino/bootstrap.go, step 3] by
+`PRIV_DB=cas_b_mut bash .../priv_test.sh -tags integration -run TestBootstrapLaunch_ADV_CrossProvider
+-v ./internal/casino/...`
+    first failure: expected refusal reason "binding_mismatch", got "not_active"
+    (the CAS still refuses the mismatch - correctness is unaffected - but the reported REFUSAL
+    REASON changes, which the test's own reason assertion catches; this is exactly the "moved the
+    check" mutant's observable effect: the binding mismatch is no longer distinguished from a
+    generic CAS miss.)
+
+Mutant 6 (move Redeem+Recheck after the session lookup, SB-1 - modeled as a decoy `SELECT 1`
+statement inserted before the redeem call, since a literal reorder cannot be expressed without also
+parsing the body before Redeem returns it - see bootstrap_sb1_integration_test.go's own note):
+KILLED [internal/casino/bootstrap.go, BootstrapLaunch] by
+`PRIV_DB=cas_b_mut bash .../priv_test.sh -tags integration -run
+TestBootstrapLaunch_SB1_RedeemRecheckIsFirstStatement -v ./internal/casino/...`
+    first failure: domain statements = ["SELECT 1" "SELECT 1 FROM provider_credential_handles ..."],
+                   want only the failed re-check
+    (phasecapture.Tx records every statement in order; the test asserts the recheck is the ONLY
+    statement on a revoked-handle path - any earlier statement fails it immediately.)
+
+Mutant 7 (replay without the hash comparison - `existing.TokenHash != tokenHash ||` removed from the
+replay-branch condition):
+KILLED [internal/casino/bootstrap.go] by
+`PRIV_DB=cas_b_mut bash .../priv_test.sh -tags integration -run
+TestBootstrapLaunch_ADV_ReusedRequestIDDifferentTokenHash -v ./internal/casino/...`
+    first failure: expected refusal reason "replay_mismatch", got "replay_revoked"
+    (still refused - session B's own token hash resolves to a DIFFERENT session than the one the
+    idempotency row names, so the fallback session.ID != existing.LaunchSessionID check catches it
+    instead - a different reason, still a FAIL against the test's own reason assertion, confirming
+    the mutant changed behaviour.)
+
+Mutant 8 (replay without the digest comparison - `|| existing.RequestDigest != digest` removed):
+KILLED [internal/casino/bootstrap.go] by
+`PRIV_DB=cas_b_mut bash .../priv_test.sh -tags integration -run
+TestBootstrapLaunch_ADV_ReusedRequestIDSameTokenDifferentFields -v ./internal/casino/...`
+    (this ADV case - SB-6, "a reused request_id with the same token but different fields" - did not
+    exist before this workstream; added specifically because the MUT list requires it)
+    first failure: expected a *BootstrapRefusedError, got <nil>: <nil>
+    (the second bootstrap, which names a different asset_code for the same request_id/token,
+    incorrectly succeeds as a "replay" under this mutant.)
+
+Mutant 9 (replay without the `consumed` check - `|| session.Status != LaunchSessionConsumed`
+removed):
+KILLED [internal/casino/bootstrap.go] by
+`PRIV_DB=cas_b_mut bash .../priv_test.sh -tags integration -run TestBootstrapLaunch_ADV_ReplayAfterRevoke
+-v ./internal/casino/...`
+    first failure: expected a *BootstrapRefusedError, got <nil>: <nil>
+    (a replay against a session A's own revoke (workstream A, migration 0108's consumed -> revoked)
+    has since moved to 'revoked' is incorrectly honoured under this mutant - exactly the resurrection
+    BS-4 forbids.)
+
+Mutant 10 (a lazy `expired` write on refusal - `UPDATE casino_launch_sessions SET status =
+'expired' WHERE id = $1 AND status = 'active'` added immediately before the BootstrapRefusalExpired
+return):
+NOT KILLABLE - STRUCTURALLY PREVENTED, verified empirically rather than assumed:
+`PRIV_DB=cas_b_mut bash .../priv_test.sh -tags integration -run TestBootstrapLaunch_ADV_Expired -v
+./internal/casino/...` still PASSES with the write physically present in the code. Reason:
+BootstrapLaunch runs its entire contract in ONE transaction whose commit/rollback is driven solely
+by whether the WithTenant closure returns nil; every refusal returns a non-nil
+*BootstrapRefusedError, so pool.WithTenant ALWAYS rolls back the whole transaction - a write
+attempted anywhere on a refusal path can never survive to be observed, regardless of whether the
+write is present in the source. This is a STRONGER guarantee than the named mutant anticipated (it
+assumes a ResolveLaunchToken-style architecture where the lazy write and the caller's own commit/
+rollback decision are decoupled), not a gap in the test suite - the mutant was physically introduced,
+run, confirmed to leave no observable trace, and reverted.
+
+Mutant 11 (revoke on an evaluation error - `RevokeLaunchSession` called immediately before returning
+a genuine `bootstrapGateDenialReason` error):
+NOT KILLABLE - STRUCTURALLY PREVENTED, same mechanism as mutant 10, verified empirically:
+`PRIV_DB=cas_b_mut bash .../priv_test.sh -tags integration -run
+TestBootstrapLaunch_EvaluationError_RollsBackNeverDenies -v ./internal/casino/...` still PASSES with
+the revoke call physically present - an evaluation error is a non-nil return, so the whole
+transaction (including the attempted revoke) rolls back. Session confirmed still 'active' after the
+mutated run.
+
+Mutant 12 (drop `UNIQUE (launch_session_id)` from migration 0115):
+KILLED [migrations/0115_casino_launch_bootstrap.up.sql] by
+`PRIV_DB=cas_b_mut bash .../priv_test.sh -tags integration -run
+TestCasinoLaunchBootstraps_UniqueLaunchSessionID -v ./internal/casino/...`
+    first failure: expected a second bootstrap row for the same launch_session_id to be refused
+    (a second row inserted directly against an already-consumed session, with a different
+    request_id so it does not collide on the (tenant,provider,request_id) key, succeeds under this
+    mutant - BS-3's "at most one bootstrap row per session" is violated.)
+
+Summary: 10/12 killed; 2/12 (mutants 10 and 11) are structurally unreachable given this
+architecture's one-transaction/rollback-on-any-error design - a STRICTLY STRONGER property than the
+mutant anticipated, confirmed by physically introducing each mutant and observing zero effect on the
+relevant test, not by reasoning alone. No mutant was left in the codebase; every file was diffed
+byte-identical against its committed original after each round.
