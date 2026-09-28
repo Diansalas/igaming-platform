@@ -487,16 +487,26 @@ merged). Migration number **0115** (placeholder - the orchestrator renumbers at 
   (false)`, which validates every existing row at the storage level unconditionally, regardless of
   RLS (the same "the check IS the check" principle as 0107's own unique-index-build guard). Found
   by the author's own `TestMigration0115_DownRefusesWhileRowsExist`.
-- **Two MUT-list mutants are structurally unreachable, not merely untested** ("a lazy `expired`
-  write on refusal"; "revoke on an evaluation error"): `BootstrapLaunch` runs the entire contract
-  in ONE transaction whose commit/rollback is driven solely by whether the closure returns nil: a
-  refusal or an evaluation error always returns non-nil, so `pool.WithTenant` always rolls back the
-  WHOLE transaction - any write attempted on that path (a lazy `expired` write; a revoke) can never
-  survive to be observed, regardless of whether the write is present in the code. Verified
-  empirically, not merely reasoned about: both were physically added, and the existing tests
-  (`TestBootstrapLaunch_ADV_Expired`; `TestBootstrapLaunch_EvaluationError_RollsBackNeverDenies`)
-  still passed with them in place (the write vanished with the rollback) - see the evidence file.
-  This is a stronger guarantee than the MUT item anticipated, not a gap.
+- **Mutation evidence: 12/12 killed (F-4 re-run, 2026-09-28).** As originally specified, MUT-list
+  mutants 10 ("a lazy `expired` write on refusal") and 11 ("revoke on an evaluation error") are
+  EQUIVALENT MUTANTS, not merely untested: `BootstrapLaunch` runs the entire contract in ONE
+  transaction whose commit/rollback is driven solely by whether the closure returns nil, and both
+  mutants, as specified, kept the SAME non-nil return the real refusal/error path already uses - so
+  `pool.WithTenant` always rolls back the WHOLE transaction regardless of whether the write is
+  present in the code. Verified empirically, not merely reasoned about: both were physically added,
+  and the existing tests (`TestBootstrapLaunch_ADV_Expired`;
+  `TestBootstrapLaunch_EvaluationError_RollsBackNeverDenies`) still passed with them in place (the
+  write vanished with the rollback). This is a stronger guarantee than the MUT item anticipated, not
+  a gap. Architect review F-4 asked for a re-run in the only form actually reachable under this
+  architecture - changing the function's own RETURN VALUE, not merely adding a write beside an
+  unchanged non-nil return: mutant 10-PRIME also flips the expired-refusal branch's return to `nil`
+  (making the refusal itself commit), and mutant 11-PRIME reclassifies a genuine evaluation error as
+  `reason = "evaluation_error"` and routes it into the COMMITTING denial branch instead of
+  propagating it. Both PRIME variants are genuinely reachable and both are KILLED by the SAME two
+  existing tests, with no new test needed - see the evidence file
+  (`docs/plans/payment-readiness/evidence/prh2-casino-b-mutation-kill.txt`) for the exact commands,
+  first-failure output, and the byte-identical (md5sum) revert proof for all four runs (10, 10-PRIME,
+  11, 11-PRIME).
 - **Interaction with the pre-existing B2C "play simulation" routes, reported rather than silently
   changed:** `casino_play_handlers.go`'s `requireActiveUnexpiredSession` (documented there as
   security review finding P2-2) accepts only `'active'`, never `'consumed'` - a session a real
