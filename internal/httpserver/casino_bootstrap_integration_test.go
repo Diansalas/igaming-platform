@@ -127,6 +127,31 @@ func TestCasinoBootstrap_UnsignedRequest_UniformUnauthorized(t *testing.T) {
 	}
 }
 
+// TestCasinoBootstrap_UnknownTenantSlug_UniformUnauthorized is F-3's own
+// missing case: a genuinely-signed-shaped bootstrap request against a
+// tenant slug that does not exist gets refused before ever reaching
+// VerifyCallback/BootstrapLaunch, and with the SAME uniform 401 body as
+// every other pre-verification failure - mirroring
+// TestCasinoWebhook_AuthFailureLogging_AllowListOnly's own
+// "tenant_unknown" case for the bet/win/rollback callback route, but for
+// the bootstrap route specifically.
+func TestCasinoBootstrap_UnknownTenantSlug_UniformUnauthorized(t *testing.T) {
+	pool, issuer := testEnv(t)
+	orchestrator, mock := newMockCasinoOrchestrator()
+	srv := newCasinoTestServer(t, pool, issuer, orchestrator)
+
+	in := mock.BootstrapPayload(uuid.New(), "some-token", "req-f3-unknown-tenant-1", "game-1", "EUR", "real")
+	resp := rawPostCasinoBootstrap(t, srv, "does-not-exist-slug", in)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("expected 401 for an unknown tenant slug, got %d", resp.StatusCode)
+	}
+	apiErr := decodeAPIError(t, resp)
+	if apiErr.Message != "callback rejected" {
+		t.Fatalf("expected the uniform 'callback rejected' message, got %q", apiErr.Message)
+	}
+}
+
 // TestCasinoBootstrap_RealProviderBetWorksAfterBootstrap is
 // CAS-PLAY-BOOTSTRAP-1's own DoD item, over the REAL provider webhook
 // route (postBet, via a genuinely-signed callback - newCasinoWebhookHandler),

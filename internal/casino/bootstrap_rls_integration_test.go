@@ -13,8 +13,10 @@ package casino
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Diansalas/igaming-platform/internal/db"
@@ -129,5 +131,56 @@ func TestCasinoLaunchBootstrapsRLS_PlayerScopeCannotInsert(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected the player-scoped insert into casino_launch_bootstraps to be refused")
+	}
+}
+
+// TestCasinoLaunchBootstrapsRLS_NonPlayerScopesCannotInsert is F-3's own
+// missing case: TestCasinoLaunchBootstrapsRLS_PlayerScopeCannotInsert
+// above proves the WRITE side only for the player scope; this proves it
+// for the remaining four excluded GUCs
+// (app.platform_admin_principal_id, app.platform_service_id,
+// app.acting_tenant_id, app.acting_platform_principal_id) - each set
+// ALONGSIDE the correct app.tenant_id, exactly like
+// TestCasinoLaunchBootstrapsRLS_ExtendedExclusionList's own read-side
+// mixed-context technique, so a pass here can only mean the INSERT
+// policy's own WITH CHECK exclusion clause is doing the work, never a
+// coincidental tenant mismatch.
+func TestCasinoLaunchBootstrapsRLS_NonPlayerScopesCannotInsert(t *testing.T) {
+	pool, f, _, _, _ := setupBootstrapFixture(t)
+
+	cases := []struct {
+		guc   string
+		value string
+	}{
+		{"app.platform_admin_principal_id", f.playerAccountID.String()},
+		{"app.platform_service_id", "sportsbook_catalogue_sync"},
+		{"app.acting_tenant_id", f.tenantID.String()},
+		{"app.acting_platform_principal_id", f.playerAccountID.String()},
+	}
+	for i, c := range cases {
+		t.Run(c.guc, func(t *testing.T) {
+			err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+				setExtraGUC(t, tx, c.guc, c.value)
+				_, err := tx.Exec(ctx,
+					`INSERT INTO casino_provider_player_refs (tenant_id, provider_id, player_account_id) VALUES ($1, $2, $3)`,
+					f.tenantID, "mock-casino", uuid.New())
+				return err
+			})
+			if err == nil {
+				t.Fatalf("expected the insert into casino_provider_player_refs to be refused with %s set", c.guc)
+			}
+
+			err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+				setExtraGUC(t, tx, c.guc, c.value)
+				_, err := tx.Exec(ctx,
+					`INSERT INTO casino_launch_bootstraps (tenant_id, provider_id, request_id, token_hash, request_digest, launch_session_id, player_ref, response)
+					 VALUES ($1, 'mock-casino', $2, repeat('a', 64), repeat('a', 64), gen_random_uuid(), gen_random_uuid(), '{}'::jsonb)`,
+					f.tenantID, fmt.Sprintf("req-rls-nonplayer-insert-%d", i))
+				return err
+			})
+			if err == nil {
+				t.Fatalf("expected the insert into casino_launch_bootstraps to be refused with %s set", c.guc)
+			}
+		})
 	}
 }
