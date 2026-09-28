@@ -337,8 +337,8 @@ func TestCasinoConsistency_CleanWorldReconcilesToZero(t *testing.T) {
 		var err error
 		run, _, err = RunLedgerVsProjection(ctx, tx, w.f.tenantID, time.Now().Add(-time.Hour), time.Now())
 		return err
-	}); err != nil || run.Status != StatusClean {
-		t.Fatalf("ledger_vs_projection must be clean: %s %v", run.Status, err)
+	}); err != nil || !runCleanExceptUnlinkedFixtures(t, pool, w.f.tenantID, run) {
+		t.Fatalf("ledger_vs_projection must be clean (fixture-funding ledger_unlinked_manual_adjustment rows excepted, ADR 0100 §12): %s %v", run.Status, err)
 	}
 }
 
