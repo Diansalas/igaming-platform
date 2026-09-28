@@ -63,6 +63,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/ledger"
 	"github.com/Diansalas/igaming-platform/internal/payments"
+	"github.com/Diansalas/igaming-platform/internal/reconciliation/statement"
 	"github.com/Diansalas/igaming-platform/internal/testsupport/scratchdb"
 )
 
@@ -119,6 +120,201 @@ func TestINVDEP1_Recon_M_CapturedUnposted_ReplacesDuplicate(t *testing.T) {
 	}
 	if sawDuplicate {
 		t.Errorf("ADR 0095 §28.9: 'pay_duplicate' must no longer fire once the second capture is held disputed/unposted; got:\n%s", renderMismatches(ms))
+	}
+}
+
+// mismatchKinds is a small helper shared by the two tests below.
+func mismatchKinds(ms []Mismatch) map[MismatchKind]bool {
+	out := map[MismatchKind]bool{}
+	for _, m := range ms {
+		out[m.MismatchKind] = true
+	}
+	return out
+}
+
+// TestINVDEP1_C2_CapturedUnposted_StandsAcrossStatementWindow closes
+// ledger-finance review C2/F2 (rv-fh3-ledger.md, 076e42e): before this
+// fix, pay_captured_unposted was raised ONLY inside matchPayment, when a
+// statement line for THIS run happens to match the disputed attempt - so
+// once the capture's own settlement period passed (no line ever names it
+// again in a later run), the exposure silently dropped out of
+// reconciliation entirely, even though the money is still unrefunded.
+// Under HD-LEDGER-UNALLOC-1 (A) this report is the ONLY standing record
+// of that off-ledger money, so this is a financial-correctness fix, not
+// polish.
+//
+// Builds the SAME real T13d scenario as TestINVDEP1_Recon_M_
+// CapturedUnposted_ReplacesDuplicate, runs it once against the real
+// statement source (the matched-line path, already covered there), then
+// runs it AGAIN against a statement with NO lines at all for this
+// provider (a fresh, empty payFixedSource - simulating exactly "the
+// capture's own statement period has passed, no line ever names it
+// again") and asserts pay_captured_unposted STILL fires, via
+// checkUnmatchedAttempts' new, unwindowed standing check.
+func TestINVDEP1_C2_CapturedUnposted_StandsAcrossStatementWindow(t *testing.T) {
+	w := newPayWorld(t)
+	declined, child := w.cascade(t)
+	w.succeed(t, w.mockB, payProvB, child)
+
+	w.mockA.Resolve(*declined.ProviderReference, payments.OutcomeSucceeded, "", false)
+	w.applyReceipt(t, payProvA, payments.ReceiptEvidence{
+		EventType: "deposit", ProviderReference: *declined.ProviderReference,
+		Outcome: payments.OutcomeSucceeded, Amount: declined.Amount, AssetCode: declined.AssetCode,
+	})
+	declinedAfter := w.attempt(t, declined.ID)
+	if declinedAfter.State != payments.AttemptDisputed || declinedAfter.TerminalReason == nil || *declinedAfter.TerminalReason != "multiple_success_for_intent" {
+		t.Fatalf("setup: expected disputed/multiple_success_for_intent, got state=%s reason=%v", declinedAfter.State, declinedAfter.TerminalReason)
+	}
+
+	// Run 1: the real statement source, which DOES carry a line for this
+	// reference (the mock provider's own record of the late success) -
+	// the matched-line path, baseline confirmation.
+	_, ms1 := w.run(t, w.srcA, PaymentStatementOptions{})
+	if !mismatchKinds(ms1)[MismatchKind("pay_captured_unposted")] {
+		t.Fatalf("setup: expected pay_captured_unposted on the matched-line run; got:\n%s", renderMismatches(ms1))
+	}
+
+	// Run 2: an EMPTY statement for this same provider - no line at all
+	// for this reference, exactly the "statement window has passed"
+	// scenario. Must STILL raise pay_captured_unposted.
+	emptySrc := payFixedSource{provider: payProvA, stmt: wideCoverage()}
+	_, ms2 := w.run(t, emptySrc, PaymentStatementOptions{})
+	if !mismatchKinds(ms2)[MismatchKind("pay_captured_unposted")] {
+		t.Errorf("C2: expected pay_captured_unposted to STAND across a run with no statement line at all for this reference; got:\n%s", renderMismatches(ms2))
+	}
+}
+
+// TestINVDEP1_C5_CapturedUnposted_ClearsOnReversalLineOrTombstone closes
+// ledger-finance review C5: a test that kills mutant RTMB (the
+// pay_captured_unposted clearing conditions replaced by `true`, which
+// survived the full internal/payments and internal/reconciliation suites
+// at a927aed). Exercises BOTH of §28.9's clearing signals independently,
+// each on its OWN fresh T13d fixture, each checked via a run with NO
+// matching statement line at all (the standing/unmatched path C2 adds),
+// so this test is impossible to satisfy by accident via the
+// matched-line path alone:
+//
+//  1. a PSP-reported deposit_reversal STATEMENT line naming this
+//     reference as its own original (m.reversalOriginals) clears it;
+//  2. a real platform-side TOMBSTONE ledger row for this reference
+//     (m.ledgerByRef) clears it - produced here via a genuine reversal
+//     callback for a never-posted capture, which applyReversalReceipt
+//     Evidence's own tombstone branch takes (LedgerTransactionID is nil
+//     on a T13d attempt by construction).
+func TestINVDEP1_C5_CapturedUnposted_ClearsOnReversalLineOrTombstone(t *testing.T) {
+	buildDisputed := func(t *testing.T) (*payWorld, payments.PaymentAttempt) {
+		w := newPayWorld(t)
+		declined, child := w.cascade(t)
+		w.succeed(t, w.mockB, payProvB, child)
+		w.mockA.Resolve(*declined.ProviderReference, payments.OutcomeSucceeded, "", false)
+		w.applyReceipt(t, payProvA, payments.ReceiptEvidence{
+			EventType: "deposit", ProviderReference: *declined.ProviderReference,
+			Outcome: payments.OutcomeSucceeded, Amount: declined.Amount, AssetCode: declined.AssetCode,
+		})
+		declinedAfter := w.attempt(t, declined.ID)
+		if declinedAfter.State != payments.AttemptDisputed || declinedAfter.TerminalReason == nil || *declinedAfter.TerminalReason != "multiple_success_for_intent" {
+			t.Fatalf("setup: expected disputed/multiple_success_for_intent, got state=%s reason=%v", declinedAfter.State, declinedAfter.TerminalReason)
+		}
+		return w, declinedAfter
+	}
+
+	t.Run("reversal_line", func(t *testing.T) {
+		w, disputed := buildDisputed(t)
+		revLine := payLineFor(payProvA, "c5-rev-"+disputed.ID.String()[:8], "", statement.PaymentLineDepositReversal, statement.PaymentStatusSucceeded, disputed.Amount)
+		revLine.OriginalProviderReference = *disputed.ProviderReference
+		src := payFixedSource{provider: payProvA, stmt: wideCoverage(revLine)}
+		_, ms := w.run(t, src, PaymentStatementOptions{})
+		if mismatchKinds(ms)[MismatchKind("pay_captured_unposted")] {
+			t.Errorf("C5: a PSP-reported reversal line naming this reference as its original must CLEAR pay_captured_unposted; got:\n%s", renderMismatches(ms))
+		}
+	})
+
+	t.Run("tombstone", func(t *testing.T) {
+		w, disputed := buildDisputed(t)
+		if disputed.LedgerTransactionID != nil {
+			t.Fatalf("setup: a T13d attempt must carry no ledger link, got %s", *disputed.LedgerTransactionID)
+		}
+		w.deliverReversal(t, "c5-tomb-"+disputed.ID.String()[:8], *disputed.ProviderReference, disputed.Amount)
+		var tombCount int64
+		if err := w.pool.WithTenant(context.Background(), w.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+			return tx.QueryRow(ctx, `SELECT count(*) FROM ledger_transactions WHERE transaction_type='tombstone' AND provider_tx_id=$1`, *disputed.ProviderReference).Scan(&tombCount)
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if tombCount != 1 {
+			t.Fatalf("setup: expected exactly one tombstone for this reference, got %d", tombCount)
+		}
+		// No statement line at all - the tombstone alone must clear it.
+		emptySrc := payFixedSource{provider: payProvA, stmt: wideCoverage()}
+		_, ms := w.run(t, emptySrc, PaymentStatementOptions{})
+		if mismatchKinds(ms)[MismatchKind("pay_captured_unposted")] {
+			t.Errorf("C5: a real tombstone ledger row for this reference must CLEAR pay_captured_unposted even with no statement line at all; got:\n%s", renderMismatches(ms))
+		}
+	})
+
+	// Code review R1 (rv-fh3-code-review.md, 95a1c34): the disputed
+	// attempt's OWN statement line, if the PSP itself now reports THAT
+	// line's own status as 'reversed' (not a SEPARATE deposit_reversal
+	// line naming it as an original - this is the SAME reference,
+	// reported directly as refunded), must ALSO clear pay_captured_
+	// unposted - never keep it standing just because SOME line still
+	// names the reference. Kills mutant X15 (the "only succeeded counts"
+	// narrowing, if ever widened back to accept 'reversed' too).
+	t.Run("own_line_reported_reversed", func(t *testing.T) {
+		w, disputed := buildDisputed(t)
+		ownLine := payLineFor(payProvA, *disputed.ProviderReference, "", statement.PaymentLineDeposit, statement.PaymentStatusReversed, disputed.Amount)
+		src := payFixedSource{provider: payProvA, stmt: wideCoverage(ownLine)}
+		_, ms := w.run(t, src, PaymentStatementOptions{})
+		if mismatchKinds(ms)[MismatchKind("pay_captured_unposted")] {
+			t.Errorf("R1: a statement line reporting THIS reference's own status as reversed must CLEAR pay_captured_unposted, never keep it standing; got:\n%s", renderMismatches(ms))
+		}
+	})
+}
+
+// TestINVDEP1_X16_TerminalReasonFilter_PrecedenceCaseNeverReportsCapturedUnposted
+// closes code-review R3's X16 gap (rv-fh3-code-review.md, 95a1c34): both
+// pay_captured_unposted call sites (matchPayment's matched-line case and
+// checkUnmatchedAttempts' standing case) gate on
+// a.terminalReason == "multiple_success_for_intent" specifically - a
+// disputed attempt with the OTHER T13t/T13d terminal reason
+// (reversal_tombstone_precedes_success, ADR 0095 §28.6.3's "the reversal
+// precedes the success" precedence case) never occupied the INV-DEP-1
+// slot with real, unposted captured money in the first place (the
+// tombstone arrived BEFORE any success, so the attempt was disputed with
+// NO capture ever recorded) and must never be reported as
+// pay_captured_unposted, regardless of statement content.
+func TestINVDEP1_X16_TerminalReasonFilter_PrecedenceCaseNeverReportsCapturedUnposted(t *testing.T) {
+	w := newPayWorld(t)
+	declined, _ := w.cascade(t)
+
+	if err := w.pool.WithTenant(context.Background(), w.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return payments.ApplyTombstonePrecedesSuccess(ctx, tx, declined.ID, payments.EvidenceCallback)
+	}); err != nil {
+		t.Fatalf("setup: ApplyTombstonePrecedesSuccess (T13t): %v", err)
+	}
+	precedence := w.attempt(t, declined.ID)
+	if precedence.State != payments.AttemptDisputed || precedence.TerminalReason == nil || *precedence.TerminalReason != payments.TerminalReasonTombstonePrecedesSuccess {
+		t.Fatalf("setup: expected disputed/%s, got state=%s reason=%v", payments.TerminalReasonTombstonePrecedesSuccess, precedence.State, precedence.TerminalReason)
+	}
+	if precedence.LedgerTransactionID != nil {
+		t.Fatalf("setup: a T13t attempt must carry no ledger link, got %s", *precedence.LedgerTransactionID)
+	}
+
+	// Both the matched-line run (a statement line naming this reference,
+	// still reported succeeded - the PSP's own view before the platform's
+	// tombstone caught up) and the standing/unmatched run (no line at all)
+	// must never report pay_captured_unposted for this terminal_reason.
+	line := payLineFor(payProvA, *precedence.ProviderReference, "", statement.PaymentLineDeposit, statement.PaymentStatusSucceeded, precedence.Amount)
+	matchedSrc := payFixedSource{provider: payProvA, stmt: wideCoverage(line)}
+	_, msMatched := w.run(t, matchedSrc, PaymentStatementOptions{})
+	if mismatchKinds(msMatched)[MismatchKind("pay_captured_unposted")] {
+		t.Errorf("X16: a reversal_tombstone_precedes_success attempt must never report pay_captured_unposted on the matched-line path; got:\n%s", renderMismatches(msMatched))
+	}
+
+	emptySrc := payFixedSource{provider: payProvA, stmt: wideCoverage()}
+	_, msStanding := w.run(t, emptySrc, PaymentStatementOptions{})
+	if mismatchKinds(msStanding)[MismatchKind("pay_captured_unposted")] {
+		t.Errorf("X16: a reversal_tombstone_precedes_success attempt must never report pay_captured_unposted on the standing/unmatched path; got:\n%s", renderMismatches(msStanding))
 	}
 }
 

@@ -929,8 +929,16 @@ func (m *payMatcher) matchPayment(lk string, l payLine) {
 
 	providerSucceeded := l.status == statement.PaymentStatusSucceeded || l.status == statement.PaymentStatusReversed
 	switch {
-	case a.state == "disputed" && a.terminalReason == "multiple_success_for_intent" && providerSucceeded &&
-		!m.reversalOriginals[a.providerRef] && m.ledgerByRef["tombstone\x00"+a.providerRef] == nil:
+	// Code review R1 (rv-fh3-code-review.md, 95a1c34): ONLY a `succeeded`
+	// statement-line status counts as "still captured" for this check -
+	// deliberately `l.status == statement.PaymentStatusSucceeded`, never
+	// the wider `providerSucceeded` (which also includes `reversed`). A
+	// `reversed` line is the PSP's OWN statement confirming this capture
+	// was refunded - exactly the signal that must CLEAR the flag, not
+	// keep it standing - so it falls through to the plain "disputed:
+	// already a payments P1" case below instead, precisely like every
+	// other disputed reason.
+	case a.state == "disputed" && a.terminalReason == "multiple_success_for_intent" && l.status == statement.PaymentStatusSucceeded && m.capturedUnposted(a):
 		// ADR 0095 §28.9: the ONE disputed reason code that is NOT already
 		// a plain payments P1 for reconciliation's purposes - a real PSP
 		// capture the platform never posted and has not (yet) been
@@ -951,8 +959,26 @@ func (m *payMatcher) matchPayment(lk string, l payLine) {
 	}
 }
 
-// checkUnmatchedAttempts: attempts in the coverage window that no line
-// matched.
+// capturedUnposted is ADR 0095 §28.9's pay_captured_unposted clearing
+// predicate, shared by matchPayment (a statement line for this run DOES
+// name the attempt) and checkUnmatchedAttempts (ledger-finance review C2/
+// F2, rv-fh3-ledger.md 076e42e: no line names it in THIS run, which is
+// exactly the case that let the exposure silently drop out of
+// reconciliation once the capture's own statement period passed) - the
+// SAME two conditions in both places, so a future edit to one can never
+// silently diverge from the other: no deposit_reversal line in THIS run
+// named this reference (m.reversalOriginals, populated once per run by
+// matchLines before either caller runs), and no tombstone ledger row
+// exists for it. Both callers already gate on
+// a.terminalReason == "multiple_success_for_intent" themselves - not
+// duplicated here, since matchPayment's own case additionally requires
+// providerSucceeded (a statement-line-status concept this predicate has
+// no business knowing about).
+func (m *payMatcher) capturedUnposted(a *payAttempt) bool {
+	return !m.reversalOriginals[a.providerRef] && m.ledgerByRef["tombstone\x00"+a.providerRef] == nil
+}
+
+// checkUnmatchedAttempts: attempts that no line in THIS run matched.
 func (m *payMatcher) checkUnmatchedAttempts() {
 	for _, a := range m.attempts {
 		if _, ok := m.matchedBy[a.id]; ok {
@@ -960,6 +986,20 @@ func (m *payMatcher) checkUnmatchedAttempts() {
 		}
 		k := m.key("attempt="+a.id.String(), "provider_reference="+orNone(a.providerRef))
 		switch {
+		// Ledger-finance review C2/F2 (rv-fh3-ledger.md, 076e42e,
+		// HD-LEDGER-UNALLOC-1 (A)): a disputed multiple_success_for_intent
+		// deposit attempt is real, standing, unallocated money off-ledger
+		// until a PSP-side reversal or tombstone clears it - this report
+		// is its ONLY record, so it must be raised on EVERY run, not only
+		// the run whose statement happens to carry a line for it (a
+		// capture's own settlement period passes, after which no line
+		// ever names it again). Deliberately UNWINDOWED, like
+		// m.attempts itself (loadPlatform's own query has no date
+		// filter) - never gated on m.inCoverage/m.aged, which exist for
+		// the OTHER two cases below, not this one.
+		case a.state == "disputed" && a.terminalReason == "multiple_success_for_intent" && m.capturedUnposted(a):
+			m.r.add(MismatchKindPayCapturedUnposted, k+" check=captured_unposted",
+				"resolution: a PSP-initiated reversal/tombstone, or M1/allocation (BLOCKED)", m.label+"no statement line; platform: "+a.render())
 		// The coverage window protects only the "missing provider record"
 		// rule. Ageing is not coverage-gated (code review F2): with a
 		// window no longer than the horizon an in-flight attempt would
