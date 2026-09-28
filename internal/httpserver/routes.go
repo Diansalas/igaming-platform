@@ -171,4 +171,8 @@ func registerIdentityRoutes(mux *http.ServeMux, deps Deps) {
 		auth.Middleware(deps.AuthIssuer)(auth.RequirePermission(auth.PermStaffManage)(newUpdateStaffDisplayNameHandler(deps))))
 	mux.Handle("PATCH /v1/admin/staff/me/display-name",
 		auth.Middleware(deps.AuthIssuer)(auth.RequireStaffPrincipal(newSelfUpdateStaffDisplayNameHandler(deps))))
+
+	// PRH-2 K1 (ADR 0099): the scoped financial capability grant admin
+	// API - see capability_routes.go's own doc comment.
+	registerCapabilityRoutes(mux, deps)
 }

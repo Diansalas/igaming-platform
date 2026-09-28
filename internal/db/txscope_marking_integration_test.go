@@ -38,6 +38,27 @@ func TestWithScopes_MarkTxscope(t *testing.T) {
 				called, marked = true, txscope.Held(ctx)
 				return errDone
 			})
+
+			// WithPlatformActingInTenant (ADR 0099 §6.1, PRH-2 K1) is
+			// deliberately NOT like every other With* setter: it validates
+			// the acting session against the database (an in-force grant
+			// for principalID/targetTenantID) BEFORE ever calling fn, and
+			// raises (SQLSTATE CG020) rather than proceeding on a random
+			// uuid.New() pair - that fail-closed behaviour is the whole
+			// point of the ADR. The generic "any random UUID makes fn run"
+			// assumption below does not hold for it, so this builds a real,
+			// valid grant fixture first and calls it directly.
+			if m.Name == "WithPlatformActingInTenant" {
+				principalID, tenantID := mustBuildValidActingGrantFixture(t, pool)
+				if err := pool.WithPlatformActingInTenant(context.Background(), principalID, tenantID, uuid.Nil, "", fn); !errors.Is(err, errDone) {
+					t.Fatalf("%s did not run fn: %v", m.Name, err)
+				}
+				if !called || !marked {
+					t.Fatalf("%s must pass a txscope-marked context to fn (ADR 0094 INV-POOL guard)", m.Name)
+				}
+				return
+			}
+
 			args := []reflect.Value{reflect.ValueOf(pool)}
 			for j := 1; j < m.Type.NumIn(); j++ {
 				in := m.Type.In(j)

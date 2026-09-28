@@ -336,3 +336,111 @@ func SetSessionInternalOpID(ctx context.Context, tx pgx.Tx, sessionID uuid.UUID)
 	}
 	return nil
 }
+
+// WithPlatformActingInTenant runs fn in a "platform principal acting in
+// tenant X" transaction (ADR 0099 §6.1, PRH-2 K1). It is the SOLE
+// sanctioned way in this codebase to set the "app.acting_tenant_id" /
+// "app.acting_platform_principal_id" GUCs (a static test,
+// internal/db/acting_setter_static_test.go, pins that no other Go source
+// file calls raw set_config on either) - every acting-session policy and
+// fence added by migration 0112 therefore holds precisely because this
+// function, and nothing else, can ever produce that GUC shape.
+//
+// principalID MUST be the value the caller read from the verified
+// token's own subject (tenant.FromContext(ctx).Subject in HTTP callers) -
+// never anything else, and never a value read from a request body or
+// query parameter. targetTenantID MUST be the route-validated target
+// tenant (the platform route's own path parameter, resolved and
+// validated by the caller's own canActOnTenant-equivalent check before
+// this is ever invoked) - again, never taken from a request body. Passing
+// an arbitrary uuid here grants nothing on its own: migration 0112's
+// financial_acting_session_valid() independently re-reads staff_users and
+// staff_capability_grants inside the same transaction and refuses
+// (SQLSTATE CG020) unless principalID resolves to an active
+// platform_admin holding an in-force financial capability grant for
+// targetTenantID.
+//
+// Inside one transaction this:
+//  1. sets exactly the two acting GUCs via set_config(..., true), and
+//     nothing else;
+//  2. calls financial_acting_session_open(), which raises CG020 unless
+//     the ADR 0099 §6.3 validity holds - a refused open rolls back the
+//     whole transaction, so fn never runs on an invalid acting session;
+//  3. writes the audit row "financial.acting_session_opened" (actor
+//     principalID, tenant targetTenantID) in the SAME transaction so it
+//     commits or rolls back with everything fn does; the row's actor/
+//     tenant columns are independently re-forced by the
+//     audit_log_acting_actor trigger, so a caller cannot misreport them
+//     even if it tried;
+//  4. calls fn.
+//
+// Only internal/adjustment (ADR 0100, K2) and
+// internal/payments/manual_resolution.go (ADR 0101, K3) may call this -
+// pinned by the same static test.
+//
+// requestID and operation (F-7, code review of 0f34d36) identify the
+// caller's own governed request/resolution row and the calling operation
+// name (e.g. "ledger_adjustment", "payment_force_resolve") - ADR 0099
+// §6.1 point 3 requires the "financial.acting_session_opened" audit row
+// to carry both. requestID may be uuid.Nil and operation may be empty for
+// a caller with no single request row to name (neither is validated here
+// - the caller's own domain trigger, e.g. the §6.6 ledger fence, is what
+// actually ties the operation to a real, executing request).
+func (p *Pool) WithPlatformActingInTenant(ctx context.Context, principalID, targetTenantID, requestID uuid.UUID, operation string, fn TxFunc) error {
+	if principalID == uuid.Nil {
+		return fmt.Errorf("db: WithPlatformActingInTenant called with nil principal id")
+	}
+	if targetTenantID == uuid.Nil {
+		return fmt.Errorf("db: WithPlatformActingInTenant called with nil target tenant id")
+	}
+
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("db: begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if _, err := tx.Exec(ctx, `SELECT set_config('app.acting_platform_principal_id', $1, true)`, principalID.String()); err != nil {
+		return fmt.Errorf("db: set acting platform principal context: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `SELECT set_config('app.acting_tenant_id', $1, true)`, targetTenantID.String()); err != nil {
+		return fmt.Errorf("db: set acting tenant context: %w", err)
+	}
+
+	if _, err := tx.Exec(ctx, `SELECT financial_acting_session_open()`); err != nil {
+		return fmt.Errorf("db: open acting session: %w", err)
+	}
+
+	// Written directly (not via internal/audit.Record) to avoid an
+	// internal/db <-> internal/audit import cycle: internal/audit's own
+	// integration test imports internal/db, so internal/db must not
+	// import internal/audit back. The row shape matches audit.Record's
+	// own INSERT exactly (audit_log's actor_type/actor_id/action/outcome/
+	// metadata columns); migration 0112's audit_log_acting_actor trigger
+	// independently re-forces actor_type/actor_id/tenant_id/metadata from
+	// the DB session regardless of what is written here, so this cannot
+	// misreport the actor even if it tried. metadata is a jsonb object
+	// (never NULL) so the trigger's own "metadata || '{...}'::jsonb" merge
+	// works: jsonb_concat with a NULL left operand yields NULL, which
+	// would silently drop the actor_scope tag entirely.
+	var requestIDVal any
+	if requestID != uuid.Nil {
+		requestIDVal = requestID.String()
+	}
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO audit_log (tenant_id, actor_type, actor_id, action, outcome, metadata)
+		 VALUES ($1, 'staff', $2, 'financial.acting_session_opened', 'success', jsonb_build_object('request_id', $3::text, 'operation', $4::text))`,
+		targetTenantID, principalID, requestIDVal, operation,
+	); err != nil {
+		return fmt.Errorf("db: audit acting session open: %w", err)
+	}
+
+	if err := fn(txscope.Mark(ctx), tx); err != nil {
+		return err // deferred Rollback cleans up
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("db: commit tx: %w", err)
+	}
+	return nil
+}

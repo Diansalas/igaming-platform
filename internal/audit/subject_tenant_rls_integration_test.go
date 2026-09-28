@@ -216,6 +216,20 @@ func isP0001(err error) bool {
 	return errors.As(err, &pgErr) && pgErr.Code == "P0001"
 }
 
+// cgIsCode020 (security ruling, item 9): PRH-2 K1's migration 0112 adds
+// audit_log_acting_actor, a BEFORE INSERT trigger on audit_log that fires
+// BEFORE this file's own audit_log_subject_actor_guard (Postgres fires
+// BEFORE ROW triggers in trigger-name order, and "audit_log_acting_actor"
+// sorts before "audit_log_subject_actor_guard"). So a shape with an
+// acting GUC set (present but not the C-1 exact shape) is refused by the
+// newer, earlier-firing trigger (CG020) before the older one (P0001) ever
+// runs. This pins exactly CG020 for those specific cases, not "either" -
+// the firing order is now guaranteed, not merely possible.
+func cgIsCode020(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "CG020"
+}
+
 // TestSubjectActorGuard_Refusals is ADR 0104 §7's "AZ/RLS write side"
 // list, and §7's MUT items for the trigger.
 func TestSubjectActorGuard_Refusals(t *testing.T) {
@@ -278,8 +292,11 @@ func TestSubjectActorGuard_Refusals(t *testing.T) {
 		}
 		return Record(ctx, tx, Entry{ActorType: ActorStaff, ActorID: admin, Action: "test.az5", Outcome: OutcomeSuccess, SubjectTenantID: tenantA})
 	})
-	if !isP0001(err) {
-		t.Errorf("(5) app.acting_tenant_id set: expected P0001, got %v", err)
+	// Security ruling: migration 0112's audit_log_acting_actor trigger
+	// fires first (see cgIsCode020's own doc comment on trigger
+	// firing order), so this is now pinned to exactly CG020, not "either".
+	if !cgIsCode020(err) {
+		t.Errorf("(5) app.acting_tenant_id set: expected exactly CG020, got %v", err)
 	}
 
 	// (5b) app.platform_service_id set alongside the platform GUC: refused.
@@ -322,8 +339,18 @@ func TestSubjectActorGuard_Refusals(t *testing.T) {
 			}
 			return Record(ctx, tx, Entry{ActorType: ActorStaff, ActorID: admin, Action: "test.az" + gc.name, Outcome: OutcomeSuccess, SubjectTenantID: tenantA})
 		})
-		if !isP0001(err) {
-			t.Errorf("(%s) %s set alone: expected P0001, got %v", gc.name, gc.guc, err)
+		// 5e sets app.acting_platform_principal_id, which migration 0112's
+		// audit_log_acting_actor trigger (fires first - see
+		// cgIsCode020's own doc comment) now refuses on its own,
+		// with exactly CG020 rather than this file's own P0001.
+		ok := isP0001(err)
+		wantMsg := "P0001"
+		if gc.name == "5e" {
+			ok = cgIsCode020(err)
+			wantMsg = "exactly CG020"
+		}
+		if !ok {
+			t.Errorf("(%s) %s set alone: expected %s: got %v", gc.name, gc.guc, wantMsg, err)
 		}
 	}
 

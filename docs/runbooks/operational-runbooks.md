@@ -162,3 +162,44 @@ during a real incident is itself a major risk.
 5. Legal/regulatory notification obligations are a human/legal decision,
    not something to determine or execute autonomously — escalate rather
    than guess at breach-notification requirements.
+
+## 10. Scoped financial capability grants (ADR 0099, PRH-2 K1)
+
+Applies to the `staff_capability_grant_requests` / `_approvals` /
+`_grants` tables and the "platform acting in tenant X" session shape.
+
+**Emergency revoke a grant:**
+1. `POST /v1/admin/tenants/{tenantID}/capability-grants/{grantID}/revoke`
+   with a `reason_code`, as a `tenant_admin` of that tenant or any
+   `platform_admin` — this is the single emergency-stop action (ADR §8.1).
+   It is one-way: a revoked grant can never be un-revoked or re-revoked
+   with a different reason (both are refused, `CG012`) — a fresh grant
+   must be requested and re-approved if access is needed again.
+2. Confirm via `GET /v1/admin/tenants/{tenantID}/capability-grants` that
+   the grant now shows `revoked_at` set.
+3. Check `audit_log` for `capability_grant.revoked` (action name, exact)
+   for the actor, reason code and before/after state — every revoke is
+   audited by construction (`internal/capability.RevokeGrant`'s own
+   caller always writes it in the same transaction).
+
+**A suspicious grant approval (suspected sock-puppet / self-approval):**
+1. The DB itself refuses same-Person approval-of-own-request
+   structurally (R-1..R-8) — if one nonetheless exists, it means either a
+   Person record was manually mis-linked, or a DB-level control was
+   bypassed (table-owner/superuser access) — treat as a security incident
+   (§9 above), not a routine revoke.
+2. Revoke the grant immediately (above), then investigate how the
+   approval was recorded — check `staff_capability_grant_approvals`'
+   `decided_by`/`decided_by_person_id` against the requester's own
+   `person_id`.
+
+**A grantee's status/role changed after a grant was approved:** there is
+no automatic revoke yet (STAFF-LIFECYCLE-1 is not implemented — ADR §8.4,
+security ruling S-b). Revoke the grant manually as part of any
+suspend/role-change/off-boarding procedure until that automation exists.
+
+**G-P1 is not available:** a platform-originated grant request naming a
+tenant's own `finance` staff always fails closed (`CG010`, HTTP 409) — this
+is by design (ADR §4.1, architect ruling, deferred out of PRH-2), not an
+outage. Use G-T instead (the tenant's own `tenant_admin` requests, a
+`platform_admin` co-approves).
