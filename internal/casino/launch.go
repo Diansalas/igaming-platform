@@ -261,6 +261,23 @@ func CreateLaunchSession(ctx context.Context, tx pgx.Tx, params CreateLaunchSess
 	}, token, nil
 }
 
+// ResolveLaunchToken - DO NOT USE for a new vendor bootstrap/consume path.
+// ADR 0103 §5 (S-5) deliberately does NOT reuse this function for
+// CAS-PLAY-BOOTSTRAP-1: it performs a single unconditional UPDATE with no
+// binding check (provider/mode/asset/game), no gate re-evaluation, and no
+// idempotency record, none of which this comment's original text called
+// out as a reason to avoid it because none of that existed yet when this
+// function was written. Real vendor bootstrap/consume traffic goes through
+// casino.Orchestrator.BootstrapLaunch (bootstrap.go) instead, which is the
+// only production-shaped path with the full ADR 0103 §3.2 step order.
+// This function is kept only because it still has test-only callers this
+// change does not touch (ADR 0103 §11 item 5); a follow-up should delete
+// it once those callers are migrated or retired (registry: propose a
+// CAS-RESOLVE-LAUNCH-TOKEN-DELETE-1 follow-up).
+//
+// Original doc, preserved below because it is still accurate for what
+// THIS function does (just not what a new caller should use):
+//
 // ResolveLaunchToken looks up the casino_launch_sessions row for a raw
 // token by its hash and, if it is genuinely active and not expired,
 // atomically marks it 'consumed' - single-use enforcement (ADR 0025 §3).

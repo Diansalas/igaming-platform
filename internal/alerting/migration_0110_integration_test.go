@@ -4,6 +4,9 @@ package alerting
 
 import (
 	"context"
+	"os"
+	"path/filepath"
+	"strconv"
 	"testing"
 
 	"github.com/google/uuid"
@@ -30,6 +33,56 @@ func scratchPool(t *testing.T, prefix string) *db.Pool {
 func realMigrationsDir(t *testing.T) string {
 	t.Helper()
 	return "../../migrations"
+}
+
+// migration0110Version is the version these down/round-trip tests target.
+const migration0110Version = int64(110)
+
+// scratchPoolThrough0110 copies only the migration files numbered up to
+// and including 0110 into a temp dir and migrates a fresh scratch DB
+// through them, so "down one step" always rolls back exactly 0110 however
+// many later migrations exist on disk (the internal/casino
+// migration0099Scratch pattern). The returned dir must be used for every
+// subsequent MigrateDown/MigrateUp/VerifyMigrations call.
+func scratchPoolThrough0110(t *testing.T, prefix string) (*db.Pool, string) {
+	t.Helper()
+	src := realMigrationsDir(t)
+	dir := t.TempDir()
+	entries, err := os.ReadDir(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || len(name) < 4 {
+			continue
+		}
+		n, perr := strconv.ParseInt(name[:4], 10, 64)
+		if perr != nil || n > migration0110Version {
+			continue
+		}
+		b, rerr := os.ReadFile(filepath.Join(src, name))
+		if rerr != nil {
+			t.Fatal(rerr)
+		}
+		if werr := os.WriteFile(filepath.Join(dir, name), b, 0o600); werr != nil {
+			t.Fatal(werr)
+		}
+	}
+	url := scratchdb.New(t, prefix)
+	pool, err := db.Connect(context.Background(), url, 10, 5_000_000_000)
+	if err != nil {
+		t.Fatalf("connect scratch: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	applied, err := pool.MigrateUp(context.Background(), dir)
+	if err != nil {
+		t.Fatalf("migrate scratch up through %d: %v", migration0110Version, err)
+	}
+	if len(applied) == 0 || applied[len(applied)-1] != migration0110Version {
+		t.Fatalf("expected %d to be the last applied migration, got %v", migration0110Version, applied)
+	}
+	return pool, dir
 }
 
 // TestMigration0110_NoRouteSeeded is AL-8/HD-PRH2-4: alert_routes ships
@@ -105,17 +158,12 @@ func TestMigration0110_RecipientRefRefusesEmailAndPhoneShapes(t *testing.T) {
 
 // TestMigration0110_DownRefusesWithRows.
 func TestMigration0110_DownRefusesWithRows(t *testing.T) {
-	pool := scratchPool(t, "alert0110down")
+	pool, migDir := scratchPoolThrough0110(t, "alert0110down")
 	admin := seedPlatformAdmin(t, pool)
 	tenantA := seedTenant(t, pool, admin)
 	seedOpenAlert(t, pool, tenantA, KindPaymentKillSwitchEngaged, "switch:"+uuid.NewString())
 
-	// steps=2: PRH-2 K1 (ADR 0099) added migration 0112 on top of 0110.
-	// Rolling back only 1 step now undoes 0112 (which has no rows of its
-	// own here and reverses cleanly), never reaching 0110's own down
-	// migration at all - 2 steps is what actually exercises 0110's
-	// refuse-with-rows guard this test is named for.
-	_, err := pool.MigrateDown(context.Background(), realMigrationsDir(t), 2)
+	_, err := pool.MigrateDown(context.Background(), migDir, 1)
 	if err == nil {
 		t.Fatal("expected migration 0110's down migration to refuse while an alerts row exists")
 	}
@@ -125,7 +173,7 @@ func TestMigration0110_DownRefusesWithRows(t *testing.T) {
 // down migration must also refuse when alert_routes alone is non-empty,
 // even with zero alerts/occurrences/deliveries.
 func TestMigration0110_DownRefusesWithRoutesOnly(t *testing.T) {
-	pool := scratchPool(t, "alert0110downroutes")
+	pool, migDir := scratchPoolThrough0110(t, "alert0110downroutes")
 	admin := seedPlatformAdmin(t, pool)
 	err := pool.WithPlatformAdmin(context.Background(), admin, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := tx.Exec(ctx, `INSERT INTO alert_routes (scope, severity, escalation_step, channel_kind, recipient_ref) VALUES ('platform', 'p1', 0, 'log', 'ops')`)
@@ -135,8 +183,7 @@ func TestMigration0110_DownRefusesWithRoutesOnly(t *testing.T) {
 		t.Fatalf("seed route: %v", err)
 	}
 
-	// steps=2: see TestMigration0110_DownRefusesWithRows's identical note.
-	_, err = pool.MigrateDown(context.Background(), realMigrationsDir(t), 2)
+	_, err = pool.MigrateDown(context.Background(), migDir, 1)
 	if err == nil {
 		t.Fatal("expected migration 0110's down migration to refuse with a routes-only state")
 	}
@@ -145,46 +192,32 @@ func TestMigration0110_DownRefusesWithRoutesOnly(t *testing.T) {
 // TestMigration0110_UpDownUp verifies the migration is fully reversible
 // on an otherwise-empty database.
 func TestMigration0110_UpDownUp(t *testing.T) {
-	pool := scratchPool(t, "alert0110updown")
+	pool, migDir := scratchPoolThrough0110(t, "alert0110updown")
 
-	if _, err := pool.MigrateDown(context.Background(), realMigrationsDir(t), 1); err != nil {
+	if _, err := pool.MigrateDown(context.Background(), migDir, 1); err != nil {
 		t.Fatalf("down: %v", err)
 	}
-	applied, err := pool.MigrateUp(context.Background(), realMigrationsDir(t))
+	applied, err := pool.MigrateUp(context.Background(), migDir)
 	if err != nil {
 		t.Fatalf("up: %v", err)
 	}
-	if len(applied) != 1 {
-		t.Fatalf("expected exactly 1 migration re-applied, got %d", len(applied))
+	if len(applied) != 1 || applied[0] != migration0110Version {
+		t.Fatalf("expected exactly [%d] re-applied, got %v", migration0110Version, applied)
 	}
 
-	report, err := pool.VerifyMigrations(context.Background(), realMigrationsDir(t))
+	report, err := pool.VerifyMigrations(context.Background(), migDir)
 	if err != nil {
 		t.Fatalf("verify: %v", err)
 	}
-	// This branch may legitimately show ONE known, disclosed version gap,
-	// depending on which sibling branches are merged into this worktree
-	// yet: G1's migration 0109 (if not yet merged), or PRH-2 B's migration
-	// 0111 (the casino bootstrap - if not yet merged; PRH-2 K1's own
-	// migration is 0112, allocated on top of B's 0111 per the
-	// orchestrator's mid-build renumbering, see ADR 0099's own "NOTE ON
-	// NUMBERING"). Either is expected and resolved by the orchestrator at
-	// merge time - assert every CHECKSUM result is clean (report.OK()'s
-	// other half) without requiring report.OK() itself, which would also
-	// fail on either known, disclosed gap.
+	// Migrations 0001..0110 are contiguous on main, so the round trip must
+	// leave a fully clean report: no checksum drift, no missing file and
+	// no version gap.
+	if !report.OK() {
+		t.Fatalf("expected a clean migration report after the round trip, got %+v", report)
+	}
 	for _, res := range report.Results {
 		if res.Status == db.MigrationCheckMismatch || res.Status == db.MigrationCheckMissingFile {
 			t.Fatalf("expected no checksum drift, got %+v", res)
 		}
-	}
-	knownGaps := map[string]bool{
-		"missing migration version 109 (gap between 108 and 110)": true,
-		"missing migration version 111 (gap between 110 and 112)": true,
-	}
-	if len(report.VersionGaps) > 1 {
-		t.Fatalf("expected at most one known gap, got %v", report.VersionGaps)
-	}
-	if len(report.VersionGaps) == 1 && !knownGaps[report.VersionGaps[0]] {
-		t.Fatalf("expected only a known gap, got %v", report.VersionGaps)
 	}
 }

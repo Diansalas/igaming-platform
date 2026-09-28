@@ -60,7 +60,7 @@ production credential exists.
 |---|---|---|
 | Payments (PSP), deposits and payouts | MOCK (`internal/payments` mock provider) | ADR 0095; PROV-OUTBOUND-CRED-1 tripwire `TestOutboundPrecondition_EveryWiredAdapterIsSynthetic`; PRH-2 C/D/E2/H; PAY-PSP-CONTRACT-INVDEP1; PAY-SEC-LAUNCH-1 |
 | Payment statements / reconciliation source | MOCK source (PRH-I5) | Real PSP statement format (provider dependent) |
-| Casino aggregator | MOCK (`internal/casino` mock) | CAS-REVOKE-CONSUMED-1 done (PRH-2 A, migration 0108); CAS-PLAY-BOOTSTRAP-1 (PRH-2 B); CAS-GAME-KILL-BET-1; tripwire |
+| Casino aggregator | MOCK (`internal/casino` mock). The launch-token bootstrap endpoint (ADR 0103, migration 0111) is IMPLEMENTED against the MOCK vendor over HTTP. | CAS-REVOKE-CONSUMED-1 done (PRH-2 A, 0108). Before a real vendor: CAS-PLAYER-REF-1, a vendor-side bootstrap parse hook (ADR 0103 §13), CAS-GAME-KILL-BET-1 and CAS-BET-REQUIRES-BOOTSTRAP-1. Tripwire. |
 | Sportsbook provider | MOCK / in-house mock mode (ADR 0087/0088) | Catalogue fetch is outside any transaction (SB-CATALOGUE-IO-1, done). A bounded fetch timeout is needed before a real adapter. The bet-placement contract is unknown. |
 | KYC vendor | MOCK | KYC-SUBMIT-OUTBOX-1 (PRH-2 E1); KYC-ENFORCE-1; HD-KYC-1..8 thresholds |
 | Crypto custody | NOT IMPLEMENTED (interface only, ADR 0008) | Custodian selection (human) |

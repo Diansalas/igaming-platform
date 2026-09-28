@@ -922,3 +922,15 @@ The payments lane stays strictly serial (E2 → C → D → F-pay → H → I-wi
 - **K1** also touches `internal/db/tenant_rls.go`.
 - **K2** also touches `internal/reconciliation`, for the `ledger_unlinked_manual_adjustment` detector. Its scheduler registration edits `reconciliation/scheduler.go`. K2 (W2) owns that file before I-wire (W4) takes it; they never overlap.
 - **K3** also touches `internal/providerref/providerref.go` (the payments-only `ValidatePaymentReference`), `internal/payments/{drive,sweeper,payout,receipt}.go`, the callback handlers, the statement import and `reconciliation/payment_statement.go`. K3 is last in the payments lane, so the payments lane stays serial.
+
+**Migration re-allocation (orchestrator, 2026-09-28).** B's placeholder 0115 would leave a version gap on main, because 0111–0114 belong to lanes that have not merged yet. B merges first, so the allocation becomes:
+
+| Number | Workstream |
+|---|---|
+| 0111 | B |
+| 0112 | K1 |
+| 0113 | K2 |
+| 0114 | E1 |
+| 0115 | K3 |
+
+The ADRs' references to 0111, 0112 and 0114 for K1, K2 and K3 mean their new numbers. Each lane updates its own ADR's implementation record.
