@@ -23,3 +23,21 @@ Of the reviewer's 8 extra mutants, 4 survive.
 | F7 | Info | ADR 0095 §33 omits the AST allow-list change; "ONLY sanctioned caller" is a convention rather than enforced (F1); and the no-transaction claim is untested (F2). The registry and HANDOVER rows need updating at merge. | Add one line to §33; update the rows at merge. |
 
 **Architecture/security opinion:** consistent with ADR 0094 INV-POOL and ADR 0095 D1, using the same three-layer pattern as payments, casino and KYC (API shape, runtime refusal, separate write transaction). No new risk of significance: this path handles no money, tenant data or secrets. Close F1 and F6 before the first real sportsbook adapter.
+
+## Conditions closed (2026-09-28)
+
+The author added three commits on top of `33213c7` without rewriting it: `0fd9c4c`, `1c27a8e` and `e02b82c`.
+
+- **F1 closed.** The IO-1C static guard now also scans `internal/sportsbook` and `cmd/platform-api`, and flags `FetchCatalogue`. Mutant X5b is killed at `main.go:266`.
+- **F2 closed.** A pure unit test covers the over-bound case with no transaction opened. Mutant X2 is killed.
+- **F3 closed.** An integration test covers `SyncCatalogue` directly with an over-bound result. Mutant X3 is killed. The test also showed that the DB CHECK `sb_selections_external_ref_ref_bound` is an independent backstop.
+- **F5 closed.** The sentinel now covers the tx-held refusal only.
+- **F7 closed.** ADR 0095 §33.1 records the fixes.
+- **F4:** not addressed (Low, pre-existing).
+- **F6:** a binding condition before the first real sportsbook adapter: a bounded per-call timeout.
+
+**Orchestrator merge verification** (merged into `claude/focused-wright-jw88w9`):
+- build, vet (plain and integration), gofmt and the pinned lint: clean (0 issues);
+- `-race -tags integration` for `internal/sportsbook`, `internal/txscope` and `cmd/platform-api`: all ok.
+
+The code-reviewer's architecture/security opinion found the change consistent with ADR 0094 INV-POOL and ADR 0095 D1, with no new risk. This path handles no money, tenant data or secrets.
