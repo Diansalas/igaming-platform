@@ -15,6 +15,8 @@ package db
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -109,13 +111,188 @@ func TestCapabilityGrant_A2_TenantScopeApprovalRefused(t *testing.T) {
 		_, _, err := capability.DecideAndGrant(ctx, tx, tenantID, requestID, "approve", "test")
 		return err
 	})
-	if err == nil {
-		t.Fatal("expected a tenant-scope approval attempt to be refused")
+	// K1-C3: exactly CG011, not merely "refused somehow". PostgreSQL
+	// evaluates a BEFORE INSERT trigger's raised exception before the
+	// INSERT's own RLS WITH CHECK is ever tested (RLS's row check runs
+	// against the final row values, immediately before the heap write,
+	// which is after every BEFORE ROW trigger has already had a chance to
+	// raise) - so staff_capability_grant_approvals_guard's own R-7 check
+	// (v_actor.scope <> 'platform') is what actually fires here, not RLS.
+	// See TestCapabilityGrant_K1C3_LayeredIndependentKill below for the
+	// case where RLS is deliberately widened, proving this is the trigger,
+	// not RLS, doing the work.
+	if !cgIsCode(err, "CG011") {
+		t.Fatalf("expected exactly CG011 (R-7, the trigger's own scope guard), got %v", err)
 	}
-	// Refused either because the tenant session cannot even see/insert
-	// into staff_capability_grant_approvals (RLS - the platform-only
-	// INSERT policy), or by the R-7 guard trigger itself if it somehow
-	// reached it; either is an acceptable refusal shape for this AZ test.
+}
+
+// TestCapabilityGrant_K1C3_LayeredIndependentKill (K1-C3, security
+// condition, code-review F-10): pins R-7 (HD-PRH2-2's core control)
+// independently at the TRIGGER layer, not merely "however it happens to be
+// refused today". Runs entirely inside one owner-role transaction that is
+// ALWAYS rolled back (via a sentinel error returned to
+// pool.WithoutTenant), using nested transactions (Postgres SAVEPOINTs, via
+// tx.Begin) around each refusal so a refused statement does not abort the
+// whole outer transaction and prevent the later steps/rollback.
+//
+// Layer 1: widen staff_capability_grant_approvals' RLS with a genuinely
+// permissive tenant-shaped INSERT policy (so if RLS were the ONLY thing
+// stopping a tenant session, this would let the INSERT through) - the
+// trigger's own R-7 check must still refuse it with CG011.
+//
+// Layer 2: with that same widened RLS AND the decided_by_scope CHECK
+// constraint also dropped, the trigger must STILL independently refuse
+// with CG011 - proving R-7 is not "masked by RLS" nor "masked by the
+// CHECK": the trigger enforces it on its own.
+//
+// This is also the mutation-kill test for mutant M4 (the trigger's
+// `IF v_actor.scope <> 'platform'` block removed): with that block
+// removed, both layers above would let the tenant-shaped INSERT succeed,
+// and this test would fail.
+func TestCapabilityGrant_K1C3_LayeredIndependentKill(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+	tenantID := createTestTenant(t, pool)
+	requester := cgStaff(t, pool, tenantID, "tenant_admin")
+	finance := cgStaff(t, pool, tenantID, "finance")
+	otherTenantAdmin := cgStaff(t, pool, tenantID, "tenant_admin")
+
+	var requestID uuid.UUID
+	if err := pool.WithPrincipalScope(ctx, tenantID, requester, func(ctx context.Context, tx pgx.Tx) error {
+		req, err := capability.CreateRequest(ctx, tx, tenantID, capability.NewRequestInput{
+			GranteeStaffID: finance, Capability: capability.CapabilityLedgerAdjustmentInitiate,
+			ValidFrom: time.Now(), ReasonCode: "test",
+		})
+		requestID = req.ID
+		return err
+	}); err != nil {
+		t.Fatalf("create request: %v", err)
+	}
+
+	sentinel := errors.New("K1C3 layered test: intentional rollback, not a real failure")
+	err := pool.WithoutTenant(ctx, func(ctx context.Context, tx pgx.Tx) error {
+		// Owner-role DDL: a genuinely permissive tenant-shaped INSERT
+		// policy, wide open (WITH CHECK (true)) - the most permissive
+		// possible widening.
+		if _, ddlErr := tx.Exec(ctx, `CREATE POLICY zz_k1c3_permissive_tenant_insert ON staff_capability_grant_approvals FOR INSERT WITH CHECK (true)`); ddlErr != nil {
+			return fmt.Errorf("add permissive tenant INSERT policy: %w", ddlErr)
+		}
+
+		// Simulate the tenant-shaped session in THIS SAME transaction
+		// (same backend, so the just-added policy is visible to it even
+		// though it is uncommitted).
+		if _, gucErr := tx.Exec(ctx, `SELECT set_config('app.tenant_id', $1, true)`, tenantID.String()); gucErr != nil {
+			return gucErr
+		}
+		if _, gucErr := tx.Exec(ctx, `SELECT set_config('app.principal_id', $1, true)`, otherTenantAdmin.String()); gucErr != nil {
+			return gucErr
+		}
+
+		// Layer 1: CHECK still present. Run inside a SAVEPOINT (tx.Begin)
+		// so the expected failure does not abort the outer transaction.
+		if attemptErr := k1c3AttemptApprove(ctx, tx, tenantID, requestID); !cgIsCode(attemptErr, "CG011") {
+			return fmt.Errorf("layer 1 (RLS widened, CHECK present): expected CG011, got %v", attemptErr)
+		}
+
+		// Layer 2: also drop the decided_by_scope CHECK.
+		if _, ddlErr := tx.Exec(ctx, `ALTER TABLE staff_capability_grant_approvals DROP CONSTRAINT staff_capability_grant_approvals_decided_by_scope_check`); ddlErr != nil {
+			return fmt.Errorf("drop decided_by_scope CHECK: %w", ddlErr)
+		}
+		if attemptErr := k1c3AttemptApprove(ctx, tx, tenantID, requestID); !cgIsCode(attemptErr, "CG011") {
+			return fmt.Errorf("layer 2 (RLS widened, CHECK also dropped): expected CG011, got %v", attemptErr)
+		}
+
+		return sentinel
+	})
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("expected the layered test to end in its own rollback sentinel (nothing persisted), got %v", err)
+	}
+}
+
+// k1c3AttemptApprove runs capability.DecideAndGrant inside a SAVEPOINT
+// (pgx's tx.Begin on an already-open tx) so a refused attempt aborts only
+// the savepoint, not the caller's outer transaction, letting the caller
+// keep going (more DDL, a second attempt, and ultimately its own
+// rollback).
+func k1c3AttemptApprove(ctx context.Context, tx pgx.Tx, tenantID, requestID uuid.UUID) error {
+	sp, err := tx.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = sp.Rollback(ctx) }()
+	_, _, err = capability.DecideAndGrant(ctx, sp, tenantID, requestID, "approve", "test")
+	return err
+}
+
+// TestCapabilityGrant_K1C3_CatalogueAssertion (K1-C3 (c)): a
+// metadata-only pin that no policy on staff_capability_grant_approvals
+// admits INSERT to a tenant-shaped session (the ONLY INSERT-capable
+// policy is platform_scope_insert, and its own WITH CHECK clause requires
+// the platform-shaped GUCs), and that the decided_by_scope = 'platform'
+// CHECK constraint exists.
+func TestCapabilityGrant_K1C3_CatalogueAssertion(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+
+	type policyRow struct {
+		name      string
+		cmd       string
+		withCheck string
+	}
+	var rows []policyRow
+	if err := pool.WithoutTenant(ctx, func(ctx context.Context, tx pgx.Tx) error {
+		r, err := tx.Query(ctx, `
+			SELECT policyname, cmd, COALESCE(with_check, '')
+			  FROM pg_policies
+			 WHERE tablename = 'staff_capability_grant_approvals'
+			   AND cmd IN ('INSERT', 'ALL', '*')`)
+		if err != nil {
+			return err
+		}
+		defer r.Close()
+		for r.Next() {
+			var pr policyRow
+			if err := r.Scan(&pr.name, &pr.cmd, &pr.withCheck); err != nil {
+				return err
+			}
+			rows = append(rows, pr)
+		}
+		return r.Err()
+	}); err != nil {
+		t.Fatalf("query pg_policies: %v", err)
+	}
+
+	if len(rows) != 1 {
+		t.Fatalf("expected exactly one INSERT-capable policy on staff_capability_grant_approvals, found %d: %+v", len(rows), rows)
+	}
+	if rows[0].name != "platform_scope_insert" {
+		t.Fatalf("expected the sole INSERT-capable policy to be platform_scope_insert, got %q", rows[0].name)
+	}
+	// A tenant-shaped session (app.tenant_id set, app.platform_admin_principal_id
+	// unset) cannot satisfy this WITH CHECK clause: it structurally
+	// requires platform_admin_principal_id IS NOT NULL and tenant_id IS
+	// NULL, which a tenant session can never both be true for at once.
+	for _, must := range []string{"platform_admin_principal_id", "app.tenant_id"} {
+		if !strings.Contains(rows[0].withCheck, must) {
+			t.Fatalf("expected platform_scope_insert's WITH CHECK to reference %q, got %q", must, rows[0].withCheck)
+		}
+	}
+
+	var checkExists bool
+	if err := pool.WithoutTenant(ctx, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `
+			SELECT EXISTS (
+				SELECT 1 FROM pg_constraint
+				 WHERE conname = 'staff_capability_grant_approvals_decided_by_scope_check'
+				   AND conrelid = 'staff_capability_grant_approvals'::regclass
+				   AND pg_get_constraintdef(oid) = $1
+			)`, `CHECK ((decided_by_scope = 'platform'::text))`).Scan(&checkExists)
+	}); err != nil {
+		t.Fatalf("query pg_constraint: %v", err)
+	}
+	if !checkExists {
+		t.Fatal("expected the decided_by_scope = 'platform' CHECK constraint to exist")
+	}
 }
 
 // A-5: self-grant, self-approval, approver == grantee, one Person under
@@ -412,6 +589,58 @@ func TestCapabilityGrant_A13_AppendOnly(t *testing.T) {
 	})
 	if !cgIsCode(err, "CG012") {
 		t.Fatalf("un-revoke: expected CG012, got %v", err)
+	}
+
+	// K1-C4 / LF C-K1-1: a RE-REVOKE - an UPDATE that keeps revoked_at
+	// NOT NULL (never clearing it, unlike the un-revoke case above) but
+	// supplies a NEW revoked_at/revoked_by/revoke_reason_code, attempting
+	// to rewrite the historical revocation record itself - must also be
+	// refused with CG012, and the row must be byte-for-byte unchanged
+	// afterward. This is the mutation-kill test for mutant M5 (the
+	// `OLD.revoked_at IS NOT NULL` guard removed): with that guard gone,
+	// the trigger's whole-row-equality check (only revoked_at/revoked_by/
+	// revoked_by_scope/revoke_reason_code may change) does NOT stop a
+	// re-revoke, because those are exactly the four columns it lets
+	// change - and the trigger unconditionally overwrites
+	// revoked_at/revoked_by/revoked_by_scope with fresh actor/now()
+	// values on any UPDATE that reaches that far, silently rewriting the
+	// reason, the timestamp and the actor.
+	var beforeRevokedAt time.Time
+	var beforeRevokedBy uuid.UUID
+	var beforeReason string
+	if err := pool.WithPlatformAdmin(ctx, f.ApproverID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx,
+			`SELECT revoked_at, revoked_by, revoke_reason_code FROM staff_capability_grants WHERE id = $1`, f.GrantID,
+		).Scan(&beforeRevokedAt, &beforeRevokedBy, &beforeReason)
+	}); err != nil {
+		t.Fatalf("read grant before re-revoke attempt: %v", err)
+	}
+
+	otherApprover := cgStaff(t, pool, uuid.Nil, "platform_admin")
+	err = pool.WithPlatformAdmin(ctx, otherApprover, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx,
+			`UPDATE staff_capability_grants
+			    SET revoked_at = now(), revoked_by_scope = 'platform', revoke_reason_code = $2
+			  WHERE id = $1`, f.GrantID, "rewritten-reason")
+		return err
+	})
+	if !cgIsCode(err, "CG012") {
+		t.Fatalf("re-revoke: expected CG012, got %v", err)
+	}
+
+	var afterRevokedAt time.Time
+	var afterRevokedBy uuid.UUID
+	var afterReason string
+	if err := pool.WithPlatformAdmin(ctx, f.ApproverID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx,
+			`SELECT revoked_at, revoked_by, revoke_reason_code FROM staff_capability_grants WHERE id = $1`, f.GrantID,
+		).Scan(&afterRevokedAt, &afterRevokedBy, &afterReason)
+	}); err != nil {
+		t.Fatalf("read grant after re-revoke attempt: %v", err)
+	}
+	if !beforeRevokedAt.Equal(afterRevokedAt) || beforeRevokedBy != afterRevokedBy || beforeReason != afterReason {
+		t.Fatalf("re-revoke: expected the revocation record unchanged, before=(%v,%v,%q) after=(%v,%v,%q)",
+			beforeRevokedAt, beforeRevokedBy, beforeReason, afterRevokedAt, afterRevokedBy, afterReason)
 	}
 
 	// DELETE refused - either by an explicit trigger exception, or (since
