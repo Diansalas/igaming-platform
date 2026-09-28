@@ -67,6 +67,12 @@ func registerCasinoRoutes(mux *http.ServeMux, deps Deps) {
 	// newPaymentWebhookHandler's identical rationale.
 	mux.HandleFunc("POST /v1/webhooks/casino/{tenantSlug}/{providerID}", newCasinoWebhookHandler(deps))
 
+	// CAS-PLAY-BOOTSTRAP-1 (ADR 0103): the vendor launch-token bootstrap/
+	// consume endpoint. Same preamble/admission/credential surface as the
+	// callback route above - a distinct path, never a distinct domain or
+	// scheme.
+	mux.HandleFunc("POST /v1/webhooks/casino/{tenantSlug}/{providerID}/launch-bootstrap", newCasinoBootstrapHandler(deps))
+
 	// Platform-wide game catalogue (platform_admin only - see
 	// PermCasinoCatalogueManage's own doc comment). Deliberately NOT
 	// wrapped in RequireTenantScope: a platform_admin's token carries a

@@ -256,6 +256,41 @@ BEGIN
 END
 $$;
 
+-- CAS-PLAY-BOOTSTRAP-1 (migration 0111, casino_launch_bootstraps/
+-- casino_provider_player_refs; ADR 0103 §5): the same treatment as
+-- casino_callback_rejections above, re-asserted on every run. The blanket
+-- backfill GRANT above ("ALL TABLES IN SCHEMA public") would otherwise
+-- silently re-grant table-level UPDATE/DELETE on these append-only tables
+-- every time this idempotent script is re-run against an already-migrated
+-- database; migration 0111 itself runs only once. The statements are
+-- EXACTLY migration 0111's own guarded grant: REVOKE ALL, then
+-- SELECT/INSERT only - never UPDATE, DELETE or TRUNCATE. The deny
+-- triggers created by migration 0111
+-- (casino_launch_bootstraps_immutable/_no_truncate,
+-- casino_provider_player_refs_immutable/_no_truncate) remain the binding
+-- control; this is defence in depth (architect review F-5 /
+-- security review B-C1, docs/plans/prh2-hardening-round/reviews/). Guarded
+-- per table because the tables do not exist yet on a fresh
+-- docker-entrypoint-initdb.d run (migrations run after this script).
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM information_schema.tables
+        WHERE table_schema = 'public' AND table_name = 'casino_launch_bootstraps'
+    ) THEN
+        EXECUTE 'REVOKE ALL ON casino_launch_bootstraps FROM igaming_runtime';
+        EXECUTE 'GRANT SELECT, INSERT ON casino_launch_bootstraps TO igaming_runtime';
+    END IF;
+    IF EXISTS (
+        SELECT 1 FROM information_schema.tables
+        WHERE table_schema = 'public' AND table_name = 'casino_provider_player_refs'
+    ) THEN
+        EXECUTE 'REVOKE ALL ON casino_provider_player_refs FROM igaming_runtime';
+        EXECUTE 'GRANT SELECT, INSERT ON casino_provider_player_refs TO igaming_runtime';
+    END IF;
+END
+$$;
+
 -- PRH-2 I-core (migration 0110; ADR 0102, ALERT-DELIVERY-1):
 -- least-privilege, re-asserted on every run for the same reason as the
 -- blocks above. RLS (FORCE on all five tables) is the binding control;
