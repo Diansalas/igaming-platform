@@ -1,5 +1,18 @@
 # PAY-DOUBLE-CREDIT-1 — reconciliation and fix plan (read-only analysis)
 
+*Status note 2026-09-28 (`architect`, FH-7): the status line below is the 2026-09-27
+analysis-time status, kept verbatim. The fix is now IMPLEMENTED and merged (ADR 0095 §28 and §31;
+migration 0107):*
+
+- *Commits: FH-3 `8ce538c`, FH-3b `cb03868`, FH-3c `92f5889` and FH3-FOLLOWUP-1 `5ee09e4`,
+  merged `a72128d`.*
+- *The human approved the plan under Financial Hardening. Decision HD-LEDGER-UNALLOC-1, "A now,
+  B later", is implemented as (A).*
+- *LF-Q1 is superseded (`lf-q1-supersession.md`).*
+- *Every §6 owner has signed off: `rv-fh3-ledger.md`, `rv-fh3-security.md`, `rv-fh3-payments.md`,
+  `rv-fh3-code-review.md` and `qa-fh3-adjudication.md`. Final architecture review:
+  `rv-fh7-architect-final.md`.*
+
 Status: **OPEN, HIGH (financial integrity)**. No fix implemented. Implementation is
 halted pending human approval of this plan (orchestrator STOP, 2026-09-27).
 

@@ -1792,3 +1792,14 @@ residual, non-blocking items (a FIFO lock-queue assumption documented in
 `#1a`'s own test, and `#5c`'s waiter being identified by query text only,
 not also `wait_event_type = 'Lock'`) do not affect this status, per the
 same ruling.
+
+*Status note 2026-09-28 (`architect`, FH-7): still **IMPLEMENTED**. The
+second residual above is now closed. FH3-FOLLOWUP-1 L2 (`430d4f7`)
+requires `wait_event_type = 'Lock'` on the matched backend in
+`TestA7_5c_*`, and `ledger-finance` confirmed it in `rv-fh3-ledger.md`
+("Confirmation: FH3-FOLLOWUP-1", `3a38930`). By reading
+`internal/payments/receipt.go` I confirmed that R0
+(`insertReceiptDeduped`) precedes the `deposit_intents`/`withdrawal_requests`
+`FOR UPDATE` on both the main receipt path and the reversal tombstone
+branch. The FIFO lock-queue assumption documented in `#1a` stands.
+Record: `docs/plans/payment-readiness/rv-fh7-architect-final.md`.*

@@ -1,5 +1,45 @@
 # ADR 0095 — Provider-I/O Transaction Boundary and Provider-Neutral Payment Contract
 
+- **Status note 2026-09-28 (`architect`, FH-7 final architecture review,
+  `docs/plans/payment-readiness/rv-fh7-architect-final.md`; verified against code at `7f5d0fb`).
+  Overall label unchanged: ACCEPTED — PARTIALLY IMPLEMENTED.** The revision-4 table below is kept
+  as the 2026-09-27 record. Where they differ, these per-part corrections govern:
+  - **§28 AM-2 (INV-DEP-1): IMPLEMENTED** (MOCK adapters only; real PSP PROVIDER DEPENDENT, see
+    PAY-PSP-CONTRACT-INVDEP1). Commits: FH-3 `8ce538c`, FH-3b `cb03868`, FH-3c `92f5889` and
+    FH3-FOLLOWUP-1 `5ee09e4`, merged at `a72128d`. Reviews:
+    - `ledger-finance`: APPROVED, then CONFIRMED (`rv-fh3-ledger.md`);
+    - `security`: APPROVE (`rv-fh3-security.md`, re-verification 1);
+    - `payments`: APPROVE (`rv-fh3-payments.md`);
+    - `code-reviewer`: READY WITH CONDITIONS (`rv-fh3-code-review.md`, re-review 1). Its N-1 was
+      ruled by `ledger-finance` and registered as PAY-RECON-N1;
+    - `qa`: A–O matrix adjudicated (`qa-fh3-adjudication.md`).
+
+    §28.13 option (B) is NOT IMPLEMENTED by human decision (LEDGER-SUSPENSE-B-1). M1/M2 remain
+    BLOCKED.
+  - **§4/§5.1 callback cutover.** The table's "both NOT READY" is superseded:
+    - `ledger-finance` re-review 2 returned APPROVE WITH CONDITIONS;
+    - `code-reviewer` re-review 2 returned READY WITH CONDITIONS;
+    - the conditions were then closed (`rv-fh3-code-review.md`, "Status of my prior conditions";
+      `f43025c`; `prh-i1-mutation-kill.txt`).
+
+    Label: IMPLEMENTED against MOCK adapters. PROVIDER DEPENDENT for a real PSP.
+  - **§5.2 payout: PARTIALLY IMPLEMENTED.**
+    - `security` APPROVE WITH CONDITIONS; S-H1 and S-M1 CLOSED (`rv-prh-i1-payout-security.md`,
+      re-verification 1).
+    - FH-6 round 2 confirmed by `ledger-finance` and `code-reviewer`.
+    - Payout-typed callbacks are refused at the route (PROVIDER DEPENDENT).
+    - PAY-SEC-LAUNCH-1 is NOT IMPLEMENTED.
+  - **§10 kill switch: PARTIALLY IMPLEMENTED.**
+    - Phase 2 (`4e04f4e`) is merged on this branch.
+    - KS-DEP-T2-T3-1 is IMPLEMENTED (`2da7548`, `qa-killswitch-phase2-verification.md` §2 PASS).
+    - Alert delivery and KS-AUDIT-TENANT-1 remain NOT IMPLEMENTED and launch-blocking.
+  - **§12.** The §28.9 `pay_captured_unposted` kind is IMPLEMENTED. It is a standing, unwindowed
+    report per provider run. The stream itself stays MOCK.
+  - **§29 (F-POOL-2).** The deposit (`deposit_v2.go`/`drive.go`), sweeper, callback and payout
+    (`payout.go`/`payout_sweep.go`) paths conform to the three-phase rule. The legacy
+    `Orchestrator.InitiateDeposit` path does not: it has a test-only caller and is tracked as
+    PROV-OUTBOUND-CRED-1-LEGACY-PATH.
+  - **§14 (ADR 0082 A7): IMPLEMENTED.**
 - **Current status (architect, 2026-09-27, revision 4): ACCEPTED — PARTIALLY IMPLEMENTED.**
   Amended by §28 (AM-2, INV-DEP-1, NOT IMPLEMENTED), §29 (F-POOL-2 durable-state definition)
   and §30 (AM-1, kill-switch route family). Per part, on this branch:
@@ -861,6 +901,39 @@ The receipt's `event_fingerprint` is SHA-256 over the canonical, length-prefixed
 amount, asset_code, settlement_reference)`. It is never computed over raw bytes, because a
 vendor may re-sign or reorder a redelivery.
 
+*[AMENDED 2026-09-28 by `architect` (FH-7; item L-b of `rv-prh-i1-callback-ledger.md`
+re-review 2). The original §9.3 text above is kept verbatim. This note adds three binding
+clarifications:*
+
+1. *A verified `CallbackEvent` with `Outcome = succeeded` is **evidence, never authorization to
+   post**. For `EventType = deposit`, only §4.4 as amended by §28 (AM-2) decides whether it
+   posts:*
+   - *T7 and T13 post only as the intent's **first** financial resolution.*
+   - *A verified matching success for an intent that another attempt or posting has already
+     financially resolved takes T10 or T13d (`multiple_success_for_intent`). There is no
+     posting. It raises a P1 and is reported as `pay_captured_unposted` (§28.9).*
+
+   *This follows INV-DEP-1 (§28.2) and human decision HD-LEDGER-UNALLOC-1, "A now, B later"
+   (§28.13). Any wording in this ADR that reads as if a second or later capture of one intent
+   posts is superseded. That covers T13's original row, §4.4's LF-Q1 bullet, §20's residuals and
+   §21.2 LF-Q1. See `ledger-finance`'s `docs/plans/payment-readiness/lf-q1-supersession.md`.*
+2. *For `EventType = deposit_reversal`, `Outcome` does not mean "the reversal itself
+   succeeded" (`ledger-finance` H1 rule 5):*
+   - *`succeeded`, and the legacy `declined` carrier with `DeclineReason` naming the cause (for
+     example a chargeback), are both **final** reversal decisions. They post or tombstone
+     identically.*
+   - *`pending` and `ambiguous` are **non-final**. They never post or tombstone. The result is
+     an anomaly with a P1 audit and the uniform 200.*
+   - *A won chargeback (a reinstatement) cannot be represented in this contract. It is
+     unsupported and PROVIDER DEPENDENT.*
+
+   *As built: the `CallbackEvent.Outcome` and `HandleCallback` doc comments in
+   `internal/payments/types.go`, and `applyReversalReceiptEvidence` in `receipt.go`.*
+3. *For `deposit_reversal`, the fingerprint tuple's `outcome` element is the **raw wire
+   outcome** (`ReceiptEvidence.RawOutcome`), never the normalized one (H1 rule 3). It is pinned
+   by `TestINVDEP1_H1b_ReversalFingerprintEndToEnd_RawWireOutcomePreserved` and
+   `TestRVLF_SecGapA3_ReversalFingerprintUsesRawWireOutcome`.]*
+
 ### 9.4 Provider reference
 
 References are opaque and bounded by `PROVIDER_REF_MAX` (0099). They are validated at the
@@ -1605,6 +1678,20 @@ marked complete and before a `payments.Sweeper` is wired in `cmd/platform-api`).
   - audit;
   - add one test plus a mutant.
 - A wildcard (`'*'`) switch is already handled at cascade T1 (`payment.cascade_skipped_kill_switch`).
+- *[Status note 2026-09-28 (`architect`, FH-7): **IMPLEMENTED** in `2da7548`, which is merged on
+  this branch. Verified by reading `internal/payments/drive.go` (`driveCreatedAttempt`, the
+  `ClaimCreatedForSubmission` error branch). The fix does exactly what was required:*
+  - *it acts only on `ErrAttemptStateConflict`;*
+  - *it classifies the refusal with a read-only `KillSwitchEngaged` call, and a genuine CAS
+    conflict still returns an error;*
+  - *it writes the `payments.cascade_rejected_kill_switch` audit, then `RejectCreated(…,
+    'kill_switch')` (T3), then `finalizeDeclined`, whose sticky guard keeps a `succeeded`
+    intent `succeeded`.*
+
+  *QA verified it with a mutant that is killed:
+  `TestDriveCreatedAttemptCascade_KillSwitchOnFallbackProvider_DeclinesCleanly_T3`
+  (`qa-killswitch-phase2-verification.md` §2). No `code-reviewer` record exists for this delta
+  (see `rv-fh7-architect-final.md` FH7-07).]*
 
 **10.9.4 Kind split and pool threading: consistent with casino/KYC and ADR 0094/§11.**
 
@@ -1634,7 +1721,8 @@ marked complete and before a `payments.Sweeper` is wired in `cmd/platform-api`).
 **Labels.**
 - Phase 2 wiring and the payments kind split: IMPLEMENTED on `4e04f4e`, pending merge and the
   code-reviewer's re-review of the fix round.
-- KS-DEP-T2-T3-1: NOT IMPLEMENTED.
+- KS-DEP-T2-T3-1: NOT IMPLEMENTED. *[Status note 2026-09-28: IMPLEMENTED (`2da7548`); see the
+  note at the end of §10.9.3. Phase 2 (`4e04f4e`) is merged on this branch.]*
 - PROV-OUTBOUND-CRED-1-LEGACY-PATH: open.
 - Alert delivery and KS-AUDIT-TENANT-1: NOT IMPLEMENTED, launch-blocking (unchanged).
 
@@ -5123,6 +5211,11 @@ is kept verbatim with an in-place *[SUPERSEDED / AMENDED by §N]* note.
 
 ## 28. Amendment AM-2 — INV-DEP-1: at most one success and one posting per deposit intent (PAY-DOUBLE-CREDIT-1)
 
+- *[Status note 2026-09-28 (`architect`, FH-7): **IMPLEMENTED**. See §31 and the header status
+  note. The final architecture verification is in
+  `docs/plans/payment-readiness/rv-fh7-architect-final.md`. The "NOT IMPLEMENTED" on the next
+  line is the 2026-09-27 design-time status, kept verbatim. Option (B) of §28.13 stays NOT
+  IMPLEMENTED by decision.]*
 - **Status:** ACCEPTED (design). **NOT IMPLEMENTED.** Owner of the state machine: `architect`.
   Financial invariants, the ledger schema and the accounting treatment are ruled by
   `ledger-finance` in `docs/plans/payment-readiness/lf-q1-supersession.md` (`17e5ffc`); this
@@ -5814,3 +5907,22 @@ BLOCKED per §28.13).
 - **Deferred, per HD-LEDGER-UNALLOC-1 (§28.13):** the interim policy is (A), no posting of any
   kind for a second real capture - implemented exactly as specified. Option (B) (an unallocated
   suspense posting) is LEDGER-SUSPENSE-B-1, NOT IMPLEMENTED, out of scope for this round.
+
+## 32. Final architecture review of the Financial Hardening block (`architect`, 2026-09-28, FH-7)
+
+- **Record:** `docs/plans/payment-readiness/rv-fh7-architect-final.md`, reviewed at `7f5d0fb`.
+- **Verdict:** APPROVE WITH CONDITIONS. The conditions are listed in that record. None of them
+  is a money-path defect.
+- **Verified against code, not against the documents' claims:**
+  - the INV-DEP-1 single choke point (`postDepositSuccessOrDispute`, then `postDepositSuccess`)
+    at all three evidence-application sites, which include T17 re-drive through the sweeper;
+  - the migration 0107 backstops (two partial unique indexes and the NULL-safe guard) and 0106;
+  - the F-POOL-2 three-phase rule on the deposit, payout, callback and sweeper paths;
+  - kill-switch phase 2 (AM-1 tenant scope, KS-DEP-T2-T3-1);
+  - the ADR 0082 A7 order (R0 before L1, and the parent lock before the attempt);
+  - the standing `pay_captured_unposted` check.
+- **Edits in this revision, all additive with none rewriting earlier text:**
+  - the header status note;
+  - the §9.3 amendment (L-b);
+  - the §10.9.3 and §28 status notes;
+  - this section.
