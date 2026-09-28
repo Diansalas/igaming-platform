@@ -27,25 +27,52 @@ import (
 )
 
 // a7c8WaitAnyQueryContains polls until ANY of pids currently shows a query
-// containing needle, returning that pid. Deliberately checks BOTH pids on
-// every poll: given two IDENTICAL, concurrently-started deliveries, this
-// test cannot know in advance which one loses the race for the shared
-// resource (R0's own unique-index entry) - by symmetry, either could be
-// first, and the OTHER one may independently end up blocked on something
-// else entirely (this test's own external L1 blocker) at the same time,
-// which is not the signal being looked for here.
+// containing needle AND is actually blocked waiting on a lock
+// (pg_stat_activity.wait_event_type = 'Lock'), returning that pid.
+// Deliberately checks BOTH pids on every poll: given two IDENTICAL,
+// concurrently-started deliveries, this test cannot know in advance which
+// one loses the race for the shared resource (R0's own unique-index
+// entry) - by symmetry, either could be first, and the OTHER one may
+// independently end up blocked on something else entirely (this test's
+// own external L1 blocker) at the same time, which is not the signal
+// being looked for here.
+//
+// Code review L2 (rv-fh3-code-review.md, FH3-FOLLOWUP-1): the query TEXT
+// alone is not sufficient - a backend can show "INSERT INTO
+// payment_provider_events" in pg_stat_activity.query while merely
+// EXECUTING that statement (not yet blocked on anything), or while
+// blocked on a WHOLLY DIFFERENT wait type (e.g. I/O). Requiring
+// wait_event_type = 'Lock' on the SAME row confirms the backend is
+// actually contending for the lock this test's own doc comment claims it
+// is, not just that its last-reported statement text happens to match.
 func a7c8WaitAnyQueryContains(t *testing.T, pool *db.Pool, pids []int, needle string, timeout time.Duration) (int, bool) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		for _, pid := range pids {
-			if strings.Contains(loBackendQuery(t, pool, pid), needle) {
+			query, waitEventType := loBackendQueryAndWaitEventType(t, pool, pid)
+			if strings.Contains(query, needle) && waitEventType == "Lock" {
 				return pid, true
 			}
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 	return 0, false
+}
+
+// loBackendQueryAndWaitEventType reads both pg_stat_activity.query and
+// pg_stat_activity.wait_event_type for pid in ONE row read, so the two
+// values are never read from two different, potentially-inconsistent
+// polling moments (loBackendQuery only ever returns the query text).
+func loBackendQueryAndWaitEventType(t *testing.T, pool *db.Pool, pid int) (query, waitEventType string) {
+	t.Helper()
+	err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT COALESCE(query, ''), COALESCE(wait_event_type, '') FROM pg_stat_activity WHERE pid = $1`, pid).Scan(&query, &waitEventType)
+	})
+	if err != nil {
+		t.Fatalf("read pg_stat_activity.query/wait_event_type for pid %d: %v", pid, err)
+	}
+	return query, waitEventType
 }
 
 // TestA7_5c_TombstoneBranch_SecondIdenticalReversalWaitsOnReceiptInsert
