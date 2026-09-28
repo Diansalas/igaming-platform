@@ -652,6 +652,44 @@ func (o *Orchestrator) InitiateDeposit(ctx context.Context, tx pgx.Tx, params In
 	return o.attemptDeposit(ctx, tx, intent, nil)
 }
 
+// InitiateDepositAudited is InitiateDeposit's own pool-based wrapper
+// (ledger-finance review C4, rv-fh3-ledger.md 076e42e; ADR 0095 §28.3
+// rule 3). InitiateDeposit itself takes a bare tx, never a pool, so it
+// cannot open the SEPARATE, freshly-committed transaction §28.3 rule 3's
+// P1/audit row (RecordDepositMultipleSuccessRefusal) requires once its
+// own tx has already rolled back on ErrDepositIntentAlreadyResolved
+// (DepositIntentAlreadyResolvedRefusal, resolveAmbiguous's own wrapped
+// form of it) - exactly the same shape RecordDepositReversalRejection's
+// own doc comment describes for the reversal-rejection case, whose caller
+// is the HTTP layer for the same reason.
+//
+// TEST-ONLY today: InitiateDeposit (and therefore this wrapper) has no
+// production caller - InitiateDepositAttempt is the current, real
+// production entry point (see InitiateDeposit's own doc comment). This
+// wrapper exists so §28.3 rule 3 is actually satisfiable, with a test
+// proving it, rather than left permanently unwired (security P2-L2's own
+// finding) while the legacy chain still exists at all - the smaller,
+// safer of ledger-finance's two offered options (wire it, vs. delete the
+// whole legacy chain).
+func (o *Orchestrator) InitiateDepositAudited(ctx context.Context, pool *db.Pool, params InitiateDepositParams) (DepositIntent, error) {
+	var result DepositIntent
+	err := pool.WithTenant(ctx, params.Scope.TenantID, func(ctx context.Context, tx pgx.Tx) error {
+		var err error
+		result, err = o.InitiateDeposit(ctx, tx, params)
+		return err
+	})
+	var refusal *DepositIntentAlreadyResolvedRefusal
+	if errors.As(err, &refusal) {
+		auditErr := pool.WithTenant(ctx, refusal.TenantID, func(ctx context.Context, tx pgx.Tx) error {
+			return RecordDepositMultipleSuccessRefusal(ctx, tx, refusal.TenantID, refusal.IntentID, refusal.ProviderID, refusal.ProviderReference)
+		})
+		if auditErr != nil {
+			return result, fmt.Errorf("payments: record deposit multiple success refusal: %w (original error: %v)", auditErr, err)
+		}
+	}
+	return result, err
+}
+
 // attemptDeposit routes and attempts one provider Deposit call for
 // intent, recursing (via handleDecline) on a cascadable decline up to
 // MaxCascadeDepth, and resolving an ambiguous synchronous outcome via
@@ -779,8 +817,17 @@ func (o *Orchestrator) resolveAmbiguous(ctx context.Context, tx pgx.Tx, intent D
 		// rejection whose caller's tx has already rolled back. This
 		// legacy, no-attempt-row path has no production caller today
 		// (InitiateDeposit is scheduled for removal, security P2-L2) and
-		// is exercised only by tests/the receive-bridge.
+		// is exercised only by tests/the receive-bridge. Ledger-finance
+		// review C4: InitiateDeposit itself only ever holds a bare tx
+		// (never a pool), so it cannot open that separate transaction -
+		// wrap the sentinel with the context InitiateDepositAudited
+		// (this file) needs to do so itself, one level up.
 		updated, _, err := o.postDepositSuccess(ctx, tx, intent, nil, providerID, providerReference, status.Amount, status.AssetCode)
+		if errors.Is(err, ErrDepositIntentAlreadyResolved) {
+			return updated, &DepositIntentAlreadyResolvedRefusal{
+				IntentID: intent.ID, TenantID: intent.TenantID, ProviderID: providerID, ProviderReference: providerReference,
+			}
+		}
 		return updated, err
 	case OutcomeDeclined:
 		return o.handleDecline(ctx, tx, intent, providerID, providerReference, status.Cascadable, status.DeclineReason, excluded)
@@ -859,6 +906,28 @@ func (o *Orchestrator) finalizeAmbiguous(ctx context.Context, tx pgx.Tx, intent 
 // declined attempt) via postDepositSuccessOrDispute - never a 5xx, never a
 // rollback, never a credit.
 var ErrDepositIntentAlreadyResolved = errors.New("payments: deposit intent is already financially resolved by another attempt or posting")
+
+// DepositIntentAlreadyResolvedRefusal wraps ErrDepositIntentAlreadyResolved
+// with the context ADR 0095 §28.3 rule 3's P1/audit row
+// (RecordDepositMultipleSuccessRefusal) needs, for the legacy InitiateDeposit
+// path specifically (ledger-finance review C4, rv-fh3-ledger.md 076e42e).
+// resolveAmbiguous's OutcomeSucceeded branch returns this instead of the
+// bare sentinel because it has no attempt row to dispute (attemptID is nil
+// on this path) - there is nothing else in the returned value that could
+// carry intentID/providerID/providerReference back out. errors.Is(err,
+// ErrDepositIntentAlreadyResolved) still reports true via Unwrap, so every
+// existing caller that only checks the sentinel is unaffected.
+type DepositIntentAlreadyResolvedRefusal struct {
+	IntentID          uuid.UUID
+	TenantID          uuid.UUID
+	ProviderID        string
+	ProviderReference string
+}
+
+func (e *DepositIntentAlreadyResolvedRefusal) Error() string {
+	return ErrDepositIntentAlreadyResolved.Error()
+}
+func (e *DepositIntentAlreadyResolvedRefusal) Unwrap() error { return ErrDepositIntentAlreadyResolved }
 
 // resolvedForOtherDeposit implements ADR 0095 §28.2's resolved_for_other
 // predicate exactly:
