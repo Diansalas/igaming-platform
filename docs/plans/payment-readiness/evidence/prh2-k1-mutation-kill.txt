@@ -266,6 +266,9 @@ this schema's own deliberate layering of overlapping checks, disclosed
 honestly rather than claimed as an independent kill they are not.
 
 ================================================================================
+R-12/R-14/I-5 ROUND (architect ruling k1-architect-ruling-r12.md + its
+appended security confirmation; k1-architect-ruling-gp1.md for I-5)
+================================================================================
 Migration under test: migrations/0112_scoped_financial_capability_grants.up.sql
   (unmerged; edited in place on branch prh2-k1-r12).
 Test DB: private orchestrator scratchpad DB (prh2k1r12test), rebuilt via
@@ -424,21 +427,29 @@ internal/auth, internal/audit and httpserver's TestCapabilityAPI subset, all
 re-run on the fully-restored migration file - all pass. The concurrency test
 (TestCapabilityGrant_A23_R12c_ConcurrentOverlappingGrantsExactlyOne) was
 additionally run at `-race -count=20` on the restored code (39.2s, all pass).
-=======
+================================================================================
 ADDENDUM (prh2-k1-tests branch, F-10 / K1-C3 / K1-C4 corrections)
 
-This addendum corrects the summary above per security's and code review's
-K1 findings (K1-C3, K1-C4/LF C-K1-1) and code review F-10's count/count
-correction, and records the additional mutants run for F-2/I-3 and for the
-ADR's own "not yet attempted" list.
+This addendum corrects the "Summary (as of the original prh2-k1-capability-
+grants pass)" above (the one at the top of this file, NOT the "Summary
+(R-12/R-14/I-5 round)" immediately preceding this addendum - that round's
+own summary is already correct and untouched by this addendum) per
+security's and code review's K1 findings (K1-C3, K1-C4/LF C-K1-1) and code
+review F-10's count correction, and records the additional mutants run for
+F-2/I-3 and for the ADR's own "not yet attempted" list.
 
 Corrected summary (this branch):
-  Required-class mutants (9): 9 independently killed (1, 2, 3, 4, 6, 7, 8, 9,
-    10 - see mutants 7 and 10's RECLASSIFIED entries above for how 7 and 10
-    moved from "masked" to "killed" by new, dedicated tests). Only mutant 5
-    (R-1 self-grant, masked by R-4 distinct-Person) remains an accepted
-    equivalent per security's own ruling on this file ("R-1 masked by R-4:
-    ACCEPTED as a genuinely equivalent mutant").
+  C-3(b) (code review of `5a27be6`) plain restatement: **10 required-class
+  mutants total: 9 independently killed, 1 accepted equivalent (mutant 5,
+  R-1 self-grant, masked by R-4 distinct-Person).**
+  Required-class mutants (10 total, numbered 1-10 in this file): 9
+  independently killed (1, 2, 3, 4, 6, 7, 8, 9, 10 - see mutants 7 and 10's
+  RECLASSIFIED entries above for how 7 and 10 moved from "masked" to
+  "killed" by new, dedicated tests). Mutant 5 (R-1 self-grant, masked by
+  R-4 distinct-Person) remains an accepted equivalent per security's own
+  ruling on this file ("R-1 masked by R-4: ACCEPTED as a genuinely
+  equivalent mutant") - it is not, and has never been claimed as, an
+  independent kill.
   New mutants (F-2 / I-3, forced columns):
     MF-a (`requested_by_person_id := COALESCE(NEW..., actor)`) - KILLED by
       TestCapabilityGrant_F2_ForcedColumnsCannotBeSupplied's
@@ -497,6 +508,140 @@ Corrected summary (this branch):
       more analysis than this pass had time for - deferred, not silently
       dropped).
 
-R-12/R-14/I-5 ROUND (architect ruling k1-architect-ruling-r12.md + its
-appended security confirmation; k1-architect-ruling-gp1.md for I-5)
-=========================================================================
+================================================================================
+RC ROUND (security's re-check of the integrated head 5a27be6; code review of
+5a27be6)
+================================================================================
+Migration under test: migrations/0112_scoped_financial_capability_grants.up.sql
+  (still unmerged; edited in place on branch prh2-k1-rc, based on
+  prh2-k1-int @ 5a27be6).
+Test DB: private orchestrator scratchpad DB (prh2k1rctest), rebuilt via
+priv_db.sh for every mutant below; never the shared CI DB.
+New/extended killer tests: internal/db/capability_grant_r12_integration_test.go
+  (TestCapabilityGrant_R12a_NonReadCommittedRefused - now table-driven over
+  repeatable_read AND serializable; TestCapabilityGrant_R12a_
+  MixedIsolationRaceExactlyOne - new; TestCapabilityGrant_RC2_
+  SuspendedPlatformActorRefused - new; TestCapabilityGrant_La_
+  R13BoundedByRequestedValidFromNotClamped - new); internal/httpserver/
+  capability_api_rc_integration_test.go (new file: TestCapabilityAPI_C1_
+  DuplicateRequestUniqueViolation, TestCapabilityAPI_C1_CheckViolationGives400).
+
+Baseline md5sum for this round (migration file AFTER RC-1's isolation-level
+correction, L-a's fix, and N-3's new CHECK are applied and committed - i.e.
+the file every mutant below is applied to and reverted back to):
+  990efaa4c4afbd193758149b4b7e9d18 (before L-a)
+  0bb1891b397145852724a585385829e4 (after L-a; final baseline for M12/MC-1
+    reverts below, since L-a and N-3 are real fixes, not round-trip mutants)
+
+--------------------------------------------------------------------------------
+RC-1 CORRECTION mutant: widen R12-a back to "READ COMMITTED or SERIALIZABLE"
+(the original, INCORRECT text this round replaces)
+Change: `IF current_setting('transaction_isolation') <> 'read committed' THEN`
+        replaced with
+        `IF current_setting('transaction_isolation') NOT IN ('read committed', 'serializable') THEN`
+        (i.e. reverting RC-1's own fix, to prove the fix matters).
+Command: rebuild, then
+         PRIV_DB=prh2k1rctest PRIV_SRC=<worktree> bash priv_test.sh -tags
+           integration -count=1 -run TestCapabilityGrant_R12a ./internal/db/... -v
+Result (mutant in place): FAIL (both new tests)
+    TestCapabilityGrant_R12a_NonReadCommittedRefused/serializable:
+      approve under serializable: expected CG012 (R12-a), got <nil>
+    TestCapabilityGrant_R12a_MixedIsolationRaceExactlyOne:
+      approve request B under SERIALIZABLE racing a committed overlap:
+      expected CG012 (R12-a), got <nil>
+  (the mixed-isolation race test's failure IS the live reproduction of
+  security's own bug report: a SERIALIZABLE approver whose snapshot
+  predates a committed READ COMMITTED approval successfully inserts a
+  SECOND, overlapping grant - "got <nil>" means the second grant was
+  actually created, not merely that an assertion was skipped).
+Result (after revert): PASS (both).
+md5sum after revert: 990efaa4c4afbd193758149b4b7e9d18 (matches the
+  post-RC1-fix, pre-L-a baseline - this mutant/revert pair was run before
+  L-a and N-3 were applied).
+
+--------------------------------------------------------------------------------
+M12 (code review of 5a27be6, previously survived): drop financial_actor_
+session's platform-branch `status = 'active'` check
+Change: `IF NOT FOUND OR rec.status <> 'active' THEN` (in the v_platform
+        branch only, NOT the tenant branch's identical-looking line a few
+        lines above it) replaced with `IF NOT FOUND THEN`.
+Command: rebuild, then
+         PRIV_DB=prh2k1rctest PRIV_SRC=<worktree> bash priv_test.sh -tags
+           integration -count=1 -run TestCapabilityGrant_RC2 ./internal/db/... -v
+Result (mutant in place): FAIL (all three subtests)
+    suspended_platform_requester_gp2: suspended platform requester:
+      expected CG001, got <nil>
+    suspended_platform_approver: suspended platform approver: expected
+      CG001, got <nil>
+    suspended_platform_revoker: suspended platform revoker: expected
+      CG001, got <nil>
+Result (after revert): PASS (all three).
+md5sum after revert: 990efaa4c4afbd193758149b4b7e9d18 (matches the
+  post-RC1-fix, pre-L-a baseline).
+
+--------------------------------------------------------------------------------
+L-a mutant: bound the grant-time R-13 re-check by the CLAMPED NEW.valid_from
+instead of the REQUESTED v_req.valid_from (the pre-L-a bug this round fixes)
+Change: `IF v_max_lifetime IS NULL OR NEW.valid_until IS NULL OR
+        NEW.valid_until > v_req.valid_from + v_max_lifetime THEN` replaced
+        with the same condition using `NEW.valid_from` in place of
+        `v_req.valid_from`.
+Command: rebuild, then
+         PRIV_DB=prh2k1rctest PRIV_SRC=<worktree> bash priv_test.sh -tags
+           integration -count=1 -run TestCapabilityGrant_La ./internal/db/... -v
+Result (mutant in place): FAIL
+    approve a grant whose requested-from-based duration exceeds max
+    lifetime: expected CG012 (R-13/L-a), got <nil>
+  (a request whose valid_from was rewritten 2h into the past - simulating a
+  long-pending request - now clamps to a grant whose ACTUAL duration is a
+  full 4h from the clamped start, but is 6h measured from the originally
+  requested start; the pre-L-a check let this through).
+Result (after revert): PASS.
+md5sum after revert: 0bb1891b397145852724a585385829e4 (matches the current
+  baseline, with L-a's fix applied).
+
+--------------------------------------------------------------------------------
+MC-1 (code review of 5a27be6, previously survived) - internal/capability/
+capability.go, not the migration: drop the 23505 case from ClassifyError
+Change: removed
+        `case "23505":
+            return ErrClassUniqueViolation`
+        from internal/capability.ClassifyError's switch, leaving 23505 to
+        fall through to `default: return ErrClassOther`.
+Command: `go build -tags integration ./...` (compiles fine - ErrClassOther
+         already exists), then
+         PRIV_DB=prh2k1rctest PRIV_SRC=<worktree> bash priv_test.sh -tags
+           integration -count=1 -run TestCapabilityAPI_C1_DuplicateRequestUniqueViolation
+           ./internal/httpserver/... -v
+Result (mutant in place): FAIL
+    duplicate request: expected 409 (unique_violation, MC-1's own target),
+    got 500: {"code":"internal_error","message":"internal error", ...}
+  (ErrClassOther maps to writeCapabilityError's `default` branch: 500
+  internal error, not 409 - exactly MC-1's target: the double-submit race
+  becomes an unhandled server error instead of a legible client conflict).
+Result (after revert): PASS.
+md5sum after revert (internal/capability/capability.go):
+  7aa9c58e6c6e10f12b4c2d1051aeb65b (matches the pre-mutation file exactly).
+
+--------------------------------------------------------------------------------
+Summary (RC round)
+  Attempted: 4 (the RC-1 correction mutant, M12, L-a's own mutant, MC-1)
+  Independently killed: 4 (all of the above)
+  Masked: 0
+  Not killed / undetected: 0
+
+C-3(b) restatement (applies file-wide, per the code review of 5a27be6):
+**10 required-class mutants total across this whole file's history:
+9 independently killed, 1 accepted equivalent (mutant 5, R-1 self-grant,
+masked by R-4 distinct-Person).** This RC round's own 4 mutants (the RC-1
+correction, M12, L-a, MC-1) are ADDITIONAL to that original 10 - none of
+them replace or renumber it.
+
+Post-round verification: build, vet (plain and -tags integration), gofmt,
+golangci-lint (0 issues), migrate verify (clean), all clean. Full
+internal/db suite (including -race) and the new httpserver RC tests all
+pass on the fully-restored/fixed code. Ten leftover cap0112* scratch
+databases (attributable to this round's and the prior round's own test name
+prefixes - cap0112a17*, cap0112i5c23*, cap0112r12a21*, cap0112r12c*,
+cap0112updown*) with zero active sessions were dropped via the
+igaming_test_admin connection; none remain.

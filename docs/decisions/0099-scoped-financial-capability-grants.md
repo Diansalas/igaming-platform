@@ -84,8 +84,11 @@ Verified facts (at `6864efa`; the code is unchanged since `cabca27`):
    - an audit actor trigger.
 5. **The actor is derived from the DB session** (§7). Staff and grant rows are re-read, and at
    execution locked `FOR SHARE` (S-4, LF F3).
-6. **Lifecycle** (§8): one-way revoke (the emergency stop); a mandatory expiry for G-P2 grants; a
-   `grant.reattested` audit action. The re-attestation table and view move to STAFF-LIFECYCLE-1.
+6. **Lifecycle** (§8): one-way revoke (the emergency stop); a mandatory expiry for G-P2 grants.
+   **Re-attestation (C-2, orchestrator decision on the code review of `5a27be6`): the entire
+   feature - the `grant.reattested` audit action, the typed re-attestation table, and the view -
+   moves to STAFF-LIFECYCLE-1. NOT IMPLEMENTED in K1**, superseding this ADR's earlier text, which
+   had K1 provide the audit action alone; no code for it was ever built.
 7. **The S-1 caveat is stated plainly** (§9). Distinct-Person is defence in depth. The structural
    control is that the platform co-approver is not tenant-mintable over HTTP.
 
@@ -201,7 +204,7 @@ row.
 | R-9 | the grantee's role is eligible (§3.3); the grantee is `active`; a platform grantee only via G-P2 |
 | R-10 | an acting session never requests, approves or revokes grants |
 | R-11 | one pending request per `(tenant, grantee, capability)` (partial UNIQUE) |
-| R-12 | **(reworked, architect ruling k1-architect-ruling-r12.md) no overlapping validity ranges:** no two unrevoked grants for one `(tenant, grantee, capability)` may have overlapping half-open `[valid_from, valid_until)` windows (a NULL end means unbounded). Expired grants do not block; queued, back-to-back renewals are allowed. The **binding control is DB-level**: the grant INSERT trigger takes a per-key `pg_advisory_xact_lock` (keyed on all three parts, taken *before* the overlap `SELECT` - R12-b) and then refuses an overlap (`CG012`). The request and approval guards re-run the same overlap check as a legible, **non-binding** pre-check. The prior partial UNIQUE index on `revoked_at IS NULL` is **dropped** - it could only express "at most one unrevoked row", which would wrongly refuse a valid renewal made before the prior grant's natural expiry. `EXCLUDE USING gist` is deferred pending the btree_gist extension decision (PHASE-D-ARCH/SEC-P3-2, 0075/0076); no `CREATE EXTENSION` here. Auto-superseding the prior grant by revoke at renewal time was considered and **rejected**: it would record natural expiry as a governance decision, misattribute the actor, and mutate history - expiry stays derived, and no row is written at expiry. **R12-a** (security condition): the grant INSERT trigger additionally refuses (`CG012`) unless `transaction_isolation` is READ COMMITTED or SERIALIZABLE - under REPEATABLE READ, two overlapping approvals could both commit (write skew) despite the lock. The trigger function stays VOLATILE. **R12-c** (security condition): a concurrency test proves two concurrent approvals for overlapping windows on the same key yield exactly one grant, with a mutant that removes only the lock and is killed by that test. **R12-d** (security condition): whole-row UPDATE equality is kept on `staff_capability_grants`, so INSERT is the only path that can ever create an overlap. **Accepted residual:** a table owner or superuser could disable the trigger; this is migration-controlled and moves to `EXCLUDE USING gist` once the btree_gist decision is made. |
+| R-12 | **(reworked, architect ruling k1-architect-ruling-r12.md) no overlapping validity ranges:** no two unrevoked grants for one `(tenant, grantee, capability)` may have overlapping half-open `[valid_from, valid_until)` windows (a NULL end means unbounded). Expired grants do not block; queued, back-to-back renewals are allowed. The **binding control is DB-level**: the grant INSERT trigger takes a per-key `pg_advisory_xact_lock` (keyed on all three parts, taken *before* the overlap `SELECT` - R12-b) and then refuses an overlap (`CG012`). The request and approval guards re-run the same overlap check as a legible, **non-binding** pre-check. The prior partial UNIQUE index on `revoked_at IS NULL` is **dropped** - it could only express "at most one unrevoked row", which would wrongly refuse a valid renewal made before the prior grant's natural expiry. `EXCLUDE USING gist` is deferred pending the btree_gist extension decision (PHASE-D-ARCH/SEC-P3-2, 0075/0076); no `CREATE EXTENSION` here. Auto-superseding the prior grant by revoke at renewal time was considered and **rejected**: it would record natural expiry as a governance decision, misattribute the actor, and mutate history - expiry stays derived, and no row is written at expiry. **R12-a** (security condition, **CORRECTED by security's own re-check of the integrated head `5a27be6`**): the grant INSERT trigger additionally refuses (`CG012`) unless `transaction_isolation` is **READ COMMITTED - and only READ COMMITTED**. The original text ("READ COMMITTED or SERIALIZABLE") was wrong: under REPEATABLE READ, two overlapping approvals could both commit (write skew) despite the lock, which is why REPEATABLE READ was always excluded - but SERIALIZABLE alone is not safe either. A SERIALIZABLE approver that took its snapshot before a concurrent READ COMMITTED approver commits can still acquire the advisory lock afterward (locks are not part of a transaction's snapshot), then run its own overlap `SELECT` against its own pre-commit snapshot, see no conflict, and insert an overlapping grant - Postgres's serializable snapshot isolation (SSI) only detects SERIALIZABLE-vs-SERIALIZABLE conflicts, not a SERIALIZABLE transaction racing a READ COMMITTED one. Security reproduced this in a scratch DB with the R-11 index dropped (the A-23 technique). The trigger function stays VOLATILE. **R12-c** (security condition): a concurrency test proves two concurrent approvals for overlapping windows on the same key yield exactly one grant, with a mutant that removes only the lock and is killed by that test. **R12-d** (security condition): whole-row UPDATE equality is kept on `staff_capability_grants`, so INSERT is the only path that can ever create an overlap. **Accepted residual:** a table owner or superuser could disable the trigger; this is migration-controlled and moves to `EXCLUDE USING gist` once the btree_gist decision is made. |
 | R-13 | a G-P2 grant has NOT NULL `valid_until`, `<= valid_from + acting_grant_max_lifetime` (§8.2); re-checked **after** the R-14 clamp, against the live setting, in the grant INSERT trigger itself (not just at request time) |
 | R-14 | **(new, architect ruling k1-architect-ruling-r12.md) no backdated or already-expired grant.** At request: `valid_from` defaults to `now()` and must satisfy `now() - 5min ≤ valid_from ≤ request.expires_at`; a supplied `valid_until` must be `> now()`. At approval: a request whose window has already ended (`valid_until <= now()`) is refused. At grant INSERT (the binding control): `valid_from := GREATEST(request.valid_from, now())`, restated as a table `CHECK (valid_from >= granted_at)`. All three checks use `now()`, never `clock_timestamp()`. The 5-minute tolerance is the same technical value as `PaymentCoverageMaxClockSkew` and is hardcoded like the 24h request TTL; because of the INSERT-time clamp it grants no authority by itself, so it is not a policy value (security-confirmed). |
 
@@ -581,12 +584,15 @@ No `SELECT *` on either table. No further row narrowing now (security ruling 2).
 ### 8.3 Demoted or suspended grantor: re-attestation (PO Q2, security ruling 6)
 
 - A grant stays in force if its requester or approver later changes.
-- **K1 provides the audit action `grant.reattested`.** A platform principal (or a tenant admin of
-  X) records that an in-force grant was reviewed. It is written through `audit.Record`, with the
-  grant id, the attesting actor and a note code.
-- **The typed re-attestation table, the "needing re-attestation" view, and the p2 alert for
-  entries older than a configurable technical default all move to STAFF-LIFECYCLE-1.** This is
-  adopted from `product-owner-proxy`, and `security` accepts it.
+- **DEFERRED to STAFF-LIFECYCLE-1 (C-2, orchestrator decision on the code review of `5a27be6`):
+  `grant.reattested` is NOT IMPLEMENTED in K1.** This ADR previously said K1 provides the audit
+  action alone (a platform principal, or a tenant admin of X, recording that an in-force grant was
+  reviewed, via `audit.Record` with the grant id, attesting actor and a note code) while only the
+  typed table/view/alert moved to STAFF-LIFECYCLE-1 - no code for even the audit action was ever
+  built, so the whole feature (audit action, typed re-attestation table, "needing re-attestation"
+  view, and the p2 alert for entries older than a configurable technical default) moves to
+  STAFF-LIFECYCLE-1 together. This is adopted from `product-owner-proxy`, and `security` accepts
+  it.
 - Rationale: with no staff suspend or role-change API, "grantor demoted or suspended" cannot arise
   through the product today.
 - The re-attestation alert age is, like §8.2, a technical security default (orchestrator decision)
@@ -740,7 +746,10 @@ Common rules:
   `valid_until`; `granted_at`; `revoked_at`, `revoked_by`, `revoked_by_scope`,
   `revoke_reason_code`, all NULL until a revoke.
 - **CHECK:** `grantee_scope = 'platform' ⇒ valid_until IS NOT NULL`; **`valid_from >= granted_at`
-  (R-14, defence in depth over the INSERT trigger's own clamp).**
+  (R-14, defence in depth over the INSERT trigger's own clamp)**; **N-3 (ledger-finance, code
+  review of `5a27be6`): `valid_until IS NULL OR valid_until > valid_from`** (restates, directly on
+  the grants table, the same ordering the requests table's own identical CHECK already implies -
+  cheap defence in depth, independent of whatever the INSERT trigger copies).
 - **(architect ruling k1-architect-ruling-r12.md) the prior partial UNIQUE**
   `(tenant_id, grantee_staff_id, capability) WHERE revoked_at IS NULL` **is dropped** - R-12's
   binding control is now the INSERT trigger's own per-key `pg_advisory_xact_lock` + overlap check
@@ -748,7 +757,8 @@ Common rules:
 - **Triggers:**
   - INSERT only with an `approve` approval for `request_id` whose `decided_txid = txid_current()`;
     the columns are copied from and checked against the request; **R12-a** (refuses unless
-    `transaction_isolation` is READ COMMITTED or SERIALIZABLE); **R-12** (takes the per-key
+    `transaction_isolation` is READ COMMITTED - corrected from an earlier, unsafe "READ COMMITTED
+    or SERIALIZABLE"); **R-12** (takes the per-key
     `pg_advisory_xact_lock`, then refuses an overlap via `staff_capability_grant_overlaps`); **R-14**
     (clamps `valid_from := GREATEST(request.valid_from, now())`); **R-13 re-checked** against the
     clamped `valid_from` and the live `acting_grant_max_lifetime` setting;
@@ -782,8 +792,9 @@ policy sets exactly), then the new tables, then the functions.
 
 ## 11. Audit
 
-Every grant request, approval, rejection, cancellation, expiry and revoke, every `grant.reattested`
-action, and every acting session open writes `audit_log` in the same transaction, with:
+Every grant request, approval, rejection, cancellation, expiry and revoke, and every acting session
+open writes `audit_log` in the same transaction, with:
+(`grant.reattested` is NOT IMPLEMENTED in K1 - deferred to STAFF-LIFECYCLE-1, §8.3, C-2.)
 - actor, actor scope, and acting tenant;
 - target, grantee, capability and tenant;
 - before and after state;
@@ -851,11 +862,11 @@ Notes:
 | A-5 | AZ | Self-grant; self-approval; approver = grantee; one Person under two principals; a NULL Person. All refused. |
 | A-6 | AZ | A tenant names a platform grantee or another tenant. Refused. |
 | A-7 | AZ | G-P1/G-P2 with the same platform principal or Person. Refused. |
-| A-8 | AZ | S-4: a suspended actor (status set by DB fixture) with a live token; a demoted grantee. Both refused. |
+| A-8 | AZ | S-4: a suspended actor (status set by DB fixture) with a live token; a demoted grantee. Both refused. **RC-2 (code review of `5a27be6`, mutant M12 survived) extends this to the platform branch specifically**: a suspended platform requester (a G-P2 request), a suspended platform approver, and a suspended platform revoker - all via `WithPlatformAdmin` - each refused `CG001` by `financial_actor_session`'s own platform-branch status check. |
 | A-9 | CON | **`FOR SHARE` (LF F3):** revoke commits first → not counted; execution first → the revoke waits, then applies. Expiry between approve and execute → not counted. |
 | A-10 | R | G-P2 without `valid_until`, beyond the max lifetime, or with no settings row: refused. G-T without `valid_until`: allowed. |
 | A-11 | IDM | Duplicate pending request and duplicate in-force grant: refused |
-| A-12 | AU | One audit row per lifecycle action and per acting open. The acting audit actor is forced (a supplied different actor is overwritten). The tenant view marks `platform_acting`; IP and user agent are hidden. `grant.reattested` is recorded. |
+| A-12 | AU | One audit row per lifecycle action and per acting open. The acting audit actor is forced (a supplied different actor is overwritten). The tenant view marks `platform_acting`; IP and user agent are hidden. (`grant.reattested` is NOT IMPLEMENTED in K1 - deferred to STAFF-LIFECYCLE-1, C-2 - and so is correctly excluded from this test.) |
 | A-13 | R | Append-only; un-revoke, DELETE, TRUNCATE: refused |
 | A-14 | R | `POST /staff` with `role = platform_admin` is refused (HTTP allowlist) |
 | A-14b | R | Static: only `cmd/seed-admin` (plus allow-listed test support) inserts `platform_admin` |
@@ -869,7 +880,7 @@ Notes:
 | A-22 | R | Backdating beyond the 5-minute tolerance is refused at request; an already-ended window is refused at request and at approval; a within-tolerance backdated `valid_from` is accepted and clamped to `granted_at` |
 | A-23 | CON | A direct grant INSERT that bypasses the request/approval guards' own (non-binding) pre-checks still hits R-12's binding overlap refusal in the grant INSERT trigger itself |
 | A-10 (extended) | R | A clamped G-P2 grant's actual window still ends at or before `requested_from + acting_grant_max_lifetime` |
-| R12-a test | CON | An approval attempted under REPEATABLE READ is refused (`CG012`) outright |
+| R12-a test | CON | An approval attempted under REPEATABLE READ **or SERIALIZABLE** is refused (`CG012`) outright (corrected: SERIALIZABLE alone is not safe, see R-12/R12-a). A scratch-DB mixed-isolation race (one READ COMMITTED approver, one SERIALIZABLE, overlapping windows, R-11 index dropped) proves exactly one grant results |
 | R12-c | CON | Two concurrent approvals for overlapping windows on the same key yield **exactly one** grant; a blocker transaction holds the per-key advisory lock, the test polls `pg_stat_activity` until both are queued waiting on it, then releases it (`-race -count=20`) |
 | I-5 test | AZ | A G-P2 approval is refused when the grantee's live `staff_users` row is not `active`, not `platform_admin`, or has a different `person_id` than the request-time snapshot |
 
@@ -897,7 +908,10 @@ Notes:
 | drop the R-14 approval-time window check | A-22 |
 | restore the R-12 unique index | A-20 |
 | drop the R12-a isolation-level guard | R12-a test |
+| **widen R12-a back to "READ COMMITTED or SERIALIZABLE" (the original, incorrect text)** | R12-a test's serializable subtest, and the mixed-isolation race test |
 | drop the I-5 live re-read | I-5 test |
+| **MC-1 (code review of `5a27be6`): drop the `23505` case from `ClassifyError`** | `TestCapabilityAPI_C1_DuplicateRequestUniqueViolation` (falls through to `ErrClassOther`/500 instead of 409) |
+| **M12 (code review of `5a27be6`): drop `financial_actor_session`'s platform-branch `status = 'active'` check** | A-8's new suspended-platform-requester/approver/revoker cases |
 
 ## 15. Alternatives rejected
 
@@ -959,7 +973,8 @@ K1 updates:
 - `backoffice/src/auth/permissions.ts`;
 - `docs/runbooks/operational-runbooks.md`:
   - "Capability grants": the co-approval checklist including the out-of-band identity check;
-    **revoke as the emergency stop**; `grant.reattested`;
+    **revoke as the emergency stop**; (`grant.reattested` moves to STAFF-LIFECYCLE-1's own runbook
+    entry - NOT IMPLEMENTED in K1, C-2);
   - "seed-admin: two-person audited procedure";
 - `deploy/init-app-role.sql` (append-only grants; no write grant on the reference tables).
 
@@ -1058,17 +1073,22 @@ explicitly deferred; see below.
   comment), I-1 (G-P1 fail-closed), K1-C1 (path-tenant scoping), and A-12
   (full audit content across request/approve/reject/cancel/revoke,
   including the HD-PRH2-5 tenant presentation - `grant.reattested` is
-  correctly excluded, being STAFF-LIFECYCLE-1/out-of-K1-scope per §8.3).
+  correctly excluded: **NOT IMPLEMENTED in K1**, deferred to
+  STAFF-LIFECYCLE-1 in full (C-2, orchestrator decision on the code review
+  of `5a27be6`; §2, §8.3, §11, §14 A-12 updated accordingly).
   All pass under `-race -tags integration`.
 - **Mutants**: `docs/plans/payment-readiness/evidence/prh2-k1-mutation-kill.txt`
-  (corrected on the `prh2-k1-tests` branch per code review F-10) - of the 9
-  required-class mutants, all 9 are now independently killed (mutants 7 and
-  10 were reclassified from "masked" to "killed" once dedicated tests
-  stopped relying on the masking control; only mutant 5, R-1 self-grant, is
-  an accepted equivalent per security's own ruling). The two new forced-
-  column mutants (MF-a, MF-b) are killed. Several additional, ADR-listed
-  mutants beyond the required list were also run or honestly disclosed as
-  not attempted - see the evidence file's addendum. 0 undetected gaps.
+  (corrected on the `prh2-k1-tests` branch per code review F-10) - **C-3(b)
+  (code review of `5a27be6`) plain restatement: 10 required-class mutants:
+  9 killed, 1 accepted equivalent (R-1).** Mutants 7 and 10 were
+  reclassified from "masked" to "killed" once dedicated tests stopped
+  relying on the masking control; mutant 5 (R-1 self-grant, masked by R-4
+  distinct-Person) is the one accepted equivalent, per security's own
+  ruling on this file - it is not counted among the 9 independent kills.
+  The two new forced-column mutants (MF-a, MF-b) are killed. Several
+  additional, ADR-listed mutants beyond the required list were also run or
+  honestly disclosed as not attempted - see the evidence file's addendum.
+  0 undetected gaps.
 
 ### 19.2 A real design gap found and fixed during K1 (disclosed, not silently patched)
 
@@ -1115,6 +1135,10 @@ missing.
 
 ### 19.3 Explicitly NOT DONE / deferred (honest labels)
 
+- **`grant.reattested`** (the audit action, the typed re-attestation table, the "needing
+  re-attestation" view, and its p2 alert): **NOT IMPLEMENTED** - deferred to STAFF-LIFECYCLE-1 in
+  full (C-2, orchestrator decision on the code review of `5a27be6`). No code for any part of this
+  feature was ever built; §2, §8.3, §11 and §14's A-12 row are corrected accordingly.
 - **`security` and `code-reviewer` review of this K1 HTTP/DB
   implementation**: NOT DONE. This is a security-critical financial-grant
   control surface and CLAUDE.md requires explicit `security` review before
