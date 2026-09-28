@@ -366,3 +366,65 @@ failure fails closed.
     PLAT-AUDIT-SUBJECT-1; presentation compiled-in defaults, configurable table per
     AUDIT-PRESENTATION-POLICY-1)".
 - **Registry (orchestrator):** KS-AUDIT-TENANT-1 → IMPLEMENTED after the security diff review.
+
+## 12. Implementation record (G1, 2026-09-28)
+
+Implemented on branch `prh2-g1-audit-tenant`, migration **0109** (`0109_tenant_visible_platform_audit`),
+exactly as specified in §3-§5, with the two review-round additions (N-2, N-3) folded in. Numbering
+note: migration 0108 (workstream A) is not present on this branch, so `migrate verify` reports a
+version gap (107 → 109) here; the orchestrator resolves final numbering at merge, per this task's
+own instruction.
+
+- **Migration 0109:** `audit_log.subject_tenant_id` (FK `NO ACTION`), the platform-only CHECK, the
+  partial index, `subject_tenant_read` (FOR SELECT), the `audit_log_subject_actor_guard` BEFORE
+  INSERT trigger (no status check, per Q7), and `staff_users.display_name` with the hygiene CHECK
+  extended per N-3 (bidi overrides U+202A-U+202E, bidi isolates U+2066-U+2069, zero-width
+  U+200B-U+200F, on top of `[[:cntrl:]]`). The down migration refuses while any `subject_tenant_id`
+  row exists or any `display_name` is non-NULL, verified by an up/down/up round trip and both refusal
+  preconditions (`internal/audit/subject_tenant_migration_integration_test.go`).
+- **Write path (`audit.Entry.SubjectTenantID`, `internal/audit/audit.go`):** `Record` refuses an
+  entry with both `TenantID` and `SubjectTenantID` set, in Go, before any SQL. The kill-switch
+  handlers (`internal/httpserver/payments_kill_switch_handlers.go`) set it via a new
+  `killSwitchCall.auditSubjectTenantID()` - `c.target`, ONLY for a platform-scope caller, after
+  `canActOnTenant` and the existence check already ran - for engage, request_release,
+  approve_release, cancel_release and `recordKillSwitchRefusalAudit`. `cancel_release`'s audit
+  metadata gained a `kill_switch_id` key (previously omitted) so the read path's approval-chain
+  linking can key it the same way `request_release` already could.
+- **Read path:** `GET /v1/admin/audit-log/platform-actions`
+  (`internal/httpserver/audit_platform_actions_handlers.go`), `RequireTenantScope` +
+  `PermAuditRead`. Explicit `WHERE tenant_id IS NULL AND subject_tenant_id = $1` defence in depth
+  over `subject_tenant_read` RLS. The actor is always identified (`staff_id` + `display_name` via a
+  second, `id, display_name`-only lookup restricted to the RLS-filtered actor ids, run under
+  `WithoutTenant` - never `email`, pinned by
+  `TestPlatformActionsAuditAPI_NameLookupNeverSelectsEmail`'s assertion on the query's own SQL
+  text). The per-action allowlist is `audit.TenantPresentation`
+  (`internal/audit/allowlist.go`); an action with no entry projects only the base columns. The
+  approval chain (`internal/httpserver`'s `killSwitchChainKey`) is built only from the same
+  RLS-filtered result set, keyed by metadata's own `kill_switch_id` or the row's own `target_id` -
+  no second, wider-scope query. Existing readers (`GET /v1/admin/audit-log`,
+  `GET /v1/admin/platform/audit-log`, `internal/casino/rejections.go:257-266`) are unchanged.
+- **Presentation resolver (`internal/audit/presentation.go`):** `ResolvePresentation` returns the
+  compiled-in default (identified actor, no network metadata, no free-form metadata) unconditionally
+  in PRH-2; `ResolvePresentationOrRestrictive` is the fail-closed wrapper every caller uses. No
+  `audit_presentation_policies` table (AUDIT-PRESENTATION-POLICY-1 remains open, as planned).
+- **`display_name` write path (N-2):** two new endpoints in `internal/httpserver/admin_routes.go` -
+  `PATCH /v1/admin/tenants/{tenantID}/staff/{staffID}/display-name` (`PermStaffManage` +
+  `canActOnTenant`) and `PATCH /v1/admin/staff/me/display-name` (self-rename, verified token subject
+  only, no staff-management permission required). Both call
+  `identity.UpdateStaffDisplayName` (`internal/identity/staff_user.go`), a column-allowlisted UPDATE
+  of `display_name` only, and both audit `staff.display_name_changed` with before/after, self-renames
+  included. `identity.ValidateDisplayName` mirrors the DB CHECK in Go, including N-3's bidi/zero-width
+  refusal.
+- **Tests:** `internal/audit/subject_tenant_rls_integration_test.go` (AT-1..AT-9, the excluded-session
+  list, the AZ/RLS write-side refusals including the suspended-admin-can-still-write case, and
+  append-only); `internal/audit/subject_tenant_migration_integration_test.go` (MIG);
+  `internal/audit/presentation_test.go` and `record_guard_test.go` (unit); `internal/identity`'s
+  `staff_user_display_name_test.go`/`_integration_test.go`; `internal/httpserver`'s
+  `audit_platform_actions_api_integration_test.go` (the TI headline, cross-tenant isolation, the
+  approval chain, excluded sessions over HTTP, the forced-resolver-error fail-closed case, and the
+  name-lookup-never-selects-email assertion) and `staff_display_name_api_integration_test.go` (every
+  N-2 refusal case, hygiene refusals including bidi/zero-width and the `<script>` case, and the
+  audited self/other-rename paths). Evidence:
+  `docs/plans/payment-readiness/evidence/prh2-g1-mutation-kill.txt`.
+- **Not implemented in this wave (unchanged from §8/§10):** SA-3 (ADR 0099/0112), PLAT-AUDIT-SUBJECT-1,
+  AUDIT-PRESENTATION-POLICY-1.

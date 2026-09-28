@@ -46,6 +46,29 @@ state, IP, reason code. 5–7 year retention, exportable. Manual balance
 adjustments require reason code + four-eyes approval above a configurable
 threshold.
 
+**Tenant visibility into platform-scope actions (PRH-2 G1, ADR 0104,
+`IMPLEMENTED — kill switch only`).** `audit_log`'s dual-scope RLS (ADR
+0013) is unchanged: a platform-scope action is still written as a
+platform-level row (`tenant_id IS NULL`), never as a write into the
+affected tenant's own scope — there is no new write power into tenant
+scope, and the append-only triggers are byte-identical. A tenant instead
+gets **read-only** visibility into the platform-scope rows that concern
+it via a first-class `audit_log.subject_tenant_id` column (migration
+0109) and an additive `FOR SELECT` policy, gated by a BEFORE INSERT
+trigger that requires a validated `app.platform_admin_principal_id`
+session acting as its own staff row, and that excludes player, platform-
+service and `app.acting_*` sessions. The read path
+(`GET /v1/admin/audit-log/platform-actions`) shows the identifiable actor
+(never a pseudonym in this wave — HD-PRH2-5), a per-action metadata
+allowlist (`audit.TenantPresentation`; an unlisted action discloses only
+base columns), and never IP/user agent/request id by default (the
+presentation resolver ships with compiled-in defaults only — the
+configurable policy table is AUDIT-PRESENTATION-POLICY-1, and enabling
+network-metadata disclosure in it requires a legal/privacy review first).
+The actor's display name is resolved via a second, `id, display_name`-
+only lookup — never `email`. See ADR 0104 for the full design and
+`docs/architecture/12-audit-reporting-architecture.md` for the summary.
+
 ## Threat model priorities for Stage 0/1
 
 1. Cross-tenant data access (highest architectural risk given the
