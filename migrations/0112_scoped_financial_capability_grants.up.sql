@@ -15,9 +15,9 @@
 -- message text:
 --   CG001 unresolvable/invalid actor session (financial_actor_session)
 --   CG002 actor has no linked person_id on a capability-grant write
---   CG010 grant-request guard violation (R-1/4/5/6/9/10/11/13, TTL, etc.)
---   CG011 grant-approval guard violation (R-2/3/4/7/8/10/12)
---   CG012 grant guard violation (insert/revoke invariants, R-10)
+--   CG010 grant-request guard violation (R-1/4/5/6/9/10/11/12/13/14, TTL)
+--   CG011 grant-approval guard violation (R-2/3/4/7/8/10/12/14, I-5)
+--   CG012 grant guard violation (insert/revoke invariants, R-10/12/13/14)
 --   CG020 acting session is not valid (financial_acting_session_open)
 --   CG099 down-migration refused while rows exist
 --
@@ -71,6 +71,33 @@ BEGIN
            AND g.revoked_at IS NULL
            AND g.valid_from <= p_at
            AND (g.valid_until IS NULL OR p_at < g.valid_until)
+    );
+END;
+$$ LANGUAGE plpgsql STABLE;
+
+-- staff_capability_grant_overlaps: R-12 ("no overlapping validity
+-- ranges"). True if any unrevoked grant for (p_tenant, p_staff,
+-- p_capability) has a half-open [valid_from, valid_until) range that
+-- overlaps [p_from, p_until) (a NULL end means unbounded/infinity).
+-- Expired grants do not block (this is NOT "in force at now()" - queued,
+-- back-to-back renewals are allowed). Used as a legible, non-binding
+-- pre-check by the request and approval guards, and - after the per-key
+-- pg_advisory_xact_lock - as the binding control in the grant INSERT
+-- trigger. Same lazy-parse reasoning as staff_capability_grant_in_force
+-- above: LANGUAGE plpgsql because staff_capability_grants does not exist
+-- yet at CREATE FUNCTION time.
+CREATE FUNCTION staff_capability_grant_overlaps(
+    p_tenant uuid, p_staff uuid, p_capability text, p_from timestamptz, p_until timestamptz
+) RETURNS boolean AS $$
+BEGIN
+    RETURN EXISTS (
+        SELECT 1 FROM staff_capability_grants g
+         WHERE g.tenant_id = p_tenant
+           AND g.grantee_staff_id = p_staff
+           AND g.capability = p_capability
+           AND g.revoked_at IS NULL
+           AND g.valid_from < COALESCE(p_until, 'infinity'::timestamptz)
+           AND p_from < COALESCE(g.valid_until, 'infinity'::timestamptz)
     );
 END;
 $$ LANGUAGE plpgsql STABLE;
@@ -318,6 +345,26 @@ BEGIN
         -- never longer than requested, never a money value.
         NEW.expires_at := LEAST(COALESCE(NEW.expires_at, now() + interval '24 hours'), now() + interval '24 hours');
 
+        -- R-14 (no backdated or already-expired grant), part 1: valid_from
+        -- defaults to now() and must sit within a 5-minute clock-skew
+        -- tolerance of now() (the same technical value as
+        -- PaymentCoverageMaxClockSkew) and no later than the request's own
+        -- expiry. valid_until, if given, must not already be in the past.
+        -- This is a legible, non-binding pre-check: the grant INSERT
+        -- trigger's own GREATEST(valid_from, now()) clamp plus its
+        -- CHECK (valid_from >= granted_at) is the binding control, so this
+        -- 5-minute value grants no authority by itself.
+        NEW.valid_from := COALESCE(NEW.valid_from, now());
+        IF NEW.valid_from < now() - interval '5 minutes' THEN
+            RAISE EXCEPTION 'staff_capability_grant_requests: valid_from is backdated beyond the clock-skew tolerance (R-14)' USING ERRCODE = 'CG010';
+        END IF;
+        IF NEW.valid_from > NEW.expires_at THEN
+            RAISE EXCEPTION 'staff_capability_grant_requests: valid_from is after the request''s own expiry (R-14)' USING ERRCODE = 'CG010';
+        END IF;
+        IF NEW.valid_until IS NOT NULL AND NEW.valid_until <= now() THEN
+            RAISE EXCEPTION 'staff_capability_grant_requests: valid_until is already in the past (R-14)' USING ERRCODE = 'CG010';
+        END IF;
+
         SELECT id, tenant_id, role, status, person_id INTO v_grantee
           FROM staff_users WHERE id = NEW.grantee_staff_id;
         IF NOT FOUND THEN
@@ -387,10 +434,14 @@ BEGIN
             END IF;
         END;
 
-        -- R-12 (partial defence; the DB unique index on grants is the
-        -- binding control): no second unrevoked, unexpired grant already.
-        IF staff_capability_grant_in_force(NEW.tenant_id, NEW.grantee_staff_id, NEW.capability, now()) THEN
-            RAISE EXCEPTION 'staff_capability_grant_requests: grantee already holds an in-force grant for this capability (R-12)' USING ERRCODE = 'CG010';
+        -- R-12 ("no overlapping validity ranges"; legible, non-binding
+        -- pre-check - the grant INSERT trigger's own per-key
+        -- pg_advisory_xact_lock plus overlap check is the binding
+        -- control): no unrevoked grant already occupies an overlapping
+        -- window. Expired grants and queued back-to-back renewals do not
+        -- block.
+        IF staff_capability_grant_overlaps(NEW.tenant_id, NEW.grantee_staff_id, NEW.capability, NEW.valid_from, NEW.valid_until) THEN
+            RAISE EXCEPTION 'staff_capability_grant_requests: grantee already holds an overlapping grant for this capability (R-12)' USING ERRCODE = 'CG010';
         END IF;
 
         RETURN NEW;
@@ -556,8 +607,9 @@ CREATE INDEX staff_capability_grant_approvals_tenant ON staff_capability_grant_a
 
 CREATE FUNCTION staff_capability_grant_approvals_guard() RETURNS TRIGGER AS $$
 DECLARE
-    v_actor RECORD;
-    v_req   RECORD;
+    v_actor         RECORD;
+    v_req           RECORD;
+    v_live_grantee  RECORD;
 BEGIN
     IF TG_OP <> 'INSERT' THEN
         RAISE EXCEPTION 'staff_capability_grant_approvals: approvals are immutable (append-only)' USING ERRCODE = 'CG011';
@@ -584,6 +636,13 @@ BEGIN
     IF now() >= v_req.expires_at THEN
         RAISE EXCEPTION 'staff_capability_grant_approvals: request % has expired', NEW.request_id USING ERRCODE = 'CG011';
     END IF;
+    -- R-14 (no backdated or already-expired grant), approval-side: a
+    -- request whose window has already ended by decision time is refused.
+    -- This is a legible, non-binding pre-check (the grant INSERT trigger's
+    -- own clamp plus CHECK is binding); NULL valid_until is open-ended.
+    IF NEW.decision = 'approve' AND v_req.valid_until IS NOT NULL AND v_req.valid_until <= now() THEN
+        RAISE EXCEPTION 'staff_capability_grant_approvals: request %''s validity window has already ended (R-14)', NEW.request_id USING ERRCODE = 'CG011';
+    END IF;
 
     -- R-2: approver != requester (principal). R-3: approver not in
     -- {requester, grantee} (principal). R-4/R-8: distinct, non-NULL
@@ -606,13 +665,35 @@ BEGIN
         RAISE EXCEPTION 'staff_capability_grant_approvals: the approver must be a distinct Person from the grantee (R-4/R-8)' USING ERRCODE = 'CG011';
     END IF;
 
-    -- R-12: no second unrevoked, unexpired grant (re-checked at decision
-    -- time; the partial unique index on staff_capability_grants is the
-    -- binding control against races).
+    -- I-5 (architect ruling k1-architect-ruling-gp1.md, "approval,
+    -- platform grantee"): unlike a tenant grantee, a plain platform
+    -- approval session CAN see the grantee's own staff_users row (both
+    -- are platform-scoped, so 0011 dual_scope_isolation does not blind
+    -- it). Re-read it live and require status='active', role=
+    -- 'platform_admin', and person_id still equal to the snapshot taken
+    -- at request time - otherwise the grantee is no longer eligible for a
+    -- G-P2 grant and the decision is refused, even though the request
+    -- guard already checked all three at request time.
+    IF NEW.decision = 'approve' AND v_req.grantee_scope = 'platform' THEN
+        SELECT status, role, person_id INTO v_live_grantee
+          FROM staff_users WHERE id = v_req.grantee_staff_id;
+        IF NOT FOUND
+           OR v_live_grantee.status <> 'active'
+           OR v_live_grantee.role <> 'platform_admin'
+           OR v_live_grantee.person_id IS DISTINCT FROM v_req.grantee_person_id
+        THEN
+            RAISE EXCEPTION 'staff_capability_grant_approvals: platform grantee % is no longer eligible for a G-P2 grant (I-5)', v_req.grantee_staff_id USING ERRCODE = 'CG011';
+        END IF;
+    END IF;
+
+    -- R-12 ("no overlapping validity ranges"; legible, non-binding
+    -- pre-check - the grant INSERT trigger's own per-key
+    -- pg_advisory_xact_lock plus overlap check is the binding control):
+    -- re-checked at decision time against the request's own window.
     IF NEW.decision = 'approve'
-       AND staff_capability_grant_in_force(v_req.tenant_id, v_req.grantee_staff_id, v_req.capability, now())
+       AND staff_capability_grant_overlaps(v_req.tenant_id, v_req.grantee_staff_id, v_req.capability, v_req.valid_from, v_req.valid_until)
     THEN
-        RAISE EXCEPTION 'staff_capability_grant_approvals: grantee already holds an in-force grant for this capability (R-12)' USING ERRCODE = 'CG011';
+        RAISE EXCEPTION 'staff_capability_grant_approvals: grantee already holds an overlapping grant for this capability (R-12)' USING ERRCODE = 'CG011';
     END IF;
 
     NEW.tenant_id := v_req.tenant_id;
@@ -738,22 +819,35 @@ CREATE TABLE staff_capability_grants (
     -- R-13, restated as a CHECK: a platform (G-P2) grant always has a
     -- valid_until.
     CHECK (grantee_scope <> 'platform' OR valid_until IS NOT NULL),
+    -- R-14: the INSERT trigger's GREATEST(requested valid_from, now())
+    -- clamp is what makes this hold; the CHECK is defence in depth against
+    -- a trigger bypass (accepted residual, ADR 0099 §16) - no grant can
+    -- ever record a validity start before the moment it was actually
+    -- granted.
+    CHECK (valid_from >= granted_at),
     UNIQUE (tenant_id, id)
 );
 
--- R-12, the binding control: at most one unrevoked grant per
--- (tenant, grantee, capability), independent of the trigger's own
--- point-in-time check (which is racy without this index).
-CREATE UNIQUE INDEX staff_capability_grants_one_unrevoked
-    ON staff_capability_grants (tenant_id, grantee_staff_id, capability) WHERE revoked_at IS NULL;
+-- R-12 ("no overlapping validity ranges"): the partial unique index on
+-- revoked_at IS NULL is DELETED (architect ruling k1-architect-ruling-
+-- r12.md). It could only ever express "at most one unrevoked row", which
+-- is stricter than the actual invariant (queued, back-to-back renewals
+-- for the same key must be allowed) and would have refused a valid
+-- renewal made before the prior grant's natural expiry. The binding
+-- control is now the grant INSERT trigger's own per-key
+-- pg_advisory_xact_lock followed by an overlap check (security-accepted
+-- in place of a unique index, with conditions R12-a..R12-d below).
+-- EXCLUDE USING gist is deferred pending the btree_gist extension
+-- decision (PHASE-D-ARCH/SEC-P3-2); no CREATE EXTENSION here.
 CREATE INDEX staff_capability_grants_tenant ON staff_capability_grants (tenant_id);
 CREATE INDEX staff_capability_grants_grantee ON staff_capability_grants (grantee_staff_id);
 
 CREATE FUNCTION staff_capability_grants_guard() RETURNS TRIGGER AS $$
 DECLARE
-    v_actor RECORD;
-    v_appr  RECORD;
-    v_req   RECORD;
+    v_actor        RECORD;
+    v_appr         RECORD;
+    v_req          RECORD;
+    v_max_lifetime INTERVAL;
 BEGIN
     IF TG_OP = 'INSERT' THEN
         SELECT * INTO v_appr FROM staff_capability_grant_approvals WHERE id = NEW.approval_id;
@@ -764,19 +858,66 @@ BEGIN
         IF NOT FOUND OR v_req.id <> NEW.request_id THEN
             RAISE EXCEPTION 'staff_capability_grants: request/approval mismatch' USING ERRCODE = 'CG012';
         END IF;
+
+        -- R12-a (security condition): under REPEATABLE READ, two
+        -- concurrent overlapping INSERTs could each take the advisory
+        -- lock in turn but neither would see the other's row (snapshot
+        -- taken at transaction start), producing write skew. Refuse
+        -- outright unless READ COMMITTED or SERIALIZABLE. This function
+        -- stays VOLATILE (the default for this trigger; never STABLE),
+        -- so it is re-evaluated per row and cannot be constant-folded.
+        IF current_setting('transaction_isolation') NOT IN ('read committed', 'serializable') THEN
+            RAISE EXCEPTION 'staff_capability_grants: grant insert is refused under isolation level % (must be read committed or serializable, R12-a)', current_setting('transaction_isolation') USING ERRCODE = 'CG012';
+        END IF;
+
+        -- R-12 binding control (R12-b): take the per-key advisory lock,
+        -- keyed on all three parts of (tenant, grantee, capability),
+        -- BEFORE the overlap SELECT below, so two concurrent approvals
+        -- for the same key serialize on this lock rather than both
+        -- reading "no overlap" and both committing.
+        PERFORM pg_advisory_xact_lock(hashtextextended(
+            'staff_capability_grant:' || v_req.tenant_id::text || ':' || v_req.grantee_staff_id::text || ':' || v_req.capability,
+            0));
+
+        IF staff_capability_grant_overlaps(v_req.tenant_id, v_req.grantee_staff_id, v_req.capability, v_req.valid_from, v_req.valid_until) THEN
+            RAISE EXCEPTION 'staff_capability_grants: an unrevoked grant with an overlapping validity range already exists for this grantee/capability (R-12)' USING ERRCODE = 'CG012';
+        END IF;
+
         -- Every grant column is copied from, and checked against, the
         -- request/approval pair - never independently supplied.
         NEW.tenant_id := v_req.tenant_id;
         NEW.grantee_staff_id := v_req.grantee_staff_id;
         NEW.grantee_scope := v_req.grantee_scope;
         NEW.capability := v_req.capability;
-        NEW.valid_from := v_req.valid_from;
-        NEW.valid_until := v_req.valid_until;
         NEW.granted_at := now();
+        -- R-14: no backdating. valid_from is clamped forward to now() if
+        -- the requested start has already passed by grant time (e.g. the
+        -- request sat pending for a while); it is never clamped backward.
+        -- Combined with the table's CHECK (valid_from >= granted_at),
+        -- this is the binding control - the request/approval guards'
+        -- 5-minute tolerance checks above are non-binding pre-checks only.
+        NEW.valid_from := GREATEST(v_req.valid_from, now());
+        NEW.valid_until := v_req.valid_until;
         NEW.revoked_at := NULL;
         NEW.revoked_by := NULL;
         NEW.revoked_by_scope := NULL;
         NEW.revoke_reason_code := NULL;
+
+        -- R-13 must still hold after the R-14 clamp: a clamped G-P2 grant
+        -- never ends later than the ORIGINAL requested_from + max
+        -- lifetime would have allowed. Because the clamp only ever moves
+        -- valid_from forward (never back), a clamped grant's window is
+        -- always <= the originally requested window, so this can only
+        -- ever re-confirm what the request guard already checked - but it
+        -- is re-checked here, against the live setting, as the binding
+        -- layer rather than trusting the non-binding request-time check.
+        IF NEW.grantee_scope = 'platform' THEN
+            SELECT value_interval INTO v_max_lifetime FROM financial_capability_settings WHERE key = 'acting_grant_max_lifetime';
+            IF v_max_lifetime IS NULL OR NEW.valid_until IS NULL OR NEW.valid_until > NEW.valid_from + v_max_lifetime THEN
+                RAISE EXCEPTION 'staff_capability_grants: clamped valid_until exceeds acting_grant_max_lifetime (R-13)' USING ERRCODE = 'CG012';
+            END IF;
+        END IF;
+
         RETURN NEW;
     END IF;
 
@@ -1041,3 +1182,49 @@ $$ LANGUAGE plpgsql;
 CREATE TRIGGER audit_log_acting_actor
     BEFORE INSERT ON audit_log
     FOR EACH ROW EXECUTE FUNCTION audit_log_acting_actor();
+
+-- =========================================================================
+-- 8. Runtime role grants (L-1, k1-security.md): mirrored here, at the
+--    migration itself, the same way migrations 0102/0110/0111 narrow
+--    their own tables - never relying solely on deploy/init-app-role.sql.
+--    RLS (FORCE on all three new tables) is the binding control; this is
+--    defence in depth, narrower than the blanket ALTER DEFAULT PRIVILEGES
+--    backfill deploy/init-app-role.sql's own preceding blocks otherwise
+--    leave in place. Matches deploy/init-app-role.sql's own 0112 block
+--    exactly:
+--      financial_capability_catalogue,
+--      financial_governance_permissions,
+--      financial_capability_settings   - immutable seed vocabulary, SELECT
+--                                        only, no write grant at all.
+--      staff_capability_grant_requests - SELECT/INSERT/UPDATE (the
+--                                        pending -> cancelled/expired/
+--                                        approved/rejected transition).
+--                                        Never DELETE.
+--      staff_capability_grant_approvals - append-only: SELECT/INSERT only.
+--      staff_capability_grants          - SELECT/INSERT/UPDATE (the
+--                                        one-way revoke). Never DELETE -
+--                                        the guard trigger refuses it
+--                                        anyway.
+-- =========================================================================
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'igaming_runtime') THEN
+        EXECUTE 'REVOKE ALL ON financial_capability_catalogue FROM igaming_runtime';
+        EXECUTE 'GRANT SELECT ON financial_capability_catalogue TO igaming_runtime';
+
+        EXECUTE 'REVOKE ALL ON financial_governance_permissions FROM igaming_runtime';
+        EXECUTE 'GRANT SELECT ON financial_governance_permissions TO igaming_runtime';
+
+        EXECUTE 'REVOKE ALL ON financial_capability_settings FROM igaming_runtime';
+        EXECUTE 'GRANT SELECT ON financial_capability_settings TO igaming_runtime';
+
+        EXECUTE 'REVOKE ALL ON staff_capability_grant_requests FROM igaming_runtime';
+        EXECUTE 'GRANT SELECT, INSERT, UPDATE ON staff_capability_grant_requests TO igaming_runtime';
+
+        EXECUTE 'REVOKE ALL ON staff_capability_grant_approvals FROM igaming_runtime';
+        EXECUTE 'GRANT SELECT, INSERT ON staff_capability_grant_approvals TO igaming_runtime';
+
+        EXECUTE 'REVOKE ALL ON staff_capability_grants FROM igaming_runtime';
+        EXECUTE 'GRANT SELECT, INSERT, UPDATE ON staff_capability_grants TO igaming_runtime';
+    END IF;
+END $$;

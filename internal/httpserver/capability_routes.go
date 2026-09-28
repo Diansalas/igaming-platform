@@ -325,7 +325,14 @@ func newCreateCapabilityGrantRequestHandler(deps Deps) http.HandlerFunc {
 			apierror.Write(w, c.requestID, apierror.CodeValidation, "grantee_staff_id, capability and reason_code are required")
 			return
 		}
-		validFrom := time.Now().UTC()
+		// R-14 (ADR 0099, k1-architect-ruling-r12.md): no longer defaulted
+		// to time.Now() here. When body.ValidFrom is absent, the zero
+		// time.Time{} is passed through to capability.CreateRequest, which
+		// turns it into SQL NULL; migration 0112's request-guard trigger
+		// then defaults it to now() itself. Defaulting it here would just
+		// be a second, redundant clock reading that could itself race the
+		// trigger's own now() across the 5-minute backdating tolerance.
+		var validFrom time.Time
 		if body.ValidFrom != nil {
 			validFrom = *body.ValidFrom
 		}

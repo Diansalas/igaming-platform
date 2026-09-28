@@ -225,3 +225,166 @@ names, on the real (unmutated) code, through the alternate control
 identified - none of them represent an actual security gap; they represent
 this schema's own deliberate layering of overlapping checks, disclosed
 honestly rather than claimed as an independent kill they are not.
+
+================================================================================
+R-12/R-14/I-5 ROUND (architect ruling k1-architect-ruling-r12.md + its
+appended security confirmation; k1-architect-ruling-gp1.md for I-5)
+================================================================================
+Migration under test: migrations/0112_scoped_financial_capability_grants.up.sql
+  (unmerged; edited in place on branch prh2-k1-r12).
+Test DB: private orchestrator scratchpad DB (prh2k1r12test), rebuilt via
+priv_db.sh for every mutant below; never the shared CI DB.
+New killer tests: internal/db/capability_grant_r12_integration_test.go
+  (A-20..A-23, A-10 extension, R12-a, I-5 - all seven mutants below are killed
+  by tests in this new file, none touch the parallel branch's
+  capability_grant_integration_test.go).
+
+Method for every mutant below (identical discipline to the rounds above):
+  1. Edit migrations/0112_scoped_financial_capability_grants.up.sql in place
+     (exact hunk shown).
+  2. Rebuild the private DB from source (priv_db.sh).
+  3. Run the specific integration test(s) named as the killer; record the
+     exact failure output.
+  4. Revert the edit back to the original text.
+  5. `md5sum migrations/0112_scoped_financial_capability_grants.up.sql`,
+     confirmed IDENTICAL to the pre-mutation hash
+     (bd2d56e08ac63aad2e9d45d507914863) after every single revert below.
+  6. Rebuild once more; the full internal/db suite (including -race) passes
+     again on the restored code (re-verified after the last revert).
+
+All seven required mutants are independently killed. 0 masked, 0 undetected.
+
+--------------------------------------------------------------------------------
+MUTANT 1: drop the overlap check (grant INSERT trigger)
+Change: `IF staff_capability_grant_overlaps(v_req.tenant_id, v_req.grantee_
+        staff_id, v_req.capability, v_req.valid_from, v_req.valid_until) THEN`
+        replaced with `IF false THEN` (the RAISE body left untouched, so the
+        exception text/SQLSTATE stay in the source but can never fire).
+Command: PRIV_DB=prh2k1r12test PRIV_SRC=<worktree> bash priv_db.sh
+         PRIV_DB=prh2k1r12test PRIV_SRC=<worktree> bash priv_test.sh -tags
+           integration -race -run TestCapabilityGrant_A23_R12c ./internal/db/... -v
+Result (mutant in place): FAIL
+    capability_grant_r12_integration_test.go:440: expected exactly one success
+    and one CG012 refusal, got 2 successes and 0 other-refusals
+    (errs: [<nil> <nil>])
+Result (after revert): PASS (full internal/db -race suite re-run clean).
+md5sum after revert: bd2d56e08ac63aad2e9d45d507914863 (matches original).
+
+--------------------------------------------------------------------------------
+MUTANT 2: drop ONLY the advisory-lock call (must be killed by the concurrency
+test - R12-c's own condition)
+Change: deleted
+        `PERFORM pg_advisory_xact_lock(hashtextextended(
+            'staff_capability_grant:' || v_req.tenant_id::text || ':' ||
+            v_req.grantee_staff_id::text || ':' || v_req.capability, 0));`
+        (the overlap check right after it is left intact).
+Command: same rebuild, then
+         PRIV_DB=prh2k1r12test PRIV_SRC=<worktree> bash priv_test.sh -tags
+           integration -race -run TestCapabilityGrant_A23_R12c ./internal/db/... -v
+Result (mutant in place): FAIL
+    capability_grant_r12_integration_test.go:416: timed out waiting for both
+    approvals to queue on the advisory lock (saw 0)
+  (with the lock gone, neither concurrent transaction ever blocks on
+  pg_advisory_xact_lock, so the test's own poll of pg_stat_activity for
+  wait_event='advisory' never reaches 2 and it times out after 10s - this is
+  the concurrency test itself failing specifically because the lock is gone,
+  exactly the required kill condition).
+Result (after revert): PASS.
+md5sum after revert: bd2d56e08ac63aad2e9d45d507914863 (matches original).
+
+--------------------------------------------------------------------------------
+MUTANT 3: drop the clamp
+Change: `NEW.valid_from := GREATEST(v_req.valid_from, now());` replaced with
+        `NEW.valid_from := v_req.valid_from;`.
+Command: rebuild, then
+         PRIV_DB=prh2k1r12test PRIV_SRC=<worktree> bash priv_test.sh -tags
+           integration -run 'TestCapabilityGrant_A22_|TestCapabilityGrant_A10Ext'
+           ./internal/db/... -v
+Result (mutant in place): FAIL (both tests)
+    TestCapabilityGrant_A22_BackdatingAndEndedWindow:
+      approve within-tolerance backdated request: ERROR: new row for relation
+      "staff_capability_grants" violates check constraint
+      "staff_capability_grants_check4" (SQLSTATE 23514)
+    TestCapabilityGrant_A10Ext_ClampedGP2StillBoundedByMaxLifetime:
+      approve request: ERROR: new row for relation "staff_capability_grants"
+      violates check constraint "staff_capability_grants_check4" (SQLSTATE 23514)
+  (every backdated-but-within-tolerance grant now trips the table's own
+  CHECK (valid_from >= granted_at), since without the clamp v_req.valid_from
+  is earlier than granted_at whenever a request sat pending for any time at
+  all - the CHECK is defence in depth exactly as documented, and here it is
+  what actually fires).
+Result (after revert): PASS (both).
+md5sum after revert: bd2d56e08ac63aad2e9d45d507914863 (matches original).
+
+--------------------------------------------------------------------------------
+MUTANT 4: drop the approval window check (R-14, approval-side)
+Change: `IF NEW.decision = 'approve' AND v_req.valid_until IS NOT NULL AND
+        v_req.valid_until <= now() THEN` replaced with `IF false THEN`.
+Command: rebuild, then
+         PRIV_DB=prh2k1r12test PRIV_SRC=<worktree> bash priv_test.sh -tags
+           integration -run TestCapabilityGrant_A22_ ./internal/db/... -v
+Result (mutant in place): FAIL
+    capability_grant_r12_integration_test.go:298: approve after window ended:
+    expected CG011, got <nil>
+Result (after revert): PASS.
+md5sum after revert: bd2d56e08ac63aad2e9d45d507914863 (matches original).
+
+--------------------------------------------------------------------------------
+MUTANT 5: restore the unique index (must be killed by A-20)
+Change: re-added
+        `CREATE UNIQUE INDEX staff_capability_grants_one_unrevoked
+            ON staff_capability_grants (tenant_id, grantee_staff_id, capability)
+            WHERE revoked_at IS NULL;`
+        immediately before the (retained) staff_capability_grants_tenant index.
+Command: rebuild, then
+         PRIV_DB=prh2k1r12test PRIV_SRC=<worktree> bash priv_test.sh -tags
+           integration -run TestCapabilityGrant_A20 ./internal/db/... -v
+Result (mutant in place): FAIL
+    capability_grant_r12_integration_test.go:183: approve renewal after expiry
+    (no revoke) should succeed: ERROR: duplicate key value violates unique
+    constraint "staff_capability_grants_one_unrevoked" (SQLSTATE 23505)
+  (A-20's whole point - a renewal after natural expiry, no revoke - is exactly
+  what the old index forbade; restoring it makes A-20 fail immediately, as
+  required).
+Result (after revert): PASS.
+md5sum after revert: bd2d56e08ac63aad2e9d45d507914863 (matches original).
+
+--------------------------------------------------------------------------------
+MUTANT 6: drop the isolation-level guard (R12-a)
+Change: `IF current_setting('transaction_isolation') NOT IN ('read committed',
+        'serializable') THEN` replaced with `IF false THEN`.
+Command: rebuild, then
+         PRIV_DB=prh2k1r12test PRIV_SRC=<worktree> bash priv_test.sh -tags
+           integration -run TestCapabilityGrant_R12a ./internal/db/... -v
+Result (mutant in place): FAIL
+    capability_grant_r12_integration_test.go:530: approve under REPEATABLE
+    READ: expected CG012 (R12-a), got <nil>
+Result (after revert): PASS.
+md5sum after revert: bd2d56e08ac63aad2e9d45d507914863 (matches original).
+
+--------------------------------------------------------------------------------
+MUTANT 7: drop the I-5 re-read
+Change: `IF NEW.decision = 'approve' AND v_req.grantee_scope = 'platform' THEN`
+        (the guard on the whole live-re-read block) replaced with `IF false
+        THEN`, so the live SELECT and its three eligibility checks never run.
+Command: rebuild, then
+         PRIV_DB=prh2k1r12test PRIV_SRC=<worktree> bash priv_test.sh -tags
+           integration -run TestCapabilityGrant_I5 ./internal/db/... -v
+Result (mutant in place): FAIL
+    capability_grant_r12_integration_test.go:574: approve G-P2 for a
+    now-suspended grantee: expected CG011 (I-5), got <nil>
+Result (after revert): PASS.
+md5sum after revert: bd2d56e08ac63aad2e9d45d507914863 (matches original).
+
+--------------------------------------------------------------------------------
+Summary (R-12/R-14/I-5 round)
+  Attempted: 7 (all required by the task)
+  Independently killed: 7 (mutants 1-7, each by a dedicated new test)
+  Masked: 0
+  Not killed / undetected: 0
+
+Post-round verification: full `internal/db` suite (including -race), plus
+internal/auth, internal/audit and httpserver's TestCapabilityAPI subset, all
+re-run on the fully-restored migration file - all pass. The concurrency test
+(TestCapabilityGrant_A23_R12c_ConcurrentOverlappingGrantsExactlyOne) was
+additionally run at `-race -count=20` on the restored code (39.2s, all pass).

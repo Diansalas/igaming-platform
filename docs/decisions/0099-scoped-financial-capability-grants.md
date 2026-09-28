@@ -169,8 +169,9 @@ tables.
 | R-9 | the grantee's role is eligible (§3.3); the grantee is `active`; a platform grantee only via G-P2 |
 | R-10 | an acting session never requests, approves or revokes grants |
 | R-11 | one pending request per `(tenant, grantee, capability)` (partial UNIQUE) |
-| R-12 | no second unrevoked, unexpired grant per `(tenant, grantee, capability)`. The approval trigger checks this against `now()`, plus a partial UNIQUE on unrevoked rows. |
-| R-13 | a G-P2 grant has NOT NULL `valid_until`, `<= valid_from + acting_grant_max_lifetime` (§8.2) |
+| R-12 | **(reworked, architect ruling k1-architect-ruling-r12.md) no overlapping validity ranges:** no two unrevoked grants for one `(tenant, grantee, capability)` may have overlapping half-open `[valid_from, valid_until)` windows (a NULL end means unbounded). Expired grants do not block; queued, back-to-back renewals are allowed. The **binding control is DB-level**: the grant INSERT trigger takes a per-key `pg_advisory_xact_lock` (keyed on all three parts, taken *before* the overlap `SELECT` - R12-b) and then refuses an overlap (`CG012`). The request and approval guards re-run the same overlap check as a legible, **non-binding** pre-check. The prior partial UNIQUE index on `revoked_at IS NULL` is **dropped** - it could only express "at most one unrevoked row", which would wrongly refuse a valid renewal made before the prior grant's natural expiry. `EXCLUDE USING gist` is deferred pending the btree_gist extension decision (PHASE-D-ARCH/SEC-P3-2, 0075/0076); no `CREATE EXTENSION` here. Auto-superseding the prior grant by revoke at renewal time was considered and **rejected**: it would record natural expiry as a governance decision, misattribute the actor, and mutate history - expiry stays derived, and no row is written at expiry. **R12-a** (security condition): the grant INSERT trigger additionally refuses (`CG012`) unless `transaction_isolation` is READ COMMITTED or SERIALIZABLE - under REPEATABLE READ, two overlapping approvals could both commit (write skew) despite the lock. The trigger function stays VOLATILE. **R12-c** (security condition): a concurrency test proves two concurrent approvals for overlapping windows on the same key yield exactly one grant, with a mutant that removes only the lock and is killed by that test. **R12-d** (security condition): whole-row UPDATE equality is kept on `staff_capability_grants`, so INSERT is the only path that can ever create an overlap. **Accepted residual:** a table owner or superuser could disable the trigger; this is migration-controlled and moves to `EXCLUDE USING gist` once the btree_gist decision is made. |
+| R-13 | a G-P2 grant has NOT NULL `valid_until`, `<= valid_from + acting_grant_max_lifetime` (§8.2); re-checked **after** the R-14 clamp, against the live setting, in the grant INSERT trigger itself (not just at request time) |
+| R-14 | **(new, architect ruling k1-architect-ruling-r12.md) no backdated or already-expired grant.** At request: `valid_from` defaults to `now()` and must satisfy `now() - 5min ≤ valid_from ≤ request.expires_at`; a supplied `valid_until` must be `> now()`. At approval: a request whose window has already ended (`valid_until <= now()`) is refused. At grant INSERT (the binding control): `valid_from := GREATEST(request.valid_from, now())`, restated as a table `CHECK (valid_from >= granted_at)`. All three checks use `now()`, never `clock_timestamp()`. The 5-minute tolerance is the same technical value as `PaymentCoverageMaxClockSkew` and is hardcoded like the 24h request TTL; because of the INSERT-time clamp it grants no authority by itself, so it is not a policy value (security-confirmed). |
 
 ## 5. Session families
 
@@ -451,6 +452,17 @@ No `SELECT *` on either table. No further row narrowing now (security ruling 2).
      in-force, unrevoked grant at `now()`.
    - A concurrent revoke either commits first, and `FOR SHARE` then re-reads the revoked version,
      so the approval is not counted; or it waits for the execution to commit.
+   - **(architect ruling k1-architect-ruling-r12.md) K2/K3 lock the grant *in force at `now()`*,
+     never "the unrevoked grant".** This distinction is now load-bearing: after the R-12 rework
+     (§4), a grantee can legitimately hold several unrevoked grants for the same capability across
+     non-overlapping time windows (a natural history of renewals). Only the one row whose
+     `[valid_from, valid_until)` actually covers `now()` may be counted at execution time -
+     `staff_capability_grant_in_force(tenant, grantee, capability, now())` (§10.1), never a bare
+     "is there any unrevoked row" check.
+   - **Lock-order note:** this execution-time `FOR SHARE` lock order is unrelated to, and does not
+     substitute for, the grant INSERT trigger's own per-key `pg_advisory_xact_lock` (R12-b, §4) -
+     that lock only ever runs once, at the moment a grant is created, to serialize concurrent
+     overlapping INSERTs; it is not held or re-acquired at K2/K3 execution time.
 5. **A cross-family visibility limit (stated).**
    - A tenant session cannot see a platform approver's `staff_users` row (0011's policy), and an
      acting session sees only its own platform row.
@@ -485,6 +497,19 @@ No `SELECT *` on either table. No further row narrowing now (security ruling 2).
 - **Orchestrator decision:** `acting_grant_max_lifetime` is a **technical security default**. It is
   configurable (a `financial_capability_settings` row, changed by migration) and its value is set
   and recorded in K1's implementation record. It is not a human policy value.
+- **Expiry is derived, never written (architect ruling k1-architect-ruling-r12.md; rejects "option
+  (b)").** A natural expiry writes no row and revokes nothing - `revoked_at` stays NULL for an
+  expired-but-unrevoked grant. Auto-superseding an expired grant with a revoke at renewal time was
+  considered and rejected: it would record natural expiry as a governance decision, misattribute
+  the actor to whoever happened to approve the renewal, and mutate history. A-20 tests this: after
+  a G-P2 grant expires, a new grant for the same key is approved with no revoke of the first.
+- **R-13 is re-checked after the R-14 clamp (§4).** Because the grant INSERT trigger clamps
+  `valid_from := GREATEST(request.valid_from, now())` rather than trusting the request's own
+  (pre-clamp) `valid_from`, R-13's `valid_until <= valid_from + acting_grant_max_lifetime` bound is
+  re-verified against the *clamped* `valid_from`, live against `financial_capability_settings`, in
+  the same trigger - not merely inherited from the request guard's earlier, non-binding check. The
+  clamp only ever moves `valid_from` forward, so a clamped grant's actual window is always `<=` the
+  originally requested window (A-10 extension test).
 
 ### 8.3 Demoted or suspended grantor: re-attestation (PO Q2, security ruling 6)
 
@@ -559,6 +584,14 @@ Common rules:
   `CG020`).
 - `staff_capability_grant_in_force(p_tenant uuid, p_staff uuid, p_capability text, p_at
   timestamptz) RETURNS boolean`. A NULL capability means "any financial capability".
+- **`staff_capability_grant_overlaps(p_tenant uuid, p_staff uuid, p_capability text, p_from
+  timestamptz, p_until timestamptz) RETURNS boolean`** (architect ruling
+  k1-architect-ruling-r12.md): true if any *unrevoked* grant for the key has a half-open
+  `[valid_from, valid_until)` window overlapping `[p_from, p_until)` (NULL end = unbounded).
+  Unlike `staff_capability_grant_in_force`, this is not evaluated "at a point in time" - it
+  compares two ranges directly, so expired grants never match. Used by the request/approval
+  guards as a non-binding pre-check, and by the grant INSERT trigger - after taking the per-key
+  `pg_advisory_xact_lock` (R12-b) - as R-12's binding control.
 - `financial_actor_session()` (§7.1).
 
 ### 10.2 Reference tables (family R; rows written by 0112 itself)
@@ -578,7 +611,7 @@ Common rules:
 | `grantee_staff_id` | `UUID NOT NULL REFERENCES staff_users(id)` |
 | `grantee_scope` | `TEXT NOT NULL CHECK (grantee_scope IN ('tenant','platform'))`, derived by trigger |
 | `capability` | `TEXT NOT NULL REFERENCES financial_capability_catalogue` |
-| `valid_from` | `TIMESTAMPTZ NOT NULL` |
+| `valid_from` | `TIMESTAMPTZ NOT NULL`, **defaults to `now()` if not supplied (R-14)** |
 | `valid_until` | `TIMESTAMPTZ NULL`, `CHECK (valid_until IS NULL OR valid_until > valid_from)` |
 | `reason_code` | `TEXT NOT NULL CHECK (octet_length(reason_code) BETWEEN 1 AND 64)` |
 | `requested_by`, `requested_by_scope`, `requested_by_person_id` | forced (§7.2) |
@@ -588,7 +621,10 @@ Common rules:
 - Index: partial UNIQUE `(tenant_id, grantee_staff_id, capability) WHERE status = 'pending'`
   (R-11).
 - BEFORE INSERT/UPDATE trigger `staff_capability_grant_requests_guard`: R-1, R-4 (requester vs
-  grantee), R-5, R-6, R-9, R-10, R-13 (G-P2); forced actor and scope; identity columns immutable;
+  grantee), R-5, R-6, R-9, R-10, R-13 (G-P2); **R-12 (overlap, non-binding pre-check via
+  `staff_capability_grant_overlaps`) and R-14 (defaults `valid_from`, refuses backdating beyond a
+  5-minute tolerance, `valid_from` after the request's own `expires_at`, and an already-past
+  `valid_until`)**; forced actor and scope; identity columns immutable;
   `pending → approved|rejected|cancelled|expired` only; terminal rows immutable.
 - Policies:
   - T: SELECT, INSERT, UPDATE (cancel only, by trigger);
@@ -600,7 +636,13 @@ Common rules:
   `request_id`; `decision TEXT CHECK (decision IN ('approve','reject'))`; `decided_by`,
   `decided_by_scope`, `decided_by_person_id` (forced); `decided_at`;
   `decided_txid BIGINT NOT NULL` (forced to `txid_current()`); `reason_code`.
-- **Trigger `…_guard`:** R-2, R-3, R-4, R-7, R-8, R-12; the request is `pending` and unexpired; it
+- **Trigger `…_guard`:** R-2, R-3, R-4, R-7, R-8; **R-12** (overlap, non-binding pre-check via
+  `staff_capability_grant_overlaps` against the request's own window); **R-14** (refuses `approve`
+  if the request's `valid_until` has already passed); **I-5** (architect ruling
+  k1-architect-ruling-gp1.md): for a `platform` (G-P2) grantee, re-reads the *live* `staff_users`
+  row and requires `status = 'active'`, `role = 'platform_admin'`, and `person_id` still equal to
+  the request-time snapshot - refusing `CG011` otherwise, even though the request guard already
+  checked all three at request time; the request is `pending` and unexpired; it
   moves the request to `approved` or `rejected` in the same statement's transaction.
 - **Deferred constraint trigger:** an `approve` row commits only if a grant row with `approval_id`
   equal to it exists.
@@ -613,12 +655,21 @@ Common rules:
   `grantee_scope`; `capability`; `request_id UNIQUE`; `approval_id UNIQUE`; `valid_from`;
   `valid_until`; `granted_at`; `revoked_at`, `revoked_by`, `revoked_by_scope`,
   `revoke_reason_code`, all NULL until a revoke.
-- **CHECK:** `grantee_scope = 'platform' ⇒ valid_until IS NOT NULL`.
-- **Partial UNIQUE** `(tenant_id, grantee_staff_id, capability) WHERE revoked_at IS NULL`.
+- **CHECK:** `grantee_scope = 'platform' ⇒ valid_until IS NOT NULL`; **`valid_from >= granted_at`
+  (R-14, defence in depth over the INSERT trigger's own clamp).**
+- **(architect ruling k1-architect-ruling-r12.md) the prior partial UNIQUE**
+  `(tenant_id, grantee_staff_id, capability) WHERE revoked_at IS NULL` **is dropped** - R-12's
+  binding control is now the INSERT trigger's own per-key `pg_advisory_xact_lock` + overlap check
+  (§4), not a unique index.
 - **Triggers:**
   - INSERT only with an `approve` approval for `request_id` whose `decided_txid = txid_current()`;
-    the columns are copied from and checked against the request;
-  - one-way revoke under whole-row equality (§8.1); forced revoker; R-10;
+    the columns are copied from and checked against the request; **R12-a** (refuses unless
+    `transaction_isolation` is READ COMMITTED or SERIALIZABLE); **R-12** (takes the per-key
+    `pg_advisory_xact_lock`, then refuses an overlap via `staff_capability_grant_overlaps`); **R-14**
+    (clamps `valid_from := GREATEST(request.valid_from, now())`); **R-13 re-checked** against the
+    clamped `valid_from` and the live `acting_grant_max_lifetime` setting;
+  - one-way revoke under whole-row equality (§8.1; **R12-d**: kept so INSERT is the only path that
+    can ever create an overlap); forced revoker; R-10;
   - DELETE and TRUNCATE refused.
 - **Policies:**
   - T: SELECT, UPDATE (revoke);
@@ -674,7 +725,10 @@ Scope rules:
 - **INV-DEP-1:** K1 adds no deposit path. The acting ledger fence refuses `deposit`.
 - **Append-only double-entry:** K1 writes no ledger rows. Later writes go only through `ledger.Post`
   under the §6.6 fence.
-- **DB idempotency:** R-11 and R-12 unique indexes; UNIQUE `request_id` and `approval_id`.
+- **DB idempotency:** the R-11 partial unique index; UNIQUE `request_id` and `approval_id`. **R-12's
+  own binding control is no longer a unique index** (architect ruling
+  k1-architect-ruling-r12.md) - it is the grant INSERT trigger's per-key `pg_advisory_xact_lock`
+  plus overlap check (§4, §10.5); INV-CAP-13 below states this explicitly.
 - **RLS:** FORCE RLS on every new table. The acting family is deny-by-default and restrictively
   fenced.
 - **No direct balance mutation:** the §6.7 projection fence for acting sessions.
@@ -691,6 +745,8 @@ Scope rules:
 | INV-CAP-5 | Grants are append-only except for a one-way revoke |
 | INV-CAP-6 | No HTTP API creates a `platform_admin`; `seed-admin` is the only non-test inserter |
 | INV-CAP-7 | Grantees are `finance` staff (G-T/G-P1) or `platform_admin` (G-P2, time-bounded) only |
+| INV-CAP-13 | (architect ruling k1-architect-ruling-r12.md) No two unrevoked grants for one `(tenant, grantee, capability)` ever have overlapping `[valid_from, valid_until)` windows. The binding control is the grant INSERT trigger's per-key `pg_advisory_xact_lock` + overlap check (R-12), not a unique index; it refuses unless `transaction_isolation` is READ COMMITTED or SERIALIZABLE (R12-a) |
+| INV-CAP-14 | (architect ruling k1-architect-ruling-r12.md) No grant's `valid_from` ever precedes its own `granted_at` (R-14) - enforced by the INSERT trigger's `GREATEST(request.valid_from, now())` clamp and restated as a table `CHECK (valid_from >= granted_at)` |
 
 ## 14. Tests and mutants (K1 DoD; QA W1)
 
@@ -722,6 +778,14 @@ Notes:
 | A-17 | MIG | 0112 up/down/up; down refuses with rows; after down, the effective policy sets on the seven fenced tables equal pre-0112 |
 | A-18 | R | Static: migration replay finds no NULL-arm table without the restrictive acting fence |
 | A-19 | R | Static column discipline (§6.8) |
+| A-20 | R | (architect ruling k1-architect-ruling-r12.md) After a G-P2 grant expires (real wall-clock wait), a new grant for the same key is approved with **no revoke** of the first; the expired grant is confirmed to stay unrevoked |
+| A-21 | R | An adjacent renewal (`valid_from == previous valid_until`) is accepted; an overlapping window is refused at request (`CG010`), at approval (`CG011`) and at a direct grant INSERT (`CG012`) |
+| A-22 | R | Backdating beyond the 5-minute tolerance is refused at request; an already-ended window is refused at request and at approval; a within-tolerance backdated `valid_from` is accepted and clamped to `granted_at` |
+| A-23 | CON | A direct grant INSERT that bypasses the request/approval guards' own (non-binding) pre-checks still hits R-12's binding overlap refusal in the grant INSERT trigger itself |
+| A-10 (extended) | R | A clamped G-P2 grant's actual window still ends at or before `requested_from + acting_grant_max_lifetime` |
+| R12-a test | CON | An approval attempted under REPEATABLE READ is refused (`CG012`) outright |
+| R12-c | CON | Two concurrent approvals for overlapping windows on the same key yield **exactly one** grant; a blocker transaction holds the per-key advisory lock, the test polls `pg_stat_activity` until both are queued waiting on it, then releases it (`-race -count=20`) |
+| I-5 test | AZ | A G-P2 approval is refused when the grantee's live `staff_users` row is not `active`, not `platform_admin`, or has a different `person_id` than the request-time snapshot |
 
 **Mutants:**
 
@@ -741,6 +805,13 @@ Notes:
 | allow un-revoke | A-13 |
 | drop R-13 | A-10 |
 | drop the audit actor trigger | A-12 |
+| drop the R-12 overlap check (grant INSERT trigger) | A-23 (also breaks R12-c) |
+| drop only the advisory-lock call | R12-c (killed specifically by the concurrency test, not by any serial test) |
+| drop the R-14 clamp | A-22, A-10 (extended) |
+| drop the R-14 approval-time window check | A-22 |
+| restore the R-12 unique index | A-20 |
+| drop the R12-a isolation-level guard | R12-a test |
+| drop the I-5 live re-read | I-5 test |
 
 ## 15. Alternatives rejected
 
@@ -773,6 +844,14 @@ Notes:
 4. **Security "not covered" items that K1 verifies in code:** the `permission.go` role sets
    (A-15); login refusal for suspended tenants (out of K1 scope, noted); `persons` RLS (now fully
    fenced for acting, §6.4).
+5. **(architect ruling k1-architect-ruling-r12.md) `EXCLUDE USING gist` for R-12** is deferred
+   pending the `btree_gist` extension decision that PHASE-D-ARCH/SEC-P3-2 (migrations 0075/0076)
+   already owns; no `CREATE EXTENSION` was run in 0112. When that decision lands, R-12's trigger +
+   advisory-lock control (§4, §10.5) can be replaced by a single `EXCLUDE` constraint.
+6. **Security's accepted residual on the R-12 trigger + advisory-lock control:** a table owner or
+   superuser could disable the trigger, bypassing R-12 entirely. This is judged acceptable because
+   it is migration-controlled (no runtime code path can do it) and moves away once item 5 lands;
+   it is not a gap an ordinary session can exploit.
 
 **HUMAN DECISION REQUIRED:** none new in this ADR. The launch flags in §12 need human risk
 acceptance or legal review before real money; they are not new design decisions.
@@ -955,3 +1034,36 @@ rather than decided unilaterally.
   `docs/governance/task-registry.md` and the HANDOVER index are the
   orchestrator's to update, per this ADR's own §17 - proposed row text is in
   the K1 build's final report, not applied here.
+
+### 19.4 R-12/R-14/I-5 round (architect ruling k1-architect-ruling-r12.md and
+its appended security confirmation; k1-architect-ruling-gp1.md for I-5)
+
+- **IMPLEMENTED, in place, on the unmerged 0112 migration:** R-12 reworked to
+  "no overlapping validity ranges" (advisory-lock + overlap check, the
+  partial unique index dropped), R12-a (isolation-level guard), the new R-14
+  (no backdating, request/approval pre-checks plus the binding INSERT-time
+  clamp and CHECK), the I-5 live re-read of a G-P2 grantee at approval, and
+  L-1 (an in-migration `igaming_runtime` grant block mirroring
+  `deploy/init-app-role.sql`, which already documented these six tables'
+  intended grants).
+- **Tests:** A-20 through A-23, an A-10 extension, an R12-a test and an I-5
+  test, all in a new file
+  (`internal/db/capability_grant_r12_integration_test.go`) so as not to
+  touch the parallel `prh2-k1-tests` branch's own test file. All pass under
+  `-race`; the R12-c concurrency test additionally passes at `-race
+  -count=20`.
+- **Mutants:** all 7 required mutants for this round (drop the overlap
+  check, drop only the advisory lock, drop the clamp, drop the approval
+  window check, restore the unique index, drop the isolation-level guard,
+  drop the I-5 re-read) are independently killed - recorded in
+  `docs/plans/payment-readiness/evidence/prh2-k1-mutation-kill.txt`'s "R-12/
+  R-14/I-5 round" section, with exact commands and first-failure output, and
+  a byte-identical (md5sum-verified) revert after each.
+- **Go:** `internal/httpserver/capability_routes.go` no longer defaults
+  `valid_from` to `time.Now()` (passes it through so the trigger can
+  NULL-default it); `internal/capability/capability.go`'s stale
+  `ErrClassUniqueViolation` comment (which referenced an R-12 unique index
+  that no longer exists) is corrected.
+- **NOT DONE in this round** (unchanged from §19.3): `security`/
+  `code-reviewer` review of this specific round; the architecture/runbook
+  doc updates listed above.
