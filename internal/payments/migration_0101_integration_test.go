@@ -249,6 +249,10 @@ func isCheckOrTriggerViolation(err error) bool {
 
 // --- up/down/up round trip -------------------------------------------------
 
+// PINNED TO 0101 (migration-boundary test, not a payment_attempts_guard()
+// behaviour test - security review F-M2, rv-fh3-security.md 81dd4b7):
+// this asserts 0101's OWN up/down/up mechanics stay correct at exactly
+// that version, so it must stay at that version rather than move to HEAD.
 func TestMigration0101_UpDownUpRoundTrip(t *testing.T) {
 	v := migration0101Version(t)
 	pool, dir := migration0101Scratch(t, "m0101rt_", v)
@@ -285,6 +289,12 @@ func TestMigration0101_UpDownUpRoundTrip(t *testing.T) {
 
 // --- backfill: clean mapping -------------------------------------------------
 
+// PINNED TO 0101 (migration-boundary/backfill-history test, not a
+// payment_attempts_guard() behaviour test - security review F-M2,
+// rv-fh3-security.md 81dd4b7): 0101's one-time backfill (deposit_intents
+// -> payment_attempts) only ever runs once, AT 0101, and never runs again
+// at any later migration - there is nothing "at HEAD" for this test to
+// exercise.
 func TestMigration0101_Backfill_CleanMapping(t *testing.T) {
 	v := migration0101Version(t)
 	pool, _ := migration0101ScratchBefore101(t, "m0101bf_")
@@ -375,6 +385,15 @@ func TestMigration0101_Backfill_CleanMapping(t *testing.T) {
 	}
 }
 
+// PINNED TO 0101 (migration-boundary/backfill-history test, not a
+// payment_attempts_guard() behaviour test - security review F-M2,
+// rv-fh3-security.md 81dd4b7, same rationale as TestMigration0101_
+// Backfill_CleanMapping above): this test and every
+// TestMigration0101_Backfill_Preflight* test below it deliberately
+// migrate to EXACTLY 0101 (migration0101Dir(t, v)), never further, because
+// they exercise the one-time backfill/pre-flight abort behaviour that
+// only exists at that migration boundary.
+//
 // TestMigration0101_Backfill_NonTerminalIntentPickedUpBySweep is the N4
 // regression the ledger-finance re-verification asked for: a backfilled
 // ambiguous intent must have next_action_at set, or idx_payment_attempts_due
@@ -461,9 +480,13 @@ func assertMigrationNotRecorded(t *testing.T, pool *db.Pool, version int64) {
 
 // --- RLS cross-tenant --------------------------------------------------------
 
+// Moved to a HEAD-migrated scratch DB (security review F-M2,
+// rv-fh3-security.md 81dd4b7) for consistency with the guard-behaviour
+// tests below, though this test exercises the tenant_staff_scope RLS
+// policy (unaffected by migration 0107), not payment_attempts_guard()
+// itself.
 func TestMigration0101_RLS_CrossTenantIsolation(t *testing.T) {
-	v := migration0101Version(t)
-	pool, _ := migration0101Scratch(t, "m0101rls_", v)
+	pool := depositV2ScratchPool(t)
 	a := seedM0101Fixture(t, pool)
 	b := seedM0101Fixture(t, pool)
 
@@ -527,9 +550,16 @@ func TestMigration0101_RLS_CrossTenantIsolation(t *testing.T) {
 
 // --- trigger: INSERT guard (N2, MX22) ---------------------------------------
 
+// Security review F-M2 (rv-fh3-security.md, 81dd4b7): this test exercises
+// payment_attempts_guard()'s INSERT half, which migration 0107 did not
+// touch (only the UPDATE half's T13t/T13d line changed) - but per the
+// MIG-PIN-HEAD rule (rv-prh-architect.md §5, ADR 0095 §28.8 item 3), every
+// behaviour test of this function runs against a HEAD-migrated scratch DB
+// in the same change regardless, so a future migration cannot silently
+// change this function's INSERT behaviour without this test catching it.
+// depositV2ScratchPool migrates through 0101 and then on to HEAD.
 func TestMigration0101_InsertGuard_RejectsForbiddenShapes(t *testing.T) {
-	v := migration0101Version(t)
-	pool, _ := migration0101Scratch(t, "m0101ins_", v)
+	pool := depositV2ScratchPool(t)
 	f := seedM0101Fixture(t, pool)
 	intentID := insertDepositIntent(t, pool, f, "pending", ptr("mock-psp"), nil, nil)
 
@@ -581,9 +611,11 @@ func TestMigration0101_InsertGuard_RejectsForbiddenShapes(t *testing.T) {
 
 // --- trigger: UPDATE state-pair whitelist -----------------------------------
 
+// Security review F-M2 (rv-fh3-security.md, 81dd4b7): moved to a
+// HEAD-migrated scratch DB (MIG-PIN-HEAD rule) - see
+// TestMigration0101_InsertGuard_RejectsForbiddenShapes's identical note.
 func TestMigration0101_UpdateGuard_TransitionWhitelist(t *testing.T) {
-	v := migration0101Version(t)
-	pool, _ := migration0101Scratch(t, "m0101upd_", v)
+	pool := depositV2ScratchPool(t)
 	f := seedM0101Fixture(t, pool)
 
 	// newAttempt only ever INSERTs the two shapes the guard's INSERT half
@@ -686,9 +718,15 @@ func TestMigration0101_UpdateGuard_TransitionWhitelist(t *testing.T) {
 
 // --- T13t (tombstone) ---------------------------------------------------
 
+// Security review F-M2 (rv-fh3-security.md, 81dd4b7): moved to a
+// HEAD-migrated scratch DB (MIG-PIN-HEAD rule). This is also "the only
+// test of another reason is refused" F-M2 names - now running against
+// 0107's REPLACED guard body, not 0101's original. The NULL case F-M1
+// requires (a NULL terminal_reason must ALSO be refused) is added
+// separately below, in TestMigration0107_T13tT13d_TerminalReasonTrigger_
+// HEAD, since it is new behaviour 0101 never had an opinion on.
 func TestMigration0101_T13t_TombstonePrecedesSuccess_RequiresNamedTerminalReason(t *testing.T) {
-	v := migration0101Version(t)
-	pool, _ := migration0101Scratch(t, "m0101t13t_", v)
+	pool := depositV2ScratchPool(t)
 	f := seedM0101Fixture(t, pool)
 	intentID := insertDepositIntent(t, pool, f, "declined", ptr("mock-psp"), ptr("t13t-ref"), nil)
 

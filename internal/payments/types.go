@@ -561,9 +561,27 @@ type CallbackEvent struct {
 	// CallbackEventDepositReversal: the reference of the deposit being
 	// reversed.
 	OriginalProviderReference string
-	Outcome                   Outcome
-	Amount                    int64
-	AssetCode                 string
+	// Outcome for EventType == CallbackEventDepositReversal (RV-PRH-I1
+	// ledger-finance H1 RULING, ADR 0095 §9.3 amendment): a
+	// deposit_reversal event asserts a FINAL debit against the original
+	// deposit. OutcomeSucceeded and OutcomeDeclined are BOTH accepted as
+	// final (the latter is a legacy reason-carrier some adapters use for a
+	// chargeback/refund reason string, e.g. "chargeback"/"chargeback_lost" -
+	// it still means the money left, never "the reversal itself failed").
+	// OutcomePending/OutcomeAmbiguous mean the reversal is NOT yet final
+	// (e.g. a chargeback inquiry still open) and are refused as a no-op
+	// anomaly by applyReversalReceiptEvidence - they never post or
+	// tombstone. An adapter must NEVER emit this event type for a
+	// pending-refund/chargeback-inquiry-open signal using OutcomeSucceeded
+	// or the legacy OutcomeDeclined reason-carrier - only once the
+	// provider itself has finally decided the debit happened. A won
+	// chargeback (the platform keeps the money; nothing reverses) is not a
+	// deposit_reversal event at all - see the PaymentProvider interface
+	// doc comment below for the "chargeback won"/unsupported-event
+	// mapping, which is PROVIDER DEPENDENT pending real adapter contracts.
+	Outcome   Outcome
+	Amount    int64
+	AssetCode string
 	// DeclineReason/Cascadable are set only when Outcome ==
 	// OutcomeDeclined - see StatusResult's identical fields.
 	DeclineReason string
@@ -602,6 +620,16 @@ type PaymentProvider interface {
 	// DIFFERENT, adapter-specific sentinel (the mock's
 	// ErrCallbackMalformedBody) that a caller maps to a 4xx, never to the
 	// uniform pre-verification 401.
+	//
+	// RV-PRH-I1 ledger-finance H1 RULING (rule 5): a "chargeback won" (or
+	// equivalent "the platform keeps the money, nothing reverses") vendor
+	// event is NEVER mapped to CallbackEventDepositReversal - see that
+	// type's own Outcome doc comment. Until a real adapter contract
+	// defines its own event type for this signal, an adapter that receives
+	// one maps it to a generic "unsupported callback event type" error
+	// (ReceiveVerifiedCallback's existing default case, which raises a P1
+	// and never applies any evidence) - PROVIDER DEPENDENT, deferred until
+	// a real vendor contract exists.
 	HandleCallback(ctx context.Context, req InboundCallback, cred WebhookCredential) (CallbackEvent, error)
 	// WebhookScheme returns this adapter's own inbound-callback
 	// verification scheme (Stage 10.3 W1a, WH-VENDOR-SCHEME-1). The

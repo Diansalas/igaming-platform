@@ -113,7 +113,12 @@ func insertCascadeAttemptIfEligible(ctx context.Context, tx pgx.Tx, prev Payment
 // posted, so intentSucceeded is already true; the T2 CAS predicate
 // (ClaimCreatedForSubmission) is the second, independent guard for the
 // race where a claim is already in flight concurrently.
-func rejectCreatedSiblings(ctx context.Context, tx pgx.Tx, attempt PaymentAttempt) error {
+//
+// RV-PRH-I1 ledger-finance N4: evidence is the CALLER's own evidence kind
+// (EvidenceCallback/EvidenceSync/EvidenceQueryStatus) - this used to
+// hardcode EvidenceCallback even when called from phase C or the sweeper,
+// mislabelling the sibling's own last_evidence_kind and audit trail.
+func rejectCreatedSiblings(ctx context.Context, tx pgx.Tx, attempt PaymentAttempt, evidence EvidenceKind) error {
 	if attempt.DepositIntentID == nil {
 		return nil
 	}
@@ -140,7 +145,7 @@ func rejectCreatedSiblings(ctx context.Context, tx pgx.Tx, attempt PaymentAttemp
 	rows.Close()
 
 	for _, id := range siblingIDs {
-		if err := RejectCreated(ctx, tx, id, EvidenceCallback, "intent_succeeded"); err != nil {
+		if err := RejectCreated(ctx, tx, id, evidence, "intent_succeeded"); err != nil {
 			// A concurrent T2 claim may have already moved this sibling out
 			// of 'created' between the SELECT and this UPDATE - the T2
 			// predicate's own succeeded-sibling guard is the backstop for

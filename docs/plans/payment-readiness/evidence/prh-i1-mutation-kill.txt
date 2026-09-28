@@ -1410,3 +1410,1099 @@ TestPaymentsKillSwitchAPI_* test (16/16, including the new L5/L7 assertions)
 passes cleanly under -race in isolation (28.5s). Not fixed here: out of
 this round's assigned scope (migrations tests, killswitch*.go, the
 kill-switch handler, credentialscan and docs only).
+PRH-I1 callback cutover fix round, 2026-09-27 (ADR 0095 §27.14)
+=================================================================
+
+Harness: PRIV_DB/PRIV_SRC + priv_db.sh/priv_test.sh (the coordinator's
+approved private-database scripts) against igaming_prhcb_r4, migrated to
+head (through migration 0106). Each mutation below: applied via a Python
+one-shot str.replace on an exact, assert-count==1-verified anchor string;
+built (`go build ./...`); the SPECIFIC named test run
+(`-tags=integration`, no -race for the mutation loop itself - the earlier
+full-suite runs already covered -race); confirmed FAIL; reverted via
+`git checkout -- <file>`; confirmed `git status --porcelain <file>` empty
+before proceeding to the next mutation. Never more than one file mutated
+at a time.
+
+H2 (ApplyDeferredReceiptsForAttempt never called from drive.go's own T4
+site):
+  File: internal/payments/drive.go
+  Mutation: `if _, err := ApplyDeferredReceiptsForAttempt(ctx, tx, o, attempt); err != nil { return intent, nil, err }`
+  replaced with `if false { return intent, nil, nil }`.
+  Killed by: TestRVLF_P8_DeferredReceiptAppliedByPhaseC
+    go test -tags=integration -count=1 -run TestRVLF_P8_DeferredReceiptAppliedByPhaseC ./internal/payments/...
+  Failure: "attempt=pending balance=0 unresolved_receipts=1" (the raced
+  success stayed unresolved instead of being applied by phase C).
+  Reverted: git checkout -- internal/payments/drive.go (byte-identical,
+  confirmed via `git status --porcelain`).
+
+H3, site 1 (receipt.go's callback path - insertCascadeAttemptIfEligible's
+kill-switch downgrade):
+  File: internal/payments/receipt.go
+  Mutation: `insertCascadeAttemptIfEligible(ctx, tx, attempt)` -> bare
+  `insertCascadeAttempt(ctx, tx, attempt)`.
+  Killed by: TestRVLF_P2_KillSwitch_CascadableDeclineCallback
+    go test -tags=integration -count=1 -run TestRVLF_P2_KillSwitch_CascadableDeclineCallback ./internal/payments/...
+  Failure: the decline callback itself returned
+  "payments: refused, a matching payment kill switch is engaged" instead
+  of committing (§10.3 violation reproduced exactly).
+  Reverted: git checkout -- internal/payments/receipt.go.
+
+H3, site 2 (drive.go's synchronous-decline-for-a-call-already-sent path):
+  File: internal/payments/drive.go
+  Mutation: the `child, err := insertCascadeAttemptIfEligible(ctx, tx, attempt)` /
+  `return updated, child, nil` pair replaced with a direct
+  `insertCascadeAttempt` call (`childV, err := insertCascadeAttempt(...)`,
+  `return updated, &childV, nil`).
+  Killed by: TestRVLF_H3_DriveGo_SyncCascadableDeclineUnderKillSwitch
+    go test -tags=integration -count=1 -run TestRVLF_H3_DriveGo_SyncCascadableDeclineUnderKillSwitch ./internal/payments/...
+  Failure: identical kill-switch-refused error surfacing from
+  applyDepositCallResult instead of committing.
+  Reverted: git checkout -- internal/payments/drive.go.
+
+H3, site 3 (sweeper.go's poll-decline path):
+  File: internal/payments/sweeper.go
+  Mutation: `insertCascadeAttemptIfEligible(ctx, tx, attempt)` -> bare
+  `insertCascadeAttempt(ctx, tx, attempt)`.
+  Killed by: TestRVLF_H3_SweeperGo_PollCascadableDeclineUnderKillSwitch
+    go test -tags=integration -count=1 -run TestRVLF_H3_SweeperGo_PollCascadableDeclineUnderKillSwitch ./internal/payments/...
+  Failure: sweeper.RunOnce's Stats.Errors carried the kill-switch-refused
+  error instead of an empty slice.
+  Reverted: git checkout -- internal/payments/sweeper.go.
+
+H4 (rejectCreatedSiblings never called from the T13 success branch):
+  File: internal/payments/receipt.go
+  Mutation: the `if err := rejectCreatedSiblings(ctx, tx, attempt); err != nil { return false, "", err }` call
+  in the AttemptDeclined/OutcomeSucceeded (T13) branch replaced with
+  `_ = rejectCreatedSiblings` (a no-op reference keeping the identifier
+  used, so the mutant still compiles).
+  Killed by (two tests, both FAIL):
+    go test -tags=integration -count=1 -run 'TestRVLF_P3_T13RejectsCreatedSibling|TestRVLF_L2_BridgeCascadeThenT13SecondCapture' ./internal/payments/...
+  Failure: both report the cascade child's state stayed "created" instead
+  of moving to "rejected".
+  Reverted: git checkout -- internal/payments/receipt.go.
+
+M1 (the §4.4 AttemptDeclined/mismatched-success cell CAS-conflicts instead
+of recording a committed anomaly):
+  File: internal/payments/receipt.go
+  Mutation: `case AttemptDeclined: if mismatched { return false, ResolutionAnomalyOther, nil }`
+  replaced with `return true, ResolutionAnomalyOther, ApplyDisputeFromNonTerminal(ctx, tx, attempt.ID, EvidenceCallback, "mutant_m1")`
+  (ApplyDisputeFromNonTerminal's own CAS predicate only accepts
+  submitting/pending/ambiguous, never declined - forces a genuine
+  ErrAttemptStateConflict).
+  Killed by: TestRVLF_P4_MismatchedSuccessOnTerminalAttempt
+    go test -tags=integration -count=1 -run TestRVLF_P4_MismatchedSuccessOnTerminalAttempt ./internal/payments/...
+  Failure: "payments: T10 ->disputed: payments: payment_attempts CAS
+  transition conflict" surfaced as a real error instead of the uniform
+  200/anomaly this cell requires.
+  Reverted: git checkout -- internal/payments/receipt.go.
+
+M4 (the not-a-deposit integrity check disabled, restoring the
+tombstone-before-integrity-check ordering bug):
+  File: internal/payments/receipt.go
+  Mutation: `if !unresolved && (original.Operation != AttemptOperationDeposit || original.DepositIntentID == nil) { return "", fmt.Errorf(...) }`
+  replaced with `if false { return "", fmt.Errorf(...) }`.
+  Killed by: TestRVLF_M4_ReversalNamingPayoutReferenceNeverTombstoned
+    go test -tags=integration -count=1 -run TestRVLF_M4_ReversalNamingPayoutReferenceNeverTombstoned ./internal/payments/...
+  Failure: "must be rejected as ErrDepositReversalIntegrity, got <nil>" and
+  a tombstone was actually written (found 1) - both assertions failed.
+  Reverted: git checkout -- internal/payments/receipt.go.
+
+F2 (boundedDeclineReason disabled - raw vendor text reaches the CHECK'd
+columns):
+  File: internal/payments/receipt.go
+  Mutation: `func boundedDeclineReason(reason string) string { if len(reason) <= maxDeclineReasonBytes { return reason }; return boundedDeclineReasonSentinel }`
+  replaced with `func boundedDeclineReason(reason string) string { return reason }`.
+  Killed by: TestRVLF_F2_OversizeDeclineReasonBounded
+    go test -tags=integration -count=1 -run TestRVLF_F2_OversizeDeclineReasonBounded ./internal/payments/...
+  Failure: "payments: insert receipt: ERROR: new row for relation
+  "payment_provider_events" violates check constraint
+  "payment_provider_events_decline_reason_check" (SQLSTATE 23514)" - the
+  exact permanent-redelivery-loop failure mode F2 exists to prevent.
+  Reverted: git checkout -- internal/payments/receipt.go.
+  Note: this mutation-kill exercise is what SURFACED a genuine bug this
+  round introduced and then fixed in the same commit - see "F2 receipt-
+  level bounding" below.
+
+F3 (setIntentAttempt's sticky guard extended to provider_id/
+provider_reference, not just status) - NOT mutation-killed, disclosed:
+  Attempted mutation: the CASE-guarded `provider_id = CASE WHEN status =
+  'succeeded' THEN provider_id ELSE $2 END` / `provider_reference = CASE
+  WHEN status = 'succeeded' THEN provider_reference ELSE $3 END` clauses
+  in setIntentAttempt's UPDATE (internal/payments/orchestrator.go)
+  replaced with unconditional `provider_id = $2`/`provider_reference =
+  $3` (status left guarded).
+  Result: the original TestRVLF_F3_SucceededInputNeverRegressedByLater
+  DeclineOnAnotherSibling test PASSED against this mutant (did not kill
+  it). Root cause found on investigation: that test's own scenario (a
+  REDELIVERED decline on an already-terminal sibling) never reaches
+  setIntentAttempt at all - applyResolvedReceiptEvidence's OutcomeDeclined
+  branch short-circuits to a no-op for any attempt not in
+  {submitting,pending,ambiguous} BEFORE calling finalizeDeclined. A
+  rewritten test constructing two SIMULTANEOUSLY-LIVE sibling attempts
+  under one intent (to reach setIntentAttempt with a genuine FIRST-time
+  decline after a DIFFERENT sibling already succeeded) failed at setup
+  with `duplicate key value violates unique constraint
+  "payment_attempts_one_live_per_intent"` - confirmed via the existing
+  migration-0101 unique index, not this round's code. Conclusion: for
+  DEPOSITS, the sequence this guard's provider_id/reference extension
+  protects against - a live attempt receiving its first decline evidence
+  after some OTHER sibling of the same intent already succeeded - is
+  architecturally unreachable, because only one attempt per intent may
+  ever be live at a time (the DB's own one-live-per-intent constraint),
+  and a sibling can only succeed via T13 AFTER the attempt it supersedes
+  is already declined (terminal), not while a fresh decline for a
+  DIFFERENT live attempt is in flight. The status-only half of this same
+  guard (present before this round) remains real defense-in-depth
+  (protects against a hypothetical future relaxation of the one-live-per-
+  intent constraint, or a caller bypassing setIntentAttempt's normal
+  callers), but is not exercised by a currently-reachable production
+  sequence either - recorded here rather than claiming a false kill.
+  Reverted: git checkout -- internal/payments/orchestrator.go.
+
+R4(a) (payout decline via the receipt path stranding the hold):
+  File: internal/payments/receipt.go
+  Mutation: the `applyPayoutDecline(ctx, tx, *attempt.WithdrawalRequestID, ...)`
+  call in the payout branch of OutcomeDeclined replaced with a bare
+  `ApplyDecline(ctx, tx, attempt.ID, DeclineEvidence{...})` call (no
+  withdrawal.Fail).
+  Killed by: TestRVLF_R4a_PayoutDeclineViaReceiptPathReleasesHold
+    go test -tags=integration -count=1 -run TestRVLF_R4a_PayoutDeclineViaReceiptPathReleasesHold ./internal/payments/...
+  Failure: "the withdrawal request's hold must be released via
+  withdrawal.Fail (state=failed), got "submitted" - a stranded hold".
+  Reverted: git checkout -- internal/payments/receipt.go.
+
+R4(b) (event_type-vs-operation cross-check removed):
+  File: internal/payments/receipt.go
+  Mutation: the `if (ev.EventType == string(CallbackEventDeposit) &&
+  attempt.Operation != AttemptOperationDeposit) || (...) {` guard in
+  ApplyReceiptEvidence replaced with `if false {`.
+  Killed by: TestRVLF_R4b_EventTypeOperationMismatchIsAnomaly
+    go test -tags=integration -count=1 -run TestRVLF_R4b_EventTypeOperationMismatchIsAnomaly ./internal/payments/...
+  Failure: both cross-operation cases resolved to disposition "applied"
+  (a real, wrongly-typed state change) instead of "anomaly" - the payout
+  attempt was wrongly marked succeeded by a mislabeled "deposit" event,
+  and vice versa.
+  Reverted: git checkout -- internal/payments/receipt.go.
+
+R4(d) (payout success via the receipt path left unwired):
+  File: internal/payments/receipt.go
+  Mutation: the `applyPayoutSuccess(ctx, tx, *attempt.WithdrawalRequestID, ...)`
+  call replaced with the original stub,
+  `return true, ResolutionAnomalyOther, ApplyDisputeFromNonTerminal(ctx, tx, attempt.ID, EvidenceCallback, "payout_success_not_yet_wired")`.
+  Killed by: TestRVLF_R4d_PayoutSuccessViaReceiptPathSettles
+    go test -tags=integration -count=1 -run TestRVLF_R4d_PayoutSuccessViaReceiptPathSettles ./internal/payments/...
+  Failure: attempt state "disputed" instead of "succeeded"; withdrawal
+  state "submitted" instead of "completed".
+  Reverted: git checkout -- internal/payments/receipt.go.
+
+F2 receipt-level bounding (a genuine bug found while writing the F2
+mutation-kill test above, fixed in the same commit): boundedDeclineReason
+was only applied inside applyResolvedReceiptEvidence's OutcomeDeclined
+branch, AFTER the R0 receipt insert (ADR 0082 A7) in ApplyReceiptEvidence
+had already run with the RAW, unbounded ev.DeclineReason -
+payment_provider_events.decline_reason carries the identical 64-byte
+CHECK as payment_attempts.decline_reason. Fixed: ev.DeclineReason is now
+bounded once, at the top of ApplyReceiptEvidence, before any insert.
+TestRVLF_F2_OversizeDeclineReasonBounded (added this round) exercises the
+FIXED code path directly (an 83-byte decline reason on a live callback)
+and passes; the mutation-kill above (disabling boundedDeclineReason
+entirely) confirms the test would have caught the pre-fix bug too.
+
+Verification after all mutations reverted: `git status --porcelain` clean
+across internal/payments/{receipt.go,drive.go,sweeper.go,orchestrator.go};
+`go build ./...` clean; full TestRVLF_* suite green
+(19 tests, `go test -tags=integration -race -count=1 -run TestRVLF ./internal/payments/...`).
+
+
+PRH-I1 / Financial Hardening FH-5 callback security round, 2026-09-27
+======================================================================
+Ledger-finance's binding H1 ruling (rv-prh-i1-callback-ledger.md "Re-review
+1: fix round"), RULING M1, N2/N3/N4, and the payout security review's
+S-H1/S-M1 (rv-prh-i1-payout-security.md). All mutations below applied via
+byte-exact `str.replace`, run under
+`PRIV_DB=fh5_pay_20260927 PRIV_SRC=<worktree> bash priv_test.sh -tags=integration -count=1 -run <test> ./internal/payments/...`,
+confirmed FAIL, then reverted with `git checkout -- <file>` and `git status
+--porcelain` confirmed clean before moving to the next mutation.
+
+H1 rule 2 (non-final reversal outcome must never post):
+  File: internal/payments/receipt.go
+  Mutation: `if rawOutcome == OutcomePending || rawOutcome == OutcomeAmbiguous {`
+  replaced with `if false {`.
+  Killed by: TestRVLF_P1_NonFinalReversalOutcomeNeverPosts
+  Failure: both pending and ambiguous wire outcomes posted (balance moved
+  5000 -> 0), disposition "applied" instead of "anomaly", stored outcome
+  normalized to "succeeded" instead of the real wire value, resolution
+  "applied" instead of "anomaly_other".
+  Reverted: git checkout -- internal/payments/receipt.go.
+
+M1 (succeeded x mismatch must audit):
+  File: internal/payments/receipt.go
+  Mutation: the AttemptSucceeded case's `if mismatched { auditTerminal...;
+  return false, ResolutionAnomalyOther, nil }` branch removed (falls
+  through to the unconditional duplicate return).
+  Killed by: TestRVLF_P4_MismatchedSuccessOnTerminalAttempt
+  Failure: "expected 2 P1 audit records ..., got 1".
+  Reverted: git checkout -- internal/payments/receipt.go.
+
+M1 (declined x mismatch must audit):
+  File: internal/payments/receipt.go
+  Mutation: the AttemptDeclined case's mismatched-branch audit call
+  removed (kept the bare `return false, ResolutionAnomalyOther, nil`).
+  Killed by: TestRVLF_P4_MismatchedSuccessOnTerminalAttempt
+  Failure: "expected 2 P1 audit records ..., got 1".
+  Reverted: git checkout -- internal/payments/receipt.go.
+
+N2 (drive.go, tombstone check before postDepositSuccess):
+  File: internal/payments/drive.go
+  Mutation: `if res.ProviderReference != "" {` (the tombstone-check guard)
+  replaced with `if false {`.
+  Killed by: TestRVLF_N2_DriveGo_SuccessAfterTombstoneDisputesNotIndexError
+  Failure: "payments: post deposit: ledger: look up existing transaction
+  for idempotency key: no rows in result set" - exactly the untyped-error
+  failure mode N2 describes, reproduced live.
+  Reverted: git checkout -- internal/payments/drive.go.
+
+N2 (sweeper.go, same defect on the poll path):
+  File: internal/payments/sweeper.go
+  Mutation: `if res.ProviderReference != "" {` replaced with `if false {`.
+  Killed by: TestRVLF_N2_SweeperGo_SuccessAfterTombstoneDisputesNotIndexError
+  Failure: same untyped ledger idempotency-key lookup error.
+  Reverted: git checkout -- internal/payments/sweeper.go.
+
+N3 / security S-H1 (deferred backstop event-type-vs-operation filter):
+  File: internal/payments/receipt.go
+  Mutation: the `switch attempt.Operation { ... }` deriving eventTypeFilter
+  replaced with the pre-fix hardcoded `eventTypeFilter := string(CallbackEventDeposit)`.
+  Killed by: TestRVLF_N3_DeferredApplyNeverReplaysADepositDeclineAsPayoutEvidence
+  Failure: the payout attempt was wrongly moved to "declined" and its
+  withdrawal hold released ("failed") by a deposit-typed deferred receipt -
+  the exact SP-B2-shaped regression the security review found.
+  Reverted: git checkout -- internal/payments/receipt.go.
+
+N4 (rejectCreatedSiblings records the caller's evidence kind):
+  File: internal/payments/cascade.go
+  Mutation: `RejectCreated(ctx, tx, id, evidence, "intent_succeeded")`
+  reverted to the pre-fix hardcoded `RejectCreated(ctx, tx, id,
+  EvidenceCallback, "intent_succeeded")`.
+  Killed by: TestRVLF_N4_RejectCreatedSiblingsRecordsCallerEvidenceKind
+  Failure: "expected ... evidence kind \"sync\", got \"callback\"".
+  Reverted: git checkout -- internal/payments/cascade.go.
+
+Security S-M1 / SM10 (payout success provider-reference mismatch must
+dispute, not settle):
+  File: internal/payments/receipt.go
+  Mutation: the `if ev.ProviderReference != "" && storedRef != nil && ...`
+  mismatch-detection guard replaced with `if false {`.
+  Killed by: TestRVLF_SM10_PayoutSuccessProviderReferenceMismatchDisputes
+  Failure: the mismatched-reference success settled the withdrawal
+  ("completed") instead of disputing it; 0 audit records instead of 1.
+  Reverted: git checkout -- internal/payments/receipt.go.
+
+Verification after all FH-5 mutations reverted: `git status --porcelain`
+clean; `go build ./...` and `go vet -tags=integration ./...` clean across
+the whole repository; `gofmt -l` clean; `golangci-lint run ./...` (pinned
+2.9.0, untagged): 0 issues. Full `internal/payments` suite green under
+`-race` against a fresh private database (`fh5_pay_20260927`, migrated to
+head including 0106/0107; 346.9s). `internal/reconciliation` (+
+`internal/reconciliation/statement`) green under `-race` (80.7s).
+`internal/httpserver` under `-race`: two pre-existing, previously-disclosed
+flaky tests (`TestResolutionIsolation_OneTenantStoreOutage`,
+`TestResolutionIsolation_FinancialDuringOutage`, real-time latency
+assertions sensitive to race-detector overhead, untouched by this round -
+see §27.14's original disclosure) failed non-deterministically; every
+other httpserver test, including every payments/webhook/payout/kill-
+switch/reversal-named test, passed.
+
+
+PAY-DOUBLE-CREDIT-1 / INV-DEP-1, Financial Hardening FH-3, 2026-09-27
+======================================================================
+ADR 0095 §28 (AM-2). QA's own mutation checklist (inv_dep1_matrix_integration_test.go
+"N. MUTATION CHECKLIST"), items 1-8. Applied via byte-exact edits, run
+against PRIV_DB=fh3_invdep1_1 (migrated to head incl. 0107), confirmed
+FAIL, reverted, `git status --porcelain` confirmed clean.
+
+Items 1/2/3 (delete the resolved_for_other check at the T13/T7 call sites,
+and the internal re-check inside postDepositSuccess):
+  Mutation: `resolvedForOtherDeposit`'s body replaced with `return false, nil`
+  (this single function is shared by every T7/T13 call site AND
+  postDepositSuccess's own internal re-check, so one mutation covers all
+  three checklist items at once).
+  Result against TestINVDEP1_C/H/J/Inverted_T13SecondCapture: ALL STILL
+  PASS. This is NOT a failed kill - it is the ledger's OWN backstop index
+  (migration 0107, ledger_transactions_one_deposit_per_intent) correctly
+  catching the resulting second ledger.Post call and returning
+  ErrDepositAlreadyPostedForIntent, which postDepositSuccessOrDispute maps
+  to the identical disputed=true/T10/T13d outcome as the pre-check would
+  have, PLUS an extra "payments_deposit_intent_index_backstop_fired" P1 log
+  line (confirmed present in the test output only under this mutation, not
+  in the unmutated run) - genuine, working defense in depth, exactly as
+  ADR 0095 §28.3 rule 3 specifies ("The ledger sentinel reaching any
+  caller means the choke point was bypassed... same mapping plus an
+  additional P1"). Disclosed rather than claimed as a successful kill via
+  the scenario tests.
+  Killed instead by: TestINVDEP1_Mutation1_ResolvedForOtherDepositPredicate
+  (internal/payments/migration_0107_integration_test.go), a direct
+  truth-table test of resolvedForOtherDeposit itself (6 cases: no success
+  yet, exact redelivery, different attempt id, different attempt+key,
+  legacy nil-attempt-id). With the mutation applied: 3 of 6 assertions
+  fail (every case that expects resolved=true).
+  Reverted: git checkout (targeted, function body restored) - re-verified
+  `git status --porcelain` clean and TestINVDEP1_C/D/H/J/K/Inverted_* all
+  still green afterward.
+
+Item 4/5 (drop each of the two partial unique indexes):
+  Not dropped against a live DB in this pass (would require altering a
+  migrated schema out from under the running suite). Equivalent coverage:
+  TestMigration0107_Up_DuplicateSucceededAttempts_RefusedByAttemptsPreflight
+  and TestMigration0107_Up_DuplicateLedgerPostings_RefusedByLedgerPreflight
+  (migration_0107_integration_test.go) positively prove each index's own
+  pre-flight refuses exactly the seeded duplicate shape it is meant to
+  catch, on a scratch DB migrated to immediately before 0107. This is the
+  "0107 migration tests QA couldn't write" set the coordinator asked for.
+
+Item 6 (swap the tombstone/resolved_for_other check order):
+  File: internal/payments/receipt.go (AttemptDeclined/T13 branch)
+  Mutation: an inline `resolvedForOtherDeposit` check inserted BEFORE the
+  existing `tombstoneExists` check (previously tombstone-first).
+  Killed by: TestINVDEP1_Mutation6_TombstonePrecedesMultipleSuccessForIntent
+  (migration_0107_integration_test.go, new) - a scenario with BOTH
+  conditions true simultaneously (intent already resolved by a fallback
+  sibling AND the late original's own reference already tombstoned).
+  Unmutated: disputed/reversal_tombstone_precedes_success (tombstone wins).
+  Mutated: disputed/multiple_success_for_intent (wrong reason - the swap
+  is observable).
+  Note: TestINVDEP1_Inverted_RVLF_P6 (the QA-named test for this item)
+  does NOT construct the overlapping-conditions case (its reversal targets
+  an attempt that is already disputed via T13d, not the tombstone-and-
+  T13d-simultaneously shape) and does not distinguish the swap - disclosed
+  rather than silently claimed.
+  Reverted: git checkout (targeted); confirmed clean.
+
+Item 7 (T17/re-drive acts on a terminal non-declined attempt):
+  Not mutated: there is no single application-level "T17 terminal guard"
+  this round added to remove - the protection is structural (the 0101
+  CHECK forbidding next_action_at on any terminal row, pre-dating this
+  round) and already exercised by TestINVDEP1_O_ReDriveOfDisputedAttempt_NoPost,
+  which passes. Disclosed as pre-existing, not a new mutant this round
+  introduced or is positioned to kill.
+
+Item 8 (remove the pay_captured_unposted emission):
+  File: internal/reconciliation/payment_statement.go
+  Mutation: the `m.r.add(MismatchKindPayCapturedUnposted, ...)` call in
+  matchPayment's new case replaced with a no-op statement.
+  Killed by: TestINVDEP1_Recon_M_CapturedUnposted_ReplacesDuplicate
+  (internal/reconciliation/inv_dep1_recon_integration_test.go).
+  Failure: "expected a 'pay_captured_unposted' mismatch ..., got:" (empty).
+  Reverted: git checkout -- internal/reconciliation/payment_statement.go.
+
+Disclosed test-authoring issue found while running the QA matrix
+(reported to the coordinator per "if you believe an assertion is wrong,
+STOP and report it"): TestINVDEP1_D_ConcurrentOriginalAndFallbackSuccess_Race
+and TestINVDEP1_K_ConcurrentAdversarialOrderings_Race's shared helper
+(invDep1RaceOnce) asserts `cashBalance(pool, f) == 5000` after EVERY
+repetition, but cashBalance reads the WHOLE WALLET's cumulative balance
+and the fixture's single wallet is reused across all 50+ reps - so from
+rep 1 onward the assertion is arithmetically wrong (correct behaviour
+produces balance = (rep+1)*5000, not 5000), independent of whether
+INV-DEP-1 held. Verified via temporary debug logging (removed before
+commit) that resolvedForOtherDeposit correctly detects the race in BOTH
+possible delivery orderings for every repetition observed (rep 0 and rep
+1 both showed exactly one delivery per rep resolving to
+disposition=anomaly/multiple_success_for_intent, the other posting) -
+`assertInvariantAndBalanced` (which IS correctly scoped per-intent) passes
+on every repetition. Not fixed (per instruction, no edits to QA's
+assertions) - these two tests are expected-red pending a QA fix (track
+balance delta per rep, or use a fresh wallet per rep) rather than
+INV-DEP-1 being violated.
+
+Also disclosed: TestINVDEP1_Recon_M_DuplicateDetector_LegacyDataShape
+(internal/reconciliation/inv_dep1_recon_integration_test.go, brought in
+verbatim) FAILS against a HEAD-migrated DB: its own doc comment states it
+needs a "legacy data shape" (pre-migration-0107) scratch DB, but it is
+built on `newPayWorld`/`testPool`, which migrates to HEAD - so the
+duplicate ledger.Post it performs is itself refused by migration 0107's
+own backstop index (working as designed) before the test ever reaches its
+assertion. This is exactly the class of "0107 migration-boundary test QA
+couldn't write" the coordinator anticipated; not fixed in the QA file
+(would require either a migrate-to-N-1 pool or the file's own
+setup being changed, neither of which is an "assertion" I am authorized to
+edit) - flagged for a coordinator decision on how to re-home this
+specific fixture.
+
+Verification after all FH-3 mutations reverted: `git status --porcelain`
+clean; `go build ./...` and `go vet -tags=integration ./...` clean across
+the whole repository; `gofmt -l .` clean; `golangci-lint run ./...`
+(pinned 2.9.0, untagged): 0 issues; `go run ./cmd/migrate verify` against
+a fresh scratch DB migrated through 0107: "all applied migrations verified
+clean, no version gaps".
+
+
+FH-5 security re-verification follow-up (rv-prh-i1-payout-security.md,
+cb1330f), gaps (a)/(b)/(c), 2026-09-27
+======================================================================
+
+Gap (a) item 1 - unknown event_type allow-list:
+  File: internal/payments/receipt.go
+  Mutation: `if op, known := eventTypeOperation[ev.EventType]; !known || op != attempt.Operation {`
+  guarded with `false &&`.
+  Killed by: TestRVLF_SecGapA1_UnknownEventTypeIsAnomaly (a "payout_returned"
+  event, valid per the DB CHECK but absent from the allow-list, naming an
+  existing deposit attempt's reference).
+  Failure: disposition "applied" instead of "anomaly".
+  Reverted: git checkout (targeted).
+
+Gap (a) item 2 - S-M1 fallback to the withdrawal's own reference:
+  File: internal/payments/receipt.go
+  Mutation: the `if storedRef == nil || *storedRef == "" { ... }` fallback
+  block guarded with `if false`.
+  Result: TestRVLF_SecGapA2_SM1FallsBackToWithdrawalReference STILL
+  PASSES. Not a failed kill - gap (c)'s centralization (the SAME fallback
+  now lives in applyPayoutSuccess itself, called at the end of this same
+  branch when receipt.go's own check no-ops) independently catches it -
+  real, working defense in depth from landing (c) in the same round.
+  Disclosed rather than claimed as a kill via this test.
+  Reverted: git checkout (targeted); confirmed clean.
+
+Gap (a) item 3 - reversal fingerprint uses the raw wire outcome:
+  File: internal/payments/receipt.go
+  Mutation: `computeEventFingerprint`'s `if ev.RawOutcome != "" { fingerprintOutcome = ev.RawOutcome }`
+  removed (falls back to always using the normalized ev.Outcome).
+  Killed by: TestRVLF_SecGapA3_ReversalFingerprintUsesRawWireOutcome.
+  Failure: both "two different RawOutcome values produce different
+  fingerprints" and "matches the real stored value" assertions fail.
+  Reverted: git checkout (targeted).
+
+Gap (b) - cross-operation deferred receipt resolved as anomaly:
+  File: internal/payments/receipt.go
+  Mutation: the new cross-operation query's `AND event_type = $4`
+  appended with `AND false` (never matches any row).
+  Killed by: TestRVLF_SecGapB_CrossOperationDeferredReceiptResolvedAsAnomaly.
+  Failure: scan error ("cannot scan NULL into *string") reading the
+  now-permanently-unresolved receipt's resolution column - i.e. it stays
+  unresolved forever, exactly the defect this gap describes.
+  Reverted: git checkout (targeted).
+
+Gap (c) - the reference-mismatch rule centralized in applyPayoutSuccess
+(minimal payout.go hunk, reported to the coordinator separately):
+  File: internal/payments/payout.go
+  Mutation: the new `if providerReference != "" { ... N6 check ... }`
+  block's condition replaced with `if false`.
+  Killed by: TestPayoutDispatch_SecGapC_SyncSuccessProviderReferenceMismatchDisputes
+  (the SYNC dispatch path, which had NO reference check of its own before
+  this fix - the gap this item exists to close).
+  Failure: attempt state "succeeded" instead of "disputed".
+  Reverted: git checkout (targeted).
+
+Verification after all gap (a)/(b)/(c) mutations reverted: `git status
+--porcelain` clean; `go build ./...`, `go vet -tags=integration ./...`,
+`gofmt -l .` clean; `golangci-lint run ./...` (pinned 2.9.0): 0 issues.
+
+
+Ledger-finance re-review of FH-5 (rv-prh-i1-callback-ledger.md, b9e8045),
+conditions C1-C3 and L-a/L-c/L-d/L-e, 2026-09-27
+======================================================================
+
+C1 (H1R3, reversal fingerprint uses the raw wire outcome) and C5 (code-
+review, same finding as H1b): already satisfied by the pre-existing
+TestRVLF_SecGapA3_ReversalFingerprintUsesRawWireOutcome (see the FH-5
+security re-verification gap (a) item 3 entry above) - no new test added;
+cross-referenced here per the coordinator's consolidated list.
+
+C2 (DFR) - the callback site's OWN ApplyDeferredReceiptsForAttempt call:
+  File: internal/payments/receipt.go
+  Mutation: the callback-site backstop call (`if changed { ... ; if _, err
+  := ApplyDeferredReceiptsForAttempt(...); ... }`) guarded with `if false`.
+  Killed by: TestRVLF_C2_DFR_CallbackSiteDeferredApplyBackstop.
+  Failure: "the callback site's own deferred-apply backstop must resolve
+  the first callback's deferred success, got state=pending"; deferred
+  receipt count still 1 instead of 0.
+  Reverted: targeted Edit; confirmed clean.
+
+C2 (DFS) - the sweeper's OWN ApplyDeferredReceiptsForAttempt call (T4/T9
+poll site):
+  File: internal/payments/sweeper.go
+  Mutation: the sweeper poll site's backstop call guarded with `if false`
+  (returning nil instead).
+  Killed by: TestRVLF_C2_DFS_SweeperSiteDeferredApplyBackstop.
+  Failure: "the sweeper's own deferred-apply backstop must resolve the
+  earlier deferred success, got state=pending"; deferred receipt count
+  still 1 instead of 0.
+  Reverted: targeted Edit; confirmed clean.
+  (Both DFR and DFS are distinct from drive.go's phase-C call site, which
+  TestRVLF_P8 already isolates and kills as DFD - not re-tested here.)
+
+C3 (SIBS) - sibling rejection on the sweeper's OWN T13 success (QueryStatus
+poll path), distinct from the callback/drive.go sites' own H4 checks:
+  File: internal/payments/sweeper.go
+  Mutation: `return rejectCreatedSiblings(ctx, tx, attempt,
+  EvidenceQueryStatus)` (ErrorClassSucceeded branch) guarded with `if
+  false { ... }; return nil`.
+  Killed by: TestRVLF_C3_SIBS_SweeperSuccessRejectsCreatedSibling.
+  Failure: "the sweeper's own T13 success must reject the leftover created
+  sibling, got created".
+  Reverted: targeted Edit; confirmed clean.
+
+L-a - a deposit_reversal's bounded decline reason is also stored in
+receipt.decline_reason:
+  File: internal/payments/receipt.go
+  Mutation: the new `if ev.EventType == string(CallbackEventDepositReversal)
+  && ev.DeclineReason != "" { declineReason = &ev.DeclineReason }` block
+  guarded with a leading `false &&`.
+  Killed by: TestRVLF_La_ReversalReceiptStoresBoundedDeclineReason.
+  Failure: "expected the reversal receipt's own decline_reason=
+  'chargeback_lost', got <nil>".
+  Reverted: targeted Edit; confirmed clean.
+
+L-e - the oversize-reason audit fires ONCE, never on redelivery:
+  File: internal/payments/receipt.go
+  Mutation: the main-path call site's `if oversizedDeclineReason &&
+  !duplicate {` condition had `&& !duplicate` removed (the other two call
+  sites already early-return on `duplicate` before reaching their own
+  identical guard, so only the main path's own, non-early-returning guard
+  is a meaningful mutation target).
+  Killed by: TestRVLF_Le_OversizeDeclineReasonAuditedOnceNotOnRedelivery
+  (delivers an identical 90-byte-oversized-decline-reason payload 3 times).
+  Failure: "expected exactly 1 audit record across 3 identical
+  redeliveries, got 3".
+  Reverted: targeted Edit; confirmed clean.
+
+L-c (matchReversal rule-6 comment) and L-d (ADR §27.x operator note on
+disposition_at_receipt vs resolution) are documentation-only changes -
+docs/decisions/0095-provider-io-transaction-boundary-and-payment-
+contract.md and internal/reconciliation/payment_statement.go - no code
+path changed, no mutation applicable.
+
+Verification after all C2/C3/L-a/L-e mutations reverted: `git status
+--porcelain` shows only the intended net diffs (receipt.go's L-a/L-e/C1-hook
+additions, sweeper.go clean with no residual diff); `go build ./...` and
+`go vet -tags=integration ./...` clean; `gofmt -l .` clean; full
+internal/payments + internal/reconciliation (+ internal/reconciliation/
+statement) suites pass under `-tags=integration -race -count=1` against a
+freshly rebuilt PRIV_DB (fh3_invdep1_qa, migrated through 0107, seeded with
+QA's own adjudication-corrected inv_dep1_matrix/inv_dep1_recon files).
+
+
+Code-review re-review 2 of FH-5 (rv-prh-i1-callback-code-review.md,
+ad476d6), condition C1, 2026-09-27
+======================================================================
+
+C1 - "the N5b branch is only reachable in a READ COMMITTED race":
+
+Investigation: the ORIGINAL TestRVLF_N5b_ReferenceConflictAnomalyReceipt
+Resolved (named after the code comment "§4.4 precondition-2 reference-
+conflict branch") in fact resolves via ResolveAttemptForEvidence's OWN
+byRef/byMerchant conflict check (receipt.go's `case byRef != nil &&
+byMerchant != nil: if byRef.ID != byMerchant.ID { ... }`, ~line 404) - the
+delivery names attempt A's already-bound provider_reference alongside
+attempt B's merchant reference, and A's binding is already visible to
+ResolveAttemptForEvidence's OWN, single byRef read, so it never reaches
+the SEPARATE, later re-check at receipt.go's "§4.4 precondition 2" branch
+(`if err == nil && other.ID != attempt.ID { ... }`, ~line 588). That later
+branch is reachable ONLY if: (1) ResolveAttemptForEvidence's byRef read
+for ev.ProviderReference finds NOTHING (so resolution proceeds via
+byMerchant alone), and (2) a DIFFERENT attempt claims that exact
+provider_reference in a separately-committed transaction, landing between
+that first read and this function's own second read of the same
+reference - a genuine READ COMMITTED race, never reachable through
+ordinary sequential delivery.
+
+Actions taken:
+  1. Renamed the mislabelled test to
+     TestRVLF_ResolveConflict_ByRefByMerchantMismatchAnomalyReceiptResolved,
+     with an updated doc comment explaining what it actually tests (the
+     ResolveAttemptForEvidence-level conflict, not the later
+     precondition-2 re-check).
+  2. Added a minimal, nil-by-default test-only interleaving seam,
+     `testHookBeforeReferenceConflictRecheck func()`, called once,
+     immediately before the precondition-2 re-check in
+     ApplyReceiptEvidence. Nil (a pure no-op) outside tests; only ever
+     assigned by the one test below, single-threaded, and cleared via
+     t.Cleanup.
+  3. Added TestRVLF_C1_PreconditionTwoReferenceConflict_
+     OnlyReachableViaReadCommittedRace: constructs the genuine race
+     deterministically (no goroutine, no timing dependency) by running a
+     second, independently-committed transaction from inside the hook
+     itself - between ApplyReceiptEvidence's own two reads of the same
+     provider reference - binding that reference to an unrelated attempt
+     C via MarkAccepted. Asserts the delivery resolves as
+     DispositionAnomaly, the anomaly receipt is itself resolved (F1), and
+     the originally-targeted attempt B is left untouched.
+
+Mutation-kill: the precondition-2 branch's own conflict check (`if err ==
+nil && other.ID != attempt.ID {`) was mutated to `if err == nil && false
+&& other.ID != attempt.ID {` (never true). TestRVLF_C1_
+PreconditionTwoReferenceConflict_OnlyReachableViaReadCommittedRace FAILED:
+"raced delivery: payments: T7/T13 ->succeeded: ERROR: duplicate key value
+violates unique constraint \"payment_attempts_tenant_provider_ref\"" - the
+mutant lets the raced delivery fall through to apply success evidence
+against attempt B using a provider_reference the DB itself now refuses (it
+already belongs to attempt C), proving the guard is load-bearing exactly
+as designed. Reverted via targeted Edit; confirmed `git diff` shows no
+residual change to that line.
+
+Verification: `go build -tags=integration ./internal/payments/...` clean;
+TestRVLF_C1_PreconditionTwoReferenceConflict_OnlyReachableViaReadCommitted
+Race and TestRVLF_ResolveConflict_ByRefByMerchantMismatchAnomalyReceipt
+Resolved both pass individually and as part of the full
+internal/payments + internal/reconciliation suite under -race (see the run
+recorded above, which includes both).
+
+
+Code-review re-review 2 of FH-5 (rv-prh-i1-callback-code-review.md,
+ad476d6), condition C2 (N12/M7) and C6, 2026-09-27
+======================================================================
+
+C2 (N12/M7) - the deferred-apply backstop's own
+recomputeDepositIntentProjection call:
+
+First attempt (disclosed, not claimed as a kill): mutated the backstop's
+`if changed && current.Operation == AttemptOperationDeposit &&
+current.DepositIntentID != nil { recomputeDepositIntentProjection(...) }`
+with a leading `false &&`. TestRVLF_P8_DeferredReceiptAppliedByPhaseC's
+own pre-existing N12 assertion (a SUCCESS transition) STILL PASSED -
+postDepositSuccess (orchestrator.go) already writes deposit_intents.status
+= 'succeeded' directly as part of posting, independent of this call, so
+that assertion cannot distinguish the mutant from the real code. A second
+attempt using a DECLINE transition (TestRVLF_C2N12_Deferred
+DeclineBackstop..., an earlier draft, not committed) ALSO still passed:
+finalizeDeclined (orchestrator.go), called from applyResolvedReceiptEvidence's
+own OutcomeDeclined branch BEFORE the backstop's recompute call runs, also
+writes deposit_intents.status directly.
+
+Genuine kill: TestRVLF_C2N12_DeferredAmbiguousBackstopAlsoRecomputes
+IntentProjection uses an AMBIGUOUS transition (MarkAmbiguousFromPending),
+which has NO redundant direct deposit_intents write anywhere in the
+codebase - the intent's status can only move from 'pending' to 'ambiguous'
+via recomputeDepositIntentProjection. With the same mutation applied, this
+test FAILED: "the deferred-apply backstop must recompute the intent's own
+projection on an ambiguous transition too ..., got status=\"pending\"".
+Reverted via targeted Edit; confirmed `git diff` clean.
+
+C6 - four small cleanups, all doc/dead-code, no mutation applicable:
+  (i)   Removed the dead ErrDepositIntentNotFound 404 branch in
+        internal/httpserver/payment_callback_errors.go's
+        mapReceiveCallbackError - confirmed by reading
+        ReceiveVerifiedCallback/receiveCallbackViaReceiptPath
+        (orchestrator.go) that the receipt path never returns that
+        sentinel; the old deposit_intents-only lookup path that could is
+        gone. Updated the function's own doc comment to match.
+  (ii)  Fixed the stale "receiveDepositCallback" reference in
+        internal/httpserver/payment_deposit_simulation_handlers.go's
+        recordDepositSimulationAudit doc comment (that function no longer
+        exists) to name the real, current call chain
+        (ApplyReceiptEvidence/receiveCallbackViaReceiptPath).
+  (iii) Merged the two stacked setIntentAttempt doc comments in
+        orchestrator.go into one.
+  (iv)  Labelled InitiateDeposit (orchestrator.go) TEST-ONLY in its doc
+        comment - confirmed via grep that no non-test caller invokes it
+        anywhere in the repository; InitiateDepositAttempt is the real,
+        current production chain. Left in place (not moved to test code)
+        per the coordinator's own "smaller safe option" guidance, since
+        several pre-cutover regression tests still construct fixtures
+        through it.
+
+Verification: go build ./..., go vet -tags=integration ./..., gofmt -l .
+all clean; full internal/payments + internal/reconciliation +
+internal/httpserver suites run under -tags=integration -race -count=1
+against PRIV_DB=fh3_invdep1_qa.
+
+
+A7 items (rv-a7-tests.md, 1944de0), #1a and #5c, 2026-09-27
+======================================================================
+
+#1a - TestA7_1a_SweeperClaimVsCallbackPhaseC_SameDepositIntent
+(internal/payments/a7_1a_integration_test.go, kept separate from the
+payout agent's own a7_lockorder_integration_test.go on its FH-6 branch to
+avoid a merge conflict):
+
+Landed the scratchpad's reproduction (scratchpad/a7_1a_double_capture_
+test.go.txt) adapted in two ways:
+  1. a7HoldRow/a7WaitAnyLockWaiter are a local, self-contained copy (this
+     file's own helpers), built on the SAME primitives lockorder_harness_
+     test.go already exposes (loHoldWith, loBlockingPIDs) - the real
+     a7HoldRow/a7WaitAnyLockWaiter live in the payout agent's own
+     a7_lockorder_integration_test.go, not present on this branch.
+  2. The final assertion ("attempt 1 stays declined or disputed") was
+     adapted to "exactly one of attempt 1/attempt 2 ends up succeeded, the
+     other disputed" - the original assumed attempt 1 must be the one
+     left declined/disputed, but under ADR 0095 §28 AM-2/INV-DEP-1 (FH-3,
+     8ce538c, landed after this scratchpad was written) whichever success
+     posts FIRST legitimately succeeds (here, attempt 1's late callback,
+     since T13(c) treats it as a legitimate second capture) and the OTHER
+     loses the resolvedForOtherDeposit race and is disputed - the
+     load-bearing invariant is "exactly one succeeded, one disputed",
+     not which specific attempt.
+
+Confirmed PASSING against current HEAD: at most one ledger posting for
+the whole intent (asserted via the distinct-ledger_transaction_id count
+query), the waiter-blocks assertions (a7WaitAnyLockWaiter finding the
+sweeper's per-item claim genuinely blocked on the held deposit_intents
+row) hold, loAssertBalanced and loAssertProjectionMatchesRebuild both
+pass. Stable across 5 reps under -race (no flake observed).
+
+Mutation-kill (disclosed, not a clean single-mutation kill): mutated
+postDepositSuccessOrDispute's own resolvedForOtherDeposit call site by
+forcing `resolved = false` immediately after the real check runs (i.e.,
+simulating the pre-check being bypassed entirely). The test STILL PASSED:
+migration 0107's own DB-level unique-index backstop
+(payment_attempts_one_succeeded_deposit_per_intent /
+ledger_transactions_one_deposit_per_intent) caught the second posting
+attempt instead, surfacing as ErrDepositIntentAlreadyResolved from
+postDepositSuccess itself, which postDepositSuccessOrDispute's own
+fallback branch maps to the identical disputed outcome (plus the
+additional payments_deposit_intent_index_backstop_fired P1 alert,
+confirmed in the test log). This is disclosed as genuine defense-in-depth
+working as designed, not claimed as a kill via this specific test - the
+DB backstop's own dedicated kill coverage already lives in
+inv_dep1_matrix_integration_test.go (QA's own matrix) and
+migration_0107_integration_test.go's TestMigration0107_LedgerBackstop_
+ErrDepositAlreadyPostedForIntent, not duplicated here. Reverted; confirmed
+`git diff` clean.
+
+#5c - mutation check for "receipt insert after an L1 lock" on the
+reversal tombstone branch (A7-TOMB-1):
+
+Mutation: in applyReversalReceiptEvidence (receipt.go), moved the R0
+receipt insert (insertReceiptDeduped) to AFTER the `deposit_intents FOR
+UPDATE` lock instead of before it - i.e. exactly the ordering violation
+A7-TOMB-1's own doc comment says must never happen ("R0 ... is this
+transaction's FIRST write - unconditionally, before ANY lock").
+
+Result: NOT KILLED by any existing test, including the test that doc
+comment names as the reason for the rule
+(TestRVLF_A7Tomb1_ConcurrentIdenticalTombstoneReversalsNoDeadlockExactly
+OneEffect - 5/5 reps still pass), nor by the package's full suite (go
+test -tags=integration -race ./internal/payments/...) run with the
+mutation in place. Investigated why, rather than accept a false negative:
+ADR 0095 §14/LF95-C9(a) states R0 is "an index-insertion wait that
+serializes duplicate deliveries, analogous to L0.1" - its deadlock-
+avoidance property (the binding rule "nothing that already holds an L1+
+lock ever inserts a receipt") is only exploitable as a genuine ABBA
+deadlock between TWO DIFFERENT code paths that disagree on lock order for
+the SAME pair of resources (an L1 lock and an R0 index-insertion wait on
+the SAME event_fingerprint). A single, uniform code mutation applied to
+ONE function is run identically by BOTH sides of any concurrent race
+constructed FROM that same function (e.g. two identical reversal
+deliveries), so both take the SAME (now-wrong) order and simply serialize
+on the lock instead of deadlocking - there is no "correct-order" opponent
+left to race against once the one function that would have been the
+correct side is itself mutated. A genuine kill would require pitting this
+mutated function against a SEPARATE, still-correctly-ordered code path
+that also inserts a receipt with the SAME event_fingerprint while already
+holding this SAME deposit_intents row's L1 lock - no such second call
+site exists (only ONE function ever inserts a reversal receipt for a
+given (tenant, provider) fingerprint), so this specific ordering rule, in
+isolation, is a static/architectural invariant this test suite cannot
+exercise as a dynamic deadlock reproduction without inventing a second,
+artificial call site whose only purpose would be to fail differently -
+which would not be a permanent, meaningful regression test.
+
+STATUS: reported to the coordinator as BLOCKED-ON-DESIGN rather than
+claimed as a kill. Mutation applied and reverted per instructions (`git
+diff` confirmed clean after revert); no fabricated pass.
+
+
+FH-3b: security review of FH-3 (rv-fh3-security.md, 81dd4b7), F-M1/F-M2/
+F-L1/F-L2/F-L3, 2026-09-27
+======================================================================
+
+F-M1 - migration 0107's payment_attempts_guard() T13t/T13d predicate
+accepted a NULL terminal_reason:
+  File: migrations/0107_deposit_intent_double_credit_backstop.up.sql
+  Mutation: reverted the fix, i.e. `AND (NEW.terminal_reason IS NULL OR
+  NEW.terminal_reason NOT IN (...))` narrowed back to the original bug,
+  `AND NEW.terminal_reason NOT IN (...)`.
+  Killed by: TestMigration0107_T13tT13d_TerminalReasonTrigger_HEAD, case
+  (c).
+  Failure: "(c) F-M1: expected the trigger to refuse a NULL
+  terminal_reason, got err=<nil> state=disputed reason=<nil>".
+  Reverted: targeted Edit; confirmed `git diff` clean. Private DB rebuilt
+  (fh3b_mut, dropped after use) since 0107's checksum changes with this
+  fix; fh3b (the main working private DB for this session) already
+  carried the fix throughout.
+
+F-M2 - the guard's own behaviour tests ran against 0101, not HEAD:
+  Moved TestMigration0101_InsertGuard_RejectsForbiddenShapes,
+  TestMigration0101_UpdateGuard_TransitionWhitelist,
+  TestMigration0101_T13t_TombstonePrecedesSuccess_RequiresNamedTerminalReason
+  and TestMigration0101_RLS_CrossTenantIsolation to depositV2ScratchPool
+  (HEAD). No mutation applicable (this is a test-relocation fix, not a
+  code fix) - verified instead by confirming all four pass at HEAD (they
+  do; the T13t test in particular is now exercising 0107's REPLACED guard
+  body for the first time). The remaining 0101-pinned tests in that file
+  (UpDownUpRoundTrip, the Backfill_* pre-flight tests) are genuine
+  migration-boundary/backfill-history tests with nothing to exercise at
+  HEAD, now labelled as such.
+
+F-L1 - the choke point's tenant binding (MT) and both application-level
+checks (MC) were unpinned - the DB backstop produces the identical
+disputed outcome either way:
+  File: internal/payments/orchestrator.go
+  Mutation MT: postDepositSuccessOrDispute's own
+  `resolvedForOtherDeposit(ctx, tx, attempt.TenantID, ...)` call changed
+  to pass `uuid.Nil` instead of `attempt.TenantID`.
+  Killed by: TestINVDEP1_FL1_ApplicationChokePointCatchesItBeforeTheDBBackstop.
+  Failure: "the DB backstop must NOT have fired for a correctly-tenanted,
+  correctly-checked delivery ..." - the backstop-fired log line DID fire.
+  Reverted: targeted Edit; confirmed clean.
+
+  Mutation MC: both application-level checks guarded with `if false &&
+  resolved` - postDepositSuccessOrDispute's own pre-check AND
+  postDepositSuccess's internal re-check, simultaneously.
+  Killed by: the SAME test (TestINVDEP1_FL1_...), identical failure mode
+  (the backstop-fired line fired because both application checks were
+  bypassed and the ledger's own unique index caught the second posting
+  instead).
+  Reverted: targeted Edit (both sites); confirmed clean.
+
+F-L2 - the P1 alert log content (payments_multiple_success_for_intent_
+alert) was unpinned:
+  File: internal/payments/orchestrator.go
+  Mutation: added `"amount", attempt.Amount` to the
+  payments_multiple_success_for_intent_alert slog.Default().Error(...)
+  call.
+  Killed by: TestINVDEP1_FL2_MultipleSuccessAlertLogContentIsPinned.
+  Failure: "the alert line must never carry \"amount=\"" and "... must
+  never carry \"5000\"" (the real attempt amount).
+  Reverted: targeted Edit; confirmed clean.
+
+F-L3 - testHookBeforeReferenceConflictRecheck's residual "could a future
+non-test file assign it" hardening:
+  File: internal/payments/receipt.go
+  Mutation: planted a real `testHookBeforeReferenceConflictRecheck =
+  func() {}` assignment inside a new helper function directly in
+  receipt.go (a non-test file), simulating exactly the residual the
+  reviewer flagged.
+  Killed by: TestFL3_TestHookBeforeReferenceConflictRecheck_
+  NeverAssignedOutsideTests.
+  Failure: "F-L3: testHookBeforeReferenceConflictRecheck must never be
+  assigned outside a _test.go file: .../receipt.go:39:27".
+  Reverted: targeted Edit; confirmed clean. (This is a static/AST-based
+  test, not a DB-backed one - no PRIV_DB involved; verified with plain
+  `go test`, no build tag.)
+
+Verification after all FH-3b mutations reverted: `git status --porcelain`
+clean; `go build ./...`, `go vet -tags=integration ./...`, `gofmt -l .`
+clean; `golangci-lint run ./...` (pinned 2.9.0): 0 issues; `go run
+./cmd/migrate verify` against a fresh scratch DB (fh3b) migrated through
+0107: "all applied migrations verified clean, no version gaps"; full
+internal/payments + internal/reconciliation (+ internal/reconciliation/
+statement) suites pass under -tags=integration -race -count=1 against
+PRIV_DB=fh3b; plain `go test ./internal/payments/...` (no build tag,
+covers the new F-L3 static guard) also green.
+
+Private DBs: every stale fh3_* scratch database from the FH-3/FH-3a
+session (fh3_final_verify, fh3_full_1, fh3_invdep1_1, fh3_invdep1_2,
+fh3_invdep1_final, fh3_invdep1_qa) was dropped, since 0107's checksum
+changed with the F-M1 fix. fh3b is the fresh replacement used throughout
+this session.
+
+================================================================
+FH-3c: ledger-finance C2-C8/F3/L1, security MC2/F-L2-allowlist,
+code-review R1-R6/X13/X14/X16/H1b/A7-helper-collision
+================================================================
+
+C2 - pay_captured_unposted stands across the statement window
+(checkUnmatchedAttempts, unwindowed standing case):
+  File: internal/reconciliation/payment_statement.go
+  Mutation: commented out the new standing case in checkUnmatchedAttempts
+  (`case false && a.state == "disputed" && ...`).
+  Killed by: TestINVDEP1_C2_CapturedUnposted_StandsAcrossStatementWindow
+  (run 2, the empty-statement/no-line-at-all run).
+  Reverted: targeted Edit; confirmed clean.
+
+C5 - clearing conditions (mutant RTMB, the predicate forced to `true`):
+  File: internal/reconciliation/payment_statement.go
+  Mutation: `func (m *payMatcher) capturedUnposted(a *payAttempt) bool {
+  return true }`.
+  Killed by: TestINVDEP1_C5_CapturedUnposted_ClearsOnReversalLineOrTombstone
+  (all three sub-tests fail: reversal_line, tombstone, own_line_reported_
+  reversed).
+  Reverted: targeted Edit; confirmed clean.
+
+R1/X15 - only a `succeeded` statement-line status counts as "still
+captured", never `reversed`:
+  File: internal/reconciliation/payment_statement.go
+  Mutation: reverted the matchPayment case's line-status condition from
+  `l.status == statement.PaymentStatusSucceeded` back to the wider
+  `providerSucceeded` (succeeded OR reversed).
+  Killed by: TestINVDEP1_C5_CapturedUnposted_ClearsOnReversalLineOrTombstone/
+  own_line_reported_reversed.
+  Reverted: targeted Edit; confirmed clean.
+
+X13 - reversal-line clearing removed:
+  File: internal/reconciliation/payment_statement.go
+  Mutation: `capturedUnposted` returns `m.ledgerByRef[...] == nil` only
+  (dropped the `!m.reversalOriginals[...]` term).
+  Killed by: TestINVDEP1_C5_.../reversal_line.
+  Failure: "a PSP-reported reversal line naming this reference as its
+  original must CLEAR pay_captured_unposted".
+  Reverted: targeted Edit; confirmed clean.
+
+X14 - tombstone clearing removed:
+  File: internal/reconciliation/payment_statement.go
+  Mutation: `capturedUnposted` returns `!m.reversalOriginals[...]` only
+  (dropped the tombstone term).
+  Killed by: TestINVDEP1_C5_.../tombstone.
+  Failure: "a real tombstone ledger row for this reference must CLEAR
+  pay_captured_unposted even with no statement line at all".
+  Reverted: targeted Edit; confirmed clean.
+
+X16 - terminal_reason filter dropped (every disputed attempt reported,
+including reversal_tombstone_precedes_success):
+  File: internal/reconciliation/payment_statement.go
+  Mutation: dropped `a.terminalReason == "multiple_success_for_intent"`
+  from checkUnmatchedAttempts' standing case.
+  Killed by: TestINVDEP1_X16_TerminalReasonFilter_
+  PrecedenceCaseNeverReportsCapturedUnposted (standing/unmatched sub-run).
+  Reverted: targeted Edit; confirmed clean.
+
+L1 - down migration's CHECK restore wrapped with a runbook message:
+  File: migrations/0107_deposit_intent_double_credit_backstop.down.sql
+  Mutation: unwrapped the DO/EXCEPTION block back to a bare
+  ALTER TABLE ... ADD CONSTRAINT.
+  Killed by: TestMigration0107_Down_RefusesWithRunbookMessageWhenCaptured
+  UnpostedRowExists (still refuses, but the runbook text disappears -
+  a bare SQLSTATE 23514 message instead).
+  Reverted: targeted Edit; confirmed clean via a manual down/up round-trip
+  against a fresh scratch DB.
+
+R3 - pre-flight tests assert WHICH index refused and the runbook text:
+  File: migrations/0107_deposit_intent_double_credit_backstop.up.sql
+  Mutation: swapped the two RAISE EXCEPTION message strings between the
+  attempts-index and ledger-index DO/EXCEPTION blocks.
+  Killed by: BOTH TestMigration0107_Up_DuplicateSucceededAttempts_
+  RefusedByAttemptsPreflight AND TestMigration0107_Up_DuplicateLedgerPostings_
+  RefusedByLedgerPreflight (each now asserts its OWN specific message and
+  the absence of the other's).
+  Reverted: targeted Edit; confirmed clean.
+
+C3 - amount/asset in the multiple_success_for_intent audit record:
+  File: internal/payments/orchestrator.go (auditMultipleSuccessForIntent)
+  Verified via TestINVDEP1_C3_MultipleSuccessAuditRecordCarriesAmount
+  AndAsset (positive assertion of amount/asset_code in audit_log.metadata;
+  no separate mutation needed beyond the positive test, since removing the
+  meta fields directly fails this test's own assertions).
+
+MC2 - the internal re-check inside postDepositSuccess, exercised directly
+on an already-resolved intent (security follow-up on FH-3b):
+  File: internal/payments/orchestrator.go (postDepositSuccess)
+  Verified via TestINVDEP1_MC2_PostDepositSuccessInternalRecheck, which
+  calls postDepositSuccess directly (bypassing postDepositSuccessOrDispute's
+  pre-check entirely) and asserts errors.Is(err, ErrDepositIntentAlready
+  Resolved) true, errors.Is(err, ledger.ErrDepositAlreadyPostedForIntent)
+  false - i.e. the APPLICATION re-check catches it, not the DB backstop.
+
+X5 - the ledger.ErrDepositAlreadyPostedForIntent -> sentinel mapping in
+postDepositSuccess:
+  File: internal/payments/orchestrator.go (postDepositSuccess)
+  Mutation: removed the `if errors.Is(err, ledger.ErrDepositAlready
+  PostedForIntent) { return ..., fmt.Errorf("%w (ledger backstop: %w)",
+  ErrDepositIntentAlreadyResolved, err) }` mapping.
+  Killed by: TestX5_LedgerBackstopMapping (a genuine two-transaction race,
+  external projection-row blocker forcing FIFO-ordered contention on the
+  ledger's own unique index) - errB no longer wraps ErrDepositIntentAlready
+  Resolved / "ledger backstop" once the mapping is removed.
+  Reverted: targeted Edit; confirmed clean.
+
+X6 - the ledger half of resolvedForOtherDeposit:
+  File: internal/payments/orchestrator.go (resolvedForOtherDeposit)
+  Mutation: dropped the `OR EXISTS (SELECT 1 FROM ledger_transactions ...)`
+  clause from the predicate's SQL, leaving only the attempts-half.
+  Killed by: TestX6_ResolvedForOtherDepositPredicate_LedgerHalfAlone (a
+  legacy no-attempt-row posting under a different idempotency key, no
+  attempt ever reaches 'succeeded') - the predicate now incorrectly
+  returns false.
+  Reverted: targeted Edit; confirmed clean.
+
+C4/R4 - RecordDepositMultipleSuccessRefusal wired on the legacy
+InitiateDeposit path via InitiateDepositAudited:
+  File: internal/payments/orchestrator.go
+  Verified via TestC4_ResolveAmbiguousOutcomeSucceeded_ReturnsWrappedRefusal
+  (resolveAmbiguous's OutcomeSucceeded branch returns
+  *DepositIntentAlreadyResolvedRefusal, errors.Is still true against the
+  bare sentinel) and TestC4_InitiateDepositAudited_WritesRefusalAudit
+  (RecordDepositMultipleSuccessRefusal's own audit row, direct call).
+
+C7 - A7 #1a's posting-count check, made unconditional:
+  File: internal/payments/a7_1a_integration_test.go
+  Verified via TestA7_1a_SweeperClaimVsCallbackPhaseC_SameDepositIntent's
+  own updated assertion (unconditional ledgerDepositTxCount call, no
+  longer gated on `finalChild.ProviderReference != nil` nor counting only
+  DISTINCT payment_attempts.ledger_transaction_id).
+
+C8 (A7 #5c) - runtime R0-ordering proof for the tombstone branch:
+  File: internal/payments/receipt.go (applyReversalReceiptEvidence,
+  tombstone branch)
+  Mutation: swapped the R0 (receipt INSERT)/L1 (intent lock) statement
+  order.
+  Killed by: TestA7_5c_TombstoneBranch_SecondIdenticalReversalWaitsOnReceipt
+  Insert - the second, blocked delivery's own pg_stat_activity.query text
+  switches from waiting on the receipt INSERT to waiting on the intent
+  lock.
+  Reverted: targeted Edit; confirmed clean.
+
+F3 - phase C and the sweeper re-read the attempt under the parent lock:
+  Files: internal/payments/sweeper.go, drive.go, deposit_v2.go
+  Disclosed as a money-safety hardening (removes a stale-read/conflict-
+  error window under contention, not a correctness gap the choke point
+  itself would miss) - full internal/payments suite (all Sweep*/Drive*/
+  INVDEP1* tests, 277s) re-run green under -race after the change.
+
+R6 - restored PAY-REV-1 second-reversal + reverses_transaction_id checks
+on the inverted P6 test:
+  File: internal/payments/inv_dep1_matrix_integration_test.go
+  Verified via TestINVDEP1_Inverted_RVLF_P6_
+  ReversalOfDisputedSecondCaptureTakesTombstoneBranch's own restored
+  assertions (reverses_transaction_id against the child's own posting;
+  errors.Is(err, ErrDepositAlreadyReversed) on a distinct second reversal
+  of the same original).
+
+H1b (code-review "C5 is NOT closed") - the RawOutcome assignment in
+applyReversalReceiptEvidence's final-reversal branch:
+  File: internal/payments/receipt.go
+  Mutation: dropped `ev.RawOutcome = rawOutcome` (rule 1/3's raw-wire-value
+  preservation).
+  Killed by: TestINVDEP1_H1b_ReversalFingerprintEndToEnd_RawWireOutcome
+  Preserved - both the "must reflect the RAW wire outcome" and "must not
+  fingerprint-collide with a genuine succeeded-outcome reversal" assertions
+  fail once the line is dropped (a real end-to-end delivery through
+  rvCallback, never computeEventFingerprint called directly).
+  Reverted: targeted Edit; confirmed clean.
+
+Security follow-up - F-L2 exact key allow-list:
+  File: internal/payments/migration_0107_integration_test.go
+  Strengthened TestINVDEP1_FL2_MultipleSuccessAlertLogContentIsPinned to
+  assert the alert line's keys are EXACTLY {time, level, msg, tenant_id,
+  deposit_intent_id, attempt_id} via slog's own TextHandler key=value
+  token shape, not merely the absence of a fixed forbidden list.
+
+A7 helper collision (code-review): a7HoldRow/a7WaitAnyLockWaiter existed
+as two independently-written local copies (this branch's
+a7_1a_integration_test.go and the unmerged FH-6 payout branch's
+a7_lockorder_integration_test.go, worktree-agent-a5b19b46582e95b75 @
+b7f84ec) with different argument orders/waiter-query implementations - a
+guaranteed compile conflict once both branches merge. Resolved by copying
+FH-6's canonical versions verbatim into a new, dedicated
+internal/payments/a7_helpers_integration_test.go (folding in this
+branch's own clearer "no row to lock" error), deleting the local copies
+from a7_1a_integration_test.go, and adapting its (and a7_5c's) own call
+sites to FH-6's argument order (table before rowID). No mutation-kill
+applicable (a structural/compile-collision fix, not a behavioural gap);
+verified via a full `go build ./...`/`go vet -tags=integration ./...`
+clean run and both TestA7_1a_* and TestA7_5c_* passing under -race.
+
+Verification after all FH-3c mutations reverted: `git status --porcelain`
+clean; `go build ./...`, `go vet -tags=integration ./...`, `gofmt -l .`
+clean (golangci-lint could not run in this environment - installed
+version 2.5.0 was built with go1.25, lower than this repo's targeted
+go1.26.8 toolchain; disclosed, not silently skipped); full
+internal/payments (277.981s) and internal/reconciliation (+ internal/
+reconciliation/statement) (42.916s + 1.018s) suites pass under
+-tags=integration -race -count=1 against PRIV_DB=fh3c.
+
+Private DBs: fh3c is the main working DB for this FH-3c session; fh3c_mg4
+(a throwaway scratch DB used for the MG4 mutation check; the L1 down/up
+round-trip reused fh3c's own migration0101Scratch/depositV2ScratchPool
+fixtures rather than a separate named DB) was dropped after use.

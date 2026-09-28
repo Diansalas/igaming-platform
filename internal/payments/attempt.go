@@ -74,10 +74,18 @@ const (
 	DeclineAfterAcceptance DeclineStage = "after_acceptance"
 )
 
-// TerminalReasonTombstonePrecedesSuccess is the ONLY terminal_reason the
-// guard trigger accepts on a deposit declined->disputed transition
-// (ADR 0095 §4.3 T13t, LF95-C6(d)).
+// TerminalReasonTombstonePrecedesSuccess is one of the two terminal_reason
+// values migration 0107's guard trigger accepts on a deposit
+// declined->disputed transition (ADR 0095 §4.3 T13t, LF95-C6(d)).
 const TerminalReasonTombstonePrecedesSuccess = "reversal_tombstone_precedes_success"
+
+// TerminalReasonMultipleSuccessForIntent is the OTHER terminal_reason
+// migration 0107's guard trigger accepts on a deposit declined->disputed
+// (T13d) or submitting/pending/ambiguous->disputed (T10) transition -
+// ADR 0095 §28.2 INV-DEP-1: a verified matching success arrived for an
+// attempt whose intent was already financially resolved by ANOTHER
+// attempt or ledger posting.
+const TerminalReasonMultipleSuccessForIntent = "multiple_success_for_intent"
 
 // killSwitchNotEngagedSQL returns the ADR 0095 §10.3 kill-switch predicate
 // as a boolean SQL expression, evaluated INSIDE the same claim statement
@@ -632,6 +640,25 @@ func ApplyTombstonePrecedesSuccess(ctx context.Context, tx pgx.Tx, attemptID uui
 		     next_action_at = NULL, updated_at = now()
 		 WHERE id = $1 AND state = 'declined' AND operation = 'deposit'`,
 		attemptID, evidence, TerminalReasonTombstonePrecedesSuccess,
+	)
+}
+
+// ApplyMultipleSuccessForIntent performs T13d (ADR 0095 §28.4, AM-2):
+// declined -> disputed, deposit only, for a verified matching success that
+// arrives after this attempt already declined, while the intent is
+// already financially resolved by ANOTHER attempt or ledger posting
+// (INV-DEP-1's resolved_for_other predicate). No posting, no error, no
+// rollback - this is the FIRST success's sibling story, symmetrical with
+// T13t: the money the PSP captured here is never credited to the player,
+// only recorded as a dispute for the (BLOCKED) M1 queue and reported by
+// reconciliation's pay_captured_unposted kind.
+func ApplyMultipleSuccessForIntent(ctx context.Context, tx pgx.Tx, attemptID uuid.UUID, evidence EvidenceKind) error {
+	return casUpdate(ctx, tx, "T13d declined->disputed (multiple success for intent)",
+		`UPDATE payment_attempts
+		 SET state = 'disputed', last_evidence_kind = $2, terminal_reason = $3, resolved_at = now(),
+		     next_action_at = NULL, updated_at = now()
+		 WHERE id = $1 AND state = 'declined' AND operation = 'deposit'`,
+		attemptID, evidence, TerminalReasonMultipleSuccessForIntent,
 	)
 }
 

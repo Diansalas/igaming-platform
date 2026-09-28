@@ -796,6 +796,66 @@ func TestPayoutDispatch_M11_RawVendorDeclineReasonNeverPersisted(t *testing.T) {
 // - survives"): a SECOND KYC deny on an attempt already escalated by a
 // FIRST deny must reschedule quietly, never error/roll back every sweep
 // tick forever.
+// TestPayoutDispatch_SecGapC_SyncSuccessProviderReferenceMismatchDisputes
+// pins security re-verification gap (c): applyPayoutSuccess itself now
+// centralizes the N6 provider-reference-mismatch rule, so the SYNC
+// dispatch path (ApplyPayoutResult's ErrorClassSucceeded branch, which
+// previously had NO reference check of its own at all - only the
+// QueryStatus and callback/receipt paths did) also disputes instead of
+// settling when a synchronous success result echoes a DIFFERENT,
+// non-empty reference than the one already on file.
+func TestPayoutDispatch_SecGapC_SyncSuccessProviderReferenceMismatchDisputes(t *testing.T) {
+	pool := depositV2ScratchPool(t)
+	f := seedPayoutFixture(t, pool, 100_000, true)
+	provider := NewMockProvider("mock-secgapc", "EUR")
+	registerCapability(t, pool, f.orchFixture, provider, 100)
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-secgapc": provider}, MultiWebhookCredentialResolver{"mock-secgapc": NewMockWebhookCredentials(provider)})
+
+	wr := approvedWithdrawal(t, pool, f, 500, "payout-secgapc")
+	claim, err := orch.ClaimForDispatch(context.Background(), pool, KYCEnforcementPayoutGate{}, f.tenantID, wr.ID, "bank_transfer", testSubmitActor())
+	if err != nil {
+		t.Fatalf("ClaimForDispatch: %v", err)
+	}
+	// Establish an on-file reference first (an ordinary accepted/pending
+	// result), so the later success has something to conflict with.
+	pending := GateResult[WithdrawResult]{Class: ErrorClassPending, Value: WithdrawResult{Outcome: OutcomePending, ProviderReference: "secgapc-on-file-ref"}}
+	if err := ApplyPayoutResult(context.Background(), pool, f.tenantID, wr.ID, claim.Attempt, pending, EvidenceSync); err != nil {
+		t.Fatalf("ApplyPayoutResult (pending): %v", err)
+	}
+	var accepted PaymentAttempt
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		var err error
+		accepted, err = GetAttemptByID(ctx, tx, claim.Attempt.ID)
+		return err
+	}); err != nil {
+		t.Fatalf("reread: %v", err)
+	}
+
+	// A SYNCHRONOUS success result echoing a DIFFERENT reference.
+	success := GateResult[WithdrawResult]{Class: ErrorClassSucceeded, Value: WithdrawResult{Outcome: OutcomeSucceeded, ProviderReference: "secgapc-DIFFERENT-ref"}}
+	if err := ApplyPayoutResult(context.Background(), pool, f.tenantID, wr.ID, accepted, success, EvidenceSync); err != nil {
+		t.Fatalf("ApplyPayoutResult (mismatched success): %v", err)
+	}
+
+	final := mustGetAttempt(t, pool, f.tenantID, claim.Attempt.ID)
+	if final.State != AttemptDisputed {
+		t.Fatalf("sec-gap-c: a sync success echoing a different on-file reference must dispute, got state=%s", final.State)
+	}
+	var wrState string
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT state FROM withdrawal_requests WHERE id = $1`, wr.ID).Scan(&wrState)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if wrState == "completed" {
+		t.Errorf("sec-gap-c: the withdrawal must never be settled against a reference the platform never had on file, got state=%q", wrState)
+	}
+	auditN := rvQueryInt(t, pool, f.orchFixture, `SELECT count(*) FROM audit_log WHERE action = 'payments.payout_provider_reference_mismatch'`)
+	if auditN != 1 {
+		t.Errorf("sec-gap-c: expected 1 audit record for the reference mismatch, got %d", auditN)
+	}
+}
+
 func TestSweeper_M12_RepeatedKYCDenyOnEscalatedAttempt_IsIdempotent(t *testing.T) {
 	pool := depositV2ScratchPool(t)
 	f := seedPayoutFixture(t, pool, 100_000, true)

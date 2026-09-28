@@ -211,7 +211,23 @@ func (o *Orchestrator) driveCreatedAttempt(
 		if _, err := tx.Exec(actx, `SELECT id FROM deposit_intents WHERE id = $1 FOR UPDATE`, intent.ID); err != nil {
 			return fmt.Errorf("payments: lock deposit intent: %w", err)
 		}
-		updated, child, err := o.applyDepositCallResult(actx, tx, intent, attempt, capability, claimToken, gr, EvidenceSync, sweeperDriven)
+		// Ledger-finance review F3 (rv-fh3-ledger.md, 076e42e): attempt was
+		// read (line ~178) BEFORE phase B's outbound Deposit call and
+		// BEFORE the parent lock just above - money-safe (CAS plus
+		// INV-DEP-1 catch every stale decision regardless, confirmed by
+		// the reviewer's own 25-rep concurrent storm), but a concurrent
+		// callback that moved the attempt in the meantime made
+		// applyDepositCallResult decide from a stale snapshot the CAS
+		// predicates then reject as a plain error - noise today, and a
+		// spurious error surfaced to a player whose deposit actually
+		// succeeded. Re-read under the now-held lock, exactly as
+		// ApplyReceiptEvidence and the sweeper's own identical fix
+		// (processViaQueryStatus) already do.
+		current, err := GetAttemptByID(actx, tx, attempt.ID)
+		if err != nil {
+			return err
+		}
+		updated, child, err := o.applyDepositCallResult(actx, tx, intent, current, capability, claimToken, gr, EvidenceSync, sweeperDriven)
 		intent = updated
 		cascadeChild = child
 		return err
@@ -298,17 +314,49 @@ func (o *Orchestrator) applyDepositCallResult(
 		return intent, nil, nil
 
 	case ErrorClassSucceeded:
-		// postedTxID (never updated.LedgerTransactionID - PRH-I5 finding,
-		// LF95-C6(a)/T13): a concurrent sibling could have already posted
-		// the intent's FIRST capture between this attempt's own phase B
-		// and this phase C, in which case updated.LedgerTransactionID
-		// still names that first posting while THIS attempt's own
-		// posting (a genuine T13 second capture) got its own, different
+		// RV-PRH-I1 ledger-finance N2: a reversal tombstone already
+		// occupying (provider_id, provider_reference) must route to T10
+		// (ADR 0095 §4.3's own "…T10 instead, with no posting and no
+		// error"), never straight into postDepositSuccess - that call's
+		// own ledger idempotency-key insert would otherwise hit the
+		// tombstone's unique index and surface as an untyped error, which
+		// the caller cannot distinguish from a real failure and which
+		// retries identically forever. This attempt is always 'submitting'
+		// here (phase C dispatches immediately after ClaimCreatedForSubmission),
+		// so the non-terminal dispute path applies, exactly as the receipt
+		// path's OutcomeSucceeded/{submitting,pending,ambiguous} cell does.
+		if res.ProviderReference != "" {
+			tombstoned, err := tombstoneExists(ctx, tx, attempt.TenantID, capability.ProviderID, res.ProviderReference)
+			if err != nil {
+				return intent, nil, err
+			}
+			if tombstoned {
+				if err := ApplyDisputeFromNonTerminal(ctx, tx, attempt.ID, evidence, "reversal_tombstone_precedes_success"); err != nil {
+					return intent, nil, err
+				}
+				return intent, nil, nil
+			}
+		}
+		// ADR 0095 §28.3: routed through the choke-point wrapper, which
+		// checks resolved_for_other(I, A, K) BEFORE ever posting - a
+		// success for an intent already financially resolved by ANOTHER
+		// attempt or posting takes T10 (this attempt is always
+		// 'submitting' here) instead of Flow 1. postedTxID (never
+		// updated.LedgerTransactionID - PRH-I5 finding, LF95-C6(a)/T13):
+		// a concurrent sibling could have already posted the intent's
+		// FIRST capture between this attempt's own phase B and this
+		// phase C, in which case updated.LedgerTransactionID still names
+		// that first posting while THIS attempt's own posting (the
+		// intent's first-ever capture, since resolved_for_other above
+		// already refused anything else) got its own, different
 		// transaction id - linking the attempt to the wrong one would
 		// collide with payment_attempts_tenant_ledger_tx.
-		updated, postedTxID, err := o.postDepositSuccess(ctx, tx, intent, capability.ProviderID, res.ProviderReference, attempt.Amount, attempt.AssetCode)
+		updated, postedTxID, disputed, err := o.postDepositSuccessOrDispute(ctx, tx, intent, attempt, capability.ProviderID, res.ProviderReference, attempt.Amount, attempt.AssetCode, evidence)
 		if err != nil {
 			return intent, nil, err
+		}
+		if disputed {
+			return intent, nil, nil
 		}
 		if err := ApplySuccess(ctx, tx, attempt.ID, SuccessEvidence{
 			Evidence: evidence, ProviderReference: res.ProviderReference, LedgerTransactionID: &postedTxID,
@@ -320,7 +368,7 @@ func (o *Orchestrator) applyDepositCallResult(
 		// PRIOR decline of a different sibling, driven concurrently) - any
 		// such leftover 'created' sibling must never reach T2 and place a
 		// second real PSP charge now that the intent has succeeded.
-		if err := rejectCreatedSiblings(ctx, tx, attempt); err != nil {
+		if err := rejectCreatedSiblings(ctx, tx, attempt, evidence); err != nil {
 			return intent, nil, err
 		}
 		return updated, nil, nil
@@ -330,7 +378,10 @@ func (o *Orchestrator) applyDepositCallResult(
 		if res.ProviderReference != "" {
 			refPtr = &res.ProviderReference
 		}
-		reason := boundedDeclineReason(res.DeclineReason)
+		reason, err := boundedDeclineReasonAudited(ctx, tx, attempt.TenantID, "payment_attempt", attempt.ID.String(), capability.ProviderID, res.DeclineReason)
+		if err != nil {
+			return intent, nil, err
+		}
 		updated, err := o.finalizeDeclined(ctx, tx, intent, &capability.ProviderID, refPtr, reason)
 		if err != nil {
 			return intent, nil, err
