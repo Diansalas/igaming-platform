@@ -135,23 +135,13 @@ func f() { tx.Exec(ctx, "SELECT set_config('app.tenant_id', $1, true)") }
 
 var actingSetterCallPattern = regexp.MustCompile(`\.WithPlatformActingInTenant\s*\(`)
 
-// actingSetterAllowedCallers is the closed list of non-test files
-// permitted to call db.Pool.WithPlatformActingInTenant (ADR 0099 §6.1).
-// K1 does not implement the K2 (internal/adjustment) or K3
-// (internal/payments/manual_resolution.go) call sites themselves - those
-// land with ADR 0100/0101 - so today this list has no real caller at all,
-// and the test below passes vacuously until one exists. It still pins
-// that the ONLY two files ever allowed to gain such a call site are
-// these, so a future change adding a call anywhere else fails the build
+// TestA16_OnlyTwoPackagesCallTheActingSetter is A-16's second half. The
+// closed allow-list is internal/adjustment (K2, ADR 0100) and
+// internal/payments/manual_resolution.go (K3, ADR 0101) - neither exists
+// yet, so this test passes vacuously until one does; it still pins that
+// the ONLY two places ever allowed to gain such a call site are these, so
+// a future change adding a call anywhere else fails the build
 // immediately.
-func actingSetterAllowedCallers(root string) map[string]bool {
-	return map[string]bool{
-		filepath.Join(root, "internal", "adjustment"):                       true, // directory prefix
-		filepath.Join(root, "internal", "payments", "manual_resolution.go"): true,
-	}
-}
-
-// TestA16_OnlyTwoPackagesCallTheActingSetter is A-16's second half.
 func TestA16_OnlyTwoPackagesCallTheActingSetter(t *testing.T) {
 	root := repoRootForActingSetterTest(t)
 	allowedDir := filepath.Join(root, "internal", "adjustment")

@@ -399,7 +399,15 @@ func TestCapabilityGrant_A13_AppendOnly(t *testing.T) {
 
 	// Un-revoke: attempting to clear revoked_at is refused.
 	err := pool.WithPlatformAdmin(ctx, f.ApproverID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `UPDATE staff_capability_grants SET revoked_at = NULL WHERE id = $1`, f.GrantID)
+		// Clears all four revoke columns together (not just revoked_at) so
+		// this exercises the TRIGGER's own explicit re-revoke refusal, not
+		// merely the table's separate (revoked_at IS NULL) = (revoked_by
+		// IS NULL) CHECK constraint - a real, independent backstop, but a
+		// different one from the trigger's own "no un-revoke" guard.
+		_, err := tx.Exec(ctx,
+			`UPDATE staff_capability_grants
+			    SET revoked_at = NULL, revoked_by = NULL, revoked_by_scope = NULL, revoke_reason_code = NULL
+			  WHERE id = $1`, f.GrantID)
 		return err
 	})
 	if !cgIsCode(err, "CG012") {
@@ -598,6 +606,17 @@ func TestCapabilityGrant_A4_K11_RestrictiveFenceRefusals(t *testing.T) {
 	runZeroRows(t, "read_login_attempts", `SELECT count(*) FROM login_attempts`)
 	// audit_log: read any row (INSERT is allowed for own tenant, but
 	// SELECT is always refused).
+	// Seed a genuine platform-level (tenant_id NULL) audit row first - the
+	// acting_insert audit row WithPlatformActingInTenant itself wrote is
+	// tenant-scoped (forced to tenantID), so without this a mutant that
+	// widens the SELECT fence to "true" would escape detection simply
+	// because no platform-scope row happens to exist yet.
+	if err := pool.WithoutTenant(ctx, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `INSERT INTO audit_log (tenant_id, actor_type, actor_id, action, outcome) VALUES (NULL, 'staff', $1, 'test.platform_seed', 'success')`, principalID)
+		return err
+	}); err != nil {
+		t.Fatalf("seed platform audit row: %v", err)
+	}
 	runZeroRows(t, "read_audit_log", `SELECT count(*) FROM audit_log`)
 	// audit_log: an attempted platform (tenant_id NULL) insert is FORCED
 	// to the acting tenant by audit_log_acting_actor (never left as a

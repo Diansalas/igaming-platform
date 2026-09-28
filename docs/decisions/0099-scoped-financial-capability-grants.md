@@ -828,3 +828,130 @@ HANDOVER index, plan §3 Touches, and the review records.
 | Ruling 6 | §7.4; ADR 0100 §8 |
 | F4–F17, rulings 1, 3–5, 7 | ADR 0100 §17, ADR 0101 §16 |
 | **Orchestrator decisions** | G-P2 lifetime and re-attestation defaults are technical security defaults: §8.2, §8.3, §16.3. Registry ids used: STAFF-LIFECYCLE-1. |
+
+## 19. K1 implementation status (backend-engineer, PRH-2 K1 build)
+
+**Status: PARTIALLY IMPLEMENTED.** Migration 0112 is applied, the DB-level
+invariants are tested and mutation-tested, and a working (but not fully
+audited by `security`) HTTP API exists for the G-T flow end to end. Several
+items are explicitly deferred; see below.
+
+### 19.1 What is IMPLEMENTED
+
+- **Migration 0112** (`migrations/0112_scoped_financial_capability_grants.{up,down}.sql`):
+  every §10 object - the functions (§10.1), the three reference tables with
+  their seed rows (§10.2, including `acting_grant_max_lifetime = 4 hours`,
+  the K1 technical security default), `staff_capability_grant_requests`
+  (§10.3), `staff_capability_grant_approvals` (§10.4),
+  `staff_capability_grants` (§10.5), the §6.4 restrictive fence and §6.5
+  acting policies on the seven exposed tables plus `audit_log_acting_actor`
+  (§10.6), and the §10.7 down migration (refuses with rows; reversible on an
+  empty database; `go run ./cmd/migrate verify` is clean).
+- **The sole setter**, `WithPlatformActingInTenant` (`internal/db/tenant_rls.go`).
+  Static test A-16 (`internal/db/acting_setter_static_test.go`) pins it as the
+  only place that sets the two acting GUCs, with a required negative control.
+- **`internal/capability`**: the Go service layer (CreateRequest,
+  CancelRequest, DecideAndGrant, RevokeGrant, ListRequests, ListGrants, error
+  classification by `CG` SQLSTATE class). Deliberately thin - every real
+  invariant lives in the migration's own triggers.
+- **`internal/httpserver/capability_routes.go`**: the HTTP API (request,
+  approve/reject, cancel, revoke, list requests, list grants), following the
+  dual-scope `/v1/admin/tenants/{tenantID}/capability-grants/...` convention
+  this codebase already uses for the payment kill switch and provider
+  credentials. One line added to `routes.go` (`registerCapabilityRoutes`).
+  **This HTTP layer has NOT been reviewed by `security` or `code-reviewer`**
+  - see §19.3.
+- **`internal/auth/permission.go`**: the seven §3.2 governance permissions
+  added and wired into `RolePlatformAdmin`/`RoleTenantAdmin`/`RoleCompliance`/
+  `RoleFinance` exactly matching the seeded `financial_governance_permissions`
+  catalogue (test A-15 pins the two in agreement).
+- **Tests** (`internal/db/capability_grant_integration_test.go`,
+  `migration_0112_integration_test.go`, `acting_setter_static_test.go`,
+  `acting_grant_fixture_integration_test.go`, plus
+  `internal/identity/platform_admin_insert_static_test.go`): A-2 (both
+  halves), A-4 (the K1-1 restrictive-fence cases, DB-level only - not the
+  HTTP-level A-1 matrix), A-5, A-6, A-7, A-8, A-10, A-11, A-13, A-15, A-16,
+  A-17 (both halves, using the "migrate only through 0112" scratch pattern),
+  A-14b, the C-1 exact-GUC-shape predicate test, the setter's own
+  no-valid-grant refusal test, and the required sock-puppet test. All pass
+  under `-race -tags integration`.
+- **Mutants**: `docs/plans/payment-readiness/evidence/prh2-k1-mutation-kill.txt`
+  - 6 independently killed, 4 honestly disclosed as masked by an
+  independent, equally-real control (not a gap), 0 undetected gaps.
+
+### 19.2 A real design gap found and fixed during K1 (disclosed, not silently patched)
+
+While building the G-T flow end to end, K1 found that migration 0011's
+`dual_scope_isolation` policy leaves a **plain platform session
+structurally blind to any tenant-scoped `staff_users` row** (independently
+already documented by `newLinkPlatformStaffPersonHandler`'s own doc comment
+in `admin_routes.go`). This breaks the platform approver's own R-4
+distinct-Person check for a G-T grant (finance grantee, tenant-scoped) the
+moment the approver is a plain platform session - there was no way for it
+to read the grantee's `person_id` at all.
+
+**Fix applied (no new tenant-isolation mechanism, no RLS widening):**
+`staff_capability_grant_requests` gained a forced column,
+`grantee_person_id`, captured from the grantee's own `staff_users` row at
+**request-creation time** (when the actor - a tenant session for G-T, or a
+platform session for G-P2 - can legitimately see it). The approval trigger
+reads `v_req.grantee_person_id` instead of re-querying `staff_users`. This
+fully unblocks G-T (tenant admin requests a `finance` grantee; a platform
+principal approves) and G-P2 (platform grantee, itself visible to a plain
+platform session via the pre-existing NULL-tenant arm).
+
+**What remains BLOCKED / NOT IMPLEMENTED by this fix: G-P1** (a platform
+session *requesting* a grant naming a **tenant-scoped** grantee, e.g. a
+`finance` staff member, per §4's G-P1 row). At **request-creation** time a
+platform session still cannot see the tenant-scoped grantee row at all, so
+`staff_capability_grant_requests_guard`'s own grantee lookup fails
+("grantee ... does not exist") before any of R-1/R-4/R-9 can even run. **This
+needs an `architect` decision** - options include (a) a new,
+column-restricted platform-wide SELECT view onto `staff_users` (id,
+tenant_id, role, status, person_id only, mirroring the acting-session
+column-discipline precedent in §6.8), (b) requiring G-P1 to be filed as a
+tenant-side co-request instead, or (c) declaring G-P1 out of scope for PRH-2
+and relying on G-T alone for tenant-scoped grantees. **G-T and G-P2 are
+fully functional and tested end to end; G-P1 is NOT IMPLEMENTED.** No
+tenant-isolation mechanism was invented or RLS policy widened to work
+around this - per the backend-engineer role's own limits, this is escalated
+rather than decided unilaterally.
+
+### 19.3 Explicitly NOT DONE / deferred (honest labels)
+
+- **`security` and `code-reviewer` review of this K1 HTTP/DB
+  implementation**: NOT DONE. This is a security-critical financial-grant
+  control surface and CLAUDE.md requires explicit `security` review before
+  it is "complete" - this build is a candidate for that review, not a
+  substitute for it.
+- **A-1** (the full role × family × capability × action HTTP+DB matrix),
+  **A-3** (acting session opens/audits, in the context of an actual K2/K3
+  governed post - K1 has no governed post to complete), **A-4b/A-4c** (the
+  projection and ledger fences - explicitly K2's migration 0113 content per
+  ADR §6.6/§6.7, "not executed" here on purpose), **A-9** (the `FOR SHARE`
+  concurrent-revoke-vs-execution race - there is no K1 execution path to
+  race against yet; only file-level revoke-is-effective-next-read is
+  implicitly exercised), **A-12** (the full audit-content/`platform_acting`
+  tenant-presentation/`grant.reattested` test), **A-18** (the static
+  migration-replay tool that proves no future NULL-arm table ships
+  unfenced - a real, nontrivial SQL-parsing static analysis tool, not built
+  in this session for time reasons; A-17's DB-level baseline check is a
+  partial substitute, not a replacement), and **A-19** (column discipline -
+  moot for K1 alone, since K1 code never reads `player_accounts` or ledger
+  tables; applies to K2/K3) are **NOT IMPLEMENTED** in this K1 build.
+- **`deploy/init-app-role.sql`**: UPDATED - the `igaming_runtime` grants for
+  all six new K1 tables (SELECT-only on the three reference tables;
+  SELECT/INSERT/UPDATE on `staff_capability_grant_requests`/
+  `staff_capability_grants`; SELECT/INSERT on
+  `staff_capability_grant_approvals`), mirroring the alerts-table pattern
+  already in that file.
+- **`docs/architecture/05-identity-architecture.md`,
+  `03-database-architecture.md`, `docs/security/security-architecture.md`,
+  `36-backoffice-and-partner-console-architecture.md`,
+  `backoffice/src/auth/permissions.ts`, `docs/runbooks/operational-
+  runbooks.md`**: **NOT UPDATED** in this session (time) - a real, disclosed
+  documentation gap.
+- The registry (CAP-GRANT-1), `docs/progress.md`, `docs/active-stage.md`,
+  `docs/governance/task-registry.md` and the HANDOVER index are the
+  orchestrator's to update, per this ADR's own §17 - proposed row text is in
+  the K1 build's final report, not applied here.

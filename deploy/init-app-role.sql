@@ -333,3 +333,50 @@ BEGIN
     END IF;
 END
 $$;
+
+-- PRH-2 K1 (migration 0112; ADR 0099): least-privilege, re-asserted on
+-- every run for the same reason as the blocks above. RLS (FORCE on every
+-- one of these tables) is the binding control; these grants are defence
+-- in depth, narrower than the blanket ALTER DEFAULT PRIVILEGES backfill.
+--   financial_capability_catalogue,
+--   financial_governance_permissions,
+--   financial_capability_settings   - immutable seed vocabulary written
+--                                     only by migration 0112 itself:
+--                                     SELECT only, no write grant at all.
+--   staff_capability_grant_requests - SELECT/INSERT/UPDATE (the
+--                                     pending -> cancelled/expired/
+--                                     approved/rejected transition; append-
+--                                     only otherwise, enforced by the
+--                                     guard trigger). Never DELETE.
+--   staff_capability_grant_approvals - append-only: SELECT/INSERT only.
+--   staff_capability_grants          - SELECT/INSERT/UPDATE (the one-way
+--                                     revoke). Never DELETE - the guard
+--                                     trigger refuses it anyway.
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'financial_capability_catalogue') THEN
+        EXECUTE 'REVOKE ALL ON financial_capability_catalogue FROM igaming_runtime';
+        EXECUTE 'GRANT SELECT ON financial_capability_catalogue TO igaming_runtime';
+    END IF;
+    IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'financial_governance_permissions') THEN
+        EXECUTE 'REVOKE ALL ON financial_governance_permissions FROM igaming_runtime';
+        EXECUTE 'GRANT SELECT ON financial_governance_permissions TO igaming_runtime';
+    END IF;
+    IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'financial_capability_settings') THEN
+        EXECUTE 'REVOKE ALL ON financial_capability_settings FROM igaming_runtime';
+        EXECUTE 'GRANT SELECT ON financial_capability_settings TO igaming_runtime';
+    END IF;
+    IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'staff_capability_grant_requests') THEN
+        EXECUTE 'REVOKE ALL ON staff_capability_grant_requests FROM igaming_runtime';
+        EXECUTE 'GRANT SELECT, INSERT, UPDATE ON staff_capability_grant_requests TO igaming_runtime';
+    END IF;
+    IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'staff_capability_grant_approvals') THEN
+        EXECUTE 'REVOKE ALL ON staff_capability_grant_approvals FROM igaming_runtime';
+        EXECUTE 'GRANT SELECT, INSERT ON staff_capability_grant_approvals TO igaming_runtime';
+    END IF;
+    IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'staff_capability_grants') THEN
+        EXECUTE 'REVOKE ALL ON staff_capability_grants FROM igaming_runtime';
+        EXECUTE 'GRANT SELECT, INSERT, UPDATE ON staff_capability_grants TO igaming_runtime';
+    END IF;
+END
+$$;
