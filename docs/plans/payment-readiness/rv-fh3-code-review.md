@@ -260,3 +260,100 @@ Surviving and killed mutants, for the evidence file:
 X1 and X3 survived both `internal/payments` and `internal/httpserver`. The ADR explicitly allows X2 and
 X6 to survive as defence in depth only if each layer is pinned somewhere; today none is pinned
 behaviourally.
+
+---
+
+## Re-review 1: FH-3c at `92f5889` (FH-3b underneath at `cb03868`), 2026-09-28
+
+- Range reviewed: `a927aed..92f5889`, read as a direct diff of `internal/` and `migrations/`.
+- Environment:
+  - A detached worktree with a unique name (`crfh3c_5688-wt`) and a private DB (`crfh3c_5688`), built
+    with `priv_db.sh`.
+  - No sudo, role or password changes.
+  - The worktree and DB were removed afterwards, and `git status` was clean after every mutant batch.
+- Baseline: `internal/payments`, `internal/reconciliation`, `internal/ledger` and `internal/idempotency`
+  all pass under `-tags=integration`.
+- Every mutant below ran against the **full** package(s). MG4 rebuilt the private DB from the mutated
+  `0107…up.sql`, then rebuilt it again clean afterwards.
+
+### Verdict: READY WITH CONDITIONS (one Low, fail-safe residual for `ledger-finance` to rule on; nothing blocking)
+
+Every item from my `95a1c34` review is fixed and pinned. Every requested mutant is now killed. The A7
+helper collision is resolved, and I proved it compiles by performing the merge.
+
+### Mutants (all requested, re-run)
+
+| ID | Mutation | Result | Killed by |
+|---|---|---|---|
+| X1 | wrapper pre-check dropped | **KILLED** | `TestINVDEP1_FL1_ApplicationChokePointCatchesItBeforeTheDBBackstop` (backstop P1 must not fire) |
+| X2 | re-check in `postDepositSuccess` dropped | **KILLED** | `TestINVDEP1_MC2_PostDepositSuccessInternalRecheck` (asserts the application sentinel, not the ledger one) |
+| X3 | both application checks dropped | **KILLED** | `TestINVDEP1_FL1_*` |
+| X4 | ledger sentinel routing removed | **KILLED** | ledger/0107 backstop tests |
+| X5 | backstop → sentinel mapping removed | **KILLED** | `TestX5_LedgerBackstopMapping` |
+| X6 | ledger half of `resolvedForOtherDeposit` dropped | **KILLED** | `TestX6_ResolvedForOtherDepositPredicate_LedgerHalfAlone` (a direct predicate test, which is acceptable because X1/X3 pin the behavioural layer) |
+| X13 | recon reversal-line clearing removed | **KILLED** | `TestINVDEP1_C5_*` |
+| X14 | recon tombstone clearing removed | **KILLED** | `TestINVDEP1_C5_*` |
+| X15 | recon counts statement `reversed` as captured | **KILLED** | `TestINVDEP1_C5_*/own_line_reported_reversed` |
+| X16a / X16b | terminal_reason filter dropped (with a statement line / with no line) | **KILLED** | `TestINVDEP1_X16_*` |
+| X17 (new) | the every-run, no-statement-line emission removed | **KILLED** | `TestINVDEP1_C2_CapturedUnposted_StandsAcrossStatementWindow` |
+| H1b | `ev.RawOutcome = rawOutcome` removed | **KILLED** | `TestINVDEP1_H1b_ReversalFingerprintEndToEnd_RawWireOutcomePreserved` |
+| MG4 | the 0107 trigger accepts ANY deposit `declined → disputed` reason | **KILLED** | `TestMigration0107_T13tT13d_TerminalReasonTrigger_HEAD` and `TestMigration0101_T13t_*` (both now run at HEAD) |
+
+The H1b test drives a real `declined`-carrier reversal through the callback path. It asserts that the
+stored fingerprint equals the one computed from the raw wire outcome, and that it differs from the
+fingerprint a `succeeded` delivery would produce. **C5 is closed.**
+
+### Status of my previous findings
+
+| Item | Status |
+|---|---|
+| R1 (statement status `reversed` counted as captured) | **Fixed.** The matched-line case now requires `PaymentStatusSucceeded`. A line whose own status is `reversed` clears the report for that run (X15 killed). A residual remains; see N-1. |
+| R2 (only reported when a statement line exists) | **Fixed.** `checkUnmatchedAttempts` now reports disputed `multiple_success_for_intent` attempts on every run, deliberately without a date window (X17 killed). |
+| R3 (test gaps) | **Fixed.** See the X-kills above. Also: the down migration wraps the CHECK restore in `DO … EXCEPTION` with runbook text and has a refusal test, and the pre-flight tests now assert the runbook message. |
+| R4 (legacy refusal audit unwired) | **Fixed.** `InitiateDepositAudited` catches the typed `DepositIntentAlreadyResolvedRefusal` and writes the audit in a separate transaction. It is labelled TEST-ONLY. Minor: `TestC4_*` calls `RecordDepositMultipleSuccessRefusal` directly rather than going through `InitiateDepositAudited`'s own unwrapping. |
+| R5 (stale attempt copy in the sweeper) | **Fixed.** The attempt is re-read under the parent lock in `sweeper.go` and in both `deposit_v2.go` call sites (`84af3d4`). |
+| R6 (inverted P6 lost assertions) | **Fixed.** The PAY-REV-1 second-reversal and `reverses_transaction_id` assertions are restored (`1ffc904`). |
+| C5 / H1b | **Closed** (see above). |
+
+### A7 helper collision
+
+- `internal/payments/a7_helpers_integration_test.go` at `92f5889` has **byte-identical** signatures to
+  FH-6 `b7f84ec` for both `a7HoldRow(t, pool, tenantID, table, rowID, name)` and
+  `a7WaitAnyLockWaiter(t, pool, exclude, timeout)`.
+- `a7WaitAnyLockWaiter`'s body is identical, including the `current_database()` scope.
+- `a7HoldRow`'s body differs only by the folded-in `ErrNoRows` "no %s row %s to lock" error and
+  `fmt.Sprintf`, as proposed. This is a behaviour-preserving superset.
+- **Compile proof:** in a throwaway detached worktree I merged `b7f84ec` into `92f5889` (no textual
+  conflicts). The first `go vet` failed on `a7WaitAnyLockWaiter redeclared`. After deleting only FH-6's
+  two copies from `a7_lockorder_integration_test.go`, `go vet -tags=integration ./internal/payments/` is
+  **clean**, with no unused imports and no other collision. So the payout/FH-6 branch deleting its
+  copies will compile. The throwaway worktree was removed and nothing was committed.
+
+### New finding
+
+**N-1 (Low, fail-safe; for `ledger-finance` to rule, non-blocking): a refund reported only as the
+capture's own statement line with status `reversed` clears `pay_captured_unposted` for that run only.**
+
+The clearing rule, `capturedUnposted` (no `deposit_reversal` line in this run, and no ledger tombstone),
+has no durable memory of a statement-reported refund. So the next run, whose statement no longer
+carries the line, re-reports the exposure. I confirmed this with a scratch probe using the recon test
+harness:
+
+```
+run1 (own line reversed) captured_unposted=false; run2 (no line) captured_unposted=true
+```
+
+This errs toward over-reporting: a refunded capture keeps reappearing as an exposure. It never hides
+real unposted money, so it is not a money-safety defect. Ops, however, would see a standing false
+positive that can never clear, and that erodes the report's value.
+
+Options, for `ledger-finance` to choose:
+- (a) accept and document that a PSP must also send a reversal callback or line to clear the exposure;
+- (b) persist the statement-reported refund durably, for example as a resolved receipt or reconciliation
+  clearance row keyed by `(provider_id, provider_reference)`, and include it in `capturedUnposted`.
+
+### Required to close the conditions
+
+1. `ledger-finance` rules on N-1, and it is either fixed with a two-run test (the probe above) or
+   documented as an accepted residual.
+2. Optional: a test that drives `InitiateDepositAudited` itself end to end.
