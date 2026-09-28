@@ -288,3 +288,87 @@ confirmed passing. This is disclosed as a gap relative to a strict
 re-mutate-and-kill methodology: the fixes are proven correct by direct
 test, not by reproducing the reviewer's exact mutants against the new
 code and watching them fail.
+
+------------------------------------------------------------------------
+
+Round 3 (security re-review IR-1, 2026-09-28): exclusion set on
+alert_occurrences' subject-tenant raise policy
+=============================================================================
+
+M12. Exclusion set removed from alerts_subject_tenant_raise ON
+alert_occurrences (IR-1's explicit follow-up finding).
+    File: migrations/0110_durable_alerting.up.sql, alerts_subject_tenant_
+    raise policy on `alert_occurrences`.
+    Mutation: the five `AND NULLIF(current_setting(...` exclusion clauses
+    removed from the WITH CHECK, leaving only the tenant/subject match
+    and the in_tx_raisable_by_tenant check.
+    IMPORTANT FINDING: this mutant is NOT killed by a behavioural probe
+    (the same shape as M11's). `alert_occurrences_guard`'s own
+    `alerting_session_scope()` call independently raises for EVERY one of
+    the five exclusion GUCs combined with app.tenant_id (each one hits
+    either the "acting"/"player" check or a "mixed session" check in that
+    function, before RLS is ever evaluated on INSERT - BEFORE ROW
+    triggers run strictly before WITH CHECK is checked). Confirmed
+    empirically: with the mutation applied,
+    TestExclusionSets_SubjectTenantRaise_Family (the M11-style behavioural
+    probe, first fixed this round per IR-1 to target a REAL, committed
+    alert id) still PASSED - the mutant SURVIVED that probe, exactly as
+    the security re-review predicted.
+    Killed by: TestExclusionSets_SubjectTenantRaise_OccurrencesPolicyTextPinsExclusions
+    (new this round) - a metadata-level pin querying
+    `pg_get_expr(pol.polwithcheck, pol.polrelid)` from `pg_policy`/
+    `pg_class` directly for the exact policy, asserting the WITH CHECK
+    text contains all five GUC names. This is independent of the
+    trigger's own redundant defence, and is the only way to observe a
+    change to this SPECIFIC policy's text given the trigger structurally
+    intercepts every reachable attack shape first.
+        (go test -tags=integration -run
+         TestExclusionSets_SubjectTenantRaise_OccurrencesPolicyTextPinsExclusions
+         ./internal/alerting/..., against a freshly rebuilt PRIV_DB=ialert7)
+    Observed failure: all five `t.Errorf` lines fired, each showing the
+    mutated WITH CHECK text with no exclusion clauses present.
+    Restored: migration byte-identical to the committed version
+    (`git diff --stat migrations/0110_durable_alerting.up.sql`: no
+    output); PRIV_DB rebuilt clean before continuing.
+
+Result for this round: 1/1 attempted mutant killed (M12), via a metadata
+pin rather than a behavioural test - disclosed explicitly above as the
+correct, necessary approach given the trigger/RLS redundancy this
+investigation uncovered on this specific table/policy.
+
+------------------------------------------------------------------------
+
+Round 4 (ledger-finance re-review N-1, 2026-09-28): Flush retrying on the
+original runner instead of freshReadCommittedRunner
+=============================================================================
+
+MF. `Pending.Flush`'s detached retry uses `p.runner` directly instead of
+`freshReadCommittedRunner(p.runner.Pool(), p.runner.Scope())` (LF's own
+mutant name, ledger-finance re-review note N-1).
+    File: internal/alerting/guarded.go, Pending.Flush.
+    Mutation: `retryRunner := freshReadCommittedRunner(p.runner.Pool(),
+    p.runner.Scope())` replaced with `retryRunner := p.runner`.
+    Killed by: TestLFC2_RaiseGuardedDefersInsteadOfRaisingUnderRepeatableRead
+    (strengthened this round per N-1: `snapshotRunner` now records the
+    real `transaction_isolation` seen on EVERY invocation of its own Run
+    method, and the test asserts it was invoked exactly once - the
+    original raise inside InTx - never again during Flush's retry)
+        (go test -tags=integration -run TestLFC2 ./internal/alerting/...,
+         against PRIV_DB=ialert7)
+    Observed failure:
+        lf_c2_integration_test.go:126: expected the snapshot runner to be
+        invoked exactly once (the original raise), got 2 invocations
+        (isolations: [repeatable read repeatable read]) - the detached
+        retry must use freshReadCommittedRunner, never the original
+        runner
+    Before this fix, the same test only asserted the alert persisted
+    after Flush - which the mutant ALSO satisfies (Raise still succeeds
+    the second time even at REPEATABLE READ here, since the dedup key is
+    stable and no concurrent writer contends the snapshot in this single-
+    threaded test), so the mutant previously survived silently. The
+    invocation-count/isolation-log assertion is what actually pins the
+    isolation level of the RETRY, not just the raise's eventual success.
+    Restored: guarded.go byte-identical to the committed version
+    (`git diff --stat internal/alerting/guarded.go`: no output).
+
+Result for this round: 1/1 attempted mutant killed (MF).

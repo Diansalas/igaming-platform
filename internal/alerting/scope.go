@@ -2,6 +2,7 @@ package alerting
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/google/uuid"
 
@@ -126,13 +127,33 @@ func (r platformAdminRunner) Pool() *db.Pool { return r.pool }
 // stricter isolation level into the retry path.
 func freshReadCommittedRunner(pool *db.Pool, scope RaiseScope) ScopedRunner {
 	switch scope.Kind {
+	case ScopeTenant:
+		return NewTenantRunner(pool, scope.TenantID)
 	case ScopeTenantPrincipal:
 		return NewPrincipalRunner(pool, scope.TenantID, scope.PrincipalID)
 	case ScopePlatformAdmin:
 		return NewPlatformAdminRunner(pool, scope.PlatformAdminID)
-	default: // ScopeTenant
-		return NewTenantRunner(pool, scope.TenantID)
+	default:
+		// A future ScopeKind added without updating this switch must
+		// never silently fall back to treating it as ScopeTenant (which
+		// could open a transaction under the WRONG tenant/identity). This
+		// refuses outright instead.
+		return refusingRunner{pool: pool, scope: scope}
 	}
+}
+
+// refusingRunner is a ScopedRunner whose Run always fails - the
+// structural "unknown ScopeKind" refusal freshReadCommittedRunner's
+// default case returns, rather than ever guessing a scope.
+type refusingRunner struct {
+	pool  *db.Pool
+	scope RaiseScope
+}
+
+func (r refusingRunner) Scope() RaiseScope { return r.scope }
+func (r refusingRunner) Pool() *db.Pool    { return r.pool }
+func (r refusingRunner) Run(context.Context, db.TxFunc) error {
+	return fmt.Errorf("alerting: freshReadCommittedRunner: unknown ScopeKind %d - refusing rather than guessing a scope", r.scope.Kind)
 }
 
 // subjectTenant returns the tenant id a ScopedRunner's own scope

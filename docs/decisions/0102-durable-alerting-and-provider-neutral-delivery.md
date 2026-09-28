@@ -1186,3 +1186,59 @@ incomplete.
   confirmed to catch the described defect by direct testing of the fixed
   behaviour (e.g. the backoff/escalation clock-driven tests), rather than
   by re-running the reviewer's own mutants against this codebase.
+
+### 16.2 Addendum — security re-review IR-1/IR-2 and LF re-review N-1 (2026-09-28)
+
+Security's re-review of `9f5970c` is **ACCEPT**. Three small follow-up
+items, addressed here:
+
+- **IR-1.** `TestExclusionSets_SubjectTenantRaise_Family`'s occurrence
+  probe previously inserted `alert_occurrences (alert_id)` against a
+  RANDOM id, so it was refused by the row simply not existing, never by
+  RLS - vacuous. Fixed to probe against a real, committed seed alert.
+  Doing so exposed a genuine, deeper finding: `alert_occurrences_guard`'s
+  own `alerting_session_scope()` call independently raises for every one
+  of the five C-102-9 exclusion GUCs combined with `app.tenant_id`
+  (BEFORE ROW triggers run strictly before RLS's WITH CHECK on INSERT),
+  so a behavioural probe of `alerts_subject_tenant_raise` on
+  `alert_occurrences` can never observe the RLS policy's OWN exclusion
+  clauses - the trigger always blocks it first, by construction. A new
+  test, `TestExclusionSets_SubjectTenantRaise_OccurrencesPolicyTextPinsExclusions`,
+  pins the policy's WITH CHECK text directly via `pg_get_expr`/
+  `pg_policy`, independent of the trigger's redundant defence. Confirmed:
+  a hand-applied "exclusions removed" mutant on that policy left the
+  (fixed) behavioural test passing, and was killed only by the new text
+  pin (evidence file, M12). `TestExclusionSets_TenantOwned_Family` now
+  also seeds and confirms a genuinely visible alert before asserting the
+  dispatcher-plus-tenant-GUC session sees nothing.
+- **IR-2.** The IC-3 static test now also flags a bare `"alert_dispatcher"`
+  string literal anywhere (not only inside a `db.PlatformService(...)`
+  call) and any string literal that both contains `set_config(` and
+  mentions `app.platform_service_id` (a raw SQL statement setting the GUC
+  directly, bypassing `db.WithPlatformService`) - both outside the
+  allowed dispatcher/fallback files. Verified against two planted
+  violations (removed, not committed).
+- **Scope-kind hardening (recommendation).** `freshReadCommittedRunner`
+  now has an explicit `ScopeTenant` case; an unrecognised `ScopeKind`
+  returns a `refusingRunner` whose `Run` always errors, rather than
+  silently falling through to `ScopeTenant` (which could open a
+  transaction under the wrong tenant/identity if a future `ScopeKind` is
+  added without updating this function). Unit-tested
+  (`TestFreshReadCommittedRunner_UnknownScopeKindRefuses`,
+  `TestFreshReadCommittedRunner_KnownKindsDoNotRefuse`).
+- **LF N-1.** Mutant MF (`Pending.Flush` retrying on `p.runner` instead of
+  `freshReadCommittedRunner`) previously survived: the only assertion was
+  that the alert eventually persisted, which the mutant also satisfies in
+  a single-threaded test (REPEATABLE READ still succeeds when nothing
+  else contends the snapshot). `snapshotRunner` (the LF C-2 test's
+  REPEATABLE READ test double) now records the real
+  `transaction_isolation` seen on every invocation of its own `Run`, and
+  the test asserts it was invoked exactly once (the original raise) -
+  never again during the retry. Confirmed: with MF applied, the test now
+  fails with "got 2 invocations (isolations: [repeatable read repeatable
+  read])" (evidence file, mutant MF).
+
+Verified again on a private database (rebuilt between runs, dropped
+after): build, vet (plain and `-tags integration`), `gofmt`, the pinned
+`golangci-lint` (0 issues), and `-race -tags integration -count=1` for
+`./internal/alerting/...` and `./internal/db/...` all pass.

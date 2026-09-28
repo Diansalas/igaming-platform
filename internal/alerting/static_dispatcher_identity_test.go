@@ -21,6 +21,7 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -132,7 +133,15 @@ var staticAllowedDispatcherIdentityPaths = map[string]bool{
 // (a raw string conversion to the same type, which internal/db's own
 // WithPlatformService would accept identically to the real constant,
 // since Go constants of a defined string type compare equal to an
-// equivalent literal conversion).
+// equivalent literal conversion), nor by ANY OTHER route that reaches the
+// same identity value: IR-2 additionally flags
+//   - a bare `"alert_dispatcher"` string literal anywhere (a slice/map
+//     key, a struct field, a test fixture masquerading as production
+//     code, etc. - not only inside a db.PlatformService(...) call), and
+//   - any string literal that both contains `set_config(` and mentions
+//     `app.platform_service_id` (a raw SQL statement setting this GUC
+//     directly, bypassing db.WithPlatformService entirely - the only
+//     sanctioned way to set it).
 func TestStatic_ServiceAlertDispatcherConfinedToDispatcherAndFallback(t *testing.T) {
 	root := staticRepoRoot(t)
 	staticWalkNonTestGoFiles(t, root, func(path string, src []byte) {
@@ -155,26 +164,19 @@ func TestStatic_ServiceAlertDispatcherConfinedToDispatcherAndFallback(t *testing
 					}
 				}
 			}
-			// db.PlatformService("alert_dispatcher") - a raw conversion
-			// that reaches the exact same runtime value without ever
-			// naming the constant.
-			if call, ok := n.(*ast.CallExpr); ok {
-				sel, ok := call.Fun.(*ast.SelectorExpr)
-				if !ok {
+			// Any string literal anywhere - covers db.PlatformService(
+			// "alert_dispatcher") equally well as a bare literal, plus the
+			// IR-2 raw set_config(...) case.
+			if lit, ok := n.(*ast.BasicLit); ok && lit.Kind == token.STRING {
+				value, uerr := strconv.Unquote(lit.Value)
+				if uerr != nil {
 					return true
 				}
-				pkgIdent, ok := sel.X.(*ast.Ident)
-				if !ok || pkgIdent.Name != "db" || sel.Sel.Name != "PlatformService" {
-					return true
+				if value == "alert_dispatcher" && !allowed {
+					t.Errorf("%s: \"alert_dispatcher\" string literal referenced outside the allowed dispatcher/fallback files (AL-10/IC-3)", rel)
 				}
-				for _, arg := range call.Args {
-					lit, ok := arg.(*ast.BasicLit)
-					if !ok || lit.Kind != token.STRING {
-						continue
-					}
-					if lit.Value == `"alert_dispatcher"` && !allowed {
-						t.Errorf("%s: db.PlatformService(\"alert_dispatcher\") conversion outside the allowed dispatcher/fallback files (AL-10/IC-3)", rel)
-					}
+				if strings.Contains(value, "set_config(") && strings.Contains(value, "app.platform_service_id") && !allowed {
+					t.Errorf("%s: a raw set_config(...) SQL literal mentions app.platform_service_id outside the allowed dispatcher/fallback files (AL-10/IC-3) - use db.WithPlatformService instead", rel)
 				}
 			}
 			return true
