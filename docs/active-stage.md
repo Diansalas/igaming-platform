@@ -1,6 +1,8 @@
 # Active Stage
 
 > **Current stage:** see ["## Current stage"](#current-stage-stage-103-accepted-post-acceptance-close-out-done-awaiting-human-authorization) section (Stage 10.3 ACCEPTED by the human 2026-09-26; post-acceptance close-out done: F-POOL-1 fixed (ADR 0094, CLOSED WITH CONDITIONS, K1 outstanding — CI blocked by billing), hygiene reconciled, real-provider planning gate prepared; awaiting human authorization; staging OFF). Sections below are kept in their historical order.
+>
+> **Status note 2026-09-28 — current block: PRH (Payment Readiness & Provider-Independent Hardening), including the Financial Hardening / double-credit fix (FH-1..FH-7). Stopped at the final human gate.** PAY-DOUBLE-CREDIT-1 is CLOSED (INV-DEP-1, migration 0107). All MOCK/local; GitHub CI is BLOCKED by CI-BILLING-1; staging and AWS are OFF; no real vendor. Classification, remaining blockers and human decisions: `docs/governance/payment-readiness-completion-report.md`. Registry: `docs/governance/task-registry.md` (PRH-*, FH*, PAY-SEC-*, KS-*, KYC-ENF-*). The Stage 10.3 text below is historical.
 
 ## Stage 4H-B0-R7 — Final Financial/Bonus Implementation Gate — Complete
 

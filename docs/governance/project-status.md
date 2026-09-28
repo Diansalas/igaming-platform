@@ -50,10 +50,14 @@ stage detail), and the ADRs cited below.
 | 10.1 planning gate | PAY-REV-1 + SB-T1-XMIN plan (`docs/plans/stage-10.1-planning-gate-proposal.md`, ADR 0090 PROPOSED); ADR 0089 future AI-agent boundary | Complete; awaiting human approval |
 | 10.1 | PAY-REV-1 + SB-T1-XMIN + PAY-WH-TENANT-1 (ADR 0090 ACCEPTED; migrations 0092/0093; PAY-WH-TENANT-1 with a MOCK credential resolver only) | Implemented; stopped at the staging-deployment gate (`docs/governance/stage-10.1-completion-report.md`) |
 | 10.2 | Webhook trust hardening: KYC-WH-1, CAS-WH-TENANT-1, PAYWH-GATE-1; CI-FLAKE-281 investigated (ADR 0091 ACCEPTED) | Implemented for the MOCK providers; stopped at the Stage 10.2 deployment gate (`docs/governance/stage-10.2-completion-report.md`) |
+| 10.3 | Real Provider Trust & Casino Financial Readiness (MOCK/local) | Complete; ACCEPTED by the human 2026-09-26 (`docs/governance/stage-10.3-completion-report.md`); F-POOL-1 CLOSED WITH CONDITIONS (K1 needs CI) |
+| PRH + FH | Payment Readiness & Provider-Independent Hardening, incl. Financial Hardening / double-credit fix (FH-1..FH-7; migrations 0099–0107) | PAY-DOUBLE-CREDIT-1 CLOSED; block PARTIALLY IMPLEMENTED (MOCK/local); **stopped at the final human gate** (`docs/governance/payment-readiness-completion-report.md`); GitHub CI BLOCKED (CI-BILLING-1) |
 
 *Status note 2026-09-26: rows 10.1 and 10.2 added. The "10.1 planning gate" row's "awaiting human approval" is historical — ADR 0090 was ACCEPTED on the human's approval of `8561ac2` (`docs/governance/stage-10.1-completion-report.md` header), and ADR 0091 records the human's acceptance of the Stage 10.1 completion report.*
 
 ## Active stage
+
+*Status note 2026-09-28 (supersedes the notes below): the current block is **PRH + Financial Hardening**, **stopped at the final human gate**. PAY-DOUBLE-CREDIT-1 is CLOSED (INV-DEP-1, ADR 0095 §28 AM-2, migration 0107). Remaining launch blockers, human decisions, staging-required and real-provider-required items are in `docs/governance/payment-readiness-completion-report.md` §11. Nothing is deployed; staging and AWS are OFF; no real vendor. The next step requires explicit human authorization.*
 
 *Status note 2026-09-26: the paragraph below is superseded. Stages 10.1 and 10.2 followed Stage 10. Latest executed stage: **Stage 10.2 — Webhook trust hardening — IMPLEMENTED (MOCK providers); stopped at the Stage 10.2 deployment gate** (`docs/governance/stage-10.2-completion-report.md`; `docs/active-stage.md` "Current stage"). The next stage is in planning only (`docs/plans/stage-10.3-planning/`); no stage-definition ADR or human authorization for it is recorded.*
 

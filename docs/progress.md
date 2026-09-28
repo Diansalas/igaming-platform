@@ -8268,3 +8268,54 @@ permission probes.
 - **Planning gate:** `docs/plans/next-real-provider-integration-planning-gate.md` (PO-reviewed).
 - Not done by design: no vendor selected; no real provider implemented; no AWS deployment; Bonus Wave 4,
   AI agents not started; ADR 0089 architecture only; HD-10.3-2 infrastructure follow-ups documented only.
+
+## PRH — Payment Readiness & Provider-Independent Hardening, incl. Financial Hardening / double-credit fix (2026-09-27/28) — stopped at the final human gate
+
+- **Authorized by the human:** PRH (registered `1560ad0`), then "MASTER ORCHESTRATOR — AUTHORIZE FINANCIAL
+  HARDENING / DOUBLE-CREDIT FIX" (FH-1..FH-7). Human decision HD-LEDGER-UNALLOC-1 = "A now, B later".
+  Full classification: `docs/governance/payment-readiness-completion-report.md`.
+- **PAY-DOUBLE-CREDIT-1 CLOSED.** INV-DEP-1 (ADR 0095 §28 AM-2) is enforced by:
+  - the single choke point `postDepositSuccess(OrDispute)`;
+  - migration 0107's partial unique indexes and NULL-safe guard;
+  - the standing reconciliation kind `pay_captured_unposted`.
+
+  A second real success now goes to disputed (`multiple_success_for_intent`) with no posting.
+  LF-Q1 is superseded for the multiple-success case.
+- **Other workstreams:**
+
+  | Workstream | Status |
+  |---|---|
+  | Callback security (S-H1, S-M1, FH-5 C2/C3) | CLOSED |
+  | Payout security (FH-6) | Fixed; launch conditions deferred (PAY-SEC-LAUNCH-1) |
+  | A7 lock-order suite | IMPLEMENTED |
+  | Kill switch phase 2 (migration 0106) | IMPLEMENTED; KS-DEP-T2-T3-1 closed |
+  | F-POOL-2 | Payments part IMPLEMENTED (MOCK) |
+  | KYC enforcement (ADR 0096, migrations 0100/0103) | PARTIALLY IMPLEMENTED |
+  | Webhook rate limiting (ADR 0097) | PARTIALLY IMPLEMENTED |
+  | PROVIDER-REF-BOUND-1 (0099) | IMPLEMENTED |
+  | Payment reconciliation (0102/0104) | IMPLEMENTED against MOCK |
+- **Migrations** 0099–0107 are allocated gap-free, and `migrate verify` is clean.
+- **Reviews:**
+  - architect final APPROVE WITH CONDITIONS;
+  - product-owner-proxy APPROVE WITH CONDITIONS (no scope creep);
+  - QA final gate PASS except item O (CI);
+  - code re-reviews: kill-switch phase 2 READY, PRH-I5 READY, PRH-I3 READY WITH CONDITIONS, PRH-I2
+    casino NOT READY. That last one found the HIGH regression **CAS-SESSION-EXPIRY-1**: consumed
+    casino sessions refused bets after the 2-minute launch-token TTL. See the completion report for
+    the fix status.
+- **Verification (local; GitHub CI BLOCKED by CI-BILLING-1):**
+  - lint 0 issues;
+  - full integration suite under `-race` green;
+  - A–O matrix green, including 50× race repetitions;
+  - timing lane on an idle machine 40/40.
+- **Governance:**
+  - DB credential incident recorded; the permanent CLAUDE.md rule was added.
+  - 210 leaked scratch DBs dropped.
+  - TEST-T11A-FLIP-1: the orchestrator pushed once with a masked FAIL; all verification now uses
+    `pipefail`.
+- **Not done by design:**
+  - no real vendor selected or integrated, and no production credentials;
+  - no staging or AWS deployment;
+  - Bonus Wave 4 and AI agents not started.
+
+  **Stop: final human gate. The next step needs explicit human authorization.**
