@@ -280,3 +280,36 @@ KILLED - 10/10 FAIL, first failure:
 
 Reverted and diffed byte-identical (md5sum 0c5e2ab41b2cda880023391400a61657 before AND after) against
 the committed original.
+
+C-3 (code review of e810ece - the SB-6 digest test only varied asset_code; reviewer mutant MD -
+"drop mode from bootstrapRequestDigest" - survived the whole suite because nothing varied mode
+specifically):
+
+Fix: TestBootstrapLaunch_ADV_ReusedRequestIDSameTokenDifferentFields_ByField (internal/casino/
+bootstrap_integration_test.go) table-drives the SAME scenario over all three of the digest's
+non-token-bound fields individually: provider_game_id, asset_code, mode. Each sub-test bootstraps
+once, then replays the SAME request_id/token with exactly one field changed, expecting
+BootstrapRefusalReplayMismatch.
+
+Re-applied mutant MD directly (mode dropped from the loop in bootstrapRequestDigest):
+
+  for _, f := range []string{providerID, requestID, providerGameID, assetCode} {  // mode dropped
+
+Private DB cas_md_mut rebuilt from scratch via priv_db.sh, then:
+
+  PRIV_DB=cas_md_mut bash .../priv_test.sh -race -tags integration -run \
+    'TestBootstrapLaunch_ADV_ReusedRequestIDSameTokenDifferentFields_ByField' -count=1 -v ./internal/casino/...
+
+KILLED - specifically and only by the "mode" sub-test:
+
+  --- PASS: .../provider_game_id
+  --- PASS: .../asset_code
+  --- FAIL: .../mode
+      bootstrap_integration_test.go:442: expected a *BootstrapRefusedError, got <nil>: <nil>
+
+("provider_game_id" and "asset_code" still PASS under this mutant, as expected - only the field the
+mutant actually drops from the digest fails to be detected - confirming the table-drive genuinely
+isolates each field rather than merely re-testing the same one three times.)
+
+Reverted and diffed byte-identical (md5sum 0c5e2ab41b2cda880023391400a61657 before AND after) against
+the committed original.

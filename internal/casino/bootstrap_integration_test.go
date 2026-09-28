@@ -395,6 +395,66 @@ func TestBootstrapLaunch_ADV_ReusedRequestIDSameTokenDifferentFields(t *testing.
 	}
 }
 
+// TestBootstrapLaunch_ADV_ReusedRequestIDSameTokenDifferentFields_ByField
+// is code review C-3's own table-drive of the SB-6 digest test: the
+// original test only varied asset_code. Reviewer mutant MD (drop `mode`
+// from bootstrapRequestDigest) survived the whole suite, because nothing
+// varied mode specifically. Table-drives all three of the digest's
+// non-token-bound fields (provider_game_id, asset_code, mode)
+// individually - changing exactly one field per sub-test, holding the
+// others at their original values, reusing the SAME request_id so the
+// idempotency lookup's existingFound branch (§3.4's digest comparison)
+// is what is exercised, never step 3's own binding check (which runs
+// only when no idempotency row is found yet).
+func TestBootstrapLaunch_ADV_ReusedRequestIDSameTokenDifferentFields_ByField(t *testing.T) {
+	cases := []struct {
+		name           string
+		providerGameID string
+		assetCode      string
+		mode           string
+	}{
+		{"provider_game_id", "a-different-provider-game-id", "EUR", "real"},
+		{"asset_code", "", "USD", "real"},
+		{"mode", "", "EUR", "demo"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			pool, f, game, provider, orch := setupBootstrapFixture(t)
+			session, token := mintSessionForBootstrap(t, pool, f, game, ModeReal, "EUR", DefaultLaunchTokenTTL)
+
+			requestID := "req-c3-digest-" + tc.name
+			in1 := provider.BootstrapPayload(f.tenantID, token, requestID, game.ProviderGameID, "EUR", "real")
+			v1 := bootstrapVerified(t, orch, pool, f.tenantID, "mock-casino", in1)
+			if _, err := orch.BootstrapLaunch(context.Background(), pool, f.tenantID, "mock-casino", v1); err != nil {
+				t.Fatalf("first bootstrap: %v", err)
+			}
+
+			providerGameID := tc.providerGameID
+			if providerGameID == "" {
+				providerGameID = game.ProviderGameID
+			}
+			// Same token, same request_id, but exactly ONE digest field
+			// differs from the first call - the digest must differ even
+			// though the token hash matches (SB-6).
+			in2 := provider.BootstrapPayload(f.tenantID, token, requestID, providerGameID, tc.assetCode, tc.mode)
+			v2 := bootstrapVerified(t, orch, pool, f.tenantID, "mock-casino", in2)
+			_, err := orch.BootstrapLaunch(context.Background(), pool, f.tenantID, "mock-casino", v2)
+			requireBootstrapRefused(t, err, BootstrapRefusalReplayMismatch)
+
+			var status LaunchSessionStatus
+			err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+				return tx.QueryRow(ctx, `SELECT status FROM casino_launch_sessions WHERE id = $1`, session.ID).Scan(&status)
+			})
+			if err != nil {
+				t.Fatalf("read session status: %v", err)
+			}
+			if status != LaunchSessionConsumed {
+				t.Fatalf("expected the original session to remain consumed, got %q", status)
+			}
+		})
+	}
+}
+
 func TestBootstrapLaunch_ADV_UnknownFieldInBody(t *testing.T) {
 	pool, f, game, provider, orch := setupBootstrapFixture(t)
 	session, token := mintSessionForBootstrap(t, pool, f, game, ModeReal, "EUR", DefaultLaunchTokenTTL)
