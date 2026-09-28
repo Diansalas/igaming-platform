@@ -156,34 +156,6 @@ type RoutingRequest struct {
 	ExcludeProviderIDs []string
 }
 
-// RouteProvider implements payment-orchestration.md §4's routing
-// dimensions 1 (tenant/brand, via ListRoutingCandidates being scoped to
-// tenant/brand already), 3 (currency/asset), 4 (payment method), 5
-// (amount), and 6 (provider health) - dimension 2 (jurisdiction) is
-// TODO(jurisdiction) per RoutingRequest's doc comment. Candidates are
-// filtered down to those active, registered, healthy (circuit not open),
-// and matching every dimension, then ranked by health (higher rolling
-// success rate first, then lower p99 latency), with Priority breaking
-// ties among "otherwise-equal" candidates exactly as
-// docs/decisions/0022 §2 describes it - Priority is a tie-breaker, not
-// the primary ranking key, because §6 of payment-orchestration.md states
-// health ranking picks "the healthiest" among survivors.
-func (o *Orchestrator) RouteProvider(ctx context.Context, tx pgx.Tx, req RoutingRequest) (PaymentProvider, ProviderCapability, error) {
-	candidates, err := ListRoutingCandidates(ctx, tx, req.TenantID, req.BrandID)
-	if err != nil {
-		return nil, ProviderCapability{}, err
-	}
-	// NOTE (PRH-I1 step (c), ADR 0095 §9.6): this convenience wrapper is
-	// kept ONLY for the existing (pre-step-(b)) InitiateDeposit/
-	// attemptDeposit call sites, which still call HealthStatus while
-	// holding tx - the exact gap §9.6 exists to close, not yet fixed on
-	// that path because that path is not cut over to the two-phase
-	// pattern in this step (deposit_v2.go's own doc comment names the
-	// cutover as later PRH-I1 work). RankRoutingCandidates below is the
-	// tx-free replacement InitiateDepositAttempt actually uses.
-	return RankRoutingCandidates(ctx, candidates, o.providers, o.breaker, req)
-}
-
 // RankRoutingCandidates is ADR 0095 §9.6's "Rank(candidates, health)":
 // filters and ranks an already-loaded candidate list against live
 // health/circuit state, taking NO transaction and NO tx parameter at
@@ -310,8 +282,9 @@ func amountWithinLimits(capability ProviderCapability, assetCode string, amount 
 // DepositScope carries only server-derived identifiers
 // (payment-orchestration.md §3): tenant_id, brand_id, player_account_id,
 // and wallet_id must all be resolved from the caller's own authenticated
-// session/context before InitiateDeposit is called - never populated from
-// client-supplied request fields. Carrying them in their own struct
+// session/context before InitiateDepositAttempt is called ([deleted by
+// E2] this used to name InitiateDeposit, now deleted) - never populated
+// from client-supplied request fields. Carrying them in their own struct
 // (rather than as bare InitiateDepositParams fields) is deliberate, per
 // that section's own instruction, "precisely so that a future caller
 // cannot pass a client-supplied value positionally without it being
@@ -323,7 +296,8 @@ type DepositScope struct {
 	WalletID        uuid.UUID
 }
 
-// InitiateDepositParams is InitiateDeposit's input. AssetCode/Amount/
+// InitiateDepositParams is InitiateDepositAttempt's input ([deleted by
+// E2] it used to be InitiateDeposit's, now deleted). AssetCode/Amount/
 // PaymentMethod/IdempotencyKey are the only caller-controlled fields -
 // everything identifying WHO is depositing comes from Scope.
 type InitiateDepositParams struct {
@@ -367,7 +341,8 @@ type DepositIntent struct {
 	// RedirectURL/HostedFieldToken are transient - migration 0025 has no
 	// column for either, since they are only meaningful once, at
 	// initiation time (a caller redirects the player or mounts hosted
-	// fields immediately using the value InitiateDeposit itself returns).
+	// fields immediately using the value InitiateDepositAttempt itself
+	// returns - [deleted by E2] this used to be InitiateDeposit's).
 	// A later lookup of the same intent (e.g. a player polling their own
 	// deposit's status) will not repopulate these fields - that is by
 	// design, not a bug.
@@ -511,7 +486,7 @@ func setIntentAttempt(ctx context.Context, tx pgx.Tx, intentID uuid.UUID, provid
 
 func validateInitiateDepositParams(p InitiateDepositParams) error {
 	if p.Scope.TenantID == uuid.Nil || p.Scope.BrandID == uuid.Nil || p.Scope.PlayerAccountID == uuid.Nil || p.Scope.WalletID == uuid.Nil {
-		return fmt.Errorf("payments: InitiateDeposit requires a fully-populated, server-derived DepositScope")
+		return fmt.Errorf("payments: deposit initiation requires a fully-populated, server-derived DepositScope")
 	}
 	if p.Amount <= 0 {
 		return fmt.Errorf("payments: amount must be positive, got %d", p.Amount)
@@ -609,9 +584,12 @@ var ErrDepositIntentAlreadyResolved = errors.New("payments: deposit intent is al
 // An exact redelivery (same attempt, same idempotency key) is therefore
 // NOT "resolved for other" - it keeps today's replay semantics
 // (AlreadyPosted / duplicate_effect). attemptID is nil on the legacy
-// InitiateDeposit path (no attempt row exists yet); "id IS DISTINCT FROM
-// NULL" is true for every row, so every succeeded sibling counts there -
-// ledger-finance's own confirmation of the AM-2 revision (§3(iii)).
+// InitiateDeposit path ([deleted by E2] production InitiateDeposit is
+// gone; only the TEST-ONLY legacyShapeInitiateDeposit copy,
+// receive_bridge_integration_test.go, still exercises this nil-attemptID
+// shape - no attempt row exists yet on that path either); "id IS DISTINCT
+// FROM NULL" is true for every row, so every succeeded sibling counts
+// there - ledger-finance's own confirmation of the AM-2 revision (§3(iii)).
 func resolvedForOtherDeposit(ctx context.Context, tx pgx.Tx, tenantID, intentID uuid.UUID, attemptID *uuid.UUID, idempotencyKey string) (bool, error) {
 	var exists bool
 	err := tx.QueryRow(ctx,
@@ -786,11 +764,13 @@ func (o *Orchestrator) postDepositSuccess(ctx context.Context, tx pgx.Tx, intent
 	// T7/T13 evidence-application call sites already checked before ever
 	// calling this function (rule 1.4, postDepositSuccessOrDispute below)
 	// - the re-check exists so that no caller, including the legacy
-	// InitiateDeposit path and any future one, can reach ledger.Post for
-	// an already financially resolved intent. attemptID is nil on the
-	// legacy path (no attempt row exists): resolvedForOtherDeposit then
-	// counts EVERY succeeded sibling attempt, which is correct there
-	// (ledger-finance's confirmation of the AM-2 revision, §3(iii)).
+	// InitiateDeposit path ([deleted by E2]; only the TEST-ONLY
+	// legacyShapeInitiateDeposit copy still exercises this shape) and any
+	// future one, can reach ledger.Post for an already financially
+	// resolved intent. attemptID is nil on the legacy path (no attempt
+	// row exists): resolvedForOtherDeposit then counts EVERY succeeded
+	// sibling attempt, which is correct there (ledger-finance's
+	// confirmation of the AM-2 revision, §3(iii)).
 	idemKey := providerID + ":" + providerReference
 	resolved, err := resolvedForOtherDeposit(ctx, tx, intent.TenantID, intent.ID, attemptID, idemKey)
 	if err != nil {

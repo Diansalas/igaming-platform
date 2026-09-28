@@ -338,3 +338,28 @@ func backfillCascadeAttemptsForIntent(ctx context.Context, tx pgx.Tx, intent Dep
 	}
 	return first, second, nil
 }
+
+// RouteProvider is a TEST-ONLY (E2-3/F-2, code-review and security review
+// of PROV-OUTBOUND-CRED-1-LEGACY-PATH/E2) convenience wrapper: it used to
+// be exported production code (orchestrator.go), kept only for the
+// deleted legacy InitiateDeposit/attemptDeposit call sites, which - per
+// ADR 0095 §9.6's own gap this wrapper's old doc comment named - called
+// provider.HealthStatus (via RankRoutingCandidates) while still holding a
+// tx. With the legacy chain gone, nothing in production calls this shape
+// any more (InitiateDepositAttempt's own phase A0 calls
+// ListRoutingCandidates and RankRoutingCandidates directly, exactly as
+// this wrapper does, but with ListRoutingCandidates' own tx committed and
+// closed BEFORE RankRoutingCandidates/HealthStatus ever run - see
+// deposit_v2.go's own phase A0 comment). Defining this method in a
+// _test.go file (rather than keeping it exported in orchestrator.go)
+// makes it structurally impossible to reach from non-test/production code
+// - a stronger guarantee than a doc comment alone - while letting the
+// existing test call sites that still name it keep passing an unchanged
+// tx-shaped call, unaffected by this relocation.
+func (o *Orchestrator) RouteProvider(ctx context.Context, tx pgx.Tx, req RoutingRequest) (PaymentProvider, ProviderCapability, error) {
+	candidates, err := ListRoutingCandidates(ctx, tx, req.TenantID, req.BrandID)
+	if err != nil {
+		return nil, ProviderCapability{}, err
+	}
+	return RankRoutingCandidates(ctx, candidates, o.providers, o.breaker, req)
+}

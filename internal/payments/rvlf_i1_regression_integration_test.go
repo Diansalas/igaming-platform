@@ -985,13 +985,26 @@ func rvApplyReceipt(pool *db.Pool, orch *Orchestrator, tenantID uuid.UUID, provi
 	return disp, err
 }
 
-// L2 (ledger-finance review): backfillCascadeAttemptsForIntent (receive_
-// bridge_integration_test.go) builds a real two-attempt cascade shape -
-// this test drives a genuine T13 second capture (a callback naming the
-// FIRST, declined attempt's own reference with real success evidence)
-// while the cascade CHILD is still sitting 'created', proving H4's
-// sibling-rejection fires through the bridge's own multi-attempt shape,
-// not only through a live-provider-driven cascade.
+// L2 (ledger-finance review). SETUP is TEST-ONLY, but does not reach the
+// deleted legacy chain's own cascade logic (E2 code review E2-1's
+// concern): legacyShapeInitiateDeposit below is called only to create
+// the underlying deposit_intents row, at a plain amount (5000) that is
+// none of the mock's cascade-triggering amounts, so its own cascade
+// recursion never runs here. The actual two-attempt cascade SHAPE this
+// test needs (first: created->submitting->declined-cascadable; second:
+// the cascade child, inserted 'created') comes entirely from
+// backfillCascadeAttemptsForIntent (receive_bridge_integration_test.go),
+// which drives those rows through the SAME exported T1/T2/T4/T8
+// attempt-state-machine transitions the live cascade path
+// (InitiateDepositAttempt's own synchronous cascade loop / drive.go's
+// driveCreatedAttempt) uses - a fixture shortcut for reaching that shape
+// quickly, never a copy of the deleted chain's own in-process recursion.
+// The ASSERTION under test is entirely live: a genuine T13 second capture
+// (a callback naming the FIRST, declined attempt's own reference with
+// real success evidence) while the cascade CHILD is still sitting
+// 'created', proving H4's sibling-rejection fires through
+// applyReceiptEvidence/receipt.go's real, production T13 handling - not
+// through anything test-only.
 func TestRVLF_L2_BridgeCascadeThenT13SecondCapture(t *testing.T) {
 	pool := depositV2ScratchPool(t)
 	f := seedOrchFixture(t, pool)

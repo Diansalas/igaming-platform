@@ -206,148 +206,96 @@ func TestReceiveCallback_RedeliveredSuccessIsIdempotent(t *testing.T) {
 	}
 }
 
-func TestInitiateDeposit_SynchronousDeclineNoCascade(t *testing.T) {
-	pool := testPool(t)
-	f := seedOrchFixture(t, pool)
-	provider := NewMockProvider("mock-psp", "EUR")
-	registerCapability(t, pool, f, provider, 100)
-	orch := NewOrchestrator(map[string]PaymentProvider{"mock-psp": provider}, MultiWebhookCredentialResolver{"mock-psp": NewMockWebhookCredentials(provider)})
+// TestInitiateDeposit_SynchronousDeclineNoCascade is DELETED
+// (PROV-OUTBOUND-CRED-1-LEGACY-PATH/E2 code review E2-1): it called
+// initiateDepositWithAttempt, which now wraps the TEST-ONLY
+// legacyShapeInitiateDeposit copy - a regression in the LIVE synchronous-
+// decline/no-cascade path could not have failed it. Redundant with
+// TestInitiateDepositAttempt_DeclinedOutcome_T8 (deposit_v2_integration_
+// test.go), which drives the identical MockAmountPlayerDeclineNoCascade
+// scenario through InitiateDepositAttempt itself and asserts
+// Cascadable=false and DepositIntentDeclined.
 
-	var intent DepositIntent
-	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		var err error
-		intent, err = initiateDepositWithAttempt(ctx, tx, orch, InitiateDepositParams{
-			Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
-			AssetCode: "EUR", Amount: MockAmountPlayerDeclineNoCascade, PaymentMethod: "card", IdempotencyKey: "dep-decline",
-		})
-		return err
-	})
-	if err != nil {
-		t.Fatalf("InitiateDeposit: %v", err)
-	}
-	if intent.Status != DepositIntentDeclined {
-		t.Fatalf("expected declined, got %v", intent.Status)
-	}
-	if balance := cashBalance(t, pool, f); balance != 0 {
-		t.Fatalf("a declined deposit must never post a ledger entry, got balance %d", balance)
-	}
-}
+// TestInitiateDeposit_CascadesToSecondProviderOnCascadableDecline is
+// DELETED (E2-1, same reasoning): redundant with
+// TestDriveCreatedAttemptCascade_PoolThreadedToResolver
+// (pool_threading_integration_test.go), which drives the identical
+// MockAmountProviderDeclineCascade scenario (mock-a declines cascadable,
+// mock-b accepts) through InitiateDepositAttempt's own synchronous
+// cascade loop and asserts the intent lands DepositIntentPending on the
+// fallback provider.
 
-func TestInitiateDeposit_CascadesToSecondProviderOnCascadableDecline(t *testing.T) {
-	pool := testPool(t)
-	f := seedOrchFixture(t, pool)
-	declining := NewMockProvider("mock-a", "EUR")
-	accepting := NewMockProvider("mock-b", "EUR")
-	accepting.AcceptAllAmounts = true
-	// mock-a ranked ahead of mock-b (lower priority number wins the tie
-	// break, both start with identical default health).
-	registerCapability(t, pool, f, declining, 10)
-	registerCapability(t, pool, f, accepting, 20)
-	orch := NewOrchestrator(map[string]PaymentProvider{"mock-a": declining, "mock-b": accepting}, MultiWebhookCredentialResolver{"mock-a": NewMockWebhookCredentials(declining), "mock-b": NewMockWebhookCredentials(accepting)})
-
-	var intent DepositIntent
-	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		var err error
-		intent, err = initiateDepositWithAttempt(ctx, tx, orch, InitiateDepositParams{
-			Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
-			AssetCode: "EUR", Amount: MockAmountProviderDeclineCascade, PaymentMethod: "card", IdempotencyKey: "dep-cascade",
-		})
-		return err
-	})
-	if err != nil {
-		t.Fatalf("InitiateDeposit: %v", err)
-	}
-	if intent.Status != DepositIntentPending {
-		t.Fatalf("expected the cascade to land on mock-b as pending, got %v", intent.Status)
-	}
-	if intent.ProviderID == nil || *intent.ProviderID != "mock-b" {
-		t.Fatalf("expected the final attempt to be against mock-b, got %v", intent.ProviderID)
-	}
-}
-
+// TestInitiateDeposit_CascadeExhaustedEndsDeclined migrated (E2-1) to
+// InitiateDepositAttempt: no live-path test already caps MaxCascadeDepth
+// and asserts the resulting decline once every candidate is exhausted,
+// so this is not redundant - it is the only live coverage of that
+// specific exhaustion behaviour. A third, ACCEPTING provider c is
+// registered (lowest priority, never reached when MaxCascadeDepth is
+// honoured) so an off-by-one mutant in cascade.go's own cascadeEligible
+// (e.g. attempt.AttemptNo > maxDepth instead of >=) is actually
+// observable: with only a/b registered (both declining), an off-by-one
+// that wrongly permits a third attempt would still terminate in the same
+// declined state via ErrNoRoutableProvider (ledger-finance/coordinator-
+// requested mutant run, PROV-OUTBOUND-CRED-1-LEGACY-PATH/E2 follow-up) -
+// c's presence turns that into an observably WRONG pending/succeeded
+// outcome instead, which this test's own spy assertion now catches.
 func TestInitiateDeposit_CascadeExhaustedEndsDeclined(t *testing.T) {
 	pool := testPool(t)
 	f := seedOrchFixture(t, pool)
 	a := NewMockProvider("mock-a", "EUR")
 	b := NewMockProvider("mock-b", "EUR")
+	c := newSpyProvider(NewMockProvider("mock-c", "EUR"))
+	c.AcceptAllAmounts = true
 	registerCapability(t, pool, f, a, 10)
 	registerCapability(t, pool, f, b, 20)
-	orch := NewOrchestrator(map[string]PaymentProvider{"mock-a": a, "mock-b": b}, MultiWebhookCredentialResolver{"mock-a": NewMockWebhookCredentials(a), "mock-b": NewMockWebhookCredentials(b)})
-	orch.MaxCascadeDepth = 2 // exactly enough to try both, never a third
+	registerCapability(t, pool, f, c, 30)
+	orch := NewOrchestrator(
+		map[string]PaymentProvider{"mock-a": a, "mock-b": b, "mock-c": c},
+		MultiWebhookCredentialResolver{"mock-a": NewMockWebhookCredentials(a), "mock-b": NewMockWebhookCredentials(b), "mock-c": NewMockWebhookCredentials(c.MockProvider)},
+	)
+	orch.MaxCascadeDepth = 2 // exactly enough to try a and b, never c
 
-	var intent DepositIntent
-	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		var err error
-		intent, err = initiateDepositWithAttempt(ctx, tx, orch, InitiateDepositParams{
-			Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
-			AssetCode: "EUR", Amount: MockAmountProviderDeclineCascade, PaymentMethod: "card", IdempotencyKey: "dep-exhausted",
-		})
-		return err
+	res, err := orch.InitiateDepositAttempt(context.Background(), pool, AllowAllDepositKYCGate{}, MockCredentialResolver{}, InitiateDepositParams{
+		Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
+		AssetCode: "EUR", Amount: MockAmountProviderDeclineCascade, PaymentMethod: "card", IdempotencyKey: "dep-exhausted",
 	})
 	if err != nil {
-		t.Fatalf("InitiateDeposit: %v", err)
+		t.Fatalf("InitiateDepositAttempt: %v", err)
 	}
-	if intent.Status != DepositIntentDeclined {
-		t.Fatalf("expected declined once every candidate is exhausted, got %v", intent.Status)
+	if res.Intent.Status != DepositIntentDeclined {
+		t.Fatalf("expected declined once every candidate is exhausted, got %v", res.Intent.Status)
+	}
+	if got := c.DepositCallCount(); got != 0 {
+		t.Fatalf("expected MaxCascadeDepth to stop before ever reaching the third provider, but mock-c's Deposit was called %d times", got)
 	}
 	if balance := cashBalance(t, pool, f); balance != 0 {
 		t.Fatalf("no ledger entry should exist after cascade exhaustion, got balance %d", balance)
 	}
 }
 
-func TestInitiateDeposit_AmbiguousOutcomeIsNotCascaded(t *testing.T) {
-	pool := testPool(t)
-	f := seedOrchFixture(t, pool)
-	a := NewMockProvider("mock-a", "EUR")
-	b := NewMockProvider("mock-b", "EUR")
-	b.AcceptAllAmounts = true
-	registerCapability(t, pool, f, a, 10)
-	registerCapability(t, pool, f, b, 20)
-	orch := NewOrchestrator(map[string]PaymentProvider{"mock-a": a, "mock-b": b}, MultiWebhookCredentialResolver{"mock-a": NewMockWebhookCredentials(a), "mock-b": NewMockWebhookCredentials(b)})
-
-	var intent DepositIntent
-	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		var err error
-		intent, err = initiateDepositWithAttempt(ctx, tx, orch, InitiateDepositParams{
-			Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
-			AssetCode: "EUR", Amount: MockAmountAmbiguous, PaymentMethod: "card", IdempotencyKey: "dep-ambiguous",
-		})
-		return err
-	})
-	if err != nil {
-		t.Fatalf("InitiateDeposit: %v", err)
-	}
-	// Ambiguous must NEVER cascade to mock-b, even though mock-b would
-	// have accepted it (payment-orchestration.md §5) - QueryStatus was
-	// called on mock-a and, since the mock never resolves on its own,
-	// left the intent open.
-	if intent.Status != DepositIntentAmbiguous {
-		t.Fatalf("expected ambiguous (never cascaded), got %v", intent.Status)
-	}
-	if intent.ProviderID == nil || *intent.ProviderID != "mock-a" {
-		t.Fatalf("expected the ambiguous attempt to stay attributed to mock-a, got %v", intent.ProviderID)
-	}
-
-	// Once mock-a's backend resolves the ambiguity to a success (the
-	// real-world equivalent of a delayed confirmation), a callback still
-	// posts it correctly.
-	payload := a.CallbackPayload(f.tenantID, CallbackEventDeposit, *intent.ProviderReference, "", OutcomeSucceeded, MockAmountAmbiguous, "EUR", "", false)
-	var result ReceiveCallbackResult
-	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		var err error
-		result, err = orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-a", payload)
-		return err
-	})
-	if err != nil {
-		t.Fatalf("ReceiveCallback: %v", err)
-	}
-	if result.Status != DepositIntentSucceeded {
-		t.Fatalf("expected succeeded after the delayed confirmation, got %v", result.Status)
-	}
-	if balance := cashBalance(t, pool, f); balance != MockAmountAmbiguous {
-		t.Fatalf("expected exactly one deposit posted, got balance %d", balance)
-	}
-}
+// TestInitiateDeposit_AmbiguousOutcomeIsNotCascaded is DELETED
+// (E2-1 fix round, second pass): the first migration attempt (E2-1) kept
+// this test's second half - a callback naming the SAME reference the
+// mock's synchronous Ambiguous Deposit call returned, expected to post a
+// success - but that assumption is WRONG for the live path and the
+// migrated test FAILED when actually run (not merely reasoned about):
+// MarkAmbiguousFromSubmitting (T6, attempt.go) deliberately does NOT
+// record a provider_reference on the ATTEMPT row - only
+// finalizeAmbiguous's own deposit_intents.provider_reference column gets
+// it, which is no longer what the post-cutover receipt path
+// (ApplyReceiptEvidence) resolves callbacks against. A callback naming
+// that reference therefore correctly returns `deferred_unresolved` (the
+// platform does not yet know that reference belongs to this attempt),
+// exactly the shape TestReceipt_Unresolved_DeferredThenAppliedOnceReferenceKnown
+// (receipt_integration_test.go) already builds and asserts, INCLUDING the
+// eventual convergence to succeeded once the attempt separately learns
+// the reference (simulating T9/T4) and ApplyDeferredReceiptsForAttempt
+// re-applies it - a strictly MORE thorough live test than this one ever
+// was. First half (ambiguous never cascades) is separately redundant with
+// the strengthened TestInitiateDepositAttempt_AmbiguousOutcome_T6
+// (deposit_v2_integration_test.go). Both halves of the original legacy-
+// chain test are therefore covered by existing live tests; nothing here
+// needed migrating after all.
 
 func TestInitiateDeposit_ClientRetryReturnsOriginalIntent_NoSecondProviderCall(t *testing.T) {
 	pool := testPool(t)
