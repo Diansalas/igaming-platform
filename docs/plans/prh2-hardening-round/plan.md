@@ -874,3 +874,35 @@ Amendments:
 
 Nothing is marked "not adopted", and no open split remains. S-7 item 5 is resolved by the security
 addendum.
+
+## 11. Authorization and human decisions (orchestrator, 2026-09-28)
+
+**The human authorized the plan at `0ea367d`**. Covered: W0; documentation, ADR and registry work; A, C, D, E1, E2, F, G, H, I and J; B after A. K may start only once the decisions below are incorporated into ADRs 0099–0101 and verified by security and ledger-finance. Not authorized: real providers, credentials, AWS, staging, branch protection and billing. The decisions are recorded in `docs/decisions/0098-…` §5 and are **binding on this plan**. Where they differ from §5-K or §7 above, §11 wins.
+
+| Decision | Consequence for the design |
+|---|---|
+| HD-PRH2-2 = (c) | K1: a tenant admin may **request** a financial capability grant for a user in its tenant. The grant takes effect only after **platform co-approval** by an independent platform principal with the grant-approval capability. A platform grant (to platform or tenant-scoped staff) also needs an independent second platform approver. Always refused: self-grant, self-approval, the approver being the requester or the grantee, and a tenant admin requesting platform scope or another tenant. The capability enum is extensible: new capabilities are added by migration and ADR, not per-tenant custom roles. The distinct-Person check stays as defence in depth (S-1). |
+| HD-PRH2-7 | K2: platform financial approval policy rows are written only by platform principals holding the policy-admin capability. Tenant and brand rows may only **tighten**, enforced in the DB resolver/trigger (S-2 ii/iv). Every change is audited, effective-dated and append-only, so historical evaluation is reproducible. |
+| HD-PRH2-1 | K2: a standing platform **financial-control classification** marks which operation kinds are in the mandatory four-eyes class (manual adjustment and force-resolve are in it). For that class, policy can set thresholds and profiles but has no `never` mode. An operation outside the class is represented explicitly by the classification, not by a policy switch. No CLAUDE.md amendment. |
+| HD-PRH2-6 = yes, explicit grants only | K1/K2/K3: the "platform principal acting in tenant X" session family (S-3) is built. It is valid only when the principal holds an **explicit tenant-scoped grant for X**; platform employment confers nothing. It is trigger-validated and audited with both principal and tenant, and limited to the K tables and the governed ledger post. It is the same framework for platform-licence and own-licence tenants. The interim "refuse platform scope on tenant ledgers" rule is replaced by "refuse unless an explicit tenant grant exists". |
+| HD-PRH2-3 | No threshold values; per-operation, tenant, jurisdiction, profile and asset configurability; synthetic values in fixtures only. |
+| HD-PRH2-4 | I-core adds a routing-configuration table (routes per severity and scope to channel-kind + recipient **reference**), delivery state, retry, and escalation state (escalation step and next-escalation-at). **No recipients are seeded.** With no route configured, an alert stays `undelivered/unrouted`: visible, counted, and itself raising a platform warning. The real recipients are HD-PRH2-4-OPS. |
+| HD-PRH2-5 | G1's tenant read projection shows the **identifiable** platform actor (staff id and display name) with the approval chain, reason and before/after where recorded. IP, user agent and free-form metadata are excluded from the tenant **presentation** by default as a privacy-presentation setting; they stay in the record, and the setting is configurable (orchestrator interpretation in 0098 §5). |
+
+**New workstream E3: SB-CATALOGUE-IO-1** (classified at the human's request; registry row). Owner: sportsbook; reviewers: architect, security, code-reviewer.
+- Change the `Provider.Catalogue()` contract to `Catalogue(ctx) (CatalogueResult, error)`.
+- Fetch and validate **outside** any transaction, then upsert inside `WithPlatformService`.
+- Add a txscope-held refusal (the same guard as the other adapters), plus tests: no transaction is open during the provider call; a fetch error writes nothing; the validation bound still holds.
+- No migration.
+- Files: `internal/sportsbook/{catalogue.go,types.go,mock.go}` and the three-line call in `cmd/platform-api/main.go`. E3 merges **before H starts**, because H owns `main.go`.
+
+**Dispatch order** (orchestrator decision, dependency-based): workstreams that need no new ADR (A, E2, F-kyc, E3) start in parallel with the W0 ADR drafting. W0's exit conditions gate only the workstreams that depend on those ADRs:
+
+| Workstream | Waits for |
+|---|---|
+| B | ADR 0103 |
+| G1 | ADR 0104 |
+| I | ADR 0102 |
+| K | ADRs 0099–0101 |
+
+The payments lane stays strictly serial (E2 → C → D → F-pay → H → I-wire → K3). There is one owner per critical file. The orchestrator is the single writer of the registry, `progress.md`, `active-stage.md`, `project-status.md` and `HANDOVER.md`.
