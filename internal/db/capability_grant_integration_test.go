@@ -724,11 +724,31 @@ func TestCapabilityGrant_SockPuppet_NoCoApprovalNoGrant(t *testing.T) {
 
 func timePtr(t time.Time) *time.Time { return &t }
 
+// assertActingOpenRefusal (L-2, security review): checks not just that the
+// error carries SQLSTATE CG020, but that it actually comes from the
+// setter's own "open acting session" step (WithPlatformActingInTenant's
+// `db: open acting session: %w` wrap around
+// `SELECT financial_acting_session_open()`), never from some other,
+// unrelated step that happens to also raise CG020.
+func assertActingOpenRefusal(t *testing.T, err error) {
+	t.Helper()
+	if err == nil {
+		t.Fatal("expected the setter to refuse")
+	}
+	if !cgIsCode(err, "CG020") {
+		t.Fatalf("expected CG020, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "open acting session") {
+		t.Fatalf("expected the error to come from the setter's own \"open acting session\" step, got %v", err)
+	}
+}
+
 // TestActingSetter_RefusesWithoutValidGrant is the setter's own validity
 // check (ADR 0099 §6.1 point 2, C-99-8): WithPlatformActingInTenant must
-// raise (SQLSTATE CG020) and never call fn when the (principal, tenant)
-// pair has no in-force grant at all - a random staff_users row, a real
-// tenant with no grant, and a revoked grant are each tried.
+// raise (SQLSTATE CG020, from its own "open acting session" step) and
+// never call fn when the (principal, tenant) pair has no in-force grant at
+// all - a random staff_users row, a real tenant with no grant, and a
+// revoked grant are each tried.
 func TestActingSetter_RefusesWithoutValidGrant(t *testing.T) {
 	pool := testPool(t)
 	ctx := context.Background()
@@ -741,12 +761,7 @@ func TestActingSetter_RefusesWithoutValidGrant(t *testing.T) {
 			called = true
 			return nil
 		})
-		if err == nil {
-			t.Fatal("expected the setter to refuse with no in-force grant")
-		}
-		if !cgIsCode(err, "CG020") {
-			t.Fatalf("expected CG020, got %v", err)
-		}
+		assertActingOpenRefusal(t, err)
 		if called {
 			t.Fatal("fn must never run when the acting session fails to open")
 		}
@@ -762,9 +777,7 @@ func TestActingSetter_RefusesWithoutValidGrant(t *testing.T) {
 		err := pool.WithPlatformActingInTenant(ctx, f.GranteeID, f.TenantID, uuid.Nil, "", func(ctx context.Context, tx pgx.Tx) error {
 			return nil
 		})
-		if !cgIsCode(err, "CG020") {
-			t.Fatalf("revoked grant: expected CG020, got %v", err)
-		}
+		assertActingOpenRefusal(t, err)
 	})
 
 	t.Run("grant for a different tenant", func(t *testing.T) {
@@ -773,9 +786,7 @@ func TestActingSetter_RefusesWithoutValidGrant(t *testing.T) {
 		err := pool.WithPlatformActingInTenant(ctx, f.GranteeID, otherTenant, uuid.Nil, "", func(ctx context.Context, tx pgx.Tx) error {
 			return nil
 		})
-		if !cgIsCode(err, "CG020") {
-			t.Fatalf("grant for a different tenant: expected CG020, got %v", err)
-		}
+		assertActingOpenRefusal(t, err)
 	})
 }
 
