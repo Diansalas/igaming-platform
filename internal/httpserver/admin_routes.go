@@ -1309,3 +1309,167 @@ func newListPlatformAuditLogHandler(deps Deps) http.HandlerFunc {
 		writeJSON(w, http.StatusOK, newPagedResponse(resp, p, total))
 	}
 }
+
+// --- Staff display name (ADR 0104 §3/§5.4; security confirmation N-2) ---
+
+type updateStaffDisplayNameRequest struct {
+	DisplayName string `json:"display_name"`
+}
+
+// newUpdateStaffDisplayNameHandler is N-2's "another user" write path: a
+// COLUMN-ALLOWLISTED update of display_name only (identity.
+// UpdateStaffDisplayName never touches any other staff_users column),
+// gated by PermStaffManage AND canActOnTenant - a tenant-scoped caller
+// may only rename staff within its own tenant; a platform-scoped caller
+// may name any tenant, mirroring every other dual-scope admin route in
+// this file (e.g. newCreateStaffHandler, newLinkStaffPersonHandler).
+// Every change is audited as staff.display_name_changed with a real
+// before/after, INCLUDING when the acting staff member happens to be
+// renaming themselves through this route (self is also reachable here,
+// not just through the dedicated self-rename route below) - ADR 0104 §4:
+// "Every change, self-rename included, is audited."
+func newUpdateStaffDisplayNameHandler(deps Deps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		requestID := observability.RequestIDFromContext(r.Context())
+		logger := observability.LoggerFromContext(r.Context(), deps.Logger)
+
+		tc, err := tenant.FromContext(r.Context())
+		if err != nil {
+			apierror.Write(w, requestID, apierror.CodeUnauthorized, "no authenticated context")
+			return
+		}
+		targetTenantID, err := uuid.Parse(r.PathValue("tenantID"))
+		if err != nil {
+			apierror.Write(w, requestID, apierror.CodeValidation, "invalid tenant id")
+			return
+		}
+		if !canActOnTenant(tc, targetTenantID) {
+			apierror.Write(w, requestID, apierror.CodeForbidden, "cannot act on a different tenant")
+			return
+		}
+		staffID, err := uuid.Parse(r.PathValue("staffID"))
+		if err != nil {
+			apierror.Write(w, requestID, apierror.CodeValidation, "invalid staff id")
+			return
+		}
+
+		var req updateStaffDisplayNameRequest
+		if err := decodeJSON(r, &req); err != nil {
+			apierror.Write(w, requestID, apierror.CodeValidation, "invalid request body")
+			return
+		}
+		if err := identity.ValidateDisplayName(req.DisplayName); err != nil {
+			apierror.Write(w, requestID, apierror.CodeValidation, "display_name failed hygiene validation")
+			return
+		}
+
+		subjectID, _ := uuid.Parse(tc.Subject)
+		err = deps.DB.WithTenant(r.Context(), targetTenantID, func(ctx context.Context, tx pgx.Tx) error {
+			// Confirm staffID actually belongs to targetTenantID first -
+			// same defence-in-depth style as newLinkStaffPersonHandler.
+			if _, err := identity.GetStaffUserByID(ctx, tx, staffID); err != nil {
+				return err
+			}
+			previous, err := identity.UpdateStaffDisplayName(ctx, tx, staffID, req.DisplayName)
+			if err != nil {
+				return err
+			}
+			return audit.Record(ctx, tx, audit.Entry{
+				TenantID: targetTenantID, ActorType: audit.ActorStaff, ActorID: subjectID,
+				Action: "staff.display_name_changed", TargetType: "staff_user", TargetID: staffID.String(),
+				Outcome: audit.OutcomeSuccess, IPAddress: clientIP(r), UserAgent: r.UserAgent(), RequestID: requestID,
+				Metadata: map[string]any{"before": previous, "after": req.DisplayName, "self": subjectID == staffID},
+			})
+		})
+		if errors.Is(err, identity.ErrNotFound) {
+			apierror.Write(w, requestID, apierror.CodeNotFound, "staff user not found")
+			return
+		}
+		if errors.Is(err, identity.ErrInvalidDisplayName) {
+			apierror.Write(w, requestID, apierror.CodeValidation, "display_name failed hygiene validation")
+			return
+		}
+		if err != nil {
+			logger.Error("update_staff_display_name_failed", "error", err)
+			apierror.Write(w, requestID, apierror.CodeInternal, "failed to update display name")
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+// newSelfUpdateStaffDisplayNameHandler is N-2's self-rename path: renames
+// ONLY the verified token subject (tc.Subject) - there is no "which staff
+// member" input at all, so there is no permission check on WHOM to
+// target, deliberately unlike newUpdateStaffDisplayNameHandler above.
+// Works for both a tenant-scoped staff member and a platform_admin
+// (tc.TenantID selects WithTenant vs WithoutTenant, mirroring every other
+// dual-scope staff_users access in this codebase).
+func newSelfUpdateStaffDisplayNameHandler(deps Deps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		requestID := observability.RequestIDFromContext(r.Context())
+		logger := observability.LoggerFromContext(r.Context(), deps.Logger)
+
+		tc, err := tenant.FromContext(r.Context())
+		if err != nil {
+			apierror.Write(w, requestID, apierror.CodeUnauthorized, "no authenticated context")
+			return
+		}
+		subjectID, err := uuid.Parse(tc.Subject)
+		if err != nil {
+			apierror.Write(w, requestID, apierror.CodeUnauthorized, "no authenticated context")
+			return
+		}
+
+		var req updateStaffDisplayNameRequest
+		if err := decodeJSON(r, &req); err != nil {
+			apierror.Write(w, requestID, apierror.CodeValidation, "invalid request body")
+			return
+		}
+		if err := identity.ValidateDisplayName(req.DisplayName); err != nil {
+			apierror.Write(w, requestID, apierror.CodeValidation, "display_name failed hygiene validation")
+			return
+		}
+
+		fn := func(ctx context.Context, tx pgx.Tx) error {
+			previous, err := identity.UpdateStaffDisplayName(ctx, tx, subjectID, req.DisplayName)
+			if err != nil {
+				return err
+			}
+			return audit.Record(ctx, tx, audit.Entry{
+				TenantID: tc.TenantID, ActorType: audit.ActorStaff, ActorID: subjectID,
+				Action: "staff.display_name_changed", TargetType: "staff_user", TargetID: subjectID.String(),
+				Outcome: audit.OutcomeSuccess, IPAddress: clientIP(r), UserAgent: r.UserAgent(), RequestID: requestID,
+				Metadata: map[string]any{"before": previous, "after": req.DisplayName, "self": true},
+			})
+		}
+		if tc.TenantID == uuid.Nil {
+			// G1-C2 (security review): WithPlatformAdmin, not WithoutTenant -
+			// a platform_admin self-rename is still a genuinely
+			// platform-scoped write, and WithPlatformAdmin is this
+			// codebase's own sanctioned way to make one (sets
+			// app.platform_admin_principal_id, matching every other
+			// platform-scope staff_users write in this file).
+			// WithoutTenant sets no GUC at all, which is weaker than
+			// necessary for a write path even though staff_users' own
+			// dual_scope_isolation policy happens to admit it either way.
+			err = deps.DB.WithPlatformAdmin(r.Context(), subjectID, fn)
+		} else {
+			err = deps.DB.WithTenant(r.Context(), tc.TenantID, fn)
+		}
+		if errors.Is(err, identity.ErrNotFound) {
+			apierror.Write(w, requestID, apierror.CodeNotFound, "staff user not found")
+			return
+		}
+		if errors.Is(err, identity.ErrInvalidDisplayName) {
+			apierror.Write(w, requestID, apierror.CodeValidation, "display_name failed hygiene validation")
+			return
+		}
+		if err != nil {
+			logger.Error("self_update_staff_display_name_failed", "error", err)
+			apierror.Write(w, requestID, apierror.CodeInternal, "failed to update display name")
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
