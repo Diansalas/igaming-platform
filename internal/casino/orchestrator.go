@@ -1446,24 +1446,39 @@ func (o *Orchestrator) postBet(ctx context.Context, tx pgx.Tx, tenantID uuid.UUI
 		return ReceiveCallbackResult{}, fmt.Errorf("%w: session belongs to a different provider", ErrLaunchSessionRequired)
 	}
 	// Security review RV-PRH-I2 (I3/item 2, casino/ledger-finance
-	// follow-up on ADR 0095 §15.1's "expires, harmless" argument): a NEW
-	// bet is only ever accepted against a session that is 'active' or
+	// follow-up on ADR 0095 §15.1's "expires, harmless" argument), CORRECTED
+	// per code-reviewer FH-7 re-review (CAS-SESSION-EXPIRY-1, 2026-09-28):
+	// a NEW bet is only ever accepted against a session that is 'active' or
 	// 'consumed' (the two states a normal, in-progress round can be in -
 	// 'consumed' is the ordinary post-token-bootstrap state, not an edge
-	// case) AND not yet past its own expires_at. An allow-list (rather than
-	// "reject only 'revoked'") fails closed on 'expired' and on any future
-	// status this package doesn't know about yet, not just the ones named
-	// today. This is what makes §15.1's "an orphaned/never-resolved active
-	// session is harmless" claim actually true: without this, a session
-	// left 'active' by a crash or a phase-C failure would accept a bet
-	// indefinitely. postWin/postRollback are UNAFFECTED - they resolve
-	// their accounts from the ledger's own prior entries (correlation_id),
-	// never from this session lookup, so a bet placed BEFORE expiry still
+	// case). An allow-list (rather than "reject only 'revoked'") fails
+	// closed on 'expired' and on any future status this package doesn't
+	// know about yet, not just the ones named today.
+	//
+	// `expires_at` bounds only the UN-CONSUMED launch TOKEN's own
+	// resolvability window (DefaultLaunchTokenTTL, launch.go) - it is set
+	// once at mint and is immutable (migration 0036/0042). It was never
+	// meant to bound how long an in-play (consumed) round may keep
+	// betting: the original item-2 fix applied it to BOTH statuses, which
+	// meant every real-money round stopped accepting bets ~
+	// DefaultLaunchTokenTTL (2 minutes) after launch, regardless of actual
+	// play. Fixed: the expiry check applies ONLY to a session that was
+	// NEVER consumed - this is what makes §15.1's "an orphaned/never-
+	// resolved active session is harmless" claim actually true, without
+	// also time-boxing genuine in-play sessions. A 'consumed' session
+	// remains bet-eligible for as long as it stays 'consumed' (bounded
+	// instead by RevokeLaunchSession at launch-failure time - see
+	// launchFailed below - and by the status allow-list itself: 'revoked'
+	// and 'expired' are still rejected).
+	//
+	// postWin/postRollback are UNAFFECTED either way - they resolve their
+	// accounts from the ledger's own prior entries (correlation_id), never
+	// from this session lookup, so a bet placed BEFORE expiry still
 	// settles (win/rollback) after the session has since expired.
 	if session.Status != LaunchSessionActive && session.Status != LaunchSessionConsumed {
 		return ReceiveCallbackResult{}, fmt.Errorf("%w: session is not eligible to accept a new bet (status=%s)", ErrLaunchSessionRequired, session.Status)
 	}
-	if time.Now().UTC().After(session.ExpiresAt) {
+	if session.Status == LaunchSessionActive && time.Now().UTC().After(session.ExpiresAt) {
 		return ReceiveCallbackResult{}, fmt.Errorf("%w: session has expired", ErrLaunchSessionRequired)
 	}
 	if session.Mode != ModeReal {

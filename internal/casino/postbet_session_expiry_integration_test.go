@@ -11,6 +11,19 @@
 // (postWin/postRollback never consult session status/expiry - they
 // resolve accounts from the ledger's own prior entries via
 // correlation_id).
+//
+// CAS-SESSION-EXPIRY-1 (code-reviewer FH-7 re-review, 2026-09-28, ADR 0095
+// §15.1.5): the ORIGINAL item-2 fix applied the expires_at check to BOTH
+// 'active' and 'consumed' sessions - a regression, since expires_at bounds
+// only the un-consumed launch TOKEN's own TTL (DefaultLaunchTokenTTL),
+// never a 'consumed' (normal in-play) session's own lifetime. Every
+// real-money round stopped accepting bets ~DefaultLaunchTokenTTL after
+// launch. Fixed: the expiry check now applies ONLY to 'active' sessions;
+// TestReceiveCallback_ConsumedSessionAcceptsBetAfterTokenTTLExpires below
+// is this regression's repro, and
+// TestReceiveCallback_NewBetRejectedPastExpiresAtEvenIfStillActive (still
+// present, unchanged) proves the 'active' half of the check was not also
+// dropped.
 package casino
 
 import (
@@ -73,6 +86,92 @@ func mintSessionWithTTL(t *testing.T, pool *db.Pool, f casinoFixture, providerID
 		t.Fatalf("mint launch session with TTL: %v", err)
 	}
 	return sessionID
+}
+
+// mintAndConsumeSessionWithTTL mints a session with a short TTL and
+// immediately consumes its token via ResolveLaunchToken (the normal
+// vendor-bootstrap call), all BEFORE the TTL lapses - mirroring the real
+// sequence (mint, then the game client consumes the token to start the
+// round) rather than a test artificially forcing 'consumed' without ever
+// going through the single-use token path. Returns the session id.
+func mintAndConsumeSessionWithTTL(t *testing.T, pool *db.Pool, f casinoFixture, providerID, assetCode string, ttl time.Duration) uuid.UUID {
+	t.Helper()
+	game := seedGame(t, pool, providerID, assetCode)
+	var sessionID uuid.UUID
+	var token string
+	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		session, tok, err := CreateLaunchSession(ctx, tx, CreateLaunchSessionParams{
+			TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID,
+			GameID: game.ID, ProviderID: providerID, ProviderGameID: game.ProviderGameID,
+			AssetCode: assetCode, Mode: ModeReal, TTL: ttl,
+		})
+		if err != nil {
+			return err
+		}
+		sessionID, token = session.ID, tok
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("mint launch session with TTL: %v", err)
+	}
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		session, err := ResolveLaunchToken(ctx, tx, token)
+		if err != nil {
+			return err
+		}
+		if session.Status != LaunchSessionConsumed {
+			t.Fatalf("test setup: expected ResolveLaunchToken to consume the session, got status %q", session.Status)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("consume launch session before TTL lapses: %v", err)
+	}
+	return sessionID
+}
+
+// TestReceiveCallback_ConsumedSessionAcceptsBetAfterTokenTTLExpires is the
+// CAS-SESSION-EXPIRY-1 regression repro (code-reviewer FH-7 re-review,
+// 2026-09-28): a 'consumed' (normal in-play) session must keep accepting
+// bets after its own expires_at has passed, because expires_at bounds only
+// the un-consumed TOKEN's own resolvability window (DefaultLaunchTokenTTL),
+// never the round's own in-play lifetime. Before this fix, postBet rejected
+// every bet on a consumed session once ~2 minutes had elapsed since launch,
+// regardless of how much real play was still happening.
+func TestReceiveCallback_ConsumedSessionAcceptsBetAfterTokenTTLExpires(t *testing.T) {
+	pool := testPool(t)
+	f := seedCasinoFixture(t, pool)
+	fundWallet(t, pool, f, 5000)
+	provider := NewMockCasinoProvider("mock-casino", "EUR")
+	registerCasinoCapability(t, pool, f, provider, 100)
+	sessionID := mintAndConsumeSessionWithTTL(t, pool, f, "mock-casino", "EUR", 30*time.Millisecond)
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
+
+	time.Sleep(200 * time.Millisecond)
+
+	var status LaunchSessionStatus
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT status FROM casino_launch_sessions WHERE id = $1`, sessionID).Scan(&status)
+	}); err != nil {
+		t.Fatalf("read session status: %v", err)
+	}
+	if status != LaunchSessionConsumed {
+		t.Fatalf("test setup: expected the session to still be 'consumed', got %q", status)
+	}
+
+	payload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-consumed-past-ttl", "", "round-consumed-past-ttl", "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
+	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", payload)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("expected the bet on a consumed, in-play session to be accepted after its token TTL lapsed, got %v", err)
+	}
+	if balance := cashBalance(t, pool, f); balance != 4000 {
+		t.Fatalf("expected 4000 after the 1000 bet, got %d", balance)
+	}
+	if debits, credits := sumDebitsCredits(t, pool, f.tenantID); debits != credits {
+		t.Fatalf("ledger invariant violated: debits=%d credits=%d", debits, credits)
+	}
 }
 
 func TestReceiveCallback_NewBetRejectedOnExpiredStatus_LedgerBalanced(t *testing.T) {

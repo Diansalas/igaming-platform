@@ -551,11 +551,6 @@ func TestLaunchGame_CtxCancelledAfterVendorAccept_StillAuditsLaunched(t *testing
 	}
 }
 
-// TestLaunchGame_CircuitOpenRevokesAndAudits closes code review F1's
-// circuit-open gap: the existing TestLaunchGame_UnhealthyProviderCircuitOpenRejected
-// asserts only the error; this asserts the session is actually revoked and
-// audited too (a mutant deleting the revoke on this specific branch alone
-// would otherwise survive).
 // TestLaunchGame_TransportErrorAuditNeverStoresRawErrorText is the
 // orchestrator's own follow-up on RV-PRH-I2 item 5: the append-only
 // casino.launch_failed audit record must carry only a closed
@@ -608,6 +603,11 @@ func TestLaunchGame_TransportErrorAuditNeverStoresRawErrorText(t *testing.T) {
 	}
 }
 
+// TestLaunchGame_CircuitOpenRevokesAndAudits closes code review F1's
+// circuit-open gap: the existing TestLaunchGame_UnhealthyProviderCircuitOpenRejected
+// asserts only the error; this asserts the session is actually revoked and
+// audited too (a mutant deleting the revoke on this specific branch alone
+// would otherwise survive).
 func TestLaunchGame_CircuitOpenRevokesAndAudits(t *testing.T) {
 	pool := testPool(t)
 	f := seedCasinoFixture(t, pool)
@@ -690,5 +690,104 @@ func assertSoleSessionRevoked(t *testing.T, pool *db.Pool, f casinoFixture) {
 	}
 	if status != LaunchSessionRevoked {
 		t.Fatalf("expected the session revoked, got status %q", status)
+	}
+}
+
+// TestLaunchGame_FailedLaunchOnConsumedSession_RevokeCASMissesAndBetStillAccepted
+// pins the REOPENED C4 gap (ADR 0095 §15.1.5, CAS-SESSION-EXPIRY-1): once
+// postBet no longer applies expires_at to a 'consumed' session (the
+// CAS-SESSION-EXPIRY-1 fix, required to stop rejecting real-money bets
+// ~DefaultLaunchTokenTTL after every launch), a session the vendor already
+// consumed BEFORE phase C recorded the launch as failed is bet-eligible
+// forever: RevokeLaunchSession's CAS (WHERE status='active') misses it,
+// and migration 0036/0042's immutability trigger forbids widening that CAS
+// to 'consumed' (any UPDATE where OLD.status IN ('consumed','expired',
+// 'revoked') is rejected, regardless of the target status) - closing this
+// properly needs a migration, tracked as CAS-REVOKE-CONSUMED-1 rather than
+// solved here. This test is a deliberate, labelled characterization of the
+// gap (NOT IMPLEMENTED), not a silent regression: it exists so a future
+// migration-backed fix has a red test to turn green.
+func TestLaunchGame_FailedLaunchOnConsumedSession_RevokeCASMissesAndBetStillAccepted(t *testing.T) {
+	pool := testPool(t)
+	f := seedCasinoFixture(t, pool)
+	fundWallet(t, pool, f, 5000)
+	game := seedGame(t, pool, "mock-casino", "EUR")
+	enableGameForTenant(t, pool, f, game.ID)
+
+	base := NewMockCasinoProvider("mock-casino", "EUR")
+	registerCasinoCapability(t, pool, f, base, 100)
+
+	provider := &spyLaunchProvider{MockCasinoProvider: base}
+	provider.onLaunch = func(ctx context.Context, req LaunchRequest) (LaunchResult, error) {
+		// Simulate the vendor's game client consuming the launch token
+		// (the normal bootstrap call) WHILE the platform's own phase B/C
+		// is still in flight, then have phase B itself fail - the exact
+		// interleaving C4 names.
+		if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+			_, err := ResolveLaunchToken(ctx, tx, req.LaunchToken)
+			return err
+		}); err != nil {
+			t.Fatalf("consume launch token from within onLaunch: %v", err)
+		}
+		return LaunchResult{}, errors.New("simulated transport failure after vendor consumed the token")
+	}
+
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(base))
+	_, err := orch.LaunchGame(context.Background(), pool, NewMockOutboundResolver(), LaunchGameParams{
+		TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID,
+		GameID: game.ID, AssetCode: "EUR", Mode: ModeReal,
+	})
+	if err == nil {
+		t.Fatal("expected an error for the simulated transport failure")
+	}
+
+	// LaunchGame returns a zero LaunchGameResult on this error path, so the
+	// session id is recovered from the (sole) row this fixture created -
+	// the session is 'consumed', NOT 'revoked': RevokeLaunchSession's CAS
+	// (status='active') missed it, because the vendor's onLaunch hook
+	// consumed it first. This is the DB-trigger-blocked half of the fix
+	// (§15.1.5) - documented here, not silently left unasserted.
+	var sessionID uuid.UUID
+	var status LaunchSessionStatus
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx,
+			`SELECT id, status FROM casino_launch_sessions WHERE tenant_id = $1 AND player_account_id = $2`,
+			f.tenantID, f.playerAccountID).Scan(&sessionID, &status)
+	}); err != nil {
+		t.Fatalf("read launch session status: %v", err)
+	}
+	if status != LaunchSessionConsumed {
+		t.Fatalf("test setup: expected the session to remain 'consumed' (revoke CAS should miss it), got %q", status)
+	}
+
+	// The launch_failed audit record's own "revoked" field must honestly
+	// report the CAS miss (false), not claim a revocation that did not
+	// happen.
+	var metadataJSON []byte
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx,
+			`SELECT metadata FROM audit_log
+			 WHERE tenant_id = $1 AND action = 'casino.launch_failed'
+			 ORDER BY created_at DESC LIMIT 1`,
+			f.tenantID).Scan(&metadataJSON)
+	}); err != nil {
+		t.Fatalf("read casino.launch_failed audit metadata: %v", err)
+	}
+	if strings.Contains(string(metadataJSON), `"revoked":true`) {
+		t.Fatalf("expected revoked=false in the audit metadata (the CAS missed a consumed session), got %s", metadataJSON)
+	}
+
+	// The gap: a bet against this 'consumed'-but-launch-failed session is
+	// STILL ACCEPTED - CAS-REVOKE-CONSUMED-1, not yet closed.
+	payload := base.CallbackPayload(f.tenantID, CallbackEventBet, "bet-after-failed-launch", "", "round-after-failed-launch", "game-1", 500, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
+	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", payload)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("CAS-REVOKE-CONSUMED-1 characterization: expected the bet to still be accepted (the gap this test documents), got a rejection instead - if this now fails, CAS-REVOKE-CONSUMED-1 may already be fixed and this test should be updated/removed: %v", err)
+	}
+	if balance := cashBalance(t, pool, f); balance != 4500 {
+		t.Fatalf("expected cash balance 4500 (5000 - 500 bet) despite the failed/revoked-in-name-only launch, got %d", balance)
 	}
 }
