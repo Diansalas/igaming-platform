@@ -1803,3 +1803,7 @@ requires `wait_event_type = 'Lock'` on the matched backend in
 `FOR UPDATE` on both the main receipt path and the reversal tombstone
 branch. The FIFO lock-queue assumption documented in `#1a` stands.
 Record: `docs/plans/payment-readiness/rv-fh7-architect-final.md`.*
+
+### Amendment 2026-09-28 (PRH-2, ADR 0102 §7.7; ledger-finance F11): alert tables are the terminal lock level
+
+Alert tables (`alerts`, `alert_occurrences`) are the terminal lock level. After `alerting.RaiseGuarded` runs inside a business transaction, that transaction takes no further business-row lock on a different intent, attempt, wallet, account or session. This keeps the dedup-key wait introduced by durable alerting out of every existing lock-order cycle.

@@ -694,21 +694,27 @@ func assertSoleSessionRevoked(t *testing.T, pool *db.Pool, f casinoFixture) {
 	}
 }
 
+// TestLaunchGame_FailedLaunchOnConsumedSession_RevokesAndRejectsBet closes
+// the CAS-REVOKE-CONSUMED-1 gap (ADR 0095 §15.1.5 C4; security's required
+// fix, docs/plans/payment-readiness/rv-prh-i2-casino-security.md
+// "Re-review (FH-7, 2026-09-28)"; migration 0108).
+//
+// This is the INVERSION of the former (now removed) characterization test
 // TestLaunchGame_FailedLaunchOnConsumedSession_RevokeCASMissesAndBetStillAccepted
-// pins the REOPENED C4 gap (ADR 0095 §15.1.5, CAS-SESSION-EXPIRY-1): once
-// postBet no longer applies expires_at to a 'consumed' session (the
-// CAS-SESSION-EXPIRY-1 fix, required to stop rejecting real-money bets
-// ~DefaultLaunchTokenTTL after every launch), a session the vendor already
-// consumed BEFORE phase C recorded the launch as failed is bet-eligible
-// forever: RevokeLaunchSession's CAS (WHERE status='active') misses it,
-// and migration 0036/0042's immutability trigger forbids widening that CAS
-// to 'consumed' (any UPDATE where OLD.status IN ('consumed','expired',
-// 'revoked') is rejected, regardless of the target status) - closing this
-// properly needs a migration, tracked as CAS-REVOKE-CONSUMED-1 rather than
-// solved here. This test is a deliberate, labelled characterization of the
-// gap (NOT IMPLEMENTED), not a silent regression: it exists so a future
-// migration-backed fix has a red test to turn green.
-func TestLaunchGame_FailedLaunchOnConsumedSession_RevokeCASMissesAndBetStillAccepted(t *testing.T) {
+// (QA F1, plan §5-A): before migration 0108, a session the vendor already
+// 'consumed' BEFORE phase C recorded the launch as failed stayed
+// 'consumed' forever - RevokeLaunchSession's CAS (WHERE status='active')
+// missed it, and migration 0036/0042's immutability trigger forbade
+// widening that CAS to 'consumed' (any UPDATE where OLD.status IN
+// ('consumed','expired','revoked') was rejected, regardless of the target
+// status). A bet against that session was then still accepted.
+//
+// After 0108, the same interleaving now ends with the session 'revoked',
+// the launch_failed audit honestly reporting revoked=true and
+// prior_status="consumed", a subsequent bet refused with
+// ErrLaunchSessionRequired, and the player's balance/ledger untouched by
+// that refused bet.
+func TestLaunchGame_FailedLaunchOnConsumedSession_RevokesAndRejectsBet(t *testing.T) {
 	pool := testPool(t)
 	f := seedCasinoFixture(t, pool)
 	fundWallet(t, pool, f, 5000)
@@ -744,10 +750,9 @@ func TestLaunchGame_FailedLaunchOnConsumedSession_RevokeCASMissesAndBetStillAcce
 
 	// LaunchGame returns a zero LaunchGameResult on this error path, so the
 	// session id is recovered from the (sole) row this fixture created -
-	// the session is 'consumed', NOT 'revoked': RevokeLaunchSession's CAS
-	// (status='active') missed it, because the vendor's onLaunch hook
-	// consumed it first. This is the DB-trigger-blocked half of the fix
-	// (§15.1.5) - documented here, not silently left unasserted.
+	// migration 0108 lets phase C's RevokeLaunchSession CAS now match the
+	// 'consumed' session the vendor's onLaunch hook consumed first, and the
+	// session ends 'revoked', not 'consumed'.
 	var sessionID uuid.UUID
 	var status LaunchSessionStatus
 	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
@@ -757,13 +762,13 @@ func TestLaunchGame_FailedLaunchOnConsumedSession_RevokeCASMissesAndBetStillAcce
 	}); err != nil {
 		t.Fatalf("read launch session status: %v", err)
 	}
-	if status != LaunchSessionConsumed {
-		t.Fatalf("test setup: expected the session to remain 'consumed' (revoke CAS should miss it), got %q", status)
+	if status != LaunchSessionRevoked {
+		t.Fatalf("expected the session revoked (CAS-REVOKE-CONSUMED-1 closed), got %q", status)
 	}
 
-	// The launch_failed audit record's own "revoked" field must honestly
-	// report the CAS miss (false), not claim a revocation that did not
-	// happen.
+	// The launch_failed audit record must honestly report the successful
+	// revoke (revoked=true) AND the prior status the CAS matched from
+	// ("consumed", not "active") - security's required fix.
 	var metadataJSON []byte
 	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		return tx.QueryRow(ctx,
@@ -780,21 +785,28 @@ func TestLaunchGame_FailedLaunchOnConsumedSession_RevokeCASMissesAndBetStillAcce
 	if err := json.Unmarshal(metadataJSON, &metadata); err != nil {
 		t.Fatalf("parse casino.launch_failed audit metadata: %v (%s)", err, metadataJSON)
 	}
-	if revoked, ok := metadata["revoked"].(bool); !ok || revoked {
-		t.Fatalf("expected revoked=false in the audit metadata (the CAS missed a consumed session), got %s", metadataJSON)
+	if revoked, ok := metadata["revoked"].(bool); !ok || !revoked {
+		t.Fatalf("expected revoked=true in the audit metadata, got %s", metadataJSON)
+	}
+	if priorStatus, ok := metadata["prior_status"].(string); !ok || priorStatus != string(LaunchSessionConsumed) {
+		t.Fatalf(`expected prior_status="consumed" in the audit metadata, got %s`, metadataJSON)
 	}
 
-	// The gap: a bet against this 'consumed'-but-launch-failed session is
-	// STILL ACCEPTED - CAS-REVOKE-CONSUMED-1, not yet closed.
+	// The gap is closed: a bet against this now-'revoked' session is
+	// refused with ErrLaunchSessionRequired.
 	payload := base.CallbackPayload(f.tenantID, CallbackEventBet, "bet-after-failed-launch", "", "round-after-failed-launch", "game-1", 500, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", payload)
 		return err
 	})
-	if err != nil {
-		t.Fatalf("CAS-REVOKE-CONSUMED-1 characterization: expected the bet to still be accepted (the gap this test documents), got a rejection instead - if this now fails, CAS-REVOKE-CONSUMED-1 may already be fixed and this test should be updated/removed: %v", err)
+	if !errors.Is(err, ErrLaunchSessionRequired) {
+		t.Fatalf("expected ErrLaunchSessionRequired for a bet against a revoked session, got %v", err)
 	}
-	if balance := cashBalance(t, pool, f); balance != 4500 {
-		t.Fatalf("expected cash balance 4500 (5000 - 500 bet) despite the failed/revoked-in-name-only launch, got %d", balance)
+	if balance := cashBalance(t, pool, f); balance != 5000 {
+		t.Fatalf("expected cash balance unchanged at 5000 (the bet was refused), got %d", balance)
+	}
+	debits, credits := sumDebitsCredits(t, pool, f.tenantID)
+	if debits != credits {
+		t.Fatalf("ledger not balanced: debits=%d credits=%d", debits, credits)
 	}
 }

@@ -25,8 +25,12 @@ import (
 func TestSyncCatalogue_RequiresPlatformServiceScope(t *testing.T) {
 	pool := testPool(t)
 
+	result, fetchErr := FetchCatalogue(context.Background(), NewMockSportsbookProvider())
+	if fetchErr != nil {
+		t.Fatalf("FetchCatalogue: %v", fetchErr)
+	}
 	err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
-		return SyncCatalogue(ctx, tx, NewMockSportsbookProvider())
+		return SyncCatalogue(ctx, tx, result)
 	})
 	if err == nil {
 		t.Fatal("expected SyncCatalogue to fail under WithoutTenant, got nil")
@@ -45,8 +49,12 @@ func TestSyncCatalogue_IdempotentAcrossTwoRuns(t *testing.T) {
 	provider := NewMockSportsbookProvider()
 
 	runSync := func() {
+		result, fetchErr := FetchCatalogue(context.Background(), provider)
+		if fetchErr != nil {
+			t.Fatalf("FetchCatalogue: %v", fetchErr)
+		}
 		err := pool.WithPlatformService(context.Background(), db.ServiceSportsbookCatalogueSync, func(ctx context.Context, tx pgx.Tx) error {
-			return SyncCatalogue(ctx, tx, provider)
+			return SyncCatalogue(ctx, tx, result)
 		})
 		if err != nil {
 			t.Fatalf("SyncCatalogue under WithPlatformService failed: %v", err)

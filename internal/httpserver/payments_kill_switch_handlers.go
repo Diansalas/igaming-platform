@@ -250,6 +250,21 @@ func (c killSwitchCall) auditTenantID() uuid.UUID {
 	return c.target
 }
 
+// auditSubjectTenantID is ADR 0104 §4's SubjectTenantID for a kill-switch
+// mutation's own audit row: c.target, but ONLY for a platform-scope
+// caller (c.tc.TenantID == uuid.Nil) - exactly the sessions whose audit
+// row auditTenantID() above writes as a platform-level event
+// (TenantID: uuid.Nil). c.target is always route-validated by this point
+// (beginKillSwitchCall's canActOnTenant and existence check already ran),
+// never taken from a request body. A tenant-scoped caller's own audit row
+// already carries its real TenantID, so it has no subject tenant.
+func (c killSwitchCall) auditSubjectTenantID() uuid.UUID {
+	if c.tc.TenantID == uuid.Nil {
+		return c.target
+	}
+	return uuid.Nil
+}
+
 // killSwitchErrorClass classifies err into the class both
 // writeKillSwitchError and recordKillSwitchRefusalAudit use: "cas_conflict"
 // and "trigger_refusal" are genuine administrative refusals (409, and -
@@ -323,7 +338,7 @@ func writeKillSwitchError(ctx context.Context, deps Deps, w http.ResponseWriter,
 // problem.
 func recordKillSwitchRefusalAudit(ctx context.Context, deps Deps, c killSwitchCall, op, class, targetType, targetID string) {
 	entry := audit.Entry{
-		TenantID: c.auditTenantID(), ActorType: audit.ActorStaff, ActorID: c.subject,
+		TenantID: c.auditTenantID(), SubjectTenantID: c.auditSubjectTenantID(), ActorType: audit.ActorStaff, ActorID: c.subject,
 		Action: "payments_kill_switch." + op, TargetType: targetType, TargetID: targetID,
 		Outcome: audit.OutcomeDenied, IPAddress: c.ipAddress, UserAgent: c.userAgent, RequestID: c.requestID,
 		Metadata: map[string]any{"actor_scope": c.sessionScopeLabel(), "target_tenant_id": c.target.String(), "denied_class": class},
@@ -640,7 +655,7 @@ func newEngageKillSwitchHandler(deps Deps) http.HandlerFunc {
 			}
 
 			return audit.Record(ctx, tx, audit.Entry{
-				TenantID: c.auditTenantID(), ActorType: audit.ActorStaff, ActorID: c.subject,
+				TenantID: c.auditTenantID(), SubjectTenantID: c.auditSubjectTenantID(), ActorType: audit.ActorStaff, ActorID: c.subject,
 				Action: "payments_kill_switch.engage", TargetType: "payment_kill_switch", TargetID: ks.ID.String(),
 				Outcome: audit.OutcomeSuccess, IPAddress: clientIP(r), UserAgent: r.UserAgent(), RequestID: c.requestID,
 				Metadata: metadata,
@@ -700,7 +715,7 @@ func newRequestKillSwitchReleaseHandler(deps Deps) http.HandlerFunc {
 				return err
 			}
 			return audit.Record(ctx, tx, audit.Entry{
-				TenantID: c.auditTenantID(), ActorType: audit.ActorStaff, ActorID: c.subject,
+				TenantID: c.auditTenantID(), SubjectTenantID: c.auditSubjectTenantID(), ActorType: audit.ActorStaff, ActorID: c.subject,
 				Action: "payments_kill_switch.request_release", TargetType: "payment_kill_switch_release_request", TargetID: req.ID.String(),
 				Outcome: audit.OutcomeSuccess, IPAddress: clientIP(r), UserAgent: r.UserAgent(), RequestID: c.requestID,
 				Metadata: map[string]any{
@@ -763,7 +778,7 @@ func newApproveKillSwitchReleaseHandler(deps Deps) http.HandlerFunc {
 				return err
 			}
 			return audit.Record(ctx, tx, audit.Entry{
-				TenantID: c.auditTenantID(), ActorType: audit.ActorStaff, ActorID: c.subject,
+				TenantID: c.auditTenantID(), SubjectTenantID: c.auditSubjectTenantID(), ActorType: audit.ActorStaff, ActorID: c.subject,
 				Action: "payments_kill_switch.approve_release", TargetType: "payment_kill_switch", TargetID: ks.ID.String(),
 				Outcome: audit.OutcomeSuccess, IPAddress: clientIP(r), UserAgent: r.UserAgent(), RequestID: c.requestID,
 				Metadata: map[string]any{
@@ -810,13 +825,19 @@ func newCancelKillSwitchReleaseHandler(deps Deps) http.HandlerFunc {
 				return err
 			}
 			return audit.Record(ctx, tx, audit.Entry{
-				TenantID: c.auditTenantID(), ActorType: audit.ActorStaff, ActorID: c.subject,
+				TenantID: c.auditTenantID(), SubjectTenantID: c.auditSubjectTenantID(), ActorType: audit.ActorStaff, ActorID: c.subject,
 				Action: "payments_kill_switch.cancel_release", TargetType: "payment_kill_switch_release_request", TargetID: req.ID.String(),
 				Outcome: audit.OutcomeSuccess, IPAddress: clientIP(r), UserAgent: r.UserAgent(), RequestID: c.requestID,
 				Metadata: map[string]any{
 					"actor_scope": c.sessionScopeLabel(), "target_tenant_id": c.target.String(),
-					"before": map[string]any{"status": req.Status},
-					"after":  map[string]any{"status": "cancelled"},
+					// kill_switch_id (ADR 0104 §5.5): lets the tenant
+					// platform-actions read path link a cancel back to the
+					// switch it concerns, exactly like request_release's own
+					// kill_switch_id metadata key - it was previously
+					// omitted since no reader needed it yet.
+					"kill_switch_id": req.KillSwitchID.String(),
+					"before":         map[string]any{"status": req.Status},
+					"after":          map[string]any{"status": "cancelled"},
 				},
 			})
 		})

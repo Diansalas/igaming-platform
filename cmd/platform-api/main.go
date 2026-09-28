@@ -251,8 +251,17 @@ func run() error {
 	// unscoped connection. If the sync cannot authorize itself, the
 	// binary must not serve traffic with a half-synced catalogue, so the
 	// existing fail-the-startup wrap below is unchanged.
+	// SB-CATALOGUE-IO-1 (ADR 0095 amendment, 2026-09-28): the provider call
+	// runs first, with no database transaction open at all (FetchCatalogue
+	// refuses under txscope.Held and never opens one itself); only once it
+	// has returned a validated result does the platform-service-scoped
+	// transaction open, to upsert that already-fetched result.
+	sbCatalogue, err := sportsbook.FetchCatalogue(ctx, providers.Sportsbook)
+	if err != nil {
+		return fmt.Errorf("sync sportsbook catalogue: %w", err)
+	}
 	if err := pool.WithPlatformService(ctx, db.ServiceSportsbookCatalogueSync, func(ctx context.Context, tx pgx.Tx) error {
-		return sportsbook.SyncCatalogue(ctx, tx, providers.Sportsbook)
+		return sportsbook.SyncCatalogue(ctx, tx, sbCatalogue)
 	}); err != nil {
 		return fmt.Errorf("sync sportsbook catalogue: %w", err)
 	}

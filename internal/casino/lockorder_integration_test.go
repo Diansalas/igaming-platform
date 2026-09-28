@@ -16,6 +16,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/bonus"
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/ledger"
+	"github.com/Diansalas/igaming-platform/internal/rg"
 )
 
 func loCasinoAccount(t *testing.T, pool *db.Pool, f casinoFixture, walletID *uuid.UUID, at ledger.AccountType) uuid.UUID {
@@ -350,6 +351,165 @@ func TestLockOrder_ConcurrentBetAndGrantConversion_NoDeadlock(t *testing.T) {
 		loAssertBalanced(t, pool, f.tenantID)
 		loAssertProjectionMatchesRebuild(t, pool, f.tenantID)
 	})
+}
+
+// --- F-1: bootstrap vs. the first postBet of a round -----------------------
+
+// TestLockOrder_BootstrapAndFirstBetOfRound_NoDeadlock is the architect
+// review's F-1 finding (docs/plans/prh2-hardening-round/reviews/
+// b-architect-qa-pop.md), reproduced against the real locking primitives on
+// both sides:
+//
+//	BootstrapLaunch's getLaunchSessionForBootstrap locks the SAME
+//	casino_launch_sessions row bootstrap is consuming, then (via
+//	bootstrapGateDenialReason -> evaluateAndAuditEligibility) takes RG's
+//	person-scoped advisory lock (rg.go's lockPerson, called from
+//	rg.EvaluateEligibility).
+//
+//	postBet, on an active session, takes the SAME RG advisory lock FIRST
+//	(evaluateAndAuditEligibility, orchestrator.go ~:1570), and only
+//	afterwards calls BindProviderRound (~:1785), whose INSERT into
+//	casino_provider_rounds carries a foreign key to casino_launch_sessions
+//	(migration 0080) - Postgres takes an IMPLICIT FOR KEY SHARE lock on the
+//	referenced session row to enforce that FK, with no explicit SQL
+//	anywhere naming it.
+//
+// Session-then-RG vs. RG-then-session on the same two resources is the
+// textbook ABBA shape. B is always the REAL production BindProviderRound
+// plus the real rg.EvaluateEligibility. A's own lock-acquisition step is
+// what security's B-C3 finding corrected (docs/plans/prh2-hardening-round/
+// reviews/b-security.md): the ORIGINAL version of this test built its own
+// `fmt.Sprintf("... %s", lockClause)` query for BOTH the mutant and the fix
+// case, so it never actually called getLaunchSessionForBootstrap at all -
+// security changed bootstrap.go:242 back to FOR UPDATE and every test in
+// this suite, including this one, still passed. Fixed:
+//
+//   - "harness control: FOR UPDATE deadlocks (mutant)" keeps the
+//     Sprintf-built raw query, on purpose - it exists ONLY to prove the
+//     harness itself (loRunABBA, the blockers, loIsDeadlock) can detect a
+//     40P01 in this exact two-resource shape, never to stand in for
+//     production code. This is why it is a "harness control", not "the
+//     mutant case of the production test" - it was the earlier design's
+//     naming that blurred the two.
+//   - "production: getLaunchSessionForBootstrap (fix)" is the ONLY
+//     sub-test that pins production behaviour: racer A calls
+//     getLaunchSessionForBootstrap directly - the exact function
+//     BootstrapLaunch itself calls, not a hand-written equivalent query -
+//     so a regression of that function's own lock clause is what this
+//     sub-test is wired to catch. Re-applying the exact mutant this
+//     finding names (bootstrap.go:242, FOR NO KEY UPDATE -> FOR UPDATE)
+//     and re-running ONLY this sub-test is recorded as killing it in
+//     docs/plans/payment-readiness/evidence/prh2-casino-b-mutation-kill.txt
+//     (B-C3 entry) - the harness control above is not sufficient evidence
+//     of that on its own, which is exactly what B-C3 found.
+func TestLockOrder_BootstrapAndFirstBetOfRound_NoDeadlock(t *testing.T) {
+	t.Run("harness control: FOR UPDATE deadlocks (mutant)", func(t *testing.T) {
+		runBootstrapFirstBetLockOrderCase(t, func(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, tokenHash string) error {
+			var discard uuid.UUID
+			return tx.QueryRow(ctx,
+				`SELECT id FROM casino_launch_sessions WHERE token_hash = $1 AND tenant_id = $2 FOR UPDATE`,
+				tokenHash, tenantID).Scan(&discard)
+		}, true)
+	})
+	t.Run("production: getLaunchSessionForBootstrap (fix)", func(t *testing.T) {
+		runBootstrapFirstBetLockOrderCase(t, func(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, tokenHash string) error {
+			_, _, err := getLaunchSessionForBootstrap(ctx, tx, tenantID, tokenHash)
+			return err
+		}, false)
+	})
+}
+
+// runBootstrapFirstBetLockOrderCase is shared by both sub-tests above.
+// lockSession is racer A's own session-row-acquisition step - either the
+// harness control's raw Sprintf query, or (for the sub-test that actually
+// pins production behaviour) a direct call to getLaunchSessionForBootstrap
+// itself.
+func runBootstrapFirstBetLockOrderCase(t *testing.T, lockSession func(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, tokenHash string) error, wantDeadlock bool) {
+	t.Helper()
+	pool := testPool(t)
+	f := seedCasinoFixture(t, pool)
+	fundWallet(t, pool, f, 100_000)
+	game := seedGame(t, pool, "mock-casino", "EUR")
+	session, token := mintSessionForBootstrap(t, pool, f, game, ModeReal, "EUR", 0)
+	sessionID := session.ID
+	tokenHash := hashLaunchToken(token)
+
+	elig := rg.EligibilityParams{
+		TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID,
+	}
+
+	// blockerSession forces racer A (the bootstrap-sim) to queue on
+	// the session row before it ever reaches the RG lock - ANY
+	// conflicting mode does this, so the blocker itself always uses
+	// the strongest lock (FOR UPDATE), independently of which
+	// acquisition step A itself uses below.
+	blockerSession := loHoldWith(t, pool, f.tenantID, "session row (FOR UPDATE)", func(ctx context.Context, tx pgx.Tx) error {
+		var discard uuid.UUID
+		return tx.QueryRow(ctx, `SELECT id FROM casino_launch_sessions WHERE id = $1 FOR UPDATE`, sessionID).Scan(&discard)
+	})
+	// blockerRG forces racer B (the postbet-sim) to queue on the RG
+	// advisory lock before A ever tries it, so B is first in that
+	// lock's wait queue - the ordering loRunABBA's own doc comment
+	// requires for a deterministic interleaving.
+	blockerRG := loHoldWith(t, pool, f.tenantID, "RG advisory lock", func(ctx context.Context, tx pgx.Tx) error {
+		_, err := rg.EvaluateEligibility(ctx, tx, elig)
+		return err
+	})
+
+	// A: bootstrap-sim. Acquires the session row via lockSession, then
+	// wants the RG advisory lock next, exactly as
+	// bootstrapGateDenialReason does via evaluateAndAuditEligibility.
+	startBootstrapSim := func() *loRacer {
+		return loStartRacer(t, pool, f.tenantID, "bootstrap-sim(session,RG)", func(ctx context.Context, tx pgx.Tx) error {
+			if err := lockSession(ctx, tx, f.tenantID, tokenHash); err != nil {
+				return err
+			}
+			_, err := rg.EvaluateEligibility(ctx, tx, elig)
+			return err
+		})
+	}
+	// B: postbet-sim. Takes the RG advisory lock first, exactly as
+	// postBet's own evaluateAndAuditEligibility call does, then
+	// calls the REAL BindProviderRound - whose FK to
+	// casino_launch_sessions takes the IMPLICIT FOR KEY SHARE lock
+	// this whole finding is about.
+	startPostBetSim := func() *loRacer {
+		return loStartRacer(t, pool, f.tenantID, "postbet-sim(RG,session FK)", func(ctx context.Context, tx pgx.Tx) error {
+			if _, err := rg.EvaluateEligibility(ctx, tx, elig); err != nil {
+				return err
+			}
+			return BindProviderRound(ctx, tx, f.tenantID, f.brandID, f.playerAccountID, sessionID, game.ID,
+				"mock-casino", "lockorder-f1-round-"+sessionID.String(), nil)
+		})
+	}
+
+	racerA, racerB, errA, errB := loRunABBA(t, pool, startBootstrapSim, startPostBetSim, []*loBlocker{blockerSession, blockerRG})
+
+	deadlockedA, deadlockedB := loIsDeadlock(errA), loIsDeadlock(errB)
+	if wantDeadlock {
+		if !deadlockedA && !deadlockedB {
+			t.Fatalf("expected a 40P01 deadlock between %q and %q; got errA=%v errB=%v",
+				racerA.name, racerB.name, errA, errB)
+		}
+		// Postgres's deadlock detector aborts exactly one side; the
+		// other must then complete normally once the victim's locks
+		// are released.
+		if deadlockedA && errB != nil {
+			t.Fatalf("the non-victim racer %q must still succeed once the deadlock victim aborts: %v", racerB.name, errB)
+		}
+		if deadlockedB && errA != nil {
+			t.Fatalf("the non-victim racer %q must still succeed once the deadlock victim aborts: %v", racerA.name, errA)
+		}
+	} else {
+		loAssertNoDeadlock(t, "F-1 (bootstrap session lock vs. postBet's FK-driven lock)",
+			map[string]error{racerA.name: errA, racerB.name: errB})
+		if errA != nil {
+			t.Fatalf("%s must not error under the fix: %v", racerA.name, errA)
+		}
+		if errB != nil {
+			t.Fatalf("%s must not error under the fix: %v", racerB.name, errB)
+		}
+	}
 }
 
 // loAssertWageringContribution fails unless grantID has a

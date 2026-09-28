@@ -538,6 +538,20 @@ const (
 	PermSportsbookSettlementSimulate Permission = "sportsbook_settlement:simulate"
 )
 
+// PermAlertManage gates acknowledging/resolving a platform-owned durable
+// alert (ADR 0102 "Durable Alerting and Provider-Neutral Delivery",
+// PRH-2 I-core, ALERT-DELIVERY-1, §4.2/C-102-7) - platform scope only.
+// Migration 0110's alerts state guard independently re-validates the
+// acting session against a platform-scoped staff_users row regardless of
+// this permission grant, but the permission is the application-layer gate
+// on the ack/resolve endpoints (built in I-wire; this permission is added
+// in I-core so K1 can be sequenced after it per the plan's Rule 1).
+// Deliberately NEVER granted to RoleTenantAdmin or any tenant-scoped
+// role: there is no tenant ack endpoint in PRH-2, and a tenant can never
+// ack, resolve or suppress a platform-owned integrity alert even one for
+// which it is the subject (ADR 0102 §2(2)).
+const PermAlertManage Permission = "alert:manage"
+
 // Provider credential permissions (Stage 10.3 W2a; ADR 0093 §3 and its
 // W2a design-review amendment; security review §6). Four distinct
 // permissions, never bundled into PermTenantWrite, PermCasinoConfigWrite
@@ -647,6 +661,9 @@ var rolePermissions = map[Role]map[Permission]bool{
 		// tenant's kill switches, through the same route family
 		// RoleTenantAdmin uses for its own tenant (canActOnTenant).
 		PermPaymentsKillSwitchEngage, PermPaymentsKillSwitchRelease, PermPaymentsKillSwitchRead,
+		// PRH-2 I-core (ADR 0102 §4.2/C-102-7): the sole grantee of
+		// PermAlertManage. See that permission's own doc comment.
+		PermAlertManage,
 	),
 	// Stage 3D business decision #4/#5: tenant_admin (a broad
 	// administrative role that also holds PermStaffManage) deliberately

@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -78,6 +80,13 @@ type StaffUser struct {
 	// internal/httpserver) compares against a withdrawal's own player
 	// account to authoritatively prevent self-approval.
 	PersonID *uuid.UUID
+	// DisplayName (ADR 0104 §3/§5.4) is nil for most staff accounts. It is
+	// the identifiable actor name a tenant's platform-actions audit
+	// projection shows next to the immutable staff_id (names are mutable
+	// and resolved at read time, per staff_id always being shown too).
+	// Written only through UpdateStaffDisplayName, itself only reachable
+	// from the audited endpoints in internal/httpserver.
+	DisplayName *string
 }
 
 // GetStaffUserByEmail looks up a staff user. If tenantID is uuid.Nil, tx
@@ -179,6 +188,97 @@ func LinkStaffPersonID(ctx context.Context, tx pgx.Tx, staffID, personID uuid.UU
 		return ErrAlreadyLinkedOrNotFound
 	}
 	return nil
+}
+
+// ErrInvalidDisplayName is returned by ValidateDisplayName (and surfaced
+// by UpdateStaffDisplayName's callers) for a name that fails hygiene.
+var ErrInvalidDisplayName = errors.New("identity: invalid display_name")
+
+// isBidiOrZeroWidthFormatRune reports whether r is one of the Unicode
+// format characters ADR 0104's security confirmation (N-3) requires
+// display_name to refuse, on top of plain control characters: the bidi
+// overrides U+202A-U+202E, the bidi isolates U+2066-U+2069, the
+// zero-width characters U+200B-U+200F, the word-joiner/invisible-operator
+// block U+2060-U+2064, the zero-width no-break space/BOM U+FEFF, and the
+// Arabic Letter Mark U+061C (G1-C3, security review 2026-09-28: the
+// original set missed these three). Any of these could make a displayed
+// name visually misrepresent a different actor's identity in the tenant
+// audit projection (ADR 0104 §5.4). Mirrors migration 0109's
+// staff_users_display_name_hygiene CHECK exactly - keep both in sync.
+func isBidiOrZeroWidthFormatRune(r rune) bool {
+	switch {
+	case r >= 0x202A && r <= 0x202E:
+		return true
+	case r >= 0x2066 && r <= 0x2069:
+		return true
+	case r >= 0x200B && r <= 0x200F:
+		return true
+	case r >= 0x2060 && r <= 0x2064:
+		return true
+	case r == 0xFEFF:
+		return true
+	case r == 0x061C:
+		return true
+	default:
+		return false
+	}
+}
+
+// ValidateDisplayName enforces, in Go, the SAME hygiene rule migration
+// 0109's staff_users_display_name_hygiene CHECK enforces in the database
+// (defense in depth, not a replacement for it): 1-100 characters (Unicode
+// codepoints, matching Postgres's char_length), no control characters,
+// and no bidi-override/isolate or zero-width format character (N-3).
+func ValidateDisplayName(name string) error {
+	if n := utf8.RuneCountInString(name); n < 1 || n > 100 {
+		return fmt.Errorf("%w: must be between 1 and 100 characters", ErrInvalidDisplayName)
+	}
+	for _, r := range name {
+		if unicode.IsControl(r) {
+			return fmt.Errorf("%w: must not contain control characters", ErrInvalidDisplayName)
+		}
+		if isBidiOrZeroWidthFormatRune(r) {
+			return fmt.Errorf("%w: must not contain bidi-override, bidi-isolate or zero-width format characters", ErrInvalidDisplayName)
+		}
+	}
+	return nil
+}
+
+// UpdateStaffDisplayName performs a COLUMN-ALLOWLISTED update of exactly
+// one column, display_name - never email, role, status or any other
+// staff_users field (N-2's "another user" write path must not become a
+// general staff-editing endpoint). tx must already be scoped correctly
+// for staffID (db.WithTenant(tenantID) for tenant staff, db.WithoutTenant
+// for a platform_admin) - staff_users' own dual_scope_isolation RLS
+// policy (migration 0011) is what actually enforces that a caller can
+// only ever reach a staffID inside its own scope; this function does not
+// re-derive or trust any tenant id itself.
+//
+// Returns the PRIOR value (nil if it was unset) so the caller can write a
+// complete before/after audit record (staff.display_name_changed) in the
+// same transaction - the CTE below reads the old value before the UPDATE
+// writes the new one, in a single round trip.
+func UpdateStaffDisplayName(ctx context.Context, tx pgx.Tx, staffID uuid.UUID, displayName string) (previous *string, err error) {
+	if err := ValidateDisplayName(displayName); err != nil {
+		return nil, err
+	}
+	row := tx.QueryRow(ctx, `
+		WITH old AS (SELECT display_name FROM staff_users WHERE id = $2)
+		UPDATE staff_users SET display_name = $1, updated_at = now()
+		WHERE id = $2
+		RETURNING (SELECT display_name FROM old)`,
+		displayName, staffID,
+	)
+	if err := row.Scan(&previous); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		if db.IsCheckViolation(err) {
+			return nil, fmt.Errorf("%w: rejected by the database hygiene constraint", ErrInvalidDisplayName)
+		}
+		return nil, fmt.Errorf("identity: update staff display name: %w", err)
+	}
+	return previous, nil
 }
 
 func CreateStaffUser(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, email, passwordHash string, role StaffRole, personID *uuid.UUID) (StaffUser, error) {
