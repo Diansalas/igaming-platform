@@ -463,9 +463,12 @@ func TestKYCWebhook_BadSignature_NoStatementBeforeVerification(t *testing.T) {
 	})
 	in := provider.CallbackPayload(f.tenantID, ref, ProviderApproved, "x")
 	sig := in.Header.Get(webhookauth.KYCSignatureHeader)
-	flipped := strings.Replace(sig, "0", "f", 1)
-	if flipped == sig {
-		flipped = strings.Replace(sig, "1", "e", 1)
+	// Flip the last hex digit only (the header is ^v1=[0-9a-f]{64}$): the old
+	// "first 0, else first 1" rewrite hit the "v1=" prefix when the hex had no
+	// '0' (~1.6% of runs), testing a malformed header instead (TEST-T11A-FLIP-1).
+	flipped := sig[:len(sig)-1] + "0"
+	if sig[len(sig)-1] == '0' {
+		flipped = sig[:len(sig)-1] + "1"
 	}
 	in.Header.Set(webhookauth.KYCSignatureHeader, flipped)
 

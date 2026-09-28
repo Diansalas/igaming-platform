@@ -156,11 +156,21 @@ func TestWebhook_BadSignature_NoWriteBeforeVerification(t *testing.T) {
 	// fails.
 	payload := provider.CallbackPayload(f.tenantID, CallbackEventDeposit, "t11a-ref", "", OutcomeSucceeded, 1000, "EUR", "", false)
 	badHeader := payload.Header.Clone()
+	// Flip the LAST hex digit only, never the "v1=" prefix: the previous
+	// "replace the first '0', else the first '1'" hit the prefix whenever
+	// the hex had no '0' (~1.6% of runs), producing a malformed header that
+	// ParseHeaders rejects before ProviderAcceptsWebhook - zero recorded
+	// statements and a spurious failure (TEST-T11A-FLIP-1).
 	sig := badHeader.Get(HeaderSignature)
-	flipped := strings.Replace(sig, "0", "f", 1)
-	if flipped == sig {
-		flipped = strings.Replace(sig, "1", "e", 1)
+	if !strings.HasPrefix(sig, "v1=") || len(sig) <= len("v1=") {
+		t.Fatalf("unexpected signature header shape %q", sig)
 	}
+	last := sig[len(sig)-1]
+	repl := byte('0')
+	if last == '0' {
+		repl = '1'
+	}
+	flipped := sig[:len(sig)-1] + string(repl)
 	badHeader.Set(HeaderSignature, flipped)
 	payload.Header = badHeader
 
