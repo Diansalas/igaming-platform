@@ -5163,3 +5163,49 @@ review flagged (F-2, F-6, F-9, F-11), and added the first full-lifecycle
 audit-content test (A-12) - see that branch's own report for detail; none
 of this changes the residuals above, which remain open pending K2/K3 and
 STAFF-LIFECYCLE-1.
+
+## PRH-2 K2 — governed manual adjustments: security-relevant surface (ADR 0100; NOT YET SECURITY-REVIEWED)
+
+This entry records what K2 adds so the index is complete. It is **not** a
+security review: `security`'s review of the K2 diff is still required before
+K2 is "complete" (CLAUDE.md).
+
+- **Acting surface widened (disclosed, pending security review):** migration
+  0113 adds the ADR 0099 §6.5 acting policies for K2 (player_accounts,
+  wallets, ledger_accounts SELECT + INSERT restricted to `player_cash` /
+  `manual_adjustment` - stricter than §6.5's four types, ledger_transactions
+  SELECT/INSERT/lock, ledger_entries SELECT/INSERT, wallet_balance_projection
+  SELECT/INSERT/UPDATE, payment_attempts/deposit_intents SELECT, and the K2
+  tables) and THREE implementation-record additions outside §6.5's list:
+  `licences` (own licence only - policy jurisdiction resolution),
+  `asset_authorizations` (tenant X - the K2-b suspended-asset rule) and
+  `staff_capability_grant_requests` (tenant X - the K2-G4 live-person vs
+  `grantee_person_id` re-check). Each calls `financial_acting_session_valid()`
+  (as an InitPlan); a layered probe test proves each one refuses an
+  acting-shaped session without an in-force grant, and the "drop the grant
+  function" mutant is killed for all 24.
+- **Fences first (LF C-K1-2):** the §6.6 ledger fence (branch (a) only) and
+  the §6.7 projection fence are created in the same migration, before the
+  acting policies on the money tables; LF N-2 (a non-governed entries insert
+  under acting) is pinned.
+- **K2-G1 finding, fixed:** the hardened A-18 found that
+  `asset_operation_eligibility.tenant_and_platform_read` and
+  `open_bet_self_exclusion_policies.tenant_and_platform_read` exposed
+  NULL-tenant rows to any player-unset session (ADR 0099 §6.2 had judged
+  them by their write policies only). 0113 adds `AS RESTRICTIVE` acting SELECT
+  fences on both. The dynamic probe also found `schema_migrations` has no RLS
+  at all (bookkeeping only; accepted and allow-listed in the probe).
+- **The system-tenant session** (`db.WithTenant`, used by the reconciliation
+  sweep) may read ONLY executed `ledger_adjustment_requests` rows (the §12
+  detector's link check).
+- **Plain platform sessions** have no policy on the request/approval
+  tables; platform staff act only through the acting session with a G-P2
+  grant for the tenant.
+- **Residuals (stated):** the ADR 0099 §7.6 cross-family visibility limit -
+  a platform principal's own staff row is invisible to a tenant session and
+  to another acting principal, so at execution its approval is re-checked by
+  its in-force grant (and the grant request's Person snapshot vs the
+  approval-time Person) only; its staff status was re-checked at its own
+  approval time. Grant revoke is the emergency stop. TM-7/TM-10 launch
+  flags, HD-PRH2-8 and LEDGER-MANUAL-ADJ-LINK-1 remain open.
+

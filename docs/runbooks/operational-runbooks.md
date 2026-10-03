@@ -203,3 +203,103 @@ tenant's own `finance` staff always fails closed (`CG010`, HTTP 409) — this
 is by design (ADR §4.1, architect ruling, deferred out of PRH-2), not an
 outage. Use G-T instead (the tenant's own `tenant_admin` requests, a
 `platform_admin` co-approves).
+
+## 11. Manual adjustment (ADR 0100, PRH-2 K2)
+
+Applies to `ledger_adjustment_requests` / `_approvals`, the financial
+approval policy tables, and the `ledger_unlinked_manual_adjustment`
+reconciliation kind. A manual adjustment is the ONLY way to correct a
+player's cash balance by hand, and it has exactly one shape: the tenant's
+`manual_adjustment` house account <-> the player's `player_cash`, one asset,
+one amount. Bonus corrections go through the bonus engine; cross-asset moves
+are a `ConversionOperation`.
+
+**Nothing is enabled until the platform authors a baseline.** No policy row
+is seeded (HD-PRH2-3). With no in-force `platform`-level row for
+`ledger_adjustment` (asset-scoped or all-assets) every submission is refused
+`MA014` ("manual adjustments are not enabled for this tenant"). To enable:
+1. A `platform_admin` proposes `POST /v1/admin/financial-policy-changes`
+   (`change_kind=policy`, `operation_kind=ledger_adjustment`, `level=platform`,
+   `base_required_approvals` >= 1, optional per-asset threshold). The values
+   are a legal/compliance decision - LEGAL / COMPLIANCE REVIEW REQUIRED;
+   record the reference in `legal_review_reference`.
+2. A DIFFERENT `platform_admin` (different Person) approves
+   `POST /v1/admin/financial-policy-changes/{id}/approve` with the
+   `content_hash` it reviewed. The policy row is written in that same
+   transaction and is effective from approval time (never back-dated).
+3. Under the HD-PRH2-8 interim every adjustment needs at least one
+   independent approver at every amount (`base_required_approvals` < 1 is
+   refused, `MA013`).
+
+**Submitting and approving (four-eyes, always):**
+1. The initiator (`finance` staff of the tenant with an in-force
+   `ledger_adjustment:initiate` grant, or a `platform_admin` with a G-P2 grant
+   for the tenant) submits `POST /v1/admin/tenants/{tid}/manual-adjustments`
+   with `wallet_id`, `asset_code`, `direction` (`credit_player`/`debit_player`),
+   `amount_minor_units` (integer string), `reason_code`
+   (`operational_error_correction`, `compensating_entry`, `goodwill_credit`,
+   `external_instruction`), `causation_transaction_id` where required,
+   `evidence_ref_hash` (hex SHA-256 of the external evidence reference - never
+   the reference itself or any PII) where required, and a note (1-1000 bytes).
+2. A different Person with an in-force `ledger_adjustment:approve` grant
+   reviews the request and approves with the request's `payload_hash`
+   (`POST .../{id}/approve`). The approval that brings the count to the
+   required number EXECUTES the posting in the same transaction - there is
+   no "approved but not yet posted" state.
+3. One reject ends the request. Only the initiator can cancel. Requests
+   expire after 24 hours (technical default).
+4. Refused by design: the initiator approving; the same Person under another
+   principal; the player's own Person as initiator or approver (`MA032`);
+   anyone who authored or approved a contributing policy (`MA011`); a stale
+   or foreign payload hash (`MA031`).
+
+**`refused_insufficient_funds`:** a debit larger than the player's cash
+balance, read under the posting's own projection lock, ends the request
+committed and posts nothing (LF-13, no negative balance). Submit a new
+request for the correct amount if the correction is still due.
+
+**`open_payment_exposure` (`MA020`, or `refused_at_execution` with that
+code):** every CREDIT to a player who has a deposit attempt in
+`disputed / multiple_success_for_intent` without a refund tombstone is
+refused, whatever the reason code. **There is no override**, deliberately: a
+hand credit could pay a captured-but-unposted deposit twice (INV-DEP-1).
+Resolve the payment side first (the PSP refund produces the tombstone that
+clears it). Debits are unaffected.
+
+**Other `refused_at_execution` codes:** `asset_suspended` (goodwill in an
+asset that is not active, not platform-authorized, or not authorized for the
+tenant), `tenant_not_active` (goodwill for a suspended/closed tenant),
+`compensation_cap_exceeded` (cumulative compensations would exceed the
+causation's `player_cash` leg), `policy_disabled`.
+
+**Tightening / loosening policy:**
+- A `tenant_admin` may only TIGHTEN its tenant's (or brand's) rows:
+  `POST /v1/admin/tenants/{tid}/financial-policy-changes` (`level=tenant` or
+  `brand`), approved by a different Person (another `tenant_admin`, or a
+  platform principal). A loosening from a tenant principal is refused
+  (`MA010`).
+- **Unblocking an over-tightened tenant (ADR 0100 §6.7):** a tenant can make
+  its own adjustments slow by raising its own requirement. The platform
+  remedy is a non-tightening tenant row with a platform REQUESTER **and** a
+  platform APPROVER (`POST /v1/admin/tenants/{tid}/financial-policy-changes`
+  by one `platform_admin`, approved by another). For `payment_force_resolve`
+  on a non-active tenant, tenant/brand rows are ignored automatically (K2-1).
+- Every policy change is four-eyes, audited (`financial_policy.change_*`),
+  append-only and effective-dated.
+
+**Emergency stop:** revoke the actor's `ledger_adjustment:*` grant (§10).
+The next in-transaction read refuses the authority; an execution already
+holding `FOR SHARE` on the grant completes first, then the revoke applies.
+There is still no staff suspend API (STAFF-LIFECYCLE-1).
+
+**`ledger_unlinked_manual_adjustment` (P1 reconciliation finding):** a
+`manual_adjustment` ledger transaction exists after the K2 cutover with no
+executed request linked to it - someone posted outside the governed path.
+Treat it as a financial incident (§3): identify the writer (application logs,
+`audit_log`, DB access logs), stop further access, and correct any economic
+effect ONLY with a governed `compensating_entry` request whose causation is
+the unlinked transaction. Never edit or delete ledger rows.
+
+**What this is not:** software four-eyes is not a legal or licensing
+approval. Real threshold values and the HD-PRH2-8 below-threshold question
+are human decisions.

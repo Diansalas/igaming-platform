@@ -65,3 +65,27 @@ describe('getNavPermissions write flags', () => {
     expect(getNavPermissions(undefined).staffAdmin).toBe(false)
   })
 })
+
+/**
+ * PRH-2 K2 (ADR 0100): the manual-adjustment flags mirror
+ * internal/auth/permission.go's ledger_adjustment:{read,initiate,approve}
+ * role sets exactly. UI convenience only.
+ */
+describe('getNavPermissions manual adjustment flags', () => {
+  const ma = (role: string) => {
+    const p = getNavPermissions(role)
+    return [p.manualAdjustments, p.manualAdjustmentAct]
+  }
+  it('finance and platform_admin may view and act (the grant is still required server-side)', () => {
+    expect(ma('finance')).toEqual([true, true])
+    expect(ma('platform_admin')).toEqual([true, true])
+  })
+  it('compliance views only', () => {
+    expect(ma('compliance')).toEqual([true, false])
+  })
+  it('every other role neither views nor acts', () => {
+    for (const role of ['tenant_admin', 'support', 'risk_manager', 'promotions_manager', 'bonus_operations', 'player', undefined]) {
+      expect(ma(role as string)).toEqual([false, false])
+    }
+  })
+})

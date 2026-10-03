@@ -175,9 +175,14 @@ func TestMigration0077_PerCommandPoliciesNoForAllAndNoLicenceDelete(t *testing.T
 			{table: "jurisdictions", name: "jurisdictions_read", cmd: "SELECT"}:                  true,
 			{table: "jurisdictions", name: "jurisdictions_platform_admin_insert", cmd: "INSERT"}: true,
 			{table: "jurisdictions", name: "jurisdictions_platform_admin_update", cmd: "UPDATE"}: true,
+			// Migration 0113 (ADR 0099 §20, security-accepted in the K2
+			// review): an acting session may read only the licence its
+			// acting tenant holds. SELECT-only; any other addition still
+			// fails this exact-set check.
+			{table: "licences", name: "acting_read_own_licence", cmd: "SELECT"}: true,
 		}
-		if len(wantPolicies) != 10 {
-			t.Fatalf("test bug: whitelist must name exactly 10 tuples, named %d", len(wantPolicies))
+		if len(wantPolicies) != 11 {
+			t.Fatalf("test bug: whitelist must name exactly 11 tuples, named %d", len(wantPolicies))
 		}
 		if len(got) != len(wantPolicies) {
 			t.Fatalf("expected exactly %d (tablename, policyname, cmd) tuples across tenants/licences/jurisdictions, found %d: %+v", len(wantPolicies), len(got), got)

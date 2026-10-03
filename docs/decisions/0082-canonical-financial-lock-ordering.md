@@ -43,6 +43,16 @@ Design `ACCEPTED`; `IMPLEMENTED` (2026-09-28, per `ledger-finance`'s
 closure ruling, `docs/plans/payment-readiness/rv-a7-tests.md`, `057587c` -
 see Amendment A7's own Status line at the end of this file).
 
+**Amended 2026-09-28 — Amendment A8 (PRH-2 K2/K3, ADRs 0100/0101).**
+L1 is extended with `payment_manual_resolutions`, `ledger_adjustment_requests`
+(each `FOR UPDATE`), then `staff_users` and `staff_capability_grants` (both
+`FOR SHARE`, ascending `id`), before L2/L3. A governed manual adjustment
+with a causation transaction takes that one causation row as L2 `FOR UPDATE`.
+Approval-row inserts belong to no lock class. No new class, no new exception.
+See "Amendment A8" at the end of this file. The manual-adjustment order is
+`IMPLEMENTED` by K2 (`internal/adjustment/execute.go`, migration 0113); the
+M1/M2 orders are K3's and NOT IMPLEMENTED until K3 lands.
+
 ## Context
 
 ### The reported defect
@@ -1807,3 +1817,58 @@ Record: `docs/plans/payment-readiness/rv-fh7-architect-final.md`.*
 ### Amendment 2026-09-28 (PRH-2, ADR 0102 §7.7; ledger-finance F11): alert tables are the terminal lock level
 
 Alert tables (`alerts`, `alert_occurrences`) are the terminal lock level. After `alerting.RaiseGuarded` runs inside a business transaction, that transaction takes no further business-row lock on a different intent, attempt, wallet, account or session. This keeps the dedup-key wait introduced by durable alerting out of every existing lock-order cycle.
+
+## Amendment A8 — 2026-09-28 — PRH-2 K2/K3 (ADRs 0100, 0101): governed request rows, staff/grant `FOR SHARE`, the causation L2 lock
+
+*Text as specified by ADR 0100 §8 (LF-13, LF ruling 6; the L2 causation
+step CONFIRMED by `ledger-finance` in its revision-2 check,
+`docs/plans/prh2-hardening-round/reviews/adr-0099-0101-ledger-finance-confirmation.md`).
+Applied to this file by the K2 implementer (ledger-finance owner) because it
+had not yet been applied; the orchestrator owns any later edit.*
+
+**Class L1** is extended, in this order:
+- … `withdrawal_requests` … `deposit_intents`, `payment_attempts` (per A7);
+- then **`payment_manual_resolutions`**, then **`ledger_adjustment_requests`**
+  (each `FOR UPDATE`);
+- then **`staff_users`**, then **`staff_capability_grants`**, both `FOR SHARE`,
+  ascending `id` within each table.
+
+All of these come before L2/L3.
+
+**M2 order:** withdrawal → attempt → resolution → staff → grants.
+
+**M1 order:** intent → attempt → resolution → staff → grants.
+
+**Manual adjustment order:**
+- request → staff → grants;
+- then, for a request with a causation transaction, **L2**
+  `ledger_transactions` `FOR UPDATE` on that one causation row (this
+  serializes ADR 0100 §5.4's cumulative compensation cap);
+- then L3 (`LockProjectionsForPosting`) and L4 (`Post`).
+
+**Approval-row inserts** happen while the L1 request or resolution row is
+held. They belong to no lock class; they are not L4.
+
+There is no new class and no new exception.
+
+**Grant rows locked are the grant IN FORCE AT `now()`** (architect ruling
+`k1-architect-ruling-r12.md`, I-5): `revoked_at IS NULL AND valid_from <=
+now() AND (valid_until IS NULL OR now() < valid_until)`, never "the unrevoked
+grant" - several unrevoked rows may exist per key once renewals are queued.
+
+**Status (manual adjustment order): `IMPLEMENTED`** by PRH-2 K2 -
+`internal/adjustment/execute.go` `DecideInTx` (step 1 request `FOR UPDATE`;
+step 4 `lockStaffAndGrants`: staff `FOR SHARE ORDER BY id`, then the in-force
+grants `FOR SHARE ORDER BY id`; step 5 the causation `FOR UPDATE`; step 8
+`ledger.LockProjectionsForPosting`; step 9 `ledger.Post`). Account creation
+(`ledger.GetOrCreateAccounts`, §3.2) runs between L2 and L3, as §2.1 requires
+("before L3"). Tests: `TestB7_ForShareBlocksConcurrentRevokeAndSuspend`
+(a concurrent revoke and a concurrent suspend both wait for the executor,
+tenant and acting sessions; real contention proven via
+`pg_stat_activity.wait_event_type = 'Lock'`),
+`TestB7_ConcurrentFinalApprovalsPostOnce` (L1 serialization),
+`TestB7_ConcurrentCompensationsRespectCap` (L2 serialization of the cap).
+Mutants "drop FOR SHARE (staff)", "drop FOR SHARE (grants)" and "drop the L2
+lock" are killed (`docs/plans/payment-readiness/evidence/prh2-k2-mutation-kill.txt`).
+**M1/M2 orders: NOT IMPLEMENTED** (K3, ADR 0101).
+

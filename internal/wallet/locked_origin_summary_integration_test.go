@@ -590,8 +590,20 @@ func TestReconciliationSweep_UnchangedOverLockedSplitAccounts(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		if run.Status != reconciliation.StatusClean || len(mismatches) != 0 {
-			t.Fatalf("sweep over locked-split accounts must be clean, got status=%s mismatches=%+v", run.Status, mismatches)
+		// PRH-2 K2 (ADR 0100 §12): this fixture funds with manual_adjustment
+		// postings made outside any governed request, which the
+		// ledger_vs_projection run now correctly reports as
+		// ledger_unlinked_manual_adjustment. Moving the fixture to a
+		// request-backed helper is LEDGER-MANUAL-ADJ-LINK-1; until then only
+		// that kind is accepted - any balance mismatch still fails.
+		var rest []reconciliation.Mismatch
+		for _, m := range mismatches {
+			if m.MismatchKind != reconciliation.MismatchKindLedgerUnlinkedManualAdjustment {
+				rest = append(rest, m)
+			}
+		}
+		if len(rest) != 0 {
+			t.Fatalf("sweep over locked-split accounts must be clean, got status=%s mismatches=%+v", run.Status, rest)
 		}
 		return nil
 	})
@@ -615,6 +627,15 @@ func TestReconciliationSweep_UnchangedOverLockedSplitAccounts(t *testing.T) {
 		if err != nil {
 			return err
 		}
+		// Fixture-funding ledger_unlinked_manual_adjustment rows excepted
+		// (ADR 0100 §12, see the clean sweep above).
+		var drifted []reconciliation.Mismatch
+		for _, m := range mismatches {
+			if m.MismatchKind != reconciliation.MismatchKindLedgerUnlinkedManualAdjustment {
+				drifted = append(drifted, m)
+			}
+		}
+		mismatches = drifted
 		if run.Status != reconciliation.StatusMismatchesFound || len(mismatches) != 1 {
 			t.Fatalf("expected exactly one mismatch on the drifted player_locked_cash account, got status=%s mismatches=%+v",
 				run.Status, mismatches)

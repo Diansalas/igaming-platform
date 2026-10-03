@@ -1,35 +1,41 @@
-// A-18 (ADR 0099 §6.2/§6.9 TM-3, security K1-1 future-proofing condition,
-// binding per the orchestrator): a permanent static guard that replays
-// every CREATE POLICY / DROP POLICY statement across migrations/*.up.sql,
-// in migration-version order, to compute the EFFECTIVE policy set, then
-// flags any effective, non-SELECT, PERMISSIVE policy that has a bare
-// `tenant_id IS NULL` arm (the K1-1 shape: a NULL-tenant row is reachable
-// with no other required positive GUC) UNLESS:
-//   - it is guarded by a platform-admin or platform-service GUC
-//     requirement (the "platform family" and "reference/service" shapes
-//     this codebase already uses everywhere outside K1), or
-//   - it is guarded by a positive subject-tenant equality requirement (the
-//     ADR 0104/0109 `subject_tenant_read` shape and its 0110
-//     `alerts_subject_tenant_raise` INSERT counterpart: despite containing
-//     the literal substring "tenant_id IS NULL", these require a REAL,
-//     non-NULL `app.tenant_id` value to match `subject_tenant_id`, so they
-//     are not a free NULL arm at all), or
-//   - the table is one of the seven ADR 0099 §6.4 tables migration 0112
-//     already restrictively fences (staff_users, audit_log, sessions,
-//     login_attempts, persons, player_restrictions, risk_rules) - A-17
-//     (migration_0112_integration_test.go) is what proves THEIR fence is
-//     actually present; A-18's job is to catch a FUTURE, different table
-//     shipping the same exposure unfenced.
+// A-18 (ADR 0099 §6.2/§6.9 TM-3, security K1-1 future-proofing condition;
+// hardened by security's K1 re-check hard gate K2-G1): a permanent static
+// guard that replays every CREATE POLICY / DROP POLICY statement across
+// migrations/*.up.sql, in migration-version order, to compute the
+// EFFECTIVE policy set, then flags any effective PERMISSIVE policy whose
+// predicate is reachable by an acting session without a positive guard:
 //
-// This is a pragmatic regex/line-scanner over the migration SQL text, not
-// a real SQL parser (matching this codebase's own established convention
-// for this class of guard - see internal/txscope's INV-IO-1(c) test and
-// internal/ledger's lockorder_static_test.go, both of which state the same
-// "lexical, not semantic" trade-off explicitly). It is proven correct by
-// planted cases below for every shape enumerated above, both a positive
-// (flagged) and a negative (not flagged) case for each guard type, plus a
-// DROP-then-recreate-narrower case (the real 0043/0049 precedent ADR 0099
-// §6.2 cites) and a DROP-with-no-recreation case.
+//   - an EXPOSURE is either a bare `tenant_id IS NULL` arm on the table's
+//     own column (the K1-1 shape) or a literal `USING (true)` /
+//     `WITH CHECK (true)` arm (K2-G1 false negative (b));
+//   - a GUARD must be POSITIVE (K2-G1 false negative (a)): a named
+//     non-tenant GUC required to be NOT NULL or equal to something
+//     (`NULLIF(current_setting('app.platform_admin_principal_id', true),
+//     ”) IS NOT NULL`, `... = 'alert_dispatcher'`, `col = NULLIF(
+//     current_setting('app.player_account_id', true), ”)::uuid`), a
+//     positive `subject_tenant_id =` equality, or one of the acting-family
+//     functions (financial_acting_session_valid / financial_acting_gucs_exact).
+//     A NEGATIVE mention (`... platform_admin_principal_id ... IS NULL`)
+//     is NOT a guard - that is exactly what an acting session satisfies;
+//   - a SELECT exposure is accepted ONLY on the closed ADR 0099 §6.2
+//     reference-table allowlist (a18SelectAllowlist) - K2-G1 false
+//     negative (c): every other SELECT NULL/true arm is flagged too;
+//   - any non-SELECT exposure is always flagged;
+//   - the seven ADR 0099 §6.4 tables migration 0112 restrictively fences
+//     (A-17 proves their fence) are skipped, as are tables carrying a
+//     migration-0113 acting restrictive SELECT fence
+//     (a18AdditionallyFencedTables).
+//
+// This is a lexical scanner over the migration SQL text, not a SQL parser
+// (the same stated trade-off as internal/txscope's INV-IO-1(c) test and
+// internal/ledger's lockorder_static_test.go). Its known limit - a positive
+// guard that sits in a different OR branch from the NULL arm is still
+// counted - is covered by the DYNAMIC complement
+// (acting_visibility_dynamic_integration_test.go, K2-G1): a real, valid
+// acting session counts the rows it can see on every public table and
+// compares against the same allowlist. Planted cases below prove each of
+// security's three false negatives is now caught, plus every negative
+// (not-flagged) shape.
 package db
 
 import (
@@ -53,6 +59,55 @@ var a18FencedTables = map[string]bool{
 	"persons":             true,
 	"player_restrictions": true,
 	"risk_rules":          true,
+}
+
+// a18AdditionallyFencedTables are tables whose SELECT NULL arm was found
+// by the hardened A-18 (K2-G1) and closed by migration 0113 with an
+// AS RESTRICTIVE acting SELECT fence (ADR 0100 §20 implementation
+// record): 0045's asset_operation_eligibility.tenant_and_platform_read and
+// 0043's open_bet_self_exclusion_policies.tenant_and_platform_read both
+// admit NULL-tenant rows to any player-unset session, which an acting
+// session is. ADR 0099 §6.2 listed both as "not exposed" on the strength
+// of their WRITE policies only. Only their SELECT exposure is fenced, so
+// only SELECT exposures are skipped for these tables; a non-SELECT
+// exposure on them is still flagged.
+var a18AdditionallyFencedTables = map[string]bool{
+	"asset_operation_eligibility":      true,
+	"open_bet_self_exclusion_policies": true,
+}
+
+// a18SelectAllowlist is the closed ADR 0099 §6.2 "read-only reference data
+// an acting session can still read (accepted)" list, plus the family-R
+// reference tables migrations 0112 (K1) and 0113 (K2) create themselves
+// (ADR 0099 §10.2, ADR 0100 §10.1): platform reference data, no PII, no
+// credentials. A SELECT NULL/true arm on any table NOT listed here is
+// flagged (K2-G1 (c)). The dynamic complement uses this same list.
+var a18SelectAllowlist = map[string]bool{
+	"assets":                          true,
+	"brands":                          true,
+	"casino_games":                    true,
+	"jurisdictions":                   true,
+	"jurisdiction_precedence_configs": true,
+	"kyc_enforcement_policies":        true,
+	"platform_operations":             true,
+	"platform_products":               true,
+	"sb_sports":                       true,
+	"sb_competitions":                 true,
+	"sb_events":                       true,
+	"sb_markets":                      true,
+	"sb_selections":                   true,
+	"sb_jurisdiction_restrictions":    true,
+	"alert_kinds":                     true,
+	"tenants":                         true,
+	"licences":                        true,
+	"licence_country_ceilings":        true,
+	// K1 (0112) family-R reference tables.
+	"financial_capability_catalogue":   true,
+	"financial_governance_permissions": true,
+	"financial_capability_settings":    true,
+	// K2 (0113) family-R reference tables.
+	"financial_control_classifications": true,
+	"ledger_adjustment_reason_codes":    true,
 }
 
 // a18Policy is one effective (CREATE'd, not yet DROP'd) policy.
@@ -90,16 +145,28 @@ var (
 var (
 	a18ForCommandPattern = regexp.MustCompile(`(?i)\bFOR\s+(SELECT|INSERT|UPDATE|DELETE|ALL)\b`)
 	// a18BareTenantNullArm matches "tenant_id IS NULL" on the table's OWN
-	// column - i.e. NOT prefixed by a dot (which would instead be
-	// something like "app.tenant_id ... IS NULL", a GUC-unset check, a
-	// completely different and common non-exposing idiom).
-	a18BareTenantNullArm    = regexp.MustCompile(`(?i)(^|[^.\w])tenant_id\s+IS\s+NULL`)
-	a18PlatformAdminGuard   = regexp.MustCompile(`(?i)platform_admin_principal_id`)
-	a18PlatformServiceGuard = regexp.MustCompile(`(?i)platform_service_id`)
+	// column - i.e. NOT prefixed by a dot, quote or word character (which
+	// would instead be something like "app.tenant_id ... IS NULL" or
+	// "subject_tenant_id IS NULL", a different idiom).
+	a18BareTenantNullArm = regexp.MustCompile(`(?i)(^|[^.\w'])tenant_id\s+IS\s+NULL`)
+	// a18TrueArm matches a literal always-true predicate arm (K2-G1 (b)).
+	a18TrueArm = regexp.MustCompile(`(?i)\b(USING|WITH\s+CHECK)\s*\(\s*true\s*\)`)
+	// a18PositiveGUCGuard matches a non-tenant GUC required to be present:
+	// "NULLIF(current_setting('app.X', true), '')[)][::type][)] IS NOT
+	// NULL" or "... = <something>". app.tenant_id is deliberately NOT a
+	// guard GUC: it is the tenant arm itself, not a second requirement.
+	a18PositiveGUCGuard = regexp.MustCompile(`(?i)NULLIF\(\s*current_setting\(\s*'app\.(platform_admin_principal_id|platform_service_id|principal_id|player_account_id|session_lookup_hash|session_internal_op_id|credential_token_lookup_hash)'\s*,\s*true\s*\)\s*,\s*''\s*\)\s*\)?\s*(::\s*\w+)?\s*\)?\s*(IS\s+NOT\s+NULL|=)`)
+	// a18PositiveGUCEqualityRHS matches "col = NULLIF(current_setting(
+	// 'app.X'...", the same positive requirement with the GUC on the right.
+	a18PositiveGUCEqualityRHS = regexp.MustCompile(`(?i)=\s*\(?\s*NULLIF\(\s*current_setting\(\s*'app\.(platform_admin_principal_id|platform_service_id|principal_id|player_account_id|session_lookup_hash|session_internal_op_id|credential_token_lookup_hash)'`)
 	// a18SubjectTenantPositiveGuard matches the subject_tenant_read/
 	// alerts_subject_tenant_raise shape: subject_tenant_id required to
 	// equal a real value (never merely "IS NULL").
 	a18SubjectTenantPositiveGuard = regexp.MustCompile(`(?i)subject_tenant_id\s*=`)
+	// a18ActingFamilyGuard matches a deliberate acting-family permissive
+	// policy (ADR 0099 §6.3/§6.5): these ARE the acting surface, bounded
+	// by the dynamic complement, not an accidental NULL arm.
+	a18ActingFamilyGuard = regexp.MustCompile(`(?i)financial_acting_session_valid\(\)|financial_acting_gucs_exact\(\)`)
 )
 
 // a18ExtractStatement returns the full statement text starting at
@@ -124,19 +191,235 @@ func a18Command(stmt string) string {
 	return "ALL"
 }
 
-// a18HasTenantNullArm reports whether stmt contains the K1-1 bare
-// tenant_id-IS-NULL idiom.
-func a18HasTenantNullArm(stmt string) bool {
-	return a18BareTenantNullArm.MatchString(stmt)
+// a18HasExposure reports whether stmt contains a K1-1 bare
+// tenant_id-IS-NULL arm or a literal true arm.
+func a18HasExposure(stmt string) bool {
+	return a18BareTenantNullArm.MatchString(stmt) || a18TrueArm.MatchString(stmt)
 }
 
-// a18IsGuarded reports whether stmt's NULL arm is closed by a recognized
-// guard: a platform-admin GUC requirement, a platform-service GUC
-// requirement, or a positive subject-tenant-equality requirement.
+// a18IsGuarded reports whether stmt carries a recognized POSITIVE guard.
 func a18IsGuarded(stmt string) bool {
-	return a18PlatformAdminGuard.MatchString(stmt) ||
-		a18PlatformServiceGuard.MatchString(stmt) ||
-		a18SubjectTenantPositiveGuard.MatchString(stmt)
+	return a18PositiveGUCGuard.MatchString(stmt) ||
+		a18PositiveGUCEqualityRHS.MatchString(stmt) ||
+		a18SubjectTenantPositiveGuard.MatchString(stmt) ||
+		a18ActingFamilyGuard.MatchString(stmt)
+}
+
+// --- structural guard check (security K2 review, Low: OR-ed guards) ---
+//
+// A positive guard anywhere in the statement is NOT enough: in
+// "tenant_id IS NULL OR <guard>" the NULL arm is a free disjunct. The rule
+// is evaluated per policy clause (USING, WITH CHECK) over the boolean
+// structure at parenthesis depth 0 of each sub-expression:
+//   - a disjunction (A OR B ...) is exposed if ANY disjunct is exposed;
+//   - a conjunction (A AND B ...) is exposed only if NO conjunct is a guard
+//     and some conjunct is exposed;
+//   - a guard expression is a guard leaf, a conjunction with a guard
+//     conjunct, or a disjunction whose EVERY disjunct is a guard;
+//   - a leaf (no top-level AND/OR) is exposed if it is the bare literal
+//     "true" or contains a bare NULL arm without a positive guard of its own
+//     (the old lexical rule, now applied only within one leaf).
+
+// a18SplitTop splits expr at depth-0 occurrences of the keyword kw
+// (case-insensitive, word-bounded), ignoring text inside parentheses and
+// single-quoted strings. It returns the original expr as the single part
+// when kw does not occur at depth 0.
+func a18SplitTop(expr, kw string) []string {
+	var parts []string
+	depth, start := 0, 0
+	inStr := false
+	up := strings.ToUpper(expr)
+	isWord := func(b byte) bool {
+		return b == '_' || (b >= '0' && b <= '9') || (b >= 'A' && b <= 'Z') || (b >= 'a' && b <= 'z')
+	}
+	for i := 0; i < len(expr); i++ {
+		c := expr[i]
+		switch {
+		case inStr:
+			if c == '\'' {
+				inStr = false
+			}
+		case c == '\'':
+			inStr = true
+		case c == '(':
+			depth++
+		case c == ')':
+			depth--
+		case depth == 0 && strings.HasPrefix(up[i:], kw) &&
+			(i == 0 || !isWord(expr[i-1])) && (i+len(kw) >= len(expr) || !isWord(expr[i+len(kw)])):
+			parts = append(parts, expr[start:i])
+			start = i + len(kw)
+			i += len(kw) - 1
+		}
+	}
+	return append(parts, expr[start:])
+}
+
+// a18StripParens removes whitespace and any parentheses wrapping the WHOLE
+// expression.
+func a18StripParens(expr string) string {
+	for {
+		e := strings.TrimSpace(expr)
+		if len(e) < 2 || e[0] != '(' || e[len(e)-1] != ')' {
+			return e
+		}
+		depth := 0
+		wraps := true
+		for i := 0; i < len(e); i++ {
+			if e[i] == '(' {
+				depth++
+			} else if e[i] == ')' {
+				depth--
+				if depth == 0 && i != len(e)-1 {
+					wraps = false
+					break
+				}
+			}
+		}
+		if !wraps {
+			return e
+		}
+		expr = e[1 : len(e)-1]
+	}
+}
+
+func a18ExprIsGuard(expr string) bool {
+	e := a18StripParens(expr)
+	if ors := a18SplitTop(e, "OR"); len(ors) > 1 {
+		for _, p := range ors {
+			if !a18ExprIsGuard(p) {
+				return false
+			}
+		}
+		return true
+	}
+	if ands := a18SplitTop(e, "AND"); len(ands) > 1 {
+		for _, p := range ands {
+			if a18ExprIsGuard(p) {
+				return true
+			}
+		}
+		return false
+	}
+	return a18IsGuarded(e) && !a18BareTenantNullArm.MatchString(e)
+}
+
+func a18ExprExposed(expr string) bool {
+	e := a18StripParens(expr)
+	if ors := a18SplitTop(e, "OR"); len(ors) > 1 {
+		for _, p := range ors {
+			if a18ExprExposed(p) {
+				return true
+			}
+		}
+		return false
+	}
+	if ands := a18SplitTop(e, "AND"); len(ands) > 1 {
+		for _, p := range ands {
+			if a18ExprIsGuard(p) {
+				return false
+			}
+		}
+		for _, p := range ands {
+			if a18ExprExposed(p) {
+				return true
+			}
+		}
+		return false
+	}
+	if strings.EqualFold(e, "true") {
+		return true
+	}
+	return a18BareTenantNullArm.MatchString(e) && !a18IsGuarded(e)
+}
+
+var (
+	a18ClauseStart = regexp.MustCompile(`(?i)\b(USING|WITH\s+CHECK)\s*\(`)
+	a18LineComment = regexp.MustCompile(`--[^\n]*`)
+)
+
+// a18Clauses returns the parenthesized bodies of the policy's USING and
+// WITH CHECK clauses.
+func a18Clauses(stmt string) []string {
+	var out []string
+	for _, loc := range a18ClauseStart.FindAllStringIndex(stmt, -1) {
+		open := loc[1] - 1
+		depth := 0
+		inStr := false
+		for i := open; i < len(stmt); i++ {
+			c := stmt[i]
+			if inStr {
+				if c == '\'' {
+					inStr = false
+				}
+				continue
+			}
+			if c == '\'' {
+				inStr = true
+			} else if c == '(' {
+				depth++
+			} else if c == ')' {
+				depth--
+				if depth == 0 {
+					out = append(out, stmt[open+1:i])
+					break
+				}
+			}
+		}
+	}
+	return out
+}
+
+// a18StructurallyExposed reports whether any clause of the policy leaves a
+// NULL/true arm reachable without a conjoined positive guard. A statement
+// whose clauses cannot be extracted falls back to "exposed" (fail closed).
+func a18StructurallyExposed(stmt string) bool {
+	clauses := a18Clauses(a18LineComment.ReplaceAllString(stmt, ""))
+	if len(clauses) == 0 {
+		return true
+	}
+	for _, c := range clauses {
+		if a18ExprExposed(c) {
+			return true
+		}
+	}
+	return false
+}
+
+// a18Flagged is the single classification rule both the real guard and
+// the planted scenarios use.
+func a18Flagged(pol a18Policy) bool { return a18FlaggedWith(pol, true) }
+
+// a18FlaggedWith is a18Flagged with the 0113 additionally-fenced SELECT
+// exemption switchable, so a test can prove those entries are real findings.
+func a18FlaggedWith(pol a18Policy, exemptAdditional bool) bool {
+	if a18FencedTables[pol.table] {
+		return false
+	}
+	if pol.restrictive {
+		return false // a fence itself, not an exposure
+	}
+	if !a18HasExposure(pol.body) || !a18StructurallyExposed(pol.body) {
+		return false
+	}
+	if pol.command == "SELECT" && (a18SelectAllowlist[pol.table] || (exemptAdditional && a18AdditionallyFencedTables[pol.table])) {
+		return false
+	}
+	return true
+}
+
+// a18Collect applies a18Flagged to every effective policy, sorted.
+func a18Collect(effective map[string]map[string]a18Policy) []a18Violation {
+	var violations []a18Violation
+	for _, policies := range effective {
+		for _, pol := range policies {
+			if a18Flagged(pol) {
+				violations = append(violations, a18Violation{table: pol.table, name: pol.name, command: pol.command})
+			}
+		}
+	}
+	sort.Slice(violations, func(i, j int) bool { return violations[i].String() < violations[j].String() })
+	return violations
 }
 
 // a18Violation is one flagged effective policy.
@@ -253,28 +536,7 @@ func a18ComputeViolations(t *testing.T, dir string) []a18Violation {
 		a18Replay(effective, string(src))
 	}
 
-	var violations []a18Violation
-	for table, policies := range effective {
-		if a18FencedTables[table] {
-			continue
-		}
-		for name, pol := range policies {
-			if pol.restrictive {
-				continue // a fence itself, not an exposure
-			}
-			if pol.command == "SELECT" {
-				continue // read-only reference data is accepted, §6.2
-			}
-			if !a18HasTenantNullArm(pol.body) {
-				continue
-			}
-			if a18IsGuarded(pol.body) {
-				continue
-			}
-			violations = append(violations, a18Violation{table: table, name: name, command: pol.command})
-		}
-	}
-	sort.Slice(violations, func(i, j int) bool { return violations[i].String() < violations[j].String() })
+	violations := a18Collect(effective)
 	return violations
 }
 
@@ -310,6 +572,42 @@ func TestA18_NoUnfencedNullArmTable(t *testing.T) {
 		}
 		t.Fatalf("A-18: unfenced NULL-tenant-arm polic(y/ies) found - add a migration 0112-style restrictive fence or a recognized guard:\n  %s",
 			strings.Join(lines, "\n  "))
+	}
+}
+
+// TestA18_AdditionallyFencedTablesAreRealFindings proves the two
+// a18AdditionallyFencedTables entries are genuine findings of the hardened
+// scanner (not stale allowlist padding): with their exemption switched
+// off, replaying the real migrations flags EXACTLY their SELECT NULL arms
+// and nothing else. Migration 0113's restrictive acting SELECT fence on
+// both is what makes the exemption legitimate; the dynamic complement
+// (TestK2G1_ActingSessionRowVisibilityMatchesAllowlist) proves the fence
+// actually holds at runtime.
+func TestA18_AdditionallyFencedTablesAreRealFindings(t *testing.T) {
+	root := a18RepoRoot(t)
+	effective := map[string]map[string]a18Policy{}
+	for _, path := range a18SortedMigrationFiles(t, filepath.Join(root, "migrations")) {
+		src, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		a18Replay(effective, string(src))
+	}
+	var got []string
+	for _, policies := range effective {
+		for _, pol := range policies {
+			if a18FlaggedWith(pol, false) {
+				got = append(got, pol.table+"."+pol.name+"("+pol.command+")")
+			}
+		}
+	}
+	sort.Strings(got)
+	want := []string{
+		"asset_operation_eligibility.tenant_and_platform_read(SELECT)",
+		"open_bet_self_exclusion_policies.tenant_and_platform_read(SELECT)",
+	}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("expected exactly %v flagged without the 0113 exemption, got %v", want, got)
 	}
 }
 
@@ -360,20 +658,7 @@ func a18Scenario(files ...string) []a18Violation {
 	for _, f := range files {
 		a18Replay(effective, f)
 	}
-	var violations []a18Violation
-	for table, policies := range effective {
-		if a18FencedTables[table] {
-			continue
-		}
-		for name, pol := range policies {
-			if pol.restrictive || pol.command == "SELECT" || !a18HasTenantNullArm(pol.body) || a18IsGuarded(pol.body) {
-				continue
-			}
-			violations = append(violations, a18Violation{table: table, name: name, command: pol.command})
-		}
-	}
-	sort.Slice(violations, func(i, j int) bool { return violations[i].String() < violations[j].String() })
-	return violations
+	return a18Collect(effective)
 }
 
 // TestA18_Plant_UnguardedNullArm_Flagged: the base planted violation - a
@@ -445,16 +730,94 @@ CREATE POLICY subject_tenant_raise ON new_widget_table
 	}
 }
 
-// TestA18_Plant_SelectOnly_NotFlagged: a bare NULL arm on a SELECT-only
-// policy (read-only reference data, accepted per §6.2) is not flagged.
-func TestA18_Plant_SelectOnly_NotFlagged(t *testing.T) {
+// TestA18_Plant_SelectOnlyOnAllowlistedReferenceTable_NotFlagged: a bare
+// NULL arm (or a USING (true) arm) on a SELECT-only policy of a table on
+// the closed ADR 0099 §6.2 reference allowlist is accepted.
+func TestA18_Plant_SelectOnlyOnAllowlistedReferenceTable_NotFlagged(t *testing.T) {
 	v := a18Scenario(`
-CREATE POLICY read_only_reference ON new_widget_table
+CREATE POLICY read_only_reference ON assets
     FOR SELECT
     USING (tenant_id IS NULL);
+CREATE POLICY read_all ON alert_kinds FOR SELECT USING (true);
 `)
 	if len(v) != 0 {
-		t.Fatalf("expected no violations (SELECT-only is accepted), got %v", v)
+		t.Fatalf("expected no violations (SELECT on an allowlisted reference table is accepted), got %v", v)
+	}
+}
+
+// TestA18_K2G1a_NegativeIsNullMentionIsNotAGuard_Flagged is security's
+// planted false negative (a): a policy whose only "guard" is a NEGATIVE
+// mention of the platform GUC (`... IS NULL`) - exactly what an acting
+// session satisfies - must be flagged. The old scanner accepted any
+// textual mention of platform_admin_principal_id as a guard.
+func TestA18_K2G1a_NegativeIsNullMentionIsNotAGuard_Flagged(t *testing.T) {
+	v := a18Scenario(`
+CREATE POLICY negative_only ON new_widget_table
+    FOR INSERT
+    WITH CHECK (
+        tenant_id IS NULL
+        AND NULLIF(current_setting('app.platform_admin_principal_id', true), '') IS NULL
+        AND NULLIF(current_setting('app.platform_service_id', true), '') IS NULL
+    );
+`)
+	if len(v) != 1 || v[0].name != "negative_only" {
+		t.Fatalf("expected the negative-only 'guard' to be flagged, got %v", v)
+	}
+	// And the positive form of the very same GUC is still accepted.
+	ok := a18Scenario(`
+CREATE POLICY positive ON new_widget_table
+    FOR INSERT
+    WITH CHECK (
+        tenant_id IS NULL
+        AND NULLIF(current_setting('app.platform_admin_principal_id', true), '')::uuid IS NOT NULL
+    );
+`)
+	if len(ok) != 0 {
+		t.Fatalf("expected the positive guard to be accepted, got %v", ok)
+	}
+}
+
+// TestA18_K2G1b_TrueArms_Flagged is security's planted false negative (b):
+// `FOR ALL USING (true) WITH CHECK (true)` has no tenant_id text at all and
+// was invisible to the old scanner. A lone WITH CHECK (true) INSERT is
+// flagged too.
+func TestA18_K2G1b_TrueArms_Flagged(t *testing.T) {
+	v := a18Scenario(`
+CREATE POLICY wide_open ON new_widget_table FOR ALL USING (true) WITH CHECK (true);
+CREATE POLICY insert_anything ON other_widget_table FOR INSERT WITH CHECK ( true );
+`)
+	if len(v) != 2 {
+		t.Fatalf("expected both true-arm policies flagged, got %v", v)
+	}
+}
+
+// TestA18_K2G1c_SelectNullArmOutsideAllowlist_Flagged is security's
+// planted false negative (c): the old scanner blanket-exempted every SELECT
+// policy. A SELECT NULL arm (or USING (true)) on a table NOT on the ADR
+// 0099 §6.2 allowlist must be flagged.
+func TestA18_K2G1c_SelectNullArmOutsideAllowlist_Flagged(t *testing.T) {
+	v := a18Scenario(`
+CREATE POLICY read_null_rows ON new_widget_table
+    FOR SELECT
+    USING (tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
+CREATE POLICY read_everything ON other_widget_table FOR SELECT USING (true);
+`)
+	if len(v) != 2 {
+		t.Fatalf("expected both SELECT exposures outside the allowlist to be flagged, got %v", v)
+	}
+}
+
+// TestA18_AdditionallyFencedTables_SelectOnlyExempt pins that the two
+// tables migration 0113 fences (asset_operation_eligibility,
+// open_bet_self_exclusion_policies) are exempt for SELECT only - a
+// non-SELECT exposure on them is still flagged.
+func TestA18_AdditionallyFencedTables_SelectOnlyExempt(t *testing.T) {
+	v := a18Scenario(`
+CREATE POLICY r ON asset_operation_eligibility FOR SELECT USING (tenant_id IS NULL);
+CREATE POLICY w ON asset_operation_eligibility FOR INSERT WITH CHECK (tenant_id IS NULL);
+`)
+	if len(v) != 1 || v[0].name != "w" {
+		t.Fatalf("expected only the INSERT exposure flagged, got %v", v)
 	}
 }
 
@@ -537,5 +900,55 @@ CREATE POLICY regressed ON new_widget_table FOR ALL USING (tenant_id IS NULL);`,
 	)
 	if len(v) != 1 || v[0].name != "regressed" {
 		t.Fatalf("expected exactly one flagged violation (the guard was regressed away), got %v", v)
+	}
+}
+
+// Security K2 review (Low): an OR-ed guard is not a guard. The NULL arm is
+// a free disjunct in "tenant_id IS NULL OR <positive guard>", so it must be
+// flagged even though a positive guard occurs in the statement - the
+// lexical rule a18IsGuarded alone accepted this shape.
+func TestA18_K2Low_OrEdGuard_Flagged(t *testing.T) {
+	src := `
+CREATE POLICY or_guarded ON new_widget_table
+    FOR ALL
+    USING (
+        tenant_id IS NULL
+        OR NULLIF(current_setting('app.platform_admin_principal_id', true), '') IS NOT NULL
+    );
+CREATE POLICY or_guarded_nested ON other_widget_table
+    FOR INSERT
+    WITH CHECK (
+        (tenant_id IS NULL OR financial_acting_session_valid())
+        AND status = 'x'
+    );
+`
+	if !a18IsGuarded(src) {
+		t.Fatal("precondition: the lexical guard regex must match this statement (otherwise the plant proves nothing)")
+	}
+	v := a18Scenario(src)
+	if len(v) != 2 {
+		t.Fatalf("expected both OR-ed-guard policies flagged, got %v", v)
+	}
+}
+
+// The structural rule still accepts a guard conjoined at any depth, and a
+// disjunction in which EVERY disjunct is separately guarded.
+func TestA18_K2Low_ConjoinedGuards_NotFlagged(t *testing.T) {
+	v := a18Scenario(`
+CREATE POLICY nested_and ON new_widget_table
+    FOR ALL
+    USING (
+        (tenant_id IS NULL AND (status = 'x' OR status = 'y'))
+        AND NULLIF(current_setting('app.platform_admin_principal_id', true), '') IS NOT NULL
+    );
+CREATE POLICY each_disjunct_guarded ON other_widget_table
+    FOR ALL
+    USING (
+        (tenant_id IS NULL AND NULLIF(current_setting('app.platform_service_id', true), '') = 'w')
+        OR (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
+    );
+`)
+	if len(v) != 0 {
+		t.Fatalf("expected no violations for conjoined guards, got %v", v)
 	}
 }
