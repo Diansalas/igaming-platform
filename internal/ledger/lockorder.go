@@ -346,6 +346,15 @@ func prepareEntries(ctx context.Context, tx pgx.Tx, in TransactionInput) ([]Entr
 	if (in.ProviderID == nil) != (in.ProviderTxID == nil) {
 		return nil, fmt.Errorf("%w: provider_id and provider_tx_id must both be set or both be nil", ErrInvalidEntry)
 	}
+	// PRH-2 D (PAY-POLL-AMOUNT-1 / FH7-06, defence in depth): an EMPTY
+	// provider_tx_id is never a valid external reference (migration 0099's
+	// ledger_transactions_provider_tx_id_ref_bound CHECK refuses it too, but as an
+	// untyped constraint error). Refuse it here with the typed sentinel so a
+	// caller that derives the key from an unvalidated echo can never post under
+	// the degenerate key "<provider>:".
+	if in.ProviderTxID != nil && *in.ProviderTxID == "" {
+		return nil, fmt.Errorf("%w: provider_tx_id must not be empty when set", ErrInvalidEntry)
+	}
 	// reason_code is required on manual_adjustment (CLAUDE.md's four-eyes
 	// rule) AND on bonus_forfeiture (ADR 0032 §3.1: expiry vs. staff
 	// cancellation is distinguished ONLY by reason_code) - migration

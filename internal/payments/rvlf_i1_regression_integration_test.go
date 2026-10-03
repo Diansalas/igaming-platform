@@ -1971,7 +1971,11 @@ func TestRVLF_N2_SweeperGo_SuccessAfterTombstoneDisputesNotIndexError(t *testing
 	}
 
 	sweeper := NewSweeper(pool, orch, AllowAllDepositKYCGate{}, MockCredentialResolver{})
-	gr := GateResult[StatusResult]{Class: ErrorClassSucceeded, Value: StatusResult{Outcome: OutcomeSucceeded, ProviderReference: ref}}
+	// PRH-2 D: a poll success now needs the provider's amount/asset echo before
+	// anything else is decided (an echo-less success is Missing and never reaches the
+	// tombstone check), so this synthetic poll result carries the matching echo a
+	// conformant adapter returns. The assertions below are unchanged.
+	gr := GateResult[StatusResult]{Class: ErrorClassSucceeded, Value: StatusResult{Outcome: OutcomeSucceeded, ProviderReference: ref, Amount: 5000, AssetCode: "EUR"}}
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, `SELECT id FROM deposit_intents WHERE id = $1 FOR UPDATE`, intentID); err != nil {
 			return err
@@ -1992,6 +1996,12 @@ func TestRVLF_N2_SweeperGo_SuccessAfterTombstoneDisputesNotIndexError(t *testing
 	final := mustGetAttempt(t, pool, f.tenantID, attemptID)
 	if final.State != AttemptDisputed {
 		t.Errorf("N2: a poll success after a tombstone must dispute (T10), got %s", final.State)
+	}
+	// PRH-2 D code review D1-CR-2: the reason must be the tombstone one. Poll amount and
+	// reference mismatches are checked before the tombstone, so State alone could pass
+	// through poll_amount_mismatch if this fixture's echo ever drifted.
+	if final.TerminalReason == nil || *final.TerminalReason != TerminalReasonTombstonePrecedesSuccess {
+		t.Errorf("N2: terminal_reason=%v, want %q", final.TerminalReason, TerminalReasonTombstonePrecedesSuccess)
 	}
 	if b := cashBalance(t, pool, f); b != 0 {
 		t.Errorf("N2: a tombstoned poll success must never post; balance=%d", b)

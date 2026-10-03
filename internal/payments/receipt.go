@@ -149,20 +149,26 @@ func auditOversizeDeclineReasonOnce(ctx context.Context, tx pgx.Tx, tenantID uui
 // "callback_amount_asset_mismatch_terminal". Amounts go in the audit
 // metadata (an append-only, access-controlled store), never in a log
 // line (security S-5).
-func auditTerminalAmountAssetMismatch(ctx context.Context, tx pgx.Tx, attempt PaymentAttempt, ev ReceiptEvidence) error {
+func auditTerminalAmountAssetMismatch(ctx context.Context, tx pgx.Tx, attempt PaymentAttempt, ev ReceiptEvidence, extra ...map[string]any) error {
+	meta := map[string]any{
+		"attempt_state":      string(attempt.State),
+		"provider_id":        attempt.ProviderID,
+		"provider_reference": ev.ProviderReference,
+		"stored_amount":      attempt.Amount,
+		"stored_asset_code":  attempt.AssetCode,
+		"echoed_amount":      ev.Amount,
+		"echoed_asset_code":  ev.AssetCode,
+	}
+	for _, m := range extra {
+		for k, v := range m {
+			meta[k] = v
+		}
+	}
 	if err := audit.Record(ctx, tx, audit.Entry{
 		TenantID: attempt.TenantID, ActorType: audit.ActorSystem,
 		Action:     "payments.callback_amount_asset_mismatch_terminal",
 		TargetType: "payment_attempt", TargetID: attempt.ID.String(), Outcome: audit.OutcomeDenied,
-		Metadata: map[string]any{
-			"attempt_state":      string(attempt.State),
-			"provider_id":        attempt.ProviderID,
-			"provider_reference": ev.ProviderReference,
-			"stored_amount":      attempt.Amount,
-			"stored_asset_code":  attempt.AssetCode,
-			"echoed_amount":      ev.Amount,
-			"echoed_asset_code":  ev.AssetCode,
-		},
+		Metadata: meta,
 	}); err != nil {
 		return fmt.Errorf("payments: audit terminal amount/asset mismatch: %w", err)
 	}

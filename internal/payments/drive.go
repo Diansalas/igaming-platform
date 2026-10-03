@@ -340,6 +340,14 @@ const (
 	// returned is already bound to another attempt or intent in the same
 	// tenant (LF-6). Nothing posted; no error loop.
 	TerminalReasonProviderReferenceConflict = "provider_reference_conflict"
+	// TerminalReasonPollAmountMismatch (PRH-2 D, PAY-POLL-AMOUNT-1): a status poll
+	// reported success with an amount or asset different from the attempt's own
+	// record (the poll-path twin of sync_amount_mismatch). Nothing posted.
+	TerminalReasonPollAmountMismatch = "poll_amount_mismatch"
+	// TerminalReasonPollReferenceMismatch (PRH-2 D, FH7-06): a status poll
+	// reported success and echoed a NON-empty provider reference different from the
+	// reference the attempt is bound to. Nothing posted.
+	TerminalReasonPollReferenceMismatch = "poll_reference_mismatch"
 )
 
 // parkDepositAttempt is PRH-2 C's shared T10 for a live deposit attempt whose
@@ -431,6 +439,25 @@ func foreignReferenceBinding(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID,
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return false, "", fmt.Errorf("payments: check foreign reference binding (intents): %w", err)
+	}
+	// PRH-2 D (LF F-C4): a NON-tombstone ledger transaction already holding
+	// (tenant, provider, provider_tx_id) - e.g. a payout Step B
+	// withdrawal_completed settlement reference at the same PSP, which is bound
+	// to no payment_attempts row at all - would otherwise reach ledger.Post and
+	// loop on ErrIdempotencyPayloadMismatch. A tombstone is excluded: it has its
+	// own T10 (reversal_tombstone_precedes_success, checked after this).
+	var txType string
+	err = tx.QueryRow(ctx,
+		`SELECT transaction_type FROM ledger_transactions
+		 WHERE tenant_id = $1 AND provider_id = $2 AND provider_tx_id = $3 AND transaction_type <> 'tombstone'
+		 LIMIT 1`,
+		tenantID, providerID, reference,
+	).Scan(&txType)
+	if err == nil {
+		return true, "ledger_" + txType, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return false, "", fmt.Errorf("payments: check foreign reference binding (ledger): %w", err)
 	}
 	return false, "", nil
 }
@@ -573,6 +600,15 @@ func (o *Orchestrator) applyDepositCallResult(
 		// such leftover 'created' sibling must never reach T2 and place a
 		// second real PSP charge now that the intent has succeeded.
 		if err := rejectCreatedSiblings(ctx, tx, attempt, evidence); err != nil {
+			return intent, nil, err
+		}
+		// PRH-2 D (PAY-DEFERRED-RECEIPT-SYNC-1, ADR 0095 §36.3): a sync success
+		// binds its reference only in THIS commit (ApplySuccess above), so a
+		// verified callback for it that arrived during phase B was stored
+		// deferred_unresolved. Drain it now, under the locks already held: it
+		// resolves against the now-succeeded attempt (no second posting).
+		attempt.ProviderID, attempt.ProviderReference = &capability.ProviderID, &res.ProviderReference
+		if _, err := ApplyDeferredReceiptsForAttempt(ctx, tx, o, attempt); err != nil {
 			return intent, nil, err
 		}
 		return updated, nil, nil
