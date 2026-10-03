@@ -442,14 +442,16 @@ func (s *Sweeper) applyStatusEvidence(ctx context.Context, tx pgx.Tx, intent Dep
 			// no-op (reschedule) - already pending, nothing changed.
 			return RescheduleNonTerminal(ctx, tx, attempt.ID, nextPoll)
 		}
-		// PRH-2 D (FH7-06, ADR 0095 §36.6): the attempt was polled BY its bound
-		// reference, so that is the reference T9 and the intent keep. The poll's echo
-		// is never written: an empty one would violate the 0099 CHECK (an error
-		// loop) and a different one would overwrite the intent's reference.
-		if attempt.ProviderReference == nil || *attempt.ProviderReference == "" {
-			return fmt.Errorf("payments: poll pending for attempt %s which has no bound provider reference", attempt.ID)
+		// PRH-2 D (FH7-06, ADR 0095 §36.6): an attempt polled BY its bound reference
+		// keeps that reference through T9 and on the intent; the poll's echo is never
+		// written over it (an empty one would violate the 0099 CHECK - an error loop -
+		// and a different one would overwrite the intent's reference). Only an attempt
+		// with no bound reference yet (the sweeper never polls one; direct callers of
+		// this function may) learns the reference from the poll, as before.
+		boundRef := res.ProviderReference
+		if attempt.ProviderReference != nil && *attempt.ProviderReference != "" {
+			boundRef = *attempt.ProviderReference
 		}
-		boundRef := *attempt.ProviderReference
 		if err := MarkAccepted(ctx, tx, attempt.ID, EvidenceQueryStatus, boundRef, nextPoll); err != nil {
 			return err
 		}
@@ -458,6 +460,7 @@ func (s *Sweeper) applyStatusEvidence(ctx context.Context, tx pgx.Tx, intent Dep
 		}
 		// RV-PRH-I1 ledger-finance H2: see drive.go's identical comment -
 		// this poll is the sweeper's own T9 site.
+		attempt.ProviderReference = &boundRef
 		_, err := ApplyDeferredReceiptsForAttempt(ctx, tx, s.Orchestrator, attempt)
 		return err
 

@@ -6535,7 +6535,8 @@ and the full payments, ledger, wallet, casino, adjustment, withdrawal and idempo
 - **Pending branch (FH7-06, same defect class):** the poll's Pending branch wrote `res.ProviderReference`
   to the intent through `setIntentAttempt`: an empty echo violated the 0099 CHECK (an error loop) and a
   different one overwrote the intent's reference. T9 and the intent now keep the bound reference; the echo is
-  ignored there (no money moves, the attempt stays live).
+  ignored there (no money moves, the attempt stays live). An attempt with no bound reference yet (never polled
+  by the sweeper; reachable only by direct callers) still learns it from the poll, as before.
 - **Exported reason list:** `DepositDisputeTerminalReasons()` / `IsDepositDisputeTerminalReason`
   (`deposit_terminal_reasons.go`) enumerate every `terminal_reason` a deposit dispute can carry
   (`multiple_success_for_intent`, `reversal_tombstone_precedes_success`, `sync_amount_mismatch`,
