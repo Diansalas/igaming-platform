@@ -40,6 +40,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Diansalas/igaming-platform/internal/payments"
+	"github.com/Diansalas/igaming-platform/internal/providerref"
 	"github.com/Diansalas/igaming-platform/internal/reconciliation/statement"
 )
 
@@ -587,18 +588,31 @@ func TestD2_4_ConflictParks(t *testing.T) {
 		d2NoCU(t, w.d2Run(t, d2Src()), "an unbound park with no line this run")
 		w.d2AssertNoMoney(t, pk)
 	})
-	// Defence in depth: an unbound-park reason on an attempt that DOES hold
-	// a reference (not producible by C's code - fixture via T10 on a real
-	// pending deposit) and a succeeded line naming that reference: still
-	// flagged, never silently excluded. Pins the rule as not gated on how
-	// the line resolved.
+	// Defence in depth: a park reason that is not plainly bound, on an
+	// attempt that DOES hold a reference (fixture via T10 on a real pending
+	// deposit), and a succeeded line naming that reference: still flagged,
+	// never silently excluded.
+	//   - provider_reference_conflict: since LF D2 final PM-1 it is
+	//     bound-if-referenced, so this case goes through the BOUND rule (the
+	//     real shape is D1's poll F-C4 park, TestD2_14).
+	//   - invalid_provider_reference:<reason>: always unbound, so this case
+	//     pins the UNBOUND rule as not gated on how the line resolved (it
+	//     kills M-UNBOUND-BYMERCHANT-GATE). It was the conflict reason's
+	//     job before PM-1 reclassified it.
 	t.Run("unbound_reason_on_a_reference_holding_attempt_is_still_flagged", func(t *testing.T) {
-		w := newD2World(t)
-		pk := w.parkPoll(t, payments.TerminalReasonProviderReferenceConflict)
-		ms := w.d2Run(t, d2Src(d2Line(pk.pspRef, "", statement.PaymentStatusSucceeded, d2Amount)))
-		d2Expect(t, ms, map[MismatchKind]int{d2KindCU: 1})
-		d2CUFor(t, ms, pk.attempt.ID)
-		w.d2AssertNoMoney(t, pk)
+		for _, reason := range []string{
+			payments.TerminalReasonProviderReferenceConflict,
+			payments.TerminalReasonInvalidProviderReference + ":" + string(providerref.ReasonControlChar),
+		} {
+			t.Run(reason, func(t *testing.T) {
+				w := newD2World(t)
+				pk := w.parkPoll(t, reason)
+				ms := w.d2Run(t, d2Src(d2Line(pk.pspRef, "", statement.PaymentStatusSucceeded, d2Amount)))
+				d2Expect(t, ms, map[MismatchKind]int{d2KindCU: 1})
+				d2CUFor(t, ms, pk.attempt.ID)
+				w.d2AssertNoMoney(t, pk)
+			})
+		}
 	})
 	// A conflict bound to ANOTHER DEPOSIT attempt, plus a second succeeded
 	// line with the same reference: pay_duplicate (check=duplicate_line),
