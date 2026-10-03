@@ -24,8 +24,8 @@ var d2ExpectedClasses = map[string]disputeReasonClass{
 	payments.TerminalReasonPollAmountMismatch:          reasonBound,
 	payments.TerminalReasonPollReferenceMismatch:       reasonBound,
 	payments.TerminalReasonCallbackAmountAssetMismatch: reasonBound,
-	payments.TerminalReasonProviderReferenceConflict:   reasonUnbound,
-	payments.TerminalReasonInvalidProviderReference:    reasonUnbound, // bare form (PAY-POLL-ECHO-HARDENING-1)
+	payments.TerminalReasonProviderReferenceConflict:   reasonBoundIfReferenced, // LF D2 final PM-1
+	payments.TerminalReasonInvalidProviderReference:    reasonUnbound,           // bare form (PAY-POLL-ECHO-HARDENING-1)
 	payments.TerminalReasonSuccessForNeverSentAttempt:  reasonBoundIfReferenced,
 	payments.TerminalReasonTombstonePrecedesSuccess:    reasonExcluded,
 }

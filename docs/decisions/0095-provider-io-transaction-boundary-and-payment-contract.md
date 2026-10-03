@@ -6450,8 +6450,9 @@ raised for a `disputed` deposit attempt whose `terminal_reason` is one of:
 
 **Classification table and pin (LF D2 review P1).** Reconciliation classifies every deposit dispute
 reason explicitly, in one table (`disputeReasonClasses`): **bound** (above), **unbound**
-(`provider_reference_conflict`, `invalid_provider_reference` bare and `invalid_provider_reference:*`,
-§35.2), **bound-if-referenced** (T15) or **excluded** (`reversal_tombstone_precedes_success`, net zero at
+(`invalid_provider_reference` bare and `invalid_provider_reference:*`, §35.2), **bound-if-referenced**
+(T15, and `provider_reference_conflict` per LF D2 final PM-1: a phase C conflict park holds no
+reference and is unbound, a poll F-C4 conflict park holds X and is bound; §35.4) or **excluded** (`reversal_tombstone_precedes_success`, net zero at
 the PSP). A reason not in the table is *unclassified*: no finding at run time, and refused by the
 unit pin `TestD2_P1_EveryPaymentsDepositDisputeReasonIsClassified`, which iterates
 `payments.DepositDisputeTerminalReasons()` (PRH-2 D1; prefix entries are checked with every closed
@@ -6550,15 +6551,22 @@ of the match. One tenant, its own rows only (FORCE RLS, `tenant_id = $1` on ever
 - **GATE (binding, ledger-finance D2 review B1; not a future consideration).** Neither of the following
   may happen — **the first real PSP adapter enabled for any tenant, or the first non-MOCK payment
   statement source** (whichever comes first) — until **both** hold:
-  1. PAY-RECON-PARKED-CAPTURE-STANDING-1 has landed (standing coverage for unbound parks); and
-  2. the I-wire P1 alert for the PRH-2 C/D T10 deposit parks (`invalid_provider_reference:*`,
-     `provider_reference_conflict`, `sync_amount_mismatch`, `poll_amount_mismatch`,
-     `poll_reference_mismatch`) exists and is delivered.
+  1. PAY-RECON-PARKED-CAPTURE-STANDING-1 has landed (standing coverage for unbound parks), **together
+     with PAY-RECON-POLL-REF-CLEAR-1** (see below); and
+  2. the I-wire P1 alert exists and is delivered for:
+     - every deposit dispute reason that `disputeReasonClasses` (`internal/reconciliation/payment_statement.go`)
+       classifies as **bound, unbound or bound-if-referenced**, i.e. every class except *excluded*. The
+       table is the list: it already includes `callback_amount_asset_mismatch` and
+       `success_for_never_sent_attempt`, and a future reason joins the gate when it is classified,
+       which the P1 pin forces; and
+     - the audit action `payments.poll_evidence_contradicts_terminal_attempt` (a contradicting poll
+       success on a declined attempt, D1 §36: no state change, audit only).
 
   **Status at D2: neither holds.** The I-wire P1 alert does **not** exist yet: P1 visibility for these
   parks is an open I-wire condition (ALERT-DELIVERY-1, ADR 0102; see §34.7). Today these parks write
   only the `payment.attempt_disputed` audit row. This is acceptable only because the parks are
-  reachable solely through the MOCK adapter and the MOCK statement source.
+  reachable solely through the MOCK adapter and the MOCK statement source. (Ledger-finance D2 final
+  review PM-2.)
 - **Residual (ledger-finance D2 review N1): unbound-park clearing is approximate for conflict parks.**
   The in-run unbound rule clears on a reversal or tombstone on the **line's** reference (§35.2). For
   `provider_reference_conflict` that reference is held by **another** attempt (the conflict holder),
@@ -6577,9 +6585,26 @@ of the match. One tenant, its own rows only (FORCE RLS, `tenant_id = $1` on ever
   NULL`) refuses a `created -> disputed` move on an attempt that never chose a provider, and building
   a provider-bearing never-sent attempt would need payments internals. Every T15 row that exists does
   carry a provider, so the per-provider stream loads it and the classification applies.
-- **Clearing on the poll's returned reference Y (B3): NOT IMPLEMENTED** (see §35.1). Proposed registry
-  item: PAY-RECON-POLL-REF-CLEAR-1. It needs Y persisted as structured evidence (a schema change),
-  never read from audit JSON.
+- **Clearing on the poll's returned reference Y (B3): NOT IMPLEMENTED** (see §35.1).
+  PAY-RECON-POLL-REF-CLEAR-1 needs Y persisted as structured evidence (a schema change), never read
+  from audit JSON.
+  - **Operator rule until then:** a standing `poll_reference_mismatch` finding whose PSP reversal came
+    under the returned reference Y, not the bound reference X, does **not** clear by itself. It needs
+    **manual verification** against the PSP. An M1 resolution only acknowledges it; it never clears or
+    suppresses the finding (ADR 0101 §4, LF-3).
+  - **Deadline (binding):** PAY-RECON-POLL-REF-CLEAR-1 must land before the first real PSP or the
+    first non-MOCK statement source, whichever comes first. It ships together with
+    PAY-RECON-PARKED-CAPTURE-STANDING-1, under one allocated schema change that ledger-finance signs
+    off.
+- **`provider_reference_conflict` is bound-if-referenced (ledger-finance D2 final review PM-1).** A
+  phase C conflict park never holds a reference, so it stays unbound (in-run only). D1's poll F-C4
+  park holds the reference X the PSP just confirmed (X has become another non-tombstone ledger key at
+  the same PSP), so it is bound: in-run and standing, keyed on X. It clears on a reversal line naming
+  X. A tombstone on X cannot exist for this shape, because ledger keys are unique per (tenant,
+  provider, provider_tx_id) and X is already held. Pinned by `TestD2_14`.
+- **L1 (optional, not done):** defaulting an unclassified disputed reason to bound-if-referenced would
+  change existing assertions (`TestD2_6` pins an unknown reason as producing no finding). The P1 pin
+  already refuses any unclassified reason payments can write.
 
 ### 35.5 Tests and evidence
 
@@ -6587,8 +6612,9 @@ of the match. One tenant, its own rows only (FORCE RLS, `tenant_id = $1` on ever
   (c) 1-6, plus a pin that other disputed reasons are unchanged.
 - `internal/reconciliation/prh2_d2_merchant_crosscheck_integration_test.go` (`TestD2_7`..`TestD2_9b`):
   the D2-1 ruling's (c) 1-8, and R-1.
-- `internal/reconciliation/prh2_d2_postd1_integration_test.go` (`TestD2_10`..`TestD2_12`): the real D1
-  poll parks end to end, the real callback mismatch park, and the declined-attempt pin.
+- `internal/reconciliation/prh2_d2_postd1_integration_test.go` (`TestD2_10`..`TestD2_14`): the real D1
+  poll parks end to end, the real callback mismatch park, the declined-attempt pin, and the poll F-C4
+  conflict park holding X (`TestD2_14`, PM-1).
 - `internal/reconciliation/payment_reason_classification_test.go` (`TestD2_P1_*`, unit): the
   classification pin.
 - Mutants: LF (c) 7 (the predicate reverted to `multiple_success_for_intent` only), the D2-1 (c) 9 set,

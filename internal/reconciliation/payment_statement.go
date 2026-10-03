@@ -211,7 +211,7 @@ var disputeReasonClasses = map[string]disputeReasonClass{
 	"poll_amount_mismatch":                reasonBound,             // PRH-2 D, §36 (polled by the bound reference)
 	"poll_reference_mismatch":             reasonBound,             // PRH-2 D, §36 (the echo is never bound)
 	"callback_amount_asset_mismatch":      reasonBound,             // T10: verified callback for the bound reference
-	"provider_reference_conflict":         reasonUnbound,           // §34.3: the reference belongs to another holder
+	"provider_reference_conflict":         reasonBoundIfReferenced, // §34.3 phase C park: no reference (unbound); §36 poll F-C4 park: holds X (bound) - LF D2 final PM-1
 	"invalid_provider_reference":          reasonUnbound,           // bare form (PAY-POLL-ECHO-HARDENING-1)
 	"success_for_never_sent_attempt":      reasonBoundIfReferenced, // T15
 	"reversal_tombstone_precedes_success": reasonExcluded,          // net zero at the PSP (§28.9)
