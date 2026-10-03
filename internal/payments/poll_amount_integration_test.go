@@ -104,6 +104,16 @@ func (e *depRefEnv) deliverCallbackOnce(t *testing.T, outcome Outcome, amount in
 			if _, err := rvCallback(e.pool, e.orch, e.f, e.id, e.p.CallbackPayload(e.f.tenantID, CallbackEventDeposit, ref, "", outcome, amount, "EUR", declineReason, false)); err != nil {
 				t.Errorf("interleaved callback: %v", err)
 			}
+			// D1 QA re-confirmation (mutant B): "the hook fired" is not "the callback was
+			// applied". Prove its EFFECT before the poll's phase C runs: the attempt that
+			// owns the reference is now in the state the callback's outcome implies.
+			want := AttemptSucceeded
+			if outcome == OutcomeDeclined {
+				want = AttemptDeclined
+			}
+			if got := depScan[string](t, e.pool, e.f.tenantID, `SELECT state FROM payment_attempts WHERE tenant_id = $1 AND provider_reference = $2`, e.f.tenantID, ref); got != string(want) {
+				t.Errorf("after the interleaved %s callback the attempt is %q, want %q: the callback was not applied before the poll's phase C", outcome, got, want)
+			}
 		})
 	})
 	return fired
@@ -681,6 +691,11 @@ func TestPollDeclinedAttempt_ContradictionAuditedMatchingPostsT13(t *testing.T) 
 		a, ref := e.ambiguousBound(t, "d1-decl-ok")
 		e.deliverCallbackOnce(t, OutcomeDeclined, 5000, "provider_unavailable")
 		e.mustNoSweepErrors(t, e.poll(t, a, ref, pollSuccess("", 5000, "EUR")))
+		// The declined callback was applied (receipt 'applied') BEFORE the poll: this
+		// success is a T13 second capture, not the poll succeeding on a live attempt.
+		if n := depScan[int64](t, pool, e.f.tenantID, `SELECT count(*) FROM payment_provider_events WHERE tenant_id = $1 AND provider_reference = $2 AND outcome = 'declined' AND disposition_at_receipt = 'applied'`, e.f.tenantID, ref); n != 1 {
+			t.Fatalf("applied declined-callback receipts = %d, want exactly 1 (the attempt must have been declined when the poll reached phase C)", n)
+		}
 		got := mustGetAttempt(t, pool, e.f.tenantID, a.ID)
 		if got.State != AttemptSucceeded || got.ProviderReference == nil || *got.ProviderReference != ref {
 			t.Fatalf("state=%s ref=%v, want succeeded on %q (T13)", got.State, got.ProviderReference, ref)
