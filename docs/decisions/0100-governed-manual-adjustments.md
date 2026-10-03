@@ -796,12 +796,13 @@ These bind K2. The sources are `reviews/k1-security.md`, `reviews/k1-ledger-fina
 
 ## 20. Implementation status (PRH-2 K2, `ledger-finance` owner, branch `prh2-k2-manual-adjustments`)
 
-**Label: IMPLEMENTED (engineering, on the unmerged K2 branch) — NOT YET
-REVIEWED.** Every K2 deliverable in §3–§12 and the K1 follow-up gates of §19
-are built and tested; `security`, `code-reviewer` and `qa` review of this
-diff has not happened, and CLAUDE.md does not allow a security-sensitive
-financial control to be called complete before `security` reviews it. The
-items in §20.4 are explicitly NOT IMPLEMENTED or deferred.
+**Label: IMPLEMENTED (engineering, on the unmerged K2 branch) — reviews
+ACCEPT WITH CONDITIONS; condition fixes (§20.5) awaiting re-review.** Every
+K2 deliverable in §3–§12 and the K1 follow-up gates of §19 are built and
+tested. `security` (18c357a) and `code-reviewer` returned ACCEPT WITH
+CONDITIONS; the pre-merge conditions are fixed on the branch (§20.5) but
+their closure is for those reviewers to confirm, not for this author.
+The items in §20.4 are explicitly NOT IMPLEMENTED or deferred.
 
 ### 20.1 What exists
 
@@ -852,11 +853,11 @@ the insert guards is never counted: stale hash, initiator's Person,
 beneficiary, policy author, no grant, one Person twice), txid-not-xmin,
 K2-G4 scratch tests, B-19 whole-schema up/down/up equality, and every test
 asserts SUM(D) = SUM(C) and projection = recomputed (`assertInvariants`).
-Mutation results: `docs/plans/payment-readiness/evidence/prh2-k2-mutation-kill.txt`
-(68 mutants including K1's M9, M10 and "widen acting": 68 killed at their
-latest run. S32 survived its first run - a real layering gap, closed by
-`TestLayered_TightenOnlyEachLayerIndependently`; the run history is
-disclosed in the evidence file).
+Mutation results: `docs/plans/payment-readiness/evidence/prh2-k2-mutation-kill.txt`.
+The round-1 "68/68 killed" claim is WITHDRAWN: the security review found
+two survivors that round 1 never ran (F2, F7). The fix round (§20.5)
+re-ran every mutant, including F1/F2/F7 and the new ones; the evidence
+file is the only authoritative count.
 
 ### 20.3 Implementation decisions and deviations (disclosed)
 
@@ -917,6 +918,56 @@ disclosed in the evidence file).
   `GREATEST(1, …)`).
 - **P1 routing** of `ledger_unlinked_manual_adjustment`: I-wire (ADR 0102).
 - **Backoffice UI pages** for requests/policies: NOT IMPLEMENTED (flags only).
-- **Reviews:** `security`, `code-reviewer`, `qa`, `ledger-finance`
-  (independent) review of this diff: NOT DONE.
+- **Reviews:** `security` and `code-reviewer`: ACCEPT WITH CONDITIONS
+  (conditions fixed in §20.5, closure pending their re-check);
+  `ledger-finance` independent review: ACCEPT WITH CONDITIONS (C-K2-1 bound
+  to I-wire); `qa`: not done.
 - **Launch flags unchanged:** TM-7, TM-10, HD-PRH2-8, LEDGER-MANUAL-ADJ-LINK-1.
+- **STAFF-LIFECYCLE-1 (launch prerequisite, recorded per the security
+  review §5):** the §7.6 residual - a platform approver's own staff row is
+  invisible to the tenant-scope execution, so only its grant and Person
+  snapshot are re-checked at execution, not its status - is accepted for
+  merge ONLY. Before any real-money use it depends on STAFF-LIFECYCLE-1
+  revoking a principal's grants in the same transaction that suspends it,
+  DB-enforced (security S-b).
+
+### 20.5 Fix round after the K2 security and code reviews
+
+Security review (`docs/plans/prh2-hardening-round/reviews/k2-security.md`)
+and code review (`k2-code-review.md`), both ACCEPT WITH CONDITIONS.
+
+- **K2-C1 (High) - FIXED.** (i) Every non-executed exit of a request
+  (`refused_insufficient_funds`, `refused_at_execution`, `rejected`,
+  `cancelled`, `expired`) raises MA040 while a `ledger_transactions` row
+  carries `manual_adjustment:`||id in the tenant - in every session family,
+  not only acting (this is also code review R-1). (ii) The acting entries
+  fence validates each entry against the executing request: the account
+  is the request wallet's `player_cash` (player direction) or the tenant's
+  `manual_adjustment` house account with `wallet_id IS NULL` (opposite
+  direction); asset and amount equal the payload; at most two entries and
+  one per direction. Tests: `TestK2C1_ActingFenceEnforcesClosedShape`
+  (security's probe, the exact shape followed by the refused exit,
+  wrong wallet, wrong direction, split legs, duplicated balanced legs) and
+  `TestK2R1_TenantSessionNonExecutedExitRefusedAfterGovernedPosting`.
+- **K2-C2 - FIXED (test).** `TestK2C2_FenceStateArmAfterExit`: the
+  required extra-entry-after-executed case, plus a governed posting after
+  a legitimate refused exit, which is what isolates the state arm now
+  that (ii)'s count arm also refuses the first case.
+- **K2-C3 - FIXED (test).** `TestK2C3_DBRecountOnExecuting`: pending ->
+  executing driven directly with 1 of 2 approvals, and with an invalid
+  initiator (initiate grant revoked); the UPDATE itself must raise MA030.
+- **R-2 - FIXED.** A decision on an expired request commits the expiry
+  transition and its audit row and returns `ErrRequestExpired` -> 409
+  "request expired"; no approval row is written.
+- **R-3 - FIXED.** MA021/MA022/MA025 -> 400 with a token from a CLOSED set
+  (`adjustment.RefusalToken`; any other text falls back to a per-code
+  generic token); 40001/40P01 -> retryable 409; a denied audit row on each
+  path.
+- **R-4 - FIXED.** The reconciliation fixture helper decides in memory from
+  the returned mismatches; the sweep variant (which only holds the Run)
+  requires at least one visible row for a non-clean run.
+- **LOW - FIXED.** The A-18 guard check is structural over each policy
+  clause (an OR-ed guard no longer counts; planted cases); the 0113 down
+  file states it must run in a single transaction.
+- **F1** (drop the fence's `executed_txid` arm) is EQUIVALENT, as security
+  accepted; it is listed in the evidence file.
