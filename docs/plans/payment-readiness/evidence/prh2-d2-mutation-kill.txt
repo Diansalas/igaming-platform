@@ -87,3 +87,72 @@ Note on X6: for a deposit line resolved by provider reference, l.ref == a.provid
 construction, so the mutant is observable only on a payout line resolved by SETTLEMENT reference.
 TestD2_9b builds that shape: B is a pending payout moved by fixture to the T10
 invalid_provider_reference:* park.
+
+Post-D1 round (D1 merged at 7adb0c5; main 6836319 merged into this branch at 96c8625)
+---------------------------------------------------------------------------------------
+Production change at a0a6325: the reason sets became one explicit classification table
+(disputeReasonClasses: bound / unbound / bound-if-referenced / excluded; anything else is
+unclassified). The whole battery was re-expressed against the new code and re-run at a0a6325 with
+`$S/d2_mut2.py`. Table rows are matched by key and every anchor is asserted unique. Harness:
+-tags integration -count=1 -run 'TestD2_|TestINVDEP1_|TestPaymentStatement_' ./internal/reconciliation/
+(this includes the unit pin TestD2_P1_*). Private DB lf_d2_20261003 was rebuilt after the cluster
+restart, before this run. Each restore was asserted byte-identical to HEAD.
+
+Results: 32 mutants, 32 KILLED, 0 survived, 0 equivalent. For each new mutant, the failing assertion
+was read in its log and is the intended one: the P1 pin message "... is NOT classified by
+reconciliation", and the R-1 message "B (...) must get no pay_captured_unposted from the line naming
+it".
+
+| Mutant | Change | Verdict | Killed by (top-level tests) |
+|---|---|---|---|
+| M-PRED (LF (c) 7) | both bound sites reverted to `multiple_success_for_intent` only | KILLED | TestD2_1, TestD2_2, TestD2_3, TestD2_7, TestD2_10, TestD2_11 |
+| M-PRED-INRUN | matched-line site only | KILLED | TestD2_1, TestD2_2, TestD2_10, TestD2_11 |
+| M-PRED-STANDING | standing site only | KILLED | TestD2_2, TestD2_3, TestD2_7, TestD2_10, TestD2_11 |
+| M-SYNC-DROP | sync_amount_mismatch row removed | KILLED | TestD2_1, TestD2_2, TestD2_3, TestD2_7, TestD2_P1_EveryPaymentsDepositDisputeReasonIsClassified |
+| M-POLLAMT-DROP | poll_amount_mismatch row removed | KILLED | TestD2_1, TestD2_2, TestD2_3, TestD2_7, TestD2_10, TestD2_P1_Every... |
+| M-POLLREF-DROP | poll_reference_mismatch row removed | KILLED | TestD2_1, TestD2_2, TestD2_10, TestD2_P1_Every... |
+| M-CALLBACK-DROP (P1: an unclassified reason slipping through) | callback_amount_asset_mismatch row removed | KILLED | TestD2_11, TestD2_P1_Every... |
+| M-CALLBACK-UNBOUND | callback_amount_asset_mismatch classified unbound | KILLED | TestD2_11, TestD2_P1_Every... |
+| M-T15-DROP | success_for_never_sent_attempt row removed | KILLED | TestD2_P1_Every..., TestD2_P1_BoundIfReferenced |
+| M-T15-ALWAYS-BOUND | T15 bound even without a reference | KILLED | TestD2_P1_BoundIfReferenced |
+| M-TOMB-ROW-DROP | reversal_tombstone_precedes_success row removed (unclassified) | KILLED | TestD2_P1_Every... |
+| M-TOMB-BOUND | reversal_tombstone_precedes_success classified bound | KILLED | TestD2_6, TestD2_7 (R-1), TestD2_P1_Every..., TestINVDEP1_X16 |
+| M-BARE-INVALID-DROP | bare invalid_provider_reference row removed | KILLED | TestD2_P1_Every... |
+| M-UNCLASSIFIED-AS-BOUND | an unclassified reason defaults to bound | KILLED | TestD2_6, TestD2_P1_UnknownReasonIsUnclassified |
+| M-UNBOUND-FLAG-DROP | in-run unbound-park case disabled | KILLED | TestD2_4, TestD2_5, TestD2_7 |
+| M-CONFLICT-DROP | provider_reference_conflict row removed | KILLED | TestD2_4, TestD2_7, TestD2_P1_Every... |
+| M-INVALID-DROP | invalid_provider_reference:* prefix branch removed | KILLED | TestD2_5, TestD2_9b, TestD2_P1_Every... |
+| M-UNBOUND-STATUS-WIDEN | unbound flag on any line status | KILLED | TestD2_4 |
+| M-UNBOUND-BYMERCHANT-GATE | unbound flag gated on merchant resolution | KILLED | TestD2_4 |
+| M-BOUND-STATUS-WIDEN | bound in-run flag also on a `reversed` line | KILLED | TestD2_1, TestINVDEP1_C5 |
+| M-STANDING-UNBOUND-WIDEN | standing case widened to unbound parks | KILLED | TestD2_4, TestD2_7, TestD2_9b |
+| M-CLEAR-W1-ANY-REVERSAL | any reversal line clears | KILLED | TestD2_3 |
+| M-CLEAR-W2-ANY-TOMBSTONE | any tombstone clears | KILLED | TestD2_3 |
+| M-CLEAR-NEVER | clearing removed | KILLED | TestD2_3, TestD2_4, TestD2_5, TestD2_7, TestD2_9b, TestINVDEP1_C5 |
+| M-UNBOUND-CLEAR-ATTEMPT-REF | unbound clearing on the attempt's reference | KILLED | TestD2_4, TestD2_5 |
+| X1-CROSSCHECK-REMOVED | merchant cross-check removed | KILLED | TestD2_7, TestD2_8, TestD2_9, TestD2_9b |
+| X2-CROSSCHECK-BYMERCHANT-GATE | cross-check gated on byMerchant | KILLED | TestD2_7, TestD2_8, TestD2_9, TestD2_9b |
+| X3-CROSSCHECK-STRING-COMPARE | string compare instead of byMerchant identity | KILLED | TestD2_7, TestD2_8, TestD2_9, TestD2_9b |
+| X4-B-CONSUMED | B recorded in matchedBy | KILLED | TestD2_7 (c7), TestD2_9 |
+| X5-B-CU-DROPPED | B captured-unposted step dropped | KILLED | TestD2_7, TestD2_9b |
+| X6-B-CLEAR-ON-A-REF | B cleared on a.providerRef | KILLED | TestD2_9b |
+| Y-B-ANYDISPUTED (code review R-1) | B step fires for any disputed B (unboundPark guard dropped) | KILLED | TestD2_7/r1_B_bound_or_excluded_reason_gets_no_finding_from_the_line (all three subcases: poll_amount_mismatch, sync_amount_mismatch, reversal_tombstone_precedes_success) |
+
+New tests and the mutants that pin them:
+- TestD2_P1_* (unit classification pin): M-CALLBACK-DROP, M-T15-DROP, M-TOMB-ROW-DROP,
+  M-BARE-INVALID-DROP, M-UNCLASSIFIED-AS-BOUND, M-T15-ALWAYS-BOUND, M-TOMB-BOUND.
+- TestD2_10 (real D1 poll parks via the sweeper, QA D2-F1): M-PRED*, M-POLLAMT-DROP, M-POLLREF-DROP.
+- TestD2_11 (real callback_amount_asset_mismatch park): M-PRED*, M-CALLBACK-DROP, M-CALLBACK-UNBOUND.
+- TestD2_7/r1 (R-1): Y-B-ANYDISPUTED.
+- TestD2_12 (declined attempt + succeeded line = pay_status_mismatch) pins EXISTING behaviour
+  (PAY-POLL-DECLINED-ALERT-RECON-1 (b)); no matcher change was needed. Its mutant targets the pre-D2
+  rule it pins:
+
+| Mutant | Change | Verdict | Killed by |
+|---|---|---|---|
+| Z-DECLINED-STATUS-DROP | `case providerSucceeded && a.state != "succeeded"` also excludes `declined` | KILLED | TestD2_12_DeclinedAttempt_SucceededLine_IsStatusMismatch (only) |
+
+With Z, the battery is 33 mutants, 33 KILLED.
+
+The P2 text mutants (`$S/d2_p2_mut.py`, two mutants) were re-run at a0a6325. Both KILLED:
+P2-TEXT-INRUN by TestD2_1; P2-TEXT-STANDING by TestD2_2, TestD2_3, TestD2_7.

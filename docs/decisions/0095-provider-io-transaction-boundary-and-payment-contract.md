@@ -6445,6 +6445,20 @@ raised for a `disputed` deposit attempt whose `terminal_reason` is one of:
 | `sync_amount_mismatch` | PRH-2 C, §34.2 | the park binds the validated reference (§34.8, F-C1) |
 | `poll_amount_mismatch` | PRH-2 D (PAY-POLL-AMOUNT-1), plan §5 D design 1 | the poll queries by the bound reference |
 | `poll_reference_mismatch` | PRH-2 D, plan §5 D design 2 | as above; the echo is never bound (design 3) |
+| `callback_amount_asset_mismatch` | T10 from a verified callback (receipt path) | the callback resolved the live attempt by its bound reference (LF D2 review P1: same exposure as `sync_amount_mismatch`) |
+| `success_for_never_sent_attempt` (T15) | receipt path | **bound only if the attempt holds a reference**; otherwise it is an unbound park (§35.2). Never excluded (LF D2 review P1) |
+
+**Classification table and pin (LF D2 review P1).** Reconciliation classifies every deposit dispute
+reason explicitly, in one table (`disputeReasonClasses`): **bound** (above), **unbound**
+(`provider_reference_conflict`, `invalid_provider_reference` bare and `invalid_provider_reference:*`,
+§35.2), **bound-if-referenced** (T15) or **excluded** (`reversal_tombstone_precedes_success`, net zero at
+the PSP). A reason not in the table is *unclassified*: no finding at run time, and refused by the
+unit pin `TestD2_P1_EveryPaymentsDepositDisputeReasonIsClassified`, which iterates
+`payments.DepositDisputeTerminalReasons()` (PRH-2 D1; prefix entries are checked with every closed
+`providerref` reason and in bare form) and also checks each classification against the
+ledger-finance table. `TestD2_P1_NoStaleClassification` refuses table rows payments no longer
+writes. Production reconciliation keeps string literals (it does not import `internal/payments`); the
+pin ties the two packages together, so a new payments reason cannot ship without a decision here.
 
 - **In-run:** a statement line matched to the attempt (by the bound reference, or by merchant
   reference) with status `succeeded`. `pay_amount_mismatch` / `pay_reference_mismatch` still fire
@@ -6455,9 +6469,16 @@ raised for a `disputed` deposit attempt whose `terminal_reason` is one of:
   as its original, or a `tombstone` ledger row on `(provider_id, bound reference)`. Nothing else: not a
   reversal line or a tombstone on any other reference, not `investigation_status` on a prior finding
   (the predicate reads no prior finding), and not M1 (ADR 0101 §4, LF-3: M1 only acknowledges).
-- The poll reasons are spelled as string literals fixed by the plan; reconciliation never imports
-  `internal/payments`. If PRH-2 D1 merges with different strings, this table and
-  `capturedUnpostedBoundReasons` must change in the same merge.
+- **End to end (QA D2-F1).** A real D1 poll park (`poll_amount_mismatch` and
+  `poll_reference_mismatch`), produced by the payments sweeper polling the MOCK (§36), is reported
+  in-run and standing (`TestD2_10`); a real `callback_amount_asset_mismatch` park likewise
+  (`TestD2_11`).
+- **Clearing for `poll_reference_mismatch` on the returned reference Y (LF D2 review B3): NOT
+  IMPLEMENTED.** D1 records Y only inside the park's audit metadata (`echoed_provider_reference`, and
+  only when Y passes `providerref.Validate`). Ledger-finance ruled that reconciliation must not parse
+  audit JSON as money evidence; persisting Y as structured evidence needs a schema change, and none is
+  allocated to D2. So today the finding clears only on the bound reference X. A PSP reversal under Y
+  leaves it standing: loud, never silent. Proposed registry item: PAY-RECON-POLL-REF-CLEAR-1.
 
 ### 35.2 The rule: unbound parks (in-run only)
 
@@ -6502,6 +6523,14 @@ text uses the ADR 0101 F13 wording: "a PSP-initiated reversal/tombstone, or allo
   with no new findings. Tests are the ruling's (c) 1-8
   (`internal/reconciliation/prh2_d2_merchant_crosscheck_integration_test.go`), and its (c) 9 mutants
   are in the evidence file (§35.5).
+- **The B step is for unbound parks only (code review R-1).** If the named attempt B is disputed with a
+  bound reason (it holds its own reference) or an excluded reason, the line produces only the
+  `check=merchant` finding against A, and no `pay_captured_unposted` for B. A bound B is still reported
+  by its own standing rule, keyed by its own reference. Pinned by
+  `TestD2_7/r1_B_bound_or_excluded_reason_gets_no_finding_from_the_line`.
+- **A declined attempt with a succeeded line** (the T13 shape; D1 audits a contradicting poll on a
+  declined attempt without a state change) gives `pay_status_mismatch` under the existing rule. No
+  matcher change; pinned by `TestD2_12` (LF ruling, PAY-POLL-DECLINED-ALERT-RECON-1 part (b)).
 - An **invalid reference** on a statement line is refused at fetch (`validatePaymentLine`): the run
   fails, nothing is stored, and the sweep audits `reconciliation.sweep_run_failed` with severity P1.
 
@@ -6542,12 +6571,29 @@ of the match. One tenant, its own rows only (FORCE RLS, `tenant_id = $1` on ever
   and is not part of D2.
 - **MA020 (`player_open_payment_exposure`, migration 0113)** still names only
   `multiple_success_for_intent`; MA020-SYNC-MISMATCH-1 should cover the poll reasons as well.
+- **`success_for_never_sent_attempt` (T15) is pinned by unit test only.** The bound-if-referenced
+  resolution is tested against the attempt row (`TestD2_P1_BoundIfReferenced`). There is no
+  integration fixture: migration 0101's CHECK (`state IN ('created','rejected') OR provider_id IS NOT
+  NULL`) refuses a `created -> disputed` move on an attempt that never chose a provider, and building
+  a provider-bearing never-sent attempt would need payments internals. Every T15 row that exists does
+  carry a provider, so the per-provider stream loads it and the classification applies.
+- **Clearing on the poll's returned reference Y (B3): NOT IMPLEMENTED** (see §35.1). Proposed registry
+  item: PAY-RECON-POLL-REF-CLEAR-1. It needs Y persisted as structured evidence (a schema change),
+  never read from audit JSON.
 
 ### 35.5 Tests and evidence
 
-`internal/reconciliation/prh2_d2_parked_capture_integration_test.go` (`TestD2_1`..`TestD2_6`, LF (c)
-1-6 plus a pin that other disputed reasons are unchanged). Mutants, including LF (c) 7 (the predicate
-reverted to `multiple_success_for_intent` only): `docs/plans/payment-readiness/evidence/prh2-d2-mutation-kill.txt`.
+- `internal/reconciliation/prh2_d2_parked_capture_integration_test.go` (`TestD2_1`..`TestD2_6`): LF
+  (c) 1-6, plus a pin that other disputed reasons are unchanged.
+- `internal/reconciliation/prh2_d2_merchant_crosscheck_integration_test.go` (`TestD2_7`..`TestD2_9b`):
+  the D2-1 ruling's (c) 1-8, and R-1.
+- `internal/reconciliation/prh2_d2_postd1_integration_test.go` (`TestD2_10`..`TestD2_12`): the real D1
+  poll parks end to end, the real callback mismatch park, and the declined-attempt pin.
+- `internal/reconciliation/payment_reason_classification_test.go` (`TestD2_P1_*`, unit): the
+  classification pin.
+- Mutants: LF (c) 7 (the predicate reverted to `multiple_success_for_intent` only), the D2-1 (c) 9 set,
+  R-1's `Y-B-ANYDISPUTED`, and the P1 table mutants, in
+  `docs/plans/payment-readiness/evidence/prh2-d2-mutation-kill.txt`.
 
 ## 36. Amendment — PRH-2 D: poll amount and reference evidence, ledger-key binding, deferred-receipt drains, park fault injection (`payments`, 2026-10-03)
 
