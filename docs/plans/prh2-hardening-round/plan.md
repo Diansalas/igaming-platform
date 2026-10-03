@@ -946,3 +946,25 @@ The payments lane stays strictly serial (E2 → C → D → F-pay → H → I-wi
 | 0115 | K3 |
 
 The ADRs' references to 0111, 0112 and 0114 for K1, K2 and K3 mean their new numbers. Each lane updates its own ADR's implementation record.
+
+## 12. Parallelization analysis and decision (orchestrator, 2026-10-03, after D1 merge `7adb0c5`)
+
+The user authorized safe parallelization of the remaining workstreams once critical-file ownership had been analyzed.
+The plan's merge order (§3) is unchanged. This section records which workstreams may be IMPLEMENTED in parallel.
+Merge order stays: D2, F-pay, H, E1, I-wire, K3 (migrations 0114 E1, 0115 K3).
+
+| WS | Hard entry condition (plan §2) | Critical files | Migration | Overlap with an active WS | Decision |
+|---|---|---|---|---|---|
+| **D2** (active) | D1 merged (done) | `reconciliation/payment_statement.go`, its tests, ADR 0095 §35 | none | none | **running** |
+| **F-pay** | D merged (D1 done; D2 is reconciliation-only and independent) | `payments/{kycgate,payout,payout_sweep}.go`, ADR 0096 | none | none with D2 or I-wire | **STARTED** (`prh2-fpay-kyc-gate`) |
+| **I-wire** | E2 and I-core merged (done); S-7 item 2 settled by I-core's ownership model | alert sites in `orchestrator.go`, `drive.go`, `sweeper.go`, `receipt.go`; `reconciliation/scheduler.go`; kill-switch and simulation handlers; `alerting/*`; ADR 0102. **`main.go` dispatcher line is H's file (Rule 5)** | none | none with D2 (`scheduler.go` vs `payment_statement.go`) or F-pay | **STARTED** (`prh2-iwire-alert-delivery`), with the `main.go` wiring withheld until H merges; I-wire merges after H |
+| **H** | **F-pay merged** (hard edge; payout half needs the payout-gate fixes) | new `payments/sweeper_loop.go`, `main.go`, `config/config.go`, AST tests | none | owns `main.go`; waits on F-pay | **HELD** until F-pay merges |
+| **E1** | **H merged** (hard edge; E1's worker is wired in `main.go` at its merge) | `kyc/*`, new `kyc/outbox.go`, 1 line `main.go` | 0114 | `main.go` with H | **HELD** until H merges |
+| **K3** | K2 merged (done); ADR 0101 accepted | `payments/{drive,sweeper,payout,receipt}.go`, `attempt.go`, new `manual_resolution.go`, callback handlers, statement import, **`reconciliation/payment_statement.go`** (F13 detail strings), `providerref.go` | 0115 | `payment_statement.go` with D2; `payout.go` with F-pay; `drive/sweeper/receipt` with I-wire | **HELD**. It is last in the payments lane by design. It overlaps three active workstreams on critical files, and its force-resolve semantics depend on F-pay's payout gate and I-wire's alert Kinds |
+
+Concurrency cap: at most three implementers at a time (D2, F-pay, I-wire), because the disk and the shared Postgres are shared.
+Reviewers run on final commits only. Every workstream merges one at a time with a whole-repo `-race` run between merges.
+
+Follow-ups that stay registered and visible, and are NOT closed by this decision: PAY-DEPOSIT-ESCALATION-1, PAY-POLL-ECHO-HARDENING-1,
+PAY-POLL-DECLINED-ALERT-RECON-1, PAY-RECEIPT-T4-DRAIN-TEST-1, PAY-PAYOUT-UNBOUND-HOLD-1, PAY-RECON-PARKED-CAPTURE-STANDING-1 (hard prerequisite to any real PSP),
+MA020-SYNC-MISMATCH-1, and ALERT-DELIVERY-1 (OPEN: no dispatcher is wired, no recipient exists, nothing is delivered).
