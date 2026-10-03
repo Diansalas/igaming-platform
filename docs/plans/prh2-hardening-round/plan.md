@@ -296,6 +296,18 @@ require an amount echo.
 
 ### D — PAY-POLL-AMOUNT-1 + FH7-06 (merged S-6/LF-4)
 
+> **Orchestrator decision (2026-10-03): D is split by file ownership.** C's review round added
+> follow-ups (PAY-DEFERRED-RECEIPT-SYNC-1, PAY-RECON-PARKED-CAPTURE-1 with LF F-C4, QA C3
+> fault injection, and the Missing-on-poll ruling).
+> - **D1** (`internal/payments`, payments): branch `prh2-d1-poll-amount`. Covers the design below,
+>   the ride-alongs, deferred-receipt draining, F-C4 and QA C3.
+> - **D2** (`internal/reconciliation`, ledger-finance): branch `prh2-d2-recon-parked-capture`.
+>   Covers PAY-RECON-PARKED-CAPTURE-1 per the LF ruling in `reviews/c-ledger-finance.md`, plus the
+>   QA F5 reconciliation-impact test.
+>
+> The two branches touch disjoint packages. D2 treats D1's poll T10 reasons by string. The
+> orchestrator checks the coupling at merge and merges D1 first.
+
 **Design** (in the live-attempt success branch):
 1. The shared helper compares amount and asset → T10 `poll_amount_mismatch`.
 2. A **non-empty** echo that differs from `*attempt.ProviderReference` → T10 `poll_reference_mismatch`.
