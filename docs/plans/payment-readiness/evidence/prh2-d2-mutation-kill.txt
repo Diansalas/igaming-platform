@@ -65,3 +65,25 @@ every D2 finding asserts it. Same method; run with -run 'TestD2_'; restore byte-
 
 Full suite at 3047d28: go test -race -tags integration -count=1 -p 1 ./internal/reconciliation/... -> ok
 (61.5s), statement ok, 0 FAIL/panic/DATA RACE lines.
+
+Review round 1, D2-1 merchant cross-check (ledger-finance ruling
+docs/plans/prh2-hardening-round/reviews/d2-1-ledger-finance-ruling.md (c) 9)
+--------------------------------------------------------------------------
+Same method and harness (-run 'TestD2_|TestINVDEP1_|TestPaymentStatement_'). The full battery (the
+17 mutants above plus these 6) was re-run at 0d34708: all 23 KILLED, each restore byte-identical to
+HEAD. X4 was re-run at 0c9b3c9 after the (c) 7 test was fixed to order R before R2; at 0d34708 R2
+sorted first, so a consumed B surfaced only through TestD2_9.
+
+| Mutant | Change | Verdict | Killed by (top-level tests) |
+|---|---|---|---|
+| X1-CROSSCHECK-REMOVED | cross-check disabled (`if false && !byMerchant && ...`) | KILLED | TestD2_7 (c1, both c2, c3, c7), TestD2_8 (both), TestD2_9, TestD2_9b |
+| X2-CROSSCHECK-BYMERCHANT-GATE | gated back on `byMerchant` | KILLED | TestD2_7, TestD2_8, TestD2_9, TestD2_9b |
+| X3-CROSSCHECK-STRING-COMPARE | `l.merchant != a.merchantRef` instead of resolving `byMerchant` | KILLED | TestD2_7, TestD2_8 (other operation), TestD2_9, TestD2_9b |
+| X4-B-CONSUMED | B recorded in `matchedBy` | KILLED | TestD2_7/c7_B_not_consumed, TestD2_9 |
+| X5-B-CU-DROPPED | the B captured-unposted step dropped | KILLED | TestD2_7 (c1, c3, c7), TestD2_9b |
+| X6-B-CLEAR-ON-A-REF | B cleared on `a.providerRef` instead of `l.ref` | KILLED | TestD2_9b |
+
+Note on X6: for a deposit line resolved by provider reference, l.ref == a.providerRef by
+construction, so the mutant is observable only on a payout line resolved by SETTLEMENT reference.
+TestD2_9b builds that shape: B is a pending payout moved by fixture to the T10
+invalid_provider_reference:* park.
