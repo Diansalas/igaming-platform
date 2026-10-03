@@ -114,7 +114,16 @@ import (
 // Disclosed limits:
 //   - disputed attempts are excluded from status comparison: T10/T13t/T14
 //     already made them a payments P1 with no automated remedy, and the
-//     stream does not second-guess that terminal decision.
+//     stream does not second-guess that terminal decision. EXCEPT the
+//     "provider captured, platform disputed, nothing posted" reasons,
+//     which are pay_captured_unposted (ADR 0095 §28.9, extended by §35,
+//     PAY-RECON-PARKED-CAPTURE-1): see capturedUnpostedBoundReasons and
+//     isUnboundParkReason.
+//   - an unbound park (provider_reference_conflict,
+//     invalid_provider_reference:*) holds no provider reference, so it is
+//     flagged only in a run whose statement carries a succeeded line
+//     resolving to it by merchant reference. Standing coverage for it
+//     (persisted-line evidence) is NOT IMPLEMENTED (ADR 0095 §35.4).
 //   - declined attempts absent from the statement are not flagged
 //     (whether a real statement lists declines is PROVIDER DEPENDENT).
 //   - provider-succeeded vs platform-in-flight is NOT age-gated (ADR
@@ -145,8 +154,48 @@ const (
 	// Reported on every run until it clears (a reversal/tombstone appears,
 	// or M1/allocation happens - BLOCKED). Never auto-resolved, never a
 	// T17/re-drive trigger.
+	//
+	// ADR 0095 §35 (PRH-2 D2, PAY-RECON-PARKED-CAPTURE-1) widens the
+	// reason set to every T10 where the provider says it captured and the
+	// platform disputed without posting: capturedUnpostedBoundReasons
+	// (in-run and standing) and isUnboundParkReason (in-run only).
 	MismatchKindPayCapturedUnposted MismatchKind = "pay_captured_unposted"
 )
+
+// capturedUnpostedBoundReasons are the disputed terminal reasons whose
+// attempt HOLDS the provider reference the provider reported as captured,
+// with nothing posted (ADR 0095 §28.9 as extended by §35):
+//
+//   - multiple_success_for_intent (T13d, §28.4);
+//   - sync_amount_mismatch (PRH-2 C, §34.2: the park binds the validated
+//     reference, §34.8);
+//   - poll_amount_mismatch, poll_reference_mismatch (PRH-2 D, the poll T10s
+//     of PAY-POLL-AMOUNT-1; the attempt is polled by its bound reference).
+//
+// pay_captured_unposted is raised for them both in-run (a succeeded line
+// names the attempt) and standing (no line this run, unwindowed), and
+// clears only on capturedUnposted's two signals.
+//
+// String literals, never imported from internal/payments: reconciliation
+// reads payments' rows, not its code, and the poll reasons are fixed by
+// the PRH-2 plan (§5 D) rather than by any constant this package can see.
+var capturedUnpostedBoundReasons = map[string]bool{
+	"multiple_success_for_intent": true,
+	"sync_amount_mismatch":        true,
+	"poll_amount_mismatch":        true,
+	"poll_reference_mismatch":     true,
+}
+
+// isUnboundParkReason: a PRH-2 C park that NEVER binds the adapter's
+// reference on the attempt (§34.8): provider_reference_conflict (the
+// reference belongs to another attempt or intent) and
+// invalid_provider_reference:<reason> (the reference failed
+// providerref.Validate). A real capture behind such a park is visible to
+// reconciliation only through a statement line that resolves to the
+// attempt by merchant reference, so it is flagged in-run only (§35.2).
+func isUnboundParkReason(r string) bool {
+	return r == "provider_reference_conflict" || r == "invalid_provider_reference" || strings.HasPrefix(r, "invalid_provider_reference:")
+}
 
 // paymentAssetCodeRE is the asset code shape a statement line may carry
 // (security C2): the Asset registry's codes are upper-case alphanumerics.
@@ -938,15 +987,24 @@ func (m *payMatcher) matchPayment(lk string, l payLine) {
 	// keep it standing - so it falls through to the plain "disputed:
 	// already a payments P1" case below instead, precisely like every
 	// other disputed reason.
-	case a.state == "disputed" && a.terminalReason == "multiple_success_for_intent" && l.status == statement.PaymentStatusSucceeded && m.capturedUnposted(a):
-		// ADR 0095 §28.9: the ONE disputed reason code that is NOT already
-		// a plain payments P1 for reconciliation's purposes - a real PSP
-		// capture the platform never posted and has not (yet) been
-		// refunded is a standing, reported exposure, never silently
-		// folded into "disputed: already a payments P1" like every other
-		// disputed reason below.
+	case a.state == "disputed" && capturedUnpostedBoundReasons[a.terminalReason] && l.status == statement.PaymentStatusSucceeded && m.capturedUnposted(a):
+		// ADR 0095 §28.9, extended by §35: the disputed reason codes that
+		// are NOT already a plain payments P1 for reconciliation's
+		// purposes - a real PSP capture the platform never posted and has
+		// not (yet) been refunded is a standing, reported exposure, never
+		// silently folded into "disputed: already a payments P1" like
+		// every other disputed reason below.
 		m.r.add(MismatchKindPayCapturedUnposted, ak+" check=captured_unposted",
-			"resolution: a PSP-initiated reversal/tombstone, or M1/allocation (BLOCKED)", "platform: "+a.render()+"; "+m.label+l.render())
+			"resolution: a PSP-initiated reversal/tombstone, or M1/allocation (BLOCKED)", "platform: "+a.render()+" terminal_reason="+a.terminalReason+"; "+m.label+l.render())
+	case a.state == "disputed" && byMerchant && isUnboundParkReason(a.terminalReason) && l.status == statement.PaymentStatusSucceeded && m.capturedUnpostedRef(l.ref):
+		// ADR 0095 §35.2 (LF ruling on QA C-F2 (a)): a park that never
+		// bound a reference (a binding conflict, or an invalid reference)
+		// and a succeeded deposit line resolving to it by merchant
+		// reference - the PSP says it captured for this attempt and the
+		// platform posted nothing. The attempt holds no reference, so the
+		// clearing signals are read on the LINE's reference. In-run only.
+		m.r.add(MismatchKindPayCapturedUnposted, ak+" check=captured_unposted",
+			"resolution: a PSP-initiated reversal/tombstone on this line's reference, or allocation (LEDGER-SUSPENSE-B-1); M1 only acknowledges", "platform: "+a.render()+" terminal_reason="+a.terminalReason+"; "+m.label+l.render())
 	case a.state == "disputed" || (a.state == "rejected" && !providerSucceeded):
 		// disputed: already a payments P1 (see the file comment).
 	case providerSucceeded && a.state != "succeeded":
@@ -969,13 +1027,22 @@ func (m *payMatcher) matchPayment(lk string, l payLine) {
 // silently diverge from the other: no deposit_reversal line in THIS run
 // named this reference (m.reversalOriginals, populated once per run by
 // matchLines before either caller runs), and no tombstone ledger row
-// exists for it. Both callers already gate on
-// a.terminalReason == "multiple_success_for_intent" themselves - not
+// exists for it. Both callers already gate on the terminal reason
+// (capturedUnpostedBoundReasons, ADR 0095 §35) themselves - not
 // duplicated here, since matchPayment's own case additionally requires
 // providerSucceeded (a statement-line-status concept this predicate has
 // no business knowing about).
 func (m *payMatcher) capturedUnposted(a *payAttempt) bool {
-	return !m.reversalOriginals[a.providerRef] && m.ledgerByRef["tombstone\x00"+a.providerRef] == nil
+	return m.capturedUnpostedRef(a.providerRef)
+}
+
+// capturedUnpostedRef is capturedUnposted's clearing rule for one
+// reference: still captured-and-unposted unless a deposit_reversal line of
+// THIS run names it as its original, or a tombstone ledger row holds it.
+// Nothing else clears it - not an M1 decision, not a mismatch row's
+// investigation_status (ADR 0095 §35.3).
+func (m *payMatcher) capturedUnpostedRef(ref string) bool {
+	return !m.reversalOriginals[ref] && m.ledgerByRef["tombstone\x00"+ref] == nil
 }
 
 // checkUnmatchedAttempts: attempts that no line in THIS run matched.
@@ -997,9 +1064,14 @@ func (m *payMatcher) checkUnmatchedAttempts() {
 		// m.attempts itself (loadPlatform's own query has no date
 		// filter) - never gated on m.inCoverage/m.aged, which exist for
 		// the OTHER two cases below, not this one.
-		case a.state == "disputed" && a.terminalReason == "multiple_success_for_intent" && m.capturedUnposted(a):
+		//
+		// ADR 0095 §35: the same holds for every reason in
+		// capturedUnpostedBoundReasons (the attempt holds the captured
+		// reference). An unbound park (isUnboundParkReason) is NOT
+		// reported here: it holds no reference this rule could clear on.
+		case a.state == "disputed" && capturedUnpostedBoundReasons[a.terminalReason] && m.capturedUnposted(a):
 			m.r.add(MismatchKindPayCapturedUnposted, k+" check=captured_unposted",
-				"resolution: a PSP-initiated reversal/tombstone, or M1/allocation (BLOCKED)", m.label+"no statement line; platform: "+a.render())
+				"resolution: a PSP-initiated reversal/tombstone, or M1/allocation (BLOCKED)", m.label+"no statement line; platform: "+a.render()+" terminal_reason="+a.terminalReason)
 		// The coverage window protects only the "missing provider record"
 		// rule. Ageing is not coverage-gated (code review F2): with a
 		// window no longer than the horizon an in-flight attempt would
