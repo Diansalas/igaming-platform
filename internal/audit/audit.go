@@ -103,18 +103,28 @@ func Record(ctx context.Context, tx pgx.Tx, entry Entry) error {
 	if entry.ActorID != uuid.Nil {
 		actorID = &entry.ActorID
 	}
-	var subjectTenantID *uuid.UUID
+	// subject_tenant_id (migration 0109) is named only when set: a NULL
+	// value is the column default, so omitting it is behaviour-identical,
+	// and it keeps every non-subject audit write valid against a schema
+	// migrated only up to a pre-0109 version (legacy-data-shape scratch
+	// tests run current code on such schemas).
 	if entry.SubjectTenantID != uuid.Nil {
-		subjectTenantID = &entry.SubjectTenantID
+		_, err = tx.Exec(ctx,
+			`INSERT INTO audit_log
+				(tenant_id, actor_type, actor_id, action, target_type, target_id, outcome, ip_address, user_agent, request_id, metadata, subject_tenant_id)
+			 VALUES ($1, $2, $3, $4, NULLIF($5, ''), NULLIF($6, ''), $7, NULLIF($8, '')::inet, NULLIF($9, ''), NULLIF($10, ''), $11, $12)`,
+			tenantID, entry.ActorType, actorID, entry.Action, entry.TargetType, entry.TargetID,
+			entry.Outcome, entry.IPAddress, entry.UserAgent, entry.RequestID, metadataJSON, entry.SubjectTenantID,
+		)
+	} else {
+		_, err = tx.Exec(ctx,
+			`INSERT INTO audit_log
+				(tenant_id, actor_type, actor_id, action, target_type, target_id, outcome, ip_address, user_agent, request_id, metadata)
+			 VALUES ($1, $2, $3, $4, NULLIF($5, ''), NULLIF($6, ''), $7, NULLIF($8, '')::inet, NULLIF($9, ''), NULLIF($10, ''), $11)`,
+			tenantID, entry.ActorType, actorID, entry.Action, entry.TargetType, entry.TargetID,
+			entry.Outcome, entry.IPAddress, entry.UserAgent, entry.RequestID, metadataJSON,
+		)
 	}
-
-	_, err = tx.Exec(ctx,
-		`INSERT INTO audit_log
-			(tenant_id, actor_type, actor_id, action, target_type, target_id, outcome, ip_address, user_agent, request_id, metadata, subject_tenant_id)
-		 VALUES ($1, $2, $3, $4, NULLIF($5, ''), NULLIF($6, ''), $7, NULLIF($8, '')::inet, NULLIF($9, ''), NULLIF($10, ''), $11, $12)`,
-		tenantID, entry.ActorType, actorID, entry.Action, entry.TargetType, entry.TargetID,
-		entry.Outcome, entry.IPAddress, entry.UserAgent, entry.RequestID, metadataJSON, subjectTenantID,
-	)
 	if err != nil {
 		return fmt.Errorf("audit: insert entry: %w", err)
 	}

@@ -15,6 +15,17 @@
       - *the R1 edge residual (WEBHOOK-EDGE-1) is open, STAGING/INFRA REQUIRED and pre-launch.*
     - *The Low and Info follow-ups PRH-I4-L4-1, L5-1, I1-1, I2-1, I3-1, I4-1 and
       L3-RESIDUAL-1 remain open in the registry.*
+  - *Status note (PRH-2 hardening round, workstream J, `devops`): `PRH-I4-METRICS-1` above is
+    now stale - see §21.12 "PRH-I4-METRICS-1: §8 OTel metrics" for what was built. The decisions
+    counter and the A4a in-flight gauge are `IMPLEMENTED (local; pending orchestrator merge)`,
+    code + tests. `security` reviewed and returned **ACCEPT, no conditions**
+    (`docs/plans/prh2-hardening-round/reviews/j-security.md`); `code-reviewer` returned **READY
+    WITH CONDITIONS** (`docs/plans/prh2-hardening-round/reviews/j-code-review.md`, J-1/J-2/J-3 -
+    all closed in a same-branch fix round, see §21.12). The registry item itself is NOT closed
+    here - the orchestrator closes it at merge (J-4). §8's other originally-drafted gauges
+    (directory size/age, DB-gate occupancy, limiter key counts) remain `NOT IMPLEMENTED`, tracked
+    as a new, separate, non-blocking item `PRH-I4-METRICS-2`. This does not itself close
+    `PRH-I4`'s PARTIALLY IMPLEMENTED status - `WEBHOOK-EDGE-1` is still open.*
 - **Decision type:** architecture + security control (cross-domain: `httpserver`,
   `webhookauth`, `identity`, `config`, the three webhook domains `payments`, `casino`, `kyc`).
 - **Owner:** `security`. **Reviewers:** `devops` (configuration, deployment topology),
@@ -1348,3 +1359,117 @@ remain registered and open, non-blocking, as before.
 
 Full mutation-kill evidence: `docs/plans/payment-readiness/evidence/prh-i4-mutation-kill.txt`
 (round 6 section: the I7 falsifiability verification).
+
+### 21.12 PRH-I4-METRICS-1: §8 OTel metrics (workstream J, PRH-2 hardening round)
+
+**Status: IMPLEMENTED (local; pending orchestrator merge).** `PRH-I4-METRICS-1` is NOT closed in
+the registry - the orchestrator closes it at merge (J-4, both security's J-L1 and code review's
+J-4 finding: an ADR/runbook saying "closed" while on an unmerged branch, with reviews only just
+landed, overstates the state). What follows is what is built and tested on branch
+`prh2-j-admission-metrics`, not a registry closure. This is a scoped, additive change -
+`internal/httpserver/webhook_admission.go`'s decision logic is unchanged; every metrics call
+added is a pure side effect recorded strictly AFTER the admission decision was already made and
+(for a rejection) the HTTP response already written, so it cannot influence that decision.
+
+**Reviews received (this round).** `security`: **ACCEPT, no conditions**
+(`docs/plans/prh2-hardening-round/reviews/j-security.md`) - bounded labels, no decision
+influence, no new side channel confirmed; Low findings J-L1 (wording, this section) and J-L2
+(double-counted `admitted`, see the `stage` label below) closed by this fix round; J-L3 (optional
+static closed-enum guard) also closed. `code-reviewer`: **READY WITH CONDITIONS**
+(`docs/plans/prh2-hardening-round/reviews/j-code-review.md`) - J-1 (vacuous failing-exporter
+test), J-2 (MJ2/MJ3 mutant coverage gaps) and J-3 (the `stage` label, same as security's J-L2)
+were Medium findings, all closed by this fix round; J-4 (wording) and J-5 (optional
+`sync.Once` hardening) also closed.
+
+**What is built, versus §8's original text.** §8 as originally written specified
+`webhook_admission_decisions_total{domain, tier, outcome}` plus a separate
+`webhook_admission_verified_rejected_total{domain, provider_key}` and several gauges. The actual
+implementation (`docs/plans/prh2-hardening-round/plan.md` "J — PRH-I4-METRICS-1", which
+superseded that draft label set before code was written) is narrower and stricter:
+
+- **One counter:** `webhook_admission_decisions_total{decision, reason, provider_kind, stage}`
+  (`internal/observability/webhook_admission_metrics.go`). `decision` is the closed 2-value
+  enum `admitted`/`rejected`. `reason` is a closed enum mirroring the existing `tier` values
+  already used by the §8 allow-listed `webhook_admission_rejected` log line
+  (`ip`/`preauth`/`inflight`/`db_gate`/`verified`/`domain_bulkhead`/`directory_unloaded`), plus
+  `admitted` and `panic` (the admission layer's own inner-recover fail-closed path, §6.1/§7/T9).
+  `provider_kind` is the webhook DOMAIN (`payments`/`casino`/`kyc`) - **not** a raw provider id
+  and **not** `webhook_admission_verified_rejected_total`'s originally-specified `provider_key`.
+  This is a deliberate tightening, not an oversight: a self-hosted or bespoke provider
+  integration's id can itself be tenant-identifying, and HD-PRH-1 (per-tenant webhook path
+  confidentiality) is still open - so no provider identifier of any kind is a label here, only
+  the fixed 3-value domain enum. There is consequently no separate
+  `webhook_admission_verified_rejected_total` metric; a verified-tier rejection is fully
+  represented by `webhook_admission_decisions_total{decision="rejected",reason="verified",...}`.
+  **`stage`** (`preauth`/`verified`, added in this fix round - security J-L2 / code review J-3)
+  distinguishes the pre-auth tiers (A2/A3/A4a/A4b) from the verified tiers (B1/B2): a request
+  admitted at both stages (the common case) legitimately records
+  `decision="admitted",reason="admitted"` twice, once per stage - without `stage`, that looked
+  identical to two distinct admitted requests, silently doubling the `admitted` count relative to
+  every (single-stage) rejection reason and skewing any rejection-rate ratio built on this
+  counter. Two values, no cardinality concern.
+- **One gauge (UpDownCounter):** `webhook_admission_inflight{provider_kind}`, tracking exactly
+  the A4a in-flight bulkhead's occupancy - `+1` at the same point the A4a slot is acquired,
+  `-1` folded into the very release func the caller already must invoke exactly once, now wrapped
+  in its own `sync.Once` (J-5) so a double call to that release func can never drive the gauge
+  negative (the underlying A4a slot release was already idempotent; the gauge decrement was not,
+  before this fix). The other §8-drafted gauges (`webhook_db_gate_in_use`,
+  `webhook_limiter_keys{tier}`, `webhook_tenant_directory_size`,
+  `webhook_tenant_directory_age_seconds`) are **NOT IMPLEMENTED** this round - registered as
+  `PRH-I4-METRICS-2` (non-blocking; A4a's in-flight gauge is the one this workstream's DoD
+  required, and the directory/DB-gate/limiter-key gauges were not part of PRH-2's J scope;
+  security's review of this section requires METRICS-2's own gauges stay tier-/domain-labelled
+  only, with their own security review before landing).
+- **No tenant label anywhere**, consistent with §8's original text and HD-PRH-1's still-open
+  status. Enforced not just by review but by a permanent static test (J-L3):
+  `internal/observability/webhook_admission_closed_enum_static_test.go`'s
+  `TestClosedEnum_NoConversionOutsideObservability` fails the build if any package other than
+  `internal/observability` ever converts an arbitrary value to `WebhookAdmissionDecision`/
+  `WebhookAdmissionReason`/`WebhookProviderKind`/`WebhookAdmissionStage` - only this package's own
+  declared constants may be used anywhere else.
+
+**No-op/failing-exporter/panicking-instrument guarantee, corrected (J-1).** Every counter/gauge
+is created once at package-init time via the OTel global (delegating) meter, exactly like
+`internal/alerting/metrics.go`'s existing pattern; its creation error is discarded, leaving a nil
+instrument as a documented no-op safely guarded by a nil check in every `Record*`/`Inc`/`Dec`
+call, and every `Add()` call is wrapped in `safelyRecord`, which swallows any panic so a
+misbehaving instrument can never unwind into the admission layer's own `recover()`. The FIRST
+version of this round's tests tried to prove the "failing exporter" arm of this by calling
+`otel.SetMeterProvider` a second time mid-test-run - `code-reviewer`'s J-1 finding proved this
+was vacuous: OTel's global meter delegate binds permanently to the FIRST `SetMeterProvider` call
+in a process (`TestMain`'s), so the second call had no effect and the "failing" run silently
+recorded into the same reader as the "real" run. The fix,
+`observability.SetWebhookAdmissionInstrumentsForTest` (test-only, substitutes the package's
+instrument variables directly, bypassing the global provider indirection), is what
+`internal/observability/webhook_admission_metrics_test.go` and
+`internal/httpserver/webhook_admission_metrics_test.go` now actually use to prove: nil
+instruments (true no-op), an instrument whose `Add()` always panics, and an instrument whose
+`Add()` is merely slow, all leave admission's HTTP status/body/`release`/`ok` outcomes
+byte-for-byte identical to a real, healthy meter (`TestAdmission_DecisionsIdenticalRegardlessOfMeter`)
+and leave `Record*`/`Inc`/`Dec` themselves side-effect-free toward their caller
+(`TestRecordWebhookAdmissionDecision_NilInstrumentsAreNoOp`/
+`_PanickingInstrumentNeverEscapes`/`_SlowInstrumentStillReturns`/`_FailedReaderInstrumentIsSafe`).
+
+**Coverage, corrected (J-2).** `TestAdmission_MetricsCoverage_AllReasonsBothStages` now exercises
+every `reason` at both stages (not just a sample), each as its own subtest against a
+freshly-scoped, zero-baseline instrument pair, asserting the FULL exercised-combo map is exactly
+right (value 1 at every combo the scenario should have produced, and nothing else present at
+all). This is what actually kills the two mutants the prior round's coverage missed: MJ2
+(`admitVerified` recording `admitted` twice per call - the "verified admitted" subtest would see
+value 2, not 1) and MJ3 (`domain_bulkhead` mis-recorded as `verified` - the "verified
+domain_bulkhead" subtest would be missing its expected combo and have an unexpected one instead).
+Both were re-planted and re-killed as part of this fix round's own verification (mutation
+evidence: orchestrator's diff review of this branch).
+
+**Files:** `internal/observability/webhook_admission_metrics.go`,
+`internal/observability/webhook_admission_metrics_test.go`,
+`internal/observability/webhook_admission_closed_enum_static_test.go` (new, J-L3),
+`internal/httpserver/webhook_admission.go` (`recordDecision`/`webhookProviderKind` helpers, the
+`stage` argument threaded through every call site, the `sync.Once`-wrapped gauge decrement - no
+control-flow change), `internal/httpserver/webhook_admission_metrics_test.go`.
+`docs/runbooks/observability-and-alerting.md` §1/§2 updated to document the `stage` label
+semantics and correct the alert rule's ratio guidance.
+
+**Not done.** `PRH-I4-METRICS-2` (the remaining §8-drafted gauges) - explicitly out of scope,
+registered separately. Orchestrator merge and registry closure - pending; this section is not a
+substitute for that.
