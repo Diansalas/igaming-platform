@@ -494,7 +494,7 @@ func TestA7_3_DeferredReceiptAppliedVsFreshCallback_SameAttempt(t *testing.T) {
 	f := seedOrchFixture(t, pool)
 	provider := NewMockProvider("a7-3", "EUR")
 	registerCapability(t, pool, f, provider, 100)
-	orch := NewOrchestrator(map[string]PaymentProvider{"a7-3": provider}, MultiWebhookCredentialResolver{"a7-3": NewMockWebhookCredentials(provider)})
+	orch := NewOrchestrator(map[string]PaymentProvider{"a7-3": &refLessAmbiguousProvider{provider}}, MultiWebhookCredentialResolver{"a7-3": NewMockWebhookCredentials(provider)})
 
 	res, err := orch.InitiateDepositAttempt(context.Background(), pool, AllowAllDepositKYCGate{}, MockCredentialResolver{}, InitiateDepositParams{
 		Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},

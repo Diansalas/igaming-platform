@@ -151,6 +151,13 @@ type invDep1Setup struct {
 
 func newInvDep1Setup(t *testing.T, providerAID, providerBID string) invDep1Setup {
 	t.Helper()
+	return newInvDep1SetupWith(t, providerAID, providerBID, false)
+}
+
+// newInvDep1SetupWith: refLessA wraps provider A so its Ambiguous result carries
+// no reference (a real timeout), see refLessAmbiguousProvider.
+func newInvDep1SetupWith(t *testing.T, providerAID, providerBID string, refLessA bool) invDep1Setup {
+	t.Helper()
 	pool := depositV2ScratchPool(t)
 	f := seedOrchFixture(t, pool)
 	pa := NewMockProvider(providerAID, "EUR")
@@ -158,7 +165,11 @@ func newInvDep1Setup(t *testing.T, providerAID, providerBID string) invDep1Setup
 	pb.AcceptAllAmounts = true
 	registerCapability(t, pool, f, pa, 100)
 	registerCapability(t, pool, f, pb, 200)
-	orch := NewOrchestrator(map[string]PaymentProvider{providerAID: pa, providerBID: pb},
+	var aProv PaymentProvider = pa
+	if refLessA {
+		aProv = &refLessAmbiguousProvider{pa}
+	}
+	orch := NewOrchestrator(map[string]PaymentProvider{providerAID: aProv, providerBID: pb},
 		MultiWebhookCredentialResolver{providerAID: NewMockWebhookCredentials(pa), providerBID: NewMockWebhookCredentials(pb)})
 	return invDep1Setup{pool: pool, f: f, pa: pa, pb: pb, orch: orch}
 }
@@ -767,7 +778,7 @@ func TestINVDEP1_H_ThreeDistinctReferences_AllButFirstDisputed(t *testing.T) {
 // ---------------------------------------------------------------------
 
 func TestINVDEP1_I_TimeoutThenFallbackThenLateOriginal(t *testing.T) {
-	s := newInvDep1Setup(t, "invdep1-i-orig", "invdep1-i-fb")
+	s := newInvDep1SetupWith(t, "invdep1-i-orig", "invdep1-i-fb", true)
 	res, err := s.orch.InitiateDepositAttempt(context.Background(), s.pool, AllowAllDepositKYCGate{}, MockCredentialResolver{}, InitiateDepositParams{
 		Scope:     DepositScope{TenantID: s.f.tenantID, BrandID: s.f.brandID, PlayerAccountID: s.f.playerAccountID, WalletID: s.f.walletID},
 		AssetCode: "EUR", Amount: MockAmountAmbiguous, PaymentMethod: "card", IdempotencyKey: "invdep1-i",

@@ -906,3 +906,18 @@ func TestDepSyncAmount_MismatchPark_BindsReferenceAndAuditsAdapterOutcome(t *tes
 		t.Errorf("audit adapter_outcome=%q, want succeeded", got)
 	}
 }
+
+// refLessAmbiguousProvider models a REAL timeout: an Ambiguous deposit result
+// carries no provider reference (the MOCK's ambiguous amount returns one). Used
+// by fixtures whose premise is "the attempt is ambiguous and its reference is
+// not known yet". PRH-2 C binds a returned reference on T6 (LF F-C1), so those
+// fixtures must not hand the orchestrator a reference they claim is unknown.
+type refLessAmbiguousProvider struct{ *MockProvider }
+
+func (p *refLessAmbiguousProvider) Deposit(ctx context.Context, req DepositRequest) (DepositResult, error) {
+	res, err := p.MockProvider.Deposit(ctx, req)
+	if err == nil && res.Outcome == OutcomeAmbiguous {
+		res.ProviderReference = ""
+	}
+	return res, err
+}
