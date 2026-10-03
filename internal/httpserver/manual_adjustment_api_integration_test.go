@@ -9,6 +9,7 @@ package httpserver
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -355,5 +356,82 @@ func TestManualAdjustmentAPI_A12_AuditContent(t *testing.T) {
 			AND tenant_id IS NULL AND subject_tenant_id = $2`, w.actingNoGrant, w.tenant).Scan(&denied)
 	}); err != nil || denied != 1 {
 		t.Fatalf("denied audit row for the no-grant platform principal: n=%d err=%v", denied, err)
+	}
+}
+
+// Code review R-2: a decision on a request already past expires_at commits
+// the pending -> expired transition and its audit row, records NO decision,
+// and answers 409 "request expired" (never 200 {executed:false}).
+func TestManualAdjustmentAPI_K2R2_ExpiredDecisionIs409(t *testing.T) {
+	w := newMAWorld(t)
+	base := "/v1/admin/tenants/" + w.tenant.String() + "/manual-adjustments"
+	st, d := w.submit(w.f1)
+	if st != http.StatusCreated {
+		t.Fatalf("submit: %d", st)
+	}
+	// Scratch DB only: move expires_at into the past with the immutability
+	// guard disabled inside ONE transaction (ALTER TABLE is transactional,
+	// so no other session ever sees the guard off).
+	if err := w.a.pool.WithPrincipalScope(context.Background(), w.tenant, w.f1, func(ctx context.Context, tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `ALTER TABLE ledger_adjustment_requests DISABLE TRIGGER ledger_adjustment_requests_guard`); err != nil {
+			return err
+		}
+		tag, err := tx.Exec(ctx, `UPDATE ledger_adjustment_requests SET expires_at = now() - interval '1 minute' WHERE id = $1`, d.ID)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() != 1 {
+			return fmt.Errorf("backdate touched %d rows", tag.RowsAffected())
+		}
+		if _, err := tx.Exec(ctx, `SET CONSTRAINTS ALL IMMEDIATE`); err != nil {
+			return err
+		}
+		_, err = tx.Exec(ctx, `ALTER TABLE ledger_adjustment_requests ENABLE TRIGGER ledger_adjustment_requests_guard`)
+		return err
+	}); err != nil {
+		t.Fatalf("backdate expires_at (scratch): %v", err)
+	}
+	res := w.a.do("POST", base+"/"+d.ID+"/approve", w.tok(w.f2), map[string]any{"payload_hash": d.PayloadHash, "reason_code": "ok"})
+	if res.status != http.StatusConflict || !strings.Contains(string(res.body), "request expired") {
+		t.Fatalf("decision on an expired request: want 409 \"request expired\", got %d %s", res.status, res.body)
+	}
+	var state string
+	var expiredRows, approvals int
+	if err := w.a.pool.WithPrincipalScope(context.Background(), w.tenant, w.f1, func(ctx context.Context, tx pgx.Tx) error {
+		if err := tx.QueryRow(ctx, `SELECT state FROM ledger_adjustment_requests WHERE id = $1`, d.ID).Scan(&state); err != nil {
+			return err
+		}
+		if err := tx.QueryRow(ctx, `SELECT count(*) FROM audit_log WHERE target_id = $1 AND action = 'ledger_adjustment.expired'`, d.ID).Scan(&expiredRows); err != nil {
+			return err
+		}
+		return tx.QueryRow(ctx, `SELECT count(*) FROM ledger_adjustment_approvals WHERE request_id = $1`, d.ID).Scan(&approvals)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if state != "expired" || expiredRows != 1 || approvals != 0 {
+		t.Fatalf("after expiry: state=%s expired-audit-rows=%d approvals=%d (want expired, 1, 0)", state, expiredRows, approvals)
+	}
+}
+
+// Code review R-3: a DB payload-rule refusal (MA022 here: goodwill_credit
+// as a debit) is a 400 carrying only the closed refusal token, with a
+// denied audit row; never a 409 "conflict" and never DB message text.
+func TestManualAdjustmentAPI_K2R3_PayloadRuleRefusalIs400WithToken(t *testing.T) {
+	w := newMAWorld(t)
+	res := w.a.do("POST", "/v1/admin/tenants/"+w.tenant.String()+"/manual-adjustments", w.tok(w.f1), map[string]any{
+		"wallet_id": w.wallet.String(), "asset_code": "USD", "direction": "debit_player", "amount_minor_units": "5",
+		"reason_code": "goodwill_credit", "note": "r3",
+	})
+	if res.status != http.StatusBadRequest || !strings.Contains(string(res.body), "direction_not_allowed_for_reason") {
+		t.Fatalf("goodwill debit: want 400 with the closed token, got %d %s", res.status, res.body)
+	}
+	if strings.Contains(string(res.body), "ledger_adjustment_requests") {
+		t.Fatalf("DB message text leaked: %s", res.body)
+	}
+	var denied int
+	if err := w.a.pool.WithTenant(context.Background(), w.tenant, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT count(*) FROM audit_log WHERE action = 'ledger_adjustment.submit' AND outcome = 'denied' AND actor_id = $1`, w.f1).Scan(&denied)
+	}); err != nil || denied != 1 {
+		t.Fatalf("denied audit row: n=%d err=%v", denied, err)
 	}
 }

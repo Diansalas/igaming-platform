@@ -1039,6 +1039,17 @@ BEGIN
     IF NEW.state IN ('executed', 'refused_insufficient_funds', 'refused_at_execution', 'rejected', 'cancelled', 'expired') THEN
         NEW.closed_at := now();
     END IF;
+    -- Security K2-C1 (i): every NON-executed exit refuses while a ledger
+    -- transaction carrying this request's governed key exists (in any
+    -- state the session can see, including one posted earlier in this very
+    -- transaction). Only the executed exit may leave a posting behind, and
+    -- that exit runs ledger_adjustment_verify_link.
+    IF NEW.state IN ('refused_insufficient_funds', 'refused_at_execution', 'rejected', 'cancelled', 'expired')
+       AND EXISTS (SELECT 1 FROM ledger_transactions t
+                    WHERE t.tenant_id = OLD.tenant_id AND t.idempotency_key = 'manual_adjustment:' || OLD.id::text) THEN
+        RAISE EXCEPTION 'ledger_adjustment_requests: % refused - a ledger transaction with this request''s governed key exists', NEW.state
+            USING ERRCODE = 'MA040';
+    END IF;
 
     IF OLD.state = 'pending' AND NEW.state = 'cancelled' THEN
         IF v_actor.actor IS DISTINCT FROM OLD.initiated_by THEN
@@ -1441,9 +1452,21 @@ CREATE TRIGGER ledger_transactions_governed_fence
 
 -- Entries can never be appended to a pre-existing (or non-governed)
 -- transaction by an acting session: the parent must pass the same fence.
+-- Security K2-C1 (ii): and EACH acting-inserted entry must be one leg of
+-- the executing request's closed §4 shape - the request wallet's
+-- player_cash in the player direction, or the tenant's manual_adjustment
+-- house account (wallet_id IS NULL) in the opposite direction - in the
+-- request's asset and amount; at most one leg per direction and at most
+-- two entries per linked transaction. (Rows inserted earlier by the same
+-- INSERT statement are visible here: row-level BEFORE triggers see the
+-- outer command's previously processed rows.)
 CREATE FUNCTION ledger_entries_governed_fence() RETURNS TRIGGER AS $$
 DECLARE
-    v_tx RECORD;
+    v_tx          RECORD;
+    v_req         RECORD;
+    v_acct        RECORD;
+    v_player_dir  text;
+    v_house_dir   text;
 BEGIN
     IF financial_acting_gucs_present() THEN
         SELECT t.tenant_id, t.transaction_type, t.idempotency_key, t.correlation_id, t.provider_id, t.provider_tx_id INTO v_tx
@@ -1451,6 +1474,30 @@ BEGIN
         IF NOT FOUND OR NOT ledger_governed_fence_allows(v_tx.tenant_id, v_tx.transaction_type, v_tx.idempotency_key, v_tx.correlation_id,
                                                          v_tx.provider_id, v_tx.provider_tx_id) THEN
             RAISE EXCEPTION 'ledger_entries_governed_fence: an acting session may add entries only to a governed, executing request''s transaction' USING ERRCODE = 'CG030';
+        END IF;
+        SELECT r.wallet_id, r.asset_code, r.amount, r.direction INTO v_req
+          FROM ledger_adjustment_requests r
+         WHERE r.id = v_tx.correlation_id AND r.tenant_id = v_tx.tenant_id
+           AND v_tx.idempotency_key = 'manual_adjustment:' || r.id::text;
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'ledger_entries_governed_fence: governed request not found' USING ERRCODE = 'CG030';
+        END IF;
+        v_player_dir := CASE WHEN v_req.direction = 'credit_player' THEN 'credit' ELSE 'debit' END;
+        v_house_dir  := CASE WHEN v_req.direction = 'credit_player' THEN 'debit' ELSE 'credit' END;
+        SELECT la.account_type, la.wallet_id INTO v_acct
+          FROM ledger_accounts la WHERE la.id = NEW.ledger_account_id AND la.tenant_id = NEW.tenant_id;
+        IF NOT FOUND
+           OR NEW.asset_code IS DISTINCT FROM v_req.asset_code
+           OR NEW.amount IS DISTINCT FROM v_req.amount
+           OR NOT ((v_acct.account_type = 'player_cash' AND v_acct.wallet_id = v_req.wallet_id AND NEW.direction = v_player_dir)
+                OR (v_acct.account_type = 'manual_adjustment' AND v_acct.wallet_id IS NULL AND NEW.direction = v_house_dir)) THEN
+            RAISE EXCEPTION 'ledger_entries_governed_fence: the entry is not a leg of the approved §4 shape (account, asset, amount or direction)' USING ERRCODE = 'CG030';
+        END IF;
+        IF EXISTS (SELECT 1 FROM ledger_entries e
+                    WHERE e.ledger_transaction_id = NEW.ledger_transaction_id
+                      AND (e.direction = NEW.direction
+                           OR (SELECT count(*) FROM ledger_entries e2 WHERE e2.ledger_transaction_id = NEW.ledger_transaction_id) >= 2)) THEN
+            RAISE EXCEPTION 'ledger_entries_governed_fence: the linked transaction already holds this leg (at most two entries, one per direction)' USING ERRCODE = 'CG030';
         END IF;
     END IF;
     RETURN NEW;

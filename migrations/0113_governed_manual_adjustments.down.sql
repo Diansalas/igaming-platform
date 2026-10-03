@@ -1,3 +1,8 @@
+-- MUST RUN INSIDE A SINGLE TRANSACTION (db.MigrateDown does this). Run by
+-- hand under psql autocommit, a MA099 refusal below would leave FORCE ROW
+-- LEVEL SECURITY lifted for the owner on the checked tables. By hand, use
+-- `psql --single-transaction -v ON_ERROR_STOP=1 -f <this file>`.
+--
 -- Reverses 0113 (ADR 0100 §10.9). Refuses (MA099) while any row exists in
 -- the requests, approvals, policies, policy changes or profile tables, or
 -- while any ledger_unlinked_manual_adjustment mismatch exists - so once a

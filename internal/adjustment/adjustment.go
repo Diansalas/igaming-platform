@@ -26,6 +26,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -86,6 +87,10 @@ var (
 	ErrNotFound = errors.New("adjustment: not found")
 	// ErrNotPending: the request is no longer pending.
 	ErrNotPending = errors.New("adjustment: request is not pending")
+	// ErrRequestExpired: the request was past expires_at when a decision
+	// arrived. The pending -> expired transition and its audit row ARE
+	// committed; the decision is not recorded (code review R-2).
+	ErrRequestExpired = errors.New("adjustment: request expired")
 	// ErrInvalidInput: a request failed Go-side validation before any SQL.
 	ErrInvalidInput = errors.New("adjustment: invalid input")
 	// ErrNoAuthContext: no verified token subject in ctx.
@@ -190,7 +195,16 @@ const (
 	ErrClassDisabled       ErrClass = "disabled"
 	ErrClassExposure       ErrClass = "open_payment_exposure"
 	ErrClassSessionInvalid ErrClass = "session_invalid"
-	ErrClassOther          ErrClass = "other"
+	// ErrClassRefusedInvalid: a DB payload-rule refusal (MA021 asset rule,
+	// MA022 reason-code rule, MA025 note) - a 400 with the closed token
+	// from RefusalToken (code review R-3).
+	ErrClassRefusedInvalid ErrClass = "validation_refused"
+	// ErrClassExpired: ErrRequestExpired (code review R-2) - a 409.
+	ErrClassExpired ErrClass = "expired"
+	// ErrClassRetryable: a serialization failure or deadlock (40001,
+	// 40P01) - a retryable 409, never a 500 (code review R-3).
+	ErrClassRetryable ErrClass = "retryable"
+	ErrClassOther     ErrClass = "other"
 )
 
 // SQLState returns err's SQLSTATE, or "".
@@ -214,6 +228,8 @@ func ClassifyError(err error) ErrClass {
 		return ErrClassForbidden
 	case errors.Is(err, ErrNotPending):
 		return ErrClassConflict
+	case errors.Is(err, ErrRequestExpired):
+		return ErrClassExpired
 	case errors.Is(err, ErrInvalidInput):
 		return ErrClassInvalid
 	}
@@ -221,6 +237,10 @@ func ClassifyError(err error) ErrClass {
 	switch {
 	case code == "MA014":
 		return ErrClassDisabled
+	case code == "MA021", code == "MA022", code == "MA025":
+		return ErrClassRefusedInvalid
+	case code == "40001", code == "40P01":
+		return ErrClassRetryable
 	case code == "MA020":
 		return ErrClassExposure
 	case code == "MA001", code == "MA003", code == "42501":
@@ -233,4 +253,40 @@ func ClassifyError(err error) ErrClass {
 		return ErrClassInvalid
 	}
 	return ErrClassOther
+}
+
+// refusalTokens is the CLOSED set of payload-rule refusal tokens migration
+// 0113 emits (ledger_adjustment_payload_refusal's 'SQLSTATE:token' values,
+// raised as "...: refused: <token>"). Only a token in this set is ever
+// exposed to a client; anything else maps to its code's generic token.
+var refusalTokens = map[string]bool{
+	"unknown_reason_code": true, "direction_not_allowed_for_reason": true,
+	"wallet_not_found": true, "asset_mismatch": true, "asset_suspended": true,
+	"evidence_required": true, "causation_forbidden": true, "causation_required": true,
+	"causation_not_found": true, "causation_type_refused": true, "causation_not_on_wallet": true,
+	"compensation_cap_exceeded": true,
+}
+
+// RefusalToken returns the closed, client-safe refusal token for an
+// ErrClassRefusedInvalid error: the split_part token when it is in the
+// closed set, else a generic per-code token. Never message text.
+func RefusalToken(err error) string {
+	code := SQLState(err)
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		if i := strings.LastIndex(pgErr.Message, "refused: "); i >= 0 {
+			if tok := pgErr.Message[i+len("refused: "):]; refusalTokens[tok] {
+				return tok
+			}
+		}
+	}
+	switch code {
+	case "MA021":
+		return "asset_rule"
+	case "MA022":
+		return "reason_code_rule"
+	case "MA025":
+		return "note_invalid"
+	}
+	return "invalid"
 }

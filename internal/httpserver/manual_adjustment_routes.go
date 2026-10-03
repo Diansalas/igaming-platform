@@ -186,6 +186,23 @@ func writeAdjustmentError(ctx context.Context, deps Deps, w http.ResponseWriter,
 	case adjustment.ErrClassExposure:
 		recordAdjustmentDenied(ctx, deps, c, op, string(class))
 		apierror.Write(w, c.requestID, apierror.CodeConflict, "open_payment_exposure")
+	case adjustment.ErrClassRefusedInvalid:
+		// MA021/MA022/MA025 (code review R-3): a 400 carrying only the
+		// closed refusal token, never DB message text.
+		tok := adjustment.RefusalToken(err)
+		c.logger.Warn("ledger_adjustment_refused", "op", op, "class", string(class), "sqlstate", adjustment.SQLState(err), "token", tok)
+		recordAdjustmentDenied(ctx, deps, c, op, string(class)+":"+adjustment.SQLState(err)+":"+tok)
+		apierror.Write(w, c.requestID, apierror.CodeValidation, tok)
+	case adjustment.ErrClassExpired:
+		// Code review R-2: the expiry transition and its audit row are
+		// committed; the decision was not taken.
+		recordAdjustmentDenied(ctx, deps, c, op, string(class))
+		apierror.Write(w, c.requestID, apierror.CodeConflict, "request expired")
+	case adjustment.ErrClassRetryable:
+		// 40001/40P01 (code review R-3): nothing committed; safe to retry.
+		c.logger.Warn("ledger_adjustment_retryable", "op", op, "sqlstate", adjustment.SQLState(err))
+		recordAdjustmentDenied(ctx, deps, c, op, string(class)+":"+adjustment.SQLState(err))
+		apierror.Write(w, c.requestID, apierror.CodeConflict, "transient conflict; retry")
 	case adjustment.ErrClassConflict:
 		c.logger.Warn("ledger_adjustment_refused", "op", op, "class", string(class), "sqlstate", adjustment.SQLState(err))
 		recordAdjustmentDenied(ctx, deps, c, op, string(class)+":"+adjustment.SQLState(err))

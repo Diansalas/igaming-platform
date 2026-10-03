@@ -205,6 +205,187 @@ func a18IsGuarded(stmt string) bool {
 		a18ActingFamilyGuard.MatchString(stmt)
 }
 
+// --- structural guard check (security K2 review, Low: OR-ed guards) ---
+//
+// A positive guard anywhere in the statement is NOT enough: in
+// "tenant_id IS NULL OR <guard>" the NULL arm is a free disjunct. The rule
+// is evaluated per policy clause (USING, WITH CHECK) over the boolean
+// structure at parenthesis depth 0 of each sub-expression:
+//   - a disjunction (A OR B ...) is exposed if ANY disjunct is exposed;
+//   - a conjunction (A AND B ...) is exposed only if NO conjunct is a guard
+//     and some conjunct is exposed;
+//   - a guard expression is a guard leaf, a conjunction with a guard
+//     conjunct, or a disjunction whose EVERY disjunct is a guard;
+//   - a leaf (no top-level AND/OR) is exposed if it is the bare literal
+//     "true" or contains a bare NULL arm without a positive guard of its own
+//     (the old lexical rule, now applied only within one leaf).
+
+// a18SplitTop splits expr at depth-0 occurrences of the keyword kw
+// (case-insensitive, word-bounded), ignoring text inside parentheses and
+// single-quoted strings. It returns the original expr as the single part
+// when kw does not occur at depth 0.
+func a18SplitTop(expr, kw string) []string {
+	var parts []string
+	depth, start := 0, 0
+	inStr := false
+	up := strings.ToUpper(expr)
+	isWord := func(b byte) bool {
+		return b == '_' || (b >= '0' && b <= '9') || (b >= 'A' && b <= 'Z') || (b >= 'a' && b <= 'z')
+	}
+	for i := 0; i < len(expr); i++ {
+		c := expr[i]
+		switch {
+		case inStr:
+			if c == '\'' {
+				inStr = false
+			}
+		case c == '\'':
+			inStr = true
+		case c == '(':
+			depth++
+		case c == ')':
+			depth--
+		case depth == 0 && strings.HasPrefix(up[i:], kw) &&
+			(i == 0 || !isWord(expr[i-1])) && (i+len(kw) >= len(expr) || !isWord(expr[i+len(kw)])):
+			parts = append(parts, expr[start:i])
+			start = i + len(kw)
+			i += len(kw) - 1
+		}
+	}
+	return append(parts, expr[start:])
+}
+
+// a18StripParens removes whitespace and any parentheses wrapping the WHOLE
+// expression.
+func a18StripParens(expr string) string {
+	for {
+		e := strings.TrimSpace(expr)
+		if len(e) < 2 || e[0] != '(' || e[len(e)-1] != ')' {
+			return e
+		}
+		depth := 0
+		wraps := true
+		for i := 0; i < len(e); i++ {
+			if e[i] == '(' {
+				depth++
+			} else if e[i] == ')' {
+				depth--
+				if depth == 0 && i != len(e)-1 {
+					wraps = false
+					break
+				}
+			}
+		}
+		if !wraps {
+			return e
+		}
+		expr = e[1 : len(e)-1]
+	}
+}
+
+func a18ExprIsGuard(expr string) bool {
+	e := a18StripParens(expr)
+	if ors := a18SplitTop(e, "OR"); len(ors) > 1 {
+		for _, p := range ors {
+			if !a18ExprIsGuard(p) {
+				return false
+			}
+		}
+		return true
+	}
+	if ands := a18SplitTop(e, "AND"); len(ands) > 1 {
+		for _, p := range ands {
+			if a18ExprIsGuard(p) {
+				return true
+			}
+		}
+		return false
+	}
+	return a18IsGuarded(e) && !a18BareTenantNullArm.MatchString(e)
+}
+
+func a18ExprExposed(expr string) bool {
+	e := a18StripParens(expr)
+	if ors := a18SplitTop(e, "OR"); len(ors) > 1 {
+		for _, p := range ors {
+			if a18ExprExposed(p) {
+				return true
+			}
+		}
+		return false
+	}
+	if ands := a18SplitTop(e, "AND"); len(ands) > 1 {
+		for _, p := range ands {
+			if a18ExprIsGuard(p) {
+				return false
+			}
+		}
+		for _, p := range ands {
+			if a18ExprExposed(p) {
+				return true
+			}
+		}
+		return false
+	}
+	if strings.EqualFold(e, "true") {
+		return true
+	}
+	return a18BareTenantNullArm.MatchString(e) && !a18IsGuarded(e)
+}
+
+var (
+	a18ClauseStart = regexp.MustCompile(`(?i)\b(USING|WITH\s+CHECK)\s*\(`)
+	a18LineComment = regexp.MustCompile(`--[^\n]*`)
+)
+
+// a18Clauses returns the parenthesized bodies of the policy's USING and
+// WITH CHECK clauses.
+func a18Clauses(stmt string) []string {
+	var out []string
+	for _, loc := range a18ClauseStart.FindAllStringIndex(stmt, -1) {
+		open := loc[1] - 1
+		depth := 0
+		inStr := false
+		for i := open; i < len(stmt); i++ {
+			c := stmt[i]
+			if inStr {
+				if c == '\'' {
+					inStr = false
+				}
+				continue
+			}
+			if c == '\'' {
+				inStr = true
+			} else if c == '(' {
+				depth++
+			} else if c == ')' {
+				depth--
+				if depth == 0 {
+					out = append(out, stmt[open+1:i])
+					break
+				}
+			}
+		}
+	}
+	return out
+}
+
+// a18StructurallyExposed reports whether any clause of the policy leaves a
+// NULL/true arm reachable without a conjoined positive guard. A statement
+// whose clauses cannot be extracted falls back to "exposed" (fail closed).
+func a18StructurallyExposed(stmt string) bool {
+	clauses := a18Clauses(a18LineComment.ReplaceAllString(stmt, ""))
+	if len(clauses) == 0 {
+		return true
+	}
+	for _, c := range clauses {
+		if a18ExprExposed(c) {
+			return true
+		}
+	}
+	return false
+}
+
 // a18Flagged is the single classification rule both the real guard and
 // the planted scenarios use.
 func a18Flagged(pol a18Policy) bool { return a18FlaggedWith(pol, true) }
@@ -218,7 +399,7 @@ func a18FlaggedWith(pol a18Policy, exemptAdditional bool) bool {
 	if pol.restrictive {
 		return false // a fence itself, not an exposure
 	}
-	if !a18HasExposure(pol.body) || a18IsGuarded(pol.body) {
+	if !a18HasExposure(pol.body) || !a18StructurallyExposed(pol.body) {
 		return false
 	}
 	if pol.command == "SELECT" && (a18SelectAllowlist[pol.table] || (exemptAdditional && a18AdditionallyFencedTables[pol.table])) {
@@ -719,5 +900,55 @@ CREATE POLICY regressed ON new_widget_table FOR ALL USING (tenant_id IS NULL);`,
 	)
 	if len(v) != 1 || v[0].name != "regressed" {
 		t.Fatalf("expected exactly one flagged violation (the guard was regressed away), got %v", v)
+	}
+}
+
+// Security K2 review (Low): an OR-ed guard is not a guard. The NULL arm is
+// a free disjunct in "tenant_id IS NULL OR <positive guard>", so it must be
+// flagged even though a positive guard occurs in the statement - the
+// lexical rule a18IsGuarded alone accepted this shape.
+func TestA18_K2Low_OrEdGuard_Flagged(t *testing.T) {
+	src := `
+CREATE POLICY or_guarded ON new_widget_table
+    FOR ALL
+    USING (
+        tenant_id IS NULL
+        OR NULLIF(current_setting('app.platform_admin_principal_id', true), '') IS NOT NULL
+    );
+CREATE POLICY or_guarded_nested ON other_widget_table
+    FOR INSERT
+    WITH CHECK (
+        (tenant_id IS NULL OR financial_acting_session_valid())
+        AND status = 'x'
+    );
+`
+	if !a18IsGuarded(src) {
+		t.Fatal("precondition: the lexical guard regex must match this statement (otherwise the plant proves nothing)")
+	}
+	v := a18Scenario(src)
+	if len(v) != 2 {
+		t.Fatalf("expected both OR-ed-guard policies flagged, got %v", v)
+	}
+}
+
+// The structural rule still accepts a guard conjoined at any depth, and a
+// disjunction in which EVERY disjunct is separately guarded.
+func TestA18_K2Low_ConjoinedGuards_NotFlagged(t *testing.T) {
+	v := a18Scenario(`
+CREATE POLICY nested_and ON new_widget_table
+    FOR ALL
+    USING (
+        (tenant_id IS NULL AND (status = 'x' OR status = 'y'))
+        AND NULLIF(current_setting('app.platform_admin_principal_id', true), '') IS NOT NULL
+    );
+CREATE POLICY each_disjunct_guarded ON other_widget_table
+    FOR ALL
+    USING (
+        (tenant_id IS NULL AND NULLIF(current_setting('app.platform_service_id', true), '') = 'w')
+        OR (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
+    );
+`)
+	if len(v) != 0 {
+		t.Fatalf("expected no violations for conjoined guards, got %v", v)
 	}
 }

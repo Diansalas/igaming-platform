@@ -34,19 +34,54 @@ func ignoringUnlinkedFixtureAdjustments(ms []Mismatch) []Mismatch {
 	return out
 }
 
-// runCleanExceptUnlinkedFixtures reports whether run's only mismatches (if
-// any) are ledger_unlinked_manual_adjustment rows.
-func runCleanExceptUnlinkedFixtures(t *testing.T, pool *db.Pool, tenantID uuid.UUID, run Run) bool {
-	t.Helper()
-	if run.Status == StatusClean {
-		return true
+// cleanExceptUnlinkedFixtures decides IN MEMORY, from the run and the
+// mismatches the same call returned (code review R-4: no re-read in a new
+// transaction, which could pass vacuously): a clean run must carry no
+// mismatches; a non-clean run must carry at least one, every one of them
+// belonging to this run and of kind ledger_unlinked_manual_adjustment.
+func cleanExceptUnlinkedFixtures(run Run, ms []Mismatch) bool {
+	if run.ID == uuid.Nil {
+		return false
 	}
-	var other int
+	if run.Status == StatusClean {
+		return len(ms) == 0
+	}
+	if len(ms) == 0 {
+		return false
+	}
+	for _, m := range ms {
+		if m.RunID != run.ID || m.MismatchKind != MismatchKindLedgerUnlinkedManualAdjustment {
+			return false
+		}
+	}
+	return true
+}
+
+// persistedCleanExceptUnlinkedFixtures is for callers that only hold the
+// Run (RunSweepTenants returns no mismatches). It reads EVERY persisted
+// mismatch row of the run and then applies the same in-memory rule, so a
+// non-clean run whose rows the read cannot see fails (never vacuous).
+func persistedCleanExceptUnlinkedFixtures(t *testing.T, pool *db.Pool, tenantID uuid.UUID, run Run) bool {
+	t.Helper()
+	var ms []Mismatch
 	if err := pool.WithTenant(context.Background(), tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		return tx.QueryRow(ctx, `SELECT count(*) FROM reconciliation_mismatches
-			WHERE reconciliation_run_id = $1 AND mismatch_kind <> 'ledger_unlinked_manual_adjustment'`, run.ID).Scan(&other)
+		rows, err := tx.Query(ctx, `SELECT reconciliation_run_id, mismatch_kind FROM reconciliation_mismatches WHERE reconciliation_run_id = $1`, run.ID)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var m Mismatch
+			var kind string
+			if err := rows.Scan(&m.RunID, &kind); err != nil {
+				return err
+			}
+			m.MismatchKind = MismatchKind(kind)
+			ms = append(ms, m)
+		}
+		return rows.Err()
 	}); err != nil {
 		t.Fatalf("read run mismatches: %v", err)
 	}
-	return other == 0
+	return cleanExceptUnlinkedFixtures(run, ms)
 }

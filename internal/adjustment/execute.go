@@ -36,6 +36,11 @@ type Outcome struct {
 	// Counted/Required describe the approval count after this decision.
 	Counted  int
 	Required int
+	// Expired is true when the request was found past expires_at: the
+	// pending -> expired transition and its audit row are committed, NO
+	// decision is recorded, and Service.Decide returns ErrRequestExpired
+	// (code review R-2: never a 200 for a decision that was not taken).
+	Expired bool
 }
 
 // executionStatus is migration 0113's ledger_adjustment_execution_status():
@@ -108,7 +113,7 @@ func DecideInTx(ctx context.Context, tx pgx.Tx, call Call, requestID uuid.UUID, 
 			return Outcome{}, err
 		}
 		before := req.State
-		return Outcome{Request: after}, recordAudit(ctx, tx, call, "ledger_adjustment.expired", after, &before, nil)
+		return Outcome{Request: after, Expired: true}, recordAudit(ctx, tx, call, "ledger_adjustment.expired", after, &before, nil)
 	}
 
 	// Step 2 - the approval insert (migration 0113 triggers: payload hash,
@@ -378,5 +383,10 @@ func (s *Service) Decide(ctx context.Context, target Target, requestID uuid.UUID
 		out, err = DecideInTx(ctx, tx, call, requestID, in)
 		return err
 	})
+	if err == nil && out.Expired {
+		// The expiry transition and its audit are committed; the caller's
+		// decision was not taken.
+		return out, ErrRequestExpired
+	}
 	return out, err
 }

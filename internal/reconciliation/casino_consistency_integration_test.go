@@ -333,11 +333,12 @@ func TestCasinoConsistency_CleanWorldReconcilesToZero(t *testing.T) {
 	}
 	// ledger_vs_projection is unaffected.
 	var run Run
+	var lvp []Mismatch
 	if err := pool.WithTenant(context.Background(), w.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		run, _, err = RunLedgerVsProjection(ctx, tx, w.f.tenantID, time.Now().Add(-time.Hour), time.Now())
+		run, lvp, err = RunLedgerVsProjection(ctx, tx, w.f.tenantID, time.Now().Add(-time.Hour), time.Now())
 		return err
-	}); err != nil || !runCleanExceptUnlinkedFixtures(t, pool, w.f.tenantID, run) {
+	}); err != nil || !cleanExceptUnlinkedFixtures(run, lvp) {
 		t.Fatalf("ledger_vs_projection must be clean (fixture-funding ledger_unlinked_manual_adjustment rows excepted, ADR 0100 §12): %s %v", run.Status, err)
 	}
 }
