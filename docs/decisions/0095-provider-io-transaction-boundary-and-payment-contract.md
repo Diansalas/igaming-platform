@@ -6457,12 +6457,23 @@ the attempt **by merchant reference**. Such a `deposit` line with status `succee
 `pay_captured_unposted` in-run, whatever outcome the adapter originally reported (security C-1). The
 rule is not gated on *how* the line resolved: should such an attempt ever hold a reference, a
 succeeded line naming it is the same exposure and stays loud. The clearing signals are read on the
-**line's** reference. The detail text says
-"M1 only acknowledges" (ADR 0101 F13 wording).
+**line's** reference. At all three sites (bound in-run, bound standing, unbound in-run) the detail
+text uses the ADR 0101 F13 wording: "a PSP-initiated reversal/tombstone, or allocation
+(LEDGER-SUSPENSE-B-1); M1 only acknowledges" (D2 review P2).
 
-- A conflict bound to **another deposit attempt**: the line resolves by reference to the holder; a
-  second `succeeded` line for the same reference raises `pay_duplicate` (`check=duplicate_line`),
-  reported once. Verified by test; no code change.
+- A conflict bound to **another deposit attempt**: any line with that reference resolves **by
+  reference to the holder**, never to the parked attempt.
+  - **Two lines** for the same reference (e.g. the holder's capture and the parked attempt's): the
+    second raises `pay_duplicate` (`check=duplicate_line`), reported once. Verified by test; no code
+    change.
+  - **One line** (reference R, merchant reference naming the **parked** attempt): **silent today.**
+    The line matches the holder by reference; if the holder is `succeeded` with its posting, the run
+    reports nothing, and the parked attempt is not flagged (D2 code review D2-1; the reviewer's probe
+    found 0 mismatches). The merchant reference contradicting the reference-resolved attempt is not
+    checked: `pay_reference_mismatch` fires only on merchant-resolved lines. Whether a
+    reference-resolved line whose merchant reference names a different attempt should raise
+    `pay_reference_mismatch`, and whether in D2 or a follow-up, is pending a ledger-finance ruling;
+    the matcher is unchanged until then.
 - An **invalid reference** on a statement line is refused at fetch (`validatePaymentLine`): the run
   fails, nothing is stored, and the sweep audits `reconciliation.sweep_run_failed` with severity P1.
 
@@ -6477,9 +6488,28 @@ of the match. One tenant, its own rows only (FORCE RLS, `tenant_id = $1` on ever
 
 - **Standing coverage for unbound parks: NOT IMPLEMENTED.** After the statement period that carried
   the merchant-resolved line passes, the finding drops out; only the `payment.attempt_disputed` audit
-  row remains (P1 alerting for these T10s is I-wire). The ruling's route is persisted-line evidence
-  (`payment_statement_lines` of earlier imports), the same approach as ruling 5(c)(d). Proposed
-  follow-up: PAY-RECON-PARKED-CAPTURE-STANDING-1.
+  row remains. The ruling's route is persisted-line evidence (`payment_statement_lines` of earlier
+  imports), the same approach as ruling 5(c)(d). Registered as PAY-RECON-PARKED-CAPTURE-STANDING-1.
+- **GATE (binding, ledger-finance D2 review B1; not a future consideration).** Neither of the following
+  may happen — **the first real PSP adapter enabled for any tenant, or the first non-MOCK payment
+  statement source** (whichever comes first) — until **both** hold:
+  1. PAY-RECON-PARKED-CAPTURE-STANDING-1 has landed (standing coverage for unbound parks); and
+  2. the I-wire P1 alert for the PRH-2 C/D T10 deposit parks (`invalid_provider_reference:*`,
+     `provider_reference_conflict`, `sync_amount_mismatch`, `poll_amount_mismatch`,
+     `poll_reference_mismatch`) exists and is delivered.
+
+  **Status at D2: neither holds.** The I-wire P1 alert does **not** exist yet: P1 visibility for these
+  parks is an open I-wire condition (ALERT-DELIVERY-1, ADR 0102; see §34.7). Today these parks write
+  only the `payment.attempt_disputed` audit row. This is acceptable only because the parks are
+  reachable solely through the MOCK adapter and the MOCK statement source.
+- **Residual (ledger-finance D2 review N1): unbound-park clearing is approximate for conflict parks.**
+  The in-run unbound rule clears on a reversal or tombstone on the **line's** reference (§35.2). For
+  `provider_reference_conflict` that reference is held by **another** attempt (the conflict holder),
+  so a tombstone or reversal on it — which may concern the holder's capture — also clears the in-run
+  finding for the parked attempt: attribution to the parked attempt is approximate. It cannot hide
+  unposted money (a tombstone or reversal on the reference means the PSP itself reversed that capture,
+  and the holder's own posting state is reconciled independently), but it is not per-park evidence.
+  PAY-RECON-PARKED-CAPTURE-STANDING-1 replaces it with clearing against a per-park evidence record.
 - **F-C4** (`foreignReferenceBinding` over non-tombstone `ledger_transactions`) is `internal/payments`
   and is not part of D2.
 - **MA020 (`player_open_payment_exposure`, migration 0113)** still names only

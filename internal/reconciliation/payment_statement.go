@@ -152,7 +152,9 @@ const (
 	// terminal_reason='multiple_success_for_intent' whose statement line
 	// reports succeeded, with no reversal line and no ledger tombstone.
 	// Reported on every run until it clears (a reversal/tombstone appears,
-	// or M1/allocation happens - BLOCKED). Never auto-resolved, never a
+	// or, later, an allocation posting under LEDGER-SUSPENSE-B-1). An M1
+	// resolution only acknowledges it and never clears or suppresses it
+	// (ADR 0101 §4, LF-3, F13). Never auto-resolved, never a
 	// T17/re-drive trigger.
 	//
 	// ADR 0095 §35 (PRH-2 D2, PAY-RECON-PARKED-CAPTURE-1) widens the
@@ -995,7 +997,7 @@ func (m *payMatcher) matchPayment(lk string, l payLine) {
 		// silently folded into "disputed: already a payments P1" like
 		// every other disputed reason below.
 		m.r.add(MismatchKindPayCapturedUnposted, ak+" check=captured_unposted",
-			"resolution: a PSP-initiated reversal/tombstone, or M1/allocation (BLOCKED)", "platform: "+a.render()+" terminal_reason="+a.terminalReason+"; "+m.label+l.render())
+			"resolution: a PSP-initiated reversal/tombstone, or allocation (LEDGER-SUSPENSE-B-1); M1 only acknowledges", "platform: "+a.render()+" terminal_reason="+a.terminalReason+"; "+m.label+l.render())
 	case a.state == "disputed" && isUnboundParkReason(a.terminalReason) && l.status == statement.PaymentStatusSucceeded && m.capturedUnpostedRef(l.ref):
 		// ADR 0095 §35.2 (LF ruling on QA C-F2 (a)): a park that never
 		// bound a reference (a binding conflict, or an invalid reference)
@@ -1074,7 +1076,7 @@ func (m *payMatcher) checkUnmatchedAttempts() {
 		// reported here: it holds no reference this rule could clear on.
 		case a.state == "disputed" && capturedUnpostedBoundReasons[a.terminalReason] && m.capturedUnposted(a):
 			m.r.add(MismatchKindPayCapturedUnposted, k+" check=captured_unposted",
-				"resolution: a PSP-initiated reversal/tombstone, or M1/allocation (BLOCKED)", m.label+"no statement line; platform: "+a.render()+" terminal_reason="+a.terminalReason)
+				"resolution: a PSP-initiated reversal/tombstone, or allocation (LEDGER-SUSPENSE-B-1); M1 only acknowledges", m.label+"no statement line; platform: "+a.render()+" terminal_reason="+a.terminalReason)
 		// The coverage window protects only the "missing provider record"
 		// rule. Ageing is not coverage-gated (code review F2): with a
 		// window no longer than the horizon an in-flight attempt would

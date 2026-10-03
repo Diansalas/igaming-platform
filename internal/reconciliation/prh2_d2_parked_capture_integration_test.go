@@ -271,6 +271,12 @@ func d2CUFor(t *testing.T, ms []Mismatch, attemptID uuid.UUID) Mismatch {
 	if !strings.Contains(found[0].ReconciliationKey, "check=captured_unposted") {
 		t.Fatalf("pay_captured_unposted key lacks check=captured_unposted: %s", found[0].ReconciliationKey)
 	}
+	// D2 review P2 (ADR 0101 F13 / C-19): operators act on this text. It
+	// must name allocation (LEDGER-SUSPENSE-B-1), say M1 only acknowledges,
+	// and never suggest that M1 clears the finding.
+	if ev := found[0].ExpectedValue; !strings.Contains(ev, "allocation (LEDGER-SUSPENSE-B-1); M1 only acknowledges") || strings.Contains(ev, "M1/allocation") {
+		t.Fatalf("pay_captured_unposted detail must use the F13 wording, got %q", ev)
+	}
 	return found[0]
 }
 
