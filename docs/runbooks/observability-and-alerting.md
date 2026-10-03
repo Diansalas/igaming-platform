@@ -386,15 +386,47 @@ against real traffic.
 
 ## 3. Durable alerting (ADR 0102, PRH-2 I-core; `internal/alerting`; ALERT-DELIVERY-1)
 
-**Status: IMPLEMENTED (I-core only).** This supersedes the "Metrics
-backend"/"log-only" framing above for the specific event classes ADR 0102
-names - it does NOT replace the log-event list in §1/§2, which stays the
-day-one signal for everything not yet wired into this model. I-wire (a
-later, separate workstream) connects the real business raise sites
-(payment multiple-success, reconciliation mismatches, the kill switch,
-handler-integrity alerts) listed in ADR 0102 §8; until I-wire merges, the
-only durable alerts a real deployment will ever see are the three
-`alerting.*` meta-Kinds the dispatcher itself raises.
+**Status: I-core IMPLEMENTED; I-wire sites IMPLEMENTED (PRH-2 I-wire);
+delivery NOT LIVE.** ADR 0102 §17 records what I-wire built: the business
+raise sites below now write durable alerts, the dispatcher loop is
+hardened (`alerting.RunDispatcherLoopWithConfig`), and platform-admin
+ack/resolve endpoints exist. **The dispatcher is NOT started in
+`cmd/platform-api/main.go`** (it follows the H sweeper merge, plan Rule 5)
+and **no route exists**, so **no alert is delivered anywhere**: a stored
+alert, a stored P1 severity or an `unrouted` delivery row is NOT a
+delivery. ALERT-DELIVERY-1 stays OPEN until the dispatcher is wired AND a
+human has configured real routes (HD-PRH2-4-OPS) over a real channel
+(PROVIDER DEPENDENT). This section supersedes the "log-only" framing of §1/§2
+only for the event classes below; the log lines in §1/§2 are retained and
+remain the day-one signal for everything not listed here.
+
+### Which events now raise durable alerts
+
+| Event | Kind (sev) | Key (discriminator) | Raised |
+|---|---|---|---|
+| Deposit T10/T13d park: `sync_amount_mismatch`, `provider_reference_conflict`, `invalid_provider_reference`, `poll_amount_mismatch`, `poll_reference_mismatch`, `callback_amount_asset_mismatch`, `success_for_never_sent_attempt`, `reversal_tombstone_precedes_success` | `payment.webhook_integrity` (p1) | `attempt:<attempt_id>:reason:<reason>` | in the evidence transaction (savepoint) + post-commit detached retry |
+| `payments.poll_evidence_contradicts_terminal_attempt` (declined attempt, success poll contradicts) | `payment.webhook_integrity` (p1) | `attempt:<attempt_id>:reason:poll_evidence_contradicts_terminal_attempt:<poll_amount_mismatch\|poll_reference_mismatch\|provider_reference_conflict\|poll_amount_unconfirmed>` | same |
+| Multiple success for one intent (T10/T13d) | `payment.multiple_success_for_intent` (p1) | `intent:<deposit_intent_id>` | same |
+| INV-DEP-1 index backstop fired | `payment.deposit_intent_index_backstop_fired` (p1) | `intent:<deposit_intent_id>` | same |
+| Webhook failure paths: `payload_mismatch`, `deposit_already_reversed`, `reversal_link` | `payment.webhook_integrity` (p1) | `provider:<provider_id>:reason:<reason>` | detached (the domain tx rolled back) |
+| Casino callback integrity | `casino.callback_integrity` (p1) | `provider:<provider_id>:reason:<reason>` | detached |
+| Ledger projection drift | `reconciliation.ledger_projection_drift` (p1) | `stream:ledger_vs_projection` | in the run tx |
+| **Unlinked manual adjustment (governance breach, NOT drift)** | `reconciliation.ledger_projection_drift` (p1) | `stream:ledger_unlinked_manual_adjustment` | in the run tx |
+| Sportsbook / casino-consistency mismatch | `reconciliation.sportsbook_settlement_mismatch` / `reconciliation.casino_consistency_mismatch` (p1) | `stream:sportsbook_settlement` / `stream:casino_consistency` | in the run tx |
+| Casino statement / payment statement mismatch (REPEATABLE READ) | `reconciliation.casino_statement_mismatch` / `reconciliation.payment_statement_mismatch` (p1) | `stream:casino_statement` / `stream:payment_statement:provider:<id>` | after the snapshot commits, detached |
+| A reconciliation run transaction failed | `reconciliation.run_failed` (p1) | `stream:<stream>[:provider:<id>]` | detached |
+| Kill switch engaged | `payment.kill_switch_engaged` (p2) | `switch:<kill_switch_id>` | after commit, detached only |
+| Deposit simulation payload mismatch | `simulation.payment.payload_mismatch` (p3, simulation) | `provider:<provider_id>` | detached; **never delivered, never paged** |
+
+Not wired yet (listed honestly): casino-play and sportsbook-settlement
+simulation alerts (ADR 0102 §8 rows 12-13, p3, never delivered anyway); payout
+disputes (F-pay's surface); the terminal amount-mismatch audit
+`payments.callback_amount_asset_mismatch_terminal`.
+
+**Routing matrix (PLACEHOLDER, pending HD-PRH2-4):** p1 = integrity or money
+correctness; p2 = operational safety event or alerting meta-warning; p3 =
+informational/simulation. No severity maps to any person, rota, address or
+channel until a human configures `alert_routes`.
 
 ### The model
 
@@ -441,8 +473,9 @@ NOT a bug and NOT something to silence by seeding a placeholder route.
 
 ### How routes will be configured (once HD-PRH2-4-OPS is answered)
 
-There is no route-authoring HTTP endpoint yet (PRH-2 I-wire/a later
-workstream builds the platform-admin-only, audited API). Today, a route
+There is no route-authoring HTTP endpoint (ack and resolve exist; route
+writes are deliberately not built until the SR-7 preconditions and
+HD-PRH2-4-OPS). Today, a route
 is a plain row in `alert_routes`, insertable only by a validated
 platform-admin session (`alerting_validated_platform_admin()`, migration
 0110):
@@ -470,6 +503,9 @@ VALUES ('platform', 'p1', 0, 'log', 'log:some-operator-defined-reference');
 
 ### Metrics and logs this stage adds
 
+- `alert_dispatcher_passes_total{result}` (`result` ∈ `ok`, `error`, `panic`):
+  one increment per dispatcher loop pass; a flat counter is the "dispatcher
+  stalled" signal. No tenant label.
 - `alert_raise_failures_total{kind,phase}` (`phase` ∈ `in_tx`, `detached`,
   `fallback`) - a raise that was swallowed, exhausted its detached retry,
   or whose own terminal fallback failed. No tenant label (ADR §6.3).
@@ -501,26 +537,89 @@ becomes due again under a NEW attempt number, counted toward
 therefore still reaches `dead` plus `alerting.delivery_dead` eventually,
 rather than silently losing the alert.
 
-### What is stubbed / not yet wired
+### Reading a paged P1 (what the payload carries)
 
-- **I-wire** (a separate, later workstream) connects the real business
-  raise sites named in ADR 0102 §8 (payment multiple-success,
-  reconciliation mismatches, the kill switch, handler-integrity alerts,
-  `reconciliation.run_failed`). Until then, this model exists and is
-  fully tested, but the only alerts a real deployment produces are the
-  meta-Kinds.
-- **The dispatcher loop is built but NOT started anywhere**
-  (`alerting.RunDispatcherLoop` is exported, unwired - `cmd/platform-api/
-  main.go` is owned by a different workstream). No alert is delivered in
-  a running deployment until that one line is added.
-- **The platform-admin ack/resolve/route-write HTTP endpoints** do not
-  exist yet - only the `alert:manage` permission (platform scope) is
-  registered (`internal/auth/permission.go`), so K1/I-wire can sequence
-  against it. Today an admin operation is a direct, RLS-enforced SQL
-  statement, not an API call.
-- **Retention** (`alert_occurrences`/`alert_deliveries` grow without
-  bound) has no partitioning/archival policy yet - registered as
-  `ALERT-RETENTION-1`.
+Every delivery carries `alert_id`, `kind`, `severity`, the subject tenant id,
+the alert's **discriminator** and its allowlisted attributes. The discriminator
+is the "which condition within this Kind" signal (for the T10 parks, the closed
+reason after `:reason:`). It holds only server-side ids and closed reason
+values, never a provider reference, player data or error text. A real channel
+adapter MUST dedupe on `DedupKey = "<alert_id>:<escalation_step>"` (stable
+across retry attempts); the per-attempt `IdempotencyKey` is for logs only.
+
+### Runbook: alert dispatcher stalled
+
+Signal: `alert_dispatcher_passes_total` has stopped increasing (or only `error`
+or `panic` results increase) while open alerts exist; or open alerts with no
+`alert_deliveries` row older than a few passes.
+1. Is the dispatcher started? Until the `main.go` wiring lands it is NOT: that
+   is the expected state, not a stall.
+2. `result="panic"`: look for the `alert_dispatcher_pass_panic` log line. The
+   loop survives and the next pass reclaims the stranded claim after
+   `ClaimLease`. A repeating panic is a defect in a sink: fix or unroute it.
+3. `result="error"`: the pass could not read due work (database or RLS
+   problem): `alert_dispatcher_pass_failed` carries the error. The business
+   path is unaffected (alerts are only raised, never delivered, in-tx).
+4. `alert_stale_claims_total` rising: deliveries are being stranded between
+   claim and outcome (sink hangs, deploys, OOM). Check the sink timeout (it is
+   `ClaimLease/2`) and process restarts.
+5. A rows-`dead` pile-up (`alert_dead_total`, `alerting.delivery_dead`): the
+   channel is failing for a whole retry budget; fix the channel, then re-raise
+   or resolve with a reason code.
+
+### Runbook: unrouted alerts
+
+Signal: `alert_unrouted_total` > 0 or an open `alerting.unrouted` (p2).
+This is the CURRENT steady state of every environment: no route is configured.
+Do not seed a placeholder route. Resolve it by having a human decide
+recipients/channel (HD-PRH2-4-OPS) and then configuring a route as a validated
+platform admin (see "How routes will be configured"). The original alerts stay
+open and visible until they are acked or resolved
+(`POST /v1/admin/alerts/{id}/ack|resolve`, `alert:manage`, platform admin only).
+
+### Runbook: `alert_raise_failures_total{kind,phase}` rising
+
+- `phase="in_tx"`: an in-transaction raise was swallowed (class 22/23, 42501 or
+  P0001) and the business transaction committed regardless; the post-commit
+  detached retry follows. Transient causes recover. A persistent cause (a
+  trigger or RLS refusal) will exhaust the retry and show `phase="detached"`
+  then `phase="fallback"`.
+- `phase="fallback"` or a durable `alerting.raise_failed` (p1, tenant-less,
+  `{kind, sqlstate_class}` only): the alert for `kind` could not be stored. The
+  condition itself still has its audit row and its reconciliation backstop
+  (ADR 0102 §7.5 and §17). Treat it as a P1 about alerting and investigate the
+  SQLSTATE class: `23` points at a subject-tenant or constraint problem, `42`
+  at a policy refusal, `P0` at a trigger refusal, `go_validation` at a code
+  defect (a Kind/attribute/discriminator that fails the allowlist).
+
+### Runbook: `reconciliation.ledger_projection_drift` with
+`stream:ledger_unlinked_manual_adjustment`
+
+This is **a governance breach, not projection drift**: a `manual_adjustment`
+posting exists that is not linked to a governed adjustment request (ADR 0100
+§12). Balances reconcile; the control (four-eyes, closed reason code) was
+bypassed. Do not "rebuild the projection". Identify the posting from the
+reconciliation mismatch rows of the run named in the alert's `run_id`
+attribute, find who posted it (audit log), and treat it as a compliance
+incident (security + ledger-finance). Distinct from `stream:ledger_vs_projection`
+(true drift, a P1 data-integrity incident, see the financial-incident runbook).
+
+### What is still stubbed / not yet wired
+
+- **The dispatcher is not started in `cmd/platform-api/main.go`.** The wiring
+  is a ready-to-apply patch recorded in ADR 0102 §17.6; it is released only
+  after H (the sweeper process) merges. Until then no alert is delivered, even
+  to the log sink.
+- **No route exists** (HD-PRH2-4-OPS), so after wiring every alert is
+  `unrouted` until a human configures routes. Real channels are PROVIDER
+  DEPENDENT; only the log sink and the MOCK sink exist.
+- **No route-authoring endpoint.** Ack and resolve are API calls now; route
+  writes remain direct SQL by a validated platform admin (SR-7 preconditions
+  apply before any real channel).
+- **Dedicated per-reason Kinds** for the T10 parks need a migration and are
+  deferred (ALERT-KINDS-DEDICATED-1).
+- **Retention** (`alert_occurrences`/`alert_deliveries` grow without bound) has
+  no partitioning/archival policy yet - registered as `ALERT-RETENTION-1`.
 
 ## Known gaps (recorded honestly, not silently deferred)
 

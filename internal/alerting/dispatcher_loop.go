@@ -37,10 +37,11 @@ type LoopConfig struct {
 	OnPass func(result string)
 }
 
-const (
-	defaultLoopInterval     = 15 * time.Second
-	defaultLoopDrainTimeout = 10 * time.Second
-)
+// DefaultLoopInterval is the technical default pass interval (devops-reviewable,
+// not a policy value). cmd/platform-api passes it to RunDispatcherLoop.
+const DefaultLoopInterval = 15 * time.Second
+
+const defaultLoopDrainTimeout = 10 * time.Second
 
 // PassRunner is what the loop drives. *Dispatcher satisfies it; tests
 // substitute a fake to prove panic recovery and drain without a database.
@@ -71,7 +72,7 @@ func RunDispatcherLoop(ctx context.Context, d *Dispatcher, interval time.Duratio
 // never returns an error and never touches a business transaction.
 func RunDispatcherLoopWithConfig(ctx context.Context, d PassRunner, cfg LoopConfig) {
 	if cfg.Interval <= 0 {
-		cfg.Interval = defaultLoopInterval
+		cfg.Interval = DefaultLoopInterval
 	}
 	if cfg.DrainTimeout <= 0 {
 		cfg.DrainTimeout = defaultLoopDrainTimeout

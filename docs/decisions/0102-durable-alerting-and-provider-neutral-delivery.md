@@ -1360,3 +1360,240 @@ after): build, vet (plain and `-tags integration`), `gofmt`, the pinned
 `TestDispatcher_ClaimRaceIsDeterministic`, `-race -tags integration` for
 `./internal/auth/...`, and `-race -tags integration` for
 `./internal/httpserver/...` all pass.
+
+
+---
+
+## 17. Implementation record — I-wire (2026-10-03)
+
+**Branch:** `prh2-iwire-alert-delivery`, based on `6836319` (D1 merged at `7adb0c5`). Implemented by
+payments + devops under the PRH-2 I-wire brief. **No migration** (decision below). Labels:
+
+| Item | Label |
+|---|---|
+| Business raise sites (§17.3) | **IMPLEMENTED** |
+| Dispatcher loop (panic recovery per pass, immediate first pass, shutdown drain, injectable ticker) | **IMPLEMENTED** |
+| Stable delivery dedup key `<alert_id>:<step>` and discriminator on `Delivery` | **IMPLEMENTED** |
+| `POST /v1/admin/alerts/{id}/ack\|resolve` (`alert:manage`, platform scope, audited) | **IMPLEMENTED** |
+| `cmd/platform-api/main.go` dispatcher wiring | **NOT DONE** — released only after H merges (plan Rule 5); ready-to-apply patch in §17.6 |
+| Route configuration, recipients, real channel | **NOT IMPLEMENTED** / **PROVIDER DEPENDENT**; HD-PRH2-4-OPS. **No route is seeded.** |
+| §8 rows 12–13 (casino-play and sportsbook-settlement simulation alerts) | **NOT IMPLEMENTED** (p3, simulation, never delivered; deferred) |
+| ALERT-DELIVERY-1 | **stays OPEN** until the dispatcher is wired in `main.go` AND routes exist |
+
+A stored alert, a stored P1 severity or an `unrouted` delivery row is never "delivered". Until the
+dispatcher runs and a human configures routes, nothing leaves the database.
+
+### 17.1 Decision: no migration, no new Kinds
+
+`alert_kinds` is an immutable reference table that only a migration writes, and I-wire has no
+migration allocation. The registered additions therefore **reuse existing Kinds with closed-set
+discriminators** (orchestrator decision 2026-10-03):
+
+- The C/D deposit T10 park reasons and `payments.poll_evidence_contradicts_terminal_attempt` use
+  `payment.webhook_integrity` (p1, platform-owned, `requires_subject`, `in_tx_raisable_by_tenant`;
+  allowlist `provider_id`, `request_id`) with discriminator
+  `attempt:<attempt_id>:reason:<reason>`.
+- The K2 unlinked-adjustment detector (C-K2-1) uses `reconciliation.ledger_projection_drift` with
+  discriminator `stream:ledger_unlinked_manual_adjustment` (true drift keeps
+  `stream:ledger_vs_projection`, so the two never merge into one alert).
+
+The `<reason>` part is taken from a **closed set** at the call site (`payments/alerts.go`):
+`payments.DepositDisputeTerminalReasons()` (the `invalid_provider_reference:<detail>` family collapses
+to its prefix), plus the one audit action
+`poll_evidence_contradicts_terminal_attempt:<poll_amount_mismatch|poll_reference_mismatch|
+provider_reference_conflict|poll_amount_unconfirmed>`. Anything else becomes `unclassified`; a raw
+error string, a provider reference or provider text can never enter a discriminator. A unit test
+(`TestAlertReasonFor_ClosedSetOnly`) and a mutant pin this. The discriminator is part of the
+delivered payload (`Delivery.Discriminator`), so a paged P1 names the condition within the Kind.
+
+**Deferred option (to be registered as ALERT-KINDS-DEDICATED-1):** dedicated per-reason Kinds
+(`payment.deposit_park.<reason>` etc.), each with its own allowlist, severity and `raise_mode`, would
+need a migration seeding `alert_kinds` plus the Go `kindDefs` mirror and the parity test. It is
+**not built**; reusing `payment.webhook_integrity` costs only that the Kind name reads as "webhook"
+for parks that arrived through the sweeper or phase C.
+
+**Tenant-owned Kind matrix (registry condition, security I-core re-review).** The condition applies to
+"the migration that adds the first tenant-owned alert Kind". **No tenant-owned Kind is added**
+(every Kind used here is `scope='platform'` with `requires_subject=true`), so the
+`alerts_tenant_owned` positive-then-negative exclusion matrix is **vacuous for I-wire**. It is not
+faked; it stays a precondition of whichever change first adds a tenant-owned Kind.
+
+### 17.2 What the sites do (raise failure semantics, as built)
+
+- **In financial evidence and posting transactions** (T10, T13d, T15, the poll park and poll
+  contradiction audit, the multiple-success and index-backstop sites) the raise is
+  `alerting.RaiseGuarded`: a savepoint encloses only the alert INSERT; only that statement's own
+  error in class 22/23, 42501 or P0001 is swallowed and the savepoint rolled back; 25P02, 40001,
+  40P01, 55P03, 57014, 08, 53 and cancellation propagate. A swallowed raise registers on the
+  transaction's `Pending`; after the **nil commit** the owner calls `Pending.Flush`, which re-raises
+  detached in the originating scope (bounded retry, then the §6.3 `alerting.raise_failed`
+  fallback). The Error log and `alert_raise_failures_total{kind,phase}` (no tenant label, kind label
+  bounded to the registry) record every swallow. **An alert failure never rolls back a dispute,
+  receipt or posting**; delivery is always post-commit.
+- **Evidence-transaction owners open their transaction through `alerting.InTx` and Flush after
+  commit** (B-1): the webhook handler (`deposit_handlers.go`), the deposit-simulation handler,
+  `InitiateDepositAttempt` phase C (`deposit_v2.go`), `driveCreatedAttempt` phase C (`drive.go`), the
+  sweeper's status-evidence transaction (`sweeper.go`), and the reconciliation run transactions
+  (`scheduler.go`). `static_wiring_test.go` pins, over the whole
+  module: every `RaiseGuarded` is inside an `InTx` closure or one of five named helpers; every owner
+  contains both `InTx` and a `.Flush`; every `PaymentOrchestrator.ReceiveVerifiedCallback` is inside
+  an `InTx`; **no alerting call is inside a `WithTenantSnapshot` closure** (C-102-5); the kill switch
+  never calls `RaiseGuarded`.
+- **REPEATABLE READ sites** (casino_statement, payment_statement match): no alert statement inside
+  the snapshot; after the snapshot commits, `alerting.RaisePostCommit` opens a fresh READ COMMITTED
+  tenant transaction (LF test 6). The `WithTenantSnapshot` doc comment now states the rule
+  (`internal/db/tenant_snapshot.go`, C-102-5).
+- **Failure-path P1s** (the domain transaction rolled back): detached raise in a fresh transaction
+  after the error response: webhook `payload_mismatch`, `deposit_already_reversed`, `reversal_link`,
+  casino callback integrity, `reconciliation.run_failed`, the simulation payload mismatch.
+- **The kill-switch engage** raises post-commit only, in the engage's own scope (platform admin or
+  tenant principal), so no failure of any class can roll back an engage (LF F10, LF test 10).
+
+### 17.3 Sites as built
+
+| ADR §8 row | Site | Kind (sev) | Key | Mode |
+|---|---|---|---|---|
+| 1 | `payments/orchestrator.go` `auditMultipleSuccessForIntent` (the plan's `:989-1024` is stale) | `payment.multiple_success_for_intent` (p1) | `intent:<id>` | in-tx guarded |
+| 2 | same function, `backstopFired` | `payment.deposit_intent_index_backstop_fired` (p1) | `intent:<id>` | in-tx guarded |
+| 3 | `reconciliation/scheduler.go` `sweepTenants` | `reconciliation.ledger_projection_drift` (p1) | `stream:ledger_vs_projection` (+ `stream:ledger_unlinked_manual_adjustment`) | in-tx guarded |
+| 4 | `runSportsbookStreamForTenant` | `reconciliation.sportsbook_settlement_mismatch` (p1) | `stream:sportsbook_settlement` | in-tx guarded |
+| 5 | `runCasinoStreamForTenant` | `reconciliation.casino_consistency_mismatch` (p1) | `stream:casino_consistency` | in-tx guarded |
+| 6 | `runCasinoStatementStreamForTenant` (RR) | `reconciliation.casino_statement_mismatch` (p1) | `stream:casino_statement` | post-commit |
+| 7 | `ReconcilePaymentStatementForTenant` (RR match) | `reconciliation.payment_statement_mismatch` (p1) | `stream:payment_statement:provider:<id>` | post-commit |
+| 8 | `httpserver/payments_kill_switch_handlers.go` engage | `payment.kill_switch_engaged` (p2) | `switch:<id>` | post-commit detached |
+| 9 | `httpserver/casino_handlers.go` | `casino.callback_integrity` (p1) | `provider:<id>:reason:<reason>` | detached |
+| 10 | `httpserver/deposit_handlers.go` | `payment.webhook_integrity` (p1) | `provider:<id>:reason:<reason>` | detached |
+| 11 | `httpserver/payment_deposit_simulation_handlers.go` | `simulation.payment.payload_mismatch` (p3, simulation) | `provider:<id>` | detached; **never delivered** |
+| 14 | `scheduler.go` (five failure branches) | `reconciliation.run_failed` (p1) | `stream:<stream>[:provider:<id>]` | detached |
+| reg. | `payments/drive.go` `parkDepositAttempt` (shared by phase C, cascade and the poll park) | `payment.webhook_integrity` (p1) | `attempt:<id>:reason:<closed reason>` | in-tx guarded |
+| reg. | `payments/receipt.go` T10/T13t/T15 sites | same | same | in-tx guarded |
+| reg. | `payments/poll_evidence.go` `auditPollTerminalContradiction` | same | `attempt:<id>:reason:poll_evidence_contradicts_terminal_attempt:<sub>` | in-tx guarded |
+
+Row 2 was blocked on INVDEP1-BACKSTOP-BRANCH-TEST-1, which is CLOSED (`e08d847`). Payout disputes
+(`ApplyDisputeFromNonTerminal` in `payout.go`) are F-pay's surface: `raiseDepositParkAlert` is a no-op
+for a payout attempt. `payments.callback_amount_asset_mismatch_terminal` (the terminal-state amount
+mismatch audit) is not raised as an alert (not in the registered set); recorded as a follow-up.
+
+### 17.4 §8 backstop per discriminator (§7.5, exactly)
+
+A "backstop" is a standing reconciliation check that re-surfaces the condition if its P1 is lost.
+The detached retry is mandatory for every Kind (§7.5) and applies to all rows below.
+
+- **Bound parks** (the attempt carries the provider reference at park time) have the standing
+  `pay_captured_unposted` reconciliation backstop **after D2** (the payment-statement matcher), and
+  only for a provider with a wired payment-statement source (the MOCK source today). Bound:
+  `sync_amount_mismatch` (the park binds the validated reference while the attempt is live),
+  `poll_amount_mismatch`, `poll_reference_mismatch` and a poll-detected
+  `provider_reference_conflict` (the sweeper only polls a bound attempt), the poll
+  `reversal_tombstone_precedes_success`, and `callback_amount_asset_mismatch` /
+  `reversal_tombstone_precedes_success` from a callback **when the attempt already had its
+  reference**. `payments.poll_evidence_contradicts_terminal_attempt` is bound; its backstop is
+  PAY-POLL-DECLINED-ALERT-RECON-1 (b): D2 pins that a declined attempt plus a succeeded statement
+  line gives `pay_status_mismatch`. **This branch does not contain D2**, so until D2 merges that
+  backstop is a claim about the planned matcher, not a verified fact here.
+- **Unbound parks are in-run only** (no standing backstop beyond the audit row and the P1 log):
+  `invalid_provider_reference` (nothing is persisted), `provider_reference_conflict` detected in phase
+  C (the foreign reference is not bound to this attempt), `success_for_never_sent_attempt` (a
+  created/rejected attempt has no reference), and any callback-detected reason on an attempt without a
+  bound reference. For these the detached retry plus the `alerting.raise_failed` fallback are the only
+  protection against a lost alert.
+- `payment.multiple_success_for_intent` and `…index_backstop_fired`: unchanged from §7.5
+  (conditional `pay_captured_unposted`; `pay_duplicate` does not apply).
+- `reconciliation.ledger_projection_drift`: the drift sweep re-detects each run, both for
+  `stream:ledger_vs_projection` and for `stream:ledger_unlinked_manual_adjustment` (the unlinked finding
+  is state-type: it is re-detected until the posting is linked or the governed cutover moves).
+- Reconciliation and failure-path rows: as §7.5.
+
+### 17.5 Dispatcher, dedup key and ack/resolve
+
+- `alerting.RunDispatcherLoopWithConfig(ctx, runner, LoopConfig)` (`dispatcher_loop.go`), in the
+  style of `reconciliation.RunSchedulerLoop`: one pass immediately, then one per tick (injectable
+  `Ticker`, T-1); a panic in one pass is recovered, logged and counted
+  (`alert_dispatcher_passes_total{result=ok|error|panic}`) and the loop continues; on shutdown no new
+  pass starts but a pass already running drains (its context is detached from the parent and bounded by
+  `DrainTimeout`). `RunDispatcherLoop(ctx, d, interval)` is the thin default. The claim, bounded
+  retry with backoff, dead-letter, stale-claim lease, severity-keyed route resolution, simulation
+  suppression and meta-Kind non-recursion are I-core's and are unchanged.
+- **Stable delivery dedup key (§16.3 item 3, mandatory before any real channel).**
+  `Delivery.DedupKey = "<alert_id>:<escalation_step>"` is identical across retry attempts of a step;
+  `IdempotencyKey` (`…:<attempt_no>`) stays per-attempt for logs. A real channel adapter MUST dedupe on
+  `DedupKey`. No schema change was needed. `Delivery.Discriminator` carries the condition.
+- **Ack and resolve** (`httpserver/alert_admin_handlers.go`): `POST /v1/admin/alerts/{alertID}/ack`
+  and `…/resolve` (resolve requires a closed-shape `reason_code`). Gated by `auth.PermAlertManage`
+  (platform admin only) plus an explicit platform-scope check; `acked_by`/`resolved_by` are forced by
+  the migration 0110 guard from the validated session; the audit row is written in the same
+  platform-admin transaction with the alert's `subject_tenant_id` (ADR 0104) so the subject tenant sees
+  the action read-only. There is no tenant ack endpoint. Route writes (`alert_routes`) are
+  deliberately not built (SR-7, HD-PRH2-4-OPS).
+
+### 17.6 `main.go` wiring: NOT DONE (ready-to-apply patch)
+
+Applied only after H merges, as one commit that touches only `cmd/platform-api/main.go`. LogSink only:
+the MOCK sink is never wired in a binary. After it is applied every alert is `unrouted` until a human
+configures routes.
+
+```go
+	// ADR 0102 6.1 / I-wire (ALERT-DELIVERY-1): the durable alert dispatcher.
+	// LogSink only (real channels are PROVIDER DEPENDENT, HD-PRH2-4-OPS). With
+	// no alert_routes row every alert stays 'unrouted'; nothing is invented.
+	alertDispatcher := alerting.NewDispatcher(pool, alerting.DefaultDispatcherConfig(), alerting.LogSink{Logger: logger})
+	var alertDispatcherWG sync.WaitGroup
+	alertDispatcherWG.Add(1)
+	go func() {
+		defer alertDispatcherWG.Done()
+		alerting.RunDispatcherLoop(ctx, alertDispatcher, alerting.DefaultLoopInterval)
+	}()
+```
+
+and, next to the other bounded shutdown waits:
+
+```go
+	alertDispatcherDone := make(chan struct{})
+	go func() {
+		alertDispatcherWG.Wait()
+		close(alertDispatcherDone)
+	}()
+	select {
+	case <-alertDispatcherDone:
+	case <-time.After(15 * time.Second): // DrainTimeout (10s) + record-outcome headroom
+		logger.Error("alert dispatcher did not stop within the shutdown timeout")
+	}
+```
+
+plus the import `"github.com/Diansalas/igaming-platform/internal/alerting"`. The interval is a technical
+default (`alerting.DefaultLoopInterval`, 15s); making it configurable belongs to the H/config owner.
+
+### 17.7 ALERT-DELIVERY-1 binding conditions
+
+| Condition | Status |
+|---|---|
+| IC-5: failure-path callers pass a detached, bounded context | MET: `RaiseDetached` detaches its own context at entry; every failure-path caller goes through it |
+| LF test 6: casino_statement / payment_statement via `RaisePostCommit`, `stream:` keys, run and mismatch rows commit under a persistent raise failure | MET (casino_statement under P0001 and 40P01; payment_statement via the same helper) |
+| LF test 7: stable `stream:` discriminators, `run_id` an attribute | MET |
+| LF test 9: `-race -count=50` | MET (`-race -count=50`, see `docs/plans/payment-readiness/evidence/prh2-iwire-mutation-kill.txt`) |
+| LF test 10: kill-switch engage unaffected by persistent P0001 then 40P01 | MET |
+| INVDEP1-BACKSTOP-BRANCH-TEST-1 before row 2 | MET (closed `e08d847`) |
+| B-1: `RaiseGuarded` only inside `InTx` | MET (static test, §17.2) |
+| Tenant-owned Kind exclusion matrix | VACUOUS: no tenant-owned Kind added (§17.1) |
+| C-K2-1: unlinked adjustment not presented as drift | MET: distinct discriminator; runbook states it is a governance breach |
+| 2026-10-03 condition: P1 visibility for the C/D park reasons | MET at the alert layer (durable P1 per reason); delivery still depends on the dispatcher and routes |
+| PAY-POLL-DECLINED-ALERT-RECON-1 (a) | MET (the audit action is a P1 discriminator); (b) is D2's |
+| LEDGER-MANUAL-ADJ-4EYES-1: unlinked-detector P1 routing | MET at the alert layer |
+| PAY-P1-MULTISUCCESS-ALERT-1 | alert layer MET; closes with ALERT-DELIVERY-1 except for real recipients (HD-PRH2-4-OPS) |
+| PAY-DEPOSIT-ESCALATION-1 | NOT in scope (needs T16 escalation in the sweeper); its P1 after the settlement window is a later raise site |
+| `MOCK-ADAPTER-PROD-1` | unchanged: `MockSink` is synthetic and is never wired by the main.go patch |
+
+### 17.8 Known gaps and residuals (honest)
+
+- No delivery exists (dispatcher unwired, no route, no real channel).
+- Rows 12–13 not wired; payout disputes not alerted; the terminal-state amount-mismatch audit has no
+  alert.
+- The accepted §7.3a crash residual stands (a crash between an RR-site commit and its post-commit
+  raise loses that alert until the next run re-detects it).
+- A process crash between a business commit and `Pending.Flush` loses the retry of a swallowed
+  in-tx raise; the §17.4 backstops and the metric are the cover (and only the bound parks have one).
+- The raise is the last alert-table statement but not literally the last statement of the surrounding
+  transaction at the receipt and phase-C sites (the owner continues with deferred-receipt drains);
+  those later statements take only locks the transaction already holds on the same intent, so the §7.7
+  terminal-lock-level rule is unchanged in effect. Pinned by `-race -count=50` on the concurrent test.
+- `ALERT-KINDS-DEDICATED-1` (§17.1) and `ALERT-RETENTION-1` (§14 item 6) remain.
