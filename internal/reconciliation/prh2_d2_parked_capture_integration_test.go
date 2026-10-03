@@ -560,6 +560,19 @@ func TestD2_4_ConflictParks(t *testing.T) {
 		d2NoCU(t, w.d2Run(t, d2Src()), "an unbound park with no line this run")
 		w.d2AssertNoMoney(t, pk)
 	})
+	// Defence in depth: an unbound-park reason on an attempt that DOES hold
+	// a reference (not producible by C's code - fixture via T10 on a real
+	// pending deposit) and a succeeded line naming that reference: still
+	// flagged, never silently excluded. Pins the rule as not gated on how
+	// the line resolved.
+	t.Run("unbound_reason_on_a_reference_holding_attempt_is_still_flagged", func(t *testing.T) {
+		w := newD2World(t)
+		pk := w.parkPoll(t, payments.TerminalReasonProviderReferenceConflict)
+		ms := w.d2Run(t, d2Src(d2Line(pk.pspRef, "", statement.PaymentStatusSucceeded, d2Amount)))
+		d2Expect(t, ms, map[MismatchKind]int{d2KindCU: 1})
+		d2CUFor(t, ms, pk.attempt.ID)
+		w.d2AssertNoMoney(t, pk)
+	})
 	// A conflict bound to ANOTHER DEPOSIT attempt, plus a second succeeded
 	// line with the same reference: pay_duplicate (check=duplicate_line),
 	// reported once. The first line resolves to the holder, which is

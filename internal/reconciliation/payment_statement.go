@@ -996,13 +996,16 @@ func (m *payMatcher) matchPayment(lk string, l payLine) {
 		// every other disputed reason below.
 		m.r.add(MismatchKindPayCapturedUnposted, ak+" check=captured_unposted",
 			"resolution: a PSP-initiated reversal/tombstone, or M1/allocation (BLOCKED)", "platform: "+a.render()+" terminal_reason="+a.terminalReason+"; "+m.label+l.render())
-	case a.state == "disputed" && byMerchant && isUnboundParkReason(a.terminalReason) && l.status == statement.PaymentStatusSucceeded && m.capturedUnpostedRef(l.ref):
+	case a.state == "disputed" && isUnboundParkReason(a.terminalReason) && l.status == statement.PaymentStatusSucceeded && m.capturedUnpostedRef(l.ref):
 		// ADR 0095 §35.2 (LF ruling on QA C-F2 (a)): a park that never
 		// bound a reference (a binding conflict, or an invalid reference)
-		// and a succeeded deposit line resolving to it by merchant
-		// reference - the PSP says it captured for this attempt and the
-		// platform posted nothing. The attempt holds no reference, so the
-		// clearing signals are read on the LINE's reference. In-run only.
+		// and a succeeded deposit line resolving to it - by construction
+		// by merchant reference, since such an attempt holds no provider
+		// reference. Deliberately NOT gated on byMerchant: should such an
+		// attempt ever hold a reference, a succeeded line naming it is the
+		// same exposure and stays loud. The PSP says it captured for this
+		// attempt and the platform posted nothing; the clearing signals
+		// are read on the LINE's reference. In-run only.
 		m.r.add(MismatchKindPayCapturedUnposted, ak+" check=captured_unposted",
 			"resolution: a PSP-initiated reversal/tombstone on this line's reference, or allocation (LEDGER-SUSPENSE-B-1); M1 only acknowledges", "platform: "+a.render()+" terminal_reason="+a.terminalReason+"; "+m.label+l.render())
 	case a.state == "disputed" || (a.state == "rejected" && !providerSucceeded):

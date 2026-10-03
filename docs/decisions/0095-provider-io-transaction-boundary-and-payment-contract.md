@@ -5741,7 +5741,8 @@ own correlation id (`ledger-finance` ruling §3).
   - It clears when a reversal or tombstone appears (the PSP refunded), or when M1/allocation
     occurs (BLOCKED).
   - `reversal_tombstone_precedes_success` disputes are excluded (net zero at the PSP).
-  - `matchPayment` must stop skipping `disputed` attempts **for this reason code only**. Other
+  - `matchPayment` must stop skipping `disputed` attempts **for this reason code only** (widened by
+    §35 to every captured-and-unposted T10 reason). Other
     disputed attempts remain payments-owned P1s, not reconciliation rows.
   - Remediation (§12.5 row): escalate; never auto-resolve; **never** a T17/re-drive trigger.
 - **`pay_duplicate` / `checkPlatformDuplicates` is kept as an integrity detector.** After
@@ -6368,7 +6369,7 @@ amount on a sync success must declare `SyncSuccessPossible=false` (its sync resu
 - The deposit poll path's reference and amount checks are PRH-2 D. The reference it polls is the
   already-validated bound reference; D adds the echo comparison.
 - The new T10 reasons write an audit record but emit no P1 log line, so they are **not alerted**.
-  - **Reconciliation does not report them either.** `payment_statement.go` silently excludes every
+  - **Reconciliation does not report them either** (as of C; **superseded by §35**, PRH-2 D2). `payment_statement.go` silently excludes every
     disputed reason except `multiple_success_for_intent` from status comparison. Coverage is
     **PAY-RECON-PARKED-CAPTURE-1** (assigned to PRH-2 D, together with extending the binding
     pre-check to `ledger_transactions`, F-C4).
@@ -6414,3 +6415,78 @@ Review-round fixes:
 - **Tombstone T10 unified (F-C2)** through `parkDepositAttempt`.
 - **Error-path validation (code review F1).** An adapter that returns an error together with a reference is validated like any other: an invalid one parks, a valid one is bound on the ambiguous attempt and returns no redirect.
 - **Test-only corrections.** The callback-versus-sync-success test was vacuous (the callback ran in phase B before the reference was bound, so it always deferred); it is replaced by two deterministic tests that assert the disposition (`deferred_unresolved` during phase B, `duplicate_effect` after phase C). A callback cannot be forced to resolve before phase C commits for a sync success, because nothing is bound until that commit. Added: sweeper-invisibility for every park, late callbacks after a conflict park (applies to the attempt that owns the reference, posts only there) and after a mismatch park (recorded only, `duplicate_effect`), and the cascade-driven redirect case.
+
+## 35. Amendment — PRH-2 D2: reconciliation of parked captures (PAY-RECON-PARKED-CAPTURE-1) (`ledger-finance`, 2026-10-03)
+
+Closes the reconciliation half of QA C-F2 per the ledger-finance ruling
+(`docs/plans/prh2-hardening-round/reviews/c-ledger-finance.md`, "QA F2 ruling" (a) and (c)), and QA F5
+of plan §5 D. Extends §28.9; supersedes the reconciliation sub-bullet of §34.7. No migration; code in
+`internal/reconciliation/payment_statement.go` only. Status: **IMPLEMENTED against the MOCK adapter
+and the MOCK statement source; PROVIDER DEPENDENT for a real PSP statement.**
+
+### 35.1 The rule: bound reasons (in-run and standing)
+
+`pay_captured_unposted` ("the provider says it captured, the platform disputed, nothing posted") is
+raised for a `disputed` deposit attempt whose `terminal_reason` is one of:
+
+| Reason | Origin | Why the attempt holds the captured reference |
+|---|---|---|
+| `multiple_success_for_intent` | T13d, §28.4 | unchanged from §28.9 |
+| `sync_amount_mismatch` | PRH-2 C, §34.2 | the park binds the validated reference (§34.8, F-C1) |
+| `poll_amount_mismatch` | PRH-2 D (PAY-POLL-AMOUNT-1), plan §5 D design 1 | the poll queries by the bound reference |
+| `poll_reference_mismatch` | PRH-2 D, plan §5 D design 2 | as above; the echo is never bound (design 3) |
+
+- **In-run:** a statement line matched to the attempt (by the bound reference, or by merchant
+  reference) with status `succeeded`. `pay_amount_mismatch` / `pay_reference_mismatch` still fire
+  alongside where they apply. A `reversed` line clears (R1, unchanged).
+- **Standing:** no line names the attempt in this run: reported on every run, unwindowed, exactly as
+  §28.9 / ledger-finance C2.
+- **Clearing (unchanged from §28.9):** a `deposit_reversal` line in this run naming the bound reference
+  as its original, or a `tombstone` ledger row on `(provider_id, bound reference)`. Nothing else: not a
+  reversal line or a tombstone on any other reference, not `investigation_status` on a prior finding
+  (the predicate reads no prior finding), and not M1 (ADR 0101 §4, LF-3: M1 only acknowledges).
+- The poll reasons are spelled as string literals fixed by the plan; reconciliation never imports
+  `internal/payments`. If PRH-2 D1 merges with different strings, this table and
+  `capturedUnpostedBoundReasons` must change in the same merge.
+
+### 35.2 The rule: unbound parks (in-run only)
+
+`provider_reference_conflict` and `invalid_provider_reference:<reason>` parks never bind the adapter's
+reference (§34.8). A real capture behind one is visible only through a statement line that resolves to
+the attempt **by merchant reference**. Such a `deposit` line with status `succeeded` raises
+`pay_captured_unposted` in-run, whatever outcome the adapter originally reported (security C-1). The
+rule is not gated on *how* the line resolved: should such an attempt ever hold a reference, a
+succeeded line naming it is the same exposure and stays loud. The clearing signals are read on the
+**line's** reference. The detail text says
+"M1 only acknowledges" (ADR 0101 F13 wording).
+
+- A conflict bound to **another deposit attempt**: the line resolves by reference to the holder; a
+  second `succeeded` line for the same reference raises `pay_duplicate` (`check=duplicate_line`),
+  reported once. Verified by test; no code change.
+- An **invalid reference** on a statement line is refused at fetch (`validatePaymentLine`): the run
+  fails, nothing is stored, and the sweep audits `reconciliation.sweep_run_failed` with severity P1.
+
+### 35.3 Invariants
+
+Reconciliation writes only its run and mismatch rows (INV-IO-12): no posting, no attempt, intent,
+receipt or projection change. Every test asserts zero ledger transactions for the parked attempt,
+SUM(debits) = SUM(credits), `RunLedgerVsProjection` with 0 mismatches, and the before/after snapshot
+of the match. One tenant, its own rows only (FORCE RLS, `tenant_id = $1` on every read).
+
+### 35.4 Not implemented / residuals
+
+- **Standing coverage for unbound parks: NOT IMPLEMENTED.** After the statement period that carried
+  the merchant-resolved line passes, the finding drops out; only the `payment.attempt_disputed` audit
+  row remains (P1 alerting for these T10s is I-wire). The ruling's route is persisted-line evidence
+  (`payment_statement_lines` of earlier imports), the same approach as ruling 5(c)(d). Proposed
+  follow-up: PAY-RECON-PARKED-CAPTURE-STANDING-1.
+- **F-C4** (`foreignReferenceBinding` over non-tombstone `ledger_transactions`) is `internal/payments`
+  and is not part of D2.
+- **MA020 (`player_open_payment_exposure`, migration 0113)** still names only
+  `multiple_success_for_intent`; MA020-SYNC-MISMATCH-1 should cover the poll reasons as well.
+
+### 35.5 Tests and evidence
+
+`internal/reconciliation/prh2_d2_parked_capture_integration_test.go` (`TestD2_1`..`TestD2_6`, LF (c)
+1-6 plus a pin that other disputed reasons are unchanged). Mutants, including LF (c) 7 (the predicate
+reverted to `multiple_success_for_intent` only): `docs/plans/payment-readiness/evidence/prh2-d2-mutation-kill.txt`.
