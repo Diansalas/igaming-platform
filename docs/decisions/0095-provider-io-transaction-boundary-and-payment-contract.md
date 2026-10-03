@@ -899,6 +899,7 @@ The adapter maps every outcome of an outbound call to exactly one of:
 | `Ambiguous` | Anything else: timeout after a possible send, reset, unmapped 5xx, malformed response, panic | `httpclient` `Sent=true`, `ErrProviderMalformedResponse` | T6 | Only T12 (same key, `IdempotentSubmission`) |
 | `Pending` | Accepted, with a reference | — | T4 | — |
 | `Succeeded` (sync) | Definite success, only where the manifest has `SyncSuccessPossible` and a provider reference is returned | — | T7 | — |
+| `ProviderRefInvalid` *[Amendment 2026-10-03, PRH-2 C, see §34]* | The adapter returned a reference that fails `providerref.Validate` (empty on `Pending`; over-bound, not UTF-8 or containing a control character on **any** outcome). Checked before the outcome switch, so it wins over whatever outcome the adapter also reported. | Deposit: `depositAdapterCall`. Payout: `payoutAdapterCall` (already so). | **T10** (`submitting` -> `disputed`, `terminal_reason='invalid_provider_reference:<reason>'`), committed with its audit; the intent projects `ambiguous`. Nothing from the response is stored. | No: parked, never retried, never an error |
 
 - **Timeout classification.**
   - A timeout before dispatch (credential or queue) is `NotSent`.
@@ -908,6 +909,9 @@ The adapter maps every outcome of an outbound call to exactly one of:
 - **httpclient idempotent retry.** It is enabled for a money-moving request only if the
   manifest has `IdempotentSubmission`, because it re-sends the same key. It is always
   enabled for `QueryStatus`.
+- **Reference validation is part of classification** *[Amendment 2026-10-03, PRH-2 C]*. Every
+  adapter-response reference is validated before classification, for deposits and payouts alike
+  (PROVIDER-REF-BOUND-1 security condition C1, whose deposit half this closes). See §34.
 
 ---
 
@@ -951,6 +955,10 @@ HealthStatus(ctx) (ProviderHealth, error)   // contract tightened (§9.6)
 
 Every result and error carries a `Class ErrorClass` (§8). A returned Go `error` without a class
 is treated as `Ambiguous` for money operations.
+
+*[Amendment 2026-10-03, PRH-2 C, §34]* `DepositResult` also carries the provider's **echo** of the
+amount and asset it processed (`Amount int64`, `AssetCode string`). It is required evidence on a
+synchronous success.
 
 `Amount int64` carries forward the existing platform-wide int64 amount path (the same as
 `ledger.EntryInput`). This is not new here; an 18-exponent asset routed through
@@ -6264,3 +6272,102 @@ commits on top of `33213c7` (not squashed/rebased):
   `Provider.Catalogue`" - before F1, that sentence was a doc-comment convention, not a checked
   invariant. The registry and `docs/HANDOVER.md` rows are updated by the orchestrator at merge, per
   this file's standing convention (the orchestrator is the single writer of those files).
+
+## 34. Amendment — PRH-2 C: deposit reference validation, sync amount evidence, same-tenant binding pre-check (`payments`, 2026-10-03)
+
+Closes PAY-DEP-REF-VALIDATE-1 (architect FH7-05), the sync half of ledger-finance LF-5, LF-6 and
+security S-9 from the PRH-2 planning gate (`docs/plans/prh2-hardening-round/plan.md` §5-C). No
+migration. Status: **IMPLEMENTED against the MOCK adapter; PROVIDER DEPENDENT for a real PSP.** The
+deposit **poll** path (`QueryStatus`) is **not** covered here: it is PRH-2 D (PAY-POLL-AMOUNT-1),
+which reuses the comparison helper below.
+
+### 34.1 The deposit half of PROVIDER-REF-BOUND-1 condition C1 (§8)
+
+`depositAdapterCall` (`internal/payments/drive.go`) validates the adapter-returned reference **before**
+the outcome switch, as `payoutAdapterCall` already did for payouts:
+
+| Outcome returned | Reference | Result |
+|---|---|---|
+| any | non-empty and invalid (over 255 bytes, invalid UTF-8, or a control character) | `ErrorClassProviderRefInvalid` -> T10 park |
+| `Pending` | empty | `ErrorClassProviderRefInvalid` -> T10 park (S-9). Previously the empty value reached `MarkAccepted`, failed the `payment_attempts` CHECK (0101 / 0099) and surfaced as an untyped error. |
+| `Succeeded` (sync) | empty | unchanged: `ErrorClassAmbiguous`, not parked |
+| `Declined`, `Ambiguous` | empty | unchanged (a reference is optional) |
+
+Phase C parks with `ApplyDisputeFromNonTerminal` (T10, `terminal_reason='invalid_provider_reference:<reason>'`
+where `<reason>` is the closed `providerref.Reason`), writes one `payment.attempt_disputed` audit
+record carrying only the field, reason, length and hash prefix (never the value), and recomputes the
+intent projection (`ambiguous`: funds may have been captured). The result is returned scrubbed of
+the reference, redirect URL and hosted-field token, so nothing from an unvalidated response is
+persisted, logged or handed to the player. The transaction commits; the attempt is terminal, so the
+sweeper never sees it: no retry or escalation loop.
+
+### 34.2 Sync amount evidence in the `DepositResult` contract (LF-5)
+
+`DepositResult` gains `Amount int64` and `AssetCode string`: the provider's echo of what it
+processed. On a synchronous success they are **required evidence**:
+
+- **Absent** (zero amount or empty asset) -> `ErrorClassAmbiguous`. The poll decides; no posting and no dispute.
+- **Present and different** from the attempt's recorded amount or asset -> **T10 `sync_amount_mismatch`**.
+  No posting, no error, committed with its audit (`provider_amount` / `provider_asset_code` in the
+  metadata).
+- **Equal** -> the existing tombstone check, then the INV-DEP-1 choke point, then posting, in that order.
+
+Before this change the sync success posted `attempt.Amount` with no provider evidence, and the
+intent comparison inside `postDepositSuccess` was tautological. The comparison lives in one shared,
+pure helper, `CompareProviderAmount` (`internal/payments/amount_evidence.go`), returning
+`Missing | Match | Mismatch`. PRH-2 D reuses it unchanged for the poll path. The asset comparison is
+exact (no case folding); a negative echoed amount is a mismatch, not "missing".
+
+### 34.3 Same-tenant binding pre-check (LF-6)
+
+Phase C runs, under the intent lock and before any statement that would bind or post the
+reference, `foreignReferenceBinding`: is `(tenant_id, provider_id, reference)` already held by a
+**different** `payment_attempts` row (deposit **or** payout) or a different `deposit_intents` row? If
+so: **T10 `provider_reference_conflict`**. It covers every outcome that carries a reference, because
+`MarkAccepted`, `ApplyDecline`, the intent projection and `ledger.Post` each bind it, and a unique
+violation at any of them would roll the transaction back and recur on every retry: an error loop.
+No posting; the conflicting existing attempt is untouched.
+
+**Cross-tenant:** there is no cross-tenant read. The predicate names the tenant, and the indexes it
+mirrors are per tenant under FORCE RLS (0101 `payment_attempts_tenant_provider_ref`, 0025
+`idx_deposit_intents_tenant_provider_ref`). Tenant B using the same string as tenant A's attempt has
+no effect on A's attempt, ledger or audit, and A has no way to detect B's use. The test asserts exactly
+that; it does not assert that either tenant "detects" the other.
+
+### 34.4 Contract criteria for a real PSP (PAY-PSP-CONTRACT-INVDEP1)
+
+The vendor-selection criteria are extended: a real deposit adapter must **echo the processed amount
+and asset on a synchronous success**, and must return a reference that satisfies
+`providerref.Validate` on every outcome (or none on a decline). An adapter that cannot echo the
+amount on a sync success must declare `SyncSuccessPossible=false` (its sync result then stays
+`Ambiguous` and the poll or callback decides).
+
+### 34.5 Tests and evidence
+
+- Unit: `amount_evidence_test.go` (helper table, `depositAdapterCall` classification).
+- Integration: `dep_ref_validate_integration_test.go` (every outcome x invalid reference, S-9, sync
+  amount match/missing/mismatch, deposit-, payout- and intent-bound conflicts, cross-tenant, the
+  callback-versus-sync race).
+- The T10 paths never post: every case asserts zero ledger transactions, an unchanged balance and a
+  balanced ledger.
+- Mutants and their kills: `docs/plans/payment-readiness/evidence/prh2-c-mutation-kill.txt`.
+
+### 34.6 Carried with C (test gaps, no production behaviour change)
+
+- **INVDEP1-BACKSTOP-BRANCH-TEST-1** (ledger-finance C-1): `invdep1_backstop_branch_integration_test.go`
+  reaches `postDepositSuccessOrDispute`'s backstop branch through a real race (the X5 construction):
+  the pre-check and the re-check pass, the 0107 index fires, and the branch disputes, logs
+  `payments_deposit_intent_index_backstop_fired` once, writes exactly one `payment.attempt_disputed`,
+  posts nothing a second time and commits. Mutant M2 is killed.
+- **KS-CAS-DISCRIM-TEST-1** (code-reviewer N1): `ks_cas_discrim_integration_test.go` forces a
+  non-kill-switch T2 conflict (the sibling-succeeded guard) at `drive.go`'s `!engaged` discrimination
+  and asserts the error surfaces with no false `kill_switch` reason or audit. Mutant K1 is killed.
+
+### 34.7 Residuals
+
+- The deposit poll path's reference and amount checks are PRH-2 D. The reference it polls is the
+  already-validated bound reference; D adds the echo comparison.
+- The new T10 reasons write an audit record but emit no new P1 log line: a disputed attempt is already
+  reported through reconciliation ("disputed: already a payments P1", `payment_statement.go`), and
+  adding a log site now would change the alert inventory that I-wire (ADR 0102) is about to wire. I-wire
+  should route these through the alert core with the other `payment.attempt_disputed` sites.

@@ -1,0 +1,57 @@
+PRH-2 C mutation kill record
+============================
+
+Workstream: PAY-DEP-REF-VALIDATE-1 (+ LF-5 sync amount evidence, LF-6 binding pre-check, S-9),
+INVDEP1-BACKSTOP-BRANCH-TEST-1 (mutant M2) and KS-CAS-DISCRIM-TEST-1 (mutant K1).
+Branch: prh2-c-dep-ref-validate (base c458bb8). Local run, NOT CI.
+
+Method: apply ONE source mutation at a time to a clean tree, run the targeted set below against a
+private database (priv_db.sh / priv_test.sh, `-tags integration -count=1`), record the failing
+tests, restore the file. A mutant is KILLED only if the run compiled and at least one test failed.
+The harness refuses to apply a mutation whose pattern does not match exactly once.
+
+Targeted set (-run):
+  TestDepRef|TestDepSync|TestDepositAdapterCall|TestCompareProviderAmount|TestMockDeposit_Echoes|
+  TestINVDEP1_BackstopBranch|TestKSCASDiscrim
+
+Baseline (unmutated): PASS.
+
+| Mutant | Mutation | Result | Failing tests (first three) |
+|---|---|---|---|
+| M2 | INVDEP1-BACKSTOP-BRANCH-TEST-1: disable the backstop branch in postDepositSuccessOrDispute (ErrDepositIntentAlreadyResolved no longer maps to T10/T13d) | KILLED | TestINVDEP1_BackstopBranch_PreCheckPassesLedgerIndexFires_DisputesAndCommits |
+| K1 | KS-CAS-DISCRIM-TEST-1: never return on !engaged at the cascade T2 CAS conflict (drive.go) | KILLED | TestKSCASDiscrim_NonKillSwitchT2ConflictIsNeverRecordedAsKillSwitch |
+| C-REF-1 | drop the adapter-response reference validation verdict (invalid reference no longer classifies ProviderRefInvalid) | KILLED | TestDepRef_InvalidReferenceOnAnyOutcomeParks_NoPersistenceNoRedirect, TestDepRef_ParkedAttemptIsNotAnErrorLoop_SweeperHasNothingToDo, TestDepositAdapterCall_ClassifiesReferenceAndAmountEvidence |
+| C-REF-2 | an empty Pending reference no longer parks (Pending uses the optional validator) | KILLED | TestDepRef_InvalidReferenceOnAnyOutcomeParks_NoPersistenceNoRedirect, TestDepositAdapterCall_ClassifiesReferenceAndAmountEvidence |
+| C-REF-3 | every outcome requires a reference (empty declined/ambiguous/sync-empty would park) | KILLED | TestDepRef_BoundaryAndNonParkingPaths, TestDepositAdapterCall_ClassifiesReferenceAndAmountEvidence |
+| C-REF-4 | a parked result is no longer scrubbed (reference/redirect survive) | KILLED | TestDepRef_InvalidReferenceOnAnyOutcomeParks_NoPersistenceNoRedirect, TestDepositAdapterCall_ClassifiesReferenceAndAmountEvidence |
+| C-REF-5 | phase C ignores ErrorClassProviderRefInvalid (falls to the default ambiguous branch) | KILLED | TestDepRef_InvalidReferenceOnAnyOutcomeParks_NoPersistenceNoRedirect, TestDepRef_ParkedAttemptIsNotAnErrorLoop_SweeperHasNothingToDo |
+| C-AMT-1 | drop the sync missing-amount check (missing evidence classifies Succeeded) | KILLED | TestDepSyncAmount_MissingEvidenceIsAmbiguousNotPostedNotDisputed, TestDepositAdapterCall_ClassifiesReferenceAndAmountEvidence |
+| C-AMT-2 | drop the sync amount comparison in phase C (a mismatch posts) | KILLED | TestDepSyncAmount_MismatchDisputesNoPosting |
+| C-AMT-3 | helper: the amount is no longer compared (only the asset) | KILLED | TestCompareProviderAmount_Table, _not_missing, TestDepSyncAmount_MismatchDisputesNoPosting |
+| C-AMT-4 | helper: the asset is no longer compared (only the amount) | KILLED | TestCompareProviderAmount_Table, TestDepSyncAmount_MismatchDisputesNoPosting |
+| C-AMT-5 | helper: a zero amount counts as a mismatch instead of missing | KILLED | TestCompareProviderAmount_Table, TestDepSyncAmount_MissingEvidenceIsAmbiguousNotPostedNotDisputed, TestDepositAdapterCall_ClassifiesReferenceAndAmountEvidence |
+| C-BIND-1 | drop the LF-6 binding pre-check verdict (a conflicting reference proceeds to the binding write) | KILLED | TestDepRefConflict_ReferenceBoundToAPayoutAttempt_Parks, TestDepRefConflict_ReferenceBoundToAnotherDepositAttempt_ParksEveryOutcome, TestDepRefConflict_ReferenceBoundToAnotherIntent_Parks |
+| C-BIND-2 | binding pre-check ignores payment_attempts (deposit AND payout attempts) | KILLED | TestDepRefConflict_ReferenceBoundToAPayoutAttempt_Parks, TestDepRefConflict_ReferenceBoundToAnotherDepositAttempt_ParksEveryOutcome |
+| C-BIND-3 | binding pre-check ignores deposit_intents | KILLED | TestDepRefConflict_ReferenceBoundToAnotherIntent_Parks |
+| C-BIND-4 | the attempt filter is restricted to deposit operations (payout-bound references pass) | KILLED | TestDepRefConflict_ReferenceBoundToAPayoutAttempt_Parks |
+| C-PARK-1 | park skips the intent projection recompute | KILLED | TestDepRefConflict_ReferenceBoundToAnotherDepositAttempt_ParksEveryOutcome, TestDepRef_InvalidReferenceOnAnyOutcomeParks_NoPersistenceNoRedirect, TestDepRef_ParkedAttemptIsNotAnErrorLoop_SweeperHasNothingToDo |
+| C-PARK-2 | park records its audit under a different action name (the dispute evidence is lost to consumers) | KILLED | TestDepRefConflict_ReferenceBoundToAPayoutAttempt_Parks, TestDepRefConflict_ReferenceBoundToAnotherDepositAttempt_ParksEveryOutcome, TestDepRefConflict_ReferenceBoundToAnotherIntent_Parks |
+
+Notes
+-----
+- M2 is killed by TestINVDEP1_BackstopBranch_PreCheckPassesLedgerIndexFires_DisputesAndCommits, a REAL race
+  (the X5 construction: racer A blocked on a held psp_clearing projection row, racer B entering
+  postDepositSuccessOrDispute, A commits, B's INSERT hits the 0107 index). No production seam. With M2 applied
+  the sentinel propagates as an error, B's transaction rolls back, and the test fails on the error.
+- K1 is killed by TestKSCASDiscrim_NonKillSwitchT2ConflictIsNeverRecordedAsKillSwitch: the non-kill-switch
+  cause is the T2 sibling-succeeded guard (the intent is already credited when a stray 'created' sibling reaches
+  T2). With K1 applied the conflict is recorded as a kill-switch decline instead of surfacing an error.
+- Equivalent mutant (not run, by reasoning): dropping the explicit `tenant_id = $1` predicate from
+  foreignReferenceBinding. Under FORCE RLS the table already hides other tenants, so no test can distinguish it;
+  the predicate is belt and braces. Cross-tenant behaviour is instead pinned by
+  TestDepRefConflict_CrossTenantSameStringHasNoEffectOnTheOtherTenant (tenant B reusing A's string neither
+  disturbs nor is disturbed by A; no cross-tenant read).
+- A pre-existing test fixture had to change: TestRVLF_N2_DriveGo and TestRVLF_N4 build a synthetic Succeeded
+  DepositResult. Without the new amount echo they would now hit T10 sync_amount_mismatch before reaching the
+  tombstone/T13 branch they exist to test (N2 would have kept passing for the wrong reason). Both fixtures now
+  carry Amount/AssetCode, so they exercise their original branch.
