@@ -156,3 +156,33 @@ With Z, the battery is 33 mutants, 33 KILLED.
 
 The P2 text mutants (`$S/d2_p2_mut.py`, two mutants) were re-run at a0a6325. Both KILLED:
 P2-TEXT-INRUN by TestD2_1; P2-TEXT-STANDING by TestD2_2, TestD2_3, TestD2_7.
+
+Ledger-finance D2 final review, PM-1 (provider_reference_conflict -> bound-if-referenced)
+----------------------------------------------------------------------------------------
+Change at 3a92cb2, test follow-through at 6c44c24. Same harness, private DB rebuilt for this round.
+
+Full battery at 3a92cb2 (35 mutants: the 33 above plus the two PM-1 mutants): 34 KILLED, 1
+SURVIVED.
+- The survivor was M-UNBOUND-BYMERCHANT-GATE. It was killed only by
+  TestD2_4/unbound_reason_on_a_reference_holding_attempt_is_still_flagged, which used
+  provider_reference_conflict on a reference-holding attempt. PM-1 moved exactly that case onto the
+  BOUND rule, so no test reached the unbound rule with a reference-holding attempt any more.
+- Fix (6c44c24, no assertion loosened): the subtest now runs both
+  provider_reference_conflict (now via the bound rule) and
+  invalid_provider_reference:control_char (still unbound), with identical assertions.
+- The affected and PM-1 mutants were re-run at 6c44c24:
+
+| Mutant | Change | Verdict | Killed by |
+|---|---|---|---|
+| PM1-CONFLICT-UNBOUND | `provider_reference_conflict` row reverted to `reasonUnbound` | KILLED | TestD2_14 (standing finding keyed on X missing: "want exactly one pay_captured_unposted ... got 0"), TestD2_P1_Every... ("classifies it unbound, ledger-finance requires bound-if-referenced") |
+| PM1-CONFLICT-BOUND | row set to `reasonBound` (bound even without a reference) | KILLED | TestD2_14 (phase C park without reference must have no standing finding), TestD2_4, TestD2_7, TestD2_P1_Every... |
+| M-UNBOUND-BYMERCHANT-GATE | unbound flag gated on merchant resolution | KILLED | TestD2_4/unbound_reason_on_a_reference_holding_attempt_is_still_flagged/invalid_provider_reference:control_char |
+| M-UNBOUND-FLAG-DROP | in-run unbound flag disabled | KILLED | TestD2_4, TestD2_5, TestD2_7 |
+| M-INVALID-DROP | invalid_provider_reference:* prefix branch removed | KILLED | TestD2_4, TestD2_5, TestD2_9b, TestD2_P1_Every... |
+
+Battery status at 6c44c24: 35 mutants, 35 KILLED, 0 survived. The other 30 mutants were killed at
+3a92cb2, and their code anchors and killing tests are unchanged by 6c44c24, which is a test-only commit
+adding a subcase.
+
+L1 (default an unclassified reason to bound-if-referenced) was NOT done: it would change
+TestD2_6's existing assertion that an unknown reason produces no finding. No mutant applies.
