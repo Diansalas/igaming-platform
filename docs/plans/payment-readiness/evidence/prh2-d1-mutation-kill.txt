@@ -45,5 +45,6 @@ D-FORCED-1	KILLED	QA F1: the succeeded x succeeded handling of a poll is dropped
 D-Z4	KILLED	code review Z4: a Missing poll no longer reschedules the live attempt (returns without RescheduleNonTerminal)	TestPollAmount_Missing_NeverPosts_StaysLiveAndAudited,TestPollAmount_Missing_NeverPosts_StaysLiveAndAudited/neither,TestPollAmount_Missing_NeverPosts_
 D-N2-1	KILLED	D1-CR-2: the N2 poll tombstone park reports a different terminal reason (poll_amount_mismatch via a drifted echo)	TestPollTombstone_OnBoundReference_DisputesEvenWithAnEmptyEcho,TestPollTombstone_OnBoundReference_DisputesEvenWithAnEmptyEcho/empty_echo,TestPollTombs
 D-FORCED-HOOK-1	KILLED	D1-CR-5 (T-FORCED-HOOK-OFF): deliverCallbackOnce returns before installing the onQuery hook, so no callback is delivered	TestF3SM_MismatchedPollAgainstAnAlreadySucceededAttempt_AuditsTheContradiction,TestF3SM_PollWithoutAmountAgainstSucceededAttempt_IsNotAContradiction,T
+D-FORCED-HOOK-2	KILLED	QA mutant B: the hook fires and closes `fired` but the callback is NOT applied (rvCallback skipped inside deliverCallbackOnce)	TestF3SM_MismatchedPollAgainstAnAlreadySucceededAttempt_AuditsTheContradiction,TestF3SM_PollWithoutAmountAgainstSucceededAttempt_IsNotAContradiction,T
 
-TOTAL 40 mutants: 38 KILLED, 2 SURVIVED (1 equivalent/unreachable, 1 pre-existing out of scope).
+TOTAL 41 mutants: 39 KILLED, 2 SURVIVED (1 equivalent/unreachable, 1 pre-existing out of scope).
