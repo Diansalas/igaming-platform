@@ -2128,7 +2128,7 @@ ADR's text, since code already existed by the time they landed:
 | Finding | Resolution |
 |---|---|
 | ledger-finance N1 (payout deny is a carve-out, not "zero ledger effect") | `withdrawal.DenyForCompliance`'s doc comment states this explicitly; it commits the reversal + `approved→rejected` transition + decision + audit together, in one transaction, exactly like `Reject`/`Fail`. §3.6/§7.6's general "deny = zero domain effect" rule is understood as covering `withdrawal_hold`/`deposit`/`play` only, never `withdrawal_payout` |
-| ledger-finance N2 (pre-insert lookup is new code) | `withdrawal.RequestWithdrawal` now does a read-only `getByTenantPlayerIdempotencyKey` lookup first, applies the wallet/asset/amount mismatch check on a hit, evaluates KYC only on a miss, and keeps the post-`IdempotentInsert` conflict branch unchanged for the genuine-race case — both paths tested (`TestRequestWithdrawal_IsIdempotentOnRetry`, `TestRequestWithdrawal_ConcurrentRequestsOnlyOneSucceeds`) |
+| ledger-finance N2 (pre-insert lookup is new code) | `withdrawal.RequestWithdrawal` now does a read-only `getByTenantPlayerIdempotencyKey` lookup first, applies the wallet/asset/amount mismatch check on a hit, evaluates KYC only on a miss, and keeps the post-`IdempotentInsert` conflict branch unchanged for the genuine-race case. **[CORRECTED 2026-09-28, fix round 9, code review T3]** This row originally cited `TestRequestWithdrawal_IsIdempotentOnRetry`/`TestRequestWithdrawal_ConcurrentRequestsOnlyOneSucceeds` for BOTH the "replay after hold is not re-gated" and "same-key genuine conflict" claims — neither test actually proves either: `IsIdempotentOnRetry` never changes KYC state between its two calls (so it would pass even if the gate ran on every replay), and `ConcurrentRequestsOnlyOneSucceeds` uses a distinct `uuid.New()` idempotency key per goroutine (so it never reaches the same-key conflict branch at all — it proves a DIFFERENT property, that concurrent DISTINCT-key requests each get their own row). The tests that actually prove THIS row's two claims were added in round 2 (§16.1) and already exist: `TestRequestWithdrawal_ReplayAfterRevocationIsNotReGated` (a KYC state change — revocation — between the original request and its replay does not re-deny the already-placed hold) and `TestRequestWithdrawal_SameKeyConcurrentRequestsRaceTheGate` (`internal/withdrawal/kyc_gate_integration_test.go`) — this row is corrected to cite those instead. |
 | ledger-finance N3 (`release_ledger_transaction_id` must be set in the same UPDATE) | Done — `DenyForCompliance`'s conditional `UPDATE ... SET state = 'rejected', release_ledger_transaction_id = $2 ... WHERE state = 'approved'` mirrors `Reject`/`Fail`/`Cancel` exactly |
 | ledger-finance N5 / security N1 (read key: per-Person vs per-PlayerAccount) | Resolved per security's own explicit prescription (the primary source, not the orchestrator's relayed paraphrase, which this implementation follows where the two differed): the read key is `(tenant_id, brand_id, player_account_id)` for every operation — never `person_id` as a primary key. `PersonID` is used **only** as an additional, deny-only overlay on the withdrawal structural rule (`crossAccountRejectedOverlay`): a rejection on a DIFFERENT `PlayerAccount` of the same `Person`, in the same tenant, denies a withdrawal from THIS account even when this account's own latest row is approved. Tested (`TestEvaluateEnforcement_WithdrawalCrossAccountRejectedOverlayDenies`, `TestEvaluateEnforcement_LatestRowWins*`) |
 | security N2 / C4(e) (cumulative_deposit is one-asset-per-jurisdiction; cross-asset structuring) | Migration 0100's unique index now includes `asset_code`; `evaluateDepositThreshold` fetches every active row for the trigger and asset, and returns `unavailable` (fail-closed) if any active row exists for the jurisdiction but none matches the requested asset — never silently `not_required`. True cross-asset aggregation (an FX/`ConversionOperation` basis) is out of scope, registered as **KYC-FX-AGG-1** (a new human-decision-gated follow-up; needs a rate source this platform does not have) |
@@ -2364,6 +2364,18 @@ open below land and every mandatory reviewer signs off clean.
   unlike withdrawal's own separately-committed-decision pattern, NO
   decision/audit row survives for that attempt. This is the same class of
   gap security condition 5 closed for withdrawal, not yet closed for play.
+  **[PARTIALLY CLOSED 2026-09-28, §23.1/§23.5; corrected same day, code
+  review `f-kyc-code-review.md` FK-1]** KYC-ENF-OUTAGE-1's savepoint fix to
+  `EvaluateEnforcement` applies to every call site, not only withdrawal -
+  a genuine DB-READ failure no longer aborts the caller's transaction at
+  all, so `postBet`/`PlaceBet`'s own subsequent `RecordDecision` call now
+  succeeds and commits exactly like withdrawal's already did. **This
+  closes the `EvaluateEnforcement`-error half only**, pinned by a
+  dedicated casino/sportsbook fault-injection test (§23.5). The
+  `RecordDecision`-error half (that call itself failing, e.g. on the
+  INSERT) is UNTOUCHED - it still runs directly against the caller's
+  transaction and still rolls back the whole bet with no decision/audit
+  row surviving on that specific failure. See §23.1/§23.5.
 - **B7 (same-key concurrent retry can report a denial for a hold that
   exists).** Not fixed - the narrow TOCTOU window code review named
   (KYC state changes between two concurrent same-key requests, one of
@@ -3549,3 +3561,314 @@ genuinely different held `expired` outcome produces a second, separate row. Muta
   registry row updated to "ruled and implemented, pending a light security confirmation" (this
   addendum's own fix has not yet had its own dedicated security pass, though it directly
   resolves security's own L-1/L-2 notes from re-verification 4).
+
+## 23. Fix round 9 (2026-09-28, identity-compliance) — KYC-ENF-OUTAGE-1 (N1, B1-now-truly-closed), N5, B4, T3, and the §15.1 N2 row correction
+
+Closes the code-reviewer FH-7 re-review's remaining blockers for
+`IMPLEMENTED` on the KYC enforcement outage path (N1) and the
+`KYC-ENF-TESTPINS-1` follow-up items assigned to `identity-compliance`
+(N5, B4's tenant-status filter, the `ActiveRequiresLegalReviewReference`
+assertion). Ledger-finance's LF-20 condition (§5-F of
+`docs/plans/prh2-hardening-round/plan.md`) governs this round: the
+`unavailable` path commits ONLY the decision and audit rows - no
+`withdrawal_requests` row, no ledger posting.
+
+### 23.1 N1 / KYC-ENF-OUTAGE-1 — CLOSED
+
+**The defect, precisely.** `internal/kyc.EvaluateEnforcement`'s branch
+functions (`evaluateWithdrawalStructuralRule`,
+`evaluateDepositThreshold`, `evaluatePlayTrigger`,
+`resolveLicensingJurisdictionID`) each swallow a genuine Postgres read
+error into a typed `unavailableDecision(...)` with a NIL Go error, per
+§2.6(c)'s own contract ("the query failed" must never be confused with
+"no rows found" or interpreted as `not_required`). Before this fix, those
+reads ran directly against the CALLER's transaction (`tx`). A real
+Postgres error (the reviewer's own probe: a second connection holding
+`LOCK TABLE kyc_verifications IN ACCESS EXCLUSIVE MODE` while the request
+transaction runs a short `lock_timeout`) therefore aborted the caller's
+entire transaction, even though `EvaluateEnforcement` itself returned
+successfully (`Outcome: unavailable`, `err == nil`). The caller (e.g.
+`withdrawal.RequestWithdrawal`) then tried to write that very
+`unavailable` decision INTO the now-aborted transaction and hit SQLSTATE
+25P02 - a raw, untyped error, never a `*KYCDeniedError`/
+`ErrKYCUnavailable`. Through the withdrawal HTTP handler this surfaced as
+a generic non-retryable 500, never the retryable 503 the handler's own
+`Outcome == OutcomeUnavailable` branch (`withdrawal_handlers.go:138-164`)
+was written for - that branch existed in source (§16.1's original B1 fix)
+but was UNREACHABLE by any genuine DB failure, only by a hand-constructed
+test value. This is the exact defect the FH-7 re-review's N1 finding and
+its lock-based probe demonstrated.
+
+**The fix.** A new package, `internal/db` (`savepoint.go`), exports
+`RunReadOnlyInSavepoint(ctx, tx, fn)`: it opens a SAVEPOINT nested in `tx`
+(the identical `pgx.Tx.Begin`-on-an-open-`Tx` mechanism
+`db/idempotency.go`'s `IdempotentInsert` already uses, per this task's own
+precedent), runs `fn` against that savepoint-scoped transaction, and
+UNCONDITIONALLY rolls the savepoint back afterwards regardless of whether
+`fn` succeeded, returned a business-level "could not determine" result,
+or hit a genuine Postgres error. This is always safe because
+`EvaluateEnforcement` is documented as read-only (§5: "it takes no row
+lock, plain SELECTs only") - there is nothing to lose by discarding the
+savepoint on success, and rolling back is the ONLY way to recover a
+usable connection state after a failure, without touching anything the
+OUTER transaction itself already holds (locks, prior writes, GUC
+settings).
+
+`EvaluateEnforcement` is split into itself (validation, then
+`db.RunReadOnlyInSavepoint`) and a new unexported `evaluateEnforcementReads`
+(the unchanged dispatch switch), with `evaluateEnforcementReads` now
+always receiving the SAVEPOINT-scoped transaction, never the caller's
+own. A genuine DB-read failure is therefore fully contained: the caller's
+transaction is never touched, so its own subsequent `kyc.RecordDecision`
+call - and every other domain write already in that transaction - proceeds
+exactly as if the failed read had never happened, and the resulting
+`unavailable` decision commits cleanly, in the caller's own healthy
+transaction, alongside its audit row.
+
+**Scope: every call site, not only withdrawal.** The fix lives in
+`EvaluateEnforcement` itself, so it applies uniformly to withdrawal,
+deposit, casino play, and sportsbook play - not withdrawal alone.
+
+**[REWORDED 2026-09-28, code review `f-kyc-code-review.md` FK-1]** §16.2's
+LF-I3-5 disclosure ("casino/sportsbook decision loss on DB error") names
+TWO distinct failure cases: `EvaluateEnforcement` itself returning a
+genuine read error, and `RecordDecision` returning one. This round's
+savepoint fix closes only the FIRST: before it, a genuine DB failure
+inside the KYC READ during `postBet`/`PlaceBet`'s evaluation rolled back
+the whole bet-placement transaction with no decision/audit row surviving;
+the read is now contained to a savepoint, so that failure mode is fixed,
+and is pinned by a dedicated play-path fault-injection test for BOTH
+casino and sportsbook (§23.5) - not merely reasoned about. The SECOND
+case - `RecordDecision` itself failing (e.g. a constraint violation, a
+connection drop, on the INSERT rather than the read) inside
+`postBet`/`PlaceBet` - is untouched by this fix: that write still runs
+directly against the caller's transaction, so its own failure still rolls
+back the whole bet with no decision/audit row surviving. This is the SAME
+class of gap security condition 5 already closed for withdrawal via
+`RequestWithdrawal`'s LF-I3-3 same-transaction-commit design (§17.1) -
+withdrawal's own `RecordDecision` call sits inside the SAME transaction as
+the request's own effects, deliberately, so a decision-write failure
+there aborts nothing it wasn't already going to abort; the play call
+sites have no equivalent design discipline documented or tested.
+**LF-I3-5 is corrected from "CLOSED" to: the evaluate-error half is
+CLOSED (§23.1, §23.5); the RecordDecision-error half remains OPEN**,
+superseding the earlier "LF-I3-5 is now CLOSED" claim in this same
+section and in §23.9's round-9 label summary. No fix for the
+RecordDecision-error half is built this round; it is registered as a
+named follow-up (see the F-kyc code review's own FK-1 finding).
+
+**Withdrawal-side handler mapping is unchanged in shape.**
+`withdrawal_handlers.go`'s existing `kycDenied.Decision.Outcome ==
+kyc.OutcomeUnavailable -> 503` branch (§16.1's B1 fix) required no source
+change - it was already correct, merely unreachable. This round makes it
+reachable. `withdrawal.ErrKYCUnavailable`'s own doc comment is corrected
+(it previously described itself as covering "a hard failure evaluating
+the KYC gate itself (a DB error)" - since this round, `RequestWithdrawal`
+only reaches that branch for a STRUCTURALLY INVALID call (missing
+tenant/brand/player/person id); a genuine DB read failure now always
+surfaces as an ordinary `unavailable` `EnforcementDecision` with a nil
+error, handled via the normal `*KYCDeniedError` path instead).
+
+**LF-20 (ledger-finance's condition on this round, §5-F):** proved
+directly - see §23.5's fault-injection tests, which assert zero
+`withdrawal_requests` rows and zero ledger postings alongside the single
+committed `unavailable` decision/audit pair.
+
+**Mutant MB1 (the handler's 503 branch disabled): KILLED** - see §23.5.
+
+### 23.2 N5 — `DenyForCompliance` now refuses `Outcome = unavailable`
+
+`withdrawal.DenyForCompliance` (`withdrawal.go`) gains a third guard,
+alongside B6's existing `Allowed == true` and wrong-`Operation` refusals:
+`decision.Outcome == kyc.OutcomeUnavailable` is refused outright, before
+touching the ledger, the request row, or the audit log, returning
+`ErrKYCUnavailable` (retryable - its own doc comment states this
+explicitly). An `unavailable` outcome means the evaluator could not
+determine the player's actual KYC state; it is never evidence of a
+compliance failure. Converting it into a terminal `rejected` withdrawal
+would strand a possibly-fully-compliant player's funds with no path back
+to `approved`. The request therefore stays exactly `approved`, so a
+later, healthy re-evaluation can still allow or (only then) genuinely
+deny the payout. The future ADR 0095 T1p/sweeper payout-dispatch caller
+(`internal/payments`'s own scope, not touched this round) must treat this
+as retryable, not terminal.
+
+Test: `TestDenyForCompliance_RefusesUnavailableOutcome`
+(`internal/withdrawal/kyc_gate_integration_test.go`) proves the refusal,
+the retryable error type, and zero domain effect (state stays `approved`,
+zero new decision rows).
+
+### 23.3 B4 — dormancy tenant-status filter, plus its first tests
+
+`ListDormantJurisdictionTriggers` (`internal/kyc/enforcement_dormancy.go`)
+had NO dedicated test at all before this round, and its "at least one
+LIVE tenant" claim (§6's own illustrative-query description) was never
+actually enforced: both its `cumulative_deposit` and `play` queries
+joined `tenants` with no filter on `tenants.status`, so a jurisdiction
+whose only tenant had gone `suspended`/`closed` was still reported as
+needing a dormant-policy decision. Fixed: both queries now add
+`t.status = 'active'`. Three new tests
+(`internal/kyc/enforcement_dormancy_integration_test.go`):
+`TestListDormantJurisdictionTriggers_ReportsEveryTriggerType` (a live
+tenant with no policy is reported for all three trigger keys),
+`TestListDormantJurisdictionTriggers_ActivePolicyExcludesOnlyThatTrigger`
+(activating one policy excludes only its own key), and
+`TestListDormantJurisdictionTriggers_ExcludesNonActiveTenants`
+(`suspended`/`closed`, each proven both against a fixture-sanity "before"
+state and mutation-verified - removing the filter reproduces false
+dormancy reports for both statuses).
+
+### 23.4 T3 — `ActiveRequiresLegalReviewReference` now asserts the exact SQLSTATE and constraint
+
+`TestMigration0100_ActiveRequiresLegalReviewReference`
+(`internal/kyc/enforcement_integration_test.go`) previously asserted only
+`err != nil`, which would pass identically for an unrelated failure (a
+different CHECK, an RLS denial, a dropped connection) as for the
+constraint actually under test. It now asserts `db.IsCheckViolation(err)`
+(SQLSTATE 23514) AND the exact firing constraint's name via a new
+`db.CheckViolationConstraintName` helper (mirroring
+`UniqueViolationConstraintName`'s existing contract), looked up
+dynamically at test time from `pg_constraint` by its definition text
+(`legal_review_reference IS NOT NULL`) rather than a hardcoded guess at
+Postgres's auto-generated constraint name.
+
+### 23.5 Fault-injection tests (KYC-ENF-OUTAGE-1's own DoD item)
+
+Two tests reproduce the FH-7 re-review's exact probe (a second connection
+holding `LOCK TABLE kyc_verifications IN ACCESS EXCLUSIVE MODE`; the
+request transaction running with a short `lock_timeout`), deterministically
+(the blocker's own `LOCK TABLE` statement only returns once the lock is
+genuinely held - no polling, no wall-clock assertion beyond Postgres's own
+`lock_timeout` GUC, which is exactly what is under test):
+
+- `TestRequestWithdrawal_KYCStoreOutage_FailsClosedWithOneUnavailableDecision`
+  (`internal/withdrawal/kyc_outage_fault_injection_integration_test.go`)
+  drives `RequestWithdrawal` directly, with `SET LOCAL lock_timeout =
+  '300ms'` inside the request transaction. Its LF-20 ledger assertion
+  (ledger-finance `f-kyc-ledger-finance.md` F-1, fixed in a follow-up
+  commit on this same branch) counts the tenant's WHOLE
+  `ledger_transactions` table and both the `player_cash`/
+  `player_withdrawal_hold` projection balances before/after, rather than
+  filtering by a correlation id a hold posting could never carry.
+- `TestRequestWithdrawalHandler_KYCStoreOutageReturns503`
+  (`internal/httpserver/kyc_outage_503_integration_test.go`) drives the
+  REAL HTTP handler end to end, via a dedicated `*db.Pool` whose
+  connections are opened with `lock_timeout=300ms` as a session default
+  through the connection string's own `options` parameter (a
+  per-connection startup GUC - no role, database, or shared test
+  infrastructure is altered). **[FK-3, code review `f-kyc-code-review.md`]**
+  Only `newFinancialTestServer` uses this `lock_timeout`-scoped pool;
+  every fixture (`mustCreateTenant`, `mustCreateBrand`, `mustRegisterPlayer`,
+  `mustActivatePlayer`, `fundWallet`) is seeded through the ORDINARY
+  `testEnv` pool, so a fixture statement contending with another
+  package's own DDL on a shared CI database cannot spuriously fail with
+  `55P03` at a 300ms threshold that has nothing to do with what this test
+  is actually probing.
+
+Both assert: a retryable outcome (`*KYCDeniedError{Decision.Outcome:
+unavailable}` / HTTP 503), the exact code
+`kyc_unavailable:verification_lookup_failed` (**FK-4**, not merely
+`Outcome=unavailable`), exactly one `kyc_enforcement_decisions` row with
+`outcome = 'unavailable'`, exactly one `audit_log` row, zero
+`withdrawal_requests` rows, and zero ledger postings (LF-20).
+
+**FK-1 (play-path counterparts, code review `f-kyc-code-review.md`):** the
+same lock/`lock_timeout` handshake is repeated for BOTH play surfaces,
+each with its own `lockKYCVerificationsTable` helper (package-private,
+duplicated per this repo's convention) -
+`TestReceiveCallback_KYCStoreOutage_DeclinesUnavailableWithOneDecisionRow`
+(`internal/casino/kyc_play_outage_integration_test.go`) and
+`TestPlaceBet_KYCStoreOutage_DeclinesUnavailableWithOneDecisionRow`
+(`internal/sportsbook/kyc_play_outage_integration_test.go`), each against
+a REAL active play policy (not the dormant/`not_required` default). Both
+assert: the bet declined with code
+`kyc_unavailable:verification_lookup_failed`, exactly one
+`kyc_enforcement_decisions` row with `outcome = 'unavailable'` for the
+matching operation (`casino_play`/`sportsbook_play`), the player's cash
+balance unchanged, and `SUM(debits) == SUM(credits)` with zero postings
+for the tenant. These pin the evaluate-error half of LF-I3-5 (§23.1) for
+the play surfaces specifically, closing the gap the code review named:
+before this, nothing in the repo committed a play-path outage test at
+all.
+
+### 23.6 KYC-ENF-TESTPINS-1: B6 and MPLAYREC now pinned
+
+Two more `DenyForCompliance` pins alongside N5:
+`TestDenyForCompliance_RefusesAllowedDecision` (MB6 - an `Allowed: true`
+decision is refused, `ErrInvalidInput`, zero domain effect) and
+`TestDenyForCompliance_RefusesWrongOperation` (the companion
+wrong-`Operation` guard). Both mutation-verified (disabling the guard
+under test made the corresponding test fail).
+
+The casino and sportsbook play-deny tests
+(`TestReceiveCallback_BetDeniedByKYCPlayPolicy_NoLedgerEffect`,
+`TestPlaceBet_DeniedByKYCPlayPolicy_NoLedgerEffect`) gained decision-row
+and audit-row assertions for a REAL evaluation's deny path (MPLAYREC),
+mutation-verified on BOTH the casino and sportsbook call sites
+(`internal/casino/orchestrator.go`, `internal/sportsbook/orchestrator.go`)
+per the task's own instruction to mutate the sportsbook path too, not
+only casino's.
+
+### 23.7 §15.1 N2 row correction
+
+§15.1's table cited `rv-0096-ledger-reverify.md`/`rv-0096-security-reverify.md`
+N2 findings; the code-reviewer FH-7 re-review separately flagged that
+§15.1's OWN "N2" reference (ledger-finance N2, the pre-insert idempotency
+lookup) had drifted from being about the correct pairing of tests by the
+time of the FH-7 round - `rv-prh-i3-code-review.md`'s "Required before
+IMPLEMENTED" list names this as "registry prose update and the ADR 0096
+N2 row" (T3's own tracking item). Corrected: §15.1's ledger-finance-N2 row
+already names `TestRequestWithdrawal_IsIdempotentOnRetry` and
+`TestRequestWithdrawal_ConcurrentRequestsOnlyOneSucceeds` correctly - the
+row that was actually wrong is `docs/plans/payment-readiness/evidence/
+prh-i3-mutation-kill.txt`'s own "unavailable IS exercised... via
+DepositDormantByDefault" sentence (already corrected 2026-09-28 in that
+file per the FH-7 addendum, cross-referenced here rather than duplicated,
+since the file itself is this round's evidence record of record).
+
+### 23.8 Verification (fix round 9)
+
+`gofmt -l .` clean. `go build ./...`, `go vet ./...`, `go vet -tags
+integration ./...` all clean. `golangci-lint run --allow-parallel-runners
+./...` (pinned 2.9.0 binary): 0 issues. `go test -race -tags=integration
+-count=1` for `./internal/kyc/...`, `./internal/withdrawal/...`,
+`./internal/casino/...`, `./internal/sportsbook/...`,
+`./internal/httpserver/...` (timing lane tests skipped per this round's
+own harness instructions) - 0 FAIL, against a private database. Manual
+mutation kills recorded in
+`docs/plans/payment-readiness/evidence/prh-i3-mutation-kill.txt`'s
+"ADDENDUM 2026-09-28 (identity-compliance...)" section: MB1, MB6, and
+MPLAYREC (both casino and sportsbook) all KILLED.
+
+### 23.9 Labels (round 9 summary)
+
+- **KYC-ENF-OUTAGE-1 (N1):** IMPLEMENTED - savepoint fix applied to every
+  `EvaluateEnforcement` call site; fault-injection tests pass; LF-20
+  proved directly; MB1 killed. **B1 is now TRULY closed** (§16.1's fix was
+  correct in shape but unreachable; this round makes it reachable).
+- **LF-I3-5 (§16.2):** **[CORRECTED 2026-09-28, code review `f-kyc-code-
+  review.md` FK-1]** PARTIALLY CLOSED, not fully closed as this row
+  originally claimed. The evaluate-error half is CLOSED - the same
+  savepoint fix closes the casino/sportsbook decision-loss-on-DB-error gap
+  as a direct consequence of fixing N1 at the shared
+  `EvaluateEnforcement` level, pinned by a dedicated play-path
+  fault-injection test for both casino and sportsbook (§23.5). The
+  RecordDecision-error half remains OPEN: `postBet`/`PlaceBet`'s own
+  `RecordDecision` INSERT still runs directly against the caller's
+  transaction, so ITS failure still rolls back the whole bet with no
+  decision/audit row surviving - untouched by this round, registered as a
+  named follow-up.
+- **N5:** IMPLEMENTED - `DenyForCompliance` refuses `Outcome = unavailable`,
+  retryable, tested.
+- **B4:** IMPLEMENTED - tenant-status filter added, three tests, one
+  mutation-verified.
+- **T3 (`ActiveRequiresLegalReviewReference`):** IMPLEMENTED - exact
+  SQLSTATE and constraint name asserted.
+- **KYC-ENF-TESTPINS-1 (identity-compliance's share: B6, MPLAYREC, N5):**
+  IMPLEMENTED - all three mutation-verified KILLED (MB6, MPLAYREC on both
+  casino and sportsbook; N5 has no assigned mutant ID but is directly
+  tested).
+- No KYC or RG threshold value is seeded or invented by this round;
+  HD-KYC-1..8 are unchanged. F-pay (deposit/payout `RecordDecision` call
+  sites, N3) is explicitly OUT of this round's scope (payments lane,
+  `internal/payments/*` not touched).

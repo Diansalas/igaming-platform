@@ -13,9 +13,13 @@
 // LABEL: IMPLEMENTED for the mechanism described in ADR 0096 §2/§3.2/§3.5
 // as wired into internal/withdrawal, internal/casino, internal/sportsbook
 // by this same change. The deposit call site (internal/payments.
-// InitiateDeposit) is NOT wired by this change - PRH-I1 rewrites that
-// function and calls this exported service (task split, task-registry.md
-// PRH-I3 row). No production threshold value exists anywhere in this
+// InitiateDeposit, at the time this file was written) was NOT wired by
+// this change - PRH-I1 rewrote that call site (task split, task-
+// registry.md PRH-I3 row). [Status note] InitiateDeposit itself is now
+// deleted (PROV-OUTBOUND-CRED-1-LEGACY-PATH, E2); the deposit call site
+// is InitiateDepositAttempt (internal/payments/deposit_v2.go), which
+// calls this exported service via KYCEnforcementDepositGate
+// (internal/payments/kycgate.go). No production threshold value exists anywhere in this
 // file; every numeric value this package ever compares against comes
 // from a kyc_enforcement_policies row an operator authors later (ADR
 // 0096 §3.7) - zero rows are seeded by migration 0100.
@@ -47,6 +51,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Diansalas/igaming-platform/internal/audit"
+	"github.com/Diansalas/igaming-platform/internal/db"
 )
 
 // PolicyVersion is EvaluateEnforcement's own compiled-in logic version,
@@ -177,6 +182,28 @@ var ErrEnforcementUnavailable = errors.New("kyc: enforcement evaluation unavaila
 // EnforcementDecision{Outcome: OutcomeUnavailable, Allowed: false}, per
 // §2.6(c): "no rows found" and "the query failed" are different states,
 // and a query failure must never be interpreted as not_required.
+//
+// KYC-ENF-OUTAGE-1 (2026-09-28, code review N1/rv-prh-i3-code-review.md
+// "Re-review (FH-7)"): every read below runs inside a SAVEPOINT nested
+// within tx (db.RunReadOnlyInSavepoint), not directly against tx. Before
+// this fix, a genuine Postgres error inside e.g.
+// readLatestVerificationByPlayerAccount aborted the CALLER's transaction
+// (tx) - the branch functions below already swallow that error into a
+// typed unavailableDecision with a nil Go error (§2.6(c)'s own contract),
+// so EvaluateEnforcement itself returned successfully while silently
+// leaving tx unusable. The caller (e.g. withdrawal.RequestWithdrawal)
+// would then try to write that very "unavailable" decision INTO the now-
+// aborted tx and hit SQLSTATE 25P02, which the withdrawal handler could
+// only map to a generic non-retryable 500 - never the fail-closed,
+// retryable 503 ADR 0096 §7.6 and the handler's own outcome-mapping
+// (withdrawal_handlers.go:138-164) intend for an `unavailable` outcome.
+// Running every read against a savepoint, and unconditionally rolling it
+// back afterwards (safe: this function is read-only, §5, "it takes no row
+// lock"), means a failed read is fully contained: tx itself is never
+// touched, so the caller's own RecordDecision call - and every other
+// domain write already in tx - keeps working exactly as if the failed
+// read had never happened, and the resulting `unavailable` decision
+// commits cleanly.
 func EvaluateEnforcement(ctx context.Context, tx pgx.Tx, params EnforcementParams) (EnforcementDecision, error) {
 	if params.TenantID == uuid.Nil || params.BrandID == uuid.Nil || params.PlayerAccountID == uuid.Nil {
 		return EnforcementDecision{}, fmt.Errorf("kyc: tenant/brand/player account ids are required")
@@ -188,14 +215,39 @@ func EvaluateEnforcement(ctx context.Context, tx pgx.Tx, params EnforcementParam
 		return EnforcementDecision{}, fmt.Errorf("kyc: person id is required")
 	}
 
-	// Withdrawal's structural rule (§3.2 point 1) needs NO policy-table
-	// lookup and therefore no jurisdiction resolution at all (§5:
-	// "withdrawal_hold/withdrawal_payout need no policy-table lookup and
-	// no withdrawal_requests history query") - resolved lazily below,
-	// only for the two operations that actually consult a policy row, so
-	// a tenant with no licence bound (a perfectly ordinary fixture/test
-	// state, or an as-yet-unlicensed tenant) never turns every withdrawal
-	// into a spurious `unavailable`.
+	var decision EnforcementDecision
+	if err := db.RunReadOnlyInSavepoint(ctx, tx, func(spTx pgx.Tx) error {
+		var evalErr error
+		decision, evalErr = evaluateEnforcementReads(ctx, spTx, params)
+		return evalErr
+	}); err != nil {
+		// evaluateEnforcementReads itself never returns a non-nil error for
+		// an ordinary DB read failure (those are folded into
+		// unavailableDecision, per §2.6(c)) - a non-nil error here means
+		// RunReadOnlyInSavepoint's OWN housekeeping failed (opening or
+		// rolling back the savepoint), which is itself a sign the
+		// connection/outer transaction is unusable. Fail closed the same
+		// way as any other evaluator failure, rather than propagating a Go
+		// error a caller might mistake for a structural caller bug.
+		return unavailableDecision("savepoint_failed"), nil
+	}
+	return decision, nil
+}
+
+// evaluateEnforcementReads is EvaluateEnforcement's dispatch, unchanged in
+// behavior from before KYC-ENF-OUTAGE-1 - the only difference is that its
+// caller now always passes a SAVEPOINT-scoped tx, never the caller's own
+// transaction directly.
+//
+// Withdrawal's structural rule (§3.2 point 1) needs NO policy-table
+// lookup and therefore no jurisdiction resolution at all (§5:
+// "withdrawal_hold/withdrawal_payout need no policy-table lookup and
+// no withdrawal_requests history query") - resolved lazily below,
+// only for the two operations that actually consult a policy row, so
+// a tenant with no licence bound (a perfectly ordinary fixture/test
+// state, or an as-yet-unlicensed tenant) never turns every withdrawal
+// into a spurious `unavailable`.
+func evaluateEnforcementReads(ctx context.Context, tx pgx.Tx, params EnforcementParams) (EnforcementDecision, error) {
 	switch {
 	case isWithdrawalOperation(params.Operation):
 		return evaluateWithdrawalStructuralRule(ctx, tx, params)

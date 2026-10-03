@@ -15,7 +15,6 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Diansalas/igaming-platform/internal/ledger"
-	"github.com/Diansalas/igaming-platform/internal/payments"
 	"github.com/Diansalas/igaming-platform/internal/reconciliation/statement"
 	"github.com/Diansalas/igaming-platform/internal/withdrawal"
 )
@@ -33,40 +32,41 @@ func (w *payWorld) runInfo(t *testing.T, src statement.PaymentStatementSource, o
 // legacyDeposit simulates a deposit posted BEFORE the payments callback
 // cutover (PRH-payments-callback-cutover): a deposit_intents row with no
 // payment_attempts row at all, and a ledger_transaction_id set directly -
-// exactly the on-disk SHAPE the pre-cutover live path (InitiateDeposit plus
-// the old, now-removed deposit_intents-only ReceiveVerifiedCallback) used
-// to produce.
+// exactly the on-disk SHAPE the pre-cutover live path (the now-removed
+// InitiateDeposit/attemptDeposit chain plus the old, now-removed
+// deposit_intents-only ReceiveVerifiedCallback) used to produce.
 //
 // After the cutover, ReceiveVerifiedCallback resolves every deposit
 // callback through payment_attempts (ApplyReceiptEvidence, ADR 0095 §6.1,
-// INV-IO-14) - a deposit_intents row created via the legacy InitiateDeposit
-// helper (still exported for this reconciliation-history test, but no
-// longer reachable from any live HTTP path) has no attempt to resolve
-// against, so a callback for it is now correctly `deferred_unresolved`
-// (never posted) rather than posted via the old, now-removed
-// intent-only path. This helper therefore constructs the pre-cutover
-// on-disk shape directly (InitiateDeposit for the intent row, then a raw
-// ledger.Post plus a direct UPDATE for the posting) instead of driving it
-// through today's callback path, so this test keeps proving what it always
+// INV-IO-14) - a deposit_intents row with no attempt has no attempt to
+// resolve against, so a callback for it is now correctly
+// `deferred_unresolved` (never posted) rather than posted via the old,
+// now-removed intent-only path.
+//
+// PROV-OUTBOUND-CRED-1-LEGACY-PATH (E2): the legacy InitiateDeposit chain
+// that used to produce this on-disk shape is deleted. This helper now
+// constructs the identical shape directly via a raw INSERT (the same
+// columns/values setIntentAttempt used to write: status='pending',
+// provider_id, provider_reference) instead of going through the removed
+// orchestrator call, then applies the same raw ledger.Post plus a direct
+// UPDATE for the posting - so this test keeps proving what it always
 // proved: reconciliation's legacy_unattempted exclusion (F1) for
 // attempt-less historical data, independent of how such data is created.
 func (w *payWorld) legacyDeposit(t *testing.T, amount int64) string {
 	t.Helper()
-	var intent payments.DepositIntent
+	intentID := uuid.New()
+	ref := "legacy-ref-" + uuid.NewString()
 	if err := w.pool.WithTenant(context.Background(), w.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		var err error
-		intent, err = w.orch.InitiateDeposit(ctx, tx, payments.InitiateDepositParams{
-			Scope:     payments.DepositScope{TenantID: w.f.tenantID, BrandID: w.f.brandID, PlayerAccountID: w.f.playerAccountID, WalletID: w.f.walletID},
-			AssetCode: "EUR", Amount: amount, PaymentMethod: "card", IdempotencyKey: "legacy-" + uuid.NewString(),
-		})
+		_, err := tx.Exec(ctx,
+			`INSERT INTO deposit_intents (id, tenant_id, brand_id, player_account_id, wallet_id, asset_code, amount, payment_method, idempotency_key, provider_id, provider_reference, status)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, 'card', $8, $9, $10, 'pending')`,
+			intentID, w.f.tenantID, w.f.brandID, w.f.playerAccountID, w.f.walletID, "EUR", amount,
+			"legacy-"+uuid.NewString(), payProvA, ref,
+		)
 		return err
 	}); err != nil {
-		t.Fatalf("legacy InitiateDeposit: %v", err)
+		t.Fatalf("legacy deposit_intents insert: %v", err)
 	}
-	if intent.ProviderReference == nil {
-		t.Fatalf("legacy deposit has no provider reference (status %s)", intent.Status)
-	}
-	ref := *intent.ProviderReference
 	if err := w.pool.WithTenant(context.Background(), w.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		accounts, err := ledger.GetOrCreateAccounts(ctx, tx, w.f.tenantID,
 			ledger.AccountSpec{WalletID: &w.f.walletID, AccountType: ledger.AccountPlayerCash, AssetCode: "EUR"},
@@ -79,7 +79,7 @@ func (w *payWorld) legacyDeposit(t *testing.T, amount int64) string {
 		providerID := payProvA
 		postResult, err := ledger.Post(ctx, tx, ledger.TransactionInput{
 			TenantID: w.f.tenantID, TransactionType: ledger.TxDeposit, IdempotencyKey: payProvA + ":" + ref,
-			ProviderID: &providerID, ProviderTxID: &ref, CorrelationID: intent.ID,
+			ProviderID: &providerID, ProviderTxID: &ref, CorrelationID: intentID,
 			Entries: []ledger.EntryInput{
 				{LedgerAccountID: clearingAccountID, Direction: ledger.Debit, Amount: amount},
 				{LedgerAccountID: cashAccountID, Direction: ledger.Credit, Amount: amount},
@@ -89,7 +89,7 @@ func (w *payWorld) legacyDeposit(t *testing.T, amount int64) string {
 			return err
 		}
 		_, err = tx.Exec(ctx, `UPDATE deposit_intents SET status = 'succeeded', ledger_transaction_id = $1 WHERE id = $2`,
-			postResult.TransactionID, intent.ID)
+			postResult.TransactionID, intentID)
 		return err
 	}); err != nil {
 		t.Fatalf("legacy deposit posting: %v", err)

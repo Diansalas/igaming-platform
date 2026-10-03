@@ -11,7 +11,9 @@
 // idempotency mechanism (ADR 0020's SAVEPOINT-based exact-retry path in
 // internal/db.IdempotentInsert, consumed today by internal/ledger.Post,
 // internal/withdrawal.RequestWithdrawal, and internal/payments.
-// InitiateDeposit). It sits ONE LAYER BELOW that mechanism: it is how an
+// InitiateDepositAttempt ([deleted by E2, 2026-09-28] this used to name
+// InitiateDeposit, now deleted - PROV-OUTBOUND-CRED-1-LEGACY-PATH)). It
+// sits ONE LAYER BELOW that mechanism: it is how an
 // adapter derives the exact string value it hands to that mechanism as
 // provider_tx_id/idempotency_key, so the mechanism's own uniqueness
 // constraint means what everyone assumes it means.

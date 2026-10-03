@@ -1,8 +1,12 @@
 // PRH-I1 step (a): the payment_attempts data-access layer (migration
 // 0101, ADR 0095 §4 and §13.1). This file is deliberately scoped to
-// types plus INSERT/CAS-transition functions ONLY - nothing here is
-// called by InitiateDeposit, the webhook path or the withdrawal handlers
-// yet (that wiring is PRH-I1 steps b-i). Every function is a thin,
+// types plus INSERT/CAS-transition functions ONLY - at the time this
+// step was written, nothing here was yet called by InitiateDeposit, the
+// webhook path or the withdrawal handlers (that wiring was PRH-I1 steps
+// b-i). [Status note, E2] InitiateDeposit itself is now deleted
+// (PROV-OUTBOUND-CRED-1-LEGACY-PATH); every function in this file is
+// called from the live InitiateDepositAttempt/drive/sweeper/payout paths
+// today. Every function is a thin,
 // tenant-RLS-scoped wrapper around exactly one ADR 0095 §4.3 transition,
 // so the CAS predicate in Go and the guard trigger in migration 0101
 // enforce the SAME rule from two independent layers (defense in depth,

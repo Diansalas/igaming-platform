@@ -267,38 +267,27 @@ func (w *isoWorld) deposit(it *isoTenant, amount int64) payments.InboundCallback
 
 func (w *isoWorld) depositFor(it *isoTenant, p isoPlayer, amount int64) payments.InboundCallback {
 	w.t.Helper()
-	var intent payments.DepositIntent
-	providerRef := "iso-ref-" + uuid.NewString()
-	if err := w.pool.WithTenant(context.Background(), it.tenant.ID, func(ctx context.Context, tx pgx.Tx) error {
-		var err error
-		intent, err = w.payOrch.InitiateDeposit(ctx, tx, payments.InitiateDepositParams{
-			Scope:     payments.DepositScope{TenantID: it.tenant.ID, BrandID: it.brandID, PlayerAccountID: p.id, WalletID: p.walletID},
-			AssetCode: "EUR", Amount: amount, PaymentMethod: "card", IdempotencyKey: "iso-" + uuid.NewString(),
-		})
-		if err != nil {
-			return err
-		}
-		// Legacy InitiateDeposit creates no payment_attempts row (it is not
-		// reachable from any live HTTP path any more; only this test
-		// harness's synthetic-callback helper still calls it). Drive a
-		// matching attempt through the SAME T1+T2/T4 transitions
-		// InitiateDepositAttempt would have produced, so the callback below
-		// resolves and posts exactly like a real one - this test is about
-		// pool/tenant isolation under the resolver, not about the deposit
-		// state machine itself.
-		attempt, err := payments.InsertSubmittingAttempt(ctx, tx, payments.NewSubmittingAttempt{
-			ID: uuid.New(), TenantID: it.tenant.ID, Operation: payments.AttemptOperationDeposit,
-			DepositIntentID: &intent.ID, ProviderID: "mock-psp", PaymentMethod: "card",
-			AssetCode: "EUR", Amount: amount, Interactive: false,
-			ClaimToken: uuid.New(), LeaseOwner: "iso-test", LeaseUntil: time.Now().Add(time.Minute),
-		})
-		if err != nil {
-			return err
-		}
-		return payments.MarkAccepted(ctx, tx, attempt.ID, payments.EvidenceSync, providerRef, time.Now().Add(time.Minute))
-	}); err != nil {
-		w.t.Fatalf("InitiateDeposit: %v", err)
+	// PROV-OUTBOUND-CRED-1-LEGACY-PATH (E2): the legacy InitiateDeposit/
+	// attemptDeposit chain is gone. InitiateDepositAttempt (the live v2
+	// entry point) creates the matching payment_attempts row itself as
+	// part of its own T1+T2/T4 transitions - no need to hand-drive
+	// InsertSubmittingAttempt/MarkAccepted separately any more. A fresh
+	// isoTenant has no licence bound, so KYCEnforcementDepositGate is a
+	// structural not_required pass here, exactly like the real deposit
+	// handler wires it (deposit_handlers.go) - this test is about
+	// pool/tenant isolation under the resolver, not about the deposit
+	// state machine itself.
+	res, err := w.payOrch.InitiateDepositAttempt(context.Background(), w.pool, payments.KYCEnforcementDepositGate{}, payments.MockCredentialResolver{}, payments.InitiateDepositParams{
+		Scope:     payments.DepositScope{TenantID: it.tenant.ID, BrandID: it.brandID, PlayerAccountID: p.id, WalletID: p.walletID},
+		AssetCode: "EUR", Amount: amount, PaymentMethod: "card", IdempotencyKey: "iso-" + uuid.NewString(),
+	})
+	if err != nil {
+		w.t.Fatalf("InitiateDepositAttempt: %v", err)
 	}
+	if res.Attempt.ProviderReference == nil || *res.Attempt.ProviderReference == "" {
+		w.t.Fatalf("expected InitiateDepositAttempt to set a provider_reference, got %+v", res.Attempt)
+	}
+	providerRef := *res.Attempt.ProviderReference
 	in := w.payMock.CallbackPayload(it.tenant.ID, payments.CallbackEventDeposit, providerRef, "", payments.OutcomeSucceeded, amount, "EUR", "", false)
 	in.Header = in.Header.Clone()
 	webhookauth.PaymentsScheme().SetHeaders(in.Header, webhookauth.MockKeyID,

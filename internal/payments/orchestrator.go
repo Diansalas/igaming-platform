@@ -11,10 +11,8 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Diansalas/igaming-platform/internal/audit"
-	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/ledger"
 	"github.com/Diansalas/igaming-platform/internal/providerref"
-	"github.com/Diansalas/igaming-platform/internal/rg"
 	"github.com/Diansalas/igaming-platform/internal/webhookauth"
 )
 
@@ -158,34 +156,6 @@ type RoutingRequest struct {
 	ExcludeProviderIDs []string
 }
 
-// RouteProvider implements payment-orchestration.md §4's routing
-// dimensions 1 (tenant/brand, via ListRoutingCandidates being scoped to
-// tenant/brand already), 3 (currency/asset), 4 (payment method), 5
-// (amount), and 6 (provider health) - dimension 2 (jurisdiction) is
-// TODO(jurisdiction) per RoutingRequest's doc comment. Candidates are
-// filtered down to those active, registered, healthy (circuit not open),
-// and matching every dimension, then ranked by health (higher rolling
-// success rate first, then lower p99 latency), with Priority breaking
-// ties among "otherwise-equal" candidates exactly as
-// docs/decisions/0022 §2 describes it - Priority is a tie-breaker, not
-// the primary ranking key, because §6 of payment-orchestration.md states
-// health ranking picks "the healthiest" among survivors.
-func (o *Orchestrator) RouteProvider(ctx context.Context, tx pgx.Tx, req RoutingRequest) (PaymentProvider, ProviderCapability, error) {
-	candidates, err := ListRoutingCandidates(ctx, tx, req.TenantID, req.BrandID)
-	if err != nil {
-		return nil, ProviderCapability{}, err
-	}
-	// NOTE (PRH-I1 step (c), ADR 0095 §9.6): this convenience wrapper is
-	// kept ONLY for the existing (pre-step-(b)) InitiateDeposit/
-	// attemptDeposit call sites, which still call HealthStatus while
-	// holding tx - the exact gap §9.6 exists to close, not yet fixed on
-	// that path because that path is not cut over to the two-phase
-	// pattern in this step (deposit_v2.go's own doc comment names the
-	// cutover as later PRH-I1 work). RankRoutingCandidates below is the
-	// tx-free replacement InitiateDepositAttempt actually uses.
-	return RankRoutingCandidates(ctx, candidates, o.providers, o.breaker, req)
-}
-
 // RankRoutingCandidates is ADR 0095 §9.6's "Rank(candidates, health)":
 // filters and ranks an already-loaded candidate list against live
 // health/circuit state, taking NO transaction and NO tx parameter at
@@ -312,8 +282,9 @@ func amountWithinLimits(capability ProviderCapability, assetCode string, amount 
 // DepositScope carries only server-derived identifiers
 // (payment-orchestration.md §3): tenant_id, brand_id, player_account_id,
 // and wallet_id must all be resolved from the caller's own authenticated
-// session/context before InitiateDeposit is called - never populated from
-// client-supplied request fields. Carrying them in their own struct
+// session/context before InitiateDepositAttempt is called ([deleted by
+// E2] this used to name InitiateDeposit, now deleted) - never populated
+// from client-supplied request fields. Carrying them in their own struct
 // (rather than as bare InitiateDepositParams fields) is deliberate, per
 // that section's own instruction, "precisely so that a future caller
 // cannot pass a client-supplied value positionally without it being
@@ -325,7 +296,8 @@ type DepositScope struct {
 	WalletID        uuid.UUID
 }
 
-// InitiateDepositParams is InitiateDeposit's input. AssetCode/Amount/
+// InitiateDepositParams is InitiateDepositAttempt's input ([deleted by
+// E2] it used to be InitiateDeposit's, now deleted). AssetCode/Amount/
 // PaymentMethod/IdempotencyKey are the only caller-controlled fields -
 // everything identifying WHO is depositing comes from Scope.
 type InitiateDepositParams struct {
@@ -369,7 +341,8 @@ type DepositIntent struct {
 	// RedirectURL/HostedFieldToken are transient - migration 0025 has no
 	// column for either, since they are only meaningful once, at
 	// initiation time (a caller redirects the player or mounts hosted
-	// fields immediately using the value InitiateDeposit itself returns).
+	// fields immediately using the value InitiateDepositAttempt itself
+	// returns - [deleted by E2] this used to be InitiateDeposit's).
 	// A later lookup of the same intent (e.g. a player polling their own
 	// deposit's status) will not repopulate these fields - that is by
 	// design, not a bug.
@@ -513,7 +486,7 @@ func setIntentAttempt(ctx context.Context, tx pgx.Tx, intentID uuid.UUID, provid
 
 func validateInitiateDepositParams(p InitiateDepositParams) error {
 	if p.Scope.TenantID == uuid.Nil || p.Scope.BrandID == uuid.Nil || p.Scope.PlayerAccountID == uuid.Nil || p.Scope.WalletID == uuid.Nil {
-		return fmt.Errorf("payments: InitiateDeposit requires a fully-populated, server-derived DepositScope")
+		return fmt.Errorf("payments: deposit initiation requires a fully-populated, server-derived DepositScope")
 	}
 	if p.Amount <= 0 {
 		return fmt.Errorf("payments: amount must be positive, got %d", p.Amount)
@@ -528,312 +501,6 @@ func validateInitiateDepositParams(p InitiateDepositParams) error {
 		return fmt.Errorf("payments: idempotency_key is required")
 	}
 	return nil
-}
-
-// InitiateDeposit creates (or, on a client-side retry, returns) a
-// DepositIntent and drives it through RouteProvider and the chosen
-// adapter's synchronous Deposit call, including cascade-on-decline and
-// ambiguous-outcome resolution (payment-orchestration.md §5, §7). tx must
-// already be tenant-scoped via db.Pool.WithTenant(params.Scope.TenantID,
-// ...).
-//
-// Code-review C6 (rv-prh-i1-callback-code-review.md, ad476d6): TEST-ONLY.
-// This is the pre-ADR-0095 (pre-InitiateDepositAttempt) deposit-creation
-// chain, superseded everywhere in production by
-// InitiateDepositAttempt/the attempt-driven state machine (attempt.go,
-// drive.go). No non-test caller invokes InitiateDeposit anymore; kept only
-// because some pre-cutover regression tests still construct fixtures
-// through it. Do not add a new production call site - use
-// InitiateDepositAttempt instead.
-//
-// Idempotency (payment-orchestration.md §8): a retried call with the same
-// (tenant_id, player_account_id, idempotency_key) returns the ORIGINAL
-// intent as-is - never a second call to any provider - via the same
-// SAVEPOINT pattern ledger.Post uses (db.IdempotentInsert), against
-// deposit_intents' own UNIQUE(tenant_id, player_account_id,
-// idempotency_key) constraint (migration 0025).
-func (o *Orchestrator) InitiateDeposit(ctx context.Context, tx pgx.Tx, params InitiateDepositParams) (DepositIntent, error) {
-	if err := validateInitiateDepositParams(params); err != nil {
-		return DepositIntent{}, err
-	}
-
-	intentID := uuid.New()
-	conflict, _, err := db.IdempotentInsert(ctx, tx, func(spTx pgx.Tx) error {
-		_, err := spTx.Exec(ctx,
-			`INSERT INTO deposit_intents (id, tenant_id, brand_id, player_account_id, wallet_id, asset_code, amount, payment_method, idempotency_key)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-			intentID, params.Scope.TenantID, params.Scope.BrandID, params.Scope.PlayerAccountID, params.Scope.WalletID,
-			params.AssetCode, params.Amount, params.PaymentMethod, params.IdempotencyKey,
-		)
-		return err
-	})
-	if err != nil {
-		return DepositIntent{}, fmt.Errorf("payments: create deposit intent: %w", err)
-	}
-
-	if conflict {
-		existing, found, err := loadDepositIntentByIdempotencyKey(ctx, tx, params.Scope.TenantID, params.Scope.PlayerAccountID, params.IdempotencyKey)
-		if err != nil {
-			return DepositIntent{}, err
-		}
-		if !found {
-			return DepositIntent{}, fmt.Errorf("payments: idempotency conflict on deposit intent but no existing row found")
-		}
-		// A retry must reuse the SAME deposit parameters as the original -
-		// never be silently accepted against a different payload (see
-		// ErrIdempotencyKeyReused's doc comment; mirrors
-		// internal/ledger.Post and internal/withdrawal.RequestWithdrawal's
-		// identical check on their own idempotency conflict path).
-		if existing.BrandID != params.Scope.BrandID || existing.WalletID != params.Scope.WalletID ||
-			existing.AssetCode != params.AssetCode || existing.Amount != params.Amount || existing.PaymentMethod != params.PaymentMethod {
-			return DepositIntent{}, fmt.Errorf("%w: existing intent %s", ErrIdempotencyKeyReused, existing.ID)
-		}
-		return existing, nil
-	}
-
-	intent := DepositIntent{
-		ID: intentID, TenantID: params.Scope.TenantID, BrandID: params.Scope.BrandID,
-		PlayerAccountID: params.Scope.PlayerAccountID, WalletID: params.Scope.WalletID,
-		AssetCode: params.AssetCode, Amount: params.Amount, PaymentMethod: params.PaymentMethod,
-		IdempotencyKey: params.IdempotencyKey, Status: DepositIntentPending,
-	}
-
-	if err := audit.Record(ctx, tx, audit.Entry{
-		TenantID: params.Scope.TenantID, ActorType: audit.ActorPlayer, ActorID: params.Scope.PlayerAccountID,
-		Action: "deposit.requested", TargetType: "deposit_intent", TargetID: intentID.String(), Outcome: audit.OutcomeSuccess,
-		Metadata: map[string]any{"amount": params.Amount, "asset_code": params.AssetCode, "payment_method": params.PaymentMethod},
-	}); err != nil {
-		return DepositIntent{}, fmt.Errorf("payments: audit deposit request: %w", err)
-	}
-
-	// Stage 9 production-readiness fix (identity-compliance): internal/
-	// rg.EvaluateEligibility - the single authoritative "may this player
-	// perform a gambling-adjacent financial action right now" boundary
-	// (ADR 0026 §5), consulted by internal/casino's LaunchGame/postBet
-	// since Stage 4D-RG - was never consulted anywhere on the deposit
-	// path. An active platform-wide self-exclusion (or a suspended
-	// player account, or a non-active wallet) had NO effect on whether a
-	// deposit could be initiated: a self-excluded player could fund a
-	// wallet indefinitely even though they could never launch a game or
-	// place a bet with the resulting balance. Checked here, inside the
-	// SAME transaction that created intent above, and strictly BEFORE
-	// RouteProvider/provider.Deposit ever run - a denied player must
-	// never reach a real payment provider at all.
-	//
-	// Deliberately surfaced as a DepositIntentDeclined RESULT via
-	// finalizeDeclined, never as a Go error: a non-nil error returned
-	// from inside this same db.Pool.WithTenant callback rolls back the
-	// whole transaction, which would silently discard the very audit
-	// record this check exists to create - the identical class of bug
-	// internal/casino.evaluateAndAuditEligibility's own doc comment
-	// already records finding and fixing once before on the casino
-	// launch/bet path ("an earlier error-based attempt was found, by
-	// test, to silently roll back its own audit record").
-	eligibility, err := rg.EvaluateEligibility(ctx, tx, rg.EligibilityParams{
-		TenantID: intent.TenantID, BrandID: intent.BrandID, PlayerAccountID: intent.PlayerAccountID, WalletID: intent.WalletID,
-	})
-	if err != nil {
-		return DepositIntent{}, fmt.Errorf("payments: evaluate rg eligibility: %w", err)
-	}
-	if !eligibility.Allowed {
-		if err := audit.Record(ctx, tx, audit.Entry{
-			TenantID: intent.TenantID, ActorType: audit.ActorSystem, Action: "payments.deposit_denied_by_rg",
-			TargetType: "player_account", TargetID: intent.PlayerAccountID.String(), Outcome: audit.OutcomeDenied,
-			Metadata: map[string]any{
-				"reason_code": eligibility.Code, "person_id": eligibility.PersonID.String(),
-				"deposit_intent_id": intent.ID.String(), "brand_id": intent.BrandID.String(),
-			},
-		}); err != nil {
-			return DepositIntent{}, fmt.Errorf("payments: audit rg denial: %w", err)
-		}
-		return o.finalizeDeclined(ctx, tx, intent, nil, nil, "rg_ineligible:"+eligibility.Code)
-	}
-
-	return o.attemptDeposit(ctx, tx, intent, nil)
-}
-
-// InitiateDepositAudited is InitiateDeposit's own pool-based wrapper
-// (ledger-finance review C4, rv-fh3-ledger.md 076e42e; ADR 0095 §28.3
-// rule 3). InitiateDeposit itself takes a bare tx, never a pool, so it
-// cannot open the SEPARATE, freshly-committed transaction §28.3 rule 3's
-// P1/audit row (RecordDepositMultipleSuccessRefusal) requires once its
-// own tx has already rolled back on ErrDepositIntentAlreadyResolved
-// (DepositIntentAlreadyResolvedRefusal, resolveAmbiguous's own wrapped
-// form of it) - exactly the same shape RecordDepositReversalRejection's
-// own doc comment describes for the reversal-rejection case, whose caller
-// is the HTTP layer for the same reason.
-//
-// TEST-ONLY today: InitiateDeposit (and therefore this wrapper) has no
-// production caller - InitiateDepositAttempt is the current, real
-// production entry point (see InitiateDeposit's own doc comment). This
-// wrapper exists so §28.3 rule 3 is actually satisfiable, with a test
-// proving it, rather than left permanently unwired (security P2-L2's own
-// finding) while the legacy chain still exists at all - the smaller,
-// safer of ledger-finance's two offered options (wire it, vs. delete the
-// whole legacy chain).
-func (o *Orchestrator) InitiateDepositAudited(ctx context.Context, pool *db.Pool, params InitiateDepositParams) (DepositIntent, error) {
-	var result DepositIntent
-	err := pool.WithTenant(ctx, params.Scope.TenantID, func(ctx context.Context, tx pgx.Tx) error {
-		var err error
-		result, err = o.InitiateDeposit(ctx, tx, params)
-		return err
-	})
-	var refusal *DepositIntentAlreadyResolvedRefusal
-	if errors.As(err, &refusal) {
-		auditErr := pool.WithTenant(ctx, refusal.TenantID, func(ctx context.Context, tx pgx.Tx) error {
-			return RecordDepositMultipleSuccessRefusal(ctx, tx, refusal.TenantID, refusal.IntentID, refusal.ProviderID, refusal.ProviderReference)
-		})
-		if auditErr != nil {
-			return result, fmt.Errorf("payments: record deposit multiple success refusal: %w (original error: %v)", auditErr, err)
-		}
-	}
-	return result, err
-}
-
-// attemptDeposit routes and attempts one provider Deposit call for
-// intent, recursing (via handleDecline) on a cascadable decline up to
-// MaxCascadeDepth, and resolving an ambiguous synchronous outcome via
-// QueryStatus before ever cascading (payment-orchestration.md §5).
-// excluded is every provider_id already attempted for this intent so far
-// - its length IS the current cascade depth, so no separate depth
-// parameter is threaded through.
-func (o *Orchestrator) attemptDeposit(ctx context.Context, tx pgx.Tx, intent DepositIntent, excluded []string) (DepositIntent, error) {
-	provider, capability, err := o.RouteProvider(ctx, tx, RoutingRequest{
-		TenantID: intent.TenantID, BrandID: intent.BrandID, AssetCode: intent.AssetCode,
-		PaymentMethod: intent.PaymentMethod, Amount: intent.Amount, Operation: OperationDeposit,
-		ExcludeProviderIDs: excluded,
-	})
-	if errors.Is(err, ErrNoRoutableProvider) {
-		return o.finalizeDeclined(ctx, tx, intent, nil, nil, "no_routable_provider")
-	}
-	if err != nil {
-		return intent, fmt.Errorf("payments: route provider: %w", err)
-	}
-	providerID := capability.ProviderID
-
-	result, err := provider.Deposit(ctx, DepositRequest{
-		MerchantReference: intent.ID.String(), Amount: intent.Amount, AssetCode: intent.AssetCode, PaymentMethod: intent.PaymentMethod,
-	})
-	if err != nil {
-		// Transport-level failure while initiating: the platform cannot
-		// tell whether the provider actually received the request, so
-		// this is OutcomeAmbiguous by policy - never a decline (which
-		// could silently discard a request the provider did receive) and
-		// never cascaded without a reference to query
-		// (payment-orchestration.md §5).
-		return o.finalizeAmbiguous(ctx, tx, intent, &providerID, nil, "initiation_transport_error")
-	}
-
-	switch result.Outcome {
-	case OutcomePending:
-		if result.ProviderReference == "" {
-			return intent, fmt.Errorf("payments: adapter %s returned OutcomePending with no provider reference", providerID)
-		}
-		ref := result.ProviderReference
-		if _, err := setIntentAttempt(ctx, tx, intent.ID, &providerID, &ref, DepositIntentPending); err != nil {
-			return intent, err
-		}
-		intent.ProviderID, intent.ProviderReference, intent.Status = &providerID, &ref, DepositIntentPending
-		intent.RedirectURL, intent.HostedFieldToken = result.RedirectURL, result.HostedFieldToken
-		if err := audit.Record(ctx, tx, audit.Entry{
-			TenantID: intent.TenantID, ActorType: audit.ActorSystem, Action: "deposit.initiated",
-			TargetType: "deposit_intent", TargetID: intent.ID.String(), Outcome: audit.OutcomeSuccess,
-			Metadata: map[string]any{"provider_id": providerID, "provider_reference": ref},
-		}); err != nil {
-			return intent, fmt.Errorf("payments: audit deposit initiated: %w", err)
-		}
-		return intent, nil
-
-	case OutcomeDeclined:
-		return o.handleDecline(ctx, tx, intent, providerID, result.ProviderReference, result.Cascadable, result.DeclineReason, excluded)
-
-	case OutcomeAmbiguous:
-		return o.resolveAmbiguous(ctx, tx, intent, providerID, provider, result.ProviderReference, excluded)
-
-	default:
-		return intent, fmt.Errorf("payments: adapter %s returned invalid synchronous Deposit outcome %q", providerID, result.Outcome)
-	}
-}
-
-// handleDecline records a definite decline and either cascades to the
-// next-ranked candidate (if the adapter declared it cascadable and the
-// cascade depth budget allows) or finalizes the intent as declined
-// (payment-orchestration.md §5).
-func (o *Orchestrator) handleDecline(ctx context.Context, tx pgx.Tx, intent DepositIntent, providerID, providerReference string, cascadable bool, reason string, excluded []string) (DepositIntent, error) {
-	var refPtr *string
-	if providerReference != "" {
-		refPtr = &providerReference
-	}
-	if err := audit.Record(ctx, tx, audit.Entry{
-		TenantID: intent.TenantID, ActorType: audit.ActorSystem, Action: "deposit.attempt_declined",
-		TargetType: "deposit_intent", TargetID: intent.ID.String(), Outcome: audit.OutcomeFailure,
-		Metadata: map[string]any{"provider_id": providerID, "provider_reference": providerReference, "decline_reason": reason, "cascadable": cascadable},
-	}); err != nil {
-		return intent, fmt.Errorf("payments: audit attempt decline: %w", err)
-	}
-
-	attemptsSoFar := len(excluded) + 1
-	if cascadable && attemptsSoFar < o.maxCascadeDepth() {
-		nextExcluded := make([]string, 0, len(excluded)+1)
-		nextExcluded = append(nextExcluded, excluded...)
-		nextExcluded = append(nextExcluded, providerID)
-		return o.attemptDeposit(ctx, tx, intent, nextExcluded)
-	}
-	return o.finalizeDeclined(ctx, tx, intent, &providerID, refPtr, reason)
-}
-
-// resolveAmbiguous implements payment-orchestration.md §5's binding rule:
-// "the orchestrator must not cascade on an ambiguous/timeout outcome; it
-// must call the provider's QueryStatus to resolve the ambiguity first...
-// and only cascade once that provider has returned a definite decline."
-// If QueryStatus itself cannot resolve it (error, or still
-// pending/ambiguous), the intent is left in DepositIntentAmbiguous -
-// "left open pending manual/reconciliation resolution", never cascaded
-// and never silently marked failed.
-func (o *Orchestrator) resolveAmbiguous(ctx context.Context, tx pgx.Tx, intent DepositIntent, providerID string, provider PaymentProvider, providerReference string, excluded []string) (DepositIntent, error) {
-	if providerReference == "" {
-		return o.finalizeAmbiguous(ctx, tx, intent, &providerID, nil, "no_provider_reference_to_query")
-	}
-	status, err := provider.QueryStatus(ctx, providerReference)
-	if err != nil {
-		return o.finalizeAmbiguous(ctx, tx, intent, &providerID, &providerReference, "query_status_failed")
-	}
-
-	switch status.Outcome {
-	case OutcomeSucceeded:
-		// ADR 0095 §28.3 rule 3, legacy InitiateDeposit row: no attempt row
-		// exists on this path (attemptID = nil), so resolvedForOtherDeposit
-		// counts EVERY succeeded sibling attempt of the intent - correct
-		// per the ledger-finance ruling's own confirmation (§3(iii)). On
-		// ErrDepositIntentAlreadyResolved: nothing is posted and nothing is
-		// committed for this success (the error propagates and the
-		// CALLER's transaction rolls back, exactly like every other error
-		// this function already returns). There is no attempt to dispute
-		// on this path, so this is neither T10 nor T13d - the caller must
-		// write the P1 plus deposit.multiple_success_refused audit row in
-		// a SEPARATE, freshly-opened transaction after the rollback
-		// (RecordDepositMultipleSuccessRefusal below), mirroring
-		// RecordDepositReversalRejection's identical pattern for a typed
-		// rejection whose caller's tx has already rolled back. This
-		// legacy, no-attempt-row path has no production caller today
-		// (InitiateDeposit is scheduled for removal, security P2-L2) and
-		// is exercised only by tests/the receive-bridge. Ledger-finance
-		// review C4: InitiateDeposit itself only ever holds a bare tx
-		// (never a pool), so it cannot open that separate transaction -
-		// wrap the sentinel with the context InitiateDepositAudited
-		// (this file) needs to do so itself, one level up.
-		updated, _, err := o.postDepositSuccess(ctx, tx, intent, nil, providerID, providerReference, status.Amount, status.AssetCode)
-		if errors.Is(err, ErrDepositIntentAlreadyResolved) {
-			return updated, &DepositIntentAlreadyResolvedRefusal{
-				IntentID: intent.ID, TenantID: intent.TenantID, ProviderID: providerID, ProviderReference: providerReference,
-			}
-		}
-		return updated, err
-	case OutcomeDeclined:
-		return o.handleDecline(ctx, tx, intent, providerID, providerReference, status.Cascadable, status.DeclineReason, excluded)
-	default: // OutcomeAmbiguous or OutcomePending - still unresolved
-		return o.finalizeAmbiguous(ctx, tx, intent, &providerID, &providerReference, "still_unresolved_after_query_status")
-	}
 }
 
 func (o *Orchestrator) finalizeDeclined(ctx context.Context, tx pgx.Tx, intent DepositIntent, providerID, providerReference *string, reason string) (DepositIntent, error) {
@@ -907,28 +574,6 @@ func (o *Orchestrator) finalizeAmbiguous(ctx context.Context, tx pgx.Tx, intent 
 // rollback, never a credit.
 var ErrDepositIntentAlreadyResolved = errors.New("payments: deposit intent is already financially resolved by another attempt or posting")
 
-// DepositIntentAlreadyResolvedRefusal wraps ErrDepositIntentAlreadyResolved
-// with the context ADR 0095 §28.3 rule 3's P1/audit row
-// (RecordDepositMultipleSuccessRefusal) needs, for the legacy InitiateDeposit
-// path specifically (ledger-finance review C4, rv-fh3-ledger.md 076e42e).
-// resolveAmbiguous's OutcomeSucceeded branch returns this instead of the
-// bare sentinel because it has no attempt row to dispute (attemptID is nil
-// on this path) - there is nothing else in the returned value that could
-// carry intentID/providerID/providerReference back out. errors.Is(err,
-// ErrDepositIntentAlreadyResolved) still reports true via Unwrap, so every
-// existing caller that only checks the sentinel is unaffected.
-type DepositIntentAlreadyResolvedRefusal struct {
-	IntentID          uuid.UUID
-	TenantID          uuid.UUID
-	ProviderID        string
-	ProviderReference string
-}
-
-func (e *DepositIntentAlreadyResolvedRefusal) Error() string {
-	return ErrDepositIntentAlreadyResolved.Error()
-}
-func (e *DepositIntentAlreadyResolvedRefusal) Unwrap() error { return ErrDepositIntentAlreadyResolved }
-
 // resolvedForOtherDeposit implements ADR 0095 §28.2's resolved_for_other
 // predicate exactly:
 //
@@ -939,9 +584,12 @@ func (e *DepositIntentAlreadyResolvedRefusal) Unwrap() error { return ErrDeposit
 // An exact redelivery (same attempt, same idempotency key) is therefore
 // NOT "resolved for other" - it keeps today's replay semantics
 // (AlreadyPosted / duplicate_effect). attemptID is nil on the legacy
-// InitiateDeposit path (no attempt row exists yet); "id IS DISTINCT FROM
-// NULL" is true for every row, so every succeeded sibling counts there -
-// ledger-finance's own confirmation of the AM-2 revision (§3(iii)).
+// InitiateDeposit path ([deleted by E2] production InitiateDeposit is
+// gone; only the TEST-ONLY legacyShapeInitiateDeposit copy,
+// receive_bridge_integration_test.go, still exercises this nil-attemptID
+// shape - no attempt row exists yet on that path either); "id IS DISTINCT
+// FROM NULL" is true for every row, so every succeeded sibling counts
+// there - ledger-finance's own confirmation of the AM-2 revision (§3(iii)).
 func resolvedForOtherDeposit(ctx context.Context, tx pgx.Tx, tenantID, intentID uuid.UUID, attemptID *uuid.UUID, idempotencyKey string) (bool, error) {
 	var exists bool
 	err := tx.QueryRow(ctx,
@@ -1116,11 +764,13 @@ func (o *Orchestrator) postDepositSuccess(ctx context.Context, tx pgx.Tx, intent
 	// T7/T13 evidence-application call sites already checked before ever
 	// calling this function (rule 1.4, postDepositSuccessOrDispute below)
 	// - the re-check exists so that no caller, including the legacy
-	// InitiateDeposit path and any future one, can reach ledger.Post for
-	// an already financially resolved intent. attemptID is nil on the
-	// legacy path (no attempt row exists): resolvedForOtherDeposit then
-	// counts EVERY succeeded sibling attempt, which is correct there
-	// (ledger-finance's confirmation of the AM-2 revision, §3(iii)).
+	// InitiateDeposit path ([deleted by E2]; only the TEST-ONLY
+	// legacyShapeInitiateDeposit copy still exercises this shape) and any
+	// future one, can reach ledger.Post for an already financially
+	// resolved intent. attemptID is nil on the legacy path (no attempt
+	// row exists): resolvedForOtherDeposit then counts EVERY succeeded
+	// sibling attempt, which is correct there (ledger-finance's
+	// confirmation of the AM-2 revision, §3(iii)).
 	idemKey := providerID + ":" + providerReference
 	resolved, err := resolvedForOtherDeposit(ctx, tx, intent.TenantID, intent.ID, attemptID, idemKey)
 	if err != nil {
@@ -1486,28 +1136,6 @@ func RecordDepositReversalRejection(ctx context.Context, tx pgx.Tx, tenantID uui
 	}); err != nil {
 		return fmt.Errorf("payments: audit deposit reversal rejection: %w", err)
 	}
-	return nil
-}
-
-// RecordDepositMultipleSuccessRefusal is the ADR 0095 §28.3 rule-3 legacy
-// InitiateDeposit counterpart to RecordDepositReversalRejection: when
-// resolveAmbiguous's synchronous QueryStatus success returns
-// ErrDepositIntentAlreadyResolved, the caller's transaction has already
-// rolled back (nothing was posted, nothing committed for the success), so
-// the P1 plus the deposit.multiple_success_refused audit row are written
-// here, in a SEPARATE, freshly-opened transaction the caller provides -
-// exactly the same pattern RecordDepositReversalRejection already uses for
-// its own typed rejection.
-func RecordDepositMultipleSuccessRefusal(ctx context.Context, tx pgx.Tx, tenantID, intentID uuid.UUID, providerID, providerReference string) error {
-	if err := audit.Record(ctx, tx, audit.Entry{
-		TenantID: tenantID, ActorType: audit.ActorSystem, Action: "deposit.multiple_success_refused",
-		TargetType: "deposit_intent", TargetID: intentID.String(), Outcome: audit.OutcomeDenied,
-		Metadata: map[string]any{"provider_id": providerID, "provider_reference": providerReference},
-	}); err != nil {
-		return fmt.Errorf("payments: audit deposit multiple success refusal: %w", err)
-	}
-	slog.Default().Error("payments_multiple_success_for_intent_alert",
-		"tenant_id", tenantID.String(), "deposit_intent_id", intentID.String(), "attempt_id", "")
 	return nil
 }
 

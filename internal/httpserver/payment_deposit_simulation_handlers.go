@@ -55,9 +55,11 @@ import (
 // built), never from this request's body:
 //
 //   - provider_reference comes from the intent's own ProviderReference
-//     (assigned by attemptDeposit when the mock's synchronous Deposit call
-//     returned OutcomePending - orchestrator.go), never a caller-supplied
-//     string. A forged or foreign reference could otherwise resolve to a
+//     (assigned by setIntentAttempt via InitiateDepositAttempt's phase C
+//     when the mock's synchronous Deposit call returned OutcomePending -
+//     [deleted by E2] this used to be attemptDeposit's job, orchestrator.go),
+//     never a caller-supplied string. A forged or foreign reference could
+//     otherwise resolve to a
 //     DIFFERENT deposit intent entirely (the same class of finding
 //     requireRollbackTargetOwnedByRound closes for casino rollback).
 //   - amount/asset_code come from the intent's own Amount/AssetCode,
@@ -161,8 +163,10 @@ func requireDepositAwaitingCallback(intent payments.DepositIntent) error {
 	}
 	if intent.ProviderID == nil || intent.ProviderReference == nil {
 		// Defensive only: every DepositIntentPending row is written with
-		// both fields set in the same statement (attemptDeposit,
-		// orchestrator.go) - this branch should be unreachable.
+		// both fields set in the same statement (setIntentAttempt, called
+		// from InitiateDepositAttempt's phase C - [deleted by E2] this
+		// used to be attemptDeposit's job, orchestrator.go) - this branch
+		// should be unreachable.
 		return &apierror.Error{Code: apierror.CodeConflict, Message: "deposit is not awaiting a provider callback"}
 	}
 	return nil

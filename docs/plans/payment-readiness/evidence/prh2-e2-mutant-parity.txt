@@ -1,0 +1,273 @@
+PRH-2 E2 (PROV-OUTBOUND-CRED-1-LEGACY-PATH) mutant parity
+===========================================================
+
+Scope: LF-16 (docs/plans/prh2-hardening-round/reviews/ledger-finance.md),
+as corrected by code-review E2d (docs/plans/prh2-hardening-round/reviews/
+code-reviewer-verification.md). Requirement: re-confirm, before deleting
+the legacy Orchestrator.InitiateDeposit/attemptDeposit/handleDecline/
+resolveAmbiguous/RecordDepositMultipleSuccessRefusal chain, that every
+INV-DEP-1/A7/reconciliation mutant recorded in
+docs/plans/payment-readiness/evidence/prh-i1-mutation-kill.txt is still
+killed by a test that does NOT depend on the deleted chain - i.e. that the
+"legacy chain is the only path to ledger.ErrDepositAlreadyPostedForIntent"
+premise was false (E2d), and that the live path's own coverage already
+carries this weight.
+
+Method: BEFORE deleting anything, confirmed (by source inspection - grep
+for orch.InitiateDeposit(/orch.InitiateDepositAudited(/orch.resolveAmbiguous(
+in every test file named below) that NONE of these tests call the legacy
+chain. AFTER deleting the chain (this branch, commit series below) and
+migrating the 21 call sites in 10 files, re-ran the identical named tests
+against a private scratch database (PRIV_DB=e2legacy1, rebuilt from this
+worktree's migrations via priv_db.sh) under -tags=integration. Every test
+below is unaffected by the deletion by construction (it never called any
+deleted symbol, confirmed by grep before AND after), so "still passes" is
+equivalent to "still kills its named mutant" - the mutated code path
+(resolvedForOtherDeposit, postDepositSuccess, postDepositSuccessOrDispute,
+applyMultipleSuccessDispute, auditMultipleSuccessForIntent, the 0107
+guard/backstop triggers, payment_statement.go's capturedUnposted/
+checkUnmatchedAttempts) is completely untouched by E2's deletion - only
+orchestrator.go's legacy-only functions and the now-orphaned
+DepositIntentAlreadyResolvedRefusal wrapper type were removed.
+
+Before/after table
+------------------
+
+| Mutant (per prh-i1-mutation-kill.txt) | Killed by | Before E2 (legacy chain present) | After E2 (legacy chain deleted) |
+|---|---|---|---|
+| N3 (resolved-sibling predicate, T12 trigger) / TestINVDEP1_Mutation1 | TestINVDEP1_Mutation1_ResolvedForOtherDepositPredicate | PASS (does not call legacy chain) | PASS |
+| Tombstone-precedes-multiple-success | TestINVDEP1_Mutation6_TombstonePrecedesMultipleSuccessForIntent | PASS | PASS |
+| T10/T13d re-drive real multiple-success reason | TestINVDEP1_O2_ReDriveOfDisputedAttempt_RealMultipleSuccessReason_NoPost | PASS | PASS |
+| F-L1 MT (tenant-scoping bypass on resolvedForOtherDeposit) | TestINVDEP1_FL1_ApplicationChokePointCatchesItBeforeTheDBBackstop | PASS | PASS |
+| F-L1 MC (both application-level pre/re-checks bypassed) | TestINVDEP1_FL1_ApplicationChokePointCatchesItBeforeTheDBBackstop (same test, second mode) | PASS | PASS |
+| F-L2 (P1 alert content leaks amount) | TestINVDEP1_FL2_MultipleSuccessAlertLogContentIsPinned | PASS | PASS |
+| C3 (multiple_success_for_intent audit carries amount/asset_code) | TestINVDEP1_C3_MultipleSuccessAuditRecordCarriesAmountAndAsset | PASS | PASS |
+| MC2 (postDepositSuccess's own internal re-check, independent of the pre-check) | TestINVDEP1_MC2_PostDepositSuccessInternalRecheck | PASS | PASS |
+| X5 (ledger.ErrDepositAlreadyPostedForIntent -> ErrDepositIntentAlreadyResolved mapping in postDepositSuccess) - THE LEDGER-BACKSTOP SENTINEL | TestX5_LedgerBackstopMapping | PASS | PASS |
+| H1b (reversal fingerprint, raw wire outcome preserved end to end) | TestINVDEP1_H1b_ReversalFingerprintEndToEnd_RawWireOutcomePreserved | PASS | PASS |
+| F-M1 (0107 guard trigger accepts a NULL terminal_reason) | TestMigration0107_T13tT13d_TerminalReasonTrigger_HEAD | PASS | PASS |
+| R3 (0107 up-migration preflight messages, attempts index) | TestMigration0107_Up_DuplicateSucceededAttempts_RefusedByAttemptsPreflight | PASS | PASS |
+| R3 (0107 up-migration preflight messages, ledger index) | TestMigration0107_Up_DuplicateLedgerPostings_RefusedByLedgerPreflight | PASS | PASS |
+| L1 (0107 down-migration CHECK-restore runbook wrapping) | TestMigration0107_Down_RefusesWithRunbookMessageWhenCapturedUnpostedRowExists | PASS | PASS |
+| 0107 ledger backstop unique-index (direct fixture) | TestMigration0107_LedgerBackstop_ErrDepositAlreadyPostedForIntent | PASS | PASS |
+| C2 (pay_captured_unposted stands, unwindowed) [internal/reconciliation] | TestINVDEP1_C2_CapturedUnposted_StandsAcrossStatementWindow | PASS | PASS |
+| C5/RTMB/R1/X15/X13/X14 (capturedUnposted clearing conditions: reversal line, tombstone, own-line-reported-reversed) [internal/reconciliation] | TestINVDEP1_C5_CapturedUnposted_ClearsOnReversalLineOrTombstone (+ subtests reversal_line, tombstone, own_line_reported_reversed) | PASS | PASS |
+| X16 (terminal_reason filter on the standing/unmatched case) [internal/reconciliation] | TestINVDEP1_X16_TerminalReasonFilter_PrecedenceCaseNeverReportsCapturedUnposted | PASS | PASS |
+
+Direct ledger.Post fixture (E2d's third cited path, migration_0107_integration_test.go:344):
+covered by TestMigration0107_LedgerBackstop_ErrDepositAlreadyPostedForIntent above, which
+constructs the collision via a direct ledger.Post call under a second idempotency key against
+an already-posted intent, with no InitiateDeposit/attemptDeposit/resolveAmbiguous call anywhere
+in its setup - confirmed by source inspection of the test body.
+
+Commands run
+------------
+
+Setup (private scratch DB, never the shared TEST_DATABASE_URL):
+  PRIV_DB=e2legacy1 PRIV_SRC=<this worktree> bash <scratchpad>/priv_db.sh
+
+Payments-package set:
+  PRIV_DB=e2legacy1 PRIV_SRC=<this worktree> bash <scratchpad>/priv_test.sh \
+    -tags=integration -count=1 \
+    -run 'TestINVDEP1_|TestX5_LedgerBackstopMapping|TestMigration0107_' \
+    ./internal/payments/... -v
+Result: PASS, 14/14 named tests (ok, 85.873s)
+
+Reconciliation-package set (no -run filter - full package, includes the
+reconciliation-side INV-DEP-1 mutants above, plus legacyDeposit's own
+migrated fixture, TestPaymentStatement_* etc.):
+  PRIV_DB=e2legacy1 PRIV_SRC=<this worktree> bash <scratchpad>/priv_test.sh \
+    -tags=integration -count=1 ./internal/reconciliation/... -v
+Result: ok  internal/reconciliation  52.455s
+        ok  internal/reconciliation/statement  0.009s
+
+Both runs green, zero FAIL, zero panic (grep -c FAIL/panic on both logs: 0).
+
+Migration-time finding (fixed, not hidden)
+-------------------------------------------
+The first full-package run after the deletion (before this evidence file
+was finalized) caught a genuine migration defect, not a mutant-coverage
+gap: TestInitiateDeposit_AmbiguousOutcomeCallsQueryStatusBeforeNotCascading
+(adversarial_test.go), migrated to the live InitiateDepositAttempt path,
+asserted "exactly 1 QueryStatus call" - but InitiateDepositAttempt
+(deposit_v2.go) never calls QueryStatus synchronously at all; an ambiguous
+outcome is left for the sweeper (the exact QueryStatus-in-tx anti-pattern
+ADR 0095 removes, already documented for the callback-path twin of this
+test). This was the deleted legacy chain's OWN behaviour, not a
+still-live invariant, so migrating it onto the live path as originally
+written was wrong. Fixed by deleting the test (redundant once its
+replacement exists) and strengthening
+TestInitiateDepositAttempt_AmbiguousOutcome_T6 (deposit_v2_integration_
+test.go) to assert the strict opposite (zero QueryStatus calls) plus the
+unchanged no-cascade/no-ledger-effect guarantees, using spy providers -
+never a weaker assertion than the original. Full package re-run after the
+fix (below) is green.
+
+Full-suite confirmation (this branch, after the fix above)
+------------------------------------------------------------
+Private scratch database (PRIV_DB=e2legacy1, rebuilt via priv_db.sh from
+this worktree's migrations), -tags=integration -count=1, skip
+'TestStoreOutage_DoesNotPinPool|TestResolutionIsolation_':
+
+  ./internal/payments/...        -> ok (517.459s, no -race)
+  ./internal/payments/... -race  -> ok (521.180s)
+  ./internal/reconciliation/...  -> ok (61.656s)
+  ./internal/reconciliation/statement -> ok (1.036s)
+  ./internal/withdrawal/...      -> ok (10.807s)
+  ./cmd/platform-api             -> ok (5.637s)
+  ./cmd/migrate, ./cmd/seed-admin -> [no test files]
+  ./internal/httpserver/... -race -> ok (394.341s)
+
+Zero FAIL, zero panic across every run (grep -c '^--- FAIL|^FAIL|panic:'
+on every log: 0). Private database dropped with DROP DATABASE ... WITH
+(FORCE) after use.
+
+golangci-lint (2.9.0, `golangci-lint run --allow-parallel-runners ./...`):
+0 issues. gofmt -l .: clean. go build ./... and go build -tags integration
+./...: clean. go vet ./... and go vet -tags integration ./...: clean.
+internal/txscope's static guard (TestINV_IO_1c_*): 3/3 pass - no provider
+adapter call remains lexically inside a database transaction closure
+anywhere in internal/payments (or casino/kyc), confirming E2's deletion
+of orchestrator.go's :714/:797 provider calls (both inside a `pgx.Tx`
+closure) removed the only two such sites the sweep (E3) had found.
+
+Ledger-finance re-confirmation
+-------------------------------
+This table and method are submitted for ledger-finance's LF-16 re-
+confirmation at E2's gate (plan.md §1-E2/§5-E2), on the corrected premise
+(E2d): the legacy chain was never the only path to
+ledger.ErrDepositAlreadyPostedForIntent. The sentinel's own mapping
+(X5/TestX5_LedgerBackstopMapping), the application-level pre/re-check
+(MC2/TestINVDEP1_MC2_...), and a direct ledger.Post fixture
+(TestMigration0107_LedgerBackstop_ErrDepositAlreadyPostedForIntent) all
+independently exercise it through the live path with no legacy-chain
+dependency, before and after E2's deletion.
+
+Ledger-finance's own verdict (docs/plans/prh2-hardening-round/reviews/
+e2-ledger-finance.md, ACCEPT WITH CONDITIONS, condition C-3): ran
+independent mutants against `orchestrator.go` at `9a25453`, using private
+databases for both E2 and a `cabca27` control, both dropped afterwards.
+
+  M1: INV-DEP-1 choke-point pre-check bypassed (postDepositSuccessOrDispute
+      :728) - KILLED by TestINVDEP1_FL1_ApplicationChokePointCatchesItBefore
+      TheDBBackstop.
+  M3: X5 ledger-sentinel mapping removed (postDepositSuccess :839) - KILLED
+      by TestX5_LedgerBackstopMapping.
+  M2: the choke point's own backstop branch (postDepositSuccessOrDispute
+      :738-746, mapping ErrDepositIntentAlreadyResolved from postDepositSuccess's
+      OWN internal re-check/the ledger-index backstop back into a T10/T13d
+      dispute) does NOT map to a dispute under this mutant - SURVIVES, both
+      at `9a25453` (post-E2) and at `cabca27` (pre-E2, the control). This is
+      PRE-EXISTING, not introduced or hidden by E2: no test today drives the
+      choke point's backstop branch specifically (the pre-check passing,
+      then postDepositSuccess itself returning ErrDepositIntentAlreadyResolved
+      from its own internal re-check or the ledger index). The 0107 unique
+      index still prevents a double credit either way (a money-safety
+      invariant, not what M2 tests) - this is a liveness/evidence gap: a
+      regression that turned this specific race into a propagated error (a
+      500 and a retry loop, instead of a clean T10/T13d dispute) would pass
+      every test today. Tracked as ledger-finance's own condition C-1,
+      registry item INVDEP1-BACKSTOP-BRANCH-TEST-1, explicitly NOT part of
+      E2's own scope - ledger-finance's own instruction is that this closes
+      before ADR 0102 §8 row 2 (I-wire) and is recommended for workstreams
+      C/D, not required here. Recorded honestly rather than silently
+      dropped or claimed as covered.
+
+Ledger-finance's overall conclusion: "Mutant parity: holds. The evidence's
+'still passes = still kills' argument is sound. The reviewer's re-kills of
+M1 and M3 supply real kills for the two load-bearing sentinels. M2 behaves
+the same before and after" - i.e. E2's deletion changed nothing about M2's
+pre-existing gap, for better or worse.
+
+Production-cascade mutant run (coordinator-requested follow-up, code
+review E2-1 fix round, 2026-09-28)
+-------------------------------------------------------------------------
+Two anchored, verified (assert count()==1 before writing), byte-reverted
+mutations against internal/payments/cascade.go's cascadeEligible - the
+predicate driveCreatedAttempt's own cascade loop (called from both
+InitiateDepositAttempt's synchronous cascade loop and the sweeper) uses
+to decide whether a just-declined attempt may cascade to the next
+candidate. Private scratch DB (PRIV_DB=e2mut1), -tags=integration.
+
+Mutant A (cascadable-check removed): `if !evidenceCascadable { return
+false }` replaced with `_ = evidenceCascadable`.
+  BEFORE (baseline, unmutated): TestInitiateDepositAttempt_DeclinedOutcome_T8
+    and the new TestInitiateDepositAttempt_NonCascadableDeclineNeverCascadesToAvailableFallback
+    (deposit_v2_integration_test.go, added by this fix round to close a
+    genuine gap - see below) both PASS.
+  AFTER (mutated): BOTH FAIL -
+    - T8: "expected attempt state declined, got rejected" (a cascade
+      attempt is now wrongly inserted even though evidence said
+      non-cascadable; with only one provider registered, the resulting
+      state diverges from 'declined' anyway, which is itself a kill, even
+      though T8 alone was not built to prove the ABSENCE of a wrongful
+      cascade to an available second provider);
+    - NonCascadableDeclineNeverCascadesToAvailableFallback: "expected
+      attempt state declined, got pending" - the mutant let the decline
+      wrongly cascade to the available, accepting fallback provider,
+      which accepted it. THIS is the real, unambiguous kill: T8 alone
+      registers only ONE provider, so a mutant removing the cascadable
+      check is NOT observably different there (no second provider exists
+      to wrongly route to) - this was a genuine, disclosed coverage gap
+      found by this mutant run, not assumed away. Closed by adding the
+      new test (a second, accepting provider, asserting its Deposit is
+      never called).
+  Reverted: `git diff --stat`/`git status --short` clean.
+
+Mutant B (MaxCascadeDepth off-by-one): `attempt.AttemptNo >= maxDepth`
+changed to `attempt.AttemptNo > maxDepth`.
+  BEFORE (baseline): TestInitiateDeposit_CascadeExhaustedEndsDeclined
+    (orchestrator_integration_test.go) PASSES.
+  First attempt: with the test's ORIGINAL two-provider fixture (a, b,
+    both declining, MaxCascadeDepth=2), this mutant did NOT fail the
+    test - the off-by-one lets a third cascade attempt through, but with
+    only two providers registered and both already excluded, routing
+    fails with ErrNoRoutableProvider regardless, producing the SAME
+    'declined' terminal state either way. Disclosed as a genuine,
+    non-hidden equivalent-outcome finding under the test's original
+    fixture, matching this codebase's own established convention for
+    this class of finding (see MX-AMOUNT-SKIP, PRH-I1 section of this
+    file). NOT silently accepted: the test was strengthened instead (see
+    below), rather than left with an unobservable gap.
+  Fix: added a third, ACCEPTING provider c (lowest priority, spy-wrapped)
+    to the SAME test. AFTER (mutated, strengthened test): FAILS -
+    "expected declined once every candidate is exhausted, got pending" -
+    the off-by-one let the cascade wrongly reach c, which accepted it.
+    KILLED.
+  Reverted: `git diff --stat`/`git status --short` clean. Re-ran the
+    strengthened test against the unmutated code afterwards: PASSES.
+
+Both are genuine kills on the PRODUCTION cascade code
+(internal/payments/cascade.go), reached through the LIVE
+InitiateDepositAttempt path (deposit_v2.go's own synchronous cascade
+loop) - neither test uses the TEST-ONLY legacyShape* bridge.
+
+Migration finding, second pass (E2-1 fix round): the first migration of
+TestInitiateDeposit_AmbiguousOutcomeIsNotCascaded onto InitiateDepositAttempt
+FAILED when actually run ("expected succeeded after the delayed
+confirmation, got ambiguous") - MarkAmbiguousFromSubmitting (T6) never
+records a provider_reference on the attempt row, so a callback naming the
+mock's synchronously-returned reference correctly resolves as
+deferred_unresolved, not succeeded, on the live path. The test was
+deleted (not force-fitted): both of its original halves are already
+covered, more thoroughly, by TestInitiateDepositAttempt_AmbiguousOutcome_T6
+and TestReceipt_Unresolved_DeferredThenAppliedOnceReferenceKnown
+(receipt_integration_test.go).
+
+Full re-verification after all E2-1/E2-2/E2-3/E2-5/E2-C1/C-2/C-3 fixes
+(private scratch DB, PRIV_DB=e2fix1, rebuilt via priv_db.sh; dropped with
+DROP DATABASE ... WITH (FORCE) after use), set -o pipefail, every log
+grepped for FAIL/panic (0 in every log):
+
+  go build ./... , go build -tags integration ./...             -> clean
+  go vet ./... , go vet -tags integration ./...                 -> clean
+  gofmt -l .                                                     -> clean
+  golangci-lint run --allow-parallel-runners ./... (2.9.0)       -> 0 issues
+  internal/txscope/... -v (IO-1C x3, PCG1 x6)                    -> 10/10 pass
+  ./internal/payments/... -race -tags=integration -count=1 -skip '...' -> ok (463.2s) - the
+    FIRST run of this exact command, at 487.879s, FAILED on
+    TestInitiateDeposit_AmbiguousOutcomeIsNotCascaded (the second-pass
+    finding above); re-run clean after that test was deleted.
+  ./internal/reconciliation/... -race -tags=integration -count=1 -skip '...' -> ok (53.9s)
+  ./internal/reconciliation/statement -race ...                  -> ok (1.0s)
+  ./internal/httpserver/... -race -tags=integration -count=1 -run 'Financial|Deposit' -> ok (14.2s)

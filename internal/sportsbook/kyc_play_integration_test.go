@@ -82,6 +82,18 @@ func mustSeedSBVerification(t *testing.T, pool *db.Pool, f sbFixture, personID u
 	}
 }
 
+func countRows(t *testing.T, pool *db.Pool, tenantID uuid.UUID, query string, args ...any) int {
+	t.Helper()
+	var n int
+	err := pool.WithTenant(context.Background(), tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, query, args...).Scan(&n)
+	})
+	if err != nil {
+		t.Fatalf("count query %q: %v", query, err)
+	}
+	return n
+}
+
 // sbPersonID resolves the Person id backing f.playerAccountID (sbFixture
 // carries no personID field of its own).
 func sbPersonID(t *testing.T, pool *db.Pool, f sbFixture) uuid.UUID {
@@ -115,6 +127,24 @@ func TestPlaceBet_DeniedByKYCPlayPolicy_NoLedgerEffect(t *testing.T) {
 	}
 	if result.RejectionCategory != RejectionKYCDenied {
 		t.Fatalf("expected RejectionKYCDenied, got %q (%q)", result.RejectionCategory, result.RejectionMessage)
+	}
+
+	// MPLAYREC (code review rv-prh-i3-code-review.md, KYC-ENF-TESTPINS-1),
+	// mutated on the sportsbook path too, per instruction: a REAL
+	// evaluation (an active play policy exists) must write a
+	// kyc_enforcement_decisions row for the deny, exactly like
+	// internal/casino's own play-deny path and withdrawal's own deny path.
+	decisionCount := countRows(t, pool, f.tenantID,
+		`SELECT count(*) FROM kyc_enforcement_decisions WHERE tenant_id = $1 AND player_account_id = $2 AND operation = 'sportsbook_play' AND allowed = false`,
+		f.tenantID, f.playerAccountID)
+	if decisionCount != 1 {
+		t.Fatalf("expected exactly 1 kyc_enforcement_decisions row for the denied sportsbook_play evaluation, got %d", decisionCount)
+	}
+	auditCount := countRows(t, pool, f.tenantID,
+		`SELECT count(*) FROM audit_log WHERE tenant_id = $1 AND action = 'kyc.enforcement_denied' AND target_id = $2`,
+		f.tenantID, f.playerAccountID.String())
+	if auditCount != 1 {
+		t.Fatalf("expected exactly 1 kyc.enforcement_denied audit row, got %d", auditCount)
 	}
 }
 

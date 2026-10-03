@@ -5,7 +5,10 @@
 // adapter for development/testing.
 //
 // Scope for this stage (Stage 3B): deposits only (InitiateDeposit,
-// RouteProvider, ReceiveCallback), currency/asset -> payment method ->
+// RouteProvider, ReceiveCallback - [deleted by E2, 2026-09-28]:
+// InitiateDeposit and RouteProvider are both gone from production;
+// InitiateDepositAttempt/RankRoutingCandidates are the current
+// equivalents), currency/asset -> payment method ->
 // amount -> provider-health routing dimensions, cascade-on-decline, and
 // ambiguous-outcome handling. Withdrawal orchestration
 // (InitiateWithdrawalRequest) is NOT IMPLEMENTED here - it belongs to the
@@ -203,7 +206,8 @@ var (
 	// transaction was ever posted for this reference" at all, a different
 	// and legitimate case) and never posts anything.
 	ErrDepositReversalIntegrity = errors.New("payments: original deposit reference does not resolve to a valid deposit ledger transaction")
-	// ErrIdempotencyKeyReused is returned by InitiateDeposit when a
+	// ErrIdempotencyKeyReused is returned by InitiateDepositAttempt
+	// ([deleted by E2] this used to be InitiateDeposit's) when a
 	// retried call reuses (tenant_id, player_account_id, idempotency_key)
 	// but with different deposit parameters (brand, wallet, asset, amount,
 	// or payment method) than the original request - the payments-package

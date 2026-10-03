@@ -34,8 +34,9 @@ import (
 // attempt is still returned to the player who made the original HTTP
 // request - the sweeper (sweeperDriven=true) has no synchronous caller and
 // simply ignores these two return values. Neither is persisted: exactly
-// like the pre-cutover InitiateDeposit/attemptDeposit path, they are
-// transient, this-request-only detail, never read back from deposit_intents.
+// like the pre-cutover InitiateDeposit/attemptDeposit path ([deleted by
+// E2] - both are gone), they are transient, this-request-only detail,
+// never read back from deposit_intents.
 func (o *Orchestrator) driveCreatedAttempt(
 	ctx context.Context,
 	pool *db.Pool,

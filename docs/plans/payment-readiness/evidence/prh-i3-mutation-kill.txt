@@ -95,3 +95,82 @@ MB6    | DenyForCompliance Allowed=true guard off | SURVIVED| (KYC-ENF-TESTPINS-
 MPLAYREC | RecordDecision removed from casino play-deny | SURVIVED | (KYC-ENF-TESTPINS-1)
 
 Source: docs/plans/payment-readiness/rv-prh-i3-code-review.md, "Re-review (FH-7, 2026-09-28)".
+
+ADDENDUM 2026-09-28 (identity-compliance, KYC-ENF-OUTAGE-1 / KYC-ENF-TESTPINS-1)
+================================================================================
+Fixes and mutant re-verification for the three FH-7 survivors above, plus
+the N5/B4/T3 items. Private DB `ic_f_kyc_outage_20260928` (dropped at end
+of session). `go test -race -tags=integration -count=1` for
+./internal/kyc/... ./internal/withdrawal/... ./internal/casino/...
+./internal/sportsbook/... ./internal/httpserver/... - 0 FAIL. gofmt,
+`go vet`/`go vet -tags integration`, and
+`golangci-lint run --allow-parallel-runners ./...` (pinned 2.9.0): 0
+issues.
+
+Fix: internal/kyc.EvaluateEnforcement now runs every read inside a
+SAVEPOINT nested in the caller's transaction (internal/db.
+RunReadOnlyInSavepoint, the same pgx.Tx.Begin-on-an-open-Tx mechanism as
+internal/db/idempotency.go's IdempotentInsert) and unconditionally rolls
+it back afterwards. A genuine Postgres error inside the read (e.g. a
+lock_timeout) previously aborted the CALLER's transaction; the caller's
+own subsequent attempt to record the resulting `unavailable` decision in
+that same transaction then hit SQLSTATE 25P02, producing a raw error
+instead of a typed *KYCDeniedError/ErrKYCUnavailable outcome. The fix
+applies uniformly to EVERY EvaluateEnforcement call site (withdrawal,
+deposit, casino play, sportsbook play) - not only withdrawal - which also
+closes ADR 0096 §16.2's LF-I3-5 disclosure (casino/sportsbook decision-row
+loss on a genuine DB error during evaluation): with the read now
+contained to a savepoint, RecordDecision's own transaction is never
+poisoned, so the decision/audit row for a play-path DB failure now
+survives exactly like withdrawal's already did.
+
+Mutant | Change                                       | Result | Killed by
+MB1    | handler OutcomeUnavailable -> 503 branch off | KILLED | TestRequestWithdrawalHandler_KYCStoreOutageReturns503 (internal/httpserver), verified by manual mutation (branch disabled -> test failed with "got 409"); backed by TestRequestWithdrawal_KYCStoreOutage_FailsClosedWithOneUnavailableDecision (internal/withdrawal) at the package level
+MB6    | DenyForCompliance Allowed=true guard off     | KILLED | TestDenyForCompliance_RefusesAllowedDecision (internal/withdrawal), verified by manual mutation (guard disabled -> test failed, no error returned)
+MPLAYREC | RecordDecision removed from casino play-deny | KILLED | TestReceiveCallback_BetDeniedByKYCPlayPolicy_NoLedgerEffect's new decision-row assertion (internal/casino), verified by manual mutation (call removed -> "got 0" rows)
+MPLAYREC (sportsbook) | RecordDecision removed from sportsbook play-deny | KILLED | TestPlaceBet_DeniedByKYCPlayPolicy_NoLedgerEffect's new decision-row assertion (internal/sportsbook), verified by manual mutation (call removed -> "got 0" rows)
+
+Fault-injection test (KYC-ENF-OUTAGE-1's own DoD item, the reviewer's
+exact probe): TestRequestWithdrawal_KYCStoreOutage_FailsClosedWithOneUnavailableDecision
+(internal/withdrawal/kyc_outage_fault_injection_integration_test.go) and
+TestRequestWithdrawalHandler_KYCStoreOutageReturns503
+(internal/httpserver/kyc_outage_503_integration_test.go) both use a
+second connection holding `LOCK TABLE kyc_verifications IN ACCESS
+EXCLUSIVE MODE` (deterministic: the blocker's own LOCK TABLE statement
+only returns once the lock is genuinely held, so the racer never starts
+before that point - no wall-clock assertion, no polling) while the
+request transaction runs with `lock_timeout = '300ms'` (the withdrawal
+package test sets it via `SET LOCAL`; the HTTP-layer test uses a
+dedicated *db.Pool whose connections are opened with `lock_timeout=300ms`
+as a session default via the DSN's own `options` parameter - a
+per-connection GUC, not a shared role/database change). Both assert: a
+retryable outcome (*KYCDeniedError{Outcome: unavailable} / HTTP 503),
+exactly one kyc_enforcement_decisions row with outcome='unavailable',
+exactly one audit_log row, zero withdrawal_requests rows, and zero ledger
+postings (LF-20).
+
+N5 (DenyForCompliance must refuse Outcome=unavailable, retryable, never
+terminal): TestDenyForCompliance_RefusesUnavailableOutcome
+(internal/withdrawal) proves DenyForCompliance returns ErrKYCUnavailable
+(wrapped) and leaves the request in state `approved` with zero domain
+effect and zero new decision rows when handed an unavailable decision.
+
+B4 (dormancy tenant-status filter, previously entirely untested):
+TestListDormantJurisdictionTriggers_ReportsEveryTriggerType,
+TestListDormantJurisdictionTriggers_ActivePolicyExcludesOnlyThatTrigger,
+and TestListDormantJurisdictionTriggers_ExcludesNonActiveTenants
+(internal/kyc/enforcement_dormancy_integration_test.go) - the last proves,
+via manual mutation of the new `t.status = 'active'` filter (removed ->
+both subtests failed, reporting a suspended/closed-only jurisdiction as
+dormant), that the filter is load-bearing.
+
+T3 (ActiveRequiresLegalReviewReference asserted only err != nil):
+TestMigration0100_ActiveRequiresLegalReviewReference now additionally
+asserts db.IsCheckViolation(err) (SQLSTATE 23514) and the exact
+constraint name, looked up dynamically from pg_constraint by its
+definition text rather than hardcoded.
+
+Source: docs/plans/payment-readiness/rv-prh-i3-code-review.md, "Re-review
+(FH-7, 2026-09-28)"; docs/plans/prh2-hardening-round/plan.md §5-F;
+docs/plans/prh2-hardening-round/reviews/{identity-compliance,ledger-finance}.md
+(LF-20).

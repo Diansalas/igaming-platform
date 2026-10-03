@@ -20,7 +20,23 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+
+	"github.com/Diansalas/igaming-platform/internal/db"
 )
+
+// mustInitiateDepositAttempt is this file's own thin call-through to the
+// live v2 entry point (InitiateDepositAttempt), replacing the deleted
+// InitiateDeposit for every test below that is actually about
+// InitiateDeposit's OWN behaviour (idempotency, retry, ambiguous/timeout
+// handling, routing refusal) rather than about the callback/receipt path
+// (those already use initiateDepositWithAttempt, the test-only bridge in
+// receive_bridge_integration_test.go). AllowAllDepositKYCGate is this
+// package's own test-only stand-in (kycgate_mock_test.go) - none of these
+// tests are about KYC enforcement.
+func mustInitiateDepositAttempt(pool *db.Pool, orch *Orchestrator, params InitiateDepositParams) (DepositIntent, error) {
+	res, err := orch.InitiateDepositAttempt(context.Background(), pool, AllowAllDepositKYCGate{}, MockCredentialResolver{}, params)
+	return res.Intent, err
+}
 
 // spyProvider wraps a *MockProvider so a test can count calls and,
 // optionally, force a transport-level error - test-only instrumentation,
@@ -103,11 +119,7 @@ func TestInitiateDeposit_ConcurrentSameIdempotencyKey_OnlyOneProviderCall(t *tes
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			errs[i] = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-				var err error
-				intents[i], err = orch.InitiateDeposit(ctx, tx, params)
-				return err
-			})
+			intents[i], errs[i] = mustInitiateDepositAttempt(pool, orch, params)
 		}(i)
 	}
 	wg.Wait()
@@ -121,7 +133,7 @@ func TestInitiateDeposit_ConcurrentSameIdempotencyKey_OnlyOneProviderCall(t *tes
 		}
 	}
 	if got := spy.DepositCallCount(); got != 1 {
-		t.Fatalf("expected exactly 1 provider Deposit call across %d concurrent InitiateDeposit calls sharing one idempotency key, got %d", n, got)
+		t.Fatalf("expected exactly 1 provider Deposit call across %d concurrent InitiateDepositAttempt calls sharing one idempotency key, got %d", n, got)
 	}
 }
 
@@ -290,23 +302,15 @@ func TestInitiateDeposit_RetryWithDifferentAmountRejected(t *testing.T) {
 		Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
 		AssetCode: "EUR", Amount: 3000, PaymentMethod: "card", IdempotencyKey: "dep-same-key-different-payload",
 	}
-	var first DepositIntent
-	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		var err error
-		first, err = orch.InitiateDeposit(ctx, tx, original)
-		return err
-	})
+	first, err := mustInitiateDepositAttempt(pool, orch, original)
 	if err != nil {
-		t.Fatalf("first InitiateDeposit: %v", err)
+		t.Fatalf("first InitiateDepositAttempt: %v", err)
 	}
 
 	retried := original
 	retried.Amount = 999999 // same idempotency key, different amount
 
-	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := orch.InitiateDeposit(ctx, tx, retried)
-		return err
-	})
+	_, err = mustInitiateDepositAttempt(pool, orch, retried)
 	if !errors.Is(err, ErrIdempotencyKeyReused) {
 		t.Fatalf("expected ErrIdempotencyKeyReused for a retried call with a different amount, got %v", err)
 	}
@@ -315,21 +319,13 @@ func TestInitiateDeposit_RetryWithDifferentAmountRejected(t *testing.T) {
 	// the same check.
 	retriedMethod := original
 	retriedMethod.PaymentMethod = "bank_transfer"
-	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := orch.InitiateDeposit(ctx, tx, retriedMethod)
-		return err
-	})
+	_, err = mustInitiateDepositAttempt(pool, orch, retriedMethod)
 	if !errors.Is(err, ErrIdempotencyKeyReused) {
 		t.Fatalf("expected ErrIdempotencyKeyReused for a retried call with a different payment method, got %v", err)
 	}
 
 	// The original, unmodified retry must still succeed as before.
-	var second DepositIntent
-	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		var err error
-		second, err = orch.InitiateDeposit(ctx, tx, original)
-		return err
-	})
+	second, err := mustInitiateDepositAttempt(pool, orch, original)
 	if err != nil {
 		t.Fatalf("unmodified retry: %v", err)
 	}
@@ -365,14 +361,9 @@ func TestInitiateDeposit_ProviderTransportError_AmbiguousNotCascadedThenRetryNoS
 		AssetCode: "EUR", Amount: 4500, PaymentMethod: "card", IdempotencyKey: "dep-timeout",
 	}
 
-	var first DepositIntent
-	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		var err error
-		first, err = orch.InitiateDeposit(ctx, tx, params)
-		return err
-	})
+	first, err := mustInitiateDepositAttempt(pool, orch, params)
 	if err != nil {
-		t.Fatalf("InitiateDeposit: %v", err)
+		t.Fatalf("InitiateDepositAttempt: %v", err)
 	}
 	if first.Status != DepositIntentAmbiguous {
 		t.Fatalf("expected a provider transport error to finalize as ambiguous (never a silent decline or success), got %v", first.Status)
@@ -387,14 +378,9 @@ func TestInitiateDeposit_ProviderTransportError_AmbiguousNotCascadedThenRetryNoS
 		t.Fatalf("a transport-error/ambiguous outcome must never cascade to another provider, but mock-b's Deposit was called %d times", got)
 	}
 
-	var second DepositIntent
-	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		var err error
-		second, err = orch.InitiateDeposit(ctx, tx, params)
-		return err
-	})
+	second, err := mustInitiateDepositAttempt(pool, orch, params)
 	if err != nil {
-		t.Fatalf("retried InitiateDeposit: %v", err)
+		t.Fatalf("retried InitiateDepositAttempt: %v", err)
 	}
 	if second.ID != first.ID || second.Status != DepositIntentAmbiguous {
 		t.Fatalf("expected the retry to return the SAME still-ambiguous intent, got %+v", second)
@@ -407,47 +393,23 @@ func TestInitiateDeposit_ProviderTransportError_AmbiguousNotCascadedThenRetryNoS
 	}
 }
 
-// --- Item 16: ambiguous outcome must call QueryStatus before any decision --
+// --- Item 16: ambiguous outcome must not be silently cascaded ---------
 
 // TestInitiateDeposit_AmbiguousOutcomeCallsQueryStatusBeforeNotCascading
-// strengthens TestInitiateDeposit_AmbiguousOutcomeIsNotCascaded (which
-// already proves the resulting intent status) with a direct call-count
-// assertion: QueryStatus is actually invoked exactly once on the
-// synchronously-ambiguous provider, and the second candidate's Deposit is
-// never called - the ambiguity is resolved (or left open) via QueryStatus,
-// not skipped.
-func TestInitiateDeposit_AmbiguousOutcomeCallsQueryStatusBeforeNotCascading(t *testing.T) {
-	pool := testPool(t)
-	f := seedOrchFixture(t, pool)
-	a := newSpyProvider(NewMockProvider("mock-a", "EUR"))
-	b := newSpyProvider(NewMockProvider("mock-b", "EUR"))
-	b.AcceptAllAmounts = true
-	registerCapability(t, pool, f, a, 10)
-	registerCapability(t, pool, f, b, 20)
-	orch := NewOrchestrator(map[string]PaymentProvider{"mock-a": a, "mock-b": b}, MultiWebhookCredentialResolver{"mock-a": NewMockWebhookCredentials(a.MockProvider), "mock-b": NewMockWebhookCredentials(b.MockProvider)})
-
-	var intent DepositIntent
-	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		var err error
-		intent, err = orch.InitiateDeposit(ctx, tx, InitiateDepositParams{
-			Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
-			AssetCode: "EUR", Amount: MockAmountAmbiguous, PaymentMethod: "card", IdempotencyKey: "dep-ambiguous-querystatus",
-		})
-		return err
-	})
-	if err != nil {
-		t.Fatalf("InitiateDeposit: %v", err)
-	}
-	if intent.Status != DepositIntentAmbiguous {
-		t.Fatalf("expected ambiguous, got %v", intent.Status)
-	}
-	if got := a.QueryStatusCallCount(); got != 1 {
-		t.Fatalf("expected exactly 1 QueryStatus call to attempt resolving the ambiguous outcome before any cascade decision, got %d", got)
-	}
-	if got := b.DepositCallCount(); got != 0 {
-		t.Fatalf("an ambiguous outcome must never auto-cascade without first calling QueryStatus, but mock-b's Deposit was called %d times", got)
-	}
-}
+// (item 16's original test) asserted a synchronous, in-transaction
+// provider.QueryStatus call before ever finalizing/cascading an ambiguous
+// deposit - the deleted legacy chain's own behaviour
+// (PROV-OUTBOUND-CRED-1-LEGACY-PATH, E2). InitiateDepositAttempt
+// (deposit_v2.go), the live path, deliberately never calls QueryStatus
+// synchronously at all (the exact QueryStatus-in-tx anti-pattern ADR 0095
+// removes - see TestReceiveCallback_AmbiguousCallbackResolvedViaQueryStatus_
+// NotCascaded's own doc comment for the identical, already-adapted
+// callback-path case). Deleted as redundant with
+// TestInitiateDepositAttempt_AmbiguousOutcome_T6 (deposit_v2_integration_
+// test.go), strengthened by this same E2 migration to assert the STRICT
+// OPPOSITE (zero QueryStatus calls, not one) plus the unchanged
+// no-cascade/no-ledger-effect guarantees - an equally strict, never
+// weaker, replacement, not a silent drop.
 
 // TestReceiveCallback_AmbiguousCallbackResolvedViaQueryStatus_NotCascaded
 // covers the same invariant on the OTHER code path that can observe an
@@ -693,17 +655,12 @@ func TestInitiateDeposit_CapabilityMethodMismatch_NeverCallsProvider(t *testing.
 	registerCapability(t, pool, f, provider, 100)
 	orch := NewOrchestrator(map[string]PaymentProvider{"mock-psp": provider}, MultiWebhookCredentialResolver{"mock-psp": NewMockWebhookCredentials(provider.MockProvider)})
 
-	var intent DepositIntent
-	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		var err error
-		intent, err = orch.InitiateDeposit(ctx, tx, InitiateDepositParams{
-			Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
-			AssetCode: "EUR", Amount: 5000, PaymentMethod: "crypto_rail", IdempotencyKey: "dep-method-mismatch",
-		})
-		return err
+	intent, err := mustInitiateDepositAttempt(pool, orch, InitiateDepositParams{
+		Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
+		AssetCode: "EUR", Amount: 5000, PaymentMethod: "crypto_rail", IdempotencyKey: "dep-method-mismatch",
 	})
 	if err != nil {
-		t.Fatalf("InitiateDeposit: %v", err)
+		t.Fatalf("InitiateDepositAttempt: %v", err)
 	}
 	if intent.Status != DepositIntentDeclined {
 		t.Fatalf("expected a capability mismatch to decline rather than attempt routing, got %v", intent.Status)

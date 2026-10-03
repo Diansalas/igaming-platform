@@ -149,10 +149,33 @@ func (e *KYCDeniedError) Error() string {
 	return fmt.Sprintf("withdrawal: kyc enforcement denied (%s)", e.Decision.Code)
 }
 
-// ErrKYCUnavailable wraps a hard failure evaluating the KYC gate itself
-// (a DB error, not a business denial) - also fail-closed, also rolls back
-// with no domain effect, distinguished from KYCDeniedError only so a
-// caller can log it differently (an outage, not a compliance decision).
+// ErrKYCUnavailable signals that the KYC enforcement gate could not be
+// evaluated/acted on as a real compliance decision - fail-closed, no
+// domain effect, and RETRYABLE by the caller (never a terminal outcome).
+// Two call sites return it, both post-KYC-ENF-OUTAGE-1:
+//   - RequestWithdrawal, when kyc.EvaluateEnforcement itself returns a
+//     non-nil Go error. Since KYC-ENF-OUTAGE-1 (2026-09-28), that only
+//     happens for a STRUCTURALLY INVALID call (a missing tenant/brand/
+//     player/person id) - a caller bug, not a runtime DB outage: every
+//     genuine DB-read failure inside EvaluateEnforcement is now contained
+//     by a savepoint and surfaces as an ordinary
+//     EnforcementDecision{Outcome: OutcomeUnavailable} with a NIL error
+//     (see enforcement.go's own doc comment), which RequestWithdrawal
+//     handles via its normal *KYCDeniedError/decision-row path, not this
+//     branch. The withdrawal HTTP handler maps THIS branch to a
+//     non-retryable 500 (a caller bug is never worth retrying as-is), and
+//     the OutcomeUnavailable branch above it to a retryable 503 -
+//     see withdrawal_handlers.go:138-164.
+//   - DenyForCompliance (N5, code review rv-prh-i3-code-review.md), when a
+//     caller passes a decision whose Outcome is OutcomeUnavailable. An
+//     `unavailable` outcome means the evaluator could not determine
+//     whether the player is actually KYC-cleared - it is NEVER evidence
+//     of a compliance failure, so DenyForCompliance must never convert it
+//     into a terminal `rejected` withdrawal (that would strand a
+//     compliant player's funds behind a mere outage). The caller (the
+//     future ADR 0095 T1p/sweeper payout dispatch path, `internal/
+//     payments`'s own scope) must retry the KYC evaluation later instead
+//     of treating this as a denial.
 var ErrKYCUnavailable = errors.New("withdrawal: kyc enforcement evaluation unavailable")
 
 // WithdrawalRequest mirrors the withdrawal_requests row
@@ -385,9 +408,11 @@ func RequestWithdrawal(ctx context.Context, tx pgx.Tx, params RequestParams) (Wi
 	// ADR 0096 §5 exact placement: immediately after the idempotency-
 	// replay lookup, before the first statement that could need undoing
 	// (IdempotentInsert). correlationID is generated up front so the
-	// decision row (written on deny, in a caller-opened fresh transaction
-	// - see KYCDeniedError's doc) and, on allow, the request itself
-	// (written below) share one correlation id.
+	// decision row (written on deny, in THIS SAME transaction - LF-I3-3,
+	// §17.1: the earlier "caller-opened fresh transaction" design was
+	// replaced before this comment was last accurate, see KYCDeniedError's
+	// own doc) and, on allow, the request itself (written below) share one
+	// correlation id.
 	correlationID := uuid.New()
 	kycParams := kyc.EnforcementParams{
 		TenantID: params.TenantID, BrandID: params.BrandID, PlayerAccountID: params.PlayerAccountID,
@@ -979,8 +1004,9 @@ func Reject(ctx context.Context, tx pgx.Tx, requestID, approverPrincipalID uuid.
 // most one of the two attempts observes `approved`, so the provider is
 // called at most once per request - exactly mirroring how the deposit
 // orchestrator's own idempotency insert (IdempotentInsert, executed
-// before InitiateDeposit ever calls provider.Deposit) prevents the same
-// class of race on the deposit side.
+// before InitiateDepositAttempt ever calls provider.Deposit - [deleted
+// by E2] this used to be InitiateDeposit's own idempotency insert, now
+// deleted) prevents the same class of race on the deposit side.
 func LockApprovedForSubmission(ctx context.Context, tx pgx.Tx, requestID uuid.UUID) (WithdrawalRequest, error) {
 	wr, err := lockRequestForUpdate(ctx, tx, requestID)
 	if err != nil {
@@ -1048,6 +1074,20 @@ func DenyForCompliance(ctx context.Context, tx pgx.Tx, requestID uuid.UUID, deci
 	}
 	if kycParams.Operation != kyc.EnforcementWithdrawalPayout {
 		return WithdrawalRequest{}, fmt.Errorf("%w: DenyForCompliance requires kycParams.Operation == EnforcementWithdrawalPayout, got %q", ErrInvalidInput, kycParams.Operation)
+	}
+	// N5 (code review rv-prh-i3-code-review.md, KYC-ENF-TESTPINS-1): an
+	// `unavailable` outcome means the evaluator could not determine the
+	// player's actual KYC state - it is a transient inability to decide,
+	// never a compliance denial. Converting it into a terminal `rejected`
+	// withdrawal here would strand a possibly-fully-compliant player's
+	// funds behind nothing more than a KYC-store outage, with no path
+	// back to `approved`. Refuse it outright and return ErrKYCUnavailable
+	// (retryable - see its own doc comment) BEFORE touching the ledger,
+	// the request row, or the audit log, so the request stays exactly
+	// `approved` and a later, healthy re-evaluation can still allow or
+	// (only then) genuinely deny the payout.
+	if decision.Outcome == kyc.OutcomeUnavailable {
+		return WithdrawalRequest{}, fmt.Errorf("%w: DenyForCompliance refuses an unavailable decision (request %s); retry the KYC evaluation, do not deny", ErrKYCUnavailable, requestID)
 	}
 
 	wr, err := lockRequestForUpdate(ctx, tx, requestID)
