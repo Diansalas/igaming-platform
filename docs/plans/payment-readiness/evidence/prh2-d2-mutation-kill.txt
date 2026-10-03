@@ -52,3 +52,16 @@ Notes
   M1 is NOT IMPLEMENTED (ADR 0101, K3); the emission predicate reads no resolution or prior finding.
 - The D1 poll reasons are inserted by fixture (ApplyDisputeFromNonTerminal on a real pending
   deposit, with the plan's reason strings); D1's code is not used.
+
+Review round 1 (D2 review P2, tree 3047d28)
+-------------------------------------------
+The pay_captured_unposted detail text at both bound sites now uses the ADR 0101 F13 wording, and
+every D2 finding asserts it. Same method; run with -run 'TestD2_'; restore byte-identical to HEAD.
+
+| Mutant | Change | Verdict | Killed by |
+|---|---|---|---|
+| P2-TEXT-INRUN | matched-line site reverted to "or M1/allocation (BLOCKED)" | KILLED | TestD2_1_BoundPark_MatchedSucceededLine_ReportsCapturedUnposted |
+| P2-TEXT-STANDING | standing site reverted to "or M1/allocation (BLOCKED)" | KILLED | TestD2_2_BoundPark_Standing_ReportedWhenCoverageExcludesTheLine, TestD2_3_BoundPark_ClearsOnlyOnReversalLineOrTombstoneOnBoundRef |
+
+Full suite at 3047d28: go test -race -tags integration -count=1 -p 1 ./internal/reconciliation/... -> ok
+(61.5s), statement ok, 0 FAIL/panic/DATA RACE lines.
