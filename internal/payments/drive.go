@@ -241,7 +241,25 @@ func (o *Orchestrator) driveCreatedAttempt(
 	if err != nil {
 		return intent, attempt, nil, "", "", err
 	}
+	// PRH-2 C security C-1: the redirect/token are copied out of the UNSCRUBBED
+	// adapter result before phase C decides, so a T10 park decided there
+	// (reference conflict, sync amount mismatch) must not leave them with the
+	// caller. Decided by the state phase C committed, not by which branch ran.
+	redirectURL, hostedFieldToken = playerFacingRedirect(final, redirectURL, hostedFieldToken)
 	return intent, final, cascadeChild, redirectURL, hostedFieldToken, nil
+}
+
+// playerFacingRedirect returns the PSP redirect URL / hosted-field token only
+// for an attempt phase C left 'pending' (accepted by the provider, awaiting
+// the player). For any other state - disputed (parked), declined, ambiguous,
+// succeeded - the player must never be sent to a PSP session that the
+// platform has refused to bind (a parked attempt's reference may belong to
+// another player's deposit).
+func playerFacingRedirect(a PaymentAttempt, redirectURL, hostedFieldToken string) (string, string) {
+	if a.State != AttemptPending {
+		return "", ""
+	}
+	return redirectURL, hostedFieldToken
 }
 
 // depositAdapterCall builds the AdapterCall closure Deposit's phase B

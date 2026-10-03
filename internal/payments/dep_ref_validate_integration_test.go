@@ -78,9 +78,9 @@ func (e *depRefEnv) addTenant(t *testing.T) orchFixture {
 func scriptOutcome(o Outcome, ref string) func(DepositRequest) DepositResult {
 	return func(req DepositRequest) DepositResult {
 		r := DepositResult{Outcome: o, ProviderReference: ref, Amount: req.Amount, AssetCode: req.AssetCode}
-		if o == OutcomePending {
-			r.RedirectURL = "https://mock-psp.invalid/pay/x"
-		}
+		// A hostile or buggy adapter may hand back a redirect/token on ANY
+		// outcome; a park must never forward them (security C-1).
+		r.RedirectURL, r.HostedFieldToken = "https://mock-psp.invalid/pay/x", "hosted-tok"
 		if o == OutcomeDeclined {
 			r.DeclineReason, r.Cascadable = "provider_unavailable", false
 		}
@@ -90,7 +90,8 @@ func scriptOutcome(o Outcome, ref string) func(DepositRequest) DepositResult {
 
 func scriptSyncEcho(ref string, amount int64, asset string) func(DepositRequest) DepositResult {
 	return func(req DepositRequest) DepositResult {
-		return DepositResult{Outcome: OutcomeSucceeded, ProviderReference: ref, Amount: amount, AssetCode: asset}
+		return DepositResult{Outcome: OutcomeSucceeded, ProviderReference: ref, Amount: amount, AssetCode: asset,
+			RedirectURL: "https://mock-psp.invalid/pay/x", HostedFieldToken: "hosted-tok"}
 	}
 }
 
@@ -168,6 +169,10 @@ func assertParkedNoMoney(t *testing.T, e *depRefEnv, f orchFixture, res Initiate
 	}
 	if !depNextActionNull(t, e, f, a.ID) {
 		t.Errorf("a parked attempt must have no next_action_at")
+	}
+	// Security C-1: a parked attempt never hands the player a PSP session.
+	if res.RedirectURL != "" || res.HostedFieldToken != "" {
+		t.Errorf("a parked attempt must return no redirect/token, got %q %q", res.RedirectURL, res.HostedFieldToken)
 	}
 	return a
 }
@@ -261,6 +266,10 @@ func TestDepRef_BoundaryAndNonParkingPaths(t *testing.T) {
 		}
 		if depDisputeAudits(t, e, e.f, a.ID) != 0 {
 			t.Errorf("a valid reference must not produce a dispute audit")
+		}
+		// Positive control: an accepted (pending) attempt still gets its redirect/token.
+		if res.RedirectURL == "" || res.HostedFieldToken == "" {
+			t.Errorf("a pending attempt must keep its redirect/token, got %q %q", res.RedirectURL, res.HostedFieldToken)
 		}
 	})
 
@@ -425,6 +434,9 @@ func TestDepRefConflict_ReferenceBoundToAnotherDepositAttempt_ParksEveryOutcome(
 			if a.State != AttemptDisputed || depTerminalReason(a) != TerminalReasonProviderReferenceConflict {
 				t.Fatalf("second attempt state=%s reason=%s, want disputed/provider_reference_conflict", a.State, depTerminalReason(a))
 			}
+			if second.RedirectURL != "" || second.HostedFieldToken != "" {
+				t.Errorf("a conflict park must return no redirect/token, got %q %q", second.RedirectURL, second.HostedFieldToken)
+			}
 			if a.ProviderReference != nil {
 				t.Errorf("the conflicting reference must not be bound to the second attempt")
 			}
@@ -469,6 +481,9 @@ func TestDepRefConflict_ReferenceBoundToAPayoutAttempt_Parks(t *testing.T) {
 				e.p.setScript(scriptSyncEcho(payoutRef, 5000, "EUR"))
 			}
 			res := rvInit(t, pool, e.orch, e.f, 5000, "cfp")
+			if res.RedirectURL != "" || res.HostedFieldToken != "" {
+				t.Errorf("a conflict park must return no redirect/token, got %q %q", res.RedirectURL, res.HostedFieldToken)
+			}
 			a := mustGetAttempt(t, pool, e.f.tenantID, res.Attempt.ID)
 			if a.State != AttemptDisputed || depTerminalReason(a) != TerminalReasonProviderReferenceConflict {
 				t.Fatalf("state=%s reason=%s, want disputed/provider_reference_conflict", a.State, depTerminalReason(a))
@@ -503,6 +518,9 @@ func TestDepRefConflict_ReferenceBoundToAnotherIntent_Parks(t *testing.T) {
 	}
 	e.p.setScript(scriptOutcome(OutcomePending, boundRef))
 	res := rvInit(t, pool, e.orch, e.f, 5000, "cfi")
+	if res.RedirectURL != "" || res.HostedFieldToken != "" {
+		t.Errorf("a conflict park must return no redirect/token, got %q %q", res.RedirectURL, res.HostedFieldToken)
+	}
 	a := mustGetAttempt(t, pool, e.f.tenantID, res.Attempt.ID)
 	if a.State != AttemptDisputed || depTerminalReason(a) != TerminalReasonProviderReferenceConflict {
 		t.Fatalf("state=%s reason=%s, want disputed/provider_reference_conflict", a.State, depTerminalReason(a))
@@ -618,5 +636,44 @@ func TestDepRef_CallbackVersusSyncSuccessRace_PostsExactlyOnce(t *testing.T) {
 			t.Fatalf("iter %d: an in-order success pair must not dispute", iter)
 		}
 		assertLedgerBalanced(t, pool, e.f.tenantID)
+	}
+}
+
+// Security C-1 through the cascade driver (driveCreatedAttempt): provider A
+// declines cascadably, the cascade child is routed to provider B, whose
+// Pending result (with a redirect and token) names a reference already bound
+// to a payout attempt in the same tenant. The child parks; the player gets no
+// redirect from the request that drove it.
+func TestDepRefConflict_CascadeDrivenParkReturnsNoRedirect(t *testing.T) {
+	pool := testPool(t)
+	ma := NewMockProvider("mock-dr-cas-a", "EUR")
+	mb := NewMockProvider("mock-dr-cas-b", "EUR")
+	pa := &depRefProvider{MockProvider: ma}
+	pb := &depRefProvider{MockProvider: mb}
+	f := seedOrchFixture(t, pool)
+	registerCapability(t, pool, f, pa, 100)
+	registerCapability(t, pool, f, pb, 200)
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-dr-cas-a": pa, "mock-dr-cas-b": pb},
+		MultiWebhookCredentialResolver{"mock-dr-cas-a": NewMockWebhookCredentials(ma), "mock-dr-cas-b": NewMockWebhookCredentials(mb)})
+	const boundRef = "cascade-bound-ref-1"
+	seedPayoutAttemptBoundTo(t, pool, f, "mock-dr-cas-b", boundRef)
+	pa.setScript(func(req DepositRequest) DepositResult {
+		return DepositResult{Outcome: OutcomeDeclined, DeclineReason: "provider_unavailable", Cascadable: true, Amount: req.Amount, AssetCode: req.AssetCode}
+	})
+	pb.setScript(scriptOutcome(OutcomePending, boundRef))
+
+	res := rvInit(t, pool, orch, f, 5000, "cas")
+	if res.RedirectURL != "" || res.HostedFieldToken != "" {
+		t.Fatalf("a cascade-driven conflict park must return no redirect/token, got %q %q", res.RedirectURL, res.HostedFieldToken)
+	}
+	if res.Attempt.AttemptNo != 2 {
+		t.Fatalf("expected the driven attempt to be the cascade child (attempt_no 2), got %d", res.Attempt.AttemptNo)
+	}
+	a := mustGetAttempt(t, pool, f.tenantID, res.Attempt.ID)
+	if a.State != AttemptDisputed || depTerminalReason(a) != TerminalReasonProviderReferenceConflict {
+		t.Fatalf("child state=%s reason=%s, want disputed/provider_reference_conflict", a.State, depTerminalReason(a))
+	}
+	if n := depScan[int64](t, pool, f.tenantID, `SELECT count(*) FROM ledger_transactions WHERE tenant_id = $1`, f.tenantID); n != 0 {
+		t.Errorf("no ledger transaction may exist, found %d", n)
 	}
 }
