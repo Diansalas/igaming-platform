@@ -6367,7 +6367,50 @@ amount on a sync success must declare `SyncSuccessPossible=false` (its sync resu
 
 - The deposit poll path's reference and amount checks are PRH-2 D. The reference it polls is the
   already-validated bound reference; D adds the echo comparison.
-- The new T10 reasons write an audit record but emit no new P1 log line: a disputed attempt is already
-  reported through reconciliation ("disputed: already a payments P1", `payment_statement.go`), and
-  adding a log site now would change the alert inventory that I-wire (ADR 0102) is about to wire. I-wire
-  should route these through the alert core with the other `payment.attempt_disputed` sites.
+- The new T10 reasons write an audit record but emit no P1 log line, so they are **not alerted**.
+  - **Reconciliation does not report them either.** `payment_statement.go` silently excludes every
+    disputed reason except `multiple_success_for_intent` from status comparison. Coverage is
+    **PAY-RECON-PARKED-CAPTURE-1** (assigned to PRH-2 D, together with extending the binding
+    pre-check to `ledger_transactions`, F-C4).
+  - **P1 alerting** for these T10s is an I-wire condition (ADR 0102), tracked with I-wire; adding a log
+    site now would change the alert inventory I-wire is about to wire.
+- The payout-side copy of the error-path reference gap (`payoutAdapterCall` returns before validating
+  when the adapter errors) is out of scope here: PAY-PAYOUT-ERRREF-1 (F-pay).
+- A deferred receipt stored for a sync-success reference during phase B stays `unresolved` after the
+  sync success posts (phase C's sync-success branch does not call `ApplyDeferredReceiptsForAttempt`;
+  only the Pending branch does). No money effect (one posting, proven by test); the receipt ages into
+  `pay_unresolved`. Reported to the orchestrator, not fixed in C.
+
+### 34.8 Order of checks in phase C, and the fixes of the PRH-2 C review round
+
+Phase C (`applyDepositCallResult`) evaluates, in this order, and the first that applies decides:
+
+1. **Reference invalid** (decided in `depositAdapterCall`, **including when the adapter also returned
+   an error**: the reference is validated before the error return) -> T10 `invalid_provider_reference:<reason>`.
+2. **Binding conflict** (`foreignReferenceBinding`) -> T10 `provider_reference_conflict`.
+3. **Amount mismatch** (sync success only) -> T10 `sync_amount_mismatch`. Missing evidence never reaches
+   here: it is `Ambiguous` in `depositAdapterCall`.
+4. **Reversal tombstone** on the reference -> T10 `reversal_tombstone_precedes_success`.
+5. **INV-DEP-1 choke point** (`postDepositSuccessOrDispute`) -> T10/T13d or post.
+6. **Post.**
+
+All four T10s go through one function, `parkDepositAttempt`: dispute CAS, one `payment.attempt_disputed`
+audit (metadata includes `terminal_reason`, `adapter_outcome`, amounts), intent projection recompute, and the
+fresh intent returned to the caller.
+
+Review-round fixes:
+
+- **Player-facing redirect (security C-1).** A redirect URL or hosted-field token is returned to the
+  player only for an attempt phase C left `pending` (`playerFacingRedirect`, applied in both
+  `InitiateDepositAttempt` and `driveCreatedAttempt` after phase C, by committed state). A parked,
+  declined, ambiguous or succeeded attempt returns none, including an ambiguous result on the error path
+  with a valid reference. Otherwise a player could pay into a PSP session whose reference is bound to
+  another attempt.
+- **Reference binding on T6 (ledger-finance F-C1).** A validated, binding-checked, non-empty reference is
+  bound with `COALESCE(provider_reference, ...)` on the ambiguous transition
+  (`MarkAmbiguousFromSubmittingBindingRef`) and at the `sync_amount_mismatch` park, so the sweeper can poll
+  an ambiguous attempt (it never polled a reference-less one) and reconciliation can match a parked
+  mismatch. The conflict and invalid-reference parks never bind.
+- **Tombstone T10 unified (F-C2)** through `parkDepositAttempt`.
+- **Error-path validation (code review F1).** An adapter that returns an error together with a reference is validated like any other: an invalid one parks, a valid one is bound on the ambiguous attempt and returns no redirect.
+- **Test-only corrections.** The callback-versus-sync-success test was vacuous (the callback ran in phase B before the reference was bound, so it always deferred); it is replaced by two deterministic tests that assert the disposition (`deferred_unresolved` during phase B, `duplicate_effect` after phase C). A callback cannot be forced to resolve before phase C commits for a sync success, because nothing is bound until that commit. Added: sweeper-invisibility for every park, late callbacks after a conflict park (applies to the attempt that owns the reference, posts only there) and after a mismatch park (recorded only, `duplicate_effect`), and the cascade-driven redirect case.

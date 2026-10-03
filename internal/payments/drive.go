@@ -293,17 +293,21 @@ func depositAdapterCall(provider PaymentProvider, attempt PaymentAttempt, manife
 			MerchantReference: attempt.MerchantReference, Amount: attempt.Amount,
 			AssetCode: attempt.AssetCode, PaymentMethod: attempt.PaymentMethod,
 		})
-		if err != nil {
-			return res, ErrorClassAmbiguous, err
-		}
+		// The reference is validated BEFORE the error return: an adapter that
+		// returns an error together with a (hostile) reference must park like any
+		// other outcome, never reach phase C's binding query or the intent write
+		// raw (code review F1: it would hit the 0099 CHECK and loop forever).
 		var verr error
-		if res.Outcome == OutcomePending {
+		if err == nil && res.Outcome == OutcomePending {
 			verr = providerref.Validate("deposit.provider_reference", res.ProviderReference)
 		} else {
 			verr = providerref.ValidateOptional("deposit.provider_reference", res.ProviderReference)
 		}
 		if verr != nil {
 			return DepositResult{Outcome: res.Outcome}, ErrorClassProviderRefInvalid, verr
+		}
+		if err != nil {
+			return res, ErrorClassAmbiguous, err
 		}
 		switch res.Outcome {
 		case OutcomePending:
@@ -349,14 +353,25 @@ const (
 // cycle. Called under the intent lock phase C already holds.
 func parkDepositAttempt(
 	ctx context.Context, tx pgx.Tx, intent DepositIntent, attempt PaymentAttempt, providerID string,
-	evidence EvidenceKind, reason string, extra map[string]any,
+	evidence EvidenceKind, reason string, adapterOutcome Outcome, bindRef string, extra map[string]any,
 ) (DepositIntent, error) {
+	// bindRef (non-empty only for a validated, binding-checked reference, i.e.
+	// the sync_amount_mismatch park) is bound while the attempt is still live,
+	// so reconciliation can match the provider's record to this attempt.
+	if bindRef != "" {
+		if _, err := tx.Exec(ctx,
+			`UPDATE payment_attempts SET provider_reference = COALESCE(provider_reference, $2) WHERE id = $1 AND state IN ('submitting','pending','ambiguous')`,
+			attempt.ID, bindRef); err != nil {
+			return intent, fmt.Errorf("payments: bind reference on parked attempt: %w", err)
+		}
+	}
 	if err := ApplyDisputeFromNonTerminal(ctx, tx, attempt.ID, evidence, reason); err != nil {
 		return intent, err
 	}
 	meta := map[string]any{
 		"terminal_reason": reason, "last_evidence_kind": string(evidence), "provider_id": providerID,
 		"deposit_intent_id": intent.ID.String(), "amount": attempt.Amount, "asset_code": attempt.AssetCode,
+		"adapter_outcome": string(adapterOutcome),
 	}
 	for k, v := range extra {
 		meta[k] = v
@@ -444,7 +459,7 @@ func (o *Orchestrator) applyDepositCallResult(
 			reason += ":" + string(perr.Reason)
 			extra["ref_field"], extra["ref_reason"], extra["ref_len"], extra["ref_sha256_prefix"] = perr.Field, string(perr.Reason), perr.Length, perr.HashPrefix
 		}
-		updated, err := parkDepositAttempt(ctx, tx, intent, attempt, capability.ProviderID, evidence, reason, extra)
+		updated, err := parkDepositAttempt(ctx, tx, intent, attempt, capability.ProviderID, evidence, reason, res.Outcome, "", extra)
 		return updated, nil, err
 	}
 
@@ -458,7 +473,7 @@ func (o *Orchestrator) applyDepositCallResult(
 		}
 		if conflict {
 			updated, err := parkDepositAttempt(ctx, tx, intent, attempt, capability.ProviderID, evidence,
-				TerminalReasonProviderReferenceConflict,
+				TerminalReasonProviderReferenceConflict, res.Outcome, "",
 				map[string]any{"provider_reference": res.ProviderReference, "bound_to_operation": boundOp})
 			return updated, nil, err
 		}
@@ -498,7 +513,7 @@ func (o *Orchestrator) applyDepositCallResult(
 		// differing echo is a T10, with no posting and no error.
 		if CompareProviderAmount(attempt.Amount, attempt.AssetCode, res.Amount, res.AssetCode) != AmountEvidenceMatch {
 			updated, err := parkDepositAttempt(ctx, tx, intent, attempt, capability.ProviderID, evidence,
-				TerminalReasonSyncAmountMismatch,
+				TerminalReasonSyncAmountMismatch, res.Outcome, res.ProviderReference,
 				map[string]any{"provider_reference": res.ProviderReference, "provider_amount": res.Amount, "provider_asset_code": res.AssetCode})
 			return updated, nil, err
 		}
@@ -519,10 +534,11 @@ func (o *Orchestrator) applyDepositCallResult(
 				return intent, nil, err
 			}
 			if tombstoned {
-				if err := ApplyDisputeFromNonTerminal(ctx, tx, attempt.ID, evidence, "reversal_tombstone_precedes_success"); err != nil {
-					return intent, nil, err
-				}
-				return intent, nil, nil
+				// Unified (LF F-C2): same audit and intent recompute as every C park.
+				updated, err := parkDepositAttempt(ctx, tx, intent, attempt, capability.ProviderID, evidence,
+					TerminalReasonTombstonePrecedesSuccess, res.Outcome, "",
+					map[string]any{"provider_reference": res.ProviderReference})
+				return updated, nil, err
 			}
 		}
 		// ADR 0095 §28.3: routed through the choke-point wrapper, which
@@ -599,7 +615,7 @@ func (o *Orchestrator) applyDepositCallResult(
 		if err != nil {
 			return intent, nil, err
 		}
-		if err := MarkAmbiguousFromSubmitting(ctx, tx, attempt.ID, evidence, nextPoll); err != nil {
+		if err := MarkAmbiguousFromSubmittingBindingRef(ctx, tx, attempt.ID, evidence, res.ProviderReference, nextPoll); err != nil {
 			return updated, nil, err
 		}
 		return updated, nil, nil

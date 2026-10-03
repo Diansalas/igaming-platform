@@ -520,12 +520,24 @@ func MarkNotSent(ctx context.Context, tx pgx.Tx, attemptID, claimToken uuid.UUID
 // per ADR 0095 §4.2's rule that the flag is only proof of "not
 // classified NotSent yet", not proof of a send.
 func MarkAmbiguousFromSubmitting(ctx context.Context, tx pgx.Tx, attemptID uuid.UUID, evidence EvidenceKind, nextActionAt time.Time) error {
+	return MarkAmbiguousFromSubmittingBindingRef(ctx, tx, attemptID, evidence, "", nextActionAt)
+}
+
+// MarkAmbiguousFromSubmittingBindingRef is T6 that also binds the provider
+// reference the adapter returned, when non-empty (PRH-2 C, LF F-C1). The caller
+// MUST have validated it (providerref) and run the same-tenant binding
+// pre-check first. Without it an ambiguous attempt carries no reference while
+// its intent does, and the poll path (which needs the attempt's own reference)
+// reschedules it forever without ever polling. COALESCE keeps an
+// already-bound reference immutable.
+func MarkAmbiguousFromSubmittingBindingRef(ctx context.Context, tx pgx.Tx, attemptID uuid.UUID, evidence EvidenceKind, providerReference string, nextActionAt time.Time) error {
 	return casUpdate(ctx, tx, "T6 submitting->ambiguous",
 		`UPDATE payment_attempts
 		 SET state = 'ambiguous', last_evidence_kind = $2, ever_possibly_sent = true,
+		     provider_reference = COALESCE(provider_reference, NULLIF($4, '')),
 		     next_action_at = $3, poll_count = poll_count + 1, updated_at = now()
 		 WHERE id = $1 AND state = 'submitting'`,
-		attemptID, evidence, nextActionAt,
+		attemptID, evidence, nextActionAt, providerReference,
 	)
 }
 

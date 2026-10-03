@@ -13,6 +13,7 @@ package payments
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -27,19 +28,45 @@ import (
 // depRefProvider wraps the MOCK and lets a test rewrite what Deposit returns.
 type depRefProvider struct {
 	*MockProvider
-	mu     sync.Mutex
-	script func(req DepositRequest) DepositResult
+	mu        sync.Mutex
+	script    func(req DepositRequest) DepositResult
+	errScript func(req DepositRequest) (DepositResult, error) // takes precedence: result AND error
+	status    map[string]StatusResult                         // QueryStatus overrides by reference
+	queried   []string
 }
 
 func (p *depRefProvider) Deposit(ctx context.Context, req DepositRequest) (DepositResult, error) {
 	res, err := p.MockProvider.Deposit(ctx, req)
 	p.mu.Lock()
-	script := p.script
+	script, errScript := p.script, p.errScript
 	p.mu.Unlock()
-	if err != nil || script == nil {
+	if err != nil {
 		return res, err
 	}
+	if errScript != nil {
+		return errScript(req)
+	}
+	if script == nil {
+		return res, nil
+	}
 	return script(req), nil
+}
+
+func (p *depRefProvider) QueryStatus(ctx context.Context, ref string) (StatusResult, error) {
+	p.mu.Lock()
+	p.queried = append(p.queried, ref)
+	ov, ok := p.status[ref]
+	p.mu.Unlock()
+	if ok {
+		return ov, nil
+	}
+	return p.MockProvider.QueryStatus(ctx, ref)
+}
+
+func (p *depRefProvider) queriedRefs() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]string(nil), p.queried...)
 }
 
 func (p *depRefProvider) setScript(s func(req DepositRequest) DepositResult) {
@@ -163,6 +190,9 @@ func assertParkedNoMoney(t *testing.T, e *depRefEnv, f orchFixture, res Initiate
 	assertLedgerBalanced(t, e.pool, f.tenantID)
 	if s := depIntentStatus(t, e, f, res.Intent.ID); s != string(DepositIntentAmbiguous) {
 		t.Errorf("intent status = %q, want ambiguous", s)
+	}
+	if res.Intent.Status != DepositIntentAmbiguous {
+		t.Errorf("the intent RETURNED to the caller has status %q, want ambiguous (not a stale pre-park snapshot)", res.Intent.Status)
 	}
 	if n := depAttemptCount(t, e, f, res.Intent.ID); n != 1 {
 		t.Errorf("attempts for the intent = %d, want 1 (a park must not cascade)", n)
@@ -700,9 +730,10 @@ func TestDepRefConflict_LateCallbackAfterConflictPark_AppliesToTheBoundAttemptOn
 }
 
 // F3: a late verified callback after a sync_amount_mismatch park. The parked
-// attempt never bound its reference, so the callback cannot be resolved: it is
-// stored deferred_unresolved. Nothing posts and the attempt stays disputed.
-func TestDepSyncAmount_LateCallbackAfterMismatchPark_DefersNoPosting(t *testing.T) {
+// attempt bound the reference at the park (LF F-C1), so the callback resolves to
+// the disputed attempt and is recorded only (duplicate_effect). Nothing posts
+// and the attempt stays disputed.
+func TestDepSyncAmount_LateCallbackAfterMismatchPark_RecordedOnlyNoPosting(t *testing.T) {
 	pool := testPool(t)
 	e := newDepRefEnv(t, pool, "mock-dr-late-mm")
 	ref := "late-mm-" + uuid.NewString()
@@ -714,8 +745,8 @@ func TestDepSyncAmount_LateCallbackAfterMismatchPark_DefersNoPosting(t *testing.
 	if err != nil {
 		t.Fatalf("callback: %v", err)
 	}
-	if cb.Disposition != DispositionDeferredUnresolved {
-		t.Fatalf("callback disposition=%s, want deferred_unresolved (the parked attempt has no bound reference)", cb.Disposition)
+	if cb.Disposition != DispositionDuplicateEffect {
+		t.Fatalf("callback disposition=%s, want duplicate_effect (the park bound the reference; success on a disputed attempt is recorded only)", cb.Disposition)
 	}
 	if depLedgerTxCount(t, e, e.f) != 0 || cashBalance(t, pool, e.f) != 0 {
 		t.Errorf("a late callback after a mismatch park must not post")
@@ -762,5 +793,116 @@ func TestDepRefConflict_CascadeDrivenParkReturnsNoRedirect(t *testing.T) {
 	}
 	if n := depScan[int64](t, pool, f.tenantID, `SELECT count(*) FROM ledger_transactions WHERE tenant_id = $1`, f.tenantID); n != 0 {
 		t.Errorf("no ledger transaction may exist, found %d", n)
+	}
+}
+
+// Code review F1: the adapter returns an ERROR together with a reference. The
+// reference is validated before the error return, so a hostile one parks like
+// any other outcome (before, it reached the binding query and the intent write
+// raw, hit the 0099 CHECK, and the attempt looped forever as 'submitting').
+func TestDepRef_ErrorPathWithInvalidReference_ParksNothingPersisted(t *testing.T) {
+	pool := testPool(t)
+	long := strings.Repeat("e", providerrefMax+1)
+	cases := []struct {
+		name, ref, reason string
+	}{
+		{"error with oversize reference", long, "too_long"},
+		{"error with control-character reference", "err\x07refQ", "control_char"},
+	}
+	for i, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			e := newDepRefEnv(t, pool, "mock-dr-err"+string(rune('a'+i)))
+			e.p.errScript = func(req DepositRequest) (DepositResult, error) {
+				return DepositResult{Outcome: OutcomePending, ProviderReference: c.ref, RedirectURL: "https://mock-psp.invalid/pay/x", HostedFieldToken: "hosted-tok"},
+					errors.New("psp transport blew up after answering")
+			}
+			res := rvInit(t, pool, e.orch, e.f, 5000, "dr-err")
+			a := assertParkedNoMoney(t, e, e.f, res, TerminalReasonInvalidProviderReference+":"+c.reason)
+			if a.ProviderReference != nil || depIntentRef(t, e, e.f, res.Intent.ID) != nil {
+				t.Errorf("an invalid reference must never be stored")
+			}
+		})
+	}
+}
+
+// Orchestrator ruling: an ambiguous result on the error path returns NO
+// redirect and NO token even when the reference is valid (a player-facing
+// redirect exists only for an attempt phase C leaves pending). The valid
+// reference IS bound on the ambiguous attempt (LF F-C1).
+func TestDepRef_ErrorPathWithValidReference_AmbiguousNoRedirectReferenceBound(t *testing.T) {
+	pool := testPool(t)
+	e := newDepRefEnv(t, pool, "mock-dr-err-ok")
+	ref := "err-valid-" + uuid.NewString()
+	e.p.errScript = func(req DepositRequest) (DepositResult, error) {
+		return DepositResult{Outcome: OutcomePending, ProviderReference: ref, RedirectURL: "https://mock-psp.invalid/pay/x", HostedFieldToken: "hosted-tok"},
+			errors.New("psp transport blew up after answering")
+	}
+	res := rvInit(t, pool, e.orch, e.f, 5000, "dr-err-ok")
+	if res.RedirectURL != "" || res.HostedFieldToken != "" {
+		t.Fatalf("an ambiguous error-path result must return no redirect/token, got %q %q", res.RedirectURL, res.HostedFieldToken)
+	}
+	a := mustGetAttempt(t, pool, e.f.tenantID, res.Attempt.ID)
+	if a.State != AttemptAmbiguous {
+		t.Fatalf("state=%s, want ambiguous", a.State)
+	}
+	if a.ProviderReference == nil || *a.ProviderReference != ref {
+		t.Fatalf("the validated reference must be bound on the ambiguous attempt, got %v", a.ProviderReference)
+	}
+	if depLedgerTxCount(t, e, e.f) != 0 {
+		t.Errorf("nothing may post")
+	}
+}
+
+// LF F-C1: a sync success with no amount echo goes ambiguous WITH the
+// reference bound, so the sweeper's very next poll actually calls QueryStatus
+// with it, and a polled success then posts exactly once.
+func TestDepSyncAmount_MissingEcho_ReferenceBound_SweepPollsAndPostsOnce(t *testing.T) {
+	pool := testPool(t)
+	e := newDepRefEnv(t, pool, "mock-dr-poll")
+	ref := "poll-ref-" + uuid.NewString()
+	e.p.setScript(scriptSyncEcho(ref, 0, "EUR")) // amount not echoed
+	e.p.status = map[string]StatusResult{ref: {ProviderReference: ref, Outcome: OutcomeSucceeded, Amount: 5000, AssetCode: "EUR"}}
+	res := rvInit(t, pool, e.orch, e.f, 5000, "dr-poll")
+	a := mustGetAttempt(t, pool, e.f.tenantID, res.Attempt.ID)
+	if a.State != AttemptAmbiguous || a.ProviderReference == nil || *a.ProviderReference != ref {
+		t.Fatalf("state=%s ref=%v, want ambiguous with the reference bound", a.State, a.ProviderReference)
+	}
+	setNextActionNow(t, pool, e.f.tenantID, a.ID)
+	sw := NewSweeper(pool, e.orch, AllowAllDepositKYCGate{}, MockCredentialResolver{})
+	if st := sw.RunOnce(context.Background(), []uuid.UUID{e.f.tenantID}); len(st.Errors) != 0 {
+		t.Fatalf("sweep errors: %v", st.Errors)
+	}
+	if q := e.p.queriedRefs(); len(q) != 1 || q[0] != ref {
+		t.Fatalf("QueryStatus calls=%v, want exactly one with %q", q, ref)
+	}
+	final := mustGetAttempt(t, pool, e.f.tenantID, a.ID)
+	if final.State != AttemptSucceeded {
+		t.Fatalf("state=%s, want succeeded after the poll", final.State)
+	}
+	if n := depScan[int64](t, pool, e.f.tenantID, `SELECT count(*) FROM ledger_transactions WHERE tenant_id = $1 AND transaction_type = 'deposit'`, e.f.tenantID); n != 1 {
+		t.Fatalf("deposit postings=%d, want exactly 1", n)
+	}
+	if b := cashBalance(t, pool, e.f); b != 5000 {
+		t.Fatalf("balance=%d, want 5000", b)
+	}
+	assertLedgerBalanced(t, pool, e.f.tenantID)
+}
+
+// LF F-C1 (mismatch half) and F-C3: the sync_amount_mismatch park binds the
+// validated reference, and the audit names the adapter outcome.
+func TestDepSyncAmount_MismatchPark_BindsReferenceAndAuditsAdapterOutcome(t *testing.T) {
+	pool := testPool(t)
+	e := newDepRefEnv(t, pool, "mock-dr-mm-bind")
+	ref := "mm-bind-" + uuid.NewString()
+	e.p.setScript(scriptSyncEcho(ref, 4999, "EUR"))
+	res := rvInit(t, pool, e.orch, e.f, 5000, "dr-mm-bind")
+	a := assertParkedNoMoney(t, e, e.f, res, TerminalReasonSyncAmountMismatch)
+	if a.ProviderReference == nil || *a.ProviderReference != ref {
+		t.Errorf("the mismatch park must bind the validated reference, got %v", a.ProviderReference)
+	}
+	if got := depScan[string](t, pool, e.f.tenantID,
+		`SELECT metadata->>'adapter_outcome' FROM audit_log WHERE tenant_id = $1 AND action = 'payment.attempt_disputed' AND target_id = $2`,
+		e.f.tenantID, a.ID.String()); got != string(OutcomeSucceeded) {
+		t.Errorf("audit adapter_outcome=%q, want succeeded", got)
 	}
 }

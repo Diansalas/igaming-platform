@@ -1854,6 +1854,27 @@ func TestRVLF_N2_DriveGo_SuccessAfterTombstoneDisputesNotIndexError(t *testing.T
 	if final.State != AttemptDisputed {
 		t.Errorf("N2: a success after a tombstone must dispute (T10), got %s", final.State)
 	}
+	// PRH-2 C code review F3: the reason must be the tombstone reason, not merely "disputed".
+	if final.TerminalReason == nil || *final.TerminalReason != TerminalReasonTombstonePrecedesSuccess {
+		t.Errorf("N2: terminal_reason=%v, want %q", final.TerminalReason, TerminalReasonTombstonePrecedesSuccess)
+	}
+	// LF F-C2 (unified park): the T10 also writes the dispute audit and recomputes the intent.
+	var audits int64
+	var intentStatus string
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		if err := tx.QueryRow(ctx, `SELECT count(*) FROM audit_log WHERE action = 'payment.attempt_disputed' AND target_id = $1`, attemptID.String()).Scan(&audits); err != nil {
+			return err
+		}
+		return tx.QueryRow(ctx, `SELECT status FROM deposit_intents WHERE id = $1`, intentID).Scan(&intentStatus)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if audits != 1 {
+		t.Errorf("N2: payment.attempt_disputed audits=%d, want 1", audits)
+	}
+	if intentStatus != string(DepositIntentAmbiguous) {
+		t.Errorf("N2: intent status=%q, want ambiguous (recomputed)", intentStatus)
+	}
 	if b := cashBalance(t, pool, f); b != 0 {
 		t.Errorf("N2: a tombstoned success must never post; balance=%d", b)
 	}
