@@ -67,7 +67,11 @@ import (
 //	                            (LF95-C13).
 //	pay_reference_mismatch      resolved by merchant reference only, while
 //	                            the attempt holds a different provider
-//	                            reference.
+//	                            reference; or (check=merchant, D2-1)
+//	                            resolved by provider/settlement reference
+//	                            while the line's merchant reference names
+//	                            another attempt, the other operation, or
+//	                            no attempt of this provider.
 //	pay_asset_mismatch          asset differs (checked before amount).
 //	pay_amount_mismatch         amount differs.
 //	pay_status_mismatch         provider succeeded/reversed vs platform not
@@ -966,6 +970,9 @@ func (m *payMatcher) matchPayment(lk string, l payLine) {
 	if byMerchant && a.providerRef != "" && a.providerRef != l.ref {
 		m.r.add(MismatchKindPayReferenceMismatch, ak+" check=reference", "platform: "+a.render(), m.label+l.render())
 	}
+	if !byMerchant && l.merchant != "" {
+		m.checkMerchantAttribution(lk, ak, op, a, l)
+	}
 	if op == "payout" && l.settlement != "" && a.settlementRef != "" && l.settlement != a.settlementRef {
 		// Code review F4: the provider's stated settlement reference
 		// contradicts the ledger's withdrawal_completed provider_tx_id.
@@ -1019,6 +1026,50 @@ func (m *payMatcher) matchPayment(lk string, l payLine) {
 	case !providerSucceeded && inFlight(a.state) && m.aged(a):
 		m.r.add(MismatchKindPayUnresolved, ak+" check=unresolved",
 			"resolution within "+m.ce.Sub(m.agedBefore).String()+" of submission", "platform: "+a.render()+"; "+m.label+l.render())
+	}
+}
+
+// checkMerchantAttribution is the D2-1 merchant cross-check (ledger-finance
+// ruling docs/plans/prh2-hardening-round/reviews/d2-1-ledger-finance-
+// ruling.md (a); ADR 0095 §35.2). It runs for a line resolved to attempt a
+// by provider reference or settlement reference (never by merchant
+// reference) that carries a non-empty merchant reference. The platform
+// issues merchant references, so the PSP naming any attempt other than a -
+// a different attempt, an attempt of the other operation, or no attempt of
+// this provider at all - says whose capture this line is and contradicts
+// the attribution to a: pay_reference_mismatch check=merchant against a.
+// Attempt IDENTITY is compared (the byMerchant resolution), never strings.
+//
+// When the named attempt b is an unbound park (isUnboundParkReason: it
+// cannot hold the line's reference) and the line reports succeeded and is
+// not cleared on the line's reference, the PSP is reporting b's capture
+// that the platform never posted: pay_captured_unposted against b too.
+// b is NOT recorded in matchedBy - this line stays matched to a, and a
+// separate line for b must be matched normally, with no false
+// pay_duplicate. a's own checks are unaffected (the finding is additive).
+func (m *payMatcher) checkMerchantAttribution(lk, ak, op string, a *payAttempt, l payLine) {
+	b := m.byMerchant[l.merchant]
+	switch {
+	case b == nil:
+		m.r.add(MismatchKindPayReferenceMismatch, ak+" check=merchant",
+			"platform: merchant_reference "+a.merchantRef+" ("+a.render()+")",
+			m.label+"merchant_reference names no platform attempt of this provider; "+l.render())
+		return
+	case b.operation != op:
+		m.r.add(MismatchKindPayReferenceMismatch, ak+" check=merchant",
+			"platform: merchant_reference "+a.merchantRef+" ("+a.render()+")",
+			m.label+"merchant_reference names attempt="+b.id.String()+" of the other operation ("+b.operation+"); "+l.render())
+		return
+	case b == a:
+		return
+	}
+	m.r.add(MismatchKindPayReferenceMismatch, ak+" check=merchant",
+		"platform: merchant_reference "+a.merchantRef+" ("+a.render()+")",
+		m.label+"merchant_reference names attempt="+b.id.String()+" ("+b.render()+" terminal_reason="+orNone(b.terminalReason)+"); "+l.render())
+	if b.state == "disputed" && isUnboundParkReason(b.terminalReason) && l.status == statement.PaymentStatusSucceeded && m.capturedUnpostedRef(l.ref) {
+		m.r.add(MismatchKindPayCapturedUnposted, lk+" attempt="+b.id.String()+" check=captured_unposted",
+			"resolution: a PSP-initiated reversal/tombstone on this line's reference, or allocation (LEDGER-SUSPENSE-B-1); M1 only acknowledges",
+			"platform: "+b.render()+" terminal_reason="+b.terminalReason+"; line resolved by reference to attempt="+a.id.String()+"; "+m.label+l.render())
 	}
 }
 

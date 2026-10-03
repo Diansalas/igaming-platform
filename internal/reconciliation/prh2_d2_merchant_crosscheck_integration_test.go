@@ -1,0 +1,238 @@
+//go:build integration
+
+// PRH-2 D2-1: merchant-reference cross-check on lines resolved by provider
+// or settlement reference (ledger-finance ruling
+// docs/plans/prh2-hardening-round/reviews/d2-1-ledger-finance-ruling.md (a)
+// and (c) 1-8; ADR 0095 §35.2). The (c) 9 mutants are recorded in
+// docs/plans/payment-readiness/evidence/prh2-d2-mutation-kill.txt.
+//
+// Before this check, ONE statement line (reference R, merchant reference
+// naming the conflict-parked attempt B) resolved by reference to R's holder
+// A and the run was silent (code review D2-1 probe: 0 mismatches) - a
+// misattributed capture the balanced ledger cannot show.
+package reconciliation
+
+import (
+	"context"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+
+	"github.com/Diansalas/igaming-platform/internal/payments"
+	"github.com/Diansalas/igaming-platform/internal/reconciliation/statement"
+)
+
+// parkDepositConflict: holder A binds R through the real path (and, when
+// succeedHolder, succeeds and posts through a verified callback); B's
+// adapter then returns R, and phase C parks B provider_reference_conflict.
+func (w *d2World) parkDepositConflict(t *testing.T, succeedHolder bool) (holder, parked payments.PaymentAttempt, ref string) {
+	t.Helper()
+	holder = w.deposit(t, d2Amount)
+	if holder.ProviderReference == nil {
+		t.Fatalf("setup: holder has no reference (state %s)", holder.State)
+	}
+	ref = *holder.ProviderReference
+	if succeedHolder {
+		w.succeed(t, w.mockA, payProvA, holder)
+	}
+	w.p.setScript(d2Pending(ref))
+	defer w.p.setScript(nil)
+	parked = w.mustParked(t, w.deposit(t, d2Amount).ID, payments.TerminalReasonProviderReferenceConflict, false)
+	if parked.ProviderReference != nil {
+		t.Fatalf("setup: the conflict park must not bind the reference")
+	}
+	return w.attempt(t, holder.ID), parked, ref
+}
+
+func d2Merchant(ms []Mismatch) []Mismatch {
+	var out []Mismatch
+	for _, m := range ms {
+		if m.MismatchKind == MismatchKindPayReferenceMismatch && strings.Contains(m.ReconciliationKey, "check=merchant") {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+// d2OneMerchant asserts exactly one check=merchant mismatch, attributed to
+// attempt a, whose detail contains every fragment.
+func d2OneMerchant(t *testing.T, ms []Mismatch, a uuid.UUID, detail ...string) {
+	t.Helper()
+	got := d2Merchant(ms)
+	if len(got) != 1 {
+		t.Fatalf("want exactly one pay_reference_mismatch check=merchant, got %d:\n%s", len(got), renderMismatches(ms))
+	}
+	if !strings.Contains(got[0].ReconciliationKey, "attempt="+a.String()) {
+		t.Fatalf("check=merchant must be attributed to attempt=%s, key=%s", a, got[0].ReconciliationKey)
+	}
+	for _, d := range detail {
+		if !strings.Contains(got[0].ActualValue, d) {
+			t.Fatalf("check=merchant detail lacks %q: %s", d, got[0].ActualValue)
+		}
+	}
+}
+
+// d2AssertBalanced is (c) 8: SUM(D)=SUM(C) and RunLedgerVsProjection reports 0.
+func (w *d2World) d2AssertBalanced(t *testing.T) {
+	t.Helper()
+	var debits, credits int64
+	var drift []Mismatch
+	if err := w.pool.WithTenant(context.Background(), w.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		if err := tx.QueryRow(ctx, `
+			SELECT COALESCE(SUM(amount) FILTER (WHERE direction = 'debit'), 0)::bigint,
+			       COALESCE(SUM(amount) FILTER (WHERE direction = 'credit'), 0)::bigint
+			  FROM ledger_entries WHERE tenant_id = $1`, w.f.tenantID).Scan(&debits, &credits); err != nil {
+			return err
+		}
+		var err error
+		_, drift, err = RunLedgerVsProjection(ctx, tx, w.f.tenantID, time.Now().Add(-time.Hour), time.Now())
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if debits != credits || len(drift) != 0 {
+		t.Fatalf("ledger invariants: debits=%d credits=%d drift mismatches=%d", debits, credits, len(drift))
+	}
+}
+
+// TestD2_7_MerchantCrossCheck_DepositConflict is the ruling's (c) 1-4, 7, 8.
+func TestD2_7_MerchantCrossCheck_DepositConflict(t *testing.T) {
+	// (c) 1: A succeeded on R; B parked conflict on R; ONE line (R,
+	// merchant B, succeeded).
+	t.Run("c1_core_single_line_names_parked_attempt", func(t *testing.T) {
+		w := newD2World(t)
+		a, b, r := w.parkDepositConflict(t, true)
+		ms := w.d2Run(t, d2Src(d2Line(r, b.MerchantReference, statement.PaymentStatusSucceeded, d2Amount)))
+		d2Expect(t, ms, map[MismatchKind]int{MismatchKindPayReferenceMismatch: 1, d2KindCU: 1})
+		d2OneMerchant(t, ms, a.ID, "names attempt="+b.ID.String())
+		cu := d2CUFor(t, ms, b.ID)
+		if !strings.Contains(cu.ActualValue, "resolved by reference to attempt="+a.ID.String()) {
+			t.Errorf("B's finding must name the attempt the line resolved to: %s", cu.ActualValue)
+		}
+		w.d2AssertNoMoney(t, d2Parked{attempt: b, pspRef: "d2-none"})
+		w.d2AssertBalanced(t)
+	})
+	// (c) 2: B's captured_unposted clears on a reversal line naming R in
+	// the run, or a tombstone on R; the check=merchant finding stays.
+	t.Run("c2_reversal_line_on_R_clears_B_keeps_merchant_check", func(t *testing.T) {
+		w := newD2World(t)
+		a, b, r := w.parkDepositConflict(t, true)
+		ms := w.d2Run(t, d2Src(d2Line(r, b.MerchantReference, statement.PaymentStatusSucceeded, d2Amount),
+			d2ReversalLine("d2-rev-"+uuid.NewString()[:8], r, d2Amount)))
+		d2OneMerchant(t, ms, a.ID, "names attempt="+b.ID.String())
+		d2NoCU(t, ms, "a reversal line naming the line's reference")
+		w.d2AssertBalanced(t)
+	})
+	t.Run("c2_tombstone_on_R_clears_B_keeps_merchant_check", func(t *testing.T) {
+		w := newD2World(t)
+		a, b, r := w.parkDepositConflict(t, false) // holder pending: R never posted, so the reversal tombstones it
+		w.deliverReversal(t, "d2-tomb-"+uuid.NewString()[:8], r, d2Amount)
+		var tombs int64
+		if err := w.pool.WithTenant(context.Background(), w.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+			return tx.QueryRow(ctx, `SELECT count(*) FROM ledger_transactions WHERE tenant_id = $1 AND transaction_type = 'tombstone' AND provider_id = $2 AND provider_tx_id = $3`,
+				w.f.tenantID, payProvA, r).Scan(&tombs)
+		}); err != nil || tombs != 1 {
+			t.Fatalf("setup: want one tombstone on R, got %d err=%v", tombs, err)
+		}
+		ms := w.d2Run(t, d2Src(d2Line(r, b.MerchantReference, statement.PaymentStatusSucceeded, d2Amount)))
+		d2OneMerchant(t, ms, a.ID, "names attempt="+b.ID.String())
+		d2NoCU(t, ms, "a tombstone on the line's reference")
+		w.d2AssertNoMoney(t, d2Parked{attempt: b, pspRef: "d2-none"})
+		w.d2AssertBalanced(t)
+	})
+	// (c) 3: holder pending - loud on A (status) and names B.
+	t.Run("c3_holder_pending", func(t *testing.T) {
+		w := newD2World(t)
+		a, b, r := w.parkDepositConflict(t, false)
+		ms := w.d2Run(t, d2Src(d2Line(r, b.MerchantReference, statement.PaymentStatusSucceeded, d2Amount)))
+		d2Expect(t, ms, map[MismatchKind]int{MismatchKindPayStatusMismatch: 1, MismatchKindPayReferenceMismatch: 1, d2KindCU: 1})
+		mustKeyed(t, ms, MismatchKindPayStatusMismatch, "attempt="+a.ID.String())
+		d2OneMerchant(t, ms, a.ID, "names attempt="+b.ID.String())
+		d2CUFor(t, ms, b.ID)
+		w.d2AssertNoMoney(t, d2Parked{attempt: b, pspRef: "d2-none"})
+		w.d2AssertBalanced(t)
+	})
+	// (c) 4: a merchant reference naming A, or an empty one: no finding.
+	// (The other half of (c) 4 - the full existing suite, whose MOCK
+	// statement lines carry each attempt's own merchant reference, passing
+	// unchanged - is the package run itself.)
+	t.Run("c4_merchant_names_A_or_empty_is_clean", func(t *testing.T) {
+		w := newD2World(t)
+		a, _, r := w.parkDepositConflict(t, true)
+		for _, merchant := range []string{a.MerchantReference, ""} {
+			d2Expect(t, w.d2Run(t, d2Src(d2Line(r, merchant, statement.PaymentStatusSucceeded, d2Amount))), map[MismatchKind]int{})
+		}
+		w.d2AssertBalanced(t)
+	})
+	// (c) 7: B is not consumed by the first line: a second line (R2,
+	// merchant B) matches B through the normal merchant path, with no
+	// false pay_duplicate.
+	t.Run("c7_B_not_consumed", func(t *testing.T) {
+		w := newD2World(t)
+		a, b, r := w.parkDepositConflict(t, true)
+		r2 := "d2-r2-" + uuid.NewString()
+		ms := w.d2Run(t, d2Src(
+			d2Line(r, b.MerchantReference, statement.PaymentStatusSucceeded, d2Amount),
+			d2Line(r2, b.MerchantReference, statement.PaymentStatusSucceeded, d2Amount)))
+		d2Expect(t, ms, map[MismatchKind]int{MismatchKindPayReferenceMismatch: 1, d2KindCU: 2})
+		d2OneMerchant(t, ms, a.ID, "names attempt="+b.ID.String())
+		var viaR2 bool
+		for _, m := range ms {
+			if m.MismatchKind != d2KindCU {
+				continue
+			}
+			if !strings.Contains(m.ReconciliationKey, "attempt="+b.ID.String()) {
+				t.Fatalf("captured_unposted must name B: %s", m.ReconciliationKey)
+			}
+			viaR2 = viaR2 || strings.Contains(m.ReconciliationKey, "provider_reference="+r2)
+		}
+		if !viaR2 {
+			t.Fatalf("the second line must match B through the merchant path:\n%s", renderMismatches(ms))
+		}
+		w.d2AssertBalanced(t)
+	})
+}
+
+// TestD2_8_MerchantCrossCheck_UnknownAndOtherOperation is the ruling's (c) 5.
+func TestD2_8_MerchantCrossCheck_UnknownAndOtherOperation(t *testing.T) {
+	t.Run("names_no_platform_attempt", func(t *testing.T) {
+		w := newD2World(t)
+		a := w.deposit(t, d2Amount)
+		w.succeed(t, w.mockA, payProvA, a)
+		ms := w.d2Run(t, d2Src(d2Line(*a.ProviderReference, "d2-never-issued", statement.PaymentStatusSucceeded, d2Amount)))
+		d2Expect(t, ms, map[MismatchKind]int{MismatchKindPayReferenceMismatch: 1})
+		d2OneMerchant(t, ms, a.ID, "names no platform attempt")
+		w.d2AssertBalanced(t)
+	})
+	t.Run("names_an_attempt_of_the_other_operation", func(t *testing.T) {
+		w := newD2World(t)
+		a := w.deposit(t, d2Amount)
+		w.succeed(t, w.mockA, payProvA, a)
+		payout := w.attempt(t, w.payoutFixture(t, payProvA, "d2-instr-"+uuid.NewString()[:8], "", 3000, false))
+		ms := w.d2Run(t, d2Src(d2Line(*a.ProviderReference, payout.MerchantReference, statement.PaymentStatusSucceeded, d2Amount)))
+		d2Expect(t, ms, map[MismatchKind]int{MismatchKindPayReferenceMismatch: 1})
+		d2OneMerchant(t, ms, a.ID, "names attempt="+payout.ID.String(), "other operation (payout)")
+		w.d2AssertBalanced(t)
+	})
+}
+
+// TestD2_9_MerchantCrossCheck_PayoutBySettlement is the ruling's (c) 6.
+func TestD2_9_MerchantCrossCheck_PayoutBySettlement(t *testing.T) {
+	w := newD2World(t)
+	s1, s2 := "d2-settle-1-"+uuid.NewString()[:8], "d2-settle-2-"+uuid.NewString()[:8]
+	p1 := w.attempt(t, w.payoutFixture(t, payProvA, "d2-instr-1-"+uuid.NewString()[:8], s1, 3000, true))
+	p2 := w.attempt(t, w.payoutFixture(t, payProvA, "d2-instr-2-"+uuid.NewString()[:8], s2, 2000, true))
+	payoutLine := func(ref, merchant string, amount int64) statement.PaymentStatementLine {
+		return payLineFor(payProvA, ref, merchant, statement.PaymentLinePayout, statement.PaymentStatusSucceeded, amount)
+	}
+	// Control: each settlement line names its own attempt - clean.
+	d2Expect(t, w.d2Run(t, d2Src(payoutLine(s1, p1.MerchantReference, 3000), payoutLine(s2, p2.MerchantReference, 2000))), map[MismatchKind]int{})
+	// The line found by settlement reference s1 names P2.
+	ms := w.d2Run(t, d2Src(payoutLine(s1, p2.MerchantReference, 3000), payoutLine(s2, p2.MerchantReference, 2000)))
+	d2Expect(t, ms, map[MismatchKind]int{MismatchKindPayReferenceMismatch: 1})
+	d2OneMerchant(t, ms, p1.ID, "names attempt="+p2.ID.String())
+	w.d2AssertBalanced(t)
+}

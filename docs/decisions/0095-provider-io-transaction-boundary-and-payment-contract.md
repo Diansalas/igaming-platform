@@ -6466,14 +6466,32 @@ text uses the ADR 0101 F13 wording: "a PSP-initiated reversal/tombstone, or allo
   - **Two lines** for the same reference (e.g. the holder's capture and the parked attempt's): the
     second raises `pay_duplicate` (`check=duplicate_line`), reported once. Verified by test; no code
     change.
-  - **One line** (reference R, merchant reference naming the **parked** attempt): **silent today.**
-    The line matches the holder by reference; if the holder is `succeeded` with its posting, the run
-    reports nothing, and the parked attempt is not flagged (D2 code review D2-1; the reviewer's probe
-    found 0 mismatches). The merchant reference contradicting the reference-resolved attempt is not
-    checked: `pay_reference_mismatch` fires only on merchant-resolved lines. Whether a
-    reference-resolved line whose merchant reference names a different attempt should raise
-    `pay_reference_mismatch`, and whether in D2 or a follow-up, is pending a ledger-finance ruling;
-    the matcher is unchanged until then.
+  - **One line** (reference R, merchant reference naming the **parked** attempt B): **detected**, by
+    the merchant cross-check below. Before it (D2 code review D2-1) this case was silent: the line
+    matched the holder A by reference and, with A `succeeded` and posted, the run reported nothing.
+- **Merchant cross-check (D2-1; ledger-finance ruling
+  `docs/plans/prh2-hardening-round/reviews/d2-1-ledger-finance-ruling.md` (a); orchestrator decision:
+  in D2, pre-merge).** It applies to every deposit **and payout** line resolved by **provider
+  reference or settlement reference** (never by merchant reference) that carries a non-empty merchant
+  reference. The platform issues merchant references, so the line names whose capture it is.
+  Reconciliation resolves `byMerchant[merchant]` and compares **attempt identity**, not strings. It
+  raises `pay_reference_mismatch` with `check=merchant` against the resolved attempt A when the merchant
+  reference:
+  - names a **different attempt** (the detail names it);
+  - names an attempt of the **other operation** (deposit vs payout); or
+  - names **no attempt** of this provider ("names no platform attempt"). An adapter that cannot echo
+    our merchant reference must leave the field empty.
+
+  When the named attempt B is `disputed` with an unbound reason, the line is `succeeded`, and nothing
+  clears it on the line's reference, the check **also** raises `pay_captured_unposted` against B. B is
+  **not** consumed (not recorded as matched): a separate line for B still matches it through the
+  merchant path, with no false `pay_duplicate`. A's own checks (amount, asset, status, captured-unposted)
+  still run; the finding is additive. With A still pending, the line also gives `pay_status_mismatch`
+  against A. A line whose merchant reference names A, or is empty, is unchanged; the existing
+  reconciliation suite, whose MOCK statement lines carry each attempt's own merchant reference, passes
+  with no new findings. Tests are the ruling's (c) 1-8
+  (`internal/reconciliation/prh2_d2_merchant_crosscheck_integration_test.go`), and its (c) 9 mutants
+  are in the evidence file (§35.5).
 - An **invalid reference** on a statement line is refused at fetch (`validatePaymentLine`): the run
   fails, nothing is stored, and the sweep audits `reconciliation.sweep_run_failed` with severity P1.
 
