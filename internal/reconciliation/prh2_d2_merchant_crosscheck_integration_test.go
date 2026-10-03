@@ -173,7 +173,13 @@ func TestD2_7_MerchantCrossCheck_DepositConflict(t *testing.T) {
 	t.Run("c7_B_not_consumed", func(t *testing.T) {
 		w := newD2World(t)
 		a, b, r := w.parkDepositConflict(t, true)
-		r2 := "d2-r2-" + uuid.NewString()
+		// Lines are matched in provider_reference order: R2 must sort AFTER
+		// R (the MOCK's "mock-psp-recon-a-..."), so the R line's cross-check
+		// runs first and a consumed B would surface on the R2 line.
+		r2 := "zz-d2-r2-" + uuid.NewString()
+		if r2 <= r {
+			t.Fatalf("setup: R2 %q must sort after R %q", r2, r)
+		}
 		ms := w.d2Run(t, d2Src(
 			d2Line(r, b.MerchantReference, statement.PaymentStatusSucceeded, d2Amount),
 			d2Line(r2, b.MerchantReference, statement.PaymentStatusSucceeded, d2Amount)))
