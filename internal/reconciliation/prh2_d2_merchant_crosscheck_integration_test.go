@@ -236,3 +236,36 @@ func TestD2_9_MerchantCrossCheck_PayoutBySettlement(t *testing.T) {
 	d2OneMerchant(t, ms, p1.ID, "names attempt="+p2.ID.String())
 	w.d2AssertBalanced(t)
 }
+
+// TestD2_9b_MerchantCrossCheck_SettlementLine_NamedUnboundPark_ClearsOnLineRef:
+// a payout line found by SETTLEMENT reference S1 (so the line's reference
+// differs from the resolved attempt's own provider reference) whose merchant
+// reference names an unbound-park attempt B. B's captured_unposted is raised,
+// and clears on a reversal naming the LINE's reference S1 - never on the
+// resolved attempt's reference. This is the only shape where the two differ
+// (for a deposit resolved by reference they are equal by construction), so it
+// is what pins the ruling's mutant "clear B on a.providerRef instead of l.ref".
+// B is a fixture: a pending payout moved to T10 with an unbound reason.
+func TestD2_9b_MerchantCrossCheck_SettlementLine_NamedUnboundPark_ClearsOnLineRef(t *testing.T) {
+	w := newD2World(t)
+	s1, i1 := "d2-settle-"+uuid.NewString()[:8], "d2-instr-1-"+uuid.NewString()[:8]
+	p1 := w.attempt(t, w.payoutFixture(t, payProvA, i1, s1, 3000, true))
+	bID := w.payoutFixture(t, payProvA, "d2-instr-b-"+uuid.NewString()[:8], "", 3000, false)
+	if err := w.pool.WithTenant(context.Background(), w.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return payments.ApplyDisputeFromNonTerminal(ctx, tx, bID, payments.EvidenceSync, payments.TerminalReasonInvalidProviderReference+":control_character")
+	}); err != nil {
+		t.Fatalf("setup: T10: %v", err)
+	}
+	b := w.attempt(t, bID)
+	line := payLineFor(payProvA, s1, b.MerchantReference, statement.PaymentLinePayout, statement.PaymentStatusSucceeded, 3000)
+
+	ms := w.d2Run(t, d2Src(line))
+	d2Expect(t, ms, map[MismatchKind]int{MismatchKindPayReferenceMismatch: 1, d2KindCU: 1})
+	d2OneMerchant(t, ms, p1.ID, "names attempt="+b.ID.String())
+	d2CUFor(t, ms, b.ID)
+
+	ms = w.d2Run(t, d2Src(line, d2ReversalLine("d2-rev-"+uuid.NewString()[:8], s1, 3000)))
+	d2OneMerchant(t, ms, p1.ID, "names attempt="+b.ID.String())
+	d2NoCU(t, ms, "a reversal naming the line's (settlement) reference")
+	w.d2AssertBalanced(t)
+}
