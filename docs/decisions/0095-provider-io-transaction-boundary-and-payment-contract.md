@@ -6551,8 +6551,24 @@ of the match. One tenant, its own rows only (FORCE RLS, `tenant_id = $1` on ever
 - **GATE (binding, ledger-finance D2 review B1; not a future consideration).** Neither of the following
   may happen — **the first real PSP adapter enabled for any tenant, or the first non-MOCK payment
   statement source** (whichever comes first) — until **both** hold:
-  1. PAY-RECON-PARKED-CAPTURE-STANDING-1 has landed (standing coverage for unbound parks), **together
-     with PAY-RECON-POLL-REF-CLEAR-1** (see below); and
+  1. PAY-RECON-PARKED-CAPTURE-STANDING-1 has landed, **together with PAY-RECON-POLL-REF-CLEAR-1** (see
+     below). STANDING-1 must give standing coverage to **every disputed attempt that the D2F-1 runtime
+     rule treats as unbound**. That means:
+     - the unbound parks (`invalid_provider_reference*`, and a phase C `provider_reference_conflict`
+       park with no reference); and
+     - the **reference-less parks with a bound reason**: `callback_amount_asset_mismatch` and
+       `multiple_success_for_intent`, when the evidence resolved the attempt by merchant reference.
+
+     **Until STANDING-1 lands, the exposure of such a park drops out of reconciliation silently** once
+     the statement period that carried its line has passed. Its only remaining trace is the
+     `payment.attempt_disputed` audit row, because the I-wire P1 alert does not exist yet.
+
+     **PAY-CALLBACK-MISMATCH-BIND-1** (payments; binding before the first real PSP or non-MOCK
+     statement source) is the other way to close this hole for the bound reasons. The callback T10
+     that writes `callback_amount_asset_mismatch`, and `applyMultipleSuccessDispute`, should bind the
+     callback's validated, non-conflicting reference, so that those parks fall under the bound rule.
+     Either that item or STANDING-1 closes the hole, and both stay behind this gate (ledger-finance
+     D2F-1 confirmation, PM-3); and
   2. the I-wire P1 alert exists and is delivered for:
      - every deposit dispute reason that `disputeReasonClasses` (`internal/reconciliation/payment_statement.go`)
        classifies as **bound, unbound or bound-if-referenced**, i.e. every class except *excluded*. The
@@ -6578,7 +6594,9 @@ of the match. One tenant, its own rows only (FORCE RLS, `tenant_id = $1` on ever
 - **F-C4** (`foreignReferenceBinding` over non-tombstone `ledger_transactions`) is `internal/payments`
   and is not part of D2.
 - **MA020 (`player_open_payment_exposure`, migration 0113)** still names only
-  `multiple_success_for_intent`; MA020-SYNC-MISMATCH-1 should cover the poll reasons as well.
+  `multiple_success_for_intent`; MA020-SYNC-MISMATCH-1 should cover the poll reasons as well. That
+  widening (B4) must apply the same D2F-1 runtime rule: an exposure keyed on a stored reference only
+  when the attempt holds one.
 - **`success_for_never_sent_attempt` (T15) is pinned by unit test only.** The bound-if-referenced
   resolution is tested against the attempt row (`TestD2_P1_BoundIfReferenced`). There is no
   integration fixture: migration 0101's CHECK (`state IN ('created','rejected') OR provider_id IS NOT
