@@ -19,10 +19,10 @@
 //
 // Fixtures: the C reasons are produced through the REAL deposit path
 // (InitiateDepositAttempt -> phase C park) with a scripted wrapper around the
-// MOCK adapter. The D1 poll reasons are NOT produced by D1's code (another
-// branch, not depended on here): a real pending deposit is moved to disputed
-// with payments.ApplyDisputeFromNonTerminal and the reason string the plan
-// fixes (§5 D design 1-2), declared below as test-only constants.
+// MOCK adapter. In TestD2_1..3 the D1 poll reasons are fixture parks (a real
+// pending deposit moved to disputed with payments.ApplyDisputeFromNonTerminal
+// and D1's reason constant); TestD2_10 drives REAL D1 poll parks through the
+// sweeper end to end (QA D2-F1).
 //
 // One tenant, the MOCK provider, test-only fixed MOCK statement sources.
 package reconciliation
@@ -43,12 +43,12 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/reconciliation/statement"
 )
 
-// The PRH-2 D1 poll T10 reasons, as fixed by the plan (§5 D). Test-only:
-// production reconciliation spells them as string literals and never
-// imports internal/payments.
+// The PRH-2 D1 poll T10 reasons, from payments (D1 merged at 7adb0c5).
+// Production reconciliation spells them as string literals and never imports
+// internal/payments; payment_reason_classification_test.go pins the two.
 const (
-	d2ReasonPollAmountMismatch    = "poll_amount_mismatch"
-	d2ReasonPollReferenceMismatch = "poll_reference_mismatch"
+	d2ReasonPollAmountMismatch    = payments.TerminalReasonPollAmountMismatch
+	d2ReasonPollReferenceMismatch = payments.TerminalReasonPollReferenceMismatch
 )
 
 const (
@@ -58,11 +58,32 @@ const (
 	d2WideBefore       = -time.Hour
 )
 
-// d2Provider wraps the MOCK and lets a test rewrite what Deposit returns.
+// d2Provider wraps the MOCK and lets a test rewrite what Deposit and
+// QueryStatus return.
 type d2Provider struct {
 	*payments.MockProvider
 	mu     sync.Mutex
 	script func(req payments.DepositRequest) payments.DepositResult
+	status map[string]payments.StatusResult // QueryStatus overrides by reference
+}
+
+func (p *d2Provider) QueryStatus(ctx context.Context, ref string) (payments.StatusResult, error) {
+	p.mu.Lock()
+	ov, ok := p.status[ref]
+	p.mu.Unlock()
+	if ok {
+		return ov, nil
+	}
+	return p.MockProvider.QueryStatus(ctx, ref)
+}
+
+func (p *d2Provider) setStatus(ref string, st payments.StatusResult) {
+	p.mu.Lock()
+	if p.status == nil {
+		p.status = map[string]payments.StatusResult{}
+	}
+	p.status[ref] = st
+	p.mu.Unlock()
 }
 
 func (p *d2Provider) Deposit(ctx context.Context, req payments.DepositRequest) (payments.DepositResult, error) {
@@ -360,7 +381,7 @@ type d2BoundCase struct {
 
 func d2BoundCases() []d2BoundCase {
 	return []d2BoundCase{
-		{"sync_amount_mismatch", func(t *testing.T, w *d2World) d2Parked { return w.parkSyncMismatch(t) }, d2PSPAmount, true},
+		{payments.TerminalReasonSyncAmountMismatch, func(t *testing.T, w *d2World) d2Parked { return w.parkSyncMismatch(t) }, d2PSPAmount, true},
 		{d2ReasonPollAmountMismatch, func(t *testing.T, w *d2World) d2Parked { return w.parkPoll(t, d2ReasonPollAmountMismatch) }, d2PSPAmount, true},
 		{d2ReasonPollReferenceMismatch, func(t *testing.T, w *d2World) d2Parked { return w.parkPoll(t, d2ReasonPollReferenceMismatch) }, d2Amount, false},
 	}
@@ -469,8 +490,8 @@ func TestD2_2_BoundPark_Standing_ReportedWhenCoverageExcludesTheLine(t *testing.
 // the investigation_status case: no row state of a prior finding is read.)
 func TestD2_3_BoundPark_ClearsOnlyOnReversalLineOrTombstoneOnBoundRef(t *testing.T) {
 	builders := map[string]func(t *testing.T, w *d2World) d2Parked{
-		"sync_amount_mismatch":     func(t *testing.T, w *d2World) d2Parked { return w.parkSyncMismatch(t) },
-		d2ReasonPollAmountMismatch: func(t *testing.T, w *d2World) d2Parked { return w.parkPoll(t, d2ReasonPollAmountMismatch) },
+		payments.TerminalReasonSyncAmountMismatch: func(t *testing.T, w *d2World) d2Parked { return w.parkSyncMismatch(t) },
+		d2ReasonPollAmountMismatch:                func(t *testing.T, w *d2World) d2Parked { return w.parkPoll(t, d2ReasonPollAmountMismatch) },
 	}
 	for name, build := range builders {
 		t.Run(name+"/investigation_status_resolved_does_not_clear", func(t *testing.T) {

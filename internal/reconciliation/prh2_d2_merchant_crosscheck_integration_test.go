@@ -22,6 +22,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Diansalas/igaming-platform/internal/payments"
+	"github.com/Diansalas/igaming-platform/internal/providerref"
 	"github.com/Diansalas/igaming-platform/internal/reconciliation/statement"
 )
 
@@ -170,6 +171,48 @@ func TestD2_7_MerchantCrossCheck_DepositConflict(t *testing.T) {
 	// (c) 7: B is not consumed by the first line: a second line (R2,
 	// merchant B) matches B through the normal merchant path, with no
 	// false pay_duplicate.
+	// R-1 (code review): the B step is for UNBOUND parks only. B disputed with
+	// a bound reason (it holds its own reference RB) or an excluded reason,
+	// and a line (R, merchant B, succeeded) resolved by reference to A: only
+	// the check=merchant mismatch against A, and NO pay_captured_unposted for
+	// B from this line. (A bound B still gets its own STANDING finding, keyed
+	// by RB - that is the bound rule, not this line.) Kills Y-B-ANYDISPUTED.
+	t.Run("r1_B_bound_or_excluded_reason_gets_no_finding_from_the_line", func(t *testing.T) {
+		for _, c := range []struct {
+			reason       string
+			wantStanding int
+		}{
+			{payments.TerminalReasonPollAmountMismatch, 1},
+			{payments.TerminalReasonSyncAmountMismatch, 1},
+			{payments.TerminalReasonTombstonePrecedesSuccess, 0},
+		} {
+			t.Run(c.reason, func(t *testing.T) {
+				w := newD2World(t)
+				a := w.deposit(t, d2Amount)
+				w.succeed(t, w.mockA, payProvA, a)
+				a = w.attempt(t, a.ID)
+				r := *a.ProviderReference
+				b := w.parkPoll(t, c.reason) // a real pending deposit B (own reference RB), T10 by fixture
+				ms := w.d2Run(t, d2Src(d2Line(r, b.attempt.MerchantReference, statement.PaymentStatusSucceeded, d2Amount)))
+				d2OneMerchant(t, ms, a.ID, "names attempt="+b.attempt.ID.String())
+				for _, m := range ms {
+					if m.MismatchKind == d2KindCU && strings.Contains(m.ReconciliationKey, "provider_reference="+r+" ") {
+						t.Fatalf("R-1: B (%s) must get no pay_captured_unposted from the line naming it:\n%s", c.reason, renderMismatches(ms))
+					}
+				}
+				want := map[MismatchKind]int{MismatchKindPayReferenceMismatch: 1}
+				if c.wantStanding > 0 {
+					want[d2KindCU] = c.wantStanding
+					cu := d2CUFor(t, ms, b.attempt.ID)
+					if !strings.Contains(cu.ReconciliationKey, "provider_reference="+b.pspRef) || !strings.Contains(cu.ActualValue, "no statement line") {
+						t.Fatalf("R-1: B's only finding must be its standing one keyed by its own reference: %s", cu.ReconciliationKey)
+					}
+				}
+				d2Expect(t, ms, want)
+				w.d2AssertBalanced(t)
+			})
+		}
+	})
 	t.Run("c7_B_not_consumed", func(t *testing.T) {
 		w := newD2World(t)
 		a, b, r := w.parkDepositConflict(t, true)
@@ -258,7 +301,7 @@ func TestD2_9b_MerchantCrossCheck_SettlementLine_NamedUnboundPark_ClearsOnLineRe
 	p1 := w.attempt(t, w.payoutFixture(t, payProvA, i1, s1, 3000, true))
 	bID := w.payoutFixture(t, payProvA, "d2-instr-b-"+uuid.NewString()[:8], "", 3000, false)
 	if err := w.pool.WithTenant(context.Background(), w.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		return payments.ApplyDisputeFromNonTerminal(ctx, tx, bID, payments.EvidenceSync, payments.TerminalReasonInvalidProviderReference+":control_character")
+		return payments.ApplyDisputeFromNonTerminal(ctx, tx, bID, payments.EvidenceSync, payments.TerminalReasonInvalidProviderReference+":"+string(providerref.ReasonControlChar))
 	}); err != nil {
 		t.Fatalf("setup: T10: %v", err)
 	}
