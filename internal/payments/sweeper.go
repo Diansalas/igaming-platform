@@ -44,6 +44,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/Diansalas/igaming-platform/internal/audit"
 	"github.com/Diansalas/igaming-platform/internal/db"
 )
 
@@ -413,6 +414,20 @@ func (s *Sweeper) processViaQueryStatus(ctx context.Context, tenantID uuid.UUID,
 func (s *Sweeper) applyStatusEvidence(ctx context.Context, tx pgx.Tx, intent DepositIntent, attempt PaymentAttempt, gr GateResult[StatusResult]) error {
 	nextPoll := s.backoff(attempt.PollCount)
 
+	// PAY-SWEEP-CAS-NOISE-1 (PRH-2 D): the fresh-state short-circuit F3b added
+	// for the success branch, applied to EVERY other branch. The attempt was
+	// re-read under the intent lock, so if a concurrent callback already moved it
+	// out of submitting/pending/ambiguous, a pending / ambiguous / decline /
+	// transport-failure poll result has nothing to apply: §4.4 makes every such
+	// cell a no-op (or recorded-only) for a terminal row, and attempting the CAS
+	// (MarkAccepted, MarkAmbiguousFromPending, ApplyDecline, RescheduleNonTerminal -
+	// the last needs next_action_at IS NOT NULL, which a terminal row no longer
+	// has) only produced a benign-but-noisy CAS conflict. A poll SUCCESS keeps its
+	// own terminal-state cells below (succeeded, disputed and declined/T13).
+	if !attemptAwaitingEvidence(attempt.State) && (gr.Err != nil || gr.Class != ErrorClassSucceeded) {
+		return nil
+	}
+
 	if gr.Err != nil || gr.Class == ErrorClassNotSent {
 		// Transport/credential failure resolving the query itself, or a
 		// gate refusal: inconclusive, never treated as failure (§8's
@@ -428,15 +443,25 @@ func (s *Sweeper) applyStatusEvidence(ctx context.Context, tx pgx.Tx, intent Dep
 			// no-op (reschedule) - already pending, nothing changed.
 			return RescheduleNonTerminal(ctx, tx, attempt.ID, nextPoll)
 		}
-		if err := MarkAccepted(ctx, tx, attempt.ID, EvidenceQueryStatus, res.ProviderReference, nextPoll); err != nil {
+		// PRH-2 D (FH7-06, ADR 0095 §36.6): an attempt polled BY its bound reference
+		// keeps that reference through T9 and on the intent; the poll's echo is never
+		// written over it (an empty one would violate the 0099 CHECK - an error loop -
+		// and a different one would overwrite the intent's reference). Only an attempt
+		// with no bound reference yet (the sweeper never polls one; direct callers of
+		// this function may) learns the reference from the poll, as before.
+		boundRef := res.ProviderReference
+		if attempt.ProviderReference != nil && *attempt.ProviderReference != "" {
+			boundRef = *attempt.ProviderReference
+		}
+		if err := MarkAccepted(ctx, tx, attempt.ID, EvidenceQueryStatus, boundRef, nextPoll); err != nil {
 			return err
 		}
-		if _, err := setIntentAttempt(ctx, tx, intent.ID, attempt.ProviderID, &res.ProviderReference, DepositIntentPending); err != nil {
+		if _, err := setIntentAttempt(ctx, tx, intent.ID, attempt.ProviderID, &boundRef, DepositIntentPending); err != nil {
 			return err
 		}
 		// RV-PRH-I1 ledger-finance H2: see drive.go's identical comment -
 		// this poll is the sweeper's own T9 site.
-		attempt.ProviderReference = &res.ProviderReference
+		attempt.ProviderReference = &boundRef
 		_, err := ApplyDeferredReceiptsForAttempt(ctx, tx, s.Orchestrator, attempt)
 		return err
 
@@ -468,10 +493,24 @@ func (s *Sweeper) applyStatusEvidence(ctx context.Context, tx pgx.Tx, intent Dep
 			// amount/asset than what is already on file) is the same
 			// terminal contradiction applyResolvedReceiptEvidence audits
 			// via auditTerminalAmountAssetMismatch, never a CAS attempt.
-			if attempt.Amount != res.Amount || attempt.AssetCode != res.AssetCode {
+			//
+			// PRH-2 D: decided by the same poll evidence rule as the live
+			// branch (pollAmountEvidence), so an echo that merely OMITS the
+			// amount (Missing) is not reported as a contradiction here.
+			if pollAmountEvidence(attempt, res) == AmountEvidenceMismatch {
+				// D1-F2: provider_reference is the BOUND reference; the echo is audited
+				// only when valid (else reason, length and hash prefix).
+				bound := ""
+				if attempt.ProviderReference != nil {
+					bound = *attempt.ProviderReference
+				}
+				var extra map[string]any
+				if res.ProviderReference != "" && res.ProviderReference != bound {
+					extra = echoAuditMeta(res.ProviderReference)
+				}
 				return auditTerminalAmountAssetMismatch(ctx, tx, attempt, ReceiptEvidence{
-					ProviderReference: res.ProviderReference, Amount: res.Amount, AssetCode: res.AssetCode,
-				})
+					ProviderReference: bound, Amount: res.Amount, AssetCode: res.AssetCode,
+				}, extra)
 			}
 			return nil
 		case AttemptDisputed:
@@ -490,17 +529,21 @@ func (s *Sweeper) applyStatusEvidence(ctx context.Context, tx pgx.Tx, intent Dep
 		// already 'declined' (a T13 second-capture re-drive), so both the
 		// declined (T13t) and live (T10) tombstone cells apply here,
 		// exactly as the receipt path's own matrix distinguishes them.
-		if res.ProviderReference != "" {
-			tombstoned, err := tombstoneExists(ctx, tx, attempt.TenantID, *attempt.ProviderID, res.ProviderReference)
-			if err != nil {
-				return err
-			}
-			if tombstoned {
-				if attempt.State == AttemptDeclined {
-					return ApplyTombstonePrecedesSuccess(ctx, tx, attempt.ID, EvidenceQueryStatus)
-				}
-				return ApplyDisputeFromNonTerminal(ctx, tx, attempt.ID, EvidenceQueryStatus, "reversal_tombstone_precedes_success")
-			}
+		//
+		// PRH-2 D (PAY-POLL-AMOUNT-1 + FH7-06, ADR 0095 §36): everything from
+		// here on keys on the attempt's BOUND reference, never the poll's echo.
+		// The checks run in the order of ADR 0095 §36.1: amount/asset, echoed
+		// reference, binding conflict, tombstone; INV-DEP-1 and the posting
+		// follow below.
+		if attempt.ProviderReference == nil || *attempt.ProviderReference == "" {
+			// processViaQueryStatus never polls a reference-less attempt and the
+			// reference is immutable once bound, so this is unreachable; refuse
+			// rather than ever derive a posting key from the echo.
+			return fmt.Errorf("payments: poll success for attempt %s which has no bound provider reference", attempt.ID)
+		}
+		boundRef := *attempt.ProviderReference
+		if handled, err := s.checkPollSuccessEvidence(ctx, tx, intent, attempt, res, boundRef); err != nil || handled {
+			return err
 		}
 		// ADR 0095 §28.3: routed through the choke-point wrapper (see
 		// drive.go's identical comment) - a poll success for an intent
@@ -510,7 +553,7 @@ func (s *Sweeper) applyStatusEvidence(ctx context.Context, tx pgx.Tx, intent Dep
 		// doc comment: T17 re-drive reuses this same evidence application).
 		// postedTxID, not updated.LedgerTransactionID - PRH-I5 finding
 		// (LF95-C6(a)/T13); see drive.go's identical comment.
-		_, postedTxID, disputed, err := s.Orchestrator.postDepositSuccessOrDispute(ctx, tx, intent, attempt, *attempt.ProviderID, res.ProviderReference, attempt.Amount, attempt.AssetCode, EvidenceQueryStatus)
+		_, postedTxID, disputed, err := s.Orchestrator.postDepositSuccessOrDispute(ctx, tx, intent, attempt, *attempt.ProviderID, boundRef, attempt.Amount, attempt.AssetCode, EvidenceQueryStatus)
 		if err != nil {
 			return err
 		}
@@ -518,16 +561,42 @@ func (s *Sweeper) applyStatusEvidence(ctx context.Context, tx pgx.Tx, intent Dep
 			return nil
 		}
 		if err := ApplySuccess(ctx, tx, attempt.ID, SuccessEvidence{
-			Evidence: EvidenceQueryStatus, ProviderReference: res.ProviderReference, LedgerTransactionID: &postedTxID,
+			Evidence: EvidenceQueryStatus, ProviderReference: boundRef, LedgerTransactionID: &postedTxID,
 		}); err != nil {
 			return err
 		}
 		// RV-PRH-I1 ledger-finance H4: see drive.go's identical comment.
-		return rejectCreatedSiblings(ctx, tx, attempt, EvidenceQueryStatus)
+		if err := rejectCreatedSiblings(ctx, tx, attempt, EvidenceQueryStatus); err != nil {
+			return err
+		}
+		// PRH-2 D (PAY-DEFERRED-RECEIPT-SYNC-1, LF widening): a poll success on an
+		// attempt T6 bound while a callback for that reference had been deferred
+		// (phase B) is the transition that resolves it - drain the receipt now.
+		// `attempt` already carries the bound provider_id/reference.
+		_, err = ApplyDeferredReceiptsForAttempt(ctx, tx, s.Orchestrator, attempt)
+		return err
 
 	case ErrorClassDefiniteDecline:
+		// PRH-2 D fix round (D1-F1): like Pending, a decline keeps the attempt's BOUND
+		// reference on the intent and the attempt. The poll's echo is never written
+		// over it (finalizeDeclined -> setIntentAttempt overwrites the intent's
+		// reference; a foreign-bound or invalid echo would violate a unique index or
+		// the 0099 CHECK and loop). A different non-empty echo is audit-only.
 		var refPtr *string
-		if res.ProviderReference != "" {
+		if attempt.ProviderReference != nil && *attempt.ProviderReference != "" {
+			refPtr = attempt.ProviderReference
+			if res.ProviderReference != "" && res.ProviderReference != *attempt.ProviderReference {
+				meta := echoAuditMeta(res.ProviderReference)
+				meta["provider_reference"] = *attempt.ProviderReference
+				meta["deposit_intent_id"] = intent.ID.String()
+				if err := audit.Record(ctx, tx, audit.Entry{
+					TenantID: attempt.TenantID, ActorType: audit.ActorSystem, Action: "payments.poll_decline_reference_mismatch",
+					TargetType: "payment_attempt", TargetID: attempt.ID.String(), Outcome: audit.OutcomeDenied, Metadata: meta,
+				}); err != nil {
+					return fmt.Errorf("payments: audit poll decline reference mismatch: %w", err)
+				}
+			}
+		} else if res.ProviderReference != "" {
 			refPtr = &res.ProviderReference
 		}
 		providerIDStr := ""

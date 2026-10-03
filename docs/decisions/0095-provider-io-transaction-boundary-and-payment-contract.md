@@ -504,6 +504,16 @@ state; columns are the evidence outcome. Every cell is also audited.
   never posted.]*
 - *[AMENDED by §28.5: the `submitting`/`pending`/`ambiguous` × `succeeded (match)` cells read
   "T7 (tombstone → T10; intent already resolved → T10 `multiple_success_for_intent`)".]*
+- *[AMENDED by §36 (PRH-2 D) for the **poll** (`QueryStatus`) source of evidence: "match" in the
+  `succeeded` columns is decided by the poll's own amount, asset and echoed reference, in this order:
+  amount/asset mismatch → T10 `poll_amount_mismatch`; a **non-empty** echoed reference that differs from
+  the attempt's bound reference → T10 `poll_reference_mismatch` (an empty echo is allowed); reference bound
+  elsewhere (attempt, intent or non-tombstone ledger transaction) → T10 `provider_reference_conflict`;
+  tombstone on the **bound** reference → T10; then INV-DEP-1; then the posting, keyed on the **bound**
+  reference, never on the echo. A success with no usable amount evidence ("Missing") is none of these:
+  nothing is posted, the attempt stays live and is re-polled (§36.2). For a fresh attempt state of
+  `declined` the contradiction cells are audit-only (no live→disputed transition exists), and every
+  non-success poll result on a state that is no longer `submitting`/`pending`/`ambiguous` is a no-op.]*
 
 ### 4.5 Deposit/payout asymmetry (binding)
 
@@ -6538,3 +6548,172 @@ of the match. One tenant, its own rows only (FORCE RLS, `tenant_id = $1` on ever
 `internal/reconciliation/prh2_d2_parked_capture_integration_test.go` (`TestD2_1`..`TestD2_6`, LF (c)
 1-6 plus a pin that other disputed reasons are unchanged). Mutants, including LF (c) 7 (the predicate
 reverted to `multiple_success_for_intent` only): `docs/plans/payment-readiness/evidence/prh2-d2-mutation-kill.txt`.
+
+## 36. Amendment — PRH-2 D: poll amount and reference evidence, ledger-key binding, deferred-receipt drains, park fault injection (`payments`, 2026-10-03)
+
+Closes PAY-POLL-AMOUNT-1 and FH7-06 (architect `rv-fh7-architect-final.md`; ledger-finance LF-4 and
+security S-6 from the PRH-2 planning gate, plan §5-D), PAY-DEFERRED-RECEIPT-SYNC-1 (widened by
+ledger-finance), LF F-C4, the ride-alongs PAY-F3SM-TEST-1 and PAY-SWEEP-CAS-NOISE-1, and the QA C3
+fault-injection gap carried from C. **No migration.** Status: **IMPLEMENTED against the MOCK adapter;
+PROVIDER DEPENDENT for a real PSP** (§36.7). It reuses C's `CompareProviderAmount` unchanged (§34.2).
+
+### 36.1 The poll success branch (`applyStatusEvidence`, `internal/payments/sweeper.go`, `poll_evidence.go`)
+
+The sweeper re-reads the attempt under the intent lock and then, for a poll that reports **success** on a
+live attempt, decides in this order; the first that applies wins. Every contradiction is a T10 through
+`parkDepositAttempt` (dispute CAS, one `payment.attempt_disputed` audit with `adapter_outcome`, intent
+projection recompute), commits, and posts nothing:
+
+| # | Check | Result |
+|---|---|---|
+| 1 | `CompareProviderAmount` on `StatusResult.Amount`/`AssetCode` is **Mismatch** | T10 `poll_amount_mismatch` |
+| 1 | …is **Missing** | no posting, no dispute; see §36.2 |
+| 2 | echoed `ProviderReference` non-empty and different from `*attempt.ProviderReference` | T10 `poll_reference_mismatch` (an empty echo is allowed) |
+| 3 | `foreignReferenceBinding` on the **bound** reference (attempt, intent, or non-tombstone ledger transaction, §36.4) | T10 `provider_reference_conflict` |
+| 4 | reversal tombstone on the **bound** reference | T10 `reversal_tombstone_precedes_success` (now also audited and recomputed, F-C2) |
+| 5 | INV-DEP-1 choke point (`postDepositSuccessOrDispute`) | T10/T13d `multiple_success_for_intent` or post |
+| 6 | post | `provider_tx_id` and idempotency key = the **bound** reference |
+
+The tombstone lookup, the binding check, the posting and the `ApplySuccess` link all use the bound
+reference. The echo is used only for the comparison in row 2 and, when it is itself a valid reference,
+in the audit; an invalid echo is recorded as length and hash prefix only (never the value). A bound
+reference is guaranteed non-empty: `processViaQueryStatus` never polls a reference-less attempt, and the
+branch returns an error rather than ever derive a posting key from the echo.
+
+One poll-specific tightening of C's helper. `CompareProviderAmount` classes any echo with a zero amount
+or an empty asset as Missing, which on the **sync** path routes to "the poll decides". On the poll path
+nothing decides afterwards, so `pollAmountEvidence` upgrades **partial evidence that already contradicts
+the record** (a non-zero amount that differs, or a non-empty asset that differs) from Missing to
+Mismatch. Partial evidence that contradicts nothing (amount equal, asset omitted) stays Missing. The
+helper itself is unchanged.
+
+For a fresh attempt state of `declined` (the T13 second-capture shape, reachable when a callback declined
+the attempt while the poll was in flight) there is no live→disputed transition (§4.4: declined ×
+contradicting success is a P1 anomaly, no state change), so checks 1–3 write
+`payments.poll_evidence_contradicts_terminal_attempt` and change nothing; check 4 is T13t; a matching
+success posts as T13. For `succeeded` the existing succeeded × mismatch audit
+(`payments.callback_amount_asset_mismatch_terminal`) now uses the same evidence rule, so a poll that merely
+omits the amount is not reported as a contradiction.
+
+### 36.2 Decision: what "Missing" means on the poll path (code review of C, F5)
+
+**A poll success with no usable amount or asset evidence is never posted, is not a dispute, and leaves the
+attempt live.** The sweeper writes one `payment.attempt_poll_amount_unconfirmed` audit record, reschedules
+the attempt at the poll backoff, and polls again.
+
+Rationale:
+- *Never post:* the amount is the one fact the platform cannot supply itself; posting the attempt's own
+  amount on a provider's bare "succeeded" is exactly the under/over-credit risk PAY-POLL-AMOUNT-1 exists to close.
+- *Not a dispute:* a terminal `disputed` attempt makes every later matching callback recorded-only, so
+  parking on Missing would strand a possibly real capture behind a manual M1 for a provider that merely
+  omits the amount on status. A callback carries its own amount evidence and can still post for a live attempt.
+- *Not silent:* the audit makes a provider that never echoes an amount visible. It is bounded by the poll
+  backoff (cap 30 minutes, so at most 48 records per attempt per day). Deposits have no T16 escalation in the
+  sweeper today, so this audit and reconciliation's `pay_status_mismatch` are the only signals; see §36.7.
+- *Contradicting partial evidence is not Missing* (§36.1).
+- A real PSP adapter must echo amount and asset on a `QueryStatus` success, like the sync echo of §34.4
+  (PAY-PSP-CONTRACT-INVDEP1); one that cannot is unsuitable for deposits until it can.
+
+### 36.3 Deferred-receipt drains (PAY-DEFERRED-RECEIPT-SYNC-1)
+
+`ApplyDeferredReceiptsForAttempt` now runs on **every** transition that binds or resolves a reference
+where a verified callback may be waiting:
+
+| Site | Where | Receipt outcome |
+|---|---|---|
+| phase C sync success | `applyDepositCallResult`, after `ApplySuccess` and `rejectCreatedSiblings` | resolved against the now-succeeded attempt, no second posting |
+| sweeper poll success on a T6-bound ambiguous attempt | `applyStatusEvidence`, after `ApplySuccess` | same |
+| T9 (sweeper poll Pending) | already present (H2/S-Q2); now **asserted** by test | the stored success applies exactly once |
+| T4/T9 on the callback path (`receipt.go`) | already present; **not** covered by a new test (mutant D-DRAIN-4 survives, pre-existing site) | n/a |
+
+The resolved receipt has `resolved_at` set, `attempt_id` set and `resolution = 'applied'` (the
+succeeded-attempt duplicate cell). Its `disposition_at_receipt` stays `deferred_unresolved`: that column
+is immutable by trigger and describes the HTTP response given at receipt time, so the later
+"duplicate_effect" reading applies to a redelivery (also asserted). Not drained, by design and recorded as
+residual: T6 itself and the `sync_amount_mismatch` park, which also bind a reference; a stored success there
+would, at T6, post from the callback and is a behaviour change beyond this amendment.
+
+### 36.4 LF F-C4: `foreignReferenceBinding` covers the ledger
+
+The pre-check gains a third query: a **non-tombstone** `ledger_transactions` row with
+`(tenant_id, provider_id, provider_tx_id)` equal to the reference is a conflict (`bound_to_operation =
+ledger_<transaction_type>`). The case that motivated it: a payout Step B `withdrawal_completed`
+settlement reference at the same PSP equals a deposit's reference. It is bound to no `payment_attempts`
+row, so the earlier queries miss it, and `ledger.Post` would loop on `ErrIdempotencyPayloadMismatch`. It is
+now T10 `provider_reference_conflict` on both the phase C and poll paths. Tombstones are excluded: they have
+their own T10 (§4.3), checked after the binding check.
+
+### 36.5 `ledger.Post` refuses an empty `provider_tx_id`
+
+`prepareEntries` returns `ErrInvalidEntry` when `ProviderTxID` is set and empty, before anything is locked
+or written (defence in depth for FH7-06; migration 0099's CHECK already refuses `''` but as an untyped
+constraint error). A grep of every non-test `ledger.TransactionInput` construction found no caller that
+relies on `""` (all derive from validated references; `withdrawal.Complete` already refuses an empty id),
+and the full payments, ledger, wallet, casino, adjustment, withdrawal and idempotency suites stay green.
+
+### 36.6 Ride-alongs
+
+- **PAY-F3SM-TEST-1:** a callback succeeds the attempt while the poll is in flight (a hook inside
+  `QueryStatus`, where no transaction is held); the poll then reports a different amount; the test asserts
+  the terminal-mismatch audit, no state change and one posting. Mutant F3SM is killed.
+- **Pending branch (FH7-06, same defect class):** the poll's Pending branch wrote `res.ProviderReference`
+  to the intent through `setIntentAttempt`: an empty echo violated the 0099 CHECK (an error loop) and a
+  different one overwrote the intent's reference. T9 and the intent now keep the bound reference; the echo is
+  ignored there (no money moves, the attempt stays live). An attempt with no bound reference yet (never polled
+  by the sweeper; reachable only by direct callers) still learns it from the poll, as before.
+- **Exported reason list:** `DepositDisputeTerminalReasons()` / `IsDepositDisputeTerminalReason`
+  (`deposit_terminal_reasons.go`) enumerate every `terminal_reason` a deposit dispute can carry
+  (`multiple_success_for_intent`, `reversal_tombstone_precedes_success`, `sync_amount_mismatch`,
+  `provider_reference_conflict`, the `invalid_provider_reference:` prefix, `poll_amount_mismatch`,
+  `poll_reference_mismatch`, `callback_amount_asset_mismatch`, `success_for_never_sent_attempt`). A static unit
+  test parses the non-payout sources and fails if any dispute write site uses a reason outside the list.
+  The poll reason strings are a contract with reconciliation (PAY-RECON-PARKED-CAPTURE-1) and must not change.
+  The poll park keeps the bound reference and never binds the echo; a valid echo is recorded in the audit
+  (`echoed_provider_reference`), an invalid one only as reason, length and hash prefix.
+- **Review fix round (security D1-F1/F2, ledger-finance D1-M1):**
+  - *Decline branch (D1-F1):* the poll's Decline branch passed the raw echo to `finalizeDeclined` (which
+    overwrites `deposit_intents.provider_reference`) and to `ApplyDecline`. It now keeps the attempt's
+    bound reference for both. A different non-empty echo is audit-only
+    (`payments.poll_decline_reference_mismatch`), recorded as the value only when `providerref.Validate`
+    passes and otherwise as reason, length and hash prefix.
+  - *Succeeded-terminal audit (D1-F2):* `payments.callback_amount_asset_mismatch_terminal` from a poll now
+    records the **bound** reference as `provider_reference`; the echo appears only under the same
+    validate-or-hash rule.
+  - *Missing on a declined attempt (D1-M1):* writes one
+    `payments.poll_evidence_contradicts_terminal_attempt` audit with `reason=poll_amount_unconfirmed`; no
+    posting, no state change. A declined attempt has no `next_action_at`, so the sweeper does not poll it
+    again and the row is written once.
+- **PAY-SWEEP-CAS-NOISE-1:** F3b's fresh-state short-circuit now covers the pending, ambiguous, decline and
+  transport-failure branches: when the fresh attempt is no longer `submitting`/`pending`/`ambiguous`, a
+  non-success poll is a no-op instead of a CAS conflict (`RescheduleNonTerminal` needs
+  `next_action_at IS NOT NULL`, which a terminal row no longer has).
+
+### 36.7 Tests, mutants, residuals
+
+- Tests: `poll_amount_integration_test.go` (mismatch table including partial contradiction, Missing,
+  empty/matching/different/invalid echo, order, tombstone with an empty echo, F-C4 on both paths, the
+  poll-versus-callback race run `-count=50 -race`, F3SM, declined, CAS noise, deferred-receipt drains, fault
+  injection) and `internal/ledger/empty_provider_tx_id_integration_test.go`. No sleeps and no wall-clock
+  assertions (plan §5.0).
+- **Fault injection (QA C3):** a table `SHARE` lock held by another transaction plus `SET LOCAL
+  lock_timeout = '1ms'` in the victim forces SQLSTATE 55P03 after the dispute CAS, once at the audit insert
+  and once at the intent projection update, for all four C parks and both poll parks. Each asserts the
+  rollback is complete (attempt, intent, audit and ledger unchanged) and that re-driving the same evidence
+  parks exactly once.
+- **Surviving mutants, classified (not counted as killed):**
+  - *ApplySuccess links the echo (D-ECHO-2): equivalent / unreachable.* `ApplySuccess` writes
+    `provider_reference = COALESCE(provider_reference, $3)`. A polled attempt always has a bound,
+    non-empty reference at that point (the branch refuses otherwise), so the argument can never change the
+    row; and a differing echo is parked earlier (`poll_reference_mismatch`). Ledger-finance reviewed and
+    agrees.
+  - *Callback-path drain at `receipt.go` T4/T9 (D-DRAIN-4): pre-existing receipt-handling mutant, outside
+    D1's scope,* owned by registry item PAY-RECEIPT-T4-DRAIN-TEST-1.
+- Evidence and mutant kills: `docs/plans/payment-readiness/evidence/prh2-d1-mutation-kill.txt`.
+- **Residuals:**
+  - *Reconciliation:* on this branch `payment_statement.go` still excludes every disputed reason except
+    `multiple_success_for_intent` (§34.7). `poll_amount_mismatch` and `poll_reference_mismatch` are
+    captured-but-unposted shapes; PAY-RECON-PARKED-CAPTURE-1 (D2, separate branch) matches them by exact string.
+  - *Alerting:* the new T10s and the unconfirmed-poll audit emit no P1 log line (I-wire, as §34.7).
+  - *Drains at T6 and the mismatch-park bind* (§36.3).
+  - *Deposit escalation (T16)* is not implemented for deposits, so a never-confirming provider polls at the
+    backoff cap indefinitely.

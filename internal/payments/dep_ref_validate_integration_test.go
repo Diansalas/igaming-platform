@@ -33,6 +33,7 @@ type depRefProvider struct {
 	errScript func(req DepositRequest) (DepositResult, error) // takes precedence: result AND error
 	status    map[string]StatusResult                         // QueryStatus overrides by reference
 	queried   []string
+	onQuery   func(ref string) // PRH-2 D: runs inside QueryStatus (phase B of a poll, no tx held), before the result is returned
 }
 
 func (p *depRefProvider) Deposit(ctx context.Context, req DepositRequest) (DepositResult, error) {
@@ -56,7 +57,11 @@ func (p *depRefProvider) QueryStatus(ctx context.Context, ref string) (StatusRes
 	p.mu.Lock()
 	p.queried = append(p.queried, ref)
 	ov, ok := p.status[ref]
+	hook := p.onQuery
 	p.mu.Unlock()
+	if hook != nil {
+		hook(ref)
+	}
 	if ok {
 		return ov, nil
 	}
@@ -67,6 +72,21 @@ func (p *depRefProvider) queriedRefs() []string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return append([]string(nil), p.queried...)
+}
+
+func (p *depRefProvider) setStatus(ref string, st StatusResult) {
+	p.mu.Lock()
+	if p.status == nil {
+		p.status = map[string]StatusResult{}
+	}
+	p.status[ref] = st
+	p.mu.Unlock()
+}
+
+func (p *depRefProvider) setOnQuery(h func(ref string)) {
+	p.mu.Lock()
+	p.onQuery = h
+	p.mu.Unlock()
 }
 
 func (p *depRefProvider) setScript(s func(req DepositRequest) DepositResult) {
@@ -666,8 +686,22 @@ func TestDepRef_SyncSuccess_CallbackDuringPhaseB_DefersAndPostsExactlyOnce(t *te
 		t.Fatalf("a deferred callback followed by the sync success must not dispute")
 	}
 	assertLedgerBalanced(t, pool, e.f.tenantID)
-	t.Logf("deferred receipts still unresolved after the sync success (known residual, see report): %d",
-		depScan[int64](t, pool, e.f.tenantID, `SELECT count(*) FROM payment_provider_events WHERE tenant_id = $1 AND provider_reference = $2 AND resolved_at IS NULL`, e.f.tenantID, ref))
+	// PRH-2 D (PAY-DEFERRED-RECEIPT-SYNC-1, QA C re-review C1): ASSERTED, not
+	// logged. Phase C's sync-success branch drains the receipt the phase B callback
+	// stored: it is resolved against the now-succeeded attempt (the duplicate cell,
+	// resolution 'applied', no state change), not left to age into pay_unresolved.
+	assertDeferredReceiptResolved(t, pool, e.f.tenantID, ref, a.ID)
+	// Redelivering the same callback is a duplicate effect and posts nothing more.
+	cb, err := rvCallback(pool, e.orch, e.f, e.id, e.p.CallbackPayload(e.f.tenantID, CallbackEventDeposit, ref, "", OutcomeSucceeded, 5000, "EUR", "", false))
+	if err != nil {
+		t.Fatalf("redelivered callback: %v", err)
+	}
+	if cb.Disposition != DispositionDuplicateEffect {
+		t.Fatalf("redelivered callback disposition=%s, want duplicate_effect", cb.Disposition)
+	}
+	if n := depScan[int64](t, pool, e.f.tenantID, `SELECT count(*) FROM ledger_transactions WHERE tenant_id = $1 AND transaction_type = 'deposit'`, e.f.tenantID); n != 1 {
+		t.Fatalf("deposit postings after the redelivery=%d, want exactly 1", n)
+	}
 }
 
 func TestDepRef_SyncSuccess_CallbackAfterPhaseC_IsDuplicateEffectNoSecondPosting(t *testing.T) {
