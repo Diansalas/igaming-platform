@@ -216,6 +216,19 @@ func recordDepositSimulationAudit(ctx context.Context, tx pgx.Tx, r *http.Reques
 	})
 }
 
+// raiseSimulationPayloadMismatchAlert is ADR 0102 8 row 11: a detached raise of
+// the simulation Kind (p3, Simulation=true). The dispatcher records such an
+// alert as suppressed_simulation and never delivers it, so it is never paged as
+// a production P1; it exists so a payload-mismatch in the test-support route is
+// visible to the tenant's own audit of the simulation.
+func raiseSimulationPayloadMismatchAlert(ctx context.Context, deps Deps, tenantID uuid.UUID, providerID, requestID string) {
+	_ = alerting.RaiseDetached(ctx, alerting.NewTenantRunner(deps.DB, tenantID), alerting.Alert{
+		Kind: alerting.KindSimulationPaymentPayloadMismatch, SubjectTenantID: tenantID,
+		Discriminator: "provider:" + providerID,
+		Attributes:    map[string]alerting.AttrValue{"provider_id": providerID, "request_id": requestID},
+	})
+}
+
 // writeDepositCallbackError maps ReceiveCallback's sentinel errors to
 // their player-facing HTTP response via the SAME shared mapper
 // newPaymentWebhookHandler uses (deposit_handlers.go/
@@ -388,11 +401,7 @@ func newSimulateDepositCallbackHandler(deps Deps) http.HandlerFunc {
 		}
 		if err != nil {
 			writeDepositCallbackError(w, requestID, logger, err, func() {
-				_ = alerting.RaiseDetached(r.Context(), alerting.NewTenantRunner(deps.DB, tc.TenantID), alerting.Alert{
-					Kind: alerting.KindSimulationPaymentPayloadMismatch, SubjectTenantID: tc.TenantID,
-					Discriminator: "provider:" + providerID,
-					Attributes:    map[string]alerting.AttrValue{"provider_id": providerID, "request_id": requestID},
-				})
+				raiseSimulationPayloadMismatchAlert(r.Context(), deps, tc.TenantID, providerID, requestID)
 			})
 			return
 		}

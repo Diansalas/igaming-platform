@@ -2,6 +2,7 @@ package alerting
 
 import (
 	"context"
+	"sync"
 	"testing"
 
 	"github.com/google/uuid"
@@ -10,13 +11,58 @@ import (
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
 
+var (
+	metricReaderOnce sync.Once
+	metricReader     *sdkmetric.ManualReader
+)
+
+// testMetricReader installs ONE process-wide meter provider (the global
+// delegating meter binds only to the first provider set) and returns its
+// reader, shared by every metric test in this package.
+func testMetricReader() *sdkmetric.ManualReader {
+	metricReaderOnce.Do(func() {
+		metricReader = sdkmetric.NewManualReader()
+		otel.SetMeterProvider(sdkmetric.NewMeterProvider(sdkmetric.WithReader(metricReader)))
+	})
+	return metricReader
+}
+
+// raiseFailureCount returns the cumulative value of alert_raise_failures_total for
+// (kind, phase).
+func raiseFailureCount(t *testing.T, kind, phase string) int64 {
+	t.Helper()
+	var rm metricdata.ResourceMetrics
+	if err := testMetricReader().Collect(context.Background(), &rm); err != nil {
+		t.Fatal(err)
+	}
+	var n int64
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if m.Name != "alert_raise_failures_total" {
+				continue
+			}
+			sum, ok := m.Data.(metricdata.Sum[int64])
+			if !ok {
+				t.Fatalf("unexpected data type %T", m.Data)
+			}
+			for _, dp := range sum.DataPoints {
+				k, _ := dp.Attributes.Value("kind")
+				p, _ := dp.Attributes.Value("phase")
+				if k.AsString() == kind && p.AsString() == phase {
+					n += dp.Value
+				}
+			}
+		}
+	}
+	return n
+}
+
 // Security addendum 1 (c): a swallowed or failed raise increments
 // alert_raise_failures_total{kind,phase} with BOUNDED labels and NO tenant label
 // (ADR 0102 6.3/7.2). The instrument is created from the package's global
 // meter, which delegates to the provider installed here.
 func TestMetric_AlertRaiseFailuresTotal_BoundedLabelsNoTenant(t *testing.T) {
-	reader := sdkmetric.NewManualReader()
-	otel.SetMeterProvider(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader)))
+	reader := testMetricReader()
 
 	ctx := context.Background()
 	// Go-validation failure path of RaiseGuarded: no SQL, so no tx is needed. It
