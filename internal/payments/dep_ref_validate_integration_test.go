@@ -170,6 +170,14 @@ func assertParkedNoMoney(t *testing.T, e *depRefEnv, f orchFixture, res Initiate
 	if !depNextActionNull(t, e, f, a.ID) {
 		t.Errorf("a parked attempt must have no next_action_at")
 	}
+	// F3: nothing for the sweeper to claim or touch.
+	sw := NewSweeper(e.pool, e.orch, AllowAllDepositKYCGate{}, MockCredentialResolver{})
+	if st := sw.RunOnce(context.Background(), []uuid.UUID{f.tenantID}); len(st.Errors) != 0 {
+		t.Errorf("sweeper errors after a park: %v", st.Errors)
+	}
+	if after := mustGetAttempt(t, e.pool, f.tenantID, a.ID); after.State != AttemptDisputed || !after.UpdatedAt.Equal(a.UpdatedAt) {
+		t.Errorf("the sweeper touched a parked attempt: %s", after.State)
+	}
 	// Security C-1: a parked attempt never hands the player a PSP session.
 	if res.RedirectURL != "" || res.HostedFieldToken != "" {
 		t.Errorf("a parked attempt must return no redirect/token, got %q %q", res.RedirectURL, res.HostedFieldToken)
@@ -481,13 +489,7 @@ func TestDepRefConflict_ReferenceBoundToAPayoutAttempt_Parks(t *testing.T) {
 				e.p.setScript(scriptSyncEcho(payoutRef, 5000, "EUR"))
 			}
 			res := rvInit(t, pool, e.orch, e.f, 5000, "cfp")
-			if res.RedirectURL != "" || res.HostedFieldToken != "" {
-				t.Errorf("a conflict park must return no redirect/token, got %q %q", res.RedirectURL, res.HostedFieldToken)
-			}
-			a := mustGetAttempt(t, pool, e.f.tenantID, res.Attempt.ID)
-			if a.State != AttemptDisputed || depTerminalReason(a) != TerminalReasonProviderReferenceConflict {
-				t.Fatalf("state=%s reason=%s, want disputed/provider_reference_conflict", a.State, depTerminalReason(a))
-			}
+			a := assertParkedNoMoney(t, e, e.f, res, TerminalReasonProviderReferenceConflict)
 			if got := depScan[string](t, pool, e.f.tenantID,
 				`SELECT metadata->>'bound_to_operation' FROM audit_log WHERE tenant_id = $1 AND action = 'payment.attempt_disputed' AND target_id = $2`,
 				e.f.tenantID, a.ID.String()); got != "payout" {
@@ -518,13 +520,7 @@ func TestDepRefConflict_ReferenceBoundToAnotherIntent_Parks(t *testing.T) {
 	}
 	e.p.setScript(scriptOutcome(OutcomePending, boundRef))
 	res := rvInit(t, pool, e.orch, e.f, 5000, "cfi")
-	if res.RedirectURL != "" || res.HostedFieldToken != "" {
-		t.Errorf("a conflict park must return no redirect/token, got %q %q", res.RedirectURL, res.HostedFieldToken)
-	}
-	a := mustGetAttempt(t, pool, e.f.tenantID, res.Attempt.ID)
-	if a.State != AttemptDisputed || depTerminalReason(a) != TerminalReasonProviderReferenceConflict {
-		t.Fatalf("state=%s reason=%s, want disputed/provider_reference_conflict", a.State, depTerminalReason(a))
-	}
+	a := assertParkedNoMoney(t, e, e.f, res, TerminalReasonProviderReferenceConflict)
 	if got := depScan[string](t, pool, e.f.tenantID,
 		`SELECT metadata->>'bound_to_operation' FROM audit_log WHERE tenant_id = $1 AND action = 'payment.attempt_disputed' AND target_id = $2`,
 		e.f.tenantID, a.ID.String()); got != "deposit_intent" {
@@ -596,46 +592,137 @@ func TestDepRefConflict_CrossTenantSameStringHasNoEffectOnTheOtherTenant(t *test
 	assertLedgerBalanced(t, pool, fB.tenantID)
 }
 
-// Callback-vs-sync race: a verified success callback for the reference lands
-// WHILE the sync success is still being applied. Whatever the interleaving,
-// the intent is credited exactly once and nothing errors or disputes.
-func TestDepRef_CallbackVersusSyncSuccessRace_PostsExactlyOnce(t *testing.T) {
+// Callback-versus-sync-success, as it can actually be forced.
+//
+// A sync success binds its reference to the attempt only in phase C's own
+// commit (ApplySuccess). Before that commit a verified callback for the same
+// reference cannot be resolved (nothing is bound on deposit_intents or
+// payment_attempts yet), so the ONLY reachable orderings are: (a) callback
+// during phase B -> stored deferred_unresolved; (b) callback after phase C ->
+// duplicate_effect. A "callback queued behind phase C's lock" ordering does not
+// exist for sync success (it would still be unresolved), so unlike the
+// Pending race (TestRVLF_P8) no lock-held interleaving can make the callback
+// resolve first; both orderings are therefore driven sequentially and
+// deterministically, with the disposition asserted explicitly.
+func TestDepRef_SyncSuccess_CallbackDuringPhaseB_DefersAndPostsExactlyOnce(t *testing.T) {
 	pool := testPool(t)
-	for iter := 0; iter < 5; iter++ {
-		e := newDepRefEnv(t, pool, "mock-dr-race")
-		ref := "race-ref-" + uuid.NewString()
-		var wg sync.WaitGroup
-		var cbErr error
-		started := make(chan struct{})
-		e.p.setScript(func(req DepositRequest) DepositResult {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				close(started)
-				_, cbErr = rvCallback(pool, e.orch, e.f, e.id, e.p.CallbackPayload(e.f.tenantID, CallbackEventDeposit, ref, "", OutcomeSucceeded, 5000, "EUR", "", false))
-			}()
-			<-started
-			return DepositResult{Outcome: OutcomeSucceeded, ProviderReference: ref, Amount: req.Amount, AssetCode: req.AssetCode}
-		})
-		res := rvInit(t, pool, e.orch, e.f, 5000, "race")
-		wg.Wait()
-		if cbErr != nil {
-			t.Fatalf("iter %d: callback returned %v", iter, cbErr)
-		}
-		a := mustGetAttempt(t, pool, e.f.tenantID, res.Attempt.ID)
-		if a.State != AttemptSucceeded {
-			t.Fatalf("iter %d: state=%s, want succeeded", iter, a.State)
-		}
-		if n := depScan[int64](t, pool, e.f.tenantID, `SELECT count(*) FROM ledger_transactions WHERE tenant_id = $1 AND transaction_type = 'deposit'`, e.f.tenantID); n != 1 {
-			t.Fatalf("iter %d: deposit postings=%d, want exactly 1", iter, n)
-		}
-		if b := cashBalance(t, pool, e.f); b != 5000 {
-			t.Fatalf("iter %d: balance=%d, want 5000", iter, b)
-		}
-		if depDisputeAudits(t, e, e.f, a.ID) != 0 {
-			t.Fatalf("iter %d: an in-order success pair must not dispute", iter)
-		}
-		assertLedgerBalanced(t, pool, e.f.tenantID)
+	e := newDepRefEnv(t, pool, "mock-dr-race-b")
+	ref := "race-ref-" + uuid.NewString()
+	var cbRes ReceiveCallbackResult
+	var cbErr error
+	e.p.setScript(func(req DepositRequest) DepositResult {
+		// Runs inside phase B (no tx held by the caller): the reference is not bound yet.
+		cbRes, cbErr = rvCallback(pool, e.orch, e.f, e.id, e.p.CallbackPayload(e.f.tenantID, CallbackEventDeposit, ref, "", OutcomeSucceeded, 5000, "EUR", "", false))
+		return DepositResult{Outcome: OutcomeSucceeded, ProviderReference: ref, Amount: req.Amount, AssetCode: req.AssetCode}
+	})
+	res := rvInit(t, pool, e.orch, e.f, 5000, "race-b")
+	if cbErr != nil {
+		t.Fatalf("callback returned %v", cbErr)
+	}
+	if cbRes.Disposition != DispositionDeferredUnresolved {
+		t.Fatalf("callback during phase B: disposition=%s, want deferred_unresolved (reference not bound yet)", cbRes.Disposition)
+	}
+	a := mustGetAttempt(t, pool, e.f.tenantID, res.Attempt.ID)
+	if a.State != AttemptSucceeded {
+		t.Fatalf("state=%s, want succeeded", a.State)
+	}
+	if n := depScan[int64](t, pool, e.f.tenantID, `SELECT count(*) FROM ledger_transactions WHERE tenant_id = $1 AND transaction_type = 'deposit'`, e.f.tenantID); n != 1 {
+		t.Fatalf("deposit postings=%d, want exactly 1", n)
+	}
+	if b := cashBalance(t, pool, e.f); b != 5000 {
+		t.Fatalf("balance=%d, want 5000", b)
+	}
+	if depDisputeAudits(t, e, e.f, a.ID) != 0 {
+		t.Fatalf("a deferred callback followed by the sync success must not dispute")
+	}
+	assertLedgerBalanced(t, pool, e.f.tenantID)
+	t.Logf("deferred receipts still unresolved after the sync success (known residual, see report): %d",
+		depScan[int64](t, pool, e.f.tenantID, `SELECT count(*) FROM payment_provider_events WHERE tenant_id = $1 AND provider_reference = $2 AND resolved_at IS NULL`, e.f.tenantID, ref))
+}
+
+func TestDepRef_SyncSuccess_CallbackAfterPhaseC_IsDuplicateEffectNoSecondPosting(t *testing.T) {
+	pool := testPool(t)
+	e := newDepRefEnv(t, pool, "mock-dr-race-a")
+	ref := "race-ref-" + uuid.NewString()
+	e.p.setScript(scriptSyncEcho(ref, 5000, "EUR"))
+	res := rvInit(t, pool, e.orch, e.f, 5000, "race-a")
+	cb, err := rvCallback(pool, e.orch, e.f, e.id, e.p.CallbackPayload(e.f.tenantID, CallbackEventDeposit, ref, "", OutcomeSucceeded, 5000, "EUR", "", false))
+	if err != nil {
+		t.Fatalf("callback: %v", err)
+	}
+	if cb.Disposition != DispositionDuplicateEffect {
+		t.Fatalf("callback after phase C: disposition=%s, want duplicate_effect", cb.Disposition)
+	}
+	if n := depScan[int64](t, pool, e.f.tenantID, `SELECT count(*) FROM ledger_transactions WHERE tenant_id = $1 AND transaction_type = 'deposit'`, e.f.tenantID); n != 1 {
+		t.Fatalf("deposit postings=%d, want exactly 1", n)
+	}
+	if a := mustGetAttempt(t, pool, e.f.tenantID, res.Attempt.ID); a.State != AttemptSucceeded || depDisputeAudits(t, e, e.f, a.ID) != 0 {
+		t.Fatalf("state=%s, want succeeded and undisputed", a.State)
+	}
+	if b := cashBalance(t, pool, e.f); b != 5000 {
+		t.Fatalf("balance=%d, want 5000", b)
+	}
+}
+
+// F3: a late verified callback after a LF-6 conflict park. The reference
+// belongs to the OTHER attempt, so the callback legitimately applies there and
+// posts to the first intent only; the parked attempt stays disputed.
+func TestDepRefConflict_LateCallbackAfterConflictPark_AppliesToTheBoundAttemptOnly(t *testing.T) {
+	pool := testPool(t)
+	e := newDepRefEnv(t, pool, "mock-dr-late-cf")
+	first := rvInit(t, pool, e.orch, e.f, 5000, "late-cf-1")
+	r := *first.Attempt.ProviderReference
+	e.p.setScript(scriptOutcome(OutcomePending, r))
+	second := rvInit(t, pool, e.orch, e.f, 5000, "late-cf-2")
+	parked := mustGetAttempt(t, pool, e.f.tenantID, second.Attempt.ID)
+	if parked.State != AttemptDisputed || depTerminalReason(parked) != TerminalReasonProviderReferenceConflict {
+		t.Fatalf("setup: parked attempt %s/%s", parked.State, depTerminalReason(parked))
+	}
+
+	cb, err := rvCallback(pool, e.orch, e.f, e.id, e.p.CallbackPayload(e.f.tenantID, CallbackEventDeposit, r, "", OutcomeSucceeded, 5000, "EUR", "", false))
+	if err != nil {
+		t.Fatalf("callback: %v", err)
+	}
+	if cb.Disposition != DispositionApplied {
+		t.Fatalf("callback disposition=%s, want applied (to the attempt that owns the reference)", cb.Disposition)
+	}
+	if n := ledgerDepositTxCount(t, pool, e.f.tenantID, first.Intent.ID); n != 1 {
+		t.Errorf("first intent postings=%d, want 1", n)
+	}
+	if n := ledgerDepositTxCount(t, pool, e.f.tenantID, second.Intent.ID); n != 0 {
+		t.Errorf("parked intent postings=%d, want 0", n)
+	}
+	a := mustGetAttempt(t, pool, e.f.tenantID, second.Attempt.ID)
+	if a.State != AttemptDisputed || depTerminalReason(a) != TerminalReasonProviderReferenceConflict {
+		t.Errorf("parked attempt changed: %s/%s", a.State, depTerminalReason(a))
+	}
+	assertLedgerBalanced(t, pool, e.f.tenantID)
+}
+
+// F3: a late verified callback after a sync_amount_mismatch park. The parked
+// attempt never bound its reference, so the callback cannot be resolved: it is
+// stored deferred_unresolved. Nothing posts and the attempt stays disputed.
+func TestDepSyncAmount_LateCallbackAfterMismatchPark_DefersNoPosting(t *testing.T) {
+	pool := testPool(t)
+	e := newDepRefEnv(t, pool, "mock-dr-late-mm")
+	ref := "late-mm-" + uuid.NewString()
+	e.p.setScript(scriptSyncEcho(ref, 4999, "EUR"))
+	res := rvInit(t, pool, e.orch, e.f, 5000, "late-mm")
+	assertParkedNoMoney(t, e, e.f, res, TerminalReasonSyncAmountMismatch)
+
+	cb, err := rvCallback(pool, e.orch, e.f, e.id, e.p.CallbackPayload(e.f.tenantID, CallbackEventDeposit, ref, "", OutcomeSucceeded, 5000, "EUR", "", false))
+	if err != nil {
+		t.Fatalf("callback: %v", err)
+	}
+	if cb.Disposition != DispositionDeferredUnresolved {
+		t.Fatalf("callback disposition=%s, want deferred_unresolved (the parked attempt has no bound reference)", cb.Disposition)
+	}
+	if depLedgerTxCount(t, e, e.f) != 0 || cashBalance(t, pool, e.f) != 0 {
+		t.Errorf("a late callback after a mismatch park must not post")
+	}
+	a := mustGetAttempt(t, pool, e.f.tenantID, res.Attempt.ID)
+	if a.State != AttemptDisputed || depTerminalReason(a) != TerminalReasonSyncAmountMismatch {
+		t.Errorf("parked attempt changed: %s/%s", a.State, depTerminalReason(a))
 	}
 }
 
