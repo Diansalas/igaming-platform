@@ -36,6 +36,12 @@ Round history, disclosed:
     the added case 'governed posting after the refused exit' is what kills F2.
   - C1ii is the C1 probe mutant (per-entry closed-shape check removed): security's over-credit
     probe and the wrong-wallet variant must commit refusals under it.
+  - C1ii's FIRST round-2 form was a malformed mutant and is discarded: it rewrote the shape
+    condition to 'IF false AND <asset> OR <amount> OR <account/direction>', which (AND binds
+    tighter than OR) still enforced the amount and account arms, so it 'survived' twice
+    (once by the spec, once by a rerun whose spec edit had not applied). The corrected mutant
+    neutralises the RAISE itself and is KILLED. Under it, security's probe is still refused by
+    C1i (MA040) at the refused exit - the two fixes are independent layers.
   - Round 1 (disclosed there): S32 survived once (layering gap, fixed); G1's first run hung
     and S11's first run was invalid (DB rebuild failure); both were rerun.
 
