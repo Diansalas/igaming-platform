@@ -21,10 +21,12 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/Diansalas/igaming-platform/internal/alerting"
 	"github.com/Diansalas/igaming-platform/internal/apierror"
 	"github.com/Diansalas/igaming-platform/internal/identity"
 	"github.com/Diansalas/igaming-platform/internal/identityresolution"
 	"github.com/Diansalas/igaming-platform/internal/payments"
+	"github.com/Diansalas/igaming-platform/internal/testsupport/alertinject"
 )
 
 func TestPaymentWebhookHandler_DepositReversalAlreadyReversed_Maps409(t *testing.T) {
@@ -123,6 +125,24 @@ func TestPaymentWebhookHandler_DepositReversalAlreadyReversed_Maps409(t *testing
 	for _, leaked := range []string{providerRef, "payrev1-http-rev-1", "payrev1-http-rev-2", "9000", "9_000"} {
 		if strings.Contains(body.Message, leaked) {
 			t.Fatalf("the denial body must never echo %q, got %q", leaked, body.Message)
+		}
+	}
+
+	// ADR 0102 8 row 10 (failure-path P1, detached): the same condition is also a
+	// durable payment.webhook_integrity alert, with only server-side ids in its
+	// discriminator and attributes limited to provider_id/request_id.
+	durable := alertinject.Find(alertinject.ForSubject(t, pool, tenant.ID), string(alerting.KindPaymentWebhookIntegrity))
+	if len(durable) != 1 || durable[0].Discriminator != "provider:mock:reason:deposit_already_reversed" || durable[0].Severity != "p1" {
+		t.Fatalf("expected one durable deposit_already_reversed P1, got %+v", durable)
+	}
+	for k, v := range durable[0].Attributes {
+		if k != "provider_id" && k != "request_id" {
+			t.Fatalf("durable alert carries non-allow-listed attribute %q", k)
+		}
+		for _, leaked := range []string{providerRef, "payrev1-http-rev-1", "payrev1-http-rev-2", "9000"} {
+			if strings.Contains(fmt.Sprint(v), leaked) {
+				t.Fatalf("durable alert attribute %q leaks %q", k, leaked)
+			}
 		}
 	}
 
