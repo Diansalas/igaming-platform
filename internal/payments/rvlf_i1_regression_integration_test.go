@@ -1831,7 +1831,7 @@ func TestRVLF_N2_DriveGo_SuccessAfterTombstoneDisputesNotIndexError(t *testing.T
 	}
 
 	capability := ProviderCapability{AdapterCapability: AdapterCapability{ProviderID: "mock-n2drive"}}
-	gr := GateResult[DepositResult]{Class: ErrorClassSucceeded, Value: DepositResult{Outcome: OutcomeSucceeded, ProviderReference: ref}}
+	gr := GateResult[DepositResult]{Class: ErrorClassSucceeded, Value: DepositResult{Outcome: OutcomeSucceeded, ProviderReference: ref, Amount: 5000, AssetCode: "EUR"}}
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, `SELECT id FROM deposit_intents WHERE id = $1 FOR UPDATE`, intentID); err != nil {
 			return err
@@ -1897,7 +1897,7 @@ func TestRVLF_N4_RejectCreatedSiblingsRecordsCallerEvidenceKind(t *testing.T) {
 	// applyDepositCallResult directly - the same shape phase C's own
 	// re-drive of a declined attempt would take.
 	capability := ProviderCapability{AdapterCapability: AdapterCapability{ProviderID: "mock-n4"}}
-	gr := GateResult[DepositResult]{Class: ErrorClassSucceeded, Value: DepositResult{Outcome: OutcomeSucceeded, ProviderReference: ref}}
+	gr := GateResult[DepositResult]{Class: ErrorClassSucceeded, Value: DepositResult{Outcome: OutcomeSucceeded, ProviderReference: ref, Amount: 5000, AssetCode: "EUR"}}
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, `SELECT id FROM deposit_intents WHERE id = $1 FOR UPDATE`, intentID); err != nil {
 			return err
