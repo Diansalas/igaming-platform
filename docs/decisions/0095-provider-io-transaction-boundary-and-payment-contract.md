@@ -6546,6 +6546,19 @@ and the full payments, ledger, wallet, casino, adjustment, withdrawal and idempo
   The poll reason strings are a contract with reconciliation (PAY-RECON-PARKED-CAPTURE-1) and must not change.
   The poll park keeps the bound reference and never binds the echo; a valid echo is recorded in the audit
   (`echoed_provider_reference`), an invalid one only as reason, length and hash prefix.
+- **Review fix round (security D1-F1/F2, ledger-finance D1-M1):**
+  - *Decline branch (D1-F1):* the poll's Decline branch passed the raw echo to `finalizeDeclined` (which
+    overwrites `deposit_intents.provider_reference`) and to `ApplyDecline`. It now keeps the attempt's
+    bound reference for both. A different non-empty echo is audit-only
+    (`payments.poll_decline_reference_mismatch`), recorded as the value only when `providerref.Validate`
+    passes and otherwise as reason, length and hash prefix.
+  - *Succeeded-terminal audit (D1-F2):* `payments.callback_amount_asset_mismatch_terminal` from a poll now
+    records the **bound** reference as `provider_reference`; the echo appears only under the same
+    validate-or-hash rule.
+  - *Missing on a declined attempt (D1-M1):* writes one
+    `payments.poll_evidence_contradicts_terminal_attempt` audit with `reason=poll_amount_unconfirmed`; no
+    posting, no state change. A declined attempt has no `next_action_at`, so the sweeper does not poll it
+    again and the row is written once.
 - **PAY-SWEEP-CAS-NOISE-1:** F3b's fresh-state short-circuit now covers the pending, ambiguous, decline and
   transport-failure branches: when the fresh attempt is no longer `submitting`/`pending`/`ambiguous`, a
   non-success poll is a no-op instead of a CAS conflict (`RescheduleNonTerminal` needs
@@ -6563,6 +6576,14 @@ and the full payments, ledger, wallet, casino, adjustment, withdrawal and idempo
   and once at the intent projection update, for all four C parks and both poll parks. Each asserts the
   rollback is complete (attempt, intent, audit and ledger unchanged) and that re-driving the same evidence
   parks exactly once.
+- **Surviving mutants, classified (not counted as killed):**
+  - *ApplySuccess links the echo (D-ECHO-2): equivalent / unreachable.* `ApplySuccess` writes
+    `provider_reference = COALESCE(provider_reference, $3)`. A polled attempt always has a bound,
+    non-empty reference at that point (the branch refuses otherwise), so the argument can never change the
+    row; and a differing echo is parked earlier (`poll_reference_mismatch`). Ledger-finance reviewed and
+    agrees.
+  - *Callback-path drain at `receipt.go` T4/T9 (D-DRAIN-4): pre-existing receipt-handling mutant, outside
+    D1's scope,* owned by registry item PAY-RECEIPT-T4-DRAIN-TEST-1.
 - Evidence and mutant kills: `docs/plans/payment-readiness/evidence/prh2-d1-mutation-kill.txt`.
 - **Residuals:**
   - *Reconciliation:* on this branch `payment_statement.go` still excludes every disputed reason except
