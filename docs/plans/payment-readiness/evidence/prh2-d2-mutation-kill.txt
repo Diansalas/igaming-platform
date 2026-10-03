@@ -1,0 +1,54 @@
+PRH-2 D2 - PAY-RECON-PARKED-CAPTURE-1 - mutation-kill evidence
+=================================================================
+Owner: ledger-finance. Date: 2026-10-03. Local run, NOT CI.
+Branch: prh2-d2-recon-parked-capture (base 564c515). Mutated tree: 9ff8757.
+Spec: docs/plans/prh2-hardening-round/reviews/c-ledger-finance.md, "QA F2 ruling" (a) and (c) 1-7.
+ADR: docs/decisions/0095-provider-io-transaction-boundary-and-payment-contract.md §35.
+
+Method
+------
+- Private database lf_d2_20261003 (scratchpad priv_db.sh), fully migrated from the worktree.
+  No role, password, credential or shared-infrastructure change.
+- Each mutant is an exact-anchor string replacement in
+  internal/reconciliation/payment_statement.go (each anchor asserted to occur exactly once),
+  followed by:
+    go test -tags integration -count=1 -run 'TestD2_|TestINVDEP1_|TestPaymentStatement_' ./internal/reconciliation/
+  under set -o pipefail; the log is grepped for FAIL / panic / DATA RACE.
+- After every mutant the file is restored and asserted byte-identical to `git show HEAD:<path>`
+  ("restore verified byte-identical to HEAD after every mutant").
+- Verdict KILLED = non-zero exit with at least one "--- FAIL" of a named test (no build failure).
+
+Results: 17 mutants, 17 KILLED, 0 survived, 0 equivalent.
+
+| Mutant | Change | Verdict | Killed by (top-level tests) |
+|---|---|---|---|
+| M-PRED (LF (c) 7) | both sites reverted to `a.terminalReason == "multiple_success_for_intent"` | KILLED | TestD2_1_BoundPark_MatchedSucceededLine_ReportsCapturedUnposted (all 4 subtests), TestD2_2_BoundPark_Standing_ReportedWhenCoverageExcludesTheLine (all 3), TestD2_3_BoundPark_ClearsOnlyOnReversalLineOrTombstoneOnBoundRef (setup asserts the finding first) |
+| M-PRED-INRUN | matched-line site only reverted | KILLED | TestD2_1, TestD2_2 (its in-run precondition) |
+| M-PRED-STANDING | standing (unmatched, unwindowed) site only reverted | KILLED | TestD2_2, TestD2_3 |
+| M-SYNC-DROP | `sync_amount_mismatch` removed from the bound set | KILLED | TestD2_1, TestD2_2, TestD2_3 |
+| M-POLLAMT-DROP | `poll_amount_mismatch` removed from the bound set | KILLED | TestD2_1, TestD2_2, TestD2_3 |
+| M-POLLREF-DROP | `poll_reference_mismatch` removed from the bound set | KILLED | TestD2_1, TestD2_2 |
+| M-UNBOUND-FLAG-DROP | in-run unbound-park case disabled (`case false && ...`) | KILLED | TestD2_4_ConflictParks, TestD2_5_InvalidReferencePark |
+| M-CONFLICT-DROP | `provider_reference_conflict` removed from isUnboundParkReason | KILLED | TestD2_4_ConflictParks |
+| M-INVALID-DROP | `invalid_provider_reference[:*]` removed from isUnboundParkReason | KILLED | TestD2_5_InvalidReferencePark |
+| M-UNBOUND-STATUS-WIDEN | unbound flag fires on any line status | KILLED | TestD2_4_ConflictParks (pending line) |
+| M-UNBOUND-BYMERCHANT-GATE | unbound flag gated on merchant resolution only | KILLED | TestD2_4_ConflictParks/unbound_reason_on_a_reference_holding_attempt_is_still_flagged |
+| M-BOUND-STATUS-WIDEN | bound in-run flag also fires on a `reversed` line (X15 analogue) | KILLED | TestD2_1 (non_succeeded_line_is_not_flagged_in_run), TestINVDEP1_C5_CapturedUnposted_ClearsOnReversalLineOrTombstone |
+| M-STANDING-UNBOUND-WIDEN | standing case widened to unbound parks | KILLED | TestD2_4_ConflictParks |
+| M-CLEAR-W1-ANY-REVERSAL | clearing widened: any reversal line in the run clears | KILLED | TestD2_3 (reversal_line_or_tombstone_on_another_reference_does_not_clear) |
+| M-CLEAR-W2-ANY-TOMBSTONE | clearing widened: any tombstone of the provider clears | KILLED | TestD2_3 (reversal_line_or_tombstone_on_another_reference_does_not_clear) |
+| M-CLEAR-NEVER | clearing removed (`return true`) | KILLED | TestD2_3, TestD2_4, TestD2_5, TestINVDEP1_C5 |
+| M-UNBOUND-CLEAR-ATTEMPT-REF | unbound clearing read on the attempt's (empty) reference, not the line's | KILLED | TestD2_4, TestD2_5 |
+
+Notes
+-----
+- A first battery at 32dc4f0 (where the unbound rule also required `byMerchant`) had one surviving
+  mutant, "byMerchant dropped", equivalent by construction (an unbound park holds no reference, so
+  a line can only resolve to it by merchant reference). The rule was changed at 9ff8757 to not gate
+  on how the line resolved (more conservative: an unbound reason on a reference-holding attempt stays
+  loud) and pinned by test; the re-run above has no survivor.
+- "An M1 or investigation_status change does not clear it" (LF (c) 3): investigation_status is
+  exercised through ResolveMismatch (TestD2_3 .../investigation_status_resolved_does_not_clear).
+  M1 is NOT IMPLEMENTED (ADR 0101, K3); the emission predicate reads no resolution or prior finding.
+- The D1 poll reasons are inserted by fixture (ApplyDisputeFromNonTerminal on a real pending
+  deposit, with the plan's reason strings); D1's code is not used.
