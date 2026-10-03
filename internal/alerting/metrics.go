@@ -78,3 +78,18 @@ func recordStaleClaim(ctx context.Context) {
 	}
 	alertStaleClaimsTotal.Add(ctx, 1)
 }
+
+// alertDispatcherPassesTotal counts dispatcher loop passes by result
+// ("ok", "error", "panic"). A flat counter is the "alert dispatcher
+// stalled" signal (runbook). No tenant label.
+var alertDispatcherPassesTotal, _ = meter.Int64Counter(
+	"alert_dispatcher_passes_total",
+	metric.WithDescription("Count of alert dispatcher loop passes by result (ADR 0102 I-wire)."),
+)
+
+func recordDispatcherPass(ctx context.Context, result string) {
+	if alertDispatcherPassesTotal == nil {
+		return
+	}
+	alertDispatcherPassesTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("result", result)))
+}

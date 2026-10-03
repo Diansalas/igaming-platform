@@ -46,6 +46,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
+	"github.com/Diansalas/igaming-platform/internal/alerting"
 	"github.com/Diansalas/igaming-platform/internal/apierror"
 	"github.com/Diansalas/igaming-platform/internal/audit"
 	"github.com/Diansalas/igaming-platform/internal/auth"
@@ -383,6 +384,41 @@ func logKillSwitchEngagedAlert(logger observabilityLogger, ks payments.KillSwitc
 	)
 }
 
+// alertRunner is the engage's own ScopedRunner (ADR 0102 5): a platform
+// admin session reopens WithPlatformAdmin, a tenant session WithPrincipalScope.
+// It mirrors runKillSwitchTx exactly and never chooses scope from the alert.
+func (c killSwitchCall) alertRunner(deps Deps) alerting.ScopedRunner {
+	if c.tc.TenantID == uuid.Nil {
+		return alerting.NewPlatformAdminRunner(deps.DB, c.subject)
+	}
+	return alerting.NewPrincipalRunner(deps.DB, c.tc.TenantID, c.subject)
+}
+
+// killSwitchAlertReasonMax bounds the staff-supplied reason_code attribute so
+// it can never push the alert past the attribute size cap (which would turn
+// the alert into a go_validation fallback).
+const killSwitchAlertReasonMax = 128
+
+// raiseKillSwitchEngagedAlert raises payment.kill_switch_engaged (p2) after
+// the engage committed. The result of the raise is intentionally ignored here:
+// alerting.RaisePostCommit already logs, counts and falls back, and the
+// engage outcome never depends on it.
+func raiseKillSwitchEngagedAlert(ctx context.Context, deps Deps, c killSwitchCall, ks payments.KillSwitch, isTakeover bool) {
+	reason := ks.ReasonCode
+	if len(reason) > killSwitchAlertReasonMax {
+		reason = reason[:killSwitchAlertReasonMax]
+	}
+	_ = alerting.RaisePostCommit(ctx, c.alertRunner(deps), alerting.Alert{
+		Kind: alerting.KindPaymentKillSwitchEngaged, SubjectTenantID: c.target,
+		Discriminator: "switch:" + ks.ID.String(),
+		Attributes: map[string]alerting.AttrValue{
+			"provider_scope": ks.ProviderScope, "operation_scope": string(ks.OperationScope),
+			"reason_code": reason, "changed_by_scope": string(ks.ChangedByScope),
+			"is_platform_takeover": isTakeover, "request_id": c.requestID,
+		},
+	})
+}
+
 // scopeOrNil renders a *payments.KillSwitchSessionScope as a plain string
 // pointer for JSON metadata (nil stays nil, never "").
 func scopeOrNil(s *payments.KillSwitchSessionScope) any {
@@ -608,6 +644,7 @@ func newEngageKillSwitchHandler(deps Deps) http.HandlerFunc {
 			}
 		}
 		var ks payments.KillSwitch
+		var isTakeover bool // captured for the post-commit alert (ADR 0102 row 8)
 		err := runKillSwitchTx(r.Context(), deps, c, func(ctx context.Context, tx pgx.Tx) error {
 			// M3: capture the prior state (natural-key lookup - engage has
 			// no id yet on a first-ever engage of this provider/operation
@@ -640,7 +677,7 @@ func newEngageKillSwitchHandler(deps Deps) http.HandlerFunc {
 				return err
 			}
 
-			isTakeover := foundBefore && before.Engaged && before.EngagedByScope != nil && *before.EngagedByScope == payments.KillSwitchScopeTenant &&
+			isTakeover = foundBefore && before.Engaged && before.EngagedByScope != nil && *before.EngagedByScope == payments.KillSwitchScopeTenant &&
 				ks.EngagedByScope != nil && *ks.EngagedByScope == payments.KillSwitchScopePlatform
 
 			metadata := map[string]any{
@@ -666,6 +703,11 @@ func newEngageKillSwitchHandler(deps Deps) http.HandlerFunc {
 			return
 		}
 		logKillSwitchEngagedAlert(c.logger, ks, c.requestID)
+		// ADR 0102 row 8 (LF F10, LF test 10): the durable alert is raised
+		// POST-COMMIT ONLY, detached, in the engage's own scope. The engage
+		// row and its audit row are already committed; no failure of any
+		// class in the alert path can roll back or change this response.
+		raiseKillSwitchEngagedAlert(r.Context(), deps, c, ks, isTakeover)
 		writeJSON(w, http.StatusOK, toKillSwitchDTO(ks))
 	}
 }

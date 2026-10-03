@@ -8,6 +8,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/Diansalas/igaming-platform/internal/alerting"
 	"github.com/Diansalas/igaming-platform/internal/apierror"
 	"github.com/Diansalas/igaming-platform/internal/audit"
 	"github.com/Diansalas/igaming-platform/internal/observability"
@@ -225,9 +226,15 @@ func recordDepositSimulationAudit(ctx context.Context, tx pgx.Tx, r *http.Reques
 // the mock/resolver wiring is itself broken (502/503, never 401 - the
 // caller is an already-authenticated player, not an unauthenticated third
 // party).
+//
+// onPayloadMismatch (ADR 0102 I-wire row 11) raises the Kind-tagged
+// simulation alert for the payload-mismatch class. It is invoked after the
+// rolled-back domain transaction (failure-path P1 class, so detached), and
+// the Kind is simulation.payment.payload_mismatch: p3, never delivered and
+// never paged as a production P1.
 func writeDepositCallbackError(w http.ResponseWriter, requestID string, logger interface {
 	Error(string, ...any)
-}, err error) {
+}, err error, onPayloadMismatch func()) {
 	var authErr *payments.CallbackAuthError
 	if errors.As(err, &authErr) {
 		logger.Error("payment_simulation_auth_failed", "reason", string(authErr.Reason))
@@ -242,6 +249,9 @@ func writeDepositCallbackError(w http.ResponseWriter, requestID string, logger i
 	}
 	if errors.Is(err, payments.ErrCallbackPayloadMismatch) {
 		logger.Error("payment_simulation_integrity_alert_payload_mismatch", "error", err)
+		if onPayloadMismatch != nil {
+			onPayloadMismatch()
+		}
 		code, msg := mapReceiveCallbackError(err, callbackRouteSimulate)
 		apierror.Write(w, requestID, code, msg)
 		return
@@ -308,7 +318,11 @@ func newSimulateDepositCallbackHandler(deps Deps) http.HandlerFunc {
 			providerID        string
 			providerReference string
 			inbound           payments.InboundCallback
+			pending           *alerting.Pending
 		)
+		// ADR 0102 7.3: post-commit detached retry for a swallowed in-tx raise;
+		// runs when the handler returns, after the response is written.
+		defer func() { pending.Flush(r.Context()) }()
 		err = deps.DB.WithTenantReadOnly(r.Context(), tc.TenantID, func(ctx context.Context, tx pgx.Tx) error {
 			intent, err := resolveOwnDepositIntent(ctx, tx, depositID, playerAccountID)
 			if err != nil {
@@ -343,7 +357,7 @@ func newSimulateDepositCallbackHandler(deps Deps) http.HandlerFunc {
 			depositSimulationBetweenPhasesHook(depositID)
 		}
 		if err == nil {
-			err = deps.DB.WithTenant(r.Context(), tc.TenantID, func(ctx context.Context, tx pgx.Tx) error {
+			pending, err = alerting.InTx(r.Context(), alerting.NewTenantRunner(deps.DB, tc.TenantID), func(ctx context.Context, tx pgx.Tx) error {
 				intent, err := resolveOwnDepositIntent(ctx, tx, depositID, playerAccountID)
 				if err != nil {
 					return err
@@ -373,7 +387,13 @@ func newSimulateDepositCallbackHandler(deps Deps) http.HandlerFunc {
 			return
 		}
 		if err != nil {
-			writeDepositCallbackError(w, requestID, logger, err)
+			writeDepositCallbackError(w, requestID, logger, err, func() {
+				_ = alerting.RaiseDetached(r.Context(), alerting.NewTenantRunner(deps.DB, tc.TenantID), alerting.Alert{
+					Kind: alerting.KindSimulationPaymentPayloadMismatch, SubjectTenantID: tc.TenantID,
+					Discriminator: "provider:" + providerID,
+					Attributes:    map[string]alerting.AttrValue{"provider_id": providerID, "request_id": requestID},
+				})
+			})
 			return
 		}
 

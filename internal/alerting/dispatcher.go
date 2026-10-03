@@ -53,7 +53,15 @@ const (
 // provider credential and no route configuration - only what the sink
 // needs to render/deliver the message.
 type Delivery struct {
-	IdempotencyKey  string // "<alert_id>:<step>:<attempt_no>" - at-least-once dedup key for a real channel
+	IdempotencyKey string // "<alert_id>:<step>:<attempt_no>" - per-attempt key, for logs and metrics only
+	// DedupKey is "<alert_id>:<step>", stable across retry attempts (ADR 0102
+	// 16.3 item 3). A real channel adapter MUST dedupe on this key, never on
+	// IdempotencyKey, or a retry after a transient failure becomes a second send.
+	DedupKey string
+	// Discriminator is the alert's server-side stable id string (for example
+	// "attempt:<id>:reason:<reason>"). It is not PII; it tells the responder
+	// WHICH condition within a Kind fired.
+	Discriminator   string
 	AlertID         uuid.UUID
 	Kind            Kind
 	Severity        Severity
@@ -91,7 +99,8 @@ func (s LogSink) Deliver(_ context.Context, d Delivery) (Outcome, ErrorClass) {
 	}
 	logger.Log(context.Background(), level, "alert_delivery",
 		"alert_id", d.AlertID, "kind", d.Kind, "severity", d.Severity,
-		"recipient_ref", d.RecipientRef, "idempotency_key", d.IdempotencyKey)
+		"recipient_ref", d.RecipientRef, "discriminator", d.Discriminator,
+		"idempotency_key", d.IdempotencyKey, "dedup_key", d.DedupKey)
 	return OutcomeSent, ErrorClassNone
 }
 
@@ -215,32 +224,13 @@ func NewDispatcher(pool *db.Pool, config DispatcherConfig, sinks ...Sink) *Dispa
 	return &Dispatcher{pool: pool, sinks: m, config: config}
 }
 
-// RunDispatcherLoop runs d.RunOnce every interval until ctx is done. It is
-// exported, UNWIRED (ADR §6.1: "I-core ships the dispatcher as an unwired
-// function. I-wire adds one line to main.go after H merges") - I-wire or
-// H is responsible for calling this from cmd/platform-api/main.go; this
-// package deliberately never imports cmd/platform-api.
-func RunDispatcherLoop(ctx context.Context, d *Dispatcher, interval time.Duration) {
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			if err := d.RunOnce(ctx); err != nil {
-				slog.Default().Error("alert_dispatcher_pass_failed", "error", err)
-			}
-		}
-	}
-}
-
 type dueAlert struct {
 	id              uuid.UUID
 	kind            Kind
 	severity        Severity
 	simulation      bool
 	subjectTenantID uuid.UUID
+	discriminator   string
 	attributes      map[string]AttrValue
 	acked           bool
 
@@ -319,7 +309,7 @@ func (d *Dispatcher) readDueWork(ctx context.Context, tx pgx.Tx, now time.Time) 
 	// within the same clock tick need a deterministic tiebreaker or a
 	// test/fake clock set in the past could pick the wrong "latest" row.
 	rows, err := tx.Query(ctx, `
-		SELECT a.id, a.kind, a.severity, a.simulation, a.subject_tenant_id, a.attributes, a.state,
+		SELECT a.id, a.kind, a.severity, a.simulation, a.subject_tenant_id, a.discriminator, a.attributes, a.state,
 		       ld.escalation_step, ld.attempt_no, ld.event, ld.next_attempt_at, ld.next_escalation_at, ld.recorded_at
 		FROM alerts a
 		LEFT JOIN LATERAL (
@@ -348,7 +338,7 @@ func (d *Dispatcher) readDueWork(ctx context.Context, tx pgx.Tx, now time.Time) 
 			nextAttemptAt, nextEscalationAt *time.Time
 			recordedAt                      *time.Time
 		)
-		if err := rows.Scan(&w.id, &w.kind, &w.severity, &w.simulation, &subjectTenantID, &attrsJSON, &state,
+		if err := rows.Scan(&w.id, &w.kind, &w.severity, &w.simulation, &subjectTenantID, &w.discriminator, &attrsJSON, &state,
 			&step, &attemptNo, &event, &nextAttemptAt, &nextEscalationAt, &recordedAt); err != nil {
 			return nil, err
 		}
@@ -495,6 +485,8 @@ func (d *Dispatcher) processOne(ctx context.Context, w dueAlert, now time.Time, 
 
 	outcome, errClass := sink.Deliver(deliverCtx, Delivery{
 		IdempotencyKey:  fmt.Sprintf("%s:%d:%d", w.id, w.step, w.attemptNo),
+		DedupKey:        fmt.Sprintf("%s:%d", w.id, w.step),
+		Discriminator:   w.discriminator,
 		AlertID:         w.id,
 		Kind:            w.kind,
 		Severity:        w.severity,

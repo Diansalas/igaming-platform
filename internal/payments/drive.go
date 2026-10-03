@@ -17,6 +17,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/Diansalas/igaming-platform/internal/alerting"
 	"github.com/Diansalas/igaming-platform/internal/audit"
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/providerref"
@@ -209,7 +210,10 @@ func (o *Orchestrator) driveCreatedAttempt(
 
 	// Phase C, with a possible further cascade insert.
 	var cascadeChild *PaymentAttempt
-	err = pool.WithTenant(ctx, attempt.TenantID, func(actx context.Context, tx pgx.Tx) error {
+	// ADR 0102 I-wire (B-1): phase C is an evidence transaction owner - it
+	// opens its transaction through alerting.InTx so a swallowed in-tx raise
+	// gets its mandatory post-commit detached retry (Flush, below).
+	pending, err := alerting.InTx(ctx, alerting.NewTenantRunner(pool, attempt.TenantID), func(actx context.Context, tx pgx.Tx) error {
 		if _, err := tx.Exec(actx, `SELECT id FROM deposit_intents WHERE id = $1 FOR UPDATE`, intent.ID); err != nil {
 			return fmt.Errorf("payments: lock deposit intent: %w", err)
 		}
@@ -237,6 +241,7 @@ func (o *Orchestrator) driveCreatedAttempt(
 	if err != nil {
 		return intent, attempt, nil, "", "", err
 	}
+	pending.Flush(ctx) // post-commit only; a nil Pending (error path) is a no-op
 	final, err := getAttemptInTenant(ctx, pool, attempt.TenantID, attempt.ID)
 	if err != nil {
 		return intent, attempt, nil, "", "", err
@@ -396,6 +401,13 @@ func parkDepositAttempt(
 	}
 	updated, err := GetDepositIntentByID(ctx, tx, intent.ID)
 	if err != nil {
+		return intent, err
+	}
+	// ADR 0102 I-wire: durable P1 for the park reason (sync_amount_mismatch,
+	// provider_reference_conflict, invalid_provider_reference, poll_amount_
+	// mismatch, poll_reference_mismatch, tombstone-precedes-success). Last
+	// statement; savepoint-guarded, so it can never abort the T10.
+	if err := raiseDepositParkAlert(ctx, tx, attempt, providerID, reason); err != nil {
 		return intent, err
 	}
 	return updated, nil
