@@ -463,9 +463,72 @@ func TestFC4_PollSuccessWhoseBoundReferenceBecameAPayoutStepBKey_ParksNotErrorLo
 	e.assertParkedOnLedgerKey(t, a.ID, *a.DepositIntentID, before)
 }
 
-// --- the poll racing a verified callback (run with -count=50 -race) -------------
+// --- the poll versus a verified callback ----------------------------------------
 
-func TestPollSuccess_RacingCallback_PostsExactlyOnce(t *testing.T) {
+// FORCED interleaving (QA F1): the callback commits INSIDE the poll's own
+// QueryStatus, i.e. after the poll's provider call and before its phase C, so the
+// poll deterministically lands on an already-succeeded attempt (the
+// succeeded x succeeded cell). No scheduler luck is involved.
+func TestPollSuccess_CallbackCommitsDuringTheProviderCall_PollIsADuplicateNoOp(t *testing.T) {
+	pool := testPool(t)
+	e := newDepRefEnv(t, pool, "mock-d1-forced-cb-first")
+	a, ref := e.ambiguousBound(t, "d1-forced-cb-first")
+	e.deliverCallbackOnce(t, OutcomeSucceeded, 5000, "")
+	e.mustNoSweepErrors(t, e.poll(t, a, ref, pollSuccess(ref, 5000, "EUR")))
+
+	if got := mustGetAttempt(t, pool, e.f.tenantID, a.ID); got.State != AttemptSucceeded {
+		t.Fatalf("state=%s, want succeeded", got.State)
+	}
+	if n := ledgerDepositTxCount(t, pool, e.f.tenantID, *a.DepositIntentID); n != 1 {
+		t.Fatalf("deposit postings=%d, want exactly 1", n)
+	}
+	if b := cashBalance(t, pool, e.f); b != 5000 {
+		t.Fatalf("balance=%d, want 5000", b)
+	}
+	for _, action := range []string{"payment.attempt_disputed", "payments.poll_evidence_contradicts_terminal_attempt", "payments.callback_amount_asset_mismatch_terminal"} {
+		if n := e.auditCount(t, action, a.ID); n != 0 {
+			t.Errorf("%s audits=%d, want 0 (a matching poll on a succeeded attempt is a pure duplicate)", action, n)
+		}
+	}
+	// The callback was applied directly (the reference was bound): nothing deferred.
+	if n := depScan[int64](t, pool, e.f.tenantID, `SELECT count(*) FROM payment_provider_events WHERE tenant_id = $1 AND provider_reference = $2 AND resolved_at IS NULL`, e.f.tenantID, ref); n != 0 {
+		t.Errorf("unresolved receipts=%d, want 0", n)
+	}
+	assertLedgerBalanced(t, pool, e.f.tenantID)
+	loAssertProjectionMatchesRebuild(t, pool, e.f.tenantID)
+}
+
+// Reverse order, sequential and therefore deterministic: the poll succeeds first,
+// then a verified callback arrives: duplicate_effect, still exactly one posting.
+func TestPollSuccess_ThenCallback_IsDuplicateEffectOnePosting(t *testing.T) {
+	pool := testPool(t)
+	e := newDepRefEnv(t, pool, "mock-d1-forced-poll-first")
+	a, ref := e.ambiguousBound(t, "d1-forced-poll-first")
+	e.mustNoSweepErrors(t, e.poll(t, a, ref, pollSuccess(ref, 5000, "EUR")))
+	if got := mustGetAttempt(t, pool, e.f.tenantID, a.ID); got.State != AttemptSucceeded {
+		t.Fatalf("state=%s, want succeeded after the poll", got.State)
+	}
+	cb, err := rvCallback(pool, e.orch, e.f, e.id, e.p.CallbackPayload(e.f.tenantID, CallbackEventDeposit, ref, "", OutcomeSucceeded, 5000, "EUR", "", false))
+	if err != nil {
+		t.Fatalf("callback: %v", err)
+	}
+	if cb.Disposition != DispositionDuplicateEffect {
+		t.Fatalf("callback disposition=%s, want duplicate_effect", cb.Disposition)
+	}
+	if n := ledgerDepositTxCount(t, pool, e.f.tenantID, *a.DepositIntentID); n != 1 || cashBalance(t, pool, e.f) != 5000 {
+		t.Fatalf("postings=%d balance=%d, want exactly one posting of 5000", n, cashBalance(t, pool, e.f))
+	}
+	if depDisputeAudits(t, e, e.f, a.ID) != 0 {
+		t.Fatalf("no dispute expected")
+	}
+	assertLedgerBalanced(t, pool, e.f.tenantID)
+}
+
+// SMOKE TEST ONLY. Two goroutines released together: this SAMPLES the scheduler
+// (more with -count=N -race) and does NOT force or record any interleaving. The
+// deterministic coverage of the poll-versus-callback cells is the two forced tests
+// above and TestF3SM_*, TestSweepCASNoise_* and TestDeferredReceipt_*.
+func TestPollSuccess_RacingCallback_Smoke_SamplesSchedulerPostsExactlyOnce(t *testing.T) {
 	pool := testPool(t)
 	e := newDepRefEnv(t, pool, "mock-d1-race")
 	a, ref := e.ambiguousBound(t, "d1-race")
@@ -698,6 +761,12 @@ func TestDeferredReceipt_T9PollPending_ResolvesReceiptAndPostsOnce(t *testing.T)
 }
 
 // --- QA C3: fault injection on the park paths ----------------------------------
+//
+// NOTE (QA F2a): these tests rely on parkDepositAttempt running the audit insert and
+// the intent projection update AFTER the dispute CAS. The injected lock makes one of
+// those later writes fail, which is what proves the CAS was rolled back too. If that
+// order ever changes (e.g. the audit moves before the CAS), the rollback assertion
+// could become trivial; re-check the injection points then.
 //
 // An error is forced AFTER the dispute CAS and BEFORE commit with a table lock held
 // by another transaction plus `SET LOCAL lock_timeout = '1ms'` in the victim: the
