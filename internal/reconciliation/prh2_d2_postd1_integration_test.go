@@ -237,3 +237,87 @@ func TestD2_14_PollFC4ConflictPark_HoldingReference_IsBoundAndStanding(t *testin
 		w.d2AssertBalanced(t)
 	})
 }
+
+// TestD2_15_RefLessCallbackMismatchPark_IsUnboundAndClearsOnLineReference is
+// the D2 code final review D2F-1, built from the reviewer's probe.
+//
+// Shape: a deposit times out with no reference (Ambiguous, no reference ->
+// the attempt is ambiguous with provider_reference NULL). A verified callback
+// then names reference R and the attempt's MERCHANT reference, reporting
+// success with a different amount. The receipt path resolves the attempt by
+// merchant reference and parks it T10 callback_amount_asset_mismatch WITHOUT
+// binding R (payments/receipt.go). Before D2F-1 the attempt was "bound" on the
+// empty reference: a standing finding that no reversal and no tombstone could
+// ever clear. Now the runtime rule treats a bound reason with no stored
+// reference as unbound: in-run by merchant reference, cleared on the line's
+// reference R.
+func TestD2_15_RefLessCallbackMismatchPark_IsUnboundAndClearsOnLineReference(t *testing.T) {
+	const pspAmount int64 = 4999
+	build := func(t *testing.T, w *d2World) (d2Parked, string) {
+		t.Helper()
+		w.p.setScript(func(req payments.DepositRequest) payments.DepositResult {
+			return payments.DepositResult{Outcome: payments.OutcomeAmbiguous, Amount: req.Amount, AssetCode: req.AssetCode}
+		})
+		a := w.deposit(t, d2Amount)
+		w.p.setScript(nil)
+		a = w.attempt(t, a.ID)
+		if a.State != payments.AttemptAmbiguous || a.ProviderReference != nil {
+			t.Fatalf("setup: want an ambiguous attempt with NO reference, got %s %v", a.State, a.ProviderReference)
+		}
+		r := "d2-cb-r-" + uuid.NewString()
+		w.applyReceipt(t, payProvA, payments.ReceiptEvidence{
+			EventType: "deposit", ProviderReference: r, MerchantReference: a.MerchantReference,
+			Outcome: payments.OutcomeSucceeded, Amount: pspAmount, AssetCode: "EUR",
+		})
+		parked := w.mustParked(t, a.ID, payments.TerminalReasonCallbackAmountAssetMismatch, false)
+		if parked.ProviderReference != nil {
+			t.Fatalf("setup: the probe's shape needs the callback park to leave the reference unbound, got %q", *parked.ProviderReference)
+		}
+		return d2Parked{attempt: parked, pspRef: r}, r
+	}
+	line := func(pk d2Parked, r string) statement.PaymentStatementLine {
+		return d2Line(r, pk.attempt.MerchantReference, statement.PaymentStatusSucceeded, pspAmount)
+	}
+
+	t.Run("a_in_run_succeeded_line_for_R_gives_exactly_one_finding", func(t *testing.T) {
+		w := newD2World(t)
+		pk, r := build(t, w)
+		ms := w.d2Run(t, d2Src(line(pk, r)))
+		d2Expect(t, ms, map[MismatchKind]int{d2KindCU: 1, MismatchKindPayAmountMismatch: 1})
+		cu := d2CUFor(t, ms, pk.attempt.ID)
+		if !strings.Contains(cu.ReconciliationKey, "provider_reference="+r+" ") || !strings.Contains(cu.ExpectedValue, "on this line's reference") {
+			t.Fatalf("the finding must be the unbound in-run form on the line's reference R: key=%s expected=%s", cu.ReconciliationKey, cu.ExpectedValue)
+		}
+		// No line: unbound parks have no standing finding (STANDING-1), and
+		// in particular no un-clearable one keyed on <none>.
+		d2NoCU(t, w.d2Run(t, d2Src()), "a ref-less bound-reason park with no line (unbound: in-run only)")
+		w.d2AssertNoMoney(t, pk)
+		w.d2AssertBalanced(t)
+	})
+
+	t.Run("b_tombstone_on_R_clears", func(t *testing.T) {
+		w := newD2World(t)
+		pk, r := build(t, w)
+		d2CUFor(t, w.d2Run(t, d2Src(line(pk, r))), pk.attempt.ID)
+		w.deliverReversal(t, "d2-tomb-"+uuid.NewString()[:8], r, pspAmount)
+		var tombs int64
+		if err := w.pool.WithTenant(context.Background(), w.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+			return tx.QueryRow(ctx, `SELECT count(*) FROM ledger_transactions WHERE tenant_id = $1 AND transaction_type = 'tombstone' AND provider_id = $2 AND provider_tx_id = $3`,
+				w.f.tenantID, payProvA, r).Scan(&tombs)
+		}); err != nil || tombs != 1 {
+			t.Fatalf("setup: want one tombstone on R, got %d err=%v", tombs, err)
+		}
+		d2NoCU(t, w.d2Run(t, d2Src(line(pk, r))), "a tombstone on R")
+		w.d2AssertNoMoney(t, pk)
+		w.d2AssertBalanced(t)
+	})
+
+	t.Run("b_reversal_line_naming_R_clears", func(t *testing.T) {
+		w := newD2World(t)
+		pk, r := build(t, w)
+		d2CUFor(t, w.d2Run(t, d2Src(line(pk, r))), pk.attempt.ID)
+		d2NoCU(t, w.d2Run(t, d2Src(line(pk, r), d2ReversalLine("d2-rev-"+uuid.NewString()[:8], r, pspAmount))), "a reversal line naming R")
+		w.d2AssertNoMoney(t, pk)
+		w.d2AssertBalanced(t)
+	})
+}

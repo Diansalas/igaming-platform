@@ -170,10 +170,13 @@ const (
 // disputeReasonClass is how pay_captured_unposted treats a disputed
 // attempt's terminal_reason (ADR 0095 §28.9 as extended by §35):
 //
-//   - reasonBound: the attempt HOLDS the provider reference the provider
-//     reported as captured, with nothing posted. Reported in-run (a
-//     succeeded line names the attempt) and standing (no line this run,
-//     unwindowed); clears only on capturedUnposted's two signals.
+//   - reasonBound: the reason's write site normally leaves the attempt
+//     HOLDING the provider reference the provider reported as captured,
+//     with nothing posted. Reported in-run (a succeeded line names the
+//     attempt) and standing (no line this run, unwindowed); clears only on
+//     capturedUnposted's two signals. At run time it applies only if the
+//     attempt really holds a reference (captureClass, D2F-1); otherwise the
+//     attempt is treated as unbound.
 //   - reasonUnbound: a park that never binds the adapter's reference
 //     (§34.8). A real capture behind it is visible only through a succeeded
 //     line resolving to the attempt (by construction by merchant
@@ -231,9 +234,19 @@ func classifyDisputeReason(r string) disputeReasonClass {
 
 // captureClass resolves a disputed attempt's class against its own row
 // (reasonBoundIfReferenced becomes bound or unbound).
+//
+// Runtime rule (D2 code final review D2F-1): a reason classed bound is bound
+// only when the attempt actually HOLDS a reference. A park whose write site
+// did not bind one (callback_amount_asset_mismatch on an attempt the callback
+// resolved by merchant reference; multiple_success_for_intent likewise, a gap
+// that predates D2) has nothing to key a standing finding on, and checking it
+// on the empty reference could never clear. Such an attempt is treated as
+// unbound: reported in-run by merchant reference, cleared on the line's
+// reference. So every bound reason behaves as bound-if-referenced; the table
+// still records what the reason IS.
 func (a *payAttempt) captureClass() disputeReasonClass {
 	c := classifyDisputeReason(a.terminalReason)
-	if c == reasonBoundIfReferenced {
+	if c == reasonBound || c == reasonBoundIfReferenced {
 		if a.providerRef != "" {
 			return reasonBound
 		}

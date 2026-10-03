@@ -7,6 +7,13 @@ package reconciliation
 // pay_captured_unposted (ADR 0095 §35). A reason added on the payments side
 // without a decision here fails this test, instead of being silently excluded
 // at run time. Unit test: no database.
+//
+// The table says what a reason IS. The runtime rule (captureClass, D2 code
+// final review D2F-1) decides by the attempt row: a bound or
+// bound-if-referenced reason is bound ONLY when the attempt holds a provider
+// reference, and unbound otherwise (in-run by merchant reference, cleared on
+// the line's reference). Unbound stays unbound and excluded stays excluded
+// whatever the row holds. TestD2_P1_RuntimeRule pins this for every reason.
 
 import (
 	"strings"
@@ -138,5 +145,32 @@ func TestD2_P1_BoundIfReferenced(t *testing.T) {
 	notDisputed := &payAttempt{state: "declined", terminalReason: r, providerRef: "psp-ref-1"}
 	if notDisputed.boundCapture() || notDisputed.unboundPark() {
 		t.Error("only a disputed attempt is a captured-unposted candidate")
+	}
+}
+
+// TestD2_P1_RuntimeRule pins captureClass for EVERY reason payments can write,
+// with and without a stored reference (D2F-1): bound and bound-if-referenced
+// resolve to bound only with a reference and to unbound without one; unbound
+// and excluded are unaffected by the reference.
+func TestD2_P1_RuntimeRule(t *testing.T) {
+	for _, r := range d2ReasonsToCheck(t) {
+		class := classifyDisputeReason(r)
+		for _, ref := range []string{"psp-ref-1", ""} {
+			a := &payAttempt{state: "disputed", terminalReason: r, providerRef: ref}
+			got := a.captureClass()
+			var want disputeReasonClass
+			switch class {
+			case reasonBound, reasonBoundIfReferenced:
+				want = reasonUnbound
+				if ref != "" {
+					want = reasonBound
+				}
+			default:
+				want = class
+			}
+			if got != want {
+				t.Errorf("reason %q (table class %s) with reference %q: runtime class %s, want %s", r, className(class), ref, className(got), className(want))
+			}
+		}
 	}
 }
