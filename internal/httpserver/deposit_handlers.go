@@ -91,17 +91,19 @@ func toDepositAttemptResponse(res payments.InitiateDepositAttemptResult) deposit
 }
 
 // newInitiateDepositHandler resolves the player's own wallet (creating it
-// on first use for this asset) and drives PaymentOrchestrator.InitiateDeposit.
-// Per payment-orchestration.md §3, every identifying field (tenant, brand,
-// player, wallet) is resolved server-side from the authenticated session -
-// the request body supplies only asset_code, amount, payment_method, and
-// the client's own idempotency key.
+// on first use for this asset) and drives
+// PaymentOrchestrator.InitiateDepositAttempt ([deleted by E2] this
+// comment used to name InitiateDeposit, now deleted). Per payment-
+// orchestration.md §3, every identifying field (tenant, brand, player,
+// wallet) is resolved server-side from the authenticated session - the
+// request body supplies only asset_code, amount, payment_method, and the
+// client's own idempotency key.
 //
 // Runs under db.Pool.WithTenant, NOT WithPlayerScope - see
 // newGetWalletHandler's identical rationale in wallet_handlers.go: this
-// handler writes (wallet.GetOrCreate, InitiateDeposit's deposit_intents
-// insert and ledger posting), and deposit_intents' player_self_scope
-// policy (migration 0025) is SELECT-only by design.
+// handler writes (wallet.GetOrCreate, InitiateDepositAttempt's
+// deposit_intents insert and ledger posting), and deposit_intents'
+// player_self_scope policy (migration 0025) is SELECT-only by design.
 func newInitiateDepositHandler(deps Deps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		requestID := observability.RequestIDFromContext(r.Context())

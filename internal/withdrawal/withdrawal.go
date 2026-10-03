@@ -979,8 +979,9 @@ func Reject(ctx context.Context, tx pgx.Tx, requestID, approverPrincipalID uuid.
 // most one of the two attempts observes `approved`, so the provider is
 // called at most once per request - exactly mirroring how the deposit
 // orchestrator's own idempotency insert (IdempotentInsert, executed
-// before InitiateDeposit ever calls provider.Deposit) prevents the same
-// class of race on the deposit side.
+// before InitiateDepositAttempt ever calls provider.Deposit - [deleted
+// by E2] this used to be InitiateDeposit's own idempotency insert, now
+// deleted) prevents the same class of race on the deposit side.
 func LockApprovedForSubmission(ctx context.Context, tx pgx.Tx, requestID uuid.UUID) (WithdrawalRequest, error) {
 	wr, err := lockRequestForUpdate(ctx, tx, requestID)
 	if err != nil {

@@ -13,9 +13,13 @@
 // LABEL: IMPLEMENTED for the mechanism described in ADR 0096 §2/§3.2/§3.5
 // as wired into internal/withdrawal, internal/casino, internal/sportsbook
 // by this same change. The deposit call site (internal/payments.
-// InitiateDeposit) is NOT wired by this change - PRH-I1 rewrites that
-// function and calls this exported service (task split, task-registry.md
-// PRH-I3 row). No production threshold value exists anywhere in this
+// InitiateDeposit, at the time this file was written) was NOT wired by
+// this change - PRH-I1 rewrote that call site (task split, task-
+// registry.md PRH-I3 row). [Status note] InitiateDeposit itself is now
+// deleted (PROV-OUTBOUND-CRED-1-LEGACY-PATH, E2); the deposit call site
+// is InitiateDepositAttempt (internal/payments/deposit_v2.go), which
+// calls this exported service via KYCEnforcementDepositGate
+// (internal/payments/kycgate.go). No production threshold value exists anywhere in this
 // file; every numeric value this package ever compares against comes
 // from a kyc_enforcement_policies row an operator authors later (ADR
 // 0096 §3.7) - zero rows are seeded by migration 0100.
