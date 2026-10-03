@@ -83,17 +83,30 @@ func (e *depRefEnv) depositTxCount(t *testing.T) int64 {
 }
 
 // deliverCallbackOnce interleaves a verified callback inside the poll's own
-// QueryStatus (no transaction held there), exactly once.
-func (e *depRefEnv) deliverCallbackOnce(t *testing.T, outcome Outcome, amount int64, declineReason string) {
+// QueryStatus (no transaction held there), exactly once. It returns a channel that
+// is closed AFTER the callback has been applied, and registers a cleanup that FAILS
+// the test if the hook never fired (D1-CR-5): a forced interleaving that silently
+// did not happen would otherwise let the test pass as "the poll alone".
+func (e *depRefEnv) deliverCallbackOnce(t *testing.T, outcome Outcome, amount int64, declineReason string) <-chan struct{} {
 	t.Helper()
 	var once sync.Once
+	fired := make(chan struct{})
+	t.Cleanup(func() {
+		select {
+		case <-fired:
+		default:
+			t.Errorf("the forced callback never fired: the interleaving this test depends on did not happen")
+		}
+	})
 	e.p.setOnQuery(func(ref string) {
 		once.Do(func() {
+			defer close(fired)
 			if _, err := rvCallback(e.pool, e.orch, e.f, e.id, e.p.CallbackPayload(e.f.tenantID, CallbackEventDeposit, ref, "", outcome, amount, "EUR", declineReason, false)); err != nil {
 				t.Errorf("interleaved callback: %v", err)
 			}
 		})
 	})
+	return fired
 }
 
 // assertDeferredReceiptResolved: exactly one stored receipt names ref, it was
@@ -480,11 +493,30 @@ func TestPollSuccess_CallbackCommitsDuringTheProviderCall_PollIsADuplicateNoOp(t
 	pool := testPool(t)
 	e := newDepRefEnv(t, pool, "mock-d1-forced-cb-first")
 	a, ref := e.ambiguousBound(t, "d1-forced-cb-first")
-	e.deliverCallbackOnce(t, OutcomeSucceeded, 5000, "")
+	fired := e.deliverCallbackOnce(t, OutcomeSucceeded, 5000, "")
 	e.mustNoSweepErrors(t, e.poll(t, a, ref, pollSuccess(ref, 5000, "EUR")))
 
-	if got := mustGetAttempt(t, pool, e.f.tenantID, a.ID); got.State != AttemptSucceeded {
+	// D1-CR-5: prove the callback was applied BEFORE the poll's phase C, so the poll
+	// really landed on an already-succeeded attempt (not "the poll alone").
+	select {
+	case <-fired:
+	default:
+		t.Fatalf("the forced callback never fired")
+	}
+	got := mustGetAttempt(t, pool, e.f.tenantID, a.ID)
+	if got.State != AttemptSucceeded {
 		t.Fatalf("state=%s, want succeeded", got.State)
+	}
+	// The poll applies evidence as 'query_status'; the callback as 'callback'. A
+	// poll that had posted by itself would leave 'query_status' here.
+	if k := depScan[string](t, pool, e.f.tenantID, `SELECT last_evidence_kind FROM payment_attempts WHERE id = $1`, a.ID); k != string(EvidenceCallback) {
+		t.Fatalf("last_evidence_kind=%q, want %q (the callback must have succeeded the attempt first)", k, EvidenceCallback)
+	}
+	if n := depScan[int64](t, pool, e.f.tenantID, `SELECT count(*) FROM payment_provider_events WHERE tenant_id = $1 AND provider_reference = $2 AND disposition_at_receipt = 'applied'`, e.f.tenantID, ref); n != 1 {
+		t.Fatalf("applied callback receipts for the reference = %d, want exactly 1", n)
+	}
+	if n := depScan[int64](t, pool, e.f.tenantID, `SELECT count(*) FROM payment_provider_events WHERE tenant_id = $1 AND provider_reference = $2`, e.f.tenantID, ref); n != 1 {
+		t.Fatalf("receipts for the reference = %d, want exactly 1", n)
 	}
 	if n := ledgerDepositTxCount(t, pool, e.f.tenantID, *a.DepositIntentID); n != 1 {
 		t.Fatalf("deposit postings=%d, want exactly 1", n)
