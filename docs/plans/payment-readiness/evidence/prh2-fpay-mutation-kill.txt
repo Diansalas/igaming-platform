@@ -1,0 +1,33 @@
+PRH-2 F-pay mutation kill evidence (PAY-KYC-UNAVAIL-1, DECISION-ROWS-1, PAY-PAYOUT-ERRREF-1; MB1, MB6, MPLAYREC and MX1/MX2 re-kills)
+Harness: one mutation applied to the worktree, the targeted tests run with -tags integration -count=1 -p 1 against a private DB (pay_fpay_20261003, dropped afterwards), then restored. The harness script lives in the scratchpad and is not committed.
+Base: branch prh2-fpay-kyc-gate at 4d5e6e6 (F-pay code and tests). Local run, NOT CI.
+A KILLED verdict means a targeted test FAILED under the mutation. There are no survivors in this run.
+Targeted payments set: TestClaimForDispatch_*, TestSweeper_T2/T12 *KYCStoreOutage*, TestSweeper_T2Reclaim_KYCDeny_RecordsOneDecisionRow, TestDepositGate_*, TestPayoutAdapterCall_ErrorPath*, TestPayoutDispatch_ErrorPlusHostile*, TestPayoutDispatch_OversizeProviderReference_Parks, TestClaimForDispatch_KYCDeny_NoAttemptRowHoldReleased.
+
+ID | VERDICT | MUTATION | KILLED BY (test names)
+MU-1 | KILLED | T1p: unavailable handled before DenyForCompliance removed (falls into the deny branch) | TestClaimForDispatch_KYCStoreOutage_RetryableAndRecorded
+MU-2 | KILLED | T1p unavailable branch writes no decision row | TestClaimForDispatch_KYCStoreOutage_RetryableAndRecorded
+MU-3 | KILLED | T1p unavailable branch audit outcome success instead of denied | TestClaimForDispatch_KYCStoreOutage_RetryableAndRecorded
+MU-4 | KILLED | T1p unavailable branch rolls back (returns the error inside the transaction) instead of committing | TestClaimForDispatch_KYCStoreOutage_RetryableAndRecorded
+MU-5 | KILLED | T1p allow decision row removed | TestClaimForDispatch_OneDecisionRowPerEvaluation_AllowAndDeny
+MU-6 | KILLED | sweeper T2/T12: unavailable branch removed (an outage escalates, T16) | TestSweeper_T12Resubmit_KYCStoreOutage_ReschedulesNeverEscalates, TestSweeper_T2Reclaim_KYCStoreOutage_ReschedulesNeverEscalates
+MU-6b | KILLED | sweeper T2/T12: unavailable returns without rescheduling | TestSweeper_T2Reclaim_KYCStoreOutage_ReschedulesNeverEscalates
+MU-7 | KILLED | sweeper T2/T12 decision row removed | TestSweeper_T12Resubmit_KYCStoreOutage_ReschedulesNeverEscalates, TestSweeper_T2Reclaim_KYCDeny_RecordsOneDecisionRow, TestSweeper_T2Reclaim_KYCStoreOutage_ReschedulesNeverEscalates
+MU-8 | KILLED | deposit gate decision row removed | TestDepositGate_RecordsOneDecisionRowPerEvaluation, TestDepositGate_StoreOutage_RecordsUnavailableAndDenies
+MU-9 | KILLED | payoutAdapterCall validates the reference AFTER the error return (the old order) | TestPayoutAdapterCall_ErrorPathReferenceValidation, TestPayoutDispatch_ErrorPlusHostileReference_ParksNoRawPersistence
+MU-10 | KILLED | payoutAdapterCall invalid-reference result not scrubbed | TestPayoutAdapterCall_ErrorPathReferenceValidation
+MU-11 | KILLED | payoutAdapterCall error-path validation dropped entirely | TestPayoutAdapterCall_ErrorPathReferenceValidation, TestPayoutDispatch_ErrorPlusHostileReference_ParksNoRawPersistence
+MU-12 | KILLED | submit handler ErrPayoutKYCUnavailable -> 503 mapping off | TestSubmitWithdrawalHandler_KYCStoreOutageReturns503
+MU-13 | KILLED | DenyForCompliance N5 guard (refuse unavailable) off | TestDenyForCompliance_RefusesUnavailableOutcome
+MB1 | KILLED | request-withdrawal handler OutcomeUnavailable -> 503 branch off | TestRequestWithdrawalHandler_KYCStoreOutageReturns503
+MB6 | KILLED | DenyForCompliance Allowed=true guard off | TestDenyForCompliance_RefusesAllowedDecision
+MPLAYREC-casino | KILLED | RecordDecision removed from the casino play-deny | TestReceiveCallback_BetDeniedByKYCPlayPolicy_NoLedgerEffect
+MPLAYREC-sportsbook | KILLED | RecordDecision removed from the sportsbook play-deny | TestPlaceBet_DeniedByKYCPlayPolicy_NoLedgerEffect
+MX1 | KILLED | RequestWithdrawal deny disabled (N2 family) | TestRequestWithdrawal_DenialCommitsDecisionAndAudit, TestRequestWithdrawal_DeniesWhenNotPassed
+MX2 | KILLED | asset-not-covered -> not_required (N2 family) | TestEvaluateEnforcement_Deposit_AssetNotCovered_Unavailable
+
+Notes
+- MU-3 mutates the audit OUTCOME (success instead of denied) instead of deleting the audit call. The test counts denied and success rows separately, so deleting the call is caught by the same assertion (denied count == 1).
+- MU-6b is killed only by the T2 test, which asserts next_action_at moved past its due time. The T12 test does not assert the reschedule time (PollPayoutStatus also reschedules in that flow), so on its own it would not catch a missing reschedule. Disclosed, low risk: T2 and T12 share ONE function (gateAndEscalateOnDeny) and the T2 test pins it.
+- MB1, MB6 and MPLAYREC (casino, sportsbook) are re-killed against their F-kyc tests. MX1 and MX2 (the N2 family from rv-prh-i3-code-review.md) are re-killed here, which completes the N2 mutation-kill record beside the FH-7 addendum in prh-i3-mutation-kill.txt.
+- No dedicated mutant removes only the sweeper's ALLOW-path decision row; MU-7 removes the shared RecordDecision call (allow, deny and unavailable) and is killed.
