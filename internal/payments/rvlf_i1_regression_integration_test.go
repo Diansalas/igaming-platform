@@ -1971,7 +1971,11 @@ func TestRVLF_N2_SweeperGo_SuccessAfterTombstoneDisputesNotIndexError(t *testing
 	}
 
 	sweeper := NewSweeper(pool, orch, AllowAllDepositKYCGate{}, MockCredentialResolver{})
-	gr := GateResult[StatusResult]{Class: ErrorClassSucceeded, Value: StatusResult{Outcome: OutcomeSucceeded, ProviderReference: ref}}
+	// PRH-2 D: a poll success now needs the provider's amount/asset echo before
+	// anything else is decided (an echo-less success is Missing and never reaches the
+	// tombstone check), so this synthetic poll result carries the matching echo a
+	// conformant adapter returns. The assertions below are unchanged.
+	gr := GateResult[StatusResult]{Class: ErrorClassSucceeded, Value: StatusResult{Outcome: OutcomeSucceeded, ProviderReference: ref, Amount: 5000, AssetCode: "EUR"}}
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, `SELECT id FROM deposit_intents WHERE id = $1 FOR UPDATE`, intentID); err != nil {
 			return err
