@@ -3943,7 +3943,19 @@ F4): routing runs before them and the adapter call after their commit;
 `TestPCG1` and IO-1C stay green. Tests: lock-timeout injection at the
 deposit gate (unavailable row, fail-closed deny) and at T1p/T2/T12; one row
 per evaluation per call site; tenant isolation / RLS between two tenants'
-decision rows. A threshold-driven deposit DENY is not exercised here:
+decision rows. **What a deposit `allow` row means (FP-1, code review):** it records the
+EVALUATION, not the claim. The deposit gate runs before routing (phase A)
+and before the parent lock and claim (cascade T2), so a deposit that passes
+KYC and is then declined (`no_routable_provider`, or a kill-switch decline)
+commits an `allow`/`passed` decision row and its audit although no attempt
+was claimed. An auditor must not infer from such a row that a deposit
+proceeded; the intent and attempt state say what happened. No money is
+affected. The payout path writes its allow row after routing, so it never
+leaves one for an unclaimed payout. Moving the deposit row after routing
+needs edits to `deposit_v2.go`/`drive.go` (other workstream) and was
+deliberately not done. Pinned by
+`TestDepositGate_AllowThenNoRoutableProvider_LeavesOneRowAndMovesNoMoney`.
+A threshold-driven deposit DENY is not exercised here:
 doing so needs a seeded policy, which this round does not invent (the deny
 shape is covered in `internal/kyc`).
 

@@ -66,13 +66,19 @@ func (KYCEnforcementDepositGate) EvaluateDeposit(ctx context.Context, tx pgx.Tx,
 	// kyc_enforcement_decisions row (plus its audit) per evaluation - allow,
 	// deny and unavailable alike - written HERE, in the caller's phase-A
 	// transaction (InitiateDepositAttempt's T1+T2, driveCreatedAttempt's
-	// cascade T2). It therefore commits with exactly the effect it
-	// authorizes: the attempt claim on allow, the declined intent on a deny
-	// (the call site finalizes the intent in this same tx and returns nil
-	// for a deny, so the row is not rolled back). That tx contains no
-	// provider I/O (IC F4): routing runs before it and the adapter call only
-	// after its commit. An `unavailable` evaluation read inside a savepoint
-	// (KYC-ENF-OUTAGE-1), so tx is still usable for this insert.
+	// cascade T2). The row records the EVALUATION, not the claim: this gate
+	// runs BEFORE routing (phase A) and before the parent lock and claim
+	// (cascade T2), so an `allow` row is followed by a no-routable-provider
+	// or kill-switch decline in the same, committing transaction and stays
+	// in place. An auditor must not infer from an allow row that a deposit
+	// proceeded; read the intent/attempt state for that (FP-1, ADR 0096
+	// §24.2). A deny row commits with the declined intent (the call site
+	// finalizes the intent in this same tx and returns nil, so the row is
+	// not rolled back). The payout path differs on purpose: it writes the
+	// allow row after routing. That tx contains no provider I/O (IC F4):
+	// the adapter call runs only after its commit. An `unavailable`
+	// evaluation reads inside a savepoint (KYC-ENF-OUTAGE-1), so tx is still
+	// usable for this insert.
 	if err := kyc.RecordDecision(ctx, tx, params, decision); err != nil {
 		return false, "", fmt.Errorf("payments: record deposit kyc decision: %w", err)
 	}
