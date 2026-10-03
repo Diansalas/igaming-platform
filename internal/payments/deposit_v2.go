@@ -333,6 +333,8 @@ func (o *Orchestrator) InitiateDepositAttempt(
 	if err != nil {
 		return InitiateDepositAttemptResult{}, err
 	}
+	// PRH-2 C security C-1: scrub after phase C, by committed attempt state.
+	redirectURL, hostedFieldToken = playerFacingRedirect(updatedAttempt, redirectURL, hostedFieldToken)
 
 	// §4.6 case (a): a cascade-eligible SYNCHRONOUS decline is driven
 	// immediately by this same request's own driver - a bounded loop

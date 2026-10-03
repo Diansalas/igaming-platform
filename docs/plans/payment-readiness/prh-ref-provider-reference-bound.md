@@ -367,3 +367,22 @@ file must stay byte-identical, because `migrate verify` checksums it and any dat
 0099 would otherwise report drift. The corrections stand here instead: `tenants` IS covered by RLS; the
 pre-flight satisfies every tenant-table RLS policy by setting the tenant per tenant (it never disables RLS);
 the step counts in the file header are approximate. The SQL behaviour of 0099 is unchanged either way.
+
+## Update (payments, 2026-10-03, PRH-2 C): security C1, deposit half, closed (PAY-DEP-REF-VALIDATE-1)
+
+C1 required `providerref.Validate` on every adapter-response reference. State after PRH-2 C:
+
+| Adapter response | State |
+|---|---|
+| Payout `Withdraw` / payout `QueryStatus` | Done earlier (`payoutAdapterCall`, `payoutStatusQuery`): `ErrorClassProviderRefInvalid` -> park (T10). |
+| **Deposit `Deposit`** | **Done in PRH-2 C**: `depositAdapterCall` validates before the outcome switch. An invalid reference on **any** outcome, and an empty reference on `Pending`, parks via `ApplyDisputeFromNonTerminal` (T10, `invalid_provider_reference:<reason>`). Nothing from the response is persisted, and no redirect or token reaches the player. A sync success with an empty reference keeps the ambiguous path. Tests: `internal/payments/amount_evidence_test.go`, `dep_ref_validate_integration_test.go`. Mutants: `evidence/prh2-c-mutation-kill.txt` (C-REF-1..5). Design: ADR 0095 §34. |
+| Deposit `QueryStatus` (poll) | **Not in C.** PRH-2 D (PAY-POLL-AMOUNT-1 + FH7-06). The polled reference is only ever compared to the already-validated bound reference, and a non-empty echo that differs becomes T10 `poll_reference_mismatch`. |
+| KYC `CreateVerification` | Unchanged: `identity-compliance`. |
+
+So PRH-REF C1 is now **fully closed for payments `Deposit` and `Withdraw`**; the deposit poll echo
+is closed when D lands. Status: IMPLEMENTED against the MOCK adapter; a real PSP adapter is
+PROVIDER DEPENDENT and must pass `providerref.Validate` on every outcome (ADR 0095 §34.4).
+
+The C1 failure mode named in §9.1 for a deposit (a real capture sitting unparked, looping through the
+0099 CHECK failure) is gone: the attempt parks deterministically in the same transaction that observes
+the response, and the intent projects `ambiguous` for reconciliation.

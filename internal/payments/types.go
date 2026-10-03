@@ -497,6 +497,18 @@ type DepositResult struct {
 	// per adapter, not by the orchestrator.
 	DeclineReason string
 	Cascadable    bool
+	// Amount and AssetCode are the provider's ECHO of the amount (minor
+	// units) and asset it actually processed (PRH-2 C, LF-5; ADR 0095 §8
+	// amendment). They are REQUIRED evidence on a synchronous success
+	// (Outcome == OutcomeSucceeded): without them the platform would post
+	// its own recorded amount with no provider evidence at all. The
+	// orchestrator compares them (CompareProviderAmount) before any posting:
+	// absent -> ambiguous (the status poll decides); different -> T10
+	// sync_amount_mismatch, nothing posted. Optional and unused for every
+	// other outcome. A zero Amount or an empty AssetCode means "not
+	// echoed".
+	Amount    int64
+	AssetCode string
 }
 
 // WithdrawRequest/WithdrawResult mirror Deposit's shape for the send leg

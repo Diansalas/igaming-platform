@@ -140,7 +140,7 @@ func TestReceipt_Unresolved_DeferredThenAppliedOnceReferenceKnown(t *testing.T) 
 	f := seedOrchFixture(t, pool)
 	provider := NewMockProvider("mock-psp-rc-c", "EUR")
 	registerCapability(t, pool, f, provider, 100)
-	orch := NewOrchestrator(map[string]PaymentProvider{"mock-psp-rc-c": provider}, MultiWebhookCredentialResolver{"mock-psp-rc-c": NewMockWebhookCredentials(provider)})
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-psp-rc-c": &refLessAmbiguousProvider{provider}}, MultiWebhookCredentialResolver{"mock-psp-rc-c": NewMockWebhookCredentials(provider)})
 
 	res, err := orch.InitiateDepositAttempt(context.Background(), pool, AllowAllDepositKYCGate{}, MockCredentialResolver{}, InitiateDepositParams{
 		Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
@@ -292,7 +292,7 @@ func TestReceipt_DeferredReceipt_PredatesSubmission_NeverApplied(t *testing.T) {
 	f := seedOrchFixture(t, pool)
 	provider := NewMockProvider("mock-psp-rc-e", "EUR")
 	registerCapability(t, pool, f, provider, 100)
-	orch := NewOrchestrator(map[string]PaymentProvider{"mock-psp-rc-e": provider}, MultiWebhookCredentialResolver{"mock-psp-rc-e": NewMockWebhookCredentials(provider)})
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-psp-rc-e": &refLessAmbiguousProvider{provider}}, MultiWebhookCredentialResolver{"mock-psp-rc-e": NewMockWebhookCredentials(provider)})
 
 	ref := "predates-ref-" + uuid.NewString()
 

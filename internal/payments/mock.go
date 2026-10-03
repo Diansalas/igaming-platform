@@ -404,7 +404,9 @@ func (m *MockProvider) nextReference() string {
 	return fmt.Sprintf("%s-%d-%s", m.providerID, m.seq, uuid.NewString())
 }
 
-// Deposit implements PaymentProvider.
+// Deposit implements PaymentProvider. MOCK: every outcome echoes the
+// request's own amount and asset (PRH-2 C, LF-5), as a real adapter must on a
+// synchronous success.
 func (m *MockProvider) Deposit(ctx context.Context, req DepositRequest) (DepositResult, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -413,24 +415,24 @@ func (m *MockProvider) Deposit(ctx context.Context, req DepositRequest) (Deposit
 	defer m.tagRecord(ctx, ref, req.MerchantReference)
 	if m.AcceptAllAmounts {
 		m.attempts[ref] = &mockAttempt{kind: "deposit", amount: req.Amount, assetCode: req.AssetCode, outcome: OutcomePending}
-		return DepositResult{Outcome: OutcomePending, ProviderReference: ref, RedirectURL: "https://mock-psp.invalid/pay/" + ref}, nil
+		return DepositResult{Outcome: OutcomePending, ProviderReference: ref, RedirectURL: "https://mock-psp.invalid/pay/" + ref, Amount: req.Amount, AssetCode: req.AssetCode}, nil
 	}
 	switch req.Amount {
 	case MockAmountPlayerDeclineNoCascade:
 		m.attempts[ref] = &mockAttempt{kind: "deposit", amount: req.Amount, assetCode: req.AssetCode, outcome: OutcomeDeclined, declineReason: "insufficient_funds"}
-		return DepositResult{Outcome: OutcomeDeclined, ProviderReference: ref, DeclineReason: "insufficient_funds", Cascadable: false}, nil
+		return DepositResult{Outcome: OutcomeDeclined, ProviderReference: ref, DeclineReason: "insufficient_funds", Cascadable: false, Amount: req.Amount, AssetCode: req.AssetCode}, nil
 	case MockAmountProviderDeclineCascade:
 		m.attempts[ref] = &mockAttempt{kind: "deposit", amount: req.Amount, assetCode: req.AssetCode, outcome: OutcomeDeclined, declineReason: "provider_unavailable", cascadable: true}
-		return DepositResult{Outcome: OutcomeDeclined, ProviderReference: ref, DeclineReason: "provider_unavailable", Cascadable: true}, nil
+		return DepositResult{Outcome: OutcomeDeclined, ProviderReference: ref, DeclineReason: "provider_unavailable", Cascadable: true, Amount: req.Amount, AssetCode: req.AssetCode}, nil
 	case MockAmountAmbiguous:
 		m.attempts[ref] = &mockAttempt{kind: "deposit", amount: req.Amount, assetCode: req.AssetCode, outcome: OutcomeAmbiguous}
-		return DepositResult{Outcome: OutcomeAmbiguous, ProviderReference: ref}, nil
+		return DepositResult{Outcome: OutcomeAmbiguous, ProviderReference: ref, Amount: req.Amount, AssetCode: req.AssetCode}, nil
 	case MockAmountSyncSuccess:
 		m.attempts[ref] = &mockAttempt{kind: "deposit", amount: req.Amount, assetCode: req.AssetCode, outcome: OutcomeSucceeded}
-		return DepositResult{Outcome: OutcomeSucceeded, ProviderReference: ref}, nil
+		return DepositResult{Outcome: OutcomeSucceeded, ProviderReference: ref, Amount: req.Amount, AssetCode: req.AssetCode}, nil
 	default:
 		m.attempts[ref] = &mockAttempt{kind: "deposit", amount: req.Amount, assetCode: req.AssetCode, outcome: OutcomePending}
-		return DepositResult{Outcome: OutcomePending, ProviderReference: ref, RedirectURL: "https://mock-psp.invalid/pay/" + ref}, nil
+		return DepositResult{Outcome: OutcomePending, ProviderReference: ref, RedirectURL: "https://mock-psp.invalid/pay/" + ref, Amount: req.Amount, AssetCode: req.AssetCode}, nil
 	}
 }
 
