@@ -186,3 +186,31 @@ adding a subcase.
 
 L1 (default an unclassified reason to bound-if-referenced) was NOT done: it would change
 TestD2_6's existing assertion that an unknown reason produces no finding. No mutant applies.
+
+D2 code final review, D2F-1 (a bound reason with no stored reference is unbound at run time)
+----------------------------------------------------------------------------------------------
+Change at c3ec56d. Same harness, private DB rebuilt for this round. Full battery re-run at c3ec56d:
+36 mutants (the 35 above plus D2F1-BOUND-EMPTY-REF-STAYS-BOUND), 36 KILLED, 0 survived. Each
+restore was byte-identical to HEAD. M-T15-ALWAYS-BOUND was re-anchored to the widened condition (it
+now forces bound for both bound and bound-if-referenced).
+
+| Mutant | Change | Verdict | Killed by |
+|---|---|---|---|
+| D2F1-BOUND-EMPTY-REF-STAYS-BOUND | `c == reasonBound \|\| c == reasonBoundIfReferenced` reverted to `c == reasonBoundIfReferenced` | KILLED | TestD2_15 (all three subtests: the finding is not the in-run line-reference form; "a tombstone on R: expected NO pay_captured_unposted"; "a reversal line naming R: expected NO ..."), TestD2_P1_RuntimeRule ("table class bound with reference \"\": runtime class bound, want unbound") |
+| M-T15-ALWAYS-BOUND | bound/bound-if-referenced resolve to bound without a reference | KILLED | TestD2_4, TestD2_7, TestD2_14, TestD2_15, TestD2_P1_BoundIfReferenced, TestD2_P1_RuntimeRule |
+| PM1-CONFLICT-UNBOUND | conflict row -> unbound | KILLED | TestD2_14, TestD2_P1_Every... |
+| PM1-CONFLICT-BOUND | conflict row -> bound | KILLED | TestD2_P1_Every... only |
+| M-CALLBACK-DROP | callback row removed | KILLED | TestD2_11, TestD2_15, TestD2_P1_Every... |
+| M-CALLBACK-UNBOUND | callback row -> unbound | KILLED | TestD2_11, TestD2_P1_Every... |
+| M-SYNC-DROP / M-POLLAMT-DROP / M-POLLREF-DROP / M-CONFLICT-DROP / M-T15-DROP / M-TOMB-ROW-DROP / M-TOMB-BOUND / M-BARE-INVALID-DROP / M-UNCLASSIFIED-AS-BOUND | P1 table mutants | KILLED (all) | as before; see the log for each |
+| all other mutants (M-PRED*, M-UNBOUND-*, M-BOUND-STATUS-WIDEN, M-STANDING-UNBOUND-WIDEN, M-CLEAR-*, X1-X6, Y-B-ANYDISPUTED, Z-DECLINED-STATUS-DROP) | unchanged | KILLED (all) | unchanged |
+
+Note on PM1-CONFLICT-BOUND. Under D2F-1, bound and bound-if-referenced behave identically at run
+time: both are bound with a reference and unbound without one. So this mutant changes only the
+table, not the runtime behaviour, and only the classification pin catches it, by design: the table
+records what a reason IS, as ledger-finance classified it. At 6c44c24 it was also killed by
+behaviour tests; that is no longer possible, and it is not a test weakness.
+
+Existing tests: every test passed unchanged after D2F-1. No assertion was changed, including the
+bound tests holding a reference (TestD2_1, TestD2_2, TestD2_3, TestD2_10, TestD2_11, TestD2_14):
+standing, and cleared only on their own reference.

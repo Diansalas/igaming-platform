@@ -6445,7 +6445,7 @@ raised for a `disputed` deposit attempt whose `terminal_reason` is one of:
 | `sync_amount_mismatch` | PRH-2 C, §34.2 | the park binds the validated reference (§34.8, F-C1) |
 | `poll_amount_mismatch` | PRH-2 D (PAY-POLL-AMOUNT-1), plan §5 D design 1 | the poll queries by the bound reference |
 | `poll_reference_mismatch` | PRH-2 D, plan §5 D design 2 | as above; the echo is never bound (design 3) |
-| `callback_amount_asset_mismatch` | T10 from a verified callback (receipt path) | the callback resolved the live attempt by its bound reference (LF D2 review P1: same exposure as `sync_amount_mismatch`) |
+| `callback_amount_asset_mismatch` | T10 from a verified callback (receipt path) | usually: the callback resolved the live attempt by its bound reference (LF D2 review P1: same exposure as `sync_amount_mismatch`). **Not always** — see the runtime rule below |
 | `success_for_never_sent_attempt` (T15) | receipt path | **bound only if the attempt holds a reference**; otherwise it is an unbound park (§35.2). Never excluded (LF D2 review P1) |
 
 **Classification table and pin (LF D2 review P1).** Reconciliation classifies every deposit dispute
@@ -6596,6 +6596,26 @@ of the match. One tenant, its own rows only (FORCE RLS, `tenant_id = $1` on ever
     first non-MOCK statement source, whichever comes first. It ships together with
     PAY-RECON-PARKED-CAPTURE-STANDING-1, under one allocated schema change that ledger-finance signs
     off.
+- **Runtime rule: a reason classed *bound* is bound only when the attempt holds a reference (D2 code
+  final review D2F-1).**
+  - **The gap.** The callback T10 that writes `callback_amount_asset_mismatch`
+    (`payments/receipt.go`, `ApplyDisputeFromNonTerminal`) does not bind the callback's reference. A
+    live attempt with no reference (for example an ambiguous timeout), which the callback resolves by
+    **merchant** reference, is parked with `provider_reference` NULL. Checked as bound on the empty
+    reference, it gave a standing finding that no reversal or tombstone could ever clear. The
+    reviewer's probe confirmed it: still reported after the PSP's own reversal, on every run, and
+    M1 only acknowledges it.
+  - **The same shape predates D2** for `multiple_success_for_intent`: `applyMultipleSuccessDispute`
+    (`payments/orchestrator.go`) does not bind either. D2's table is where it is decided.
+  - **The rule.** `captureClass` resolves *bound* exactly like *bound-if-referenced*: bound with a stored
+    reference, otherwise unbound. Unbound means in-run only, by merchant reference, cleared on the
+    line's reference (as PM-1 does for the ref-less conflict park). It has no standing finding until
+    PAY-RECON-PARKED-CAPTURE-STANDING-1.
+  - **Table versus rule.** `disputeReasonClasses` still records what each reason *is*; the runtime
+    rule decides by the attempt row.
+  - **Pins.** `TestD2_P1_RuntimeRule` checks every payments reason with and without a reference.
+    `TestD2_15` drives the probe end to end on the real callback path: one in-run finding on R, and it
+    clears on a tombstone on R or on a reversal line naming R.
 - **`provider_reference_conflict` is bound-if-referenced (ledger-finance D2 final review PM-1).** A
   phase C conflict park never holds a reference, so it stays unbound (in-run only). D1's poll F-C4
   park holds the reference X the PSP just confirmed (X has become another non-tombstone ledger key at
@@ -6612,9 +6632,10 @@ of the match. One tenant, its own rows only (FORCE RLS, `tenant_id = $1` on ever
   (c) 1-6, plus a pin that other disputed reasons are unchanged.
 - `internal/reconciliation/prh2_d2_merchant_crosscheck_integration_test.go` (`TestD2_7`..`TestD2_9b`):
   the D2-1 ruling's (c) 1-8, and R-1.
-- `internal/reconciliation/prh2_d2_postd1_integration_test.go` (`TestD2_10`..`TestD2_14`): the real D1
+- `internal/reconciliation/prh2_d2_postd1_integration_test.go` (`TestD2_10`..`TestD2_15`): the real D1
   poll parks end to end, the real callback mismatch park, the declined-attempt pin, and the poll F-C4
-  conflict park holding X (`TestD2_14`, PM-1).
+  conflict park holding X (`TestD2_14`, PM-1), and the ref-less callback mismatch park (`TestD2_15`,
+  D2F-1).
 - `internal/reconciliation/payment_reason_classification_test.go` (`TestD2_P1_*`, unit): the
   classification pin.
 - Mutants: LF (c) 7 (the predicate reverted to `multiple_success_for_intent` only), the D2-1 (c) 9 set,
