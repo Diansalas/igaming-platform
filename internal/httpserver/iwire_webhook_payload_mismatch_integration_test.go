@@ -41,7 +41,7 @@ func TestIWire_Webhook_PayloadMismatch_RaisesDetachedP1(t *testing.T) {
 		if cb.StatusCode != http.StatusOK {
 			t.Fatalf("success callback %s: %d", key, cb.StatusCode)
 		}
-		cb.Body.Close()
+		_ = cb.Body.Close()
 		return ref
 	}
 	d1, d2 := deposit("iw-pm-1"), deposit("iw-pm-2")
@@ -49,7 +49,7 @@ func TestIWire_Webhook_PayloadMismatch_RaisesDetachedP1(t *testing.T) {
 	post := func(origin string) int {
 		resp := rawPostCallback(t, srv, "/v1/webhooks/payments/"+tenant.Slug+"/mock",
 			mockProvider.CallbackPayload(tenant.ID, payments.CallbackEventDepositReversal, "iw-pm-rev", origin, payments.OutcomeSucceeded, amount, "EUR", "", false))
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		return resp.StatusCode
 	}
 	if s := post(d1); s != http.StatusOK {

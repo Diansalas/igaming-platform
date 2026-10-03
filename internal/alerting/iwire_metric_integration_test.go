@@ -8,6 +8,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 
 	"github.com/Diansalas/igaming-platform/internal/testsupport/alertinject"
 )
@@ -58,4 +59,34 @@ func TestIWire_SwallowedInTxRaise_IncrementsMetric_BusinessTxCommits_DetachedPer
 	if len(rows) != 1 || rows[0].Discriminator != disc {
 		t.Fatalf("the detached retry must persist the alert: %+v", rows)
 	}
+}
+
+// raiseFailureCount returns the cumulative value of alert_raise_failures_total for
+// (kind, phase).
+func raiseFailureCount(t *testing.T, kind, phase string) int64 {
+	t.Helper()
+	var rm metricdata.ResourceMetrics
+	if err := testMetricReader().Collect(context.Background(), &rm); err != nil {
+		t.Fatal(err)
+	}
+	var n int64
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if m.Name != "alert_raise_failures_total" {
+				continue
+			}
+			sum, ok := m.Data.(metricdata.Sum[int64])
+			if !ok {
+				t.Fatalf("unexpected data type %T", m.Data)
+			}
+			for _, dp := range sum.DataPoints {
+				k, _ := dp.Attributes.Value("kind")
+				p, _ := dp.Attributes.Value("phase")
+				if k.AsString() == kind && p.AsString() == phase {
+					n += dp.Value
+				}
+			}
+		}
+	}
+	return n
 }

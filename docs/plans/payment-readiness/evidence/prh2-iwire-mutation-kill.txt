@@ -1,0 +1,122 @@
+PRH-2 I-wire mutation-kill evidence (ADR 0102 17; ALERT-DELIVERY-1)
+Local run, NOT CI. 72 of 80 final mutant ids killed. Branch prh2-iwire-alert-delivery (based on 6836319), private DB.
+Method: each mutant is ONE textual change (or one added file) applied to a committed tree,
+the targeted tests run with -tags integration, then the change is reverted with git checkout.
+A mutant is KILLED only if a targeted test FAILS (a panic that crashes the test binary counts).
+Runner: scratchpad iw_mut.py (not committed). No tool-based mutation framework was used.
+
+Format: id | result | mutant | killing test
+
+G1 | KILLED | no savepoint rollback after a failed Raise (outer tx stays aborted) | TestIWire_SwallowedInTxRaise_IncrementsMetric_BusinessTxCommits_DetachedPersists (./internal/alerting/)
+G2 | KILLED | swallow every error class (masks 25P02/deadlock/serialization) | TestClassifySQLState_SwallowAllowlistIsNarrow (./internal/alerting/)
+G3 | KILLED | post-commit detached raise (Pending.Flush) is a no-op | TestIWire_SwallowedInTxRaise_IncrementsMetric_BusinessTxCommits_DetachedPersists (./internal/alerting/)
+G4 | KILLED | Go validation failure propagates into the business transaction | TestMetric_AlertRaiseFailuresTotal_BoundedLabelsNoTenant (./internal/alerting/)
+G6 | KILLED | in-tx swallow does not increment alert_raise_failures_total | TestIWire_SwallowedInTxRaise_IncrementsMetric_BusinessTxCommits_DetachedPersists (./internal/alerting/)
+G7 | KILLED | InTx returns the Pending even when the transaction failed | TestInTx_RolledBackTransactionNeverFlushes (./internal/alerting/)
+G8 | KILLED | metric kind label unbounded (caller string) | TestMetric_AlertRaiseFailuresTotal_BoundedLabelsNoTenant (./internal/alerting/)
+G9 | KILLED | metric carries the tenant | TestMetric_AlertRaiseFailuresTotal_BoundedLabelsNoTenant (./internal/alerting/)
+D1 | KILLED | dedup key includes the attempt number (not stable across retries) | TestIWire_Dispatcher_DedupKeyStableAcrossRetries_DiscriminatorInPayload (./internal/alerting/)
+D2 | KILLED | discriminator not carried in the delivery payload | TestIWire_Dispatcher_DedupKeyStableAcrossRetries_DiscriminatorInPayload (./internal/alerting/)
+D2b | KILLED | subject tenant not carried in the delivery payload | TestIWire_Dispatcher_DedupKeyStableAcrossRetries_DiscriminatorInPayload (./internal/alerting/)
+D3 | KILLED | loop has no per-pass panic recovery | FAIL (./internal/alerting/)
+D4 | KILLED | loop has no immediate first pass | FAIL (./internal/alerting/)
+D5 | KILLED | no shutdown drain (in-flight pass cancelled with the parent) | TestLoop_ShutdownDrainsInFlightPassAndStartsNoNewOne (./internal/alerting/)
+D6 | KILLED | a new pass starts after shutdown | TestLoop_NoPassWhenAlreadyCancelled (./internal/alerting/)
+D6b | KILLED | drain timeout never bounds a wedged pass | FAIL (./internal/alerting/)
+D7 | KILLED | failed delivery is always due (no backoff) | TestDispatcher_BackoffHoldsRetryUntilElapsed (./internal/alerting/)
+D8 | KILLED | no dead-letter after MaxAttempts | TestDispatcher_MockSinkRetryThenDead (./internal/alerting/)
+D9 | KILLED | stale claim lease never expires | TestDispatcher_StaleClaimReclaimedThenDead (./internal/alerting/)
+D10 | KILLED | simulation alerts are delivered | TestIWire_SimulationPayloadMismatchAlert_IsP3SimulationNeverDelivered (./internal/httpserver/)
+D11 | KILLED | severity ignored when resolving a route | TestIWire_Dispatcher_SeverityRoutesAreNotInterchangeable (./internal/alerting/)
+P1 | BUILD-ERROR | alert reason taken raw (not from the closed set) | FAIL	github.com/Diansalas/igaming-platform/internal/payments [build failed] FAIL # github.com/Diansalas/igaming-platform/internal/payments [github.com/Diansalas/igaming-platform/internal/payments.test] internal/payments/alerts.go:5:2: "log/slog" imported and not used    -> SUPERSEDED by P1r (mutant text fixed: unused import / duplicate pattern / wrong test selector)
+P2 | BUILD-ERROR | invalid_provider_reference detail not collapsed | FAIL	github.com/Diansalas/igaming-platform/internal/payments [build failed] FAIL # github.com/Diansalas/igaming-platform/internal/payments [github.com/Diansalas/igaming-platform/internal/payments.test] internal/payments/alerts.go:6:2: "strings" imported and not used    -> SUPERSEDED by P2r (mutant text fixed: unused import / duplicate pattern / wrong test selector)
+P3 | SETUP-ERROR | non-allowlisted attribute on the park alert | SETUP-ERROR pattern count 2 in internal/payments/alerts.go   -> SUPERSEDED by P3r (mutant text fixed: unused import / duplicate pattern / wrong test selector)
+P4 | KILLED | park alert not raised in parkDepositAttempt (sync/conflict/invalid/poll/tombstone-poll) | TestIWire_T10Park_SyncAmountMismatch_RaisesP1 (./internal/payments/)
+P5a | KILLED | receipt site without its alert: success_for_never_sent_attempt | TestIWire_ReceiptT15_SuccessForNeverSentAttempt_RaisesP1 (./internal/payments/)
+P5b | KILLED | receipt site without its alert: callback_amount_asset_mismatch | TestIWire_ReceiptT10_CallbackAmountAssetMismatch_RaisesP1 (./internal/payments/)
+P5c | KILLED | receipt site without its alert: tombstone (live attempt receipt) | TestIWire_Tombstone_ReceiptLiveAttempt_RaisesP1 (./internal/payments/)
+P5d | KILLED | receipt site without its alert: tombstone (declined attempt receipt, T13t) | TestIWire_Tombstone_ReceiptDeclinedAttempt_RaisesP1 (./internal/payments/)
+P6 | KILLED | poll-contradiction audit action raises no alert | TestIWire_PollEvidenceContradictsTerminalAttempt_RaisesP1 (./internal/payments/)
+P7 | KILLED | multiple-success raises no alert | TestIWire_MultipleSuccess_RaisesP1_KeyedByIntent (./internal/payments/)
+P7b | KILLED | index backstop alert never raised | TestIWire_MultipleSuccess_ConcurrentRaisersDedupToOneAlert (./internal/payments/)
+P8 | KILLED | deposit park alert raised for payout attempts | TestRaiseDepositParkAlert_IsNoOpForPayoutAttempts (./internal/payments/)
+P9a | KILLED | phase C (drive.go) never flushes the detached retry | TestIWire_CascadeDrivenPark_InjectedRaiseFailure_ParkCommits_DetachedP1Persists (./internal/payments/)
+P9b | KILLED | phase C (deposit_v2.go) never flushes | TestIWire_PhaseC_T10Park_InjectedRaiseFailure_ParkCommits_DetachedP1Persists (./internal/payments/)
+P9c | KILLED | sweeper never flushes | TestIWire_Sweeper_T10Park_InjectedRaiseFailure_ParkCommits_DetachedP1Persists (./internal/payments/)
+P9d | KILLED | webhook handler never flushes | TestIWire_Webhook_T10_InjectedRaiseFailure_UniformResponse_DetachedP1Fires (./internal/httpserver/)
+P9e | KILLED | simulation handler never flushes | TestStaticWiring_EvidenceTransactionOwnersOpenThroughInTxAndFlush (./internal/alerting/)
+P9f | KILLED | scheduler stream never flushes (ledger) | TestIWire_Recon_InTxRaiseFailureNeverAbortsRun (./internal/reconciliation/)
+P9g | KILLED | sportsbook stream never flushes | TestStaticWiring_EvidenceTransactionOwnersOpenThroughInTxAndFlush (./internal/alerting/)
+R1 | KILLED | ledger drift/unlinked alerts not raised | TestIWire_Recon_LedgerDriftP1_StableKey (./internal/reconciliation/)
+R2 | KILLED | unlinked adjustment presented as projection drift (C-K2-1) | TestIWire_Recon_UnlinkedAdjustmentIsNotDrift (./internal/reconciliation/)
+R3 | KILLED | unstable discriminator (run id in the key) | TestIWire_Recon_LedgerDriftP1_StableKey (./internal/reconciliation/)
+R4 | KILLED | sportsbook mismatch alert not raised | TestIWire_Recon_SportsbookSettlementP1 (./internal/reconciliation/)
+R5 | KILLED | casino consistency mismatch alert not raised | TestIWire_Recon_CasinoConsistencyP1 (./internal/reconciliation/)
+R6 | KILLED | in-tx mismatch alert raised on a clean run (guard removed) | TestIWire_Recon_CleanRunRaisesNothing (./internal/reconciliation/)
+R7 | KILLED | casino statement (RR) mismatch alert not raised | TestIWire_Recon_CasinoStatementP1_PostCommit_RunCommitsEvenWhenRaiseFailsPersistently (./internal/reconciliation/)
+R8 | KILLED | payment statement (RR) mismatch alert not raised | TestIWire_Recon_PaymentStatementP1_PostCommit (./internal/reconciliation/)
+R9a | KILLED | run_failed alert not raised for ledger_vs_projection | TestIWire_Recon_RunFailedP1_DetachedAndNoErrorText (./internal/reconciliation/)
+R9b | KILLED | run_failed alert not raised for sportsbook_settlement | TestIWire_Recon_RunFailedP1_DetachedAndNoErrorText (./internal/reconciliation/)
+R9c | KILLED | run_failed alert not raised for casino_consistency | TestIWire_Recon_RunFailedP1_DetachedAndNoErrorText (./internal/reconciliation/)
+R9d | KILLED | run_failed alert not raised for casino_statement | TestIWire_Recon_RunFailedP1_DetachedAndNoErrorText (./internal/reconciliation/)
+R9e | KILLED | run_failed alert not raised for payment_statement | TestIWire_Recon_PaymentStatementRunFailedP1_PerProvider (./internal/reconciliation/)
+R10 | KILLED | run_failed attribute carries the raw error text | TestIWire_Recon_RunFailedP1_DetachedAndNoErrorText (./internal/reconciliation/)
+K1 | KILLED | kill-switch engage alert not raised | TestIWire_KillSwitch_Engage_RaisesP2_TenantAndPlatformScope (./internal/httpserver/)
+K2 | KILLED | takeover flag constant false | TestKillSwitchEngagedAlert_ShapeAllowlistAndBounds (./internal/httpserver/)
+K3 | KILLED | reason code unbounded | TestKillSwitchEngagedAlert_ShapeAllowlistAndBounds (./internal/httpserver/)
+K4 | KILLED | engage alert always opened in platform-admin scope | TestIWire_KillSwitch_Engage_RaisesP2_TenantAndPlatformScope (./internal/httpserver/)
+K5 | SURVIVED | kill-switch alert raised in-tx instead of post-commit (static guard) |   -> SUPERSEDED by K5r (mutant text fixed: unused import / duplicate pattern / wrong test selector)
+H1 | KILLED | webhook integrity payload_mismatch alert not raised | TestIWire_Webhook_PayloadMismatch_RaisesDetachedP1 (./internal/httpserver/)
+H2 | KILLED | webhook integrity deposit_already_reversed alert not raised | TestPaymentWebhookHandler_DepositReversalAlreadyReversed_Maps409 (./internal/httpserver/)
+H3 | SURVIVED | webhook integrity reversal_link alert not raised |
+H4 | KILLED | casino bet_not_found integrity alert not raised | TestCasinoRejectionRecord_EveryClassViaWebhook (./internal/httpserver/)
+H5 | KILLED | casino win_origin integrity alert not raised | TestCasinoRejectionRecord_EveryClassViaWebhook (./internal/httpserver/)
+H6 | KILLED | simulation payload-mismatch hook never invoked | TestWriteDepositCallbackError_PayloadMismatchHookFiresOnlyForPayloadMismatch (./internal/httpserver/)
+H7 | KILLED | simulation alert uses a production Kind | TestIWire_SimulationPayloadMismatchAlert_IsP3SimulationNeverDelivered (./internal/httpserver/)
+A1 | SURVIVED | ack/resolve without the alert:manage permission gate |
+A1b | SURVIVED | resolve without the alert:manage permission gate |
+A2 | SURVIVED | tenant-scoped session allowed to transition |
+A3 | KILLED | ack/resolve not audited | TestAlertAdmin_AckResolveAudited_PlatformScopeOnly (./internal/httpserver/)
+A4 | KILLED | audit row lacks the subject tenant | TestAlertAdmin_AckResolveAudited_PlatformScopeOnly (./internal/httpserver/)
+A5 | KILLED | resolve reason code unvalidated | TestAlertAdmin_AckResolveAudited_PlatformScopeOnly (./internal/httpserver/)
+A6 | KILLED | terminal alert can be transitioned again | TestAlertAdmin_AckResolveAudited_PlatformScopeOnly (./internal/httpserver/)
+S1 | KILLED | RaiseGuarded called outside InTx and outside the sanctioned helpers (B-1) | TestStaticWiring_RaiseGuardedOnlyInsideInTxOrSanctionedHelpers_B1 (./internal/alerting/)
+S2 | KILLED | alert raised inside a REPEATABLE READ snapshot closure (C-102-5) | TestStaticWiring_NoAlertingCallInsideSnapshotTransaction_C1025 (./internal/alerting/)
+P1r | KILLED | alert reason taken raw (not from the closed set) | TestAlertReasonFor_ClosedSetOnly (./internal/payments/)
+P2r | KILLED | invalid_provider_reference detail not collapsed | TestAlertReasonFor_ClosedSetOnly (./internal/payments/)
+P3r | KILLED | non-allowlisted attribute on the park alert | TestDepositParkAlert_ShapeIsValidForEveryReason (./internal/payments/)
+K5r | KILLED | kill-switch alert raised in-tx instead of post-commit (static guard) | TestStaticWiring_RaiseGuardedOnlyInsideInTxOrSanctionedHelpers_B1 (./internal/alerting/)
+A12 | KILLED | both permission gate and platform-scope check removed (the two independent layers) | ['--- FAIL: TestAlertAdmin_Authorization_TenantAndPlayerAndAnonymousRefused (3.38s)']
+
+SURVIVORS, classified explicitly (never counted as killed):
+
+H3  SURVIVED  webhook integrity reason "reversal_link" raises no alert.
+    Class: UNTESTED BRANCH (real gap). The branch is the data-corruption case
+    ErrDepositReversalIntegrity at the HTTP layer; reaching it needs a payout attempt fixture
+    bound to a reference in the webhook test environment (the payments package reaches it with
+    its own fixtures, TestRVLF_M4). Not killed. Follow-up: add an HTTP-level test.
+A1, A1b, A2  SURVIVED individually (permission gate on ack, on resolve, and the explicit
+    platform-scope check).
+    Class: REDUNDANT DEFENCE-IN-DEPTH, equivalent when mutated one at a time: either layer alone
+    refuses a tenant admin, and the staff-principal middleware refuses a player. The COMBINED
+    mutant A12 (permission gates AND scope check both removed) is KILLED
+    (TestAlertAdmin_Authorization_TenantAndPlayerAndAnonymousRefused). Each layer is therefore
+    protected as a pair, not individually.
+
+Mutants not generated (stated, not hidden):
+  - "savepoint widened to cover a business statement" (ADR 11, Q3): the savepoint is opened inside
+    RaiseGuarded, which has no business statement to widen over; structurally impossible, not tested.
+  - "RaiseDetached chooses its scope from the Alert": there is no field to choose from (alert.go).
+  - I-core mutants (MA..MG, attempt_no, raise_failed trigger, RLS families) were killed in I-core
+    and are not re-run here.
+
+Other verification (local, -race -tags integration -count=1 unless noted; pipefail; FAIL/panic/DATA RACE grep clean):
+  ./internal/alerting/...  ./internal/reconciliation/...  ./internal/txscope/...  ./internal/audit/...  ok
+  ./internal/payments/...  ok
+  ./internal/httpserver/... ./internal/auth/... ./internal/db/...  ok (full httpserver suite)
+  LF test 9: -race -count=50 TestInTx_ConcurrentRaisersDedupToOneAlert (alerting) ok;
+             -race -count=50 TestIWire_MultipleSuccess_ConcurrentRaisersDedupToOneAlert (payments) ok.
+  build, vet (plain and -tags integration), gofmt: clean.
+  golangci-lint 2.9.0 default tags: 0 issues.
+  golangci-lint with --build-tags integration: 670 findings repo-wide (665 errcheck on pre-existing
+    tests, loHoldWithRollback unused); the two new errcheck in this branch's test were fixed.

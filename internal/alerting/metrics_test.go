@@ -27,36 +27,6 @@ func testMetricReader() *sdkmetric.ManualReader {
 	return metricReader
 }
 
-// raiseFailureCount returns the cumulative value of alert_raise_failures_total for
-// (kind, phase).
-func raiseFailureCount(t *testing.T, kind, phase string) int64 {
-	t.Helper()
-	var rm metricdata.ResourceMetrics
-	if err := testMetricReader().Collect(context.Background(), &rm); err != nil {
-		t.Fatal(err)
-	}
-	var n int64
-	for _, sm := range rm.ScopeMetrics {
-		for _, m := range sm.Metrics {
-			if m.Name != "alert_raise_failures_total" {
-				continue
-			}
-			sum, ok := m.Data.(metricdata.Sum[int64])
-			if !ok {
-				t.Fatalf("unexpected data type %T", m.Data)
-			}
-			for _, dp := range sum.DataPoints {
-				k, _ := dp.Attributes.Value("kind")
-				p, _ := dp.Attributes.Value("phase")
-				if k.AsString() == kind && p.AsString() == phase {
-					n += dp.Value
-				}
-			}
-		}
-	}
-	return n
-}
-
 // Security addendum 1 (c): a swallowed or failed raise increments
 // alert_raise_failures_total{kind,phase} with BOUNDED labels and NO tenant label
 // (ADR 0102 6.3/7.2). The instrument is created from the package's global
