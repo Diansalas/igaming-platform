@@ -39,6 +39,19 @@ export interface NavPermissions {
   casinoConfig: boolean
   /** PermCasinoCatalogueManage - platform-wide casino catalogue upsert. platform_admin only. */
   catalogue: boolean
+  /**
+   * PRH-2 K2 (ADR 0100): PermLedgerAdjustmentRead - view governed manual
+   * adjustment requests (finance, compliance, platform_admin).
+   */
+  manualAdjustments: boolean
+  /**
+   * PRH-2 K2 (ADR 0100): PermLedgerAdjustmentInitiate/Approve - the STATIC
+   * half only (finance, platform_admin). The authority is an in-force
+   * ledger_adjustment capability GRANT read server-side in the action's own
+   * transaction (and, for platform_admin, a G-P2 grant for the tenant) -
+   * this flag can never stand in for it.
+   */
+  manualAdjustmentAct: boolean
 }
 
 const NONE: NavPermissions = {
@@ -59,6 +72,8 @@ const NONE: NavPermissions = {
   providerConfig: false,
   casinoConfig: false,
   catalogue: false,
+  manualAdjustments: false,
+  manualAdjustmentAct: false,
 }
 
 // The write flags (tenantWrite/brandWrite/staffAdmin/providerConfig/
@@ -92,6 +107,8 @@ const ROLE_NAV_PERMISSIONS: Record<string, NavPermissions> = {
     brandWrite: true,
     staffAdmin: true,
     catalogue: true,
+    manualAdjustments: true,
+    manualAdjustmentAct: true,
   },
   tenant_admin: {
     ...NONE,
@@ -109,8 +126,8 @@ const ROLE_NAV_PERMISSIONS: Record<string, NavPermissions> = {
     casinoConfig: true,
   },
   support: { ...NONE, players: true, bonus: true, sportsbook: true, casino: true },
-  compliance: { ...NONE, players: true, kyc: true, rg: true, bonus: true, tenantAudit: true, sportsbook: true, casino: true },
-  finance: { ...NONE, withdrawals: true, sportsbook: true, casino: true },
+  compliance: { ...NONE, players: true, kyc: true, rg: true, bonus: true, tenantAudit: true, sportsbook: true, casino: true, manualAdjustments: true },
+  finance: { ...NONE, withdrawals: true, sportsbook: true, casino: true, manualAdjustments: true, manualAdjustmentAct: true },
   risk_manager: { ...NONE },
   promotions_manager: { ...NONE, bonus: true },
   bonus_operations: { ...NONE, bonus: true },

@@ -9326,6 +9326,48 @@ machinery are all `bonus-engine`'s, unchanged by this subsection. This
 specifies the ledger shape and the amount rules only — the two things ADR
 0040 says must exist before implementation starts.
 
+## 7.K2 Governed manual adjustments (PRH-2 K2, ADR 0100) — `IMPLEMENTED`
+
+- **The shape (LF-9, S-13):** a manual adjustment posts exactly two
+  entries - the tenant's house `manual_adjustment` account and ONE player's
+  `player_cash` - in one asset, one amount, `transaction_type =
+  'manual_adjustment'`. No other account can appear: the request row's
+  `account_type` is CHECKed to `player_cash`, the executor builds the only
+  `TransactionInput` (`internal/adjustment.buildPosting`), and the link
+  trigger refuses an executed request whose ledger transaction has any other
+  entry set. BONUS_SET accounts are unreachable, so Rule B2 never generates
+  mirror legs for a manual adjustment (HR-9 removed, HR-17 intact).
+- **The catalogue (LF ruling 1, literal; K3 adds the Step-B causation arm):**
+  `operational_error_correction` and `external_instruction` (both directions;
+  optional causation = a same-tenant transaction with a `player_cash` leg on
+  this wallet; evidence required for `external_instruction`),
+  `compensating_entry` (both directions; causation required, never
+  deposit/deposit_reversal/tombstone, a `player_cash` leg on this wallet in
+  this asset; evidence required; cumulative cap), `goodwill_credit` (credit
+  only; no causation; refused in a suspended asset or for a non-active
+  tenant). There is no deposit-allocation code (LF-2).
+- **The compensation cap (INV-ADJ-6):** for `(causation, direction)`, the
+  sum of executed `compensating_entry` amounts plus this amount must be `<=`
+  the causation's `player_cash` leg amount on this wallet in this asset
+  (the SUM of such legs, any direction - K2 implementation pin). Checked at
+  submission and, under the causation row's L2 `FOR UPDATE`, at execution.
+- **The exposure refusal (INV-ADJ-5, LF F4/ruling 2, K2-a):**
+  `player_open_payment_exposure(tenant, player)` is true while any deposit
+  attempt of the player is `disputed` with `terminal_reason =
+  'multiple_success_for_intent'` and no `tombstone` exists keyed on the
+  attempt's ORIGINAL `(provider_id, provider_reference)`. Every credit is
+  refused while it is true (`MA020`, at submission and at execution; no
+  override); debits are unaffected.
+- **No negative balance (INV-ADJ-4, LF-13):** a debit reads `player_cash`
+  from `LockProjectionsForPosting` with the same input it posts, and ends
+  `refused_insufficient_funds` (committed, nothing posted) if short.
+- **Suspended asset (LF ruling 3, K2-b; exact predicate pinned by K2):**
+  `NOT (assets.active AND assets.platform_authorized)` OR no
+  `asset_authorizations` row with `scope_kind = 'tenant' AND product IS NULL
+  AND eligible` for (tenant, asset).
+- **Detective control:** `ledger_unlinked_manual_adjustment`
+  (`reconciliation-model.md` §2.1a).
+
 ## 8. Cross-references
 
 - Object scoping, `Wallet` shape: `financial-domain-model.md`.

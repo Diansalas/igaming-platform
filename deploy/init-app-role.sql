@@ -380,3 +380,39 @@ BEGIN
     END IF;
 END
 $$;
+
+-- PRH-2 K2 (migration 0113; ADR 0100): least-privilege, re-asserted on
+-- every run, mirroring migration 0113's own in-migration grant block:
+--   financial_control_classifications,
+--   ledger_adjustment_reason_codes     - migration-written reference data:
+--                                        SELECT only, no write grant.
+--   financial_approval_policy_changes  - SELECT/INSERT/UPDATE (status only:
+--                                        cancel/expire/decided by trigger).
+--   financial_approval_policy_change_approvals,
+--   financial_approval_policies,
+--   tenant_financial_policy_profiles   - append-only: SELECT/INSERT.
+--   ledger_adjustment_requests         - SELECT/INSERT/UPDATE (the state
+--                                        machine; payload immutable by
+--                                        trigger). Never DELETE.
+--   ledger_adjustment_approvals        - append-only: SELECT/INSERT.
+DO $$
+DECLARE
+    t RECORD;
+BEGIN
+    FOR t IN SELECT * FROM (VALUES
+        ('financial_control_classifications', 'SELECT'),
+        ('ledger_adjustment_reason_codes', 'SELECT'),
+        ('financial_approval_policy_changes', 'SELECT, INSERT, UPDATE'),
+        ('financial_approval_policy_change_approvals', 'SELECT, INSERT'),
+        ('financial_approval_policies', 'SELECT, INSERT'),
+        ('tenant_financial_policy_profiles', 'SELECT, INSERT'),
+        ('ledger_adjustment_requests', 'SELECT, INSERT, UPDATE'),
+        ('ledger_adjustment_approvals', 'SELECT, INSERT')) AS v(name, privs)
+    LOOP
+        IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = t.name) THEN
+            EXECUTE format('REVOKE ALL ON %I FROM igaming_runtime', t.name);
+            EXECUTE format('GRANT %s ON %I TO igaming_runtime', t.privs, t.name);
+        END IF;
+    END LOOP;
+END
+$$;

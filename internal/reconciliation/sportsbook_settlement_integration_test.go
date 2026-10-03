@@ -392,8 +392,10 @@ func TestSportsbookSettlementRecon_CleanAfterEveryLifecycleFlow(t *testing.T) {
 
 	err = pool.WithTenant(context.Background(), w.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		run, ms, err := RunLedgerVsProjection(ctx, tx, w.f.tenantID, time.Now().Add(-time.Hour), time.Now())
-		if err == nil && (run.Status != StatusClean || len(ms) != 0) {
-			return fmt.Errorf("ledger_vs_projection not clean: %v", ms)
+		// Fixture-funding ledger_unlinked_manual_adjustment rows excepted
+		// (ADR 0100 §12; see unlinked_manual_adjustment_helpers_integration_test.go).
+		if rest := ignoringUnlinkedFixtureAdjustments(ms); err == nil && (!cleanExceptUnlinkedFixtures(run, ms) || len(rest) != 0) {
+			return fmt.Errorf("ledger_vs_projection not clean: %v", rest)
 		}
 		return err
 	})
@@ -792,10 +794,10 @@ func TestSportsbookSettlementRecon_DriftInjectionPerKind(t *testing.T) {
 		if oc.Err != nil || oc.Sportsbook.Err != nil || od.Err != nil || od.Sportsbook.Err != nil {
 			t.Fatalf("sweep errors: %v %v %v %v", oc.Err, oc.Sportsbook.Err, od.Err, od.Sportsbook.Err)
 		}
-		if oc.Run.Status != StatusClean || oc.Sportsbook.Run.Status != StatusClean {
+		if !persistedCleanExceptUnlinkedFixtures(t, pool, clean.f.tenantID, oc.Run) || oc.Sportsbook.Run.Status != StatusClean {
 			t.Fatalf("clean tenant: ledger=%s sportsbook=%s", oc.Run.Status, oc.Sportsbook.Run.Status)
 		}
-		if od.Run.Status != StatusClean || od.Sportsbook.Run.Status != StatusMismatchesFound {
+		if !persistedCleanExceptUnlinkedFixtures(t, pool, dirty.f.tenantID, od.Run) || od.Sportsbook.Run.Status != StatusMismatchesFound {
 			t.Fatalf("dirty tenant: ledger=%s sportsbook=%s", od.Run.Status, od.Sportsbook.Run.Status)
 		}
 		if od.Sportsbook.Run.Stream != StreamSportsbookSettlement {

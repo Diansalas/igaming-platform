@@ -639,6 +639,23 @@ const (
 	PermFinancialPolicyRead    Permission = "financial_policy:read"
 )
 
+// Governed manual adjustment permissions (PRH-2 K2, ADR 0100; ADR 0099
+// §3.1/§3.3). These are the STATIC half of the two-layer design: the route
+// gate. The authority itself is the in-force ledger_adjustment:initiate /
+// ledger_adjustment:approve capability GRANT, read (and at execution locked
+// FOR SHARE) in the action's own transaction by migration 0113's triggers -
+// a JWT role is never trusted for it. Per ADR 0099 §3.3 the static
+// permission of each financial capability is held by finance and
+// platform_admin only (the only eligible grantee roles); a platform_admin
+// additionally needs a G-P2 grant for the target tenant to open the acting
+// session at all. PermLedgerAdjustmentRead adds compliance ("compliance
+// sees, never acts").
+const (
+	PermLedgerAdjustmentInitiate Permission = "ledger_adjustment:initiate"
+	PermLedgerAdjustmentApprove  Permission = "ledger_adjustment:approve"
+	PermLedgerAdjustmentRead     Permission = "ledger_adjustment:read"
+)
+
 // rolePermissions is a static, in-code role -> permission-set mapping.
 // Stage 2 does not make this database-driven/partner-configurable - that
 // would be a Stage 6 partner-console feature (custom roles), premature
@@ -715,6 +732,9 @@ var rolePermissions = map[Role]map[Permission]bool{
 		// that requests grants) also holds :request/:revoke/:read.
 		PermCapabilityGrantRequest, PermCapabilityGrantApprove, PermCapabilityGrantRevoke, PermCapabilityGrantRead,
 		PermFinancialPolicyAuthor, PermFinancialPolicyRead,
+		// PRH-2 K2 (ADR 0100): the static half only; acting in a tenant
+		// additionally needs a G-P2 grant (ADR 0099 §6).
+		PermLedgerAdjustmentInitiate, PermLedgerAdjustmentApprove, PermLedgerAdjustmentRead,
 	),
 	// Stage 3D business decision #4/#5: tenant_admin (a broad
 	// administrative role that also holds PermStaffManage) deliberately
@@ -879,6 +899,9 @@ var rolePermissions = map[Role]map[Permission]bool{
 		// and is never itself an eligible grantee (§3.3 - "compliance is
 		// not eligible in PRH-2").
 		PermCapabilityGrantRead, PermFinancialPolicyRead,
+		// PRH-2 K2 (ADR 0100): read-only visibility of governed manual
+		// adjustments - compliance sees, never acts.
+		PermLedgerAdjustmentRead,
 	),
 	// finance is Stage 3B's own role, dedicated solely to withdrawal
 	// governance - it holds all four withdrawal permissions and nothing
@@ -901,6 +924,10 @@ var rolePermissions = map[Role]map[Permission]bool{
 		// no capability_grant:* permission, only the financial-policy read
 		// the catalogue lists it for.
 		PermFinancialPolicyRead,
+		// PRH-2 K2 (ADR 0100): finance is the eligible tenant grantee role
+		// for both ledger_adjustment capabilities (ADR 0099 §3.3); the
+		// grant itself is still required, in-tx.
+		PermLedgerAdjustmentInitiate, PermLedgerAdjustmentApprove, PermLedgerAdjustmentRead,
 	),
 	// Stage 4G: risk_manager is dedicated solely to Risk & Limits
 	// configuration - it holds both risk_config permissions and nothing

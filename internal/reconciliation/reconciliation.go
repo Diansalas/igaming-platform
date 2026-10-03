@@ -57,6 +57,15 @@ type MismatchKind string
 const (
 	MismatchKindMissingProjection MismatchKind = "missing_projection"
 	MismatchKindBalanceMismatch   MismatchKind = "balance_mismatch"
+	// MismatchKindLedgerUnlinkedManualAdjustment (PRH-2 K2, ADR 0100 §12,
+	// LF ruling 4) is the DETECTIVE control for governed manual
+	// adjustments: a manual_adjustment ledger transaction created at or
+	// after the ledger_adjustment classification's governed_since cutover
+	// that no executed ledger_adjustment_requests row links to. Standing
+	// and unwindowed (every run re-raises every such transaction,
+	// whatever the run's period), severity P1 (routed via ADR 0102 once
+	// I-wire lands). The PREVENTIVE rule is LEDGER-MANUAL-ADJ-LINK-1.
+	MismatchKindLedgerUnlinkedManualAdjustment MismatchKind = "ledger_unlinked_manual_adjustment"
 )
 
 // Run is one execution of a reconciliation stream over a period.
@@ -177,6 +186,12 @@ func RunLedgerVsProjection(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, p
 		}
 	}
 
+	unlinked, err := unlinkedManualAdjustments(ctx, tx, tenantID)
+	if err != nil {
+		return Run{}, nil, err
+	}
+	mismatches = append(mismatches, unlinked...)
+
 	if len(mismatches) > 0 {
 		run.Status = StatusMismatchesFound
 	} else {
@@ -187,6 +202,51 @@ func RunLedgerVsProjection(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, p
 		return Run{}, nil, err
 	}
 	return run, mismatches, nil
+}
+
+// unlinkedManualAdjustments is the ADR 0100 §12 detective check: every
+// manual_adjustment transaction of tenantID created at or after the
+// ledger_adjustment governed_since cutover (migration 0113) that no
+// EXECUTED ledger_adjustment_requests row links to. It deliberately
+// ignores the run's period (standing, unwindowed). It reads requests
+// through migration 0113's tenant_system_read_executed policy - the only
+// ledger_adjustment_requests rows this system-tenant session can see are
+// executed ones, which is exactly the set the check needs.
+func unlinkedManualAdjustments(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID) ([]Mismatch, error) {
+	rows, err := tx.Query(ctx, `
+		SELECT t.id, t.created_at, COALESCE(t.reason_code, '')
+		  FROM ledger_transactions t
+		 WHERE t.tenant_id = $1
+		   AND t.transaction_type = 'manual_adjustment'
+		   AND t.created_at >= (SELECT c.governed_since FROM financial_control_classifications c
+		                         WHERE c.operation_kind = 'ledger_adjustment')
+		   AND NOT EXISTS (
+		       SELECT 1 FROM ledger_adjustment_requests r
+		        WHERE r.tenant_id = t.tenant_id AND r.state = 'executed' AND r.ledger_transaction_id = t.id)
+		 ORDER BY t.created_at, t.id`, tenantID)
+	if err != nil {
+		return nil, fmt.Errorf("reconciliation: unlinked manual adjustment check: %w", err)
+	}
+	defer rows.Close()
+	var out []Mismatch
+	for rows.Next() {
+		var id uuid.UUID
+		var createdAt time.Time
+		var reason string
+		if err := rows.Scan(&id, &createdAt, &reason); err != nil {
+			return nil, err
+		}
+		out = append(out, Mismatch{
+			ID:                  uuid.New(),
+			TenantID:            tenantID,
+			ReconciliationKey:   id.String(),
+			ExpectedValue:       "an executed ledger_adjustment_requests row linked to this manual_adjustment transaction",
+			ActualValue:         fmt.Sprintf("no linked executed request (reason_code=%s created_at=%s)", reason, createdAt.UTC().Format(time.RFC3339Nano)),
+			MismatchKind:        MismatchKindLedgerUnlinkedManualAdjustment,
+			InvestigationStatus: investigationStatusOpen,
+		})
+	}
+	return out, rows.Err()
 }
 
 // persistRun inserts run and its mismatches (setting each mismatch's

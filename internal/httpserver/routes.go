@@ -175,4 +175,5 @@ func registerIdentityRoutes(mux *http.ServeMux, deps Deps) {
 	// PRH-2 K1 (ADR 0099): the scoped financial capability grant admin
 	// API - see capability_routes.go's own doc comment.
 	registerCapabilityRoutes(mux, deps)
+	registerManualAdjustmentRoutes(mux, deps)
 }

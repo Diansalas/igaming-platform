@@ -570,6 +570,61 @@ found no single statement of that boundary anywhere in the Stage 3A set.
   entirely (corrections there going through Flow 19/18-shaped entries
   instead) is a finance/risk policy decision for `ledger-finance` and
   `security`, not resolved in this freeze.
+  **RESOLVED by ADR 0100 (PRH-2 K2, LF-9/S-13):** the posting shape is
+  CLOSED - `manual_adjustment` pairs ONLY with the player's `player_cash`
+  (the house `manual_adjustment` account of the same tenant and asset);
+  every system/house account, BONUS_SET, hold/locked, PSP, provider, promo,
+  `bonus_expense` and jackpot account is unrepresentable. See below.
+
+### 16a. Governed manual adjustment as built — PRH-2 K2 (ADR 0100) — `IMPLEMENTED`
+
+*Supersedes the idempotency-key and audit-event bullets above; the rest of
+§16 is historical design context.*
+
+- **Request**: `ledger_adjustment_requests` (migration 0113). Payload =
+  tenant, wallet (player and brand derived), `account_type = 'player_cash'`
+  (CHECK), asset (= the wallet's), `direction` (`credit_player` /
+  `debit_player`), `amount` NUMERIC(38,0) in `(0, 2^63-1]`, `reason_code` from
+  the closed catalogue (`operational_error_correction`, `compensating_entry`,
+  `goodwill_credit`, `external_instruction`; no deposit-allocation code),
+  optional causation transaction, `evidence_ref_hash`, `note_hash`. The
+  `payload_hash` over all of it is DB-computed; the payload is immutable.
+- **Authority**: an in-force `ledger_adjustment:initiate` grant (ADR 0099)
+  for the initiator, and `ledger_adjustment:approve` for each approver, read
+  in-transaction; a distinct non-NULL Person per approver (LF-11); never the
+  player's own Person (S-12); never the author/approver of a contributing
+  policy (S-2(iii)); required approvals = `GREATEST(1, MAX(applicable
+  policy rows))`, pinned at submission and never lowered.
+- **Execution**: in the FINAL approval's own transaction (LF-13), in ADR 0082
+  Amendment A8 order: request `FOR UPDATE` → staff `FOR SHARE` → in-force
+  grants `FOR SHARE` → causation `ledger_transactions` `FOR UPDATE` (L2) →
+  `LockProjectionsForPosting` (L3, same input) → sufficiency for a debit
+  (no negative `player_cash`) → `ledger.Post` (L4) → `executed` + link.
+- **Accounts**: credit_player = Dr house `manual_adjustment` / Cr the
+  wallet's `player_cash`; debit_player = the reverse. Exactly two entries.
+- **Idempotency key**: `'manual_adjustment:' || request_id`
+  (`UNIQUE (tenant_id, idempotency_key)`); `correlation_id` = request id;
+  `causation_id` = the causation transaction; `reason_code` copied. The link
+  trigger refuses an `executed` request whose ledger transaction does not
+  carry exactly these keys and exactly the two approved entries.
+- **Refusals**: `MA020 open_payment_exposure` for every credit while the
+  player has a captured-unposted deposit exposure (no override; cleared only
+  by the refund tombstone on the original reference); goodwill refused in a
+  suspended asset (incl. the 0045 tenant layer) or for a non-active tenant;
+  compensating_entry capped cumulatively by its causation's `player_cash`
+  leg; causation to deposit / deposit_reversal / tombstone refused for every
+  code.
+- **Audit events**: `ledger_adjustment.submitted`, `.approved` (non-final),
+  `.executed`, `.rejected`, `.cancelled`, `.expired`,
+  `.refused_at_execution`, `.refused_insufficient_funds`, plus
+  `financial.acting_session_opened` for acting sessions and
+  `financial_policy.change_*` for policy changes.
+- **Detective control**: reconciliation kind
+  `ledger_unlinked_manual_adjustment` (`reconciliation-model.md` §2.1a). The
+  preventive link rule is LEDGER-MANUAL-ADJ-LINK-1 (deferred,
+  launch-blocking).
+- **Invariants engaged**: #1, #2, #3, #5, #6, #7, #8, #10, #14 and
+  INV-ADJ-1..6 (ADR 0100 §14).
 
 ## 17. Provider settlement / payable — `BLUEPRINT`
 

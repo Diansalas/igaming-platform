@@ -72,6 +72,41 @@ flowchart LR
   evidence the ledger itself needs correcting — the ledger's own internal
   consistency is checked separately (§4).
 
+#### 2.1a Kind `ledger_unlinked_manual_adjustment` — PRH-2 K2 (ADR 0100 §12, LF ruling 4) — `IMPLEMENTED` (detective control)
+
+- **What it checks.** Inside the same `ledger_vs_projection` run
+  (`reconciliation.RunLedgerVsProjection`, so it is already scheduled by
+  `RunSweep`; no scheduler change): every `ledger_transactions` row of the
+  tenant with `transaction_type = 'manual_adjustment'` and `created_at >=`
+  the `ledger_adjustment` row's `financial_control_classifications.governed_since`
+  (migration 0113's cutover) for which **no** `ledger_adjustment_requests` row
+  has `state = 'executed'` and `ledger_transaction_id` equal to it.
+- **Reconciliation key**: the manual_adjustment `ledger_transactions.id`.
+- **Standing and unwindowed**: the run's period is ignored; every run
+  re-raises every unlinked transaction until the cause is resolved.
+- **Severity: P1.** Routing as a P1 alert is ADR 0102's, and lands with
+  I-wire (not K2).
+- **Session**: the sweep runs in the system-tenant shape (`db.WithTenant`,
+  `app.tenant_id` only). Migration 0113 gives that shape exactly one read on
+  `ledger_adjustment_requests` - `tenant_system_read_executed`, **executed
+  rows only**, SELECT only.
+- **Why only detective**: the PREVENTIVE rule (a BEFORE INSERT trigger for
+  all sessions requiring an executing request) is LEDGER-MANUAL-ADJ-LINK-1,
+  launch-blocking for the first real-money tenant. Until then, test fixtures
+  that post `manual_adjustment` directly (the "19 files") are correctly
+  reported by this kind; the few pre-K2 tests that assert a clean
+  `ledger_vs_projection` run on such a fixture accept exactly this kind and
+  nothing else.
+- **Correction**: never by editing the ledger. Investigate who posted the
+  transaction outside the governed path (a code path other than
+  `internal/adjustment`, or a direct DB write); correct any economic effect
+  with a governed `compensating_entry` request whose causation is the
+  unlinked transaction; resolve the mismatch with that correction's id.
+- **Migration**: 0113 re-adds `reconciliation_mismatches_mismatch_kind_check`
+  as a strict superset of 0107's list plus this kind; 0113's down refuses
+  (MA099) while any row of this kind exists (accepted by ledger-finance: once
+  a finding exists, 0113 is effectively irreversible).
+
 ### 2.2 Wallet ↔ PSP — `BLUEPRINT`
 
 - **Reconciliation key**: `(provider_id, provider_tx_id)`, joined against
