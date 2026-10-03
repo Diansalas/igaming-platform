@@ -86,7 +86,13 @@ func (s *Sweeper) checkPollSuccessEvidence(
 		})
 	case AmountEvidenceMissing:
 		if !live {
-			return true, nil
+			// D1-M1: a declined attempt is not rescheduled, so without a record this
+			// evidence (a possible T13 second capture) would vanish. One audit row per
+			// poll that reaches here (the sweeper does not poll a declined attempt
+			// again, so in practice once); no posting, no state change.
+			return true, auditPollTerminalContradiction(ctx, tx, attempt, "poll_amount_unconfirmed", map[string]any{
+				"provider_reference": boundRef, "provider_amount": res.Amount, "provider_asset_code": res.AssetCode,
+			})
 		}
 		if err := audit.Record(ctx, tx, audit.Entry{
 			TenantID: attempt.TenantID, ActorType: audit.ActorSystem, Action: "payment.attempt_poll_amount_unconfirmed",
@@ -107,14 +113,8 @@ func (s *Sweeper) checkPollSuccessEvidence(
 	// never used for anything else; it is audited only when it is itself a valid
 	// reference, otherwise only its length and hash prefix.
 	if res.ProviderReference != "" && res.ProviderReference != boundRef {
-		extra := map[string]any{"provider_reference": boundRef}
-		if verr := providerref.Validate("poll.provider_reference", res.ProviderReference); verr != nil {
-			if perr, ok := providerref.AsError(verr); ok {
-				extra["echo_ref_reason"], extra["echo_ref_len"], extra["echo_ref_sha256_prefix"] = string(perr.Reason), perr.Length, perr.HashPrefix
-			}
-		} else {
-			extra["echoed_provider_reference"] = res.ProviderReference
-		}
+		extra := echoAuditMeta(res.ProviderReference)
+		extra["provider_reference"] = boundRef
 		return contradict(TerminalReasonPollReferenceMismatch, extra)
 	}
 
@@ -164,4 +164,19 @@ func auditPollTerminalContradiction(ctx context.Context, tx pgx.Tx, attempt Paym
 		return fmt.Errorf("payments: audit poll contradiction on terminal attempt (%s): %w", reason, err)
 	}
 	return nil
+}
+
+// echoAuditMeta returns the audit fields for a provider-echoed reference that is
+// NOT the bound one: the value itself only when it passes providerref.Validate,
+// otherwise only the closed reason, length and hash prefix (never the value).
+func echoAuditMeta(echo string) map[string]any {
+	meta := map[string]any{}
+	if verr := providerref.Validate("poll.provider_reference", echo); verr != nil {
+		if perr, ok := providerref.AsError(verr); ok {
+			meta["echo_ref_reason"], meta["echo_ref_len"], meta["echo_ref_sha256_prefix"] = string(perr.Reason), perr.Length, perr.HashPrefix
+		}
+	} else {
+		meta["echoed_provider_reference"] = echo
+	}
+	return meta
 }

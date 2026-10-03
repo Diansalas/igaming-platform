@@ -44,6 +44,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/Diansalas/igaming-platform/internal/audit"
 	"github.com/Diansalas/igaming-platform/internal/db"
 )
 
@@ -497,9 +498,19 @@ func (s *Sweeper) applyStatusEvidence(ctx context.Context, tx pgx.Tx, intent Dep
 			// branch (pollAmountEvidence), so an echo that merely OMITS the
 			// amount (Missing) is not reported as a contradiction here.
 			if pollAmountEvidence(attempt, res) == AmountEvidenceMismatch {
+				// D1-F2: provider_reference is the BOUND reference; the echo is audited
+				// only when valid (else reason, length and hash prefix).
+				bound := ""
+				if attempt.ProviderReference != nil {
+					bound = *attempt.ProviderReference
+				}
+				var extra map[string]any
+				if res.ProviderReference != "" && res.ProviderReference != bound {
+					extra = echoAuditMeta(res.ProviderReference)
+				}
 				return auditTerminalAmountAssetMismatch(ctx, tx, attempt, ReceiptEvidence{
-					ProviderReference: res.ProviderReference, Amount: res.Amount, AssetCode: res.AssetCode,
-				})
+					ProviderReference: bound, Amount: res.Amount, AssetCode: res.AssetCode,
+				}, extra)
 			}
 			return nil
 		case AttemptDisputed:
@@ -566,8 +577,26 @@ func (s *Sweeper) applyStatusEvidence(ctx context.Context, tx pgx.Tx, intent Dep
 		return err
 
 	case ErrorClassDefiniteDecline:
+		// PRH-2 D fix round (D1-F1): like Pending, a decline keeps the attempt's BOUND
+		// reference on the intent and the attempt. The poll's echo is never written
+		// over it (finalizeDeclined -> setIntentAttempt overwrites the intent's
+		// reference; a foreign-bound or invalid echo would violate a unique index or
+		// the 0099 CHECK and loop). A different non-empty echo is audit-only.
 		var refPtr *string
-		if res.ProviderReference != "" {
+		if attempt.ProviderReference != nil && *attempt.ProviderReference != "" {
+			refPtr = attempt.ProviderReference
+			if res.ProviderReference != "" && res.ProviderReference != *attempt.ProviderReference {
+				meta := echoAuditMeta(res.ProviderReference)
+				meta["provider_reference"] = *attempt.ProviderReference
+				meta["deposit_intent_id"] = intent.ID.String()
+				if err := audit.Record(ctx, tx, audit.Entry{
+					TenantID: attempt.TenantID, ActorType: audit.ActorSystem, Action: "payments.poll_decline_reference_mismatch",
+					TargetType: "payment_attempt", TargetID: attempt.ID.String(), Outcome: audit.OutcomeDenied, Metadata: meta,
+				}); err != nil {
+					return fmt.Errorf("payments: audit poll decline reference mismatch: %w", err)
+				}
+			}
+		} else if res.ProviderReference != "" {
 			refPtr = &res.ProviderReference
 		}
 		providerIDStr := ""

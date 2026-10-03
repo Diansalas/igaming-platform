@@ -967,3 +967,127 @@ func TestPollPending_EchoNeverReplacesTheBoundReference(t *testing.T) {
 		})
 	}
 }
+
+// D1-F1: the poll DECLINE branch keeps the BOUND reference. The echo never
+// overwrites the intent's or the attempt's reference, a foreign-bound or invalid
+// echo is not an error loop, and a different echo is audit-only under the
+// validate-or-hash rule.
+func TestPollDecline_EchoNeverOverwritesTheBoundReference(t *testing.T) {
+	pool := testPool(t)
+	long := "bad\x01" + strings.Repeat("Z", 300)
+	cases := []struct {
+		name    string
+		echo    func(e *depRefEnv) string
+		valid   bool
+		notMeta string
+	}{
+		{"fresh valid echo", func(*depRefEnv) string { return "fresh-valid-echo-1" }, true, ""},
+		{"echo bound to another intent", func(e *depRefEnv) string {
+			foreign := "foreign-bound-" + uuid.NewString()
+			e.p.setScript(scriptOutcome(OutcomePending, foreign))
+			rvInit(t, pool, e.orch, e.f, 5000, "d1-decl-foreign-other")
+			return foreign
+		}, true, ""},
+		{"invalid echo", func(*depRefEnv) string { return long }, false, strings.Repeat("Z", 40)},
+	}
+	for i, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			e := newDepRefEnv(t, pool, "mock-d1-decl-echo"+string(rune('a'+i)))
+			a, ref := e.ambiguousBound(t, "d1-decl-echo")
+			echo := c.echo(e)
+			e.mustNoSweepErrors(t, e.poll(t, a, ref, StatusResult{ProviderReference: echo, Outcome: OutcomeDeclined, DeclineReason: "provider_unavailable"}))
+			got := mustGetAttempt(t, pool, e.f.tenantID, a.ID)
+			if got.State != AttemptDeclined {
+				t.Fatalf("state=%s, want declined", got.State)
+			}
+			if got.ProviderReference == nil || *got.ProviderReference != ref {
+				t.Errorf("attempt reference=%v, want the bound %q", got.ProviderReference, ref)
+			}
+			if r := depIntentRef(t, e, e.f, *a.DepositIntentID); r == nil || *r != ref {
+				t.Errorf("intent reference=%v, want the bound %q", r, ref)
+			}
+			if n := e.auditCount(t, "payments.poll_decline_reference_mismatch", a.ID); n != 1 {
+				t.Fatalf("decline reference-mismatch audits = %d, want 1", n)
+			}
+			meta := depScan[string](t, pool, e.f.tenantID,
+				`SELECT metadata::text FROM audit_log WHERE tenant_id = $1 AND action = 'payments.poll_decline_reference_mismatch' AND target_id = $2`, e.f.tenantID, a.ID.String())
+			if c.valid && !strings.Contains(meta, echo) {
+				t.Errorf("a valid echo must be recorded: %s", meta)
+			}
+			if !c.valid && (!strings.Contains(meta, "echo_ref_len") || strings.Contains(meta, c.notMeta) || strings.Contains(meta, "echoed_provider_reference")) {
+				t.Errorf("an invalid echo must be recorded only as reason/length/hash: %s", meta)
+			}
+		})
+	}
+}
+
+// D1-F2: the succeeded-terminal mismatch audit records the BOUND reference as
+// provider_reference, and the echo only under the validate-or-hash rule.
+func TestF3SM_TerminalMismatchAudit_NeverStoresARawEcho(t *testing.T) {
+	pool := testPool(t)
+	long := "bad\x01" + strings.Repeat("Z", 300)
+	for i, c := range []struct {
+		name, echo string
+		valid      bool
+	}{{"invalid echo", long, false}, {"valid different echo", "other-valid-echo-9", true}} {
+		t.Run(c.name, func(t *testing.T) {
+			e := newDepRefEnv(t, pool, "mock-d1-f2-"+string(rune('a'+i)))
+			a, ref := e.ambiguousBound(t, "d1-f2")
+			e.deliverCallbackOnce(t, OutcomeSucceeded, 5000, "")
+			e.mustNoSweepErrors(t, e.poll(t, a, ref, pollSuccess(c.echo, 4999, "EUR")))
+			if n := e.auditCount(t, "payments.callback_amount_asset_mismatch_terminal", a.ID); n != 1 {
+				t.Fatalf("terminal mismatch audits = %d, want 1", n)
+			}
+			if got := depScan[string](t, pool, e.f.tenantID,
+				`SELECT metadata->>'provider_reference' FROM audit_log WHERE tenant_id = $1 AND action = 'payments.callback_amount_asset_mismatch_terminal' AND target_id = $2`,
+				e.f.tenantID, a.ID.String()); got != ref {
+				t.Errorf("audit provider_reference=%q, want the bound %q", got, ref)
+			}
+			if c.valid {
+				if n := depScan[int64](t, pool, e.f.tenantID, `SELECT count(*) FROM audit_log WHERE tenant_id = $1 AND target_id = $2 AND metadata->>'echoed_provider_reference' = $3`, e.f.tenantID, a.ID.String(), c.echo); n != 1 {
+					t.Errorf("a valid echo must be recorded as echoed_provider_reference")
+				}
+				return
+			}
+			if n := depScan[int64](t, pool, e.f.tenantID, `SELECT count(*) FROM audit_log WHERE tenant_id = $1 AND metadata::text LIKE '%' || $2 || '%'`, e.f.tenantID, strings.Repeat("Z", 40)); n != 0 {
+				t.Errorf("the raw invalid echo is present in %d audit rows", n)
+			}
+			if n := depScan[int64](t, pool, e.f.tenantID, `SELECT count(*) FROM audit_log WHERE tenant_id = $1 AND target_id = $2 AND metadata ? 'echo_ref_len' AND metadata ? 'echo_ref_sha256_prefix'`, e.f.tenantID, a.ID.String()); n != 1 {
+				t.Errorf("an invalid echo must be recorded as reason/length/hash prefix")
+			}
+		})
+	}
+}
+
+// D1-M1: a Missing poll success on a DECLINED attempt (the T13 shape) is not
+// dropped silently: exactly one audit row, no posting, no state change. The
+// sweeper does not poll a declined attempt again (next_action_at is NULL), so
+// the row is written once per poll that reaches it, which is once.
+func TestPollDeclinedAttempt_MissingEvidenceIsAuditedOnceNoPostingNoStateChange(t *testing.T) {
+	pool := testPool(t)
+	e := newDepRefEnv(t, pool, "mock-d1-decl-miss")
+	a, ref := e.ambiguousBound(t, "d1-decl-miss")
+	e.deliverCallbackOnce(t, OutcomeDeclined, 5000, "provider_unavailable")
+	e.mustNoSweepErrors(t, e.poll(t, a, ref, pollSuccess(ref, 0, "")))
+	got := mustGetAttempt(t, pool, e.f.tenantID, a.ID)
+	if got.State != AttemptDeclined {
+		t.Fatalf("state=%s, want declined (unchanged)", got.State)
+	}
+	if n := e.auditCount(t, "payments.poll_evidence_contradicts_terminal_attempt", a.ID); n != 1 {
+		t.Fatalf("audits = %d, want exactly 1", n)
+	}
+	if r := depScan[string](t, pool, e.f.tenantID,
+		`SELECT metadata->>'reason' FROM audit_log WHERE tenant_id = $1 AND action = 'payments.poll_evidence_contradicts_terminal_attempt' AND target_id = $2`, e.f.tenantID, a.ID.String()); r != "poll_amount_unconfirmed" {
+		t.Errorf("audit reason=%q, want poll_amount_unconfirmed", r)
+	}
+	if e.depositTxCount(t) != 0 || cashBalance(t, pool, e.f) != 0 {
+		t.Errorf("Missing evidence must never post")
+	}
+	if !depNextActionNull(t, e, e.f, a.ID) {
+		t.Errorf("a declined attempt must not be rescheduled")
+	}
+	e.mustNoSweepErrors(t, e.sweeper().RunOnce(context.Background(), []uuid.UUID{e.f.tenantID}))
+	if n := e.auditCount(t, "payments.poll_evidence_contradicts_terminal_attempt", a.ID); n != 1 {
+		t.Errorf("a further sweep wrote another row: %d", n)
+	}
+}
