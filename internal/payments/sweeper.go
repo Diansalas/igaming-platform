@@ -532,9 +532,9 @@ func (s *Sweeper) applyStatusEvidence(ctx context.Context, tx pgx.Tx, intent Dep
 		//
 		// PRH-2 D (PAY-POLL-AMOUNT-1 + FH7-06, ADR 0095 §36): everything from
 		// here on keys on the attempt's BOUND reference, never the poll's echo.
-		// The checks run in the callback path's order (§34.8): amount/asset,
-		// echoed reference, binding conflict, tombstone; INV-DEP-1 and the
-		// posting follow below.
+		// The checks run in the order of ADR 0095 §36.1: amount/asset, echoed
+		// reference, binding conflict, tombstone; INV-DEP-1 and the posting
+		// follow below.
 		if attempt.ProviderReference == nil || *attempt.ProviderReference == "" {
 			// processViaQueryStatus never polls a reference-less attempt and the
 			// reference is immutable once bound, so this is unreachable; refuse

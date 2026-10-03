@@ -229,7 +229,14 @@ func TestPollAmount_Missing_NeverPosts_StaysLiveAndAudited(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			e := newDepRefEnv(t, pool, "mock-d1-am-miss"+string(rune('a'+i)))
 			a, ref := e.ambiguousBound(t, "d1-am-miss")
+			pcBefore := depScan[int64](t, pool, e.f.tenantID, `SELECT poll_count FROM payment_attempts WHERE id = $1`, a.ID)
 			e.mustNoSweepErrors(t, e.poll(t, a, ref, pollSuccess(ref, c.amt, c.asset)))
+			// D1-CR-1: the attempt was RESCHEDULED by the poll (RescheduleNonTerminal bumps
+			// poll_count by exactly one). next_action_at IS NOT NULL alone proves nothing:
+			// the batch lease sets it anyway.
+			if pc := depScan[int64](t, pool, e.f.tenantID, `SELECT poll_count FROM payment_attempts WHERE id = $1`, a.ID); pc != pcBefore+1 {
+				t.Errorf("poll_count = %d, want %d (a Missing poll must reschedule the attempt)", pc, pcBefore+1)
+			}
 
 			got := mustGetAttempt(t, pool, e.f.tenantID, a.ID)
 			if got.State != AttemptAmbiguous {

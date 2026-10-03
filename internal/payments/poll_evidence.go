@@ -2,9 +2,10 @@ package payments
 
 // PRH-2 D (PAY-POLL-AMOUNT-1 + FH7-06; ADR 0095 §36): the evidence checks the
 // sweeper applies to a status poll that reports SUCCESS for a live deposit
-// attempt, before anything is posted. They mirror the callback path's order
-// (§34.8): amount/asset, echoed reference, binding conflict, tombstone; the
-// INV-DEP-1 choke point and the posting follow in applyStatusEvidence.
+// attempt, before anything is posted. The order is the one in ADR 0095 §36.1
+// (not literally the callback path's §34.8 order): amount/asset, echoed reference,
+// binding conflict, tombstone; the INV-DEP-1 choke point and the posting follow in
+// applyStatusEvidence.
 //
 // Two rules are absolute here:
 //   - the tombstone lookup, the binding check and the posting key use the

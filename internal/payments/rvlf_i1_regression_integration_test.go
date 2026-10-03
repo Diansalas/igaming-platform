@@ -1997,6 +1997,12 @@ func TestRVLF_N2_SweeperGo_SuccessAfterTombstoneDisputesNotIndexError(t *testing
 	if final.State != AttemptDisputed {
 		t.Errorf("N2: a poll success after a tombstone must dispute (T10), got %s", final.State)
 	}
+	// PRH-2 D code review D1-CR-2: the reason must be the tombstone one. Poll amount and
+	// reference mismatches are checked before the tombstone, so State alone could pass
+	// through poll_amount_mismatch if this fixture's echo ever drifted.
+	if final.TerminalReason == nil || *final.TerminalReason != TerminalReasonTombstonePrecedesSuccess {
+		t.Errorf("N2: terminal_reason=%v, want %q", final.TerminalReason, TerminalReasonTombstonePrecedesSuccess)
+	}
 	if b := cashBalance(t, pool, f); b != 0 {
 		t.Errorf("N2: a tombstoned poll success must never post; balance=%d", b)
 	}
