@@ -174,16 +174,22 @@ func TestStaticWiring_RaiseGuardedOnlyInsideInTxOrSanctionedHelpers_B1(t *testin
 	}
 }
 
-func TestStaticWiring_EvidenceTransactionOwnersOpenThroughInTx(t *testing.T) {
-	has := map[string]bool{}
+func TestStaticWiring_EvidenceTransactionOwnersOpenThroughInTxAndFlush(t *testing.T) {
+	hasInTx, hasFlush := map[string]bool{}, map[string]bool{}
 	for _, c := range staticCollectCalls(t) {
 		if c.name == "alerting.InTx" {
-			has[c.file+":"+c.fn] = true
+			hasInTx[c.file+":"+c.fn] = true
+		}
+		if strings.HasSuffix(c.name, ".Flush") {
+			hasFlush[c.file+":"+c.fn] = true
 		}
 	}
 	for _, owner := range staticInTxOwners {
-		if !has[owner] {
+		if !hasInTx[owner] {
 			t.Errorf("transaction owner %s must open its evidence transaction through alerting.InTx (no Pending, no post-commit retry otherwise)", owner)
+		}
+		if !hasFlush[owner] {
+			t.Errorf("transaction owner %s must call Pending.Flush after the commit (mandatory post-commit detached retry, condition (b))", owner)
 		}
 	}
 }

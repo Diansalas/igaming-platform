@@ -404,19 +404,27 @@ const killSwitchAlertReasonMax = 128
 // alerting.RaisePostCommit already logs, counts and falls back, and the
 // engage outcome never depends on it.
 func raiseKillSwitchEngagedAlert(ctx context.Context, deps Deps, c killSwitchCall, ks payments.KillSwitch, isTakeover bool) {
+	_ = alerting.RaisePostCommit(ctx, c.alertRunner(deps), killSwitchEngagedAlert(c.target, c.requestID, ks, isTakeover))
+}
+
+// killSwitchEngagedAlert builds the ADR 0102 row 8 alert: subject = the
+// route-validated target tenant, discriminator = the switch id, attributes on
+// the Kind's allowlist only (never a request body field beyond the bounded
+// reason code).
+func killSwitchEngagedAlert(target uuid.UUID, requestID string, ks payments.KillSwitch, isTakeover bool) alerting.Alert {
 	reason := ks.ReasonCode
 	if len(reason) > killSwitchAlertReasonMax {
 		reason = reason[:killSwitchAlertReasonMax]
 	}
-	_ = alerting.RaisePostCommit(ctx, c.alertRunner(deps), alerting.Alert{
-		Kind: alerting.KindPaymentKillSwitchEngaged, SubjectTenantID: c.target,
+	return alerting.Alert{
+		Kind: alerting.KindPaymentKillSwitchEngaged, SubjectTenantID: target,
 		Discriminator: "switch:" + ks.ID.String(),
 		Attributes: map[string]alerting.AttrValue{
 			"provider_scope": ks.ProviderScope, "operation_scope": string(ks.OperationScope),
 			"reason_code": reason, "changed_by_scope": string(ks.ChangedByScope),
-			"is_platform_takeover": isTakeover, "request_id": c.requestID,
+			"is_platform_takeover": isTakeover, "request_id": requestID,
 		},
-	})
+	}
 }
 
 // scopeOrNil renders a *payments.KillSwitchSessionScope as a plain string

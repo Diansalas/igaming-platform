@@ -271,6 +271,18 @@ func TestIWire_Recon_RunFailedP1_DetachedAndNoErrorText(t *testing.T) {
 	if !sawLedger {
 		t.Fatalf("the ledger_vs_projection failure must raise run_failed: %+v", failed)
 	}
+	// Every READ COMMITTED/REPEATABLE READ run stream has its own stable key.
+	for _, stream := range []string{"ledger_vs_projection", "sportsbook_settlement", "casino_consistency", "casino_statement"} {
+		var n int
+		for _, r := range failed {
+			if r.Discriminator == "stream:"+stream {
+				n++
+			}
+		}
+		if n != 1 {
+			t.Fatalf("stream %s: want exactly one run_failed alert, got %d (%+v)", stream, n, failed)
+		}
+	}
 }
 
 func TestIWire_Recon_PaymentStatementRunFailedP1_PerProvider(t *testing.T) {
