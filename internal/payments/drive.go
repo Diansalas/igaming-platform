@@ -602,7 +602,7 @@ func (o *Orchestrator) applyDepositCallResult(
 		if err := rejectCreatedSiblings(ctx, tx, attempt, evidence); err != nil {
 			return intent, nil, err
 		}
-		// PRH-2 D (PAY-DEFERRED-RECEIPT-SYNC-1, ADR 0095 §35.3): a sync success
+		// PRH-2 D (PAY-DEFERRED-RECEIPT-SYNC-1, ADR 0095 §36.3): a sync success
 		// binds its reference only in THIS commit (ApplySuccess above), so a
 		// verified callback for it that arrived during phase B was stored
 		// deferred_unresolved. Drain it now, under the locks already held: it

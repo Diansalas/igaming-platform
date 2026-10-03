@@ -211,7 +211,7 @@ func (e *depRefEnv) assertPollParked(t *testing.T, a PaymentAttempt, ref, wantRe
 	return got
 }
 
-// What "Missing" means on the poll path (ADR 0095 §35.2): a success with no usable
+// What "Missing" means on the poll path (ADR 0095 §36.2): a success with no usable
 // amount evidence NEVER posts, is NOT a dispute, keeps the attempt live, and is
 // audited on every poll so a provider that never echoes an amount is visible.
 func TestPollAmount_Missing_NeverPosts_StaysLiveAndAudited(t *testing.T) {
@@ -946,4 +946,24 @@ func (e *depRefEnv) phaseCVictim(attemptID, intentID, claim uuid.UUID, gr GateRe
 		_, _, err = e.orch.applyDepositCallResult(ctx, tx, intent, attempt, capability, claim, gr, EvidenceSync, false)
 		return err
 	})
+}
+
+// FH7-06 on the poll's Pending branch: T9 and the intent keep the BOUND reference;
+// an empty echo is not an error loop and a different one never overwrites it.
+func TestPollPending_EchoNeverReplacesTheBoundReference(t *testing.T) {
+	pool := testPool(t)
+	for i, echo := range []string{"", "other-ref-PENDING"} {
+		t.Run("echo="+echo, func(t *testing.T) {
+			e := newDepRefEnv(t, pool, "mock-d1-pend"+string(rune('a'+i)))
+			a, ref := e.ambiguousBound(t, "d1-pend")
+			e.mustNoSweepErrors(t, e.poll(t, a, ref, StatusResult{ProviderReference: echo, Outcome: OutcomePending}))
+			got := mustGetAttempt(t, pool, e.f.tenantID, a.ID)
+			if got.State != AttemptPending || got.ProviderReference == nil || *got.ProviderReference != ref {
+				t.Fatalf("state=%s ref=%v, want pending on %q", got.State, got.ProviderReference, ref)
+			}
+			if r := depIntentRef(t, e, e.f, *a.DepositIntentID); r == nil || *r != ref {
+				t.Errorf("intent reference=%v, want the bound %q", r, ref)
+			}
+		})
+	}
 }

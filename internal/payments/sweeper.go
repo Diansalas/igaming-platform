@@ -442,15 +442,22 @@ func (s *Sweeper) applyStatusEvidence(ctx context.Context, tx pgx.Tx, intent Dep
 			// no-op (reschedule) - already pending, nothing changed.
 			return RescheduleNonTerminal(ctx, tx, attempt.ID, nextPoll)
 		}
-		if err := MarkAccepted(ctx, tx, attempt.ID, EvidenceQueryStatus, res.ProviderReference, nextPoll); err != nil {
+		// PRH-2 D (FH7-06, ADR 0095 §36.6): the attempt was polled BY its bound
+		// reference, so that is the reference T9 and the intent keep. The poll's echo
+		// is never written: an empty one would violate the 0099 CHECK (an error
+		// loop) and a different one would overwrite the intent's reference.
+		if attempt.ProviderReference == nil || *attempt.ProviderReference == "" {
+			return fmt.Errorf("payments: poll pending for attempt %s which has no bound provider reference", attempt.ID)
+		}
+		boundRef := *attempt.ProviderReference
+		if err := MarkAccepted(ctx, tx, attempt.ID, EvidenceQueryStatus, boundRef, nextPoll); err != nil {
 			return err
 		}
-		if _, err := setIntentAttempt(ctx, tx, intent.ID, attempt.ProviderID, &res.ProviderReference, DepositIntentPending); err != nil {
+		if _, err := setIntentAttempt(ctx, tx, intent.ID, attempt.ProviderID, &boundRef, DepositIntentPending); err != nil {
 			return err
 		}
 		// RV-PRH-I1 ledger-finance H2: see drive.go's identical comment -
 		// this poll is the sweeper's own T9 site.
-		attempt.ProviderReference = &res.ProviderReference
 		_, err := ApplyDeferredReceiptsForAttempt(ctx, tx, s.Orchestrator, attempt)
 		return err
 
@@ -509,7 +516,7 @@ func (s *Sweeper) applyStatusEvidence(ctx context.Context, tx pgx.Tx, intent Dep
 		// declined (T13t) and live (T10) tombstone cells apply here,
 		// exactly as the receipt path's own matrix distinguishes them.
 		//
-		// PRH-2 D (PAY-POLL-AMOUNT-1 + FH7-06, ADR 0095 §35): everything from
+		// PRH-2 D (PAY-POLL-AMOUNT-1 + FH7-06, ADR 0095 §36): everything from
 		// here on keys on the attempt's BOUND reference, never the poll's echo.
 		// The checks run in the callback path's order (§34.8): amount/asset,
 		// echoed reference, binding conflict, tombstone; INV-DEP-1 and the

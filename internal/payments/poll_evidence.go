@@ -1,6 +1,6 @@
 package payments
 
-// PRH-2 D (PAY-POLL-AMOUNT-1 + FH7-06; ADR 0095 §35): the evidence checks the
+// PRH-2 D (PAY-POLL-AMOUNT-1 + FH7-06; ADR 0095 §36): the evidence checks the
 // sweeper applies to a status poll that reports SUCCESS for a live deposit
 // attempt, before anything is posted. They mirror the callback path's order
 // (§34.8): amount/asset, echoed reference, binding conflict, tombstone; the
@@ -52,7 +52,7 @@ func pollAmountEvidence(attempt PaymentAttempt, res StatusResult) AmountEvidence
 // every check passed and the caller proceeds to INV-DEP-1 and the posting, keyed
 // on boundRef. Called under the intent lock with the attempt freshly re-read.
 //
-// What "Missing" means on the poll path (ADR 0095 §35.2): the provider says
+// What "Missing" means on the poll path (ADR 0095 §36.2): the provider says
 // "succeeded" but gave no usable amount or asset. That is NOT confirmation, so
 // nothing is posted - ever - and it is NOT a dispute either (a callback with its
 // own amount evidence can still resolve the attempt, and a terminal dispute
