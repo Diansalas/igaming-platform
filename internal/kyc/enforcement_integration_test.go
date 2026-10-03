@@ -1009,10 +1009,25 @@ func TestMigration0100_CheckConstraints_TriggerTypeShapes(t *testing.T) {
 // IS NOT NULL` CHECK - an active row with no legal_review_reference must
 // never be insertable, full stop, regardless of how it later gets
 // activated (draft rows may omit it).
+//
+// KYC-ENF-TESTPINS-1 (2026-09-28, code review rv-prh-i3-code-review.md
+// "Re-review (FH-7)", T3): the original version of this test asserted
+// only `err != nil`, which would pass just as well for an unrelated
+// failure (a dropped connection, a different CHECK, an RLS denial) as for
+// the constraint actually under test. This version asserts the exact
+// Postgres SQLSTATE (23514, check_violation, via db.IsCheckViolation) AND
+// the exact constraint name that fired, looked up dynamically from
+// pg_constraint by its definition text rather than a hardcoded guess at
+// Postgres's auto-generated name (which is an implementation detail this
+// test must not need to track by hand every time the table's other CHECK
+// constraints change).
 func TestMigration0100_ActiveRequiresLegalReviewReference(t *testing.T) {
 	pool := testPool(t)
 	principal := uuid.New()
 	jurisdictionID := mustSeedJurisdiction(t, pool)
+
+	wantConstraint := lookupCheckConstraintName(t, pool, "kyc_enforcement_policies",
+		"legal_review_reference IS NOT NULL")
 
 	// A draft with no legal_review_reference inserts cleanly...
 	var id uuid.UUID
@@ -1029,7 +1044,8 @@ func TestMigration0100_ActiveRequiresLegalReviewReference(t *testing.T) {
 	}
 
 	// ...but activating it (draft -> active) with no legal_review_reference
-	// must be refused by the CHECK constraint, not merely by convention.
+	// must be refused by THIS EXACT CHECK constraint, not merely "some"
+	// error.
 	err = pool.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
 		_, err := tx.Exec(ctx, `UPDATE kyc_enforcement_policies SET status = 'active' WHERE id = $1`, id)
 		return err
@@ -1037,6 +1053,40 @@ func TestMigration0100_ActiveRequiresLegalReviewReference(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected activating a row with no legal_review_reference to be rejected")
 	}
+	if !db.IsCheckViolation(err) {
+		t.Fatalf("expected a Postgres CHECK violation (SQLSTATE 23514), got: %v", err)
+	}
+	gotConstraint, ok := db.CheckViolationConstraintName(err)
+	if !ok {
+		t.Fatalf("expected the error to carry a constraint name, got: %v", err)
+	}
+	if gotConstraint != wantConstraint {
+		t.Fatalf("expected constraint %q to fire, got %q (err: %v)", wantConstraint, gotConstraint, err)
+	}
+}
+
+// lookupCheckConstraintName finds the auto-generated (or explicit) name
+// of the CHECK constraint on table whose pg_get_constraintdef() output
+// contains defSubstring - used so tests assert against the ACTUAL
+// constraint Postgres enforces, discovered at test time, rather than a
+// hardcoded guess at Postgres's naming convention that would silently
+// stop matching if an unrelated CHECK on the same table were ever added,
+// reordered, or renamed.
+func lookupCheckConstraintName(t *testing.T, pool *db.Pool, table, defSubstring string) string {
+	t.Helper()
+	var name string
+	err := pool.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `
+			SELECT conname FROM pg_constraint
+			 WHERE conrelid = $1::regclass
+			   AND contype = 'c'
+			   AND pg_get_constraintdef(oid) LIKE '%' || $2 || '%'`,
+			table, defSubstring).Scan(&name)
+	})
+	if err != nil {
+		t.Fatalf("look up CHECK constraint on %s containing %q: %v", table, defSubstring, err)
+	}
+	return name
 }
 
 func mustSeedJurisdiction(t *testing.T, pool *db.Pool) uuid.UUID {

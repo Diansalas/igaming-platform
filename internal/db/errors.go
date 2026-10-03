@@ -48,6 +48,22 @@ func IsUniqueViolation(err error) bool {
 	return errors.As(err, &pgErr) && pgErr.Code == pgUniqueViolationCode
 }
 
+// CheckViolationConstraintName returns the name of the CHECK constraint
+// err's SQLSTATE 23514 (check_violation) fired against, and true, if err
+// is (or wraps) such a violation that carries one - Postgres always sets
+// pgconn.PgError.ConstraintName for this SQLSTATE. Mirrors
+// UniqueViolationConstraintName's contract for the check-violation case,
+// so a test asserting "this SPECIFIC CHECK fired" (as opposed to "some
+// CHECK, possibly an unrelated one on the same table, fired") does not
+// need to hand-roll a *pgconn.PgError type assertion itself.
+func CheckViolationConstraintName(err error) (string, bool) {
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) || pgErr.Code != pgCheckViolationCode {
+		return "", false
+	}
+	return pgErr.ConstraintName, true
+}
+
 // UniqueViolationConstraintName returns the name of the unique constraint
 // or index a unique-constraint violation fired against, and true, if err
 // is (or wraps) a Postgres unique_violation (SQLSTATE 23505) that carries

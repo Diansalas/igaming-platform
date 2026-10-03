@@ -9,6 +9,7 @@ package withdrawal
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"testing"
@@ -305,6 +306,124 @@ func TestDenyForCompliance_PostsReversalAndTransitionsAtomically(t *testing.T) {
 	acount := countRows(t, pool, f.tenantID, `SELECT count(*) FROM audit_log WHERE action = 'withdrawal.rejected_kyc' AND target_id = $1`, wr.ID.String())
 	if acount != 1 {
 		t.Fatalf("expected exactly 1 withdrawal.rejected_kyc audit row, got %d", acount)
+	}
+}
+
+// TestDenyForCompliance_RefusesAllowedDecision is KYC-ENF-TESTPINS-1's B6
+// pin (code review rv-prh-i3-code-review.md B6/MB6): DenyForCompliance
+// must never act on a decision whose Allowed is true, however it got
+// there (a caller bug, a stale/mismatched decision value) - guarding
+// against a caller that could otherwise reverse a legitimate hold and
+// record a self-contradictory `withdrawal.rejected_kyc` audit entry for
+// an "allowed" decision. Before this pin, disabling that guard survived
+// as mutant MB6 with no test failing.
+func TestDenyForCompliance_RefusesAllowedDecision(t *testing.T) {
+	pool := testPool(t)
+	f := seedFixture(t, pool, 10_000)
+	wr := approvedRequest(t, pool, f, 300, "wd-deny-compliance-b6-allowed")
+
+	params, decision := denialDecision(f, wr.ID)
+	decision.Allowed = true // the exact B6 attack shape: an "allowed" decision.
+
+	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		if _, err := LockApprovedForSubmission(ctx, tx, wr.ID); err != nil {
+			return err
+		}
+		_, err := DenyForCompliance(ctx, tx, wr.ID, decision, params)
+		return err
+	})
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("expected ErrInvalidInput for an Allowed=true decision, got: %v", err)
+	}
+
+	// No domain effect: the request stays exactly `approved`, no reversal
+	// posted, no decision/audit row written.
+	got, gerr := runTxResult(pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) (WithdrawalRequest, error) {
+		return GetByID(ctx, tx, wr.ID)
+	})
+	if gerr != nil {
+		t.Fatalf("read request: %v", gerr)
+	}
+	if got.State != StateApproved {
+		t.Fatalf("expected state to remain approved, got %s", got.State)
+	}
+	n := countRows(t, pool, f.tenantID, `SELECT count(*) FROM ledger_transactions WHERE tenant_id = $1 AND transaction_type = 'withdrawal_rejected' AND reverses_transaction_id = $2`, f.tenantID, wr.HoldLedgerTransactionID)
+	if n != 0 {
+		t.Fatalf("expected 0 withdrawal_rejected reversals, got %d", n)
+	}
+	dcount := countRows(t, pool, f.tenantID, `SELECT count(*) FROM kyc_enforcement_decisions WHERE tenant_id = $1 AND correlation_id = $2`, f.tenantID, wr.ID)
+	if dcount != 0 {
+		t.Fatalf("expected 0 kyc_enforcement_decisions rows, got %d", dcount)
+	}
+}
+
+// TestDenyForCompliance_RefusesWrongOperation pins the companion guard
+// (kycParams.Operation must be EnforcementWithdrawalPayout) alongside B6,
+// so both halves of DenyForCompliance's own input-trust boundary are
+// pinned together.
+func TestDenyForCompliance_RefusesWrongOperation(t *testing.T) {
+	pool := testPool(t)
+	f := seedFixture(t, pool, 10_000)
+	wr := approvedRequest(t, pool, f, 300, "wd-deny-compliance-wrong-op")
+
+	params, decision := denialDecision(f, wr.ID)
+	params.Operation = kyc.EnforcementWithdrawalHold // wrong operation for this call site.
+
+	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		if _, err := LockApprovedForSubmission(ctx, tx, wr.ID); err != nil {
+			return err
+		}
+		_, err := DenyForCompliance(ctx, tx, wr.ID, decision, params)
+		return err
+	})
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("expected ErrInvalidInput for the wrong operation, got: %v", err)
+	}
+}
+
+// TestDenyForCompliance_RefusesUnavailableOutcome is N5 (code review
+// rv-prh-i3-code-review.md): DenyForCompliance must refuse
+// Outcome=unavailable and return the RETRYABLE ErrKYCUnavailable, never
+// convert a mere inability to evaluate KYC into a terminal `rejected`
+// withdrawal that would strand a possibly-compliant player's funds.
+func TestDenyForCompliance_RefusesUnavailableOutcome(t *testing.T) {
+	pool := testPool(t)
+	f := seedFixture(t, pool, 10_000)
+	wr := approvedRequest(t, pool, f, 300, "wd-deny-compliance-n5-unavailable")
+
+	params, decision := denialDecision(f, wr.ID)
+	decision.Outcome = kyc.OutcomeUnavailable
+	decision.Code = "kyc_unavailable:verification_lookup_failed"
+
+	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		if _, err := LockApprovedForSubmission(ctx, tx, wr.ID); err != nil {
+			return err
+		}
+		_, err := DenyForCompliance(ctx, tx, wr.ID, decision, params)
+		return err
+	})
+	if !errors.Is(err, ErrKYCUnavailable) {
+		t.Fatalf("expected ErrKYCUnavailable for Outcome=unavailable, got: %v", err)
+	}
+
+	// No domain effect: the request stays exactly `approved` so a later,
+	// healthy re-evaluation can still allow or genuinely deny it.
+	got, gerr := runTxResult(pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) (WithdrawalRequest, error) {
+		return GetByID(ctx, tx, wr.ID)
+	})
+	if gerr != nil {
+		t.Fatalf("read request: %v", gerr)
+	}
+	if got.State != StateApproved {
+		t.Fatalf("expected state to remain approved after refusing an unavailable outcome, got %s", got.State)
+	}
+	n := countRows(t, pool, f.tenantID, `SELECT count(*) FROM ledger_transactions WHERE tenant_id = $1 AND transaction_type = 'withdrawal_rejected' AND reverses_transaction_id = $2`, f.tenantID, wr.HoldLedgerTransactionID)
+	if n != 0 {
+		t.Fatalf("expected 0 withdrawal_rejected reversals, got %d", n)
+	}
+	dcount := countRows(t, pool, f.tenantID, `SELECT count(*) FROM kyc_enforcement_decisions WHERE tenant_id = $1 AND correlation_id = $2`, f.tenantID, wr.ID)
+	if dcount != 0 {
+		t.Fatalf("expected 0 kyc_enforcement_decisions rows (the caller must retry evaluation, not persist this attempt as-is), got %d", dcount)
 	}
 }
 
