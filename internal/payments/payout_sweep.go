@@ -265,6 +265,12 @@ func (s *Sweeper) reclaimPayoutCreated(ctx context.Context, tenantID uuid.UUID, 
 		if err != nil {
 			return err
 		}
+		// PRH-2 H (security addendum §2): a non-active tenant is resolution-only -
+		// a T2 re-claim leads to a NEW Withdraw call, so it is deferred like an
+		// engaged kill switch (status read in this tx).
+		if blocked, err := checkPayoutResolutionOnly(actx, tx, attempt, nextPoll, "payout_reclaim"); err != nil || blocked {
+			return err
+		}
 		// Kill switch (migration 0105): checked BEFORE the KYC gate/claim,
 		// fail closed, transient - a plain reschedule, never Escalate.
 		blocked, err := checkPayoutKillSwitch(actx, tx, tenantID, *attempt.ProviderID, attempt, nextPoll)
@@ -351,6 +357,11 @@ func (s *Sweeper) resubmitPayoutAmbiguous(ctx context.Context, tenantID uuid.UUI
 	err := s.Pool.WithTenant(ctx, tenantID, func(actx context.Context, tx pgx.Tx) error {
 		wr, err := lockSubmittedRequest(actx, tx, *attempt.WithdrawalRequestID)
 		if err != nil {
+			return err
+		}
+		// PRH-2 H: a non-active tenant never gets a resend (a new Withdraw call);
+		// the QueryStatus poll above already ran and is the resolution path.
+		if blocked, err := checkPayoutResolutionOnly(actx, tx, attempt, nextPoll, "payout_resend"); err != nil || blocked {
 			return err
 		}
 		// Kill switch (migration 0105): checked BEFORE the KYC gate/resend,

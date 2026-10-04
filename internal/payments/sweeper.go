@@ -98,6 +98,19 @@ type Sweeper struct {
 	PresenceWindow  time.Duration
 	PollBackoffBase time.Duration
 	PollBackoffCap  time.Duration
+
+	// TenantAdvisoryHint (PRH-2 H, LF-8) makes claimBatch take a per-tenant
+	// pg_try_advisory_xact_lock at the start of the phase-A claim tx and skip
+	// the tenant this pass when another instance holds it. It is ONLY an
+	// efficiency hint that de-duplicates phase A across instances: it lasts one
+	// short transaction, is never held across a provider call, and correctness
+	// never depends on it (the row lease with SKIP LOCKED, the claim-token CAS,
+	// ledger idempotency and the 0107 indexes carry exactly-once). false (the
+	// zero value) is always safe.
+	TenantAdvisoryHint bool
+
+	// testBeforeClaim is a fault-injection seam for tests only (nil in production).
+	testBeforeClaim func(tenantID uuid.UUID)
 }
 
 // NewSweeper returns a Sweeper with §7.3's default bounds.
@@ -172,6 +185,21 @@ func (s *Sweeper) claimBatch(ctx context.Context, tenantID uuid.UUID) ([]uuid.UU
 	leaseUntil := time.Now().Add(s.Lease)
 	var ids []uuid.UUID
 	err := s.Pool.WithTenant(ctx, tenantID, func(actx context.Context, tx pgx.Tx) error {
+		if s.TenantAdvisoryHint {
+			// PRH-2 H efficiency hint only (see Sweeper.TenantAdvisoryHint): advisory
+			// locks precede row locks (ADR 0082 R8), the xact lock ends with this
+			// short tx, and a miss only means another instance is leasing this
+			// tenant's batch right now.
+			var got bool
+			if err := tx.QueryRow(actx,
+				`SELECT pg_try_advisory_xact_lock(hashtext('payments.sweeper.phaseA'), hashtext($1::text))`,
+				tenantID.String()).Scan(&got); err != nil {
+				return fmt.Errorf("sweeper advisory hint: %w", err)
+			}
+			if !got {
+				return nil
+			}
+		}
 		rows, err := tx.Query(actx,
 			`SELECT id FROM payment_attempts
 			 WHERE tenant_id = $1 AND next_action_at IS NOT NULL AND next_action_at <= now()
@@ -300,6 +328,14 @@ func (s *Sweeper) processCreated(ctx context.Context, tenantID uuid.UUID, attemp
 	// any further cascade this decline is eligible for (§4.6 case (b)).
 	current := attempt
 	for {
+		// PRH-2 H (security addendum §2): a non-active tenant is resolution-only.
+		// A created attempt (or a cascade child) is a NEW money-moving call, so it
+		// is deferred exactly like an engaged kill switch. The status is read in a
+		// separate short tx BEFORE driveCreatedAttempt (NOT in the T2 claim tx; see
+		// ADR 0095 §37.3 safeguard 4 for the residual race).
+		if blocked, err := s.deferIfResolutionOnly(ctx, tenantID, current, "deposit_dispatch"); err != nil || blocked {
+			return err
+		}
 		updatedIntent, updatedAttempt, child, _, _, err := s.Orchestrator.driveCreatedAttempt(ctx, s.Pool, s.KYCGate, s.CredResolver, loadedIntent, current, true)
 		if err != nil {
 			return err
@@ -369,9 +405,12 @@ func (s *Sweeper) processViaQueryStatus(ctx context.Context, tenantID uuid.UUID,
 		}
 	})
 
+	// PRH-2 H (LF F1): apply the poll result on a detached, bounded context.
+	applyCtx, cancelApply := context.WithTimeout(context.WithoutCancel(ctx), depositPhaseCTimeout)
+	defer cancelApply()
 	// ADR 0102 I-wire (B-1): the status-evidence transaction owner opens its
-	// transaction through alerting.InTx and flushes after the commit.
-	pending, err := alerting.InTx(ctx, alerting.NewTenantRunner(s.Pool, tenantID), func(actx context.Context, tx pgx.Tx) error {
+	// transaction through alerting.InTx (on applyCtx) and flushes after the commit.
+	pending, err := alerting.InTx(applyCtx, alerting.NewTenantRunner(s.Pool, tenantID), func(actx context.Context, tx pgx.Tx) error {
 		if _, err := tx.Exec(actx, `SELECT id FROM deposit_intents WHERE id = $1 FOR UPDATE`, *attempt.DepositIntentID); err != nil {
 			return err
 		}
@@ -627,6 +666,20 @@ func (s *Sweeper) applyStatusEvidence(ctx context.Context, tx pgx.Tx, intent Dep
 			return err
 		}
 		if cascadeEligible(attempt, updated.Status, cascadable, s.Orchestrator.maxCascadeDepth(), true) {
+			// PRH-2 H: a cascade child is a new money-moving attempt, so a
+			// non-active tenant gets none (in-tx status read); the decline above
+			// is already final and stands.
+			if resOnly, err := tenantResolutionOnly(ctx, tx, attempt.TenantID); err != nil {
+				return err
+			} else if resOnly {
+				recordResolutionOnlyBlock(ctx, "deposit_cascade_child")
+				// Same-tx audit, the twin of payment.cascade_skipped_kill_switch (H-CR-6).
+				return audit.Record(ctx, tx, audit.Entry{
+					TenantID: attempt.TenantID, ActorType: audit.ActorSystem, Action: "payment.cascade_skipped_resolution_only",
+					TargetType: "payment_attempt", TargetID: attempt.ID.String(), Outcome: audit.OutcomeDenied,
+					Metadata: map[string]any{"deposit_intent_id": intent.ID.String()},
+				})
+			}
 			_, err := insertCascadeAttemptIfEligible(ctx, tx, attempt)
 			return err
 		}

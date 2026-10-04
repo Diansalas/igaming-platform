@@ -29,6 +29,7 @@ import (
 // is every composite literal of a provider-package type.
 var allowedProviderCallsOutsideRegistrations = map[string]bool{
 	"payments.NewOrchestrator":  true,
+	"payments.RunSweeperLoop":   true, // PRH-2 H: runs an already-built Sweeper, constructs nothing
 	"casino.NewOrchestrator":    true,
 	"kyc.NewOrchestrator":       true,
 	"sportsbook.SyncCatalogue":  true,

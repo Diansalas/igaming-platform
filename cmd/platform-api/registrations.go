@@ -6,6 +6,7 @@ import (
 
 	"github.com/Diansalas/igaming-platform/internal/casino"
 	"github.com/Diansalas/igaming-platform/internal/config"
+	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/email"
 	"github.com/Diansalas/igaming-platform/internal/identityresolution"
 	"github.com/Diansalas/igaming-platform/internal/kyc"
@@ -463,4 +464,24 @@ func validateWebhookSchemes(paymentsAdapters map[string]payments.PaymentProvider
 // Config at all (kept a dependency-free leaf package deliberately).
 func refuseSyntheticInProduction(cfg config.Config, regs []providerkind.Registration) error {
 	return providerkind.RefuseSyntheticInProduction(cfg.GuardEnvironment(), regs)
+}
+
+// buildPaymentsSweeper constructs the production payments Sweeper (PRH-2 H,
+// CP-W1) from the SAME orchestrator and the SAME bundle-derived outbound
+// credential resolver the HTTP path uses, so it reaches only MOCK adapters that
+// already passed the synthetic guard (the real path stays PROVIDER DEPENDENT).
+//
+// PayoutKYCGate is set EXPLICITLY (code-reviewer H3): NewSweeper leaves it nil,
+// and a nil gate makes the whole payout half (T2 re-claim, T12 resend, payout
+// resolve) a silent no-op. TestBuildPaymentsSweeper_PayoutKYCGateNonNil pins it,
+// and Sweeper.ValidateForLoop refuses a nil one at startup. It lives here, not in
+// main.go, because the provider-construction AST guard confines payments-package
+// constructors to this file.
+func buildPaymentsSweeper(pool *db.Pool, orch *payments.Orchestrator, b providerBundle) *payments.Sweeper {
+	s := payments.NewSweeper(pool, orch, payments.KYCEnforcementDepositGate{}, b.paymentsOutboundCredentials())
+	s.PayoutKYCGate = payments.KYCEnforcementPayoutGate{}
+	// Efficiency hint only (LF-8): correctness rests on the row lease, the claim
+	// token CAS and ledger idempotency, never on this.
+	s.TenantAdvisoryHint = true
+	return s
 }

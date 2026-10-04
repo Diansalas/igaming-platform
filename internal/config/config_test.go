@@ -573,3 +573,35 @@ func TestLoad_TestSupportRoutesEnabled_BothConditionsIndependentlyRequired(t *te
 		})
 	}
 }
+
+// PRH-2 H: PAYMENTS_SWEEP_INTERVAL_SECONDS defaults to ADR 0095 §7.3's 15 s tick, must be a
+// positive integer, and is validated like its sibling sweep intervals.
+func TestLoad_PaymentsSweepInterval(t *testing.T) {
+	base := func(t *testing.T) {
+		clearEnv(t)
+		t.Setenv("DATABASE_URL", "postgres://localhost/test")
+		t.Setenv("JWT_SIGNING_SECRET", "a-secret-that-is-at-least-32-characters-long")
+		t.Setenv("PAYMENTS_SWEEP_INTERVAL_SECONDS", "")
+		_ = os.Unsetenv("PAYMENTS_SWEEP_INTERVAL_SECONDS")
+	}
+	base(t)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.PaymentsSweepInterval.Seconds() != 15 {
+		t.Fatalf("default = %v, want 15s", cfg.PaymentsSweepInterval)
+	}
+	base(t)
+	t.Setenv("PAYMENTS_SWEEP_INTERVAL_SECONDS", "7")
+	if cfg, err = Load(); err != nil || cfg.PaymentsSweepInterval.Seconds() != 7 {
+		t.Fatalf("override: %v %v", cfg.PaymentsSweepInterval, err)
+	}
+	for _, bad := range []string{"0", "-3", "abc"} {
+		base(t)
+		t.Setenv("PAYMENTS_SWEEP_INTERVAL_SECONDS", bad)
+		if _, err := Load(); err == nil {
+			t.Fatalf("PAYMENTS_SWEEP_INTERVAL_SECONDS=%q must be refused", bad)
+		}
+	}
+}

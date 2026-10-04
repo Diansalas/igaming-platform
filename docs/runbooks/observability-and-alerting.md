@@ -210,6 +210,19 @@ is not yet a registry closure - the orchestrator closes `PRH-I4-METRICS-1` at me
   `PRH-I4-METRICS-2`, non-blocking; only the decisions counter and the A4a in-flight gauge were
   in this workstream's scope). See ADR 0097 §21.12 for the full implementation record.
 
+### Payments sweeper (ADR 0095 §37, PRH-2 H)
+
+Counters and one gauge from `internal/payments/sweeper_loop.go`, none with a tenant, provider or attempt
+label: `payments_sweeper_passes_total`; `payments_sweeper_items_total{result=processed|error|panic}`;
+`payments_sweeper_tenant_failures_total{phase=list|claim|panic}`;
+`payments_sweeper_resolution_only_blocks_total{site=deposit_dispatch|deposit_cascade_child|payout_reclaim|payout_resend}`;
+gauge `payments_sweeper_last_pass_unix_seconds`. Log lines are prefixed `payments sweeper:` and carry tenant and
+attempt ids (never provider payloads or panic values). **Proposed alert rules** (not wired; no backend and no
+recipients exist, ALERT-DELIVERY-1 OPEN): sweeper stalled when `time() - payments_sweeper_last_pass_unix_seconds
+> 3 x PAYMENTS_SWEEP_INTERVAL_SECONDS`; sustained `items_total{result="error"}` or any `result="panic"`; a
+non-zero and growing `resolution_only_blocks_total` for longer than an agreed window (a tenant suspended with
+work queued).
+
 ### Queue / event failures
 
 - **No real message-queue/event-bus producer or consumer exists in this

@@ -208,12 +208,16 @@ func (o *Orchestrator) driveCreatedAttempt(
 	}
 	redirectURL, hostedFieldToken := gr.Value.RedirectURL, gr.Value.HostedFieldToken
 
-	// Phase C, with a possible further cascade insert.
+	// Phase C, with a possible further cascade insert. PRH-2 H (LF F1): detached and bounded, so a
+	// phase-B result is always recorded even if ctx is cancelled or its deadline passed during the call.
+	phaseCtx, cancelPhaseC := context.WithTimeout(context.WithoutCancel(ctx), depositPhaseCTimeout)
+	defer cancelPhaseC()
 	var cascadeChild *PaymentAttempt
 	// ADR 0102 I-wire (B-1): phase C is an evidence transaction owner - it
-	// opens its transaction through alerting.InTx so a swallowed in-tx raise
-	// gets its mandatory post-commit detached retry (Flush, below).
-	pending, err := alerting.InTx(ctx, alerting.NewTenantRunner(pool, attempt.TenantID), func(actx context.Context, tx pgx.Tx) error {
+	// opens its transaction through alerting.InTx (on H's detached, bounded
+	// phaseCtx, LF F1) so a swallowed in-tx raise gets its mandatory post-commit
+	// detached retry (Flush, below).
+	pending, err := alerting.InTx(phaseCtx, alerting.NewTenantRunner(pool, attempt.TenantID), func(actx context.Context, tx pgx.Tx) error {
 		if _, err := tx.Exec(actx, `SELECT id FROM deposit_intents WHERE id = $1 FOR UPDATE`, intent.ID); err != nil {
 			return fmt.Errorf("payments: lock deposit intent: %w", err)
 		}
