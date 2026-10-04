@@ -252,7 +252,7 @@ func TestKYCWorkerCatalogueGate_EveryPermissivePolicyIsUnsatisfiableOrFenced_31(
 	if err := rt.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
 		rows, err := tx.Query(ctx,
 			`SELECT c.relname, c.relrowsecurity FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-			  WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p') AND NOT c.relispartition AND c.relname <> 'schema_migrations'`)
+			  WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p') AND c.relname <> 'schema_migrations'`) // partitions included: each must carry RLS too (security O-3)
 		if err != nil {
 			return err
 		}

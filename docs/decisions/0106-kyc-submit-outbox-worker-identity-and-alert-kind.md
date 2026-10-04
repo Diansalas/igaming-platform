@@ -1228,8 +1228,11 @@ jurisdiction whitelist is unchanged (still 11 tuples; none of the nine tables is
    `requestVerificationTestHook` (stages `after_conflict`, `before_retry`; precedent
    `reviewVerificationTestRaceHook`; settable only inside package `kyc`), and the exported field
    `OutboxWorker.ClaimScope` (a `func() []uuid.UUID` that restricts the claim to the given tenants so integration
-   tests sharing one database never touch each other's rows; a static test pins that no non-test file other than
-   the worker reads or sets it, so `cmd/platform-api` cannot). The guard/RLS layers are proven independently by
+   tests sharing one database never touch each other's rows; a static test flags any non-test reference other than the worker's own, both
+   by selector (`w.ClaimScope`) and by keyed composite literal (`OutboxWorker{ClaimScope: ...}`); an unkeyed
+   literal or reflection is not detected, so this is a review-time guard, not a proof. The production arm (nil
+   scope claims every tenant, an empty scope claims nothing) is tested on a scratch database, never on the shared
+   one) The guard/RLS layers are proven independently by
    owner-side probes (`openOutboxPolicies` for the trigger alone, `disableOutboxGuard` for RLS alone) that run
    their DDL INSIDE a rolled-back owner transaction (never committed: invisible to every other session, nothing
    left behind by a killed test binary).
@@ -1286,6 +1289,15 @@ jurisdiction whitelist is unchanged (still 11 tuples; none of the nine tables is
     `PhaseCAttempts` attempts plus the apply-conflict transaction (worst case about 40 s against a 60 s lease at
     the defaults; an overrun is safe through the claim-token CAS and the same-key re-send). If `PhaseCAttempts`
     ever becomes configurable the floor must use `2*(P+R+Call+PhaseCAttempts*C+C)+5`.
+
+22. **Accepted residual (code review R5, not changed).** `hasLiveCreate`'s `FOR SHARE` is held from before the
+    malware scan until the upload commits, so a worker phase C deciding the same create waits behind scanner and
+    storage I/O. If the upload exceeds about 15 s (three phase-C attempts of 5 s) phase C gives up, the row stays
+    claimed and is re-sent after lease expiry with the SAME idempotency key (benign: one extra vendor call; no
+    deadlock path). Narrowing it (an unlocked fail-fast read plus a `FOR SHARE` re-check just before the
+    enqueue) is a possible follow-up. The L-2 static guard is now an allowlist of argument forms with negative
+    controls (final round), the deferred-age gauge is sampled per pass (alert on it with `max_over_time`), and the
+    ownerTx fixture asserts both guard triggers `tgenabled = 'O'` and FORCE RLS before it commits.
 
 ### 15.4 Evidence
 

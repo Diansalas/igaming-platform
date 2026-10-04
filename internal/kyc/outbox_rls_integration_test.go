@@ -164,7 +164,7 @@ func ownerProbe(t *testing.T, ddl []string, gucs map[string]string, fn func(ctx 
 	if super || bypass {
 		t.Fatalf("the owner probe must not run as a superuser or BYPASSRLS role (super=%v bypassrls=%v)", super, bypass)
 	}
-	for _, stmt := range append([]string{`SELECT pg_advisory_xact_lock(1140114)`, `SET LOCAL lock_timeout = '30s'`}, ddl...) {
+	for _, stmt := range append([]string{`SET LOCAL lock_timeout = '30s'`, `SELECT pg_advisory_xact_lock(1140114)`}, ddl...) {
 		if _, err := tx.Exec(ctx, stmt); err != nil {
 			t.Fatalf("owner probe %q: %v", stmt, err)
 		}

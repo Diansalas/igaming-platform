@@ -513,3 +513,123 @@ func TestOutbox_38c_UploadHoldsTheLiveCreateRowLock_F4(t *testing.T) {
 		t.Fatalf("a concurrent FOR UPDATE on the live create must be refused (55P03) while the upload holds it, got %v", lockErr)
 	}
 }
+
+// ---- code review R1 (X1, X2): the PRODUCTION arm of ClaimScope ----
+//
+// An UNSCOPED worker (ClaimScope nil, exactly what cmd/platform-api builds) must
+// claim rows of every tenant; an empty non-nil scope must claim nothing. An
+// unscoped worker must never run on the SHARED database (it would claim other
+// packages' rows: code review F1), so this runs on a SCRATCH database that holds
+// only this test's two tenants.
+func TestOutbox_14c_NilClaimScope_ClaimsEveryTenant_EmptyScopeClaimsNothing_X1_X2(t *testing.T) {
+	pool, _ := scratchThrough0114(t, "kyc0114scope")
+	r := newRigOn(t, pool, pool)
+	other := seedFixture(t, pool) // a SECOND tenant
+	va := r.create()
+	vb, _ := requestCreate(t, pool, other, "mock")
+
+	empty := NewOutboxWorker(pool, r.w.Orchestrator, r.w.Outbound)
+	empty.ClaimScope = func() []uuid.UUID { return nil }
+	if row, err := empty.claimNext(context.Background(), nil); err != nil || row != nil {
+		t.Fatalf("an empty scope must claim nothing (X2), got %+v %v", row, err)
+	}
+
+	prod := NewOutboxWorker(pool, r.w.Orchestrator, r.w.Outbound) // ClaimScope nil: production
+	if prod.ClaimScope != nil {
+		t.Fatal("NewOutboxWorker must leave ClaimScope nil")
+	}
+	seen := map[uuid.UUID]bool{}
+	for i := 0; i < 2; i++ {
+		row, err := prod.claimNext(context.Background(), nil)
+		if err != nil || row == nil {
+			t.Fatalf("an unscoped (production) worker must claim every tenant's row (X1): claim %d got %+v %v", i, row, err)
+		}
+		seen[row.TenantID] = true
+	}
+	if !seen[r.f.tenantID] || !seen[other.tenantID] {
+		t.Fatalf("the unscoped worker must have claimed rows of BOTH tenants, saw %v", seen)
+	}
+	_, _ = va, vb
+}
+
+// ---- code review R2 (X9): the repeat-create read ignores other operations ----
+
+func TestOutbox_20g_RepeatCreate_IgnoresNewerSubmitOfOlderVerification_X9(t *testing.T) {
+	r := newRig(t)
+	old := r.createSent()
+	winner := r.create()
+	seedDocument(t, r.pool, r.f, old.ID, DocumentPassport, "p.png") // the newest outbox row is now a SUBMIT for `old`
+	again, existing := requestCreate(t, r.pool, r.f, "mock")
+	if !existing || again.ID != winner.ID {
+		t.Fatalf("a repeat create must return the live create's verification: existing=%v sameAsWinner=%v sameAsOld=%v", existing, again.ID == winner.ID, again.ID == old.ID)
+	}
+}
+
+// ---- code review R3 (X3, X4): the deferred-age gauge is a per-pass maximum of deferred items only ----
+
+func TestOutbox_07h_DeferredGauge_IsPerPassMaxNotLast_X3(t *testing.T) {
+	r := newRig(t)
+	v1 := r.create()
+	a2 := seedSecondAccount(t, r.pool, r.f)
+	v2, _ := requestCreate(t, r.pool, a2, "mock")
+	r1 := onlyRow(t, r.pool, r.f.tenantID, v1.ID, OpCreate)
+	r2 := onlyRow(t, r.pool, r.f.tenantID, v2.ID, OpCreate)
+	// The OLDER row is claimed first, the younger last: the gauge must be the max.
+	outboxFixtureUpdate(t, r1.ID, `created_at = now() - interval '3 hours', next_attempt_at = now() - interval '2 minutes'`)
+	outboxFixtureUpdate(t, r2.ID, `created_at = now() - interval '1 hour', next_attempt_at = now() - interval '1 minute'`)
+	setTenantStatus(t, r.pool, r.f.tenantID, "suspended")
+	t.Cleanup(func() { setTenantStatus(t, r.pool, r.f.tenantID, "active") })
+	if st := r.pass(); st.Results[resultDeferred] != 2 {
+		t.Fatalf("setup: %+v", st.Results)
+	}
+	if age := outboxOldestDeferredSecs.Load(); age < 3*3600-60 {
+		t.Fatalf("the gauge must be the per-pass maximum (about 3 h), got %d s", age)
+	}
+}
+
+func TestOutbox_07i_DeferredGauge_IgnoresNonDeferredItems_X4(t *testing.T) {
+	r := newRig(t)
+	v := r.create()
+	row := onlyRow(t, r.pool, r.f.tenantID, v.ID, OpCreate)
+	outboxFixtureUpdate(t, row.ID, `created_at = now() - interval '2 hours'`)
+	if st := r.pass(); st.Results[resultSent] != 1 {
+		t.Fatalf("setup: %+v", st.Results)
+	}
+	if age := outboxOldestDeferredSecs.Load(); age != 0 {
+		t.Fatalf("a pass that defers nothing must report 0 even when it sends an old row, got %d", age)
+	}
+}
+
+// ---- security O-2: the catalogue pins the search_path of BOTH 0114 functions ----
+
+func TestMigration0114_FunctionsPinSearchPath_O2(t *testing.T) {
+	pool := rtPool(t, 2)
+	got := map[string]string{}
+	if err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, `SELECT p.proname, coalesce(array_to_string(p.proconfig, ','), '')
+			FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+			WHERE n.nspname = 'public' AND p.proname IN ('kyc_submission_outbox_session', 'kyc_submission_outbox_guard')`)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var name, cfg string
+			if err := rows.Scan(&name, &cfg); err != nil {
+				return err
+			}
+			got[name] = cfg
+		}
+		return rows.Err()
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("expected both 0114 functions, got %v", got)
+	}
+	for name, cfg := range got {
+		if cfg != "search_path=pg_catalog, public, pg_temp" {
+			t.Errorf("%s proconfig = %q, want the pinned search_path with pg_temp last", name, cfg)
+		}
+	}
+}

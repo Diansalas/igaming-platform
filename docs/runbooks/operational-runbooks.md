@@ -366,7 +366,8 @@ watching the signals below. The staff `submission_state` on the compliance case 
 
 **Signals.** Gauge `kyc_outbox_last_pass_unix_seconds` stops advancing (stalled if older than ~3x
 `KYC_OUTBOX_INTERVAL_SECONDS`); the oldest-due and oldest-deferred age gauges (observed at claim time, not a
-table scan, so they only move while the worker is claiming) growing; counter `kyc_outbox_items_total` by
+table scan, so they only move while the worker is claiming) growing (the deferred-age gauge is sampled per pass and reads 0 between deferral re-claims, so alert on it with
+`max_over_time`, not on an instantaneous value); counter `kyc_outbox_items_total` by
 closed `result` label; log lines `kyc_outbox_*`; open `kyc.submission_failed_terminal` alerts;
 `submission_state = failed` in the console; players reporting "stuck in unverified". Metrics carry no tenant,
 provider or row labels.

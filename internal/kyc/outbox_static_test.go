@@ -549,13 +549,25 @@ func TestStatic_ClaimScopeSeamNeverSetOutsideTests(t *testing.T) {
 	var mentions int
 	for _, f := range nonTestGoFiles(t, "internal", "cmd") {
 		ast.Inspect(f.ast, func(n ast.Node) bool {
-			sel, ok := n.(*ast.SelectorExpr)
-			if !ok || sel.Sel.Name != "ClaimScope" {
+			var pos token.Pos
+			switch e := n.(type) {
+			case *ast.SelectorExpr: // w.ClaimScope = ... / reads
+				if e.Sel.Name != "ClaimScope" {
+					return true
+				}
+				pos = e.Pos()
+			case *ast.KeyValueExpr: // OutboxWorker{ClaimScope: ...} (a keyed composite literal)
+				id, ok := e.Key.(*ast.Ident)
+				if !ok || id.Name != "ClaimScope" {
+					return true
+				}
+				pos = e.Pos()
+			default:
 				return true
 			}
 			mentions++
 			if f.rel != "internal/kyc/outbox_worker.go" {
-				t.Errorf("%s:%d references OutboxWorker.ClaimScope: it is a test seam, nil in production", f.rel, f.fset.Position(sel.Pos()).Line)
+				t.Errorf("%s:%d references OutboxWorker.ClaimScope: it is a test seam, nil in production", f.rel, f.fset.Position(pos).Line)
 			}
 			return true
 		})
@@ -565,10 +577,14 @@ func TestStatic_ClaimScopeSeamNeverSetOutsideTests(t *testing.T) {
 	}
 }
 
-// Every worker log call that carries an error uses the closed redactor, never
-// the error text (security L-2, mutants S5 and S5c): a "detail" attribute's
-// value must be RedactedProviderErrorDetail(...), and no log argument may call
-// .Error() or pass an error-named identifier directly.
+// Every worker log call carries only allowlisted argument forms (security L-2 and
+// C-1b, code review R4): string literals, RedactedProviderErrorDetail(...), a
+// conversion string(row.X) or string(ClassX), or row.X.String(). Anything else -
+// an error variable (whatever its name), .Error(), fmt.Sprint(err), an aliased
+// error - is rejected by DETECTION, never by guessing names. Every logging
+// receiver in the file is covered: slog.*, logger.*, w.Logger.* and
+// w.logger().*. The one exemption is the loop's start-refusal line, whose error
+// is a ValidateForLoop message made of constant configuration strings.
 func TestStatic_WorkerLogCallsNeverCarryRawErrorText_L2(t *testing.T) {
 	var f srcFile
 	for _, x := range nonTestGoFiles(t, "internal") {
@@ -579,70 +595,141 @@ func TestStatic_WorkerLogCallsNeverCarryRawErrorText_L2(t *testing.T) {
 	if f.ast == nil {
 		t.Fatal("outbox_worker.go not found")
 	}
-	var logCalls, detailArgs int
+	var errs []string
+	logCalls, detailArgs := workerLogViolations(f, &errs)
+	for _, e := range errs {
+		t.Error(e)
+	}
+	if logCalls < 10 || detailArgs < 4 {
+		t.Fatalf("expected the worker's log calls (>=10) and detail attributes (>=4), saw %d and %d (guard is vacuous)", logCalls, detailArgs)
+	}
+}
+
+var logMethodNames = map[string]bool{"Error": true, "Warn": true, "Info": true, "Debug": true, "Log": true,
+	"ErrorContext": true, "WarnContext": true, "InfoContext": true, "DebugContext": true}
+
+func isLogReceiver(x ast.Expr) bool {
+	switch e := x.(type) {
+	case *ast.Ident:
+		return e.Name == "slog" || e.Name == "logger"
+	case *ast.SelectorExpr:
+		return e.Sel.Name == "Logger"
+	case *ast.CallExpr:
+		if s, ok := e.Fun.(*ast.SelectorExpr); ok {
+			return s.Sel.Name == "logger"
+		}
+	}
+	return false
+}
+
+func rootIdent(x ast.Expr) string {
+	for {
+		switch e := x.(type) {
+		case *ast.SelectorExpr:
+			x = e.X
+		case *ast.Ident:
+			return e.Name
+		default:
+			return ""
+		}
+	}
+}
+
+// allowedLogArg reports whether a (non-message) log argument is an allowlisted form.
+func allowedLogArg(a ast.Expr) bool {
+	e, isCall := a.(*ast.CallExpr)
+	if _, isLit := a.(*ast.BasicLit); isLit {
+		return true
+	}
+	if !isCall {
+		return false
+	}
+	switch fn := e.Fun.(type) {
+	case *ast.Ident:
+		if fn.Name == "RedactedProviderErrorDetail" {
+			return true
+		}
+		if fn.Name == "string" && len(e.Args) == 1 {
+			switch in := e.Args[0].(type) {
+			case *ast.SelectorExpr:
+				return rootIdent(in) == "row"
+			case *ast.Ident:
+				return strings.HasPrefix(in.Name, "Class")
+			}
+		}
+	case *ast.SelectorExpr:
+		return fn.Sel.Name == "String" && len(e.Args) == 0 && rootIdent(fn.X) == "row"
+	}
+	return false
+}
+
+// workerLogViolations scans f and appends one message per violation.
+func workerLogViolations(f srcFile, out *[]string) (logCalls, detailArgs int) {
 	ast.Inspect(f.ast, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
 		if !ok {
 			return true
 		}
 		sel, ok := call.Fun.(*ast.SelectorExpr)
-		if !ok || (sel.Sel.Name != "Error" && sel.Sel.Name != "Warn" && sel.Sel.Name != "Info" && sel.Sel.Name != "Debug") {
-			return true
-		}
-		inner, ok := sel.X.(*ast.CallExpr)
-		if !ok {
-			return true
-		}
-		if is, ok := inner.Fun.(*ast.SelectorExpr); !ok || is.Sel.Name != "logger" {
+		if !ok || !logMethodNames[sel.Sel.Name] || !isLogReceiver(sel.X) {
 			return true
 		}
 		logCalls++
+		line := f.fset.Position(call.Pos()).Line
+		if len(call.Args) > 0 {
+			if lit, ok := call.Args[0].(*ast.BasicLit); ok && lit.Value == `"kyc outbox worker: refusing to start"` {
+				return true // constant configuration strings only
+			}
+		}
 		for i, a := range call.Args {
+			if i == 0 {
+				continue // the message
+			}
 			if lit, ok := a.(*ast.BasicLit); ok && lit.Value == `"detail"` && i+1 < len(call.Args) {
 				detailArgs++
-				c, ok := call.Args[i+1].(*ast.CallExpr)
-				if id, isID := c.Fun.(*ast.Ident); !ok || !isID || id.Name != "RedactedProviderErrorDetail" {
-					t.Errorf("line %d: a log detail must be RedactedProviderErrorDetail(err)", f.fset.Position(call.Pos()).Line)
+				c, isCall := call.Args[i+1].(*ast.CallExpr)
+				if !isCall {
+					*out = append(*out, fmt.Sprintf("line %d: a log detail must be RedactedProviderErrorDetail(err)", line))
+				} else if id, isID := c.Fun.(*ast.Ident); !isID || id.Name != "RedactedProviderErrorDetail" {
+					*out = append(*out, fmt.Sprintf("line %d: a log detail must be RedactedProviderErrorDetail(err)", line))
 				}
 			}
-			ast.Inspect(a, func(m ast.Node) bool {
-				if c, ok := m.(*ast.CallExpr); ok {
-					if s, ok := c.Fun.(*ast.SelectorExpr); ok && s.Sel.Name == "Error" && len(c.Args) == 0 {
-						t.Errorf("line %d: a log argument calls .Error() (raw error text)", f.fset.Position(c.Pos()).Line)
-					}
-				}
-				if id, ok := m.(*ast.Ident); ok && (id.Name == "err" || id.Name == "lastErr" || id.Name == "callErr") {
-					if !isInsideRedactorCall(a, id) {
-						t.Errorf("line %d: a log argument passes %s outside RedactedProviderErrorDetail", f.fset.Position(id.Pos()).Line, id.Name)
-					}
-				}
-				return true
-			})
+			if !allowedLogArg(a) {
+				*out = append(*out, fmt.Sprintf("line %d: log argument %d is not an allowlisted form (literal, RedactedProviderErrorDetail(...), string(row.X), row.X.String()): an error value or raw text may reach the log", line, i))
+			}
 		}
 		return true
 	})
-	if logCalls < 8 || detailArgs < 4 {
-		t.Fatalf("expected the worker's log calls (>=8) and detail attributes (>=4), saw %d and %d (guard is vacuous)", logCalls, detailArgs)
-	}
+	return logCalls, detailArgs
 }
 
-// isInsideRedactorCall reports whether id sits inside a RedactedProviderErrorDetail call within arg.
-func isInsideRedactorCall(arg ast.Expr, id *ast.Ident) bool {
-	found := false
-	ast.Inspect(arg, func(n ast.Node) bool {
-		c, ok := n.(*ast.CallExpr)
-		if !ok {
-			return true
-		}
-		if fid, ok := c.Fun.(*ast.Ident); ok && fid.Name == "RedactedProviderErrorDetail" {
-			ast.Inspect(c, func(m ast.Node) bool {
-				if m == id {
-					found = true
-				}
-				return true
-			})
-		}
-		return true
-	})
-	return found
+// Negative controls: every leak shape the reviewers proved is detected, the
+// compliant call is not, and a non-call "detail" value does not panic.
+func TestStatic_WorkerLogGuard_NegativeControls_L2(t *testing.T) {
+	src := `package kyc
+func f(w *OutboxWorker, row claimedRow, err error, callErr error) {
+	cause := callErr
+	w.logger().Warn("a", "cause", cause)
+	slog.Warn("b", "e", err)
+	w.Logger.Warn("c", "e", err)
+	logger.Error("d", "e", err.Error())
+	w.logger().Error("e", "detail", err)
+	w.logger().Error("f", "x", fmt.Sprint(err))
+	w.logger().Error("ok", "detail", RedactedProviderErrorDetail(err), "outbox_id", row.ID.String(), "class", string(ClassAmbiguous), "n", "lit")
+}
+`
+	fset := token.NewFileSet()
+	af, err := parser.ParseFile(fset, "internal/kyc/outbox_worker.go", src, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var errs []string
+	calls, _ := workerLogViolations(srcFile{rel: "internal/kyc/outbox_worker.go", fset: fset, ast: af, text: src}, &errs)
+	flagged := map[string]bool{}
+	for _, e := range errs {
+		flagged[strings.SplitN(e, ":", 2)[0]] = true
+	}
+	if calls != 7 || len(flagged) != 6 {
+		t.Fatalf("expected 7 log calls and 6 flagged lines (all but the compliant one), got %d calls, flagged %v", calls, flagged)
+	}
 }

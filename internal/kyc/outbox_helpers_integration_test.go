@@ -75,8 +75,8 @@ func ownerTx(t *testing.T, fn func(ctx context.Context, tx pgx.Tx)) {
 		// One cross-package serialisation point for every outbox DDL fixture
 		// (taken first, so two fixtures never deadlock on the table lock), and a
 		// bounded wait for concurrent writers of other packages.
+		`SET LOCAL lock_timeout = '30s'`, // set FIRST so the advisory-lock wait is bounded too
 		`SELECT pg_advisory_xact_lock(1140114)`,
-		`SET LOCAL lock_timeout = '30s'`,
 		`ALTER TABLE kyc_submission_outbox DISABLE TRIGGER USER`,
 		`ALTER TABLE kyc_submission_outbox NO FORCE ROW LEVEL SECURITY`,
 	} {
@@ -92,6 +92,21 @@ func ownerTx(t *testing.T, fn func(ctx context.Context, tx pgx.Tx)) {
 		if _, err := tx.Exec(ctx, stmt); err != nil {
 			t.Fatalf("owner fixture restore %q: %v", stmt, err)
 		}
+	}
+	// Hardening (security review): before committing, assert the two named guard
+	// triggers are enabled ('O') and FORCE RLS is back, so a fixture can never
+	// commit with the protections off (and ENABLE TRIGGER USER never silently
+	// re-enables a trigger some future migration disables on purpose).
+	var enabled int
+	var force bool
+	if err := tx.QueryRow(ctx,
+		`SELECT (SELECT count(*) FROM pg_trigger WHERE tgrelid = 'kyc_submission_outbox'::regclass
+		            AND tgname IN ('kyc_submission_outbox_guard_row', 'kyc_submission_outbox_guard_truncate') AND tgenabled = 'O'),
+		        (SELECT relforcerowsecurity FROM pg_class WHERE oid = 'kyc_submission_outbox'::regclass)`).Scan(&enabled, &force); err != nil {
+		t.Fatalf("owner fixture verify: %v", err)
+	}
+	if enabled != 2 || !force {
+		t.Fatalf("owner fixture would commit with protections off: guard triggers enabled=%d (want 2), force RLS=%v", enabled, force)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		t.Fatalf("owner commit: %v", err)

@@ -313,6 +313,10 @@ func existingCreateForPlayer(ctx context.Context, tx pgx.Tx, tenantID, playerAcc
 // read in the caller's transaction (security Q-R1 condition: an orphan accepts
 // an upload only if its live create is read inside the SAME upload tx).
 //
+// The state filter is backed by the tenant RLS UPDATE policy's USING clause
+// (state IN ('claimed','pending')), which FOR SHARE also applies; the explicit
+// filter keeps the intent readable and is not load-bearing alone (review R6).
+//
 // The create row is read FOR SHARE and held until the upload commits: a worker
 // phase C that decides or cancels the create (decided_concurrently) must lock
 // that row FOR UPDATE, so it waits for this transaction and then sees the
