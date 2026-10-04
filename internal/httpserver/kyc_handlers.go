@@ -44,6 +44,13 @@ type verificationResponse struct {
 	Reason            string `json:"reason,omitempty"`
 	ReviewedAt        string `json:"reviewed_at,omitempty"`
 	CreatedAt         string `json:"created_at"`
+
+	// STAFF-only derived submission state (PRH-2 E1, ADR 0106 section 7.2);
+	// empty (omitted) where the handler does not compute it. Never present in
+	// a player-facing shape.
+	SubmissionState        string `json:"submission_state,omitempty"`
+	SubmissionErrorClass   string `json:"submission_last_error_class,omitempty"`
+	SubmissionCancelReason string `json:"submission_cancel_reason,omitempty"`
 }
 
 func toVerificationResponse(v kyc.Verification) verificationResponse {
@@ -143,32 +150,33 @@ func newCreateMyVerificationHandler(deps Deps) http.HandlerFunc {
 			return
 		}
 
-		// ADR 0095 §15.2 (PRH-I2): CreateVerification now owns its own
-		// transaction boundaries (phase A commits before any provider
-		// call), so only the identity/provider-selection resolution below
-		// still needs its own short tenant-scoped transaction (a cheap,
-		// no-vendor-I/O read) - mirrors casino_handlers.go's identical
-		// LaunchGame wiring.
-		var brandID, personID uuid.UUID
-		var provider kyc.KYCProvider
+		// ADR 0095 §38 / ADR 0106 (PRH-2 E1): phase A only, in ONE tenant
+		// transaction - provider selection, the orphan verification row, its
+		// audit record, the outbox `create` row and the enqueue audit. NO KYC
+		// vendor call happens on this path: the outbox worker
+		// (internal/kyc/outbox_worker.go) is the only caller. A repeated create
+		// for the same player returns that player's existing live verification
+		// with 200 (at most one live create per player account, enforced by a
+		// unique index); a new one returns 201 with the `unverified` row.
+		var v kyc.Verification
+		var existing bool
 		err = deps.DB.WithTenant(r.Context(), tc.TenantID, func(ctx context.Context, tx pgx.Tx) error {
 			account, err := identity.GetPlayerAccountByID(ctx, tx, playerAccountID)
 			if err != nil {
 				return err
 			}
-			brandID, personID = account.BrandID, account.PersonID
 			// O4 (Stage 10.3 W2a): the provider comes from the tenant's own
 			// configuration, never a hard-coded id, and selection fails
 			// closed when none is configured (kyc.SelectProvider).
-			provider, err = deps.KYCOrchestrator.SelectProvider(ctx, tx, tc.TenantID)
+			provider, err := deps.KYCOrchestrator.SelectProvider(ctx, tx, tc.TenantID)
+			if err != nil {
+				return err
+			}
+			v, existing, err = kyc.RequestVerification(ctx, tx, kyc.CreateVerificationParams{
+				TenantID: tc.TenantID, BrandID: account.BrandID, PlayerAccountID: playerAccountID, PersonID: account.PersonID,
+			}, provider.ID())
 			return err
 		})
-		var v kyc.Verification
-		if err == nil {
-			v, err = kyc.CreateVerification(r.Context(), deps.DB, deps.KYCOutboundCredentials, provider, kyc.CreateVerificationParams{
-				TenantID: tc.TenantID, BrandID: brandID, PlayerAccountID: playerAccountID, PersonID: personID,
-			})
-		}
 		if errors.Is(err, identity.ErrNotFound) {
 			apierror.Write(w, requestID, apierror.CodeNotFound, "player not found")
 			return
@@ -178,11 +186,10 @@ func newCreateMyVerificationHandler(deps Deps) http.HandlerFunc {
 			apierror.Write(w, requestID, apierror.CodeUnavailable, "identity verification is temporarily unavailable")
 			return
 		}
-		if errors.Is(err, kyc.ErrProviderUnavailable) {
-			// Security review RV-PRH-I2 KYC C5: err may wrap the adapter's
-			// or resolver's own raw error text - redacted here, never
-			// logged verbatim.
-			logger.Warn("create_verification_provider_unavailable", "detail", kyc.RedactedProviderErrorDetail(err))
+		if errors.Is(err, kyc.ErrProviderUnavailable) || errors.Is(err, kyc.ErrVerificationCreateContention) {
+			// Security review RV-PRH-I2 KYC C5: err may wrap raw error text -
+			// redacted here, never logged verbatim.
+			logger.Warn("create_verification_unavailable", "detail", kyc.RedactedProviderErrorDetail(err))
 			apierror.Write(w, requestID, apierror.CodeUnavailable, "identity verification is temporarily unavailable")
 			return
 		}
@@ -191,7 +198,14 @@ func newCreateMyVerificationHandler(deps Deps) http.HandlerFunc {
 			apierror.Write(w, requestID, apierror.CodeInternal, "failed to start identity verification")
 			return
 		}
-		writeJSON(w, http.StatusCreated, toPlayerVerificationResponse(v))
+		status := http.StatusCreated
+		if existing {
+			// An existing live create of THIS player (caller-owned, read by the
+			// authenticated player_account_id): same body shape, no outbox
+			// field, nothing beyond the verification itself.
+			status = http.StatusOK
+		}
+		writeJSON(w, status, toPlayerVerificationResponse(v))
 	}
 }
 
@@ -287,13 +301,12 @@ func newUploadMyDocumentHandler(deps Deps) http.HandlerFunc {
 			return
 		}
 
-		// ADR 0095 §15.3 (PRH-I2): UploadDocument is phase A only (document
-		// insert + audit, committed here); the provider submission step
-		// (phase B/C, kyc.SubmitVerification) runs SEPARATELY below, after
-		// this transaction has already committed - no database transaction
-		// is held across the provider call.
+		// ADR 0095 §38 / ADR 0106 (PRH-2 E1): UploadDocument is phase A only
+		// (document insert + audit + the `submit` outbox row, one tenant
+		// transaction). NO KYC vendor call happens on this path: the outbox
+		// worker submits the pinned document set later, with no transaction
+		// held. A duplicate submit of the same set is a no-op.
 		var doc kyc.Document
-		var provider kyc.KYCProvider
 		err = deps.DB.WithTenant(r.Context(), tc.TenantID, func(ctx context.Context, tx pgx.Tx) error {
 			account, err := identity.GetPlayerAccountByID(ctx, tx, playerAccountID)
 			if err != nil {
@@ -306,9 +319,6 @@ func newUploadMyDocumentHandler(deps Deps) http.HandlerFunc {
 			if verification.PlayerAccountID != account.ID {
 				return kyc.ErrNotFound
 			}
-			if deps.KYCOrchestrator != nil {
-				provider, _ = deps.KYCOrchestrator.Provider(verification.ProviderID)
-			}
 			doc, err = kyc.UploadDocument(ctx, tx, deps.DocumentStorage, deps.MalwareScanner, kyc.UploadDocumentParams{
 				TenantID: tc.TenantID, BrandID: account.BrandID, PlayerAccountID: account.ID, PersonID: account.PersonID,
 				VerificationID: verificationID, DocumentType: kyc.DocumentType(documentType),
@@ -316,19 +326,6 @@ func newUploadMyDocumentHandler(deps Deps) http.HandlerFunc {
 			})
 			return err
 		})
-		if err == nil && provider != nil {
-			if _, submitErr := kyc.SubmitVerification(r.Context(), deps.DB, deps.KYCOutboundCredentials, provider, tc.TenantID, verificationID); submitErr != nil {
-				// A phase-B/C submission failure never invalidates the
-				// document upload that already committed (ADR 0095 §15.3:
-				// the verification's status is simply left as it was, and
-				// the next upload re-submits) - logged, never surfaced as
-				// upload failure to the player. Security review RV-PRH-I2
-				// KYC C5: submitErr may wrap the adapter's or resolver's
-				// own raw error text - redacted here, never logged
-				// verbatim.
-				logger.Warn("submit_verification_failed", "detail", kyc.RedactedProviderErrorDetail(submitErr))
-			}
-		}
 		if errors.Is(err, kyc.ErrNotFound) || errors.Is(err, identity.ErrNotFound) {
 			apierror.Write(w, requestID, apierror.CodeNotFound, "verification not found")
 			return
