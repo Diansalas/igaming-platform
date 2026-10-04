@@ -164,7 +164,7 @@ S5                         KILLED    TestOutboxLogs_ResolverFailureAndPhaseCFail
                                        what: worker logs the raw credential-resolver error
 S5c                        KILLED    TestOutboxLogs_ResolverFailureAndPhaseCFailure_NeverCarryRawErrorText_L2,TestStatic_WorkerLogCallsNeverCarryRawErrorText_L2
                                        what: phase-C failure log uses the raw error text
-L1a                        KILLED    TestOutboxGuard_SearchPath_TempTenantsTableCannotAlterTheTrigger_L1
+L1a                        KILLED    TestOutboxGuard_SearchPath_TempTenantsTableCannotAlterTheTrigger_L1,TestMigration0114_FunctionsPinSearchPath_O2
                                        what: guard trigger without a pinned search_path
 I1                         KILLED    TestOutboxGuard_24c_InsertForcesNextAttemptAtToNow_I1
                                        what: insert trigger trusts a caller-supplied next_attempt_at
@@ -172,8 +172,28 @@ F6                         KILLED    TestKYCWorkerCatalogueGate_EveryPermissiveP
                                        what: a public table with row-level security disabled
 F1scope                    KILLED    TestOutboxCompliance_35_TA_EnforcementIndependentOfOutboxState,TestOutboxCompliance_35_TA_EnforcementIndependentOfOutboxState/claimed,TestOutboxCompliance_36_TB_DecisionRowsIdenticalToNoVerificationCase,TestOutboxCompliance_38_TD_StaffReviewRacingCreatePhaseC,TestOutboxLoop_ShutdownDrainsTheItemInFlight,TestOutboxRLS_22_ExclusionMatrix,TestOutboxRLS_23_TenantTransitionLimits_NoDeleteNoTruncate,TestOutboxRLS_26_WorkerTriggerPinning_F6
                                        what: claim ignores ClaimScope (parallel-package interference)
+X1                         KILLED    TestOutbox_14c_NilClaimScope_ClaimsEveryTenant_EmptyScopeClaimsNothing_X1_X2
+                                       what: nil ClaimScope treated as an empty scope (production claims nothing)
+X2                         KILLED    TestOutbox_14c_NilClaimScope_ClaimsEveryTenant_EmptyScopeClaimsNothing_X1_X2
+                                       what: an empty ClaimScope widens to every tenant
+H                          KILLED    TestOutbox_14c_NilClaimScope_ClaimsEveryTenant_EmptyScopeClaimsNothing_X1_X2
+                                       what: NULL arm of the claim scope broken (production claims nothing)
+CS_literal                 KILLED    TestStatic_ClaimScopeSeamNeverSetOutsideTests
+                                       what: ClaimScope set by a keyed composite literal in a non-test file
+S5e                        KILLED    TestOutboxLogs_ResolverFailureAndPhaseCFailure_NeverCarryRawErrorText_L2,TestStatic_WorkerLogCallsNeverCarryRawErrorText_L2
+                                       what: aliased error value in a log call
+S5g                        KILLED    TestStatic_WorkerLogCallsNeverCarryRawErrorText_L2
+                                       what: extra slog.Warn carrying an error
+S5h                        KILLED    TestStatic_WorkerLogCallsNeverCarryRawErrorText_L2
+                                       what: extra w.Logger.Warn carrying an error
+X9                         KILLED    TestOutbox_20g_RepeatCreate_IgnoresNewerSubmitOfOlderVerification_X9
+                                       what: repeat-create read without the operation filter
+X3                         KILLED    TestOutbox_07h_DeferredGauge_IsPerPassMaxNotLast_X3
+                                       what: deferred gauge stores the last value, not the per-pass maximum
+X4                         KILLED    TestOutbox_07i_DeferredGauge_IgnoresNonDeferredItems_X4
+                                       what: deferred gauge counts non-deferred items
 
-Totals: 77 mutant entries, 77 KILLED, 0 not killed.
+Totals: 87 mutant entries, 87 KILLED, 0 not killed.
 Counting M24 per table (9 entries) and the split variants (M3a/b, M4a/b, M7a/b, M11a/b/c, M14a/b, M16a/b, M22a/b, M36/M36b).
 
 Survivors after the final test set: none among the entries above.
@@ -199,3 +219,9 @@ and the fix mutants F3, F4c (upload FOR SHARE), L1a (search_path), I1, F6 (publi
 F4c survived its first run (the prepare and phase-B guards mask the lock) and was killed by TestOutbox_38c (a concurrent
 FOR UPDATE NOWAIT on the live create is refused while the upload holds it). The first fix-round run of the original
 M-set is the table above; the earlier round-1 results are superseded.
+
+FINAL ROUND (delta reviews): added and killed X1 (nil scope as empty), X2 (empty scope widens), H (NULL arm broken) by the
+scratch-DB TestOutbox_14c; CS_literal by the tightened ClaimScope static guard (keyed literal); S5e (aliased error; also the
+reviewer X7 shape), S5g (extra slog.*), S5h (extra w.Logger.*) by detection in the allowlist-based L2 static guard; X9 by
+TestOutbox_20g; X3 and X4 by TestOutbox_07h and TestOutbox_07i. S5, S5c, L1a (also killed by the new proconfig test O-2), F4c,
+N8 and N12 were re-run on the final tree and stay KILLED.
