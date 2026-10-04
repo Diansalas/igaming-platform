@@ -336,6 +336,7 @@ dispatch is being withheld for a non-active tenant (expected, see step 5).
    reactivated. **A CLOSED tenant never resumes**: a never-sent `created` payout keeps its withdrawal hold and the
    player's funds stay held with no release path today. That is an OPEN BUSINESS/COMPLIANCE DECISION (§37.5), not
    something to fix by editing rows. A tenant whose new money you want paused should use the kill switch (§5).
+   Each deferral bumps `poll_count`, so deferred attempts wait up to the 30 min backoff cap after reactivation.
 6. **Disabling deliberately.** There is no off switch for the loop; the control that stops NEW money moving is
    the kill switch (INV-IO-15, ADR 0095 §10): it withholds every new dispatch while polls continue.
 7. **Escalated payouts** (`payments.payout_resend_escalated`, `payments.payout_reclaim_denied_by_kyc` audit

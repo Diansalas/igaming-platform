@@ -26,6 +26,7 @@ type loopProvider struct {
 	mu                             sync.Mutex
 	deposits, withdraws, queries   int
 	onDeposit, onWithdraw, onQuery func(call int)
+	onQueryCtx                     func(ctx context.Context, call int)
 	panicCapabilities              bool
 }
 
@@ -74,8 +75,11 @@ func (p *loopProvider) Withdraw(ctx context.Context, req WithdrawRequest) (Withd
 func (p *loopProvider) QueryStatus(ctx context.Context, ref string) (StatusResult, error) {
 	p.mu.Lock()
 	p.queries++
-	n, hook := p.queries, p.onQuery
+	n, hook, ctxHook := p.queries, p.onQuery, p.onQueryCtx
 	p.mu.Unlock()
+	if ctxHook != nil {
+		ctxHook(ctx, n)
+	}
 	if hook != nil {
 		hook(n)
 	}

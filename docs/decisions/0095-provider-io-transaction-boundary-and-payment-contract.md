@@ -6835,7 +6835,7 @@ and the full payments, ledger, wallet, casino, adjustment, withdrawal and idempo
 
 ## 37. Amendment — PRH-2 H: the sweeper process, S-8 wording, and resolution-only sweeping of non-active tenants (§7.3) (`payments`, 2026-10-04)
 
-Status: `IMPLEMENTED` for the process and the gating; `MOCK` adapters only (no PSP contract exists, so every real
+Status: `IMPLEMENTED` for the process, the gating and RECON-PAYOUT-LIVE-TEST-1 (a test-only addition, see §37.6); `MOCK` adapters only (no PSP contract exists, so every real
 adapter path stays `PROVIDER DEPENDENT`). Source: plan `docs/plans/prh2-hardening-round/plan.md` §5-H; security
 addendum §2 (ACCEPTED with amendments); ledger-finance LF-8; merged S-8.
 
@@ -6880,7 +6880,7 @@ money must resolve. This **supersedes §7.2 point 1's "active tenants"** for the
 | Evidence application, dispute, T17 re-drive of an already-sent attempt, every audit those write | **allowed**, audited exactly as for an active tenant |
 | T3 expiry of an interactive `created` deposit (it makes no provider call) | allowed |
 | Dispatch of a `created` deposit attempt (T2, phase B) | **never**: rescheduled on the ordinary backoff |
-| A cascade child after a poll decline | **never** on the sweeper's poll path: the decline stands, no child is inserted (status read in the poll's own transaction). The `drive.go` phase-C cascade insert is NOT gated: a child can be inserted if the tenant flips mid-pass, but it is never driven while the tenant is non-active |
+| A cascade child after a poll decline | **never** on the sweeper's poll path: the decline stands, no child is inserted (status read in the poll's own transaction; the skip is audited in the same transaction as `payment.cascade_skipped_resolution_only`). The `drive.go` phase-C cascade insert is NOT gated: a child can be inserted if the tenant flips mid-pass, but it is never driven while the tenant is non-active |
 | Payout T2 re-claim of a `created` attempt (new `Withdraw`) | **never**: rescheduled |
 | Payout T12 resend of an `ambiguous` attempt (a `Withdraw`) | **never**: rescheduled. The preceding poll still runs |
 
@@ -6938,7 +6938,6 @@ or attempt label: `payments_sweeper_passes_total`, `payments_sweeper_items_total
 - §7.3's global (16) and per-(tenant, provider) (4) concurrency caps, the in-process nudge channel and jittered
   backoff are not implemented; the loop sweeps tenants sequentially, one item at a time.
 - Tenant listing costs one indexed range scan per tenant per tick (§7.3 "idle cost"), including non-active ones.
-- `RECON-PAYOUT-LIVE-TEST-1` (payments F2) is not closed by this amendment.
 - **Cross-tenant head-of-line blocking (H-SEC-2).** The pass is sequential across tenants (batch 20, manifest
   `CallTimeout` 30 s, payout calls up to 60 s outside the item budget), so one tenant's hanging provider can delay
   every later tenant's work in the pass for a long time, and the 60 s batch lease can lapse mid-batch (money-safe
@@ -6954,4 +6953,16 @@ or attempt label: `payments_sweeper_passes_total`, `payments_sweeper_items_total
   NOT make; the default here is only "no new money moves".
 - **Idempotent-manifest ambiguous payout of a suspended tenant** stays `ambiguous` (funds held) until the poll
   resolves it or the tenant is reactivated; it is never escalated (ledger-finance F4, follow-up).
+- **Deferred attempts back off.** A deferral is a `RescheduleNonTerminal`, which bumps `poll_count`, so a deferred
+  attempt waits up to the 30 min backoff cap after reactivation (as for the kill switch). Brands also have
+  suspended/closed statuses; resolution-only is tenant-scoped only (flagged to security).
 - Evidence of the mutants run: `docs/plans/payment-readiness/evidence/prh2-h-mutation-kill.txt`.
+
+### 37.6 RECON-PAYOUT-LIVE-TEST-1 (closed here, test only)
+
+`internal/reconciliation/payout_live_integration_test.go`
+(`TestPaymentStatement_LivePayoutPath_AgainstWiredMockSource_NoMismatches`) runs the live, attempt-based payout
+path (`ClaimForDispatch` -> `DispatchWithdraw` -> `ApplyPayoutResult` -> `Resolve(succeeded)` ->
+`PollPayoutStatus`) against the wired MOCK statement source and requires a clean `payment_statement` run with 0
+mismatches. No production code changed for it. It pins the rendering and reference/settlement writes against the
+F1 false-P1 class; it is MOCK evidence only, and real PSP statement matching remains `PROVIDER DEPENDENT`.

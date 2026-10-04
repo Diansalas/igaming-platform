@@ -32,15 +32,25 @@ func attemptsForIntent(t *testing.T, pool *db.Pool, tenantID, intentID uuid.UUID
 	return n
 }
 
-func nextActionInFuture(t *testing.T, pool *db.Pool, tenantID, attemptID uuid.UUID) bool {
+// assertDeferred proves a withheld dispatch was really RESCHEDULED by the deferral itself (H-CR-3):
+// claimBatch already moves next_action_at to lease_until, so "next_action_at is in the future" proves
+// nothing. A real deferral bumps poll_count and sets a next_action_at different from the batch lease.
+func assertDeferred(t *testing.T, pool *db.Pool, tenantID, attemptID uuid.UUID, pollBefore, minIncrease int) PaymentAttempt {
 	t.Helper()
-	var future bool
-	if err := pool.WithTenant(context.Background(), tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		return tx.QueryRow(ctx, `SELECT next_action_at > now() FROM payment_attempts WHERE id = $1`, attemptID).Scan(&future)
-	}); err != nil {
-		t.Fatalf("read next_action_at: %v", err)
+	a := mustGetAttempt(t, pool, tenantID, attemptID)
+	if a.PollCount < pollBefore+minIncrease {
+		t.Fatalf("withheld attempt %s was not rescheduled: poll_count %d -> %d (want >= +%d)", attemptID, pollBefore, a.PollCount, minIncrease)
 	}
-	return future
+	var sameAsLease bool
+	if err := pool.WithTenant(context.Background(), tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT next_action_at = lease_until FROM payment_attempts WHERE id = $1`, attemptID).Scan(&sameAsLease)
+	}); err != nil {
+		t.Fatalf("read schedule: %v", err)
+	}
+	if sameAsLease {
+		t.Fatalf("withheld attempt %s still carries the batch lease's next_action_at: nothing rescheduled it", attemptID)
+	}
+	return a
 }
 
 // A suspended (or closed) tenant's pending deposit resolves by poll, with the same posting
@@ -109,8 +119,8 @@ func TestSweeperLoop_NonActiveTenant_CreatedDepositNotDispatched_ThenResumesOnRe
 	if na.State != AttemptCreated || na.ProviderID != nil || na.SubmitCount != 0 {
 		t.Fatalf("suspended tenant's created attempt must be untouched, got state=%s provider=%v submits=%d", na.State, na.ProviderID, na.SubmitCount)
 	}
-	if !nextActionInFuture(t, pool, fNA.tenantID, ids[0]) {
-		t.Fatal("the deferred attempt must be rescheduled on the ordinary backoff")
+	if got := assertDeferred(t, pool, fNA.tenantID, ids[0], 0, 1); got.PollCount != 1 {
+		t.Fatalf("exactly one deferral expected, poll_count=%d", got.PollCount)
 	}
 	if act := mustGetAttempt(t, pool, fAct.tenantID, ids[1]); act.State == AttemptCreated {
 		t.Fatal("control: the active tenant's created attempt must have been dispatched")
@@ -160,6 +170,12 @@ func TestSweeperLoop_NonActiveTenant_NoCascadeChild(t *testing.T) {
 	}
 	if n := attemptsForIntent(t, pool, fNA.tenantID, *atts[0].DepositIntentID); n != 1 {
 		t.Fatalf("a non-active tenant must get no cascade child, got %d attempts", n)
+	}
+	if n := auditActions(t, pool, fNA.tenantID)["payment.cascade_skipped_resolution_only"]; n != 1 {
+		t.Fatalf("the skipped cascade must be audited once (H-CR-6), got %d", n)
+	}
+	if n := auditActions(t, pool, fAct.tenantID)["payment.cascade_skipped_resolution_only"]; n != 0 {
+		t.Fatalf("an active tenant must not get that audit, got %d", n)
 	}
 	if n := attemptsForIntent(t, pool, fAct.tenantID, *atts[1].DepositIntentID); n != 2 {
 		t.Fatalf("control: the active tenant must get its cascade child, got %d attempts", n)
@@ -228,6 +244,11 @@ func TestSweeperLoop_NonActiveTenant_PayoutResolutionOnly(t *testing.T) {
 	if got := mustGetAttempt(t, pool, fNA.tenantID, ambiguous[0].ID); got.State != AttemptAmbiguous || got.SubmitCount != ambiguous[0].SubmitCount {
 		t.Fatalf("suspended tenant's ambiguous payout must not be resent: state=%s submits=%d", got.State, got.SubmitCount)
 	}
+	if got := assertDeferred(t, pool, fNA.tenantID, created[0].ID, created[0].PollCount, 1); got.PollCount != created[0].PollCount+1 {
+		t.Fatalf("created payout: exactly one deferral expected, poll_count %d -> %d", created[0].PollCount, got.PollCount)
+	}
+	// The ambiguous payout is polled first (one reschedule) and then its resend is deferred (a second).
+	assertDeferred(t, pool, fNA.tenantID, ambiguous[0].ID, ambiguous[0].PollCount, 2)
 	// Active control: both WERE driven (one T2 re-claim Withdraw and one T12 resend Withdraw).
 	if got := mustGetAttempt(t, pool, fAct.tenantID, created[1].ID); got.State == AttemptCreated {
 		t.Fatal("control: the active tenant's created payout must be re-claimed")

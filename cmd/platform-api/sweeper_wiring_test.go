@@ -124,7 +124,7 @@ func TestRun_StartsSweeperThroughValidatedConstructor(t *testing.T) {
 		}
 		return true
 	})
-	for _, want := range []string{"buildPaymentsSweeper", "paymentsSweeper.ValidateForLoop", "payments.RunSweeperLoop"} {
+	for _, want := range []string{"buildPaymentsSweeper", "paymentsSweeper.ValidateForLoop", "payments.RunSweeperLoop", "db.Connect", "refuseSyntheticInProduction", "paymentsSweeperWG.Wait"} {
 		if _, ok := first[want]; !ok {
 			t.Fatalf("run() does not call %s", want)
 		}
@@ -134,6 +134,39 @@ func TestRun_StartsSweeperThroughValidatedConstructor(t *testing.T) {
 	}
 	if first["buildPaymentsSweeper"] >= first["paymentsSweeper.ValidateForLoop"] || first["paymentsSweeper.ValidateForLoop"] >= first["payments.RunSweeperLoop"] {
 		t.Fatal("expected build, then validate, then start")
+	}
+	// ValidateForLoop's error must be handled by returning from run().
+	handled := false
+	ast.Inspect(run.Body, func(n ast.Node) bool {
+		ifs, ok := n.(*ast.IfStmt)
+		if !ok || ifs.Init == nil {
+			return true
+		}
+		as, ok := ifs.Init.(*ast.AssignStmt)
+		if !ok || len(as.Rhs) != 1 {
+			return true
+		}
+		call, ok := as.Rhs[0].(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok || sel.Sel.Name != "ValidateForLoop" {
+			return true
+		}
+		for _, st := range ifs.Body.List {
+			if _, ok := st.(*ast.ReturnStmt); ok {
+				handled = true
+			}
+		}
+		return true
+	})
+	if !handled {
+		t.Fatal("run() must return when ValidateForLoop reports an error")
+	}
+	// The shutdown drain wait must exist (H-CR-7): the WaitGroup is waited on in a goroutine.
+	if !insideGo["paymentsSweeperWG.Wait"] {
+		t.Fatal("the sweeper's shutdown wait must be a goroutine selected against a timeout")
 	}
 	if !insideGo["payments.RunSweeperLoop"] {
 		t.Fatal("payments.RunSweeperLoop must run in its own goroutine")

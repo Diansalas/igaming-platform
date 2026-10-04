@@ -107,6 +107,9 @@ type Sweeper struct {
 	// ledger idempotency and the 0107 indexes carry exactly-once). false (the
 	// zero value) is always safe.
 	TenantAdvisoryHint bool
+
+	// testBeforeClaim is a fault-injection seam for tests only (nil in production).
+	testBeforeClaim func(tenantID uuid.UUID)
 }
 
 // NewSweeper returns a Sweeper with §7.3's default bounds.
@@ -326,7 +329,9 @@ func (s *Sweeper) processCreated(ctx context.Context, tenantID uuid.UUID, attemp
 	for {
 		// PRH-2 H (security addendum §2): a non-active tenant is resolution-only.
 		// A created attempt (or a cascade child) is a NEW money-moving call, so it
-		// is deferred exactly like an engaged kill switch - status read in-tx.
+		// is deferred exactly like an engaged kill switch. The status is read in a
+		// separate short tx BEFORE driveCreatedAttempt (NOT in the T2 claim tx; see
+		// ADR 0095 §37.3 safeguard 4 for the residual race).
 		if blocked, err := s.deferIfResolutionOnly(ctx, tenantID, current, "deposit_dispatch"); err != nil || blocked {
 			return err
 		}
@@ -660,7 +665,12 @@ func (s *Sweeper) applyStatusEvidence(ctx context.Context, tx pgx.Tx, intent Dep
 				return err
 			} else if resOnly {
 				recordResolutionOnlyBlock(ctx, "deposit_cascade_child")
-				return nil
+				// Same-tx audit, the twin of payment.cascade_skipped_kill_switch (H-CR-6).
+				return audit.Record(ctx, tx, audit.Entry{
+					TenantID: attempt.TenantID, ActorType: audit.ActorSystem, Action: "payment.cascade_skipped_resolution_only",
+					TargetType: "payment_attempt", TargetID: attempt.ID.String(), Outcome: audit.OutcomeDenied,
+					Metadata: map[string]any{"deposit_intent_id": intent.ID.String()},
+				})
 			}
 			_, err := insertCascadeAttemptIfEligible(ctx, tx, attempt)
 			return err

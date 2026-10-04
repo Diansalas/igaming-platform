@@ -328,10 +328,12 @@ func TestSweeperLoop_NoTransactionOpenDuringProviderCalls(t *testing.T) {
 
 	// Non-vacuity: the probe really sees an open transaction.
 	probeSeen := make(chan int, 1)
+	ctlDone := make(chan struct{})
 	holdDone := make(chan struct{})
 	holdDoneOnce := onceCloser(t, holdDone)
 	holdOpen := make(chan struct{})
 	go func() {
+		defer close(ctlDone)
 		_ = pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
 			if _, err := tx.Exec(ctx, `SELECT 1`); err != nil {
 				return err
@@ -344,6 +346,7 @@ func TestSweeperLoop_NoTransactionOpenDuringProviderCalls(t *testing.T) {
 	waitClosed(t, holdOpen, "the probe control transaction")
 	probeSeen <- idleInTxCount(t, pool)
 	holdDoneOnce()
+	waitClosed(t, ctlDone, "the probe control transaction to commit") // H-CR-12
 	if n := <-probeSeen; n < 1 {
 		t.Fatalf("probe is vacuous: it did not see a deliberately open transaction (%d)", n)
 	}

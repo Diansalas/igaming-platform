@@ -139,6 +139,7 @@ func (s *Sweeper) ValidateForLoop() error {
 
 // SweepPassStats summarises one RunPass (test/observability only).
 type SweepPassStats struct {
+	Listed    bool // the tenant listing succeeded (H-CR-10)
 	Tenants   int
 	Claimed   int
 	Processed int
@@ -189,6 +190,7 @@ func (s *Sweeper) RunPass(ctx context.Context, logger *slog.Logger, offset int) 
 		}
 		return st
 	}
+	st.Listed = true
 	for _, tenantID := range tenants {
 		if ctx.Err() != nil {
 			break
@@ -200,12 +202,21 @@ func (s *Sweeper) RunPass(ctx context.Context, logger *slog.Logger, offset int) 
 }
 
 func (s *Sweeper) sweepTenant(ctx context.Context, logger *slog.Logger, tenantID uuid.UUID, st *SweepPassStats) {
+	if ctx.Err() != nil {
+		return // shutdown: do not claim on a dead context (H-CR-8)
+	}
 	var ids []uuid.UUID
 	if err := s.guarded(func() error {
+		if s.testBeforeClaim != nil {
+			s.testBeforeClaim(tenantID)
+		}
 		var err error
 		ids, err = s.claimBatch(ctx, tenantID)
 		return err
 	}); err != nil {
+		if ctx.Err() != nil && !errors.Is(err, errSweeperPanic) {
+			return // cancelled mid-claim: not a failure
+		}
 		recordSweeperTenantFailure(ctx, "claim")
 		st.Errors++
 		if errors.Is(err, errSweeperPanic) {
@@ -307,7 +318,10 @@ func runSweeperLoop(ctx context.Context, s *Sweeper, logger *slog.Logger, ticks 
 		}()
 		st := s.RunPass(ctx, logger, pass)
 		pass++
-		sweeperLastPassUnix.Store(time.Now().Unix())
+		if st.Listed {
+			// A pass that could not even list tenants did not sweep: leave the gauge so a stalled-sweeper rule fires (H-CR-10).
+			sweeperLastPassUnix.Store(time.Now().Unix())
+		}
 		if sweeperPassesTotal != nil {
 			sweeperPassesTotal.Add(ctx, 1)
 		}
