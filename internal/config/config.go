@@ -225,6 +225,13 @@ type Config struct {
 	// its own).
 	RGEnumerationStalledThreshold time.Duration
 
+	// PaymentsSweepInterval is the tick of the payments sweeper loop
+	// (internal/payments.RunSweeperLoop, PRH-2 H / CP-W1): the deposit poll
+	// AND payout dispatch/resend/resolve. Default 15s is ADR 0095 §7.3's
+	// RECOMMENDATION sweep tick (reversible engineering default, not a
+	// measured value). Env: PAYMENTS_SWEEP_INTERVAL_SECONDS (positive).
+	PaymentsSweepInterval time.Duration
+
 	// Stage 4H-B1 Wave 3 Phase 3 (bonus-engine): the three scheduled
 	// Bonus Engine jobs (internal/bonus.RunDepositSweepSchedulerLoop/
 	// RunCashbackSchedulerLoop/RunExpirySweepSchedulerLoop), mirroring
@@ -452,6 +459,7 @@ func Load() (Config, error) {
 		ReconciliationInterval:           time.Hour,
 		RGEnumerationSweepInterval:       15 * time.Minute,
 		RGEnumerationStalledThreshold:    15 * time.Minute,
+		PaymentsSweepInterval:            15 * time.Second,
 		BonusDepositSweepInterval:        5 * time.Minute,
 		BonusCashbackSweepInterval:       time.Hour,
 		BonusExpirySweepInterval:         time.Hour,
@@ -504,6 +512,16 @@ func Load() (Config, error) {
 			return Config{}, fmt.Errorf("config: RECONCILIATION_INTERVAL_SECONDS must be positive")
 		}
 		cfg.ReconciliationInterval = time.Duration(n) * time.Second
+	}
+	if v := os.Getenv("PAYMENTS_SWEEP_INTERVAL_SECONDS"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return Config{}, fmt.Errorf("config: invalid PAYMENTS_SWEEP_INTERVAL_SECONDS: %w", err)
+		}
+		if n <= 0 {
+			return Config{}, fmt.Errorf("config: PAYMENTS_SWEEP_INTERVAL_SECONDS must be positive")
+		}
+		cfg.PaymentsSweepInterval = time.Duration(n) * time.Second
 	}
 	if v := os.Getenv("RG_ENUMERATION_SWEEP_INTERVAL_SECONDS"); v != "" {
 		n, err := strconv.Atoi(v)

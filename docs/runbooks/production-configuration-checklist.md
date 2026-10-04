@@ -79,6 +79,7 @@ investigating an incident).
 | Field | Env var | Dev default | Notes |
 |---|---|---|---|
 | `ReconciliationInterval` | `RECONCILIATION_INTERVAL_SECONDS` | `3600` (1h) | Ledger-vs-projection drift sweep. Must be positive if set. Not a secret. |
+| `PaymentsSweepInterval` | `PAYMENTS_SWEEP_INTERVAL_SECONDS` | `15` | Payments sweeper tick (deposit poll, payout dispatch/resend/resolve; ADR 0095 §7.3 RECOMMENDATION, §37). Must be positive if set. Not a secret. Non-active tenants are resolution-only. No alert delivery exists (ALERT-DELIVERY-1). |
 | `RGEnumerationSweepInterval` | `RG_ENUMERATION_SWEEP_INTERVAL_SECONDS` | `900` (15 min) | Self-exclusion enumeration-run reconciliation. Deliberately tighter than the reconciliation sweep — a dropped run is a compliance-enforcement gap, not just a financial-drift one. Must be positive if set. Not a secret. |
 | `RGEnumerationStalledThreshold` | `RG_ENUMERATION_STALLED_THRESHOLD_SECONDS` | `900` (15 min) | How old an enumeration run may be before it's reported stalled. Must be positive if set. Not a secret. |
 | `BonusDepositSweepInterval` | `BONUS_DEPOSIT_SWEEP_INTERVAL_SECONDS` | `300` (5 min) | Must be positive if set. Not a secret. |

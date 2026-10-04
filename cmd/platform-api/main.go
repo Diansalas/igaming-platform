@@ -455,6 +455,24 @@ func run() error {
 		bonus.RunExpirySweepSchedulerLoop(ctx, pool, logger, cfg.BonusExpirySweepInterval)
 	}()
 
+	// ---- PRH-2 H (CP-W1): payments sweeper process (begin) -------------------
+	// Activates the deposit poll AND payout dispatch/resend/resolve
+	// (payments.RunSweeperLoop). The Sweeper is built in registrations.go from the
+	// same orchestrator and bundle resolver as the HTTP path, with PayoutKYCGate set
+	// explicitly; ValidateForLoop refuses to start one without it. Non-active
+	// tenants are resolution-only (ADR 0095 §7.3). MOCK adapters only today.
+	paymentsSweeper := buildPaymentsSweeper(pool, orchestrator, providers)
+	if err := paymentsSweeper.ValidateForLoop(); err != nil {
+		return fmt.Errorf("payments sweeper wiring: %w", err)
+	}
+	var paymentsSweeperWG sync.WaitGroup
+	paymentsSweeperWG.Add(1)
+	go func() {
+		defer paymentsSweeperWG.Done()
+		payments.RunSweeperLoop(ctx, paymentsSweeper, logger, cfg.PaymentsSweepInterval)
+	}()
+	// ---- PRH-2 H: payments sweeper process (end) -----------------------------
+
 	server := &http.Server{
 		Addr:              cfg.HTTPAddr,
 		Handler:           handler,
@@ -557,6 +575,21 @@ func run() error {
 	case <-time.After(10 * time.Second):
 		logger.Error("bonus engine scheduler loops did not stop within the shutdown timeout")
 	}
+
+	// ---- PRH-2 H: payments sweeper shutdown drain (begin) --------------------
+	// RunSweeperLoop stops starting items on ctx cancel and drains the item in
+	// flight (payments.SweeperItemTimeout); this is the same bounded wait.
+	paymentsSweeperDone := make(chan struct{})
+	go func() {
+		paymentsSweeperWG.Wait()
+		close(paymentsSweeperDone)
+	}()
+	select {
+	case <-paymentsSweeperDone:
+	case <-time.After(10 * time.Second):
+		logger.Error("payments sweeper did not stop within the shutdown timeout")
+	}
+	// ---- PRH-2 H: payments sweeper shutdown drain (end) ----------------------
 
 	logger.Info("shutdown complete")
 	return nil
