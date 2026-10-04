@@ -8,8 +8,8 @@
   `reviews/k3-design-ledger-finance.md`). **Revision 4 (2026-10-04, `architect`) writes every
   required condition into this ADR** (§24, with the in-place edits listed in the §25 checklist).
   **Before any K3 code:** a short `security` text-delta confirmation of revision 4, which also
-  confirms the MA020 exemption (§18.3), and `ledger-finance` confirmation of the D-* text. **NOT
-  IMPLEMENTED.**
+  confirms the MA020 exemption (§18.3), and `ledger-finance` confirmation of the D-* text. **Implemented
+  2026-10-04 against the MOCK provider (§27); real-PSP behaviour is PROVIDER DEPENDENT.**
 - **Revision history:** revision 1 (`d83a71c`) was reviewed ACCEPT (`product-owner-proxy`) and ACCEPT
   WITH CONDITIONS (`security`, `ledger-finance`). Revision 2 (`6864efa`) applied every condition
   (§16). Revision 3 is described in the table below and in §17a.
@@ -1666,3 +1666,86 @@ additive triggers of RC-1 and the function named in K3-S2, which are listed here
 Revision 4 plus §26 is the binding implementation text. Still open (non-blocking, recorded): Q-IC-1,
 Q-PAY-1 vocabulary (the code uses the §5.1 vocabulary unchanged), Q-PAY-2 (confirmed by the C-17/T-11
 matrices at implementation), Q-POP-1.
+
+## 27. Implementation record (`payments`, K3 implementation, 2026-10-04)
+
+Branch `prh2-k3-impl` (from `prh2-k3-design`, merged with `claude/focused-wright-jw88w9`). Revision 4 plus §26 was
+implemented as written; where this record differs it says so in §27.4.
+
+### 27.1 Deliverable labels
+
+| Deliverable | Label |
+|---|---|
+| Migration 0115 up/down (§20.1 object list), `payment_manual_resolutions` / `_approvals` / `_codes`, `payment_attempt_reference_evidence`, `payment_m2_admits`, guards, fences, policies, CHECKs, grants | `IMPLEMENTED` |
+| M1 (deposit evidence only) and M2 "declare paid" / "declare not paid" via `withdrawal.Complete` / `Fail`, request/approve/reject/cancel/execute service, routes, permissions | `IMPLEMENTED` against the MOCK provider; behaviour against a real PSP is `PROVIDER DEPENDENT` |
+| Reserved provider-tx namespace and ingress validation at every payments site (and the statement fetch) | `IMPLEMENTED` |
+| Reconciliation: persisted statement-line lookup S1-S6, the three standing kinds, typed Y evidence | `IMPLEMENTED` against MOCK statement sources; real statement matching is `PROVIDER DEPENDENT` |
+| Registration of a payment statement source in the platform binary (`payments.DefaultStatementSources.Register` from `cmd/platform-api/main.go`) | `NOT IMPLEMENTED` (E1-owned file; the runbook precondition and the `m2_declare_not_paid` refusal cover it) |
+| Alerts for payout disputes and T14 (PAY-PAYOUT-DISPUTE-ALERT-1) and alert delivery (ALERT-DELIVERY-1) | `NOT IMPLEMENTED` (open; nothing here delivers or pages anyone) |
+| Closed-tenant player-funds path (ADR 0107) | design only, `NOT IMPLEMENTED` |
+| Casino / sportsbook 4xx mapping of the all-sessions ledger trigger's `MR020` (O-1) | `NOT IMPLEMENTED`: the posting is refused by the database (tested), the HTTP layer returns its generic 5xx |
+| Backoffice permissions (`backoffice/src/auth/permissions.ts` + test) | `IMPLEMENTED`; the vitest run was NOT RUN (no `node_modules` in this environment) |
+
+### 27.2 What was verified
+
+Tests (all `-race -tags integration -count=1 -p 1`, private database; PASS unless stated):
+- the K3 suites: `internal/payments` (`TestK3_*`: C-1..C-50, T-1..T-18 and the LF additions as numbered in §12), `internal/reconciliation`
+  (`TestK3_*` S1-S4/C-34..C-36/C-38/C-43/C-44/C-14d/C-19+, plus the edited D2 tests), `internal/providerref`, `internal/httpserver`
+  (`TestForceResolutionAPI_*`: T-12, T-14), `internal/auth`;
+- the C-12 class (concurrent final approvals, M2 versus the sweeper, K2 compensation versus M2, the Step B cap) under `-race -count=50`: PASS;
+- the touched and neighbouring packages in full: `internal/payments`, `internal/reconciliation/...`, `internal/withdrawal`, `internal/adjustment/...`,
+  `internal/ledger/...`, `internal/auth/...`, `internal/providerref/...`, `internal/httpserver`, `internal/jurisdiction/...` (the 0075/0077 chain rollbacks;
+  the 0077 whitelist stays at 11), `internal/db` (after the allowlist addition in §27.4), `cmd/...`: PASS. SWEEP_RESULT
+- migration chain: `cmd/migrate verify` reports every applied migration clean; against this branch alone it reports the **0114 version gap** (E1's
+  migration is not merged here); against this branch plus E1's `de8caba` migration files in a throwaway copy it reports "all applied migrations
+  verified clean, no version gaps", and the C-16/T-18, C-17, C-9c, jurisdiction and `internal/db` chain tests PASS there;
+- `go build ./...`, `go vet ./...` and `go vet -tags integration ./...`, `gofmt -l cmd internal`, `golangci-lint run ./...` (0 issues) and
+  `--build-tags integration` on the changed packages (no finding in a K3 file).
+
+### 27.3 Mutation testing
+
+`docs/plans/payment-readiness/evidence/prh2-k3-mutation-kill.txt`: 106 mutants (every §12 mutant, the revision 4 extras, and extras found
+while testing), run against a throwaway copy of the worktree with a restore and `cmp` after every mutant (0 differences) and a passing control
+run of the unmutated copy. **92 killed, 14 survived**, and each survivor is classified in the evidence file:
+- `S24` (LIKE instead of `left()`): **EQUIVALENT**, as recorded in §12 (T-16); never counted as killed.
+- Equivalent or redundant under an invariant: `S01`/`S39` (`executed_txid = txid_current()`: an `executing` row is only ever visible inside its own
+  transaction because the deferred check forbids it committing), `S03` (`target_state` is derived 1:1 from `kind`), `S20` (the prefix term of the Step B arm is
+  implied by the executed-M2 link), `S36` (a CHECK duplicates the M1 no-link guard), `E02` (the Go allow-list restatement is unreachable behind the
+  insert guard and the R-6 pin), `G14` (idempotent consumers of duplicate persisted lines).
+- Redundant layers: `S10a/b/c`, `SJ2`, `SJ3` (the `executing` predicate in the fences: a second governed posting after `executed` is impossible
+  through the ledger idempotency uniqueness and the two-leg cap), `G05` (the explicit `tenant_id` predicate of the persisted lookup: `FORCE` RLS in
+  `WithTenantSnapshot` is the second line).
+- Mutants killed only by a static pin and not behaviourally (`V02`, `V03`: a second validator downstream also refuses the prefix) are counted killed
+  by the C-9b pin.
+- The first run left 32 survivors, which produced real tests (not allow-list edits): C-5c (the attempt guard's own withdrawal-state re-check), C-45b/c
+  (MOCK reversal eligibility, duplicate-copy eligibility), the C-8 settlement-reference exemption, and `TestK3_X01..X12` (the NULL-safe fence on a
+  house-level hold account, the committed `executed` verifier, evidence back-fill and the evidence INSERT policy, the closed-tenant recount, the
+  payload-hash oracle, the ledger prefix trigger's type and executing binding, the id sentinel, stale-hash approvals, direct reject/cancel/expire/
+  execute attacks, expiry, policy-author approvers).
+
+### 27.4 Deviations and amendments (nothing silently changed)
+
+1. **PostgreSQL's 63-byte identifier limit** truncates two constraint names that §20.1 spells in full: `payment_provider_events_original_provider_reference_no_reserved_prefix`
+   and `payment_statement_lines_original_provider_reference_no_reserved_prefix` exist as `..._no_reserved`. The C-16 object list uses the real names.
+2. **The R-2 system-read policy** is written as §20.1 states it (`state = 'executed'`): it also exposes executed **M1** rows (kind, no money link) to the
+   reconciliation session. The stream selects `m2_*` only. Tightening it to `kind LIKE 'm2_%'` would be a one-line follow-up if security wants it.
+3. **`internal/db/null_arm_replay_static_test.go`** (not in §7) gained one line: `payment_manual_resolution_codes` is added to the family-R `a18SelectAllowlist`
+   (the K2 precedent for `ledger_adjustment_reason_codes`). Without it `TestA18_*` and `TestK2G1_*` fail on the new reference table.
+4. **Audit metadata key names** are `tenant_status_at_submit` and `ever_possibly_sent_at_submission` (the first run wrote a truncated key; fixed and pinned
+   by `TestK3_C15_T15_*`).
+5. **Error mapping.** `MR030`/`MR031` and the other `MR*` codes without a named class map to the closed token `force_resolve_conflict` (409); `MR003`, `MR011`,
+   `MR032`, `42501` map to `force_resolve_not_permitted` (403); `MR014` to `force_resolve_disabled`. A self-approval therefore returns 409, not 403 (T-12/T-14
+   accept either; the body is always one of the closed tokens).
+6. **Id sentinel:** the resolution `id` default is the nil UUID and the guard refuses any other client-supplied value (`MR030`), then forces `gen_random_uuid()`.
+7. **C-17b scope:** the differential matrix tests the `payment_attempts_guard` function (0107 text installed under another name versus head) on shadow
+   tables; the column-discipline trigger is tested separately (`TestK3_T10`).
+8. **Expiry** is 24 hours, copied from K2 (a technical default, not a legal value). Tests backdate it in a scratch database only.
+9. **C-9c exempt list** (closed, in the test): `payment_manual_resolutions.reserved_provider_tx_id`, the two `casino_callback_rejections` provider-tx columns (a
+   rejection log; the ledger trigger covers postings) and `kyc_verifications.provider_reference` (a KYC vendor reference).
+10. **`deploy/init-app-role.sql`:** the K3 block is appended; E1's `de8caba` also appends a block, so the merge will conflict trivially: keep both.
+
+### 27.5 Residuals (unchanged by this implementation)
+
+PAY-PAYOUT-DISPUTE-ALERT-1 and ALERT-DELIVERY-1 (no delivery, no recipients); the `psp_clearing` residual of a declared-paid payout; MA020 stranding after
+an M2; the closed-tenant hold-release path (ADR 0107); real-PSP behaviour; statement-source registration in the binary; casino/sportsbook 4xx mapping
+of `MR020`.
