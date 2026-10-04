@@ -1473,3 +1473,15 @@ semantics and correct the alert rule's ratio guidance.
 **Not done.** `PRH-I4-METRICS-2` (the remaining §8-drafted gauges) - explicitly out of scope,
 registered separately. Orchestrator merge and registry closure - pending; this section is not a
 substitute for that.
+
+### 21.13 A5 body-read deadline was a silent no-op behind the access-log wrapper (PRH-2 I-wire, 2026-10-04)
+
+`armBodyReadDeadline` (A5, §5.4) calls `http.NewResponseController(w).SetReadDeadline`. The access-log
+`statusRecorder` did not implement `Unwrap`, so behind it the call returned `ErrNotSupported`, which the
+function deliberately ignores: **in production the A5 per-request body read deadline was never enforced**
+(only the server-level `ReadTimeout`, 15s, applied; T11 swaps the seam out and so could not see it).
+I-wire added `statusRecorder.Unwrap`, which makes A5 effective: on webhook routes the request context
+now cancels about `BodyReadTimeout` (10s default) after the body read starts instead of 15s. This fails
+safe (rollback, 5xx, provider redelivery). `BodyReadTimeout` must comfortably exceed the worst-case
+webhook processing time, because the same deadline bounds the handler context; see the production
+configuration checklist. Pinned by `TestStatusRecorder_ResponseControllerReachesTheConnectionThroughTheChain`.

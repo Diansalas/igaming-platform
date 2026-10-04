@@ -430,7 +430,7 @@ remain the day-one signal for everything not listed here.
 | Sportsbook / casino-consistency mismatch | `reconciliation.sportsbook_settlement_mismatch` / `reconciliation.casino_consistency_mismatch` (p1) | `stream:sportsbook_settlement` / `stream:casino_consistency` | in the run tx |
 | Casino statement / payment statement mismatch (REPEATABLE READ) | `reconciliation.casino_statement_mismatch` / `reconciliation.payment_statement_mismatch` (p1) | `stream:casino_statement` / `stream:payment_statement:provider:<id>` | after the snapshot commits, detached |
 | A reconciliation run transaction failed | `reconciliation.run_failed` (p1) | `stream:<stream>[:provider:<id>]` | detached |
-| Kill switch engaged (a platform takeover of a tenant-engaged switch is its own alert) | `payment.kill_switch_engaged` (p2) | `switch:<kill_switch_id>` / `switch:<kill_switch_id>:takeover`; `reason_code` is a closed token or `nonconforming` | after commit and after the response has been flushed to the client, detached only |
+| Kill switch engaged (a platform takeover of a tenant-engaged switch is its own alert) | `payment.kill_switch_engaged` (p2) | `switch:<kill_switch_id>` / `switch:<kill_switch_id>:takeover`; `reason_code` is a closed token or `nonconforming` | after commit, then status, headers and body bytes are flushed (the chunked body ends only when the handler returns), then the detached raise |
 | Deposit simulation payload mismatch | `simulation.payment.payload_mismatch` (p3, simulation) | `provider:<provider_id>` | detached; **never delivered, never paged** |
 
 Not wired yet (listed honestly): casino-play and sportsbook-settlement

@@ -178,6 +178,34 @@ func checkAlertWiring(t *testing.T, files map[string]string, minWait time.Durati
 			if len(callsIn(g, func(d *ast.CallExpr) bool { return isMethodOn(d, "alertDispatcherWG", "Done") })) == 0 {
 				v = append(v, "the dispatcher goroutine must call alertDispatcherWG.Done")
 			}
+			// ctx must not be redeclared or reassigned inside the goroutine (a
+			// context.WithoutCancel(ctx) shadow would keep the loop alive past shutdown).
+			ast.Inspect(g, func(x ast.Node) bool {
+				if as, ok := x.(*ast.AssignStmt); ok {
+					for _, l := range as.Lhs {
+						if id, ok := l.(*ast.Ident); ok && id.Name == "ctx" {
+							v = append(v, "the dispatcher goroutine must not redeclare or reassign ctx")
+						}
+					}
+				}
+				return true
+			})
+			// Exactly one alertDispatcherWG.Add(1), before this go statement.
+			adds := callsIn(run.Body, func(d *ast.CallExpr) bool { return isMethodOn(d, "alertDispatcherWG", "Add") })
+			if len(adds) != 1 {
+				v = append(v, fmt.Sprintf("expected exactly one alertDispatcherWG.Add, found %d", len(adds)))
+			} else {
+				lit, ok := (*ast.BasicLit)(nil), false
+				if len(adds[0].Args) == 1 {
+					lit, ok = adds[0].Args[0].(*ast.BasicLit)
+				}
+				if !ok || lit.Value != "1" {
+					v = append(v, "alertDispatcherWG.Add must be Add(1)")
+				}
+				if adds[0].Pos() > g.Pos() {
+					v = append(v, "alertDispatcherWG.Add(1) must come before the dispatcher go statement")
+				}
+			}
 		}
 	}
 	if len(loopCalls) != 1 || inGo != 1 {
@@ -203,6 +231,18 @@ func checkAlertWiring(t *testing.T, files map[string]string, minWait time.Durati
 
 	// (3) a select with <-alertDispatcherDone AND a time.After(N s) case, N s > drain timeout.
 	selects := 0
+	var shutdownPos token.Pos
+	for _, c := range callsIn(run.Body, func(c *ast.CallExpr) bool {
+		s, ok := c.Fun.(*ast.SelectorExpr)
+		return ok && s.Sel.Name == "Shutdown"
+	}) {
+		if shutdownPos == token.NoPos || c.Pos() < shutdownPos {
+			shutdownPos = c.Pos()
+		}
+	}
+	if shutdownPos == token.NoPos {
+		v = append(v, "run must call <server>.Shutdown; the dispatcher drain wait must come after it")
+	}
 	ast.Inspect(run.Body, func(n ast.Node) bool {
 		sel, ok := n.(*ast.SelectStmt)
 		if !ok {
@@ -234,6 +274,9 @@ func checkAlertWiring(t *testing.T, files map[string]string, minWait time.Durati
 			return true
 		}
 		selects++
+		if shutdownPos != token.NoPos && sel.Pos() < shutdownPos {
+			v = append(v, "the dispatcher drain select must come after the server Shutdown call")
+		}
 		if !gotAfter {
 			v = append(v, "the shutdown select on alertDispatcherDone must have a `time.After(N * time.Second)` case (bounded wait)")
 		} else if after <= minWait {
@@ -286,6 +329,7 @@ func run() error {
 		defer alertDispatcherWG.Done()
 		alerting.RunDispatcherLoop(ctx, d, alerting.DefaultLoopInterval)
 	}()
+	server.Shutdown(shutdownCtx)
 	alertDispatcherDone := make(chan struct{})
 	go func() {
 		alertDispatcherWG.Wait()
@@ -315,6 +359,11 @@ func TestMain_AlertDispatcherWiring_NegativeControls(t *testing.T) {
 		{"Wait goroutine never closes Done", "\t\tclose(alertDispatcherDone)\n", ""},
 		{"select without a time.After case", "\tcase <-time.After(15 * time.Second):\n", ""},
 		{"bounded wait not longer than the drain timeout", "15 * time.Second", "10 * time.Second"},
+		{"Add removed", "\talertDispatcherWG.Add(1)\n", ""},
+		{"Add after the go statement", "\talertDispatcherWG.Add(1)\n\tgo func() {\n\t\tdefer alertDispatcherWG.Done()", "\tgo func() {\n\t\tdefer alertDispatcherWG.Done()"},
+		{"ctx shadowed in the goroutine", "\t\tdefer alertDispatcherWG.Done()\n", "\t\tdefer alertDispatcherWG.Done()\n\t\tctx := context.WithoutCancel(ctx)\n"},
+		{"drain moved before Shutdown", "\tserver.Shutdown(shutdownCtx)\n", ""},
+		{"interval changed", "alerting.DefaultLoopInterval)", "30 * time.Second)"},
 		{"mock sink", "alerting.LogSink{Logger: logger}", "alerting.MockSink{}"},
 		{"non-log sink", "alerting.LogSink{Logger: logger}", "newSink()"},
 	}

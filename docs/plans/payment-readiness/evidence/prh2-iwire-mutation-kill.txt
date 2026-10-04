@@ -291,3 +291,23 @@ post-response raise, so the test read the alert before its second occurrence exi
 fixed by waiting for the post-response work (alertinject.WaitUpTo/WaitForKind, bounded failure guard), then the filtered httpserver
 suite passed and the webhook/casino/kill-switch alert tests passed -count=4. build, vet (both tag sets), gofmt clean; golangci-lint
 default tags 0 issues; with --build-tags integration no finding in any file touched this round (pre-existing errcheck noise elsewhere).
+
+Post-final-review correction (F1 deferred flush removed; supersedes the C1 mutant rows above)
+The earlier rows FL-dep, FL-cas (deposit webhook / casino deferred flush removed) are NO LONGER APPLICABLE: the deferred flushes were
+removed (a deferred flush turned a handler panic into HTTP 200). The simulation deferred-flush survivor reported by code review (F3) is
+likewise no longer applicable (that flush is removed), and a re-introduced one is now killed (PAN-sim below). Remaining flush sites,
+exactly two, both INLINE after a response was written: (1) kill-switch engage; (2) simulation payload-mismatch branch.
+PAN-dep | KILLED | deferred flushResponse re-applied in the deposit webhook defer (the 3b8d45b shape) | TestIWire_PaymentWebhookPanic_IsA5xxOnTheWire_AccessLogAgrees_ThenRedeliveryCredits
+PAN-cas | KILLED | deferred flushResponse re-applied in the casino callback defer | TestIWire_CasinoCallbackPanic_IsA5xxOnTheWire_AccessLogAgrees
+PAN-sim | KILLED | deferred flushResponse re-applied in the simulation callback defer | TestFlushResponse_IsNeverCalledFromADefer (static, every handler file)
+FL-ks | KILLED | kill-switch inline flush removed | TestIWire_ResponseFlush_KillSwitchEngage_ClientGetsResponseBeforeTheRaiseCompletes
+FL-sim267 | KILLED | simulation payload-mismatch inline flush removed | TestWriteDepositCallbackError_PayloadMismatchHookRunsAfterTheResponseIsFlushed
+FL-mw | KILLED | statusRecorder.Unwrap removed | kill-switch flush test and TestStatusRecorder_ResponseControllerReachesTheConnectionThroughTheChain
+FL-mw2 | KILLED | statusRecorder.Unwrap removed | TestStatusRecorder_ResponseControllerReachesTheConnectionThroughTheChain alone (A5 SetReadDeadline / Flush through the chain)
+FL-noop | KILLED | flushResponse body made a no-op | kill-switch flush test, simulation hook test
+F6a | KILLED | main.go: alertDispatcherWG.Add(1) deleted | TestMain_AlertDispatcherWiring_LogSinkOnlyNeverMock
+F6b | KILLED | main.go: ctx := context.WithoutCancel(ctx) shadowed in the dispatcher goroutine | same
+F6c | KILLED | main.go: drain block moved before server.Shutdown | same
+F6d | KILLED | main.go: loop interval changed | same
+F6e | KILLED | main.go: Add(2) | same
+(main.go was mutated in the working tree and restored by writing the original back; it is unchanged in the commits.)

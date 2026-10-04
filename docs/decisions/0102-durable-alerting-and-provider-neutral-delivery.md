@@ -507,9 +507,12 @@ The business outcome never depends on the alert row.
   A swallowed alert from a rolled-back tx1 can therefore never flush after a later tx2 in the same
   context commits. An AST test asserts that no `Pending` spans two transactions.
 - **When `Flush` runs (LF F5, SR-8).**
-  - HTTP handlers call `Flush` **after the response has been written and flushed to the client**
-    (`flushResponse`, `http.NewResponseController(w).Flush()`; I-wire §17.10), and before the handler
-    returns. It still runs **inside the ADR 0097 admission hold**, which is released in the
+  - HTTP handlers call `Flush` **after the handler has written its response and before it returns**
+    (a deferred call). No flush is forced for the webhook, casino and simulation-callback paths: the
+    response body is complete only when the handler returns, so body EOF, connection reuse and a
+    buffering proxy still wait for this work (a degraded alert path adds up to about 5s to those
+    handlers, with the admission slot held). Only the kill-switch engage and the simulation
+    payload-mismatch branch flush early (§17.10). It still runs **inside the ADR 0097 admission hold**, which is released in the
     handler's deferred release, so the load stays bounded.
   - The 200 body and its timing are unchanged.
   - Non-HTTP callers (the sweeper and scheduler) call `Flush` right after the commit.
@@ -1635,7 +1638,8 @@ default (`alerting.DefaultLoopInterval`, 15s); making it configurable belongs to
    human, never seeded.
 5. Channel credentials live in Vault/KMS (never in `alert_routes`, config or logs); the adapter never
    logs message bodies.
-6. `alert_dispatcher` is the only platform-service identity the binary sets. The §17.6 wiring is
+6. The dispatcher uses only the `alert_dispatcher` platform-service identity (`main.go` also sets
+   `sportsbook_catalogue_sync` for the catalogue sync, which is not part of this wiring). The §17.6 wiring is
    applied (a separate commit touching only `cmd/platform-api`); security re-checks it, and any later
    change to the wiring (in particular a real sink) goes through the same review.
 7. Route authoring and the dispatcher must not black-hole alerts (code review N-4). A route whose
@@ -1668,8 +1672,10 @@ default (`alerting.DefaultLoopInterval`, 15s); making it configurable belongs to
   no reason code (the ADR requires one only on resolve).
 - Ack-tx commit wait (LF L1): the post-response alert work (the queued raises and `Pending.Flush`) runs
   before the handler returns, so a handler goroutine and its admission slot stay held through that work
-  (bounded by the 5s detached context and at most three attempts). The client already has its response
-  (§17.10). An ack or resolve transaction that waits on a lock the business transaction holds is also
+  (bounded by the 5s detached context and at most three attempts). For the webhook, casino and simulation-generic paths the
+  client's response body (and connection reuse) also waits for this work, because those handlers do not
+  flush early (§17.10); only the kill-switch engage and the simulation payload-mismatch branch send
+  status, headers and body bytes early. An ack or resolve transaction that waits on a lock the business transaction holds is also
   bounded by the request context; that wait is not separately measured.
 - A new K2 breach does not page while the one open alert exists (§17.7 precondition, NOT built).
 - `ALERT-KINDS-DEDICATED-1` (§17.1) and `ALERT-RETENTION-1` (§14 item 6) remain.
@@ -1694,20 +1700,47 @@ followed as its own commit (§17.6).
 
 ### 17.10 Final round (code review C1/C2, QA O-1, LF L1/L2, docs)
 
-- **C1, the response really precedes the post-response work.** net/http buffers a small response until
-  the handler returns, so "after the response" was not true as the client sees it. The kill-switch,
-  deposit webhook, casino callback and deposit-simulation handlers now call `flushResponse` (the
-  `http.NewResponseController(w).Flush()` call; `statusRecorder` exposes `Unwrap`, otherwise Flush is a
-  silent no-op) before the queued raises and `Pending.Flush`. The failure is ignored on purpose. Proved
-  without a wall-clock assertion: the detached alert INSERT blocks on an advisory lock the test holds, the
-  client must receive its response while that raise is blocked, and only then is the lock released and the
-  alert must appear (`iwire_response_flush_integration_test.go`).
+- **C1 as finally built (corrected after the final reviews, F1/F2).** The first version of this round
+  flushed the response from the deferred post-response blocks of the deposit webhook, casino callback and
+  deposit-simulation handlers. Review found that a panic unwinding through such a defer made `Flush` commit
+  an implicit `200 OK`, so the recover middleware's 500 was dropped as a superfluous `WriteHeader` while
+  the access log said 500: a payment or casino provider would treat a rolled-back callback as
+  acknowledged and never redeliver (a lost deposit or casino credit). **Those three deferred flushes are
+  removed.** `flushResponse` (`http.NewResponseController(w).Flush()`) now exists at exactly **two inline
+  sites**, each directly after a response was written and never in a defer:
+  1. kill-switch engage (`payments_kill_switch_handlers.go`), before the post-commit detached raise;
+  2. the deposit-simulation `ErrCallbackPayloadMismatch` branch (`writeDepositCallbackError`), before
+     the payload-mismatch hook.
+
+  What an early flush does and does not do: status line, headers and the body bytes written so far reach
+  the client early. The body has no `Content-Length` (chunked), so its terminating chunk (body EOF,
+  connection reuse, a buffering proxy) is still sent only when the handler returns, after the alert work;
+  the kill-switch test therefore reads status and headers only. For the webhook, casino and
+  simulation-generic paths the post-response alert work runs after the handler's response write but
+  **before the handler returns**; a degraded alert path adds up to about 5s (the detached bound) to those
+  handlers, with the admission slot held (the L1 residual). Guards: `TestFlushResponse_IsNeverCalledFromADefer`
+  (static, every handler file, with a negative control), `TestIWire_PaymentWebhookPanic_...` and
+  `TestIWire_CasinoCallbackPanic_...` (the real middleware chain: wire status 5xx, access log agrees, a
+  redelivery then succeeds), `TestIWire_ResponseFlush_KillSwitchEngage_...` (advisory-lock proof, no
+  wall-clock assertion), and `TestWriteDepositCallbackError_PayloadMismatchHookRunsAfterTheResponseIsFlushed`.
+  Mutants for each remaining site and the three re-applied deferred flushes are in the evidence file.
+- **`statusRecorder.Unwrap` and ADR 0097 A5 (security F-3).** `http.NewResponseController` behind the
+  access-log wrapper returned `ErrNotSupported`, so `armBodyReadDeadline` (A5, ADR 0097 5.4, ending in
+  `ResponseController.SetReadDeadline`) was a silent no-op in production: only the server `ReadTimeout`
+  (15s) applied. With `Unwrap` it is effective: on webhook routes `r.Context()` now cancels about
+  `BodyReadTimeout` (10s default) after the body read starts instead of 15s. This fails safe (the domain
+  transaction rolls back, the provider gets a 5xx and redelivers; the detached alert work is unaffected).
+  `BodyReadTimeout` must therefore comfortably exceed the worst-case webhook processing time (see the
+  production configuration checklist). Pinned by `TestStatusRecorder_ResponseControllerReachesTheConnectionThroughTheChain`
+  (a read deadline set through the real chain cuts off a missing body). Note: `Unwrap` also exposes
+  Hijack and the other controller methods in-process; no handler uses them, and a future use needs review.
 - **C2/QA O-1, the `main.go` wiring test** now pins the structure described in §17.6 (the dispatcher
   goroutine on `ctx`, Wait-in-goroutine closing the done channel, the bounded `select`, 15s greater than
   `DefaultLoopDrainTimeout`) over every non-test `cmd/platform-api` file, with a negative-control
   fixture. `main.go` itself did not change in this round; `alerting.DefaultLoopDrainTimeout` was exported
   so the test compares against the real value.
 - **Test gate note (QA R-2).** `TestResolutionIsolation_*` asserts wall-clock bounds and is not stable
-  under a contended lane (stage 10.3 review R-1). The usual lanes pass `-skip 'TestResolutionIsolation_'`
-  for `./internal/httpserver` and `./internal/payments`; that skip is a pre-existing, documented
+  under a contended lane (stage 10.3 review R-1). The usual lanes pass
+  `-skip 'TestStoreOutage_DoesNotPinPool|TestResolutionIsolation_'` for `./internal/httpserver` and
+  `./internal/payments`; that skip is a pre-existing, documented
   exclusion and nothing from I-wire is skipped.

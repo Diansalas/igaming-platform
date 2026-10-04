@@ -79,7 +79,10 @@ type WebhookAdmissionConfig struct {
 	DomainTxPerTenant int
 	DomainWait        time.Duration
 
-	// BodyReadTimeout is A5's per-request read deadline (§9.1: 10s).
+	// BodyReadTimeout is A5's per-request read deadline (§9.1: 10s). Effective
+	// since statusRecorder.Unwrap (PRH-2 I-wire): it also cancels the webhook
+	// request context, so it must comfortably exceed the worst-case webhook
+	// processing time (validation only requires > 0).
 	BodyReadTimeout time.Duration
 
 	// DirectoryRefresh/DirectoryCap govern the webhook tenant directory
