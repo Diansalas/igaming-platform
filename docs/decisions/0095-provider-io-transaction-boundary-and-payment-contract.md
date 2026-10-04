@@ -6987,3 +6987,56 @@ path (`ClaimForDispatch` -> `DispatchWithdraw` -> `ApplyPayoutResult` -> `Resolv
 `PollPayoutStatus`) against the wired MOCK statement source and requires a clean `payment_statement` run with 0
 mismatches. No production code changed for it. It pins the rendering and reference/settlement writes against the
 F1 false-P1 class; it is MOCK evidence only, and real PSP statement matching remains `PROVIDER DEPENDENT`.
+
+## 39. Amendment — PRH-2 K3: governed force-resolution M1/M2, the reserved namespace and the standing kinds (`payments`, 2026-10-04)
+
+Applies ADR 0101 §10 (revision 4, §24 and §26 governing) as implemented. Where this section and an earlier
+section of this ADR differ, this section wins. Migration 0115 is the schema; the Go side is
+`internal/payments/manual_resolution.go`, `internal/providerref`, `internal/reconciliation/payment_statement*.go`
+and `internal/httpserver/payment_force_resolution_routes.go`. All of it is `IMPLEMENTED` against the MOCK
+provider only; real-PSP behaviour is `PROVIDER DEPENDENT`.
+
+### 39.1 §4.8 rows M1 and M2 (replaces the DESIGNED rows)
+
+| M | What | Governance | Status |
+|---|---|---|---|
+| M1 | Evidence-only resolution of a `disputed` DEPOSIT. The attempt stays `disputed`. No posting, no ledger link. It never clears `pay_captured_unposted`; it only annotates the finding as acknowledged (LF-3). | ADR 0101 §3, §6: ADR 0099 grants, four-eyes recounted in the database, beneficiary guard | IMPLEMENTED (MOCK) |
+| M2 | For an `ambiguous` payout, or a `disputed` payout with `provider_reference_mismatch` / `success_for_never_sent_attempt`, whose withdrawal is `submitted`: declare paid (attempt `succeeded`, `withdrawal.Complete` under `platform-operator-declared:<resolution-id>`) or declare not paid (attempt `declined`, `withdrawal.Fail`). `operator` evidence and an executed resolution in the same transaction. Every other reason (including `amount_asset_mismatch` and `callback_amount_asset_mismatch`, PAYOUT-AMOUNT-DISPUTE-1) is refused. "Declare paid" needs a bound provider reference (D-3). | As M1 | IMPLEMENTED (MOCK) |
+
+M3 is unchanged: no non-test caller; the closed-tenant caller is design only (ADR 0107). §4.3 gains the
+transitions **M2p** (`{ambiguous, disputed}` -> `succeeded`, payout, `operator`) and **M2n** (-> `declined`).
+The attempt-state guard admits them only through `payment_m2_admits` with an executing resolution.
+
+### 39.2 The reserved provider-tx namespace (extends §6 / the providerref contract)
+
+`platform-operator-declared:` (27 bytes) is reserved. `providerref.ValidatePaymentReference` (and the
+`Optional` / plural forms) refuse it with `ReasonReservedNamespace` at every ingress: deposit and payout sync
+replies, both deposit-poll binding sites, payout polls, verified callbacks and statement fetch. Refused echoes
+park the attempt (or, at a poll binding site, record `payments.poll_echo_reference_refused` and back off; a
+refused echo is never an error return). The database backs it with CHECK constraints on `payment_attempts`,
+`payment_provider_events`, `payment_statement_lines`, `payment_attempt_reference_evidence`, `deposit_intents` and
+`withdrawal_requests`, and with a ledger trigger that admits the prefix only in the Step B posting of an executing
+`m2_declare_paid`. The Go constant and the SQL literal are pinned equal by test; `left()` is used, never `LIKE`.
+
+### 39.3 §28.9, INV-IO-7, §12 kinds
+
+- §28.9: an M1 resolution never clears or suppresses the finding; it only annotates it as acknowledged.
+- INV-IO-7 exception: M2 "declare not paid", admitted only with `operator` evidence and an executed four-eyes
+  resolution in the same transaction. Its late-success double-payout risk surfaces as T14 and as the standing kind
+  `pay_declared_not_paid_but_paid`.
+- §12 gains `pay_declared_paid_unconfirmed`, `pay_declared_not_paid_but_paid` and
+  `pay_declared_paid_compensated_but_paid`. They are found by the persisted statement-line lookup across imports
+  (ADR 0101 §9, S1-S6), read from the typed resolution table only (system-shape read of executed resolutions),
+  one finding per exposure. A MOCK import may confirm or clear only when no non-MOCK import exists (D-4/RC-3); a
+  confirming line needs reference, amount and asset to match (D-5). The Y-evidence clearing of unbound parks reads
+  `payment_attempt_reference_evidence`, written in the same transaction as the park (deferred binding constraint).
+
+### 39.4 Residuals (not closed here)
+
+- Alerts for payout disputes and T14: NOT IMPLEMENTED (PAY-PAYOUT-DISPUTE-ALERT-1 and ALERT-DELIVERY-1 open).
+  Nothing in this amendment delivers anything.
+- The platform binary does not yet register a statement source (`payments.DefaultStatementSources.Register` is not
+  called from the E1-owned `cmd/platform-api/main.go`). Until it is, the standing kinds can only be produced by an
+  explicitly wired source and the M2 runbook precondition is unmet by default.
+- The `psp_clearing` residual of a declared-paid payout; MA020 stranding; the closed-tenant hold-release path
+  (ADR 0107, design only). Casino/sportsbook MR020 mapping: recorded in ADR 0101's implementation record.
