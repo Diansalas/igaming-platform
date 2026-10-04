@@ -19,6 +19,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/Diansalas/igaming-platform/internal/alerting"
 	"github.com/Diansalas/igaming-platform/internal/auth"
 	"github.com/Diansalas/igaming-platform/internal/bonus"
 	"github.com/Diansalas/igaming-platform/internal/casino"
@@ -473,6 +474,21 @@ func run() error {
 	}()
 	// ---- PRH-2 H: payments sweeper process (end) -----------------------------
 
+	// ---- PRH-2 I-wire (ALERT-DELIVERY-1): durable alert dispatcher (begin) ----
+	// ADR 0102 6.1/17.6. LogSink only: real channels are PROVIDER DEPENDENT and
+	// HD-PRH2-4-OPS is open, and the MOCK sink is never wired into a binary. No
+	// alert_routes row is seeded, so after this starts every alert is 'unrouted'
+	// until a human configures routes; nothing is delivered to a person. The loop
+	// recovers a panic per pass and drains the pass in flight on shutdown.
+	alertDispatcher := alerting.NewDispatcher(pool, alerting.DefaultDispatcherConfig(), alerting.LogSink{Logger: logger})
+	var alertDispatcherWG sync.WaitGroup
+	alertDispatcherWG.Add(1)
+	go func() {
+		defer alertDispatcherWG.Done()
+		alerting.RunDispatcherLoop(ctx, alertDispatcher, alerting.DefaultLoopInterval)
+	}()
+	// ---- PRH-2 I-wire: durable alert dispatcher (end) -------------------------
+
 	server := &http.Server{
 		Addr:              cfg.HTTPAddr,
 		Handler:           handler,
@@ -590,6 +606,21 @@ func run() error {
 		logger.Error("payments sweeper did not stop within the shutdown timeout")
 	}
 	// ---- PRH-2 H: payments sweeper shutdown drain (end) ----------------------
+
+	// ---- PRH-2 I-wire: alert dispatcher shutdown drain (begin) ----------------
+	// RunDispatcherLoop starts no new pass on ctx cancel and drains the pass in
+	// flight within its DrainTimeout (10s); this bounded wait is longer than that.
+	alertDispatcherDone := make(chan struct{})
+	go func() {
+		alertDispatcherWG.Wait()
+		close(alertDispatcherDone)
+	}()
+	select {
+	case <-alertDispatcherDone:
+	case <-time.After(15 * time.Second):
+		logger.Error("alert dispatcher did not stop within the shutdown timeout")
+	}
+	// ---- PRH-2 I-wire: alert dispatcher shutdown drain (end) ------------------
 
 	logger.Info("shutdown complete")
 	return nil
