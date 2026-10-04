@@ -416,3 +416,31 @@ BEGIN
     END LOOP;
 END
 $$;
+
+-- PRH-2 K3 (migration 0115; ADR 0101): least-privilege, re-asserted on every
+-- run, mirroring migration 0115's own in-migration grant block:
+--   payment_manual_resolution_codes     - migration-written reference data:
+--                                         SELECT only, no write grant.
+--   payment_manual_resolutions          - SELECT/INSERT/UPDATE (the state
+--                                         machine; payload immutable by
+--                                         trigger). Never DELETE.
+--   payment_manual_resolution_approvals - append-only: SELECT/INSERT.
+--   payment_attempt_reference_evidence  - append-only: SELECT/INSERT (the
+--                                         poll's returned reference Y).
+DO $$
+DECLARE
+    t RECORD;
+BEGIN
+    FOR t IN SELECT * FROM (VALUES
+        ('payment_manual_resolution_codes', 'SELECT'),
+        ('payment_manual_resolutions', 'SELECT, INSERT, UPDATE'),
+        ('payment_manual_resolution_approvals', 'SELECT, INSERT'),
+        ('payment_attempt_reference_evidence', 'SELECT, INSERT')) AS v(name, privs)
+    LOOP
+        IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = t.name) THEN
+            EXECUTE format('REVOKE ALL ON %I FROM igaming_runtime', t.name);
+            EXECUTE format('GRANT %s ON %I TO igaming_runtime', t.privs, t.name);
+        END IF;
+    END LOOP;
+END
+$$;
