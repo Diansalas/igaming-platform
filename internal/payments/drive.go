@@ -209,7 +209,7 @@ func (o *Orchestrator) driveCreatedAttempt(
 
 	// Phase C, with a possible further cascade insert. PRH-2 H (LF F1): detached and bounded, so a
 	// phase-B result is always recorded even if ctx is cancelled or its deadline passed during the call.
-	phaseCtx, cancelPhaseC := context.WithTimeout(context.WithoutCancel(ctx), sweeperPhaseCTimeout)
+	phaseCtx, cancelPhaseC := context.WithTimeout(context.WithoutCancel(ctx), depositPhaseCTimeout)
 	defer cancelPhaseC()
 	var cascadeChild *PaymentAttempt
 	err = pool.WithTenant(phaseCtx, attempt.TenantID, func(actx context.Context, tx pgx.Tx) error {

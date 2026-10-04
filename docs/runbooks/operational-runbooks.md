@@ -317,6 +317,7 @@ refusing to start`, `... failed to list tenants`, `... claim batch failed`, `...
 from panic`; `payments_sweeper_items_total{result="error"|"panic"}` and
 `payments_sweeper_tenant_failures_total` rising; `payments_sweeper_resolution_only_blocks_total` rising means
 dispatch is being withheld for a non-active tenant (expected, see step 5).
+`payments_sweeper_passes_total` keeps incrementing on passes that could not list tenants (a database outage), so "passes_total flat" stays quiet then: use `payments_sweeper_last_pass_unix_seconds` (advances only after a successful listing) and `payments_sweeper_tenant_failures_total{phase="list"}`.
 
 1. **Not running at all.** Look for `payments sweeper: refusing to start` (a wiring defect: missing payout KYC
    gate or dependency; `platform-api` also refuses to start on `payments sweeper wiring`). Fix the deployment;

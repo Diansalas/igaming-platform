@@ -165,6 +165,65 @@ func TestRun_StartsSweeperThroughValidatedConstructor(t *testing.T) {
 		t.Fatal("run() must return when ValidateForLoop reports an error")
 	}
 	// The shutdown drain wait must exist (H-CR-7): the WaitGroup is waited on in a goroutine.
+	// The wait goroutine must close paymentsSweeperDone AFTER Wait(), and the select must have a time.After case.
+	waitOK, timeoutOK := false, false
+	ast.Inspect(run.Body, func(n ast.Node) bool {
+		g, ok := n.(*ast.GoStmt)
+		if !ok {
+			return true
+		}
+		var waitPos, closePos token.Pos
+		ast.Inspect(g, func(m ast.Node) bool {
+			c, ok := m.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			if sel, ok := c.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "Wait" {
+				if id, ok := sel.X.(*ast.Ident); ok && id.Name == "paymentsSweeperWG" {
+					waitPos = c.Pos()
+				}
+			}
+			if id, ok := c.Fun.(*ast.Ident); ok && id.Name == "close" && len(c.Args) == 1 {
+				if a, ok := c.Args[0].(*ast.Ident); ok && a.Name == "paymentsSweeperDone" {
+					closePos = c.Pos()
+				}
+			}
+			return true
+		})
+		if waitPos != token.NoPos && closePos != token.NoPos && waitPos < closePos {
+			waitOK = true
+		}
+		return true
+	})
+	ast.Inspect(run.Body, func(n ast.Node) bool {
+		sel, ok := n.(*ast.SelectStmt)
+		if !ok {
+			return true
+		}
+		hasDone, hasAfter := false, false
+		ast.Inspect(sel, func(m ast.Node) bool {
+			if u, ok := m.(*ast.UnaryExpr); ok && u.Op == token.ARROW {
+				switch x := u.X.(type) {
+				case *ast.Ident:
+					if x.Name == "paymentsSweeperDone" {
+						hasDone = true
+					}
+				case *ast.CallExpr:
+					if s2, ok := x.Fun.(*ast.SelectorExpr); ok && s2.Sel.Name == "After" {
+						hasAfter = true
+					}
+				}
+			}
+			return true
+		})
+		if hasDone && hasAfter {
+			timeoutOK = true
+		}
+		return true
+	})
+	if !waitOK || !timeoutOK {
+		t.Fatalf("the shutdown wait must close paymentsSweeperDone after Wait() in one goroutine and select it against time.After (waitOK=%v timeoutOK=%v)", waitOK, timeoutOK)
+	}
 	if !insideGo["paymentsSweeperWG.Wait"] {
 		t.Fatal("the sweeper's shutdown wait must be a goroutine selected against a timeout")
 	}

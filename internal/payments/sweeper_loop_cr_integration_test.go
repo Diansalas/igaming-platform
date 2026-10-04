@@ -6,6 +6,7 @@ package payments
 
 import (
 	"context"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -37,10 +38,14 @@ func TestSweeperLoop_SlowQueryStatusBeyondItemTimeout_LiveLoop_Succeeds(t *testi
 	orch := spy.orchestrator()
 	attempt, ref := pendingDeposit(t, pool, orch, f, "lp-slowq", 5000)
 	spy.Resolve(ref, OutcomeSucceeded, "", false)
-	spy.onQuery = func(int) { time.Sleep(700 * time.Millisecond) }
+	var cut atomic.Bool
+	spy.onQueryCtx = slowUnlessCut(700*time.Millisecond, &cut) // ctx-honouring, like a real adapter
 	st := newLoopSweeper(pool, orch, false, nil).RunPass(context.Background(), nil, 0)
 	if st.Errors != 0 || st.Processed != 1 {
 		t.Fatalf("a slow poll with a live loop must succeed: %+v", st)
+	}
+	if cut.Load() {
+		t.Fatal("QueryStatus was cut by an item deadline with a live loop context (H-CR-1)")
 	}
 	if got := mustGetAttempt(t, pool, f.tenantID, attempt.ID); got.State != AttemptSucceeded {
 		t.Fatalf("expected succeeded, got %s", got.State)

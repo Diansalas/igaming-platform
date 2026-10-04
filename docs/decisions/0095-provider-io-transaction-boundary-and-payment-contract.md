@@ -6904,7 +6904,9 @@ escalation, no state change, and reactivation resumes the work with no special a
    status read inside `driveCreatedAttempt`'s T2 claim transaction (ideally as a predicate in the
    `ClaimCreatedForSubmission` CAS, like the kill switch) and gate the phase-C cascade insert. Registered follow-up.
 5. Resolution-only applies to the SWEEPER only. The HTTP deposit and withdrawal initiation paths read no
-   `tenants.status` (H-SEC-5, pre-existing); suspension must not be described as stopping payments.
+   `tenants.status` (H-SEC-5, pre-existing) and neither path reads brand status (H-SEC-11; resolution-only is
+   tenant-scoped); suspension must not be described as stopping payments. **Registered follow-up; required before
+   real-provider/launch:** a tenant-status and brand-status gate on HTTP deposit and withdrawal initiation.
 
 Judgement call recorded for security: a payout **T12 resend** is classed as a new money-moving call (it issues a
 `Withdraw`), so it is withheld for a non-active tenant even though the attempt was already sent once; "T17
@@ -6920,13 +6922,23 @@ NO deadline of its own: a provider call is bounded by the gate's manifest `CallT
 result obtained in phase B must always be recorded. (A first version applied an 8 s item deadline on every item;
 a deposit provider slower than that left the attempt `submitting` with no reference, never polled.) Deposit phase C
 (`drive.go`, one 3-line hunk) and the poll's result application run on their own context detached from the item
-context and bounded by `sweeperPhaseCTimeout` (5 s), as payout phase C does. **Only after the loop context is
+context and bounded by `depositPhaseCTimeout` (5 s), as payout phase C does. **Only after the loop context is
 cancelled** (`context.AfterFunc`) does an item get `SweeperItemTimeout` (8 s) to drain. That bound is best effort,
 not a guarantee: payout items re-detach with `WithoutCancel` inside `DispatchWithdraw` (up to
 `payoutOutboundCallBound`, 60 s) and `ApplyPayoutResult`/`PollPayoutStatus` (`payoutPhaseCTimeout`), so a payout
 item can outlive both the 8 s budget and `main`'s 10 s bounded wait; `main` then logs that the sweeper did not stop.
-Every such cut-off is money-safe: the lease expires, a `submitting` attempt converges via `QueryStatus` or T6
-ambiguous, and a resend happens only under T12's idempotent-manifest rules. OTel counters carry no tenant, provider
+Every such cut-off is money-safe (no posting, no second send): the lease expires, and a **payout** `submitting`
+attempt converges via `QueryStatus` or T6 ambiguous, with a resend only under T12's idempotent-manifest rules.
+**A deposit is different:** a reference-less `submitting` deposit (a crash, or phase C exceeding
+`depositPhaseCTimeout`, for example under a database lock wait) is never polled; it resolves only by a callback
+matched on the merchant reference or by reconciliation, and there is no deposit T16 (§36 residual).
+**Deposit drain overshoot:** after the drain budget a deposit item can still run its detached phase C (5 s), so
+the worst case is about 8 + 5 s, longer than `main`'s 10 s wait.
+**HTTP path:** the `drive.go` phase-C hunk is unconditional, so it also changes the HTTP cascade-child path
+(`driveCreatedAttempt` with `sweeperDriven=false`, from `deposit_v2.go`): phase C there is now detached and capped
+at 5 s. The HTTP **primary** attempt's phase C (`deposit_v2.go:306`) is still on the request context, so a player
+disconnect during `Deposit()` can leave it `submitting` without a reference (same shape as F1, pre-existing,
+integrity/liveness only, no double credit). Registered follow-up; H does not widen into it. OTel counters carry no tenant, provider
 or attempt label: `payments_sweeper_passes_total`, `payments_sweeper_items_total{result}`,
 `payments_sweeper_tenant_failures_total{phase}`, `payments_sweeper_resolution_only_blocks_total{site}`, and the gauge
 `payments_sweeper_last_pass_unix_seconds` (a stalled sweeper stops advancing it).
@@ -6943,6 +6955,10 @@ or attempt label: `payments_sweeper_passes_total`, `payments_sweeper_items_total
   every later tenant's work in the pass for a long time, and the 60 s batch lease can lapse mid-batch (money-safe
   via the claim CAS, but duplicated work). Before real-provider / payout go-live: a per-tenant pass budget or the
   §7.3 concurrency caps. Registered follow-up.
+  Related (H-SEC-9): items have no deadline in normal operation and the repository sets no `statement_timeout` or
+  `lock_timeout`, so an idle-in-transaction session or a long row lock can stall the single sweeper loop
+  indefinitely (the last-pass gauge stops advancing; nothing pages, ALERT-DELIVERY-1 OPEN), and a deposit cascade
+  chain can take N x 30 s. Fix with the pass budget: a pool-level or per-transaction timeout.
 - **NotSent churn (H-SEC-4).** A persistent NotSent (for example a missing credential) returns the attempt to
   `created` at a fixed 30 s cadence with no counter or escalation; each payout T2 re-claim writes a decision row and
   an audit row. Bounded retry/escalation is required before payout go-live. Registered follow-up.
@@ -6953,6 +6969,11 @@ or attempt label: `payments_sweeper_passes_total`, `payments_sweeper_items_total
   NOT make; the default here is only "no new money moves".
 - **Idempotent-manifest ambiguous payout of a suspended tenant** stays `ambiguous` (funds held) until the poll
   resolves it or the tenant is reactivated; it is never escalated (ledger-finance F4, follow-up).
+- **LF F6 (multi-instance, pre-existing, now reachable):** the loser of a T12 race escalates a row that is being
+  resent (the escalate CAS accepts `submitting`), giving a spurious `escalated_at`; no money effect. Record for the
+  multi-instance rollout.
+- **LF F7:** a non-interactive `created` deposit of a closed tenant, and an ungated `drive.go` cascade child, stay
+  `created` forever and the intent never becomes terminal; no funds are involved.
 - **Deferred attempts back off.** A deferral is a `RescheduleNonTerminal`, which bumps `poll_count`, so a deferred
   attempt waits up to the 30 min backoff cap after reactivation (as for the kill switch). Brands also have
   suspended/closed statuses; resolution-only is tenant-scoped only (flagged to security).

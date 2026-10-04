@@ -8,6 +8,7 @@ package payments
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -27,6 +28,7 @@ type loopProvider struct {
 	deposits, withdraws, queries   int
 	onDeposit, onWithdraw, onQuery func(call int)
 	onQueryCtx                     func(ctx context.Context, call int)
+	onDepositCtx                   func(ctx context.Context, call int)
 	panicCapabilities              bool
 }
 
@@ -53,8 +55,11 @@ func (p *loopProvider) setPanicCapabilities(v bool) {
 func (p *loopProvider) Deposit(ctx context.Context, req DepositRequest) (DepositResult, error) {
 	p.mu.Lock()
 	p.deposits++
-	n, hook := p.deposits, p.onDeposit
+	n, hook, ctxHook := p.deposits, p.onDeposit, p.onDepositCtx
 	p.mu.Unlock()
+	if ctxHook != nil {
+		ctxHook(ctx, n)
+	}
 	if hook != nil {
 		hook(n)
 	}
@@ -272,4 +277,17 @@ func onceCloser(t *testing.T, ch chan struct{}) func() {
 	closer := func() { once.Do(func() { close(ch) }) }
 	t.Cleanup(closer)
 	return closer
+}
+
+// slowUnlessCut returns a ctx-honouring provider hook body: it models a real adapter that is slow (waits d)
+// but gives up when its context is cancelled, and records that it was cut. A regression that puts an item
+// deadline back into normal operation makes it flag `cut`.
+func slowUnlessCut(d time.Duration, cut *atomic.Bool) func(ctx context.Context, call int) {
+	return func(ctx context.Context, _ int) {
+		select {
+		case <-time.After(d):
+		case <-ctx.Done():
+			cut.Store(true)
+		}
+	}
 }

@@ -7,6 +7,7 @@ package payments
 
 import (
 	"context"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -29,7 +30,8 @@ func TestSweeperLoop_SlowDepositBeyondItemTimeout_StillRecordsResult(t *testing.
 	orch := spy.orchestrator()
 	intentID := insertRawDepositIntent(t, pool, f, "pending")
 	attemptID := insertRawCreatedAttempt(t, pool, f.tenantID, intentID, false, time.Now())
-	spy.onDeposit = func(int) { time.Sleep(700 * time.Millisecond) } // forces the call past the (lowered) item budget
+	var cut atomic.Bool
+	spy.onDepositCtx = slowUnlessCut(700*time.Millisecond, &cut) // ctx-honouring: slow past the (lowered) item budget
 
 	if st := newLoopSweeper(pool, orch, false, nil).RunPass(context.Background(), nil, 0); st.Errors != 0 {
 		t.Fatalf("pass: %+v", st)
@@ -37,6 +39,9 @@ func TestSweeperLoop_SlowDepositBeyondItemTimeout_StillRecordsResult(t *testing.
 	got := mustGetAttempt(t, pool, f.tenantID, attemptID)
 	if got.State != AttemptPending || got.ProviderReference == nil {
 		t.Fatalf("a slow Deposit must end pending with a bound reference, got state=%s ref=%v", got.State, got.ProviderReference)
+	}
+	if cut.Load() {
+		t.Fatal("the provider call was cut by an item deadline in normal operation (the original F1 defect)")
 	}
 	if d, _, _ := spy.counts(); d != 1 {
 		t.Fatalf("expected exactly one Deposit, got %d", d)
