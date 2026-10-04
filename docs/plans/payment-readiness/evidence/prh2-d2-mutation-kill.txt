@@ -1,0 +1,216 @@
+PRH-2 D2 - PAY-RECON-PARKED-CAPTURE-1 - mutation-kill evidence
+=================================================================
+Owner: ledger-finance. Date: 2026-10-03. Local run, NOT CI.
+Branch: prh2-d2-recon-parked-capture (base 564c515). Mutated tree: 9ff8757.
+Spec: docs/plans/prh2-hardening-round/reviews/c-ledger-finance.md, "QA F2 ruling" (a) and (c) 1-7.
+ADR: docs/decisions/0095-provider-io-transaction-boundary-and-payment-contract.md §35.
+
+Method
+------
+- Private database lf_d2_20261003 (scratchpad priv_db.sh), fully migrated from the worktree.
+  No role, password, credential or shared-infrastructure change.
+- Each mutant is an exact-anchor string replacement in
+  internal/reconciliation/payment_statement.go (each anchor asserted to occur exactly once),
+  followed by:
+    go test -tags integration -count=1 -run 'TestD2_|TestINVDEP1_|TestPaymentStatement_' ./internal/reconciliation/
+  under set -o pipefail; the log is grepped for FAIL / panic / DATA RACE.
+- After every mutant the file is restored and asserted byte-identical to `git show HEAD:<path>`
+  ("restore verified byte-identical to HEAD after every mutant").
+- Verdict KILLED = non-zero exit with at least one "--- FAIL" of a named test (no build failure).
+
+Results: 17 mutants, 17 KILLED, 0 survived, 0 equivalent.
+
+| Mutant | Change | Verdict | Killed by (top-level tests) |
+|---|---|---|---|
+| M-PRED (LF (c) 7) | both sites reverted to `a.terminalReason == "multiple_success_for_intent"` | KILLED | TestD2_1_BoundPark_MatchedSucceededLine_ReportsCapturedUnposted (all 4 subtests), TestD2_2_BoundPark_Standing_ReportedWhenCoverageExcludesTheLine (all 3), TestD2_3_BoundPark_ClearsOnlyOnReversalLineOrTombstoneOnBoundRef (setup asserts the finding first) |
+| M-PRED-INRUN | matched-line site only reverted | KILLED | TestD2_1, TestD2_2 (its in-run precondition) |
+| M-PRED-STANDING | standing (unmatched, unwindowed) site only reverted | KILLED | TestD2_2, TestD2_3 |
+| M-SYNC-DROP | `sync_amount_mismatch` removed from the bound set | KILLED | TestD2_1, TestD2_2, TestD2_3 |
+| M-POLLAMT-DROP | `poll_amount_mismatch` removed from the bound set | KILLED | TestD2_1, TestD2_2, TestD2_3 |
+| M-POLLREF-DROP | `poll_reference_mismatch` removed from the bound set | KILLED | TestD2_1, TestD2_2 |
+| M-UNBOUND-FLAG-DROP | in-run unbound-park case disabled (`case false && ...`) | KILLED | TestD2_4_ConflictParks, TestD2_5_InvalidReferencePark |
+| M-CONFLICT-DROP | `provider_reference_conflict` removed from isUnboundParkReason | KILLED | TestD2_4_ConflictParks |
+| M-INVALID-DROP | `invalid_provider_reference[:*]` removed from isUnboundParkReason | KILLED | TestD2_5_InvalidReferencePark |
+| M-UNBOUND-STATUS-WIDEN | unbound flag fires on any line status | KILLED | TestD2_4_ConflictParks (pending line) |
+| M-UNBOUND-BYMERCHANT-GATE | unbound flag gated on merchant resolution only | KILLED | TestD2_4_ConflictParks/unbound_reason_on_a_reference_holding_attempt_is_still_flagged |
+| M-BOUND-STATUS-WIDEN | bound in-run flag also fires on a `reversed` line (X15 analogue) | KILLED | TestD2_1 (non_succeeded_line_is_not_flagged_in_run), TestINVDEP1_C5_CapturedUnposted_ClearsOnReversalLineOrTombstone |
+| M-STANDING-UNBOUND-WIDEN | standing case widened to unbound parks | KILLED | TestD2_4_ConflictParks |
+| M-CLEAR-W1-ANY-REVERSAL | clearing widened: any reversal line in the run clears | KILLED | TestD2_3 (reversal_line_or_tombstone_on_another_reference_does_not_clear) |
+| M-CLEAR-W2-ANY-TOMBSTONE | clearing widened: any tombstone of the provider clears | KILLED | TestD2_3 (reversal_line_or_tombstone_on_another_reference_does_not_clear) |
+| M-CLEAR-NEVER | clearing removed (`return true`) | KILLED | TestD2_3, TestD2_4, TestD2_5, TestINVDEP1_C5 |
+| M-UNBOUND-CLEAR-ATTEMPT-REF | unbound clearing read on the attempt's (empty) reference, not the line's | KILLED | TestD2_4, TestD2_5 |
+
+Notes
+-----
+- A first battery at 32dc4f0 (where the unbound rule also required `byMerchant`) had one surviving
+  mutant, "byMerchant dropped", equivalent by construction (an unbound park holds no reference, so
+  a line can only resolve to it by merchant reference). The rule was changed at 9ff8757 to not gate
+  on how the line resolved (more conservative: an unbound reason on a reference-holding attempt stays
+  loud) and pinned by test; the re-run above has no survivor.
+- "An M1 or investigation_status change does not clear it" (LF (c) 3): investigation_status is
+  exercised through ResolveMismatch (TestD2_3 .../investigation_status_resolved_does_not_clear).
+  M1 is NOT IMPLEMENTED (ADR 0101, K3); the emission predicate reads no resolution or prior finding.
+- The D1 poll reasons are inserted by fixture (ApplyDisputeFromNonTerminal on a real pending
+  deposit, with the plan's reason strings); D1's code is not used.
+
+Review round 1 (D2 review P2, tree 3047d28)
+-------------------------------------------
+The pay_captured_unposted detail text at both bound sites now uses the ADR 0101 F13 wording, and
+every D2 finding asserts it. Same method; run with -run 'TestD2_'; restore byte-identical to HEAD.
+
+| Mutant | Change | Verdict | Killed by |
+|---|---|---|---|
+| P2-TEXT-INRUN | matched-line site reverted to "or M1/allocation (BLOCKED)" | KILLED | TestD2_1_BoundPark_MatchedSucceededLine_ReportsCapturedUnposted |
+| P2-TEXT-STANDING | standing site reverted to "or M1/allocation (BLOCKED)" | KILLED | TestD2_2_BoundPark_Standing_ReportedWhenCoverageExcludesTheLine, TestD2_3_BoundPark_ClearsOnlyOnReversalLineOrTombstoneOnBoundRef |
+
+Full suite at 3047d28: go test -race -tags integration -count=1 -p 1 ./internal/reconciliation/... -> ok
+(61.5s), statement ok, 0 FAIL/panic/DATA RACE lines.
+
+Review round 1, D2-1 merchant cross-check (ledger-finance ruling
+docs/plans/prh2-hardening-round/reviews/d2-1-ledger-finance-ruling.md (c) 9)
+--------------------------------------------------------------------------
+Same method and harness (-run 'TestD2_|TestINVDEP1_|TestPaymentStatement_'). The full battery (the
+17 mutants above plus these 6) was re-run at 0d34708: all 23 KILLED, each restore byte-identical to
+HEAD. X4 was re-run at 0c9b3c9 after the (c) 7 test was fixed to order R before R2; at 0d34708 R2
+sorted first, so a consumed B surfaced only through TestD2_9.
+
+| Mutant | Change | Verdict | Killed by (top-level tests) |
+|---|---|---|---|
+| X1-CROSSCHECK-REMOVED | cross-check disabled (`if false && !byMerchant && ...`) | KILLED | TestD2_7 (c1, both c2, c3, c7), TestD2_8 (both), TestD2_9, TestD2_9b |
+| X2-CROSSCHECK-BYMERCHANT-GATE | gated back on `byMerchant` | KILLED | TestD2_7, TestD2_8, TestD2_9, TestD2_9b |
+| X3-CROSSCHECK-STRING-COMPARE | `l.merchant != a.merchantRef` instead of resolving `byMerchant` | KILLED | TestD2_7, TestD2_8 (other operation), TestD2_9, TestD2_9b |
+| X4-B-CONSUMED | B recorded in `matchedBy` | KILLED | TestD2_7/c7_B_not_consumed, TestD2_9 |
+| X5-B-CU-DROPPED | the B captured-unposted step dropped | KILLED | TestD2_7 (c1, c3, c7), TestD2_9b |
+| X6-B-CLEAR-ON-A-REF | B cleared on `a.providerRef` instead of `l.ref` | KILLED | TestD2_9b |
+
+Note on X6: for a deposit line resolved by provider reference, l.ref == a.providerRef by
+construction, so the mutant is observable only on a payout line resolved by SETTLEMENT reference.
+TestD2_9b builds that shape: B is a pending payout moved by fixture to the T10
+invalid_provider_reference:* park.
+
+Post-D1 round (D1 merged at 7adb0c5; main 6836319 merged into this branch at 96c8625)
+---------------------------------------------------------------------------------------
+Production change at a0a6325: the reason sets became one explicit classification table
+(disputeReasonClasses: bound / unbound / bound-if-referenced / excluded; anything else is
+unclassified). The whole battery was re-expressed against the new code and re-run at a0a6325 with
+`$S/d2_mut2.py`. Table rows are matched by key and every anchor is asserted unique. Harness:
+-tags integration -count=1 -run 'TestD2_|TestINVDEP1_|TestPaymentStatement_' ./internal/reconciliation/
+(this includes the unit pin TestD2_P1_*). Private DB lf_d2_20261003 was rebuilt after the cluster
+restart, before this run. Each restore was asserted byte-identical to HEAD.
+
+Results: 32 mutants, 32 KILLED, 0 survived, 0 equivalent. For each new mutant, the failing assertion
+was read in its log and is the intended one: the P1 pin message "... is NOT classified by
+reconciliation", and the R-1 message "B (...) must get no pay_captured_unposted from the line naming
+it".
+
+| Mutant | Change | Verdict | Killed by (top-level tests) |
+|---|---|---|---|
+| M-PRED (LF (c) 7) | both bound sites reverted to `multiple_success_for_intent` only | KILLED | TestD2_1, TestD2_2, TestD2_3, TestD2_7, TestD2_10, TestD2_11 |
+| M-PRED-INRUN | matched-line site only | KILLED | TestD2_1, TestD2_2, TestD2_10, TestD2_11 |
+| M-PRED-STANDING | standing site only | KILLED | TestD2_2, TestD2_3, TestD2_7, TestD2_10, TestD2_11 |
+| M-SYNC-DROP | sync_amount_mismatch row removed | KILLED | TestD2_1, TestD2_2, TestD2_3, TestD2_7, TestD2_P1_EveryPaymentsDepositDisputeReasonIsClassified |
+| M-POLLAMT-DROP | poll_amount_mismatch row removed | KILLED | TestD2_1, TestD2_2, TestD2_3, TestD2_7, TestD2_10, TestD2_P1_Every... |
+| M-POLLREF-DROP | poll_reference_mismatch row removed | KILLED | TestD2_1, TestD2_2, TestD2_10, TestD2_P1_Every... |
+| M-CALLBACK-DROP (P1: an unclassified reason slipping through) | callback_amount_asset_mismatch row removed | KILLED | TestD2_11, TestD2_P1_Every... |
+| M-CALLBACK-UNBOUND | callback_amount_asset_mismatch classified unbound | KILLED | TestD2_11, TestD2_P1_Every... |
+| M-T15-DROP | success_for_never_sent_attempt row removed | KILLED | TestD2_P1_Every..., TestD2_P1_BoundIfReferenced |
+| M-T15-ALWAYS-BOUND | T15 bound even without a reference | KILLED | TestD2_P1_BoundIfReferenced |
+| M-TOMB-ROW-DROP | reversal_tombstone_precedes_success row removed (unclassified) | KILLED | TestD2_P1_Every... |
+| M-TOMB-BOUND | reversal_tombstone_precedes_success classified bound | KILLED | TestD2_6, TestD2_7 (R-1), TestD2_P1_Every..., TestINVDEP1_X16 |
+| M-BARE-INVALID-DROP | bare invalid_provider_reference row removed | KILLED | TestD2_P1_Every... |
+| M-UNCLASSIFIED-AS-BOUND | an unclassified reason defaults to bound | KILLED | TestD2_6, TestD2_P1_UnknownReasonIsUnclassified |
+| M-UNBOUND-FLAG-DROP | in-run unbound-park case disabled | KILLED | TestD2_4, TestD2_5, TestD2_7 |
+| M-CONFLICT-DROP | provider_reference_conflict row removed | KILLED | TestD2_4, TestD2_7, TestD2_P1_Every... |
+| M-INVALID-DROP | invalid_provider_reference:* prefix branch removed | KILLED | TestD2_5, TestD2_9b, TestD2_P1_Every... |
+| M-UNBOUND-STATUS-WIDEN | unbound flag on any line status | KILLED | TestD2_4 |
+| M-UNBOUND-BYMERCHANT-GATE | unbound flag gated on merchant resolution | KILLED | TestD2_4 |
+| M-BOUND-STATUS-WIDEN | bound in-run flag also on a `reversed` line | KILLED | TestD2_1, TestINVDEP1_C5 |
+| M-STANDING-UNBOUND-WIDEN | standing case widened to unbound parks | KILLED | TestD2_4, TestD2_7, TestD2_9b |
+| M-CLEAR-W1-ANY-REVERSAL | any reversal line clears | KILLED | TestD2_3 |
+| M-CLEAR-W2-ANY-TOMBSTONE | any tombstone clears | KILLED | TestD2_3 |
+| M-CLEAR-NEVER | clearing removed | KILLED | TestD2_3, TestD2_4, TestD2_5, TestD2_7, TestD2_9b, TestINVDEP1_C5 |
+| M-UNBOUND-CLEAR-ATTEMPT-REF | unbound clearing on the attempt's reference | KILLED | TestD2_4, TestD2_5 |
+| X1-CROSSCHECK-REMOVED | merchant cross-check removed | KILLED | TestD2_7, TestD2_8, TestD2_9, TestD2_9b |
+| X2-CROSSCHECK-BYMERCHANT-GATE | cross-check gated on byMerchant | KILLED | TestD2_7, TestD2_8, TestD2_9, TestD2_9b |
+| X3-CROSSCHECK-STRING-COMPARE | string compare instead of byMerchant identity | KILLED | TestD2_7, TestD2_8, TestD2_9, TestD2_9b |
+| X4-B-CONSUMED | B recorded in matchedBy | KILLED | TestD2_7 (c7), TestD2_9 |
+| X5-B-CU-DROPPED | B captured-unposted step dropped | KILLED | TestD2_7, TestD2_9b |
+| X6-B-CLEAR-ON-A-REF | B cleared on a.providerRef | KILLED | TestD2_9b |
+| Y-B-ANYDISPUTED (code review R-1) | B step fires for any disputed B (unboundPark guard dropped) | KILLED | TestD2_7/r1_B_bound_or_excluded_reason_gets_no_finding_from_the_line (all three subcases: poll_amount_mismatch, sync_amount_mismatch, reversal_tombstone_precedes_success) |
+
+New tests and the mutants that pin them:
+- TestD2_P1_* (unit classification pin): M-CALLBACK-DROP, M-T15-DROP, M-TOMB-ROW-DROP,
+  M-BARE-INVALID-DROP, M-UNCLASSIFIED-AS-BOUND, M-T15-ALWAYS-BOUND, M-TOMB-BOUND.
+- TestD2_10 (real D1 poll parks via the sweeper, QA D2-F1): M-PRED*, M-POLLAMT-DROP, M-POLLREF-DROP.
+- TestD2_11 (real callback_amount_asset_mismatch park): M-PRED*, M-CALLBACK-DROP, M-CALLBACK-UNBOUND.
+- TestD2_7/r1 (R-1): Y-B-ANYDISPUTED.
+- TestD2_12 (declined attempt + succeeded line = pay_status_mismatch) pins EXISTING behaviour
+  (PAY-POLL-DECLINED-ALERT-RECON-1 (b)); no matcher change was needed. Its mutant targets the pre-D2
+  rule it pins:
+
+| Mutant | Change | Verdict | Killed by |
+|---|---|---|---|
+| Z-DECLINED-STATUS-DROP | `case providerSucceeded && a.state != "succeeded"` also excludes `declined` | KILLED | TestD2_12_DeclinedAttempt_SucceededLine_IsStatusMismatch (only) |
+
+With Z, the battery is 33 mutants, 33 KILLED.
+
+The P2 text mutants (`$S/d2_p2_mut.py`, two mutants) were re-run at a0a6325. Both KILLED:
+P2-TEXT-INRUN by TestD2_1; P2-TEXT-STANDING by TestD2_2, TestD2_3, TestD2_7.
+
+Ledger-finance D2 final review, PM-1 (provider_reference_conflict -> bound-if-referenced)
+----------------------------------------------------------------------------------------
+Change at 3a92cb2, test follow-through at 6c44c24. Same harness, private DB rebuilt for this round.
+
+Full battery at 3a92cb2 (35 mutants: the 33 above plus the two PM-1 mutants): 34 KILLED, 1
+SURVIVED.
+- The survivor was M-UNBOUND-BYMERCHANT-GATE. It was killed only by
+  TestD2_4/unbound_reason_on_a_reference_holding_attempt_is_still_flagged, which used
+  provider_reference_conflict on a reference-holding attempt. PM-1 moved exactly that case onto the
+  BOUND rule, so no test reached the unbound rule with a reference-holding attempt any more.
+- Fix (6c44c24, no assertion loosened): the subtest now runs both
+  provider_reference_conflict (now via the bound rule) and
+  invalid_provider_reference:control_char (still unbound), with identical assertions.
+- The affected and PM-1 mutants were re-run at 6c44c24:
+
+| Mutant | Change | Verdict | Killed by |
+|---|---|---|---|
+| PM1-CONFLICT-UNBOUND | `provider_reference_conflict` row reverted to `reasonUnbound` | KILLED | TestD2_14 (standing finding keyed on X missing: "want exactly one pay_captured_unposted ... got 0"), TestD2_P1_Every... ("classifies it unbound, ledger-finance requires bound-if-referenced") |
+| PM1-CONFLICT-BOUND | row set to `reasonBound` (bound even without a reference) | KILLED | TestD2_14 (phase C park without reference must have no standing finding), TestD2_4, TestD2_7, TestD2_P1_Every... |
+| M-UNBOUND-BYMERCHANT-GATE | unbound flag gated on merchant resolution | KILLED | TestD2_4/unbound_reason_on_a_reference_holding_attempt_is_still_flagged/invalid_provider_reference:control_char |
+| M-UNBOUND-FLAG-DROP | in-run unbound flag disabled | KILLED | TestD2_4, TestD2_5, TestD2_7 |
+| M-INVALID-DROP | invalid_provider_reference:* prefix branch removed | KILLED | TestD2_4, TestD2_5, TestD2_9b, TestD2_P1_Every... |
+
+Battery status at 6c44c24: 35 mutants, 35 KILLED, 0 survived. The other 30 mutants were killed at
+3a92cb2, and their code anchors and killing tests are unchanged by 6c44c24, which is a test-only commit
+adding a subcase.
+
+L1 (default an unclassified reason to bound-if-referenced) was NOT done: it would change
+TestD2_6's existing assertion that an unknown reason produces no finding. No mutant applies.
+
+D2 code final review, D2F-1 (a bound reason with no stored reference is unbound at run time)
+----------------------------------------------------------------------------------------------
+Change at c3ec56d. Same harness, private DB rebuilt for this round. Full battery re-run at c3ec56d:
+36 mutants (the 35 above plus D2F1-BOUND-EMPTY-REF-STAYS-BOUND), 36 KILLED, 0 survived. Each
+restore was byte-identical to HEAD. M-T15-ALWAYS-BOUND was re-anchored to the widened condition (it
+now forces bound for both bound and bound-if-referenced).
+
+| Mutant | Change | Verdict | Killed by |
+|---|---|---|---|
+| D2F1-BOUND-EMPTY-REF-STAYS-BOUND | `c == reasonBound \|\| c == reasonBoundIfReferenced` reverted to `c == reasonBoundIfReferenced` | KILLED | TestD2_15 (all three subtests: the finding is not the in-run line-reference form; "a tombstone on R: expected NO pay_captured_unposted"; "a reversal line naming R: expected NO ..."), TestD2_P1_RuntimeRule ("table class bound with reference \"\": runtime class bound, want unbound") |
+| M-T15-ALWAYS-BOUND | bound/bound-if-referenced resolve to bound without a reference | KILLED | TestD2_4, TestD2_7, TestD2_14, TestD2_15, TestD2_P1_BoundIfReferenced, TestD2_P1_RuntimeRule |
+| PM1-CONFLICT-UNBOUND | conflict row -> unbound | KILLED | TestD2_14, TestD2_P1_Every... |
+| PM1-CONFLICT-BOUND | conflict row -> bound | KILLED | TestD2_P1_Every... only |
+| M-CALLBACK-DROP | callback row removed | KILLED | TestD2_11, TestD2_15, TestD2_P1_Every... |
+| M-CALLBACK-UNBOUND | callback row -> unbound | KILLED | TestD2_11, TestD2_P1_Every... |
+| M-SYNC-DROP / M-POLLAMT-DROP / M-POLLREF-DROP / M-CONFLICT-DROP / M-T15-DROP / M-TOMB-ROW-DROP / M-TOMB-BOUND / M-BARE-INVALID-DROP / M-UNCLASSIFIED-AS-BOUND | P1 table mutants | KILLED (all) | as before; see the log for each |
+| all other mutants (M-PRED*, M-UNBOUND-*, M-BOUND-STATUS-WIDEN, M-STANDING-UNBOUND-WIDEN, M-CLEAR-*, X1-X6, Y-B-ANYDISPUTED, Z-DECLINED-STATUS-DROP) | unchanged | KILLED (all) | unchanged |
+
+Note on PM1-CONFLICT-BOUND. Under D2F-1, bound and bound-if-referenced behave identically at run
+time: both are bound with a reference and unbound without one. So this mutant changes only the
+table, not the runtime behaviour, and only the classification pin catches it, by design: the table
+records what a reason IS, as ledger-finance classified it. At 6c44c24 it was also killed by
+behaviour tests; that is no longer possible, and it is not a test weakness.
+
+Existing tests: every test passed unchanged after D2F-1. No assertion was changed, including the
+bound tests holding a reference (TestD2_1, TestD2_2, TestD2_3, TestD2_10, TestD2_11, TestD2_14):
+standing, and cleared only on their own reference.
