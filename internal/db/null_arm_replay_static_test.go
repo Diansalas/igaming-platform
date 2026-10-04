@@ -108,6 +108,9 @@ var a18SelectAllowlist = map[string]bool{
 	// K2 (0113) family-R reference tables.
 	"financial_control_classifications": true,
 	"ledger_adjustment_reason_codes":    true,
+	// K3 (0115) family-R reference table: the closed finding/basis/context code
+	// vocabulary (ADR 0101 8.1), seeded before FORCE, SELECT-only, no tenant data.
+	"payment_manual_resolution_codes": true,
 }
 
 // a18Policy is one effective (CREATE'd, not yet DROP'd) policy.
