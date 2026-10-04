@@ -65,7 +65,7 @@ func txClosureViolations(fset *token.FileSet, f *ast.File) []string {
 		// A transaction closure is one handed to a pool With* method OR to alerting.InTx
 		// (ADR 0102 I-wire: the evidence-transaction owners open through InTx, which wraps
 		// the same With* call; without this the guard would be blind to sweeper.go).
-		if !ok || !(strings.HasPrefix(calleeName(call), "With") || calleeName(call) == "InTx") {
+		if !ok || (!strings.HasPrefix(calleeName(call), "With") && calleeName(call) != "InTx") {
 			return true
 		}
 		for _, arg := range call.Args {
