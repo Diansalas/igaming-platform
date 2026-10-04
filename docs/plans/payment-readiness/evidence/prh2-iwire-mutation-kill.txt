@@ -228,3 +228,36 @@ Verification of this round (local, not CI; -race -tags integration -count=1, pri
 ./internal/payments/... and ./internal/httpserver/ (-run 'KillSwitch|Alert|Deposit|Payment|Financial|Payout|
 IWire|CasinoRejection|AlertAdmin'). build, vet (both tag sets), gofmt clean; golangci-lint default tags
 0 issues; with --build-tags integration no finding in any file added or changed by this branch.
+
+
+H MERGE RE-RUN (main 22ff3b6 merged by f92cfa3; the main.go dispatcher wiring is the separate commit 1ac87dd).
+Conflict regions (drive.go phase C, sweeper.go processViaQueryStatus) resolved keeping H's detached bounded
+contexts AND alerting.InTx on them (Flush after the nil-error check). Mutants re-run on the merged tree:
+15 rows, 13 KILLED, 2 not killed. H1c and H1s hit a build error on the first pass (the mutated context
+variable became unused); H1cr and H1sr are their corrected re-runs and are KILLED by H's F1 tests, so
+neither detached context can regress to the request context unnoticed. H1x/H1y drop the detached context
+entirely (the H-F1-ALWAYS shape): KILLED. H8 (the S-8 guard blind to InTx closures) KILLED.
+M1 (main.go wires MockSink) and M2 (dispatcher never started) KILLED by TestMain_AlertDispatcherWiring.
+
+P4 | KILLED | park alert not raised in parkDepositAttempt (sync/conflict/invalid/poll/tombstone-poll) | TestIWire_T10Park_SyncAmountMismatch_RaisesP1 (./internal/payments/)
+P9a | KILLED | phase C (drive.go) never flushes the detached retry | TestIWire_CascadeDrivenPark_InjectedRaiseFailure_ParkCommits_DetachedP1Persists (./internal/payments/)
+P9c | KILLED | sweeper never flushes | TestIWire_Sweeper_T10Park_InjectedRaiseFailure_ParkCommits_DetachedP1Persists (./internal/payments/)
+P9b | KILLED | phase C (deposit_v2.go) never flushes | TestIWire_PhaseC_T10Park_InjectedRaiseFailure_ParkCommits_DetachedP1Persists (./internal/payments/)
+P5b | KILLED | receipt site without its alert: callback_amount_asset_mismatch | TestIWire_ReceiptT10_CallbackAmountAssetMismatch_RaisesP1 (./internal/payments/)
+H1c | BUILD-ERROR | phase C opens InTx on the request ctx instead of H's detached phaseCtx (LF F1 regression) | FAIL	github.com/Diansalas/igaming-platform/internal/payments [build failed] FAIL # github.com/Diansalas/igaming-platform/internal/payments [github.com/Diansalas/igaming-platform/internal/payments.test] internal/payments/drive.go:213:2: declared and not used: phaseCtx 
+H1s | BUILD-ERROR | sweeper poll applies on the request ctx instead of H's applyCtx (LF F1 regression) | FAIL	github.com/Diansalas/igaming-platform/internal/payments [build failed] FAIL # github.com/Diansalas/igaming-platform/internal/payments [github.com/Diansalas/igaming-platform/internal/payments.test] internal/payments/sweeper.go:409:2: declared and not used: applyCtx 
+H1x | KILLED | phase C detached ctx dropped entirely (H-F1-ALWAYS style) | TestSweeperLoop_ShutdownDrain_DepositResultNearBudgetStillCommits (./internal/payments/)
+H1y | KILLED | poll apply detached ctx dropped entirely | TestSweeperLoop_ShutdownDrain_PollResultNearBudgetStillCommits (./internal/payments/)
+H8 | KILLED | S-8 guard blind to InTx closures | TestSweeperProcess_NoItemWorkInsideATransactionClosure_S8 (./internal/payments/)
+M1 | KILLED | main.go wires the MOCK sink | TestMain_AlertDispatcherWiring_LogSinkOnlyNeverMock (./cmd/platform-api/)
+M2 | KILLED | main.go never starts the dispatcher loop | TestMain_AlertDispatcherWiring_LogSinkOnlyNeverMock (./cmd/platform-api/)
+A12 | KILLED | both permission gate and platform-scope check removed (the two independent layers) | ['--- FAIL: TestAlertAdmin_Authorization_TenantAndPlayerAndAnonymousRefused (2.28s)']
+H1cr | KILLED | phase C opens InTx on the request ctx instead of H's detached phaseCtx (LF F1 regression) | TestSweeperLoop_ShutdownDrain_DepositResultNearBudgetStillCommits (./internal/payments/)
+H1sr | KILLED | sweeper poll applies on the request ctx instead of H's applyCtx (LF F1 regression) | TestSweeperLoop_ShutdownDrain_PollResultNearBudgetStillCommits (./internal/payments/)
+
+Merged-head verification (local, not CI; private DB, -p 1, -race -tags integration -count=1): ok on
+./internal/alerting/... ./internal/reconciliation/... ./internal/txscope/... ./internal/audit/... ./cmd/...
+./internal/config/... ./internal/payments/... (full, including H's sweeper_loop F1 tests) and ./internal/httpserver/
+(-run 'KillSwitch|Alert|Deposit|Payment|Financial|Payout|IWire|CasinoRejection|AlertAdmin').
+`-count=3 -run TestSweeperLoop_ ./internal/payments/` ok. build, vet (both tag sets), gofmt clean; golangci-lint
+default tags 0 issues.
