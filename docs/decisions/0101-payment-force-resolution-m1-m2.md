@@ -383,7 +383,7 @@ Rule 1: this list is the K3 Touches record. The orchestrator copies it into plan
 recorded by the orchestrator first. For `main.go` and `config.go`, it also waits for E1's merge
 (§20.3).
 
-**K2 SQL objects K3 replaces in 0115 (CREATE OR REPLACE, built on the 0113 body):**
+**K2 SQL objects K3 replaces in 0115 (CREATE OR REPLACE, built on the 0113 body; §20.1 #13-#15 and §26 are the binding list, this paragraph is illustrative):**
 `ledger_governed_fence_allows` (adds branches (b) and (c)); `ledger_adjustment_payload_refusal`
 (adds the M2 Step B compensating-credit causation arm, ADR 0100 §5.4 adopted). Each down migration
 restores the 0113 body byte-for-byte (C-16).
@@ -678,7 +678,7 @@ is added to `ledger_adjustment_payload_refusal` in 0115. Its conditions:
 | **S5: T15i** | An integration test of `success_for_never_sent_attempt` bound-if-referenced and unreferenced, built through the payout `created → disputed` path or a provider-bearing deposit fixture (`payments` provides a test helper; no production change). |
 | **N1 residual** (ADR 0095 §35.4) | Clearing for a conflict park is keyed on the evidencing line's reference, which another attempt may hold. **LF Q-LF-3 ruling (rev 4): approximate attribution ACCEPTED; no second `evidence_kind` in K3.** The S1 detail records the evidencing import id, its `line_no` and the holder attempt. Test **C-34b**: a conflict park is cleared by a reversal on R, and the holder is still reconciled independently. The N1 residual is disclosed in ADR 0095 §35 and `reconciliation-model.md` (LF edits). |
 | **S6: one finding per exposure (rev 4, D-7)** | `checkMerchantAttribution` does not record the named attempt b in `matchedBy` (`payment_statement.go:1107-1113`), so S1 could otherwise emit twice. Findings are deduplicated on **(attempt, evidencing reference) per run**. The lookup deduplicates a line that appears in several overlapping imports (same provider, reference, kind, status, amount, asset and `occurred_at`). Persisted-lookup lines **never feed `pay_duplicate`**, which stays per-import. Tests C-43 (one finding) and C-44 (overlapping imports). |
-| **Eligible evidence (rev 4, D-4)** | Evidence that **clears or confirms** ((c) confirmation, S2, S3, S4 reversal lines) comes only from imports with `is_mock = false`, **unless** the current run's own import is MOCK (MOCK-only dev and test environments). Evidence that **raises** may come from any import. The finding detail names the import id and `is_mock`. Test C-45; mutant "MOCK clearing allowed". |
+| **Eligible evidence (rev 4, D-4)** | Evidence that **clears or confirms** ((c) confirmation, S2, S3, S4 reversal lines) comes only from imports with `is_mock = false`, **unless** NO `is_mock = false` import exists for (tenant, provider) (MOCK-only dev and test environments; §26 RC-3 supersedes "the current run's own import is MOCK"). Evidence that **raises** may come from any import. The finding detail names the import id and `is_mock`. Test C-45; mutant "MOCK clearing allowed". |
 | **Flip** | `d2NoCU(... "an unbound park with no line this run")` (`prh2_d2_parked_capture_integration_test.go:305`) is flipped to assert the standing finding. The ADR 0095 §35.4 "NOT IMPLEMENTED" wording and the `payment_statement.go:126-129` disclosed limit are rewritten by K3 (ledger-finance edits ADR 0095 §35). |
 | **Gate effect** | The ADR 0095 §35.4 B1 gate item 1 (STANDING-1 + POLL-REF-CLEAR-1) is satisfied **against MOCK** once K3 merges. Item 2 (a **delivered** I-wire P1) still fails: ALERT-DELIVERY-1 is OPEN. The real-PSP gate therefore stays closed. |
 
@@ -824,7 +824,7 @@ Notes:
 | C-34 | R | **S1:** an unbound park with a merchant-resolved succeeded line in import 1, and no line in imports 2..N → `pay_captured_unposted` on every run (the flipped `d2NoCU`). **S2:** a reversal in import k clears it from run k on. M1 executed: still reported (LF-3). |
 | C-35 | R | **S3 (TestD2_14 shape):** the reversal line naming X in import 1 clears the bound standing finding in runs 2..N |
 | C-36 | R | **S4:** a `poll_reference_mismatch` park with Y evidence: reversal or tombstone on Y clears; on an unrelated reference it does not; without a Y row only X clears; a Y never comes from audit JSON (mutant: read `echoed_provider_reference` → killed) |
-| C-37 | R/FL | Y evidence write: written only for a valid Y; in the park transaction (fault injection after the evidence insert → nothing persists, as ADR 0095 §36.7 QA C3); a prefixed Y is refused (CHECK and validator); UPDATE/DELETE refused; a duplicate is idempotent only if equal |
+| C-37 | R/FL | Y evidence write: written only for a valid Y; in the park transaction (fault injection after the evidence insert → nothing persists, as ADR 0095 §36.7 QA C3); a prefixed Y is refused (CHECK and validator); UPDATE/DELETE refused; **a duplicate plain INSERT raises** (rev 4 / §26 RC-2; supersedes "idempotent only if equal") |
 | C-38 | R | **T15i:** `success_for_never_sent_attempt` bound-if-referenced integration test (S5) |
 | C-39 | MIG | The 0077 exact whitelist stays at 11 tuples; the `jurisdiction/migration_0075`/`0077` full-chain rollbacks pass with 0115 present; `migration_0097/0098` constraint-name tests pass; I-wire `static_wiring_test.go` passes |
 | C-40 | RLS | K3's own acting-policy probe list (the `internal/adjustment/acting_policies_integration_test.go` pattern, in a new payments test file): each new acting policy is allowed with a valid grant and denied without one |
@@ -1590,3 +1590,79 @@ These mirror `manual_adjustment_routes.go`.
 - Q-POP-1.
 
 No threshold, recipient, retention period or legal rule is set here.
+
+## 26. Implementation-start conditions (applied before any 0115 SQL; `payments`, K3 implementation)
+
+Sources: `reviews/k3-design-r4-security-delta.md` (K3-S1..S3, O-K1..O-K3) and
+`reviews/k3-design-r4-lf-delta.md` (RC-1..RC-3, O-1..O-6). **Where this section and an earlier section
+differ, this section wins** (as §24 does). The §20.1 object list stays exact except for the two
+additive triggers of RC-1 and the function named in K3-S2, which are listed here and are added to
+§20.1 as rows 6a and 6b.
+
+### 26.1 Security conditions
+
+- **K3-S1 (column discipline scope).** `payment_attempts_operator_column_discipline` fires on a
+  `payment_attempts` UPDATE when **either** (i) `NEW.last_evidence_kind = 'operator'` and the state
+  changes, **or** (ii) `financial_acting_gucs_present()` is true, state change or not. In case (ii) the
+  same column rules apply (only `state`, `last_evidence_kind`, `resolved_at`, `next_action_at`,
+  `updated_at` may change; `terminal_reason` unchanged), so a same-state acting UPDATE that sets
+  `provider_reference` or `ledger_transaction_id` from NULL is refused (`MR040`). T-10 adds that case.
+  Tenant-session same-state writes at HEAD are out of scope and unchanged.
+- **K3-S2 (requester re-check at execution).** `payment_manual_resolution_execution_status(p_resolution)`
+  returns, besides the recount, a boolean `requester_valid` = requester's staff row live AND the
+  `payment_force_resolve:request` grant in force (`ledger_adjustment_eligible_grant`, with the
+  invisible-platform fallback) AND the requester's Person unchanged since insert AND (when the tenant
+  status read at execution is `closed`) the requester scope is `platform_acting`. `-> executing` is
+  refused when it is false. T-4 adds "requester grant revoked before execution"; T-8 adds "tenant closed
+  after a tenant-scope submission".
+- **K3-S3 (Touches record; MA020 audit).** The Touches record is corrected: `internal/adjustment/execute.go`
+  is **edited**, and only to add the `open_payment_exposure_at_execution` audit attribute. The value
+  comes from an in-tx DB read of `player_open_payment_exposure(...)` after Step 6 under L2. A read error
+  aborts the transaction (fail closed). The attribute has no effect on control flow. K2's other
+  `internal/adjustment/*` Go code is unchanged. In §7 "Called, NOT edited" this file is no longer listed.
+- **O-K1.** The R-3(v) refusal (§24.3 (v)) applies to transitions **out of** `executing` only (not to a
+  `pending` M2 that is cancelled, rejected or expired because the withdrawal was failed by evidence).
+  Test: a pending M2 can still be cancelled after the withdrawal was failed by sweeper evidence.
+- **O-K2.** Tidy: C-37 (RC-2), §7 "K2 SQL objects" (§20.1 binding), C-16 (D-10 snapshot) are corrected in
+  place or superseded by this section.
+- **O-K3 (residual).** The acting `withdrawal_requests` UPDATE policy could let an acting M2 session set
+  `withdrawal_requests.provider_reference` once from NULL. K3 records this as a residual next to R-K3-11
+  (`withdrawal.Complete`/`Fail` do not write it); it is not extended in K3.
+
+### 26.2 Ledger-finance conditions
+
+- **RC-1 (Person separation of the Step B credit; `v_step_b_arm`).**
+  - `v_step_b_arm` in `ledger_adjustment_payload_refusal` is defined as the **payload-arm conditions
+    only**: reason `compensating_entry`; direction `credit_player`; the causation passes
+    `left(provider_tx_id, 27) = payment_reserved_ref_prefix()` and has type `withdrawal_completed`; the
+    causation is the `ledger_transaction_id` of an executed `m2_declare_paid`; the causation has a
+    `player_withdrawal_hold` leg on `p_wallet` in `p_asset`; the cap check has passed (MA022 returns first);
+    the evidence hash is present. It is assigned only on the Step B path, after all those checks, and is never
+    a parameter.
+  - Person separation is enforced by **two new additive triggers** (neither edits a K2 body):
+    `ledger_adjustment_requests_step_b_person_sep` (BEFORE INSERT on `ledger_adjustment_requests`; the name
+    sorts after `ledger_adjustment_requests_guard`, so it sees the forced `initiated_by_person_id`) and
+    `ledger_adjustment_approvals_step_b_person_sep` (BEFORE INSERT on `ledger_adjustment_approvals`). Each
+    refuses when the causation is an M2 Step B and the Person is the M2's requester or any counted M2
+    approver.
+  - The execution-time re-check sits inside the Step B arm of `ledger_adjustment_payload_refusal`, using
+    `p_self` (at `-> executing` the request and its approvals are visible). If separation fails the arm is
+    false and the function refuses (fail closed).
+  - Both triggers are listed in §20.1 (rows 6a, 6b); the down migration drops them; the C-16/T-18 snapshot
+    covers them. C-28 therefore has a DB site at insert (both triggers) and at execution.
+- **RC-2.** C-37: "a duplicate plain INSERT raises".
+- **RC-3.** MOCK evidence may clear or confirm only when no `is_mock = false` import exists for
+  (tenant, provider). Raising from any import is unchanged. C-45 states the intent.
+- **LF optional, adopted where cheap:** O-2 the entries-fence (b)/(c) lookup also binds
+  `v_tx.idempotency_key` to the resolution; O-3 the execution-status function is named
+  `payment_manual_resolution_execution_status`; O-4 the "no statement source registered" refusal decides from
+  the in-process source registry, never from `payment_statement_imports`; O-5 the Y BEFORE INSERT trigger
+  locks the attempt row `FOR SHARE`; O-6 `open_payment_exposure_at_execution` is derived by calling
+  `player_open_payment_exposure()` inside the execution tx (C-48 adds a case where exposure opens between
+  submission and execution).
+
+### 26.3 Status
+
+Revision 4 plus §26 is the binding implementation text. Still open (non-blocking, recorded): Q-IC-1,
+Q-PAY-1 vocabulary (the code uses the §5.1 vocabulary unchanged), Q-PAY-2 (confirmed by the C-17/T-11
+matrices at implementation), Q-POP-1.
