@@ -139,11 +139,18 @@ func evaluatePayoutGate(ctx context.Context, tx pgx.Tx, kycGate PayoutKYCGate, w
 	return decision, params, nil
 }
 
-// ErrPayoutKYCUnavailable wraps a hard failure evaluating the payout KYC
-// gate itself (a DB error, not a business denial) - fail-closed: the
-// caller's transaction rolls back with no domain effect, exactly like
-// internal/withdrawal.ErrKYCUnavailable's identical contract for the
-// pending_review-time gate.
+// ErrPayoutKYCUnavailable means the payout KYC gate could not reach a
+// compliance decision - fail-closed AND retryable, never a terminal outcome
+// (no Withdraw call, no rejection, no hold release; the request stays
+// `approved`). Two shapes, both mapped to a retryable 503 by the handler:
+//   - evaluatePayoutGate's own failure (the gate returned a Go error, i.e. a
+//     structurally invalid call, or the account lookup failed): the
+//     caller's transaction rolls back with no domain effect and no decision
+//     row, like internal/withdrawal.ErrKYCUnavailable.
+//   - ClaimForDispatch (PAY-KYC-UNAVAIL-1): the evaluator returned
+//     Outcome=unavailable (a genuine DB-read outage contained by its
+//     savepoint). The decision row and the denied `withdrawal.submit.http`
+//     audit COMMIT, then this error is returned. Nothing else commits.
 var ErrPayoutKYCUnavailable = errors.New("payments: payout kyc enforcement evaluation unavailable")
 
 // ErrPayoutKillSwitchEngaged wraps a payout claim/resend refused by the
@@ -282,6 +289,10 @@ func (o *Orchestrator) ClaimForDispatch(ctx context.Context, pool *db.Pool, kycG
 	})
 
 	var result ClaimResult
+	// kycUnavailable is set (and the closure returns nil, so the tx COMMITS)
+	// when the evaluator could not decide: only the decision row and the
+	// denied-submit audit were written, see the branch below.
+	var kycUnavailable bool
 	err := pool.WithTenant(ctx, tenantID, func(actx context.Context, tx pgx.Tx) error {
 		wr, err := withdrawal.LockApprovedForSubmission(actx, tx, requestID)
 		if err != nil {
@@ -291,6 +302,33 @@ func (o *Orchestrator) ClaimForDispatch(ctx context.Context, pool *db.Pool, kycG
 		decision, kycParams, err := evaluatePayoutGate(actx, tx, kycGate, wr)
 		if err != nil {
 			return err
+		}
+		// PAY-KYC-UNAVAIL-1 (security C-F1, LF F-2): an `unavailable`
+		// outcome means the evaluator could not decide - it is never
+		// evidence of a compliance failure. It MUST be handled BEFORE the
+		// deny branch: DenyForCompliance refuses it (N5, ErrKYCUnavailable)
+		// and the resulting rollback would leave no decision row and no
+		// submit audit, and the caller would see a non-retryable 500.
+		// Instead (the LF-I3-3 / F-kyc pattern) record the decision and the
+		// denied-submit audit and COMMIT them - and nothing else: the
+		// request stays `approved`, no attempt row, no ledger posting, no
+		// hold release. The caller maps this to a retryable 503. The
+		// evaluator's reads ran inside a savepoint (KYC-ENF-OUTAGE-1), so
+		// tx is still usable here.
+		if decision.Outcome == kyc.OutcomeUnavailable {
+			if err := kyc.RecordDecision(actx, tx, kycParams, decision); err != nil {
+				return err
+			}
+			if err := audit.Record(actx, tx, audit.Entry{
+				TenantID: tenantID, ActorType: audit.ActorStaff, ActorID: actor.StaffID,
+				Action: "withdrawal.submit.http", TargetType: "withdrawal_request", TargetID: requestID.String(),
+				Outcome: audit.OutcomeDenied, IPAddress: actor.IPAddress, UserAgent: actor.UserAgent, RequestID: actor.RequestID,
+				Metadata: map[string]any{"denied_by_kyc_unavailable": true, "reason_code": decision.Code, "outcome": string(decision.Outcome)},
+			}); err != nil {
+				return err
+			}
+			kycUnavailable = true
+			return nil
 		}
 		if !decision.Allowed {
 			denied, err := withdrawal.DenyForCompliance(actx, tx, requestID, decision, kycParams)
@@ -318,6 +356,15 @@ func (o *Orchestrator) ClaimForDispatch(ctx context.Context, pool *db.Pool, kycG
 			// request stays `approved`, retriable once routing succeeds) -
 			// never a partial claim.
 			return fmt.Errorf("payments: route payout: %w", routeErr)
+		}
+
+		// DECISION-ROWS-1: the ALLOW decision row (and its audit) commits in
+		// the SAME transaction as the domain effect it authorizes (ADR 0096
+		// §3.6); a kill-switch or routing rollback below discards it together
+		// with the claim, so a row never exists for a claim that did not
+		// happen. This transaction contains no provider I/O.
+		if err := kyc.RecordDecision(actx, tx, kycParams, decision); err != nil {
+			return err
 		}
 
 		if err := withdrawal.MarkSubmittedPending(actx, tx, requestID, routedCapability.ProviderID); err != nil {
@@ -370,6 +417,12 @@ func (o *Orchestrator) ClaimForDispatch(ctx context.Context, pool *db.Pool, kycG
 		}
 		return ClaimResult{}, err
 	}
+	if kycUnavailable {
+		// Returned only AFTER the commit above: the decision and the denied
+		// audit are durable. The handler maps ErrPayoutKYCUnavailable to a
+		// retryable 503; the request is still `approved`.
+		return ClaimResult{}, fmt.Errorf("%w: kyc evaluation unavailable, payout not claimed (decision recorded, request left approved)", ErrPayoutKYCUnavailable)
+	}
 	return result, nil
 }
 
@@ -386,13 +439,23 @@ func payoutAdapterCall(provider PaymentProvider, attempt PaymentAttempt) Adapter
 			MerchantReference: attempt.MerchantReference, Amount: attempt.Amount,
 			AssetCode: attempt.AssetCode, PaymentMethod: attempt.PaymentMethod,
 		})
-		if err != nil {
-			return res, ErrorClassAmbiguous, err
-		}
+		// PAY-PAYOUT-ERRREF-1 (code review of PRH-2 C, F1): the reference is
+		// validated BEFORE the error return, exactly like depositAdapterCall
+		// (ADR 0095 §34). An adapter that returns an error TOGETHER with a
+		// hostile reference must park (ErrorClassProviderRefInvalid ->
+		// ApplyPayoutResult's T10), never reach phase C's persistence
+		// (payoutMarkAmbiguousFromSubmitting / AttachProviderReference) raw,
+		// where it would hit the 0099 CHECK, roll back and loop. An empty
+		// reference stays valid (P95-C2: a payout may be accepted without
+		// one). The returned result is SCRUBBED to the outcome alone, so the
+		// raw value cannot leak through gr.Value on any path.
 		if res.ProviderReference != "" {
 			if verr := providerref.Validate("withdraw.provider_reference", res.ProviderReference); verr != nil {
-				return res, ErrorClassProviderRefInvalid, verr
+				return WithdrawResult{Outcome: res.Outcome}, ErrorClassProviderRefInvalid, verr
 			}
+		}
+		if err != nil {
+			return res, ErrorClassAmbiguous, err
 		}
 		switch res.Outcome {
 		case OutcomePending:

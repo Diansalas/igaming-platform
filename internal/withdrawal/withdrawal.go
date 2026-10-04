@@ -172,10 +172,15 @@ func (e *KYCDeniedError) Error() string {
 //     whether the player is actually KYC-cleared - it is NEVER evidence
 //     of a compliance failure, so DenyForCompliance must never convert it
 //     into a terminal `rejected` withdrawal (that would strand a
-//     compliant player's funds behind a mere outage). The caller (the
-//     future ADR 0095 T1p/sweeper payout dispatch path, `internal/
-//     payments`'s own scope) must retry the KYC evaluation later instead
-//     of treating this as a denial.
+//     compliant player's funds behind a mere outage). Its callers are NOT
+//     "future": payments.ClaimForDispatch (ADR 0095 T1p) and the sweeper's
+//     T2/T12 re-checks already exist, and since PRH-2 F-pay
+//     (PAY-KYC-UNAVAIL-1) they handle an `unavailable` outcome BEFORE
+//     reaching DenyForCompliance - ClaimForDispatch commits the decision
+//     and the denied-submit audit and returns a retryable
+//     payments.ErrPayoutKYCUnavailable (503), and the sweeper reschedules
+//     the attempt. This refusal is the defence-in-depth backstop should a
+//     caller ever pass an `unavailable` decision anyway.
 var ErrKYCUnavailable = errors.New("withdrawal: kyc enforcement evaluation unavailable")
 
 // WithdrawalRequest mirrors the withdrawal_requests row
