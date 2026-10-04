@@ -2261,6 +2261,10 @@ open below land and every mandatory reviewer signs off clean.
   re-applied and re-verified KILLED** - see
   `docs/plans/payment-readiness/evidence/prh-i3-mutation-kill.txt`'s
   addendum.
+  *[Note 2026-10-03, PRH-2 F-pay: the N2 mutation-kill record is now
+  complete. MX1 and MX2 are re-killed at the F-pay HEAD and recorded in
+  `docs/plans/payment-readiness/evidence/prh2-fpay-mutation-kill.txt`,
+  next to the FH-7 addendum below.]*
   *[Note 2026-09-28, FH-7: that addendum did not exist when this was
   written (code-reviewer FH-7 re-review N2). The MX1/MX2 kills were
   independently re-verified by code-reviewer on 2026-09-28 and are now
@@ -2427,7 +2431,10 @@ including every package this round touched:
 - **Withdrawal-request and play gates:** IMPLEMENTED, now WITH call-site
   tests (T1/T2 closed).
 - **Deposit gate, payout-dispatch call site:** unchanged from §15 -
-  NOT IMPLEMENTED here, PRH-I1's scope.
+  NOT IMPLEMENTED here, PRH-I1's scope. *[Update 2026-10-03: both were
+  wired by PRH-I1 (`kycgate.go`, `ClaimForDispatch`, the sweeper T2/T12)
+  and `DenyForCompliance` IS wired at T1p. PRH-2 F-pay (§24) adds the
+  `unavailable` handling and the decision rows those call sites lacked.]*
 
 ## 17. Fix round 3 (2026-09-27) — F3, LF-I3-3, and the 50-repeat race ask
 
@@ -3689,9 +3696,15 @@ compliance failure. Converting it into a terminal `rejected` withdrawal
 would strand a possibly-fully-compliant player's funds with no path back
 to `approved`. The request therefore stays exactly `approved`, so a
 later, healthy re-evaluation can still allow or (only then) genuinely
-deny the payout. The future ADR 0095 T1p/sweeper payout-dispatch caller
-(`internal/payments`'s own scope, not touched this round) must treat this
-as retryable, not terminal.
+deny the payout. *[Corrected 2026-10-03, PRH-2 F-pay, security C-F1: the
+original wording called the ADR 0095 T1p/sweeper payout-dispatch caller
+"future". It is not future: `payments.ClaimForDispatch` (T1p) and the
+sweeper's T2/T12 re-checks already existed and passed every denial,
+`unavailable` included, to `DenyForCompliance`. As shipped by F-kyc, N5
+therefore turned a KYC-store outage at staff submit into a non-retryable
+500 with no decision row and no audit. F-pay (§24) handles `unavailable`
+BEFORE `DenyForCompliance` at every one of those callers; N5 remains as
+the defence-in-depth backstop.]*
 
 Test: `TestDenyForCompliance_RefusesUnavailableOutcome`
 (`internal/withdrawal/kyc_gate_integration_test.go`) proves the refusal,
@@ -3872,3 +3885,106 @@ MPLAYREC (both casino and sportsbook) all KILLED.
   HD-KYC-1..8 are unchanged. F-pay (deposit/payout `RecordDecision` call
   sites, N3) is explicitly OUT of this round's scope (payments lane,
   `internal/payments/*` not touched).
+
+## 24. Fix round 10 (2026-10-03, `payments` + `identity-compliance`) — PRH-2 F-pay: PAY-KYC-UNAVAIL-1, DECISION-ROWS-1, PAY-PAYOUT-ERRREF-1
+
+Closes the payments-lane half of the F-kyc review (security C-F1, ledger-
+finance F-2, code review N3/F-3). Scope: `internal/payments/kycgate.go`,
+`payout.go`, `payout_sweep.go` and tests. No migration. No KYC or RG
+threshold is seeded or invented; HD-KYC-1..8 are unchanged.
+
+### 24.1 PAY-KYC-UNAVAIL-1 — CLOSED (against the MOCK provider; a real PSP is PROVIDER DEPENDENT)
+
+**The defect.** After F-kyc's N5, `DenyForCompliance` refuses
+`Outcome=unavailable` (retryable `ErrKYCUnavailable`). Its callers did not
+know: `ClaimForDispatch` passed every `!Allowed` decision to it, so a
+KYC-store outage at staff submit rolled the transaction back and surfaced a
+non-retryable 500, with no decision row and no `withdrawal.submit.http`
+audit. The sweeper's T2/T12 check treated every `!Allowed` as a deny:
+`Escalate` (T16, sticky) plus the `payout_reclaim_denied_by_kyc` audit.
+
+**The fix.**
+- *T1p (`ClaimForDispatch`).* `unavailable` is handled BEFORE the deny
+  branch. The decision row (`kyc.RecordDecision`) and the denied
+  `withdrawal.submit.http` audit are written in the claim transaction and
+  COMMIT (the LF-I3-3 / F-kyc pattern; the evaluator's reads run in a
+  savepoint, so the transaction is still usable). Nothing else commits: the
+  request stays `approved`, there is no attempt row, no hold release, no
+  posting. After the commit the function returns `ErrPayoutKYCUnavailable`,
+  which the existing handler mapping turns into a retryable 503.
+- *Sweeper T2/T12 (`gateAndEscalateOnDeny`).* `unavailable` is a plain
+  `RescheduleNonTerminal`: no `Escalate`, no deny audit, no resend, nothing
+  moved to a terminal state. A genuine deny still escalates exactly as
+  before. Fail-closed in both: `allowed` stays false, so no provider is
+  reached.
+
+**Tests** (`internal/payments/fpay_kyc_integration_test.go`,
+`internal/httpserver/kyc_payout_outage_503_integration_test.go`), all with
+deterministic fault injection (`LOCK TABLE kyc_verifications` held by a
+second transaction plus `SET LOCAL lock_timeout` / a lock_timeout session
+default on the handler pool; no sleeps): submit outage returns 503 (HTTP) /
+`ErrPayoutKYCUnavailable` (package); the request stays `approved`; exactly
+one `unavailable` decision row and one denied submit audit; no attempt row;
+the tenant's `ledger_transactions` count unchanged and the ledger balanced;
+a retry after the outage claims cleanly. T2 and T12 outage: attempt not
+escalated, not resent, rescheduled; one `unavailable` row; no deny audit;
+no posting; T2 recovers on the next healthy tick.
+
+### 24.2 DECISION-ROWS-1 (F-pay) — IMPLEMENTED
+
+One `kyc_enforcement_decisions` row (plus its audit) per evaluation, in the
+caller's own transaction, at: the deposit gate (`KYCEnforcementDepositGate`,
+inside the phase-A transaction and the cascade T2, so the row commits with
+the attempt claim or the declined intent), payout T1p allow (committed with
+the claim; a kill-switch or routing rollback discards it with the claim),
+and T2/T12 (allow, deny and unavailable). T1p deny already recorded one via
+`DenyForCompliance`. None of these transactions contains provider I/O (IC
+F4): routing runs before them and the adapter call after their commit;
+`TestPCG1` and IO-1C stay green. Tests: lock-timeout injection at the
+deposit gate (unavailable row, fail-closed deny) and at T1p/T2/T12; one row
+per evaluation per call site; tenant isolation / RLS between two tenants'
+decision rows. **What a deposit `allow` row means (FP-1, code review):** it records the
+EVALUATION, not the claim. The deposit gate runs before routing (phase A)
+and before the parent lock and claim (cascade T2), so a deposit that passes
+KYC and is then declined (`no_routable_provider`, or a kill-switch decline)
+commits an `allow`/`passed` decision row and its audit although no attempt
+was claimed. An auditor must not infer from such a row that a deposit
+proceeded; the intent and attempt state say what happened. No money is
+affected. The payout path writes its allow row after routing, so it never
+leaves one for an unclaimed payout. Moving the deposit row after routing
+needs edits to `deposit_v2.go`/`drive.go` (other workstream) and was
+deliberately not done. Pinned by
+`TestDepositGate_AllowThenNoRoutableProvider_LeavesOneRowAndMovesNoMoney`.
+A threshold-driven deposit DENY is not exercised here:
+doing so needs a seeded policy, which this round does not invent (the deny
+shape is covered in `internal/kyc`).
+
+### 24.3 PAY-PAYOUT-ERRREF-1 — CLOSED (MOCK; real PSP PROVIDER DEPENDENT)
+
+`payoutAdapterCall` returned the adapter result untouched on the error
+path, before any `providerref` validation, so an error plus a hostile
+reference reached phase C's persistence (attempt reference, withdrawal
+reference) and could hit the 0099 CHECK and loop. The reference is now
+validated BEFORE the `err != nil` return, as `depositAdapterCall` does
+(§34): an invalid one returns `ErrorClassProviderRefInvalid` with a result
+scrubbed to the outcome alone, and phase C parks the attempt (T10,
+`invalid_provider_reference:<reason>`), persisting no raw value. An empty
+reference stays valid (P95-C2). **Payout differs from deposit in one
+respect, disclosed:** payout phase C has no LF-6 same-tenant binding
+pre-check (`foreignReferenceBinding` is deposit-intent shaped), so a VALID
+reference on the error path is bound as before (Ambiguous keeps it for
+`QueryStatus`) and this round adds no pre-check. Registered as a follow-up
+(PAY-PAYOUT-REFBIND-1, see the report). `payoutStatusQuery`'s error path
+returns the status unvalidated too, but its consumer reschedules on any
+error before touching the value, so nothing is persisted; left unchanged.
+
+### 24.4 Labels (round 10)
+
+- **PAY-KYC-UNAVAIL-1:** IMPLEMENTED against the MOCK; real PSP PROVIDER
+  DEPENDENT.
+- **DECISION-ROWS-1 (F-pay):** IMPLEMENTED.
+- **PAY-PAYOUT-ERRREF-1:** IMPLEMENTED against the MOCK; PROVIDER DEPENDENT.
+- **KYC-ENFORCE-1:** remains PARTIALLY IMPLEMENTED (thresholds dormant
+  pending HD-KYC/legal; LF-I3-4, the `RecordDecision`-error half of LF-I3-5,
+  F4/F5 and B7 open). `DenyForCompliance` is wired at T1p.
+- Evidence: `docs/plans/payment-readiness/evidence/prh2-fpay-mutation-kill.txt`.

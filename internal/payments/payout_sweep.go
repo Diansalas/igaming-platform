@@ -22,6 +22,10 @@
 // still false) - a KYC outcome, allow or deny, never itself releases a
 // hold once dispatch may have happened (ADR 0095 §5).
 //
+// An `unavailable` KYC outcome at T2/T12 (a KYC-store outage) is not a deny
+// at all (PAY-KYC-UNAVAIL-1): the attempt is rescheduled for the next tick,
+// never escalated, never resent, never moved to a terminal state.
+//
 // M5 (RV-PRH-I1 ledger-finance review): the INV-IO-15 kill switch
 // (migration 0105, another agent's work - killswitch.go/attempt.go's own
 // CAS predicates, never edited here) is now checked at every claim/resend
@@ -46,6 +50,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Diansalas/igaming-platform/internal/audit"
+	"github.com/Diansalas/igaming-platform/internal/kyc"
 	"github.com/Diansalas/igaming-platform/internal/withdrawal"
 )
 
@@ -91,6 +96,9 @@ func (s *Sweeper) processPayoutAttempt(ctx context.Context, tenantID uuid.UUID, 
 // T2 and T12 both use (item 8's "every claim runs the gate", extended to
 // the re-claim paths as item 5 requires).
 //
+// Every evaluation records one kyc_enforcement_decisions row (DECISION-ROWS-1);
+// an `unavailable` outcome reschedules instead of escalating (PAY-KYC-UNAVAIL-1).
+//
 // L3/B8 (RV-PRH-I1 code review): a repeat KYC deny on an ALREADY-escalated
 // attempt is an idempotent no-op (a plain reschedule of the next look),
 // never a second Escalate call - Escalate's own CAS (`escalated_at IS
@@ -101,12 +109,32 @@ func (s *Sweeper) gateAndEscalateOnDeny(ctx context.Context, tx pgx.Tx, wr withd
 	// BEFORE this function - see reclaimPayoutCreated/resubmitPayoutAmbiguous),
 	// deliberately not duplicated here: unlike a KYC deny, a kill-switch
 	// block is transient and must reschedule, not Escalate.
-	decision, _, err := evaluatePayoutGate(ctx, tx, s.PayoutKYCGate, wr)
+	decision, kycParams, err := evaluatePayoutGate(ctx, tx, s.PayoutKYCGate, wr)
 	if err != nil {
+		return false, err
+	}
+	// DECISION-ROWS-1: exactly one decision row (plus its audit) per
+	// evaluation, in THIS transaction - allow, deny and unavailable alike -
+	// so it commits with whatever this tick then does (the re-claim on
+	// allow; the escalation or reschedule below otherwise). The transaction
+	// holds no provider I/O: phase B runs only after it commits.
+	if err := kyc.RecordDecision(ctx, tx, kycParams, decision); err != nil {
 		return false, err
 	}
 	if decision.Allowed {
 		return true, nil
+	}
+	// PAY-KYC-UNAVAIL-1 (ledger-finance F-2): `unavailable` means the
+	// evaluator could not decide (a KYC-store outage) - it is NOT a deny.
+	// Retry on the next tick with a plain reschedule: no Escalate (T16 is
+	// sticky and needs a human), no denied-by-kyc audit, no resend, nothing
+	// moved to a terminal state because of an outage. Fail-closed: allowed
+	// stays false, so the caller never reaches a provider.
+	if decision.Outcome == kyc.OutcomeUnavailable {
+		if err := RescheduleNonTerminal(ctx, tx, attempt.ID, nextActionAt); err != nil {
+			return false, err
+		}
+		return false, nil
 	}
 	if attempt.EscalatedAt != nil {
 		if err := RescheduleNonTerminal(ctx, tx, attempt.ID, nextActionAt); err != nil {
