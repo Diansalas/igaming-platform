@@ -507,7 +507,8 @@ The business outcome never depends on the alert row.
   A swallowed alert from a rolled-back tx1 can therefore never flush after a later tx2 in the same
   context commits. An AST test asserts that no `Pending` spans two transactions.
 - **When `Flush` runs (LF F5, SR-8).**
-  - HTTP handlers call `Flush` **after the response has been written**, and before the handler
+  - HTTP handlers call `Flush` **after the response has been written and flushed to the client**
+    (`flushResponse`, `http.NewResponseController(w).Flush()`; I-wire §17.10), and before the handler
     returns. It still runs **inside the ADR 0097 admission hold**, which is released in the
     handler's deferred release, so the load stays bounded.
   - The 200 body and its timing are unchanged.
@@ -900,7 +901,8 @@ Also required:
     pending HD-PRH2-4-OPS;
   - HANDOVER rows: `LogSink` IMPLEMENTED; `MockSink` MOCK; real channels PROVIDER DEPENDENT.
 - **Registry (orchestrator):**
-  - ALERT-DELIVERY-1 → IMPLEMENTED (MOCK/log channels);
+  - ALERT-DELIVERY-1 → IMPLEMENTED (MOCK/log channels) (**superseded by §17: it stays OPEN until the
+    closure conditions in the §17 status table hold; log and MOCK channels deliver to no person**);
   - RECON-RUN-FAILED-ALERT-1 closes with I-wire;
   - PAY-P1-MULTISUCCESS-ALERT-1 stays launch-blocking;
   - add ALERT-RETENTION-1.
@@ -1366,8 +1368,9 @@ after): build, vet (plain and `-tags integration`), `gofmt`, the pinned
 
 ## 17. Implementation record — I-wire (2026-10-03)
 
-**Branch:** `prh2-iwire-alert-delivery`, based on `6836319` (D1 merged at `7adb0c5`) and merged with
-main `6cbea70` (D1, D2, F-pay) by merge commit `4df7c4e`; review round 1 fixes follow (§17.9). Implemented by
+**Branch:** `prh2-iwire-alert-delivery`, branched from `6836319` (D1 merged at `7adb0c5`), merged with
+main `6cbea70` (D1, D2, F-pay) by merge commit `4df7c4e` and with main `22ff3b6` (H) by `f92cfa3`; review
+round 1 fixes and the final-round fixes follow (§17.9, §17.10). Implemented by
 payments + devops under the PRH-2 I-wire brief. **No migration** (decision below). Labels:
 
 | Item | Label |
@@ -1379,7 +1382,7 @@ payments + devops under the PRH-2 I-wire brief. **No migration** (decision below
 | `cmd/platform-api/main.go` dispatcher wiring | **IMPLEMENTED** after H merged (main `22ff3b6`), as one separate commit touching only `cmd/platform-api` (LogSink only, never MockSink). **Starting it delivers nothing**: no route exists, so every alert is `unrouted` |
 | Route configuration, recipients, real channel | **NOT IMPLEMENTED** / **PROVIDER DEPENDENT**; HD-PRH2-4-OPS. **No route is seeded.** |
 | §8 rows 12–13 (casino-play and sportsbook-settlement simulation alerts) | **NOT IMPLEMENTED** (p3, simulation, never delivered; deferred) |
-| ALERT-DELIVERY-1 | **stays OPEN** until the dispatcher is wired in `main.go` AND routes exist |
+| ALERT-DELIVERY-1 | **stays OPEN.** The dispatcher is now wired (LogSink only) but that is not closure. ALERT-DELIVERY-1 closes ONLY when ALL of these hold: (a) real `alert_routes` rows exist (authored by a human under SR-7, none seeded); (b) a real channel that is neither the log sink nor the MOCK sink is wired and proven (PROVIDER DEPENDENT); (c) a named human recipient or on-call exists (HD-PRH2-4-OPS); and (d) the §17.7 preconditions are met (the new-K2-breach-pages precondition and the pre-channel list). Wiring the dispatcher is not closure. |
 
 A stored alert, a stored P1 severity or an `unrouted` delivery row is never "delivered". Until the
 dispatcher runs and a human configures routes, nothing leaves the database.
@@ -1559,7 +1562,13 @@ Applied after H merged, as one separate commit touching only `cmd/platform-api` 
 `alert_dispatcher_wiring_test.go`, which pins LogSink-only / never MockSink / exactly one dispatcher).
 The blocks sit after H's delimited PRH-2 H start block and after H's shutdown-drain block, each
 delimited "PRH-2 I-wire". LogSink only: the MOCK sink is never wired in a binary. Now that it is
-wired, every alert is `unrouted` until a human configures routes. The patch, as applied:
+wired, every alert is `unrouted` until a human configures routes. The code below is **equivalent to**
+the applied block, not a verbatim copy: the applied block carries the PRH-2 delimiters and longer comments,
+and `cmd/platform-api/main.go` is authoritative. Its structure is pinned by an AST test over every
+non-test `cmd/platform-api` file (`alert_dispatcher_wiring_test.go`): `RunDispatcherLoop` in a goroutine
+on `ctx`, `Wait` in a goroutine that closes the done channel, a `select` with a `time.After` bound that
+must exceed `alerting.DefaultLoopDrainTimeout` (10s), `LogSink` only, no `MockSink`, with negative
+controls. The patch, as applied:
 
 ```go
 	// ADR 0102 6.1 / I-wire (ALERT-DELIVERY-1): the durable alert dispatcher.
@@ -1597,7 +1606,7 @@ default (`alerting.DefaultLoopInterval`, 15s); making it configurable belongs to
 | Condition | Status |
 |---|---|
 | IC-5: failure-path callers pass a detached, bounded context | MET: `RaiseDetached` detaches its own context at entry; every failure-path caller goes through it |
-| LF test 6: casino_statement / payment_statement via `RaisePostCommit`, `stream:` keys, run and mismatch rows commit under a persistent raise failure | MET (casino_statement under P0001 and 40P01; payment_statement via the same helper) |
+| LF test 6: casino_statement / payment_statement via `RaisePostCommit`, `stream:` keys, run and mismatch rows commit under a persistent raise failure | MET (casino_statement under P0001 and 40P01 by `TestIWire_Recon_CasinoStatementP1_PostCommit_RunCommitsEvenWhenRaiseFailsPersistently`; payment_statement by its own test, `TestIWire_Recon_PaymentStatementP1_PostCommit_RunCommitsUnderPersistentRaiseFailure`. Both go through the shared post-commit helper but each is exercised separately) |
 | LF test 7: stable `stream:` discriminators, `run_id` an attribute | MET |
 | LF test 9: `-race -count=50`, two T10s on one intent plus a concurrent detached flush | MET by `TestIWire_LF9_ConcurrentT10ReceiptsWithDetachedFlush_NoDoublePostingOneAlert` (real `ApplyReceiptEvidence` path, 8 concurrent receipts, half contradicting and half valid, InTxOnly P0001 injection so swallowed raises are re-raised detached concurrently; no receipt errors; at most one posting; disputed => zero postings and exactly one alert, succeeded => one posting and no park alert). `-race -count=50` output, with the observed outcome split, is in the evidence file. The earlier `TestIWire_MultipleSuccess_ConcurrentRaisersDedupToOneAlert` only covers N concurrent raisers of one key (LF test 7/dedup), not LF test 9 |
 | LF test 10: kill-switch engage unaffected by persistent P0001 then 40P01 | MET |
@@ -1626,9 +1635,16 @@ default (`alerting.DefaultLoopInterval`, 15s); making it configurable belongs to
    human, never seeded.
 5. Channel credentials live in Vault/KMS (never in `alert_routes`, config or logs); the adapter never
    logs message bodies.
-6. `alert_dispatcher` is the only platform-service identity the binary sets; security re-checks the
-   `main.go` patch (§17.6) as one commit touching only `cmd/platform-api/main.go`.
-7. ALERT-DELIVERY-1 should block production launch of money-moving flows that rely on these P1s (a
+6. `alert_dispatcher` is the only platform-service identity the binary sets. The §17.6 wiring is
+   applied (a separate commit touching only `cmd/platform-api`); security re-checks it, and any later
+   change to the wiring (in particular a real sink) goes through the same review.
+7. Route authoring and the dispatcher must not black-hole alerts (code review N-4). A route whose
+   `channel_kind` has no sink wired in the binary (today any kind other than `log`, including `mock`) is
+   skipped each pass with only an `alert_dispatcher_no_sink_for_channel` log line: the alert stays
+   undelivered with no delivery row, no metric and no meta-alert. Before real routes exist, route
+   authoring must refuse a `channel_kind` the deployment has no sink for, a `mock` route must be refused
+   outside tests, and a missing sink must be visible as a metric or alert rather than only a log line.
+8. ALERT-DELIVERY-1 should block production launch of money-moving flows that rely on these P1s (a
    human launch decision).
 
 ### 17.8 Known gaps and residuals (honest)
@@ -1650,6 +1666,12 @@ default (`alerting.DefaultLoopInterval`, 15s); making it configurable belongs to
   back the evidence transaction, §17.2); the evidence is then retried by redelivery or the sweeper.
 - Ack and resolve refusals (403/404/409) are not audited (only successful transitions are); ack carries
   no reason code (the ADR requires one only on resolve).
+- Ack-tx commit wait (LF L1): the post-response alert work (the queued raises and `Pending.Flush`) runs
+  before the handler returns, so a handler goroutine and its admission slot stay held through that work
+  (bounded by the 5s detached context and at most three attempts). The client already has its response
+  (§17.10). An ack or resolve transaction that waits on a lock the business transaction holds is also
+  bounded by the request context; that wait is not separately measured.
+- A new K2 breach does not page while the one open alert exists (§17.7 precondition, NOT built).
 - `ALERT-KINDS-DEDICATED-1` (§17.1) and `ALERT-RETENTION-1` (§14 item 6) remain.
 
 ### 17.9 Review round 1 (security, ledger-finance, code review) and what changed
@@ -1669,3 +1691,23 @@ asserted), CR-7 (snapshot count, `Pending` receiver, reachability pin, negative 
 S-8 guard `txClosureViolations` now treats `alerting.InTx` closures as transaction closures, with a
 negative control; this branch's static guards accept H's new code unchanged. The `main.go` wiring
 followed as its own commit (§17.6).
+
+### 17.10 Final round (code review C1/C2, QA O-1, LF L1/L2, docs)
+
+- **C1, the response really precedes the post-response work.** net/http buffers a small response until
+  the handler returns, so "after the response" was not true as the client sees it. The kill-switch,
+  deposit webhook, casino callback and deposit-simulation handlers now call `flushResponse` (the
+  `http.NewResponseController(w).Flush()` call; `statusRecorder` exposes `Unwrap`, otherwise Flush is a
+  silent no-op) before the queued raises and `Pending.Flush`. The failure is ignored on purpose. Proved
+  without a wall-clock assertion: the detached alert INSERT blocks on an advisory lock the test holds, the
+  client must receive its response while that raise is blocked, and only then is the lock released and the
+  alert must appear (`iwire_response_flush_integration_test.go`).
+- **C2/QA O-1, the `main.go` wiring test** now pins the structure described in §17.6 (the dispatcher
+  goroutine on `ctx`, Wait-in-goroutine closing the done channel, the bounded `select`, 15s greater than
+  `DefaultLoopDrainTimeout`) over every non-test `cmd/platform-api` file, with a negative-control
+  fixture. `main.go` itself did not change in this round; `alerting.DefaultLoopDrainTimeout` was exported
+  so the test compares against the real value.
+- **Test gate note (QA R-2).** `TestResolutionIsolation_*` asserts wall-clock bounds and is not stable
+  under a contended lane (stage 10.3 review R-1). The usual lanes pass `-skip 'TestResolutionIsolation_'`
+  for `./internal/httpserver` and `./internal/payments`; that skip is a pre-existing, documented
+  exclusion and nothing from I-wire is skipped.

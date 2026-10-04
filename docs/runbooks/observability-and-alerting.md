@@ -407,9 +407,11 @@ ack/resolve endpoints exist. **The dispatcher IS started in
 `cmd/platform-api/main.go`** (LogSink only, after the H sweeper merge) but
 **no route exists**, so **no alert is delivered to anyone**: a stored
 alert, a stored P1 severity or an `unrouted` delivery row is NOT a
-delivery. ALERT-DELIVERY-1 stays OPEN until the dispatcher is wired AND a
-human has configured real routes (HD-PRH2-4-OPS) over a real channel
-(PROVIDER DEPENDENT). This section supersedes the "log-only" framing of §1/§2
+delivery. ALERT-DELIVERY-1 stays OPEN. It closes only when real routes
+exist (authored by a human, none seeded), a real channel that is neither the
+log sink nor the MOCK sink is wired (PROVIDER DEPENDENT), a named human
+recipient or on-call exists (HD-PRH2-4-OPS) and the ADR 0102 §17.7
+preconditions are met. Wiring the dispatcher is not closure. This section supersedes the "log-only" framing of §1/§2
 only for the event classes below; the log lines in §1/§2 are retained and
 remain the day-one signal for everything not listed here.
 
@@ -428,13 +430,19 @@ remain the day-one signal for everything not listed here.
 | Sportsbook / casino-consistency mismatch | `reconciliation.sportsbook_settlement_mismatch` / `reconciliation.casino_consistency_mismatch` (p1) | `stream:sportsbook_settlement` / `stream:casino_consistency` | in the run tx |
 | Casino statement / payment statement mismatch (REPEATABLE READ) | `reconciliation.casino_statement_mismatch` / `reconciliation.payment_statement_mismatch` (p1) | `stream:casino_statement` / `stream:payment_statement:provider:<id>` | after the snapshot commits, detached |
 | A reconciliation run transaction failed | `reconciliation.run_failed` (p1) | `stream:<stream>[:provider:<id>]` | detached |
-| Kill switch engaged (a platform takeover of a tenant-engaged switch is its own alert) | `payment.kill_switch_engaged` (p2) | `switch:<kill_switch_id>` / `switch:<kill_switch_id>:takeover`; `reason_code` is a closed token or `nonconforming` | after commit and after the response, detached only |
+| Kill switch engaged (a platform takeover of a tenant-engaged switch is its own alert) | `payment.kill_switch_engaged` (p2) | `switch:<kill_switch_id>` / `switch:<kill_switch_id>:takeover`; `reason_code` is a closed token or `nonconforming` | after commit and after the response has been flushed to the client, detached only |
 | Deposit simulation payload mismatch | `simulation.payment.payload_mismatch` (p3, simulation) | `provider:<provider_id>` | detached; **never delivered, never paged** |
 
 Not wired yet (listed honestly): casino-play and sportsbook-settlement
 simulation alerts (ADR 0102 §8 rows 12-13, p3, never delivered anyway); payout
 disputes (F-pay's surface); the terminal amount-mismatch audit
 `payments.callback_amount_asset_mismatch_terminal`.
+
+**Route and channel caution (ADR 0102 17.7 item 7).** A route whose `channel_kind` has no sink wired in
+the binary (today anything other than `log`, including `mock`) is skipped on every pass with only an
+`alert_dispatcher_no_sink_for_channel` log line: no delivery row, no metric, no meta-alert, and the alert
+stays undelivered. Do not author such a route as a placeholder. A `log` route "delivers" only to the
+application log, which is not a person.
 
 **Routing matrix (PLACEHOLDER, pending HD-PRH2-4):** p1 = integrity or money
 correctness; p2 = operational safety event or alerting meta-warning; p3 =
