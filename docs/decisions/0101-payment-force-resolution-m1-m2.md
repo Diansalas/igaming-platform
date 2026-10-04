@@ -3,9 +3,13 @@
 - **Status:** revision 2 ACCEPTED (2026-09-28): `security` CONFIRMED WITH CONDITIONS (C-3, C-4) and
   `ledger-finance` CONFIRMED WITH CONDITIONS (K3-a). **Revision 3 PROPOSED (2026-10-04, `architect`,
   K3 design phase, base `3517980`).** Revision 3 is a refresh plus a scope decision. It does not
-  reopen any revision-2 ruling. Its **deltas** (§18 folds, §8.6 schema, §9.2 rules, §12.2 tests and
-  the open questions in §22) need `security` and `ledger-finance` confirmation **before any K3
-  code**. **NOT IMPLEMENTED.**
+  reopen any revision-2 ruling. **Revision 3 reviews:** `security` ACCEPT WITH CONDITIONS (R-1..R-9,
+  `reviews/k3-design-security.md`) and `ledger-finance` ACCEPT WITH CONDITIONS (D-1..D-10,
+  `reviews/k3-design-ledger-finance.md`). **Revision 4 (2026-10-04, `architect`) writes every
+  required condition into this ADR** (§24, with the in-place edits listed in the §25 checklist).
+  **Before any K3 code:** a short `security` text-delta confirmation of revision 4, which also
+  confirms the MA020 exemption (§18.3), and `ledger-finance` confirmation of the D-* text. **NOT
+  IMPLEMENTED.**
 - **Revision history:** revision 1 (`d83a71c`) was reviewed ACCEPT (`product-owner-proxy`) and ACCEPT
   WITH CONDITIONS (`security`, `ledger-finance`). Revision 2 (`6864efa`) applied every condition
   (§16). Revision 3 is described in the table below and in §17a.
@@ -46,6 +50,7 @@
 | 1 | `d83a71c` | Initial draft |
 | 2 | `6864efa` | Acting UPDATE policies gated on an executing M2 resolution and `operator` evidence (C-101-1); `evidence_ref_hash` NOT NULL for M2 (C-101-2); tenant status recorded (C-101-4); the M2 terminal-reason allow-list refusing `amount_asset_mismatch` (F9); reconciliation matching plus two standing kinds (F10, ruling 5); the `psp_clearing` residual (F11); the exact permitted guard diff and the deposit matrix test (F12); detail text (F13); ingress validation (F14); the reserved-prefix trigger for all sessions (F2(d)); binding code catalogues (ruling 1); lock order (ruling 6); full migration content; review disposition |
 | **3** | **`3517980`** | **Refresh:** migration 0114→**0115**; K2's fence and kind CHECK live in **0113** (not 0112); facts and line references re-verified against post-D2/F-pay/H/I-wire code (§1); F13 found **already landed by D2** (§4); the payout dispute reason set at HEAD, including `callback_amount_asset_mismatch` and `invalid_provider_reference:*` on payouts (§5.1); the authoritative file list (§7), including `poll_evidence.go`, the deposit poll binding sites and `httpserver/deposit_handlers.go`; what the P1 tests can assert today (§12.3). **Scope:** STANDING-1 and POLL-REF-CLEAR-1 folded under one LF-signed schema change (§18, §8.6, §9.2); the other four items stay separate (§18); HD-PRH2-9 is a separate workstream (§19); the 0115 plan and E1 coordination (§20); the open questions (§22) |
+| **4** | **`3158cf0`** | **Review conditions written in.** Security R-1..R-9 and LF D-1..D-10 (§24): the entries fence rewritten with per-entry shapes for (b)/(c), plus the widened acting `ledger_accounts` INSERT (R-1/D-1/D-2); a system-shape read of executed resolutions for reconciliation (R-2); a DB-guard parity table with K2 (R-3); the Y table's split system-shape policies and deferred park binding (R-4/D-6); the closed-tenant actor scope (R-5); payload pinning of the attempt state and reason (R-6); the column-discipline trigger (R-7); ingress conditions (R-8); routes and permissions (R-9); "declare paid" needs a reference (D-3); non-MOCK clearing (D-4); the confirming-line definition (D-5); one finding per exposure (D-7); `payment_attempts_id_tenant_key` (D-8); the hardened C-5b (D-9); the whole-schema C-16 (D-10). **MA020 exemption ADOPTED** with security (a)–(d) (§18.3). O-1..O-6 and L-1..L-4 adopted or recorded. LIKE-vs-`left()` mutant recorded as EQUIVALENT. New tests T-1..T-18 plus the LF additions (§12.4). The closed-tenant design becomes **ADR 0107** (PROPOSED, design only) |
 
 ---
 
@@ -160,10 +165,12 @@ moved.
 | **Allow-list (F9; revision 3 restated against HEAD)** | `state = 'ambiguous'`, **or** `state = 'disputed' AND terminal_reason IN ('provider_reference_mismatch', 'success_for_never_sent_attempt')`. **Every other payout reason is refused (`MR010`) for both M2 kinds.** That covers the reasons §1 lists at HEAD: `amount_asset_mismatch` and **`callback_amount_asset_mismatch`** (the provider evidence contradicts the amount, so they go to PAYOUT-AMOUNT-DISPUTE-1); `invalid_provider_reference[:*]` (an unbound payout park, so its hold is kept, per PAY-PAYOUT-UNBOUND-HOLD-1); `reversal_tombstone_precedes_success`; the three `late_*` reasons; and T14 `success_after_payout_declined`, which the withdrawal-state precondition already excludes. Any future reason is refused until this ADR names it. The allow-list is a closed literal set in `payment_m2_admits` and in the executor, and a pin test (C-5b) enumerates every payout dispute write site. |
 | Withdrawal | `submitted`. `LockSubmittedForResolution` refuses otherwise, and the guard re-checks it. This excludes T14 disputes (LF-15). |
 | Provider | `attempt.provider_id IS NOT NULL` |
+| **Reference for "declare paid" (rev 4, LF D-3)** | `m2_declare_paid ⇒ attempt.provider_reference IS NOT NULL`. This is refused at submission by the insert trigger, again in `payment_m2_admits`, and in the executor (`MR010` family). The 0101 CHECK `state <> 'succeeded' OR provider_reference IS NOT NULL` (LF95-C4) is **not** relaxed, and the reserved id is **never** bound to the attempt. **Residual R-K3-9:** a reference-less payout (for example an ambiguous timeout before the provider acknowledged, or a T15 from `created`) that is confirmed paid out of band has no "declare paid" path; its hold is retained. "Declare not paid" stays available for it. |
+| **Basis for "declare not paid" after possible dispatch (rev 4, LF L-3, adopted)** | `m2_declare_not_paid` on an attempt with `ever_possibly_sent = true` requires `basis_code = 'provider_confirmed_out_of_band'`. `reconciliation_exhausted` cannot be verified automatically, and a late statement line is exactly the double-payout case. Enforced by CHECK-by-trigger and the executor; test C-41. |
 | **Basis (LF ruling 1)** | `basis_code IN ('provider_confirmed_out_of_band', 'reconciliation_exhausted')` for both M2 kinds (CHECK). Meaning: for `m2_declare_paid`, `reconciliation_exhausted` means a statement success line exists; for `m2_declare_not_paid`, it means statement coverage extends past the attempt with no line. `context_code` is NULL or in `('provider_unqueryable', 'past_resubmission_horizon')`, and is **secondary only**. The vocabulary is `payments`' to confirm. Automated verification of `reconciliation_exhausted` against the §9.2 persisted lines stays a candidate follow-up, not K3 scope. |
 | **Evidence (C-101-2)** | `evidence_ref_hash` NOT NULL for M2 (CHECK). The runbook requires an operator T17 re-verify first, and its outcome is referenced. |
 | Kind | `kind ∈ {m2_declare_paid, m2_declare_not_paid}`, with `target_state` `succeeded` / `declined` (CHECK) |
-| **Tenant status (C-101-4; security ruling 5)** | M1 and M2 are **available for non-active tenants**, which includes `closed` (§19). Tenant status is read in-tx and recorded at submission and at execution. Policy evaluation for a non-active tenant ignores tenant and brand rows (`0113:655`). |
+| **Tenant status (C-101-4; security ruling 5)** | M1 and M2 are **available for non-active tenants**, which includes `closed` (§19). Tenant status is read in-tx and recorded at submission and at execution. Policy evaluation for a non-active tenant ignores tenant and brand rows (`0113:655`). **Rev 4 (security R-5):** when `tenant_status = 'closed'`, read in-tx at insert, at each approval and at execution, a **tenant-scope** requester or approver is refused (and is not counted). Only `platform_acting` actors holding `payment_force_resolve` grants for that tenant may act (§24.5). |
 | **Payout KYC gate (revision 3, open question Q-IC-1)** | Architect position: the ADR 0096 payout KYC gate does **not** apply to M2. M2 records a fact about a payout already dispatched (declare paid), or releases a hold the provider never paid out (declare not paid). It is not a dispatch. ADR 0095 §5 already rules that no KYC outcome triggers or blocks a post-dispatch resolution. `identity-compliance` and LF confirm. |
 
 ### 5.2 Transitions admitted (payout only)
@@ -217,6 +224,15 @@ All transitions: `ambiguous` or `disputed` → `succeeded` or `declined`. Each i
     | Legacy callback (`HandleCallback`) | `orchestrator.go:1003` | switch `provider_reference` and `original_provider_reference` |
     | Webhook HTTP mapping | `httpserver/deposit_handlers.go:316` (`newPaymentWebhookHandler`) | **no new branch expected**; a test asserts that a reserved-prefix reference maps to the same deterministic 4xx class as any other invalid reference, and never to a retryable status |
     | Statement fetch | `payment_statement.go:395`, `:398`, `:401` (`validatePaymentLine`) | switch `provider_reference`, `original_provider_reference` and `settlement_reference` (the run fails and nothing is stored, ADR 0095 §35.2) |
+    | **(rev 4, R-8(c))** Poll echo audits on the succeeded-terminal and decline paths | `sweeper.go:556`, `:636` (both through `echoAuditMeta`) | covered by the `echoAuditMeta` switch; each site is listed and tested separately (C-9) |
+    | **(rev 4, R-8(d))** Deferred receipt replay | `receipt.go:1569-1607` (`ApplyDeferredReceiptsForAttempt`), which re-applies stored `payment_provider_events` without calling `validateReceiptReferences` | protected by the `payment_provider_events` CHECKs and the up-time refusal; C-9 adds a replay case proving a stored prefixed reference cannot exist |
+    | (rev 4, Q-SEC-1 enumeration) Deposit sync via `deposit_v2.go:297` (`depositAdapterCall`); payout resubmit `payout.go:990-1085`; `payoutStatusQuery` callers (`/resolve`, `payout.go:1376`); deposit simulation via `ReceiveVerifiedCallback` | the same validator sites above | no extra site; listed so C-9 drives each caller |
+
+    **Refused-echo handling (rev 4, LF L-2 / security O-2).** At `sweeper.go:499-503`, a refused echo
+    writes one audit row and then `RescheduleNonTerminal` at the normal poll backoff. It **never**
+    returns an error: an error return would re-drive the item at once, giving a hot loop and an
+    audit-volume DoS by a hostile PSP. At `sweeper.go:646-647`, the decline proceeds with a nil
+    reference (the echo is not adopted) and the same audit. Test T-13.
 - **DB backstops.**
   - A CHECK `left(col, 27) <> payment_reserved_ref_prefix()` on:
     - `payment_attempts.provider_reference`;
@@ -225,17 +241,33 @@ All transitions: `ambiguous` or `disputed` → `succeeded` or `declined`. Each i
     - `payment_statement_lines.provider_reference`, `.original_provider_reference`,
       `.settlement_reference`;
     - **(revision 3)** `payment_attempt_reference_evidence.reference` (§8.6);
-    - **(revision 3, to confirm in implementation)** `deposit_intents.provider_reference` and
-      `withdrawal_requests.provider_reference`, if those columns carry provider-supplied values.
-      `payments` lists every provider-reference column by a catalogue query
-      (`information_schema.columns` filtered by name), and the list is pinned by test C-9c.
+    - **(revision 4, R-8(a), unconditional)** `deposit_intents.provider_reference` and
+      `withdrawal_requests.provider_reference`. Both are provider-supplied (writers `drive.go:535`,
+      `orchestrator.go:476`, `sweeper.go:507`, `:657`; `withdrawal.AttachProviderReference` from
+      `payout.go:606`, `:636`, `:719`, `:752`, `:1032`, `:1046`, `:1079`). This is safe for M2:
+      `withdrawal.Complete` does not write `withdrawal_requests.provider_reference`
+      (`withdrawal.go:1501`).
+    - **C-9c (R-8(b))** is a catalogue pin. It lists every column whose name matches
+      `%provider_reference%`, `%provider_tx_id%` or `settlement_reference`, **plus
+      `payment_attempt_reference_evidence.reference` by explicit name** (its name matches no
+      filter). Each must carry the CHECK (or the all-sessions trigger, for
+      `ledger_transactions.provider_tx_id`). `merchant_reference` columns are listed as
+      **exempt** (the platform generates them).
   - A trigger **`ledger_transactions_reserved_prefix_guard`** (BEFORE INSERT, **all sessions**,
     `left()` not `LIKE`). If `left(NEW.provider_tx_id, 27) = prefix`, it requires
     `NEW.transaction_type = 'withdrawal_completed'` and ADR 0099 §6.6 predicate (b) (an executing
     `m2_declare_paid` resolution binding correlation, provider and key). Otherwise it raises
     `MR020`.
   - **0115 up refuses** if any existing value in those columns, or any
-    `ledger_transactions.provider_tx_id`, already has the prefix.
+    `ledger_transactions.provider_tx_id`, already has the prefix. This is a full scan, run in the
+    deploy window (security O-4).
+  - **Casino and sportsbook sessions (security O-1, adopted).** The all-sessions trigger also binds
+    casino and sportsbook postings. A provider-sent `provider_tx_id` that carries the prefix
+    raises `MR020`. The casino and sportsbook callback paths map `MR020` to their existing
+    deterministic invalid-reference (non-retryable 4xx) class, never to a retryable 5xx. Test T-13.
+    If the mapping cannot be done without editing those packages' error tables, the residual is
+    recorded (a retried 5xx is money-safe, because the trigger refuses every retry) and the mapping
+    becomes a follow-up.
 
 ## 6. Governance
 
@@ -248,7 +280,8 @@ All transitions: `ambiguous` or `disputed` → `succeeded` or `declined`. Each i
 | Policy | `financial_policy_required_approvals('payment_force_resolve', …)`: M2 uses the attempt's amount and asset; M1 the base only; `GREATEST(1, …)`; no platform baseline ⇒ disabled |
 | Independence floor | LF-11: a distinct, non-NULL `person_id` for the requester and each approver. **Non-configurable.** |
 | Counting | exactly ADR 0100 §6.2, including `FOR SHARE` and S-2(iii) for approvers |
-| Payload hash | covers `attempt_id`, `kind`, `target_state`, `finding_code`/`basis_code`/`context_code`, `evidence_ref_hash`, amount, asset, reason code |
+| Payload hash | covers `attempt_id`, `kind`, `target_state`, `finding_code`/`basis_code`/`context_code`, `evidence_ref_hash`, amount, asset, reason code, **and (rev 4, R-6) `attempt_state_at_submission` and `terminal_reason_at_submission`** (DB-forced from the attempt row at insert). Execution ends `refused_at_execution` if either has changed. |
+| Capability-specific grants (rev 4, R-3(ii)) | `financial_acting_session_valid()` is capability-agnostic. Every insert, approval and count therefore also requires `ledger_adjustment_eligible_grant(tenant, staff, 'payment_force_resolve:request' \| ':approve')`, with the `ledger_adjustment_invisible_platform_grant` fallback. A principal holding only `ledger_adjustment:*` for tenant X is refused (T-6). |
 | HD-PRH2-8 interim | at least one independent approver (ADR 0100 §3.4) |
 
 ### 6.2 Beneficiary exclusion (S-12): trigger `payment_manual_resolutions_beneficiary_guard`
@@ -301,7 +334,11 @@ All transitions: `ambiguous` or `disputed` → `succeeded` or `declined`. Each i
 | `deposit_intents` | as above | `false` (M1 never updates an intent) |
 
 - Every other table `Complete`/`Fail` touch is a ledger table (ADR 0099 §6.5–§6.7 fences) or
-  `ledger_accounts` (INSERT limited by account type).
+  `ledger_accounts` (INSERT limited by account type). **Rev 4:** these need the entries-fence
+  rewrite (§24.1) and the widened `ledger_accounts` policy (§24.2). Without them every acting M2
+  posting fails at its first entry (R-1/D-1/D-2).
+- **Column discipline (rev 4, R-7):** neither the acting WITH CHECK nor `payment_m2_admits`
+  constrains columns. The new trigger in §24.7 does.
 - **Consequence:** an acting session **cannot** write `callback`, `sync` or `query_status` evidence,
   and cannot move an attempt or withdrawal without an executing M2 resolution. This closes K3-1.
 - **LF C-K1-2:** 0115 replaces the fence function with (a)+(b)+(c) **in the same migration** as
@@ -333,6 +370,8 @@ Rule 1: this list is the K3 Touches record. The orchestrator copies it into plan
 | `internal/auth/permission.go` | static permissions `payment_force_resolve:request` / `:approve` / `:read` and their role map, mirroring `PermLedgerAdjustment*` (`:654-656`). This is a two-layer gate: the static permission plus the in-tx grant (ADR 0099 §2). |
 | `backoffice/src/auth/permissions.ts` | the matching UI permission constants (DoD) |
 | `deploy/init-app-role.sql` | **append** the K3 block **after** E1's block (§20.3) |
+| **(rev 4)** `internal/adjustment/execute.go` | one audit attribute, `open_payment_exposure_at_execution`, when the MA020 exemption applied (§18.3 (c)). No logic change |
+| **(rev 4, conditional on O-1)** the casino and sportsbook callback error mapping | map `MR020` to the existing deterministic invalid-reference class. Only if it can be done without touching their domain logic; otherwise it is a recorded residual (§5.4) |
 | Tests: new `internal/payments/*_k3_*_integration_test.go`, `internal/payments/migration_0115_integration_test.go`, `internal/providerref/*_test.go`; **plus** updates to `migration_0101_integration_test.go` and `migration_0107_integration_test.go` HEAD pins only if they assert the guard body text | §12 |
 | Docs (DoD, §17) | as listed |
 
@@ -429,6 +468,29 @@ Triggers:
 and `tenant_id = acting tenant`, mirroring K2's `ledger_adjustment_requests` policies. **No P
 family.** The codes table: `reference_read FOR SELECT USING (true)`, no write policy.
 
+**Rev 4 (security R-2): system-shape read of executed resolutions.** Without this policy the
+reconciliation stream would see no `m2_*` rows, and rules (c), (c2) and (d) and INV-M-4 would be
+silently dead. The stream runs as `WithTenantSnapshot`, which sets only `app.tenant_id`
+(`tenant_rls.go:54`). One SELECT-only policy is added on `payment_manual_resolutions`, following K2's
+`tenant_system_read_executed` (`0113:1785`):
+
+```sql
+CREATE POLICY tenant_system_read_executed ON payment_manual_resolutions FOR SELECT
+    USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid
+           AND state = 'executed'
+           AND NULLIF(current_setting('app.principal_id', true), '') IS NULL
+           AND NULLIF(current_setting('app.platform_admin_principal_id', true), '') IS NULL
+           AND NULLIF(current_setting('app.player_account_id', true), '') IS NULL
+           AND NULLIF(current_setting('app.platform_service_id', true), '') IS NULL
+           AND NOT financial_acting_gucs_present());
+```
+
+No system-shape policy is added on approvals. C-7, C-22 and C-29 run in the real reconciliation
+session shape **as the runtime role** (T-1). The mutant that drops this policy must be killed (T-3).
+
+**Rev 4 (R-3): the DB-guard triggers** are listed in the parity table, §24.3. The trigger list
+above is the minimum; §24.3 is binding.
+
 ### 8.3 The `payment_attempts_guard()` change: the exact permitted diff (F12)
 
 The 0115 body equals the **0107 body verbatim**, except for exactly these edits:
@@ -471,8 +533,13 @@ with `operator` evidence.
 |---|---|
 | The §5.4 CHECKs | on `payment_attempts`, `payment_provider_events`, `payment_statement_lines`, `payment_attempt_reference_evidence`, plus any column C-9c lists |
 | `ledger_transactions_reserved_prefix_guard` | all sessions |
-| `ledger_governed_fence_allows` | replaced: ADR 0099 §6.6 (a) + (b) + (c). Both fence triggers (`ledger_transactions_governed_fence`, `ledger_entries_governed_fence`) call it unchanged |
-| `ledger_adjustment_payload_refusal` | replaced: 0113 body plus the M2 Step B causation arm (ADR 0100 §5.4 adopted; security C-4 (a)–(e)). **The MA020 tail is unchanged** pending Q-LF-2 (§18.3) |
+| `ledger_governed_fence_allows` | replaced: ADR 0099 §6.6 (a) + (b) + (c). `ledger_transactions_governed_fence` calls it unchanged |
+| **`ledger_entries_governed_fence()` (rev 4, D-1/R-1)** | **replaced** (CREATE OR REPLACE): branch (a) byte-identical to `0113:1463-1505`; new per-entry shapes for (b) and (c), §24.1. The revision-3 claim that this trigger is "unchanged" was wrong |
+| **`ledger_accounts` `acting_insert` (rev 4, D-2/R-1)** | dropped and re-created, widened only as §24.2 says |
+| **`payment_attempts_id_tenant_key` (rev 4, D-8/R-8(e))** | `ALTER TABLE payment_attempts ADD CONSTRAINT payment_attempts_id_tenant_key UNIQUE (id, tenant_id)`. Prerequisite for the composite FKs |
+| **`payment_attempts_operator_column_discipline` (rev 4, R-7)** | a new BEFORE UPDATE trigger, §24.7. Not a guard edit |
+| **`tenant_system_read_executed` on `payment_manual_resolutions` (rev 4, R-2)** | §8.2 |
+| `ledger_adjustment_payload_refusal` | replaced: 0113 body plus the M2 Step B causation arm (ADR 0100 §5.4 adopted; security C-4 (a)–(e)), **plus (rev 4) the MA020 exemption term** (§18.3) |
 | Acting policies | §6.4. Acting SELECT on `withdrawal_requests`. **Not** on `payment_statement_lines` or the evidence table |
 | **Reconciliation kinds** | `reconciliation_mismatches_mismatch_kind_check` (the constraint **name is kept**; `migration_0097/0098` tests match it) is dropped and re-added as a strict superset of **0113's** list (`0113:1850-1863`), or of the latest definition at merge if one lands earlier, plus **`pay_declared_paid_unconfirmed`**, **`pay_declared_not_paid_but_paid`** and **`pay_declared_paid_compensated_but_paid`** (LF K3-a). **The folded items add no kind** (§9.2) |
 | **(Folded) `payment_attempt_reference_evidence`** | §8.6 |
@@ -486,8 +553,11 @@ with `operator` evidence.
   dropping it would destroy money evidence).
 - Otherwise:
   - restore **the 0107 `payment_attempts_guard()` body verbatim**;
-  - restore **0113's** `ledger_governed_fence_allows` (branch (a) only) and **0113's**
-    `ledger_adjustment_payload_refusal`, byte-for-byte;
+  - restore **0113's** `ledger_governed_fence_allows` (branch (a) only), **0113's**
+    `ledger_entries_governed_fence`, **0113's** `ledger_accounts` `acting_insert` policy, and **0113's**
+    `ledger_adjustment_payload_refusal`, byte-for-byte (rev 4);
+  - drop `payment_attempts_id_tenant_key`, the column-discipline trigger and the system-read policy
+    (rev 4);
   - drop the reserved-prefix trigger and CHECKs, the acting policies, the new tables, the folded
     evidence table and indexes, and the functions;
   - restore **0113's** kind CHECK exactly (or, if another kind-widening migration merged between
@@ -496,6 +566,13 @@ with `operator` evidence.
 - **Must succeed on an empty scratch DB**: the full-chain rollback tests
   (`jurisdiction/migration_0075_*`, `migration_0077_*`) roll back every migration above 0099.
 - **Guard tests run on a HEAD-migrated scratch DB** (LF-18).
+- **C-16 uses K2's whole-schema snapshot (rev 4, D-10/T-18).** `schemaSnapshot`
+  (`internal/adjustment/migration_0113_integration_test.go:20-47`, extended with indexes and grants)
+  is taken on a scratch DB at N-1. Then up, down, and a second snapshot must be equal. That covers
+  functions (including the entries fence), policies (including `ledger_accounts` and the R-2/R-4
+  policies), constraints (including D-8), indexes, triggers and grants.
+- **One transaction (security O-4).** Up and down each run in one transaction, so a FORCE-RLS
+  lifted window for reference seeding is never visible outside the migration.
 
 ### 8.6 (Revision 3, folded) Persisted evidence substrate: STANDING-1 + POLL-REF-CLEAR-1
 
@@ -508,34 +585,51 @@ reference Y (POLL-REF-CLEAR-1). It is never audit JSON (LF ruling).
 |---|---|
 | `id` | `UUID PK DEFAULT gen_random_uuid()` |
 | `tenant_id` | `UUID NOT NULL` |
-| `attempt_id` | `UUID NOT NULL`; composite FK `(attempt_id, tenant_id)` → `payment_attempts (id, tenant_id)` (add a UNIQUE `(id, tenant_id)` on `payment_attempts` if none exists; `payments` to check) |
+| `attempt_id` | `UUID NOT NULL`; composite FK `(attempt_id, tenant_id)` → `payment_attempts (id, tenant_id)`, through the new `payment_attempts_id_tenant_key` that 0115 adds (rev 4, D-8: no such UNIQUE exists at HEAD) |
 | `provider_id` | `TEXT NOT NULL`, the 0099 bound; must equal the attempt's `provider_id` (trigger) |
 | `evidence_kind` | `TEXT NOT NULL CHECK (evidence_kind IN ('poll_returned_reference'))`. The set is closed; widening needs a migration and LF |
 | `reference` | `TEXT NOT NULL`, the 0099 bound (length, no control characters), plus the §5.4 reserved-prefix CHECK, plus `CHECK (reference <> '')` |
 | `recorded_at` | `TIMESTAMPTZ NOT NULL DEFAULT now()` |
 
-- **Constraints and triggers:** UNIQUE `(tenant_id, attempt_id, evidence_kind)` (a park happens once;
-  a replay is a no-op through `ON CONFLICT DO NOTHING` only when the stored reference is equal,
-  otherwise it raises). A BEFORE INSERT trigger requires the attempt to be
-  `operation = 'deposit'`, the reference to differ from the attempt's bound `provider_reference`,
-  and the provider to match. Writing in the **same transaction** as the T10 park is required: the
-  executor inserts the evidence row **before** `parkDepositAttempt`, so the alert raise stays the
-  last alert-table statement (ADR 0102 §7.7), and a failed park CAS rolls the row back.
-  `ledger_deny_mutation` on UPDATE, DELETE and TRUNCATE, binding on the owner too (0102 pattern).
-- **RLS:** ENABLE + FORCE. Family **T** only: `tenant_scope_select`, `tenant_scope_insert`
-  (`tenant_id = current tenant GUC`, no platform GUC). No A family, no P family. The
-  reconciliation stream reads it under `WithTenantSnapshot` like every other payment table.
+- **Constraints and triggers (rev 4, D-6 / R-4; supersedes revision 3):**
+  - UNIQUE `(tenant_id, attempt_id, evidence_kind)`. The writer uses a **plain INSERT; any
+    duplicate raises**. There is no `ON CONFLICT DO NOTHING`, because a park happens exactly once.
+  - **BEFORE INSERT trigger:** the attempt is `operation = 'deposit'` and in a **live** state
+    (`submitting`, `pending` or `ambiguous`); its bound `provider_reference` is NOT NULL and differs
+    from `reference`; `provider_id` equals the attempt's.
+  - **DEFERRABLE INITIALLY DEFERRED constraint trigger** `payment_attempt_reference_evidence_bound_to_park`:
+    at commit, the attempt is `disputed` with `terminal_reason = 'poll_reference_mismatch'`. Live
+    at insert and parked at commit means the park happened **in this transaction**. A row without
+    its park is refused at commit (T-7, mutant "drop deferred check").
+  - `ledger_deny_mutation` on UPDATE, DELETE and TRUNCATE, binding on the owner too (0102 pattern).
+  - The writer inserts the row **before** `parkDepositAttempt` in the same transaction, so the
+    alert raise stays the last alert-table statement (ADR 0102 §7.7), and a failed park CAS rolls
+    the row back.
+- **RLS (rev 4, R-4; supersedes revision 3):** ENABLE + FORCE. **Split, system-shape policies
+  only**, with no NULL arm (`NULLIF(...)::uuid` equality only):
+  - `system_insert` FOR INSERT WITH CHECK: `tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid`,
+    and `app.principal_id`, `app.player_account_id`, `app.platform_admin_principal_id` and
+    `app.platform_service_id` all NULL, and `NOT financial_acting_gucs_present()`. This is the
+    sweeper's `WithTenant` shape.
+  - `system_select` FOR SELECT USING: the same predicate. This is the reconciliation
+    `WithTenantSnapshot` shape.
+  - **No** tenant-staff, player, acting or platform policy; **no** UPDATE or DELETE policy. Display
+    to tenant staff is not needed by K3 and is not added.
+  - Consequence (LF L-4): an acting MA020 evaluation cannot see Y and fails closed (safe).
+    MA020-SYNC-MISMATCH-1 must add an acting read or accept that.
 - **Grants:** `SELECT, INSERT` to `igaming_runtime` (migration block and `init-app-role.sql`).
 - **Writer:** only `poll_evidence.go`'s `poll_reference_mismatch` park, and only when
   `ValidatePaymentReference(Y)` passes. An invalid Y stays audit-only (length and hash prefix),
   exactly as today.
 
-**(b) Indexes on `payment_statement_lines`** (the cross-import lookup; non-concurrent is
-acceptable because the migration runs in a deploy window, and the table is append-only and small
-today; LF/devops confirm):
-- `(tenant_id, provider_id, provider_reference)`;
-- `(tenant_id, provider_id, merchant_reference) WHERE merchant_reference IS NOT NULL`;
-- `(tenant_id, provider_id, original_provider_reference) WHERE kind = 'deposit_reversal'`.
+**(b) Indexes on `payment_statement_lines`** (the cross-import lookup). **Non-concurrent build
+ACCEPTED (LF Q-LF-5)**, inside the deploy window, together with the D-8 unique constraint (the
+migration runs in a transaction). The runbook records the row counts of `payment_statement_lines`
+and `payment_attempts` before the deploy. Index work at real-PSP volume goes through a later,
+dedicated `CONCURRENTLY` migration. Exact names:
+- `payment_statement_lines_ref` on `(tenant_id, provider_id, provider_reference)`;
+- `payment_statement_lines_merchant` on `(tenant_id, provider_id, merchant_reference) WHERE merchant_reference IS NOT NULL`;
+- `payment_statement_lines_reversal_original` on `(tenant_id, provider_id, original_provider_reference) WHERE kind = 'deposit_reversal'`.
 
 No column is added to `payment_attempts`, so `payment_attempts_guard()` keeps exactly the §8.3 diff
 (F12). A column alternative was rejected for that reason (§14).
@@ -548,10 +642,21 @@ No column is added to `payment_attempts`, so `payment_attempts_guard()` keeps ex
 |---|---|
 | (a) | A reserved-prefix `withdrawal_completed` **skips the settlement-reference comparison** (`payment_statement.go:1040-1045`). Amount and asset are still compared. |
 | (b) | Statement lines for an M2-declared payout resolve **by reference, then by merchant reference**. A matching `succeeded` line is a **confirmation**, counted by the metric `payment_m2_declared_paid_confirmed_total` (no tenant label); it is not a mismatch. A `declined` line → `pay_status_mismatch`. |
-| (c) | **`pay_declared_paid_unconfirmed`**, standing and **unwindowed**, is raised for every executed `m2_declare_paid`. It clears **only** when (i) a confirming `succeeded` line exists in any persisted import (§9.3 lookup), or (ii) a future WITHDRAWAL-REVERSAL-1 posting reverses that Step B. **A `compensating_entry` credit with causation = that Step B does not clear it** (LF K3-a). The compensation appears only as a read-time annotation. |
+| (c) | **`pay_declared_paid_unconfirmed`**, standing and **unwindowed**, is raised for every executed `m2_declare_paid`. It clears **only** when (i) a **confirming line** (rev 4, D-5: defined below) exists in any eligible persisted import (§9.3 lookup, D-4), or (ii) a future WITHDRAWAL-REVERSAL-1 posting reverses that Step B. **A `compensating_entry` credit with causation = that Step B does not clear it** (LF K3-a). The compensation appears only as a read-time annotation. |
 | (c2) | **`pay_declared_paid_compensated_but_paid`** (P1, standing, **unwindowed**; security C-4(b), LF K3-a) is raised when an executed `compensating_entry` credit whose causation is an M2 Step B is followed by a confirming `succeeded` line. It clears only when executed `compensating_entry` **debits**, whose causation is that credit's own `manual_adjustment` transaction, total **at least** the credited amount. |
 | (d) | **`pay_declared_not_paid_but_paid`**, standing and **unwindowed**, is raised for every executed `m2_declare_not_paid` whose attempt reached T14 `disputed` **or** for which any persisted import has a `succeeded` line (§9.3 lookup). It clears only when executed `compensating_entry` debits with causation = the `withdrawal_failed` transaction **total at least the withdrawn amount** (LF confirmed). It **overrides the `:1084` disputed exclusion** for these attempts. |
 | (e) | The reserved id is never expected on a statement. A line carrying the prefix is refused at fetch (§5.4). |
+
+**Rev 4, D-5: "raise broad, clear narrow".**
+- **Confirming line** (used to *clear* (c) and to count the confirmation metric): `kind = 'payout'`,
+  `status = 'succeeded'`, same tenant and provider, resolved to the attempt by reference (then by
+  merchant reference), `amount = attempt.amount` **and** `asset_code = attempt.asset_code`, from an
+  eligible import (D-4).
+- **Raising predicate** (used to *raise* (c2) and (d)): any `succeeded` payout line resolved to the
+  attempt by reference or merchant reference, from **any** import (MOCK or not), whatever its
+  amount and asset.
+- A succeeded line with a different amount does **not** clear `pay_declared_paid_unconfirmed`, and
+  it does raise `pay_amount_mismatch`. Test C-42.
 
 **The compensating-credit causation arm** (ADR 0100 §5.4, adopted; security C-4 (a)–(e), LF K3-a)
 is added to `ledger_adjustment_payload_refusal` in 0115. Its conditions:
@@ -571,7 +676,9 @@ is added to `ledger_adjustment_payload_refusal` in 0115. Its conditions:
 | **S3: persisted-reversal clearing for bound standing findings** (STANDING-1, LF D2 confirmation, the TestD2_14 shape) | The bound standing rule (`:1191-1194`) also clears on a `deposit_reversal` line in **any persisted import** naming the bound reference X, not only in this run. A tombstone on X still clears it. |
 | **S4: Y clearing** (POLL-REF-CLEAR-1, LF B3) | For a `poll_reference_mismatch` park with a `payment_attempt_reference_evidence` row Y, the bound standing finding clears on a reversal line (any persisted import) or a tombstone on **X or Y**. Without a Y row, X only, as today. Y is read only from the evidence table, **never from audit JSON**. |
 | **S5: T15i** | An integration test of `success_for_never_sent_attempt` bound-if-referenced and unreferenced, built through the payout `created → disputed` path or a provider-bearing deposit fixture (`payments` provides a test helper; no production change). |
-| **N1 residual** (ADR 0095 §35.4) | Clearing for a conflict park is keyed on the evidencing line's reference, which another attempt may hold. S2 makes the evidence a persisted line, not this run's line, but attribution remains approximate for `provider_reference_conflict`. **Ledger-finance rules whether this is acceptable or whether a per-park evidence row (a second `evidence_kind`) is required** (Q-LF-3). Default: accept and document; no extra table. |
+| **N1 residual** (ADR 0095 §35.4) | Clearing for a conflict park is keyed on the evidencing line's reference, which another attempt may hold. **LF Q-LF-3 ruling (rev 4): approximate attribution ACCEPTED; no second `evidence_kind` in K3.** The S1 detail records the evidencing import id, its `line_no` and the holder attempt. Test **C-34b**: a conflict park is cleared by a reversal on R, and the holder is still reconciled independently. The N1 residual is disclosed in ADR 0095 §35 and `reconciliation-model.md` (LF edits). |
+| **S6: one finding per exposure (rev 4, D-7)** | `checkMerchantAttribution` does not record the named attempt b in `matchedBy` (`payment_statement.go:1107-1113`), so S1 could otherwise emit twice. Findings are deduplicated on **(attempt, evidencing reference) per run**. The lookup deduplicates a line that appears in several overlapping imports (same provider, reference, kind, status, amount, asset and `occurred_at`). Persisted-lookup lines **never feed `pay_duplicate`**, which stays per-import. Tests C-43 (one finding) and C-44 (overlapping imports). |
+| **Eligible evidence (rev 4, D-4)** | Evidence that **clears or confirms** ((c) confirmation, S2, S3, S4 reversal lines) comes only from imports with `is_mock = false`, **unless** the current run's own import is MOCK (MOCK-only dev and test environments). Evidence that **raises** may come from any import. The finding detail names the import id and `is_mock`. Test C-45; mutant "MOCK clearing allowed". |
 | **Flip** | `d2NoCU(... "an unbound park with no line this run")` (`prh2_d2_parked_capture_integration_test.go:305`) is flipped to assert the standing finding. The ADR 0095 §35.4 "NOT IMPLEMENTED" wording and the `payment_statement.go:126-129` disclosed limit are rewritten by K3 (ledger-finance edits ADR 0095 §35). |
 | **Gate effect** | The ADR 0095 §35.4 B1 gate item 1 (STANDING-1 + POLL-REF-CLEAR-1) is satisfied **against MOCK** once K3 merges. Item 2 (a **delivered** I-wire P1) still fails: ALERT-DELIVERY-1 is OPEN. The real-PSP gate therefore stays closed. |
 
@@ -587,6 +694,14 @@ It runs in the stream's `WithTenantSnapshot` REPEATABLE READ transaction (`requi
 `payment_statement.go:588`), with an explicit `tenant_id = $1` predicate and RLS. It never reads
 another tenant's lines (C-14d). Run cost grows with history, as every stream does
 (CAS-RECON-SCALE-1).
+
+**Rev 4 (security O-3, adopted):**
+- The lookup **never truncates with a LIMIT**. If a cap is ever needed it fails the run loudly
+  (`reconciliation.run_failed`), and never drops evidence (INV-M-5).
+- Each standing kind adds mismatch rows on every run, unwindowed. That growth is disclosed under
+  CAS-RECON-SCALE-1.
+- Session shape: as above, with the `system_select` policy on the evidence table (§8.6(a)) and the
+  `tenant_system_read_executed` policy on resolutions (§8.2).
 
 `docs/architecture/reconciliation-model.md` gains the three kinds, the widened standing rule and
 the Y clearing (edited by ledger-finance).
@@ -727,7 +842,7 @@ Notes:
 | drop the beneficiary guard for M1 or M2 | C-10 |
 | let M1 clear `pay_captured_unposted` (bound, unbound or S1) | C-2, C-34 |
 | accept the prefix at any one ingress | C-9 |
-| use `LIKE` instead of `left()` with a `_`/`%`-bearing value | C-9 |
+| use `LIKE` instead of `left()` | **EQUIVALENT (rev 4, security T-16)**: the prefix `platform-operator-declared:` contains no `_`, `%` or `\`, so `LIKE prefix || '%'` and `left()` agree on every input. It is recorded as equivalent, **never counted as killed**. `left()` stays the mandated form. |
 | drop the deferred check | C-13 |
 | drop the `operator` term from the acting WITH CHECK | C-14b |
 | let `pay_declared_not_paid_but_paid` clear on a partial recovery | C-7 |
@@ -737,6 +852,76 @@ Notes:
 | **(rev 3)** drop `tenant_id` from the persisted lookup | C-14d |
 | **(rev 3)** grant-function removed from a K3 acting policy | C-40 |
 | **(rev 3)** use the shared `Validate` at one payments ingress | C-9, C-9b |
+
+### 12.4 Revision-4 additions (security T-1..T-18; LF test additions)
+
+**Binding test rules:**
+- **T-1 (vacuity):** every RLS, guard and fence test runs as the runtime role and asserts
+  `NOT rolsuper AND NOT rolbypassrls`.
+- The reconciliation tests (C-7, C-22, C-29, C-34..C-36, C-42..C-45) run in the real
+  `WithTenantSnapshot` shape, with fixtures written through the real writers (sweeper park,
+  executor, ingest), never by direct INSERT under the owner.
+
+| ID | Source | Test |
+|---|---|---|
+| T-2 | R-1, D-1, D-2 | Acting M2 "paid" and "not paid" post successfully, **including the first-ever `psp_clearing` creation for a tenant and asset**. Refused (K2-C1/C2 analogs): wrong wallet, wrong amount, wrong asset, wrong account type, a third entry, a second leg in one direction, an entry appended after `executed` in the same transaction, `ledger_accounts` INSERT of another type or another wallet, or any of these with no executing M2 in this txid |
+| T-3 | R-2 | The reconciliation session (app.tenant_id only, runtime role) sees executed `m2_*` rows, and sees no pending row and no approvals. Mutant: drop the policy → C-7 and C-22 fail |
+| T-4 | R-3(iv) | Driving `pending → executing` with too few counted approvals is refused **by the DB** (a direct UPDATE in a test session). Mutant: delete the DB recount |
+| T-5 | R-3(v) | After a governed posting in this transaction, any exit to `refused_at_execution`, `rejected`, `cancelled` or `expired` is refused. Mutant |
+| T-6 | R-3(ii) | An acting principal with only `ledger_adjustment:*` for X cannot request, approve or be counted; the tenant-scope analog too. Mutant: capability argument set to NULL |
+| T-7 | R-4, D-6 | Tenant staff, player, acting and platform sessions cannot INSERT or SELECT evidence. Evidence for a non-parked attempt, or for a parked attempt with another reason, is refused at commit. A duplicate plain INSERT raises. Mutants: drop the deferred check; widen the INSERT policy |
+| T-8 | R-5 | `closed` tenant: a tenant-scope requester is refused at insert, a tenant-scope approver at approval, and a tenant-scope approval is not counted at execution (including a tenant closed **after** submission). Mutant |
+| T-9 | R-6 | The attempt state or terminal reason changes between submission and execution → `refused_at_execution`. Mutant: drop the pinned fields from the hash |
+| T-10 | R-7 | An operator-evidence UPDATE that also sets `provider_reference`, `provider_id`, `ledger_transaction_id`, `amount` or any other column is refused, in tenant **and** acting sessions. Mutant: drop the trigger |
+| T-11 | C-17c | An exhaustive **payout** matrix, every non-`operator` evidence transition, is identical on 0107 and 0115 |
+| T-12 | — | `payment_m2_admits` returns **false, never an error**, in sessions that cannot see resolutions (the sweeper's `WithTenant` shape). The H payout sweeper's behaviour is unchanged (H suite green) |
+| T-13 | R-8, O-1, O-2, L-2 | C-9 extensions: `sweeper.go:556` and `:636` echo audits; deferred receipt replay; the `deposit_intents` and `withdrawal_requests` CHECKs; casino and sportsbook `MR020` mapping; a refused echo at `:499` reschedules with backoff (one audit per poll, no hot loop: assert `next_action_at` advanced and no error) |
+| T-14 | R-9 | HTTP: a missing static permission gives 403; `tenant_admin` has no K3 permission; a path tenant different from the token tenant is refused; a body `tenant_id` is ignored; error bodies are tokens from the closed set; every refusal writes a denial audit |
+| T-15 | R-9, C-15 | Audit asserts IP, UA, request id, before/after, the acting-forced actor, and the **link** from the `withdrawal.completed`/`withdrawal.failed` rows (written with `ActorSystem` in tenant sessions) to the resolution audit through the ledger transaction id |
+| T-16 | — | The LIKE mutant is classified EQUIVALENT (§12 mutant table) |
+| T-17 | C-37 | Fault injection after the evidence insert; then a **second session** verifies the row is absent after rollback |
+| T-18 | D-10, C-16 | The whole-schema snapshot covers the R-1 objects and the R-2/R-4 policies |
+| C-41 | L-3 | "Declare not paid" with `ever_possibly_sent = true` and basis `reconciliation_exhausted` is refused |
+| C-42 | D-5 | A succeeded line with a different amount does not clear `pay_declared_paid_unconfirmed` |
+| C-43 | D-7 | Exactly one finding per (attempt, reference) per run |
+| C-44 | D-7 | A line in overlapping imports is deduplicated and never gives `pay_duplicate` |
+| C-45 | D-4 | A MOCK import cannot clear or confirm a finding raised against a non-MOCK import; a MOCK-only run can |
+| C-46 | D-3 | "Declare paid" on a reference-less attempt is refused at insert, in `payment_m2_admits` and in the executor |
+| C-47 | D-9 | Go↔SQL allow-list parity: the DB allow-list, run against every classified reason, NULL and an unknown reason, refuses exactly what Go refuses |
+| C-48 | Q-LF-2 | **MA020 exemption trio:** (1) a player with an open exposure receives the Step B credit; (2) every other credit, including a `compensating_entry` with non-Step-B causation, is still refused with MA020; (3) the audit records `open_payment_exposure_at_execution = true` |
+| C-49 | LF | `RunLedgerVsProjection` = 0 after M2 "paid" and "not paid", with the `psp_clearing` delta asserted |
+| C-50 | LF | Re-approving an executed resolution is refused |
+| C-17b+ | LF | Non-vacuity: the accept and refuse sets are both non-empty; the deposit `→ declined` operator gate is exercised |
+| C-19+ | LF | Checks detail text **stored by real runs**, not a source grep |
+| C-34b | Q-LF-3 | §9.2 N1 row |
+
+**C-5b hardened (D-9):** the static pin parses `receipt.go`, `payout.go`, `payout_sweep.go`,
+`attempt.go` and `orchestrator.go`. It watches all five dispute writers
+(`ApplyDisputeFromNonTerminal`, `ApplyDisputeFromNeverSent`, `ApplyDisputeFromDeclinedPayout`,
+`ApplyTombstonePrecedesSuccess`, `applyPayoutLateEvidence`). Reasons written in the shared
+`applyResolvedReceiptEvidence` count as payout-reachable. `invalid_provider_reference:` is expanded
+over the closed `providerref` reasons. Variable reasons are resolved, never whitelisted. The pin
+asserts a minimum site count, so a parser that finds nothing fails.
+
+**Extra mutants (rev 4):**
+
+| Mutant | Killed by |
+|---|---|
+| the entries fence admits any leg for (b)/(c) | T-2 |
+| the entries fence drops `r.state = 'executing'` | T-2 |
+| the `ledger_accounts` policy admits all account types | T-2 |
+| the confirmation drops the amount check | C-42 |
+| MOCK clearing allowed | C-45 |
+| Y deferred check dropped | T-7 |
+| S2 clears on any reference | C-34 |
+| the Step B arm without the prefix | C-23 |
+| MA020 exemption term negated, or widened to any `compensating_entry` | C-48 |
+| system-read policy dropped | T-3 |
+| DB recount deleted | T-4 |
+| capability argument NULL | T-6 |
+| R-5 closed-tenant refusal dropped | T-8 |
+| R-6 pinned fields dropped | T-9 |
+| R-7 trigger dropped | T-10 |
 
 ### 12.3 What the P1 tests can assert today (revision 3; I-wire merged, ALERT-DELIVERY-1 OPEN)
 
@@ -756,8 +941,14 @@ raise no alert** (§1). K3's P1 tests can therefore assert exactly this, and mus
   source produces resolutions and audit, but no standing mismatch and no alert. This is a disclosed
   residual (§21 R-K3-5). The runbook makes "statement source registered" a precondition of using M2.
 - **K3 adds no new alert Kind and no in-tx raise.** A dedicated payout-dispute/T14 alert is not
-  in K3. It is the existing gap "payout disputes not alerted" (ADR 0102 §17.8), proposed for
-  registration as PAY-PAYOUT-DISPUTE-ALERT-1 (§22, Q-SEC-3). This keeps K3 off `internal/alerting/kind.go`, an
+  in K3. It is the existing gap "payout disputes not alerted" (ADR 0102 §17.8).
+  **Rev 4 (Q-SEC-3 ruling, accepted with conditions):** PAY-PAYOUT-DISPUTE-ALERT-1 is registered as
+  a **hard prerequisite** before (1) any real payout provider and (2) **any platform policy row
+  enabling `payment_force_resolve` for a real-money tenant**. "No platform row ⇒ disabled" is the
+  enforcement point. The runbook precondition R-K3-5 stays. **Optional, adopted:** the executor
+  refuses `m2_declare_not_paid` when no statement source is registered for (tenant, provider).
+  **Launch flag:** until PAY-PAYOUT-DISPUTE-ALERT-1 and ALERT-DELIVERY-1 land, a double payout after
+  "declare not paid" is detected only at rest and is never surfaced to a human. This keeps K3 off `internal/alerting/kind.go`, an
   E1 file, and away from the FORCE-lift seeding pattern.
 - No K3 document or test may say an alert is "delivered" or that someone is "paged".
 
@@ -941,7 +1132,45 @@ E1 (0114) ─► K3 (0115: force-resolution + STANDING-1 + POLL-REF-CLEAR-1) ─
 K3 does not touch `player_open_payment_exposure`, K2's Go executor, K2's reason catalogue rows, or
 the K2 policy evaluator. The `payment_force_resolve` special case at `0113:655` is already there.
 
-### 18.3 MA020 versus the M2 compensating credit (flagged; not decided here)
+### 18.3 MA020 versus the M2 compensating credit: rev 4 decision
+
+**ADOPTED (LF Q-LF-2 ruling: MA020 should not refuse the Step B credit; security Q-SEC-2: acceptable
+only with conditions (a)–(d)).** In 0115's `ledger_adjustment_payload_refusal`, the MA020 test
+becomes:
+
+```sql
+IF p_direction = 'credit_player'
+   AND player_open_payment_exposure(p_tenant, p_player)
+   AND NOT v_step_b_arm THEN
+    RETURN 'MA020:open_payment_exposure';
+END IF;
+```
+
+`v_step_b_arm` is **the same boolean** that admitted the causation through the Step B arm earlier in
+the same function. It is never a free-standing "is compensating" flag. It is true only when
+**every** C-4 (a)–(e) condition holds:
+- `reason_code = 'compensating_entry'`, `direction = 'credit_player'`;
+- the causation satisfies `left(provider_tx_id, 27) = payment_reserved_ref_prefix()` **and**
+  `transaction_type = 'withdrawal_completed'`;
+- the causation is the `ledger_transaction_id` of an **executed `m2_declare_paid`**;
+- the causation has its `player_withdrawal_hold` leg on this wallet, in this asset;
+- the cumulative cap is the hold-leg amount, checked under L2 at execution;
+- `evidence_ref_hash` is present;
+- no Person counted on the M2 resolution initiates or approves.
+
+| Security condition | Where |
+|---|---|
+| (a) conjoined with the complete C-4 (a)–(e) predicate | the list above |
+| (b) evaluated in the DB at insert and at `→ executing` | `ledger_adjustment_payload_refusal` is called by K2's request guard at insert and by the execution-status function at `→ executing` (the 0113 call sites are unchanged) |
+| (c) audit records `open_payment_exposure_at_execution = true` | the K2 executor's `_executed` audit gains that attribute when the exemption applied. This is a Go change in `internal/adjustment` (a Rule 1 Touches addition for K3: one attribute, no logic change) |
+| (d) a mutant widening the term to any `compensating_entry` is killed | C-48 (2) |
+
+**Fallback (documented):** if security's text-delta confirmation of revision 4 withholds the
+exemption, K3 ships with MA020 unchanged (fail closed). The stranding residual is then registered
+(a player declared paid but unpaid, with an unrelated open exposure, cannot be restored until the
+exposure clears), and a runbook step covers it. Neither choice blocks starting K3.
+
+The text below is the revision-3 analysis, kept for the record.
 
 - **Today (0113:886):** every `credit_player` adjustment is refused while
   `player_open_payment_exposure` is true, **with no override**. That includes a K3 Step B
@@ -960,10 +1189,10 @@ the K2 policy evaluator. The `payment_force_resolve` special case at `0113:655` 
 ## 19. HD-PRH2-9 (closed-tenant player funds): disposition
 
 **Decision: a SEPARATE registered workstream, PAY-CLOSED-TENANT-FUNDS-RESOLUTION-1. It is NOT
-folded into K3.** The design is in
-`docs/plans/prh2-hardening-round/designs/pay-closed-tenant-funds-resolution-1.md`. It becomes an ADR
-when the orchestrator allocates a number; it is not given one here, to avoid colliding with E1's ADR
-(HD-PRH2-11).
+folded into K3.** **Rev 4:** the design is now **ADR 0107**
+(`docs/decisions/0107-closed-tenant-player-funds-staff-resolution.md`), status PROPOSED, design only,
+**not part of the PRH-2 implementation**. It incorporates security CT-R1..CT-R7 and LF CT-1..CT-6.
+The former design file is kept only as a pointer.
 
 Reasons (no-scope-expansion rule):
 1. **Different subject.** K3 resolves a *payment attempt* (`payment_manual_resolutions.attempt_id`
@@ -996,16 +1225,31 @@ a DB guard in the new workstream). This is a recommendation, not a requirement.
 
 ## 20. Migration 0115 plan, file ownership and E1 coordination
 
-### 20.1 0115 object list (summary of §8)
+### 20.1 0115 object list (exact; rev 4)
 
-| Group | Objects | RLS / grants |
-|---|---|---|
-| Reference | `payment_manual_resolution_codes` (7 rows) | FORCE RLS; `reference_read` SELECT; grant SELECT |
-| Force-resolution | `payment_manual_resolutions`, `payment_manual_resolution_approvals`; functions `payment_reserved_ref_prefix`, `payment_m2_admits`, the beneficiary guard, the state machine, the deferred check | FORCE RLS; families T + A; no P; grants SELECT/INSERT/UPDATE (resolutions) and SELECT/INSERT (approvals); no DELETE; TRUNCATE denied |
-| Folded evidence | `payment_attempt_reference_evidence`; three `payment_statement_lines` indexes | FORCE RLS; family T only; grant SELECT/INSERT; append-only triggers |
-| Altered | `payment_attempts_guard()` (§8.3 diff); reserved-prefix CHECKs; `ledger_transactions_reserved_prefix_guard`; `ledger_governed_fence_allows` (a)+(b)+(c); `ledger_adjustment_payload_refusal` (+ Step B arm); acting UPDATE policies on `payment_attempts`, `withdrawal_requests`, `deposit_intents`; acting SELECT on `withdrawal_requests`; the kind CHECK (+3) | as §6.4 |
-| Up-time refusal | any reserved-prefix value present | — |
-| Down | refuses with resolutions, new-kind rows or evidence rows; restores 0107 guard, 0113 functions and CHECK; must pass on an empty scratch DB | — |
+This list is binding. An object not listed here is not created or replaced by 0115.
+
+| # | Group | Object | Kind | RLS / grants |
+|---|---|---|---|---|
+| 1 | Prerequisite | `payment_attempts_id_tenant_key` UNIQUE `(id, tenant_id)` (D-8) | constraint | — |
+| 2 | Reference | `payment_manual_resolution_codes` (7 rows, inserted before FORCE) | table | FORCE RLS; `reference_read` SELECT; grant SELECT |
+| 3 | Functions | `payment_reserved_ref_prefix()`, `payment_m2_admits(...)` | new | — |
+| 4 | Force-resolution | `payment_manual_resolutions` | table | FORCE RLS; T (`tenant_scope_select/insert/update`), A (`acting_read/insert/update`), **`tenant_system_read_executed`** (R-2); no P; grant SELECT/INSERT/UPDATE; no DELETE; TRUNCATE denied |
+| 5 | Force-resolution | `payment_manual_resolution_approvals` | table | FORCE RLS; T and A select/insert; no system policy; grant SELECT/INSERT; immutable |
+| 6 | Triggers on 4/5 | payload immutability and forced actor; class/allow-list/attempt checks at insert (incl. D-3, L-3, R-5, R-6 pinning); `payment_manual_resolutions_beneficiary_guard`; state machine with R-3 (i)–(viii); `payment_manual_resolutions_no_executing_commit` (deferred) | new | — |
+| 7 | Folded evidence | `payment_attempt_reference_evidence` + BEFORE INSERT trigger + deferred `…_bound_to_park` + `ledger_deny_mutation` triggers | table | FORCE RLS; `system_insert`, `system_select` only; grant SELECT/INSERT |
+| 8 | Folded indexes | `payment_statement_lines_ref`, `payment_statement_lines_merchant`, `payment_statement_lines_reversal_original` | index | — |
+| 9 | Guard | `payment_attempts_guard()`: the exact §8.3 diff | replaced | — |
+| 10 | Column discipline | `payment_attempts_operator_column_discipline` (R-7) | new trigger | — |
+| 11 | Reserved prefix | CHECKs on `payment_attempts.provider_reference`; `payment_provider_events.{provider_reference, original_provider_reference, settlement_reference}`; `payment_statement_lines.{provider_reference, original_provider_reference, settlement_reference}`; `payment_attempt_reference_evidence.reference`; `deposit_intents.provider_reference`; `withdrawal_requests.provider_reference` | constraints | — |
+| 12 | Reserved prefix | `ledger_transactions_reserved_prefix_guard` (all sessions) | new trigger | — |
+| 13 | Fences | `ledger_governed_fence_allows` (a)+(b)+(c); `ledger_entries_governed_fence()` with (a) byte-identical and (b)/(c) per-entry shapes (§24.1) | replaced functions | — |
+| 14 | Acting policies | `ledger_accounts` `acting_insert` (widened, §24.2); `payment_attempts` `acting_update`; `withdrawal_requests` `acting_read` + `acting_update`; `deposit_intents` `acting_update` (WITH CHECK false) | policies | — |
+| 15 | K2 function | `ledger_adjustment_payload_refusal` (Step B arm + MA020 exemption term) | replaced | — |
+| 16 | Reconciliation | `reconciliation_mismatches_mismatch_kind_check` (+3 kinds, name kept) | constraint | — |
+| 17 | Up-time refusal | any reserved-prefix value present in the 11/12 columns or `ledger_transactions.provider_tx_id` | DO block | — |
+| 18 | Grants | the in-migration `REVOKE ALL` then `GRANT` block for 2, 4, 5 and 7 (the K2 pattern) | — | matches `init-app-role.sql` |
+| Down | — | refuses with resolutions, new-kind rows or evidence rows; restores the 0107 guard, the 0113 bodies of 13 and 15, the 0113 `ledger_accounts` `acting_insert`, and the previous kind CHECK; drops everything else; must pass on an empty scratch DB; verified by the whole-schema snapshot (D-10) | — | — |
 
 **`deploy/init-app-role.sql`:** one new block, **appended after E1's block** (§20.3), in K2's
 `DO $$ … FOR t IN SELECT * FROM (VALUES …)` loop pattern (`init-app-role.sql:398-418`):
@@ -1080,24 +1324,29 @@ confirmed, and K3 merges after E1.
 | R-K3-5 | Standing kinds need a running payment_statement stream for the provider | runbook precondition; registry note |
 | R-K3-6 | N1 conflict-park attribution stays approximate | Q-LF-3 |
 | R-K3-7 | S-1: distinct Person does not prove two humans under the unverified identity model | HD-PRH2-2 (c) platform co-approval; disclosed in ADR 0099 |
-| R-K3-8 | Unbound payout parks (`invalid_provider_reference*`) keep their hold with no resolution path | PAY-PAYOUT-UNBOUND-HOLD-1; for a closed tenant, also the §19 workstream (it may list them as "retain") |
+| R-K3-8 (rev 4, LF L-1: complete list) | **Every payout hold M2 refuses keeps its hold with no resolution path:** `amount_asset_mismatch` and `callback_amount_asset_mismatch` (owner PAYOUT-AMOUNT-DISPUTE-1); `invalid_provider_reference` and `invalid_provider_reference:<reason>` (owner PAY-PAYOUT-UNBOUND-HOLD-1); **`reversal_tombstone_precedes_success`, `late_success_after_terminal`, `late_decline_after_terminal`, `late_contradicting_evidence`** (until now no owner; **new follow-up PAY-PAYOUT-CONTRADICTION-HOLD-1**, owner payments + LF, before any real payout provider) | the follow-ups named; for a closed tenant, also ADR 0107 (`retain` only) |
+| R-K3-9 (rev 4, D-3) | A reference-less payout confirmed paid out of band has no "declare paid" path; its hold is retained | registered residual (§5.1); "declare not paid" stays available |
+| R-K3-10 (rev 4, O-5, launch flag) | Under HD-PRH2-2 (c), co-approval is grant-level only | before real money, at least one **platform-scope** approver on `m2_declare_not_paid` (the double-payout direction), via HD-PRH2-8. Human decision, not set here |
+| R-K3-11 (rev 4, O-6, accepted) | The acting `withdrawal_requests` USING clause (needed for `FOR UPDATE`) lets a validly acting principal briefly row-lock tenant X's withdrawals | accepted; the same class as K2's `staff_users` `acting_lock` |
+| R-K3-12 (rev 4, R-9, accepted) | `withdrawal.Complete`/`Fail` write `ActorType: system` audit rows in tenant-scope sessions (`withdrawal.go:1513`); acting sessions are forced to staff by `audit_log_acting_actor` | accepted without a `withdrawal.go` edit, **only because** T-15/C-15 asserts the linkage to the resolution audit |
+| R-K3-13 (launch flags carried) | TM-7, TM-10, HD-PRH2-8, LEDGER-MANUAL-ADJ-LINK-1, STAFF-LIFECYCLE-1 (revoke-on-suspend before real money), PAY-PAYOUT-DISPUTE-ALERT-1 + ALERT-DELIVERY-1 before any real payout provider or real-money enablement of M2 | via the orchestrator to the human |
 
-## 22. Open questions (must be answered before K3 code)
+## 22. Open questions: status at revision 4
 
-| ID | To | Question |
+| ID | To | Status |
 |---|---|---|
-| Q-LF-1 | ledger-finance | Confirm the fold of STANDING-1 + POLL-REF-CLEAR-1 into 0115 as **the** single LF-signed schema change (§8.6, §9.2), including S1–S5 wording and the Y-table shape (a separate table, not a column) |
-| Q-LF-2 | ledger-finance | Should MA020 refuse a K3 Step B compensating credit (§18.3)? Interim: yes (unchanged) |
-| Q-LF-3 | ledger-finance | N1: accept persisted-line attribution for conflict parks, or require a per-park evidence row (§9.2)? |
-| Q-LF-4 | ledger-finance | Confirm `callback_amount_asset_mismatch` on a payout is refused by M2 and belongs to PAYOUT-AMOUNT-DISPUTE-1 (§5.1) |
-| Q-LF-5 | ledger-finance + devops | The non-concurrent index build on `payment_statement_lines` in 0115 (§8.6(b)) |
-| Q-SEC-1 | security | Confirm the revision-3 ingress list (§5.4) and the C-9c column-catalogue pin as complete |
-| Q-SEC-2 | security | The MA020 versus Step B arm question, jointly with Q-LF-2 |
-| Q-SEC-3 | security | Accept that K3 adds no payout T14 alert, with PAY-PAYOUT-DISPUTE-ALERT-1 registered (§12.3), or require it inside K3 (it would then touch `alerts.go`/`receipt.go` alert sites and possibly `kind.go`, an E1 file, so it would sequence after E1) |
-| Q-SEC-4 | security | The Y evidence table: is family T only (no acting read) sufficient (§8.6(a))? |
-| Q-IC-1 | identity-compliance + LF | The payout KYC gate does not apply to M2 (§5.1) |
-| Q-PAY-1 | payments | The basis/context vocabulary (§5.1); whether `deposit_intents`/`withdrawal_requests.provider_reference` need the prefix CHECK (§5.4); a composite key `(id, tenant_id)` on `payment_attempts` for the evidence FK (§8.6(a)) |
-| Q-POP-1 | product-owner-proxy | Concur with the two folds and four non-folds (§18) |
+| Q-LF-1 | ledger-finance | **CONFIRMED** with D-4..D-8 (§8.6, §9.2) |
+| Q-LF-2 | ledger-finance | **Ruled: no MA020 on the Step B credit**; adopted with security (a)–(d) (§18.3); awaiting security's text-delta confirmation (fallback documented) |
+| Q-LF-3 | ledger-finance | **Ruled: approximate attribution accepted**; C-34b; N1 disclosed (§9.2) |
+| Q-LF-4 | ledger-finance | **CONFIRMED** (§5.1; R-K3-8) |
+| Q-LF-5 | ledger-finance + devops | **ACCEPTED** non-concurrent build, explicit object list, runbook row counts (§8.6(b), §20.1) |
+| Q-SEC-1 | security | **CONFIRMED** with R-8 (§5.4) |
+| Q-SEC-2 | security | conditions (a)–(d) written into §18.3; **text-delta confirmation pending** |
+| Q-SEC-3 | security | **ACCEPTED with conditions** (§12.3): PAY-PAYOUT-DISPUTE-ALERT-1 is a hard prerequisite |
+| Q-SEC-4 | security | **SUFFICIENT** under R-4 (§8.6(a)) |
+| Q-IC-1 | identity-compliance + LF | LF part concurred; **identity-compliance confirmation still OPEN** (not blocking K3 code per the reviews; the orchestrator decides) |
+| Q-PAY-1 | payments | the provider-reference CHECKs are now unconditional (R-8(a)); `payment_attempts_id_tenant_key` added (D-8); **the basis/context vocabulary is still OPEN for `payments`** |
+| Q-POP-1 | product-owner-proxy | **OPEN** (concurrence on the §18 folds) |
 
 No threshold, recipient, retention period or legal rule is set by this ADR.
 
@@ -1105,3 +1354,239 @@ No threshold, recipient, retention period or legal rule is set by this ADR.
 
 See the K3 design hand-off. The orchestrator is the single writer of `task-registry.md`,
 `HANDOVER.md`, `progress.md` and `active-stage.md`.
+
+## 24. Revision 4: binding design changes from the revision-3 reviews
+
+The sources are `reviews/k3-design-security.md` (R-1..R-9, O-1..O-6, T-1..T-18) and
+`reviews/k3-design-ledger-finance.md` (D-1..D-10, L-1..L-4, rulings). Where this section and an
+earlier section differ, **this section wins**.
+
+### 24.1 The entries fence: per-entry shapes for (b) and (c) (LF D-1 = security R-1)
+
+0115 replaces `ledger_entries_governed_fence()` with CREATE OR REPLACE. The parent check is
+unchanged: the transaction must pass `ledger_governed_fence_allows`, now (a)+(b)+(c). The function
+then dispatches on the parent's `transaction_type`:
+
+- **`manual_adjustment`:** the 0113 body (`0113:1478-1499`), **byte-identical**. That means the K2
+  request lookup, the §4 leg shape, and at most two entries with one per direction.
+- **`withdrawal_completed` (branch (b), "declare paid"):**
+  - Look up the resolution `m` with `m.tenant_id = v_tx.tenant_id`, `m.kind = 'm2_declare_paid'`,
+    `m.state = 'executing'`, `m.executed_txid = txid_current()` and
+    `m.withdrawal_request_id = v_tx.correlation_id`, joined to `withdrawal_requests w` (same
+    tenant). If none is found, raise `CG030`.
+  - The entry must be exactly one of: **debit** `player_withdrawal_hold` with
+    `wallet_id = w.wallet_id`, or **credit** `psp_clearing` with `wallet_id IS NULL`.
+  - In both cases `NEW.asset_code = w.asset_code` and `NEW.amount = w.amount = m.amount`.
+- **`withdrawal_failed` (branch (c), "declare not paid"):**
+  - The same lookup, with `m.kind = 'm2_declare_not_paid'`.
+  - The entry must be exactly one of: **debit** `player_withdrawal_hold` with
+    `wallet_id = w.wallet_id`, or **credit** `player_cash` with `wallet_id = w.wallet_id` (the same
+    wallet).
+  - The same asset and amount rule applies.
+- **Every branch:** at most two entries per linked transaction, one per direction (the 0113 count
+  rule).
+- **Any other `transaction_type`:** `CG030`. An acting session can add entries only to a governed
+  header of a known shape, so K2-C1 cannot reopen.
+- **After the resolution leaves `executing`** in the same transaction, no further entry passes:
+  every branch requires `state = 'executing'`.
+- **Down** restores the 0113 body byte-for-byte (C-16 / D-10).
+- **Tests:** T-2. **Mutants:** "admit any leg for (b)/(c)"; "drop `state = 'executing'`".
+
+### 24.2 Acting `ledger_accounts` INSERT, widened (LF D-2; security R-1)
+
+`GetOrCreateAccount` always runs `INSERT … ON CONFLICT DO NOTHING` (`ledger.go:521-545`). RLS WITH
+CHECK fires even when the row already exists (LF probe on PG 16.13). 0115 therefore drops and
+re-creates `acting_insert` on `ledger_accounts`:
+
+```sql
+CREATE POLICY acting_insert ON ledger_accounts FOR INSERT
+    WITH CHECK (tenant_id = NULLIF(current_setting('app.acting_tenant_id', true), '')::uuid
+                AND (SELECT financial_acting_session_valid())
+                AND (account_type IN ('player_cash', 'manual_adjustment')          -- 0113, unchanged
+                     OR (account_type = 'player_withdrawal_hold'
+                         AND EXISTS (SELECT 1 FROM payment_manual_resolutions m
+                                       JOIN withdrawal_requests w ON w.id = m.withdrawal_request_id AND w.tenant_id = m.tenant_id
+                                      WHERE m.tenant_id = ledger_accounts.tenant_id
+                                        AND m.kind IN ('m2_declare_paid', 'm2_declare_not_paid')
+                                        AND m.state = 'executing' AND m.executed_txid = txid_current()
+                                        AND w.wallet_id = ledger_accounts.wallet_id
+                                        AND w.asset_code = ledger_accounts.asset_code))
+                     OR (account_type = 'psp_clearing' AND wallet_id IS NULL
+                         AND EXISTS (SELECT 1 FROM payment_manual_resolutions m
+                                       JOIN withdrawal_requests w ON w.id = m.withdrawal_request_id AND w.tenant_id = m.tenant_id
+                                      WHERE m.tenant_id = ledger_accounts.tenant_id
+                                        AND m.kind = 'm2_declare_paid'
+                                        AND m.state = 'executing' AND m.executed_txid = txid_current()
+                                        AND w.asset_code = ledger_accounts.asset_code))));
+```
+
+- Down restores the 0113 policy byte-for-byte.
+- Test T-2 includes **M2 as the first-ever `psp_clearing` creation for a tenant and asset**.
+- Mutant: "admit all account types".
+- The subqueries read through the acting read policies (§8.2, §6.4).
+
+### 24.3 DB-guard parity with K2 (security R-3)
+
+Each control is enforced **in the DB**, not only in the executor.
+
+| # | Control | K2 counterpart | K3 implementation |
+|---|---|---|---|
+| (i) | Insert scope is `tenant` or `platform_acting` only, from `financial_actor_session()`; `NEW.tenant_id` equals the session tenant | `ledger_adjustment_requests_guard` (`0113:954`) | the resolutions and approvals insert triggers |
+| (ii) | **A capability-specific grant** at insert and in counting | `ledger_adjustment_eligible_grant(..)` and `_invisible_platform_grant` (`0113:898`, `:925`) | the same functions with `'payment_force_resolve:request'` (requester) and `':approve'` (approvers). `financial_acting_session_valid()` alone is **not** enough (T-6) |
+| (iii) | S-2(iii) at insert: the requester is not a Person who authored or approved a contributing policy | `financial_policy_author_persons` (`0113:692`) | the insert trigger, and again at count |
+| (iv) | **DB-side recount** at `pending → executing` (K2-C3 lesson) | `ledger_adjustment_execution_status` (`0113:1360`) | `payment_manual_resolution_execution_status(p_resolution)`, called by the state-machine trigger on `→ executing`. It recounts distinct, non-NULL, non-beneficiary, non-author Persons with in-force `:approve` grants (`FOR SHARE`), applies R-5, and compares the count with `financial_policy_required_approvals` at execution. Too few → refused (T-4) |
+| (v) | Refuse every non-executed exit (`refused_at_execution`, `rejected`, `cancelled`, `expired`) once a governed posting exists in this transaction. "Governed posting" means a `ledger_transactions` row keyed `provider_id:platform-operator-declared:<id>`, or keyed `wr.id:failed` with `correlation_id = wr.id`, inserted by this transaction | K2-C1(i) / MA040 | the state-machine trigger (T-5) |
+| (vi) | `expires_at` is DB-forced from the policy, never client-supplied | K2 guard | the insert trigger |
+| (vii) | Only the requester may cancel. Reject happens only through a reject decision in the same transaction. `→ executing` and `→ refused_at_execution` happen only in the final approval's transaction (`decided_txid = txid_current()`) | K2 guard | the state-machine trigger |
+| (viii) | Server-forced ids: `id` is a DB default and a client-supplied value is refused, so `reserved_provider_tx_id = prefix \|\| id` is never client-chosen | K2 guard | the insert trigger |
+
+### 24.4 Y evidence table (security R-4; LF D-6)
+
+Now specified in §8.6(a):
+- split system-shape INSERT and SELECT policies;
+- no UPDATE or DELETE policy, and no NULL arm;
+- a live-state BEFORE INSERT check;
+- the DEFERRABLE INITIALLY DEFERRED park binding;
+- a plain INSERT, so any duplicate raises.
+
+Tests T-7 and T-17.
+
+### 24.5 Closed-tenant actor scope (security R-5)
+
+- The insert, approval and execution triggers each read `tenants.status` in-tx.
+- When it is `'closed'`:
+  - a requester whose `financial_actor_session()` scope is `tenant` is refused (`MR030`);
+  - an approval row from a tenant-scope approver is refused at insert;
+  - at `→ executing`, the DB recount (§24.3 (iv)) counts **only** `platform_acting` approvals. This
+    catches a tenant closed after submission.
+- Only `platform_acting` actors holding `payment_force_resolve:*` grants for that tenant may act.
+- The optional extension to `suspended` is **not adopted**. It is recorded as a candidate for
+  HD-PRH2-8 / O-5 (R-K3-10).
+- Test T-8.
+
+### 24.6 Payload pinning of the factual basis (security R-6)
+
+- `attempt_state_at_submission` and `terminal_reason_at_submission` are DB-forced from the attempt
+  at insert, and included in `payload_hash` (§6.1).
+- At `→ executing`, a changed state or reason ends the resolution `refused_at_execution` (an S-11
+  stale-approval void).
+- Tests C-12b and T-9.
+
+### 24.7 Column discipline for operator-evidence UPDATEs (security R-7)
+
+New trigger `payment_attempts_operator_column_discipline`, BEFORE UPDATE ON `payment_attempts` FOR
+EACH ROW. It fires when `NEW.last_evidence_kind = 'operator'` and `NEW.state IS DISTINCT FROM
+OLD.state`. It is **not** an edit of `payment_attempts_guard()`, so the §8.3 diff stays exact.
+
+- **Allowed to change:** `state`, `last_evidence_kind`, `resolved_at`, `next_action_at`,
+  `updated_at`.
+- **`terminal_reason`:** must stay unchanged, except where a later ADR names an exact value for a
+  named transition. K3 names none. ADR 0107's governed M3 names `closed_tenant_release` for
+  `created → rejected`, and would add that one case.
+- **Every other column** must be `IS NOT DISTINCT FROM` OLD. This explicitly includes
+  `provider_reference`, `provider_id`, `ledger_transaction_id`, `amount`, `asset_code`,
+  `ever_possibly_sent`, `claim_token` and the lease columns. Otherwise `MR040`.
+- **Scope:** every session. That covers tenant sessions (`tenant_staff_scope` FOR ALL), not only
+  acting ones.
+- The executor never passes the reserved id as `provider_reference`. The reserved id lives only in
+  the ledger key.
+- Test T-10; mutant "drop the trigger".
+- **Q-PAY-2 (non-blocking; at implementation):** the 0107 guard and its T5/M3 branches must accept
+  an M2 transition that leaves `terminal_reason` unchanged. `payments` confirms with the C-17/T-11
+  matrices.
+
+### 24.8 Ingress conditions (security R-8)
+
+Written into §5.4:
+- (a) the unconditional `deposit_intents` and `withdrawal_requests` CHECKs;
+- (b) the explicit C-9c evidence column and the `merchant_reference` exemption;
+- (c) `sweeper.go:556` and `:636`;
+- (d) the deferred receipt replay;
+- (e) the composite FK prerequisite, which is `payment_attempts_id_tenant_key` (§8.4, §20.1 #1).
+
+### 24.9 Routes, permissions, errors and audit (security R-9)
+
+These mirror `manual_adjustment_routes.go`.
+
+| Aspect | Rule |
+|---|---|
+| Static permissions | `payment_force_resolve:request` and `:approve` go to `finance` and `platform_admin` **only**, never `tenant_admin`. `payment_force_resolve:read` goes to `finance`, `platform_admin` and `compliance`. `backoffice/src/auth/permissions.ts` matches |
+| Authority | The JWT role is only the route gate. The authority is the in-tx grant (§24.3 (ii)) |
+| Tenant | Taken from the `canActOnTenant` path value, never the body. A body `tenant_id` is ignored. A mismatch is refused |
+| Errors | DB refusals map to a **closed token set**: `force_resolve_disabled`, `force_resolve_not_permitted`, `force_resolve_precondition_failed`, `force_resolve_reason_not_resolvable`, `force_resolve_conflict`, `force_resolve_expired`, `force_resolve_not_found`. No SQL text and no Person ids |
+| Denial audit | Every refusal writes `payment.manual_resolution_denied` (the K2 `recordAdjustmentDenied` pattern), with the token, actor, tenant, resolution or attempt id, IP, UA and request id |
+| Executed audit | `payment.manual_resolution_executed` carries the resolution id, the ledger transaction id, and the withdrawal and attempt before/after (§11) |
+| Linkage | R-K3-12; T-15 |
+
+### 24.10 Optional findings and LOW items: disposition
+
+| Item | Disposition |
+|---|---|
+| O-1 casino/sportsbook `MR020` | **Adopted** (§5.4): map it to the deterministic invalid-reference class, or record the residual; T-13 |
+| O-2 refused poll echo | **Adopted** (§5.4): an audit plus `RescheduleNonTerminal`, never an error return; T-13 |
+| O-3 unwindowed growth, no LIMIT | **Adopted** (§9.3) |
+| O-4 one-transaction down; full-scan up-time refusal | **Adopted** (§8.5, §5.4) |
+| O-5 a platform-scope approver on "declare not paid" before real money | **Launch flag** (R-K3-10); human, via HD-PRH2-8 |
+| O-6 acting `withdrawal_requests` row lock | **Accepted** residual (R-K3-11) |
+| L-1 every refused hold listed; an owner for tombstone/`late_*` | **Adopted** (R-K3-8); new **PAY-PAYOUT-CONTRADICTION-HOLD-1** |
+| L-2 refused echo handling | **Adopted** (= O-2) |
+| L-3 "not paid" after a possible dispatch needs `provider_confirmed_out_of_band` | **Adopted** (§5.1); C-41 |
+| L-4 MA020 cannot see Y under acting | **Recorded** (§8.6(a)); MA020-SYNC-MISMATCH-1 adds an acting read or accepts this |
+| Security optional: refuse `m2_declare_not_paid` when no statement source is registered | **Adopted** (§12.3) |
+
+### 24.11 Follow-ups for the orchestrator to register
+
+- **PAY-PAYOUT-DISPUTE-ALERT-1:** payout disputes, T14 included, raise no alert. **Hard prerequisite
+  before any real payout provider and before any platform policy row enabling
+  `payment_force_resolve` for a real-money tenant** (Q-SEC-3).
+- **PAY-PAYOUT-CONTRADICTION-HOLD-1:** the holds of payouts disputed with
+  `reversal_tombstone_precedes_success` or a `late_*` reason have no resolution path (LF L-1). Owner:
+  payments + LF. Due before any real payout provider.
+- **PAY-M3-STAFF-PATH-1:** M3 has no caller for active tenants (a KYC deny at T2, a credential
+  permanently gone). Owner: payments. Needs a design decision. ADR 0107's governed M3 can be
+  generalized later.
+- **R-K3-9 residual:** a reference-less payout confirmed paid has no "declare paid" path. Record it
+  as a note on PAYOUT-AMOUNT-DISPUTE-1, or under its own id, at the orchestrator's choice.
+
+## 25. Revision 4 checklist (required change → where satisfied)
+
+| Required change | Section(s) |
+|---|---|
+| **Security R-1** (fences (b)/(c) per entry; `ledger_accounts`; down; K2-C1/C2 analogs) | §24.1, §24.2, §8.4, §8.5, §20.1 #13–14, T-2 |
+| **Security R-2** (system read of executed resolutions; real-session tests; mutant) | §8.2, §9.3, §20.1 #4, T-1, T-3 |
+| **Security R-3** (DB-guard parity (i)–(viii)) | §24.3, §6.1, T-4, T-5, T-6 |
+| **Security R-4** (Y policies and writer binding) | §8.6(a), §24.4, T-7, T-17 |
+| **Security R-5** (closed tenant: platform_acting only) | §5.1, §24.5, T-8 |
+| **Security R-6** (pin attempt state and reason) | §6.1, §24.6, T-9, C-12b |
+| **Security R-7** (column discipline) | §6.4, §24.7, §20.1 #10, T-10 |
+| **Security R-8** (ingress (a)–(e)) | §5.4, §24.8, §8.4, §20.1 #1, #11, T-13 |
+| **Security R-9** (routes, permissions, errors, denial audit, linkage) | §24.9, R-K3-12, T-14, T-15 |
+| Security O-1..O-6 | §24.10 |
+| Security Q-SEC-1..4 | §22, §5.4, §18.3, §12.3, §8.6(a) |
+| Security T-1..T-18 | §12.4 (T-16 = §12 mutant table) |
+| LIKE mutant EQUIVALENT | §12 mutant table |
+| **LF D-1** | §24.1 |
+| **LF D-2** | §24.2 |
+| **LF D-3** (+ residual) | §5.1, R-K3-9, C-46 |
+| **LF D-4** | §9.2 "Eligible evidence", §9.1, C-45 |
+| **LF D-5** | §9.1, C-42 |
+| **LF D-6** | §8.6(a), T-7 |
+| **LF D-7** | §9.2 S6, C-43, C-44 |
+| **LF D-8** | §8.4, §8.6(a), §20.1 #1 |
+| **LF D-9** | §12.4 "C-5b hardened", C-47 |
+| **LF D-10** | §8.5, T-18 |
+| LF L-1..L-4 | §24.10, R-K3-8, §5.1, §5.4, §8.6(a) |
+| LF Q-LF-1..5 | §22, §8.6, §9.2, §18.3, §5.1 |
+| LF test additions and extra mutants | §12.4 |
+| **MA020 exemption** (Q-LF-2 + Q-SEC-2 (a)–(d)) | §18.3, §8.4, C-48, §7 |
+| HD-PRH2-9 → ADR 0107 | §19 |
+| Follow-ups | §24.11 |
+
+**Still open after revision 4:**
+- security's text-delta confirmation, including the MA020 exemption;
+- LF confirmation of the D-* text;
+- Q-IC-1 (identity-compliance);
+- Q-PAY-1 vocabulary and Q-PAY-2 (payments);
+- Q-POP-1.
+
+No threshold, recipient, retention period or legal rule is set here.
