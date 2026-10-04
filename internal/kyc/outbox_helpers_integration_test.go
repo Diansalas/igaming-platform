@@ -16,6 +16,8 @@ import (
 	"context"
 	"errors"
 	"os"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -70,6 +72,11 @@ func ownerTx(t *testing.T, fn func(ctx context.Context, tx pgx.Tx)) {
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	for _, stmt := range []string{
+		// One cross-package serialisation point for every outbox DDL fixture
+		// (taken first, so two fixtures never deadlock on the table lock), and a
+		// bounded wait for concurrent writers of other packages.
+		`SELECT pg_advisory_xact_lock(1140114)`,
+		`SET LOCAL lock_timeout = '30s'`,
 		`ALTER TABLE kyc_submission_outbox DISABLE TRIGGER USER`,
 		`ALTER TABLE kyc_submission_outbox NO FORCE ROW LEVEL SECURITY`,
 	} {
@@ -91,15 +98,56 @@ func ownerTx(t *testing.T, fn func(ctx context.Context, tx pgx.Tx)) {
 	}
 }
 
-// resetOutbox deletes every outbox row (fixture only; the guard forbids DELETE
-// for every production session), so a test's worker passes see only its own rows.
-func resetOutbox(t *testing.T) {
+// ---- parallel-package safety (code review F1) ----
+//
+// CI runs every package's integration tests in parallel against ONE database.
+// No test deletes outbox rows or lifts a guard for rows it does not own, and no
+// worker pass claims a row of a tenant the running test did not create:
+// OutboxWorker.ClaimScope (nil in production) is set to the tenants the CURRENT
+// top-level test seeded. The only DDL left is the short, advisory-lock
+// serialised owner fixture in ownerTx (transactional: no other session ever
+// sees the trigger disabled).
+
+var testScope struct {
+	mu  sync.Mutex
+	top string
+	ids []uuid.UUID
+}
+
+// registerScopeTenant adds a tenant the running test owns to the claim scope.
+// A new top-level test starts with an empty scope.
+func registerScopeTenant(t *testing.T, id uuid.UUID) {
 	t.Helper()
-	ownerTx(t, func(ctx context.Context, tx pgx.Tx) {
-		if _, err := tx.Exec(ctx, `DELETE FROM kyc_submission_outbox`); err != nil {
-			t.Fatalf("reset outbox: %v", err)
-		}
-	})
+	top := strings.SplitN(t.Name(), "/", 2)[0]
+	testScope.mu.Lock()
+	defer testScope.mu.Unlock()
+	if testScope.top != top {
+		testScope.top, testScope.ids = top, nil
+	}
+	testScope.ids = append(testScope.ids, id)
+}
+
+// resetScope starts a fresh claim scope for the running (sub)test: rows an
+// earlier subtest left behind are out of scope (no deletion needed).
+func resetScope(t *testing.T) {
+	t.Helper()
+	testScope.mu.Lock()
+	defer testScope.mu.Unlock()
+	testScope.top, testScope.ids = strings.SplitN(t.Name(), "/", 2)[0], nil
+}
+
+// currentScope is the OutboxWorker.ClaimScope of every test worker.
+func currentScope() []uuid.UUID {
+	testScope.mu.Lock()
+	defer testScope.mu.Unlock()
+	return append([]uuid.UUID{}, testScope.ids...)
+}
+
+// newScopedWorker is NewOutboxWorker limited to the running test's tenants.
+func newScopedWorker(pool *db.Pool, orch *Orchestrator, outbound OutboundCredentialResolver) *OutboxWorker {
+	w := NewOutboxWorker(pool, orch, outbound)
+	w.ClaimScope = currentScope
+	return w
 }
 
 // outboxFixtureUpdate applies `UPDATE kyc_submission_outbox SET <set> WHERE id = $1`
@@ -194,7 +242,7 @@ func onlyRow(t *testing.T, pool *db.Pool, tenantID, verificationID uuid.UUID, op
 // and the F4 re-check passes).
 func workerFor(pool *db.Pool, outbound OutboundCredentialResolver, provider KYCProvider) *OutboxWorker {
 	orch := NewOrchestrator(map[string]KYCProvider{provider.ID(): provider}, nil)
-	w := NewOutboxWorker(pool, orch, outbound)
+	w := newScopedWorker(pool, orch, outbound)
 	w.Logger = nil
 	return w
 }
@@ -272,17 +320,6 @@ func submitViaWorker(t *testing.T, pool *db.Pool, outbound OutboundCredentialRes
 		t.Fatalf("read verification: %v", err)
 	}
 	return got
-}
-
-// purgeOutboxForTenant deletes one tenant's outbox rows (fixture only), so rows
-// a test leaves behind never reach a later test's worker pass.
-func purgeOutboxForTenant(t *testing.T, tenantID uuid.UUID) {
-	t.Helper()
-	ownerTx(t, func(ctx context.Context, tx pgx.Tx) {
-		if _, err := tx.Exec(ctx, `DELETE FROM kyc_submission_outbox WHERE tenant_id = $1`, tenantID); err != nil {
-			t.Fatalf("purge outbox for tenant: %v", err)
-		}
-	})
 }
 
 // orphanViaPhaseA seeds a genuine phase-A-only orphan (a pending create row

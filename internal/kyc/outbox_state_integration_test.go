@@ -62,7 +62,7 @@ func TestOutboxState_43_TI_StaffDerivedState(t *testing.T) {
 	}
 	seedDocument(t, r.pool, r.f, vs.ID, DocumentPassport, "p.png")
 	orch := NewOrchestrator(map[string]KYCProvider{"mock": r.spy, "mock2": renamedMock{NewMockKYCProvider(), "mock2"}}, nil)
-	passUntilQuiet(t, NewOutboxWorker(r.pool, orch, NewMockOutboundResolver()))
+	passUntilQuiet(t, newScopedWorker(r.pool, orch, NewMockOutboundResolver()))
 	if got := staffState(t, r, vs.ID); got != (SubmissionState{State: SubmissionCancelled, CancelReason: "provider_deconfigured"}) {
 		t.Errorf("R2 stranded case (sent + cancelled provider_deconfigured): %+v", got)
 	}

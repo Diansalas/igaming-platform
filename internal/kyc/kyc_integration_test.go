@@ -82,9 +82,10 @@ func seedFixture(t *testing.T, pool *db.Pool) fixture {
 	if err != nil {
 		t.Fatalf("seed brand/player: %v", err)
 	}
-	// PRH-2 E1: outbox rows this test leaves behind must never reach a later
-	// test's worker pass.
-	t.Cleanup(func() { purgeOutboxForTenant(t, f.tenantID) })
+	// PRH-2 E1: this test's workers claim only the tenants the test seeded, so
+	// rows it leaves behind never reach another test (or package) and no test
+	// deletes outbox rows (code review F1).
+	registerScopeTenant(t, f.tenantID)
 	return f
 }
 

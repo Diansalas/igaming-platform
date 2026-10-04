@@ -308,7 +308,7 @@ func TestMigration0114_54_DownRefusesOnAnyRow(t *testing.T) {
 				passUntilQuiet(t, workerFor(pool, mismatchedKYCOutboundResolver{}, NewMockKYCProvider()))
 			case "cancelled_only":
 				orch := NewOrchestrator(map[string]KYCProvider{"mock": NewMockKYCProvider(), "mock2": renamedMock{NewMockKYCProvider(), "mock2"}}, nil)
-				passUntilQuiet(t, NewOutboxWorker(pool, orch, NewMockOutboundResolver()))
+				passUntilQuiet(t, newScopedWorker(pool, orch, NewMockOutboundResolver()))
 			}
 			wantState := map[string]OutboxState{"pending": OutboxPending, "claimed": OutboxClaimed, "sent_only": OutboxSent,
 				"failed_terminal_only": OutboxFailedTerminal, "cancelled_only": OutboxCancelled}[mode]

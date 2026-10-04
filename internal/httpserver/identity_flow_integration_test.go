@@ -42,6 +42,7 @@ func mustCreateTenant(t *testing.T, pool *db.Pool) identity.Tenant {
 	if err != nil {
 		t.Fatalf("failed to create tenant: %v", err)
 	}
+	registerKYCScopeTenant(t, tenant.ID) // PRH-2 E1: the KYC test worker claims only this test's tenants
 	t.Cleanup(func() {
 		_ = pool.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
 			_, err := tx.Exec(ctx, `DELETE FROM tenants WHERE id = $1`, tenant.ID)

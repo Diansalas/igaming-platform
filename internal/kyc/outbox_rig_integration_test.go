@@ -43,9 +43,16 @@ type rig struct {
 
 func newRig(t *testing.T) *rig {
 	t.Helper()
-	pool := rtPool(t, 10)
-	resetOutbox(t) // rows another test (or package) left behind never reach this worker
-	r := &rig{t: t, pool: pool, owner: testPool(t)}
+	return newRigOn(t, rtPool(t, 10), testPool(t))
+}
+
+// newRigOn builds the rig over an explicit pool pair. Tests that must add a
+// database constraint or otherwise change the schema use a SCRATCH database
+// (scratchThrough0114) here, never the shared one.
+func newRigOn(t *testing.T, pool, owner *db.Pool) *rig {
+	t.Helper()
+	resetScope(t) // rows an earlier (sub)test left behind are out of this test's claim scope
+	r := &rig{t: t, pool: pool, owner: owner}
 	r.f = seedFixture(t, pool)
 	base := NewMockKYCProvider()
 	r.createImpl = func(ctx context.Context, in CreateVerificationInput) (ProviderResult, error) {

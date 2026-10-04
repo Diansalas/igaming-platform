@@ -37,6 +37,17 @@ func pgCode(err error) string {
 // first applying extra GUCs, and ALWAYS rolls back.
 func probeTx(t *testing.T, pool *db.Pool, tenant uuid.UUID, gucs map[string]string, fn func(ctx context.Context, tx pgx.Tx)) {
 	t.Helper()
+	if len(probeDDL) > 0 {
+		merged := map[string]string{}
+		for k, v := range gucs {
+			merged[k] = v
+		}
+		if tenant != uuid.Nil {
+			merged["app.tenant_id"] = tenant.String()
+		}
+		ownerProbe(t, probeDDL, merged, fn)
+		return
+	}
 	run := func(ctx context.Context, tx pgx.Tx) error {
 		for k, v := range gucs {
 			if _, err := tx.Exec(ctx, `SELECT set_config($1, $2, true)`, k, v); err != nil {
@@ -79,6 +90,10 @@ func spExec(ctx context.Context, tx pgx.Tx, sql string, args ...any) (int64, err
 // probeWorker is probeTx under the real worker identity.
 func probeWorker(t *testing.T, pool *db.Pool, fn func(ctx context.Context, tx pgx.Tx)) {
 	t.Helper()
+	if len(probeDDL) > 0 {
+		ownerProbe(t, probeDDL, map[string]string{"app.platform_service_id": string(db.ServiceKYCSubmissionWorker)}, fn)
+		return
+	}
 	err := pool.WithPlatformService(context.Background(), db.ServiceKYCSubmissionWorker, func(ctx context.Context, tx pgx.Tx) error {
 		fn(ctx, tx)
 		return errProbeRollback
@@ -106,54 +121,85 @@ func rawOrphan(t *testing.T, pool *db.Pool, f fixture) uuid.UUID {
 const insertCreateSQL = `INSERT INTO kyc_submission_outbox (tenant_id, verification_id, operation, provider_id, idempotency_key)
 	VALUES ($1, $2, 'create', 'mock', $3)`
 
-// disableOutboxGuard disables ONLY the guard row trigger (committed, owner DDL)
-// so a test can observe the RLS layer ALONE; it re-enables it on cleanup. The
-// guard runs BEFORE the RLS WITH CHECK, so with it enabled a refusal may come
-// from either layer: the layered assertions below require the guard-enabled
-// refusal to be 42501 or P0001, and the RLS-only run to be exactly the policy.
+// ---- layer-isolation seams (code review F2: nothing here is ever committed) ----
+//
+// probeDDL is owner DDL applied INSIDE each probe transaction by ownerProbe and
+// rolled back with it. DDL is transactional in PostgreSQL: the statements are
+// invisible to every other session (which merely waits on the table lock for
+// the few milliseconds of the probe) and vanish on rollback, so a killed test
+// binary leaves NOTHING behind (an uncommitted transaction is aborted by the
+// server) and a concurrent test in another package never sees the outbox with
+// its isolation removed. Tests run sequentially within the package, so a
+// package variable is safe; t.Cleanup clears it.
+var probeDDL []string
+
+// ownerProbe runs fn in one OWNER-connection transaction: serialised with the
+// other outbox DDL fixtures by a transaction advisory lock, the DDL applied, the
+// session GUCs set, fn run, and the transaction ALWAYS rolled back. The owner
+// role is neither a superuser nor BYPASSRLS (asserted: a bypassing role would
+// make every layer assertion vacuous) and the outbox is FORCE ROW LEVEL
+// SECURITY, so the policies and the trigger still apply to it exactly as to the
+// runtime role (the policies and the guard read the GUCs, not the role).
+func ownerProbe(t *testing.T, ddl []string, gucs map[string]string, fn func(ctx context.Context, tx pgx.Tx)) {
+	t.Helper()
+	url := os.Getenv("TEST_DATABASE_URL")
+	if url == "" {
+		t.Skip("TEST_DATABASE_URL not set")
+	}
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, url)
+	if err != nil {
+		t.Fatalf("owner connect: %v", err)
+	}
+	defer func() { _ = conn.Close(ctx) }()
+	tx, err := conn.Begin(ctx)
+	if err != nil {
+		t.Fatalf("owner begin: %v", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	var super, bypass bool
+	if err := tx.QueryRow(ctx, `SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user`).Scan(&super, &bypass); err != nil {
+		t.Fatalf("owner role attributes: %v", err)
+	}
+	if super || bypass {
+		t.Fatalf("the owner probe must not run as a superuser or BYPASSRLS role (super=%v bypassrls=%v)", super, bypass)
+	}
+	for _, stmt := range append([]string{`SELECT pg_advisory_xact_lock(1140114)`, `SET LOCAL lock_timeout = '30s'`}, ddl...) {
+		if _, err := tx.Exec(ctx, stmt); err != nil {
+			t.Fatalf("owner probe %q: %v", stmt, err)
+		}
+	}
+	for k, v := range gucs {
+		if _, err := tx.Exec(ctx, `SELECT set_config($1, $2, true)`, k, v); err != nil {
+			t.Fatalf("set GUC %s: %v", k, err)
+		}
+	}
+	fn(ctx, tx)
+}
+
+// disableOutboxGuard makes every following probe run with ONLY the guard row
+// trigger disabled (inside the probe's own rolled-back transaction), so a test
+// can observe the RLS layer ALONE. The guard runs BEFORE the RLS WITH CHECK, so
+// with it enabled a refusal may come from either layer: the layered assertions
+// require the guard-enabled refusal to be 42501 or P0001, and the RLS-only run
+// to be exactly the policy. It returns the restore function (idempotent).
 func disableOutboxGuard(t *testing.T) func() {
 	t.Helper()
-	conn := func(sql string) {
-		url := os.Getenv("TEST_DATABASE_URL")
-		c, err := pgx.Connect(context.Background(), url)
-		if err != nil {
-			t.Fatalf("owner connect: %v", err)
-		}
-		defer func() { _ = c.Close(context.Background()) }()
-		if _, err := c.Exec(context.Background(), sql); err != nil {
-			t.Fatalf("%s: %v", sql, err)
-		}
-	}
-	conn(`ALTER TABLE kyc_submission_outbox DISABLE TRIGGER kyc_submission_outbox_guard_row`)
-	restored := false
-	restore := func() {
-		if !restored {
-			restored = true
-			conn(`ALTER TABLE kyc_submission_outbox ENABLE TRIGGER kyc_submission_outbox_guard_row`)
-		}
-	}
+	probeDDL = []string{`ALTER TABLE kyc_submission_outbox DISABLE TRIGGER kyc_submission_outbox_guard_row`}
+	restore := func() { probeDDL = nil }
 	t.Cleanup(restore)
 	return restore
 }
 
-// openOutboxPolicies adds a temporary permissive FOR ALL policy (committed owner
-// DDL, dropped on cleanup) so the RLS layer admits everything and the guard
-// TRIGGER alone decides: the third layer of the defence in depth (RLS, trigger,
-// Go CAS), needed to prove each layer independently.
+// openOutboxPolicies makes every following probe run with a permissive FOR ALL
+// policy added (inside the probe's own rolled-back transaction) so the RLS layer
+// admits everything and the guard TRIGGER alone decides: the third layer of the
+// defence in depth (RLS, trigger, Go CAS), needed to prove each layer
+// independently.
 func openOutboxPolicies(t *testing.T) {
 	t.Helper()
-	conn := func(sql string) {
-		c, err := pgx.Connect(context.Background(), os.Getenv("TEST_DATABASE_URL"))
-		if err != nil {
-			t.Fatalf("owner connect: %v", err)
-		}
-		defer func() { _ = c.Close(context.Background()) }()
-		if _, err := c.Exec(context.Background(), sql); err != nil {
-			t.Fatalf("%s: %v", sql, err)
-		}
-	}
-	conn(`CREATE POLICY kso_test_open_all ON kyc_submission_outbox FOR ALL USING (true) WITH CHECK (true)`)
-	t.Cleanup(func() { conn(`DROP POLICY IF EXISTS kso_test_open_all ON kyc_submission_outbox`) })
+	probeDDL = []string{`CREATE POLICY kso_test_open_all ON kyc_submission_outbox FOR ALL USING (true) WITH CHECK (true)`}
+	t.Cleanup(func() { probeDDL = nil })
 }
 
 // Statements for the exclusion matrix: complete enough to satisfy every CHECK

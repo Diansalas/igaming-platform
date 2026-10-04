@@ -48,8 +48,6 @@ func (a failingCreateVerificationAdapter) CreateVerification(ctx context.Context
 func newCreateVerificationLogRedactionServer(t *testing.T, pool *db.Pool, issuer *auth.Issuer, logger *slog.Logger) (*httptest.Server, *atomic.Int32) {
 	t.Helper()
 	adapter := failingCreateVerificationAdapter{MockKYCProvider: kyc.NewMockKYCProvider(), calls: new(atomic.Int32)}
-	purgeKYCOutbox(t)
-	t.Cleanup(func() { purgeKYCOutbox(t) })
 	orch := kyc.NewOrchestrator(map[string]kyc.KYCProvider{"mock": adapter}, kyc.NewMockWebhookCredentials(adapter.MockKYCProvider))
 	w := registerKYCOutboxWorker(t, pool, orch, kyc.NewMockOutboundResolver())
 	w.Logger = logger

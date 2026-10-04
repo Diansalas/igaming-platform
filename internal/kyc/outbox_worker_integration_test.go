@@ -287,7 +287,7 @@ func TestOutbox_07b_ProviderDeconfigured_CancelsWithoutACall_F4(t *testing.T) {
 	// selects "mock", and the tenant holds no credential handle for it.
 	second := NewMockKYCProvider()
 	orch := NewOrchestrator(map[string]KYCProvider{"mock": r.spy, "mock2": renamedMock{second, "mock2"}}, nil)
-	w := NewOutboxWorker(r.pool, orch, NewMockOutboundResolver())
+	w := newScopedWorker(r.pool, orch, NewMockOutboundResolver())
 	st := w.RunPass(context.Background())
 	if st.Results[resultCancelled] != 1 {
 		t.Fatalf("expected one cancellation, got %+v", st.Results)

@@ -242,6 +242,43 @@ func TestKYCWorkerCatalogueGate_EveryPermissivePolicyIsUnsatisfiableOrFenced_31(
 	for _, v := range violations {
 		t.Error(v)
 	}
+
+	// Code review F6: the policy enumeration above never sees a table with NO
+	// policies or with row-level security DISABLED, which the worker identity
+	// could read and write in full. Every public table except schema_migrations
+	// must have RLS enabled, or be fenced, or be on the reference allowlist.
+	var noRLS []string
+	var publicTables int
+	if err := rt.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+		rows, err := tx.Query(ctx,
+			`SELECT c.relname, c.relrowsecurity FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+			  WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p') AND NOT c.relispartition AND c.relname <> 'schema_migrations'`)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var name string
+			var rls bool
+			if err := rows.Scan(&name, &rls); err != nil {
+				return err
+			}
+			publicTables++
+			if !rls && !fenced[name] && !workerReferenceAllowlist[name] {
+				noRLS = append(noRLS, name)
+			}
+		}
+		return rows.Err()
+	}); err != nil {
+		t.Fatalf("enumerate public tables: %v", err)
+	}
+	if publicTables < 50 {
+		t.Fatalf("expected the full public schema (>50 tables), got %d (the enumeration is broken)", publicTables)
+	}
+	sort.Strings(noRLS)
+	if len(noRLS) != 0 {
+		t.Errorf("public table(s) with row-level security DISABLED that are neither fenced nor on the worker reference allowlist: %v", noRLS)
+	}
 	if evaluated < 150 {
 		t.Fatalf("expected to evaluate >150 policy expressions, evaluated %d (the gate is vacuous)", evaluated)
 	}

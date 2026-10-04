@@ -58,8 +58,6 @@ func newUploadSubmitFailureLogRedactionServer(t *testing.T, pool *db.Pool, issue
 	t.Helper()
 	base := kyc.NewMockKYCProvider()
 	adapter := failingSubmitVerificationAdapter{MockKYCProvider: base, calls: new(atomic.Int32)}
-	purgeKYCOutbox(t)
-	t.Cleanup(func() { purgeKYCOutbox(t) })
 	orch := kyc.NewOrchestrator(map[string]kyc.KYCProvider{"mock": adapter}, kyc.NewMockWebhookCredentials(base))
 	w := registerKYCOutboxWorker(t, pool, orch, kyc.NewMockOutboundResolver())
 	w.Logger = logger
@@ -232,8 +230,6 @@ func (mismatchedKYCResolver) Resolve(_ context.Context, _ providercred.TenantTxR
 func TestKYC_UploadOrphanVerification_Returns409NotInternalError(t *testing.T) {
 	pool, issuer := testEnv(t)
 	base := kyc.NewMockKYCProvider()
-	purgeKYCOutbox(t)
-	t.Cleanup(func() { purgeKYCOutbox(t) })
 	orch := kyc.NewOrchestrator(map[string]kyc.KYCProvider{"mock": base}, kyc.NewMockWebhookCredentials(base))
 	registerKYCOutboxWorker(t, pool, orch, mismatchedKYCResolver{})
 	srv := httptest.NewServer(New(Deps{

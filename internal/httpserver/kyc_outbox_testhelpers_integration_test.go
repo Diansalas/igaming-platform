@@ -9,11 +9,11 @@ package httpserver
 
 import (
 	"context"
-	"os"
+	"strings"
 	"sync"
 	"testing"
 
-	"github.com/jackc/pgx/v5"
+	"github.com/google/uuid"
 
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/kyc"
@@ -25,41 +25,36 @@ var kycTestWorkers struct {
 	ws []*kyc.OutboxWorker
 }
 
-// purgeKYCOutbox deletes every outbox row through the OWNER connection with the
-// guard trigger disabled and FORCE RLS lifted in one transaction (fixture only:
-// the guard forbids DELETE for every production session), so rows an earlier
-// test left behind never reach this test's worker pass.
-func purgeKYCOutbox(t *testing.T) {
+// ---- parallel-package safety (code review F1) ----
+//
+// CI runs every package's integration tests in parallel against ONE database.
+// A test never deletes outbox rows, and a test worker claims only the tenants
+// the running top-level test created (kyc.OutboxWorker.ClaimScope, nil in
+// production), so it never touches another test's or package's rows.
+
+var kycScope struct {
+	mu  sync.Mutex
+	top string
+	ids []uuid.UUID
+}
+
+// registerKYCScopeTenant adds a tenant the running test created to the claim
+// scope; a new top-level test starts with an empty scope.
+func registerKYCScopeTenant(t *testing.T, id uuid.UUID) {
 	t.Helper()
-	url := os.Getenv("TEST_DATABASE_URL")
-	if url == "" {
-		return
+	top := strings.SplitN(t.Name(), "/", 2)[0]
+	kycScope.mu.Lock()
+	defer kycScope.mu.Unlock()
+	if kycScope.top != top {
+		kycScope.top, kycScope.ids = top, nil
 	}
-	ctx := context.Background()
-	conn, err := pgx.Connect(ctx, url)
-	if err != nil {
-		t.Fatalf("owner connect: %v", err)
-	}
-	defer func() { _ = conn.Close(ctx) }()
-	tx, err := conn.Begin(ctx)
-	if err != nil {
-		t.Fatalf("owner begin: %v", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-	for _, stmt := range []string{
-		`ALTER TABLE kyc_submission_outbox DISABLE TRIGGER USER`,
-		`ALTER TABLE kyc_submission_outbox NO FORCE ROW LEVEL SECURITY`,
-		`DELETE FROM kyc_submission_outbox`,
-		`ALTER TABLE kyc_submission_outbox FORCE ROW LEVEL SECURITY`,
-		`ALTER TABLE kyc_submission_outbox ENABLE TRIGGER USER`,
-	} {
-		if _, err := tx.Exec(ctx, stmt); err != nil {
-			t.Fatalf("purge outbox %q: %v", stmt, err)
-		}
-	}
-	if err := tx.Commit(ctx); err != nil {
-		t.Fatalf("purge commit: %v", err)
-	}
+	kycScope.ids = append(kycScope.ids, id)
+}
+
+func currentKYCScope() []uuid.UUID {
+	kycScope.mu.Lock()
+	defer kycScope.mu.Unlock()
+	return append([]uuid.UUID{}, kycScope.ids...)
 }
 
 // registerKYCOutboxWorker builds a worker from the server-under-test's own
@@ -68,6 +63,7 @@ func purgeKYCOutbox(t *testing.T) {
 func registerKYCOutboxWorker(t *testing.T, pool *db.Pool, orch *kyc.Orchestrator, creds kyc.OutboundCredentialResolver) *kyc.OutboxWorker {
 	t.Helper()
 	w := kyc.NewOutboxWorker(pool, orch, creds)
+	w.ClaimScope = currentKYCScope
 	kycTestWorkers.mu.Lock()
 	kycTestWorkers.ws = append(kycTestWorkers.ws, w)
 	kycTestWorkers.mu.Unlock()
@@ -89,8 +85,6 @@ func registerKYCOutboxWorker(t *testing.T, pool *db.Pool, orch *kyc.Orchestrator
 // builders pass as KYCOutboundCredentials).
 func newKYCOrchestratorWithWorker(t *testing.T, pool *db.Pool, providers map[string]kyc.KYCProvider, resolver webhookauth.Resolver) *kyc.Orchestrator {
 	t.Helper()
-	purgeKYCOutbox(t)
-	t.Cleanup(func() { purgeKYCOutbox(t) })
 	orch := kyc.NewOrchestrator(providers, resolver)
 	registerKYCOutboxWorker(t, pool, orch, kyc.NewMockOutboundResolver())
 	return orch

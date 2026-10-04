@@ -19,6 +19,7 @@ package kyc
 //     read in phase B is NOT BUILT; the rule is pinned here).
 
 import (
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -195,19 +196,19 @@ func funcsReachingVendor(files []srcFile) (direct map[string]bool, exported map[
 				recvExported = ast.IsExported(recvTypeName(fd.Recv.List[0].Type))
 			}
 			x := &fn{key: f.rel + ":" + fd.Name.Name, name: fd.Name.Name, exported: ast.IsExported(fd.Name.Name) && recvExported, callees: map[string]bool{}}
+			// EVERY selector and identifier reference counts, not only call
+			// expressions: a method value (f := p.CreateVerification) or a
+			// function value (g := helper) reaches the vendor just as a call does
+			// (code review N10).
 			ast.Inspect(fd.Body, func(n ast.Node) bool {
-				call, ok := n.(*ast.CallExpr)
-				if !ok {
-					return true
-				}
-				switch fun := call.Fun.(type) {
+				switch e := n.(type) {
 				case *ast.SelectorExpr:
-					x.callees[fun.Sel.Name] = true
-					if fun.Sel.Name == "CreateVerification" || fun.Sel.Name == "SubmitVerification" {
+					x.callees[e.Sel.Name] = true
+					if e.Sel.Name == "CreateVerification" || e.Sel.Name == "SubmitVerification" {
 						x.vendor = true
 					}
 				case *ast.Ident:
-					x.callees[fun.Name] = true
+					x.callees[e.Name] = true
 				}
 				return true
 			})
@@ -270,17 +271,13 @@ func TestStatic_NoVendorCallOutsideWorkerAndNoExportedPathToIt_Q_R3(t *testing.T
 	var calls int
 	for _, f := range files {
 		ast.Inspect(f.ast, func(n ast.Node) bool {
-			call, ok := n.(*ast.CallExpr)
-			if !ok {
-				return true
-			}
-			sel, ok := call.Fun.(*ast.SelectorExpr)
+			sel, ok := n.(*ast.SelectorExpr) // calls AND method values
 			if !ok || (sel.Sel.Name != "CreateVerification" && sel.Sel.Name != "SubmitVerification") {
 				return true
 			}
 			calls++
 			if f.rel != "internal/kyc/outbox_worker.go" {
-				t.Errorf("%s:%d: KYC vendor call %s outside internal/kyc/outbox_worker.go", f.rel, f.fset.Position(call.Pos()).Line, sel.Sel.Name)
+				t.Errorf("%s:%d: KYC vendor reference %s outside internal/kyc/outbox_worker.go", f.rel, f.fset.Position(sel.Pos()).Line, sel.Sel.Name)
 			}
 			return true
 		})
@@ -339,9 +336,65 @@ func Harmless() {}
 	}
 }
 
+// Negative control for N10: an exported function that takes the vendor method
+// as a VALUE (never calling it itself) and one that stores a helper as a value
+// are both flagged.
+func TestStatic_ExportedVendorPathGuard_MethodValueNegativeControl(t *testing.T) {
+	src := `package kyc
+func helper(p KYCProvider) func() { return func() { p.CreateVerification(nil, CreateVerificationInput{}) } }
+func ViaMethodValue(p KYCProvider) { f := p.SubmitVerification; _ = f }
+func ViaFunctionValue(p KYCProvider) { g := helper; _ = g }
+func Harmless() {}
+`
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "internal/kyc/x.go", src, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, exported := funcsReachingVendor([]srcFile{{rel: "internal/kyc/x.go", fset: fset, ast: f, text: src}})
+	if !exported["internal/kyc/x.go:ViaMethodValue"] || !exported["internal/kyc/x.go:ViaFunctionValue"] || exported["internal/kyc/x.go:Harmless"] {
+		t.Fatalf("the guard must flag the method-value and function-value paths and not Harmless, got %v", exported)
+	}
+}
+
 // INV-KYC-OB-5 / IC T-C: enforcement, payments and withdrawal code never
 // reference the outbox table, and (IC R1) never call the staff-only derived
 // submission state.
+// outboxReaderReferences returns every selector or identifier reference (not
+// only calls) to a function that reads or writes the outbox or the derived
+// staff-only state.
+func outboxReaderReferences(f srcFile) []string {
+	banned := map[string]bool{
+		"StaffSubmissionState": true, "StaffSubmissionStates": true, "deriveSubmissionState": true,
+		"RequestVerification": true, "enqueueSubmitForCurrentSet": true, "enqueueSubmitRow": true,
+	}
+	var out []string
+	ast.Inspect(f.ast, func(n ast.Node) bool {
+		// A selector's Sel is itself an Ident, so identifiers cover both forms.
+		if e, ok := n.(*ast.Ident); ok && banned[e.Name] {
+			out = append(out, fmt.Sprintf("%s (line %d)", e.Name, f.fset.Position(e.Pos()).Line))
+		}
+		return true
+	})
+	return out
+}
+
+func TestStatic_OutboxReaderReferenceGuard_NegativeControl(t *testing.T) {
+	src := `package payments
+func gate() { _ = kyc.StaffSubmissionStates; kyc.RequestVerification(nil, nil, kyc.CreateVerificationParams{}, "x") }
+func fine() { kyc.EvaluateEnforcement() }
+`
+	fset := token.NewFileSet()
+	af, err := parser.ParseFile(fset, "internal/payments/x.go", src, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	refs := outboxReaderReferences(srcFile{rel: "internal/payments/x.go", fset: fset, ast: af, text: src})
+	if len(refs) != 2 {
+		t.Fatalf("expected the value reference and the call to be flagged (2), got %v", refs)
+	}
+}
+
 func TestStatic_EnforcementPaymentsWithdrawalNeverReadOutbox_INVKYCOB5(t *testing.T) {
 	var scanned int
 	for _, f := range nonTestGoFiles(t, "internal") {
@@ -355,23 +408,9 @@ func TestStatic_EnforcementPaymentsWithdrawalNeverReadOutbox_INVKYCOB5(t *testin
 		if strings.Contains(f.text, "kyc_submission_outbox") {
 			t.Errorf("%s references kyc_submission_outbox: enforcement must be independent of outbox state (INV-KYC-OB-5)", f.rel)
 		}
-		ast.Inspect(f.ast, func(n ast.Node) bool {
-			call, ok := n.(*ast.CallExpr)
-			if !ok {
-				return true
-			}
-			var name string
-			switch fun := call.Fun.(type) {
-			case *ast.SelectorExpr:
-				name = fun.Sel.Name
-			case *ast.Ident:
-				name = fun.Name
-			}
-			if name == "StaffSubmissionState" || name == "StaffSubmissionStates" || name == "deriveSubmissionState" {
-				t.Errorf("%s:%d calls %s: the derived submission state is for staff handlers only (IC R1)", f.rel, f.fset.Position(call.Pos()).Line, name)
-			}
-			return true
-		})
+		for _, ref := range outboxReaderReferences(f) {
+			t.Errorf("%s references %s: an exported function that reads or writes the outbox must never be used by enforcement, payments or withdrawal code (IC R1, IC F-6)", f.rel, ref)
+		}
 	}
 	if scanned < 5 {
 		t.Fatalf("expected enforcement*.go plus the payments and withdrawal packages, scanned %d files (guard is vacuous)", scanned)
@@ -502,4 +541,108 @@ func TestStatic_WorkerNeverReadsDocumentContentOrStorageReferences(t *testing.T)
 			return true
 		})
 	}
+}
+
+// ClaimScope is a TEST SEAM (nil in production): no non-test file may assign or
+// read it other than the worker itself, and cmd/platform-api must not set it.
+func TestStatic_ClaimScopeSeamNeverSetOutsideTests(t *testing.T) {
+	var mentions int
+	for _, f := range nonTestGoFiles(t, "internal", "cmd") {
+		ast.Inspect(f.ast, func(n ast.Node) bool {
+			sel, ok := n.(*ast.SelectorExpr)
+			if !ok || sel.Sel.Name != "ClaimScope" {
+				return true
+			}
+			mentions++
+			if f.rel != "internal/kyc/outbox_worker.go" {
+				t.Errorf("%s:%d references OutboxWorker.ClaimScope: it is a test seam, nil in production", f.rel, f.fset.Position(sel.Pos()).Line)
+			}
+			return true
+		})
+	}
+	if mentions == 0 {
+		t.Fatal("expected claimNext to read ClaimScope (guard is vacuous)")
+	}
+}
+
+// Every worker log call that carries an error uses the closed redactor, never
+// the error text (security L-2, mutants S5 and S5c): a "detail" attribute's
+// value must be RedactedProviderErrorDetail(...), and no log argument may call
+// .Error() or pass an error-named identifier directly.
+func TestStatic_WorkerLogCallsNeverCarryRawErrorText_L2(t *testing.T) {
+	var f srcFile
+	for _, x := range nonTestGoFiles(t, "internal") {
+		if x.rel == "internal/kyc/outbox_worker.go" {
+			f = x
+		}
+	}
+	if f.ast == nil {
+		t.Fatal("outbox_worker.go not found")
+	}
+	var logCalls, detailArgs int
+	ast.Inspect(f.ast, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok || (sel.Sel.Name != "Error" && sel.Sel.Name != "Warn" && sel.Sel.Name != "Info" && sel.Sel.Name != "Debug") {
+			return true
+		}
+		inner, ok := sel.X.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		if is, ok := inner.Fun.(*ast.SelectorExpr); !ok || is.Sel.Name != "logger" {
+			return true
+		}
+		logCalls++
+		for i, a := range call.Args {
+			if lit, ok := a.(*ast.BasicLit); ok && lit.Value == `"detail"` && i+1 < len(call.Args) {
+				detailArgs++
+				c, ok := call.Args[i+1].(*ast.CallExpr)
+				if id, isID := c.Fun.(*ast.Ident); !ok || !isID || id.Name != "RedactedProviderErrorDetail" {
+					t.Errorf("line %d: a log detail must be RedactedProviderErrorDetail(err)", f.fset.Position(call.Pos()).Line)
+				}
+			}
+			ast.Inspect(a, func(m ast.Node) bool {
+				if c, ok := m.(*ast.CallExpr); ok {
+					if s, ok := c.Fun.(*ast.SelectorExpr); ok && s.Sel.Name == "Error" && len(c.Args) == 0 {
+						t.Errorf("line %d: a log argument calls .Error() (raw error text)", f.fset.Position(c.Pos()).Line)
+					}
+				}
+				if id, ok := m.(*ast.Ident); ok && (id.Name == "err" || id.Name == "lastErr" || id.Name == "callErr") {
+					if !isInsideRedactorCall(a, id) {
+						t.Errorf("line %d: a log argument passes %s outside RedactedProviderErrorDetail", f.fset.Position(id.Pos()).Line, id.Name)
+					}
+				}
+				return true
+			})
+		}
+		return true
+	})
+	if logCalls < 8 || detailArgs < 4 {
+		t.Fatalf("expected the worker's log calls (>=8) and detail attributes (>=4), saw %d and %d (guard is vacuous)", logCalls, detailArgs)
+	}
+}
+
+// isInsideRedactorCall reports whether id sits inside a RedactedProviderErrorDetail call within arg.
+func isInsideRedactorCall(arg ast.Expr, id *ast.Ident) bool {
+	found := false
+	ast.Inspect(arg, func(n ast.Node) bool {
+		c, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		if fid, ok := c.Fun.(*ast.Ident); ok && fid.Name == "RedactedProviderErrorDetail" {
+			ast.Inspect(c, func(m ast.Node) bool {
+				if m == id {
+					found = true
+				}
+				return true
+			})
+		}
+		return true
+	})
+	return found
 }

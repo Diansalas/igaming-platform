@@ -56,7 +56,7 @@ func putCreateRowInState(t *testing.T, r *rig, state string) uuid.UUID {
 		passUntilQuiet(t, workerFor(r.pool, mismatchedKYCOutboundResolver{}, r.spy))
 	case "cancelled":
 		orch := NewOrchestrator(map[string]KYCProvider{"mock": r.spy, "mock2": renamedMock{NewMockKYCProvider(), "mock2"}}, nil)
-		passUntilQuiet(t, NewOutboxWorker(r.pool, orch, NewMockOutboundResolver())) // provider_deconfigured
+		passUntilQuiet(t, newScopedWorker(r.pool, orch, NewMockOutboundResolver())) // provider_deconfigured
 	default:
 		t.Fatalf("unknown state %q", state)
 	}
@@ -173,11 +173,22 @@ func TestOutboxCompliance_38_TD_StaffReviewRacingCreatePhaseC(t *testing.T) {
 		return ProviderResult{ProviderReference: vendorRef, Outcome: ProviderPending, Reason: "created"}, nil
 	}
 	v := r.create()
+	// A document uploaded while the create is live enqueues a pending submit row
+	// behind it (N8): the decided_concurrently cascade must cancel it in the SAME
+	// transaction, before any worker can claim it.
+	seedDocument(t, r.pool, r.f, v.ID, DocumentPassport, "p.png")
 	passUntilQuiet(t, r.w)
 
 	row := onlyRow(t, r.pool, r.f.tenantID, v.ID, OpCreate)
 	if row.State != OutboxCancelled || row.CancelReason != string(CancelDecidedConcurrently) {
 		t.Fatalf("create row = %s / %q, want cancelled / decided_concurrently (M35: never a re-send loop)", row.State, row.CancelReason)
+	}
+	sub := onlyRow(t, r.pool, r.f.tenantID, v.ID, OpSubmit)
+	if sub.State != OutboxCancelled || sub.CancelReason != string(CancelVerificationNotSubmitted) || sub.Claims != 0 {
+		t.Fatalf("the pending submit behind a decided create must be cancelled by the cascade, never claimed (N8): %+v", sub)
+	}
+	if _, s := r.calls(); s != 0 {
+		t.Fatalf("no submit may reach the vendor for a decided orphan, got %d", s)
 	}
 	if c, _ := r.calls(); c != 1 {
 		t.Fatalf("the vendor must be called exactly once (no re-send), got %d", c)
@@ -187,9 +198,17 @@ func TestOutboxCompliance_38_TD_StaffReviewRacingCreatePhaseC(t *testing.T) {
 		t.Fatalf("the staff decision must be intact and the reference unbound: %q reviewed_by %s ref %q", got.Status, got.ReviewedBy, got.ProviderReference)
 	}
 	a := r.auditFor(v.ID)
-	cancelled := auditByAction(a, auditActionSubmissionCancelled)
-	if len(cancelled) != 1 || cancelled[0].Meta["vendor_reference_unbound"] != true || cancelled[0].Meta["cancel_reason"] != "decided_concurrently" {
-		t.Fatalf("expected one cancelled audit row with vendor_reference_unbound=true, got %+v", cancelled)
+	var cancelled []auditRow
+	for _, ar := range auditByAction(a, auditActionSubmissionCancelled) {
+		if ar.Meta["cancel_reason"] == "decided_concurrently" {
+			cancelled = append(cancelled, ar)
+		}
+	}
+	if len(cancelled) != 1 || cancelled[0].Meta["vendor_reference_unbound"] != true {
+		t.Fatalf("expected one decided_concurrently cancelled audit row with vendor_reference_unbound=true, got %+v", cancelled)
+	}
+	if n := len(auditByAction(a, auditActionSubmissionCancelled)); n != 2 {
+		t.Fatalf("expected the create's cancel row plus one cascade row for the pending submit, got %d", n)
 	}
 	if auditCount(a, "kyc.verification_submitted") != 0 {
 		t.Fatal("no kyc.verification_submitted row may be written for a decided orphan")
@@ -220,7 +239,7 @@ func TestOutboxCompliance_41_TG_CreateTerminalCancelsPendingSubmits(t *testing.T
 				passUntilQuiet(t, workerFor(r.pool, mismatchedKYCOutboundResolver{}, r.spy))
 			} else {
 				orch := NewOrchestrator(map[string]KYCProvider{"mock": r.spy, "mock2": renamedMock{NewMockKYCProvider(), "mock2"}}, nil)
-				passUntilQuiet(t, NewOutboxWorker(r.pool, orch, NewMockOutboundResolver()))
+				passUntilQuiet(t, newScopedWorker(r.pool, orch, NewMockOutboundResolver()))
 			}
 			create := onlyRow(t, r.pool, r.f.tenantID, v.ID, OpCreate)
 			if string(create.State) != mode {
