@@ -281,3 +281,13 @@ O-5 | KILLED | alert admin audit entry drops IPAddress | TestAlertAdmin_AckResol
 CR2-S4 | KILLED | a new function in internal/payments calls an evidence helper outside an InTx closure | TestStaticWiring_DerivedRaiseReachingSetIsReviewed_CR2S4
 (main.go itself was not modified; the mutants were applied to it and reverted by git checkout.)
 Real-path LF test 9 sibling TestIWire_LF9_AllContradictingConcurrentReceipts_DisputedZeroPostingsOneAlert: -race -count=20 ok.
+
+Final-round verification (local, not CI; private DB, -p 1, -race -tags integration -count=1, skip 'TestStoreOutage_DoesNotPinPool|TestResolutionIsolation_'):
+ok ./internal/alerting/... ./internal/reconciliation/... ./internal/txscope/... ./internal/audit/... ./cmd/... ./internal/config/...
+ok ./internal/payments/... (full, 638s); ok -count=3 -run TestSweeperLoop_ ./internal/payments/
+ok ./internal/httpserver/... -run 'KillSwitch|Alert|Deposit|Payment|Financial|Payout|IWire|CasinoRejection|AlertAdmin'
+The first httpserver run FAILED TestCasinoRejectionRecord_EveryClassViaWebhook (8 subtests): the response is now flushed before the
+post-response raise, so the test read the alert before its second occurrence existed. A test race caused by C1, not a product defect;
+fixed by waiting for the post-response work (alertinject.WaitUpTo/WaitForKind, bounded failure guard), then the filtered httpserver
+suite passed and the webhook/casino/kill-switch alert tests passed -count=4. build, vet (both tag sets), gofmt clean; golangci-lint
+default tags 0 issues; with --build-tags integration no finding in any file touched this round (pre-existing errcheck noise elsewhere).
