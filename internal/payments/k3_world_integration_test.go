@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -82,6 +83,7 @@ type k3World struct {
 
 	provider string
 	mock     *MockProvider
+	prov     *k3Provider // the scripted wrapper the orchestrator calls
 	orch     *Orchestrator
 
 	// Platform principals: two policy authors, a K1 grant approver and two
@@ -176,8 +178,9 @@ func newK3WorldOn(t *testing.T, pool *db.Pool, opts k3Opts) *k3World {
 	}
 	w.provider = fmt.Sprintf("k3-psp-%d-%s", n, w.f.tenantID.String()[:6])
 	w.mock = NewMockProvider(w.provider, "EUR")
-	registerCapability(t, pool, w.f.orchFixture, w.mock, 100)
-	w.orch = NewOrchestrator(map[string]PaymentProvider{w.provider: w.mock},
+	w.prov = &k3Provider{MockProvider: w.mock}
+	registerCapability(t, pool, w.f.orchFixture, w.prov, 100)
+	w.orch = NewOrchestrator(map[string]PaymentProvider{w.provider: w.prov},
 		MultiWebhookCredentialResolver{w.provider: NewMockWebhookCredentials(w.mock)})
 	w.reg = &StatementSourceRegistry{}
 	if !opts.noStatementSource {
@@ -643,4 +646,68 @@ func (w *k3World) walletBalance(accountType string) int64 {
 		w.t.Fatal(err)
 	}
 	return n
+}
+
+// k3Provider wraps the MockProvider so a test can script a hostile or unusual
+// provider answer (a reserved-prefix reference, a different poll echo) without
+// touching the mock. With nothing scripted it is the mock.
+type k3Provider struct {
+	*MockProvider
+	mu       sync.Mutex
+	deposit  func(req DepositRequest) DepositResult
+	withdraw func(req WithdrawRequest) WithdrawResult
+	status   map[string]StatusResult
+}
+
+func (p *k3Provider) Deposit(ctx context.Context, req DepositRequest) (DepositResult, error) {
+	res, err := p.MockProvider.Deposit(ctx, req)
+	p.mu.Lock()
+	f := p.deposit
+	p.mu.Unlock()
+	if err != nil || f == nil {
+		return res, err
+	}
+	return f(req), nil
+}
+
+func (p *k3Provider) Withdraw(ctx context.Context, req WithdrawRequest) (WithdrawResult, error) {
+	res, err := p.MockProvider.Withdraw(ctx, req)
+	p.mu.Lock()
+	f := p.withdraw
+	p.mu.Unlock()
+	if err != nil || f == nil {
+		return res, err
+	}
+	return f(req), nil
+}
+
+func (p *k3Provider) QueryStatus(ctx context.Context, ref string) (StatusResult, error) {
+	p.mu.Lock()
+	ov, ok := p.status[ref]
+	p.mu.Unlock()
+	if ok {
+		return ov, nil
+	}
+	return p.MockProvider.QueryStatus(ctx, ref)
+}
+
+func (p *k3Provider) setDeposit(f func(req DepositRequest) DepositResult) {
+	p.mu.Lock()
+	p.deposit = f
+	p.mu.Unlock()
+}
+
+func (p *k3Provider) setWithdraw(f func(req WithdrawRequest) WithdrawResult) {
+	p.mu.Lock()
+	p.withdraw = f
+	p.mu.Unlock()
+}
+
+func (p *k3Provider) setStatus(ref string, st StatusResult) {
+	p.mu.Lock()
+	if p.status == nil {
+		p.status = map[string]StatusResult{}
+	}
+	p.status[ref] = st
+	p.mu.Unlock()
 }
