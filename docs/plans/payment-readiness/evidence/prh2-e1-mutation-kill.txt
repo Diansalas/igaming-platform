@@ -1,0 +1,150 @@
+PRH-2 E1 (KYC-SUBMIT-OUTBOX-1, migration 0114) mutation evidence
+====================================================================
+Design: ADR 0106 r2 section 10.9 (M1..M38). Local run on a private database, MOCK provider only.
+Harness: scratchpad driver (apply exact-text edit, assert the old text matched the expected number of times,
+rebuild the private DB for SQL mutants, run the killer test sets, restore with git checkout, verify clean diff,
+rebuild the pristine schema before the next mutant so no mutant runs on a damaged database).
+Test sets: internal/kyc (-run Outbox|Migration0114|TwoPhase|TestStatic_|TestDerive|TestSubmission|TestSorted|TestDefault|TestIsApply),
+internal/db (-run KYCWorker|TestStatic_PlatformServiceGUC|PlatformServiceAllowlist) for fence mutants. -tags integration, -p 1, no -race
+for the mutation loop (race runs are in the verification section). All failing top-level tests are listed (first 8).
+A first run that ran Go mutants on a database left damaged by the preceding SQL mutant was DISCARDED as contaminated and redone.
+
+Vacuity: each killer test passes on the unmutated tree (full suite green at the final commit); a kill means the test failed
+only with the mutant applied. Collateral kills (tests whose setup depends on the mutated behaviour) are named as such.
+
+mutant                     result    killed by (first 8 failing tests) / note
+------------------------------------------------------------------------------------------------------------------------
+M1                         KILLED    TestOutbox_15b_EachStatementRequiresTheClaimToken_M1_M2,TestStatic_OutboxUpdatesConfinedAndClaimTokenCAS_F8c
+                                       what: drop claim_token=$2 from the four phase-C CAS statements
+                                       note: Behavioural kill added after the first run: the lock precedes every CAS so the layers mask each other through the worker; TestOutbox_15b drives each statement directly.
+M2                         KILLED    TestOutbox_15b_EachStatementRequiresTheClaimToken_M1_M2,TestOutboxRLS_27_TamperedTenantID_NoCallNoWrite_INVKYCOB4
+                                       what: drop claim_token from the P re-select (lockClaim)
+                                       note: Same as M1 (layer redundancy); TestOutbox_15b and test 27 kill it.
+M3a                        KILLED    TestOutbox_14b_ClaimSkipsLockedRows_M3,TestStatic_OutboxUpdatesConfinedAndClaimTokenCAS_F8c
+                                       what: remove SKIP LOCKED
+M3b                        KILLED    TestOutbox_14_TwoWorkers_EachRowClaimedOnce_EachCallOnce,TestOutbox_14b_ClaimSkipsLockedRows_M3,TestStatic_OutboxUpdatesConfinedAndClaimTokenCAS_F8c
+                                       what: remove FOR UPDATE and SKIP LOCKED
+M4a                        KILLED    TestOutbox_03_AmbiguousKinds_StatusUnchanged_ICCondition2,TestOutbox_03_AmbiguousKinds_StatusUnchanged_ICCondition2/transport_error,TestOutbox_03_AmbiguousKinds_StatusUnchanged_ICCondition2/ProviderError_outcome,TestOutbox_03_AmbiguousKinds_StatusUnchanged_ICCondition2/unrecognized_outcome
+                                       what: claim ignores next_attempt_at
+M4b                        KILLED    TestOutbox_12_CrashAfterVendorCall_ReclaimSameKey,TestOutbox_18_SubmitNotClaimableWhileCreateLive
+                                       what: claim ignores lease_expires_at
+M5                         KILLED    TestOutboxAlert_46_Redaction,TestOutboxAlert_47_DedupAndScope,TestOutboxCompliance_45_TK_AuditCompleteness,TestOutbox_03_AmbiguousKinds_StatusUnchanged_ICCondition2,TestOutbox_03_AmbiguousKinds_StatusUnchanged_ICCondition2/transport_error,TestOutbox_03_AmbiguousKinds_StatusUnchanged_ICCondition2/ProviderError_outcome,TestOutbox_03_AmbiguousKinds_StatusUnchanged_ICCondition2/unrecognized_outcome,TestOutbox_04_NotSent_NoCall
+                                       what: ambiguous/not-sent outcome writes the verification status
+M6                         KILLED    TestOutboxAlert_47_DedupAndScope,TestOutboxCompliance_35_TA_EnforcementIndependentOfOutboxState,TestOutboxCompliance_35_TA_EnforcementIndependentOfOutboxState/failed_terminal,TestOutboxCompliance_36_TB_DecisionRowsIdenticalToNoVerificationCase,TestOutbox_20d_CreateRace_PersistentContention_TypedError_D2,TestOutboxState_43_TI_StaffDerivedState,TestOutbox_05_Exhaustion_FailedTerminal_AlertAndVerificationIdentical,TestOutbox_10_ApplyConflict_NoResendLoop_ReferenceNeverRecorded_ICR3
+                                       what: failTerminal writes a verification status
+M7a                        KILLED    TestOutboxCompliance_38_TD_StaffReviewRacingCreatePhaseC,TestOutboxCompliance_45_TK_AuditCompleteness,TestOutbox_14_TwoWorkers_EachRowClaimedOnce_EachCallOnce,TestOutbox_10_ApplyConflict_NoResendLoop_ReferenceNeverRecorded_ICR3,TestOutbox_12_CrashAfterVendorCall_ReclaimSameKey
+                                       what: vendor call inside the P transaction (create)
+                                       note: Vendor call inside the P transaction: killed by call-count and ordering tests.
+M7b                        KILLED    TestOutbox_32b_CallVendorRefusesAHeldTransactionContext_M7b  [first run SURVIVED; killed after adding TestOutbox_32b_CallVendorRefusesAHeldTransactionContext_M7b (new)]
+                                       what: remove the txscope.Held refusal in callVendor
+M8                         KILLED    TestOutboxGuard_TriggerAlone_Refuses_8_16b
+                                       what: trigger lets a tenant claim a pending row
+M9                         KILLED    TestOutboxRLS_22_ExclusionMatrix,TestOutboxRLS_22_ExclusionMatrix/rls_only,TestOutboxRLS_22_ExclusionMatrix/rls_only/kyc_worker_only
+                                       what: worker WITH CHECK admits sent
+M10                        KILLED    TestOutboxRLS_22_ExclusionMatrix,TestOutboxRLS_22_ExclusionMatrix/guard_enabled,TestOutboxRLS_22_ExclusionMatrix/guard_enabled/kyc_worker_+_tenant_(mixed;_M10/M11),TestOutboxRLS_22_ExclusionMatrix/rls_only,TestOutboxRLS_22_ExclusionMatrix/rls_only/kyc_worker_+_tenant_(mixed;_M10/M11)
+                                       what: worker policies lose app.tenant_id IS NULL
+M11a                       KILLED    TestOutboxRLS_22_ExclusionMatrix,TestOutboxRLS_22_ExclusionMatrix/guard_enabled,TestOutboxRLS_22_ExclusionMatrix/guard_enabled/acting_tenant_+_tenant,TestOutboxRLS_22_ExclusionMatrix/rls_only,TestOutboxRLS_22_ExclusionMatrix/rls_only/acting_tenant_+_tenant
+                                       what: tenant policies lose the acting-tenant exclusion
+M11b                       KILLED    TestOutboxRLS_22_ExclusionMatrix,TestOutboxRLS_22_ExclusionMatrix/guard_enabled,TestOutboxRLS_22_ExclusionMatrix/guard_enabled/alert_dispatcher_+_tenant_(mixed),TestOutboxRLS_22_ExclusionMatrix/guard_enabled/sportsbook_catalogue_sync_+_tenant_(mixed),TestOutboxRLS_22_ExclusionMatrix/guard_enabled/kyc_worker_+_tenant_(mixed;_M10/M11),TestOutboxRLS_22_ExclusionMatrix/rls_only,TestOutboxRLS_22_ExclusionMatrix/rls_only/alert_dispatcher_+_tenant_(mixed),TestOutboxRLS_22_ExclusionMatrix/rls_only/sportsbook_catalogue_sync_+_tenant_(mixed)
+                                       what: tenant policies lose the platform-service exclusion
+M11c                       KILLED    TestOutboxRLS_22_ExclusionMatrix,TestOutboxRLS_22_ExclusionMatrix/guard_enabled,TestOutboxRLS_22_ExclusionMatrix/guard_enabled/acting_platform_principal_+_tenant,TestOutboxRLS_22_ExclusionMatrix/rls_only,TestOutboxRLS_22_ExclusionMatrix/rls_only/acting_platform_principal_+_tenant
+                                       what: tenant policies lose the acting-platform exclusion
+M30                        KILLED    TestOutboxRLS_22_ExclusionMatrix,TestOutboxRLS_22_ExclusionMatrix/rls_only,TestOutboxRLS_22_ExclusionMatrix/rls_only/staff_principal_(read_yes,_write_no;_M30)
+                                       what: tenant write policies lose the principal exclusion
+M12                        KILLED    TestOutboxRLS_26_WorkerTriggerPinning_F6,TestOutbox_07c_ExhaustedReclaim_FailedTerminalLeaseExpired,TestOutbox_12_CrashAfterVendorCall_ReclaimSameKey
+                                       what: re-claim does not count failed_attempts
+M13                        KILLED    TestOutboxRLS_26b_RetryAndDeferralValidation_F6,TestOutbox_07a_TenantInactive_DefersWithoutAttempt_ThenResumes_T_H,TestOutbox_07a_TenantInactive_DefersWithoutAttempt_ThenResumes_T_H/suspended,TestOutbox_07a_TenantInactive_DefersWithoutAttempt_ThenResumes_T_H/closed
+                                       what: deferral consumes an attempt
+M14a                       KILLED    TestOutboxRLS_24_InsertValidation,TestOutboxRLS_24_InsertValidation/a_key_that_does_not_match_the_set_(M14)
+                                       what: insert trigger trusts the Go submit key
+M14b                       KILLED    TestOutboxGuard_24b_CreateKeyMismatchRefusedByTheTrigger_M14b  [first run SURVIVED; killed after adding TestOutboxGuard_24b_CreateKeyMismatchRefusedByTheTrigger_M14b (new)]
+                                       what: insert trigger trusts the Go create key
+M15                        KILLED    TestOutbox_07e_DocumentSetChanged_CancelsAndReenqueues,TestOutbox_17_DuplicateSubmit_NoOp_ThenReenqueueAfterTerminal
+                                       what: live-key unique index unconditional
+M16a                       KILLED    TestOutbox_18_SubmitNotClaimableWhileCreateLive
+                                       what: claim SQL lets a submit be claimed while its create is live
+M16b                       KILLED    TestOutboxGuard_TriggerAlone_Refuses_8_16b
+                                       what: trigger lets a submit be claimed while its create is live
+M17                        KILLED    TestOutboxAlert_49a_SwallowedInTxRaise_TerminalStillCommits_FlushRecovers
+                                       what: Pending.Flush skipped
+M18                        KILLED    TestMigration0114_54_DownRefusesOnAnyRow,TestMigration0114_54_DownRefusesOnAnyRow/sent_only,TestMigration0114_54_DownRefusesOnAnyRow/failed_terminal_only,TestOutboxAlert_46_Redaction,TestOutboxAlert_47_DedupAndScope,TestOutboxAlert_49a_SwallowedInTxRaise_TerminalStillCommits_FlushRecovers,TestOutboxCompliance_35_TA_EnforcementIndependentOfOutboxState,TestOutboxCompliance_35_TA_EnforcementIndependentOfOutboxState/failed_terminal
+                                       what: phase C (alert raise) runs under the worker identity
+                                       note: Killed by the whole phase-C family: under the worker identity every tenant write is fenced. The direct DB-level denial of the worker identity raising is T-ID-2; a Go-side worker-identity runner cannot be built through the alerting API (structural).
+M19                        KILLED    TestSubmissionDiscriminator_ClosedSet_51
+                                       what: discriminator built from the raw provider id
+M20                        KILLED    TestMigration0114_54_DownRefusesOnAnyRow,TestMigration0114_54_DownRefusesOnAnyRow/pending,TestMigration0114_54_DownRefusesOnAnyRow/claimed,TestMigration0114_54_DownRefusesOnAnyRow/sent_only,TestMigration0114_54_DownRefusesOnAnyRow/cancelled_only
+                                       what: down refusal removed
+M21                        KILLED    TestStatic_WorkerIdentityConfinedToClaimNextOneStatement
+                                       what: ServiceKYCSubmissionWorker used outside claimNext
+M22a                       KILLED    TestOutboxRLS_26_WorkerTriggerPinning_F6
+                                       what: worker claim resets next_attempt_at
+M22b                       KILLED    TestOutboxAlert_46_Redaction,TestOutboxRLS_26_WorkerTriggerPinning_F6,TestOutbox_05_Exhaustion_FailedTerminal_AlertAndVerificationIdentical
+                                       what: worker claim resets failed_attempts
+M23                        KILLED    TestOutboxRLS_26_WorkerTriggerPinning_F6
+                                       what: re-claim ignores lease expiry (trigger)
+M24-staff_users            KILLED    TestKYCWorkerCatalogueGate_EveryPermissivePolicyIsUnsatisfiableOrFenced_31,TestKYCWorkerFencePolicies_ExactShape_52,TestKYCWorkerIdentity_T_ID_2_NullTenantWritesAndReadsDenied,TestKYCWorkerIdentity_T_ID_3_VisibilityZeroExceptOutboxAndAllowlist,TestKYCWorkerIdentity_T_ID_4_FreshAndReusedConnection
+                                       what: remove the worker fence on staff_users
+M24-audit_log              KILLED    TestKYCWorkerCatalogueGate_EveryPermissivePolicyIsUnsatisfiableOrFenced_31,TestKYCWorkerFencePolicies_ExactShape_52,TestKYCWorkerIdentity_T_ID_2_NullTenantWritesAndReadsDenied,TestKYCWorkerIdentity_T_ID_3_VisibilityZeroExceptOutboxAndAllowlist,TestKYCWorkerIdentity_T_ID_4_FreshAndReusedConnection
+                                       what: remove the worker fence on audit_log
+M24-sessions               KILLED    TestKYCWorkerCatalogueGate_EveryPermissivePolicyIsUnsatisfiableOrFenced_31,TestKYCWorkerFencePolicies_ExactShape_52,TestKYCWorkerIdentity_T_ID_2_NullTenantWritesAndReadsDenied
+                                       what: remove the worker fence on sessions
+M24-login_attempts         KILLED    TestKYCWorkerCatalogueGate_EveryPermissivePolicyIsUnsatisfiableOrFenced_31,TestKYCWorkerFencePolicies_ExactShape_52,TestKYCWorkerIdentity_T_ID_2_NullTenantWritesAndReadsDenied,TestKYCWorkerIdentity_T_ID_3_VisibilityZeroExceptOutboxAndAllowlist
+                                       what: remove the worker fence on login_attempts
+M24-risk_rules             KILLED    TestKYCWorkerCatalogueGate_EveryPermissivePolicyIsUnsatisfiableOrFenced_31,TestKYCWorkerFencePolicies_ExactShape_52,TestKYCWorkerIdentity_T_ID_2_NullTenantWritesAndReadsDenied,TestKYCWorkerIdentity_T_ID_3_VisibilityZeroExceptOutboxAndAllowlist
+                                       what: remove the worker fence on risk_rules
+M24-player_restrictions    KILLED    TestKYCWorkerCatalogueGate_EveryPermissivePolicyIsUnsatisfiableOrFenced_31,TestKYCWorkerFencePolicies_ExactShape_52,TestKYCWorkerIdentity_T_ID_2_NullTenantWritesAndReadsDenied,TestKYCWorkerIdentity_T_ID_3_VisibilityZeroExceptOutboxAndAllowlist
+                                       what: remove the worker fence on player_restrictions
+M24-persons                KILLED    TestKYCWorkerCatalogueGate_EveryPermissivePolicyIsUnsatisfiableOrFenced_31,TestKYCWorkerFencePolicies_ExactShape_52,TestKYCWorkerIdentity_T_ID_2_NullTenantWritesAndReadsDenied,TestKYCWorkerIdentity_T_ID_3_VisibilityZeroExceptOutboxAndAllowlist,TestKYCWorkerIdentity_T_ID_4_FreshAndReusedConnection
+                                       what: remove the worker fence on persons
+M24-asset_operation_eligibility KILLED    TestKYCWorkerCatalogueGate_EveryPermissivePolicyIsUnsatisfiableOrFenced_31,TestKYCWorkerFencePolicies_ExactShape_52,TestKYCWorkerIdentity_T_ID_2_NullTenantWritesAndReadsDenied,TestKYCWorkerIdentity_T_ID_3_VisibilityZeroExceptOutboxAndAllowlist
+                                       what: remove the worker fence on asset_operation_eligibility
+M24-open_bet_self_exclusion_policies KILLED    TestKYCWorkerCatalogueGate_EveryPermissivePolicyIsUnsatisfiableOrFenced_31,TestKYCWorkerFencePolicies_ExactShape_52,TestKYCWorkerIdentity_T_ID_2_NullTenantWritesAndReadsDenied,TestKYCWorkerIdentity_T_ID_3_VisibilityZeroExceptOutboxAndAllowlist
+                                       what: remove the worker fence on open_bet_self_exclusion_policies
+M25                        KILLED    TestOutboxRLS_27_TamperedTenantID_NoCallNoWrite_INVKYCOB4
+                                       what: phase C takes the tenant id from prep, not the claim
+M26                        KILLED    TestMigration0114_54_DownRefusesOnAnyRow,TestMigration0114_54_DownRefusesOnAnyRow/cancelled_only,TestOutboxCompliance_35_TA_EnforcementIndependentOfOutboxState,TestOutboxCompliance_35_TA_EnforcementIndependentOfOutboxState/cancelled,TestOutboxCompliance_36_TB_DecisionRowsIdenticalToNoVerificationCase,TestOutboxCompliance_41_TG_CreateTerminalCancelsPendingSubmits,TestOutboxCompliance_41_TG_CreateTerminalCancelsPendingSubmits/cancelled,TestOutboxState_43_TI_StaffDerivedState
+                                       what: P's provider-configured re-check dropped
+M27                        KILLED    TestMigration0114_54_DownRefusesOnAnyRow,TestMigration0114_54_DownRefusesOnAnyRow/failed_terminal_only,TestOutboxAlert_47_DedupAndScope,TestOutboxCompliance_35_TA_EnforcementIndependentOfOutboxState,TestOutboxCompliance_35_TA_EnforcementIndependentOfOutboxState/failed_terminal,TestOutboxCompliance_36_TB_DecisionRowsIdenticalToNoVerificationCase,TestOutboxCompliance_41_TG_CreateTerminalCancelsPendingSubmits,TestOutboxCompliance_41_TG_CreateTerminalCancelsPendingSubmits/failed_terminal
+                                       what: credential binding mismatch is retryable (not_sent)
+M28                        KILLED    TestMigration0114_52_UpShape,TestMigration0114_QS2_SeedAndDownStructure,TestMigration0114_53_UpDownUp,TestMigration0114_54_DownRefusesOnAnyRow,TestMigration0114_54_DownRefusesOnAnyRow/pending,TestMigration0114_54_DownRefusesOnAnyRow/claimed,TestMigration0114_54_DownRefusesOnAnyRow/sent_only,TestMigration0114_54_DownRefusesOnAnyRow/failed_terminal_only
+                                       what: seed policy not dropped
+M29                        KILLED    TestOutboxRLS_26_WorkerTriggerPinning_F6
+                                       what: lease upper bound removed from the trigger
+M31                        KILLED    TestOutboxAlert_47_DedupAndScope,TestOutboxAlert_49a_SwallowedInTxRaise_TerminalStillCommits_FlushRecovers,TestOutboxAlert_49b_DeadlockClassPropagates_NotSwallowed,TestOutbox_05_Exhaustion_FailedTerminal_AlertAndVerificationIdentical,TestOutbox_07c_ExhaustedReclaim_FailedTerminalLeaseExpired,TestOutbox_09_BindingMismatch_TerminalAtOnce_DistinctDiscriminator,TestOutbox_10_ApplyConflict_NoResendLoop_ReferenceNeverRecorded_ICR3
+                                       what: alert attribute outside the allowlist
+M32                        KILLED    TestOutbox_20_ConcurrentCreates_OneLiveCreatePerPlayer_CallerOwned_D2,TestOutbox_20b_CreateRace_WinnerSentBetweenConflictAndRead_ReturnsOwnVerification_D2,TestOutbox_20c_CreateRace_WinnerTerminalBetweenConflictAndRead_RetriesInsert_D2,TestOutbox_20d_CreateRace_PersistentContention_TypedError_D2
+                                       what: per-player live-create bound removed
+M33                        KILLED    TestMigration0114_QS2_SeedAndDownStructure
+                                       what: down split into two DO blocks (refusal no longer atomic)
+M34                        KILLED    TestOutboxRLS_26b_RetryAndDeferralValidation_F6
+                                       what: deferral accepted while tenant active
+M35                        KILLED    TestOutboxCompliance_38_TD_StaffReviewRacingCreatePhaseC
+                                       what: create CAS miss not mapped to decided_concurrently
+M36                        KILLED    TestOutboxCompliance_41_TG_CreateTerminalCancelsPendingSubmits,TestOutboxCompliance_41_TG_CreateTerminalCancelsPendingSubmits/failed_terminal
+                                       what: create terminal does not cancel pending submits
+M36b                       KILLED    TestOutboxCompliance_41_TG_CreateTerminalCancelsPendingSubmits,TestOutboxCompliance_41_TG_CreateTerminalCancelsPendingSubmits/cancelled
+                                       what: a cancelled create does not cancel pending submits
+M37                        KILLED    TestIsApplyConflictError_OnlyClass22And23_M37  [first run SURVIVED; killed after adding TestIsApplyConflictError_OnlyClass22And23_M37 (new)]
+                                       what: SQLSTATE class 40 treated as apply_conflict
+M38                        KILLED    TestKYCWorkerFencePolicies_ExactShape_52,TestKYCWorkerIdentity_T_ID_2_NullTenantWritesAndReadsDenied,TestKYCWorkerIdentity_T_ID_3_VisibilityZeroExceptOutboxAndAllowlist,TestKYCWorkerIdentity_T_ID_4_FreshAndReusedConnection
+                                       what: fence predicate uses <> instead of IS DISTINCT FROM (NULL GUC)
+
+Totals: 55 mutant entries, 55 KILLED, 0 not killed.
+Counting M24 per table (9 entries) and the split variants (M3a/b, M4a/b, M7a/b, M11a/b/c, M14a/b, M16a/b, M22a/b, M36/M36b).
+
+Survivors after the final test set: none among the entries above.
+Survivors on the FIRST run that required new tests (all now killed): M7b (no direct held-context test), M14b (the
+table CHECK masks the trigger check: now asserted by exact SQLSTATE P0001), M37 (no unit test of the SQLSTATE class
+mapping). M1 and M2 were killed on the first run only by a static test (redundant CAS/lock layers): a direct
+behavioural test (TestOutbox_15b) was added.
+
+Residual equivalence note (not a surviving mutant): the second txscope.Held check in callVendor (after credential
+resolution) is redundant with the first (the derived context inherits the mark); it is a documented defence in depth
+and cannot be killed on its own. M7b removes both guards and is killed.
+
+Not mutated (no test could distinguish, documented in ADR 0106 implementation record): the document-deletion path for
+document_set_changed (no delete path exists; only rejection is tested); the provider-rotation-overlap positive control
+(needs a provider_credential_handles activation fixture; PROVIDER DEPENDENT).
+
+Race and repetition (-race, -p 1): TestOutbox_14_ (two workers, each row claimed once) and TestOutbox_14b -count=50: ok;
+TestOutboxCompliance_38 (staff review racing create), TestOutbox_20* (concurrent creates), TestOutbox_19 -count=25: ok.

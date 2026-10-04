@@ -7003,10 +7003,11 @@ F1 false-P1 class; it is MOCK evidence only, and real PSP statement matching rem
 
 **Status: PROPOSED (design only), revision 2 (2026-10-04), after the identity-compliance and security
 design reviews (`docs/plans/prh2-hardening-round/reviews/e1-design-identity-compliance.md`,
-`e1-design-security.md`). NOT IMPLEMENTED.** Full design: ADR 0106 revision 2
+`e1-design-security.md`). IMPLEMENTED against the MOCK KYC provider on branch `prh2-e1-impl` (see §38.6); not
+yet merged, not yet reviewed.** Full design: ADR 0106 revision 2
 (`docs/decisions/0106-kyc-submit-outbox-worker-identity-and-alert-kind.md`). Source: plan
 `docs/plans/prh2-hardening-round/plan.md` §5-E1 and its IC F3 DoD; ADR 0105 §2 (HD-PRH2-10) and §3
-(HD-PRH2-11); migration **0114**. This section becomes the implementation record when E1 merges. Any
+(HD-PRH2-11); migration **0114**. §38.6 is the implementation record (pending review and merge). Any
 later amendment to this ADR (for example K3's) takes §39 or later.
 
 ### 38.1 What changes in §15.2 and §15.3
@@ -7099,3 +7100,24 @@ rejection landing between prepare and the vendor call (at most one send), delaye
 item 6). The pre-existing NULL-tenant write exposure of `WithoutTenant` and the two older service
 identities is **NULL-ARM-WRITE-1** (not changed here). Any KYC deadline a jurisdiction imposes is
 jurisdiction configuration, never the worker's retry budget (a PLACEHOLDER technical bound).
+
+### 38.6 Implementation record (PRH-2 E1, branch `prh2-e1-impl`, 2026-10-04)
+
+`IMPLEMENTED` against the `MOCK` KYC provider; real vendor `PROVIDER DEPENDENT`; alert notification
+`NOT IMPLEMENTED` (no route, channel or recipient; ALERT-DELIVERY-1 OPEN). Full record, deviations and evidence:
+ADR 0106 §15. Summary of what changed in §15.2/§15.3 behaviour:
+
+- HTTP create and upload no longer call the KYC vendor. Create records a `kyc_verifications` row in the phase-A
+  orphan shape (`status = 'unverified' AND provider_reference IS NULL`) and a durable `kyc_submission_outbox`
+  row in one tenant transaction (201, or 200 with the caller's own existing in-flight verification); upload
+  records a pending `submit` row for the current non-rejected document set in the same transaction as the document.
+- The worker (`kyc.OutboxWorker`, identity `kyc_submission_worker`, claim in one statement) is the only caller of
+  the vendor: P (tenant transaction), B (no transaction, `txscope.Held` false), C (`alerting.InTx` with the
+  `(id, claim_token)` compare-and-set, then `Flush`).
+- IC F3 holds as designed: enforcement never reads the outbox; a pending or claimed create leaves the verification
+  as the excluded orphan; an ambiguous or not-sent result never writes a verification; a staff decision racing a
+  create is never overwritten (`decided_concurrently`).
+- Invariants INV-KYC-OB-1..7 (§38.4) are each covered by named tests; see ADR 0106 §10 and the mutation evidence.
+- The §15.3.3 permanent-503 gap is narrowed as designed, not closed: an unbound vendor-side verification after an
+  ambiguous create remains `PROVIDER DEPENDENT`.
+

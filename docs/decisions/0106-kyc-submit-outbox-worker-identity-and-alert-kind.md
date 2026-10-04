@@ -1,9 +1,11 @@
 # ADR 0106 — KYC submission outbox, the dedicated KYC worker identity, and the KYC alert Kind (PRH-2 E1, KYC-SUBMIT-OUTBOX-1)
 
-- **Status:** **PROPOSED, revision 2**, 2026-10-04. Design only. Nothing in this ADR is implemented;
-  every item is `NOT IMPLEMENTED` until the E1 implementation merges and passes its review chain (§11).
-  Drafted by `architect` for PRH-2 workstream E1. **Implementation may start only after security's
-  delta re-check of revision 2** (security design review verdict).
+- **Status:** **IMPLEMENTED against the MOCK KYC provider on branch `prh2-e1-impl` (2026-10-04); NOT YET
+  MERGED and NOT YET REVIEWED.** Revision 2 design, with the implementation record in §15. The mandatory
+  reviews (security implementation review, identity-compliance F3 sign-off, code-reviewer, qa, devops, §11.1)
+  have not happened; this ADR is not ACCEPTED until they do. A real KYC vendor is `PROVIDER DEPENDENT`.
+  Alert notification is `NOT IMPLEMENTED`. Drafted by `architect` for PRH-2 workstream E1; implemented by the
+  E1 implementer.
 - **Revisions:**
 
   | Rev | Base | Change |
@@ -1138,3 +1140,95 @@ required.
 | Jurisdiction rule; retry budget PLACEHOLDER | §2.8; §12 HQ-E1-3 |
 | HQ-E1-1..4 kept OPEN with defaults | §12 |
 | Reconcile with deployed `main.go` (H, I-wire blocks) and shared files | §7.4; §8.2 |
+
+---
+
+## 15. Implementation record (PRH-2 E1, branch `prh2-e1-impl`, 2026-10-04)
+
+Written by the implementer. It records what was built, where the build adjusted or narrowed the design,
+what was NOT built, and the evidence. It is not a review verdict.
+
+### 15.1 Labels (exact)
+
+| Deliverable | Label |
+|---|---|
+| Migration 0114 (outbox table, guard trigger, split FORCE RLS policies, 36 worker fence policies, grants, Kind seed) and its atomic down | `IMPLEMENTED` (local, private database; not CI) |
+| `kyc_submission_worker` platform-service identity (`db.ServiceKYCSubmissionWorker`, used only by `claimNext`) | `IMPLEMENTED` |
+| Outbox worker (claim, P, B, C), HTTP phase A, staff derived `submission_state`, metrics | `IMPLEMENTED` against the `MOCK` KYC provider |
+| Alert Kind `kyc.submission_failed_terminal` and its in-transaction raise | `IMPLEMENTED` (durable alert row) |
+| Alert NOTIFICATION (route, channel, recipient) | `NOT IMPLEMENTED` (ALERT-DELIVERY-1 OPEN; nobody, including the tenant and the player, is notified) |
+| A real KYC vendor adapter, vendor-side idempotency, finding and closing an unbound vendor reference | `PROVIDER DEPENDENT` |
+| Document content read seam (phase B reading stored bytes for a real adapter) | `NOT IMPLEMENTED` (not built; a static test pins that no worker file touches `storage_reference` or `Retrieve`) |
+| Staff requeue of a `failed_terminal` row (KYC-OUTBOX-REQUEUE-1) | `NOT IMPLEMENTED` (follow-up) |
+| Outbox retention / deletion (HQ-E1-4) | `NOT IMPLEMENTED` (no delete path exists; OPEN human decision) |
+| Player-visible coarse `submission_state` enum (Q-R2b) | `NOT IMPLEMENTED` (not adopted; a player response carries no submission field) |
+| NULL-ARM-WRITE-1 (pre-existing NULL-tenant write exposure of the older identities) | `NOT IMPLEMENTED` (separate item, not changed here) |
+| Provider-rotation-overlap positive control test | `NOT IMPLEMENTED` (needs a `provider_credential_handles` activation fixture; PROVIDER DEPENDENT behaviour) |
+
+HQ-E1-1 (suspended/closed tenants), HQ-E1-2 (severity `p2`), HQ-E1-3 (deadlines) and HQ-E1-4 (retention) stay
+OPEN human questions. The values in the code are the ADR's engineering defaults, not decisions. No recipient,
+threshold, retention period or legal rule was invented.
+
+### 15.2 The live-catalogue fence derivation (security F1)
+
+The nine fenced tables (`staff_users`, `audit_log`, `sessions`, `login_attempts`, `risk_rules`,
+`player_restrictions`, `persons`, `asset_operation_eligibility`, `open_bet_self_exclusion_policies`) were
+re-derived from the LIVE catalogue (`pg_policies`) of a throwaway database migrated through 0113, by listing every
+permissive policy whose predicate is satisfiable by a session with NO tenant GUC set and no other scope GUC,
+for each command, not from the lexical migration replay. Each result is one table with four RESTRICTIVE policies
+(`kyc_worker_fence_select|insert|update|delete`) whose predicate is
+`NULLIF(current_setting('app.platform_service_id', true), '') IS DISTINCT FROM 'kyc_submission_worker'`: true for
+every session that is not the worker (including a session with the GUC unset), so no other session changes.
+`IS DISTINCT FROM` is deliberate: `<>` would be NULL for an unset GUC and deny every other session (mutant M38).
+The catalogue gate test (`TestKYCWorkerCatalogueGate_...31`) keeps this true for every future migration: through
+a semantic probe (a temporary table named like the real table in `pg_temp`, an all-NULL probe row) it asserts
+that every permissive policy a worker-identity session could satisfy is unsatisfiable or fenced. The 0077
+jurisdiction whitelist is unchanged (still 11 tuples; none of the nine tables is on it).
+
+### 15.3 Deviations and adjustments (nothing silently changed)
+
+1. **Provider outcome handling, create.** ADR 0106 reads `ProviderError => ambiguous`. The build keeps the
+   pre-existing, tested behaviour: a create whose result is an unrecognised outcome (including `ProviderError`)
+   with NO provider reference is ambiguous and leaves the orphan untouched; the same outcome WITH a genuine
+   provider reference binds the reference and the row becomes pending, because discarding it would leave an
+   unbound vendor-side verification and a re-send. Submit keeps `ProviderError => ambiguous`, with the existing
+   failure audit row, status untouched (IC condition 2). Needs identity-compliance confirmation.
+2. **P-phase terminal.** A re-claim whose retry budget is exhausted is handed from P to phase C
+   (`prepTerminalLeaseExpired`) so the terminal row, audit row and alert commit in the same phase-C transaction
+   (`runPhaseC` owns the alert).
+3. **`apply_conflict` audit key.** A submit that ends `apply_conflict` records `vendor_state_unreflected=true`; a
+   create records `vendor_reference_unbound=true` (never a value).
+4. **Gauges.** `kyc_outbox_oldest_due_age_seconds` and `kyc_outbox_oldest_deferred_age_seconds` are "observed at
+   claim", not table scans: they only move while the worker is claiming. A stalled worker is seen through
+   `kyc_outbox_last_pass_unix_seconds`.
+5. **T-A is gate-level at `EvaluateEnforcement`**, for all five enforced operations, not by importing
+   `internal/payments` or `internal/withdrawal` (the DoD forbids the E1 diff importing them). A ledger-finance
+   look at the payout-gate path is therefore not required by this build but would be a cheap confirmation.
+6. **Document-set change by deletion** has no test: no delete path exists. Only the staff-rejection path is
+   tested (`document_set_changed`).
+7. **Nil worker at startup** logs once and never fails startup (`buildKYCOutboxWorker` returns nil when the
+   orchestrator or the outbound credential resolver is nil): in that deployment nothing is ever sent.
+   Documented in the runbook and the production-configuration checklist.
+8. **Test seams.** `requestVerificationTestHook` (stages `after_conflict`, `before_retry`) is a package variable
+   used only by tests. The guard/RLS layers are proven independently by owner-side fixtures (`openOutboxPolicies`
+   for the trigger alone, `disableOutboxGuard` for RLS alone). No production path has a seam.
+9. **Exported entry points removed.** `kyc.CreateVerification` and `kyc.SubmitVerification` (the HTTP-reachable
+   vendor callers) no longer exist; the vendor is reachable only from the worker (static test, Q-R3).
+10. **`cmd` construction allowlist.** `kyc.RunOutboxWorkerLoop` was added to the main-construction AST allowlist
+    (precedent: `payments.RunSweeperLoop`).
+11. **Existing tests rewritten.** Tests that relied on the synchronous vendor call now drive the worker
+    (`kyc_two_phase_integration_test.go` rewritten; httpserver KYC tests use a drain helper). Assertions were
+    adapted to the asynchronous path (for example a status read after the worker drains); reviewers should diff
+    these files against the base to confirm no enforcement assertion was dropped.
+
+### 15.4 Evidence
+
+- Mutation evidence: `docs/plans/payment-readiness/evidence/prh2-e1-mutation-kill.txt` (M1..M38 including the
+  per-table M24 and split variants: 55 entries, all killed; first-run survivors M7b, M14b, M37 each got a new
+  killer test; M1/M2 got a direct behavioural test beyond the static one). One redundant second `txscope.Held`
+  check is documented as a defence in depth that cannot be killed alone.
+- Local verification (private database, not CI): see the Definition-of-Done results in the implementer report;
+  `go run ./cmd/migrate verify` OK against the private database.
+- Review chain still required (§11.1): security (mandatory implementation review, including a delta check of
+  the worker identity, the fences and the seeding), identity-compliance (F3, T-A..T-C), architect,
+  code-reviewer, qa, devops (wiring).
