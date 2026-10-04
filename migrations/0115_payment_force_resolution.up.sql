@@ -358,6 +358,9 @@ BEGIN
          ORDER BY c.person, c.decided_at, c.id
     )
     SELECT count(*)::int, COALESCE(array_agg(q.id ORDER BY q.id), '{}') INTO counted, counted_approval_ids FROM qualified q;
+    -- Never NULL: a NULL here would make the recount's NOT requester_valid test
+    -- silently pass (the K2 initiator_valid lesson).
+    requester_valid := COALESCE(requester_valid, false);
 END;
 $$ LANGUAGE plpgsql STABLE;
 
@@ -467,9 +470,9 @@ BEGIN
                 RAISE EXCEPTION 'payment_manual_resolutions: the attempt has no provider' USING ERRCODE = 'MR010';
             END IF;
             -- F9: the closed allow-list (a literal set; C-5b/C-47 pin it).
-            IF NOT (v_att.state = 'ambiguous'
-                    OR (v_att.state = 'disputed'
-                        AND v_att.terminal_reason IN ('provider_reference_mismatch', 'success_for_never_sent_attempt'))) THEN
+            IF NOT COALESCE(v_att.state = 'ambiguous'
+                            OR (v_att.state = 'disputed'
+                                AND v_att.terminal_reason IN ('provider_reference_mismatch', 'success_for_never_sent_attempt')), false) THEN
                 RAISE EXCEPTION 'payment_manual_resolutions: the attempt state/dispute reason is not M2-resolvable' USING ERRCODE = 'MR012';
             END IF;
             IF v_w.state IS DISTINCT FROM 'submitted' THEN
@@ -611,9 +614,9 @@ BEGIN
             IF v_att.provider_id IS DISTINCT FROM OLD.provider_id THEN
                 RAISE EXCEPTION 'payment_manual_resolutions: the attempt provider changed' USING ERRCODE = 'MR010';
             END IF;
-            IF NOT (v_att.state = 'ambiguous'
-                    OR (v_att.state = 'disputed'
-                        AND v_att.terminal_reason IN ('provider_reference_mismatch', 'success_for_never_sent_attempt'))) THEN
+            IF NOT COALESCE(v_att.state = 'ambiguous'
+                            OR (v_att.state = 'disputed'
+                                AND v_att.terminal_reason IN ('provider_reference_mismatch', 'success_for_never_sent_attempt')), false) THEN
                 RAISE EXCEPTION 'payment_manual_resolutions: the attempt state/dispute reason is not M2-resolvable' USING ERRCODE = 'MR012';
             END IF;
             SELECT w.state INTO v_w FROM withdrawal_requests w WHERE w.id = OLD.withdrawal_request_id AND w.tenant_id = OLD.tenant_id;
@@ -1314,11 +1317,11 @@ BEGIN
                OR NEW.asset_code IS DISTINCT FROM v_m.asset_code
                OR NEW.amount IS DISTINCT FROM v_m.w_amount
                OR NEW.amount IS DISTINCT FROM v_m.m_amount
-               OR NOT ((v_acct.account_type = 'player_withdrawal_hold' AND v_acct.wallet_id = v_m.wallet_id AND NEW.direction = 'debit')
+               OR NOT COALESCE((v_acct.account_type = 'player_withdrawal_hold' AND v_acct.wallet_id = v_m.wallet_id AND NEW.direction = 'debit')
                     OR (v_tx.transaction_type = 'withdrawal_completed' AND v_acct.account_type = 'psp_clearing'
                         AND v_acct.wallet_id IS NULL AND NEW.direction = 'credit')
                     OR (v_tx.transaction_type = 'withdrawal_failed' AND v_acct.account_type = 'player_cash'
-                        AND v_acct.wallet_id = v_m.wallet_id AND NEW.direction = 'credit')) THEN
+                        AND v_acct.wallet_id = v_m.wallet_id AND NEW.direction = 'credit'), false) THEN
                 RAISE EXCEPTION 'ledger_entries_governed_fence: the entry is not a leg of the approved M2 shape (account, asset, amount or direction)' USING ERRCODE = 'CG030';
             END IF;
         ELSE
