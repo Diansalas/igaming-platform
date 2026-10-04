@@ -1,0 +1,141 @@
+PRH-2 K3 mutation testing evidence (ADR 0101 section 12 mutant table + rev 4 extras + extras found while testing)
+Generated 2026-10-04 from the mutation driver logs (docs/plans/payment-readiness/evidence/prh2-k3-mutation-kill.txt).
+Method: each mutant is applied to a throwaway COPY of the worktree (never the worktree itself), the migration mutants rebuild a
+private database from the mutated migration, the stated tests run (-tags integration, -count=1, -p 1), the file is restored and
+compared byte for byte (cmp) after every mutant. A control run of the unmutated copy passed before the first mutant.
+Rounds: round 1 = the ADR list; round 2 = survivors re-run after adding tests (C-5c, C-45b/c, C-8 settlement, X01..X10) plus joint mutants;
+round 3 = survivors re-run after X11/X12 and the X07 session fix. The FINAL verdict per mutant is its last run.
+
+SUMMARY: 106 mutants; 92 KILLED; 14 SURVIVED (all classified below: 14 equivalent/redundant); 0 other.
+restore+cmp: 140 restore checks, 0 DIFFERS.
+
+id     verdict   mutant | killed by (first failing tests)
+V01    KILLED    shared Validate at deposit sync (drive.go required) | --- FAIL: TestK3_C9_ReservedPrefixAtEveryIngress (19.61s); --- FAIL: TestK3_C9b_PaymentsIngressUsesThePaymentsValidatorsOnly (0.02s); FAIL
+V02    KILLED    shared Validate at deposit sync (drive.go optional) | --- FAIL: TestK3_C9b_PaymentsIngressUsesThePaymentsValidatorsOnly (0.02s); FAIL
+V03    KILLED    shared validator at the verified-callback / receipt site (orchestrator.go) | --- FAIL: TestK3_C9b_PaymentsIngressUsesThePaymentsValidatorsOnly (0.02s); FAIL
+V04    KILLED    shared Validate at payout sync (payout.go withdraw) | --- FAIL: TestK3_C9_ReservedPrefixAtEveryIngress (20.31s); --- FAIL: TestK3_C9b_PaymentsIngressUsesThePaymentsValidatorsOnly (0.02s); FAIL
+V05    KILLED    shared validator at payout poll (payout.go query_status) | --- FAIL: TestK3_C9_ReservedPrefixAtEveryIngress (20.10s); --- FAIL: TestK3_C9b_PaymentsIngressUsesThePaymentsValidatorsOnly (0.02s); FAIL
+V06    KILLED    shared Validate at the deposit poll binding site (poll_evidence.go :123) | --- FAIL: TestK3_C37_YEvidenceWrite (2.55s); --- FAIL: TestK3_C9_ReservedPrefixAtEveryIngress (19.27s); --- FAIL: TestK3_C9b_PaymentsIngressUsesThePaymentsValidatorsOnly (0.02s); FAIL
+V07    KILLED    shared Validate at the poll echo (poll_evidence.go :221) | --- FAIL: TestK3_C37_YEvidenceWrite (2.71s); --- FAIL: TestK3_C9_ReservedPrefixAtEveryIngress (19.94s); --- FAIL: TestK3_C9b_PaymentsIngressUsesThePaymentsValidatorsOnly (0.03s); FAIL
+V08    KILLED    shared validator at the receipt/callback site (receipt.go) | --- FAIL: TestK3_C9_ReservedPrefixAtEveryIngress (18.05s); --- FAIL: TestK3_C9b_PaymentsIngressUsesThePaymentsValidatorsOnly (0.03s); FAIL
+V09    KILLED    shared Validate at sweeper.go :503 (deposit poll binding) | --- FAIL: TestK3_C9_ReservedPrefixAtEveryIngress (21.50s); --- FAIL: TestK3_C9b_PaymentsIngressUsesThePaymentsValidatorsOnly (0.02s); FAIL
+V10    KILLED    shared Validate at sweeper.go :661 (deposit poll echo) | --- FAIL: TestK3_C9_ReservedPrefixAtEveryIngress (21.93s); --- FAIL: TestK3_C9b_PaymentsIngressUsesThePaymentsValidatorsOnly (0.02s); FAIL
+V11    KILLED    shared Validate at the statement fetch (provider_reference) | --- FAIL: TestK3_C9_ReservedPrefixAtEveryIngress (20.20s); --- FAIL: TestK3_C9b_PaymentsIngressUsesThePaymentsValidatorsOnly (0.03s); FAIL
+V12    KILLED    shared validator at the statement fetch (original_provider_reference) | --- FAIL: TestK3_C9_ReservedPrefixAtEveryIngress (20.51s); --- FAIL: TestK3_C9b_PaymentsIngressUsesThePaymentsValidatorsOnly (0.02s); FAIL
+V13    KILLED    shared validator at the statement fetch (settlement_reference) | --- FAIL: TestK3_C9_ReservedPrefixAtEveryIngress (20.65s); --- FAIL: TestK3_C9b_PaymentsIngressUsesThePaymentsValidatorsOnly (0.03s); FAIL
+V14    KILLED    ValidatePaymentReference does not refuse the reserved prefix | --- FAIL: TestK3_ValidatePaymentReference_ReservedNamespace (0.00s); --- FAIL: TestK3_ValidatePaymentReference_ErrorNeverCarriesTheValue (0.00s); --- FAIL: TestK3_ValidatePaymentReferenceOptional_AndPlural (0.00s); FAIL
+G01    KILLED    M1 execution moves the attempt (M1 'clears') | --- FAIL: TestK3_C3_M1NeverLinksOrPosts (2.15s); --- FAIL: TestK3_C1_DepositDisputedToAnyStateRefusedEvenAfterExecutedM1 (1.74s); --- FAIL: TestK3_C2_M1NeverClearsCapturedUnposted (1.86s); FAIL
+G02    KILLED    S1 windowed to the latest import only | --- FAIL: TestD2_4_ConflictParks (0.63s); --- FAIL: TestD2_15_RefLessCallbackMismatchPark_IsUnboundAndClearsOnLineReference (0.48s); --- FAIL: TestK3_C34_S1S2_UnboundParkStandingThenClearedByAPersistedReversal (0.15s); --- FAIL: TestK3_C34_S2_UnrelatedReversal
+G03    KILLED    S2 clears on any reversal reference | --- FAIL: TestD2_3_BoundPark_ClearsOnlyOnReversalLineOrTombstoneOnBoundRef (1.09s); --- FAIL: TestK3_C34_S2_UnrelatedReversalDoesNotClear (0.14s); --- FAIL: TestK3_C36_S4_PollReferenceMismatchClearsOnTheReturnedReference (0.19s); --- FAIL: TestK3_C36_S4_YComes
+G04a   KILLED    S4 accepts any reversal as clearing Y | --- FAIL: TestK3_C36_S4_PollReferenceMismatchClearsOnTheReturnedReference (0.17s); FAIL
+G04b   KILLED    S4 reads Y from audit JSON instead of the typed table | --- FAIL: TestK3_C36_S4_YComesOnlyFromTheTypedTable_NeverFromAuditJSON (0.12s); FAIL
+G05    SURVIVED  persisted lookup drops the tenant_id predicate | 
+G06    KILLED    MOCK clearing allowed (D-4) | --- FAIL: TestK3_C45_MockEvidenceEligibility (4.57s); FAIL
+G07    KILLED    confirmation drops the amount check (D-5) | --- FAIL: TestK3_C42_DifferentAmountLineDoesNotConfirm (1.93s); FAIL
+G08    KILLED    declared-not-paid-but-paid clears on a partial recovery | --- FAIL: TestK3_C7_LateSuccessAfterNotPaid_StandingUntilFullRecovery (2.09s); FAIL
+G09    KILLED    F4 reserved-prefix settlement exemption removed | --- FAIL: TestK3_C8_C20_LateEvidenceAfterPaid (1.97s); FAIL
+G10    KILLED    S6 dedupe dropped (one finding per exposure) | --- FAIL: TestD2_7_MerchantCrossCheck_DepositConflict (1.40s); --- FAIL: TestD2_4_ConflictParks (0.51s); --- FAIL: TestD2_5_InvalidReferencePark (0.21s); --- FAIL: TestD2_15_RefLessCallbackMismatchPark_IsUnboundAndClearsOnLineReference (0.38s); --- FAIL: TestK
+G11    KILLED    a compensating credit clears declared_paid_unconfirmed | --- FAIL: TestK3_C22_C29_CompensationAnnotatesNeverClears (2.46s); FAIL
+G12    KILLED    compensated-but-paid clears on a partial recovery | --- FAIL: TestK3_C22_C29_CompensationAnnotatesNeverClears (2.71s); FAIL
+G13    KILLED    persisted reversal lookup ignores MOCK eligibility (hasRealImp ignored) | --- FAIL: TestK3_C45b_MockReversalCannotClearAFindingOnceARealImportExists (2.45s); FAIL
+G14    SURVIVED  persisted lines not deduplicated (overlapping imports) | 
+E01    KILLED    executor drops the R-6 attempt re-check | --- FAIL: TestK3_T9_PinnedFactualBasis (2.24s); FAIL
+E02    SURVIVED  executor drops the Go allow-list restatement | 
+E03    KILLED    Go allow-list admits callback_amount_asset_mismatch | --- FAIL: TestK3_C5b_PayoutDisputeWriteSitesAreClassified (0.05s); --- FAIL: TestK3_C47_AllowListParityGoAndSQL (2.64s); FAIL
+E04    KILLED    executor skips the statement-source precondition for not-paid | --- FAIL: TestK3_NotPaidRefusedWithoutStatementSource (3.05s); FAIL
+P01    KILLED    C-5b: a payout dispute reason literal changed at a write site | --- FAIL: TestK3_C5b_PayoutDisputeWriteSitesAreClassified (0.05s); FAIL
+P02    KILLED    C-5b: a reason removed from the classification table | --- FAIL: TestK3_C5b_PayoutDisputeWriteSitesAreClassified (0.04s); FAIL
+P03    KILLED    C-9b: casino switches to the payments validator | --- FAIL: TestK3_C9b_CasinoAndSportsbookKeepTheSharedValidator (0.02s); FAIL
+S01    SURVIVED  drop executed_txid = txid_current() (admits) | 
+S02    KILLED    drop attempt binding (admits) | --- FAIL: TestK3_C6_ResolutionBinding (1.94s); FAIL
+S03    SURVIVED  drop target match (admits) | 
+S04    KILLED    drop withdrawal submitted re-check (admits) | --- FAIL: TestK3_C5c_AdmitsRechecksTheWithdrawalStateAtWriteTime (2.18s); FAIL
+S05a   KILLED    drop the allow-list (admits) | --- FAIL: TestK3_C47_AllowListParityGoAndSQL (2.11s); FAIL
+S05b   KILLED    admit amount_asset_mismatch (admits) | --- FAIL: TestK3_C47_AllowListParityGoAndSQL (2.26s); FAIL
+S05c   KILLED    admit callback_amount_asset_mismatch (resolution guard, insert) | --- FAIL: TestK3_C5_C33_M2RefusedReasons_HoldUntouched (2.71s); FAIL
+S05d   KILLED    NULL allow-list bypass: COALESCE removed (insert) | --- FAIL: TestK3_C5_C33_M2RefusedReasons_HoldUntouched (2.77s); FAIL
+S06a   KILLED    drop beneficiary guard (M1 branch) | --- FAIL: TestK3_C10_BeneficiaryExclusion (1.92s); FAIL
+S06b   KILLED    drop beneficiary guard (M2 branch) | --- FAIL: TestK3_C10_BeneficiaryExclusion (2.29s); FAIL
+S06c   KILLED    drop beneficiary equality test entirely | --- FAIL: TestK3_C10_BeneficiaryExclusion (2.34s); FAIL
+S07    KILLED    drop the deferred never-commit-executing check | --- FAIL: TestK3_C13_FailureInjectionAndNoExecutingCommit (5.02s); FAIL
+S07b   KILLED    drop the executed-link verifier (deferred trigger) | --- FAIL: TestK3_X02_ExecutedWithoutItsOutcomeCannotCommit (2.48s); FAIL
+S08    KILLED    drop operator term from the acting WITH CHECK (payment_attempts) | --- FAIL: TestK3_C14b_ActingUpdatePolicies (2.45s); FAIL
+S09    KILLED    entries fence admits any leg for (b)/(c) | --- FAIL: TestK3_T2_ActingFence (12.54s); FAIL
+S09b   KILLED    entries fence: NULL shape bypass (COALESCE removed) | --- FAIL: TestK3_X01_EntriesFenceIsNullSafe_HouseLevelHoldAccount (4.92s); FAIL
+S10a   SURVIVED  entries fence drops state = 'executing' (per-entry shape) | 
+S10b   SURVIVED  fence function (b) drops state = 'executing' | 
+S10c   SURVIVED  fence function (c) drops state = 'executing' | 
+S11    KILLED    ledger_accounts acting policy admits all account types | --- FAIL: TestK3_T2_ActingFence (10.33s); FAIL
+S11b   KILLED    ledger_accounts psp_clearing arm drops the executing-M2 binding | --- FAIL: TestK3_T2_ActingFence (10.13s); FAIL
+S12    KILLED    Y deferred bound-to-park check dropped | --- FAIL: TestK3_T7_EvidenceTablePolicies (2.51s); FAIL
+S12b   KILLED    Y insert guard: live-state condition dropped | --- FAIL: TestK3_X03_EvidenceCannotBeBackfilledForAnEarlierPark (3.11s); FAIL
+S12c   KILLED    Y insert guard: different-reference condition dropped | --- FAIL: TestK3_T7_EvidenceTablePolicies (2.00s); FAIL
+S13    KILLED    widen the evidence INSERT policy (principal GUC check dropped) | --- FAIL: TestK3_X04_EvidenceInsertPolicyRefusesAStaffSessionEvenWithAValidPark (2.52s); FAIL
+S14    KILLED    system-read policy dropped (USING false) | --- FAIL: TestK3_T3_SystemReadSeesOnlyExecutedM2Rows (2.06s); --- FAIL: TestK3_C7_LateSuccessAfterNotPaid_StandingUntilFullRecovery (2.10s); --- FAIL: TestK3_C7b_NotPaidThenSucceededStatementLine (2.18s); --- FAIL: TestK3_C22_C29_CompensationAnnotatesNeverClea
+S15    KILLED    DB recount deleted | --- FAIL: TestK3_T4_DBRecountAndRequesterRecheck (6.03s); FAIL
+S15b   KILLED    K3-S2 requester_valid dropped from the recount | --- FAIL: TestK3_T4_DBRecountAndRequesterRecheck (5.51s); --- FAIL: TestK3_T8_ClosedTenantActorScope (12.83s); FAIL
+S15c   KILLED    recount threshold dropped (counted < required ignored) | --- FAIL: TestK3_T4_DBRecountAndRequesterRecheck (5.92s); FAIL
+S16a   KILLED    request capability argument set to a K2 capability | --- FAIL: TestK3_C11_AuthorizationMatrix (17.48s); --- FAIL: TestK3_T6_CapabilityIsSpecific (2.43s); FAIL
+S16b   KILLED    approve capability argument set to a K2 capability (approvals guard) | --- FAIL: TestK3_C11_AuthorizationMatrix (15.90s); --- FAIL: TestK3_T6_CapabilityIsSpecific (2.08s); FAIL
+S16c   KILLED    approve capability argument NULL (execution count) | --- FAIL: TestK3_C11_AuthorizationMatrix (17.64s); --- FAIL: TestK3_C4_M2DeclarePaid_FromAmbiguous (1.84s); --- FAIL: TestK3_C4_M2DeclareNotPaid_FromAmbiguous (1.91s); --- FAIL: TestK3_C4_M2_FromAllowListedDisputed (3.57s); --- FAIL: TestK3_C4_M2_T15NeverSent_
+S17a   KILLED    R-5 closed-tenant refusal dropped (request insert) | --- FAIL: TestK3_T8_ClosedTenantActorScope (12.24s); FAIL
+S17b   KILLED    R-5 closed-tenant refusal dropped (approval insert) | --- FAIL: TestK3_T8_ClosedTenantActorScope (13.92s); FAIL
+S17c   KILLED    R-5 requester_valid closed-tenant term dropped (recount) | --- FAIL: TestK3_T8_ClosedTenantActorScope (20.54s); FAIL
+S17d   KILLED    R-5 approval closed-tenant term dropped (recount) | --- FAIL: TestK3_X05_ClosedAfterApproval_TenantScopeApprovalIsNotCounted (2.70s); FAIL
+S18a   KILLED    R-6 pinned fields dropped from the payload hash (insert + update check) | --- FAIL: TestK3_X06_PayloadHashCoversThePinnedFactualBasis (2.52s); FAIL
+S18b   KILLED    R-6 attempt state/reason re-check at executing dropped | --- FAIL: TestK3_T9_PinnedFactualBasis (2.49s); FAIL
+S19    KILLED    R-7 column-discipline trigger dropped | --- FAIL: TestK3_T10_ColumnDiscipline (2.29s); FAIL
+S19b   KILLED    K3-S1 same-state acting UPDATE no longer disciplined | --- FAIL: TestK3_T10_ColumnDiscipline (4.32s); FAIL
+S20    SURVIVED  Step B arm without the reserved-prefix condition | 
+S21a   KILLED    MA020 exemption negated | --- FAIL: TestK3_C48_MA020ExemptionTrio (2.14s); FAIL
+S21b   KILLED    MA020 exemption widened to any compensating_entry | --- FAIL: TestK3_C48_MA020ExemptionTrio (6.43s); FAIL
+S22    KILLED    Step B Person-separation execution-time recheck dropped | --- FAIL: TestK3_C28_StepBPersonSeparation (2.00s); FAIL
+S23a   KILLED    all-sessions ledger trigger: type check dropped | --- FAIL: TestK3_X07_LedgerPrefixTriggerBindsTypeAndExecutingState (2.25s); FAIL
+S23b   KILLED    all-sessions ledger trigger: executing-M2 binding dropped (any withdrawal_completed) | --- FAIL: TestK3_X07_LedgerPrefixTriggerBindsTypeAndExecutingState (1.85s); FAIL
+S24    SURVIVED  LIKE instead of left() in the ledger prefix trigger | 
+S25a   KILLED    deposit_intents reserved-prefix CHECK weakened | --- FAIL: TestK3_C9_ReservedPrefixAtEveryIngress (19.04s); --- FAIL: TestK3_C9c_ReservedPrefixCatalogue (2.03s); FAIL
+S25b   KILLED    statement-lines original_provider_reference CHECK weakened | --- FAIL: TestK3_C9c_ReservedPrefixCatalogue (1.88s); FAIL
+S25c   KILLED    payment_attempts reserved-prefix CHECK weakened | --- FAIL: TestK3_C9c_ReservedPrefixCatalogue (1.91s); FAIL
+S25d   KILLED    withdrawal_requests reserved-prefix CHECK weakened | --- FAIL: TestK3_C9_ReservedPrefixAtEveryIngress (19.17s); --- FAIL: TestK3_C9c_ReservedPrefixCatalogue (1.99s); FAIL
+S26    KILLED    resolution id sentinel check dropped (client-chosen id) | --- FAIL: TestK3_X08_ResolutionGuardsAgainstDirectStatements (3.65s); FAIL
+S27    KILLED    approvals payload-hash check dropped | --- FAIL: TestK3_X08_ResolutionGuardsAgainstDirectStatements (3.78s); FAIL
+S28    KILLED    distinct-Person floor dropped (approvals guard) | --- FAIL: TestK3_C11_AuthorizationMatrix (21.56s); FAIL
+S29    KILLED    policy-author exclusion dropped (approvals guard) | --- FAIL: TestK3_X11_PolicyAuthorCannotApprove (2.01s); FAIL
+S30    KILLED    policy-author exclusion dropped (recount qualified) | --- FAIL: TestK3_X12_ApprovalOfALaterPolicyAuthorIsNotCounted (2.21s); FAIL
+S31    KILLED    resolution expiry check dropped (approvals guard) | --- FAIL: TestK3_X10_ExpiredResolutionTakesNoApproval (3.19s); FAIL
+S32    KILLED    only the requester may cancel: dropped | --- FAIL: TestK3_X08_ResolutionGuardsAgainstDirectStatements (2.93s); FAIL
+S33    KILLED    D-3 declare-paid-needs-reference dropped (insert) | --- FAIL: TestK3_C4_M2_T15NeverSent_NotPaidAdmitted_PaidRefusedForNoReference (2.66s); --- FAIL: TestK3_C46_DeclarePaidNeedsReference (2.98s); FAIL
+S34    KILLED    L-3 out-of-band basis check dropped (insert) | --- FAIL: TestK3_C41_NotPaidAfterPossibleDispatchNeedsOutOfBandBasis (2.93s); FAIL
+S35    KILLED    M1 allowed on non-disputed deposit (insert) | --- FAIL: TestK3_X09_M1GuardsAtInsertAndAtExecution (3.20s); FAIL
+S36    SURVIVED  executed M1 may link a ledger transaction | 
+S37    KILLED    tenant_scope_update policy widened: reject without same-tx reject decision allowed | --- FAIL: TestK3_X08_ResolutionGuardsAgainstDirectStatements (2.62s); FAIL
+S38    KILLED    execution only in the final approval's own transaction: dropped | --- FAIL: TestK3_X08_ResolutionGuardsAgainstDirectStatements (2.35s); FAIL
+S39    SURVIVED  executed link requires executing transaction: dropped | 
+S40    KILLED    out-of-executing refusal after governed posting (R-3 v) dropped | --- FAIL: TestK3_T5_ExitsOutOfExecutingRefusedAfterPosting_OK1 (4.65s); FAIL
+SJ1    KILLED    policy-author exclusion dropped in BOTH layers (approvals guard + recount) | --- FAIL: TestK3_X11_PolicyAuthorCannotApprove (2.29s); --- FAIL: TestK3_X12_ApprovalOfALaterPolicyAuthorIsNotCounted (2.25s); FAIL
+SJ2    SURVIVED  'executing' state dropped in BOTH the (b) fence function and the per-entry shape lookup | 
+SJ3    SURVIVED  'executing' state AND txid dropped in BOTH the (b) fence function and the per-entry lookup | 
+G14b   KILLED    duplicate persisted lines: eligibility no longer ORed across copies | --- FAIL: TestK3_C45c_OverlappingMockAndRealCopiesConfirmOnTheRealOne (2.91s); --- FAIL: TestK3_C45_MockEvidenceEligibility (5.96s); FAIL
+
+SURVIVORS - classification (none is a test gap; each is argued, and where an argument could be turned into a test it was):
+  G05: DEFENCE IN DEPTH (RLS) - dropping the explicit tenant_id predicate from the persisted-line lookup: the stream runs in WithTenantSnapshot under FORCE RLS, which already confines every row to the tenant, so the mutant is unobservable from the runtime role. C-14d runs in that real shape and asserts the observable result (no cross-tenant evidence); the explicit predicate is the first line, RLS the second (ADR 0101 9.3).
+  G14: EQUIVALENT (idempotent consumers) - persisted statement lines are deduplicated across overlapping imports, but every consumer is idempotent over duplicates (S6 dedupe per (attempt, reference), boolean confirmation, any-copy succeeded). The behaviour that matters, ORing eligibility across the copies, is killed by G14b.
+  E02: EQUIVALENT (unreachable) - the executor's Go restatement of the M2 allow-list: the insert guard already admitted only an allow-listed state/reason, and R-6 (pinned state and reason, killed by E01/S18b) refuses any change, so a non-allow-listed shape cannot reach the executor. The DB allow-list copies are killed (S05a/S05b/S05d, C-47 parity).
+  S01: EQUIVALENT (redundant under an invariant) - executed_txid = txid_current() in payment_m2_admits: a row in state 'executing' is visible only inside the transaction that wrote it (the deferred never-commit-executing trigger, killed by S07, forbids it committing; MVCC hides it from every other session), so the txid test cannot differ from state = 'executing'. No test can construct an executing row from another txid without superuser trigger bypass.
+  S03: EQUIVALENT (redundant condition) - m.target_state = p_new_state in payment_m2_admits: target_state is derived 1:1 from kind by the insert guard and immutable, and the same predicate already requires m.kind = CASE p_new_state ... END.
+  S10a: REDUNDANT LAYER (joint mutants SJ2/SJ3 also survive) - dropping state = 'executing' from ONE of the two fence layers is covered by the other; dropping it from both (SJ2) or state AND txid from both (SJ3) still survives: after the M2 is executed in the same transaction a second governed posting is impossible because the ledger idempotency key (tenant, key) is UNIQUE and the entries fence caps a transaction at two legs, one per direction. The state predicate is defence in depth, not independently observable. Residual: relies on the ledger idempotency uniqueness.
+  S10b: REDUNDANT LAYER (see S10a) - see S10a
+  S10c: REDUNDANT LAYER (see S10a) - see S10a
+  S20: EQUIVALENT (redundant condition) - the left(v_cause_ptx, 27) = prefix term of the MA020 Step B arm: the arm also requires the causation to be the ledger_transaction_id of an EXECUTED m2_declare_paid, whose link the deferred verifier (killed by S07b) pins to a withdrawal_completed carrying exactly the reserved id.
+  S24: EQUIVALENT - LIKE vs left(): the prefix 'platform-operator-declared:' contains no _, % or backslash, so LIKE prefix||'%' and left() agree on every input (ADR 0101 T-16). Never counted as killed.
+  S36: EQUIVALENT (redundant with a CHECK) - the guard's 'M1 never links a ledger transaction' at executing -> executed duplicates the table CHECKs (kind <> 'm1_deposit_evidence' OR ledger_transaction_id IS NULL, and the state/operation link CHECK); the statement is refused with 23514 either way.
+  S39: EQUIVALENT (redundant under an invariant) - executing -> executed requires OLD.executed_txid = txid_current(): same argument as S01 (txid_current() is constant for the top-level transaction, executing cannot commit).
+  SJ2: REDUNDANT LAYER (see S10a) - see S10a
+  SJ3: REDUNDANT LAYER (see S10a) - see S10a
+
+VACUITY AND SANITY CHECKS recorded with this run:
+  - Control run of the unmutated copy: payments, reconciliation and providerref K3 suites PASS.
+  - Every RLS/guard/fence test world asserts the session role is neither superuser nor BYPASSRLS (T-1, k3AssertUnprivilegedRole).
+  - The differential guard matrix (C-17b / T-11) asserts both accept and refuse sets are non-empty and pins named anchors.
+  - C-5b / C-9b static pins have their own non-vacuity mutants (P01..P03) and a minimum-site-count assertion.
+  - The recon tests run in the real WithTenantSnapshot shape against fixtures written by the real sweeper / callback / executor writers.

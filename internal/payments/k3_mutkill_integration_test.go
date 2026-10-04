@@ -9,6 +9,9 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+
+	"github.com/Diansalas/igaming-platform/internal/adjustment"
+	"github.com/Diansalas/igaming-platform/internal/capability"
 )
 
 // Tests added after the first mutation run (ADR 0101 12 mutant table): each one
@@ -185,8 +188,9 @@ func TestK3_X07_LedgerPrefixTriggerBindsTypeAndExecutingState(t *testing.T) {
 	reserved := ReservedDeclaredTxID(r.ID)
 	key := w.provider + ":" + reserved
 
-	// (b) pending only.
-	w.tx(func(ctx context.Context, tx pgx.Tx) error {
+	// (b) pending only. A tenant STAFF session can see the pending resolution row
+	// (the system shape cannot), so only the executing/txid binding refuses it.
+	if err := w.pool.WithPrincipalScope(context.Background(), w.f.tenantID, w.f1.ID, func(ctx context.Context, tx pgx.Tx) error {
 		err := k3Try(ctx, tx, func(ctx context.Context, tx pgx.Tx) error {
 			return k3InsertTx(ctx, tx, w.f.tenantID, uuid.New(), "withdrawal_completed", key, &w.provider, &reserved, wr.ID)
 		})
@@ -194,7 +198,9 @@ func TestK3_X07_LedgerPrefixTriggerBindsTypeAndExecutingState(t *testing.T) {
 			t.Errorf("a withdrawal_completed with the reserved id and only a PENDING resolution: want MR020, got %v", err)
 		}
 		return nil
-	})
+	}); err != nil {
+		t.Fatal(err)
+	}
 	// (a) executing, another type with the same keys.
 	err := w.inExecuting(r, w.f2, func(ctx context.Context, tx pgx.Tx) error {
 		for _, typ := range []string{"casino_win", "manual_adjustment", "deposit"} {
@@ -302,6 +308,52 @@ func TestK3_X08_ResolutionGuardsAgainstDirectStatements(t *testing.T) {
 		return nil
 	}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// S29 / SJ1 (S-2(iii)): the author or approver of a contributing policy cannot
+// APPROVE a resolution (the approvals guard refuses, MR011).
+func TestK3_X11_PolicyAuthorCannotApprove(t *testing.T) {
+	w := newK3World(t, k3Opts{base: 1})
+	_, a := w.ambiguousPayout(100)
+	r := w.mustRequest(w.f1, w.m2In(a.ID, ResolutionM2DeclareNotPaid))
+	for name, person := range map[string]uuid.UUID{"policy proposer": w.adminA.PersonID, "policy approver": w.adminB.PersonID} {
+		s := k3MkStaff(t, w.pool, w.f.tenantID, "finance", person)
+		w.grantTenant(s, capability.CapabilityPaymentForceResolveApprove)
+		out, err := w.decide(s, r, ResolutionApprove)
+		if k3Code(err) != "MR011" || out.Executed {
+			t.Errorf("%s as approver: want MR011 and no execution, got %v %+v", name, err, out)
+		}
+	}
+	if w.attempt(a.ID).State != AttemptAmbiguous {
+		t.Fatal("the attempt moved")
+	}
+}
+
+// S30 (recount): an approval counted when it was cast stops counting once its
+// Person becomes an author of a contributing policy before execution (a policy
+// change between approval and execution): the DB recount excludes it.
+func TestK3_X12_ApprovalOfALaterPolicyAuthorIsNotCounted(t *testing.T) {
+	w := newK3World(t, k3Opts{base: 2})
+	_, a := w.ambiguousPayout(100)
+	r := w.mustRequest(w.f1, w.m2In(a.ID, ResolutionM2DeclareNotPaid))
+	if out, err := w.decide(w.acting, r, ResolutionApprove); err != nil || out.Executed || out.Counted != 1 {
+		t.Fatalf("first approval (acting): %v %+v", err, out)
+	}
+	// The first approver now approves a NEW in-force platform policy row.
+	w.approvePolicy(adjustment.PolicyChangeInput{
+		ChangeKind: adjustment.ChangeKindPolicy, OperationKind: OperationKindForceResolve, Level: adjustment.LevelPlatform,
+		AssetCode: k3StrPtr("EUR"), BaseRequiredApprovals: k3IntPtr(2),
+	}, w.adminB, w.acting)
+	out, err := w.decide(w.f2, r, ResolutionApprove)
+	if err != nil {
+		t.Fatalf("second approval: %v", err)
+	}
+	if out.Executed {
+		t.Fatalf("executed on an approval whose Person authored a contributing policy: %+v", out)
+	}
+	if w.attempt(a.ID).State != AttemptAmbiguous {
+		t.Fatal("the attempt moved")
 	}
 }
 
