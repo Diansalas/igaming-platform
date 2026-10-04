@@ -416,3 +416,25 @@ BEGIN
     END LOOP;
 END
 $$;
+
+-- PRH-2 E1 (migration 0114; ADR 0106 section 6): least-privilege, re-asserted on
+-- every run, mirroring migration 0114's own in-migration grant block:
+--   kyc_submission_outbox - the KYC create/submit outbox: SELECT/INSERT/UPDATE
+--                           only (the state machine is enforced by the guard
+--                           trigger and RLS). Never DELETE, never TRUNCATE.
+-- Grants on the nine tables fenced by the kyc_worker_fence_* policies are NOT
+-- changed (the fence is RLS, not grants). No role, password or attribute change.
+DO $$
+DECLARE
+    t RECORD;
+BEGIN
+    FOR t IN SELECT * FROM (VALUES
+        ('kyc_submission_outbox', 'SELECT, INSERT, UPDATE')) AS v(name, privs)
+    LOOP
+        IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = t.name) THEN
+            EXECUTE format('REVOKE ALL ON %I FROM igaming_runtime', t.name);
+            EXECUTE format('GRANT %s ON %I TO igaming_runtime', t.privs, t.name);
+        END IF;
+    END LOOP;
+END
+$$;

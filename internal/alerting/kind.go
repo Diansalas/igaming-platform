@@ -97,6 +97,15 @@ const (
 	KindSimulationSportsbookSettlement      Kind = "simulation.sportsbook_settlement"
 )
 
+// KindKYCSubmissionFailedTerminal is the PRH-2 E1 (ADR 0106, HD-PRH2-10)
+// KYC outbox Kind: a create/submit outbox row reached failed_terminal. It
+// is raised in-tx from the tenant phase-C session (alerting.InTx +
+// RaiseGuarded + Flush) by internal/kyc, never by the worker identity.
+// Severity p2 is an engineering default (HQ-E1-2 OPEN). Alert
+// NOTIFICATION for it is NOT IMPLEMENTED (no route or recipient,
+// ALERT-DELIVERY-1 OPEN).
+const KindKYCSubmissionFailedTerminal Kind = "kyc.submission_failed_terminal"
+
 func keys(ks ...string) map[string]struct{} {
 	m := make(map[string]struct{}, len(ks))
 	for _, k := range ks {
@@ -179,6 +188,11 @@ var kindDefs = map[Kind]KindDef{
 		Kind: KindSimulationSportsbookSettlement, Severity: SeverityP3, Scope: ScopeKindPlatform, Simulation: true,
 		RequiresSubject: true, InTxRaisableByTenant: true, RaiseMode: RaiseModeDetached,
 		AllowedKeys: keys("reason", "event_type", "generation", "bet_status", "request_id"),
+	},
+	KindKYCSubmissionFailedTerminal: {
+		Kind: KindKYCSubmissionFailedTerminal, Severity: SeverityP2, Scope: ScopeKindPlatform,
+		RequiresSubject: true, InTxRaisableByTenant: true, RaiseMode: RaiseModeInTx,
+		AllowedKeys: keys("operation", "provider_id", "last_error_class", "outbox_id"),
 	},
 	KindAlertingUnrouted: {
 		Kind: KindAlertingUnrouted, Severity: SeverityP2, Scope: ScopeKindPlatform,
