@@ -7001,7 +7001,9 @@ F1 false-P1 class; it is MOCK evidence only, and real PSP statement matching rem
 
 ## 38. Amendment — PRH-2 E1: the KYC create/submit outbox, and IC F3 (amends §15.2/§15.3) (`architect`, design, 2026-10-04)
 
-**Status: PROPOSED (design only). NOT IMPLEMENTED.** Full design: ADR 0106
+**Status: PROPOSED (design only), revision 2 (2026-10-04), after the identity-compliance and security
+design reviews (`docs/plans/prh2-hardening-round/reviews/e1-design-identity-compliance.md`,
+`e1-design-security.md`). NOT IMPLEMENTED.** Full design: ADR 0106 revision 2
 (`docs/decisions/0106-kyc-submit-outbox-worker-identity-and-alert-kind.md`). Source: plan
 `docs/plans/prh2-hardening-round/plan.md` §5-E1 and its IC F3 DoD; ADR 0105 §2 (HD-PRH2-10) and §3
 (HD-PRH2-11); migration **0114**. This section becomes the implementation record when E1 merges. Any
@@ -7011,9 +7013,9 @@ later amendment to this ADR (for example K3's) takes §39 or later.
 
 | Aspect | §15.2 `create` | §15.3 `submit` |
 |---|---|---|
-| Phase A | The orphan row (`status='unverified'`, `provider_reference NULL`) **plus** a `kyc_submission_outbox` row (`operation='create'`, key `kv:<verification_id>`), in **one** tenant transaction. The HTTP response is 201 with the `unverified` row. | The document row **plus** a `kyc_submission_outbox` row (`operation='submit'`, the pinned sorted non-rejected document ids, key `ks:<verification_id>:<sha256>`), in the upload's own transaction. `INSERT … ON CONFLICT DO NOTHING` on the live key makes a duplicate submit a no-op. |
-| Phase B | Run only by the KYC outbox worker, after it claims the row (`FOR UPDATE SKIP LOCKED`, one row per claim, trigger-forced claim token, lease) under the dedicated platform-service identity `kyc_submission_worker`, and after a tenant-scoped prepare step. **No transaction is held** (`txscope.Held` refusal and the IO-1C static guard unchanged). The idempotency key sent is the row's stored key on every attempt. | same |
-| Phase C | A new tenant transaction (`alerting.InTx` over a tenant runner, detached bounded context) that first re-selects the row by `(id, claim_token)` `FOR UPDATE`. A definitive result is applied by the **existing** CAS (`applyCreateVerificationResult` / `applyForwardOnlyStatus`) and the row moves `claimed → sent`, atomically. A lost claim rolls back and discards the result. | same |
+| Phase A | The orphan row (`status='unverified'`, `provider_reference NULL`) **plus** a `kyc_submission_outbox` row (`operation='create'`, key `kv:<verification_id>`), in **one** tenant transaction. **At most one live (`pending`/`claimed`) create per player account**, enforced by a partial unique index; a repeated create returns the existing orphan verification idempotently (200). A new one returns 201 with the `unverified` row. | The document row **plus** a `kyc_submission_outbox` row (`operation='submit'`, the pinned sorted non-rejected document ids, key `ks:<verification_id>:<sha256>`), in the upload's own transaction. `INSERT … ON CONFLICT DO NOTHING` on the live key makes a duplicate submit a no-op. |
+| Phase B | Run only by the KYC outbox worker, after it claims the row (`FOR UPDATE SKIP LOCKED`, one row per claim, trigger-forced claim token, lease) under the dedicated platform-service identity `kyc_submission_worker` (fenced off every NULL-tenant table by restrictive policies, ADR 0106 §3.3), and after a bounded tenant-scoped prepare step that re-checks the tenant is active (else defer), that the pinned provider is still configured for the tenant (else `cancelled / provider_deconfigured`, never redirected) and that the orphan was not decided concurrently (else `cancelled / decided_concurrently`). **No transaction is held** (`txscope.Held` refusal and the IO-1C static guard unchanged). The idempotency key sent is the row's stored key on every attempt. A credential binding mismatch is terminal at once (`credential_binding_mismatch`). | same |
+| Phase C | A new tenant transaction (`alerting.InTx` over a tenant runner, detached bounded context) that first re-selects the row by `(id, claim_token)` `FOR UPDATE`. A definitive result is applied by the **existing** CAS (`applyCreateVerificationResult` / `applyForwardOnlyStatus`) and the row moves `claimed → sent`, atomically. A lost claim rolls back and discards the result. A create-CAS miss because staff decided the orphan concurrently ends `cancelled / decided_concurrently`: the staff decision is never overwritten or demoted, and the audit row flags the vendor reference as unbound (the value is never written). A deterministic SQLSTATE 22/23 failure ends `failed_terminal / apply_conflict` (no re-send loop). | same (a submit result after a forward move is the existing forward-only no-op) |
 | Ambiguous / not sent | Retry: `claimed → pending` with a backoff deadline computed by the database; after the configured number of failed attempts `claimed → failed_terminal` plus the `kyc.submission_failed_terminal` alert raised in the same transaction. **`kyc_verifications` is never written.** | same; IC condition 2 unchanged |
 | Crash recovery | A crash after A leaves a `pending` row that the next pass sends. A crash after B leaves a `claimed` row; when its lease expires it is re-claimed (counted `lease_expired`) and re-sent with the **same** key. A phase-C failure takes the same path. | same |
 | Migration | 0114 | 0114 |
@@ -7039,9 +7041,23 @@ entry points are replaced by the worker's executors (ADR 0106 §7.1).
    orphans is evaluated exactly as an account with no verification (ADR 0096 §2.6(g), unchanged).
 4. A `submit` row in `pending` or `claimed` likewise leaves the verification status as it was; a
    `submit` row is not claimable while its verification's `create` row is still `pending`/`claimed`.
-5. Required tests (ADR 0106 §10.1 items 3, 5, 6; mutants M5, M6): enforcement with a `pending`, a
-   `claimed` and a `failed_terminal` create row returns the pre-existing outcome; 100 % ambiguous
-   results until `failed_terminal` leave the verification row image unchanged.
+5. **Enforcement never reads the outbox (INV-KYC-OB-5).** `internal/kyc/enforcement*.go`,
+   `internal/payments` and `internal/withdrawal` never reference `kyc_submission_outbox` (static test).
+   Every gate (payout, deposit, withdrawal request) and the compliance-console read give the same
+   decision whatever the outbox state (`pending`, `claimed`, `failed_terminal`, `cancelled`) as with no
+   outbox row; an approved player stays allowed; an orphan-only account is `OutcomeFailed`; outbox state
+   alone never produces `OutcomeUnavailable`. The DECISION-ROWS-1 row for a denial during a
+   platform-side stall is identical to the "never submitted" case (a recorded audit gap; the staff-visible
+   derived submission state of ADR 0106 §7.2 disambiguates; no schema change).
+6. **Delayed supersession (pre-existing ADR 0096 semantics, now asynchronous).** A re-verification's
+   `create` that reaches `sent` with a definitive `pending` makes that new row the latest decided row, so
+   an already-approved player moves to `OutcomePending` when the worker sends it, at an arbitrary later
+   time, where before E1 this happened synchronously inside the create request. This is deliberate and
+   pinned by a test (ADR 0106 T-J); it is not an outbox-manufactured outcome (it needs a definitive vendor
+   result).
+7. Required tests (ADR 0106 §10.1 items 3, 5, 6; §10.5 T-A..T-K; mutants M5, M6): enforcement with a
+   `pending`, a `claimed`, a `failed_terminal` and a `cancelled` create row returns the pre-existing
+   outcome; 100 % ambiguous results until `failed_terminal` leave the verification row image unchanged.
 
 ### 38.3 The permanent-503 gap (§15.3.3 F2) — narrowed, not closed
 
@@ -7063,12 +7079,23 @@ The same holds for a duplicate `submit` after a lost claim.
 - **INV-KYC-OB-3:** the outbox never writes `kyc_verifications`; only the phase-C apply of a definitive
   result does, under the existing CAS rules, atomically with `claimed → sent`.
 - **INV-KYC-OB-4:** the tenant id used for every tenant-scoped step comes from the claimed row returned by
-  the database, and is re-checked under tenant RLS by `(id, claim_token)`.
+  the database, and is re-checked under tenant RLS by `(id, claim_token)` (tamper test: any other tenant id
+  gives 0 rows, no vendor call, no write).
+- **INV-KYC-OB-5:** KYC enforcement is independent of outbox state; no enforcement, payments or withdrawal
+  code reads `kyc_submission_outbox` (§38.2 item 5).
+- **INV-KYC-OB-6:** the `kyc_submission_worker` session reads nothing but `kyc_submission_outbox` and the
+  public reference allowlist, and writes nothing but the outbox claim (restrictive fence family on every
+  NULL-tenant-exposed table plus a catalogue gate test; ADR 0106 §3.3).
+- **INV-KYC-OB-7:** at most one live `create` row per player account (partial unique index).
 
 ### 38.5 Not changed / residuals
 
 IC condition 2, §15.3.3's forward-only CAS, the IC-Q1 retryable 5xx for an unknown reference, the
 outbound credential binding check and `orphanRowExclusionSQL` are unchanged. Residuals are listed in
-ADR 0106 §9: vendor idempotency (above), sequential head-of-line across tenants, no alert delivery
-(ALERT-DELIVERY-1 OPEN), unbounded retention (human decision), non-active tenant deferral (human
-decision), no staff requeue of `failed_terminal` (follow-up).
+ADR 0106 §9: vendor idempotency (above), sequential head-of-line across tenants, no alert delivery and
+no notification path to anyone (ALERT-DELIVERY-1 OPEN), unbounded retention (HQ-E1-4), non-active tenant
+deferral (HQ-E1-1), no staff requeue of `failed_terminal` (follow-up), a suspension or staff document
+rejection landing between prepare and the vendor call (at most one send), delayed supersession (§38.2
+item 6). The pre-existing NULL-tenant write exposure of `WithoutTenant` and the two older service
+identities is **NULL-ARM-WRITE-1** (not changed here). Any KYC deadline a jurisdiction imposes is
+jurisdiction configuration, never the worker's retry budget (a PLACEHOLDER technical bound).
