@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -42,15 +43,15 @@ func iwAlertAudits(t *testing.T, a *ksAPI, tenant uuid.UUID, action string) []ma
 	t.Helper()
 	var out []map[string]any
 	if err := a.pool.WithTenant(context.Background(), tenant, func(ctx context.Context, tx pgx.Tx) error {
-		rows, err := tx.Query(ctx, `SELECT metadata, actor_id::text FROM audit_log WHERE action = $1 AND subject_tenant_id = $2`, action, tenant)
+		rows, err := tx.Query(ctx, `SELECT metadata, actor_id::text, COALESCE(ip_address::text, '') FROM audit_log WHERE action = $1 AND subject_tenant_id = $2`, action, tenant)
 		if err != nil {
 			return err
 		}
 		defer rows.Close()
 		for rows.Next() {
 			var raw []byte
-			var actor string
-			if err := rows.Scan(&raw, &actor); err != nil {
+			var actor, ip string
+			if err := rows.Scan(&raw, &actor, &ip); err != nil {
 				return err
 			}
 			m := map[string]any{}
@@ -58,6 +59,7 @@ func iwAlertAudits(t *testing.T, a *ksAPI, tenant uuid.UUID, action string) []ma
 				return err
 			}
 			m["_actor"] = actor
+			m["_ip"] = ip
 			out = append(out, m)
 		}
 		return rows.Err()
@@ -92,6 +94,10 @@ func TestAlertAdmin_AckResolveAudited_PlatformScopeOnly(t *testing.T) {
 	if len(audits) != 1 || audits[0]["_actor"] != plat.String() || audits[0]["before_state"] != "open" || audits[0]["after_state"] != "acked" ||
 		audits[0]["kind"] != string(alerting.KindPaymentKillSwitchEngaged) {
 		t.Fatalf("exactly one ack audit with actor and before/after, visible to the subject tenant: %+v", audits)
+	}
+	// QA O-5: the audit record carries the caller's IP (the test server's loopback).
+	if ip, _ := audits[0]["_ip"].(string); !strings.Contains(ip, "127.0.0.1") {
+		t.Fatalf("the ack audit must record the caller IP, got %q", ip)
 	}
 
 	// A resolve needs a closed-shape reason code.
