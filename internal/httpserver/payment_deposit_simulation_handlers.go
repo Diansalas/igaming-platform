@@ -262,11 +262,11 @@ func writeDepositCallbackError(w http.ResponseWriter, requestID string, logger i
 	}
 	if errors.Is(err, payments.ErrCallbackPayloadMismatch) {
 		logger.Error("payment_simulation_integrity_alert_payload_mismatch", "error", err)
-		if onPayloadMismatch != nil {
-			onPayloadMismatch()
-		}
 		code, msg := mapReceiveCallbackError(err, callbackRouteSimulate)
 		apierror.Write(w, requestID, code, msg)
+		if onPayloadMismatch != nil {
+			onPayloadMismatch() // after the response (ADR 0102 7.4)
+		}
 		return
 	}
 	if errors.Is(err, payments.ErrDepositAlreadyReversed) {

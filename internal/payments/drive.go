@@ -406,7 +406,9 @@ func parkDepositAttempt(
 	// ADR 0102 I-wire: durable P1 for the park reason (sync_amount_mismatch,
 	// provider_reference_conflict, invalid_provider_reference, poll_amount_
 	// mismatch, poll_reference_mismatch, tombstone-precedes-success). Last
-	// statement; savepoint-guarded, so it can never abort the T10.
+	// statement; savepoint-guarded, so a deterministic alert failure cannot
+	// abort the T10 (transient/lock/cancel classes propagate like any other
+	// statement and the evidence is retried).
 	if err := raiseDepositParkAlert(ctx, tx, attempt, providerID, reason); err != nil {
 		return intent, err
 	}

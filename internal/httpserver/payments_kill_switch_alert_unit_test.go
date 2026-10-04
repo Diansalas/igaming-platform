@@ -21,15 +21,15 @@ func TestKillSwitchEngagedAlert_ShapeAllowlistAndBounds(t *testing.T) {
 	ks := payments.KillSwitch{ID: uuid.New(), TenantID: target, ProviderScope: "mock", OperationScope: payments.KillSwitchOperationDeposit,
 		ReasonCode: "incident-7", ChangedByScope: scope}
 
-	a := killSwitchEngagedAlert(target, "req-1", ks, true)
+	a := killSwitchEngagedAlert(target, "req-1", ks, false)
 	if a.Kind != alerting.KindPaymentKillSwitchEngaged || a.SubjectTenantID != target || a.Discriminator != "switch:"+ks.ID.String() {
 		t.Fatalf("kind/subject/discriminator: %+v", a)
 	}
-	if a.Attributes["is_platform_takeover"] != true || a.Attributes["changed_by_scope"] != string(scope) ||
+	if a.Attributes["is_platform_takeover"] != false || a.Attributes["changed_by_scope"] != string(scope) ||
 		a.Attributes["provider_scope"] != "mock" || a.Attributes["operation_scope"] != "deposit" || a.Attributes["reason_code"] != "incident-7" {
 		t.Fatalf("attributes: %v", a.Attributes)
 	}
-	if b := killSwitchEngagedAlert(target, "req-1", ks, false); b.Attributes["is_platform_takeover"] != false {
+	if b := killSwitchEngagedAlert(target, "req-1", ks, true); b.Attributes["is_platform_takeover"] != true {
 		t.Fatal("is_platform_takeover must reflect the engage, not be a constant")
 	}
 	def := alerting.MustDef(a.Kind)
@@ -39,9 +39,27 @@ func TestKillSwitchEngagedAlert_ShapeAllowlistAndBounds(t *testing.T) {
 		}
 	}
 
-	ks.ReasonCode = strings.Repeat("r", 5000)
-	long := killSwitchEngagedAlert(target, "req-1", ks, false)
-	if got := long.Attributes["reason_code"].(string); len(got) != killSwitchAlertReasonMax {
-		t.Fatalf("reason_code must be bounded to %d, got %d", killSwitchAlertReasonMax, len(got))
+	// Takeover: its own discriminator, so the takeover is observable.
+	tk := killSwitchEngagedAlert(target, "req-1", ks, true)
+	if tk.Discriminator != "switch:"+ks.ID.String()+":takeover" {
+		t.Fatalf("takeover discriminator: %q", tk.Discriminator)
+	}
+	if a.Discriminator == tk.Discriminator {
+		t.Fatal("takeover and ordinary engage must not share a key")
+	}
+
+	// S-3: the reason_code attribute is a closed token or "nonconforming";
+	// free text, uppercase, spaces, an over-long value or multi-byte text never
+	// reach the payload.
+	for _, bad := range []string{strings.Repeat("r", 5000), strings.Repeat("r", 65), "Free Text!", "has space", "ünïcode", "-leading", ""} {
+		ks.ReasonCode = bad
+		got := killSwitchEngagedAlert(target, "req-1", ks, false).Attributes["reason_code"]
+		if got != "nonconforming" {
+			t.Fatalf("reason %q must map to nonconforming, got %v", bad, got)
+		}
+	}
+	ks.ReasonCode = "incident_123.a-b"
+	if got := killSwitchEngagedAlert(target, "req-1", ks, false).Attributes["reason_code"]; got != "incident_123.a-b" {
+		t.Fatalf("a conforming reason must pass through, got %v", got)
 	}
 }

@@ -14,12 +14,14 @@ package payments
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/Diansalas/igaming-platform/internal/alerting"
 	"github.com/Diansalas/igaming-platform/internal/testsupport/alertinject"
@@ -210,11 +212,20 @@ func TestIWire_NarrowSwallow_25P02AndDeadlockPropagate(t *testing.T) {
 	a, _ := e.ambiguousBound(t, "iw-ns")
 
 	t.Run("25P02_outer_tx_already_aborted", func(t *testing.T) {
+		var raiseErr error
 		_, err := alerting.InTx(context.Background(), alerting.NewTenantRunner(pool, e.f.tenantID), func(ctx context.Context, tx pgx.Tx) error {
 			// Abort the outer transaction with a failing statement the caller (wrongly) swallows.
 			_, _ = tx.Exec(ctx, `SELECT 1/0`)
-			return raiseDepositParkAlert(ctx, tx, a, e.id, TerminalReasonCallbackAmountAssetMismatch)
+			raiseErr = raiseDepositParkAlert(ctx, tx, a, e.id, TerminalReasonCallbackAmountAssetMismatch)
+			return raiseErr
 		})
+		// The raise itself must return the 25P02 (CR finding 6): asserting only
+		// that the transaction failed is vacuous, a commit of an aborted
+		// transaction fails regardless.
+		var pgErr *pgconn.PgError
+		if !errors.As(raiseErr, &pgErr) || pgErr.Code != "25P02" {
+			t.Fatalf("RaiseGuarded on an aborted outer transaction must return SQLSTATE 25P02, got %v", raiseErr)
+		}
 		if err == nil {
 			t.Fatal("an aborted outer transaction must propagate, never be masked by the alert swallow")
 		}

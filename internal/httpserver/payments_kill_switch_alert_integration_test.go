@@ -41,8 +41,10 @@ func TestIWire_KillSwitch_Engage_RaisesP2_TenantAndPlatformScope(t *testing.T) {
 		t.Fatalf("attributes: %v", r.Attributes)
 	}
 
-	// A platform admin takeover of the tenant-engaged switch: same switch, same open
-	// alert (stable key), a second occurrence.
+	// A platform admin takeover of the tenant-engaged switch has its OWN alert
+	// (switch:<id>:takeover): the tenant's alert already holds the open
+	// switch:<id> key and occurrences carry no attributes, so only a distinct
+	// key makes is_platform_takeover and the takeover reason observable.
 	plat := a.platformAdmin()
 	ptok := a.token(plat, [16]byte{}, auth.RolePlatformAdmin, auth.PrincipalStaff)
 	resp = a.do("POST", base+"/kill-switches", ptok, map[string]any{"provider_scope": "*", "operation_scope": "deposit", "reason_code": "takeover_iw"})
@@ -50,8 +52,24 @@ func TestIWire_KillSwitch_Engage_RaisesP2_TenantAndPlatformScope(t *testing.T) {
 		t.Fatalf("platform engage: %d %s", resp.status, resp.body)
 	}
 	rows = alertinject.Find(alertinject.ForSubject(t, a.pool, tenant), string(alerting.KindPaymentKillSwitchEngaged))
-	if len(rows) != 1 || rows[0].Occurrences != 2 {
-		t.Fatalf("a repeated engage of the same switch is one open alert with 2 occurrences: %+v", rows)
+	var original, takeover *alertinject.Row
+	for i := range rows {
+		switch rows[i].Discriminator {
+		case "switch:" + ks.ID:
+			original = &rows[i]
+		case "switch:" + ks.ID + ":takeover":
+			takeover = &rows[i]
+		}
+	}
+	if len(rows) != 2 || original == nil || takeover == nil {
+		t.Fatalf("want the original alert and a distinct takeover alert, got %+v", rows)
+	}
+	if original.Attributes["is_platform_takeover"] != false || original.Attributes["reason_code"] != "incident_iw_1" {
+		t.Fatalf("the original engage alert must keep its own attributes: %v", original.Attributes)
+	}
+	if takeover.Severity != "p2" || takeover.Attributes["is_platform_takeover"] != true ||
+		takeover.Attributes["reason_code"] != "takeover_iw" || takeover.Attributes["changed_by_scope"] != "platform" {
+		t.Fatalf("takeover alert attributes: %+v", takeover)
 	}
 }
 

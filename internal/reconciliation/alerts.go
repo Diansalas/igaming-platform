@@ -115,7 +115,15 @@ func sqlstateClassOf(err error) string {
 // raiseRunFailed is ADR 0102 row 14: the run transaction rolled back, so the
 // P1 is a detached raise in a fresh transaction of the originating tenant
 // scope. providerID is empty except for payment_statement.
+//
+// A run that failed only because the sweep's own context was cancelled
+// (graceful shutdown mid-sweep) is NOT a failed run: it raises nothing, or
+// every remaining tenant and stream would page a false P1 at shutdown (LF F3).
+// Any other failure raises, including a deadline expiry.
 func raiseRunFailed(ctx context.Context, pool *db.Pool, tenantID uuid.UUID, stream, providerID, phase string, runErr error) {
+	if ctx.Err() != nil && errors.Is(runErr, context.Canceled) {
+		return
+	}
 	disc := "stream:" + stream
 	if providerID != "" && providerID != "<none>" {
 		disc += ":provider:" + providerID

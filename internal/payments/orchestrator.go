@@ -671,7 +671,9 @@ func auditMultipleSuccessForIntent(ctx context.Context, tx pgx.Tx, attempt Payme
 	}
 	// ADR 0102 I-wire rows 1-2: the durable P1s (the log lines above are
 	// retained). Last statement of this helper; RaiseGuarded runs under its
-	// own savepoint and never aborts the dispute (LF-7).
+	// own savepoint; a deterministic alert-statement failure never aborts the
+	// dispute (LF-7), while transient/lock/cancel classes propagate like any
+	// other statement of the transaction.
 	return raiseMultipleSuccessAlert(ctx, tx, attempt, providerID, evidence, backstopFired)
 }
 

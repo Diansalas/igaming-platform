@@ -29,6 +29,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/Diansalas/igaming-platform/internal/apierror"
 	"github.com/Diansalas/igaming-platform/internal/audit"
@@ -63,6 +64,17 @@ type alertDTO struct {
 	AckedAt    *time.Time `json:"acked_at,omitempty"`
 	ResolvedAt *time.Time `json:"resolved_at,omitempty"`
 }
+
+// alertTransitionLockSQL locks the alert row for an ack/resolve. It MUST be
+// FOR NO KEY UPDATE, never FOR UPDATE (security S-1): the alert_occurrences
+// foreign-key insert that every in-transaction Raise performs takes FOR KEY
+// SHARE on the alert row, which FOR UPDATE conflicts with. With FOR UPDATE an
+// ack would block (and be blocked by) a business transaction raising on the
+// same alert, and a context expiry there (57014, not swallowed) would roll back
+// the dispute, park or posting because of an alert statement. The later UPDATE
+// changes no key column, so it takes the same non-key lock. Pinned by
+// TestAlertAdmin_AckLockDoesNotBlockInTxRaise.
+const alertTransitionLockSQL = `SELECT kind, severity, state, subject_tenant_id FROM alerts WHERE id = $1 AND tenant_id IS NULL FOR NO KEY UPDATE`
 
 var errAlertNotFound = errors.New("alert not found")
 var errAlertBadTransition = errors.New("invalid alert state transition")
@@ -111,9 +123,7 @@ func newAlertTransitionHandler(deps Deps, op string) http.HandlerFunc {
 				kind, severity, state string
 				subject               *uuid.UUID
 			)
-			if err := tx.QueryRow(ctx,
-				`SELECT kind, severity, state, subject_tenant_id FROM alerts WHERE id = $1 AND tenant_id IS NULL FOR UPDATE`, alertID,
-			).Scan(&kind, &severity, &state, &subject); err != nil {
+			if err := tx.QueryRow(ctx, alertTransitionLockSQL, alertID).Scan(&kind, &severity, &state, &subject); err != nil {
 				if errors.Is(err, pgx.ErrNoRows) {
 					return errAlertNotFound
 				}
@@ -162,10 +172,22 @@ func newAlertTransitionHandler(deps Deps, op string) http.HandlerFunc {
 		case errors.Is(err, errAlertBadTransition):
 			apierror.Write(w, requestID, apierror.CodeConflict, "alert state does not allow this operation")
 		case err != nil:
-			logger.Error("alert_admin_transition_failed", "op", op, "alert_id", alertID.String())
+			// Class only (never the error text): enough to tell a lock/timeout
+			// from a refusal without leaking statement detail.
+			logger.Error("alert_admin_transition_failed", "op", op, "alert_id", alertID.String(), "sqlstate_class", alertAdminSQLStateClass(err))
 			apierror.Write(w, requestID, apierror.CodeInternal, "internal error")
 		default:
 			writeJSON(w, http.StatusOK, out)
 		}
 	}
+}
+
+// alertAdminSQLStateClass returns the two-character SQLSTATE class of err, or
+// "non_pg".
+func alertAdminSQLStateClass(err error) string {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && len(pgErr.Code) >= 2 {
+		return pgErr.Code[:2]
+	}
+	return "non_pg"
 }

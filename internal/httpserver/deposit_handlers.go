@@ -423,7 +423,13 @@ func newPaymentWebhookHandler(deps Deps) http.HandlerFunc {
 		// retry via Flush, deferred here so it runs after the response is
 		// written and BEFORE the admission hold's earlier-registered release.
 		var pendingAlerts *alerting.Pending
-		defer func() { pendingAlerts.Flush(r.Context()) }()
+		var postResponseRaises []func() // failure-path P1s, run after the response is written
+		defer func() {
+			pendingAlerts.Flush(r.Context())
+			for _, raise := range postResponseRaises {
+				raise()
+			}
+		}()
 		if err == nil {
 			pendingAlerts, err = alerting.InTx(r.Context(), alerting.NewTenantRunner(deps.DB, t.ID), func(ctx context.Context, tx pgx.Tx) error {
 				var err error
@@ -435,10 +441,12 @@ func newPaymentWebhookHandler(deps Deps) http.HandlerFunc {
 		// domain transaction rolled back, so the alert is a detached raise in a
 		// fresh transaction. The reason is a fixed literal at each call site.
 		raiseIntegrity := func(reason string) {
-			_ = alerting.RaiseDetached(r.Context(), alerting.NewTenantRunner(deps.DB, t.ID), alerting.Alert{
-				Kind: alerting.KindPaymentWebhookIntegrity, SubjectTenantID: t.ID,
-				Discriminator: "provider:" + providerID + ":reason:" + reason,
-				Attributes:    map[string]alerting.AttrValue{"provider_id": providerID, "request_id": requestID},
+			postResponseRaises = append(postResponseRaises, func() {
+				_ = alerting.RaiseDetached(r.Context(), alerting.NewTenantRunner(deps.DB, t.ID), alerting.Alert{
+					Kind: alerting.KindPaymentWebhookIntegrity, SubjectTenantID: t.ID,
+					Discriminator: "provider:" + providerID + ":reason:" + reason,
+					Attributes:    map[string]alerting.AttrValue{"provider_id": providerID, "request_id": requestID},
+				})
 			})
 		}
 

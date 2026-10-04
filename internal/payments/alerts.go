@@ -15,15 +15,19 @@ import (
 // (T10 / T13d / T15 and the poll contradiction audit). Every raise here goes
 // through alerting.RaiseGuarded, which runs the alert INSERT under its own
 // SAVEPOINT and swallows only the alert statement's own deterministic error
-// (classes 22/23, 42501, P0001): an alert failure can never abort the
-// dispute, receipt or posting it reports (LF-7; security addendum 1 (a)).
+// (classes 22/23, 42501, P0001): a DETERMINISTIC alert-statement failure never
+// rolls back the dispute, receipt or posting it reports (LF-7; security
+// addendum 1 (a)). Transient, lock and cancellation classes (25P02, 40001,
+// 40P01, 55P03, 57014, 08, 53, context) are deliberately NOT swallowed: they
+// propagate exactly as any other statement of the transaction would, and the
+// evidence application is retried by redelivery or the sweeper.
 // A swallowed raise is retried detached AFTER the commit by the Pending that
 // the transaction's owner opened with alerting.InTx and flushes after commit
 // (condition (b)). The transaction owners that wire this are: the webhook
 // handler (httpserver/deposit_handlers.go and the simulation twin),
 // driveCreatedAttempt's phase C (drive.go) and the sweeper's status
 // evidence transaction (sweeper.go). B-1 is pinned by
-// alerts_static_test.go.
+// internal/alerting/static_wiring_test.go.
 //
 // No new alert Kind is created (no migration, ADR 0102 section 17): the T10
 // park reasons reuse the existing p1 platform-owned Kind

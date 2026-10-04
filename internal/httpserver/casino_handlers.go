@@ -441,11 +441,19 @@ func newCasinoWebhookHandler(deps Deps) http.HandlerFunc {
 		// domain transaction rolled back, so the alert is a detached raise in a
 		// fresh tenant transaction. The reason is a fixed literal at each call
 		// site; one open alert per (tenant, provider, reason).
+		var postResponseRaises []func() // run after the response is written (ADR 0102 7.4)
+		defer func() {
+			for _, raise := range postResponseRaises {
+				raise()
+			}
+		}()
 		raiseIntegrity := func(reason string) {
-			_ = alerting.RaiseDetached(r.Context(), alerting.NewTenantRunner(deps.DB, t.ID), alerting.Alert{
-				Kind: alerting.KindCasinoCallbackIntegrity, SubjectTenantID: t.ID,
-				Discriminator: "provider:" + providerID + ":reason:" + reason,
-				Attributes:    map[string]alerting.AttrValue{"provider_id": providerID, "request_id": requestID},
+			postResponseRaises = append(postResponseRaises, func() {
+				_ = alerting.RaiseDetached(r.Context(), alerting.NewTenantRunner(deps.DB, t.ID), alerting.Alert{
+					Kind: alerting.KindCasinoCallbackIntegrity, SubjectTenantID: t.ID,
+					Discriminator: "provider:" + providerID + ":reason:" + reason,
+					Attributes:    map[string]alerting.AttrValue{"provider_id": providerID, "request_id": requestID},
+				})
 			})
 		}
 

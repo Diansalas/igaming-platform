@@ -394,34 +394,43 @@ func (c killSwitchCall) alertRunner(deps Deps) alerting.ScopedRunner {
 	return alerting.NewPrincipalRunner(deps.DB, c.tc.TenantID, c.subject)
 }
 
-// killSwitchAlertReasonMax bounds the staff-supplied reason_code attribute so
-// it can never push the alert past the attribute size cap (which would turn
-// the alert into a go_validation fallback).
-const killSwitchAlertReasonMax = 128
+// killSwitchAlertReasonAttr maps the staff-supplied reason_code to the closed
+// token shape (alertReasonCodePattern) or the literal "nonconforming"
+// (security S-3): a free-text value must never reach a platform P2 payload that
+// a future channel adapter renders. The real reason stays in the audit row.
+func killSwitchAlertReasonAttr(reason string) string {
+	if alertReasonCodePattern.MatchString(reason) {
+		return reason
+	}
+	return "nonconforming"
+}
 
 // raiseKillSwitchEngagedAlert raises payment.kill_switch_engaged (p2) after
-// the engage committed. The result of the raise is intentionally ignored here:
-// alerting.RaisePostCommit already logs, counts and falls back, and the
-// engage outcome never depends on it.
+// the engage committed and the response was written. The result is
+// intentionally ignored here: alerting.RaisePostCommit already logs, counts and
+// falls back, and the engage outcome never depends on it.
 func raiseKillSwitchEngagedAlert(ctx context.Context, deps Deps, c killSwitchCall, ks payments.KillSwitch, isTakeover bool) {
 	_ = alerting.RaisePostCommit(ctx, c.alertRunner(deps), killSwitchEngagedAlert(c.target, c.requestID, ks, isTakeover))
 }
 
 // killSwitchEngagedAlert builds the ADR 0102 row 8 alert: subject = the
-// route-validated target tenant, discriminator = the switch id, attributes on
-// the Kind's allowlist only (never a request body field beyond the bounded
-// reason code).
+// route-validated target tenant, attributes on the Kind's allowlist only. A
+// platform TAKEOVER of a tenant-engaged switch has its own discriminator
+// (switch:<id>:takeover): the tenant's original engage already holds the open
+// alert under switch:<id>, and a repeat raise would only attach an occurrence
+// (occurrences carry no attributes), so the takeover and its reason_code would
+// otherwise never be observable (code review finding 3).
 func killSwitchEngagedAlert(target uuid.UUID, requestID string, ks payments.KillSwitch, isTakeover bool) alerting.Alert {
-	reason := ks.ReasonCode
-	if len(reason) > killSwitchAlertReasonMax {
-		reason = reason[:killSwitchAlertReasonMax]
+	disc := "switch:" + ks.ID.String()
+	if isTakeover {
+		disc += ":takeover"
 	}
 	return alerting.Alert{
 		Kind: alerting.KindPaymentKillSwitchEngaged, SubjectTenantID: target,
-		Discriminator: "switch:" + ks.ID.String(),
+		Discriminator: disc,
 		Attributes: map[string]alerting.AttrValue{
 			"provider_scope": ks.ProviderScope, "operation_scope": string(ks.OperationScope),
-			"reason_code": reason, "changed_by_scope": string(ks.ChangedByScope),
+			"reason_code": killSwitchAlertReasonAttr(ks.ReasonCode), "changed_by_scope": string(ks.ChangedByScope),
 			"is_platform_takeover": isTakeover, "request_id": requestID,
 		},
 	}
@@ -715,8 +724,8 @@ func newEngageKillSwitchHandler(deps Deps) http.HandlerFunc {
 		// POST-COMMIT ONLY, detached, in the engage's own scope. The engage
 		// row and its audit row are already committed; no failure of any
 		// class in the alert path can roll back or change this response.
-		raiseKillSwitchEngagedAlert(r.Context(), deps, c, ks, isTakeover)
 		writeJSON(w, http.StatusOK, toKillSwitchDTO(ks))
+		raiseKillSwitchEngagedAlert(r.Context(), deps, c, ks, isTakeover) // after the response (ADR 0102 7.3)
 	}
 }
 
