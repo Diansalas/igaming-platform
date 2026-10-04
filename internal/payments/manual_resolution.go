@@ -1005,21 +1005,21 @@ func resolutionUUIDStrings(ids []uuid.UUID) []string {
 // evidence hash is recorded, never a free-text evidence reference.
 func recordResolutionAudit(ctx context.Context, tx pgx.Tx, call ResolutionCall, action string, r ManualResolution, before *ResolutionState, extra map[string]any) error {
 	md := map[string]any{
-		"actor_scope":                call.Scope,
-		"resolution_id":              r.ID.String(),
-		"attempt_id":                 r.AttemptID.String(),
-		"operation":                  r.Operation,
-		"kind":                       string(r.Kind),
-		"asset_code":                 r.AssetCode,
-		"amount_minor_units":         fmt.Sprint(r.Amount),
-		"reason_code":                r.ReasonCode,
-		"payload_hash":               r.PayloadHash,
-		"after_state":                string(r.State),
-		"tenant_status_at_submit":    r.TenantStatusAtSubmission,
-		"attempt_state_at_submit":    r.AttemptStateAtSubmission,
-		"requested_by_scope":         r.RequestedByScope,
-		"required_at_submission":     r.RequiredAtSubmission,
-		"ever_possibly_sent_at_subm": r.EverPossiblySentAtSubmit,
+		"actor_scope":                      call.Scope,
+		"resolution_id":                    r.ID.String(),
+		"attempt_id":                       r.AttemptID.String(),
+		"operation":                        r.Operation,
+		"kind":                             string(r.Kind),
+		"asset_code":                       r.AssetCode,
+		"amount_minor_units":               fmt.Sprint(r.Amount),
+		"reason_code":                      r.ReasonCode,
+		"payload_hash":                     r.PayloadHash,
+		"after_state":                      string(r.State),
+		"tenant_status_at_submit":          r.TenantStatusAtSubmission,
+		"attempt_state_at_submit":          r.AttemptStateAtSubmission,
+		"requested_by_scope":               r.RequestedByScope,
+		"required_at_submission":           r.RequiredAtSubmission,
+		"ever_possibly_sent_at_submission": r.EverPossiblySentAtSubmit,
 	}
 	if before != nil {
 		md["before_state"] = string(*before)
