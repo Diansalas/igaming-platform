@@ -1628,7 +1628,7 @@ func ApplyDeferredReceiptsForAttempt(ctx context.Context, tx pgx.Tx, o *Orchestr
 // violation is deterministic and non-retryable - the caller must map it
 // to a 4xx-class rejection, never a retry signal.
 func validateReceiptReferences(ev ReceiptEvidence) error {
-	return providerref.ValidateAll(
+	return providerref.ValidatePaymentReferences(
 		providerref.Field{Name: "provider_reference", Value: ev.ProviderReference, Required: true},
 		providerref.Field{Name: "original_provider_reference", Value: ev.OriginalProviderReference, Required: false},
 		providerref.Field{Name: "merchant_reference", Value: ev.MerchantReference, Required: false},

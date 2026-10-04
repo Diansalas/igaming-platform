@@ -288,9 +288,14 @@ func TestD2_15_RefLessCallbackMismatchPark_IsUnboundAndClearsOnLineReference(t *
 		if !strings.Contains(cu.ReconciliationKey, "provider_reference="+r+" ") || !strings.Contains(cu.ExpectedValue, "on this line's reference") {
 			t.Fatalf("the finding must be the unbound in-run form on the line's reference R: key=%s expected=%s", cu.ReconciliationKey, cu.ExpectedValue)
 		}
-		// No line: unbound parks have no standing finding (STANDING-1), and
-		// in particular no un-clearable one keyed on <none>.
-		d2NoCU(t, w.d2Run(t, d2Src()), "a ref-less bound-reason park with no line (unbound: in-run only)")
+		// PRH-2 K3 S1 (STANDING-1) flips the old "no line: no finding": the
+		// persisted succeeded line for R keeps the finding standing on a later
+		// run with no line - keyed on the evidencing reference R, never on the
+		// attempt's empty reference (so it is clearable on R).
+		standing := d2CUFor(t, w.d2Run(t, d2Src()), pk.attempt.ID)
+		if !strings.Contains(standing.ReconciliationKey, "provider_reference="+r+" ") || strings.Contains(standing.ReconciliationKey, "provider_reference=<none>") {
+			t.Fatalf("the standing finding must be keyed on the evidencing reference R: %s", standing.ReconciliationKey)
+		}
 		w.d2AssertNoMoney(t, pk)
 		w.d2AssertBalanced(t)
 	})

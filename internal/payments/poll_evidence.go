@@ -116,6 +116,16 @@ func (s *Sweeper) checkPollSuccessEvidence(
 	if res.ProviderReference != "" && res.ProviderReference != boundRef {
 		extra := echoAuditMeta(res.ProviderReference)
 		extra["provider_reference"] = boundRef
+		// PRH-2 K3 (POLL-REF-CLEAR-1): a live attempt is about to be parked, so Y
+		// is persisted first as typed evidence - only a Y that passes the payments
+		// validator, and never for the declined (audit-only) shape, which has no
+		// park for the deferred database check to bind to.
+		if live && providerref.ValidatePaymentReference("poll.provider_reference", res.ProviderReference) == nil {
+			if err := insertPollReferenceEvidence(ctx, tx, attempt, providerID, res.ProviderReference); err != nil {
+				return true, err
+			}
+			extra["evidence_recorded"] = true
+		}
 		return contradict(TerminalReasonPollReferenceMismatch, extra)
 	}
 
@@ -147,6 +157,40 @@ func (s *Sweeper) checkPollSuccessEvidence(
 	return false, nil
 }
 
+// auditRefusedPollEcho records one audit row for a poll echo the payments
+// validator refused (ADR 0101 5.4): only the closed reason, length and hash
+// prefix - never the value. The caller then reschedules (or declines with a nil
+// reference); it never returns an error for a hostile echo.
+func auditRefusedPollEcho(ctx context.Context, tx pgx.Tx, attempt PaymentAttempt, intent DepositIntent, site, echo string) error {
+	meta := echoAuditMeta(echo)
+	meta["site"] = site
+	meta["deposit_intent_id"] = intent.ID.String()
+	meta["provider_id"] = providerIDOrEmpty(attempt)
+	if err := audit.Record(ctx, tx, audit.Entry{
+		TenantID: attempt.TenantID, ActorType: audit.ActorSystem, Action: "payments.poll_echo_reference_refused",
+		TargetType: "payment_attempt", TargetID: attempt.ID.String(), Outcome: audit.OutcomeDenied, Metadata: meta,
+	}); err != nil {
+		return fmt.Errorf("payments: audit refused poll echo (%s): %w", site, err)
+	}
+	return nil
+}
+
+// insertPollReferenceEvidence persists the poll's returned reference Y as typed
+// evidence (PAY-RECON-POLL-REF-CLEAR-1, ADR 0101 8.6(a)): a PLAIN INSERT (a
+// duplicate raises: a park happens exactly once), in the park's own
+// transaction and BEFORE parkDepositAttempt, so the park's alert raise stays the
+// last alert-table statement and a failed park rolls the row back. Written only
+// for a Y that passed ValidatePaymentReference.
+func insertPollReferenceEvidence(ctx context.Context, tx pgx.Tx, attempt PaymentAttempt, providerID, y string) error {
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO payment_attempt_reference_evidence (tenant_id, attempt_id, provider_id, evidence_kind, reference)
+		 VALUES ($1, $2, $3, 'poll_returned_reference', $4)`,
+		attempt.TenantID, attempt.ID, providerID, y); err != nil {
+		return fmt.Errorf("payments: record poll returned reference evidence: %w", err)
+	}
+	return nil
+}
+
 // auditPollTerminalContradiction records a poll success that contradicts an
 // attempt which is not live (declined): no state change and no posting, a P1
 // audit only (§4.4 declined x contradicting success).
@@ -174,7 +218,7 @@ func auditPollTerminalContradiction(ctx context.Context, tx pgx.Tx, attempt Paym
 // otherwise only the closed reason, length and hash prefix (never the value).
 func echoAuditMeta(echo string) map[string]any {
 	meta := map[string]any{}
-	if verr := providerref.Validate("poll.provider_reference", echo); verr != nil {
+	if verr := providerref.ValidatePaymentReference("poll.provider_reference", echo); verr != nil {
 		if perr, ok := providerref.AsError(verr); ok {
 			meta["echo_ref_reason"], meta["echo_ref_len"], meta["echo_ref_sha256_prefix"] = string(perr.Reason), perr.Length, perr.HashPrefix
 		}

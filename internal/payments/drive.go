@@ -308,9 +308,9 @@ func depositAdapterCall(provider PaymentProvider, attempt PaymentAttempt, manife
 		// raw (code review F1: it would hit the 0099 CHECK and loop forever).
 		var verr error
 		if err == nil && res.Outcome == OutcomePending {
-			verr = providerref.Validate("deposit.provider_reference", res.ProviderReference)
+			verr = providerref.ValidatePaymentReference("deposit.provider_reference", res.ProviderReference)
 		} else {
-			verr = providerref.ValidateOptional("deposit.provider_reference", res.ProviderReference)
+			verr = providerref.ValidatePaymentReferenceOptional("deposit.provider_reference", res.ProviderReference)
 		}
 		if verr != nil {
 			return DepositResult{Outcome: res.Outcome}, ErrorClassProviderRefInvalid, verr

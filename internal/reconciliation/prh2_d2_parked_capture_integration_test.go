@@ -565,7 +565,11 @@ func TestD2_4_ConflictParks(t *testing.T) {
 	// A provider_reference_conflict bound to a PAYOUT attempt, plus a
 	// deposit line resolving to the parked attempt by merchant reference
 	// with status succeeded: flagged in-run. The payout attempt is not
-	// touched, and an unbound park is not a standing finding.
+	// touched. PRH-2 K3 (ADR 0101 9.2 S1/S2, STANDING-1) FLIPS the old "an
+	// unbound park is in-run only" rule: once ANY persisted import carries a
+	// succeeded line for the parked attempt, the finding stands on every
+	// later run (unwindowed) until a reversal line or tombstone on the
+	// evidencing line's reference clears it.
 	t.Run("payout_bound_conflict_merchant_resolved_succeeded_line_is_flagged", func(t *testing.T) {
 		w := newD2World(t)
 		pk, payoutID := w.parkPayoutConflict(t)
@@ -579,13 +583,15 @@ func TestD2_4_ConflictParks(t *testing.T) {
 		if after := w.attempt(t, payoutID); after.State != payoutBefore.State || !after.UpdatedAt.Equal(payoutBefore.UpdatedAt) {
 			t.Errorf("the payout attempt changed: %s -> %s", payoutBefore.State, after.State)
 		}
-		// Not succeeded: not flagged.
-		d2NoCU(t, w.d2Run(t, d2Src(d2Line(pk.pspRef, pk.attempt.MerchantReference, statement.PaymentStatusPending, d2Amount))), "a pending merchant-resolved line")
+		// K3 S1: a pending line in THIS run does not matter - the succeeded line of
+		// the first import still evidences the capture, so the finding stands.
+		d2CUFor(t, w.d2Run(t, d2Src(d2Line(pk.pspRef, pk.attempt.MerchantReference, statement.PaymentStatusPending, d2Amount))), pk.attempt.ID)
 		// In-run clearing on the LINE's reference: a reversal line naming it.
 		d2NoCU(t, w.d2Run(t, d2Src(d2Line(pk.pspRef, pk.attempt.MerchantReference, statement.PaymentStatusSucceeded, d2Amount),
 			d2ReversalLine("d2-rev-"+uuid.NewString()[:8], pk.pspRef, d2Amount))), "a reversal line naming the line's reference")
-		// Unbound parks are in-run only (standing: ADR 0095 §35.4, NOT IMPLEMENTED).
-		d2NoCU(t, w.d2Run(t, d2Src()), "an unbound park with no line this run")
+		// K3 S2: the reversal line of the previous run is PERSISTED, so it clears
+		// the standing finding from then on, whatever this run's statement holds.
+		d2NoCU(t, w.d2Run(t, d2Src()), "an unbound park whose evidencing reference a persisted reversal names")
 		w.d2AssertNoMoney(t, pk)
 	})
 	// Defence in depth: a park reason that is not plainly bound, on an
@@ -636,8 +642,19 @@ func TestD2_4_ConflictParks(t *testing.T) {
 		ms := w.d2Run(t, d2Src(
 			d2Line(ref, holder.MerchantReference, statement.PaymentStatusSucceeded, d2Amount),
 			d2Line(ref, parked.MerchantReference, statement.PaymentStatusSucceeded, d2Amount)))
-		d2Expect(t, ms, map[MismatchKind]int{MismatchKindPayDuplicate: 1})
-		mustOnePay(t, ms, MismatchKindPayDuplicate, "provider_reference="+ref, "check=duplicate_line")
+		// K3 S1: the second line names the parked attempt by merchant reference
+		// and reports succeeded, so the unbound park is also reported (the
+		// duplicate line is skipped by the in-run matcher; the persisted-line
+		// lookup is where the standing finding comes from).
+		d2Expect(t, ms, map[MismatchKind]int{MismatchKindPayDuplicate: 1, d2KindCU: 1})
+		d2CUFor(t, ms, parked.ID)
+		var dups []Mismatch
+		for _, m := range ms {
+			if m.MismatchKind == MismatchKindPayDuplicate {
+				dups = append(dups, m)
+			}
+		}
+		mustOnePay(t, dups, MismatchKindPayDuplicate, "provider_reference="+ref, "check=duplicate_line")
 		if a := w.attempt(t, holder.ID); a.State != payments.AttemptSucceeded {
 			t.Fatalf("holder state %s, want succeeded", a.State)
 		}

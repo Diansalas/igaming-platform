@@ -450,7 +450,7 @@ func payoutAdapterCall(provider PaymentProvider, attempt PaymentAttempt) Adapter
 		// one). The returned result is SCRUBBED to the outcome alone, so the
 		// raw value cannot leak through gr.Value on any path.
 		if res.ProviderReference != "" {
-			if verr := providerref.Validate("withdraw.provider_reference", res.ProviderReference); verr != nil {
+			if verr := providerref.ValidatePaymentReference("withdraw.provider_reference", res.ProviderReference); verr != nil {
 				return WithdrawResult{Outcome: res.Outcome}, ErrorClassProviderRefInvalid, verr
 			}
 		}
@@ -1239,7 +1239,7 @@ func payoutStatusQuery(provider PaymentProvider, providerReference string) Adapt
 			return status, ErrorClassAmbiguous, err
 		}
 		if status.ProviderReference != "" {
-			if verr := providerref.ValidateOptional("query_status.provider_reference", status.ProviderReference); verr != nil {
+			if verr := providerref.ValidatePaymentReferenceOptional("query_status.provider_reference", status.ProviderReference); verr != nil {
 				return status, ErrorClassProviderRefInvalid, verr
 			}
 		}

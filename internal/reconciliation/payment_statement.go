@@ -124,9 +124,10 @@ import (
 //     PAY-RECON-PARKED-CAPTURE-1): see disputeReasonClasses.
 //   - an unbound park (provider_reference_conflict,
 //     invalid_provider_reference:*) holds no provider reference, so it is
-//     flagged only in a run whose statement carries a succeeded line
-//     resolving to it by merchant reference. Standing coverage for it
-//     (persisted-line evidence) is NOT IMPLEMENTED (ADR 0095 §35.4).
+//     flagged whenever ANY persisted import of the tenant and provider has a
+//     succeeded line resolving to it by merchant reference - on every run,
+//     unwindowed (PRH-2 K3, ADR 0101 9.2 S1/S2: IMPLEMENTED against MOCK;
+//     the N1 attribution residual is disclosed in ADR 0095 §35.4).
 //   - declined attempts absent from the statement are not flagged
 //     (whether a real statement lists declines is PROVIDER DEPENDENT).
 //   - provider-succeeded vs platform-in-flight is NOT age-gated (ADR
@@ -392,13 +393,13 @@ func validatePaymentLine(providerID string, l statement.PaymentStatementLine) er
 		// INV-IO-14 / S95-C1: a source speaks for its own provider only.
 		return fmt.Errorf("provider_id is not the source's provider")
 	}
-	if err := providerref.Validate("provider_reference", l.ProviderReference); err != nil {
+	if err := providerref.ValidatePaymentReference("provider_reference", l.ProviderReference); err != nil {
 		return err
 	}
-	if err := providerref.ValidateOptional("original_provider_reference", l.OriginalProviderReference); err != nil {
+	if err := providerref.ValidatePaymentReferenceOptional("original_provider_reference", l.OriginalProviderReference); err != nil {
 		return err
 	}
-	if err := providerref.ValidateOptional("settlement_reference", l.SettlementReference); err != nil {
+	if err := providerref.ValidatePaymentReferenceOptional("settlement_reference", l.SettlementReference); err != nil {
 		return err
 	}
 	// Security C2 (rv-prh-i5-security.md): the providerref rule (valid
@@ -644,8 +645,12 @@ func runPaymentStatementUnchecked(ctx context.Context, tx pgx.Tx, tenantID, impo
 	if err := m.loadPlatform(ctx, tx); err != nil {
 		return Run{}, nil, PaymentStatementInfo{}, fmt.Errorf("reconciliation: load payment platform records: %w", err)
 	}
+	if err := m.loadK3Evidence(ctx, tx, info.IsMock); err != nil {
+		return Run{}, nil, PaymentStatementInfo{}, fmt.Errorf("reconciliation: load persisted payment evidence: %w", err)
+	}
 	m.matchLines(lines)
 	m.checkUnmatchedAttempts()
+	m.checkStandingUnbound()
 	m.checkLedgerJoin()
 	info.LegacyUnattempted = m.legacyUnattempted
 	if err := m.checkPlatformDuplicates(ctx, tx); err != nil {
@@ -653,6 +658,9 @@ func runPaymentStatementUnchecked(ctx context.Context, tx pgx.Tx, tenantID, impo
 	}
 	if err := m.checkDeferredReceipts(ctx, tx); err != nil {
 		return Run{}, nil, PaymentStatementInfo{}, fmt.Errorf("reconciliation: payment receipt check: %w", err)
+	}
+	if err := m.checkM2Standing(ctx, tx); err != nil {
+		return Run{}, nil, PaymentStatementInfo{}, fmt.Errorf("reconciliation: M2 standing check: %w", err)
 	}
 
 	run := Run{
@@ -737,6 +745,10 @@ type payMatcher struct {
 	reversalOriginals map[string]bool
 
 	legacyUnattempted int
+
+	// PRH-2 K3 (ADR 0101 9.2/9.3): the persisted-evidence substrate. Set by
+	// loadK3Evidence before any line is matched.
+	k3 *k3Evidence
 }
 
 func (m *payMatcher) key(parts ...string) string {
@@ -919,10 +931,19 @@ func (m *payMatcher) matchLines(lines []payLine) {
 	// line for the same original in this same statement) can already see
 	// it.
 	m.reversalOriginals = map[string]bool{}
-	for _, l := range lines {
-		if l.kind == statement.PaymentLineDepositReversal && l.original != "" {
-			m.reversalOriginals[l.original] = true
+	// PRH-2 K3 (D-4, section 26 RC-3): this run's own reversal lines clear only
+	// when its import may clear (a MOCK import clears only when no non-MOCK
+	// import exists for the tenant and provider); every ELIGIBLE persisted
+	// import's reversal lines clear too (S2/S3/S4).
+	if m.k3.clearEligible(m.k3.importIsMock) {
+		for _, l := range lines {
+			if l.kind == statement.PaymentLineDepositReversal && l.original != "" {
+				m.reversalOriginals[l.original] = true
+			}
 		}
+	}
+	for o := range m.k3.reversalOriginal {
+		m.reversalOriginals[o] = true
 	}
 	reportedDup := map[string]bool{}
 	for i, l := range lines {
@@ -1037,7 +1058,8 @@ func (m *payMatcher) matchPayment(lk string, l payLine) {
 	if !byMerchant && l.merchant != "" {
 		m.checkMerchantAttribution(lk, ak, op, a, l)
 	}
-	if op == "payout" && l.settlement != "" && a.settlementRef != "" && l.settlement != a.settlementRef {
+	if op == "payout" && l.settlement != "" && a.settlementRef != "" && l.settlement != a.settlementRef &&
+		!strings.HasPrefix(a.settlementRef, reservedOperatorPrefix) {
 		// Code review F4: the provider's stated settlement reference
 		// contradicts the ledger's withdrawal_completed provider_tx_id.
 		m.r.add(MismatchKindPayReferenceMismatch, ak+" check=settlement_reference",
@@ -1048,6 +1070,10 @@ func (m *payMatcher) matchPayment(lk string, l payLine) {
 	} else if a.amount.Cmp(l.amount) != 0 {
 		m.r.add(MismatchKindPayAmountMismatch, ak+" check=amount", "platform: "+a.render(), m.label+l.render())
 	}
+
+	// ADR 0101 9.1 (b): a matching succeeded line for an M2-declared-paid payout
+	// is a confirmation (counted), never a mismatch.
+	m.countM2Confirmation(context.Background(), a, l)
 
 	providerSucceeded := l.status == statement.PaymentStatusSucceeded || l.status == statement.PaymentStatusReversed
 	switch {
@@ -1069,7 +1095,7 @@ func (m *payMatcher) matchPayment(lk string, l payLine) {
 		// every other disputed reason below.
 		m.r.add(MismatchKindPayCapturedUnposted, ak+" check=captured_unposted",
 			"resolution: a PSP-initiated reversal/tombstone, or allocation (LEDGER-SUSPENSE-B-1); M1 only acknowledges", "platform: "+a.render()+" terminal_reason="+a.terminalReason+"; "+m.label+l.render())
-	case a.unboundPark() && l.status == statement.PaymentStatusSucceeded && m.capturedUnpostedRef(l.ref):
+	case a.unboundPark() && l.status == statement.PaymentStatusSucceeded && m.capturedUnpostedRef(l.ref) && m.markCaptured(a, l.ref):
 		// ADR 0095 §35.2 (LF ruling on QA C-F2 (a)): a park that never
 		// bound a reference (a binding conflict, or an invalid reference)
 		// and a succeeded deposit line resolving to it - by construction
@@ -1130,7 +1156,7 @@ func (m *payMatcher) checkMerchantAttribution(lk, ak, op string, a *payAttempt, 
 	m.r.add(MismatchKindPayReferenceMismatch, ak+" check=merchant",
 		"platform: merchant_reference "+a.merchantRef+" ("+a.render()+")",
 		m.label+"merchant_reference names attempt="+b.id.String()+" ("+b.render()+" terminal_reason="+orNone(b.terminalReason)+"); "+l.render())
-	if b.unboundPark() && l.status == statement.PaymentStatusSucceeded && m.capturedUnpostedRef(l.ref) {
+	if b.unboundPark() && l.status == statement.PaymentStatusSucceeded && m.capturedUnpostedRef(l.ref) && m.markCaptured(b, l.ref) {
 		m.r.add(MismatchKindPayCapturedUnposted, lk+" attempt="+b.id.String()+" check=captured_unposted",
 			"resolution: a PSP-initiated reversal/tombstone on this line's reference, or allocation (LEDGER-SUSPENSE-B-1); M1 only acknowledges",
 			"platform: "+b.render()+" terminal_reason="+b.terminalReason+"; line resolved by reference to attempt="+a.id.String()+"; "+m.label+l.render())
@@ -1153,7 +1179,17 @@ func (m *payMatcher) checkMerchantAttribution(lk, ak, op string, a *payAttempt, 
 // providerSucceeded (a statement-line-status concept this predicate has
 // no business knowing about).
 func (m *payMatcher) capturedUnposted(a *payAttempt) bool {
-	return m.capturedUnpostedRef(a.providerRef)
+	if !m.capturedUnpostedRef(a.providerRef) {
+		return false
+	}
+	// PRH-2 K3 (S4, POLL-REF-CLEAR-1, LF B3): a poll_reference_mismatch park with
+	// typed Y evidence (the poll's returned reference, never audit JSON) also
+	// clears on a reversal line or a tombstone on Y. Without a Y row only X
+	// clears, as before.
+	if y, ok := m.k3.yRef[a.id]; ok && y != "" && !m.capturedUnpostedRef(y) {
+		return false
+	}
+	return true
 }
 
 // capturedUnpostedRef is capturedUnposted's clearing rule for one
@@ -1162,7 +1198,7 @@ func (m *payMatcher) capturedUnposted(a *payAttempt) bool {
 // Nothing else clears it - not an M1 decision, not a mismatch row's
 // investigation_status (ADR 0095 §35.3).
 func (m *payMatcher) capturedUnpostedRef(ref string) bool {
-	return !m.reversalOriginals[ref] && m.ledgerByRef["tombstone\x00"+ref] == nil
+	return !m.clearedRef(ref)
 }
 
 // checkUnmatchedAttempts: attempts that no line in THIS run matched.

@@ -52,6 +52,19 @@ export interface NavPermissions {
    * this flag can never stand in for it.
    */
   manualAdjustmentAct: boolean
+  /**
+   * PRH-2 K3 (ADR 0101 24.9): PermPaymentForceResolveRead - view payment
+   * force-resolutions (finance, compliance, platform_admin).
+   */
+  paymentForceResolutions: boolean
+  /**
+   * PRH-2 K3 (ADR 0101 24.9): PermPaymentForceResolveRequest/Approve - the
+   * STATIC half only (finance, platform_admin; never tenant_admin). The
+   * authority is an in-force payment_force_resolve capability GRANT read
+   * server-side in the action's own transaction - this flag can never stand
+   * in for it.
+   */
+  paymentForceResolutionAct: boolean
 }
 
 const NONE: NavPermissions = {
@@ -74,6 +87,8 @@ const NONE: NavPermissions = {
   catalogue: false,
   manualAdjustments: false,
   manualAdjustmentAct: false,
+  paymentForceResolutions: false,
+  paymentForceResolutionAct: false,
 }
 
 // The write flags (tenantWrite/brandWrite/staffAdmin/providerConfig/
@@ -109,6 +124,8 @@ const ROLE_NAV_PERMISSIONS: Record<string, NavPermissions> = {
     catalogue: true,
     manualAdjustments: true,
     manualAdjustmentAct: true,
+    paymentForceResolutions: true,
+    paymentForceResolutionAct: true,
   },
   tenant_admin: {
     ...NONE,
@@ -126,8 +143,17 @@ const ROLE_NAV_PERMISSIONS: Record<string, NavPermissions> = {
     casinoConfig: true,
   },
   support: { ...NONE, players: true, bonus: true, sportsbook: true, casino: true },
-  compliance: { ...NONE, players: true, kyc: true, rg: true, bonus: true, tenantAudit: true, sportsbook: true, casino: true, manualAdjustments: true },
-  finance: { ...NONE, withdrawals: true, sportsbook: true, casino: true, manualAdjustments: true, manualAdjustmentAct: true },
+  compliance: { ...NONE, players: true, kyc: true, rg: true, bonus: true, tenantAudit: true, sportsbook: true, casino: true, manualAdjustments: true, paymentForceResolutions: true },
+  finance: {
+    ...NONE,
+    withdrawals: true,
+    sportsbook: true,
+    casino: true,
+    manualAdjustments: true,
+    manualAdjustmentAct: true,
+    paymentForceResolutions: true,
+    paymentForceResolutionAct: true,
+  },
   risk_manager: { ...NONE },
   promotions_manager: { ...NONE, bonus: true },
   bonus_operations: { ...NONE, bonus: true },

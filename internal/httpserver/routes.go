@@ -176,4 +176,5 @@ func registerIdentityRoutes(mux *http.ServeMux, deps Deps) {
 	// API - see capability_routes.go's own doc comment.
 	registerCapabilityRoutes(mux, deps)
 	registerManualAdjustmentRoutes(mux, deps)
+	registerPaymentForceResolutionRoutes(mux, deps)
 }
