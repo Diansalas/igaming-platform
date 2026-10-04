@@ -261,3 +261,23 @@ Merged-head verification (local, not CI; private DB, -p 1, -race -tags integrati
 (-run 'KillSwitch|Alert|Deposit|Payment|Financial|Payout|IWire|CasinoRejection|AlertAdmin').
 `-count=3 -run TestSweeperLoop_ ./internal/payments/` ok. build, vet (both tag sets), gofmt clean; golangci-lint
 default tags 0 issues.
+
+Final round (C1 flush, C2 main.go wiring test, optional tests). One textual change per mutant, targeted tests, reverted.
+FL-ks | KILLED | kill-switch handler: flushResponse removed | TestIWire_ResponseFlush_KillSwitchEngage_ClientGetsResponseBeforeTheRaiseCompletes
+FL-dep | KILLED | deposit webhook defer: flushResponse removed | TestIWire_ResponseFlush_Webhook*
+FL-cas | KILLED | casino callback defer: flushResponse removed | TestIWire_ResponseFlush_CasinoIntegrityFailurePath_*
+FL-mw | KILLED | statusRecorder.Unwrap removed (Flush becomes a silent no-op behind the access-log wrapper) | TestIWire_ResponseFlush_*
+FL-noop | KILLED | flushResponse body made a no-op | TestIWire_ResponseFlush_*
+CR2-MA | KILLED | main.go: `go` removed from the dispatcher loop goroutine | TestMain_AlertDispatcherWiring_LogSinkOnlyNeverMock
+CR2-MB | KILLED | main.go: alertDispatcherWG.Wait() outside a goroutine | same
+CR2-MC | KILLED | main.go: shutdown bound 15s -> 5s | same
+CR2-MC2 | KILLED | main.go: time.After case removed from the shutdown select | same
+QA-M3 | KILLED | main.go: RunDispatcherLoop given context.Background() instead of ctx | same
+QA-M3b | KILLED | main.go: Wait goroutine no longer closes alertDispatcherDone | same
+M4 | KILLED | main.go: dispatcher goroutine never calls Done | same
+M5 | KILLED | main.go: shutdown bound 10s (equal to DrainTimeout) | same
+CR2-S1 | KILLED | alert admin handler lock SQL FOR NO KEY UPDATE -> FOR UPDATE | TestAlertAdmin_*
+O-5 | KILLED | alert admin audit entry drops IPAddress | TestAlertAdmin_AckResolveAudited_PlatformScopeOnly
+CR2-S4 | KILLED | a new function in internal/payments calls an evidence helper outside an InTx closure | TestStaticWiring_DerivedRaiseReachingSetIsReviewed_CR2S4
+(main.go itself was not modified; the mutants were applied to it and reverted by git checkout.)
+Real-path LF test 9 sibling TestIWire_LF9_AllContradictingConcurrentReceipts_DisputedZeroPostingsOneAlert: -race -count=20 ok.
