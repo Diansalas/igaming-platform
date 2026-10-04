@@ -259,7 +259,7 @@ func TestMigration0114_QS2_SeedAndDownStructure(t *testing.T) {
 		t.Error("the down must be exactly ONE atomic DO block (F7)")
 	}
 	refuse, dropTable, unseed := strings.Index(down, "RAISE EXCEPTION 'migration 0114 down: refusing"), strings.Index(down, "DROP TABLE kyc_submission_outbox"), strings.Index(down, "DELETE FROM alert_kinds")
-	if refuse < 0 || dropTable < 0 || unseed < 0 || !(refuse < dropTable && dropTable < unseed) {
+	if refuse < 0 || dropTable < 0 || unseed < 0 || refuse >= dropTable || dropTable >= unseed {
 		t.Errorf("the outbox refusal must come first, then the drops, then the unseed (refuse=%d drop=%d unseed=%d)", refuse, dropTable, unseed)
 	}
 	if !strings.Contains(down, "SELECT count(*) INTO v_count FROM kyc_submission_outbox") || strings.Contains(down, "WHERE state") {

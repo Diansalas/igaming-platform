@@ -231,10 +231,10 @@ func TestOutbox_20d_CreateRace_PersistentContention_TypedError_D2(t *testing.T) 
 		saved := requestVerificationTestHook
 		requestVerificationTestHook = nil
 		defer func() { requestVerificationTestHook = saved }()
-		switch {
-		case stage == "after_conflict":
+		switch stage {
+		case "after_conflict":
 			passUntilQuiet(t, bad) // the current winner ends terminal: the read finds nothing
-		case stage == "before_retry":
+		case "before_retry":
 			requestCreate(t, r.pool, r.f, "mock") // another request wins the live slot again
 		}
 	}

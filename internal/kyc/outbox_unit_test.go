@@ -220,7 +220,7 @@ func TestSortedDocumentIDs_AscendingTextOrder(t *testing.T) {
 	}
 	ids := sortedDocumentIDs(docs)
 	for i := 1; i < len(ids); i++ {
-		if !(ids[i].String() > ids[i-1].String()) {
+		if ids[i].String() <= ids[i-1].String() {
 			t.Fatalf("not strictly ascending at %d: %s then %s", i, ids[i-1], ids[i])
 		}
 	}
