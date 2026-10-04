@@ -375,10 +375,13 @@ first gate: a missing or revoked grant is refused by the database.
    Record the hash of your evidence reference (`evidence_ref_hash`, hex SHA-256 of the external
    reference; never the reference itself and never PII). It is mandatory for M2.
 2. **A statement source must be registered for the provider.** The three standing reconciliation
-   kinds below can only fire if a `payment_statement` stream for that provider is running. If none is
-   registered the declaration is made blind (R-K3-5). The platform binary does not register a source
-   yet (deferred item, see ADR 0101 implementation record); until it does, treat every M2 as
-   unmonitored and escalate to engineering first.
+   kinds below can only fire if a `payment_statement` stream for that provider is running. The service
+   REFUSES `m2_declare_not_paid` (`force_resolve_precondition_failed`) when no statement source is
+   registered for the provider, because its double-payout risk is detected only by that stream
+   (ADR 0101 §12.3 optional rule, adopted). "Declare paid" is not refused, but it is then unmonitored
+   (R-K3-5). The platform binary does not register a source yet (deferred item: the E1-owned
+   `cmd/platform-api/main.go` must call `payments.DefaultStatementSources.Register`; see the ADR 0101
+   implementation record). Until that lands, treat every M2 as unmonitored and escalate to engineering.
 3. **Check the reason is resolvable.** M2 admits an `ambiguous` payout, or a `disputed` payout with
    `provider_reference_mismatch` / `success_for_never_sent_attempt`, whose withdrawal is still
    `submitted`. NOT resolvable by M1/M2 (the request is refused `force_resolve_reason_not_resolvable`):

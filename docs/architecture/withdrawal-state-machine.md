@@ -430,3 +430,22 @@ threshold and amount in force at the time.
   `payment-orchestration.md`.
 - Crypto-specific withdrawal detail (custodian approval step): `crypto-custody-boundary.md`.
 - Reconciliation of open holds: `reconciliation-model.md`.
+
+## PRH-2 K3 — M2 force-resolution of a `submitted` payout (ADR 0101; `IMPLEMENTED` against MOCK)
+
+A payout whose attempt is `ambiguous`, or `disputed` with `provider_reference_mismatch` /
+`success_for_never_sent_attempt`, and whose withdrawal is still `submitted`, can be resolved by a governed,
+four-eyes M2 resolution:
+
+| M2 kind | Attempt | Withdrawal | Posting |
+|---|---|---|---|
+| `m2_declare_paid` | `-> succeeded` (`operator` evidence) | `submitted -> completed` via `withdrawal.Complete` | Step B `withdrawal_completed` under `platform-operator-declared:<resolution-id>`; `psp_clearing` credit, `player_withdrawal_hold` debit |
+| `m2_declare_not_paid` | `-> declined` (`operator` evidence) | `submitted -> failed` via `withdrawal.Fail` | hold release back to `player_cash` |
+
+No withdrawal state or transition is added. Both run through the existing writers inside the resolution's own
+transaction, so a failure rolls everything back and a committed `executing` is impossible (deferred constraint
+trigger). Residual risks (not closed here): after "declare not paid" the provider may still have paid (T14: the
+standing kind `pay_declared_not_paid_but_paid`, no alert delivered); after "declare paid" `psp_clearing` carries the
+declared amount until the provider's settlement reconciles; a CLOSED tenant's held payouts have no release path
+(ADR 0107, design only). The reserved id `platform-operator-declared:` is never bound to the attempt's
+`provider_reference`. A K2 compensation of an executed M2 is the only way to move the player's cash back.
