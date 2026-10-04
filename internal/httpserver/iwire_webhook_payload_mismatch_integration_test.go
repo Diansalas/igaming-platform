@@ -58,7 +58,7 @@ func TestIWire_Webhook_PayloadMismatch_RaisesDetachedP1(t *testing.T) {
 	if s := post(d2); s != http.StatusConflict {
 		t.Fatalf("a reversal reference re-used for a different deposit must be 409, got %d", s)
 	}
-	rows := alertinject.Find(alertinject.ForSubject(t, pool, tenant.ID), string(alerting.KindPaymentWebhookIntegrity))
+	rows := alertinject.Find(alertinject.WaitForKind(t, pool, tenant.ID, string(alerting.KindPaymentWebhookIntegrity), 1), string(alerting.KindPaymentWebhookIntegrity))
 	if len(rows) != 1 || rows[0].Discriminator != "provider:mock:reason:payload_mismatch" || rows[0].Severity != "p1" {
 		t.Fatalf("expected the payload_mismatch P1, got %+v", rows)
 	}

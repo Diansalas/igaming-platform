@@ -58,7 +58,7 @@ func TestIWire_Webhook_ReversalLink_RaisesDetachedP1(t *testing.T) {
 	if resp.StatusCode != http.StatusInternalServerError {
 		t.Fatalf("a reversal naming a payout reference must fail generically (500), got %d", resp.StatusCode)
 	}
-	rows := alertinject.Find(alertinject.ForSubject(t, pool, tenant.ID), string(alerting.KindPaymentWebhookIntegrity))
+	rows := alertinject.Find(alertinject.WaitForKind(t, pool, tenant.ID, string(alerting.KindPaymentWebhookIntegrity), 1), string(alerting.KindPaymentWebhookIntegrity))
 	if len(rows) != 1 || rows[0].Discriminator != "provider:mock:reason:reversal_link" || rows[0].Severity != "p1" {
 		t.Fatalf("expected the reversal_link P1, got %+v", rows)
 	}

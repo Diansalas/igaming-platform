@@ -21,6 +21,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -228,4 +229,28 @@ func HoldAdvisoryLock(t *testing.T, pool *db.Pool, key int64) (release func()) {
 	}
 	t.Cleanup(release)
 	return release
+}
+
+// WaitUpTo returns the subject tenant's alert rows as soon as ok(rows) holds, or
+// the last rows read once the bound elapses (it never fails the test itself).
+// HTTP handlers now flush the response BEFORE their post-response alert work
+// (ADR 0102 17.10), so a test that has just received a response and asserts a
+// durable alert must wait for that work; the bound is a failure guard, never a
+// timing assertion.
+func WaitUpTo(t *testing.T, pool *db.Pool, tenantID uuid.UUID, bound time.Duration, ok func([]Row) bool) []Row {
+	t.Helper()
+	deadline := time.Now().Add(bound)
+	for {
+		rows := ForSubject(t, pool, tenantID)
+		if ok(rows) || time.Now().After(deadline) {
+			return rows
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+}
+
+// WaitForKind is WaitUpTo until at least minRows rows of kind exist (10s bound).
+func WaitForKind(t *testing.T, pool *db.Pool, tenantID uuid.UUID, kind string, minRows int) []Row {
+	t.Helper()
+	return WaitUpTo(t, pool, tenantID, 10*time.Second, func(rows []Row) bool { return len(Find(rows, kind)) >= minRows })
 }

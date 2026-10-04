@@ -28,7 +28,7 @@ func TestIWire_KillSwitch_Engage_RaisesP2_TenantAndPlatformScope(t *testing.T) {
 	var ks killSwitchDTO
 	resp.decode(t, &ks)
 
-	rows := alertinject.Find(alertinject.ForSubject(t, a.pool, tenant), string(alerting.KindPaymentKillSwitchEngaged))
+	rows := alertinject.Find(alertinject.WaitForKind(t, a.pool, tenant, string(alerting.KindPaymentKillSwitchEngaged), 1), string(alerting.KindPaymentKillSwitchEngaged))
 	if len(rows) != 1 {
 		t.Fatalf("want exactly one kill-switch alert, got %+v", rows)
 	}
@@ -51,7 +51,7 @@ func TestIWire_KillSwitch_Engage_RaisesP2_TenantAndPlatformScope(t *testing.T) {
 	if resp.status != http.StatusOK {
 		t.Fatalf("platform engage: %d %s", resp.status, resp.body)
 	}
-	rows = alertinject.Find(alertinject.ForSubject(t, a.pool, tenant), string(alerting.KindPaymentKillSwitchEngaged))
+	rows = alertinject.Find(alertinject.WaitForKind(t, a.pool, tenant, string(alerting.KindPaymentKillSwitchEngaged), 2), string(alerting.KindPaymentKillSwitchEngaged))
 	var original, takeover *alertinject.Row
 	for i := range rows {
 		switch rows[i].Discriminator {

@@ -131,7 +131,7 @@ func TestPaymentWebhookHandler_DepositReversalAlreadyReversed_Maps409(t *testing
 	// ADR 0102 8 row 10 (failure-path P1, detached): the same condition is also a
 	// durable payment.webhook_integrity alert, with only server-side ids in its
 	// discriminator and attributes limited to provider_id/request_id.
-	durable := alertinject.Find(alertinject.ForSubject(t, pool, tenant.ID), string(alerting.KindPaymentWebhookIntegrity))
+	durable := alertinject.Find(alertinject.WaitForKind(t, pool, tenant.ID, string(alerting.KindPaymentWebhookIntegrity), 1), string(alerting.KindPaymentWebhookIntegrity))
 	if len(durable) != 1 || durable[0].Discriminator != "provider:mock:reason:deposit_already_reversed" || durable[0].Severity != "p1" {
 		t.Fatalf("expected one durable deposit_already_reversed P1, got %+v", durable)
 	}

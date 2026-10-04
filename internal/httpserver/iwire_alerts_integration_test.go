@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -68,7 +69,7 @@ func iwWebhookMismatch(t *testing.T, inject bool, mode alertinject.Mode, code st
 	}); err != nil {
 		t.Fatalf("read back: %v", err)
 	}
-	return resp, tenant.ID.String(), state, n, alertinject.ForSubject(t, pool, tenant.ID)
+	return resp, tenant.ID.String(), state, n, alertinject.WaitUpTo(t, pool, tenant.ID, 5*time.Second, func(rs []alertinject.Row) bool { return len(rs) > 0 })
 }
 
 func TestIWire_Webhook_T10_RaisesP1_UniformResponse(t *testing.T) {
