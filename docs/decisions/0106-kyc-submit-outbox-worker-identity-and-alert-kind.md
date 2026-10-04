@@ -310,7 +310,7 @@ tenant id used afterwards is this `RETURNING` value (INV-KYC-OB-4).
 | Definitive (and, for create, a non-empty reference); CAS applied | `claimed → sent` | changed only by the existing CAS rules | existing `kyc.verification_submitted` / `..._to_provider` row + `outbox_id`, `claims`, `platform_service` |
 | **Create CAS miss** because the orphan was decided concurrently (staff `ReviewVerification`, IC C3) | `claimed → cancelled` (`decided_concurrently`) | **never overwritten or demoted** | `kyc.submission_cancelled` with `vendor_reference_unbound=true` (the reference value is never written); runbook §8.3 step |
 | Submit result arriving after a staff/callback forward move | the existing forward-only CAS is a no-op; `claimed → sent` | unchanged (never demoted) | existing row with `status_applied=false` |
-| **Ambiguous** (`ProviderError`, transport error, timeout, empty create reference) | `claimed → pending` + backoff, or `→ failed_terminal` when `failed_attempts + 1 >= MaxFailedAttempts` (+ alert) | **unchanged** (IC condition 2) | `kyc.submission_retry_scheduled` / `kyc.submission_failed_terminal`; for submit `ProviderError` the existing failure row is kept as well |
+| **Ambiguous** (transport error, timeout, a create answered by `ProviderError` or any unrecognised outcome WITHOUT a vendor reference, a submit answered by `ProviderError` or any unrecognised outcome; a create answered with an unrecognised outcome AND a genuine reference is NOT ambiguous: it binds the reference and becomes `pending`, see §15.3 item 1, confirmed by identity-compliance) | `claimed → pending` + backoff, or `→ failed_terminal` when `failed_attempts + 1 >= MaxFailedAttempts` (+ alert) | **unchanged** (IC condition 2) | `kyc.submission_retry_scheduled` / `kyc.submission_failed_terminal`; for submit `ProviderError` the existing failure row is kept as well |
 | **Not sent** (credential unavailable, adapter not registered, `ErrProviderCallRefused`) | as ambiguous, class `not_sent` | unchanged | as above |
 | **Credential binding mismatch** (F5) | `claimed → failed_terminal` **immediately**, class `credential_binding_mismatch`, no retry | unchanged | `kyc.submission_failed_terminal` + alert with discriminator suffix `:binding_mismatch` |
 | **Phase C fails with SQLSTATE class 22 or 23** after the bounded in-item retries (F11, adopted) | new short tenant tx: `claimed → failed_terminal`, class `apply_conflict` (no re-send loop) | unchanged | `kyc.submission_failed_terminal` + alert, suffix `:apply_conflict` |
@@ -712,9 +712,13 @@ RLS, not grants). K3 appends after this block.
   backed by `ListVerificationsForTenant` / `GetVerificationByID`) gains a read-only derived
   `submission_state` ∈ {`none`, `queued`, `sent`, `failed`, `cancelled`} and, when `failed`/`cancelled`,
   the closed `last_error_class` / `cancel_reason`. Derivation, per verification, from its latest `create`
-  row and latest `submit` row by `(created_at, id)`: `failed` if either latest row is `failed_terminal`;
-  else `queued` if either is `pending`/`claimed`; else `sent` if either is `sent`; else `cancelled` if a row
-  exists; else `none`. Tenant-scoped read under the staff principal's RLS (`kso_tenant_select`). No vendor
+  row and latest `submit` row by `(created_at, id)`. **As implemented (identity-compliance R2 precedence,
+  superseding the r2 text "failed > queued > sent > cancelled"; recorded as a deviation in §15.3):**
+  `failed` if either latest row is `failed_terminal`; else a NON-BENIGN `cancelled` (any cancel reason other
+  than `superseded`, `no_documents`, or `document_set_changed` with a replacement submit row) outranks
+  `queued`, so a stranded case (create sent, latest submit cancelled `provider_deconfigured`) is shown as
+  `cancelled`; else `queued` if either is `pending`/`claimed`; else `sent` if either is `sent`; else a benign
+  `cancelled` if a row exists; else `none`. Tenant-scoped read under the staff principal's RLS (`kso_tenant_select`). No vendor
   reference, document data or counters are exposed.
 - **Player read (optional, product-owner-proxy decision, NOT built by default):** a coarse enum
   {`queued`, `sent`, `failed`, `none`} with no vendor data, same derivation.
@@ -786,7 +790,7 @@ observable).
 | File | E1 change | Other known writer | Conflict |
 |---|---|---|---|
 | `deploy/init-app-role.sql` | append one block after K2's | K3 appends after E1 | textual; E1 first |
-| `cmd/platform-api/main.go` | two delimited blocks after the I-wire blocks (§7.4) | none active (H, I-wire merged; their blocks untouched) | none |
+| `cmd/platform-api/main.go` | two delimited blocks after the I-wire blocks (§7.4) **and, OUTSIDE those blocks, the D1 hoist (recorded here per security condition D1 and code review F7):** `kycOrch := kycOrchestrator(...)` and `kycOutboundCreds := providers.kycOutboundCredentials()` are constructed once before the `Deps` literal, and the two `Deps` fields `KYCOrchestrator` and `KYCOutboundCredentials` now read those variables, so the HTTP server and the worker share ONE orchestrator and ONE resolver. The H and I-wire blocks are untouched. | none active (H, I-wire merged; their blocks untouched) | none |
 | `cmd/platform-api/registrations.go` | `buildKYCOutboxWorker` | none active | none |
 | `internal/config/config.go` | `KYCOutboxInterval` | none active | none |
 | `internal/alerting/kind.go` | one constant + one def | K3 only if it adds Kinds | append |
@@ -1192,7 +1196,17 @@ jurisdiction whitelist is unchanged (still 11 tuples; none of the nine tables is
    with NO provider reference is ambiguous and leaves the orphan untouched; the same outcome WITH a genuine
    provider reference binds the reference and the row becomes pending, because discarding it would leave an
    unbound vendor-side verification and a re-send. Submit keeps `ProviderError => ambiguous`, with the existing
-   failure audit row, status untouched (IC condition 2). Needs identity-compliance confirmation.
+   failure audit row, status untouched (IC condition 2). **CONFIRMED by identity-compliance** (implementation
+   review, condition C-1): this is byte-for-byte the pre-E1 behaviour (R2 / ADR 0096 section 20.5) moved to the
+   worker; it opens no new way to write a status and `pending` is written only when the vendor genuinely issued a
+   reference. The design text of section 2.9 (the "Ambiguous" row) and any other `ProviderError => ambiguous`
+   wording is reconciled to this: for a CREATE, `ProviderError` (or any unrecognised outcome) is ambiguous only
+   when it carries NO reference. **Residual risk, `PROVIDER DEPENDENT`:** a real adapter that returns
+   `ProviderError` together with a NON-verification identifier (for example a request id) in `ProviderReference`
+   would bind that bogus reference and set `pending`, which supersedes an approval (fail-closed for a
+   withdrawal, the same as the pre-E1 behaviour). Re-check at real-vendor intake: the adapter must map such a
+   response to an empty reference, or the worker must be given an explicit allowlist of outcomes that may bind.
+   Not testable against the MOCK.
 2. **P-phase terminal.** A re-claim whose retry budget is exhausted is handed from P to phase C
    (`prepTerminalLeaseExpired`) so the terminal row, audit row and alert commit in the same phase-C transaction
    (`runPhaseC` owns the alert).
@@ -1209,9 +1223,16 @@ jurisdiction whitelist is unchanged (still 11 tuples; none of the nine tables is
 7. **Nil worker at startup** logs once and never fails startup (`buildKYCOutboxWorker` returns nil when the
    orchestrator or the outbound credential resolver is nil): in that deployment nothing is ever sent.
    Documented in the runbook and the production-configuration checklist.
-8. **Test seams.** `requestVerificationTestHook` (stages `after_conflict`, `before_retry`) is a package variable
-   used only by tests. The guard/RLS layers are proven independently by owner-side fixtures (`openOutboxPolicies`
-   for the trigger alone, `disableOutboxGuard` for RLS alone). No production path has a seam.
+8. **Test seams.** Two seams are COMPILED INTO production code and are nil in production (code review F9; the
+   earlier wording "no production path has a seam" was inaccurate): the unexported package variable
+   `requestVerificationTestHook` (stages `after_conflict`, `before_retry`; precedent
+   `reviewVerificationTestRaceHook`; settable only inside package `kyc`), and the exported field
+   `OutboxWorker.ClaimScope` (a `func() []uuid.UUID` that restricts the claim to the given tenants so integration
+   tests sharing one database never touch each other's rows; a static test pins that no non-test file other than
+   the worker reads or sets it, so `cmd/platform-api` cannot). The guard/RLS layers are proven independently by
+   owner-side probes (`openOutboxPolicies` for the trigger alone, `disableOutboxGuard` for RLS alone) that run
+   their DDL INSIDE a rolled-back owner transaction (never committed: invisible to every other session, nothing
+   left behind by a killed test binary).
 9. **Exported entry points removed.** `kyc.CreateVerification` and `kyc.SubmitVerification` (the HTTP-reachable
    vendor callers) no longer exist; the vendor is reachable only from the worker (static test, Q-R3).
 10. **`cmd` construction allowlist.** `kyc.RunOutboxWorkerLoop` was added to the main-construction AST allowlist
@@ -1220,6 +1241,51 @@ jurisdiction whitelist is unchanged (still 11 tuples; none of the nine tables is
     (`kyc_two_phase_integration_test.go` rewritten; httpserver KYC tests use a drain helper). Assertions were
     adapted to the asynchronous path (for example a status read after the worker drains); reviewers should diff
     these files against the base to confirm no enforcement assertion was dropped.
+12. **Out-of-block `main.go` edit (code review F7, security condition D1).** `kycOrch` and `kycOutboundCreds`
+    are hoisted before the `Deps` literal and the two `Deps` fields read them (recorded in section 8.2). The H
+    and I-wire blocks are untouched.
+13. **Derived staff state precedence (code review F7).** Section 7.2 is reconciled to the implemented
+    identity-compliance R2 precedence (non-benign `cancelled` outranks `queued`); the r2 text was
+    `failed > queued > sent > cancelled`.
+14. **Fix round after the implementation reviews (items 14-21).** Code review F4: prepare cancels a submit
+    (`verification_not_submitted`) when the verification is an orphan OR has an empty provider reference, and
+    phase B refuses a submit against an empty reference; the upload reads the live create row `FOR SHARE` so a
+    concurrent decision waits for the upload and its cascade then sees the submit row. Code review F3: the
+    idempotent-create read takes the player's NEWEST create row in any state and returns it only if it is
+    pending, claimed or sent (an older sent create is never returned for a terminal winner; the insert is
+    retried). Security L-1: both 0114 functions carry `SET search_path = pg_catalog, public, pg_temp` (a TEMP
+    table can no longer shadow `tenants`, `kyc_verifications`, `kyc_documents` or the outbox inside the guard).
+    Security I-1: the insert trigger forces `next_attempt_at := now()`.
+15. **Parallel-package safety (code review F1).** No test deletes outbox rows; test workers claim only the
+    tenants of the running top-level test (`ClaimScope`, item 8); the owner DDL fixture that moves times and
+    states (`ownerTx`: DISABLE TRIGGER USER and NO FORCE RLS, restored before the same transaction commits) is
+    serialised across packages by a transaction advisory lock and bounded by `lock_timeout`. That DDL is
+    transactional: no other session ever observes the trigger disabled or FORCE lifted; it only waits briefly on
+    the table lock. This is a deliberate, narrow use of DDL in tests; the alternative (a scratch database per
+    fixture-heavy test) was not adopted for cost. A schema-changing probe (the submit-side apply-conflict
+    constraint) uses a scratch database.
+16. **Catalogue gate (code review F6).** Test 31 also asserts every public table except `schema_migrations` has
+    row-level security enabled or is fenced or on the reference allowlist (a table with RLS disabled would be
+    fully readable and writable by the worker identity and was previously invisible to the policy enumeration).
+17. **Gauge and drain wording (code review F8).** `kyc_outbox_oldest_deferred_age_seconds` is now a per-pass
+    maximum (like the due-lag gauge) and is cleared by a pass that defers nothing. The shutdown drain comment
+    states the real worst case (about 40 s) against the 30 s wait; exiting mid-item is benign (lease expiry,
+    re-claim, same idempotency key).
+18. **Test additions.** Tests for the binding check arms (provider id and domain), the per-pass per-tenant cap,
+    the submit-side `apply_conflict` (`vendor_state_unreflected`, identity-compliance C-2), the late-submit
+    probe, the older-sent-create race probe, the temp-table search_path probe, log redaction (resolver failure,
+    phase-C failure, plus a static test that every worker log call uses the closed redactor), retry and deferral
+    backoff growth, the exhausted re-claim ordering, the deferred-age gauge, the bounded phase B, and static
+    guards (every selector/identifier reference to a vendor method, not only calls; payments, withdrawal and
+    enforcement code never reference `RequestVerification` or the staff state by selector or identifier).
+19. **`NOT IMPLEMENTED` (unchanged).** Alert notification (no route, channel or recipient; ALERT-DELIVERY-1
+    OPEN), the content-read seam, staff requeue (KYC-OUTBOX-REQUEUE-1), retention (HQ-E1-4), the player enum,
+    and the rotation-overlap positive control (a registered follow-up for the identity-compliance owner).
+20. **Not changed:** `kyc_verifications` writes; enforcement read paths; the 36 fence policies (literal SQL).
+21. **Residual (security L-3, optional):** `leaseFloor` counts one phase-C timeout while `runPhaseC` can run
+    `PhaseCAttempts` attempts plus the apply-conflict transaction (worst case about 40 s against a 60 s lease at
+    the defaults; an overrun is safe through the claim-token CAS and the same-key re-send). If `PhaseCAttempts`
+    ever becomes configurable the floor must use `2*(P+R+Call+PhaseCAttempts*C+C)+5`.
 
 ### 15.4 Evidence
 

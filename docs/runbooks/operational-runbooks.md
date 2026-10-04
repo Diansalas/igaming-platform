@@ -380,7 +380,9 @@ provider or row labels.
    means phase C keeps failing (database health, section 7).
 3. **`not_sent` / `ambiguous` retries.** The vendor or credential is unavailable or the result was ambiguous.
    The verification is never changed by an ambiguous result. After the retry budget the row ends
-   `failed_terminal` and raises the alert. Fix the cause; pending rows resume on their own.
+   `failed_terminal` and raises the alert. Fix the cause; pending rows resume on their own, but a row that has
+   already ended `failed_terminal` does NOT resume (item 10). A permanent callback 503 for an unbound vendor
+   reference is a known residual (ADR 0095 section 38.3).
 4. **`provider_deconfigured` cancels.** The pinned provider is no longer configured for the tenant (a
    credential rotation without overlap, ADR 0093). The row is cancelled, not retried. Rotate with overlap.
    `PROVIDER DEPENDENT`: the rotation-overlap behaviour is not exercised against a real vendor.
