@@ -439,6 +439,7 @@ func NewWithAdmission(deps Deps) (http.Handler, WebhookAdmissionRuntime) {
 	registerJurisdictionRoutes(mux, deps)
 	registerProviderCredentialRoutes(mux, deps)
 	registerPaymentsKillSwitchRoutes(mux, deps)
+	registerAlertAdminRoutes(mux, deps) // ADR 0102 4.2: platform-scope ack/resolve (alert:manage)
 
 	instrumented := otelhttp.NewHandler(mux, deps.ServiceName)
 

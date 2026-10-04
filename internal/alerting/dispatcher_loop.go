@@ -1,0 +1,141 @@
+package alerting
+
+import (
+	"context"
+	"fmt"
+	"log/slog"
+	"time"
+)
+
+// Ticker is the injectable tick source for the dispatcher loop (plan T-1:
+// never time.Sleep and hope). Production uses a time.Ticker; tests drive
+// ticks by hand.
+type Ticker interface {
+	C() <-chan time.Time
+	Stop()
+}
+
+type timeTicker struct{ t *time.Ticker }
+
+func (k timeTicker) C() <-chan time.Time { return k.t.C }
+func (k timeTicker) Stop()               { k.t.Stop() }
+
+// LoopConfig configures RunDispatcherLoopWithConfig.
+type LoopConfig struct {
+	// Interval between passes (default 15s, a technical default for devops
+	// review - not a policy value).
+	Interval time.Duration
+	// NewTicker overrides the tick source (tests). Defaults to a time.Ticker.
+	NewTicker func(d time.Duration) Ticker
+	// DrainTimeout bounds how long an in-flight pass may keep running after
+	// the parent context is cancelled (shutdown drain). Default 10s.
+	DrainTimeout time.Duration
+	// Logger defaults to slog.Default().
+	Logger *slog.Logger
+	// OnPass, if set, is called after every pass with its outcome
+	// ("ok", "error" or "panic"). Test and metrics hook.
+	OnPass func(result string)
+}
+
+// DefaultLoopInterval is the technical default pass interval (devops-reviewable,
+// not a policy value). cmd/platform-api passes it to RunDispatcherLoop.
+const DefaultLoopInterval = 15 * time.Second
+
+// DefaultLoopDrainTimeout is how long RunDispatcherLoop waits for the pass in
+// flight on shutdown; cmd/platform-api's bounded wait must exceed it.
+const DefaultLoopDrainTimeout = 10 * time.Second
+
+const defaultLoopDrainTimeout = DefaultLoopDrainTimeout
+
+// PassRunner is what the loop drives. *Dispatcher satisfies it; tests
+// substitute a fake to prove panic recovery and drain without a database.
+type PassRunner interface {
+	RunOnce(ctx context.Context) error
+}
+
+// RunDispatcherLoop runs the dispatcher with the default LoopConfig and
+// the given interval. Blocks until ctx is done and the in-flight pass has
+// drained. ADR 0102 6.1: wired in cmd/platform-api/main.go only after H
+// merges (plan Rule 5).
+func RunDispatcherLoop(ctx context.Context, d *Dispatcher, interval time.Duration) {
+	RunDispatcherLoopWithConfig(ctx, d, LoopConfig{Interval: interval})
+}
+
+// RunDispatcherLoopWithConfig mirrors reconciliation.RunSchedulerLoop:
+//   - one pass immediately on start (a restart must not wait a full
+//     interval; a pass is always safe because claims are DB-enforced);
+//   - then one pass per tick;
+//   - every pass has its own panic recovery, so a panic in one pass never
+//     kills the process or the loop (the platform must not die because
+//     alerting did);
+//   - shutdown drain: once ctx is cancelled no new pass starts, but a pass
+//     already running is allowed to finish (bounded by DrainTimeout) so a
+//     delivery is not abandoned between its claim and its recorded outcome.
+//
+// A pass failure is logged and counted; the loop continues. This function
+// never returns an error and never touches a business transaction.
+func RunDispatcherLoopWithConfig(ctx context.Context, d PassRunner, cfg LoopConfig) {
+	if cfg.Interval <= 0 {
+		cfg.Interval = DefaultLoopInterval
+	}
+	if cfg.DrainTimeout <= 0 {
+		cfg.DrainTimeout = defaultLoopDrainTimeout
+	}
+	if cfg.NewTicker == nil {
+		cfg.NewTicker = func(dur time.Duration) Ticker { return timeTicker{t: time.NewTicker(dur)} }
+	}
+	logger := cfg.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+
+	pass := func() {
+		if ctx.Err() != nil {
+			return // shutting down: no new pass
+		}
+		result := runPassRecovered(ctx, d, cfg.DrainTimeout, logger)
+		recordDispatcherPass(context.WithoutCancel(ctx), result)
+		if cfg.OnPass != nil {
+			cfg.OnPass(result)
+		}
+	}
+
+	pass()
+
+	ticker := cfg.NewTicker(cfg.Interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C():
+			pass()
+		}
+	}
+}
+
+// runPassRecovered runs exactly one d.RunOnce with panic recovery and the
+// shutdown-drain context. It returns "ok", "error" or "panic".
+func runPassRecovered(parent context.Context, d PassRunner, drain time.Duration, logger *slog.Logger) (result string) {
+	// The pass context is detached from the parent's cancellation so an
+	// in-flight pass can drain; it is cancelled DrainTimeout after the
+	// parent is, or when the pass returns.
+	passCtx, cancel := context.WithCancel(context.WithoutCancel(parent))
+	defer cancel()
+	stop := context.AfterFunc(parent, func() {
+		time.AfterFunc(drain, cancel)
+	})
+	defer stop()
+
+	defer func() {
+		if r := recover(); r != nil {
+			logger.Error("alert_dispatcher_pass_panic", "panic", fmt.Sprint(r))
+			result = "panic"
+		}
+	}()
+	if err := d.RunOnce(passCtx); err != nil {
+		logger.Error("alert_dispatcher_pass_failed", "error", err)
+		return "error"
+	}
+	return "ok"
+}

@@ -38,12 +38,22 @@ var alertDeadTotal, _ = meter.Int64Counter(
 	metric.WithDescription("Count of alerts whose delivery attempts were exhausted (ADR 0102 §6.1)."),
 )
 
+// boundedKindLabel keeps the metric's kind label cardinality bounded by the
+// closed Kind registry: anything not in it is reported as "unknown", never as
+// a caller-supplied string.
+func boundedKindLabel(kind Kind) string {
+	if _, ok := Def(kind); ok {
+		return string(kind)
+	}
+	return "unknown"
+}
+
 func recordRaiseFailure(ctx context.Context, kind Kind, phase string) {
 	if alertRaiseFailuresTotal == nil {
 		return
 	}
 	alertRaiseFailuresTotal.Add(ctx, 1, metric.WithAttributes(
-		attribute.String("kind", string(kind)),
+		attribute.String("kind", boundedKindLabel(kind)),
 		attribute.String("phase", phase),
 	))
 }
@@ -77,4 +87,19 @@ func recordStaleClaim(ctx context.Context) {
 		return
 	}
 	alertStaleClaimsTotal.Add(ctx, 1)
+}
+
+// alertDispatcherPassesTotal counts dispatcher loop passes by result
+// ("ok", "error", "panic"). A flat counter is the "alert dispatcher
+// stalled" signal (runbook). No tenant label.
+var alertDispatcherPassesTotal, _ = meter.Int64Counter(
+	"alert_dispatcher_passes_total",
+	metric.WithDescription("Count of alert dispatcher loop passes by result (ADR 0102 I-wire)."),
+)
+
+func recordDispatcherPass(ctx context.Context, result string) {
+	if alertDispatcherPassesTotal == nil {
+		return
+	}
+	alertDispatcherPassesTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("result", result)))
 }

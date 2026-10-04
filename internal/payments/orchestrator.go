@@ -669,7 +669,12 @@ func auditMultipleSuccessForIntent(ctx context.Context, tx pgx.Tx, attempt Payme
 		slog.Default().Error("payments_deposit_intent_index_backstop_fired",
 			"tenant_id", attempt.TenantID.String(), "deposit_intent_id", intentID, "attempt_id", attempt.ID.String())
 	}
-	return nil
+	// ADR 0102 I-wire rows 1-2: the durable P1s (the log lines above are
+	// retained). Last statement of this helper; RaiseGuarded runs under its
+	// own savepoint; a deterministic alert-statement failure never aborts the
+	// dispute (LF-7), while transient/lock/cancel classes propagate like any
+	// other statement of the transaction.
+	return raiseMultipleSuccessAlert(ctx, tx, attempt, providerID, evidence, backstopFired)
 }
 
 // postDepositSuccessOrDispute is the shared choke-point wrapper every

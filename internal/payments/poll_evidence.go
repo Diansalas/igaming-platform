@@ -164,7 +164,9 @@ func auditPollTerminalContradiction(ctx context.Context, tx pgx.Tx, attempt Paym
 	}); err != nil {
 		return fmt.Errorf("payments: audit poll contradiction on terminal attempt (%s): %w", reason, err)
 	}
-	return nil
+	// ADR 0102 I-wire / PAY-POLL-DECLINED-ALERT-RECON-1 (a): durable P1 for the
+	// audit action (reason from a closed set). Savepoint-guarded, last statement.
+	return raisePollContradictionAlert(ctx, tx, attempt, reason)
 }
 
 // echoAuditMeta returns the audit fields for a provider-echoed reference that is

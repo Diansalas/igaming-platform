@@ -26,6 +26,16 @@ import (
 // between the two would surface as a false P1 mismatch. Such a job should
 // only INSERT (never UPDATE/DELETE a row another transaction may touch), so
 // it cannot hit a serialization failure.
+//
+// ALERTS (ADR 0102 7.3a, C-102-5, SR-5): a snapshot transaction must NEVER
+// raise an alert, and must never run INSERT ... ON CONFLICT against rows
+// another transaction may commit. Under REPEATABLE READ, an ON CONFLICT DO
+// NOTHING against a row committed after the snapshot raises 40001
+// (serialization failure), which would roll back the whole run and its
+// mismatch rows because of an alert statement. A P1 found inside a snapshot
+// is raised only AFTER the snapshot commits, from a fresh READ COMMITTED
+// transaction (alerting.RaisePostCommit), exactly as the casino_statement
+// and payment_statement reconciliation sites do.
 func (p *Pool) WithTenantSnapshot(ctx context.Context, tenantID uuid.UUID, fn TxFunc) error {
 	if tenantID == uuid.Nil {
 		return fmt.Errorf("db: WithTenantSnapshot called with nil tenant id")

@@ -507,9 +507,15 @@ The business outcome never depends on the alert row.
   A swallowed alert from a rolled-back tx1 can therefore never flush after a later tx2 in the same
   context commits. An AST test asserts that no `Pending` spans two transactions.
 - **When `Flush` runs (LF F5, SR-8).**
-  - HTTP handlers call `Flush` **after the response has been written**, and before the handler
-    returns. It still runs **inside the ADR 0097 admission hold**, which is released in the
-    handler's deferred release, so the load stays bounded.
+  - HTTP handlers call `Flush` **after the handler has written its response and before it returns**
+    (a deferred call). No flush is forced for the webhook, casino and simulation-callback paths, so on
+    those paths **nothing (status, headers or body) reaches the provider until the handler returns**; the
+    response goes out in one piece with a `Content-Length` (it is not chunked). A degraded alert path
+    therefore adds up to about 5s per detached raise to the latency the provider sees, which is what
+    decides its timeout and redelivery, and the admission slot is held for that time. Only the
+    kill-switch engage and the simulation payload-mismatch branch flush early (§17.10; chunked, so only
+    their terminating chunk waits). It still runs **inside the ADR 0097 admission hold**, which is
+    released in the handler's deferred release, so the load stays bounded.
   - The 200 body and its timing are unchanged.
   - Non-HTTP callers (the sweeper and scheduler) call `Flush` right after the commit.
   - `Flush` uses a detached, bounded context (the `deniedAuditCtx` pattern,
@@ -900,7 +906,8 @@ Also required:
     pending HD-PRH2-4-OPS;
   - HANDOVER rows: `LogSink` IMPLEMENTED; `MockSink` MOCK; real channels PROVIDER DEPENDENT.
 - **Registry (orchestrator):**
-  - ALERT-DELIVERY-1 → IMPLEMENTED (MOCK/log channels);
+  - ALERT-DELIVERY-1 → IMPLEMENTED (MOCK/log channels) (**superseded by §17: it stays OPEN until the
+    closure conditions in the §17 status table hold; log and MOCK channels deliver to no person**);
   - RECON-RUN-FAILED-ALERT-1 closes with I-wire;
   - PAY-P1-MULTISUCCESS-ALERT-1 stays launch-blocking;
   - add ALERT-RETENTION-1.
@@ -1360,3 +1367,384 @@ after): build, vet (plain and `-tags integration`), `gofmt`, the pinned
 `TestDispatcher_ClaimRaceIsDeterministic`, `-race -tags integration` for
 `./internal/auth/...`, and `-race -tags integration` for
 `./internal/httpserver/...` all pass.
+
+
+---
+
+## 17. Implementation record — I-wire (2026-10-03)
+
+**Branch:** `prh2-iwire-alert-delivery`, branched from `6836319` (D1 merged at `7adb0c5`), merged with
+main `6cbea70` (D1, D2, F-pay) by merge commit `4df7c4e` and with main `22ff3b6` (H) by `f92cfa3`; review
+round 1 fixes and the final-round fixes follow (§17.9, §17.10). Implemented by
+payments + devops under the PRH-2 I-wire brief. **No migration** (decision below). Labels:
+
+| Item | Label |
+|---|---|
+| Business raise sites (§17.3) | **IMPLEMENTED** |
+| Dispatcher loop (panic recovery per pass, immediate first pass, shutdown drain, injectable ticker) | **IMPLEMENTED** |
+| Stable delivery dedup key `<alert_id>:<step>` and discriminator on `Delivery` | **IMPLEMENTED** |
+| `POST /v1/admin/alerts/{id}/ack\|resolve` (`alert:manage`, platform scope, audited) | **IMPLEMENTED** |
+| `cmd/platform-api/main.go` dispatcher wiring | **IMPLEMENTED** after H merged (main `22ff3b6`), as one separate commit touching only `cmd/platform-api` (LogSink only, never MockSink). **Starting it delivers nothing**: no route exists, so every alert is `unrouted` |
+| Route configuration, recipients, real channel | **NOT IMPLEMENTED** / **PROVIDER DEPENDENT**; HD-PRH2-4-OPS. **No route is seeded.** |
+| §8 rows 12–13 (casino-play and sportsbook-settlement simulation alerts) | **NOT IMPLEMENTED** (p3, simulation, never delivered; deferred) |
+| ALERT-DELIVERY-1 | **stays OPEN.** The dispatcher is now wired (LogSink only) but that is not closure. ALERT-DELIVERY-1 closes ONLY when ALL of these hold: (a) real `alert_routes` rows exist (authored by a human under SR-7, none seeded); (b) a real channel that is neither the log sink nor the MOCK sink is wired and proven (PROVIDER DEPENDENT); (c) a named human recipient or on-call exists (HD-PRH2-4-OPS); and (d) the §17.7 preconditions are met (the new-K2-breach-pages precondition and the pre-channel list). Wiring the dispatcher is not closure. |
+
+A stored alert, a stored P1 severity or an `unrouted` delivery row is never "delivered". Until the
+dispatcher runs and a human configures routes, nothing leaves the database.
+
+### 17.1 Decision: no migration, no new Kinds
+
+`alert_kinds` is an immutable reference table that only a migration writes, and I-wire has no
+migration allocation. The registered additions therefore **reuse existing Kinds with closed-set
+discriminators** (orchestrator decision 2026-10-03):
+
+- The C/D deposit T10 park reasons and `payments.poll_evidence_contradicts_terminal_attempt` use
+  `payment.webhook_integrity` (p1, platform-owned, `requires_subject`, `in_tx_raisable_by_tenant`;
+  allowlist `provider_id`, `request_id`) with discriminator
+  `attempt:<attempt_id>:reason:<reason>`.
+- The K2 unlinked-adjustment detector (C-K2-1) uses `reconciliation.ledger_projection_drift` with
+  discriminator `stream:ledger_unlinked_manual_adjustment` (true drift keeps
+  `stream:ledger_vs_projection`, so the two never merge into one alert).
+
+The `<reason>` part is taken from a **closed set** at the call site (`payments/alerts.go`):
+`payments.DepositDisputeTerminalReasons()` (the `invalid_provider_reference:<detail>` family collapses
+to its prefix), plus the one audit action
+`poll_evidence_contradicts_terminal_attempt:<poll_amount_mismatch|poll_reference_mismatch|
+provider_reference_conflict|poll_amount_unconfirmed>`. Anything else becomes `unclassified`; a raw
+error string, a provider reference or provider text can never enter a discriminator. A unit test
+(`TestAlertReasonFor_ClosedSetOnly`) and a mutant pin this. The discriminator is part of the
+delivered payload (`Delivery.Discriminator`), so a paged P1 names the condition within the Kind.
+
+**Deferred option (to be registered as ALERT-KINDS-DEDICATED-1):** dedicated per-reason Kinds
+(`payment.deposit_park.<reason>` etc.), each with its own allowlist, severity and `raise_mode`, would
+need a migration seeding `alert_kinds` plus the Go `kindDefs` mirror and the parity test. It is
+**not built**; reusing `payment.webhook_integrity` costs only that the Kind name reads as "webhook"
+for parks that arrived through the sweeper or phase C.
+
+**Tenant-owned Kind matrix (registry condition, security I-core re-review).** The condition applies to
+"the migration that adds the first tenant-owned alert Kind". **No tenant-owned Kind is added**
+(every Kind used here is `scope='platform'` with `requires_subject=true`), so the
+`alerts_tenant_owned` positive-then-negative exclusion matrix is **vacuous for I-wire**. It is not
+faked; it stays a precondition of whichever change first adds a tenant-owned Kind.
+
+### 17.2 What the sites do (raise failure semantics, as built)
+
+- **In financial evidence and posting transactions** (T10, T13d, T15, the poll park and poll
+  contradiction audit, the multiple-success and index-backstop sites) the raise is
+  `alerting.RaiseGuarded`: a savepoint encloses only the alert INSERT; only that statement's own
+  error in class 22/23, 42501 or P0001 is swallowed and the savepoint rolled back; 25P02, 40001,
+  40P01, 55P03, 57014, 08, 53 and cancellation propagate. A swallowed raise registers on the
+  transaction's `Pending`; after the **nil commit** the owner calls `Pending.Flush`, which re-raises
+  detached in the originating scope (bounded retry, then the §6.3 `alerting.raise_failed`
+  fallback). The Error log and `alert_raise_failures_total{kind,phase}` (no tenant label, kind label
+  bounded to the registry) record every swallow. **A deterministic alert-statement failure (class 22/23,
+  42501, P0001) never rolls back a dispute, receipt or posting.** Transient, lock and cancellation
+  classes (25P02, 40001, 40P01, 55P03, 57014, 08, 53, context) are deliberately **not** swallowed: they
+  propagate and roll back the enclosing transaction exactly as any other statement of it would
+  (§7.6), and the evidence application is retried by redelivery or the sweeper. **Delivery is always
+  post-commit**; no sink call is ever inside a database transaction.
+- **Evidence-transaction owners open their transaction through `alerting.InTx` and Flush after
+  commit** (B-1): the webhook handler (`deposit_handlers.go`), the deposit-simulation handler,
+  `InitiateDepositAttempt` phase C (`deposit_v2.go`), `driveCreatedAttempt` phase C (`drive.go`), the
+  sweeper's status-evidence transaction (`sweeper.go`), and the reconciliation run transactions
+  (`scheduler.go`). `static_wiring_test.go` pins, over the whole
+  module: every `RaiseGuarded` is inside an `InTx` closure or one of five named helpers; every owner
+  contains both `InTx` and a `.Flush`; every `PaymentOrchestrator.ReceiveVerifiedCallback` is inside
+  an `InTx`; **no alerting call is inside a `WithTenantSnapshot` closure** (C-102-5); the kill switch
+  never calls `RaiseGuarded`.
+- **REPEATABLE READ sites** (casino_statement, payment_statement match): no alert statement inside
+  the snapshot; after the snapshot commits, `alerting.RaisePostCommit` opens a fresh READ COMMITTED
+  tenant transaction (LF test 6). The `WithTenantSnapshot` doc comment now states the rule
+  (`internal/db/tenant_snapshot.go`, C-102-5).
+- **Failure-path P1s** (the domain transaction rolled back): detached raise in a fresh transaction
+  **after the error response is written** (the webhook and casino handlers queue the raise and run it
+  from a deferred function; the simulation hook runs after `apierror.Write`): webhook `payload_mismatch`, `deposit_already_reversed`, `reversal_link`,
+  casino callback integrity, `reconciliation.run_failed`, the simulation payload mismatch.
+- **The kill-switch engage** raises post-commit only, in the engage's own scope (platform admin or
+  tenant principal), after the response is written, so no failure of any class can roll back an engage
+  (LF F10, LF test 10).
+- **Where `Flush` runs (stated exactly).** Handlers Flush from a deferred function, after the response.
+  The orchestration functions `InitiateDepositAttempt` phase C (`deposit_v2.go`) and
+  `driveCreatedAttempt` (`drive.go`) Flush after the commit but BEFORE they return to their caller (the
+  player-facing deposit-initiation response); the sweeper and scheduler Flush right after the commit.
+  The detached retry is bounded (3 attempts, 0/200/800 ms, 5 s context) and only does work when a raise
+  was swallowed, so the added latency exists only on that path.
+- **Reconciliation `run_failed` and shutdown (LF F3).** A run that failed only because the sweep's own
+  context was cancelled (graceful shutdown mid-sweep) raises nothing: `raiseRunFailed` returns when
+  `ctx.Err() != nil && errors.Is(err, context.Canceled)`. Any other failure still raises.
+
+### 17.3 Sites as built
+
+| ADR §8 row | Site | Kind (sev) | Key | Mode |
+|---|---|---|---|---|
+| 1 | `payments/orchestrator.go` `auditMultipleSuccessForIntent` (the plan's `:989-1024` is stale) | `payment.multiple_success_for_intent` (p1) | `intent:<id>` | in-tx guarded |
+| 2 | same function, `backstopFired` | `payment.deposit_intent_index_backstop_fired` (p1) | `intent:<id>` | in-tx guarded |
+| 3 | `reconciliation/scheduler.go` `sweepTenants` | `reconciliation.ledger_projection_drift` (p1) | `stream:ledger_vs_projection` (+ `stream:ledger_unlinked_manual_adjustment`) | in-tx guarded |
+| 4 | `runSportsbookStreamForTenant` | `reconciliation.sportsbook_settlement_mismatch` (p1) | `stream:sportsbook_settlement` | in-tx guarded |
+| 5 | `runCasinoStreamForTenant` | `reconciliation.casino_consistency_mismatch` (p1) | `stream:casino_consistency` | in-tx guarded |
+| 6 | `runCasinoStatementStreamForTenant` (RR) | `reconciliation.casino_statement_mismatch` (p1) | `stream:casino_statement` | post-commit |
+| 7 | `ReconcilePaymentStatementForTenant` (RR match) | `reconciliation.payment_statement_mismatch` (p1) | `stream:payment_statement:provider:<id>` | post-commit |
+| 8 | `httpserver/payments_kill_switch_handlers.go` engage | `payment.kill_switch_engaged` (p2) | `switch:<id>`; a platform **takeover** of a tenant-engaged switch uses `switch:<id>:takeover` | post-commit detached, after the response |
+| 9 | `httpserver/casino_handlers.go` | `casino.callback_integrity` (p1) | `provider:<id>:reason:<reason>` | detached |
+| 10 | `httpserver/deposit_handlers.go` | `payment.webhook_integrity` (p1) | `provider:<id>:reason:<reason>` | detached |
+| 11 | `httpserver/payment_deposit_simulation_handlers.go` | `simulation.payment.payload_mismatch` (p3, simulation) | `provider:<id>` | detached; **never delivered** |
+| 14 | `scheduler.go` (five failure branches) | `reconciliation.run_failed` (p1) | `stream:<stream>[:provider:<id>]` | detached |
+| reg. | `payments/drive.go` `parkDepositAttempt` (shared by phase C, cascade and the poll park) | `payment.webhook_integrity` (p1) | `attempt:<id>:reason:<closed reason>` | in-tx guarded |
+| reg. | `payments/receipt.go` T10/T13t/T15 sites | same | same | in-tx guarded |
+| reg. | `payments/poll_evidence.go` `auditPollTerminalContradiction` | same | `attempt:<id>:reason:poll_evidence_contradicts_terminal_attempt:<sub>` | in-tx guarded |
+
+Row 2 was blocked on INVDEP1-BACKSTOP-BRANCH-TEST-1, which is CLOSED (`e08d847`). Payout disputes
+(`ApplyDisputeFromNonTerminal` in `payout.go`) are F-pay's surface: `raiseDepositParkAlert` is a no-op
+for a payout attempt. `payments.callback_amount_asset_mismatch_terminal` (the terminal-state amount
+mismatch audit) is not raised as an alert (not in the registered set); recorded as a follow-up.
+
+### 17.4 §8 backstop per discriminator (§7.5, exactly)
+
+A "backstop" is a standing reconciliation check that re-surfaces the condition if its P1 is lost.
+The detached retry is mandatory for every Kind (§7.5) and applies to all rows below.
+
+- **D2 is merged into this branch (main `6cbea70`).** The standing `pay_captured_unposted`
+  reconciliation backstop (ADR 0095 §28.9 as extended by §35) classifies every deposit dispute reason
+  explicitly (`reconciliation/payment_statement.go`, pinned by
+  `payment_reason_classification_test.go` against `payments.DepositDisputeTerminalReasons()`). It
+  applies only for a provider with a wired payment-statement source (the MOCK source today). Per
+  discriminator reason, as D2 classifies it:
+  - **Bound** (the attempt normally holds the provider reference; reported in-run and standing,
+    clearing only on `capturedUnposted`'s two signals): `multiple_success_for_intent`,
+    `sync_amount_mismatch`, `poll_amount_mismatch`, `poll_reference_mismatch`,
+    `callback_amount_asset_mismatch`. At run time a bound class applies only if the attempt row really
+    holds a reference; otherwise it is treated as unbound.
+  - **Bound if referenced** (bound when the attempt holds a reference, otherwise unbound; never
+    excluded): `provider_reference_conflict`, `success_for_never_sent_attempt`.
+  - **Unbound parks are in-run only** (reported only when a succeeded statement line resolves to the
+    attempt by merchant reference; no standing coverage, which is
+    PAY-RECON-PARKED-CAPTURE-STANDING-1): `invalid_provider_reference`, and any bound or
+    bound-if-referenced reason whose attempt holds no reference. For these the detached retry plus the
+    `alerting.raise_failed` fallback are the only protection against a lost alert.
+  - **Excluded** (no captured-and-unposted exposure by construction):
+    `reversal_tombstone_precedes_success`. A lost alert for it has **no** reconciliation backstop.
+  - `payments.poll_evidence_contradicts_terminal_attempt` (declined attempt): PAY-POLL-DECLINED-ALERT-RECON-1
+    (b) is pinned by D2 (`TestD2_12_DeclinedAttempt_SucceededLine_IsStatusMismatch`): a declined attempt
+    plus a succeeded statement line gives `pay_status_mismatch`.
+- `payment.multiple_success_for_intent` and `…index_backstop_fired`: unchanged from §7.5
+  (conditional `pay_captured_unposted`; `pay_duplicate` does not apply).
+- `reconciliation.ledger_projection_drift`: the drift sweep re-detects each run, both for
+  `stream:ledger_vs_projection` and for `stream:ledger_unlinked_manual_adjustment` (the unlinked finding
+  is state-type: it is re-detected until the posting is linked or the governed cutover moves).
+- Reconciliation and failure-path rows: as §7.5.
+
+### 17.5 Dispatcher, dedup key and ack/resolve
+
+- `alerting.RunDispatcherLoopWithConfig(ctx, runner, LoopConfig)` (`dispatcher_loop.go`), in the
+  style of `reconciliation.RunSchedulerLoop`: one pass immediately, then one per tick (injectable
+  `Ticker`, T-1); a panic in one pass is recovered, logged and counted
+  (`alert_dispatcher_passes_total{result=ok|error|panic}`) and the loop continues; on shutdown no new
+  pass starts but a pass already running drains (its context is detached from the parent and bounded by
+  `DrainTimeout`). `RunDispatcherLoop(ctx, d, interval)` is the thin default. The claim, bounded
+  retry with backoff, dead-letter, stale-claim lease, severity-keyed route resolution, simulation
+  suppression and meta-Kind non-recursion are I-core's and are unchanged.
+- **Stable delivery dedup key (§16.3 item 3, mandatory before any real channel).**
+  `Delivery.DedupKey = "<alert_id>:<escalation_step>"` is identical across retry attempts of a step;
+  `IdempotencyKey` (`…:<attempt_no>`) stays per-attempt for logs. A real channel adapter MUST dedupe on
+  `DedupKey`. No schema change was needed. `Delivery.Discriminator` carries the condition.
+- **Ack and resolve** (`httpserver/alert_admin_handlers.go`): `POST /v1/admin/alerts/{alertID}/ack`
+  and `…/resolve` (resolve requires a closed-shape `reason_code`). Gated by `auth.PermAlertManage`
+  (platform admin only) plus an explicit platform-scope check; `acked_by`/`resolved_by` are forced by
+  the migration 0110 guard from the validated session; the audit row is written in the same
+  platform-admin transaction with the alert's `subject_tenant_id` (ADR 0104) so the subject tenant sees
+  the action read-only. There is no tenant ack endpoint. Route writes (`alert_routes`) are
+  deliberately not built (SR-7, HD-PRH2-4-OPS). **Row lock (security S-1):** the ack/resolve selects
+  the alert `FOR NO KEY UPDATE`, never `FOR UPDATE`, because every in-transaction Raise inserts an
+  `alert_occurrences` row whose foreign key takes `FOR KEY SHARE` on the alert row; `FOR UPDATE` would
+  make an ack block, and be blocked by, a business transaction raising on the same alert, and a context
+  expiry there (not swallowed) would roll the business transaction back because of an alert statement.
+  Pinned by `TestAlertAdmin_AckLockDoesNotBlockInTxRaise` (fails on `FOR UPDATE`). A failed ack/resolve
+  logs the SQLSTATE class only.
+
+### 17.6 `main.go` wiring: IMPLEMENTED after H (patch as applied)
+
+Applied after H merged, as one separate commit touching only `cmd/platform-api` (`main.go` plus
+`alert_dispatcher_wiring_test.go`, which pins LogSink-only / never MockSink / exactly one dispatcher).
+The blocks sit after H's delimited PRH-2 H start block and after H's shutdown-drain block, each
+delimited "PRH-2 I-wire". LogSink only: the MOCK sink is never wired in a binary. Now that it is
+wired, every alert is `unrouted` until a human configures routes. The code below is **equivalent to**
+the applied block, not a verbatim copy: the applied block carries the PRH-2 delimiters and longer comments,
+and `cmd/platform-api/main.go` is authoritative. Its structure is pinned by an AST test over every
+non-test `cmd/platform-api` file (`alert_dispatcher_wiring_test.go`): `RunDispatcherLoop` in a goroutine
+on `ctx`, `Wait` in a goroutine that closes the done channel, a `select` with a `time.After` bound that
+must exceed `alerting.DefaultLoopDrainTimeout` (10s), `LogSink` only, no `MockSink`, with negative
+controls. The patch, as applied:
+
+```go
+	// ADR 0102 6.1 / I-wire (ALERT-DELIVERY-1): the durable alert dispatcher.
+	// LogSink only (real channels are PROVIDER DEPENDENT, HD-PRH2-4-OPS). With
+	// no alert_routes row every alert stays 'unrouted'; nothing is invented.
+	alertDispatcher := alerting.NewDispatcher(pool, alerting.DefaultDispatcherConfig(), alerting.LogSink{Logger: logger})
+	var alertDispatcherWG sync.WaitGroup
+	alertDispatcherWG.Add(1)
+	go func() {
+		defer alertDispatcherWG.Done()
+		alerting.RunDispatcherLoop(ctx, alertDispatcher, alerting.DefaultLoopInterval)
+	}()
+```
+
+and, next to the other bounded shutdown waits:
+
+```go
+	alertDispatcherDone := make(chan struct{})
+	go func() {
+		alertDispatcherWG.Wait()
+		close(alertDispatcherDone)
+	}()
+	select {
+	case <-alertDispatcherDone:
+	case <-time.After(15 * time.Second): // DrainTimeout (10s) + record-outcome headroom
+		logger.Error("alert dispatcher did not stop within the shutdown timeout")
+	}
+```
+
+plus the import `"github.com/Diansalas/igaming-platform/internal/alerting"`. The interval is a technical
+default (`alerting.DefaultLoopInterval`, 15s); making it configurable belongs to the H/config owner.
+
+### 17.7 ALERT-DELIVERY-1 binding conditions
+
+| Condition | Status |
+|---|---|
+| IC-5: failure-path callers pass a detached, bounded context | MET: `RaiseDetached` detaches its own context at entry; every failure-path caller goes through it |
+| LF test 6: casino_statement / payment_statement via `RaisePostCommit`, `stream:` keys, run and mismatch rows commit under a persistent raise failure | MET (casino_statement under P0001 and 40P01 by `TestIWire_Recon_CasinoStatementP1_PostCommit_RunCommitsEvenWhenRaiseFailsPersistently`; payment_statement by its own test, `TestIWire_Recon_PaymentStatementP1_PostCommit_RunCommitsUnderPersistentRaiseFailure`. Both go through the shared post-commit helper but each is exercised separately) |
+| LF test 7: stable `stream:` discriminators, `run_id` an attribute | MET |
+| LF test 9: `-race -count=50`, two T10s on one intent plus a concurrent detached flush | MET by `TestIWire_LF9_ConcurrentT10ReceiptsWithDetachedFlush_NoDoublePostingOneAlert` (real `ApplyReceiptEvidence` path, 8 concurrent receipts, half contradicting and half valid, InTxOnly P0001 injection so swallowed raises are re-raised detached concurrently; no receipt errors; at most one posting; disputed => zero postings and exactly one alert, succeeded => one posting and no park alert). `-race -count=50` output, with the observed outcome split, is in the evidence file. The earlier `TestIWire_MultipleSuccess_ConcurrentRaisersDedupToOneAlert` only covers N concurrent raisers of one key (LF test 7/dedup), not LF test 9 |
+| LF test 10: kill-switch engage unaffected by persistent P0001 then 40P01 | MET |
+| **Precondition to CLOSE ALERT-DELIVERY-1 (not built now): a NEW K2 breach must page** | OPEN. The unlinked-adjustment alert has one stable key per tenant (`stream:ledger_unlinked_manual_adjustment`); a later unlinked posting while the alert is open or acked only adds an occurrence (occurrences carry no attributes), so it does not page again, and an ack-and-forget silences later breaches. Before ALERT-DELIVERY-1 can close, a new breach must page: e.g. a per-transaction discriminator `stream:ledger_unlinked_manual_adjustment:tx:<ledger_transaction_id>` with an ack that is terminal, or an equivalent. Until then the runbook directs operators to the latest run's open mismatch rows and states the caveat (LF F2) |
+| **Precondition: no false `run_failed` at shutdown** | MET (LF F3, §17.2) |
+| INVDEP1-BACKSTOP-BRANCH-TEST-1 before row 2 | MET (closed `e08d847`) |
+| B-1: `RaiseGuarded` only inside `InTx` | MET (static test, §17.2) |
+| Tenant-owned Kind exclusion matrix | VACUOUS: no tenant-owned Kind added (§17.1) |
+| C-K2-1: unlinked adjustment not presented as drift | MET: distinct discriminator; runbook states it is a governance breach |
+| 2026-10-03 condition: P1 visibility for the C/D park reasons | MET at the alert layer (durable P1 per reason); delivery still depends on the dispatcher and routes |
+| PAY-POLL-DECLINED-ALERT-RECON-1 (a) | MET (the audit action is a P1 discriminator); (b) is D2's |
+| LEDGER-MANUAL-ADJ-4EYES-1: unlinked-detector P1 routing | MET at the alert layer |
+| PAY-P1-MULTISUCCESS-ALERT-1 | alert layer MET; closes with ALERT-DELIVERY-1 except for real recipients (HD-PRH2-4-OPS) |
+| PAY-DEPOSIT-ESCALATION-1 | NOT in scope (needs T16 escalation in the sweeper); its P1 after the settlement window is a later raise site |
+| `MOCK-ADAPTER-PROD-1` | unchanged: `MockSink` is synthetic and is never wired by the main.go patch |
+
+**Preconditions before ANY real channel or recipient (HD-PRH2-4-OPS; security I-wire review):**
+1. Kill-switch `reason_code` reaches the p2 payload only as a closed token or `nonconforming`
+   (security S-3): **DONE** (`killSwitchAlertReasonAttr`); a real adapter must still render every
+   attribute as escaped data, never interpolate it into markup, a command or a template.
+2. The adapter dedupes on `Delivery.DedupKey` (`<alert_id>:<step>`), proven by a test against the real
+   adapter, never on `IdempotencyKey`.
+3. ALERT-RETENTION-1 (and a volume bound): occurrence and delivery rows are unbounded until then.
+4. Route authoring meets SR-7 (§6.2: four-eyes or an audited `alerting.route_changed`; superseding the
+   last effective p1 route refused) and gets its own security review; recipients are configured by a
+   human, never seeded.
+5. Channel credentials live in Vault/KMS (never in `alert_routes`, config or logs); the adapter never
+   logs message bodies.
+6. The dispatcher uses only the `alert_dispatcher` platform-service identity (`main.go` also sets
+   `sportsbook_catalogue_sync` for the catalogue sync, which is not part of this wiring). The §17.6 wiring is
+   applied (a separate commit touching only `cmd/platform-api`); security re-checks it, and any later
+   change to the wiring (in particular a real sink) goes through the same review.
+7. Route authoring and the dispatcher must not black-hole alerts (code review N-4). A route whose
+   `channel_kind` has no sink wired in the binary (today any kind other than `log`, including `mock`) is
+   skipped each pass with only an `alert_dispatcher_no_sink_for_channel` log line: the alert stays
+   undelivered with no delivery row, no metric and no meta-alert. Before real routes exist, route
+   authoring must refuse a `channel_kind` the deployment has no sink for, a `mock` route must be refused
+   outside tests, and a missing sink must be visible as a metric or alert rather than only a log line.
+8. ALERT-DELIVERY-1 should block production launch of money-moving flows that rely on these P1s (a
+   human launch decision).
+
+### 17.8 Known gaps and residuals (honest)
+
+- No delivery exists: the dispatcher now runs (LogSink only) but no route exists (HD-PRH2-4-OPS) and there is no real channel, so every alert is `unrouted`. ALERT-DELIVERY-1 stays OPEN.
+- Rows 12–13 not wired; payout disputes not alerted; the terminal-state amount-mismatch audit has no
+  alert.
+- The accepted §7.3a crash residual stands (a crash between an RR-site commit and its post-commit
+  raise loses that alert until the next run re-detects it).
+- A process crash between a business commit and `Pending.Flush` loses the retry of a swallowed
+  in-tx raise; the §17.4 backstops and the metric are the cover (and only the bound parks have one).
+- The raise is the last alert-table statement but not literally the last statement of the surrounding
+  transaction at the receipt and phase-C sites (the owner continues with deferred-receipt drains);
+  those later statements take only locks the transaction already holds on the same intent, so the §7.7
+  terminal-lock-level rule is unchanged in effect. Exercised by `-race -count=50` on the real-path LF
+  test 9 (§17.7); it is evidence of the absence of a deadlock or double posting in that shape, not a
+  proof for every interleaving.
+- The in-tx alert raise can still fail transiently (a lock or cancellation class propagates and rolls
+  back the evidence transaction, §17.2); the evidence is then retried by redelivery or the sweeper.
+- Ack and resolve refusals (403/404/409) are not audited (only successful transitions are); ack carries
+  no reason code (the ADR requires one only on resolve).
+- Ack-tx commit wait (LF L1): the post-response alert work (the queued raises and `Pending.Flush`) runs
+  before the handler returns, so a handler goroutine and its admission slot stay held through that work
+  (bounded by the 5s detached context and at most three attempts). For the webhook, casino and simulation-generic paths
+  nothing (status, headers or body) reaches the provider until the handler returns, because those
+  handlers do not flush early (§17.10); the response is then sent with a `Content-Length`. A degraded
+  alert path adds up to about 5s per detached raise to the latency the provider sees, which decides its
+  timeout and redelivery. Only the kill-switch engage and the simulation payload-mismatch branch send
+  status, headers and body bytes early (chunked, so only their terminating chunk waits). An ack or resolve transaction that waits on a lock the business transaction holds is also
+  bounded by the request context; that wait is not separately measured.
+- A new K2 breach does not page while the one open alert exists (§17.7 precondition, NOT built).
+- `ALERT-KINDS-DEDICATED-1` (§17.1) and `ALERT-RETENTION-1` (§14 item 6) remain.
+
+### 17.9 Review round 1 (security, ledger-finance, code review) and what changed
+
+Verdicts: security ACCEPT WITH CONDITIONS, ledger-finance ACCEPT WITH CONDITIONS, code review READY
+WITH CONDITIONS (`docs/plans/prh2-hardening-round/reviews/iwire-*.md`). Fixed on this branch:
+S-1 (`FOR NO KEY UPDATE` + regression test), S-2 (guarantee reworded, §17.2 and code comments), S-3
+(closed reason token), S-6 (each authorization layer pinned), S-8 (SQLSTATE class logged), S-4/CR-5
+(failure-path raises and the kill-switch raise now run after the response; `Flush` placement stated
+exactly), LF F1 (real LF test 9), LF F2 (runbook + the §17.7 precondition), LF F3 (no `run_failed` on
+shutdown cancellation), LF F4/F5 (discarded-result static guard; payment_statement persistent-failure
+test), CR-2 (dispatcher pass counter test), CR-3 (takeover discriminator), CR-6 (25P02 return value
+asserted), CR-7 (snapshot count, `Pending` receiver, reachability pin, negative controls), CR-8
+(doc corrections). **H merge (done, merge commit `f92cfa3`):** drive.go phase C and sweeper.go
+`processViaQueryStatus` keep H's detached, bounded contexts (LF F1) and open through
+`alerting.InTx(phaseCtx, ...)` / `alerting.InTx(applyCtx, ...)` with Flush after the nil-error check; H's
+S-8 guard `txClosureViolations` now treats `alerting.InTx` closures as transaction closures, with a
+negative control; this branch's static guards accept H's new code unchanged. The `main.go` wiring
+followed as its own commit (§17.6).
+
+### 17.10 Final round (code review C1/C2, QA O-1, LF L1/L2, docs)
+
+- **C1 as finally built (corrected after the final reviews, F1/F2).** The first version of this round
+  flushed the response from the deferred post-response blocks of the deposit webhook, casino callback and
+  deposit-simulation handlers. Review found that a panic unwinding through such a defer made `Flush` commit
+  an implicit `200 OK`, so the recover middleware's 500 was dropped as a superfluous `WriteHeader` while
+  the access log said 500: a payment or casino provider would treat a rolled-back callback as
+  acknowledged and never redeliver (a lost deposit or casino credit). **Those three deferred flushes are
+  removed.** `flushResponse` (`http.NewResponseController(w).Flush()`) now exists at exactly **two inline
+  sites**, each directly after a response was written and never in a defer:
+  1. kill-switch engage (`payments_kill_switch_handlers.go`), before the post-commit detached raise;
+  2. the deposit-simulation `ErrCallbackPayloadMismatch` branch (`writeDepositCallbackError`), before
+     the payload-mismatch hook.
+
+  What an early flush does and does not do: status line, headers and the body bytes written so far reach
+  the client early. The body has no `Content-Length` (chunked), so its terminating chunk (body EOF,
+  connection reuse, a buffering proxy) is still sent only when the handler returns, after the alert work;
+  the kill-switch test therefore reads status and headers only. For the webhook, casino and
+  simulation-generic paths the post-response alert work runs after the handler's response write but
+  **before the handler returns**; a degraded alert path adds up to about 5s (the detached bound) to those
+  handlers, with the admission slot held (the L1 residual). Guards: `TestFlushResponse_IsNeverCalledFromADefer`
+  (static, every handler file, with a negative control), `TestIWire_PaymentWebhookPanic_...` and
+  `TestIWire_CasinoCallbackPanic_...` (the real middleware chain: wire status 5xx, access log agrees, a
+  redelivery then succeeds), `TestIWire_ResponseFlush_KillSwitchEngage_...` (advisory-lock proof, no
+  wall-clock assertion), and `TestWriteDepositCallbackError_PayloadMismatchHookRunsAfterTheResponseIsFlushed`.
+  Mutants for each remaining site and the three re-applied deferred flushes are in the evidence file.
+- **`statusRecorder.Unwrap` and ADR 0097 A5 (security F-3).** `http.NewResponseController` behind the
+  access-log wrapper returned `ErrNotSupported`, so `armBodyReadDeadline` (A5, ADR 0097 5.4, ending in
+  `ResponseController.SetReadDeadline`) was a silent no-op in production: only the server `ReadTimeout`
+  (15s) applied. With `Unwrap` it is effective: on webhook routes `r.Context()` now cancels about
+  `BodyReadTimeout` (10s default) after the body read starts instead of 15s. This fails safe (the domain
+  transaction rolls back, the provider gets a 5xx and redelivers; the detached alert work is unaffected).
+  `BodyReadTimeout` must therefore comfortably exceed the worst-case webhook processing time (see the
+  production configuration checklist). Pinned by `TestStatusRecorder_ResponseControllerReachesTheConnectionThroughTheChain`
+  (a read deadline set through the real chain cuts off a missing body). Note: `Unwrap` also exposes
+  Hijack and the other controller methods in-process; no handler uses them, and a future use needs review.
+- **C2/QA O-1, the `main.go` wiring test** now pins the structure described in §17.6 (the dispatcher
+  goroutine on `ctx`, Wait-in-goroutine closing the done channel, the bounded `select`, 15s greater than
+  `DefaultLoopDrainTimeout`) over every non-test `cmd/platform-api` file, with a negative-control
+  fixture. `main.go` itself did not change in this round; `alerting.DefaultLoopDrainTimeout` was exported
+  so the test compares against the real value.
+- **Test gate note (QA R-2).** `TestResolutionIsolation_*` asserts wall-clock bounds and is not stable
+  under a contended lane (stage 10.3 review R-1). The usual lanes pass
+  `-skip 'TestStoreOutage_DoesNotPinPool|TestResolutionIsolation_'` for `./internal/httpserver` and
+  `./internal/payments`; that skip is a pre-existing, documented
+  exclusion and nothing from I-wire is skipped.

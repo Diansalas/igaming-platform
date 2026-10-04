@@ -15,6 +15,8 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"github.com/Diansalas/igaming-platform/internal/alerting"
+	"github.com/Diansalas/igaming-platform/internal/testsupport/alertinject"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -48,11 +50,19 @@ type rejEnvHTTP struct {
 	sessionID uuid.UUID
 }
 
-func newRejEnvHTTP(t *testing.T) *rejEnvHTTP {
+func newRejEnvHTTP(t *testing.T) *rejEnvHTTP { return newRejEnvHTTPWithLogger(t, nil) }
+
+// newRejEnvHTTPWithLogger is newRejEnvHTTP with an injected server logger (nil =
+// the default quiet test logger).
+func newRejEnvHTTPWithLogger(t *testing.T, logger *slog.Logger) *rejEnvHTTP {
 	t.Helper()
 	pool, issuer := testEnv(t)
 	orchestrator, mock := newMockCasinoOrchestrator()
-	e := &rejEnvHTTP{pool: pool, issuer: issuer, mock: mock, srv: newCasinoTestServer(t, pool, issuer, orchestrator)}
+	srv := newCasinoTestServer(t, pool, issuer, orchestrator)
+	if logger != nil {
+		srv = newCasinoTestServerWithLogger(t, pool, issuer, orchestrator, logger)
+	}
+	e := &rejEnvHTTP{pool: pool, issuer: issuer, mock: mock, srv: srv}
 	e.tenant = mustCreateTenant(t, pool)
 	mustEnableCasinoCapability(t, e.srv, pool, e.tenant)
 	e.brand = mustCreateBrand(t, pool, e.tenant)
@@ -318,6 +328,11 @@ func TestCasinoRejectionRecord_EveryClassViaWebhook(t *testing.T) {
 					t.Fatalf("delivery %d: expected exactly one row %+v, got %+v", i, c.want, got)
 				}
 			}
+			// ADR 0102 8 row 9 (failure-path P1, detached): an integrity rejection
+			// answered with an error status raises ONE open casino.callback_integrity
+			// alert per (provider, reason) - two deliveries are two occurrences of the
+			// same alert (stable key) - and a non-error disposition raises none.
+			assertCasinoIntegrityAlert(t, e, c.want.class, c.wantStatus)
 			after := noeffect.CaptureCasino(t, e.pool, []uuid.UUID{e.tenant.ID})
 			id := e.tenant.ID
 			if after.LedgerTransactionCount[id] != before.LedgerTransactionCount[id] || after.LedgerEntryCount[id] != before.LedgerEntryCount[id] ||
@@ -541,5 +556,53 @@ func TestCasinoReconciliationAdmin_AuthorizationIsolationAndShape(t *testing.T) 
 		if page.Total != 0 || len(page.Items) != 0 {
 			t.Fatalf("tenant B must see none of A's rows on %s, got %+v", p, page)
 		}
+	}
+}
+
+// casinoAlertReasonByRejectionClass maps a stored rejection class to the
+// integrity-alert reason casino_handlers.go raises for it (and nothing for the
+// classes that map to a plain conflict/ok response).
+var casinoAlertReasonByRejectionClass = map[string]string{
+	"bet_not_found":            "bet_not_found",
+	"payload_mismatch":         "payload_mismatch",
+	"round_ownership_conflict": "provider_round_ownership_conflict",
+	"original_tombstoned":      "original_tombstoned",
+	"ambiguous_round":          "win_origin",
+	"wallet_collision":         "win_origin",
+	"mixed_funding":            "win_origin",
+	"lock_already_released":    "win_origin",
+	"bonus_bet_not_locked":     "win_origin",
+}
+
+func assertCasinoIntegrityAlert(t *testing.T, e *rejEnvHTTP, class string, status int) {
+	t.Helper()
+	reason, mapped := casinoAlertReasonByRejectionClass[class]
+	var got []alertinject.Row
+	rows := alertinject.ForSubject(t, e.pool, e.tenant.ID)
+	if mapped && status >= 400 {
+		// the alert is raised by post-response work (ADR 0102 7.4); wait (bounded)
+		// for both deliveries' occurrences
+		rows = alertinject.WaitUpTo(t, e.pool, e.tenant.ID, 10*time.Second, func(rs []alertinject.Row) bool {
+			k := alertinject.Find(rs, string(alerting.KindCasinoCallbackIntegrity))
+			return len(k) == 1 && k[0].Occurrences >= 2
+		})
+	}
+	for _, r := range rows {
+		if r.Kind == string(alerting.KindCasinoCallbackIntegrity) {
+			got = append(got, r)
+		}
+	}
+	if !mapped || status < 400 {
+		if len(got) != 0 {
+			t.Fatalf("class %s (status %d) must raise no integrity alert, got %+v", class, status, got)
+		}
+		return
+	}
+	if len(got) != 1 {
+		t.Fatalf("class %s: want exactly one integrity alert, got %+v", class, got)
+	}
+	r := got[0]
+	if r.Discriminator != "provider:mock-casino:reason:"+reason || r.Severity != "p1" || r.Occurrences != 2 || r.Attributes["provider_id"] != "mock-casino" {
+		t.Fatalf("class %s: alert %+v, want discriminator provider:mock-casino:reason:%s, p1, 2 occurrences", class, r, reason)
 	}
 }

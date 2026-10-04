@@ -180,3 +180,12 @@ environment with `APP_ENV=production`:
      (`MOCK-ADAPTER-PROD-1`). Record this explicitly if a future
      environment sets `TEST_SUPPORT_ENDPOINTS_ENABLED=false` while still
      relying on the MOCK payments adapter for anything.
+
+## Webhook body-read deadline (ADR 0097 A5, `BodyReadTimeout`)
+
+`WebhookAdmission.BodyReadTimeout` (default 10s, not env-configurable today) is A5's per-request read
+deadline. Since PRH-2 I-wire (`statusRecorder.Unwrap`) it is actually enforced, and on webhook routes the
+same deadline cancels the request context that bounds the handler's database work. Any change to it must
+keep it comfortably above the worst-case webhook processing time (verification, domain transaction and
+the post-response alert work are measured separately, but a slow database counts); validation only
+requires it to be positive. If it fires, the callback rolls back and the provider redelivers.

@@ -8,6 +8,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/Diansalas/igaming-platform/internal/alerting"
 	"github.com/Diansalas/igaming-platform/internal/apierror"
 	"github.com/Diansalas/igaming-platform/internal/casino"
 	"github.com/Diansalas/igaming-platform/internal/db"
@@ -436,6 +437,26 @@ func newCasinoWebhookHandler(deps Deps) http.HandlerFunc {
 			})
 		}
 
+		// raiseIntegrity is ADR 0102 row 9 (failure-path P1, 7.4): the callback's
+		// domain transaction rolled back, so the alert is a detached raise in a
+		// fresh tenant transaction. The reason is a fixed literal at each call
+		// site; one open alert per (tenant, provider, reason).
+		var postResponseRaises []func() // run after the response is written (ADR 0102 7.4)
+		defer func() {
+			for _, raise := range postResponseRaises {
+				raise()
+			}
+		}()
+		raiseIntegrity := func(reason string) {
+			postResponseRaises = append(postResponseRaises, func() {
+				_ = alerting.RaiseDetached(r.Context(), alerting.NewTenantRunner(deps.DB, t.ID), alerting.Alert{
+					Kind: alerting.KindCasinoCallbackIntegrity, SubjectTenantID: t.ID,
+					Discriminator: "provider:" + providerID + ":reason:" + reason,
+					Attributes:    map[string]alerting.AttrValue{"provider_id": providerID, "request_id": requestID},
+				})
+			})
+		}
+
 		// Stage 10.3 W2b (CAS-RECON-1): a verified-but-rejected callback
 		// gets its durable rejection record here, in a separately
 		// committed transaction (the callback's own one has rolled back).
@@ -493,6 +514,7 @@ func newCasinoWebhookHandler(deps Deps) http.HandlerFunc {
 			// routine failure (financial-transaction-flows.md §6) -
 			// logged at elevated severity, never silently 200'd.
 			logger.Error("casino_webhook_integrity_alert_bet_not_found", "error", err, "provider_id", providerID, "tenant_id", t.ID.String())
+			raiseIntegrity("bet_not_found")
 			apierror.Write(w, requestID, apierror.CodeValidation, "no matching prior bet for this round")
 			return
 		}
@@ -508,6 +530,7 @@ func newCasinoWebhookHandler(deps Deps) http.HandlerFunc {
 			// id or any player identity, which would let a well-behaved-
 			// looking caller enumerate which round ids are already claimed.
 			logger.Error("casino_webhook_integrity_alert_provider_round_ownership_conflict", "error", err, "provider_id", providerID, "tenant_id", t.ID.String())
+			raiseIntegrity("provider_round_ownership_conflict")
 			apierror.Write(w, requestID, apierror.CodeConflict, "callback rejected")
 			return
 		}
@@ -520,6 +543,7 @@ func newCasinoWebhookHandler(deps Deps) http.HandlerFunc {
 			// violation or compromised signing key), and a 409 with a
 			// generic body that never echoes the reference or amounts.
 			logger.Error("casino_webhook_integrity_alert_payload_mismatch", "error", err, "provider_id", providerID, "tenant_id", t.ID.String())
+			raiseIntegrity("payload_mismatch")
 			apierror.Write(w, requestID, apierror.CodeConflict, "callback rejected")
 			return
 		}
@@ -534,6 +558,7 @@ func newCasinoWebhookHandler(deps Deps) http.HandlerFunc {
 			// never retryable, nothing posted - a 409 with a generic body,
 			// never echoing the reference.
 			logger.Error("casino_webhook_integrity_alert_original_tombstoned", "error", err, "provider_id", providerID, "tenant_id", t.ID.String())
+			raiseIntegrity("original_tombstoned")
 			apierror.Write(w, requestID, apierror.CodeConflict, "callback rejected")
 			return
 		}
@@ -554,6 +579,7 @@ func newCasinoWebhookHandler(deps Deps) http.HandlerFunc {
 			// branch is now reached only for a GENUINELY ambiguous
 			// bonus/mixed-origin round or a wallet collision.
 			logger.Error("casino_webhook_integrity_alert_win_origin", "error", err, "provider_id", providerID, "tenant_id", t.ID.String())
+			raiseIntegrity("win_origin")
 			apierror.Write(w, requestID, apierror.CodeConflict, "callback rejected")
 			return
 		}

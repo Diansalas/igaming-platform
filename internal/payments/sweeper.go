@@ -44,6 +44,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/Diansalas/igaming-platform/internal/alerting"
 	"github.com/Diansalas/igaming-platform/internal/audit"
 	"github.com/Diansalas/igaming-platform/internal/db"
 )
@@ -407,7 +408,9 @@ func (s *Sweeper) processViaQueryStatus(ctx context.Context, tenantID uuid.UUID,
 	// PRH-2 H (LF F1): apply the poll result on a detached, bounded context.
 	applyCtx, cancelApply := context.WithTimeout(context.WithoutCancel(ctx), depositPhaseCTimeout)
 	defer cancelApply()
-	return s.Pool.WithTenant(applyCtx, tenantID, func(actx context.Context, tx pgx.Tx) error {
+	// ADR 0102 I-wire (B-1): the status-evidence transaction owner opens its
+	// transaction through alerting.InTx (on applyCtx) and flushes after the commit.
+	pending, err := alerting.InTx(applyCtx, alerting.NewTenantRunner(s.Pool, tenantID), func(actx context.Context, tx pgx.Tx) error {
 		if _, err := tx.Exec(actx, `SELECT id FROM deposit_intents WHERE id = $1 FOR UPDATE`, *attempt.DepositIntentID); err != nil {
 			return err
 		}
@@ -445,6 +448,11 @@ func (s *Sweeper) processViaQueryStatus(ctx context.Context, tenantID uuid.UUID,
 		}
 		return s.applyStatusEvidence(actx, tx, intent, attempt, gr)
 	})
+	if err != nil {
+		return err
+	}
+	pending.Flush(ctx)
+	return nil
 }
 
 // applyStatusEvidence maps one QueryStatus GateResult onto the §4.4

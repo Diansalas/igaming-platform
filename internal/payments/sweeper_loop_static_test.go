@@ -62,7 +62,10 @@ func txClosureViolations(fset *token.FileSet, f *ast.File) []string {
 	var out []string
 	ast.Inspect(f, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
-		if !ok || !strings.HasPrefix(calleeName(call), "With") {
+		// A transaction closure is one handed to a pool With* method OR to alerting.InTx
+		// (ADR 0102 I-wire: the evidence-transaction owners open through InTx, which wraps
+		// the same With* call; without this the guard would be blind to sweeper.go).
+		if !ok || (!strings.HasPrefix(calleeName(call), "With") && calleeName(call) != "InTx") {
 			return true
 		}
 		for _, arg := range call.Args {
@@ -107,6 +110,12 @@ func TestSweeperProcess_NoItemWorkInsideATransactionClosure_S8(t *testing.T) {
 func x(s *Sweeper) { _ = s.Pool.WithTenant(nil, nil, func(a, b any) error { return s.processAttempt(a, nil, nil) }) }`)
 	if len(txClosureViolations(fset, f)) != 1 {
 		t.Fatal("negative control: the guard did not flag item work inside a WithTenant closure")
+	}
+	// Negative control for the InTx extension.
+	fset, f = parseSrc(t, "bad2.go", `package payments
+func x(s *Sweeper) { _, _ = alerting.InTx(nil, nil, func(a, b any) error { return s.processAttempt(a, nil, nil) }) }`)
+	if len(txClosureViolations(fset, f)) != 1 {
+		t.Fatal("negative control: the guard did not flag item work inside an alerting.InTx closure")
 	}
 }
 

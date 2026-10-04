@@ -17,6 +17,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/Diansalas/igaming-platform/internal/alerting"
 	"github.com/Diansalas/igaming-platform/internal/audit"
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/providerref"
@@ -212,7 +213,11 @@ func (o *Orchestrator) driveCreatedAttempt(
 	phaseCtx, cancelPhaseC := context.WithTimeout(context.WithoutCancel(ctx), depositPhaseCTimeout)
 	defer cancelPhaseC()
 	var cascadeChild *PaymentAttempt
-	err = pool.WithTenant(phaseCtx, attempt.TenantID, func(actx context.Context, tx pgx.Tx) error {
+	// ADR 0102 I-wire (B-1): phase C is an evidence transaction owner - it
+	// opens its transaction through alerting.InTx (on H's detached, bounded
+	// phaseCtx, LF F1) so a swallowed in-tx raise gets its mandatory post-commit
+	// detached retry (Flush, below).
+	pending, err := alerting.InTx(phaseCtx, alerting.NewTenantRunner(pool, attempt.TenantID), func(actx context.Context, tx pgx.Tx) error {
 		if _, err := tx.Exec(actx, `SELECT id FROM deposit_intents WHERE id = $1 FOR UPDATE`, intent.ID); err != nil {
 			return fmt.Errorf("payments: lock deposit intent: %w", err)
 		}
@@ -240,6 +245,7 @@ func (o *Orchestrator) driveCreatedAttempt(
 	if err != nil {
 		return intent, attempt, nil, "", "", err
 	}
+	pending.Flush(ctx) // post-commit only; a nil Pending (error path) is a no-op
 	final, err := getAttemptInTenant(ctx, pool, attempt.TenantID, attempt.ID)
 	if err != nil {
 		return intent, attempt, nil, "", "", err
@@ -399,6 +405,15 @@ func parkDepositAttempt(
 	}
 	updated, err := GetDepositIntentByID(ctx, tx, intent.ID)
 	if err != nil {
+		return intent, err
+	}
+	// ADR 0102 I-wire: durable P1 for the park reason (sync_amount_mismatch,
+	// provider_reference_conflict, invalid_provider_reference, poll_amount_
+	// mismatch, poll_reference_mismatch, tombstone-precedes-success). Last
+	// statement; savepoint-guarded, so a deterministic alert failure cannot
+	// abort the T10 (transient/lock/cancel classes propagate like any other
+	// statement and the evidence is retried).
+	if err := raiseDepositParkAlert(ctx, tx, attempt, providerID, reason); err != nil {
 		return intent, err
 	}
 	return updated, nil

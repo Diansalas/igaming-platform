@@ -50,6 +50,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/Diansalas/igaming-platform/internal/alerting"
 	"github.com/Diansalas/igaming-platform/internal/audit"
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/rg"
@@ -305,7 +306,8 @@ func (o *Orchestrator) InitiateDepositAttempt(
 
 	// --- Phase C: apply the evidence, CAS, in a fresh tx ---------------
 	var cascadeChild *PaymentAttempt
-	err = pool.WithTenant(ctx, attempt.TenantID, func(actx context.Context, tx pgx.Tx) error {
+	// ADR 0102 I-wire (B-1): evidence transaction owner - alerting.InTx, Flush after commit.
+	pending, err := alerting.InTx(ctx, alerting.NewTenantRunner(pool, attempt.TenantID), func(actx context.Context, tx pgx.Tx) error {
 		// Lock parent before attempt (ADR 0095 §14).
 		if _, err := tx.Exec(actx, `SELECT id FROM deposit_intents WHERE id = $1 FOR UPDATE`, intent.ID); err != nil {
 			return fmt.Errorf("payments: lock deposit intent: %w", err)
@@ -328,6 +330,7 @@ func (o *Orchestrator) InitiateDepositAttempt(
 	if err != nil {
 		return InitiateDepositAttemptResult{}, err
 	}
+	pending.Flush(ctx)
 
 	updatedAttempt, err := getAttemptInTenant(ctx, pool, attempt.TenantID, attempt.ID)
 	if err != nil {

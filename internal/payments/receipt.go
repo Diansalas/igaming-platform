@@ -753,7 +753,8 @@ func applyResolvedReceiptEvidence(ctx context.Context, tx pgx.Tx, o *Orchestrato
 		case AttemptCreated, AttemptRejected:
 			// T15: success evidence for an attempt that was never sent to
 			// (or was rejected before reaching) a provider.
-			return true, ResolutionAnomalyOther, ApplyDisputeFromNeverSent(ctx, tx, attempt.ID, EvidenceCallback, "success_for_never_sent_attempt")
+			return true, ResolutionAnomalyOther, alertAfterDispute(ctx, tx, attempt, TerminalReasonSuccessForNeverSentAttempt,
+				ApplyDisputeFromNeverSent(ctx, tx, attempt.ID, EvidenceCallback, TerminalReasonSuccessForNeverSentAttempt))
 		case AttemptDisputed:
 			return false, ResolutionAnomalyOther, nil // already terminal-disputed: no-op
 		case AttemptSucceeded:
@@ -794,7 +795,8 @@ func applyResolvedReceiptEvidence(ctx context.Context, tx pgx.Tx, o *Orchestrato
 				return false, "", err
 			}
 			if tombstoned {
-				return true, ResolutionAnomalyOther, ApplyTombstonePrecedesSuccess(ctx, tx, attempt.ID, EvidenceCallback)
+				return true, ResolutionAnomalyOther, alertAfterDispute(ctx, tx, attempt, TerminalReasonTombstonePrecedesSuccess,
+					ApplyTombstonePrecedesSuccess(ctx, tx, attempt.ID, EvidenceCallback))
 			}
 			disputed, err := applyDepositSuccessAndPost(ctx, tx, o, attempt, ev)
 			if err != nil {
@@ -820,7 +822,8 @@ func applyResolvedReceiptEvidence(ctx context.Context, tx pgx.Tx, o *Orchestrato
 			return true, ResolutionApplied, nil
 		case AttemptSubmitting, AttemptPending, AttemptAmbiguous:
 			if mismatched {
-				return true, ResolutionAnomalyOther, ApplyDisputeFromNonTerminal(ctx, tx, attempt.ID, EvidenceCallback, "callback_amount_asset_mismatch")
+				return true, ResolutionAnomalyOther, alertAfterDispute(ctx, tx, attempt, TerminalReasonCallbackAmountAssetMismatch,
+					ApplyDisputeFromNonTerminal(ctx, tx, attempt.ID, EvidenceCallback, TerminalReasonCallbackAmountAssetMismatch))
 			}
 			tombstoned, err := tombstoneExists(ctx, tx, attempt.TenantID, *attempt.ProviderID, ev.ProviderReference)
 			if err != nil {
@@ -830,7 +833,8 @@ func applyResolvedReceiptEvidence(ctx context.Context, tx pgx.Tx, o *Orchestrato
 				// Only a deposit's declined->disputed pair exists for a
 				// tombstone (T13t); for a non-declined attempt a
 				// tombstone collision is a plain anomaly dispute.
-				return true, ResolutionAnomalyOther, ApplyDisputeFromNonTerminal(ctx, tx, attempt.ID, EvidenceCallback, "reversal_tombstone_precedes_success")
+				return true, ResolutionAnomalyOther, alertAfterDispute(ctx, tx, attempt, TerminalReasonTombstonePrecedesSuccess,
+					ApplyDisputeFromNonTerminal(ctx, tx, attempt.ID, EvidenceCallback, TerminalReasonTombstonePrecedesSuccess))
 			}
 			if attempt.Operation == AttemptOperationDeposit {
 				disputed, err := applyDepositSuccessAndPost(ctx, tx, o, attempt, ev)

@@ -8,6 +8,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/Diansalas/igaming-platform/internal/alerting"
 	"github.com/Diansalas/igaming-platform/internal/apierror"
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/identity"
@@ -417,11 +418,38 @@ func newPaymentWebhookHandler(deps Deps) http.HandlerFunc {
 				}
 			}()
 		}
+		// ADR 0102 7.3 (B-1): the evidence transaction opens through
+		// alerting.InTx; a swallowed in-tx raise gets its mandatory detached
+		// retry via Flush, deferred here so it runs when the handler returns:
+		// after the response was written into the (unflushed) response, before the
+		// handler returns and before the admission hold's earlier-registered release.
+		// No response flush here: a deferred flush would turn a panic into an
+		// implicit 200.
+		var pendingAlerts *alerting.Pending
+		var postResponseRaises []func() // failure-path P1s, run after the response is written
+		defer func() {
+			pendingAlerts.Flush(r.Context())
+			for _, raise := range postResponseRaises {
+				raise()
+			}
+		}()
 		if err == nil {
-			err = deps.DB.WithTenant(r.Context(), t.ID, func(ctx context.Context, tx pgx.Tx) error {
+			pendingAlerts, err = alerting.InTx(r.Context(), alerting.NewTenantRunner(deps.DB, t.ID), func(ctx context.Context, tx pgx.Tx) error {
 				var err error
 				result, err = deps.PaymentOrchestrator.ReceiveVerifiedCallback(ctx, tx, t.ID, providerID, verified)
 				return err
+			})
+		}
+		// raiseIntegrity is the failure-path P1 (ADR 0102 7.4, row 10): the
+		// domain transaction rolled back, so the alert is a detached raise in a
+		// fresh transaction. The reason is a fixed literal at each call site.
+		raiseIntegrity := func(reason string) {
+			postResponseRaises = append(postResponseRaises, func() {
+				_ = alerting.RaiseDetached(r.Context(), alerting.NewTenantRunner(deps.DB, t.ID), alerting.Alert{
+					Kind: alerting.KindPaymentWebhookIntegrity, SubjectTenantID: t.ID,
+					Discriminator: "provider:" + providerID + ":reason:" + reason,
+					Attributes:    map[string]alerting.AttrValue{"provider_id": providerID, "request_id": requestID},
+				})
 			})
 		}
 
@@ -451,6 +479,7 @@ func newPaymentWebhookHandler(deps Deps) http.HandlerFunc {
 			// its own audit trail and is not part of the pre-verification
 			// auth-failure contract above.
 			logger.Error("payment_webhook_integrity_alert_payload_mismatch", "error", err, "provider_id", providerID, "tenant_id", t.ID.String())
+			raiseIntegrity("payload_mismatch")
 			code, msg := mapReceiveCallbackError(err, callbackRoutePublicWebhook)
 			apierror.Write(w, requestID, code, msg)
 			return
@@ -466,6 +495,7 @@ func newPaymentWebhookHandler(deps Deps) http.HandlerFunc {
 			// but this log line itself carries no financial detail.
 			logger.Error("payment_webhook_integrity_alert_deposit_already_reversed",
 				"provider_id", providerID, "tenant_id", t.ID.String(), "request_id", requestID)
+			raiseIntegrity("deposit_already_reversed")
 			// The denial audit is written in a SEPARATE, freshly-opened
 			// tenant-scoped transaction: WithTenant above already rolled the
 			// failed one back because ReceiveCallback returned a non-nil
@@ -518,6 +548,7 @@ func newPaymentWebhookHandler(deps Deps) http.HandlerFunc {
 			// transaction ids, which are already-verified, tenant-scoped
 			// identifiers (not payload content), so it is safe to log here.
 			logger.Error("payment_webhook_integrity_alert_reversal_link", "error", err, "provider_id", providerID, "tenant_id", t.ID.String(), "request_id", requestID)
+			raiseIntegrity("reversal_link")
 			apierror.Write(w, requestID, apierror.CodeInternal, "failed to process callback")
 			return
 		}

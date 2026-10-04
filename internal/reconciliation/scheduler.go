@@ -14,6 +14,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/Diansalas/igaming-platform/internal/alerting"
 	"github.com/Diansalas/igaming-platform/internal/audit"
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/reconciliation/statement"
@@ -282,8 +283,8 @@ func sweepTenants(ctx context.Context, pool *db.Pool, logger *slog.Logger, tenan
 	for _, tenantID := range tenantIDs {
 		outcome := SweepOutcome{TenantID: tenantID}
 
-		txErr := pool.WithTenant(ctx, tenantID, func(ctx context.Context, tx pgx.Tx) error {
-			run, _, acquired, err := TryRunLedgerVsProjectionForTenant(ctx, tx, tenantID, periodStart, periodEnd)
+		pending, txErr := alerting.InTx(ctx, alerting.NewTenantRunner(pool, tenantID), func(ctx context.Context, tx pgx.Tx) error {
+			run, ledgerMismatches, acquired, err := TryRunLedgerVsProjectionForTenant(ctx, tx, tenantID, periodStart, periodEnd)
 			outcome.Run, outcome.Skipped = run, !acquired
 			if err != nil {
 				return err
@@ -297,16 +298,22 @@ func sweepTenants(ctx context.Context, pool *db.Pool, logger *slog.Logger, tenan
 			if !acquired {
 				status = "skipped"
 			}
-			return audit.Record(ctx, tx, audit.Entry{
+			if err := audit.Record(ctx, tx, audit.Entry{
 				TenantID: tenantID, ActorType: audit.ActorSystem, Action: "reconciliation.sweep_run",
 				TargetType: "reconciliation_run", TargetID: run.ID.String(), Outcome: audit.OutcomeSuccess,
 				Metadata: map[string]any{
 					"stream": string(StreamLedgerVsProjection), "skipped_lock_contention": !acquired,
 					"status": status,
 				},
-			})
+			}); err != nil {
+				return err
+			}
+			// ADR 0102 row 3 (+ K2 unlinked adjustments, C-K2-1): durable P1,
+			// savepoint-guarded, after the audit row, inside this run tx.
+			return raiseLedgerRunAlerts(ctx, tx, tenantID, run, acquired, ledgerMismatches)
 		})
 		outcome.Err = txErr
+		pending.Flush(ctx) // post-commit detached retry of any swallowed raise; nil-safe
 
 		switch {
 		case txErr != nil:
@@ -329,6 +336,7 @@ func sweepTenants(ctx context.Context, pool *db.Pool, logger *slog.Logger, tenan
 			}); auditErr != nil && logger != nil {
 				logger.Error("reconciliation sweep: failed to audit tenant failure", "tenant_id", tenantID, "error", auditErr)
 			}
+			raiseRunFailed(ctx, pool, tenantID, string(StreamLedgerVsProjection), "", "run", txErr) // row 14
 		case outcome.Run.Status == StatusMismatchesFound:
 			// CLAUDE.md: "Any non-zero drift is a P1 incident." Logged at
 			// Error level (specialist review: ledger-finance), not Info -
@@ -380,8 +388,8 @@ func runSportsbookStreamForTenant(ctx context.Context, pool *db.Pool, logger *sl
 		label = source.Label()
 	}
 
-	txErr := pool.WithTenant(ctx, tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		run, _, acquired, err := TryRunSportsbookSettlementForTenant(ctx, tx, tenantID, periodStart, periodEnd, source)
+	pending, txErr := alerting.InTx(ctx, alerting.NewTenantRunner(pool, tenantID), func(ctx context.Context, tx pgx.Tx) error {
+		run, sbMismatches, acquired, err := TryRunSportsbookSettlementForTenant(ctx, tx, tenantID, periodStart, periodEnd, source)
 		out.Run, out.Skipped = run, !acquired
 		if err != nil {
 			return err
@@ -390,16 +398,22 @@ func runSportsbookStreamForTenant(ctx context.Context, pool *db.Pool, logger *sl
 		if !acquired {
 			status = "skipped"
 		}
-		return audit.Record(ctx, tx, audit.Entry{
+		if err := audit.Record(ctx, tx, audit.Entry{
 			TenantID: tenantID, ActorType: audit.ActorSystem, Action: "reconciliation.sweep_run",
 			TargetType: "reconciliation_run", TargetID: run.ID.String(), Outcome: audit.OutcomeSuccess,
 			Metadata: map[string]any{
 				"stream": stream, "skipped_lock_contention": !acquired,
 				"status": status, "statement_source": label,
 			},
-		})
+		}); err != nil {
+			return err
+		}
+		// ADR 0102 row 4.
+		return raiseInTxMismatch(ctx, tx, alerting.KindReconciliationSportsbookSettlement, tenantID, "stream:"+stream,
+			run, acquired, len(sbMismatches), map[string]alerting.AttrValue{"statement_source": label})
 	})
 	out.Err = txErr
+	pending.Flush(ctx)
 
 	switch {
 	case txErr != nil:
@@ -415,6 +429,7 @@ func runSportsbookStreamForTenant(ctx context.Context, pool *db.Pool, logger *sl
 		}); auditErr != nil && logger != nil {
 			logger.Error("reconciliation sweep: failed to audit tenant failure", "tenant_id", tenantID, "stream", stream, "error", auditErr)
 		}
+		raiseRunFailed(ctx, pool, tenantID, stream, "", "run", txErr) // row 14
 	case out.Run.Status == StatusMismatchesFound:
 		if logger != nil {
 			logger.Error("reconciliation sweep: MISMATCH FOUND", "tenant_id", tenantID, "stream", stream,
@@ -439,7 +454,7 @@ func runCasinoStreamForTenant(ctx context.Context, pool *db.Pool, logger *slog.L
 	stream := string(StreamCasinoConsistency)
 	var mismatchCount int
 
-	txErr := pool.WithTenant(ctx, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+	pending, txErr := alerting.InTx(ctx, alerting.NewTenantRunner(pool, tenantID), func(ctx context.Context, tx pgx.Tx) error {
 		run, mismatches, metrics, acquired, err := TryRunCasinoConsistencyForTenant(ctx, tx, tenantID, periodStart, periodEnd)
 		out.Run, out.Skipped = run, !acquired
 		mismatchCount = len(mismatches)
@@ -459,19 +474,26 @@ func runCasinoStreamForTenant(ctx context.Context, pool *db.Pool, logger *slog.L
 				metadata[k] = v
 			}
 		}
-		return audit.Record(ctx, tx, audit.Entry{
+		if err := audit.Record(ctx, tx, audit.Entry{
 			TenantID: tenantID, ActorType: audit.ActorSystem, Action: "reconciliation.sweep_run",
 			TargetType: "reconciliation_run", TargetID: run.ID.String(), Outcome: audit.OutcomeSuccess,
 			Metadata: metadata,
-		})
+		}); err != nil {
+			return err
+		}
+		// ADR 0102 row 5.
+		return raiseInTxMismatch(ctx, tx, alerting.KindReconciliationCasinoConsistency, tenantID, "stream:"+stream,
+			run, acquired, len(mismatches), nil)
 	})
 	out.Err = txErr
+	pending.Flush(ctx)
 
 	switch {
 	case txErr != nil:
 		if logger != nil {
 			logger.Error("reconciliation sweep: tenant run failed", "tenant_id", tenantID, "stream", stream, "error", txErr)
 		}
+		defer raiseRunFailed(ctx, pool, tenantID, stream, "", "run", txErr) // row 14, after the failure audit below
 		if auditErr := pool.WithTenant(ctx, tenantID, func(ctx context.Context, tx pgx.Tx) error {
 			return audit.Record(ctx, tx, audit.Entry{
 				TenantID: tenantID, ActorType: audit.ActorSystem, Action: "reconciliation.sweep_run_failed",
@@ -547,6 +569,7 @@ func runCasinoStatementStreamForTenant(ctx context.Context, pool *db.Pool, logge
 			logger.Error("reconciliation sweep: tenant run failed", "tenant_id", tenantID, "stream", stream,
 				"error", txErr, "statement_source", label)
 		}
+		defer raiseRunFailed(ctx, pool, tenantID, stream, "", "run", txErr) // row 14, after the failure audit below
 		if auditErr := pool.WithTenant(ctx, tenantID, func(ctx context.Context, tx pgx.Tx) error {
 			return audit.Record(ctx, tx, audit.Entry{
 				TenantID: tenantID, ActorType: audit.ActorSystem, Action: "reconciliation.sweep_run_failed",
@@ -562,6 +585,11 @@ func runCasinoStatementStreamForTenant(ctx context.Context, pool *db.Pool, logge
 			logger.Error("reconciliation sweep: MISMATCH FOUND", "tenant_id", tenantID, "stream", stream,
 				"run_id", out.Run.ID, "mismatches", mismatchCount, "statement_source", label)
 		}
+		// ADR 0102 row 6 (REPEATABLE READ site): post-commit detached only.
+		// The run and its mismatch rows are already committed; a persistent
+		// raise failure cannot change that (LF test 6).
+		raisePostCommitMismatch(ctx, pool, alerting.KindReconciliationCasinoStatement, tenantID, "stream:"+stream,
+			out.Run, mismatchCount, map[string]alerting.AttrValue{"statement_source": label})
 	case logger != nil:
 		logger.Info("reconciliation sweep: tenant run complete", "tenant_id", tenantID, "stream", stream,
 			"skipped_lock_contention", out.Skipped, "status", string(out.Run.Status), "statement_source", label)
@@ -657,6 +685,7 @@ func ReconcilePaymentStatementForTenant(ctx context.Context, pool *db.Pool, logg
 		}); auditErr != nil && logger != nil {
 			logger.Error("reconciliation sweep: failed to audit tenant failure", "tenant_id", tenantID, "stream", stream, "error", auditErr)
 		}
+		raiseRunFailed(ctx, pool, tenantID, stream, provider, phase, err) // ADR 0102 row 14
 		return out
 	}
 
@@ -719,6 +748,10 @@ func ReconcilePaymentStatementForTenant(ctx context.Context, pool *db.Pool, logg
 			logger.Error("reconciliation sweep: MISMATCH FOUND", "tenant_id", tenantID, "stream", stream,
 				"run_id", out.Run.ID, "mismatches", mismatchCount, "statement_source", label, "provider_id", provider)
 		}
+		// ADR 0102 row 7 (REPEATABLE READ site): post-commit detached only.
+		raisePostCommitMismatch(ctx, pool, alerting.KindReconciliationPaymentStatement, tenantID,
+			"stream:"+stream+":provider:"+provider, out.Run, mismatchCount,
+			map[string]alerting.AttrValue{"statement_source": label, "import_id": importID.String()})
 	case logger != nil:
 		logger.Info("reconciliation sweep: tenant run complete", "tenant_id", tenantID, "stream", stream,
 			"skipped_lock_contention", out.Skipped, "status", string(out.Run.Status), "statement_source", label, "provider_id", provider)
