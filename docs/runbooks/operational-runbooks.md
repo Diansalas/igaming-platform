@@ -303,3 +303,40 @@ the unlinked transaction. Never edit or delete ledger rows.
 **What this is not:** software four-eyes is not a legal or licensing
 approval. Real threshold values and the HD-PRH2-8 below-threshold question
 are human decisions.
+
+## 12. Payments sweeper stalled, stuck or disabled (ADR 0095 §37, PRH-2 H)
+
+The payments sweeper (`payments.RunSweeperLoop`, started by `platform-api`) polls pending deposits and
+dispatches, resends and resolves payouts. If it stops, nothing else does that work: pending deposits stay
+pending and in-flight payouts stay `submitting`/`pending`/`ambiguous`. **Nothing pages anyone**
+(ALERT-DELIVERY-1 is OPEN): a human must be watching the signals below.
+
+**Signals.** Gauge `payments_sweeper_last_pass_unix_seconds` stops advancing (stalled if older than ~3x
+`PAYMENTS_SWEEP_INTERVAL_SECONDS`); counter `payments_sweeper_passes_total` flat; log lines `payments sweeper:
+refusing to start`, `... failed to list tenants`, `... claim batch failed`, `... item failed`, `... recovered
+from panic`; `payments_sweeper_items_total{result="error"|"panic"}` and
+`payments_sweeper_tenant_failures_total` rising; `payments_sweeper_resolution_only_blocks_total` rising means
+dispatch is being withheld for a non-active tenant (expected, see step 5).
+
+1. **Not running at all.** Look for `payments sweeper: refusing to start` (a wiring defect: missing payout KYC
+   gate or dependency; `platform-api` also refuses to start on `payments sweeper wiring`). Fix the deployment;
+   do not work around it by hand-driving attempts.
+2. **Running but every item errors.** Read the item error. A DB outage: see §7. Provider calls refused with
+   `no outbound credential resolver configured` / credential errors: the per-tenant credential is missing or
+   revoked; every call fails closed as NotSent and nothing resolves until it is fixed.
+3. **Panics.** A recovered panic leaves that attempt leased; it reappears when its lease expires. A repeating
+   panic on one tenant is isolated (other tenants still sweep) but needs an engineering fix, not a restart loop.
+4. **Do not** force an attempt to a terminal state or edit `payment_attempts` rows to unstick it. Recovery is
+   the sweeper itself (lease expiry, then `QueryStatus`); if a human decision is needed use the governed
+   force-resolution path (ADR 0101, K3, not yet implemented) or the reconciliation findings (ADR 0095 §12).
+5. **A suspended/closed tenant's `created` deposit or payout is not being sent.** This is by design
+   (resolution-only, §37.3): its pending attempts still resolve by poll; new dispatch resumes when the tenant is
+   reactivated. A tenant whose switch you want paused for new money should use the kill switch (§5), not suspension.
+6. **Disabling deliberately.** There is no off switch for the loop; the control that stops NEW money moving is
+   the kill switch (INV-IO-15, ADR 0095 §10): it withholds every new dispatch while polls continue.
+7. **Escalated payouts** (`payments.payout_resend_escalated`, `payments.payout_reclaim_denied_by_kyc` audit
+   rows; `escalated_at` set): the sweeper never resends a non-idempotent or exhausted attempt. Resolve through
+   the staff payout-resolution path (poll/`/resolve`), M3 for a never-sent attempt, or the force-resolution path
+   once it exists. Never resend by hand.
+
+`PROVIDER DEPENDENT`: all of this is exercised against MOCK adapters only.

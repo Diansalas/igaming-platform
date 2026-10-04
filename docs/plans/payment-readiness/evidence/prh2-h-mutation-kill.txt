@@ -1,0 +1,83 @@
+PRH-2 H (CP-W1 sweeper process) - mutation-kill evidence
+Base: main 6cbea70. Branch prh2-h-sweeper-process. Run on a PRIVATE database (h_priv), -race -tags integration -count=1 -p 1.
+Runner: scratchpad h_mut.py (applies one textual mutant, builds, runs the H suite, restores the file). 25 mutants, final run on the committed tests.
+H suite regex: TestSweeperLoop_|TestSweeperProcess_|TestSweeperLoopFiles_|TestSweeperAdvisoryLock|TestSweeperValidateForLoop (payments); cmd/platform-api wiring tests for the two H-WIRE mutants.
+
+RESULT: 24 KILLED, 1 SURVIVED. The one survivor (H-ADV) is the EXPECTED, REQUIRED outcome (LF-8), classified below. No unclassified survivors.
+
+MUTANT             RESULT    FAILING TESTS (the kill) / description
+H-ADV              SURVIVED  advisory lock removed (LF-8: correctness suite must still PASS)
+                             -> (none)
+H-ADV-ALL          KILLED    advisory lock removed (full H suite: only the hint-specific test may fail)
+                             -> TestSweeperAdvisoryLock_OnlyInsideClaimBatch, TestSweeperLoop_AdvisoryHint_OnlyDeduplicatesPhaseA
+H-TOKEN            KILLED    claim-token CAS removed from MarkNotSent
+                             -> TestSweeperLoop_StaleClaimantCannotRevertFreshClaim_TokenCAS
+H-MUT-ALL          KILLED    tenantResolutionOnly never reports non-active (in-tx status read skipped)
+                             -> TestSweeperLoop_NonActiveTenant_CreatedDepositNotDispatched_ThenResumesOnReactivation, TestSweeperLoop_NonActiveTenant_NoCascadeChild, TestSweeperLoop_NonActiveTenant_PayoutResolutionOnly, TestSweeperLoop_TenantIsolation_SuspensionNeitherAffectsNorExposesAnother, TestSweeperLoop_TenantResolutionOnly_StatusTable_MissingRowFailsClosed
+H-MUT-DEPDISPATCH  KILLED    created-deposit site skips the status read
+                             -> TestSweeperLoop_NonActiveTenant_CreatedDepositNotDispatched_ThenResumesOnReactivation, TestSweeperLoop_TenantIsolation_SuspensionNeitherAffectsNorExposesAnother
+H-MUT-CASCADE      KILLED    cascade-child site skips the status read
+                             -> TestSweeperLoop_NonActiveTenant_NoCascadeChild, TestSweeperProcess_ListsAllTenants_AndDispatchSitesReadStatusInTx
+H-MUT-PAYOUT-RECLAIM KILLED    payout T2 re-claim skips the status check
+                             -> TestSweeperLoop_NonActiveTenant_PayoutResolutionOnly, TestSweeperProcess_ListsAllTenants_AndDispatchSitesReadStatusInTx
+H-MUT-PAYOUT-RESEND KILLED    payout T12 resend skips the status check
+                             -> TestSweeperLoop_NonActiveTenant_PayoutResolutionOnly, TestSweeperProcess_ListsAllTenants_AndDispatchSitesReadStatusInTx
+H-MUT-STALE        KILLED    status cached across tenants within the process (state leak)
+                             -> TestSweeperLoop_NonActiveTenant_CreatedDepositNotDispatched_ThenResumesOnReactivation, TestSweeperLoop_NonActiveTenant_NoCascadeChild, TestSweeperLoop_NonActiveTenant_PayoutResolutionOnly, TestSweeperLoop_TenantIsolation_SuspensionNeitherAffectsNorExposesAnother, TestSweeperLoop_TenantResolutionOnly_StatusTable_MissingRowFailsClosed
+H-MUT-CLOSEDONLY   KILLED    only 'closed' treated as non-active
+                             -> TestSweeperLoop_NonActiveTenant_CreatedDepositNotDispatched_ThenResumesOnReactivation, TestSweeperLoop_NonActiveTenant_NoCascadeChild, TestSweeperLoop_NonActiveTenant_PayoutResolutionOnly, TestSweeperLoop_TenantIsolation_SuspensionNeitherAffectsNorExposesAnother, TestSweeperLoop_TenantResolutionOnly_StatusTable_MissingRowFailsClosed
+H-OVERBLOCK        KILLED    non-active tenants are not swept at all (resolution blocked)
+                             -> TestSweeperLoop_NonActiveTenant_CreatedDepositNotDispatched_ThenResumesOnReactivation, TestSweeperLoop_NonActiveTenant_NoCascadeChild, TestSweeperLoop_NonActiveTenant_PayoutResolutionOnly, TestSweeperLoop_NonActiveTenant_PendingDepositResolvesByPoll_AuditedLikeActive, TestSweeperLoop_TenantIsolation_SuspensionNeitherAffectsNorExposesAnother, TestSweeperProcess_ListsAllTenants_AndDispatchSitesReadStatusInTx
+H-NOMISSING        KILLED    missing tenant row treated as active (fail-open)
+                             -> TestSweeperLoop_TenantResolutionOnly_StatusTable_MissingRowFailsClosed
+H-DRAIN            KILLED    item ctx not detached from cancellation
+                             -> TestSweeperLoop_ShutdownDrain_InFlightItemCompletesNoNewItemStarts
+H-NONEWITEM        KILLED    no cancellation check between items
+                             -> TestSweeperLoop_ShutdownDrain_InFlightItemCompletesNoNewItemStarts
+H-PANIC            KILLED    per-item panic recovery removed
+                             -> TestSweeperLoop_TenantFaultIsolation_PanicInOneTenantDoesNotStopOthers [process panic]
+H-PASSPANIC        KILLED    pass-level recover removed
+                             -> [process panic]
+H-IMMEDIATE        KILLED    no immediate first pass
+                             -> TestSweeperLoop_LoopMechanics_ImmediatePassPerTickPanicRecoveredCancelStops, TestSweeperLoop_ShutdownDrain_InFlightItemCompletesNoNewItemStarts
+H-VALIDATE         KILLED    ValidateForLoop no longer requires PayoutKYCGate
+                             -> TestSweeperValidateForLoop [process panic]
+H-S8               KILLED    item work run inside an open transaction (unmarked ctx)
+                             -> TestSweeperLoop_NoTransactionOpenDuringProviderCalls, TestSweeperProcess_NoItemWorkInsideATransactionClosure_S8
+H-REREAD           KILLED    sweeper deposit poll skips the fresh re-read under the parent lock
+                             -> TestSweeperLoop_LeaseExpiryMidPass_DepositOnePosting, TestSweeperLoop_SameAttemptTwoWorkers_OnePosting
+H-LEASE            KILLED    batch lease write removed (no lease_until/next_action_at advance)
+                             -> TestSweeperLoop_TwoLoopsConcurrently_OnePostingEach
+H-SKIPLOCKED       KILLED    SKIP LOCKED removed from the batch claim
+                             -> TestSweeperLoop_BatchClaimSkipsRowLockedElsewhere
+H-NORESEND-GUARD   KILLED    non-idempotent manifest no longer blocks a payout resend
+                             -> TestSweeperLoop_LeaseExpiryMidPass_PayoutOneDispatchOnePosting
+H-WIRE             KILLED    PayoutKYCGate not set explicitly in production wiring
+                             -> TestBuildPaymentsSweeper_NoResolverStillValid, TestBuildPaymentsSweeper_PayoutKYCGateNonNil
+H-WIRE-MAIN        KILLED    main.go no longer validates the sweeper before starting
+                             -> TestRun_StartsSweeperThroughValidatedConstructor
+
+SURVIVOR CLASSIFICATION
+- H-ADV (advisory lock removed from claimBatch), correctness suite TestSweeperLoop_(LeaseExpiry|TwoLoops|SameAttempt|ShutdownDrain): SURVIVED = REQUIRED.
+  LF-8 requires exactly this: exactly-once rests on the row lease + SKIP LOCKED, the claim-token CAS, ledger idempotency and the 0107 indexes; the advisory lock is only an
+  efficiency hint. Those tests also run with TenantAdvisoryHint both true and false (sub-tests advisory_hint_true/false). Under the SAME mutant the full H suite fails ONLY the two
+  hint-specific tests (H-ADV-ALL: TestSweeperLoop_AdvisoryHint_OnlyDeduplicatesPhaseA, TestSweeperAdvisoryLock_OnlyInsideClaimBatch), which is the evidence the hint is real and optional.
+
+NOTES ON KILLS (vacuity and honesty)
+- H-TOKEN is killed ONLY by the constructed stale-claimant test (TestSweeperLoop_StaleClaimantCannotRevertFreshClaim_TokenCAS). In the real lease-expiry flow the same stale NotSent is ALSO refused
+  by `NOT ever_possibly_sent` (T6 sets it when the lease-expired submitting attempt goes ambiguous), so the token CAS is defence in depth there; the constructed test isolates the case where
+  ever_possibly_sent is still false on both claims and the token is the only discriminator. Not an equivalent mutant: it is killed.
+- H-PANIC, H-PASSPANIC, H-VALIDATE are killed as a test-binary panic (the injected fault / nil escapes), which fails the run; H-PASSPANIC names no single test because the panic aborts the binary.
+- H-MUT-DEPDISPATCH is the plan's required MUT (skipping the in-tx status read lets a suspended tenant's created attempt dispatch): killed by the created-deposit and tenant-isolation tests.
+  H-MUT-CASCADE / H-MUT-PAYOUT-RECLAIM / H-MUT-PAYOUT-RESEND are the per-site twins; H-MUT-ALL, -STALE (state leak across tenants) and -CLOSEDONLY cover the helper itself.
+- H-NOMISSING first SURVIVED (a missing tenant row was untested); a fail-closed status-table test was added (TestSweeperLoop_TenantResolutionOnly_StatusTable_MissingRowFailsClosed) and it now KILLS.
+- H-SKIPLOCKED first SURVIVED (removing SKIP LOCKED only changes blocking, not the outcome of the race tests); a deterministic row-lock test was added
+  (TestSweeperLoop_BatchClaimSkipsRowLockedElsewhere) and it now KILLS.
+- Vacuity guards inside the tests: S-8 probe control (a deliberately open tx must be seen) and 'each provider method was actually called'; payout lease test fails if A's late result does not bind;
+  non-active tests carry an ACTIVE control tenant in the same pass (control must dispatch/resend/cascade) and the reactivation step; AST guards carry negative controls and vacuity checks.
+
+NOT MUTATED HERE (covered elsewhere, stated so nothing is implied): ledger (provider_id, provider_tx_id) uniqueness and postDepositSuccess idempotency (D1/C evidence files); the runtime txscope.Held refusal in
+callProvider (IO-1/IO-1C suites); T2/T12 CAS predicates other than MarkNotSent's token term.
+
+BASELINE (unmutated, committed tree): go build/vet (both tag sets) OK; gofmt clean; golangci-lint 0 issues (default and -tags integration on payments/cmd);
+go test -race -tags integration -count=1 -p 1 -skip 'TestStoreOutage_DoesNotPinPool|TestResolutionIsolation_' ./internal/payments/ ./internal/config/ ./cmd/... -> ok (payments 512.7s).

@@ -841,6 +841,8 @@ first. Deferred receipts still unresolved after the `SettlementWindow` raise the
 
 1. **Tenant iteration.** Active tenants in round-robin order, as the reconciliation scheduler
    does (`activeTenantIDs`). Each tenant is handled in its own `WithTenant` tx.
+   **Amended by §37.3 (PRH-2 H):** the payments sweeper lists every tenant whatever its status;
+   a non-active tenant is resolution-only (no new money-moving call).
 2. **Batch lease tx (short; the sole exception to "parent first", LF95-C9(d)).** `SELECT … FROM
    payment_attempts WHERE next_action_at <= now() ORDER BY next_action_at LIMIT $batch FOR
    UPDATE SKIP LOCKED`. For each row it writes **only** `lease_owner`, `lease_until = now() +
@@ -6828,3 +6830,96 @@ and the full payments, ledger, wallet, casino, adjustment, withdrawal and idempo
   - *Drains at T6 and the mismatch-park bind* (§36.3).
   - *Deposit escalation (T16)* is not implemented for deposits, so a never-confirming provider polls at the
     backoff cap indefinitely.
+
+---
+
+## 37. Amendment — PRH-2 H: the sweeper process, S-8 wording, and resolution-only sweeping of non-active tenants (§7.3) (`payments`, 2026-10-04)
+
+Status: `IMPLEMENTED` for the process and the gating; `MOCK` adapters only (no PSP contract exists, so every real
+adapter path stays `PROVIDER DEPENDENT`). Source: plan `docs/plans/prh2-hardening-round/plan.md` §5-H; security
+addendum §2 (ACCEPTED with amendments); ledger-finance LF-8; merged S-8.
+
+### 37.1 The process (amends §7.1–§7.3)
+
+`payments.RunSweeperLoop(ctx, sweeper, logger, interval)` runs one pass immediately and then one per tick
+(`PAYMENTS_SWEEP_INTERVAL_SECONDS`, default 15 s, the §7.3 `RECOMMENDATION`), mirroring
+`reconciliation.RunSchedulerLoop`. It is wired in `cmd/platform-api/main.go` after the synthetic-component guard
+and the database connection. **It activates the deposit poll AND payout dispatch (T2 re-claim), resend (T12) and
+resolve** (payments F1): the `Sweeper` is one type for both. Payout sweeping runs only when
+`Sweeper.PayoutKYCGate` is non-nil (code-reviewer H3), so the production constructor
+(`cmd/platform-api/registrations.go: buildPaymentsSweeper`) sets it explicitly, and `Sweeper.ValidateForLoop`
+refuses a sweeper without it (and `RunSweeperLoop` refuses to start one). A nil outbound credential resolver is
+not refused (the gate fails every call closed as NotSent, exactly as on the HTTP path); the loop logs a warning.
+
+### 37.2 What carries exactly-once (merged S-8 / LF-8)
+
+In this order: the row lease with `FOR UPDATE SKIP LOCKED` (`SweeperBatchLeaseOwner`, §7.2 point 2); the
+claim-token CAS on every state-changing transition; ledger idempotency `(provider_id, provider_tx_id)`; the 0107
+indexes. The optional per-tenant `pg_try_advisory_xact_lock(hashtext('payments.sweeper.phaseA'),
+hashtext(tenant))` (`Sweeper.TenantAdvisoryHint`, on in production wiring) is **only an efficiency hint** that
+de-duplicates phase A across instances. It is taken as the first statement of `claimBatch`'s own short
+transaction (advisory before row locks, ADR 0082 R8), ends with that transaction, is never held across a
+provider call, and no code path depends on it: a mutant that removes it passes every correctness test.
+
+**S-8 wording (replaces any reading of §7.2 point 4 that allows a transaction around a call):** no database
+transaction is open during `QueryStatus`, `Deposit` or `Withdraw` on any sweeper path, deposit or payout. Every
+item is a sequence of short `WithTenant` transactions around gate-wrapped provider calls. Enforced three ways:
+the runtime `txscope.Held` refusal in `callProvider`; the repository-wide static guards (IO-1C and the
+named-builder guard); and the H tests (an AST guard that no item-level work appears inside a `With*` closure, and
+a runtime probe that finds no `idle in transaction` session while the sweeper is inside each of the three
+provider methods, with a control that the probe does see a deliberately open transaction).
+
+### 37.3 Non-active tenants are resolution-only (security addendum §2)
+
+Tenants are listed **whatever their status** (`SELECT id FROM tenants`, no status filter), because in-flight
+money must resolve. This **supersedes §7.2 point 1's "active tenants"** for the payments sweeper.
+
+| For a tenant whose status is not `active` | Behaviour |
+|---|---|
+| `QueryStatus` poll of a submitting / pending / ambiguous attempt | **allowed** (deposit and payout) |
+| Evidence application, dispute, T17 re-drive of an already-sent attempt, every audit those write | **allowed**, audited exactly as for an active tenant |
+| T3 expiry of an interactive `created` deposit (it makes no provider call) | allowed |
+| Dispatch of a `created` deposit attempt (T2, phase B) | **never**: rescheduled on the ordinary backoff |
+| A cascade child after a poll decline | **never**: the decline stands, no child is inserted; a child already inserted is not driven |
+| Payout T2 re-claim of a `created` attempt (new `Withdraw`) | **never**: rescheduled |
+| Payout T12 resend of an `ambiguous` attempt (a `Withdraw`) | **never**: rescheduled. The preceding poll still runs |
+
+A non-active tenant is treated exactly like an engaged kill switch for new dispatch: a plain reschedule, no
+escalation, no state change, and reactivation resumes the work with no special action. Safeguards:
+
+1. The tenant status is read **inside the transaction that performs (or would perform) the state change, per
+   call**, never cached per pass: `deferIfResolutionOnly` (deposit dispatch, before every `driveCreatedAttempt`
+   iteration), `tenantResolutionOnly` inside `applyStatusEvidence` (cascade child), and
+   `checkPayoutResolutionOnly` inside the T2 and T12 claim transactions (after the withdrawal lock, before the
+   kill-switch check and the KYC gate). A missing tenant row fails closed (resolution-only).
+2. The kill switch (INV-IO-15) and the synthetic-adapter startup tripwire apply unchanged; polls are never
+   stopped by the kill switch (§10.3).
+3. Credentials come only from the per-tenant outbound resolver, bound to the attempt's own tenant by
+   `callProvider` (S95-C8(b)); a test records the tenant of every resolution.
+4. A tenant flipping to non-active between the status read and the claim commit is the same race as flipping
+   right after the claim; an already-committed `submitting` claim is in-flight money and resolves.
+
+Judgement call recorded for security: a payout **T12 resend** is classed as a new money-moving call (it issues a
+`Withdraw`), so it is withheld for a non-active tenant even though the attempt was already sent once; "T17
+re-drive of an already-sent attempt" in the addendum is read as the poll-and-apply path.
+
+### 37.4 Process mechanics
+
+Per-tenant and per-item panic recovery (a recovered panic is counted and logged without the panic value, which
+could carry provider material); a pass-level recover mirrors `RunSchedulerLoop`. **Shutdown drain:** on context
+cancellation the loop stops starting items; the item in flight runs on a context detached from the cancellation,
+bounded by `SweeperItemTimeout` (8 s, inside `main`'s 10 s bounded wait), and its result is committed. OTel
+counters carry no tenant, provider or attempt label: `payments_sweeper_passes_total`,
+`payments_sweeper_items_total{result}`, `payments_sweeper_tenant_failures_total{phase}`,
+`payments_sweeper_resolution_only_blocks_total{site}`, and the gauge `payments_sweeper_last_pass_unix_seconds`
+(a stalled sweeper stops advancing it).
+
+### 37.5 Residuals (not closed here)
+
+- **Alert delivery does not exist (ALERT-DELIVERY-1 OPEN).** No dispatcher is wired by this amendment, and nothing
+  pages anyone about a stalled sweeper or an escalated payout; the metrics above are emitted, not alerted on.
+- §7.3's global (16) and per-(tenant, provider) (4) concurrency caps, the in-process nudge channel and jittered
+  backoff are not implemented; the loop sweeps tenants sequentially, one item at a time.
+- Tenant listing costs one indexed range scan per tenant per tick (§7.3 "idle cost"), including non-active ones.
+- `RECON-PAYOUT-LIVE-TEST-1` (payments F2) is not closed by this amendment.
+- Evidence of the mutants run: `docs/plans/payment-readiness/evidence/prh2-h-mutation-kill.txt`.
