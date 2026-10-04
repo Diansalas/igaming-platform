@@ -41,7 +41,11 @@ type LoopConfig struct {
 // not a policy value). cmd/platform-api passes it to RunDispatcherLoop.
 const DefaultLoopInterval = 15 * time.Second
 
-const defaultLoopDrainTimeout = 10 * time.Second
+// DefaultLoopDrainTimeout is how long RunDispatcherLoop waits for the pass in
+// flight on shutdown; cmd/platform-api's bounded wait must exceed it.
+const DefaultLoopDrainTimeout = 10 * time.Second
+
+const defaultLoopDrainTimeout = DefaultLoopDrainTimeout
 
 // PassRunner is what the loop drives. *Dispatcher satisfies it; tests
 // substitute a fake to prove panic recovery and drain without a database.
