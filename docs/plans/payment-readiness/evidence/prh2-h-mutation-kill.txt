@@ -1,9 +1,9 @@
-PRH-2 H (CP-W1 sweeper process) - mutation-kill evidence (rounds 1 and 2)
+PRH-2 H (CP-W1 sweeper process) - mutation-kill evidence (rounds 1, 2 and 3)
 Base: main 6cbea70. Branch prh2-h-sweeper-process. PRIVATE database, -race -tags integration -count=1 -p 1.
 Runner: scratchpad h_mut.py (one textual mutant at a time, build, run the H suite, restore). Round 2 re-ran every round-1 mutant on the round-2 tests and added the review mutants.
 H suite regex: TestSweeperLoop_|TestSweeperProcess_|TestSweeperLoopFiles_|TestSweeperAdvisoryLock|TestSweeperValidateForLoop (payments); cmd/platform-api wiring tests for the cmd mutants.
 
-RESULT: 38 mutants, 36 KILLED, 2 SURVIVED (H-ADV, H-CR-TENANTBREAK-TOP). Both survivors are classified below; no unclassified survivor.
+RESULT: 41 mutants, 39 KILLED, 2 SURVIVED (H-ADV, H-CR-TENANTBREAK-TOP). Both survivors are classified below; no unclassified survivor.
 
 H-ADV                      SURVIVED  advisory lock removed (LF-8: correctness suite must still PASS)
                                      -> (none)
@@ -52,7 +52,7 @@ H-SKIPLOCKED               KILLED    SKIP LOCKED removed from the batch claim
 H-NORESEND-GUARD           KILLED    non-idempotent manifest no longer blocks a payout resend
                                      -> TestSweeperLoop_LeaseExpiryMidPass_PayoutOneDispatchOnePosting
 H-F1-ALWAYS                KILLED    item deadline applied in normal operation (LF F1 original defect)
-                                     -> TestSweeperLoop_SlowDepositBeyondItemTimeout_StillRecordsResult
+                                     -> TestSweeperLoop_SlowDepositBeyondItemTimeout_StillRecordsResult, TestSweeperLoop_SlowQueryStatusBeyondItemTimeout_LiveLoop_Succeeds (round 3: both now use ctx-honouring hooks)
 H-F1-PHASEC                KILLED    deposit phase C not detached from the item context
                                      -> TestSweeperLoop_ShutdownDrain_DepositResultNearBudgetStillCommits
 H-F1-APPLY                 KILLED    poll result application not detached from the item context
@@ -89,9 +89,18 @@ SURVIVOR CLASSIFICATION
   (H-CR-TENANTBREAK-MID, KILLED) is what keeps a cancelled claim from being counted; the entry check only saves one database round trip on a dead context.
 
 ROUND 2 NOTES
-- LF F1 / H-CR-1: H-F1-ALWAYS reproduces the original defect (unconditional item deadline) and is KILLED by TestSweeperLoop_SlowDepositBeyondItemTimeout_StillRecordsResult and
-  TestSweeperLoop_SlowQueryStatusBeyondItemTimeout_LiveLoop_Succeeds, i.e. the new tests FAIL on the 03269da behaviour. H-F1-PHASEC / H-F1-APPLY (phase C and poll apply not detached) are killed by the shutdown-near-budget tests.
+- LF F1 / H-CR-1 (CORRECTED in round 3): in round 2 the killer worked only by accident: the mock ignores its ctx and the poll result is applied on a detached ctx, so H-F1-ALWAYS alone did not fail the steady-state QueryStatus test, and the deposit test died only via the post-phase-C read on the expired ctx.
+  Round 3 uses ctx-honouring hooks (spy.onQueryCtx / onDepositCtx: wait 700 ms OR ctx.Done(), flag `cut`, fail if cut), like a real adapter. Re-run: H-F1-ALWAYS alone -> BOTH Slow* tests FAIL; the combined mutant (H-F1-ALWAYS + the final attempt read in drive.go on phaseCtx) -> BOTH FAIL. H-F1-PHASEC / H-F1-APPLY (phase C and poll apply not detached) are killed by the shutdown-near-budget tests.
 - H-DRAIN (item ctx not detached) and H-F1-NOAFTERFUNC (reviewer M-NOBOUND, bound never enforced) first SURVIVED in round 2 (the detached phase C made the old drain test insensitive); TestSweeperLoop_ShutdownDrain_ItemContextDetachedThenBounded now kills both.
 - Reviewer mutants M-NORESCHED-DEP/-PAYOUT, M-RECLAIM-AFTER-KYC, M-NOBOUND, M-TENANTBREAK (top = equivalent, mid = killed), M-NOCLAIMGUARD, and main.go drain-wait deletion are all in the table above.
 - Not mutated here: ledger (provider_id, provider_tx_id) idempotency (D1/C evidence), the runtime txscope refusal (IO-1/IO-1C suites), T2/T12 CAS terms other than MarkNotSent's token term.
 - H-TOKEN is killed only by the constructed stale-claimant test; in the real lease-expiry flow `NOT ever_possibly_sent` also refuses the stale NotSent, so the token CAS is defence in depth there.
+
+
+ROUND 3 ADDITIONS
+H-F1-COMBINED              KILLED    H-F1-ALWAYS + drive.go final read on phaseCtx (reviewer's combined mutant, applied by a one-off script)
+                                     -> TestSweeperLoop_SlowDepositBeyondItemTimeout_StillRecordsResult, TestSweeperLoop_SlowQueryStatusBeyondItemTimeout_LiveLoop_Succeeds
+H-MAIN-NOTIMEOUT           KILLED    main.go drain wait without the time.After case -> TestRun_StartsSweeperThroughValidatedConstructor (new AST check)
+H-MAIN-CLOSEFIRST          KILLED    main.go closes paymentsSweeperDone before Wait() -> TestRun_StartsSweeperThroughValidatedConstructor (new AST check)
+Untested defensive bounds (classified, not killed): M-NOSTOPWATCH (memory only: one AfterFunc registration per processed item until loop ctx ends) and M-DRIVE-PHASEC-UNBOUNDED / M-POLL-UNBOUNDED
+(WithTimeout->WithCancel on the detached phase C / poll apply; a test needs >5 s of lock contention). Round-3 rename sweeperPhaseCTimeout -> depositPhaseCTimeout is a pure rename.
