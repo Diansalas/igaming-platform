@@ -415,7 +415,7 @@ remain the day-one signal for everything not listed here.
 | Sportsbook / casino-consistency mismatch | `reconciliation.sportsbook_settlement_mismatch` / `reconciliation.casino_consistency_mismatch` (p1) | `stream:sportsbook_settlement` / `stream:casino_consistency` | in the run tx |
 | Casino statement / payment statement mismatch (REPEATABLE READ) | `reconciliation.casino_statement_mismatch` / `reconciliation.payment_statement_mismatch` (p1) | `stream:casino_statement` / `stream:payment_statement:provider:<id>` | after the snapshot commits, detached |
 | A reconciliation run transaction failed | `reconciliation.run_failed` (p1) | `stream:<stream>[:provider:<id>]` | detached |
-| Kill switch engaged | `payment.kill_switch_engaged` (p2) | `switch:<kill_switch_id>` | after commit, detached only |
+| Kill switch engaged (a platform takeover of a tenant-engaged switch is its own alert) | `payment.kill_switch_engaged` (p2) | `switch:<kill_switch_id>` / `switch:<kill_switch_id>:takeover`; `reason_code` is a closed token or `nonconforming` | after commit and after the response, detached only |
 | Deposit simulation payload mismatch | `simulation.payment.payload_mismatch` (p3, simulation) | `provider:<provider_id>` | detached; **never delivered, never paged** |
 
 Not wired yet (listed honestly): casino-play and sportsbook-settlement
@@ -592,17 +592,31 @@ open and visible until they are acked or resolved
   at a policy refusal, `P0` at a trigger refusal, `go_validation` at a code
   defect (a Kind/attribute/discriminator that fails the allowlist).
 
-### Runbook: `reconciliation.ledger_projection_drift` with
-`stream:ledger_unlinked_manual_adjustment`
+### Runbook: `reconciliation.ledger_projection_drift`
 
-This is **a governance breach, not projection drift**: a `manual_adjustment`
-posting exists that is not linked to a governed adjustment request (ADR 0100
-§12). Balances reconcile; the control (four-eyes, closed reason code) was
-bypassed. Do not "rebuild the projection". Identify the posting from the
-reconciliation mismatch rows of the run named in the alert's `run_id`
-attribute, find who posted it (audit log), and treat it as a compliance
-incident (security + ledger-finance). Distinct from `stream:ledger_vs_projection`
-(true drift, a P1 data-integrity incident, see the financial-incident runbook).
+Two different findings share this Kind; the discriminator tells them apart.
+
+- `stream:ledger_vs_projection`: true projection drift, a P1 data-integrity incident (see the financial
+  incident runbook).
+- `stream:ledger_unlinked_manual_adjustment`: **a governance breach, not projection drift.** A
+  `manual_adjustment` posting exists that is not linked to a governed adjustment request (ADR 0100 §12).
+  Balances reconcile; the control (four-eyes, closed reason code) was bypassed. Do not "rebuild the
+  projection". Treat it as a compliance incident (security + ledger-finance) and find who posted it from
+  the audit log.
+
+**How to investigate (both streams).** Do NOT rely on the alert's `run_id` attribute: it is the run that
+first raised the alert, and a repeat raise only adds an occurrence (which carries no attributes). Query
+the **latest** reconciliation run for the tenant and stream and read its **open** mismatch rows
+(`reconciliation_mismatches` for that run; for the unlinked stream, rows of kind
+`ledger_unlinked_manual_adjustment`). Those rows are the current set.
+
+**Ack-masking caveat (known, tracked).** One stable alert per (tenant, stream) means that once the alert
+is open or acked, a NEW unlinked posting (or new drift) adds an occurrence only and does **not** page
+again; and the unlinked finding cannot be cleared (the ledger is append-only and the link is set only by
+the governed execution), so resolving the alert re-pages on the next hourly run. Acking and forgetting
+therefore silences later breaches. Until the design change recorded as a precondition for closing
+ALERT-DELIVERY-1 (ADR 0102 §17.7: a new K2 breach must page) is built, an operator who acks this alert
+must still review the latest run's open mismatch rows on every sweep.
 
 ### What is still stubbed / not yet wired
 
