@@ -311,3 +311,5 @@ F6c | KILLED | main.go: drain block moved before server.Shutdown | same
 F6d | KILLED | main.go: loop interval changed | same
 F6e | KILLED | main.go: Add(2) | same
 (main.go was mutated in the working tree and restored by writing the original back; it is unchanged in the commits.)
+
+Post-review verification (local, private DB, -p 1, -race -tags integration): ok ./internal/httpserver/... (filter KillSwitch|Alert|Deposit|Payment|Financial|Payout|IWire|CasinoRejection|AlertAdmin|TestFlushResponse|TestStatusRecorder|Webhook, skip TestStoreOutage_DoesNotPinPool|TestResolutionIsolation_), ./cmd/..., ./internal/alerting/..., ./internal/config/..., narrow -run IWire in ./internal/payments and ./internal/reconciliation (code unchanged since the last full run). build, vet (both tag sets), gofmt clean, golangci-lint default tags 0 issues, no integration-tag finding in files touched.
