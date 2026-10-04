@@ -1479,24 +1479,29 @@ mismatch audit) is not raised as an alert (not in the registered set); recorded 
 A "backstop" is a standing reconciliation check that re-surfaces the condition if its P1 is lost.
 The detached retry is mandatory for every Kind (§7.5) and applies to all rows below.
 
-- **Bound parks** (the attempt carries the provider reference at park time) have the standing
-  `pay_captured_unposted` reconciliation backstop **after D2** (the payment-statement matcher), and
-  only for a provider with a wired payment-statement source (the MOCK source today). Bound:
-  `sync_amount_mismatch` (the park binds the validated reference while the attempt is live),
-  `poll_amount_mismatch`, `poll_reference_mismatch` and a poll-detected
-  `provider_reference_conflict` (the sweeper only polls a bound attempt), the poll
-  `reversal_tombstone_precedes_success`, and `callback_amount_asset_mismatch` /
-  `reversal_tombstone_precedes_success` from a callback **when the attempt already had its
-  reference**. `payments.poll_evidence_contradicts_terminal_attempt` is bound; its backstop is
-  PAY-POLL-DECLINED-ALERT-RECON-1 (b): D2 pins that a declined attempt plus a succeeded statement
-  line gives `pay_status_mismatch`. **This branch does not contain D2**, so until D2 merges that
-  backstop is a claim about the planned matcher, not a verified fact here.
-- **Unbound parks are in-run only** (no standing backstop beyond the audit row and the P1 log):
-  `invalid_provider_reference` (nothing is persisted), `provider_reference_conflict` detected in phase
-  C (the foreign reference is not bound to this attempt), `success_for_never_sent_attempt` (a
-  created/rejected attempt has no reference), and any callback-detected reason on an attempt without a
-  bound reference. For these the detached retry plus the `alerting.raise_failed` fallback are the only
-  protection against a lost alert.
+- **D2 is merged into this branch (main `6cbea70`).** The standing `pay_captured_unposted`
+  reconciliation backstop (ADR 0095 §28.9 as extended by §35) classifies every deposit dispute reason
+  explicitly (`reconciliation/payment_statement.go`, pinned by
+  `payment_reason_classification_test.go` against `payments.DepositDisputeTerminalReasons()`). It
+  applies only for a provider with a wired payment-statement source (the MOCK source today). Per
+  discriminator reason, as D2 classifies it:
+  - **Bound** (the attempt normally holds the provider reference; reported in-run and standing,
+    clearing only on `capturedUnposted`'s two signals): `multiple_success_for_intent`,
+    `sync_amount_mismatch`, `poll_amount_mismatch`, `poll_reference_mismatch`,
+    `callback_amount_asset_mismatch`. At run time a bound class applies only if the attempt row really
+    holds a reference; otherwise it is treated as unbound.
+  - **Bound if referenced** (bound when the attempt holds a reference, otherwise unbound; never
+    excluded): `provider_reference_conflict`, `success_for_never_sent_attempt`.
+  - **Unbound parks are in-run only** (reported only when a succeeded statement line resolves to the
+    attempt by merchant reference; no standing coverage, which is
+    PAY-RECON-PARKED-CAPTURE-STANDING-1): `invalid_provider_reference`, and any bound or
+    bound-if-referenced reason whose attempt holds no reference. For these the detached retry plus the
+    `alerting.raise_failed` fallback are the only protection against a lost alert.
+  - **Excluded** (no captured-and-unposted exposure by construction):
+    `reversal_tombstone_precedes_success`. A lost alert for it has **no** reconciliation backstop.
+  - `payments.poll_evidence_contradicts_terminal_attempt` (declined attempt): PAY-POLL-DECLINED-ALERT-RECON-1
+    (b) is pinned by D2 (`TestD2_12_DeclinedAttempt_SucceededLine_IsStatusMismatch`): a declined attempt
+    plus a succeeded statement line gives `pay_status_mismatch`.
 - `payment.multiple_success_for_intent` and `…index_backstop_fired`: unchanged from §7.5
   (conditional `pay_captured_unposted`; `pay_duplicate` does not apply).
 - `reconciliation.ledger_projection_drift`: the drift sweep re-detects each run, both for
