@@ -106,6 +106,14 @@ type OutboxWorker struct {
 	Outbound     OutboundCredentialResolver
 	Config       OutboxConfig
 	Logger       *slog.Logger
+
+	// ClaimScope is a TEST SEAM and is nil in production (nothing in
+	// cmd/platform-api sets it; a static test pins that). When set, the claim
+	// only considers rows of the returned tenants, so integration tests that
+	// share one database across packages run in parallel without one test's
+	// worker claiming another test's rows (code review F1). nil means every
+	// tenant, the production behaviour; an empty non-nil result claims nothing.
+	ClaimScope func() []uuid.UUID
 }
 
 // NewOutboxWorker constructs a worker with the default configuration.
@@ -233,6 +241,7 @@ WITH candidate AS (
      WHERE (   (o.state = 'pending' AND o.next_attempt_at  <= now())
             OR (o.state = 'claimed' AND o.lease_expires_at <= now()))
        AND NOT (o.tenant_id = ANY ($2::uuid[]))
+       AND ($3::uuid[] IS NULL OR o.tenant_id = ANY ($3::uuid[]))
        AND NOT (o.operation = 'submit' AND EXISTS (
                SELECT 1 FROM kyc_submission_outbox c
                 WHERE c.tenant_id = o.tenant_id AND c.verification_id = o.verification_id
@@ -258,6 +267,12 @@ func (w *OutboxWorker) claimNext(ctx context.Context, excludeTenants []uuid.UUID
 	if excludeTenants == nil {
 		excludeTenants = []uuid.UUID{}
 	}
+	var scope []uuid.UUID // nil = every tenant (production)
+	if w.ClaimScope != nil {
+		if scope = w.ClaimScope(); scope == nil {
+			scope = []uuid.UUID{}
+		}
+	}
 	var row claimedRow
 	var found bool
 	err := w.Pool.WithPlatformService(ctx, db.ServiceKYCSubmissionWorker, func(ctx context.Context, tx pgx.Tx) error {
@@ -265,7 +280,7 @@ func (w *OutboxWorker) claimNext(ctx context.Context, excludeTenants []uuid.UUID
 			return err
 		}
 		var lastErr *string
-		scanErr := tx.QueryRow(ctx, claimSQL, w.Config.Lease.Seconds(), excludeTenants).Scan(
+		scanErr := tx.QueryRow(ctx, claimSQL, w.Config.Lease.Seconds(), excludeTenants, scope).Scan(
 			&row.ID, &row.TenantID, &row.VerificationID, &row.Operation, &row.ProviderID,
 			&row.IdempotencyKey, &row.DocumentIDs, &row.ClaimToken, &row.Claims, &row.FailedAttempts, &lastErr,
 			&row.CreatedAt, &row.NextAttemptAt)
@@ -435,7 +450,6 @@ func (w *OutboxWorker) prepareTx(ctx context.Context, tx pgx.Tx, row claimedRow)
 		if err := casOne(ctx, tx, sqlOutboxRetry, row.ID, row.ClaimToken, string(ClassDeferredTenantInactive), delay.Seconds()); err != nil {
 			return prepOutcome{}, err
 		}
-		recordDeferredAge(row)
 		return prepOutcome{kind: prepHandled, result: resultDeferred}, nil
 	}
 
@@ -485,8 +499,13 @@ func (w *OutboxWorker) prepareTx(ctx context.Context, tx pgx.Tx, row claimedRow)
 	if newer {
 		return w.cancelInTx(ctx, tx, row, CancelSuperseded)
 	}
-	// 7. still an orphan: its create ended terminal.
-	if isOrphan {
+	// 7. no vendor reference to submit against: either still an orphan (its
+	// create ended terminal) or decided/changed without ever binding one (a staff
+	// decision, or decided_concurrently, whose cascade could not see a submit row
+	// committed after it). Submitting with an empty reference would send PII
+	// documents the vendor cannot attach (code review F4); phase B refuses the
+	// same state independently.
+	if isOrphan || v.ProviderReference == "" {
 		return w.cancelInTx(ctx, tx, row, CancelVerificationNotSubmitted)
 	}
 	// 8/9. the current non-rejected set.
@@ -584,14 +603,14 @@ func (w *OutboxWorker) cascadeCancelSubmits(ctx context.Context, tx pgx.Tx, row 
 	return nil
 }
 
-func recordDeferredAge(row claimedRow) {
-	age := int64(time.Since(row.CreatedAt).Seconds())
+// ageSeconds is the non-negative whole seconds since t (the per-pass deferred
+// age maximum, mirroring the due-lag maximum: a gauge of the LATEST pass).
+func ageSeconds(t time.Time) int64 {
+	age := int64(time.Since(t).Seconds())
 	if age < 0 {
-		age = 0
+		return 0
 	}
-	if age > outboxOldestDeferredSecs.Load() {
-		outboxOldestDeferredSecs.Store(age)
-	}
+	return age
 }
 
 // ---- phase B ----
@@ -685,6 +704,11 @@ func (w *OutboxWorker) callVendor(ctx context.Context, row claimedRow, prep *pre
 		return vendorOutcome{kind: outcomeDefinitive, result: result, hasResult: true}
 	default:
 		v := prep.verification
+		if v.ProviderReference == "" {
+			// Defence in depth behind prepareTx step 7: never send documents
+			// against an empty vendor reference.
+			return vendorOutcome{kind: outcomeNotSent}
+		}
 		result, callErr := provider.SubmitVerification(bctx, v.ProviderReference, prep.docs, call)
 		if callErr != nil {
 			w.logger().Warn("kyc_outbox_provider_call_failed",
@@ -995,7 +1019,7 @@ type PassStats struct {
 func (w *OutboxWorker) RunPass(ctx context.Context) PassStats {
 	stats := PassStats{Results: map[string]int{}}
 	perTenant := map[uuid.UUID]int{}
-	var maxDueLag int64
+	var maxDueLag, maxDeferredAge int64
 	for i := 0; i < w.Config.PassItemCap; i++ {
 		if ctx.Err() != nil {
 			break
@@ -1023,11 +1047,14 @@ func (w *OutboxWorker) RunPass(ctx context.Context) PassStats {
 		result := w.processItemSafe(ctx, *row)
 		stats.Results[result]++
 		recordOutboxItem(ctx, result)
+		if result == resultDeferred {
+			if age := ageSeconds(row.CreatedAt); age > maxDeferredAge {
+				maxDeferredAge = age
+			}
+		}
 	}
 	outboxOldestDueAgeSecs.Store(maxDueLag)
-	if stats.Claimed == 0 {
-		outboxOldestDeferredSecs.Store(0)
-	}
+	outboxOldestDeferredSecs.Store(maxDeferredAge)
 	return stats
 }
 

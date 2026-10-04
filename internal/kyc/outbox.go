@@ -273,17 +273,22 @@ func requestVerificationAttempt(ctx context.Context, tx pgx.Tx, params CreateVer
 	return v, outboxID, nil
 }
 
-// existingCreateForPlayer returns the verification of the caller's most recent
-// create row that is live or sent, filtered by the caller's own
-// player_account_id (server context) and tenant. found=false means no such row
-// is visible (the winner moved to a terminal state).
+// existingCreateForPlayer returns the verification of the caller's NEWEST
+// create row, found only if that newest row is pending, claimed or sent,
+// filtered by the caller's own player_account_id (server context) and tenant.
+// The newest row is taken in ANY state first and the state filter applied
+// after: filtering first would skip a winner that just ended failed_terminal or
+// cancelled and return an OLDER sent create's verification (ADR 0106 section
+// 2.10 says the insert is retried instead; code review F3). found=false means
+// the newest create is terminal (or there is none).
 func existingCreateForPlayer(ctx context.Context, tx pgx.Tx, tenantID, playerAccountID uuid.UUID) (Verification, bool, error) {
 	var verificationID uuid.UUID
 	err := tx.QueryRow(ctx,
-		`SELECT verification_id FROM kyc_submission_outbox
-		  WHERE tenant_id = $1 AND player_account_id = $2 AND operation = 'create'
-		    AND state IN ('pending', 'claimed', 'sent')
-		  ORDER BY created_at DESC, id DESC LIMIT 1`,
+		`SELECT verification_id FROM (
+		     SELECT verification_id, state FROM kyc_submission_outbox
+		      WHERE tenant_id = $1 AND player_account_id = $2 AND operation = 'create'
+		      ORDER BY created_at DESC, id DESC LIMIT 1) latest
+		  WHERE state IN ('pending', 'claimed', 'sent')`,
 		tenantID, playerAccountID,
 	).Scan(&verificationID)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -307,18 +312,27 @@ func existingCreateForPlayer(ctx context.Context, tx pgx.Tx, tenantID, playerAcc
 // hasLiveCreate reports whether verificationID has a pending/claimed create row,
 // read in the caller's transaction (security Q-R1 condition: an orphan accepts
 // an upload only if its live create is read inside the SAME upload tx).
+//
+// The create row is read FOR SHARE and held until the upload commits: a worker
+// phase C that decides or cancels the create (decided_concurrently) must lock
+// that row FOR UPDATE, so it waits for this transaction and then sees the
+// submit row this upload enqueued, and its cascade cancels it (code review F4).
 func hasLiveCreate(ctx context.Context, tx pgx.Tx, tenantID, verificationID uuid.UUID) (bool, error) {
-	var live bool
+	var id uuid.UUID
 	err := tx.QueryRow(ctx,
-		`SELECT EXISTS (SELECT 1 FROM kyc_submission_outbox
-		                 WHERE tenant_id = $1 AND verification_id = $2 AND operation = 'create'
-		                   AND state IN ('pending', 'claimed'))`,
+		`SELECT id FROM kyc_submission_outbox
+		  WHERE tenant_id = $1 AND verification_id = $2 AND operation = 'create'
+		    AND state IN ('pending', 'claimed')
+		  FOR SHARE`,
 		tenantID, verificationID,
-	).Scan(&live)
+	).Scan(&id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
 	if err != nil {
 		return false, fmt.Errorf("kyc: read live create: %w", err)
 	}
-	return live, nil
+	return true, nil
 }
 
 // sortedDocumentIDs returns the ids of docs distinct and in ascending text

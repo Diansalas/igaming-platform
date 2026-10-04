@@ -657,8 +657,12 @@ func run() error {
 
 	// ---- PRH-2 E1: KYC outbox worker shutdown drain (begin) ----
 	// RunOutboxWorkerLoop claims no new row on ctx cancel and lets the item in
-	// flight finish on its own bounded contexts (at most prepare + phase B +
-	// phase C, about 25 s by default); this bounded wait covers that.
+	// flight finish on its own bounded contexts. Typical item: prepare + phase B
+	// + phase C (about 25 s at the defaults); the worst case (prepare 5 s,
+	// resolve+call 15 s, three phase-C attempts of 5 s and an apply-conflict
+	// transaction of 5 s) is about 40 s, longer than this 30 s wait. Exiting
+	// mid-item is benign: the row stays claimed, its lease expires, and the
+	// re-claim re-sends with the SAME idempotency key (ADR 0106 section 2.6).
 	kycOutboxDone := make(chan struct{})
 	go func() {
 		kycOutboxWG.Wait()

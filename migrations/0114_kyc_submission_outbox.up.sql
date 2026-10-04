@@ -50,7 +50,10 @@ BEGIN
     END IF;
     RETURN 'tenant';
 END;
-$$ LANGUAGE plpgsql STABLE;
+$$ LANGUAGE plpgsql STABLE
+-- Security L-1: a pinned search_path with pg_temp LAST, so a TEMP table (the
+-- runtime role holds TEMP) can never shadow a table this function reads.
+SET search_path = pg_catalog, public, pg_temp;
 
 -- =========================================================================
 -- 2. The outbox table
@@ -210,9 +213,10 @@ BEGIN
         NEW.terminal_at := NULL;
         NEW.created_at := now();
         NEW.updated_at := now();
-        IF NEW.next_attempt_at IS NULL THEN
-            NEW.next_attempt_at := now();
-        END IF;
+        -- Security I-1: a new row is always due now, never at a caller-supplied
+        -- time (a far-future value on a live create would block the player's
+        -- future creates behind the per-player unique index).
+        NEW.next_attempt_at := now();
         RETURN NEW;
     END IF;
 
@@ -362,7 +366,11 @@ BEGIN
     END IF;
     RETURN NEW;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql
+-- Security L-1: pinned search_path, pg_temp LAST. The trigger reads tenants,
+-- kyc_verifications, kyc_documents and kyc_submission_outbox; a TEMP table of
+-- the same name created by the runtime role must never decide a transition.
+SET search_path = pg_catalog, public, pg_temp;
 
 CREATE TRIGGER kyc_submission_outbox_guard_row
     BEFORE INSERT OR UPDATE OR DELETE ON kyc_submission_outbox
