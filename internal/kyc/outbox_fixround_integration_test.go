@@ -485,3 +485,31 @@ func TestOutboxGuard_24c_InsertForcesNextAttemptAtToNow_I1(t *testing.T) {
 		}
 	})
 }
+
+// F4 (FOR SHARE): the upload's read of the live create holds a row lock until
+// the upload transaction ends, so a worker phase C that decides or cancels the
+// create (FOR UPDATE) cannot slip between the read and the submit insert.
+func TestOutbox_38c_UploadHoldsTheLiveCreateRowLock_F4(t *testing.T) {
+	r := newRig(t)
+	v := r.create()
+	row := onlyRow(t, r.pool, r.f.tenantID, v.ID, OpCreate)
+	var lockErr error
+	err := r.pool.WithTenant(context.Background(), r.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		live, err := hasLiveCreate(ctx, tx, r.f.tenantID, v.ID)
+		if err != nil || !live {
+			t.Fatalf("setup: the create must be live: %v %v", live, err)
+		}
+		probeErr := r.pool.WithTenant(context.Background(), r.f.tenantID, func(ctx2 context.Context, tx2 pgx.Tx) error {
+			var id uuid.UUID
+			return tx2.QueryRow(ctx2, `SELECT id FROM kyc_submission_outbox WHERE id = $1 FOR UPDATE NOWAIT`, row.ID).Scan(&id)
+		})
+		lockErr = probeErr
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pgCode(lockErr) != "55P03" {
+		t.Fatalf("a concurrent FOR UPDATE on the live create must be refused (55P03) while the upload holds it, got %v", lockErr)
+	}
+}
