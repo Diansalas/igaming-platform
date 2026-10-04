@@ -399,7 +399,10 @@ func (s *Sweeper) processViaQueryStatus(ctx context.Context, tenantID uuid.UUID,
 		}
 	})
 
-	return s.Pool.WithTenant(ctx, tenantID, func(actx context.Context, tx pgx.Tx) error {
+	// PRH-2 H (LF F1): apply the poll result on a detached, bounded context.
+	applyCtx, cancelApply := context.WithTimeout(context.WithoutCancel(ctx), sweeperPhaseCTimeout)
+	defer cancelApply()
+	return s.Pool.WithTenant(applyCtx, tenantID, func(actx context.Context, tx pgx.Tx) error {
 		if _, err := tx.Exec(actx, `SELECT id FROM deposit_intents WHERE id = $1 FOR UPDATE`, *attempt.DepositIntentID); err != nil {
 			return err
 		}

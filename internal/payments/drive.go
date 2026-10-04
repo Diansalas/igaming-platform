@@ -207,9 +207,12 @@ func (o *Orchestrator) driveCreatedAttempt(
 	}
 	redirectURL, hostedFieldToken := gr.Value.RedirectURL, gr.Value.HostedFieldToken
 
-	// Phase C, with a possible further cascade insert.
+	// Phase C, with a possible further cascade insert. PRH-2 H (LF F1): detached and bounded, so a
+	// phase-B result is always recorded even if ctx is cancelled or its deadline passed during the call.
+	phaseCtx, cancelPhaseC := context.WithTimeout(context.WithoutCancel(ctx), sweeperPhaseCTimeout)
+	defer cancelPhaseC()
 	var cascadeChild *PaymentAttempt
-	err = pool.WithTenant(ctx, attempt.TenantID, func(actx context.Context, tx pgx.Tx) error {
+	err = pool.WithTenant(phaseCtx, attempt.TenantID, func(actx context.Context, tx pgx.Tx) error {
 		if _, err := tx.Exec(actx, `SELECT id FROM deposit_intents WHERE id = $1 FOR UPDATE`, intent.ID); err != nil {
 			return fmt.Errorf("payments: lock deposit intent: %w", err)
 		}

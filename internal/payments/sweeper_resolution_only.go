@@ -11,9 +11,13 @@
 //
 // A non-active tenant is treated exactly like an engaged kill switch for new
 // dispatch: the attempt is rescheduled on the ordinary backoff and nothing else
-// changes, so reactivating the tenant resumes it with no special action. The
-// status is read INSIDE the transaction that performs (or would perform) the
-// state change, per call, never cached per pass. The kill switch (INV-IO-15) and
+// changes, so reactivating a suspended tenant resumes it. The status is read per
+// call, never cached per pass: inside the payout T2/T12 claim transactions and the
+// poll's result transaction (cascade child), but for DEPOSIT dispatch in a separate
+// short transaction BEFORE driveCreatedAttempt (the T2 claim in drive.go reads no
+// status), and the drive.go phase-C cascade insert is not gated: a tenant flipping in
+// that gap can get one Deposit out, and a child inserted there is never driven
+// (security H-SEC-1; the in-claim-tx fix is a registered follow-up). The kill switch (INV-IO-15) and
 // the synthetic-adapter tripwire still apply on top of this, and credentials come
 // only from the per-tenant resolver (callProvider binds them to the attempt's
 // own tenant).

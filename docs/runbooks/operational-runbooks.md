@@ -330,13 +330,19 @@ dispatch is being withheld for a non-active tenant (expected, see step 5).
    the sweeper itself (lease expiry, then `QueryStatus`); if a human decision is needed use the governed
    force-resolution path (ADR 0101, K3, not yet implemented) or the reconciliation findings (ADR 0095 §12).
 5. **A suspended/closed tenant's `created` deposit or payout is not being sent.** This is by design
-   (resolution-only, §37.3): its pending attempts still resolve by poll; new dispatch resumes when the tenant is
-   reactivated. A tenant whose switch you want paused for new money should use the kill switch (§5), not suspension.
+   (resolution-only, ADR 0095 §37.3): its pending attempts still resolve by poll, and new dispatch resumes when a
+   SUSPENDED tenant is reactivated (after the poll backoff, up to 30 min). An idempotent-manifest `ambiguous` payout of a
+   suspended tenant is not resent: it stays `ambiguous` (funds held) until a poll resolves it or the tenant is
+   reactivated. **A CLOSED tenant never resumes**: a never-sent `created` payout keeps its withdrawal hold and the
+   player's funds stay held with no release path today. That is an OPEN BUSINESS/COMPLIANCE DECISION (§37.5), not
+   something to fix by editing rows. A tenant whose new money you want paused should use the kill switch (§5).
 6. **Disabling deliberately.** There is no off switch for the loop; the control that stops NEW money moving is
    the kill switch (INV-IO-15, ADR 0095 §10): it withholds every new dispatch while polls continue.
 7. **Escalated payouts** (`payments.payout_resend_escalated`, `payments.payout_reclaim_denied_by_kyc` audit
-   rows; `escalated_at` set): the sweeper never resends a non-idempotent or exhausted attempt. Resolve through
-   the staff payout-resolution path (poll/`/resolve`), M3 for a never-sent attempt, or the force-resolution path
-   once it exists. Never resend by hand.
+   rows; `escalated_at` set): the sweeper never resends a non-idempotent or exhausted attempt. Resolve through the
+   staff payout-resolution path (poll / `/resolve`). Releasing the hold of a never-sent attempt (M3,
+   `RejectCreated` plus hold release) has NO caller today and the governed force-resolution path (ADR 0101, K3) is
+   not implemented, so there is currently no supported release path; escalate to engineering and the business
+   owner. Never resend or edit rows by hand.
 
 `PROVIDER DEPENDENT`: all of this is exercised against MOCK adapters only.

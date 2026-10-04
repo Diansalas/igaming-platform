@@ -45,14 +45,30 @@ import (
 // (reversible engineering default, not a measured value).
 const SweeperLoopDefaultInterval = 15 * time.Second
 
-// SweeperItemTimeout bounds ONE item (its transactions plus its provider call)
-// once the loop's context is cancelled: shutdown drain lets the item already in
-// flight finish on a context detached from the cancellation, but never longer
-// than this. It is below cmd/platform-api's 10 s bounded wait plus the fact
-// that a provider call is itself bounded by the manifest's deadline; an item cut
-// off here is crash-recovered by its lease like any other (a lease-expired
-// submitting attempt converges via QueryStatus, never a second submission).
+// SweeperItemTimeout is the drain budget an item gets AFTER the loop's context is cancelled
+// (shutdown). It is NOT applied to an item in normal operation: a provider call is bounded by
+// the gate's manifest CallTimeout (DefaultCallTimeout 30 s), and a result obtained from phase B
+// must always be recorded (LF F1: an item deadline shorter than a slow Deposit left the attempt
+// `submitting` with no reference, never polled). It is a best-effort bound, not a guarantee:
+//
+//   - payout items re-detach with WithoutCancel inside DispatchWithdraw/PollPayoutStatus/
+//     ApplyPayoutResult (payoutOutboundCallBound up to 60 s plus payoutPhaseCTimeout), so a payout
+//     item can outlive this budget and main's 10 s bounded wait;
+//   - deposit phase C and the poll's result application run on their own detached context
+//     bounded by sweeperPhaseCTimeout, so a phase-B result is recorded even near the budget.
+//
+// An item cut short is money-safe: its lease expires, a submitting attempt converges via
+// QueryStatus / T6 ambiguous, and a resend happens only under T12's idempotent-manifest rules.
+// Cross-tenant effect: the pass is sequential, so one tenant's slow provider delays the next
+// tenants in the pass (head-of-line); the §7.3 concurrency caps are the registered follow-up.
 const SweeperItemTimeout = 8 * time.Second
+
+// sweeperPhaseCTimeout bounds the detached context deposit phase C / poll application run on
+// (mirrors payoutPhaseCTimeout).
+const sweeperPhaseCTimeout = 5 * time.Second
+
+// sweeperItemTimeout is SweeperItemTimeout, overridable only by tests.
+var sweeperItemTimeout = SweeperItemTimeout
 
 var errSweeperPanic = errors.New("payments: sweeper recovered from panic")
 
@@ -207,11 +223,22 @@ func (s *Sweeper) sweepTenant(ctx context.Context, logger *slog.Logger, tenantID
 			// (the batch lease is the crash-recovery mechanism, not a claim).
 			return
 		}
-		// Shutdown drain: the item runs on a context detached from the loop's
-		// cancellation, bounded by SweeperItemTimeout.
-		itemCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), SweeperItemTimeout)
+		// Shutdown drain: the item runs on a context detached from the loop's cancellation.
+		// The item context carries no deadline in normal operation; only once the loop's context is
+		// cancelled does it get sweeperItemTimeout to drain (context.AfterFunc below).
+		itemCtx, cancelItem := context.WithCancel(context.WithoutCancel(ctx))
+		itemDone := make(chan struct{})
+		stopWatch := context.AfterFunc(ctx, func() {
+			select {
+			case <-time.After(sweeperItemTimeout):
+				cancelItem()
+			case <-itemDone:
+			}
+		})
 		err := s.guarded(func() error { return s.processAttempt(itemCtx, tenantID, id) })
-		cancel()
+		close(itemDone)
+		stopWatch()
+		cancelItem()
 		switch {
 		case err == nil:
 			st.Processed++
@@ -269,7 +296,7 @@ func runSweeperLoop(ctx context.Context, s *Sweeper, logger *slog.Logger, ticks 
 		return
 	}
 	if s.CredResolver == nil && logger != nil {
-		logger.Warn("payments sweeper: no outbound credential resolver wired; every provider call is refused fail-closed and in-flight attempts will not resolve")
+		logger.Error("payments sweeper: no outbound credential resolver wired; every provider call is refused fail-closed and in-flight attempts will not resolve")
 	}
 	pass := 0
 	runOnce := func() {
