@@ -455,7 +455,9 @@ func (w *k3World) payout(amount int64) (withdrawal.WithdrawalRequest, PaymentAtt
 	var a PaymentAttempt
 	w.tx(func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		a, err = GetAttemptByID(ctx, tx, claim.Attempt.ID)
+		if a, err = GetAttemptByID(ctx, tx, claim.Attempt.ID); err != nil {
+			return err
+		}
 		wr, err = withdrawal.GetByID(ctx, tx, wr.ID)
 		return err
 	})

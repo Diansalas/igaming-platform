@@ -84,13 +84,6 @@ func (w *k3World) depositLine(ref, merchant, status string, amount int64) statem
 	return l
 }
 
-func (w *k3World) reversalLine(ref, original string, amount int64) statement.PaymentStatementLine {
-	l := w.depositLine(ref, "", statement.PaymentStatusSucceeded, amount)
-	l.Kind = statement.PaymentLineDepositReversal
-	l.OriginalProviderReference = original
-	return l
-}
-
 // stmtRun is the real three-phase stream (fetch, ingest, snapshot match) in the
 // REAL WithTenantSnapshot session shape. It returns the run's mismatches.
 func (w *k3World) stmtRun(src statement.PaymentStatementSource) []reconciliation.Mismatch {
@@ -116,14 +109,6 @@ func (w *k3World) stmtRun(src statement.PaymentStatementSource) []reconciliation
 		w.t.Fatalf("RunPaymentStatement: %v", err)
 	}
 	return ms
-}
-
-func kindsOf(ms []reconciliation.Mismatch) map[reconciliation.MismatchKind]int {
-	out := map[reconciliation.MismatchKind]int{}
-	for _, m := range ms {
-		out[m.MismatchKind]++
-	}
-	return out
 }
 
 func mismatchesOf(ms []reconciliation.Mismatch, kind reconciliation.MismatchKind, keyContains string) []reconciliation.Mismatch {

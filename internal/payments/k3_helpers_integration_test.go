@@ -104,10 +104,3 @@ func k3RequireNoErr(t *testing.T, err error, what string) {
 		t.Fatalf("%s: %v", what, err)
 	}
 }
-
-func k3RequireErr(t *testing.T, err error, what string) {
-	t.Helper()
-	if err == nil {
-		t.Fatalf("%s: expected a refusal, got success", what)
-	}
-}
