@@ -86,6 +86,43 @@ func TestK3_C47_AllowListParityGoAndSQL(t *testing.T) {
 	}
 }
 
+// C-5c: the attempt guard's own re-check (payment_m2_admits) of the withdrawal
+// state at WRITE time. The resolution guard checks it at insert and at
+// `-> executing`, and withdrawal.Complete/Fail CAS on it; this is the fourth,
+// last-line restatement, reached only by moving the withdrawal inside the
+// executing transaction.
+func TestK3_C5c_AdmitsRechecksTheWithdrawalStateAtWriteTime(t *testing.T) {
+	w := newK3World(t, k3Opts{base: 1})
+	wr, a := w.ambiguousPayout(110)
+	r := w.mustRequest(w.f1, w.m2In(a.ID, ResolutionM2DeclareNotPaid))
+	err := w.inExecuting(r, w.f2, func(ctx context.Context, tx pgx.Tx) error {
+		// Sanity: while the withdrawal is submitted the write is admitted.
+		if err := k3Try(ctx, tx, func(ctx context.Context, tx pgx.Tx) error {
+			_, err := tx.Exec(ctx, `UPDATE payment_attempts SET state='declined', last_evidence_kind='operator', resolved_at=now(), next_action_at=NULL WHERE id = $1`, a.ID)
+			if err != nil {
+				t.Errorf("the matching write was refused while the withdrawal is submitted: %v", err)
+			}
+			return errK3Rollback
+		}); err != nil && err != errK3Rollback {
+			return err
+		}
+		// Move the withdrawal out of `submitted` inside the executing transaction.
+		if _, err := tx.Exec(ctx, `UPDATE withdrawal_requests SET state = 'rejected' WHERE id = $1`, wr.ID); err != nil {
+			t.Fatalf("setup: cannot move the withdrawal: %v", err)
+		}
+		if err := k3Try(ctx, tx, func(ctx context.Context, tx pgx.Tx) error {
+			_, err := tx.Exec(ctx, `UPDATE payment_attempts SET state='declined', last_evidence_kind='operator', resolved_at=now(), next_action_at=NULL WHERE id = $1`, a.ID)
+			return err
+		}); err == nil {
+			t.Error("the attempt guard admitted an operator write for a withdrawal that is no longer submitted")
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 // T-12: payment_m2_admits returns false, never an error, in sessions that cannot
 // see resolutions (the sweeper's WithTenant shape and a no-tenant session).
 func TestK3_T12_AdmitsIsFalseNotAnErrorWhereResolutionsAreInvisible(t *testing.T) {

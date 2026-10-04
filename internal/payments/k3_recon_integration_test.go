@@ -310,7 +310,12 @@ func TestK3_C8_C20_LateEvidenceAfterPaid(t *testing.T) {
 
 	// The real statement line confirms: clean (no unconfirmed, no mismatch), metric +1.
 	before := k3ConfirmedCount(t)
-	ms = w.stmtRun(w.source(false, w.payoutLine(*a.ProviderReference, a.MerchantReference, statement.PaymentStatusSucceeded, 500)))
+	// The provider's own settlement reference differs from the reserved id the
+	// Step B posted under: the F4 settlement-reference check must be EXEMPT for a
+	// reserved-prefix Step B (mutant: exemption removed -> pay_reference_mismatch).
+	confirm := w.payoutLine(*a.ProviderReference, a.MerchantReference, statement.PaymentStatusSucceeded, 500)
+	confirm.SettlementReference = "k3-provider-settlement-" + uuid.NewString()
+	ms = w.stmtRun(w.source(false, confirm))
 	if len(ms) != 0 {
 		t.Fatalf("a matching confirming line must give a clean run, got:\n%s", render(ms))
 	}
@@ -345,6 +350,41 @@ func TestK3_C8_C20_LateEvidenceAfterPaid(t *testing.T) {
 	}
 	_ = wr
 	_ = res
+}
+
+// C-45b (D-4 / RC-3, persisted lookup): once a non-MOCK import exists, a MOCK
+// import's reversal line - in the run that carries it AND, as persisted
+// evidence, in every later run - cannot clear a finding; a non-MOCK reversal can.
+func TestK3_C45b_MockReversalCannotClearAFindingOnceARealImportExists(t *testing.T) {
+	w := newK3World(t, k3Opts{base: 1})
+	a := w.disputedDeposit(5000)
+	ref := *a.ProviderReference
+	line := w.depositLine(ref, a.MerchantReference, statement.PaymentStatusSucceeded, 5000)
+	rev := func(real bool) statement.PaymentStatementSource {
+		l := w.depositLine("k3-rev-"+uuid.NewString(), "", statement.PaymentStatusSucceeded, 5000)
+		l.Kind = statement.PaymentLineDepositReversal
+		l.OriginalProviderReference = ref
+		return w.source(real, l)
+	}
+	w.requireOne(w.stmtRun(w.source(true, line)), reconciliation.MismatchKindPayCapturedUnposted, a.ID, "raised against a REAL import")
+	w.requireOne(w.stmtRun(rev(false)), reconciliation.MismatchKindPayCapturedUnposted, a.ID, "a MOCK reversal in the run that carries it")
+	w.requireOne(w.stmtRun(w.pastSource(true)), reconciliation.MismatchKindPayCapturedUnposted, a.ID, "a persisted MOCK reversal in a later run")
+	w.requireNone(w.stmtRun(rev(true)), reconciliation.MismatchKindPayCapturedUnposted, a.ID, "a REAL reversal clears")
+	w.requireNone(w.stmtRun(w.pastSource(true)), reconciliation.MismatchKindPayCapturedUnposted, a.ID, "and stays cleared")
+}
+
+// C-45c: the same payout line persisted by a MOCK import and a later non-MOCK
+// import is one line that is eligible if ANY copy is (the dedupe ORs eligibility).
+func TestK3_C45c_OverlappingMockAndRealCopiesConfirmOnTheRealOne(t *testing.T) {
+	w := newK3World(t, k3Opts{base: 1})
+	_, a := w.ambiguousPayout(500)
+	w.executeM2(a.ID, ResolutionM2DeclarePaid)
+	line := w.payoutLine(*a.ProviderReference, a.MerchantReference, statement.PaymentStatusSucceeded, 500)
+	// Import 1 (MOCK, no real import yet): the line confirms.
+	w.requireNone(w.stmtRun(w.source(false, line)), reconciliation.MismatchKindPayDeclaredPaidUnconfirmed, a.ID, "MOCK-only world")
+	// Import 2 (non-MOCK): the MOCK copy is now ineligible, the real copy is eligible.
+	w.requireNone(w.stmtRun(w.source(true, line)), reconciliation.MismatchKindPayDeclaredPaidUnconfirmed, a.ID, "the real copy confirms")
+	w.requireNone(w.stmtRun(w.pastSource(true)), reconciliation.MismatchKindPayDeclaredPaidUnconfirmed, a.ID, "and it stays confirmed")
 }
 
 // C-42 (LF D-5): a succeeded line with a DIFFERENT amount does not clear
