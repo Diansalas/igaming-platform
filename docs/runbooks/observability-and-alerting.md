@@ -403,9 +403,9 @@ against real traffic.
 delivery NOT LIVE.** ADR 0102 §17 records what I-wire built: the business
 raise sites below now write durable alerts, the dispatcher loop is
 hardened (`alerting.RunDispatcherLoopWithConfig`), and platform-admin
-ack/resolve endpoints exist. **The dispatcher is NOT started in
-`cmd/platform-api/main.go`** (it follows the H sweeper merge, plan Rule 5)
-and **no route exists**, so **no alert is delivered anywhere**: a stored
+ack/resolve endpoints exist. **The dispatcher IS started in
+`cmd/platform-api/main.go`** (LogSink only, after the H sweeper merge) but
+**no route exists**, so **no alert is delivered to anyone**: a stored
 alert, a stored P1 severity or an `unrouted` delivery row is NOT a
 delivery. ALERT-DELIVERY-1 stays OPEN until the dispatcher is wired AND a
 human has configured real routes (HD-PRH2-4-OPS) over a real channel
@@ -633,11 +633,11 @@ must still review the latest run's open mismatch rows on every sweep.
 
 ### What is still stubbed / not yet wired
 
-- **The dispatcher is not started in `cmd/platform-api/main.go`.** The wiring
-  is a ready-to-apply patch recorded in ADR 0102 §17.6; it is released only
-  after H (the sweeper process) merges. Until then no alert is delivered, even
-  to the log sink.
-- **No route exists** (HD-PRH2-4-OPS), so after wiring every alert is
+- **The dispatcher runs (LogSink only) but delivers nothing real.** It is wired
+  in `cmd/platform-api/main.go` (ADR 0102 §17.6). With no `alert_routes` row
+  every alert is `unrouted`; the log sink only records deliveries for routes
+  that do not yet exist.
+- **No route exists** (HD-PRH2-4-OPS), so every alert is
   `unrouted` until a human configures routes. Real channels are PROVIDER
   DEPENDENT; only the log sink and the MOCK sink exist.
 - **No route-authoring endpoint.** Ack and resolve are API calls now; route

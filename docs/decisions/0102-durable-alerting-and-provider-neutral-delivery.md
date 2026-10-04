@@ -1376,7 +1376,7 @@ payments + devops under the PRH-2 I-wire brief. **No migration** (decision below
 | Dispatcher loop (panic recovery per pass, immediate first pass, shutdown drain, injectable ticker) | **IMPLEMENTED** |
 | Stable delivery dedup key `<alert_id>:<step>` and discriminator on `Delivery` | **IMPLEMENTED** |
 | `POST /v1/admin/alerts/{id}/ack\|resolve` (`alert:manage`, platform scope, audited) | **IMPLEMENTED** |
-| `cmd/platform-api/main.go` dispatcher wiring | **NOT DONE** — released only after H merges (plan Rule 5); ready-to-apply patch in §17.6 |
+| `cmd/platform-api/main.go` dispatcher wiring | **IMPLEMENTED** after H merged (main `22ff3b6`), as one separate commit touching only `cmd/platform-api` (LogSink only, never MockSink). **Starting it delivers nothing**: no route exists, so every alert is `unrouted` |
 | Route configuration, recipients, real channel | **NOT IMPLEMENTED** / **PROVIDER DEPENDENT**; HD-PRH2-4-OPS. **No route is seeded.** |
 | §8 rows 12–13 (casino-play and sportsbook-settlement simulation alerts) | **NOT IMPLEMENTED** (p3, simulation, never delivered; deferred) |
 | ALERT-DELIVERY-1 | **stays OPEN** until the dispatcher is wired in `main.go` AND routes exist |
@@ -1553,11 +1553,13 @@ The detached retry is mandatory for every Kind (§7.5) and applies to all rows b
   Pinned by `TestAlertAdmin_AckLockDoesNotBlockInTxRaise` (fails on `FOR UPDATE`). A failed ack/resolve
   logs the SQLSTATE class only.
 
-### 17.6 `main.go` wiring: NOT DONE (ready-to-apply patch)
+### 17.6 `main.go` wiring: IMPLEMENTED after H (patch as applied)
 
-Applied only after H merges, as one commit that touches only `cmd/platform-api/main.go`. LogSink only:
-the MOCK sink is never wired in a binary. After it is applied every alert is `unrouted` until a human
-configures routes.
+Applied after H merged, as one separate commit touching only `cmd/platform-api` (`main.go` plus
+`alert_dispatcher_wiring_test.go`, which pins LogSink-only / never MockSink / exactly one dispatcher).
+The blocks sit after H's delimited PRH-2 H start block and after H's shutdown-drain block, each
+delimited "PRH-2 I-wire". LogSink only: the MOCK sink is never wired in a binary. Now that it is
+wired, every alert is `unrouted` until a human configures routes. The patch, as applied:
 
 ```go
 	// ADR 0102 6.1 / I-wire (ALERT-DELIVERY-1): the durable alert dispatcher.
@@ -1631,7 +1633,7 @@ default (`alerting.DefaultLoopInterval`, 15s); making it configurable belongs to
 
 ### 17.8 Known gaps and residuals (honest)
 
-- No delivery exists (dispatcher unwired, no route, no real channel).
+- No delivery exists: the dispatcher now runs (LogSink only) but no route exists (HD-PRH2-4-OPS) and there is no real channel, so every alert is `unrouted`. ALERT-DELIVERY-1 stays OPEN.
 - Rows 12–13 not wired; payout disputes not alerted; the terminal-state amount-mismatch audit has no
   alert.
 - The accepted §7.3a crash residual stands (a crash between an RR-site commit and its post-commit
@@ -1661,7 +1663,9 @@ exactly), LF F1 (real LF test 9), LF F2 (runbook + the §17.7 precondition), LF 
 shutdown cancellation), LF F4/F5 (discarded-result static guard; payment_statement persistent-failure
 test), CR-2 (dispatcher pass counter test), CR-3 (takeover discriminator), CR-6 (25P02 return value
 asserted), CR-7 (snapshot count, `Pending` receiver, reachability pin, negative controls), CR-8
-(doc corrections). **Deferred:** the H merge resolution (drive.go phase C and sweeper.go
-`processViaQueryStatus` must keep H's detached context: `alerting.InTx(phaseCtx, ...)` /
-`alerting.InTx(applyCtx, ...)`, and H's `txClosureViolations` guard must treat `InTx` as a transaction
-closure with a negative control), done only after H merges to main.
+(doc corrections). **H merge (done, merge commit `f92cfa3`):** drive.go phase C and sweeper.go
+`processViaQueryStatus` keep H's detached, bounded contexts (LF F1) and open through
+`alerting.InTx(phaseCtx, ...)` / `alerting.InTx(applyCtx, ...)` with Flush after the nil-error check; H's
+S-8 guard `txClosureViolations` now treats `alerting.InTx` closures as transaction closures, with a
+negative control; this branch's static guards accept H's new code unchanged. The `main.go` wiring
+followed as its own commit (§17.6).
