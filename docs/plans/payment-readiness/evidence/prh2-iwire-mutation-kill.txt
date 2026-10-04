@@ -104,3 +104,32 @@ Mutants not generated (stated, not hidden):
 
 Other verification: see the final report (full -race -tags integration runs, -count=50 for LF test 9,
 vet with both tag sets, gofmt, golangci-lint).
+
+
+POST-MERGE RE-RUN (main 6cbea70 = D1, D2, F-pay merged into the branch by merge commit; no textual
+conflicts; the merge changed only kycgate.go, payout.go, payout_sweep.go and test/doc files, none of
+which this branch edits). Merged head b3c055f, fresh private DB. Re-run: every payments-region
+mutant, the payment-statement reconciliation mutants, the reversal_link mutant, a static guard
+mutant and the combined A12. 20 rows, 20 KILLED, 0 SURVIVED. (The A1/A1b/A2 individual survivors
+above are unchanged and still classified as redundant defence-in-depth.)
+
+P1 | KILLED | alert reason taken raw (not from the closed set) | TestAlertReasonFor_ClosedSetOnly (./internal/payments/)
+P2 | KILLED | invalid_provider_reference detail not collapsed | TestAlertReasonFor_ClosedSetOnly (./internal/payments/)
+P3 | KILLED | non-allowlisted attribute on the park alert | TestDepositParkAlert_ShapeIsValidForEveryReason (./internal/payments/)
+P4 | KILLED | park alert not raised in parkDepositAttempt (sync/conflict/invalid/poll/tombstone-poll) | TestIWire_T10Park_SyncAmountMismatch_RaisesP1 (./internal/payments/)
+P5a | KILLED | receipt site without its alert: success_for_never_sent_attempt | TestIWire_ReceiptT15_SuccessForNeverSentAttempt_RaisesP1 (./internal/payments/)
+P5b | KILLED | receipt site without its alert: callback_amount_asset_mismatch | TestIWire_ReceiptT10_CallbackAmountAssetMismatch_RaisesP1 (./internal/payments/)
+P5c | KILLED | receipt site without its alert: tombstone (live attempt receipt) | TestIWire_Tombstone_ReceiptLiveAttempt_RaisesP1 (./internal/payments/)
+P5d | KILLED | receipt site without its alert: tombstone (declined attempt receipt, T13t) | TestIWire_Tombstone_ReceiptDeclinedAttempt_RaisesP1 (./internal/payments/)
+P6 | KILLED | poll-contradiction audit action raises no alert | TestIWire_PollEvidenceContradictsTerminalAttempt_RaisesP1 (./internal/payments/)
+P7 | KILLED | multiple-success raises no alert | TestIWire_MultipleSuccess_RaisesP1_KeyedByIntent (./internal/payments/)
+P7b | KILLED | index backstop alert never raised | TestIWire_MultipleSuccess_ConcurrentRaisersDedupToOneAlert (./internal/payments/)
+P8 | KILLED | deposit park alert raised for payout attempts | TestRaiseDepositParkAlert_IsNoOpForPayoutAttempts (./internal/payments/)
+P9a | KILLED | phase C (drive.go) never flushes the detached retry | TestIWire_CascadeDrivenPark_InjectedRaiseFailure_ParkCommits_DetachedP1Persists (./internal/payments/)
+P9b | KILLED | phase C (deposit_v2.go) never flushes | TestIWire_PhaseC_T10Park_InjectedRaiseFailure_ParkCommits_DetachedP1Persists (./internal/payments/)
+P9c | KILLED | sweeper never flushes | TestIWire_Sweeper_T10Park_InjectedRaiseFailure_ParkCommits_DetachedP1Persists (./internal/payments/)
+R8 | KILLED | payment statement (RR) mismatch alert not raised | TestIWire_Recon_PaymentStatementP1_PostCommit (./internal/reconciliation/)
+R9e | KILLED | run_failed alert not raised for payment_statement | TestIWire_Recon_PaymentStatementRunFailedP1_PerProvider (./internal/reconciliation/)
+H3 | KILLED | webhook integrity reversal_link alert not raised | TestIWire_Webhook_ReversalLink_RaisesDetachedP1 (./internal/httpserver/)
+S1 | KILLED | RaiseGuarded called outside InTx and outside the sanctioned helpers (B-1) | TestStaticWiring_RaiseGuardedOnlyInsideInTxOrSanctionedHelpers_B1 (./internal/alerting/)
+A12 | KILLED | both permission gate and platform-scope check removed (the two independent layers) | ['--- FAIL: TestAlertAdmin_Authorization_TenantAndPlayerAndAnonymousRefused (1.86s)']
