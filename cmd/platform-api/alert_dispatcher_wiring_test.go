@@ -181,6 +181,13 @@ func checkAlertWiring(t *testing.T, files map[string]string, minWait time.Durati
 			// ctx must not be redeclared or reassigned inside the goroutine (a
 			// context.WithoutCancel(ctx) shadow would keep the loop alive past shutdown).
 			ast.Inspect(g, func(x ast.Node) bool {
+				if vs, ok := x.(*ast.ValueSpec); ok { // var ctx = ... (inside a DeclStmt)
+					for _, id := range vs.Names {
+						if id.Name == "ctx" {
+							v = append(v, "the dispatcher goroutine must not declare a variable named ctx")
+						}
+					}
+				}
 				if as, ok := x.(*ast.AssignStmt); ok {
 					for _, l := range as.Lhs {
 						if id, ok := l.(*ast.Ident); ok && id.Name == "ctx" {
@@ -362,6 +369,7 @@ func TestMain_AlertDispatcherWiring_NegativeControls(t *testing.T) {
 		{"Add removed", "\talertDispatcherWG.Add(1)\n", ""},
 		{"Add after the go statement", "\talertDispatcherWG.Add(1)\n\tgo func() {\n\t\tdefer alertDispatcherWG.Done()", "\tgo func() {\n\t\tdefer alertDispatcherWG.Done()"},
 		{"ctx shadowed in the goroutine", "\t\tdefer alertDispatcherWG.Done()\n", "\t\tdefer alertDispatcherWG.Done()\n\t\tctx := context.WithoutCancel(ctx)\n"},
+		{"ctx var-declared in the goroutine", "\t\tdefer alertDispatcherWG.Done()\n", "\t\tdefer alertDispatcherWG.Done()\n\t\tvar ctx = context.WithoutCancel(ctx)\n"},
 		{"drain moved before Shutdown", "\tserver.Shutdown(shutdownCtx)\n", ""},
 		{"interval changed", "alerting.DefaultLoopInterval)", "30 * time.Second)"},
 		{"mock sink", "alerting.LogSink{Logger: logger}", "alerting.MockSink{}"},

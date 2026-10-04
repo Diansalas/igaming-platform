@@ -233,10 +233,11 @@ func HoldAdvisoryLock(t *testing.T, pool *db.Pool, key int64) (release func()) {
 
 // WaitUpTo returns the subject tenant's alert rows as soon as ok(rows) holds, or
 // the last rows read once the bound elapses (it never fails the test itself).
-// HTTP handlers now flush the response BEFORE their post-response alert work
-// (ADR 0102 17.10), so a test that has just received a response and asserts a
-// durable alert must wait for that work; the bound is a failure guard, never a
-// timing assertion.
+// The post-response alert work of an HTTP handler can still be running when a
+// test that has just received a response reads the alerts (the kill-switch
+// handler flushes early; the others finish it before returning, but a test that
+// does not read the body may proceed sooner), so a test asserting a durable
+// alert waits for it; the bound is a failure guard, never a timing assertion.
 func WaitUpTo(t *testing.T, pool *db.Pool, tenantID uuid.UUID, bound time.Duration, ok func([]Row) bool) []Row {
 	t.Helper()
 	deadline := time.Now().Add(bound)

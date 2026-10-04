@@ -420,10 +420,11 @@ func newPaymentWebhookHandler(deps Deps) http.HandlerFunc {
 		}
 		// ADR 0102 7.3 (B-1): the evidence transaction opens through
 		// alerting.InTx; a swallowed in-tx raise gets its mandatory detached
-		// retry via Flush, deferred here so it runs when the handler returns
-		// (after the response write, but BEFORE the handler returns and BEFORE the
-		// admission hold's earlier-registered release). No response flush here: a
-		// deferred flush would turn a panic into an implicit 200.
+		// retry via Flush, deferred here so it runs when the handler returns:
+		// after the response was written into the (unflushed) response, before the
+		// handler returns and before the admission hold's earlier-registered release.
+		// No response flush here: a deferred flush would turn a panic into an
+		// implicit 200.
 		var pendingAlerts *alerting.Pending
 		var postResponseRaises []func() // failure-path P1s, run after the response is written
 		defer func() {

@@ -29,6 +29,12 @@ const flushLockKeyBase int64 = 0x1F1A5000
 
 // within runs f and fails the test if it does not finish (failure guard only;
 // never an assertion about how long the happy path takes).
+//
+// Timing dependency (final review O-3): WITHOUT the early flush the request
+// would complete only after the 5s detached bound of the blocked raise, with the
+// raise given up; the test then fails on its post-release positive assertion
+// (the alert must exist), not on this 60s guard. So the test relies on the time
+// from the response to release() staying well under that 5s bound.
 func within(t *testing.T, what string, f func()) {
 	t.Helper()
 	done := make(chan struct{})
@@ -36,7 +42,7 @@ func within(t *testing.T, what string, f func()) {
 	select {
 	case <-done:
 	case <-time.After(60 * time.Second):
-		t.Fatalf("%s did not return while the post-response alert work was blocked: the response was not flushed before the alert work", what)
+		t.Fatalf("%s did not return within the failure guard while the post-response alert work was blocked", what)
 	}
 }
 

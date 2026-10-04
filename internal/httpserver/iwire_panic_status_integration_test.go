@@ -143,6 +143,7 @@ func TestIWire_PaymentWebhookPanic_IsA5xxOnTheWire_AccessLogAgrees_ThenRedeliver
 		return r.StatusCode
 	}
 
+	tok := player.Tokens.AccessToken
 	pp.armed.Store(true)
 	status := cb()
 	if status < 500 || status > 599 {
@@ -155,11 +156,20 @@ func TestIWire_PaymentWebhookPanic_IsA5xxOnTheWire_AccessLogAgrees_ThenRedeliver
 		t.Fatalf("the access log must agree with the wire: wire=%d log=%d (found=%v)", status, got, ok)
 	}
 
-	// The provider's redelivery (the panic is gone) is processed normally.
+	if bal := walletCashBalance(t, srv, tok); bal != 0 {
+		t.Fatalf("the panicking callback must have rolled back: cash balance %d, want 0", bal)
+	}
+
+	// The provider's redelivery (the panic is gone) is processed normally and
+	// credits the deposit exactly once.
 	pp.armed.Store(false)
 	if s := cb(); s != http.StatusOK {
 		t.Fatalf("redelivery after the panic must succeed, got %d", s)
 	}
+	if bal := walletCashBalance(t, srv, tok); bal != amount {
+		t.Fatalf("the redelivery must credit the deposit: cash balance %d, want %d", bal, amount)
+	}
+	assertLedgerBalancedAndReconciled(t, pool, tenant.ID)
 }
 
 func TestIWire_CasinoCallbackPanic_IsA5xxOnTheWire_AccessLogAgrees(t *testing.T) {

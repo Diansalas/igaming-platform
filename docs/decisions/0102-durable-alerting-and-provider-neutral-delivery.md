@@ -508,12 +508,14 @@ The business outcome never depends on the alert row.
   context commits. An AST test asserts that no `Pending` spans two transactions.
 - **When `Flush` runs (LF F5, SR-8).**
   - HTTP handlers call `Flush` **after the handler has written its response and before it returns**
-    (a deferred call). No flush is forced for the webhook, casino and simulation-callback paths: the
-    response body is complete only when the handler returns, so body EOF, connection reuse and a
-    buffering proxy still wait for this work (a degraded alert path adds up to about 5s to those
-    handlers, with the admission slot held). Only the kill-switch engage and the simulation
-    payload-mismatch branch flush early (§17.10). It still runs **inside the ADR 0097 admission hold**, which is released in the
-    handler's deferred release, so the load stays bounded.
+    (a deferred call). No flush is forced for the webhook, casino and simulation-callback paths, so on
+    those paths **nothing (status, headers or body) reaches the provider until the handler returns**; the
+    response goes out in one piece with a `Content-Length` (it is not chunked). A degraded alert path
+    therefore adds up to about 5s per detached raise to the latency the provider sees, which is what
+    decides its timeout and redelivery, and the admission slot is held for that time. Only the
+    kill-switch engage and the simulation payload-mismatch branch flush early (§17.10; chunked, so only
+    their terminating chunk waits). It still runs **inside the ADR 0097 admission hold**, which is
+    released in the handler's deferred release, so the load stays bounded.
   - The 200 body and its timing are unchanged.
   - Non-HTTP callers (the sweeper and scheduler) call `Flush` right after the commit.
   - `Flush` uses a detached, bounded context (the `deniedAuditCtx` pattern,
@@ -1672,10 +1674,12 @@ default (`alerting.DefaultLoopInterval`, 15s); making it configurable belongs to
   no reason code (the ADR requires one only on resolve).
 - Ack-tx commit wait (LF L1): the post-response alert work (the queued raises and `Pending.Flush`) runs
   before the handler returns, so a handler goroutine and its admission slot stay held through that work
-  (bounded by the 5s detached context and at most three attempts). For the webhook, casino and simulation-generic paths the
-  client's response body (and connection reuse) also waits for this work, because those handlers do not
-  flush early (§17.10); only the kill-switch engage and the simulation payload-mismatch branch send
-  status, headers and body bytes early. An ack or resolve transaction that waits on a lock the business transaction holds is also
+  (bounded by the 5s detached context and at most three attempts). For the webhook, casino and simulation-generic paths
+  nothing (status, headers or body) reaches the provider until the handler returns, because those
+  handlers do not flush early (§17.10); the response is then sent with a `Content-Length`. A degraded
+  alert path adds up to about 5s per detached raise to the latency the provider sees, which decides its
+  timeout and redelivery. Only the kill-switch engage and the simulation payload-mismatch branch send
+  status, headers and body bytes early (chunked, so only their terminating chunk waits). An ack or resolve transaction that waits on a lock the business transaction holds is also
   bounded by the request context; that wait is not separately measured.
 - A new K2 breach does not page while the one open alert exists (§17.7 precondition, NOT built).
 - `ALERT-KINDS-DEDICATED-1` (§17.1) and `ALERT-RETENTION-1` (§14 item 6) remain.

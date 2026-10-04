@@ -580,7 +580,7 @@ func assertCasinoIntegrityAlert(t *testing.T, e *rejEnvHTTP, class string, statu
 	var got []alertinject.Row
 	rows := alertinject.ForSubject(t, e.pool, e.tenant.ID)
 	if mapped && status >= 400 {
-		// the alert is raised after the response is flushed (ADR 0102 17.10): wait
+		// the alert is raised by post-response work (ADR 0102 7.4); wait (bounded)
 		// for both deliveries' occurrences
 		rows = alertinject.WaitUpTo(t, e.pool, e.tenant.ID, 10*time.Second, func(rs []alertinject.Row) bool {
 			k := alertinject.Find(rs, string(alerting.KindCasinoCallbackIntegrity))
