@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/google/uuid"
@@ -158,4 +159,73 @@ func Find(rows []Row, kind string) []Row {
 		}
 	}
 	return out
+}
+
+// InstallBlockDetached makes every DETACHED alert INSERT for subjectTenantID
+// (a fresh transaction with no write yet) block on pg_advisory_xact_lock(key)
+// until the test releases that lock. In-transaction raises (a transaction that
+// has already written) are not blocked. It is how a test proves, with no
+// wall-clock assertion, that a response reached the client BEFORE the
+// post-response alert work finished: hold the lock, make the request, and the
+// client must get its response while the raise is still blocked.
+func InstallBlockDetached(t *testing.T, pool *db.Pool, subjectTenantID uuid.UUID, key int64) {
+	t.Helper()
+	name := "iw_block_" + strings.ReplaceAll(uuid.NewString(), "-", "")[:16]
+	fn := fmt.Sprintf(`CREATE FUNCTION %s() RETURNS trigger AS $$
+BEGIN
+  IF NEW.subject_tenant_id = '%s'::uuid AND pg_current_xact_id_if_assigned() IS NULL THEN
+    PERFORM pg_advisory_xact_lock(%d);
+  END IF;
+  RETURN NEW;
+END $$ LANGUAGE plpgsql`, name, subjectTenantID.String(), key)
+	if err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, fn); err != nil {
+			return err
+		}
+		_, err := tx.Exec(ctx, fmt.Sprintf(`CREATE TRIGGER %s_alerts BEFORE INSERT ON alerts FOR EACH ROW EXECUTE FUNCTION %s()`, name, name))
+		return err
+	}); err != nil {
+		t.Fatalf("alertinject: install block: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+			if _, err := tx.Exec(ctx, fmt.Sprintf(`DROP TRIGGER IF EXISTS %s_alerts ON alerts`, name)); err != nil {
+				return err
+			}
+			_, err := tx.Exec(ctx, fmt.Sprintf(`DROP FUNCTION IF EXISTS %s()`, name))
+			return err
+		})
+	})
+}
+
+// HoldAdvisoryLock takes pg_advisory_xact_lock(key) in an open transaction and
+// returns a release function that ends it. Pair with InstallBlockDetached.
+func HoldAdvisoryLock(t *testing.T, pool *db.Pool, key int64) (release func()) {
+	t.Helper()
+	locked := make(chan struct{})
+	rel := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		done <- pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+			if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, key); err != nil {
+				close(locked)
+				return err
+			}
+			close(locked)
+			<-rel
+			return nil
+		})
+	}()
+	<-locked
+	var once sync.Once
+	release = func() {
+		once.Do(func() {
+			close(rel)
+			if err := <-done; err != nil {
+				t.Errorf("alertinject: advisory lock holder: %v", err)
+			}
+		})
+	}
+	t.Cleanup(release)
+	return release
 }

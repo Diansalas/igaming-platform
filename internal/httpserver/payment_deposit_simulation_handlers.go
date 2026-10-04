@@ -264,8 +264,9 @@ func writeDepositCallbackError(w http.ResponseWriter, requestID string, logger i
 		logger.Error("payment_simulation_integrity_alert_payload_mismatch", "error", err)
 		code, msg := mapReceiveCallbackError(err, callbackRouteSimulate)
 		apierror.Write(w, requestID, code, msg)
+		flushResponse(w)
 		if onPayloadMismatch != nil {
-			onPayloadMismatch() // after the response (ADR 0102 7.4)
+			onPayloadMismatch() // after the response is delivered (ADR 0102 7.4)
 		}
 		return
 	}
@@ -335,7 +336,10 @@ func newSimulateDepositCallbackHandler(deps Deps) http.HandlerFunc {
 		)
 		// ADR 0102 7.3: post-commit detached retry for a swallowed in-tx raise;
 		// runs when the handler returns, after the response is written.
-		defer func() { pending.Flush(r.Context()) }()
+		defer func() {
+			flushResponse(w)
+			pending.Flush(r.Context())
+		}()
 		err = deps.DB.WithTenantReadOnly(r.Context(), tc.TenantID, func(ctx context.Context, tx pgx.Tx) error {
 			intent, err := resolveOwnDepositIntent(ctx, tx, depositID, playerAccountID)
 			if err != nil {

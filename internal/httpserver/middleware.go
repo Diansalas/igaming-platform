@@ -55,6 +55,10 @@ type statusRecorder struct {
 	status int
 }
 
+// Unwrap lets http.NewResponseController reach the underlying writer's Flush
+// (flushResponse); without it the access-log wrapper would hide Flush.
+func (r *statusRecorder) Unwrap() http.ResponseWriter { return r.ResponseWriter }
+
 func (r *statusRecorder) WriteHeader(status int) {
 	r.status = status
 	r.ResponseWriter.WriteHeader(status)

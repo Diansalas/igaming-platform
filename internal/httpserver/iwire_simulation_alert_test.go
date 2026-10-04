@@ -46,3 +46,17 @@ func TestWriteDepositCallbackError_PayloadMismatchHookFiresOnlyForPayloadMismatc
 	// A nil hook is allowed (no panic).
 	writeDepositCallbackError(httptest.NewRecorder(), "req-1", simLogger{}, payments.ErrCallbackPayloadMismatch, nil)
 }
+
+// C1: the simulation route's payload-mismatch hook runs only after the response
+// has been written AND flushed to the client.
+func TestWriteDepositCallbackError_PayloadMismatchHookRunsAfterTheResponseIsFlushed(t *testing.T) {
+	rec := httptest.NewRecorder()
+	var bodyAtHook, flushedAtHook bool
+	writeDepositCallbackError(rec, "req-1", simLogger{}, payments.ErrCallbackPayloadMismatch, func() {
+		bodyAtHook = rec.Body.Len() > 0
+		flushedAtHook = rec.Flushed
+	})
+	if !bodyAtHook || !flushedAtHook {
+		t.Fatalf("the hook must run after the body is written and flushed: body=%v flushed=%v", bodyAtHook, flushedAtHook)
+	}
+}

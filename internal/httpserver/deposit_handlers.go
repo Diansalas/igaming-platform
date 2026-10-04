@@ -425,6 +425,7 @@ func newPaymentWebhookHandler(deps Deps) http.HandlerFunc {
 		var pendingAlerts *alerting.Pending
 		var postResponseRaises []func() // failure-path P1s, run after the response is written
 		defer func() {
+			flushResponse(w) // the client gets the response BEFORE any alert work below
 			pendingAlerts.Flush(r.Context())
 			for _, raise := range postResponseRaises {
 				raise()

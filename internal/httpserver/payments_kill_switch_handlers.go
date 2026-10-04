@@ -725,7 +725,8 @@ func newEngageKillSwitchHandler(deps Deps) http.HandlerFunc {
 		// row and its audit row are already committed; no failure of any
 		// class in the alert path can roll back or change this response.
 		writeJSON(w, http.StatusOK, toKillSwitchDTO(ks))
-		raiseKillSwitchEngagedAlert(r.Context(), deps, c, ks, isTakeover) // after the response (ADR 0102 7.3)
+		flushResponse(w)
+		raiseKillSwitchEngagedAlert(r.Context(), deps, c, ks, isTakeover) // after the response is delivered (ADR 0102 7.3)
 	}
 }
 

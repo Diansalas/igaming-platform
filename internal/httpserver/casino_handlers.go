@@ -443,6 +443,7 @@ func newCasinoWebhookHandler(deps Deps) http.HandlerFunc {
 		// site; one open alert per (tenant, provider, reason).
 		var postResponseRaises []func() // run after the response is written (ADR 0102 7.4)
 		defer func() {
+			flushResponse(w) // the provider gets the response BEFORE any alert work below
 			for _, raise := range postResponseRaises {
 				raise()
 			}
