@@ -82,18 +82,18 @@ func seedFixture(t *testing.T, pool *db.Pool) fixture {
 	if err != nil {
 		t.Fatalf("seed brand/player: %v", err)
 	}
+	// PRH-2 E1: outbox rows this test leaves behind must never reach a later
+	// test's worker pass.
+	t.Cleanup(func() { purgeOutboxForTenant(t, f.tenantID) })
 	return f
 }
 
+// seedVerification seeds a created verification the way production now does:
+// phase A (RequestVerification) plus the outbox worker applying the MOCK's
+// definitive create result (ADR 0106: no HTTP-path code calls a vendor).
 func seedVerification(t *testing.T, pool *db.Pool, f fixture) uuid.UUID {
 	t.Helper()
-	v, err := CreateVerification(context.Background(), pool, NewMockOutboundResolver(), NewMockKYCProvider(), CreateVerificationParams{
-		TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerID, PersonID: f.personID,
-	})
-	if err != nil {
-		t.Fatalf("seed verification: %v", err)
-	}
-	return v.ID
+	return createViaWorker(t, pool, NewMockOutboundResolver(), NewMockKYCProvider(), f).ID
 }
 
 const pgRLSViolation = "42501"

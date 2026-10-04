@@ -248,6 +248,9 @@ func TestAdmission_T6g_B1RunsBeforeWithTenant_ExactPoolAcquisitionCounts(t *test
 		var created map[string]any
 		decodeBody(t, createResp, &created)
 		verificationID := uuid.MustParse(created["id"].(string))
+		// PRH-2 E1: the reference exists only once the outbox worker applied the create.
+		registerKYCOutboxWorker(t, pool, orchestrator, kyc.NewMockOutboundResolver())
+		drainKYCOutbox(t)
 		beforeStatus, beforeUpdatedAt, providerRef := kycVerificationSnapshot(t, pool, tenant.ID, verificationID)
 		if providerRef == "" {
 			t.Fatal("kyc: the seeded verification has no provider_reference - the test's own setup is broken")

@@ -24,34 +24,45 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/google/uuid"
 
 	"github.com/Diansalas/igaming-platform/internal/auth"
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/identity"
 	"github.com/Diansalas/igaming-platform/internal/identityresolution"
 	"github.com/Diansalas/igaming-platform/internal/kyc"
+	"github.com/Diansalas/igaming-platform/internal/providercred"
 )
 
 const uploadLogRedactionSentinel = "VENDOR-SUBMIT-TRANSPORT-SECRET-qrs456"
 
 // failingSubmitVerificationAdapter wraps the MOCK but always fails
 // SubmitVerification with an error carrying a sentinel string - standing
-// in for a real adapter's own transport error on the SUBMIT call
-// (distinct from failingCreateVerificationAdapter's own CREATE failure),
-// so the upload handler's own "submit_verification_failed" log line is
-// what gets exercised, not the create-path's line.
-type failingSubmitVerificationAdapter struct{ *kyc.MockKYCProvider }
+// in for a real adapter's own transport error on the SUBMIT call. calls counts
+// the vendor submit calls actually made.
+type failingSubmitVerificationAdapter struct {
+	*kyc.MockKYCProvider
+	calls *atomic.Int32
+}
 
 func (a failingSubmitVerificationAdapter) SubmitVerification(ctx context.Context, providerReference string, documents []kyc.SubmittedDocument, call kyc.CallContext) (kyc.ProviderResult, error) {
+	a.calls.Add(1)
 	return kyc.ProviderResult{}, errors.New("POST https://vendor.example/submit?token=" + uploadLogRedactionSentinel)
 }
 
-func newUploadSubmitFailureLogRedactionServer(t *testing.T, pool *db.Pool, issuer *auth.Issuer, logger *slog.Logger) *httptest.Server {
+func newUploadSubmitFailureLogRedactionServer(t *testing.T, pool *db.Pool, issuer *auth.Issuer, logger *slog.Logger) (*httptest.Server, *atomic.Int32) {
 	t.Helper()
 	base := kyc.NewMockKYCProvider()
-	adapter := failingSubmitVerificationAdapter{base}
+	adapter := failingSubmitVerificationAdapter{MockKYCProvider: base, calls: new(atomic.Int32)}
+	purgeKYCOutbox(t)
+	t.Cleanup(func() { purgeKYCOutbox(t) })
+	orch := kyc.NewOrchestrator(map[string]kyc.KYCProvider{"mock": adapter}, kyc.NewMockWebhookCredentials(base))
+	w := registerKYCOutboxWorker(t, pool, orch, kyc.NewMockOutboundResolver())
+	w.Logger = logger
 	srv := httptest.NewServer(New(Deps{
 		Logger:                 logger,
 		DB:                     pool,
@@ -60,26 +71,24 @@ func newUploadSubmitFailureLogRedactionServer(t *testing.T, pool *db.Pool, issue
 		AccessTokenTTL:         5 * time.Minute,
 		RefreshTokenTTL:        time.Hour,
 		PersonResolver:         identityresolution.NewMockPersonResolver(),
-		KYCOrchestrator:        kyc.NewOrchestrator(map[string]kyc.KYCProvider{"mock": adapter}, kyc.NewMockWebhookCredentials(base)),
+		KYCOrchestrator:        orch,
 		KYCWebhookEnabled:      true,
 		DocumentStorage:        kyc.NewMockDocumentStorageProvider(),
 		MalwareScanner:         kyc.NewMockMalwareScanner(),
 		KYCOutboundCredentials: kyc.NewMockOutboundResolver(),
 	}))
 	t.Cleanup(srv.Close)
-	return srv
+	return srv, adapter.calls
 }
 
-// TestKYC_UploadSubmitFailureLog_NeverLeaksRawErrorText is R2-2's own
-// required test: an upload that succeeds (phase A commits) but whose
-// immediately-following SubmitVerification (phase B/C) fails must never
-// leak the raw adapter error text into the "submit_verification_failed"
-// log line - only kyc.RedactedProviderErrorDetail's bounded
-// classification, mirroring the create-path's own already-pinned test.
+// TestKYC_UploadSubmitFailureLog_NeverLeaksRawErrorText (R2-2, rewritten for
+// PRH-2 E1): the upload handler commits the document and its submit outbox row
+// and makes NO vendor call; the worker's later submit fails with raw adapter
+// error text, which must never reach a worker log line.
 func TestKYC_UploadSubmitFailureLog_NeverLeaksRawErrorText(t *testing.T) {
 	pool, issuer := testEnv(t)
 	logger, captured := newCapturingLogger()
-	srv := newUploadSubmitFailureLogRedactionServer(t, pool, issuer, logger)
+	srv, submitCalls := newUploadSubmitFailureLogRedactionServer(t, pool, issuer, logger)
 	brand := mustCreateBrand(t, pool, mustCreateTenant(t, pool))
 	player := mustRegisterPlayer(t, srv, brand.Slug)
 
@@ -90,42 +99,40 @@ func TestKYC_UploadSubmitFailureLog_NeverLeaksRawErrorText(t *testing.T) {
 	var verification map[string]any
 	decodeBody(t, verResp, &verification)
 	verificationID := verification["id"].(string)
+	drainKYCOutbox(t) // the create is sent (the adapter only fails SUBMIT)
 
 	uploadResp := postMultipartDocument(t, srv, player.Tokens.AccessToken, verificationID, "passport", "passport.png", tinyPNG)
 	defer uploadResp.Body.Close()
-	// The document upload itself (phase A) still succeeds - only the
-	// FOLLOWING SubmitVerification call (phase B/C) fails, and that
-	// failure never invalidates the already-committed upload (ADR 0095
-	// §15.3).
 	if uploadResp.StatusCode != http.StatusCreated {
-		t.Fatalf("expected 201 uploading a document even though the following submit fails, got %d", uploadResp.StatusCode)
+		t.Fatalf("expected 201 uploading a document, got %d", uploadResp.StatusCode)
+	}
+	if got := submitCalls.Load(); got != 0 {
+		t.Fatalf("the HTTP upload path must make NO vendor call, got %d", got)
 	}
 
+	drainKYCOutbox(t)
+	if got := submitCalls.Load(); got != 1 {
+		t.Fatalf("the worker must make exactly one vendor submit call, got %d", got)
+	}
 	var lines []capturedLogLine
 	for _, l := range captured() {
-		if l.msg == "submit_verification_failed" {
+		for k, v := range l.attrs {
+			if s, ok := v.(string); ok && strings.Contains(s, uploadLogRedactionSentinel) {
+				t.Fatalf("log line %q field %q leaked raw provider error text: %q", l.msg, k, s)
+			}
+		}
+		if l.msg == "kyc_outbox_provider_call_failed" && l.attrs["operation"] == "submit" {
 			lines = append(lines, l)
+		}
+		if l.msg == "submit_verification_failed" {
+			t.Fatal("the handler must not log a vendor submit failure: it makes no vendor call")
 		}
 	}
 	if len(lines) != 1 {
-		t.Fatalf("expected exactly 1 submit_verification_failed line, got %d: %+v", len(lines), lines)
+		t.Fatalf("expected exactly 1 worker submit failure line, got %d: %+v", len(lines), lines)
 	}
-	for k, v := range lines[0].attrs {
-		if s, ok := v.(string); ok && strings.Contains(s, uploadLogRedactionSentinel) {
-			t.Fatalf("submit_verification_failed field %q leaked raw provider error text: %q", k, s)
-		}
-	}
-	// The wrapping fmt.Errorf("%w: submit verification to provider: %v",
-	// ErrProviderUnavailable, err) in SubmitVerification means
-	// errors.Is(err, ErrProviderUnavailable) holds, so
-	// RedactedProviderErrorDetail correctly classifies this as "provider
-	// unavailable" (not the default "internal error (redacted)" branch) -
-	// exactly like the create-path's own already-pinned test. The point of
-	// THIS test is that the SENTINEL never leaks (checked above), not
-	// which specific closed class applies.
-	detail, _ := lines[0].attrs["detail"].(string)
-	if detail != "provider unavailable" {
-		t.Fatalf(`expected detail="provider unavailable", got %q`, detail)
+	if class, _ := lines[0].attrs["class"].(string); class != string(kyc.ClassAmbiguous) {
+		t.Fatalf(`expected class="ambiguous", got %q`, class)
 	}
 }
 
@@ -207,20 +214,28 @@ func TestKYC_ReviewVerificationConflict_Returns409NotInternalError(t *testing.T)
 	t.Fatalf("R2-3: did not observe a genuine ErrVerificationStatusConflict 409 (message containing \"verification status changed\") in %d attempts", maxAttempts)
 }
 
-// TestKYC_UploadOrphanVerification_Returns409NotInternalError is R2-3's
-// own required test for kyc.ErrVerificationNotSubmitted: a player who
-// somehow knows an orphan verification's id (surfaced legitimately by
-// their own GET /v1/me/kyc/verifications listing) must get 409 uploading
-// to it, never 500 - if the ErrVerificationNotSubmitted branch in
-// newUploadMyDocumentHandler is removed, this falls through to whatever
-// the next matched branch is (or the generic 500), not the required 409.
+// mismatchedKYCResolver hands back a credential for a DIFFERENT tenant: the
+// worker's binding check ends the create failed_terminal, which leaves a
+// harmless orphan with no live create (PRH-2 E1).
+type mismatchedKYCResolver struct{}
+
+func (mismatchedKYCResolver) Resolve(_ context.Context, _ providercred.TenantTxRunner, _ uuid.UUID, providerID string) (providercred.OutboundCredential, error) {
+	return providercred.NewMockOutboundCredential(uuid.New(), "kyc", providerID), nil
+}
+
+// TestKYC_UploadOrphanVerification_Returns409NotInternalError is R2-3's own
+// required test for kyc.ErrVerificationNotSubmitted: a player who somehow
+// knows an orphan verification's id must get 409 uploading to it when the
+// orphan has NO live create (its create ended failed_terminal), never 500.
+// (An orphan whose create is still live accepts the upload, ADR 0106 section
+// 2.6: covered in internal/kyc.)
 func TestKYC_UploadOrphanVerification_Returns409NotInternalError(t *testing.T) {
 	pool, issuer := testEnv(t)
-	// A resolver that always fails credential resolution reproduces
-	// CreateVerification's own documented phase-B failure mode (ADR 0095
-	// §15.2), leaving a harmless orphan row (status=unverified,
-	// provider_reference NULL) - exactly like a real vendor outage.
 	base := kyc.NewMockKYCProvider()
+	purgeKYCOutbox(t)
+	t.Cleanup(func() { purgeKYCOutbox(t) })
+	orch := kyc.NewOrchestrator(map[string]kyc.KYCProvider{"mock": base}, kyc.NewMockWebhookCredentials(base))
+	registerKYCOutboxWorker(t, pool, orch, mismatchedKYCResolver{})
 	srv := httptest.NewServer(New(Deps{
 		Logger:                 slog.New(slog.DiscardHandler),
 		DB:                     pool,
@@ -229,11 +244,11 @@ func TestKYC_UploadOrphanVerification_Returns409NotInternalError(t *testing.T) {
 		AccessTokenTTL:         5 * time.Minute,
 		RefreshTokenTTL:        time.Hour,
 		PersonResolver:         identityresolution.NewMockPersonResolver(),
-		KYCOrchestrator:        kyc.NewOrchestrator(map[string]kyc.KYCProvider{"mock": base}, kyc.NewMockWebhookCredentials(base)),
+		KYCOrchestrator:        orch,
 		KYCWebhookEnabled:      true,
 		DocumentStorage:        kyc.NewMockDocumentStorageProvider(),
 		MalwareScanner:         kyc.NewMockMalwareScanner(),
-		KYCOutboundCredentials: nil, // nil resolver -> CreateVerification's phase B fails closed, leaving an orphan.
+		KYCOutboundCredentials: kyc.NewMockOutboundResolver(),
 	}))
 	t.Cleanup(srv.Close)
 	brand := mustCreateBrand(t, pool, mustCreateTenant(t, pool))
@@ -241,9 +256,10 @@ func TestKYC_UploadOrphanVerification_Returns409NotInternalError(t *testing.T) {
 
 	verResp := postJSON(t, srv, "/v1/me/kyc/verifications", player.Tokens.AccessToken, map[string]any{})
 	defer verResp.Body.Close()
-	if verResp.StatusCode != http.StatusServiceUnavailable {
-		t.Fatalf("test setup: expected 503 creating a verification with no outbound resolver (leaving an orphan), got %d", verResp.StatusCode)
+	if verResp.StatusCode != http.StatusCreated {
+		t.Fatalf("test setup: expected 201 creating a verification, got %d", verResp.StatusCode)
 	}
+	drainKYCOutbox(t) // credential binding mismatch: the create ends failed_terminal
 
 	listResp := getJSON(t, srv, "/v1/me/kyc/verifications", player.Tokens.AccessToken)
 	defer listResp.Body.Close()
@@ -257,6 +273,6 @@ func TestKYC_UploadOrphanVerification_Returns409NotInternalError(t *testing.T) {
 	uploadResp := postMultipartDocument(t, srv, player.Tokens.AccessToken, orphanID, "passport", "passport.png", tinyPNG)
 	defer uploadResp.Body.Close()
 	if uploadResp.StatusCode != http.StatusConflict {
-		t.Fatalf("R2-3: expected 409 uploading to an orphan verification, got %d", uploadResp.StatusCode)
+		t.Fatalf("R2-3: expected 409 uploading to an orphan verification with no live create, got %d", uploadResp.StatusCode)
 	}
 }

@@ -36,6 +36,9 @@ var staticRaiseGuardedHelpers = map[string]bool{
 	"internal/payments/alerts.go:raiseMultipleSuccessAlert":   true,
 	"internal/reconciliation/alerts.go:raiseLedgerRunAlerts":  true,
 	"internal/reconciliation/alerts.go:raiseInTxMismatch":     true,
+	// PRH-2 E1 (ADR 0106 section 4.3): the KYC outbox terminal alert, raised in-tx
+	// from the tenant phase-C session by runPhaseC / recordApplyConflict.
+	"internal/kyc/outbox_worker.go:raiseSubmissionFailedTerminal": true,
 }
 
 // evidence/run transaction owners that MUST contain an alerting.InTx call.
@@ -48,6 +51,9 @@ var staticInTxOwners = []string{
 	"internal/reconciliation/scheduler.go:runCasinoStreamForTenant",
 	"internal/httpserver/deposit_handlers.go:newPaymentWebhookHandler",
 	"internal/httpserver/payment_deposit_simulation_handlers.go:newSimulateDepositCallbackHandler",
+	// PRH-2 E1 (ADR 0106 section 4.3): the KYC outbox phase-C owners.
+	"internal/kyc/outbox_worker.go:runPhaseC",
+	"internal/kyc/outbox_worker.go:recordApplyConflict",
 }
 
 type staticCall struct {
@@ -230,6 +236,7 @@ func staticDiscardedRaiseResults(calls []staticCall) []string {
 	guarded := map[string]bool{
 		"alerting.RaiseGuarded": true, "raiseDepositParkAlert": true, "raisePollContradictionAlert": true,
 		"raiseMultipleSuccessAlert": true, "raiseLedgerRunAlerts": true, "raiseInTxMismatch": true, "alertAfterDispute": true,
+		"raiseSubmissionFailedTerminal": true,
 	}
 	var out []string
 	for _, c := range calls {

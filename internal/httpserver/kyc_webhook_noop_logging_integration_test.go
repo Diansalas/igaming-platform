@@ -40,7 +40,7 @@ func newKYCNoopTestServer(t *testing.T, pool *db.Pool, issuer *auth.Issuer, logg
 		AccessTokenTTL:         5 * time.Minute,
 		RefreshTokenTTL:        time.Hour,
 		PersonResolver:         identityresolution.NewMockPersonResolver(),
-		KYCOrchestrator:        kyc.NewOrchestrator(map[string]kyc.KYCProvider{"mock": mockProvider}, kyc.NewMockWebhookCredentials(mockProvider)),
+		KYCOrchestrator:        newKYCOrchestratorWithWorker(t, pool, map[string]kyc.KYCProvider{"mock": mockProvider}, kyc.NewMockWebhookCredentials(mockProvider)),
 		KYCWebhookEnabled:      true,
 		DocumentStorage:        kyc.NewMockDocumentStorageProvider(),
 		MalwareScanner:         kyc.NewMockMalwareScanner(),
