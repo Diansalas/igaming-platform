@@ -50,11 +50,19 @@ type rejEnvHTTP struct {
 	sessionID uuid.UUID
 }
 
-func newRejEnvHTTP(t *testing.T) *rejEnvHTTP {
+func newRejEnvHTTP(t *testing.T) *rejEnvHTTP { return newRejEnvHTTPWithLogger(t, nil) }
+
+// newRejEnvHTTPWithLogger is newRejEnvHTTP with an injected server logger (nil =
+// the default quiet test logger).
+func newRejEnvHTTPWithLogger(t *testing.T, logger *slog.Logger) *rejEnvHTTP {
 	t.Helper()
 	pool, issuer := testEnv(t)
 	orchestrator, mock := newMockCasinoOrchestrator()
-	e := &rejEnvHTTP{pool: pool, issuer: issuer, mock: mock, srv: newCasinoTestServer(t, pool, issuer, orchestrator)}
+	srv := newCasinoTestServer(t, pool, issuer, orchestrator)
+	if logger != nil {
+		srv = newCasinoTestServerWithLogger(t, pool, issuer, orchestrator, logger)
+	}
+	e := &rejEnvHTTP{pool: pool, issuer: issuer, mock: mock, srv: srv}
 	e.tenant = mustCreateTenant(t, pool)
 	mustEnableCasinoCapability(t, e.srv, pool, e.tenant)
 	e.brand = mustCreateBrand(t, pool, e.tenant)

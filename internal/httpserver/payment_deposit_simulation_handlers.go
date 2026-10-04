@@ -266,7 +266,7 @@ func writeDepositCallbackError(w http.ResponseWriter, requestID string, logger i
 		apierror.Write(w, requestID, code, msg)
 		flushResponse(w)
 		if onPayloadMismatch != nil {
-			onPayloadMismatch() // after the response is delivered (ADR 0102 7.4)
+			onPayloadMismatch() // after the response bytes are flushed (ADR 0102 7.4)
 		}
 		return
 	}
@@ -335,9 +335,9 @@ func newSimulateDepositCallbackHandler(deps Deps) http.HandlerFunc {
 			pending           *alerting.Pending
 		)
 		// ADR 0102 7.3: post-commit detached retry for a swallowed in-tx raise;
-		// runs when the handler returns, after the response is written.
+		// runs when the handler returns (after the response write, before return).
+		// Deliberately no flushResponse in this defer (panic would become a 200).
 		defer func() {
-			flushResponse(w)
 			pending.Flush(r.Context())
 		}()
 		err = deps.DB.WithTenantReadOnly(r.Context(), tc.TenantID, func(ctx context.Context, tx pgx.Tx) error {

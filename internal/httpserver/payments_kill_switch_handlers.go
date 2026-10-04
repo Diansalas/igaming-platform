@@ -726,7 +726,7 @@ func newEngageKillSwitchHandler(deps Deps) http.HandlerFunc {
 		// class in the alert path can roll back or change this response.
 		writeJSON(w, http.StatusOK, toKillSwitchDTO(ks))
 		flushResponse(w)
-		raiseKillSwitchEngagedAlert(r.Context(), deps, c, ks, isTakeover) // after the response is delivered (ADR 0102 7.3)
+		raiseKillSwitchEngagedAlert(r.Context(), deps, c, ks, isTakeover) // after status, headers and body bytes are flushed (ADR 0102 7.3)
 	}
 }
 

@@ -55,8 +55,10 @@ type statusRecorder struct {
 	status int
 }
 
-// Unwrap lets http.NewResponseController reach the underlying writer's Flush
-// (flushResponse); without it the access-log wrapper would hide Flush.
+// Unwrap lets http.NewResponseController reach the underlying writer (Flush for
+// flushResponse, and SetReadDeadline for the ADR 0097 A5 body-read deadline,
+// armBodyReadDeadline); without it the access-log wrapper hides both and they
+// silently return ErrNotSupported.
 func (r *statusRecorder) Unwrap() http.ResponseWriter { return r.ResponseWriter }
 
 func (r *statusRecorder) WriteHeader(status int) {
