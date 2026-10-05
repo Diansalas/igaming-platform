@@ -171,3 +171,8 @@ Q09   KILLED    R-2 tightening dropped: system read exposes executed M1 rows aga
 Q10   KILLED    Z01: a player policy added to payment_manual_resolutions | --- FAIL: TestK3_T3_SystemReadSeesOnlyExecutedM2Rows (3.12s); --- FAIL: TestK3_C16_T18_Migration0115UpDownUp_WholeSchema (2.54s)
 The 14 survivors of the original 106-mutant run (classified above) are unchanged: this batch touched none of the code they mutate except
 payment_statement_k3.go (G14 duplicates, G05 tenant predicate: still equivalent/defence in depth).
+
+---- LF delta D-1 (2026-10-05): C-42c ----
+LFD8   KILLED    (d) raising loop narrowed to resolvesTo | --- FAIL: TestK3_C42c_ABorrowedLineStillRaisesDAndC2
+LFD8b  KILLED    (c2) anySucceeded narrowed to resolvesTo | --- FAIL: TestK3_C42c_ABorrowedLineStillRaisesDAndC2
+(restore+cmp OK for both; the F-1 mutants are named F01..F03 above, matching ADR 0101 27.6.)

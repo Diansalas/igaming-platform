@@ -7140,8 +7140,7 @@ refused echo is never an error return). The database backs it with CHECK constra
 - §12 gains `pay_declared_paid_unconfirmed`, `pay_declared_not_paid_but_paid` and
   `pay_declared_paid_compensated_but_paid`. They are found by the persisted statement-line lookup across imports
   (ADR 0101 §9, S1-S6), read from the typed resolution table only (system-shape read of executed resolutions),
-  one finding per exposure. A MOCK import may confirm or clear only when no non-MOCK import exists (D-4/RC-3); a
-  confirming line needs reference, amount and asset to match (D-5). A confirming line must resolve to the attempt by provider reference, or by merchant reference only when no other attempt of the same kind holds the line's reference, and must match amount and asset (D-5). The Y clearing of `poll_reference_mismatch` parks (bound) reads `payment_attempt_reference_evidence`, written in the same transaction as the park (deferred binding constraint).
+  one finding per exposure. A MOCK import may confirm or clear only when no non-MOCK import exists (D-4/RC-3). A confirming line must resolve to the attempt by provider reference, or by merchant reference only when no other attempt of the same kind holds the line's reference, and must match amount and asset (D-5). The Y clearing of `poll_reference_mismatch` parks (bound) reads `payment_attempt_reference_evidence`, written in the same transaction as the park (deferred binding constraint).
 
 ### 39.4 Residuals (not closed here)
 

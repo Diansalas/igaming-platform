@@ -443,10 +443,12 @@ first gate: a missing or revoked grant is refused by the database.
    kinds below can only fire if a `payment_statement` stream for that provider is running. The service
    REFUSES `m2_declare_not_paid` (`force_resolve_precondition_failed`) when no statement source is
    registered for the provider, because its double-payout risk is detected only by that stream
-   (ADR 0101 §12.3 optional rule, adopted). "Declare paid" is not refused, but it is then unmonitored
-   (R-K3-5). The platform binary does not register a source yet (deferred item: the E1-owned
-   `cmd/platform-api/main.go` must call `payments.DefaultStatementSources.Register`; see the ADR 0101
-   implementation record). Until that lands, treat every M2 as unmonitored and escalate to engineering.
+   (ADR 0101 §12.3 optional rule, adopted). "Declare paid" is not refused. The registry
+   `payments.DefaultStatementSources` is not populated in the binary (**PAY-K3-STATEMENT-SOURCE-WIRING-1, a
+   REAL-MONEY PRECONDITION**), so every declare-not-paid is refused today. The `payment_statement` stream IS
+   scheduled with the MOCK source, so `pay_declared_paid_unconfirmed`, `pay_declared_paid_compensated_but_paid`
+   and S1-S4 do run for the MOCK provider; for a real provider whose source is not scheduled, treat every M2 as
+   unmonitored and escalate to engineering.
 3. **Check the reason is resolvable.** M2 admits an `ambiguous` payout, or a `disputed` payout with
    `provider_reference_mismatch` / `success_for_never_sent_attempt`, whose withdrawal is still
    `submitted`. NOT resolvable by M1/M2 (the request is refused `force_resolve_reason_not_resolvable`):
@@ -481,12 +483,14 @@ are pinned in the payload) and the resolution ends `refused_at_execution` (commi
 
 **After an M2: the three standing kinds** (reconciliation `payment_statement`, surfaced like every
 other payment mismatch through `reconciliation.payment_statement_mismatch`):
-- `pay_declared_paid_unconfirmed`: declared paid but no confirming statement line (same reference,
-  amount AND asset) in any persisted import. Chase the provider statement. It clears only on a line
-  from a non-MOCK import.
+- `pay_declared_paid_unconfirmed`: declared paid but no confirming statement line in any eligible persisted
+  import (payout, succeeded, resolved to the attempt by provider reference, or by merchant reference when no
+  other payout holds the line's reference, amount AND asset equal). An import is eligible if it is non-MOCK, or
+  if no non-MOCK import exists for the provider. Chase the provider statement.
 - `pay_declared_not_paid_but_paid`: declared not paid, but a statement shows the provider paid. The
   player holds the returned funds AND was paid. This is the T14 double-payout risk. Compensate through
-  a K2 manual adjustment (a debit of the player; reason `compensating_entry`).
+  a K2 manual adjustment (a debit of the player; reason `compensating_entry`). The debit's causation MUST be
+  that resolution's `withdrawal_failed` transaction, otherwise it does not clear the finding.
 - `pay_declared_paid_compensated_but_paid`: a compensation was posted for a declared-paid payout, and
   the provider's statement later shows it paid after all. Same remedy direction; escalate to finance.
 
@@ -494,9 +498,10 @@ One finding per exposure is kept; it persists until the evidence closes it. **Al
 disputes and T14 are NOT IMPLEMENTED** (PAY-PAYOUT-DISPUTE-ALERT-1 and ALERT-DELIVERY-1 are open).
 Nothing pages anyone: staff must read the findings list.
 
-**psp_clearing residual.** A declared-paid payout does not move the `psp_clearing` house account until
-the provider's settlement is reconciled; the clearing balance can sit off by the declared amount.
-Do not "fix" it by hand; the settlement reconciliation (D1/D2 lines) and finance own it.
+**psp_clearing residual.** An executed declare-paid credits `psp_clearing` by the withdrawn amount at
+execution, without a PSP confirmation. Each open `pay_declared_paid_unconfirmed` finding itemises that credit
+as an explained difference. If the PSP never paid, the amount stays in `psp_clearing` until a
+WITHDRAWAL-REVERSAL-1 posting or a governed correction; it is never netted away. Do not fix it by hand.
 
 **Stranding by MA020.** After a declared-paid M2 the player's cash can be below what an in-flight K2
 compensation expects; MA020 (open payment exposure) is a K2 payload refusal; it never applies to the Step B

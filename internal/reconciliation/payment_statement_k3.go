@@ -50,7 +50,7 @@ const (
 	m2KindPaid                                                 = "m2_declare_paid"
 	m2KindNotPaid                                              = "m2_declare_not_paid"
 	capturedUnpostedResolutionHint                             = "resolution: a PSP-initiated reversal/tombstone on this line's reference, or allocation (LEDGER-SUSPENSE-B-1); M1 only acknowledges"
-	declaredPaidUnconfirmedResolutionHint                      = "resolution: a confirming statement line (payout, succeeded, amount and asset equal, non-MOCK source) or a withdrawal reversal (WITHDRAWAL-REVERSAL-1); a compensating credit annotates but does not clear"
+	declaredPaidUnconfirmedResolutionHint                      = "resolution: a confirming statement line from an eligible import (payout, succeeded, resolved to this attempt, amount and asset equal) or a withdrawal reversal (WITHDRAWAL-REVERSAL-1); a compensating credit annotates but does not clear"
 	declaredNotPaidButPaidResolutionHint                       = "resolution: executed compensating_entry debits, causation = the withdrawal_failed transaction, totalling at least the withdrawn amount; an off-platform recovery has no clearing path and is tracked through the row's investigation status"
 	declaredPaidCompensatedButPaidResolutionHint               = "resolution: executed compensating_entry debits, causation = the compensating credit's own transaction, totalling at least the credited amount"
 )

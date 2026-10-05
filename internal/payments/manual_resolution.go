@@ -618,7 +618,7 @@ func readResolutionExecStatus(ctx context.Context, tx pgx.Tx, id uuid.UUID) (res
 
 // testHookResolutionAfterShareLocks, when set by an in-package test, runs after
 // the L1 staff/grant FOR SHARE locks are held and the recount is done - so
-// C-12b can race a revoke against a real execution.
+// TestK3_Y07 races a revoke and a staff suspension against a real execution.
 var testHookResolutionAfterShareLocks func(ctx context.Context, id uuid.UUID)
 
 // testHookResolutionBeforePost, when set by an in-package test, runs after the

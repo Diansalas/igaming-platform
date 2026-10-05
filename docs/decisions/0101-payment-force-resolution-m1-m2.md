@@ -1682,7 +1682,7 @@ implemented as written; where this record differs it says so in §27.4.
 | M1 (deposit evidence only) and M2 "declare paid" / "declare not paid" via `withdrawal.Complete` / `Fail`, request/approve/reject/cancel/execute service, routes, permissions | `IMPLEMENTED` against the MOCK provider; behaviour against a real PSP is `PROVIDER DEPENDENT` |
 | Reserved provider-tx namespace and ingress validation at every payments site (and the statement fetch) | `IMPLEMENTED` |
 | Reconciliation: persisted statement-line lookup S1-S6, the three standing kinds, typed Y evidence | `IMPLEMENTED` against MOCK statement sources; real statement matching is `PROVIDER DEPENDENT` |
-| Registration of a payment statement source in the platform binary (`payments.DefaultStatementSources.Register` from `cmd/platform-api/main.go`) | `NOT IMPLEMENTED` (E1-owned file; the runbook precondition and the `m2_declare_not_paid` refusal cover it) |
+| Registration of a payment statement source in the platform binary (`payments.DefaultStatementSources.Register` from `cmd/platform-api/main.go`) | `NOT IMPLEMENTED`: PAY-K3-STATEMENT-SOURCE-WIRING-1, a REAL-MONEY PRECONDITION (E1-owned file; until then the `m2_declare_not_paid` refusal and the runbook precondition cover it; the MOCK stream is scheduled, so (c), (c2) and S1-S4 run for MOCK) |
 | Alerts for payout disputes and T14 (PAY-PAYOUT-DISPUTE-ALERT-1) and alert delivery (ALERT-DELIVERY-1) | `NOT IMPLEMENTED` (open; nothing here delivers or pages anyone) |
 | Closed-tenant player-funds path (ADR 0107) | design only, `NOT IMPLEMENTED` |
 | Casino / sportsbook 4xx mapping of the all-sessions ledger trigger's `MR020` (O-1) | `NOT IMPLEMENTED`: the posting is refused by the database (tested), the HTTP layer returns its generic 5xx |
@@ -1755,9 +1755,9 @@ of `MR020`.
 ### 27.6 Fix batch after the implementation reviews (2026-10-05)
 
 Applied after the ledger-finance, code-review and security implementation reviews of `041fb55` (`docs/plans/prh2-hardening-round/reviews/k3-impl-*.md`), on
-`prh2-k3-impl` merged with main `a642e8c` (E1, migration 0114; `deploy/init-app-role.sql` keeps both blocks; the 0095 §38/§39 and runbook §13/§14 sections keep both):
+`prh2-k3-impl` merged with main `a642e8c` (E1, migration 0114; `deploy/init-app-role.sql` has one combined block listing both sets of tables; the 0095 §38/§39 and runbook §13/§14 sections keep both):
 - **LF F-1 / security PM-S2 (real defect, fixed).** A confirming line now resolves to the attempt by provider reference, or by merchant reference only when no
-  other attempt of the same kind holds the line's reference (`payMatcher.resolvesTo`); raising predicates stay broad. Regression `TestK3_C42b_*`, killed mutant `Y-F1`.
+  other attempt of the same kind holds the line's reference (`payMatcher.resolvesTo`); raising predicates stay broad. Regression `TestK3_C42b_*` and `TestK3_C42c_*`, killed mutants F01, F02, F03 (evidence file) and LFD8.
 - **Security PM-S1 / code-review F-1.** Every function 0115 creates (18) carries `SET search_path = pg_catalog, public, pg_temp`. `TestK3_Y01` pins the
   live `proconfig` of exactly that list and counts the migration text; `TestK3_Y02` shows a TEMP table named `payment_manual_resolutions` cannot defeat the reserved
   namespace trigger. The down migration restores the previous bodies (no SET); the C-16/T-18 round trip, C-17 and C-9c pass.
@@ -1768,8 +1768,10 @@ Applied after the ledger-finance, code-review and security implementation review
   and the (d) hint no longer promises an off-platform recording path. **Code-review F-2/F-3:** `TestK3_Y08` (requester Person unchanged at execution, scratch DB),
   and the HTTP leakage assertion now checks every collected refusal body (non-vacuous). `TestK3_Y09` (requester who later authors a policy), `TestK3_Y10` (`refused_at_execution` needs a same-transaction approval).
 - **Wording** of ADR 0095 §35.4/§39.3/§39.4 and `reconciliation-model.md` applied as ledger-finance wrote it.
+- **REAL-MONEY PRECONDITIONS (not optional, not docs-only):** PAY-K3-STATEMENT-SOURCE-WIRING-1 (populate `DefaultStatementSources` from the SAME list given to the
+  scheduler, and refuse `m2_declare_paid` as well when no source is scheduled); ALERT-DELIVERY-1 and PAY-PAYOUT-DISPUTE-ALERT-1; WITHDRAWAL-REVERSAL-1 or a governed path for the
+  `psp_clearing` residual; a real non-MOCK statement source (PROVIDER DEPENDENT); CAS-RECON-SCALE-1; the ledger-finance RM-1..RM-7 list. The orchestrator owns the registry row.
 - **Deferred (docs only):** PAY-K3-MR020-HTTP-MAPPING-1 (casino/sportsbook: a crafted provider id gives a 5xx a provider may retry; the database refuses it);
-  PAY-K3-STATEMENT-SOURCE-WIRING-1 (populate `DefaultStatementSources` from the SAME list given to the scheduler, and also refuse `m2_declare_paid` when no source is scheduled);
   Z28/Z29 (optional static route-permission pin); LF F-8/F-9 and code-review F-4/F-5 (optional hardening: refuse a second M1 once one executed; expire a stale pending row in `Request`).
 - **Second reference-allowlist edit (merge with E1).** E1's worker visibility gates (`internal/db/kyc_worker_identity_integration_test.go`,
   `workerReferenceAllowlist`) also gained `payment_manual_resolution_codes` (the same family-R reference table; the K2 precedent). Both allowlist edits are test-only.
@@ -1777,3 +1779,6 @@ Applied after the ledger-finance, code-review and security implementation review
   the integration tag); `cmd/migrate verify` clean with migrations 0001..0115 contiguous (E1's 0114 merged); `go test -race -tags integration -count=1 -p 1 -skip
   'TestStoreOutage_DoesNotPinPool|TestResolutionIsolation_' ./...` PASS for every package (the `internal/db` and `internal/kyc` gates re-run PASS after the allowlist line).
   Mutation: 21 new mutants, all KILLED after three test strengthenings (evidence file, "FIX BATCH" section); the 14 classified survivors of the original run are unchanged.
+- **Post-fix concurrency run (recorded by ledger-finance, local):** `-race -count=20 -run 'TestK3_C12|TestK3_C26|TestK3_Y07' ./internal/payments/` PASS (392s). The earlier `-count=50` run refers to `041fb55`.
+- **Residual (security finding 1, pre-existing K2, HIGH, launch-blocking):** clearing of (d) and (c2) trusts executed K2 `compensating_entry` requests. Those can be forged through a TEMP-table
+  shadow on the unpinned 0112/0113 helper functions until TRIGGER-SEARCH-PATH-1 is fixed for them; 0115 pins only its own 18 functions.
