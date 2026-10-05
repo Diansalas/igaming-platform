@@ -24,6 +24,7 @@ import (
 
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/ledger"
+	"github.com/Diansalas/igaming-platform/internal/tenant"
 )
 
 // runtimePool connects as the runtime role and asserts it is neither a
@@ -478,4 +479,32 @@ func TestTenantNotActive_StatusChangeVsSettlementRace(t *testing.T) {
 			t.Fatalf("after the closure the next posting is refused: %+v err=%v", res, err)
 		}
 	})
+}
+
+// TestTenantNotActive_GateFailsClosedWhenTheRowIsNotVisible: under a
+// player-scoped connection tenants_read hides the row; the shared primitive
+// must refuse rather than treat a missing status as active. A tenant-scoped
+// connection on an active tenant passes (positive control).
+func TestTenantNotActive_GateFailsClosedWhenTheRowIsNotVisible(t *testing.T) {
+	owner := testPool(t)
+	rt := runtimePool(t)
+	f := seedFixture(t, owner)
+
+	err := rt.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return tenant.RequireActiveForGameplay(ctx, tx, f.tenantID)
+	})
+	if err != nil {
+		t.Fatalf("active tenant, tenant scope: must pass, got %v", err)
+	}
+	err = rt.WithPlayerScope(context.Background(), f.tenantID, f.playerAccountID, func(ctx context.Context, tx pgx.Tx) error {
+		return tenant.RequireActiveForGameplay(ctx, tx, f.tenantID)
+	})
+	if !errors.Is(err, tenant.ErrNotActiveForGameplay) {
+		t.Fatalf("a row hidden by RLS must fail closed, got %v", err)
+	}
+	if err := rt.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return tenant.RequireActiveForGameplay(ctx, tx, uuid.Nil)
+	}); !errors.Is(err, tenant.ErrNotActiveForGameplay) {
+		t.Fatalf("a nil tenant id must be refused, got %v", err)
+	}
 }

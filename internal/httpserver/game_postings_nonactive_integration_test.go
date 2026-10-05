@@ -14,12 +14,14 @@ import (
 	"context"
 	"net/http"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/Diansalas/igaming-platform/internal/casino"
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/identity"
 )
@@ -157,5 +159,72 @@ func TestGamePostingsNonActive_SportsbookRoutesRefuseAndRecord(t *testing.T) {
 	}
 	if got := gateCount(t, owner, tenant.ID, `SELECT count(*) FROM ledger_transactions WHERE tenant_id = $1`, tenant.ID); got != txs0 {
 		t.Fatalf("refused requests changed the ledger: %d -> %d", txs0, got)
+	}
+}
+
+// TestGamePostingsNonActive_WebhookRaceWithClosure is the only way a PUBLIC
+// webhook request reaches the in-transaction refusal: the route's active check
+// (preamble) read the tenant as active, then the tenant is closed before the
+// domain transaction posts. Two real connections: the closure is held
+// uncommitted while the webhook request arrives; the request waits on the
+// status gate, then must be refused with a deterministic 409, a durable audit
+// record and no ledger row.
+func TestGamePostingsNonActive_WebhookRaceWithClosure(t *testing.T) {
+	owner, issuer := testEnv(t)
+	rt := gateRuntimePool(t)
+	orchestrator, mock := newMockCasinoOrchestrator()
+	srv := newCasinoTestServer(t, rt, issuer, orchestrator)
+
+	tenant := mustCreateTenant(t, owner)
+	brand := mustCreateBrand(t, owner, tenant)
+	player := mustRegisterPlayer(t, srv, brand.Slug)
+	mustActivatePlayer(t, owner, tenant.ID, player.ID)
+	fundWallet(t, owner, tenant.ID, brand.ID, player.ID, "EUR", 10_000)
+	game := mustSeedCasinoGame(t, owner, "mock-casino", "EUR")
+	mustEnableCasinoGameForTenant(t, owner, tenant.ID, game.ID)
+	mustEnableCasinoCapability(t, srv, owner, tenant)
+	launched := mustLaunchCasinoGame(t, srv, player.Tokens.AccessToken, game.ID.String(), "EUR", "real")
+	payload := mock.CallbackPayload(tenant.ID, casino.CallbackEventBet, "bet-webhook-race", "", "round-webhook-race", game.ProviderGameID,
+		1000, "EUR", casino.OutcomeSucceeded, "", player.ID, uuid.MustParse(launched.SessionID))
+
+	updated, release, closerDone := make(chan struct{}), make(chan struct{}), make(chan error, 1)
+	var once sync.Once
+	releaseOnce := func() { once.Do(func() { close(release) }) }
+	t.Cleanup(releaseOnce)
+	go func() {
+		closerDone <- owner.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
+			if _, err := tx.Exec(ctx, `UPDATE tenants SET status = 'closed' WHERE id = $1`, tenant.ID); err != nil {
+				return err
+			}
+			close(updated)
+			<-release
+			return nil
+		})
+	}()
+	<-updated
+
+	status := make(chan int, 1)
+	go func() {
+		resp := rawPostCasinoCallback(t, srv, "/v1/webhooks/casino/"+tenant.Slug+"/mock-casino", payload)
+		_ = resp.Body.Close()
+		status <- resp.StatusCode
+	}()
+	select {
+	case code := <-status:
+		t.Fatalf("the webhook must wait for the in-flight closure at the status gate, answered %d early", code)
+	case <-time.After(700 * time.Millisecond):
+	}
+	releaseOnce()
+	if err := <-closerDone; err != nil {
+		t.Fatalf("closure: %v", err)
+	}
+	if code := <-status; code != http.StatusConflict {
+		t.Fatalf("a webhook racing the closure must be refused with a deterministic 409, got %d", code)
+	}
+	if got := gateCount(t, owner, tenant.ID, `SELECT count(*) FROM ledger_transactions WHERE provider_id = 'mock-casino' AND provider_tx_id = 'bet-webhook-race'`); got != 0 {
+		t.Fatalf("the refused bet must not be posted, found %d", got)
+	}
+	if got := gateCount(t, owner, tenant.ID, `SELECT count(*) FROM audit_log WHERE tenant_id = $1 AND action = 'casino_callback.rejected_tenant_not_active'`, tenant.ID); got != 1 {
+		t.Fatalf("expected one durable refusal audit record, got %d", got)
 	}
 }
