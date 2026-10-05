@@ -1,0 +1,111 @@
+ALERT-DELIVERY-1 routing readiness (migration 0117) - mutation evidence
+
+Method: throwaway copy of the worktree (not the repo). Each mutant edits ONE anchor, runs the targeted tests,
+then the file is restored from the pristine source and compared byte-for-byte (cmp). KILLED = the targeted tests
+failed; SURVIVED = they passed (classified below). Integration tests run -tags integration, the runtime role
+(asserted not rolsuper / not rolbypassrls by World), against private databases only.
+
+HISTORY OF THIS RUN: the first full pass gave 31 killed / 1 survived / 1 invalid. The survivor (removing the OUTER per-alert
+recovery in processOneRecovered) was a real test gap, because the inner Deliver recovery masked it; it is now killed by
+TestRouting_PanicOutsideDeliverDoesNotEndThePass (a sink that panics after Deliver, in the recording path). The invalid one
+(readiness counts non-human routes) was a mutant that did not compile (unused variable); its anchor was rewritten. The
+numbers below are the final complete re-run: no survivors remain, so there is nothing to classify as equivalent.
+
+CONTROL RUN (unmutated copy; every targeted test group must PASS):
+  control ./internal/alerting/ -run 'TestMigration0117_R1': PASS (5s)
+  control ./internal/alerting/ -run 'TestMigration0117_NoRouteCanBeEnabled': PASS (5s)
+  control ./internal/alerting/ -run 'TestMigration0117_ReasonCode': PASS (5s)
+  control ./internal/alerting/ -run 'TestMigration0117_EnabledAndReason': PASS (5s)
+  control ./internal/alerting/ -run 'TestMigration0117_(EveryAlertFunction|TempShadowProbe_Staff)': PASS (8s)
+  control ./internal/alerting/ -run 'TestMigration0117_(EveryAlertFunction|TempShadowProbe_Alerts)': PASS (9s)
+  control ./internal/alerting/ -run 'TestMigration0117_UnroutedReason': PASS (5s)
+  control ./internal/alerting/ -run 'TestMigration0117_DownRefusesWithAnyRouteRow': PASS (5s)
+  control ./internal/alerting/ -run '(TestErrorClass_Retryable|TestRouting_Permanent)': PASS (12s)
+  control ./internal/alerting/ -run 'TestRouting_PanicInOne': PASS (5s)
+  control ./internal/alerting/...  -run 'TestHumanNotification|TestConformance_LogSink': PASS (2s)
+  control ./internal/alerting/ -run 'TestEvaluateReadiness': PASS (1s)
+  control ./internal/alerting/ -run 'TestReadinessSnapshot|TestMetric_RoutingReady': PASS (1s)
+  control ./internal/alerting/ -run 'TestRouting_Unrouted': PASS (8s)
+  control ./internal/alerting/ -run 'TestRouting_P1EscalatesOnDead': PASS (17s)
+  control ./internal/alerting/ -run '(TestRetryBudgets|TestRouting_P1Budget)': PASS (4s)
+  control ./internal/alerting/ -run 'TestDeliveryState': PASS (1s)
+  control ./internal/alerting/ -run 'TestValidateRecipientRef': PASS (1s)
+  control ./internal/auth/ -run 'TestRoleHasPermission_AlertRouteManage': PASS (1s)
+  control ./internal/alerting/alertingtest/ -run 'TestRecordingChannel_DedupeCounts': PASS (1s)
+  control ./internal/httpserver/ -run 'TestAlertRoutingAPI_Authorization': PASS (6s)
+  control ./internal/httpserver/ -run 'TestAlertRoutingAPI|TestAlertAdmin_Refused': PASS (25s)
+  control ./internal/httpserver/ -run 'TestAlertRoutingAPI_CreateSupersede': PASS (6s)
+  control ./internal/httpserver/ -run 'TestAlertRoutingAPI_Production': PASS (6s)
+  control ./internal/httpserver/ -run 'TestAlertAdmin_Refused': PASS (5s)
+  control ./internal/alerting/ -run 'TestRouting_PanicOutsideDeliver': PASS (5s)
+
+MUTANTS:
+  M00 [KILLED] R1 CHECK dropped
+        killed by: --- FAIL: TestMigration0117_R1_EnabledRequiresARecipient_DisabledMayBeStaged_DefaultIsDisabled (3.52s)
+  M01 [KILLED] enabled default flipped to true
+        killed by: --- FAIL: TestMigration0117_R1_EnabledRequiresARecipient_DisabledMayBeStaged_DefaultIsDisabled (3.66s)
+  M02 [KILLED] SR-7 human-notification guard removed
+        killed by: --- FAIL: TestMigration0117_NoRouteCanBeEnabledForAHumanNotificationKind (3.41s)
+  M03 [KILLED] human-kind function fails open (unknown kind = non-human)
+        killed by: --- FAIL: TestMigration0117_NoRouteCanBeEnabledForAHumanNotificationKind (3.07s)
+  M04 [KILLED] reason_code requirement dropped
+        killed by: --- FAIL: TestMigration0117_ReasonCode_RequiredAndClosedVocabulary (3.30s)
+  M05 [KILLED] enabled/reason_code immutability dropped from the guard
+        killed by: --- FAIL: TestMigration0117_EnabledAndReasonAreImmutable_OnlySupersessionMayUpdate (2.69s)
+  M06 [KILLED] search_path pin removed from alerting_validated_platform_admin
+        killed by: --- FAIL: TestMigration0117_EveryAlertFunctionPinsSearchPath_ExactCatalogue (2.82s); --- FAIL: TestMigration0117_TempShadowProbe_StaffUsersCannotForgeAPlatformAdmin (2.62s)
+  M07 [KILLED] search_path pin removed from alert_deliveries_guard
+        killed by: --- FAIL: TestMigration0117_EveryAlertFunctionPinsSearchPath_ExactCatalogue (2.51s); --- FAIL: TestMigration0117_TempShadowProbe_AlertsCannotHideASimulationAlertFromTheDeliveryGuard (2.73s)
+  M08 [KILLED] unrouted_reason required-on-new-rows CHECK dropped
+        killed by: --- FAIL: TestMigration0117_UnroutedReason_ConstraintsAreStructural (2.85s)
+  M09 [KILLED] down migration refusal for route rows removed
+        killed by: --- FAIL: TestMigration0117_DownRefusesWithAnyRouteRow (2.80s)
+  M10 [KILLED] retryable split removed (permanent errors retry)
+        killed by: --- FAIL: TestErrorClass_Retryable_Table (0.00s); --- FAIL: TestRouting_PermanentErrorsAreTerminalImmediately_RetryableBurnBudget (10.25s); --- FAIL: TestRouting_PermanentErrorsAreTerminalImmediately_RetryableBurnBudget/rejected (3.24s)
+  M11 [KILLED] panic VALUE logged
+        killed by: --- FAIL: TestRouting_PanicInOneDeliveryDoesNotEndThePass_AndNeverLogsTheValue (2.56s)
+  M12 [KILLED] per-alert Deliver recovery removed
+        killed by: --- FAIL: TestRouting_PanicInOneDeliveryDoesNotEndThePass_AndNeverLogsTheValue (3.02s)
+  M13 [KILLED] LogSink claims HumanNotification
+        killed by: --- FAIL: TestHumanNotification_LogAndMockAreFalse (0.00s); --- FAIL: TestConformance_LogSink (0.05s); --- FAIL: TestConformance_LogSink/not_a_human_notification_unless_declared (0.00s)
+  M14 [KILLED] readiness counts non-human (log) routes
+        killed by: --- FAIL: TestEvaluateReadiness_Table (0.00s); --- FAIL: TestEvaluateReadiness_CountsAndRequiredSeverities (0.00s)
+  M15 [KILLED] stale readiness still counted ready
+        killed by: --- FAIL: TestMetric_RoutingReadyGauge_StaleReadsZero (0.00s); --- FAIL: TestReadinessSnapshot_StaleAndUnevaluatedAreNotReady (0.00s)
+  M16 [KILLED] disabled route treated as enabled
+        killed by: --- FAIL: TestRouting_UnroutedReasons_NoRoute_Disabled_NoSink (2.55s)
+  M17 [KILLED] no_sink branch reverted to a silent skip (no row)
+        killed by: --- FAIL: TestRouting_UnroutedReasons_NoRoute_Disabled_NoSink (5.34s)
+  M18 [KILLED] escalate-on-dead applied to p2
+        killed by: --- FAIL: TestRouting_P1EscalatesOnDead_P2DoesNot_AckedDoesNot_NoNextRouteTerminal (13.68s); --- FAIL: TestRouting_P1EscalatesOnDead_P2DoesNot_AckedDoesNot_NoNextRouteTerminal/p2_dead_is_terminal_even_with_a_step-1_route (2.96s)
+  M19 [KILLED] escalate-on-dead ignores ack
+        killed by: --- FAIL: TestRouting_P1EscalatesOnDead_P2DoesNot_AckedDoesNot_NoNextRouteTerminal (14.85s); --- FAIL: TestRouting_P1EscalatesOnDead_P2DoesNot_AckedDoesNot_NoNextRouteTerminal/an_acknowledged_p1_does_not_escalate (2.97s)
+  M20 [KILLED] p1 attempt budget 8 -> 5
+        killed by: --- FAIL: TestRetryBudgets_ConstantsAndOverride (0.00s); --- FAIL: TestRouting_P1BudgetIsEightAttempts (3.22s)
+  M21 [KILLED] non-human sent derives delivered
+        killed by: --- FAIL: TestDeliveryState_NonHumanSentIsNeverDelivered (0.00s)
+  M22 [KILLED] recipient IPv4/host:port check removed
+        killed by: --- FAIL: TestValidateRecipientRef_Table (0.00s)
+  M23 [KILLED] alert:route_manage granted to tenant_admin
+        killed by: --- FAIL: TestRoleHasPermission_AlertRouteManage_ExactlyPlatformAdmin (0.00s)
+  M24 [KILLED] RecordingChannel loses dedupe accounting
+        killed by: --- FAIL: TestRecordingChannel_DedupeCountsDuplicates (0.00s)
+  M25 [KILLED] status/list/routes explicit tenant-scope check dropped
+        killed by: --- FAIL: TestAlertRoutingAPI_Authorization_EachLayer_DeniedAuditedInCallerScope (3.91s)
+  M26 [KILLED] POST route permission check dropped
+        killed by: --- FAIL: TestAlertRoutingAPI_Authorization_EachLayer_DeniedAuditedInCallerScope (2.88s)
+  M27 [KILLED] POST route platform-scope check dropped
+        killed by: --- FAIL: TestAlertRoutingAPI_Authorization_EachLayer_DeniedAuditedInCallerScope (3.13s)
+  M28 [KILLED] refusal audit write dropped
+        killed by: --- FAIL: TestAlertRoutingAPI_CreateSupersedeList_AuditedWithoutTheRecipient (3.25s); --- FAIL: TestAlertRoutingAPI_ValidationRefusalsAreAuditedAndChangeNothing (3.47s); --- FAIL: TestAlertRoutingAPI_Authorization_EachLayer_DeniedAuditedInCallerScope (3.29s)
+  M29 [KILLED] recipient_ref audited verbatim
+        killed by: --- FAIL: TestAlertRoutingAPI_CreateSupersedeList_AuditedWithoutTheRecipient (3.58s)
+  M30 [KILLED] production non-human p1/p2 refusal dropped
+        killed by: --- FAIL: TestAlertRoutingAPI_ProductionRefusesNonHumanP1P2Enabled (3.26s)
+  M31 [KILLED] ack reason_code not recorded in audit
+        killed by: --- FAIL: TestAlertAdmin_RefusedAckAndResolveAreAudited_AckTakesAReasonCode (3.66s)
+  M32 [KILLED] outer per-alert panic recovery removed (panic outside Deliver)
+        killed by: --- FAIL: TestRouting_PanicOutsideDeliverDoesNotEndThePass (2.71s)
+
+RESTORE CHECK (cmp of every mutated file, copy vs worktree): IDENTICAL
+SUMMARY: 33 mutants, 33 killed, 0 survived, 0 invalid

@@ -58,11 +58,40 @@ func recordRaiseFailure(ctx context.Context, kind Kind, phase string) {
 	))
 }
 
-func recordUnrouted(ctx context.Context, severity Severity) {
+func severityAttr(s Severity) attribute.KeyValue { return attribute.String("severity", string(s)) }
+
+// recordUnrouted counts alert_unrouted_total{severity,reason}; reason is one
+// of the closed unrouted_reason vocabulary.
+func recordUnrouted(ctx context.Context, severity Severity, reason UnroutedReason) {
 	if alertUnroutedTotal == nil {
 		return
 	}
-	alertUnroutedTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("severity", string(severity))))
+	alertUnroutedTotal.Add(ctx, 1, metric.WithAttributes(severityAttr(severity), attribute.String("reason", string(reason))))
+}
+
+// alertDeliveryAttemptsTotal is alert_delivery_attempts_total{channel_kind,
+// result,error_class,notification}: result is sent|failed|dead, error_class
+// is empty for sent, and notification is human|non_human - a delivery
+// through log or mock is labelled non_human and is NEVER a human notification.
+var alertDeliveryAttemptsTotal, _ = meter.Int64Counter(
+	"alert_delivery_attempts_total",
+	metric.WithDescription("Count of alert delivery attempts by channel kind, result and error class; notification=non_human for channels that reach no person (ADR 0102 section 18)."),
+)
+
+func recordDeliveryAttempt(ctx context.Context, channelKind ChannelKind, result string, class ErrorClass, human bool) {
+	if alertDeliveryAttemptsTotal == nil {
+		return
+	}
+	notification := "non_human"
+	if human {
+		notification = "human"
+	}
+	alertDeliveryAttemptsTotal.Add(ctx, 1, metric.WithAttributes(
+		attribute.String("channel_kind", string(channelKind)),
+		attribute.String("result", result),
+		attribute.String("error_class", string(class)),
+		attribute.String("notification", notification),
+	))
 }
 
 func recordDead(ctx context.Context, channelKind string) {

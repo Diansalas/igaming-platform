@@ -552,6 +552,17 @@ const (
 // which it is the subject (ADR 0102 §2(2)).
 const PermAlertManage Permission = "alert:manage"
 
+// PermAlertRouteManage gates authoring alert routing configuration
+// (alert_routes: who is paged, through which channel, at which escalation
+// step) - ADR 0102 section 18, ALERT-DELIVERY-1. Platform scope only, granted
+// solely to RolePlatformAdmin, and DELIBERATELY separate from PermAlertManage:
+// someone who can ack or resolve an alert must not, by that alone, be able to
+// redirect where pages go (security SR-7 separation). The database layer
+// (alerting_validated_platform_admin) checks platform scope, not this
+// permission, so the permission is enforced in Go and pinned by its own test.
+// Never granted to a tenant-scoped role.
+const PermAlertRouteManage Permission = "alert:route_manage"
+
 // Provider credential permissions (Stage 10.3 W2a; ADR 0093 §3 and its
 // W2a design-review amendment; security review §6). Four distinct
 // permissions, never bundled into PermTenantWrite, PermCasinoConfigWrite
@@ -740,6 +751,9 @@ var rolePermissions = map[Role]map[Permission]bool{
 		// PRH-2 I-core (ADR 0102 §4.2/C-102-7): the sole grantee of
 		// PermAlertManage. See that permission's own doc comment.
 		PermAlertManage,
+		// ALERT-DELIVERY-1 (ADR 0102 section 18): sole grantee of the routing
+		// authoring permission, kept apart from PermAlertManage.
+		PermAlertRouteManage,
 		// PRH-2 K1 (ADR 0099 §3.2): platform_admin holds every governance
 		// permission - it is the sole grantee of capability_grant:approve
 		// (R-7) and financial_policy:author, and (like every other role

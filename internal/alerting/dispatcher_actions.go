@@ -16,7 +16,20 @@ type resolvedRoute struct {
 	channelKind   ChannelKind
 	recipientRef  string
 	escalateAfter *time.Duration
+	enabled       bool
 }
+
+// UnroutedReason is the closed alert_deliveries.unrouted_reason vocabulary.
+type UnroutedReason string
+
+const (
+	// UnroutedNoRoute: no current route exists for (severity, step).
+	UnroutedNoRoute UnroutedReason = "no_route"
+	// UnroutedChannelDisabled: a current route exists but is not enabled.
+	UnroutedChannelDisabled UnroutedReason = "channel_disabled"
+	// UnroutedNoSink: an enabled route names a channel this binary has no sink for.
+	UnroutedNoSink UnroutedReason = "no_sink"
+)
 
 // resolveRoute looks up the effective (severity, step) route (ADR §6.1)
 // as of now (T-1: the clock is a query parameter, never the database's
@@ -37,13 +50,13 @@ func (d *Dispatcher) resolveRoute(ctx context.Context, severity Severity, step i
 	var escalateAfter *time.Duration
 	err := d.pool.WithPlatformService(ctx, db.ServiceAlertDispatcher, func(ctx context.Context, tx pgx.Tx) error {
 		return tx.QueryRow(ctx, `
-			SELECT id, channel_kind, recipient_ref, escalate_after
+			SELECT id, channel_kind, COALESCE(recipient_ref, ''), escalate_after, enabled
 			FROM alert_routes
 			WHERE scope = 'platform' AND severity = $1 AND escalation_step = $2
 			  AND superseded_at IS NULL AND effective_from <= $3
 			ORDER BY effective_from DESC
 			LIMIT 1
-		`, string(severity), step, now).Scan(&r.id, &r.channelKind, &r.recipientRef, &escalateAfter)
+		`, string(severity), step, now).Scan(&r.id, &r.channelKind, &r.recipientRef, &escalateAfter, &r.enabled)
 	})
 	if err == pgx.ErrNoRows {
 		return nil, nil
@@ -96,16 +109,22 @@ func (d *Dispatcher) recordSent(ctx context.Context, w dueAlert, route *resolved
 	})
 	if err != nil {
 		slog.Default().Error("alert_dispatcher_record_sent_failed", "alert_id", w.id, "error", err)
+		return
 	}
+	recordDeliveryAttempt(ctx, route.channelKind, "sent", ErrorClassNone, d.channelIsHuman(route.channelKind))
 }
 
 func (d *Dispatcher) recordFailedOrDead(ctx context.Context, w dueAlert, route *resolvedRoute, errClass ErrorClass, now time.Time) {
-	if w.attemptNo+1 >= d.config.MaxAttempts {
+	errClass = errClass.normalized()
+	// A permanent class (rejected, misconfigured) is terminal at once: retrying
+	// cannot help and must not burn the budget. A retryable class is dead only
+	// when the severity's attempt budget is spent.
+	if !errClass.Retryable() || w.attemptNo+1 >= d.config.attemptBudget(w.severity) {
 		d.recordDeadDirect(ctx, w, route, errClass, "")
 		return
 	}
 
-	next := now.Add(d.config.Backoff(w.attemptNo))
+	next := now.Add(d.config.backoffFor(w.severity, w.attemptNo))
 	err := d.pool.WithPlatformService(ctx, db.ServiceAlertDispatcher, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := tx.Exec(ctx, `
 			INSERT INTO alert_deliveries (alert_id, escalation_step, attempt_no, event, route_id, channel_kind, last_error_class, next_attempt_at)
@@ -115,7 +134,15 @@ func (d *Dispatcher) recordFailedOrDead(ctx context.Context, w dueAlert, route *
 	})
 	if err != nil {
 		slog.Default().Error("alert_dispatcher_record_failed_failed", "alert_id", w.id, "error", err)
+		return
 	}
+	recordDeliveryAttempt(ctx, route.channelKind, "failed", errClass, d.channelIsHuman(route.channelKind))
+}
+
+// channelIsHuman reports the wired sink's HumanNotification (false if unwired).
+func (d *Dispatcher) channelIsHuman(k ChannelKind) bool {
+	s, ok := d.sinks[k]
+	return ok && s.HumanNotification()
 }
 
 // recordDeadDirect records a 'dead' delivery row for w at its CURRENT
@@ -141,18 +168,19 @@ func (d *Dispatcher) recordDeadDirect(ctx context.Context, w dueAlert, route *re
 		slog.Default().Warn("alert_dispatcher_dead_without_delivery", "alert_id", w.id, "escalation_step", w.step, "attempt_no", w.attemptNo, "detail", logDetail)
 	}
 	recordDead(ctx, string(route.channelKind))
+	recordDeliveryAttempt(ctx, route.channelKind, "dead", errClass, d.channelIsHuman(route.channelKind))
 	d.raiseMeta(ctx, KindAlertingDeliveryDead, w.kind)
 }
 
-func (d *Dispatcher) markUnrouted(ctx context.Context, w dueAlert) {
+func (d *Dispatcher) markUnrouted(ctx context.Context, w dueAlert, reason UnroutedReason) {
 	var id uuid.UUID
 	err := d.pool.WithPlatformService(ctx, db.ServiceAlertDispatcher, func(ctx context.Context, tx pgx.Tx) error {
 		return tx.QueryRow(ctx, `
-			INSERT INTO alert_deliveries (alert_id, escalation_step, attempt_no, event)
-			VALUES ($1, $2, 0, 'unrouted')
+			INSERT INTO alert_deliveries (alert_id, escalation_step, attempt_no, event, unrouted_reason)
+			VALUES ($1, $2, 0, 'unrouted', $3)
 			ON CONFLICT DO NOTHING
 			RETURNING id
-		`, w.id, w.step).Scan(&id)
+		`, w.id, w.step, string(reason)).Scan(&id)
 	})
 	if err == pgx.ErrNoRows {
 		// Already marked unrouted for this (alert, step) - LF F9: no
@@ -165,7 +193,7 @@ func (d *Dispatcher) markUnrouted(ctx context.Context, w dueAlert) {
 	}
 	// RETURNING yielded a row: this is genuinely new. Count and raise the
 	// meta occurrence exactly once (ADR §6.1 point 2).
-	recordUnrouted(ctx, w.severity)
+	recordUnrouted(ctx, w.severity, reason)
 	d.raiseMeta(ctx, KindAlertingUnrouted, w.kind)
 }
 
@@ -208,4 +236,32 @@ func mustSeverityOf(k Kind) Severity {
 		return def.Severity
 	}
 	return SeverityP2
+}
+
+// loadRouteConfigs reads the configuration-only projection of every current
+// platform route (readiness evaluation). It lives here because this is one of
+// the three files allowed to use the dispatcher identity (AL-10).
+func (d *Dispatcher) loadRouteConfigs(ctx context.Context, now time.Time) ([]RouteConfig, error) {
+	var routes []RouteConfig
+	err := d.pool.WithPlatformService(ctx, db.ServiceAlertDispatcher, func(ctx context.Context, tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, `
+			SELECT severity, escalation_step, channel_kind, enabled, recipient_ref IS NOT NULL,
+			       alerting_channel_kind_is_human_notification(channel_kind), effective_from
+			FROM alert_routes
+			WHERE scope = 'platform' AND superseded_at IS NULL AND effective_from <= $1
+		`, now)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var r RouteConfig
+			if err := rows.Scan(&r.Severity, &r.Step, &r.ChannelKind, &r.Enabled, &r.HasRecipient, &r.DBHuman, &r.EffectiveFrom); err != nil {
+				return err
+			}
+			routes = append(routes, r)
+		}
+		return rows.Err()
+	})
+	return routes, err
 }

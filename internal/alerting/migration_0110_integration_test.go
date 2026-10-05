@@ -147,7 +147,7 @@ func TestMigration0110_RecipientRefRefusesEmailAndPhoneShapes(t *testing.T) {
 
 	for _, ref := range []string{"ops@example.com", "+15551234567", "5551234567"} {
 		err := pool.WithPlatformAdmin(context.Background(), admin, func(ctx context.Context, tx pgx.Tx) error {
-			_, err := tx.Exec(ctx, `INSERT INTO alert_routes (scope, severity, escalation_step, channel_kind, recipient_ref) VALUES ('platform', 'p1', 0, 'mock', $1)`, ref)
+			_, err := tx.Exec(ctx, `INSERT INTO alert_routes (scope, severity, escalation_step, channel_kind, recipient_ref, reason_code) VALUES ('platform', 'p1', 0, 'mock', $1, 'initial_setup')`, ref)
 			return err
 		})
 		if err == nil {

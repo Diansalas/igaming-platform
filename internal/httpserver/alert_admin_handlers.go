@@ -16,13 +16,20 @@ package httpserver
 // the before and after state and the reason code - never alert attributes
 // beyond what the alert itself already exposes.
 //
-// Route configuration (alert_routes writes) is deliberately NOT built here:
-// it needs the SR-7 preconditions (ADR 0102 6.2) and is a human decision
-// (HD-PRH2-4-OPS). Until a human configures routes every alert stays unrouted.
+// Route authoring lives in alert_routing_handlers.go (ALERT-DELIVERY-1, ADR
+// 0102 section 18): configuring a route is not a notification, and no channel
+// that reaches a person exists. Until a human configures a real channel
+// (HD-PRH2-4-OPS) nothing is delivered to anyone.
+//
+// Refusals are audited (security L-1): the permission check is made INSIDE the
+// handler (not in middleware) so a refused attempt can write its own denied
+// audit row in the CALLER'S OWN scope (a tenant caller in its own tenant's
+// audit, a platform caller in the platform audit), the K1 pattern.
 
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"regexp"
 	"time"
@@ -42,10 +49,48 @@ func registerAlertAdminRoutes(mux *http.ServeMux, deps Deps) {
 	staff := func(h http.Handler) http.Handler {
 		return auth.Middleware(deps.AuthIssuer)(auth.RequireStaffPrincipal(h))
 	}
-	mux.Handle("POST /v1/admin/alerts/{alertID}/ack",
-		staff(auth.RequirePermission(auth.PermAlertManage)(newAlertTransitionHandler(deps, "ack"))))
-	mux.Handle("POST /v1/admin/alerts/{alertID}/resolve",
-		staff(auth.RequirePermission(auth.PermAlertManage)(newAlertTransitionHandler(deps, "resolve"))))
+	// The permission check is inside the handler (see the file comment).
+	mux.Handle("POST /v1/admin/alerts/{alertID}/ack", staff(newAlertTransitionHandler(deps, "ack")))
+	mux.Handle("POST /v1/admin/alerts/{alertID}/resolve", staff(newAlertTransitionHandler(deps, "resolve")))
+	registerAlertRoutingRoutes(mux, deps, staff)
+}
+
+// alertDenial describes one refused alert/routing mutation for its denied
+// audit row. reason is a closed token; no request value is recorded.
+type alertDenial struct {
+	action     string
+	targetType string
+	targetID   string
+	reason     string
+}
+
+// recordAlertDenied writes the denied audit row in the caller's own scope in
+// its own bounded transaction (the main transaction, if any, rolled back).
+func recordAlertDenied(ctx context.Context, deps Deps, tc tenant.Context, actor uuid.UUID, d alertDenial, r *http.Request, requestID string) {
+	entry := audit.Entry{
+		TenantID: tc.TenantID, ActorType: audit.ActorStaff, ActorID: actor,
+		Action: d.action, TargetType: d.targetType, TargetID: d.targetID,
+		Outcome: audit.OutcomeDenied, IPAddress: clientIP(r), UserAgent: r.UserAgent(), RequestID: requestID,
+		Metadata: map[string]any{"denied": d.reason},
+	}
+	record := func(ctx context.Context, tx pgx.Tx) error { return audit.Record(ctx, tx, entry) }
+	dctx, cancel := deniedAuditCtx(ctx)
+	defer cancel()
+	var err error
+	if tc.TenantID == uuid.Nil {
+		err = deps.DB.WithPlatformAdmin(dctx, actor, record)
+	} else {
+		err = deps.DB.WithTenant(dctx, tc.TenantID, record)
+	}
+	if err != nil {
+		observability.LoggerFromContext(ctx, deps.Logger).Error("alert_admin_denied_audit_failed", "action", d.action)
+	}
+}
+
+// refuseAlert audits the refusal then writes the API error.
+func refuseAlert(w http.ResponseWriter, r *http.Request, deps Deps, tc tenant.Context, actor uuid.UUID, requestID string, d alertDenial, code apierror.Code, msg string) {
+	recordAlertDenied(r.Context(), deps, tc, actor, d, r, requestID)
+	apierror.Write(w, requestID, code, msg)
 }
 
 // alertReasonCodePattern bounds the resolve reason code (a closed-shape token,
@@ -93,11 +138,19 @@ func newAlertTransitionHandler(deps Deps, op string) http.HandlerFunc {
 			apierror.Write(w, requestID, apierror.CodeUnauthorized, "no authenticated context")
 			return
 		}
-		// Platform scope only: a tenant-scoped session never reaches the
-		// state change (the permission already excludes every tenant role;
+		deny := alertDenial{action: "alerts." + op, targetType: "alert", targetID: r.PathValue("alertID")}
+		// Layer 1: the permission. Inside the handler so a refusal is audited.
+		if !auth.RoleHasPermission(auth.Role(tc.Role), auth.PermAlertManage) {
+			deny.reason = "permission"
+			refuseAlert(w, r, deps, tc, actor, requestID, deny, apierror.CodeForbidden, "insufficient permissions for this operation")
+			return
+		}
+		// Layer 2, platform scope only: a tenant-scoped session never reaches
+		// the state change (the permission already excludes every tenant role;
 		// this is the explicit second gate).
 		if tc.TenantID != uuid.Nil {
-			apierror.Write(w, requestID, apierror.CodeForbidden, "insufficient permissions for this operation")
+			deny.reason = "platform_scope_required"
+			refuseAlert(w, r, deps, tc, actor, requestID, deny, apierror.CodeForbidden, "insufficient permissions for this operation")
 			return
 		}
 		alertID, err := uuid.Parse(r.PathValue("alertID"))
@@ -105,14 +158,29 @@ func newAlertTransitionHandler(deps Deps, op string) http.HandlerFunc {
 			apierror.Write(w, requestID, apierror.CodeInvalidRequest, "invalid request")
 			return
 		}
+		deny.targetID = alertID.String()
 		var body alertTransitionRequest
 		if op == "resolve" {
 			if err := decodeJSON(r, &body); err != nil {
-				apierror.Write(w, requestID, apierror.CodeInvalidRequest, "invalid request")
+				deny.reason = "invalid_body"
+				refuseAlert(w, r, deps, tc, actor, requestID, deny, apierror.CodeInvalidRequest, "invalid request")
 				return
 			}
 			if !alertReasonCodePattern.MatchString(body.ReasonCode) {
-				apierror.Write(w, requestID, apierror.CodeValidation, "reason_code is required (lowercase token, at most 64 characters)")
+				deny.reason = "reason_code_required"
+				refuseAlert(w, r, deps, tc, actor, requestID, deny, apierror.CodeValidation, "reason_code is required (lowercase token, at most 64 characters)")
+				return
+			}
+		} else if r.ContentLength != 0 {
+			// ack takes an OPTIONAL reason_code (audit metadata only).
+			if err := decodeJSON(r, &body); err != nil && !errors.Is(err, io.EOF) {
+				deny.reason = "invalid_body"
+				refuseAlert(w, r, deps, tc, actor, requestID, deny, apierror.CodeInvalidRequest, "invalid request")
+				return
+			}
+			if body.ReasonCode != "" && !alertReasonCodePattern.MatchString(body.ReasonCode) {
+				deny.reason = "reason_code_invalid"
+				refuseAlert(w, r, deps, tc, actor, requestID, deny, apierror.CodeValidation, "reason_code must be a lowercase token of at most 64 characters")
 				return
 			}
 		}
@@ -142,6 +210,7 @@ func newAlertTransitionHandler(deps Deps, op string) http.HandlerFunc {
 			if op == "resolve" {
 				reason = &body.ReasonCode
 			}
+			auditReason := body.ReasonCode
 			// acked_by/resolved_by and the timestamps are forced by the
 			// database guard from the validated session, not from here.
 			if err := tx.QueryRow(ctx,
@@ -152,8 +221,8 @@ func newAlertTransitionHandler(deps Deps, op string) http.HandlerFunc {
 				return err
 			}
 			meta := map[string]any{"kind": kind, "severity": severity, "before_state": state, "after_state": newState}
-			if reason != nil {
-				meta["reason_code"] = *reason
+			if auditReason != "" {
+				meta["reason_code"] = auditReason
 			}
 			entry := audit.Entry{
 				TenantID: uuid.Nil, ActorType: audit.ActorStaff, ActorID: actor,
@@ -168,9 +237,11 @@ func newAlertTransitionHandler(deps Deps, op string) http.HandlerFunc {
 		})
 		switch {
 		case errors.Is(err, errAlertNotFound):
-			apierror.Write(w, requestID, apierror.CodeNotFound, "not found")
+			deny.reason = "not_found"
+			refuseAlert(w, r, deps, tc, actor, requestID, deny, apierror.CodeNotFound, "not found")
 		case errors.Is(err, errAlertBadTransition):
-			apierror.Write(w, requestID, apierror.CodeConflict, "alert state does not allow this operation")
+			deny.reason = "invalid_transition"
+			refuseAlert(w, r, deps, tc, actor, requestID, deny, apierror.CodeConflict, "alert state does not allow this operation")
 		case err != nil:
 			// Class only (never the error text): enough to tell a lock/timeout
 			// from a refusal without leaking statement detail.

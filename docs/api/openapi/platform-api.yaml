@@ -5286,6 +5286,113 @@ paths:
         "500":
           $ref: "#/components/responses/InternalError"
 
+  # --- ALERT-DELIVERY-1 routing readiness (ADR 0102 section 18, migration 0117).
+  # Platform scope only (tenant tokens get 403). Routing is configuration: no
+  # channel that reaches a person exists, a log/mock route notifies nobody, and
+  # readiness is always false today. ---
+  /v1/admin/alerting/routes:
+    post:
+      summary: Create or supersede an alert route version (log/mock channels only)
+      description: >
+        Requires `alert:route_manage` (platform_admin only, separate from
+        `alert:manage`) and a platform-scope token. A route is never edited in
+        place: `supersedes_id` creates a new version and marks the old one
+        superseded; a second current route for the same severity and step is
+        409. A route is DISABLED unless `enabled` is true; enabling requires a
+        `recipient_ref`, an opaque target id (no email, phone, address, URL or
+        key-shaped value). The database refuses to enable a route for any
+        channel kind that notifies a person (SR-7, four-eyes not built); in
+        production a p1/p2 route on log/mock cannot be enabled. Every success
+        and every refusal is audited; the recipient value is never audited.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [severity, escalation_step, channel_kind, enabled, reason_code]
+              properties:
+                severity: { type: string, enum: [p1, p2, p3] }
+                escalation_step: { type: integer, minimum: 0, maximum: 9 }
+                channel_kind: { type: string, enum: [log, mock] }
+                recipient_ref: { type: string, nullable: true }
+                escalate_after_seconds: { type: number, minimum: 0, exclusiveMinimum: true, maximum: 604800 }
+                enabled: { type: boolean }
+                reason_code: { type: string, enum: [initial_setup, on_call_change, escalation_change, correction, decommission, drill] }
+                supersedes_id: { type: string, format: uuid, nullable: true }
+      responses:
+        "201":
+          description: The new route version
+        "400":
+          description: Validation refusal (audited as denied), including the SR-7 four-eyes guard
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: Tenant-scoped caller, or a platform caller without `alert:route_manage` (audited in the caller's own scope)
+        "404":
+          description: supersedes_id names no current platform route
+        "409":
+          description: A current route exists for this severity and step (supply supersedes_id), or supersedes_id names a different severity or step
+    get:
+      summary: List alert route versions (current, or all with include_superseded=true)
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: include_superseded
+          in: query
+          schema: { type: boolean }
+      responses:
+        "200":
+          description: Route versions, each with `human_notification` (false for every kind that exists)
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: Tenant-scoped caller or missing `alert:route_manage`
+  /v1/admin/alerting/status:
+    get:
+      summary: Routing readiness per severity, with the exact missing operator input
+      description: >
+        Requires `alert:manage` and a platform-scope token. Readiness is computed
+        over configuration only (never live delivery success); a stale or
+        never-evaluated cache is NOT ready. A log or mock route never counts.
+        Report-only: `/readyz` is unaffected.
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: "`ready`, `evaluated_at`, and per severity routes_configured, routes_enabled, human_notification_routes, ready, reason, missing_operator_input"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: Tenant-scoped caller or missing `alert:manage`
+  /v1/admin/alerts:
+    get:
+      summary: List platform alerts with their derived delivery state
+      description: >
+        Requires `alert:manage` and a platform-scope token. `delivery_state` is
+        pending, retrying, unrouted (with `unrouted_reason`), delivery_failed,
+        recorded_non_human or suppressed. `delivered` is reserved for a
+        human-notification channel and does not occur today;
+        `notified_a_person` is false for every non-human delivery.
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: state, in: query, schema: { type: string, enum: [open, acked, resolved] } }
+        - { name: severity, in: query, schema: { type: string, enum: [p1, p2, p3] } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 200, default: 50 } }
+      responses:
+        "200":
+          description: Alerts, newest first
+        "400":
+          description: Invalid filter
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: Tenant-scoped caller or missing `alert:manage`
+
 components:
   parameters:
     ProviderCredentialTenantID:

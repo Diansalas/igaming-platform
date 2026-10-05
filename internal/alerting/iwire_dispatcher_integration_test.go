@@ -119,9 +119,9 @@ func TestIWire_LogSink_CarriesDiscriminatorAndDedupKey(t *testing.T) {
 	}
 }
 
-// The loop wired to a real dispatcher: a sink that panics mid-delivery is
-// recovered per pass (the process survives), the stranded 'claimed' row is
-// reclaimed once its lease expires, and the alert is then delivered.
+// The loop wired to a real dispatcher: a sink that panics mid-delivery is (since ALERT-DELIVERY-1 routing readiness)
+// recovered per ALERT and recorded as a failed/unknown attempt (the pass and process survive), and the
+// alert is delivered on the next pass.
 func TestIWire_DispatcherLoop_PanicRecoveredThenStaleClaimReclaimedAndDelivered(t *testing.T) {
 	pool := scratchPool(t, "iwloop")
 	admin := seedPlatformAdmin(t, pool)
@@ -154,12 +154,15 @@ func TestIWire_DispatcherLoop_PanicRecoveredThenStaleClaimReclaimedAndDelivered(
 		})
 	}()
 
-	if got := <-results; got != "panic" {
-		t.Fatalf("pass 1 result %q, want panic (recovered)", got)
+	// Per-alert recovery (security M-5 / ALERT-DELIVERY-1): a panic inside
+	// Deliver no longer ends the pass. It is recorded as a failed attempt of
+	// class unknown, so nothing is stranded in 'claimed'.
+	if got := <-results; got != "ok" {
+		t.Fatalf("pass 1 result %q, want ok (panic recovered per alert)", got)
 	}
-	assertLatestEvent(t, pool, admin, alertID, "claimed") // stranded between claim and outcome
+	assertLatestEvent(t, pool, admin, alertID, "failed")
 
-	clock.Advance(lease + time.Second)
+	clock.Advance(time.Second)
 	tick <- time.Time{}
 	if got := <-results; got != "ok" {
 		t.Fatalf("pass 2 result %q, want ok", got)

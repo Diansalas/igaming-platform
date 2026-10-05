@@ -65,6 +65,12 @@ export interface NavPermissions {
    * in for it.
    */
   paymentForceResolutionAct: boolean
+  /**
+   * ALERT-DELIVERY-1 (ADR 0102 section 18): PermAlertRouteManage - author alert
+   * routing (who is paged). platform_admin only, and separate from the
+   * ack/resolve permission. UI convenience only; the server re-checks.
+   */
+  alertRouting: boolean
 }
 
 const NONE: NavPermissions = {
@@ -89,6 +95,7 @@ const NONE: NavPermissions = {
   manualAdjustmentAct: false,
   paymentForceResolutions: false,
   paymentForceResolutionAct: false,
+  alertRouting: false,
 }
 
 // The write flags (tenantWrite/brandWrite/staffAdmin/providerConfig/
@@ -126,6 +133,7 @@ const ROLE_NAV_PERMISSIONS: Record<string, NavPermissions> = {
     manualAdjustmentAct: true,
     paymentForceResolutions: true,
     paymentForceResolutionAct: true,
+    alertRouting: true,
   },
   tenant_admin: {
     ...NONE,

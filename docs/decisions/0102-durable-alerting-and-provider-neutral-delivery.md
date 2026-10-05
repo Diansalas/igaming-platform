@@ -1748,3 +1748,95 @@ followed as its own commit (§17.6).
   `-skip 'TestStoreOutage_DoesNotPinPool|TestResolutionIsolation_'` for `./internal/httpserver` and
   `./internal/payments`; that skip is a pre-existing, documented
   exclusion and nothing from I-wire is skipped.
+
+## 18. Amendment: routing readiness, smallest cut (ALERT-DELIVERY-1 stays OPEN)
+
+Status: **IMPLEMENTED (config, guards, visibility) with a MOCK test channel; real delivery NOT IMPLEMENTED.**
+Migration `0117_alert_routing_readiness`. Design: `docs/plans/prh2-hardening-round/analysis/
+alert-delivery-design-v1.md`; adopted cut: the product-owner-proxy scope verdict plus the security review
+(ACCEPT WITH CONDITIONS) in the same directory. **No real channel, no recipient, no vendor, no secret exists.
+Nothing reaches a person.** A `log` or `mock` delivery is not a notification. ALERT-DELIVERY-1 is not closed
+and this section does not claim otherwise.
+
+### 18.1 What was built (labels per CLAUDE.md)
+
+| Item | Label |
+|---|---|
+| `alert_routes.enabled` (DEFAULT false; every existing row disabled), `reason_code` (closed vocabulary), nullable `recipient_ref`, CHECK R1 (enabled needs a recipient_ref and a channel_kind); `enabled` and `reason_code` immutable per row (activation = a new version) | IMPLEMENTED |
+| SR-7 structural guard: the database refuses `enabled = true` for any channel kind whose human-notification flag is true (`alerting_channel_kind_is_human_notification`, fail-closed: only `log` and `mock` are known non-human), error "SR-7: four-eyes approval required; not built". No such kind exists | IMPLEMENTED (guard); four-eyes itself NOT IMPLEMENTED |
+| `alert_deliveries.unrouted_reason` (`no_route`, `channel_disabled`, `no_sink`), required on every new unrouted row (NOT VALID CHECK, so pre-0117 rows keep NULL). N-4 closed: a route with no wired sink is a visible, counted row with the meta-alert, not a log line | IMPLEMENTED |
+| Security H-1: `SET search_path = pg_catalog, public, pg_temp` on every function 0117 creates or replaces, and `ALTER FUNCTION ... SET` on the seven 0110 alert functions; exact-catalogue test; TEMP-shadow probes with controls | IMPLEMENTED |
+| Down migration refuses (AR099) while `alert_routes` has ANY row or any delivery carries an `unrouted_reason` (security L-2); the pins are left in place | IMPLEMENTED |
+| `ErrorClass.Retryable()`: `rejected` and `misconfigured` go straight to terminal failure; `timeout`, `unavailable`, `unknown` retry. Budgets as constants: p1 8 attempts / 5 min cap, p2 5 / 1 min, p3 3 / 1 min | IMPLEMENTED |
+| Per-alert panic recovery (the pass continues; the delivery is recorded failed/unknown); only the panic TYPE is logged, never its value (security M-5), with a canary test; the pass-level recovery logs type only too | IMPLEMENTED |
+| `Sink.HumanNotification()` (log and mock false). A `sent` through a non-human channel is labelled `non_human` in `alert_delivery_attempts_total` and derives `recorded_non_human` (never `delivered`, `notified_a_person=false`) in the list API | IMPLEMENTED |
+| p1 escalate-on-dead: a terminally dead, unacknowledged p1 step n is followed by step n+1 when an ENABLED route for it exists; otherwise terminal with no extra row. p2 and p3 unchanged | IMPLEMENTED |
+| Readiness evaluator over configuration only (never live delivery success; a stale or never-evaluated cache is NOT READY), gauge `alert_routing_ready{severity}` (p1, p2; observed at scrape time), Error log on every transition and at most every 10 minutes while not ready; platform-only `GET /v1/admin/alerting/status` naming the exact missing operator input. Readiness counts only routes whose channel is human-notification in BOTH the database flag and the wired sink, so it is always NOT READY today (correct, fail-closed). `/readyz` is REPORT-ONLY and unchanged | IMPLEMENTED |
+| Metrics `alert_unrouted_total{severity,reason}`, `alert_delivery_attempts_total{channel_kind,result,error_class,notification}` | IMPLEMENTED |
+| `alertingtest.RecordingChannel` (mutex-safe, scripted outcomes, hang-until-ctx, panic on demand, duplicate counter, dedupe on `DedupKey`), importable from tests only (static test), and the slim conformance suite (dedupe, ctx cancellation, classification, no secrets in logs, recipient never dialled) run against it and `LogSink` | MOCK (a test double, never wired in any binary) |
+| HTTP, platform scope only, three layers each pinned: `POST/GET /v1/admin/alerting/routes` (`alert:route_manage`), `GET /v1/admin/alerting/status` and `GET /v1/admin/alerts` (`alert:manage`); ack takes an optional `reason_code`. New permission `alert:route_manage` (RolePlatformAdmin only, separate from `alert:manage`, mirrored in `backoffice/src/auth/permissions.ts`) | IMPLEMENTED |
+| Audit: every successful route write, every refused attempt (403/404/409/400, written in the CALLER'S OWN scope, K1 denied-audit pattern) and the existing ack/resolve refusals. `recipient_ref` is never audited (only `recipient_ref_present`); the value lives only in `alert_routes` | IMPLEMENTED |
+| Production refusal (security M-3): `AlertRoutingProduction` (from `GuardEnvironment()`) refuses enabling a p1/p2 route on a channel that does not notify a person | IMPLEMENTED |
+| Post-commit test: a failing, hanging or panicking channel cannot change a committed deposit posting; SUM(debits) = SUM(credits) unchanged | IMPLEMENTED (test) |
+| Any real channel adapter, any recipient, any vendor, any secret | **NOT IMPLEMENTED / PROVIDER DEPENDENT / BLOCKED on HD-PRH2-4-OPS** |
+
+Decisions recorded. A current route with `enabled = false` resolves to `unrouted/channel_disabled`, and a newer
+disabled version wins over an older enabled one (fail closed). A second current route for the same (severity,
+step) is refused by the endpoint (409, "supply supersedes_id"). The DB unique-current-route rule R3 is deferred,
+so the endpoint serialises route writers with a transaction-scoped advisory lock (a write-ordering lock, not a
+tenant-isolation mechanism) and route resolution still picks the latest `effective_from`.
+
+### 18.2 recipient_ref rules (security M-7), binding before any real adapter
+
+1. `recipient_ref` is an opaque vendor target id (a service or rota reference). It is NEVER a credential: a
+   routing key, integration key or tokenised webhook URL lives only in the secret store.
+2. It is NEVER a network address. An adapter must not resolve, dial or interpolate it as a host, URL, path,
+   header or template; it is passed to the vendor API as escaped data. The conformance suite proves a channel
+   does not connect to a `recipient_ref`-derived address.
+3. A real adapter's endpoint is a compiled-in vendor host allowlist: no redirects, TLS verified, private,
+   link-local and metadata ranges refused after DNS resolution. Neither the secret value nor the database
+   supplies a base URL.
+4. A generic "webhook" channel kind is out of scope without its own egress-allowlist security review.
+5. Attribute rendering stays escaped (S-3 precedent).
+
+`alerting.ValidateRecipientRef` (Go) enforces the shape on the authoring endpoint on top of 0110's CHECKs: no
+email, phone, IPv4, host:port, URL or 32-hex key-shaped value.
+
+### 18.3 Deferred (not built; each with the trigger that reopens it)
+
+| Deferred item | Trigger |
+|---|---|
+| `alert_channels` table (versioned channel config), secret refs, credential fingerprints, the structural namespace rule (marker once, one segment equal to `channel_key`, pinned ARN account), write-time secret fetch, dispatcher credential fetch, `Credential` parameter, receipts / `receipt_fp` | real channel kind chosen |
+| `alert_channel_kinds` table (the Go flag and `alerting_channel_kind_is_human_notification` carry the semantics until then); widening or replacing the `channel_kind` CHECKs | real channel kind chosen |
+| `channel_not_eligible` reason, N-5 (register `LogSink` with the providerkind guard), `Sink` to `Channel` rename, markup-rendering conformance case | real channel kind chosen |
+| Kind-specific route override (`alert_routes.kind`), cut by security M-1 (targeted silencing invisible to readiness). If ever added: overrides on `alerting.*` Kinds are refused and a p1/p2 override must target a human channel, under four-eyes | real channel kind chosen |
+| R3 unique current route (DB-enforced); the endpoint 409 plus the advisory lock cover it meanwhile | real channel kind chosen |
+| R5 last-p1-route guard, with the security M-2 fixes recorded as closure preconditions: channel kind immutable across versions of a key; R5 as a DEFERRABLE INITIALLY DEFERRED constraint trigger; every route and channel write serialised on one advisory lock taken inside the guard trigger (two-session test); R5 covers every severity readiness counts, or enforce counts only p1 | real channel kind chosen |
+| Four-eyes (distinct-Person request/approve, DB-enforced) for enabling or superseding any p1/p2 route, any enabled channel version, and superseding the last p1 route; `route_changed` additionally delivered to the superseded route's recipient, or the external monitor alerts on route changes | before the FIRST `human_notification = true` kind (the 0117 guard makes this a database fact) |
+| `alerting.route_changed` Kind (fail-closed raise, per-version discriminator `route:<version_id>`, security M-4); the audit rows suffice in the log/mock phase per the security ruling | real channel kind chosen (re-evaluate against four-eyes) |
+| `/readyz` enforce mode and the production-required `ALERT_ROUTING_READINESS_MODE` env (security L-6: configuration-only, stale = not ready, p2/enforce blast radius; a narrower gate than whole-service `/readyz` deserves consideration) | launch gating decision (H5/H9) |
+| `ALERT_MOCK_CHANNEL` dev wiring | DECLINED by security (S1); not a deferral |
+| Env-var tuning of budgets and intervals, backoff jitter | launch gating decision / observed herd |
+| The `alert_delivery_status` VIEW (security recommends a handler query, which is what shipped) | first tenant-owned Kind (a tenant-visible delivery state) |
+| Tenant-scoped routing (`scope = 'tenant'`, `tenant_id NOT NULL`, an `alert_routes_tenant_owned` family) and H7 | first tenant-owned alert Kind |
+
+### 18.4 What still blocks closure of ALERT-DELIVERY-1
+
+Operator inputs (none decided or invented here): **H1** channel vendor and contract (and alert-payload data
+location); **H2** recipients / on-call targets as the vendor's opaque refs (HD-PRH2-4-OPS); **H3** on-call policy;
+**H4** escalation windows (`escalate_after` per severity and step); **H5** enforce versus report in production;
+**H6** who provisions the vendor credential in the production secret store; **H8** the external monitor's own
+notification target; **H9** whether ALERT-DELIVERY-1 gates launch of money-moving flows.
+
+Closure preconditions (all still open): (a) human-authored routes; (b) a real channel that is neither `log` nor
+`mock`; (c) a named human recipient or on-call; (d) the section 17.7 list: a NEW K2 breach pages, ALERT-RETENTION-1
+and a volume bound, a real-adapter test that dedupes on `DedupKey` and honours ctx (the conformance suite is the
+harness), Vault/KMS credentials with no body logging, and four-eyes route authoring with its own security review
+plus the M-2 fixes in 18.3. This section delivers the SR-7 audit trail, N-4, the structural human-channel guard,
+readiness visibility and the conformance harness; nothing of (a) to (c).
+
+Residuals: the DB layer checks platform scope, not `alert:route_manage` (security L-5; acceptable while
+`platform_admin` is the only platform role); a `dead` delivery is terminal and is not re-delivered after a channel
+fix (operators use the list endpoint); a `Sink` that ignores its context still blocks the pass (the external
+monitor's flat `alert_dispatcher_passes_total` alert is the cover); the TEMP-shadow probes run through the owner
+pool because migration 0116 revokes TEMP creation from the runtime role.

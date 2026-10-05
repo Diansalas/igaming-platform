@@ -129,7 +129,8 @@ func runPassRecovered(parent context.Context, d PassRunner, drain time.Duration,
 
 	defer func() {
 		if r := recover(); r != nil {
-			logger.Error("alert_dispatcher_pass_panic", "panic", fmt.Sprint(r))
+			// Type only, never the value (security M-5).
+			logger.Error("alert_dispatcher_pass_panic", "panic_type", fmt.Sprintf("%T", r))
 			result = "panic"
 		}
 	}()

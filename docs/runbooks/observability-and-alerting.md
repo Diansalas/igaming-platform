@@ -492,19 +492,41 @@ is the correct, honest state until a human operational decision
 (HD-PRH2-4-OPS) configures real recipients and a real channel - it is
 NOT a bug and NOT something to silence by seeding a placeholder route.
 
-### How routes will be configured (once HD-PRH2-4-OPS is answered)
+### How routes are configured (ADR 0102 section 18, migration 0117)
 
-There is no route-authoring HTTP endpoint (ack and resolve exist; route
-writes are deliberately not built until the SR-7 preconditions and
-HD-PRH2-4-OPS). Today, a route
-is a plain row in `alert_routes`, insertable only by a validated
-platform-admin session (`alerting_validated_platform_admin()`, migration
-0110):
+**A log or mock route is not a notification to any person.** Routing
+configuration exists and is audited, but no channel that reaches a human
+exists, so `alert_routing_ready` stays 0 and readiness stays NOT READY.
 
-```sql
-INSERT INTO alert_routes (scope, severity, escalation_step, channel_kind, recipient_ref)
-VALUES ('platform', 'p1', 0, 'log', 'log:some-operator-defined-reference');
-```
+Routes are authored through the audited platform-admin API (permission
+`alert:route_manage`, platform scope only, separate from `alert:manage`):
+
+- `POST /v1/admin/alerting/routes` with `severity`, `escalation_step`,
+  `channel_kind` (`log` or `mock`), `recipient_ref` (optional while
+  disabled), `escalate_after_seconds` (optional), `enabled`, `reason_code`
+  (closed vocabulary: `initial_setup`, `on_call_change`,
+  `escalation_change`, `correction`, `decommission`, `drill`) and, to change
+  an existing route, `supersedes_id`. A route is never edited in place:
+  activation or deactivation is a NEW version that supersedes the old one.
+  A second current route for the same severity and step is refused (409).
+- A new route starts DISABLED unless you send `enabled: true`; enabling
+  requires a `recipient_ref`. `recipient_ref` is an opaque target id: no
+  email, phone, address, URL or key-shaped value is accepted.
+- The database refuses to enable a route for any channel kind that notifies
+  a person ("SR-7: four-eyes approval required; not built"). In production,
+  enabling a p1/p2 route on log/mock is refused too.
+- `GET /v1/admin/alerting/routes[?include_superseded=true]` lists versions;
+  `GET /v1/admin/alerting/status` shows, per severity, routes configured and
+  enabled, human-notification routes, `ready` and the exact missing operator
+  input; `GET /v1/admin/alerts[?state=&severity=&limit=]` lists alerts with a
+  derived delivery state (`pending`, `retrying`, `unrouted` + reason,
+  `delivery_failed`, `recorded_non_human`; `delivered` is reserved for a human
+  channel and cannot occur today).
+- Every successful write and every refused attempt writes an audit row
+  (actor, IP, request id, reason code, before/after route ids). The
+  recipient value is never audited.
+
+Underlying table facts:
 
 - `channel_kind` is `'log'` (IMPLEMENTED - `alerting.LogSink`, writes a
   structured log line) or `'mock'` (MOCK - `alerting.MockSink`, test/dev
@@ -590,13 +612,72 @@ or `panic` results increase) while open alerts exist; or open alerts with no
 
 ### Runbook: unrouted alerts
 
-Signal: `alert_unrouted_total` > 0 or an open `alerting.unrouted` (p2).
-This is the CURRENT steady state of every environment: no route is configured.
-Do not seed a placeholder route. Resolve it by having a human decide
+Signal: `alert_unrouted_total{severity,reason}` > 0 or an open `alerting.unrouted`
+(p2). This is the CURRENT steady state of every environment: no route is
+configured. Do not seed a placeholder route. Resolve it by having a human decide
 recipients/channel (HD-PRH2-4-OPS) and then configuring a route as a validated
-platform admin (see "How routes will be configured"). The original alerts stay
+platform admin (see "How routes are configured"). The original alerts stay
 open and visible until they are acked or resolved
-(`POST /v1/admin/alerts/{id}/ack|resolve`, `alert:manage`, platform admin only).
+(`POST /v1/admin/alerts/{id}/ack|resolve`, `alert:manage`, platform admin only;
+ack takes an optional `reason_code`).
+
+By `reason` (also the `unrouted_reason` column and the list API):
+
+- `no_route`: no current route for that severity and step. Needs a human
+  routing decision (H2).
+- `channel_disabled`: a current route exists but is not enabled. Enabling is a
+  new route version and needs a recipient.
+- `no_sink`: an ENABLED route names a channel this binary has no adapter for
+  (for example `mock`, which is never wired). This is a misconfiguration, not a
+  delivery: supersede the route with a wired channel kind. It used to be only a
+  log line (code review N-4); it is now a counted row plus the meta-alert.
+
+### Runbook: `alert_routing_ready == 0` (always, today)
+
+Signal: gauge `alert_routing_ready{severity}` (p1, p2) is 0, or the Error log
+`alert_routing_not_ready` (with `reason` and `missing_operator_input`). It is
+computed from configuration only (never from live delivery success), and a stale
+or never-evaluated cache reads 0. `GET /v1/admin/alerting/status` shows the exact
+reason per severity: `no_route_configured`, `route_not_enabled`,
+`channel_not_human_notification` (the route is on log/mock), `channel_not_wired`,
+`evaluation_stale` (check `alert_dispatcher_passes_total` for a stall).
+It stays 0 until a human-notification channel exists. `/readyz` is REPORT-ONLY:
+it is not affected. The external monitor should alert on
+`alert_routing_ready == 0`, an increase of `alert_dead_total`, and a flat
+`alert_dispatcher_passes_total`, through a path that does not depend on this
+dispatcher (its own target is operator input H8).
+
+### Runbook: `delivery_failed` (dead) alerts
+
+A permanent failure (`rejected`, `misconfigured`) is terminal immediately; a
+retryable one is terminal after the severity budget (p1 8 attempts / 5 min cap,
+p2 5 / 1 min, p3 3 / 1 min). A p1 that is dead at step n escalates to step n+1
+when an enabled route exists. A dead delivery is NOT re-delivered after you fix
+the channel: list `GET /v1/admin/alerts` and handle those alerts by hand.
+`alert_delivery_attempts_total{channel_kind,result,error_class,notification}`
+carries `notification=non_human` for log and mock: a `sent` there is a record,
+never a person being told.
+
+### Activation checklist (ALERT-DELIVERY-1 stays OPEN until ALL are true)
+
+Nothing below is decided or provisioned by engineering; each needs a named human:
+
+1. H1 channel vendor and contract (and where alert payloads are processed).
+2. H2 recipients / on-call targets as the vendor's opaque refs (HD-PRH2-4-OPS).
+3. H3 on-call policy (coverage, primary/secondary, ack expectations) and H4
+   escalation windows (`escalate_after` per severity and step).
+4. H6 provisioning of the vendor credential in the production secret store.
+5. A real channel adapter that passes `alertingtest.RunChannelConformance`
+   (dedupe on `DedupKey`, honours ctx, no secrets or bodies in logs, never uses
+   `recipient_ref` as an address), together with four-eyes route approval and the
+   security re-review (ADR 0102 section 18.3, replacing the SR-7 database guard).
+6. H5 enforce versus report for routing readiness, and H9 whether this gates the
+   launch of money-moving flows.
+7. H8 the external monitor's own notification target.
+8. ALERT-RETENTION-1 and a new K2 breach paging (ADR 0102 section 17.7).
+
+Until then: every alert is `unrouted` or recorded to a non-human channel, and no
+person is notified of anything.
 
 ### Runbook: `alert_raise_failures_total{kind,phase}` rising
 
@@ -648,9 +729,9 @@ must still review the latest run's open mismatch rows on every sweep.
 - **No route exists** (HD-PRH2-4-OPS), so every alert is
   `unrouted` until a human configures routes. Real channels are PROVIDER
   DEPENDENT; only the log sink and the MOCK sink exist.
-- **No route-authoring endpoint.** Ack and resolve are API calls now; route
-  writes remain direct SQL by a validated platform admin (SR-7 preconditions
-  apply before any real channel).
+- **Route authoring is an audited API** (ADR 0102 section 18) but only for log
+  and mock: the database refuses to enable a route for a human-notification
+  channel until four-eyes exists. `alert_routing_ready` is always 0 today.
 - **Dedicated per-reason Kinds** for the T10 parks need a migration and are
   deferred (ALERT-KINDS-DEDICATED-1).
 - **Retention** (`alert_occurrences`/`alert_deliveries` grow without bound) has
