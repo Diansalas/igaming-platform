@@ -1,0 +1,99 @@
+PRH-2 R4 R3-GAME-POSTINGS-NONACTIVE-1 mutation-kill evidence (2026-10-05)
+Branch prh2-r4-game-postings-nonactive (from 4164a1c). Migration 0119.
+
+Method. A throwaway copy of the worktree (outside the repository) was migrated into a private database
+(g_gamemut, dropped afterwards) and tested as the runtime role (asserted NOT rolsuper AND NOT rolbypassrls).
+For each mutant: apply ONE textual mutation to the copy (migration mutants rebuild the private database),
+run  go test -tags integration -p 1 -run 'TestTenantNotActive|TestGamePostingsNonActive'  on
+./internal/casino ./internal/sportsbook ./internal/httpserver, record KILLED (non-zero exit) or SURVIVED,
+restore the file from the worktree and verify with cmp. A CONTROL run of the unmutated copy passed (rc=0)
+before each batch. The repository working tree was never mutated.
+
+Entry points mutated: casino postBet, postWin, postRollback (tombstone branch, posted-original branch),
+sportsbook PlaceBet, sportsbook lockAndPost (the single choke point of settle, rollback, rollback tombstone,
+void of an open bet, void after settlement, i.e. also the staff SimulateSettlementEvent path), the shared
+primitive, the casino durable record, the HTTP mappings, and every part of migration 0119.
+
+Note on the two-layer design: removing an application check (M01..M04, M10, M12) leaves the database trigger
+as a backstop, so the posting is STILL refused at the database (SQLSTATE GP010) and no money moves; the
+mutant is nevertheless killed because the tests require the clean typed refusal, the recorded audit row and
+the deterministic response, which only the application check produces.
+
+--- raw results from g_mut_run_part1.log ---
+CONTROL (unmutated copy): rc=0 fails=[]
+M01 postBet guard removed: KILLED rc=1
+   restore+cmp internal/casino/orchestrator.go: identical
+M02 postWin guard removed: KILLED rc=1
+   restore+cmp internal/casino/orchestrator.go: identical
+M03 postRollback tombstone-branch guard removed: KILLED rc=1
+   restore+cmp internal/casino/orchestrator.go: identical
+M04 postRollback posted-original guard removed: KILLED rc=1
+   restore+cmp internal/casino/orchestrator.go: identical
+M05 casino replay exemption removed (ownRef ignored): KILLED rc=1
+   restore+cmp internal/casino/orchestrator.go: identical
+M06 casino helper: ErrNotActive not translated (returns raw tenant error): KILLED rc=1
+   restore+cmp internal/casino/orchestrator.go: identical
+M07 casino helper: guard always passes: KILLED rc=1
+   restore+cmp internal/casino/orchestrator.go: identical
+M08 casino rejectionClassFor mapping removed: KILLED rc=1
+   restore+cmp internal/casino/rejections.go: identical
+M09 casino durable audit action renamed (record not found): KILLED rc=1
+   restore+cmp internal/casino/rejections.go: identical
+M10 PlaceBet guard removed: KILLED rc=1
+   restore+cmp internal/sportsbook/orchestrator.go: identical
+M11 PlaceBet audit record removed: KILLED rc=1
+   restore+cmp internal/sportsbook/orchestrator.go: identical
+M12 lockAndPost guard removed (all settlement postings): KILLED rc=1
+   restore+cmp internal/sportsbook/settlement.go: identical
+M13 settlement sentinel not converted to a rejection: KILLED rc=1
+   restore+cmp internal/sportsbook/settlement.go: identical
+M14 settlement rejection flagged as integrity alert: KILLED rc=1
+   restore+cmp internal/sportsbook/settlement.go: identical
+M15 helper: only closed refused (suspended passes): KILLED rc=1
+   restore+cmp internal/tenant/gameplay_gate.go: identical
+M16 helper: advisory lock not taken: KILLED rc=1
+   restore+cmp internal/tenant/gameplay_gate.go: identical
+M17 helper: missing row passes: SURVIVED rc=0
+   restore+cmp internal/tenant/gameplay_gate.go: identical
+M18 casino play route mapping removed (falls to 500): KILLED rc=1
+   restore+cmp internal/httpserver/casino_play_handlers.go: identical
+M19 casino webhook route mapping removed (falls to 500): SURVIVED rc=0
+   restore+cmp internal/httpserver/casino_handlers.go: identical
+M20 apierror: settlement code mapped 500: KILLED rc=1
+   restore+cmp internal/apierror/apierror.go: identical
+--- raw results from g_mut_run2.log ---
+CONTROL (unmutated copy): rc=0 fails=[]
+M21 migration: status-change trigger removed: KILLED rc=1
+   restore+cmp migrations/0119_gameplay_posting_tenant_status_gate.up.sql: identical
+M22 migration: ledger backstop trigger never fires: KILLED rc=1
+   restore+cmp migrations/0119_gameplay_posting_tenant_status_gate.up.sql: identical
+M23 migration: backstop replay exemption removed: KILLED rc=1
+   restore+cmp migrations/0119_gameplay_posting_tenant_status_gate.up.sql: identical
+M24 migration: backstop refuses only suspended (closed passes): KILLED rc=1
+   restore+cmp migrations/0119_gameplay_posting_tenant_status_gate.up.sql: identical
+M25 migration: backstop type list drops sportsbook_void: KILLED rc=1
+   restore+cmp migrations/0119_gameplay_posting_tenant_status_gate.up.sql: identical
+M26 migration: backstop type list drops casino_rollback: KILLED rc=1
+   restore+cmp migrations/0119_gameplay_posting_tenant_status_gate.up.sql: identical
+--- raw results from g_mut_run3.log ---
+CONTROL (unmutated copy): rc=0 fails=[]
+M17 helper: missing row passes: KILLED rc=1
+   restore+cmp internal/tenant/gameplay_gate.go: identical
+M19 casino webhook route mapping removed (falls to 500): KILLED rc=1
+   restore+cmp internal/httpserver/casino_handlers.go: identical
+
+SUMMARY: 26 mutants applied, 26 KILLED, 0 survived at the end. Every restore verified identical by cmp.
+
+Survivors during development and what closed them:
+- M17 (helper: a missing/hidden tenant row passes) SURVIVED the first test set. Classified: unreachable under a
+  tenant-scoped connection (the FK guarantees the tenant row and tenants_read shows it), reachable only under a
+  player-scoped session where RLS hides the row. Closed by TestTenantNotActive_GateFailsClosedWhenTheRowIsNotVisible
+  (player scope must fail closed); re-run KILLED.
+- M19 (casino webhook route 409 mapping removed) SURVIVED: the public route refuses a non-active tenant before the
+  orchestrator in the preamble (401), so the in-transaction refusal is reachable on that route only in the race
+  window. Closed by TestGamePostingsNonActive_WebhookRaceWithClosure (closure held uncommitted while a signed
+  webhook arrives; the request waits at the gate, is answered 409, writes the audit record and no ledger row);
+  re-run KILLED.
+
+Not mutated, by classification: the audit text and log wording; the Q-GP-* residuals in ADR 0095 section 40.5.
+
