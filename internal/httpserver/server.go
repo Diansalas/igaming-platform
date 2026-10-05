@@ -35,6 +35,17 @@ type Deps struct {
 	AuthIssuer  *auth.Issuer
 	ServiceName string
 
+	// AlertRouting is the dispatcher's cached routing-readiness view that the
+	// platform status endpoint reports (ALERT-DELIVERY-1, ADR 0102 section 18).
+	// nil means no dispatcher runs in this process: every severity is reported
+	// not ready ("not evaluated"). Report-only: /readyz is unaffected.
+	AlertRouting AlertRoutingSource
+	// AlertRoutingProduction is true when cfg.GuardEnvironment() is
+	// "production" (missing APP_ENV counts as production). The route authoring
+	// endpoint then refuses to enable a p1/p2 route on a channel that does not
+	// notify a person (security M-3).
+	AlertRoutingProduction bool
+
 	// AuditPresentationResolver (ADR 0104 §5.3) resolves the tenant
 	// platform-actions audit projection's presentation rules. nil means
 	// "use audit.ResolvePresentation" (the production compiled-in

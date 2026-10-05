@@ -364,7 +364,7 @@ func TestDispatcher_ClaimRaceIsDeterministic(t *testing.T) {
 func mustAddRouteWithEscalation(t *testing.T, pool *db.Pool, adminID uuid.UUID, severity Severity, step int, channel ChannelKind, recipientRef string, escalateAfter *time.Duration) {
 	t.Helper()
 	err := pool.WithPlatformAdmin(context.Background(), adminID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `INSERT INTO alert_routes (scope, severity, escalation_step, channel_kind, recipient_ref, escalate_after) VALUES ('platform', $1, $2, $3, $4, $5)`,
+		_, err := tx.Exec(ctx, `INSERT INTO alert_routes (scope, severity, escalation_step, channel_kind, recipient_ref, escalate_after, enabled, reason_code) VALUES ('platform', $1, $2, $3, $4, $5, true, 'initial_setup')`,
 			string(severity), step, string(channel), recipientRef, escalateAfter)
 		return err
 	})

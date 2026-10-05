@@ -30,7 +30,7 @@ func TestIWire_SimulationPayloadMismatchAlert_IsP3SimulationNeverDelivered(t *te
 	admin := a.platformAdmin()
 	if err := a.pool.WithPlatformAdmin(context.Background(), admin, func(ctx context.Context, tx pgx.Tx) error {
 		for _, sev := range []string{"p1", "p2", "p3"} {
-			if _, err := tx.Exec(ctx, `INSERT INTO alert_routes (scope, severity, escalation_step, channel_kind, recipient_ref) VALUES ('platform', $1, 0, 'mock', $2)`, sev, "mock:"+sev); err != nil {
+			if _, err := tx.Exec(ctx, `INSERT INTO alert_routes (scope, severity, escalation_step, channel_kind, recipient_ref, enabled, reason_code) VALUES ('platform', $1, 0, 'mock', $2, true, 'initial_setup')`, sev, "mock:"+sev); err != nil {
 				return err
 			}
 		}

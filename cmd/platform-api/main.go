@@ -277,7 +277,15 @@ func run() error {
 	kycOrch := kycOrchestrator(wiring, providers, logger)
 	kycOutboundCreds := providers.kycOutboundCredentials()
 
+	// ALERT-DELIVERY-1 (ADR 0102 section 18): the dispatcher is constructed
+	// here so the platform status endpoint can report its routing readiness.
+	// It is STARTED further below (PRH-2 I-wire). LogSink only: a log line is
+	// not a notification to any person, so readiness stays NOT READY.
+	alertDispatcher := alerting.NewDispatcher(pool, alerting.DefaultDispatcherConfig(), alerting.LogSink{Logger: logger})
+
 	handler, webhookAdmission := httpserver.NewWithAdmission(httpserver.Deps{
+		AlertRouting:                alertDispatcher,
+		AlertRoutingProduction:      cfg.GuardEnvironment() == "production",
 		Logger:                      logger,
 		DB:                          pool,
 		AuthIssuer:                  issuer,
@@ -489,7 +497,6 @@ func run() error {
 	// alert_routes row is seeded, so after this starts every alert is 'unrouted'
 	// until a human configures routes; nothing is delivered to a person. The loop
 	// recovers a panic per pass and drains the pass in flight on shutdown.
-	alertDispatcher := alerting.NewDispatcher(pool, alerting.DefaultDispatcherConfig(), alerting.LogSink{Logger: logger})
 	var alertDispatcherWG sync.WaitGroup
 	alertDispatcherWG.Add(1)
 	go func() {

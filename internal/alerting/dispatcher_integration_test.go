@@ -34,7 +34,7 @@ func seedOpenAlert(t *testing.T, pool *db.Pool, tenantID uuid.UUID, kind Kind, d
 func addTestRoute(t *testing.T, pool *db.Pool, adminID uuid.UUID, severity Severity, step int, channel ChannelKind, recipientRef string) {
 	t.Helper()
 	err := pool.WithPlatformAdmin(context.Background(), adminID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `INSERT INTO alert_routes (scope, severity, escalation_step, channel_kind, recipient_ref) VALUES ('platform', $1, $2, $3, $4)`,
+		_, err := tx.Exec(ctx, `INSERT INTO alert_routes (scope, severity, escalation_step, channel_kind, recipient_ref, enabled, reason_code) VALUES ('platform', $1, $2, $3, $4, true, 'initial_setup')`,
 			string(severity), step, string(channel), recipientRef)
 		return err
 	})

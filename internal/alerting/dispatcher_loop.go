@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 )
 
@@ -32,6 +33,9 @@ type LoopConfig struct {
 	DrainTimeout time.Duration
 	// Logger defaults to slog.Default().
 	Logger *slog.Logger
+	// ReadinessInterval is how often routing readiness is re-evaluated by its
+	// OWN ticker, independent of how long a delivery pass takes (default: Interval).
+	ReadinessInterval time.Duration
 	// OnPass, if set, is called after every pass with its outcome
 	// ("ok", "error" or "panic"). Test and metrics hook.
 	OnPass func(result string)
@@ -89,6 +93,27 @@ func RunDispatcherLoopWithConfig(ctx context.Context, d PassRunner, cfg LoopConf
 		logger = slog.Default()
 	}
 
+	// Routing readiness is configuration-only and must not depend on how long a
+	// delivery pass takes: a slow or down vendor (each Deliver may run up to
+	// ClaimLease/2 = 60s) would otherwise delay the evaluation beyond the
+	// staleness window and flip alert_routing_ready (code review C1). It runs
+	// on its own ticker whenever the runner can evaluate readiness. The default
+	// staleness window is three intervals, so two consecutive missed or failed
+	// evaluations are tolerated before the cache reads "stale = not ready".
+	var readyWG sync.WaitGroup
+	defer readyWG.Wait()
+	if ev, ok := d.(readinessEvaluator); ok {
+		ri := cfg.ReadinessInterval
+		if ri <= 0 {
+			ri = cfg.Interval
+		}
+		readyWG.Add(1)
+		go func() {
+			defer readyWG.Done()
+			runReadinessLoop(ctx, ev, ri, logger)
+		}()
+	}
+
 	pass := func() {
 		if ctx.Err() != nil {
 			return // shutting down: no new pass
@@ -114,6 +139,40 @@ func RunDispatcherLoopWithConfig(ctx context.Context, d PassRunner, cfg LoopConf
 	}
 }
 
+// readinessEvaluator is implemented by *Dispatcher.
+type readinessEvaluator interface {
+	EvaluateReadiness(ctx context.Context) error
+}
+
+// readinessEvalTimeout bounds one readiness evaluation (a single short read).
+var readinessEvalTimeout = 10 * time.Second
+
+func runReadinessLoop(ctx context.Context, ev readinessEvaluator, interval time.Duration, logger *slog.Logger) {
+	eval := func() {
+		defer func() {
+			if r := recover(); r != nil {
+				logger.Error("alert_routing_readiness_panic", "panic_type", fmt.Sprintf("%T", r))
+			}
+		}()
+		ectx, cancel := context.WithTimeout(ctx, readinessEvalTimeout)
+		defer cancel()
+		if err := ev.EvaluateReadiness(ectx); err != nil && ctx.Err() == nil {
+			logger.Error("alert_routing_readiness_evaluation_failed", "error_type", fmt.Sprintf("%T", err))
+		}
+	}
+	eval()
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			eval()
+		}
+	}
+}
+
 // runPassRecovered runs exactly one d.RunOnce with panic recovery and the
 // shutdown-drain context. It returns "ok", "error" or "panic".
 func runPassRecovered(parent context.Context, d PassRunner, drain time.Duration, logger *slog.Logger) (result string) {
@@ -129,7 +188,8 @@ func runPassRecovered(parent context.Context, d PassRunner, drain time.Duration,
 
 	defer func() {
 		if r := recover(); r != nil {
-			logger.Error("alert_dispatcher_pass_panic", "panic", fmt.Sprint(r))
+			// Type only, never the value (security M-5).
+			logger.Error("alert_dispatcher_pass_panic", "panic_type", fmt.Sprintf("%T", r))
 			result = "panic"
 		}
 	}()

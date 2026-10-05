@@ -108,3 +108,17 @@ describe('getNavPermissions manual adjustment flags', () => {
     }
   })
 })
+
+/**
+ * ALERT-DELIVERY-1 (ADR 0102 section 18): the alertRouting flag mirrors
+ * internal/auth/permission.go's alert:route_manage, granted to platform_admin
+ * only. UI convenience; the server re-checks.
+ */
+describe('getNavPermissions alert routing flag', () => {
+  it('only platform_admin may author alert routing', () => {
+    expect(getNavPermissions('platform_admin').alertRouting).toBe(true)
+    for (const role of ['tenant_admin', 'finance', 'compliance', 'support', 'risk_manager', 'promotions_manager', 'bonus_operations', 'player', undefined]) {
+      expect(getNavPermissions(role as string).alertRouting).toBe(false)
+    }
+  })
+})
