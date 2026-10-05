@@ -575,3 +575,5 @@ references): use the closed codes (basis, context, finding, reason) and the `evi
 
 **Never:** hand-edit `payment_attempts`, `withdrawal_requests` or ledger rows; resend a payout; use a
 `platform-operator-declared:` reference anywhere else; claim a payment was delivered or an alert sent.
+
+**Suspending or closing a tenant (casino and sportsbook).** From the moment a tenant is not `active`, NEW casino bets, wins and rollbacks and NEW sportsbook bets and settlements are refused (ADR 0095 §40.5): provider wins, refunds and rollbacks for rounds that were open are refused too and recorded (`audit_log` actions `casino_callback.rejected_tenant_not_active`, `sportsbook_bet.denied_tenant_not_active`, `sportsbook_bet.settlement_rejected` with `SETTLEMENT_TENANT_NOT_ACTIVE`). No staff path exists to resolve those rounds. Settle or void every open casino round and sportsbook bet BEFORE closing a tenant, and treat suspension of a tenant with open rounds as an incident to be resolved by reactivation or an owner-approved procedure (open question Q-GP-1). Do not hand-edit ledger rows.
