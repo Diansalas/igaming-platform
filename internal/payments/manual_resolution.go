@@ -134,6 +134,7 @@ func PayoutDisputeReasons() map[string]bool {
 		"amount_asset_mismatch":               false,
 		"callback_amount_asset_mismatch":      false,
 		"invalid_provider_reference":          false,
+		"provider_reference_conflict":         false, // PAY-PAYOUT-REFBIND-1: hold kept; no M2 path
 		"reversal_tombstone_precedes_success": false,
 		"late_success_after_terminal":         false,
 		"late_decline_after_terminal":         false,

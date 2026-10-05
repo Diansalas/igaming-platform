@@ -112,10 +112,10 @@ func (o *Orchestrator) driveCreatedAttempt(
 			}); err != nil {
 				return err
 			}
-			if err := RejectCreated(actx, tx, created.ID, EvidencePlatform, "kyc_required:"+denyReason); err != nil {
+			if err := RejectCreated(actx, tx, created.ID, EvidencePlatform, depositKYCDeclineReason(denyReason)); err != nil {
 				return err
 			}
-			intent, err = o.finalizeDeclined(actx, tx, intent, nil, nil, "kyc_required:"+denyReason)
+			intent, err = o.finalizeDeclined(actx, tx, intent, nil, nil, depositKYCDeclineReason(denyReason))
 			return err
 		}
 

@@ -220,7 +220,7 @@ func (o *Orchestrator) InitiateDepositAttempt(
 			}); err != nil {
 				return fmt.Errorf("payments: audit kyc denial: %w", err)
 			}
-			intent, err = o.finalizeDeclined(actx, tx, intent, nil, nil, "kyc_required:"+denyReason)
+			intent, err = o.finalizeDeclined(actx, tx, intent, nil, nil, depositKYCDeclineReason(denyReason))
 			return err
 		}
 
