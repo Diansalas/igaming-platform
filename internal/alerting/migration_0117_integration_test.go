@@ -17,8 +17,8 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/Diansalas/igaming-platform/internal/alerting"
-	"github.com/Diansalas/igaming-platform/internal/alerting/alertingtest"
 	"github.com/Diansalas/igaming-platform/internal/db"
+	"github.com/Diansalas/igaming-platform/internal/testsupport/alertworld"
 	"github.com/Diansalas/igaming-platform/internal/testsupport/scratchdb"
 )
 
@@ -44,7 +44,7 @@ func insertRoute(ctx context.Context, tx pgx.Tx, enabled bool, recipient *string
 func strp(s string) *string { return &s }
 
 func TestMigration0117_R1_EnabledRequiresARecipient_DisabledMayBeStaged_DefaultIsDisabled(t *testing.T) {
-	w := alertingtest.NewWorld(t, "m117_r1")
+	w := alertworld.NewWorld(t, "m117_r1")
 	admin := w.SeedAdmin()
 	run := func(f func(ctx context.Context, tx pgx.Tx) error) error {
 		return w.Pool.WithPlatformAdmin(context.Background(), admin, f)
@@ -74,7 +74,7 @@ func TestMigration0117_R1_EnabledRequiresARecipient_DisabledMayBeStaged_DefaultI
 }
 
 func TestMigration0117_ReasonCode_RequiredAndClosedVocabulary(t *testing.T) {
-	w := alertingtest.NewWorld(t, "m117_rc")
+	w := alertworld.NewWorld(t, "m117_rc")
 	admin := w.SeedAdmin()
 	err := w.Pool.WithPlatformAdmin(context.Background(), admin, func(ctx context.Context, tx pgx.Tx) error {
 		return insertRoute(ctx, tx, false, strp("ops"), nil)
@@ -91,7 +91,7 @@ func TestMigration0117_ReasonCode_RequiredAndClosedVocabulary(t *testing.T) {
 }
 
 func TestMigration0117_EnabledAndReasonAreImmutable_OnlySupersessionMayUpdate(t *testing.T) {
-	w := alertingtest.NewWorld(t, "m117_imm")
+	w := alertworld.NewWorld(t, "m117_imm")
 	admin := w.SeedAdmin()
 	id := w.AddRoute(admin, alerting.SeverityP2, 0, alerting.ChannelMock, "ops", false)
 	err := w.Pool.WithPlatformAdmin(context.Background(), admin, func(ctx context.Context, tx pgx.Tx) error {
@@ -114,7 +114,7 @@ func TestMigration0117_EnabledAndReasonAreImmutable_OnlySupersessionMayUpdate(t 
 // No such kind exists (channel_kind is limited to log/mock), so the guard is exercised by
 // lifting the kind CHECK in a rolled-back owner transaction.
 func TestMigration0117_NoRouteCanBeEnabledForAHumanNotificationKind(t *testing.T) {
-	w := alertingtest.NewWorld(t, "m117_sr7")
+	w := alertworld.NewWorld(t, "m117_sr7")
 	admin := w.SeedAdmin()
 
 	for kind, want := range map[string]bool{"log": false, "mock": false, "pager_x": true, "": true} {
@@ -162,7 +162,7 @@ func TestMigration0117_NoRouteCanBeEnabledForAHumanNotificationKind(t *testing.T
 }
 
 func TestMigration0117_UnroutedReason_ConstraintsAreStructural(t *testing.T) {
-	w := alertingtest.NewWorld(t, "m117_ur")
+	w := alertworld.NewWorld(t, "m117_ur")
 	admin := w.SeedAdmin()
 	tenant := w.SeedTenant(admin)
 	id := w.SeedAlert(tenant, alerting.KindPaymentWebhookIntegrity, "d:"+uuid.NewString())
@@ -198,7 +198,7 @@ func TestMigration0117_UnroutedReason_ConstraintsAreStructural(t *testing.T) {
 
 // RLS / tenant isolation: routing configuration is platform-scope only.
 func TestMigration0117_RLS_TenantsAndUnvalidatedSessionsSeeNoRoutingConfiguration(t *testing.T) {
-	w := alertingtest.NewWorld(t, "m117_rls")
+	w := alertworld.NewWorld(t, "m117_rls")
 	admin := w.SeedAdmin()
 	tenantA := w.SeedTenant(admin)
 	tenantB := w.SeedTenant(admin)
@@ -266,7 +266,7 @@ var expectedPinnedAlertFunctions = []string{
 
 // Security H-1 catalogue: EXACTLY these alert functions exist and every one pins search_path with pg_temp last.
 func TestMigration0117_EveryAlertFunctionPinsSearchPath_ExactCatalogue(t *testing.T) {
-	w := alertingtest.NewWorld(t, "m117_cat")
+	w := alertworld.NewWorld(t, "m117_cat")
 	got := map[string]string{}
 	if err := w.Pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, `SELECT proname, coalesce(array_to_string(proconfig, ','), '') FROM pg_proc
@@ -305,7 +305,7 @@ func TestMigration0117_EveryAlertFunctionPinsSearchPath_ExactCatalogue(t *testin
 // OWNER pool in a rolled-back transaction. Each probe has a control: with the pin lifted (also rolled back)
 // the shadow WORKS, proving the probe has teeth.
 func TestMigration0117_TempShadowProbe_StaffUsersCannotForgeAPlatformAdmin(t *testing.T) {
-	w := alertingtest.NewWorld(t, "m117_tmp1")
+	w := alertworld.NewWorld(t, "m117_tmp1")
 	fake := uuid.New()
 	probe := func(lift bool) (uuid.UUID, error) {
 		ctx := context.Background()
@@ -341,7 +341,7 @@ func TestMigration0117_TempShadowProbe_StaffUsersCannotForgeAPlatformAdmin(t *te
 }
 
 func TestMigration0117_TempShadowProbe_AlertsCannotHideASimulationAlertFromTheDeliveryGuard(t *testing.T) {
-	w := alertingtest.NewWorld(t, "m117_tmp2")
+	w := alertworld.NewWorld(t, "m117_tmp2")
 	admin := w.SeedAdmin()
 	tenant := w.SeedTenant(admin)
 	sim := w.SeedAlert(tenant, alerting.KindSimulationCasinoPlay, "d:"+uuid.NewString())

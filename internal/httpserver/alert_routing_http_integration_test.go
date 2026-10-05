@@ -20,15 +20,16 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/alerting"
 	"github.com/Diansalas/igaming-platform/internal/alerting/alertingtest"
 	"github.com/Diansalas/igaming-platform/internal/auth"
+	"github.com/Diansalas/igaming-platform/internal/testsupport/alertworld"
 )
 
 // ALERT-DELIVERY-1 routing readiness at the HTTP layer. Every test runs through
-// the REAL RUNTIME ROLE (alertingtest.World asserts it is neither superuser nor
+// the REAL RUNTIME ROLE (alertworld.World asserts it is neither superuser nor
 // BYPASSRLS) against a throwaway database.
 
 type arAPI struct {
 	t      *testing.T
-	w      *alertingtest.World
+	w      *alertworld.World
 	issuer *auth.Issuer
 	srv    *httptest.Server
 	disp   *alerting.Dispatcher
@@ -37,7 +38,7 @@ type arAPI struct {
 
 func newARAPI(t *testing.T, production bool) *arAPI {
 	t.Helper()
-	w := alertingtest.NewWorld(t, "arh_")
+	w := alertworld.NewWorld(t, "arh_")
 	keys, err := auth.NewKeyRegistry("k1", map[string]string{"k1": strings.Repeat("k", 32)})
 	if err != nil {
 		t.Fatal(err)

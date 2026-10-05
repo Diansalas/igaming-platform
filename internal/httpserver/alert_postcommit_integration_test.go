@@ -16,6 +16,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/alerting/alertingtest"
 	"github.com/Diansalas/igaming-platform/internal/auth"
 	"github.com/Diansalas/igaming-platform/internal/payments"
+	"github.com/Diansalas/igaming-platform/internal/testsupport/alertworld"
 )
 
 // ALERT-DELIVERY-1 post-commit guarantee (ledger-finance): delivery runs
@@ -24,7 +25,7 @@ import (
 // alter a committed ledger transaction, and the ledger invariant
 // SUM(debits) = SUM(credits) is unchanged.
 func TestAlertDelivery_ChannelFailureHangOrPanicCannotAffectACommittedLedgerTransaction(t *testing.T) {
-	w := alertingtest.NewWorld(t, "arpc_")
+	w := alertworld.NewWorld(t, "arpc_")
 	keys, err := auth.NewKeyRegistry("k1", map[string]string{"k1": testJWTSecret})
 	if err != nil {
 		t.Fatal(err)

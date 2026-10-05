@@ -16,6 +16,7 @@ import (
 
 	"github.com/Diansalas/igaming-platform/internal/alerting"
 	"github.com/Diansalas/igaming-platform/internal/alerting/alertingtest"
+	"github.com/Diansalas/igaming-platform/internal/testsupport/alertworld"
 )
 
 // ALERT-DELIVERY-1 routing readiness (ADR 0102 section 18): dispatcher
@@ -46,7 +47,7 @@ func zeroBackoff() func(int) time.Duration { return func(int) time.Duration { re
 
 // N-4: an unrouted alert is a visible row with a closed reason, never a log line.
 func TestRouting_UnroutedReasons_NoRoute_Disabled_NoSink(t *testing.T) {
-	w := alertingtest.NewWorld(t, "arr_unr")
+	w := alertworld.NewWorld(t, "arr_unr")
 	admin := w.SeedAdmin()
 	tenant := w.SeedTenant(admin)
 
@@ -65,7 +66,7 @@ func TestRouting_UnroutedReasons_NoRoute_Disabled_NoSink(t *testing.T) {
 
 	// An ENABLED route naming a channel with no sink wired in this binary
 	// (mock is not wired; only LogSink is) is a no_sink row: N-4.
-	w2 := alertingtest.NewWorld(t, "arr_nosink")
+	w2 := alertworld.NewWorld(t, "arr_nosink")
 	admin2 := w2.SeedAdmin()
 	tenant2 := w2.SeedTenant(admin2)
 	w2.AddRoute(admin2, alerting.SeverityP1, 0, alerting.ChannelMock, "mock-target", true)
@@ -94,7 +95,7 @@ func TestRouting_UnroutedReasons_NoRoute_Disabled_NoSink(t *testing.T) {
 
 // Once an enabled route with a wired sink exists, a previously unrouted alert is delivered.
 func TestRouting_EnabledRouteDeliversViaTestChannel_NonHuman(t *testing.T) {
-	w := alertingtest.NewWorld(t, "arr_ok")
+	w := alertworld.NewWorld(t, "arr_ok")
 	admin := w.SeedAdmin()
 	tenant := w.SeedTenant(admin)
 	w.AddRoute(admin, alerting.SeverityP2, 0, alerting.ChannelMock, "mock-target", true)
@@ -124,7 +125,7 @@ func TestRouting_PermanentErrorsAreTerminalImmediately_RetryableBurnBudget(t *te
 		{alerting.ErrorClassUnavailable, 5}, // p2 budget
 	} {
 		t.Run(string(tc.class), func(t *testing.T) {
-			w := alertingtest.NewWorld(t, "arr_perm")
+			w := alertworld.NewWorld(t, "arr_perm")
 			admin := w.SeedAdmin()
 			tenant := w.SeedTenant(admin)
 			w.AddRoute(admin, alerting.SeverityP2, 0, alerting.ChannelMock, "mock-target", true)
@@ -154,7 +155,7 @@ func TestRouting_PermanentErrorsAreTerminalImmediately_RetryableBurnBudget(t *te
 }
 
 func TestRouting_P1BudgetIsEightAttempts(t *testing.T) {
-	w := alertingtest.NewWorld(t, "arr_p1")
+	w := alertworld.NewWorld(t, "arr_p1")
 	admin := w.SeedAdmin()
 	tenant := w.SeedTenant(admin)
 	w.AddRoute(admin, alerting.SeverityP1, 0, alerting.ChannelMock, "mock-target", true)
@@ -183,7 +184,7 @@ func TestRouting_PanicInOneDeliveryDoesNotEndThePass_AndNeverLogsTheValue(t *tes
 	slog.SetDefault(logger)
 	defer slog.SetDefault(prev)
 
-	w := alertingtest.NewWorld(t, "arr_pan")
+	w := alertworld.NewWorld(t, "arr_pan")
 	admin := w.SeedAdmin()
 	tenant := w.SeedTenant(admin)
 	w.AddRoute(admin, alerting.SeverityP2, 0, alerting.ChannelMock, "mock-target", true)
@@ -218,7 +219,7 @@ func (f writerFunc) Write(p []byte) (int, error) { return f(p) }
 
 // A hung channel times out as a normal failed attempt; nothing is left stranded in 'claimed'.
 func TestRouting_HungChannelBecomesTimeoutFailure(t *testing.T) {
-	w := alertingtest.NewWorld(t, "arr_hang")
+	w := alertworld.NewWorld(t, "arr_hang")
 	admin := w.SeedAdmin()
 	tenant := w.SeedTenant(admin)
 	w.AddRoute(admin, alerting.SeverityP2, 0, alerting.ChannelMock, "mock-target", true)
@@ -246,7 +247,7 @@ func TestRouting_HungChannelBecomesTimeoutFailure(t *testing.T) {
 // p1 escalate-on-dead.
 func TestRouting_P1EscalatesOnDead_P2DoesNot_AckedDoesNot_NoNextRouteTerminal(t *testing.T) {
 	t.Run("p1 with a step-1 route escalates to it", func(t *testing.T) {
-		w := alertingtest.NewWorld(t, "arr_esc")
+		w := alertworld.NewWorld(t, "arr_esc")
 		admin := w.SeedAdmin()
 		tenant := w.SeedTenant(admin)
 		w.AddRoute(admin, alerting.SeverityP1, 0, alerting.ChannelMock, "step-zero", true)
@@ -266,7 +267,7 @@ func TestRouting_P1EscalatesOnDead_P2DoesNot_AckedDoesNot_NoNextRouteTerminal(t 
 		}
 	})
 	t.Run("p1 with no step-1 route stays terminal with no extra row", func(t *testing.T) {
-		w := alertingtest.NewWorld(t, "arr_esc2")
+		w := alertworld.NewWorld(t, "arr_esc2")
 		admin := w.SeedAdmin()
 		tenant := w.SeedTenant(admin)
 		w.AddRoute(admin, alerting.SeverityP1, 0, alerting.ChannelMock, "step-zero", true)
@@ -280,7 +281,7 @@ func TestRouting_P1EscalatesOnDead_P2DoesNot_AckedDoesNot_NoNextRouteTerminal(t 
 		}
 	})
 	t.Run("a disabled step-1 route does not escalate", func(t *testing.T) {
-		w := alertingtest.NewWorld(t, "arr_esc3")
+		w := alertworld.NewWorld(t, "arr_esc3")
 		admin := w.SeedAdmin()
 		tenant := w.SeedTenant(admin)
 		w.AddRoute(admin, alerting.SeverityP1, 0, alerting.ChannelMock, "step-zero", true)
@@ -295,7 +296,7 @@ func TestRouting_P1EscalatesOnDead_P2DoesNot_AckedDoesNot_NoNextRouteTerminal(t 
 		}
 	})
 	t.Run("p2 dead is terminal even with a step-1 route", func(t *testing.T) {
-		w := alertingtest.NewWorld(t, "arr_esc4")
+		w := alertworld.NewWorld(t, "arr_esc4")
 		admin := w.SeedAdmin()
 		tenant := w.SeedTenant(admin)
 		w.AddRoute(admin, alerting.SeverityP2, 0, alerting.ChannelMock, "step-zero", true)
@@ -310,7 +311,7 @@ func TestRouting_P1EscalatesOnDead_P2DoesNot_AckedDoesNot_NoNextRouteTerminal(t 
 		}
 	})
 	t.Run("an acknowledged p1 does not escalate", func(t *testing.T) {
-		w := alertingtest.NewWorld(t, "arr_esc5")
+		w := alertworld.NewWorld(t, "arr_esc5")
 		admin := w.SeedAdmin()
 		tenant := w.SeedTenant(admin)
 		w.AddRoute(admin, alerting.SeverityP1, 0, alerting.ChannelMock, "step-zero", true)
@@ -335,7 +336,7 @@ func TestRouting_P1EscalatesOnDead_P2DoesNot_AckedDoesNot_NoNextRouteTerminal(t 
 
 // Readiness is configuration-only: a log/mock route never counts, and today nothing can be ready.
 func TestRouting_ReadinessNeverReadyWithoutAHumanChannel_ConfigOnly(t *testing.T) {
-	w := alertingtest.NewWorld(t, "arr_rdy")
+	w := alertworld.NewWorld(t, "arr_rdy")
 	admin := w.SeedAdmin()
 	var buf bytes.Buffer
 	var mu sync.Mutex
@@ -417,7 +418,7 @@ func (s *lateHumanSink) HumanNotification() bool {
 }
 
 func TestRouting_PanicOutsideDeliverDoesNotEndThePass(t *testing.T) {
-	w := alertingtest.NewWorld(t, "arr_pan2")
+	w := alertworld.NewWorld(t, "arr_pan2")
 	admin := w.SeedAdmin()
 	tenant := w.SeedTenant(admin)
 	w.AddRoute(admin, alerting.SeverityP2, 0, alerting.ChannelMock, "mock-target", true)
