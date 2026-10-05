@@ -1,0 +1,69 @@
+PRH-2 R2 (migration 0116, ADR 0108) mutation-kill evidence
+Method: each mutant edits the real file in the worktree, the private DB (a_temp) is rebuilt from the mutated migrations
+(priv_db.sh), then `go test -tags integration -count=1 -p 1 -run TempRevoke` runs on ./internal/db and ./internal/adjustment
+against the real runtime role. A mutant whose mutated migration fails at migrate-up time is KILLED by the in-migration
+assertion (or the migrator). Files are restored after every mutant and byte-compared with the pre-run copies at the end
+(RESTORED and byte-compared OK; git status clean). The control run (no mutation) passes; its "SURVIVED" label below only
+means "no failing test", which is the expected control result.
+
+CONTROL (no mutation)
+tests: [('./internal/db', 0, []), ('./internal/adjustment', 0, [])]
+VERDICT: SURVIVED
+M1a drop REVOKE FROM PUBLIC (keep role revoke, keep assertion)
+priv_db (migrate up) FAILED -> KILLED at migration time: exit status 1
+VERDICT: KILLED
+M1b drop REVOKE FROM PUBLIC AND the assertion (tests must catch it alone)
+tests: [('./internal/db', 1, ['--- FAIL: TestTempRevoke_Catalogue_RuntimeAndPublicHaveNoTemp_OwnerKeepsIt', '--- FAIL: TestTempRevoke_RuntimeRoleCannotCreateAnyTempObject_AllForms', '--- FAIL: TestTempRevoke_Migration_UpDownUp_VerifyClean_AssertionFires']), ('./internal/adjustment', 1, ['--- FAIL: TestTempRevoke_K2ShadowAttack_FailsAtTempCreation_NoCompensatingEntry'])]
+VERDICT: KILLED
+M2 drop REVOKE FROM igaming_runtime only
+tests: [('./internal/db', 1, ['--- FAIL: TestTempRevoke_Migration_UpDownUp_VerifyClean_AssertionFires']), ('./internal/adjustment', 0, [])]
+VERDICT: KILLED
+M3 drop the assertion
+tests: [('./internal/db', 1, ['--- FAIL: TestTempRevoke_Migration_UpDownUp_VerifyClean_AssertionFires']), ('./internal/adjustment', 0, [])]
+VERDICT: KILLED
+M4a revoke from the wrong database (template1), assertion kept
+priv_db (migrate up) FAILED -> KILLED at migration time: exit status 1
+VERDICT: KILLED
+M4b revoke from the wrong database (template1), assertion dropped
+tests: [('./internal/db', 1, ['--- FAIL: TestTempRevoke_Catalogue_RuntimeAndPublicHaveNoTemp_OwnerKeepsIt', '--- FAIL: TestTempRevoke_RuntimeRoleCannotCreateAnyTempObject_AllForms', '--- FAIL: TestTempRevoke_Migration_UpDownUp_VerifyClean_AssertionFires']), ('./internal/adjustment', 1, ['--- FAIL: TestTempRevoke_K2ShadowAttack_FailsAtTempCreation_NoCompensatingEntry'])]
+VERDICT: KILLED
+M5 drop the down GRANT
+tests: [('./internal/db', 1, ['--- FAIL: TestTempRevoke_Migration_UpDownUp_VerifyClean_AssertionFires']), ('./internal/adjustment', 0, [])]
+VERDICT: KILLED
+M6 test (2) skips the CREATE TEMP VIEW form
+tests: [('./internal/db', 1, ['--- FAIL: TestTempRevoke_RuntimeRoleCannotCreateAnyTempObject_AllForms']), ('./internal/adjustment', 0, [])]
+VERDICT: KILLED
+M6b test (2) DO-block wrapper silently becomes direct
+tests: [('./internal/db', 1, ['--- FAIL: TestTempRevoke_RuntimeRoleCannotCreateAnyTempObject_AllForms']), ('./internal/adjustment', 0, [])]
+VERDICT: KILLED
+M7a over-revoke: migration also revokes CONNECT from the runtime role and PUBLIC (positive path must break)
+tests: [('./internal/db', 1, ['--- FAIL: TestTempRevoke_Catalogue_RuntimeAndPublicHaveNoTemp_OwnerKeepsIt', '--- FAIL: TestTempRevoke_RuntimeRoleCannotCreateAnyTempObject_AllForms', '--- FAIL: TestTempRevoke_Migration_UpDownUp_VerifyClean_AssertionFires']), ('./internal/adjustment', 1, ['--- FAIL: TestTempRevoke_K2ShadowAttack_FailsAtTempCreation_NoCompensatingEntry', '--- FAIL: TestTempRevoke_GenuineTwoPersonAdjustment_StillWorks_ExactlyOnce'])]
+VERDICT: KILLED
+M7b positive-path test weakened: exactly-once count assertion neutered
+tests: [('./internal/db', 0, []), ('./internal/adjustment', 0, [])]
+VERDICT: SURVIVED
+M7c attack test weakened: SQLSTATE 42501 check removed
+tests: [('./internal/db', 0, []), ('./internal/adjustment', 0, [])]
+VERDICT: SURVIVED
+RESTORED and byte-compared OK
+
+
+CLASSIFICATION
+- CONTROL: expected pass.
+- M1a: killed by the migration's own assertion (migrate up fails). M1b: with the assertion also removed, killed by the
+  catalogue test, the all-forms test, the migration test and the K2 attack test (the TEMP shadows get created).
+  Revoking from the role alone is a no-op while PUBLIC still grants TEMP: that is exactly M1.
+- M2 (drop role-only revoke): on a database where PUBLIC is already revoked the role revoke is a no-op, so only a case where the
+  role holds a DIRECT grant distinguishes it. Killed by the migration test (direct GRANT, then the real SQL must remove it).
+- M3: killed by the migration test (the non-owner run must RAISE).
+- M4a/M4b: wrong database (template1; a non-owner revoke there is a no-op and no shared DB is touched). Killed by the
+  assertion, and with the assertion dropped by the catalogue/forms/migration/attack tests.
+- M5: killed by the migration test (down must restore PUBLIC TEMP).
+- M6, M6b: weakened test (2) (skipped form; DO wrapper degraded to direct). Both killed by the pinned form list and wrapper checks
+  added for exactly this.
+- M7a: over-revoke (CONNECT) breaks the positive path; killed, including by the positive-path test.
+- M7b (exactly-once count assertion neutered) and M7c (SQLSTATE check removed in the attack test) SURVIVE. Classification:
+  test-weakening mutants, not product mutants. The same tests keep redundant assertions (M7b: a replayed decision must be
+  refused AND player_cash must stay 9700 AND the posting keys are checked; M7c: err == nil is still fatal, and the exact 42501
+  code is asserted for every form in TestTempRevoke_RuntimeRoleCannotCreateAnyTempObject_AllForms). Residual: deleting several
+  redundant assertions at once would not be caught by tests; that is what review is for.
