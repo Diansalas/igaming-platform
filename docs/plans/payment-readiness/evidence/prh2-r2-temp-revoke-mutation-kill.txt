@@ -124,3 +124,37 @@ CLASSIFICATION (fix batch)
   are asserted.
 - N9 SURVIVED - EQUIVALENT until a migration 0117 exists: the staged-dir filter only differs once later migrations land
   (that is exactly what it protects against); the copied-file-count check guards the staging itself.
+
+
+=====================================================================
+FINAL BATCH (QA / security delta): binary-level down guard, TEMP privilege name pin, membership gate, cmd/ static fixture
+Same method; P0 is the control (no failing test = expected). An earlier attempt of this run was invalid (the private DB was
+not rebuilt after a container restart, so even the control failed) and was discarded; this is the clean rerun.
+=====================================================================
+P0 CONTROL
+tests: [('./internal/db', 0, []), ('./internal/adjustment', 0, []), ('./cmd/migrate', 0, [])]
+VERDICT: SURVIVED
+P1 ConnectingRoleHoldsTemp asks about 'CREATE' instead of 'TEMP'
+tests: [('./internal/db', 1, ['--- FAIL: TestTempRevoke_ConnectingRoleHoldsTemp_PinsTheTempPrivilegeName']), ('./internal/adjustment', 1, ['--- FAIL: TestTempRevoke_K2ShadowAttack_SucceedsWhenTempIsGrantedBack']), ('./cmd/migrate', 0, [])]
+VERDICT: KILLED
+G1 down guard unplugged from run() (the function stays, the call is gone)
+tests: [('./internal/db', 0, []), ('./internal/adjustment', 0, []), ('./cmd/migrate', 1, ['--- FAIL: TestBinary_DownRefusedWhenAppEnvUnsetOrProduction'])]
+VERDICT: KILLED
+S1 static scan no longer walks cmd/
+tests: [('./internal/db', 1, ['--- FAIL: TestNoRuntimeTempObjectsInProductionCode']), ('./internal/adjustment', 0, []), ('./cmd/migrate', 0, [])]
+VERDICT: KILLED
+M1 ConnectingRoleHasMemberships always false
+tests: [('./internal/db', 1, ['--- FAIL: TestTempRevoke_ConnectingRoleHasMemberships_RuntimeNone_AdminSome']), ('./internal/adjustment', 0, []), ('./cmd/migrate', 0, [])]
+VERDICT: KILLED
+M2 production gate drops the membership refusal
+tests: [('./internal/db', 1, ['--- FAIL: TestVerifyRuntimeRoleInProduction_MembershipFailsClosed']), ('./internal/adjustment', 0, []), ('./cmd/migrate', 0, [])]
+VERDICT: KILLED
+RESTORED and byte-compared OK
+
+CLASSIFICATION (final batch): all 5 mutants KILLED, no survivors.
+- P1: asking about 'CREATE' instead of 'TEMP' is killed by the scratch-DB case where the runtime role holds CREATE but not TEMP
+  (and by the in-repo non-vacuity test through the production gate).
+- G1: unplugging the down guard from run() is killed only by the end-to-end binary test (the unit test of the function cannot see it).
+- S1: the cmd/ fixture in the static test proves cmd/ is walked.
+- M1, M2: membership query forced false / gate refusal dropped are killed by the real-DB test (test-admin role is a member of the
+  owner role) and the unit test.
