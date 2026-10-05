@@ -158,11 +158,24 @@ func seedFencedRows(t *testing.T, owner *Pool) map[string]uuid.UUID {
 		_, err := tx.Exec(ctx, `INSERT INTO persons (id, status) VALUES ($1, 'unverified')`, id)
 		return err
 	}))
+	// This is a live platform-wide deposit rule: left behind it makes every
+	// later internal/risk evaluation on the shared test database fail with
+	// "conflicting configurable rules". risk_rules is append-only (no DELETE),
+	// so the rule is DISABLED when the test ends - the only permitted mutation.
+	var riskRuleID uuid.UUID
 	must("risk_rules", owner.WithPlatformAdmin(ctx, admin, func(ctx context.Context, tx pgx.Tx) error {
 		return tx.QueryRow(ctx,
 			`INSERT INTO risk_rules (tenant_id, operation, limit_kind, time_window, threshold, threshold_exponent, created_by_actor_type, created_by_actor_id)
-			 VALUES (NULL, 'deposit', 'max_amount', 'transaction', 100, 2, 'staff', $1) RETURNING id`, admin).Scan(new(uuid.UUID))
+			 VALUES (NULL, 'deposit', 'max_amount', 'transaction', 100, 2, 'staff', $1) RETURNING id`, admin).Scan(&riskRuleID)
 	}))
+	t.Cleanup(func() {
+		if err := owner.WithPlatformAdmin(context.Background(), admin, func(ctx context.Context, tx pgx.Tx) error {
+			_, err := tx.Exec(ctx, `UPDATE risk_rules SET status = 'disabled' WHERE id = $1`, riskRuleID)
+			return err
+		}); err != nil {
+			t.Errorf("disabling the seeded platform risk rule failed (it would poison internal/risk on a shared DB): %v", err)
+		}
+	})
 	must("player_restrictions", owner.WithPlatformAdmin(ctx, admin, func(ctx context.Context, tx pgx.Tx) error {
 		return tx.QueryRow(ctx,
 			`INSERT INTO player_restrictions (person_id, tenant_id, restriction_type, source, created_by_actor_type, created_by_actor_id)
