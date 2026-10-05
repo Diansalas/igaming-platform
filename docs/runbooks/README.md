@@ -16,6 +16,9 @@ Operational incident runbooks now exist (Stage 9) — see:
 - `observability-and-alerting.md` — minimum alert-rule inventory.
 - `production-configuration-checklist.md` — field-by-field production
   config audit.
+- `self-hosted-runner.md` — PREPARED, NOT ACTIVE: Mac self-hosted CI runner
+  plan for CI-BILLING-1 (paired with `.github/workflows/ci-selfhosted.yml`,
+  manual dispatch only); no setup until the owner separately authorizes it.
 
 This directory also still carries local development setup, below.
 
