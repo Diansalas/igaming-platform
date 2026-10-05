@@ -139,3 +139,35 @@ VACUITY AND SANITY CHECKS recorded with this run:
   - The differential guard matrix (C-17b / T-11) asserts both accept and refuse sets are non-empty and pins named anchors.
   - C-5b / C-9b static pins have their own non-vacuity mutants (P01..P03) and a minimum-site-count assertion.
   - The recon tests run in the real WithTenantSnapshot shape against fixtures written by the real sweeper / callback / executor writers.
+
+
+==== FIX BATCH (2026-10-05): mutants for the review fixes (LF F-1..F-6, security PM-S1..S5, code-review F-1..F-3, R-2) ====
+Same method: throwaway copy of the worktree, restore + cmp after each (all OK), control run of the unmutated copy passed first.
+21 mutants, 21 KILLED, 0 SURVIVED. Three survived the first run (F03, Q04, Q07) and exposed weak tests, not equivalents:
+  F03: no test had a line carrying ONLY A's provider reference (all A lines also carried the merchant reference) -> C-42b extended.
+  Q04: the immutability refusal was masked by the state machine's fall-through (also MR030) -> TestK3_Y03 now rejects an 'invalid transition' refusal.
+  Q07: a relinked staff member's old grants stop matching the Person snapshot, which masked the requester-Person term -> TestK3_Y08 re-grants after the relink.
+Final verdicts:
+F01   KILLED    LF F-1: resolvesTo accepts any line by merchant reference (the union) | --- FAIL: TestK3_C42b_AnotherPayoutsLineCannotConfirm (3.14s)
+F02   KILLED    LF F-1: resolvesTo drops the 'holder nil' condition (always the holder's own) | --- FAIL: TestK3_C42b_AnotherPayoutsLineCannotConfirm (5.65s)
+F03   KILLED    LF F-1: provider-reference match dropped from resolvesTo | --- FAIL: TestK3_C42b_AnotherPayoutsLineCannotConfirm (4.79s) [re-run after strengthening]
+G01x  KILLED    GK: (d) recovery ignores the causation filter | --- FAIL: TestK3_Y05_UnrelatedCompensatingDebitDoesNotClear (2.82s)
+G02x  KILLED    GM: (c2) raised only by confirming lines | --- FAIL: TestK3_Y06_CompensatedButPaidIsRaisedByAnySucceededLine (3.05s)
+G03x  KILLED    GD: grants FOR SHARE lock removed from the executor | --- FAIL: TestK3_Y07_RevokeVersusExecutionIsSerialisedByTheShareLocks (4.57s)
+G04x  KILLED    GD: staff FOR SHARE lock removed from the executor | --- FAIL: TestK3_Y07_RevokeVersusExecutionIsSerialisedByTheShareLocks (4.65s)
+G05x  KILLED    (d) hint reverts to the off-platform promise | --- FAIL: TestK3_Y11_NotPaidButPaidHintTextIsHonest (2.87s)
+H01   KILLED    denied audit drops the sqlstate | --- FAIL: TestForceResolutionAPI_T12_Matrix (2.62s)
+H02   KILLED    foreign-tenant refusal writes no denied audit row | --- FAIL: TestForceResolutionAPI_T12_Matrix (3.22s)
+H03   KILLED    refusal body leaks the SQL error text | --- FAIL: TestForceResolutionAPI_T14_FlowTokensAndAudit (2.94s)
+Q01   KILLED    PM-S1: search_path pin removed from ledger_transactions_reserved_prefix_guard | --- FAIL: TestK3_Y01_EveryFunctionPinsSearchPath (0.00s); --- FAIL: TestK3_Y02_TempTableShadowCannotDefeatTheReservedNamespace (2.73s)
+Q02   KILLED    PM-S1: search_path pin removed from payment_m2_admits | --- FAIL: TestK3_Y01_EveryFunctionPinsSearchPath (0.00s)
+Q03   KILLED    PM-S1: search_path pin removed from ledger_governed_fence_allows | --- FAIL: TestK3_Y01_EveryFunctionPinsSearchPath (0.00s)
+Q04   KILLED    Z17: the guard's payload/actor/pinned-policy immutability refusal dropped | --- FAIL: TestK3_Y03_PendingResolutionPayloadIsImmutable (2.94s) [re-run after strengthening]
+Q05   KILLED    Z05: the pinned required count (GREATEST) dropped | --- FAIL: TestK3_Y04_PinnedRequiredCountSurvivesALowerPolicy (3.32s)
+Q06   KILLED    Z10: requester policy-author re-check dropped | --- FAIL: TestK3_Y09_RequesterWhoLaterAuthorsAPolicyNoLongerQualifies (2.80s)
+Q07   KILLED    N16/CR F-2: requester Person-unchanged term dropped | --- FAIL: TestK3_Y08_RequesterPersonMustBeUnchangedAtExecution (3.57s) [re-run after strengthening]
+Q08   KILLED    Z16/S38: same-tx approval requirement dropped (executing and refused_at_execution) | --- FAIL: TestK3_Y10_RefusedAtExecutionNeedsASameTransactionApproval (2.81s); --- FAIL: TestK3_X08_ResolutionGuardsAgainstDirectStatements (2.75s)
+Q09   KILLED    R-2 tightening dropped: system read exposes executed M1 rows again | --- FAIL: TestK3_T3_SystemReadSeesOnlyExecutedM2Rows (3.03s)
+Q10   KILLED    Z01: a player policy added to payment_manual_resolutions | --- FAIL: TestK3_T3_SystemReadSeesOnlyExecutedM2Rows (3.12s); --- FAIL: TestK3_C16_T18_Migration0115UpDownUp_WholeSchema (2.54s)
+The 14 survivors of the original 106-mutant run (classified above) are unchanged: this batch touched none of the code they mutate except
+payment_statement_k3.go (G14 duplicates, G05 tenant predicate: still equivalent/defence in depth).

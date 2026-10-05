@@ -118,6 +118,10 @@ func TestK3_Y03_PendingResolutionPayloadIsImmutable(t *testing.T) {
 			})
 			if k3Code(err) != "MR030" {
 				t.Errorf("direct UPDATE of %s: want MR030, got %v", name, err)
+			} else if msg := err.Error(); strings.Contains(msg, "invalid transition") {
+				// the refusal must come from the immutability / hash check, not from the
+				// state machine's fall-through (which would hide a dropped guard)
+				t.Errorf("direct UPDATE of %s was refused only by the state-machine fall-through: %v", name, err)
 			}
 		}
 		return nil
@@ -176,6 +180,13 @@ func TestK3_C42b_AnotherPayoutsLineCannotConfirm(t *testing.T) {
 	// Non-vacuity: A's own line (by reference) confirms.
 	ms := w.stmtRun(w.source(false, w.payoutLine(*a.ProviderReference, a.MerchantReference, statement.PaymentStatusSucceeded, 500)))
 	w.requireNone(ms, reconciliation.MismatchKindPayDeclaredPaidUnconfirmed, a.ID, "A's own confirming line")
+	// A's own line by REFERENCE alone (no merchant reference on the line) confirms.
+	w3 := newK3World(t, k3Opts{base: 1})
+	_, a3 := w3.ambiguousPayout(500)
+	w3.executeM2(a3.ID, ResolutionM2DeclarePaid)
+	w3.requireOne(w3.stmtRun(w3.source(false)), reconciliation.MismatchKindPayDeclaredPaidUnconfirmed, a3.ID, "no line yet")
+	ms = w3.stmtRun(w3.source(false, w3.payoutLine(*a3.ProviderReference, "", statement.PaymentStatusSucceeded, 500)))
+	w3.requireNone(ms, reconciliation.MismatchKindPayDeclaredPaidUnconfirmed, a3.ID, "a line resolved to A by its provider reference alone")
 	// A reference-less line that resolves to A by merchant reference alone (no other
 	// attempt holds its reference) also confirms.
 	w2 := newK3World(t, k3Opts{base: 1})
@@ -331,6 +342,14 @@ func TestK3_Y08_RequesterPersonMustBeUnchangedAtExecution(t *testing.T) {
 		_, err := tx.Exec(ctx, `ALTER TABLE staff_users ENABLE TRIGGER staff_users_person_id_append_only`)
 		return err
 	})
+	// A grant is bound to its request-time Person snapshot, so the relinked staff
+	// first lose their old grants; fresh grants (snapshot = the NEW live Person) make
+	// both principals fully eligible again. Only the "requester's Person unchanged"
+	// term of the recount then stops the requester-of-record P1 approving.
+	w.revokeGrant(w.f1.ID, capability.CapabilityPaymentForceResolveRequest)
+	w.revokeGrant(w.f2.ID, capability.CapabilityPaymentForceResolveApprove)
+	w.grantTenant(w.f1, capability.CapabilityPaymentForceResolveRequest)
+	w.grantTenant(w.f2, capability.CapabilityPaymentForceResolveApprove)
 	out, err := w.decide(w.f3, r, ResolutionApprove)
 	if err == nil && out.Executed {
 		t.Fatalf("executed although the requester's Person changed since submission (P1 is now requester-of-record AND an approver): %+v", out)

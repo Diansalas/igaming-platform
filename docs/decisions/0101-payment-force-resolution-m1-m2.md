@@ -1771,3 +1771,9 @@ Applied after the ledger-finance, code-review and security implementation review
 - **Deferred (docs only):** PAY-K3-MR020-HTTP-MAPPING-1 (casino/sportsbook: a crafted provider id gives a 5xx a provider may retry; the database refuses it);
   PAY-K3-STATEMENT-SOURCE-WIRING-1 (populate `DefaultStatementSources` from the SAME list given to the scheduler, and also refuse `m2_declare_paid` when no source is scheduled);
   Z28/Z29 (optional static route-permission pin); LF F-8/F-9 and code-review F-4/F-5 (optional hardening: refuse a second M1 once one executed; expire a stale pending row in `Request`).
+- **Second reference-allowlist edit (merge with E1).** E1's worker visibility gates (`internal/db/kyc_worker_identity_integration_test.go`,
+  `workerReferenceAllowlist`) also gained `payment_manual_resolution_codes` (the same family-R reference table; the K2 precedent). Both allowlist edits are test-only.
+- **Verification of this batch (local, private DB; not CI):** `go build`, `go vet` (both tag sets), `gofmt`, `golangci-lint run ./...` (0 issues; no finding in a K3 file with
+  the integration tag); `cmd/migrate verify` clean with migrations 0001..0115 contiguous (E1's 0114 merged); `go test -race -tags integration -count=1 -p 1 -skip
+  'TestStoreOutage_DoesNotPinPool|TestResolutionIsolation_' ./...` PASS for every package (the `internal/db` and `internal/kyc` gates re-run PASS after the allowlist line).
+  Mutation: 21 new mutants, all KILLED after three test strengthenings (evidence file, "FIX BATCH" section); the 14 classified survivors of the original run are unchanged.
