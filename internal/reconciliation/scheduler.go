@@ -164,9 +164,10 @@ type SweepOutcome struct {
 	// MOCK result (the MockProvider's own records, not the platform DB).
 	PaymentStatement []StreamOutcome
 	// ObservationOnly is true for a tenant whose status is not 'active' (PRH-2
-	// R3, H-W1): only the payment_statement stream ran for it, in evidence-only
-	// mode (see observeNonActiveTenants); every field except PaymentStatement
-	// and TenantStatus is the zero value. TenantStatus is the status read at
+	// R3, H-W1): only ledger_vs_projection (Run, Skipped, Err) and
+	// payment_statement (PaymentStatement) ran for it, in evidence-only mode
+	// (see observeNonActiveTenants); Sportsbook, Casino and CasinoStatement are
+	// the zero value. TenantStatus is the status read at
 	// selection ("suspended", "closed"); empty for an active tenant.
 	ObservationOnly bool
 	TenantStatus    string
@@ -261,9 +262,9 @@ func RunSweep(ctx context.Context, pool *db.Pool, logger *slog.Logger, periodSta
 		return nil, fmt.Errorf("reconciliation: list tenants for sweep: %w", err)
 	}
 	outcomes := sweepTenants(ctx, pool, logger, tenantIDs, periodStart, periodEnd, sbSource, casSource, paySources)
-	// PRH-2 R3 (H-W1): non-active tenants are observed by the payment_statement
-	// stream only. A failure to list them is returned, never swallowed; the
-	// active outcomes are still returned with it.
+	// PRH-2 R3 (H-W1): non-active tenants are observed (ledger_vs_projection and
+	// payment_statement only). A failure to list them is returned, never
+	// swallowed; the active outcomes are still returned with it.
 	observed, obsErr := observeNonActiveTenants(ctx, pool, logger, nil, outcomes, periodStart, periodEnd, paySources)
 	if obsErr != nil {
 		return append(outcomes, observed...), fmt.Errorf("reconciliation: list non-active tenants for observation: %w", obsErr)
@@ -275,9 +276,8 @@ func RunSweep(ctx context.Context, pool *db.Pool, logger *slog.Logger, periodSta
 // same per-tenant streams, locks, audit records, logging and failure
 // isolation, over the ACTIVE tenants among tenantIDs (duplicates are swept
 // once; an unknown id yields no SweepOutcome). A suspended or closed id among
-// them gets RunSweep's evidence-only payment_statement observation
-// (observeNonActiveTenants) when at least one payment statement source is
-// given, and nothing otherwise. It is the operational entry point for an on-demand
+// them gets RunSweep's evidence-only observation (observeNonActiveTenants:
+// ledger_vs_projection, plus payment_statement per given source). It is the operational entry point for an on-demand
 // re-run of one tenant's reconciliation (for example after a provider
 // redelivery, or to confirm a P1 is resolved) without paying for every
 // other tenant's full sweep, and it is what the integration tests use so
@@ -339,19 +339,32 @@ func nonActiveTenants(ctx context.Context, pool *db.Pool, only []uuid.UUID) ([]n
 	return out, err
 }
 
+// listNonActiveTenants is the non-active tenant listing observeNonActiveTenants
+// uses. A variable ONLY so a test can force the listing to fail (security F-3);
+// always nonActiveTenants in production.
+var listNonActiveTenants = nonActiveTenants
+
 // observeNonActiveTenants is the PRH-2 R3 / H-W1 observation sweep (OWNER
-// DECISION 2026-10-05; ADR 0095 40.1, ADR 0101 28, ADR 0107 pointer).
+// DECISION 2026-10-05; ADR 0095 40.1/40.4, ADR 0101 28.3, ADR 0107 pointer).
 //
 // A suspended or closed tenant is not reconciled by the ordinary streams, but
 // its provider-side money movements, parked captures, declared-paid payouts
 // and M2 standing findings must not become invisible merely because the tenant
 // stopped being active: R-5 still lets platform_acting staff resolve a closed
-// tenant's player funds, so the detective control has to keep running.
-// Therefore, for every non-active tenant and every given payment statement
-// source, and ONLY for the payment_statement stream, it runs
-// ReconcilePaymentStatementForTenant with PaymentStatementOptions
-// .ObservationOnlyStatus set (recorded in the run's audit metadata as
-// non_active_tenant_observation=true and tenant_status).
+// tenant's player funds, and its postings (staff M2, the payments sweeper's
+// resolution-only evidence application) still move its ledger. Therefore, for
+// every non-active tenant it runs exactly two streams, both recorded with
+// non_active_tenant_observation=true and tenant_status in the audit metadata:
+//
+//  1. ledger_vs_projection (owner-approved extension, ledger-finance C-2:
+//     CLAUDE.md requires the hourly drift check and a closed tenant's postings
+//     must not escape it). Internal read of the tenant's own ledger and
+//     projection: no credential, no outbound call; drift raises the same P1
+//     finding and alert as for an active tenant. Runs even with no payment
+//     statement source.
+//  2. payment_statement, once per registered source
+//     (ReconcilePaymentStatementForTenant with PaymentStatementOptions
+//     .ObservationOnlyStatus set).
 //
 // GUARANTEE (pinned by TestR3_*): this path is read plus findings/alerts only.
 // It posts no ledger transaction or entry, changes no attempt, withdrawal,
@@ -363,16 +376,15 @@ func nonActiveTenants(ctx context.Context, pool *db.Pool, only []uuid.UUID) ([]n
 // and it does not unlock, create or execute any resolution: M2 on a closed
 // tenant stays gated by the platform_acting + four-eyes path.
 //
-// The other streams (ledger_vs_projection, sportsbook_settlement,
-// casino_consistency, casino_statement) are deliberately NOT run for a
-// non-active tenant (deferred; none of them can make provider-side money
-// disappear). With no sources it returns nothing. One tenant's failure is
-// recorded on its own outcome and never stops the others.
+// sportsbook_settlement, casino_consistency and casino_statement are NOT run
+// for a non-active tenant (deferred): a non-active tenant's game rounds and
+// bets are not settled by any path that reaches this package, and a casino or
+// sportsbook posting for a closed tenant has no staff or sweeper writer; if one
+// is ever added these streams must be revisited (they are internal reads too,
+// so the extension is cheap). One tenant's failure is recorded on its own
+// outcome and never stops the others.
 func observeNonActiveTenants(ctx context.Context, pool *db.Pool, logger *slog.Logger, only []uuid.UUID, alreadySwept []SweepOutcome, periodStart, periodEnd time.Time, paySources []statement.PaymentStatementSource) ([]SweepOutcome, error) {
-	if len(paySources) == 0 {
-		return nil, nil
-	}
-	tenants, err := nonActiveTenants(ctx, pool, only)
+	tenants, err := listNonActiveTenants(ctx, pool, only)
 	if err != nil {
 		return nil, err
 	}
@@ -389,6 +401,8 @@ func observeNonActiveTenants(ctx context.Context, pool *db.Pool, logger *slog.Lo
 			continue
 		}
 		outcome := SweepOutcome{TenantID: t.ID, ObservationOnly: true, TenantStatus: t.Status}
+		ls := runLedgerStreamForTenant(ctx, pool, logger, t.ID, periodStart, periodEnd, t.Status)
+		outcome.Run, outcome.Skipped, outcome.Err = ls.Run, ls.Skipped, ls.Err
 		for _, src := range paySources {
 			outcome.PaymentStatement = append(outcome.PaymentStatement,
 				ReconcilePaymentStatementForTenant(ctx, pool, logger, t.ID, periodStart, periodEnd, src,
@@ -402,10 +416,10 @@ func observeNonActiveTenants(ctx context.Context, pool *db.Pool, logger *slog.Lo
 // observationMetadata marks an audit record written by the non-active-tenant
 // observation sweep so staff can see the tenant was not active when the run
 // happened. A run for an active tenant is returned unchanged.
-func observationMetadata(opts PaymentStatementOptions, m map[string]any) map[string]any {
-	if opts.ObservationOnlyStatus != "" {
+func observationMetadata(status string, m map[string]any) map[string]any {
+	if status != "" {
 		m["non_active_tenant_observation"] = true
-		m["tenant_status"] = opts.ObservationOnlyStatus
+		m["tenant_status"] = status
 	}
 	return m
 }
@@ -417,75 +431,8 @@ func sweepTenants(ctx context.Context, pool *db.Pool, logger *slog.Logger, tenan
 	for _, tenantID := range tenantIDs {
 		outcome := SweepOutcome{TenantID: tenantID}
 
-		pending, txErr := alerting.InTx(ctx, alerting.NewTenantRunner(pool, tenantID), func(ctx context.Context, tx pgx.Tx) error {
-			run, ledgerMismatches, acquired, err := TryRunLedgerVsProjectionForTenant(ctx, tx, tenantID, periodStart, periodEnd)
-			outcome.Run, outcome.Skipped = run, !acquired
-			if err != nil {
-				return err
-			}
-			// Specialist review (architect/ledger-finance): when skipped
-			// by lock contention, run is the zero value, so "status"
-			// would otherwise be an empty string - indistinguishable at a
-			// glance from a genuinely clean run whose Status field was
-			// somehow blank. Record "skipped" explicitly instead.
-			status := string(run.Status)
-			if !acquired {
-				status = "skipped"
-			}
-			if err := audit.Record(ctx, tx, audit.Entry{
-				TenantID: tenantID, ActorType: audit.ActorSystem, Action: "reconciliation.sweep_run",
-				TargetType: "reconciliation_run", TargetID: run.ID.String(), Outcome: audit.OutcomeSuccess,
-				Metadata: map[string]any{
-					"stream": string(StreamLedgerVsProjection), "skipped_lock_contention": !acquired,
-					"status": status,
-				},
-			}); err != nil {
-				return err
-			}
-			// ADR 0102 row 3 (+ K2 unlinked adjustments, C-K2-1): durable P1,
-			// savepoint-guarded, after the audit row, inside this run tx.
-			return raiseLedgerRunAlerts(ctx, tx, tenantID, run, acquired, ledgerMismatches)
-		})
-		outcome.Err = txErr
-		pending.Flush(ctx) // post-commit detached retry of any swallowed raise; nil-safe
-
-		switch {
-		case txErr != nil:
-			if logger != nil {
-				logger.Error("reconciliation sweep: tenant run failed", "tenant_id", tenantID, "error", txErr)
-			}
-			// The failed attempt's own transaction (including any
-			// Run/Mismatch rows it tried to insert, and the audit
-			// record above) already rolled back in full - CLAUDE.md's
-			// "no fake completion"/auditability rules mean the failure
-			// itself must still become an observable, auditable fact,
-			// not just a log line, so it is recorded here in a fresh
-			// transaction, best-effort.
-			if auditErr := pool.WithTenant(ctx, tenantID, func(ctx context.Context, tx pgx.Tx) error {
-				return audit.Record(ctx, tx, audit.Entry{
-					TenantID: tenantID, ActorType: audit.ActorSystem, Action: "reconciliation.sweep_run_failed",
-					TargetType: "tenant", TargetID: tenantID.String(), Outcome: audit.OutcomeFailure,
-					Metadata: map[string]any{"stream": string(StreamLedgerVsProjection), "error": txErr.Error()},
-				})
-			}); auditErr != nil && logger != nil {
-				logger.Error("reconciliation sweep: failed to audit tenant failure", "tenant_id", tenantID, "error", auditErr)
-			}
-			raiseRunFailed(ctx, pool, tenantID, string(StreamLedgerVsProjection), "", "run", txErr) // row 14
-		case outcome.Run.Status == StatusMismatchesFound:
-			// CLAUDE.md: "Any non-zero drift is a P1 incident." Logged at
-			// Error level (specialist review: ledger-finance), not Info -
-			// a mismatch found is not routine sweep telemetry, it is the
-			// exact condition this job exists to surface. The
-			// reconciliation_mismatches rows themselves are the durable
-			// record; this is the runtime signal an operator/alerting
-			// pipeline can act on without polling the table.
-			if logger != nil {
-				logger.Error("reconciliation sweep: MISMATCH FOUND", "tenant_id", tenantID, "run_id", outcome.Run.ID)
-			}
-		case logger != nil:
-			logger.Info("reconciliation sweep: tenant run complete",
-				"tenant_id", tenantID, "skipped_lock_contention", outcome.Skipped, "status", string(outcome.Run.Status))
-		}
+		ls := runLedgerStreamForTenant(ctx, pool, logger, tenantID, periodStart, periodEnd, "")
+		outcome.Run, outcome.Skipped, outcome.Err = ls.Run, ls.Skipped, ls.Err
 
 		// ADR 0088 §8: the sportsbook stream runs after
 		// ledger_vs_projection, regardless of its outcome.
@@ -505,6 +452,88 @@ func sweepTenants(ctx context.Context, pool *db.Pool, logger *slog.Logger, tenan
 		outcomes = append(outcomes, outcome)
 	}
 	return outcomes
+}
+
+// runLedgerStreamForTenant runs the ledger_vs_projection stream for one tenant
+// in its own tenant-scoped transaction with the sweep's audit, log and alert
+// discipline (ADR 0102 row 3, row 14). observeStatus is "" for an active tenant;
+// for a suspended or closed tenant (PRH-2 R3, H-W1, owner-approved extension:
+// closed-tenant postings must not escape the hourly drift check) it is the
+// tenant's status and is recorded in the audit metadata. The stream is a pure
+// internal read of the tenant's own ledger and projection: no credential, no
+// outbound call, writes only reconciliation_runs/_mismatches, audit_log, alerts.
+func runLedgerStreamForTenant(ctx context.Context, pool *db.Pool, logger *slog.Logger, tenantID uuid.UUID, periodStart, periodEnd time.Time, observeStatus string) StreamOutcome {
+	var out StreamOutcome
+	pending, txErr := alerting.InTx(ctx, alerting.NewTenantRunner(pool, tenantID), func(ctx context.Context, tx pgx.Tx) error {
+		run, ledgerMismatches, acquired, err := TryRunLedgerVsProjectionForTenant(ctx, tx, tenantID, periodStart, periodEnd)
+		out.Run, out.Skipped = run, !acquired
+		if err != nil {
+			return err
+		}
+		// Specialist review (architect/ledger-finance): when skipped
+		// by lock contention, run is the zero value, so "status"
+		// would otherwise be an empty string - indistinguishable at a
+		// glance from a genuinely clean run whose Status field was
+		// somehow blank. Record "skipped" explicitly instead.
+		status := string(run.Status)
+		if !acquired {
+			status = "skipped"
+		}
+		if err := audit.Record(ctx, tx, audit.Entry{
+			TenantID: tenantID, ActorType: audit.ActorSystem, Action: "reconciliation.sweep_run",
+			TargetType: "reconciliation_run", TargetID: run.ID.String(), Outcome: audit.OutcomeSuccess,
+			Metadata: observationMetadata(observeStatus, map[string]any{
+				"stream": string(StreamLedgerVsProjection), "skipped_lock_contention": !acquired,
+				"status": status,
+			}),
+		}); err != nil {
+			return err
+		}
+		// ADR 0102 row 3 (+ K2 unlinked adjustments, C-K2-1): durable P1,
+		// savepoint-guarded, after the audit row, inside this run tx.
+		return raiseLedgerRunAlerts(ctx, tx, tenantID, run, acquired, ledgerMismatches)
+	})
+	out.Err = txErr
+	pending.Flush(ctx) // post-commit detached retry of any swallowed raise; nil-safe
+
+	switch {
+	case txErr != nil:
+		if logger != nil {
+			logger.Error("reconciliation sweep: tenant run failed", "tenant_id", tenantID, "error", txErr)
+		}
+		// The failed attempt's own transaction (including any
+		// Run/Mismatch rows it tried to insert, and the audit
+		// record above) already rolled back in full - CLAUDE.md's
+		// "no fake completion"/auditability rules mean the failure
+		// itself must still become an observable, auditable fact,
+		// not just a log line, so it is recorded here in a fresh
+		// transaction, best-effort.
+		if auditErr := pool.WithTenant(ctx, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+			return audit.Record(ctx, tx, audit.Entry{
+				TenantID: tenantID, ActorType: audit.ActorSystem, Action: "reconciliation.sweep_run_failed",
+				TargetType: "tenant", TargetID: tenantID.String(), Outcome: audit.OutcomeFailure,
+				Metadata: observationMetadata(observeStatus, map[string]any{"stream": string(StreamLedgerVsProjection), "error": txErr.Error()}),
+			})
+		}); auditErr != nil && logger != nil {
+			logger.Error("reconciliation sweep: failed to audit tenant failure", "tenant_id", tenantID, "error", auditErr)
+		}
+		raiseRunFailed(ctx, pool, tenantID, string(StreamLedgerVsProjection), "", "run", txErr) // row 14
+	case out.Run.Status == StatusMismatchesFound:
+		// CLAUDE.md: "Any non-zero drift is a P1 incident." Logged at
+		// Error level (specialist review: ledger-finance), not Info -
+		// a mismatch found is not routine sweep telemetry, it is the
+		// exact condition this job exists to surface. The
+		// reconciliation_mismatches rows themselves are the durable
+		// record; this is the runtime signal an operator/alerting
+		// pipeline can act on without polling the table.
+		if logger != nil {
+			logger.Error("reconciliation sweep: MISMATCH FOUND", "tenant_id", tenantID, "run_id", out.Run.ID)
+		}
+	case logger != nil:
+		logger.Info("reconciliation sweep: tenant run complete",
+			"tenant_id", tenantID, "skipped_lock_contention", out.Skipped, "status", string(out.Run.Status))
+	}
+	return out
 }
 
 // runSportsbookStreamForTenant runs the sportsbook_settlement stream for
@@ -761,7 +790,7 @@ func RunSchedulerLoop(ctx context.Context, pool *db.Pool, logger *slog.Logger, i
 		}()
 		now := time.Now().UTC()
 		if _, err := RunSweep(ctx, pool, logger, now.Add(-interval), now, sbSource, casSource, paySources...); err != nil && logger != nil {
-			logger.Error("reconciliation sweep: failed to list tenants", "error", err)
+			logger.Error("reconciliation sweep: tenant listing failed (active or non-active; LOG-ONLY: no audit record or alert is written - known gap, ADR 0095 40.4)", "error", err)
 		}
 	}
 
@@ -813,7 +842,7 @@ func ReconcilePaymentStatementForTenant(ctx context.Context, pool *db.Pool, logg
 			return audit.Record(ctx, tx, audit.Entry{
 				TenantID: tenantID, ActorType: audit.ActorSystem, Action: "reconciliation.sweep_run_failed",
 				TargetType: "tenant", TargetID: tenantID.String(), Outcome: audit.OutcomeFailure,
-				Metadata: observationMetadata(opts, map[string]any{"stream": stream, "phase": phase, "error": out.Err.Error(),
+				Metadata: observationMetadata(opts.ObservationOnlyStatus, map[string]any{"stream": stream, "phase": phase, "error": out.Err.Error(),
 					"statement_source": label, "provider_id": provider, "severity": "P1"}),
 			})
 		}); auditErr != nil && logger != nil {
@@ -868,7 +897,7 @@ func ReconcilePaymentStatementForTenant(ctx context.Context, pool *db.Pool, logg
 		return audit.Record(ctx, tx, audit.Entry{
 			TenantID: tenantID, ActorType: audit.ActorSystem, Action: "reconciliation.sweep_run",
 			TargetType: "reconciliation_run", TargetID: run.ID.String(), Outcome: audit.OutcomeSuccess,
-			Metadata: observationMetadata(opts, metadata),
+			Metadata: observationMetadata(opts.ObservationOnlyStatus, metadata),
 		})
 	}); err != nil {
 		out.Run = Run{}

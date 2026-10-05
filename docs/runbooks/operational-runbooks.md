@@ -67,9 +67,12 @@ glossed over; see `docs/runbooks/observability-and-alerting.md` and
 6. Write the incident and its resolution to `reconciliation_mismatches`'
    investigation columns (mutable by design — see migration 0082) and to
    the audit log if any compensating entry was posted.
-7. **Suspended / closed tenants (PRH-2 R3, H-W1).** Only the `payment_statement`
-   stream observes a tenant that is not `active` (the other streams stay
-   active-only). A finding or `reconciliation.*` alert for such a tenant is real
+7. **Suspended / closed tenants (PRH-2 R3, H-W1).** Only `ledger_vs_projection`
+   and `payment_statement` observe a tenant that is not `active` (the sportsbook
+   and casino streams stay active-only). A closed tenant's ledger can still move
+   through staff M2, so drift on it is a real P1. A failure to LIST tenants is
+   log-only (no alert): if observation findings stop appearing, check the
+   scheduler log for "tenant listing failed". A finding or `reconciliation.*` alert for such a tenant is real
    evidence: the audit record of its run shows `non_active_tenant_observation:
    true` and the `tenant_status`. The observation never resolves anything: do
    not expect, and do not build, an automatic release, dispatch or posting for a

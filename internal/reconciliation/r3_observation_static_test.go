@@ -19,6 +19,7 @@ import (
 	"go/parser"
 	"go/token"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -75,25 +76,86 @@ func TestR3_Static_ReconciliationImportsNoProviderOrMoneyMovingPackage(t *testin
 	}
 }
 
+const r3LedgerPath = "github.com/Diansalas/igaming-platform/internal/ledger"
+
 func TestR3_Static_LedgerUsedReadOnly(t *testing.T) {
-	allowed := map[string]bool{"GetProjectedBalance": true, "RebuildBalance": true, "Credit": true, "Debit": true}
+	// Exact allow-list (security F-6): two read functions, the direction
+	// constants, and the account/transaction type constants the sportsbook
+	// stream compares. A new ledger symbol, including a future function whose
+	// name starts with Tx or Account, fails here until reviewed.
+	allowed := map[string]bool{
+		"GetProjectedBalance": true, "RebuildBalance": true, "Credit": true, "Debit": true,
+		"AccountHouseGaming": true, "AccountPlayerCash": true, "AccountPlayerLockedCash": true,
+		"TxSportsbookBet": true, "TxSportsbookRollback": true, "TxSportsbookSettlement": true,
+		"TxSportsbookVoid": true, "TxTombstone": true,
+	}
+	seen := 0
 	for name, f := range r3ProductionFiles(t) {
+		// Resolve the LOCAL name of the ledger import by PATH (LF N-2: an aliased
+		// import must not evade the check); a dot import is refused outright.
+		local := ""
+		for _, imp := range f.Imports {
+			p, _ := strconv.Unquote(imp.Path.Value)
+			if p != r3LedgerPath {
+				continue
+			}
+			switch {
+			case imp.Name == nil:
+				local = "ledger"
+			case imp.Name.Name == ".":
+				t.Errorf("%s dot-imports the ledger package", name)
+			default:
+				local = imp.Name.Name
+			}
+		}
+		if local == "" {
+			continue
+		}
 		ast.Inspect(f, func(n ast.Node) bool {
 			sel, ok := n.(*ast.SelectorExpr)
 			if !ok {
 				return true
 			}
 			id, ok := sel.X.(*ast.Ident)
-			if !ok || id.Name != "ledger" {
+			if !ok || id.Name != local {
 				return true
 			}
-			sym := sel.Sel.Name
-			if allowed[sym] || strings.HasPrefix(sym, "Tx") || strings.HasPrefix(sym, "Account") {
-				return true
+			seen++
+			if !allowed[sel.Sel.Name] {
+				t.Errorf("%s uses ledger.%s: only the reviewed read functions and constants are allowed here (no ledger.Post, no account creation)", name, sel.Sel.Name)
 			}
-			t.Errorf("%s uses ledger.%s: only read functions and constants are allowed here (no ledger.Post, no account creation)", name, sym)
 			return true
 		})
+	}
+	if seen < 4 {
+		t.Fatalf("static scan is vacuous: it saw only %d ledger references", seen)
+	}
+}
+
+// LF N-2 / security: the import pin above looks at direct imports; this one
+// asks the toolchain for the TRANSITIVE closure, so a forbidden package pulled
+// in through an allowed one is caught as well.
+func TestR3_Static_TransitiveDependenciesAreReadOnlyPackages(t *testing.T) {
+	out, err := exec.Command("go", "list", "-deps", ".").Output()
+	if err != nil {
+		t.Skipf("go list unavailable: %v", err)
+	}
+	allowed := map[string]bool{}
+	for _, p := range []string{"txscope", "db", "alerting", "audit", "ledger", "providerref", "reconciliation", "reconciliation/statement"} {
+		allowed["github.com/Diansalas/igaming-platform/internal/"+p] = true
+	}
+	seen := 0
+	for _, p := range strings.Fields(string(out)) {
+		if !strings.HasPrefix(p, "github.com/Diansalas/igaming-platform/") {
+			continue
+		}
+		seen++
+		if !allowed[p] {
+			t.Errorf("transitive dependency %s is not in the reviewed read-only set", p)
+		}
+	}
+	if seen < 5 {
+		t.Fatalf("go list -deps saw only %d internal packages (vacuous)", seen)
 	}
 }
 
@@ -152,7 +214,7 @@ func TestR3_Static_OnlyOwnStoresAreWritten(t *testing.T) {
 func TestR3_Static_ObservationEntryPointCallsOnlyThePaymentStatementStream(t *testing.T) {
 	allowed := map[string]bool{
 		"len": true, "make": true, "append": true,
-		"nonActiveTenants": true, "ReconcilePaymentStatementForTenant": true,
+		"listNonActiveTenants": true, "runLedgerStreamForTenant": true, "ReconcilePaymentStatementForTenant": true,
 	}
 	var fn *ast.FuncDecl
 	for _, f := range r3ProductionFiles(t) {
@@ -175,7 +237,7 @@ func TestR3_Static_ObservationEntryPointCallsOnlyThePaymentStatementStream(t *te
 		case *ast.Ident:
 			calls[fun.Name] = true
 			if !allowed[fun.Name] {
-				t.Errorf("observeNonActiveTenants calls %s: it may call only the payment_statement stream and the non-active tenant list", fun.Name)
+				t.Errorf("observeNonActiveTenants calls %s: it may call only the ledger_vs_projection stream, the payment_statement stream and the non-active tenant list", fun.Name)
 			}
 		case *ast.SelectorExpr:
 			t.Errorf("observeNonActiveTenants calls %s.%s: only package-local stream functions are allowed", exprName(fun.X), fun.Sel.Name)
@@ -184,7 +246,7 @@ func TestR3_Static_ObservationEntryPointCallsOnlyThePaymentStatementStream(t *te
 		}
 		return true
 	})
-	for _, must := range []string{"nonActiveTenants", "ReconcilePaymentStatementForTenant"} {
+	for _, must := range []string{"listNonActiveTenants", "runLedgerStreamForTenant", "ReconcilePaymentStatementForTenant"} {
 		if !calls[must] {
 			t.Errorf("observeNonActiveTenants no longer calls %s (the pin would be vacuous)", must)
 		}

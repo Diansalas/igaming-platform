@@ -322,12 +322,17 @@ func TestR3_ParkedDepositCapture_StandingFindingForNonActiveTenants(t *testing.T
 				if meta["non_active_tenant_observation"] != true || meta["tenant_status"] != status {
 					t.Fatalf("run audit lacks the observation flag/status: %v", meta)
 				}
-				// ONLY payment_statement ran: no other stream's run exists.
-				if n := w.countRows(`SELECT count(*) FROM reconciliation_runs WHERE tenant_id = $1 AND stream <> 'payment_statement'`, w.f.tenantID); n != 0 {
-					t.Fatalf("the observation sweep ran %d non-payment_statement run(s)", n)
+				// ONLY ledger_vs_projection and payment_statement ran: no other
+				// stream's run exists (sportsbook/casino streams are deferred).
+				if n := w.countRows(`SELECT count(*) FROM reconciliation_runs WHERE tenant_id = $1 AND stream NOT IN ('payment_statement', 'ledger_vs_projection')`, w.f.tenantID); n != 0 {
+					t.Fatalf("the observation sweep ran %d run(s) of a deferred stream", n)
 				}
-				if o.Run.ID != uuid.Nil || o.Sportsbook.Run.ID != uuid.Nil || o.Casino.Run.ID != uuid.Nil || o.CasinoStatement.Run.ID != uuid.Nil {
-					t.Fatalf("a non-payment stream ran for a non-active tenant: %+v", o)
+				if o.Run.ID == uuid.Nil || o.Run.Stream != reconciliation.StreamLedgerVsProjection || o.Err != nil ||
+					o.Sportsbook.Run.ID != uuid.Nil || o.Casino.Run.ID != uuid.Nil || o.CasinoStatement.Run.ID != uuid.Nil {
+					t.Fatalf("a non-active tenant must get exactly the ledger_vs_projection run plus payment_statement: %+v", o)
+				}
+				if m := w.r3AuditSweepRun(o.Run.ID); m["non_active_tenant_observation"] != true || m["tenant_status"] != status {
+					t.Fatalf("ledger run audit lacks the observation flag/status: %v", m)
 				}
 				r3RequireNoMoneyEffect(t, before, w.r3Snapshot())
 				// The finding raised a durable alert for the (non-active) tenant.
@@ -827,16 +832,20 @@ func TestR3_TenantReactivatedDuringTheSweepIsNotObservedAsNonActive(t *testing.T
 	}
 }
 
-// R3-10: no source registered means nothing to observe; a non-active tenant is
-// then not swept at all (the pre-existing behaviour for the other streams is
-// unchanged).
-func TestR3_NoSource_NonActiveTenantIsNotSwept(t *testing.T) {
+// R3-10: with no payment statement source registered a non-active tenant still
+// gets the ledger_vs_projection observation (internal read, no credential, no
+// outbound call) and NOTHING else: no payment run, no fetch.
+func TestR3_NoSource_NonActiveTenantGetsOnlyTheLedgerObservation(t *testing.T) {
 	w := newK3World(t, k3Opts{base: 1})
 	w.setTenantStatus("closed")
-	if outs := w.r3Sweep([]uuid.UUID{w.f.tenantID}); len(outs) != 0 {
-		t.Fatalf("a closed tenant with no payment source produced %d outcome(s)", len(outs))
+	before := w.r3Snapshot()
+	outs := w.r3Sweep([]uuid.UUID{w.f.tenantID})
+	o := r3Outcome(t, outs, w.f.tenantID)
+	if !o.ObservationOnly || o.Err != nil || o.Run.Stream != reconciliation.StreamLedgerVsProjection || len(o.PaymentStatement) != 0 {
+		t.Fatalf("want a ledger-only observation, got %+v", o)
 	}
-	if n := w.countRows(`SELECT count(*) FROM reconciliation_runs WHERE tenant_id = $1`, w.f.tenantID); n != 0 {
-		t.Fatalf("%d run(s) for a closed tenant with no source", n)
+	if n := w.countRows(`SELECT count(*) FROM reconciliation_runs WHERE tenant_id = $1 AND stream <> 'ledger_vs_projection'`, w.f.tenantID); n != 0 {
+		t.Fatalf("%d non-ledger run(s) for a closed tenant with no source", n)
 	}
+	r3RequireNoMoneyEffect(t, before, w.r3Snapshot())
 }
