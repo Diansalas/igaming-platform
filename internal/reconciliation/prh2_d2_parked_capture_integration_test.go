@@ -431,7 +431,9 @@ func TestD2_1_BoundPark_MatchedSucceededLine_ReportsCapturedUnposted(t *testing.
 		d2CUFor(t, ms, pk.attempt.ID)
 		w.d2AssertNoMoney(t, pk)
 	})
-	// PAY-RECON-PARKED-CAPTURE-STANDING-1 M-S2 (ledger-finance ruling; this
+	// PAY-RECON-PARKED-CAPTURE-STANDING-1 M-S2 (ledger-finance ruling M-S2, recorded in
+	// docs/plans/prh2-hardening-round/analysis/psp-prerequisites-analysis.md 2.4 and
+	// re-confirmed by the ledger-finance implementation review; this
 	// REPLACES the earlier pin that a pending/declined line on a bound park
 	// raised nothing in-run). A pending or declined line is NOT a clearing
 	// signal - only a reversal line or a tombstone clears (ADR 0095 35.4, S2) -
@@ -455,8 +457,10 @@ func TestD2_1_BoundPark_MatchedSucceededLine_ReportsCapturedUnposted(t *testing.
 		}
 	})
 	// Two lines for the same bound park in one run (pending, then succeeded)
-	// still produce exactly ONE finding (S6 dedupe).
-	t.Run("pending_and_succeeded_lines_flag_once_S6", func(t *testing.T) {
+	// still produce exactly ONE finding. NOTE: this is enforced today by matchLines
+	// (the second line of the same ref and kind is a pay_duplicate and never reaches
+	// matchPayment), NOT by markCaptured, which is defence in depth here.
+	t.Run("two_lines_for_one_ref_flag_once", func(t *testing.T) {
 		w := newD2World(t)
 		pk := w.parkSyncMismatch(t)
 		ms := w.d2Run(t, d2Src(d2Line(pk.pspRef, "", statement.PaymentStatusPending, d2PSPAmount),
@@ -473,6 +477,9 @@ func TestD2_1_BoundPark_MatchedSucceededLine_ReportsCapturedUnposted(t *testing.
 		pk := w.parkSyncMismatch(t)
 		ms := w.d2Run(t, d2Src(d2Line(pk.pspRef, "", statement.PaymentStatusReversed, d2PSPAmount)))
 		d2NoCU(t, ms, "line status reversed")
+		// R-S4: the NEXT run (no line) re-raises, because a reversed deposit line
+		// is not a reversal line or a tombstone: noisy, never silent.
+		d2CUFor(t, w.d2Run(t, d2PastSrc()), pk.attempt.ID)
 		w.d2AssertNoMoney(t, pk)
 	})
 }

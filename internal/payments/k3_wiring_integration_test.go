@@ -14,7 +14,7 @@ import (
 
 // PAY-K3-STATEMENT-SOURCE-WIRING-1 service-level tests (the binary wiring is
 // pinned in cmd/platform-api). The registry is keyed by provider id: "no
-// non-MOCK source" is evaluated PER PROVIDER (owner ruling H-W2).
+// non-MOCK source" is evaluated PER PROVIDER (orchestrator engineering ruling H-W2 (reversible, PRH-2-ROUND2-ENGINEERING-RULINGS)).
 
 // Registered ONLY for some other provider id (as the MOCK source is for
 // mock-payments while a real PSP has none): both kinds are refused at
@@ -49,10 +49,12 @@ func TestWiring1_SubmissionFailsClosed(t *testing.T) {
 	w := newK3World(t, k3Opts{base: 1})
 	_, a := w.ambiguousPayout(130)
 	for _, kind := range []ResolutionKind{ResolutionM2DeclareNotPaid, ResolutionM2DeclarePaid} {
-		// Unknown attempt id: refused (not found), never falls through to the INSERT.
+		// Unknown attempt id: refused by migration 0115's INSERT guard, which runs
+		// FIRST (security F-2/F-3), as an AUDITED class (forbidden/precondition),
+		// exactly like M1 - never silently not-found.
 		_, err := w.request(w.f1, w.m2In(uuid.New(), kind))
-		if err == nil || ClassifyResolutionError(err) != ResolutionErrNotFound {
-			t.Fatalf("%s unknown attempt: want not-found refusal, got %v", kind, err)
+		if c := ClassifyResolutionError(err); err == nil || (c != ResolutionErrForbidden && c != ResolutionErrPrecondition) {
+			t.Fatalf("%s unknown attempt: want an audited guard refusal, got class %q err %v", kind, c, err)
 		}
 		// A service built with a NIL registry refuses every M2.
 		saved := w.svc
@@ -133,13 +135,23 @@ func TestWiring1_ConcurrentFinalApprovalsUnregistered_NoPosting(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+	refused := 0
 	for i := range outs {
 		if outs[i].Executed {
 			t.Fatalf("approver %d executed with no registered source", i)
 		}
+		if outs[i].Refused {
+			refused++
+		} else if errs[i] == nil {
+			t.Fatalf("approver %d neither refused nor errored: %+v", i, outs[i])
+		}
 	}
-	if got := w.resolution(r.ID); got.State == ResolutionExecuted {
-		t.Fatalf("resolution executed: %+v", got)
+	if refused < 1 {
+		t.Fatalf("no decision landed as refused (errs %v %v)", errs[0], errs[1])
+	}
+	got := w.resolution(r.ID)
+	if got.State != ResolutionRefusedAtExecute || got.RefusalCode == nil || *got.RefusalCode != resolutionRefusedNoSource {
+		t.Fatalf("final state must be refused_at_execution/no_statement_source, got %+v", got)
 	}
 	if got := w.withdrawalOf(wr.ID); got.State != withdrawal.StateSubmitted {
 		t.Fatalf("withdrawal = %s", got.State)

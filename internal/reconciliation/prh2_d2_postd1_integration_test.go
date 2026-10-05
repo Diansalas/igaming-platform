@@ -231,7 +231,7 @@ func TestD2_14_PollFC4ConflictPark_HoldingReference_IsBoundAndStanding(t *testin
 	// RUNS. Run 1 raises the finding; run 2 carries a reversal line naming X
 	// (X is the withdrawal_completed key, so no tombstone can ever hold it);
 	// runs 3..N carry no deposit line at all and the persisted reversal line
-	// keeps the finding cleared. The payout side stays clean and no money moves.
+	// keeps the finding cleared. No finding is raised for X after the reversal, and no money moves.
 	t.Run("reversal_line_naming_X_persisted_clears_in_later_runs", func(t *testing.T) {
 		w := newD2World(t)
 		pk, payoutLine := buildFC4(t, w)
@@ -241,7 +241,7 @@ func TestD2_14_PollFC4ConflictPark_HoldingReference_IsBoundAndStanding(t *testin
 			ms := w.d2Run(t, d2PastSrc())
 			d2NoCU(t, ms, "a later run, the reversal line persisted from an earlier import")
 		}
-		// The payout's own side stays clean when its line is present.
+		// With the payout's own line present, X still raises nothing.
 		d2NoCU(t, w.d2Run(t, d2Src(payoutLine)), "later run with the payout line")
 		w.d2AssertNoMoney(t, d2Parked{attempt: pk.attempt, pspRef: "d2-none"})
 		w.d2AssertBalanced(t)

@@ -42,13 +42,6 @@ func TestR2_ParkedSecondCaptureStandsWhenSiblingAttemptSucceeded(t *testing.T) {
 		t.Fatalf("setup: second attempt on the same intent: %v", err)
 	}
 	ref := "r2-sib-" + uuid.NewString()
-	w.applyReceipt(t, payProvA, payments.ReceiptEvidence{EventType: "deposit", ProviderReference: ref, MerchantReference: second.MerchantReference,
-		Outcome: payments.OutcomeSucceeded, Amount: d2Amount, AssetCode: "EUR"})
-	parked := w.attempt(t, second.ID)
-	if parked.State != payments.AttemptDisputed || parked.LedgerTransactionID != nil {
-		t.Fatalf("setup: the second capture must be disputed and unposted, got %s ledger=%v", parked.State, parked.LedgerTransactionID)
-	}
-	line := d2Line(ref, second.MerchantReference, statement.PaymentStatusSucceeded, d2Amount)
 	count := func() int {
 		var n int
 		if err := w.pool.WithTenant(context.Background(), w.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
@@ -58,7 +51,41 @@ func TestR2_ParkedSecondCaptureStandsWhenSiblingAttemptSucceeded(t *testing.T) {
 		}
 		return n
 	}
-	postedBefore := count() // the sibling's posting (plus any fixture seed)
+	postedBefore := count() // BEFORE the second capture is applied
+	intentTx := func() uuid.UUID {
+		var id uuid.UUID
+		if err := w.pool.WithTenant(context.Background(), w.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+			return tx.QueryRow(ctx, `SELECT ledger_transaction_id FROM deposit_intents WHERE id = $1`, first.DepositIntentID).Scan(&id)
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+	if intentTx() != *first.LedgerTransactionID {
+		t.Fatal("setup: the intent must be linked to the first attempt's posting")
+	}
+	w.applyReceipt(t, payProvA, payments.ReceiptEvidence{EventType: "deposit", ProviderReference: ref, MerchantReference: second.MerchantReference,
+		Outcome: payments.OutcomeSucceeded, Amount: d2Amount, AssetCode: "EUR"})
+	parked := w.attempt(t, second.ID)
+	if parked.State != payments.AttemptDisputed || parked.LedgerTransactionID != nil {
+		t.Fatalf("setup: the second capture must be disputed and unposted, got %s ledger=%v", parked.State, parked.LedgerTransactionID)
+	}
+	line := d2Line(ref, second.MerchantReference, statement.PaymentStatusSucceeded, d2Amount)
+	// The receipt path added NO deposit posting of any kind for the second
+	// capture: none keyed (provider, ref), none overall, the intent still points at
+	// the first attempt's posting.
+	if n := count(); n != postedBefore {
+		t.Fatalf("the second capture's receipt added %d deposit posting(s)", n-postedBefore)
+	}
+	var keyed int
+	if err := w.pool.WithTenant(context.Background(), w.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT count(*) FROM ledger_transactions WHERE tenant_id = $1 AND provider_id = $2 AND provider_tx_id = $3`, w.f.tenantID, payProvA, ref).Scan(&keyed)
+	}); err != nil || keyed != 0 {
+		t.Fatalf("want 0 postings keyed (provider, ref), got %d (%v)", keyed, err)
+	}
+	if intentTx() != *first.LedgerTransactionID {
+		t.Fatal("the intent's ledger transaction changed")
+	}
 	d2CUFor(t, w.d2Run(t, d2Src(line)), second.ID)
 	for i := 0; i < 3; i++ {
 		d2CUFor(t, w.d2Run(t, d2PastSrc()), second.ID)

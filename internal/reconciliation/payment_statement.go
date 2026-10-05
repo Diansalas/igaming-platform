@@ -1087,8 +1087,10 @@ func (m *payMatcher) matchPayment(lk string, l payLine) {
 	// already a payments P1" case below instead, precisely like every
 	// other disputed reason.
 	case a.boundCapture() && (l.status == statement.PaymentStatusSucceeded ||
-		// PAY-RECON-PARKED-CAPTURE-STANDING-1 M-S2 (ledger-finance ruling,
-		// fail-closed tightening, no new money path): a `pending` or `declined`
+		// PAY-RECON-PARKED-CAPTURE-STANDING-1 M-S2 (ledger-finance ruling M-S2 in
+		// docs/plans/prh2-hardening-round/analysis/psp-prerequisites-analysis.md 2.4,
+		// re-confirmed by the LF implementation review; fail-closed tightening, no
+		// new money path): a `pending` or `declined`
 		// line naming a bound park is NOT a clearing signal - only a reversal
 		// line or a tombstone clears (ADR 0095 §35.4, S2). A PSP that keeps
 		// listing X as pending/declined in every window must not suppress the

@@ -12,7 +12,7 @@ import (
 )
 
 // PAY-K3-STATEMENT-SOURCE-WIRING-1 tests. The registry is keyed by provider id,
-// so "no non-MOCK source" is evaluated PER PROVIDER (owner ruling H-W2): the MOCK
+// so "no non-MOCK source" is evaluated PER PROVIDER (orchestrator engineering ruling H-W2, reversible; PRH-2-ROUND2-ENGINEERING-RULINGS): the MOCK
 // source unlocks only the mock provider's attempts.
 
 // fakeRealAdapter is a payments adapter WITHOUT the Synthetic marker (embedding
@@ -186,6 +186,7 @@ func TestRun_StatementSourcesRegisteredAndScheduledFromOneList(t *testing.T) {
 	if run == nil {
 		t.Fatal("no run()")
 	}
+	paySourcesWrites := 0
 	var (
 		assignedFrom       string
 		assignPos          token.Pos
@@ -202,6 +203,14 @@ func TestRun_StatementSourcesRegisteredAndScheduledFromOneList(t *testing.T) {
 	ast.Inspect(run.Body, func(n ast.Node) bool {
 		switch x := n.(type) {
 		case *ast.AssignStmt:
+			// LF C-1/F-3: paySources is written EXACTLY once (its := from the
+			// bundle); any later write (reassignment, element or slice write) would
+			// let the scheduled slice differ from the registered one.
+			for _, lhs := range x.Lhs {
+				if paySourcesWrite(lhs) {
+					paySourcesWrites++
+				}
+			}
 			if len(x.Lhs) == 1 && len(x.Rhs) == 1 {
 				if id, ok := x.Lhs[0].(*ast.Ident); ok && id.Name == "paySources" {
 					if call, ok := x.Rhs[0].(*ast.CallExpr); ok {
@@ -258,6 +267,9 @@ func TestRun_StatementSourcesRegisteredAndScheduledFromOneList(t *testing.T) {
 		}
 		return true
 	})
+	if paySourcesWrites != 1 {
+		t.Fatalf("paySources must be written exactly once in run() (its := from the bundle), got %d writes", paySourcesWrites)
+	}
 	if assignedFrom != "providers.paymentStatementSources" {
 		t.Fatalf("paySources must be assigned from providers.paymentStatementSources(), got %q", assignedFrom)
 	}
@@ -277,5 +289,117 @@ func TestRun_StatementSourcesRegisteredAndScheduledFromOneList(t *testing.T) {
 	if !ordered {
 		t.Fatalf("order must be: assign < coverage gate < register < db.Connect and < HTTP server construction (%v %v %v %v %v)",
 			assignPos, coveragePos, registerPos, connectPos, newServerPos)
+	}
+}
+
+// paySourcesWrite reports whether lhs writes to paySources: the identifier
+// itself, an index or slice expression over it, or a dereference of it.
+func paySourcesWrite(lhs ast.Expr) bool {
+	switch e := lhs.(type) {
+	case *ast.Ident:
+		return e.Name == "paySources"
+	case *ast.IndexExpr:
+		return paySourcesWrite(e.X)
+	case *ast.SliceExpr:
+		return paySourcesWrite(e.X)
+	case *ast.StarExpr:
+		return paySourcesWrite(e.X)
+	case *ast.ParenExpr:
+		return paySourcesWrite(e.X)
+	}
+	return false
+}
+
+// Security F-5: every scheduled payment statement source is ALSO in the
+// production-guard registration list (buildRegistrations), so a future real
+// source appended to paymentStatementSources() cannot skip
+// RefuseSyntheticInProduction.
+func TestWiring_EveryScheduledSourceIsInTheProductionGuardRegistrations(t *testing.T) {
+	cfg := baseConfig(t, "development", true)
+	b := buildProviderBundle(mockProviderWiring(cfg))
+	regs := buildRegistrations(cfg, b)
+	inGuard := func(c any) bool {
+		for _, r := range regs {
+			if r.Component == c {
+				return true
+			}
+		}
+		return false
+	}
+	srcs := b.paymentStatementSources()
+	if len(srcs) == 0 {
+		t.Fatal("setup: no scheduled sources")
+	}
+	for _, src := range srcs {
+		if !inGuard(src) {
+			t.Fatalf("scheduled payment statement source %T is not in buildRegistrations: it would skip RefuseSyntheticInProduction", src)
+		}
+	}
+	// And the guard really refuses the MOCK source in production.
+	if err := refuseSyntheticInProduction(baseConfig(t, "production", true), buildRegistrations(baseConfig(t, "production", true), b)); err == nil ||
+		!strings.Contains(err.Error(), "payments/statement_source") {
+		t.Fatalf("production must refuse the MOCK payments statement source, got %v", err)
+	}
+}
+
+// Code review F-5: startup must FAIL on a bad list. In run(), the coverage gate
+// and the registration are each `if err := f(...); err != nil { return err }`
+// with the condition EXACTLY `err != nil` (a mutant `err != nil && false` or a
+// dropped return would let a bad list start).
+func TestRun_StatementSourceGatesReturnTheirError(t *testing.T) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "main.go", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := map[string]bool{}
+	ast.Inspect(file, func(n ast.Node) bool {
+		ifs, ok := n.(*ast.IfStmt)
+		if !ok {
+			return true
+		}
+		as, ok := ifs.Init.(*ast.AssignStmt)
+		if !ok || len(as.Rhs) != 1 {
+			return true
+		}
+		call, ok := as.Rhs[0].(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		id, ok := call.Fun.(*ast.Ident)
+		if !ok || (id.Name != "checkPaymentStatementCoverage" && id.Name != "registerPaymentStatementSources") {
+			return true
+		}
+		cond, ok := ifs.Cond.(*ast.BinaryExpr)
+		if !ok || cond.Op != token.NEQ {
+			t.Errorf("%s: the guard condition must be exactly err != nil", id.Name)
+			return true
+		}
+		if x, ok := cond.X.(*ast.Ident); !ok || x.Name != "err" {
+			t.Errorf("%s: condition left side must be err", id.Name)
+		}
+		if y, ok := cond.Y.(*ast.Ident); !ok || y.Name != "nil" {
+			t.Errorf("%s: condition right side must be nil", id.Name)
+		}
+		if len(ifs.Body.List) != 1 {
+			t.Errorf("%s: the body must be a single return err", id.Name)
+			return true
+		}
+		ret, ok := ifs.Body.List[0].(*ast.ReturnStmt)
+		if !ok || len(ret.Results) != 1 {
+			t.Errorf("%s: the body must be return err", id.Name)
+			return true
+		}
+		if r, ok := ret.Results[0].(*ast.Ident); !ok || r.Name != "err" {
+			t.Errorf("%s: must return err unchanged", id.Name)
+			return true
+		}
+		found[id.Name] = true
+		return true
+	})
+	for _, name := range []string{"checkPaymentStatementCoverage", "registerPaymentStatementSources"} {
+		if !found[name] {
+			t.Errorf("main.go has no pinned fail-startup guard for %s", name)
+		}
 	}
 }
