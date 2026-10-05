@@ -92,7 +92,8 @@ func New(t testing.TB, prefix string) string {
 		// and WITH (FORCE) cannot terminate another role's session ("permission
 		// denied to terminate process"). Wait (bounded) for the sessions to
 		// drain and retry instead of leaking the database. No privilege is
-		// changed and no session is terminated.
+		// changed and no extra session-termination is attempted (WITH (FORCE) still
+		// ends the scratch database's own sessions that the admin role may signal).
 		var dropErr error
 		for attempt := 0; attempt < 40; attempt++ {
 			if _, dropErr = conn.Exec(context.Background(), "DROP DATABASE IF EXISTS "+ident+" WITH (FORCE)"); dropErr == nil {

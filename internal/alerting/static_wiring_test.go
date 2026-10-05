@@ -46,7 +46,9 @@ var staticInTxOwners = []string{
 	"internal/payments/drive.go:driveCreatedAttempt",
 	"internal/payments/deposit_v2.go:InitiateDepositAttempt",
 	"internal/payments/sweeper.go:processViaQueryStatus",
-	"internal/reconciliation/scheduler.go:sweepTenants",
+	// H-W1 moved the ledger_vs_projection evidence transaction (and its InTx/Flush) out of
+	// sweepTenants into runLedgerStreamForTenant, shared by the ordinary and observation sweeps.
+	"internal/reconciliation/scheduler.go:runLedgerStreamForTenant",
 	"internal/reconciliation/scheduler.go:runSportsbookStreamForTenant",
 	"internal/reconciliation/scheduler.go:runCasinoStreamForTenant",
 	"internal/httpserver/deposit_handlers.go:newPaymentWebhookHandler",

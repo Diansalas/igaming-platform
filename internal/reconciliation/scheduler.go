@@ -377,12 +377,15 @@ var listNonActiveTenants = nonActiveTenants
 // tenant stays gated by the platform_acting + four-eyes path.
 //
 // sportsbook_settlement, casino_consistency and casino_statement are NOT run
-// for a non-active tenant (deferred): a non-active tenant's game rounds and
-// bets are not settled by any path that reaches this package, and a casino or
-// sportsbook posting for a closed tenant has no staff or sweeper writer; if one
-// is ever added these streams must be revisited (they are internal reads too,
-// so the extension is cheap). One tenant's failure is recorded on its own
-// outcome and never stops the others.
+// for a non-active tenant (DEFERRED GAP, not a proof of absence): casino wallet
+// callbacks and the staff sportsbook settlement simulation do not check
+// tenants.status, so game and sportsbook postings CAN still land on a suspended
+// or closed tenant. The ledger_vs_projection stream above covers the money
+// invariant (drift) for those postings; what does not run for these tenants is the
+// provider cross-check streams. Owner decision pending (ADR 0095 section 40.4
+// item 2): block such postings for non-active tenants, or extend these streams
+// (they are internal reads, so the extension is cheap). One tenant's failure is
+// recorded on its own outcome and never stops the others.
 func observeNonActiveTenants(ctx context.Context, pool *db.Pool, logger *slog.Logger, only []uuid.UUID, alreadySwept []SweepOutcome, periodStart, periodEnd time.Time, paySources []statement.PaymentStatementSource) ([]SweepOutcome, error) {
 	tenants, err := listNonActiveTenants(ctx, pool, only)
 	if err != nil {

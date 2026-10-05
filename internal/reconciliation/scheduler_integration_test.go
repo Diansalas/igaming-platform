@@ -27,7 +27,8 @@ import (
 // has ever left behind (thousands, each with four streams), making each
 // call cost minutes (CAS-RECON-SCALE-1). RunSweep's only difference - the
 // unrestricted tenant enumeration - is covered directly by
-// TestSweepTenantSelection_ActiveOnlyScopedAndUnscoped.
+// TestSweepTenantSelection_ActiveOnlyScopedAndUnscoped (which since H-W1 also pins
+// that non-active tenants are observed by the ledger and payment_statement streams only).
 func findOutcome(t *testing.T, outcomes []SweepOutcome, f fixture) SweepOutcome {
 	t.Helper()
 	for _, o := range outcomes {

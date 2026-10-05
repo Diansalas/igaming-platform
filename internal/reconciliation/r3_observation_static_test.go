@@ -138,7 +138,7 @@ func TestR3_Static_LedgerUsedReadOnly(t *testing.T) {
 func TestR3_Static_TransitiveDependenciesAreReadOnlyPackages(t *testing.T) {
 	out, err := exec.Command("go", "list", "-deps", ".").Output()
 	if err != nil {
-		t.Skipf("go list unavailable: %v", err)
+		t.Fatalf("go list -deps failed (the transitive read-only pin must not silently switch off): %v", err)
 	}
 	allowed := map[string]bool{}
 	for _, p := range []string{"txscope", "db", "alerting", "audit", "ledger", "providerref", "reconciliation", "reconciliation/statement"} {
