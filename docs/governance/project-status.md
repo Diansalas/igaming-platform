@@ -8,6 +8,8 @@ Orchestrator. This is a summary/index — full detail always lives in
 `docs/progress.md` (per-stage narrative), `docs/active-stage.md` (current
 stage detail), and the ADRs cited below.
 
+**Status note 2026-10-05 (PRH-2 implementation state; the notes below are older).** PRH-2 workstreams merged to this branch since the 2026-09-28 planning gate: A, B, C, D1, D2, E1, E2, E3, F-kyc, F-pay, G1, H, I-core, I-wire, J, K1, K2 and K3 (git log `merge(prh2)` commits; per-merge detail is in the task-registry `PRH-2-*-MERGE-STATE` rows). This includes D1 (poll amount/reference evidence), D2 (reconciliation parked capture), F-pay (KYC gate on deposit/payout), H (payments sweeper process), I-wire (alert dispatcher loop, log sink only), E1 (KYC submission outbox, migration 0114) and K3 (payment force resolution M1/M2, migration 0115). Migrations 0108-0115 were added (0108 A, 0109 G1, 0110 I-core, 0111 B, 0112 K1, 0113 K2, 0114 E1, 0115 K3). Everything is implemented against MOCK providers only (PROVIDER DEPENDENT for real vendors); AWS is OFF. All verification is LOCAL; there is NO GitHub CI evidence (CI-BILLING-1 open). The final-gate timing lane (TEST-RESISO-RACE-1) is NOT GREEN: `TestResolutionIsolation_NormalOperation` failed 0/5 and 0/3 on an idle box (`docs/plans/payment-readiness/evidence/prh2-final-timing-lane.md`); thresholds are unchanged and a decision is needed. The final PRH-2 gate is PENDING owner authorization: this note does NOT say the stage is complete and nothing here is approved. ALERT-DELIVERY-1 stays OPEN (no one is paged). Current launch blockers and open human decisions: `docs/HANDOVER.md` sections "Launch blockers (current)" and "Human decisions awaiting the owner".
+
 ## Completed stages
 
 | Stage | Title | Status |

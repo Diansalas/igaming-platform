@@ -12,7 +12,9 @@ Status: Stage 0 draft.
 | Crypto rails/custodian | Self-custody infra, or Fireblocks/BitGo | `payments` crypto flows |
 | KYC/AML vendor | SumSub, Veriff, Jumio | `identity-compliance` real verification |
 | Affiliate platform | Income Access, MyAffiliates | Affiliate attribution (buy first, per Blueprint §1) |
-| Hosting | Hetzner/OVH/Leaseweb (AWS/GCP need written gambling-AUP confirmation) | Every deployed environment |
+| Hosting | Hetzner/OVH/Leaseweb (AWS/GCP need written gambling-AUP confirmation). Update 2026-10-05: ADR 0009/0084 chose AWS for staging (currently OFF); the hosting AUP confirmation (R6) remains a human item | Every deployed environment |
+| CI (GitHub Actions) | GitHub-hosted runners; currently BLOCKED by billing (CI-BILLING-1) | Green CI evidence for the final gate |
+| Alert paging | None selected; alerts are durable but unrouted (ALERT-DELIVERY-1, HD-PRH2-4-OPS) | Any real-money operation |
 | Secrets/KMS | Vault or cloud KMS provider | Any environment holding real credentials — **and, added in Stage 4H-B1 Wave 1.5 Fix Wave, the affiliate `tracking_token` key material specifically**: per-tenant derivation, `key_version` on the row, rotation with overlapping validity, and immediate per-tenant revocation (doc 32 §5.1.2, DEP-AFF-8). This is the first concrete, design-level consumer of this row rather than a general environment concern |
 | Certification body | GLI (GLI-19, GLI-33) | B2B sale readiness, not MVP |
 | Gaming lawyer | Jurisdiction-specific (Blueprint recommends Malta-based) | Licensing structure, contracts, all Q1–Q6 decisions |

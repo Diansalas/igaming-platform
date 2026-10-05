@@ -2,8 +2,14 @@
 
 Operational incident runbooks now exist (Stage 9) — see:
 
-- `operational-runbooks.md` — deployment, rollback, financial incident,
-  provider/payment/auth/database outages, security incident.
+- `operational-runbooks.md` — sections 1-14: deployment, rollback, financial incident,
+  provider/payment/auth/database outages, security incident, §10 capability
+  grants (K1), §11 manual adjustment (K2), §12 payments sweeper (H), §13 KYC
+  outbox (E1), §14 payment force-resolution M1/M2 (K3).
+- `migration-0101-payment-attempts-remediation.md` — migration 0101 remediation.
+- `stage-9-3-staging-deployment-runbook.md`, `stage-9-4-aws-account-verification.md`
+  and `stage-9-4-staging-lifecycle-runbook.md` — staging (AWS is currently OFF;
+  see `../governance/staging-teardown-2026-09-26.md`).
 - `backup-and-disaster-recovery.md` — honest RPO/RTO evidence status
   (currently NOT MET/NOT IMPLEMENTED — see that file for why and what's
   needed).
@@ -34,6 +40,12 @@ make dev-db-up
 #    via docker-compose.
 #   sudo -u postgres psql -c "CREATE ROLE igaming LOGIN PASSWORD 'igaming_dev_password' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;"
 #   sudo -u postgres psql -c "CREATE DATABASE igaming_platform_dev OWNER igaming;"
+
+# 2b. The runtime-role and migration tests also need `make dev-db-init-roles`
+#     (igaming_runtime) and `make dev-db-init-test-admin` (igaming_test_admin)
+#     plus the TEST_*_DATABASE_URL variables (see Makefile, .env.example).
+#     Role/sudo steps are for humans only; sub-agents must never create or
+#     alter database roles (CLAUDE.md environment safety).
 
 # 3. Apply migrations
 make migrate-up

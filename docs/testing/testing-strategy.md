@@ -3774,3 +3774,31 @@ Pre-fix defects reproduced before fixing (E1–E4, `docs/plans/stage-10.2-planni
   `AssertNoCasinoEffect` (adds casino rounds, launch sessions and projection totals), on both tenants
   from a fresh transaction.
 - Tenant-binding conformance cases fail — never skip — for any non-mock adapter.
+
+## Mutation evidence convention and timing lane (added 2026-10-05, handover audit)
+
+These two subsections document practice that already exists in the repository; they introduce no new rule or threshold.
+
+### Mutation evidence convention
+
+Financial and security-sensitive workstreams record mutation evidence as `docs/plans/payment-readiness/evidence/<workstream-id>-mutation-kill.txt` (for example `prh2-k3-mutation-kill.txt`, `prh2-e1-mutation-kill.txt`; `docs/plans/stage-10.3-planning/evidence/` follows the same pattern). The convention, as practised in those files:
+
+1. **Throwaway copy.** Every mutant is applied to a throwaway COPY of the worktree, never to the worktree itself. Migration mutants rebuild a private database from the mutated migration.
+2. **Control run.** A run of the unmutated copy passes before the first mutant.
+3. **Restore and compare.** After every mutant the file is restored and compared byte for byte (`cmp`); the file reports the number of restore checks and `0 DIFFERS`.
+4. **Targeted tests.** The stated tests run with `-tags integration -count=1` (K3 used `-p 1`); the first failing tests are recorded as the kill.
+5. **SUMMARY line.** The file header carries one `SUMMARY:` line with mutants run, KILLED, SURVIVED and not run (for example `SUMMARY: 106 mutants; 92 KILLED; 14 SURVIVED ...`).
+6. **Every survivor classified.** Each surviving mutant is classified (equivalent, redundant, or a real gap with a follow-up registry ID). An unclassified survivor is not acceptable evidence.
+7. **Rounds.** Survivors are re-run after tests are added; the FINAL verdict per mutant is its last run.
+
+Mutation evidence is LOCAL evidence; it is never reported as GitHub CI.
+
+### Timing lane
+
+A small set of tests assert wall-clock security bounds (ADR 0094 §9; for example no request exceeds 500 ms, at most 4 store calls, no transaction held longer than 400 ms). Under `-race` they are sensitive to CPU contention, so `.github/workflows/ci.yml` runs them in a separate step ("Timing-sensitive security tests, run alone"), after the rest of the integration suite has skipped them by name (`TIMING_LANE_TESTS`).
+
+- **The 8 tests:** `TestStoreOutage_DoesNotPinPool`, `TestStoreOutage_DoesNotPinPool_ProductionPoolSize` (`./internal/providercred/`), and `TestResolutionIsolation_NormalOperation`, `_OneTenantStoreOutage`, `_MultipleTenantsOutage`, `_SimultaneousOnset_Bounded`, `_ConnectionExhaustion`, `_FinancialDuringOutage` (`./internal/httpserver/`).
+- **Commands:** `go test -race -tags=integration -v -count=1 -run '^(...)$'` per package, blocking, no retry or rerun, one name guard per test that fails the step if a test did not PASS by name. Nothing else joins the lane without its own security ruling.
+- **Bounds are never widened** to make a run pass. A change to a bound is a recorded decision (ADR 0094 owns it).
+- **Local runs** use exactly the CI commands, `-count=1`, on a private migrated database (a stale shared database fails with SQLSTATE 42P01), on an idle machine, and state the CPU set (for example `taskset -c 0-1`).
+- **Latest result (LOCAL evidence, not GitHub CI): NOT GREEN** as of 2026-10-05. `TestResolutionIsolation_NormalOperation` failed 0/5 and 0/3 on an idle box; the other 7 passed. A decision is needed; see `docs/plans/payment-readiness/evidence/prh2-final-timing-lane.md` and registry rows TEST-RESISO-RACE-1 and TEST-RESISO-RACE-1-UPDATE-2026-10-05. The GitHub CI half is blocked by CI-BILLING-1.

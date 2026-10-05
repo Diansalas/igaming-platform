@@ -4,7 +4,7 @@ Owner: `devops`. Design: `docs/decisions/0086-stage-9-4-staging-hardening-and-co
 (amends ADR 0084). Account verification: `docs/runbooks/stage-9-4-aws-account-verification.md`.
 Scripts: `deploy/aws/scripts/deploy.sh`, `deploy/aws/scripts/verify-teardown.sh`.
 
-**Status when written: nothing in this runbook has been run against AWS.**
+**Status when written: nothing in this runbook has been run against AWS.** (Later note, 2026-10-05: staging was subsequently deployed and then torn down; see `docs/governance/staging-teardown-2026-09-26.md`. AWS is currently OFF.)
 The only AWS access so far is the read-only credential
 `arn:aws:iam::765578795051:user/claude-staging-readonly`, used only for
 identity checks, `terraform plan` (staging: 74 to add; bootstrap: 9 to

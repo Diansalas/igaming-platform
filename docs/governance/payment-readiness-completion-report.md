@@ -316,6 +316,8 @@ The FH-7 code re-review verdict is READY WITH CONDITIONS for this label and NOT 
 
 ## 11. Remaining launch blockers, human decisions, staging and real-provider dependencies
 
+> **SUPERSEDED as of 2026-10-05.** This section is a 2026-09-28 snapshot; several items listed below are now closed or implemented against MOCK and newer blockers are missing. The current list is in `docs/HANDOVER.md` "Launch blockers (current)" and "Human decisions awaiting the owner"; the registry row `REGISTRY-HYGIENE-2026-10-05` records the evidence. The text below is kept unchanged as history.
+
 **Launch-blocking (NOT IMPLEMENTED or OPEN):**
 
 | Item | What is missing |
