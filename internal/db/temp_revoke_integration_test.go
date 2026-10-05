@@ -179,6 +179,58 @@ func TestTempRevoke_RuntimeRoleCannotCreateAnyTempObject_AllForms(t *testing.T) 
 	}
 }
 
+// stagedThrough0116 copies every migration numbered <= 116 into a temp dir, so
+// the round-trip test (MigrateDown steps=1 rolls back exactly 0116) does not
+// depend on what is newest in the live migrations directory.
+func stagedThrough0116(t *testing.T) string {
+	t.Helper()
+	src := filepath.Join("..", "..", "migrations")
+	entries, err := os.ReadDir(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	var copied int
+	for _, e := range entries {
+		n := e.Name()
+		if e.IsDir() || !strings.HasSuffix(n, ".sql") || len(n) < 4 {
+			continue
+		}
+		v := 0
+		if _, err := fmt.Sscanf(n[:4], "%d", &v); err != nil || v > 116 {
+			continue
+		}
+		b, err := os.ReadFile(filepath.Join(src, n))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, n), b, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		copied++
+	}
+	if copied < 232 {
+		t.Fatalf("staged only %d files through 0116, want at least 232 (116 up + 116 down)", copied)
+	}
+	return dir
+}
+
+// (2b) PRH-2 R2 security C2: the production startup check reads the same fact.
+func TestTempRevoke_ConnectingRoleHoldsTemp_RuntimeFalse_OwnerTrue(t *testing.T) {
+	rt := kycRuntimePool(t, 1)
+	owner := tempOwnerPool(t)
+	if holds, err := rt.ConnectingRoleHoldsTemp(context.Background()); err != nil || holds {
+		t.Fatalf("runtime role: holds=%v err=%v, want false", holds, err)
+	}
+	if holds, err := owner.ConnectingRoleHoldsTemp(context.Background()); err != nil || !holds {
+		t.Fatalf("owner role: holds=%v err=%v, want true (the owner keeps TEMP)", holds, err)
+	}
+	// And through the real production gate: the runtime pool passes in production.
+	if err := VerifyRuntimeRoleInProduction(context.Background(), "production", rt); err != nil {
+		t.Fatalf("production gate with the runtime role: %v", err)
+	}
+}
+
 // migration 0116 file contents (the real files).
 func tempRevokeUpSQL(t *testing.T) string {
 	t.Helper()
@@ -225,7 +277,7 @@ func runtimeURLFor(t *testing.T, scratchURL string) string {
 func TestTempRevoke_Migration_UpDownUp_VerifyClean_AssertionFires(t *testing.T) {
 	scratchURL := scratchdb.New(t, "temprev_")
 	ctx := context.Background()
-	migDir := filepath.Join("..", "..", "migrations")
+	migDir := stagedThrough0116(t) // stable when later migrations (0117...) land
 	p := checksumScratchPool(t, scratchURL)
 	rtURL := runtimeURLFor(t, scratchURL)
 	su, err := url.Parse(scratchURL)
@@ -252,8 +304,8 @@ func TestTempRevoke_Migration_UpDownUp_VerifyClean_AssertionFires(t *testing.T) 
 	if err != nil {
 		t.Fatalf("migrate up (full chain): %v", err)
 	}
-	if len(applied) == 0 || applied[len(applied)-1] < 116 {
-		t.Fatalf("expected the chain to reach at least 116, applied %v", applied)
+	if len(applied) == 0 || applied[len(applied)-1] != 116 {
+		t.Fatalf("expected the staged chain to end at 116, applied %v", applied)
 	}
 	if a := readTempACL(t, p); a.publicTemp || a.runtimeTemp || !a.ownerTemp {
 		t.Fatalf("after up: want no PUBLIC/runtime TEMP and owner TEMP, got %+v", a)
@@ -268,9 +320,7 @@ func TestTempRevoke_Migration_UpDownUp_VerifyClean_AssertionFires(t *testing.T) 
 		return err
 	})
 
-	// Down: the historical default is restored. (0116 must be the newest migration
-	// for steps=1 to roll it back; a later migration makes this test's step count
-	// wrong, which is the intended tripwire.)
+	// Down: the historical default is restored (0116 is the newest of the STAGED set).
 	rolled, err := p.MigrateDown(ctx, migDir, 1)
 	if err != nil || len(rolled) != 1 || rolled[0] != 116 {
 		t.Fatalf("migrate down 1: rolled=%v err=%v", rolled, err)

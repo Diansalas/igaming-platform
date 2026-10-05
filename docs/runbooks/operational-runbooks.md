@@ -38,8 +38,11 @@ glossed over; see `docs/runbooks/observability-and-alerting.md` and
    rolling back schema under live traffic.
 2. **Migration rollback**: only for a migration that has not yet been
    relied upon by committed data in a way its `.down.sql` can't undo.
-   `DATABASE_URL=<prod> go run ./cmd/migrate down` (steps as needed). Never
-   hand-edit `schema_migrations`.
+   Since PRH-2 R2 (ADR 0108) `cmd/migrate down` REFUSES to run unless `APP_ENV`
+   is explicitly `development` or `staging` (production and an unset `APP_ENV`
+   are refused), because a down migration can silently undo a security
+   invariant (0116 down re-grants PUBLIC TEMP). In production, fix forward or
+   restore; do not work around the guard. Never hand-edit `schema_migrations`.
 3. After any rollback, re-run the runtime-role adversarial suite and the
    reconciliation scheduler's next cycle before declaring the system
    stable again.
@@ -134,11 +137,29 @@ glossed over; see `docs/runbooks/observability-and-alerting.md` and
    failed-over database is not safe to serve traffic on until role
    separation and RLS are independently reconfirmed, not merely assumed
    carried over.
-5. Also confirm `TEMPORARY` is still revoked (ADR 0108, migration 0116): as the owner role run
-   `SELECT has_database_privilege('igaming_runtime', current_database(), 'TEMP')` (must be `f`) and check
-   `pg_database.datacl` carries no `=...T...` PUBLIC entry. A restored or recreated database starts with the
-   PostgreSQL default (PUBLIC has TEMP) until migration 0116 or `deploy/init-app-role.sql` is re-applied; a
-   database where the runtime role can create TEMP tables lets it defeat the unpinned K2 four-eyes guards.
+5. Also confirm `TEMPORARY` is still revoked (ADR 0108, migration 0116). **A restore or `CREATE DATABASE` does not
+   carry the database ACL, but `schema_migrations` still lists 0116, so `cmd/migrate up` will NOT re-apply it.**
+   Run the 0116 up SQL (`migrations/0116_revoke_temp_from_runtime.up.sql`) or the environment's role-provisioning
+   script (`deploy/aws/sql/init-runtime-role.rds.sql` on AWS, `deploy/init-app-role.sql` for the dev bootstrap)
+   directly as the database OWNER with psql. Then recycle or terminate the `igaming_runtime` backends
+   (`SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename='igaming_runtime' AND pid <> pg_backend_pid()`),
+   because a session that created a TEMP table before the revoke keeps it. In production the platform refuses to
+   start while the connecting role holds TEMP. Verify:
+   ```sql
+   -- as igaming_runtime, connected to the app DB:
+   SELECT current_database(), current_user,
+          has_database_privilege(current_database(),'TEMP')                    AS temp,          -- must be f
+          (SELECT rolsuper OR rolbypassrls FROM pg_roles WHERE rolname=current_user) AS privileged, -- must be f
+          (SELECT count(*) FROM pg_auth_members
+            WHERE member=(SELECT oid FROM pg_roles WHERE rolname=current_user)) AS memberships,   -- must be 0
+          (SELECT count(*) FROM pg_proc WHERE prosecdef)                        AS secdef_fns;    -- must be 0
+   BEGIN; CREATE TEMP TABLE tsp1_probe(a int); ROLLBACK;                      -- must fail 42501
+   -- as the owner:
+   SELECT count(*) FROM pg_database d, LATERAL aclexplode(COALESCE(d.datacl, acldefault('d', d.datdba))) a
+    WHERE d.datname = current_database() AND a.grantee = 0 AND a.privilege_type = 'TEMPORARY'; -- must be 0
+   ```
+   When applying 0116 to a live environment for the first time, apply it before runtime traffic (the AWS deploy
+   flow does) or recycle the runtime pools straight afterwards. `cmd/migrate down` is refused in production.
 
 ## 8. Restore verification (once a backup mechanism exists)
 

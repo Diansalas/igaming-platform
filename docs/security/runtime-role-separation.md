@@ -122,7 +122,7 @@ keeps `TEMPORARY` as the database owner. Deployment requirement: the migration r
 (on RDS the master user does). Tests: `internal/db/temp_revoke_integration_test.go`,
 `internal/adjustment/temp_revoke_integration_test.go`, and the static guard
 `TestNoRuntimeTempObjectsInProductionCode`. This closes the exploitation path for the older unpinned functions
-but does not replace pinning them (TRIGGER-SEARCH-PATH-1 residual, defence in depth).
+but does not replace pinning them (TRIGGER-SEARCH-PATH-1 residual, defence in depth). The owner keeps TEMP. A restore or recreate loses the ACL (and `migrate up` will not re-apply 0116): production startup fails closed when the connecting role holds TEMP, and the runbook (section 7 step 5) gives the repair and verification SQL. Existing runtime backends keep TEMP tables created before the revoke, so recycle them. `cmd/migrate down` is refused outside development and staging.
 
 **Independently re-verified and extended by the security review with 20
 additional escalation probes** (`SET session_replication_role =

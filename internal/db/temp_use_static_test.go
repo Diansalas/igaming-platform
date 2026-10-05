@@ -21,17 +21,25 @@ import (
 // through exactly this capability. A bare "pg_temp" at the END of a pinned
 // search_path is not an object reference and is allowed.
 func TestNoRuntimeTempObjectsInProductionCode(t *testing.T) {
-	pat := regexp.MustCompile(`(?i)(create\s+(?:global\s+|local\s+)?temp(?:orary)?\b|into\s+(?:global\s+|local\s+)?temp(?:orary)?\b|pg_temp\s*\.)`)
+	// Comments are ignored (English prose such as "into temporary storage" is not
+	// SQL); a tripwire, not a parser. Forms flagged: CREATE [GLOBAL|LOCAL] TEMP[ORARY],
+	// SELECT ... INTO TEMP[ORARY], and any object qualified into pg_temp, pg_temp_N,
+	// "pg_temp" or "pg_temp_N" (quoted or not, spaces around the dot allowed).
+	pat := regexp.MustCompile(`(?i)(create\s+(?:global\s+|local\s+)?temp(?:orary)?\b|into\s+(?:global\s+|local\s+)?temp(?:orary)?\b|"?pg_temp(?:_\d+)?"?\s*\.)`)
 	for _, f := range []string{
 		"CREATE TEMP TABLE x (a int)", "create temporary table x (a int)", "CREATE GLOBAL TEMP TABLE x (a int)",
 		"SELECT 1 INTO TEMP x", "select 1 into temporary table x", "INSERT INTO pg_temp.x VALUES (1)", "CREATE FUNCTION pg_temp.f()",
+		"CREATE TABLE pg_temp_3.x (a int)", `CREATE TABLE "pg_temp".x (a int)`, `CREATE TABLE "pg_temp_12".x (a int)`, "INSERT INTO pg_temp . x VALUES (1)",
 	} {
-		if !pat.MatchString(f) {
+		if !pat.MatchString(stripGoComments(f)) {
 			t.Fatalf("self-check: pattern must flag %q", f)
 		}
 	}
-	for _, ok := range []string{"SET search_path = pg_catalog, public, pg_temp", "temperature", "INTO template_x", "a temp value"} {
-		if pat.MatchString(ok) {
+	for _, ok := range []string{
+		"SET search_path = pg_catalog, public, pg_temp", "temperature", "INTO template_x", "a temp value",
+		"// into temporary storage", "/* CREATE TEMP TABLE in a block comment */", "x := 1 // CREATE TEMP TABLE only in a trailing comment",
+	} {
+		if pat.MatchString(stripGoComments(ok)) {
 			t.Fatalf("self-check: pattern must not flag %q", ok)
 		}
 	}
@@ -55,7 +63,7 @@ func TestNoRuntimeTempObjectsInProductionCode(t *testing.T) {
 				return err
 			}
 			scanned++
-			if loc := pat.FindString(string(b)); loc != "" {
+			if loc := pat.FindString(stripGoComments(string(b))); loc != "" {
 				rel, _ := filepath.Rel(root, path)
 				offenders = append(offenders, rel+": "+loc)
 			}
@@ -71,4 +79,17 @@ func TestNoRuntimeTempObjectsInProductionCode(t *testing.T) {
 	if len(offenders) > 0 {
 		t.Fatalf("production code creates TEMP objects, which the runtime role cannot do after migration 0116 (ADR 0108); revisit that invariant first: %v", offenders)
 	}
+}
+
+var (
+	blockComment = regexp.MustCompile(`(?s)/\*.*?\*/`)
+	lineComment  = regexp.MustCompile(`(?m)//[^\n]*`)
+)
+
+// stripGoComments removes /* */ and // comments. It is deliberately naive: a
+// "//" inside a string literal (a URL) also drops the rest of that line, which
+// can only hide text AFTER the URL on the same line - an accepted limit of a
+// tripwire whose real control is the database REVOKE.
+func stripGoComments(src string) string {
+	return lineComment.ReplaceAllString(blockComment.ReplaceAllString(src, ""), "")
 }

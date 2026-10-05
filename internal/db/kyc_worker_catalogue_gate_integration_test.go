@@ -13,8 +13,10 @@
 //
 // It is SEMANTIC, not lexical: each policy expression, exactly as stored in
 // pg_policies, is re-created on a TEMP probe table (LIKE the real table, every
-// NOT NULL dropped) and evaluated under the real worker session, as the runtime
-// role. The probe row is the "defaults and NULLs" row, which is precisely the
+// NOT NULL dropped) and evaluated under the real worker session, by the OWNER
+// pool (the runtime role cannot create TEMP objects since migration 0116, ADR
+// 0108; the equivalence premise is enforced by a tripwire in the test itself).
+// The probe row is the "defaults and NULLs" row, which is precisely the
 // shape a NULL-tenant arm or a USING (true) arm admits. A new migration that
 // adds such an arm without extending the fence therefore fails here. Its known
 // limit (a guard that needs a non-NULL column value is not exercised by the
@@ -26,6 +28,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 	"testing"
@@ -225,6 +228,22 @@ func TestKYCWorkerCatalogueGate_EveryPermissivePolicyIsUnsatisfiableOrFenced_31(
 		t.Fatalf("expected the full catalogue (>300 policies), got %d - the enumeration is broken", len(policies))
 	}
 	fenced := fenceTables(policies)
+
+	// Premise tripwire (code review C2): the gate evaluates the policies as the
+	// OWNER, which is only equivalent to the runtime role while no policy is
+	// role-specific and no expression depends on the evaluating role. A future
+	// migration breaking that premise must fail HERE, not silently make the gate
+	// blind (FORCE RLS applies the owner to the same policies, but not to a
+	// "TO igaming_runtime" policy or a current_user-dependent expression).
+	roleDep := regexp.MustCompile(`(?i)\b(current_user|session_user|current_role|pg_has_role|has_\w+_privilege)\b`)
+	for _, p := range policies {
+		if strings.Join(p.roles, ",") != "public" {
+			t.Errorf("policy %s.%s is role-specific (roles=%v): the owner-pool probe is no longer equivalent to the runtime role; revisit the gate", p.table, p.name, p.roles)
+		}
+		if roleDep.MatchString(p.qual) || roleDep.MatchString(p.check) {
+			t.Errorf("policy %s.%s depends on the evaluating role (%s / %s): the owner-pool probe is no longer equivalent to the runtime role; revisit the gate", p.table, p.name, p.qual, p.check)
+		}
+	}
 
 	// The nine tables are exactly the fenced set (the security-derived list).
 	var got []string

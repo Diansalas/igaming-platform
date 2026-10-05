@@ -10,6 +10,26 @@ import (
 // database connection (see production_safety_test.go).
 type tableOwnershipChecker interface {
 	ConnectingRoleOwnsNoTables(ctx context.Context) (bool, error)
+	// ConnectingRoleHoldsTemp reports whether the connecting role can create
+	// temporary objects in the current database (PRH-2 R2, ADR 0108).
+	ConnectingRoleHoldsTemp(ctx context.Context) (bool, error)
+}
+
+// ConnectingRoleHoldsTemp reports whether the role this Pool is connected as
+// holds the TEMPORARY privilege on the current database, directly, through
+// PUBLIC or through a role membership (has_database_privilege covers all three;
+// it is also true for a superuser). Migration 0116 revokes it from PUBLIC and
+// the runtime role, but the database ACL is NOT carried by a restore or a
+// CREATE DATABASE, and `migrate up` will not re-run an already-recorded 0116,
+// so the end state is also verified at startup (ADR 0108).
+func (p *Pool) ConnectingRoleHoldsTemp(ctx context.Context) (bool, error) {
+	var holds bool
+	if err := p.pool.QueryRow(ctx,
+		`SELECT has_database_privilege(current_user, current_database(), 'TEMP')`,
+	).Scan(&holds); err != nil {
+		return false, fmt.Errorf("db: check connecting role's TEMP privilege: %w", err)
+	}
+	return holds, nil
 }
 
 // ConnectingRoleOwnsNoTables reports whether the role this Pool is
@@ -89,6 +109,23 @@ func VerifyRuntimeRoleInProduction(ctx context.Context, environment string, chec
 				"row-level security is silently inert for every request this process would serve (see " +
 				"docs/security/runtime-role-separation.md, PLAT-ROLESPLIT-1) - point DATABASE_URL at the " +
 				"runtime role's credential instead",
+		)
+	}
+
+	// PRH-2 R2 (ADR 0108): the runtime role must not be able to create temporary
+	// objects - a TEMP table shadows an unqualified table name used by an
+	// unpinned guard function (TRIGGER-SEARCH-PATH-1). A restored or recreated
+	// database silently loses migration 0116's ACL change, so fail closed here.
+	holdsTemp, err := checker.ConnectingRoleHoldsTemp(ctx)
+	if err != nil {
+		return fmt.Errorf("db: production TEMP-privilege safety check failed (fail-closed - refusing to start): %w", err)
+	}
+	if holdsTemp {
+		return fmt.Errorf(
+			"db: refusing to start in production - the connecting database role holds the TEMPORARY privilege on " +
+				"the current database, so it can shadow tables used by unpinned trigger functions (ADR 0108, " +
+				"TRIGGER-SEARCH-PATH-1); as the database OWNER run the REVOKE statements of migration 0116 (see " +
+				"docs/runbooks/operational-runbooks.md section 7 step 5) and recycle the runtime sessions",
 		)
 	}
 	return nil

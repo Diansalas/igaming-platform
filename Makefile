@@ -62,7 +62,7 @@ migrate-up:
 	DATABASE_URL=$(DATABASE_URL) $(GO) run ./cmd/migrate up
 
 migrate-down:
-	DATABASE_URL=$(DATABASE_URL) $(GO) run ./cmd/migrate -steps=$(steps) down
+	APP_ENV=development DATABASE_URL=$(DATABASE_URL) $(GO) run ./cmd/migrate -steps=$(steps) down
 
 migrate-status:
 	DATABASE_URL=$(DATABASE_URL) $(GO) run ./cmd/migrate status

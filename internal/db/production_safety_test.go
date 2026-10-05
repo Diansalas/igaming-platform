@@ -13,6 +13,12 @@ import (
 type fakeTableOwnershipChecker struct {
 	ownsNothing bool
 	err         error
+	holdsTemp   bool
+	tempErr     error
+}
+
+func (f fakeTableOwnershipChecker) ConnectingRoleHoldsTemp(ctx context.Context) (bool, error) {
+	return f.holdsTemp, f.tempErr
 }
 
 func (f fakeTableOwnershipChecker) ConnectingRoleOwnsNoTables(ctx context.Context) (bool, error) {
@@ -63,5 +69,27 @@ func TestVerifyRuntimeRoleInProduction_ProductionCheckFailurePropagatesFailClose
 
 	if err := VerifyRuntimeRoleInProduction(ctx, "production", checker); err == nil {
 		t.Fatal("expected an error when the ownership check itself fails, but got nil - a broken check must fail closed, not silently pass")
+	}
+}
+
+// PRH-2 R2 (security C2, code N3; ADR 0108): a connecting role that can create
+// TEMP objects fails production startup closed; a failing check also fails closed.
+func TestVerifyRuntimeRoleInProduction_TempPrivilegeFailsClosed(t *testing.T) {
+	ctx := context.Background()
+	err := VerifyRuntimeRoleInProduction(ctx, "production", fakeTableOwnershipChecker{ownsNothing: true, holdsTemp: true})
+	if err == nil || !strings.Contains(err.Error(), "TEMPORARY") {
+		t.Fatalf("a role holding TEMP must fail production startup naming TEMPORARY, got %v", err)
+	}
+	if err := VerifyRuntimeRoleInProduction(ctx, "production", fakeTableOwnershipChecker{ownsNothing: true, tempErr: errors.New("boom")}); err == nil {
+		t.Fatal("a failing TEMP check must fail closed")
+	}
+	if err := VerifyRuntimeRoleInProduction(ctx, "production", fakeTableOwnershipChecker{ownsNothing: true}); err != nil {
+		t.Fatalf("a non-owning role without TEMP must pass, got %v", err)
+	}
+	// Never gated outside production: dev/CI connect as the owner, which keeps TEMP.
+	for _, env := range []string{"development", "staging", "test"} {
+		if err := VerifyRuntimeRoleInProduction(ctx, env, fakeTableOwnershipChecker{ownsNothing: false, holdsTemp: true}); err != nil {
+			t.Errorf("environment %q must not be gated: %v", env, err)
+		}
 	}
 }
