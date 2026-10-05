@@ -439,16 +439,19 @@ first gate: a missing or revoked grant is refused by the database.
    attempt and note the outcome. M2 is for the case where the provider cannot or will not answer.
    Record the hash of your evidence reference (`evidence_ref_hash`, hex SHA-256 of the external
    reference; never the reference itself and never PII). It is mandatory for M2.
-2. **A statement source must be registered for the provider.** The three standing reconciliation
-   kinds below can only fire if a `payment_statement` stream for that provider is running. The service
-   REFUSES `m2_declare_not_paid` (`force_resolve_precondition_failed`) when no statement source is
-   registered for the provider, because its double-payout risk is detected only by that stream
-   (ADR 0101 §12.3 optional rule, adopted). "Declare paid" is not refused. The registry
-   `payments.DefaultStatementSources` is not populated in the binary (**PAY-K3-STATEMENT-SOURCE-WIRING-1, a
-   REAL-MONEY PRECONDITION**), so every declare-not-paid is refused today. The `payment_statement` stream IS
-   scheduled with the MOCK source, so `pay_declared_paid_unconfirmed`, `pay_declared_paid_compensated_but_paid`
-   and S1-S4 do run for the MOCK provider; for a real provider whose source is not scheduled, treat every M2 as
-   unmonitored and escalate to engineering.
+2. **A statement source must be registered for the provider.** The standing reconciliation kinds
+   below can only fire if a `payment_statement` stream for that provider is running. The service
+   REFUSES BOTH `m2_declare_paid` and `m2_declare_not_paid` (`force_resolve_precondition_failed`, at submission
+   and again at execution as `refused_at_execution` / `no_statement_source`) when no statement source is
+   registered for THAT attempt's provider (ADR 0101 §12.3 and §28; PAY-K3-STATEMENT-SOURCE-WIRING-1). The
+   registry is filled at startup from the SAME list the reconciliation scheduler runs, so registered means
+   scheduled. Today that list holds only the MOCK source for the `mock-payments` provider: the MOCK source
+   unlocks M2 for mock-payments attempts only, and every real provider stays refused until its own real
+   statement source is scheduled. A refusal is the correct outcome for an unmonitored provider; escalate to
+   engineering, do not look for a workaround. Known residuals: standing findings exist only while the
+   provider's stream stays scheduled (removing a source silently ends them); tenants that are not
+   `active` are not swept (OPEN HUMAN DECISION H-W1), so for a closed tenant treat M2 as unmonitored;
+   deposit-park coverage depends on the PSP statement carrying `merchant_reference` (PROVIDER DEPENDENT).
 3. **Check the reason is resolvable.** M2 admits an `ambiguous` payout, or a `disputed` payout with
    `provider_reference_mismatch` / `success_for_never_sent_attempt`, whose withdrawal is still
    `submitted`. NOT resolvable by M1/M2 (the request is refused `force_resolve_reason_not_resolvable`):

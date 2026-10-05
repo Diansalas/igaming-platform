@@ -6608,7 +6608,7 @@ of the match. One tenant, its own rows only (FORCE RLS, `tenant_id = $1` on ever
   NULL`) refuses a `created -> disputed` move on an attempt that never chose a provider, and building
   a provider-bearing never-sent attempt would need payments internals. Every T15 row that exists does
   carry a provider, so the per-provider stream loads it and the classification applies.
-- **`poll_reference_mismatch` parks (S4, PAY-RECON-POLL-REF-CLEAR-1): IMPLEMENTED against MOCK.** The poll's returned reference Y is persisted as typed evidence (`payment_attempt_reference_evidence`) in the park's own transaction, and only when Y passes `ValidatePaymentReference`. Y is never read from audit JSON. The bound finding clears on an eligible reversal line or a tombstone on X or on Y. Without a Y row (Y was refused at ingress), only X clears, and the operator rule of manual PSP verification still applies.
+- **`poll_reference_mismatch` parks (S4, PAY-RECON-POLL-REF-CLEAR-1): IMPLEMENTED against MOCK.** The poll's returned reference Y is persisted as typed evidence (`payment_attempt_reference_evidence`) in the park's own transaction, and only when Y passes `ValidatePaymentReference`. Y is never read from audit JSON. The bound finding clears on an eligible reversal line or a tombstone on X, or on Y **when Y is attributable to this capture** (§40.3: Y is not held by another attempt and is not a `deposit`, `withdrawal_completed` or `deposit_reversal` ledger key). Without a Y row (Y was refused at ingress) or with an unattributable Y, only X clears, and the operator rule of manual PSP verification still applies.
 - **Runtime rule: a reason classed *bound* is bound only when the attempt holds a reference (D2 code
   final review D2F-1).**
   - **The gap.** The callback T10 that writes `callback_amount_asset_mismatch`
@@ -7146,6 +7146,35 @@ refused echo is never an error return). The database backs it with CHECK constra
 
 - Alerts for payout disputes and T14: NOT IMPLEMENTED (PAY-PAYOUT-DISPUTE-ALERT-1 and ALERT-DELIVERY-1 open).
   Nothing in this amendment delivers anything.
-- The `payment_statement` stream is scheduled with the MOCK payments statement source, so `pay_declared_paid_unconfirmed`, `pay_declared_paid_compensated_but_paid` and S1-S4 run for the MOCK provider. The in-process registry `payments.DefaultStatementSources` is not populated (PAY-K3-STATEMENT-SOURCE-WIRING-1). Every `m2_declare_not_paid` is therefore refused (O-4), so `pay_declared_not_paid_but_paid` cannot arise today. A standing M2 kind exists only for a provider whose statement source is scheduled in the stream. That is a precondition for any real PSP.
+- The `payment_statement` stream is scheduled with the MOCK payments statement source, so `pay_declared_paid_unconfirmed`, `pay_declared_paid_compensated_but_paid` and S1-S4 run for the MOCK provider. The statement-source registry is now populated from the same list (PAY-K3-STATEMENT-SOURCE-WIRING-1, §40.1): both M2 kinds are executable for the MOCK provider only and refused for every other provider. A standing M2 kind exists only for a provider whose statement source is scheduled in the stream. A real PSP still needs its own real source (PROVIDER DEPENDENT).
 - The `psp_clearing` residual of a declared-paid payout; MA020 stranding; the closed-tenant hold-release path
   (ADR 0107, design only). Casino/sportsbook MR020 mapping: recorded in ADR 0101's implementation record.
+
+## 40. PRH-2 round 2: real-PSP financial prerequisites (amendment; `payments`, reviewed by `ledger-finance`)
+
+Status: Go and tests only; **no migration** (0118 stays unused). Labels: `IMPLEMENTED` against the MOCK provider and MOCK statement source; real-PSP behaviour `PROVIDER DEPENDENT`. Closure of the three registry rows is the orchestrator's decision after independent review.
+
+### 40.1 PAY-K3-STATEMENT-SOURCE-WIRING-1 (`IMPLEMENTED`; residuals below)
+
+- `cmd/platform-api` builds ONE list (`providerBundle.paymentStatementSources()`). The same variable is (1) checked by the coverage gate, (2) registered into a `payments.StatementSourceRegistry` before the HTTP server exists, and (3) passed as `RunSchedulerLoop(..., paySources...)`. A test pins the link statically (same identifier, order before `db.Connect` and the server) and a unit test pins registered set == scheduled set. There is no package-level registry any more; `httpserver.Deps.StatementSources` carries it, and a nil registry refuses every M2.
+- Registration fails startup on a nil source (including a typed nil), an empty or malformed provider id, or a duplicate provider id, and registers nothing from a refused list.
+- **Both** M2 kinds (`m2_declare_paid`, `m2_declare_not_paid`) are refused at submission (`ErrResolutionNoStatementSource`, `force_resolve_precondition_failed`) and again at execution (`refused_at_execution`, code `no_statement_source`) when no source is registered for THAT attempt's provider. The submission check is fail closed in shape: an unreadable attempt, an unknown attempt, a missing provider id or an unregistered provider all refuse.
+- **Per provider (owner ruling H-W2):** the MOCK source registers only `mock-payments`; it unlocks M2 only for mock-payments attempts. Every real provider stays refused.
+- **Readiness gate** (`checkPaymentStatementCoverage`, same style as `RefuseSyntheticInProduction`, environment independent): every real (non-`Synthetic`) payments adapter needs a real statement source with the same provider id, and a MOCK source may never carry a real adapter's id. Vacuous today (the only adapter is the MOCK); it is the gate the first real PSP must pass.
+- **Sequencing dependency.** The wiring makes `m2_declare_not_paid` executable for the MOCK provider. Clearing of the standing kinds (d) and (c2) trusts executed K2 `compensating_entry` rows. Those rows are protected against forgery only once migration 0116 (REVOKE TEMP / search_path, TRIGGER-SEARCH-PATH-1, a separate branch) is merged. 0116 must land before or with this change reaches a shared environment.
+- Residuals: standing findings exist only while the provider's source stays scheduled (removing a source ends them silently; a startup check against disputed attempts would need a DB read, an orchestrator choice). Non-active tenants are not swept by the stream: **OPEN HUMAN DECISION H-W1**, sweep scope deliberately unchanged. The registry is in-process: it says a stream is scheduled, not that a run succeeded.
+
+### 40.2 PAY-RECON-PARKED-CAPTURE-STANDING-1 (`IMPLEMENTED` against MOCK; residuals below)
+
+- M-S1: the exact TestD2_14 shape (poll F-C4 park holding X, X the `withdrawal_completed` key) is tested across runs: a reversal line naming X in one import keeps later runs cleared; the payout side stays clean; no money moves.
+- **M-S2 (ledger-finance ruling, fail-closed tightening, no new money path):** a bound park matched in the current run by a `pending` or `declined` statement line still emits the finding (once per attempt and reference, S6). `reversed` stays the in-run clear (R1). The earlier D2 control that pinned "a pending/declined line raises nothing in-run" was replaced, with a comment citing this ruling.
+- Pin: a parked second capture keeps standing when a sibling attempt of the same intent succeeded and posted. One posting per intent, the second capture stays `disputed` and unposted, no automatic posting, receivable or clawback; only a PSP reversal line or a tombstone clears it. (The cancelled/expired-intent variant is covered by the same code path: the matcher never reads intent or sibling state; it has no separate fixture.)
+- Residuals: R-S1 findings exist only while the provider's source stays scheduled; R-S2 non-active tenants are not swept (H-W1); R-S3 unbound coverage depends on the statement's `merchant_reference` (PROVIDER DEPENDENT); R-S4 a `reversed` line clears in-run only and re-raises next run.
+
+### 40.3 PAY-RECON-POLL-REF-CLEAR-1 (`PARTIALLY IMPLEMENTED`)
+
+- **G-Y1 implemented.** `yAttributable(a, y)`: Y clears only if no other deposit or payout attempt of the (tenant, provider) holds it (provider or settlement reference) and no `deposit`, `withdrawal_completed` or `deposit_reversal` ledger posting is keyed by it. A tombstone on Y clears (G-Y3 test). Otherwise only X clears and the finding detail names Y ("not used for clearing"). All inputs are in the run snapshot; no new query.
+- Tests: Y held by a posted attempt, Y held by an unposted attempt, Y a `withdrawal_completed` key, Y a `deposit_reversal` key, tombstone on Y, a same-string reference in another tenant (neither blocks nor clears).
+- **G-Y2 NOT IMPLEMENTED** (separately evidenced captures on both X and Y: reversing only one should not clear). The analysis marks it a ledger-finance ruling, not a requirement; it is recorded here as an open residual.
+- **MA020-SYNC-MISMATCH-1 stays OPEN** and separate; its Y clearing must reuse `yAttributable`.
+- Real-PSP behaviour (what a PSP echoes on a poll) is `PROVIDER DEPENDENT`.

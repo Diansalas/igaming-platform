@@ -273,7 +273,8 @@ func TestRun_StatementSourcesRegisteredAndScheduledFromOneList(t *testing.T) {
 	if depsStmtSourcesVal != registerArgs[0] {
 		t.Fatalf("Deps.StatementSources must receive the registry that was filled (%q), got %q", registerArgs[0], depsStmtSourcesVal)
 	}
-	if !(assignPos < coveragePos && coveragePos < registerPos && registerPos < connectPos && registerPos < newServerPos) {
+	ordered := assignPos < coveragePos && coveragePos < registerPos && registerPos < connectPos && registerPos < newServerPos
+	if !ordered {
 		t.Fatalf("order must be: assign < coverage gate < register < db.Connect and < HTTP server construction (%v %v %v %v %v)",
 			assignPos, coveragePos, registerPos, connectPos, newServerPos)
 	}

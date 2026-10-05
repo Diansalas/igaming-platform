@@ -1682,7 +1682,7 @@ implemented as written; where this record differs it says so in §27.4.
 | M1 (deposit evidence only) and M2 "declare paid" / "declare not paid" via `withdrawal.Complete` / `Fail`, request/approve/reject/cancel/execute service, routes, permissions | `IMPLEMENTED` against the MOCK provider; behaviour against a real PSP is `PROVIDER DEPENDENT` |
 | Reserved provider-tx namespace and ingress validation at every payments site (and the statement fetch) | `IMPLEMENTED` |
 | Reconciliation: persisted statement-line lookup S1-S6, the three standing kinds, typed Y evidence | `IMPLEMENTED` against MOCK statement sources; real statement matching is `PROVIDER DEPENDENT` |
-| Registration of a payment statement source in the platform binary (`payments.DefaultStatementSources.Register` from `cmd/platform-api/main.go`) | `NOT IMPLEMENTED`: PAY-K3-STATEMENT-SOURCE-WIRING-1, a REAL-MONEY PRECONDITION (E1-owned file; until then the `m2_declare_not_paid` refusal and the runbook precondition cover it; the MOCK stream is scheduled, so (c), (c2) and S1-S4 run for MOCK) |
+| Registration of a payment statement source in the platform binary (from the SAME list the scheduler runs; both M2 kinds refused per provider) | `IMPLEMENTED` against the MOCK source for `mock-payments` only (§28, PAY-K3-STATEMENT-SOURCE-WIRING-1); a real PSP source is `PROVIDER DEPENDENT` and `NOT IMPLEMENTED`; H-W1 (non-active tenants not swept) is an OPEN HUMAN DECISION; depends on migration 0116 merging (§28.1) |
 | Alerts for payout disputes and T14 (PAY-PAYOUT-DISPUTE-ALERT-1) and alert delivery (ALERT-DELIVERY-1) | `NOT IMPLEMENTED` (open; nothing here delivers or pages anyone) |
 | Closed-tenant player-funds path (ADR 0107) | design only, `NOT IMPLEMENTED` |
 | Casino / sportsbook 4xx mapping of the all-sessions ledger trigger's `MR020` (O-1) | `NOT IMPLEMENTED`: the posting is refused by the database (tested), the HTTP layer returns its generic 5xx |
@@ -1768,7 +1768,7 @@ Applied after the ledger-finance, code-review and security implementation review
   and the (d) hint no longer promises an off-platform recording path. **Code-review F-2/F-3:** `TestK3_Y08` (requester Person unchanged at execution, scratch DB),
   and the HTTP leakage assertion now checks every collected refusal body (non-vacuous). `TestK3_Y09` (requester who later authors a policy), `TestK3_Y10` (`refused_at_execution` needs a same-transaction approval).
 - **Wording** of ADR 0095 §35.4/§39.3/§39.4 and `reconciliation-model.md` applied as ledger-finance wrote it.
-- **REAL-MONEY PRECONDITIONS (not optional, not docs-only):** PAY-K3-STATEMENT-SOURCE-WIRING-1 (populate `DefaultStatementSources` from the SAME list given to the
+- **REAL-MONEY PRECONDITIONS (not optional, not docs-only):** PAY-K3-STATEMENT-SOURCE-WIRING-1 (IMPLEMENTED in §28 against the MOCK source; originally: populate the registry from the SAME list given to the
   scheduler, and refuse `m2_declare_paid` as well when no source is scheduled); ALERT-DELIVERY-1 and PAY-PAYOUT-DISPUTE-ALERT-1; WITHDRAWAL-REVERSAL-1 or a governed path for the
   `psp_clearing` residual; a real non-MOCK statement source (PROVIDER DEPENDENT); CAS-RECON-SCALE-1; the ledger-finance RM-1..RM-7 list. The orchestrator owns the registry row.
 - **Deferred (docs only):** PAY-K3-MR020-HTTP-MAPPING-1 (casino/sportsbook: a crafted provider id gives a 5xx a provider may retry; the database refuses it);
@@ -1792,3 +1792,21 @@ Applied after the ledger-finance, code-review and security implementation review
 - **Post-fix concurrency run (recorded by ledger-finance, local):** `-race -count=20 -run 'TestK3_C12|TestK3_C26|TestK3_Y07' ./internal/payments/` PASS (392s). The earlier `-count=50` run refers to `041fb55`.
 - **Residual (security finding 1, pre-existing K2, HIGH, launch-blocking):** clearing of (d) and (c2) trusts executed K2 `compensating_entry` requests. Those can be forged through a TEMP-table
   shadow on the unpinned 0112/0113 helper functions until TRIGGER-SEARCH-PATH-1 is fixed for them; 0115 pins only its own 18 functions.
+
+## 28. Implementation record: round-2 PSP prerequisites (2026-10-05, amendment; no migration)
+
+Go and tests only; migration 0118 stays unused. Full text: ADR 0095 §40. Labels are `IMPLEMENTED` against MOCK; real-PSP behaviour `PROVIDER DEPENDENT`. Closure of the registry rows is the orchestrator's decision after independent review.
+
+### 28.1 PAY-K3-STATEMENT-SOURCE-WIRING-1 (supersedes the §27.6 precondition wording)
+
+- The statement-source registry is filled in `cmd/platform-api` from the SAME list given to `RunSchedulerLoop` (one variable, pinned by a static test) and injected through `httpserver.Deps.StatementSources`; the package-level `DefaultStatementSources` is removed. A nil registry refuses every M2.
+- **Both** `m2_declare_paid` and `m2_declare_not_paid` are refused at submission and at execution with the existing `no_statement_source` refusal when no source is registered for the attempt's provider. "No non-MOCK source" is evaluated **per provider** (owner ruling H-W2): the MOCK source unlocks only `mock-payments` attempts; every real provider stays refused. The submission check is fail closed in shape.
+- Startup fails on a nil source, an empty provider id or a duplicate; the readiness gate refuses a real payments adapter without a real statement source of the same provider id, and a MOCK source carrying a real adapter's id.
+- **Dependency (sequencing).** The wiring makes `m2_declare_not_paid` executable for the MOCK provider, and the clearing of (d) and (c2) trusts executed K2 `compensating_entry` rows. Those rows are protected against forgery only once migration 0116 (REVOKE TEMP, TRIGGER-SEARCH-PATH-1; a separate branch) is merged. Do not enable this wiring in a shared environment before 0116.
+- Residuals: the registry is in-process (scheduled, not "last run succeeded"); removing a source silently ends its standing findings; **H-W1 OPEN HUMAN DECISION**: the stream sweeps `active` tenants only, while R-5 admits M2 on a closed tenant through `platform_acting`. Sweep scope is not changed here.
+
+### 28.2 Reconciliation (ADR 0095 §40.2, §40.3)
+
+- PAY-RECON-PARKED-CAPTURE-STANDING-1: M-S1 cross-run test, M-S2 ruling (bound park matched by a pending/declined line still reports; `reversed` stays the in-run clear), sibling-success pin. `IMPLEMENTED` against MOCK; residuals R-S1..R-S4.
+- PAY-RECON-POLL-REF-CLEAR-1: G-Y1 (`yAttributable`) and the G-Y3 tombstone test. `PARTIALLY IMPLEMENTED`: G-Y2 is NOT IMPLEMENTED; MA020-SYNC-MISMATCH-1 stays OPEN and must reuse `yAttributable`.
+- Mutation evidence: `docs/plans/payment-readiness/evidence/prh2-r2-psp-prereq-mutation-kill.txt`.
