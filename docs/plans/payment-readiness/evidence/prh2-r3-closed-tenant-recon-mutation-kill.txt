@@ -1,0 +1,60 @@
+PRH-2 R3 / H-W1 (non-active tenant observation): mutation kill evidence
+Branch prh2-r3-closed-tenant-recon (base 66d2968). Private local scratch databases only (hw1_recon owner DB; each k3World also builds its own private scratch database), never the shared CI/orchestrator DBs. Go + tests only, no migration.
+Method: the file under test is copied to a backup (throwaway copy), ONE mutant is applied in place by exact string replacement (the harness refuses a pattern that does not occur exactly once), the targeted tests run, the file is restored from the backup and compared with cmp (every restore line below says identical). Mutants S2..S5 add a throwaway file that is removed afterwards. A KILLED mutant made at least one test fail; the CONTROL run (unmutated, same selector) PASSED first.
+Selector: -tags integration -count=1 -p 1 -run TestR3_ ./internal/payments/ ./internal/reconciliation/ (behavioural TestR3_* in the K3 world, session role asserted NOT rolsuper AND NOT rolbypassrls; static TestR3_Static_* in internal/reconciliation).
+
+Survivor classification:
+- M3 (observation predicate `status <> 'active'` replaced by TRUE) SURVIVED the first batch. It was NOT equivalent: it differs when a tenant that was non-active at the ordinary sweep's listing is reactivated before the observation listing (it would be observed and mislabelled as non-active). A test was added (TestR3_TenantReactivatedDuringTheSweepIsNotObservedAsNonActive, using a hook on the MOCK sportsbook settlement source) and the mutant is now KILLED in the second batch.
+- M13 was NOT-APPLIED in the first batch (its pattern also matched the ordinary sweep loop); the pattern was made unique and it is KILLED in the second batch.
+- No survivor remains. No mutant was classified equivalent.
+- Disclosed limits: the mutants cover the new selection, flagging, de-duplication, isolation and entry-point logic and the static pins. They do not mutate the pre-existing payment_statement matcher (covered by the round-2 evidence prh2-r2-psp-prereq-mutation-kill.txt). A mutant that makes the observation call a provider adapter is not expressible (the package cannot import one); that is exactly what S2 pins statically.
+
+--- raw log (batch 1, then batch 2) ---
+CONTROL | PASS (unmutated)
+M1-predicate-drops-suspended | KILLED | --- FAIL: TestR3_ParkedDepositCapture_StandingFindingForNonActiveTenants | internal/reconciliation/scheduler.go
+M1-predicate-drops-suspended restored: cmp identical
+M2-predicate-drops-closed | KILLED | --- FAIL: TestR3_ParkedDepositCapture_StandingFindingForNonActiveTenants | internal/reconciliation/scheduler.go
+M2-predicate-drops-closed restored: cmp identical
+M3-predicate-TRUE | SURVIVED (batch 1; killed in batch 2 below) | - | internal/reconciliation/scheduler.go
+M3-predicate-TRUE restored: cmp identical
+M4-no-already-swept-skip | KILLED | --- FAIL: TestR3_TenantStatusChangesBetweenAndDuringRuns | internal/reconciliation/scheduler.go
+M4-no-already-swept-skip restored: cmp identical
+M5-options-flag-dropped | KILLED | --- FAIL: TestR3_ParkedDepositCapture_StandingFindingForNonActiveTenants | internal/reconciliation/scheduler.go
+M5-options-flag-dropped restored: cmp identical
+M6-audit-flag-false | KILLED | --- FAIL: TestR3_ParkedDepositCapture_StandingFindingForNonActiveTenants | internal/reconciliation/scheduler.go
+M6-audit-flag-false restored: cmp identical
+M7-audit-status-blank | KILLED | --- FAIL: TestR3_ParkedDepositCapture_StandingFindingForNonActiveTenants | internal/reconciliation/scheduler.go
+M7-audit-status-blank restored: cmp identical
+M8-outcome-observation-false | KILLED | --- FAIL: TestR3_ParkedDepositCapture_StandingFindingForNonActiveTenants | internal/reconciliation/scheduler.go
+M8-outcome-observation-false restored: cmp identical
+M9-outcome-status-blank | KILLED | --- FAIL: TestR3_ParkedDepositCapture_StandingFindingForNonActiveTenants | internal/reconciliation/scheduler.go
+M9-outcome-status-blank restored: cmp identical
+M10-scoped-ignores-names | KILLED | --- FAIL: TestR3_UnscopedAndScopedSelection | internal/reconciliation/scheduler.go
+M10-scoped-ignores-names restored: cmp identical
+M11-runsweep-no-observation | KILLED | --- FAIL: TestR3_UnscopedAndScopedSelection | internal/reconciliation/scheduler.go
+M11-runsweep-no-observation restored: cmp identical
+M12-runsweeptenants-no-observation | KILLED | --- FAIL: TestR3_ParkedDepositCapture_StandingFindingForNonActiveTenants | internal/reconciliation/scheduler.go
+M12-runsweeptenants-no-observation restored: cmp identical
+M13-loop-aborts-on-first-error | NOT-APPLIED in batch 1 (pattern count 2; unique pattern in batch 2 below)
+M14-ordinary-sweep-includes-nonactive | KILLED | --- FAIL: TestR3_ParkedDepositCapture_StandingFindingForNonActiveTenants | internal/reconciliation/scheduler.go
+M14-ordinary-sweep-includes-nonactive restored: cmp identical
+M15-failure-audit-no-flag | KILLED | --- FAIL: TestR3_FailureOfOneTenantDoesNotStopOthers | internal/reconciliation/scheduler.go
+M15-failure-audit-no-flag restored: cmp identical
+M16-run-audit-no-flag | KILLED | --- FAIL: TestR3_ParkedDepositCapture_StandingFindingForNonActiveTenants | internal/reconciliation/scheduler.go
+M16-run-audit-no-flag restored: cmp identical
+M17-no-source-guard-removed | KILLED | --- FAIL: TestR3_NoSource_NonActiveTenantIsNotSwept | internal/reconciliation/scheduler.go
+M17-no-source-guard-removed restored: cmp identical
+S1-observe-calls-full-sweep | KILLED | --- FAIL: TestR3_Static_ObservationEntryPointCallsOnlyThePaymentStatementStream | internal/reconciliation/scheduler.go
+S1-observe-calls-full-sweep restored: cmp identical
+S2-imports-withdrawal | KILLED | --- FAIL: TestR3_Static_ReconciliationImportsNoProviderOrMoneyMovingPackage | internal/reconciliation/zz_mut.go (new file, removed)
+S3-uses-ledger-post | KILLED | --- FAIL: TestR3_Static_LedgerUsedReadOnly | internal/reconciliation/zz_mut.go (new file, removed)
+S4-writes-ledger-table | KILLED | --- FAIL: TestR3_Static_OnlyOwnStoresAreWritten | internal/reconciliation/zz_mut.go (new file, removed)
+S5-updates-attempts | KILLED | --- FAIL: TestR3_Static_OnlyOwnStoresAreWritten | internal/reconciliation/zz_mut.go (new file, removed)
+--- batch 2 (after adding TestR3_TenantReactivatedDuringTheSweepIsNotObservedAsNonActive and a unique M13 pattern) ---
+CONTROL | PASS (unmutated)
+M3-predicate-TRUE | KILLED | --- FAIL: TestR3_TenantReactivatedDuringTheSweepIsNotObservedAsNonActive | internal/reconciliation/scheduler.go
+M3-predicate-TRUE restored: cmp identical
+M13-loop-aborts-on-first-error | KILLED | --- FAIL: TestR3_FailureOfOneTenantDoesNotStopOthers | internal/reconciliation/scheduler.go
+M13-loop-aborts-on-first-error restored: cmp identical
+
+Process note: a first attempt at batch 1 was aborted after M1 because mutant M2 exposed a defect in TestR3_Concurrency_TwoSchedulerInstances (a failing assertion before the lock holder was released left the holder, and with it the pool cleanup, blocked). The test now releases the holder idempotently and via defer; the aborted run's file was restored with git checkout and verified clean before the rerun, and an aborted scratch test database may have been left behind (see the report).

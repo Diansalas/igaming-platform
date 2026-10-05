@@ -786,6 +786,47 @@ func TestR3_UnscopedAndScopedSelection(t *testing.T) {
 	}
 }
 
+// r3ReactivatingSettlementSource is the MOCK sportsbook settlement source plus a
+// hook that runs while the ordinary (active) sweep processes a tenant.
+type r3ReactivatingSettlementSource struct {
+	sportsbook.MockSettlementStatementSource
+	hook func()
+}
+
+func (s r3ReactivatingSettlementSource) StatementLines(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID) ([]statement.SportsbookSettlementLine, error) {
+	if s.hook != nil {
+		s.hook()
+	}
+	return s.MockSettlementStatementSource.StatementLines(ctx, tx, tenantID)
+}
+
+// R3-12: a tenant that was NOT active when the ordinary sweep listed its tenants
+// and was reactivated before the observation listing is not observed as a
+// "non-active" tenant (it is picked up as an ordinary active tenant next tick):
+// the observation never mislabels an active tenant.
+func TestR3_TenantReactivatedDuringTheSweepIsNotObservedAsNonActive(t *testing.T) {
+	x := newK3World(t, k3Opts{base: 1})
+	y := newK3WorldOn(t, x.pool, k3Opts{base: 1})
+	y.setTenantStatus("closed")
+	src := newR3Source(y.provider)
+	var once sync.Once
+	sb := r3ReactivatingSettlementSource{hook: func() { once.Do(func() { y.setTenantStatus("active") }) }}
+	now := time.Now()
+	outs, err := reconciliation.RunSweepTenants(context.Background(), x.pool, nil, []uuid.UUID{x.f.tenantID, y.f.tenantID},
+		now.Add(-time.Hour), now, sb, casino.MockStatementSource{}, src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, o := range outs {
+		if o.TenantID == y.f.tenantID {
+			t.Fatalf("a tenant reactivated during the sweep was observed as non-active: %+v", o)
+		}
+	}
+	if n := y.countRows(`SELECT count(*) FROM reconciliation_runs WHERE tenant_id = $1`, y.f.tenantID); n != 0 {
+		t.Fatalf("%d run(s) recorded for the reactivated tenant in this tick", n)
+	}
+}
+
 // R3-10: no source registered means nothing to observe; a non-active tenant is
 // then not swept at all (the pre-existing behaviour for the other streams is
 // unchanged).
