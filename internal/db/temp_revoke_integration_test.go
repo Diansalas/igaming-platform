@@ -134,6 +134,9 @@ func TestTempRevoke_RuntimeRoleCannotCreateAnyTempObject_AllForms(t *testing.T) 
 		"direct": func(s string) string { return s },
 		"do":     func(s string) string { return "DO $do$ BEGIN EXECUTE $q$" + s + "$q$; END $do$" },
 	}
+	if !strings.HasPrefix(wrap["do"]("SELECT 1"), "DO ") || wrap["direct"]("SELECT 1") != "SELECT 1" {
+		t.Fatal("the DO-block / direct wrappers are not what they claim to be")
+	}
 	run := func(p *Pool, mode, sqlText string, searchPathFirst bool) error {
 		err := p.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
 			if searchPathFirst {
