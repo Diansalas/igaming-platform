@@ -103,6 +103,20 @@ BEGIN
 END
 $$;
 
+-- PRH-2 R2 (TRIGGER-SEARCH-PATH-1, ADR 0108, migration 0116): the runtime role
+-- must not be able to create TEMP objects. TEMPORARY on the database is granted
+-- to PUBLIC by default and the runtime role inherits it from there, so the
+-- PUBLIC revoke is what matters (a role-only revoke is a no-op). The connecting
+-- master/migration role owns the database, so this works on RDS without
+-- superuser. Repeated by migration 0116, which also asserts the end state.
+-- No role, password or attribute is changed.
+DO $$
+BEGIN
+    EXECUTE format('REVOKE TEMPORARY ON DATABASE %I FROM PUBLIC', current_database());
+    EXECUTE format('REVOKE TEMPORARY ON DATABASE %I FROM igaming_runtime', current_database());
+END
+$$;
+
 GRANT USAGE ON SCHEMA public TO igaming_runtime;
 
 -- Direct grants cover any table/sequence that already exists (relevant on

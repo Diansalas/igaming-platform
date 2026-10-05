@@ -13,8 +13,10 @@
 //
 // It is SEMANTIC, not lexical: each policy expression, exactly as stored in
 // pg_policies, is re-created on a TEMP probe table (LIKE the real table, every
-// NOT NULL dropped) and evaluated under the real worker session, as the runtime
-// role. The probe row is the "defaults and NULLs" row, which is precisely the
+// NOT NULL dropped) and evaluated under the real worker session, by the OWNER
+// pool (the runtime role cannot create TEMP objects since migration 0116, ADR
+// 0108; the equivalence premise is enforced by a tripwire in the test itself).
+// The probe row is the "defaults and NULLs" row, which is precisely the
 // shape a NULL-tenant arm or a USING (true) arm admits. A new migration that
 // adds such an arm without extending the fence therefore fails here. Its known
 // limit (a guard that needs a non-NULL column value is not exercised by the
@@ -26,6 +28,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 	"testing"
@@ -226,6 +229,22 @@ func TestKYCWorkerCatalogueGate_EveryPermissivePolicyIsUnsatisfiableOrFenced_31(
 	}
 	fenced := fenceTables(policies)
 
+	// Premise tripwire (code review C2): the gate evaluates the policies as the
+	// OWNER, which is only equivalent to the runtime role while no policy is
+	// role-specific and no expression depends on the evaluating role. A future
+	// migration breaking that premise must fail HERE, not silently make the gate
+	// blind (FORCE RLS applies the owner to the same policies, but not to a
+	// "TO igaming_runtime" policy or a current_user-dependent expression).
+	roleDep := regexp.MustCompile(`(?i)\b(current_user|session_user|current_role|pg_has_role|has_\w+_privilege)\b`)
+	for _, p := range policies {
+		if strings.Join(p.roles, ",") != "public" {
+			t.Errorf("policy %s.%s is role-specific (roles=%v): the owner-pool probe is no longer equivalent to the runtime role; revisit the gate", p.table, p.name, p.roles)
+		}
+		if roleDep.MatchString(p.qual) || roleDep.MatchString(p.check) {
+			t.Errorf("policy %s.%s depends on the evaluating role (%s / %s): the owner-pool probe is no longer equivalent to the runtime role; revisit the gate", p.table, p.name, p.qual, p.check)
+		}
+	}
+
 	// The nine tables are exactly the fenced set (the security-derived list).
 	var got []string
 	for tbl := range fenced {
@@ -238,7 +257,14 @@ func TestKYCWorkerCatalogueGate_EveryPermissivePolicyIsUnsatisfiableOrFenced_31(
 		t.Fatalf("fenced tables = %v, want exactly %v", got, want)
 	}
 
-	violations, evaluated := gateViolations(t, rt, policies, fenced)
+	// PRH-2 R2 (migration 0116, ADR 0108): the runtime role can no longer create
+	// TEMP objects, so the TEMP probe tables are created and evaluated by the
+	// OWNER pool instead. This is equivalent: every probe policy is created
+	// without a TO clause and FORCE ROW LEVEL SECURITY applies to the owner, no
+	// policy expression in the catalogue depends on the evaluating role, and the
+	// worker identity is carried by the app.platform_service_id GUC alone.
+	probePool := testPool(t)
+	violations, evaluated := gateViolations(t, probePool, policies, fenced)
 	for _, v := range violations {
 		t.Error(v)
 	}
@@ -287,7 +313,7 @@ func TestKYCWorkerCatalogueGate_EveryPermissivePolicyIsUnsatisfiableOrFenced_31(
 	// nine fenced tables' permissive policies ARE satisfiable by the worker
 	// session. If the fence were the only thing standing and the probe were
 	// blind, this would find nothing.
-	unfenced, _ := gateViolations(t, rt, policies, map[string]bool{})
+	unfenced, _ := gateViolations(t, probePool, policies, map[string]bool{})
 	tablesFlagged := map[string]bool{}
 	for _, v := range unfenced {
 		tablesFlagged[strings.SplitN(v, ".", 2)[0]] = true

@@ -33,6 +33,16 @@ func run() error {
 	}
 	command := flag.Arg(0)
 
+	// The `down` guard runs BEFORE any database connection, so it holds even when
+	// the database is unreachable and is testable end to end (main_test.go execs
+	// the built binary).
+	if command == "down" {
+		appEnv, appEnvSet := os.LookupEnv("APP_ENV")
+		if err := checkDownAllowed(appEnv, appEnvSet); err != nil {
+			return err
+		}
+	}
+
 	databaseURL := os.Getenv("DATABASE_URL")
 	if databaseURL == "" {
 		return fmt.Errorf("DATABASE_URL is required")
@@ -104,4 +114,23 @@ func run() error {
 	default:
 		return fmt.Errorf("unknown command %q: expected up, down, status, or verify", command)
 	}
+}
+
+// checkDownAllowed is the deployed-environment guard on `migrate down` (PRH-2
+// R2, security C4; ADR 0108): a down migration can silently undo a security
+// invariant (0116 down re-grants PUBLIC TEMP), so it is runnable only when APP_ENV
+// is explicitly "development" or "staging". It mirrors config.GuardEnvironment's
+// semantics: "production" and an UNSET APP_ENV both count as production, and any
+// other value is refused too (fail closed). The db.MigrateDown library function
+// is deliberately NOT guarded: integration tests call it directly.
+func checkDownAllowed(appEnv string, isSet bool) error {
+	if isSet && (appEnv == "development" || appEnv == "staging") {
+		return nil
+	}
+	shown := appEnv
+	if !isSet {
+		shown = "<unset>"
+	}
+	return fmt.Errorf("migrate: refusing `down` with APP_ENV=%s: down migrations are for development and staging only "+
+		"(set APP_ENV=development explicitly); in production fix forward or restore (docs/runbooks/operational-runbooks.md section 2)", shown)
 }

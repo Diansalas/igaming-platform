@@ -360,7 +360,7 @@ jobs:
           psql "$TEST_ADMIN_DATABASE_URL" -v ON_ERROR_STOP=1 -c "CREATE DATABASE igaming_reversibility OWNER igaming"
           export DATABASE_URL="postgres://igaming:igaming_ci_password@localhost:5432/igaming_reversibility?sslmode=disable"
           go run ./cmd/migrate up
-          go run ./cmd/migrate -steps=4 down
+          APP_ENV=development go run ./cmd/migrate -steps=4 down
           go run ./cmd/migrate up
           go run ./cmd/migrate verify
 
