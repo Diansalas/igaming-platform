@@ -258,7 +258,7 @@ func TestK3_Y07_RevokeVersusExecutionIsSerialisedByTheShareLocks(t *testing.T) {
 	r := w.mustRequest(w.f1, w.m2In(a.ID, ResolutionM2DeclareNotPaid))
 	gid := w.grantIDs[k3GrantKey(w.f2.ID, capability.CapabilityPaymentForceResolveApprove)]
 	var mu sync.Mutex
-	var revokeErr error
+	var revokeErr, suspendErr error
 	hooked := false
 	testHookResolutionAfterShareLocks = func(ctx context.Context, id uuid.UUID) {
 		mu.Lock()
@@ -268,6 +268,13 @@ func TestK3_Y07_RevokeVersusExecutionIsSerialisedByTheShareLocks(t *testing.T) {
 		defer cancel()
 		revokeErr = w.pool.WithPrincipalScope(rctx, w.f.tenantID, w.tenantAdmin.ID, func(ctx context.Context, tx pgx.Tx) error {
 			return capability.RevokeGrant(ctx, tx, w.f.tenantID, gid, "k3-race")
+		})
+		// The approver's STAFF row is share-locked too: a suspension waits as well.
+		sctx, scancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+		defer scancel()
+		suspendErr = w.pool.WithTenant(sctx, w.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+			_, err := tx.Exec(ctx, `UPDATE staff_users SET status = 'suspended' WHERE id = $1`, w.f2.ID)
+			return err
 		})
 	}
 	out, err := w.decide(w.f2, r, ResolutionApprove)
@@ -282,6 +289,9 @@ func TestK3_Y07_RevokeVersusExecutionIsSerialisedByTheShareLocks(t *testing.T) {
 	}
 	if revokeErr == nil {
 		t.Fatal("a revoke completed WHILE the execution held its share locks (the A8 L1 locks are missing)")
+	}
+	if suspendErr == nil {
+		t.Fatal("a staff suspension completed WHILE the execution held its share locks (the staff lock is missing)")
 	}
 	// After the execution commits, the revoke goes through.
 	if err := w.pool.WithPrincipalScope(context.Background(), w.f.tenantID, w.tenantAdmin.ID, func(ctx context.Context, tx pgx.Tx) error {
