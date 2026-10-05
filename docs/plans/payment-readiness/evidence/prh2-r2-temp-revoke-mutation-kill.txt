@@ -67,3 +67,60 @@ CLASSIFICATION
   refused AND player_cash must stay 9700 AND the posting keys are checked; M7c: err == nil is still fatal, and the exact 42501
   code is asserted for every form in TestTempRevoke_RuntimeRoleCannotCreateAnyTempObject_AllForms). Residual: deleting several
   redundant assertions at once would not be caught by tests; that is what review is for.
+
+
+=====================================================================
+FIX BATCH (after security / ledger-finance / code-review): mutants for the code added in the batch
+Same method as above (edit, run the relevant tests against the private DB, restore, byte-compare). N0 is the control.
+=====================================================================
+N0 CONTROL
+tests: [('./internal/db', 0, []), ('./cmd/migrate', 0, []), ('./internal/adjustment', 0, [])]
+VERDICT: SURVIVED
+N1 production gate: drop the TEMP check
+tests: [('./internal/db', 1, ['--- FAIL: TestVerifyRuntimeRoleInProduction_TempPrivilegeFailsClosed'])]
+VERDICT: KILLED
+N2 ConnectingRoleHoldsTemp always reports false
+tests: [('./internal/db', 1, ['--- FAIL: TestTempRevoke_ConnectingRoleHoldsTemp_RuntimeFalse_OwnerTrue'])]
+VERDICT: KILLED
+N3 migrate down guard removed
+tests: [('./cmd/migrate', 1, ['--- FAIL: TestCheckDownAllowed'])]
+VERDICT: KILLED
+N4 migrate down guard allows an unset APP_ENV
+tests: [('./cmd/migrate', 0, [])]
+VERDICT: SURVIVED
+N4b migrate down guard allows production
+tests: [('./cmd/migrate', 1, ['--- FAIL: TestCheckDownAllowed'])]
+VERDICT: KILLED
+N5 catalogue tripwire inverted (shows it evaluates the real roles column)
+tests: [('./internal/db', 1, ['--- FAIL: TestKYCWorkerCatalogueGate_EveryPermissivePolicyIsUnsatisfiableOrFenced_31'])]
+VERDICT: KILLED
+N6 static test: pg_temp_N form dropped from the pattern
+tests: [('./internal/db', 1, ['--- FAIL: TestNoRuntimeTempObjectsInProductionCode'])]
+VERDICT: KILLED
+N6b static test: comments no longer stripped
+tests: [('./internal/db', 1, ['--- FAIL: TestNoRuntimeTempObjectsInProductionCode'])]
+VERDICT: KILLED
+N7 vacuity test: the GRANT TEMPORARY back to PUBLIC removed
+tests: [('./internal/adjustment', 1, ['--- FAIL: TestTempRevoke_K2ShadowAttack_SucceedsWhenTempIsGrantedBack'])]
+VERDICT: KILLED
+N8 defence-in-depth: forged-initiator expectation CG001 -> MA003
+tests: [('./internal/adjustment', 1, ['--- FAIL: TestTempRevoke_K2ShadowAttack_FailsAtTempCreation_NoCompensatingEntry'])]
+VERDICT: KILLED
+N9 staged dir no longer stages (v > 116 -> v > 9999): equivalent until a 0117 exists
+tests: [('./internal/db', 0, [])]
+VERDICT: SURVIVED
+RESTORED and byte-compared OK
+
+CLASSIFICATION (fix batch)
+- N1, N2: the production TEMP gate and its SQL are killed by the unit test and the real-DB test (owner true, runtime false).
+- N3, N4b: the migrate down guard removed / allowing production: killed by TestCheckDownAllowed.
+- N4 SURVIVED - EQUIVALENT: dropping the isSet term leaves an unset APP_ENV as "" which is still not development or staging,
+  so it is refused anyway; isSet only selects the message text.
+- N5: the catalogue tripwire, inverted, fails on the real catalogue (every policy has roles {public}); this shows it reads the
+  real data. Removing the tripwire entirely is not detectable by a test (there is no policy that violates the premise today);
+  that residual is accepted and documented in the test.
+- N6, N6b: widened static pattern and comment stripping are pinned by the self-check cases.
+- N7: the in-repo non-vacuity test dies if the TEMP grant-back is removed (the forgery then cannot be set up). N8: the real codes
+  are asserted.
+- N9 SURVIVED - EQUIVALENT until a migration 0117 exists: the staged-dir filter only differs once later migrations land
+  (that is exactly what it protects against); the copied-file-count check guards the staging itself.
