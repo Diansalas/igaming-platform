@@ -287,12 +287,17 @@ func TestValidateRecipientRef_Table(t *testing.T) {
 // The test channel is importable from tests only (design section 6).
 func TestStatic_AlertingtestImportedOnlyByTests(t *testing.T) {
 	root := staticRepoRoot(t)
-	needle := regexp.MustCompile(`"github.com/Diansalas/igaming-platform/internal/alerting/alertingtest"`)
+	// alertworld is the integration fixture (a scratch database plus a
+	// runtime-role pool) moved out of alertingtest into the allow-listed
+	// internal/testsupport tree (A-14b, ADR 0099 section 9); it is held to the
+	// same tests-only rule.
+	needle := regexp.MustCompile(`"github.com/Diansalas/igaming-platform/internal/(alerting/alertingtest|testsupport/alertworld)"`)
 	var offenders []string
 	staticWalkNonTestGoFiles(t, root, func(path string, src []byte) {
 		rel, _ := filepath.Rel(root, path)
-		if strings.HasPrefix(rel, filepath.Join("internal", "alerting", "alertingtest")+string(filepath.Separator)) {
-			return // the package itself
+		if strings.HasPrefix(rel, filepath.Join("internal", "alerting", "alertingtest")+string(filepath.Separator)) ||
+			strings.HasPrefix(rel, filepath.Join("internal", "testsupport", "alertworld")+string(filepath.Separator)) {
+			return // the packages themselves
 		}
 		if needle.Match(src) {
 			offenders = append(offenders, rel)
@@ -324,6 +329,11 @@ func TestStatic_NoMigrationOrProductionCodeSeedsARoute(t *testing.T) {
 	staticWalkNonTestGoFiles(t, root, func(path string, src []byte) {
 		rel, _ := filepath.Rel(root, path)
 		if strings.HasPrefix(rel, filepath.Join("internal", "alerting", "alertingtest")) {
+			return
+		}
+		// The test-only fixture seeds routes for scratch databases; this exact
+		// file only (it is import-restricted to tests by the guard above).
+		if rel == filepath.Join("internal", "testsupport", "alertworld", "world.go") {
 			return
 		}
 		if ins.Match(src) && rel != filepath.Join("internal", "httpserver", "alert_routing_handlers.go") {
