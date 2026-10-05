@@ -44,6 +44,14 @@ func NewWorld(t *testing.T, prefix string) *World {
 		t.Skip("TEST_RUNTIME_DATABASE_URL not set; skipping runtime-role integration test")
 	}
 	ownerURL := scratchdb.New(t, prefix)
+	// Cleanup order matters (LIFO): this is registered right after the scratch
+	// database, so it runs AFTER the pools below are closed and BEFORE the drop.
+	// pool.Close returns before the server has reaped the backends, and the
+	// drop's WITH (FORCE) cannot terminate the runtime role's sessions
+	// ("permission denied to terminate process"), which used to leak the
+	// scratch database. Wait (bounded) until the database has no sessions left.
+	// No privilege is changed.
+	t.Cleanup(func() { waitNoSessions(t, ownerURL) })
 	rtu, err := url.Parse(rtBase)
 	if err != nil {
 		t.Fatalf("parse TEST_RUNTIME_DATABASE_URL: %v", err)
@@ -204,4 +212,33 @@ func (w *World) Events(admin, alertID uuid.UUID) []string {
 		w.T.Fatalf("events: %v", err)
 	}
 	return out
+}
+
+// waitNoSessions polls pg_stat_activity (through the CREATEDB-only test admin
+// connection the scratch helper already uses) until the scratch database has no
+// remaining sessions, for at most ten seconds.
+func waitNoSessions(t *testing.T, ownerURL string) {
+	adminURL := os.Getenv("TEST_ADMIN_DATABASE_URL")
+	if adminURL == "" {
+		return
+	}
+	ou, err := url.Parse(ownerURL)
+	if err != nil {
+		return
+	}
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, adminURL)
+	if err != nil {
+		return
+	}
+	defer func() { _ = conn.Close(ctx) }()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		var n int
+		if err := conn.QueryRow(ctx, `SELECT count(*) FROM pg_stat_activity WHERE datname = $1`, ou.Path[1:]).Scan(&n); err != nil || n == 0 {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Logf("scratch database %s still has sessions after 10s", ou.Path[1:])
 }

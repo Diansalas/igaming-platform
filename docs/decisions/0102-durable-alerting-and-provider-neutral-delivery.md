@@ -1775,7 +1775,7 @@ and this section does not claim otherwise.
 | Metrics `alert_unrouted_total{severity,reason}`, `alert_delivery_attempts_total{channel_kind,result,error_class,notification}` | IMPLEMENTED |
 | `alertingtest.RecordingChannel` (mutex-safe, scripted outcomes, hang-until-ctx, panic on demand, duplicate counter, dedupe on `DedupKey`), importable from tests only (static test), and the slim conformance suite (dedupe, ctx cancellation, classification, no secrets in logs, recipient never dialled) run against it and `LogSink` | MOCK (a test double, never wired in any binary) |
 | HTTP, platform scope only, three layers each pinned: `POST/GET /v1/admin/alerting/routes` (`alert:route_manage`), `GET /v1/admin/alerting/status` and `GET /v1/admin/alerts` (`alert:manage`); ack takes an optional `reason_code`. New permission `alert:route_manage` (RolePlatformAdmin only, separate from `alert:manage`, mirrored in `backoffice/src/auth/permissions.ts`) | IMPLEMENTED |
-| Audit: every successful route write, every refused attempt (403/404/409/400, written in the CALLER'S OWN scope, K1 denied-audit pattern) and the existing ack/resolve refusals. `recipient_ref` is never audited (only `recipient_ref_present`); the value lives only in `alert_routes` | IMPLEMENTED |
+| Audit: every successful route write, every refused attempt (permission, scope, body validation, 404 and 409, written in the CALLER'S OWN scope, K1 denied-audit pattern) and the existing ack/resolve refusals. One exception, by design: a malformed alert id on ack/resolve from an authorized platform caller is a plain 400 with no audit row. `recipient_ref` is never audited (only `recipient_ref_present`); the value lives only in `alert_routes` | IMPLEMENTED |
 | Production refusal (security M-3): `AlertRoutingProduction` (from `GuardEnvironment()`) refuses enabling a p1/p2 route on a channel that does not notify a person | IMPLEMENTED |
 | Post-commit test: a failing, hanging or panicking channel cannot change a committed deposit posting; SUM(debits) = SUM(credits) unchanged | IMPLEMENTED (test) |
 | Any real channel adapter, any recipient, any vendor, any secret | **NOT IMPLEMENTED / PROVIDER DEPENDENT / BLOCKED on HD-PRH2-4-OPS** |
@@ -1876,7 +1876,7 @@ These are recorded, not built, and travel with four-eyes:
 - The route audit carries `recipient_changed` (a boolean, never either value), so a recipient-only redirection is
   visible (security F5).
 - Display fails closed for unknown kinds: `delivered` and `notified_a_person` require the kind to be in
-  `alerting.KnownHumanChannelKinds` (empty today); any other `sent` reads `recorded_non_human`.
+  `alerting.KnownHumanChannelKind` (an unexported, empty-today list; a test pins it to the DB kind vocabulary and to the Go and DB human checks); any other `sent` reads `recorded_non_human`.
 
 Residuals: the DB layer checks platform scope, not `alert:route_manage` (security L-5; acceptable while
 `platform_admin` is the only platform role); a `dead` delivery is terminal and is not re-delivered after a channel

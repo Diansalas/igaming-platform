@@ -141,3 +141,35 @@ MUTANTS:
 
 RESTORE CHECK (cmp of every mutated file, copy vs worktree): IDENTICAL
 SUMMARY: 45 mutants, 45 killed, 0 survived, 0 invalid (M40 and M43 first failed to compile; their anchors were rewritten and re-run on a fresh copy, restore cmp IDENTICAL)
+
+======================================================================
+FINAL SMALL BATCH (security delta findings 1, 2, 4)
+CONTROL RUN (unmutated copy; every targeted test group must PASS):
+  control ./internal/alerting/ -run 'TestLoop_ReadinessEvaluationPanic': PASS (4s)
+  control ./internal/alerting/ -run 'TestLoop_ShutdownWaits': PASS (1s)
+  control ./internal/alerting/ -run 'TestLoop_ReadinessEvaluationIsTimeBounded': PASS (1s)
+  control ./internal/alerting/ -run 'TestLoop_ReadinessDoesNotFlap': PASS (2s)
+  control ./internal/alerting/ -run 'TestLoop_ReadinessEvaluationError': PASS (1s)
+  control ./internal/alerting/ -run 'TestReadinessTracker_OlderEvaluation': PASS (1s)
+  control ./internal/alerting/ -run 'TestHumanKindSources|TestDeliveryState': PASS (9s)
+  control ./internal/alerting/ -run 'TestHumanKindSources|TestHumanNotification': PASS (5s)
+
+MUTANTS:
+  M00 [KILLED] X5 readiness evaluation panic recovery removed
+  M01 [KILLED] X6 shutdown wait for the readiness goroutine removed
+        killed by: --- FAIL: TestLoop_ShutdownWaitsForTheReadinessGoroutine (0.03s)
+  M02 [KILLED] X7 readiness evaluation time bound removed
+        killed by: --- FAIL: TestLoop_ReadinessEvaluationIsTimeBounded (2.00s)
+  M03 [KILLED] M35 readiness ticker not started (must now fail FAST, not by the go test timeout)
+        killed by: --- FAIL: TestLoop_ReadinessDoesNotFlapWhileADeliveryPassIsSlow (2.00s)
+  M04 [KILLED] readiness error logged with its text
+        killed by: --- FAIL: TestLoop_ReadinessEvaluationErrorIsLoggedByTypeOnly (0.04s)
+  M05 [KILLED] finding 1: older evaluation may overwrite a newer snapshot
+        killed by: --- FAIL: TestReadinessTracker_OlderEvaluationCannotOverwriteANewerOne (0.00s)
+  M06 [KILLED] finding 2: display allow-list gains a kind the DB vocabulary lacks
+        killed by: --- FAIL: TestHumanKindSources_AgreeWithTheDatabaseVocabulary (4.07s); --- FAIL: TestDeliveryState_UnknownKindsNeverReadAsDelivered (0.00s); --- FAIL: TestDeliveryState_NonHumanSentIsNeverDelivered (0.00s)
+  M07 [KILLED] finding 2: Go human check disagrees with the DB function (mock = human)
+        killed by: --- FAIL: TestHumanKindSources_AgreeWithTheDatabaseVocabulary (3.68s); --- FAIL: TestHumanNotification_LogAndMockAreFalse (0.00s)
+
+RESTORE CHECK (cmp of every mutated file, copy vs worktree): IDENTICAL
+SUMMARY: 8 mutants, 8 killed, 0 survived, 0 invalid

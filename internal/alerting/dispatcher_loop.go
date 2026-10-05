@@ -145,7 +145,7 @@ type readinessEvaluator interface {
 }
 
 // readinessEvalTimeout bounds one readiness evaluation (a single short read).
-const readinessEvalTimeout = 10 * time.Second
+var readinessEvalTimeout = 10 * time.Second
 
 func runReadinessLoop(ctx context.Context, ev readinessEvaluator, interval time.Duration, logger *slog.Logger) {
 	eval := func() {

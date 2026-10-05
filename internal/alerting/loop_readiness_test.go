@@ -58,7 +58,14 @@ func TestLoop_ReadinessDoesNotFlapWhileADeliveryPassIsSlow(t *testing.T) {
 		})
 	}()
 	<-r.started
-	<-r.evaluated
+	select {
+	case <-r.evaluated:
+	case <-time.After(2 * time.Second):
+		cancel()
+		close(r.release)
+		<-done
+		t.Fatal("readiness was never evaluated while the delivery pass was running: the readiness ticker is not running")
+	}
 	deadline := time.Now().Add(5 * staleAfter) // the pass stays blocked well past the window
 	samples := 0
 	for time.Now().Before(deadline) {
@@ -119,8 +126,8 @@ func TestDeliveryState_UnknownKindsNeverReadAsDelivered(t *testing.T) {
 			t.Errorf("DeliveryState(sent,%q) = delivered with no known human kind", k)
 		}
 	}
-	KnownHumanChannelKinds["pager_test_only"] = true
-	defer delete(KnownHumanChannelKinds, "pager_test_only")
+	knownHumanChannelKinds["pager_test_only"] = true
+	defer delete(knownHumanChannelKinds, "pager_test_only")
 	if DeliveryState("sent", "pager_test_only") != DeliveryStateDelivered {
 		t.Fatal("a kind explicitly registered as human must read as delivered")
 	}

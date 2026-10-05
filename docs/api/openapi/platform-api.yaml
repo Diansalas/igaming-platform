@@ -5455,8 +5455,10 @@ paths:
       description: >
         Requires `alert:manage` and a platform-scope token. The body is optional;
         `reason_code` (lowercase token, at most 64 characters) is recorded in the audit
-        metadata only. Every refusal is audited in the caller's own scope; the audit
-        target is the parsed alert id or the marker `invalid_id`, never the raw path.
+        metadata only. Permission, scope, body-validation (reason_code) and state
+        (404/409) refusals are audited in the caller's own scope; the audit target is the
+        parsed alert id or the marker `invalid_id`, never the raw path. A malformed alert
+        id from an authorized platform caller is rejected with 400 and writes no audit row.
       security:
         - bearerAuth: []
       parameters:

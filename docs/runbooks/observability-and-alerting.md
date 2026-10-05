@@ -522,7 +522,8 @@ Routes are authored through the audited platform-admin API (permission
   derived delivery state (`pending`, `retrying`, `unrouted` + reason,
   `delivery_failed`, `suppressed`, `recorded_non_human`; `delivered` is reserved for a human
   channel and cannot occur today).
-- Every successful write and every refused attempt writes an audit row
+- Every successful write and every refused attempt (except a malformed alert id on
+  ack/resolve from an authorized caller, a plain 400) writes an audit row
   (actor, IP, request id, reason code, before/after route ids). The
   recipient value is never audited.
 

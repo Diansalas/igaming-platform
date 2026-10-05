@@ -120,7 +120,7 @@ func scanAlertRoute(row pgx.Row) (alertRouteDTO, error) {
 	var d alertRouteDTO
 	err := row.Scan(&d.ID, &d.Severity, &d.EscalationStep, &d.ChannelKind, &d.RecipientRef,
 		&d.EscalateAfterSeconds, &d.Enabled, &d.ReasonCode, &d.EffectiveFrom, &d.SupersededAt, &d.SupersededBy, &d.CreatedAt)
-	d.HumanNotification = alerting.KnownHumanChannelKinds[alerting.ChannelKind(d.ChannelKind)]
+	d.HumanNotification = alerting.KnownHumanChannelKind(alerting.ChannelKind(d.ChannelKind))
 	return d, err
 }
 

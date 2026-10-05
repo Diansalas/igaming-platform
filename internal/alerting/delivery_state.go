@@ -13,12 +13,17 @@ const (
 	DeliveryStateSuppressed       = "suppressed"
 )
 
-// KnownHumanChannelKinds lists the channel kinds KNOWN to notify a person.
+// knownHumanChannelKinds lists the channel kinds KNOWN to notify a person.
 // It is empty: no human-notification channel is implemented. Display (the
 // derived delivery state and `human_notification`/`notified_a_person`) follows
 // THIS list, so an unknown or unclassified kind can never read as "delivered".
 // A real kind adds itself here together with its adapter and four-eyes.
-var KnownHumanChannelKinds = map[ChannelKind]bool{}
+var knownHumanChannelKinds = map[ChannelKind]bool{}
+
+// KnownHumanChannelKind reports whether k is KNOWN to notify a person (display
+// only; enforcement uses the fail-closed ChannelKindIsHumanNotification and the
+// database function). Unexported state, so no other package can widen it.
+func KnownHumanChannelKind(k ChannelKind) bool { return knownHumanChannelKinds[k] }
 
 // ChannelKindIsHumanNotification mirrors the database function
 // alerting_channel_kind_is_human_notification: fail-closed, only log and mock
@@ -46,7 +51,7 @@ func DeliveryState(latestEvent string, channelKind ChannelKind) string {
 	case "failed":
 		return DeliveryStateRetrying
 	case "sent":
-		if KnownHumanChannelKinds[channelKind] {
+		if knownHumanChannelKinds[channelKind] {
 			return DeliveryStateDelivered
 		}
 		return DeliveryStateRecordedNonHuman

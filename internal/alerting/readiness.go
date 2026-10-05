@@ -228,6 +228,12 @@ func (t *readinessTracker) update(logger interface {
 }, now time.Time, res []SeverityReadiness) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	// RunOnce and the readiness ticker can evaluate concurrently; a slower,
+	// older evaluation must never overwrite a newer one (its `now` is taken
+	// BEFORE the read). Equal timestamps may overwrite.
+	if t.snap.Evaluated && now.Before(t.snap.EvaluatedAt) {
+		return
+	}
 	first := !t.snap.Evaluated
 	if t.prevReady == nil {
 		t.prevReady = map[Severity]bool{}
