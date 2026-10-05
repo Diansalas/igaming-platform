@@ -6557,10 +6557,8 @@ of the match. One tenant, its own rows only (FORCE RLS, `tenant_id = $1` on ever
 
 ### 35.4 Not implemented / residuals
 
-- **Standing coverage for unbound parks: NOT IMPLEMENTED.** After the statement period that carried
-  the merchant-resolved line passes, the finding drops out; only the `payment.attempt_disputed` audit
-  row remains. The ruling's route is persisted-line evidence (`payment_statement_lines` of earlier
-  imports), the same approach as ruling 5(c)(d). Registered as PAY-RECON-PARKED-CAPTURE-STANDING-1.
+- **Standing coverage for unbound parks: IMPLEMENTED against MOCK (PRH-2 K3, ADR 0101 §9.2 S1/S2, migration 0115).** Scope: every `disputed` deposit attempt that the D2F-1 runtime rule treats as unbound: `invalid_provider_reference*`, a phase C `provider_reference_conflict` park with no reference, and the reference-less bound-reason parks. Raising: `pay_captured_unposted` is raised on every run, unwindowed, keyed by (attempt, evidencing line reference), while ANY persisted import of the tenant and provider has a `succeeded` deposit line resolving to the attempt by merchant reference (or by reference, should the attempt hold one). Clearing: only a `deposit_reversal` line naming that reference in an eligible persisted import, or a `tombstone` ledger row on (provider_id, that reference). Eligible import: `is_mock = false`, or no `is_mock = false` import exists for (tenant, provider). An M1 resolution never clears or suppresses it.
+- **Bound parks (S3):** the bound standing rule also clears on an eligible persisted `deposit_reversal` line naming X, not only one in the current run.
 - **GATE (binding, ledger-finance D2 review B1; not a future consideration).** Neither of the following
   may happen — **the first real PSP adapter enabled for any tenant, or the first non-MOCK payment
   statement source** (whichever comes first) — until **both** hold:
@@ -6596,14 +6594,8 @@ of the match. One tenant, its own rows only (FORCE RLS, `tenant_id = $1` on ever
   only the `payment.attempt_disputed` audit row. This is acceptable only because the parks are
   reachable solely through the MOCK adapter and the MOCK statement source. (Ledger-finance D2 final
   review PM-2.)
-- **Residual (ledger-finance D2 review N1): unbound-park clearing is approximate for conflict parks.**
-  The in-run unbound rule clears on a reversal or tombstone on the **line's** reference (§35.2). For
-  `provider_reference_conflict` that reference is held by **another** attempt (the conflict holder),
-  so a tombstone or reversal on it — which may concern the holder's capture — also clears the in-run
-  finding for the parked attempt: attribution to the parked attempt is approximate. It cannot hide
-  unposted money (a tombstone or reversal on the reference means the PSP itself reversed that capture,
-  and the holder's own posting state is reconciled independently), but it is not per-park evidence.
-  PAY-RECON-PARKED-CAPTURE-STANDING-1 replaces it with clearing against a per-park evidence record.
+- **GATE item 1: SATISFIED against MOCK** once K3 merges. GATE item 2 (a DELIVERED I-wire P1 for every bound, unbound and bound-if-referenced deposit dispute reason, and for `payments.poll_evidence_contradicts_terminal_attempt`) is NOT satisfied (ALERT-DELIVERY-1 open). **The gate therefore stays CLOSED**: no real PSP adapter and no non-MOCK payment statement source for any tenant. (The "Status at D2" paragraph above is the D2 state, superseded by this bullet for item 1.)
+- **Residual N1 (accepted, Q-LF-3): attribution for conflict parks is approximate.** Standing clearing for a conflict park is keyed on the evidencing line's reference, which another attempt (the holder) may hold. A reversal or tombstone on it clears the park's finding even if it concerns the holder's capture. It cannot hide unposted money: the PSP itself reversed that capture, and the holder is reconciled independently. The finding detail records the evidencing import, its `line_no`, `is_mock` and the holder attempt (test C-34b). No per-park evidence kind exists.
 - **F-C4** (`foreignReferenceBinding` over non-tombstone `ledger_transactions`) is `internal/payments`
   and is not part of D2.
 - **MA020 (`player_open_payment_exposure`, migration 0113)** still names only
@@ -6616,17 +6608,7 @@ of the match. One tenant, its own rows only (FORCE RLS, `tenant_id = $1` on ever
   NULL`) refuses a `created -> disputed` move on an attempt that never chose a provider, and building
   a provider-bearing never-sent attempt would need payments internals. Every T15 row that exists does
   carry a provider, so the per-provider stream loads it and the classification applies.
-- **Clearing on the poll's returned reference Y (B3): NOT IMPLEMENTED** (see §35.1).
-  PAY-RECON-POLL-REF-CLEAR-1 needs Y persisted as structured evidence (a schema change), never read
-  from audit JSON.
-  - **Operator rule until then:** a standing `poll_reference_mismatch` finding whose PSP reversal came
-    under the returned reference Y, not the bound reference X, does **not** clear by itself. It needs
-    **manual verification** against the PSP. An M1 resolution only acknowledges it; it never clears or
-    suppresses the finding (ADR 0101 §4, LF-3).
-  - **Deadline (binding):** PAY-RECON-POLL-REF-CLEAR-1 must land before the first real PSP or the
-    first non-MOCK statement source, whichever comes first. It ships together with
-    PAY-RECON-PARKED-CAPTURE-STANDING-1, under one allocated schema change that ledger-finance signs
-    off.
+- **`poll_reference_mismatch` parks (S4, PAY-RECON-POLL-REF-CLEAR-1): IMPLEMENTED against MOCK.** The poll's returned reference Y is persisted as typed evidence (`payment_attempt_reference_evidence`) in the park's own transaction, and only when Y passes `ValidatePaymentReference`. Y is never read from audit JSON. The bound finding clears on an eligible reversal line or a tombstone on X or on Y. Without a Y row (Y was refused at ingress), only X clears, and the operator rule of manual PSP verification still applies.
 - **Runtime rule: a reason classed *bound* is bound only when the attempt holds a reference (D2 code
   final review D2F-1).**
   - **The gap.** The callback T10 that writes `callback_amount_asset_mismatch`
@@ -6639,9 +6621,7 @@ of the match. One tenant, its own rows only (FORCE RLS, `tenant_id = $1` on ever
   - **The same shape predates D2** for `multiple_success_for_intent`: `applyMultipleSuccessDispute`
     (`payments/orchestrator.go`) does not bind either. D2's table is where it is decided.
   - **The rule.** `captureClass` resolves *bound* exactly like *bound-if-referenced*: bound with a stored
-    reference, otherwise unbound. Unbound means in-run only, by merchant reference, cleared on the
-    line's reference (as PM-1 does for the ref-less conflict park). It has no standing finding until
-    PAY-RECON-PARKED-CAPTURE-STANDING-1.
+    reference, otherwise unbound. Unbound means: in-run by merchant reference, and standing across persisted imports (S1), cleared on the line's reference (S2).
   - **Table versus rule.** `disputeReasonClasses` still records what each reason *is*; the runtime
     rule decides by the attempt row.
   - **Pins.** `TestD2_P1_RuntimeRule` checks every payments reason with and without a reference.
@@ -7121,3 +7101,51 @@ ADR 0106 §15. Summary of what changed in §15.2/§15.3 behaviour:
 - The §15.3.3 permanent-503 gap is narrowed as designed, not closed: an unbound vendor-side verification after an
   ambiguous create remains `PROVIDER DEPENDENT`.
 
+## 39. Amendment — PRH-2 K3: governed force-resolution M1/M2, the reserved namespace and the standing kinds (`payments`, 2026-10-04)
+
+Applies ADR 0101 §10 (revision 4, §24 and §26 governing) as implemented. Where this section and an earlier
+section of this ADR differ, this section wins. Migration 0115 is the schema; the Go side is
+`internal/payments/manual_resolution.go`, `internal/providerref`, `internal/reconciliation/payment_statement*.go`
+and `internal/httpserver/payment_force_resolution_routes.go`. All of it is `IMPLEMENTED` against the MOCK
+provider only; real-PSP behaviour is `PROVIDER DEPENDENT`.
+
+### 39.1 §4.8 rows M1 and M2 (replaces the DESIGNED rows)
+
+| M | What | Governance | Status |
+|---|---|---|---|
+| M1 | Evidence-only resolution of a `disputed` DEPOSIT. The attempt stays `disputed`. No posting, no ledger link. It never clears `pay_captured_unposted`; it only annotates the finding as acknowledged (LF-3). | ADR 0101 §3, §6: ADR 0099 grants, four-eyes recounted in the database, beneficiary guard | IMPLEMENTED (MOCK) |
+| M2 | For an `ambiguous` payout, or a `disputed` payout with `provider_reference_mismatch` / `success_for_never_sent_attempt`, whose withdrawal is `submitted`: declare paid (attempt `succeeded`, `withdrawal.Complete` under `platform-operator-declared:<resolution-id>`) or declare not paid (attempt `declined`, `withdrawal.Fail`). `operator` evidence and an executed resolution in the same transaction. Every other reason (including `amount_asset_mismatch` and `callback_amount_asset_mismatch`, PAYOUT-AMOUNT-DISPUTE-1) is refused. "Declare paid" needs a bound provider reference (D-3). | As M1 | IMPLEMENTED (MOCK) |
+
+M3 is unchanged: no non-test caller; the closed-tenant caller is design only (ADR 0107). §4.3 gains the
+transitions **M2p** (`{ambiguous, disputed}` -> `succeeded`, payout, `operator`) and **M2n** (-> `declined`).
+The attempt-state guard admits them only through `payment_m2_admits` with an executing resolution.
+
+### 39.2 The reserved provider-tx namespace (extends §6 / the providerref contract)
+
+`platform-operator-declared:` (27 bytes) is reserved. `providerref.ValidatePaymentReference` (and the
+`Optional` / plural forms) refuse it with `ReasonReservedNamespace` at every ingress: deposit and payout sync
+replies, both deposit-poll binding sites, payout polls, verified callbacks and statement fetch. Refused echoes
+park the attempt (or, at a poll binding site, record `payments.poll_echo_reference_refused` and back off; a
+refused echo is never an error return). The database backs it with CHECK constraints on `payment_attempts`,
+`payment_provider_events`, `payment_statement_lines`, `payment_attempt_reference_evidence`, `deposit_intents` and
+`withdrawal_requests`, and with a ledger trigger that admits the prefix only in the Step B posting of an executing
+`m2_declare_paid`. The Go constant and the SQL literal are pinned equal by test; `left()` is used, never `LIKE`.
+
+### 39.3 §28.9, INV-IO-7, §12 kinds
+
+- §28.9: an M1 resolution never clears or suppresses the finding; it only annotates it as acknowledged.
+- INV-IO-7 exception: M2 "declare not paid", admitted only with `operator` evidence and an executed four-eyes
+  resolution in the same transaction. Its late-success double-payout risk surfaces as T14 and as the standing kind
+  `pay_declared_not_paid_but_paid`.
+- §12 gains `pay_declared_paid_unconfirmed`, `pay_declared_not_paid_but_paid` and
+  `pay_declared_paid_compensated_but_paid`. They are found by the persisted statement-line lookup across imports
+  (ADR 0101 §9, S1-S6), read from the typed resolution table only (system-shape read of executed resolutions),
+  one finding per exposure. A MOCK import may confirm or clear only when no non-MOCK import exists (D-4/RC-3). A confirming line must resolve to the attempt by provider reference, or by merchant reference only when no other attempt of the same kind holds the line's reference, and must match amount and asset (D-5). The Y clearing of `poll_reference_mismatch` parks (bound) reads `payment_attempt_reference_evidence`, written in the same transaction as the park (deferred binding constraint).
+
+### 39.4 Residuals (not closed here)
+
+- Alerts for payout disputes and T14: NOT IMPLEMENTED (PAY-PAYOUT-DISPUTE-ALERT-1 and ALERT-DELIVERY-1 open).
+  Nothing in this amendment delivers anything.
+- The `payment_statement` stream is scheduled with the MOCK payments statement source, so `pay_declared_paid_unconfirmed`, `pay_declared_paid_compensated_but_paid` and S1-S4 run for the MOCK provider. The in-process registry `payments.DefaultStatementSources` is not populated (PAY-K3-STATEMENT-SOURCE-WIRING-1). Every `m2_declare_not_paid` is therefore refused (O-4), so `pay_declared_not_paid_but_paid` cannot arise today. A standing M2 kind exists only for a provider whose statement source is scheduled in the stream. That is a precondition for any real PSP.
+- The `psp_clearing` residual of a declared-paid payout; MA020 stranding; the closed-tenant hold-release path
+  (ADR 0107, design only). Casino/sportsbook MR020 mapping: recorded in ADR 0101's implementation record.

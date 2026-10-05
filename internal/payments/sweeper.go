@@ -47,6 +47,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/alerting"
 	"github.com/Diansalas/igaming-platform/internal/audit"
 	"github.com/Diansalas/igaming-platform/internal/db"
+	"github.com/Diansalas/igaming-platform/internal/providerref"
 )
 
 // Sweeper bounds and defaults (§7.3 RECOMMENDATION values, reduced only
@@ -499,6 +500,17 @@ func (s *Sweeper) applyStatusEvidence(ctx context.Context, tx pgx.Tx, intent Dep
 		boundRef := res.ProviderReference
 		if attempt.ProviderReference != nil && *attempt.ProviderReference != "" {
 			boundRef = *attempt.ProviderReference
+		} else if verr := providerref.ValidatePaymentReference("poll.provider_reference", res.ProviderReference); verr != nil {
+			// PRH-2 K3 (ADR 0101 5.4, LF L-2 / security O-2): the echo of an
+			// unbound attempt is validated before it is bound. A refused echo
+			// (including the reserved operator-declared namespace) is NOT bound:
+			// one audit row, then the normal poll backoff. NEVER an error return
+			// - that would re-drive the item at once (a hot loop and an
+			// audit-volume DoS by a hostile PSP).
+			if err := auditRefusedPollEcho(ctx, tx, attempt, intent, "poll_pending_bind", res.ProviderReference); err != nil {
+				return err
+			}
+			return RescheduleNonTerminal(ctx, tx, attempt.ID, nextPoll)
 		}
 		if err := MarkAccepted(ctx, tx, attempt.ID, EvidenceQueryStatus, boundRef, nextPoll); err != nil {
 			return err
@@ -644,7 +656,15 @@ func (s *Sweeper) applyStatusEvidence(ctx context.Context, tx pgx.Tx, intent Dep
 				}
 			}
 		} else if res.ProviderReference != "" {
-			refPtr = &res.ProviderReference
+			// PRH-2 K3 (ADR 0101 5.4): a refused echo is not adopted - the decline
+			// proceeds with a nil reference and one audit row.
+			if verr := providerref.ValidatePaymentReference("poll.provider_reference", res.ProviderReference); verr != nil {
+				if err := auditRefusedPollEcho(ctx, tx, attempt, intent, "poll_decline_adopt", res.ProviderReference); err != nil {
+					return err
+				}
+			} else {
+				refPtr = &res.ProviderReference
+			}
 		}
 		providerIDStr := ""
 		if attempt.ProviderID != nil {

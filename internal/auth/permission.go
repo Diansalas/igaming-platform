@@ -656,6 +656,20 @@ const (
 	PermLedgerAdjustmentRead     Permission = "ledger_adjustment:read"
 )
 
+// Payment force-resolution permissions (PRH-2 K3, ADR 0101 24.9 / R-9). The
+// STATIC half of the two-layer design, mirroring the ledger_adjustment trio:
+// request and approve go to finance and platform_admin ONLY (never
+// tenant_admin); read adds compliance ("compliance sees, never acts"). The
+// authority is the in-force payment_force_resolve:request / :approve
+// capability GRANT, read in the action's own transaction by migration 0115's
+// triggers - a JWT role is never trusted for it. A platform_admin additionally
+// needs a G-P2 grant for the target tenant to open the acting session at all.
+const (
+	PermPaymentForceResolveRequest Permission = "payment_force_resolve:request"
+	PermPaymentForceResolveApprove Permission = "payment_force_resolve:approve"
+	PermPaymentForceResolveRead    Permission = "payment_force_resolve:read"
+)
+
 // rolePermissions is a static, in-code role -> permission-set mapping.
 // Stage 2 does not make this database-driven/partner-configurable - that
 // would be a Stage 6 partner-console feature (custom roles), premature
@@ -735,6 +749,8 @@ var rolePermissions = map[Role]map[Permission]bool{
 		// PRH-2 K2 (ADR 0100): the static half only; acting in a tenant
 		// additionally needs a G-P2 grant (ADR 0099 §6).
 		PermLedgerAdjustmentInitiate, PermLedgerAdjustmentApprove, PermLedgerAdjustmentRead,
+		// PRH-2 K3 (ADR 0101 24.9): the static half only, as above.
+		PermPaymentForceResolveRequest, PermPaymentForceResolveApprove, PermPaymentForceResolveRead,
 	),
 	// Stage 3D business decision #4/#5: tenant_admin (a broad
 	// administrative role that also holds PermStaffManage) deliberately
@@ -902,6 +918,9 @@ var rolePermissions = map[Role]map[Permission]bool{
 		// PRH-2 K2 (ADR 0100): read-only visibility of governed manual
 		// adjustments - compliance sees, never acts.
 		PermLedgerAdjustmentRead,
+		// PRH-2 K3 (ADR 0101 24.9): read-only visibility of payment
+		// force-resolutions.
+		PermPaymentForceResolveRead,
 	),
 	// finance is Stage 3B's own role, dedicated solely to withdrawal
 	// governance - it holds all four withdrawal permissions and nothing
@@ -928,6 +947,9 @@ var rolePermissions = map[Role]map[Permission]bool{
 		// for both ledger_adjustment capabilities (ADR 0099 §3.3); the
 		// grant itself is still required, in-tx.
 		PermLedgerAdjustmentInitiate, PermLedgerAdjustmentApprove, PermLedgerAdjustmentRead,
+		// PRH-2 K3 (ADR 0101 24.9): the same for the payment_force_resolve
+		// capabilities.
+		PermPaymentForceResolveRequest, PermPaymentForceResolveApprove, PermPaymentForceResolveRead,
 	),
 	// Stage 4G: risk_manager is dedicated solely to Risk & Limits
 	// configuration - it holds both risk_config permissions and nothing

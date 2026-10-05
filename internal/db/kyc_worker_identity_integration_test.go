@@ -189,6 +189,7 @@ var workerReferenceAllowlist = map[string]bool{
 	"ledger_adjustment_reason_codes": true, "platform_operations": true, "platform_products": true,
 	"sb_competitions": true, "sb_events": true, "sb_jurisdiction_restrictions": true, "sb_markets": true,
 	"sb_selections": true, "sb_sports": true, "schema_migrations": true,
+	"payment_manual_resolution_codes": true, // K3 (0115) family-R reference table: closed code vocabulary
 }
 
 // T-ID-1: the worker sees every tenant's outbox rows, claims a due row, and the

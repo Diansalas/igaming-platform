@@ -457,39 +457,72 @@ func newPayWorldOnPool(t *testing.T, pool *db.Pool) *payWorld {
 //     data (ledger-finance ruling §3(i): "the migration refuses to apply
 //     while any intent has more than one succeeded deposit attempt").
 func TestINVDEP1_Recon_M_DuplicateDetector_LegacyDataShape(t *testing.T) {
-	pool := migration0106ReconScratch(t, "invdep1_recon_legacy_")
-	w := newPayWorldOnPool(t, pool)
-	declined, child := w.cascade(t)
-	w.succeed(t, w.mockB, payProvB, child)
+	// PRH-2 K3: the payment_statement stream now reads migration 0115's
+	// persisted-evidence tables, so the detector can no longer run on a database
+	// frozen at 0106. Part 1 therefore runs the detector on a FULLY migrated
+	// scratch database whose two 0107 backstop indexes are dropped by its owner
+	// (the exact "old data or a dropped index must still be caught" case); part
+	// 2 builds the same shape on a database migrated only to 0106, where the
+	// stream is not run, and proves the 0107 pre-flight refuses it.
+	buildLegacyShape := func(t *testing.T, w *payWorld) {
+		t.Helper()
+		declined, child := w.cascade(t)
+		w.succeed(t, w.mockB, payProvB, child)
 
-	w.mockA.Resolve(*declined.ProviderReference, payments.OutcomeSucceeded, "", false)
-	err := w.pool.WithTenant(context.Background(), w.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		provider, ref := payProvA, *declined.ProviderReference
-		res, err := ledger.Post(ctx, tx, ledger.TransactionInput{
-			TenantID: w.f.tenantID, TransactionType: ledger.TxDeposit, IdempotencyKey: provider + ":" + ref,
-			ProviderID: &provider, ProviderTxID: &ref, CorrelationID: *declined.DepositIntentID,
-			Entries: []ledger.EntryInput{
-				{LedgerAccountID: w.f.clearingID, Direction: ledger.Debit, Amount: declined.Amount},
-				{LedgerAccountID: w.f.cashAccountID, Direction: ledger.Credit, Amount: declined.Amount},
-			},
+		w.mockA.Resolve(*declined.ProviderReference, payments.OutcomeSucceeded, "", false)
+		err := w.pool.WithTenant(context.Background(), w.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+			provider, ref := payProvA, *declined.ProviderReference
+			res, err := ledger.Post(ctx, tx, ledger.TransactionInput{
+				TenantID: w.f.tenantID, TransactionType: ledger.TxDeposit, IdempotencyKey: provider + ":" + ref,
+				ProviderID: &provider, ProviderTxID: &ref, CorrelationID: *declined.DepositIntentID,
+				Entries: []ledger.EntryInput{
+					{LedgerAccountID: w.f.clearingID, Direction: ledger.Debit, Amount: declined.Amount},
+					{LedgerAccountID: w.f.cashAccountID, Direction: ledger.Credit, Amount: declined.Amount},
+				},
+			})
+			if err != nil {
+				return err
+			}
+			return payments.ApplySuccess(ctx, tx, declined.ID, payments.SuccessEvidence{
+				Evidence: payments.EvidenceCallback, ProviderReference: ref, LedgerTransactionID: &res.TransactionID,
+			})
 		})
 		if err != nil {
+			t.Fatalf("synthetic legacy-shape second capture: %v", err)
+		}
+	}
+
+	// Part 1: the detector on the legacy shape (fully migrated, 0107 indexes dropped).
+	headURL := scratchdb.New(t, "invdep1_recon_head_")
+	headPool, err := db.Connect(context.Background(), headURL, 10, 5_000_000_000)
+	if err != nil {
+		t.Fatalf("connect scratch: %v", err)
+	}
+	t.Cleanup(headPool.Close)
+	if _, err := headPool.MigrateUp(context.Background(), reconMigrationsDir(t)); err != nil {
+		t.Fatalf("migrate scratch to the latest: %v", err)
+	}
+	if err := headPool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `DROP INDEX payment_attempts_one_succeeded_deposit_per_intent`); err != nil {
 			return err
 		}
-		return payments.ApplySuccess(ctx, tx, declined.ID, payments.SuccessEvidence{
-			Evidence: payments.EvidenceCallback, ProviderReference: ref, LedgerTransactionID: &res.TransactionID,
-		})
-	})
-	if err != nil {
-		t.Fatalf("synthetic legacy-shape second capture: %v", err)
+		_, err := tx.Exec(ctx, `DROP INDEX ledger_transactions_one_deposit_per_intent`)
+		return err
+	}); err != nil {
+		t.Fatalf("drop the 0107 backstop indexes: %v", err)
 	}
-	_, ms := w.run(t, w.srcA, PaymentStatementOptions{})
+	wHead := newPayWorldOnPool(t, headPool)
+	buildLegacyShape(t, wHead)
+	_, ms := wHead.run(t, wHead.srcA, PaymentStatementOptions{})
 	mustOnePay(t, ms, MismatchKindPayDuplicate, "deposit_intent=", "check=duplicate_success")
 
-	// Confirm the 0107 pre-flight refuses THIS exact data: migrate the
-	// SAME database (which still carries the two-succeeded-attempts
-	// legacy shape just proven above) the rest of the way to the latest
-	// on-disk migration (0107).
+	// Part 2: the 0107 pre-flight refuses THIS exact data on a database migrated
+	// only to 0106.
+	pool := migration0106ReconScratch(t, "invdep1_recon_legacy_")
+	w := newPayWorldOnPool(t, pool)
+	buildLegacyShape(t, w)
+	// Migrate the SAME database (which carries the two-succeeded-attempts legacy
+	// shape) the rest of the way to the latest on-disk migration.
 	_, err = pool.MigrateUp(context.Background(), reconMigrationsDir(t))
 	if err == nil {
 		t.Fatal("ledger-finance ruling §3(i): expected migration 0107 to REFUSE to apply while this intent has more than one succeeded deposit attempt, but it succeeded")

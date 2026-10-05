@@ -413,3 +413,109 @@ provider or row labels.
 path and the down migration refuses on any row), or set a verification status to clear a row.
 
 `MOCK` / `PROVIDER DEPENDENT`: all of this is exercised against the MOCK KYC provider only.
+
+## 14. Payment force-resolution M1/M2 (ADR 0101, PRH-2 K3)
+
+Applies to `payment_manual_resolutions` / `_approvals` and the routes under
+`/v1/admin/tenants/{tid}/payment-force-resolutions`. It is the ONLY governed way to move a
+`disputed` or `ambiguous` payment attempt by hand. `IMPLEMENTED` against the MOCK provider;
+behaviour against a real PSP is `PROVIDER DEPENDENT`. A resolution is never a ledger edit: M2
+posts through `withdrawal.Complete` / `withdrawal.Fail` and M1 posts nothing.
+
+**Nothing is enabled until the platform authors a baseline.** Like K2 (§11) there is no seeded policy
+and no seeded grant. With no in-force `payment_force_resolve` policy a request is refused
+`force_resolve_disabled`. The required approvals (the four-eyes number) come from the financial
+policy tables and are recounted by the database at `pending -> executing`. The values are a
+LEGAL / COMPLIANCE decision; nothing in the code invents them.
+
+**Who:** `finance` staff with an in-force `payment_force_resolve:request` / `:approve` grant for the
+tenant, or a `platform_admin` acting under a G-P2 grant for exactly that tenant. `compliance` may read.
+`tenant_admin` has no force-resolution permission. The requester and approver must be different
+Persons; the beneficiary (the player's own Person) can be neither. A route permission is only the
+first gate: a missing or revoked grant is refused by the database.
+
+**Before you request anything (in this order):**
+1. **Re-verify with the provider first (T17).** Run the staff `/resolve` (a status poll) for the
+   attempt and note the outcome. M2 is for the case where the provider cannot or will not answer.
+   Record the hash of your evidence reference (`evidence_ref_hash`, hex SHA-256 of the external
+   reference; never the reference itself and never PII). It is mandatory for M2.
+2. **A statement source must be registered for the provider.** The three standing reconciliation
+   kinds below can only fire if a `payment_statement` stream for that provider is running. The service
+   REFUSES `m2_declare_not_paid` (`force_resolve_precondition_failed`) when no statement source is
+   registered for the provider, because its double-payout risk is detected only by that stream
+   (ADR 0101 §12.3 optional rule, adopted). "Declare paid" is not refused. The registry
+   `payments.DefaultStatementSources` is not populated in the binary (**PAY-K3-STATEMENT-SOURCE-WIRING-1, a
+   REAL-MONEY PRECONDITION**), so every declare-not-paid is refused today. The `payment_statement` stream IS
+   scheduled with the MOCK source, so `pay_declared_paid_unconfirmed`, `pay_declared_paid_compensated_but_paid`
+   and S1-S4 do run for the MOCK provider; for a real provider whose source is not scheduled, treat every M2 as
+   unmonitored and escalate to engineering.
+3. **Check the reason is resolvable.** M2 admits an `ambiguous` payout, or a `disputed` payout with
+   `provider_reference_mismatch` / `success_for_never_sent_attempt`, whose withdrawal is still
+   `submitted`. NOT resolvable by M1/M2 (the request is refused `force_resolve_reason_not_resolvable`):
+   `amount_asset_mismatch`, `callback_amount_asset_mismatch` (PAYOUT-AMOUNT-DISPUTE-1, open),
+   `invalid_provider_reference*`, `late_*`, a tombstone. Those go to engineering and the business
+   owner; do not try to edit rows.
+4. **"Declare paid" needs a provider reference on the attempt.** A reference-less ambiguous payout
+   (a timeout before the provider acknowledged) can only be declared NOT paid, with the out-of-band
+   basis.
+
+**Kinds:**
+- `m1_deposit_evidence`: a `disputed` DEPOSIT. Evidence only. The attempt stays `disputed`, nothing is
+  posted, nothing is linked. Funds leave only via a PSP refund. **M1 never clears
+  `pay_captured_unposted`**, including a standing `poll_reference_mismatch` finding; it only
+  annotates the finding as acknowledged.
+- `m2_declare_paid`: the attempt becomes `succeeded` and the withdrawal `Complete` under the reserved
+  reference `platform-operator-declared:<resolution-id>`. That namespace is refused at every ingress
+  (provider replies, polls, callbacks, statements) and by CHECK constraints; only an executing M2 may
+  write it.
+- `m2_declare_not_paid`: the attempt becomes `declined` and the withdrawal `Fail` (hold released).
+  This is the risky direction: if the provider did pay, the player is credited back AND paid.
+
+**Flow (same shape as K2):** `POST .../payment-force-resolutions` (attempt id, kind, finding code,
+basis / context code, `evidence_ref_hash`, reason code, note), then a different Person approves with
+`POST .../{id}/approve` using the request's payload hash. The approval that reaches the required
+count executes in the same transaction. One reject ends it; only the requester cancels; requests
+expire after 24 hours (copied from K2, a technical default). Error bodies are one of the closed
+tokens `force_resolve_disabled | _not_permitted | _precondition_failed | _reason_not_resolvable |
+_conflict | _expired | _not_found`. Every refusal writes a `payment.manual_resolution_denied` audit
+row. If the attempt moved between request and approval, the approval is refused (state and reason
+are pinned in the payload) and the resolution ends `refused_at_execution` (committed, audited, nothing posted); submit a new one only after re-verifying.
+
+**After an M2: the three standing kinds** (reconciliation `payment_statement`, surfaced like every
+other payment mismatch through `reconciliation.payment_statement_mismatch`):
+- `pay_declared_paid_unconfirmed`: declared paid but no confirming statement line in any eligible persisted
+  import (payout, succeeded, resolved to the attempt by provider reference, or by merchant reference when no
+  other payout holds the line's reference, amount AND asset equal). An import is eligible if it is non-MOCK, or
+  if no non-MOCK import exists for the provider. Chase the provider statement.
+- `pay_declared_not_paid_but_paid`: declared not paid, but a statement shows the provider paid. The
+  player holds the returned funds AND was paid. This is the T14 double-payout risk. Compensate through
+  a K2 manual adjustment (a debit of the player; reason `compensating_entry`). The debit's causation MUST be
+  that resolution's `withdrawal_failed` transaction, otherwise it does not clear the finding.
+- `pay_declared_paid_compensated_but_paid`: a compensation was posted for a declared-paid payout, and
+  the provider's statement later shows it paid after all. Same remedy direction; escalate to finance.
+
+One finding per exposure is kept; it persists until the evidence closes it. **Alerts for payout
+disputes and T14 are NOT IMPLEMENTED** (PAY-PAYOUT-DISPUTE-ALERT-1 and ALERT-DELIVERY-1 are open).
+Nothing pages anyone: staff must read the findings list.
+
+**psp_clearing residual.** An executed declare-paid credits `psp_clearing` by the withdrawn amount at
+execution, without a PSP confirmation. Each open `pay_declared_paid_unconfirmed` finding itemises that credit
+as an explained difference. If the PSP never paid, the amount stays in `psp_clearing` until a
+WITHDRAWAL-REVERSAL-1 posting or a governed correction; it is never netted away. Do not fix it by hand.
+
+**Stranding by MA020.** After a declared-paid M2 the player's cash can be below what an in-flight K2
+compensation expects; MA020 (open payment exposure) is a K2 payload refusal; it never applies to the Step B
+`withdrawal.Complete` posting itself. The only exemption is a K2 `compensating_entry` CREDIT whose causation is the Step B of an executed declare-paid. Any other K2 adjustment of a player with an
+open payment exposure is still refused (`open_payment_exposure_at_execution` is recorded in the audit
+row of every executed adjustment).
+
+**Non-active tenants.** For a CLOSED tenant the approver must be a platform acting principal (the
+closed-tenant actor scope, ADR 0101 R-5); a tenant principal cannot approve. The hold-release
+path for the funds of a closed tenant is OPEN (ADR 0107, design only, NOT IMPLEMENTED). Do not set a
+tenant to `closed` while it has withdrawals in a hold-bearing state.
+
+**The free-text `note` (up to 1000 bytes) is stored in the append-only audit log.** Do not put personal data in it (player names, account numbers, document
+references): use the closed codes (basis, context, finding, reason) and the `evidence_ref_hash`. A personal-data note cannot be erased from an append-only store (PII retention risk).
+
+**Never:** hand-edit `payment_attempts`, `withdrawal_requests` or ledger rows; resend a payout; use a
+`platform-operator-declared:` reference anywhere else; claim a payment was delivered or an alert sent.

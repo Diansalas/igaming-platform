@@ -688,3 +688,15 @@ must still review the latest run's open mismatch rows on every sweep.
   metrics backend capable of reading the JSON log stream and/or the OTel
   stdout trace/metric exporters' eventual real backend - this document
   defines the RULES, not a working pipeline (`PROVIDER DEPENDENT`).
+
+## PRH-2 K3 — what the force-resolution kinds emit (and do not)
+
+The three standing kinds `pay_declared_paid_unconfirmed`, `pay_declared_not_paid_but_paid` and
+`pay_declared_paid_compensated_but_paid` are produced by the `payment_statement` reconciliation stream and surfaced
+through the existing `reconciliation.payment_statement_mismatch` durable alert (ADR 0102) like every other payment
+mismatch. K3 adds NO alert kind and no in-transaction alert raise. **Payout disputes, including T14 (a late success
+after "declare not paid"), have no direct alert** (PAY-PAYOUT-DISPUTE-ALERT-1 open); alert DELIVERY to a human is
+NOT IMPLEMENTED (ALERT-DELIVERY-1 open: every alert is `unrouted`). The force-resolution routes write
+`payment.manual_resolution_*` and `payment.manual_resolution_denied` audit rows; no metric or alert is derived from
+them. The only new metric is `payment_m2_declared_paid_confirmed_total` (no labels). Nothing here claims that anyone
+is paged.

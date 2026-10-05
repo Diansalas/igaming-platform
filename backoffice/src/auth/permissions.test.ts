@@ -71,6 +71,25 @@ describe('getNavPermissions write flags', () => {
  * internal/auth/permission.go's ledger_adjustment:{read,initiate,approve}
  * role sets exactly. UI convenience only.
  */
+describe('getNavPermissions payment force-resolution flags (PRH-2 K3)', () => {
+  const fr = (role: string) => {
+    const p = getNavPermissions(role)
+    return [p.paymentForceResolutions, p.paymentForceResolutionAct]
+  }
+  it('finance and platform_admin may view and act (the grant is still required server-side)', () => {
+    expect(fr('finance')).toEqual([true, true])
+    expect(fr('platform_admin')).toEqual([true, true])
+  })
+  it('compliance views only', () => {
+    expect(fr('compliance')).toEqual([true, false])
+  })
+  it('tenant_admin and every other role neither views nor acts', () => {
+    for (const role of ['tenant_admin', 'support', 'risk_manager', 'promotions_manager', 'bonus_operations', 'player', undefined]) {
+      expect(fr(role as string)).toEqual([false, false])
+    }
+  })
+})
+
 describe('getNavPermissions manual adjustment flags', () => {
   const ma = (role: string) => {
     const p = getNavPermissions(role)

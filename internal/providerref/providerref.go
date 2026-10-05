@@ -56,7 +56,19 @@ const (
 	ReasonTooLong     Reason = "too_long"
 	ReasonInvalidUTF8 Reason = "invalid_utf8"
 	ReasonControlChar Reason = "control_char"
+	// ReasonReservedNamespace is the payments-only refusal of the reserved
+	// provider-tx namespace (ADR 0101 5.4, F14): a reference starting with
+	// ReservedOperatorPrefix can never come from a provider.
+	ReasonReservedNamespace Reason = "reserved_namespace"
 )
+
+// ReservedOperatorPrefix is the provider-tx namespace reserved for an M2
+// "declare paid" Step B posting (ADR 0101 5.4). It is exactly 27 bytes and is
+// pinned equal to migration 0115's payment_reserved_ref_prefix() by a test.
+// Only the payments validators below refuse it: the shared Validate is
+// unchanged, so casino and sportsbook semantics do not change (their
+// postings are covered by the all-sessions ledger trigger instead).
+const ReservedOperatorPrefix = "platform-operator-declared:"
 
 // Error describes one rejected reference. It deliberately does NOT carry
 // the value: only the field name, the reason, the byte length and a short
@@ -102,6 +114,57 @@ func Validate(field, value string) error {
 		return &Error{Field: field, Reason: ReasonEmpty, Length: 0, HashPrefix: Fingerprint(value)}
 	}
 	return check(field, value)
+}
+
+// hasReservedPrefix is the byte-prefix test (never a wildcard match): the
+// Go twin of the database's left(col, 27) = payment_reserved_ref_prefix().
+func hasReservedPrefix(value string) bool {
+	return len(value) >= len(ReservedOperatorPrefix) && value[:len(ReservedOperatorPrefix)] == ReservedOperatorPrefix
+}
+
+func reservedErr(field, value string) error {
+	return &Error{Field: field, Reason: ReasonReservedNamespace, Length: len(value), HashPrefix: Fingerprint(value)}
+}
+
+// ValidatePaymentReference is Validate plus the refusal of the reserved
+// operator-declared prefix (ADR 0101 5.4, F14). Every payments ingress of a
+// provider-supplied reference uses it. It returns the same *Error type, so
+// every caller's existing AsError branch and 4xx mapping applies unchanged.
+func ValidatePaymentReference(field, value string) error {
+	if err := Validate(field, value); err != nil {
+		return err
+	}
+	if hasReservedPrefix(value) {
+		return reservedErr(field, value)
+	}
+	return nil
+}
+
+// ValidatePaymentReferenceOptional is ValidateOptional plus the same refusal.
+func ValidatePaymentReferenceOptional(field, value string) error {
+	if err := ValidateOptional(field, value); err != nil {
+		return err
+	}
+	if hasReservedPrefix(value) {
+		return reservedErr(field, value)
+	}
+	return nil
+}
+
+// ValidatePaymentReferences is ValidateAll plus the reserved-prefix refusal.
+func ValidatePaymentReferences(fields ...Field) error {
+	for _, f := range fields {
+		var err error
+		if f.Required {
+			err = ValidatePaymentReference(f.Name, f.Value)
+		} else {
+			err = ValidatePaymentReferenceOptional(f.Name, f.Value)
+		}
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // ValidateOptional checks an OPTIONAL reference: an empty value means

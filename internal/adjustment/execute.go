@@ -217,6 +217,17 @@ func DecideInTx(ctx context.Context, tx pgx.Tx, call Call, requestID uuid.UUID, 
 		})
 	}
 
+	// PRH-2 K3-S3 (ADR 0101 section 26; security Q-SEC-2 (c)): the open-payment-
+	// exposure fact AT EXECUTION, read in this transaction after Step 6 (the L2
+	// causation lock, when any, is already held). It feeds ONLY the executed
+	// audit row below - it is true exactly when migration 0115's MA020 exemption
+	// (the M2 Step B compensating credit) is what admitted this credit. A read
+	// error aborts the transaction (fail closed); no control flow depends on it.
+	var exposureAtExecution bool
+	if err := tx.QueryRow(ctx, `SELECT player_open_payment_exposure($1, $2)`, req.TenantID, req.PlayerAccountID).Scan(&exposureAtExecution); err != nil {
+		return Outcome{}, fmt.Errorf("adjustment: read open payment exposure at execution: %w", err)
+	}
+
 	// Step 7 - executing, executed_txid = txid_current() (forced by the
 	// guard, which re-verifies the count and the payload rules).
 	if _, err := setState(ctx, tx, requestID, StateExecuting, nil); err != nil {
@@ -287,6 +298,7 @@ func DecideInTx(ctx context.Context, tx pgx.Tx, call Call, requestID uuid.UUID, 
 	return out, recordAudit(ctx, tx, call, "ledger_adjustment.executed", after, &before, map[string]any{
 		"approval_id": approvalID.String(), "counted_approval_ids": uuidStrings(st.CountedIDs),
 		"required_at_execution": st.Required, "contributing_policy_ids_at_execution": uuidStrings(st.Contributing),
+		"open_payment_exposure_at_execution": exposureAtExecution,
 	})
 }
 

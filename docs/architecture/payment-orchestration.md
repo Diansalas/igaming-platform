@@ -399,3 +399,33 @@ the ledger, the balance projection, any Mandatory Financial Invariant, or
 - Reconciliation: `reconciliation-model.md`.
 - Existing orchestration/custody principles this document extends:
   `07-payments-architecture.md`.
+
+## PRH-2 K3 — governed force-resolution M1/M2 and operator evidence (ADR 0101; `IMPLEMENTED` against MOCK)
+
+- **Operator evidence.** `payment_attempts.last_evidence_kind = 'operator'` is a new accepted evidence
+  kind for exactly two payout transitions, `{ambiguous, disputed} -> succeeded` (M2 "declare paid") and
+  `-> declined` (M2 "declare not paid"). The attempt guard admits them only when `payment_m2_admits` finds an
+  `executing` resolution in the same transaction (`executed_txid = txid_current()`), a payout attempt whose
+  withdrawal is still `submitted`, and, for "paid", a bound provider reference. Everywhere else `operator`
+  evidence is refused exactly as before. The deposit side is unchanged: a deposit `disputed` moves nowhere (M1
+  is evidence-only).
+- **Allow-list (closed, literal).** `ambiguous`, or `disputed` with `provider_reference_mismatch` /
+  `success_for_never_sent_attempt`. Every other payout dispute reason is refused (`amount_asset_mismatch` and
+  `callback_amount_asset_mismatch` go to PAYOUT-AMOUNT-DISPUTE-1; `invalid_provider_reference*` keep their hold;
+  tombstone and `late_*` have no path). `payments.PayoutDisputeReasons()` is the single classification table;
+  the static pin `TestK3_C5b_*` fails if a new payout dispute reason is written without being classified, and
+  `TestK3_C47_*` pins Go/SQL parity.
+- **Reserved provider-tx namespace.** `platform-operator-declared:<resolution-id>` is minted only by an executing
+  M2 "declare paid" and posted through `withdrawal.Complete` (Step B). `providerref.ValidatePaymentReference`
+  refuses it at every payments ingress; CHECK constraints and an all-sessions ledger trigger back it.
+- **Service.** `payments.ManualResolutionService` (request / approve / reject / cancel / execute) runs entirely in
+  the database's governance: ADR 0099 grants, the K2 four-eyes pattern recounted at `pending -> executing`, the
+  beneficiary guard, the closed-tenant actor scope, and a pinned factual basis (attempt state and reason are part
+  of the payload hash). It never writes a balance and never touches a PSP SDK type. No PCI surface is added.
+- **Reconciliation.** Three standing kinds (`pay_declared_paid_unconfirmed`, `pay_declared_not_paid_but_paid`,
+  `pay_declared_paid_compensated_but_paid`) and the persisted statement-line lookup (S1-S6) are in
+  `internal/reconciliation/payment_statement*.go`; see `reconciliation-model.md` for the final wording (owned by
+  ledger-finance).
+- **Not done / provider dependent.** Alerts for payout disputes and T14 (PAY-PAYOUT-DISPUTE-ALERT-1,
+  ALERT-DELIVERY-1) are NOT IMPLEMENTED. A real PSP's status/statement behaviour is PROVIDER DEPENDENT. The
+  platform binary does not yet register a payment statement source.

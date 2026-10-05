@@ -1000,7 +1000,7 @@ func (o *Orchestrator) ReceiveVerifiedCallback(ctx context.Context, tx pgx.Tx, t
 	// PROVIDER-REF-BOUND-1: bound every provider-supplied reference before
 	// any domain statement. Kept to this one call at the verified-callback
 	// boundary (the orchestrator is redesigned under ADR 0095).
-	if err := providerref.ValidateAll(
+	if err := providerref.ValidatePaymentReferences(
 		providerref.Field{Name: "provider_reference", Value: event.ProviderReference, Required: true},
 		providerref.Field{Name: "original_provider_reference", Value: event.OriginalProviderReference},
 		providerref.Field{Name: "asset_code", Value: event.AssetCode},

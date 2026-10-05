@@ -5209,3 +5209,28 @@ K2 is "complete" (CLAUDE.md).
   approval time. Grant revoke is the emergency stop. TM-7/TM-10 launch
   flags, HD-PRH2-8 and LEDGER-MANUAL-ADJ-LINK-1 remain open.
 
+
+## PRH-2 K3 — payment force-resolution M1/M2: security-relevant surface (ADR 0101; NOT YET SECURITY-REVIEWED)
+
+`implemented`, awaiting `security` review of the implementation (the design was reviewed at ADR 0101 revision 4;
+the review conditions R-1..R-9, T-1..T-18 are implemented and tested, see the ADR implementation record).
+
+- **S-12 / C-101-1.** The only acting-session write on `payment_attempts` and `withdrawal_requests` is the governed
+  M2 path: the attempt guard requires `payment_m2_admits` (an executing resolution in this txid), a column-
+  discipline trigger limits an `operator` UPDATE to the evidence columns, and the ledger entries fence admits only
+  the two Step B / Fail posting shapes while an M2 is `executing`. A widened acting `ledger_accounts` INSERT admits
+  only the tenant's own `psp_clearing` (and the wallet's own holds), and the policy fires even for
+  `ON CONFLICT DO NOTHING`.
+- **Governance.** ADR 0099 grants (`payment_force_resolve:request|approve`, specific to the capability), K2-style
+  four-eyes recounted by the database, beneficiary exclusion, policy-author exclusion, closed-tenant platform-only
+  approvals, 24 h expiry (technical default). No tenant-supplied tenant id is trusted; a body `tenant_id` is ignored.
+- **Reserved namespace.** `platform-operator-declared:` cannot be written by any provider or statement; it is refused
+  at every ingress, by CHECK constraints (migration up refuses if a row already carries it) and by an
+  all-sessions ledger trigger.
+- **Reads.** The reconciliation session (tenant GUC only) reads EXECUTED resolutions through one policy; pending
+  payloads and approvals are never exposed to it. The typed Y-evidence table accepts inserts only in the park's own
+  transaction (deferred check) and is immutable.
+- **Not covered / residual.** No alert is delivered for payout disputes or T14 (ALERT-DELIVERY-1 open); a real
+  PSP's behaviour is PROVIDER DEPENDENT; casino/sportsbook post failures for a reserved-prefix id surface as a
+  generic 5xx (the ledger trigger refuses the posting; a 4xx mapping is deferred). No PCI scope is added: nothing in
+  K3 reads, stores or transmits card data.
