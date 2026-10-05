@@ -58,3 +58,33 @@ M13-loop-aborts-on-first-error | KILLED | --- FAIL: TestR3_FailureOfOneTenantDoe
 M13-loop-aborts-on-first-error restored: cmp identical
 
 Process note: a first attempt at batch 1 was aborted after M1 because mutant M2 exposed a defect in TestR3_Concurrency_TwoSchedulerInstances (a failing assertion before the lock holder was released left the holder, and with it the pool cleanup, blocked). The test now releases the holder idempotently and via defer; the aborted run's file was restored with git checkout and verified clean before the rerun, and an aborted scratch test database may have been left behind (see the report).
+
+
+=== FIX BATCH (ledger-finance C-1..C-3 and security F-1..F-6 follow-ups) ===
+Same method and private databases. Code under test now also runs ledger_vs_projection for non-active tenants (runLedgerStreamForTenant, shared with the ordinary sweep) and exposes the listing seam (listNonActiveTenants). Selector: -tags integration -count=1 -p 1 -run 'TestR3_|TestSweepTenantSelection' ./internal/payments/ ./internal/reconciliation/ (the Static tests are included).
+Notes: (1) the batch-1 mutants above were run against the pre-C-2 code; mutant M17 (drop the "no sources, no sweep" guard) no longer exists because the guard was removed (the ledger observation runs without sources, pinned by TestR3_NoSource_NonActiveTenantGetsOnlyTheLedgerObservation and killed as L5). The mutants M1-M16 and S1-S5 target code that is unchanged in logic; the full R3 suite passes against the current code. (2) X1 and X2 are the security reviewer's own mutants: X1 (every observation under the first tenant's id) is the same class as L2 and is killed; X2 (listing error swallowed) SURVIVED in security's run and is X2a/X2b here, now KILLED by TestR3_NonActiveListingFailureIsReturnedNotSwallowed. (3) Not mutated, disclosed: the transitive-dependency pin (TestR3_Static_TransitiveDependenciesAreReadOnlyPackages) has no mutant because a forbidden package cannot be reached transitively without also being a direct import in this package today; it is a defence-in-depth guard for a future change. No survivor remains; none classified equivalent.
+
+--- raw log (fix batch) ---
+CONTROL | PASS (unmutated)
+L1-ledger-skipped-for-nonactive | KILLED | --- FAIL: TestR3_ParkedDepositCapture_StandingFindingForNonActiveTenants (5.37s) | internal/reconciliation/scheduler.go
+L1-ledger-skipped-for-nonactive restored: cmp identical
+L2-ledger-wrong-tenant | KILLED | --- FAIL: TestR3_NonActiveTenant_LedgerRunFailureIsIsolatedAndVisible (1.73s) | internal/reconciliation/scheduler.go
+L2-ledger-wrong-tenant restored: cmp identical
+L3-ledger-error-swallowed | KILLED | --- FAIL: TestR3_NonActiveTenant_LedgerRunFailureIsIsolatedAndVisible (2.39s) | internal/reconciliation/scheduler.go
+L3-ledger-error-swallowed restored: cmp identical
+L4-ledger-observation-status-not-passed | KILLED | --- FAIL: TestR3_ParkedDepositCapture_StandingFindingForNonActiveTenants (8.83s) | internal/reconciliation/scheduler.go
+L4-ledger-observation-status-not-passed restored: cmp identical
+L5-ledger-only-when-a-source-exists | KILLED | --- FAIL: TestR3_NoSource_NonActiveTenantGetsOnlyTheLedgerObservation (1.99s) | internal/reconciliation/scheduler.go
+L5-ledger-only-when-a-source-exists restored: cmp identical
+L6-ledger-failure-audit-no-flag | KILLED | --- FAIL: TestR3_NonActiveTenant_LedgerRunFailureIsIsolatedAndVisible (1.63s) | internal/reconciliation/scheduler.go
+L6-ledger-failure-audit-no-flag restored: cmp identical
+L7-ledger-run-audit-no-flag | KILLED | --- FAIL: TestR3_ParkedDepositCapture_StandingFindingForNonActiveTenants (6.44s) | internal/reconciliation/scheduler.go
+L7-ledger-run-audit-no-flag restored: cmp identical
+X2a-scoped-listing-error-swallowed | KILLED | --- FAIL: TestR3_NonActiveListingFailureIsReturnedNotSwallowed (2.21s) | internal/reconciliation/scheduler.go
+X2a-scoped-listing-error-swallowed restored: cmp identical
+X2b-unscoped-listing-error-swallowed | KILLED | --- FAIL: TestR3_NonActiveListingFailureIsReturnedNotSwallowed (1.78s) | internal/reconciliation/scheduler.go
+X2b-unscoped-listing-error-swallowed restored: cmp identical
+X2c-listing-error-drops-active-outcomes | KILLED | --- FAIL: TestR3_NonActiveListingFailureIsReturnedNotSwallowed (2.05s) | internal/reconciliation/scheduler.go
+X2c-listing-error-drops-active-outcomes restored: cmp identical
+S6-aliased-ledger-post | KILLED | --- FAIL: TestR3_Static_LedgerUsedReadOnly (0.01s) | internal/reconciliation/zz_mut.go (new file, removed)
+S7-unlisted-Tx-symbol | KILLED | --- FAIL: TestR3_Static_LedgerUsedReadOnly (0.01s) | internal/reconciliation/zz_mut.go (new file, removed)
