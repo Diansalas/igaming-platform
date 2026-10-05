@@ -73,6 +73,20 @@ END
 $$;
 
 GRANT CONNECT ON DATABASE igaming_platform_dev TO igaming_runtime;
+
+-- PRH-2 R2 (TRIGGER-SEARCH-PATH-1, ADR 0108, migration 0116): the runtime role
+-- must not be able to create TEMP objects. PostgreSQL grants TEMPORARY on every
+-- database to PUBLIC by default and the runtime role inherits it from there, so
+-- revoking from PUBLIC is what matters (a role-only revoke is a no-op). Done
+-- here as well as in migration 0116 so a freshly provisioned database is safe
+-- before any migration runs. The owner keeps TEMPORARY as the database owner.
+-- No role, password or attribute is changed.
+DO $$
+BEGIN
+    EXECUTE format('REVOKE TEMPORARY ON DATABASE %I FROM PUBLIC', current_database());
+    EXECUTE format('REVOKE TEMPORARY ON DATABASE %I FROM igaming_runtime', current_database());
+END
+$$;
 GRANT USAGE ON SCHEMA public TO igaming_runtime;
 
 -- Direct grants cover any table/sequence that already exists (relevant

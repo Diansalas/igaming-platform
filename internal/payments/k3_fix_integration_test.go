@@ -67,7 +67,9 @@ func TestK3_Y01_EveryFunctionPinsSearchPath(t *testing.T) {
 }
 
 // PM-S1: a session-created TEMP table named like a table the trigger reads must NOT
-// shadow it. As the runtime role, with a fake `executing` resolution of this very
+// shadow it. (PRH-2 R2: this probe runs on the scratch OWNER pool, which holds TEMP;
+// the runtime role can no longer create TEMP objects at all - migration 0116, ADR 0108.)
+// With a fake `executing` resolution of this very
 // txid in a TEMP table, a reserved-prefix withdrawal_completed is still MR020.
 func TestK3_Y02_TempTableShadowCannotDefeatTheReservedNamespace(t *testing.T) {
 	w := newK3World(t, k3Opts{base: 1})

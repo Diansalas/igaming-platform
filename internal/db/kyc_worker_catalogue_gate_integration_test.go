@@ -238,7 +238,14 @@ func TestKYCWorkerCatalogueGate_EveryPermissivePolicyIsUnsatisfiableOrFenced_31(
 		t.Fatalf("fenced tables = %v, want exactly %v", got, want)
 	}
 
-	violations, evaluated := gateViolations(t, rt, policies, fenced)
+	// PRH-2 R2 (migration 0116, ADR 0108): the runtime role can no longer create
+	// TEMP objects, so the TEMP probe tables are created and evaluated by the
+	// OWNER pool instead. This is equivalent: every probe policy is created
+	// without a TO clause and FORCE ROW LEVEL SECURITY applies to the owner, no
+	// policy expression in the catalogue depends on the evaluating role, and the
+	// worker identity is carried by the app.platform_service_id GUC alone.
+	probePool := testPool(t)
+	violations, evaluated := gateViolations(t, probePool, policies, fenced)
 	for _, v := range violations {
 		t.Error(v)
 	}
@@ -287,7 +294,7 @@ func TestKYCWorkerCatalogueGate_EveryPermissivePolicyIsUnsatisfiableOrFenced_31(
 	// nine fenced tables' permissive policies ARE satisfiable by the worker
 	// session. If the fence were the only thing standing and the probe were
 	// blind, this would find nothing.
-	unfenced, _ := gateViolations(t, rt, policies, map[string]bool{})
+	unfenced, _ := gateViolations(t, probePool, policies, map[string]bool{})
 	tablesFlagged := map[string]bool{}
 	for _, v := range unfenced {
 		tablesFlagged[strings.SplitN(v, ".", 2)[0]] = true

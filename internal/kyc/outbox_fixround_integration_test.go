@@ -408,9 +408,14 @@ func TestOutboxGuard_SearchPath_TempTenantsTableCannotAlterTheTrigger_L1(t *test
 	r := newRig(t)
 	r.create()
 	claimed := claimOne(t, r.w) // a claimed row of an ACTIVE tenant
-	probeTx(t, r.pool, r.f.tenantID, nil, func(ctx context.Context, tx pgx.Tx) {
+	// PRH-2 R2 (migration 0116, ADR 0108): the runtime role can no longer create
+	// TEMP objects, so this pin check runs on the OWNER pool (r.owner), which
+	// still holds TEMP as the database owner. The shadow semantics being tested
+	// (an unpinned lookup resolves to pg_temp, the pinned guard does not) do not
+	// depend on the role; FORCE ROW LEVEL SECURITY applies to the owner too.
+	probeTx(t, r.owner, r.f.tenantID, nil, func(ctx context.Context, tx pgx.Tx) {
 		if _, err := tx.Exec(ctx, `CREATE TEMP TABLE tenants (id uuid, status text) ON COMMIT DROP`); err != nil {
-			t.Fatalf("temp table (the runtime role holds TEMP): %v", err)
+			t.Fatalf("temp table (the owner role holds TEMP): %v", err)
 		}
 		if _, err := tx.Exec(ctx, `INSERT INTO pg_temp.tenants VALUES ($1, 'suspended')`, r.f.tenantID); err != nil {
 			t.Fatal(err)
