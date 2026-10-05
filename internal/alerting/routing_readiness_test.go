@@ -249,7 +249,7 @@ func TestDeliveryState_NonHumanSentIsNeverDelivered(t *testing.T) {
 		{"failed", ChannelMock, DeliveryStateRetrying},
 		{"sent", ChannelLog, DeliveryStateRecordedNonHuman},
 		{"sent", ChannelMock, DeliveryStateRecordedNonHuman},
-		{"sent", "pager", DeliveryStateDelivered},
+		{"sent", "pager", DeliveryStateRecordedNonHuman}, // unknown kind fails closed
 		{"unrouted", "", DeliveryStateUnrouted},
 		{"dead", ChannelLog, DeliveryStateDeliveryFailed},
 		{"suppressed_simulation", "", DeliveryStateSuppressed},

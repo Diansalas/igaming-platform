@@ -120,7 +120,7 @@ func scanAlertRoute(row pgx.Row) (alertRouteDTO, error) {
 	var d alertRouteDTO
 	err := row.Scan(&d.ID, &d.Severity, &d.EscalationStep, &d.ChannelKind, &d.RecipientRef,
 		&d.EscalateAfterSeconds, &d.Enabled, &d.ReasonCode, &d.EffectiveFrom, &d.SupersededAt, &d.SupersededBy, &d.CreatedAt)
-	d.HumanNotification = alerting.ChannelKindIsHumanNotification(alerting.ChannelKind(d.ChannelKind))
+	d.HumanNotification = alerting.KnownHumanChannelKinds[alerting.ChannelKind(d.ChannelKind)]
 	return d, err
 }
 
@@ -225,13 +225,15 @@ func newCreateAlertRouteHandler(deps Deps) http.HandlerFunc {
 				return err
 			}
 			var before map[string]any
+			var recipientChanged bool
 			if req.SupersedesID != nil {
 				var oldSev string
 				var oldStep int
 				var oldEnabled bool
 				var oldKind string
-				err := tx.QueryRow(ctx, `SELECT severity, escalation_step, enabled, channel_kind FROM alert_routes
-					WHERE id = $1 AND scope = 'platform' AND superseded_at IS NULL FOR UPDATE`, supersedes).Scan(&oldSev, &oldStep, &oldEnabled, &oldKind)
+				var oldRecipient *string
+				err := tx.QueryRow(ctx, `SELECT severity, escalation_step, enabled, channel_kind, recipient_ref FROM alert_routes
+					WHERE id = $1 AND scope = 'platform' AND superseded_at IS NULL FOR UPDATE`, supersedes).Scan(&oldSev, &oldStep, &oldEnabled, &oldKind, &oldRecipient)
 				if errors.Is(err, pgx.ErrNoRows) {
 					return errRouteNotFound
 				}
@@ -242,6 +244,9 @@ func newCreateAlertRouteHandler(deps Deps) http.HandlerFunc {
 					return errRouteSupersedeMatch
 				}
 				before = map[string]any{"route_id": supersedes.String(), "enabled": oldEnabled, "channel_kind": oldKind}
+				// Shows a redirection without recording either value (security F5).
+				recipientChanged = (oldRecipient == nil) != (req.RecipientRef == nil) ||
+					(oldRecipient != nil && req.RecipientRef != nil && *oldRecipient != *req.RecipientRef)
 			} else {
 				var exists bool
 				if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM alert_routes WHERE scope = 'platform' AND severity = $1 AND escalation_step = $2 AND superseded_at IS NULL)`,
@@ -275,6 +280,7 @@ func newCreateAlertRouteHandler(deps Deps) http.HandlerFunc {
 				"enabled": req.Enabled, "reason_code": req.ReasonCode,
 				// The value is never audited (it lives only in alert_routes).
 				"recipient_ref_present": req.RecipientRef != nil,
+				"recipient_changed":     recipientChanged,
 				"after":                 map[string]any{"route_id": newID.String(), "enabled": req.Enabled, "channel_kind": req.ChannelKind},
 			}
 			if before != nil {

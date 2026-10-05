@@ -54,7 +54,7 @@ func (d *Dispatcher) resolveRoute(ctx context.Context, severity Severity, step i
 			FROM alert_routes
 			WHERE scope = 'platform' AND severity = $1 AND escalation_step = $2
 			  AND superseded_at IS NULL AND effective_from <= $3
-			ORDER BY effective_from DESC
+			ORDER BY effective_from DESC, id DESC
 			LIMIT 1
 		`, string(severity), step, now).Scan(&r.id, &r.channelKind, &r.recipientRef, &escalateAfter, &r.enabled)
 	})
@@ -245,7 +245,7 @@ func (d *Dispatcher) loadRouteConfigs(ctx context.Context, now time.Time) ([]Rou
 	var routes []RouteConfig
 	err := d.pool.WithPlatformService(ctx, db.ServiceAlertDispatcher, func(ctx context.Context, tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, `
-			SELECT severity, escalation_step, channel_kind, enabled, recipient_ref IS NOT NULL,
+			SELECT id::text, severity, escalation_step, channel_kind, enabled, recipient_ref IS NOT NULL,
 			       alerting_channel_kind_is_human_notification(channel_kind), effective_from
 			FROM alert_routes
 			WHERE scope = 'platform' AND superseded_at IS NULL AND effective_from <= $1
@@ -256,7 +256,7 @@ func (d *Dispatcher) loadRouteConfigs(ctx context.Context, now time.Time) ([]Rou
 		defer rows.Close()
 		for rows.Next() {
 			var r RouteConfig
-			if err := rows.Scan(&r.Severity, &r.Step, &r.ChannelKind, &r.Enabled, &r.HasRecipient, &r.DBHuman, &r.EffectiveFrom); err != nil {
+			if err := rows.Scan(&r.ID, &r.Severity, &r.Step, &r.ChannelKind, &r.Enabled, &r.HasRecipient, &r.DBHuman, &r.EffectiveFrom); err != nil {
 				return err
 			}
 			routes = append(routes, r)

@@ -141,7 +141,7 @@ func (s LogSink) Deliver(_ context.Context, d Delivery) (Outcome, ErrorClass) {
 	}
 	logger.Log(context.Background(), level, "alert_delivery",
 		"alert_id", d.AlertID, "kind", d.Kind, "severity", d.Severity,
-		"recipient_ref", d.RecipientRef, "discriminator", d.Discriminator,
+		"recipient_ref_present", d.RecipientRef != "", "discriminator", d.Discriminator,
 		"idempotency_key", d.IdempotencyKey, "dedup_key", d.DedupKey)
 	return OutcomeSent, ErrorClassNone
 }

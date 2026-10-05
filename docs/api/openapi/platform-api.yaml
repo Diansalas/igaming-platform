@@ -5313,19 +5313,22 @@ paths:
             schema:
               type: object
               additionalProperties: false
-              required: [severity, escalation_step, channel_kind, enabled, reason_code]
+              required: [severity, channel_kind, reason_code]
               properties:
                 severity: { type: string, enum: [p1, p2, p3] }
-                escalation_step: { type: integer, minimum: 0, maximum: 9 }
+                escalation_step: { type: integer, minimum: 0, maximum: 9, default: 0 }
                 channel_kind: { type: string, enum: [log, mock] }
                 recipient_ref: { type: string, nullable: true }
                 escalate_after_seconds: { type: number, minimum: 0, exclusiveMinimum: true, maximum: 604800 }
-                enabled: { type: boolean }
+                enabled: { type: boolean, default: false }
                 reason_code: { type: string, enum: [initial_setup, on_call_change, escalation_change, correction, decommission, drill] }
                 supersedes_id: { type: string, format: uuid, nullable: true }
       responses:
         "201":
           description: The new route version
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AlertRoute" }
         "400":
           description: Validation refusal (audited as denied), including the SR-7 four-eyes guard
         "401":
@@ -5336,6 +5339,8 @@ paths:
           description: supersedes_id names no current platform route
         "409":
           description: A current route exists for this severity and step (supply supersedes_id), or supersedes_id names a different severity or step
+        "500":
+          description: Internal error (class only is logged; no detail)
     get:
       summary: List alert route versions (current, or all with include_superseded=true)
       security:
@@ -5347,10 +5352,18 @@ paths:
       responses:
         "200":
           description: Route versions, each with `human_notification` (false for every kind that exists)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  routes: { type: array, items: { $ref: "#/components/schemas/AlertRoute" } }
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
           description: Tenant-scoped caller or missing `alert:route_manage`
+        "500":
+          description: Internal error
   /v1/admin/alerting/status:
     get:
       summary: Routing readiness per severity, with the exact missing operator input
@@ -5364,10 +5377,33 @@ paths:
       responses:
         "200":
           description: "`ready`, `evaluated_at`, and per severity routes_configured, routes_enabled, human_notification_routes, ready, reason, missing_operator_input"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ready: { type: boolean }
+                  evaluated_at: { type: string, format: date-time }
+                  note: { type: string }
+                  severities:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        severity: { type: string, enum: [p1, p2, p3] }
+                        required_for_readiness: { type: boolean }
+                        routes_configured: { type: integer }
+                        routes_enabled: { type: integer }
+                        human_notification_routes: { type: integer }
+                        ready: { type: boolean }
+                        reason: { type: string }
+                        missing_operator_input: { type: string }
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
           description: Tenant-scoped caller or missing `alert:manage`
+        "500":
+          description: Internal error
   /v1/admin/alerts:
     get:
       summary: List platform alerts with their derived delivery state
@@ -5386,12 +5422,87 @@ paths:
       responses:
         "200":
           description: Alerts, newest first
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  alerts:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: string, format: uuid }
+                        kind: { type: string }
+                        severity: { type: string, enum: [p1, p2, p3] }
+                        state: { type: string, enum: [open, acked, resolved] }
+                        subject_tenant_id: { type: string, format: uuid, nullable: true }
+                        first_seen_at: { type: string, format: date-time }
+                        delivery_state: { type: string, enum: [pending, retrying, unrouted, delivery_failed, suppressed, recorded_non_human, delivered] }
+                        unrouted_reason: { type: string, enum: [no_route, channel_disabled, no_sink], nullable: true }
+                        notified_a_person: { type: boolean }
         "400":
           description: Invalid filter
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
           description: Tenant-scoped caller or missing `alert:manage`
+        "500":
+          description: Internal error
+  /v1/admin/alerts/{alertID}/ack:
+    post:
+      summary: Acknowledge a platform alert (optional audited reason_code)
+      description: >
+        Requires `alert:manage` and a platform-scope token. The body is optional;
+        `reason_code` (lowercase token, at most 64 characters) is recorded in the audit
+        metadata only. Every refusal is audited in the caller's own scope; the audit
+        target is the parsed alert id or the marker `invalid_id`, never the raw path.
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: alertID, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                reason_code: { type: string, pattern: "^[a-z0-9][a-z0-9_.-]{0,63}$" }
+      responses:
+        "200": { description: The alert after the transition }
+        "400": { description: Invalid alert id or reason_code }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { description: Tenant-scoped caller or missing `alert:manage` }
+        "404": { description: No such platform alert }
+        "409": { description: The alert is not open }
+        "500": { description: Internal error }
+  /v1/admin/alerts/{alertID}/resolve:
+    post:
+      summary: Resolve a platform alert (reason_code required)
+      security:
+        - bearerAuth: []
+      parameters:
+        - { name: alertID, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [reason_code]
+              properties:
+                reason_code: { type: string, pattern: "^[a-z0-9][a-z0-9_.-]{0,63}$" }
+      responses:
+        "200": { description: The alert after the transition }
+        "400": { description: Invalid alert id, body or reason_code }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { description: Tenant-scoped caller or missing `alert:manage` }
+        "404": { description: No such platform alert }
+        "409": { description: The alert is already resolved }
+        "500": { description: Internal error }
 
 components:
   parameters:
@@ -5437,6 +5548,22 @@ components:
         This remains PROVIDER DEPENDENT / foundation-only for Stage 2 -
         see docs/architecture/05-identity-architecture.md.
   schemas:
+    AlertRoute:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        severity: { type: string, enum: [p1, p2, p3] }
+        escalation_step: { type: integer }
+        channel_kind: { type: string, enum: [log, mock] }
+        recipient_ref: { type: string, nullable: true }
+        escalate_after_seconds: { type: number, nullable: true }
+        enabled: { type: boolean }
+        reason_code: { type: string, nullable: true }
+        human_notification: { type: boolean, description: "false for every kind that exists" }
+        effective_from: { type: string, format: date-time }
+        superseded_at: { type: string, format: date-time, nullable: true }
+        superseded_by: { type: string, format: uuid, nullable: true }
+        created_at: { type: string, format: date-time }
     PaymentsMockCallback:
       type: object
       description: >

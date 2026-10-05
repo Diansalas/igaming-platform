@@ -63,6 +63,7 @@ func MissingOperatorInput(r ReadinessReason) string {
 
 // RouteConfig is the configuration-only projection of one current route.
 type RouteConfig struct {
+	ID            string // tie-break only (deterministic when effective_from is equal)
 	Severity      Severity
 	Step          int
 	ChannelKind   ChannelKind
@@ -95,7 +96,8 @@ func EvaluateReadiness(routes []RouteConfig, wired map[ChannelKind]bool) []Sever
 	latest := make(map[key]RouteConfig)
 	for _, r := range routes {
 		k := key{r.Severity, r.Step}
-		if cur, ok := latest[k]; !ok || r.EffectiveFrom.After(cur.EffectiveFrom) {
+		if cur, ok := latest[k]; !ok || r.EffectiveFrom.After(cur.EffectiveFrom) ||
+			(r.EffectiveFrom.Equal(cur.EffectiveFrom) && r.ID > cur.ID) {
 			latest[k] = r
 		}
 	}

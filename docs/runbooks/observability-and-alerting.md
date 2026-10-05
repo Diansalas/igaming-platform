@@ -520,7 +520,7 @@ Routes are authored through the audited platform-admin API (permission
   enabled, human-notification routes, `ready` and the exact missing operator
   input; `GET /v1/admin/alerts[?state=&severity=&limit=]` lists alerts with a
   derived delivery state (`pending`, `retrying`, `unrouted` + reason,
-  `delivery_failed`, `recorded_non_human`; `delivered` is reserved for a human
+  `delivery_failed`, `suppressed`, `recorded_non_human`; `delivered` is reserved for a human
   channel and cannot occur today).
 - Every successful write and every refused attempt writes an audit row
   (actor, IP, request id, reason code, before/after route ids). The
@@ -650,10 +650,14 @@ dispatcher (its own target is operator input H8).
 ### Runbook: `delivery_failed` (dead) alerts
 
 A permanent failure (`rejected`, `misconfigured`) is terminal immediately; a
-retryable one is terminal after the severity budget (p1 8 attempts / 5 min cap,
-p2 5 / 1 min, p3 3 / 1 min). A p1 that is dead at step n escalates to step n+1
-when an enabled route exists. A dead delivery is NOT re-delivered after you fix
-the channel: list `GET /v1/admin/alerts` and handle those alerts by hand.
+retryable one is terminal after the severity attempt budget (p1 8, p2 5, p3 3
+attempts). The nominal backoff caps (5 min / 1 min) are NEVER reached: backoff is
+`1s << attempt`, so with the 15 s loop a vendor outage makes an alert `dead` after
+roughly 3 to 4 minutes for p1, about 1 minute for p2 and about 30 seconds for p3.
+A p1 that is dead at step n escalates to step n+1 when an enabled route exists.
+A dead delivery is NOT re-delivered after you fix the channel (a redrive is a
+closure precondition for a real channel, ADR 0102 section 18.4): list
+`GET /v1/admin/alerts` and handle those alerts by hand.
 `alert_delivery_attempts_total{channel_kind,result,error_class,notification}`
 carries `notification=non_human` for log and mock: a `sent` there is a record,
 never a person being told.

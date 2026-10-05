@@ -1767,7 +1767,7 @@ and this section does not claim otherwise.
 | `alert_deliveries.unrouted_reason` (`no_route`, `channel_disabled`, `no_sink`), required on every new unrouted row (NOT VALID CHECK, so pre-0117 rows keep NULL). N-4 closed: a route with no wired sink is a visible, counted row with the meta-alert, not a log line | IMPLEMENTED |
 | Security H-1: `SET search_path = pg_catalog, public, pg_temp` on every function 0117 creates or replaces, and `ALTER FUNCTION ... SET` on the seven 0110 alert functions; exact-catalogue test; TEMP-shadow probes with controls | IMPLEMENTED |
 | Down migration refuses (AR099) while `alert_routes` has ANY row or any delivery carries an `unrouted_reason` (security L-2); the pins are left in place | IMPLEMENTED |
-| `ErrorClass.Retryable()`: `rejected` and `misconfigured` go straight to terminal failure; `timeout`, `unavailable`, `unknown` retry. Budgets as constants: p1 8 attempts / 5 min cap, p2 5 / 1 min, p3 3 / 1 min | IMPLEMENTED |
+| `ErrorClass.Retryable()`: `rejected` and `misconfigured` go straight to terminal failure; `timeout`, `unavailable`, `unknown` retry. Budgets as constants: p1 8 attempts / 5 min cap, p2 5 / 1 min, p3 3 / 1 min (nominal; the caps are never reached, real windows in 18.5) | IMPLEMENTED |
 | Per-alert panic recovery (the pass continues; the delivery is recorded failed/unknown); only the panic TYPE is logged, never its value (security M-5), with a canary test; the pass-level recovery logs type only too | IMPLEMENTED |
 | `Sink.HumanNotification()` (log and mock false). A `sent` through a non-human channel is labelled `non_human` in `alert_delivery_attempts_total` and derives `recorded_non_human` (never `delivered`, `notified_a_person=false`) in the list API | IMPLEMENTED |
 | p1 escalate-on-dead: a terminally dead, unacknowledged p1 step n is followed by step n+1 when an ENABLED route for it exists; otherwise terminal with no extra row. p2 and p3 unchanged | IMPLEMENTED |
@@ -1834,6 +1834,49 @@ and a volume bound, a real-adapter test that dedupes on `DedupKey` and honours c
 harness), Vault/KMS credentials with no body logging, and four-eyes route authoring with its own security review
 plus the M-2 fixes in 18.3. This section delivers the SR-7 audit trail, N-4, the structural human-channel guard,
 readiness visibility and the conformance harness; nothing of (a) to (c).
+
+**Additional binding preconditions (before the FIRST human-notification kind; from the implementation reviews).**
+These are recorded, not built, and travel with four-eyes:
+
+1. **Per-vendor positive allowlist for `recipient_ref`** (security F2), mirrored in a DB CHECK or a channel-kind
+   validator. `ValidateRecipientRef` is a denylist and has known gaps: UUID-shaped values (a vendor key format),
+   integer and hex IPv4 (`2852039166`, `0xa9fea9fe`), IPv6 forms not ending in `:digits`, bare hostnames such as
+   `localhost` and `metadata.google.internal`. The DB keeps only 0110's shape CHECK (a 32-hex value passes it). The
+   primary control today is rule 2 above (an adapter never dials the value).
+2. **Database-enforced route integrity** (security F4), together with four-eyes: R5 (the last p1 route cannot be
+   removed), exactly one current route per (severity, step) (R3), `superseded_by` must reference a newer version of
+   the same severity and step, and `effective_from` forced or bounded. Today a session with arbitrary SQL as the
+   runtime role can self-supersede, leave no current route, create duplicate current routes or set a far-future
+   `effective_from`; nothing reaches a person so this is accepted for log/mock only.
+3. **Dead-delivery redrive.** A `dead` delivery is terminal and is never re-sent after the channel recovers. A real
+   channel needs an audited operator redrive (or an automatic re-drive policy) before closure.
+4. **Readiness-versus-live-delivery separation stays true.** Readiness is configuration-only and is evaluated on its
+   own ticker (see 18.5); a real channel must not couple it to delivery success, and enforce mode must be decided
+   with the blast radius (security L-6) in view.
+
+### 18.5 Fix batch (code and security implementation reviews)
+
+- **Real retry windows (do not read the nominal caps as the behaviour).** Backoff is `1s << attempt`, capped by the
+  per-severity cap, so the caps are never reached under the default attempt budgets. The total backoff is about
+  127 s for p1 (8 attempts, largest gap 64 s), 15 s for p2 (5 attempts, largest gap 8 s) and 3 s for p3 (3 attempts,
+  largest gap 2 s). With the 15 s loop interval a vendor outage therefore turns an alert `dead` after roughly
+  3 to 4 minutes for p1, about 1 minute for p2 and about 30 seconds for p3. The 5 min and 1 min caps are dead
+  configuration under these budgets. The budgets are NOT retuned here (devops-reviewable technical defaults,
+  T1). A `dead` delivery is never re-sent (see precondition 3 above).
+- **Readiness is evaluated on its own ticker** (default one loop interval), independent of how long a delivery pass
+  takes: a down vendor makes each Deliver run up to `ClaimLease/2` = 60 s, which would otherwise outlast the 45 s
+  staleness window. The window is three loop intervals (45 s), so two consecutive missed evaluations are tolerated
+  before "stale = not ready". The default is pinned by a test, and a test holds a pass open longer than the window
+  and asserts readiness does not flip.
+- `LogSink` no longer logs the `recipient_ref` value (only `recipient_ref_present`); the conformance suite asserts
+  the value never appears in captured logs (security F1).
+- The ack/resolve denied audit records the target only from a successfully parsed UUID, otherwise the marker
+  `invalid_id`; the raw path segment is never recorded (security F3, code review C3).
+- Route resolution and the readiness evaluator break an `effective_from` tie by the higher `id`, identically.
+- The route audit carries `recipient_changed` (a boolean, never either value), so a recipient-only redirection is
+  visible (security F5).
+- Display fails closed for unknown kinds: `delivered` and `notified_a_person` require the kind to be in
+  `alerting.KnownHumanChannelKinds` (empty today); any other `sent` reads `recorded_non_human`.
 
 Residuals: the DB layer checks platform scope, not `alert:route_manage` (security L-5; acceptable while
 `platform_admin` is the only platform role); a `dead` delivery is terminal and is not re-delivered after a channel

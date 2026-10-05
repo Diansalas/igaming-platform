@@ -35,9 +35,12 @@ func attrs(set attribute.Set, keys ...string) map[string]string {
 // alert_delivery_attempts_total labels a log/mock delivery non_human, never human.
 func TestMetric_DeliveryAttempts_LabelNonHuman_NoTenant(t *testing.T) {
 	ctx := context.Background()
-	recordDeliveryAttempt(ctx, ChannelMock, "sent", ErrorClassNone, false)
-	recordDeliveryAttempt(ctx, ChannelLog, "failed", ErrorClassTimeout, false)
-	recordDeliveryAttempt(ctx, ChannelMock, "dead", ErrorClassRejected, false)
+	// A private channel_kind label keeps this test independent of other tests'
+	// series in the shared process-wide reader.
+	const k = ChannelKind("unit_label_probe")
+	recordDeliveryAttempt(ctx, k, "sent", ErrorClassNone, false)
+	recordDeliveryAttempt(ctx, k, "failed", ErrorClassTimeout, false)
+	recordDeliveryAttempt(ctx, k, "dead", ErrorClassRejected, false)
 	var seen int
 	for _, m := range collect(t) {
 		if m.Name != "alert_delivery_attempts_total" {
@@ -48,6 +51,9 @@ func TestMetric_DeliveryAttempts_LabelNonHuman_NoTenant(t *testing.T) {
 				t.Fatalf("labels must be {channel_kind,result,error_class,notification}: %v", dp.Attributes.ToSlice())
 			}
 			a := attrs(dp.Attributes, "channel_kind", "result", "error_class", "notification")
+			if a["channel_kind"] != string(k) {
+				continue
+			}
 			if a["notification"] != "non_human" {
 				t.Fatalf("a log/mock delivery must be labelled non_human: %v", a)
 			}

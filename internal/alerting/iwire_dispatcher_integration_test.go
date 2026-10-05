@@ -122,7 +122,7 @@ func TestIWire_LogSink_CarriesDiscriminatorAndDedupKey(t *testing.T) {
 // The loop wired to a real dispatcher: a sink that panics mid-delivery is (since ALERT-DELIVERY-1 routing readiness)
 // recovered per ALERT and recorded as a failed/unknown attempt (the pass and process survive), and the
 // alert is delivered on the next pass.
-func TestIWire_DispatcherLoop_PanicRecoveredThenStaleClaimReclaimedAndDelivered(t *testing.T) {
+func TestIWire_DispatcherLoop_DeliverPanicIsRecordedFailedThenRetriedAndDelivered(t *testing.T) {
 	pool := scratchPool(t, "iwloop")
 	admin := seedPlatformAdmin(t, pool)
 	tenantA := seedTenant(t, pool, admin)

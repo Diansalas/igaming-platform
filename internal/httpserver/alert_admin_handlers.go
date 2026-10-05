@@ -138,7 +138,13 @@ func newAlertTransitionHandler(deps Deps, op string) http.HandlerFunc {
 			apierror.Write(w, requestID, apierror.CodeUnauthorized, "no authenticated context")
 			return
 		}
-		deny := alertDenial{action: "alerts." + op, targetType: "alert", targetID: r.PathValue("alertID")}
+		// The audit target is set ONLY from a successfully parsed UUID; the raw
+		// path segment is client-controlled and unbounded and is never recorded
+		// (security F3 / code review C3).
+		deny := alertDenial{action: "alerts." + op, targetType: "alert", targetID: "invalid_id"}
+		if id, perr := uuid.Parse(r.PathValue("alertID")); perr == nil {
+			deny.targetID = id.String()
+		}
 		// Layer 1: the permission. Inside the handler so a refusal is audited.
 		if !auth.RoleHasPermission(auth.Role(tc.Role), auth.PermAlertManage) {
 			deny.reason = "permission"

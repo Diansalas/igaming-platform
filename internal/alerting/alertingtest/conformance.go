@@ -143,13 +143,19 @@ func RunChannelConformance(t *testing.T, factory Factory) {
 
 	t.Run("never_logs_secrets_or_attribute_values", func(t *testing.T) {
 		s, logs := newSubject(t)
-		s.Sink.Deliver(context.Background(), delivery(uuid.NewString()+":0", "x", "ops-target"))
+		const recipientCanary = "recipient-canary-9e41c0"
+		s.Sink.Deliver(context.Background(), delivery(uuid.NewString()+":0", "x", recipientCanary))
 		out := logs.String()
 		if s.Logs != nil {
 			out += s.Logs()
 		}
 		if strings.Contains(out, canarySecret) || strings.Contains(out, "<script>") {
 			t.Fatalf("channel logged attribute content: %s", out)
+		}
+		// recipient_ref may be credential-shaped by mistake (security F1): its
+		// value is never logged, only its presence.
+		if strings.Contains(out, recipientCanary) {
+			t.Fatalf("channel logged the recipient_ref value: %s", out)
 		}
 	})
 
