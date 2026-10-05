@@ -1,0 +1,24 @@
+rep 1 load 2.00
+worst: 419.773075ms
+--- PASS: TestResolutionIsolation_NormalOperation (3.03s)
+rep 2 load 2.00
+worst: 454.531314ms
+--- PASS: TestResolutionIsolation_NormalOperation (3.20s)
+rep 3 load 2.64
+worst: 467.141358ms
+--- PASS: TestResolutionIsolation_NormalOperation (3.50s)
+rep 4 load 2.59
+worst: 436.488495ms
+--- PASS: TestResolutionIsolation_NormalOperation (3.35s)
+rep 5 load 2.70
+worst: 450.914802ms
+--- PASS: TestResolutionIsolation_NormalOperation (3.49s)
+rep 6 load 2.44
+worst: 455.704978ms
+--- PASS: TestResolutionIsolation_NormalOperation (3.11s)
+rep 7 load 2.25
+worst: 450.49112ms
+--- PASS: TestResolutionIsolation_NormalOperation (3.20s)
+rep 8 load 2.07
+worst: 439.64306ms
+--- PASS: TestResolutionIsolation_NormalOperation (3.17s)

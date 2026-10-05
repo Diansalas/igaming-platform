@@ -1,0 +1,60 @@
+cmd_migrate PASS 18:36:29
+cmd_platform-api PASS 18:36:33
+cmd_seed-admin PASS 18:36:29
+internal_adjustment PASS 18:37:13
+internal_admission PASS 18:59:32
+internal_alerting PASS 19:01:41
+internal_alerting_alertingtest PASS 18:59:34
+internal_apierror PASS 18:59:36
+internal_assetregistry PASS 18:59:42
+internal_audit PASS 18:59:52
+internal_auth PASS 18:37:52
+internal_bonus PASS 18:38:07
+internal_capability PASS 18:37:52
+internal_casino PASS 18:38:50
+internal_config PASS 18:38:08
+internal_db PASS 18:38:57
+internal_economicop PASS 18:38:53
+internal_email PASS 18:38:54
+internal_eventbus PASS 18:38:56
+internal_geolocation PASS 18:38:57
+internal_httpserver PASS 18:47:16
+internal_idempotency PASS 18:39:01
+internal_identity PASS 18:39:10
+internal_identityresolution PASS 18:39:13
+internal_jurisdiction PASS 18:39:42
+internal_kyc PASS 18:40:55
+internal_ledger PASS 18:41:26
+internal_money PASS 18:41:27
+internal_observability PASS 18:41:33
+internal_operatingmarket PASS 18:42:04
+internal_payments PASS 18:59:17
+internal_providercred PASS 18:47:59
+internal_providerkind PASS 18:48:01
+internal_providerref PASS 18:48:03
+internal_providers PASS 18:48:05
+internal_providers_httpclient PASS 18:48:08
+internal_providers_httpclient_conformance PASS 18:48:08
+internal_reconciliation PASS 18:49:36
+internal_reconciliation_statement PASS 18:49:37
+internal_rg PASS 18:50:04
+internal_risk PASS 18:50:14
+internal_secretstore PASS 18:50:20
+internal_secretstore_awssm PASS 18:50:44
+internal_secretstore_devfile PASS 18:50:46
+internal_secretstore_memstore PASS 18:50:46
+internal_sportsbook PASS 18:51:30
+internal_tenant PASS 18:51:32
+internal_testsupport_credentialscan PASS 18:51:34
+internal_txscope PASS 18:51:37
+internal_validation PASS 18:51:39
+internal_wallet PASS 18:51:42
+internal_webhookauth PASS 18:51:47
+internal_webhookauth_webhookauthtest PASS 18:51:49
+internal_withdrawal PASS 18:52:02
+FIRST-PASS ENV FAIL (retried, then PASS): internal_admission
+FIRST-PASS ENV FAIL (retried, then PASS): internal_alerting
+FIRST-PASS ENV FAIL (retried, then PASS): internal_alerting_alertingtest
+FIRST-PASS ENV FAIL (retried, then PASS): internal_apierror
+FIRST-PASS ENV FAIL (retried, then PASS): internal_assetregistry
+FIRST-PASS ENV FAIL (retried, then PASS): internal_audit
