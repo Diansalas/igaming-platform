@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/Diansalas/igaming-platform/internal/audit"
 	"github.com/Diansalas/igaming-platform/internal/ledger"
@@ -619,11 +620,80 @@ func resolvedForOtherDeposit(ctx context.Context, tx pgx.Tx, tenantID, intentID 
 // via §5.1's sticky "any succeeded -> succeeded" rule; the caller's own
 // recomputeDepositIntentProjection, if it runs, sees the same result
 // either way).
-func applyMultipleSuccessDispute(ctx context.Context, tx pgx.Tx, attempt PaymentAttempt, evidence EvidenceKind) error {
+func applyMultipleSuccessDispute(ctx context.Context, tx pgx.Tx, attempt PaymentAttempt, evidence EvidenceKind, providerID, providerReference string) error {
 	if attempt.State == AttemptDeclined {
+		// A declined row is not bindable (bindParkReference only touches live
+		// states); COALESCE semantics would keep any reference it already holds.
 		return ApplyMultipleSuccessForIntent(ctx, tx, attempt.ID, evidence)
 	}
+	if err := bindParkReference(ctx, tx, attempt, providerID, providerReference); err != nil {
+		return err
+	}
 	return ApplyDisputeFromNonTerminal(ctx, tx, attempt.ID, evidence, TerminalReasonMultipleSuccessForIntent)
+}
+
+// bindParkReference is PAY-CALLBACK-MISMATCH-BIND-1: before a callback- or
+// multiple-success-driven T10 parks a live attempt, bind the reference the
+// provider reported so reconciliation can match the provider's record to
+// this attempt (a reference-less park is "unbound" to D2F-1 and MA020 can
+// never clear it). It mirrors parkDepositAttempt's bindRef, and binds ONLY
+// when (1) the attempt holds no reference yet, (2) the value passes
+// providerref.ValidatePaymentReference, and (3) foreignReferenceBinding
+// reports no other attempt/intent of this tenant holding it. On any failed
+// condition it does nothing and the park stays reference-less (no error, so
+// the transaction commits and nothing loops). Must run under the locks the
+// caller already holds (intent/attempt).
+func bindParkReference(ctx context.Context, tx pgx.Tx, attempt PaymentAttempt, providerID, reference string) error {
+	if reference == "" || providerID == "" {
+		return nil
+	}
+	if attempt.ProviderReference != nil && *attempt.ProviderReference != "" {
+		return nil
+	}
+	switch attempt.State {
+	case AttemptSubmitting, AttemptPending, AttemptAmbiguous:
+	default:
+		return nil
+	}
+	if err := providerref.ValidatePaymentReference("provider_reference", reference); err != nil {
+		return nil
+	}
+	intentID := uuid.Nil
+	if attempt.DepositIntentID != nil {
+		intentID = *attempt.DepositIntentID
+	}
+	conflict, _, err := foreignReferenceBinding(ctx, tx, attempt.TenantID, providerID, reference, attempt.ID, intentID)
+	if err != nil {
+		return err
+	}
+	if conflict {
+		return nil
+	}
+	// The pre-check above cannot see a concurrent, uncommitted bind of the same
+	// reference by another attempt (different intent, different lock). That
+	// race surfaces at the per-tenant unique index; a savepoint turns it into
+	// "someone else holds it" (park stays reference-less) instead of rolling
+	// the whole evidence transaction back.
+	sp, err := tx.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("payments: bind reference on parked attempt: %w", err)
+	}
+	if _, err := sp.Exec(ctx,
+		`UPDATE payment_attempts SET provider_reference = COALESCE(provider_reference, $2) WHERE id = $1 AND state IN ('submitting','pending','ambiguous')`,
+		attempt.ID, reference); err != nil {
+		if rbErr := sp.Rollback(ctx); rbErr != nil {
+			return fmt.Errorf("payments: bind reference on parked attempt: %w", rbErr)
+		}
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			return nil
+		}
+		return fmt.Errorf("payments: bind reference on parked attempt: %w", err)
+	}
+	if err := sp.Commit(ctx); err != nil {
+		return fmt.Errorf("payments: bind reference on parked attempt: %w", err)
+	}
+	return nil
 }
 
 // auditMultipleSuccessForIntent records the ADR 0095 §28.11 audit entry
@@ -709,7 +779,7 @@ func (o *Orchestrator) postDepositSuccessOrDispute(
 		return intent, uuid.Nil, false, err
 	}
 	if resolved {
-		if err := applyMultipleSuccessDispute(ctx, tx, attempt, evidence); err != nil {
+		if err := applyMultipleSuccessDispute(ctx, tx, attempt, evidence, providerID, providerReference); err != nil {
 			return intent, uuid.Nil, false, err
 		}
 		if err := auditMultipleSuccessForIntent(ctx, tx, attempt, providerID, providerReference, evidence, false); err != nil {
@@ -719,7 +789,7 @@ func (o *Orchestrator) postDepositSuccessOrDispute(
 	}
 	updated, postedTxID, err = o.postDepositSuccess(ctx, tx, intent, &attempt.ID, providerID, providerReference, amount, assetCode)
 	if errors.Is(err, ErrDepositIntentAlreadyResolved) {
-		if derr := applyMultipleSuccessDispute(ctx, tx, attempt, evidence); derr != nil {
+		if derr := applyMultipleSuccessDispute(ctx, tx, attempt, evidence, providerID, providerReference); derr != nil {
 			return intent, uuid.Nil, false, derr
 		}
 		if derr := auditMultipleSuccessForIntent(ctx, tx, attempt, providerID, providerReference, evidence, true); derr != nil {
