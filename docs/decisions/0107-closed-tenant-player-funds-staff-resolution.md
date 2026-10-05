@@ -9,6 +9,9 @@
   - the human authorizes a workstream.
 
   **Until HD-CTF-1 is answered, the mechanism stays "every outcome disabled by configuration".**
+- **Pointer (2026-10-05, PRH-2 R3 / H-W1):** reconciliation OBSERVATION of non-active tenants now exists
+  (evidence only, `payment_statement` stream, ADR 0095 §40.4 / ADR 0101 §28.3). It implements nothing of
+  this ADR: this stays DESIGN ONLY, and no resolution, dispatch, release or posting is added for a closed tenant.
 - **Source:** ADR 0105 §1 (HD-PRH2-9, human decision: a controlled STAFF RESOLUTION PATH); ADR
   0095 §37.5 (H LF F3 residual); ADR 0101 rev 3/4 §19 (why this is separate from K3).
 - **Reviews of the design record** (`3158cf0`):
@@ -465,6 +468,9 @@ Down:
 | HD-CTF-7 | The reason-code vocabulary and evidence obligations (§5.4) |
 | HD-CTF-8 | Are alerts, notifications to players or regulators, or deadlines required? (No timelines, recipients or retention are set.) |
 | HD-CTF-9 | May a `closed` tenant ever be reopened? |
+| **HD-CTF-10** (added 2026-10-05, PRH-2 R3 security F-1; **OPEN HUMAN DECISION**) | **Credential treatment and end condition of reconciliation observation of a non-active tenant.** Observing a closed tenant fetches its statement with that tenant's still-ACTIVE outbound PSP credential (`providercred.OutboundResolver` checks the handle's status and expiry, never `tenants.status`). Either (a) the credential stays active: the platform keeps authenticating to an offboarded operator's merchant account every sweep with no end (a legal, contract and licence question, especially for an `own_licence` operator); or (b) closure revokes it: every closed tenant then fails the fetch phase on every sweep, writing a P1 audit row and `reconciliation.run_failed` alert forever, which trains operators to ignore the control. Needed: the credential treatment on closure (read/reporting-scoped credential where the PSP supports one; retention vs revocation), and when observation ENDS (for example: all hold-bearing work resolved and N clean runs). Any tenant-closure flow must depend on this answer. See ADR 0095 §40.4. |
+
+Note (security F-4, tracks Q-CT-SEC-1 / HD-CTF-2): observation of a closed tenant writes new post-closure `audit_log` rows with that `tenant_id` (`reconciliation.sweep_run`, `reconciliation.sweep_run_failed`; benign content: counts, provider id, import id, status, the observation flag). `internal/auth` does not refuse closed-tenant staff sessions today, so staff of the closed tenant with audit-read could see them. HD-CTF-2's answer must cover these rows.
 
 Thresholds and approval counts are configuration under HD-PRH2-3 (none seeded). The permit lifetime
 is a technical security default (§6.2), not a legal value.

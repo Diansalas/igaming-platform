@@ -31,6 +31,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -87,9 +88,19 @@ func New(t testing.TB, prefix string) string {
 			return
 		}
 		defer func() { _ = conn.Close(context.Background()) }()
-		if _, err := conn.Exec(context.Background(), "DROP DATABASE IF EXISTS "+ident+" WITH (FORCE)"); err != nil {
-			t.Logf("scratch database %s left behind (drop failed: %v)", name, err)
+		// pool.Close returns before the server has reaped the closed backends,
+		// and WITH (FORCE) cannot terminate another role's session ("permission
+		// denied to terminate process"). Wait (bounded) for the sessions to
+		// drain and retry instead of leaking the database. No privilege is
+		// changed and no session is terminated.
+		var dropErr error
+		for attempt := 0; attempt < 40; attempt++ {
+			if _, dropErr = conn.Exec(context.Background(), "DROP DATABASE IF EXISTS "+ident+" WITH (FORCE)"); dropErr == nil {
+				return
+			}
+			time.Sleep(250 * time.Millisecond)
 		}
+		t.Logf("scratch database %s left behind (drop failed after retries: %v)", name, dropErr)
 	})
 
 	base.Path = "/" + name

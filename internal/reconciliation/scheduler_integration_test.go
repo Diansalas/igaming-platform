@@ -300,29 +300,49 @@ func TestSweepTenantSelection_ActiveOnlyScopedAndUnscoped(t *testing.T) {
 		}
 	}
 
-	// Scoped: exactly the active named tenant, once.
+	// Scoped: the active named tenant is swept by the full stream set, once; a
+	// named suspended/closed tenant gets ONLY the evidence-only observation
+	// (PRH-2 R3 / H-W1: ledger_vs_projection; no payment source is given here, so
+	// no payment_statement run); an unknown id yields nothing.
 	outcomes, err := RunSweepTenants(ctx, pool, nil,
 		[]uuid.UUID{suspended.tenantID, active.tenantID, uuid.New(), active.tenantID, closed.tenantID},
 		time.Now().Add(-time.Hour), time.Now(), sportsbook.MockSettlementStatementSource{}, casino.MockStatementSource{})
 	if err != nil {
 		t.Fatalf("RunSweepTenants: %v", err)
 	}
-	if len(outcomes) != 1 || outcomes[0].TenantID != active.tenantID {
-		t.Fatalf("expected exactly one outcome for the active tenant, got %+v", outcomes)
+	if len(outcomes) != 3 {
+		t.Fatalf("expected one outcome each for the active, suspended and closed tenant, got %d: %+v", len(outcomes), outcomes)
 	}
-	o := outcomes[0]
-	if o.Err != nil || o.Run.Status != StatusClean || o.Sportsbook.Err != nil || o.Casino.Err != nil || o.CasinoStatement.Err != nil {
+	o := findOutcome(t, outcomes, active)
+	if o.ObservationOnly || o.Err != nil || o.Run.Status != StatusClean || o.Sportsbook.Err != nil || o.Casino.Err != nil || o.CasinoStatement.Err != nil {
 		t.Fatalf("unexpected outcome for the active tenant: %+v", o)
 	}
 	for _, f := range []fixture{suspended, closed} {
-		var runs int
+		po := findOutcome(t, outcomes, f)
+		if !po.ObservationOnly || po.Err != nil || po.Run.Stream != StreamLedgerVsProjection || len(po.PaymentStatement) != 0 ||
+			po.Sportsbook.Run.ID != uuid.Nil || po.Casino.Run.ID != uuid.Nil || po.CasinoStatement.Run.ID != uuid.Nil {
+			t.Fatalf("a non-active tenant must get only the ledger_vs_projection observation, got %+v", po)
+		}
+		var streams []string
 		if err := pool.WithTenant(ctx, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-			return tx.QueryRow(ctx, `SELECT count(*) FROM reconciliation_runs WHERE tenant_id = $1`, f.tenantID).Scan(&runs)
+			rows, err := tx.Query(ctx, `SELECT stream FROM reconciliation_runs WHERE tenant_id = $1 ORDER BY stream`, f.tenantID)
+			if err != nil {
+				return err
+			}
+			defer rows.Close()
+			for rows.Next() {
+				var s string
+				if err := rows.Scan(&s); err != nil {
+					return err
+				}
+				streams = append(streams, s)
+			}
+			return rows.Err()
 		}); err != nil {
 			t.Fatal(err)
 		}
-		if runs != 0 {
-			t.Fatalf("a non-active tenant %s must not be swept, found %d runs", f.tenantID, runs)
+		if len(streams) != 1 || streams[0] != string(StreamLedgerVsProjection) {
+			t.Fatalf("a non-active tenant %s must have exactly one ledger_vs_projection run, got %v", f.tenantID, streams)
 		}
 	}
 }
