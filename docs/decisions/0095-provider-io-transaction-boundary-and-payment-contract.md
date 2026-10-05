@@ -2850,6 +2850,11 @@ orchestrator's own gate, not this ADR's.)
 | Failure recovery | Crash after A: an orphan row, harmless. After B: an orphan vendor verification. KYC enforcement (ADR 0096) reads only platform rows, so it is harmless. |
 | Migration | None. |
 
+> **Amended by §38 (PRH-2 E1, KYC-SUBMIT-OUTBOX-1; design PROPOSED 2026-10-04, ADR 0106).** Phase A also
+> writes a durable `kyc_submission_outbox` row (`operation='create'`) in the same transaction; phases B
+> and C move to the KYC outbox worker. The rows above stay true for the orphan's enforcement effect. See
+> §38 for the retry, the IC F3 guarantee and the vendor-intake requirement.
+
 ### 15.3 KYC `SubmitVerification` (document upload)
 
 | Aspect | Specification |
@@ -2858,6 +2863,12 @@ orchestrator's own gate, not this ADR's.)
 | Ambiguous result (IC condition 2) | **An ambiguous, timeout or transport-error `SubmitVerification` result leaves `kyc_verifications.status` unchanged.** Phase C maps it to the existing `ProviderError` branch (audit with outcome failure, no status update); it is never passed to `statusForOutcome` and never read by `normalizeProviderResult` as a definitive outcome. §15.3 does not reuse §4.4's matrix, so this rule has its own test (§16.2 item 18). |
 | Failure recovery | Identical to today's `ProviderError` outcome: the verification stays as it is, and the next upload re-submits the full set. A durable KYC submission outbox is **deferred** as KYC-SUBMIT-OUTBOX-1, and it is a **hard precondition on the first real KYC adapter**: no real KYC adapter is accepted into PRH-I2 (or later) without a durable submission outbox design landing first (IC condition 5). |
 | Migration | None. |
+
+> **Amended by §38 (PRH-2 E1, KYC-SUBMIT-OUTBOX-1; design PROPOSED 2026-10-04, ADR 0106).** The
+> "Failure recovery" row above is superseded once E1 is implemented: the document upload writes a durable
+> `kyc_submission_outbox` row (`operation='submit'`) in its own transaction, and a dedicated worker
+> retries an ambiguous result with backoff, then `failed_terminal` plus an alert. IC condition 2 is
+> unchanged. Migration 0114.
 
 #### 15.3.1 Implementation record (PRH-I2, KYC part, `identity-compliance`, 2026-09-27)
 
@@ -6987,3 +6998,126 @@ path (`ClaimForDispatch` -> `DispatchWithdraw` -> `ApplyPayoutResult` -> `Resolv
 `PollPayoutStatus`) against the wired MOCK statement source and requires a clean `payment_statement` run with 0
 mismatches. No production code changed for it. It pins the rendering and reference/settlement writes against the
 F1 false-P1 class; it is MOCK evidence only, and real PSP statement matching remains `PROVIDER DEPENDENT`.
+
+## 38. Amendment — PRH-2 E1: the KYC create/submit outbox, and IC F3 (amends §15.2/§15.3) (`architect`, design, 2026-10-04)
+
+**Status: PROPOSED (design only), revision 2 (2026-10-04), after the identity-compliance and security
+design reviews (`docs/plans/prh2-hardening-round/reviews/e1-design-identity-compliance.md`,
+`e1-design-security.md`). IMPLEMENTED against the MOCK KYC provider on branch `prh2-e1-impl` (see §38.6); not
+yet merged, not yet reviewed.** Full design: ADR 0106 revision 2
+(`docs/decisions/0106-kyc-submit-outbox-worker-identity-and-alert-kind.md`). Source: plan
+`docs/plans/prh2-hardening-round/plan.md` §5-E1 and its IC F3 DoD; ADR 0105 §2 (HD-PRH2-10) and §3
+(HD-PRH2-11); migration **0114**. §38.6 is the implementation record (pending review and merge). Any
+later amendment to this ADR (for example K3's) takes §39 or later.
+
+### 38.1 What changes in §15.2 and §15.3
+
+| Aspect | §15.2 `create` | §15.3 `submit` |
+|---|---|---|
+| Phase A | The orphan row (`status='unverified'`, `provider_reference NULL`) **plus** a `kyc_submission_outbox` row (`operation='create'`, key `kv:<verification_id>`), in **one** tenant transaction. **At most one live (`pending`/`claimed`) create per player account**, enforced by a partial unique index; a repeated create returns the existing orphan verification idempotently (200). A new one returns 201 with the `unverified` row. | The document row **plus** a `kyc_submission_outbox` row (`operation='submit'`, the pinned sorted non-rejected document ids, key `ks:<verification_id>:<sha256>`), in the upload's own transaction. `INSERT … ON CONFLICT DO NOTHING` on the live key makes a duplicate submit a no-op. |
+| Phase B | Run only by the KYC outbox worker, after it claims the row (`FOR UPDATE SKIP LOCKED`, one row per claim, trigger-forced claim token, lease) under the dedicated platform-service identity `kyc_submission_worker` (fenced off every NULL-tenant table by restrictive policies, ADR 0106 §3.3), and after a bounded tenant-scoped prepare step that re-checks the tenant is active (else defer), that the pinned provider is still configured for the tenant (else `cancelled / provider_deconfigured`, never redirected) and that the orphan was not decided concurrently (else `cancelled / decided_concurrently`). **No transaction is held** (`txscope.Held` refusal and the IO-1C static guard unchanged). The idempotency key sent is the row's stored key on every attempt. A credential binding mismatch is terminal at once (`credential_binding_mismatch`). | same |
+| Phase C | A new tenant transaction (`alerting.InTx` over a tenant runner, detached bounded context) that first re-selects the row by `(id, claim_token)` `FOR UPDATE`. A definitive result is applied by the **existing** CAS (`applyCreateVerificationResult` / `applyForwardOnlyStatus`) and the row moves `claimed → sent`, atomically. A lost claim rolls back and discards the result. A create-CAS miss because staff decided the orphan concurrently ends `cancelled / decided_concurrently`: the staff decision is never overwritten or demoted, and the audit row flags the vendor reference as unbound (the value is never written). A deterministic SQLSTATE 22/23 failure ends `failed_terminal / apply_conflict` (no re-send loop). | same (a submit result after a forward move is the existing forward-only no-op) |
+| Ambiguous / not sent | Retry: `claimed → pending` with a backoff deadline computed by the database; after the configured number of failed attempts `claimed → failed_terminal` plus the `kyc.submission_failed_terminal` alert raised in the same transaction. **`kyc_verifications` is never written.** | same; IC condition 2 unchanged |
+| Crash recovery | A crash after A leaves a `pending` row that the next pass sends. A crash after B leaves a `claimed` row; when its lease expires it is re-claimed (counted `lease_expired`) and re-sent with the **same** key. A phase-C failure takes the same path. | same |
+| Migration | 0114 | 0114 |
+
+The HTTP paths no longer call the KYC vendor at all; the inline `CreateVerification`/`SubmitVerification`
+entry points are replaced by the worker's executors (ADR 0106 §7.1).
+
+### 38.2 IC F3 — a pending or claimed outbox row is still the phase-A orphan (binding)
+
+1. **A `create` row in `pending` or `claimed` (not yet `sent`) leaves its verification exactly in the
+   phase-A orphan shape** (`status='unverified' AND provider_reference IS NULL`). ADR 0096 §2.6(g) /
+   §19's predicate `NOT (status = 'unverified' AND provider_reference IS NULL)` therefore keeps
+   excluding it from "latest decided row" selection, in both `readLatestVerificationByPlayerAccount`
+   and `crossAccountRejectedOverlay`, with **no change to `internal/kyc/enforcement.go`**. An
+   already-approved player who starts a re-verification keeps the approved outcome while the row waits,
+   retries or fails.
+2. **No outbox transition except `claimed → sent` writes `kyc_verifications`, and `sent` is reached
+   only from a definitive vendor result.** `pending`, `claimed`, retry, `failed_terminal` and
+   `cancelled` never touch the verification row and never call `statusForOutcome`.
+3. **Therefore a vendor outage can never manufacture a `failed`.** An outage of any length ends, at
+   worst, in `failed_terminal` on the outbox row and a durable alert; the verification stays the
+   excluded orphan (create) or keeps its previous status (submit). An account whose only rows are
+   orphans is evaluated exactly as an account with no verification (ADR 0096 §2.6(g), unchanged).
+4. A `submit` row in `pending` or `claimed` likewise leaves the verification status as it was; a
+   `submit` row is not claimable while its verification's `create` row is still `pending`/`claimed`.
+5. **Enforcement never reads the outbox (INV-KYC-OB-5).** `internal/kyc/enforcement*.go`,
+   `internal/payments` and `internal/withdrawal` never reference `kyc_submission_outbox` (static test).
+   Every gate (payout, deposit, withdrawal request) and the compliance-console read give the same
+   decision whatever the outbox state (`pending`, `claimed`, `failed_terminal`, `cancelled`) as with no
+   outbox row; an approved player stays allowed; an orphan-only account is `OutcomeFailed`; outbox state
+   alone never produces `OutcomeUnavailable`. The DECISION-ROWS-1 row for a denial during a
+   platform-side stall is identical to the "never submitted" case (a recorded audit gap; the staff-visible
+   derived submission state of ADR 0106 §7.2 disambiguates; no schema change).
+6. **Delayed supersession (pre-existing ADR 0096 semantics, now asynchronous).** A re-verification's
+   `create` that reaches `sent` with a definitive `pending` makes that new row the latest decided row, so
+   an already-approved player moves to `OutcomePending` when the worker sends it, at an arbitrary later
+   time, where before E1 this happened synchronously inside the create request. This is deliberate and
+   pinned by a test (ADR 0106 T-J); it is not an outbox-manufactured outcome (it needs a definitive vendor
+   result).
+7. Required tests (ADR 0106 §10.1 items 3, 5, 6; §10.5 T-A..T-K; mutants M5, M6): enforcement with a
+   `pending`, a `claimed`, a `failed_terminal` and a `cancelled` create row returns the pre-existing
+   outcome; 100 % ambiguous results until `failed_terminal` leave the verification row image unchanged.
+
+### 38.3 The permanent-503 gap (§15.3.3 F2) — narrowed, not closed
+
+A `create` whose phase C failed after the vendor accepted is no longer stranded forever: the row stays
+`claimed`, its lease expires, and the worker re-sends with the same `kv:` key. **Whether that binds the
+original vendor verification is PROVIDER DEPENDENT.** It does only if the vendor honours idempotency
+keys or lets the platform look up or echo the merchant reference (`ExternalReference = verification
+id`). **Real-vendor intake requirement (added to IC condition 5):** the KYC vendor contract must
+provide one of these; otherwise a re-send creates a second vendor verification, and the first
+reference's callbacks keep returning the retryable 503 (IC-Q1) until the vendor stops redelivering.
+The same holds for a duplicate `submit` after a lost claim.
+
+### 38.4 Invariants added
+
+- **INV-KYC-OB-1:** every KYC vendor call is made by the outbox worker for a row it holds a live claim
+  on, with no transaction open, using the row's stored idempotency key.
+- **INV-KYC-OB-2:** only the `kyc_submission_worker` identity can move a row to `claimed` (RLS + trigger);
+  every other transition requires the claim token (CAS) and a tenant session.
+- **INV-KYC-OB-3:** the outbox never writes `kyc_verifications`; only the phase-C apply of a definitive
+  result does, under the existing CAS rules, atomically with `claimed → sent`.
+- **INV-KYC-OB-4:** the tenant id used for every tenant-scoped step comes from the claimed row returned by
+  the database, and is re-checked under tenant RLS by `(id, claim_token)` (tamper test: any other tenant id
+  gives 0 rows, no vendor call, no write).
+- **INV-KYC-OB-5:** KYC enforcement is independent of outbox state; no enforcement, payments or withdrawal
+  code reads `kyc_submission_outbox` (§38.2 item 5).
+- **INV-KYC-OB-6:** the `kyc_submission_worker` session reads nothing but `kyc_submission_outbox` and the
+  public reference allowlist, and writes nothing but the outbox claim (restrictive fence family on every
+  NULL-tenant-exposed table plus a catalogue gate test; ADR 0106 §3.3).
+- **INV-KYC-OB-7:** at most one live `create` row per player account (partial unique index).
+
+### 38.5 Not changed / residuals
+
+IC condition 2, §15.3.3's forward-only CAS, the IC-Q1 retryable 5xx for an unknown reference, the
+outbound credential binding check and `orphanRowExclusionSQL` are unchanged. Residuals are listed in
+ADR 0106 §9: vendor idempotency (above), sequential head-of-line across tenants, no alert delivery and
+no notification path to anyone (ALERT-DELIVERY-1 OPEN), unbounded retention (HQ-E1-4), non-active tenant
+deferral (HQ-E1-1), no staff requeue of `failed_terminal` (follow-up), a suspension or staff document
+rejection landing between prepare and the vendor call (at most one send), delayed supersession (§38.2
+item 6). The pre-existing NULL-tenant write exposure of `WithoutTenant` and the two older service
+identities is **NULL-ARM-WRITE-1** (not changed here). Any KYC deadline a jurisdiction imposes is
+jurisdiction configuration, never the worker's retry budget (a PLACEHOLDER technical bound).
+
+### 38.6 Implementation record (PRH-2 E1, branch `prh2-e1-impl`, 2026-10-04)
+
+`IMPLEMENTED` against the `MOCK` KYC provider; real vendor `PROVIDER DEPENDENT`; alert notification
+`NOT IMPLEMENTED` (no route, channel or recipient; ALERT-DELIVERY-1 OPEN). Full record, deviations and evidence:
+ADR 0106 §15. Summary of what changed in §15.2/§15.3 behaviour:
+
+- HTTP create and upload no longer call the KYC vendor. Create records a `kyc_verifications` row in the phase-A
+  orphan shape (`status = 'unverified' AND provider_reference IS NULL`) and a durable `kyc_submission_outbox`
+  row in one tenant transaction (201, or 200 with the caller's own existing in-flight verification); upload
+  records a pending `submit` row for the current non-rejected document set in the same transaction as the document.
+- The worker (`kyc.OutboxWorker`, identity `kyc_submission_worker`, claim in one statement) is the only caller of
+  the vendor: P (tenant transaction), B (no transaction, `txscope.Held` false), C (`alerting.InTx` with the
+  `(id, claim_token)` compare-and-set, then `Flush`).
+- IC F3 holds as designed: enforcement never reads the outbox; a pending or claimed create leaves the verification
+  as the excluded orphan; an ambiguous or not-sent result never writes a verification; a staff decision racing a
+  create is never overwritten (`decided_concurrently`).
+- Invariants INV-KYC-OB-1..7 (§38.4) are each covered by named tests; see ADR 0106 §10 and the mutation evidence.
+- The §15.3.3 permanent-503 gap is narrowed as designed, not closed: an unbound vendor-side verification after an
+  ambiguous create remains `PROVIDER DEPENDENT`.
+

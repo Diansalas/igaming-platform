@@ -485,3 +485,16 @@ func buildPaymentsSweeper(pool *db.Pool, orch *payments.Orchestrator, b provider
 	s.TenantAdvisoryHint = true
 	return s
 }
+
+// buildKYCOutboxWorker builds the PRH-2 E1 KYC submission outbox worker from the
+// SAME orchestrator and outbound credential resolver as the HTTP path (ADR 0106
+// section 7.4, security D1). It returns nil, never an error, when either is
+// absent: that is the production / test-support-off shape (kycOrchestrator
+// returns a true nil), where the create handler answers 503 before writing any
+// row and main.go logs once and does not start the worker.
+func buildKYCOutboxWorker(pool *db.Pool, orch *kyc.Orchestrator, outbound kyc.OutboundCredentialResolver) *kyc.OutboxWorker {
+	if orch == nil || outbound == nil {
+		return nil
+	}
+	return kyc.NewOutboxWorker(pool, orch, outbound)
+}

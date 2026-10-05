@@ -11,11 +11,13 @@ import (
 )
 
 // PlatformService is the closed vocabulary of non-human, non-request-scoped
-// platform processes that are permitted to write platform-wide catalogue
-// data. Adding a member is an ADR-level decision plus a migration that
-// widens the corresponding policy predicate - never a bare string at a
-// call site. See docs/decisions/0081-arch-db-2-catalogue-write-
-// authorization.md §3.2.
+// platform processes that run under a platform-service identity: the
+// sportsbook catalogue sync (platform-wide catalogue writes), the alert
+// dispatcher (ADR 0102) and the KYC submission worker (ADR 0106; discovery
+// and claim on one table only). Adding a member is an ADR-level decision
+// plus a migration that widens the corresponding policy predicate - never a
+// bare string at a call site. See docs/decisions/0081-arch-db-2-catalogue-
+// write-authorization.md §3.2.
 type PlatformService string
 
 // ServiceSportsbookCatalogueSync is the sportsbook catalogue sync's
@@ -40,12 +42,28 @@ const ServiceSportsbookCatalogueSync PlatformService = "sportsbook_catalogue_syn
 // in internal/alerting enforces this).
 const ServiceAlertDispatcher PlatformService = "alert_dispatcher"
 
+// ServiceKYCSubmissionWorker is the PRH-2 E1 (ADR 0106, HD-PRH2-11)
+// dedicated, least-privilege, non-human identity of the KYC submission
+// outbox worker (internal/kyc). It exists for exactly ONE statement: the
+// discovery-and-claim UPDATE ... RETURNING on kyc_submission_outbox
+// (internal/kyc/outbox_worker.go:claimNext). Migration 0114 gives it two
+// policies on that one table (kso_kyc_worker_select, kso_kyc_worker_claim),
+// restricts it with the 36 kyc_worker_fence_* policies on the nine tables
+// where a session with no tenant GUC would otherwise reach more than public
+// reference data, and it holds no grant or policy anywhere else. Every
+// tenant-data step of the worker runs in a plain WithTenant transaction for
+// the tenant id the claim returned - never under this identity. Only
+// internal/kyc/outbox_worker.go:claimNext may use it (a static test
+// enforces this).
+const ServiceKYCSubmissionWorker PlatformService = "kyc_submission_worker"
+
 // platformServiceAllowlist is the closed vocabulary itself - the point is
 // that the GUC value set below can never be attacker- or config-supplied,
 // only one of these compiled-in constants.
 var platformServiceAllowlist = map[PlatformService]struct{}{
 	ServiceSportsbookCatalogueSync: {},
 	ServiceAlertDispatcher:         {},
+	ServiceKYCSubmissionWorker:     {},
 }
 
 // ErrPlatformServiceScope is returned when a caller attempts to act as
@@ -60,7 +78,9 @@ var ErrPlatformServiceScope = errors.New("db: requires a platform-service-scoped
 // the Postgres session variable "app.platform_service_id" set, for the
 // lifetime of the transaction, to service. This is the ONLY sanctioned
 // way to perform a migration-0084 sb_sports/sb_competitions/sb_events/
-// sb_markets/sb_selections write.
+// sb_markets/sb_selections write, a migration-0110 dispatcher statement
+// or the ADR 0106 KYC outbox claim; each identity's own policies bound
+// what it can do (ADR 0106 section 3.3 for the KYC worker's fence).
 //
 // It exists because those five tables are platform-wide catalogue data
 // written exclusively by a startup-time background process

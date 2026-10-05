@@ -6,16 +6,12 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"log/slog"
 	"sort"
-	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Diansalas/igaming-platform/internal/audit"
-	"github.com/Diansalas/igaming-platform/internal/providercred"
-	"github.com/Diansalas/igaming-platform/internal/txscope"
 )
 
 // ErrMalwareDetected is returned by UploadDocument when the configured
@@ -23,20 +19,18 @@ import (
 // refused outright, nothing is stored, nothing is inserted.
 var ErrMalwareDetected = errors.New("kyc: uploaded content failed malware scanning")
 
-// ErrVerificationNotSubmitted is returned by UploadDocument and
-// SubmitVerification when the target verification is a never-decided
-// orphan (ADR 0095 §15.2: CreateVerification's phase A committed the row,
-// but phase B/C never obtained a live provider reference for it - a vendor
-// outage, resolver failure, or a crash left it "orphaned", status
-// 'unverified' with provider_reference NULL). N5 (RV-PRH-I2 KYC code
-// review): a player must never be able to upload documents to, or submit,
-// a verification the platform has no live provider-side reference for -
-// doing so would either accumulate evidence attached to an attempt no
-// vendor ever agreed to evaluate, or (worse, for SubmitVerification) send
-// a real vendor an EMPTY reference, which is malformed and whose behaviour
-// is PROVIDER DEPENDENT. Fail closed instead, with a clear, typed error:
-// the player must retry CreateVerification (a fresh attempt/row) rather
-// than uploading against, or submitting, a dead one.
+// ErrVerificationNotSubmitted is returned by UploadDocument when the target
+// verification is a never-decided orphan with no LIVE create (ADR 0095 §15.2 /
+// §38: the verification row exists with status 'unverified' and a NULL
+// provider_reference, and its create outbox row is neither pending nor claimed
+// - it ended failed_terminal or cancelled, or never existed). N5 (RV-PRH-I2 KYC
+// code review): a player must never be able to upload documents to, or have
+// submitted, a verification the platform has no live provider-side reference
+// for and no live create in flight - doing so would accumulate evidence
+// attached to an attempt no vendor ever agreed to evaluate. An orphan whose
+// create IS still pending or claimed accepts the upload (ADR 0106 section 2.6);
+// its submit row waits until the create is sent. Fail closed otherwise, with a
+// clear, typed error: the player must start a new verification.
 var ErrVerificationNotSubmitted = errors.New("kyc: verification has no live provider reference (orphaned) - retry creating a new verification")
 
 const documentColumns = `id, tenant_id, brand_id, player_account_id, person_id, verification_id,
@@ -95,32 +89,38 @@ type UploadDocumentParams struct {
 // document of this DocumentType (directive §5: never overwrite history),
 // version 1 otherwise. tx must already be tenant-scoped.
 //
-// ADR 0095 §15.3 (PRH-I2): this function is phase A ONLY now - it no longer
-// calls KYCProvider.SubmitVerification itself. That call (phase B, with no
-// database transaction held across it) is the separate, pool-based
-// SubmitVerification function below; a caller that wants the pre-split
-// "upload, then submit to the provider" behaviour calls UploadDocument
-// (inside its own short transaction) and then SubmitVerification
-// (pool-based) afterward - exactly how internal/httpserver's upload handler
-// is wired. This split is what actually removes the DB-transaction-held-
-// across-a-provider-call hazard §1 of ADR 0095 named; the previous single-
-// transaction shape is superseded, not merely renamed.
+// ADR 0095 §38 / ADR 0106 (PRH-2 E1): this function is phase A of a submit and
+// NEVER calls KYCProvider.SubmitVerification (nothing on an HTTP path calls a
+// KYC vendor). In the SAME transaction as the document row and its audit it
+// gathers the verification's current non-rejected document set and enqueues a
+// `submit` outbox row pinning that set (INSERT ... ON CONFLICT DO NOTHING, so
+// a duplicate submit is a no-op); the outbox worker (outbox_worker.go) is the
+// only code that reaches the vendor, with no database transaction held.
 func UploadDocument(ctx context.Context, tx pgx.Tx, storage DocumentStorageProvider, scanner MalwareScanner, params UploadDocumentParams) (Document, error) {
 	if params.VerificationID == uuid.Nil {
 		return Document{}, fmt.Errorf("%w: verification_id is required", ErrInvalidTransition)
 	}
 
-	// N5 (RV-PRH-I2 KYC code review): fail closed against an orphan
-	// verification (no live provider reference) - see ErrVerificationNotSubmitted's
-	// own doc comment. This read is cheap (already-open tx, RLS-scoped) and
-	// runs BEFORE the malware scan/storage write below, so a rejected
-	// upload never touches storage at all.
+	// N5 (RV-PRH-I2 KYC code review) relaxed by ADR 0106 section 2.6: a
+	// verification with no live provider reference is an orphan. It accepts
+	// the upload only if its create is STILL LIVE (a pending or claimed
+	// outbox row), read INSIDE this same transaction; an orphan whose create
+	// ended failed_terminal/cancelled, or that never had one, fails closed
+	// exactly as before - see ErrVerificationNotSubmitted. This read is cheap
+	// (already-open tx, RLS-scoped) and runs BEFORE the malware scan/storage
+	// write below, so a rejected upload never touches storage at all.
 	verification, err := GetVerificationByID(ctx, tx, params.VerificationID)
 	if err != nil {
 		return Document{}, err
 	}
 	if verification.ProviderReference == "" {
-		return Document{}, ErrVerificationNotSubmitted
+		live, err := hasLiveCreate(ctx, tx, verification.TenantID, verification.ID)
+		if err != nil {
+			return Document{}, err
+		}
+		if !live {
+			return Document{}, ErrVerificationNotSubmitted
+		}
 	}
 
 	sniffedType, sanitizedName, err := ValidateUpload(params.Filename, params.Content)
@@ -182,6 +182,12 @@ func UploadDocument(ctx context.Context, tx pgx.Tx, storage DocumentStorageProvi
 		Metadata: map[string]any{"document_type": string(d.DocumentType), "version": d.Version, "content_type": d.ContentType, "size_bytes": d.SizeBytes},
 	}); err != nil {
 		return Document{}, fmt.Errorf("kyc: audit document upload: %w", err)
+	}
+
+	// Phase A (submit): the outbox row is written in THIS transaction, with
+	// the document row it accompanies (ADR 0106 section 2.6).
+	if err := enqueueSubmitForCurrentSet(ctx, tx, params.VerificationID, playerEnqueueActor(params.PlayerAccountID)); err != nil {
+		return Document{}, err
 	}
 
 	return scanDocument(tx.QueryRow(ctx, `SELECT `+documentColumns+` FROM kyc_documents WHERE id = $1`, d.ID))
@@ -270,7 +276,7 @@ func submissionIdempotencyKey(verificationID uuid.UUID, docs []SubmittedDocument
 // not its own status write ended up applying), now carrying a
 // `status_applied` flag so a superseded submission is distinguishable from
 // one that actually changed the row.
-func applySubmissionResult(ctx context.Context, tx pgx.Tx, v Verification, submitted []SubmittedDocument, result ProviderResult) (Verification, error) {
+func applySubmissionResult(ctx context.Context, tx pgx.Tx, v Verification, submitted []SubmittedDocument, result ProviderResult, wa workerAudit) (Verification, error) {
 	result, reasonTruncated := normalizeProviderResult(result)
 
 	if result.Outcome == ProviderError {
@@ -278,7 +284,7 @@ func applySubmissionResult(ctx context.Context, tx pgx.Tx, v Verification, submi
 			TenantID: v.TenantID, ActorType: audit.ActorSystem,
 			Action: "kyc.verification_submitted_to_provider", TargetType: "kyc_verification", TargetID: v.ID.String(),
 			Outcome:  audit.OutcomeFailure,
-			Metadata: withReasonTruncated(map[string]any{"provider_id": v.ProviderID, "document_count": len(submitted), "provider_outcome": string(result.Outcome), "reason": result.Reason}, reasonTruncated),
+			Metadata: wa.merge(withReasonTruncated(map[string]any{"provider_id": v.ProviderID, "document_count": len(submitted), "provider_outcome": string(result.Outcome), "reason": result.Reason}, reasonTruncated)),
 		}); err != nil {
 			return Verification{}, fmt.Errorf("kyc: audit provider submission: %w", err)
 		}
@@ -313,143 +319,14 @@ func applySubmissionResult(ctx context.Context, tx pgx.Tx, v Verification, submi
 		TenantID: v.TenantID, ActorType: audit.ActorSystem,
 		Action: "kyc.verification_submitted_to_provider", TargetType: "kyc_verification", TargetID: v.ID.String(),
 		Outcome: audit.OutcomeSuccess,
-		Metadata: withReasonTruncated(map[string]any{
+		Metadata: wa.merge(withReasonTruncated(map[string]any{
 			"provider_id": v.ProviderID, "document_count": len(submitted), "provider_outcome": string(result.Outcome),
 			"reason": result.Reason, "status_applied": applied, "held_for_review": heldForReview,
-		}, reasonTruncated),
+		}, reasonTruncated)),
 	}); err != nil {
 		return Verification{}, fmt.Errorf("kyc: audit provider submission: %w", err)
 	}
 	return updated, nil
-}
-
-// SubmitVerification is ADR 0095 §15.3's phase A(read)/B/C split of the
-// former inline submitVerificationDocuments step (PRH-I2): a short,
-// read-only transaction gathers the verification's terminal-guard and its
-// current non-rejected document set (phase A); the provider is called with
-// NO database transaction/pooled connection held, using a per-call outbound
-// credential resolved via outbound (PROV-OUTBOUND-CRED-1) and a
-// content-derived idempotency key (phase B); the result is applied under a
-// short, bounded, ctx-independent transaction (phase C).
-//
-// IC condition 2 (ADR 0095 §25): an ambiguous, timeout, or transport-error
-// result leaves kyc_verifications.status UNCHANGED - see
-// applySubmissionResult's own doc comment. Callers: internal/httpserver's
-// document-upload handler, after UploadDocument's own transaction has
-// already committed the new document row.
-//
-// pool/outbound/provider follow CreateVerification's identical nil-fails-
-// closed convention. A verification already in a terminal status, or one
-// with no current non-rejected documents to submit at all (the caller races
-// a rejection, or has none yet), is a documented no-op returning the
-// verification unchanged and a nil error - never an error for "nothing to
-// do".
-// tenantID must be the caller's own server-resolved tenant (the same scope
-// the verification row belongs to) - never client-supplied; it scopes every
-// transaction this function opens via pool.WithTenant, mirroring every
-// other tenant-scoped entry point in this codebase.
-func SubmitVerification(ctx context.Context, pool providercred.TenantTxRunner, outbound OutboundCredentialResolver, provider KYCProvider, tenantID uuid.UUID, verificationID uuid.UUID) (Verification, error) {
-	if provider == nil {
-		return Verification{}, fmt.Errorf("%w: no KYC provider configured", ErrProviderUnavailable)
-	}
-	if pool == nil {
-		return Verification{}, fmt.Errorf("%w: KYC submission has no transaction runner configured", ErrProviderUnavailable)
-	}
-	if tenantID == uuid.Nil {
-		return Verification{}, fmt.Errorf("%w: tenant_id is required", ErrInvalidTransition)
-	}
-
-	var (
-		v         Verification
-		submitted []SubmittedDocument
-		proceed   bool
-	)
-	if err := pool.WithTenant(ctx, tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		var err error
-		v, submitted, proceed, err = gatherSubmissionDocuments(ctx, tx, verificationID)
-		return err
-	}); err != nil {
-		return Verification{}, err
-	}
-	if !proceed {
-		return v, nil
-	}
-	// N5 (RV-PRH-I2 KYC code review): a non-terminal verification with NO
-	// live provider reference is an orphan (ADR 0095 §15.2) - fail closed
-	// rather than ever calling provider.SubmitVerification with an EMPTY
-	// reference, which is malformed and PROVIDER DEPENDENT with a real
-	// vendor. Checked here, defense in depth, independent of the identical
-	// guard in UploadDocument - SubmitVerification is itself an exported,
-	// independently callable entry point.
-	if v.ProviderReference == "" {
-		return v, ErrVerificationNotSubmitted
-	}
-	if len(submitted) == 0 {
-		// C4 (RV-PRH-I2 KYC code review): this function's own doc comment
-		// has always said "no current non-rejected documents to submit at
-		// all ... is a documented no-op" - the code did not actually
-		// implement that until now (it called the provider with an empty
-		// set instead). There is nothing to submit, so no call is made,
-		// mirroring the terminal-verification no-op just above it.
-		return v, nil
-	}
-	providerID := provider.ID()
-
-	if outbound == nil {
-		return Verification{}, fmt.Errorf("%w: no outbound credential resolver configured", ErrProviderUnavailable)
-	}
-	cred, err := outbound.Resolve(ctx, pool, tenantID, providerID)
-	if err != nil {
-		slog.Default().Warn("kyc_submit_verification_credential_unavailable",
-			"tenant_id", tenantID.String(), "verification_id", v.ID.String(), "provider_id", providerID)
-		return Verification{}, fmt.Errorf("%w: resolve outbound credential: %v", ErrProviderUnavailable, err)
-	}
-	if cred.TenantID != tenantID || cred.ProviderID != providerID || cred.Domain != "kyc" {
-		return Verification{}, fmt.Errorf("%w: outbound credential binding mismatch", ErrProviderUnavailable)
-	}
-
-	call := CallContext{
-		TenantID: tenantID, ProviderID: providerID, Credential: cred,
-		IdempotencyKey: submissionIdempotencyKey(v.ID, submitted), Deadline: time.Now().Add(defaultProviderCallTimeout),
-	}
-	// IO-1B (architect review, INV-IO-1(b)): defence in depth behind the
-	// primary API-shape control (no function that can reach
-	// KYCProvider.SubmitVerification takes a pgx.Tx) - refuse the adapter
-	// outbound call itself if ctx is, despite that, marked as holding a
-	// pooled database transaction. See ErrProviderCallRefused's own doc
-	// comment (provider.go) for why this exists as a SECOND control, not
-	// the primary one.
-	if txscope.Held(ctx) {
-		return Verification{}, ErrProviderCallRefused
-	}
-	result, err := provider.SubmitVerification(ctx, v.ProviderReference, submitted, call)
-	if err != nil {
-		// A transport-level failure here is IC condition 2's own case,
-		// applied without ever reaching applySubmissionResult (there is no
-		// ProviderResult to apply): kyc_verifications.status is left
-		// completely untouched, exactly like a returned ProviderError
-		// outcome, since neither ever reaches statusForOutcome. No audit
-		// row is written for this specific failure (mirrors
-		// CreateVerification's identical phase-B-failure silence) - the
-		// next upload re-submits the current document set.
-		slog.Default().Warn("kyc_submit_verification_provider_call_failed",
-			"tenant_id", tenantID.String(), "verification_id", v.ID.String(), "provider_id", providerID)
-		return v, fmt.Errorf("%w: submit verification to provider: %v", ErrProviderUnavailable, err)
-	}
-
-	phaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), phaseCTimeout)
-	defer cancel()
-	var applied Verification
-	if err := pool.WithTenant(phaseCtx, tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		var err error
-		applied, err = applySubmissionResult(ctx, tx, v, submitted, result)
-		return err
-	}); err != nil {
-		slog.Default().Error("kyc_submit_verification_phase_c_failed",
-			"tenant_id", tenantID.String(), "verification_id", v.ID.String(), "error", err.Error())
-		return Verification{}, fmt.Errorf("kyc: submit verification: apply result: %w", err)
-	}
-	return applied, nil
 }
 
 func derefOrEmpty(s *string) string {

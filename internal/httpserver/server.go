@@ -193,8 +193,12 @@ type Deps struct {
 	// resolver (ADR 0095 §15.2/§15.3/§9.1, PROV-OUTBOUND-CRED-1) - a MOCK
 	// synthetic credential behind a synthetic/MOCK provider adapter, or the
 	// real provider-credential subsystem's Outbound("kyc") once a real
-	// adapter exists. Nil fails every CreateVerification/SubmitVerification
-	// call closed, mirroring CasinoOutboundCredentials' identical
+	// adapter exists. PRH-2 E1 (ADR 0106): no HTTP handler calls the KYC
+	// vendor any more (create/upload only record a durable outbox row), so
+	// this field no longer feeds a handler; the same resolver is handed to
+	// the KYC submission worker (cmd/platform-api, kyc.OutboxWorker), the
+	// only caller of the vendor. A nil resolver fails every worker call
+	// closed (not sent, retried), mirroring CasinoOutboundCredentials'
 	// nil-resolver convention - never a silent fallback to an
 	// unauthenticated or cached credential.
 	KYCOutboundCredentials kyc.OutboundCredentialResolver

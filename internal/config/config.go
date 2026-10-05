@@ -232,6 +232,13 @@ type Config struct {
 	// measured value). Env: PAYMENTS_SWEEP_INTERVAL_SECONDS (positive).
 	PaymentsSweepInterval time.Duration
 
+	// KYCOutboxInterval is the tick of the KYC submission outbox worker loop
+	// (internal/kyc.RunOutboxWorkerLoop, PRH-2 E1 / KYC-SUBMIT-OUTBOX-1, ADR
+	// 0106 section 7.3). Default 5s is an engineering RECOMMENDATION
+	// (reversible, not a measured value and not a compliance deadline).
+	// Env: KYC_OUTBOX_INTERVAL_SECONDS (positive).
+	KYCOutboxInterval time.Duration
+
 	// Stage 4H-B1 Wave 3 Phase 3 (bonus-engine): the three scheduled
 	// Bonus Engine jobs (internal/bonus.RunDepositSweepSchedulerLoop/
 	// RunCashbackSchedulerLoop/RunExpirySweepSchedulerLoop), mirroring
@@ -460,6 +467,7 @@ func Load() (Config, error) {
 		RGEnumerationSweepInterval:       15 * time.Minute,
 		RGEnumerationStalledThreshold:    15 * time.Minute,
 		PaymentsSweepInterval:            15 * time.Second,
+		KYCOutboxInterval:                5 * time.Second,
 		BonusDepositSweepInterval:        5 * time.Minute,
 		BonusCashbackSweepInterval:       time.Hour,
 		BonusExpirySweepInterval:         time.Hour,
@@ -522,6 +530,16 @@ func Load() (Config, error) {
 			return Config{}, fmt.Errorf("config: PAYMENTS_SWEEP_INTERVAL_SECONDS must be positive")
 		}
 		cfg.PaymentsSweepInterval = time.Duration(n) * time.Second
+	}
+	if v := os.Getenv("KYC_OUTBOX_INTERVAL_SECONDS"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return Config{}, fmt.Errorf("config: invalid KYC_OUTBOX_INTERVAL_SECONDS: %w", err)
+		}
+		if n <= 0 {
+			return Config{}, fmt.Errorf("config: KYC_OUTBOX_INTERVAL_SECONDS must be positive")
+		}
+		cfg.KYCOutboxInterval = time.Duration(n) * time.Second
 	}
 	if v := os.Getenv("RG_ENUMERATION_SWEEP_INTERVAL_SECONDS"); v != "" {
 		n, err := strconv.Atoi(v)

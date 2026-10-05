@@ -44,6 +44,23 @@ type kycCaseResponse struct {
 	CreatedAt            string `json:"created_at"`
 	UpdatedAt            string `json:"updated_at"`
 	HasVerifiedResidence bool   `json:"has_verified_residence"`
+
+	// PRH-2 E1 (ADR 0106 section 7.2, identity-compliance C1): the read-only
+	// derived vendor-submission state (none, queued, sent, failed,
+	// cancelled) and, when failed or cancelled, the closed error class or
+	// cancel reason. Staff only; derived by kyc.StaffSubmissionStates, never
+	// part of kyc.Verification. It exposes no vendor reference, document data
+	// or counters. Alert NOTIFICATION is NOT IMPLEMENTED: this field is the
+	// only place a stranded submission becomes visible.
+	SubmissionState        string `json:"submission_state"`
+	SubmissionErrorClass   string `json:"submission_last_error_class,omitempty"`
+	SubmissionCancelReason string `json:"submission_cancel_reason,omitempty"`
+}
+
+func applySubmissionState(resp *kycCaseResponse, st kyc.SubmissionState) {
+	resp.SubmissionState = string(st.State)
+	resp.SubmissionErrorClass = st.LastErrorClass
+	resp.SubmissionCancelReason = st.CancelReason
 }
 
 func toKYCCaseResponse(v kyc.Verification) kycCaseResponse {
@@ -117,10 +134,19 @@ func newListKYCCasesHandler(deps Deps) http.HandlerFunc {
 		var (
 			verifications []kyc.Verification
 			total         int
+			states        map[uuid.UUID]kyc.SubmissionState
 		)
 		err = deps.DB.WithTenant(r.Context(), tc.TenantID, func(ctx context.Context, tx pgx.Tx) error {
 			var err error
 			verifications, total, err = kyc.ListVerificationsForTenant(ctx, tx, params)
+			if err != nil {
+				return err
+			}
+			ids := make([]uuid.UUID, len(verifications))
+			for i, v := range verifications {
+				ids[i] = v.ID
+			}
+			states, err = kyc.StaffSubmissionStates(ctx, tx, ids)
 			return err
 		})
 		if err != nil {
@@ -130,7 +156,9 @@ func newListKYCCasesHandler(deps Deps) http.HandlerFunc {
 		}
 		items := make([]kycCaseResponse, 0, len(verifications))
 		for _, v := range verifications {
-			items = append(items, toKYCCaseResponse(v))
+			item := toKYCCaseResponse(v)
+			applySubmissionState(&item, states[v.ID])
+			items = append(items, item)
 		}
 		writeJSON(w, http.StatusOK, newPagedResponse(items, p, total))
 	}
@@ -160,9 +188,18 @@ func newListVerificationsForAccountHandler(deps Deps) http.HandlerFunc {
 		}
 
 		var verifications []kyc.Verification
+		var states map[uuid.UUID]kyc.SubmissionState
 		err = deps.DB.WithTenant(r.Context(), tc.TenantID, func(ctx context.Context, tx pgx.Tx) error {
 			var err error
 			verifications, err = kyc.ListVerificationsForAccount(ctx, tx, targetID)
+			if err != nil {
+				return err
+			}
+			ids := make([]uuid.UUID, len(verifications))
+			for i, v := range verifications {
+				ids[i] = v.ID
+			}
+			states, err = kyc.StaffSubmissionStates(ctx, tx, ids)
 			return err
 		})
 		if err != nil {
@@ -172,7 +209,12 @@ func newListVerificationsForAccountHandler(deps Deps) http.HandlerFunc {
 		}
 		resp := make([]verificationResponse, 0, len(verifications))
 		for _, v := range verifications {
-			resp = append(resp, toVerificationResponse(v))
+			item := toVerificationResponse(v)
+			st := states[v.ID]
+			item.SubmissionState = string(st.State)
+			item.SubmissionErrorClass = st.LastErrorClass
+			item.SubmissionCancelReason = st.CancelReason
+			resp = append(resp, item)
 		}
 		writeJSON(w, http.StatusOK, resp)
 	}
