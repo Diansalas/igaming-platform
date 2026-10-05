@@ -627,7 +627,12 @@ func TestR3_Concurrency_TwoSchedulerInstances(t *testing.T) {
 	ctx := context.Background()
 
 	// (a) another instance holds the tenant's lock while this one matches.
-	held, release, done := make(chan struct{}), make(chan struct{}), make(chan error, 1)
+	held, releaseCh, done := make(chan struct{}), make(chan struct{}), make(chan error, 1)
+	// release is idempotent and also deferred, so a failing assertion below can
+	// never leave the holder (and with it the pool cleanup) blocked forever.
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseCh) }) }
+	defer release()
 	go func() {
 		done <- w.pool.WithTenant(ctx, w.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 			var ok bool
@@ -638,7 +643,7 @@ func TestR3_Concurrency_TwoSchedulerInstances(t *testing.T) {
 				return errors.New("holder could not take the lock")
 			}
 			close(held)
-			<-release
+			<-releaseCh
 			return nil
 		})
 	}()
@@ -649,7 +654,7 @@ func TestR3_Concurrency_TwoSchedulerInstances(t *testing.T) {
 	}
 	before := w.r3Snapshot()
 	o := r3Outcome(t, w.r3Sweep([]uuid.UUID{w.f.tenantID}, src), w.f.tenantID)
-	close(release)
+	release()
 	if err := <-done; err != nil {
 		t.Fatalf("lock holder: %v", err)
 	}
