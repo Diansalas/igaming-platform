@@ -4,6 +4,7 @@ package payments
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -298,11 +299,15 @@ func TestK3_Y07_RevokeVersusExecutionIsSerialisedByTheShareLocks(t *testing.T) {
 	if !hooked {
 		t.Fatal("the after-share-locks hook never ran")
 	}
-	if revokeErr == nil {
-		t.Fatal("a revoke completed WHILE the execution held its share locks (the A8 L1 locks are missing)")
+	isTimeout := func(err error) bool {
+		return err != nil && (errors.Is(err, context.DeadlineExceeded) || strings.Contains(err.Error(), "context deadline exceeded") ||
+			strings.Contains(err.Error(), "canceling statement") || k3Code(err) == "57014")
 	}
-	if suspendErr == nil {
-		t.Fatal("a staff suspension completed WHILE the execution held its share locks (the staff lock is missing)")
+	if !isTimeout(revokeErr) {
+		t.Fatalf("a revoke must WAIT for the execution's share locks and time out; got %v (nil = it completed: the A8 L1 locks are missing)", revokeErr)
+	}
+	if !isTimeout(suspendErr) {
+		t.Fatalf("a staff suspension must WAIT for the share locks and time out; got %v (nil = the staff lock is missing)", suspendErr)
 	}
 	// After the execution commits, the revoke goes through.
 	if err := w.pool.WithPrincipalScope(context.Background(), w.f.tenantID, w.tenantAdmin.ID, func(ctx context.Context, tx pgx.Tx) error {
@@ -310,6 +315,8 @@ func TestK3_Y07_RevokeVersusExecutionIsSerialisedByTheShareLocks(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("revoke after the execution: %v", err)
 	}
+	// ... and so does the suspension (it was refused only by the lock wait).
+	w.setStaff(w.f2.ID, "status", "suspended")
 }
 
 // code-review F-2 (K3-S2): the requester's Person must be UNCHANGED since submission.

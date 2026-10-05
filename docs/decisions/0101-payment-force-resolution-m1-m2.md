@@ -1686,7 +1686,7 @@ implemented as written; where this record differs it says so in §27.4.
 | Alerts for payout disputes and T14 (PAY-PAYOUT-DISPUTE-ALERT-1) and alert delivery (ALERT-DELIVERY-1) | `NOT IMPLEMENTED` (open; nothing here delivers or pages anyone) |
 | Closed-tenant player-funds path (ADR 0107) | design only, `NOT IMPLEMENTED` |
 | Casino / sportsbook 4xx mapping of the all-sessions ledger trigger's `MR020` (O-1) | `NOT IMPLEMENTED`: the posting is refused by the database (tested), the HTTP layer returns its generic 5xx |
-| Backoffice permissions (`backoffice/src/auth/permissions.ts` + test) | `IMPLEMENTED`; `payments` did not run vitest (no `node_modules` in its environment). The code-review run reports `npx vitest run src/auth/permissions.test.ts` 11/11 PASS and `tsc --noEmit` clean (local, reported, not CI) |
+| Backoffice permissions (`backoffice/src/auth/permissions.ts` + test) | `IMPLEMENTED`; `payments` did not run vitest (no `node_modules` in its environment). QA reports PASS (local): vitest 17 files / 96 tests, `tsc --noEmit` clean (local, not CI) |
 
 ### 27.2 What was verified
 
@@ -1779,6 +1779,16 @@ Applied after the ledger-finance, code-review and security implementation review
   the integration tag); `cmd/migrate verify` clean with migrations 0001..0115 contiguous (E1's 0114 merged); `go test -race -tags integration -count=1 -p 1 -skip
   'TestStoreOutage_DoesNotPinPool|TestResolutionIsolation_' ./...` PASS for every package (the `internal/db` and `internal/kyc` gates re-run PASS after the allowlist line).
   Mutation: 21 new mutants, all KILLED after three test strengthenings (evidence file, "FIX BATCH" section); the 14 classified survivors of the original run are unchanged.
+- **Sweep command (state the timeout):** `go test -race -tags integration -count=1 -p 1 -timeout 30m -skip 'TestStoreOutage_DoesNotPinPool|TestResolutionIsolation_' <pkgs>`; the full
+  `internal/payments` package takes about 23 minutes under `-race`, so the default 10-minute `go test` timeout is NOT enough.
+- **Code-review survivors N01, N03, N05, N10, N13, N18: accepted, with reasons (not test gaps in the money path).** N01 (insert-guard "withdrawal submitted" dropped) and N18 (executor Go
+  `wr.State != submitted` re-check dropped): redundant while no payout cascade or staff-side withdrawal Fail/Complete path exists (a withdrawal leaves `submitted` only with its single attempt's terminal
+  transition; `payment_m2_admits`, the `-> executing` guard and `withdrawal.Complete/Fail`'s CAS remain; C-5c pins the admits layer); required if such a path is ever added. N03 (prefix guard drops
+  `correlation_id = withdrawal_request_id`): redundant (the provider+reserved-id key is unique per tenant and the deferred verifier checks the correlation). N05 (approvals guard drops `state = 'pending'`):
+  reachable only by direct SQL, which can add `approve` rows to a non-pending resolution (pollutes the append-only approvals log; a `reject` still fails MR030); accepted. N10 (`poll_evidence.go` drops
+  `live &&`): a DECLINED deposit that later gets a poll success with a different valid echo would abort the poll transaction at the evidence guard and lose the P1 contradiction audit; no cheap fixture
+  exists without payments internals, so it is an accepted residual (the audit is lost, no money moves). N13 (the Step B `reverses_transaction_id` clearing branch of (c)): LATENT, no writer exists
+  (WITHDRAWAL-REVERSAL-1 not implemented); **launch flag:** add the scratch-DB test with that writer, or remove the branch, before any real-money enablement.
 - **Post-fix concurrency run (recorded by ledger-finance, local):** `-race -count=20 -run 'TestK3_C12|TestK3_C26|TestK3_Y07' ./internal/payments/` PASS (392s). The earlier `-count=50` run refers to `041fb55`.
 - **Residual (security finding 1, pre-existing K2, HIGH, launch-blocking):** clearing of (d) and (c2) trusts executed K2 `compensating_entry` requests. Those can be forged through a TEMP-table
   shadow on the unpinned 0112/0113 helper functions until TRIGGER-SEARCH-PATH-1 is fixed for them; 0115 pins only its own 18 functions.

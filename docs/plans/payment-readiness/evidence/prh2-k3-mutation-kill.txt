@@ -176,3 +176,10 @@ payment_statement_k3.go (G14 duplicates, G05 tenant predicate: still equivalent/
 LFD8   KILLED    (d) raising loop narrowed to resolvesTo | --- FAIL: TestK3_C42c_ABorrowedLineStillRaisesDAndC2
 LFD8b  KILLED    (c2) anySucceeded narrowed to resolvesTo | --- FAIL: TestK3_C42c_ABorrowedLineStillRaisesDAndC2
 (restore+cmp OK for both; the F-1 mutants are named F01..F03 above, matching ADR 0101 27.6.)
+
+---- QA gate (2026-10-05) ----
+Code-review survivors N01, N03, N05, N10, N13, N18: classified in ADR 0101 27.6 (accepted-redundant, or latent with a launch flag for N13).
+QA mutants M12 (approvals guard "this Person already decided" dropped), M16 (recount DISTINCT ON (c.person) removed) and the joint MJ: see the results appended below.
+M12   KILLED    approvals guard "this Person already decided" dropped | TestK3_Y12_TwoAccountsOnePersonCountOnce
+M16   KILLED    recount DISTINCT ON (c.person) removed | TestK3_Y12_TwoAccountsOnePersonCountOnce
+MJ    KILLED    both | TestK3_Y12_TwoAccountsOnePersonCountOnce (restore+cmp OK for all three)
