@@ -44,10 +44,50 @@ func TestNoRuntimeTempObjectsInProductionCode(t *testing.T) {
 		}
 	}
 
+	// Self-check: the walk covers cmd/ AND internal/ (a fixture proves it).
+	fixtureRoot := t.TempDir()
+	for _, d := range []string{"cmd/x", "internal/y"} {
+		if err := os.MkdirAll(filepath.Join(fixtureRoot, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(fixtureRoot, d, "f.go"), []byte("package x\nconst q = `CREATE TEMP TABLE t (a int)`\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, off := scanForTempUse(t, fixtureRoot, pat); len(off) != 2 {
+		t.Fatalf("self-check: the scan must flag the fixture in BOTH cmd/ and internal/, got %v", off)
+	}
+
 	root, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
 		t.Fatal(err)
 	}
+	scanned, offenders := scanForTempUse(t, root, pat)
+	if scanned < 100 {
+		t.Fatalf("scanned only %d production .go files; the walk is broken", scanned)
+	}
+	if len(offenders) > 0 {
+		t.Fatalf("production code creates TEMP objects, which the runtime role cannot do after migration 0116 (ADR 0108); revisit that invariant first: %v", offenders)
+	}
+}
+
+var (
+	blockComment = regexp.MustCompile(`(?s)/\*.*?\*/`)
+	lineComment  = regexp.MustCompile(`(?m)//[^\n]*`)
+)
+
+// stripGoComments removes /* */ and // comments. It is deliberately naive: a
+// "//" inside a string literal (a URL) also drops the rest of that line, which
+// can only hide text AFTER the URL on the same line - an accepted limit of a
+// tripwire whose real control is the database REVOKE.
+func stripGoComments(src string) string {
+	return lineComment.ReplaceAllString(blockComment.ReplaceAllString(src, ""), "")
+}
+
+// scanForTempUse walks cmd/ and internal/ under root and returns the number of
+// non-test .go files scanned and the offending "file: match" strings.
+func scanForTempUse(t *testing.T, root string, pat *regexp.Regexp) (int, []string) {
+	t.Helper()
 	var scanned int
 	var offenders []string
 	for _, top := range []string{"cmd", "internal"} {
@@ -73,23 +113,5 @@ func TestNoRuntimeTempObjectsInProductionCode(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if scanned < 100 {
-		t.Fatalf("scanned only %d production .go files; the walk is broken", scanned)
-	}
-	if len(offenders) > 0 {
-		t.Fatalf("production code creates TEMP objects, which the runtime role cannot do after migration 0116 (ADR 0108); revisit that invariant first: %v", offenders)
-	}
-}
-
-var (
-	blockComment = regexp.MustCompile(`(?s)/\*.*?\*/`)
-	lineComment  = regexp.MustCompile(`(?m)//[^\n]*`)
-)
-
-// stripGoComments removes /* */ and // comments. It is deliberately naive: a
-// "//" inside a string literal (a URL) also drops the rest of that line, which
-// can only hide text AFTER the URL on the same line - an accepted limit of a
-// tripwire whose real control is the database REVOKE.
-func stripGoComments(src string) string {
-	return lineComment.ReplaceAllString(blockComment.ReplaceAllString(src, ""), "")
+	return scanned, offenders
 }

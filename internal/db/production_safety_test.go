@@ -15,6 +15,12 @@ type fakeTableOwnershipChecker struct {
 	err         error
 	holdsTemp   bool
 	tempErr     error
+	member      bool
+	memberErr   error
+}
+
+func (f fakeTableOwnershipChecker) ConnectingRoleHasMemberships(ctx context.Context) (bool, error) {
+	return f.member, f.memberErr
 }
 
 func (f fakeTableOwnershipChecker) ConnectingRoleHoldsTemp(ctx context.Context) (bool, error) {
@@ -91,5 +97,20 @@ func TestVerifyRuntimeRoleInProduction_TempPrivilegeFailsClosed(t *testing.T) {
 		if err := VerifyRuntimeRoleInProduction(ctx, env, fakeTableOwnershipChecker{ownsNothing: false, holdsTemp: true}); err != nil {
 			t.Errorf("environment %q must not be gated: %v", env, err)
 		}
+	}
+}
+
+// ADR 0108 I2: a runtime role with any role membership fails production startup closed.
+func TestVerifyRuntimeRoleInProduction_MembershipFailsClosed(t *testing.T) {
+	ctx := context.Background()
+	err := VerifyRuntimeRoleInProduction(ctx, "production", fakeTableOwnershipChecker{ownsNothing: true, member: true})
+	if err == nil || !strings.Contains(err.Error(), "member of another role") {
+		t.Fatalf("a role with memberships must fail production startup, got %v", err)
+	}
+	if err := VerifyRuntimeRoleInProduction(ctx, "production", fakeTableOwnershipChecker{ownsNothing: true, memberErr: errors.New("boom")}); err == nil {
+		t.Fatal("a failing membership check must fail closed")
+	}
+	if err := VerifyRuntimeRoleInProduction(ctx, "staging", fakeTableOwnershipChecker{ownsNothing: false, member: true}); err != nil {
+		t.Fatalf("staging is not gated: %v", err)
 	}
 }

@@ -221,6 +221,14 @@ func TestTempRevoke_K2ShadowAttack_SucceedsWhenTempIsGrantedBack(t *testing.T) {
 	if _, err := owner.Raw().Exec(ctx, `GRANT TEMPORARY ON DATABASE `+pgx.Identifier{dbName}.Sanitize()+` TO PUBLIC`); err != nil {
 		t.Fatal(err)
 	}
+	// QA P3: the production gate sees the re-opened hole on a fresh runtime pool.
+	rtFresh := tempRevokeRuntimePoolAt(t, ru.String())
+	if holds, err := rtFresh.ConnectingRoleHoldsTemp(ctx); err != nil || !holds {
+		t.Fatalf("with PUBLIC TEMP granted back ConnectingRoleHoldsTemp must be true, got %v %v", holds, err)
+	}
+	if err := db.VerifyRuntimeRoleInProduction(ctx, "production", rtFresh); err == nil || !strings.Contains(err.Error(), "TEMPORARY") {
+		t.Fatalf("production startup must refuse a runtime role that can create TEMP objects, got %v", err)
+	}
 	// The shadows must live in the SAME session as the forged Submit/Decide, so the
 	// attack runs on a single-connection runtime pool (session-scoped TEMP tables).
 	rt1, err := db.Connect(ctx, ru.String(), 1, 5*time.Second)

@@ -33,6 +33,16 @@ func run() error {
 	}
 	command := flag.Arg(0)
 
+	// The `down` guard runs BEFORE any database connection, so it holds even when
+	// the database is unreachable and is testable end to end (main_test.go execs
+	// the built binary).
+	if command == "down" {
+		appEnv, appEnvSet := os.LookupEnv("APP_ENV")
+		if err := checkDownAllowed(appEnv, appEnvSet); err != nil {
+			return err
+		}
+	}
+
 	databaseURL := os.Getenv("DATABASE_URL")
 	if databaseURL == "" {
 		return fmt.Errorf("DATABASE_URL is required")
@@ -58,10 +68,6 @@ func run() error {
 		fmt.Printf("migrate: applied %d migration(s): %v\n", len(applied), applied)
 		return nil
 	case "down":
-		appEnv, appEnvSet := os.LookupEnv("APP_ENV")
-		if err := checkDownAllowed(appEnv, appEnvSet); err != nil {
-			return err
-		}
 		rolledBack, err := pool.MigrateDown(ctx, *dir, *steps)
 		if err != nil {
 			return err

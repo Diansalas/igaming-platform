@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -440,5 +441,83 @@ func TestTempRevoke_ProvisioningScriptsCarryTheRevoke(t *testing.T) {
 				t.Errorf("%s: missing %q", f, want)
 			}
 		}
+	}
+}
+
+// QA P3 / security D2: pin the 'TEMP' privilege NAME in ConnectingRoleHoldsTemp.
+// On a THROWAWAY scratch database (database-level GRANT/REVOKE only; no role is
+// created or altered) the runtime role holds CREATE but not TEMP, then TEMP but
+// not CREATE. A query that asked about CREATE instead of TEMP gets both wrong.
+func TestTempRevoke_ConnectingRoleHoldsTemp_PinsTheTempPrivilegeName(t *testing.T) {
+	scratchURL := scratchdb.New(t, "temprevp_")
+	rtURL := runtimeURLFor(t, scratchURL)
+	su, err := url.Parse(scratchURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ident := pgx.Identifier{strings.TrimPrefix(su.Path, "/")}.Sanitize()
+	ctx := context.Background()
+	rt := checksumScratchPool(t, rtURL)
+	var super, bypass bool
+	if err := rt.WithoutTenant(ctx, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user`).Scan(&super, &bypass)
+	}); err != nil || super || bypass {
+		t.Fatalf("runtime role must be neither superuser nor BYPASSRLS: %v super=%v bypass=%v", err, super, bypass)
+	}
+	setup := func(stmts ...string) {
+		execOn(t, scratchURL, func(ctx context.Context, c *pgx.Conn) error {
+			for _, s := range stmts {
+				if _, err := c.Exec(ctx, s); err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+	}
+	holds := func() bool {
+		h, err := rt.ConnectingRoleHoldsTemp(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return h
+	}
+	// Default database: PUBLIC TEMP -> true.
+	if !holds() {
+		t.Fatal("a fresh database grants TEMP to PUBLIC: want true")
+	}
+	// CREATE but not TEMP.
+	setup(`REVOKE TEMPORARY ON DATABASE `+ident+` FROM PUBLIC`, `GRANT CREATE ON DATABASE `+ident+` TO igaming_runtime`)
+	if holds() {
+		t.Fatal("the runtime role holds CREATE but not TEMP: ConnectingRoleHoldsTemp must be false")
+	}
+	// TEMP but not CREATE.
+	setup(`REVOKE CREATE ON DATABASE `+ident+` FROM igaming_runtime`, `GRANT TEMPORARY ON DATABASE `+ident+` TO igaming_runtime`)
+	if !holds() {
+		t.Fatal("the runtime role holds TEMP but not CREATE: ConnectingRoleHoldsTemp must be true")
+	}
+	if err := VerifyRuntimeRoleInProduction(ctx, "production", rt); err == nil || !strings.Contains(err.Error(), "TEMPORARY") {
+		t.Fatalf("production gate must refuse a role holding TEMP, got %v", err)
+	}
+}
+
+// ADR 0108 I2: ConnectingRoleHasMemberships reads pg_auth_members for current_user.
+// The runtime role has none; the test-admin role (member of the owner role) has one.
+// No role or membership is created or changed.
+func TestTempRevoke_ConnectingRoleHasMemberships_RuntimeNone_AdminSome(t *testing.T) {
+	rt := kycRuntimePool(t, 1)
+	if has, err := rt.ConnectingRoleHasMemberships(context.Background()); err != nil || has {
+		t.Fatalf("runtime role: has=%v err=%v, want no memberships", has, err)
+	}
+	adminURL := os.Getenv("TEST_ADMIN_DATABASE_URL")
+	if adminURL == "" {
+		t.Skip("TEST_ADMIN_DATABASE_URL not set")
+	}
+	admin, err := Connect(context.Background(), adminURL, 1, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(admin.Close)
+	if has, err := admin.ConnectingRoleHasMemberships(context.Background()); err != nil || !has {
+		t.Fatalf("test-admin role (member of the owner role): has=%v err=%v, want true", has, err)
 	}
 }

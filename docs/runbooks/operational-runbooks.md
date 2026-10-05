@@ -141,9 +141,17 @@ glossed over; see `docs/runbooks/observability-and-alerting.md` and
    carry the database ACL, but `schema_migrations` still lists 0116, so `cmd/migrate up` will NOT re-apply it.**
    Run the 0116 up SQL (`migrations/0116_revoke_temp_from_runtime.up.sql`) or the environment's role-provisioning
    script (`deploy/aws/sql/init-runtime-role.rds.sql` on AWS, `deploy/init-app-role.sql` for the dev bootstrap)
-   directly as the database OWNER with psql. Then recycle or terminate the `igaming_runtime` backends
-   (`SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename='igaming_runtime' AND pid <> pg_backend_pid()`),
-   because a session that created a TEMP table before the revoke keeps it. In production the platform refuses to
+   directly as the database OWNER with psql. Then recycle or terminate the `igaming_runtime` backends, because a
+   session that created a TEMP table before the revoke keeps it. Terminating needs a role with `pg_signal_backend`
+   (on RDS the master user, an rds_superuser); a plain non-superuser owner is DENIED
+   (`permission denied to terminate process`) and the shadow stays alive. Either run, as that role,
+   `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename='igaming_runtime' AND pid <> pg_backend_pid()`
+   or, preferably in ECS, **force a new deployment of the platform-api service** so every runtime task and its
+   pooled sessions are replaced. Then confirm no live shadow remains (as the owner; must return NO rows):
+   ```sql
+   SELECT n.nspname||'.'||c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE n.nspname ~ '^pg_temp_[0-9]+$' AND c.relowner = 'igaming_runtime'::regrole;
+   ``` In production the platform refuses to
    start while the connecting role holds TEMP. Verify:
    ```sql
    -- as igaming_runtime, connected to the app DB:
@@ -152,12 +160,15 @@ glossed over; see `docs/runbooks/observability-and-alerting.md` and
           (SELECT rolsuper OR rolbypassrls FROM pg_roles WHERE rolname=current_user) AS privileged, -- must be f
           (SELECT count(*) FROM pg_auth_members
             WHERE member=(SELECT oid FROM pg_roles WHERE rolname=current_user)) AS memberships,   -- must be 0
-          (SELECT count(*) FROM pg_proc WHERE prosecdef)                        AS secdef_fns;    -- must be 0
+          (SELECT count(*) FROM pg_proc WHERE prosecdef)                        AS secdef_fns;    -- must be 0 (see caveat)
    BEGIN; CREATE TEMP TABLE tsp1_probe(a int); ROLLBACK;                      -- must fail 42501
    -- as the owner:
    SELECT count(*) FROM pg_database d, LATERAL aclexplode(COALESCE(d.datacl, acldefault('d', d.datdba))) a
     WHERE d.datname = current_database() AND a.grantee = 0 AND a.privilege_type = 'TEMPORARY'; -- must be 0
    ```
+   Caveat on `secdef_fns`: the count covers all of `pg_proc`, including `pg_catalog`; on RDS the `rds_*` helper
+   objects may add SECURITY DEFINER functions. Read the condition as "0, or each one reviewed as not callable by
+   `igaming_runtime`". `memberships` must be 0 (production startup also refuses a runtime role that is a member of any role).
    When applying 0116 to a live environment for the first time, apply it before runtime traffic (the AWS deploy
    flow does) or recycle the runtime pools straight afterwards. `cmd/migrate down` is refused in production.
 

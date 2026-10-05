@@ -5,7 +5,9 @@
   applied in the fix batch recorded in section 7. Owner-authorized fix (smallest safe change).
 - **Decision type:** database privilege hardening; no new service boundary, no change to how tenant isolation is
   enforced, no change to the ledger account model.
-- **Registry:** TRIGGER-SEARCH-PATH-1 and TRIGGER-SEARCH-PATH-1-UPGRADE (exploitation path closed; pinning residual open).
+- **Registry:** TRIGGER-SEARCH-PATH-1 and TRIGGER-SEARCH-PATH-1-UPGRADE: exploitation path closed **for the runtime
+  role and other non-owner roles** (the owner keeps TEMP); pinning of the older 0026..0113 functions is
+  **NOT IMPLEMENTED** (residual, defence in depth).
 - **Source:** `docs/plans/prh2-hardening-round/reviews/k3-delta-security.md` finding 1.
 
 ## 1. Invariant
@@ -102,6 +104,12 @@ run on the owner pool.
   reintroduces it without revisiting this ADR.
 - Large sorts and hash spills use temp FILES, not the TEMPORARY privilege, and are unaffected (security verified a
   13.9 MB external merge sort and a 17.5 MB hash aggregate as the runtime role).
+- **Production gate scope and decision.** The startup gate (`db.VerifyRuntimeRoleInProduction`) now refuses a runtime role that
+  owns tables, holds TEMP, or is a member of any other role (`pg_auth_members`; this covers the PG16 INHERIT FALSE / SET TRUE
+  case of I2). Like the pre-existing ownership gate it runs only for production (an unset APP_ENV counts as production,
+  `GuardEnvironment`); **staging (`APP_ENV=staging`) is not gated.** Extending the gate to staging would cost nothing
+  there (its ECS service connects as `igaming_runtime`) but would change an established gate's scope; the decision
+  is to leave it as is and record it, to be revisited by `security`.
 - Recorded, not done here: (I1) on RDS consider `REVOKE CONNECT ON DATABASE postgres FROM PUBLIC` (the runtime role
   can connect to, and hold TEMP in, other databases on the server; there is no cross-database access, so no tenant
   data is reachable); (I2) a future PostgreSQL 16 membership of `igaming_runtime` with INHERIT FALSE, SET TRUE in a role

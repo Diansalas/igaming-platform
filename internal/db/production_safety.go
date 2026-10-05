@@ -13,6 +13,22 @@ type tableOwnershipChecker interface {
 	// ConnectingRoleHoldsTemp reports whether the connecting role can create
 	// temporary objects in the current database (PRH-2 R2, ADR 0108).
 	ConnectingRoleHoldsTemp(ctx context.Context) (bool, error)
+	// ConnectingRoleHasMemberships reports whether the connecting role is a
+	// member of any other role (pg_auth_members). A membership with INHERIT
+	// FALSE, SET TRUE (PostgreSQL 16) would let it SET ROLE into a role that
+	// holds TEMP without has_database_privilege seeing it (ADR 0108, I2).
+	ConnectingRoleHasMemberships(ctx context.Context) (bool, error)
+}
+
+// ConnectingRoleHasMemberships implements the interface method of the same name.
+func (p *Pool) ConnectingRoleHasMemberships(ctx context.Context) (bool, error) {
+	var has bool
+	if err := p.pool.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM pg_auth_members WHERE member = (SELECT oid FROM pg_roles WHERE rolname = current_user))`,
+	).Scan(&has); err != nil {
+		return false, fmt.Errorf("db: check connecting role's role memberships: %w", err)
+	}
+	return has, nil
 }
 
 // ConnectingRoleHoldsTemp reports whether the role this Pool is connected as
@@ -126,6 +142,23 @@ func VerifyRuntimeRoleInProduction(ctx context.Context, environment string, chec
 				"the current database, so it can shadow tables used by unpinned trigger functions (ADR 0108, " +
 				"TRIGGER-SEARCH-PATH-1); as the database OWNER run the REVOKE statements of migration 0116 (see " +
 				"docs/runbooks/operational-runbooks.md section 7 step 5) and recycle the runtime sessions",
+		)
+	}
+
+	// ADR 0108 I2: the runtime role must be a member of nothing. Memberships are
+	// how a role could reach TEMP (or any other privilege) through SET ROLE
+	// without holding it directly. NOTE: like the checks above this runs only for
+	// APP_ENV=production (an unset APP_ENV counts as production); staging is NOT
+	// gated. Extending the gate to staging is optional and was left out so the
+	// staging posture stays identical to the existing ownership gate.
+	member, err := checker.ConnectingRoleHasMemberships(ctx)
+	if err != nil {
+		return fmt.Errorf("db: production role-membership safety check failed (fail-closed - refusing to start): %w", err)
+	}
+	if member {
+		return fmt.Errorf(
+			"db: refusing to start in production - the connecting database role is a member of another role " +
+				"(pg_auth_members); the runtime role must have no memberships (ADR 0108, I2)",
 		)
 	}
 	return nil
