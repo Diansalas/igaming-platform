@@ -1883,3 +1883,7 @@ Residuals: the DB layer checks platform scope, not `alert:route_manage` (securit
 fix (operators use the list endpoint); a `Sink` that ignores its context still blocks the pass (the external
 monitor's flat `alert_dispatcher_passes_total` alert is the cover); the TEMP-shadow probes run through the owner
 pool because migration 0116 revokes TEMP creation from the runtime role.
+
+### 18.6 Owner confirmation 2026-10-05 (HQ-E1-2) and no-recipient statement
+
+The default severity of `kyc.submission_failed_terminal` is **p2**, confirmed by the owner (ADR 0106 amendment 2026-10-05); the severity stays an `alert_kinds` row (configuration). No alert recipient, channel, vendor or on-call person was created, assumed or invented in this round; routing stays configurable and every route stays disabled by default (0117). ALERT-DELIVERY-1 remains OPEN: there is still no real non-log channel and no configured recipient, so a p2 (or p1) alert is a durable, unrouted record that notifies no human. R3 observation alerts for non-active tenants (drift, run failures) use the same alert kinds and are unrouted for the same reason. The sandbox question (does ADR 0095 §35.4 item 2 forbid a sandbox PSP adapter before delivery exists?) is an open owner decision (registry HUMAN-DECISIONS-ROUND3 item 5).
