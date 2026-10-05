@@ -67,7 +67,7 @@ func TestKYCWebhook_PlayerComputedSignature_Rejected(t *testing.T) {
 		AccessTokenTTL:         5 * time.Minute,
 		RefreshTokenTTL:        time.Hour,
 		PersonResolver:         identityresolution.NewMockPersonResolver(),
-		KYCOrchestrator:        kyc.NewOrchestrator(map[string]kyc.KYCProvider{"mock": mockProvider}, kyc.NewMockWebhookCredentials(mockProvider)),
+		KYCOrchestrator:        newKYCOrchestratorWithWorker(t, pool, map[string]kyc.KYCProvider{"mock": mockProvider}, kyc.NewMockWebhookCredentials(mockProvider)),
 		KYCWebhookEnabled:      true,
 		KYCOutboundCredentials: kyc.NewMockOutboundResolver(),
 	}))
@@ -93,6 +93,16 @@ func TestKYCWebhook_PlayerComputedSignature_Rejected(t *testing.T) {
 		t.Fatalf("unexpected initial verification status %q", created.Status)
 	}
 	providerReference := mustGetKYCProviderReference(t, pool, tenant.ID, created.ID)
+	// PRH-2 E1: the create response is the phase-A orphan (unverified); the
+	// outbox worker has since applied the vendor's result (read via the
+	// helper above), so the "unchanged" baseline is read now, after it.
+	baseResp := getJSON(t, srv, "/v1/me/kyc/verifications", player.Tokens.AccessToken)
+	var baseList []playerVerificationResponse
+	decodeBody(t, baseResp, &baseList)
+	if len(baseList) != 1 {
+		t.Fatalf("expected one verification, got %+v", baseList)
+	}
+	baselineStatus := baseList[0].Status
 
 	// Step 3: the player HMACs a forged approval body with a secret they
 	// could never actually derive (see kycE1RandomSecret's doc comment),
@@ -139,7 +149,7 @@ func TestKYCWebhook_PlayerComputedSignature_Rejected(t *testing.T) {
 	listResp := getJSON(t, srv, "/v1/me/kyc/verifications", player.Tokens.AccessToken)
 	var list []playerVerificationResponse
 	decodeBody(t, listResp, &list)
-	if len(list) != 1 || list[0].Status != created.Status {
+	if len(list) != 1 || list[0].Status != baselineStatus {
 		t.Fatalf("expected the verification's status to be unchanged by the forged callback, got %+v", list)
 	}
 

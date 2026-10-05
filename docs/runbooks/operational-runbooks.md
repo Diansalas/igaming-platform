@@ -349,6 +349,71 @@ dispatch is being withheld for a non-active tenant (expected, see step 5).
 
 `PROVIDER DEPENDENT`: all of this is exercised against MOCK adapters only.
 
+---
+
+## 13. KYC outbox stuck (ADR 0106, ADR 0095 section 38, PRH-2 E1)
+
+The KYC submission worker (`kyc.RunOutboxWorkerLoop`, started by `platform-api` only when a KYC orchestrator
+and a KYC outbound credential resolver are both configured) is the ONLY caller of the KYC vendor. HTTP create
+and upload record a durable `kyc_submission_outbox` row and return; the worker sends later. If the worker
+stops, verifications sit `unverified` (the orphan shape) and submitted documents are never sent. Enforcement
+is unaffected: it never reads the outbox, and an unsent verification is simply not verified.
+
+**Nothing pages anyone.** Alert notification for `kyc.submission_failed_terminal` is `NOT IMPLEMENTED` (no
+route, channel or recipient; ALERT-DELIVERY-1 is OPEN). The alert row is durable but unrouted: a human has to be
+watching the signals below. The staff `submission_state` on the compliance case list/verification reads
+(`none`, `queued`, `sent`, `failed`, `cancelled`) is the only place a stranded submission becomes visible.
+
+**Signals.** Gauge `kyc_outbox_last_pass_unix_seconds` stops advancing (stalled if older than ~3x
+`KYC_OUTBOX_INTERVAL_SECONDS`); the oldest-due and oldest-deferred age gauges (observed at claim time, not a
+table scan, so they only move while the worker is claiming) growing (the deferred-age gauge is sampled per pass and reads 0 between deferral re-claims, so alert on it with
+`max_over_time`, not on an instantaneous value); counter `kyc_outbox_items_total` by
+closed `result` label; log lines `kyc_outbox_*`; open `kyc.submission_failed_terminal` alerts;
+`submission_state = failed` in the console; players reporting "stuck in unverified". Metrics carry no tenant,
+provider or row labels.
+
+1. **Not running at all.** `platform-api` logs once that the KYC outbox worker is not configured and does NOT
+   fail startup when the orchestrator or the outbound credential resolver is nil: nothing is ever sent. Fix the
+   deployment; there is no off switch and no manual send.
+2. **Running but rows are not due or not claimed.** A retry waits for `next_attempt_at` (exponential backoff,
+   computed by the database clock). A `claimed` row whose lease has not expired is not re-claimed; after it
+   expires the next pass re-claims it and counts one failed attempt (`lease_expired`). Repeated `lease_expired`
+   means phase C keeps failing (database health, section 7).
+3. **`not_sent` / `ambiguous` retries.** The vendor or credential is unavailable or the result was ambiguous.
+   The verification is never changed by an ambiguous result. After the retry budget the row ends
+   `failed_terminal` and raises the alert. Fix the cause; pending rows resume on their own, but a row that has
+   already ended `failed_terminal` does NOT resume (item 10). A permanent callback 503 for an unbound vendor
+   reference is a known residual (ADR 0095 section 38.3).
+4. **`provider_deconfigured` cancels.** The pinned provider is no longer configured for the tenant (a
+   credential rotation without overlap, ADR 0093). The row is cancelled, not retried. Rotate with overlap.
+   `PROVIDER DEPENDENT`: the rotation-overlap behaviour is not exercised against a real vendor.
+5. **`deferred_tenant_inactive`.** The tenant is not active; the row is deferred without consuming a failed
+   attempt (`claims` grows, `failed_attempts` does not) and is never cancelled. Whether a suspended or closed
+   tenant's submissions should ever be sent or auto-cancelled is HQ-E1-1 (OPEN human/legal question).
+6. **`credential_binding_mismatch`.** The resolved credential did not bind to the row's tenant, provider and
+   kyc domain. This is an INTEGRITY signal, not an outage: it ends `failed_terminal` at once. Escalate to
+   security; do not retry by hand.
+7. **`apply_conflict`.** The vendor accepted the call but a deterministic database conflict (SQLSTATE class 22
+   or 23) stopped the result being recorded. The row ends `failed_terminal`; the audit row names that a
+   vendor-side artefact is not reflected on the platform (`vendor_reference_unbound` for a create,
+   `vendor_state_unreflected` for a submit; never the reference value). Escalate to identity-compliance.
+8. **`decided_concurrently` cancels.** Staff decided the orphan verification while its create was in flight.
+   The staff decision is never overwritten. The vendor may hold a verification bound to no platform row
+   (audit `vendor_reference_unbound=true`).
+9. **Unbound vendor references** (ambiguous create that ended `failed_terminal`, `decided_concurrently`,
+   `apply_conflict` on a create). Whether the vendor-side verification can be found and closed is `PROVIDER
+   DEPENDENT` (ADR 0095 section 38.3). Record the case; never bind a reference by hand.
+10. **`failed_terminal` is never requeued by hand.** The player re-uploads (the same content may be enqueued
+    again) or starts a new verification; documents stranded on a failed orphan stay stored (retention
+    HQ-E1-4). A staff requeue does not exist (KYC-OUTBOX-REQUEUE-1, `NOT IMPLEMENTED`; when built it must be
+    an audited staff action with a reason code that never writes a verification status). Resolve alerts with
+    `alert:manage` and a reason code.
+
+**Never:** lift RLS or a worker fence, disable the outbox trigger, DELETE outbox rows (the table has no DELETE
+path and the down migration refuses on any row), or set a verification status to clear a row.
+
+`MOCK` / `PROVIDER DEPENDENT`: all of this is exercised against the MOCK KYC provider only.
+
 ## 14. Payment force-resolution M1/M2 (ADR 0101, PRH-2 K3)
 
 Applies to `payment_manual_resolutions` / `_approvals` and the routes under

@@ -373,14 +373,9 @@ func seedVerificationThenCallback(t *testing.T, pool *db.Pool, f fixture, outcom
 	t.Helper()
 	provider := NewMockKYCProvider()
 	orch := NewOrchestrator(map[string]KYCProvider{"mock": provider}, NewMockWebhookCredentials(provider))
-	v, err := CreateVerification(context.Background(), pool, NewMockOutboundResolver(), provider, CreateVerificationParams{
-		TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerID, PersonID: f.personID,
-	})
-	if err != nil {
-		t.Fatalf("seedVerificationThenCallback: create verification: %v", err)
-	}
+	v := createViaWorker(t, pool, NewMockOutboundResolver(), provider, f)
 	in := provider.CallbackPayload(f.tenantID, v.ProviderReference, outcome, reason)
-	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		_, _, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock", in)
 		return err
 	})
@@ -482,12 +477,7 @@ func TestEvaluateEnforcement_N3_StaffReviewRequiredThenVendorRejected_StillAppli
 
 	provider := NewMockKYCProvider()
 	orch := NewOrchestrator(map[string]KYCProvider{"mock": provider}, NewMockWebhookCredentials(provider))
-	v, err := CreateVerification(context.Background(), pool, NewMockOutboundResolver(), provider, CreateVerificationParams{
-		TenantID: second.tenantID, BrandID: second.brandID, PlayerAccountID: second.playerID, PersonID: second.personID,
-	})
-	if err != nil {
-		t.Fatalf("seed second account's verification: %v", err)
-	}
+	v := createViaWorker(t, pool, NewMockOutboundResolver(), provider, second)
 
 	staffID := seedComplianceStaff(t, pool, second)
 	if err := pool.WithTenant(context.Background(), second.tenantID, func(ctx context.Context, tx pgx.Tx) error {
@@ -531,12 +521,7 @@ func TestEvaluateEnforcement_N3_StaffReviewRequiredThenVendorApproved_HeldForRev
 
 	provider := NewMockKYCProvider()
 	orch := NewOrchestrator(map[string]KYCProvider{"mock": provider}, NewMockWebhookCredentials(provider))
-	v, err := CreateVerification(context.Background(), pool, NewMockOutboundResolver(), provider, CreateVerificationParams{
-		TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerID, PersonID: f.personID,
-	})
-	if err != nil {
-		t.Fatalf("seed verification: %v", err)
-	}
+	v := createViaWorker(t, pool, NewMockOutboundResolver(), provider, f)
 	staffID := seedComplianceStaff(t, pool, f)
 	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := ReviewVerification(ctx, tx, ReviewVerificationParams{
@@ -578,12 +563,7 @@ func TestEvaluateEnforcement_L1_StaffReviewRequiredThenVendorExpired_HeldForRevi
 
 	provider := NewMockKYCProvider()
 	orch := NewOrchestrator(map[string]KYCProvider{"mock": provider}, NewMockWebhookCredentials(provider))
-	v, err := CreateVerification(context.Background(), pool, NewMockOutboundResolver(), provider, CreateVerificationParams{
-		TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerID, PersonID: f.personID,
-	})
-	if err != nil {
-		t.Fatalf("seed verification: %v", err)
-	}
+	v := createViaWorker(t, pool, NewMockOutboundResolver(), provider, f)
 	staffID := seedComplianceStaff(t, pool, f)
 	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := ReviewVerification(ctx, tx, ReviewVerificationParams{
@@ -623,12 +603,7 @@ func TestEvaluateEnforcement_L2_RedeliveredHeldOutcome_DoesNotDuplicateAudit(t *
 
 	provider := NewMockKYCProvider()
 	orch := NewOrchestrator(map[string]KYCProvider{"mock": provider}, NewMockWebhookCredentials(provider))
-	v, err := CreateVerification(context.Background(), pool, NewMockOutboundResolver(), provider, CreateVerificationParams{
-		TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerID, PersonID: f.personID,
-	})
-	if err != nil {
-		t.Fatalf("seed verification: %v", err)
-	}
+	v := createViaWorker(t, pool, NewMockOutboundResolver(), provider, f)
 	staffID := seedComplianceStaff(t, pool, f)
 	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := ReviewVerification(ctx, tx, ReviewVerificationParams{
@@ -686,12 +661,7 @@ func TestEvaluateEnforcement_L2HeldForReviewDedup_UnaffectedBySubjectRow(t *test
 
 	provider := NewMockKYCProvider()
 	orch := NewOrchestrator(map[string]KYCProvider{"mock": provider}, NewMockWebhookCredentials(provider))
-	v, err := CreateVerification(context.Background(), pool, NewMockOutboundResolver(), provider, CreateVerificationParams{
-		TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerID, PersonID: f.personID,
-	})
-	if err != nil {
-		t.Fatalf("seed verification: %v", err)
-	}
+	v := createViaWorker(t, pool, NewMockOutboundResolver(), provider, f)
 	staffID := seedComplianceStaff(t, pool, f)
 	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := ReviewVerification(ctx, tx, ReviewVerificationParams{

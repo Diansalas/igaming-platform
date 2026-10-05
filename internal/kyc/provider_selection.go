@@ -45,12 +45,11 @@ const configuredKYCProvidersSQL = `SELECT DISTINCT provider_id FROM provider_cre
 
 type syntheticKYCComponent interface{ SyntheticComponent() }
 
-// SelectProvider returns the tenant's configured KYC provider, read in tx
-// (a tenant-scoped transaction for tenantID).
-func (o *Orchestrator) SelectProvider(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID) (KYCProvider, error) {
-	if o == nil || tenantID == uuid.Nil {
-		return nil, ErrNoKYCProviderConfigured
-	}
+// configuredRegisteredProviderIDs is the tenant's configured KYC provider set:
+// the ids of the tenant's active, in-window outbound KYC credential handles
+// (configuredKYCProvidersSQL) that this process also registers an adapter
+// for, sorted. One read in tx (a tenant-scoped transaction for tenantID).
+func (o *Orchestrator) configuredRegisteredProviderIDs(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID) ([]string, error) {
 	rows, err := tx.Query(ctx, configuredKYCProvidersSQL, tenantID)
 	if err != nil {
 		return nil, err
@@ -71,6 +70,32 @@ func (o *Orchestrator) SelectProvider(ctx context.Context, tx pgx.Tx, tenantID u
 		return nil, err
 	}
 	sort.Strings(configured)
+	return configured, nil
+}
+
+// soleSyntheticProvider is rule 2 of the selection order: when the process
+// registers exactly one adapter and it is a synthetic (MOCK) component.
+func (o *Orchestrator) soleSyntheticProvider() (KYCProvider, bool) {
+	if len(o.providers) == 1 {
+		for _, p := range o.providers {
+			if _, synthetic := p.(syntheticKYCComponent); synthetic {
+				return p, true
+			}
+		}
+	}
+	return nil, false
+}
+
+// SelectProvider returns the tenant's configured KYC provider, read in tx
+// (a tenant-scoped transaction for tenantID).
+func (o *Orchestrator) SelectProvider(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID) (KYCProvider, error) {
+	if o == nil || tenantID == uuid.Nil {
+		return nil, ErrNoKYCProviderConfigured
+	}
+	configured, err := o.configuredRegisteredProviderIDs(ctx, tx, tenantID)
+	if err != nil {
+		return nil, err
+	}
 	switch len(configured) {
 	case 1:
 		return o.providers[configured[0]], nil
@@ -78,12 +103,36 @@ func (o *Orchestrator) SelectProvider(ctx context.Context, tx pgx.Tx, tenantID u
 	default:
 		return nil, ErrKYCProviderAmbiguous
 	}
-	if len(o.providers) == 1 {
-		for _, p := range o.providers {
-			if _, synthetic := p.(syntheticKYCComponent); synthetic {
-				return p, nil
-			}
-		}
+	if p, ok := o.soleSyntheticProvider(); ok {
+		return p, nil
 	}
 	return nil, ErrNoKYCProviderConfigured
+}
+
+// providerStillConfigured reports whether providerID is, right now, a KYC
+// provider the tenant is configured for (ADR 0106 section 2.9, security F4):
+// it is in the tenant's configured-and-registered set, or the set is empty
+// and providerID is the sole synthetic adapter the fallback selects. It is
+// the SAME source as SelectProvider (never a different rule), and it never
+// redirects a row to another provider: the caller either proceeds with the
+// pinned provider or cancels.
+func (o *Orchestrator) providerStillConfigured(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, providerID string) (bool, error) {
+	if o == nil || tenantID == uuid.Nil || providerID == "" {
+		return false, nil
+	}
+	configured, err := o.configuredRegisteredProviderIDs(ctx, tx, tenantID)
+	if err != nil {
+		return false, err
+	}
+	for _, id := range configured {
+		if id == providerID {
+			return true, nil
+		}
+	}
+	if len(configured) == 0 {
+		if p, ok := o.soleSyntheticProvider(); ok && p.ID() == providerID {
+			return true, nil
+		}
+	}
+	return false, nil
 }

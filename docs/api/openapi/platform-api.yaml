@@ -2074,15 +2074,37 @@ paths:
     post:
       summary: Start a new identity-verification attempt for the caller's own account
       description: >
-        Authenticated, self-service. Calls the registered KYCProvider
-        (MockKYCProvider only this stage - no real vendor is integrated)
-        and creates a new kyc_verifications row. NOT_IMPLEMENTED for any
-        production identity-verification vendor.
+        Authenticated, self-service. PRH-2 E1 (ADR 0095 section 38, ADR
+        0106): the vendor submission is ASYNCHRONOUS. This call only records
+        the intent - in ONE transaction, a kyc_verifications row in the
+        `unverified` state (no provider reference yet) and a durable outbox
+        row - and makes NO call to the KYC vendor. A background worker later
+        submits it to the registered KYCProvider (MockKYCProvider only - no
+        real vendor is integrated; a real vendor is PROVIDER DEPENDENT) and
+        the status advances from the vendor's definitive result. A vendor
+        outage never changes the status to a failure: the verification stays
+        `unverified` and the submission is retried. Alert NOTIFICATION for a
+        submission that exhausts its retries is NOT IMPLEMENTED (no route or
+        recipient exists; ALERT-DELIVERY-1 is open). At most one verification
+        creation is in flight per player account: a repeat call while one is
+        still waiting (or being sent) returns 200 with the caller's EXISTING
+        verification (same body shape, nothing beyond the verification
+        itself); once it has been sent, a new call starts a new verification
+        (201). NOT_IMPLEMENTED for any production identity-verification
+        vendor.
       security:
         - bearerAuth: []
       responses:
         "201":
-          description: Verification created
+          description: Verification recorded (status `unverified`; vendor submission pending)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlayerVerification"
+        "200":
+          description: >
+            The caller's existing in-flight verification (a repeat create);
+            no new verification was created.
           content:
             application/json:
               schema:
@@ -2128,7 +2150,13 @@ paths:
         closed on a scan error) before storage. A reupload of the same
         document_type is a NEW, version-incremented row - never an
         overwrite; documents are immutable after upload except for the
-        review fields.
+        review fields. PRH-2 E1 (ADR 0106): the call stores the document and
+        records, in the same transaction, a durable submission of the current
+        document set; it makes NO call to the KYC vendor (a background worker
+        submits later, and an identical set is never submitted twice). A
+        verification still waiting for its vendor creation accepts the
+        upload (its submission waits for the creation); one whose creation
+        failed permanently returns 409.
       security:
         - bearerAuth: []
       requestBody:
@@ -2357,7 +2385,14 @@ paths:
         already-known player_account_id), this is the tenant-wide
         operational queue a compliance operator lands on. Existing
         review/decision endpoints are unchanged - this is additive
-        read-only visibility.
+        read-only visibility. Each item carries a read-only, derived
+        `submission_state` (PRH-2 E1, ADR 0106 section 7.2): where the
+        verification's vendor submission is (none, queued, sent, failed,
+        cancelled), plus the closed error class or cancel reason for failed
+        or cancelled. It is the ONLY place a stranded submission becomes
+        visible: alert notification is NOT IMPLEMENTED (no route or
+        recipient). It exposes no vendor reference, document data or
+        counters, and enforcement never reads it.
       security:
         - bearerAuth: []
       parameters:
@@ -2401,7 +2436,9 @@ paths:
       description: >
         Requires verification:read (compliance or tenant_admin,
         read-only for tenant_admin). Requires a real tenant context -
-        scoped to the caller's own tenant only.
+        scoped to the caller's own tenant only. Each item carries the
+        read-only derived `submission_state` described on
+        GET /v1/admin/kyc/cases.
       security:
         - bearerAuth: []
       parameters:
@@ -5739,6 +5776,24 @@ components:
         expires_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
         has_verified_residence: { type: boolean }
+        # PRH-2 E1 (ADR 0106 section 7.2) - STAFF-ONLY, read-only, derived.
+        submission_state:
+          type: string
+          enum: [none, queued, sent, failed, cancelled]
+          description: >
+            Where the vendor submission of this verification is. NOT a
+            verification status and never read by enforcement. `failed` and
+            `cancelled` (except benign supersession) are the stranded states
+            a compliance operator must act on; alert notification for them is
+            NOT IMPLEMENTED.
+        submission_last_error_class:
+          type: string
+          enum: [ambiguous, not_sent, lease_expired, credential_binding_mismatch, apply_conflict]
+          description: Present only when submission_state is failed.
+        submission_cancel_reason:
+          type: string
+          enum: [superseded, verification_terminal, no_documents, document_set_changed, verification_not_submitted, provider_deconfigured, decided_concurrently]
+          description: Present only when submission_state is cancelled.
       required: [id, player_account_id, status, provider_id, created_at]
     PlayerVerification:
       type: object

@@ -26,6 +26,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/config"
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/httpserver"
+	"github.com/Diansalas/igaming-platform/internal/kyc"
 	"github.com/Diansalas/igaming-platform/internal/observability"
 	"github.com/Diansalas/igaming-platform/internal/payments"
 	"github.com/Diansalas/igaming-platform/internal/reconciliation"
@@ -268,6 +269,14 @@ func run() error {
 	}
 	logger.Info("sportsbook catalogue synced")
 
+	// PRH-2 E1 (ADR 0106 section 8.2, security D1): ONE KYC orchestrator and
+	// ONE outbound credential resolver, hoisted so the HTTP path and the KYC
+	// outbox worker below are built from the very same values. kycOrch is a
+	// true nil when test-support routes are off (production): then the create
+	// handler answers 503 before writing any row and the worker is not started.
+	kycOrch := kycOrchestrator(wiring, providers, logger)
+	kycOutboundCreds := providers.kycOutboundCredentials()
+
 	handler, webhookAdmission := httpserver.NewWithAdmission(httpserver.Deps{
 		Logger:                      logger,
 		DB:                          pool,
@@ -352,11 +361,11 @@ func run() error {
 		// (design §B3/§D): there is no real KYC vendor to fall back to.
 		// KYCWebhookEnabled below gates the ROUTE itself identically, so
 		// route registration and orchestrator wiring cannot diverge (K11).
-		KYCOrchestrator:        kycOrchestrator(wiring, providers, logger),
+		KYCOrchestrator:        kycOrch,
 		KYCWebhookEnabled:      wiring.KYCWebhookEnabled,
 		DocumentStorage:        providers.DocumentStorage,
 		MalwareScanner:         providers.MalwareScanner,
-		KYCOutboundCredentials: providers.kycOutboundCredentials(),
+		KYCOutboundCredentials: kycOutboundCreds,
 
 		// Stage 4F: no real email-delivery vendor is contracted yet
 		// (docs/decisions/0030 §4) - email.MockProvider records what would
@@ -488,6 +497,30 @@ func run() error {
 		alerting.RunDispatcherLoop(ctx, alertDispatcher, alerting.DefaultLoopInterval)
 	}()
 	// ---- PRH-2 I-wire: durable alert dispatcher (end) -------------------------
+
+	// ---- PRH-2 E1 (KYC-SUBMIT-OUTBOX-1): KYC submission outbox worker (begin) ----
+	// ADR 0106 7.4. The worker is built from the SAME orchestrator and outbound
+	// credential resolver as the HTTP path (kycOrch / kycOutboundCreds above). With
+	// no orchestrator (production / test-support off) the create handler answers
+	// 503 before writing a row, so there is nothing to drain: the worker is NOT
+	// started, this is logged once, and startup never fails. MOCK adapter only;
+	// a real KYC vendor is PROVIDER DEPENDENT. Alert notification for a terminal
+	// outbox row is NOT IMPLEMENTED (ALERT-DELIVERY-1 OPEN).
+	kycOutboxWorker := buildKYCOutboxWorker(pool, kycOrch, kycOutboundCreds)
+	var kycOutboxWG sync.WaitGroup
+	if kycOutboxWorker == nil {
+		logger.Info("kyc outbox worker not started: no KYC orchestrator or outbound credential resolver is wired")
+	} else {
+		if err := kycOutboxWorker.ValidateForLoop(); err != nil {
+			return fmt.Errorf("kyc outbox worker wiring: %w", err)
+		}
+		kycOutboxWG.Add(1)
+		go func() {
+			defer kycOutboxWG.Done()
+			kyc.RunOutboxWorkerLoop(ctx, kycOutboxWorker, logger, cfg.KYCOutboxInterval)
+		}()
+	}
+	// ---- PRH-2 E1: KYC submission outbox worker (end) ----
 
 	server := &http.Server{
 		Addr:              cfg.HTTPAddr,
@@ -621,6 +654,26 @@ func run() error {
 		logger.Error("alert dispatcher did not stop within the shutdown timeout")
 	}
 	// ---- PRH-2 I-wire: alert dispatcher shutdown drain (end) ------------------
+
+	// ---- PRH-2 E1: KYC outbox worker shutdown drain (begin) ----
+	// RunOutboxWorkerLoop claims no new row on ctx cancel and lets the item in
+	// flight finish on its own bounded contexts. Typical item: prepare + phase B
+	// + phase C (about 25 s at the defaults); the worst case (prepare 5 s,
+	// resolve+call 15 s, three phase-C attempts of 5 s and an apply-conflict
+	// transaction of 5 s) is about 40 s, longer than this 30 s wait. Exiting
+	// mid-item is benign: the row stays claimed, its lease expires, and the
+	// re-claim re-sends with the SAME idempotency key (ADR 0106 section 2.6).
+	kycOutboxDone := make(chan struct{})
+	go func() {
+		kycOutboxWG.Wait()
+		close(kycOutboxDone)
+	}()
+	select {
+	case <-kycOutboxDone:
+	case <-time.After(30 * time.Second):
+		logger.Error("kyc outbox worker did not stop within the shutdown timeout")
+	}
+	// ---- PRH-2 E1: KYC outbox worker shutdown drain (end) ----
 
 	logger.Info("shutdown complete")
 	return nil

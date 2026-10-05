@@ -219,8 +219,10 @@ func TestPCGovernance_BridgePoliciesSelectUpdateOnly(t *testing.T) {
 // dual_scope_isolation policy with migration 0011's exact policy
 // (normalized by pg_get_expr): the provider-credential work must never
 // widen it. The only other policies allowed on staff_users are the
-// closed ADR 0099 (migration 0112) acting family, whose predicates are
-// pinned by internal/db's K1 tests; any other policy fails here.
+// closed ADR 0099 (migration 0112) acting family and the ADR 0106
+// (migration 0114) kyc_worker_fence_* RESTRICTIVE family, whose
+// predicates are pinned by internal/db's K1 and kyc_worker tests; any
+// other policy fails here.
 func TestPCGovernance_StaffUsersPoliciesUnchanged(t *testing.T) {
 	f := newFx(t)
 	ps := policies(t, f, "staff_users")
@@ -232,6 +234,11 @@ func TestPCGovernance_StaffUsersPoliciesUnchanged(t *testing.T) {
 		"acting_fence_insert": "INSERT",
 		"acting_fence_update": "UPDATE",
 		"acting_fence_delete": "DELETE",
+		// ADR 0106: RESTRICTIVE only (can narrow, never widen).
+		"kyc_worker_fence_select": "SELECT",
+		"kyc_worker_fence_insert": "INSERT",
+		"kyc_worker_fence_update": "UPDATE",
+		"kyc_worker_fence_delete": "DELETE",
 	}
 	var sawIsolation bool
 	for _, p := range ps {
@@ -243,7 +250,7 @@ func TestPCGovernance_StaffUsersPoliciesUnchanged(t *testing.T) {
 			continue
 		}
 		if cmd, ok := adr0099Acting[p.name]; !ok || cmd != p.cmd {
-			t.Fatalf("staff_users has an unexpected policy %s (%s); only 0011's dual_scope_isolation and the ADR 0099 acting family are allowed: %+v", p.name, p.cmd, ps)
+			t.Fatalf("staff_users has an unexpected policy %s (%s); only 0011's dual_scope_isolation the ADR 0099 acting family and the ADR 0106 kyc_worker_fence family are allowed: %+v", p.name, p.cmd, ps)
 		}
 	}
 	if !sawIsolation {

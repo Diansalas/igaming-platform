@@ -30,6 +30,7 @@ import (
 var allowedProviderCallsOutsideRegistrations = map[string]bool{
 	"payments.NewOrchestrator":  true,
 	"payments.RunSweeperLoop":   true, // PRH-2 H: runs an already-built Sweeper, constructs nothing
+	"kyc.RunOutboxWorkerLoop":   true, // PRH-2 E1: runs an already-built OutboxWorker (buildKYCOutboxWorker, registrations.go), constructs nothing
 	"casino.NewOrchestrator":    true,
 	"kyc.NewOrchestrator":       true,
 	"sportsbook.SyncCatalogue":  true,

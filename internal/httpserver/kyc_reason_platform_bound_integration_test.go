@@ -59,7 +59,7 @@ func newRawReasonKYCServer(t *testing.T, pool *db.Pool, issuer *auth.Issuer) (*h
 		AccessTokenTTL:         5 * time.Minute,
 		RefreshTokenTTL:        time.Hour,
 		PersonResolver:         identityresolution.NewMockPersonResolver(),
-		KYCOrchestrator:        kyc.NewOrchestrator(map[string]kyc.KYCProvider{"mock": adapter}, kyc.NewMockWebhookCredentials(adapter.MockKYCProvider)),
+		KYCOrchestrator:        newKYCOrchestratorWithWorker(t, pool, map[string]kyc.KYCProvider{"mock": adapter}, kyc.NewMockWebhookCredentials(adapter.MockKYCProvider)),
 		KYCWebhookEnabled:      true,
 		DocumentStorage:        kyc.NewMockDocumentStorageProvider(),
 		MalwareScanner:         kyc.NewMockMalwareScanner(),
@@ -106,9 +106,10 @@ func TestKYC_UnnormalizedAdapterReason_NoServerError_StaffSeesBounded(t *testing
 			t.Fatalf("%s: staff reason must be the bounded, cleaned value (%d bytes), got %d bytes: %q", stage, len(bounded), len(rows[0].Reason), rows[0].Reason)
 		}
 	}
-	assertStaffReason("after create")
-
+	// PRH-2 E1: the reason exists only once the outbox worker applied the
+	// vendor's create result (the reference helper drains the outbox first).
 	ref := mustGetKYCProviderReference(t, pool, tenant.ID, created.ID)
+	assertStaffReason("after create")
 	post := func(stage string, outcome kyc.ProviderOutcome) {
 		t.Helper()
 		resp := rawPostKYCCallback(t, srv, "/v1/webhooks/kyc/"+tenant.Slug+"/mock", adapter.CallbackPayload(tenant.ID, ref, outcome, "short"))

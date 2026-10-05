@@ -605,3 +605,34 @@ func TestLoad_PaymentsSweepInterval(t *testing.T) {
 		}
 	}
 }
+
+// PRH-2 E1 (ADR 0106 section 7.3): KYC_OUTBOX_INTERVAL_SECONDS defaults to the 5 s
+// engineering RECOMMENDATION and must be a positive integer.
+func TestLoad_KYCOutboxInterval(t *testing.T) {
+	base := func(t *testing.T) {
+		clearEnv(t)
+		t.Setenv("DATABASE_URL", "postgres://localhost/test")
+		t.Setenv("JWT_SIGNING_SECRET", "a-secret-that-is-at-least-32-characters-long")
+		_ = os.Unsetenv("KYC_OUTBOX_INTERVAL_SECONDS")
+	}
+	base(t)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.KYCOutboxInterval.Seconds() != 5 {
+		t.Fatalf("default = %v, want 5s", cfg.KYCOutboxInterval)
+	}
+	base(t)
+	t.Setenv("KYC_OUTBOX_INTERVAL_SECONDS", "9")
+	if cfg, err = Load(); err != nil || cfg.KYCOutboxInterval.Seconds() != 9 {
+		t.Fatalf("override: %v %v", cfg.KYCOutboxInterval, err)
+	}
+	for _, bad := range []string{"0", "-3", "abc"} {
+		base(t)
+		t.Setenv("KYC_OUTBOX_INTERVAL_SECONDS", bad)
+		if _, err := Load(); err == nil {
+			t.Fatalf("KYC_OUTBOX_INTERVAL_SECONDS=%q must be refused", bad)
+		}
+	}
+}

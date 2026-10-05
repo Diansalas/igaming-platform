@@ -52,7 +52,7 @@ func newKYCTestServer(t *testing.T, pool *db.Pool, issuer *auth.Issuer) (*httpte
 		AccessTokenTTL:         5 * time.Minute,
 		RefreshTokenTTL:        time.Hour,
 		PersonResolver:         identityresolution.NewMockPersonResolver(),
-		KYCOrchestrator:        kyc.NewOrchestrator(map[string]kyc.KYCProvider{"mock": mockProvider}, kyc.NewMockWebhookCredentials(mockProvider)),
+		KYCOrchestrator:        newKYCOrchestratorWithWorker(t, pool, map[string]kyc.KYCProvider{"mock": mockProvider}, kyc.NewMockWebhookCredentials(mockProvider)),
 		KYCWebhookEnabled:      true,
 		DocumentStorage:        kyc.NewMockDocumentStorageProvider(),
 		MalwareScanner:         kyc.NewMockMalwareScanner(),
@@ -75,6 +75,9 @@ func mustGetKYCProviderReference(t *testing.T, pool *db.Pool, tenantID uuid.UUID
 	if err != nil {
 		t.Fatalf("invalid verification id %q: %v", verificationID, err)
 	}
+	// PRH-2 E1: no HTTP path calls the vendor; the reference exists only once
+	// the outbox worker has applied the create result.
+	drainKYCOutbox(t)
 	var ref string
 	err = pool.WithTenant(context.Background(), tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		return tx.QueryRow(ctx, `SELECT provider_reference FROM kyc_verifications WHERE id = $1`, id).Scan(&ref)
@@ -853,7 +856,7 @@ func TestKYC_WebhookCallbackAuthentication(t *testing.T) {
 
 	// ADR 0095 §15.2/IC-Q1: KYC has no receipt table, so an unresolvable
 	// provider_reference is indistinguishable from one racing
-	// CreateVerification's own phase C - the response is a retryable 503,
+	// the outbox worker's create phase C - the response is a retryable 503,
 	// never a bare 404 and never a 200 (which would durably discard the
 	// only copy of a real vendor decision arriving a moment too early).
 	unknownIn := mockProvider.CallbackPayload(tenant.ID, "no-such-reference", kyc.ProviderApproved, "x")

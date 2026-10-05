@@ -108,18 +108,16 @@ func assertTruncatedFlag(t *testing.T, where string, m map[string]any) {
 	}
 }
 
-// createWithRawAdapter runs CreateVerification with a rawReasonAdapter and
+// createWithRawAdapter drives a create through the outbox worker with a rawReasonAdapter and
 // returns the adapter, the verification and its provider reference
 // (registered with the MOCK so its callbacks and submissions resolve).
 func createWithRawAdapter(t *testing.T, pool *db.Pool, f fixture) (rawReasonAdapter, Verification) {
 	t.Helper()
 	adapter := rawReasonAdapter{NewMockKYCProvider()}
-	v, err := CreateVerification(context.Background(), pool, NewMockOutboundResolver(), adapter, CreateVerificationParams{
-		TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerID, PersonID: f.personID,
-	})
-	if err != nil {
-		t.Fatalf("CreateVerification with an unnormalized adapter reason must succeed (never a CHECK-constraint 500), got %v", err)
-	}
+	// A create with an unnormalized adapter reason must succeed (never a
+	// CHECK-constraint failure): createViaWorker fails the test unless the
+	// create row ends sent.
+	v := createViaWorker(t, pool, NewMockOutboundResolver(), adapter, f)
 	return adapter, v
 }
 
@@ -139,9 +137,9 @@ func TestPlatformNormalizesReason_SubmitVerification(t *testing.T) {
 	adapter, v := createWithRawAdapter(t, pool, f)
 	seedDocument(t, pool, f, v.ID, DocumentPassport, "p.png") // C4: an empty document set is now a no-op, never reaching the provider
 
-	_, err := SubmitVerification(context.Background(), pool, NewMockOutboundResolver(), adapter, f.tenantID, v.ID)
-	if err != nil {
-		t.Fatalf("submission with an unnormalized adapter reason must succeed, got %v", err)
+	submitViaWorker(t, pool, NewMockOutboundResolver(), adapter, f.tenantID, v.ID)
+	if r := onlyRow(t, pool, f.tenantID, v.ID, OpSubmit); r.State != OutboxSent {
+		t.Fatalf("a submission with an unnormalized adapter reason must succeed (row sent), got %s", r.State)
 	}
 	assertBoundedClean(t, "kyc_verifications.reason after submission", storedReason(t, pool, f.tenantID, v.ID))
 	m := latestAuditMetadata(t, pool, f.tenantID, "kyc.verification_submitted_to_provider", v.ID)

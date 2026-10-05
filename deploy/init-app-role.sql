@@ -417,6 +417,13 @@ BEGIN
 END
 $$;
 
+-- PRH-2 E1 (migration 0114; ADR 0106 section 6): least-privilege, re-asserted on
+-- every run, mirroring migration 0114's own in-migration grant block:
+--   kyc_submission_outbox - the KYC create/submit outbox: SELECT/INSERT/UPDATE
+--                           only (the state machine is enforced by the guard
+--                           trigger and RLS). Never DELETE, never TRUNCATE.
+-- Grants on the nine tables fenced by the kyc_worker_fence_* policies are NOT
+-- changed (the fence is RLS, not grants). No role, password or attribute change.
 -- PRH-2 K3 (migration 0115; ADR 0101): least-privilege, re-asserted on every
 -- run, mirroring migration 0115's own in-migration grant block:
 --   payment_manual_resolution_codes     - migration-written reference data:
@@ -435,7 +442,8 @@ BEGIN
         ('payment_manual_resolution_codes', 'SELECT'),
         ('payment_manual_resolutions', 'SELECT, INSERT, UPDATE'),
         ('payment_manual_resolution_approvals', 'SELECT, INSERT'),
-        ('payment_attempt_reference_evidence', 'SELECT, INSERT')) AS v(name, privs)
+        ('payment_attempt_reference_evidence', 'SELECT, INSERT'),
+        ('kyc_submission_outbox', 'SELECT, INSERT, UPDATE')) AS v(name, privs)
     LOOP
         IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = t.name) THEN
             EXECUTE format('REVOKE ALL ON %I FROM igaming_runtime', t.name);
