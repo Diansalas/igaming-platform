@@ -3,9 +3,9 @@ Branch prh2-r2-psp-prereq on a91c5e5. Local private DB (f_psp), not CI. Go + tes
 Method: backup of the file (throwaway copy), one mutant applied in place by sed, targeted tests run, file restored from the backup and compared with cmp (every restore line below says identical). A KILLED mutant made at least one test fail; control runs (unmutated, same selectors) PASSED first.
 Selectors: wiring=TestWiring_|TestRun_StatementSources (cmd/platform-api, unit); payments=TestWiring1_|TestK3_NotPaidRefused (-tags integration); recon=TestR2_|TestD2_1_|TestD2_14|TestK3_C34|C35|C36|C14d (-tags integration).
 
-Survivor classification (all three are equivalent or defence-in-depth; nothing is left unexplained):
-- R3b (drop the bySettlement arm of yAttributable): EQUIVALENT in the snapshot. bySettlement is populated only when the release posting is a withdrawal_completed of the same provider, and that same posting is already refused by the withdrawal_completed ledger arm (killed together by R4b only if an attempt-less posting existed).
-- R4a / R4b (drop the deposit or the withdrawal_completed ledger arm): defence in depth. For a posting that has an attempt, the attempt holder arm (byRef / bySettlement) already refuses Y; the ledger arms matter only for an attempt-less legacy posting, which no fixture can construct (append-only, attempts cannot be deleted). R4c (deposit_reversal arm, no holder) and R5 (tombstone must NOT be refused) are killed.
+Survivor classification of the FIRST batch (R3b and R6 equivalent/defence in depth; R4a/R4b corrected below):
+- R3b (drop the bySettlement arm of yAttributable): EQUIVALENT in the snapshot. bySettlement is populated only when the release posting is a withdrawal_completed of the same provider, and that same posting is already refused by the withdrawal_completed ledger arm.
+- R4a / R4b (drop the deposit or the withdrawal_completed ledger arm): CORRECTION after the ledger-finance review. They SURVIVED the first batch and were first misclassified as unkillable ("no fixture can construct an attempt-less posting"). That was wrong: legacyDeposit and legacyWithdrawalCompleted (payment_statement_fixround_integration_test.go) build attempt-less postings. They are now KILLED by TestR2_GY1d_YIsLegacyAttemptlessDepositKey and TestR2_GY1e_YIsLegacyAttemptlessWithdrawalCompletedKey (second batch below).
 - R6 (drop the markCaptured S6 dedupe on the new bound arm): EQUIVALENT today. matchLines skips a second line with the same provider reference and kind as pay_duplicate before matchPayment, so a bound attempt matched by reference sees one line per kind; the dedupe is defence in depth for a future matcher change.
 R7 and R8 first attempts did not compile (unused variables); rerun as R7b and R8b, both KILLED.
 
@@ -84,3 +84,54 @@ R7b-no-holder-note restored: cmp identical
 R8b-remove-Y-branch | KILLED | --- FAIL: TestK3_C36_S4_PollReferenceMismatchClearsOnTheReturnedReference (0.20s) | internal/reconciliation/payment_statement.go
 R8b-remove-Y-branch restored: cmp identical
 DONE2
+
+
+=== SECOND BATCH (fix batch after the ledger-finance, security and code reviews) ===
+Same method. Control runs passed first (cmd wiring, payments, reconciliation, httpserver M2). Raw log:
+CONTROL ./cmd/platform-api/ PASS (unmutated)
+CONTROL ./internal/payments/ PASS (unmutated)
+CONTROL ./internal/reconciliation/ PASS (unmutated)
+CONTROL ./internal/httpserver/ PASS (unmutated)
+G2-revert-to-X-or-Y | KILLED | --- FAIL: TestR2_GY2a_BothEvidenced_YOnlyReversalStands (0.21s) | internal/reconciliation/payment_statement.go
+G2-revert-to-X-or-Y restored: cmp identical
+G2-both-branch-uses-or | KILLED | --- FAIL: TestR2_GY2a_BothEvidenced_YOnlyReversalStands (0.19s) | internal/reconciliation/payment_statement.go
+G2-both-branch-uses-or restored: cmp identical
+G2-evidenced-ignores-eligibility | SURVIVED | internal/reconciliation/payment_statement.go
+G2-evidenced-ignores-eligibility restored: cmp identical
+F1-shared-Y-rule-dropped | KILLED | --- FAIL: TestR2_F1_SharedYAcrossTwoParks_OneReversalClearsNeither (0.27s) | internal/reconciliation/payment_statement.go
+F1-shared-Y-rule-dropped restored: cmp identical
+R4a-ledger-arm-no-deposit | KILLED | --- FAIL: TestR2_GY1d_YIsLegacyAttemptlessDepositKey (0.19s) | internal/reconciliation/payment_statement.go
+R4a-ledger-arm-no-deposit restored: cmp identical
+R4b-ledger-arm-no-withdrawal_completed | KILLED | --- FAIL: TestR2_GY1e_YIsLegacyAttemptlessWithdrawalCompletedKey (0.21s) | internal/reconciliation/payment_statement.go
+R4b-ledger-arm-no-withdrawal_completed restored: cmp identical
+R4c-ledger-arm-no-deposit_reversal | KILLED | --- FAIL: TestR2_GY1c_YIsDepositReversalKeyDoesNotClear (0.28s) | internal/reconciliation/payment_statement.go
+R4c-ledger-arm-no-deposit_reversal restored: cmp identical
+R2-yAttributable-always-true | NOT APPLIED
+WX-paySources-nil-before-scheduler | KILLED | --- FAIL: TestRun_StatementSourcesRegisteredAndScheduledFromOneList (0.00s) | cmd/platform-api/main.go
+WX-paySources-nil-before-scheduler restored: cmp identical
+X2-coverage-error-ignored | KILLED | --- FAIL: TestRun_StatementSourceGatesReturnTheirError (0.00s) | cmd/platform-api/main.go
+X2-coverage-error-ignored restored: cmp identical
+X3-register-error-ignored | KILLED | --- FAIL: TestRun_StatementSourceGatesReturnTheirError (0.00s) | cmd/platform-api/main.go
+X3-register-error-ignored restored: cmp identical
+X1-routes-pass-nil | KILLED | --- FAIL: TestForceResolutionAPI_M2_SourceRegistry (16.88s) | internal/httpserver/payment_force_resolution_routes.go
+X1-routes-pass-nil restored: cmp identical
+F2-submission-source-check-removed | BUILD-ERROR (invalid mutant) | internal/payments/manual_resolution.go
+F2-submission-source-check-removed restored: cmp identical
+F2-submission-check-before-insert-order | SURVIVED | internal/payments/manual_resolution.go
+F2-submission-check-before-insert-order restored: cmp identical
+CONC-exec-check-removed | NOT APPLIED
+DONE3
+--- second pass (new GY2f eligibility test, corrected R2 expression, ordering test) ---
+CONTROL http (with ordering test) PASS
+G2-evidenced-ignores-eligibility | KILLED | --- FAIL: TestR2_GY2f_MockEvidenceIsIneligibleOnceARealImportExists (0.27s) | internal/reconciliation/payment_statement.go
+G2-evidenced-ignores-eligibility restored: cmp identical
+R2-yAttributable-bypassed | KILLED | --- FAIL: TestR2_F1_SharedYAcrossTwoParks_OneReversalClearsNeither (0.27s) | internal/reconciliation/payment_statement.go
+R2-yAttributable-bypassed restored: cmp identical
+F2-submission-source-check-removed | KILLED | --- FAIL: TestK3_NotPaidRefusedWithoutStatementSource (3.65s) | internal/payments/manual_resolution.go
+F2-submission-source-check-removed restored: cmp identical
+DONE4
+
+Second-batch classification:
+- KILLED: G2-revert-to-X-or-Y and G2-both-branch-uses-or (by TestR2_GY2a), G2-evidenced-ignores-eligibility (by TestR2_GY2f, rerun after adding it), F1-shared-Y-rule-dropped (TestR2_F1), R2 bypass (TestR2_F1), R4a/R4b/R4c (legacy and reversal-key tests), WX paySources=nil before the scheduler (write-count pin), X2/X3 error ignored at startup (TestRun_StatementSourceGatesReturnTheirError), X1 routes pass nil (HTTP M2 accepted-when-registered), submission source check removed (rerun as F2-submission-source-check-removed: the first form did not compile; killed by TestK3_NotPaidRefusedWithoutStatementSource).
+- F2-submission-check-before-insert-order SURVIVED: EQUIVALENT. It only replaced the wrapped read error with ErrResolutionNoStatementSource (both fail closed); it does not change ordering. The ordering property (requester without a grant gets the audited 403 before any source signal) is pinned by the HTTP subtest no_grant_gets_403_before_any_source_signal; there is no sed-expressible mutant for moving the check, and it was verified by construction (the check follows the INSERT).
+- R2-yAttributable-always-true / CONC-exec-check-removed: first sed expressions did not apply (NOT APPLIED); R2 reran as R2-yAttributable-bypassed (killed). The execution-check removal is covered by the first batch (P4, P8).

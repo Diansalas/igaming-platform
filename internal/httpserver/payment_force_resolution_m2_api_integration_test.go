@@ -100,6 +100,22 @@ func TestForceResolutionAPI_M2_SourceRegistry(t *testing.T) {
 		w.noLeakage(t, 2)
 	})
 
+	// Security F-3: authorization first. A requester with the route permission but
+	// no in-force grant gets the audited 403 from the database guard, NOT the
+	// 409 source-registry refusal (no attempt-existence / monitoring signal).
+	t.Run("no_grant_gets_403_before_any_source_signal", func(t *testing.T) {
+		w := newFRWorldWithSources(t, &payments.StatementSourceRegistry{})
+		attempt := w.ambiguousPayout()
+		before := w.deniedAudits()
+		res := w.a.do("POST", w.base(), w.tok(w.fNoGrant), w.m2Body(attempt, "m2_declare_not_paid"))
+		if res.status != http.StatusForbidden || !frHasClosedToken(res.body) {
+			t.Fatalf("want an audited closed-token 403 for a requester without a grant, got %d %s", res.status, res.body)
+		}
+		if got := w.deniedAudits(); got != before+1 {
+			t.Fatalf("want +1 denied audit row, %d -> %d", before, got)
+		}
+	})
+
 	// A nil registry in Deps (never wired) refuses too.
 	t.Run("refused_when_deps_registry_nil", func(t *testing.T) {
 		w := newFRWorldWithSources(t, nil)

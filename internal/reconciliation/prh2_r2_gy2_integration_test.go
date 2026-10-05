@@ -164,3 +164,29 @@ func d2NoCUFor(t *testing.T, ms []Mismatch, attempt uuid.UUID) {
 		}
 	}
 }
+
+// d2RealSource is a NON-synthetic fixed source (a stand-in for a real PSP
+// statement: is_mock=false imports), so a MOCK line becomes ineligible (D-4/RC-3).
+type d2RealSource struct{ inner payFixedSource }
+
+func (d2RealSource) Label() string        { return "real-fixed test statement" }
+func (s d2RealSource) ProviderID() string { return s.inner.ProviderID() }
+func (s d2RealSource) Fetch(ctx context.Context, r statement.PaymentFetchRequest) (statement.PaymentStatement, error) {
+	return s.inner.Fetch(ctx, r)
+}
+
+// G-Y2 uses ELIGIBLE evidence only (D-4/RC-3): once a real import exists, a
+// succeeded line from a MOCK import does not make Y an evidenced capture, so the
+// "X or Y" rule applies and a (real) reversal on Y clears.
+func TestR2_GY2f_MockEvidenceIsIneligibleOnceARealImportExists(t *testing.T) {
+	w := newD2World(t)
+	pk, x := w.pollParkWithY(t, "gy2-y-"+uuid.NewString())
+	y := w.yOf(t, pk.attempt.ID)
+	real := func(offset int, lines ...statement.PaymentStatementLine) d2RealSource {
+		return d2RealSource{k3Cov(offset, lines...)}
+	}
+	d2CUFor(t, w.d2Run(t, real(3, gy2Succ(x))), pk.attempt.ID)  // real import: X evidenced
+	d2CUFor(t, w.d2Run(t, k3Cov(4, gy2Succ(y))), pk.attempt.ID) // MOCK import: Y line, ineligible
+	d2NoCU(t, w.d2Run(t, real(5, d2ReversalLine("gy2-rev-"+uuid.NewString(), y, d2Amount))), "Y evidenced only by ineligible MOCK evidence: X-or-Y rule, a real reversal on Y clears")
+	w.d2AssertNoMoney(t, pk)
+}

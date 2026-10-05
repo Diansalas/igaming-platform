@@ -1212,9 +1212,9 @@ func (m *payMatcher) capturedUnposted(a *payAttempt) bool {
 		return !m.clearedRef(x)
 	}
 	if m.evidencedCapture(x) && m.evidencedCapture(y) {
-		return !(m.clearedRef(x) && m.clearedRef(y))
+		return !m.clearedRef(x) || !m.clearedRef(y)
 	}
-	return !(m.clearedRef(x) || m.clearedRef(y))
+	return !m.clearedRef(x) && !m.clearedRef(y)
 }
 
 // evidencedCapture reports whether an ELIGIBLE (D-4/RC-3) persisted `succeeded`
