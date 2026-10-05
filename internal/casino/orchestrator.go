@@ -24,6 +24,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/providerref"
 	"github.com/Diansalas/igaming-platform/internal/rg"
 	"github.com/Diansalas/igaming-platform/internal/risk"
+	"github.com/Diansalas/igaming-platform/internal/tenant"
 	"github.com/Diansalas/igaming-platform/internal/txscope"
 	"github.com/Diansalas/igaming-platform/internal/wallet"
 	"github.com/Diansalas/igaming-platform/internal/webhookauth"
@@ -940,6 +941,42 @@ func isProviderTxTombstoned(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, 
 	return found, nil
 }
 
+// requireActiveTenantForNewPosting is the casino entry point of the owner
+// decision R3-GAME-POSTINGS-NONACTIVE-1 (2026-10-05, ADR 0095 section 40.5):
+// a NEW gameplay financial posting (bet, win, rollback or rollback
+// tombstone) for a suspended or closed tenant is refused with
+// ErrTenantNotActive. It runs in the posting transaction itself, via the
+// shared race-free primitive tenant.RequireActiveForGameplay, AFTER the
+// caller's own replay short-circuits and BEFORE its first ledger write.
+//
+// A replay is a read, not a new movement: when the callback's own
+// (provider, provider_tx_id) already exists in the ledger, nothing can be
+// posted under it (the database's unique key refuses a second row), so the
+// refusal is skipped and the caller's existing replay handling returns the
+// original outcome. ownRef is that reference ("" disables the exemption).
+func requireActiveTenantForNewPosting(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, providerID, ownRef string) error {
+	err := tenant.RequireActiveForGameplay(ctx, tx, tenantID)
+	if err == nil {
+		return nil
+	}
+	if !errors.Is(err, tenant.ErrNotActiveForGameplay) {
+		return fmt.Errorf("casino: check tenant status: %w", err)
+	}
+	if ownRef != "" {
+		var exists bool
+		if qerr := tx.QueryRow(ctx,
+			`SELECT EXISTS (SELECT 1 FROM ledger_transactions WHERE tenant_id = $1 AND provider_id = $2 AND provider_tx_id = $3)`,
+			tenantID, providerID, ownRef,
+		).Scan(&exists); qerr != nil {
+			return fmt.Errorf("casino: check replay of own reference: %w", qerr)
+		}
+		if exists {
+			return nil
+		}
+	}
+	return fmt.Errorf("%w: %w", ErrTenantNotActive, err)
+}
+
 // ReceiveCallbackResult is what ReceiveCallback returns for a caller
 // (an HTTP handler) that needs to know the outcome without exposing the
 // full ledger internals - mirrors internal/payments.ReceiveCallbackResult.
@@ -1381,6 +1418,13 @@ func (o *Orchestrator) postBet(ctx context.Context, tx pgx.Tx, tenantID uuid.UUI
 			return ReceiveCallbackResult{}, err
 		}
 		return ReceiveCallbackResult{Outcome: OutcomeSucceeded, LedgerTransactionID: &existingID, Replayed: true}, nil
+	}
+
+	// R3-GAME-POSTINGS-NONACTIVE-1: past the replay short-circuit this bet
+	// would be a NEW stake. Refused for a suspended/closed tenant, in this
+	// transaction, before any session/RG/risk evaluation or write.
+	if err := requireActiveTenantForNewPosting(ctx, tx, tenantID, providerID, ""); err != nil {
+		return ReceiveCallbackResult{}, err
 	}
 
 	// Stage 10.3 CAS-CAP-ROLLBACK-1, E3 (§1.3/§1.4 step 2): a rollback for
@@ -1926,6 +1970,15 @@ func (o *Orchestrator) postWin(ctx context.Context, tx pgx.Tx, tenantID uuid.UUI
 		return ReceiveCallbackResult{}, fmt.Errorf("%w: provider_tx_id=%s", ErrOriginalTombstoned, event.ProviderTxID)
 	}
 
+	// R3-GAME-POSTINGS-NONACTIVE-1: a win for a suspended/closed tenant is a
+	// NEW movement and is refused, in this transaction, before the round is
+	// resolved or anything is locked/written. An exact replay of an already-
+	// posted win (its own reference exists) is exempt and falls through to
+	// the existing AlreadyPosted handling, which returns the original.
+	if err := requireActiveTenantForNewPosting(ctx, tx, tenantID, providerID, event.ProviderTxID); err != nil {
+		return ReceiveCallbackResult{}, err
+	}
+
 	correlationID := roundCorrelationID(tenantID, providerID, event.RoundID)
 
 	// Stage 9 §10 (adversarial concurrency re-audit, ledger-finance):
@@ -2052,6 +2105,12 @@ func (o *Orchestrator) postRollback(ctx context.Context, tx pgx.Tx, tenantID uui
 		tenantID, providerID, event.OriginalProviderTxID,
 	).Scan(&originalID, &originalType)
 	if errors.Is(err, pgx.ErrNoRows) {
+		// R3-GAME-POSTINGS-NONACTIVE-1: writing a tombstone is a NEW ledger
+		// write; refused for a suspended/closed tenant (the late original
+		// would be refused by the same check, so nothing is left unguarded).
+		if err := requireActiveTenantForNewPosting(ctx, tx, tenantID, providerID, ""); err != nil {
+			return ReceiveCallbackResult{}, err
+		}
 		txID, tombErr := postRollbackTombstone(ctx, tx, tenantID, providerID, event)
 		if tombErr != nil {
 			return ReceiveCallbackResult{}, tombErr
@@ -2110,6 +2169,16 @@ func (o *Orchestrator) postRollback(ctx context.Context, tx pgx.Tx, tenantID uui
 	if originalType != ledger.TxCasinoBet && originalType != ledger.TxCasinoWin {
 		return ReceiveCallbackResult{}, fmt.Errorf("%w: original transaction %s has type %q, expected casino_bet or casino_win",
 			ErrInvalidInput, originalID, originalType)
+	}
+
+	// R3-GAME-POSTINGS-NONACTIVE-1: a rollback/refund of an already-posted
+	// bet or win is a NEW reversing posting; refused for a suspended/closed
+	// tenant (owner decision: fail closed, the callback is kept as durable
+	// evidence for staff resolution). An exact redelivery of an already-
+	// posted rollback (its own reference exists) is exempt and returns the
+	// original through ledger.Post's AlreadyPosted gate below.
+	if err := requireActiveTenantForNewPosting(ctx, tx, tenantID, providerID, event.ProviderTxID); err != nil {
+		return ReceiveCallbackResult{}, err
 	}
 
 	// A prior reversal against originalID is only a conflict if it was

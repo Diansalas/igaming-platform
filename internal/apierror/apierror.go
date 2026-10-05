@@ -53,6 +53,7 @@ const (
 	CodeSettlementIntegrity               Code = "SETTLEMENT_INTEGRITY"
 	CodeSettlementPayoutInvalid           Code = "PAYOUT_INVALID"
 	CodeSettlementAssetMismatch           Code = "ASSET_MISMATCH"
+	CodeSettlementTenantNotActive         Code = "SETTLEMENT_TENANT_NOT_ACTIVE"
 )
 
 // Error is the wire format for an API error response.
@@ -81,7 +82,7 @@ func httpStatus(c Code) int {
 	case CodeConflict, CodeSettlementPayloadMismatch, CodeSettlementTombstoned, CodeSettlementBetVoided,
 		CodeSettlementBetAlreadySettled, CodeSettlementGenerationOutOfSequence, CodeSettlementIntegrity,
 		CodeCredentialRegistrationRejected, CodeApprovalRejected, CodeCredentialActivationRejected,
-		CodeCredentialTransitionRejected:
+		CodeCredentialTransitionRejected, CodeSettlementTenantNotActive:
 		return http.StatusConflict
 	case CodeSettlementPayoutInvalid, CodeSettlementAssetMismatch:
 		return http.StatusUnprocessableEntity

@@ -551,6 +551,19 @@ func newCasinoWebhookHandler(deps Deps) http.HandlerFunc {
 			apierror.Write(w, requestID, apierror.CodeConflict, "original transaction already rolled back")
 			return
 		}
+		if errors.Is(err, casino.ErrTenantNotActive) {
+			// R3-GAME-POSTINGS-NONACTIVE-1 (owner decision 2026-10-05): the
+			// tenant became suspended/closed between the route's active
+			// check and this transaction (or a non-HTTP caller reached the
+			// orchestrator). A NEW bet/win/rollback is refused: nothing was
+			// posted, the durable audit record was written above by
+			// recordCasinoCallbackRejection. A deterministic 409 with a
+			// generic body (never a retryable 5xx, never echoing anything),
+			// no integrity alert (an expected consequence of the closure).
+			logger.Warn("casino_webhook_refused_tenant_not_active", "provider_id", providerID, "tenant_id", t.ID.String(), "request_id", requestID)
+			apierror.Write(w, requestID, apierror.CodeConflict, "callback rejected")
+			return
+		}
 		if errors.Is(err, casino.ErrOriginalTombstoned) {
 			// Stage 10.3 CAS-CAP-ROLLBACK-1, E10: a win naming a
 			// provider_tx_id a tombstone already covers (its own rollback
