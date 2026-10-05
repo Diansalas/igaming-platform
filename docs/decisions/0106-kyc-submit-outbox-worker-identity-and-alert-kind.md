@@ -530,7 +530,7 @@ actor alternative is rejected.
 | Field | Value |
 |---|---|
 | `kind` | `kyc.submission_failed_terminal` |
-| `severity` | `p2` — engineering default; **HQ-E1-2 OPEN**: human/compliance confirms before 0114 ships (changing it later needs a migration) |
+| `severity` | `p2` — engineering default; **HQ-E1-2 CONFIRMED by the owner 2026-10-05 (see the final amendment)** |
 | `scope` / `simulation` | `platform` / `false` |
 | `requires_subject` / `in_tx_raisable_by_tenant` | `true` / `true` (security confirmed bounded: subject forced to `app.tenant_id`, `raised_by_scope` forced `tenant`, severity forced; a tenant can only create noise about itself, as with the 14 existing tenant-raisable Kinds) |
 | `allowed_keys` | `{operation, provider_id, last_error_class, outbox_id}` (security: acceptable given the F5 charset CHECK) |
@@ -1310,3 +1310,13 @@ jurisdiction whitelist is unchanged (still 11 tuples; none of the nine tables is
 - Review chain still required (§11.1): security (mandatory implementation review, including a delta check of
   the worker identity, the fences and the seeding), identity-compliance (F3, T-A..T-C), architect,
   code-reviewer, qa, devops (wiring).
+
+## Amendment 2026-10-05: owner confirmation of HQ-E1-2 and status of HQ-E1-1, -3, -4
+
+**HQ-E1-2 CONFIRMED (owner, 2026-10-05): the default severity of `kyc.submission_failed_terminal` is `p2`.** This matches the shipped migration 0114 (`severity` = `p2`); no migration or code change is needed, and the severity stays an `alert_kinds` row, i.e. configuration, not a code path. No alert recipient, channel or on-call person was created or assumed: delivery remains governed by ALERT-DELIVERY-1 (OPEN; ADR 0102 §18), so a p2 KYC terminal failure is currently a durable, unrouted alert record only. Alert routing stays configurable.
+
+**Genuinely consequential points that are still open (surfaced, not guessed):**
+1. **HQ-E1-3 (jurisdiction KYC submission/completion deadline): LEGAL, owner/compliance.** No deadline setting exists; ADR 0106 §2.8 assigns it to the jurisdiction configuration family (`kyc_enforcement_policies`, migration 0100). The retry budget in `internal/kyc/outbox_worker.go` is a PLACEHOLDER technical bound, not a compliance value. Needed before real-money KYC where a regulator imposes a deadline. Engineering continues without it (fail-closed: a player with a failed submission stays unverified and enforcement is unaffected).
+2. **HQ-E1-4 (outbox retention period, erasure duty): LEGAL, owner/compliance.** DELETE on the outbox is refused today (keep everything); the outbox holds no document content. A retention period and any erasure duty must be answered before real players.
+3. **HQ-E1-1 (inactive tenants' submissions):** the shipped default is the fail-closed one (no vendor call for a non-active tenant, the row is deferred without consuming retries, the trigger re-validates tenant status). It is configurable only by a migration today; confirm with compliance whether suspended and closed tenants should differ. Engineering continues without it.
+4. **`binding_mismatch` severity (new, security/identity-compliance engineering choice, owner informed):** the runbook (§8.3) calls a binding mismatch "an integrity signal", which under ADR 0102 §3.1 leans p1, while the kind's default is p2. Splitting it into its own p1 kind is possible later (a new `alert_kinds` row plus a raise site); it is NOT done and nothing blocks on it while no alert reaches a human.
