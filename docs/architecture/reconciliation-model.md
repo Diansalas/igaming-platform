@@ -264,8 +264,9 @@ flowchart LR
        reversed that capture, so it nets to zero.
   2. **Ageing.** It is re-reported on every run until it clears. The
      amount and asset go in the mismatch row, never in log lines. It clears
-     when a reversal or tombstone appears (the PSP refunded), or on M1 /
-     allocation (both `BLOCKED`: HD-0095-1, LEDGER-MANUAL-ADJ-4EYES-1).
+     when a reversal or tombstone appears (the PSP refunded), or, once
+     LEDGER-SUSPENSE-B-1 exists, on allocation. An M1 resolution never clears or
+     suppresses it; it only annotates the finding as acknowledged (ADR 0101 LF-3).
   3. **Remediation.** Escalate. Never auto-resolve. **Never** a T17 or
      re-drive trigger: the re-drive job must not select these rows. Even
      if it did, T17 cannot post for a financially resolved intent (ADR 0095
@@ -282,6 +283,16 @@ flowchart LR
      (LEDGER-SUSPENSE-B-1), the kind becomes "unallocated receipt still
      open", and point 6's ledger join must include the (B) postings mapped
      to their disputed attempt.
+
+  **Amendment (PRH-2 K3, ADR 0101 §9, migration 0115, `ledger-finance`). IMPLEMENTED against MOCK; real statement matching PROVIDER DEPENDENT.**
+
+  1. **Persisted evidence.** The stream reads `payment_statement_lines` across all imports of (tenant, provider), with no LIMIT. It runs in its REPEATABLE READ snapshot with an explicit `tenant_id` predicate. Lines repeated across overlapping imports are deduplicated. Persisted lines never feed `pay_duplicate`, which stays per-import. Evidence that clears or confirms comes only from eligible imports (`is_mock = false`, or no such import exists for (tenant, provider)). Evidence that raises may come from any import, and the detail names the import and `is_mock`. One finding per (attempt, evidencing reference) per run.
+  2. **Standing coverage of deposit parks: S1-S4 and N1** exactly as ADR 0095 §35.4.
+  3. **`pay_declared_paid_unconfirmed`.** Raised every run, unwindowed, for each executed `m2_declare_paid`. Clears only when (a) a confirming line exists in an eligible import, or (b) a ledger transaction reverses that resolution's Step B posting (WITHDRAWAL-REVERSAL-1; no such writer exists today). Confirming line: kind `payout`, status `succeeded`, same tenant and provider, resolved to the attempt by provider reference (or by merchant reference only when no other payout attempt holds the line's reference), amount AND asset equal to the attempt's. An executed `compensating_entry` credit with that Step B as causation is an annotation only and never clears it.
+  4. **`pay_declared_not_paid_but_paid`.** Raised every run, unwindowed, for each executed `m2_declare_not_paid` whose attempt reached T14 (`success_after_payout_declined`), or for which any import has a `succeeded` payout line resolved to the attempt by reference or merchant reference, whatever its amount, asset or MOCK status. Clears only when executed `compensating_entry` `debit_player` requests whose causation is that resolution's `withdrawal_failed` transaction total at least the withdrawn amount. Nothing else clears it. An off-platform recovery has no recording path. The row stays open as an investigated, explained item and is never deleted or suppressed.
+  5. **`pay_declared_paid_compensated_but_paid`.** Raised every run, unwindowed, when executed `compensating_entry` `credit_player` requests with that Step B as causation total more than zero, AND any import has a `succeeded` payout line resolved to the attempt (raising predicate, as in 4). Clears only when executed `compensating_entry` `debit_player` requests whose causation is one of those credits' own `manual_adjustment` transactions total at least the credited amount.
+  6. **§2.6 explained difference.** An executed `m2_declare_paid` credits `psp_clearing` by the withdrawn amount without a PSP confirmation. Each open `pay_declared_paid_unconfirmed` row itemises that credit as an explained difference. If the PSP never paid, the amount stays in `psp_clearing` until a WITHDRAWAL-REVERSAL-1 posting or a governed correction. It is never netted away.
+  7. **Precondition.** These kinds exist only for providers whose statement source is scheduled in the `payment_statement` stream. Their delivery to a human is NOT IMPLEMENTED (ALERT-DELIVERY-1, PAY-PAYOUT-DISPUTE-ALERT-1).
 
 ### 2.3 Wallet ↔ casino provider — `BLUEPRINT`
 

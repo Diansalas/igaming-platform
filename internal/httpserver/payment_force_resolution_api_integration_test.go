@@ -30,6 +30,53 @@ var frClosedTokens = []string{
 type frWorld struct {
 	*maWorld
 	orch *payments.Orchestrator
+	// refusals collects every refusal (>= 400) body seen, for the leakage check.
+	refusals [][]byte
+}
+
+func (w *frWorld) note(status int, body []byte) {
+	if status >= 400 {
+		w.refusals = append(w.refusals, body)
+	}
+}
+
+// noLeakage asserts (non-vacuously) that no collected refusal body carries database
+// text or a SQLSTATE-like marker.
+func (w *frWorld) noLeakage(t *testing.T, atLeast int) {
+	t.Helper()
+	if len(w.refusals) < atLeast {
+		t.Fatalf("only %d refusal bodies were collected, want >= %d: the leakage check would be vacuous", len(w.refusals), atLeast)
+	}
+	for _, b := range w.refusals {
+		for _, bad := range []string{"SQLSTATE", "violates", "MR0", "MR1", "CG0", "payment_manual_resolutions:", "ERROR:"} {
+			if strings.Contains(string(b), bad) {
+				t.Errorf("a refusal body leaked database text (%q): %s", bad, b)
+			}
+		}
+	}
+}
+
+// deniedRows returns the metadata JSON of the denied audit rows visible in a tenant.
+func (w *frWorld) deniedRows(tenantID uuid.UUID) []string {
+	var out []string
+	if err := w.a.pool.WithTenant(context.Background(), tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, `SELECT metadata::text FROM audit_log WHERE action = 'payment.manual_resolution_denied'`)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var m string
+			if err := rows.Scan(&m); err != nil {
+				return err
+			}
+			out = append(out, m)
+		}
+		return rows.Err()
+	}); err != nil {
+		w.a.t.Fatal(err)
+	}
+	return out
 }
 
 func newFRWorld(t *testing.T, withPolicy bool) *frWorld {
@@ -158,6 +205,7 @@ func TestForceResolutionAPI_T12_Matrix(t *testing.T) {
 		{"another tenant's finance (canActOnTenant)", w.otherFin, http.StatusForbidden},
 	} {
 		got, body, _ := w.request(c.actor, w.disputedDeposit(), nil)
+		w.note(got, body)
 		if got != c.want {
 			t.Errorf("request / %s: want %d got %d %s", c.name, c.want, got, body)
 		}
@@ -181,6 +229,19 @@ func TestForceResolutionAPI_T12_Matrix(t *testing.T) {
 		if res := w.a.do("GET", w.base(), w.tok(c.actor), nil); res.status != c.want {
 			t.Errorf("list / %s: want %d got %d %s", c.name, c.want, res.status, res.body)
 		}
+	}
+	// Z30/Z31: every service-level 403 class and the foreign-tenant refusal wrote a
+	// denied audit row carrying the closed token (and, for guard refusals, the SQLSTATE
+	// CODE only).
+	if rows := w.deniedRows(w.other); len(rows) == 0 || !strings.Contains(strings.Join(rows, "\n"), `"denied_token": "`+payments.TokenForceResolveNotPermitted+`"`) {
+		t.Errorf("the foreign-tenant refusal wrote no denied audit row with the closed token: %v", rows)
+	}
+	own := strings.Join(w.deniedRows(w.tenant), "\n")
+	if !strings.Contains(own, `"sqlstate": "MR003"`) {
+		t.Errorf("the no-grant refusal's denied audit row lacks sqlstate MR003: %s", own)
+	}
+	if strings.Contains(own, "grant") || strings.Contains(own, "ERROR") {
+		t.Errorf("a denied audit row carries message text: %s", own)
 	}
 	// No token at all, and an anonymous caller.
 	if res := w.a.do("GET", w.base(), "", nil); res.status != http.StatusUnauthorized {
@@ -212,6 +273,7 @@ func TestForceResolutionAPI_T14_FlowTokensAndAudit(t *testing.T) {
 	// Disabled until the platform authors a baseline.
 	before := w.deniedAudits()
 	st, body, _ := w.request(w.f1, attempt, nil)
+	w.note(st, body)
 	if st != http.StatusConflict || !strings.Contains(string(body), payments.TokenForceResolveDisabled) {
 		t.Fatalf("no policy: want 409 %s, got %d %s", payments.TokenForceResolveDisabled, st, body)
 	}
@@ -227,18 +289,24 @@ func TestForceResolutionAPI_T14_FlowTokensAndAudit(t *testing.T) {
 	}
 
 	// A closed-set refusal for each of: unknown attempt, self-approval, stale hash.
-	if st, body, _ := w.request(w.f1, uuid.New(), nil); st < 400 || !frHasClosedToken(body) && st != http.StatusBadRequest {
+	st, body, _ = w.request(w.f1, uuid.New(), nil)
+	w.note(st, body)
+	if st < 400 || !frHasClosedToken(body) && st != http.StatusBadRequest {
 		t.Errorf("unknown attempt: want a closed-token refusal, got %d %s", st, body)
 	}
 	res := w.a.do("POST", w.base()+"/"+d.ID+"/approve", w.tok(w.f1), map[string]any{"payload_hash": d.PayloadHash, "reason_code": "x"})
+	w.note(res.status, res.body)
 	if res.status != http.StatusForbidden && res.status != http.StatusConflict || !frHasClosedToken(res.body) {
 		t.Errorf("self-approval: want a closed-token refusal, got %d %s", res.status, res.body)
 	}
 	res = w.a.do("POST", w.base()+"/"+d.ID+"/approve", w.tok(w.f2), map[string]any{"payload_hash": strings.Repeat("0", 64), "reason_code": "x"})
+	w.note(res.status, res.body)
 	if res.status < 400 || res.status == http.StatusInternalServerError || !frHasClosedToken(res.body) {
 		t.Errorf("stale payload hash: want a closed-token refusal, got %d %s", res.status, res.body)
 	}
-	if res := w.a.do("GET", w.base()+"/"+uuid.NewString(), w.tok(w.f1), nil); res.status != http.StatusNotFound || !strings.Contains(string(res.body), payments.TokenForceResolveNotFound) {
+	nf := w.a.do("GET", w.base()+"/"+uuid.NewString(), w.tok(w.f1), nil)
+	w.note(nf.status, nf.body)
+	if res := nf; res.status != http.StatusNotFound || !strings.Contains(string(res.body), payments.TokenForceResolveNotFound) {
 		t.Errorf("unknown resolution: want 404 %s, got %d %s", payments.TokenForceResolveNotFound, res.status, res.body)
 	}
 
@@ -265,6 +333,7 @@ func TestForceResolutionAPI_T14_FlowTokensAndAudit(t *testing.T) {
 	}
 	// Re-approving an executed resolution is a conflict.
 	res = w.a.do("POST", w.base()+"/"+d.ID+"/approve", w.tok(w.f2), map[string]any{"payload_hash": d.PayloadHash, "reason_code": "x"})
+	w.note(res.status, res.body)
 	if res.status != http.StatusConflict || !frHasClosedToken(res.body) {
 		t.Errorf("re-approval: want 409 closed token, got %d %s", res.status, res.body)
 	}
@@ -279,10 +348,7 @@ func TestForceResolutionAPI_T14_FlowTokensAndAudit(t *testing.T) {
 	if dec.Resolution.State != "rejected" {
 		t.Errorf("reject state = %q", dec.Resolution.State)
 	}
-	// No error body ever carries SQL text or a SQLSTATE.
-	for _, b := range [][]byte{body} {
-		if strings.Contains(string(b), "SQLSTATE") || strings.Contains(string(b), "violates") {
-			t.Errorf("an error body leaked database text: %s", b)
-		}
-	}
+	// No refusal body ever carries SQL text or a SQLSTATE (non-vacuous: every refusal
+	// collected above is checked, and there must be several).
+	w.noLeakage(t, 6)
 }

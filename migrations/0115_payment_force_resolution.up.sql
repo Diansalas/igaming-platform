@@ -144,7 +144,8 @@ CREATE POLICY reference_read ON payment_manual_resolution_codes FOR SELECT USING
 
 CREATE FUNCTION payment_reserved_ref_prefix() RETURNS text AS $$
     SELECT 'platform-operator-declared:'::text;
-$$ LANGUAGE sql IMMUTABLE;
+$$ LANGUAGE sql IMMUTABLE
+    SET search_path = pg_catalog, public, pg_temp;
 
 -- =========================================================================
 -- 4. payment_manual_resolutions (families T, A; no P)
@@ -250,7 +251,8 @@ CREATE FUNCTION payment_m2_admits(
                        AND m.target_state = p_new_state
                        AND m.kind = CASE p_new_state WHEN 'succeeded' THEN 'm2_declare_paid' ELSE 'm2_declare_not_paid' END),
         false);
-$$ LANGUAGE sql STABLE;
+$$ LANGUAGE sql STABLE
+    SET search_path = pg_catalog, public, pg_temp;
 
 -- =========================================================================
 -- 5. payment_manual_resolution_approvals (families T, A; no P)
@@ -362,7 +364,8 @@ BEGIN
     -- silently pass (the K2 initiator_valid lesson).
     requester_valid := COALESCE(requester_valid, false);
 END;
-$$ LANGUAGE plpgsql STABLE;
+$$ LANGUAGE plpgsql STABLE
+    SET search_path = pg_catalog, public, pg_temp;
 
 -- =========================================================================
 -- 7. The resolution guard (R-3 (i)-(viii); K2's ledger_adjustment_requests_guard
@@ -671,7 +674,8 @@ BEGIN
     END IF;
     RAISE EXCEPTION 'payment_manual_resolutions: invalid transition % -> %', OLD.state, NEW.state USING ERRCODE = 'MR030';
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql
+    SET search_path = pg_catalog, public, pg_temp;
 
 -- The beneficiary guard (S-12), a separate named trigger on BOTH tables
 -- (ADR 0101 6.2). Self-contained (it derives the owner from the attempt's
@@ -711,7 +715,8 @@ BEGIN
     END IF;
     RETURN NEW;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql
+    SET search_path = pg_catalog, public, pg_temp;
 
 CREATE TRIGGER payment_manual_resolutions_guard
     BEFORE INSERT OR UPDATE ON payment_manual_resolutions
@@ -775,7 +780,8 @@ BEGIN
     END IF;
     RETURN NULL;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql
+    SET search_path = pg_catalog, public, pg_temp;
 
 CREATE CONSTRAINT TRIGGER payment_manual_resolutions_no_executing_commit
     AFTER INSERT OR UPDATE ON payment_manual_resolutions
@@ -845,7 +851,8 @@ BEGIN
     NEW.decided_txid := txid_current();
     RETURN NEW;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql
+    SET search_path = pg_catalog, public, pg_temp;
 
 CREATE FUNCTION payment_manual_resolution_approvals_apply_reject() RETURNS TRIGGER AS $$
 BEGIN
@@ -854,7 +861,8 @@ BEGIN
     END IF;
     RETURN NULL;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql
+    SET search_path = pg_catalog, public, pg_temp;
 
 CREATE TRIGGER payment_manual_resolution_approvals_guard
     BEFORE INSERT OR UPDATE ON payment_manual_resolution_approvals
@@ -906,7 +914,8 @@ BEGIN
     END IF;
     RETURN NEW;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql
+    SET search_path = pg_catalog, public, pg_temp;
 
 CREATE TRIGGER payment_attempt_reference_evidence_guard
     BEFORE INSERT ON payment_attempt_reference_evidence
@@ -923,7 +932,8 @@ BEGIN
     END IF;
     RETURN NULL;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql
+    SET search_path = pg_catalog, public, pg_temp;
 
 CREATE CONSTRAINT TRIGGER payment_attempt_reference_evidence_bound_to_park
     AFTER INSERT ON payment_attempt_reference_evidence
@@ -1005,7 +1015,8 @@ BEGIN
     END IF;
     RETURN NEW;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql
+    SET search_path = pg_catalog, public, pg_temp;
 
 CREATE TRIGGER ledger_transactions_reserved_prefix_guard
     BEFORE INSERT ON ledger_transactions
@@ -1194,7 +1205,8 @@ BEGIN
 
     RETURN NEW;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql
+    SET search_path = pg_catalog, public, pg_temp;
 
 -- R-7 / K3-S1: column discipline for operator-evidence UPDATEs. NOT an edit of
 -- payment_attempts_guard() (so the 8.3 diff stays exact). Fires on (i) an
@@ -1214,7 +1226,8 @@ BEGIN
     END IF;
     RETURN NEW;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql
+    SET search_path = pg_catalog, public, pg_temp;
 
 CREATE TRIGGER payment_attempts_operator_column_discipline
     BEFORE UPDATE ON payment_attempts
@@ -1252,7 +1265,8 @@ CREATE OR REPLACE FUNCTION ledger_governed_fence_allows(
            AND m.state = 'executing' AND m.executed_txid = txid_current()
            AND p_correlation = m.withdrawal_request_id
            AND p_idempotency_key = m.withdrawal_request_id::text || ':failed'));
-$$ LANGUAGE sql STABLE;
+$$ LANGUAGE sql STABLE
+    SET search_path = pg_catalog, public, pg_temp;
 
 -- Entries can never be appended to a pre-existing (or non-governed)
 -- transaction by an acting session: the parent must pass the same fence, and
@@ -1336,7 +1350,8 @@ BEGIN
     END IF;
     RETURN NEW;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql
+    SET search_path = pg_catalog, public, pg_temp;
 
 -- LF D-2 / security R-1: GetOrCreateAccount always runs INSERT ... ON CONFLICT
 -- DO NOTHING, and the RLS WITH CHECK fires even when the row exists. Dropped
@@ -1398,11 +1413,13 @@ CREATE POLICY tenant_scope_update ON payment_manual_resolutions FOR UPDATE
            AND NULLIF(current_setting('app.platform_service_id', true), '') IS NULL
            AND NOT financial_acting_gucs_present());
 -- R-2: the reconciliation stream runs as WithTenantSnapshot (app.tenant_id
--- only, no principal). It may read ONLY executed resolutions, never pending
+-- only, no principal). It may read ONLY executed M2 resolutions (security/LF
+-- R-2 tightening: kind IN the two M2 kinds, so an executed M1 is never exposed), never pending
 -- payloads, and never write.
 CREATE POLICY tenant_system_read_executed ON payment_manual_resolutions FOR SELECT
     USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid
            AND state = 'executed'
+           AND kind IN ('m2_declare_paid', 'm2_declare_not_paid')
            AND NULLIF(current_setting('app.principal_id', true), '') IS NULL
            AND NULLIF(current_setting('app.platform_admin_principal_id', true), '') IS NULL
            AND NULLIF(current_setting('app.player_account_id', true), '') IS NULL
@@ -1654,7 +1671,8 @@ BEGIN
     END IF;
     RETURN NULL;
 END;
-$$ LANGUAGE plpgsql STABLE;
+$$ LANGUAGE plpgsql STABLE
+    SET search_path = pg_catalog, public, pg_temp;
 
 -- RC-1: additive Person-separation triggers (neither edits a K2 body). The
 -- names sort after ledger_adjustment_requests_guard / _approvals_guard so each
@@ -1679,7 +1697,8 @@ BEGIN
     END IF;
     RETURN NEW;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql
+    SET search_path = pg_catalog, public, pg_temp;
 
 CREATE TRIGGER ledger_adjustment_requests_step_b_person_sep
     BEFORE INSERT ON ledger_adjustment_requests
@@ -1707,7 +1726,8 @@ BEGIN
     END IF;
     RETURN NEW;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql
+    SET search_path = pg_catalog, public, pg_temp;
 
 CREATE TRIGGER ledger_adjustment_approvals_step_b_person_sep
     BEFORE INSERT ON ledger_adjustment_approvals

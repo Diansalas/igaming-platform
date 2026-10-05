@@ -1625,9 +1625,11 @@ additive triggers of RC-1 and the function named in K3-S2, which are listed here
   Test: a pending M2 can still be cancelled after the withdrawal was failed by sweeper evidence.
 - **O-K2.** Tidy: C-37 (RC-2), §7 "K2 SQL objects" (§20.1 binding), C-16 (D-10 snapshot) are corrected in
   place or superseded by this section.
-- **O-K3 (residual).** The acting `withdrawal_requests` UPDATE policy could let an acting M2 session set
-  `withdrawal_requests.provider_reference` once from NULL. K3 records this as a residual next to R-K3-11
-  (`withdrawal.Complete`/`Fail` do not write it); it is not extended in K3.
+- **O-K3 (residual; wording corrected in the fix batch).** `withdrawal_requests.provider_reference`, `provider_id` and `state` are NOT in
+  `withdrawal_requests_immutable_fields`, so an acting session inside an executing M2 transaction can rewrite them (the acting UPDATE policy
+  binds the row to an executing M2, not the columns). The deferred verifier re-checks the withdrawal state and the release link at commit, and
+  `withdrawal.Complete`/`Fail` do not write those columns, but nothing extends the column discipline to `withdrawal_requests` in K3.
+  **Launch flag:** extend the column discipline (state, release link only) to `withdrawal_requests` under an acting session before any real-money enablement.
 
 ### 26.2 Ledger-finance conditions
 
@@ -1684,7 +1686,7 @@ implemented as written; where this record differs it says so in §27.4.
 | Alerts for payout disputes and T14 (PAY-PAYOUT-DISPUTE-ALERT-1) and alert delivery (ALERT-DELIVERY-1) | `NOT IMPLEMENTED` (open; nothing here delivers or pages anyone) |
 | Closed-tenant player-funds path (ADR 0107) | design only, `NOT IMPLEMENTED` |
 | Casino / sportsbook 4xx mapping of the all-sessions ledger trigger's `MR020` (O-1) | `NOT IMPLEMENTED`: the posting is refused by the database (tested), the HTTP layer returns its generic 5xx |
-| Backoffice permissions (`backoffice/src/auth/permissions.ts` + test) | `IMPLEMENTED`; the vitest run was NOT RUN (no `node_modules` in this environment) |
+| Backoffice permissions (`backoffice/src/auth/permissions.ts` + test) | `IMPLEMENTED`; `payments` did not run vitest (no `node_modules` in its environment). The code-review run reports `npx vitest run src/auth/permissions.test.ts` 11/11 PASS and `tsc --noEmit` clean (local, reported, not CI) |
 
 ### 27.2 What was verified
 
@@ -1727,8 +1729,8 @@ run of the unmutated copy. **92 killed, 14 survived**, and each survivor is clas
 
 1. **PostgreSQL's 63-byte identifier limit** truncates two constraint names that §20.1 spells in full: `payment_provider_events_original_provider_reference_no_reserved_prefix`
    and `payment_statement_lines_original_provider_reference_no_reserved_prefix` exist as `..._no_reserved`. The C-16 object list uses the real names.
-2. **The R-2 system-read policy** is written as §20.1 states it (`state = 'executed'`): it also exposes executed **M1** rows (kind, no money link) to the
-   reconciliation session. The stream selects `m2_*` only. Tightening it to `kind LIKE 'm2_%'` would be a one-line follow-up if security wants it.
+2. **The R-2 system-read policy** was first written as §20.1 states it (`state = 'executed'`), which also exposed executed **M1** rows. **Tightened in the
+   fix batch (§27.6):** the policy now also requires `kind IN ('m2_declare_paid', 'm2_declare_not_paid')`; T-3 asserts an executed M1 is invisible.
 3. **`internal/db/null_arm_replay_static_test.go`** (not in §7) gained one line: `payment_manual_resolution_codes` is added to the family-R `a18SelectAllowlist`
    (the K2 precedent for `ledger_adjustment_reason_codes`). Without it `TestA18_*` and `TestK2G1_*` fail on the new reference table.
 4. **Audit metadata key names** are `tenant_status_at_submit` and `ever_possibly_sent_at_submission` (the first run wrote a truncated key; fixed and pinned
@@ -1744,8 +1746,28 @@ run of the unmutated copy. **92 killed, 14 survived**, and each survivor is clas
    rejection log; the ledger trigger covers postings) and `kyc_verifications.provider_reference` (a KYC vendor reference).
 10. **`deploy/init-app-role.sql`:** the K3 block is appended; E1's `de8caba` also appends a block, so the merge will conflict trivially: keep both.
 
-### 27.5 Residuals (unchanged by this implementation)
+### 27.5 Residuals
 
 PAY-PAYOUT-DISPUTE-ALERT-1 and ALERT-DELIVERY-1 (no delivery, no recipients); the `psp_clearing` residual of a declared-paid payout; MA020 stranding after
 an M2; the closed-tenant hold-release path (ADR 0107); real-PSP behaviour; statement-source registration in the binary; casino/sportsbook 4xx mapping
 of `MR020`.
+
+### 27.6 Fix batch after the implementation reviews (2026-10-05)
+
+Applied after the ledger-finance, code-review and security implementation reviews of `041fb55` (`docs/plans/prh2-hardening-round/reviews/k3-impl-*.md`), on
+`prh2-k3-impl` merged with main `a642e8c` (E1, migration 0114; `deploy/init-app-role.sql` keeps both blocks; the 0095 §38/§39 and runbook §13/§14 sections keep both):
+- **LF F-1 / security PM-S2 (real defect, fixed).** A confirming line now resolves to the attempt by provider reference, or by merchant reference only when no
+  other attempt of the same kind holds the line's reference (`payMatcher.resolvesTo`); raising predicates stay broad. Regression `TestK3_C42b_*`, killed mutant `Y-F1`.
+- **Security PM-S1 / code-review F-1.** Every function 0115 creates (18) carries `SET search_path = pg_catalog, public, pg_temp`. `TestK3_Y01` pins the
+  live `proconfig` of exactly that list and counts the migration text; `TestK3_Y02` shows a TEMP table named `payment_manual_resolutions` cannot defeat the reserved
+  namespace trigger. The down migration restores the previous bodies (no SET); the C-16/T-18 round trip, C-17 and C-9c pass.
+- **Security PM-S3/PM-S4, PM-S5.** Direct UPDATEs of the pending payload columns raise `MR030` (`TestK3_Y03`); the pinned required count survives a lower policy
+  (`TestK3_Y04`); the denied audit row now carries the SQLSTATE CODE (never message text) and the HTTP tests assert it for the 403 classes and the foreign tenant.
+- **R-2 tightened** (above). **LF F-2..F-6:** `TestK3_Y05` (an unrelated debit never clears (d) or (c2)), `TestK3_Y06` ((c2) is raised by any succeeded line),
+  `TestK3_Y07` (the A8 L1 share locks serialise a revoke against an execution, using `testHookResolutionAfterShareLocks`), `TestK3_C34b` (holder attempt in the S1 detail),
+  and the (d) hint no longer promises an off-platform recording path. **Code-review F-2/F-3:** `TestK3_Y08` (requester Person unchanged at execution, scratch DB),
+  and the HTTP leakage assertion now checks every collected refusal body (non-vacuous). `TestK3_Y09` (requester who later authors a policy), `TestK3_Y10` (`refused_at_execution` needs a same-transaction approval).
+- **Wording** of ADR 0095 §35.4/§39.3/§39.4 and `reconciliation-model.md` applied as ledger-finance wrote it.
+- **Deferred (docs only):** PAY-K3-MR020-HTTP-MAPPING-1 (casino/sportsbook: a crafted provider id gives a 5xx a provider may retry; the database refuses it);
+  PAY-K3-STATEMENT-SOURCE-WIRING-1 (populate `DefaultStatementSources` from the SAME list given to the scheduler, and also refuse `m2_declare_paid` when no source is scheduled);
+  Z28/Z29 (optional static route-permission pin); LF F-8/F-9 and code-review F-4/F-5 (optional hardening: refuse a second M1 once one executed; expire a stale pending row in `Request`).

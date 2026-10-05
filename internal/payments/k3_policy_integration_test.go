@@ -188,14 +188,25 @@ func TestK3_T3_SystemReadSeesOnlyExecutedM2Rows(t *testing.T) {
 	if _, ok := seen[pending.ID.String()]; ok {
 		t.Error("the system session sees a PENDING resolution")
 	}
-	// The R-2 policy exposes EXECUTED rows of any kind (state = 'executed'); the
-	// reconciliation reader filters kind itself (it selects m2_* only). An executed
-	// M1 row carries no money link, so exposing it is benign.
-	if got := seen[m1.ID.String()]; got != "" && got != "m1_deposit_evidence/executed" {
-		t.Errorf("unexpected M1 row shape %q", got)
+	// R-2 (tightened): an EXECUTED M1 row is invisible to the system session too.
+	if got, ok := seen[m1.ID.String()]; ok {
+		t.Errorf("the system session sees an executed M1 row (%q)", got)
 	}
 	if n := len(w.sysQuery(`SELECT 1 FROM payment_manual_resolution_approvals`)); n != 0 {
 		t.Errorf("the system session sees %d approval rows", n)
+	}
+	// Z01: a PLAYER session (the beneficiary) sees no resolution row at all.
+	if err := w.pool.WithPlayerScope(context.Background(), w.f.tenantID, w.f.playerAccountID, func(ctx context.Context, tx pgx.Tx) error {
+		var n int
+		if err := tx.QueryRow(ctx, `SELECT count(*) FROM payment_manual_resolutions`).Scan(&n); err != nil {
+			return nil // no privilege at all is also a refusal
+		}
+		if n != 0 {
+			t.Errorf("a player session sees %d resolution rows", n)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
 	}
 }
 

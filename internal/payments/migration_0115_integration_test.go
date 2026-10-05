@@ -379,7 +379,7 @@ func guardBody(t *testing.T, file string) []string {
 	if i < 0 {
 		t.Fatalf("%s has no payment_attempts_guard()", file)
 	}
-	j := strings.Index(s[i:], "$$ LANGUAGE plpgsql;")
+	j := strings.Index(s[i:], "$$ LANGUAGE plpgsql")
 	return strings.Split(s[i:i+j], "\n")
 }
 

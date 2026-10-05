@@ -499,8 +499,8 @@ the provider's settlement is reconciled; the clearing balance can sit off by the
 Do not "fix" it by hand; the settlement reconciliation (D1/D2 lines) and finance own it.
 
 **Stranding by MA020.** After a declared-paid M2 the player's cash can be below what an in-flight K2
-compensation expects; MA020 (open payment exposure) is lifted only for the Step B posting of an
-executing M2 and for the compensation of an executed M2. Any other K2 adjustment of a player with an
+compensation expects; MA020 (open payment exposure) is a K2 payload refusal; it never applies to the Step B
+`withdrawal.Complete` posting itself. The only exemption is a K2 `compensating_entry` CREDIT whose causation is the Step B of an executed declare-paid. Any other K2 adjustment of a player with an
 open payment exposure is still refused (`open_payment_exposure_at_execution` is recorded in the audit
 row of every executed adjustment).
 
@@ -508,6 +508,9 @@ row of every executed adjustment).
 closed-tenant actor scope, ADR 0101 R-5); a tenant principal cannot approve. The hold-release
 path for the funds of a closed tenant is OPEN (ADR 0107, design only, NOT IMPLEMENTED). Do not set a
 tenant to `closed` while it has withdrawals in a hold-bearing state.
+
+**The free-text `note` (up to 1000 bytes) is stored in the append-only audit log.** Do not put personal data in it (player names, account numbers, document
+references): use the closed codes (basis, context, finding, reason) and the `evidence_ref_hash`. A personal-data note cannot be erased from an append-only store (PII retention risk).
 
 **Never:** hand-edit `payment_attempts`, `withdrawal_requests` or ledger rows; resend a payout; use a
 `platform-operator-declared:` reference anywhere else; claim a payment was delivered or an alert sent.

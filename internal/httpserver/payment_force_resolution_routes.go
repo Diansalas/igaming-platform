@@ -102,7 +102,7 @@ func beginResolutionCall(deps Deps, w http.ResponseWriter, r *http.Request, op s
 	c.target = target
 	if !canActOnTenant(tc, target) {
 		c.logger.Warn("payment_force_resolution_denied", "op", op, "reason", "foreign_tenant")
-		recordResolutionDenied(r.Context(), deps, c, op, payments.TokenForceResolveNotPermitted)
+		recordResolutionDenied(r.Context(), deps, c, op, payments.TokenForceResolveNotPermitted, "")
 		apierror.Write(w, c.requestID, apierror.CodeForbidden, payments.TokenForceResolveNotPermitted)
 		return c, false
 	}
@@ -124,8 +124,13 @@ func resolutionTarget(w http.ResponseWriter, c resolutionCall) (payments.Resolut
 // target as subject tenant (ADR 0104 / migration 0109). The row carries the
 // closed token, the actor, the tenant, the resolution or attempt id (when the
 // route names one), IP, user agent and request id.
-func recordResolutionDenied(ctx context.Context, deps Deps, c resolutionCall, op, token string, ids ...string) {
+func recordResolutionDenied(ctx context.Context, deps Deps, c resolutionCall, op, token, sqlstate string, ids ...string) {
 	meta := map[string]any{"denied_token": token, "target_tenant_id": c.target.String()}
+	if sqlstate != "" {
+		// The SQLSTATE CODE only, never message text (PM-S5): the audit row tells an
+		// operator which guard refused without carrying database wording.
+		meta["sqlstate"] = sqlstate
+	}
 	if len(ids) > 0 && ids[0] != "" {
 		meta["resolution_id"] = ids[0]
 	}
@@ -169,12 +174,12 @@ func writeResolutionError(ctx context.Context, deps Deps, w http.ResponseWriter,
 		apierror.Write(w, c.requestID, apierror.CodeValidation, "invalid request")
 	case payments.ResolutionErrForbidden, payments.ResolutionErrSession:
 		c.logger.Warn("payment_force_resolution_refused", "op", op, "class", string(class), "sqlstate", payments.ResolutionSQLState(err))
-		recordResolutionDenied(ctx, deps, c, op, token, ids...)
+		recordResolutionDenied(ctx, deps, c, op, token, payments.ResolutionSQLState(err), ids...)
 		apierror.Write(w, c.requestID, apierror.CodeForbidden, token)
 	case payments.ResolutionErrDisabled, payments.ResolutionErrPrecondition, payments.ResolutionErrNotResolvable,
 		payments.ResolutionErrExpired, payments.ResolutionErrConflict, payments.ResolutionErrRetryable:
 		c.logger.Warn("payment_force_resolution_refused", "op", op, "class", string(class), "sqlstate", payments.ResolutionSQLState(err))
-		recordResolutionDenied(ctx, deps, c, op, token, ids...)
+		recordResolutionDenied(ctx, deps, c, op, token, payments.ResolutionSQLState(err), ids...)
 		apierror.Write(w, c.requestID, apierror.CodeConflict, token)
 	default:
 		c.logger.Error("payment_force_resolution_failed", "op", op, "err", err.Error())

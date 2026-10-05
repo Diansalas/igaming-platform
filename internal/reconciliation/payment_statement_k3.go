@@ -51,7 +51,7 @@ const (
 	m2KindNotPaid                                              = "m2_declare_not_paid"
 	capturedUnpostedResolutionHint                             = "resolution: a PSP-initiated reversal/tombstone on this line's reference, or allocation (LEDGER-SUSPENSE-B-1); M1 only acknowledges"
 	declaredPaidUnconfirmedResolutionHint                      = "resolution: a confirming statement line (payout, succeeded, amount and asset equal, non-MOCK source) or a withdrawal reversal (WITHDRAWAL-REVERSAL-1); a compensating credit annotates but does not clear"
-	declaredNotPaidButPaidResolutionHint                       = "resolution: executed compensating_entry debits, causation = the withdrawal_failed transaction, totalling at least the withdrawn amount (or an off-platform recovery recorded as such)"
+	declaredNotPaidButPaidResolutionHint                       = "resolution: executed compensating_entry debits, causation = the withdrawal_failed transaction, totalling at least the withdrawn amount; an off-platform recovery has no clearing path and is tracked through the row's investigation status"
 	declaredPaidCompensatedButPaidResolutionHint               = "resolution: executed compensating_entry debits, causation = the compensating credit's own transaction, totalling at least the credited amount"
 )
 
@@ -346,6 +346,23 @@ func confirmingLine(l *persistedLine, a *payAttempt) bool {
 		l.asset == a.asset && l.amount.Cmp(a.amount) == 0
 }
 
+// resolvesTo is the CLEARING resolution order of D-5 / ADR 0101 9.1(b) (LF F-1,
+// security PM-S2): a persisted line may confirm attempt a only when it resolves to
+// a by provider reference, or by merchant reference when NO other attempt of the
+// same kind holds the line's own reference. Another live payout's line (carrying
+// that payout's reference) can therefore never clear a's finding by borrowing a's
+// merchant reference. Raising predicates keep the broad linesFor union.
+func (m *payMatcher) resolvesTo(l *persistedLine, a *payAttempt) bool {
+	if a.providerRef != "" && l.ref == a.providerRef {
+		return true
+	}
+	if l.merchant == "" || l.merchant != a.merchantRef {
+		return false
+	}
+	holder := m.byRef[l.kind+"\x00"+l.ref]
+	return holder == nil || holder.id == a.id
+}
+
 // payAttemptByID finds a loaded attempt.
 func (m *payMatcher) payAttemptByID(id uuid.UUID) *payAttempt {
 	for _, a := range m.attempts {
@@ -480,7 +497,7 @@ func (m *payMatcher) checkM2Standing(ctx context.Context, tx pgx.Tx) error {
 				if anySucceeded == nil {
 					anySucceeded = l
 				}
-				if confirmingLine(l, a) {
+				if m.resolvesTo(l, a) && confirmingLine(l, a) {
 					confirmed = true
 				}
 			}
