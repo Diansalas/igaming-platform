@@ -190,12 +190,11 @@ func (r *StatementSourceRegistry) Registered(providerID string) bool {
 	return r.providers[providerID]
 }
 
-// DefaultStatementSources is the process-wide registry the API routes use.
-// cmd/platform-api registers the providers whose statement source it hands to
-// the reconciliation scheduler (a wiring line in an E1-owned file, recorded as
-// a deferred item); until then an m2_declare_not_paid is refused (fail
-// closed).
-var DefaultStatementSources = &StatementSourceRegistry{}
+// There is deliberately NO package-level registry (PAY-K3-STATEMENT-SOURCE-
+// WIRING-1): cmd/platform-api builds one, registers the providers of the SAME
+// list it hands to the reconciliation scheduler, and injects it through
+// httpserver.Deps.StatementSources. A nil/empty registry refuses every M2
+// (fail closed).
 
 // ResolutionTarget is a route-validated target tenant. Its only constructor
 // applies the canActOnTenant rule (a tenant caller may name only its own
@@ -471,10 +470,20 @@ func (s *ManualResolutionService) requestInTx(ctx context.Context, tx pgx.Tx, ca
 	if err := in.validate(); err != nil {
 		return ManualResolution{}, err
 	}
-	if in.Kind == ResolutionM2DeclareNotPaid {
-		// LF O-4: refuse at submission too, deciding from the process registry.
+	if in.Kind == ResolutionM2DeclareNotPaid || in.Kind == ResolutionM2DeclarePaid {
+		// LF O-4 + PAY-K3-STATEMENT-SOURCE-WIRING-1: BOTH M2 kinds are refused at
+		// submission unless a statement source is registered for THIS attempt's
+		// provider (decided from the process registry). Fail closed in shape: an
+		// unreadable attempt, a missing provider id or an unregistered provider all
+		// refuse; only a readable attempt with a registered provider proceeds.
 		att, err := GetAttemptByID(ctx, tx, in.AttemptID)
-		if err == nil && att.ProviderID != nil && !s.sources.Registered(*att.ProviderID) {
+		if err != nil {
+			if errors.Is(err, ErrAttemptNotFound) {
+				return ManualResolution{}, ErrResolutionNotFound
+			}
+			return ManualResolution{}, fmt.Errorf("payments: manual resolution source check: %w", err)
+		}
+		if !s.statementSourceRegistered(att.ProviderID) {
 			return ManualResolution{}, ErrResolutionNoStatementSource
 		}
 	}
@@ -888,11 +897,25 @@ func (s *ManualResolutionService) executionRefusal(res ManualResolution, att Pay
 		if att.EverPossiblySent && (res.BasisCode == nil || *res.BasisCode != BasisProviderConfirmedOutOfBand) {
 			return resolutionRefusedPrecond
 		}
-		if !s.sources.Registered(*att.ProviderID) {
-			return resolutionRefusedNoSource
-		}
+	}
+	// PAY-K3-STATEMENT-SOURCE-WIRING-1: BOTH M2 kinds need a statement source
+	// registered for this attempt's provider (the standing kinds
+	// pay_declared_paid_unconfirmed and the (c)/(d) clearing exist only when that
+	// provider's stream runs). Evaluated PER PROVIDER: the MOCK source unlocks
+	// only the mock provider's attempts (owner ruling H-W2).
+	if !s.statementSourceRegistered(att.ProviderID) {
+		return resolutionRefusedNoSource
 	}
 	return ""
+}
+
+// statementSourceRegistered is true only for a non-nil, non-empty provider id
+// that has a registered statement source. Anything else is false (fail closed).
+func (s *ManualResolutionService) statementSourceRegistered(providerID *string) bool {
+	if s == nil || providerID == nil || *providerID == "" {
+		return false
+	}
+	return s.sources.Registered(*providerID)
 }
 
 func equalOptString(a, b *string) bool {

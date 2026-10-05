@@ -71,6 +71,21 @@ func run() error {
 	if err := refuseSyntheticInProduction(cfg, buildRegistrations(cfg, providers)); err != nil {
 		return err
 	}
+	// PAY-K3-STATEMENT-SOURCE-WIRING-1: ONE list of payment statement sources
+	// feeds BOTH the manual-resolution statement-source registry (registered
+	// here, before the HTTP server exists) and the scheduler's payment_statement
+	// stream (RunSchedulerLoop below). The coverage gate refuses a real payments
+	// adapter without a real source of the same provider id, and a MOCK source
+	// carrying a real adapter's id; registration refuses a nil source or an
+	// empty provider id.
+	paySources := providers.paymentStatementSources()
+	if err := checkPaymentStatementCoverage(providers.paymentsAdapters(), paySources); err != nil {
+		return err
+	}
+	stmtSources := new(payments.StatementSourceRegistry)
+	if err := registerPaymentStatementSources(stmtSources, paySources); err != nil {
+		return err
+	}
 	// Security S-1/I-1: every domain's webhook schemes are validated here,
 	// pre-DB, as an error (the orchestrator constructors below re-check and
 	// panic as the last line of defence).
@@ -285,6 +300,7 @@ func run() error {
 		AccessTokenTTL:              cfg.AccessTokenTTL,
 		RefreshTokenTTL:             cfg.RefreshTokenTTL,
 		PaymentOrchestrator:         orchestrator,
+		StatementSources:            stmtSources,
 		PaymentsOutboundCredentials: providers.paymentsOutboundCredentials(),
 		CasinoOrchestrator:          casinoOrchestrator,
 		CasinoOutboundCredentials:   providers.casinoOutboundCredentials(),
@@ -424,7 +440,7 @@ func run() error {
 		// MOCK payments statement source (PRH-I5, ADR 0095 §12.4): the
 		// MockProvider's own records, fetched with no transaction held;
 		// real PSP statement matching is PROVIDER DEPENDENT.
-		reconciliation.RunSchedulerLoop(ctx, pool, logger, cfg.ReconciliationInterval, providers.SettlementStmt, providers.CasinoStmt, providers.PaymentsStmt)
+		reconciliation.RunSchedulerLoop(ctx, pool, logger, cfg.ReconciliationInterval, providers.SettlementStmt, providers.CasinoStmt, paySources...)
 	}()
 
 	// Stage 4H-B0-R7 directive item 4: operationalize the self-exclusion

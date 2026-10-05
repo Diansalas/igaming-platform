@@ -42,7 +42,7 @@ func registerPaymentForceResolutionRoutes(mux *http.ServeMux, deps Deps) {
 	staff := func(h http.Handler) http.Handler {
 		return auth.Middleware(deps.AuthIssuer)(auth.RequireStaffPrincipal(h))
 	}
-	svc := payments.NewManualResolutionService(deps.DB, payments.DefaultStatementSources)
+	svc := payments.NewManualResolutionService(deps.DB, deps.StatementSources)
 	// Literal patterns only: the webhook route guard (security C3/L8) fails
 	// closed on any non-literal Handle pattern.
 	mux.Handle("POST /v1/admin/tenants/{tenantID}/payment-force-resolutions",
