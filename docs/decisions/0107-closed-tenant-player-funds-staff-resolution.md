@@ -9,6 +9,9 @@
   - the human authorizes a workstream.
 
   **Until HD-CTF-1 is answered, the mechanism stays "every outcome disabled by configuration".**
+- **Pointer (2026-10-05, PRH-2 R3 / H-W1):** reconciliation OBSERVATION of non-active tenants now exists
+  (evidence only, `payment_statement` stream, ADR 0095 §40.4 / ADR 0101 §28.3). It implements nothing of
+  this ADR: this stays DESIGN ONLY, and no resolution, dispatch, release or posting is added for a closed tenant.
 - **Source:** ADR 0105 §1 (HD-PRH2-9, human decision: a controlled STAFF RESOLUTION PATH); ADR
   0095 §37.5 (H LF F3 residual); ADR 0101 rev 3/4 §19 (why this is separate from K3).
 - **Reviews of the design record** (`3158cf0`):

@@ -659,9 +659,24 @@ type k3Provider struct {
 	deposit  func(req DepositRequest) DepositResult
 	withdraw func(req WithdrawRequest) WithdrawResult
 	status   map[string]StatusResult
+	// calls counts every provider-facing call by method (PRH-2 R3: "the
+	// reconciliation observation makes no provider call" is asserted on these).
+	calls [3]atomic.Int64
+}
+
+const (
+	k3CallDeposit = iota
+	k3CallWithdraw
+	k3CallQuery
+)
+
+// callTotal is the number of Deposit, Withdraw and QueryStatus calls so far.
+func (p *k3Provider) callTotal() int64 {
+	return p.calls[k3CallDeposit].Load() + p.calls[k3CallWithdraw].Load() + p.calls[k3CallQuery].Load()
 }
 
 func (p *k3Provider) Deposit(ctx context.Context, req DepositRequest) (DepositResult, error) {
+	p.calls[k3CallDeposit].Add(1)
 	res, err := p.MockProvider.Deposit(ctx, req)
 	p.mu.Lock()
 	f := p.deposit
@@ -673,6 +688,7 @@ func (p *k3Provider) Deposit(ctx context.Context, req DepositRequest) (DepositRe
 }
 
 func (p *k3Provider) Withdraw(ctx context.Context, req WithdrawRequest) (WithdrawResult, error) {
+	p.calls[k3CallWithdraw].Add(1)
 	res, err := p.MockProvider.Withdraw(ctx, req)
 	p.mu.Lock()
 	f := p.withdraw
@@ -684,6 +700,7 @@ func (p *k3Provider) Withdraw(ctx context.Context, req WithdrawRequest) (Withdra
 }
 
 func (p *k3Provider) QueryStatus(ctx context.Context, ref string) (StatusResult, error) {
+	p.calls[k3CallQuery].Add(1)
 	p.mu.Lock()
 	ov, ok := p.status[ref]
 	p.mu.Unlock()

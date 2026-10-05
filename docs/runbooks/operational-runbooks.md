@@ -67,6 +67,16 @@ glossed over; see `docs/runbooks/observability-and-alerting.md` and
 6. Write the incident and its resolution to `reconciliation_mismatches`'
    investigation columns (mutable by design — see migration 0082) and to
    the audit log if any compensating entry was posted.
+7. **Suspended / closed tenants (PRH-2 R3, H-W1).** Only the `payment_statement`
+   stream observes a tenant that is not `active` (the other streams stay
+   active-only). A finding or `reconciliation.*` alert for such a tenant is real
+   evidence: the audit record of its run shows `non_active_tenant_observation:
+   true` and the `tenant_status`. The observation never resolves anything: do
+   not expect, and do not build, an automatic release, dispatch or posting for a
+   closed tenant; closed-tenant player funds need the controlled staff
+   resolution path (`platform_acting`, four-eyes; see section on M2 below and
+   ADR 0101 R-5 / ADR 0107 design). A closed tenant with no scheduled statement
+   source is not observed at all.
 
 ## 4. Provider outage (casino / sportsbook / KYC)
 
@@ -487,7 +497,10 @@ first gate: a missing or revoked grant is refused by the database.
    statement source is scheduled. A refusal is the correct outcome for an unmonitored provider; escalate to
    engineering, do not look for a workaround. Known residuals: standing findings exist only while the
    provider's stream stays scheduled (removing a source silently ends them); tenants that are not
-   `active` are not swept (OPEN HUMAN DECISION H-W1), so for a closed tenant treat M2 as unmonitored;
+   `active` are OBSERVED by the `payment_statement` stream only (PRH-2 R3, H-W1; evidence, not resolution; the
+   run's audit record shows `non_active_tenant_observation: true` and `tenant_status`), so a closed tenant's
+   standing findings keep appearing, but nothing is resolved, dispatched or released for it automatically: M2 on
+   a closed tenant remains a `platform_acting`, four-eyes staff action, and the mechanism of ADR 0107 is not built;
    deposit-park coverage depends on the PSP statement carrying `merchant_reference` (PROVIDER DEPENDENT).
 3. **Check the reason is resolvable.** M2 admits an `ambiguous` payout, or a `disputed` payout with
    `provider_reference_mismatch` / `success_for_never_sent_attempt`, whose withdrawal is still

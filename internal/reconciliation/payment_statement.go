@@ -292,6 +292,12 @@ type PaymentStatementOptions struct {
 	MaxLines int
 	// UnresolvedHorizon defaults to DefaultPaymentUnresolvedHorizon.
 	UnresolvedHorizon time.Duration
+	// ObservationOnlyStatus is set by the scheduler's non-active-tenant
+	// observation sweep (PRH-2 R3, H-W1) to the tenant's status ("suspended",
+	// "closed"). It changes NOTHING about fetch, ingest or matching: it is
+	// recorded in the run's audit metadata only, so staff can see the run was
+	// made for a tenant that was not active.
+	ObservationOnlyStatus string
 }
 
 func (o PaymentStatementOptions) maxLines() int {
