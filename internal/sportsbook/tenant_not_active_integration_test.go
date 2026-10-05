@@ -14,6 +14,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -389,6 +390,9 @@ func TestTenantNotActive_StatusChangeVsSettlementRace(t *testing.T) {
 	t.Run("status_change_first_then_posting_refused", func(t *testing.T) {
 		f, actor, betID := newStdBet(t, owner)
 		updated, release, closerDone := make(chan struct{}), make(chan struct{}), make(chan error, 1)
+		var releaseOnceGuard sync.Once
+		releaseOnce := func() { releaseOnceGuard.Do(func() { close(release) }) }
+		t.Cleanup(releaseOnce) // never leave a held transaction behind on a failed assertion
 		go func() {
 			closerDone <- owner.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
 				if _, err := tx.Exec(ctx, `UPDATE tenants SET status = 'closed' WHERE id = $1`, f.tenantID); err != nil {
@@ -414,7 +418,7 @@ func TestTenantNotActive_StatusChangeVsSettlementRace(t *testing.T) {
 			t.Fatalf("the posting must wait for the in-flight status change, finished early: %+v err=%v", o.res, o.err)
 		case <-time.After(500 * time.Millisecond):
 		}
-		close(release)
+		releaseOnce()
 		if err := <-closerDone; err != nil {
 			t.Fatalf("status change: %v", err)
 		}
@@ -430,6 +434,9 @@ func TestTenantNotActive_StatusChangeVsSettlementRace(t *testing.T) {
 	t.Run("posting_first_then_status_change_waits", func(t *testing.T) {
 		f, actor, betID := newStdBet(t, owner)
 		inTx, release := make(chan struct{}), make(chan struct{})
+		var releaseOnceGuard sync.Once
+		releaseOnce := func() { releaseOnceGuard.Do(func() { close(release) }) }
+		t.Cleanup(releaseOnce) // never leave a held transaction behind on a failed assertion
 		restore := SetSettlementAfterPostHookForTest(func(context.Context, pgx.Tx) error {
 			close(inTx)
 			<-release // the posting holds its transaction open after the check and the post
@@ -454,7 +461,7 @@ func TestTenantNotActive_StatusChangeVsSettlementRace(t *testing.T) {
 			t.Fatalf("the status change must wait for the in-flight posting, finished early: %v", err)
 		case <-time.After(500 * time.Millisecond):
 		}
-		close(release)
+		releaseOnce()
 		if err := <-posted; err != nil {
 			t.Fatalf("posting: %v", err)
 		}
