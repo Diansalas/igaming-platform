@@ -113,7 +113,7 @@ Top families (helper-generated; 16-hex suffix), count / size / created range (UT
 Hand-named (47, 1.5 GB, 03-31 to 10-05): igaming_ci_flake, igaming_w2a/w2b/w3a_local, igaming_prhcb_local/_r4, igaming_prhref_local, igaming_prh_i5/_cr/_cr_parent, igaming_reversibility, prhi1_cutover_scratch, fh3c, fh5_pay_20260927, cas_bfix_dev, k1cap_test1, ks_0106_renum, ks_1c_*, ks_i1b_*, kyc_r1_fix_priv{,2,3}, kyc_r2_*, ph2_*, ph3_*, ph4_*, plus the two KEEP DBs and `postgres`. These are private harness DBs from named workstreams of 09-26..09-28 (PRIV_DB evidence in docs/plans/payment-readiness/evidence/prh-i1-mutation-kill.txt cites fh5_pay_20260927, fh3_invdep1_*). Not auto-cleaned; no test code ever drops them.
 
 KEEP list (never delete):
-- igaming_platform_ci_local (377 MB): the shared migrated TEST_DATABASE_URL DB, 1 active connection (this inventory's psql). 
+- igaming_platform_ci_local (377 MB): the shared migrated TEST_DATABASE_URL DB, 1 active connection (this inventory's psql).
 - igaming_orch_local (63 MB): orchestrator's local DB (recreated 05:13 today).
 - postgres, template0, template1.
 - Anything with an active backend at deletion time: re-query pg_stat_activity then (at inspection only igaming_platform_ci_local had a connection).
