@@ -1187,9 +1187,6 @@ func (m *payMatcher) checkMerchantAttribution(lk, ak, op string, a *payAttempt, 
 // providerSucceeded (a statement-line-status concept this predicate has
 // no business knowing about).
 func (m *payMatcher) capturedUnposted(a *payAttempt) bool {
-	if !m.capturedUnpostedRef(a.providerRef) {
-		return false
-	}
 	// PRH-2 K3 (S4, POLL-REF-CLEAR-1, LF B3): a poll_reference_mismatch park with
 	// typed Y evidence (the poll's returned reference, never audit JSON) also
 	// clears on a reversal line or a tombstone on Y. Without a Y row only X
@@ -1201,10 +1198,36 @@ func (m *payMatcher) capturedUnposted(a *payAttempt) bool {
 	// DIFFERENT capture's reference; a reversal of that one must never clear a
 	// park on X (LF F-1 / resolvesTo precedent: borrowed attribution may raise,
 	// never clear). Then only X clears, as for a park without a Y row.
-	if y, ok := m.k3.yRef[a.id]; ok && y != "" && m.yAttributable(a, y) && !m.capturedUnpostedRef(y) {
+	//
+	// PAY-RECON-POLL-REF-CLEAR-1 G-Y2 (ledger-finance ruling, REQUIRED): when
+	// eligible succeeded deposit lines evidence BOTH X and Y (this run or any
+	// persisted import), they are two evidenced captures, not one capture known
+	// by two names: the finding clears only when BOTH are cleared. Otherwise the
+	// "X or Y" rule stays.
+	x := a.providerRef
+	y, ok := m.k3.yRef[a.id]
+	if !ok || y == "" || !m.yAttributable(a, y) {
+		return !m.clearedRef(x)
+	}
+	if m.evidencedCapture(x) && m.evidencedCapture(y) {
+		return !(m.clearedRef(x) && m.clearedRef(y))
+	}
+	return !(m.clearedRef(x) || m.clearedRef(y))
+}
+
+// evidencedCapture reports whether an ELIGIBLE (D-4/RC-3) persisted `succeeded`
+// deposit line names ref. The run's own import is persisted before the match, so
+// "this run or any persisted import" is one lookup.
+func (m *payMatcher) evidencedCapture(ref string) bool {
+	if ref == "" {
 		return false
 	}
-	return true
+	for _, l := range m.k3.byRef[ref] {
+		if l.kind == "deposit" && l.status == paymentStatementStatusSucceeded && l.eligible {
+			return true
+		}
+	}
+	return false
 }
 
 // yAttributable reports whether the poll's returned reference y (typed Y
@@ -1219,6 +1242,13 @@ func (m *payMatcher) capturedUnposted(a *payAttempt) bool {
 func (m *payMatcher) yAttributable(a *payAttempt, y string) bool {
 	if y == "" {
 		return false
+	}
+	// Security F-1: a Y that ANOTHER park also recorded as its returned
+	// reference is ambiguous (one reversal must not clear two parks).
+	for id, oy := range m.k3.yRef {
+		if id != a.id && oy == y {
+			return false
+		}
 	}
 	for _, op := range []string{"deposit", "payout"} {
 		if h := m.byRef[op+"\x00"+y]; h != nil && h != a {
@@ -1241,10 +1271,16 @@ func (m *payMatcher) yAttributable(a *payAttempt, y string) bool {
 // row or Y is attributable.
 func (m *payMatcher) yHolderNote(a *payAttempt) string {
 	y, ok := m.k3.yRef[a.id]
-	if !ok || y == "" || m.yAttributable(a, y) {
+	if !ok || y == "" {
 		return ""
 	}
-	return "; poll_returned_reference=" + y + " is held by another attempt or posting and is not used for clearing (verify with the PSP)"
+	if m.yAttributable(a, y) {
+		if m.evidencedCapture(a.providerRef) && m.evidencedCapture(y) {
+			return "; captures evidenced on BOTH " + a.providerRef + " and the poll_returned_reference=" + y + ": both must be reversed to clear"
+		}
+		return ""
+	}
+	return "; poll_returned_reference=" + y + " is held by another attempt, park or posting and is not used for clearing (verify with the PSP)"
 }
 
 // capturedUnpostedRef is capturedUnposted's clearing rule for one
