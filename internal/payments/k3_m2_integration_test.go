@@ -454,17 +454,21 @@ func (w *k3World) timeoutPayout(amount int64) (withdrawal.WithdrawalRequest, Pay
 	return w.withdrawalOf(wr.ID), w.attempt(claim.Attempt.ID)
 }
 
-// LF O-4: an m2_declare_not_paid is refused when no statement source is
-// registered for the provider (decided from the process registry).
+// LF O-4 + PAY-K3-STATEMENT-SOURCE-WIRING-1: BOTH M2 kinds are refused at
+// submission when no statement source is registered for the attempt's provider
+// (decided from the process registry), and nothing is written. (Before the
+// wiring fix "declare paid" was not source-gated; that old pin is replaced.)
 func TestK3_NotPaidRefusedWithoutStatementSource(t *testing.T) {
 	w := newK3World(t, k3Opts{base: 1, noStatementSource: true})
 	_, a := w.ambiguousPayout(100)
-	_, err := w.request(w.f1, w.m2In(a.ID, ResolutionM2DeclareNotPaid))
-	if err == nil || ResolutionToken(ClassifyResolutionError(err)) != TokenForceResolvePreconditionFail {
-		t.Fatalf("want a precondition refusal, got %v", err)
+	for _, kind := range []ResolutionKind{ResolutionM2DeclareNotPaid, ResolutionM2DeclarePaid} {
+		_, err := w.request(w.f1, w.m2In(a.ID, kind))
+		if err == nil || ResolutionToken(ClassifyResolutionError(err)) != TokenForceResolvePreconditionFail || !errors.Is(err, ErrResolutionNoStatementSource) {
+			t.Fatalf("%s: want a no-statement-source precondition refusal, got %v", kind, err)
+		}
 	}
-	// "declare paid" is not statement-source gated.
-	if _, err := w.request(w.f1, w.m2In(a.ID, ResolutionM2DeclarePaid)); err != nil {
-		t.Fatalf("declare paid refused: %v", err)
+	if n := w.countRows(`SELECT count(*) FROM payment_manual_resolutions WHERE tenant_id = $1`, w.f.tenantID); n != 0 {
+		t.Fatalf("a refused submission left %d resolution rows", n)
 	}
+	w.assertInvariants()
 }

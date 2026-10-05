@@ -431,17 +431,56 @@ func TestD2_1_BoundPark_MatchedSucceededLine_ReportsCapturedUnposted(t *testing.
 		d2CUFor(t, ms, pk.attempt.ID)
 		w.d2AssertNoMoney(t, pk)
 	})
-	// Control: a non-succeeded line (pending, declined, reversed) on a bound
-	// park is not a captured_unposted finding in-run (R1: `reversed` is the
-	// PSP's own refund).
-	t.Run("non_succeeded_line_is_not_flagged_in_run", func(t *testing.T) {
-		for _, st := range []string{statement.PaymentStatusPending, statement.PaymentStatusDeclined, statement.PaymentStatusReversed} {
+	// PAY-RECON-PARKED-CAPTURE-STANDING-1 M-S2 (ledger-finance ruling M-S2, recorded in
+	// docs/plans/prh2-hardening-round/analysis/psp-prerequisites-analysis.md 2.4 and
+	// re-confirmed by the ledger-finance implementation review; this
+	// REPLACES the earlier pin that a pending/declined line on a bound park
+	// raised nothing in-run). A pending or declined line is NOT a clearing
+	// signal - only a reversal line or a tombstone clears (ADR 0095 35.4, S2) -
+	// so the bound park's finding is still emitted (once) in a run whose
+	// statement lists X as pending or declined. This tightens the report in the
+	// fail-closed direction; no money moves and no new money path exists.
+	t.Run("pending_or_declined_line_still_flags_bound_park_in_run_MS2", func(t *testing.T) {
+		for _, st := range []string{statement.PaymentStatusPending, statement.PaymentStatusDeclined} {
 			w := newD2World(t)
 			pk := w.parkSyncMismatch(t)
 			ms := w.d2Run(t, d2Src(d2Line(pk.pspRef, "", st, d2PSPAmount)))
-			d2NoCU(t, ms, "line status "+st)
+			// (the PSP amount differs from the platform's, so the separate
+			// amount check fires as for any matched line; only CU is the subject)
+			if got := d2Kinds(ms)[d2KindCU]; got != 1 {
+				t.Fatalf("line status %s: want exactly one CU, got %d:\n%s", st, got, renderMismatches(ms))
+			}
+			d2CUFor(t, ms, pk.attempt.ID)
+			// Still standing on later runs with no line at all.
+			d2CUFor(t, w.d2Run(t, d2PastSrc()), pk.attempt.ID)
 			w.d2AssertNoMoney(t, pk)
 		}
+	})
+	// Two lines for the same bound park in one run (pending, then succeeded)
+	// still produce exactly ONE finding. NOTE: this is enforced today by matchLines
+	// (the second line of the same ref and kind is a pay_duplicate and never reaches
+	// matchPayment), NOT by markCaptured, which is defence in depth here.
+	t.Run("two_lines_for_one_ref_flag_once", func(t *testing.T) {
+		w := newD2World(t)
+		pk := w.parkSyncMismatch(t)
+		ms := w.d2Run(t, d2Src(d2Line(pk.pspRef, "", statement.PaymentStatusPending, d2PSPAmount),
+			d2Line(pk.pspRef, "", statement.PaymentStatusSucceeded, d2PSPAmount)))
+		if got := d2Kinds(ms)[d2KindCU]; got != 1 {
+			t.Fatalf("want exactly one CU for two lines of one bound park, got %d:\n%s", got, renderMismatches(ms))
+		}
+		w.d2AssertNoMoney(t, pk)
+	})
+	// Control: a `reversed` line (the PSP's own refund, R1) stays the in-run
+	// clear; it re-raises on the next run (R-S4, noisy never silent).
+	t.Run("reversed_line_clears_in_run_only_R1", func(t *testing.T) {
+		w := newD2World(t)
+		pk := w.parkSyncMismatch(t)
+		ms := w.d2Run(t, d2Src(d2Line(pk.pspRef, "", statement.PaymentStatusReversed, d2PSPAmount)))
+		d2NoCU(t, ms, "line status reversed")
+		// R-S4: the NEXT run (no line) re-raises, because a reversed deposit line
+		// is not a reversal line or a tombstone: noisy, never silent.
+		d2CUFor(t, w.d2Run(t, d2PastSrc()), pk.attempt.ID)
+		w.d2AssertNoMoney(t, pk)
 	})
 }
 

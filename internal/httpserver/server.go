@@ -70,6 +70,14 @@ type Deps struct {
 	// to wire one up.
 	PaymentOrchestrator *payments.Orchestrator
 
+	// StatementSources is the in-process registry of providers whose payment
+	// statement stream is scheduled (PAY-K3-STATEMENT-SOURCE-WIRING-1, ADR 0101
+	// 12.3/27.6). The payment force-resolution routes decide from it whether an
+	// m2_declare_paid / m2_declare_not_paid may be submitted or executed for a
+	// provider. cmd/platform-api fills it from the SAME list it hands to the
+	// reconciliation scheduler. Nil refuses every M2 (fail closed).
+	StatementSources *payments.StatementSourceRegistry
+
 	// PaymentsOutboundCredentials is InitiateDepositAttempt's phase B
 	// credential resolver (ADR 0095 §9.1/§11, PROV-OUTBOUND-CRED-1,
 	// PRH-I1 deposit cutover) - CasinoOutboundCredentials' payments twin.

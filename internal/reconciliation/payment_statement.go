@@ -1086,7 +1086,17 @@ func (m *payMatcher) matchPayment(lk string, l payLine) {
 	// keep it standing - so it falls through to the plain "disputed:
 	// already a payments P1" case below instead, precisely like every
 	// other disputed reason.
-	case a.boundCapture() && l.status == statement.PaymentStatusSucceeded && m.capturedUnposted(a):
+	case a.boundCapture() && (l.status == statement.PaymentStatusSucceeded ||
+		// PAY-RECON-PARKED-CAPTURE-STANDING-1 M-S2 (ledger-finance ruling M-S2 in
+		// docs/plans/prh2-hardening-round/analysis/psp-prerequisites-analysis.md 2.4,
+		// re-confirmed by the LF implementation review; fail-closed tightening, no
+		// new money path): a `pending` or `declined`
+		// line naming a bound park is NOT a clearing signal - only a reversal
+		// line or a tombstone clears (ADR 0095 §35.4, S2). A PSP that keeps
+		// listing X as pending/declined in every window must not suppress the
+		// standing finding. `reversed` stays the R1 in-run clear (above).
+		l.status == statement.PaymentStatusPending || l.status == statement.PaymentStatusDeclined) &&
+		m.capturedUnposted(a) && m.markCaptured(a, a.providerRef):
 		// ADR 0095 §28.9, extended by §35: the disputed reason codes that
 		// are NOT already a plain payments P1 for reconciliation's
 		// purposes - a real PSP capture the platform never posted and has
@@ -1094,7 +1104,7 @@ func (m *payMatcher) matchPayment(lk string, l payLine) {
 		// silently folded into "disputed: already a payments P1" like
 		// every other disputed reason below.
 		m.r.add(MismatchKindPayCapturedUnposted, ak+" check=captured_unposted",
-			"resolution: a PSP-initiated reversal/tombstone, or allocation (LEDGER-SUSPENSE-B-1); M1 only acknowledges", "platform: "+a.render()+" terminal_reason="+a.terminalReason+"; "+m.label+l.render())
+			"resolution: a PSP-initiated reversal/tombstone, or allocation (LEDGER-SUSPENSE-B-1); M1 only acknowledges", "platform: "+a.render()+" terminal_reason="+a.terminalReason+m.yHolderNote(a)+"; "+m.label+l.render())
 	case a.unboundPark() && l.status == statement.PaymentStatusSucceeded && m.capturedUnpostedRef(l.ref) && m.markCaptured(a, l.ref):
 		// ADR 0095 §35.2 (LF ruling on QA C-F2 (a)): a park that never
 		// bound a reference (a binding conflict, or an invalid reference)
@@ -1179,17 +1189,100 @@ func (m *payMatcher) checkMerchantAttribution(lk, ak, op string, a *payAttempt, 
 // providerSucceeded (a statement-line-status concept this predicate has
 // no business knowing about).
 func (m *payMatcher) capturedUnposted(a *payAttempt) bool {
-	if !m.capturedUnpostedRef(a.providerRef) {
-		return false
-	}
 	// PRH-2 K3 (S4, POLL-REF-CLEAR-1, LF B3): a poll_reference_mismatch park with
 	// typed Y evidence (the poll's returned reference, never audit JSON) also
 	// clears on a reversal line or a tombstone on Y. Without a Y row only X
 	// clears, as before.
-	if y, ok := m.k3.yRef[a.id]; ok && y != "" && !m.capturedUnpostedRef(y) {
+	//
+	// PAY-RECON-POLL-REF-CLEAR-1 (ledger-finance G-Y1, fail closed on
+	// ambiguity): Y clears ONLY when it is attributable to this capture
+	// (yAttributable). A Y that another attempt or another posting holds is a
+	// DIFFERENT capture's reference; a reversal of that one must never clear a
+	// park on X (LF F-1 / resolvesTo precedent: borrowed attribution may raise,
+	// never clear). Then only X clears, as for a park without a Y row.
+	//
+	// PAY-RECON-POLL-REF-CLEAR-1 G-Y2 (ledger-finance ruling, REQUIRED): when
+	// eligible succeeded deposit lines evidence BOTH X and Y (this run or any
+	// persisted import), they are two evidenced captures, not one capture known
+	// by two names: the finding clears only when BOTH are cleared. Otherwise the
+	// "X or Y" rule stays.
+	x := a.providerRef
+	y, ok := m.k3.yRef[a.id]
+	if !ok || y == "" || !m.yAttributable(a, y) {
+		return !m.clearedRef(x)
+	}
+	if m.evidencedCapture(x) && m.evidencedCapture(y) {
+		return !m.clearedRef(x) || !m.clearedRef(y)
+	}
+	return !m.clearedRef(x) && !m.clearedRef(y)
+}
+
+// evidencedCapture reports whether an ELIGIBLE (D-4/RC-3) persisted `succeeded`
+// deposit line names ref. The run's own import is persisted before the match, so
+// "this run or any persisted import" is one lookup.
+func (m *payMatcher) evidencedCapture(ref string) bool {
+	if ref == "" {
 		return false
 	}
+	for _, l := range m.k3.byRef[ref] {
+		if l.kind == "deposit" && l.status == paymentStatementStatusSucceeded && l.eligible {
+			return true
+		}
+	}
+	return false
+}
+
+// yAttributable reports whether the poll's returned reference y (typed Y
+// evidence for attempt a) may serve as a CLEARING reference for a's park on X.
+// It is true only if y is not already someone else's reference: no OTHER
+// deposit or payout attempt of this (tenant, provider) holds it as its
+// provider reference or payout settlement reference, and no ledger posting of
+// type deposit, withdrawal_completed or deposit_reversal is keyed by it
+// (a tombstone on y is allowed: it is exactly "a reversal naming y with no
+// posted original"). All inputs are in the run snapshot (loadPlatform).
+// MA020-SYNC-MISMATCH-1 must reuse this rule for its own Y clearing.
+func (m *payMatcher) yAttributable(a *payAttempt, y string) bool {
+	if y == "" {
+		return false
+	}
+	// Security F-1: a Y that ANOTHER park also recorded as its returned
+	// reference is ambiguous (one reversal must not clear two parks).
+	for id, oy := range m.k3.yRef {
+		if id != a.id && oy == y {
+			return false
+		}
+	}
+	for _, op := range []string{"deposit", "payout"} {
+		if h := m.byRef[op+"\x00"+y]; h != nil && h != a {
+			return false
+		}
+	}
+	if h := m.bySettlement[y]; h != nil && h != a {
+		return false
+	}
+	for _, typ := range []string{"deposit", "withdrawal_completed", "deposit_reversal"} {
+		if m.ledgerByRef[typ+"\x00"+y] != nil {
+			return false
+		}
+	}
 	return true
+}
+
+// yHolderNote names an unattributable Y on a bound finding so the operator's
+// manual-PSP-verification rule applies (POLL-REF-CLEAR-1): "" when a has no Y
+// row or Y is attributable.
+func (m *payMatcher) yHolderNote(a *payAttempt) string {
+	y, ok := m.k3.yRef[a.id]
+	if !ok || y == "" {
+		return ""
+	}
+	if m.yAttributable(a, y) {
+		if m.evidencedCapture(a.providerRef) && m.evidencedCapture(y) {
+			return "; captures evidenced on BOTH " + a.providerRef + " and the poll_returned_reference=" + y + ": both must be reversed to clear"
+		}
+		return ""
+	}
+	return "; poll_returned_reference=" + y + " is held by another attempt, park or posting and is not used for clearing (verify with the PSP)"
 }
 
 // capturedUnpostedRef is capturedUnposted's clearing rule for one
@@ -1227,7 +1320,7 @@ func (m *payMatcher) checkUnmatchedAttempts() {
 		// reported here: it holds no reference this rule could clear on.
 		case a.boundCapture() && m.capturedUnposted(a):
 			m.r.add(MismatchKindPayCapturedUnposted, k+" check=captured_unposted",
-				"resolution: a PSP-initiated reversal/tombstone, or allocation (LEDGER-SUSPENSE-B-1); M1 only acknowledges", m.label+"no statement line; platform: "+a.render()+" terminal_reason="+a.terminalReason)
+				"resolution: a PSP-initiated reversal/tombstone, or allocation (LEDGER-SUSPENSE-B-1); M1 only acknowledges", m.label+"no statement line; platform: "+a.render()+" terminal_reason="+a.terminalReason+m.yHolderNote(a))
 		// The coverage window protects only the "missing provider record"
 		// rule. Ageing is not coverage-gated (code review F2): with a
 		// window no longer than the horizon an in-flight attempt would

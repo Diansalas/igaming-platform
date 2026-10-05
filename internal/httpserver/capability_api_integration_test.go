@@ -44,6 +44,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/auth"
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/identityresolution"
+	"github.com/Diansalas/igaming-platform/internal/payments"
 	"github.com/Diansalas/igaming-platform/internal/testsupport/scratchdb"
 )
 
@@ -55,6 +56,10 @@ func cgMigrationsDir(t *testing.T) string {
 	}
 	return dir
 }
+
+// cgAPIStatementSources, when a test sets it BEFORE newCGAPI, becomes the
+// server's Deps.StatementSources (tests run sequentially; reset by the test).
+var cgAPIStatementSources *payments.StatementSourceRegistry
 
 type cgAPI struct {
 	t      *testing.T
@@ -87,6 +92,8 @@ func newCGAPI(t *testing.T) *cgAPI {
 		AccessTokenTTL:  time.Hour,
 		RefreshTokenTTL: time.Hour,
 		PersonResolver:  identityresolution.NewMockPersonResolver(),
+		// PAY-K3-STATEMENT-SOURCE-WIRING-1: nil (refuse every M2) unless a test sets it.
+		StatementSources: cgAPIStatementSources,
 	}))
 	t.Cleanup(srv.Close)
 	return &cgAPI{t: t, pool: pool, issuer: issuer, srv: srv}

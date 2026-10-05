@@ -227,6 +227,26 @@ func TestD2_14_PollFC4ConflictPark_HoldingReference_IsBoundAndStanding(t *testin
 		w.d2AssertBalanced(t)
 	})
 
+	// PAY-RECON-PARKED-CAPTURE-STANDING-1 M-S1: the exact TestD2_14 shape across
+	// RUNS. Run 1 raises the finding; run 2 carries a reversal line naming X
+	// (X is the withdrawal_completed key, so no tombstone can ever hold it);
+	// runs 3..N carry no deposit line at all and the persisted reversal line
+	// keeps the finding cleared. No finding is raised for X after the reversal, and no money moves.
+	t.Run("reversal_line_naming_X_persisted_clears_in_later_runs", func(t *testing.T) {
+		w := newD2World(t)
+		pk, payoutLine := buildFC4(t, w)
+		d2CUFor(t, w.d2Run(t, d2Src(payoutLine)), pk.attempt.ID)
+		d2NoCU(t, w.d2Run(t, d2Src(payoutLine, d2ReversalLine("d2-rev-"+uuid.NewString()[:8], pk.pspRef, d2Amount))), "run with the reversal line")
+		for i := 0; i < 3; i++ {
+			ms := w.d2Run(t, d2PastSrc())
+			d2NoCU(t, ms, "a later run, the reversal line persisted from an earlier import")
+		}
+		// With the payout's own line present, X still raises nothing.
+		d2NoCU(t, w.d2Run(t, d2Src(payoutLine)), "later run with the payout line")
+		w.d2AssertNoMoney(t, d2Parked{attempt: pk.attempt, pspRef: "d2-none"})
+		w.d2AssertBalanced(t)
+	})
+
 	// A phase C conflict park holds NO reference: bound-if-referenced resolves
 	// to unbound, so it still has NO standing finding (unchanged by PM-1).
 	t.Run("phase_C_conflict_park_without_reference_has_no_standing_finding", func(t *testing.T) {

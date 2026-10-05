@@ -190,12 +190,11 @@ func (r *StatementSourceRegistry) Registered(providerID string) bool {
 	return r.providers[providerID]
 }
 
-// DefaultStatementSources is the process-wide registry the API routes use.
-// cmd/platform-api registers the providers whose statement source it hands to
-// the reconciliation scheduler (a wiring line in an E1-owned file, recorded as
-// a deferred item); until then an m2_declare_not_paid is refused (fail
-// closed).
-var DefaultStatementSources = &StatementSourceRegistry{}
+// There is deliberately NO package-level registry (PAY-K3-STATEMENT-SOURCE-
+// WIRING-1): cmd/platform-api builds one, registers the providers of the SAME
+// list it hands to the reconciliation scheduler, and injects it through
+// httpserver.Deps.StatementSources. A nil/empty registry refuses every M2
+// (fail closed).
 
 // ResolutionTarget is a route-validated target tenant. Its only constructor
 // applies the canActOnTenant rule (a tenant caller may name only its own
@@ -471,13 +470,6 @@ func (s *ManualResolutionService) requestInTx(ctx context.Context, tx pgx.Tx, ca
 	if err := in.validate(); err != nil {
 		return ManualResolution{}, err
 	}
-	if in.Kind == ResolutionM2DeclareNotPaid {
-		// LF O-4: refuse at submission too, deciding from the process registry.
-		att, err := GetAttemptByID(ctx, tx, in.AttemptID)
-		if err == nil && att.ProviderID != nil && !s.sources.Registered(*att.ProviderID) {
-			return ManualResolution{}, ErrResolutionNoStatementSource
-		}
-	}
 	// Every NOT NULL column that migration 0115's guard forces is given a
 	// placeholder here (K2's pattern): the BEFORE INSERT trigger overwrites it.
 	var r ManualResolution
@@ -493,6 +485,27 @@ func (s *ManualResolutionService) requestInTx(ctx context.Context, tx pgx.Tx, ca
 		nilIfEmpty(in.ContextCode), nilIfEmpty(in.EvidenceRefHash), uuid.Nil, in.ReasonCode)
 	if err := scanResolution(row, &r); err != nil {
 		return ManualResolution{}, err
+	}
+	if in.Kind == ResolutionM2DeclareNotPaid || in.Kind == ResolutionM2DeclarePaid {
+		// LF O-4 + PAY-K3-STATEMENT-SOURCE-WIRING-1: BOTH M2 kinds are refused at
+		// submission unless a statement source is registered for THIS attempt's
+		// provider (decided from the process registry). Fail closed in shape: an
+		// unreadable attempt, a missing provider id or an unregistered provider all
+		// refuse; only a readable attempt with a registered provider proceeds.
+		//
+		// Ordering (security F-2/F-3): this runs AFTER the INSERT, so migration
+		// 0115's guard authorises and validates first (a requester without an
+		// in-force grant gets the audited 403 before any attempt-existence or
+		// provider-monitoring signal, and an unknown or foreign attempt gets the
+		// guard's audited refusal exactly as M1 does). The refusal rolls the
+		// uncommitted INSERT back with the transaction.
+		att, err := GetAttemptByID(ctx, tx, in.AttemptID)
+		if err != nil {
+			return ManualResolution{}, fmt.Errorf("payments: manual resolution source check: %w", err)
+		}
+		if !s.statementSourceRegistered(att.ProviderID) {
+			return ManualResolution{}, ErrResolutionNoStatementSource
+		}
 	}
 	if err := recordResolutionAudit(ctx, tx, call, "payment.manual_resolution_requested", r, nil, map[string]any{
 		"note": in.Note, "required_at_submission": r.RequiredAtSubmission,
@@ -888,11 +901,25 @@ func (s *ManualResolutionService) executionRefusal(res ManualResolution, att Pay
 		if att.EverPossiblySent && (res.BasisCode == nil || *res.BasisCode != BasisProviderConfirmedOutOfBand) {
 			return resolutionRefusedPrecond
 		}
-		if !s.sources.Registered(*att.ProviderID) {
-			return resolutionRefusedNoSource
-		}
+	}
+	// PAY-K3-STATEMENT-SOURCE-WIRING-1: BOTH M2 kinds need a statement source
+	// registered for this attempt's provider (the standing kinds
+	// pay_declared_paid_unconfirmed and the (c)/(d) clearing exist only when that
+	// provider's stream runs). Evaluated PER PROVIDER: the MOCK source unlocks
+	// only the mock provider's attempts (orchestrator engineering ruling H-W2, reversible; PRH-2-ROUND2-ENGINEERING-RULINGS).
+	if !s.statementSourceRegistered(att.ProviderID) {
+		return resolutionRefusedNoSource
 	}
 	return ""
+}
+
+// statementSourceRegistered is true only for a non-nil, non-empty provider id
+// that has a registered statement source. Anything else is false (fail closed).
+func (s *ManualResolutionService) statementSourceRegistered(providerID *string) bool {
+	if s == nil || providerID == nil || *providerID == "" {
+		return false
+	}
+	return s.sources.Registered(*providerID)
 }
 
 func equalOptString(a, b *string) bool {
