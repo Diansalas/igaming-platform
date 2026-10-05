@@ -190,3 +190,18 @@ func TestR2_GY2f_MockEvidenceIsIneligibleOnceARealImportExists(t *testing.T) {
 	d2NoCU(t, w.d2Run(t, real(5, d2ReversalLine("gy2-rev-"+uuid.NewString(), y, d2Amount))), "Y evidenced only by ineligible MOCK evidence: X-or-Y rule, a real reversal on Y clears")
 	w.d2AssertNoMoney(t, pk)
 }
+
+// LF D-LF-3: G-Y2 counts only SUCCEEDED lines as evidence. X succeeded and Y only
+// pending or declined: Y is NOT an evidenced capture, so the "X or Y" rule applies
+// and a reversal on X alone clears.
+func TestR2_GY2g_YOnlyPendingOrDeclined_XReversalClears(t *testing.T) {
+	for _, st := range []string{statement.PaymentStatusPending, statement.PaymentStatusDeclined} {
+		w := newD2World(t)
+		pk, x := w.pollParkWithY(t, "gy2-y-"+uuid.NewString())
+		y := w.yOf(t, pk.attempt.ID)
+		d2CUFor(t, w.d2Run(t, d2Src(gy2Succ(x), d2Line(y, "", st, d2Amount))), pk.attempt.ID)
+		d2NoCU(t, w.d2Run(t, gy2Rev(3, x)), "Y only "+st+": a reversal on X clears")
+		d2NoCU(t, w.d2Run(t, d2PastSrc()), "and stays cleared")
+		w.d2AssertNoMoney(t, pk)
+	}
+}

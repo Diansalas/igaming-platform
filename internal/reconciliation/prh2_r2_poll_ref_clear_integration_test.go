@@ -18,9 +18,9 @@ import (
 // park's typed Y evidence may CLEAR the standing finding only when Y is
 // attributable to the parked capture: not held by another deposit/payout attempt,
 // not the key of a deposit, withdrawal_completed or deposit_reversal posting.
-// Otherwise only X clears. G-Y2 (both X and Y independently evidenced) is NOT
-// implemented here: the analysis marks it a ledger-finance ruling, not a
-// requirement; it is recorded as a residual in ADR 0095 35.4.
+// Otherwise only X clears. G-Y2 (both X and Y evidenced: both must be reversed)
+// is IMPLEMENTED per the ledger-finance ruling; its tests are in
+// prh2_r2_gy2_integration_test.go. The shared-Y rule (security F-1) is there too.
 
 // pollParkWithY parks a fresh deposit (reference X) as poll_reference_mismatch
 // with typed Y evidence for y, through the real sweeper poll path.

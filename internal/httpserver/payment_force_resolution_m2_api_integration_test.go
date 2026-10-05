@@ -11,12 +11,14 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"regexp"
 	"strings"
 	"testing"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/Diansalas/igaming-platform/internal/capability"
 	"github.com/Diansalas/igaming-platform/internal/payments"
 	"github.com/Diansalas/igaming-platform/internal/withdrawal"
 )
@@ -156,6 +158,30 @@ func TestForceResolutionAPI_M2_SourceRegistry(t *testing.T) {
 		w := newFRWorldWithSources(t, reg)
 		attempt := w.ambiguousPayout()
 
+		// The foreign caller HOLDS a request grant in its own tenant, so the only
+		// difference between the two requests is that the attempt is not visible.
+		otherAdmin := w.a.staff(w.other, "tenant_admin")
+		w.grant(w.other, otherAdmin, w.otherFin, false, capability.CapabilityPaymentForceResolveRequest)
+
+		sqlstateOf := func(rows []string) string {
+			if len(rows) == 0 {
+				return "<none>"
+			}
+			m := regexp.MustCompile(`"sqlstate": "([A-Z0-9]+)"`).FindStringSubmatch(rows[len(rows)-1])
+			if m == nil {
+				return "<absent>"
+			}
+			return m[1]
+		}
+		tokenOf := func(body []byte) string {
+			for _, tk := range frClosedTokens {
+				if strings.Contains(string(body), `"`+tk+`"`) {
+					return tk
+				}
+			}
+			return "<none>"
+		}
+
 		before := w.deniedAudits()
 		res := w.a.do("POST", w.base(), w.tok(w.f1), w.m2Body(uuid.New(), "m2_declare_not_paid"))
 		if res.status != http.StatusForbidden && res.status != http.StatusConflict {
@@ -167,20 +193,24 @@ func TestForceResolutionAPI_M2_SourceRegistry(t *testing.T) {
 		if got := w.deniedAudits(); got != before+1 {
 			t.Fatalf("unknown attempt: want +1 denied audit row, %d -> %d", before, got)
 		}
+		unknownStatus, unknownToken, unknownState := res.status, tokenOf(res.body), sqlstateOf(w.deniedRows(w.tenant))
 
-		// The other tenant's finance token names ITS OWN tenant path with this
-		// tenant's attempt id: never data, and an audit row in its own tenant.
+		// The other tenant's finance token (with its own grant) names ITS OWN
+		// tenant path with this tenant's attempt id: never data, an audit row in its
+		// own tenant, and EXACTLY the same status, token and audit sqlstate as the
+		// unknown attempt (no existence oracle).
 		otherBase := "/v1/admin/tenants/" + w.other.String() + "/payment-force-resolutions"
 		beforeOther := len(w.deniedRows(w.other))
 		res = w.a.do("POST", otherBase, w.tok(w.otherFin), w.m2Body(attempt, "m2_declare_not_paid"))
-		if res.status != http.StatusForbidden && res.status != http.StatusNotFound && res.status != http.StatusConflict {
-			t.Fatalf("foreign attempt: want 403/404/409, got %d %s", res.status, res.body)
-		}
 		if strings.Contains(string(res.body), attempt.String()) || strings.Contains(string(res.body), w.tenant.String()) {
 			t.Fatalf("foreign attempt: the refusal leaked data: %s", res.body)
 		}
 		if after := len(w.deniedRows(w.other)); after != beforeOther+1 {
 			t.Fatalf("foreign attempt: want +1 denied audit row in the caller's tenant, %d -> %d", beforeOther, after)
+		}
+		if res.status != unknownStatus || tokenOf(res.body) != unknownToken || sqlstateOf(w.deniedRows(w.other)) != unknownState {
+			t.Fatalf("existence oracle: unknown (%d %s %s) differs from foreign (%d %s %s)", unknownStatus, unknownToken, unknownState,
+				res.status, tokenOf(res.body), sqlstateOf(w.deniedRows(w.other)))
 		}
 		// And nothing was created anywhere.
 		if n := w.countRows(`SELECT count(*) FROM payment_manual_resolutions WHERE tenant_id = $1`, w.tenant); n != 0 {

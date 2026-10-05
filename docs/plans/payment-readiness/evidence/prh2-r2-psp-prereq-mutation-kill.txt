@@ -117,8 +117,8 @@ X1-routes-pass-nil | KILLED | --- FAIL: TestForceResolutionAPI_M2_SourceRegistry
 X1-routes-pass-nil restored: cmp identical
 F2-submission-source-check-removed | BUILD-ERROR (invalid mutant) | internal/payments/manual_resolution.go
 F2-submission-source-check-removed restored: cmp identical
-F2-submission-check-before-insert-order | SURVIVED | internal/payments/manual_resolution.go
-F2-submission-check-before-insert-order restored: cmp identical
+F2b-read-error-mapped-to-no-source (renamed; it never moved the check) | SURVIVED | internal/payments/manual_resolution.go
+F2b-read-error-mapped-to-no-source restored: cmp identical
 CONC-exec-check-removed | NOT APPLIED
 DONE3
 --- second pass (new GY2f eligibility test, corrected R2 expression, ordering test) ---
@@ -133,5 +133,5 @@ DONE4
 
 Second-batch classification:
 - KILLED: G2-revert-to-X-or-Y and G2-both-branch-uses-or (by TestR2_GY2a), G2-evidenced-ignores-eligibility (by TestR2_GY2f, rerun after adding it), F1-shared-Y-rule-dropped (TestR2_F1), R2 bypass (TestR2_F1), R4a/R4b/R4c (legacy and reversal-key tests), WX paySources=nil before the scheduler (write-count pin), X2/X3 error ignored at startup (TestRun_StatementSourceGatesReturnTheirError), X1 routes pass nil (HTTP M2 accepted-when-registered), submission source check removed (rerun as F2-submission-source-check-removed: the first form did not compile; killed by TestK3_NotPaidRefusedWithoutStatementSource).
-- F2-submission-check-before-insert-order SURVIVED: EQUIVALENT. It only replaced the wrapped read error with ErrResolutionNoStatementSource (both fail closed); it does not change ordering. The ordering property (requester without a grant gets the audited 403 before any source signal) is pinned by the HTTP subtest no_grant_gets_403_before_any_source_signal; there is no sed-expressible mutant for moving the check, and it was verified by construction (the check follows the INSERT).
+- F2b-read-error-mapped-to-no-source SURVIVED (renamed from an earlier mislabelled name; it never moved the check): EQUIVALENT. It only replaced the wrapped read error with ErrResolutionNoStatementSource (both fail closed); it does not change ordering. The ordering property (requester without a grant gets the audited 403 before any source signal) is pinned by the HTTP subtest no_grant_gets_403_before_any_source_signal; there is no sed-expressible mutant for moving the check, and it was verified by construction (the check follows the INSERT).
 - R2-yAttributable-always-true / CONC-exec-check-removed: first sed expressions did not apply (NOT APPLIED); R2 reran as R2-yAttributable-bypassed (killed). The execution-check removal is covered by the first batch (P4, P8).
