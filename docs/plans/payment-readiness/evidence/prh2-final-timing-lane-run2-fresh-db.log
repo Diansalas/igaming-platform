@@ -1,0 +1,69 @@
+HEAD cfa08d5 start 2026-10-05T05:09:00Z nproc=4
+Mem:           16094         967       10785         166        4826       15127
+go version go1.26.8 linux/amd64
+=== RUN 1 load: 1.39 1.30 1.54 at 05:09:00
+--- PASS: TestStoreOutage_DoesNotPinPool (2.39s)
+--- PASS: TestStoreOutage_DoesNotPinPool_ProductionPoolSize (2.29s)
+ok  	github.com/Diansalas/igaming-platform/internal/providercred	5.718s
+--- FAIL: TestResolutionIsolation_NormalOperation (2.95s)
+--- PASS: TestResolutionIsolation_OneTenantStoreOutage (3.25s)
+--- PASS: TestResolutionIsolation_MultipleTenantsOutage (4.49s)
+--- PASS: TestResolutionIsolation_SimultaneousOnset_Bounded (4.39s)
+--- PASS: TestResolutionIsolation_ConnectionExhaustion (2.83s)
+--- PASS: TestResolutionIsolation_FinancialDuringOutage (2.75s)
+FAIL
+FAIL	github.com/Diansalas/igaming-platform/internal/httpserver	20.834s
+FAIL
+=== RUN 2 load: 0.96 1.20 1.50 at 05:09:30
+--- PASS: TestStoreOutage_DoesNotPinPool (2.36s)
+--- PASS: TestStoreOutage_DoesNotPinPool_ProductionPoolSize (2.26s)
+ok  	github.com/Diansalas/igaming-platform/internal/providercred	5.664s
+--- FAIL: TestResolutionIsolation_NormalOperation (3.01s)
+--- PASS: TestResolutionIsolation_OneTenantStoreOutage (3.20s)
+--- PASS: TestResolutionIsolation_MultipleTenantsOutage (4.67s)
+--- PASS: TestResolutionIsolation_SimultaneousOnset_Bounded (4.32s)
+--- PASS: TestResolutionIsolation_ConnectionExhaustion (2.88s)
+--- PASS: TestResolutionIsolation_FinancialDuringOutage (2.74s)
+FAIL
+FAIL	github.com/Diansalas/igaming-platform/internal/httpserver	20.944s
+FAIL
+=== RUN 3 load: 0.76 1.13 1.47 at 05:10:00
+--- PASS: TestStoreOutage_DoesNotPinPool (2.33s)
+--- PASS: TestStoreOutage_DoesNotPinPool_ProductionPoolSize (2.32s)
+ok  	github.com/Diansalas/igaming-platform/internal/providercred	5.696s
+--- FAIL: TestResolutionIsolation_NormalOperation (3.24s)
+--- PASS: TestResolutionIsolation_OneTenantStoreOutage (3.26s)
+--- PASS: TestResolutionIsolation_MultipleTenantsOutage (4.44s)
+--- PASS: TestResolutionIsolation_SimultaneousOnset_Bounded (4.28s)
+--- PASS: TestResolutionIsolation_ConnectionExhaustion (2.92s)
+--- PASS: TestResolutionIsolation_FinancialDuringOutage (2.76s)
+FAIL
+FAIL	github.com/Diansalas/igaming-platform/internal/httpserver	21.042s
+FAIL
+=== RUN 4 load: 1.04 1.18 1.47 at 05:10:30
+--- PASS: TestStoreOutage_DoesNotPinPool (2.29s)
+--- PASS: TestStoreOutage_DoesNotPinPool_ProductionPoolSize (2.28s)
+ok  	github.com/Diansalas/igaming-platform/internal/providercred	5.617s
+--- FAIL: TestResolutionIsolation_NormalOperation (3.00s)
+--- PASS: TestResolutionIsolation_OneTenantStoreOutage (3.16s)
+--- PASS: TestResolutionIsolation_MultipleTenantsOutage (4.53s)
+--- PASS: TestResolutionIsolation_SimultaneousOnset_Bounded (4.28s)
+--- PASS: TestResolutionIsolation_ConnectionExhaustion (2.90s)
+--- PASS: TestResolutionIsolation_FinancialDuringOutage (2.75s)
+FAIL
+FAIL	github.com/Diansalas/igaming-platform/internal/httpserver	20.740s
+FAIL
+=== RUN 5 load: 1.53 1.33 1.51 at 05:11:00
+--- PASS: TestStoreOutage_DoesNotPinPool (2.38s)
+--- PASS: TestStoreOutage_DoesNotPinPool_ProductionPoolSize (2.29s)
+ok  	github.com/Diansalas/igaming-platform/internal/providercred	5.706s
+--- FAIL: TestResolutionIsolation_NormalOperation (3.13s)
+--- PASS: TestResolutionIsolation_OneTenantStoreOutage (3.24s)
+--- PASS: TestResolutionIsolation_MultipleTenantsOutage (4.50s)
+--- PASS: TestResolutionIsolation_SimultaneousOnset_Bounded (4.35s)
+--- PASS: TestResolutionIsolation_ConnectionExhaustion (2.87s)
+--- PASS: TestResolutionIsolation_FinancialDuringOutage (2.74s)
+FAIL
+FAIL	github.com/Diansalas/igaming-platform/internal/httpserver	20.974s
+FAIL
+TIMING_LANE_DONE 2026-10-05T05:11:30Z
