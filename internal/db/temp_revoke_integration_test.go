@@ -119,6 +119,16 @@ var tempForms = []tempForm{
 func TestTempRevoke_RuntimeRoleCannotCreateAnyTempObject_AllForms(t *testing.T) {
 	rt := kycRuntimePool(t, 1)
 	owner := tempOwnerPool(t)
+	// The form list is pinned: dropping or skipping a form must fail the test.
+	wantForms := "CREATE TEMP TABLE|CREATE TEMP TABLE AS|SELECT INTO TEMP|CREATE TEMP VIEW|CREATE TEMP SEQUENCE|CREATE TABLE pg_temp.x|CREATE FUNCTION pg_temp.f()"
+	var gotForms []string
+	for _, f := range tempForms {
+		gotForms = append(gotForms, f.name)
+	}
+	if strings.Join(gotForms, "|") != wantForms {
+		t.Fatalf("TEMP form list changed or a form was skipped: %v", gotForms)
+	}
+	var attempts int
 	errRollback := errors.New("rollback")
 	wrap := map[string]func(string) string{
 		"direct": func(s string) string { return s },
@@ -152,6 +162,7 @@ func TestTempRevoke_RuntimeRoleCannotCreateAnyTempObject_AllForms(t *testing.T) 
 					t.Fatalf("%s: the statement must be valid for the owner (non-vacuity): %v", name, err)
 				}
 				err := run(rt, mode, f.sql, spFirst)
+				attempts++
 				if err == nil {
 					t.Errorf("%s: the RUNTIME role created a temporary object", name)
 				} else if pgState(err) != "42501" {
@@ -159,6 +170,9 @@ func TestTempRevoke_RuntimeRoleCannotCreateAnyTempObject_AllForms(t *testing.T) 
 				}
 			}
 		}
+	}
+	if want := 7*2*2 - 2; attempts != want { // SELECT INTO has no DO variant
+		t.Fatalf("expected %d runtime attempts, ran %d", want, attempts)
 	}
 }
 

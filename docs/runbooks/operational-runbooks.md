@@ -134,6 +134,11 @@ glossed over; see `docs/runbooks/observability-and-alerting.md` and
    failed-over database is not safe to serve traffic on until role
    separation and RLS are independently reconfirmed, not merely assumed
    carried over.
+5. Also confirm `TEMPORARY` is still revoked (ADR 0108, migration 0116): as the owner role run
+   `SELECT has_database_privilege('igaming_runtime', current_database(), 'TEMP')` (must be `f`) and check
+   `pg_database.datacl` carries no `=...T...` PUBLIC entry. A restored or recreated database starts with the
+   PostgreSQL default (PUBLIC has TEMP) until migration 0116 or `deploy/init-app-role.sql` is re-applied; a
+   database where the runtime role can create TEMP tables lets it defeat the unpinned K2 four-eyes guards.
 
 ## 8. Restore verification (once a backup mechanism exists)
 

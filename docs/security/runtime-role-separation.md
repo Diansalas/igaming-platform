@@ -103,8 +103,26 @@ Verified empirically (§5), not inferred:
 | `DISABLE ROW LEVEL SECURITY` | **No** (`must be owner of table ...` — this is the specific capability that matters most; it is refused for the identical reason as any other `ALTER TABLE`, because disabling RLS is itself an `ALTER TABLE` subcommand) |
 | `DISABLE TRIGGER` | **No** (`must be owner of table ...`, same reasoning) |
 | `TRUNCATE` | **No** (`permission denied for table ...` — distinct from the owner-only cases above: `TRUNCATE` is grantable independently of ownership, and this role is simply never granted it) |
-| Modify schema (`CREATE TABLE`, etc.) | **No** (`permission denied for schema public`) — with one narrow, harmless exception: `CREATE TEMP TABLE` succeeds, because PostgreSQL grants `TEMPORARY` on the database to `PUBLIC` by default. Temp objects live in the connection's own `pg_temp` schema and hold no platform data, so it was originally judged not an escalation. **Correction 2026-10-05:** that judgement is withdrawn. `TEMP` lets the runtime role shadow an unqualified table name used by a trigger/guard function that has no pinned `search_path`, and this was reproduced as a bypass of the K2 four-eyes check (registry TRIGGER-SEARCH-PATH-1 / -UPGRADE, HIGH launch blocker, OPEN). It means the table above should be read as "cannot create a persistent table," not "cannot create any table." |
+| Modify schema (`CREATE TABLE`, etc.) | **No** (`permission denied for schema public`). |
+| `CREATE TEMP TABLE` / any object in `pg_temp` | **No since migration 0116** (`permission denied to create temporary tables in database`, SQLSTATE 42501) - see the TEMP section below. |
 | Ordinary `SELECT`/`INSERT`/`UPDATE`/`DELETE` under RLS | **Yes**, and — unlike the current `igaming` credential — genuinely enforced by RLS, because a non-owner role is never exempt regardless of any `FORCE` setting or its absence |
+
+
+### TEMPORARY privilege (PRH-2 R2, migration 0116, ADR 0108)
+
+**Invariant: the runtime role cannot create temporary objects.** PostgreSQL grants `TEMPORARY` on every
+database to `PUBLIC`, and `igaming_runtime` inherited it from there. An earlier version of this document judged
+`CREATE TEMP TABLE` harmless; that judgement was withdrawn on 2026-10-05 after the K3 delta security review
+reproduced a bypass of the K2 four-eyes check: a TEMP table named like `staff_users` shadows the unqualified
+name inside a trigger/guard function with no pinned `search_path`. Migration `0116_revoke_temp_from_runtime`
+revokes `TEMPORARY` on the current database from `PUBLIC` and from `igaming_runtime` (a role-only revoke is a
+no-op while `PUBLIC` holds the privilege) and ASSERTS the end state, raising if it cannot be established. The
+same revoke is in `deploy/init-app-role.sql` and `deploy/aws/sql/init-runtime-role.rds.sql`. The owner role
+keeps `TEMPORARY` as the database owner. Deployment requirement: the migration role must OWN the database
+(on RDS the master user does). Tests: `internal/db/temp_revoke_integration_test.go`,
+`internal/adjustment/temp_revoke_integration_test.go`, and the static guard
+`TestNoRuntimeTempObjectsInProductionCode`. This closes the exploitation path for the older unpinned functions
+but does not replace pinning them (TRIGGER-SEARCH-PATH-1 residual, defence in depth).
 
 **Independently re-verified and extended by the security review with 20
 additional escalation probes** (`SET session_replication_role =
