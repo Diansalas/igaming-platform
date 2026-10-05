@@ -200,8 +200,12 @@ func callProvider[T any](ctx context.Context, pool providercred.TenantTxRunner, 
 func safeCall[T any](ctx context.Context, cc CallContext, fn AdapterCall[T]) (result T, class ErrorClass, err error) {
 	defer func() {
 		if r := recover(); r != nil {
+			// SEC-8: record the panic value's TYPE only. The value itself
+			// (a string, an error, a vendor struct) can carry a credential,
+			// URL or vendor body and would otherwise flow into logs/audit
+			// via GateResult.Err (redactedReason passes it through).
 			var zero T
-			result, class, err = zero, ErrorClassAmbiguous, fmt.Errorf("payments: adapter panic recovered: %v", r)
+			result, class, err = zero, ErrorClassAmbiguous, fmt.Errorf("payments: adapter panic recovered (%T)", r)
 		}
 	}()
 	// PRH-I5: the CallContext also rides on ctx so a MOCK adapter can tag
