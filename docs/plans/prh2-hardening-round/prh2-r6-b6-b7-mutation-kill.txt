@@ -12,7 +12,7 @@ Suite per mutant (private scratch DB, no -race for speed; the final gate runs us
 
 Control (unmutated): PASS.
 
-Result of this run: 34 counted mutants, 32 KILLED, 2 SURVIVED (classified below).
+Result of this run: 34 counted mutants, 33 KILLED, 1 SURVIVED (classified below).
 (Revision 1 additionally killed M2c [both escalated_at guards], M5e [no reschedule after escalating] and
 M7a/M7b [no escalation on the Missing / pending branches]; those code shapes changed in revision 2 and are
 covered by C1c/C1d, M2a+M2b and the unchanged tests.)
@@ -52,17 +52,19 @@ M8a  alert not raised                                                         KI
 M8b  escalation audit action renamed                                          KILLED    ~8 tests
 M8c  helper's `!attemptAwaitingEvidence` pre-check removed                    SURVIVED  equivalent (below)
 M8d  closed-reason allowlist bypassed                                         KILLED    TestB6B7_RaiseEscalationAlert_UnlistedReasonBecomesUnclassified
-T6a  T6 drain: "already-bound reference" branch (drainRef) removed            SURVIVED  unreachable defensive branch (below)
+T6a  T6 drain: "already-bound reference" branch (drainRef) removed            KILLED    TestB6_T6Drain_AfterT12Resubmit_DrainsAgainstKeptReferenceNotAdapterReference
 
 Survivor classification (honest)
 --------------------------------
 M8c  EQUIVALENT (defence in depth). Escalate's SQL predicate `state NOT IN (terminal)` produces the same
      conflict -> (false, nil) with no audit and no alert; every caller also short-circuits a terminal row
      earlier. The SQL guard is the control (M2b).
-T6a  UNREACHABLE DEFENSIVE BRANCH. The drain uses the adapter's reference unless the attempt already carried
-     a different bound one (COALESCE keeps the earlier binding). A `submitting` attempt never carries a
-     reference (T4/T6 are the only binders and both leave `submitting`), so no test can reach it through the
-     real flow; the branch only guards against draining the wrong reference if that invariant ever breaks.
+T6a  (revision 3: KILLED, previously mis-classified as unreachable.) T12 ResubmitAmbiguous moves an ambiguous
+     deposit back to submitting KEEPING its bound reference X (the 0101 guard allows deposit T12; only
+     payout_sweep.go calls it in production today, so the branch is reachable by a test, not by production).
+     If the adapter then answers with a different reference Y, T6 keeps X (COALESCE) and the drain must run
+     against X. TestB6_T6Drain_AfterT12Resubmit_... asserts X kept, the Y receipt NOT applied, nothing posts.
+     Any future deposit T12 caller must land with this test.
 
 Correction of revision 1 (ledger-finance LF-C2)
 -----------------------------------------------

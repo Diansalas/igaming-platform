@@ -821,6 +821,11 @@ func TestB6_T6Drain_DeferredMismatchedAmount_ParksOnceNoPosting(t *testing.T) {
 	loAssertProjectionMatchesRebuild(t, pool, e.f.tenantID)
 }
 
+// NOTE (like the park tests' F2a note): "the fault fires after the posting" depends on
+// ResolveReceipt being the drain's LAST write, after the posting and the intent projection
+// update. If that order in ApplyDeferredReceiptsForAttempt ever changes, re-check the injection
+// point (blocking payment_provider_events) so the rollback assertion does not become trivial.
+//
 // LF-C1: fault injection AFTER the T6 drain posted. The receipt resolution (the drain's last
 // write) is made to fail with a lock timeout; the whole phase C transaction rolls back: the
 // attempt is back at 'submitting' with no reference, no posting, the receipt still unresolved,
@@ -882,6 +887,47 @@ func TestB6_T6Drain_FaultAfterPosting_RollsBackCompletelyThenRedrives(t *testing
 	}
 	if rs, open := e.receiptResolutions(t, ref); open != 0 || len(rs) != 1 || rs[0] != string(ResolutionApplied) {
 		t.Fatalf("receipts after the re-drive: %v open=%d", rs, open)
+	}
+	assertLedgerBalanced(t, pool, e.f.tenantID)
+	loAssertProjectionMatchesRebuild(t, pool, e.f.tenantID)
+}
+
+// T12 re-submission keeps the bound reference X (ResubmitAmbiguous moves ambiguous -> submitting
+// without touching it). If the adapter's next answer names a DIFFERENT reference Y, T6 keeps X
+// (COALESCE) and the drain must run against X, never Y: the deferred success stored under Y is NOT
+// applied, nothing posts, the ledger balances. (Reachable by a test, not by production today: only
+// payout_sweep.go calls ResubmitAmbiguous. Any future deposit T12 caller must land with this test.)
+func TestB6_T6Drain_AfterT12Resubmit_DrainsAgainstKeptReferenceNotAdapterReference(t *testing.T) {
+	pool := testPool(t)
+	e := newDepRefEnv(t, pool, "mock-b6-t12")
+	a, refX := e.ambiguousBound(t, "b6-t12")
+	claim := uuid.New()
+	if err := pool.WithTenant(context.Background(), e.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return ResubmitAmbiguous(ctx, tx, a.ID, claim, "b6-t12", time.Now().Add(time.Minute), 0)
+	}); err != nil {
+		t.Fatalf("T12: %v", err)
+	}
+	if got := mustGetAttempt(t, pool, e.f.tenantID, a.ID); got.State != AttemptSubmitting || got.ProviderReference == nil || *got.ProviderReference != refX {
+		t.Fatalf("setup: state=%s ref=%v, want submitting keeping %q", got.State, got.ProviderReference, refX)
+	}
+	refY := "defer-ref-Y-" + uuid.NewString()
+	cb, err := rvCallback(pool, e.orch, e.f, e.id, e.p.CallbackPayload(e.f.tenantID, CallbackEventDeposit, refY, "", OutcomeSucceeded, 5000, "EUR", "", false))
+	if err != nil || cb.Disposition != DispositionDeferredUnresolved {
+		t.Fatalf("seed deferred receipt under Y: %v %v", cb.Disposition, err)
+	}
+	gr := GateResult[DepositResult]{Class: ErrorClassAmbiguous, Value: DepositResult{Outcome: OutcomeAmbiguous, ProviderReference: refY}}
+	if err := e.phaseCVictim(a.ID, *a.DepositIntentID, claim, gr, false); err != nil {
+		t.Fatalf("phase C: %v", err)
+	}
+	got := mustGetAttempt(t, pool, e.f.tenantID, a.ID)
+	if got.State != AttemptAmbiguous || got.ProviderReference == nil || *got.ProviderReference != refX {
+		t.Fatalf("state=%s ref=%v, want ambiguous with X=%q kept", got.State, got.ProviderReference, refX)
+	}
+	if rs, open := e.receiptResolutions(t, refY); open != 1 || len(rs) != 1 {
+		t.Fatalf("the Y receipt must stay unresolved (never applied against X's attempt): %v open=%d", rs, open)
+	}
+	if e.depositTxCount(t) != 0 || cashBalance(t, pool, e.f) != 0 {
+		t.Fatalf("nothing may post")
 	}
 	assertLedgerBalanced(t, pool, e.f.tenantID)
 	loAssertProjectionMatchesRebuild(t, pool, e.f.tenantID)

@@ -7339,6 +7339,10 @@ criterion A7 (PROVIDER DEPENDENT).
 - **N4** The callback-path decline cascade insert lacks B8's tenant-status gate (existing LF F7 item 10).
 - **N5** The callback-vs-escalation concurrency tests run sequentially (correct under the intent lock); a
   `-race -count=N` goroutine storm would be stronger.
+- **N7** The T6 drain runs against the reference the attempt KEEPS (COALESCE), not the adapter's: after a T12
+  re-submission (`ResubmitAmbiguous` keeps the bound reference; only the payout sweeper calls it today) a different
+  adapter reference Y never causes a receipt stored under Y to be applied to the attempt. Pinned by
+  `TestB6_T6Drain_AfterT12Resubmit_...`; any future deposit T12 caller must land with that test.
 - **N6** Reference-less ambiguous attempts escalate with reason `deposit_unreferenced_submitting` (naming only).
 - Tracked, no code yet: A2 boot-time re-check of stored capabilities/providers before the first real adapter;
   A4 per-provider alert aggregation before ALERT-DELIVERY-1; A5 runbook note that these P1s reuse
