@@ -713,6 +713,23 @@ func (o *Orchestrator) applyDepositCallResult(
 		if err := MarkAmbiguousFromSubmittingBindingRef(ctx, tx, attempt.ID, evidence, res.ProviderReference, nextPoll); err != nil {
 			return updated, nil, err
 		}
+		// B6.3 (PAY-DEPOSIT-ESCALATION-1; closes the ADR 0095 section 36.3 T6
+		// residual): T6 just bound the adapter's reference, so a verified success
+		// callback for it that raced this phase C was stored deferred_unresolved
+		// (the attempt had no reference to resolve against). Drain it now, under
+		// the parent + attempt locks this call already holds, exactly like the
+		// Pending branch above. The drain re-reads the attempt per receipt and is
+		// idempotent on (provider_id, provider_tx_id), so at most one posting.
+		if res.ProviderReference != "" {
+			drainRef := res.ProviderReference
+			if attempt.ProviderReference != nil && *attempt.ProviderReference != "" {
+				drainRef = *attempt.ProviderReference // COALESCE kept the earlier binding
+			}
+			attempt.ProviderID, attempt.ProviderReference = &capability.ProviderID, &drainRef
+			if _, err := ApplyDeferredReceiptsForAttempt(ctx, tx, o, attempt); err != nil {
+				return updated, nil, err
+			}
+		}
 		return updated, nil, nil
 	}
 }

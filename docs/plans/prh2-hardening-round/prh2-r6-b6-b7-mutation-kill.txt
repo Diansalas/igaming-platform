@@ -1,0 +1,71 @@
+PRH-2 hardening round, R6 - Class-B B6 (PAY-DEPOSIT-ESCALATION-1) + B7 (PAY-H-FOLLOWUPS-1 (11)) mutation-kill evidence
+=========================================================================================================
+
+Method: each mutant is applied IN PLACE to one production file (backup copied first), the targeted
+suite is run, then the file is restored from the backup and byte-compared (cmp) to it. Control run
+first (unmutated). No compile-error mutants are counted (one early M3c form that left an unused
+variable failed to compile; it was discarded and replaced by the valid form listed below).
+
+Suite per mutant (private scratch DB, no -race for speed; the final gate run uses -race):
+  go test -tags integration -count=1 -p 1 ./internal/payments/ -run 'TestB6|TestB7'
+
+Control (unmutated): PASS (rc=0, no failures).
+
+Result: 28 mutants, 25 KILLED, 3 SURVIVED (all three classified below).
+
+ID   Mutant                                                              Result    Killed by (first tests)
+---  ------------------------------------------------------------------  --------  -------------------------------------------
+M1a  window comparison inverted (time.Since(start) > window+extra)      KILLED    ..._AfterWindow_ExactlyOnce..., 10 more
+M1b  window ignores the lease term (extraWait dropped)                   KILLED    TestB7_..._NotEscalatedBeforeLeasePlusWindow
+M1c  window ignored (always due)                                         KILLED    ..._AfterWindow_ExactlyOnce..., 4 more
+M2a  helper's `EscalatedAt != nil` guard removed                         SURVIVED  (equivalent, see below)
+M2b  `escalated_at IS NULL` removed from Escalate's SQL CAS              KILLED    TestB6_Escalation_CASConflict_StaleSnapshot_WritesNothing
+M2c  both escalated_at guards removed (helper + SQL)                     KILLED    ..._AfterWindow_ExactlyOnce..., CASConflict, 2 more
+M2d  CAS conflict (ErrAttemptStateConflict) no longer tolerated          KILLED    TestB6_Escalation_CASConflict_StaleSnapshot_WritesNothing
+M3a  power-of-two gate always true                                       KILLED    TestB6_PollAuditDue_Unit, PowerOfTwoGate, AlwaysOnEscalationTick
+M3b  power-of-two gate always false                                      KILLED    same three
+M3c  escalation tick no longer forces the audit                          KILLED    TestB6_UnconfirmedPollAudit_AlwaysOnEscalationTick
+M3d  gate off by one (n&(n+1))                                           KILLED    same three
+M4   T6 deferred-receipt drain call skipped                              KILLED    TestB6_T6BindingRef_DrainsDeferredReceipt_..., ..._DrainsDeferredDecline_...
+M5a  nil-reference branch reverted to the plain reschedule               KILLED    TestB7_..._EscalatesOnce_KeepsRescheduling, 3 more
+M5b  nil-reference escalation uses the wrong reason                      KILLED    TestB7_..._EscalatesOnce_KeepsRescheduling, AlertDeterministicFailure
+M5c  nil-reference lease term dropped                                    KILLED    TestB7_..._NotEscalatedBeforeLeasePlusWindow
+M5d  nil-reference branch: fresh "still live" check removed              SURVIVED  (near-equivalent, see below)
+M5e  nil-reference branch does not reschedule after escalating           KILLED    TestB7_..._EscalatesOnce_KeepsRescheduling
+M6a  manifest: by_provider_or_merchant_reference accepted again          KILLED    TestB7_ValidateManifest_MerchantReferenceStatusQueryAloneRefused
+M6b  manifest: LF95-C5 rule disabled entirely                            KILLED    same
+M6c  manifest: synthetic adapters no longer exempt                       KILLED    ~20 tests (every MOCK-registering test)
+M7a  no escalation on the success-without-amount (Missing) branch        KILLED    TestB6_Escalation_EveryNonResolvingPollOutcome, AlwaysOnEscalationTick
+M7b  no escalation on the pending branch                                 KILLED    ..._AfterWindow_ExactlyOnce..., 3 more
+M7c  no escalation on the ambiguous branch                               KILLED    TestB6_Escalation_EveryNonResolvingPollOutcome
+M7d  no escalation on the transport-failure branch                       KILLED    TestB6_Escalation_TransportFailurePastWindow
+M8a  alert not raised                                                    KILLED    ~8 tests
+M8b  escalation audit not written (action renamed)                       KILLED    ~8 tests
+M8c  helper's `!attemptAwaitingEvidence` precondition removed            SURVIVED  (equivalent, see below)
+M8d  closed-reason allowlist bypassed in raiseDepositEscalationAlert     KILLED    TestB6B7_RaiseEscalationAlert_UnlistedReasonBecomesUnclassified
+
+Survivor classification (honest)
+--------------------------------
+M2a  EQUIVALENT (defence in depth). The in-memory `attempt.EscalatedAt != nil` pre-check only saves
+     the Escalate round trip: with it removed, Escalate's own SQL CAS (`escalated_at IS NULL`) rejects
+     the second tick with ErrAttemptStateConflict, which the helper maps to (false, nil) with no audit
+     and no alert - identical observable behaviour. The SQL guard is the real control and is killed by
+     M2b/M2c; the conflict mapping by M2d.
+M8c  EQUIVALENT (defence in depth), same reasoning: Escalate's SQL predicate
+     `state NOT IN ('succeeded','declined','rejected','disputed')` yields the same conflict -> (false, nil),
+     and every caller short-circuits a terminal row earlier (applyStatusEvidence's
+     attemptAwaitingEvidence check; processUnreferenced's fresh re-read).
+M5d  NEAR-EQUIVALENT. In processUnreferenced the fresh `!attemptAwaitingEvidence` early return is
+     shadowed, for every terminal shape a callback can produce, by the next check (a callback by
+     merchant reference binds a provider_reference, so the "reference bound since the lease" return
+     fires). It is only observable for a terminal attempt that STILL has no reference, which no test
+     hook can produce today (that would need an operator/recon resolution path; out of scope). Without
+     the check such a row would reach RescheduleNonTerminal and error (next_action_at is NULL on a
+     terminal row) - a loud, safe failure, never a write. Kept as a deliberate explicit guard.
+
+Not-killable-by-design notes
+----------------------------
+* The window is read from the registered provider's manifest.SettlementWindow on every tick (default
+  24h when unset or when the provider is unregistered). first_submitted_at is immutable (trigger), so
+  tests age an attempt by shrinking the manifest window to 1ns, never by back-dating the row.
+* The control and all mutant runs used the private scratch database only.

@@ -369,11 +369,10 @@ func (s *Sweeper) presenceWindow() time.Duration {
 func (s *Sweeper) processViaQueryStatus(ctx context.Context, tenantID uuid.UUID, attempt PaymentAttempt) error {
 	if attempt.ProviderID == nil || attempt.ProviderReference == nil {
 		// No reference yet to look up (e.g. a 'submitting' attempt whose
-		// lease expired before the provider ever acknowledged it) -
-		// reschedule; there is nothing to query.
-		return s.Pool.WithTenant(ctx, tenantID, func(actx context.Context, tx pgx.Tx) error {
-			return RescheduleNonTerminal(actx, tx, attempt.ID, s.backoff(attempt.PollCount))
-		})
+		// lease expired before the provider ever acknowledged it): there is
+		// nothing to query. Reschedule, and (B7) escalate once past lease +
+		// settlement window.
+		return s.processUnreferenced(ctx, tenantID, attempt)
 	}
 	provider, ok := s.Orchestrator.Provider(*attempt.ProviderID)
 	if !ok {
@@ -459,6 +458,117 @@ func (s *Sweeper) processViaQueryStatus(ctx context.Context, tenantID uuid.UUID,
 	return nil
 }
 
+// processUnreferenced is B7.1 (PAY-H-FOLLOWUPS-1 (11)): a live deposit with no
+// bound provider reference (a crash or disconnect after a possible capture,
+// H-SEC-10) cannot be polled - PaymentProvider.QueryStatus takes only a
+// provider reference and no merchant-reference status method exists yet
+// (adapter acceptance criterion A7, PROVIDER DEPENDENT). It is therefore
+// rescheduled forever, as before, but once it is older than
+// lease + SettlementWindow it is escalated ONCE (T16, same helper as B6, reason
+// deposit_unreferenced_submitting): no state change, never an auto-decline.
+// Resolution stays with a callback by merchant reference, reconciliation or an
+// operator. Runs through alerting.InTx and flushes after commit (B-1).
+func (s *Sweeper) processUnreferenced(ctx context.Context, tenantID uuid.UUID, attempt PaymentAttempt) error {
+	if attempt.DepositIntentID == nil {
+		return s.Pool.WithTenant(ctx, tenantID, func(actx context.Context, tx pgx.Tx) error {
+			return RescheduleNonTerminal(actx, tx, attempt.ID, s.backoff(attempt.PollCount))
+		})
+	}
+	applyCtx, cancelApply := context.WithTimeout(context.WithoutCancel(ctx), depositPhaseCTimeout)
+	defer cancelApply()
+	pendingU, err := alerting.InTx(applyCtx, alerting.NewTenantRunner(s.Pool, tenantID), func(actx context.Context, tx pgx.Tx) error {
+		// Every attempt transition takes the deposit_intents parent lock: take it,
+		// then re-read, so a callback that resolved the attempt first is seen.
+		if _, err := tx.Exec(actx, `SELECT id FROM deposit_intents WHERE id = $1 FOR UPDATE`, *attempt.DepositIntentID); err != nil {
+			return err
+		}
+		intent, err := GetDepositIntentByID(actx, tx, *attempt.DepositIntentID)
+		if err != nil {
+			return err
+		}
+		fresh, err := GetAttemptByID(actx, tx, attempt.ID)
+		if err != nil {
+			return err
+		}
+		if !attemptAwaitingEvidence(fresh.State) {
+			return nil // resolved concurrently: nothing to reschedule or escalate
+		}
+		if fresh.ProviderID != nil && fresh.ProviderReference != nil && *fresh.ProviderReference != "" {
+			// A reference was bound since the lease (T4/T9 by a concurrent path):
+			// the next tick polls it normally.
+			return nil
+		}
+		if _, err := s.escalateDepositIfDue(actx, tx, intent, fresh, alertReasonDepositUnreferencedSubmitting, s.Lease); err != nil {
+			return err
+		}
+		return RescheduleNonTerminal(actx, tx, fresh.ID, s.backoff(fresh.PollCount))
+	})
+	if err != nil {
+		return err
+	}
+	pendingU.Flush(ctx)
+	return nil
+}
+
+// depositSettlementWindow is the manifest SettlementWindow of the attempt's
+// provider (DefaultSettlementWindow when unset, or when the provider is not in
+// the registry).
+func (s *Sweeper) depositSettlementWindow(attempt PaymentAttempt) time.Duration {
+	if attempt.ProviderID != nil && s.Orchestrator != nil {
+		if p, ok := s.Orchestrator.Provider(*attempt.ProviderID); ok {
+			if w := p.Capabilities().Manifest.SettlementWindow; w > 0 {
+				return w
+			}
+		}
+	}
+	return DefaultSettlementWindow
+}
+
+// escalateDepositIfDue is the single T16 helper for live deposits (B6 and B7).
+// When the attempt is live, has never been escalated and is older than
+// SettlementWindow + extraWait (measured from first_submitted_at, falling back
+// to created_at), it calls Escalate (no state change, escalated_at set - never
+// an auto-decline, LF-C2 rule 5), writes one audit row and raises the durable
+// P1 (alert last). It reports whether THIS call escalated. Escalate's own CAS
+// (escalated_at IS NULL AND state live) makes a duplicate tick, or a state
+// change racing the tick, a conflict: reported as (false, nil) with no write.
+// The caller keeps rescheduling, so an escalated attempt is still polled and a
+// later success still posts exactly once.
+func (s *Sweeper) escalateDepositIfDue(ctx context.Context, tx pgx.Tx, intent DepositIntent, attempt PaymentAttempt, reason string, extraWait time.Duration) (bool, error) {
+	if attempt.Operation != AttemptOperationDeposit || attempt.EscalatedAt != nil || !attemptAwaitingEvidence(attempt.State) {
+		return false, nil
+	}
+	start := attempt.CreatedAt
+	if attempt.FirstSubmittedAt != nil {
+		start = *attempt.FirstSubmittedAt
+	}
+	window := s.depositSettlementWindow(attempt)
+	if time.Since(start) <= window+extraWait {
+		return false, nil
+	}
+	if err := Escalate(ctx, tx, attempt.ID, s.backoff(attempt.PollCount)); err != nil {
+		if errors.Is(err, ErrAttemptStateConflict) {
+			return false, nil
+		}
+		return false, err
+	}
+	if err := audit.Record(ctx, tx, audit.Entry{
+		TenantID: attempt.TenantID, ActorType: audit.ActorSystem, Action: "payment.deposit_escalated",
+		TargetType: "payment_attempt", TargetID: attempt.ID.String(), Outcome: audit.OutcomeDenied,
+		Metadata: map[string]any{
+			"reason": reason, "provider_id": providerIDOrEmpty(attempt), "deposit_intent_id": intent.ID.String(),
+			"state": string(attempt.State), "poll_count": attempt.PollCount,
+			"settlement_window_seconds": int64(window / time.Second),
+		},
+	}); err != nil {
+		return false, fmt.Errorf("payments: audit deposit escalation: %w", err)
+	}
+	if err := raiseDepositEscalationAlert(ctx, tx, attempt, reason); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // applyStatusEvidence maps one QueryStatus GateResult onto the §4.4
 // matrix's submitting/pending/ambiguous rows. Called with the intent's
 // parent lock already held.
@@ -483,13 +593,23 @@ func (s *Sweeper) applyStatusEvidence(ctx context.Context, tx pgx.Tx, intent Dep
 		// Transport/credential failure resolving the query itself, or a
 		// gate refusal: inconclusive, never treated as failure (§8's
 		// "timeout after dispatch is Ambiguous and never a failure",
-		// restated here for the poll path itself).
+		// restated here for the poll path itself). B6: past the settlement
+		// window it is also the escalation tick (the P1 must not depend on the
+		// PSP answering).
+		if _, err := s.escalateDepositIfDue(ctx, tx, intent, attempt, alertReasonDepositSettlementWindowExceeded, 0); err != nil {
+			return err
+		}
 		return RescheduleNonTerminal(ctx, tx, attempt.ID, nextPoll)
 	}
 
 	res := gr.Value
 	switch gr.Class {
 	case ErrorClassPending:
+		// B6: a still-pending poll past the settlement window is the escalation
+		// tick (T16: no state change, keep polling, never auto-decline).
+		if _, err := s.escalateDepositIfDue(ctx, tx, intent, attempt, alertReasonDepositSettlementWindowExceeded, 0); err != nil {
+			return err
+		}
 		if attempt.State == AttemptPending {
 			// no-op (reschedule) - already pending, nothing changed. B5 (LF L1): a
 			// differing non-empty echo is no longer silently ignored.
@@ -735,6 +855,10 @@ func (s *Sweeper) applyStatusEvidence(ctx context.Context, tx pgx.Tx, intent Dep
 		return nil
 
 	default: // ErrorClassAmbiguous
+		// B6: an ambiguous poll past the settlement window is an escalation tick.
+		if _, err := s.escalateDepositIfDue(ctx, tx, intent, attempt, alertReasonDepositSettlementWindowExceeded, 0); err != nil {
+			return err
+		}
 		if attempt.State == AttemptPending {
 			// T11: the provider "forgot" an accepted attempt - a real
 			// state change (P1 anomaly), not a plain reschedule.

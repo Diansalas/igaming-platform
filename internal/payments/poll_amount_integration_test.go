@@ -236,7 +236,8 @@ func (e *depRefEnv) assertPollParked(t *testing.T, a PaymentAttempt, ref, wantRe
 
 // What "Missing" means on the poll path (ADR 0095 §36.2): a success with no usable
 // amount evidence NEVER posts, is NOT a dispute, keeps the attempt live, and is
-// audited on every poll so a provider that never echoes an amount is visible.
+// audited (B6.2: when poll_count is 0 or a power of two, and on the escalation tick) so a
+// provider that never echoes an amount is visible.
 func TestPollAmount_Missing_NeverPosts_StaysLiveAndAudited(t *testing.T) {
 	pool := testPool(t)
 	cases := []struct {
@@ -756,10 +757,14 @@ func TestSweepCASNoise_NonSuccessPollOnAnAttemptTerminalByCallback_IsANoOp(t *te
 
 // --- PAY-DEFERRED-RECEIPT-SYNC-1 (widened by LF) ---------------------------------
 
-// phaseBCallbackThenAmbiguous: a verified success callback arrives during phase B
-// for a reference the attempt does not know yet (stored deferred_unresolved) and
-// the adapter then answers Ambiguous WITH that reference, which T6 binds. The
-// attempt is ambiguous, the reference is bound and one receipt is still waiting.
+// phaseBCallbackThenAmbiguous builds the LEGACY shape the sweeper's own drains
+// (T9 / poll success) still guard: an ambiguous attempt that holds a reference
+// while a receipt for it is still waiting deferred_unresolved. B6.3 closed the live
+// route to that shape (T6 now drains in-band, TestB6_T6BindingRef_DrainsDeferredReceipt),
+// so the shape is built synthetically: a verified success callback arrives during phase
+// B (stored deferred_unresolved), the adapter answers Ambiguous with NO reference (so T6
+// binds and drains nothing), and the reference is then bound directly - exactly what an
+// attempt T6-bound before B6.3 looks like.
 func (e *depRefEnv) phaseBCallbackThenAmbiguous(t *testing.T, key string) (PaymentAttempt, string) {
 	t.Helper()
 	ref := "defer-ref-" + uuid.NewString()
@@ -767,11 +772,17 @@ func (e *depRefEnv) phaseBCallbackThenAmbiguous(t *testing.T, key string) (Payme
 	var cbErr error
 	e.p.setScript(func(req DepositRequest) DepositResult {
 		cbRes, cbErr = rvCallback(e.pool, e.orch, e.f, e.id, e.p.CallbackPayload(e.f.tenantID, CallbackEventDeposit, ref, "", OutcomeSucceeded, 5000, "EUR", "", false))
-		return DepositResult{Outcome: OutcomeAmbiguous, ProviderReference: ref}
+		return DepositResult{Outcome: OutcomeAmbiguous}
 	})
 	res := rvInit(t, e.pool, e.orch, e.f, 5000, key)
 	if cbErr != nil || cbRes.Disposition != DispositionDeferredUnresolved {
 		t.Fatalf("phase B callback: disposition=%s err=%v, want deferred_unresolved", cbRes.Disposition, cbErr)
+	}
+	if err := e.pool.WithTenant(context.Background(), e.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `UPDATE payment_attempts SET provider_reference = $2 WHERE id = $1 AND provider_reference IS NULL`, res.Attempt.ID, ref)
+		return err
+	}); err != nil {
+		t.Fatalf("legacy bind: %v", err)
 	}
 	a := mustGetAttempt(t, e.pool, e.f.tenantID, res.Attempt.ID)
 	if a.State != AttemptAmbiguous || a.ProviderReference == nil || *a.ProviderReference != ref {

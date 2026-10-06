@@ -70,6 +70,7 @@ func staticDerivedRaiseSet(calls []staticCall) map[string]bool {
 // TestStaticWiring_EvidenceTransactionOwnersOpenThroughInTxAndFlush).
 var staticDerivedRaiseSetReviewed = map[string]bool{
 	"internal/payments/alerts.go:alertAfterDispute":                     true,
+	"internal/payments/alerts.go:raiseDepositEscalationAlert":           true,
 	"internal/payments/alerts.go:raiseDepositParkAlert":                 true,
 	"internal/payments/alerts.go:raiseMultipleSuccessAlert":             true,
 	"internal/payments/alerts.go:raisePollContradictionAlert":           true,
@@ -86,6 +87,7 @@ var staticDerivedRaiseSetReviewed = map[string]bool{
 	"internal/payments/receipt.go:applyDepositSuccessAndPost":           true,
 	"internal/payments/receipt.go:applyResolvedReceiptEvidence":         true,
 	"internal/payments/sweeper.go:applyStatusEvidence":                  true,
+	"internal/payments/sweeper.go:escalateDepositIfDue":                 true,
 }
 
 func TestStaticWiring_DerivedRaiseReachingSetIsReviewed_CR2S4(t *testing.T) {

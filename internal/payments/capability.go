@@ -355,9 +355,16 @@ func validateManifest(provider PaymentProvider, declared AdapterCapability) erro
 	// TestOutboundPrecondition_EveryWiredAdapterIsSynthetic tripwire, ADR
 	// 0093/0095 §11, keeps it that way until a real one is reviewed in).
 	if _, synthetic := provider.(syntheticPaymentsAdapter); !synthetic {
-		if (declared.SupportsDeposit || declared.SupportsWithdrawal) &&
-			!m.CallbackEchoesMerchantReference && m.StatusQuery != "by_provider_or_merchant_reference" {
-			return fmt.Errorf("%w: production-eligible adapter %s supports deposit or withdrawal but neither echoes merchant_reference on callback nor supports StatusQuery by_provider_or_merchant_reference (LF95-C5)",
+		//
+		// B7 (PAY-H-FOLLOWUPS-1 (11)): StatusQuery "by_provider_or_merchant_reference"
+		// is NOT accepted as a satisfier. PaymentProvider.QueryStatus takes only a
+		// provider reference; no merchant-reference status method exists in the
+		// interface, so the declaration would promise a capability the platform
+		// cannot use. Until QueryStatusByMerchantReference exists (adapter
+		// acceptance criterion A7, PROVIDER DEPENDENT), the only satisfier is
+		// CallbackEchoesMerchantReference = true.
+		if (declared.SupportsDeposit || declared.SupportsWithdrawal) && !m.CallbackEchoesMerchantReference {
+			return fmt.Errorf("%w: production-eligible adapter %s supports deposit or withdrawal but does not echo merchant_reference on callback (LF95-C5; StatusQuery by_provider_or_merchant_reference is not accepted while no merchant-reference status method exists)",
 				ErrManifestRegistrationRefused, declared.ProviderID)
 		}
 	}
