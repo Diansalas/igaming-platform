@@ -1,6 +1,6 @@
 # iGaming Platform — Live Developer Handover
 
-> **Snapshot date: 2026-10-06. Code HEAD: `d149a64` on branch `claude/focused-wright-jw88w9` (docs-only commits since `6a7b5f5`).** This file is the PRIMARY entry point for any engineer taking the project over from the Git repository alone. It is a *live* document: whoever merges a material change updates the affected section in the same change (registry: `HANDOVER-1`, `HANDOVER-LIVE-2026-10-06`).
+> **Snapshot date: 2026-10-06 (state-corrected after the merges and the environment diagnosis). Code HEAD: `639a2f0` on branch `claude/focused-wright-jw88w9` (= origin).** This file is the PRIMARY entry point for any engineer taking the project over from the Git repository alone. It is a *live* document: whoever merges a material change updates the affected section in the same change (registry: `HANDOVER-1`, `HANDOVER-LIVE-2026-10-06`). **State correction:** the signed-actor-proof (migration 0120) and stake-return/closure (migration 0121) branches are now MERGED; migrations on HEAD are 0001..0121 (`migrate verify` clean). See [section 25a](#25a-merged-tree-race-verification-state) for the verification state: the merged-tree `-race` sweep is INCOMPLETE because the execution environment repeatedly restarts (environment limitation, no application failure).
 >
 > Companions: hands-on commands in [`runbooks/developer-handover.md`](runbooks/developer-handover.md); dated snapshot with SHAs, residual register and evidence index in [`plans/prh2-hardening-round/developer-handover-2026-10-06.md`](plans/prh2-hardening-round/developer-handover-2026-10-06.md); human-decision register in [`governance/human-decision-register.md`](governance/human-decision-register.md).
 >
@@ -12,9 +12,9 @@
 
 **What has been built.** Stages 0 to 10.3 are accepted by the human owner (2026-09-26): identity, tenancy with database-enforced row-level security, an append-only double-entry ledger, multi-wallet, payments and withdrawals, casino and sportsbook integration slices, bonus engine (waves 1-3), KYC/AML/responsible-gaming enforcement, a risk engine, jurisdiction model, back office, B2C frontend, and a staging AWS design. After that, the "PRH" blocks hardened payments without any real provider.
 
-**Where it stands.** Everything external is a **MOCK**: no real payment provider (PSP), KYC vendor, casino aggregator or sportsbook feed, no production credentials, no real money. AWS is **OFF** (nothing deployed). GitHub Actions CI is **blocked by billing**, so all test evidence is local. Migrations `0001..0119` are on HEAD; two finished branches (`0120`, `0121`) are **ready, merge pending**.
+**Where it stands.** Everything external is a **MOCK**: no real payment provider (PSP), KYC vendor, casino aggregator or sportsbook feed, no production credentials, no real money. AWS is **OFF** (nothing deployed). GitHub Actions CI is **blocked by billing**, so all test evidence is local. Migrations `0001..0121` are on HEAD `639a2f0` (the signed-actor-proof `0120` and stake-return/closure `0121` branches are merged); merged-tree `-race` verification is INCOMPLETE because the sandbox restarts (section 25a).
 
-**What is being worked on.** PRH-2 ("payment readiness and provider-independent hardening, round 2") is in its final stretch and is **not complete**. Open: merge and verify two ready branches, finish the per-package `-race` sweep (53 of 54 packages pass; `internal/payments` was still running), some remaining "Class-B" payment hardening items, and several owner decisions. A sandbox PSP adapter is **not yet authorized**.
+**What is being worked on.** PRH-2 ("payment readiness and provider-independent hardening, round 2") is **not complete**. The two ready branches are merged (0120, 0121). Open: finish merged-tree `-race` verification (INCOMPLETE, environment-limited; see 25a - run it in controlled batches or on a stable CI/self-hosted runner), some remaining "Class-B" payment hardening items, threat-register residuals (T3/T4/T5/T8) and several owner decisions. A sandbox PSP adapter is **not yet authorized**.
 
 **What to do first.** (1) Read the [HOW A NEW DEVELOPER TAKES OVER](#how-a-new-developer-takes-over) section and the [DO-NOT-CHANGE RULES](#48-do-not-change-rules). (2) Verify your local Postgres and run `go run ./cmd/migrate verify` ([runbook](runbooks/developer-handover.md)). (3) Do **not** reconstruct history from any Claude conversation; the repository (this file, `docs/governance/task-registry.md`, ADRs) is the memory. (4) Pick work only from [36. EXACT NEXT ENGINEERING TASKS](#36-exact-next-engineering-tasks), and stop for human authorization at every gate listed in [31](#31-open-human-decisions).
 
@@ -26,13 +26,13 @@
 
 ### IMMEDIATE
 Can start **without any new human decision** (ordinary reversible engineering inside the already-approved PRH-2 scope):
-- Merge `prh2-r5-signed-actor-proof@8863e31` (migration 0120) and `prh2-r5-stake-return-closure@35cd2fb` (migration 0121) once the full per-package `-race` sweep at `d149a64` finishes green; then `migrate verify` must show 0001..0121 gap-free. Both have passed security, ledger-finance and (for 0120) code review with conditions that were met.
+- ~~Merge the two ready branches~~ DONE at `639a2f0` (signed-actor-proof 0120, stake-return/closure 0121; `migrate verify` 0001..0121 clean). Remaining verification: see [25a](#25a-merged-tree-race-verification-state). Reviews with conditions were met before merge.
 - Re-read the `internal/payments` race result (status file `race_results/root_internal_payments.d149a64.status` in the orchestrator scratchpad; if lost, re-run that package per the runbook).
 - Docs and registry hygiene (the known documentation conflicts in section 47a).
 - Class-B items B5, B6, B7, B8, B11, B12 (see 28/36) are inside approved PRH-2 scope and need no new decision; B13 is **BLOCKED** (architect + owner).
 
 ### NEXT ENGINEERING ROUND
-After the merges: final PRH-2 verification (full sweep on the merged tree, `golangci-lint` v2.9.0 built with Go 1.26.x, `migrate verify`, timing lane in its own lane), a PRH-2 gate report, then **stop and ask the owner** to authorize the next stage. Do not start the sandbox adapter, ALERT-DELIVERY-1 real channel, or the identity-store hardening (T3/T4) without the authorizations in [31](#31-open-human-decisions).
+Next: complete merged-tree `-race` verification in controlled batches (or on a stable CI/self-hosted runner) when the environment allows - it must NOT block normal development; run `golangci-lint` v2.9.0 (built with Go 1.26.x) and the timing lane in its own lane; a PRH-2 gate report; then **stop and ask the owner** to authorize the next stage. Do not start the sandbox adapter, ALERT-DELIVERY-1 real channel, or the identity-store hardening (T3/T4) without the authorizations in [31](#31-open-human-decisions).
 
 ### PROVIDER PHASE
 `PROVIDER DEPENDENT` and **not authorized**. Sequence already decided: Class-B prerequisites first, then a *sandbox-only* PSP adapter for a synthetic non-real-money tenant (owner said YES to sandbox before real alert delivery; ALERT-DELIVERY-1 stays a production blocker). Vendor choice, contracts and credentials are human-only. See [38](#38-provider-integration-roadmap).
@@ -62,9 +62,9 @@ AI/agent features (ADR 0089, architecture only), crypto custody (ADR 0008, inter
 
 ### Day 1
 1. Clone `https://github.com/Diansalas/igaming-platform` (remote `origin`) and `git fetch --all`.
-2. Check out the branch `claude/focused-wright-jw88w9` (or the docs branch `prh2-handover-docs` that contains this handover). Unmerged work lives on `prh2-r5-signed-actor-proof` and `prh2-r5-stake-return-closure`.
+2. Check out the branch `claude/focused-wright-jw88w9` (or the docs branch `prh2-handover-docs` that contains this handover). The signed-actor-proof and stake-return/closure branches are merged into this branch (HEAD `639a2f0`); the `prh2-*` branches are retained.
 3. Read this file **completely**, then `CLAUDE.md`, `MASTER-BUILD-PROMPT.md`, `docs/progress.md`, `docs/active-stage.md` (newest note on top).
-4. Read the critical ADRs linked in [49](#49-important-adr--decision-index): 0001, 0002, 0007, 0019/0020, 0082, 0094, 0095 (esp. sections 35-40), 0099-0101, 0108, 0109, and (from the unmerged branch) 0110.
+4. Read the critical ADRs linked in [49](#49-important-adr--decision-index): 0001, 0002, 0007, 0019/0020, 0082, 0094, 0095 (esp. sections 35-40), 0099-0101, 0108, 0109, and 0110 (merged).
 5. Verify local prerequisites (Go 1.26.x per `go.mod`, PostgreSQL 16, Node 22 for frontends, `golangci-lint` v2.9.0 built with Go 1.26.x). Details: [`runbooks/developer-handover.md`](runbooks/developer-handover.md).
 6. Verify PostgreSQL is up and reachable as the application roles (never fix access with `ALTER ROLE` or `sudo`; see [47](#47-security--operational-warnings)).
 7. Run migration verification: `go run ./cmd/migrate verify` (expect 0001..0119 on HEAD).
@@ -100,7 +100,7 @@ Commercial objective (`MASTER-BUILD-PROMPT.md`): (1) launch our own B2C casino b
 | Identity, tenancy, RBAC, audit | `IMPLEMENTED` (open items in 29) |
 | Ledger, wallet, multi-asset | `IMPLEMENTED` |
 | Deposits, payouts, withdrawals, reconciliation | `IMPLEMENTED` against MOCK; real PSP `PROVIDER DEPENDENT` / `NOT IMPLEMENTED` |
-| Manual adjustments (K2), force-resolution (K3), capability grants (K1) | `IMPLEMENTED` (four-eyes DB-enforced); signed actor proof on branch (ready, merge pending) |
+| Manual adjustments (K2), force-resolution (K3), capability grants (K1) | `IMPLEMENTED` (four-eyes DB-enforced); signed actor proof MERGED (migration 0120, `PARTIALLY MITIGATED` threat model) |
 | Casino | `IMPLEMENTED` against MOCK vendor (launch-token bootstrap over HTTP, wallet callbacks) |
 | Sportsbook | `PARTIALLY IMPLEMENTED`: singles, placement, settlement lifecycle against MOCK |
 | Bonus engine | `PARTIALLY IMPLEMENTED` (waves 1-3); Wave 4 not authorized; G-2 configurability and self-exclusion auto-void consumer `NOT IMPLEMENTED` |
@@ -120,10 +120,10 @@ Stage position: Stages 0-10.3 accepted; PRH (payment readiness) block and PRH-2 
 
 - Remote: `origin` = `github.com/Diansalas/igaming-platform`. Branch `claude/focused-wright-jw88w9`, HEAD = origin = `d149a64` at snapshot time. Docs-only commits since `6a7b5f5`.
 - Migrations on HEAD: `0001..0119`, 119 up/down pairs (238 files), gap-free.
-- **UNMERGED, ready, merge pending** (content is NOT in HEAD; describe it only as such):
-  - `prh2-r5-signed-actor-proof` @ `8863e31`: migration 0120, ADR 0110 (HMAC signed actor proof for governed four-eyes writes).
-  - `prh2-r5-stake-return-closure` @ `35cd2fb`: migration 0121 (Q-GP-5 terminal stake returns on non-active tenants; Q-GP-1 closure refused while open sportsbook bets, `GP020`; once-only casino rollback unique index).
-  - Merge only after the full per-package `-race` sweep completes; then `migrate verify` must show 0001..0121 gap-free.
+- **MERGED at `639a2f0`** (previously 'ready, merge pending'):
+  - `prh2-r5-signed-actor-proof` (final `8863e31`): migration 0120, ADR 0110 (HMAC signed actor proof for governed four-eyes writes). THREAT-MODEL-ARBITRARY-SQL-1 stays PARTIALLY MITIGATED (T3/H1, T4, T5, T8, T6, T7, s9.5).
+  - `prh2-r5-stake-return-closure` (final `35cd2fb`): migration 0121 (Q-GP-5 terminal stake returns on non-active tenants; Q-GP-1 closure refused while open sportsbook bets, `GP020`; once-only casino rollback unique index). Casino open rounds are not representable (Q-GP-6 OPEN).
+  - Migrations on HEAD `639a2f0`: 0001..0121, gap-free (`migrate verify` on `igaming_orch_local`: 121 applied).
 - 52 agent worktrees exist under `.claude/worktrees/` (plus this one). **Preserve them; never auto-delete.** 44 UNKNOWN literal-named scratch databases were intentionally preserved; databases `igaming_orch_local` and `igaming_platform_ci_local` must be kept.
 - Many feature branches (`prh2-*`) are merged-and-retained; do not delete without classification.
 
@@ -293,7 +293,7 @@ ADR 0089: architecture boundary only (Bonus/Gamification/Reward). **Nothing is i
 
 ## 22. DATABASE / MIGRATIONS
 
-- PostgreSQL 16. Architecture: [`architecture/03-database-architecture.md`](architecture/03-database-architecture.md). 119 up/down pairs `0001..0119` on HEAD. Numbers are allocated only by the orchestrator (never pick one yourself): 0120 = signed actor proof and 0121 = stake return/closure are used by the unmerged branches.
+- PostgreSQL 16. Architecture: [`architecture/03-database-architecture.md`](architecture/03-database-architecture.md). 121 up/down pairs `0001..0121` on HEAD `639a2f0`. Numbers are allocated only by the orchestrator (never pick one yourself): 0120 = signed actor proof and 0121 = stake return/closure are used by the unmerged branches.
 - Forward-only in deployed environments. `cmd/migrate down` refuses unless `APP_ENV` is explicitly `development` or `staging` (an unset or `production` value is refused; `cmd/migrate/main.go`). Data-bearing downs refuse.
 - `go run ./cmd/migrate verify` checksums applied up-files and checks version gaps only (PLAT-MIGDRIFT-1). CI reversibility covers only the last 4 steps.
 - A restore or `CREATE DATABASE` does not carry the TEMP revoke; `schema_migrations` still says 0116 so it will not re-apply: follow `runbooks/operational-runbooks.md` section 7 step 5.
@@ -306,7 +306,7 @@ Docs: [`security/security-architecture.md`](security/security-architecture.md), 
 
 **Accepted threat model (owner decision THREAT-MODEL-ARBITRARY-SQL-1 = YES, 2026-10-05).** A compromised or stolen `igaming_runtime` database credential, or arbitrary SQL executed as that role (SQL injection, compromised application process), is **INSIDE the production threat model** for DATABASE-enforced controls (four-eyes, actor checks, tenant isolation). Consequence: RLS and triggers alone do not suffice where a session can set `app.*` settings; the signed actor proof (below) is the authorized mitigation.
 
-**Signed actor proof (SIGNED-ACTOR-PROOF = AUTHORIZED).** Ready on branch `prh2-r5-signed-actor-proof@8863e31`, migration 0120, ADR 0110 - **merge pending, not in HEAD**. Scope: the application server, after authenticating the principal and authorizing the action, signs a short-lived (30 s issuer, 60 s verifier cap) HMAC-SHA256 proof over actor, scope, tenant, operation, target, payload hash and a nonce. An owner-owned `SECURITY DEFINER` verifier (`actor_proof_require`), fed by an owner-only key table and nonce table, is called from a last-firing trigger `zz_actor_proof_guard` on **nine tables** (K2 adjustment requests/approvals, K3 manual resolutions/approvals, K1 capability grant requests/approvals/grants, financial policy changes and approvals). No valid proof, no write (SQLSTATE `AP001..AP005`). Keys: `ACTOR_PROOF_KEYS`, `ACTOR_PROOF_ACTIVE_KID` via the secret store, never in Git; production startup refuses without an active key.
+**Signed actor proof (SIGNED-ACTOR-PROOF = AUTHORIZED).** MERGED at `639a2f0` (branch `prh2-r5-signed-actor-proof`, final `8863e31`), migration 0120, ADR 0110. Scope: the application server, after authenticating the principal and authorizing the action, signs a short-lived (30 s issuer, 60 s verifier cap) HMAC-SHA256 proof over actor, scope, tenant, operation, target, payload hash and a nonce. An owner-owned `SECURITY DEFINER` verifier (`actor_proof_require`), fed by an owner-only key table and nonce table, is called from a last-firing trigger `zz_actor_proof_guard` on **nine tables** (K2 adjustment requests/approvals, K3 manual resolutions/approvals, K1 capability grant requests/approvals/grants, financial policy changes and approvals). No valid proof, no write (SQLSTATE `AP001..AP005`). Keys: `ACTOR_PROOF_KEYS`, `ACTOR_PROOF_ACTIVE_KID` via the secret store, never in Git; production startup refuses without an active key.
 
 **THREAT-MODEL-ARBITRARY-SQL-1 is PARTIALLY MITIGATED, never "closed".** Residuals (ADR 0110 section 10a):
 
@@ -371,7 +371,20 @@ Docs: [`testing/testing-strategy.md`](testing/testing-strategy.md) (including "S
 
 **Timing lane.** 8 tests assert wall-clock security bounds (ADR 0094 section 9: no request over 500 ms, at most 4 store calls, no transaction held over 400 ms): `TestStoreOutage_DoesNotPinPool`, `..._ProductionPoolSize` (`./internal/providercred/`) and `TestResolutionIsolation_NormalOperation`, `_OneTenantStoreOutage`, `_MultipleTenantsOutage`, `_SimultaneousOnset_Bounded`, `_ConnectionExhaustion`, `_FinancialDuringOutage` (`./internal/httpserver/`). They are skipped by name in the main sweep (`-skip`) and run alone in their own lane, never retried, bound **unchanged at 500 ms**. Status: environment-dependent; characterized 40/40 on one host, fails on a slower host (NOT GREEN there). The criterion decision (environment-calibrated relative assertion vs controlled runner) is open for owner/architect/security; the bound is never loosened without a recorded decision. Evidence: [`plans/payment-readiness/evidence/prh2-final-timing-lane.md`](plans/payment-readiness/evidence/prh2-final-timing-lane.md).
 
-**Race sweep at `d149a64` (LOCAL):** per-package `-race -tags integration -count=1 -p 1`, timing lane skipped: 53 of 54 packages PASS; the 54th, `internal/payments` (~20-30 min under `-race`), was killed by a container restart and re-launched; **its result must be re-read before any final claim.** None of this is GitHub CI.
+**Race verification (LOCAL, not GitHub CI):** pre-merge tree `d149a64`: 54/54 packages PASS under `-race -tags integration -count=1 -p 1` (timing lane skipped; `internal/payments` 1341 s). **Merged tree `639a2f0`: INCOMPLETE** - 34 packages carry PASS (13 carried from `d149a64` because neither they nor their dependencies changed, 21 run at `639a2f0`), `internal/httpserver` and `internal/kyc` were interrupted, the rest were not run on the merged tree; no FAIL result exists. See [25a](#25a-merged-tree-race-verification-state).
+
+
+## 25a. MERGED-TREE RACE VERIFICATION STATE
+
+**Status: INCOMPLETE - environment limitation, NOT an identified application failure. Do not read this as a PASS and do not claim production readiness from it.**
+
+- Tree: `639a2f011421bf5905fb69ae0091f76249dae299` (branch `claude/focused-wright-jw88w9`, = origin, clean). Migrations 0001..0121; `migrate verify` clean ("all applied migrations verified clean, no version gaps"); `igaming_orch_local` has 121 applied.
+- Pre-merge tree `d149a64`: 54/54 packages PASS (`-race -tags integration -count=1 -p 1`, timing lane skipped).
+- Merged tree: 34 packages PASS (13 carried from `d149a64` because the package and all its dependencies are unchanged by the merges, determined by `go list -deps`; 21 run at `639a2f0`), **0 FAIL**, `internal/httpserver` and `internal/kyc` interrupted, remaining ~19 packages (including `internal/payments`, `casino`, `sportsbook`, `reconciliation`, `adjustment`) not run on the merged tree.
+- Per-batch evidence: orchestrator scratchpad `race_results/*.639a2f0.status|out` (not in git; if lost, rerun). Do not delete it.
+- **Why incomplete (evidence, 2026-10-06):** the sandbox container was reset at least five times while a sweep was running or between turns. Each reset: uptime restarts at ~0 min, PostgreSQL is down, all background processes are gone. `dmesg` after the last reset shows `random: crng reseeded due to virtual machine fork`, `virtio_blk ... detected capacity change`, `EXT4-fs (vda): mounting unchecked fs ... without journal`, and PID 1 is `/process_api --firecracker-init` started at the boot time: i.e. the Firecracker microVM is snapshotted/forked and restored by the runtime, which discards running processes. A PostgreSQL checkpoint at 18:01:56 UTC and the last test-output write at 17:55 UTC bracket the last freeze; the next boot was 20:22 UTC. No OOM evidence (15 GiB RAM, ~15 GiB available, no swap use), no inode pressure (6%), disk at 14 GB free after the authorized `go clean -cache` (it was 5.8 GB free before; the session disk allowance, not the 252 GB device size, is the real limit). Classification: **external container/runtime restart (VM snapshot/restore)**; the exact trigger is outside the accessible environment and is not proven beyond that. Background jobs survive only while a Claude turn is actively running.
+- **Consequences / rules:** (1) this limitation must not block normal development; (2) do not repeatedly restart a full sweep in this sandbox; (3) run the remaining packages in controlled batches (`internal/httpserver`, `internal/kyc`, `internal/payments` first), each as a foreground step within an active turn, or run the whole suite on a stable CI/self-hosted runner (`docs/runbooks/self-hosted-runner.md`) once available; (4) never fabricate a PASS; carried-over PASS markers are valid only while the package and its dependencies are unchanged; (5) recovery after a reset: `service postgresql start`, wait for `pg_isready`, confirm 121 migrations, resume only the missing packages.
+- Not affected by this limitation: unit tests, targeted integration suites per branch (each merged branch passed its own targeted `-race` suites and mutation evidence before merge; see the registry rows), `migrate verify`, build, `go vet`, `gofmt`, `golangci-lint` v2.9.0 (0 issues at merge time).
 
 ## 26. AWS / INFRASTRUCTURE
 
@@ -393,8 +406,8 @@ AWS is **OFF**. Nothing is deployed; no deployment is authorized. Staging archit
 | Status | Items |
 |---|---|
 | **COMPLETED (merged in HEAD, LOCAL evidence, MOCK)** | Workstreams A, B, C, D1, D2, E1, E2, E3, F-kyc, F-pay, G1, H, I-core, I-wire, J, K1, K2, K3; R2-A (0116 REVOKE TEMP, ADR 0108), R2-E (0117 alert routing readiness), R2-F; R3 H-W1 (closed-tenant observation); R3 gameplay gate 0118; Class-B B1 (panic redaction), B2 (T4 drain test), B3 (callback mismatch bind), B4 MA020 (0119), B9, B10 (ADR 0109) |
-| **IN PROGRESS** | Full per-package `-race` sweep at `d149a64` (53/54 pass; `internal/payments` pending) |
-| **READY, MERGE PENDING (not in HEAD)** | `prh2-r5-signed-actor-proof@8863e31` (0120, ADR 0110); `prh2-r5-stake-return-closure@35cd2fb` (0121). Reviews done, conditions met |
+| **IN PROGRESS / INCOMPLETE** | Merged-tree (`639a2f0`) `-race` verification: 34 PASS, 0 FAIL, remainder unverified because the execution environment restarts (see 25a) |
+| **COMPLETED (merged `639a2f0`)** | `prh2-r5-signed-actor-proof@8863e31` (0120, ADR 0110, PARTIALLY MITIGATED threat model); `prh2-r5-stake-return-closure@35cd2fb` (0121). Reviews done, conditions met. Merged-tree `-race` verification INCOMPLETE (25a) |
 | **PARTIALLY MITIGATED** | THREAT-MODEL-ARBITRARY-SQL-1 (T1/T2 closed on the branch; T3/H1, T4, T5, T8, T6, T7, s9.5 residual); TRIGGER-SEARCH-PATH-1 (exploit path closed in code by 0116; stays a launch blocker until deployed and verified); NULL-ARM-WRITE-1 (hardening item, not mitigated by RLS) |
 | **BLOCKED** | B13 payout destination binding (architect + owner); sandbox PSP adapter (not authorized); AWS verification (no deployment authorized); green CI (billing) |
 | **DEFERRED** | B14-B18 (adapter acceptance criteria / sandbox readiness gate items); H1 identity-store hardening; T8 flows; nonce pruning automation; asymmetric proof |
@@ -431,12 +444,12 @@ Full table (ID | Question | Current Decision | Status | Blocks | Owner), grouped
 | ID | Question | Current Decision | Status | Blocks | Owner |
 |---|---|---|---|---|---|
 | THREAT-MODEL-ARBITRARY-SQL-1 | Is a stolen/compromised `igaming_runtime` credential (arbitrary SQL) inside the production threat model for DB-enforced controls? | YES (2026-10-05); TEMP fix alone insufficient | DECIDED; mitigation PARTIALLY MITIGATED | Closing it fully needs T3/H1, T4, T5, T8 decisions | owner + security |
-| SIGNED-ACTOR-PROOF | Implement a DB-verified signed actor proof? | AUTHORIZED, smallest mechanism only (2026-10-06) | DECIDED; implemented on branch `prh2-r5-signed-actor-proof@8863e31`, merge pending | Merge | owner |
+| SIGNED-ACTOR-PROOF | Implement a DB-verified signed actor proof? | AUTHORIZED, smallest mechanism only (2026-10-06) | DECIDED; IMPLEMENTED and merged `639a2f0` (PARTIALLY MITIGATED: T3/T4/T5/T8 open) | Identity-store (T3/T4) and T8 authorizations | owner |
 | H-W1 | Observe suspended/closed tenants in reconciliation? | YES, read-only evidence; never auto dispatch/release/cancel/settle (2026-10-05) | DECIDED; merged `741569e` | - | owner |
 | HD-CTF-10 | Credential treatment when observing a closed tenant | Closed tenants stay observable while unresolved player funds exist; real PSP uses a read-only/reconciliation-scoped credential where supported (2026-10-05) | DECIDED | Real-PSP architecture detail | owner |
 | R3-GAME-POSTINGS-NONACTIVE-1 | Gameplay postings on non-active tenants | FAIL CLOSED for NEW gameplay postings (2026-10-05); migration 0118 merged | DECIDED; merged | - | owner |
-| Q-GP-5 | Terminal stake returns on non-active tenants | ALLOWED for valid existing rounds; new wagering still refused (2026-10-06) | DECIDED; implemented on branch `prh2-r5-stake-return-closure@35cd2fb`, merge pending | Merge | owner |
-| Q-GP-1 | Tenant closure with open rounds | REFUSED while open rounds exist (2026-10-06); casino half not representable (Q-GP-6) | DECIDED; branch, merge pending | Merge | owner |
+| Q-GP-5 | Terminal stake returns on non-active tenants | ALLOWED for valid existing rounds; new wagering still refused (2026-10-06) | DECIDED; IMPLEMENTED and merged `639a2f0` | - | owner |
+| Q-GP-1 | Tenant closure with open rounds | REFUSED while open rounds exist (2026-10-06); casino half not representable (Q-GP-6) | DECIDED; IMPLEMENTED (sportsbook only; casino Q-GP-6 open), merged `639a2f0` | Merge | owner |
 | SANDBOX-BEFORE-ALERT-DELIVERY-1 | Sandbox PSP adapter before real alert delivery? | YES, sandbox only, synthetic non-real-money tenant; Class-B prerequisites first; ALERT-DELIVERY-1 remains a production launch blocker | DECIDED; adapter NOT authorized yet | Sandbox adapter start | owner |
 | ADR-0094-500MS | Keep the 500 ms timing bound | KEPT unchanged | DECIDED | - | owner/security |
 | HQ-E1-2 | E1 item (p2) | Confirmed | DECIDED | - | owner |
@@ -540,7 +553,7 @@ Real-money launch is **BLOCKED**. Summary (authoritative IDs in the task registr
 4. TRIGGER-SEARCH-PATH-1 deployed-and-verified, PLAT-ROLESPLIT-1 staging verification not executed; AWS off.
 5. Backup/DR NOT MET; no tested restore path.
 6. CI-BILLING-1: no green GitHub CI; timing lane environment-dependent; F-POOL-1 K1 / PRH-FPOOL1.
-7. THREAT-MODEL-ARBITRARY-SQL-1 residuals (T3/H1, T4, T5, T8) per owner risk acceptance; the 0120 merge pending.
+7. THREAT-MODEL-ARBITRARY-SQL-1 residuals (T3/H1, T4, T5, T8) per owner risk acceptance; the 0120 merge is DONE (`639a2f0`).
 8. Class-B payment items, R3 launch conditions, K3 follow-ups, CAS-GAME-KILL-BET-1, KYC-ENFORCE-1, WD-RG-1 undecided.
 9. Hosting AUP, production launch authorization.
 
@@ -579,7 +592,7 @@ Recorded, NOT built (need owner authorization where noted): H1 identity-store ha
 
 ## 35. CURRENT WORK IN PROGRESS
 
-1. Per-package `-race` sweep at `d149a64` (orchestrator, local): 53/54 PASS; `internal/payments` re-running. Container restarts kill Postgres and background jobs; do not interrupt the sweep.
+1. Merged-tree `-race` verification at `639a2f0` is INCOMPLETE (environment-limited; section 25a). Do not run it as one unattended sweep in the Claude cloud sandbox; use controlled batches or a stable CI/self-hosted runner.
 2. Two branches ready to merge (see 4 and 28). No new migration numbers may be allocated by anyone but the orchestrator.
 3. Class-B classification and remaining items (28/30). Sandbox PSP adapter NOT started.
 4. This handover (`HANDOVER-LIVE-2026-10-06`).
@@ -591,7 +604,7 @@ Ordered. "Startable" means no new human decision is needed. Every task: branch o
 
 | # | Task | Startable? | Notes |
 |---|---|---|---|
-| 1 | Re-read the `internal/payments` `-race` result at `d149a64`; if unavailable re-run that package (`-race -tags integration -count=1 -p 1 -timeout 60m -skip '<timing lane>'`, see runbook) | Yes | Do not interrupt other sweeps |
+| 1 | Complete merged-tree `-race` verification for the remaining packages (httpserver, kyc, payments first), in controlled batches or on a stable runner | Yes (not a development blocker) | Do not run two heavy sweeps at once |
 | 2 | Merge `prh2-r5-signed-actor-proof@8863e31` and `prh2-r5-stake-return-closure@35cd2fb` (only after task 1 is green); `go run ./cmd/migrate verify` must show 0001..0121 gap-free; rerun the affected packages (`adjustment`, `payments`, `capability`, `db`, `httpserver`, `casino`, `sportsbook`, `tenant`, `reconciliation`) | Yes (reviews done) | Security delta review of the amended 0120 migration is called out as required before merge in ADR 0110 header; confirm it is recorded in the registry first |
 | 3 | Full-tree verification: build, vet (both tag sets), gofmt, golangci-lint v2.9.0 built with Go 1.26.x (default and integration tag), `migrate verify`, timing lane separately | Yes | LOCAL evidence only |
 | 4 | Class-B B5, B6, B7, B8, B11, B12 (see 28/30) | Yes (inside approved PRH-2 scope) | Each: ledger-finance + security + qa review; one migration only if needed, number from orchestrator |
@@ -664,7 +677,7 @@ GitHub Actions is blocked by billing (CI-BILLING-1); billing is not to be touche
 2. **Test status notes.** `active-stage.md` round-2 note says "54/54 packages pass under -race at `f9dc8a3`"; the current sweep at `d149a64` is 53/54 with `internal/payments` pending. Older note is historical.
 3. **Migration 0118.** Registry row `DECISIONS-PRH2-CLEARANCE-2026-10-05` reserves 0118 for the arbitrary-SQL mitigation; 0118 was actually used by the gameplay posting gate, and the signed actor proof is 0120. Later rows are authoritative.
 4. **THREAT-MODEL-ARBITRARY-SQL-1, R3-GAME-POSTINGS-NONACTIVE-1, H-W1, HD-CTF-10** appear as OPEN in the previous HANDOVER, in `active-stage.md` notes and in earlier registry rows; they are DECIDED (and, for the gameplay gate, merged). The registry rows `DECISIONS-PRH2-*` are newer.
-5. **Q-GP-1 and Q-GP-5** are listed open in ADR 0095 section 40 text on HEAD; they were decided 2026-10-06 and the ADR update exists only on the unmerged closure branch (section 40.6 there).
+5. **Q-GP-1 and Q-GP-5** are listed open in ADR 0095 section 40 text on HEAD; they were decided 2026-10-06; the ADR 0095 section 40.6 update is now merged (`639a2f0`).
 6. **Stage numbering.** `MASTER-BUILD-PROMPT.md` defines Stages 0-7; the repo progressed through sub-stages up to 10.3 and the PRH/PRH-2 blocks. The governance files treat the later labels as authoritative.
 7. **Timing lane.** Older notes say NOT GREEN (0/5, 0/13); the orchestrator reports 40/40 on one host and failure on a slower host. Recorded as environment-dependent; no bound was changed.
 8. **Payments statement-source label.** Old matrix: PAY-K3-STATEMENT-SOURCE-WIRING-1 "IMPLEMENTED against MOCK" while the real-money precondition is not satisfied. Both are true; read them together.
@@ -728,7 +741,7 @@ All ADRs: [`decisions/`](decisions/). Key ones (title and status as in the file 
 | [0107](decisions/0107-closed-tenant-player-funds-staff-resolution.md) | Closed-tenant funds resolution | DESIGN ONLY |
 | [0108](decisions/0108-revoke-temp-from-runtime-role.md) | Revoke TEMP (0116) | Implemented; verify per environment |
 | [0109](decisions/0109-prh2-round4-classb-amendments.md) | Class-B amendments (B9/B10, B4) | Accepted 2026-10-06 |
-| 0110 (branch `prh2-r5-signed-actor-proof`) `docs/decisions/0110-signed-actor-proof.md` | Signed actor proof | IMPLEMENTED on branch, merge pending; link valid after merge |
+| 0110 `docs/decisions/0110-signed-actor-proof.md` | Signed actor proof | IMPLEMENTED, merged `639a2f0` |
 
 Decision registers: ADR 0005, 0039, 0041, 0044. The ADR numbering skips 0049-0079 (no files). Human-decision register: [`governance/human-decision-register.md`](governance/human-decision-register.md).
 

@@ -131,3 +131,10 @@ Real-money launch is BLOCKED: no licence/legal approval beyond the Anjouan scope
 - That the delta security/LF review records for 0120 and 0121 exist as files (they are reported by the orchestrator; ADR 0110's own header still says a further review is required).
 - Existence and contents of the 44 UNKNOWN databases (no database was touched).
 - Current AWS account state (taken from the 2026-09-26 teardown record; nothing was queried).
+
+
+## Addendum (2026-10-06, after the merges): state at `639a2f0`
+
+- Merged into `claude/focused-wright-jw88w9`: handover docs, `prh2-r5-stake-return-closure` (0121), `prh2-r5-signed-actor-proof` (0120). HEAD `639a2f011421bf5905fb69ae0091f76249dae299` = origin. Migrations 0001..0121, `migrate verify` clean, `igaming_orch_local` 121 applied.
+- Race verification of the merged tree is **INCOMPLETE (environment limitation, no identified application failure)**: 34 packages PASS (13 carried from `d149a64` where neither package nor dependencies changed, 21 run at `639a2f0`), 0 FAIL, `internal/httpserver` and `internal/kyc` interrupted, ~19 packages not run on the merged tree. Pre-merge tree `d149a64`: 54/54 PASS. Evidence of the repeated resets and the rules for resuming: HANDOVER section 25a. GitHub CI remains blocked by billing; nothing here is CI evidence.
+- Environment: 14 GB free after the authorized `go clean -cache` (5.8 GB before; the session disk allowance, not the device size, is the limit); 15 GiB RAM, no OOM evidence; no real provider, no AWS.

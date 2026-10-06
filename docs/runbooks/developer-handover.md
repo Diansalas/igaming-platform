@@ -1,6 +1,6 @@
 # Developer handover runbook (hands-on procedure)
 
-Companion to [`../HANDOVER.md`](../HANDOVER.md) (read that first). Snapshot 2026-10-06, code HEAD `d149a64`. **Every command below carries its source in `[src: path]`.** Commands whose exact flags I could not find in the repository are marked **unverified**. Nothing here was executed while writing it (a race sweep was running and databases were not touched).
+Companion to [`../HANDOVER.md`](../HANDOVER.md) (read that first). Snapshot 2026-10-06, code HEAD `639a2f0`. **Every command below carries its source in `[src: path]`.** Commands whose exact flags I could not find in the repository are marked **unverified**. Nothing here was executed while writing it (a race sweep was running and databases were not touched).
 
 Placeholders in `<angle brackets>` are for you to fill. Database URLs in the repo are synthetic dev/CI placeholders, valid nowhere else.
 
@@ -163,3 +163,8 @@ GitHub Actions (`.github/workflows/ci.yml`) is blocked by billing (CI-BILLING-1)
 | `migrate down` refused | set `APP_ENV=development` explicitly on a dev DB | use it in production |
 | Disk nearly full | stop sweeps, check which scratch DBs are yours, drop only those | delete unknown DBs/worktrees |
 | Test run left databases behind | classify by creator; plain `DROP DATABASE` of your own only | `DROP DATABASE ... FORCE` on others' |
+
+
+## Race verification in the Claude cloud sandbox: known limitation (2026-10-06)
+
+The sandbox container is a Firecracker microVM that is snapshotted/forked and restored by the runtime; each restore starts fresh (uptime ~0, PostgreSQL down, all background processes gone; `dmesg` shows `random: crng reseeded due to virtual machine fork` and `virtio_blk ... detected capacity change`). Long background sweeps therefore do not survive idle gaps between turns. Recovery after a reset: `service postgresql start` (backgrounded), wait for `pg_isready`, check `select count(*) from schema_migrations` (121 expected), then rerun only the packages without a `PASS` marker. Never run `ALTER ROLE`/`sudo` to work around DB access. Prefer a stable CI/self-hosted runner for full `-race` sweeps; see [`self-hosted-runner.md`](self-hosted-runner.md). Current verification state: HANDOVER section 25a.
