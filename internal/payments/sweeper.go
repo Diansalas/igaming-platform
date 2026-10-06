@@ -498,10 +498,13 @@ func (s *Sweeper) processUnreferenced(ctx context.Context, tenantID uuid.UUID, a
 			// the next tick polls it normally.
 			return nil
 		}
-		if _, err := s.escalateDepositIfDue(actx, tx, intent, fresh, alertReasonDepositUnreferencedSubmitting, s.Lease); err != nil {
+		// Reschedule first, escalate LAST (ADR 0102 7.7: alert tables are the terminal
+		// lock level; Escalate re-touches only the row this tx already holds).
+		if err := RescheduleNonTerminal(actx, tx, fresh.ID, s.backoff(fresh.PollCount)); err != nil {
 			return err
 		}
-		return RescheduleNonTerminal(actx, tx, fresh.ID, s.backoff(fresh.PollCount))
+		_, err = s.escalateDepositIfDue(actx, tx, intent, fresh, alertReasonDepositUnreferencedSubmitting, s.Lease)
+		return err
 	})
 	if err != nil {
 		return err
@@ -517,11 +520,28 @@ func (s *Sweeper) depositSettlementWindow(attempt PaymentAttempt) time.Duration 
 	if attempt.ProviderID != nil && s.Orchestrator != nil {
 		if p, ok := s.Orchestrator.Provider(*attempt.ProviderID); ok {
 			if w := p.Capabilities().Manifest.SettlementWindow; w > 0 {
+				if w > MaxSettlementWindow {
+					return MaxSettlementWindow // registration refuses this; clamp defensively (no overflow, no silent disable)
+				}
 				return w
 			}
 		}
 	}
 	return DefaultSettlementWindow
+}
+
+// depositEscalationDue is the pure due check behind escalateDepositIfDue: a live,
+// never-escalated deposit older than SettlementWindow + extraWait (measured from
+// first_submitted_at, falling back to created_at).
+func (s *Sweeper) depositEscalationDue(attempt PaymentAttempt, extraWait time.Duration) bool {
+	if attempt.Operation != AttemptOperationDeposit || attempt.EscalatedAt != nil || !attemptAwaitingEvidence(attempt.State) {
+		return false
+	}
+	start := attempt.CreatedAt
+	if attempt.FirstSubmittedAt != nil {
+		start = *attempt.FirstSubmittedAt
+	}
+	return time.Since(start) > s.depositSettlementWindow(attempt)+extraWait
 }
 
 // escalateDepositIfDue is the single T16 helper for live deposits (B6 and B7).
@@ -535,17 +555,10 @@ func (s *Sweeper) depositSettlementWindow(attempt PaymentAttempt) time.Duration 
 // The caller keeps rescheduling, so an escalated attempt is still polled and a
 // later success still posts exactly once.
 func (s *Sweeper) escalateDepositIfDue(ctx context.Context, tx pgx.Tx, intent DepositIntent, attempt PaymentAttempt, reason string, extraWait time.Duration) (bool, error) {
-	if attempt.Operation != AttemptOperationDeposit || attempt.EscalatedAt != nil || !attemptAwaitingEvidence(attempt.State) {
+	if !s.depositEscalationDue(attempt, extraWait) {
 		return false, nil
-	}
-	start := attempt.CreatedAt
-	if attempt.FirstSubmittedAt != nil {
-		start = *attempt.FirstSubmittedAt
 	}
 	window := s.depositSettlementWindow(attempt)
-	if time.Since(start) <= window+extraWait {
-		return false, nil
-	}
 	if err := Escalate(ctx, tx, attempt.ID, s.backoff(attempt.PollCount)); err != nil {
 		if errors.Is(err, ErrAttemptStateConflict) {
 			return false, nil
@@ -595,74 +608,25 @@ func (s *Sweeper) applyStatusEvidence(ctx context.Context, tx pgx.Tx, intent Dep
 		// "timeout after dispatch is Ambiguous and never a failure",
 		// restated here for the poll path itself). B6: past the settlement
 		// window it is also the escalation tick (the P1 must not depend on the
-		// PSP answering).
-		if _, err := s.escalateDepositIfDue(ctx, tx, intent, attempt, alertReasonDepositSettlementWindowExceeded, 0); err != nil {
+		// PSP answering); escalation runs LAST (ADR 0102 7.7).
+		if err := RescheduleNonTerminal(ctx, tx, attempt.ID, nextPoll); err != nil {
 			return err
 		}
-		return RescheduleNonTerminal(ctx, tx, attempt.ID, nextPoll)
+		_, err := s.escalateDepositIfDue(ctx, tx, intent, attempt, alertReasonDepositSettlementWindowExceeded, 0)
+		return err
 	}
 
 	res := gr.Value
 	switch gr.Class {
 	case ErrorClassPending:
-		// B6: a still-pending poll past the settlement window is the escalation
-		// tick (T16: no state change, keep polling, never auto-decline).
-		if _, err := s.escalateDepositIfDue(ctx, tx, intent, attempt, alertReasonDepositSettlementWindowExceeded, 0); err != nil {
+		// B6/C1: the escalation is the LAST statement of the branch (ADR 0102 7.7: the
+		// alert tables are the terminal lock level, and a poll that resolves the
+		// attempt through the T9 drain must not raise a spurious P1; Escalate's
+		// state CAS then makes the escalation a no-op).
+		if err := s.applyPollPending(ctx, tx, intent, attempt, res, nextPoll); err != nil {
 			return err
 		}
-		if attempt.State == AttemptPending {
-			// no-op (reschedule) - already pending, nothing changed. B5 (LF L1): a
-			// differing non-empty echo is no longer silently ignored.
-			if err := auditPollPendingEchoDiffers(ctx, tx, attempt, intent, "poll_pending_noop", res.ProviderReference); err != nil {
-				return err
-			}
-			return RescheduleNonTerminal(ctx, tx, attempt.ID, nextPoll)
-		}
-		// PRH-2 D (FH7-06, ADR 0095 §36.6): an attempt polled BY its bound reference
-		// keeps that reference through T9 and on the intent; the poll's echo is never
-		// written over it (an empty one would violate the 0099 CHECK - an error loop -
-		// and a different one would overwrite the intent's reference). Only an attempt
-		// with no bound reference yet (the sweeper never polls one; direct callers of
-		// this function may) learns the reference from the poll, as before.
-		boundRef := res.ProviderReference
-		if attempt.ProviderReference != nil && *attempt.ProviderReference != "" {
-			boundRef = *attempt.ProviderReference
-			if err := auditPollPendingEchoDiffers(ctx, tx, attempt, intent, "poll_pending_bound", res.ProviderReference); err != nil {
-				return err
-			}
-		} else if verr := providerref.ValidatePaymentReference("poll.provider_reference", res.ProviderReference); verr != nil {
-			// PRH-2 K3 (ADR 0101 5.4, LF L-2 / security O-2): the echo of an
-			// unbound attempt is validated before it is bound. A refused echo
-			// (including the reserved operator-declared namespace) is NOT bound:
-			// one audit row, then the normal poll backoff. NEVER an error return
-			// - that would re-drive the item at once (a hot loop and an
-			// audit-volume DoS by a hostile PSP).
-			if err := auditRefusedPollEcho(ctx, tx, attempt, intent, "poll_pending_bind", res.ProviderReference); err != nil {
-				return err
-			}
-			return RescheduleNonTerminal(ctx, tx, attempt.ID, nextPoll)
-		} else if foreign, _, ferr := foreignReferenceBinding(ctx, tx, attempt.TenantID, providerIDOrEmpty(attempt), boundRef, attempt.ID, intent.ID); ferr != nil {
-			return ferr
-		} else if foreign {
-			// B5 (PAY-POLL-ECHO-HARDENING-1, D1-L1 remainder): a VALID echo that another
-			// attempt/intent/ledger key already holds is not bound (the unique index would
-			// fail the transaction and the poll would loop): one audit row, then the normal
-			// poll backoff; never an error return.
-			if err := auditRefusedPollEcho(ctx, tx, attempt, intent, "poll_pending_bind_conflict", res.ProviderReference); err != nil {
-				return err
-			}
-			return RescheduleNonTerminal(ctx, tx, attempt.ID, nextPoll)
-		}
-		if err := MarkAccepted(ctx, tx, attempt.ID, EvidenceQueryStatus, boundRef, nextPoll); err != nil {
-			return err
-		}
-		if _, err := setIntentAttempt(ctx, tx, intent.ID, attempt.ProviderID, &boundRef, DepositIntentPending); err != nil {
-			return err
-		}
-		// RV-PRH-I1 ledger-finance H2: see drive.go's identical comment -
-		// this poll is the sweeper's own T9 site.
-		attempt.ProviderReference = &boundRef
-		_, err := ApplyDeferredReceiptsForAttempt(ctx, tx, s.Orchestrator, attempt)
+		_, err := s.escalateDepositIfDue(ctx, tx, intent, attempt, alertReasonDepositSettlementWindowExceeded, 0)
 		return err
 
 	case ErrorClassSucceeded:
@@ -855,17 +819,80 @@ func (s *Sweeper) applyStatusEvidence(ctx context.Context, tx pgx.Tx, intent Dep
 		return nil
 
 	default: // ErrorClassAmbiguous
-		// B6: an ambiguous poll past the settlement window is an escalation tick.
-		if _, err := s.escalateDepositIfDue(ctx, tx, intent, attempt, alertReasonDepositSettlementWindowExceeded, 0); err != nil {
-			return err
-		}
+		// B6: an ambiguous poll past the settlement window is an escalation tick,
+		// run LAST (ADR 0102 7.7).
 		if attempt.State == AttemptPending {
 			// T11: the provider "forgot" an accepted attempt - a real
 			// state change (P1 anomaly), not a plain reschedule.
-			return MarkAmbiguousFromPending(ctx, tx, attempt.ID, EvidenceQueryStatus, nextPoll)
+			if err := MarkAmbiguousFromPending(ctx, tx, attempt.ID, EvidenceQueryStatus, nextPoll); err != nil {
+				return err
+			}
+		} else if err := RescheduleNonTerminal(ctx, tx, attempt.ID, nextPoll); err != nil {
+			return err
+		}
+		_, err := s.escalateDepositIfDue(ctx, tx, intent, attempt, alertReasonDepositSettlementWindowExceeded, 0)
+		return err
+	}
+}
+
+// applyPollPending is the Pending cell of applyStatusEvidence (T9 / pending no-op /
+// refused or conflicting echo), unchanged from before B6 except that it no longer
+// escalates itself: the caller escalates after it, last.
+func (s *Sweeper) applyPollPending(ctx context.Context, tx pgx.Tx, intent DepositIntent, attempt PaymentAttempt, res StatusResult, nextPoll time.Time) error {
+	if attempt.State == AttemptPending {
+		// no-op (reschedule) - already pending, nothing changed. B5 (LF L1): a
+		// differing non-empty echo is no longer silently ignored.
+		if err := auditPollPendingEchoDiffers(ctx, tx, attempt, intent, "poll_pending_noop", res.ProviderReference); err != nil {
+			return err
 		}
 		return RescheduleNonTerminal(ctx, tx, attempt.ID, nextPoll)
 	}
+	// PRH-2 D (FH7-06, ADR 0095 §36.6): an attempt polled BY its bound reference
+	// keeps that reference through T9 and on the intent; the poll's echo is never
+	// written over it (an empty one would violate the 0099 CHECK - an error loop -
+	// and a different one would overwrite the intent's reference). Only an attempt
+	// with no bound reference yet (the sweeper never polls one; direct callers of
+	// this function may) learns the reference from the poll, as before.
+	boundRef := res.ProviderReference
+	if attempt.ProviderReference != nil && *attempt.ProviderReference != "" {
+		boundRef = *attempt.ProviderReference
+		if err := auditPollPendingEchoDiffers(ctx, tx, attempt, intent, "poll_pending_bound", res.ProviderReference); err != nil {
+			return err
+		}
+	} else if verr := providerref.ValidatePaymentReference("poll.provider_reference", res.ProviderReference); verr != nil {
+		// PRH-2 K3 (ADR 0101 5.4, LF L-2 / security O-2): the echo of an
+		// unbound attempt is validated before it is bound. A refused echo
+		// (including the reserved operator-declared namespace) is NOT bound:
+		// one audit row, then the normal poll backoff. NEVER an error return
+		// - that would re-drive the item at once (a hot loop and an
+		// audit-volume DoS by a hostile PSP).
+		if err := auditRefusedPollEcho(ctx, tx, attempt, intent, "poll_pending_bind", res.ProviderReference); err != nil {
+			return err
+		}
+		return RescheduleNonTerminal(ctx, tx, attempt.ID, nextPoll)
+	} else if foreign, _, ferr := foreignReferenceBinding(ctx, tx, attempt.TenantID, providerIDOrEmpty(attempt), boundRef, attempt.ID, intent.ID); ferr != nil {
+		return ferr
+	} else if foreign {
+		// B5 (PAY-POLL-ECHO-HARDENING-1, D1-L1 remainder): a VALID echo that another
+		// attempt/intent/ledger key already holds is not bound (the unique index would
+		// fail the transaction and the poll would loop): one audit row, then the normal
+		// poll backoff; never an error return.
+		if err := auditRefusedPollEcho(ctx, tx, attempt, intent, "poll_pending_bind_conflict", res.ProviderReference); err != nil {
+			return err
+		}
+		return RescheduleNonTerminal(ctx, tx, attempt.ID, nextPoll)
+	}
+	if err := MarkAccepted(ctx, tx, attempt.ID, EvidenceQueryStatus, boundRef, nextPoll); err != nil {
+		return err
+	}
+	if _, err := setIntentAttempt(ctx, tx, intent.ID, attempt.ProviderID, &boundRef, DepositIntentPending); err != nil {
+		return err
+	}
+	// RV-PRH-I1 ledger-finance H2: see drive.go's identical comment -
+	// this poll is the sweeper's own T9 site.
+	attempt.ProviderReference = &boundRef
+	_, err := ApplyDeferredReceiptsForAttempt(ctx, tx, s.Orchestrator, attempt)
+	return err
 }
 
 // ErrSweeperProviderNotRegistered is returned (wrapped) when a lease

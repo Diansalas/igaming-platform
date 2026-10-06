@@ -105,14 +105,11 @@ func (s *Sweeper) checkPollSuccessEvidence(
 		// an amount is the "PSP never echoes amounts" shape, so it is the
 		// escalation tick when the settlement window has passed (T16, no state
 		// change, one audit, one durable P1; the attempt keeps polling).
-		escalatedNow, err := s.escalateDepositIfDue(ctx, tx, intent, attempt, alertReasonDepositSettlementWindowExceeded, 0)
-		if err != nil {
-			return true, err
-		}
 		// B6.2: rate-bound the per-poll audit - written only when poll_count is 0
 		// or a power of two (O(log n) rows per attempt), and always on the
-		// escalation tick.
-		if escalatedNow || pollAuditDue(attempt.PollCount) {
+		// escalation tick. The escalation itself runs LAST, after the reschedule
+		// (ADR 0102 7.7: the alert tables are the terminal lock level).
+		if s.depositEscalationDue(attempt, 0) || pollAuditDue(attempt.PollCount) {
 			if err := audit.Record(ctx, tx, audit.Entry{
 				TenantID: attempt.TenantID, ActorType: audit.ActorSystem, Action: "payment.attempt_poll_amount_unconfirmed",
 				TargetType: "payment_attempt", TargetID: attempt.ID.String(), Outcome: audit.OutcomeDenied,
@@ -125,7 +122,11 @@ func (s *Sweeper) checkPollSuccessEvidence(
 				return true, fmt.Errorf("payments: audit unconfirmed poll success: %w", err)
 			}
 		}
-		return true, RescheduleNonTerminal(ctx, tx, attempt.ID, s.backoff(attempt.PollCount))
+		if err := RescheduleNonTerminal(ctx, tx, attempt.ID, s.backoff(attempt.PollCount)); err != nil {
+			return true, err
+		}
+		_, err := s.escalateDepositIfDue(ctx, tx, intent, attempt, alertReasonDepositSettlementWindowExceeded, 0)
+		return true, err
 	}
 
 	// 2. An echoed reference, when present, must be the bound one. An empty echo

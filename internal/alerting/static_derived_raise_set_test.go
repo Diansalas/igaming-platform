@@ -87,6 +87,7 @@ var staticDerivedRaiseSetReviewed = map[string]bool{
 	"internal/payments/receipt.go:applyDepositSuccessAndPost":           true,
 	"internal/payments/receipt.go:applyResolvedReceiptEvidence":         true,
 	"internal/payments/sweeper.go:applyStatusEvidence":                  true,
+	"internal/payments/sweeper.go:applyPollPending":                     true,
 	"internal/payments/sweeper.go:escalateDepositIfDue":                 true,
 }
 

@@ -189,4 +189,11 @@ type OperationManifest struct {
 const (
 	DefaultCallTimeout      = 30 * time.Second
 	DefaultSettlementWindow = 24 * time.Hour
+
+	// MaxSettlementWindow is the registration ceiling for a manifest's
+	// SettlementWindow (A1): a huge value would silently disable the B6/B7
+	// escalation (and could overflow window + lease arithmetic). 30 days is far
+	// beyond any card/bank/crypto settlement horizon; a vendor needing more is a
+	// decision for the architect, not a manifest value.
+	MaxSettlementWindow = 30 * 24 * time.Hour
 )

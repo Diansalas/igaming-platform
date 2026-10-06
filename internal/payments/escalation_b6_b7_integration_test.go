@@ -701,6 +701,277 @@ func TestB7_UnreferencedDeposit_StaleSnapshotResolvedByCallback_WritesNothing(t 
 	}
 }
 
+// C1 (security review): the escalation runs LAST. A Pending poll past the window that resolves
+// the attempt through the T9 drain (deferred success receipt) posts exactly once and must NOT
+// raise a spurious "settlement window exceeded" P1, audit or escalated_at.
+func TestB6_Escalation_PendingPollThatDrainsDeferredSuccess_NoEscalation(t *testing.T) {
+	pool := testPool(t)
+	e := newDepRefEnv(t, pool, "mock-b6-c1")
+	a, ref := e.phaseBCallbackThenAmbiguous(t, "b6-c1")
+	e.setWindow(time.Nanosecond)
+	e.mustNoSweepErrors(t, e.poll(t, a, ref, pendingPoll(ref)))
+	got := mustGetAttempt(t, pool, e.f.tenantID, a.ID)
+	if got.State != AttemptSucceeded || got.EscalatedAt != nil {
+		t.Fatalf("state=%s escalated_at=%v, want succeeded and never escalated", got.State, got.EscalatedAt)
+	}
+	if e.auditCount(t, b6EscalationAudit, a.ID) != 0 || len(iwAlerts(t, e)) != 0 {
+		t.Fatalf("a poll that resolved the attempt must not audit or alert an escalation")
+	}
+	assertDeferredReceiptResolved(t, pool, e.f.tenantID, ref, a.ID)
+	if e.depositTxCount(t) != 1 || cashBalance(t, pool, e.f) != 5000 {
+		t.Fatalf("postings=%d balance=%d, want exactly one posting of 5000", e.depositTxCount(t), cashBalance(t, pool, e.f))
+	}
+	assertLedgerBalanced(t, pool, e.f.tenantID)
+	loAssertProjectionMatchesRebuild(t, pool, e.f.tenantID)
+}
+
+// receiptResolutions returns "resolution" of every stored receipt naming ref (and counts the
+// unresolved ones).
+func (e *depRefEnv) receiptResolutions(t *testing.T, ref string) (resolutions []string, unresolved int) {
+	t.Helper()
+	if err := e.pool.WithTenant(context.Background(), e.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, `SELECT COALESCE(resolution, ''), resolved_at IS NULL FROM payment_provider_events WHERE tenant_id = $1 AND provider_reference = $2 ORDER BY id`, e.f.tenantID, ref)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var r string
+			var open bool
+			if err := rows.Scan(&r, &open); err != nil {
+				return err
+			}
+			resolutions = append(resolutions, r)
+			if open {
+				unresolved++
+			}
+		}
+		return rows.Err()
+	}); err != nil {
+		t.Fatalf("read receipts: %v", err)
+	}
+	return resolutions, unresolved
+}
+
+// phaseBDeferred drives a deposit whose phase B receives a verified callback (stored
+// deferred_unresolved) before the adapter answers Ambiguous WITH the callback's reference.
+func (e *depRefEnv) phaseBDeferred(t *testing.T, key string, outcome Outcome, amount int64, declineReason string) (InitiateDepositAttemptResult, string) {
+	t.Helper()
+	ref := "defer-ref-" + uuid.NewString()
+	var cbRes ReceiveCallbackResult
+	var cbErr error
+	e.p.setScript(func(req DepositRequest) DepositResult {
+		cbRes, cbErr = rvCallback(e.pool, e.orch, e.f, e.id, e.p.CallbackPayload(e.f.tenantID, CallbackEventDeposit, ref, "", outcome, amount, "EUR", declineReason, false))
+		return DepositResult{Outcome: OutcomeAmbiguous, ProviderReference: ref}
+	})
+	res := rvInit(t, e.pool, e.orch, e.f, 5000, key)
+	if cbErr != nil || cbRes.Disposition != DispositionDeferredUnresolved {
+		t.Fatalf("phase B callback: disposition=%s err=%v, want deferred_unresolved", cbRes.Disposition, cbErr)
+	}
+	return res, ref
+}
+
+// LF-C1: ambiguous x deferred DECLINE (ADR 0095 4.4 T8) resolves at T6: the attempt is
+// declined with its stage, the intent is declined, the receipt is applied, nothing posts.
+func TestB6_T6Drain_DeferredDecline_DeclinesAttemptAndIntent_ReceiptApplied(t *testing.T) {
+	pool := testPool(t)
+	e := newDepRefEnv(t, pool, "mock-b6-t6dd")
+	res, ref := e.phaseBDeferred(t, "b6-t6dd", OutcomeDeclined, 5000, "insufficient_funds")
+	got := mustGetAttempt(t, pool, e.f.tenantID, res.Attempt.ID)
+	if got.State != AttemptDeclined || got.DeclineStage == nil || got.DeclineReason == nil {
+		t.Fatalf("state=%s stage=%v reason=%v, want declined with its stage and reason", got.State, got.DeclineStage, got.DeclineReason)
+	}
+	if got.ProviderReference == nil || *got.ProviderReference != ref {
+		t.Fatalf("the reference T6 bound must stay %q, got %v", ref, got.ProviderReference)
+	}
+	if s := depIntentStatus(t, e, e.f, *res.Attempt.DepositIntentID); s != string(DepositIntentDeclined) {
+		t.Fatalf("intent status = %q, want declined", s)
+	}
+	if rs, open := e.receiptResolutions(t, ref); open != 0 || len(rs) != 1 || rs[0] != string(ResolutionApplied) {
+		t.Fatalf("receipts = %v unresolved=%d, want one resolution 'applied'", rs, open)
+	}
+	if e.depositTxCount(t) != 0 || cashBalance(t, pool, e.f) != 0 {
+		t.Fatalf("a decline must never post")
+	}
+	assertLedgerBalanced(t, pool, e.f.tenantID)
+	loAssertProjectionMatchesRebuild(t, pool, e.f.tenantID)
+}
+
+// LF-C1: a deferred success whose amount mismatches the attempt is a T10 at T6: disputed
+// callback_amount_asset_mismatch, one P1, no posting, the T6-bound reference left as bound.
+func TestB6_T6Drain_DeferredMismatchedAmount_ParksOnceNoPosting(t *testing.T) {
+	pool := testPool(t)
+	e := newDepRefEnv(t, pool, "mock-b6-t6mm")
+	res, ref := e.phaseBDeferred(t, "b6-t6mm", OutcomeSucceeded, 4999, "")
+	got := mustGetAttempt(t, pool, e.f.tenantID, res.Attempt.ID)
+	if got.State != AttemptDisputed || got.TerminalReason == nil || *got.TerminalReason != TerminalReasonCallbackAmountAssetMismatch {
+		t.Fatalf("state=%s reason=%v, want disputed/%s", got.State, got.TerminalReason, TerminalReasonCallbackAmountAssetMismatch)
+	}
+	if got.ProviderReference == nil || *got.ProviderReference != ref {
+		t.Fatalf("bound reference = %v, want %q (already bound by T6)", got.ProviderReference, ref)
+	}
+	iwParkAlert(t, e, got.ID, TerminalReasonCallbackAmountAssetMismatch, ref)
+	if rs, open := e.receiptResolutions(t, ref); open != 0 || len(rs) != 1 {
+		t.Fatalf("receipts = %v unresolved=%d, want one resolved", rs, open)
+	}
+	if e.depositTxCount(t) != 0 || cashBalance(t, pool, e.f) != 0 {
+		t.Fatalf("a mismatch must never post")
+	}
+	assertLedgerBalanced(t, pool, e.f.tenantID)
+	loAssertProjectionMatchesRebuild(t, pool, e.f.tenantID)
+}
+
+// LF-C1: fault injection AFTER the T6 drain posted. The receipt resolution (the drain's last
+// write) is made to fail with a lock timeout; the whole phase C transaction rolls back: the
+// attempt is back at 'submitting' with no reference, no posting, the receipt still unresolved,
+// the ledger balanced; re-driving the same adapter result then converges with one posting.
+func TestB6_T6Drain_FaultAfterPosting_RollsBackCompletelyThenRedrives(t *testing.T) {
+	pool := testPool(t)
+	e := newDepRefEnv(t, pool, "mock-b6-t6fi")
+	ref := "defer-ref-" + uuid.NewString()
+	intentID := insertRawDepositIntent(t, pool, e.f, "pending")
+	attemptID, claim := uuid.New(), uuid.New()
+	if err := pool.WithTenant(context.Background(), e.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		if _, err := InsertCreatedAttempt(ctx, tx, NewCreatedAttempt{
+			ID: attemptID, TenantID: e.f.tenantID, Operation: AttemptOperationDeposit, DepositIntentID: &intentID,
+			AttemptNo: 1, ExcludedProviderIDs: []string{}, PaymentMethod: "card", AssetCode: "EUR", Amount: 5000,
+		}); err != nil {
+			return err
+		}
+		return ClaimCreatedForSubmission(ctx, tx, attemptID, e.id, claim, "b6-t6fi", time.Now().Add(time.Minute))
+	}); err != nil {
+		t.Fatalf("seed claimed attempt: %v", err)
+	}
+	// The receipt must arrive AFTER the submission started (S95-C3: an earlier one predates it).
+	cb, err := rvCallback(pool, e.orch, e.f, e.id, e.p.CallbackPayload(e.f.tenantID, CallbackEventDeposit, ref, "", OutcomeSucceeded, 5000, "EUR", "", false))
+	if err != nil || cb.Disposition != DispositionDeferredUnresolved {
+		t.Fatalf("seed deferred receipt: %v %v", cb.Disposition, err)
+	}
+	gr := GateResult[DepositResult]{Class: ErrorClassAmbiguous, Value: DepositResult{Outcome: OutcomeAmbiguous, ProviderReference: ref}}
+	before := e.snapshotPark(t, attemptID, intentID)
+	if before.attemptState != AttemptSubmitting {
+		t.Fatalf("setup: state=%s", before.attemptState)
+	}
+
+	blocker := e.holdTableShare(t, "payment_provider_events")
+	if err := e.phaseCVictim(attemptID, intentID, claim, gr, true); !isLockNotAvailable(err) {
+		t.Fatalf("injected failure after the drain posted: got %v, want SQLSTATE 55P03", err)
+	}
+	blocker.release()
+	e.assertRolledBack(t, "after the injected failure", before, e.snapshotPark(t, attemptID, intentID))
+	if rs, open := e.receiptResolutions(t, ref); open != 1 || len(rs) != 1 {
+		t.Fatalf("the receipt must stay unresolved after the rollback: %v open=%d", rs, open)
+	}
+	if got := mustGetAttempt(t, pool, e.f.tenantID, attemptID); got.ProviderReference != nil || got.LedgerTransactionID != nil {
+		t.Fatalf("rollback must unbind the reference and the ledger link: %v %v", got.ProviderReference, got.LedgerTransactionID)
+	}
+	if e.depositTxCount(t) != 0 || cashBalance(t, pool, e.f) != 0 {
+		t.Fatalf("no posting may survive the rollback")
+	}
+	assertLedgerBalanced(t, pool, e.f.tenantID)
+	loAssertProjectionMatchesRebuild(t, pool, e.f.tenantID)
+
+	if err := e.phaseCVictim(attemptID, intentID, claim, gr, false); err != nil {
+		t.Fatalf("re-drive: %v", err)
+	}
+	if got := mustGetAttempt(t, pool, e.f.tenantID, attemptID); got.State != AttemptSucceeded {
+		t.Fatalf("re-driven state=%s, want succeeded", got.State)
+	}
+	if e.depositTxCount(t) != 1 || cashBalance(t, pool, e.f) != 5000 {
+		t.Fatalf("postings=%d balance=%d, want exactly one posting of 5000", e.depositTxCount(t), cashBalance(t, pool, e.f))
+	}
+	if rs, open := e.receiptResolutions(t, ref); open != 0 || len(rs) != 1 || rs[0] != string(ResolutionApplied) {
+		t.Fatalf("receipts after the re-drive: %v open=%d", rs, open)
+	}
+	assertLedgerBalanced(t, pool, e.f.tenantID)
+	loAssertProjectionMatchesRebuild(t, pool, e.f.tenantID)
+}
+
+// LF-C2 (kills M5d): a callback by merchant reference can resolve a reference-less attempt
+// WITHOUT binding a reference (the tombstone T10 path). A stale snapshot reaching
+// processUnreferenced afterwards must be a clean no-op: no escalation, and no reschedule
+// attempt on the terminal row.
+func TestB7_UnreferencedDeposit_StaleSnapshot_TerminalWithoutReference_WritesNothing(t *testing.T) {
+	pool := testPool(t)
+	e := newDepRefEnv(t, pool, "mock-b7-tomb")
+	a := e.refLessLive(t, e.f, "b7-tomb")
+	e.setWindow(time.Nanosecond)
+	ref := "b7-tomb-ref-" + uuid.NewString()
+	if err := pool.WithTenant(context.Background(), e.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := postDepositReversalTombstone(ctx, tx, e.f.tenantID, e.id, ref)
+		return err
+	}); err != nil {
+		t.Fatalf("seed tombstone: %v", err)
+	}
+	if d, err := iwApplyReceiptInTx(t, e, ReceiptEvidence{EventType: "deposit", ProviderReference: ref, MerchantReference: a.MerchantReference,
+		Outcome: OutcomeSucceeded, Amount: 5000, AssetCode: "EUR"}); err != nil || d != DispositionApplied {
+		t.Fatalf("callback: %v %v", d, err)
+	}
+	before := mustGetAttempt(t, pool, e.f.tenantID, a.ID)
+	if before.State != AttemptDisputed || before.ProviderReference != nil {
+		t.Fatalf("setup: state=%s ref=%v, want disputed and still reference-less", before.State, before.ProviderReference)
+	}
+	if err := e.unreferencedSweeper().processUnreferenced(context.Background(), e.f.tenantID, a); err != nil {
+		t.Fatalf("a stale snapshot of a terminal reference-less attempt must be a clean no-op: %v", err)
+	}
+	after := mustGetAttempt(t, pool, e.f.tenantID, a.ID)
+	if !after.UpdatedAt.Equal(before.UpdatedAt) || after.EscalatedAt != nil {
+		t.Fatalf("the terminal row was written")
+	}
+	if e.auditCount(t, b6EscalationAudit, a.ID) != 0 {
+		t.Fatalf("no escalation audit for a resolved attempt")
+	}
+}
+
+// A reference bound after the sweeper read its snapshot (T4/T9 by a concurrent path): the stale
+// reference-less snapshot must neither escalate nor reschedule; the next tick polls it normally.
+func TestB7_UnreferencedDeposit_StaleSnapshot_ReferenceBoundSince_WritesNothing(t *testing.T) {
+	pool := testPool(t)
+	e := newDepRefEnv(t, pool, "mock-b7-bound")
+	a := e.refLessLive(t, e.f, "b7-bound")
+	e.setWindow(time.Nanosecond)
+	if err := pool.WithTenant(context.Background(), e.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		ref := "b7-bound-" + uuid.NewString()
+		_, err := tx.Exec(ctx, `UPDATE payment_attempts SET provider_reference = $2 WHERE id = $1 AND provider_reference IS NULL`, a.ID, ref)
+		return err
+	}); err != nil {
+		t.Fatalf("bind: %v", err)
+	}
+	before := mustGetAttempt(t, pool, e.f.tenantID, a.ID)
+	if err := e.unreferencedSweeper().processUnreferenced(context.Background(), e.f.tenantID, a); err != nil {
+		t.Fatalf("processUnreferenced: %v", err)
+	}
+	after := mustGetAttempt(t, pool, e.f.tenantID, a.ID)
+	if !after.UpdatedAt.Equal(before.UpdatedAt) || after.EscalatedAt != nil || e.auditCount(t, b6EscalationAudit, a.ID) != 0 {
+		t.Fatalf("a snapshot whose reference was bound since must write nothing")
+	}
+}
+
+// A1: a manifest value above the ceiling (set after registration) is clamped, never used raw.
+func TestA1_DepositSettlementWindow_ClampedAndDefaulted(t *testing.T) {
+	pool := testPool(t)
+	e := newDepRefEnv(t, pool, "mock-a1-clamp")
+	a, _ := e.ambiguousBound(t, "a1-clamp")
+	e.setWindow(MaxSettlementWindow * 10)
+	if w := e.sweeper().depositSettlementWindow(a); w != MaxSettlementWindow {
+		t.Fatalf("window = %v, want clamp to %v", w, MaxSettlementWindow)
+	}
+	e.setWindow(0)
+	if w := e.sweeper().depositSettlementWindow(a); w != DefaultSettlementWindow {
+		t.Fatalf("window = %v, want default %v", w, DefaultSettlementWindow)
+	}
+}
+
+// The legacy-shape helper binds the intent's reference too (C2).
+func TestB6_LegacyShapeHelper_BindsIntentReference(t *testing.T) {
+	pool := testPool(t)
+	e := newDepRefEnv(t, pool, "mock-b6-c2")
+	a, ref := e.phaseBCallbackThenAmbiguous(t, "b6-c2")
+	if got := depScan[string](t, pool, e.f.tenantID, `SELECT COALESCE(provider_reference, '') FROM deposit_intents WHERE id = $1`, *a.DepositIntentID); got != ref {
+		t.Fatalf("intent provider_reference = %q, want %q", got, ref)
+	}
+}
+
 // The discriminator reason is closed: an unlisted reason never reaches an alert verbatim.
 func TestB6B7_RaiseEscalationAlert_UnlistedReasonBecomesUnclassified(t *testing.T) {
 	pool := testPool(t)

@@ -415,6 +415,7 @@ var staticEvidenceCallerAllowlist = map[string]bool{
 	"internal/payments/receipt.go:ApplyReceiptEvidence":               true,
 	"internal/payments/receipt.go:applyDepositSuccessAndPost":         true,
 	"internal/payments/sweeper.go:applyStatusEvidence":                true,
+	"internal/payments/sweeper.go:applyPollPending":                   true,
 }
 
 func TestStaticWiring_EvidenceFunctionCallersAreInTxOrReviewed(t *testing.T) {

@@ -345,6 +345,14 @@ func validateManifest(provider PaymentProvider, declared AdapterCapability) erro
 			ErrManifestRegistrationRefused, declared.ProviderID)
 	}
 
+	// A1 (B6 security review): the settlement window drives the T16 escalation, so
+	// a negative or absurd value is refused at registration for EVERY adapter
+	// (synthetic included). Zero means "use DefaultSettlementWindow".
+	if m.SettlementWindow < 0 || m.SettlementWindow > MaxSettlementWindow {
+		return fmt.Errorf("%w: adapter %s declares settlement_window %s outside [0, %s]",
+			ErrManifestRegistrationRefused, declared.ProviderID, m.SettlementWindow, MaxSettlementWindow)
+	}
+
 	// LF95-C5: a PRODUCTION-ELIGIBLE (non-Synthetic) adapter supporting
 	// deposit or withdrawal must be able to converge a success even when the
 	// provider_reference alone is ambiguous - either its callback always

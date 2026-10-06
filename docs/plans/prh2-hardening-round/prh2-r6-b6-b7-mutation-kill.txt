@@ -1,71 +1,81 @@
 PRH-2 hardening round, R6 - Class-B B6 (PAY-DEPOSIT-ESCALATION-1) + B7 (PAY-H-FOLLOWUPS-1 (11)) mutation-kill evidence
 =========================================================================================================
+Revision 2 (follow-up commit after the security and ledger-finance reviews of f16cc5a). Supersedes revision 1.
 
-Method: each mutant is applied IN PLACE to one production file (backup copied first), the targeted
-suite is run, then the file is restored from the backup and byte-compared (cmp) to it. Control run
-first (unmutated). No compile-error mutants are counted (one early M3c form that left an unused
-variable failed to compile; it was discarded and replaced by the valid form listed below).
+Method: each mutant is applied IN PLACE to one production file (backup copied first), the targeted suite is
+run, then the file is restored from the backup and byte-compared (cmp). Control run first (unmutated).
+Compile-error mutants are not counted (M1c "return true" left an unused variable; discarded; the same
+behaviour is killed as M1a/M1b/C1-series and by TestB6_Escalation_AfterWindow... via the original M1c run).
 
-Suite per mutant (private scratch DB, no -race for speed; the final gate run uses -race):
-  go test -tags integration -count=1 -p 1 ./internal/payments/ -run 'TestB6|TestB7'
+Suite per mutant (private scratch DB, no -race for speed; the final gate runs use -race):
+  go test -tags integration -count=1 -p 1 ./internal/payments/ -run 'TestB6|TestB7|TestA1|TestEscalationCallIsLast'
 
-Control (unmutated): PASS (rc=0, no failures).
+Control (unmutated): PASS.
 
-Result: 28 mutants, 25 KILLED, 3 SURVIVED (all three classified below).
+Result of this run: 34 counted mutants, 32 KILLED, 2 SURVIVED (classified below).
+(Revision 1 additionally killed M2c [both escalated_at guards], M5e [no reschedule after escalating] and
+M7a/M7b [no escalation on the Missing / pending branches]; those code shapes changed in revision 2 and are
+covered by C1c/C1d, M2a+M2b and the unchanged tests.)
 
-ID   Mutant                                                              Result    Killed by (first tests)
----  ------------------------------------------------------------------  --------  -------------------------------------------
-M1a  window comparison inverted (time.Since(start) > window+extra)      KILLED    ..._AfterWindow_ExactlyOnce..., 10 more
-M1b  window ignores the lease term (extraWait dropped)                   KILLED    TestB7_..._NotEscalatedBeforeLeasePlusWindow
-M1c  window ignored (always due)                                         KILLED    ..._AfterWindow_ExactlyOnce..., 4 more
-M2a  helper's `EscalatedAt != nil` guard removed                         SURVIVED  (equivalent, see below)
-M2b  `escalated_at IS NULL` removed from Escalate's SQL CAS              KILLED    TestB6_Escalation_CASConflict_StaleSnapshot_WritesNothing
-M2c  both escalated_at guards removed (helper + SQL)                     KILLED    ..._AfterWindow_ExactlyOnce..., CASConflict, 2 more
-M2d  CAS conflict (ErrAttemptStateConflict) no longer tolerated          KILLED    TestB6_Escalation_CASConflict_StaleSnapshot_WritesNothing
-M3a  power-of-two gate always true                                       KILLED    TestB6_PollAuditDue_Unit, PowerOfTwoGate, AlwaysOnEscalationTick
-M3b  power-of-two gate always false                                      KILLED    same three
-M3c  escalation tick no longer forces the audit                          KILLED    TestB6_UnconfirmedPollAudit_AlwaysOnEscalationTick
-M3d  gate off by one (n&(n+1))                                           KILLED    same three
-M4   T6 deferred-receipt drain call skipped                              KILLED    TestB6_T6BindingRef_DrainsDeferredReceipt_..., ..._DrainsDeferredDecline_...
-M5a  nil-reference branch reverted to the plain reschedule               KILLED    TestB7_..._EscalatesOnce_KeepsRescheduling, 3 more
-M5b  nil-reference escalation uses the wrong reason                      KILLED    TestB7_..._EscalatesOnce_KeepsRescheduling, AlertDeterministicFailure
-M5c  nil-reference lease term dropped                                    KILLED    TestB7_..._NotEscalatedBeforeLeasePlusWindow
-M5d  nil-reference branch: fresh "still live" check removed              SURVIVED  (near-equivalent, see below)
-M5e  nil-reference branch does not reschedule after escalating           KILLED    TestB7_..._EscalatesOnce_KeepsRescheduling
-M6a  manifest: by_provider_or_merchant_reference accepted again          KILLED    TestB7_ValidateManifest_MerchantReferenceStatusQueryAloneRefused
-M6b  manifest: LF95-C5 rule disabled entirely                            KILLED    same
-M6c  manifest: synthetic adapters no longer exempt                       KILLED    ~20 tests (every MOCK-registering test)
-M7a  no escalation on the success-without-amount (Missing) branch        KILLED    TestB6_Escalation_EveryNonResolvingPollOutcome, AlwaysOnEscalationTick
-M7b  no escalation on the pending branch                                 KILLED    ..._AfterWindow_ExactlyOnce..., 3 more
-M7c  no escalation on the ambiguous branch                               KILLED    TestB6_Escalation_EveryNonResolvingPollOutcome
-M7d  no escalation on the transport-failure branch                       KILLED    TestB6_Escalation_TransportFailurePastWindow
-M8a  alert not raised                                                    KILLED    ~8 tests
-M8b  escalation audit not written (action renamed)                       KILLED    ~8 tests
-M8c  helper's `!attemptAwaitingEvidence` precondition removed            SURVIVED  (equivalent, see below)
-M8d  closed-reason allowlist bypassed in raiseDepositEscalationAlert     KILLED    TestB6B7_RaiseEscalationAlert_UnlistedReasonBecomesUnclassified
+ID   Mutant                                                                  Result    Killed by
+---  ----------------------------------------------------------------------  --------  ---------------------------------------------
+C1a  pending branch escalates BEFORE the T9 / drain work (security C1)        KILLED    TestB6_Escalation_PendingPollThatDrainsDeferredSuccess_NoEscalation
+C1b  missing-amount branch escalates before the reschedule                    KILLED    TestEscalationCallIsLastStatementOfItsBranch_ADR0102_7_7 (source-order guard)
+C1c  missing-amount branch drops escalation                                   KILLED    EveryNonResolvingPollOutcome, AlwaysOnEscalationTick
+C1d  pending branch drops escalation                                          KILLED    AfterWindow_ExactlyOnce..., 3 more
+C1e  nil-reference branch escalates before the reschedule                     KILLED    source-order guard
+A1a  ceiling check disabled                                                   KILLED    TestA1_ValidateManifest_SettlementWindowCeiling
+A1b  negative check disabled                                                  KILLED    same
+A1c  ceiling off by one (>=)                                                  KILLED    same
+A1d  sweeper clamp removed                                                    KILLED    TestA1_DepositSettlementWindow_ClampedAndDefaulted
+M1a  window comparison inverted                                               KILLED    AfterWindow_ExactlyOnce..., 10 more
+M1b  window ignores the lease term                                            KILLED    TestB7_..._NotEscalatedBeforeLeasePlusWindow
+M2a  helper pre-check `EscalatedAt != nil` removed                            KILLED    TestB6_UnconfirmedPollAudit_AlwaysOnEscalationTick (now observable: the due check also gates the audit)
+M2b  `escalated_at IS NULL` removed from Escalate's SQL CAS                   KILLED    TestB6_Escalation_CASConflict_StaleSnapshot_WritesNothing
+M2d  CAS conflict (ErrAttemptStateConflict) not tolerated                     KILLED    CASConflict..., PendingPollThatDrains...
+M3a  power-of-two gate always true                                            KILLED    PollAuditDue_Unit, PowerOfTwoGate, AlwaysOnEscalationTick
+M3b  power-of-two gate always false                                           KILLED    same
+M3c  escalation tick no longer forces the audit                               KILLED    TestB6_UnconfirmedPollAudit_AlwaysOnEscalationTick
+M3d  gate off by one                                                          KILLED    same three
+M4   T6 drain call skipped                                                    KILLED    TestB6_T6BindingRef_DrainsDeferredReceipt..., DrainsDeferredDecline..., T6Drain_* (LF-C1 set)
+M5a  nil-reference branch reverted to the plain reschedule                    KILLED    TestB7_UnreferencedDeposit_* (4)
+M5b  nil-reference escalation uses the wrong reason                           KILLED    EscalatesOnce_KeepsRescheduling, AlertDeterministicFailure
+M5c  nil-reference lease term dropped                                         KILLED    NotEscalatedBeforeLeasePlusWindow
+M5d  nil-reference "still live" re-read check removed                         KILLED    TestB7_UnreferencedDeposit_StaleSnapshot_TerminalWithoutReference_WritesNothing (LF-C2)
+M5f  nil-reference "reference bound since" check removed                      KILLED    TestB7_UnreferencedDeposit_StaleSnapshot_ReferenceBoundSince_WritesNothing
+M6a  manifest: by_provider_or_merchant_reference accepted again               KILLED    TestB7_ValidateManifest_MerchantReferenceStatusQueryAloneRefused
+M6b  manifest: LF95-C5 rule disabled                                          KILLED    same
+M6c  manifest: synthetic adapters no longer exempt                            KILLED    many (every MOCK-registering test)
+M7c  ambiguous branch drops escalation                                        KILLED    EveryNonResolvingPollOutcome, source-order guard
+M7d  transport-failure branch drops escalation                                KILLED    TestB6_Escalation_TransportFailurePastWindow, source-order guard
+M8a  alert not raised                                                         KILLED    ~8 tests
+M8b  escalation audit action renamed                                          KILLED    ~8 tests
+M8c  helper's `!attemptAwaitingEvidence` pre-check removed                    SURVIVED  equivalent (below)
+M8d  closed-reason allowlist bypassed                                         KILLED    TestB6B7_RaiseEscalationAlert_UnlistedReasonBecomesUnclassified
+T6a  T6 drain: "already-bound reference" branch (drainRef) removed            SURVIVED  unreachable defensive branch (below)
 
 Survivor classification (honest)
 --------------------------------
-M2a  EQUIVALENT (defence in depth). The in-memory `attempt.EscalatedAt != nil` pre-check only saves
-     the Escalate round trip: with it removed, Escalate's own SQL CAS (`escalated_at IS NULL`) rejects
-     the second tick with ErrAttemptStateConflict, which the helper maps to (false, nil) with no audit
-     and no alert - identical observable behaviour. The SQL guard is the real control and is killed by
-     M2b/M2c; the conflict mapping by M2d.
-M8c  EQUIVALENT (defence in depth), same reasoning: Escalate's SQL predicate
-     `state NOT IN ('succeeded','declined','rejected','disputed')` yields the same conflict -> (false, nil),
-     and every caller short-circuits a terminal row earlier (applyStatusEvidence's
-     attemptAwaitingEvidence check; processUnreferenced's fresh re-read).
-M5d  NEAR-EQUIVALENT. In processUnreferenced the fresh `!attemptAwaitingEvidence` early return is
-     shadowed, for every terminal shape a callback can produce, by the next check (a callback by
-     merchant reference binds a provider_reference, so the "reference bound since the lease" return
-     fires). It is only observable for a terminal attempt that STILL has no reference, which no test
-     hook can produce today (that would need an operator/recon resolution path; out of scope). Without
-     the check such a row would reach RescheduleNonTerminal and error (next_action_at is NULL on a
-     terminal row) - a loud, safe failure, never a write. Kept as a deliberate explicit guard.
+M8c  EQUIVALENT (defence in depth). Escalate's SQL predicate `state NOT IN (terminal)` produces the same
+     conflict -> (false, nil) with no audit and no alert; every caller also short-circuits a terminal row
+     earlier. The SQL guard is the control (M2b).
+T6a  UNREACHABLE DEFENSIVE BRANCH. The drain uses the adapter's reference unless the attempt already carried
+     a different bound one (COALESCE keeps the earlier binding). A `submitting` attempt never carries a
+     reference (T4/T6 are the only binders and both leave `submitting`), so no test can reach it through the
+     real flow; the branch only guards against draining the wrong reference if that invariant ever breaks.
 
-Not-killable-by-design notes
+Correction of revision 1 (ledger-finance LF-C2)
+-----------------------------------------------
+Revision 1 classified M5d as "near-equivalent, no test hook can produce a terminal reference-less attempt".
+That was wrong: a callback by merchant reference on a reference-less live attempt can reach
+ApplyDisputeFromNonTerminal WITHOUT binding a reference (receipt.go tombstone path; the section 28 multiple-
+success T10 path). With M5d applied a stale-snapshot processUnreferenced then errors in RescheduleNonTerminal on
+the terminal row. The new stale-snapshot test (tombstone shape) kills M5d. M2a/M8c remain equivalent only in
+the sense that Escalate's SQL CAS covers them; M2a is now killed because the due check also gates the audit.
+
+Not-observable-by-state note
 ----------------------------
-* The window is read from the registered provider's manifest.SettlementWindow on every tick (default
-  24h when unset or when the provider is unregistered). first_submitted_at is immutable (trigger), so
-  tests age an attempt by shrinking the manifest window to 1ns, never by back-dating the row.
-* The control and all mutant runs used the private scratch database only.
+The ADR 0102 7.7 ordering (escalation last) is not observable through database state for the missing-amount
+and nil-reference branches (same rows either way), so it is pinned by a source-order test
+(TestEscalationCallIsLastStatementOfItsBranch_ADR0102_7_7), which kills C1b/C1e. The pending branch ordering
+IS behavioural (C1a) because a T9 drain can resolve the attempt in the same transaction.

@@ -779,7 +779,12 @@ func (e *depRefEnv) phaseBCallbackThenAmbiguous(t *testing.T, key string) (Payme
 		t.Fatalf("phase B callback: disposition=%s err=%v, want deferred_unresolved", cbRes.Disposition, cbErr)
 	}
 	if err := e.pool.WithTenant(context.Background(), e.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `UPDATE payment_attempts SET provider_reference = $2 WHERE id = $1 AND provider_reference IS NULL`, res.Attempt.ID, ref)
+		if _, err := tx.Exec(ctx, `UPDATE payment_attempts SET provider_reference = $2 WHERE id = $1 AND provider_reference IS NULL`, res.Attempt.ID, ref); err != nil {
+			return err
+		}
+		// The legacy shape also had the intent's reference bound (finalizeAmbiguous wrote it
+		// at T6), so bind it here exactly like production did.
+		_, err := setIntentAttempt(ctx, tx, *res.Attempt.DepositIntentID, &e.id, &ref, DepositIntentAmbiguous)
 		return err
 	}); err != nil {
 		t.Fatalf("legacy bind: %v", err)
