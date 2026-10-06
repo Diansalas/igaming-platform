@@ -23,7 +23,7 @@ var ErrNotActiveForGameplay = errors.New("tenant: tenant is not active; new game
 // movement (a replay of an already-posted fact must not call it: replays
 // are read-only and return the original outcome).
 //
-// Race freedom (migration 0119): it takes the per-tenant status advisory lock
+// Race freedom (migration 0118): it takes the per-tenant status advisory lock
 // SHARED, then reads tenants.status in a fresh statement. A tenant status
 // change takes the same lock EXCLUSIVE (trigger tenants_status_change_gate)
 // and holds it to the end of its transaction, so a status change either
@@ -38,11 +38,11 @@ func RequireActiveForGameplay(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID
 	if tenantID == uuid.Nil {
 		return fmt.Errorf("%w: no tenant id", ErrNotActiveForGameplay)
 	}
-	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock_shared(tenant_status_gate_key($1))`, tenantID); err != nil {
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock_shared(public.tenant_status_gate_key($1))`, tenantID); err != nil {
 		return fmt.Errorf("tenant: take status gate lock: %w", err)
 	}
 	var status string
-	err := tx.QueryRow(ctx, `SELECT status FROM tenants WHERE id = $1`, tenantID).Scan(&status)
+	err := tx.QueryRow(ctx, `SELECT status FROM public.tenants WHERE id = $1`, tenantID).Scan(&status)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return fmt.Errorf("%w: tenant row not visible", ErrNotActiveForGameplay)
 	}

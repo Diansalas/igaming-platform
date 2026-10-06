@@ -964,7 +964,16 @@ func lockAndPost(ctx context.Context, tx pgx.Tx, chainCausation bool, ins ...led
 	// decision table answers them from history). Runs before any projection
 	// lock or ledger write; SimulateSettlementEvent turns the sentinel into a
 	// recorded rejection, so nothing of the call is posted.
-	if len(ins) > 0 {
+	// Ledger-finance C1: a tombstone moves no money and protects against a late
+	// settlement, so it is ALWAYS written; the gate is skipped when every input
+	// is a tombstone.
+	allTombstones := len(ins) > 0
+	for _, in := range ins {
+		if in.TransactionType != ledger.TxTombstone {
+			allTombstones = false
+		}
+	}
+	if len(ins) > 0 && !allTombstones {
 		if err := tenant.RequireActiveForGameplay(ctx, tx, ins[0].TenantID); err != nil {
 			if errors.Is(err, tenant.ErrNotActiveForGameplay) {
 				return nil, ErrSettlementTenantNotActive

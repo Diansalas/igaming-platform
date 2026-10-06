@@ -1,9 +1,8 @@
 -- R3-GAME-POSTINGS-NONACTIVE-1 (owner decision 2026-10-05; ADR 0095 section
 -- 40.4 item 2; engineering design recorded in ADR 0095 section 40.5).
 --
--- NUMBERING: 0118 is reserved for another workstream; until it merges
--- `migrate verify` on this branch alone shows a gap at 0118. Never commit a
--- 0118 file from here.
+-- NUMBERING: this is 0118 (gap-free after 0117). 0119 is reserved for
+-- another workstream; do not take it.
 --
 -- What this does (and ONLY this): makes "a NEW gameplay money movement for a
 -- suspended/closed tenant" impossible to race with a status change.

@@ -183,7 +183,6 @@ func TestTenantNotActive_CasinoNewPostingsRefused(t *testing.T) {
 				{"win_for_open_round", CallbackEventWin, "w-open", "", "round-open", 2000},
 				{"rollback_of_posted_bet", CallbackEventRollback, "rb-open", "b-open", "round-open", 0},
 				{"rollback_of_posted_win", CallbackEventRollback, "rb-win", "w-settled", "round-settled", 0},
-				{"rollback_of_unseen_original_tombstone", CallbackEventRollback, "rb-unseen", "b-never-seen", "round-unseen", 0},
 			}
 			for _, c := range refused {
 				_, err := w.deliver(t, c.ev, c.ref, c.original, c.round, c.amount)
@@ -285,7 +284,7 @@ func TestTenantNotActive_CasinoCrossTenantIsolation(t *testing.T) {
 
 // TestTenantNotActive_CasinoDatabaseBackstop: even a code path that skipped
 // the application check cannot post a gameplay ledger type for a closed
-// tenant (migration 0119 trigger, SQLSTATE GP010).
+// tenant (migration 0118 trigger, SQLSTATE GP010).
 func TestTenantNotActive_CasinoDatabaseBackstop(t *testing.T) {
 	owner := testPool(t)
 	rt := runtimePoolForGate(t)
@@ -394,4 +393,59 @@ func TestTenantNotActive_CasinoStatusChangeVsPostingRace(t *testing.T) {
 			t.Fatalf("after the closure the next posting is refused: %v", err)
 		}
 	})
+}
+
+// TestTenantNotActive_CasinoTombstonesAlwaysWrittenAndLateOriginalRecorded
+// (ledger-finance C1 and C3): a rollback of a never-seen original writes its
+// tombstone on a suspended tenant (no money, always written) and is
+// idempotent; a late original bet is then declined from the E3 check BEFORE
+// the non-active gate, so casino_callback_rejections records it as
+// original_tombstoned (the C7 cas_tombstone_late_original input), also after
+// reactivation; a late original win is refused as tombstoned.
+func TestTenantNotActive_CasinoTombstonesAlwaysWrittenAndLateOriginalRecorded(t *testing.T) {
+	owner := testPool(t)
+	rt := runtimePoolForGate(t)
+	w := newGateWorld(t, owner, rt)
+	setStatusForGate(t, owner, w.f.tenantID, "suspended")
+	txs0, entries0 := ledgerCountsForGate(t, owner, w.f.tenantID)
+
+	res, err := w.deliver(t, CallbackEventRollback, "rb-late", "b-late", "round-late", 0)
+	if err != nil || !res.Tombstoned {
+		t.Fatalf("a tombstone must be written on a suspended tenant: %+v err=%v", res, err)
+	}
+	txs1, entries1 := ledgerCountsForGate(t, owner, w.f.tenantID)
+	if txs1 != txs0+1 || entries1 != entries0 {
+		t.Fatalf("expected one tombstone and no entries: tx %d->%d entries %d->%d", txs0, txs1, entries0, entries1)
+	}
+	if again, err := w.deliver(t, CallbackEventRollback, "rb-late", "b-late", "round-late", 0); err != nil || !again.Tombstoned {
+		t.Fatalf("tombstone replay must be idempotent: %+v err=%v", again, err)
+	}
+	if txs2, _ := ledgerCountsForGate(t, owner, w.f.tenantID); txs2 != txs1 {
+		t.Fatalf("replay wrote a row: %d -> %d", txs1, txs2)
+	}
+
+	lateRows := func() int {
+		var n int
+		if err := owner.WithTenant(context.Background(), w.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+			return tx.QueryRow(ctx, `SELECT count(*) FROM casino_callback_rejections WHERE tenant_id = $1 AND reason_class = 'original_tombstoned' AND provider_tx_id = 'b-late'`, w.f.tenantID).Scan(&n)
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	for _, phase := range []string{"suspended", "reactivated"} {
+		if phase == "reactivated" {
+			setStatusForGate(t, owner, w.f.tenantID, "active")
+		}
+		bet, err := w.deliver(t, CallbackEventBet, "b-late", "", "round-late", 100)
+		if err != nil || bet.Outcome != OutcomeDeclined || bet.DeclineReason != "original_rolled_back" {
+			t.Fatalf("%s: late original bet must be declined as rolled back: %+v err=%v", phase, bet, err)
+		}
+		if lateRows() != 1 {
+			t.Fatalf("%s: the late original must be recorded once as original_tombstoned", phase)
+		}
+		if _, err := w.deliver(t, CallbackEventWin, "b-late", "", "round-late", 100); !errors.Is(err, ErrOriginalTombstoned) {
+			t.Fatalf("%s: late original win must be refused as tombstoned, got %v", phase, err)
+		}
+	}
 }

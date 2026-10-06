@@ -129,10 +129,9 @@ func TestGamePostingsNonActive_SportsbookRoutesRefuseAndRecord(t *testing.T) {
 	gateSetTenantStatus(t, owner, tenant.ID, "closed")
 	txs0 := gateCount(t, owner, tenant.ID, `SELECT count(*) FROM ledger_transactions WHERE tenant_id = $1`, tenant.ID)
 
-	// Staff simulation of settle / rollback-tombstone / void: 409, recorded.
+	// Staff simulation of settle and void (a rollback tombstone is always written): 409, recorded.
 	for _, body := range []string{
 		`{"event_type":"settle","generation":1,"outcome":"won","payout_amount":2000,"asset_code":"EUR"}`,
-		`{"event_type":"rollback","generation":1}`,
 		`{"event_type":"void","void_reason":"market_cancelled"}`,
 	} {
 		resp := mustSimulateRequest(t, srv, bet.ID, tokens.AccessToken, "gate-"+uuid.NewString(), body)
@@ -141,8 +140,8 @@ func TestGamePostingsNonActive_SportsbookRoutesRefuseAndRecord(t *testing.T) {
 		}
 		_ = resp.Body.Close()
 	}
-	if got := gateCount(t, owner, tenant.ID, `SELECT count(*) FROM audit_log WHERE tenant_id = $1 AND action = 'sportsbook_bet.settlement_rejected' AND metadata->>'rejection_code' = 'SETTLEMENT_TENANT_NOT_ACTIVE'`, tenant.ID); got != 3 {
-		t.Fatalf("expected 3 durable rejection audit records, got %d", got)
+	if got := gateCount(t, owner, tenant.ID, `SELECT count(*) FROM audit_log WHERE tenant_id = $1 AND action = 'sportsbook_bet.settlement_rejected' AND metadata->>'rejection_code' = 'SETTLEMENT_TENANT_NOT_ACTIVE'`, tenant.ID); got != 2 {
+		t.Fatalf("expected 2 durable rejection audit records, got %d", got)
 	}
 
 	// A player's NEW bet: a deterministic decline (200 shape), nothing posted.

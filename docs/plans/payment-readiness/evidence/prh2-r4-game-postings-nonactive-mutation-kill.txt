@@ -1,5 +1,5 @@
 PRH-2 R4 R3-GAME-POSTINGS-NONACTIVE-1 mutation-kill evidence (2026-10-05)
-Branch prh2-r4-game-postings-nonactive (from 4164a1c). Migration 0119.
+Branch prh2-r4-game-postings-nonactive (from 4164a1c). Migration 0118.
 
 Method. A throwaway copy of the worktree (outside the repository) was migrated into a private database
 (g_gamemut, dropped afterwards) and tested as the runtime role (asserted NOT rolsuper AND NOT rolbypassrls).
@@ -12,7 +12,7 @@ before each batch. The repository working tree was never mutated.
 Entry points mutated: casino postBet, postWin, postRollback (tombstone branch, posted-original branch),
 sportsbook PlaceBet, sportsbook lockAndPost (the single choke point of settle, rollback, rollback tombstone,
 void of an open bet, void after settlement, i.e. also the staff SimulateSettlementEvent path), the shared
-primitive, the casino durable record, the HTTP mappings, and every part of migration 0119.
+primitive, the casino durable record, the HTTP mappings, and every part of migration 0118.
 
 Note on the two-layer design: removing an application check (M01..M04, M10, M12) leaves the database trigger
 as a backstop, so the posting is STILL refused at the database (SQLSTATE GP010) and no money moves; the
@@ -64,17 +64,17 @@ M20 apierror: settlement code mapped 500: KILLED rc=1
 --- raw results from g_mut_run2.log ---
 CONTROL (unmutated copy): rc=0 fails=[]
 M21 migration: status-change trigger removed: KILLED rc=1
-   restore+cmp migrations/0119_gameplay_posting_tenant_status_gate.up.sql: identical
+   restore+cmp migrations/0118_gameplay_posting_tenant_status_gate.up.sql: identical
 M22 migration: ledger backstop trigger never fires: KILLED rc=1
-   restore+cmp migrations/0119_gameplay_posting_tenant_status_gate.up.sql: identical
+   restore+cmp migrations/0118_gameplay_posting_tenant_status_gate.up.sql: identical
 M23 migration: backstop replay exemption removed: KILLED rc=1
-   restore+cmp migrations/0119_gameplay_posting_tenant_status_gate.up.sql: identical
+   restore+cmp migrations/0118_gameplay_posting_tenant_status_gate.up.sql: identical
 M24 migration: backstop refuses only suspended (closed passes): KILLED rc=1
-   restore+cmp migrations/0119_gameplay_posting_tenant_status_gate.up.sql: identical
+   restore+cmp migrations/0118_gameplay_posting_tenant_status_gate.up.sql: identical
 M25 migration: backstop type list drops sportsbook_void: KILLED rc=1
-   restore+cmp migrations/0119_gameplay_posting_tenant_status_gate.up.sql: identical
+   restore+cmp migrations/0118_gameplay_posting_tenant_status_gate.up.sql: identical
 M26 migration: backstop type list drops casino_rollback: KILLED rc=1
-   restore+cmp migrations/0119_gameplay_posting_tenant_status_gate.up.sql: identical
+   restore+cmp migrations/0118_gameplay_posting_tenant_status_gate.up.sql: identical
 --- raw results from g_mut_run3.log ---
 CONTROL (unmutated copy): rc=0 fails=[]
 M17 helper: missing row passes: KILLED rc=1

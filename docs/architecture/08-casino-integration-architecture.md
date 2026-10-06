@@ -472,13 +472,13 @@ configured`, `casino_game.upserted` — all through the existing immutable
 
 ## 14a. Non-active tenants: new postings are refused (R3-GAME-POSTINGS-NONACTIVE-1)
 
-Owner decision 2026-10-05, fail closed (ADR 0095 §40.5, migration 0119). A verified bet, win or rollback
-(including the rollback tombstone of an unseen original) that would create a NEW ledger posting for a
+Owner decision 2026-10-05, fail closed (ADR 0095 §40.5, migration 0118). A verified bet, win or rollback
+that would create a NEW ledger posting for a
 suspended or closed tenant is refused inside the posting transaction with `ErrTenantNotActive`: no ledger
 write, no wallet change, answered `409` (never a retryable 5xx), and a durable audit row
 `casino_callback.rejected_tenant_not_active`. The check is `tenant.RequireActiveForGameplay` (advisory-lock
 pair with a status-change trigger, so there is no check-then-act race) placed after each function's own replay
-short-circuit; an exact replay of an already-posted callback still returns the original outcome. A DB trigger
+short-circuit (the bet gate sits after the E3 tombstone check, so a late original is still recorded as `original_tombstoned`); rollback tombstones are always written; an exact replay of an already-posted callback still returns the original outcome. A DB trigger
 on the casino ledger types is the backstop. Consequence: rounds open at closure strand until a staff path
 exists, so closing a tenant must first settle or void open rounds (owner questions Q-GP-1..4 in ADR 0095
 §40.5). Casino launch and reads are unchanged.

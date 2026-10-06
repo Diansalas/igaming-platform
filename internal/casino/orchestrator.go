@@ -1420,13 +1420,6 @@ func (o *Orchestrator) postBet(ctx context.Context, tx pgx.Tx, tenantID uuid.UUI
 		return ReceiveCallbackResult{Outcome: OutcomeSucceeded, LedgerTransactionID: &existingID, Replayed: true}, nil
 	}
 
-	// R3-GAME-POSTINGS-NONACTIVE-1: past the replay short-circuit this bet
-	// would be a NEW stake. Refused for a suspended/closed tenant, in this
-	// transaction, before any session/RG/risk evaluation or write.
-	if err := requireActiveTenantForNewPosting(ctx, tx, tenantID, providerID, ""); err != nil {
-		return ReceiveCallbackResult{}, err
-	}
-
 	// Stage 10.3 CAS-CAP-ROLLBACK-1, E3 (§1.3/§1.4 step 2): a rollback for
 	// THIS exact provider_tx_id was already accepted while this reference
 	// itself had never been posted (F8's late-original-after-tombstone
@@ -1478,6 +1471,15 @@ func (o *Orchestrator) postBet(ctx context.Context, tx pgx.Tx, tenantID uuid.UUI
 			return ReceiveCallbackResult{}, err
 		}
 		return ReceiveCallbackResult{Outcome: OutcomeDeclined, DeclineReason: "original_rolled_back"}, nil
+	}
+
+	// R3-GAME-POSTINGS-NONACTIVE-1: past the replay and E3 tombstone checks this
+	// bet would be a NEW stake. Refused for a suspended/closed tenant, in this
+	// transaction, before any session/RG/risk evaluation or write. Placed AFTER
+	// E3 (ledger-finance C3) so a late original on a non-active tenant is still
+	// recorded as original_tombstoned (C7 evidence).
+	if err := requireActiveTenantForNewPosting(ctx, tx, tenantID, providerID, ""); err != nil {
+		return ReceiveCallbackResult{}, err
 	}
 
 	if event.SessionID == uuid.Nil {
@@ -2105,12 +2107,10 @@ func (o *Orchestrator) postRollback(ctx context.Context, tx pgx.Tx, tenantID uui
 		tenantID, providerID, event.OriginalProviderTxID,
 	).Scan(&originalID, &originalType)
 	if errors.Is(err, pgx.ErrNoRows) {
-		// R3-GAME-POSTINGS-NONACTIVE-1: writing a tombstone is a NEW ledger
-		// write; refused for a suspended/closed tenant (the late original
-		// would be refused by the same check, so nothing is left unguarded).
-		if err := requireActiveTenantForNewPosting(ctx, tx, tenantID, providerID, ""); err != nil {
-			return ReceiveCallbackResult{}, err
-		}
+		// R3-GAME-POSTINGS-NONACTIVE-1 (ledger-finance C1): a tombstone moves
+		// no money and is the protection against a late-arriving original, so
+		// it is ALWAYS written, also for a suspended/closed tenant. It is
+		// deliberately NOT gated.
 		txID, tombErr := postRollbackTombstone(ctx, tx, tenantID, providerID, event)
 		if tombErr != nil {
 			return ReceiveCallbackResult{}, tombErr

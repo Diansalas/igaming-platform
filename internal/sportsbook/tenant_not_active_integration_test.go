@@ -217,8 +217,6 @@ func TestTenantNotActive_SettlementPathsRefused(t *testing.T) {
 	steps := []step{
 		{"settle_open_bet", func(*testing.T, sbFixture, uuid.UUID, uuid.UUID) {},
 			func(b, a uuid.UUID) SettlementEvent { return settleEvent(b, a, 1, SettlementOutcomeWon, stdPayout) }, BetStatusOpen},
-		{"rollback_tombstone_of_unseen_settlement", func(*testing.T, sbFixture, uuid.UUID, uuid.UUID) {},
-			func(b, a uuid.UUID) SettlementEvent { return rollbackEvent(b, a, 1) }, BetStatusOpen},
 		{"void_open_bet", func(*testing.T, sbFixture, uuid.UUID, uuid.UUID) {},
 			func(b, a uuid.UUID) SettlementEvent { return voidEvent(b, a, "market_cancelled") }, BetStatusOpen},
 		{"rollback_current_settlement", func(t *testing.T, f sbFixture, a, b uuid.UUID) {
@@ -322,7 +320,7 @@ func TestTenantNotActive_CrossTenantIsolation(t *testing.T) {
 	}
 }
 
-// TestTenantNotActive_DatabaseBackstopRefusesGameplayTypesOnly: the 0119
+// TestTenantNotActive_DatabaseBackstopRefusesGameplayTypesOnly: the 0118
 // trigger refuses every gameplay ledger type for a non-active tenant (SQLSTATE
 // GP010) and leaves the other transaction types alone (payments, staff
 // manual adjustment).
@@ -506,5 +504,74 @@ func TestTenantNotActive_GateFailsClosedWhenTheRowIsNotVisible(t *testing.T) {
 		return tenant.RequireActiveForGameplay(ctx, tx, uuid.Nil)
 	}); !errors.Is(err, tenant.ErrNotActiveForGameplay) {
 		t.Fatalf("a nil tenant id must be refused, got %v", err)
+	}
+}
+
+// TestTenantNotActive_TombstonesAreAlwaysWritten (ledger-finance C1): a
+// rollback of a never-seen settlement moves no money and protects against a
+// late settle, so its tombstone is written even for a suspended tenant, is
+// idempotent, and the late settle stays refused (also after reactivation).
+func TestTenantNotActive_TombstonesAreAlwaysWritten(t *testing.T) {
+	owner := testPool(t)
+	rt := runtimePool(t)
+	f, actor, betID := newStdBet(t, owner)
+	setTenantStatus(t, owner, f.tenantID, "suspended")
+	txs0, entries0 := ledgerCounts(t, owner, f.tenantID)
+
+	res, err := simulateSettlement(t, rt, f.tenantID, rollbackEvent(betID, actor, 1))
+	if err != nil || res.Rejected() || res.Result != SettlementResultTombstoned {
+		t.Fatalf("tombstone must be written on a suspended tenant: %+v err=%v", res, err)
+	}
+	txs1, entries1 := ledgerCounts(t, owner, f.tenantID)
+	if txs1 != txs0+1 || entries1 != entries0 {
+		t.Fatalf("expected exactly one tombstone and no entries: tx %d->%d entries %d->%d", txs0, txs1, entries0, entries1)
+	}
+	again, err := simulateSettlement(t, rt, f.tenantID, rollbackEvent(betID, actor, 1))
+	if err != nil || again.Result != SettlementResultReplayed {
+		t.Fatalf("tombstone replay must be idempotent: %+v err=%v", again, err)
+	}
+	if txs2, _ := ledgerCounts(t, owner, f.tenantID); txs2 != txs1 {
+		t.Fatalf("replay wrote: %d -> %d", txs1, txs2)
+	}
+	late, err := simulateSettlement(t, rt, f.tenantID, settleEvent(betID, actor, 1, SettlementOutcomeWon, stdPayout))
+	if err != nil || late.RejectionCode != SettlementRejectTombstoned {
+		t.Fatalf("late settle must be refused as tombstoned: %+v err=%v", late, err)
+	}
+	setTenantStatus(t, owner, f.tenantID, "active")
+	late, err = simulateSettlement(t, rt, f.tenantID, settleEvent(betID, actor, 1, SettlementOutcomeWon, stdPayout))
+	if err != nil || late.RejectionCode != SettlementRejectTombstoned {
+		t.Fatalf("after reactivation the late settle stays refused as tombstoned: %+v err=%v", late, err)
+	}
+}
+
+// TestTenantNotActive_BackstopReplayWithDifferentTypeWritesNothing (security):
+// a raw insert reusing another transaction's existing idempotency_key but a
+// different gameplay type on a closed tenant must not add a row (the trigger's
+// replay exemption lets it reach the unique index, which refuses it).
+func TestTenantNotActive_BackstopReplayWithDifferentTypeWritesNothing(t *testing.T) {
+	owner := testPool(t)
+	rt := runtimePool(t)
+	f, actor, betID := newStdBet(t, owner)
+	mustSimulate(t, owner, f.tenantID, settleEvent(betID, actor, 1, SettlementOutcomeWon, stdPayout))
+	var key string
+	if err := owner.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT idempotency_key FROM ledger_transactions WHERE tenant_id = $1 AND transaction_type = 'sportsbook_settlement'`, f.tenantID).Scan(&key)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	setTenantStatus(t, owner, f.tenantID, "closed")
+	txs0, _ := ledgerCounts(t, owner, f.tenantID)
+	err := rt.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx,
+			`INSERT INTO ledger_transactions (tenant_id, transaction_type, idempotency_key, correlation_id) VALUES ($1, 'casino_win', $2, $3)`,
+			f.tenantID, key, uuid.New())
+		return err
+	})
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) || pgErr.Code != "23505" {
+		t.Fatalf("expected a unique violation (23505), got %v", err)
+	}
+	if txs1, _ := ledgerCounts(t, owner, f.tenantID); txs1 != txs0 {
+		t.Fatalf("row count changed: %d -> %d", txs0, txs1)
 	}
 }
