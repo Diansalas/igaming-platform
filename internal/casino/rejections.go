@@ -8,6 +8,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+
+	"github.com/Diansalas/igaming-platform/internal/audit"
 )
 
 // Stage 10.3 W2b, CAS-RECON-1: the verified-only casino callback rejection
@@ -75,7 +77,22 @@ const (
 	// idempotent tombstone result), with no ledger or audit record of its
 	// own; this row is its only durable trace.
 	RejectionRollbackOfTombstonedOriginal RejectionClass = "rollback_of_tombstoned_original"
+
+	// RejectionTenantNotActive: a verified bet/win/rollback that would have
+	// created a NEW posting for a suspended or closed tenant (owner decision
+	// R3-GAME-POSTINGS-NONACTIVE-1, ADR 0095 section 40.5). It is NOT a value
+	// of casino_callback_rejections.reason_class: the table's classes are
+	// ledger-finance-ruled and pinned against its CHECK constraint by the
+	// reconciliation partition test, so a new class needs a ruling and a
+	// reconciliation change that this decision explicitly excludes.
+	// RecordCallbackRejection writes this class as an append-only audit_log
+	// row (action casino_callback.rejected_tenant_not_active) instead.
+	RejectionTenantNotActive RejectionClass = "tenant_not_active"
 )
+
+// AuditActionCallbackRejectedTenantNotActive is the audit_log action that
+// carries a RejectionTenantNotActive record.
+const AuditActionCallbackRejectedTenantNotActive = "casino_callback.rejected_tenant_not_active"
 
 // rejectionClassFor maps a post-verification error from postBet/postWin/
 // postRollback to its rejection class. ok=false means "not a recorded
@@ -92,6 +109,8 @@ func rejectionClassFor(err error) (RejectionClass, bool) {
 	switch {
 	case err == nil:
 		return "", false
+	case errors.Is(err, ErrTenantNotActive):
+		return RejectionTenantNotActive, true
 	case errors.Is(err, ErrProviderTxPayloadMismatch):
 		return RejectionPayloadMismatch, true
 	case errors.Is(err, ErrOriginalTombstoned):
@@ -175,6 +194,28 @@ func wrapRejection(providerID string, event CallbackEvent) func(ReceiveCallbackR
 func RecordCallbackRejection(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, providerID string, rej CallbackRejection, requestID string) (inserted bool, err error) {
 	if tenantID == uuid.Nil || providerID == "" || rej.ProviderTxID == "" || rej.Class == "" {
 		return false, fmt.Errorf("%w: a callback rejection requires tenant, provider, provider_tx_id and class", ErrInvalidInput)
+	}
+	if rej.Class == RejectionTenantNotActive {
+		// Durable evidence for staff and reconciliation, in the append-only
+		// audit store (no casino_callback_rejections row; see the class doc).
+		md := map[string]any{
+			"provider_id": providerID, "event_type": string(rej.EventType), "provider_tx_id": rej.ProviderTxID,
+			"round_id": rej.RoundID, "asset_code": rej.AssetCode, "reason": "tenant_not_active",
+			"request_id": requestID,
+		}
+		if rej.EventType == CallbackEventRollback {
+			md["original_provider_tx_id"] = rej.OriginalProviderTxID
+		} else if rej.Amount > 0 {
+			md["amount"] = rej.Amount
+		}
+		if err := audit.Record(ctx, tx, audit.Entry{
+			TenantID: tenantID, ActorType: audit.ActorSystem, Action: AuditActionCallbackRejectedTenantNotActive,
+			TargetType: "casino_provider_tx", TargetID: providerID + ":" + rej.ProviderTxID, Outcome: audit.OutcomeDenied,
+			RequestID: requestID, Metadata: md,
+		}); err != nil {
+			return false, fmt.Errorf("casino: audit callback refused for non-active tenant: %w", err)
+		}
+		return true, nil
 	}
 	var original, amount any
 	if rej.EventType == CallbackEventRollback {

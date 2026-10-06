@@ -118,3 +118,48 @@ func TestPost_RejectsZeroAmountEntry(t *testing.T) {
 		t.Fatalf("expected ErrInvalidEntry for a zero-amount entry, got %v", err)
 	}
 }
+
+// TestPost_RejectsTombstoneWithEntries: a tombstone moves no money. Post must
+// refuse a tombstone that carries real, balanced entries with ErrInvalidEntry
+// and write NO ledger_transactions, ledger_entries or projection change (the
+// gameplay tenant-status gate's tombstone exemption relies on this).
+func TestPost_RejectsTombstoneWithEntries(t *testing.T) {
+	pool := testPool(t)
+	f := seedFixture(t, pool)
+
+	counts := func(ctx context.Context, tx pgx.Tx) (txs, entries int, cash int64) {
+		if err := tx.QueryRow(ctx, `SELECT count(*) FROM ledger_transactions WHERE tenant_id = $1`, f.tenantID).Scan(&txs); err != nil {
+			t.Fatal(err)
+		}
+		if err := tx.QueryRow(ctx, `SELECT count(*) FROM ledger_entries WHERE tenant_id = $1`, f.tenantID).Scan(&entries); err != nil {
+			t.Fatal(err)
+		}
+		b, err := GetProjectedBalance(ctx, tx, f.cashAccountID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return txs, entries, b.Signed()
+	}
+	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		tx0, e0, c0 := counts(ctx, tx)
+		_, perr := Post(ctx, tx, TransactionInput{
+			TenantID: f.tenantID, TransactionType: TxTombstone,
+			IdempotencyKey: "tombstone-entries-" + uuid.NewString(), CorrelationID: uuid.New(),
+			Entries: []EntryInput{
+				{LedgerAccountID: f.clearingID, Direction: Debit, Amount: 5},
+				{LedgerAccountID: f.cashAccountID, Direction: Credit, Amount: 5},
+			},
+		})
+		if !errors.Is(perr, ErrInvalidEntry) {
+			t.Errorf("expected ErrInvalidEntry for a tombstone with entries, got %v", perr)
+		}
+		tx1, e1, c1 := counts(ctx, tx)
+		if tx1 != tx0 || e1 != e0 || c1 != c0 {
+			t.Errorf("a refused tombstone must write nothing: tx %d->%d entries %d->%d cash %d->%d", tx0, tx1, e0, e1, c0, c1)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}

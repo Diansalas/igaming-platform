@@ -18,6 +18,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/money"
 	"github.com/Diansalas/igaming-platform/internal/rg"
 	"github.com/Diansalas/igaming-platform/internal/risk"
+	"github.com/Diansalas/igaming-platform/internal/tenant"
 )
 
 // placeholderRoundingRuleID stands in for the immutable, append-only
@@ -154,6 +155,30 @@ func PlaceBet(ctx context.Context, tx pgx.Tx, params PlaceBetParams) (PlaceBetRe
 			return PlaceBetResult{}, fmt.Errorf("%w: existing bet %s", ErrBetIdempotencyKeyReused, existing.ID)
 		}
 		return PlaceBetResult{Bet: existing, Accepted: true}, nil
+	}
+
+	// R3-GAME-POSTINGS-NONACTIVE-1 (owner decision 2026-10-05, ADR 0095
+	// section 40.5): past the idempotency short-circuit this is a NEW stake.
+	// Refused for a suspended/closed tenant, in this transaction, before any
+	// catalogue/RG/risk/exposure evaluation or write, via the shared race-free
+	// primitive. A decline (not a Go error), so its audit record commits.
+	if err := tenant.RequireActiveForGameplay(ctx, tx, params.TenantID); err != nil {
+		if !errors.Is(err, tenant.ErrNotActiveForGameplay) {
+			return PlaceBetResult{}, fmt.Errorf("sportsbook: check tenant status: %w", err)
+		}
+		if aerr := audit.Record(ctx, tx, audit.Entry{
+			TenantID: params.TenantID, ActorType: audit.ActorSystem, Action: "sportsbook_bet.denied_tenant_not_active",
+			TargetType: "player_account", TargetID: params.PlayerAccountID.String(), Outcome: audit.OutcomeDenied,
+			Metadata: map[string]any{
+				"reason_code": "tenant_not_active", "brand_id": params.BrandID.String(),
+				"selection_id": params.SelectionID.String(), "asset_code": params.AssetCode,
+				"stake_amount": params.StakeAmount,
+			},
+		}); aerr != nil {
+			return PlaceBetResult{}, fmt.Errorf("sportsbook: audit tenant-not-active denial: %w", aerr)
+		}
+		return PlaceBetResult{Accepted: false, RejectionCategory: RejectionTenantNotActive, RejectionCode: "tenant_not_active",
+			RejectionMessage: "betting is not available for this operator"}, nil
 	}
 
 	// Structural validation (doc 09 §3.3 step 1, narrowed to this stage's

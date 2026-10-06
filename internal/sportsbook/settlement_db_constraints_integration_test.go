@@ -42,12 +42,16 @@ func postRawLedgerTx(t *testing.T, pool *db.Pool, f sbFixture, txType ledger.Tra
 		if err != nil {
 			return err
 		}
+		entries := []ledger.EntryInput{
+			{LedgerAccountID: house[0], Direction: ledger.Debit, Amount: 1},
+			{LedgerAccountID: cash, Direction: ledger.Credit, Amount: 1},
+		}
+		if txType == ledger.TxTombstone {
+			entries = nil // a tombstone carries no entries (ledger.Post refuses them)
+		}
 		res, err := ledger.Post(ctx, tx, ledger.TransactionInput{
 			TenantID: f.tenantID, TransactionType: txType, IdempotencyKey: key, CorrelationID: correlationID,
-			Entries: []ledger.EntryInput{
-				{LedgerAccountID: house[0], Direction: ledger.Debit, Amount: 1},
-				{LedgerAccountID: cash, Direction: ledger.Credit, Amount: 1},
-			},
+			Entries: entries,
 		})
 		id = res.TransactionID
 		return err
@@ -499,12 +503,16 @@ func postRawLedgerTxOnTx(ctx context.Context, tx pgx.Tx, tenantID, walletID uuid
 	if err != nil {
 		return uuid.Nil, err
 	}
+	entries := []ledger.EntryInput{
+		{LedgerAccountID: house[0], Direction: ledger.Debit, Amount: 1},
+		{LedgerAccountID: cash, Direction: ledger.Credit, Amount: 1},
+	}
+	if txType == ledger.TxTombstone {
+		entries = nil // a tombstone carries no entries (ledger.Post refuses them)
+	}
 	res, err := ledger.Post(ctx, tx, ledger.TransactionInput{
 		TenantID: tenantID, TransactionType: txType, IdempotencyKey: key, CorrelationID: correlationID,
-		Entries: []ledger.EntryInput{
-			{LedgerAccountID: house[0], Direction: ledger.Debit, Amount: 1},
-			{LedgerAccountID: cash, Direction: ledger.Credit, Amount: 1},
-		},
+		Entries: entries,
 	})
 	if err != nil {
 		return uuid.Nil, err

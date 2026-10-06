@@ -1156,7 +1156,8 @@ paths:
         "409":
           description: >
             SETTLEMENT_PAYLOAD_MISMATCH, SETTLEMENT_TOMBSTONED, BET_VOIDED,
-            BET_ALREADY_SETTLED, GENERATION_OUT_OF_SEQUENCE, or
+            BET_ALREADY_SETTLED, GENERATION_OUT_OF_SEQUENCE, SETTLEMENT_TENANT_NOT_ACTIVE
+            (the tenant is suspended or closed: no new settlement is posted), or
             SETTLEMENT_INTEGRITY
         "422":
           description: PAYOUT_INVALID or ASSET_MISMATCH (anti-minting / claim-vs-derived-value validation)
@@ -6378,7 +6379,7 @@ components:
         bet: { $ref: "#/components/schemas/Bet" }
         rejection_category:
           type: string
-          enum: [odds_changed, event_not_open, insufficient_funds, rg_denied, risk_denied, jurisdiction_denied]
+          enum: [odds_changed, event_not_open, insufficient_funds, rg_denied, risk_denied, jurisdiction_denied, tenant_not_active]
           description: >-
             jurisdiction_denied (Stage 9.2, ADR 0083 Part C) collapses two
             internally-distinguishable outcomes (jurisdiction_blocked /

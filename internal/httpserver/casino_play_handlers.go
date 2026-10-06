@@ -266,6 +266,13 @@ func writeCasinoCallbackError(w http.ResponseWriter, requestID string, logger in
 		apierror.Write(w, requestID, apierror.CodeConflict, "original transaction already rolled back")
 		return
 	}
+	if errors.Is(err, casino.ErrTenantNotActive) {
+		// R3-GAME-POSTINGS-NONACTIVE-1: mirrors newCasinoWebhookHandler's
+		// branch - a deterministic 409, nothing posted.
+		logger.Error("casino_play_refused_tenant_not_active", "action", action)
+		apierror.Write(w, requestID, apierror.CodeConflict, "request rejected")
+		return
+	}
 	if errors.Is(err, casino.ErrOriginalTombstoned) {
 		// Mirrors newCasinoWebhookHandler's own identical branch (Stage
 		// 10.3 CAS-CAP-ROLLBACK-1, E10; gate 10.3-W1 ledger-finance

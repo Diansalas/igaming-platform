@@ -14,6 +14,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/identity"
 	"github.com/Diansalas/igaming-platform/internal/ledger"
 	"github.com/Diansalas/igaming-platform/internal/providerref"
+	"github.com/Diansalas/igaming-platform/internal/tenant"
 )
 
 // Settlement lifecycle for cash-funded single bets, IN-HOUSE MOCK MODE
@@ -96,7 +97,12 @@ const (
 	// audit record carries when the actor check itself fails (security
 	// review P3-2), so a deactivated/unknown staff principal presenting a
 	// still-valid token is a recorded, not merely logged, event.
-	SettlementRejectActorNotActive      = "ACTOR_NOT_ACTIVE"
+	SettlementRejectActorNotActive = "ACTOR_NOT_ACTIVE"
+	// SettlementRejectTenantNotActive: the tenant is suspended or closed, so
+	// no NEW settlement, void, rollback or rollback-tombstone is posted
+	// (R3-GAME-POSTINGS-NONACTIVE-1, owner decision 2026-10-05). Not an
+	// integrity alert; the audit record carries it.
+	SettlementRejectTenantNotActive     = "SETTLEMENT_TENANT_NOT_ACTIVE"
 	settlementAuditReasonCode           = "test_support_simulation"
 	settlementDriver                    = "test_support_simulation"
 	settlementMode                      = "in_house_mock"
@@ -124,6 +130,11 @@ var (
 	// ErrSettlementActorNotActive: the staff principal driving the
 	// simulation does not exist in this tenant or is not active.
 	ErrSettlementActorNotActive = errors.New("sportsbook: settlement actor is not an active staff user of this tenant")
+	// ErrSettlementTenantNotActive is lockAndPost's internal refusal for a
+	// suspended/closed tenant; SimulateSettlementEvent converts it into the
+	// SettlementRejectTenantNotActive rejection result. Never escapes the
+	// package.
+	ErrSettlementTenantNotActive = errors.New("sportsbook: tenant is not active; new settlement postings are refused")
 )
 
 // SettlementEvent is one simulated provider event. Every effect-bearing
@@ -364,14 +375,22 @@ func SimulateSettlementEvent(ctx context.Context, tx pgx.Tx, ev SettlementEvent)
 		return rejectSettlement(ctx, tx, ev, &bet, rejection, true)
 	}
 
+	var res SettlementResult
 	switch ev.EventType {
 	case SettlementEventSettle:
-		return settleBet(ctx, tx, ev, state)
+		res, err = settleBet(ctx, tx, ev, state)
 	case SettlementEventRollback:
-		return rollbackBet(ctx, tx, ev, state)
+		res, err = rollbackBet(ctx, tx, ev, state)
 	default:
-		return voidBet(ctx, tx, ev, state)
+		res, err = voidBet(ctx, tx, ev, state)
 	}
+	if errors.Is(err, ErrSettlementTenantNotActive) {
+		// R3-GAME-POSTINGS-NONACTIVE-1: refused before anything was locked or
+		// written (lockAndPost is the first write of every posting branch),
+		// so the rejection audit record commits with no ledger change.
+		return rejectSettlement(ctx, tx, ev, &bet, SettlementRejectTenantNotActive, false)
+	}
+	return res, err
 }
 
 func lockBetForSettlement(ctx context.Context, tx pgx.Tx, betID uuid.UUID) (Bet, error) {
@@ -939,6 +958,29 @@ func buildRollbackInput(ctx context.Context, tx pgx.Tx, st settlementState, sett
 // ledger-level replay or key reuse is therefore an integrity failure that
 // aborts the transaction (§4.7).
 func lockAndPost(ctx context.Context, tx pgx.Tx, chainCausation bool, ins ...ledger.TransactionInput) ([]uuid.UUID, error) {
+	// R3-GAME-POSTINGS-NONACTIVE-1 (owner decision 2026-10-05, ADR 0095
+	// section 40.5): the single choke point of every NEW settlement, void,
+	// rollback and rollback-tombstone posting. Replays never reach here (the
+	// decision table answers them from history). Runs before any projection
+	// lock or ledger write; SimulateSettlementEvent turns the sentinel into a
+	// recorded rejection, so nothing of the call is posted.
+	// Ledger-finance C1: a tombstone moves no money and protects against a late
+	// settlement, so it is ALWAYS written; the gate is skipped when every input
+	// is an entry-less tombstone (ledger.Post also refuses a tombstone with entries).
+	allTombstones := len(ins) > 0
+	for _, in := range ins {
+		if in.TransactionType != ledger.TxTombstone || len(in.Entries) != 0 {
+			allTombstones = false
+		}
+	}
+	if len(ins) > 0 && !allTombstones {
+		if err := tenant.RequireActiveForGameplay(ctx, tx, ins[0].TenantID); err != nil {
+			if errors.Is(err, tenant.ErrNotActiveForGameplay) {
+				return nil, ErrSettlementTenantNotActive
+			}
+			return nil, fmt.Errorf("sportsbook: check tenant status: %w", err)
+		}
+	}
 	if _, err := ledger.LockProjectionsForPostings(ctx, tx, ins...); err != nil {
 		return nil, fmt.Errorf("sportsbook: lock settlement projections: %w", err)
 	}

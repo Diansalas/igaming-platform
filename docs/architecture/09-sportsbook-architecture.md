@@ -1761,3 +1761,16 @@ potential payout the book would owe" quantity §1.7 names — computed from
 `sportsbook_bets` (a domain projection), never written to or read from the
 ledger, and never surfaced to a player (INV-SB-EXP-2): no amount or
 threshold reaches `PlaceBetResult` or any HTTP response.
+
+## 17. Non-active tenants: new postings are refused (R3-GAME-POSTINGS-NONACTIVE-1)
+
+Owner decision 2026-10-05, fail closed (ADR 0095 §40.5, migration 0118). `PlaceBet` declines a new bet
+(`rejection_category` `tenant_not_active`, audit `sportsbook_bet.denied_tenant_not_active`), and every
+settlement posting (settle, rollback of a current settlement, void of an open bet, void
+after settlement; a rollback tombstone is always written, i.e. also the staff `SimulateSettlementEvent` path) is refused in `lockAndPost` with the
+rejection `SETTLEMENT_TENANT_NOT_ACTIVE` (HTTP 409, `sportsbook_bet.settlement_rejected` audit row). Both run
+in the posting transaction through `tenant.RequireActiveForGameplay` (advisory-lock pair plus a status-change
+trigger: no check-then-act race); replays are answered from history and never reach the check; a DB trigger on
+the four sportsbook ledger types is the backstop. Nothing is posted and no wallet changes. Consequence: open
+bets at closure strand until a staff path exists, so closing a tenant must first settle or void them (ADR 0095
+§40.5, owner question Q-GP-1).

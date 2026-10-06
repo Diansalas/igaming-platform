@@ -223,6 +223,10 @@ func TestMigration0097_DenyTriggerBindsEvenWithAPermissiveUpdatePolicy(t *testin
 // dropped to prove the backstop detects it.
 func TestCasinoConsistency_C5_TombstoneConflict(t *testing.T) {
 	pool, _ := migration0097Scratch(t, "recon_c5_")
+	// This scratch schema stops at 0097 but the test drives the current
+	// casino posting code, which calls the 0118 gameplay tenant-status gate
+	// (R3-GAME-POSTINGS-NONACTIVE-1). Install exactly that migration's SQL.
+	applyGameplayGateMigration(t, pool)
 	w := newCasWorld(t, pool)
 	w.buildCleanWorld(t)
 	w.mustRunClean(t)
@@ -255,5 +259,21 @@ func TestCasinoConsistency_C5_TombstoneConflict(t *testing.T) {
 	mustOneOfKind(t, ms, MismatchKindCasTombstoneConflict, "tombstone="+tombstoneID.String(), "provider_tx_id=never-5")
 	if len(ms) != 1 {
 		t.Fatalf("the conflict must be the only finding, got %+v", ms)
+	}
+}
+
+// applyGameplayGateMigration runs migration 0118's up SQL on a scratch schema
+// that was migrated only through an older version.
+func applyGameplayGateMigration(t *testing.T, pool *db.Pool) {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join("..", "..", "migrations", "0118_gameplay_posting_tenant_status_gate.up.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, string(b))
+		return err
+	}); err != nil {
+		t.Fatalf("apply 0118 on scratch: %v", err)
 	}
 }

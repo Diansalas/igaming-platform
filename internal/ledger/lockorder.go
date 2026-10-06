@@ -365,6 +365,13 @@ func prepareEntries(ctx context.Context, tx pgx.Tx, in TransactionInput) ([]Entr
 		(in.ReasonCode == nil || *in.ReasonCode == "") {
 		return nil, fmt.Errorf("%w: %s requires a reason code", ErrInvalidEntry, in.TransactionType)
 	}
+	// A tombstone moves no money (TransactionInput.Entries doc). Refusing a
+	// tombstone that carries entries closes the "tombstone as a money-moving
+	// type" route, on which the gameplay tenant-status gate's tombstone
+	// exemption (R3-GAME-POSTINGS-NONACTIVE-1) relies.
+	if in.TransactionType == TxTombstone && len(in.Entries) != 0 {
+		return nil, fmt.Errorf("%w: a tombstone must carry no entries", ErrInvalidEntry)
+	}
 	for _, e := range in.Entries {
 		if e.Amount <= 0 {
 			return nil, fmt.Errorf("%w: entry amount must be positive, got %d", ErrInvalidEntry, e.Amount)

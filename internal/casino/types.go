@@ -197,6 +197,17 @@ var (
 	// in a committing transaction; this sentinel is used only where no
 	// such decline convention exists (postWin, E10).
 	ErrOriginalTombstoned = errors.New("casino: this provider_tx_id is already covered by a tombstone (its rollback was accepted before it was ever posted)")
+	// ErrTenantNotActive is returned when a verified bet, win or rollback
+	// callback would create a NEW financial posting (a ledger write,
+	// including a rollback tombstone) for a suspended or closed tenant
+	// (owner decision R3-GAME-POSTINGS-NONACTIVE-1, ADR 0095 section 40.5).
+	// Deterministic, not retryable, nothing is posted. An exact replay of an
+	// already-posted callback never returns it (a replay is a read, not a new
+	// movement). It is deliberately NOT a casino_callback_rejections class:
+	// that table's reason classes are ledger-finance-ruled and pinned
+	// against its CHECK constraint (reconciliation partition); the durable
+	// record is an append-only audit_log row instead (RecordCallbackRejection).
+	ErrTenantNotActive = errors.New("casino: tenant is not active; new gameplay postings are refused")
 	// ErrRiskOutcomeUnrecognized is returned when risk.Evaluate returns a
 	// RiskDecision whose Outcome is none of allow/deny/review. Unreachable
 	// through risk.Evaluate itself (which self-checks its own output), and

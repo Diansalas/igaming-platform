@@ -324,6 +324,11 @@ const (
 	// pending") - never matched_trigger or policy_version (security
 	// condition 8).
 	RejectionKYCDenied = "kyc_denied"
+	// RejectionTenantNotActive is R3-GAME-POSTINGS-NONACTIVE-1's addition
+	// (owner decision 2026-10-05, ADR 0095 section 40.5): the tenant is
+	// suspended or closed, so no NEW bet is accepted. Carries no detail; the
+	// audit record (sportsbook_bet.denied_tenant_not_active) names the status.
+	RejectionTenantNotActive = "tenant_not_active"
 )
 
 // Provider is sportsbook's minimal, provider-neutral catalogue-sync
