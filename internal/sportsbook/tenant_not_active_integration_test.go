@@ -611,9 +611,24 @@ func TestTenantNotActive_LockAndPostTombstoneExemptionIsNarrow(t *testing.T) {
 		}
 		// ledger.Post refuses a tombstone that carries entries.
 		err := rt.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-			in := withEntries
-			in.IdempotencyKey, in.CorrelationID = "tomb-entries-"+uuid.NewString(), uuid.New()
-			_, err := ledger.Post(ctx, tx, in)
+			// Real, balanced entries, so only the tombstone rule can refuse it.
+			cash, err := ledger.GetOrCreateAccount(ctx, tx, f.tenantID, &f.walletID, ledger.AccountPlayerCash, "EUR")
+			if err != nil {
+				return err
+			}
+			adj, err := ledger.GetOrCreateAccount(ctx, tx, f.tenantID, nil, ledger.AccountManualAdjustment, "EUR")
+			if err != nil {
+				return err
+			}
+			in := ledger.TransactionInput{
+				TenantID: f.tenantID, TransactionType: ledger.TxTombstone,
+				IdempotencyKey: "tomb-entries-" + uuid.NewString(), CorrelationID: uuid.New(),
+				Entries: []ledger.EntryInput{
+					{LedgerAccountID: adj, Direction: ledger.Debit, Amount: 1},
+					{LedgerAccountID: cash, Direction: ledger.Credit, Amount: 1},
+				},
+			}
+			_, err = ledger.Post(ctx, tx, in)
 			return err
 		})
 		if !errors.Is(err, ledger.ErrInvalidEntry) {
