@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/Diansalas/igaming-platform/internal/webhookauth"
 )
@@ -102,18 +103,82 @@ func TestValidateManifest_ProductionEligibleAdapterSatisfiedByCallbackEcho(t *te
 	}
 }
 
-func TestValidateManifest_ProductionEligibleAdapterSatisfiedByStatusQuery(t *testing.T) {
+// B7: by_provider_or_merchant_reference alone no longer satisfies LF95-C5 (no
+// merchant-reference status method exists in the PaymentProvider interface).
+func TestB7_ValidateManifest_MerchantReferenceStatusQueryAloneRefused(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		cap  AdapterCapability
+	}{
+		{"deposit", AdapterCapability{ProviderID: "real-psp-3", SupportsDeposit: true,
+			Manifest: OperationManifest{SupportsDeposit: true, StatusQuery: "by_provider_or_merchant_reference"}}},
+		{"withdrawal", AdapterCapability{ProviderID: "real-psp-3w", SupportsWithdrawal: true,
+			Manifest: OperationManifest{StatusQuery: "by_provider_or_merchant_reference"}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateManifest(nonSyntheticFakeProvider{capability: tc.cap}, tc.cap)
+			if !errors.Is(err, ErrManifestRegistrationRefused) {
+				t.Fatalf("expected ErrManifestRegistrationRefused, got %v", err)
+			}
+		})
+	}
+}
+
+func TestB7_ValidateManifest_MerchantReferenceStatusQueryWithCallbackEchoAccepted(t *testing.T) {
 	declared := AdapterCapability{
-		ProviderID:         "real-psp-3",
-		SupportsWithdrawal: true,
+		ProviderID: "real-psp-3b", SupportsDeposit: true, SupportsWithdrawal: true,
 		Manifest: OperationManifest{
-			CallbackEchoesMerchantReference: false,
-			StatusQuery:                     "by_provider_or_merchant_reference",
+			SupportsDeposit: true, CallbackEchoesMerchantReference: true, StatusQuery: "by_provider_or_merchant_reference",
 		},
 	}
-	fake := nonSyntheticFakeProvider{capability: declared}
-	if err := validateManifest(fake, declared); err != nil {
+	if err := validateManifest(nonSyntheticFakeProvider{capability: declared}, declared); err != nil {
 		t.Fatalf("unexpected refusal: %v", err)
+	}
+}
+
+// B7: a synthetic (MOCK) adapter declaring the merchant-reference query alone
+// stays exempt.
+func TestB7_ValidateManifest_SyntheticMerchantReferenceStatusQueryStillExempt(t *testing.T) {
+	mock := NewMockProvider("mock-b7-test", "EUR")
+	declared := mock.Capabilities()
+	declared.SupportsDeposit = true
+	declared.Manifest.CallbackEchoesMerchantReference = false
+	declared.Manifest.StatusQuery = "by_provider_or_merchant_reference"
+	if err := validateManifest(mock, declared); err != nil {
+		t.Fatalf("a Synthetic (MOCK) adapter must stay exempt, got %v", err)
+	}
+}
+
+// A1: the settlement window drives the T16 escalation; a negative or absurd value is refused at
+// registration for every adapter, and the boundary values are accepted.
+func TestA1_ValidateManifest_SettlementWindowCeiling(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		w       time.Duration
+		refused bool
+	}{
+		{"zero uses the default", 0, false},
+		{"one nanosecond", time.Nanosecond, false},
+		{"exactly the ceiling", MaxSettlementWindow, false},
+		{"one past the ceiling", MaxSettlementWindow + time.Nanosecond, true},
+		{"max duration (overflow shape)", time.Duration(1<<63 - 1), true},
+		{"negative", -time.Second, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mock := NewMockProvider("mock-a1", "EUR")
+			declared := mock.Capabilities()
+			declared.Manifest.SettlementWindow = tc.w
+			err := validateManifest(mock, declared)
+			if tc.refused != errors.Is(err, ErrManifestRegistrationRefused) || (!tc.refused && err != nil) {
+				t.Fatalf("synthetic window %v: err=%v, refused want %v", tc.w, err, tc.refused)
+			}
+			real := AdapterCapability{ProviderID: "real-a1", SupportsDeposit: true,
+				Manifest: OperationManifest{SupportsDeposit: true, CallbackEchoesMerchantReference: true, SettlementWindow: tc.w}}
+			err = validateManifest(nonSyntheticFakeProvider{capability: real}, real)
+			if tc.refused != errors.Is(err, ErrManifestRegistrationRefused) || (!tc.refused && err != nil) {
+				t.Fatalf("non-synthetic window %v: err=%v, refused want %v", tc.w, err, tc.refused)
+			}
+		})
 	}
 }
 

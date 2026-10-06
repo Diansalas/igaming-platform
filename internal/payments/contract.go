@@ -176,9 +176,11 @@ type OperationManifest struct {
 	// the platform sent it, so a success can always be convergeable even if
 	// the provider_reference alone is ambiguous. Registration
 	// (validateManifest) refuses a PRODUCTION-ELIGIBLE (non-Synthetic)
-	// adapter that supports deposit or withdrawal unless this is true OR
-	// StatusQuery is "by_provider_or_merchant_reference" - a MOCK/Synthetic
-	// adapter is exempt (there is no real vendor contract to check yet).
+	// adapter that supports deposit or withdrawal unless this is true (B7:
+	// StatusQuery "by_provider_or_merchant_reference" no longer satisfies it -
+	// the interface has no merchant-reference status method until adapter
+	// acceptance criterion A7) - a MOCK/Synthetic adapter is exempt (there is
+	// no real vendor contract to check yet).
 	CallbackEchoesMerchantReference bool
 }
 
@@ -187,4 +189,11 @@ type OperationManifest struct {
 const (
 	DefaultCallTimeout      = 30 * time.Second
 	DefaultSettlementWindow = 24 * time.Hour
+
+	// MaxSettlementWindow is the registration ceiling for a manifest's
+	// SettlementWindow (A1): a huge value would silently disable the B6/B7
+	// escalation (and could overflow window + lease arithmetic). 30 days is far
+	// beyond any card/bank/crypto settlement horizon; a vendor needing more is a
+	// decision for the architect, not a manifest value.
+	MaxSettlementWindow = 30 * 24 * time.Hour
 )

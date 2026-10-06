@@ -34,6 +34,7 @@ var staticRaiseGuardedHelpers = map[string]bool{
 	"internal/payments/alerts.go:raiseDepositParkAlert":       true,
 	"internal/payments/alerts.go:raisePollContradictionAlert": true,
 	"internal/payments/alerts.go:raiseMultipleSuccessAlert":   true,
+	"internal/payments/alerts.go:raiseDepositEscalationAlert": true,
 	"internal/reconciliation/alerts.go:raiseLedgerRunAlerts":  true,
 	"internal/reconciliation/alerts.go:raiseInTxMismatch":     true,
 	// PRH-2 E1 (ADR 0106 section 4.3): the KYC outbox terminal alert, raised in-tx
@@ -46,6 +47,8 @@ var staticInTxOwners = []string{
 	"internal/payments/drive.go:driveCreatedAttempt",
 	"internal/payments/deposit_v2.go:InitiateDepositAttempt",
 	"internal/payments/sweeper.go:processViaQueryStatus",
+	// B7: the reference-less submitting deposit's escalation transaction.
+	"internal/payments/sweeper.go:processUnreferenced",
 	// H-W1 moved the ledger_vs_projection evidence transaction (and its InTx/Flush) out of
 	// sweepTenants into runLedgerStreamForTenant, shared by the ordinary and observation sweeps.
 	"internal/reconciliation/scheduler.go:runLedgerStreamForTenant",
@@ -238,7 +241,7 @@ func staticDiscardedRaiseResults(calls []staticCall) []string {
 	guarded := map[string]bool{
 		"alerting.RaiseGuarded": true, "raiseDepositParkAlert": true, "raisePollContradictionAlert": true,
 		"raiseMultipleSuccessAlert": true, "raiseLedgerRunAlerts": true, "raiseInTxMismatch": true, "alertAfterDispute": true,
-		"raiseSubmissionFailedTerminal": true,
+		"raiseSubmissionFailedTerminal": true, "raiseDepositEscalationAlert": true,
 	}
 	var out []string
 	for _, c := range calls {
@@ -286,6 +289,31 @@ func g(ctx, tx any) {
 	}
 	if snap != 1 || inTx != 1 {
 		t.Fatalf("snapshot/InTx detection: snap=%d inTx=%d, want 1/1", snap, inTx)
+	}
+}
+
+// B6/B7: the deposit escalation raise is a sanctioned RaiseGuarded helper and its result must
+// never be dropped (negative control: a dropped call is flagged), and the one real call site
+// is the sweeper's single T16 helper.
+func TestStaticWiring_DepositEscalationRaiseResultNeverDiscarded_B6B7(t *testing.T) {
+	bad := `package p
+func f(ctx, tx any) {
+	raiseDepositEscalationAlert(ctx, tx, a, r)
+	_ = raiseDepositEscalationAlert(ctx, tx, a, r)
+}
+func g(ctx, tx any) error { return raiseDepositEscalationAlert(ctx, tx, a, r) }`
+	calls := staticCollectFromSource(t, "internal/x/bad.go", bad)
+	if d := staticDiscardedRaiseResults(calls); len(d) != 2 {
+		t.Fatalf("discarded-result guard must flag the two dropped escalation raises, got %v", d)
+	}
+	var real int
+	for _, c := range staticCollectCalls(t) {
+		if c.name == "raiseDepositEscalationAlert" && c.file == "internal/payments/sweeper.go" && c.fn == "escalateDepositIfDue" {
+			real++
+		}
+	}
+	if real != 1 {
+		t.Fatalf("expected exactly one raiseDepositEscalationAlert call in sweeper.go:escalateDepositIfDue, saw %d", real)
 	}
 }
 
@@ -387,6 +415,7 @@ var staticEvidenceCallerAllowlist = map[string]bool{
 	"internal/payments/receipt.go:ApplyReceiptEvidence":               true,
 	"internal/payments/receipt.go:applyDepositSuccessAndPost":         true,
 	"internal/payments/sweeper.go:applyStatusEvidence":                true,
+	"internal/payments/sweeper.go:applyPollPending":                   true,
 }
 
 func TestStaticWiring_EvidenceFunctionCallersAreInTxOrReviewed(t *testing.T) {

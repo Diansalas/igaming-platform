@@ -39,7 +39,22 @@ import (
 const (
 	alertReasonUnclassified          = "unclassified"
 	alertReasonPollContradictsTermin = "poll_evidence_contradicts_terminal_attempt"
+
+	// B6/B7 (PAY-DEPOSIT-ESCALATION-1, PAY-H-FOLLOWUPS-1 (11)): the T16
+	// deposit escalation reasons. Not terminal reasons (the attempt stays live,
+	// LF-C2 rule 5: never auto-decline), so they are not in
+	// DepositDisputeTerminalReasons and alertReasonFor still maps them to
+	// "unclassified"; they only ever reach a discriminator through
+	// raiseDepositEscalationAlert's own closed set below.
+	alertReasonDepositSettlementWindowExceeded = "deposit_settlement_window_exceeded"
+	alertReasonDepositUnreferencedSubmitting   = "deposit_unreferenced_submitting"
 )
+
+// depositEscalationReasons is the closed set of T16 deposit escalation reasons.
+var depositEscalationReasons = map[string]struct{}{
+	alertReasonDepositSettlementWindowExceeded: {},
+	alertReasonDepositUnreferencedSubmitting:   {},
+}
 
 // pollContradictionSubReasons is the closed set of sub-reasons an
 // auditPollTerminalContradiction call can carry.
@@ -106,6 +121,22 @@ func raisePollContradictionAlert(ctx context.Context, tx pgx.Tx, attempt Payment
 	}
 	return alerting.RaiseGuarded(ctx, tx, depositParkAlert(attempt, providerIDOrEmpty(attempt),
 		alertReasonPollContradictsTermin+":"+subReason))
+}
+
+// raiseDepositEscalationAlert raises the durable P1 for a deposit T16
+// escalation (settlement window exceeded, or a reference-less submitting
+// attempt past lease + window). The reason is validated against the closed
+// set (anything else becomes "unclassified", never echoed). Same placement
+// rule as raiseDepositParkAlert: inside an alerting.InTx closure's tx.
+func raiseDepositEscalationAlert(ctx context.Context, tx pgx.Tx, attempt PaymentAttempt, reason string) error {
+	if attempt.Operation != AttemptOperationDeposit {
+		return nil
+	}
+	if _, ok := depositEscalationReasons[reason]; !ok {
+		slog.Default().Error("payments_alert_reason_unclassified")
+		reason = alertReasonUnclassified
+	}
+	return alerting.RaiseGuarded(ctx, tx, depositParkAlert(attempt, providerIDOrEmpty(attempt), reason))
 }
 
 func intentDiscriminator(intentID uuid.UUID) string { return "intent:" + intentID.String() }

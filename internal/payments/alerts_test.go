@@ -47,6 +47,9 @@ func TestDepositParkAlert_ShapeIsValidForEveryReason(t *testing.T) {
 	for sub := range pollContradictionSubReasons {
 		reasons = append(reasons, alertReasonPollContradictsTermin+":"+sub)
 	}
+	for r := range depositEscalationReasons {
+		reasons = append(reasons, r)
+	}
 	for _, r := range reasons {
 		a := depositParkAlert(attempt, "mock", r)
 		if !disc.MatchString(a.Discriminator) {
@@ -73,6 +76,43 @@ func TestDepositParkAlert_ShapeIsValidForEveryReason(t *testing.T) {
 func TestRaiseDepositParkAlert_IsNoOpForPayoutAttempts(t *testing.T) {
 	attempt := PaymentAttempt{ID: uuid.New(), TenantID: uuid.New(), Operation: AttemptOperationPayout}
 	if err := raiseDepositParkAlert(nil, nil, attempt, "mock", TerminalReasonSyncAmountMismatch); err != nil { //nolint:staticcheck // nil ctx/tx are never touched on the no-op path
+		t.Fatalf("a payout attempt must be a no-op, got %v", err)
+	}
+}
+
+// B6/B7: the T16 escalation discriminator reasons are a closed set of exactly two values, they
+// are NOT terminal dispute reasons (the attempt stays live), and the terminal-reason mapper
+// never echoes them (it maps them to "unclassified" like any unlisted string).
+func TestB6B7_EscalationReasons_ClosedSet(t *testing.T) {
+	want := map[string]bool{"deposit_settlement_window_exceeded": true, "deposit_unreferenced_submitting": true}
+	if len(depositEscalationReasons) != len(want) {
+		t.Fatalf("closed escalation reason set = %v", depositEscalationReasons)
+	}
+	for r := range want {
+		if _, ok := depositEscalationReasons[r]; !ok {
+			t.Errorf("missing closed escalation reason %q", r)
+		}
+		if IsDepositDisputeTerminalReason(r) {
+			t.Errorf("%q must not be a terminal dispute reason (an escalation never changes state)", r)
+		}
+		if got := alertReasonFor(r); got != alertReasonUnclassified {
+			t.Errorf("alertReasonFor(%q) = %q, want unclassified", r, got)
+		}
+	}
+	disc := regexp.MustCompile(`^[A-Za-z0-9:_.-]{1,160}$`)
+	attempt := PaymentAttempt{ID: uuid.New(), TenantID: uuid.New(), Operation: AttemptOperationDeposit}
+	for r := range depositEscalationReasons {
+		a := depositParkAlert(attempt, "mock", r)
+		if !disc.MatchString(a.Discriminator) || a.Kind != alerting.KindPaymentWebhookIntegrity {
+			t.Errorf("bad escalation alert shape for %q: %+v", r, a)
+		}
+	}
+}
+
+// A payout attempt is a no-op for the deposit escalation raise (F-pay's surface).
+func TestRaiseDepositEscalationAlert_IsNoOpForPayoutAttempts(t *testing.T) {
+	attempt := PaymentAttempt{ID: uuid.New(), TenantID: uuid.New(), Operation: AttemptOperationPayout}
+	if err := raiseDepositEscalationAlert(nil, nil, attempt, alertReasonDepositSettlementWindowExceeded); err != nil { //nolint:staticcheck // nil ctx/tx are never touched on the no-op path
 		t.Fatalf("a payout attempt must be a no-op, got %v", err)
 	}
 }

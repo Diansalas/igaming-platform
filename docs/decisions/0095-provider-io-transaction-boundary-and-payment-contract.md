@@ -7267,3 +7267,83 @@ Still REFUSED on a non-active tenant (unchanged): a new bet (casino or sportsboo
 **Residuals.** (a) The PUBLIC casino webhook still answers a non-active tenant with the uniform pre-verification 401 (Q-GP-3), so a provider's rollback of a posted bet reaches the new stake-return path only through the orchestrator, the staff simulation and the player play route; making the public webhook deliver it needs the verify-before-status-check design (Q-GP-3). (b) On an ACTIVE tenant a casino rollback of a bet whose round has a win posted is still allowed (existing rule); on a NON-ACTIVE tenant it is refused while the win is unreversed (C1), because the rollback of the win stays refused (owner decision unchanged) and the player would otherwise keep stake and win. (c) Once-only is database-enforced for casino reversals (C3, partial unique index, migration 0121; the C4 reconciliation `one_reversal` check stays as defence in depth for pre-index data and its test now asserts the database refuses the injection). The amount bound is enforced in the application (exact inversion of the original entries, void checked against the placement); the database backstop checks identity and shape because entries do not exist yet when a BEFORE INSERT trigger runs. (d) No HTTP route changes tenant status in the repository today (verified); `tenant.ChangeStatus` and the 409 code are ready for the route, which is not built here. (e) The R3 test helpers set a tenant to `closed` WITH open bets (a tenant closed before this guard, or by a privileged path) by disabling the status trigger inside one owner transaction (transactional DDL, never visible to another session); the production path cannot produce that state. (f) The status change still waits for in-flight postings (section 40.5 operational notes). Tests: `internal/casino/stake_return_integration_test.go`, `internal/sportsbook/stake_return_integration_test.go`, `internal/sportsbook/tenant_closure_integration_test.go`, `internal/tenant/status_test.go`, plus the amended R3 tests (runtime role asserted NOT `rolsuper` AND NOT `rolbypassrls`). Mutation evidence: `docs/plans/payment-readiness/evidence/prh2-r5-stake-return-closure-mutation-kill.txt`. `IMPLEMENTED` against MOCK for the sportsbook and the casino stake return; `PARTIALLY IMPLEMENTED` for the closure guard (casino not representable); not a licensing, legal or production claim.
 
 **Further notes (PRH-2 R5 review conditions, 2026-10-06).** (g) A redelivery whose payload disagrees with the bet it names (another player, asset, amount or round) is refused as `ErrTenantNotActive` instead of being replayed on a non-active tenant (fail closed; accepted). An EXACT redelivery of an already-posted bet rollback (same provider reference) is a replay: the stake-return verification is skipped and `ledger.Post` answers `AlreadyPosted` (it still rejects a changed payload), so a rollback posted while the tenant was active is not refused after suspension even though the round has a win. (h) A void after a WON settlement returns the stake and takes the payout back; on a closed tenant this may drive the player's balance negative (staff awareness; no new semantic). (i) `tenant.ChangeStatus` performs NO authorization check of its own and MUST get a server-side platform permission check (and four-eyes for closure should be considered) before it is wired to any HTTP or console surface: follow-up TENANT-STATUS-AUTHZ-1 (no route is wired). Its before-state read is `FOR UPDATE`. The closure open-bet count depends on RLS visibility (the trigger sets the tenant scope for it); `TestTenantClosure_RefusedWithOpenBetAllowedWhenResolved` is the guard. (j) Tracking only, no code: L2 a deferred database amount check at commit (verify void and rollback amounts against the placed stake); L7 closure audit rows carry no `subject_tenant_id` (architect decision, migration 0109); `bonus.RecheckGrantExposure` after a bonus-funded rollback on a non-active tenant was not reviewed (residual); the player-facing casino rollback simulation route (`casino_play_handlers.go`, mock, `CasinoPlaySimulationEnabled`) now also works on closed tenants. (k) Follow-ups registered: R3-RECON-NONACTIVE-STREAMS-1, TENANT-STATUS-AUTHZ-1. (l) The `ErrCasinoReversalAlreadyExists` to `ErrAlreadyRolledBack` mapping in `postRollback` and the held-win path is not unit-tested by design: it is unreachable behind the per-reference delivery lock and the `FOR UPDATE` on the original; the index itself and the ledger sentinel are tested. The shared CI database may already contain duplicate `casino_rollback` rows from the former C4 injection test, which would make the 0121 index build refuse loudly; that is for the orchestrator to handle, never by deleting ledger rows. The index build is not CONCURRENTLY (SHARE lock on `ledger_transactions`, as for 0092).
+
+
+## 41. Amendment — PRH-2 R6: deposit T16 escalation, the T6 deferred-receipt drain, reference-less escalation and the LF95-C5 satisfier (B6, B7; `payments`, 2026-10-06)
+
+Status: implemented on branch `prh2-r6-classb-b6-b7`. Amends §4.3 (T16 row), §10.1 (`CallbackEchoesMerchantReference`
+row), §36.2 and §36.3 and closes the §36.3 T6 residual. Security and ledger-finance reviews: approved with the
+conditions recorded here.
+
+### 41.1 Deposit T16 as built (amends the §4.3 T16 row)
+
+- A live deposit (`submitting`/`pending`/`ambiguous`, `escalated_at IS NULL`) older than the provider manifest's
+  `SettlementWindow` (default 24 h; **registration refuses a negative value or one above `MaxSettlementWindow`
+  = 30 days**, and the sweeper clamps defensively) is escalated on the first poll tick that does **not**
+  resolve it: a transport failure, a Pending or Ambiguous result, or a success carrying no amount. A resolving
+  poll never escalates. Age is measured from `first_submitted_at` (falling back to `created_at`).
+- The audit action is **`payment.deposit_escalated`** (not `payment.attempt_escalated`, which the T16 row
+  names); the metadata carries the closed reason, provider, intent, state, poll count and window.
+- There is **no escalated cadence**: the normal poll backoff continues. The T16 row's "poll cadence drops to the
+  escalated rate" is not built for deposits; escalation changes `escalated_at` only. The attempt is never
+  declined, parked or cascaded (LF-C2 rule 5), and a later success still posts exactly once.
+- One durable P1 on the existing platform-owned Kind `payment.webhook_integrity` with discriminator
+  `attempt:<id>:reason:<r>`, `<r>` from the closed set {`deposit_settlement_window_exceeded`,
+  `deposit_unreferenced_submitting`}. No new Kind, no migration. These P1s are not disputes (runbook note).
+- `Escalate`'s CAS (`escalated_at IS NULL AND state` live) makes a duplicate tick, or a state change racing the
+  tick, a no-op with no audit and no alert.
+- **Lock order (ADR 0102 7.7):** the escalation is the **last** statement of its branch (after the reschedule,
+  T9 or T11, and after any receipt drain); the alert is the last statement of the escalation. A poll that
+  resolves the attempt through the T9 drain therefore raises nothing. Pinned by a source-order test.
+- **Reference-less live deposits (B7.1).** `processViaQueryStatus` cannot poll them (`QueryStatus` takes only a
+  provider reference). They keep being rescheduled and are escalated once, past `first_submitted_at` + sweeper
+  lease + `SettlementWindow`, with reason `deposit_unreferenced_submitting` (this also covers a reference-less
+  `ambiguous` attempt). The transaction takes the intent lock and re-reads the attempt first. Resolution is a
+  callback by merchant reference, reconciliation or an operator.
+
+### 41.2 §36.2 amended
+
+The "one audit per poll" for a success with no amount is now written only when `poll_count` is 0 or a power of
+two (about log2(n) rows per attempt) and **always on the escalation tick**. Deposits now have a T16 escalation;
+the sentence "Deposits have no T16 escalation in the sweeper today" is superseded.
+
+### 41.3 §36.3 amended: the T6 residual is closed
+
+`applyDepositCallResult`'s Ambiguous branch now calls `ApplyDeferredReceiptsForAttempt` after
+`MarkAmbiguousFromSubmittingBindingRef` when the adapter returned a reference, under the parent and attempt locks
+phase C already holds. A verified callback stored `deferred_unresolved` during phase B is resolved in the same
+transaction as T6: success posts once (ambiguous x succeeded), decline applies T8 (attempt and intent declined),
+a mismatched amount is a T10 `callback_amount_asset_mismatch` park (reference already bound, one alert). A
+failure after the drain posts rolls the whole phase C back (attempt `submitting`, no reference, receipt
+unresolved, no posting); a re-drive converges. The "Not drained ... T6 itself" residual in §36.3 is removed; the
+`sync_amount_mismatch` park remains not drained.
+
+### 41.4 §10.1 amended: the LF95-C5 satisfier
+
+`StatusQuery = by_provider_or_merchant_reference` no longer satisfies LF95-C5: the interface has no
+merchant-reference status method. Registration refuses a non-synthetic adapter supporting deposit or payout
+unless `CallbackEchoesMerchantReference = true`. Synthetic/MOCK adapters are exempt. The interface extension
+(`QueryStatusByMerchantReference` with `MerchantLookupAuthoritativeAfter` semantics) remains adapter acceptance
+criterion A7 (PROVIDER DEPENDENT).
+
+### 41.5 Open and noted (record only)
+
+- **LF E3 remains open:** the contract clause "a `QueryStatus` success carries amount and asset" is adapter
+  acceptance criterion A6; until then a provider that omits the amount stays live, escalated and audited.
+- **N1** A callback without a merchant reference that commits its deferred receipt after phase C's drain SELECT
+  but before its commit stays deferred; loud through the unmatched-callback P1 and the escalation; B7.2 mostly
+  removes it for real adapters.
+- **N2** The first-attempt phase C runs on the request context (`deposit_v2.go` ~310, PAY-H-FOLLOWUPS-1 item 12)
+  and can now post through the T6 drain: item 12 is re-rated from "symmetry only" to money-path resilience.
+- **N3** The player may see the intent as `ambiguous` after the drain resolved it (display only).
+- **N4** The callback-path decline cascade insert lacks B8's tenant-status gate (existing LF F7 item 10).
+- **N5** The callback-vs-escalation concurrency tests run sequentially (correct under the intent lock); a
+  `-race -count=N` goroutine storm would be stronger.
+- **N7** The T6 drain runs against the reference the attempt KEEPS (COALESCE), not the adapter's: after a T12
+  re-submission (`ResubmitAmbiguous` keeps the bound reference; only the payout sweeper calls it today) a different
+  adapter reference Y never causes a receipt stored under Y to be applied to the attempt. Pinned by
+  `TestB6_T6Drain_AfterT12Resubmit_...`; any future deposit T12 caller must land with that test.
+- **N6** Reference-less ambiguous attempts escalate with reason `deposit_unreferenced_submitting` (naming only).
+- Tracked, no code yet: A2 boot-time re-check of stored capabilities/providers before the first real adapter;
+  A4 per-provider alert aggregation before ALERT-DELIVERY-1; A5 runbook note that these P1s reuse
+  `payment.webhook_integrity` and are not disputes; A6 post-CAS re-read in the T6 drain.

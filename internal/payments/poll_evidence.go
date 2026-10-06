@@ -24,6 +24,12 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/providerref"
 )
 
+// pollAuditDue is the B6.2 deterministic rate bound for the per-poll
+// "unconfirmed amount" audit: true for poll_count 0 and every power of two.
+func pollAuditDue(pollCount int) bool {
+	return pollCount <= 0 || pollCount&(pollCount-1) == 0
+}
+
 // attemptAwaitingEvidence reports whether a deposit attempt is in one of the
 // three live states a poll result can still move (T4/T6/T7/T8/T9/T10/T11).
 func attemptAwaitingEvidence(st AttemptState) bool {
@@ -95,18 +101,32 @@ func (s *Sweeper) checkPollSuccessEvidence(
 				"provider_reference": boundRef, "provider_amount": res.Amount,
 			}, "provider_asset_code", res.AssetCode))
 		}
-		if err := audit.Record(ctx, tx, audit.Entry{
-			TenantID: attempt.TenantID, ActorType: audit.ActorSystem, Action: "payment.attempt_poll_amount_unconfirmed",
-			TargetType: "payment_attempt", TargetID: attempt.ID.String(), Outcome: audit.OutcomeDenied,
-			Metadata: withAssetEcho(map[string]any{
-				"provider_id": providerID, "deposit_intent_id": intent.ID.String(), "provider_reference": boundRef,
-				"amount": attempt.Amount, "asset_code": attempt.AssetCode,
-				"provider_amount": res.Amount, "adapter_outcome": string(OutcomeSucceeded),
-			}, "provider_asset_code", res.AssetCode),
-		}); err != nil {
-			return true, fmt.Errorf("payments: audit unconfirmed poll success: %w", err)
+		// B6.1/B6.2 (PAY-DEPOSIT-ESCALATION-1): a poll success that never carries
+		// an amount is the "PSP never echoes amounts" shape, so it is the
+		// escalation tick when the settlement window has passed (T16, no state
+		// change, one audit, one durable P1; the attempt keeps polling).
+		// B6.2: rate-bound the per-poll audit - written only when poll_count is 0
+		// or a power of two (O(log n) rows per attempt), and always on the
+		// escalation tick. The escalation itself runs LAST, after the reschedule
+		// (ADR 0102 7.7: the alert tables are the terminal lock level).
+		if s.depositEscalationDue(attempt, 0) || pollAuditDue(attempt.PollCount) {
+			if err := audit.Record(ctx, tx, audit.Entry{
+				TenantID: attempt.TenantID, ActorType: audit.ActorSystem, Action: "payment.attempt_poll_amount_unconfirmed",
+				TargetType: "payment_attempt", TargetID: attempt.ID.String(), Outcome: audit.OutcomeDenied,
+				Metadata: withAssetEcho(map[string]any{
+					"provider_id": providerID, "deposit_intent_id": intent.ID.String(), "provider_reference": boundRef,
+					"amount": attempt.Amount, "asset_code": attempt.AssetCode,
+					"provider_amount": res.Amount, "adapter_outcome": string(OutcomeSucceeded),
+				}, "provider_asset_code", res.AssetCode),
+			}); err != nil {
+				return true, fmt.Errorf("payments: audit unconfirmed poll success: %w", err)
+			}
 		}
-		return true, RescheduleNonTerminal(ctx, tx, attempt.ID, s.backoff(attempt.PollCount))
+		if err := RescheduleNonTerminal(ctx, tx, attempt.ID, s.backoff(attempt.PollCount)); err != nil {
+			return true, err
+		}
+		_, err := s.escalateDepositIfDue(ctx, tx, intent, attempt, alertReasonDepositSettlementWindowExceeded, 0)
+		return true, err
 	}
 
 	// 2. An echoed reference, when present, must be the bound one. An empty echo
