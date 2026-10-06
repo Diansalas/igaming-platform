@@ -6871,7 +6871,7 @@ money must resolve. This **supersedes §7.2 point 1's "active tenants"** for the
 | Evidence application, dispute, T17 re-drive of an already-sent attempt, every audit those write | **allowed**, audited exactly as for an active tenant |
 | T3 expiry of an interactive `created` deposit (it makes no provider call) | allowed |
 | Dispatch of a `created` deposit attempt (T2, phase B) | **never**: rescheduled on the ordinary backoff |
-| A cascade child after a poll decline | **never** on the sweeper's poll path: the decline stands, no child is inserted (status read in the poll's own transaction; the skip is audited in the same transaction as `payment.cascade_skipped_resolution_only`). The `drive.go` phase-C cascade insert is NOT gated: a child can be inserted if the tenant flips mid-pass, but it is never driven while the tenant is non-active |
+| A cascade child after a decline (poll path, and since B8 the `drive.go` phase-C insert) | **never**: the decline stands, no child is inserted (status read in the same transaction as the insert; the skip is audited in that transaction as `payment.cascade_skipped_resolution_only`). *Amended 2026-10-06 (B8, PAY-H-FOLLOWUPS-1 (1)): the phase-C cascade insert in `drive.go` is now gated exactly like the poll-path twin; previously it was not.* |
 | Payout T2 re-claim of a `created` attempt (new `Withdraw`) | **never**: rescheduled |
 | Payout T12 resend of an `ambiguous` attempt (a `Withdraw`) | **never**: rescheduled. The preceding poll still runs |
 
@@ -6881,19 +6881,22 @@ escalation, no state change, and reactivation resumes the work with no special a
 1. The tenant status is read **per call, never cached per pass**, at each site: `tenantResolutionOnly` inside
    the poll's result transaction (cascade child) and inside the payout T2 and T12 claim transactions (after the
    withdrawal lock, before the kill-switch check and the KYC gate). **Deposit dispatch is different:**
-   `deferIfResolutionOnly` reads the status in its OWN short transaction BEFORE `driveCreatedAttempt`; the T2
-   claim in `drive.go` does not read the status (security H-SEC-1, ledger-finance F5). A missing tenant row fails
-   closed (resolution-only).
+   *Amended 2026-10-06 (B8):* `driveCreatedAttempt`'s T2 claim transaction now reads the status itself when
+   sweeper-driven (plain read after the intent lock and before `ClaimCreatedForSubmission`; a non-active tenant gets
+   `RescheduleNonTerminal` and no claim), so `deferIfResolutionOnly`'s separate pre-read is only a cheap early
+   skip, no longer the safeguard. A missing tenant row fails closed (resolution-only).
 2. The kill switch (INV-IO-15) and the synthetic-adapter startup tripwire apply unchanged; polls are never
    stopped by the kill switch (§10.3).
 3. Credentials come only from the per-tenant outbound resolver, bound to the attempt's own tenant by
    `callProvider` (S95-C8(b)); a test records the tenant of every resolution.
-4. **Residual race (deposit dispatch).** A suspension committing between the pre-claim status read and the T2
-   claim lets one Deposit go out for a just-suspended tenant, and the `drive.go` phase-C cascade insert can add a
-   child that is never driven. No money harm beyond that one inbound deposit; an already-committed `submitting`
-   claim is in-flight money and resolves. **Required before the real deposit path goes live** (H-SEC-1): run the
-   status read inside `driveCreatedAttempt`'s T2 claim transaction (ideally as a predicate in the
-   `ClaimCreatedForSubmission` CAS, like the kill switch) and gate the phase-C cascade insert. Registered follow-up.
+4. **Residual race (deposit dispatch) - CLOSED by B8 (2026-10-06).** Previously a suspension committing between
+   the pre-claim status read and the T2 claim could let one Deposit go out, and the phase-C cascade insert could
+   add a child. Both are now gated inside the same transactions (see 1.). **Remaining, accepted residual:** the read
+   is a plain read (not a row lock: the runtime role has no UPDATE on `tenants`, so `FOR SHARE` would hide the row);
+   a suspension that commits after the claim transaction commits can still be followed by that one already-claimed
+   `submitting` attempt's Deposit, which is in-flight money and resolves (it is the same exposure as an engaged
+   kill switch after claim). Not a predicate in the CAS (a predicate would need the tenants row visible in the
+   CAS statement; unnecessary given the in-tx read under the intent lock).
 5. Resolution-only applies to the SWEEPER only. The HTTP deposit and withdrawal initiation paths read no
    `tenants.status` (H-SEC-5, pre-existing) and neither path reads brand status (H-SEC-11; resolution-only is
    tenant-scoped); suspension must not be described as stopping payments. **Registered follow-up; required before

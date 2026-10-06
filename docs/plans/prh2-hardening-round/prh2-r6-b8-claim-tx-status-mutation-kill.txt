@@ -1,0 +1,11 @@
+B8 mutation-kill evidence (2026-10-06T20:43:29Z); method: mutate drive.go in place, run TestB8_ (-race -tags integration, private DB b8_priv), restore from backup + cmp
+CONTROL (unmutated)
+control => ok  	github.com/Diansalas/igaming-platform/internal/payments	9.045s;
+M1 in-claim-tx status read removed (never defers) => --- FAIL: TestB8_SuspensionAfterPreReadBeforeClaim_NoClaimNoDeposit_ThenResumes (3.97s);FAIL;FAIL	github.com/Diansalas/igaming-platform/internal/payments	8.193s;FAIL;
+  restore: identical
+M2 cascade gate removed (never skips) => --- FAIL: TestB8_CascadeChildNotInsertedWhenSuspendedDuringProviderCall (1.84s);FAIL;FAIL	github.com/Diansalas/igaming-platform/internal/payments	7.863s;FAIL;
+  restore: identical
+M3 claim-tx predicate inverted => --- FAIL: TestB8_SuspensionAfterPreReadBeforeClaim_NoClaimNoDeposit_ThenResumes (3.56s);--- FAIL: TestB8_OtherTenantSuspension_DoesNotDeferThisTenant (2.07s);--- FAIL: TestB8_CascadeChildNotInsertedWhenSuspendedDuringProviderCall (1.92s);FAIL;
+  restore: identical
+M4 cascade skip audit action changed => --- FAIL: TestB8_CascadeChildNotInsertedWhenSuspendedDuringProviderCall (2.01s);FAIL;FAIL	github.com/Diansalas/igaming-platform/internal/payments	7.598s;FAIL;
+  restore: identical

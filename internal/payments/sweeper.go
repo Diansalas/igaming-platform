@@ -332,10 +332,13 @@ func (s *Sweeper) processCreated(ctx context.Context, tenantID uuid.UUID, attemp
 		// PRH-2 H (security addendum §2): a non-active tenant is resolution-only.
 		// A created attempt (or a cascade child) is a NEW money-moving call, so it
 		// is deferred exactly like an engaged kill switch. The status is read in a
-		// separate short tx BEFORE driveCreatedAttempt (NOT in the T2 claim tx; see
-		// ADR 0095 §37.3 safeguard 4 for the residual race).
+		// separate short tx BEFORE driveCreatedAttempt as a cheap early skip; the
+		// authoritative read is inside the T2 claim tx in drive.go (B8).
 		if blocked, err := s.deferIfResolutionOnly(ctx, tenantID, current, "deposit_dispatch"); err != nil || blocked {
 			return err
+		}
+		if testHookAfterDispatchStatusPreRead != nil {
+			testHookAfterDispatchStatusPreRead(tenantID)
 		}
 		updatedIntent, updatedAttempt, child, _, _, err := s.Orchestrator.driveCreatedAttempt(ctx, s.Pool, s.KYCGate, s.CredResolver, loadedIntent, current, true)
 		if err != nil {

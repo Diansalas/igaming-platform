@@ -69,12 +69,14 @@ func (o *Orchestrator) driveCreatedAttempt(
 	})
 
 	var (
-		attempt    PaymentAttempt
-		claimed    bool
-		claimToken uuid.UUID
-		provider   PaymentProvider
-		capability ProviderCapability
-		manifest   OperationManifest
+		attempt PaymentAttempt
+		claimed bool
+		// deferredResolutionOnly: B8 - the claim tx found the tenant non-active.
+		deferredResolutionOnly bool
+		claimToken             uuid.UUID
+		provider               PaymentProvider
+		capability             ProviderCapability
+		manifest               OperationManifest
 	)
 	err := pool.WithTenant(ctx, intent.TenantID, func(actx context.Context, tx pgx.Tx) error {
 		// RG + KYC deposit gate re-run BEFORE the parent lock (RV-0095
@@ -133,6 +135,25 @@ func (o *Orchestrator) driveCreatedAttempt(
 		}
 		provider, capability = routedProvider, routedCapability
 		manifest = provider.Capabilities().Manifest
+		// B8 / PAY-H-FOLLOWUPS-1 (1) (HD-CTF-10): a sweeper-driven NEW deposit
+		// dispatch is refused for a non-active tenant by a plain status read in
+		// THIS claim transaction, after the intent lock and before the claim
+		// CAS, so a suspension committed after the sweeper's earlier pre-read
+		// can no longer produce a Deposit. The attempt is rescheduled on the
+		// ordinary backoff (nothing else changes), like an engaged kill switch.
+		if sweeperDriven {
+			resOnly, rerr := tenantResolutionOnly(actx, tx, intent.TenantID)
+			if rerr != nil {
+				return rerr
+			}
+			if resOnly {
+				if err := RescheduleNonTerminal(actx, tx, created.ID, resolutionOnlyDispatchBackoff(created.PollCount)); err != nil {
+					return err
+				}
+				deferredResolutionOnly = true
+				return nil
+			}
+		}
 		claimToken = uuid.New()
 		if err := ClaimCreatedForSubmission(actx, tx, created.ID, capability.ProviderID, claimToken, leaseOwner, time.Now().Add(depositAttemptClaimLease)); err != nil {
 			// KS-DEP-T2-T3-1 (architect review rv-prh-i1-killswitch-phase2-
@@ -184,6 +205,9 @@ func (o *Orchestrator) driveCreatedAttempt(
 	})
 	if err != nil {
 		return intent, created, nil, "", "", err
+	}
+	if deferredResolutionOnly {
+		recordResolutionOnlyBlock(ctx, "deposit_dispatch_claim_tx")
 	}
 	if !claimed {
 		// Rejected pre-call (RG/KYC deny, or no routable provider) - T3,
@@ -652,6 +676,23 @@ func (o *Orchestrator) applyDepositCallResult(
 			return intent, nil, err
 		}
 		if cascadeEligible(attempt, updated.Status, cascadable, o.maxCascadeDepth(), sweeperDriven) {
+			// B8 / PAY-H-FOLLOWUPS-1 (1): a cascade child is a NEW money-moving
+			// attempt, so a non-active tenant gets none (in-tx status read); the
+			// decline above is already final and stands. Twin of the poll-path
+			// gate in sweeper.go (same audit action, H-CR-6).
+			if resOnly, err := tenantResolutionOnly(ctx, tx, attempt.TenantID); err != nil {
+				return intent, nil, err
+			} else if resOnly {
+				recordResolutionOnlyBlock(ctx, "deposit_cascade_child")
+				if err := audit.Record(ctx, tx, audit.Entry{
+					TenantID: attempt.TenantID, ActorType: audit.ActorSystem, Action: "payment.cascade_skipped_resolution_only",
+					TargetType: "payment_attempt", TargetID: attempt.ID.String(), Outcome: audit.OutcomeDenied,
+					Metadata: map[string]any{"deposit_intent_id": intent.ID.String()},
+				}); err != nil {
+					return intent, nil, err
+				}
+				return updated, nil, nil
+			}
 			child, err := insertCascadeAttemptIfEligible(ctx, tx, attempt)
 			if err != nil {
 				return updated, nil, err
