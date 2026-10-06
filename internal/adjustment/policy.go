@@ -5,11 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"strconv"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/Diansalas/igaming-platform/internal/actorproof"
 	"github.com/Diansalas/igaming-platform/internal/audit"
 	"github.com/Diansalas/igaming-platform/internal/tenant"
 )
@@ -78,6 +80,36 @@ func (c PolicyCall) scope() string {
 	return "tenant"
 }
 
+// attachProof signs and attaches the SIGNED-ACTOR-PROOF (ADR 0110, migration
+// 0120) for one policy-change write, for the authenticated principal of this call.
+func (c PolicyCall) attachProof(ctx context.Context, tx pgx.Tx, operation, target, payloadHash string) error {
+	return actorproof.Default().Attach(ctx, tx, actorproof.Claims{
+		Actor: c.ActorID, Scope: c.scope(), Tenant: c.TenantID,
+		Operation: operation, Target: target, PayloadHash: payloadHash,
+	})
+}
+
+func intText(i *int) *string {
+	if i == nil {
+		return nil
+	}
+	s := strconv.Itoa(*i)
+	return &s
+}
+
+// numericText is the text PostgreSQL renders for a NUMERIC(38,0) given as a decimal string.
+func numericText(s *string) *string {
+	if s == nil {
+		return nil
+	}
+	n, ok := new(big.Int).SetString(*s, 10)
+	if !ok {
+		return s
+	}
+	t := n.String()
+	return &t
+}
+
 func validThreshold(s *string) error {
 	if s == nil {
 		return nil
@@ -110,6 +142,23 @@ func ProposePolicyChangeInTx(ctx context.Context, tx pgx.Tx, call PolicyCall, in
 	}
 	if in.Level != "" {
 		level = in.Level
+	}
+	// Migration 0120 binds the proof to effective_from, which the guard would
+	// otherwise default to the database's now(): choose it here (microsecond
+	// precision) so the digest and the row agree.
+	if in.EffectiveFrom == nil {
+		now := time.Now().UTC().Truncate(time.Microsecond)
+		in.EffectiveFrom = &now
+	} else {
+		t := in.EffectiveFrom.UTC().Truncate(time.Microsecond)
+		in.EffectiveFrom = &t
+	}
+	if err := call.attachProof(ctx, tx, actorproof.OpPolicyPropose, actorproof.TargetNew, actorproof.Digest(
+		actorproof.S(in.ChangeKind), actorproof.SP(in.OperationKind), actorproof.SP(in.Level), actorproof.UUIDP(in.TenantID),
+		actorproof.UUIDP(in.BrandID), actorproof.UUIDP(in.JurisdictionID), in.ProfileCode, in.AssetCode,
+		intText(in.BaseRequiredApprovals), numericText(in.ThresholdMinorUnits), intText(in.RequiredApprovalsAboveThreshold),
+		actorproof.TS(in.EffectiveFrom), in.LegalReviewReference)); err != nil {
+		return PolicyChange{}, err
 	}
 	var c PolicyChange
 	err := tx.QueryRow(ctx, `
@@ -145,6 +194,13 @@ func DecidePolicyChangeInTx(ctx context.Context, tx pgx.Tx, call PolicyCall, cha
 	if len(reasonCode) < 1 || len(reasonCode) > 64 {
 		return PolicyChange{}, fmt.Errorf("%w: reason_code must be 1-64 bytes", ErrInvalidInput)
 	}
+	pop := actorproof.OpPolicyApprove
+	if decision == DecisionReject {
+		pop = actorproof.OpPolicyReject
+	}
+	if err := call.attachProof(ctx, tx, pop, changeID.String(), contentHash); err != nil {
+		return PolicyChange{}, err
+	}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO financial_approval_policy_change_approvals
 			(change_id, decision, content_hash, decided_by, decided_by_scope, decided_by_person_id, decided_txid, reason_code)
@@ -173,6 +229,13 @@ func DecidePolicyChangeInTx(ctx context.Context, tx pgx.Tx, call PolicyCall, cha
 
 // CancelPolicyChangeInTx cancels a pending change (requester only).
 func CancelPolicyChangeInTx(ctx context.Context, tx pgx.Tx, call PolicyCall, changeID uuid.UUID) (PolicyChange, error) {
+	before, err := getPolicyChange(ctx, tx, changeID)
+	if err != nil {
+		return PolicyChange{}, err
+	}
+	if err := call.attachProof(ctx, tx, actorproof.OpPolicyCancel, changeID.String(), before.ContentHash); err != nil {
+		return PolicyChange{}, err
+	}
 	tag, err := tx.Exec(ctx, `UPDATE financial_approval_policy_changes SET status = 'cancelled' WHERE id = $1`, changeID)
 	if err != nil {
 		return PolicyChange{}, err

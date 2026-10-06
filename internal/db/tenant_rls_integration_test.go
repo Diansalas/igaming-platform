@@ -16,6 +16,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+
+	"github.com/Diansalas/igaming-platform/internal/actorproof/prooftest"
 )
 
 // pgRLSViolationCode is the Postgres SQLSTATE for "new row violates
@@ -51,6 +53,7 @@ func testPool(t *testing.T) *Pool {
 		t.Fatalf("failed to connect to test database: %v", err)
 	}
 	t.Cleanup(pool.Close)
+	prooftest.Install(t, url) // SIGNED-ACTOR-PROOF (ADR 0110): per-process random key, owner-provisioned
 	return pool
 }
 

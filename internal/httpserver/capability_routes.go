@@ -125,9 +125,14 @@ func recordCapabilityDenied(ctx context.Context, deps Deps, c capabilityCall, op
 // tenant-scoped caller, WithPlatformAdmin for a platform-scoped one.
 // Never db.WithTenant alone (see runKillSwitchTx's identical rationale).
 func runCapabilityTx(ctx context.Context, deps Deps, c capabilityCall, fn func(ctx context.Context, tx pgx.Tx) error) error {
+	// SIGNED-ACTOR-PROOF (ADR 0110): the caller is authenticated (verified token
+	// subject) and the route's permission check has passed; the K1 functions sign
+	// for exactly this principal.
 	if c.tc.TenantID == uuid.Nil {
+		ctx = capability.WithProofActor(ctx, capability.ProofActor{Actor: c.subject, Scope: capability.ProofScopePlatform})
 		return deps.DB.WithPlatformAdmin(ctx, c.subject, fn)
 	}
+	ctx = capability.WithProofActor(ctx, capability.ProofActor{Actor: c.subject, Scope: capability.ProofScopeTenant, Tenant: c.tc.TenantID})
 	return deps.DB.WithPrincipalScope(ctx, c.tc.TenantID, c.subject, fn)
 }
 
@@ -365,6 +370,10 @@ func newCreateCapabilityGrantRequestHandler(deps Deps) http.HandlerFunc {
 	}
 }
 
+// newCancelCapabilityGrantRequestHandler: ONLY the requester may cancel (migration
+// 0120, ADR 0110). Any other caller - including a platform admin cancelling a
+// tenant-originated request, or another member of the requester's tenant - gets
+// the guard's CG010, which this handler maps to 409 Conflict (never a 5xx).
 func newCancelCapabilityGrantRequestHandler(deps Deps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		c, ok := beginCapabilityCall(deps, w, r, "cancel")

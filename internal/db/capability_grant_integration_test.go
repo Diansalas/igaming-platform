@@ -24,6 +24,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
+	"github.com/Diansalas/igaming-platform/internal/actorproof/prooftest"
 	"github.com/Diansalas/igaming-platform/internal/capability"
 	"github.com/Diansalas/igaming-platform/internal/testsupport/scratchdb"
 )
@@ -1177,14 +1178,18 @@ func TestCapabilityGrant_F2_ForcedColumnsCannotBeSupplied(t *testing.T) {
 		bogusActor := uuid.New()
 		bogusPerson := uuid.New()
 		var requestID uuid.UUID
+		vf1 := time.Now().UTC().Truncate(time.Microsecond)
 		if err := pool.WithPrincipalScope(ctx, tenantID, requester, func(ctx context.Context, tx pgx.Tx) error {
+			if err := prooftest.AttachK1Request(ctx, tx, tenantID, finance, string(capability.CapabilityLedgerAdjustmentInitiate), vf1, nil, "test"); err != nil {
+				return err
+			}
 			return tx.QueryRow(ctx, `
 				INSERT INTO staff_capability_grant_requests
 					(tenant_id, grantee_staff_id, capability, valid_from, reason_code,
 					 requested_by, requested_by_scope, requested_by_person_id)
-				VALUES ($1, $2, $3, now(), 'test', $4, 'platform', $5)
+				VALUES ($1, $2, $3, $6, 'test', $4, 'platform', $5)
 				RETURNING id`,
-				tenantID, finance, string(capability.CapabilityLedgerAdjustmentInitiate), bogusActor, bogusPerson,
+				tenantID, finance, string(capability.CapabilityLedgerAdjustmentInitiate), bogusActor, bogusPerson, vf1,
 			).Scan(&requestID)
 		}); err != nil {
 			t.Fatalf("insert with bogus forced columns: %v", err)
@@ -1225,14 +1230,18 @@ func TestCapabilityGrant_F2_ForcedColumnsCannotBeSupplied(t *testing.T) {
 
 		bogusPerson := uuid.New()
 		var requestID uuid.UUID
+		vf2 := time.Now().UTC().Truncate(time.Microsecond)
 		if err := pool.WithPrincipalScope(ctx, tenantID, requester, func(ctx context.Context, tx pgx.Tx) error {
+			if err := prooftest.AttachK1Request(ctx, tx, tenantID, finance, string(capability.CapabilityLedgerAdjustmentInitiate), vf2, nil, "test"); err != nil {
+				return err
+			}
 			return tx.QueryRow(ctx, `
 				INSERT INTO staff_capability_grant_requests
 					(tenant_id, grantee_staff_id, capability, valid_from, reason_code,
 					 grantee_scope, grantee_person_id)
-				VALUES ($1, $2, $3, now(), 'test', 'platform', $4)
+				VALUES ($1, $2, $3, $5, 'test', 'platform', $4)
 				RETURNING id`,
-				tenantID, finance, string(capability.CapabilityLedgerAdjustmentInitiate), bogusPerson,
+				tenantID, finance, string(capability.CapabilityLedgerAdjustmentInitiate), bogusPerson, vf2,
 			).Scan(&requestID)
 		}); err != nil {
 			t.Fatalf("insert with bogus forced columns: %v", err)
@@ -1285,6 +1294,9 @@ func TestCapabilityGrant_F2_ForcedColumnsCannotBeSupplied(t *testing.T) {
 		const bogusTxid = int64(1)
 		var approvalID uuid.UUID
 		if err := pool.WithPlatformAdmin(ctx, approver, func(ctx context.Context, tx pgx.Tx) error {
+			if err := prooftest.AttachK1Decision(ctx, tx, requestID, "approve"); err != nil {
+				return err
+			}
 			if err := tx.QueryRow(ctx, `
 				INSERT INTO staff_capability_grant_approvals
 					(request_id, decision, reason_code, decided_by, decided_by_scope, decided_by_person_id, decided_txid)
@@ -1330,6 +1342,9 @@ func TestCapabilityGrant_F2_ForcedColumnsCannotBeSupplied(t *testing.T) {
 
 		bogusActor := uuid.New()
 		if err := pool.WithPlatformAdmin(ctx, f.ApproverID, func(ctx context.Context, tx pgx.Tx) error {
+			if err := prooftest.AttachK1Revoke(ctx, tx, f.GrantID, f.TenantID, "test"); err != nil {
+				return err
+			}
 			_, err := tx.Exec(ctx, `
 				UPDATE staff_capability_grants
 				   SET revoked_at = now(), revoked_by = $2, revoked_by_scope = 'tenant', revoke_reason_code = 'test'
@@ -1518,6 +1533,7 @@ func TestCapabilityGrant_I4_FailsWithoutMigration0034Trigger(t *testing.T) {
 	if _, err := pool.MigrateUp(ctx, "../../migrations"); err != nil {
 		t.Fatalf("migrate scratch up: %v", err)
 	}
+	prooftest.InstallVia(t, pool.Raw(), url)
 
 	if err := pool.WithoutTenant(ctx, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := tx.Exec(ctx, `DROP TRIGGER staff_users_person_id_append_only ON staff_users`)

@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/Diansalas/igaming-platform/internal/actorproof/prooftest"
 	"github.com/Diansalas/igaming-platform/internal/capability"
 	"github.com/Diansalas/igaming-platform/internal/ledger"
 )
@@ -28,6 +29,9 @@ func (w *world) actingForge(t *testing.T, r Request, fn func(ctx context.Context
 	t.Helper()
 	var probeErr error
 	err := w.pool.WithPlatformActingInTenant(context.Background(), w.Acting.ID, w.Tenant, uuid.New(), OperationKind, func(ctx context.Context, tx pgx.Tx) error {
+		if err := prooftest.AttachForSession(ctx, tx, "ledger_adjustment:approve", r.ID.String(), r.PayloadHash); err != nil {
+			t.Fatalf("setup: attach proof: %v", err)
+		}
 		if _, err := tx.Exec(ctx, `INSERT INTO ledger_adjustment_approvals (tenant_id, request_id, decision, payload_hash, decided_by, decided_by_scope, decided_by_person_id, decided_txid, reason_code)
 			VALUES ($1, $2, 'approve', $3, $4, 'platform_acting', $4, 0, 'k2-c1-probe')`, w.Tenant, r.ID, r.PayloadHash, uuid.Nil); err != nil {
 			t.Fatalf("setup: final approval: %v", err)
@@ -281,6 +285,9 @@ func TestK2C3_DBRecountOnExecuting(t *testing.T) {
 		t.Helper()
 		var updErr error
 		_ = w.tenantTx(approver, func(ctx context.Context, tx pgx.Tx) error {
+			if err := prooftest.AttachForSession(ctx, tx, "ledger_adjustment:approve", r.ID.String(), r.PayloadHash); err != nil {
+				t.Fatalf("setup: attach proof: %v", err)
+			}
 			if _, err := tx.Exec(ctx, `INSERT INTO ledger_adjustment_approvals (tenant_id, request_id, decision, payload_hash, decided_by, decided_by_scope, decided_by_person_id, decided_txid, reason_code)
 				VALUES ($1, $2, 'approve', $3, $4, 'tenant', $4, 0, 'k2-c3')`, w.Tenant, r.ID, r.PayloadHash, uuid.Nil); err != nil {
 				t.Fatalf("setup: approval insert must be accepted (the recount is under test, not the insert guard): %v", err)
@@ -345,6 +352,9 @@ func TestK2R1_TenantSessionNonExecutedExitRefusedAfterGovernedPosting(t *testing
 	}
 	approveRaw := func(ctx context.Context, tx pgx.Tx, r Request) {
 		t.Helper()
+		if err := prooftest.AttachForSession(ctx, tx, "ledger_adjustment:approve", r.ID.String(), r.PayloadHash); err != nil {
+			t.Fatalf("setup: attach proof: %v", err)
+		}
 		if _, err := tx.Exec(ctx, `INSERT INTO ledger_adjustment_approvals (tenant_id, request_id, decision, payload_hash, decided_by, decided_by_scope, decided_by_person_id, decided_txid, reason_code)
 			VALUES ($1, $2, 'approve', $3, $4, 'tenant', $4, 0, 'r1')`, w.Tenant, r.ID, r.PayloadHash, uuid.Nil); err != nil {
 			t.Fatalf("setup: approval: %v", err)

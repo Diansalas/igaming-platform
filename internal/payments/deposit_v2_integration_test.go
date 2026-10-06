@@ -22,6 +22,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/Diansalas/igaming-platform/internal/actorproof/prooftest"
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/providercred"
 	"github.com/Diansalas/igaming-platform/internal/txscope"
@@ -42,6 +43,9 @@ func depositV2ScratchPool(t *testing.T) *db.Pool {
 	if _, err := pool.MigrateUp(context.Background(), realMigrationsDir(t)); err != nil {
 		t.Fatalf("migrate up to latest: %v", err)
 	}
+	// SIGNED-ACTOR-PROOF (ADR 0110, migration 0120): provision the per-process
+	// random signing key into this scratch database and install the issuer.
+	prooftest.InstallVia(t, pool.Raw(), t.Name()+"/"+uuid.NewString())
 	return pool
 }
 

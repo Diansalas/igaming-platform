@@ -16,6 +16,7 @@ package adjustment
 
 import (
 	"context"
+	"fmt"
 	"net/url"
 	"os"
 	"strings"
@@ -25,6 +26,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/Diansalas/igaming-platform/internal/actorproof/prooftest"
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/testsupport/scratchdb"
 )
@@ -207,6 +209,8 @@ func TestTempRevoke_K2ShadowAttack_SucceedsWhenTempIsGrantedBack(t *testing.T) {
 	if _, err := owner.MigrateUp(ctx, "../../migrations"); err != nil {
 		t.Fatalf("migrate up: %v", err)
 	}
+	// SIGNED-ACTOR-PROOF (0120): the scratch database needs the per-process key.
+	prooftest.InstallVia(t, owner.Raw(), scratchURL)
 	// 0116 is in force on the scratch DB: the attack is refused here too ...
 	rt := tempRevokeRuntimePoolAt(t, ru.String())
 	w := newWorldOn(t, owner, worldOpts{base: 1})
@@ -236,7 +240,30 @@ func TestTempRevoke_K2ShadowAttack_SucceedsWhenTempIsGrantedBack(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(rt1.Close)
-	if err := forgeOnSessionPool(t, rt1, w, X, Y, causation); err != nil {
+	// PRH-2 R5 (migration 0120) DEFENCE IN DEPTH: with TEMP granted back and the
+	// proof triggers ENABLED, the very same forgery is still refused: the
+	// zz_actor_proof_guard trigger functions pin search_path (pg_catalog, public,
+	// pg_temp), so the actor they resolve ignores the TEMP shadows and finds no
+	// active staff row for the invented principal (CG001).
+	if err := forgeOnSessionPool(t, rt1, w, X, Y, causation); err == nil {
+		t.Fatal("with TEMP granted back, the forgery must still be refused by the proof trigger's pinned search_path")
+	} else if pgCode(err) != "CG001" || !strings.Contains(err.Error(), "forged Submit") {
+		t.Fatalf("want CG001 at the forged SUBMIT (the requests proof trigger's pinned search_path), got %v", err)
+	}
+	// The non-vacuity of 0116 itself: with the (scratch-only) proof triggers
+	// disabled by the owner, TEMP re-granted lets the forgery execute, exactly as
+	// the security review reproduced.
+	for _, tbl := range []string{"ledger_adjustment_requests", "ledger_adjustment_approvals"} {
+		if _, err := owner.Raw().Exec(ctx, `ALTER TABLE `+tbl+` DISABLE TRIGGER zz_actor_proof_guard`); err != nil {
+			t.Fatalf("scratch DB: disable the proof trigger on %s: %v", tbl, err)
+		}
+	}
+	rt2, err := db.Connect(ctx, ru.String(), 1, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(rt2.Close)
+	if err := forgeOnSessionPool(t, rt2, w, X, Y, causation); err != nil {
 		t.Fatal(err)
 	}
 	if got := w.adjustmentLedgerTxCount(); got != 1 {
@@ -299,12 +326,12 @@ func forgeOnSessionPool(t *testing.T, rt1 *db.Pool, w *world, x, y, causation uu
 	fy := staffMember{ID: y, PersonID: py, TenantID: w.Tenant, Role: "finance"}
 	req, err := svc.Submit(ctxFor(fx), w.target(), in, Meta{RequestID: "temp-revoke-vacuity"})
 	if err != nil {
-		t.Fatalf("non-vacuity: with TEMP granted back the forged Submit must be accepted (as the security review reproduced): %v", err)
+		return fmt.Errorf("forged Submit: %w", err)
 	}
 	out, err := svc.Decide(ctxFor(fy), w.target(), req.ID,
 		DecisionInput{Decision: DecisionApprove, PayloadHash: req.PayloadHash, ReasonCode: "temp-revoke-vacuity"}, Meta{RequestID: "temp-revoke-vacuity"})
 	if err != nil {
-		t.Fatalf("non-vacuity: forged Decide: %v", err)
+		return fmt.Errorf("forged Decide: %w", err)
 	}
 	if !out.Executed {
 		t.Fatalf("non-vacuity: the forged approval must execute, got %+v", out)

@@ -75,6 +75,18 @@ var k2NonRLSBookkeepingTables = map[string]bool{
 	"schema_migrations": true,
 }
 
+// k2OwnerOnlyProofTables (PRH-2 R5, ADR 0110, migration 0120) are OWNER-ONLY:
+// no privilege for PUBLIC or the runtime role, RLS enabled with no policy. They
+// are deliberately not FORCE RLS because the SECURITY DEFINER verifier runs as
+// the owner. THIS probe runs as the OWNER role (which RLS does not bind unless
+// FORCEd), so it sees them; the runtime role cannot read them at all, which is
+// asserted by TestActorProof_RuntimeRoleCannotReadKeysNoncesOrMint and by the
+// has_table_privilege / pg_policies checks there.
+var k2OwnerOnlyProofTables = map[string]bool{
+	"actor_proof_keys":   true,
+	"actor_proof_nonces": true,
+}
+
 // k2ActingCannotSeeLicencesExceptOwn: licences is on the §6.2 reference
 // allowlist, but 0113's acting policy exposes ONLY tenant X's own licence
 // row, never another tenant's - asserted separately.
@@ -235,7 +247,7 @@ func TestK2G1_ActingSessionRowVisibilityMatchesAllowlist(t *testing.T) {
 			}
 			visible[table] = n
 			scope, scoped := k2ActingScopedTables[table]
-			if !scoped && !a18SelectAllowlist[table] && !k2NonRLSBookkeepingTables[table] {
+			if !scoped && !a18SelectAllowlist[table] && !k2NonRLSBookkeepingTables[table] && !k2OwnerOnlyProofTables[table] {
 				unexpected = append(unexpected, fmt.Sprintf("%s (%d rows)", table, n))
 				continue
 			}

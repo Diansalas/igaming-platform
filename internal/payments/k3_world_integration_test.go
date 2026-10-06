@@ -24,6 +24,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
+	"github.com/Diansalas/igaming-platform/internal/actorproof/prooftest"
 	"github.com/Diansalas/igaming-platform/internal/adjustment"
 	"github.com/Diansalas/igaming-platform/internal/capability"
 	"github.com/Diansalas/igaming-platform/internal/db"
@@ -166,6 +167,7 @@ func newK3World(t *testing.T, opts k3Opts) *k3World {
 func newK3WorldOn(t *testing.T, pool *db.Pool, opts k3Opts) *k3World {
 	t.Helper()
 	ctx := context.Background()
+	prooftest.Issuer(t) // SIGNED-ACTOR-PROOF: the issuer must exist even on a scratch DB below 0120
 	n := k3Counter.Add(1)
 	w := &k3World{t: t, pool: pool, grantIDs: map[string]uuid.UUID{}}
 	initial := int64(1_000_000)

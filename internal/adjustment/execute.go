@@ -7,6 +7,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/Diansalas/igaming-platform/internal/actorproof"
 	"github.com/Diansalas/igaming-platform/internal/ledger"
 )
 
@@ -118,6 +119,13 @@ func DecideInTx(ctx context.Context, tx pgx.Tx, call Call, requestID uuid.UUID, 
 
 	// Step 2 - the approval insert (migration 0113 triggers: payload hash,
 	// in-force grant, distinct Person, beneficiary, S-2(iii), pending).
+	op := actorproof.OpAdjustmentApprove
+	if in.Decision == DecisionReject {
+		op = actorproof.OpAdjustmentReject
+	}
+	if err := call.attachProof(ctx, tx, op, requestID.String(), in.PayloadHash); err != nil {
+		return Outcome{}, err
+	}
 	var approvalID uuid.UUID
 	if err := tx.QueryRow(ctx, `
 		INSERT INTO ledger_adjustment_approvals

@@ -2,6 +2,8 @@ package adjustment
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"math/big"
@@ -12,6 +14,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/Diansalas/igaming-platform/internal/actorproof"
 	"github.com/Diansalas/igaming-platform/internal/audit"
 )
 
@@ -149,6 +152,16 @@ func SubmitInTx(ctx context.Context, tx pgx.Tx, call Call, id uuid.UUID, in Subm
 	if err := in.validate(); err != nil {
 		return Request{}, err
 	}
+	// SIGNED-ACTOR-PROOF (migration 0120): bind the proof to this actor, this
+	// request id and the caller-supplied payload (the same digest the
+	// zz_actor_proof_guard trigger recomputes from the row).
+	noteSum := sha256.Sum256([]byte(in.Note)) // = ledger_adjustment_note_hash(note)
+	if err := call.attachProof(ctx, tx, actorproof.OpAdjustmentInitiate, id.String(), actorproof.Digest(
+		actorproof.S(call.TenantID.String()), actorproof.S(in.WalletID.String()), actorproof.S(in.AssetCode),
+		actorproof.S(string(in.Direction)), actorproof.S(fmt.Sprint(in.Amount)), actorproof.S(string(in.ReasonCode)),
+		actorproof.UUIDP(in.CausationTransactionID), in.EvidenceRefHash, actorproof.S(hex.EncodeToString(noteSum[:])))); err != nil {
+		return Request{}, err
+	}
 	var r Request
 	row := tx.QueryRow(ctx, `
 		INSERT INTO ledger_adjustment_requests
@@ -215,6 +228,9 @@ func CancelInTx(ctx context.Context, tx pgx.Tx, call Call, requestID uuid.UUID) 
 	}
 	if before.State != StatePending {
 		return Request{}, ErrNotPending
+	}
+	if err := call.attachProof(ctx, tx, actorproof.OpAdjustmentCancel, requestID.String(), before.PayloadHash); err != nil {
+		return Request{}, err
 	}
 	after, err := setState(ctx, tx, requestID, StateCancelled, nil)
 	if err != nil {

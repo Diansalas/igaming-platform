@@ -155,3 +155,29 @@ BEGIN
     END IF;
 END
 $$;
+
+-- PRH-2 R5 (SIGNED-ACTOR-PROOF, ADR 0110, migration 0120): actor_proof_keys and
+-- actor_proof_nonces are OWNER-ONLY. The blanket backfill GRANT above ("ALL
+-- TABLES IN SCHEMA public") would re-grant the runtime role SELECT/INSERT/
+-- UPDATE/DELETE on them every time this idempotent script is re-run against an
+-- already-migrated database; migration 0120 itself runs only once. Re-assert the
+-- denial here (both tables also have RLS enabled with NO policy, a second
+-- independent denial), and re-assert EXECUTE on the two SECURITY DEFINER
+-- functions the runtime role needs (a database provisioned after migrations
+-- ran has not yet received it). Guarded: neither exists before migration 0120.
+DO $$
+BEGIN
+    IF to_regclass('public.actor_proof_keys') IS NOT NULL THEN
+        EXECUTE 'REVOKE ALL ON actor_proof_keys FROM igaming_runtime';
+    END IF;
+    IF to_regclass('public.actor_proof_nonces') IS NOT NULL THEN
+        EXECUTE 'REVOKE ALL ON actor_proof_nonces FROM igaming_runtime';
+    END IF;
+    IF to_regprocedure('public.actor_proof_require(uuid, text, uuid, text, text, text)') IS NOT NULL THEN
+        EXECUTE 'GRANT EXECUTE ON FUNCTION actor_proof_require(uuid, text, uuid, text, text, text) TO igaming_runtime';
+    END IF;
+    IF to_regprocedure('public.actor_proof_key_active(text)') IS NOT NULL THEN
+        EXECUTE 'GRANT EXECUTE ON FUNCTION actor_proof_key_active(text) TO igaming_runtime';
+    END IF;
+END
+$$;

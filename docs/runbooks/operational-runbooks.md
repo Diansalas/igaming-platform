@@ -580,3 +580,82 @@ references): use the closed codes (basis, context, finding, reason) and the `evi
 **Interim procedure to close a tenant (casino cannot be checked automatically, Q-GP-6):** (1) suspend the tenant; (2) settle or void every open sportsbook bet (settle with payout BEFORE suspending, or void while suspended); (3) wait at least the provider's longest round and settlement window; (4) confirm with the provider that no casino round is open; (5) close with `tenant.ChangeStatus`. A win for a casino round still open at closure is refused: that is the player's win entitlement at risk (the casino stake is not stranded; the house holds it and its rollback stays allowed).
 
 **Tenant status changes and the gameplay status gate (ADR 0095 §40.5, migration 0118).** A change of `tenants.status` takes a per-tenant advisory lock exclusively and waits for in-flight casino and sportsbook postings; postings that start meanwhile wait behind it. Run status changes with `SET LOCAL lock_timeout = '5s'` in the same transaction and retry on a lock timeout. No `idle_in_transaction_session_timeout` is configured on the runtime role (confirmed absent in the repository and in the CI/dev database; deploy decision open): an idle-in-transaction session can block a status change, so investigate `pg_stat_activity` before retrying. **Stake returns on a non-active tenant are allowed (Q-GP-5, 2026-10-06, ADR 0095 §40.6, migration 0121):** a casino rollback of a posted bet, a sportsbook void of an open bet and a sportsbook void after settlement post normally on a suspended or closed tenant (once, idempotent, balanced); use them instead of any manual workaround. A new bet, a win or payout, a settlement with payout, a rollback of a posted win and a sportsbook rollback that would reopen a bet stay refused. **Do not compensate a stake with a manual adjustment while the stake return is still possible** (the provider rollback or the void would then refund the player a second time); a manual adjustment is a last resort only for a case where a stake WAS really debited and the stake-return path demonstrably cannot reach it (for example a posting refused for a mismatch the provider cannot correct), under four-eyes approval and with the original reference recorded in the reason. **A round is resolved as a whole:** never credit the stake by hand while a win of the same round stands (that pays stake AND win); either the win is reversed too (a compensating entry under four-eyes) or the stake is not returned. The player-facing casino rollback simulation route (mock, `CasinoPlaySimulationEnabled`) now also works on closed tenants. **Closing a tenant (Q-GP-1, 2026-10-06):** closure to `closed` is REFUSED (SQLSTATE GP020, `TENANT_CLOSE_BLOCKED_OPEN_ROUNDS`, HTTP 409 where a route exposes it, audit `tenant.status_change_refused_open_rounds` with counts only) while the tenant has open sportsbook bets. Approved sequence: settle each open bet normally while the tenant is active, or void it (also allowed while suspended), then close. A bet that must pay out cannot be settled with payout once the tenant is not active; settle it before suspending, or void it. Casino open rounds cannot be detected (no round-close or loss signal, Q-GP-6), so the guard does not cover them: confirm with the provider that no round is open before closing. Use `tenant.ChangeStatus` (audited, `SET LOCAL lock_timeout`), never a hand-written UPDATE. Rollback tombstones for never-seen originals are written while a tenant is suspended or closed on the orchestrator, staff-simulation and play-route paths only; the public casino webhook answers a non-active tenant with the uniform 401 before verification (Q-GP-3), so a provider rollback arriving there is not tombstoned except in the race window.
+**Tenant status changes and the gameplay status gate (ADR 0095 §40.5, migration 0118).** A change of `tenants.status` takes a per-tenant advisory lock exclusively and waits for in-flight casino and sportsbook postings; postings that start meanwhile wait behind it. Run status changes with `SET LOCAL lock_timeout = '5s'` in the same transaction and retry on a lock timeout. No `idle_in_transaction_session_timeout` is configured on the runtime role (confirmed absent in the repository and in the CI/dev database; deploy decision open): an idle-in-transaction session can block a status change, so investigate `pg_stat_activity` before retrying. **Never compensate a stranded stake of a non-active tenant with a manual adjustment**: if the provider's rollback or void is accepted after reactivation the player is refunded twice. Terminal stake returns on non-active tenants are an open owner question (Q-GP-5). Rollback tombstones for never-seen originals are written while a tenant is suspended or closed on the orchestrator, staff-simulation and play-route paths only; the public casino webhook answers a non-active tenant with the uniform 401 before verification (Q-GP-3), so a provider rollback arriving there is not tombstoned except in the race window.
+
+
+## 15. Signed actor proof: keys, rotation and incidents (ADR 0110, migration 0120, PRH-2 R5)
+
+K2 manual adjustments, K3 manual payment resolutions, K1 capability grants (request, approve/reject, cancel, revoke) and
+financial policy changes (propose, approve/reject, cancel) are accepted by the database only with a proof signed by the application server (HMAC-SHA256) that names the actor, scope, tenant,
+operation, target and payload. Without it the write fails closed with SQLSTATE `AP001`..`AP005`; the K2/K3 HTTP
+endpoints answer 403 (class `forbidden`) when the database refuses a proof, and 500 when the server cannot sign (no key configured, or a defect). THREAT-MODEL-ARBITRARY-SQL-1 is PARTIALLY MITIGATED:
+an attacker with code execution on the application host, staff rows / sessions / player credential tokens forged by
+SQL then authenticated over HTTP, and non-governed posting paths are stated in ADR 0110 sections 8-10a and are NOT
+closed by this control.
+
+**Provisioning (once per environment, before the first deploy that carries migration 0120's code).**
+1. Generate a 32-byte (or longer) random secret in the secret store (for example `openssl rand -base64 48`). Never put
+   it in source control, a ConfigMap, a ticket or a log.
+2. Choose a key id (`[A-Za-z0-9._-]{1,32}`, for example `ap-2026-10`).
+3. Run migrations (`/app/migrate up`) as the migration/owner role: this creates the empty owner-only tables.
+4. As the migration/owner role (NOT `igaming_runtime`), insert the verification copy WITHOUT putting the secret in
+   a statement text that the server can log. Before you start, confirm on the target server that
+   `SHOW log_statement;` is NOT `mod` or `all`, that `log_min_duration_statement` is `-1` (or high enough not to
+   catch this statement) and that `log_parameter_max_length` is `0` (or statement logging is off); otherwise the
+   secret ends up in the database log. Then, with psql 16 or later, keep the secret in a file readable only by you
+   (mode 0600, on a tmpfs, removed afterwards), bind it as a PARAMETER (not interpolated into the SQL text) and send
+   it from a script file, not the command line:
+   ```
+   \set ap_kid ap-2026-10
+   \set ap_hex `cat /dev/shm/ap-2026-10.hex`
+   INSERT INTO actor_proof_keys (kid, secret) VALUES ($1, decode($2, 'hex')) \bind :ap_kid :ap_hex \g
+   ```
+   Do not type the secret into an interactive prompt that records history, do not use `psql -c "...secret..."`, and
+   do not paste it into a ticket. `status` defaults to `active`. Verify without printing it:
+   `SELECT kid, status, octet_length(secret) FROM actor_proof_keys;`.
+5. Give the application the same secret: `ACTOR_PROOF_KEYS=ap-2026-10:<base64 secret>` and
+   `ACTOR_PROOF_ACTIVE_KID=ap-2026-10`, from the secret store as environment variables.
+6. Start the application. In production it REFUSES to start unless the key is configured AND the database holds that
+   kid as an active key (`actorproof: ... refusing to start`); fix the missing side, do not work around the gate.
+
+**Rotation (no downtime; two keys active during the overlap).**
+1. New secret in the secret store, new kid (for example `ap-2027-01`).
+2. As the owner role, insert the new key exactly as in provisioning step 4 (parameter-bound, `log_statement` checked).
+   Both kids now verify.
+3. Deploy the application with `ACTOR_PROOF_KEYS=ap-2027-01:<new>,ap-2026-10:<old>` and
+   `ACTOR_PROOF_ACTIVE_KID=ap-2027-01`. Instances still on the old configuration keep signing with the old kid and
+   keep working.
+4. When no instance signs with the old kid (all rolled; allow at least 2 minutes: a proof lives 30 s and is capped at
+   60 s), retire it as the owner role:
+   `UPDATE actor_proof_keys SET status='retired', retired_at=now() WHERE kid='ap-2026-10';`
+   A proof under a retired kid is refused with `AP002`.
+5. Remove the old key from the application configuration at the next deploy.
+6. Nonce pruning (PLAN; not automated, no job exists yet). Each governed write leaves one small row. A nonce older
+   than its `expires_at` can never be accepted again (an expired proof is refused before the nonce is looked at), so
+   pruning is housekeeping only, never a security control. Run weekly as the OWNER role (the runtime role cannot, by
+   design): `DELETE FROM actor_proof_nonces WHERE expires_at < now() - interval '1 day';` in small batches if the
+   table is large. Add a job and an alert on the row count when the first production volume is known.
+
+**Emergency (key believed leaked).** Generate and insert a new key, deploy it as the active kid, then retire EVERY
+older kid immediately (step 4 without the wait): in-flight approvals fail closed with `AP002` and are simply retried
+by the user. Also treat the incident as a possible application-host compromise (ADR 0110 section 9).
+
+**Symptoms.**
+- `AP001` on every K2/K3 write: no proof was presented. The application has no key configured (non-production), or a
+  code path writes a governed table without going through `internal/adjustment` / `internal/payments`.
+- `AP002`: the application key does not match any active `actor_proof_keys` row (not provisioned, retired, or the
+  secret differs). Compare kids; never print secrets.
+- `AP003`: clock skew between the application host and the database over 5 s, or a proof used more than 60 s after
+  issue. Fix NTP.
+- `AP004`: a bug or an attack: a proof was presented for a different actor/operation/target/payload. Page `security`.
+- `AP005`: a proof was used twice. A retry never causes this (every attempt signs a new proof); investigate as a
+  possible replay.
+
+**ECS role-init (`deploy/aws/sql/init-runtime-role.rds.sql`).** Run it with `psql --single-transaction -v
+ON_ERROR_STOP=1 -f ...` so a failure part-way cannot leave the runtime role half-provisioned (for example holding the
+blanket table grants but not yet the re-REVOKE on `actor_proof_keys` / `actor_proof_nonces`). The script is idempotent
+and re-asserts that REVOKE on every run. (Terraform / the ECS task command are not changed by this branch.)
+
+**Never:** read `actor_proof_keys` into a ticket or chat; grant the runtime role anything on `actor_proof_keys` or
+`actor_proof_nonces`; re-run `deploy/init-app-role.sql` expecting it to restore a grant (it re-asserts the revoke);
+create a second signer; disable the `zz_actor_proof_guard` triggers.

@@ -14,6 +14,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/Diansalas/igaming-platform/internal/actorproof"
 )
 
 // Config is the full set of configuration platform-api needs to start.
@@ -344,6 +346,20 @@ type Config struct {
 	// never renders through fmt, slog or encoding/json.
 	ProviderCredentialFingerprintKey SecretValue
 
+	// ActorProofKeys / ActorProofActiveKID are the SIGNED-ACTOR-PROOF signing
+	// keys (PRH-2 R5, ADR 0110, migration 0120), from ACTOR_PROOF_KEYS
+	// ("kid:base64(secret)", comma-separated, >= 2 during a rotation) and
+	// ACTOR_PROOF_ACTIVE_KID. The same secrets are provisioned by the
+	// migration/owner role into the OWNER-ONLY actor_proof_keys table; the
+	// runtime role can read neither. Absent outside production means governed
+	// four-eyes writes (K2 adjustments, K3 manual resolutions) fail closed at
+	// the database; in production main refuses to start without them
+	// (actorproof.VerifyConfiguredInProduction). Present, Load refuses
+	// malformed entries, keys shorter than 32 bytes, an unknown active kid, and
+	// a key equal to either JWT secret. SecretValue: never rendered.
+	ActorProofKeys      SecretValue
+	ActorProofActiveKID string
+
 	// SecretStoreBackends lists the secret-store backend schemes this
 	// process constructs (SECRETSTORE_BACKENDS, comma-separated, e.g.
 	// "devfile"). Every entry must pass ValidateSecretBackendScheme, so a
@@ -441,6 +457,29 @@ func (c Config) validateProviderCredentialFingerprintKey() error {
 	return nil
 }
 
+// validateActorProofKeys applies the ACTOR_PROOF_KEYS rules. Absent is valid
+// here (production's requirement is enforced by main's startup gate).
+func (c Config) validateActorProofKeys() error {
+	raw := c.ActorProofKeys.Reveal()
+	if raw == "" && c.ActorProofActiveKID == "" {
+		return nil
+	}
+	iss, err := actorproof.NewIssuerFromConfig(c.ActorProofActiveKID, raw)
+	if err != nil {
+		return fmt.Errorf("config: ACTOR_PROOF_KEYS / ACTOR_PROOF_ACTIVE_KID: %w", err)
+	}
+	if iss == nil {
+		return nil
+	}
+	keys, _ := actorproof.ParseKeySet(raw)
+	for kid, k := range keys {
+		if string(k) == c.JWTSigningSecret || (c.JWTPreviousSecret != "" && string(k) == c.JWTPreviousSecret) {
+			return fmt.Errorf("config: ACTOR_PROOF_KEYS key %q must differ from the JWT secrets", kid)
+		}
+	}
+	return nil
+}
+
 // Load reads configuration from the process environment. It returns an
 // error rather than panicking so callers (including tests) can handle a
 // misconfigured environment explicitly.
@@ -475,6 +514,8 @@ func Load() (Config, error) {
 		TrustedProxyCount:                0,
 		TestSupportEndpointsEnabled:      false,
 		ProviderCredentialFingerprintKey: NewSecretValue(os.Getenv("PROVIDER_CREDENTIAL_FINGERPRINT_KEY")),
+		ActorProofKeys:                   NewSecretValue(os.Getenv("ACTOR_PROOF_KEYS")),
+		ActorProofActiveKID:              os.Getenv("ACTOR_PROOF_ACTIVE_KID"),
 		SecretStoreDevFileRoot:           getEnvDefault("SECRETSTORE_DEVFILE_ROOT", "./.secrets/dev"),
 		SecretStoreAWSRegion:             getEnvDefault("AWS_SECRETSMANAGER_REGION", os.Getenv("AWS_REGION")),
 	}
@@ -674,6 +715,11 @@ func Load() (Config, error) {
 
 	// Stage 10.3 W2a (ADR 0093 A3; security review §3/§4.1).
 	if err := cfg.validateProviderCredentialFingerprintKey(); err != nil {
+		return Config{}, err
+	}
+
+	// PRH-2 R5 (ADR 0110): validate the signed-actor-proof key configuration.
+	if err := cfg.validateActorProofKeys(); err != nil {
 		return Config{}, err
 	}
 

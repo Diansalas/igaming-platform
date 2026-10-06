@@ -5234,3 +5234,29 @@ the review conditions R-1..R-9, T-1..T-18 are implemented and tested, see the AD
   PSP's behaviour is PROVIDER DEPENDENT; casino/sportsbook post failures for a reserved-prefix id surface as a
   generic 5xx (the ledger trigger refuses the posting; a 4xx mapping is deferred). No PCI scope is added: nothing in
   K3 reads, stores or transmits card data.
+
+
+## PRH-2 R5 — signed actor proof for governed four-eyes writes (ADR 0110; NOT YET SECURITY-REVIEWED)
+
+`implemented` on branch `prh2-r5-signed-actor-proof` (migration 0120), awaiting `security`, `ledger-finance`,
+`code-reviewer` and `qa` review. Owner decisions: THREAT-MODEL-ARBITRARY-SQL-1 = YES, SIGNED-ACTOR-PROOF = AUTHORIZED.
+
+- **What it adds.** A ledger-adjustment or payment-resolution request/approval/rejection/cancel is accepted only with a
+  proof signed by the application server (HMAC-SHA256, 30 s, one-time nonce) binding actor, scope, tenant, operation,
+  target and payload, verified in the database by an owner-owned `SECURITY DEFINER` function against an owner-only key
+  table. A stolen `igaming_runtime` credential that sets the actor GUCs of two real admins is refused (`AP001`..`AP005`).
+- **Key handling.** Signing key in configuration only (`ACTOR_PROOF_KEYS`, `ACTOR_PROOF_ACTIVE_KID`); verification copy
+  in `actor_proof_keys` (no runtime privilege, RLS on with no policy); kid-based rotation with at least two active keys;
+  production refuses to start without a provisioned key. Runbook: `docs/runbooks/operational-runbooks.md` section 15.
+- **Also covered (review finding H2).** The K1 capability-grant requests / approvals / revokes and the financial
+  policy-change proposals / approvals / cancels, with a NULL-tenant encoding confined to the `platform` scope and
+  those operations. K1 request cancel is initiator-only and expiry is refused until the request has expired.
+- **THREAT-MODEL-ARBITRARY-SQL-1: PARTIALLY MITIGATED** (open because of T3/H1, T4, T5 and T8 - other dual-control
+  flows: payment kill-switch release 0105, provider credential handles 0096, KYC enforcement policy 0103, asset-registry
+  dual control 0047, withdrawal approvals/policies 0026/0034, bonus change governance 0063, casino catalogue dual control
+  0086/0089 - plus the inherent T6, T7 and the ADR 0110 section 9.5 wire residual). An attacker with code execution on the application host holds
+  the key. Ordinary non-governed posting paths are unchanged (T5). Staff rows minted or taken over by SQL, refresh
+  sessions forged by SQL, and unkeyed `player_credential_tokens` hashes still let an attacker authenticate as a
+  principal the database believes in and be issued genuine proofs (T3, T4; NULL-ARM-WRITE-1 items 1-3): the proof
+  closes the in-database impersonation chain, not the identity-store integrity chain. Those routes are
+  DEFERRED-REQUIRES-OWNER-AUTHORIZATION. See ADR 0110 sections 8-10a.

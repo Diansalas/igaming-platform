@@ -9,6 +9,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+
+	"github.com/Diansalas/igaming-platform/internal/actorproof/prooftest"
 )
 
 // errK3Rollback is returned by the in-transaction helpers to roll the test
@@ -30,6 +32,10 @@ func k3Try(ctx context.Context, tx pgx.Tx, fn func(ctx context.Context, tx pgx.T
 // insertApproval inserts the actor's approval of r in tx (the actor session is
 // the caller's) with r's payload hash.
 func k3InsertApproval(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, r ManualResolution, decision string) error {
+	// SIGNED-ACTOR-PROOF (migration 0120): the server-issued proof for this session's actor.
+	if err := prooftest.AttachForSession(ctx, tx, "payment_force_resolve:"+decision, r.ID.String(), r.PayloadHash); err != nil {
+		return err
+	}
 	_, err := tx.Exec(ctx, `
 		INSERT INTO payment_manual_resolution_approvals
 			(tenant_id, resolution_id, decision, payload_hash, decided_by, decided_by_scope, decided_by_person_id, decided_txid, reason_code)
@@ -68,6 +74,9 @@ func (w *k3World) inExecuting(r ManualResolution, approver k3Staff, fn func(ctx 
 func (w *k3World) inExecutingActing(r ManualResolution, approver k3Staff, fn func(ctx context.Context, tx pgx.Tx) error) error {
 	w.t.Helper()
 	err := w.pool.WithPlatformActingInTenant(context.Background(), approver.ID, w.f.tenantID, r.ID, OperationKindForceResolve, func(ctx context.Context, tx pgx.Tx) error {
+		if err := prooftest.AttachForSession(ctx, tx, "payment_force_resolve:approve", r.ID.String(), r.PayloadHash); err != nil {
+			return err
+		}
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO payment_manual_resolution_approvals
 				(tenant_id, resolution_id, decision, payload_hash, decided_by, decided_by_scope, decided_by_person_id, decided_txid, reason_code)

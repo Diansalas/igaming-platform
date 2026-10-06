@@ -39,6 +39,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
+	"github.com/Diansalas/igaming-platform/internal/actorproof"
 	"github.com/Diansalas/igaming-platform/internal/audit"
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/providerref"
@@ -234,6 +235,25 @@ type ResolutionCall struct {
 	TenantID uuid.UUID
 	Scope    string
 	Meta     ResolutionMeta
+	// Proofs signs the SIGNED-ACTOR-PROOF (ADR 0110, migration 0120) for this
+	// call's governed writes. nil means the process-wide actorproof.Default().
+	Proofs *actorproof.Issuer
+}
+
+// attachProof signs and attaches the actor proof for ONE governed write, after
+// runSession authenticated the principal (verified token subject). The database
+// verifies it (migration 0120) and refuses the write without it. Any signing
+// failure - a missing issuer or a claim set the database could never admit - is
+// returned (a server-side defect, HTTP 500), never silently skipped.
+func (c ResolutionCall) attachProof(ctx context.Context, tx pgx.Tx, operation, target, payloadHash string) error {
+	iss := c.Proofs
+	if iss == nil {
+		iss = actorproof.Default()
+	}
+	return iss.Attach(ctx, tx, actorproof.Claims{
+		Actor: c.ActorID, Scope: c.Scope, Tenant: c.TenantID,
+		Operation: operation, Target: target, PayloadHash: payloadHash,
+	})
 }
 
 // ManualResolution is one payment_manual_resolutions row.
@@ -408,6 +428,14 @@ type ResolutionOutcome struct {
 type ManualResolutionService struct {
 	pool    *db.Pool
 	sources *StatementSourceRegistry
+	proofs  *actorproof.Issuer
+}
+
+// WithProofIssuer sets the issuer this service signs actor proofs with (default:
+// the process-wide actorproof.Default()).
+func (s *ManualResolutionService) WithProofIssuer(i *actorproof.Issuer) *ManualResolutionService {
+	s.proofs = i
+	return s
 }
 
 // NewManualResolutionService returns a service over pool. sources is the
@@ -440,14 +468,14 @@ func (s *ManualResolutionService) runSession(ctx context.Context, target Resolut
 	}
 	if tc.TenantID == uuid.Nil {
 		return s.pool.WithPlatformActingInTenant(ctx, subject, target.tenantID, resolutionID, OperationKindForceResolve, func(ctx context.Context, tx pgx.Tx) error {
-			return fn(ctx, tx, ResolutionCall{ActorID: subject, TenantID: target.tenantID, Scope: ResolutionScopePlatformActing, Meta: meta})
+			return fn(ctx, tx, ResolutionCall{ActorID: subject, TenantID: target.tenantID, Scope: ResolutionScopePlatformActing, Meta: meta, Proofs: s.proofs})
 		})
 	}
 	if tc.TenantID != target.tenantID {
 		return ErrResolutionForeignTenant
 	}
 	return s.pool.WithPrincipalScope(ctx, tc.TenantID, subject, func(ctx context.Context, tx pgx.Tx) error {
-		return fn(ctx, tx, ResolutionCall{ActorID: subject, TenantID: tc.TenantID, Scope: ResolutionScopeTenant, Meta: meta})
+		return fn(ctx, tx, ResolutionCall{ActorID: subject, TenantID: tc.TenantID, Scope: ResolutionScopeTenant, Meta: meta, Proofs: s.proofs})
 	})
 }
 
@@ -473,6 +501,15 @@ func (s *ManualResolutionService) requestInTx(ctx context.Context, tx pgx.Tx, ca
 	}
 	// Every NOT NULL column that migration 0115's guard forces is given a
 	// placeholder here (K2's pattern): the BEFORE INSERT trigger overwrites it.
+	// SIGNED-ACTOR-PROOF (migration 0120): the id is server-forced by the guard,
+	// so the target is 'new'; the digest binds the caller-supplied payload (the
+	// same digest the zz_actor_proof_guard trigger recomputes from the row).
+	if err := call.attachProof(ctx, tx, actorproof.OpResolutionRequest, actorproof.TargetNew, actorproof.Digest(
+		actorproof.S(call.TenantID.String()), actorproof.S(in.AttemptID.String()), actorproof.S(string(in.Kind)),
+		actorproof.SP(in.FindingCode), actorproof.SP(in.BasisCode), actorproof.SP(in.ContextCode),
+		actorproof.SP(in.EvidenceRefHash), actorproof.S(in.ReasonCode))); err != nil {
+		return ManualResolution{}, err
+	}
 	var r ManualResolution
 	row := tx.QueryRow(ctx, `
 		INSERT INTO payment_manual_resolutions
@@ -578,6 +615,9 @@ func (s *ManualResolutionService) Cancel(ctx context.Context, target ResolutionT
 		}
 		if before.State != ResolutionPending {
 			return ErrResolutionNotPending
+		}
+		if err := call.attachProof(ctx, tx, actorproof.OpResolutionCancel, id.String(), before.PayloadHash); err != nil {
+			return err
 		}
 		out, err = setResolutionState(ctx, tx, id, ResolutionCancelled, nil)
 		if err != nil {
@@ -706,6 +746,13 @@ func (s *ManualResolutionService) decideInTx(ctx context.Context, tx pgx.Tx, cal
 	// Step 4: the approval insert (migration 0115 triggers: payload hash,
 	// in-force grant, distinct Person, beneficiary, S-2(iii), closed-tenant
 	// scope, pending).
+	op := actorproof.OpResolutionApprove
+	if in.Decision == ResolutionReject {
+		op = actorproof.OpResolutionReject
+	}
+	if err := call.attachProof(ctx, tx, op, id.String(), in.PayloadHash); err != nil {
+		return ResolutionOutcome{}, err
+	}
 	var approvalID uuid.UUID
 	if err := tx.QueryRow(ctx, `
 		INSERT INTO payment_manual_resolution_approvals
@@ -1170,6 +1217,9 @@ func ClassifyResolutionError(err error) ResolutionErrClass {
 	case code == "40001", code == "40P01":
 		return ResolutionErrRetryable
 	case code == "MR001", code == "MR003", code == "MR011", code == "MR032", code == "42501":
+		return ResolutionErrForbidden
+	case len(code) == 5 && code[:2] == "AP":
+		// SIGNED-ACTOR-PROOF refusal (migration 0120): fail closed.
 		return ResolutionErrForbidden
 	case code == "CG001", code == "CG002", code == "CG020", code == "MR002":
 		return ResolutionErrSession
