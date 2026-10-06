@@ -403,10 +403,16 @@ func TestTenantNotActive_CasinoStatusChangeVsPostingRace(t *testing.T) {
 // original_tombstoned (the C7 cas_tombstone_late_original input), also after
 // reactivation; a late original win is refused as tombstoned.
 func TestTenantNotActive_CasinoTombstonesAlwaysWrittenAndLateOriginalRecorded(t *testing.T) {
+	for _, status := range []string{"suspended", "closed"} {
+		t.Run(status, func(t *testing.T) { casinoTombstonesAlwaysWritten(t, status) })
+	}
+}
+
+func casinoTombstonesAlwaysWritten(t *testing.T, status string) {
 	owner := testPool(t)
 	rt := runtimePoolForGate(t)
 	w := newGateWorld(t, owner, rt)
-	setStatusForGate(t, owner, w.f.tenantID, "suspended")
+	setStatusForGate(t, owner, w.f.tenantID, status)
 	txs0, entries0 := ledgerCountsForGate(t, owner, w.f.tenantID)
 
 	res, err := w.deliver(t, CallbackEventRollback, "rb-late", "b-late", "round-late", 0)

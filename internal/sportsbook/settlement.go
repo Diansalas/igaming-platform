@@ -966,10 +966,10 @@ func lockAndPost(ctx context.Context, tx pgx.Tx, chainCausation bool, ins ...led
 	// recorded rejection, so nothing of the call is posted.
 	// Ledger-finance C1: a tombstone moves no money and protects against a late
 	// settlement, so it is ALWAYS written; the gate is skipped when every input
-	// is a tombstone.
+	// is an entry-less tombstone (ledger.Post also refuses a tombstone with entries).
 	allTombstones := len(ins) > 0
 	for _, in := range ins {
-		if in.TransactionType != ledger.TxTombstone {
+		if in.TransactionType != ledger.TxTombstone || len(in.Entries) != 0 {
 			allTombstones = false
 		}
 	}

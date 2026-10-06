@@ -512,10 +512,16 @@ func TestTenantNotActive_GateFailsClosedWhenTheRowIsNotVisible(t *testing.T) {
 // late settle, so its tombstone is written even for a suspended tenant, is
 // idempotent, and the late settle stays refused (also after reactivation).
 func TestTenantNotActive_TombstonesAreAlwaysWritten(t *testing.T) {
+	for _, status := range nonActiveStatuses {
+		t.Run(status, func(t *testing.T) { tombstonesAlwaysWritten(t, status) })
+	}
+}
+
+func tombstonesAlwaysWritten(t *testing.T, status string) {
 	owner := testPool(t)
 	rt := runtimePool(t)
 	f, actor, betID := newStdBet(t, owner)
-	setTenantStatus(t, owner, f.tenantID, "suspended")
+	setTenantStatus(t, owner, f.tenantID, status)
 	txs0, entries0 := ledgerCounts(t, owner, f.tenantID)
 
 	res, err := simulateSettlement(t, rt, f.tenantID, rollbackEvent(betID, actor, 1))
@@ -573,5 +579,45 @@ func TestTenantNotActive_BackstopReplayWithDifferentTypeWritesNothing(t *testing
 	}
 	if txs1, _ := ledgerCounts(t, owner, f.tenantID); txs1 != txs0 {
 		t.Fatalf("row count changed: %d -> %d", txs0, txs1)
+	}
+}
+
+// TestTenantNotActive_LockAndPostTombstoneExemptionIsNarrow (delta review D1,
+// D3): the exemption applies only when EVERY input is an entry-less
+// tombstone. A tombstone mixed with a settlement, or a tombstone carrying
+// entries, still hits the gate; ledger.Post refuses a tombstone with entries.
+func TestTenantNotActive_LockAndPostTombstoneExemptionIsNarrow(t *testing.T) {
+	owner := testPool(t)
+	rt := runtimePool(t)
+	for _, status := range nonActiveStatuses {
+		f := seedFixture(t, owner)
+		setTenantStatus(t, owner, f.tenantID, status)
+		tomb := ledger.TransactionInput{TenantID: f.tenantID, TransactionType: ledger.TxTombstone}
+		settle := ledger.TransactionInput{TenantID: f.tenantID, TransactionType: ledger.TxSportsbookSettlement}
+		withEntries := ledger.TransactionInput{TenantID: f.tenantID, TransactionType: ledger.TxTombstone,
+			Entries: []ledger.EntryInput{{LedgerAccountID: uuid.New(), Direction: ledger.Debit, Amount: 1}}}
+		for name, ins := range map[string][]ledger.TransactionInput{
+			"tombstone_mixed_with_settlement": {tomb, settle},
+			"settlement_mixed_with_tombstone": {settle, tomb},
+			"tombstone_with_entries":          {withEntries},
+		} {
+			err := rt.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+				_, err := lockAndPost(ctx, tx, false, ins...)
+				return err
+			})
+			if !errors.Is(err, ErrSettlementTenantNotActive) {
+				t.Fatalf("%s/%s: the gate must apply, got %v", status, name, err)
+			}
+		}
+		// ledger.Post refuses a tombstone that carries entries.
+		err := rt.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+			in := withEntries
+			in.IdempotencyKey, in.CorrelationID = "tomb-entries-"+uuid.NewString(), uuid.New()
+			_, err := ledger.Post(ctx, tx, in)
+			return err
+		})
+		if !errors.Is(err, ledger.ErrInvalidEntry) {
+			t.Fatalf("%s: a tombstone with entries must be ErrInvalidEntry, got %v", status, err)
+		}
 	}
 }
