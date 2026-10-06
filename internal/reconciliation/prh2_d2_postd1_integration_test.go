@@ -265,8 +265,9 @@ func TestD2_14_PollFC4ConflictPark_HoldingReference_IsBoundAndStanding(t *testin
 // the attempt is ambiguous with provider_reference NULL). A verified callback
 // then names reference R and the attempt's MERCHANT reference, reporting
 // success with a different amount. The receipt path resolves the attempt by
-// merchant reference and parks it T10 callback_amount_asset_mismatch WITHOUT
-// binding R (payments/receipt.go). Before D2F-1 the attempt was "bound" on the
+// merchant reference and (before B3) parked it T10 callback_amount_asset_mismatch
+// WITHOUT binding R (payments/receipt.go); B3 now binds R, so this test builds
+// that legacy/unbound shape directly (see build). Before D2F-1 the attempt was "bound" on the
 // empty reference: a standing finding that no reversal and no tombstone could
 // ever clear. Now the runtime rule treats a bound reason with no stored
 // reference as unbound: in-run by merchant reference, cleared on the line's
@@ -285,10 +286,17 @@ func TestD2_15_RefLessCallbackMismatchPark_IsUnboundAndClearsOnLineReference(t *
 			t.Fatalf("setup: want an ambiguous attempt with NO reference, got %s %v", a.State, a.ProviderReference)
 		}
 		r := "d2-cb-r-" + uuid.NewString()
-		w.applyReceipt(t, payProvA, payments.ReceiptEvidence{
-			EventType: "deposit", ProviderReference: r, MerchantReference: a.MerchantReference,
-			Outcome: payments.OutcomeSucceeded, Amount: pspAmount, AssetCode: "EUR",
-		})
+		// PAY-CALLBACK-MISMATCH-BIND-1 (B3): the receipt path now BINDS R on this
+		// park, so the live callback no longer produces the unbound shape (see
+		// TestB3_CallbackMismatchPark_IsBound_StandingUntilTombstoneOnReference).
+		// The unbound shape is still what a PRE-B3 park (and any reference the
+		// bind refused) looks like, so it is built here directly: the same T10
+		// transition and reason the old receipt code applied, with no bind.
+		if err := w.pool.WithTenant(context.Background(), w.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+			return payments.ApplyDisputeFromNonTerminal(ctx, tx, a.ID, payments.EvidenceCallback, payments.TerminalReasonCallbackAmountAssetMismatch)
+		}); err != nil {
+			t.Fatalf("setup: legacy unbound T10: %v", err)
+		}
 		parked := w.mustParked(t, a.ID, payments.TerminalReasonCallbackAmountAssetMismatch, false)
 		if parked.ProviderReference != nil {
 			t.Fatalf("setup: the probe's shape needs the callback park to leave the reference unbound, got %q", *parked.ProviderReference)

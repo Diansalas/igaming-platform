@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/Diansalas/igaming-platform/internal/audit"
 	"github.com/Diansalas/igaming-platform/internal/ledger"
@@ -619,11 +620,123 @@ func resolvedForOtherDeposit(ctx context.Context, tx pgx.Tx, tenantID, intentID 
 // via §5.1's sticky "any succeeded -> succeeded" rule; the caller's own
 // recomputeDepositIntentProjection, if it runs, sees the same result
 // either way).
-func applyMultipleSuccessDispute(ctx context.Context, tx pgx.Tx, attempt PaymentAttempt, evidence EvidenceKind) error {
+func applyMultipleSuccessDispute(ctx context.Context, tx pgx.Tx, attempt PaymentAttempt, evidence EvidenceKind, providerID, providerReference string) error {
 	if attempt.State == AttemptDeclined {
+		// A declined row is not bindable (bindParkReference only touches live
+		// states); COALESCE semantics would keep any reference it already holds.
 		return ApplyMultipleSuccessForIntent(ctx, tx, attempt.ID, evidence)
 	}
+	if err := bindParkReference(ctx, tx, attempt, providerID, providerReference); err != nil {
+		return err
+	}
 	return ApplyDisputeFromNonTerminal(ctx, tx, attempt.ID, evidence, TerminalReasonMultipleSuccessForIntent)
+}
+
+// bindParkReference is PAY-CALLBACK-MISMATCH-BIND-1: before a callback- or
+// multiple-success-driven T10 parks a live attempt, bind the reference the
+// provider reported so reconciliation can match the provider's record to
+// this attempt (a reference-less park is "unbound" to D2F-1 and MA020 can
+// never clear it). It mirrors parkDepositAttempt's bindRef, and binds ONLY
+// when (1) the attempt holds no reference yet, (2) the value passes
+// providerref.ValidatePaymentReference, and (3) foreignReferenceBinding
+// reports no other attempt/intent of this tenant holding it. On any failed
+// condition it does nothing and the park stays reference-less (no error, so
+// the transaction commits and nothing loops). Must run under the locks the
+// caller already holds (intent/attempt).
+func bindParkReference(ctx context.Context, tx pgx.Tx, attempt PaymentAttempt, providerID, reference string) error {
+	outcome, err := bindParkReferenceOutcome(ctx, tx, attempt, providerID, reference)
+	if err != nil {
+		return err
+	}
+	if outcome == "" {
+		return nil
+	}
+	// Security S-1: the bind outcome is durable. Never the raw reference: the
+	// sha256 prefix only (the reference may be hostile or foreign-held).
+	if err := audit.Record(ctx, tx, audit.Entry{
+		TenantID: attempt.TenantID, ActorType: audit.ActorSystem, Action: ParkReferenceBindAuditAction,
+		TargetType: "payment_attempt", TargetID: attempt.ID.String(), Outcome: audit.OutcomeSuccess,
+		Metadata: map[string]any{
+			"bind_outcome": outcome, "provider_id": providerID, "ref_sha256_prefix": providerref.Fingerprint(reference),
+		},
+	}); err != nil {
+		return fmt.Errorf("payments: audit park reference bind: %w", err)
+	}
+	return nil
+}
+
+// ParkReferenceBindAuditAction is the audit action recording a
+// bindParkReference outcome: bound | already_bound | invalid:<reason> |
+// conflict:<operation> | lost_race | skipped_non_deposit.
+const ParkReferenceBindAuditAction = "payment.park_reference_bind"
+
+// bindParkReferenceOutcome returns "" when nothing is worth recording
+// (nothing reported, or the attempt is not in a bindable state).
+func bindParkReferenceOutcome(ctx context.Context, tx pgx.Tx, attempt PaymentAttempt, providerID, reference string) (string, error) {
+	if reference == "" || providerID == "" {
+		return "", nil
+	}
+	switch attempt.State {
+	case AttemptSubmitting, AttemptPending, AttemptAmbiguous:
+	default:
+		return "", nil
+	}
+	// Deposit attempts only (ledger-finance C1): a payout park must stay
+	// reference-less. A bound payout park would be a standing
+	// pay_captured_unposted that no deposit reversal on R could ever clear
+	// (ErrDepositReversalIntegrity).
+	if attempt.Operation != AttemptOperationDeposit {
+		return "skipped_non_deposit", nil
+	}
+	if attempt.ProviderReference != nil && *attempt.ProviderReference != "" {
+		return "already_bound", nil
+	}
+	if err := providerref.ValidatePaymentReference("provider_reference", reference); err != nil {
+		reason := "invalid"
+		if perr, ok := providerref.AsError(err); ok {
+			reason = "invalid:" + string(perr.Reason)
+		}
+		return reason, nil
+	}
+	intentID := uuid.Nil
+	if attempt.DepositIntentID != nil {
+		intentID = *attempt.DepositIntentID
+	}
+	conflict, boundOp, err := foreignReferenceBinding(ctx, tx, attempt.TenantID, providerID, reference, attempt.ID, intentID)
+	if err != nil {
+		return "", err
+	}
+	if conflict {
+		return "conflict:" + boundOp, nil
+	}
+	// The pre-check above cannot see a concurrent, uncommitted bind of the same
+	// reference by another attempt (different intent, different lock). That
+	// race surfaces at the per-tenant unique index; a savepoint turns it into
+	// "someone else holds it" (park stays reference-less) instead of rolling
+	// the whole evidence transaction back.
+	sp, err := tx.Begin(ctx)
+	if err != nil {
+		return "", fmt.Errorf("payments: bind reference on parked attempt: %w", err)
+	}
+	if _, err := sp.Exec(ctx,
+		`UPDATE payment_attempts SET provider_reference = COALESCE(provider_reference, $2) WHERE id = $1 AND state IN ('submitting','pending','ambiguous')`,
+		attempt.ID, reference); err != nil {
+		if rbErr := sp.Rollback(ctx); rbErr != nil {
+			return "", errors.Join(
+				fmt.Errorf("payments: bind reference on parked attempt: %w", err),
+				fmt.Errorf("payments: roll back bind savepoint: %w", rbErr))
+		}
+		var pgErr *pgconn.PgError
+		// Security S-4: only the per-tenant reference unique index is a lost race.
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == "payment_attempts_tenant_provider_ref" {
+			return "lost_race", nil
+		}
+		return "", fmt.Errorf("payments: bind reference on parked attempt: %w", err)
+	}
+	if err := sp.Commit(ctx); err != nil {
+		return "", fmt.Errorf("payments: bind reference on parked attempt: %w", err)
+	}
+	return "bound", nil
 }
 
 // auditMultipleSuccessForIntent records the ADR 0095 §28.11 audit entry
@@ -709,7 +822,7 @@ func (o *Orchestrator) postDepositSuccessOrDispute(
 		return intent, uuid.Nil, false, err
 	}
 	if resolved {
-		if err := applyMultipleSuccessDispute(ctx, tx, attempt, evidence); err != nil {
+		if err := applyMultipleSuccessDispute(ctx, tx, attempt, evidence, providerID, providerReference); err != nil {
 			return intent, uuid.Nil, false, err
 		}
 		if err := auditMultipleSuccessForIntent(ctx, tx, attempt, providerID, providerReference, evidence, false); err != nil {
@@ -719,7 +832,7 @@ func (o *Orchestrator) postDepositSuccessOrDispute(
 	}
 	updated, postedTxID, err = o.postDepositSuccess(ctx, tx, intent, &attempt.ID, providerID, providerReference, amount, assetCode)
 	if errors.Is(err, ErrDepositIntentAlreadyResolved) {
-		if derr := applyMultipleSuccessDispute(ctx, tx, attempt, evidence); derr != nil {
+		if derr := applyMultipleSuccessDispute(ctx, tx, attempt, evidence, providerID, providerReference); derr != nil {
 			return intent, uuid.Nil, false, derr
 		}
 		if derr := auditMultipleSuccessForIntent(ctx, tx, attempt, providerID, providerReference, evidence, true); derr != nil {

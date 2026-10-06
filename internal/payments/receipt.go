@@ -822,6 +822,11 @@ func applyResolvedReceiptEvidence(ctx context.Context, tx pgx.Tx, o *Orchestrato
 			return true, ResolutionApplied, nil
 		case AttemptSubmitting, AttemptPending, AttemptAmbiguous:
 			if mismatched {
+				// PAY-CALLBACK-MISMATCH-BIND-1: bind the reported reference
+				// (when valid and unconflicted) before parking.
+				if err := bindParkReference(ctx, tx, attempt, providerIDOrEmpty(attempt), ev.ProviderReference); err != nil {
+					return false, "", err
+				}
 				return true, ResolutionAnomalyOther, alertAfterDispute(ctx, tx, attempt, TerminalReasonCallbackAmountAssetMismatch,
 					ApplyDisputeFromNonTerminal(ctx, tx, attempt.ID, EvidenceCallback, TerminalReasonCallbackAmountAssetMismatch))
 			}
