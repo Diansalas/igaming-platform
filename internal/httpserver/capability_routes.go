@@ -125,9 +125,14 @@ func recordCapabilityDenied(ctx context.Context, deps Deps, c capabilityCall, op
 // tenant-scoped caller, WithPlatformAdmin for a platform-scoped one.
 // Never db.WithTenant alone (see runKillSwitchTx's identical rationale).
 func runCapabilityTx(ctx context.Context, deps Deps, c capabilityCall, fn func(ctx context.Context, tx pgx.Tx) error) error {
+	// SIGNED-ACTOR-PROOF (ADR 0110): the caller is authenticated (verified token
+	// subject) and the route's permission check has passed; the K1 functions sign
+	// for exactly this principal.
 	if c.tc.TenantID == uuid.Nil {
+		ctx = capability.WithProofActor(ctx, capability.ProofActor{Actor: c.subject, Scope: capability.ProofScopePlatform})
 		return deps.DB.WithPlatformAdmin(ctx, c.subject, fn)
 	}
+	ctx = capability.WithProofActor(ctx, capability.ProofActor{Actor: c.subject, Scope: capability.ProofScopeTenant, Tenant: c.tc.TenantID})
 	return deps.DB.WithPrincipalScope(ctx, c.tc.TenantID, c.subject, fn)
 }
 

@@ -5248,9 +5248,12 @@ the review conditions R-1..R-9, T-1..T-18 are implemented and tested, see the AD
 - **Key handling.** Signing key in configuration only (`ACTOR_PROOF_KEYS`, `ACTOR_PROOF_ACTIVE_KID`); verification copy
   in `actor_proof_keys` (no runtime privilege, RLS on with no policy); kid-based rotation with at least two active keys;
   production refuses to start without a provisioned key. Runbook: `docs/runbooks/operational-runbooks.md` section 15.
-- **Not covered (stated).** An attacker with code execution on the application host holds the key. Ordinary
-  non-governed posting paths are unchanged. The K1 capability-grant and financial-policy-change guards still derive the
-  actor from GUCs alone. Staff rows minted or taken over by SQL, and refresh sessions forged by SQL, still let an
-  attacker authenticate over HTTP as a principal the database believes in and be issued genuine proofs
-  (NULL-ARM-WRITE-1 items 1-3): the proof closes the in-database impersonation chain, not the identity-store integrity
-  chain. See ADR 0110 sections 8-10.
+- **Also covered (review finding H2).** The K1 capability-grant requests / approvals / revokes and the financial
+  policy-change proposals / approvals / cancels, with a NULL-tenant encoding confined to the `platform` scope and
+  those operations. K1 request cancel is initiator-only and expiry is refused until the request has expired.
+- **THREAT-MODEL-ARBITRARY-SQL-1: PARTIALLY MITIGATED.** An attacker with code execution on the application host holds
+  the key. Ordinary non-governed posting paths are unchanged (T5). Staff rows minted or taken over by SQL, refresh
+  sessions forged by SQL, and unkeyed `player_credential_tokens` hashes still let an attacker authenticate as a
+  principal the database believes in and be issued genuine proofs (T3, T4; NULL-ARM-WRITE-1 items 1-3): the proof
+  closes the in-database impersonation chain, not the identity-store integrity chain. Those routes are
+  DEFERRED-REQUIRES-OWNER-AUTHORIZATION. See ADR 0110 sections 8-10a.

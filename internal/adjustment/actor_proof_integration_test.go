@@ -436,7 +436,7 @@ func TestActorProof_RuntimeRoleCannotReadKeysNoncesOrMint(t *testing.T) {
 	// boolean (never a token), and calling it without/with a forged proof fails.
 	var bad int
 	if err := rt.WithoutTenant(ctx, func(ctx context.Context, tx pgx.Tx) error {
-		return tx.QueryRow(ctx, `SELECT count(*) FROM pg_proc p WHERE p.proname LIKE 'actor_proof%' AND p.prorettype NOT IN ('void'::regtype, 'boolean'::regtype, 'trigger'::regtype)`).Scan(&bad)
+		return tx.QueryRow(ctx, `SELECT count(*) FROM pg_proc p WHERE p.proname LIKE 'actor_proof%' AND p.proname NOT IN ('actor_proof_ts', 'actor_proof_k1_request_digest') AND p.prorettype NOT IN ('void'::regtype, 'boolean'::regtype, 'trigger'::regtype)`).Scan(&bad)
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -468,6 +468,15 @@ func TestActorProof_RuntimeRoleCannotReadKeysNoncesOrMint(t *testing.T) {
 			return e
 		}
 		_, e := tx.Exec(ctx, `SELECT actor_proof_require($1, 'platform', $2, 'ledger_adjustment:approve', $3, $4)`, actv, tidv, tgt, pl)
+		return e
+	})
+	requireCode(t, err, "AP004")
+	// An unknown scope is never provable.
+	err = rt.WithoutTenant(ctx, func(ctx context.Context, tx pgx.Tx) error {
+		if _, e := tx.Exec(ctx, `SELECT set_config('app.actor_proof', $1, true)`, f.Valid(t, actv, "bogus", tidv, "ledger_adjustment:approve", tgt, pl)); e != nil {
+			return e
+		}
+		_, e := tx.Exec(ctx, `SELECT actor_proof_require($1, 'bogus', $2, 'ledger_adjustment:approve', $3, $4)`, actv, tidv, tgt, pl)
 		return e
 	})
 	requireCode(t, err, "AP004")

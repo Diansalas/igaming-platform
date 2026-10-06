@@ -242,22 +242,18 @@ type ResolutionCall struct {
 
 // attachProof signs and attaches the actor proof for ONE governed write, after
 // runSession authenticated the principal (verified token subject). The database
-// verifies it (migration 0120) and refuses the write without it. An unsignable
-// claim set attaches nothing, so the database refuses fail-closed with its own
-// error; a missing issuer is a configuration error and is returned.
+// verifies it (migration 0120) and refuses the write without it. Any signing
+// failure - a missing issuer or a claim set the database could never admit - is
+// returned (a server-side defect, HTTP 500), never silently skipped.
 func (c ResolutionCall) attachProof(ctx context.Context, tx pgx.Tx, operation, target, payloadHash string) error {
 	iss := c.Proofs
 	if iss == nil {
 		iss = actorproof.Default()
 	}
-	err := iss.Attach(ctx, tx, actorproof.Claims{
+	return iss.Attach(ctx, tx, actorproof.Claims{
 		Actor: c.ActorID, Scope: c.Scope, Tenant: c.TenantID,
 		Operation: operation, Target: target, PayloadHash: payloadHash,
 	})
-	if errors.Is(err, actorproof.ErrInvalidClaims) {
-		return nil
-	}
-	return err
 }
 
 // ManualResolution is one payment_manual_resolutions row.

@@ -209,20 +209,17 @@ func TestVerifyConfiguredInProduction(t *testing.T) {
 	}
 }
 
-// The signing capability may be reached only from the packages that own
-// four-eyes and from process wiring (SIGNED-ACTOR-PROOF: a single server-side
-// issuer). A new caller anywhere else fails this test and must go through
-// review (ADR 0110).
-func TestStatic_OnlyFourEyesPackagesSign(t *testing.T) {
-	allowed := map[string]bool{
-		filepath.Join("internal", "adjustment"):  true,
-		filepath.Join("internal", "payments"):    true,
-		filepath.Join("internal", "actorproof"):  true,
-		filepath.Join("cmd", "platform-api"):     true, // SetDefault wiring only
-		filepath.Join("internal", "config"):      true, // ParseKeySet validation only
-		filepath.Join("internal", "testsupport"): true,
-	}
-	root := filepath.Join("..", "..")
+// staticOffenders scans the non-test Go files under root and reports, as paths
+// relative to root: (1) files outside the allowed four-eyes owners that import
+// internal/actorproof (the single server-side issuer); (2) ANY non-test file
+// other than prooftest itself that imports internal/actorproof/prooftest (its
+// AttachForSession signs for whoever the session GUCs name, so it must never be
+// reachable from production code); (3) any non-test file other than
+// internal/capability and prooftest that mentions TestSessionProofHook.
+func staticOffenders(t *testing.T, root string, allowed map[string]bool) []string {
+	t.Helper()
+	const imp = `"github.com/Diansalas/igaming-platform/internal/actorproof"`
+	const impTest = `"github.com/Diansalas/igaming-platform/internal/actorproof/prooftest"`
 	var offenders []string
 	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
@@ -244,19 +241,62 @@ func TestStatic_OnlyFourEyesPackagesSign(t *testing.T) {
 			return rerr
 		}
 		src := string(b)
-		if !strings.Contains(src, `"github.com/Diansalas/igaming-platform/internal/actorproof"`) {
-			return nil
+		dir := filepath.Dir(rel)
+		inProoftest := dir == filepath.Join("internal", "actorproof", "prooftest")
+		if strings.Contains(src, impTest) && !inProoftest {
+			offenders = append(offenders, rel+" (imports prooftest)")
 		}
-		if allowed[filepath.Dir(rel)] || strings.HasPrefix(rel, filepath.Join("internal", "actorproof")+string(filepath.Separator)) {
-			return nil
+		if strings.Contains(src, "TestSessionProofHook") && !inProoftest && dir != filepath.Join("internal", "capability") {
+			offenders = append(offenders, rel+" (touches TestSessionProofHook)")
 		}
-		offenders = append(offenders, rel)
+		if strings.Contains(src, imp) && !allowed[dir] && !inProoftest {
+			offenders = append(offenders, rel+" (imports actorproof)")
+		}
 		return nil
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(offenders) > 0 {
-		t.Fatalf("non-test packages importing internal/actorproof outside the four-eyes owners: %v", offenders)
+	return offenders
+}
+
+var staticAllowed = map[string]bool{
+	filepath.Join("internal", "adjustment"): true,
+	filepath.Join("internal", "payments"):   true,
+	filepath.Join("internal", "capability"): true,
+	filepath.Join("internal", "actorproof"): true,
+	filepath.Join("cmd", "platform-api"):    true, // SetDefault wiring only
+	filepath.Join("internal", "config"):     true, // ParseKeySet validation only
+}
+
+// The signing capability may be reached only from the packages that own
+// four-eyes and K1 and from process wiring; prooftest must be unreachable from
+// production code (SIGNED-ACTOR-PROOF: a single server-side issuer).
+func TestStatic_OnlyFourEyesPackagesSign(t *testing.T) {
+	if off := staticOffenders(t, filepath.Join("..", ".."), staticAllowed); len(off) > 0 {
+		t.Fatalf("production code reaches the signer or the test signer outside the allowed owners: %v", off)
+	}
+}
+
+// Non-vacuity: the scan flags a planted offender of each kind.
+func TestStatic_ScanIsNotVacuous(t *testing.T) {
+	root := t.TempDir()
+	write := func(rel, body string) {
+		p := filepath.Join(root, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("internal/httpserver/x.go", "package x\nimport \"github.com/Diansalas/igaming-platform/internal/actorproof\"\n")
+	write("internal/wallet/y.go", "package y\nimport _ \"github.com/Diansalas/igaming-platform/internal/actorproof/prooftest\"\n")
+	write("internal/risk/z.go", "package z\nvar _ = TestSessionProofHook\n")
+	write("internal/adjustment/ok.go", "package ok\nimport \"github.com/Diansalas/igaming-platform/internal/actorproof\"\n")
+	write("internal/wallet/y_test.go", "package y\nimport _ \"github.com/Diansalas/igaming-platform/internal/actorproof/prooftest\"\n")
+	off := staticOffenders(t, root, staticAllowed)
+	if len(off) != 3 {
+		t.Fatalf("want exactly the 3 planted production offenders flagged, got %v", off)
 	}
 }

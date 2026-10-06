@@ -1,8 +1,9 @@
 # ADR 0110 — Signed actor proof for governed four-eyes writes (PRH-2 R5, SIGNED-ACTOR-PROOF)
 
-- **Status:** IMPLEMENTED on branch `prh2-r5-signed-actor-proof` (migration `0120_signed_actor_proof`); not merged,
-  not pushed. Review by `security`, `ledger-finance`, `code-reviewer` and `qa` is REQUIRED before merge and has NOT
-  been performed by the implementer (section 11 lists the specific points).
+- **Status:** IMPLEMENTED on branch `prh2-r5-signed-actor-proof` (migration `0120_signed_actor_proof`, amended in
+  place - it is unmerged); not merged, not pushed. First review round (security, ledger-finance, code-reviewer):
+  APPROVE WITH CONDITIONS; the conditions are applied (section 13). A further review of the amended migration is
+  REQUIRED before merge. **THREAT-MODEL-ARBITRARY-SQL-1 is PARTIALLY MITIGATED, not closed** (section 9).
 - **Decision type:** database authorization hardening for an owner-decided threat model. No new service boundary, no
   redesign of the DB authorization architecture, no change to the ledger account model, to the four-eyes rules or to
   tenant isolation.
@@ -45,6 +46,9 @@ already uses (migration 0001, `public.hmac`); no new extension. The cost of a sy
 
 ## 3. What is protected (exactly)
 
+Two scopes of coverage, one mechanism. The six K2/K3 actor-identity guards, and (review finding H2, owner-authorized
+extension of the SAME mechanism) the five K1 capability-grant / financial-policy-change tables.
+
 | Table | Operation | Proof operation | Proof target | Proof payload hash |
 |---|---|---|---|---|
 | `ledger_adjustment_requests` | INSERT | `ledger_adjustment:initiate` | the request id (chosen by Go) | digest of the caller-supplied columns |
@@ -54,7 +58,25 @@ already uses (migration 0001, `public.hmac`); no new extension. The cost of a sy
 | `payment_manual_resolutions` | UPDATE pending -> cancelled | `payment_force_resolve:cancel` | resolution id | the resolution's `payload_hash` |
 | `payment_manual_resolution_approvals` | INSERT | `payment_force_resolve:approve` / `:reject` | resolution id | the approval's `payload_hash` |
 
-These four tables carry the six actor-identity guards of 0113/0115 (`ledger_adjustment_requests_guard`,
+| `staff_capability_grant_requests` | INSERT | `capability_grant:request` | the literal `new` | digest of tenant, grantee, capability, valid_from, valid_until, reason |
+| `staff_capability_grant_requests` | UPDATE pending -> cancelled | `capability_grant:cancel` | request id | the request content digest; **initiator only** (CG010 otherwise) |
+| `staff_capability_grant_requests` | UPDATE pending -> expired | none | | refused (CG010) unless `now() >= expires_at` (closes the 0112 branch that allowed early expiry) |
+| `staff_capability_grant_approvals` | INSERT | `capability_grant:approve` / `:reject` | request id | the request content digest |
+| `staff_capability_grants` | UPDATE (revoke) | `capability_grant:revoke` | grant id | digest of grant id, tenant, reason; the grant INSERT is bound through its same-transaction approval |
+| `financial_approval_policy_changes` | INSERT | `financial_policy_change:propose` | the literal `new` | digest of the content-hash inputs (all columns including `effective_from`) |
+| `financial_approval_policy_changes` | UPDATE pending -> cancelled | `financial_policy_change:cancel` | change id | the change's `content_hash` |
+| `financial_approval_policy_change_approvals` | INSERT | `financial_policy_change:approve` / `:reject` | change id | the approver-supplied `content_hash` |
+
+In every row the trigger also asserts that the actor column the earlier guard FORCED (`initiated_by`, `decided_by`,
+`requested_by`, `revoked_by`) equals the PROVEN actor (`AP004` otherwise), and a catalog test pins that
+`zz_actor_proof_guard` is the LAST BEFORE ROW trigger on all nine tables.
+
+K1 and policy flows run in the plain `platform` scope with NO tenant. That is encoded as an EMPTY tenant field on
+the wire; the verifier accepts it ONLY for `scope = platform` AND only for the `capability_grant:` and
+`financial_policy_change:` operations, and refuses a tenant on a platform proof, a missing tenant on a `tenant` or
+`platform_acting` proof, and `platform` for any K2/K3 operation. The tenant / platform_acting checks are unchanged.
+
+The K2/K3 tables carry the six actor-identity guards of 0113/0115 (`ledger_adjustment_requests_guard`,
 `ledger_adjustment_requests_beneficiary_guard`, `ledger_adjustment_approvals_guard`,
 `ledger_adjustment_approvals_beneficiary_guard`, `payment_manual_resolutions_guard`,
 `payment_manual_resolution_approvals_guard`; the 0115 beneficiary guard runs on both K3 tables). The proof check is a
@@ -63,7 +85,7 @@ refusal and error code, and the proof is the final gate. The submission digest i
 `SHA-256(k2_canonical(tenant, wallet|attempt, ...caller-supplied columns))`; the Go issuer
 (`internal/actorproof.Digest`) computes the same value from the same inputs before the INSERT.
 
-The execution of an approved request (the `executing` / `executed` transitions) is not actor-bound: it is bound by the
+The execution of an approved K2/K3 request (the `executing` / `executed` transitions) is not actor-bound: it is bound by the
 existing guards to a same-transaction approval, which now carries a proof.
 
 ## 4. Proof format and verification
@@ -80,7 +102,7 @@ The verifier rejects, with its own SQLSTATE (class `AP`, all fail closed):
 | `AP001` | no proof, or malformed (field count, number/uuid/hex shapes) |
 | `AP002` | unknown or retired `kid`, or bad MAC |
 | `AP003` | expired, issued in the future (more than 5 s skew), or lifetime over 60 s |
-| `AP004` | binding mismatch: actor, scope (`tenant` / `platform_acting` only), tenant, operation, target or payload hash |
+| `AP004` | binding mismatch: actor, scope (`tenant` / `platform_acting` / `platform`), tenant, operation, target or payload hash; or the forced actor column differs from the proven actor |
 | `AP005` | nonce already consumed (replay) |
 
 The Go issuer uses a 30 s lifetime. The MAC comparison is done on HMACs of both values under the same key (no
@@ -139,25 +161,40 @@ byte-wise early exit on attacker-controlled input). The verifier returns `void`;
 
 ## 7. Single server-side issuer
 
-`internal/actorproof.Issuer` is the only signer. It is invoked only from the two packages that own four-eyes
-(`internal/adjustment`, `internal/payments`, from their existing single `runSession` call sites, whose principal is
-parsed from the verified token subject) and wired once at startup (`cmd/platform-api`). A static test
-(`TestStatic_OnlyFourEyesPackagesSign`) fails if any other non-test package imports `internal/actorproof`. A
-claim set the database can never admit (for example a `platform` scope) attaches nothing and the database refuses with
-its own code; a missing issuer is returned as a configuration error (HTTP 500), never silently skipped.
+`internal/actorproof.Issuer` is the only signer. It is invoked only from the packages that own four-eyes and K1
+(`internal/adjustment`, `internal/payments` from their `runSession` call sites whose principal is parsed from the
+verified token subject, and `internal/capability` for the K1 routes, which sign for the principal the HTTP handler
+put into the context with `capability.WithProofActor` after authentication and the permission check) and wired
+once at startup (`cmd/platform-api`). A static test (`TestStatic_OnlyFourEyesPackagesSign`, with a planted-offender
+non-vacuity test) fails if any other non-test package imports `internal/actorproof`, if ANY non-test package other than
+`prooftest` itself imports `internal/actorproof/prooftest`, or if anything but `internal/capability` / `prooftest`
+mentions `TestSessionProofHook`.
+
+`prooftest` is behind the `integration` build tag, so no production binary can contain it. Its `AttachForSession`
+signs for whoever the session GUCs name - exactly the capability this control denies an attacker - which is why it
+must stay unreachable from production code. `capability.TestSessionProofHook` is nil in production; only `prooftest`
+sets it so test fixtures that open their own sessions can sign; an HTTP integration test switches it off to prove
+the handler signs for the authenticated principal.
+
+Any signing failure - a missing issuer or a claim set the database could never admit (for example a `platform` scope
+on a K2 operation) - is RETURNED to the caller (HTTP 500), never silently skipped, so a defect is never reported as an
+authorization refusal (403).
 
 ## 8. NULL-ARM-WRITE-1 reassessed under this mitigation
 
 Question: does requiring the proof close the chain "create a platform_admin (or tenant staff) through the NULL-tenant /
 tenant arm of `staff_users`, then approve"?
 
-**Closed by this change (tested, `TestActorProof_K2_NullArmMintedPrincipals_CannotSubmitOrApprove`):**
-the in-database chain. A runtime session can still mint persons, platform_admin principals (NULL arm) and tenant
-finance staff (tenant arm), and can set GUCs naming them; the K2/K3 guards still recognise them as eligible actors.
-But a submit or an approve by such a principal now needs a proof signed by the application server. The attacker does
-not hold the key, so the write is refused (`AP001` without a proof, `AP002` with a proof under a wrong key), and no
-approval row and no ledger posting results. The same holds when the attacker impersonates a REAL admin by GUC. So
-"arbitrary SQL alone is enough to approve as two people" is closed for K2 and K3.
+**Closed by this change (tested, `TestActorProof_K2_NullArmMintedPrincipals_CannotSubmitOrApprove`,
+`TestActorProofK1_Adversarial_*`):** the in-database chain. A runtime session can still mint persons, platform_admin
+principals (NULL arm) and tenant finance staff (tenant arm), and can set GUCs naming them; the guards still recognise
+them as eligible actors. But a submit or an approve by such a principal now needs a proof signed by the application
+server. The attacker does not hold the key, so the write is refused (`AP001` without a proof, `AP002` with a proof
+under a wrong key), and no approval row and no ledger posting results. The same holds when the attacker impersonates
+a REAL admin by GUC. With H2 the K1 grant and policy-change flows are covered too, so the minted or impersonated
+principals can neither obtain the capability grants nor lower the required approvals that a later K2/K3 approval
+would depend on. "Arbitrary SQL alone is enough to approve as two people, or to grant itself the capability to do
+so" is closed for K1, K2, K3 and policy changes.
 
 **NOT closed (precisely):** the application issues a proof for whoever it authenticated. If the attacker can make the
 application authenticate them as a principal the database believes in, they obtain genuine server-issued proofs.
@@ -197,12 +234,9 @@ considerations (section 10), not built. **This is a residual that REMAINS OPEN a
 2. **Identity-store integrity** (section 8): minted staff rows, taken-over credentials and forged refresh sessions give
    an attacker legitimately issued proofs. Open until the identity store is protected.
 3. **Ordinary non-governed posting paths are not protected by this change.** Any path whose authority is the GUC alone
-   (deposits, withdrawals, casino/sportsbook postings, the provider callbacks, and every table other than the four
-   above) is unchanged. In particular the K1 capability-grant request/approval guards, the financial-policy-change
-   guards (both use `financial_actor_session()`), and the alerting/audit paths are NOT proof-protected. An attacker with
-   arbitrary SQL can still impersonate two admins to obtain K1 capability grants or approve policy changes; those do
-   not move money by themselves, but they widen who may later be minted a legitimate proof. Extending the proof to
-   them is a mechanical addition of triggers (the verifier is operation-agnostic) and is recorded as deferred.
+   (deposits, withdrawals, casino/sportsbook postings, the provider callbacks, and every table other than the nine
+   above) is unchanged. A runtime session can still post to the ledger by those ordinary paths. This is a
+   threat-register item (below), outside the governed four-eyes scope this ADR defends.
 4. **Symmetric key in the database.** The migration/owner role (and a superuser) can read `actor_proof_keys` and so
    can mint a proof. The migration role is already outside the threat model (it owns every table and can disable any
    trigger). An asymmetric scheme would remove it but PostgreSQL has no built-in Ed25519 verifier; a new extension was
@@ -215,16 +249,36 @@ considerations (section 10), not built. **This is a residual that REMAINS OPEN a
 7. **Clock.** The verifier uses the database clock; the issuer uses the application clock. The 5 s future skew and the
    60 s lifetime cap bound the effect of drift; a skewed host fails closed (`AP003`), never open.
 
-## 10. Deferred future considerations (recorded, NOT built)
+## 10. Deferred (recorded, NOT built)
 
-- Extend `zz_actor_proof_guard` to the K1 grant guards and the financial-policy-change guards (mechanical).
-- Owner-only lifecycle for `staff_users` platform rows and credential columns (NULL-ARM-WRITE-1 analysis item C),
-  including a bootstrap path for `cmd/seed-admin`.
-- Session issuance integrity (NULL-ARM-WRITE-1 item 3): for example storing `HMAC(server_key, refresh_token)` rather than
-  a bare SHA-256 so a row inserted by SQL cannot match a token the application will accept. Changes every refresh
-  token and needs a migration plan.
+**DEFERRED-REQUIRES-OWNER-AUTHORIZATION (identity-store integrity, review finding H1).** These are the routes that
+leave THREAT-MODEL-ARBITRARY-SQL-1 only PARTIALLY MITIGATED. Each changes how identities or credentials are stored or
+verified, which is larger than the contained mechanism the owner authorized:
+- keyed staff credential verification (so a `password_hash` written by SQL does not authenticate);
+- an owner-only lifecycle (or integrity tag) for `staff_users` platform rows and credential columns, with a
+  bootstrap path for `cmd/seed-admin` (NULL-ARM-WRITE-1 analysis item C);
+- HMAC'd refresh tokens (`HMAC(server_key, token)` instead of a bare SHA-256) so a `sessions` row inserted by SQL
+  cannot match a token the application accepts (NULL-ARM-WRITE-1 item 3); invalidates every refresh token and needs a
+  migration plan;
+- the same keyed treatment of `player_credential_tokens` (email-verification / password-reset token hashes), see the
+  threat register.
+
+Deferred without an owner gate:
 - An asymmetric proof if PostgreSQL gains a verifier or a vetted extension is approved.
-- Nonce pruning job (rows are small; the owner can prune `expires_at < now() - interval '1 day'`).
+- Nonce pruning: planned, documented, NOT automated (runbook section 15 step 6; rows are small; a 1-day retention
+  past `expires_at` is ample because an expired proof is refused on its own).
+
+## 10a. Threat register (arbitrary SQL with a stolen `igaming_runtime` credential)
+
+| # | Item | State |
+|---|---|---|
+| T1 | Impersonate one or two REAL admins by GUC to approve a K2/K3 request, a K1 grant, or a policy change | CLOSED by this ADR (proof binds actor, scope, tenant, operation, target, payload) |
+| T2 | Mint or impersonate staff by SQL and use them as actors in the database | CLOSED for K1/K2/K3/policy (no proof) |
+| T3 | Mint or take over a staff row, or forge a refresh `sessions` row, then authenticate over HTTP and be issued genuine proofs | OPEN, DEFERRED-REQUIRES-OWNER-AUTHORIZATION (H1) |
+| T4 | `player_credential_tokens` store an UNKEYED hash of the email-verification / password-reset token; a row inserted by SQL can be redeemed through the application (account takeover of a player) | OPEN, DEFERRED-REQUIRES-OWNER-AUTHORIZATION (same keyed-hash fix as T3); not a governed-financial path |
+| T5 | Ordinary NON-governed posting paths: any posting whose authority is the GUC alone (deposits, withdrawals, casino and sportsbook postings, provider callbacks) can be written by a runtime session | OPEN, NOT in the scope of the authorized mechanism; limited by the ledger invariants (balanced, append-only, idempotent, drift reconciliation hourly) but NOT by an actor proof |
+| T6 | Application-host compromise holds the signing key | OPEN, inherent (section 9.1) |
+| T7 | Owner / migration role can read the symmetric key | OPEN, accepted (section 9.4) |
 
 ## 11. Review points (specific)
 
@@ -234,8 +288,8 @@ For **security**:
 2. Binding completeness: actor, scope, tenant, operation, target, payload, iat/exp, nonce; the 60 s cap; the 5 s skew.
 3. `zz_actor_proof_guard` ordering (last) and that nothing between the earlier guards and the trigger can alter the
    bound columns (the digest columns are not modified by the 0113/0115 guards).
-4. The residuals in sections 8 and 9, in particular whether the K1 / policy-change guards must be brought in before
-   launch.
+4. The residuals in sections 8, 9 and 10a. K1 and policy-change guards are now covered (H2); the open items are the
+   identity-store routes (T3, T4) and non-governed posting (T5), which need owner authorization.
 5. The pinned `search_path` of the trigger functions also changes how the unpinned `financial_actor_session()` resolves
    relations during the proof check (defence in depth against a re-granted TEMP; see test
    `TestTempRevoke_K2ShadowAttack_SucceedsWhenTempIsGrantedBack`).
@@ -251,7 +305,17 @@ For **ledger-finance**:
 ## 12. Verification
 
 See `docs/plans/prh2-hardening-round/prh2-r5-signed-actor-proof-mutation-kill.txt` for the mutation-kill evidence, and
-the suites named in section 5 and section 8. Labels: the mechanism and its tests are `IMPLEMENTED`; the K1 / policy
-guards, staff-row integrity and session integrity are `NOT IMPLEMENTED` (deferred, section 10); the production
+the suites named in section 5 and section 8. Labels: the mechanism and its tests are `IMPLEMENTED`; the identity-store routes (T3, T4) and non-governed posting (T5) are `NOT IMPLEMENTED` (section 10, 10a); the production
 rollout (key provisioning in the real secret store, deploy ordering) is `PROVIDER DEPENDENT` on the operator and has
 not been exercised outside the local database.
+
+## 13. Review conditions applied (first review round, amended 0120)
+
+M1/C1 `prooftest` behind the `integration` tag and refused for any non-test importer (static test with planted
+non-vacuity); L1 forced actor columns asserted equal to the proven actor in every zz function; L2/R4 catalog test that
+`zz_actor_proof_guard` is the last BEFORE ROW trigger on all nine tables; LF R1 signing failures are returned (500),
+never swallowed; H2 the same mechanism extended to the five K1/policy tables, plus the K1 cancel (initiator only) and
+expiry (only when actually expired) branches of migration 0112; mutation evidence corrected and extended; L3/L4
+runbook changes (secret not inlined as a loggable SQL literal, `log_statement` check, `--single-transaction` for the
+ECS role-init, nonce pruning plan); the "mechanical" claim about extending the proof is withdrawn: it needed a
+NULL-tenant wire encoding, per-flow digests and Go issuance in the K1/policy services.

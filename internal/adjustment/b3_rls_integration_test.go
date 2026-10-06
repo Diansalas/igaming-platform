@@ -82,7 +82,10 @@ func TestB3_PlainPlatformAndForeignActingRefused(t *testing.T) {
 		if _, err := tx.Exec(ctx, `SAVEPOINT p`); err != nil {
 			return err
 		}
-		_, err := SubmitInTx(ctx, tx, Call{ActorID: w.AdminA.ID, TenantID: w.Tenant, Scope: "platform"}, uuid.New(), w.credit(1, ReasonOperationalErrorCorrection))
+		// Raw SQL (not SubmitInTx): the Go signer now refuses to sign a K2 proof for a
+		// "platform" scope (SIGNED-ACTOR-PROOF R1), so the DATABASE's own refusal of a
+		// plain platform session is exercised directly.
+		err := attackSubmitSQL(ctx, tx, w, uuid.New(), w.credit(1, ReasonOperationalErrorCorrection))
 		if err == nil {
 			return fmt.Errorf("plain platform session inserted a K2 request")
 		}

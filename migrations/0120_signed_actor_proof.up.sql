@@ -29,11 +29,21 @@
 --
 -- WHAT IS PROTECTED (exactly): INSERT into ledger_adjustment_requests,
 -- ledger_adjustment_approvals, payment_manual_resolutions and
--- payment_manual_resolution_approvals (these tables carry the six actor-
--- identity guards of 0113/0115), plus the initiator's/requester's CANCEL of a
--- pending request/resolution. Ordinary non-governed posting paths and every
--- other GUC-derived check are NOT protected by this migration (ADR 0110
--- residuals).
+-- payment_manual_resolution_approvals (the six actor-identity guards of
+-- 0113/0115), plus the initiator's/requester's CANCEL of a pending
+-- request/resolution; and, extending the SAME mechanism (owner decision, review
+-- finding H2), the K1 capability-grant and financial-policy-change flows:
+-- staff_capability_grant_requests (INSERT, cancel; and a request may be marked
+-- expired only when it actually has), staff_capability_grant_approvals (INSERT),
+-- staff_capability_grants (the revoke UPDATE; the INSERT is bound through its
+-- same-transaction approval), financial_approval_policy_changes (INSERT, cancel)
+-- and financial_approval_policy_change_approvals (INSERT). These flows run in the
+-- plain 'platform' scope with a NULL tenant, encoded as an EMPTY tenant field,
+-- valid only for scope 'platform' and only for the capability_grant: and
+-- financial_policy_change: operations. Every zz function also asserts that the
+-- actor column the earlier guard forced equals the proven actor. Ordinary
+-- non-governed posting paths and every other GUC-derived check are NOT
+-- protected by this migration (ADR 0110 residuals).
 --
 -- KEYS. actor_proof_keys holds >= 1 ACTIVE keys (kid, secret). Rotation =
 -- insert the new key, roll the app over to the new kid, retire the old kid
@@ -80,7 +90,7 @@ CREATE TABLE actor_proof_nonces (
     kid           TEXT NOT NULL,
     actor         UUID NOT NULL,
     scope         TEXT NOT NULL,
-    tenant        UUID NOT NULL,
+    tenant        UUID NULL,
     operation     TEXT NOT NULL,
     target        TEXT NOT NULL,
     payload_hash  TEXT NOT NULL,
@@ -127,12 +137,21 @@ DECLARE
     v_tenant  uuid;
     v_n       int;
 BEGIN
-    IF v_token IS NULL OR p_actor IS NULL OR p_tenant IS NULL
-       OR p_scope IS NULL OR p_operation IS NULL OR p_target IS NULL OR p_payload_hash IS NULL THEN
+    IF v_token IS NULL OR p_actor IS NULL OR p_scope IS NULL OR p_operation IS NULL OR p_target IS NULL OR p_payload_hash IS NULL THEN
         RAISE EXCEPTION 'actor_proof: no proof presented' USING ERRCODE = 'AP001';
     END IF;
-    IF p_scope NOT IN ('tenant', 'platform_acting') THEN
+    IF p_scope NOT IN ('tenant', 'platform_acting', 'platform') THEN
         RAISE EXCEPTION 'actor_proof: scope is not provable' USING ERRCODE = 'AP004';
+    END IF;
+    -- The NULL-tenant encoding (an EMPTY tenant field) exists only for scope
+    -- 'platform' and only for the K1 capability-grant and financial-policy-change
+    -- operations; every other scope and operation must carry a tenant.
+    IF p_scope = 'platform' THEN
+        IF p_tenant IS NOT NULL OR NOT (p_operation LIKE 'capability\_grant:%' OR p_operation LIKE 'financial\_policy\_change:%') THEN
+            RAISE EXCEPTION 'actor_proof: platform scope is not provable for this operation' USING ERRCODE = 'AP004';
+        END IF;
+    ELSIF p_tenant IS NULL THEN
+        RAISE EXCEPTION 'actor_proof: no proof presented' USING ERRCODE = 'AP001';
     END IF;
 
     v_parts := pg_catalog.string_to_array(v_token, '|');
@@ -145,7 +164,7 @@ BEGIN
     END IF;
     BEGIN
         v_actor  := v_parts[3]::uuid;
-        v_tenant := v_parts[5]::uuid;
+        v_tenant := NULLIF(v_parts[5], '')::uuid;
     EXCEPTION WHEN OTHERS THEN
         RAISE EXCEPTION 'actor_proof: malformed proof' USING ERRCODE = 'AP001';
     END;
@@ -215,28 +234,54 @@ $$;
 
 -- -------------------------------------------------------------------------
 -- The governed-table triggers. They fire LAST (the 'zz_' prefix sorts after
--- every existing BEFORE trigger on these tables), so every existing guard's own
--- refusal and error code is unchanged and the proof is the final gate. These
--- functions are plain invoker functions: the actor is resolved exactly as the
--- existing guards resolve it (financial_actor_session()), and only the proof
--- check itself crosses into the definer.
+-- every existing BEFORE trigger on these tables; a catalog test pins that), so
+-- every existing guard's own refusal and error code is unchanged and the proof
+-- is the final gate. These functions are plain invoker functions: the actor is
+-- resolved exactly as the existing guards resolve it (financial_actor_session()),
+-- and only the proof check itself crosses into the definer. Every function also
+-- asserts that the actor column the earlier guard FORCED (initiated_by /
+-- decided_by / requested_by / revoked_by) equals the PROVEN actor.
+--
+-- Digests. A create's payload hash is SHA-256(k2_canonical(caller-supplied
+-- columns)); the Go issuer (internal/actorproof.Digest) computes the same value
+-- from the same inputs. Timestamps are canonical UTC text with microseconds.
 -- -------------------------------------------------------------------------
 
--- Submission digest = SHA-256 over the caller-supplied payload columns, in the
--- k2_canonical encoding. The Go issuer (internal/actorproof) computes the same
--- digest from the same inputs before the INSERT.
+CREATE FUNCTION actor_proof_ts(p timestamptz) RETURNS text AS $$
+    SELECT pg_catalog.to_char(p AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"');
+$$ LANGUAGE sql IMMUTABLE
+    SET search_path = pg_catalog, public, pg_temp;
+
+-- The K1 request's content, as an approver reviews it (target of an approval's
+-- payload binding). Read by the Go issuer through actor_proof_k1_request_digest
+-- so both sides always agree.
+CREATE FUNCTION actor_proof_k1_request_digest(p_request uuid) RETURNS text AS $$
+    SELECT k2_sha256_hex(k2_canonical(r.id::text, r.tenant_id::text, r.grantee_staff_id::text, r.capability,
+               actor_proof_ts(r.valid_from), actor_proof_ts(r.valid_until), r.reason_code))
+      FROM staff_capability_grant_requests r WHERE r.id = p_request;
+$$ LANGUAGE sql STABLE
+    SET search_path = pg_catalog, public, pg_temp;
+
+-- ---- K2 -----------------------------------------------------------------
+
 CREATE FUNCTION actor_proof_ledger_adjustment_requests_guard() RETURNS TRIGGER AS $$
 DECLARE
     v_actor RECORD;
 BEGIN
     IF TG_OP = 'INSERT' THEN
         SELECT * INTO v_actor FROM financial_actor_session();
+        IF NEW.initiated_by IS DISTINCT FROM v_actor.actor THEN
+            RAISE EXCEPTION 'actor_proof: the initiator column is not the proven actor' USING ERRCODE = 'AP004';
+        END IF;
         PERFORM actor_proof_require(v_actor.actor, v_actor.scope, v_actor.tenant,
             'ledger_adjustment:initiate', NEW.id::text,
             k2_sha256_hex(k2_canonical(NEW.tenant_id::text, NEW.wallet_id::text, NEW.asset_code, NEW.direction,
                 NEW.amount::text, NEW.reason_code, NEW.causation_transaction_id::text, NEW.evidence_ref_hash, NEW.note_hash)));
     ELSIF OLD.state = 'pending' AND NEW.state = 'cancelled' THEN
         SELECT * INTO v_actor FROM financial_actor_session();
+        IF v_actor.actor IS DISTINCT FROM OLD.initiated_by THEN
+            RAISE EXCEPTION 'actor_proof: only the initiator may cancel' USING ERRCODE = 'AP004';
+        END IF;
         PERFORM actor_proof_require(v_actor.actor, v_actor.scope, v_actor.tenant,
             'ledger_adjustment:cancel', OLD.id::text, OLD.payload_hash);
     END IF;
@@ -250,6 +295,9 @@ DECLARE
     v_actor RECORD;
 BEGIN
     SELECT * INTO v_actor FROM financial_actor_session();
+    IF NEW.decided_by IS DISTINCT FROM v_actor.actor THEN
+        RAISE EXCEPTION 'actor_proof: the decided_by column is not the proven actor' USING ERRCODE = 'AP004';
+    END IF;
     PERFORM actor_proof_require(v_actor.actor, v_actor.scope, v_actor.tenant,
         'ledger_adjustment:' || NEW.decision, NEW.request_id::text, NEW.payload_hash);
     RETURN NEW;
@@ -257,12 +305,17 @@ END;
 $$ LANGUAGE plpgsql
     SET search_path = pg_catalog, public, pg_temp;
 
+-- ---- K3 -----------------------------------------------------------------
+
 CREATE FUNCTION actor_proof_payment_manual_resolutions_guard() RETURNS TRIGGER AS $$
 DECLARE
     v_actor RECORD;
 BEGIN
     IF TG_OP = 'INSERT' THEN
         SELECT * INTO v_actor FROM financial_actor_session();
+        IF NEW.requested_by IS DISTINCT FROM v_actor.actor THEN
+            RAISE EXCEPTION 'actor_proof: the requested_by column is not the proven actor' USING ERRCODE = 'AP004';
+        END IF;
         -- The id is server-forced by the 0115 guard, so the target is the
         -- literal 'new'; the digest binds the caller-supplied payload columns.
         PERFORM actor_proof_require(v_actor.actor, v_actor.scope, v_actor.tenant,
@@ -271,6 +324,9 @@ BEGIN
                 NEW.basis_code, NEW.context_code, NEW.evidence_ref_hash, NEW.reason_code)));
     ELSIF OLD.state = 'pending' AND NEW.state = 'cancelled' THEN
         SELECT * INTO v_actor FROM financial_actor_session();
+        IF v_actor.actor IS DISTINCT FROM OLD.requested_by THEN
+            RAISE EXCEPTION 'actor_proof: only the requester may cancel' USING ERRCODE = 'AP004';
+        END IF;
         PERFORM actor_proof_require(v_actor.actor, v_actor.scope, v_actor.tenant,
             'payment_force_resolve:cancel', OLD.id::text, OLD.payload_hash);
     END IF;
@@ -284,8 +340,131 @@ DECLARE
     v_actor RECORD;
 BEGIN
     SELECT * INTO v_actor FROM financial_actor_session();
+    IF NEW.decided_by IS DISTINCT FROM v_actor.actor THEN
+        RAISE EXCEPTION 'actor_proof: the decided_by column is not the proven actor' USING ERRCODE = 'AP004';
+    END IF;
     PERFORM actor_proof_require(v_actor.actor, v_actor.scope, v_actor.tenant,
         'payment_force_resolve:' || NEW.decision, NEW.resolution_id::text, NEW.payload_hash);
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql
+    SET search_path = pg_catalog, public, pg_temp;
+
+-- ---- K1 capability grants (scope 'tenant' or 'platform'; NULL tenant for platform) ----
+
+CREATE FUNCTION actor_proof_staff_capability_grant_requests_guard() RETURNS TRIGGER AS $$
+DECLARE
+    v_actor RECORD;
+BEGIN
+    IF TG_OP = 'INSERT' THEN
+        SELECT * INTO v_actor FROM financial_actor_session();
+        IF NEW.requested_by IS DISTINCT FROM v_actor.actor THEN
+            RAISE EXCEPTION 'actor_proof: the requested_by column is not the proven actor' USING ERRCODE = 'AP004';
+        END IF;
+        PERFORM actor_proof_require(v_actor.actor, v_actor.scope, v_actor.tenant,
+            'capability_grant:request', 'new',
+            k2_sha256_hex(k2_canonical(NEW.tenant_id::text, NEW.grantee_staff_id::text, NEW.capability,
+                actor_proof_ts(NEW.valid_from), actor_proof_ts(NEW.valid_until), NEW.reason_code)));
+    ELSIF NEW.status = 'cancelled' THEN
+        SELECT * INTO v_actor FROM financial_actor_session();
+        -- Closes the 0112 branch that let ANY actor in scope cancel: initiator only.
+        IF v_actor.actor IS DISTINCT FROM OLD.requested_by THEN
+            RAISE EXCEPTION 'staff_capability_grant_requests: only the requester may cancel a request' USING ERRCODE = 'CG010';
+        END IF;
+        PERFORM actor_proof_require(v_actor.actor, v_actor.scope, v_actor.tenant,
+            'capability_grant:cancel', OLD.id::text,
+            k2_sha256_hex(k2_canonical(OLD.id::text, OLD.tenant_id::text, OLD.grantee_staff_id::text, OLD.capability,
+                actor_proof_ts(OLD.valid_from), actor_proof_ts(OLD.valid_until), OLD.reason_code)));
+    ELSIF NEW.status = 'expired' THEN
+        -- Closes the 0112 branch that let a request be marked expired before it
+        -- actually expired.
+        IF pg_catalog.now() < OLD.expires_at THEN
+            RAISE EXCEPTION 'staff_capability_grant_requests: the request has not expired' USING ERRCODE = 'CG010';
+        END IF;
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql
+    SET search_path = pg_catalog, public, pg_temp;
+
+CREATE FUNCTION actor_proof_staff_capability_grant_approvals_guard() RETURNS TRIGGER AS $$
+DECLARE
+    v_actor RECORD;
+BEGIN
+    SELECT * INTO v_actor FROM financial_actor_session();
+    IF NEW.decided_by IS DISTINCT FROM v_actor.actor THEN
+        RAISE EXCEPTION 'actor_proof: the decided_by column is not the proven actor' USING ERRCODE = 'AP004';
+    END IF;
+    -- The approver's payload binding is the request's own content, read here
+    -- and by the Go issuer through the same function.
+    PERFORM actor_proof_require(v_actor.actor, v_actor.scope, v_actor.tenant,
+        'capability_grant:' || NEW.decision, NEW.request_id::text,
+        COALESCE(actor_proof_k1_request_digest(NEW.request_id), repeat('0', 64)));
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql
+    SET search_path = pg_catalog, public, pg_temp;
+
+CREATE FUNCTION actor_proof_staff_capability_grants_guard() RETURNS TRIGGER AS $$
+DECLARE
+    v_actor RECORD;
+BEGIN
+    -- INSERT is bound through the same-transaction approval (which carries a
+    -- proof); only the revoke UPDATE is actor-bound here.
+    IF TG_OP = 'UPDATE' AND OLD.revoked_at IS NULL AND NEW.revoked_at IS NOT NULL THEN
+        SELECT * INTO v_actor FROM financial_actor_session();
+        IF NEW.revoked_by IS DISTINCT FROM v_actor.actor THEN
+            RAISE EXCEPTION 'actor_proof: the revoked_by column is not the proven actor' USING ERRCODE = 'AP004';
+        END IF;
+        PERFORM actor_proof_require(v_actor.actor, v_actor.scope, v_actor.tenant,
+            'capability_grant:revoke', OLD.id::text,
+            k2_sha256_hex(k2_canonical(OLD.id::text, OLD.tenant_id::text, NEW.revoke_reason_code)));
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql
+    SET search_path = pg_catalog, public, pg_temp;
+
+-- ---- financial policy changes (scope 'tenant' or 'platform') ----
+
+CREATE FUNCTION actor_proof_financial_approval_policy_changes_guard() RETURNS TRIGGER AS $$
+DECLARE
+    v_actor RECORD;
+BEGIN
+    IF TG_OP = 'INSERT' THEN
+        SELECT * INTO v_actor FROM financial_actor_session();
+        IF NEW.requested_by IS DISTINCT FROM v_actor.actor THEN
+            RAISE EXCEPTION 'actor_proof: the requested_by column is not the proven actor' USING ERRCODE = 'AP004';
+        END IF;
+        PERFORM actor_proof_require(v_actor.actor, v_actor.scope, v_actor.tenant,
+            'financial_policy_change:propose', 'new',
+            k2_sha256_hex(k2_canonical(NEW.change_kind, NEW.operation_kind, NEW.level, NEW.tenant_id::text, NEW.brand_id::text,
+                NEW.jurisdiction_id::text, NEW.profile_code, NEW.asset_code, NEW.base_required_approvals::text,
+                NEW.threshold_minor_units::text, NEW.required_approvals_above_threshold::text,
+                actor_proof_ts(NEW.effective_from), NEW.legal_review_reference)));
+    ELSIF OLD.status = 'pending' AND NEW.status = 'cancelled' THEN
+        SELECT * INTO v_actor FROM financial_actor_session();
+        IF v_actor.actor IS DISTINCT FROM OLD.requested_by THEN
+            RAISE EXCEPTION 'actor_proof: only the requester may cancel' USING ERRCODE = 'AP004';
+        END IF;
+        PERFORM actor_proof_require(v_actor.actor, v_actor.scope, v_actor.tenant,
+            'financial_policy_change:cancel', OLD.id::text, OLD.content_hash);
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql
+    SET search_path = pg_catalog, public, pg_temp;
+
+CREATE FUNCTION actor_proof_financial_approval_policy_change_approvals_guard() RETURNS TRIGGER AS $$
+DECLARE
+    v_actor RECORD;
+BEGIN
+    SELECT * INTO v_actor FROM financial_actor_session();
+    IF NEW.decided_by IS DISTINCT FROM v_actor.actor THEN
+        RAISE EXCEPTION 'actor_proof: the decided_by column is not the proven actor' USING ERRCODE = 'AP004';
+    END IF;
+    PERFORM actor_proof_require(v_actor.actor, v_actor.scope, v_actor.tenant,
+        'financial_policy_change:' || NEW.decision, NEW.change_id::text, NEW.content_hash);
     RETURN NEW;
 END;
 $$ LANGUAGE plpgsql
@@ -303,3 +482,18 @@ CREATE TRIGGER zz_actor_proof_guard
 CREATE TRIGGER zz_actor_proof_guard
     BEFORE INSERT ON payment_manual_resolution_approvals
     FOR EACH ROW EXECUTE FUNCTION actor_proof_payment_manual_resolution_approvals_guard();
+CREATE TRIGGER zz_actor_proof_guard
+    BEFORE INSERT OR UPDATE ON staff_capability_grant_requests
+    FOR EACH ROW EXECUTE FUNCTION actor_proof_staff_capability_grant_requests_guard();
+CREATE TRIGGER zz_actor_proof_guard
+    BEFORE INSERT ON staff_capability_grant_approvals
+    FOR EACH ROW EXECUTE FUNCTION actor_proof_staff_capability_grant_approvals_guard();
+CREATE TRIGGER zz_actor_proof_guard
+    BEFORE UPDATE ON staff_capability_grants
+    FOR EACH ROW EXECUTE FUNCTION actor_proof_staff_capability_grants_guard();
+CREATE TRIGGER zz_actor_proof_guard
+    BEFORE INSERT OR UPDATE ON financial_approval_policy_changes
+    FOR EACH ROW EXECUTE FUNCTION actor_proof_financial_approval_policy_changes_guard();
+CREATE TRIGGER zz_actor_proof_guard
+    BEFORE INSERT ON financial_approval_policy_change_approvals
+    FOR EACH ROW EXECUTE FUNCTION actor_proof_financial_approval_policy_change_approvals_guard();

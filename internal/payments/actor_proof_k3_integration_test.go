@@ -352,11 +352,20 @@ func TestActorProofK3_Adversarial_ActingSession_FailsClosed(t *testing.T) {
 }
 
 // (2) POSITIVE through the real ManualResolutionService as the runtime role:
-// genuine two-person execution (distinct requester and approver), exactly one
-// posting, SUM(D)=SUM(C), projection=rebuild, refused retries consume no nonce.
+// genuine two-person execution (distinct requester and approver), EXACTLY ONE
+// governed posting (counted by its idempotency key, and by the wallet delta),
+// SUM(D)=SUM(C), projection=rebuild, and two client retries that consume no nonce
+// and change neither the posting count nor the balance.
 func TestActorProofK3_Positive_TwoPerson_RealServicePath(t *testing.T) {
 	w, _, _ := k3RuntimeWorld(t, k3Opts{base: 1})
-	_, a := w.ambiguousPayout(100)
+	wr, a := w.ambiguousPayout(650)
+	cashBefore, clearingBefore := w.walletBalance("player_cash"), w.pspClearing()
+	postings := func() int {
+		return w.countRows(`SELECT count(*) FROM ledger_transactions WHERE tenant_id = $1 AND idempotency_key = $2`, w.f.tenantID, wr.ID.String()+":failed")
+	}
+	if got := postings(); got != 0 {
+		t.Fatalf("a governed posting exists before any execution: %d", got)
+	}
 	n0 := w.proofNonces()
 	r := w.mustRequest(w.f1, w.m2In(a.ID, ResolutionM2DeclareNotPaid))
 	if got := w.proofNonces(); got != n0+1 {
@@ -369,16 +378,34 @@ func TestActorProofK3_Positive_TwoPerson_RealServicePath(t *testing.T) {
 	if got := w.proofNonces(); got != n0+1 {
 		t.Fatalf("a refused write consumed a nonce: %d", got-n0)
 	}
+	if got := postings(); got != 0 {
+		t.Fatalf("a refused approval posted: %d", got)
+	}
 	out, err := w.decide(w.f2, r, ResolutionApprove)
 	if err != nil || !out.Executed {
 		t.Fatalf("second distinct person: %v %+v", err, out)
 	}
+	if got := postings(); got != 1 {
+		t.Fatalf("want exactly ONE governed posting after the first execution, got %d", got)
+	}
+	if d := w.walletBalance("player_cash") - cashBefore; d != 650 {
+		t.Fatalf("player_cash delta = %d, want +650 exactly once", d)
+	}
+	if d := w.pspClearing() - clearingBefore; d != 0 {
+		t.Fatalf("psp_clearing delta = %d, want 0", d)
+	}
 	after := w.proofNonces()
-	// Client retry of the same logical approval after success: a fresh proof is
-	// issued, the resolution's own guards refuse it, nothing more is posted.
+	// Client retries of the same approval after success: a fresh proof is issued,
+	// the resolution's own guards refuse it, nothing more is posted.
 	for i := 0; i < 2; i++ {
 		if _, err := w.decide(w.f2, r, ResolutionApprove); err == nil {
 			t.Fatal("a retried approval of an executed resolution was accepted")
+		}
+		if got := postings(); got != 1 {
+			t.Fatalf("retry %d changed the posting count to %d", i+1, got)
+		}
+		if d := w.walletBalance("player_cash") - cashBefore; d != 650 {
+			t.Fatalf("retry %d changed the player_cash delta to %d", i+1, d)
 		}
 	}
 	if got := w.proofNonces(); got != after {
@@ -410,4 +437,54 @@ func TestActorProofK3_Positive_ActingPath_And_Cancel(t *testing.T) {
 		t.Fatalf("requester cancel with a proof: %v %+v", err, c)
 	}
 	w.assertInvariants()
+}
+
+// (L1) The proof binds the actor COLUMN the earlier guard forced. A defect (or
+// attack) in a guard that forced a different actor must be refused even when the
+// proof is perfect for the SESSION actor. Simulated on the scratch database by an
+// owner-installed BEFORE trigger that sorts between the 0115 guards and
+// zz_actor_proof_guard and overwrites the forced actor column.
+func TestActorProofK3_ForcedActorColumnMustEqualProvenActor(t *testing.T) {
+	w, rt, f := k3RuntimeWorld(t, k3Opts{base: 2})
+	_, a := w.ambiguousPayout(100)
+	r := w.mustRequest(w.f1, w.m2In(a.ID, ResolutionM2DeclareNotPaid))
+	ctx := context.Background()
+	for _, stmt := range []string{
+		`CREATE FUNCTION l1_bug_resolutions() RETURNS TRIGGER AS $$ BEGIN NEW.requested_by := gen_random_uuid(); RETURN NEW; END; $$ LANGUAGE plpgsql`,
+		`CREATE TRIGGER payment_manual_resolutions_zz_bug BEFORE INSERT ON payment_manual_resolutions FOR EACH ROW EXECUTE FUNCTION l1_bug_resolutions()`,
+		`CREATE FUNCTION l1_bug_approvals() RETURNS TRIGGER AS $$ BEGIN NEW.decided_by := gen_random_uuid(); RETURN NEW; END; $$ LANGUAGE plpgsql`,
+		`CREATE TRIGGER payment_manual_resolution_approvals_zz_bug BEFORE INSERT ON payment_manual_resolution_approvals FOR EACH ROW EXECUTE FUNCTION l1_bug_approvals()`,
+	} {
+		if _, err := w.pool.Raw().Exec(ctx, stmt); err != nil {
+			t.Fatalf("scratch DB: %v: %v", stmt, err)
+		}
+	}
+	tid := w.f.tenantID
+	in := w.m2In(a.ID, ResolutionM2DeclareNotPaid)
+	in.ReasonCode = "l1"
+	err := k3Attack(rt, w, w.f1, f.Valid(t, w.f1.ID, "tenant", tid, "payment_force_resolve:request", "new", k3SubmitDigest(w, in)), func(ctx context.Context, tx pgx.Tx) error {
+		return k3RawRequest(ctx, tx, w, in)
+	})
+	k3RequireCode(t, err, "AP004")
+	err = k3Attack(rt, w, w.f2, f.Valid(t, w.f2.ID, "tenant", tid, "payment_force_resolve:approve", r.ID.String(), r.PayloadHash), func(ctx context.Context, tx pgx.Tx) error {
+		return k3RawApprove(ctx, tx, w, r, "approve", r.PayloadHash)
+	})
+	k3RequireCode(t, err, "AP004")
+	if got := w.approvalRows(r.ID); got != 0 {
+		t.Fatalf("an approval with a forced actor that is not the proven actor was recorded: %d", got)
+	}
+	// Control: with the simulated defect removed the same write is accepted.
+	for _, stmt := range []string{
+		`DROP TRIGGER payment_manual_resolution_approvals_zz_bug ON payment_manual_resolution_approvals`,
+		`DROP TRIGGER payment_manual_resolutions_zz_bug ON payment_manual_resolutions`,
+	} {
+		if _, err := w.pool.Raw().Exec(ctx, stmt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := k3Attack(rt, w, w.f2, f.Valid(t, w.f2.ID, "tenant", tid, "payment_force_resolve:approve", r.ID.String(), r.PayloadHash), func(ctx context.Context, tx pgx.Tx) error {
+		return k3RawApprove(ctx, tx, w, r, "approve", r.PayloadHash)
+	}); err != nil {
+		t.Fatalf("control: %v", err)
+	}
 }

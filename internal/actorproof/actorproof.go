@@ -17,8 +17,10 @@
 // mac = lower-hex HMAC-SHA256(secret(kid), fields 1..11 joined by '|').
 //
 // The signing capability (Issuer.Sign / Issuer.Attach) must be reached ONLY
-// from the packages that own four-eyes (internal/adjustment, internal/payments)
-// and from process wiring; a static test (static_test.go) pins this. The key is
+// from the packages that own four-eyes and the K1 capability-grant flow
+// (internal/adjustment, internal/payments, internal/capability) and from process
+// wiring; a static test (TestStatic_OnlyFourEyesPackagesSign in
+// actorproof_test.go) pins this. The key is
 // configuration (ACTOR_PROOF_KEYS / ACTOR_PROOF_ACTIVE_KID), never committed,
 // never stored where igaming_runtime SQL can read it.
 package actorproof
@@ -63,12 +65,27 @@ const (
 	OpResolutionApprove  = "payment_force_resolve:approve"
 	OpResolutionReject   = "payment_force_resolve:reject"
 	OpResolutionCancel   = "payment_force_resolve:cancel"
+
+	// K1 capability grants and financial policy changes (scope tenant or platform).
+	OpGrantRequest  = "capability_grant:request"
+	OpGrantApprove  = "capability_grant:approve"
+	OpGrantReject   = "capability_grant:reject"
+	OpGrantCancel   = "capability_grant:cancel"
+	OpGrantRevoke   = "capability_grant:revoke"
+	OpPolicyPropose = "financial_policy_change:propose"
+	OpPolicyApprove = "financial_policy_change:approve"
+	OpPolicyReject  = "financial_policy_change:reject"
+	OpPolicyCancel  = "financial_policy_change:cancel"
 )
 
 // Scopes the database admits.
 const (
 	ScopeTenant         = "tenant"
 	ScopePlatformActing = "platform_acting"
+	// ScopePlatform is the plain platform session. It is provable ONLY for the
+	// capability_grant: and financial_policy_change: operations and carries a
+	// NULL tenant (an empty tenant field on the wire).
+	ScopePlatform = "platform"
 )
 
 // TargetNew is the target of a create whose id the database forces.
@@ -88,7 +105,7 @@ var (
 	hex64RE   = regexp.MustCompile(`^[0-9a-f]{64}$`)
 	opRE      = regexp.MustCompile(`^[a-z_]+:[a-z_]+$`)
 	targetRE  = regexp.MustCompile(`^(new|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$`)
-	scopeSet  = map[string]bool{ScopeTenant: true, ScopePlatformActing: true}
+	scopeSet  = map[string]bool{ScopeTenant: true, ScopePlatformActing: true, ScopePlatform: true}
 	keyPairRE = regexp.MustCompile(`^([A-Za-z0-9._-]{1,32}):([A-Za-z0-9+/_=-]+)$`)
 )
 
@@ -104,10 +121,14 @@ type Claims struct {
 
 func (c Claims) validate() error {
 	switch {
-	case c.Actor == uuid.Nil, c.Tenant == uuid.Nil:
-		return fmt.Errorf("%w: nil actor or tenant", ErrInvalidClaims)
+	case c.Actor == uuid.Nil:
+		return fmt.Errorf("%w: nil actor", ErrInvalidClaims)
 	case !scopeSet[c.Scope]:
 		return fmt.Errorf("%w: scope", ErrInvalidClaims)
+	case c.Scope == ScopePlatform && (c.Tenant != uuid.Nil || !platformOperation(c.Operation)):
+		return fmt.Errorf("%w: platform scope needs a nil tenant and a K1/policy operation", ErrInvalidClaims)
+	case c.Scope != ScopePlatform && c.Tenant == uuid.Nil:
+		return fmt.Errorf("%w: nil tenant", ErrInvalidClaims)
 	case !opRE.MatchString(c.Operation):
 		return fmt.Errorf("%w: operation", ErrInvalidClaims)
 	case !targetRE.MatchString(c.Target):
@@ -116,6 +137,10 @@ func (c Claims) validate() error {
 		return fmt.Errorf("%w: payload hash", ErrInvalidClaims)
 	}
 	return nil
+}
+
+func platformOperation(op string) bool {
+	return strings.HasPrefix(op, "capability_grant:") || strings.HasPrefix(op, "financial_policy_change:")
 }
 
 // Issuer signs proofs. It holds key material and must be treated as a secret
@@ -219,8 +244,12 @@ func (i *Issuer) Sign(c Claims) (string, error) {
 		return "", fmt.Errorf("actorproof: nonce: %w", err)
 	}
 	now := i.now()
+	tenantField := ""
+	if c.Tenant != uuid.Nil {
+		tenantField = c.Tenant.String()
+	}
 	signed := strings.Join([]string{
-		"v1", i.activeKID, c.Actor.String(), c.Scope, c.Tenant.String(), c.Operation, c.Target, c.PayloadHash,
+		"v1", i.activeKID, c.Actor.String(), c.Scope, tenantField, c.Operation, c.Target, c.PayloadHash,
 		strconv.FormatInt(now.Unix(), 10), strconv.FormatInt(now.Add(Lifetime).Unix(), 10),
 		base64.RawURLEncoding.EncodeToString(nb[:]),
 	}, "|")
@@ -257,6 +286,16 @@ func Digest(fields ...*string) string {
 	}
 	sum := sha256.Sum256([]byte(strings.Join(parts, ",")))
 	return hex.EncodeToString(sum[:])
+}
+
+// TS is the canonical UTC microsecond text of t, identical to the SQL
+// actor_proof_ts(); nil stays nil (SQL NULL).
+func TS(t *time.Time) *string {
+	if t == nil {
+		return nil
+	}
+	s := t.UTC().Truncate(time.Microsecond).Format("2006-01-02T15:04:05.000000Z")
+	return &s
 }
 
 // S returns &s, for Digest call sites.
@@ -316,7 +355,7 @@ func VerifyConfiguredInProduction(ctx context.Context, environment string, iss *
 		return fmt.Errorf("actorproof: check the active kid is provisioned in the database: %w", err)
 	}
 	if !ok {
-		return fmt.Errorf("actorproof: the configured active kid %q is not an ACTIVE key in actor_proof_keys; provision it (docs/runbooks/signed-actor-proof.md); refusing to start", iss.KID())
+		return fmt.Errorf("actorproof: the configured active kid %q is not an ACTIVE key in actor_proof_keys; provision it (docs/runbooks/operational-runbooks.md section 15); refusing to start", iss.KID())
 	}
 	return nil
 }

@@ -1,4 +1,7 @@
-// Package prooftest provisions a per-process, randomly generated actor-proof
+//go:build integration
+
+// Package prooftest (integration builds ONLY: it is behind the integration build
+// tag so no production binary can contain it) provisions a per-process, randomly generated actor-proof
 // signing key for integration tests (SIGNED-ACTOR-PROOF, ADR 0110). It connects
 // as the OWNER/migration role (TEST_DATABASE_URL) - the only role that may write
 // the owner-only actor_proof_keys table - inserts the key, and installs the
@@ -25,6 +28,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/Diansalas/igaming-platform/internal/actorproof"
+	"github.com/Diansalas/igaming-platform/internal/capability"
 )
 
 var (
@@ -128,6 +132,9 @@ func ensureProcessLocked(t testing.TB) {
 		t.Fatalf("prooftest: issuer: %v", err)
 	}
 	process = iss
+	// K1 fixtures open their own sessions and call internal/capability without an
+	// authenticated HTTP principal: sign for the session's own actor.
+	capability.TestSessionProofHook = AttachForSession
 }
 
 // Issuer installs the per-process issuer as the default WITHOUT touching any
@@ -178,7 +185,8 @@ func AttachForSession(ctx context.Context, tx pgx.Tx, operation, target, payload
 	if iss == nil {
 		return actorproof.ErrNoIssuer
 	}
-	var actor, tenantID, scope string
+	var actor, scope string
+	var tenantID *string
 	if err := tx.QueryRow(ctx, `SELECT actor::text, tenant::text, scope FROM financial_actor_session()`).Scan(&actor, &tenantID, &scope); err != nil {
 		return err
 	}
@@ -186,9 +194,11 @@ func AttachForSession(ctx context.Context, tx pgx.Tx, operation, target, payload
 	if err != nil {
 		return err
 	}
-	tn, err := uuid.Parse(tenantID)
-	if err != nil {
-		return err
+	tn := uuid.Nil
+	if tenantID != nil {
+		if tn, err = uuid.Parse(*tenantID); err != nil {
+			return err
+		}
 	}
 	err = iss.Attach(ctx, tx, actorproof.Claims{Actor: a, Scope: scope, Tenant: tn, Operation: operation, Target: target, PayloadHash: payloadHash})
 	if errors.Is(err, actorproof.ErrInvalidClaims) {
@@ -228,7 +238,11 @@ func Nonce22(t testing.TB) string {
 // Token signs exactly the given fields and window.
 func (f Forger) Token(t testing.TB, actor uuid.UUID, scope string, tenantID uuid.UUID, op, target, payload string, iat, exp int64) string {
 	t.Helper()
-	signed := strings.Join([]string{"v1", f.KID, actor.String(), scope, tenantID.String(), op, target, payload,
+	tenantField := ""
+	if tenantID != uuid.Nil {
+		tenantField = tenantID.String()
+	}
+	signed := strings.Join([]string{"v1", f.KID, actor.String(), scope, tenantField, op, target, payload,
 		strconv.FormatInt(iat, 10), strconv.FormatInt(exp, 10), Nonce22(t)}, "|")
 	m := hmac.New(sha256.New, f.Key)
 	m.Write([]byte(signed))
@@ -248,4 +262,52 @@ func ProcessForger(t testing.TB, ownerURL string) Forger {
 	t.Helper()
 	kid, key := ProcessKey(t, ownerURL)
 	return Forger{KID: kid, Key: key}
+}
+
+// AttachK1Request attaches the session actor's proof for a raw INSERT into
+// staff_capability_grant_requests whose valid_from the test supplies explicitly.
+func AttachK1Request(ctx context.Context, tx pgx.Tx, tenantID, grantee uuid.UUID, capabilityName string, validFrom time.Time, validUntil *time.Time, reason string) error {
+	vf := validFrom
+	return AttachForSession(ctx, tx, actorproof.OpGrantRequest, actorproof.TargetNew, actorproof.Digest(
+		actorproof.S(tenantID.String()), actorproof.S(grantee.String()), actorproof.S(capabilityName),
+		actorproof.TS(&vf), actorproof.TS(validUntil), actorproof.S(reason)))
+}
+
+// k1RequestDigest recomputes a stored request's content digest as the trigger does.
+func k1RequestDigest(ctx context.Context, tx pgx.Tx, requestID uuid.UUID) (string, error) {
+	var (
+		id, tenantID, grantee  uuid.UUID
+		capabilityName, reason string
+		validFrom              time.Time
+		validUntil             *time.Time
+	)
+	if err := tx.QueryRow(ctx, `SELECT id, tenant_id, grantee_staff_id, capability, valid_from, valid_until, reason_code
+		FROM staff_capability_grant_requests WHERE id = $1`, requestID).
+		Scan(&id, &tenantID, &grantee, &capabilityName, &validFrom, &validUntil, &reason); err != nil {
+		return "", err
+	}
+	return actorproof.Digest(actorproof.S(id.String()), actorproof.S(tenantID.String()), actorproof.S(grantee.String()),
+		actorproof.S(capabilityName), actorproof.TS(&validFrom), actorproof.TS(validUntil), actorproof.S(reason)), nil
+}
+
+// AttachK1Decision attaches the session actor's proof for a raw INSERT into
+// staff_capability_grant_approvals (decision is "approve" or "reject").
+func AttachK1Decision(ctx context.Context, tx pgx.Tx, requestID uuid.UUID, decision string) error {
+	d, err := k1RequestDigest(ctx, tx, requestID)
+	if err != nil {
+		return err
+	}
+	return AttachForSession(ctx, tx, "capability_grant:"+decision, requestID.String(), d)
+}
+
+// AttachK1Revoke attaches the session actor's proof for a raw revoke UPDATE.
+func AttachK1Revoke(ctx context.Context, tx pgx.Tx, grantID, tenantID uuid.UUID, reason string) error {
+	return AttachForSession(ctx, tx, actorproof.OpGrantRevoke, grantID.String(), actorproof.Digest(
+		actorproof.S(grantID.String()), actorproof.S(tenantID.String()), actorproof.S(reason)))
+}
+
+// K1RequestDigest returns the content digest of a stored K1 request (the
+// approval/cancel binding), computed as the trigger computes it.
+func K1RequestDigest(ctx context.Context, tx pgx.Tx, requestID uuid.UUID) (string, error) {
+	return k1RequestDigest(ctx, tx, requestID)
 }

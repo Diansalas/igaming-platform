@@ -583,21 +583,34 @@ references): use the closed codes (basis, context, finding, reason) and the `evi
 
 ## 15. Signed actor proof: keys, rotation and incidents (ADR 0110, migration 0120, PRH-2 R5)
 
-K2 manual adjustments and K3 manual payment resolutions (submit/request, approve/reject, cancel) are accepted by the
-database only with a proof signed by the application server (HMAC-SHA256) that names the actor, scope, tenant,
+K2 manual adjustments, K3 manual payment resolutions, K1 capability grants (request, approve/reject, cancel, revoke) and
+financial policy changes (propose, approve/reject, cancel) are accepted by the database only with a proof signed by the application server (HMAC-SHA256) that names the actor, scope, tenant,
 operation, target and payload. Without it the write fails closed with SQLSTATE `AP001`..`AP005`; the K2/K3 HTTP
-endpoints answer 403 (class `forbidden`) or 500 when no key is configured. Residuals (an attacker with code execution
-on the application host; staff rows / sessions forged by SQL then authenticated over HTTP; the K1 grant and
-policy-change guards) are stated in ADR 0110 sections 8-9 and are NOT closed by this control.
+endpoints answer 403 (class `forbidden`) when the database refuses a proof, and 500 when the server cannot sign (no key configured, or a defect). THREAT-MODEL-ARBITRARY-SQL-1 is PARTIALLY MITIGATED:
+an attacker with code execution on the application host, staff rows / sessions / player credential tokens forged by
+SQL then authenticated over HTTP, and non-governed posting paths are stated in ADR 0110 sections 8-10a and are NOT
+closed by this control.
 
 **Provisioning (once per environment, before the first deploy that carries migration 0120's code).**
 1. Generate a 32-byte (or longer) random secret in the secret store (for example `openssl rand -base64 48`). Never put
    it in source control, a ConfigMap, a ticket or a log.
 2. Choose a key id (`[A-Za-z0-9._-]{1,32}`, for example `ap-2026-10`).
 3. Run migrations (`/app/migrate up`) as the migration/owner role: this creates the empty owner-only tables.
-4. As the migration/owner role (NOT `igaming_runtime`), insert the verification copy:
-   `INSERT INTO actor_proof_keys (kid, secret) VALUES ('ap-2026-10', decode('<hex of the secret>', 'hex'));`
-   (use a here-document or `psql -v` so the secret never appears in shell history; `status` defaults to `active`).
+4. As the migration/owner role (NOT `igaming_runtime`), insert the verification copy WITHOUT putting the secret in
+   a statement text that the server can log. Before you start, confirm on the target server that
+   `SHOW log_statement;` is NOT `mod` or `all`, that `log_min_duration_statement` is `-1` (or high enough not to
+   catch this statement) and that `log_parameter_max_length` is `0` (or statement logging is off); otherwise the
+   secret ends up in the database log. Then, with psql 16 or later, keep the secret in a file readable only by you
+   (mode 0600, on a tmpfs, removed afterwards), bind it as a PARAMETER (not interpolated into the SQL text) and send
+   it from a script file, not the command line:
+   ```
+   \set ap_kid ap-2026-10
+   \set ap_hex `cat /dev/shm/ap-2026-10.hex`
+   INSERT INTO actor_proof_keys (kid, secret) VALUES ($1, decode($2, 'hex')) \bind :ap_kid :ap_hex \g
+   ```
+   Do not type the secret into an interactive prompt that records history, do not use `psql -c "...secret..."`, and
+   do not paste it into a ticket. `status` defaults to `active`. Verify without printing it:
+   `SELECT kid, status, octet_length(secret) FROM actor_proof_keys;`.
 5. Give the application the same secret: `ACTOR_PROOF_KEYS=ap-2026-10:<base64 secret>` and
    `ACTOR_PROOF_ACTIVE_KID=ap-2026-10`, from the secret store as environment variables.
 6. Start the application. In production it REFUSES to start unless the key is configured AND the database holds that
@@ -605,7 +618,7 @@ policy-change guards) are stated in ADR 0110 sections 8-9 and are NOT closed by 
 
 **Rotation (no downtime; two keys active during the overlap).**
 1. New secret in the secret store, new kid (for example `ap-2027-01`).
-2. As the owner role: `INSERT INTO actor_proof_keys (kid, secret) VALUES ('ap-2027-01', decode('<hex>', 'hex'));`
+2. As the owner role, insert the new key exactly as in provisioning step 4 (parameter-bound, `log_statement` checked).
    Both kids now verify.
 3. Deploy the application with `ACTOR_PROOF_KEYS=ap-2027-01:<new>,ap-2026-10:<old>` and
    `ACTOR_PROOF_ACTIVE_KID=ap-2027-01`. Instances still on the old configuration keep signing with the old kid and
@@ -615,8 +628,11 @@ policy-change guards) are stated in ADR 0110 sections 8-9 and are NOT closed by 
    `UPDATE actor_proof_keys SET status='retired', retired_at=now() WHERE kid='ap-2026-10';`
    A proof under a retired kid is refused with `AP002`.
 5. Remove the old key from the application configuration at the next deploy.
-6. Housekeeping, any time: `DELETE FROM actor_proof_nonces WHERE expires_at < now() - interval '1 day';` (owner role).
-   The runtime role cannot, by design.
+6. Nonce pruning (PLAN; not automated, no job exists yet). Each governed write leaves one small row. A nonce older
+   than its `expires_at` can never be accepted again (an expired proof is refused before the nonce is looked at), so
+   pruning is housekeeping only, never a security control. Run weekly as the OWNER role (the runtime role cannot, by
+   design): `DELETE FROM actor_proof_nonces WHERE expires_at < now() - interval '1 day';` in small batches if the
+   table is large. Add a job and an alert on the row count when the first production volume is known.
 
 **Emergency (key believed leaked).** Generate and insert a new key, deploy it as the active kid, then retire EVERY
 older kid immediately (step 4 without the wait): in-flight approvals fail closed with `AP002` and are simply retried
@@ -632,6 +648,11 @@ by the user. Also treat the incident as a possible application-host compromise (
 - `AP004`: a bug or an attack: a proof was presented for a different actor/operation/target/payload. Page `security`.
 - `AP005`: a proof was used twice. A retry never causes this (every attempt signs a new proof); investigate as a
   possible replay.
+
+**ECS role-init (`deploy/aws/sql/init-runtime-role.rds.sql`).** Run it with `psql --single-transaction -v
+ON_ERROR_STOP=1 -f ...` so a failure part-way cannot leave the runtime role half-provisioned (for example holding the
+blanket table grants but not yet the re-REVOKE on `actor_proof_keys` / `actor_proof_nonces`). The script is idempotent
+and re-asserts that REVOKE on every run. (Terraform / the ECS task command are not changed by this branch.)
 
 **Never:** read `actor_proof_keys` into a ticket or chat; grant the runtime role anything on `actor_proof_keys` or
 `actor_proof_nonces`; re-run `deploy/init-app-role.sql` expecting it to restore a grant (it re-asserts the revoke);

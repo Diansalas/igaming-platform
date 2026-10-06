@@ -28,6 +28,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+
+	"github.com/Diansalas/igaming-platform/internal/actorproof"
 )
 
 // Capability is one of the four closed, extensible ADR 0099 §3.1
@@ -151,7 +153,9 @@ func ClassifyError(err error) ErrClass {
 	switch pgErr.Code {
 	case "CG010", "CG011", "CG012", "CG099":
 		return ErrClassGuardRefusal
-	case "CG001", "CG002", "CG020":
+	case "CG001", "CG002", "CG020", "AP001", "AP002", "AP003", "AP004", "AP005":
+		// AP*: SIGNED-ACTOR-PROOF refusal (migration 0120) - fail closed; for an
+		// authenticated HTTP caller it means a missing/invalid server proof.
 		return ErrClassSessionInvalid
 	case "23505":
 		return ErrClassUniqueViolation
@@ -172,9 +176,17 @@ func CreateRequest(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, in NewReq
 	// See NewRequestInput.ValidFrom's own doc comment: a zero time.Time
 	// means "unset" and is passed through as SQL NULL, letting migration
 	// 0112's request-guard trigger apply its own now() default (R-14).
-	var validFrom any
-	if !in.ValidFrom.IsZero() {
-		validFrom = in.ValidFrom
+	// Migration 0120 binds the proof to the request's valid_from, which the guard
+	// would otherwise default to the database's now(): choose it here (microsecond
+	// precision, as PostgreSQL stores it) so both sides agree.
+	validFrom := in.ValidFrom
+	if validFrom.IsZero() {
+		validFrom = time.Now()
+	}
+	validFrom = validFrom.UTC().Truncate(time.Microsecond)
+	if err := attachProof(ctx, tx, actorproof.OpGrantRequest, actorproof.TargetNew,
+		createDigest(tenantID, in.GranteeStaffID, in.Capability, validFrom, in.ValidUntil, in.ReasonCode)); err != nil {
+		return Request{}, err
 	}
 	row := tx.QueryRow(ctx, `
 		INSERT INTO staff_capability_grant_requests
@@ -237,6 +249,13 @@ func GetGrant(ctx context.Context, tx pgx.Tx, tenantID, grantID uuid.UUID) (Gran
 // belongs to a different tenant" - returns pgx.ErrNoRows, which the HTTP
 // layer maps to 404, never revealing whether the id exists elsewhere.
 func CancelRequest(ctx context.Context, tx pgx.Tx, tenantID, requestID uuid.UUID) error {
+	d, err := requestDigest(ctx, tx, requestID)
+	if err != nil {
+		return err
+	}
+	if err := attachProof(ctx, tx, actorproof.OpGrantCancel, requestID.String(), d); err != nil {
+		return err
+	}
 	tag, err := tx.Exec(ctx, `UPDATE staff_capability_grant_requests SET status = 'cancelled' WHERE id = $1 AND tenant_id = $2`, requestID, tenantID)
 	if err != nil {
 		return err
@@ -254,6 +273,17 @@ func CancelRequest(ctx context.Context, tx pgx.Tx, tenantID, requestID uuid.UUID
 // migration 0112's deferred constraint trigger requires. For
 // decision == "reject" no grant row is inserted.
 func DecideAndGrant(ctx context.Context, tx pgx.Tx, tenantID, requestID uuid.UUID, decision, reasonCode string) (approvalID uuid.UUID, grant *Grant, err error) {
+	op := actorproof.OpGrantApprove
+	if decision == "reject" {
+		op = actorproof.OpGrantReject
+	}
+	d, err := requestDigest(ctx, tx, requestID)
+	if err != nil {
+		return uuid.Nil, nil, err
+	}
+	if err := attachProof(ctx, tx, op, requestID.String(), d); err != nil {
+		return uuid.Nil, nil, err
+	}
 	if err := tx.QueryRow(ctx, `
 		INSERT INTO staff_capability_grant_approvals (request_id, decision, reason_code)
 		SELECT $1, $2, $3
@@ -290,6 +320,9 @@ func DecideAndGrant(ctx context.Context, tx pgx.Tx, tenantID, requestID uuid.UUI
 // the DB session, never trusted from a caller - this function does not
 // even accept them as parameters.
 func RevokeGrant(ctx context.Context, tx pgx.Tx, tenantID, grantID uuid.UUID, reasonCode string) error {
+	if err := attachProof(ctx, tx, actorproof.OpGrantRevoke, grantID.String(), revokeDigest(grantID, tenantID, reasonCode)); err != nil {
+		return err
+	}
 	tag, err := tx.Exec(ctx, `
 		UPDATE staff_capability_grants
 		   SET revoked_at = now(), revoke_reason_code = $2
