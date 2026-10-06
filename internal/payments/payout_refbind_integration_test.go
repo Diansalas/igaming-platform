@@ -336,8 +336,13 @@ func TestRefBind_OtherTenantReference_NotAConflict(t *testing.T) {
 
 // Concurrency: two payouts race to bind the same fresh reference. The unique
 // indexes make exactly one bind. The loser either parks directly (it read after
-// the winner committed) or fails ONCE with a unique violation, rolled back with
-// nothing changed; its retry parks. It never loops and never double-binds.
+// the winner committed) or its WHOLE transaction fails with a unique violation
+// and rolls back with nothing changed. In production a synchronous Withdraw
+// result is LOST on that rollback; the loser converges via the sweeper (attempt
+// still `submitting`, no reference -> T6 ambiguous -> resend), and the resend's
+// result then hits the guard, which parks. This test models the convergence step
+// as the same ApplyPayoutResult call being applied again (the resend's result).
+// It never loops and never double-binds.
 func TestRefBind_Concurrent_SameFreshReference_OneBindsLoserConvergesToPark(t *testing.T) {
 	e := newRBEnv(t, "mock-rb-conc")
 	wrA, aA := e.claim(t, "rb-c-a")
@@ -577,5 +582,219 @@ func TestDepositKYC_CascadeT2_OutageVsDeny_DistinctReasons(t *testing.T) {
 				t.Fatalf("intent decline_reason = %q, want %q", r, tc.want)
 			}
 		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// LF C1: for a PAYOUT a reversal tombstone on the key is a conflict.
+
+func TestRefBind_Tombstone_PayoutSuccess_Parks_NoLoop(t *testing.T) {
+	e := newRBEnv(t, "mock-rb-tomb")
+	ref := "rb-tomb-ref-20"
+	if err := e.pool.WithTenant(context.Background(), e.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := ledger.Post(ctx, tx, ledger.TransactionInput{
+			TenantID: e.f.tenantID, TransactionType: ledger.TxTombstone,
+			IdempotencyKey: "tombstone:" + e.pid + ":" + ref, ProviderID: &e.pid, ProviderTxID: &ref, CorrelationID: uuid.New(),
+		})
+		return err
+	}); err != nil {
+		t.Fatalf("seed tombstone: %v", err)
+	}
+	wr, a := e.claim(t, "rb-tomb-a")
+	ledgerBefore := fpLedgerTx(t, e.pool, e.f)
+
+	e.apply(t, wr, a, rbResult(ErrorClassSucceeded, OutcomeSucceeded, ref))
+
+	e.assertParked(t, wr, a, ledgerBefore, ref)
+	var boundTo string
+	if err := e.pool.WithTenant(context.Background(), e.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT metadata->>'bound_to' FROM audit_log WHERE tenant_id=$1 AND action=$2`, e.f.tenantID, rbConflictAudit).Scan(&boundTo)
+	}); err != nil {
+		t.Fatalf("read audit: %v", err)
+	}
+	if boundTo != "ledger_tombstone" {
+		t.Fatalf("bound_to = %q, want ledger_tombstone", boundTo)
+	}
+	// A redelivery commits without error (no rollback loop) and adds no second park.
+	e.apply(t, wr, a, rbResult(ErrorClassSucceeded, OutcomeSucceeded, ref))
+	if e.conflictAudits(t) != 1 {
+		t.Fatalf("redelivery must not re-park, audits=%d", e.conflictAudits(t))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Callback path (receipt.go) through ApplyReceiptEvidence.
+
+func (e rbEnv) callback(t *testing.T, a PaymentAttempt, outcome Outcome, ref string) {
+	t.Helper()
+	if err := e.pool.WithTenant(context.Background(), e.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := ApplyReceiptEvidence(ctx, tx, e.orch, e.f.tenantID, e.pid, ReceiptEvidence{
+			EventType: "payout", ProviderReference: ref, MerchantReference: a.MerchantReference,
+			Outcome: outcome, Amount: 500, AssetCode: "EUR", DeclineReason: "insufficient_funds",
+		})
+		return err
+	}); err != nil {
+		t.Fatalf("ApplyReceiptEvidence(%s): %v", outcome, err)
+	}
+}
+
+func (e rbEnv) postDepositKey(t *testing.T, ref string) {
+	t.Helper()
+	if err := e.pool.WithTenant(context.Background(), e.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		cash, err := ledger.GetOrCreateAccount(ctx, tx, e.f.tenantID, &e.f.walletID, ledger.AccountPlayerCash, "EUR")
+		if err != nil {
+			return err
+		}
+		clearing, err := ledger.GetOrCreateAccount(ctx, tx, e.f.tenantID, nil, ledger.AccountPSPClearing, "EUR")
+		if err != nil {
+			return err
+		}
+		_, err = ledger.Post(ctx, tx, ledger.TransactionInput{
+			TenantID: e.f.tenantID, TransactionType: ledger.TxDeposit,
+			IdempotencyKey: e.pid + ":" + ref, ProviderID: &e.pid, ProviderTxID: &ref, CorrelationID: uuid.New(),
+			Entries: []ledger.EntryInput{
+				{LedgerAccountID: clearing, Direction: ledger.Debit, Amount: 1000},
+				{LedgerAccountID: cash, Direction: ledger.Credit, Amount: 1000},
+			},
+		})
+		return err
+	}); err != nil {
+		t.Fatalf("seed ledger key: %v", err)
+	}
+}
+
+// Pending callback: reference held ONLY by another withdrawal_requests row.
+func TestRefBind_Callback_Pending_ForeignWithdrawalReference_Parks(t *testing.T) {
+	e := newRBEnv(t, "mock-rb-cb1")
+	wrA, _ := e.claim(t, "rb-cb1-a")
+	if err := e.pool.WithTenant(context.Background(), e.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return withdrawal.AttachProviderReference(ctx, tx, wrA.ID, "rb-cb-shared-21")
+	}); err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+	wrB, aB := e.claim(t, "rb-cb1-b")
+	ledgerBefore := fpLedgerTx(t, e.pool, e.f)
+
+	e.callback(t, aB, OutcomePending, "rb-cb-shared-21")
+
+	e.assertParked(t, wrB, aB, ledgerBefore, "rb-cb-shared-21")
+	if e.conflictAudits(t) != 1 {
+		t.Fatalf("expected one conflict audit, got %d", e.conflictAudits(t))
+	}
+}
+
+// Pending callback: reference held ONLY by a ledger key.
+func TestRefBind_Callback_Pending_ForeignLedgerKey_Parks(t *testing.T) {
+	e := newRBEnv(t, "mock-rb-cb2")
+	e.postDepositKey(t, "rb-cb-key-22")
+	wrB, aB := e.claim(t, "rb-cb2-b")
+	ledgerBefore := fpLedgerTx(t, e.pool, e.f)
+
+	e.callback(t, aB, OutcomePending, "rb-cb-key-22")
+
+	e.assertParked(t, wrB, aB, ledgerBefore, "rb-cb-key-22")
+}
+
+// Success and Decline callbacks carrying a reference held by ANOTHER ATTEMPT are
+// refused earlier, at receipt resolution (anomaly receipt, no state change); the
+// hold is kept and nothing binds or posts.
+func TestRefBind_Callback_SuccessAndDecline_ForeignAttemptReference_AnomalyNoEffect(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		outcome Outcome
+	}{{"success", OutcomeSucceeded}, {"decline", OutcomeDeclined}} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newRBEnv(t, "mock-rb-cb3-"+tc.name)
+			e.seedBound(t, "rb-cb3-a", "rb-cb-shared-23")
+			wrB, aB := e.claim(t, "rb-cb3-b")
+			ledgerBefore := fpLedgerTx(t, e.pool, e.f)
+
+			e.callback(t, aB, tc.outcome, "rb-cb-shared-23")
+
+			got := mustGetAttempt(t, e.pool, e.f.tenantID, aB.ID)
+			if got.State != AttemptSubmitting || got.ProviderReference != nil {
+				t.Fatalf("an anomaly receipt must change nothing, got state=%s ref=%v", got.State, got.ProviderReference)
+			}
+			w := fpReqState(t, e.pool, e.f, wrB.ID)
+			if w.State != withdrawal.StateSubmitted || w.ProviderReference != nil || fpLedgerTx(t, e.pool, e.f) != ledgerBefore {
+				t.Fatalf("hold/ledger/withdrawal changed: %+v", w)
+			}
+		})
+	}
+}
+
+// Success and Decline callbacks carrying a reference held ONLY by a ledger key
+// reach the guard (applyPayoutSuccess/Decline) and park, hold kept.
+func TestRefBind_Callback_SuccessAndDecline_ForeignLedgerKey_Park(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		outcome Outcome
+	}{{"success", OutcomeSucceeded}, {"decline", OutcomeDeclined}} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newRBEnv(t, "mock-rb-cb5-"+tc.name)
+			e.postDepositKey(t, "rb-cb-key-25")
+			wrB, aB := e.claim(t, "rb-cb5-b")
+			ledgerBefore := fpLedgerTx(t, e.pool, e.f)
+
+			e.callback(t, aB, tc.outcome, "rb-cb-key-25")
+
+			e.assertParked(t, wrB, aB, ledgerBefore, "rb-cb-key-25")
+		})
+	}
+}
+
+// A Pending callback with a fresh reference still binds (normal path).
+func TestRefBind_Callback_Pending_FreshReference_Binds(t *testing.T) {
+	e := newRBEnv(t, "mock-rb-cb4")
+	_, aB := e.claim(t, "rb-cb4-b")
+	e.callback(t, aB, OutcomePending, "rb-cb-fresh-24")
+	got := mustGetAttempt(t, e.pool, e.f.tenantID, aB.ID)
+	if got.State != AttemptPending || got.ProviderReference == nil || *got.ProviderReference != "rb-cb-fresh-24" {
+		t.Fatalf("expected pending/bound, got %+v", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// M2 on a provider_reference_conflict payout is refused by the Go executor AND
+// the DB allow-list (payment_m2_admits), for both kinds; the hold is untouched.
+
+func TestRefBind_ConflictPark_M2Refused_GoAndDB(t *testing.T) {
+	w := newK3World(t, k3Opts{base: 1})
+	wr, a := w.disputedPayout(100, "provider_reference_conflict")
+	if M2ResolvableDispute(AttemptDisputed, a.TerminalReason) {
+		t.Fatalf("Go allow-list admits provider_reference_conflict")
+	}
+	for _, kind := range []ResolutionKind{ResolutionM2DeclarePaid, ResolutionM2DeclareNotPaid} {
+		holdBefore := w.walletBalance("player_withdrawal_hold")
+		_, err := w.request(w.f1, w.m2In(a.ID, kind))
+		k3RequireCode(t, err, "MR012")
+		if w.withdrawalOf(wr.ID).State != withdrawal.StateSubmitted || w.walletBalance("player_withdrawal_hold") != holdBefore {
+			t.Fatalf("%s: the hold or the withdrawal changed", kind)
+		}
+	}
+}
+
+func TestRefBind_ConflictPark_DBGuardRefuses(t *testing.T) {
+	w := newK3World(t, k3Opts{base: 1})
+	for _, c := range []struct {
+		kind     ResolutionKind
+		newState string
+	}{{ResolutionM2DeclarePaid, "succeeded"}, {ResolutionM2DeclareNotPaid, "declined"}} {
+		_, a := w.ambiguousPayout(120)
+		r := w.mustRequest(w.f1, w.m2In(a.ID, c.kind))
+		reason := "provider_reference_conflict"
+		if err := w.inExecuting(r, w.f2, func(ctx context.Context, tx pgx.Tx) error {
+			var got bool
+			if err := tx.QueryRow(ctx, `SELECT payment_m2_admits($1, 'disputed', $2, $3, $4, 'operator')`,
+				a.ID, reason, *a.WithdrawalRequestID, c.newState).Scan(&got); err != nil {
+				return err
+			}
+			if got {
+				t.Errorf("%s: payment_m2_admits admits provider_reference_conflict", c.kind)
+			}
+			return nil
+		}); err != nil {
+			t.Fatalf("db guard probe: %v", err)
+		}
 	}
 }

@@ -733,6 +733,12 @@ func applyResolvedReceiptEvidence(ctx context.Context, tx pgx.Tx, o *Orchestrato
 			if ev.ProviderReference == "" {
 				return false, ResolutionAnomalyOther, nil
 			}
+			// PAY-PAYOUT-REFBIND-1: a payout's Pending callback binds the reference too.
+			if attempt.Operation != AttemptOperationDeposit && attempt.WithdrawalRequestID != nil {
+				if parked, err := payoutGuardReferenceBinding(ctx, tx, attempt, *attempt.WithdrawalRequestID, ev.ProviderReference, EvidenceCallback, ErrorClassPending); err != nil || parked {
+					return parked, ResolutionAnomalyOther, err
+				}
+			}
 			return true, ResolutionApplied, MarkAccepted(ctx, tx, attempt.ID, EvidenceCallback, ev.ProviderReference, time.Now().Add(30*time.Second))
 		default:
 			// created/rejected/pending/declined/succeeded/disputed: a

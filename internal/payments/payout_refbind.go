@@ -34,16 +34,25 @@ const payoutReferenceConflictAuditAction = "payments.payout_parked_reference_con
 // reference) is already bound to something OTHER than this payout, and what:
 //   - another payment_attempts row (deposit or payout) -> its operation;
 //   - another withdrawal_requests.provider_reference   -> "withdrawal_request";
-//   - a non-tombstone ledger transaction holding the settlement key
-//     (tenant, provider, provider_tx_id) -> "ledger_<transaction_type>". This
+//   - ANY ledger transaction holding the settlement key (tenant, provider,
+//     provider_tx_id), tombstones included -> "ledger_<transaction_type>"
+//     (e.g. "ledger_tombstone"). This
 //     request's own withdrawal_completed row (written atomically with
 //     ApplySuccess) can only be seen on a replay against an already-terminal
 //     attempt, where the park's CAS fails and the late-evidence routing takes
 //     over - it is never a new bind.
 //
 // Same tenant only: the predicates name the tenant, and the unique indexes they
-// mirror are per tenant under FORCE RLS. A tombstone is excluded: it has its own
-// handling. The caller must hold the withdrawal lock.
+// mirror are per tenant under FORCE RLS. A tombstone is deliberately NOT
+// excluded here (unlike the deposit-side foreignReferenceBinding, whose
+// tombstone has its own T10/T13t handling): a payout has no such handling, and
+// a reversal tombstone occupies provider_tx_id, so withdrawal.Complete's
+// ledger.Post would hit the unique index on every redelivery and roll back with
+// the hold stuck. It is a conflict for payouts. deposit_intents is not
+// consulted: a deposit intent's reference is mirrored on its attempt row
+// (checked above) and on its ledger key (checked here), so a legacy deposit key
+// is still caught, and a bare intent row alone cannot make a payout bind loop.
+// The caller must hold the withdrawal lock.
 func payoutForeignReferenceBinding(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, providerID, reference string, attemptID, requestID uuid.UUID) (bool, string, error) {
 	var op string
 	err := tx.QueryRow(ctx,
@@ -77,7 +86,6 @@ func payoutForeignReferenceBinding(ctx context.Context, tx pgx.Tx, tenantID uuid
 	err = tx.QueryRow(ctx,
 		`SELECT transaction_type FROM ledger_transactions
 		 WHERE tenant_id = $1 AND provider_id = $2 AND provider_tx_id = $3
-		   AND transaction_type <> 'tombstone'
 		 LIMIT 1`,
 		tenantID, providerID, reference,
 	).Scan(&txType)
@@ -102,10 +110,15 @@ func payoutGuardReferenceBinding(ctx context.Context, tx pgx.Tx, attempt Payment
 		return false, nil
 	}
 	// Two payouts racing to bind the SAME fresh reference both pass this read;
-	// the payment_attempts / withdrawal_requests unique indexes then make the
-	// loser fail once (rolled back, hold untouched). Its retry sees the winner's
-	// committed binding here and parks. No advisory lock is taken: they are
-	// confined to claimBatch (TestSweeperAdvisoryLock_OnlyInsideClaimBatch).
+	// the unique indexes then make the loser's whole transaction fail and roll
+	// back (hold untouched). For a synchronous Withdraw the loser's result is
+	// LOST on that rollback: convergence is the sweeper finding the attempt still
+	// `submitting` with no reference, moving it to ambiguous (T6, no-reference),
+	// a resend, and the resend's result then hitting this guard, which sees the
+	// winner's committed binding and parks. A callback or status redelivery for
+	// the loser converges the same way on its next delivery. No advisory lock is
+	// taken: they are confined to claimBatch
+	// (TestSweeperAdvisoryLock_OnlyInsideClaimBatch).
 	conflict, boundTo, err := payoutForeignReferenceBinding(ctx, tx, attempt.TenantID, *attempt.ProviderID, reference, attempt.ID, requestID)
 	if err != nil {
 		return false, err

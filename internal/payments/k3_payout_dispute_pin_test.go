@@ -30,7 +30,7 @@ func TestK3_C5b_PayoutDisputeWriteSitesAreClassified(t *testing.T) {
 	for _, f := range files {
 		af, err := parser.ParseFile(fset, f, nil, 0)
 		if err != nil {
-			if f == "payout_sweep.go" || f == "payout_refbind.go" {
+			if f == "payout_sweep.go" {
 				continue // optional
 			}
 			t.Fatalf("parse %s: %v", f, err)
