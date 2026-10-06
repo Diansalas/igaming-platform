@@ -19,6 +19,14 @@ import (
 // layer answers it exactly like any other refusal on a non-active tenant.
 var ErrStakeReturnMismatch = errors.New("casino: rollback does not match the posted bet it names")
 
+// ErrStakeReturnWinOutstanding marks a rollback of a posted casino bet that is
+// refused on a NON-ACTIVE tenant because the bet's round still has an
+// unreversed casino_win: the rollback of that win stays refused there, so
+// returning the stake as well would leave stake AND win both paid
+// (ledger-finance C1). Always wrapped in ErrTenantNotActive; the callback is
+// kept as durable evidence for staff resolution.
+var ErrStakeReturnWinOutstanding = errors.New("casino: the bet's round has an unreversed win")
+
 // requireStakeReturnAllowed is the casino gate for a rollback of an
 // already-posted casino_bet, the TERMINAL STAKE RETURN that stays allowed on
 // a suspended or closed tenant (owner decision Q-GP-5, 2026-10-06, ADR 0095
@@ -78,6 +86,21 @@ func verifyStakeReturnMatchesBet(ctx context.Context, tx pgx.Tx, tenantID uuid.U
 	}
 	if err != nil {
 		return fmt.Errorf("casino: load bet for stake-return check: %w", err)
+	}
+	// Overpay guard: use the ORIGINAL bet's own correlation_id (never the
+	// callback's RoundID) to find unreversed wins of that round.
+	var winOutstanding bool
+	if err := tx.QueryRow(ctx, `
+		SELECT EXISTS (
+		  SELECT 1 FROM ledger_transactions w
+		   WHERE w.tenant_id = $1 AND w.correlation_id = $2 AND w.transaction_type = $3
+		     AND NOT EXISTS (SELECT 1 FROM ledger_transactions r WHERE r.reverses_transaction_id = w.id))`,
+		tenantID, correlationID, ledger.TxCasinoWin,
+	).Scan(&winOutstanding); err != nil {
+		return fmt.Errorf("casino: check round wins for stake-return: %w", err)
+	}
+	if winOutstanding {
+		return ErrStakeReturnWinOutstanding
 	}
 	if event.PlayerAccountID != uuid.Nil && event.PlayerAccountID != playerID {
 		return fmt.Errorf("%w: player", ErrStakeReturnMismatch)

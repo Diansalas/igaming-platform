@@ -377,14 +377,16 @@ var listNonActiveTenants = nonActiveTenants
 // tenant stays gated by the platform_acting + four-eyes path.
 //
 // sportsbook_settlement, casino_consistency and casino_statement are NOT run
-// for a non-active tenant (DEFERRED GAP, not a proof of absence): casino wallet
-// callbacks and the staff sportsbook settlement simulation do not check
-// tenants.status, so game and sportsbook postings CAN still land on a suspended
-// or closed tenant. The ledger_vs_projection stream above covers the money
-// invariant (drift) for those postings; what does not run for these tenants is the
-// provider cross-check streams. Owner decision pending (ADR 0095 section 40.4
-// item 2): block such postings for non-active tenants, or extend these streams
-// (they are internal reads, so the extension is cheap). One tenant's failure is
+// for a non-active tenant (DEFERRED GAP, not a proof of absence): since
+// migration 0118 NEW game and sportsbook postings are refused for a non-active
+// tenant, but since migration 0121 (PRH-2 R5, ADR 0095 section 40.6) terminal
+// STAKE RETURNS (casino rollback of a posted bet, sportsbook void of an open
+// bet and void after settlement) still post on a suspended or closed tenant.
+// The ledger_vs_projection stream above covers the money invariant (drift) for
+// those postings; what does not run for these tenants is the provider
+// cross-check streams. Follow-up R3-RECON-NONACTIVE-STREAMS-1: run
+// sportsbook_settlement and casino_consistency (internal reads) in observation
+// mode for non-active tenants. One tenant's failure is
 // recorded on its own outcome and never stops the others.
 func observeNonActiveTenants(ctx context.Context, pool *db.Pool, logger *slog.Logger, only []uuid.UUID, alreadySwept []SweepOutcome, periodStart, periodEnd time.Time, paySources []statement.PaymentStatementSource) ([]SweepOutcome, error) {
 	tenants, err := listNonActiveTenants(ctx, pool, only)

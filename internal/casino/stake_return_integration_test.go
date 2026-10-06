@@ -17,6 +17,9 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+
+	"github.com/Diansalas/igaming-platform/internal/ledger"
 )
 
 func (w gateWorld) deliverRollbackAs(ref, original, round string, amount int64, player uuid.UUID) (ReceiveCallbackResult, error) {
@@ -41,6 +44,14 @@ func countTx(t *testing.T, w gateWorld, txType string) int {
 	return n
 }
 
+func srPgCode(err error) string {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		return pgErr.Code
+	}
+	return ""
+}
+
 func assertLedgerInvariants(t *testing.T, w gateWorld) {
 	t.Helper()
 	loAssertBalanced(t, w.owner, w.f.tenantID)
@@ -63,6 +74,9 @@ func TestStakeReturn_CasinoRollbackOfBetAllowedOnNonActiveTenant(t *testing.T) {
 				{CallbackEventWin, "w-2", "", "round-2", 2000},
 				{CallbackEventBet, "b-3", "", "round-3", 500},
 				{CallbackEventBet, "b-4", "", "round-4", 300},
+				{CallbackEventBet, "b-5", "", "round-5", 400},
+				{CallbackEventWin, "w-5", "", "round-5", 900},
+				{CallbackEventRollback, "rb-w5", "w-5", "round-5", 0},
 			} {
 				if _, err := w.deliver(t, d.ev, d.ref, d.original, d.round, d.amount); err != nil {
 					t.Fatalf("active delivery %s: %v", d.ref, err)
@@ -129,7 +143,44 @@ func TestStakeReturn_CasinoRollbackOfBetAllowedOnNonActiveTenant(t *testing.T) {
 				if !errors.Is(err, ErrTenantNotActive) || !errors.Is(err, ErrStakeReturnMismatch) {
 					t.Fatalf("%s: expected a refusal (ErrTenantNotActive+ErrStakeReturnMismatch), got %v", m.name, err)
 				}
+				w.record(t, err)
 			}
+			// C1 (ledger-finance): the round of b-2 still has an unreversed win
+			// (w-2) and the rollback of that win stays refused here, so returning
+			// the stake as well would pay stake AND win: refused, callback kept as
+			// evidence (the HTTP layer records it from the typed error).
+			_, err = w.deliver(t, CallbackEventRollback, "rb-2", "b-2", "round-2", 0)
+			if !errors.Is(err, ErrTenantNotActive) || !errors.Is(err, ErrStakeReturnWinOutstanding) {
+				t.Fatalf("a bet rollback in a round with an unreversed win must be refused, got %v", err)
+			}
+			w.record(t, err)
+			// The round is found from the ORIGINAL bet's correlation, not from the
+			// callback: a callback that omits the round id is refused the same way.
+			if _, err := w.deliver(t, CallbackEventRollback, "rb-2-noround", "b-2", "", 0); !errors.Is(err, ErrStakeReturnWinOutstanding) {
+				t.Fatalf("a callback without a round id must still see the round's win, got %v", err)
+			}
+			// L4 (security): the audit row carries the internal sub-reason; the
+			// external error class is the same ErrTenantNotActive for all of them.
+			for sub, want := range map[string]int{"stake_return_mismatch": 3, "stake_return_round_has_win": 1} {
+				var n int
+				if err := owner.WithTenant(context.Background(), w.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+					return tx.QueryRow(ctx, `SELECT count(*) FROM audit_log WHERE tenant_id = $1 AND action = $2 AND metadata->>'sub_reason' = $3`,
+						w.f.tenantID, AuditActionCallbackRejectedTenantNotActive, sub).Scan(&n)
+				}); err != nil || n != want {
+					t.Fatalf("audit sub_reason %s: got %d want %d err=%v", sub, n, want, err)
+				}
+			}
+			// A round whose win was already reversed (while active) is allowed.
+			cashBefore5 := cashBalance(t, owner, w.f)
+			if r5, err := w.deliver(t, CallbackEventRollback, "rb-5", "b-5", "round-5", 0); err != nil || r5.Replayed {
+				t.Fatalf("a bet rollback whose win was already reversed must post: %+v err=%v", r5, err)
+			}
+			if got := cashBalance(t, owner, w.f); got != cashBefore5+400 {
+				t.Fatalf("cash %d, want %d", got, cashBefore5+400)
+			}
+			cash1 += 400
+			txs1++
+			entries1 += 2
 			// The original is a WIN, not a bet: still refused.
 			if _, err := w.deliver(t, CallbackEventRollback, "rb-win", "w-2", "round-2", 0); !errors.Is(err, ErrTenantNotActive) {
 				t.Fatalf("a rollback of a posted win must stay refused, got %v", err)
@@ -371,6 +422,10 @@ func TestStakeReturn_CasinoDatabaseBackstopNarrowed(t *testing.T) {
 	}{
 		{CallbackEventBet, "b-db", "", "round-db", 500},
 		{CallbackEventWin, "w-db", "", "round-db", 800},
+		{CallbackEventBet, "b-db2", "", "round-db2", 500},
+		{CallbackEventBet, "b-db3", "", "round-db3", 500},
+		{CallbackEventWin, "w-db3", "", "round-db3", 800},
+		{CallbackEventRollback, "rb-w-db3", "w-db3", "round-db3", 0},
 	} {
 		if _, err := w.deliver(t, d.ev, d.ref, d.original, d.round, d.amount); err != nil {
 			t.Fatal(err)
@@ -386,6 +441,7 @@ func TestStakeReturn_CasinoDatabaseBackstopNarrowed(t *testing.T) {
 		return id
 	}
 	betID, winID := idOf("b-db"), idOf("w-db")
+	bet2ID, bet3ID := idOf("b-db2"), idOf("b-db3")
 	setStatusForGate(t, owner, w.f.tenantID, "suspended")
 
 	insert := func(txType, key string, reverses *uuid.UUID) error {
@@ -406,13 +462,80 @@ func TestStakeReturn_CasinoDatabaseBackstopNarrowed(t *testing.T) {
 	if err := insert("casino_rollback", "raw-rb-ghost", &ghost); err == nil {
 		t.Fatal("a rollback naming a nonexistent original must not insert")
 	}
-	// The one allowed shape: reverses a casino_bet of the same tenant.
-	if err := insert("casino_rollback", "raw-rb-bet", &betID); err != nil {
+	// C1: a bet whose round still has an unreversed win is refused.
+	assertPgCode(t, insert("casino_rollback", "raw-rb-bet-with-win", &betID), "GP010")
+	// A bet whose round has no win, or whose win was reversed, passes.
+	for i, id := range []uuid.UUID{bet3ID} {
+		if err := insert("casino_rollback", "raw-rb-bet-reversed-win-"+string(rune('a'+i)), &id); err != nil && srPgCode(err) == "GP010" {
+			t.Fatalf("a bet rollback whose win was reversed must pass the backstop: %v", err)
+		}
+	}
+	// The allowed shape: reverses a casino_bet (no win) of the same tenant.
+	if err := insert("casino_rollback", "raw-rb-bet", &bet2ID); err != nil {
 		// The empty transaction may still be refused by a later balance
 		// check, but never by GP010.
-		var pgErr interface{ SQLState() string }
-		if errors.As(err, &pgErr) && pgErr.SQLState() == "GP010" {
+		if srPgCode(err) == "GP010" {
 			t.Fatalf("a casino_rollback of a casino_bet must pass the gameplay backstop: %v", err)
 		}
 	}
+}
+
+// C3: a casino bet or win is reversed at most once, database-enforced
+// (migration 0121 partial unique index), also against a writer that skips the
+// application check; ledger.Post maps it to ErrCasinoReversalAlreadyExists.
+func TestStakeReturn_CasinoOnceOnlyIndex(t *testing.T) {
+	owner := testPool(t)
+	rt := runtimePoolForGate(t)
+	w := newGateWorld(t, owner, rt)
+	if _, err := w.deliver(t, CallbackEventBet, "b-once", "", "round-once", 500); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.deliver(t, CallbackEventRollback, "rb-once", "b-once", "round-once", 0); err != nil {
+		t.Fatal(err)
+	}
+	var betID uuid.UUID
+	if err := owner.WithTenant(context.Background(), w.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT id FROM ledger_transactions WHERE tenant_id = $1 AND provider_tx_id = 'b-once'`, w.f.tenantID).Scan(&betID)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Raw second reversal under another key: unique violation on the new index.
+	err := rt.WithTenant(context.Background(), w.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx,
+			`INSERT INTO ledger_transactions (tenant_id, transaction_type, idempotency_key, correlation_id, reverses_transaction_id)
+			 VALUES ($1, 'casino_rollback', 'raw-second', $2, $3)`, w.f.tenantID, uuid.New(), betID)
+		return err
+	})
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) || pgErr.Code != "23505" || pgErr.ConstraintName != "ledger_transactions_one_casino_rollback" {
+		t.Fatalf("expected the once-only unique violation, got %v", err)
+	}
+	// Through ledger.Post: the typed sentinel, nothing posted.
+	txs0, _ := ledgerCountsForGate(t, owner, w.f.tenantID)
+	err = rt.WithTenant(context.Background(), w.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		entries, err := loadEntries(ctx, tx, betID)
+		if err != nil {
+			return err
+		}
+		var inverted []ledger.EntryInput
+		for _, e := range entries {
+			d := ledger.Credit
+			if e.Direction == ledger.Credit {
+				d = ledger.Debit
+			}
+			inverted = append(inverted, ledger.EntryInput{LedgerAccountID: e.LedgerAccountID, Direction: d, Amount: e.Amount})
+		}
+		_, err = ledger.Post(ctx, tx, ledger.TransactionInput{
+			TenantID: w.f.tenantID, TransactionType: ledger.TxCasinoRollback, IdempotencyKey: "post-second",
+			CorrelationID: uuid.New(), ReversesTransactionID: &betID, Entries: inverted,
+		})
+		return err
+	})
+	if !errors.Is(err, ledger.ErrCasinoReversalAlreadyExists) {
+		t.Fatalf("expected ErrCasinoReversalAlreadyExists, got %v", err)
+	}
+	if txs1, _ := ledgerCountsForGate(t, owner, w.f.tenantID); txs1 != txs0 {
+		t.Fatalf("a refused second reversal posted")
+	}
+	assertLedgerInvariants(t, w)
 }

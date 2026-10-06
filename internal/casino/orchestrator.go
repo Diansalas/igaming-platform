@@ -2297,6 +2297,11 @@ func (o *Orchestrator) postRollback(ctx context.Context, tx pgx.Tx, tenantID uui
 		Entries:               inverted,
 		BonusCost:             bonusCost,
 	})
+	if errors.Is(err, ledger.ErrCasinoReversalAlreadyExists) {
+		// Migration 0121's once-only index fired: a distinct second reversal
+		// of the same original that the FOR UPDATE check above did not see.
+		return ReceiveCallbackResult{}, ErrAlreadyRolledBack
+	}
 	if err != nil {
 		return ReceiveCallbackResult{}, fmt.Errorf("casino: post rollback: %w", err)
 	}

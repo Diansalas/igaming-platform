@@ -19,6 +19,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"regexp"
@@ -761,11 +762,22 @@ func TestCasinoConsistency_C4_RollbackLinkageMismatch(t *testing.T) {
 		w.mustRunClean(t)
 		orig := w.betTxID(t, "c4c-bet")
 		cash, house := w.accounts(t, w.f.walletID)
-		w.post(t, ledger.TransactionInput{TransactionType: ledger.TxCasinoRollback,
-			ProviderID: strp(casProvider), ProviderTxID: strp("c4c-rb2"), CorrelationID: corr(w.f.tenantID, "c4c-r"), ReversesTransactionID: &orig,
-			Entries: []ledger.EntryInput{{LedgerAccountID: house, Direction: ledger.Debit, Amount: 1000}, {LedgerAccountID: cash, Direction: ledger.Credit, Amount: 1000}}})
-		_, ms, _ := w.run(t)
-		mustOneOfKind(t, ms, MismatchKindCasRollbackLinkage, "original="+orig.String(), "check=one_reversal")
+		// PRH-2 R5 (migration 0121, ledger-finance C3): a second reversal of
+		// one original can no longer be injected, the database refuses it
+		// (partial unique index). The C4 one_reversal check stays as defence
+		// in depth for data that predates the index.
+		in := ledger.TransactionInput{TenantID: w.f.tenantID, TransactionType: ledger.TxCasinoRollback,
+			IdempotencyKey: "recon-inject-" + uuid.NewString(),
+			ProviderID:     strp(casProvider), ProviderTxID: strp("c4c-rb2"), CorrelationID: corr(w.f.tenantID, "c4c-r"), ReversesTransactionID: &orig,
+			Entries: []ledger.EntryInput{{LedgerAccountID: house, Direction: ledger.Debit, Amount: 1000}, {LedgerAccountID: cash, Direction: ledger.Credit, Amount: 1000}}}
+		err := w.pool.WithTenant(context.Background(), w.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+			_, err := ledger.Post(ctx, tx, in)
+			return err
+		})
+		if !errors.Is(err, ledger.ErrCasinoReversalAlreadyExists) {
+			t.Fatalf("a second reversal of one original must be refused by the database, got %v", err)
+		}
+		w.mustRunClean(t)
 	})
 }
 

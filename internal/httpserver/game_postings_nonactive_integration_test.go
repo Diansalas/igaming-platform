@@ -61,10 +61,17 @@ func gateSetTenantStatus(t *testing.T, owner *db.Pool, tenantID uuid.UUID, statu
 			if _, err := tx.Exec(ctx, `ALTER TABLE tenants DISABLE TRIGGER tenants_status_change_gate`); err != nil {
 				return err
 			}
-			defer func() { _, _ = tx.Exec(ctx, `ALTER TABLE tenants ENABLE TRIGGER tenants_status_change_gate`) }()
 		}
-		_, err := tx.Exec(ctx, `UPDATE tenants SET status = $1 WHERE id = $2`, status, tenantID)
-		return err
+		if _, err := tx.Exec(ctx, `UPDATE tenants SET status = $1 WHERE id = $2`, status, tenantID); err != nil {
+			return err
+		}
+		if status == "closed" {
+			// RETURN the error so the transaction aborts and the trigger stays enabled.
+			if _, err := tx.Exec(ctx, `ALTER TABLE tenants ENABLE TRIGGER tenants_status_change_gate`); err != nil {
+				return err
+			}
+		}
+		return nil
 	})
 	if err != nil {
 		t.Fatalf("set tenant status: %v", err)

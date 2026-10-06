@@ -66,7 +66,6 @@ func setTenantStatus(t *testing.T, owner *db.Pool, tenantID uuid.UUID, status st
 			if _, err := tx.Exec(ctx, `ALTER TABLE tenants DISABLE TRIGGER tenants_status_change_gate`); err != nil {
 				return err
 			}
-			defer func() { _, _ = tx.Exec(ctx, `ALTER TABLE tenants ENABLE TRIGGER tenants_status_change_gate`) }()
 		}
 		tag, err := tx.Exec(ctx, `UPDATE tenants SET status = $1 WHERE id = $2`, status, tenantID)
 		if err != nil {
@@ -74,6 +73,13 @@ func setTenantStatus(t *testing.T, owner *db.Pool, tenantID uuid.UUID, status st
 		}
 		if tag.RowsAffected() != 1 {
 			return errors.New("tenant row not updated")
+		}
+		if status == "closed" {
+			// The error is RETURNED so the transaction aborts (transactional DDL:
+			// the trigger then stays enabled for every session).
+			if _, err := tx.Exec(ctx, `ALTER TABLE tenants ENABLE TRIGGER tenants_status_change_gate`); err != nil {
+				return err
+			}
 		}
 		return nil
 	})

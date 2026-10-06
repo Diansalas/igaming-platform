@@ -12,7 +12,11 @@
 -- pass the 0118 gameplay backstop (ledger_gameplay_tenant_active_guard) on a
 -- non-active tenant, all inside the same shared advisory lock as before:
 --   1. casino_rollback whose reverses_transaction_id is a casino_bet of the
---      SAME tenant (a rollback of a casino_win stays refused);
+--      SAME tenant, and whose round (the ORIGINAL bet's own correlation_id)
+--      has NO unreversed casino_win: a bet rollback with the win still
+--      standing would leave stake AND win both paid, because the rollback of
+--      the win stays refused on a non-active tenant (ledger-finance C1). A
+--      rollback of a casino_win stays refused;
 --   2. sportsbook_void for a bet that was really placed (a sportsbook_bet
 --      ledger transaction of the same tenant under the same correlation id =
 --      the bet id) and has NO outstanding settlement: every sportsbook_settlement
@@ -65,6 +69,16 @@
 -- casino predicate exists and none is invented here. Recorded as an owner
 -- question in ADR 0095 section 40.6 (Q-GP-6).
 --
+-- ONCE-ONLY (ledger-finance C3): a partial unique index makes "a casino bet or
+-- win is reversed at most once" database-enforced, not application-only
+-- (CLAUDE.md), following migration 0092's pattern for deposit reversals. The
+-- application primary control stays the FOR UPDATE + existing-reversal check in
+-- casino.postRollback; ledger.Post maps the constraint to
+-- ErrCasinoReversalAlreadyExists, which postRollback reports as
+-- ErrAlreadyRolledBack. Compatible with the held-win rollback path
+-- (bonus_settlement.go, one rollback per held win, guarded by the same check).
+-- If this refuses: STOP, never delete ledger rows, escalate (see 0092).
+--
 -- Every function pins search_path (ADR 0108 / security H-1).
 
 -- ---------------------------------------------------------------------------
@@ -97,7 +111,13 @@ BEGIN
                 AND EXISTS (SELECT 1 FROM public.ledger_transactions o
                              WHERE o.id = NEW.reverses_transaction_id
                                AND o.tenant_id = NEW.tenant_id
-                               AND o.transaction_type = 'casino_bet');
+                               AND o.transaction_type = 'casino_bet'
+                               AND NOT EXISTS (SELECT 1 FROM public.ledger_transactions w
+                                                WHERE w.tenant_id = NEW.tenant_id
+                                                  AND w.correlation_id = o.correlation_id
+                                                  AND w.transaction_type = 'casino_win'
+                                                  AND NOT EXISTS (SELECT 1 FROM public.ledger_transactions r
+                                                                   WHERE r.reverses_transaction_id = w.id)));
         ELSIF NEW.transaction_type = 'sportsbook_void' THEN
             v_ok := EXISTS (SELECT 1 FROM public.ledger_transactions b
                              WHERE b.tenant_id = NEW.tenant_id
@@ -184,6 +204,10 @@ BEGIN
             v_prev_player := current_setting('app.player_account_id', true);
             PERFORM set_config('app.tenant_id', OLD.id::text, true);
             PERFORM set_config('app.player_account_id', '', true);
+            -- NOTE: this count depends on RLS visibility (app.tenant_id was set
+            -- above); without it every bet is hidden and the guard would fail
+            -- open. TestTenantClosure_RefusedWithOpenBetAllowedWhenResolved
+            -- is the guard for that.
             SELECT count(*) INTO v_open_bets
               FROM public.sportsbook_bets b
              WHERE b.tenant_id = OLD.id AND b.status = 'open';
@@ -199,3 +223,15 @@ BEGIN
     RETURN NEW;
 END
 $$;
+
+-- ---------------------------------------------------------------------------
+-- C. At most one casino_rollback per original (ledger-finance C3).
+-- ---------------------------------------------------------------------------
+DO $$
+BEGIN
+    CREATE UNIQUE INDEX ledger_transactions_one_casino_rollback
+        ON ledger_transactions (tenant_id, reverses_transaction_id)
+        WHERE transaction_type = 'casino_rollback';
+EXCEPTION WHEN unique_violation THEN
+    RAISE EXCEPTION 'migration 0121: duplicate casino_rollback rows exist for at least one (tenant_id, reverses_transaction_id) pair; this migration cannot run until they are escalated and resolved; never delete ledger rows';
+END $$;

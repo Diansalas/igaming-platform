@@ -1,8 +1,9 @@
 -- Reverses 0121: restores the exact 0118 behaviour of both functions and
--- drops the deferred rollback/void constraint trigger. Existing ledger and
+-- drops the deferred rollback/void constraint trigger and the one-casino-rollback-per-original index. Existing ledger and
 -- tenant rows are untouched. WARNING (DEV/CI ONLY): after this, terminal
 -- stake returns are refused again on non-active tenants and a tenant can be
 -- closed with open sportsbook bets.
+DROP INDEX IF EXISTS ledger_transactions_one_casino_rollback;
 DROP TRIGGER IF EXISTS ledger_sportsbook_rollback_requires_void ON ledger_transactions;
 DROP FUNCTION IF EXISTS ledger_sportsbook_rollback_requires_void();
 

@@ -108,6 +108,12 @@ const (
 
 // ChangeStatus moves a tenant between active, suspended and closed, audited.
 //
+// AUTHORIZATION (follow-up TENANT-STATUS-AUTHZ-1): ChangeStatus performs NO
+// authorization check of its own. ActorID is trusted to be a server-resolved
+// platform-scoped staff principal. Before it is wired to ANY HTTP or console
+// surface it MUST get a server-side platform permission check (and four-eyes
+// approval should be considered for closure). No route calls it today.
+//
 // The transaction takes SET LOCAL lock_timeout (the status change waits for
 // in-flight gameplay postings: runbook, ADR 0095 section 40.5) and updates
 // tenants.status. The closure refusal is NOT decided here: the database
@@ -137,7 +143,9 @@ func ChangeStatus(ctx context.Context, runner StatusRunner, p ChangeStatusParams
 			return fmt.Errorf("tenant: set lock_timeout: %w", err)
 		}
 		var before string
-		err := tx.QueryRow(ctx, `SELECT status FROM tenants WHERE id = $1`, p.TenantID).Scan(&before)
+		// FOR UPDATE: the platform-admin scope satisfies the UPDATE policy, so the
+		// row lock is real and the audited before-state cannot be stale.
+		err := tx.QueryRow(ctx, `SELECT status FROM tenants WHERE id = $1 FOR UPDATE`, p.TenantID).Scan(&before)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrUnknownTenant
 		}
