@@ -6892,12 +6892,12 @@ escalation, no state change, and reactivation resumes the work with no special a
 4. **Residual race (deposit dispatch) - CLOSED by B8 (2026-10-06).** Previously a suspension committing between
    the pre-claim status read and the T2 claim could let one Deposit go out, and the phase-C cascade insert could
    add a child. Both are now gated inside the same transactions (see 1.). **Remaining, accepted residual:** the read
-   is a plain read (not a row lock: the runtime role has no UPDATE on `tenants`, so `FOR SHARE` would hide the row);
+   is a plain read (not a row lock: the runtime role has no UPDATE privilege on `tenants`, so `FOR SHARE` would fail with a permission error; and a row lock would not shrink the post-commit phase-B window anyway, since phase B runs after the claim transaction commits either way);
    a suspension that commits after the claim transaction commits can still be followed by that one already-claimed
    `submitting` attempt's Deposit, which is in-flight money and resolves (it is the same exposure as an engaged
    kill switch after claim). Not a predicate in the CAS (a predicate would need the tenants row visible in the
    CAS statement; unnecessary given the in-tx read under the intent lock).
-5. Resolution-only applies to the SWEEPER only. The HTTP deposit and withdrawal initiation paths read no
+5. Resolution-only applies to the SWEEPER only. *(B8, 2026-10-06: the phase-C cascade insert is now gated on every path, but the player-path T2 claim for a cascade child - `driveCreatedAttempt(..., sweeperDriven=false)` from the HTTP request loop - still reads no status; this is part of H-SEC-5 below.)* The HTTP deposit and withdrawal initiation paths read no
    `tenants.status` (H-SEC-5, pre-existing) and neither path reads brand status (H-SEC-11; resolution-only is
    tenant-scoped); suspension must not be described as stopping payments. **Registered follow-up; required before
    real-provider/launch:** a tenant-status and brand-status gate on HTTP deposit and withdrawal initiation.

@@ -45,6 +45,9 @@ func TestStatic_B8InterleavingHookNeverAssignedInNonTestCode(t *testing.T) {
 				for _, id := range x.Names {
 					if id.Name == name {
 						declared = true
+						if len(x.Values) > 0 {
+							t.Errorf("%s initializes %s in non-test code", fset.Position(x.Pos()), name)
+						}
 					}
 				}
 			}

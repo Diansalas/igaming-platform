@@ -195,5 +195,12 @@ func TestB8_CascadeChildNotInsertedWhenSuspendedDuringProviderCall(t *testing.T)
 	if d, _, _ := provB.counts(); d != 1 {
 		t.Fatalf("only the active tenant's cascade child may reach the shared second provider, got %d", d)
 	}
+	// LF B8-T1: the intent is terminal-declined and no created sibling is left to resume.
+	if st := depScan[string](t, pool, fNA.tenantID, `SELECT status FROM deposit_intents WHERE id = $1`, intents[0]); st != "declined" {
+		t.Fatalf("the suspended tenant's intent must be declined (terminal), got %s", st)
+	}
+	if n := depScan[int64](t, pool, fNA.tenantID, `SELECT count(*) FROM payment_attempts WHERE deposit_intent_id = $1 AND state = 'created'`, intents[0]); n != 0 {
+		t.Fatalf("no created sibling may be left behind, got %d", n)
+	}
 	assertLedgerBalanced(t, pool, fNA.tenantID)
 }

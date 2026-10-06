@@ -147,7 +147,7 @@ func (o *Orchestrator) driveCreatedAttempt(
 				return rerr
 			}
 			if resOnly {
-				if err := RescheduleNonTerminal(actx, tx, created.ID, resolutionOnlyDispatchBackoff(created.PollCount)); err != nil {
+				if err := rescheduleCreatedForResolutionOnly(actx, tx, created.ID, resolutionOnlyDispatchBackoff(created.PollCount)); err != nil {
 					return err
 				}
 				deferredResolutionOnly = true

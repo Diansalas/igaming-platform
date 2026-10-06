@@ -111,9 +111,6 @@ func TestD2_P1_EveryPaymentsDepositDisputeReasonIsClassified(t *testing.T) {
 // table cannot drift into dead entries that hide a renamed reason.
 func TestD2_P1_NoStaleClassification(t *testing.T) {
 	for r := range disputeReasonClasses {
-		if r == payments.TerminalReasonInvalidProviderReference {
-			continue // the bare form: registered under PAY-POLL-ECHO-HARDENING-1, accepted defensively
-		}
 		if !payments.IsDepositDisputeTerminalReason(r) {
 			t.Errorf("reconciliation classifies %q, which payments.DepositDisputeTerminalReasons() does not list (renamed or removed?)", r)
 		}

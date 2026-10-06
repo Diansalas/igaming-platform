@@ -70,6 +70,19 @@ func resolutionOnlyDispatchBackoff(pollCount int) time.Time {
 	return time.Now().Add(d)
 }
 
+// rescheduleCreatedForResolutionOnly defers a CREATED attempt from inside the T2 claim tx. Unlike
+// RescheduleNonTerminal it is guarded by state='created': the attempt snapshot the caller holds can be
+// stale (another worker may have claimed it and committed meanwhile), and a claimed `submitting` row's
+// next_action_at is its claim lease, which a deferral must never rewrite (LF review B8-L1). Zero rows
+// matched means the attempt moved on: nothing to defer, not an error (no claim was made here either).
+func rescheduleCreatedForResolutionOnly(ctx context.Context, tx pgx.Tx, attemptID uuid.UUID, nextActionAt time.Time) error {
+	_, err := tx.Exec(ctx,
+		`UPDATE payment_attempts SET next_action_at = $2, poll_count = poll_count + 1, updated_at = now()
+		 WHERE id = $1 AND state = 'created' AND next_action_at IS NOT NULL`,
+		attemptID, nextActionAt)
+	return err
+}
+
 // deferIfResolutionOnly opens one short tenant tx, reads the status in it and,
 // for a non-active tenant, reschedules the attempt (no state change) and returns
 // blocked=true. It holds no transaction across anything else.

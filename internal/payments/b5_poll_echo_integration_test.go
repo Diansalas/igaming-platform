@@ -48,7 +48,7 @@ func TestB5_PollAssetEcho_HostileNeverStoredRaw_ValidStored(t *testing.T) {
 			}
 		})
 	}
-	t.Run("missing-amount/hostile", func(t *testing.T) {
+	t.Run("zero-amount+hostile-asset (classified Mismatch, not Missing)", func(t *testing.T) {
 		e := newDepRefEnv(t, pool, "mock-b5-miss")
 		a, ref := e.ambiguousBound(t, "b5-miss")
 		h := "AS\x00SET\n" + strings.Repeat("Z", 40)
@@ -183,6 +183,21 @@ func TestB5_UnboundFallbacks_ForeignHeldEcho_RefusedNoLoop(t *testing.T) {
 		if n := e.auditCount(t, "payments.poll_echo_reference_refused", a.ID); n != 1 {
 			t.Fatalf("expected one refusal audit, got %d", n)
 		}
+		// End state (LF B5-L1): the decline is final, the foreign reference was NOT adopted by the
+		// attempt or the intent, and nothing was posted.
+		got := mustGetAttempt(t, e.pool, e.f.tenantID, a.ID)
+		if got.State != AttemptDeclined {
+			t.Fatalf("the decline must apply, got %s", got.State)
+		}
+		if got.ProviderReference != nil && *got.ProviderReference == otherRef {
+			t.Fatalf("the foreign-held reference must not be adopted by the attempt")
+		}
+		if n := depScan[int64](t, e.pool, e.f.tenantID, `SELECT count(*) FROM deposit_intents WHERE id = $1 AND provider_reference = $2`, *a.DepositIntentID, otherRef); n != 0 {
+			t.Fatalf("the foreign-held reference must not be adopted by the intent")
+		}
+		if n := e.depositTxCount(t); n != 0 {
+			t.Fatalf("a decline must post nothing, got %d deposit postings", n)
+		}
 	})
 	t.Run("tenant isolation: same string in another tenant is not a conflict", func(t *testing.T) {
 		e := newDepRefEnv(t, pool, "mock-b5-fb-iso")
@@ -274,4 +289,76 @@ func TestB5_SyncAndTerminalCallbackSites_HostileAssetNeverStoredRaw(t *testing.T
 			t.Fatalf("a well-formed echoed asset code must be recorded, got: %.300s", txt)
 		}
 	})
+}
+
+// applyReal runs applyStatusEvidence for the attempt exactly as stored (fresh read), under the intent lock.
+func (e *depRefEnv) applyReal(t *testing.T, attemptID uuid.UUID, gr GateResult[StatusResult]) error {
+	t.Helper()
+	return e.pool.WithTenant(context.Background(), e.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		a, err := GetAttemptByID(ctx, tx, attemptID)
+		if err != nil {
+			return err
+		}
+		intent, err := GetDepositIntentByID(ctx, tx, *a.DepositIntentID)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `SELECT id FROM deposit_intents WHERE id = $1 FOR UPDATE`, intent.ID); err != nil {
+			return err
+		}
+		return e.sweeper().applyStatusEvidence(ctx, tx, intent, a, gr)
+	})
+}
+
+// LF B5-C1: a poll for an attempt that is ALREADY succeeded with a contradicting amount/asset is audited
+// via auditTerminalAmountAssetMismatch (sweeper.go terminal cell -> receipt.go helper site). That path
+// carries the raw poll echo, which (unlike a callback) is not bounded at ingress: a hostile or odd-shaped
+// asset code must reach audit only as length + hash prefix.
+func TestB5_PollOnSucceededAttempt_HostileAssetNeverStoredRaw(t *testing.T) {
+	pool := testPool(t)
+	odd := "<b>not-an-asset-code</b>"
+	e := newDepRefEnv(t, pool, "mock-b5-succ")
+	a, ref := e.ambiguousBound(t, "b5-succ")
+	e.mustNoSweepErrors(t, e.poll(t, a, ref, pollSuccess(ref, 5000, "EUR")))
+	if got := mustGetAttempt(t, e.pool, e.f.tenantID, a.ID); got.State != AttemptSucceeded {
+		t.Fatalf("setup: attempt must be succeeded, got %s", got.State)
+	}
+	txBefore := e.depositTxCount(t)
+	if err := e.applyReal(t, a.ID, GateResult[StatusResult]{Class: ErrorClassSucceeded, Value: StatusResult{ProviderReference: ref, Outcome: OutcomeSucceeded, Amount: 4999, AssetCode: odd}}); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if n := e.auditCount(t, "payments.callback_amount_asset_mismatch_terminal", a.ID); n != 1 {
+		t.Fatalf("setup: the terminal mismatch audit must be written once, got %d", n)
+	}
+	txt := b5AuditMetaText(t, e)
+	if strings.Contains(txt, odd) || strings.Contains(txt, "<b>") {
+		t.Fatalf("poll-echoed asset code stored raw in the terminal mismatch audit")
+	}
+	if !strings.Contains(txt, "echoed_asset_code_len") {
+		t.Fatalf("expected the masked form, got: %.300s", txt)
+	}
+	if e.depositTxCount(t) != txBefore {
+		t.Fatal("a terminal mismatch must post nothing")
+	}
+}
+
+// LF B8-L1 (here because it shares the fixtures): the deferral used by the T2 claim tx only reschedules a
+// CREATED attempt; a stale snapshot of an attempt another worker already claimed/moved is left untouched.
+func TestB8_RescheduleCreatedForResolutionOnly_OnlyTouchesCreatedAttempts(t *testing.T) {
+	pool := testPool(t)
+	e := newDepRefEnv(t, pool, "mock-b8-l1")
+	live, _ := e.ambiguousBound(t, "b8-l1") // state ambiguous: NOT created
+	var pcBefore int64 = depScan[int64](t, pool, e.f.tenantID, `SELECT poll_count FROM payment_attempts WHERE id = $1`, live.ID)
+	var nextBefore string = depScan[string](t, pool, e.f.tenantID, `SELECT next_action_at::text FROM payment_attempts WHERE id = $1`, live.ID)
+	if err := pool.WithTenant(context.Background(), e.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return rescheduleCreatedForResolutionOnly(ctx, tx, live.ID, resolutionOnlyDispatchBackoff(0))
+	}); err != nil {
+		t.Fatalf("a stale snapshot must be a no-op, not an error: %v", err)
+	}
+	if pc := depScan[int64](t, pool, e.f.tenantID, `SELECT poll_count FROM payment_attempts WHERE id = $1`, live.ID); pc != pcBefore {
+		t.Fatalf("a non-created attempt must not be rescheduled: poll_count %d -> %d", pcBefore, pc)
+	}
+	if nx := depScan[string](t, pool, e.f.tenantID, `SELECT next_action_at::text FROM payment_attempts WHERE id = $1`, live.ID); nx != nextBefore {
+		t.Fatalf("a non-created attempt's next_action_at must not be rewritten")
+	}
 }

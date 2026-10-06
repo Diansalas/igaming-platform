@@ -9,3 +9,5 @@ M3 claim-tx predicate inverted => --- FAIL: TestB8_SuspensionAfterPreReadBeforeC
   restore: identical
 M4 cascade skip audit action changed => --- FAIL: TestB8_CascadeChildNotInsertedWhenSuspendedDuringProviderCall (2.01s);FAIL;FAIL	github.com/Diansalas/igaming-platform/internal/payments	7.598s;FAIL;
   restore: identical
+--- round 2 (LF review conditions C1/C2, 2026-10-06)
+M5 B8-L1 state='created' guard removed from the deferral => --- FAIL: TestB8_RescheduleCreatedForResolutionOnly_OnlyTouchesCreatedAttempts (0.08s);FAIL	github.com/Diansalas/igaming-platform/internal/payments	7.030s;
