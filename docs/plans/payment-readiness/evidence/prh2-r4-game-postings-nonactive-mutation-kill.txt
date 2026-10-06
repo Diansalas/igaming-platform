@@ -108,3 +108,66 @@ N05 migration: backstop replay exemption always true: KILLED (backstop tests)
 N06 migration: backstop also gates the tombstone type: KILLED (tombstone test)
 N07 helper: unqualified lock-key call instead of public.-qualified: SURVIVED, classified: behaviourally identical under the normal search_path; the schema qualification is a hardening against a shadowing object (security S-2) and is pinned by review, not by a runtime test.
 Not implemented by owner-decision scope: LF C2 (terminal stake returns) and LF C4 (tenant_not_active class in casino_callback_rejections): Q-GP-5 / Q-GP-2 in ADR 0095 section 40.5. Optional security S-4 (map GP010 to the clean refusal) not done.
+
+=== Delta-review batch (D1-D3): raw logs; entry-less tombstone exemption; ledger refuses a tombstone with entries ===
+N04 as reported earlier targeted code that no longer exists after D1 (pattern not found on rerun); it is REPLACED by the N04 below
+(exemption when ANY input is a tombstone) and by N08/N09 and the direct lockAndPost test
+TestTenantNotActive_LockAndPostTombstoneExemptionIsNarrow (a tombstone mixed with a settlement, and a tombstone carrying entries,
+must still hit the gate). The earlier N04 "KILLED" line is superseded. N07 remains an expected equivalent survivor (schema
+qualification only). N08 first SURVIVED because the test used random account ids that another check refused; the test now posts a
+tombstone with real balanced entries and the mutant is KILLED.
+--- raw log g_mut3_run_first.log (N01-N03, N05, N06, N09, N07; N04 pattern-not-found; N08 survived with the weak test) ---
+CONTROL (unmutated copy): rc=0 fails=[]
+   mutation diff in internal/casino/orchestrator.go:
+      - txID, tombErr := postRollbackTombstone(ctx, tx, tenantID, providerID, event)
+      + if err := requireActiveTenantForNewPosting(ctx, tx, tenantID, providerID, ""); err != nil { | 			return ReceiveCallbackResult{}, err | 		} | 		txID, tombErr := postRollbackTombstone(ctx, tx, tenantID, providerID, event)
+N01 casino: tombstone gate re-added before postRollbackTombstone: KILLED rc=1 ['--- FAIL: TestTenantNotActive_CasinoTombstonesAlwaysWrittenAndLateOriginalRecorded (0.12s)', '--- FAIL: TestTenantNotActive_CasinoTombstonesAlwaysWrittenAndLateOriginalRecorded/suspended (0.07s)', '--- FAIL: TestTenantNo
+   restore+cmp internal/casino/orchestrator.go: identical
+   mutation diff in internal/casino/orchestrator.go:
+      - // Stage 10.3 CAS-CAP-ROLLBACK-1, E3 (
+      + if err := requireActiveTenantForNewPosting(ctx, tx, tenantID, providerID, ""); err != nil { | 		return ReceiveCallbackResult{}, err | 	} | 	// Stage 10.3 CAS-CAP-ROLLBACK-1, E3 (
+N02 casino: bet gate moved BEFORE the E3 tombstone check: KILLED rc=1 ['--- FAIL: TestTenantNotActive_CasinoTombstonesAlwaysWrittenAndLateOriginalRecorded (0.17s)', '--- FAIL: TestTenantNotActive_CasinoTombstonesAlwaysWrittenAndLateOriginalRecorded/suspended (0.10s)', '--- FAIL: TestTenantNotActive_
+   restore+cmp internal/casino/orchestrator.go: identical
+   mutation diff in internal/sportsbook/settlement.go:
+      - if len(ins) > 0 && !allTombstones {
+      + if len(ins) > 0 && (!allTombstones || true) {
+N03 sportsbook: tombstone exemption removed from lockAndPost: KILLED rc=1 ['--- FAIL: TestTenantNotActive_TombstonesAreAlwaysWritten (0.21s)', '--- FAIL: TestTenantNotActive_TombstonesAreAlwaysWritten/suspended (0.09s)', '--- FAIL: TestTenantNotActive_TombstonesAreAlwaysWritten/closed (0.12s)']
+   restore+cmp internal/sportsbook/settlement.go: identical
+N04 sportsbook: tombstone exemption too wide (any input a tombstone): PATTERN NOT FOUND (mutant not applied)
+   mutation diff in migrations/0118_gameplay_posting_tenant_status_gate.up.sql:
+      - IF EXISTS (SELECT 1 FROM public.ledger_transactions x
+      + IF true OR EXISTS (SELECT 1 FROM public.ledger_transactions x
+N05 migration: replay exemption always true (backstop bypass): KILLED rc=1 ['--- FAIL: TestTenantNotActive_CasinoDatabaseBackstop (0.07s)', 'FAIL\tgithub.com/Diansalas/igaming-platform/internal/casino\t1.798s', '--- FAIL: TestTenantNotActive_DatabaseBackstopRefusesGameplayTypesOnly (0.04s)']
+   restore+cmp migrations/0118_gameplay_posting_tenant_status_gate.up.sql: identical
+   mutation diff in migrations/0118_gameplay_posting_tenant_status_gate.up.sql:
+      - 'sportsbook_bet', 'sportsbook_settlement', 'sportsbook_void', 'sportsbook_rollback'))
+      + 'sportsbook_bet', 'sportsbook_settlement', 'sportsbook_void', 'sportsbook_rollback', 'tombstone'))
+N06 migration: backstop also gates tombstone type: KILLED rc=1 ['--- FAIL: TestTenantNotActive_CasinoTombstonesAlwaysWrittenAndLateOriginalRecorded (0.14s)', '--- FAIL: TestTenantNotActive_CasinoTombstonesAlwaysWrittenAndLateOriginalRecorded/suspended (0.07s)', '--- FAIL: TestTenantNotActive_CasinoT
+   restore+cmp migrations/0118_gameplay_posting_tenant_status_gate.up.sql: identical
+   mutation diff in internal/ledger/lockorder.go:
+      - if in.TransactionType == TxTombstone && len(in.Entries) != 0 {
+      + if false && in.TransactionType == TxTombstone && len(in.Entries) != 0 {
+N08 ledger: prepareEntries tombstone-with-entries check removed: SURVIVED rc=0 []
+   restore+cmp internal/ledger/lockorder.go: identical
+   mutation diff in internal/sportsbook/settlement.go:
+      - if in.TransactionType != ledger.TxTombstone || len(in.Entries) != 0 {
+      + if in.TransactionType != ledger.TxTombstone {
+N09 sportsbook: exemption ignores entries (len check removed): KILLED rc=1 ['--- FAIL: TestTenantNotActive_LockAndPostTombstoneExemptionIsNarrow (0.03s)', 'FAIL\tgithub.com/Diansalas/igaming-platform/internal/sportsbook\t2.551s']
+   restore+cmp internal/sportsbook/settlement.go: identical
+   mutation diff in internal/tenant/gameplay_gate.go:
+      - public.tenant_status_gate_key($1)
+      + tenant_status_gate_key($1)
+N07 helper: schema-qualified lock-key call replaced by unqualified (behavioural no-op, expected SURVIVOR): SURVIVED rc=0 []
+   restore+cmp internal/tenant/gameplay_gate.go: identical
+--- raw log g_mut3_run_b.log (N04 redefined with its diff; N08 re-run with the strengthened test) ---
+CONTROL (unmutated copy): rc=0 fails=[]
+   mutation diff in internal/sportsbook/settlement.go:
+      - allTombstones := len(ins) > 0 | 	for _, in := range ins { | 		if in.TransactionType != ledger.TxTombstone || len(in.Entries) != 0 { | 			allTombstones = false | 		} | 	}
+      + allTombstones := false | 	for _, in := range ins { | 		if in.TransactionType == ledger.TxTombstone { | 			allTombstones = true | 		} | 	}
+N04 sportsbook: exemption when ANY input is a tombstone (all-check inverted): KILLED rc=1 ['--- FAIL: TestTenantNotActive_LockAndPostTombstoneExemptionIsNarrow (0.03s)', 'FAIL\tgithub.com/Diansalas/igaming-platform/internal/sportsbook\t2.485s']
+   restore+cmp internal/sportsbook/settlement.go: identical
+   mutation diff in internal/ledger/lockorder.go:
+      - if in.TransactionType == TxTombstone && len(in.Entries) != 0 {
+      + if false && in.TransactionType == TxTombstone && len(in.Entries) != 0 {
+N08 ledger: prepareEntries tombstone-with-entries check removed: KILLED rc=1 ['--- FAIL: TestTenantNotActive_LockAndPostTombstoneExemptionIsNarrow (0.05s)', 'FAIL\tgithub.com/Diansalas/igaming-platform/internal/sportsbook\t2.720s']
+   restore+cmp internal/ledger/lockorder.go: identical
