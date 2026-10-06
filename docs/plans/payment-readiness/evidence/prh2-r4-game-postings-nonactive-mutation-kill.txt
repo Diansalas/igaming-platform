@@ -97,3 +97,14 @@ Survivors during development and what closed them:
 
 Not mutated, by classification: the audit text and log wording; the Q-GP-* residuals in ADR 0095 section 40.5.
 
+
+=== Review-conditions batch (security + ledger-finance), migration renumbered to 0118 ===
+Same method (throwaway copy, private database, runtime role, control rc=0, restore + cmp identical for each).
+N01 casino: tombstone gate re-added before postRollbackTombstone: KILLED (TestTenantNotActive_CasinoTombstonesAlwaysWrittenAndLateOriginalRecorded)
+N02 casino: bet gate moved BEFORE the E3 tombstone check: KILLED (same test; the C7 original_tombstoned row is not recorded)
+N03 sportsbook: tombstone exemption removed from lockAndPost: KILLED (TestTenantNotActive_TombstonesAreAlwaysWritten). A first attempt left an unused variable and only "failed to build"; discarded and redone as (!allTombstones || true).
+N04 sportsbook: tombstone exemption too wide (any tombstone input exempts): KILLED (TestTenantNotActive_SettlementPathsRefused)
+N05 migration: backstop replay exemption always true: KILLED (backstop tests)
+N06 migration: backstop also gates the tombstone type: KILLED (tombstone test)
+N07 helper: unqualified lock-key call instead of public.-qualified: SURVIVED, classified: behaviourally identical under the normal search_path; the schema qualification is a hardening against a shadowing object (security S-2) and is pinned by review, not by a runtime test.
+Not implemented by owner-decision scope: LF C2 (terminal stake returns) and LF C4 (tenant_not_active class in casino_callback_rejections): Q-GP-5 / Q-GP-2 in ADR 0095 section 40.5. Optional security S-4 (map GP010 to the clean refusal) not done.
