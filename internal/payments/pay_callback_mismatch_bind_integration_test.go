@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -437,6 +438,8 @@ func TestB3_BindParkReference_ConcurrentUncommittedBind_LoserAbsorbed(t *testing
 	if got := mustGetAttempt(t, pool, e.f.tenantID, a2.ID); got.ProviderReference != nil {
 		t.Fatalf("loser bound a reference the winner holds: %q", *got.ProviderReference)
 	}
+	b3WantBindOutcomes(t, e, a1.ID, ref, "bound")
+	b3WantBindOutcomes(t, e, a2.ID, ref, "lost_race")
 }
 
 // multiple_success_for_intent (T10 via the choke point): the intent is already
@@ -502,4 +505,255 @@ func TestB3_MultipleSuccess_ReferenceBoundElsewhere_QuietAnomaly(t *testing.T) {
 	if got := mustGetAttempt(t, pool, e.f.tenantID, a.ID); got.ProviderReference != nil {
 		t.Fatalf("conflicting reference bound: %q", *got.ProviderReference)
 	}
+}
+
+// seedPayoutAttemptLiveNoRef creates a payout attempt in 'submitting' holding no
+// provider reference (the payout twin of refLessLive).
+func seedPayoutAttemptLiveNoRef(t *testing.T, e *depRefEnv) PaymentAttempt {
+	t.Helper()
+	attemptID := uuid.New()
+	if err := e.pool.WithTenant(context.Background(), e.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		wr := uuid.New()
+		if _, err := tx.Exec(ctx, `INSERT INTO withdrawal_requests (id, tenant_id, brand_id, player_account_id, wallet_id, asset_code, amount, state, idempotency_key)
+			VALUES ($1,$2,$3,$4,$5,'EUR',5000,'submitted',$6)`, wr, e.f.tenantID, e.f.brandID, e.f.playerAccountID, e.f.walletID, "b3-payout-idem-"+wr.String()); err != nil {
+			return err
+		}
+		if _, err := InsertCreatedAttempt(ctx, tx, NewCreatedAttempt{
+			ID: attemptID, TenantID: e.f.tenantID, Operation: AttemptOperationPayout,
+			WithdrawalRequestID: &wr, AttemptNo: 1, ExcludedProviderIDs: []string{}, PaymentMethod: "card", AssetCode: "EUR", Amount: 5000,
+		}); err != nil {
+			return err
+		}
+		return ClaimCreatedForSubmission(ctx, tx, attemptID, e.id, uuid.New(), "b3-payout", time.Now().Add(time.Minute))
+	}); err != nil {
+		t.Fatalf("seed payout attempt: %v", err)
+	}
+	a := mustGetAttempt(t, e.pool, e.f.tenantID, attemptID)
+	if a.ProviderReference != nil || a.State != AttemptSubmitting {
+		t.Fatalf("setup: state=%s ref=%v", a.State, a.ProviderReference)
+	}
+	return a
+}
+
+// ledger-finance C1: a PAYOUT mismatch park stays reference-less (a bound payout
+// park would be a standing pay_captured_unposted no deposit reversal can clear).
+func TestB3_PayoutMismatchPark_StaysReferenceLess(t *testing.T) {
+	pool := testPool(t)
+	e := newDepRefEnv(t, pool, "mock-b3-po")
+	a := seedPayoutAttemptLiveNoRef(t, e)
+	ref := "b3-ref-" + uuid.NewString()
+	t.Run("direct", func(t *testing.T) {
+		if err := pool.WithTenant(context.Background(), e.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+			return bindParkReference(ctx, tx, a, e.id, ref)
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if got := mustGetAttempt(t, pool, e.f.tenantID, a.ID); got.ProviderReference != nil {
+			t.Fatalf("a payout attempt must never be bound by the park helper: %q", *got.ProviderReference)
+		}
+	})
+	t.Run("via_receipt", func(t *testing.T) {
+		d, err := b3Apply(t, e, e.f, ReceiptEvidence{EventType: "payout", ProviderReference: ref, MerchantReference: a.MerchantReference,
+			Outcome: OutcomeSucceeded, Amount: 1, AssetCode: "EUR"})
+		if err != nil || d != DispositionApplied {
+			t.Fatalf("receipt: %v %v", d, err)
+		}
+		b3AssertParked(t, e, e.f, a.ID, TerminalReasonCallbackAmountAssetMismatch, nil)
+		b3WantBindOutcomes(t, e, a.ID, ref, "skipped_non_deposit", "skipped_non_deposit") // direct + via_receipt
+		// The withdrawal is untouched by the park (no completion, no release).
+		var st string
+		if err := pool.WithTenant(context.Background(), e.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+			return tx.QueryRow(ctx, `SELECT w.state FROM withdrawal_requests w JOIN payment_attempts p ON p.withdrawal_request_id = w.id WHERE p.id = $1`, a.ID).Scan(&st)
+		}); err != nil || st != "submitted" {
+			t.Fatalf("withdrawal state = %q err=%v, want submitted", st, err)
+		}
+		b3NoMoney(t, e, e.f)
+	})
+}
+
+// ledger-finance C2: the LEDGER leg of foreignReferenceBinding. An attempt-less
+// legacy deposit posting keyed by (provider, R) exists (no attempt/intent holds
+// R), so a park must NOT bind R.
+func TestB3_BindParkReference_ReferenceHeldByAttemptlessLedgerPosting_NotBound(t *testing.T) {
+	pool := testPool(t)
+	e := newDepRefEnv(t, pool, "mock-b3-lg")
+	other := e.refLessLive(t, e.f, "b3-lg-other")
+	a := e.refLessLive(t, e.f, "b3-lg")
+	ref := "b3-ref-" + uuid.NewString()
+	if err := pool.WithTenant(context.Background(), e.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		intent, err := GetDepositIntentByID(ctx, tx, *other.DepositIntentID)
+		if err != nil {
+			return err
+		}
+		if _, _, err = e.orch.postDepositSuccess(ctx, tx, intent, nil, e.id, ref, 5000, "EUR"); err != nil {
+			return err
+		}
+		// A legacy, attempt-less posting: no intent or attempt holds R, only the ledger does.
+		_, err = tx.Exec(ctx, `UPDATE deposit_intents SET provider_reference = NULL WHERE id = $1`, intent.ID)
+		return err
+	}); err != nil {
+		t.Fatalf("setup: attempt-less ledger posting on R: %v", err)
+	}
+	if err := pool.WithTenant(context.Background(), e.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return bindParkReference(ctx, tx, a, e.id, ref)
+	}); err != nil {
+		t.Fatalf("must skip, not error: %v", err)
+	}
+	if got := mustGetAttempt(t, pool, e.f.tenantID, a.ID); got.ProviderReference != nil {
+		t.Fatalf("bound a reference a ledger posting already holds: %q", *got.ProviderReference)
+	}
+	b3WantBindOutcomes(t, e, a.ID, ref, "conflict:ledger_deposit")
+}
+
+// N1: a deferred (unresolved) success receipt for R is waiting when the park
+// binds R. The receipt path's own post-transition backstop (receipt.go, the
+// changed branch) now finds it in the SAME transaction and replays it against
+// the disputed, R-holding attempt: consumed as an anomaly no-op, nothing posts,
+// the attempt stays disputed, and a later explicit replay finds nothing.
+func TestB3_BoundPark_DeferredReceiptForR_ReplaysAsNoOpAgainstDisputedAttempt(t *testing.T) {
+	pool := testPool(t)
+	e := newDepRefEnv(t, pool, "mock-b3-df")
+	a := e.refLessLive(t, e.f, "b3-df")
+	ref := "b3-ref-" + uuid.NewString()
+	// Deferred: names R only, no merchant reference, nothing holds R yet.
+	if d, err := b3Apply(t, e, e.f, ReceiptEvidence{EventType: "deposit", ProviderReference: ref, Outcome: OutcomeSucceeded, Amount: 5000, AssetCode: "EUR"}); err != nil || d != DispositionDeferredUnresolved {
+		t.Fatalf("setup deferred: %v %v", d, err)
+	}
+	if d, err := b3Apply(t, e, e.f, b3Mismatch(a, ref)); err != nil || d != DispositionApplied {
+		t.Fatalf("park: %v %v", d, err)
+	}
+	parked := b3AssertParked(t, e, e.f, a.ID, TerminalReasonCallbackAmountAssetMismatch, &ref)
+	b3NoMoney(t, e, e.f)
+	var unresolved int
+	var resolutions []string
+	if err := pool.WithTenant(context.Background(), e.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, `SELECT COALESCE(resolution, '') FROM payment_provider_events
+			WHERE tenant_id = $1 AND provider_id = $2 AND provider_reference = $3 AND resolved_at IS NOT NULL AND attempt_id = $4`,
+			e.f.tenantID, e.id, ref, a.ID)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var r string
+			if err := rows.Scan(&r); err != nil {
+				return err
+			}
+			resolutions = append(resolutions, r)
+		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		return tx.QueryRow(ctx, `SELECT count(*) FROM payment_provider_events WHERE tenant_id = $1 AND provider_id = $2 AND provider_reference = $3 AND resolved_at IS NULL`,
+			e.f.tenantID, e.id, ref).Scan(&unresolved)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if unresolved != 0 {
+		t.Fatalf("the park's own backstop must consume the deferred receipt, %d left open", unresolved)
+	}
+	sawAnomaly := false
+	for _, r := range resolutions {
+		if r == string(ResolutionAnomalyOther) {
+			sawAnomaly = true
+		}
+		if r == string(ResolutionApplied) {
+			t.Fatalf("a deferred success must never be APPLIED against a disputed attempt: %v", resolutions)
+		}
+	}
+	if !sawAnomaly {
+		t.Fatalf("expected the deferred receipt resolved as anomaly_other against the parked attempt, got %v", resolutions)
+	}
+	var applied int
+	if err := pool.WithTenant(context.Background(), e.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		var err error
+		applied, err = ApplyDeferredReceiptsForAttempt(ctx, tx, e.orch, parked)
+		return err
+	}); err != nil || applied != 0 {
+		t.Fatalf("a later replay must find nothing: %d %v", applied, err)
+	}
+	b3AssertParked(t, e, e.f, a.ID, TerminalReasonCallbackAmountAssetMismatch, &ref)
+	b3NoMoney(t, e, e.f)
+}
+
+// b3WantBindOutcomes asserts the durable bind-outcome audit rows of one attempt
+// (security S-1) and that none of them carries the raw reference.
+func b3WantBindOutcomes(t *testing.T, e *depRefEnv, attemptID uuid.UUID, rawRef string, want ...string) {
+	t.Helper()
+	var got []string
+	if err := e.pool.WithTenant(context.Background(), e.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, `SELECT metadata->>'bind_outcome', metadata::text FROM audit_log
+			WHERE tenant_id = $1 AND action = $2 AND target_id = $3 ORDER BY created_at, id`,
+			e.f.tenantID, ParkReferenceBindAuditAction, attemptID.String())
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var o, raw string
+			if err := rows.Scan(&o, &raw); err != nil {
+				return err
+			}
+			if rawRef != "" && strings.Contains(raw, rawRef) {
+				t.Fatalf("bind audit leaks the raw reference: %s", raw)
+			}
+			got = append(got, o)
+		}
+		return rows.Err()
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("bind outcome audit for %s = %v, want %v", attemptID, got, want)
+	}
+}
+
+// S-1: every bind decision is durable, with the closed outcome vocabulary.
+func TestB3_BindOutcome_IsAudited_NoRawReference(t *testing.T) {
+	pool := testPool(t)
+	e := newDepRefEnv(t, pool, "mock-b3-au")
+	bind := func(a PaymentAttempt, ref string) {
+		t.Helper()
+		if err := pool.WithTenant(context.Background(), e.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+			return bindParkReference(ctx, tx, a, e.id, ref)
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Run("bound_via_receipt", func(t *testing.T) {
+		a := e.refLessLive(t, e.f, "b3-au-1")
+		ref := "b3-ref-" + uuid.NewString()
+		if _, err := b3Apply(t, e, e.f, b3Mismatch(a, ref)); err != nil {
+			t.Fatal(err)
+		}
+		b3WantBindOutcomes(t, e, a.ID, ref, "bound")
+	})
+	t.Run("already_bound", func(t *testing.T) {
+		a, _ := e.ambiguousBound(t, "b3-au-2")
+		bind(a, "b3-au-other-"+uuid.NewString())
+		b3WantBindOutcomes(t, e, a.ID, "", "already_bound")
+	})
+	t.Run("invalid", func(t *testing.T) {
+		a := e.refLessLive(t, e.f, "b3-au-3")
+		bind(a, "b3-bad\x01"+uuid.NewString()[:8])
+		b3WantBindOutcomes(t, e, a.ID, "", "invalid:control_char")
+	})
+	t.Run("conflict_payout", func(t *testing.T) {
+		a := e.refLessLive(t, e.f, "b3-au-4")
+		ref := "b3-ref-" + uuid.NewString()
+		seedPayoutAttemptBoundTo(t, pool, e.f, e.id, ref)
+		bind(a, ref)
+		b3WantBindOutcomes(t, e, a.ID, ref, "conflict:payout")
+	})
+	t.Run("skipped_non_deposit", func(t *testing.T) {
+		a := seedPayoutAttemptLiveNoRef(t, e)
+		ref := "b3-ref-" + uuid.NewString()
+		bind(a, ref)
+		b3WantBindOutcomes(t, e, a.ID, ref, "skipped_non_deposit")
+	})
+	t.Run("nothing_reported_is_not_audited", func(t *testing.T) {
+		a := e.refLessLive(t, e.f, "b3-au-6")
+		bind(a, "")
+		b3WantBindOutcomes(t, e, a.ID, "")
+	})
 }

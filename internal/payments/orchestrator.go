@@ -644,30 +644,70 @@ func applyMultipleSuccessDispute(ctx context.Context, tx pgx.Tx, attempt Payment
 // the transaction commits and nothing loops). Must run under the locks the
 // caller already holds (intent/attempt).
 func bindParkReference(ctx context.Context, tx pgx.Tx, attempt PaymentAttempt, providerID, reference string) error {
-	if reference == "" || providerID == "" {
+	outcome, err := bindParkReferenceOutcome(ctx, tx, attempt, providerID, reference)
+	if err != nil {
+		return err
+	}
+	if outcome == "" {
 		return nil
 	}
-	if attempt.ProviderReference != nil && *attempt.ProviderReference != "" {
-		return nil
+	// Security S-1: the bind outcome is durable. Never the raw reference: the
+	// sha256 prefix only (the reference may be hostile or foreign-held).
+	if err := audit.Record(ctx, tx, audit.Entry{
+		TenantID: attempt.TenantID, ActorType: audit.ActorSystem, Action: ParkReferenceBindAuditAction,
+		TargetType: "payment_attempt", TargetID: attempt.ID.String(), Outcome: audit.OutcomeSuccess,
+		Metadata: map[string]any{
+			"bind_outcome": outcome, "provider_id": providerID, "ref_sha256_prefix": providerref.Fingerprint(reference),
+		},
+	}); err != nil {
+		return fmt.Errorf("payments: audit park reference bind: %w", err)
+	}
+	return nil
+}
+
+// ParkReferenceBindAuditAction is the audit action recording a
+// bindParkReference outcome: bound | already_bound | invalid:<reason> |
+// conflict:<operation> | lost_race | skipped_non_deposit.
+const ParkReferenceBindAuditAction = "payment.park_reference_bind"
+
+// bindParkReferenceOutcome returns "" when nothing is worth recording
+// (nothing reported, or the attempt is not in a bindable state).
+func bindParkReferenceOutcome(ctx context.Context, tx pgx.Tx, attempt PaymentAttempt, providerID, reference string) (string, error) {
+	if reference == "" || providerID == "" {
+		return "", nil
 	}
 	switch attempt.State {
 	case AttemptSubmitting, AttemptPending, AttemptAmbiguous:
 	default:
-		return nil
+		return "", nil
+	}
+	// Deposit attempts only (ledger-finance C1): a payout park must stay
+	// reference-less. A bound payout park would be a standing
+	// pay_captured_unposted that no deposit reversal on R could ever clear
+	// (ErrDepositReversalIntegrity).
+	if attempt.Operation != AttemptOperationDeposit {
+		return "skipped_non_deposit", nil
+	}
+	if attempt.ProviderReference != nil && *attempt.ProviderReference != "" {
+		return "already_bound", nil
 	}
 	if err := providerref.ValidatePaymentReference("provider_reference", reference); err != nil {
-		return nil
+		reason := "invalid"
+		if perr, ok := providerref.AsError(err); ok {
+			reason = "invalid:" + string(perr.Reason)
+		}
+		return reason, nil
 	}
 	intentID := uuid.Nil
 	if attempt.DepositIntentID != nil {
 		intentID = *attempt.DepositIntentID
 	}
-	conflict, _, err := foreignReferenceBinding(ctx, tx, attempt.TenantID, providerID, reference, attempt.ID, intentID)
+	conflict, boundOp, err := foreignReferenceBinding(ctx, tx, attempt.TenantID, providerID, reference, attempt.ID, intentID)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if conflict {
-		return nil
+		return "conflict:" + boundOp, nil
 	}
 	// The pre-check above cannot see a concurrent, uncommitted bind of the same
 	// reference by another attempt (different intent, different lock). That
@@ -676,24 +716,27 @@ func bindParkReference(ctx context.Context, tx pgx.Tx, attempt PaymentAttempt, p
 	// the whole evidence transaction back.
 	sp, err := tx.Begin(ctx)
 	if err != nil {
-		return fmt.Errorf("payments: bind reference on parked attempt: %w", err)
+		return "", fmt.Errorf("payments: bind reference on parked attempt: %w", err)
 	}
 	if _, err := sp.Exec(ctx,
 		`UPDATE payment_attempts SET provider_reference = COALESCE(provider_reference, $2) WHERE id = $1 AND state IN ('submitting','pending','ambiguous')`,
 		attempt.ID, reference); err != nil {
 		if rbErr := sp.Rollback(ctx); rbErr != nil {
-			return fmt.Errorf("payments: bind reference on parked attempt: %w", rbErr)
+			return "", errors.Join(
+				fmt.Errorf("payments: bind reference on parked attempt: %w", err),
+				fmt.Errorf("payments: roll back bind savepoint: %w", rbErr))
 		}
 		var pgErr *pgconn.PgError
-		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
-			return nil
+		// Security S-4: only the per-tenant reference unique index is a lost race.
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == "payment_attempts_tenant_provider_ref" {
+			return "lost_race", nil
 		}
-		return fmt.Errorf("payments: bind reference on parked attempt: %w", err)
+		return "", fmt.Errorf("payments: bind reference on parked attempt: %w", err)
 	}
 	if err := sp.Commit(ctx); err != nil {
-		return fmt.Errorf("payments: bind reference on parked attempt: %w", err)
+		return "", fmt.Errorf("payments: bind reference on parked attempt: %w", err)
 	}
-	return nil
+	return "bound", nil
 }
 
 // auditMultipleSuccessForIntent records the ADR 0095 §28.11 audit entry
