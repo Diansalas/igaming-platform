@@ -157,8 +157,8 @@ func auditTerminalAmountAssetMismatch(ctx context.Context, tx pgx.Tx, attempt Pa
 		"stored_amount":      attempt.Amount,
 		"stored_asset_code":  attempt.AssetCode,
 		"echoed_amount":      ev.Amount,
-		"echoed_asset_code":  ev.AssetCode,
 	}
+	withAssetEcho(meta, "echoed_asset_code", ev.AssetCode) // B5: never the raw provider text
 	for _, m := range extra {
 		for k, v := range m {
 			meta[k] = v

@@ -491,7 +491,11 @@ func (s *Sweeper) applyStatusEvidence(ctx context.Context, tx pgx.Tx, intent Dep
 	switch gr.Class {
 	case ErrorClassPending:
 		if attempt.State == AttemptPending {
-			// no-op (reschedule) - already pending, nothing changed.
+			// no-op (reschedule) - already pending, nothing changed. B5 (LF L1): a
+			// differing non-empty echo is no longer silently ignored.
+			if err := auditPollPendingEchoDiffers(ctx, tx, attempt, intent, "poll_pending_noop", res.ProviderReference); err != nil {
+				return err
+			}
 			return RescheduleNonTerminal(ctx, tx, attempt.ID, nextPoll)
 		}
 		// PRH-2 D (FH7-06, ADR 0095 §36.6): an attempt polled BY its bound reference
@@ -503,6 +507,9 @@ func (s *Sweeper) applyStatusEvidence(ctx context.Context, tx pgx.Tx, intent Dep
 		boundRef := res.ProviderReference
 		if attempt.ProviderReference != nil && *attempt.ProviderReference != "" {
 			boundRef = *attempt.ProviderReference
+			if err := auditPollPendingEchoDiffers(ctx, tx, attempt, intent, "poll_pending_bound", res.ProviderReference); err != nil {
+				return err
+			}
 		} else if verr := providerref.ValidatePaymentReference("poll.provider_reference", res.ProviderReference); verr != nil {
 			// PRH-2 K3 (ADR 0101 5.4, LF L-2 / security O-2): the echo of an
 			// unbound attempt is validated before it is bound. A refused echo
@@ -511,6 +518,17 @@ func (s *Sweeper) applyStatusEvidence(ctx context.Context, tx pgx.Tx, intent Dep
 			// - that would re-drive the item at once (a hot loop and an
 			// audit-volume DoS by a hostile PSP).
 			if err := auditRefusedPollEcho(ctx, tx, attempt, intent, "poll_pending_bind", res.ProviderReference); err != nil {
+				return err
+			}
+			return RescheduleNonTerminal(ctx, tx, attempt.ID, nextPoll)
+		} else if foreign, _, ferr := foreignReferenceBinding(ctx, tx, attempt.TenantID, providerIDOrEmpty(attempt), boundRef, attempt.ID, intent.ID); ferr != nil {
+			return ferr
+		} else if foreign {
+			// B5 (PAY-POLL-ECHO-HARDENING-1, D1-L1 remainder): a VALID echo that another
+			// attempt/intent/ledger key already holds is not bound (the unique index would
+			// fail the transaction and the poll would loop): one audit row, then the normal
+			// poll backoff; never an error return.
+			if err := auditRefusedPollEcho(ctx, tx, attempt, intent, "poll_pending_bind_conflict", res.ProviderReference); err != nil {
 				return err
 			}
 			return RescheduleNonTerminal(ctx, tx, attempt.ID, nextPoll)
@@ -663,6 +681,14 @@ func (s *Sweeper) applyStatusEvidence(ctx context.Context, tx pgx.Tx, intent Dep
 			// proceeds with a nil reference and one audit row.
 			if verr := providerref.ValidatePaymentReference("poll.provider_reference", res.ProviderReference); verr != nil {
 				if err := auditRefusedPollEcho(ctx, tx, attempt, intent, "poll_decline_adopt", res.ProviderReference); err != nil {
+					return err
+				}
+			} else if foreign, _, ferr := foreignReferenceBinding(ctx, tx, attempt.TenantID, providerIDOrEmpty(attempt), res.ProviderReference, attempt.ID, intent.ID); ferr != nil {
+				return ferr
+			} else if foreign {
+				// B5: a valid but foreign-held echo is not adopted either; the decline
+				// proceeds with a nil reference and one audit row.
+				if err := auditRefusedPollEcho(ctx, tx, attempt, intent, "poll_decline_adopt_conflict", res.ProviderReference); err != nil {
 					return err
 				}
 			} else {

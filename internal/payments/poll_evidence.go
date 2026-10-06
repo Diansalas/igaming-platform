@@ -82,27 +82,27 @@ func (s *Sweeper) checkPollSuccessEvidence(
 	// 1. Amount and asset.
 	switch pollAmountEvidence(attempt, res) {
 	case AmountEvidenceMismatch:
-		return contradict(TerminalReasonPollAmountMismatch, map[string]any{
-			"provider_reference": boundRef, "provider_amount": res.Amount, "provider_asset_code": res.AssetCode,
-		})
+		return contradict(TerminalReasonPollAmountMismatch, withAssetEcho(map[string]any{
+			"provider_reference": boundRef, "provider_amount": res.Amount,
+		}, "provider_asset_code", res.AssetCode))
 	case AmountEvidenceMissing:
 		if !live {
 			// D1-M1: a declined attempt is not rescheduled, so without a record this
 			// evidence (a possible T13 second capture) would vanish. One audit row per
 			// poll that reaches here (the sweeper does not poll a declined attempt
 			// again, so in practice once); no posting, no state change.
-			return true, auditPollTerminalContradiction(ctx, tx, attempt, "poll_amount_unconfirmed", map[string]any{
-				"provider_reference": boundRef, "provider_amount": res.Amount, "provider_asset_code": res.AssetCode,
-			})
+			return true, auditPollTerminalContradiction(ctx, tx, attempt, "poll_amount_unconfirmed", withAssetEcho(map[string]any{
+				"provider_reference": boundRef, "provider_amount": res.Amount,
+			}, "provider_asset_code", res.AssetCode))
 		}
 		if err := audit.Record(ctx, tx, audit.Entry{
 			TenantID: attempt.TenantID, ActorType: audit.ActorSystem, Action: "payment.attempt_poll_amount_unconfirmed",
 			TargetType: "payment_attempt", TargetID: attempt.ID.String(), Outcome: audit.OutcomeDenied,
-			Metadata: map[string]any{
+			Metadata: withAssetEcho(map[string]any{
 				"provider_id": providerID, "deposit_intent_id": intent.ID.String(), "provider_reference": boundRef,
 				"amount": attempt.Amount, "asset_code": attempt.AssetCode,
-				"provider_amount": res.Amount, "provider_asset_code": res.AssetCode, "adapter_outcome": string(OutcomeSucceeded),
-			},
+				"provider_amount": res.Amount, "adapter_outcome": string(OutcomeSucceeded),
+			}, "provider_asset_code", res.AssetCode),
 		}); err != nil {
 			return true, fmt.Errorf("payments: audit unconfirmed poll success: %w", err)
 		}
@@ -226,4 +226,26 @@ func echoAuditMeta(echo string) map[string]any {
 		meta["echoed_provider_reference"] = echo
 	}
 	return meta
+}
+
+// auditPollPendingEchoDiffers (B5, LF L1): a poll Pending for an attempt that already has a
+// bound reference never rebinds it, but a DIFFERING non-empty echo is recorded (one audit
+// row; the echo itself only when it is a valid reference, else length and hash prefix) so it
+// is not silently ignored. An empty or identical echo records nothing.
+func auditPollPendingEchoDiffers(ctx context.Context, tx pgx.Tx, attempt PaymentAttempt, intent DepositIntent, site, echo string) error {
+	if echo == "" || attempt.ProviderReference == nil || *attempt.ProviderReference == "" || echo == *attempt.ProviderReference {
+		return nil
+	}
+	meta := echoAuditMeta(echo)
+	meta["site"] = site
+	meta["provider_reference"] = *attempt.ProviderReference
+	meta["deposit_intent_id"] = intent.ID.String()
+	meta["provider_id"] = providerIDOrEmpty(attempt)
+	if err := audit.Record(ctx, tx, audit.Entry{
+		TenantID: attempt.TenantID, ActorType: audit.ActorSystem, Action: "payments.poll_pending_reference_echo_differs",
+		TargetType: "payment_attempt", TargetID: attempt.ID.String(), Outcome: audit.OutcomeDenied, Metadata: meta,
+	}); err != nil {
+		return fmt.Errorf("payments: audit differing poll pending echo (%s): %w", site, err)
+	}
+	return nil
 }

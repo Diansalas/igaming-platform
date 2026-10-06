@@ -32,6 +32,7 @@ func DepositDisputeTerminalReasons() []string {
 		TerminalReasonTombstonePrecedesSuccess,
 		TerminalReasonSyncAmountMismatch,
 		TerminalReasonProviderReferenceConflict,
+		TerminalReasonInvalidProviderReference, // B5 (D1-CR-4): the bare form drive.go writes when AsError fails
 		invalidProviderReferencePrefix,
 		TerminalReasonPollAmountMismatch,
 		TerminalReasonPollReferenceMismatch,

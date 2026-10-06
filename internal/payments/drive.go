@@ -583,7 +583,7 @@ func (o *Orchestrator) applyDepositCallResult(
 		if CompareProviderAmount(attempt.Amount, attempt.AssetCode, res.Amount, res.AssetCode) != AmountEvidenceMatch {
 			updated, err := parkDepositAttempt(ctx, tx, intent, attempt, capability.ProviderID, evidence,
 				TerminalReasonSyncAmountMismatch, res.Outcome, res.ProviderReference,
-				map[string]any{"provider_reference": res.ProviderReference, "provider_amount": res.Amount, "provider_asset_code": res.AssetCode})
+				withAssetEcho(map[string]any{"provider_reference": res.ProviderReference, "provider_amount": res.Amount}, "provider_asset_code", res.AssetCode))
 			return updated, nil, err
 		}
 		// RV-PRH-I1 ledger-finance N2: a reversal tombstone already

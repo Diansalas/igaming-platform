@@ -1214,11 +1214,11 @@ func applyPayoutSuccessCheckedFromStatus(ctx context.Context, tx pgx.Tx, request
 		return audit.Record(ctx, tx, audit.Entry{
 			TenantID: attempt.TenantID, ActorType: audit.ActorSystem, Action: "payments.payout_amount_asset_mismatch",
 			TargetType: "payment_attempt", TargetID: attempt.ID.String(), Outcome: audit.OutcomeDenied,
-			Metadata: map[string]any{
+			Metadata: withAssetEcho(map[string]any{
 				"withdrawal_request_id": requestID.String(),
 				"requested_amount":      wr.Amount, "requested_asset": wr.AssetCode,
-				"provider_amount": status.Amount, "provider_asset": status.AssetCode,
-			},
+				"provider_amount": status.Amount,
+			}, "provider_asset", status.AssetCode), // B5: never the raw provider text
 		})
 	}
 	// N6 (RV-PRH-I1 ledger re-review, ADR 0095 §4.4; extended by RV-PRH-I1

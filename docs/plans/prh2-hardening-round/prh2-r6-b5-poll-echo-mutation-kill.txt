@@ -1,0 +1,22 @@
+B5 mutation-kill evidence (2026-10-06T20:53:03Z); mutate in place, run TestB5_ (-race -tags integration, private DB), restore from backup + cmp
+CONTROL
+ok  	github.com/Diansalas/igaming-platform/internal/payments	1.979s
+M1 helper bypass (always raw) => 
+M2 poll mismatch site raw => --- FAIL: TestB5_PollAssetEcho_HostileNeverStoredRaw_ValidStored (0.32s);FAIL	github.com/Diansalas/igaming-platform/internal/payments	1.003s;
+M3 poll declined-unconfirmed site raw (D1-M1) => ok  	github.com/Diansalas/igaming-platform/internal/payments	1.979s;
+M4 poll missing-amount live site raw => FAIL	github.com/Diansalas/igaming-platform/internal/payments [build failed];
+M5 drive.go sync park site raw => --- FAIL: TestB5_SyncAndTerminalCallbackSites_HostileAssetNeverStoredRaw (0.14s);FAIL	github.com/Diansalas/igaming-platform/internal/payments	0.900s;
+M6 receipt.go terminal callback site raw (expected equivalent: DB CHECK + ingress bound it) => ok  	github.com/Diansalas/igaming-platform/internal/payments	1.876s;
+M7 payout.go site raw (see note) => FAIL	github.com/Diansalas/igaming-platform/internal/payments [build failed];
+M8 pending-fallback foreign check removed => --- FAIL: TestB5_UnboundFallbacks_ForeignHeldEcho_RefusedNoLoop (0.24s);FAIL	github.com/Diansalas/igaming-platform/internal/payments	1.112s;
+M9 decline-fallback foreign check removed => --- FAIL: TestB5_UnboundFallbacks_ForeignHeldEcho_RefusedNoLoop (0.18s);FAIL	github.com/Diansalas/igaming-platform/internal/payments	1.022s;
+M10 L1 differing-echo audit disabled => --- FAIL: TestB5_PollPending_BoundAttempt_DifferingEchoAudited (0.21s);FAIL	github.com/Diansalas/igaming-platform/internal/payments	1.067s;
+M11 bare reason removed from the list => --- FAIL: TestB5_BareInvalidProviderReference_IsClassifiedDisputeReason (0.00s);FAIL	github.com/Diansalas/igaming-platform/internal/payments	0.969s;
+M12 Z4b missing-poll reschedule in the past => internal/payments/poll_evidence.go:109:59: undefined: time;FAIL	github.com/Diansalas/igaming-platform/internal/payments [build failed];
+--- rerun of invalid/unreadable first-pass mutants (first-pass M1/M4/M7/M12 were harness errors: binary grep / compile errors)
+M1' helper bypass (always raw) => --- FAIL: TestB5_PollAssetEcho_HostileNeverStoredRaw_ValidStored (0.28s);--- FAIL: TestB5_WithAssetEcho_Unit (0.00s);--- FAIL: TestB5_SyncAndTerminalCallbackSites_HostileAssetNeverStoredRaw (0.13s);
+M12' Z4b missing-poll reschedule 30 days in the past => --- FAIL: TestB5_PollMissing_RescheduleIsInTheFuture (0.08s);FAIL	github.com/Diansalas/igaming-platform/internal/payments	1.033s;
+--- classification of survivors
+M3/M4 (poll Missing sites, live and declined): EQUIVALENT BY CONSTRUCTION - pollAmountEvidence returns Mismatch for any non-empty asset different from the attempt's own, so a Missing poll's asset echo is empty or equal to the attempt's own (already well-formed) asset; the helper there is defence in depth.
+M6 (receipt.go terminal callback site): EQUIVALENT - the callback path is bounded at ingress (providerref rejects control characters: "asset_code rejected (control_char...)") and by the payment_provider_events_asset_code_check CHECK; the helper there is defence in depth.
+M7 (payout.go provider_asset site): NO SITE-LEVEL INTEGRATION TEST (residual, see task registry): the helper itself is unit-tested (TestB5_WithAssetEcho_Unit); a payout QueryStatus mismatch fixture with a scripted hostile asset was not built in this round.
