@@ -5251,7 +5251,10 @@ the review conditions R-1..R-9, T-1..T-18 are implemented and tested, see the AD
 - **Also covered (review finding H2).** The K1 capability-grant requests / approvals / revokes and the financial
   policy-change proposals / approvals / cancels, with a NULL-tenant encoding confined to the `platform` scope and
   those operations. K1 request cancel is initiator-only and expiry is refused until the request has expired.
-- **THREAT-MODEL-ARBITRARY-SQL-1: PARTIALLY MITIGATED.** An attacker with code execution on the application host holds
+- **THREAT-MODEL-ARBITRARY-SQL-1: PARTIALLY MITIGATED** (open because of T3/H1, T4, T5 and T8 - other dual-control
+  flows: payment kill-switch release 0105, provider credential handles 0096, KYC enforcement policy 0103, asset-registry
+  dual control 0047, withdrawal approvals/policies 0026/0034, bonus change governance 0063, casino catalogue dual control
+  0086/0089 - plus the inherent T6, T7 and the ADR 0110 section 9.5 wire residual). An attacker with code execution on the application host holds
   the key. Ordinary non-governed posting paths are unchanged (T5). Staff rows minted or taken over by SQL, refresh
   sessions forged by SQL, and unkeyed `player_credential_tokens` hashes still let an attacker authenticate as a
   principal the database believes in and be issued genuine proofs (T3, T4; NULL-ARM-WRITE-1 items 1-3): the proof

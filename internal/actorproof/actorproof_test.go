@@ -246,8 +246,28 @@ func staticOffenders(t *testing.T, root string, allowed map[string]bool) []strin
 		if strings.Contains(src, impTest) && !inProoftest {
 			offenders = append(offenders, rel+" (imports prooftest)")
 		}
-		if strings.Contains(src, "TestSessionProofHook") && !inProoftest && dir != filepath.Join("internal", "capability") {
-			offenders = append(offenders, rel+" (touches TestSessionProofHook)")
+		// Pinned to exact code-line counts (comments excluded), not to whole directories:
+		// the hook is declared and read ONLY in internal/capability/proof.go (declaration,
+		// nil check, call = 3) and assigned ONLY in prooftest (1); WithProofActor is
+		// declared in proof.go (1) and CALLED only by the K1 route handler
+		// internal/httpserver/capability_routes.go (2); PolicyCall{...} is constructed only
+		// in internal/adjustment/policy.go (1).
+		for _, pin := range []struct {
+			needle string
+			allow  map[string]int
+		}{
+			{"TestSessionProofHook", map[string]int{
+				filepath.Join("internal", "capability", "proof.go"):                  3,
+				filepath.Join("internal", "actorproof", "prooftest", "prooftest.go"): 1}},
+			{"WithProofActor(", map[string]int{
+				filepath.Join("internal", "capability", "proof.go"):             1,
+				filepath.Join("internal", "httpserver", "capability_routes.go"): 2}},
+			{"PolicyCall{", map[string]int{
+				filepath.Join("internal", "adjustment", "policy.go"): 1}},
+		} {
+			if n := codeLines(src, pin.needle); n != pin.allow[rel] && n > 0 {
+				offenders = append(offenders, fmt.Sprintf("%s (%d code occurrence(s) of %s, allowed %d)", rel, n, pin.needle, pin.allow[rel]))
+			}
 		}
 		if strings.Contains(src, imp) && !allowed[dir] && !inProoftest {
 			offenders = append(offenders, rel+" (imports actorproof)")
@@ -258,6 +278,21 @@ func staticOffenders(t *testing.T, root string, allowed map[string]bool) []strin
 		t.Fatal(err)
 	}
 	return offenders
+}
+
+// codeLines counts the lines of src that contain needle and are not comment lines.
+func codeLines(src, needle string) int {
+	n := 0
+	for _, l := range strings.Split(src, "\n") {
+		t := strings.TrimSpace(l)
+		if strings.HasPrefix(t, "//") {
+			continue
+		}
+		if strings.Contains(t, needle) {
+			n++
+		}
+	}
+	return n
 }
 
 var staticAllowed = map[string]bool{
@@ -293,10 +328,19 @@ func TestStatic_ScanIsNotVacuous(t *testing.T) {
 	write("internal/httpserver/x.go", "package x\nimport \"github.com/Diansalas/igaming-platform/internal/actorproof\"\n")
 	write("internal/wallet/y.go", "package y\nimport _ \"github.com/Diansalas/igaming-platform/internal/actorproof/prooftest\"\n")
 	write("internal/risk/z.go", "package z\nvar _ = TestSessionProofHook\n")
+	// A fourth use of the hook INSIDE internal/capability, a second caller of WithProofActor
+	// in the SAME package as the allowed one, and a second PolicyCall construction.
+	write("internal/capability/extra.go", "package capability\nvar _ = TestSessionProofHook\n")
+	write("internal/httpserver/evil.go", "package x\nvar _ = WithProofActor(nil, 0)\n")
+	write("internal/adjustment/evil.go", "package a\nvar _ = PolicyCall{}\n")
+	// The legitimate shapes must NOT be flagged.
+	write("internal/capability/proof.go", "package capability\n// TestSessionProofHook comment\nvar TestSessionProofHook func()\nfunc f() {\n\tif TestSessionProofHook != nil {\n\t\treturn TestSessionProofHook()\n\t}\n}\nfunc WithProofActor(ctx int) {}\n")
+	write("internal/httpserver/capability_routes.go", "package x\nfunc g() {\n\t_ = capability.WithProofActor(a)\n\t_ = capability.WithProofActor(b)\n}\n")
+	write("internal/adjustment/policy.go", "package a\nvar _ = PolicyCall{}\n")
 	write("internal/adjustment/ok.go", "package ok\nimport \"github.com/Diansalas/igaming-platform/internal/actorproof\"\n")
 	write("internal/wallet/y_test.go", "package y\nimport _ \"github.com/Diansalas/igaming-platform/internal/actorproof/prooftest\"\n")
 	off := staticOffenders(t, root, staticAllowed)
-	if len(off) != 3 {
-		t.Fatalf("want exactly the 3 planted production offenders flagged, got %v", off)
+	if len(off) != 6 {
+		t.Fatalf("want exactly the 6 planted production offenders flagged (and no legitimate shape), got %v", off)
 	}
 }

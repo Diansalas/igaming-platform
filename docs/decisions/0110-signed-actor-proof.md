@@ -3,7 +3,9 @@
 - **Status:** IMPLEMENTED on branch `prh2-r5-signed-actor-proof` (migration `0120_signed_actor_proof`, amended in
   place - it is unmerged); not merged, not pushed. First review round (security, ledger-finance, code-reviewer):
   APPROVE WITH CONDITIONS; the conditions are applied (section 13). A further review of the amended migration is
-  REQUIRED before merge. **THREAT-MODEL-ARBITRARY-SQL-1 is PARTIALLY MITIGATED, not closed** (section 9).
+  REQUIRED before merge. **THREAT-MODEL-ARBITRARY-SQL-1 is PARTIALLY MITIGATED, not closed** (section 9): it remains open because of
+  T3/H1 (identity-store routes), T4 (`player_credential_tokens`), T5 (non-governed posting) and T8 (other dual-control
+  flows without a proof), plus the inherent T6, T7 and the section 9.5 nonce/wire residual.
 - **Decision type:** database authorization hardening for an owner-decided threat model. No new service boundary, no
   redesign of the DB authorization architecture, no change to the ledger account model, to the four-eyes rules or to
   tenant isolation.
@@ -277,6 +279,7 @@ Deferred without an owner gate:
 | T3 | Mint or take over a staff row, or forge a refresh `sessions` row, then authenticate over HTTP and be issued genuine proofs | OPEN, DEFERRED-REQUIRES-OWNER-AUTHORIZATION (H1) |
 | T4 | `player_credential_tokens` store an UNKEYED hash of the email-verification / password-reset token; a row inserted by SQL can be redeemed through the application (account takeover of a player) | OPEN, DEFERRED-REQUIRES-OWNER-AUTHORIZATION (same keyed-hash fix as T3); not a governed-financial path |
 | T5 | Ordinary NON-governed posting paths: any posting whose authority is the GUC alone (deposits, withdrawals, casino and sportsbook postings, provider callbacks) can be written by a runtime session | OPEN, NOT in the scope of the authorized mechanism; limited by the ledger invariants (balanced, append-only, idempotent, drift reconciliation hourly) but NOT by an actor proof |
+| T8 | Other dual-control governance flows OUTSIDE the nine proof-bound tables still take the actor identity from GUCs or app-supplied values with NO proof: payment kill-switch release (0105), provider credential handles (0096), KYC enforcement policy (0103), asset-registry dual control (0047), withdrawal approvals and policies (0026/0034), bonus change governance (0063), casino catalogue dual control (0086/0089). A runtime session impersonating two admins can still approve in those flows | NOT mitigated, DEFERRED-REQUIRES-OWNER-AUTHORIZATION (not implemented here) |
 | T6 | Application-host compromise holds the signing key | OPEN, inherent (section 9.1) |
 | T7 | Owner / migration role can read the symmetric key | OPEN, accepted (section 9.4) |
 

@@ -84,3 +84,7 @@ C08 KILLED [http] Go (compiles): K1 platform routes do not carry the authenticat
 C09 KILLED [k1] Go (compiles): policy approval attaches no proof | restored-cmp-ok | first failures: --- FAIL: TestActorProofK1_Adversarial_GrantSelfEscalation_FailsClosed (0.10s);--- FAIL: TestActorProofK1_Adversarial_TenantRequest_Cancel_Expire_Revoke (0.09s);--- FAIL: TestActorProofK1_Adversarial_PolicyChange_FailsClosed (0.08s);--- FAIL: TestActorProofK1_NullTenantEncodingIsConfined (0.08s);
 C10 KILLED [r1] Go (compiles): R1 regression - unsignable claims are silently skipped | restored-cmp-ok | first failures: --- FAIL: TestB3_PlainPlatformAndForeignActingRefused (0.09s);
 C06 KILLED [k1] Go (compiles): K1 approval attaches no proof | restored-cmp-ok | first failures: --- FAIL: TestActorProofK1_Adversarial_GrantSelfEscalation_FailsClosed (0.10s);--- FAIL: TestActorProofK1_Adversarial_TenantRequest_Cancel_Expire_Revoke (0.09s);--- FAIL: TestActorProofK1_Adversarial_PolicyChange_FailsClosed (0.09s);--- FAIL: TestActorProofK1_NullTenantEncodingIsConfined (0.10s);
+
+================ ROUND 3 (security delta review C2: policy-change CANCEL proof; selection k1c = -run TestActorProofK1_PolicyChange_Cancel ./internal/adjustment) ================
+M41 KILLED [k1c] drop the proof on the policy-change CANCEL branch | restored-cmp-ok | first failures: --- FAIL: TestActorProofK1_PolicyChange_Cancel (0.50s);
+C11 KILLED [k1c] Go (compiles): CancelPolicyChangeInTx attaches no proof | restored-cmp-ok | first failures: --- FAIL: TestActorProofK1_PolicyChange_Cancel (0.27s);

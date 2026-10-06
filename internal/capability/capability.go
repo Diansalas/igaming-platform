@@ -239,9 +239,13 @@ func GetGrant(ctx context.Context, tx pgx.Tx, tenantID, grantID uuid.UUID) (Gran
 	return g, nil
 }
 
-// CancelRequest moves a pending request to 'cancelled'. Only the
-// request's own tenant/platform scope may do this (RLS), and only while
-// pending (the trigger refuses otherwise). tenantID must be the
+// CancelRequest moves a pending request to 'cancelled'. Only the REQUESTER
+// may do this (migration 0120, ADR 0110, review finding H2: the
+// zz_actor_proof_guard trigger refuses any other actor with CG010 - including a
+// platform admin cancelling a tenant-originated request, and another member of
+// the requester's own tenant - and requires a signed actor proof for the
+// requester), only within the request's own tenant/platform scope (RLS), and
+// only while pending (the trigger refuses otherwise). tenantID must be the
 // route-validated target tenant (K1-C1, security review of 0f34d36): a
 // platform-scoped caller's RLS admits every tenant's rows, so without this
 // filter a platform token naming tenant A's path could act on tenant B's

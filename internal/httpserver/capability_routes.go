@@ -370,6 +370,10 @@ func newCreateCapabilityGrantRequestHandler(deps Deps) http.HandlerFunc {
 	}
 }
 
+// newCancelCapabilityGrantRequestHandler: ONLY the requester may cancel (migration
+// 0120, ADR 0110). Any other caller - including a platform admin cancelling a
+// tenant-originated request, or another member of the requester's tenant - gets
+// the guard's CG010, which this handler maps to 409 Conflict (never a 5xx).
 func newCancelCapabilityGrantRequestHandler(deps Deps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		c, ok := beginCapabilityCall(deps, w, r, "cancel")
