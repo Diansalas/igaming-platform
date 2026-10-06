@@ -19,6 +19,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/Diansalas/igaming-platform/internal/actorproof"
 	"github.com/Diansalas/igaming-platform/internal/alerting"
 	"github.com/Diansalas/igaming-platform/internal/auth"
 	"github.com/Diansalas/igaming-platform/internal/bonus"
@@ -145,6 +146,21 @@ func run() error {
 	if err := db.VerifyRuntimeRoleInProduction(ctx, cfg.GuardEnvironment(), pool); err != nil {
 		return err
 	}
+
+	// PRH-2 R5 (SIGNED-ACTOR-PROOF, ADR 0110): the ONE server-side issuer of
+	// four-eyes actor proofs. Production refuses to start without a configured
+	// key whose kid the database holds as an ACTIVE verification key; outside
+	// production an absent key leaves governed writes (K2/K3) failing closed at
+	// the database. The key lives only in configuration (never in a table the
+	// runtime role can read).
+	actorProofIssuer, err := actorproof.NewIssuerFromConfig(cfg.ActorProofActiveKID, cfg.ActorProofKeys.Reveal())
+	if err != nil {
+		return fmt.Errorf("actor proof keys: %w", err)
+	}
+	if err := actorproof.VerifyConfiguredInProduction(ctx, cfg.GuardEnvironment(), actorProofIssuer, pool); err != nil {
+		return err
+	}
+	actorproof.SetDefault(actorProofIssuer)
 
 	keys := map[string]string{cfg.JWTActiveKID: cfg.JWTSigningSecret}
 	if cfg.JWTPreviousSecret != "" {

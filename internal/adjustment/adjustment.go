@@ -32,6 +32,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
+	"github.com/Diansalas/igaming-platform/internal/actorproof"
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/tenant"
 )
@@ -139,15 +140,48 @@ type Call struct {
 	TenantID uuid.UUID
 	Scope    string
 	Meta     Meta
+	// Proofs signs the SIGNED-ACTOR-PROOF (ADR 0110, migration 0120) for this
+	// call's governed writes. nil means the process-wide actorproof.Default().
+	Proofs *actorproof.Issuer
+}
+
+// attachProof signs and attaches the actor proof for ONE governed write. It is
+// called only after runSession has authenticated the principal (verified token
+// subject) and the caller's own server-side checks have run; the database
+// verifies it (migration 0120) and refuses the write without it. An
+// unsignable claim set (e.g. a scope the database never admits) attaches
+// nothing, so the database refuses fail-closed with its own error; a missing
+// issuer is a configuration error and is returned.
+func (c Call) attachProof(ctx context.Context, tx pgx.Tx, operation, target, payloadHash string) error {
+	iss := c.Proofs
+	if iss == nil {
+		iss = actorproof.Default()
+	}
+	err := iss.Attach(ctx, tx, actorproof.Claims{
+		Actor: c.ActorID, Scope: c.Scope, Tenant: c.TenantID,
+		Operation: operation, Target: target, PayloadHash: payloadHash,
+	})
+	if errors.Is(err, actorproof.ErrInvalidClaims) {
+		return nil
+	}
+	return err
 }
 
 // Service runs governed calls against a pool.
 type Service struct {
-	pool *db.Pool
+	pool   *db.Pool
+	proofs *actorproof.Issuer
 }
 
-// NewService returns a Service over pool.
+// NewService returns a Service over pool. Proofs are signed with the
+// process-wide actorproof.Default() issuer unless WithProofIssuer overrides it.
 func NewService(pool *db.Pool) *Service { return &Service{pool: pool} }
+
+// WithProofIssuer sets the issuer this Service signs actor proofs with.
+func (s *Service) WithProofIssuer(i *actorproof.Issuer) *Service {
+	s.proofs = i
+	return s
+}
 
 // runSession opens the ONE session shape migration 0113 admits for the
 // caller: a tenant caller gets db.WithPrincipalScope (tenant family); a
@@ -172,14 +206,14 @@ func (s *Service) runSession(ctx context.Context, target Target, requestID uuid.
 	}
 	if tc.TenantID == uuid.Nil {
 		return s.pool.WithPlatformActingInTenant(ctx, subject, target.tenantID, requestID, OperationKind, func(ctx context.Context, tx pgx.Tx) error {
-			return fn(ctx, tx, Call{ActorID: subject, TenantID: target.tenantID, Scope: ScopePlatformActing, Meta: meta})
+			return fn(ctx, tx, Call{ActorID: subject, TenantID: target.tenantID, Scope: ScopePlatformActing, Meta: meta, Proofs: s.proofs})
 		})
 	}
 	if tc.TenantID != target.tenantID {
 		return ErrForeignTenant
 	}
 	return s.pool.WithPrincipalScope(ctx, tc.TenantID, subject, func(ctx context.Context, tx pgx.Tx) error {
-		return fn(ctx, tx, Call{ActorID: subject, TenantID: tc.TenantID, Scope: ScopeTenant, Meta: meta})
+		return fn(ctx, tx, Call{ActorID: subject, TenantID: tc.TenantID, Scope: ScopeTenant, Meta: meta, Proofs: s.proofs})
 	})
 }
 
@@ -244,6 +278,9 @@ func ClassifyError(err error) ErrClass {
 	case code == "MA020":
 		return ErrClassExposure
 	case code == "MA001", code == "MA003", code == "42501":
+		return ErrClassForbidden
+	case len(code) == 5 && code[:2] == "AP":
+		// SIGNED-ACTOR-PROOF refusal (migration 0120): fail closed.
 		return ErrClassForbidden
 	case code == "CG001", code == "CG002", code == "CG020", code == "MA002":
 		return ErrClassSessionInvalid

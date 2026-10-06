@@ -11,6 +11,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/Diansalas/igaming-platform/internal/actorproof"
+	"github.com/Diansalas/igaming-platform/internal/actorproof/prooftest"
 	"github.com/Diansalas/igaming-platform/internal/ledger"
 )
 
@@ -58,6 +60,9 @@ func (w *world) forgeExecution(t *testing.T, r Request, build func(ctx context.C
 	t.Helper()
 	var linkErr error
 	err := w.tenantTx(w.F2, func(ctx context.Context, tx pgx.Tx) error {
+		if err := prooftest.AttachForSession(ctx, tx, "ledger_adjustment:approve", r.ID.String(), r.PayloadHash); err != nil {
+			return err
+		}
 		if _, err := tx.Exec(ctx, `INSERT INTO ledger_adjustment_approvals (tenant_id, request_id, decision, payload_hash, decided_by, decided_by_scope, decided_by_person_id, decided_txid, reason_code)
 			VALUES ($1, $2, 'approve', $3, $4, 'tenant', $4, 0, 'forge')`, w.Tenant, r.ID, r.PayloadHash, uuid.Nil); err != nil {
 			return err
@@ -348,11 +353,17 @@ func TestB14_ThresholdNeedsAssetAndAmountBound(t *testing.T) {
 		t.Fatalf("above threshold: %+v", ev)
 	}
 	err = w.tenantTx(w.F1, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `INSERT INTO ledger_adjustment_requests (tenant_id, wallet_id, player_account_id, brand_id, asset_code, direction, amount, reason_code,
+		id := uuid.New()
+		if err := prooftest.AttachForSession(ctx, tx, "ledger_adjustment:initiate", id.String(), actorproof.Digest(
+			actorproof.S(w.Tenant.String()), actorproof.S(w.Wallet.String()), actorproof.S(w.Asset), actorproof.S("credit_player"),
+			actorproof.S("9223372036854775808"), actorproof.S("operational_error_correction"), nil, nil, actorproof.S(strings.Repeat("a", 64)))); err != nil {
+			return err
+		}
+		_, err := tx.Exec(ctx, `INSERT INTO ledger_adjustment_requests (id, tenant_id, wallet_id, player_account_id, brand_id, asset_code, direction, amount, reason_code,
 			note_hash, payload_hash, initiated_by, initiated_by_scope, initiated_by_person_id, tenant_status_at_submission, required_at_submission,
 			contributing_policy_ids, expires_at)
-			VALUES ($1, $2, $3, $3, $4, 'credit_player', 9223372036854775808, 'operational_error_correction', repeat('a', 64), '-', $3, 'tenant', $3, '-', 1, '{}', now())`,
-			w.Tenant, w.Wallet, uuid.Nil, w.Asset)
+			VALUES ($5, $1, $2, $3, $3, $4, 'credit_player', 9223372036854775808, 'operational_error_correction', repeat('a', 64), '-', $3, 'tenant', $3, '-', 1, '{}', now())`,
+			w.Tenant, w.Wallet, uuid.Nil, w.Asset, id)
 		return err
 	})
 	if pgCode(err) != "23514" {
@@ -405,6 +416,9 @@ func TestB15_CrashBetweenExecutingAndExecutedCommitsNothing(t *testing.T) {
 		t.Fatal(err)
 	}
 	err = w.tenantTx(w.F3, func(ctx context.Context, tx pgx.Tx) error {
+		if err := prooftest.AttachForSession(ctx, tx, "ledger_adjustment:approve", r2.ID.String(), r2.PayloadHash); err != nil {
+			return err
+		}
 		if _, err := tx.Exec(ctx, `INSERT INTO ledger_adjustment_approvals (tenant_id, request_id, decision, payload_hash, decided_by, decided_by_scope, decided_by_person_id, decided_txid, reason_code)
 			VALUES ($1, $2, 'approve', $3, $4, 'tenant', $4, 0, 'x')`, w.Tenant, r2.ID, r2.PayloadHash, uuid.Nil); err != nil {
 			return err

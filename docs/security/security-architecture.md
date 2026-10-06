@@ -5234,3 +5234,23 @@ the review conditions R-1..R-9, T-1..T-18 are implemented and tested, see the AD
   PSP's behaviour is PROVIDER DEPENDENT; casino/sportsbook post failures for a reserved-prefix id surface as a
   generic 5xx (the ledger trigger refuses the posting; a 4xx mapping is deferred). No PCI scope is added: nothing in
   K3 reads, stores or transmits card data.
+
+
+## PRH-2 R5 — signed actor proof for governed four-eyes writes (ADR 0110; NOT YET SECURITY-REVIEWED)
+
+`implemented` on branch `prh2-r5-signed-actor-proof` (migration 0120), awaiting `security`, `ledger-finance`,
+`code-reviewer` and `qa` review. Owner decisions: THREAT-MODEL-ARBITRARY-SQL-1 = YES, SIGNED-ACTOR-PROOF = AUTHORIZED.
+
+- **What it adds.** A ledger-adjustment or payment-resolution request/approval/rejection/cancel is accepted only with a
+  proof signed by the application server (HMAC-SHA256, 30 s, one-time nonce) binding actor, scope, tenant, operation,
+  target and payload, verified in the database by an owner-owned `SECURITY DEFINER` function against an owner-only key
+  table. A stolen `igaming_runtime` credential that sets the actor GUCs of two real admins is refused (`AP001`..`AP005`).
+- **Key handling.** Signing key in configuration only (`ACTOR_PROOF_KEYS`, `ACTOR_PROOF_ACTIVE_KID`); verification copy
+  in `actor_proof_keys` (no runtime privilege, RLS on with no policy); kid-based rotation with at least two active keys;
+  production refuses to start without a provisioned key. Runbook: `docs/runbooks/operational-runbooks.md` section 15.
+- **Not covered (stated).** An attacker with code execution on the application host holds the key. Ordinary
+  non-governed posting paths are unchanged. The K1 capability-grant and financial-policy-change guards still derive the
+  actor from GUCs alone. Staff rows minted or taken over by SQL, and refresh sessions forged by SQL, still let an
+  attacker authenticate over HTTP as a principal the database believes in and be issued genuine proofs
+  (NULL-ARM-WRITE-1 items 1-3): the proof closes the in-database impersonation chain, not the identity-store integrity
+  chain. See ADR 0110 sections 8-10.

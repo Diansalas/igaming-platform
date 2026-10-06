@@ -24,6 +24,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
+	"github.com/Diansalas/igaming-platform/internal/actorproof/prooftest"
 	"github.com/Diansalas/igaming-platform/internal/assetregistry"
 	"github.com/Diansalas/igaming-platform/internal/capability"
 	"github.com/Diansalas/igaming-platform/internal/db"
@@ -42,6 +43,9 @@ func testPool(t *testing.T) *db.Pool {
 		t.Fatalf("connect: %v", err)
 	}
 	t.Cleanup(pool.Close)
+	// SIGNED-ACTOR-PROOF (ADR 0110): provision a per-process random signing
+	// key (owner role) and install the matching issuer as the process default.
+	prooftest.Install(t, url)
 	return pool
 }
 
@@ -175,6 +179,7 @@ func newWorld(t *testing.T, opts worldOpts) *world {
 
 func newWorldOn(t *testing.T, pool *db.Pool, opts worldOpts) *world {
 	t.Helper()
+	prooftest.Issuer(t) // scratch worlds below 0120 have no key table; the issuer must still exist
 	w := &world{t: t, pool: pool, svc: NewService(pool), grantIDs: map[string]uuid.UUID{}}
 	ctx := context.Background()
 	n := worldCounter.Add(1)

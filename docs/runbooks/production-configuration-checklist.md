@@ -190,3 +190,10 @@ same deadline cancels the request context that bounds the handler's database wor
 keep it comfortably above the worst-case webhook processing time (verification, domain transaction and
 the post-response alert work are measured separately, but a slow database counts); validation only
 requires it to be positive. If it fires, the callback rolls back and the provider redelivers.
+
+## Signed actor proof (PRH-2 R5, ADR 0110)
+
+| Field | Env var | Required | Dev default | Production action |
+|---|---|---|---|---|
+| `ActorProofKeys` | `ACTOR_PROOF_KEYS` | **Yes in production** - `cmd/platform-api` refuses to start without it (`actorproof.VerifyConfiguredInProduction`) | none (an absent key leaves K2/K3 governed writes failing closed at the database) | **Secret.** `kid:base64(secret)`, comma-separated, each secret at least 32 bytes decoded, generated from a real secret store; list two keys only during a rotation. The SAME secret must be provisioned by the migration/owner role into `actor_proof_keys` (never by `igaming_runtime`). Must differ from the JWT secrets. Never rendered by `config`. Runbook: `docs/runbooks/operational-runbooks.md` section 15. |
+| `ActorProofActiveKID` | `ACTOR_PROOF_ACTIVE_KID` | **Yes in production** (with the keys) | none | The kid the application signs with. At startup in production the database must hold this kid as an `active` key or the process refuses to start. Not a secret. |

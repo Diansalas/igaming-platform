@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/Diansalas/igaming-platform/internal/actorproof/prooftest"
 	"github.com/Diansalas/igaming-platform/internal/capability"
 	"github.com/Diansalas/igaming-platform/internal/ledger"
 )
@@ -161,6 +162,9 @@ func TestSameTxMarkerIsTxidNotXmin(t *testing.T) {
 		t.Fatal(err)
 	}
 	err = w.tenantTx(w.F2, func(ctx context.Context, tx pgx.Tx) error {
+		if err := prooftest.AttachForSession(ctx, tx, "ledger_adjustment:approve", r.ID.String(), r.PayloadHash); err != nil {
+			return err
+		}
 		if _, err := tx.Exec(ctx, `INSERT INTO ledger_adjustment_approvals (tenant_id, request_id, decision, payload_hash, decided_by, decided_by_scope, decided_by_person_id, decided_txid, reason_code)
 			VALUES ($1, $2, 'approve', $3, $4, 'tenant', $4, 0, 'x')`, w.Tenant, r.ID, r.PayloadHash, uuid.Nil); err != nil {
 			return err

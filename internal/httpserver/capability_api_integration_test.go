@@ -41,6 +41,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/Diansalas/igaming-platform/internal/actorproof/prooftest"
 	"github.com/Diansalas/igaming-platform/internal/auth"
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/identityresolution"
@@ -79,6 +80,10 @@ func newCGAPI(t *testing.T) *cgAPI {
 	if _, err := pool.MigrateUp(context.Background(), cgMigrationsDir(t)); err != nil {
 		t.Fatalf("migrate scratch up: %v", err)
 	}
+	// SIGNED-ACTOR-PROOF (ADR 0110, migration 0120): per-process random signing
+	// key, provisioned by the owner into this scratch database; the handlers
+	// sign through the process-default issuer after authenticating the token.
+	prooftest.InstallVia(t, pool.Raw(), url)
 	keys, err := auth.NewKeyRegistry("k1", map[string]string{"k1": strings.Repeat("k", 32)})
 	if err != nil {
 		t.Fatal(err)

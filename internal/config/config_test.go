@@ -13,7 +13,9 @@ func clearEnv(t *testing.T) {
 		// placeholder, which Load refuses outside explicit development.
 		"PROVIDER_CREDENTIAL_FINGERPRINT_KEY", "SECRETSTORE_BACKENDS", "SECRETSTORE_DEVFILE_ROOT", "JWT_PREVIOUS_SECRET",
 		// Stage 10.3 W3b wiring: the awssm region sources.
-		"AWS_SECRETSMANAGER_REGION", "AWS_REGION"} {
+		"AWS_SECRETSMANAGER_REGION", "AWS_REGION",
+		// PRH-2 R5 (ADR 0110): the signed-actor-proof key configuration.
+		"ACTOR_PROOF_KEYS", "ACTOR_PROOF_ACTIVE_KID"} {
 		t.Setenv(k, "")
 		_ = os.Unsetenv(k)
 	}

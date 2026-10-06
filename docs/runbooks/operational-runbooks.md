@@ -579,3 +579,60 @@ references): use the closed codes (basis, context, finding, reason) and the `evi
 **Suspending or closing a tenant (casino and sportsbook).** From the moment a tenant is not `active`, NEW casino bets, wins and rollbacks and NEW sportsbook bets and settlements are refused (ADR 0095 §40.5): provider wins, refunds and rollbacks for rounds that were open are refused too and recorded (`audit_log` actions `casino_callback.rejected_tenant_not_active`, `sportsbook_bet.denied_tenant_not_active`, `sportsbook_bet.settlement_rejected` with `SETTLEMENT_TENANT_NOT_ACTIVE`). No staff path exists to resolve those rounds. Settle or void every open casino round and sportsbook bet BEFORE closing a tenant, and treat suspension of a tenant with open rounds as an incident to be resolved by reactivation or an owner-approved procedure (open question Q-GP-1). Do not hand-edit ledger rows.
 
 **Tenant status changes and the gameplay status gate (ADR 0095 §40.5, migration 0118).** A change of `tenants.status` takes a per-tenant advisory lock exclusively and waits for in-flight casino and sportsbook postings; postings that start meanwhile wait behind it. Run status changes with `SET LOCAL lock_timeout = '5s'` in the same transaction and retry on a lock timeout. No `idle_in_transaction_session_timeout` is configured on the runtime role (confirmed absent in the repository and in the CI/dev database; deploy decision open): an idle-in-transaction session can block a status change, so investigate `pg_stat_activity` before retrying. **Never compensate a stranded stake of a non-active tenant with a manual adjustment**: if the provider's rollback or void is accepted after reactivation the player is refunded twice. Terminal stake returns on non-active tenants are an open owner question (Q-GP-5). Rollback tombstones for never-seen originals are written while a tenant is suspended or closed on the orchestrator, staff-simulation and play-route paths only; the public casino webhook answers a non-active tenant with the uniform 401 before verification (Q-GP-3), so a provider rollback arriving there is not tombstoned except in the race window.
+
+
+## 15. Signed actor proof: keys, rotation and incidents (ADR 0110, migration 0120, PRH-2 R5)
+
+K2 manual adjustments and K3 manual payment resolutions (submit/request, approve/reject, cancel) are accepted by the
+database only with a proof signed by the application server (HMAC-SHA256) that names the actor, scope, tenant,
+operation, target and payload. Without it the write fails closed with SQLSTATE `AP001`..`AP005`; the K2/K3 HTTP
+endpoints answer 403 (class `forbidden`) or 500 when no key is configured. Residuals (an attacker with code execution
+on the application host; staff rows / sessions forged by SQL then authenticated over HTTP; the K1 grant and
+policy-change guards) are stated in ADR 0110 sections 8-9 and are NOT closed by this control.
+
+**Provisioning (once per environment, before the first deploy that carries migration 0120's code).**
+1. Generate a 32-byte (or longer) random secret in the secret store (for example `openssl rand -base64 48`). Never put
+   it in source control, a ConfigMap, a ticket or a log.
+2. Choose a key id (`[A-Za-z0-9._-]{1,32}`, for example `ap-2026-10`).
+3. Run migrations (`/app/migrate up`) as the migration/owner role: this creates the empty owner-only tables.
+4. As the migration/owner role (NOT `igaming_runtime`), insert the verification copy:
+   `INSERT INTO actor_proof_keys (kid, secret) VALUES ('ap-2026-10', decode('<hex of the secret>', 'hex'));`
+   (use a here-document or `psql -v` so the secret never appears in shell history; `status` defaults to `active`).
+5. Give the application the same secret: `ACTOR_PROOF_KEYS=ap-2026-10:<base64 secret>` and
+   `ACTOR_PROOF_ACTIVE_KID=ap-2026-10`, from the secret store as environment variables.
+6. Start the application. In production it REFUSES to start unless the key is configured AND the database holds that
+   kid as an active key (`actorproof: ... refusing to start`); fix the missing side, do not work around the gate.
+
+**Rotation (no downtime; two keys active during the overlap).**
+1. New secret in the secret store, new kid (for example `ap-2027-01`).
+2. As the owner role: `INSERT INTO actor_proof_keys (kid, secret) VALUES ('ap-2027-01', decode('<hex>', 'hex'));`
+   Both kids now verify.
+3. Deploy the application with `ACTOR_PROOF_KEYS=ap-2027-01:<new>,ap-2026-10:<old>` and
+   `ACTOR_PROOF_ACTIVE_KID=ap-2027-01`. Instances still on the old configuration keep signing with the old kid and
+   keep working.
+4. When no instance signs with the old kid (all rolled; allow at least 2 minutes: a proof lives 30 s and is capped at
+   60 s), retire it as the owner role:
+   `UPDATE actor_proof_keys SET status='retired', retired_at=now() WHERE kid='ap-2026-10';`
+   A proof under a retired kid is refused with `AP002`.
+5. Remove the old key from the application configuration at the next deploy.
+6. Housekeeping, any time: `DELETE FROM actor_proof_nonces WHERE expires_at < now() - interval '1 day';` (owner role).
+   The runtime role cannot, by design.
+
+**Emergency (key believed leaked).** Generate and insert a new key, deploy it as the active kid, then retire EVERY
+older kid immediately (step 4 without the wait): in-flight approvals fail closed with `AP002` and are simply retried
+by the user. Also treat the incident as a possible application-host compromise (ADR 0110 section 9).
+
+**Symptoms.**
+- `AP001` on every K2/K3 write: no proof was presented. The application has no key configured (non-production), or a
+  code path writes a governed table without going through `internal/adjustment` / `internal/payments`.
+- `AP002`: the application key does not match any active `actor_proof_keys` row (not provisioned, retired, or the
+  secret differs). Compare kids; never print secrets.
+- `AP003`: clock skew between the application host and the database over 5 s, or a proof used more than 60 s after
+  issue. Fix NTP.
+- `AP004`: a bug or an attack: a proof was presented for a different actor/operation/target/payload. Page `security`.
+- `AP005`: a proof was used twice. A retry never causes this (every attempt signs a new proof); investigate as a
+  possible replay.
+
+**Never:** read `actor_proof_keys` into a ticket or chat; grant the runtime role anything on `actor_proof_keys` or
+`actor_proof_nonces`; re-run `deploy/init-app-role.sql` expecting it to restore a grant (it re-asserts the revoke);
+create a second signer; disable the `zz_actor_proof_guard` triggers.
