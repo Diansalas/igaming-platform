@@ -54,6 +54,10 @@ const (
 	CodeSettlementPayoutInvalid           Code = "PAYOUT_INVALID"
 	CodeSettlementAssetMismatch           Code = "ASSET_MISMATCH"
 	CodeSettlementTenantNotActive         Code = "SETTLEMENT_TENANT_NOT_ACTIVE"
+	// CodeTenantCloseBlockedOpenRounds: a tenant closure was refused because
+	// open gaming rounds exist (owner decision Q-GP-1, 2026-10-06, ADR 0095
+	// section 40.6; internal/tenant.CodeCloseBlockedOpenRounds). 409.
+	CodeTenantCloseBlockedOpenRounds Code = "TENANT_CLOSE_BLOCKED_OPEN_ROUNDS"
 )
 
 // Error is the wire format for an API error response.
@@ -82,7 +86,7 @@ func httpStatus(c Code) int {
 	case CodeConflict, CodeSettlementPayloadMismatch, CodeSettlementTombstoned, CodeSettlementBetVoided,
 		CodeSettlementBetAlreadySettled, CodeSettlementGenerationOutOfSequence, CodeSettlementIntegrity,
 		CodeCredentialRegistrationRejected, CodeApprovalRejected, CodeCredentialActivationRejected,
-		CodeCredentialTransitionRejected, CodeSettlementTenantNotActive:
+		CodeCredentialTransitionRejected, CodeSettlementTenantNotActive, CodeTenantCloseBlockedOpenRounds:
 		return http.StatusConflict
 	case CodeSettlementPayoutInvalid, CodeSettlementAssetMismatch:
 		return http.StatusUnprocessableEntity

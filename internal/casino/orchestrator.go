@@ -948,6 +948,8 @@ func isProviderTxTombstoned(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, 
 // ErrTenantNotActive. It runs in the posting transaction itself, via the
 // shared race-free primitive tenant.RequireActiveForGameplay, AFTER the
 // caller's own replay short-circuits and BEFORE its first ledger write.
+// A rollback of a posted casino_bet is NOT routed here: it is a terminal stake
+// return and stays allowed (Q-GP-5, requireStakeReturnAllowed).
 //
 // A replay is a read, not a new movement: when the callback's own
 // (provider, provider_tx_id) already exists in the ledger, nothing can be
@@ -2171,13 +2173,22 @@ func (o *Orchestrator) postRollback(ctx context.Context, tx pgx.Tx, tenantID uui
 			ErrInvalidInput, originalID, originalType)
 	}
 
-	// R3-GAME-POSTINGS-NONACTIVE-1: a rollback/refund of an already-posted
-	// bet or win is a NEW reversing posting; refused for a suspended/closed
-	// tenant (owner decision: fail closed, the callback is kept as durable
-	// evidence for staff resolution). An exact redelivery of an already-
-	// posted rollback (its own reference exists) is exempt and returns the
-	// original through ledger.Post's AlreadyPosted gate below.
-	if err := requireActiveTenantForNewPosting(ctx, tx, tenantID, providerID, event.ProviderTxID); err != nil {
+	// R3-GAME-POSTINGS-NONACTIVE-1 / Q-GP-5 (owner decision 2026-10-06, ADR
+	// 0095 section 40.5): a rollback of a posted casino_bet is a TERMINAL
+	// STAKE RETURN and stays allowed on a suspended or closed tenant (it
+	// reverses a round the tenant already accepted; it is not a new wager),
+	// after the callback is verified to match that bet
+	// (requireStakeReturnAllowed; the shared status-gate lock is held either
+	// way). A rollback of a posted casino_win is a payout correction and is
+	// still refused for a non-active tenant (fail closed, the callback is kept
+	// as durable evidence for staff resolution). An exact redelivery of an
+	// already-posted rollback (its own reference exists) returns the original
+	// through ledger.Post's AlreadyPosted gate below.
+	if originalType == ledger.TxCasinoBet {
+		if err := requireStakeReturnAllowed(ctx, tx, tenantID, providerID, originalID, event); err != nil {
+			return ReceiveCallbackResult{}, err
+		}
+	} else if err := requireActiveTenantForNewPosting(ctx, tx, tenantID, providerID, event.ProviderTxID); err != nil {
 		return ReceiveCallbackResult{}, err
 	}
 

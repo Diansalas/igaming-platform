@@ -939,6 +939,122 @@ func buildRollbackInput(ctx context.Context, tx pgx.Tx, st settlementState, sett
 	}, nil
 }
 
+// isTerminalStakeReturn reports whether ins is exactly one of the two
+// sportsbook shapes that RETURN A STAKE and nothing else (owner decision
+// Q-GP-5, 2026-10-06, ADR 0095 section 40.5): a void of an OPEN bet (one
+// sportsbook_void) and a void after settlement (the rollback of the current
+// settlement chained to the sportsbook_void, in that order, causation
+// chained). Everything else is a settlement with payout, a rollback that
+// reopens the bet, or a shape this package never builds: not a stake return.
+func isTerminalStakeReturn(chainCausation bool, ins []ledger.TransactionInput) bool {
+	switch len(ins) {
+	case 1:
+		return !chainCausation && ins[0].TransactionType == ledger.TxSportsbookVoid
+	case 2:
+		return chainCausation &&
+			ins[0].TransactionType == ledger.TxSportsbookRollback &&
+			ins[1].TransactionType == ledger.TxSportsbookVoid
+	default:
+		return false
+	}
+}
+
+// requireTenantForSettlementPosting is the single tenant-status decision for
+// every non-tombstone settlement posting. On an ACTIVE tenant it never
+// refuses. On a NON-ACTIVE tenant it refuses (ErrSettlementTenantNotActive)
+// everything except a terminal stake return (isTerminalStakeReturn), which it
+// allows only after verifying that every void returns EXACTLY the stake the
+// bet's own placement posting locked, for the same tenant (a void is bounded
+// by the original amount). The shared status-gate lock is taken in every
+// case (tenant.GameplayStatus), so a status change cannot race the posting.
+// The rollback leg of a void after settlement is built by buildRollbackInput
+// as the exact inverse of the bet's own current settlement under FOR UPDATE.
+func requireTenantForSettlementPosting(ctx context.Context, tx pgx.Tx, chainCausation bool, ins []ledger.TransactionInput) error {
+	tenantID := ins[0].TenantID
+	status, err := tenant.GameplayStatus(ctx, tx, tenantID)
+	if err != nil {
+		if errors.Is(err, tenant.ErrNotActiveForGameplay) {
+			return ErrSettlementTenantNotActive
+		}
+		return fmt.Errorf("sportsbook: check tenant status: %w", err)
+	}
+	if status == "active" {
+		return nil
+	}
+	if !isTerminalStakeReturn(chainCausation, ins) {
+		return ErrSettlementTenantNotActive
+	}
+	for _, in := range ins {
+		if in.TenantID != tenantID {
+			return ErrSettlementTenantNotActive
+		}
+		if in.TransactionType != ledger.TxSportsbookVoid {
+			continue
+		}
+		if err := verifyVoidReturnsPlacedStake(ctx, tx, in); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// verifyVoidReturnsPlacedStake refuses (ErrSettlementTenantNotActive) a void
+// that is not EXACTLY the inverse of the bet's own placement posting: the
+// sportsbook_bet transaction of this tenant under the void's correlation id
+// (the bet id). Same accounts (so the same player's wallet), same amounts,
+// opposite directions, nothing more: a void is bounded by the original stake
+// and cannot touch another player's or another asset's account.
+func verifyVoidReturnsPlacedStake(ctx context.Context, tx pgx.Tx, void ledger.TransactionInput) error {
+	type leg struct {
+		account   uuid.UUID
+		direction ledger.Direction
+		amount    int64
+	}
+	rows, err := tx.Query(ctx, `
+		SELECT e.ledger_account_id, e.direction, e.amount::bigint
+		  FROM ledger_transactions t
+		  JOIN ledger_entries e ON e.ledger_transaction_id = t.id AND e.tenant_id = t.tenant_id
+		 WHERE t.tenant_id = $1 AND t.correlation_id = $2 AND t.transaction_type = $3`,
+		void.TenantID, void.CorrelationID, ledger.TxSportsbookBet)
+	if err != nil {
+		return fmt.Errorf("sportsbook: read placed stake for void check: %w", err)
+	}
+	defer rows.Close()
+	want := map[leg]int{}
+	for rows.Next() {
+		var l leg
+		var dir string
+		if err := rows.Scan(&l.account, &dir, &l.amount); err != nil {
+			return fmt.Errorf("sportsbook: scan placed stake: %w", err)
+		}
+		// The inverse of the placement leg.
+		l.direction = ledger.Credit
+		if ledger.Direction(dir) == ledger.Credit {
+			l.direction = ledger.Debit
+		}
+		want[l]++
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("sportsbook: read placed stake for void check: %w", err)
+	}
+	if len(want) == 0 || len(void.Entries) == 0 {
+		return ErrSettlementTenantNotActive
+	}
+	for _, e := range void.Entries {
+		l := leg{account: e.LedgerAccountID, direction: e.Direction, amount: e.Amount}
+		if want[l] == 0 {
+			return ErrSettlementTenantNotActive
+		}
+		want[l]--
+	}
+	for _, n := range want {
+		if n != 0 {
+			return ErrSettlementTenantNotActive
+		}
+	}
+	return nil
+}
+
 // lockAndPost is L3 then L4 (ADR 0088 §5.1 steps 5-6): ONE pre-lock over
 // every input (R3: the set pre-locked is exactly the set posted), then
 // Post in order.
@@ -967,6 +1083,11 @@ func lockAndPost(ctx context.Context, tx pgx.Tx, chainCausation bool, ins ...led
 	// Ledger-finance C1: a tombstone moves no money and protects against a late
 	// settlement, so it is ALWAYS written; the gate is skipped when every input
 	// is an entry-less tombstone (ledger.Post also refuses a tombstone with entries).
+	// Q-GP-5 (owner decision 2026-10-06): a TERMINAL STAKE RETURN (void of an
+	// open bet; void after settlement = its settlement rollback + the void) is
+	// still allowed on a non-active tenant, see requireTenantForSettlementPosting;
+	// a settlement with payout, a rollback that reopens the bet and any other
+	// shape stay refused.
 	allTombstones := len(ins) > 0
 	for _, in := range ins {
 		if in.TransactionType != ledger.TxTombstone || len(in.Entries) != 0 {
@@ -974,11 +1095,8 @@ func lockAndPost(ctx context.Context, tx pgx.Tx, chainCausation bool, ins ...led
 		}
 	}
 	if len(ins) > 0 && !allTombstones {
-		if err := tenant.RequireActiveForGameplay(ctx, tx, ins[0].TenantID); err != nil {
-			if errors.Is(err, tenant.ErrNotActiveForGameplay) {
-				return nil, ErrSettlementTenantNotActive
-			}
-			return nil, fmt.Errorf("sportsbook: check tenant status: %w", err)
+		if err := requireTenantForSettlementPosting(ctx, tx, chainCausation, ins); err != nil {
+			return nil, err
 		}
 	}
 	if _, err := ledger.LockProjectionsForPostings(ctx, tx, ins...); err != nil {

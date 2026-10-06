@@ -1764,6 +1764,12 @@ threshold reaches `PlaceBetResult` or any HTTP response.
 
 ## 17. Non-active tenants: new postings are refused (R3-GAME-POSTINGS-NONACTIVE-1)
 
+**Amended 2026-10-06 (Q-GP-5 and Q-GP-1, ADR 0095 §40.6, migration 0121):** a void of an OPEN bet and a void after settlement
+(the settlement rollback chained to the void) are terminal stake returns and are ALLOWED for a non-active tenant (the void must be
+exactly the inverse of the bet's placement posting); settlement with payout, a rollback that reopens the bet and a new bet stay
+refused. Closing a tenant is refused (SQLSTATE GP020, `TENANT_CLOSE_BLOCKED_OPEN_ROUNDS`) while it has open bets, inside the
+status-change trigger under the same advisory lock. The paragraph below is the 2026-10-05 text, superseded for those cases.
+
 Owner decision 2026-10-05, fail closed (ADR 0095 §40.5, migration 0118). `PlaceBet` declines a new bet
 (`rejection_category` `tenant_not_active`, audit `sportsbook_bet.denied_tenant_not_active`), and every
 settlement posting (settle, rollback of a current settlement, void of an open bet, void

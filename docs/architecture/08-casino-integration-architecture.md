@@ -479,9 +479,11 @@ write, no wallet change, answered `409` (never a retryable 5xx), and a durable a
 `casino_callback.rejected_tenant_not_active`. The check is `tenant.RequireActiveForGameplay` (advisory-lock
 pair with a status-change trigger, so there is no check-then-act race) placed after each function's own replay
 short-circuit (the bet gate sits after the E3 tombstone check, so a late original is still recorded as `original_tombstoned`); rollback tombstones are written for a non-active tenant on the orchestrator, staff and play-route paths only (the public webhook answers a non-active tenant with the uniform 401 before verification, Q-GP-3, so a tombstone lands there only in the race window); an exact replay of an already-posted callback still returns the original outcome. A DB trigger
-on the casino ledger types is the backstop. Consequence: rounds open at closure strand until a staff path
-exists, so closing a tenant must first settle or void open rounds (owner questions Q-GP-1..4 in ADR 0095
-§40.5). Casino launch and reads are unchanged.
+on the casino ledger types is the backstop. **Amended 2026-10-06 (Q-GP-5, ADR 0095 §40.6, migration 0121): the rollback of a posted
+`casino_bet` is a terminal stake return and is ALLOWED for a non-active tenant** (the callback must match the bet it names;
+once, idempotent; a rollback of a posted win stays refused). A casino round has no representable open state (no loss or
+round-close callback), so the tenant-closure guard (Q-GP-1) covers sportsbook bets only (owner question Q-GP-6).
+Casino launch and reads are unchanged.
 
 ## 15. Sportsbook is a separate future concern
 

@@ -49,9 +49,20 @@ func gateRuntimePool(t *testing.T) *db.Pool {
 	return rt
 }
 
+// gateSetTenantStatus sets a tenant status. Closing a tenant that still has an
+// open sportsbook bet is refused by migration 0121 (Q-GP-1); the R3 tests need
+// that state (a tenant closed before the guard existed, or by a privileged
+// path), so for 'closed' the status-change trigger is disabled inside this one
+// owner transaction only (transactional DDL; no other session sees it disabled).
 func gateSetTenantStatus(t *testing.T, owner *db.Pool, tenantID uuid.UUID, status string) {
 	t.Helper()
 	err := owner.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
+		if status == "closed" {
+			if _, err := tx.Exec(ctx, `ALTER TABLE tenants DISABLE TRIGGER tenants_status_change_gate`); err != nil {
+				return err
+			}
+			defer func() { _, _ = tx.Exec(ctx, `ALTER TABLE tenants ENABLE TRIGGER tenants_status_change_gate`) }()
+		}
 		_, err := tx.Exec(ctx, `UPDATE tenants SET status = $1 WHERE id = $2`, status, tenantID)
 		return err
 	})
@@ -90,9 +101,13 @@ func TestGamePostingsNonActive_CasinoPlayRoutesRefuseAndRecord(t *testing.T) {
 			launched := mustLaunchCasinoGame(t, srv, player.Tokens.AccessToken, game.ID.String(), "EUR", "real")
 
 			// One bet posted while ACTIVE (an open round at closure).
-			if resp := postJSON(t, srv, "/v1/me/casino/sessions/"+launched.SessionID+"/wager", player.Tokens.AccessToken, wagerBody(1_000)); resp.StatusCode != http.StatusOK {
-				t.Fatalf("active wager: %d", resp.StatusCode)
+			wagerResp := postJSON(t, srv, "/v1/me/casino/sessions/"+launched.SessionID+"/wager", player.Tokens.AccessToken, wagerBody(1_000))
+			if wagerResp.StatusCode != http.StatusOK {
+				t.Fatalf("active wager: %d", wagerResp.StatusCode)
 			}
+			var wagerOut map[string]any
+			decodeBody(t, wagerResp, &wagerOut)
+			betRef, _ := wagerOut["provider_tx_id"].(string)
 			gateSetTenantStatus(t, owner, tenant.ID, status)
 			txs0 := gateCount(t, owner, tenant.ID, `SELECT count(*) FROM ledger_transactions WHERE tenant_id = $1`, tenant.ID)
 
@@ -109,6 +124,28 @@ func TestGamePostingsNonActive_CasinoPlayRoutesRefuseAndRecord(t *testing.T) {
 			}
 			if got := gateCount(t, owner, tenant.ID, `SELECT count(*) FROM audit_log WHERE tenant_id = $1 AND action = 'casino_callback.rejected_tenant_not_active'`, tenant.ID); got != 2 {
 				t.Fatalf("expected 2 durable refusal audit records, got %d", got)
+			}
+
+			// Q-GP-5 (2026-10-06): the rollback of the posted bet is a terminal
+			// stake return and is allowed on the non-active tenant, once.
+			rb := postJSON(t, srv, "/v1/me/casino/sessions/"+launched.SessionID+"/rollback", player.Tokens.AccessToken,
+				map[string]string{"original_provider_tx_id": betRef})
+			if rb.StatusCode != http.StatusOK {
+				t.Fatalf("a stake return on a %s tenant must be 200, got %d", status, rb.StatusCode)
+			}
+			_ = rb.Body.Close()
+			if got := gateCount(t, owner, tenant.ID, `SELECT count(*) FROM ledger_transactions WHERE tenant_id = $1 AND transaction_type = 'casino_rollback'`, tenant.ID); got != 1 {
+				t.Fatalf("expected exactly one casino_rollback posting, got %d", got)
+			}
+			// A second rollback (a distinct reference minted by the route) is refused.
+			rb2 := postJSON(t, srv, "/v1/me/casino/sessions/"+launched.SessionID+"/rollback", player.Tokens.AccessToken,
+				map[string]string{"original_provider_tx_id": betRef})
+			if rb2.StatusCode == http.StatusOK {
+				t.Fatalf("a second stake return of the same bet must be refused")
+			}
+			_ = rb2.Body.Close()
+			if got := gateCount(t, owner, tenant.ID, `SELECT count(*) FROM ledger_transactions WHERE tenant_id = $1 AND transaction_type = 'casino_rollback'`, tenant.ID); got != 1 {
+				t.Fatalf("the refused second return posted: %d rollbacks", got)
 			}
 		})
 	}
@@ -129,19 +166,15 @@ func TestGamePostingsNonActive_SportsbookRoutesRefuseAndRecord(t *testing.T) {
 	gateSetTenantStatus(t, owner, tenant.ID, "closed")
 	txs0 := gateCount(t, owner, tenant.ID, `SELECT count(*) FROM ledger_transactions WHERE tenant_id = $1`, tenant.ID)
 
-	// Staff simulation of settle and void (a rollback tombstone is always written): 409, recorded.
-	for _, body := range []string{
-		`{"event_type":"settle","generation":1,"outcome":"won","payout_amount":2000,"asset_code":"EUR"}`,
-		`{"event_type":"void","void_reason":"market_cancelled"}`,
-	} {
-		resp := mustSimulateRequest(t, srv, bet.ID, tokens.AccessToken, "gate-"+uuid.NewString(), body)
-		if resp.StatusCode != http.StatusConflict {
-			t.Fatalf("simulation %s on a closed tenant must be 409, got %d", body, resp.StatusCode)
-		}
-		_ = resp.Body.Close()
+	// Staff simulation of a settlement with payout: 409, recorded.
+	settle := mustSimulateRequest(t, srv, bet.ID, tokens.AccessToken, "gate-"+uuid.NewString(),
+		`{"event_type":"settle","generation":1,"outcome":"won","payout_amount":2000,"asset_code":"EUR"}`)
+	if settle.StatusCode != http.StatusConflict {
+		t.Fatalf("a settlement with payout on a closed tenant must be 409, got %d", settle.StatusCode)
 	}
-	if got := gateCount(t, owner, tenant.ID, `SELECT count(*) FROM audit_log WHERE tenant_id = $1 AND action = 'sportsbook_bet.settlement_rejected' AND metadata->>'rejection_code' = 'SETTLEMENT_TENANT_NOT_ACTIVE'`, tenant.ID); got != 2 {
-		t.Fatalf("expected 2 durable rejection audit records, got %d", got)
+	_ = settle.Body.Close()
+	if got := gateCount(t, owner, tenant.ID, `SELECT count(*) FROM audit_log WHERE tenant_id = $1 AND action = 'sportsbook_bet.settlement_rejected' AND metadata->>'rejection_code' = 'SETTLEMENT_TENANT_NOT_ACTIVE'`, tenant.ID); got != 1 {
+		t.Fatalf("expected 1 durable rejection audit record, got %d", got)
 	}
 
 	// A player's NEW bet: a deterministic decline (200 shape), nothing posted.
@@ -158,6 +191,18 @@ func TestGamePostingsNonActive_SportsbookRoutesRefuseAndRecord(t *testing.T) {
 	}
 	if got := gateCount(t, owner, tenant.ID, `SELECT count(*) FROM ledger_transactions WHERE tenant_id = $1`, tenant.ID); got != txs0 {
 		t.Fatalf("refused requests changed the ledger: %d -> %d", txs0, got)
+	}
+
+	// Q-GP-5 (2026-10-06): the staff void of the open bet is a terminal stake
+	// return and is allowed on the closed tenant: 200, one void posting.
+	void := mustSimulateRequest(t, srv, bet.ID, tokens.AccessToken, "gate-"+uuid.NewString(),
+		`{"event_type":"void","void_reason":"market_cancelled"}`)
+	if void.StatusCode != http.StatusOK {
+		t.Fatalf("a void of an open bet on a closed tenant must be 200, got %d", void.StatusCode)
+	}
+	_ = void.Body.Close()
+	if got := gateCount(t, owner, tenant.ID, `SELECT count(*) FROM ledger_transactions WHERE tenant_id = $1 AND transaction_type = 'sportsbook_void'`, tenant.ID); got != 1 {
+		t.Fatalf("expected exactly one void posting, got %d", got)
 	}
 }
 

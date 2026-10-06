@@ -173,6 +173,9 @@ func TestTenantNotActive_CasinoNewPostingsRefused(t *testing.T) {
 			txs0, entries0 := ledgerCountsForGate(t, owner, w.f.tenantID)
 			cash0 := cashBalance(t, owner, w.f)
 
+			// A rollback of a posted BET is a terminal stake return and is allowed
+			// on a non-active tenant (Q-GP-5, 2026-10-06): see
+			// stake_return_integration_test.go. Only the cases below stay refused.
 			refused := []struct {
 				name                 string
 				ev                   CallbackEventType
@@ -181,7 +184,6 @@ func TestTenantNotActive_CasinoNewPostingsRefused(t *testing.T) {
 			}{
 				{"new_bet", CallbackEventBet, "b-new", "", "round-new", 1000},
 				{"win_for_open_round", CallbackEventWin, "w-open", "", "round-open", 2000},
-				{"rollback_of_posted_bet", CallbackEventRollback, "rb-open", "b-open", "round-open", 0},
 				{"rollback_of_posted_win", CallbackEventRollback, "rb-win", "w-settled", "round-settled", 0},
 			}
 			for _, c := range refused {
