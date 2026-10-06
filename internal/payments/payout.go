@@ -582,6 +582,9 @@ func ApplyPayoutResult(ctx context.Context, pool *db.Pool, tenantID, requestID u
 			// ever_possibly_sent`, fail-closed, but this branch now takes
 			// the CORRECT transition instead of erroring every tick).
 			if attempt.EverPossiblySent {
+				if parked, err := payoutGuardReferenceBinding(actx, tx, attempt, requestID, res.ProviderReference, evidence, gr.Class); err != nil || parked {
+					return err
+				}
 				if err := payoutMarkAmbiguousFromSubmitting(actx, tx, attempt.ID, evidence, res.ProviderReference, nextPoll); err != nil {
 					return payoutHandleContradiction(actx, tx, attempt, evidence, gr.Class, err)
 				}
@@ -599,6 +602,9 @@ func ApplyPayoutResult(ctx context.Context, pool *db.Pool, tenantID, requestID u
 			return nil
 
 		case ErrorClassPending:
+			if parked, err := payoutGuardReferenceBinding(actx, tx, attempt, requestID, res.ProviderReference, evidence, gr.Class); err != nil || parked {
+				return err
+			}
 			if err := MarkAccepted(actx, tx, attempt.ID, evidence, res.ProviderReference, nextPoll); err != nil {
 				return payoutHandleContradiction(actx, tx, attempt, evidence, gr.Class, err)
 			}
@@ -629,6 +635,9 @@ func ApplyPayoutResult(ctx context.Context, pool *db.Pool, tenantID, requestID u
 			// (AttachProviderReference) - dropping it makes a later
 			// QueryStatus resolution impossible and pushes every case
 			// toward an unbounded resend.
+			if parked, err := payoutGuardReferenceBinding(actx, tx, attempt, requestID, res.ProviderReference, evidence, gr.Class); err != nil || parked {
+				return err
+			}
 			if err := payoutMarkAmbiguousFromSubmitting(actx, tx, attempt.ID, evidence, res.ProviderReference, nextPoll); err != nil {
 				return payoutHandleContradiction(actx, tx, attempt, evidence, gr.Class, err)
 			}
@@ -710,6 +719,12 @@ func applyPayoutSuccess(ctx context.Context, tx pgx.Tx, requestID uuid.UUID, att
 		}
 	}
 
+	// PAY-PAYOUT-REFBIND-1: the reference this success binds (attempt, withdrawal
+	// AND the withdrawal_completed ledger key) must not belong to anything else.
+	// Parked BEFORE ApplySuccess/Complete, so nothing posts and the hold stays.
+	if parked, err := payoutGuardReferenceBinding(ctx, tx, attempt, requestID, ref, evidence, ErrorClassSucceeded); err != nil || parked {
+		return err
+	}
 	if err := ApplySuccess(ctx, tx, attempt.ID, SuccessEvidence{Evidence: evidence, ProviderReference: ref}); err != nil {
 		if errors.Is(err, ErrAttemptStateConflict) {
 			return applyPayoutLateEvidence(ctx, tx, attempt, evidence, "late_success_after_terminal", requestID)
@@ -733,6 +748,11 @@ func applyPayoutDecline(ctx context.Context, tx pgx.Tx, requestID uuid.UUID, att
 	// R3 (RV-PRH-I1 ledger re-review, ADR 0082 A7): withdrawal FIRST - see
 	// applyPayoutSuccess's identical comment.
 	if _, err := withdrawal.LockForPayoutEvidence(ctx, tx, requestID); err != nil {
+		return err
+	}
+	// PAY-PAYOUT-REFBIND-1: a decline that echoes a foreign reference parks, with
+	// the hold kept, instead of binding it (ApplyDecline/Attach) and releasing.
+	if parked, err := payoutGuardReferenceBinding(ctx, tx, attempt, requestID, providerReference, evidence, ErrorClassDefiniteDecline); err != nil || parked {
 		return err
 	}
 	var refPtr *string
@@ -1025,6 +1045,9 @@ func applyPayoutStatusEvidenceInTx(actx context.Context, tx pgx.Tx, tenantID, re
 		case AttemptSubmitting:
 			switch gr.Class {
 			case ErrorClassPending:
+				if parked, err := payoutGuardReferenceBinding(actx, tx, attempt, requestID, res.ProviderReference, evidence, gr.Class); err != nil || parked {
+					return err
+				}
 				if err := MarkAccepted(actx, tx, attempt.ID, evidence, res.ProviderReference, nextPoll); err != nil {
 					return payoutHandleContradiction(actx, tx, attempt, evidence, gr.Class, err)
 				}
@@ -1039,6 +1062,9 @@ func applyPayoutStatusEvidenceInTx(actx context.Context, tx pgx.Tx, tenantID, re
 			default: // Ambiguous - a status QUERY result, never a Withdraw
 				// NotSent, so this is never routed through MarkNotSent.
 				// N1/R6: the reference is persisted on the attempt itself.
+				if parked, err := payoutGuardReferenceBinding(actx, tx, attempt, requestID, res.ProviderReference, evidence, gr.Class); err != nil || parked {
+					return err
+				}
 				if err := payoutMarkAmbiguousFromSubmitting(actx, tx, attempt.ID, evidence, res.ProviderReference, nextPoll); err != nil {
 					return payoutHandleContradiction(actx, tx, attempt, evidence, gr.Class, err)
 				}
@@ -1072,6 +1098,9 @@ func applyPayoutStatusEvidenceInTx(actx context.Context, tx pgx.Tx, tenantID, re
 		case AttemptAmbiguous:
 			switch gr.Class {
 			case ErrorClassPending:
+				if parked, err := payoutGuardReferenceBinding(actx, tx, attempt, requestID, res.ProviderReference, evidence, gr.Class); err != nil || parked {
+					return err
+				}
 				if err := MarkAccepted(actx, tx, attempt.ID, evidence, res.ProviderReference, nextPoll); err != nil {
 					return payoutHandleContradiction(actx, tx, attempt, evidence, gr.Class, err)
 				}
@@ -1240,7 +1269,10 @@ func payoutStatusQuery(provider PaymentProvider, providerReference string) Adapt
 		}
 		if status.ProviderReference != "" {
 			if verr := providerref.ValidatePaymentReferenceOptional("query_status.provider_reference", status.ProviderReference); verr != nil {
-				return status, ErrorClassProviderRefInvalid, verr
+				// F-L3: the hostile reference (and every other field of the
+				// adapter's result) must not travel past this closure; only the
+				// outcome survives.
+				return StatusResult{Outcome: status.Outcome}, ErrorClassProviderRefInvalid, verr
 			}
 		}
 		switch status.Outcome {

@@ -24,7 +24,7 @@ import (
 // "invalid_provider_reference" family. A parameter that only forwards its
 // caller's reason (applyPayoutLateEvidence) is covered by its own call sites.
 func TestK3_C5b_PayoutDisputeWriteSitesAreClassified(t *testing.T) {
-	files := []string{"receipt.go", "payout.go", "payout_sweep.go", "attempt.go", "orchestrator.go"}
+	files := []string{"receipt.go", "payout.go", "payout_refbind.go", "payout_sweep.go", "attempt.go", "orchestrator.go"}
 	fset := token.NewFileSet()
 	parsed := map[string]*ast.File{}
 	for _, f := range files {
@@ -43,7 +43,7 @@ func TestK3_C5b_PayoutDisputeWriteSitesAreClassified(t *testing.T) {
 
 	// Constants of the package (all non-test files).
 	consts := map[string]string{}
-	pkgFiles := []string{"attempt.go", "drive.go", "deposit_terminal_reasons.go", "receipt.go", "payout.go", "orchestrator.go"}
+	pkgFiles := []string{"attempt.go", "drive.go", "deposit_terminal_reasons.go", "receipt.go", "payout.go", "payout_refbind.go", "orchestrator.go"}
 	for pass := 0; pass < 4; pass++ {
 		for _, f := range pkgFiles {
 			af, perr := parser.ParseFile(fset, f, nil, 0)
