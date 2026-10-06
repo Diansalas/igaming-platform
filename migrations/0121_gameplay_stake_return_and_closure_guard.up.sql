@@ -78,6 +78,10 @@
 -- ErrAlreadyRolledBack. Compatible with the held-win rollback path
 -- (bonus_settlement.go, one rollback per held win, guarded by the same check).
 -- If this refuses: STOP, never delete ledger rows, escalate (see 0092).
+-- PRODUCTION ROLLOUT: the index build is NOT CONCURRENTLY (the runner applies
+-- each migration in one transaction), so it holds a SHARE lock on
+-- ledger_transactions while it builds, exactly as for 0092; a launch-stage
+-- rollout plan at scale is out of scope here.
 --
 -- Every function pins search_path (ADR 0108 / security H-1).
 
@@ -228,10 +232,13 @@ $$;
 -- C. At most one casino_rollback per original (ledger-finance C3).
 -- ---------------------------------------------------------------------------
 DO $$
+DECLARE
+    v_detail text;
 BEGIN
     CREATE UNIQUE INDEX ledger_transactions_one_casino_rollback
         ON ledger_transactions (tenant_id, reverses_transaction_id)
         WHERE transaction_type = 'casino_rollback';
 EXCEPTION WHEN unique_violation THEN
-    RAISE EXCEPTION 'migration 0121: duplicate casino_rollback rows exist for at least one (tenant_id, reverses_transaction_id) pair; this migration cannot run until they are escalated and resolved; never delete ledger rows';
+    GET STACKED DIAGNOSTICS v_detail = PG_EXCEPTION_DETAIL;
+    RAISE EXCEPTION 'migration 0121: duplicate casino_rollback rows exist for at least one (tenant_id, reverses_transaction_id) pair; this migration cannot run until they are escalated and resolved; never delete ledger rows (%: %)', SQLERRM, v_detail;
 END $$;

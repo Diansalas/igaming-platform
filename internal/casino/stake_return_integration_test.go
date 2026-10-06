@@ -539,3 +539,47 @@ func TestStakeReturn_CasinoOnceOnlyIndex(t *testing.T) {
 	}
 	assertLedgerInvariants(t, w)
 }
+
+// CF-2 (ledger-finance): an exact redelivery of a bet rollback that was posted
+// while the tenant was ACTIVE (its round still has a win) is a replay after the
+// tenant is suspended, not a refusal; a changed payload is still refused.
+func TestStakeReturn_CasinoRedeliveryAfterSuspensionIsReplay(t *testing.T) {
+	owner := testPool(t)
+	rt := runtimePoolForGate(t)
+	w := newGateWorld(t, owner, rt)
+	for _, d := range []struct {
+		ev                   CallbackEventType
+		ref, original, round string
+		amount               int64
+	}{
+		{CallbackEventBet, "b-rd", "", "round-rd", 500},
+		{CallbackEventWin, "w-rd", "", "round-rd", 900},
+		{CallbackEventRollback, "rb-rd", "b-rd", "round-rd", 0},
+	} {
+		if _, err := w.deliver(t, d.ev, d.ref, d.original, d.round, d.amount); err != nil {
+			t.Fatalf("active %s: %v", d.ref, err)
+		}
+	}
+	setStatusForGate(t, owner, w.f.tenantID, "suspended")
+	txs0, entries0 := ledgerCountsForGate(t, owner, w.f.tenantID)
+	audits0 := rejectionAuditCount(t, owner, w.f.tenantID)
+
+	res, err := w.deliver(t, CallbackEventRollback, "rb-rd", "b-rd", "round-rd", 0)
+	if err != nil || !res.Replayed || res.LedgerTransactionID == nil {
+		t.Fatalf("an exact redelivery must replay on a suspended tenant: %+v err=%v", res, err)
+	}
+	if txs, entries := ledgerCountsForGate(t, owner, w.f.tenantID); txs != txs0 || entries != entries0 {
+		t.Fatalf("replay posted")
+	}
+	if got := rejectionAuditCount(t, owner, w.f.tenantID); got != audits0 {
+		t.Fatalf("replay must not write a refusal audit row")
+	}
+	// A changed payload (another round id) is still refused and posts nothing.
+	if _, err := w.deliver(t, CallbackEventRollback, "rb-rd", "b-rd", "round-changed", 0); err == nil {
+		t.Fatal("a redelivery with a changed payload must be refused")
+	}
+	if txs, entries := ledgerCountsForGate(t, owner, w.f.tenantID); txs != txs0 || entries != entries0 {
+		t.Fatalf("a refused changed redelivery posted")
+	}
+	assertLedgerInvariants(t, w)
+}

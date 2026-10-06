@@ -163,3 +163,6 @@ CONTROL (unmutated copy): rc=0
 C103 app: win lookup uses the callback round id instead of the bet correlation: KILLED rc=1
    restore+cmp internal/casino/stake_return.go: identical
 CONTROL after restore: rc=0
+
+--- ROUND 3 (LF delta CF-2) ---
+C141 casino: exact-redelivery replay skip removed from requireStakeReturnAllowed: KILLED rc=1 (TestStakeReturn_CasinoRedeliveryAfterSuspensionIsReplay); throwaway copy, restored by deletion; tests on the real tree pass.

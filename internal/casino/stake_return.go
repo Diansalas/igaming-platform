@@ -59,6 +59,24 @@ func requireStakeReturnAllowed(ctx context.Context, tx pgx.Tx, tenantID uuid.UUI
 	if status == "active" {
 		return nil
 	}
+	// An exact redelivery of an already-posted rollback of THIS bet (same
+	// provider reference) is a replay, a read: skip the verification so
+	// ledger.Post answers it as AlreadyPosted (its payload comparison still
+	// rejects a changed payload). Without this a bet rollback posted while the
+	// tenant was active, whose round still has a win, would be refused on
+	// redelivery after suspension.
+	var replay bool
+	if err := tx.QueryRow(ctx, `
+		SELECT EXISTS (SELECT 1 FROM ledger_transactions r
+		                WHERE r.tenant_id = $1 AND r.reverses_transaction_id = $2
+		                  AND r.provider_id = $3 AND r.provider_tx_id = $4)`,
+		tenantID, originalID, providerID, event.ProviderTxID,
+	).Scan(&replay); err != nil {
+		return fmt.Errorf("casino: check replay of own rollback reference: %w", err)
+	}
+	if replay {
+		return nil
+	}
 	if err := verifyStakeReturnMatchesBet(ctx, tx, tenantID, providerID, originalID, event); err != nil {
 		return fmt.Errorf("%w: status=%s: %w", ErrTenantNotActive, status, err)
 	}

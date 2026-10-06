@@ -4,6 +4,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -15,7 +16,7 @@ import (
 // R3 closed-tenant fixtures) and migrations may mention them.
 func TestNoTriggerDisableOutsideTests(t *testing.T) {
 	root := filepath.Join("..", "..")
-	forbidden := []string{"DISABLE TRIGGER", "session_replication_role"}
+	forbidden := regexp.MustCompile(`(?i)DISABLE\s+TRIGGER|session_replication_role`)
 	for _, dir := range []string{"internal", "cmd"} {
 		err := filepath.WalkDir(filepath.Join(root, dir), func(path string, d fs.DirEntry, err error) error {
 			if err != nil {
@@ -29,11 +30,8 @@ func TestNoTriggerDisableOutsideTests(t *testing.T) {
 			if err != nil {
 				return err
 			}
-			up := strings.ToUpper(string(b))
-			for _, f := range forbidden {
-				if strings.Contains(up, strings.ToUpper(f)) {
-					t.Errorf("%s mentions %q: production code must not disable triggers", path, f)
-				}
+			if m := forbidden.Find(b); m != nil {
+				t.Errorf("%s mentions %q: production code must not disable triggers", path, m)
 			}
 			return nil
 		})
