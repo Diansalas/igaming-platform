@@ -52,15 +52,34 @@ func runtimePool(t *testing.T) *db.Pool {
 	return rt
 }
 
+// setTenantStatus sets a tenant status. A CLOSED tenant with open sportsbook
+// bets can no longer be produced through the guarded path (migration 0121,
+// Q-GP-1); the R3 tests still need exactly that state (a tenant closed before
+// the guard existed, or by a privileged path, with stranded bets), so for
+// 'closed' the status-change trigger is disabled for the duration of this one
+// owner transaction only (transactional DDL: no other session ever sees it
+// disabled). Every other status change goes through the trigger.
 func setTenantStatus(t *testing.T, owner *db.Pool, tenantID uuid.UUID, status string) {
 	t.Helper()
 	err := owner.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
+		if status == "closed" {
+			if _, err := tx.Exec(ctx, `ALTER TABLE tenants DISABLE TRIGGER tenants_status_change_gate`); err != nil {
+				return err
+			}
+		}
 		tag, err := tx.Exec(ctx, `UPDATE tenants SET status = $1 WHERE id = $2`, status, tenantID)
 		if err != nil {
 			return err
 		}
 		if tag.RowsAffected() != 1 {
 			return errors.New("tenant row not updated")
+		}
+		if status == "closed" {
+			// The error is RETURNED so the transaction aborts (transactional DDL:
+			// the trigger then stays enabled for every session).
+			if _, err := tx.Exec(ctx, `ALTER TABLE tenants ENABLE TRIGGER tenants_status_change_gate`); err != nil {
+				return err
+			}
 		}
 		return nil
 	})
@@ -203,7 +222,9 @@ func TestTenantNotActive_PlaceBetRefusedAndReplayIsRead(t *testing.T) {
 }
 
 // TestTenantNotActive_SettlementPathsRefused drives every posting branch of
-// SimulateSettlementEvent against a non-active tenant.
+// SimulateSettlementEvent against a non-active tenant that is still refused.
+// A void of an open bet and a void after settlement are terminal stake returns
+// and stay ALLOWED (Q-GP-5, 2026-10-06): see stake_return_integration_test.go.
 func TestTenantNotActive_SettlementPathsRefused(t *testing.T) {
 	owner := testPool(t)
 	rt := runtimePool(t)
@@ -217,14 +238,9 @@ func TestTenantNotActive_SettlementPathsRefused(t *testing.T) {
 	steps := []step{
 		{"settle_open_bet", func(*testing.T, sbFixture, uuid.UUID, uuid.UUID) {},
 			func(b, a uuid.UUID) SettlementEvent { return settleEvent(b, a, 1, SettlementOutcomeWon, stdPayout) }, BetStatusOpen},
-		{"void_open_bet", func(*testing.T, sbFixture, uuid.UUID, uuid.UUID) {},
-			func(b, a uuid.UUID) SettlementEvent { return voidEvent(b, a, "market_cancelled") }, BetStatusOpen},
 		{"rollback_current_settlement", func(t *testing.T, f sbFixture, a, b uuid.UUID) {
 			mustSimulate(t, owner, f.tenantID, settleEvent(b, a, 1, SettlementOutcomeWon, stdPayout))
 		}, func(b, a uuid.UUID) SettlementEvent { return rollbackEvent(b, a, 1) }, BetStatusSettledWon},
-		{"void_after_settlement", func(t *testing.T, f sbFixture, a, b uuid.UUID) {
-			mustSimulate(t, owner, f.tenantID, settleEvent(b, a, 1, SettlementOutcomeLost, 0))
-		}, func(b, a uuid.UUID) SettlementEvent { return voidEvent(b, a, "data_error") }, BetStatusSettledLost},
 	}
 	for _, status := range nonActiveStatuses {
 		for _, s := range steps {
@@ -394,7 +410,9 @@ func TestTenantNotActive_StatusChangeVsSettlementRace(t *testing.T) {
 		t.Cleanup(releaseOnce) // never leave a held transaction behind on a failed assertion
 		go func() {
 			closerDone <- owner.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
-				if _, err := tx.Exec(ctx, `UPDATE tenants SET status = 'closed' WHERE id = $1`, f.tenantID); err != nil {
+				// SUSPEND (not close): the bet is still open, and closing a tenant
+				// with an open bet is now refused (Q-GP-1, migration 0121).
+				if _, err := tx.Exec(ctx, `UPDATE tenants SET status = 'suspended' WHERE id = $1`, f.tenantID); err != nil {
 					return err
 				}
 				close(updated)
@@ -423,7 +441,7 @@ func TestTenantNotActive_StatusChangeVsSettlementRace(t *testing.T) {
 		}
 		o := <-posted
 		if o.err != nil || o.res.RejectionCode != SettlementRejectTenantNotActive {
-			t.Fatalf("posting must see the committed closure and be refused: %+v err=%v", o.res, o.err)
+			t.Fatalf("posting must see the committed suspension and be refused: %+v err=%v", o.res, o.err)
 		}
 		if got := betStatusOf(t, owner, f, betID); got != BetStatusOpen {
 			t.Fatalf("bet status %s", got)

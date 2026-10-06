@@ -1,0 +1,168 @@
+PRH-2 R5 stake-return (Q-GP-5) and tenant-closure guard (Q-GP-1) mutation-kill evidence (2026-10-06)
+Branch prh2-r5-stake-return-closure (from d149a64). Migration 0121.
+
+Method. A throwaway copy of the worktree (outside the repository, no .git) was migrated into a private
+database (prh2_r5_mut, dropped afterwards) and tested as the runtime role (asserted NOT rolsuper AND NOT
+rolbypassrls). For each mutant: apply ONE textual mutation to the copy (migration mutants rebuild the private
+database from the mutated migration), run  go test -tags integration -p 1 -run <regex>  on the listed packages
+(casino: TestStakeReturn|TestTenantNotActive; sportsbook: TestStakeReturn|TestTenantNotActive|TestTenantClosure;
+tenant unit tests for the Go mutants), record KILLED (non-zero exit) or SURVIVED, restore the file from the
+worktree and verify with cmp. A CONTROL run of the unmutated copy passed (rc=0) before the batch and after the
+restore. The repository working tree was never mutated.
+
+Mutant classes: A = application stake-return exemption (casino requireStakeReturnAllowed/verify, sportsbook
+isTerminalStakeReturn/requireTenantForSettlementPosting/verifyVoidReturnsPlacedStake, tenant.GameplayStatus);
+D = migration 0121 gameplay backstop (ledger_gameplay_tenant_active_guard and the deferred
+ledger_sportsbook_rollback_requires_void constraint trigger); B = migration 0121 closure guard
+(tenants_status_change_gate); G = Go closure translation and audit (internal/tenant/status.go).
+
+Note on the two-layer design: removing one application check often leaves the database trigger as a backstop
+(and the reverse); a mutant is KILLED when the tests require the clean typed refusal / the exact outcome that only
+the mutated layer produces. SURVIVORS are listed and explained at the end; they are equivalent mutants (the other
+layer refuses identically) or states unreachable under RLS.
+
+--- raw results from r5_mut_results.txt (the D07 line near the end is the re-run after the test was strengthened) ---
+CONTROL (unmutated copy): rc=0
+A01 casino stake-return verification skipped (always passes): KILLED rc=1
+   restore+cmp internal/casino/stake_return.go: identical
+A02 casino: rollback of a WIN also treated as a stake return: SURVIVED rc=0
+   restore+cmp internal/casino/orchestrator.go: identical
+A03 casino: stake return refused for non-active (exemption removed): KILLED rc=1
+   restore+cmp internal/casino/stake_return.go: identical
+A04 casino: player check removed: KILLED rc=1
+   restore+cmp internal/casino/stake_return.go: identical
+A05 casino: amount check removed: KILLED rc=1
+   restore+cmp internal/casino/stake_return.go: identical
+A06 casino: round check removed: KILLED rc=1
+   restore+cmp internal/casino/stake_return.go: identical
+A07 casino: bet lookup not tenant-bound (t.tenant_id = $2 removed): SURVIVED rc=0
+   restore+cmp internal/casino/stake_return.go: identical
+A08 shared status lock not taken in GameplayStatus: KILLED rc=1
+   restore+cmp internal/tenant/gameplay_gate.go: identical
+A09 sportsbook: no shape counts as a stake return: KILLED rc=1
+   restore+cmp internal/sportsbook/settlement.go: identical
+A10 sportsbook: a lone settlement counts as a stake return: KILLED rc=1
+   restore+cmp internal/sportsbook/settlement.go: identical
+A11 sportsbook: a lone rollback counts as a stake return: KILLED rc=1
+   restore+cmp internal/sportsbook/settlement.go: identical
+A12 sportsbook: rollback+void chain not required: KILLED rc=1
+   restore+cmp internal/sportsbook/settlement.go: identical
+A13 sportsbook: void verification skipped: KILLED rc=1
+   restore+cmp internal/sportsbook/settlement.go: identical
+A14 sportsbook: void verification ignores amounts and accounts: KILLED rc=1
+   restore+cmp internal/sportsbook/settlement.go: identical
+A15 sportsbook: non-active tenant never refused at the app layer: KILLED rc=1
+   restore+cmp internal/sportsbook/settlement.go: identical
+A16 sportsbook: ErrNotActive row-not-visible treated as pass: SURVIVED rc=0
+   restore+cmp internal/sportsbook/settlement.go: identical
+D01 DB: sportsbook_void passes unconditionally: KILLED rc=1
+   restore+cmp migrations/0121_gameplay_stake_return_and_closure_guard.up.sql: identical
+D02 DB: void check drops the unreversed-settlement clause: KILLED rc=1
+   restore+cmp migrations/0121_gameplay_stake_return_and_closure_guard.up.sql: identical
+D03 DB: void check drops the bet-was-placed clause: KILLED rc=1
+   restore+cmp migrations/0121_gameplay_stake_return_and_closure_guard.up.sql: identical
+D04 DB: casino_rollback of a casino_win also passes: KILLED rc=1
+   restore+cmp migrations/0121_gameplay_stake_return_and_closure_guard.up.sql: identical
+D05 DB: casino_rollback needs no original at all: KILLED rc=1
+   restore+cmp migrations/0121_gameplay_stake_return_and_closure_guard.up.sql: identical
+D06 DB: casino_rollback original not tenant-bound: SURVIVED rc=0
+   restore+cmp migrations/0121_gameplay_stake_return_and_closure_guard.up.sql: identical
+D07 DB: any sportsbook_rollback passes the BEFORE guard: SURVIVED rc=0
+   restore+cmp migrations/0121_gameplay_stake_return_and_closure_guard.up.sql: identical
+D08 DB: deferred rollback-needs-void constraint trigger removed: KILLED rc=1
+   restore+cmp migrations/0121_gameplay_stake_return_and_closure_guard.up.sql: identical
+D09 DB: deferred trigger does not require the void to be caused by the rollback: KILLED rc=1
+   restore+cmp migrations/0121_gameplay_stake_return_and_closure_guard.up.sql: identical
+D10 DB: deferred trigger never refuses (non-active passes): KILLED rc=1
+   restore+cmp migrations/0121_gameplay_stake_return_and_closure_guard.up.sql: identical
+D11 DB: unreadable tenant row no longer fails closed (NULL status passes): SURVIVED rc=0
+   restore+cmp migrations/0121_gameplay_stake_return_and_closure_guard.up.sql: identical
+D12 DB: casino_bet passes for non-active (guard widened): KILLED rc=1
+   restore+cmp migrations/0121_gameplay_stake_return_and_closure_guard.up.sql: identical
+B01 DB closure: open-bet check removed: KILLED rc=1
+   restore+cmp migrations/0121_gameplay_stake_return_and_closure_guard.up.sql: identical
+B02 DB closure: tenant scope setting omitted (RLS hides every bet: fails open): KILLED rc=1
+   restore+cmp migrations/0121_gameplay_stake_return_and_closure_guard.up.sql: identical
+B03 DB closure: scope settings not restored: KILLED rc=1
+   restore+cmp migrations/0121_gameplay_stake_return_and_closure_guard.up.sql: identical
+B04 DB closure: advisory lock not taken by the status trigger: KILLED rc=1
+   restore+cmp migrations/0121_gameplay_stake_return_and_closure_guard.up.sql: identical
+B05 DB closure: check also applied to suspension: KILLED rc=1
+   restore+cmp migrations/0121_gameplay_stake_return_and_closure_guard.up.sql: identical
+B06 DB closure: settled-won bets also counted as open: KILLED rc=1
+   restore+cmp migrations/0121_gameplay_stake_return_and_closure_guard.up.sql: identical
+B07 DB closure: counts every tenant (tenant filter removed AND scope not set): KILLED rc=1
+   restore+cmp migrations/0121_gameplay_stake_return_and_closure_guard.up.sql: identical
+B08 DB closure: error code changed (translation breaks): KILLED rc=1
+   restore+cmp migrations/0121_gameplay_stake_return_and_closure_guard.up.sql: identical
+G01 Go: GP020 not translated to the typed error: KILLED rc=1
+   restore+cmp internal/tenant/status.go: identical
+G02 Go: refusal audit row not written: KILLED rc=1
+   restore+cmp internal/tenant/status.go: identical
+G03 Go: refusal audit leaks extra metadata (a reason of bets would be named): KILLED rc=1
+   restore+cmp internal/tenant/status.go: identical
+G04 Go: success audit row not written: KILLED rc=1
+   restore+cmp internal/tenant/status.go: identical
+CONTROL after restore: rc=0
+CONTROL (unmutated copy): rc=0
+D07 DB: any sportsbook_rollback passes the BEFORE guard: KILLED rc=1
+   restore+cmp migrations/0121_gameplay_stake_return_and_closure_guard.up.sql: identical
+CONTROL after restore: rc=0
+
+--- notes on the survivors and the strengthened test ---
+A02 SURVIVED (equivalent): a casino rollback of a WIN routed through the stake-return gate is still refused,
+  because verifyStakeReturnMatchesBet only finds a casino_bet original (no row -> ErrStakeReturnMismatch) and the
+  database backstop (D04) independently refuses a rollback of a win. Both layers are individually mutation-killed
+  (D04 KILLED; TestStakeReturn_CasinoRollbackOfBetAllowedOnNonActiveTenant and
+  TestStakeReturn_CasinoDatabaseBackstopNarrowed pin the refusal).
+A07 / D06 SURVIVED (equivalent under RLS): dropping the tenant_id predicate from the original-bet lookup (app) or
+  from the backstop's EXISTS does not let another tenant's bet through, because ledger_transactions is FORCE-RLS
+  scoped to app.tenant_id (and ledger_entries/ledger_accounts are joined on tenant_id). The predicate is kept as
+  defence in depth; cross-tenant isolation is pinned by TestStakeReturn_CasinoCrossTenantIsolation and
+  TestStakeReturn_SportsbookCrossTenantIsolation (another tenant's reference tombstones in its own tenant, no
+  money moves in either).
+A16 / D11 SURVIVED (state unreachable in a test): "tenant row not visible" can only occur under a player-scoped or
+  platform-scoped connection, where ledger_transactions RLS already refuses the insert; the fail-closed branch of
+  the primitive is covered by TestTenantNotActive_GateFailsClosedWhenTheRowIsNotVisible (R3) and is kept.
+D07 first run SURVIVED: a raw rollback reversing the bet's PLACEMENT (not a settlement) paired with a void was not
+  covered (the unpaired variant is refused by the deferred trigger anyway). Case 4b was added to
+  TestStakeReturn_SportsbookDatabaseBackstop; re-run: D07 KILLED, control rc=0.
+Totals: 40 mutants, 35 KILLED, 5 SURVIVED (A02, A07, A16, D06, D11: all equivalent or unreachable, above), D07 killed
+after the test was strengthened (counted among the 35 on the re-run).
+
+
+--- ROUND 2 (review conditions LF C1/C3, security L4/S-C2; same method, same private-database copy) ---
+Control rc=0 before and after. C103 first run SURVIVED (callback round id equal to the bet round in every test); a case
+with an empty callback round id was added and the re-run (last C103 line) is KILLED.
+C132 SURVIVED (expected, disclosed): the FOR UPDATE on ChangeStatus' before-state read is not pinned by a
+deterministic test (the status trigger already serialises the UPDATE itself); kept as defence in depth for the audited
+before-state.
+CONTROL (unmutated copy): rc=0
+C101 app: unreversed-win clause removed from the casino stake-return gate: KILLED rc=1
+   restore+cmp internal/casino/stake_return.go: identical
+C102 app: already-reversed wins still count as outstanding: KILLED rc=1
+   restore+cmp internal/casino/stake_return.go: identical
+C103 app: win lookup uses the callback round id instead of the bet correlation: SURVIVED rc=0
+   restore+cmp internal/casino/stake_return.go: identical
+C111 DB: unreversed-win clause removed from the casino_rollback branch: KILLED rc=1
+   restore+cmp migrations/0121_gameplay_stake_return_and_closure_guard.up.sql: identical
+C112 DB: reversed wins still block (reverser clause removed): KILLED rc=1
+   restore+cmp migrations/0121_gameplay_stake_return_and_closure_guard.up.sql: identical
+C113 DB: win lookup not bound to the bet round (correlation clause removed): KILLED rc=1
+   restore+cmp migrations/0121_gameplay_stake_return_and_closure_guard.up.sql: identical
+C121 DB: once-only index not created for casino_rollback: KILLED rc=1
+   restore+cmp migrations/0121_gameplay_stake_return_and_closure_guard.up.sql: identical
+C122 ledger: constraint-to-sentinel mapping removed: KILLED rc=1
+   restore+cmp internal/ledger/ledger.go: identical
+C131 casino: sub_reason not recorded: KILLED rc=1
+   restore+cmp internal/casino/rejections.go: identical
+C132 tenant: before-state read without a row lock (no test pins it: expected survivor): SURVIVED rc=0
+   restore+cmp internal/tenant/status.go: identical
+CONTROL after restore: rc=0
+CONTROL (unmutated copy): rc=0
+C103 app: win lookup uses the callback round id instead of the bet correlation: KILLED rc=1
+   restore+cmp internal/casino/stake_return.go: identical
+CONTROL after restore: rc=0
+
+--- ROUND 3 (LF delta CF-2) ---
+C141 casino: exact-redelivery replay skip removed from requireStakeReturnAllowed: KILLED rc=1 (TestStakeReturn_CasinoRedeliveryAfterSuspensionIsReplay); throwaway copy, restored by deletion; tests on the real tree pass.

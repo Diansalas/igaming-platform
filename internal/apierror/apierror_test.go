@@ -18,6 +18,7 @@ func TestWrite_StatusCodeMapping(t *testing.T) {
 		{CodeTenantMismatch, http.StatusForbidden},
 		{CodeNotFound, http.StatusNotFound},
 		{CodeConflict, http.StatusConflict},
+		{CodeTenantCloseBlockedOpenRounds, http.StatusConflict},
 		{CodeUnavailable, http.StatusServiceUnavailable},
 		{CodeRateLimited, http.StatusTooManyRequests},
 		{CodeInternal, http.StatusInternalServerError},

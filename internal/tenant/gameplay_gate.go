@@ -35,22 +35,43 @@ var ErrNotActiveForGameplay = errors.New("tenant: tenant is not active; new game
 // database function tenant_status_gate_key so the Go and trigger sides can
 // never drift.
 func RequireActiveForGameplay(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID) error {
-	if tenantID == uuid.Nil {
-		return fmt.Errorf("%w: no tenant id", ErrNotActiveForGameplay)
-	}
-	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock_shared(public.tenant_status_gate_key($1))`, tenantID); err != nil {
-		return fmt.Errorf("tenant: take status gate lock: %w", err)
-	}
-	var status string
-	err := tx.QueryRow(ctx, `SELECT status FROM public.tenants WHERE id = $1`, tenantID).Scan(&status)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return fmt.Errorf("%w: tenant row not visible", ErrNotActiveForGameplay)
-	}
+	status, err := GameplayStatus(ctx, tx, tenantID)
 	if err != nil {
-		return fmt.Errorf("tenant: read status: %w", err)
+		return err
 	}
 	if status != "active" {
 		return fmt.Errorf("%w: status=%s", ErrNotActiveForGameplay, status)
 	}
 	return nil
+}
+
+// GameplayStatus takes the per-tenant status advisory lock SHARED and then
+// reads tenants.status in a fresh statement, returning it WITHOUT refusing a
+// non-active tenant. It is the primitive under RequireActiveForGameplay and
+// the entry point for the one class of posting that stays allowed on a
+// suspended or closed tenant: a TERMINAL STAKE RETURN (owner decision
+// Q-GP-5, 2026-10-06, ADR 0095 section 40.5): a casino rollback of a posted
+// bet, a sportsbook void of an open bet, a sportsbook void after settlement.
+// Such a caller must still hold the shared lock (so a status change cannot
+// race it), must verify the return corresponds to an existing accepted stake
+// of the same tenant, and must refuse every other kind of posting itself.
+//
+// A missing or unreadable tenant row returns ErrNotActiveForGameplay (fail
+// closed): a missing status is never a licence to post.
+func GameplayStatus(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID) (string, error) {
+	if tenantID == uuid.Nil {
+		return "", fmt.Errorf("%w: no tenant id", ErrNotActiveForGameplay)
+	}
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock_shared(public.tenant_status_gate_key($1))`, tenantID); err != nil {
+		return "", fmt.Errorf("tenant: take status gate lock: %w", err)
+	}
+	var status string
+	err := tx.QueryRow(ctx, `SELECT status FROM public.tenants WHERE id = $1`, tenantID).Scan(&status)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", fmt.Errorf("%w: tenant row not visible", ErrNotActiveForGameplay)
+	}
+	if err != nil {
+		return "", fmt.Errorf("tenant: read status: %w", err)
+	}
+	return status, nil
 }

@@ -797,6 +797,9 @@ func (o *Orchestrator) postRollbackHeldWin(ctx context.Context, tx pgx.Tx, tenan
 		Entries:               entries,
 		BonusCost:             bonusCost,
 	})
+	if errors.Is(err, ledger.ErrCasinoReversalAlreadyExists) {
+		return true, ReceiveCallbackResult{}, ErrAlreadyRolledBack
+	}
 	if err != nil {
 		return true, ReceiveCallbackResult{}, fmt.Errorf("casino: post held-win rollback: %w", err)
 	}

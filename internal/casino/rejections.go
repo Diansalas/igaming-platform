@@ -148,6 +148,22 @@ type CallbackRejection struct {
 	// Amount is the provider-asserted amount in minor units; ignored (NULL)
 	// for a rollback.
 	Amount int64
+	// SubReason is an internal diagnostic detail recorded only in the audit
+	// row of a tenant_not_active refusal (e.g. stake_return_mismatch). It is
+	// never part of any HTTP response (no oracle for a caller).
+	SubReason string
+}
+
+// subReasonFor names why a non-active-tenant stake return was refused.
+func subReasonFor(err error) string {
+	switch {
+	case errors.Is(err, ErrStakeReturnMismatch):
+		return "stake_return_mismatch"
+	case errors.Is(err, ErrStakeReturnWinOutstanding):
+		return "stake_return_round_has_win"
+	default:
+		return ""
+	}
 }
 
 func newCallbackRejection(class RejectionClass, event CallbackEvent) CallbackRejection {
@@ -182,7 +198,9 @@ func wrapRejection(providerID string, event CallbackEvent) func(ReceiveCallbackR
 		if !ok {
 			return result, err
 		}
-		return result, &CallbackRejectedError{ProviderID: providerID, Rejection: newCallbackRejection(class, event), Err: err}
+		rej := newCallbackRejection(class, event)
+		rej.SubReason = subReasonFor(err)
+		return result, &CallbackRejectedError{ProviderID: providerID, Rejection: rej, Err: err}
 	}
 }
 
@@ -207,6 +225,9 @@ func RecordCallbackRejection(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID,
 			md["original_provider_tx_id"] = rej.OriginalProviderTxID
 		} else if rej.Amount > 0 {
 			md["amount"] = rej.Amount
+		}
+		if rej.SubReason != "" {
+			md["sub_reason"] = rej.SubReason
 		}
 		if err := audit.Record(ctx, tx, audit.Entry{
 			TenantID: tenantID, ActorType: audit.ActorSystem, Action: AuditActionCallbackRejectedTenantNotActive,

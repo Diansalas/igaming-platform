@@ -223,6 +223,18 @@ const reversalOneDepositReversalConstraint = "ledger_transactions_one_deposit_re
 // exactly this change (Stage 10.1 review P2-1).
 var ErrReversalAlreadyExists = errors.New("ledger: a deposit_reversal transaction already exists for this original deposit")
 
+// reversalOneCasinoRollbackConstraint is migration 0121's partial unique
+// index (tenant_id, reverses_transaction_id) WHERE transaction_type =
+// 'casino_rollback': a casino bet or win is reversed at most once per tenant
+// (PRH-2 R5, ledger-finance C3; same pattern as migration 0092).
+const reversalOneCasinoRollbackConstraint = "ledger_transactions_one_casino_rollback"
+
+// ErrCasinoReversalAlreadyExists is returned by Post when the INSERT violates
+// migration 0121's one-casino-rollback-per-original index and this idempotency
+// key was never written (a genuine second, distinct rollback of the same
+// original). internal/casino reports it as ErrAlreadyRolledBack.
+var ErrCasinoReversalAlreadyExists = errors.New("ledger: a casino_rollback transaction already exists for this original")
+
 // depositOneDepositPerIntentConstraint is the name of migration 0107's
 // partial unique index (tenant_id, correlation_id) WHERE
 // transaction_type = 'deposit' - ADR 0095 §28.2 INV-DEP-1: at most one
@@ -458,6 +470,9 @@ func Post(ctx context.Context, tx pgx.Tx, in TransactionInput) (PostResult, erro
 		if lookupErr != nil {
 			if errors.Is(lookupErr, pgx.ErrNoRows) && conflictConstraint == reversalOneDepositReversalConstraint {
 				return PostResult{}, fmt.Errorf("%w: reverses_transaction_id=%v", ErrReversalAlreadyExists, in.ReversesTransactionID)
+			}
+			if errors.Is(lookupErr, pgx.ErrNoRows) && conflictConstraint == reversalOneCasinoRollbackConstraint {
+				return PostResult{}, fmt.Errorf("%w: reverses_transaction_id=%v", ErrCasinoReversalAlreadyExists, in.ReversesTransactionID)
 			}
 			if errors.Is(lookupErr, pgx.ErrNoRows) && conflictConstraint == depositOneDepositPerIntentConstraint {
 				return PostResult{}, fmt.Errorf("%w: correlation_id=%v", ErrDepositAlreadyPostedForIntent, in.CorrelationID)
