@@ -937,13 +937,17 @@ func (m *payMatcher) matchLines(lines []payLine) {
 	// line for the same original in this same statement) can already see
 	// it.
 	m.reversalOriginals = map[string]bool{}
+	// B4 review C3 (security + ledger-finance): only a COMPLETED reversal line
+	// (reversalCompleted) clears. A pending reversal may still fail and a declined
+	// one means the capture stands; either clearing would let a manual credit and
+	// the later refund both reach the player.
 	// PRH-2 K3 (D-4, section 26 RC-3): this run's own reversal lines clear only
 	// when its import may clear (a MOCK import clears only when no non-MOCK
 	// import exists for the tenant and provider); every ELIGIBLE persisted
 	// import's reversal lines clear too (S2/S3/S4).
 	if m.k3.clearEligible(m.k3.importIsMock) {
 		for _, l := range lines {
-			if l.kind == statement.PaymentLineDepositReversal && l.original != "" {
+			if l.kind == statement.PaymentLineDepositReversal && l.original != "" && reversalCompleted(l.status) {
 				m.reversalOriginals[l.original] = true
 			}
 		}
@@ -968,6 +972,16 @@ func (m *payMatcher) matchLines(lines []payLine) {
 		}
 		m.matchPayment(lk, l)
 	}
+}
+
+// reversalCompleted reports whether a deposit_reversal statement line's status
+// says the money went back to the payer: succeeded or reversed - the same two
+// statuses matchReversal treats as "a posting is expected". pending and declined
+// never clear a captured-unposted exposure (B4 review C3). Migration 0119's
+// payment_ref_cleared uses the identical status set (pinned by the MA020 parity
+// test).
+func reversalCompleted(status string) bool {
+	return status == statement.PaymentStatusSucceeded || status == statement.PaymentStatusReversed
 }
 
 // matchReversal's statement-side l.status values (succeeded/pending/

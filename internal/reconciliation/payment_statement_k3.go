@@ -268,7 +268,8 @@ func (m *payMatcher) loadK3Evidence(ctx context.Context, tx pgx.Tx, importIsMock
 
 	// Reversal lines naming a reference we may need to clear (S2-S4): the held
 	// references, Y, and every evidencing line's own reference. ELIGIBLE imports
-	// only (D-4); a tombstone is read from the ledger (loadPlatform).
+	// only (D-4), COMPLETED reversals only (reversalCompleted, B4 review C3); a
+	// tombstone is read from the ledger (loadPlatform).
 	need := map[string]bool{}
 	for r := range refs {
 		need[r] = true
@@ -284,6 +285,7 @@ func (m *payMatcher) loadK3Evidence(ctx context.Context, tx pgx.Tx, importIsMock
 			  FROM payment_statement_lines l
 			  JOIN payment_statement_imports i ON i.id = l.import_id AND i.tenant_id = l.tenant_id
 			 WHERE l.tenant_id = $1 AND l.provider_id = $2 AND l.kind = 'deposit_reversal'
+			   AND l.status IN ('succeeded', 'reversed')
 			   AND l.original_provider_reference = ANY($3)
 			   AND (NOT i.is_mock OR NOT $4)`,
 			m.tenantID, m.provider, keysOf(need), e.hasRealImp)

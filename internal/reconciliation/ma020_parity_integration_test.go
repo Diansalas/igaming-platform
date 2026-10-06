@@ -136,6 +136,13 @@ func ma020Rev(original string) statement.PaymentStatementLine {
 	return d2ReversalLine("ma020-rev-"+uuid.NewString(), original, ma020Amount)
 }
 
+// ma020RevSt is a deposit_reversal line naming original with the given status.
+func ma020RevSt(original, status string) statement.PaymentStatementLine {
+	l := ma020Rev(original)
+	l.Status = status
+	return l
+}
+
 func ma020Succ(ref string) statement.PaymentStatementLine {
 	return d2Line(ref, "", statement.PaymentStatusSucceeded, ma020Amount)
 }
@@ -285,6 +292,18 @@ func TestMA020_Parity_XClearingAndScope(t *testing.T) {
 	xf := ma020Ref("xf")
 	add("poll_reference_mismatch, no Y, X tombstoned (F-VIS)", w.ma020Park(t, payments.TerminalReasonPollReferenceMismatch, xf, ""), true)
 	w.ma020Tombstone(t, xf)
+	// B4 review C3: only a COMPLETED reversal line (succeeded or reversed)
+	// clears; a pending or declined reversal never does - in Go and in SQL.
+	xPend, xDecl, xRevd := ma020Ref("xpend"), ma020Ref("xdecl"), ma020Ref("xrevd")
+	add("X with only a PENDING reversal line (C3)", w.ma020Park(t, payments.TerminalReasonSyncAmountMismatch, xPend, ""), true)
+	add("X with only a DECLINED reversal line (C3)", w.ma020Park(t, payments.TerminalReasonMultipleSuccessForIntent, xDecl, ""), true)
+	add("X with a REVERSED-status reversal line (C3)", w.ma020Park(t, payments.TerminalReasonPollAmountMismatch, xRevd, ""), false)
+	w.ma020Import(t, false, ma020RevSt(xPend, statement.PaymentStatusPending), ma020RevSt(xDecl, statement.PaymentStatusDeclined),
+		ma020RevSt(xRevd, statement.PaymentStatusReversed))
+	// G-Y2 with Y "reversed" only by a pending line: still open.
+	yx, yy := ma020Ref("c3x"), ma020Ref("c3y")
+	add("poll_reference_mismatch, Y reversal PENDING, X uncleared (C3)", w.ma020Park(t, payments.TerminalReasonPollReferenceMismatch, yx, yy), true)
+	w.ma020Import(t, false, ma020RevSt(yy, statement.PaymentStatusPending))
 	// The same X string tombstoned and reversed under ANOTHER provider of the
 	// tenant clears nothing (clearing is per (provider, reference)).
 	xo := ma020Ref("xo")
@@ -603,5 +622,39 @@ func TestMA020_0119_DownUpRoundTrip(t *testing.T) {
 		if !strings.Contains(g, "version 118 ") {
 			t.Fatalf("unexpected migration gap %v", report.VersionGaps)
 		}
+	}
+}
+
+// B4 review C3 at run level (the Go in-run path AND the persisted lookup,
+// through RunPaymentStatement): a bound park named by a pending or declined
+// reversal line keeps its standing pay_captured_unposted on that run and on
+// later runs; a succeeded or reversed reversal line clears it. Deposit-line
+// semantics (M-S2) are unchanged.
+func TestMA020_C3_RunLevelOnlyCompletedReversalClears(t *testing.T) {
+	for _, st := range []string{statement.PaymentStatusPending, statement.PaymentStatusDeclined} {
+		t.Run(st+" does not clear", func(t *testing.T) {
+			w := newPayWorld(t)
+			x := ma020Ref("c3run")
+			id := w.ma020Park(t, payments.TerminalReasonSyncAmountMismatch, x, "")
+			ma020Offset++
+			_, ms := w.run(t, k3Cov(ma020Offset, ma020RevSt(x, st)), PaymentStatementOptions{})
+			d2CUFor(t, ms, id)
+			ma020Offset++
+			_, ms = w.run(t, k3Cov(ma020Offset), PaymentStatementOptions{})
+			d2CUFor(t, ms, id) // persisted lookup, later run
+		})
+	}
+	for _, st := range []string{statement.PaymentStatusSucceeded, statement.PaymentStatusReversed} {
+		t.Run(st+" clears", func(t *testing.T) {
+			w := newPayWorld(t)
+			x := ma020Ref("c3run")
+			id := w.ma020Park(t, payments.TerminalReasonSyncAmountMismatch, x, "")
+			ma020Offset++
+			_, ms := w.run(t, k3Cov(ma020Offset, ma020RevSt(x, st)), PaymentStatementOptions{})
+			d2NoCUFor(t, ms, id)
+			ma020Offset++
+			_, ms = w.run(t, k3Cov(ma020Offset), PaymentStatementOptions{})
+			d2NoCUFor(t, ms, id)
+		})
 	}
 }

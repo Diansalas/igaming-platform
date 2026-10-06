@@ -264,6 +264,18 @@ func TestMA020_K2_ReversalLineClearsInTenantSessionOnly(t *testing.T) {
 	w := newWorld(t, worldOpts{base: 1, authorizedAsset: true})
 	x := ma020Ref("rl")
 	w.park("sync_amount_mismatch", x, "")
+	// B4 review C3: pending and declined reversal lines never clear.
+	for _, st := range []string{statement.PaymentStatusPending, statement.PaymentStatusDeclined} {
+		l := ma020Rev(x)
+		l.Status = st
+		w.importLines(l)
+		if !sysExposure(t, rt, w) {
+			t.Fatalf("system shape: a %s reversal line must not clear", st)
+		}
+		if got := creditOutcome(t, svc, w, w.F1, w.F2); got != "MA020" {
+			t.Fatalf("tenant session, %s reversal line: want MA020, got %q", st, got)
+		}
+	}
 	w.importLines(ma020Rev(x))
 	if sysExposure(t, rt, w) {
 		t.Fatal("system shape: an eligible reversal line must clear")

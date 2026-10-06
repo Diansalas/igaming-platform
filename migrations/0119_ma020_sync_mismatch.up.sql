@@ -25,7 +25,11 @@
 --   R-MA-3  Clearing equals recon's clearedRef: a tombstone on the reference,
 --           OR an ELIGIBLE persisted deposit_reversal line naming it as its
 --           original (RC-3: the import is not MOCK, or no non-MOCK import
---           exists for the tenant and provider).
+--           exists for the tenant and provider) whose status says the reversal
+--           COMPLETED (succeeded or reversed). A pending or declined reversal
+--           never clears (B4 review C3, security + LF): it may still fail, or
+--           the capture stands, and a manual credit plus the later refund would
+--           double-credit. Recon's clearedRef applies the same status set.
 --   Y       A poll_reference_mismatch park also clears on its typed returned
 --           reference Y only when Y is attributable (yAttributable, incl. the
 --           security F-1 shared-Y rule) and, when eligible succeeded lines
@@ -63,6 +67,7 @@ CREATE FUNCTION payment_ref_cleared(p_tenant uuid, p_provider text, p_ref text) 
                      JOIN payment_statement_imports i ON i.id = l.import_id AND i.tenant_id = l.tenant_id
                     WHERE l.tenant_id = p_tenant AND l.provider_id = p_provider
                       AND l.kind = 'deposit_reversal' AND l.original_provider_reference = p_ref
+                      AND l.status IN ('succeeded', 'reversed')                       -- C3: completed only
                       AND (NOT i.is_mock
                            OR NOT EXISTS (SELECT 1 FROM payment_statement_imports r
                                            WHERE r.tenant_id = p_tenant AND r.provider_id = p_provider AND NOT r.is_mock))));
