@@ -797,7 +797,11 @@ func applyResolvedReceiptEvidence(ctx context.Context, tx pgx.Tx, o *Orchestrato
 				if err := auditTerminalAmountAssetMismatch(ctx, tx, attempt, ev); err != nil {
 					return false, "", err
 				}
-				return false, ResolutionAnomalyOther, nil
+				// R-5 (ADR 0095 section 42.5, raise only): for a PAYOUT this is a double-payout
+				// candidate (the hold is already released), so it pages like T14. No state change,
+				// no release, no posting. The raise is the last statement of the cell, after the
+				// audit row; it is a no-op for a deposit.
+				return false, ResolutionAnomalyOther, raisePayoutDisputeAlert(ctx, tx, attempt, alertReasonPayoutMismatchedSuccessOnDeclined)
 			}
 			if attempt.Operation != AttemptOperationDeposit {
 				// B12 (PAY-PAYOUT-DISPUTE-ALERT-1): T14, the double-payout signal. The raise is
