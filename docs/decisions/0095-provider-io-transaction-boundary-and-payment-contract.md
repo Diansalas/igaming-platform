@@ -7878,11 +7878,14 @@ terminal-reason CHECK are untouched). Same Kind, discriminator shape, attributes
   interleaving test `TestOrphanResolve_Interleaved_AnomalyCloseDuringDrain_NoConflictLeaksToBindingTx`.
   *Security I-2.* An orphan close writes no audit row; the receipt is reconstructable from `disposition_at_receipt` plus
   its `resolution`.
-  *Open, NOT changed (needs a ruling; reported to the coordinator).* `receiptIsResolved` cannot tell "resolved as applied"
-  from "closed as an anomaly with `attempt_id` NULL", so if an anomaly close lands first, the main path treats the
-  receipt as already applied (skips the terminal-cell audit rows and its own `ResolveReceipt`, `attempt_id` stays NULL;
-  state transitions are unaffected). Treating an anomaly close as not-applied would also need a re-attribution of an
-  already-resolved receipt (strict `ResolveReceipt` would conflict), a new receipt state transition, so it was not built.
+  **PAY-RECEIPT-ANOMALY-APPLIED-1 (named residual; owner `payments` + `ledger-finance`; NOT built, ruled out of scope).**
+  `receiptIsResolved` cannot tell "resolved as applied" from "closed as an anomaly" (`attempt_id` NULL). It arises only when
+  a lock-free anomaly close lands first in a reference-binding race: the main path then treats the receipt as already
+  applied, skipping the terminal-cell audit rows and its own `ResolveReceipt`, so `attempt_id` stays NULL. No state or money
+  effect. Fixing it needs a re-attribution transition on an already-resolved receipt (the strict `ResolveReceipt` would
+  conflict), so a ruling on re-attribution semantics is required before any real provider.
+  *Accepted defence in depth.* Two mutants survive by design: the cross-operation drain select without `FOR UPDATE` and the
+  `receiptIsResolved` read without `FOR UPDATE`; both guard race windows no deterministic test reaches.
   **PAY-RECEIPT-DRAIN-MERCHANT-REF-1 (LF I-1, record only, NOT implemented).** The drain selects by
   (provider, provider reference, event type) and does not re-check the receipt's merchant reference (INV-IO-14); the live
   path does. Proposed: apply the live-path check in the drain. Dispositions and returns are
