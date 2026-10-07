@@ -1,0 +1,73 @@
+R3-TEST-GAPS-1 subset mutation evidence (worktree r10-b, baseline 416976e). Tests: TestR3_ActiveTenantLedgerAuditCarriesNoObservationFlag, TestR3_Static_ListNonActiveTenantsAssignedOnlyInDeclaration. Mutated in place with backup; restored and cmp'd.
+
+== CONTROL (unmutated)
+--- PASS: TestR3_ActiveTenantLedgerAuditCarriesNoObservationFlag (0.09s)
+--- PASS: TestR3_Static_ListNonActiveTenantsAssignedOnlyInDeclaration (0.02s)
+ok  	github.com/Diansalas/igaming-platform/internal/reconciliation	0.114s
+
+== M1 (LF3): observationMetadata flags every run (if status != "" -> if true)
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+--- FAIL: TestR3_ActiveTenantLedgerAuditCarriesNoObservationFlag (0.09s)
+--- PASS: TestR3_Static_ListNonActiveTenantsAssignedOnlyInDeclaration (0.01s)
+FAIL
+FAIL	github.com/Diansalas/igaming-platform/internal/reconciliation	0.111s
+FAIL
+
+== M2: sweepTenants passes "active" as observeStatus for the active tenant
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+--- FAIL: TestR3_ActiveTenantLedgerAuditCarriesNoObservationFlag (0.10s)
+--- PASS: TestR3_Static_ListNonActiveTenantsAssignedOnlyInDeclaration (0.01s)
+FAIL
+FAIL	github.com/Diansalas/igaming-platform/internal/reconciliation	0.122s
+FAIL
+
+== M3: production code reassigns listNonActiveTenants (guard)
+ 1 file changed, 2 insertions(+)
+--- PASS: TestR3_ActiveTenantLedgerAuditCarriesNoObservationFlag (0.11s)
+--- FAIL: TestR3_Static_ListNonActiveTenantsAssignedOnlyInDeclaration (0.01s)
+FAIL
+FAIL	github.com/Diansalas/igaming-platform/internal/reconciliation	0.136s
+FAIL
+
+== RESTORE
+scheduler.go identical to baseline
+
+== POST-RESTORE
+--- PASS: TestR3_ActiveTenantLedgerAuditCarriesNoObservationFlag (0.11s)
+--- PASS: TestR3_Static_ListNonActiveTenantsAssignedOnlyInDeclaration (0.02s)
+ok  	github.com/Diansalas/igaming-platform/internal/reconciliation	0.137s
+
+Survivors: none. No compile-error mutants counted (each mutant above compiled and ran its tests).
+Still OPEN (not touched): SQL write-regex (MERGE/TRUNCATE/SQL functions), transitive dependency check ignoring std/third-party.
+
+==================================================================
+TASK 1 (PAY-FPAY-HARDENING-1 F-L2): ALREADY IMPLEMENTED at baseline (B9, e6773c0): depositKYCDeclineReason in internal/payments/deposit_kyc_reason.go, used at deposit_v2.go:223 and drive.go:117/120. No new code. Existing-test kill evidence on the in-place mutant:
+== CONTROL
+  --- PASS: TestDepositGate_AllowThenNoRoutableProvider_LeavesOneRowAndMovesNoMoney (1.85s)
+  --- PASS: TestDepositGate_RecordsOneDecisionRowPerEvaluation (3.46s)
+  --- PASS: TestDepositGate_StoreOutage_RecordsUnavailableAndDenies (3.04s)
+  --- PASS: TestDepositKYC_PhaseA_OutageVsDeny_DistinctReasons (4.97s)
+      --- PASS: TestDepositKYC_PhaseA_OutageVsDeny_DistinctReasons/unavailable (3.25s)
+      --- PASS: TestDepositKYC_PhaseA_OutageVsDeny_DistinctReasons/deny (1.72s)
+  --- PASS: TestDepositKYC_CascadeT2_OutageVsDeny_DistinctReasons (4.11s)
+      --- PASS: TestDepositKYC_CascadeT2_OutageVsDeny_DistinctReasons/unavailable (2.08s)
+      --- PASS: TestDepositKYC_CascadeT2_OutageVsDeny_DistinctReasons/deny (2.03s)
+  --- PASS: TestDepositKYCDeclineReason (0.00s)
+  ok  	github.com/Diansalas/igaming-platform/internal/payments	17.467s
+== MA: depositKYCDeclineReason always prefixes kyc_required: (the pre-fix behaviour)
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+  --- PASS: TestDepositGate_AllowThenNoRoutableProvider_LeavesOneRowAndMovesNoMoney (2.30s)
+  --- PASS: TestDepositGate_RecordsOneDecisionRowPerEvaluation (2.47s)
+  --- PASS: TestDepositGate_StoreOutage_RecordsUnavailableAndDenies (2.47s)
+  --- FAIL: TestDepositKYC_PhaseA_OutageVsDeny_DistinctReasons (4.83s)
+      --- FAIL: TestDepositKYC_PhaseA_OutageVsDeny_DistinctReasons/unavailable (2.40s)
+      --- PASS: TestDepositKYC_PhaseA_OutageVsDeny_DistinctReasons/deny (2.43s)
+  --- FAIL: TestDepositKYC_CascadeT2_OutageVsDeny_DistinctReasons (4.60s)
+      --- FAIL: TestDepositKYC_CascadeT2_OutageVsDeny_DistinctReasons/unavailable (2.27s)
+      --- PASS: TestDepositKYC_CascadeT2_OutageVsDeny_DistinctReasons/deny (2.34s)
+  --- FAIL: TestDepositKYCDeclineReason (0.00s)
+  FAIL
+  FAIL	github.com/Diansalas/igaming-platform/internal/payments	16.694s
+  FAIL
+== RESTORE
+deposit_kyc_reason.go identical to baseline
