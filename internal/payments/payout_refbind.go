@@ -144,5 +144,8 @@ func payoutGuardReferenceBinding(ctx context.Context, tx pgx.Tx, attempt Payment
 	}); err != nil {
 		return false, err
 	}
-	return true, nil
+	// B12 (PAY-PAYOUT-DISPUTE-ALERT-1): the park raises a durable P1 as the LAST statement,
+	// after the CAS and the audit row. parked stays true on a raise error so no caller falls
+	// through to a bind; a (transient) error propagates and rolls the whole park back.
+	return true, raisePayoutDisputeAlert(ctx, tx, attempt, TerminalReasonProviderReferenceConflict)
 }

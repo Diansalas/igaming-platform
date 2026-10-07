@@ -759,8 +759,11 @@ func applyResolvedReceiptEvidence(ctx context.Context, tx pgx.Tx, o *Orchestrato
 		case AttemptCreated, AttemptRejected:
 			// T15: success evidence for an attempt that was never sent to
 			// (or was rejected before reaching) a provider.
-			return true, ResolutionAnomalyOther, alertAfterDispute(ctx, tx, attempt, TerminalReasonSuccessForNeverSentAttempt,
-				ApplyDisputeFromNeverSent(ctx, tx, attempt.ID, EvidenceCallback, TerminalReasonSuccessForNeverSentAttempt))
+			// B12: alertAfterDispute raises for a deposit and is a no-op for a payout;
+			// payoutAlertAfterDispute is the payout twin (a no-op for a deposit).
+			return true, ResolutionAnomalyOther, payoutAlertAfterDispute(ctx, tx, attempt, TerminalReasonSuccessForNeverSentAttempt,
+				alertAfterDispute(ctx, tx, attempt, TerminalReasonSuccessForNeverSentAttempt,
+					ApplyDisputeFromNeverSent(ctx, tx, attempt.ID, EvidenceCallback, TerminalReasonSuccessForNeverSentAttempt)))
 		case AttemptDisputed:
 			return false, ResolutionAnomalyOther, nil // already terminal-disputed: no-op
 		case AttemptSucceeded:
@@ -794,7 +797,11 @@ func applyResolvedReceiptEvidence(ctx context.Context, tx pgx.Tx, o *Orchestrato
 				return false, ResolutionAnomalyOther, nil
 			}
 			if attempt.Operation != AttemptOperationDeposit {
-				return true, ResolutionAnomalyOther, ApplyDisputeFromDeclinedPayout(ctx, tx, attempt.ID, EvidenceCallback, "success_after_payout_declined")
+				// B12 (PAY-PAYOUT-DISPUTE-ALERT-1): T14, the double-payout signal. The
+				// raise is the last statement of the cell; no audit row is written here
+				// (unchanged: the dispute row itself and the receipt are the record).
+				return true, ResolutionAnomalyOther, payoutAlertAfterDispute(ctx, tx, attempt, "success_after_payout_declined",
+					ApplyDisputeFromDeclinedPayout(ctx, tx, attempt.ID, EvidenceCallback, "success_after_payout_declined"))
 			}
 			tombstoned, err := tombstoneExists(ctx, tx, attempt.TenantID, *attempt.ProviderID, ev.ProviderReference)
 			if err != nil {
@@ -833,8 +840,9 @@ func applyResolvedReceiptEvidence(ctx context.Context, tx pgx.Tx, o *Orchestrato
 				if err := bindParkReference(ctx, tx, attempt, providerIDOrEmpty(attempt), ev.ProviderReference); err != nil {
 					return false, "", err
 				}
-				return true, ResolutionAnomalyOther, alertAfterDispute(ctx, tx, attempt, TerminalReasonCallbackAmountAssetMismatch,
-					ApplyDisputeFromNonTerminal(ctx, tx, attempt.ID, EvidenceCallback, TerminalReasonCallbackAmountAssetMismatch))
+				return true, ResolutionAnomalyOther, payoutAlertAfterDispute(ctx, tx, attempt, TerminalReasonCallbackAmountAssetMismatch,
+					alertAfterDispute(ctx, tx, attempt, TerminalReasonCallbackAmountAssetMismatch,
+						ApplyDisputeFromNonTerminal(ctx, tx, attempt.ID, EvidenceCallback, TerminalReasonCallbackAmountAssetMismatch)))
 			}
 			tombstoned, err := tombstoneExists(ctx, tx, attempt.TenantID, *attempt.ProviderID, ev.ProviderReference)
 			if err != nil {
@@ -844,8 +852,9 @@ func applyResolvedReceiptEvidence(ctx context.Context, tx pgx.Tx, o *Orchestrato
 				// Only a deposit's declined->disputed pair exists for a
 				// tombstone (T13t); for a non-declined attempt a
 				// tombstone collision is a plain anomaly dispute.
-				return true, ResolutionAnomalyOther, alertAfterDispute(ctx, tx, attempt, TerminalReasonTombstonePrecedesSuccess,
-					ApplyDisputeFromNonTerminal(ctx, tx, attempt.ID, EvidenceCallback, TerminalReasonTombstonePrecedesSuccess))
+				return true, ResolutionAnomalyOther, payoutAlertAfterDispute(ctx, tx, attempt, TerminalReasonTombstonePrecedesSuccess,
+					alertAfterDispute(ctx, tx, attempt, TerminalReasonTombstonePrecedesSuccess,
+						ApplyDisputeFromNonTerminal(ctx, tx, attempt.ID, EvidenceCallback, TerminalReasonTombstonePrecedesSuccess)))
 			}
 			if attempt.Operation == AttemptOperationDeposit {
 				disputed, err := applyDepositSuccessAndPost(ctx, tx, o, attempt, ev)
@@ -904,7 +913,8 @@ func applyResolvedReceiptEvidence(ctx context.Context, tx pgx.Tx, o *Orchestrato
 				}); err != nil {
 					return false, "", fmt.Errorf("payments: audit payout reference mismatch: %w", err)
 				}
-				return true, ResolutionAnomalyOther, nil
+				// B12: last statement of the park, after its audit row.
+				return true, ResolutionAnomalyOther, raisePayoutDisputeAlert(ctx, tx, attempt, "provider_reference_mismatch")
 			}
 			if err := applyPayoutSuccess(ctx, tx, *attempt.WithdrawalRequestID, attempt, ev.ProviderReference, EvidenceCallback); err != nil {
 				return false, "", err

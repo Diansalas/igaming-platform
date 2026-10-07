@@ -49,6 +49,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/Diansalas/igaming-platform/internal/alerting"
 	"github.com/Diansalas/igaming-platform/internal/audit"
 	"github.com/Diansalas/igaming-platform/internal/kyc"
 	"github.com/Diansalas/igaming-platform/internal/withdrawal"
@@ -184,7 +185,9 @@ func checkPayoutKillSwitch(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, p
 // exhausted path (C1/B1): T16, no resend, no hold release. Idempotent if
 // already escalated (L3/B8, same rationale as gateAndEscalateOnDeny).
 func (s *Sweeper) escalateAmbiguousPayout(ctx context.Context, tenantID uuid.UUID, attempt PaymentAttempt, nextPoll time.Time, reason string) error {
-	return s.Pool.WithTenant(ctx, tenantID, func(actx context.Context, tx pgx.Tx) error {
+	// B12 (PAY-PAYOUT-DISPUTE-ALERT-1): the T16 payout escalation transaction opens through
+	// alerting.InTx and flushes after the commit (ADR 0102 B-1).
+	pending, err := alerting.InTx(ctx, alerting.NewTenantRunner(s.Pool, tenantID), func(actx context.Context, tx pgx.Tx) error {
 		if attempt.EscalatedAt != nil {
 			return RescheduleNonTerminal(actx, tx, attempt.ID, nextPoll)
 		}
@@ -231,12 +234,23 @@ func (s *Sweeper) escalateAmbiguousPayout(ctx context.Context, tenantID uuid.UUI
 		if attempt.WithdrawalRequestID != nil {
 			wrID = attempt.WithdrawalRequestID.String()
 		}
-		return audit.Record(actx, tx, audit.Entry{
+		if err := audit.Record(actx, tx, audit.Entry{
 			TenantID: attempt.TenantID, ActorType: audit.ActorSystem, Action: "payments.payout_resend_escalated",
 			TargetType: "payment_attempt", TargetID: attempt.ID.String(), Outcome: audit.OutcomeDenied,
 			Metadata: map[string]any{"withdrawal_request_id": wrID, "reason": reason, "submit_count": attempt.SubmitCount},
-		})
+		}); err != nil {
+			return err
+		}
+		// B12: the raise is the LAST statement of the escalation. Only a real escalation
+		// (Escalate's CAS succeeded) reaches here; an already-escalated or already-resolved
+		// attempt returned above and raises nothing. No resend, no release, no state change.
+		return raisePayoutDisputeAlert(actx, tx, attempt, reason)
 	})
+	if err != nil {
+		return err
+	}
+	pending.Flush(ctx) // post-commit only; the error path has no Pending to flush
+	return nil
 }
 
 // reclaimPayoutCreated performs the T2 re-claim of a payout attempt that

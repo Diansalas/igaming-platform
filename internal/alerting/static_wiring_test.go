@@ -35,8 +35,10 @@ var staticRaiseGuardedHelpers = map[string]bool{
 	"internal/payments/alerts.go:raisePollContradictionAlert": true,
 	"internal/payments/alerts.go:raiseMultipleSuccessAlert":   true,
 	"internal/payments/alerts.go:raiseDepositEscalationAlert": true,
-	"internal/reconciliation/alerts.go:raiseLedgerRunAlerts":  true,
-	"internal/reconciliation/alerts.go:raiseInTxMismatch":     true,
+	// B12 (PAY-PAYOUT-DISPUTE-ALERT-1): the payout dispute / T14 / T16 raise.
+	"internal/payments/payout_alerts.go:raisePayoutDisputeAlert": true,
+	"internal/reconciliation/alerts.go:raiseLedgerRunAlerts":     true,
+	"internal/reconciliation/alerts.go:raiseInTxMismatch":        true,
 	// PRH-2 E1 (ADR 0106 section 4.3): the KYC outbox terminal alert, raised in-tx
 	// from the tenant phase-C session by runPhaseC / recordApplyConflict.
 	"internal/kyc/outbox_worker.go:raiseSubmissionFailedTerminal": true,
@@ -49,6 +51,11 @@ var staticInTxOwners = []string{
 	"internal/payments/sweeper.go:processViaQueryStatus",
 	// B7: the reference-less submitting deposit's escalation transaction.
 	"internal/payments/sweeper.go:processUnreferenced",
+	// B12: the payout evidence transactions (sync phase C, QueryStatus poll/resolve) and the
+	// payout T16 escalation transaction. Payout callbacks run inside the webhook handler's InTx.
+	"internal/payments/payout.go:ApplyPayoutResult",
+	"internal/payments/payout.go:applyPayoutStatusEvidence",
+	"internal/payments/payout_sweep.go:escalateAmbiguousPayout",
 	// H-W1 moved the ledger_vs_projection evidence transaction (and its InTx/Flush) out of
 	// sweepTenants into runLedgerStreamForTenant, shared by the ordinary and observation sweeps.
 	"internal/reconciliation/scheduler.go:runLedgerStreamForTenant",
@@ -242,6 +249,7 @@ func staticDiscardedRaiseResults(calls []staticCall) []string {
 		"alerting.RaiseGuarded": true, "raiseDepositParkAlert": true, "raisePollContradictionAlert": true,
 		"raiseMultipleSuccessAlert": true, "raiseLedgerRunAlerts": true, "raiseInTxMismatch": true, "alertAfterDispute": true,
 		"raiseSubmissionFailedTerminal": true, "raiseDepositEscalationAlert": true,
+		"raisePayoutDisputeAlert": true, "payoutAlertAfterDispute": true,
 	}
 	var out []string
 	for _, c := range calls {
@@ -314,6 +322,50 @@ func g(ctx, tx any) error { return raiseDepositEscalationAlert(ctx, tx, a, r) }`
 	}
 	if real != 1 {
 		t.Fatalf("expected exactly one raiseDepositEscalationAlert call in sweeper.go:escalateDepositIfDue, saw %d", real)
+	}
+}
+
+// B12 (PAY-PAYOUT-DISPUTE-ALERT-1): the payout dispute raise is a sanctioned RaiseGuarded helper,
+// its result is never dropped (negative control), and its call sites are exactly the reviewed
+// set: one pinned count per owner function. A new payout dispute write site that raises (or one
+// that stops raising) changes this table and must be reviewed.
+func TestStaticWiring_PayoutDisputeRaiseSitesArePinned_B12(t *testing.T) {
+	bad := `package p
+func f(ctx, tx any) {
+	raisePayoutDisputeAlert(ctx, tx, a, r)
+	_ = payoutAlertAfterDispute(ctx, tx, a, r, nil)
+}
+func g(ctx, tx any) error { return raisePayoutDisputeAlert(ctx, tx, a, r) }`
+	if d := staticDiscardedRaiseResults(staticCollectFromSource(t, "internal/x/bad.go", bad)); len(d) != 2 {
+		t.Fatalf("discarded-result guard must flag the two dropped payout raises, got %v", d)
+	}
+	want := map[string]int{
+		"internal/payments/payout.go:ApplyPayoutResult:raisePayoutDisputeAlert":                   1, // invalid-reference park (sync)
+		"internal/payments/payout.go:applyPayoutSuccess:raisePayoutDisputeAlert":                  1, // provider_reference_mismatch park
+		"internal/payments/payout.go:applyPayoutLateEvidence:raisePayoutDisputeAlert":             1, // T14 and late T10
+		"internal/payments/payout.go:applyPayoutStatusEvidenceInTx:raisePayoutDisputeAlert":       1, // invalid-reference park (poll)
+		"internal/payments/payout.go:applyPayoutSuccessCheckedFromStatus:raisePayoutDisputeAlert": 2, // amount/asset + reference mismatch (poll)
+		"internal/payments/payout_refbind.go:payoutGuardReferenceBinding:raisePayoutDisputeAlert": 1, // B10 provider_reference_conflict park
+		"internal/payments/payout_sweep.go:escalateAmbiguousPayout:raisePayoutDisputeAlert":       1, // T16 payout escalation
+		"internal/payments/receipt.go:applyResolvedReceiptEvidence:raisePayoutDisputeAlert":       1, // callback reference-mismatch park
+		"internal/payments/receipt.go:applyResolvedReceiptEvidence:payoutAlertAfterDispute":       4, // T15, T14, callback amount mismatch, tombstone
+		"internal/payments/payout_alerts.go:payoutAlertAfterDispute:raisePayoutDisputeAlert":      1,
+	}
+	got := map[string]int{}
+	for _, c := range staticCollectCalls(t) {
+		if c.name == "raisePayoutDisputeAlert" || c.name == "payoutAlertAfterDispute" {
+			got[c.file+":"+c.fn+":"+c.name]++
+		}
+	}
+	for k, n := range want {
+		if got[k] != n {
+			t.Errorf("payout dispute raise site %s: want %d call(s), found %d", k, n, got[k])
+		}
+	}
+	for k, n := range got {
+		if _, ok := want[k]; !ok {
+			t.Errorf("unreviewed payout dispute raise site %s (%d call(s)): review it against ADR 0102 7.7 and ADR 0095 section 42, then pin it", k, n)
+		}
 	}
 }
 
@@ -401,6 +453,10 @@ var staticEvidenceFuncs = map[string]bool{
 	".applyStatusEvidence": true, "s.applyStatusEvidence": true,
 	".postDepositSuccessOrDispute": true, "o.postDepositSuccessOrDispute": true,
 	"s.Orchestrator.postDepositSuccessOrDispute": true,
+	// B12: the payout evidence chain (each reaches raisePayoutDisputeAlert).
+	"applyPayoutSuccess": true, "applyPayoutDecline": true, "applyPayoutLateEvidence": true,
+	"payoutHandleContradiction": true, "payoutGuardReferenceBinding": true,
+	"applyPayoutSuccessCheckedFromStatus": true, "applyPayoutStatusEvidenceInTx": true,
 }
 
 // Reviewed callers: each is only reachable from a transaction owner that opens
@@ -416,6 +472,16 @@ var staticEvidenceCallerAllowlist = map[string]bool{
 	"internal/payments/receipt.go:applyDepositSuccessAndPost":         true,
 	"internal/payments/sweeper.go:applyStatusEvidence":                true,
 	"internal/payments/sweeper.go:applyPollPending":                   true,
+	// B12: the payout chain. Entered only from ApplyPayoutResult / applyPayoutStatusEvidence
+	// (alerting.InTx owners) or from the webhook handler's InTx via applyResolvedReceiptEvidence.
+	"internal/payments/payout.go:applyPayoutSuccess":                  true,
+	"internal/payments/payout.go:applyPayoutDecline":                  true,
+	"internal/payments/payout.go:applyPayoutLateEvidence":             true,
+	"internal/payments/payout.go:payoutHandleContradiction":           true,
+	"internal/payments/payout.go:applyPayoutSuccessCheckedFromStatus": true,
+	"internal/payments/payout.go:applyPayoutStatusEvidenceInTx":       true,
+	"internal/payments/payout_refbind.go:payoutGuardReferenceBinding": true,
+	"internal/payments/receipt.go:applyResolvedReceiptEvidence":       true,
 }
 
 func TestStaticWiring_EvidenceFunctionCallersAreInTxOrReviewed(t *testing.T) {

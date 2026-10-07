@@ -31,6 +31,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/Diansalas/igaming-platform/internal/alerting"
 	"github.com/Diansalas/igaming-platform/internal/audit"
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/identity"
@@ -537,7 +538,10 @@ func ApplyPayoutResult(ctx context.Context, pool *db.Pool, tenantID, requestID u
 	phaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), payoutPhaseCTimeout)
 	defer cancel()
 
-	return pool.WithTenant(phaseCtx, tenantID, func(actx context.Context, tx pgx.Tx) error {
+	// PAY-PAYOUT-DISPUTE-ALERT-1 (B12, ADR 0102 B-1): the phase-C transaction owner opens
+	// through alerting.InTx and flushes its Pending after the commit, so a swallowed
+	// payout dispute alert still gets its mandatory detached retry.
+	pending, err := alerting.InTx(phaseCtx, alerting.NewTenantRunner(pool, tenantID), func(actx context.Context, tx pgx.Tx) error {
 		// R3 (RV-PRH-I1 ledger re-review, ADR 0082 A7): withdrawal FIRST,
 		// unconditionally, as the very first statement of this
 		// transaction - ONE lock order for this pair everywhere (matching
@@ -562,11 +566,14 @@ func ApplyPayoutResult(ctx context.Context, pool *db.Pool, tenantID, requestID u
 			if err := ApplyDisputeFromNonTerminal(actx, tx, attempt.ID, evidence, reason); err != nil {
 				return payoutHandleContradiction(actx, tx, attempt, evidence, gr.Class, err)
 			}
-			return audit.Record(actx, tx, audit.Entry{
+			if err := audit.Record(actx, tx, audit.Entry{
 				TenantID: tenantID, ActorType: audit.ActorSystem, Action: "payments.payout_parked_invalid_reference",
 				TargetType: "payment_attempt", TargetID: attempt.ID.String(), Outcome: audit.OutcomeDenied,
 				Metadata: map[string]any{"withdrawal_request_id": requestID.String(), "reason": reason},
-			})
+			}); err != nil {
+				return err
+			}
+			return raisePayoutDisputeAlert(actx, tx, attempt, reason) // B12: LAST statement of the park
 		}
 
 		switch gr.Class {
@@ -649,6 +656,11 @@ func ApplyPayoutResult(ctx context.Context, pool *db.Pool, tenantID, requestID u
 			return nil
 		}
 	})
+	if err != nil {
+		return err
+	}
+	pending.Flush(ctx) // post-commit only; the error path has no Pending to flush
+	return nil
 }
 
 // applyPayoutSuccess performs the attempt-CAS-before-posting sequence
@@ -707,7 +719,7 @@ func applyPayoutSuccess(ctx context.Context, tx pgx.Tx, requestID uuid.UUID, att
 			if err := ApplyDisputeFromNonTerminal(ctx, tx, attempt.ID, evidence, "provider_reference_mismatch"); err != nil {
 				return payoutHandleContradiction(ctx, tx, attempt, evidence, ErrorClassSucceeded, err)
 			}
-			return audit.Record(ctx, tx, audit.Entry{
+			if err := audit.Record(ctx, tx, audit.Entry{
 				TenantID: attempt.TenantID, ActorType: audit.ActorSystem, Action: "payments.payout_provider_reference_mismatch",
 				TargetType: "payment_attempt", TargetID: attempt.ID.String(), Outcome: audit.OutcomeDenied,
 				Metadata: map[string]any{
@@ -715,7 +727,10 @@ func applyPayoutSuccess(ctx context.Context, tx pgx.Tx, requestID uuid.UUID, att
 					"stored_reference":      *storedRef,
 					"echoed_reference":      providerReference,
 				},
-			})
+			}); err != nil {
+				return err
+			}
+			return raisePayoutDisputeAlert(ctx, tx, attempt, "provider_reference_mismatch") // B12: LAST statement of the park
 		}
 	}
 
@@ -803,11 +818,16 @@ func applyPayoutLateEvidence(ctx context.Context, tx pgx.Tx, attempt PaymentAtte
 	if applyErr != nil {
 		return applyErr
 	}
-	return audit.Record(ctx, tx, audit.Entry{
+	if err := audit.Record(ctx, tx, audit.Entry{
 		TenantID: attempt.TenantID, ActorType: audit.ActorSystem, Action: "payments.payout_late_contradicting_evidence",
 		TargetType: "payment_attempt", TargetID: attempt.ID.String(), Outcome: audit.OutcomeDenied,
 		Metadata: map[string]any{"withdrawal_request_id": requestID.String(), "terminal_reason": terminalReason, "observed_state": string(current.State)},
-	})
+	}); err != nil {
+		return err
+	}
+	// B12 (PAY-PAYOUT-DISPUTE-ALERT-1): the T14 double-payout signal (declined ->
+	// disputed) and every late T10 raise a durable P1 as the LAST statement.
+	return raisePayoutDisputeAlert(ctx, tx, attempt, terminalReason)
 }
 
 // isPayoutAttemptTerminal reports whether s is one of the four states ADR
@@ -971,7 +991,8 @@ func applyPayoutStatusEvidence(ctx context.Context, pool *db.Pool, tenantID, req
 	phaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), payoutPhaseCTimeout)
 	defer cancel()
 
-	return pool.WithTenant(phaseCtx, tenantID, func(actx context.Context, tx pgx.Tx) error {
+	// PAY-PAYOUT-DISPUTE-ALERT-1 (B12, ADR 0102 B-1): same owner shape as ApplyPayoutResult.
+	pending, err := alerting.InTx(phaseCtx, alerting.NewTenantRunner(pool, tenantID), func(actx context.Context, tx pgx.Tx) error {
 		// P-C3 (FH-6 ledger-finance ruling, rv-prh-i1-payout-ledger.md):
 		// take the SAME withdrawal lock applyPayoutStatusEvidenceInTx below
 		// takes (re-locking an already-held row lock inside the SAME
@@ -999,6 +1020,11 @@ func applyPayoutStatusEvidence(ctx context.Context, pool *db.Pool, tenantID, req
 		// sweeper-driven call) is a no-op.
 		return payoutResolveAudit(actx, tx, tenantID, requestID, lockedBefore, wrBefore.State, string(gr.Class), actor)
 	})
+	if err != nil {
+		return err
+	}
+	pending.Flush(ctx) // post-commit only; the error path has no Pending to flush
+	return nil
 }
 
 // applyPayoutStatusEvidenceInTx is applyPayoutStatusEvidence's actual
@@ -1025,11 +1051,14 @@ func applyPayoutStatusEvidenceInTx(actx context.Context, tx pgx.Tx, tenantID, re
 			if err := ApplyDisputeFromNonTerminal(actx, tx, attempt.ID, evidence, reason); err != nil {
 				return payoutHandleContradiction(actx, tx, attempt, evidence, gr.Class, err)
 			}
-			return audit.Record(actx, tx, audit.Entry{
+			if err := audit.Record(actx, tx, audit.Entry{
 				TenantID: tenantID, ActorType: audit.ActorSystem, Action: "payments.payout_parked_invalid_reference",
 				TargetType: "payment_attempt", TargetID: attempt.ID.String(), Outcome: audit.OutcomeDenied,
 				Metadata: map[string]any{"withdrawal_request_id": requestID.String(), "reason": reason},
-			})
+			}); err != nil {
+				return err
+			}
+			return raisePayoutDisputeAlert(actx, tx, attempt, reason) // B12: last statement of the park (audit tail only follows)
 		}
 
 		// A transport/credential failure resolving the query itself (a
@@ -1211,7 +1240,7 @@ func applyPayoutSuccessCheckedFromStatus(ctx context.Context, tx pgx.Tx, request
 		if err := ApplyDisputeFromNonTerminal(ctx, tx, attempt.ID, evidence, reason); err != nil {
 			return payoutHandleContradiction(ctx, tx, attempt, evidence, ErrorClassSucceeded, err)
 		}
-		return audit.Record(ctx, tx, audit.Entry{
+		if err := audit.Record(ctx, tx, audit.Entry{
 			TenantID: attempt.TenantID, ActorType: audit.ActorSystem, Action: "payments.payout_amount_asset_mismatch",
 			TargetType: "payment_attempt", TargetID: attempt.ID.String(), Outcome: audit.OutcomeDenied,
 			Metadata: withAssetEcho(map[string]any{
@@ -1219,7 +1248,10 @@ func applyPayoutSuccessCheckedFromStatus(ctx context.Context, tx pgx.Tx, request
 				"requested_amount":      wr.Amount, "requested_asset": wr.AssetCode,
 				"provider_amount": status.Amount,
 			}, "provider_asset", status.AssetCode), // B5: never the raw provider text
-		})
+		}); err != nil {
+			return err
+		}
+		return raisePayoutDisputeAlert(ctx, tx, attempt, reason) // B12: last statement of the park
 	}
 	// N6 (RV-PRH-I1 ledger re-review, ADR 0095 §4.4; extended by RV-PRH-I1
 	// re-review 2's own "N6 must also compare against the fallback
@@ -1244,7 +1276,7 @@ func applyPayoutSuccessCheckedFromStatus(ctx context.Context, tx pgx.Tx, request
 		if err := ApplyDisputeFromNonTerminal(ctx, tx, attempt.ID, evidence, reason); err != nil {
 			return payoutHandleContradiction(ctx, tx, attempt, evidence, ErrorClassSucceeded, err)
 		}
-		return audit.Record(ctx, tx, audit.Entry{
+		if err := audit.Record(ctx, tx, audit.Entry{
 			TenantID: attempt.TenantID, ActorType: audit.ActorSystem, Action: "payments.payout_provider_reference_mismatch",
 			TargetType: "payment_attempt", TargetID: attempt.ID.String(), Outcome: audit.OutcomeDenied,
 			Metadata: map[string]any{
@@ -1252,7 +1284,10 @@ func applyPayoutSuccessCheckedFromStatus(ctx context.Context, tx pgx.Tx, request
 				"stored_reference":      *storedRef,
 				"echoed_reference":      status.ProviderReference,
 			},
-		})
+		}); err != nil {
+			return err
+		}
+		return raisePayoutDisputeAlert(ctx, tx, attempt, reason) // B12: last statement of the park
 	}
 	return applyPayoutSuccess(ctx, tx, requestID, attempt, status.ProviderReference, evidence)
 }

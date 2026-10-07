@@ -89,6 +89,21 @@ var staticDerivedRaiseSetReviewed = map[string]bool{
 	"internal/payments/sweeper.go:applyStatusEvidence":                  true,
 	"internal/payments/sweeper.go:applyPollPending":                     true,
 	"internal/payments/sweeper.go:escalateDepositIfDue":                 true,
+	// B12 (PAY-PAYOUT-DISPUTE-ALERT-1): the payout dispute chain. The transaction owners
+	// ApplyPayoutResult and applyPayoutStatusEvidence (payout.go) and escalateAmbiguousPayout
+	// (payout_sweep.go) open through alerting.InTx and are therefore NOT in this set (their
+	// calls are inside the InTx closure); payout callbacks arrive through the webhook handler's
+	// InTx. Pinned by TestStaticWiring_EvidenceTransactionOwnersOpenThroughInTxAndFlush and
+	// TestStaticWiring_PayoutDisputeRaiseSitesArePinned_B12.
+	"internal/payments/payout.go:applyPayoutDecline":                  true,
+	"internal/payments/payout.go:applyPayoutLateEvidence":             true,
+	"internal/payments/payout.go:applyPayoutStatusEvidenceInTx":       true,
+	"internal/payments/payout.go:applyPayoutSuccess":                  true,
+	"internal/payments/payout.go:applyPayoutSuccessCheckedFromStatus": true,
+	"internal/payments/payout.go:payoutHandleContradiction":           true,
+	"internal/payments/payout_alerts.go:payoutAlertAfterDispute":      true,
+	"internal/payments/payout_alerts.go:raisePayoutDisputeAlert":      true,
+	"internal/payments/payout_refbind.go:payoutGuardReferenceBinding": true,
 }
 
 func TestStaticWiring_DerivedRaiseReachingSetIsReviewed_CR2S4(t *testing.T) {
