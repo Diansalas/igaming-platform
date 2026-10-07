@@ -132,6 +132,10 @@ func TestM1_Replay_OneAlertRow_OccurrencesGrow_NoStateChange(t *testing.T) {
 	if got := e.r8Events(t); got != base+1 {
 		t.Fatalf("the receipt must be deduped to one row: %d -> %d", base, got)
 	}
+	// PAY-PAYOUT-CALLBACK-AUDIT-2: the audit row is written once for the first (new) receipt, not per redelivery.
+	if n := e.b12AuditCount(t, auditActionPayoutSucceededForeignRef, a.ID); n != 1 {
+		t.Fatalf("foreign-reference audit rows = %d, want 1 after three identical deliveries", n)
+	}
 	e.r6AssertStillSucceeded(t, o)
 }
 

@@ -122,8 +122,7 @@ func TestR6_MatchingRepeatedSuccess_DoesNotRaise(t *testing.T) {
 }
 
 // Idempotence: three byte-identical mismatched deliveries leave ONE open alert whose occurrences
-// grow to 3; the receipt is deduped, the pre-existing audit row is still written per delivery
-// (F-2 / PAY-PAYOUT-CALLBACK-AUDIT-2), nothing else changes.
+// grow to 3; the receipt is deduped, the audit row is written once (PAY-PAYOUT-CALLBACK-AUDIT-2), nothing else changes.
 func TestR6_Replay_OneAlertRow_OccurrencesGrow_NoStateChange(t *testing.T) {
 	pool := depositV2ScratchPool(t)
 	f, orch, _ := fpOrch(t, pool, "mock-r6-replay")
@@ -134,8 +133,10 @@ func TestR6_Replay_OneAlertRow_OccurrencesGrow_NoStateChange(t *testing.T) {
 		if err := e.r5Callback(a, "r6-replay-ref", 499, "EUR"); err != nil {
 			t.Fatalf("delivery #%d: %v", i, err)
 		}
-		if n := e.b12AuditCount(t, r5Terminal, a.ID); n != i+1 {
-			t.Fatalf("after delivery #%d: terminal-mismatch audit rows = %d, want %d", i, n, i+1)
+		// PAY-PAYOUT-CALLBACK-AUDIT-2 (deliberate change from 1,2,3): one audit row for the first
+		// (new) receipt, none per redelivery. The raise stays per delivery (occurrences grow).
+		if n := e.b12AuditCount(t, r5Terminal, a.ID); n != 1 {
+			t.Fatalf("after delivery #%d: terminal-mismatch audit rows = %d, want 1", i, n)
 		}
 	}
 	rows := e.b12Rows(t)
