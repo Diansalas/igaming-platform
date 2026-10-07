@@ -6744,14 +6744,27 @@ for a real PSP statement.** It does not open the §35.4 GATE.
   under R. The only clearing is a `withdrawal_completed` ledger posting of this provider **keyed by the
   line reference** (`payoutCompletedRef`). The same rule applies at all three payout sites: the in-run
   `unboundPark()` case, the merchant cross-check B step, and the standing rule.
-- **Attribution (ledger-finance implementation choice, fail closed, reversible).** The
-  `withdrawal_completed` must also be **attributable to the parked attempt**: no other attempt holds the
-  line reference as its payout settlement reference or its payout provider reference. Another payout's
-  completion under the same reference therefore never clears the park's finding. This narrows the ruled
-  clearing; it never widens it. It follows the `resolvesTo` / `yAttributable` precedent: borrowed
-  attribution may raise, never clear. Consequence: a park whose line reference is held by another
-  attempt, or (reverse collision) is already a `deposit` ledger key, cannot clear by any posting today.
-  It stays loud until PAY-PAYOUT-UNBOUND-RESOLVE-1 defines its resolution.
+- **Attribution: positive, fail closed (security review condition L-1, option (a)).** The
+  `withdrawal_completed` must be **positively attributed to the parked attempt**: it is the release of
+  the attempt's **own** withdrawal request (`withdrawal_requests.release_ledger_transaction_id` points
+  at it, so `a.settlementRef == ref` and `bySettlement[ref] == a`), and no other attempt holds the line
+  reference as its payout provider reference.
+  - A completion that merely shares the line reference never clears. That covers an unlinked posting,
+    a legacy/unattempted withdrawal's completion (`legacyUnattempted`: a withdrawal with no
+    `payment_attempts` row), and another attempt's settlement.
+  - The first cut used a negative form (block only when **another** attempt holds the reference). It
+    would have let an unattributed or legacy completion clear the finding; security L-1 tightened it.
+  - This narrows the ruled clearing and never widens it. It follows the `resolvesTo` / `yAttributable`
+    precedent: borrowed attribution may raise, never clear.
+  - Consequence: a park whose line reference is held by another attempt or a legacy withdrawal, or (in
+    the reverse collision) is already a `deposit` ledger key, cannot be cleared by any posting today.
+    It stays loud until PAY-PAYOUT-UNBOUND-RESOLVE-1 defines its resolution.
+- **Folded into PAY-PAYOUT-UNBOUND-RESOLVE-1 (security review, informational; not done here).**
+  - **I-1:** the clearing `withdrawal_completed`'s amount and asset are **not** compared with the
+    attempt's (or the line's). The governed completion must define and enforce that comparison.
+  - **I-2:** the persisted-lines query (`loadK3Evidence`) is **unbounded** by design (INV-M-5: never
+    drop evidence with a LIMIT). Its cost grows with tenant history, and any cap must fail the run
+    loudly. This is shared with CAS-RECON-SCALE-1.
 - **Wording.** Every payout `pay_captured_unposted` (unbound in-run, cross-check B step, standing, and
   the text-only change at the bound-class payout sites) uses "resolution: PSP-side recall/return or
   governed completion against the hold (NOT IMPLEMENTED, R-K3-8); never allocation; M1 only
@@ -6767,8 +6780,12 @@ for a real PSP statement.** It does not open the §35.4 GATE.
     X6 (clear B on `a.providerRef` instead of `l.ref`) is now **equivalent**, because both references
     belong to P1 and neither is attributable to B. See the evidence file.
 - **New tests.**
-  - `TestB11_Recon_UnboundPayoutPark_WithdrawalCompletedOnLineRefClears`: clears on the line reference,
-    not on another reference, and not on a reference another attempt holds.
+  - `TestB11_Recon_UnboundPayoutPark_WithdrawalCompletedOnLineRefClears`: clears on the attempt's own
+    completion under the line reference. It does not clear on:
+    - a completion under another reference;
+    - a reference another attempt holds;
+    - a legacy/unattempted withdrawal's completion on the line reference (L-1);
+    - an unlinked `withdrawal_completed` posting on the line reference (L-1).
   - `TestB11_Recon_UnboundPayoutPark_UnrelatedActivityNeverClears`: other parks, other completions,
     other-reference reversals and tombstones, and another attempt's completion under the same reference.
   - `TestB11_Recon_TenantIsolation` (extended): tenant B, under tenant A's provider id and line
