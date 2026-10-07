@@ -615,6 +615,27 @@ Ordered. "Startable" means no new human decision is needed. Every task: branch o
 | 9 | Q-GP-2/3/4/6 gameplay questions | **No** | Owner/architect/legal |
 | 10 | Sandbox PSP adapter; real alert channel; AWS staging run | **No** | Separate authorizations; see 38, 45 |
 
+### 36a. B13 decision package and independent work (2026-10-07, HEAD 484cbc5 + this docs commit)
+
+B11 and B12 are complete and merged. **B13 is awaiting the architect/owner decision.** The decision brief is prepared: `docs/governance/b13-decision-brief.md` (documented requirement = destination from a player-bound, verified instrument resolved server-side; D1-D4 open; no third option is documented). B13 is NOT implemented and no option has been chosen.
+
+Classification of the named items (A = implement now, no human decision; B = needs human/architect/security decision; C = sandbox-gated; D = depends on B13; E = covered/no action):
+
+| Item | Class | Why |
+|---|---|---|
+| PAY-PAYOUT-UNBOUND-STANDING-1 | **A** (priority 1) | Direction already ruled in ADR 0095 s35.2 PO-1 (LF): per-operation standing rule, deposit-shaped signals never clear a payout finding, finding text never suggests allocation; flips the B11 pins deliberately. Reconciliation code, no migration expected (a `payout_return` line kind is out of scope). Required before any non-MOCK payout. |
+| PAY-PAYOUT-ASSET-ECHO-TEST-1 | **A** | Tests only (payout asset-echo site lacks a site-level test). |
+| PAY-PAYOUT-CALLBACK-AUDIT-1 | **A** | Audit rows for existing callback T14/T15/mismatch/tombstone cells; no state/policy change (CLAUDE.md audit rule). |
+| R-5 (B12) | **A** | Raise-only alert for mismatched-amount success on a declined payout; LF recorded raise-only as acceptable. |
+| PAY-PAYOUT-UNBOUND-RESOLVE-1 | **B** | R-K3-8 resolution semantics for unbound payout holds need owner/architect + LF design before code. Required before any non-MOCK payout. |
+| H-SEC-5 (tenant-status gate on HTTP deposit/payout initiation) | **B** (quick confirm) | Mechanism is clear; the policy for non-active tenants on NEW HTTP money initiation is not recorded as a decision (HD-CTF-10 covers closed-tenant outbound). Recommend a one-line security/owner confirmation, then it is A. |
+| H-SEC-11 (brand suspended/closed status gate) | **B** | Registry: "security to decide" (H(8)). |
+| ALERT-DELIVERY-1 | **B + C** | Owner recipients/channel; user decided sandbox PSP precedes delivery; production blocker. |
+| B13 | **B / D** | Gate. B14-B18 and the sandbox adapter depend on it. |
+| E | none of the eight is fully covered | PAY-PAYOUT-CONTRADICTION-HOLD-1 is related to RESOLVE-1. |
+
+Recommended path: (1) PAY-PAYOUT-UNBOUND-STANDING-1; (2) one bundle: PAY-PAYOUT-ASSET-ECHO-TEST-1 + PAY-PAYOUT-CALLBACK-AUDIT-1 + R-5. Remain blocked: B13, RESOLVE-1, H-SEC-5/11 (pending one-line rulings), ALERT-DELIVERY-1, B14-B18, sandbox PSP, AWS.
+
 ## 37. CONTINUING DEVELOPMENT ROADMAP
 
 1. Close PRH-2: merges, sweep, Class-B startable items, gate report, owner authorization.

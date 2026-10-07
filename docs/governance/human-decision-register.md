@@ -44,7 +44,7 @@ Columns: `ID | Question | Current Decision | Status | Blocks | Owner`. Mirrored 
 | MA020-K2-VISIBILITY-1, STMT-TABLE-INSERT-RLS-1 | K2-session visibility on reference evidence; statement-table insert RLS | none | OPEN | Before a live PSP with status polling | security + architect |
 | PAY-PAYOUT-CONTRADICTION-HOLD-1 | Operator resolution path for refused payout parks | none | OPEN | Live payouts | owner + architect |
 | PAY-PAYOUT-UNBOUND-STANDING-1 / PAY-PAYOUT-UNBOUND-RESOLVE-1 | Standing recon coverage + R-K3-8 resolution path for unbound payout holds; allocation never a route for payouts | none | OPEN (engineering; owner/architect to confirm resolution semantics) | Any non-MOCK payout, sandbox payouts included | owner + architect + ledger-finance |
-| B13 | Payout destination binding | none | BLOCKED | Real payouts | architect + owner |
+| B13 | Payout destination binding (decision brief: `docs/governance/b13-decision-brief.md`; statement in its s15) | none | AWAITING DECISION (brief prepared 2026-10-07) | Real payouts | architect + owner |
 | ALERT-DELIVERY-1 / HD-PRH2-4-OPS | Real recipients, on-call, channel | none | OPEN | Production; first human-notification kind (ADR 0102 s18.4) | owner |
 | ADR 0094 timing-lane criterion | Environment-calibrated relative assertion / p95 + p100 ceiling / controlled runner | bound unchanged | OPEN | Reliable green timing lane | owner + architect + security |
 | HD-PRH2-8 | Below-threshold four-eyes semantics | interim enforced | OPEN (non-blocking) | - | owner |
