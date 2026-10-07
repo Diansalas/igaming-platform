@@ -47,3 +47,23 @@ resume, restored with git checkout and K5 was re-run cleanly (result above).
 
 Surviving mutants: K8 and K11 (alone) are equivalent for the stated reasons; both are killed in
 combination with the second guard (K8b, K11p), which shows each defence-in-depth layer is itself pinned.
+
+----------------------------------------------------------------------------------------------
+LF review condition C2 (database allow-list payment_m2_admits): SQL mutants
+The earlier DB probe was vacuous for 'declined': payment_m2_admits requires an EXECUTING resolution
+whose target_state equals the new state, kind m2_declare_paid for 'succeeded' and m2_declare_not_paid
+for 'declined' (the kind that runs withdrawal.Fail). TestB11_M2_Refused_GoAndDB_EveryUnboundReason now
+requests one resolution of each kind, runs each state's probes under its own kind, and carries POSITIVE
+CONTROLS (provider_reference_mismatch is admitted for succeeded AND for declined).
+Note on method: every test builds its own freshly migrated scratch database, so a CREATE OR REPLACE in
+the private database would not reach the tests. The two SQL mutants were therefore applied in place to
+migrations/0115_payment_force_resolution.up.sql (backup, restore, cmp identical; never committed), and
+the function definition was verified afterwards: a database rebuilt from the restored migrations has
+pg_get_functiondef(payment_m2_admits) byte-identical to the one captured before any mutation.
+
+S1  IN-list also admits p_old_reason LIKE 'invalid_provider_reference%'                 KILLED
+    (admits ... -> succeeded and -> declined for the bare reason and every closed reason)
+S2  declined-only arm: (p_new_state='declined' AND p_old_reason LIKE 'invalid_provider_reference%')  KILLED
+    (fails only on the declined probes, "admits ... -> declined (the hold-releasing kind)": proves the
+    declined probe is no longer vacuous)
+Control run after restore: ok (all 27 TestB11_ tests).
