@@ -10,6 +10,7 @@ package payments
 
 import (
 	"context"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -268,18 +269,28 @@ func TestOrphanResolve_Concurrent_TwoRedeliveries_ResolvedOnce_NoError(t *testin
 	for _, name := range []string{"cross_provider", "reference_conflict", "event_type_mismatch"} {
 		t.Run(name, func(t *testing.T) {
 			e, b, ev, prov, _ := orRun(t, name)
-			for rep := 0; rep < 1; rep++ {
+			for rep := 0; rep < 20; rep++ {
+				// A fresh orphan per repetition (distinct provider reference => distinct fingerprint).
+				evr := ev
+				evr.ProviderReference = ev.ProviderReference + "-" + strconv.Itoa(rep)
+				if b.want == ResolutionAnomalyReferenceConflict {
+					evr = ev // the conflict is keyed on the one bound reference; the single orphan is raced once below
+					if rep > 0 {
+						continue
+					}
+				}
+				e.orPlant(t, prov, evr)
 				runTwo(t, func(int) error {
-					disp, err := e.orDeliver(prov, ev)
+					disp, err := e.orDeliver(prov, evr)
 					if err == nil && disp != DispositionAnomaly {
 						t.Errorf("disp = %s, want anomaly", disp)
 					}
 					return err
 				})
-			}
-			row := e.orReceipt(t, prov, ev.ProviderReference)
-			if row.n != 1 || !row.resolved || row.resolution != string(b.want) || row.attemptID != nil {
-				t.Fatalf("receipt = %+v, want one row resolved as %s", row, b.want)
+				row := e.orReceipt(t, prov, evr.ProviderReference)
+				if row.n != 1 || !row.resolved || row.resolution != string(b.want) || row.attemptID != nil {
+					t.Fatalf("rep %d: receipt = %+v, want one row resolved as %s", rep, row, b.want)
+				}
 			}
 			if got := e.orUnapplied(t, prov); got != 0 {
 				t.Fatalf("unapplied = %d, want 0", got)
@@ -443,4 +454,72 @@ func TestOrphanResolve_C1b_NewApplied_And_NewAnomaly_OneAuditRowEach(t *testing.
 			}
 		}
 	}
+}
+
+// Deliberate interleaving (security L-2 / LF L-1): a lock-free orphan close lands INSIDE the drain's window
+// between its select and its strict ResolveReceipt. The orphan is a deposit receipt for reference R whose
+// merchant reference names a DIFFERENT attempt, so the redelivery classifies it as a reference-conflict
+// anomaly (the tolerant close) while the binding attempt's drain selects the same row. The drain must
+// not see ErrAttemptStateConflict (that would roll back the whole binding transaction), and the receipt
+// ends resolved exactly once.
+func TestOrphanResolve_Interleaved_AnomalyCloseDuringDrain_NoConflictLeaksToBindingTx(t *testing.T) {
+	e := t4DrainSetup(t, "mock-orph-interleave", "orph-interleave")
+	c := e.orSecondAmbiguous(t, "orph-interleave-c")
+	const ref = "orph-interleave-refR"
+	e.orBind(t, e.attempt.ID, ref)
+	ev := ReceiptEvidence{EventType: "deposit", ProviderReference: ref, MerchantReference: c.MerchantReference,
+		Outcome: OutcomePending, Amount: MockAmountAmbiguous, AssetCode: "EUR"}
+	e.orPlant(t, e.provider, ev)
+
+	type res struct {
+		disp ReceiptDisposition
+		err  error
+	}
+	done := make(chan res, 1)
+	fired := false
+	testHookAfterDeferredSelect = func() {
+		fired = true
+		go func() {
+			d, err := e.orDeliver(e.provider, ev)
+			done <- res{d, err}
+		}()
+		// Give the competing close time to commit if nothing blocks it (the FOR UPDATE makes it wait).
+		time.Sleep(700 * time.Millisecond)
+	}
+	t.Cleanup(func() { testHookAfterDeferredSelect = nil })
+
+	var applied int
+	err := e.pool.WithTenant(context.Background(), e.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `SELECT id FROM deposit_intents WHERE id = $1 FOR UPDATE`, e.intent); err != nil {
+			return err
+		}
+		a, err := GetAttemptByID(ctx, tx, e.attempt.ID)
+		if err != nil {
+			return err
+		}
+		applied, err = ApplyDeferredReceiptsForAttempt(ctx, tx, e.orch, a)
+		return err
+	})
+	testHookAfterDeferredSelect = nil
+	if err != nil {
+		t.Fatalf("the binding transaction's drain failed (a conflict leaked): %v", err)
+	}
+	if !fired {
+		t.Fatal("setup: the drain hook never fired")
+	}
+	r := <-done
+	if r.err != nil || r.disp != DispositionAnomaly {
+		t.Fatalf("competing redelivery: disp=%s err=%v, want anomaly with no error", r.disp, r.err)
+	}
+	row := e.orReceipt(t, e.provider, ref)
+	if row.n != 1 || !row.resolved {
+		t.Fatalf("receipt = %+v, want one resolved row", row)
+	}
+	if applied != 1 || row.attemptID == nil || *row.attemptID != e.attempt.ID {
+		t.Fatalf("the drain (which held the lock first) must have applied it: applied=%d receipt=%+v", applied, row)
+	}
+	if got := e.orUnapplied(t, e.provider); got != 0 {
+		t.Fatalf("unapplied = %d", got)
+	}
+	assertLedgerBalanced(t, e.pool, e.f.tenantID)
 }
