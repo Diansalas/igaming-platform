@@ -119,10 +119,11 @@ func TestR5_Replay_OneAlertRow_OccurrencesGrow_NoStateChange(t *testing.T) {
 		if err := e.r5Callback(a, "r5-replay-ref", 499, "EUR"); err != nil {
 			t.Fatalf("delivery #%d: %v", i, err)
 		}
-		// Pins the ADR 0095 42.8 claim: the pre-existing terminal-mismatch audit row is written once PER
-		// DELIVERY (follow-up F-2 / PAY-PAYOUT-CALLBACK-AUDIT-2 would gate it on !duplicate).
-		if n := e.b12AuditCount(t, r5Terminal, a.ID); n != i+1 {
-			t.Fatalf("after delivery #%d: terminal-mismatch audit rows = %d, want %d", i, n, i+1)
+		// PAY-PAYOUT-CALLBACK-AUDIT-2 (deliberate change from 1,2,3): the terminal-mismatch audit row is
+		// written once for the first (new) receipt and NOT again per byte-identical redelivery, so a
+		// provider redelivery loop no longer grows the audit log. The raise stays per delivery.
+		if n := e.b12AuditCount(t, r5Terminal, a.ID); n != 1 {
+			t.Fatalf("after delivery #%d: terminal-mismatch audit rows = %d, want 1", i, n)
 		}
 	}
 	rows := e.b12Rows(t)

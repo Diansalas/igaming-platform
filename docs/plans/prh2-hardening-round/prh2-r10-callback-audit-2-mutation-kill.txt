@@ -1,0 +1,75 @@
+PRH-2 round 10 mutation-kill evidence, 2026-10-07: PAY-PAYOUT-CALLBACK-AUDIT-2 (T2, ADR 0095 section 42.8)
+Method: each mutant is applied in place to internal/payments/receipt.go (backup .mutbak beside it), `go build ./internal/payments/`
+must succeed (a compile-error mutant is NOT counted), then, stopping at the first failing suite, against a private scratch DB:
+  integ  = -tags integration -count=1 -p 1 -run 'TestCallbackAudit2_|TestR5_|TestR6_|TestM1_|TestDepositMismatch'  (runtime role)
+  unit   = go test -count=1 ./internal/payments/ -run 'TestPayoutDispute|TestPayoutAlert'
+  static = go test -count=1 ./internal/alerting/ -run TestStaticWiring
+Restored after every mutant and verified with `git diff --quiet -- <file>` ("restore-cmp ... OK"). CONTROL on the unmutated tree
+passed first. Harness: scratchpad r10a/mut.py. Compile-error mutants counted: 0.
+
+RESULTS (13 mutants)
+  First pass: 11 KILLED, 2 SURVIVED (D12, D13). After adding TestCallbackAudit2_DeferredDrain_MismatchedSuccessOnSucceeded_AuditedOnce:
+  12 KILLED, 1 SURVIVED (D13, equivalent).
+  The !duplicate gate is killed in both directions: removed (D1, D2, D3: audit per redelivery), inverted (D4, D5, D6), never-write
+  (D7), gate dead via the caller (D11 duplicate=false always), first delivery loses its audit (D10 duplicate=true always), raise
+  wrongly gated (D8, D9: the raise must stay unconditional), deferred drain (D12).
+
+SURVIVOR CLASSIFICATION (honest)
+  D13-audit-in-dup-after-raise-skip (audit error swallowed in the succeeded cell): EQUIVALENT under every injectable fault, as E9 /
+    A2 in earlier rounds: audit.Record fails in a test only through a database error that aborts the transaction, so the raise
+    then fails (25P02) or the commit fails and the delivery errors and rolls back exactly as if the error had been returned.
+  D12 first SURVIVED (the drain path had no test of a mismatched deferred receipt); killed on rerun by the new drain test.
+Not mutated: the dispute cells (T14, T15, callback mismatch, tombstone) are unchanged by this item; their concurrency behaviour is
+pinned by TestCallbackAudit2_Concurrent_DisputeCells_OneAuditRow_OneAlertRow (passes on the unmutated tree; it documents existing
+once-only behaviour and is not a mutation target here).
+----- raw logs (first pass, then the D12 rerun) -----
+CONTROL PASS
+D1-succ-gate-removed succeeded-cell audit gate removed (audit per redelivery) KILLED integ:TestCallbackAudit2_Concurrent_IdenticalDeliveries_OneAuditRow_OneAlertRow_SignalCells,TestR6_Replay_OneAlertRow_OccurrencesGrow_NoStateChange
+  restore-cmp internal/payments/receipt.go OK
+D2-decl-gate-removed declined-cell audit gate removed KILLED integ:TestCallbackAudit2_Concurrent_IdenticalDeliveries_OneAuditRow_OneAlertRow_SignalCells,TestR5_Replay_OneAlertRow_OccurrencesGrow_NoStateChange
+  restore-cmp internal/payments/receipt.go OK
+D3-m1-gate-removed M-1 audit gate removed KILLED integ:TestCallbackAudit2_Concurrent_IdenticalDeliveries_OneAuditRow_OneAlertRow_SignalCells,TestM1_Replay_OneAlertRow_OccurrencesGrow_NoStateChange
+  restore-cmp internal/payments/receipt.go OK
+D4-succ-gate-inverted succeeded-cell gate inverted (audit only duplicates) KILLED integ:TestDepositMismatchedSuccess_OnSucceededAndDeclined_AuditOnly_NoAlert_NoStateChange,TestR6_MismatchedSuccessOnSucceededPayout_RaisesOneP1_NoStateChange,TestR6_Replay_OneAlertRow_OccurrencesGrow_NoStateChange
+  restore-cmp internal/payments/receipt.go OK
+D5-decl-gate-inverted declined-cell gate inverted KILLED integ:TestDepositMismatchedSuccess_OnSucceededAndDeclined_AuditOnly_NoAlert_NoStateChange,TestR5_MismatchedSuccessOnDeclinedPayout_RaisesOneP1_NoStateChange,TestR5_Replay_OneAlertRow_OccurrencesGrow_NoStateChange
+  restore-cmp internal/payments/receipt.go OK
+D6-m1-gate-inverted M-1 gate inverted KILLED integ:TestM1_ForeignRefSuccessOnSucceededPayout_AuditAndOneP1_NoStateChange,TestM1_Replay_OneAlertRow_OccurrencesGrow_NoStateChange,TestM1_AlertFailureSemantics
+  restore-cmp internal/payments/receipt.go OK
+D7-gate-always-skip-succ succeeded-cell audit never written KILLED integ:TestDepositMismatchedSuccess_OnSucceededAndDeclined_AuditOnly_NoAlert_NoStateChange,TestCallbackAudit2_Concurrent_IdenticalDeliveries_OneAuditRow_OneAlertRow_SignalCells,TestR6_MismatchedSuccessOnSucceededPayout_RaisesOneP1_NoStateChange
+  restore-cmp internal/payments/receipt.go OK
+D8-raise-gated-succ R-6 raise gated on !duplicate (raise must stay unconditional) KILLED integ:TestCallbackAudit2_Concurrent_IdenticalDeliveries_OneAuditRow_OneAlertRow_SignalCells,TestR6_Replay_OneAlertRow_OccurrencesGrow_NoStateChange
+  restore-cmp internal/payments/receipt.go OK
+D9-raise-gated-decl R-5 raise gated on !duplicate KILLED integ:TestCallbackAudit2_Concurrent_IdenticalDeliveries_OneAuditRow_OneAlertRow_SignalCells,TestR5_Replay_OneAlertRow_OccurrencesGrow_NoStateChange
+  restore-cmp internal/payments/receipt.go OK
+D10-duplicate-always-true caller passes duplicate=true always (first delivery loses its audit) KILLED integ:TestDepositMismatchedSuccess_OnSucceededAndDeclined_AuditOnly_NoAlert_NoStateChange,TestCallbackAudit2_Concurrent_IdenticalDeliveries_OneAuditRow_OneAlertRow_SignalCells,TestR5_MismatchedSuccessOnDeclinedPayout_RaisesOneP1_NoStateChange
+  restore-cmp internal/payments/receipt.go OK
+D11-duplicate-always-false caller passes duplicate=false always (gate dead) KILLED integ:TestCallbackAudit2_Concurrent_IdenticalDeliveries_OneAuditRow_OneAlertRow_SignalCells,TestR5_Replay_OneAlertRow_OccurrencesGrow_NoStateChange,TestM1_Replay_OneAlertRow_OccurrencesGrow_NoStateChange
+  restore-cmp internal/payments/receipt.go OK
+D12-drain-duplicate-true deferred drain passes duplicate=true SURVIVED
+  restore-cmp internal/payments/receipt.go OK
+D13-audit-in-dup-after-raise-skip succeeded-cell audit error swallowed SURVIVED
+  restore-cmp internal/payments/receipt.go OK
+CONTROL PASS
+D12-drain-duplicate-true deferred drain passes duplicate=true KILLED integ:TestCallbackAudit2_DeferredDrain_MismatchedSuccessOnSucceeded_AuditedOnce
+  restore-cmp internal/payments/receipt.go OK
+
+===== ADDENDUM: S-1/C-1 gate change (already-RESOLVED instead of already-existed) =====
+Same method and suites. 7 mutants, 0 compile errors: 7 KILLED, 0 SURVIVED (revert to `duplicate`, never-resolve, always-resolve, gate forced false/true, resolved-check inverted, resolved-check skipped).
+Note: with the gate on `alreadyApplied`, the D1-D13 mutants above were written against the earlier `duplicate` form; the D-series
+logic is unchanged for resolved duplicates and is re-exercised by the same tests in the final run.
+CONTROL PASS
+N1-revert-to-duplicate apply gate reverted to `duplicate` (orphan audit lost) KILLED integ:TestCallbackAudit2_OrphanedDeferredReceipt_RedeliveredAfterConcurrentBind_AuditedOnce_Resolved,TestCallbackAudit2_DeferredThenSyncBind_Redelivered_AuditedOnce_Resolved,TestCallbackAudit2_Deposit_OrphanedReceipt_Redelivered_AuditedOnce_Resolved
+  restore-cmp internal/payments/receipt.go OK
+N2-never-resolve-duplicate ResolveReceipt gated on !duplicate again (orphan never closed) KILLED integ:TestCallbackAudit2_OrphanedDeferredReceipt_RedeliveredAfterConcurrentBind_AuditedOnce_Resolved,TestCallbackAudit2_DeferredThenSyncBind_Redelivered_AuditedOnce_Resolved,TestCallbackAudit2_Deposit_OrphanedReceipt_Redelivered_AuditedOnce_Resolved
+  restore-cmp internal/payments/receipt.go OK
+N3-always-resolve ResolveReceipt unconditional (resolved duplicate re-CAS) KILLED integ:TestCallbackAudit2_Concurrent_IdenticalDeliveries_OneAuditRow_OneAlertRow_SignalCells,TestCallbackAudit2_Concurrent_DisputeCells_OneAuditRow_OneAlertRow,TestCallbackAudit2_OrphanedDeferredReceipt_RedeliveredAfterConcurrentBind_AuditedOnce_Resolved
+  restore-cmp internal/payments/receipt.go OK
+N4-already-always-false alreadyApplied forced false (gate dead; resolved duplicates re-audit) KILLED integ:TestCallbackAudit2_Concurrent_IdenticalDeliveries_OneAuditRow_OneAlertRow_SignalCells,TestCallbackAudit2_Concurrent_DisputeCells_OneAuditRow_OneAlertRow,TestCallbackAudit2_OrphanedDeferredReceipt_RedeliveredAfterConcurrentBind_AuditedOnce_Resolved
+  restore-cmp internal/payments/receipt.go OK
+N5-already-always-true alreadyApplied forced true for duplicates (orphan never audited or closed) KILLED integ:TestCallbackAudit2_OrphanedDeferredReceipt_RedeliveredAfterConcurrentBind_AuditedOnce_Resolved,TestCallbackAudit2_DeferredThenSyncBind_Redelivered_AuditedOnce_Resolved,TestCallbackAudit2_Deposit_OrphanedReceipt_Redelivered_AuditedOnce_Resolved
+  restore-cmp internal/payments/receipt.go OK
+N6-resolved-inverted receiptIsResolved inverted KILLED integ:TestCallbackAudit2_Concurrent_IdenticalDeliveries_OneAuditRow_OneAlertRow_SignalCells,TestCallbackAudit2_Concurrent_DisputeCells_OneAuditRow_OneAlertRow,TestCallbackAudit2_OrphanedDeferredReceipt_RedeliveredAfterConcurrentBind_AuditedOnce_Resolved
+  restore-cmp internal/payments/receipt.go OK
+N7-resolved-read-skipped resolved check skipped for duplicates (treated unresolved) KILLED integ:TestCallbackAudit2_Concurrent_IdenticalDeliveries_OneAuditRow_OneAlertRow_SignalCells,TestCallbackAudit2_Concurrent_DisputeCells_OneAuditRow_OneAlertRow,TestCallbackAudit2_OrphanedDeferredReceipt_RedeliveredAfterConcurrentBind_AuditedOnce_Resolved
+  restore-cmp internal/payments/receipt.go OK

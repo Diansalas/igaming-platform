@@ -59,3 +59,34 @@ func auditPayoutCallbackDispute(ctx context.Context, tx pgx.Tx, attempt PaymentA
 	}
 	return nil
 }
+
+// PAY-PAYOUT-SUCCEEDED-REF-MISMATCH-1 (ADR 0095 section 42.8, ledger-finance M-1).
+const auditActionPayoutSucceededForeignRef = "payments.payout_succeeded_foreign_reference"
+
+// auditPayoutSucceededForeignRef records a success delivered for an already-SUCCEEDED payout that
+// echoes a DIFFERENT provider reference than the stored one (amount and asset match). Nothing is
+// parked or changed: the row is the evidence. Closed vocabulary: the stored reference is the
+// platform's own bound value; the echoed one goes through echoAuditMeta (the value only when it is
+// a valid reference, else reason, length and hash prefix); no raw provider text. It must run
+// BEFORE the raise (ADR 0102 7.7).
+func auditPayoutSucceededForeignRef(ctx context.Context, tx pgx.Tx, attempt PaymentAttempt, ev ReceiptEvidence, storedRef string) error {
+	meta := echoAuditMeta(ev.ProviderReference)
+	meta["reason"] = alertReasonPayoutForeignRefSuccessOnSucceeded
+	meta["attempt_state"] = string(attempt.State)
+	meta["evidence"] = string(EvidenceCallback)
+	meta["provider_id"] = providerIDOrEmpty(attempt)
+	meta["stored_reference"] = storedRef
+	meta["stored_amount"] = attempt.Amount
+	meta["stored_asset_code"] = attempt.AssetCode
+	if attempt.WithdrawalRequestID != nil {
+		meta["withdrawal_request_id"] = attempt.WithdrawalRequestID.String()
+	}
+	if err := audit.Record(ctx, tx, audit.Entry{
+		TenantID: attempt.TenantID, ActorType: audit.ActorSystem, Action: auditActionPayoutSucceededForeignRef,
+		TargetType: "payment_attempt", TargetID: attempt.ID.String(), Outcome: audit.OutcomeDenied,
+		Metadata: meta,
+	}); err != nil {
+		return fmt.Errorf("payments: audit payout succeeded foreign reference: %w", err)
+	}
+	return nil
+}

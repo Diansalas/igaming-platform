@@ -7748,8 +7748,9 @@ terminal-reason CHECK are untouched). Same Kind, discriminator shape, attributes
   posts or settles, the cell still reports no effect (`duplicate_effect`, changed=false). No release, no settlement, no
   delivery, recipient or channel (ALERT-DELIVERY-1 stays a production blocker). A deposit is a no-op for the raise.
 - **Repeat delivery.** The discriminator is the attempt and the reason, so repeats are ONE open alert with growing
-  occurrences (as for every B12 raise). The pre-existing terminal-mismatch audit row is still written per delivery (it was
-  before); the receipt itself is deduped and nothing else happens.
+  occurrences (as for every B12 raise). The terminal-mismatch audit row is written once, for the first (new) receipt, and no
+  longer per redelivery (PAY-PAYOUT-CALLBACK-AUDIT-2, below; it was per delivery before); the receipt itself is deduped and
+  nothing else happens.
 - **Pins.** Static: `receipt.go:applyResolvedReceiptEvidence:raisePayoutDisputeAlert` is pinned at 2 (was 1) in
   `TestStaticWiring_PayoutDisputeRaiseSitesArePinned_B12` (both directions: a missing or an extra site fails); the
   source-order guard now counts 14 sites (was 13); the closed-set test covers the new set. Integration:
@@ -7763,7 +7764,7 @@ terminal-reason CHECK are untouched). Same Kind, discriminator shape, attributes
   no terminal-reason CHECK change, no migration). No state change, no release, no settlement, no posting, no delivery,
   recipient or channel (ALERT-DELIVERY-1 stays a production blocker); the cell still reports `duplicate_effect`'s
   no-effect result. A MATCHING repeated success with the SAME provider reference on a succeeded payout is a plain duplicate and raises nothing (this sentence does not cover M-1 below). "Raise is last" (ADR 0102 7.7) means the last statement of the cell; the deferred-receipt drain may write after it. Repeats are
-  ONE open alert with growing occurrences (the audit row is still written per delivery, F-2). Pins: static raise-site count
+  ONE open alert with growing occurrences (the audit row is written once, PAY-PAYOUT-CALLBACK-AUDIT-2). Pins: static raise-site count
   for `receipt.go:applyResolvedReceiptEvidence:raisePayoutDisputeAlert` is now 3 (both directions), the source-order guard
   counts 15 sites (was 14), closed-set unit test extended. Integration: `payout_succeeded_mismatch_alert_integration_test.go`.
 - **Deposit counterpart (reviewed; NOT implemented; finding).** `receipt.go` `applyResolvedReceiptEvidence`, the
@@ -7776,18 +7777,85 @@ terminal-reason CHECK are untouched). Same Kind, discriminator shape, attributes
   success on a declined vs. a succeeded deposit differ from a payout's double-payout risk) and its own static pins. That is
   outside R-6's stated scope. Proposed follow-up: **PAY-DEPOSIT-MISMATCH-ALERT-1** (Medium; before real-provider use;
   needs a security/ledger-finance ruling on the deposit signal semantics).
-- **M-1 follow-up PAY-PAYOUT-SUCCEEDED-REF-MISMATCH-1 (ledger-finance finding; REQUIRED; production blocker alongside
-  ALERT-DELIVERY-1).** A success with a DIFFERENT provider reference but matching amount/asset on an already-SUCCEEDED payout,
-  resolved via the merchant reference, is silently folded in as `duplicate_effect` with 0 alerts and 0 audit rows. The
-  non-terminal path disputes and raises `provider_reference_mismatch` (`receipt.go` ~906-931, S-M1); the terminal-succeeded
-  cell does not. Fix: audit plus raise-only P1 (own closed reason, no state change), R-6 pattern. Not done in R-6.
+- **M-1 PAY-PAYOUT-SUCCEEDED-REF-MISMATCH-1 (ledger-finance finding; RESOLVED for payouts, `IMPLEMENTED` against MOCK, raise
+  only; 2026-10-07).** A success with a DIFFERENT provider reference but matching amount/asset on an already-SUCCEEDED payout,
+  resolved via the merchant reference (the new reference being unbound), used to be folded in as `duplicate_effect` with 0
+  alerts and 0 audit rows, while the non-terminal path disputes and raises `provider_reference_mismatch` (S-M1). In
+  `applyResolvedReceiptEvidence`, the `AttemptSucceeded` branch (matching amount/asset, payout only) now compares the delivered
+  reference with the one on file (the attempt's own, falling back to the withdrawal's, the same rule as S-M1). When they
+  differ it writes ONE `payments.payout_succeeded_foreign_reference` audit row (actor system, outcome `denied`, target the
+  attempt; closed vocabulary: `reason`, `attempt_state`, `evidence`, `provider_id`, `stored_reference` (the platform's own
+  bound value), the echoed reference through `echoAuditMeta` (raw only when a valid reference), `stored_amount`,
+  `stored_asset_code`, `withdrawal_request_id`; no provider text) and then raises ONE P1 as the returned LAST statement
+  (`raisePayoutDisputeAlert(..., alertReasonPayoutForeignRefSuccessOnSucceeded)`, new closed reason
+  `foreign_reference_success_on_succeeded_payout` in `payoutSignalReasons`, now 3 members; not a terminal reason, no CHECK
+  change, no migration; same Kind, discriminator shape, `provider_id`-only attributes and failure semantics as R-5/R-6). No
+  state change, no rebind of the stored reference, no release, settlement or posting, no delivery, recipient or channel
+  (ALERT-DELIVERY-1 stays a production blocker); the result stays `duplicate_effect`. The SAME reference (a true duplicate)
+  raises nothing and writes nothing. A deposit is unchanged (the branch is payout-only; `raisePayoutDisputeAlert` is also a
+  no-op for a deposit; pinned by `TestM1_Deposit_ForeignRefSuccessOnSucceeded_Unchanged`). Pins: the static raise-site count
+  for `receipt.go:applyResolvedReceiptEvidence:raisePayoutDisputeAlert` is now 4 (both directions), the source-order guard
+  counts 16 sites (was 15), the closed-set unit test covers the third signal reason. Tests:
+  `payout_succeeded_foreignref_integration_test.go` (audit row and one alert with `provider_id` only and no leaked
+  references, same-reference duplicate raises nothing, three-delivery replay is one open alert with growing occurrences,
+  money/ledger/state/stored reference unchanged, tenant isolation, deterministic / in-tx / transient failure semantics as
+  R-6). Mutation evidence:
+  `docs/plans/prh2-hardening-round/prh2-r10-succ-ref-mismatch-mutation-kill.txt`.
 - **PAY-DEPOSIT-MISMATCH-ALERT-1 is a HARD GATE before any real-provider deposit.** Split: a mismatched success on a DECLINED
   deposit is a capture without credit (P1 when built); on a SUCCEEDED deposit it is P1 or P2 depending on the daily provider
   reconciliation. Security design points: `provider_id` as the sole attribute; discriminator keyed to the intent/attempt id
   plus a closed reason; raised last; no state change; separate reasons for declined and succeeded; tests for cross-tenant
   isolation and that a deposit never raises a payout reason. Today's behaviour is pinned by
   `deposit_mismatch_pin_integration_test.go` (0 alerts, 1 audit row, no state change); change it deliberately.
-- **Follow-ups (PAY-PAYOUT-CALLBACK-AUDIT-2).** (F-2) gate `auditTerminalAmountAssetMismatch` on `!duplicate`
-  (`receipt.go` ~783/797): today it writes one audit row per redelivery (audit growth; the L-e oversize-reason audit is the
-  precedent for once-per-new-receipt); the test `TestR5_Replay_*` pins the current per-delivery count so the change is
-  deliberate. (F-3) a two-goroutine concurrency test for the audited T14/T15/mismatch/tombstone cells and R-5.
+- **PAY-PAYOUT-CALLBACK-AUDIT-2 (security F-2, ledger-finance L-3, F-3; RESOLVED, `IMPLEMENTED` against MOCK; 2026-10-07).**
+  `applyResolvedReceiptEvidence` now takes `alreadyApplied` (named `duplicate` until the S-1/C-1 fix below), which means the receipt of THIS delivery was
+  already RESOLVED, not merely that its row already existed; the deferred-receipt drain passes `false`, each deferred row is
+  applied once. The two
+  no-state-change terminal mismatch cells (`AttemptSucceeded` mismatched, R-6, and `AttemptDeclined` mismatched, R-5) write
+  `payments.callback_amount_asset_mismatch_terminal` only when `!duplicate`, and so does the M-1 foreign-reference audit row
+  (the same rule, applied to the row added by M-1 so it does not reintroduce the growth). This is the L-e precedent (the
+  oversize-reason audit): once per NEW receipt, never per redelivery. The raise stays unconditional (the alert dedupes, so
+  occurrences keep growing while audit rows do not). Why it is safe: the first delivery's audit row commits in the SAME
+  transaction as its receipt row, so a deduped redelivery of a RESOLVED receipt implies the row exists; a delivery whose
+  transaction rolled back (transient alert failure) took its receipt row with it, is therefore not a duplicate on redelivery,
+  and writes the audit row then (`TestR5_/TestR6_/TestM1_AlertFailureSemantics`, "transient ... converges"). The four dispute cells (T14, T15, callback
+  mismatch, tombstone) were already once-only (the second delivery finds the attempt disputed) and are unchanged.
+  **Deposits share the two terminal cells**: a mismatched deposit success redelivery also stops writing a repeat audit row
+  (first delivery still writes exactly one; `deposit_mismatch_pin_integration_test.go` delivers once and is unchanged). The
+  tests that pinned the per-delivery counts were changed deliberately: `TestR5_Replay_*` and `TestR6_Replay_*` 1,2,3 -> 1,1,1.
+  F-3: two-goroutine tests (`payout_callback_audit2_integration_test.go`) deliver the same mismatched event twice
+  concurrently on R-5, R-6 and M-1 (exactly one audit row, one alert row whose occurrences reach 2, one receipt row, no state
+  change) and on the four dispute cells, identical and (where the cell is reference-agnostic) conflicting (exactly one
+  dispute, one dispute audit row, one alert row). **Residuals.** (1) Two truly DISTINCT non-duplicate mismatched
+  receipts (different fingerprints) on R-5/R-6 each write an audit row; bounded by the number of distinct receipts, not by
+  redelivery. (S-2, accepted) The same holds for M-1: many DISTINCT foreign references on one succeeded payout write one audit
+  row each; the source is an authenticated provider and the alert dedupes. (S-4, OPEN question) M-1 pages on benign behaviour if
+  a real PSP issues a fresh transaction id per status event for the same payout; this is a ledger-finance/product question to
+  settle against the sandbox adapter and is added to the real-provider ADAPTER ACCEPTANCE LIST (confirm: stable payout reference
+  across status events, or define which differing reference is benign). (I-1) The withdrawal-reference fallback in the M-1
+  cell is dead code for a succeeded payout (the attempt always has its reference bound); kept for symmetry with S-M1.
+  **S-1 / C-1 FIX (security S-1 Medium, ledger-finance C-1; IMPLEMENTED against MOCK).** Gating on "receipt already existed"
+  could lose the first audit row of an ORPHANED deferred receipt: tx A stores a `deferred_unresolved` receipt with no attempt
+  lock while tx B binds the reference and settles without draining (READ COMMITTED cannot see A's uncommitted row; the payout
+  sync and poll paths never call `ApplyDeferredReceiptsForAttempt`); the redelivery then resolves by reference with
+  `duplicate=true`, the audit row was skipped AND `ResolveReceipt` was skipped, leaving the row orphaned forever and counted
+  against `DeferredReceiptCap`. Now `ApplyReceiptEvidence` reads `receiptIsResolved` for a duplicate AFTER the parent lock and
+  the attempt re-read (so a concurrent applier's resolution is visible) and passes `alreadyApplied` to the cell and to the
+  `ResolveReceipt` compare-and-set: a duplicate-but-unresolved receipt is treated as the first application (audit row written,
+  receipt closed, S-3); a duplicate that is already resolved writes no audit row and re-resolves nothing. The disposition
+  returned (`duplicate_effect`), state transitions and the raises are unchanged; the only other difference is that such an
+  orphan is now closed. The drain is unaffected (its rows are unresolved by construction; ResolveReceipt runs before the
+  drain query, and the parent lock plus the CAS prevent a double write). Tests: the two-transaction orphan, the LF
+  sequence (deferred, sync bind, redelivery), a deposit form (the audit row is the deposit's only trace), plus the replay
+  1,1,1 and concurrency tests. Named residuals (LF delta review, none blocking, NOT fixed here):
+  **PAY-RECEIPT-ORPHAN-RESOLVE-1 (C-1a)**: the anomaly branches in `ApplyReceiptEvidence` (cross-provider / reference
+  conflict, the event-type vs operation mismatch, and the late reference-conflict recheck; `receipt.go` ~523/571/608) skip
+  `ResolveReceipt` when the receipt is a duplicate, so an ORPHANED deferred receipt that later turns out to be another
+  operation's or a conflict stays unresolved and counts toward `DeferredReceiptCap`; no money effect. **C-1b**: the
+  oversize-decline-reason audit (~632) is gated on `duplicate`, so a deferred/drained receipt never gets
+  `payment.decline_reason_bounded`. **I-1 (LF delta review; raise with security)**: the live redelivery path has no predates-submission check,
+  unlike the drain (`anomaly_predates_submission`), so an orphan older than the attempt's first submission is applied on
+  redelivery. Not built: LF L-1 (first of two concurrent deliveries fails transiently while the second waits
+  on the unique index), optional.
+  Mutation evidence:
+  `docs/plans/prh2-hardening-round/prh2-r10-callback-audit-2-mutation-kill.txt`.

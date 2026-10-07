@@ -17,6 +17,13 @@ func TestAuditPayoutCallbackDispute_ActionNameIsStable(t *testing.T) {
 	}
 }
 
+// PAY-PAYOUT-SUCCEEDED-REF-MISMATCH-1: the same pin for the foreign-reference audit action.
+func TestAuditPayoutSucceededForeignRef_ActionNameIsStable(t *testing.T) {
+	if auditActionPayoutSucceededForeignRef != "payments.payout_succeeded_foreign_reference" {
+		t.Fatalf("audit action changed to %q: update ADR 0095 section 42.8 (M-1) and every consumer", auditActionPayoutSucceededForeignRef)
+	}
+}
+
 // PAY-PAYOUT-CALLBACK-AUDIT-1: a deposit attempt writes no payout audit row, and a failed dispute
 // CAS is returned untouched without recording anything. The nil transaction proves no statement is
 // attempted in either case.

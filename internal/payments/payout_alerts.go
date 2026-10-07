@@ -63,10 +63,17 @@ const alertReasonPayoutMismatchedSuccessOnDeclined = "mismatched_success_on_decl
 // payout. Same pattern as R-5: raise only, no state change, own closed set, not a terminal reason.
 const alertReasonPayoutMismatchedSuccessOnSucceeded = "mismatched_success_on_succeeded_payout"
 
+// PAY-PAYOUT-SUCCEEDED-REF-MISMATCH-1 (ADR 0095 section 42.8, ledger-finance M-1): a success with
+// matching amount/asset but a DIFFERENT provider reference than the one stored on an already-
+// SUCCEEDED payout (resolved to the attempt via the merchant reference). Same pattern as R-5/R-6:
+// raise only, no state change, no rebind of the stored reference, own closed reason.
+const alertReasonPayoutForeignRefSuccessOnSucceeded = "foreign_reference_success_on_succeeded_payout"
+
 // payoutSignalReasons is the closed set of payout alert reasons raised with no state change.
 var payoutSignalReasons = map[string]struct{}{
 	alertReasonPayoutMismatchedSuccessOnDeclined:  {},
 	alertReasonPayoutMismatchedSuccessOnSucceeded: {},
+	alertReasonPayoutForeignRefSuccessOnSucceeded: {},
 }
 
 // payoutAlertReasonFor maps a payout terminal or escalation reason to its
