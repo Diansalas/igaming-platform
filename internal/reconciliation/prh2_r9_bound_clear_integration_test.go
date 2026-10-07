@@ -583,22 +583,77 @@ func TestBoundClear1_PayoutBoundPark_TenantIsolation(t *testing.T) {
 	bcNone(t, a.bcRun(t, d2PastSrc()), p, "A's own completion clears A")
 }
 
-// OPEN POLICY QUESTION (reported to the orchestrator, not decided here; see
-// ADR 0095 §35.6 BOUND-CLEAR-1): a `reversed` PAYOUT statement line naming X
-// matches the attempt and falls into matchPayment's R1 branch (the code review
-// R1 rule written for deposits: `reversed` is the PSP's own refund), so the
-// in-run run raises no captured-unposted for a bound payout park, and
-// checkUnmatchedAttempts skips it because a line matched. This pins the CURRENT
-// behaviour and its bound: it is a one-run suppression, never a clearing - the
-// next run without such a line reports the finding again. Whether a `reversed`
-// payout line is a "PSP-side recall/return" (R-K3-8, RESOLVE-1) is a ledger-
-// finance decision; if it is ruled NOT to suppress, flip this pin deliberately.
-func TestBoundClear1_PayoutBoundPark_ReversedPayoutLine_OneRunSuppressionOnly(t *testing.T) {
+// FLIPPED under PAY-PAYOUT-BOUND-CLEAR-1 F-1 (was
+// TestBoundClear1_PayoutBoundPark_ReversedPayoutLine_OneRunSuppressionOnly,
+// which pinned the then-current behaviour). Ledger-finance ruled F-1 a
+// fail-closed tightening within its authority (security concurs): the R1
+// "reversed line = the PSP's own refund" rule is a DEPOSIT rule. Before the fix
+// a `reversed` PAYOUT line naming a bound payout park fell to the silent
+// "disputed" case and, the attempt being matched, checkUnmatchedAttempts
+// skipped it - for EVERY run in which the provider repeated the line; with
+// amount and asset equal to the attempt's the whole run was CLEAN (security
+// probe P1). Now it raises the bound finding in-run, on every run, by reference
+// and by merchant reference only, and the finding keeps standing afterwards.
+func TestBoundClear1_PayoutBoundPark_ReversedPayoutLineNeverSilences(t *testing.T) {
+	t.Run("by_reference_amount_and_asset_equal", func(t *testing.T) {
+		w := newBCWorld(t)
+		p := w.bcParkPayout(t)
+		bcRequire(t, w.bcRun(t, d2PastSrc()), p, false, "setup standing")
+		equal := bcPayoutLine(p.x, p.attempt.MerchantReference, statement.PaymentStatusReversed, bcAmount) // amount AND asset equal (EUR)
+		for i := 0; i < 3; i++ {
+			ms := w.bcRun(t, k3Cov(i+1, equal))
+			bcRequire(t, ms, p, true, fmt.Sprintf("reversed payout line, amount/asset equal, run %d", i))
+			if len(ms) == 0 {
+				t.Fatalf("run %d: the run must not be CLEAN", i)
+			}
+		}
+		// The line amount differing (the callback's amount) is loud too.
+		bcRequire(t, w.bcRun(t, d2Src(bcPayoutLine(p.x, p.attempt.MerchantReference, statement.PaymentStatusReversed, bcAmount-1))), p, true, "reversed payout line, other amount")
+		bcRequire(t, w.bcRun(t, bcReal(5, equal)), p, true, "reversed payout line, real import")
+		for i := 0; i < 3; i++ {
+			bcRequire(t, w.bcRun(t, d2PastSrc()), p, false, fmt.Sprintf("standing after reversed lines, run %d", i))
+		}
+		w.bcHeld(t, p, "after the reversed lines")
+	})
+	t.Run("merchant_reference_only_route", func(t *testing.T) {
+		w := newBCWorld(t)
+		p := w.bcParkPayout(t)
+		// A reversed payout line under a reference no attempt holds, naming the
+		// park only by merchant reference: matchPayment resolves it by merchant.
+		other := bcPayoutLine("bc-psp-other-"+uuid.NewString(), p.attempt.MerchantReference, statement.PaymentStatusReversed, bcAmount)
+		for i := 0; i < 3; i++ {
+			ms := w.bcRun(t, k3Cov(i+1, other))
+			got := bcCU(ms, p.attempt.ID)
+			// The in-run key names the LINE's reference (the merchant route).
+			if len(got) != 1 || got[0].ExpectedValue != payoutCapturedUnpostedResolutionHint ||
+				!strings.Contains(got[0].ReconciliationKey, "provider_reference="+other.ProviderReference) ||
+				!strings.Contains(got[0].ActualValue, "op=payout") || strings.Contains(got[0].ActualValue, "no statement line") {
+				t.Fatalf("merchant-only reversed payout line, run %d: want one in-run payout finding:\n%s", i, renderMismatches(ms))
+			}
+			if d2Kinds(ms)[MismatchKindPayReferenceMismatch] != 1 {
+				t.Fatalf("run %d: want the reference mismatch alongside:\n%s", i, renderMismatches(ms))
+			}
+		}
+		bcRequire(t, w.bcRun(t, d2PastSrc()), p, false, "standing after merchant-only reversed lines")
+		w.bcHeld(t, p, "after the merchant-only reversed lines")
+	})
+	t.Run("own_completion_still_clears_with_a_reversed_line", func(t *testing.T) {
+		w := newBCWorld(t)
+		p := w.bcParkPayout(t)
+		w.bcComplete(t, p.wrID, payProvA, p.x)
+		bcNone(t, w.bcRun(t, d2Src(bcPayoutLine(p.x, p.attempt.MerchantReference, statement.PaymentStatusReversed, bcAmount))), p, "own completion clears even with a reversed line")
+	})
+}
+
+// Deposit R1 is unchanged: a `reversed` DEPOSIT line naming a bound deposit
+// park still clears that run's in-run finding (code review R1).
+func TestBoundClear1_DepositBoundPark_ReversedLineR1Unchanged(t *testing.T) {
 	w := newBCWorld(t)
-	p := w.bcParkPayout(t)
-	bcRequire(t, w.bcRun(t, d2PastSrc()), p, false, "setup standing")
-	bcNone(t, w.bcRun(t, d2Src(bcPayoutLine(p.x, p.attempt.MerchantReference, statement.PaymentStatusReversed, bcAmount-1))), p,
-		"CURRENT behaviour (open policy question): a reversed payout line suppresses the run's finding")
-	bcRequire(t, w.bcRun(t, d2PastSrc()), p, false, "not a clearing: the next run reports it again")
-	w.bcHeld(t, p, "after the reversed line")
+	x := "bc-dep-r1-" + uuid.NewString()
+	id := w.ma020Park(t, payments.TerminalReasonCallbackAmountAssetMismatch, x, "")
+	merchant := w.attempt(t, id).MerchantReference
+	if ms := w.bcRun(t, d2PastSrc()); len(bcCU(ms, id)) != 1 {
+		t.Fatalf("setup: want the deposit bound finding:\n%s", renderMismatches(ms))
+	}
+	bcNone(t, w.bcRun(t, d2Src(d2Line(x, merchant, statement.PaymentStatusReversed, ma020Amount))), bcPark{attempt: payments.PaymentAttempt{ID: id}}, "deposit R1: a reversed deposit line clears the in-run finding")
 }
