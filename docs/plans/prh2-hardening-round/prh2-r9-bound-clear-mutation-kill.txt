@@ -1,0 +1,151 @@
+PAY-PAYOUT-BOUND-CLEAR-1 - mutation-kill evidence (ledger-finance, 2026-10-07)
+================================================================================
+
+Branch pay-payout-bound-clear-1, baseline 87ec7a4. Fix commit b866a59, tests
+4437db2. ADR 0095 §35.6 (BOUND-CLEAR-1: IMPLEMENTED against MOCK;
+PAY-PAYOUT-UNBOUND-RESOLVE-1 still NOT IMPLEMENTED).
+
+Subject under test
+------------------
+internal/reconciliation/payment_statement.go, capturedUnposted(a): the clearing
+predicate shared by the in-run boundCapture() case in matchPayment and by
+checkUnmatchedAttempts. New first statement:
+
+	if a.operation != paymentStatementKindDeposit {
+		return !m.clearedRefFor(a, a.providerRef)
+	}
+
+For a payout, clearedRefFor goes to payoutCompletedRef(a, X). The only clearing
+is the attempt's OWN withdrawal_completed keyed by X, positively attributed
+(STANDING-1, security L-1). Deposits are unchanged.
+
+Method
+------
+- Harness: scratchpad r9_mut.py.
+- Each mutant:
+  1. Back up payment_statement.go.
+  2. Apply exact-anchor string replacements; the anchor count must be 1.
+  3. Compile gate: go vet -tags integration ./internal/reconciliation/. A
+     mutant that fails to compile is NOT counted.
+  4. Run the targeted suite.
+  5. Restore from the backup.
+- At the end the harness restores the file and compares it with the backup:
+  "restore: cmp backup vs file identical=True". After the run, git status shows
+  a clean tree.
+- Suite (one run per mutant): -tags integration -count=1 -p 1 -v
+  -run '^(TestBoundClear1_|TestStanding1_|TestD2_|TestK3_C3)'
+  ./internal/reconciliation/
+- Database: private scratch DB priv_r9_boundclear (priv_test.sh sources
+  env.sh, so TEST_ADMIN_DATABASE_URL and TEST_RUNTIME_DATABASE_URL are set).
+- The TestBoundClear1_* reconciliation runs execute as the runtime role. The
+  test asserts rolsuper = false and rolbypassrls = false.
+- KILLED means rc != 0 and at least one top-level test FAILed.
+
+Control
+-------
+CONTROL (unmutated): rc=0 PASS=106 SKIP=0 FAIL=[]
+
+Mutants (15 run, 15 KILLED, 0 survived, 0 equivalent, 0 compile errors)
+------------------------------------------------------------------------
+Shared predicate (both sites at once):
+S-PRE    KILLED  payout branch removed: the pre-fix defect, deposit rule for payouts.
+                 Failing tests: AnotherAttemptsEvidenceNeverClears,
+                 DepositReversalNeverClears,
+                 OwnPositivelyAttributedCompletionClears, TenantIsolation,
+                 TombstoneNeverClears, UnrelatedAmountOrAssetNeverClears.
+S-DR     KILLED  a deposit_reversal naming X also clears a payout.
+                 Failing tests: DepositReversalNeverClears,
+                 UnrelatedAmountOrAssetNeverClears.
+S-TS     KILLED  a tombstone on X also clears a payout.
+                 Failing tests: TombstoneNeverClears.
+S-ATTR   KILLED  attribution dropped: any withdrawal_completed keyed X clears.
+                 Failing tests: AnotherAttemptsEvidenceNeverClears,
+                 UnrelatedAmountOrAssetNeverClears.
+S-NEVER  KILLED  a payout never clears; its own completion is ignored.
+                 Failing tests: OwnPositivelyAttributedCompletionClears,
+                 AnotherAttemptsEvidenceNeverClears (the control half),
+                 TenantIsolation (its last step).
+
+In-run site only (matchPayment boundCapture case):
+IR-DR         KILLED  deposit_reversal naming X clears a payout.
+                      Failing tests: DepositReversalNeverClears.
+IR-TS         KILLED  tombstone on X clears a payout.
+                      Failing tests: TombstoneNeverClears.
+IR-ATTR       KILLED  attribution dropped.
+                      Failing tests: AnotherAttemptsEvidenceNeverClears,
+                      UnrelatedAmountOrAssetNeverClears.
+IR-AMT-EXACT  KILLED  only a deposit_reversal of the EXACT attempt amount clears.
+                      Failing tests: DepositReversalNeverClears (amount_700_*),
+                      TenantIsolation (see note 1).
+IR-AMT-ONE    KILLED  only a deposit_reversal of amount 1 clears.
+                      Failing tests: DepositReversalNeverClears (amount_1_*).
+
+checkUnmatchedAttempts site only:
+CU-DR         KILLED  deposit_reversal naming X clears a payout.
+                      Failing tests: DepositReversalNeverClears,
+                      UnrelatedAmountOrAssetNeverClears.
+CU-TS         KILLED  tombstone on X clears a payout.
+                      Failing tests: TombstoneNeverClears.
+CU-ATTR       KILLED  attribution dropped.
+                      Failing tests: AnotherAttemptsEvidenceNeverClears,
+                      UnrelatedAmountOrAssetNeverClears.
+CU-AMT-EXACT  KILLED  only a deposit_reversal of the EXACT attempt amount clears.
+                      Failing tests: DepositReversalNeverClears,
+                      UnrelatedAmountOrAssetNeverClears (the USD reversal of the
+                      exact amount), TenantIsolation (see note 1).
+CU-AMT-ONE    KILLED  only a deposit_reversal of amount 1 clears.
+                      Failing tests: DepositReversalNeverClears.
+
+All test names above are TestBoundClear1_PayoutBoundPark_<name>.
+
+Per-site isolation: each IR-* mutant leaves checkUnmatchedAttempts on the fixed
+predicate, and each CU-* mutant leaves the in-run site on it. So each site is
+proven separately by the in-run (a line names X) and standing (no line) halves
+of the tests.
+
+Notes (honest classification)
+-----------------------------
+1. Kills of the AMT mutants by TenantIsolation are an ARTEFACT of the mutant,
+   not independent evidence.
+   - The AMT mutants record in-run deposit_reversal amounts in a
+     package-level map (r9RevAmt). The map is not tenant-scoped and persists
+     across runs.
+   - Tenant B's reversal of X therefore leaks into tenant A's run under the
+     mutant.
+   - The substantive kill is DepositReversalNeverClears (amounts 1, 700 and 699).
+2. The AMT mutants model "amount-aware" clearing from this run's own lines only.
+   Persisted reversal amounts are not loaded by the matcher.
+   - The "amount-agnostic" axis is also covered by S-DR, IR-DR and CU-DR. Those
+     clear on a reversal of ANY amount, which is the original defect's shape,
+     and all three are killed.
+3. The deposit side is unchanged. Under every mutant TestBoundClear1_DepositBoundPark_Unchanged,
+   TestStanding1_* and TestD2_* pass. The mutants are payout-scoped by
+   construction (a.operation == "payout" / the payout branch). A mutant that
+   touched deposits would also be caught by the D2/K3 suites in the run.
+4. Not mutated: payoutCompletedRef itself. It is shared with STANDING-1, and its
+   attribution mutants are in prh2-r8-standing1-payout-unbound-mutation-kill.txt.
+   S-ATTR, IR-ATTR and CU-ATTR show that BOUND-CLEAR-1 is wired to it at both
+   sites.
+
+Test execution (not skipped)
+----------------------------
+- New suite, -run '^TestBoundClear1_': PASS=27 (9 top-level and 18 subtests),
+  SKIP=0.
+- Non-race, with the fix:
+  - ./internal/reconciliation/... : PASS=349, SKIP=0, FAIL=0.
+  - payments ^(TestB11_|TestStanding1|TestD2|TestK3_): PASS=211, SKIP=0, FAIL=0.
+- Race runs: see the final report of this item.
+
+Open policy question (reported, not decided)
+--------------------------------------------
+A `reversed` PAYOUT statement line naming X matches the bound payout park.
+matchPayment's R1 branch (written for deposits) then raises nothing in that run,
+and checkUnmatchedAttempts skips the matched attempt.
+
+This is a one-run suppression, never a clearing: the next run without such a line
+reports the finding again. It is pinned by
+TestBoundClear1_PayoutBoundPark_ReversedPayoutLine_OneRunSuppressionOnly.
+
+Whether a `reversed` payout line is a "PSP-side recall/return" (R-K3-8) is a
+ledger-finance and RESOLVE-1 decision. The pin should be flipped deliberately
+when that is decided.
