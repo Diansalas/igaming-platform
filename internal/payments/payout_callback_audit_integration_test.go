@@ -9,6 +9,7 @@ package payments
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -220,6 +221,54 @@ func TestPayoutCallbackAudit_Atomicity_AuditAndAlertFailureSemantics(t *testing.
 			}
 			e.b12AssertNoMoneyMoved(t, b12Out{wr: wr, a: a, before: snap})
 		})
+	}
+}
+
+// Defence in depth: the callback ingress already bounds the echoed reference and asset (the
+// providerref validation and the payment_provider_events asset CHECK), so a hostile value cannot
+// reach the cells today. The audit helper must nevertheless never store provider text raw even if
+// it did (a future route, a looser CHECK): it is exercised here directly with hostile echoes.
+func TestPayoutCallbackAudit_Helper_HostileEchoNeverStoredRaw(t *testing.T) {
+	e := newRBEnv(t, "mock-r8-hostile")
+	wr, a := e.claim(t, "r8-hostile")
+	hostileAsset := "EUR\n<script>x</script>"
+	hostileRef := "ref\x00\n<b>" + strings.Repeat("Z", 300)
+	if err := e.pool.WithTenant(context.Background(), e.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return auditPayoutCallbackDispute(ctx, tx, a, ReceiptEvidence{
+			ProviderReference: hostileRef, Amount: 7, AssetCode: hostileAsset,
+		}, TerminalReasonCallbackAmountAssetMismatch, nil)
+	}); err != nil {
+		t.Fatalf("audit: %v", err)
+	}
+	rows := r8ReadAudit(t, e, e.f.tenantID, auditActionPayoutCallbackDispute, a.ID)
+	if len(rows) != 1 {
+		t.Fatalf("want one row, got %d", len(rows))
+	}
+	m := rows[0].Metadata
+	if _, raw := m["echoed_asset_code"]; raw || m["echoed_asset_code_len"] != float64(len(hostileAsset)) || m["echoed_asset_code_sha256_prefix"] == nil {
+		t.Fatalf("a hostile asset echo must be recorded only as length + hash prefix: %v", m)
+	}
+	if _, raw := m["echoed_provider_reference"]; raw || m["echo_ref_len"] == nil || m["echo_ref_sha256_prefix"] == nil {
+		t.Fatalf("a hostile reference echo must be recorded only as reason/length/hash prefix: %v", m)
+	}
+	if blob := fpAuditText(t, e); strings.Contains(blob, "<script>") || strings.Contains(blob, "<b>") || strings.Contains(blob, strings.Repeat("Z", 300)) {
+		t.Fatalf("provider text leaked into the audit trail")
+	}
+	if m["withdrawal_request_id"] != wr.ID.String() || m["echoed_amount"] != float64(7) {
+		t.Fatalf("context: %v", m)
+	}
+
+	// A failing audit write is returned (never swallowed), also when it does not abort the
+	// transaction: here the INSERT is attempted on a transaction that is already closed.
+	var closed pgx.Tx
+	if err := e.pool.WithTenant(context.Background(), e.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		closed = tx
+		return nil
+	}); err != nil {
+		t.Fatalf("open/close tx: %v", err)
+	}
+	if err := auditPayoutCallbackDispute(context.Background(), closed, a, ReceiptEvidence{}, TerminalReasonCallbackAmountAssetMismatch, nil); err == nil {
+		t.Fatalf("an audit write failure must be returned to the transaction owner")
 	}
 }
 
