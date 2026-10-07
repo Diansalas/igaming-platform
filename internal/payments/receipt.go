@@ -778,7 +778,8 @@ func applyResolvedReceiptEvidence(ctx context.Context, tx pgx.Tx, o *Orchestrato
 			// a re-used reference) and must be reported, never silently
 			// folded into "already applied". No state change (the attempt
 			// is already terminal and this specialist never auto-resolves
-			// a terminal contradiction) and no posting - P1 audit only.
+			// a terminal contradiction) and no posting - the audit row, plus (R-6, payouts
+			// only) a raise-only P1.
 			if mismatched {
 				if err := auditTerminalAmountAssetMismatch(ctx, tx, attempt, ev); err != nil {
 					return false, "", err

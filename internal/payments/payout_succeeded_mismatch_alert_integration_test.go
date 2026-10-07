@@ -108,8 +108,8 @@ func TestR6_MatchingRepeatedSuccess_DoesNotRaise(t *testing.T) {
 		if err != nil {
 			t.Fatalf("delivery #%d: %v", i, err)
 		}
-		if disp != DispositionDuplicateEffect && disp != DispositionApplied {
-			t.Logf("disposition for a matching duplicate: %s", disp)
+		if disp != DispositionDuplicateEffect {
+			t.Fatalf("delivery #%d: disposition = %s, want %s", i, disp, DispositionDuplicateEffect)
 		}
 	}
 	if rows := e.b12Rows(t); len(rows) != 0 {
