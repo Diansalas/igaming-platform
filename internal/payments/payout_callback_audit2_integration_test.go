@@ -13,9 +13,11 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Diansalas/igaming-platform/internal/alerting"
+	"github.com/Diansalas/igaming-platform/internal/testsupport/alertinject"
 )
 
 // runTwo runs f(0) and f(1) concurrently (released together) and fails on any error.
@@ -186,4 +188,204 @@ func TestCallbackAudit2_DeferredDrain_MismatchedSuccessOnSucceeded_AuditedOnce(t
 		t.Fatalf("the drained mismatched receipt must write its one audit row, got %d", n)
 	}
 	e.b12AssertOneAlert(t, a.ID, alertReasonPayoutMismatchedSuccessOnSucceeded)
+}
+
+// ---- S-1 / C-1: the audit gate is "already RESOLVED", not "already existed" ----
+
+func (e rbEnv) ca2Unresolved(t *testing.T, ref string) int {
+	t.Helper()
+	return fpCount(t, e.pool, e.f.tenantID, `SELECT count(*) FROM payment_provider_events WHERE tenant_id=$1 AND provider_reference=$2 AND resolved_at IS NULL`, e.f.tenantID, ref)
+}
+
+// The exact two-transaction orphan (security probe): tx A stores a mismatched success as a DEFERRED
+// receipt but has not committed while tx B resolves through the merchant reference, settles, binds the
+// reference and drains (it cannot see A's row under READ COMMITTED). The orphan stays unresolved.
+// The first redelivery is its first application: ONE audit row, the receipt becomes resolved; the next
+// redeliveries write nothing more. The raise stays per delivery (one alert row).
+func TestCallbackAudit2_OrphanedDeferredReceipt_RedeliveredAfterConcurrentBind_AuditedOnce_Resolved(t *testing.T) {
+	pool := depositV2ScratchPool(t)
+	pid := "mock-ca2-orphan"
+	f, orch, _ := fpOrch(t, pool, pid)
+	e := rbEnv{pool: pool, f: f, orch: orch, pid: pid}
+	_, a := e.claim(t, "ca2-orphan")
+	const ref = "ca2-orphan-ref"
+	deliver := func(merchantRef string, amount int64) error {
+		pending, err := alerting.InTx(context.Background(), alerting.NewTenantRunner(e.pool, e.f.tenantID), func(ctx context.Context, tx pgx.Tx) error {
+			_, err := ApplyReceiptEvidence(ctx, tx, e.orch, e.f.tenantID, e.pid, ReceiptEvidence{
+				EventType: "payout", ProviderReference: ref, MerchantReference: merchantRef,
+				Outcome: OutcomeSucceeded, Amount: amount, AssetCode: "EUR",
+			})
+			return err
+		})
+		if err == nil {
+			pending.Flush(context.Background())
+		}
+		return err
+	}
+	inserted, release, done := make(chan struct{}), make(chan struct{}), make(chan error, 1)
+	go func() {
+		done <- pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+			disp, err := ApplyReceiptEvidence(ctx, tx, e.orch, e.f.tenantID, e.pid, ReceiptEvidence{
+				EventType: "payout", ProviderReference: ref, Outcome: OutcomeSucceeded, Amount: 499, AssetCode: "EUR",
+			})
+			if err == nil && disp != DispositionDeferredUnresolved {
+				err = fmt.Errorf("tx A disposition = %s, want deferred_unresolved", disp)
+			}
+			close(inserted)
+			<-release
+			return err
+		})
+	}()
+	<-inserted
+	if err := deliver(a.MerchantReference, 500); err != nil {
+		t.Fatalf("matching delivery: %v", err)
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatalf("tx A: %v", err)
+	}
+	if got := mustGetAttempt(t, pool, f.tenantID, a.ID); got.State != AttemptSucceeded {
+		t.Fatalf("want succeeded, got %s", got.State)
+	}
+	if e.ca2Unresolved(t, ref) != 1 || e.b12AuditCount(t, r5Terminal, a.ID) != 0 {
+		t.Fatalf("setup: the orphan must be unresolved and unaudited")
+	}
+	for i := 0; i < 3; i++ {
+		if err := deliver("", 499); err != nil {
+			t.Fatalf("redelivery #%d: %v", i, err)
+		}
+		if n := e.b12AuditCount(t, r5Terminal, a.ID); n != 1 {
+			t.Fatalf("after redelivery #%d: terminal-mismatch audit rows = %d, want exactly 1", i, n)
+		}
+		if n := e.ca2Unresolved(t, ref); n != 0 {
+			t.Fatalf("after redelivery #%d: the orphaned receipt must be resolved, %d unresolved", i, n)
+		}
+	}
+	rows := e.b12Rows(t)
+	if len(rows) != 1 || rows[0].State != "open" {
+		t.Fatalf("want one open alert row, got %+v", rows)
+	}
+}
+
+// LF sequence for a payout: a mismatched success is DEFERRED (nothing resolves it), the payout is then
+// settled by the SYNC path (which binds the reference and never drains), and the provider redelivers.
+func TestCallbackAudit2_DeferredThenSyncBind_Redelivered_AuditedOnce_Resolved(t *testing.T) {
+	pool := depositV2ScratchPool(t)
+	pid := "mock-ca2-syncbind"
+	f, orch, _ := fpOrch(t, pool, pid)
+	e := rbEnv{pool: pool, f: f, orch: orch, pid: pid}
+	wr, a := e.claim(t, "ca2-syncbind")
+	const ref = "ca2-syncbind-ref"
+	deliver := func(amount int64) error { return e.r5Callback(PaymentAttempt{}, ref, amount, "EUR") }
+	if err := deliver(499); err != nil {
+		t.Fatalf("deferred delivery: %v", err)
+	}
+	if e.ca2Unresolved(t, ref) != 1 {
+		t.Fatalf("setup: the mismatched success must be stored deferred and unresolved")
+	}
+	e.apply(t, wr, a, rbResult(ErrorClassSucceeded, OutcomeSucceeded, ref))
+	if got := mustGetAttempt(t, pool, f.tenantID, a.ID); got.State != AttemptSucceeded {
+		t.Fatalf("want succeeded via the sync path, got %s", got.State)
+	}
+	if e.ca2Unresolved(t, ref) != 1 || e.b12AuditCount(t, r5Terminal, a.ID) != 0 {
+		t.Fatalf("setup: the sync path never drains, so the receipt stays unresolved and unaudited")
+	}
+	for i := 0; i < 3; i++ {
+		if err := deliver(499); err != nil {
+			t.Fatalf("redelivery #%d: %v", i, err)
+		}
+	}
+	if n := e.b12AuditCount(t, r5Terminal, a.ID); n != 1 {
+		t.Fatalf("terminal-mismatch audit rows = %d, want exactly 1", n)
+	}
+	if n := e.ca2Unresolved(t, ref); n != 0 {
+		t.Fatalf("the orphaned receipt must be resolved, %d unresolved", n)
+	}
+	e.b12AssertOneAlertRowCount(t, a.ID, alertReasonPayoutMismatchedSuccessOnSucceeded)
+}
+
+func (e rbEnv) b12AssertOneAlertRowCount(t *testing.T, attemptID uuid.UUID, reason string) {
+	t.Helper()
+	rows := e.b12Rows(t)
+	want := "payout_attempt:" + attemptID.String() + ":reason:" + reason
+	if len(rows) != 1 || rows[0].Discriminator != want || rows[0].State != "open" {
+		t.Fatalf("want ONE open alert row %s, got %+v", want, rows)
+	}
+}
+
+// Deposit form of the orphan: the terminal-mismatch audit row is the deposit's ONLY trace of the
+// mismatched success, so it must not be lost. An unresolved stored receipt (the orphan, planted through
+// the production insert) is redelivered after the deposit succeeded: one audit row, receipt resolved,
+// no alert, no state change; further redeliveries add nothing.
+func TestCallbackAudit2_Deposit_OrphanedReceipt_Redelivered_AuditedOnce_Resolved(t *testing.T) {
+	pool := depositV2ScratchPool(t)
+	pid := "mock-psp-ca2-dep"
+	f := seedOrchFixture(t, pool)
+	provider := NewMockProvider(pid, "EUR")
+	registerCapability(t, pool, f, provider, 100)
+	orch := NewOrchestrator(map[string]PaymentProvider{pid: provider}, MultiWebhookCredentialResolver{pid: NewMockWebhookCredentials(provider)})
+	res, err := orch.InitiateDepositAttempt(context.Background(), pool, AllowAllDepositKYCGate{}, MockCredentialResolver{}, InitiateDepositParams{
+		Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
+		AssetCode: "EUR", Amount: 5000, PaymentMethod: "card", IdempotencyKey: "ca2-dep",
+	})
+	if err != nil {
+		t.Fatalf("InitiateDepositAttempt: %v", err)
+	}
+	ref := "ca2-dep-ref"
+	if res.Attempt.ProviderReference != nil {
+		ref = *res.Attempt.ProviderReference
+	}
+	mismatched := ReceiptEvidence{EventType: "deposit", ProviderReference: ref, Outcome: OutcomeSucceeded, Amount: 4999, AssetCode: "EUR"}
+	deliver := func(ev ReceiptEvidence) {
+		pending, err := alerting.InTx(context.Background(), alerting.NewTenantRunner(pool, f.tenantID), func(ctx context.Context, tx pgx.Tx) error {
+			_, err := ApplyReceiptEvidence(ctx, tx, orch, f.tenantID, pid, ev)
+			return err
+		})
+		if err != nil {
+			t.Fatalf("ApplyReceiptEvidence: %v", err)
+		}
+		pending.Flush(context.Background())
+	}
+	deliver(ReceiptEvidence{EventType: "deposit", ProviderReference: ref, MerchantReference: res.Attempt.MerchantReference,
+		Outcome: OutcomeSucceeded, Amount: 5000, AssetCode: "EUR"})
+	if got := mustGetAttempt(t, pool, f.tenantID, res.Attempt.ID); got.State != AttemptSucceeded {
+		t.Fatalf("setup: want succeeded, got %s", got.State)
+	}
+	// Plant the orphan AFTER the success (so no drain can take it): a deferred, unresolved receipt for the mismatched event.
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, dup, err := insertReceiptDeduped(ctx, tx, f.tenantID, pid, mismatched, DispositionDeferredUnresolved)
+		if err == nil && dup {
+			err = fmt.Errorf("setup: receipt unexpectedly a duplicate")
+		}
+		return err
+	}); err != nil {
+		t.Fatalf("plant orphan: %v", err)
+	}
+	count := func(q string) int {
+		return fpCount(t, pool, f.tenantID, q, f.tenantID, ref)
+	}
+	unresolved := func() int {
+		return count(`SELECT count(*) FROM payment_provider_events WHERE tenant_id=$1 AND provider_reference=$2 AND resolved_at IS NULL AND amount=4999`)
+	}
+	if unresolved() != 1 {
+		t.Fatalf("setup: the planted orphan must be unresolved")
+	}
+	for i := 0; i < 3; i++ {
+		deliver(mismatched)
+		n := fpCount(t, pool, f.tenantID, `SELECT count(*) FROM audit_log WHERE tenant_id=$1 AND action=$2 AND target_id=$3`,
+			f.tenantID, r5Terminal, res.Attempt.ID.String())
+		if n != 1 {
+			t.Fatalf("after redelivery #%d: audit rows = %d, want exactly 1", i, n)
+		}
+	}
+	if unresolved() != 0 {
+		t.Fatalf("the orphaned deposit receipt must be resolved")
+	}
+	if rows := alertinject.ForSubject(t, pool, f.tenantID); len(rows) != 0 {
+		t.Fatalf("a deposit raises no alert today, got %+v", rows)
+	}
+	if got := mustGetAttempt(t, pool, f.tenantID, res.Attempt.ID); got.State != AttemptSucceeded {
+		t.Fatalf("state changed to %s", got.State)
+	}
+	assertLedgerBalanced(t, pool, f.tenantID)
 }

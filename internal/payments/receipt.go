@@ -363,6 +363,15 @@ func insertReceiptDeduped(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, pr
 	return returnedID, false, nil
 }
 
+// receiptIsResolved reports whether the stored receipt already has its one-shot resolution.
+func receiptIsResolved(ctx context.Context, tx pgx.Tx, receiptID uuid.UUID) (bool, error) {
+	var resolved bool
+	if err := tx.QueryRow(ctx, `SELECT resolved_at IS NOT NULL FROM payment_provider_events WHERE id = $1`, receiptID).Scan(&resolved); err != nil {
+		return false, fmt.Errorf("payments: read receipt resolution: %w", err)
+	}
+	return resolved, nil
+}
+
 // resolvedAttempt is ResolveAttemptForEvidence's outcome.
 type resolvedAttempt struct {
 	Attempt       PaymentAttempt
@@ -641,7 +650,21 @@ func ApplyReceiptEvidence(ctx context.Context, tx pgx.Tx, o *Orchestrator, tenan
 		return "", err
 	}
 
-	changed, resolution, err := applyResolvedReceiptEvidence(ctx, tx, o, attempt, ev, duplicate)
+	// PAY-PAYOUT-CALLBACK-AUDIT-2 (security S-1/S-3, ledger-finance C-1): the audit gate is "this
+	// receipt was already RESOLVED", not "this receipt already existed". A duplicate whose row is still
+	// unresolved is an ORPHANED deferred receipt (stored by a transaction whose commit the binding
+	// transaction's drain could not see, or by a path that never drains) and this delivery is its
+	// first application: it writes the audit row and closes the receipt below. Read under the parent
+	// lock, so a concurrent applier's ResolveReceipt is visible and the CAS below cannot lose.
+	alreadyApplied := false
+	if duplicate {
+		alreadyApplied, err = receiptIsResolved(ctx, tx, receiptID)
+		if err != nil {
+			return "", err
+		}
+	}
+
+	changed, resolution, err := applyResolvedReceiptEvidence(ctx, tx, o, attempt, ev, alreadyApplied)
 	if err != nil {
 		return "", err
 	}
@@ -660,7 +683,7 @@ func ApplyReceiptEvidence(ctx context.Context, tx pgx.Tx, o *Orchestrator, tenan
 		}
 	}
 
-	if !duplicate {
+	if !alreadyApplied {
 		if err := ResolveReceipt(ctx, tx, receiptID, &attempt.ID, string(resolution)); err != nil {
 			return "", err
 		}
@@ -719,8 +742,8 @@ func ApplyReceiptEvidence(ctx context.Context, tx pgx.Tx, o *Orchestrator, tenan
 // and resolution, the value this receipt's payment_provider_events.
 // resolution column is one-shot-set to.
 //
-// duplicate reports that the receipt row of THIS delivery already existed (a redelivery deduped by
-// insertReceiptDeduped). It gates only the audit rows of the no-state-change terminal cells
+// duplicate here means "the receipt of THIS delivery was already RESOLVED" (an already-applied
+// redelivery; an unresolved existing row is an orphan and counts as a first application). It gates only the audit rows of the no-state-change terminal cells
 // (PAY-PAYOUT-CALLBACK-AUDIT-2); no state transition, financial effect or raise depends on it.
 //
 // RV-PRH-I1 ledger-finance M1: every §4.4 cell for EVERY reachable attempt
