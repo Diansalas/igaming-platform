@@ -6775,10 +6775,27 @@ for a real PSP statement.** It does not open the §35.4 GATE.
   - `TestB11_Recon_UnboundPayoutPark_TombstoneClears` becomes `..._TombstoneNeverClears`.
   - `TestB11_Recon_ReverseCollisionPark_InRunFinding` becomes
     `..._InRunAndStanding_DepositRefundNeverClears`.
-  - `TestD2_9b` keeps its name: a deposit reversal naming the settlement reference no longer clears the
-    payout B, the finding stays the in-run cross-check one, and it stands on later runs. Its D2 mutant
-    X6 (clear B on `a.providerRef` instead of `l.ref`) is now **equivalent**, because both references
-    belong to P1 and neither is attributable to B. See the evidence file.
+  - `TestD2_9b_..._NamedUnboundPark_ClearsOnLineRef` is renamed
+    `TestD2_9b_MerchantCrossCheck_SettlementLine_NamedUnboundPayoutPark_DepositSignalsNeverClear` (LF F5;
+    the `TestD2_9b` prefix is kept, so earlier evidence files still resolve). A deposit reversal naming
+    the settlement reference no longer clears the payout B. The finding stays the in-run cross-check
+    one, and it stands on later runs.
+  - **D2 mutant X6** (clear B on `a.providerRef` instead of `l.ref`; LF C1/C2 correction):
+    - **Under positive attribution it is equivalent.** B clears only on its **own** release keyed by
+      the line reference. A line whose reference is B's own settlement resolves to B in `matchPayment`
+      (`bySettlement[l.ref]` is looked up before `bySettlement[l.settlement]` and the merchant
+      fallback), so it never reaches the cross-check B step. If another attempt holds that reference as
+      its provider reference, the line resolves to that attempt, but the `byRef` check refuses clearing
+      under both `l.ref` and `a.providerRef`.
+    - **The resolution shapes.** A line can be resolved by `l.ref` as a settlement reference
+      (`l.ref != a.providerRef`), or by `bySettlement[l.settlement]` with `l.ref` an unrelated PSP
+      reference. In neither shape can any posting clear B through the mutant and not through the
+      original, or the other way round.
+    - **The earlier claim was wrong.** The first STANDING-1 evidence (5467063) called X6 equivalent
+      for a reason that did not hold. Under the negative attribution then in force, X6 **was
+      distinguishable**: in the `l.settlement` shape an **unlinked** `withdrawal_completed` on the
+      unrelated `l.ref` cleared B under the original but not under the mutant. No test built that shape.
+      See the evidence file.
 - **New tests.**
   - `TestB11_Recon_UnboundPayoutPark_WithdrawalCompletedOnLineRefClears`: clears on the attempt's own
     completion under the line reference. It does not clear on:
@@ -6802,12 +6819,24 @@ for a real PSP statement.** It does not open the §35.4 GATE.
   payments, with ledger-finance sign-off; required before any non-MOCK payout. STANDING-1 only makes the
   exposure permanently visible. M1 still only acknowledges, M2 still refuses every unbound reason, and
   allocation (LEDGER-SUSPENSE-B-1) must refuse payouts.
-- **Residual (finding, not changed here).** The **bound-class** payout parks (for example
-  `callback_amount_asset_mismatch` on a payout that holds X) still clear on the deposit-shaped signals
-  (`capturedUnposted`: a `deposit_reversal` naming X, or a tombstone on X) at the `boundCapture()`
-  in-run site and in `checkUnmatchedAttempts`. STANDING-1's ruling was scoped to unbound parks; only the
-  wording changed at those sites. Proposed follow-up for a ledger-finance ruling:
-  PAY-PAYOUT-BOUND-CLEAR-1, per-operation clearing for bound-class payout parks.
+  - **Constraint on RESOLVE-1 (LF F6, binding).** A payout finding clears only when the governed
+    completion is the attempt's **own** release (its `withdrawal_requests.release_ledger_transaction_id`)
+    keyed by the **PSP line reference**. A completion under any other reference leaves the finding
+    standing and loud. RESOLVE-1 must not loosen the positive attribution of `payoutCompletedRef`.
+  - RESOLVE-1 also inherits security I-1 (comparing the completion's amount and asset) and I-2 (the
+    unbounded persisted-lines query), above.
+- **REQUIRED (HIGH): PAY-PAYOUT-BOUND-CLEAR-1. Blocks any non-MOCK payout,** together with RESOLVE-1.
+  Owner payments, ledger-finance sign-off (LF review of STANDING-1).
+  - **The defect.** Bound-class payout parks still clear on deposit-shaped signals, through
+    `capturedUnposted` at the `boundCapture()` in-run site and in `checkUnmatchedAttempts`. An example is
+    `callback_amount_asset_mismatch` on a payout that holds X. Today a tombstone on X, or a
+    `deposit_reversal` **of any amount, even 1**, naming X clears that park's possible-double-payout
+    finding. This is the same fail-open across operations that STANDING-1 removed for unbound parks.
+  - **Required fix.** Per-operation clearing for bound payout parks, using the same positive-attribution
+    payout rule.
+  - **Wording (LF F4, folded in).** STANDING-1 changed only the text at those sites: the R-K3-8 payout
+    wording now appears where the clearing still accepts deposit signals. PAY-PAYOUT-BOUND-CLEAR-1 aligns
+    the two.
 
 ## 36. Amendment — PRH-2 D: poll amount and reference evidence, ledger-key binding, deferred-receipt drains, park fault injection (`payments`, 2026-10-03)
 

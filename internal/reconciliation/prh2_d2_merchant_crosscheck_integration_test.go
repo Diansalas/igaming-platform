@@ -286,8 +286,10 @@ func TestD2_9_MerchantCrossCheck_PayoutBySettlement(t *testing.T) {
 	w.d2AssertBalanced(t)
 }
 
-// TestD2_9b_MerchantCrossCheck_SettlementLine_NamedUnboundPark_ClearsOnLineRef:
-// a payout line found by SETTLEMENT reference S1 (so the line's reference
+// TestD2_9b_MerchantCrossCheck_SettlementLine_NamedUnboundPayoutPark_DepositSignalsNeverClear
+// (renamed under STANDING-1, LF F5; it was ..._NamedUnboundPark_ClearsOnLineRef,
+// and the TestD2_9b prefix is kept so earlier evidence files still resolve).
+// D2 history: a payout line found by SETTLEMENT reference S1 (so the line's reference
 // differs from the resolved attempt's own provider reference) whose merchant
 // reference names an unbound-park attempt B. B's captured_unposted is raised,
 // and clears on a reversal naming the LINE's reference S1 - never on the
@@ -301,13 +303,14 @@ func TestD2_9_MerchantCrossCheck_PayoutBySettlement(t *testing.T) {
 // D2 pin "clears on a reversal naming the line's reference" was the
 // fail-open-across-operations defect). B's finding uses the payout wording,
 // stands on later runs, and is not cleared by P1's own withdrawal_completed on
-// S1 either (S1 is P1's settlement reference: not attributable to B). The D2
-// mutant "clear B on a.providerRef instead of l.ref" has no distinguishing
-// shape for payouts any more (both references belong to P1, neither is
-// attributable to B); it stays pinned for the clearing it can still change by
-// TestB11_Recon_UnboundPayoutPark_WithdrawalCompletedOnLineRefClears and the
-// STANDING-1 mutation evidence.
-func TestD2_9b_MerchantCrossCheck_SettlementLine_NamedUnboundPark_ClearsOnLineRef(t *testing.T) {
+// S1 either (S1 is P1's settlement reference, not B's own release). The D2
+// mutant X6 ("clear B on a.providerRef instead of l.ref") is EQUIVALENT under
+// the positive attribution rule (security L-1): B clears only on its OWN
+// release keyed by the line reference, and a line whose reference is B's own
+// settlement resolves to B first (bySettlement[l.ref]), so it never reaches
+// the cross-check B step. X6 WAS distinguishable at 5467063 (negative
+// attribution); see the STANDING-1 mutation evidence.
+func TestD2_9b_MerchantCrossCheck_SettlementLine_NamedUnboundPayoutPark_DepositSignalsNeverClear(t *testing.T) {
 	w := newD2World(t)
 	s1, i1 := "d2-settle-"+uuid.NewString()[:8], "d2-instr-1-"+uuid.NewString()[:8]
 	p1 := w.attempt(t, w.payoutFixture(t, payProvA, i1, s1, 3000, true))
