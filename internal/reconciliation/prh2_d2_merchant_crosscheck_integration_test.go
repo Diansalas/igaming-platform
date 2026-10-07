@@ -286,8 +286,10 @@ func TestD2_9_MerchantCrossCheck_PayoutBySettlement(t *testing.T) {
 	w.d2AssertBalanced(t)
 }
 
-// TestD2_9b_MerchantCrossCheck_SettlementLine_NamedUnboundPark_ClearsOnLineRef:
-// a payout line found by SETTLEMENT reference S1 (so the line's reference
+// TestD2_9b_MerchantCrossCheck_SettlementLine_NamedUnboundPayoutPark_DepositSignalsNeverClear
+// (renamed under STANDING-1, LF F5; it was ..._NamedUnboundPark_ClearsOnLineRef,
+// and the TestD2_9b prefix is kept so earlier evidence files still resolve).
+// D2 history: a payout line found by SETTLEMENT reference S1 (so the line's reference
 // differs from the resolved attempt's own provider reference) whose merchant
 // reference names an unbound-park attempt B. B's captured_unposted is raised,
 // and clears on a reversal naming the LINE's reference S1 - never on the
@@ -295,7 +297,20 @@ func TestD2_9_MerchantCrossCheck_PayoutBySettlement(t *testing.T) {
 // (for a deposit resolved by reference they are equal by construction), so it
 // is what pins the ruling's mutant "clear B on a.providerRef instead of l.ref".
 // B is a fixture: a pending payout moved to T10 with an unbound reason.
-func TestD2_9b_MerchantCrossCheck_SettlementLine_NamedUnboundPark_ClearsOnLineRef(t *testing.T) {
+//
+// FLIPPED under PAY-PAYOUT-UNBOUND-STANDING-1 (ADR 0095 §35.2 PO-1 / §35.6): B
+// is a PAYOUT park, so a deposit_reversal naming S1 no longer clears it (the
+// D2 pin "clears on a reversal naming the line's reference" was the
+// fail-open-across-operations defect). B's finding uses the payout wording,
+// stands on later runs, and is not cleared by P1's own withdrawal_completed on
+// S1 either (S1 is P1's settlement reference, not B's own release). The D2
+// mutant X6 ("clear B on a.providerRef instead of l.ref") is EQUIVALENT under
+// the positive attribution rule (security L-1): B clears only on its OWN
+// release keyed by the line reference, and a line whose reference is B's own
+// settlement resolves to B first (bySettlement[l.ref]), so it never reaches
+// the cross-check B step. X6 WAS distinguishable at 5467063 (negative
+// attribution); see the STANDING-1 mutation evidence.
+func TestD2_9b_MerchantCrossCheck_SettlementLine_NamedUnboundPayoutPark_DepositSignalsNeverClear(t *testing.T) {
 	w := newD2World(t)
 	s1, i1 := "d2-settle-"+uuid.NewString()[:8], "d2-instr-1-"+uuid.NewString()[:8]
 	p1 := w.attempt(t, w.payoutFixture(t, payProvA, i1, s1, 3000, true))
@@ -311,10 +326,17 @@ func TestD2_9b_MerchantCrossCheck_SettlementLine_NamedUnboundPark_ClearsOnLineRe
 	ms := w.d2Run(t, d2Src(line))
 	d2Expect(t, ms, map[MismatchKind]int{MismatchKindPayReferenceMismatch: 1, d2KindCU: 1})
 	d2OneMerchant(t, ms, p1.ID, "names attempt="+b.ID.String())
-	d2CUFor(t, ms, b.ID)
+	s1PayoutCUFor(t, ms, b.ID, s1)
 
 	ms = w.d2Run(t, d2Src(line, d2ReversalLine("d2-rev-"+uuid.NewString()[:8], s1, 3000)))
 	d2OneMerchant(t, ms, p1.ID, "names attempt="+b.ID.String())
-	d2NoCU(t, ms, "a reversal naming the line's (settlement) reference")
+	// STANDING-1: a deposit reversal never clears a payout park - not even in
+	// this run: the finding is still the IN-RUN merchant cross-check one, not a
+	// standing re-raise of a finding the in-run step wrongly cleared.
+	if m := s1PayoutCUFor(t, ms, b.ID, s1); strings.Contains(m.ActualValue, "standing: persisted line") ||
+		!strings.Contains(m.ActualValue, "line resolved by reference to attempt="+p1.ID.String()) {
+		t.Fatalf("want the in-run cross-check finding for B, got %s", m.ActualValue)
+	}
+	s1PayoutCUFor(t, w.d2Run(t, d2PastSrc()), b.ID, s1)
 	w.d2AssertBalanced(t)
 }

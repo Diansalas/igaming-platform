@@ -1,0 +1,190 @@
+PRH-2 round 8: PAY-PAYOUT-UNBOUND-STANDING-1 mutation evidence (ledger-finance)
+Branch pay-payout-unbound-standing-1, base a51dee7 (claude/focused-wright-jw88w9).
+Production files under test (the only production files changed):
+  internal/reconciliation/payment_statement_k3.go
+  internal/reconciliation/payment_statement.go
+Tests:
+  internal/payments/b11_payout_unbound_hold_integration_test.go       (TestB11_Recon_*)
+  internal/reconciliation/prh2_d2_merchant_crosscheck_integration_test.go (TestD2_9b, flipped)
+  internal/reconciliation/prh2_r8_standing1_payout_unbound_integration_test.go (TestStanding1_*)
+  plus the whole existing TestD2_* / TestK3_* reconciliation set (deposit behaviour unchanged).
+
+Method: each mutant is applied IN PLACE to the named production file by a scripted exact-text
+replacement (the anchor must match exactly once, otherwise the mutant is "not applied"), after a
+backup of BOTH production files. The runner then runs:
+  go test -race -tags integration -count=1 -p 1 -run '^TestB11_Recon' ./internal/payments/
+  go test -race -tags integration -count=1 -p 1 -run '^(TestD2_|TestK3_|TestStanding1_)' ./internal/reconciliation/
+against a private scratch database (priv_standing1_lf), restores both files from the backup and
+compares them byte for byte with cmp. A mutant counts as KILLED only when at least one named test
+fails on an assertion. COMPILE-ERROR mutants would be reported and not counted; none occurred
+(every mutant built). MOCK provider and MOCK statement sources only.
+
+CONTROL (unmutated tree, final test set at f480312):
+  ok  internal/payments         27.311s   (TestB11_Recon_*)
+  ok  internal/reconciliation   12.690s   (TestD2_*, TestK3_*, TestStanding1_*)
+
+Infrastructure incident, disclosed: during the first batch the host filesystem ran out of space
+("no space left on device" at link time and SQLSTATE 53100 in Postgres). The runner had marked the
+seven affected mutants KILLED, but those failures came from the environment, not from assertions.
+All seven results were DISCARDED and the mutants were re-run once space was available; only the
+re-runs are reported below. The runner now flags any log containing "no space left" as INVALID.
+The earlier mutants' logs contain no such error.
+
+ID                               Injected defect                                                    Result    Failing top-level tests
+S1-LOADER-PAYOUT-DROPPED         K3 loader no longer collects disputed unbound PAYOUT attempts      KILLED    7: B11 InRunAndStanding, TombstoneNeverClears,
+                                 (the pre-STANDING-1 deposit-only loader)                                     ReverseCollision, WithdrawalCompletedOnLineRefClears,
+                                                                                                              UnrelatedActivity, TenantIsolation; TestD2_9b
+S1-LOADER-PAYOUT-NO-MERCHANT     loader collects the payout park's reference only, not its           KILLED    7 (same set; the sync-shape park holds no reference)
+                                 merchant reference
+S1-STANDING-DEPOSIT-LINES        checkStandingUnbound reads DEPOSIT lines for a payout park          KILLED    7 (same set)
+S1-STANDING-PAYOUT-SKIPPED       checkStandingUnbound skips payout parks                             KILLED    7 (same set)
+S1-STANDING-ANY-STATUS           standing raises on any persisted line status (not only succeeded)  KILLED    1: B11 InRunAndStanding (step d: persisted pending/
+                                                                                                              declined/reversed lines must not raise)
+S1-CLEAR-PAYOUT-DEPOSIT-SIGNALS  payout clearing = the deposit-shaped signals (THE B11 defect:       KILLED    6: InRunAndStanding, TombstoneNeverClears,
+                                 deposit_reversal / tombstone clear a payout finding)                         ReverseCollision, WithdrawalCompleted..., Unrelated...,
+                                                                                                              TestD2_9b
+S1-CLEAR-PAYOUT-OR-DEPOSIT       payout clears on withdrawal_completed OR a deposit-shaped signal   KILLED    4: InRunAndStanding, TombstoneNeverClears,
+                                                                                                              ReverseCollision, TestD2_9b
+S1-CLEAR-PAYOUT-NEVER            a payout finding never clears                                       KILLED    2: WithdrawalCompletedOnLineRefClears,
+                                                                                                              UnrelatedActivity (control: the second park clears)
+S1-CLEAR-ANY-POSTING-TYPE        any deposit / tombstone posting keyed by the reference also         KILLED    2: ReverseCollision (the deposit key R),
+                                 counts as the payout clearing                                                 TombstoneNeverClears
+S1-ATTRIB-SETTLEMENT-DROPPED     attribution: another attempt holding the reference as its          KILLED    2: UnrelatedActivity (another payout's completion
+                                 settlement reference no longer blocks clearing                               under the same reference), TestD2_9b
+S1-ATTRIB-BYREF-DROPPED          attribution: another attempt holding the reference as its payout   KILLED    1: WithdrawalCompletedOnLineRefClears/
+                                 provider reference no longer blocks clearing                                 completion_keyed_by_a_reference_another_attempt_holds
+S1-TEXT-DEPOSIT-WORDING          payout findings get the deposit wording (allocation,                KILLED    7: every payout-finding test (exact ExpectedValue,
+                                 LEDGER-SUSPENSE-B-1)                                                          "LEDGER-SUSPENSE" refused)
+S1-HOLDER-SETTLEMENT-DROPPED     standing detail no longer names the payout settlement holder       KILLED    1: UnrelatedActivity (holder_attempt=<other payout>)
+S1-INRUN-DEPOSIT-CLEAR           matchPayment's unboundPark() case reverts to deposit-shaped        KILLED    3: InRunAndStanding (the in-run finding becomes a
+                                 clearing (the standing rule then re-raises it)                               standing re-raise), TombstoneNeverClears,
+                                                                                                              WithdrawalCompletedOnLineRefClears
+S1-CROSSCHECK-DEPOSIT-CLEAR      merchant cross-check B step reverts to deposit-shaped clearing     KILLED    1: TestD2_9b (asserts the IN-RUN cross-check finding
+                                                                                                              survives the deposit reversal, not a standing re-raise)
+S1-DEPOSIT-ALSO-PAYOUT-CLEAR     a DEPOSIT park also clears on the payout signal                    KILLED    1: TestStanding1_DepositUnboundPark_Unattributed-
+                                                                                                              WithdrawalCompletedNeverClears
+                                 (first run: SURVIVED; the only deposit test then used an attempt-linked completion, which the attribution
+                                 rule refuses anyway. A test with an UNLINKED withdrawal_completed on the deposit line reference was added at
+                                 f480312, and the mutant was re-run: KILLED.)
+S1-DEPOSIT-READS-PAYOUT-LINES    a DEPOSIT park reads PAYOUT lines for standing                     KILLED    9: TestD2_4, TestD2_15, TestK3_C14d, TestK3_C34 (x2),
+                                                                                                              TestK3_C34b, TestK3_C38, TestStanding1_* (x2)
+S1-X6-B-CLEAR-ON-A-REF           D2 mutant X6 re-run: cross-check B step clears on a.providerRef    SURVIVED  0  [RATIONALE BELOW IS WRONG - see the CORRECTION in the
+                                                                                                              final-tip section at the end]: a payout B is cleared only by
+                                 instead of l.ref                                                             an ATTRIBUTABLE withdrawal_completed. In the only shape where
+                                                                                                              l.ref != a.providerRef (a payout line resolved by settlement
+                                                                                                              reference S1 to P1), S1 is P1's settlement and a.providerRef is
+                                                                                                              P1's provider reference, so neither can ever be attributable to
+                                                                                                              B. For deposits l.ref == a.providerRef by construction. No
+                                                                                                              input distinguishes the mutant. It was KILLED by TestD2_9b
+                                                                                                              under D2 only because B then cleared on a deposit reversal,
+                                                                                                              the defect STANDING-1 removes.
+
+Restore + cmp: every run printed "RESTORED cmp=identical"; `git status --short` was empty after the
+last mutant.
+
+Totals: 17 STANDING-1 mutants, all KILLED (S1-DEPOSIT-ALSO-PAYOUT-CLEAR after one test was added).
+One re-run D2 mutant (X6) SURVIVED and is EQUIVALENT for the reason above. No compile-error mutants.
+
+Superseded B11 entries (prh2-r7-b11-payout-unbound-hold-mutation-kill.txt):
+  - K11 (standing reads payout lines alone: SURVIVED, equivalent) and K11p (with the loader gate
+    removed: KILLED by the "no standing" PIN). That pin is now flipped: the behaviour K11p forced is
+    the implemented behaviour. The new guards are S1-LOADER-* and S1-STANDING-*.
+  - K10 (the unbound finding dropped for payouts) is still meaningful. It is covered by every
+    B11 recon test that requires the in-run payout finding.
+
+Not mutated (disclosed): the tenant_id predicates of the K3 queries. RLS (FORCE) is a second line
+behind them, so a dropped predicate is not observable through the runtime role. Tenant isolation is
+asserted behaviourally by TestB11_Recon_TenantIsolation: tenant B, under tenant A's provider id and
+line reference, posts a withdrawal_completed and imports a deposit_reversal and a payout line naming
+A's merchant reference. Neither tenant's finding changes.
+
+==============================================================================================
+FINAL-TIP RE-RUN after security L-1 (option a) and LF C1 (production code at 2688a9c, unchanged
+through 42fa048; mutants run against tip 42fa048, same runner, same commands, same private DB)
+==============================================================================================
+What changed: payoutCompletedRef now requires POSITIVE attribution. The withdrawal_completed keyed
+by the line reference must be the parked attempt's OWN release, which means:
+  - a.settlementRef == ref (withdrawal_requests.release_ledger_transaction_id is this provider's
+    withdrawal_completed under ref), AND
+  - bySettlement[ref] == a, AND
+  - no other attempt holds ref as its payout provider reference (byRef).
+The first cut (d2d0f06..f480312) used a NEGATIVE form: clearing was blocked only when ANOTHER attempt
+held ref. That let an unlinked posting, or a legacy/unattempted withdrawal's completion, that merely
+shared the line reference clear the finding. Found by the security review (L-1) and LF review (F1).
+New subtests of TestB11_Recon_UnboundPayoutPark_WithdrawalCompletedOnLineRefClears:
+  legacy_unattempted_completion_on_the_line_reference_does_not_clear
+  unlinked_completion_posting_on_the_line_reference_does_not_clear
+B11 recon tests were confirmed to RUN, not skip: TEST_ADMIN_DATABASE_URL is exported by the private
+runner's env, and a -v run of TestB11_Recon counted 0 "--- SKIP" lines.
+
+CONTROL (tip 42fa048): ok internal/payments 28.606s; ok internal/reconciliation 10.812s.
+No "no space left" in any log of this batch. Every mutant built. Every mutant printed
+"RESTORED cmp=identical"; git status was clean afterwards.
+
+ID                               Injected defect (re-described against the POSITIVE rule)          Result
+S1-LOADER-PAYOUT-DROPPED         (as above)                                                        KILLED (7 top-level tests)
+S1-LOADER-PAYOUT-NO-MERCHANT     (as above)                                                        KILLED (7)
+S1-STANDING-DEPOSIT-LINES        (as above)                                                        KILLED (7)
+S1-STANDING-PAYOUT-SKIPPED       (as above)                                                        KILLED (7)
+S1-STANDING-ANY-STATUS           (as above)                                                        KILLED (InRunAndStanding)
+S1-CLEAR-PAYOUT-DEPOSIT-SIGNALS  (as above)                                                        KILLED (6)
+S1-CLEAR-PAYOUT-OR-DEPOSIT       (as above)                                                        KILLED (4)
+S1-CLEAR-PAYOUT-NEVER            (as above)                                                        KILLED (WithdrawalCompleted..., UnrelatedActivity)
+S1-L1-NEGATIVE-ATTRIBUTION       LF C1 "revert to negative attribution": the positive check is     KILLED by the two L-1 subtests:
+                                 replaced by the first cut's negative check                         legacy_unattempted_completion..., unlinked_completion...
+S1-ATTRIB-SETTLEMENT-DROPPED     the whole positive-attribution check is removed                   KILLED: the two L-1 subtests, UnrelatedActivity
+                                 (any withdrawal_completed under ref clears unless byRef blocks)    (another payout's completion under the same ref),
+                                                                                                    TestD2_9b
+S1-ATTRIB-BYREF-DROPPED          the "no other attempt holds ref as its payout provider reference"  KILLED: completion_keyed_by_a_reference_another_
+                                 check is removed (p's own release under another attempt's ref)     attempt_holds_does_not_clear
+S1-L1-DROP-SETTLEMENTREF-EQ      LF C1 "drop a.settlementRef != ref"                                SURVIVED  EQUIVALENT (not killed; the LF review expected
+                                 (only bySettlement[ref] != a remains)                                        a kill): loadPlatform keys bySettlement by
+                                 each attempt's own settlementRef, so bySettlement[ref] == a implies a.settlementRef == ref. No input
+                                 separates the two forms. The redundant half is kept as defence in depth. It is pinned TOGETHER with the
+                                 bySettlement half by S1-ATTRIB-SETTLEMENT-DROPPED and S1-L1-NEGATIVE-ATTRIBUTION (both KILLED).
+S1-L1-DROP-BYSETTLEMENT-EQ       the converse: drop bySettlement[ref] != a                         SURVIVED  EQUIVALENT in every state I could reach:
+                                 (only a.settlementRef != ref remains)                                        the two forms differ only if two attempts
+                                 of the SAME withdrawal request carried the same settlementRef (bySettlement keeps the last). A disputed
+                                 payout keeps its hold and no second attempt is claimed for it, so I found no reachable shape; this was not
+                                 proven exhaustively.
+S1-CLEAR-ANY-POSTING-TYPE        deposit/tombstone postings keyed by ref also count                SURVIVED  EQUIVALENT under the positive rule (it was
+                                                                                                              KILLED under the negative rule above):
+                                 a.settlementRef is non-empty only when a's release IS this provider's withdrawal_completed (loadPlatform's
+                                 releaseIsCompletion), so the ledger-type lookup can no longer change the outcome. It stays as defence in
+                                 depth.
+S1-TEXT-DEPOSIT-WORDING          (as above)                                                        KILLED (7)
+S1-HOLDER-SETTLEMENT-DROPPED     (as above)                                                        KILLED (UnrelatedActivity)
+S1-INRUN-DEPOSIT-CLEAR           (as above)                                                        KILLED (3)
+S1-CROSSCHECK-DEPOSIT-CLEAR      (as above)                                                        KILLED (TestD2_9b, renamed below)
+S1-DEPOSIT-ALSO-PAYOUT-CLEAR     a DEPOSIT park also accepts the payout signal                     SURVIVED  EQUIVALENT under the positive rule (it was
+                                                                                                              KILLED at f480312 under the negative
+                                 rule): a deposit attempt has no withdrawal request, so settlementRef == "" and payoutCompletedRef is always
+                                 false for it. The test that killed it at f480312
+                                 (TestStanding1_DepositUnboundPark_UnattributedWithdrawalCompletedNeverClears) is kept as a behavioural pin.
+S1-DEPOSIT-READS-PAYOUT-LINES    (as above)                                                        KILLED (10)
+S1-X6-B-CLEAR-ON-A-REF           D2 X6: cross-check B step clears on a.providerRef, not l.ref       SURVIVED  EQUIVALENT under the positive rule. See the
+                                                                                                              correction below.
+
+CORRECTION of the X6 rationale given in the 5467063 table above (LF C1). That rationale ("both
+references belong to P1, neither is attributable to B") considered only the line resolved by l.ref as
+P1's settlement reference. It missed the l.settlement shape: matchPayment resolves the line through
+bySettlement[l.settlement] to P1, and l.ref is an UNRELATED PSP reference R. Under the negative
+attribution in force at 5467063, an UNLINKED withdrawal_completed keyed by R cleared B under the
+original (on l.ref = R) but not under X6 (on a.providerRef = P1's reference). So X6 WAS
+distinguishable at 5467063; calling it "equivalent" there was wrong, and no test built that shape.
+Under the positive rule it is equivalent:
+  - B clears on R only if R is B's OWN release (bySettlement[R] == B). matchPayment looks up
+    byRef[payout R], then bySettlement[l.ref], before bySettlement[l.settlement] and the merchant
+    fallback, so such a line resolves to B itself and never reaches the cross-check B step.
+  - If another attempt holds R as its provider reference, the line resolves to that attempt, and the
+    byRef check refuses clearing on R and on a.providerRef alike.
+  - In the l.ref = settlement shape (TestD2_9b), both references belong to P1 and neither is B's own
+    release.
+
+Rename (LF C3 / F5): TestD2_9b_MerchantCrossCheck_SettlementLine_NamedUnboundPark_ClearsOnLineRef is
+now TestD2_9b_MerchantCrossCheck_SettlementLine_NamedUnboundPayoutPark_DepositSignalsNeverClear. The
+TestD2_9b prefix is kept, so the D2 evidence files and reviews still resolve.
+
+Final-tip totals: 21 mutants. 16 KILLED. 5 SURVIVED, every one classified EQUIVALENT with the reason
+above: S1-L1-DROP-SETTLEMENTREF-EQ, S1-L1-DROP-BYSETTLEMENT-EQ, S1-CLEAR-ANY-POSTING-TYPE,
+S1-DEPOSIT-ALSO-PAYOUT-CLEAR, S1-X6-B-CLEAR-ON-A-REF. No compile-error mutants.

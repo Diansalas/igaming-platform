@@ -1126,19 +1126,88 @@ func TestB11_TenantIsolation(t *testing.T) {
 // ---------------------------------------------------------------------------
 // 8. Reconciliation: what the code does for a disputed UNBOUND payout.
 //
-// CURRENT BEHAVIOUR, pinned (ADR 0095 section 35.2, PO-1; ledger-finance B11
-// review). DETECTION is ratified (raising more findings without posting fails
-// safe); the CLEARING half and the missing standing coverage are ruled DEFECTIVE
-// for payouts and flip under PAY-PAYOUT-UNBOUND-STANDING-1 (these pins must then
-// be changed deliberately). matchPayment's `unboundPark()` case is
-// not gated on the operation: a `succeeded` PAYOUT statement line that resolves
-// to the parked payout (by merchant reference, or by reference) raises
-// pay_captured_unposted IN-RUN, cleared on the LINE's reference by the same two
-// deposit-shaped signals (a deposit_reversal line naming it, a tombstone ledger
-// row). The K3 standing rule for unbound parks (checkStandingUnbound, S1) reads
-// DEPOSIT lines only, so an unbound payout park has NO standing coverage: with
-// no line in the run there is no finding. Bound-class payout parks are covered
-// both in-run and standing (checkUnmatchedAttempts is operation-agnostic).
+// B11 pinned the then-current behaviour (ADR 0095 section 35.2, PO-1): DETECTION
+// ratified, CLEARING and the missing standing coverage ruled DEFECTIVE for
+// payouts. PAY-PAYOUT-UNBOUND-STANDING-1 (ADR 0095 section 35.6) FLIPPED those
+// pins deliberately; the tests below now pin the fixed behaviour:
+//
+//   - a `succeeded` PAYOUT statement line resolving to the parked payout (by
+//     merchant reference, or by reference) raises pay_captured_unposted IN-RUN
+//     (unchanged) and, once persisted, STANDING on every later run, unwindowed
+//     (the K3 loader collects disputed payout attempts whose captureClass is
+//     unbound; checkStandingUnbound runs per operation on PAYOUT lines);
+//   - deposit-shaped signals (a deposit_reversal line, a tombstone, even naming
+//     the same reference) NEVER clear a payout finding;
+//   - the only clearing is a withdrawal_completed posting keyed by the line
+//     reference and attributable to the parked attempt (no other attempt holds
+//     that reference);
+//   - the finding text is the payout reading: never allocation, resolution NOT
+//     IMPLEMENTED (R-K3-8, PAY-PAYOUT-UNBOUND-RESOLVE-1), M1 only acknowledges.
+//
+// Bound-class payout parks are covered in-run and standing by
+// checkUnmatchedAttempts (unchanged by STANDING-1 except the wording).
+
+// b11PayoutHint is the exact payout ExpectedValue (STANDING-1 item 3).
+const b11PayoutHint = "resolution: PSP-side recall/return or governed completion against the hold (NOT IMPLEMENTED, R-K3-8); never allocation; M1 only acknowledges"
+
+// b11RequirePayoutCU asserts exactly one pay_captured_unposted for the payout
+// attempt keyed on lineRef, correctly represented as a PAYOUT finding.
+func (w *k3World) b11RequirePayoutCU(ms []reconciliation.Mismatch, attempt uuid.UUID, lineRef string, standing bool, what string) reconciliation.Mismatch {
+	w.t.Helper()
+	got := w.b11CU(ms, attempt)
+	if len(got) != 1 {
+		w.t.Fatalf("%s: want exactly one pay_captured_unposted for payout %s, got %d:\n%s", what, attempt, len(got), render(ms))
+	}
+	m := got[0]
+	switch {
+	case m.MismatchKind != reconciliation.MismatchKindPayCapturedUnposted,
+		!strings.Contains(m.ReconciliationKey, "check=captured_unposted"),
+		!strings.Contains(m.ReconciliationKey, "provider_reference="+lineRef),
+		m.ExpectedValue != b11PayoutHint,
+		strings.Contains(m.ExpectedValue, "LEDGER-SUSPENSE"),
+		!strings.Contains(m.ActualValue, "op=payout"),
+		!strings.Contains(m.ActualValue, "kind=payout"),
+		!strings.Contains(m.ActualValue, "terminal_reason="):
+		w.t.Fatalf("%s: payout finding misrepresented:\n%s", what, render(got))
+	}
+	if standing != strings.Contains(m.ActualValue, "standing: persisted line") {
+		w.t.Fatalf("%s: standing=%t but detail is %q", what, standing, m.ActualValue)
+	}
+	return m
+}
+
+// b11Tombstone writes a tombstone ledger row on (provider, ref) - a deposit-shaped signal.
+func (w *k3World) b11Tombstone(ref string) {
+	w.t.Helper()
+	pid := w.provider
+	w.tx(func(ctx context.Context, tx pgx.Tx) error {
+		_, err := ledger.Post(ctx, tx, ledger.TransactionInput{
+			TenantID: w.f.tenantID, TransactionType: ledger.TxTombstone,
+			IdempotencyKey: "tombstone:" + pid + ":" + ref, ProviderID: &pid, ProviderTxID: &ref, CorrelationID: uuid.New(),
+		})
+		return err
+	})
+}
+
+// b11DepositReversal is a deposit_reversal statement line naming original.
+func (w *k3World) b11DepositReversal(original, status string, amount int64) statement.PaymentStatementLine {
+	rev := w.payoutLine("b11-rev-"+uuid.NewString()[:8], "", status, amount)
+	rev.Kind = statement.PaymentLineDepositReversal
+	rev.OriginalProviderReference = original
+	return rev
+}
+
+// b11Complete is a TEST STAND-IN for the governed completion against the hold
+// (PAY-PAYOUT-UNBOUND-RESOLVE-1 is NOT IMPLEMENTED): it posts withdrawal_completed
+// for the withdrawal under (provider, settlementRef) through the real
+// withdrawal.Complete.
+func (w *k3World) b11Complete(wrID uuid.UUID, settlementRef string) {
+	w.t.Helper()
+	w.tx(func(ctx context.Context, tx pgx.Tx) error {
+		return withdrawal.Complete(ctx, tx, wrID, w.provider, settlementRef)
+	})
+	w.assertInvariants()
+}
 
 func (w *k3World) b11Recon(src statement.PaymentStatementSource) []reconciliation.Mismatch {
 	w.t.Helper()
@@ -1163,7 +1232,10 @@ func (w *k3World) b11CU(ms []reconciliation.Mismatch, attempt uuid.UUID) []recon
 	return mismatchesOf(ms, reconciliation.MismatchKindPayCapturedUnposted, "attempt="+attempt.String())
 }
 
-func TestB11_Recon_UnboundPayoutPark_InRunFinding_NoStanding_ClearingSignals(t *testing.T) {
+// FLIPPED under PAY-PAYOUT-UNBOUND-STANDING-1 (was
+// TestB11_Recon_UnboundPayoutPark_InRunFinding_NoStanding_ClearingSignals, which
+// pinned "no standing" and "a deposit_reversal clears" as CURRENT behaviour).
+func TestB11_Recon_UnboundPayoutPark_InRunAndStanding_DepositSignalsNeverClear(t *testing.T) {
 	for _, shapeName := range []string{"sync", "poll"} {
 		t.Run(shapeName, func(t *testing.T) {
 			w := newK3World(t, k3Opts{base: 1})
@@ -1179,95 +1251,269 @@ func TestB11_Recon_UnboundPayoutPark_InRunFinding_NoStanding_ClearingSignals(t *
 			}
 			okLine := w.payoutLine(lineRef, p.stale.MerchantReference, "succeeded", p.wr.Amount)
 
-			// (a) the finding is present: exactly one, check=captured_unposted, F13 wording.
-			ms := w.b11Recon(w.source(false, okLine))
-			got := w.b11CU(ms, p.stale.ID)
-			if len(got) != 1 || !strings.Contains(got[0].ReconciliationKey, "check=captured_unposted") ||
-				!strings.Contains(got[0].ExpectedValue, "allocation (LEDGER-SUSPENSE-B-1); M1 only acknowledges") ||
-				!strings.Contains(got[0].ActualValue, "terminal_reason="+b11ReasonPrefix) {
-				t.Fatalf("want exactly one in-run pay_captured_unposted for the parked payout:\n%s", render(ms))
-			}
-			if n := len(ms); n != 1 {
-				t.Fatalf("the run must report exactly that finding, got %d:\n%s", n, render(ms))
-			}
-			w.b11Held(p, "recon in-run")
-
-			// (b) the finding is repeatable (in-run, every run that carries the line).
-			if again := w.b11CU(w.b11Recon(w.source(false, okLine)), p.stale.ID); len(again) != 1 {
-				t.Fatalf("the finding must be reported on every run carrying the line, got %d", len(again))
-			}
-
-			// (c) CURRENT behaviour (flips under PAY-PAYOUT-UNBOUND-STANDING-1): no
-			// standing coverage for an unbound PAYOUT park. A run with no line for it
-			// reports nothing (deposits get S1; payouts do not). This is a GAP.
-			if none := w.b11CU(w.b11Recon(w.pastSource(false)), p.stale.ID); len(none) != 0 {
-				t.Fatalf("CURRENT-behaviour pin flipped (expected under PAY-PAYOUT-UNBOUND-STANDING-1): an unbound payout park is now reported standing; update ADR 0095 35.2 PO-1 and this pin:\n%s", render(none))
-			}
-
-			// (d) a pending, declined or reversed line is not the signal.
+			// (d) first, while no succeeded line has been persisted: a pending,
+			// declined or reversed line is not the signal (in-run or standing).
 			for _, st := range []string{"pending", "declined", "reversed"} {
 				ms := w.b11Recon(w.source(false, w.payoutLine(lineRef, p.stale.MerchantReference, st, p.wr.Amount)))
 				if len(w.b11CU(ms, p.stale.ID)) != 0 {
 					t.Fatalf("a %s line must not raise pay_captured_unposted:\n%s", st, render(ms))
 				}
 			}
-
-			// (e) clearing: CURRENT behaviour, ruled DEFECTIVE for payouts (fail-open
-			// across operations: a deposit_reversal line or a deposit tombstone, for
-			// example the PSP refund of a real deposit that shares the reference in the
-			// reverse-collision case, clears a payout's possible-double-payout finding).
-			// Flips under PAY-PAYOUT-UNBOUND-STANDING-1: then only withdrawal_completed
-			// keyed by the line reference (or a future payout_return line) may clear it.
-			rev := w.payoutLine("b11-rev-"+uuid.NewString()[:8], "", "succeeded", p.wr.Amount)
-			rev.Kind = statement.PaymentLineDepositReversal
-			rev.OriginalProviderReference = lineRef
-			if len(w.b11CU(w.b11Recon(w.source(false, okLine, rev)), p.stale.ID)) != 0 {
-				t.Fatalf("CURRENT behaviour (defective for payouts, flips under PAY-PAYOUT-UNBOUND-STANDING-1): a deposit_reversal naming the line reference clears the payout finding; it no longer does, update the pin and ADR 0095 35.2")
+			if ms := w.b11Recon(w.pastSource(false)); len(w.b11CU(ms, p.stale.ID)) != 0 {
+				t.Fatalf("persisted non-succeeded lines must not raise a standing finding:\n%s", render(ms))
 			}
-			w.b11Held(p, "recon clearing")
+
+			// (a) the in-run finding: exactly one, represented as a PAYOUT finding.
+			ms := w.b11Recon(w.source(false, okLine))
+			w.b11RequirePayoutCU(ms, p.stale.ID, lineRef, false, "in-run")
+			if n := len(ms); n != 1 {
+				t.Fatalf("the run must report exactly that finding, got %d:\n%s", n, render(ms))
+			}
+			w.b11Held(p, "recon in-run")
+
+			// (b) repeatable in-run, still exactly one (in-run and standing dedupe).
+			again := w.b11Recon(w.source(false, okLine))
+			w.b11RequirePayoutCU(again, p.stale.ID, lineRef, false, "in-run again")
+
+			// (c) FLIPPED (was "no standing coverage", a GAP): with no line in the
+			// run, the persisted succeeded line keeps the finding outstanding on
+			// EVERY run, unwindowed.
+			for i := 0; i < 3; i++ {
+				w.b11RequirePayoutCU(w.b11Recon(w.pastSource(false)), p.stale.ID, lineRef, true, fmt.Sprintf("standing run %d", i))
+				w.b11Held(p, "recon standing")
+			}
+			// A later pending/declined line for the same reference does not hide it.
+			for _, st := range []string{"pending", "declined"} {
+				ms := w.b11Recon(w.source(false, w.payoutLine(lineRef, p.stale.MerchantReference, st, p.wr.Amount)))
+				if len(w.b11CU(ms, p.stale.ID)) != 1 {
+					t.Fatalf("a later %s line must not hide the standing finding:\n%s", st, render(ms))
+				}
+			}
+
+			// (e) FLIPPED (was "a deposit_reversal naming the line reference clears",
+			// ruled DEFECTIVE): a deposit_reversal line naming the line reference,
+			// completed (succeeded or reversed), in the same import as the payout
+			// line and persisted for later runs, NEVER clears a payout finding.
+			for _, st := range []string{"succeeded", "reversed"} {
+				w.b11RequirePayoutCU(w.b11Recon(w.source(false, okLine, w.b11DepositReversal(lineRef, st, p.wr.Amount))), p.stale.ID, lineRef, false, "deposit_reversal ("+st+") in-run")
+				w.b11RequirePayoutCU(w.b11Recon(w.pastSource(false)), p.stale.ID, lineRef, true, "persisted deposit_reversal ("+st+")")
+			}
+			// The same from a non-MOCK import (eligible to clear deposit findings).
+			w.b11RequirePayoutCU(w.b11Recon(w.source(true, w.b11DepositReversal(lineRef, "succeeded", p.wr.Amount))), p.stale.ID, lineRef, true, "real-import deposit_reversal")
+			w.b11Held(p, "recon after deposit_reversal")
 		})
 	}
 }
 
-// CURRENT behaviour, ruled defective for payouts (flips under
-// PAY-PAYOUT-UNBOUND-STANDING-1): a tombstone on the line's reference (a deposit
-// tombstone, fail-open across operations) clears the in-run payout finding.
-func TestB11_Recon_UnboundPayoutPark_TombstoneClears(t *testing.T) {
+// FLIPPED under PAY-PAYOUT-UNBOUND-STANDING-1 (was
+// TestB11_Recon_UnboundPayoutPark_TombstoneClears, CURRENT behaviour ruled
+// defective): a tombstone on the line's reference (a deposit-shaped signal)
+// clears neither the in-run nor the standing payout finding.
+func TestB11_Recon_UnboundPayoutPark_TombstoneNeverClears(t *testing.T) {
+	for _, shapeName := range []string{"sync", "poll"} {
+		t.Run(shapeName, func(t *testing.T) {
+			w := newK3World(t, k3Opts{base: 1})
+			var p *b11Parked
+			if shapeName == "sync" {
+				p = w.b11ParkSync(300, OutcomeSucceeded)
+			} else {
+				p = w.b11ParkPoll(300, OutcomePending)
+			}
+			ref := p.ref
+			if ref == "" {
+				ref = b11Ref()
+			}
+			line := w.payoutLine(ref, p.stale.MerchantReference, "succeeded", p.wr.Amount)
+			w.b11RequirePayoutCU(w.b11Recon(w.source(false, line)), p.stale.ID, ref, false, "setup")
+			w.b11Tombstone(ref)
+			w.b11RequirePayoutCU(w.b11Recon(w.source(false, line)), p.stale.ID, ref, false, "tombstone, in-run")
+			w.b11RequirePayoutCU(w.b11Recon(w.pastSource(false)), p.stale.ID, ref, true, "tombstone, standing")
+			w.b11RequirePayoutCU(w.b11Recon(w.pastSource(true)), p.stale.ID, ref, true, "tombstone, standing, real import exists")
+		})
+	}
+}
+
+// FLIPPED under PAY-PAYOUT-UNBOUND-STANDING-1 (was
+// TestB11_Recon_ReverseCollisionPark_InRunFinding, whose "no standing coverage"
+// pin was a GAP). The reverse-collision park (provider_reference_conflict, no
+// bound reference): in-run AND standing. This is the fail-open case the
+// ruling named: the PSP refund of the REAL deposit R (a deposit_reversal naming
+// R) must not clear the payout's possible-double-payout finding on R.
+func TestB11_Recon_ReverseCollisionPark_InRunAndStanding_DepositRefundNeverClears(t *testing.T) {
+	w := newK3World(t, k3Opts{base: 1})
+	p, ref, _ := w.b11ParkReverse(300)
+	line := w.payoutLine(ref, p.stale.MerchantReference, "succeeded", p.wr.Amount)
+	w.b11RequirePayoutCU(w.b11Recon(w.source(false, line)), p.stale.ID, ref, false, "in-run")
+	w.b11HeldReverse(p, "recon")
+	w.b11RequirePayoutCU(w.b11Recon(w.pastSource(false)), p.stale.ID, ref, true, "standing")
+	// The real deposit R is refunded by the PSP.
+	w.b11RequirePayoutCU(w.b11Recon(w.source(false, w.b11DepositReversal(ref, "succeeded", 1000))), p.stale.ID, ref, true, "deposit refund on R")
+	w.b11RequirePayoutCU(w.b11Recon(w.pastSource(false)), p.stale.ID, ref, true, "persisted deposit refund on R")
+	w.b11HeldReverse(p, "recon after deposit refund")
+}
+
+// STANDING-1 item 2: the ONLY clearing is a withdrawal_completed keyed by the
+// line reference. b11Complete stands in for the governed completion against
+// the hold (PAY-PAYOUT-UNBOUND-RESOLVE-1, NOT IMPLEMENTED).
+func TestB11_Recon_UnboundPayoutPark_WithdrawalCompletedOnLineRefClears(t *testing.T) {
+	for _, shapeName := range []string{"sync", "poll"} {
+		t.Run(shapeName, func(t *testing.T) {
+			w := newK3World(t, k3Opts{base: 1})
+			var p *b11Parked
+			if shapeName == "sync" {
+				p = w.b11ParkSync(300, OutcomeSucceeded)
+			} else {
+				p = w.b11ParkPoll(300, OutcomePending)
+			}
+			ref := p.ref
+			if ref == "" {
+				ref = b11Ref()
+			}
+			line := w.payoutLine(ref, p.stale.MerchantReference, "succeeded", p.wr.Amount)
+			w.b11RequirePayoutCU(w.b11Recon(w.source(false, line)), p.stale.ID, ref, false, "setup in-run")
+			w.b11RequirePayoutCU(w.b11Recon(w.pastSource(false)), p.stale.ID, ref, true, "setup standing")
+
+			w.b11Complete(p.wr.ID, ref)
+			for i, src := range []statement.PaymentStatementSource{w.pastSource(false), w.source(false, line), w.pastSource(false)} {
+				if ms := w.b11Recon(src); len(w.b11CU(ms, p.stale.ID)) != 0 {
+					t.Fatalf("run %d: a withdrawal_completed keyed by the line reference must clear the payout finding:\n%s", i, render(ms))
+				}
+			}
+		})
+	}
+	// A completion of the SAME withdrawal under a DIFFERENT reference is not keyed
+	// by the line reference: the finding stays.
+	t.Run("completion_on_another_reference_does_not_clear", func(t *testing.T) {
+		w := newK3World(t, k3Opts{base: 1})
+		p := w.b11ParkSync(300, OutcomeSucceeded)
+		ref := b11Ref()
+		w.b11RequirePayoutCU(w.b11Recon(w.source(false, w.payoutLine(ref, p.stale.MerchantReference, "succeeded", p.wr.Amount))), p.stale.ID, ref, false, "setup")
+		w.b11Complete(p.wr.ID, b11Ref())
+		w.b11RequirePayoutCU(w.b11Recon(w.pastSource(false)), p.stale.ID, ref, true, "completion on another reference")
+	})
+	// Security review L-1 (a): POSITIVE attribution. A withdrawal_completed that
+	// merely shares the line reference - a legacy/unattempted withdrawal's
+	// completion (no payment_attempts row: reconciliation counts it as
+	// legacyUnattempted), or an unlinked posting released by no withdrawal at
+	// all - is not the parked attempt's own release and never clears.
+	t.Run("legacy_unattempted_completion_on_the_line_reference_does_not_clear", func(t *testing.T) {
+		w := newK3World(t, k3Opts{base: 1})
+		p := w.b11ParkSync(300, OutcomeSucceeded)
+		ref := b11Ref()
+		line := w.payoutLine(ref, p.stale.MerchantReference, "succeeded", p.wr.Amount)
+		w.b11RequirePayoutCU(w.b11Recon(w.source(false, line)), p.stale.ID, ref, false, "setup")
+		legacy := w.approveWithdrawal(120, "b11-legacy-"+uuid.NewString())
+		w.tx(func(ctx context.Context, tx pgx.Tx) error {
+			return withdrawal.MarkSubmitted(ctx, tx, legacy.ID, w.provider, "b11-legacy-instr-"+uuid.NewString()[:8])
+		})
+		w.b11Complete(legacy.ID, ref)
+		if n := w.countRows(`SELECT count(*) FROM payment_attempts WHERE tenant_id = $1 AND withdrawal_request_id = $2`, w.f.tenantID, legacy.ID); n != 0 {
+			t.Fatalf("setup: the legacy withdrawal must have no payment attempt, got %d", n)
+		}
+		w.b11RequirePayoutCU(w.b11Recon(w.pastSource(false)), p.stale.ID, ref, true, "legacy completion, standing")
+		w.b11RequirePayoutCU(w.b11Recon(w.source(false, line)), p.stale.ID, ref, false, "legacy completion, in-run")
+		if got := w.withdrawalOf(p.wr.ID); got.State != withdrawal.StateSubmitted || got.ReleaseLedgerTransactionID != nil {
+			t.Fatalf("the parked payout's hold moved: %s", got.State)
+		}
+	})
+	t.Run("unlinked_completion_posting_on_the_line_reference_does_not_clear", func(t *testing.T) {
+		w := newK3World(t, k3Opts{base: 1})
+		p := w.b11ParkSync(300, OutcomeSucceeded)
+		ref := b11Ref()
+		line := w.payoutLine(ref, p.stale.MerchantReference, "succeeded", p.wr.Amount)
+		w.b11RequirePayoutCU(w.b11Recon(w.source(false, line)), p.stale.ID, ref, false, "setup")
+		pid := w.provider
+		w.tx(func(ctx context.Context, tx pgx.Tx) error {
+			cash, err := ledger.GetOrCreateAccount(ctx, tx, w.f.tenantID, &w.f.walletID, ledger.AccountPlayerCash, "EUR")
+			if err != nil {
+				return err
+			}
+			clearing, err := ledger.GetOrCreateAccount(ctx, tx, w.f.tenantID, nil, ledger.AccountPSPClearing, "EUR")
+			if err != nil {
+				return err
+			}
+			_, err = ledger.Post(ctx, tx, ledger.TransactionInput{
+				TenantID: w.f.tenantID, TransactionType: ledger.TxWithdrawalCompleted,
+				IdempotencyKey: pid + ":" + ref, ProviderID: &pid, ProviderTxID: &ref, CorrelationID: uuid.New(),
+				Entries: []ledger.EntryInput{
+					{LedgerAccountID: cash, Direction: ledger.Debit, Amount: 50},
+					{LedgerAccountID: clearing, Direction: ledger.Credit, Amount: 50},
+				},
+			})
+			return err
+		})
+		w.assertInvariants()
+		w.b11RequirePayoutCU(w.b11Recon(w.pastSource(false)), p.stale.ID, ref, true, "unlinked completion, standing")
+		w.b11RequirePayoutCU(w.b11Recon(w.source(false, line)), p.stale.ID, ref, false, "unlinked completion, in-run")
+	})
+	// The line reference is ANOTHER payout attempt's provider reference (the
+	// line resolves to that attempt by reference and names p by merchant
+	// reference). Even p's own withdrawal completed under that reference does
+	// not clear: the reference is held by the other attempt, so the completion is
+	// not attributable to p (fail closed on ambiguity).
+	t.Run("completion_keyed_by_a_reference_another_attempt_holds_does_not_clear", func(t *testing.T) {
+		w := newK3World(t, k3Opts{base: 1})
+		p := w.b11ParkSync(300, OutcomeSucceeded)
+		_, other := w.payout(150)
+		ref := *other.ProviderReference
+		line := w.payoutLine(ref, p.stale.MerchantReference, "succeeded", p.wr.Amount)
+		ms := w.b11Recon(w.source(false, line))
+		if got := w.b11CU(ms, p.stale.ID); len(got) != 1 {
+			t.Fatalf("setup: want the merchant cross-check finding for p:\n%s", render(ms))
+		}
+		w.b11Complete(p.wr.ID, ref)
+		w.b11RequirePayoutCU(w.b11Recon(w.pastSource(false)), p.stale.ID, ref, true, "completion keyed by another attempt's reference")
+	})
+}
+
+// STANDING-1: unrelated financial activity never resolves the finding - other
+// attempts, other references, and another payout's completion under the SAME
+// reference (borrowed attribution may raise, never clear).
+func TestB11_Recon_UnboundPayoutPark_UnrelatedActivityNeverClears(t *testing.T) {
 	w := newK3World(t, k3Opts{base: 1})
 	p := w.b11ParkSync(300, OutcomeSucceeded)
 	ref := b11Ref()
 	line := w.payoutLine(ref, p.stale.MerchantReference, "succeeded", p.wr.Amount)
-	if len(w.b11CU(w.b11Recon(w.source(false, line)), p.stale.ID)) != 1 {
-		t.Fatalf("setup: finding expected")
-	}
-	pid := w.provider
-	w.tx(func(ctx context.Context, tx pgx.Tx) error {
-		_, err := ledger.Post(ctx, tx, ledger.TransactionInput{
-			TenantID: w.f.tenantID, TransactionType: ledger.TxTombstone,
-			IdempotencyKey: "tombstone:" + pid + ":" + ref, ProviderID: &pid, ProviderTxID: &ref, CorrelationID: uuid.New(),
-		})
-		return err
-	})
-	if got := w.b11CU(w.b11Recon(w.source(false, line)), p.stale.ID); len(got) != 0 {
-		t.Fatalf("CURRENT behaviour (defective for payouts, flips under PAY-PAYOUT-UNBOUND-STANDING-1): a tombstone on the line reference clears the payout finding; it no longer does, update the pin and ADR 0095 35.2:\n%s", render(got))
-	}
-}
+	w.b11RequirePayoutCU(w.b11Recon(w.source(false, line)), p.stale.ID, ref, false, "setup")
 
-// The reverse-collision park (provider_reference_conflict, no bound reference)
-// is an unbound park: the finding is present in-run for a succeeded payout line.
-func TestB11_Recon_ReverseCollisionPark_InRunFinding(t *testing.T) {
-	w := newK3World(t, k3Opts{base: 1})
-	p, ref, _ := w.b11ParkReverse(300)
-	line := w.payoutLine(ref, p.stale.MerchantReference, "succeeded", p.wr.Amount)
-	ms := w.b11Recon(w.source(false, line))
+	// Another unbound payout park, its own line and its own completion.
+	q := w.b11ParkSync(200, OutcomeSucceeded)
+	qRef := b11Ref()
+	w.b11RequirePayoutCU(w.b11Recon(w.source(false, w.payoutLine(qRef, q.stale.MerchantReference, "succeeded", q.wr.Amount))), q.stale.ID, qRef, false, "second park")
+	w.b11Complete(q.wr.ID, qRef)
+	// Another payout completed normally under its own reference.
+	other, otherPend := w.payout(150)
+	w.b11Complete(other.ID, *otherPend.ProviderReference)
+	// Deposit-shaped activity on OTHER references.
+	unrelated := b11Ref()
+	w.b11Tombstone(unrelated)
+	ms := w.b11Recon(w.source(true, w.b11DepositReversal(b11Ref(), "succeeded", 300)))
+	w.b11RequirePayoutCU(ms, p.stale.ID, ref, true, "after unrelated activity")
+	if len(w.b11CU(ms, q.stale.ID)) != 0 {
+		t.Fatalf("control: the second park's own completion must clear ITS finding:\n%s", render(ms))
+	}
+
+	// Another payout attempt completed under the SAME reference as p's line: the
+	// line names p by merchant reference, but the completion belongs to the
+	// other attempt (it holds ref as its settlement reference). Not attributable
+	// to p: the finding stays, in-run (via the merchant cross-check) and standing.
+	a, aAtt := w.payout(250)
+	w.b11Complete(a.ID, ref)
+	st := w.b11RequirePayoutCU(w.b11Recon(w.pastSource(false)), p.stale.ID, ref, true, "another attempt's completion under the same reference, standing")
+	if !strings.Contains(st.ActualValue, "holder_attempt="+aAtt.ID.String()) {
+		t.Fatalf("the standing detail must name the attempt holding the line reference (payout settlement): %s", st.ActualValue)
+	}
+	ms = w.b11Recon(w.source(false, line))
 	if got := w.b11CU(ms, p.stale.ID); len(got) != 1 {
-		t.Fatalf("want one pay_captured_unposted for the parked payout:\n%s", render(ms))
+		t.Fatalf("another attempt's completion under the same reference must not clear (in-run):\n%s", render(ms))
 	}
-	w.b11HeldReverse(p, "recon")
-	// No standing coverage either (CURRENT behaviour, a GAP; same pin as the invalid-reference park).
-	if got := w.b11CU(w.b11Recon(w.pastSource(false)), p.stale.ID); len(got) != 0 {
-		t.Fatalf("CURRENT-behaviour pin flipped (expected under PAY-PAYOUT-UNBOUND-STANDING-1): standing coverage appeared for an unbound payout park:\n%s", render(got))
+	// p itself is untouched (b11Held's tenant-wide balances legitimately moved
+	// with the other completions, so check p's own rows).
+	if got, att := w.withdrawalOf(p.wr.ID), w.attempt(p.stale.ID); got.State != withdrawal.StateSubmitted || got.ReleaseLedgerTransactionID != nil ||
+		att.State != AttemptDisputed || att.TerminalReason == nil || !strings.HasPrefix(*att.TerminalReason, b11ReasonPrefix) {
+		t.Fatalf("the parked payout moved: withdrawal %s, attempt %s", got.State, att.State)
 	}
+	w.assertInvariants()
 }
 
 // The decision half: a BOUND-class payout dispute (callback_amount_asset_mismatch
@@ -1300,15 +1546,22 @@ func TestB11_Recon_BoundClassPayoutPark_InRunAndStanding(t *testing.T) {
 	}
 }
 
-// Tenant isolation of the finding: another tenant's run never sees it.
+// Tenant isolation of the finding: another tenant's run never sees it, and
+// another tenant's financial activity - even under the SAME provider id and the
+// SAME reference, of every clearing shape (a deposit_reversal line, a tombstone,
+// a withdrawal_completed, a succeeded payout line naming A's merchant
+// reference) - never raises, clears or resolves tenant A's payout finding
+// (PAY-PAYOUT-UNBOUND-STANDING-1; every K3 read carries tenant_id = $1, RLS is
+// the second line).
 func TestB11_Recon_TenantIsolation(t *testing.T) {
 	a := newK3World(t, k3Opts{base: 1})
 	b := newK3WorldOn(t, a.pool, k3Opts{base: 1})
 	p := a.b11ParkSync(300, OutcomeSucceeded)
-	line := a.payoutLine(b11Ref(), p.stale.MerchantReference, "succeeded", p.wr.Amount)
-	if len(a.b11CU(a.b11Recon(a.source(false, line)), p.stale.ID)) != 1 {
-		t.Fatalf("setup: tenant A finding expected")
-	}
+	ref := b11Ref()
+	line := a.payoutLine(ref, p.stale.MerchantReference, "succeeded", p.wr.Amount)
+	a.b11RequirePayoutCU(a.b11Recon(a.source(false, line)), p.stale.ID, ref, false, "setup: tenant A in-run")
+	a.b11RequirePayoutCU(a.b11Recon(a.pastSource(false)), p.stale.ID, ref, true, "setup: tenant A standing")
+
 	// Tenant B (its own provider) with a line naming A's merchant reference: a
 	// missing-platform-record finding, never a captured-unposted for A's payout.
 	bl := b.payoutLine(b11Ref(), p.stale.MerchantReference, "succeeded", p.wr.Amount)
@@ -1319,4 +1572,28 @@ func TestB11_Recon_TenantIsolation(t *testing.T) {
 	if got := mismatchesOf(ms, reconciliation.MismatchKindPayCapturedUnposted, ""); len(got) != 0 {
 		t.Fatalf("tenant B has a captured_unposted finding it should not:\n%s", render(ms))
 	}
+
+	// Tenant B, under tenant A's PROVIDER ID and A's line reference: a
+	// withdrawal_completed of B's own withdrawal (THE payout clearing shape), and
+	// an import carrying a completed deposit_reversal naming the reference plus a
+	// succeeded payout line naming A's merchant reference. (A tombstone on the
+	// same key cannot coexist with the completion in tenant B - one ledger key
+	// per (tenant, provider, provider_tx_id) - and never clears a payout even
+	// inside tenant A, TestB11_Recon_UnboundPayoutPark_TombstoneNeverClears.)
+	pid := a.provider
+	bwr, _ := b.payout(120)
+	b.tx(func(ctx context.Context, tx pgx.Tx) error { return withdrawal.Complete(ctx, tx, bwr.ID, pid, ref) })
+	rev := b.b11DepositReversal(ref, "succeeded", p.wr.Amount)
+	rev.ProviderID = pid
+	bLine := a.payoutLine(ref, p.stale.MerchantReference, "succeeded", p.wr.Amount)
+	ms = b.b11Recon(k3Source{provider: pid, real: true, lines: []statement.PaymentStatementLine{bLine, rev}})
+	if got := mismatchesOf(ms, reconciliation.MismatchKindPayCapturedUnposted, ""); len(got) != 0 {
+		t.Fatalf("tenant B (provider A's id) has a captured_unposted finding it should not:\n%s", render(ms))
+	}
+	b.assertInvariants()
+
+	// Tenant A's finding is untouched by all of it, in-run and standing.
+	a.b11RequirePayoutCU(a.b11Recon(a.pastSource(false)), p.stale.ID, ref, true, "tenant A standing after tenant B activity")
+	a.b11RequirePayoutCU(a.b11Recon(a.source(false, line)), p.stale.ID, ref, false, "tenant A in-run after tenant B activity")
+	a.b11Held(p, "tenant A after tenant B activity")
 }
