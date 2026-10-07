@@ -57,7 +57,10 @@ const (
 	// Allocation is NEVER a route for a payout (it would credit player cash for
 	// money the PSP already paid out: a double payout); the resolution path
 	// (PAY-PAYOUT-UNBOUND-RESOLVE-1) is NOT IMPLEMENTED (ADR 0101 R-K3-8).
-	payoutCapturedUnpostedResolutionHint         = "resolution: PSP-side recall/return or governed completion against the hold (NOT IMPLEMENTED, R-K3-8); never allocation; M1 only acknowledges"
+	payoutCapturedUnpostedResolutionHint = "resolution: PSP-side recall/return or governed completion against the hold (NOT IMPLEMENTED, R-K3-8); never allocation; M1 only acknowledges"
+	// unknownOpCapturedUnpostedResolutionHint: fail-closed neutral text for an
+	// operation reconciliation does not know (security I-1, BOUND-CLEAR-1).
+	unknownOpCapturedUnpostedResolutionHint      = "resolution: none defined for this operation (unknown operation; nothing clears it); never allocation; M1 only acknowledges"
 	declaredPaidUnconfirmedResolutionHint        = "resolution: a confirming statement line from an eligible import (payout, succeeded, resolved to this attempt, amount and asset equal) or a withdrawal reversal (WITHDRAWAL-REVERSAL-1); a compensating credit annotates but does not clear"
 	declaredNotPaidButPaidResolutionHint         = "resolution: executed compensating_entry debits, causation = the withdrawal_failed transaction, totalling at least the withdrawn amount; an off-platform recovery has no clearing path and is tracked through the row's investigation status"
 	declaredPaidCompensatedButPaidResolutionHint = "resolution: executed compensating_entry debits, causation = the compensating credit's own transaction, totalling at least the credited amount"
@@ -424,7 +427,9 @@ func (m *payMatcher) markCaptured(a *payAttempt, ref string) bool {
 }
 
 // clearedRefFor is the per-OPERATION clearing rule for an unbound park's
-// finding keyed on the evidencing line's reference ref.
+// finding keyed on the evidencing line's reference ref, and (through
+// capturedUnposted, PAY-PAYOUT-BOUND-CLEAR-1) for a bound PAYOUT park's finding
+// keyed on its held reference X.
 //
 //   - deposit: clearedRef (a completed deposit_reversal line naming ref, or a
 //     tombstone on ref) - unchanged.
@@ -476,11 +481,17 @@ func (m *payMatcher) payoutCompletedRef(a *payAttempt, ref string) bool {
 // capturedUnpostedHintFor returns the operator text for a pay_captured_unposted
 // finding on attempt a: the deposit wording (ADR 0101 F13) for a deposit, and
 // the payout reading (never allocation) for a payout.
+//
+// An operation that is neither (I-1, fail closed) gets a neutral text that
+// suggests no clearing route at all - never the deposit allocation route.
 func capturedUnpostedHintFor(a *payAttempt, depositHint string) string {
-	if a.operation == paymentStatementKindPayout {
+	switch a.operation {
+	case paymentStatementKindPayout:
 		return payoutCapturedUnpostedResolutionHint
+	case paymentStatementKindDeposit:
+		return depositHint
 	}
-	return depositHint
+	return unknownOpCapturedUnpostedResolutionHint
 }
 
 // checkStandingUnbound is S1 (STANDING-1): every disputed attempt the D2F-1

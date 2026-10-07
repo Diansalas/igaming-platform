@@ -160,8 +160,14 @@ const (
 	// captured, platform disputed, not posted" - a disputed attempt with
 	// terminal_reason='multiple_success_for_intent' whose statement line
 	// reports succeeded, with no reversal line and no ledger tombstone.
-	// Reported on every run until it clears (a reversal/tombstone appears,
-	// or, later, an allocation posting under LEDGER-SUSPENSE-B-1). An M1
+	// Reported on every run until it clears. DEPOSIT: a reversal/tombstone
+	// appears, or, later, an allocation posting under LEDGER-SUSPENSE-B-1.
+	// PAYOUT (ADR 0095 §35.2 PO-1, §35.6 STANDING-1 / BOUND-CLEAR-1): "the
+	// provider may have paid out and the platform posted no completion";
+	// deposit-shaped signals never clear it, allocation is NEVER a route,
+	// and only the attempt's own positively attributed withdrawal_completed
+	// clears (no production path produces one until
+	// PAY-PAYOUT-UNBOUND-RESOLVE-1: a permanent standing P1). An M1
 	// resolution only acknowledges it and never clears or suppresses it
 	// (ADR 0101 §4, LF-3, F13). Never auto-resolved, never a
 	// T17/re-drive trigger.
@@ -180,7 +186,9 @@ const (
 //     HOLDING the provider reference the provider reported as captured,
 //     with nothing posted. Reported in-run (a succeeded line names the
 //     attempt) and standing (no line this run, unwindowed); clears only on
-//     capturedUnposted's two signals. At run time it applies only if the
+//     capturedUnposted's signals (deposit: a reversal line or a tombstone
+//     on the reference; payout: only the attempt's own positively attributed
+//     withdrawal_completed, PAY-PAYOUT-BOUND-CLEAR-1). At run time it applies only if the
 //     attempt really holds a reference (captureClass, D2F-1); otherwise the
 //     attempt is treated as unbound.
 //   - reasonUnbound: a park that never binds the adapter's reference
@@ -1117,10 +1125,23 @@ func (m *payMatcher) matchPayment(lk string, l payLine) {
 		// re-confirmed by the LF implementation review; fail-closed tightening, no
 		// new money path): a `pending` or `declined`
 		// line naming a bound park is NOT a clearing signal - only a reversal
-		// line or a tombstone clears (ADR 0095 §35.4, S2). A PSP that keeps
+		// line or a tombstone clears a DEPOSIT park (ADR 0095 §35.4, S2), and
+		// only the attempt's own positively attributed withdrawal_completed
+		// clears a PAYOUT park (capturedUnposted, PAY-PAYOUT-BOUND-CLEAR-1). A PSP that keeps
 		// listing X as pending/declined in every window must not suppress the
 		// standing finding. `reversed` stays the R1 in-run clear (above).
-		l.status == statement.PaymentStatusPending || l.status == statement.PaymentStatusDeclined) &&
+		l.status == statement.PaymentStatusPending || l.status == statement.PaymentStatusDeclined ||
+		// PAY-PAYOUT-BOUND-CLEAR-1 F-1 (ledger-finance ruling, fail-closed
+		// tightening; security concurs): the R1 "a reversed line is the PSP's
+		// own refund" rule is a DEPOSIT rule. A `reversed` PAYOUT line naming a
+		// bound payout park is not a clearing signal (only the attempt's own
+		// positively attributed withdrawal_completed clears, capturedUnposted):
+		// it raises like any other line. Before this, it fell to the silent
+		// "disputed" case below - and, the attempt being matched,
+		// checkUnmatchedAttempts skipped it too - for EVERY run in which the
+		// provider repeated the line (with amount and asset equal the whole
+		// run was CLEAN). Deposit R1 is unchanged.
+		(a.operation != paymentStatementKindDeposit && l.status == statement.PaymentStatusReversed)) &&
 		m.capturedUnposted(a) && m.markCaptured(a, a.providerRef):
 		// ADR 0095 §28.9, extended by §35: the disputed reason codes that
 		// are NOT already a plain payments P1 for reconciliation's
@@ -1206,8 +1227,10 @@ func (m *payMatcher) checkMerchantAttribution(lk, ak, op string, a *payAttempt, 
 // F2, rv-fh3-ledger.md 076e42e: no line names it in THIS run, which is
 // exactly the case that let the exposure silently drop out of
 // reconciliation once the capture's own statement period passed) - the
-// SAME two conditions in both places, so a future edit to one can never
-// silently diverge from the other: no deposit_reversal line in THIS run
+// SAME conditions in both places, so a future edit to one can never
+// silently diverge from the other. For a PAYOUT attempt the predicate is the
+// payout clearing rule (PAY-PAYOUT-BOUND-CLEAR-1, below). For a deposit: no
+// deposit_reversal line in THIS run
 // named this reference (m.reversalOriginals, populated once per run by
 // matchLines before either caller runs), and no tombstone ledger row
 // exists for it. Both callers already gate on the terminal reason
@@ -1216,6 +1239,22 @@ func (m *payMatcher) checkMerchantAttribution(lk, ak, op string, a *payAttempt, 
 // providerSucceeded (a statement-line-status concept this predicate has
 // no business knowing about).
 func (m *payMatcher) capturedUnposted(a *payAttempt) bool {
+	// PAY-PAYOUT-BOUND-CLEAR-1 (ADR 0095 §35.6, ledger-finance ruling on the
+	// STANDING-1 review): a bound-class PAYOUT park (e.g.
+	// callback_amount_asset_mismatch on a payout holding X) clears per
+	// OPERATION, through the same rule as an unbound payout park
+	// (clearedRefFor -> payoutCompletedRef, keyed on the held reference X):
+	// only the parked attempt's OWN withdrawal_completed, positively attributed
+	// (its withdrawal_requests.release_ledger_transaction_id, keyed by X, no
+	// other attempt holding X). Deposit-shaped signals - a deposit_reversal
+	// line naming X (of ANY amount), a tombstone on X, and the deposit-only
+	// typed Y evidence below - NEVER clear a payout finding: the PSP refund of
+	// a deposit says nothing about whether a payout left the platform. Any
+	// operation other than deposit goes through clearedRefFor (an unknown
+	// operation never clears: fail closed). Deposits are unchanged.
+	if a.operation != paymentStatementKindDeposit {
+		return !m.clearedRefFor(a, a.providerRef)
+	}
 	// PRH-2 K3 (S4, POLL-REF-CLEAR-1, LF B3): a poll_reference_mismatch park with
 	// typed Y evidence (the poll's returned reference, never audit JSON) also
 	// clears on a reversal line or a tombstone on Y. Without a Y row only X
@@ -1323,7 +1362,9 @@ func (m *payMatcher) checkUnmatchedAttempts() {
 		// Ledger-finance review C2/F2 (rv-fh3-ledger.md, 076e42e,
 		// HD-LEDGER-UNALLOC-1 (A)): a disputed multiple_success_for_intent
 		// deposit attempt is real, standing, unallocated money off-ledger
-		// until a PSP-side reversal or tombstone clears it - this report
+		// until a PSP-side reversal or tombstone clears it (a payout:
+		// until its own positively attributed withdrawal_completed,
+		// PAY-PAYOUT-BOUND-CLEAR-1 - never a deposit-shaped signal) - this report
 		// is its ONLY record, so it must be raised on EVERY run, not only
 		// the run whose statement happens to carry a line for it (a
 		// capture's own settlement period passes, after which no line
@@ -1336,6 +1377,9 @@ func (m *payMatcher) checkUnmatchedAttempts() {
 		// boundCapture (the attempt holds the captured
 		// reference). An unbound park (unboundPark) is NOT
 		// reported here: it holds no reference this rule could clear on.
+		// A bound PAYOUT park clears only on its own positively attributed
+		// withdrawal_completed keyed by X, never on a deposit-shaped signal
+		// (capturedUnposted, PAY-PAYOUT-BOUND-CLEAR-1).
 		case a.boundCapture() && m.capturedUnposted(a):
 			m.r.add(MismatchKindPayCapturedUnposted, k+" check=captured_unposted",
 				capturedUnpostedHintFor(a, boundCapturedUnpostedResolutionHint), m.label+"no statement line; platform: "+a.render()+" terminal_reason="+a.terminalReason+m.yHolderNote(a))
