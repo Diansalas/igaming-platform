@@ -286,15 +286,6 @@ func b12Cases() []b12Case {
 				e.apply(t, wr, a, rbResult(ErrorClassSucceeded, OutcomeSucceeded, "b12-late-ref"))
 				return b12Out{wr: wr, a: a, before: before, wantState: AttemptDisputed}
 			}},
-		{name: "sync_T14_late_decline_after_terminal", reason: "late_decline_after_terminal",
-			audits: map[string]int{"payments.payout_late_contradicting_evidence": 1}, probes: []string{"b12-late-d"},
-			run: func(t *testing.T, e rbEnv) b12Out {
-				wr, a := e.claim(t, "b12-late-d")
-				e.b12Decline(t, wr, a)
-				before := e.b12Snapshot(t, wr)
-				e.apply(t, wr, a, rbResult(ErrorClassDefiniteDecline, OutcomeDeclined, ""))
-				return b12Out{wr: wr, a: a, before: before, wantState: AttemptDisputed}
-			}},
 		{name: "sync_T14_late_contradicting_evidence", reason: "late_contradicting_evidence",
 			audits: map[string]int{"payments.payout_late_contradicting_evidence": 1}, probes: []string{foreign, "b12-bound-ref"},
 			run: func(t *testing.T, e rbEnv) b12Out {
@@ -366,6 +357,9 @@ func TestB12_EachSiteAndReason_RaisesExactlyOneAlert_AuditUnchanged_NoMoney(t *t
 	for reason := range PayoutDisputeReasons() {
 		if reason == "success_for_never_sent_attempt" || reason == "reversal_tombstone_precedes_success" {
 			continue // exercised below under their receipt-cell names
+		}
+		if reason == "late_decline_after_terminal" {
+			continue // LF M-1/C1: a decline replay is a clean no-op, see TestB12_LateDeclineReplay_*
 		}
 		if !covered[reason] {
 			t.Errorf("closed payout reason %q has no row in the table", reason)
@@ -689,4 +683,141 @@ func TestB12_FaultPaths_MoneyUnchanged(t *testing.T) {
 		t.Fatalf("callback: %v", err)
 	}
 	e.b12AssertNoMoneyMoved(t, b12Out{wr: wr, a: a, before: before})
+}
+
+// LF M-1/C1: a decline replayed on an already-declined attempt (a stale snapshot) is a clean
+// no-op: the attempt stays declined, no dispute, no audit row, no alert, nothing posts. A
+// SUCCESS after the decline stays T14 (the table above), and a decline echoing a foreign
+// reference is still parked by the reference guard and raises.
+func TestB12_LateDeclineReplay_IsCleanNoOp(t *testing.T) {
+	pool := depositV2ScratchPool(t)
+	f, orch, _ := fpOrch(t, pool, "mock-b12-ld")
+	e := rbEnv{pool: pool, f: f, orch: orch, pid: "mock-b12-ld"}
+	wr, a := e.claim(t, "b12-ld")
+	e.b12Decline(t, wr, a)
+	before := e.b12Snapshot(t, wr)
+	e.apply(t, wr, a, rbResult(ErrorClassDefiniteDecline, OutcomeDeclined, "")) // stale replay
+	got := mustGetAttempt(t, pool, f.tenantID, a.ID)
+	if got.State != AttemptDeclined || got.TerminalReason != nil {
+		t.Fatalf("a decline replay must leave the attempt declined, got %s %v", got.State, got.TerminalReason)
+	}
+	if n := e.b12AuditCount(t, "payments.payout_late_contradicting_evidence", a.ID); n != 0 {
+		t.Fatalf("no dispute audit for a decline replay, got %d", n)
+	}
+	if rows := e.b12Rows(t); len(rows) != 0 {
+		t.Fatalf("no alert for a decline replay: %+v", rows)
+	}
+	e.b12AssertNoMoneyMoved(t, b12Out{wr: wr, a: a, before: before})
+}
+
+// LF LOW-3: a concurrent decline (callback and status evidence) racing the synchronous phase-C
+// decline converges on one clean declined attempt: no dispute, no alert, the hold released once.
+func TestB12_ConcurrentDeclines_ConvergeCleanly_NoAlert(t *testing.T) {
+	pool := depositV2ScratchPool(t)
+	f, orch, _ := fpOrch(t, pool, "mock-b12-cd")
+	e := rbEnv{pool: pool, f: f, orch: orch, pid: "mock-b12-cd"}
+	wr, a := e.claim(t, "b12-cd")
+	ledgerBefore := fpLedgerTx(t, pool, f)
+
+	errs := make(chan error, 3)
+	start := make(chan struct{})
+	go func() {
+		<-start
+		errs <- ApplyPayoutResult(context.Background(), pool, f.tenantID, wr.ID, a, rbResult(ErrorClassDefiniteDecline, OutcomeDeclined, ""), EvidenceSync)
+	}()
+	go func() {
+		<-start
+		errs <- e.b12CallbackErr(a, OutcomeDeclined, "b12-cd-ref", 500)
+	}()
+	go func() {
+		<-start
+		errs <- applyPayoutStatusEvidence(context.Background(), pool, f.tenantID, wr.ID, a,
+			GateResult[StatusResult]{Class: ErrorClassDefiniteDecline, Value: StatusResult{Outcome: OutcomeDeclined}},
+			EvidenceQueryStatus, time.Now().Add(time.Minute), nil)
+	}()
+	close(start)
+	for i := 0; i < 3; i++ {
+		if err := <-errs; err != nil {
+			t.Fatalf("concurrent decline #%d: %v", i, err)
+		}
+	}
+	got := mustGetAttempt(t, pool, f.tenantID, a.ID)
+	if got.State != AttemptDeclined {
+		t.Fatalf("want one clean declined attempt, got %s %v", got.State, got.TerminalReason)
+	}
+	if rows := e.b12Rows(t); len(rows) != 0 {
+		t.Fatalf("concurrent declines must raise nothing: %+v", rows)
+	}
+	w := fpReqState(t, pool, f, wr.ID)
+	if w.State != withdrawal.StateFailed || w.ReleaseLedgerTransactionID == nil {
+		t.Fatalf("the hold must be released exactly once: %+v", w)
+	}
+	if n := fpLedgerTx(t, pool, f); n != ledgerBefore+1 {
+		t.Fatalf("ledger transactions %d -> %d, want exactly one release posting", ledgerBefore, n)
+	}
+	loAssertBalanced(t, pool, f.tenantID)
+}
+
+// LF LOW-3: retry convergence. A transient alert failure rolls the whole dispute back; once the
+// fault is gone (the injected trigger is dropped when the subtest ends) the redelivery converges
+// to exactly one dispute and one alert (occurrences 1), and a further duplicate adds nothing.
+func TestB12_TransientFailureThenRedelivery_ConvergesToOneDisputeOneAlert(t *testing.T) {
+	pool := depositV2ScratchPool(t)
+	f, orch, _ := fpOrch(t, pool, "mock-b12-rc")
+	e := rbEnv{pool: pool, f: f, orch: orch, pid: "mock-b12-rc"}
+	wr, a := e.claim(t, "b12-rc")
+	e.b12Decline(t, wr, a)
+	before := e.b12Snapshot(t, wr)
+
+	t.Run("faulty_delivery", func(t *testing.T) {
+		alertinject.Install(t, pool, f.tenantID, alertinject.Persistent, "40P01")
+		if err := e.b12CallbackErr(a, OutcomeSucceeded, "b12-rc-ref", 500); err == nil {
+			t.Fatalf("the transient failure must propagate")
+		}
+		if got := mustGetAttempt(t, pool, f.tenantID, a.ID); got.State != AttemptDeclined {
+			t.Fatalf("the failed delivery must roll the dispute back, got %s", got.State)
+		}
+	}) // cleanup drops the trigger here
+
+	for i := 0; i < 2; i++ {
+		if err := e.b12CallbackErr(a, OutcomeSucceeded, "b12-rc-ref", 500); err != nil {
+			t.Fatalf("redelivery #%d: %v", i, err)
+		}
+	}
+	if got := mustGetAttempt(t, pool, f.tenantID, a.ID); got.State != AttemptDisputed {
+		t.Fatalf("redelivery must converge to disputed, got %s", got.State)
+	}
+	e.b12AssertOneAlert(t, a.ID, "success_after_payout_declined") // occurrences == 1
+	e.b12AssertNoMoneyMoved(t, b12Out{wr: wr, a: a, before: before})
+}
+
+// Security C-3 / L-2: a tenant-B session reading tenant A's payout alerts sees zero rows, by the
+// alerts RLS (unfiltered SELECT under the other tenant's session), for each payout alert kind of site.
+func TestB12_OtherTenantSessionSeesZeroPayoutAlertRows(t *testing.T) {
+	pool := depositV2ScratchPool(t)
+	f, orch, _ := fpOrch(t, pool, "mock-b12-rls")
+	e := rbEnv{pool: pool, f: f, orch: orch, pid: "mock-b12-rls"}
+	other, _, _ := fpOrch(t, pool, "mock-b12-rls2")
+	wr, a := e.claim(t, "b12-rls")
+	e.b12Decline(t, wr, a)
+	e.b12Callback(t, a, OutcomeSucceeded, "b12-rls-ref", 500)
+	_, amb := e.b12Ambiguous(t, "b12-rls-esc")
+	if err := e.b12Sweeper().escalateAmbiguousPayout(context.Background(), f.tenantID, amb, time.Now().Add(time.Minute), "non_idempotent_manifest"); err != nil {
+		t.Fatalf("escalate: %v", err)
+	}
+	if rows := e.b12Rows(t); len(rows) != 2 {
+		t.Fatalf("tenant A must see its two alerts, got %+v", rows)
+	}
+	var n, occ int
+	if err := pool.WithTenant(context.Background(), other.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		if err := tx.QueryRow(ctx, `SELECT count(*) FROM alerts WHERE discriminator LIKE 'payout_attempt:%'`).Scan(&n); err != nil {
+			return err
+		}
+		return tx.QueryRow(ctx, `SELECT count(*) FROM alert_occurrences`).Scan(&occ)
+	}); err != nil {
+		t.Fatalf("tenant B read: %v", err)
+	}
+	if n != 0 || occ != 0 {
+		t.Fatalf("tenant B session read %d alerts / %d occurrences of tenant A", n, occ)
+	}
 }

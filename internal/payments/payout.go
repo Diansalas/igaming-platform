@@ -807,6 +807,14 @@ func applyPayoutLateEvidence(ctx context.Context, tx pgx.Tx, attempt PaymentAtte
 	var applyErr error
 	switch current.State {
 	case AttemptDeclined:
+		// B12 (LF M-1/C1): a decline replayed on an already-declined attempt is the SAME
+		// outcome again (a stale snapshot in phase C, a poll or a sweeper resend), not a
+		// double-payout signal: a clean no-op (no transition, no audit, no alert). Only
+		// SUCCESS evidence after a decline is T14; a decline echoing a foreign reference is
+		// routed by the reference guard to late_contradicting_evidence and still raises.
+		if terminalReason == "late_decline_after_terminal" {
+			return nil
+		}
 		applyErr = ApplyDisputeFromDeclinedPayout(ctx, tx, attempt.ID, evidence, terminalReason)
 	case AttemptSucceeded, AttemptDisputed, AttemptRejected:
 		// Already resolved (a benign replay, or an already-parked
