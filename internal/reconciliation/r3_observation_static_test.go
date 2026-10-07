@@ -132,34 +132,236 @@ func TestR3_Static_LedgerUsedReadOnly(t *testing.T) {
 	}
 }
 
+// r3ThirdPartyAllowed is the reviewed allow-list of third-party (non-std,
+// non-module) code the reconciliation package may pull in transitively. It is
+// derived from `go list -deps .` and matched on module-root boundaries. Every
+// entry is a read-path / plumbing dependency of the DB driver or tracing API;
+// none performs money movement or provider I/O of its own.
+var r3ThirdPartyAllowed = map[string]string{
+	"github.com/google/uuid":         "identifier generation (pure)",
+	"github.com/jackc/pgx/v5":        "PostgreSQL driver used by internal/db",
+	"github.com/jackc/pgpassfile":    "pgx dependency: .pgpass parsing",
+	"github.com/jackc/pgservicefile": "pgx dependency: service file parsing",
+	"github.com/jackc/puddle/v2":     "pgxpool connection pooling",
+	"golang.org/x/text":              "pgx dependency: SASLprep / unicode normalisation",
+	"golang.org/x/sync":              "puddle dependency: semaphore",
+	"github.com/go-logr/logr":        "otel dependency: logging facade",
+	"github.com/go-logr/stdr":        "otel dependency: logr stdlib adapter",
+	"github.com/cespare/xxhash/v2":   "otel attribute hashing (pure)",
+	"go.opentelemetry.io/otel":       "tracing/metric API used by internal/db (no exporter)",
+	"go.opentelemetry.io/auto/sdk":   "otel no-op/auto SDK shim (no exporter)",
+}
+
+// r3VendoredStdAllowed are the golang.org/x copies vendored inside the Go
+// standard library (reached via crypto/tls and net/http).
+var r3VendoredStdAllowed = []string{
+	"vendor/golang.org/x/crypto/", "vendor/golang.org/x/net/",
+	"vendor/golang.org/x/sys/", "vendor/golang.org/x/text/",
+}
+
+// r3StdDenied are std packages that must never appear in the closure: process
+// execution, dynamic code loading and extra network protocol clients. They are
+// all ABSENT today (verified from go list -deps); net/http, net, os, syscall
+// and crypto/tls are legitimately present via the DB driver and so cannot be
+// denied by package name (the import pin above covers direct use).
+var r3StdDenied = map[string]bool{
+	"os/exec": true, "plugin": true, "net/rpc": true, "net/smtp": true,
+	"net/http/cgi": true, "net/http/fcgi": true, "net/http/pprof": true,
+	"net/http/httputil": true, "os/signal": true,
+}
+
+const r3ModulePrefix = "github.com/Diansalas/igaming-platform/"
+
+// r3ClassifyDep returns "" when the package is acceptable, else a reason.
+func r3ClassifyDep(p string, internalAllowed map[string]bool) string {
+	first := p
+	if i := strings.Index(p, "/"); i >= 0 {
+		first = p[:i]
+	}
+	switch {
+	case strings.HasPrefix(p, r3ModulePrefix):
+		if !internalAllowed[p] {
+			return "not in the reviewed read-only internal set"
+		}
+	case strings.HasPrefix(p, "vendor/"):
+		for _, v := range r3VendoredStdAllowed {
+			if strings.HasPrefix(p, v) {
+				return ""
+			}
+		}
+		return "vendored std package not in the reviewed list"
+	case !strings.Contains(first, "."):
+		if r3StdDenied[p] {
+			return "denied std package (exec / plugin / extra network client)"
+		}
+	default:
+		for root := range r3ThirdPartyAllowed {
+			if p == root || strings.HasPrefix(p, root+"/") {
+				return ""
+			}
+		}
+		return "third-party package not in the reviewed allow-list"
+	}
+	return ""
+}
+
 // LF N-2 / security: the import pin above looks at direct imports; this one
 // asks the toolchain for the TRANSITIVE closure, so a forbidden package pulled
-// in through an allowed one is caught as well.
+// in through an allowed one is caught as well - internal, third-party and std.
 func TestR3_Static_TransitiveDependenciesAreReadOnlyPackages(t *testing.T) {
 	out, err := exec.Command("go", "list", "-deps", ".").Output()
 	if err != nil {
 		t.Fatalf("go list -deps failed (the transitive read-only pin must not silently switch off): %v", err)
 	}
-	allowed := map[string]bool{}
+	internalAllowed := map[string]bool{}
 	for _, p := range []string{"txscope", "db", "alerting", "audit", "ledger", "providerref", "reconciliation", "reconciliation/statement"} {
-		allowed["github.com/Diansalas/igaming-platform/internal/"+p] = true
+		internalAllowed[r3ModulePrefix+"internal/"+p] = true
 	}
-	seen := 0
+	internal, third, std := 0, 0, 0
+	usedRoots := map[string]bool{}
 	for _, p := range strings.Fields(string(out)) {
-		if !strings.HasPrefix(p, "github.com/Diansalas/igaming-platform/") {
-			continue
+		switch first, _, _ := strings.Cut(p, "/"); {
+		case strings.HasPrefix(p, r3ModulePrefix):
+			internal++
+		case strings.HasPrefix(p, "vendor/"):
+			std++
+		case strings.Contains(first, "."):
+			third++
+			for root := range r3ThirdPartyAllowed {
+				if p == root || strings.HasPrefix(p, root+"/") {
+					usedRoots[root] = true
+				}
+			}
+		default:
+			std++
 		}
-		seen++
-		if !allowed[p] {
-			t.Errorf("transitive dependency %s is not in the reviewed read-only set", p)
+		if why := r3ClassifyDep(p, internalAllowed); why != "" {
+			t.Errorf("transitive dependency %s: %s", p, why)
 		}
 	}
-	if seen < 5 {
-		t.Fatalf("go list -deps saw only %d internal packages (vacuous)", seen)
+	if internal < 5 || third < 10 || std < 50 {
+		t.Fatalf("go list -deps looks vacuous: internal=%d third-party=%d std=%d", internal, third, std)
+	}
+	for root := range r3ThirdPartyAllowed {
+		if !usedRoots[root] {
+			t.Errorf("allow-list entry %s is stale (no longer in the closure): remove it so the list stays minimal", root)
+		}
 	}
 }
 
-var r3WriteRE = regexp.MustCompile(`(?is)\b(insert\s+into|update|delete\s+from)\s+([a-z_][a-z0-9_]*)`)
+// Negative control for the classifier: each class of violation is flagged and
+// the accepted shapes are not.
+func TestR3_Static_DependencyClassifierHasTeeth(t *testing.T) {
+	internal := map[string]bool{r3ModulePrefix + "internal/db": true}
+	bad := []string{
+		r3ModulePrefix + "internal/payment",
+		"os/exec", "plugin", "net/rpc",
+		"github.com/evil/exfil", "github.com/jackc/pgx/v50", "github.com/google/uuidx",
+		"vendor/golang.org/x/evil/pkg",
+	}
+	for _, p := range bad {
+		if r3ClassifyDep(p, internal) == "" {
+			t.Errorf("classifier accepted forbidden dependency %s", p)
+		}
+	}
+	good := []string{
+		r3ModulePrefix + "internal/db", "fmt", "net/http", "github.com/jackc/pgx/v5/pgxpool",
+		"github.com/google/uuid", "vendor/golang.org/x/net/idna",
+	}
+	for _, p := range good {
+		if why := r3ClassifyDep(p, internal); why != "" {
+			t.Errorf("classifier rejected acceptable dependency %s: %s", p, why)
+		}
+	}
+}
+
+// r3WriteRE finds SQL write statements. Besides INSERT/UPDATE/DELETE it sees
+// MERGE INTO and TRUNCATE [TABLE] [ONLY] (both write without any of the three
+// classic verbs).
+var r3WriteRE = regexp.MustCompile(`(?is)\b(insert\s+into|update|delete\s+from|merge\s+into|truncate(?:\s+table)?(?:\s+only)?)\s+([a-z_][a-z0-9_]*)`)
+
+// r3WriteFuncRE is an ADDITIVE deny-list of well-known SQL functions that
+// persist data or reach outside the transaction: large-object writers
+// (lo_import/lo_create/lo_creat/lo_unlink/lo_put/lowrite) and dblink_exec
+// (runs arbitrary DML on a remote database). Deliberately NOT included:
+// nextval/setval/pg_advisory_* (sequence and lock state, not data writes) and
+// set_config (session setting). No reconciliation SQL uses any of these.
+var r3WriteFuncRE = regexp.MustCompile(`(?i)\b(lo_import|lo_create|lo_creat|lo_unlink|lo_put|lowrite|dblink_exec)\s*\(`)
+
+type r3SQLWrite struct{ verb, target string }
+
+// r3SQLWrites returns every write found in one SQL string. Function calls are
+// reported with verb "call".
+func r3SQLWrites(s string) []r3SQLWrite {
+	var out []r3SQLWrite
+	for _, m := range r3WriteRE.FindAllStringSubmatch(s, -1) {
+		out = append(out, r3SQLWrite{strings.ToLower(strings.Join(strings.Fields(m[1]), " ")), strings.ToLower(m[2])})
+	}
+	for _, m := range r3WriteFuncRE.FindAllStringSubmatch(s, -1) {
+		out = append(out, r3SQLWrite{"call", strings.ToLower(m[1])})
+	}
+	return out
+}
+
+// Negative control: a synthetic string with every extended shape is flagged,
+// and benign SQL (including FOR UPDATE OF and sequence/lock helpers) is not
+// flagged beyond the known lock-clause token.
+func TestR3_Static_WriteScanHasTeeth(t *testing.T) {
+	flagged := map[string]string{
+		"MERGE INTO payments USING x ON true WHEN MATCHED THEN DELETE": "merge into",
+		"merge   into\n payments using x":                              "merge into",
+		"TRUNCATE ledger_entries":                                      "truncate",
+		"truncate table ledger_entries":                                "truncate table",
+		"TRUNCATE TABLE ONLY ledger_entries":                           "truncate table only",
+		"SELECT lo_import('/etc/passwd')":                              "call",
+		"SELECT lo_create(0)":                                          "call",
+		"SELECT LO_CREAT(0)":                                           "call",
+		"SELECT lo_unlink(1234)":                                       "call",
+		"SELECT lo_put(1, 0, 'x')":                                     "call",
+		"SELECT lowrite(1, 'x')":                                       "call",
+		"SELECT dblink_exec('c', 'delete from t')":                     "call",
+	}
+	for sql, wantVerb := range flagged {
+		got := r3SQLWrites(sql)
+		found := false
+		for _, w := range got {
+			if w.verb == wantVerb {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("write scan did not flag %q (want verb %q, got %v)", sql, wantVerb, got)
+		}
+	}
+	for _, sql := range []string{
+		"SELECT nextval('s'), setval('s', 1), pg_advisory_xact_lock(1), set_config('a','b',true)",
+		"SELECT id FROM reconciliation_runs WHERE x = $1",
+	} {
+		if got := r3SQLWrites(sql); len(got) != 0 {
+			t.Errorf("write scan false-positive on %q: %v", sql, got)
+		}
+	}
+	// The production SQL must still be exactly the allowed shapes: nothing
+	// from the extended verb/function set.
+	for name, f := range r3ProductionFiles(t) {
+		ast.Inspect(f, func(n ast.Node) bool {
+			lit, ok := n.(*ast.BasicLit)
+			if !ok || lit.Kind != token.STRING {
+				return true
+			}
+			s, err := strconv.Unquote(lit.Value)
+			if err != nil {
+				return true
+			}
+			for _, w := range r3SQLWrites(s) {
+				if w.verb != "insert into" && w.verb != "update" {
+					t.Errorf("%s production SQL contains %s %s", name, w.verb, w.target)
+				}
+			}
+			return true
+		})
+	}
+}
 
 func TestR3_Static_OnlyOwnStoresAreWritten(t *testing.T) {
 	insertable := map[string]bool{
@@ -178,8 +380,8 @@ func TestR3_Static_OnlyOwnStoresAreWritten(t *testing.T) {
 			if err != nil {
 				return true
 			}
-			for _, m := range r3WriteRE.FindAllStringSubmatch(s, -1) {
-				verb, table := strings.ToLower(strings.Join(strings.Fields(m[1]), " ")), strings.ToLower(m[2])
+			for _, m := range r3SQLWrites(s) {
+				verb, table := m.verb, m.target
 				switch verb {
 				case "insert into":
 					seenInsert[table] = true
@@ -193,8 +395,10 @@ func TestR3_Static_OnlyOwnStoresAreWritten(t *testing.T) {
 					if !updatable[table] {
 						t.Errorf("%s writes (UPDATE) to %q: the reconciliation package may write only its own stores", name, table)
 					}
-				default:
+				case "delete from":
 					t.Errorf("%s DELETEs from %q: the reconciliation package never deletes", name, table)
+				default:
+					t.Errorf("%s uses forbidden SQL write %s %q: the reconciliation package may write only via INSERT/UPDATE on its own stores", name, verb, table)
 				}
 			}
 			return true
