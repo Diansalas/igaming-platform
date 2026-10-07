@@ -1,0 +1,156 @@
+PRH-2 round 8 mutation-kill evidence, 2026-10-07: PAY-PAYOUT-ASSET-ECHO-TEST-1 (T1), PAY-PAYOUT-CALLBACK-AUDIT-1 (T2), R-5 (T3)
+Method: each mutant is applied in place to the real source file (backup in the scratchpad), `go build ./internal/payments/` must
+succeed (a mutant that does not compile is NOT counted), then the targeted suites run against a private scratch database:
+  integ  = -race -tags integration -count=1 -p 1 -run <the new tests + the B12/B5 tests that touch the site>
+  unit   = go test -count=1 ./internal/payments/ -run <unit + source-order guards>
+  static = go test -count=1 ./internal/alerting/ -run TestStaticWiring
+The file is restored from the backup after every mutant and compared with cmp ("restore-cmp ... OK"); the final git status of the
+touched source files showed no diff. A CONTROL run on the unmutated tree passed first (first line of each section).
+Where: T1 and T2 were mutated in the worktree itself. T3 (R-5) was mutated in an exact full copy of the worktree taken after the
+T3 code was written (the real worktree was busy running the T2 mutants); the T3 files were then copied into the worktree
+byte-for-byte and the T3 suites re-run there on the unmutated tree (TestR5_*, TestB12_*, TestB5_*, the receipt/payout
+regression set, internal/alerting in full, golangci-lint 0 issues): all passed. Mutant harness: scratchpad r8/mut.py.
+
+RESULTS
+  T1 PAY-PAYOUT-ASSET-ECHO-TEST-1 : 11 KILLED, 1 SURVIVED, 0 not counted (compile error)
+  T2 PAY-PAYOUT-CALLBACK-AUDIT-1  : 27 KILLED, 0 SURVIVED, 1 not counted (compile error; its compiling rerun D2 is counted)
+  T3 R-5 mismatched success on a declined payout : 12 KILLED, 0 SURVIVED, 0 not counted
+
+SURVIVOR CLASSIFICATION (honest)
+  E9-site-audit-error-swallowed (T1, payout.go applyPayoutSuccessCheckedFromStatus): SURVIVED, classified EQUIVALENT under every
+    fault the harness can inject. audit.Record can fail in a test only through a database error, which aborts the transaction:
+    the next statement (the B12 raise) then fails with 25P02 and propagates, or the commit fails, so the delivery still errors and
+    rolls back exactly as if the error had been returned. The test TestPayoutAssetEcho_Site_AuditFailure_RollsBackThePark_ThenConverges
+    pins that observable behaviour (error + rollback + convergence) but cannot distinguish "returned" from "swallowed then aborted".
+    The same mutation of the new T2 helper (D2) IS killed because the helper can be called directly on a closed transaction (a
+    failure that does not abort anything); the T1 site has no such seam (its first statement already needs a live transaction),
+    so no test can reach it without a production refactor, which this item does not warrant. Not a test gap in behaviour.
+  C-asset-raw and C-ref-raw (T2) first SURVIVED: the callback ingress (providerref validation, the payment_provider_events asset
+    CHECK) already bounds both echoes, so no delivery can carry a hostile value into the cells. They were then KILLED by the
+    added direct test TestPayoutCallbackAudit_Helper_HostileEchoNeverStoredRaw (defence in depth). The first runs are kept in the
+    log below, followed by the reruns.
+  D (T2) did not compile (not counted); D2 is its compiling form (first SURVIVED, killed after the
+    closed-transaction check was added to the Helper test).
+Honesty notes: T2 ordering mutants O-* are killed by the AST source-order guard (ordering is not observable in database state,
+as for B12). R-changed-true (T3) is killed only through the disposition assertion (duplicate_effect), which is the single
+observable difference of a "changed" cell on a payout. S-const-value (T3) is killed by the unit test that pins the literal (the
+integration tests use the constant itself).
+----- raw logs (T1, then T2, then T3) -----
+===== T1 =====
+CONTROL integ=PASS
+E1-helper-always-raw withAssetEcho stores every echo raw KILLED integ:TestPayoutAssetEcho_Site_InvalidEcho_OnlyLenAndHashPrefix_NeverRaw
+  restore-cmp asset_echo_audit.go OK
+E2-regex-17 length bound 16 -> 17 KILLED integ:TestPayoutAssetEcho_Site_InvalidEcho_OnlyLenAndHashPrefix_NeverRaw
+  restore-cmp asset_echo_audit.go OK
+E3-regex-lowercase lowercase accepted as raw KILLED integ:TestPayoutAssetEcho_Site_InvalidEcho_OnlyLenAndHashPrefix_NeverRaw
+  restore-cmp asset_echo_audit.go OK
+E4-prefix-8 hash prefix 12 -> 8 KILLED integ:TestPayoutAssetEcho_Site_InvalidEcho_OnlyLenAndHashPrefix_NeverRaw
+  restore-cmp asset_echo_audit.go OK
+E5-len-off-by-one _len off by one KILLED integ:TestPayoutAssetEcho_Site_InvalidEcho_OnlyLenAndHashPrefix_NeverRaw
+  restore-cmp asset_echo_audit.go OK
+E6-site-key payout site key renamed KILLED integ:TestPayoutAssetEcho_Site_InvalidEcho_OnlyLenAndHashPrefix_NeverRaw,TestPayoutAssetEcho_Site_ValidEcho_StoredRaw
+  restore-cmp payout.go OK
+E7-site-outcome payout site outcome denied -> failure KILLED integ:TestPayoutAssetEcho_Site_AuditShape_AttemptAndTenantBinding
+  restore-cmp payout.go OK
+E8-site-target payout site target = withdrawal id KILLED integ:TestPayoutAssetEcho_Site_AuditFailure_RollsBackThePark_ThenConverges,TestPayoutAssetEcho_Site_AuditShape_AttemptAndTenantBinding,TestPayoutAssetEcho_Site_InvalidEcho_OnlyLenAndHashPrefix_NeverRaw,TestPayoutAssetEcho_Site_ValidEcho_StoredRaw
+  restore-cmp payout.go OK
+E9-site-audit-error-swallowed audit error ignored at the payout site SURVIVED
+  restore-cmp payout.go OK
+E10-site-requested-asset requested_asset taken from the echo KILLED integ:TestPayoutAssetEcho_Site_InvalidEcho_OnlyLenAndHashPrefix_NeverRaw,TestPayoutAssetEcho_Site_ValidEcho_StoredRaw
+  restore-cmp payout.go OK
+E11-site-asset-crosscheck-dropped asset half of the cross-check removed KILLED integ:TestPayoutAssetEcho_Site_AuditFailure_RollsBackThePark_ThenConverges,TestPayoutAssetEcho_Site_AuditShape_AttemptAndTenantBinding,TestPayoutAssetEcho_Site_InvalidEcho_OnlyLenAndHashPrefix_NeverRaw,TestPayoutAssetEcho_Site_ValidEcho_StoredRaw
+  restore-cmp payout.go OK
+E12-site-withdrawal-id withdrawal_request_id replaced by attempt id KILLED integ:TestPayoutAssetEcho_Site_AuditShape_AttemptAndTenantBinding
+  restore-cmp payout.go OK
+===== T2 =====
+CONTROL unit=PASS integ=PASS static=PASS
+A-T14-audit-skipped audit not written for this cell KILLED integ:TestPayoutCallbackAudit_Atomicity_AuditAndAlertFailureSemantics,TestPayoutCallbackAudit_EachCell_OneRow_CorrectContext_ReplayIdempotent_NoMoney
+  restore-cmp payout_callback_audit.go OK
+A-T15-audit-skipped audit not written for this cell KILLED integ:TestPayoutCallbackAudit_Atomicity_AuditAndAlertFailureSemantics,TestPayoutCallbackAudit_EachCell_OneRow_CorrectContext_ReplayIdempotent_NoMoney
+  restore-cmp payout_callback_audit.go OK
+A-callback-amount-audit-skipped audit not written for this cell KILLED integ:TestPayoutCallbackAudit_Atomicity_AuditAndAlertFailureSemantics,TestPayoutCallbackAudit_EachCell_OneRow_CorrectContext_ReplayIdempotent_NoMoney
+  restore-cmp payout_callback_audit.go OK
+A-tombstone-audit-skipped audit not written for this cell KILLED integ:TestPayoutCallbackAudit_Atomicity_AuditAndAlertFailureSemantics,TestPayoutCallbackAudit_EachCell_OneRow_CorrectContext_ReplayIdempotent_NoMoney
+  restore-cmp payout_callback_audit.go OK
+B-deposit-guard-removed audit also written for a deposit KILLED unit:TestAuditPayoutCallbackDispute_DepositNoOp_And_CASErrorPassthrough
+  restore-cmp payout_callback_audit.go OK
+B-cas-error-guard-removed audit attempted after a failed dispute CAS KILLED unit:TestAuditPayoutCallbackDispute_DepositNoOp_And_CASErrorPassthrough
+  restore-cmp payout_callback_audit.go OK
+C-outcome-success outcome denied -> success KILLED integ:TestPayoutCallbackAudit_EachCell_OneRow_CorrectContext_ReplayIdempotent_NoMoney
+  restore-cmp payout_callback_audit.go OK
+C-action-renamed audit action renamed KILLED unit:TestAuditPayoutCallbackDispute_ActionNameIsStable
+  restore-cmp payout_callback_audit.go OK
+C-target-tenant-attempt target id = withdrawal id KILLED integ:TestPayoutCallbackAudit_Atomicity_AuditAndAlertFailureSemantics,TestPayoutCallbackAudit_EachCell_OneRow_CorrectContext_ReplayIdempotent_NoMoney
+  restore-cmp payout_callback_audit.go OK
+C-state-before-const state_before fixed KILLED integ:TestPayoutCallbackAudit_EachCell_OneRow_CorrectContext_ReplayIdempotent_NoMoney
+  restore-cmp payout_callback_audit.go OK
+C-state-after-wrong state_after pending KILLED integ:TestPayoutCallbackAudit_EachCell_OneRow_CorrectContext_ReplayIdempotent_NoMoney
+  restore-cmp payout_callback_audit.go OK
+C-reason-dropped terminal_reason not recorded KILLED integ:TestPayoutCallbackAudit_EachCell_OneRow_CorrectContext_ReplayIdempotent_NoMoney
+  restore-cmp payout_callback_audit.go OK
+C-evidence-wrong evidence kind wrong KILLED integ:TestPayoutCallbackAudit_EachCell_OneRow_CorrectContext_ReplayIdempotent_NoMoney
+  restore-cmp payout_callback_audit.go OK
+C-provider-dropped provider_id not recorded KILLED integ:TestPayoutCallbackAudit_EachCell_OneRow_CorrectContext_ReplayIdempotent_NoMoney
+  restore-cmp payout_callback_audit.go OK
+C-wr-dropped withdrawal id not recorded KILLED integ:TestPayoutCallbackAudit_EachCell_OneRow_CorrectContext_ReplayIdempotent_NoMoney
+  restore-cmp payout_callback_audit.go OK
+C-stored-amount-from-echo stored_amount taken from the echo KILLED integ:TestPayoutCallbackAudit_EachCell_OneRow_CorrectContext_ReplayIdempotent_NoMoney
+  restore-cmp payout_callback_audit.go OK
+C-echoed-amount-dropped echoed_amount not recorded KILLED integ:TestPayoutCallbackAudit_EachCell_OneRow_CorrectContext_ReplayIdempotent_NoMoney
+  restore-cmp payout_callback_audit.go OK
+C-asset-raw echoed asset stored raw (bypasses withAssetEcho) SURVIVED
+  restore-cmp payout_callback_audit.go OK
+C-ref-raw echoed reference stored raw (bypasses echoAuditMeta) SURVIVED
+  restore-cmp payout_callback_audit.go OK
+D-audit-error-swallowed COMPILE-ERROR (not counted)
+  restore-cmp payout_callback_audit.go OK
+E-T14-audit-ev-blank T14 cell passes empty evidence KILLED integ:TestPayoutCallbackAudit_EachCell_OneRow_CorrectContext_ReplayIdempotent_NoMoney
+  restore-cmp receipt.go OK
+E-T14-reason-wrong T14 audit records a different reason KILLED integ:TestPayoutCallbackAudit_EachCell_OneRow_CorrectContext_ReplayIdempotent_NoMoney
+  restore-cmp receipt.go OK
+E-tomb-reason-wrong tombstone audit records a different reason KILLED integ:TestPayoutCallbackAudit_EachCell_OneRow_CorrectContext_ReplayIdempotent_NoMoney
+  restore-cmp receipt.go OK
+E-T15-reason-wrong T15 audit records a different reason KILLED integ:TestPayoutCallbackAudit_EachCell_OneRow_CorrectContext_ReplayIdempotent_NoMoney
+  restore-cmp receipt.go OK
+E-cam-reason-wrong amount-mismatch audit records a different reason KILLED integ:TestPayoutCallbackAudit_EachCell_OneRow_CorrectContext_ReplayIdempotent_NoMoney
+  restore-cmp receipt.go OK
+O-T14-raise-before-audit T14: audit nested outside the raise (raise runs first) KILLED unit:TestPayoutCallbackAudit_AuditPrecedesRaise_InEveryReceiptCell,TestPayoutDisputeRaiseIsReturnedNeverFollowedByWork_ADR0102_7_7 | integ:TestPayoutCallbackAudit_AuditPrecedesRaise_InEveryReceiptCell
+  restore-cmp receipt.go OK
+O-tomb-raise-before-audit tombstone: audit nested outside the raise KILLED unit:TestPayoutCallbackAudit_AuditPrecedesRaise_InEveryReceiptCell,TestPayoutDisputeRaiseIsReturnedNeverFollowedByWork_ADR0102_7_7 | integ:TestPayoutCallbackAudit_AuditPrecedesRaise_InEveryReceiptCell
+  restore-cmp receipt.go OK
+--- RERUN after adding TestPayoutCallbackAudit_Helper_HostileEchoNeverStoredRaw (C-asset-raw/C-ref-raw first SURVIVED; D compile-error -> D2)
+C-asset-raw echoed asset stored raw (bypasses withAssetEcho) KILLED integ:TestPayoutCallbackAudit_Helper_HostileEchoNeverStoredRaw
+  restore-cmp payout_callback_audit.go OK
+C-ref-raw echoed reference stored raw (bypasses echoAuditMeta) KILLED integ:TestPayoutCallbackAudit_Helper_HostileEchoNeverStoredRaw
+  restore-cmp payout_callback_audit.go OK
+D2-audit-error-swallowed audit write error swallowed (compiling form of D) SURVIVED
+  restore-cmp payout_callback_audit.go OK
+--- RERUN D2 after adding the closed-transaction write-failure check to the Helper test
+D2-audit-error-swallowed audit write error swallowed (compiling form of D) KILLED integ:TestPayoutCallbackAudit_Helper_HostileEchoNeverStoredRaw
+  restore-cmp payout_callback_audit.go OK
+===== T3 =====
+CONTROL unit=PASS integ=PASS static=PASS
+R-raise-removed R-5 raise removed KILLED unit:TestPayoutDisputeRaiseIsReturnedNeverFollowedByWork_ADR0102_7_7 | integ:TestB12_EachSiteAndReason_RaisesExactlyOneAlert_AuditUnchanged_NoMoney,TestR5_AlertFailureSemantics,TestR5_MismatchedSuccessOnDeclinedPayout_RaisesOneP1_NoStateChange,TestR5_Replay_OneAlertRow_OccurrencesGrow_NoStateChange | static:TestStaticWiring_PayoutDisputeRaiseSitesArePinned_B12
+  restore-cmp receipt.go OK
+R-reason-t14 R-5 raises the T14 reason KILLED integ:TestR5_AlertFailureSemantics,TestR5_MismatchedSuccessOnDeclinedPayout_RaisesOneP1_NoStateChange,TestR5_Replay_OneAlertRow_OccurrencesGrow_NoStateChange
+  restore-cmp receipt.go OK
+R-reason-unknown R-5 raises an unregistered reason KILLED integ:TestR5_AlertFailureSemantics,TestR5_MismatchedSuccessOnDeclinedPayout_RaisesOneP1_NoStateChange,TestR5_Replay_OneAlertRow_OccurrencesGrow_NoStateChange
+  restore-cmp receipt.go OK
+R-raise-before-audit R-5 raise placed before the audit row KILLED unit:TestPayoutDisputeRaiseIsReturnedNeverFollowedByWork_ADR0102_7_7 | integ:TestR5_AlertFailureSemantics,TestR5_MismatchedSuccessOnDeclinedPayout_RaisesOneP1_NoStateChange,TestR5_Replay_OneAlertRow_OccurrencesGrow_NoStateChange | static:TestStaticWiring_PayoutDisputeRaiseSitesArePinned_B12
+  restore-cmp receipt.go OK
+R-changed-true R-5 cell reports a state change KILLED integ:TestR5_MismatchedSuccessOnDeclinedPayout_RaisesOneP1_NoStateChange
+  restore-cmp receipt.go OK
+R-also-disputes R-5 cell also parks the attempt (state change) KILLED integ:TestR5_AlertFailureSemantics,TestR5_MismatchedSuccessOnDeclinedPayout_RaisesOneP1_NoStateChange,TestR5_Replay_OneAlertRow_OccurrencesGrow_NoStateChange | static:TestStaticWiring_PayoutDisputeRaiseSitesArePinned_B12
+  restore-cmp receipt.go OK
+R-error-dropped R-5 raise error dropped KILLED unit:TestPayoutDisputeRaiseIsReturnedNeverFollowedByWork_ADR0102_7_7 | integ:TestR5_AlertFailureSemantics | static:TestStaticWiring_InTxRaiseResultsAreNeverDiscarded_LFF4
+  restore-cmp receipt.go OK
+R-audit-removed terminal-mismatch audit removed from the cell KILLED integ:TestR5_AlertFailureSemantics,TestR5_MismatchedSuccessOnDeclinedPayout_RaisesOneP1_NoStateChange
+  restore-cmp receipt.go OK
+S-signal-set-emptied signal reason not in the closed set KILLED unit:TestPayoutAlertReasonFor_ClosedSet | integ:TestR5_AlertFailureSemantics,TestR5_MismatchedSuccessOnDeclinedPayout_RaisesOneP1_NoStateChange,TestR5_Replay_OneAlertRow_OccurrencesGrow_NoStateChange
+  restore-cmp payout_alerts.go OK
+S-signal-lookup-removed mapper ignores the signal set KILLED unit:TestPayoutAlertReasonFor_ClosedSet | integ:TestR5_AlertFailureSemantics,TestR5_MismatchedSuccessOnDeclinedPayout_RaisesOneP1_NoStateChange,TestR5_Replay_OneAlertRow_OccurrencesGrow_NoStateChange
+  restore-cmp payout_alerts.go OK
+S-const-value reason literal changed KILLED unit:TestPayoutAlertReasonFor_ClosedSet
+  restore-cmp payout_alerts.go OK
+S-signal-in-terminal-set signal reason also treated as unclassified fallthrough (mapper returns unclassified) KILLED unit:TestPayoutAlertReasonFor_ClosedSet | integ:TestR5_AlertFailureSemantics,TestR5_MismatchedSuccessOnDeclinedPayout_RaisesOneP1_NoStateChange,TestR5_Replay_OneAlertRow_OccurrencesGrow_NoStateChange
+  restore-cmp payout_alerts.go OK

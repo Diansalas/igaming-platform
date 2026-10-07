@@ -51,6 +51,19 @@ var payoutEscalationReasons = map[string]struct{}{
 	alertReasonPayoutResubmitCASRefused:    {},
 }
 
+// R-5 (ADR 0095 section 42.5): a signal raised WITHOUT any state change. A success whose
+// amount/asset is mismatched, arriving by callback on an already-declined payout (the hold is
+// already released: a double-payout candidate), leaves the attempt declined and writes only the
+// terminal-mismatch audit; it now also raises this reason. It is not a terminal reason (the
+// attempt is not parked, so it is not in PayoutDisputeReasons(), which mirrors the terminal-reason
+// CHECK) and not an escalation, hence its own closed set.
+const alertReasonPayoutMismatchedSuccessOnDeclined = "mismatched_success_on_declined_payout"
+
+// payoutSignalReasons is the closed set of payout alert reasons raised with no state change.
+var payoutSignalReasons = map[string]struct{}{
+	alertReasonPayoutMismatchedSuccessOnDeclined: {},
+}
+
 // payoutAlertReasonFor maps a payout terminal or escalation reason to its
 // closed alert-reason value. The invalid_provider_reference:<detail> family
 // collapses to its prefix; a member of PayoutDisputeReasons() (which includes
@@ -65,6 +78,9 @@ func payoutAlertReasonFor(reason string) string {
 		return reason
 	}
 	if _, ok := payoutEscalationReasons[reason]; ok {
+		return reason
+	}
+	if _, ok := payoutSignalReasons[reason]; ok {
 		return reason
 	}
 	slog.Default().Error("payments_alert_reason_unclassified")

@@ -33,6 +33,22 @@ func TestPayoutAlertReasonFor_ClosedSet(t *testing.T) {
 	if len(payoutEscalationReasons) != 3 {
 		t.Fatalf("the payout escalation set changed (%d): review the sweeper call sites", len(payoutEscalationReasons))
 	}
+	// R-5: the no-state-change signal reasons are their own closed set (not terminal reasons, not
+	// escalations), and each maps to itself.
+	for reason := range payoutSignalReasons {
+		if got := payoutAlertReasonFor(reason); got != reason {
+			t.Errorf("payout signal reason %q maps to %q, want itself", reason, got)
+		}
+		if _, terminal := PayoutDisputeReasons()[reason]; terminal {
+			t.Errorf("signal reason %q must not be a terminal dispute reason (nothing is parked)", reason)
+		}
+		if _, esc := payoutEscalationReasons[reason]; esc {
+			t.Errorf("signal reason %q must not be an escalation reason", reason)
+		}
+	}
+	if len(payoutSignalReasons) != 1 || alertReasonPayoutMismatchedSuccessOnDeclined != "mismatched_success_on_declined_payout" {
+		t.Fatalf("the payout signal set changed (%v): review the receipt call sites and ADR 0095 section 42", payoutSignalReasons)
+	}
 	for _, in := range []string{
 		"invalid_provider_reference:too_long", "invalid_provider_reference:control_char", "invalid_provider_reference:",
 	} {
@@ -45,6 +61,7 @@ func TestPayoutAlertReasonFor_ClosedSet(t *testing.T) {
 		TerminalReasonSyncAmountMismatch, TerminalReasonMultipleSuccessForIntent, // deposit-only reasons
 		alertReasonDepositSettlementWindowExceeded,
 		"invalid_provider_referenceX", "late_success_after_terminal ", "success_after_payout_declined;DROP",
+		"mismatched_success_on_declined_payout ", "Mismatched_success_on_declined_payout", "mismatched_success_on_declined",
 	} {
 		if got := payoutAlertReasonFor(in); got != alertReasonUnclassified {
 			t.Errorf("%q maps to %q, want %q", in, got, alertReasonUnclassified)
@@ -112,9 +129,10 @@ func TestPayoutDisputeRaiseIsReturnedNeverFollowedByWork_ADR0102_7_7(t *testing.
 		t.Fatalf("payout dispute raise placement violations:\n  %s", strings.Join(problems, "\n  "))
 	}
 	// 1 sync invalid ref, 1 sync ref mismatch, 1 late evidence, 1 status invalid ref, 2 status
-	// mismatches, 1 refbind park, 1 sweeper escalation, 1+4 receipt cells = 13.
-	if sites != 13 {
-		t.Fatalf("expected 13 payout dispute raise call sites in the reviewed files, found %d", sites)
+	// mismatches, 1 refbind park, 1 sweeper escalation, 2+4 receipt cells (the callback
+	// reference-mismatch park and the R-5 declined-payout signal, plus the four chained cells) = 14.
+	if sites != 14 {
+		t.Fatalf("expected 14 payout dispute raise call sites in the reviewed files, found %d", sites)
 	}
 }
 
