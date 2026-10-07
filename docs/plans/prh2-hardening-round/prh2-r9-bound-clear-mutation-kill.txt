@@ -207,3 +207,16 @@ IR-REV-AMT-NE  KILLED  the clause applies only when the reversed line's amount
                        (the amount/asset-equal subtest).
 
 Totals: 18 mutants, 18 KILLED, 0 survived, 0 equivalent, 0 compile errors.
+
+Race runs on the F-1 code (d5f0d2c + 86dc786)
+---------------------------------------------
+Flags: -race -tags integration -count=1 -p 1 -timeout 60m. Database: private
+scratch DB priv_r9_bc2.
+- ./internal/reconciliation/... : PASS=380, SKIP=0, FAIL=0, DATA RACE=0.
+- payments ^(TestB11_|TestStanding1|TestD2|TestK3_): PASS=211, SKIP=0, FAIL=0,
+  DATA RACE=0.
+
+Static checks:
+- gofmt: clean.
+- go vet, default and integration tags (reconciliation and payments): clean.
+- golangci-lint 2.9.0, --build-tags integration --new-from-rev=87ec7a4: 0 issues.
