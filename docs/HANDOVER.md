@@ -773,3 +773,8 @@ Decision registers: ADR 0005, 0039, 0041, 0044. The ADR numbering skips 0049-007
 | (earlier) | `HANDOVER-1`: index-style handover created; kept current per workstream |
 | 2026-10-05 | Handover audit and launch-blocker/human-decision sections added; round-2 and blocker-clearing updates (`REGISTRY-HYGIENE-2026-10-05`) |
 | 2026-10-06 | `HANDOVER-LIVE-2026-10-06`: rewritten as the live developer handover (this file), plus [`runbooks/developer-handover.md`](runbooks/developer-handover.md), the dated snapshot [`plans/prh2-hardening-round/developer-handover-2026-10-06.md`](plans/prh2-hardening-round/developer-handover-2026-10-06.md) and [`governance/human-decision-register.md`](governance/human-decision-register.md). The previous index content (topic map, launch blockers, human decisions, mock-vs-real matrix, secret names) is preserved inside sections 5, 20, 23, 31, 33. |
+
+
+### 36b. Round 8 (2026-10-07): unblocked payout bundle merged
+
+Merged (MOCK, security + ledger-finance reviewed, local evidence only): PAY-PAYOUT-UNBOUND-STANDING-1, PAY-PAYOUT-ASSET-ECHO-TEST-1, PAY-PAYOUT-CALLBACK-AUDIT-1, R-5. See registry rows `CLASSB-R8-*`. New required-before-non-MOCK-payout items: **PAY-PAYOUT-BOUND-CLEAR-1 (HIGH)**, **R-6** (succeeded-payout mismatched success does not page), PAY-PAYOUT-UNBOUND-RESOLVE-1 (still NOT IMPLEMENTED, owner/architect + LF), plus B13 (gate, brief `docs/governance/b13-decision-brief.md`). Follow-up: PAY-PAYOUT-CALLBACK-AUDIT-2. Still blocked: B13, RESOLVE-1, H-SEC-5/11 (rulings), ALERT-DELIVERY-1, B14-B18, sandbox PSP, AWS. Next unblocked engineering: PAY-PAYOUT-BOUND-CLEAR-1 (bound-class per-operation clearing; ruled direction in ADR 0095 s35.6) then R-6 (raise-only).
