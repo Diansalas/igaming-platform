@@ -28,6 +28,14 @@ import (
 
 const testHookBeforeReferenceConflictRecheckName = "testHookBeforeReferenceConflictRecheck"
 
+// testHookAnyPrefix generalises the F-L3 guard (LF round-2 delta review C-1):
+// EVERY package-level `testHook*` interleaving seam in this package (e.g.
+// testHookAfterDeferredSelect, testHookAfterDispatchStatusPreRead, the
+// manual-resolution hooks) belongs to the same "test-only seam" category the
+// F-L3 ruling depends on, so no non-_test.go file may assign ANY identifier
+// with this prefix.
+const testHookAnyPrefix = "testHook"
+
 // flHookAssignsToName reports whether stmt assigns (via `=` or `:=`) to an
 // identifier named name, anywhere among its LHS operands - the shape a
 // plain package-level `testHookBeforeReferenceConflictRecheck = ...` or
@@ -36,7 +44,7 @@ const testHookBeforeReferenceConflictRecheckName = "testHookBeforeReferenceConfl
 // inside any function body.
 func flHookAssignsToName(stmt *ast.AssignStmt, name string) bool {
 	for _, lhs := range stmt.Lhs {
-		if ident, ok := lhs.(*ast.Ident); ok && ident.Name == name {
+		if ident, ok := lhs.(*ast.Ident); ok && (ident.Name == name || (name == testHookAnyPrefix && strings.HasPrefix(ident.Name, testHookAnyPrefix))) {
 			return true
 		}
 	}
@@ -57,7 +65,7 @@ func flHookScanFile(path string, src []byte) ([]token.Position, error) {
 		if !ok {
 			return true
 		}
-		if flHookAssignsToName(assign, testHookBeforeReferenceConflictRecheckName) {
+		if flHookAssignsToName(assign, testHookAnyPrefix) {
 			found = append(found, fset.Position(assign.Pos()))
 		}
 		return true
@@ -152,5 +160,40 @@ func safe() {
 	}
 	if len(v) != 0 {
 		t.Fatalf("expected no violations for a mere nil-check read and call, got %v", v)
+	}
+}
+
+// TestFL3_GuardCoversEveryTestHookSeam is the negative control for the
+// generalised guard: a planted assignment to testHookAfterDeferredSelect (and
+// to an arbitrary testHook* name) must be flagged, a nil-check read must not.
+func TestFL3_GuardCoversEveryTestHookSeam(t *testing.T) {
+	planted := `package payments
+
+func plant() {
+	testHookAfterDeferredSelect = func() {}
+	testHookSomethingNew = nil
+}
+`
+	v, err := flHookScanFile("planted.go", []byte(planted))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if len(v) != 2 {
+		t.Fatalf("expected two violations (every testHook* seam is guarded), got %v", v)
+	}
+	safe := `package payments
+
+func safe() {
+	if testHookAfterDeferredSelect != nil {
+		testHookAfterDeferredSelect()
+	}
+}
+`
+	v, err = flHookScanFile("safe.go", []byte(safe))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if len(v) != 0 {
+		t.Fatalf("a nil-check read must not be flagged, got %v", v)
 	}
 }

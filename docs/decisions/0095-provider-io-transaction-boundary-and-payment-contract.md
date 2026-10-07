@@ -7887,6 +7887,7 @@ terminal-reason CHECK are untouched). Same Kind, discriminator shape, attributes
   *Accepted defence in depth.* Two mutants survive by design: the cross-operation drain select without `FOR UPDATE` and the
   `receiptIsResolved` read without `FOR UPDATE`; both guard race windows no deterministic test reaches.
   **PAY-RECEIPT-DRAIN-MERCHANT-REF-1 (LF I-1, record only, NOT implemented).** The drain selects by
+  - Note (LF round-2 delta review C-2): implementing this follow-up requires reshaping `TestOrphanResolve_Interleaved_AnomalyCloseDuringDrain_NoConflictLeaksToBindingTx`, which today asserts that the drain applies a receipt whose merchant reference names a different attempt. That assertion documents the CURRENT gap and must not be read as endorsing it.
   (provider, provider reference, event type) and does not re-check the receipt's merchant reference (INV-IO-14); the live
   path does. Proposed: apply the live-path check in the drain. Dispositions and returns are
   unchanged (`anomaly`); no attempt state, ledger, alert or audit row other than C-1b below changes.
