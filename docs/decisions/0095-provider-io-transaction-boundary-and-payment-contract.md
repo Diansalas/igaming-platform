@@ -7748,8 +7748,9 @@ terminal-reason CHECK are untouched). Same Kind, discriminator shape, attributes
   posts or settles, the cell still reports no effect (`duplicate_effect`, changed=false). No release, no settlement, no
   delivery, recipient or channel (ALERT-DELIVERY-1 stays a production blocker). A deposit is a no-op for the raise.
 - **Repeat delivery.** The discriminator is the attempt and the reason, so repeats are ONE open alert with growing
-  occurrences (as for every B12 raise). The pre-existing terminal-mismatch audit row is still written per delivery (it was
-  before); the receipt itself is deduped and nothing else happens.
+  occurrences (as for every B12 raise). The terminal-mismatch audit row is written once, for the first (new) receipt, and no
+  longer per redelivery (PAY-PAYOUT-CALLBACK-AUDIT-2, below; it was per delivery before); the receipt itself is deduped and
+  nothing else happens.
 - **Pins.** Static: `receipt.go:applyResolvedReceiptEvidence:raisePayoutDisputeAlert` is pinned at 2 (was 1) in
   `TestStaticWiring_PayoutDisputeRaiseSitesArePinned_B12` (both directions: a missing or an extra site fails); the
   source-order guard now counts 14 sites (was 13); the closed-set test covers the new set. Integration:
@@ -7763,7 +7764,7 @@ terminal-reason CHECK are untouched). Same Kind, discriminator shape, attributes
   no terminal-reason CHECK change, no migration). No state change, no release, no settlement, no posting, no delivery,
   recipient or channel (ALERT-DELIVERY-1 stays a production blocker); the cell still reports `duplicate_effect`'s
   no-effect result. A MATCHING repeated success with the SAME provider reference on a succeeded payout is a plain duplicate and raises nothing (this sentence does not cover M-1 below). "Raise is last" (ADR 0102 7.7) means the last statement of the cell; the deferred-receipt drain may write after it. Repeats are
-  ONE open alert with growing occurrences (the audit row is still written per delivery, F-2). Pins: static raise-site count
+  ONE open alert with growing occurrences (the audit row is written once, PAY-PAYOUT-CALLBACK-AUDIT-2). Pins: static raise-site count
   for `receipt.go:applyResolvedReceiptEvidence:raisePayoutDisputeAlert` is now 3 (both directions), the source-order guard
   counts 15 sites (was 14), closed-set unit test extended. Integration: `payout_succeeded_mismatch_alert_integration_test.go`.
 - **Deposit counterpart (reviewed; NOT implemented; finding).** `receipt.go` `applyResolvedReceiptEvidence`, the
@@ -7806,7 +7807,26 @@ terminal-reason CHECK are untouched). Same Kind, discriminator shape, attributes
   plus a closed reason; raised last; no state change; separate reasons for declined and succeeded; tests for cross-tenant
   isolation and that a deposit never raises a payout reason. Today's behaviour is pinned by
   `deposit_mismatch_pin_integration_test.go` (0 alerts, 1 audit row, no state change); change it deliberately.
-- **Follow-ups (PAY-PAYOUT-CALLBACK-AUDIT-2).** (F-2) gate `auditTerminalAmountAssetMismatch` on `!duplicate`
-  (`receipt.go` ~783/797): today it writes one audit row per redelivery (audit growth; the L-e oversize-reason audit is the
-  precedent for once-per-new-receipt); the test `TestR5_Replay_*` pins the current per-delivery count so the change is
-  deliberate. (F-3) a two-goroutine concurrency test for the audited T14/T15/mismatch/tombstone cells and R-5.
+- **PAY-PAYOUT-CALLBACK-AUDIT-2 (security F-2, ledger-finance L-3, F-3; RESOLVED, `IMPLEMENTED` against MOCK; 2026-10-07).**
+  `applyResolvedReceiptEvidence` now takes `duplicate` (the receipt row of THIS delivery already existed: a redelivery deduped by
+  `insertReceiptDeduped`; the deferred-receipt drain passes `false`, each deferred row is applied once). The two
+  no-state-change terminal mismatch cells (`AttemptSucceeded` mismatched, R-6, and `AttemptDeclined` mismatched, R-5) write
+  `payments.callback_amount_asset_mismatch_terminal` only when `!duplicate`, and so does the M-1 foreign-reference audit row
+  (the same rule, applied to the row added by M-1 so it does not reintroduce the growth). This is the L-e precedent (the
+  oversize-reason audit): once per NEW receipt, never per redelivery. The raise stays unconditional (the alert dedupes, so
+  occurrences keep growing while audit rows do not). Why it is safe: the first delivery's audit row commits in the SAME
+  transaction as its receipt row, so a deduped redelivery implies the row exists; a delivery whose transaction rolled back
+  (transient alert failure) took its receipt row with it, is therefore not a duplicate on redelivery, and writes the audit row
+  then (`TestR5_/TestR6_/TestM1_AlertFailureSemantics`, "transient ... converges"). The four dispute cells (T14, T15, callback
+  mismatch, tombstone) were already once-only (the second delivery finds the attempt disputed) and are unchanged.
+  **Deposits share the two terminal cells**: a mismatched deposit success redelivery also stops writing a repeat audit row
+  (first delivery still writes exactly one; `deposit_mismatch_pin_integration_test.go` delivers once and is unchanged). The
+  tests that pinned the per-delivery counts were changed deliberately: `TestR5_Replay_*` and `TestR6_Replay_*` 1,2,3 -> 1,1,1.
+  F-3: two-goroutine tests (`payout_callback_audit2_integration_test.go`) deliver the same mismatched event twice
+  concurrently on R-5, R-6 and M-1 (exactly one audit row, one alert row whose occurrences reach 2, one receipt row, no state
+  change) and on the four dispute cells, identical and (where the cell is reference-agnostic) conflicting (exactly one
+  dispute, one dispute audit row, one alert row). **Residuals.** (1) Two truly DISTINCT non-duplicate mismatched receipts
+  (different fingerprints) on R-5/R-6 each write an audit row; that is bounded by the number of distinct receipts, not by
+  redelivery. (2) A receipt first stored with a non-applied disposition (anomaly, deferred) and later redelivered is a
+  duplicate and writes no audit row for the cell. Mutation evidence:
+  `docs/plans/prh2-hardening-round/prh2-r10-callback-audit-2-mutation-kill.txt`.

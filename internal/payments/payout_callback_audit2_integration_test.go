@@ -8,9 +8,14 @@
 package payments
 
 import (
+	"context"
 	"fmt"
 	"sync"
 	"testing"
+
+	"github.com/jackc/pgx/v5"
+
+	"github.com/Diansalas/igaming-platform/internal/alerting"
 )
 
 // runTwo runs f(0) and f(1) concurrently (released together) and fails on any error.
@@ -138,4 +143,47 @@ func TestCallbackAudit2_Concurrent_DisputeCells_OneAuditRow_OneAlertRow(t *testi
 			})
 		}
 	}
+}
+
+// The deferred-receipt drain applies each stored receipt exactly once (duplicate=false), so a
+// mismatched success that was DEFERRED (unresolvable at delivery) and is applied by the drain on a
+// now-SUCCEEDED payout still writes its one terminal-mismatch audit row and raises once.
+func TestCallbackAudit2_DeferredDrain_MismatchedSuccessOnSucceeded_AuditedOnce(t *testing.T) {
+	pool := depositV2ScratchPool(t)
+	pid := "mock-ca2-drain"
+	f, orch, _ := fpOrch(t, pool, pid)
+	e := rbEnv{pool: pool, f: f, orch: orch, pid: pid}
+	_, a := e.claim(t, "ca2-drain")
+	deliver := func(merchantRef string, amount int64) error {
+		pending, err := alerting.InTx(context.Background(), alerting.NewTenantRunner(e.pool, e.f.tenantID), func(ctx context.Context, tx pgx.Tx) error {
+			_, err := ApplyReceiptEvidence(ctx, tx, e.orch, e.f.tenantID, e.pid, ReceiptEvidence{
+				EventType: "payout", ProviderReference: "ca2-drain-ref", MerchantReference: merchantRef,
+				Outcome: OutcomeSucceeded, Amount: amount, AssetCode: "EUR",
+			})
+			return err
+		})
+		if err == nil {
+			pending.Flush(context.Background())
+		}
+		return err
+	}
+	// 1. A mismatched success naming only a not-yet-bound reference: unresolvable, so DEFERRED.
+	if err := deliver("", 499); err != nil {
+		t.Fatalf("deferred delivery: %v", err)
+	}
+	if n := e.b12AuditCount(t, r5Terminal, a.ID); n != 0 {
+		t.Fatalf("nothing is audited while the receipt is deferred, got %d", n)
+	}
+	// 2. The matching success resolves through the merchant reference, settles the payout, binds the
+	// reference and drains the deferred receipt onto the now-succeeded attempt (the R-6 cell).
+	if err := deliver(a.MerchantReference, 500); err != nil {
+		t.Fatalf("matching delivery: %v", err)
+	}
+	if got := mustGetAttempt(t, pool, f.tenantID, a.ID); got.State != AttemptSucceeded {
+		t.Fatalf("want succeeded, got %s", got.State)
+	}
+	if n := e.b12AuditCount(t, r5Terminal, a.ID); n != 1 {
+		t.Fatalf("the drained mismatched receipt must write its one audit row, got %d", n)
+	}
+	e.b12AssertOneAlert(t, a.ID, alertReasonPayoutMismatchedSuccessOnSucceeded)
 }
