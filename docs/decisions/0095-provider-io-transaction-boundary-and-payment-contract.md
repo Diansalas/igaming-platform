@@ -7859,3 +7859,45 @@ terminal-reason CHECK are untouched). Same Kind, discriminator shape, attributes
   on the unique index), optional.
   Mutation evidence:
   `docs/plans/prh2-hardening-round/prh2-r10-callback-audit-2-mutation-kill.txt`.
+  **Residuals C-1a and C-1b RESOLVED (PAY-RECEIPT-ORPHAN-RESOLVE-1, `IMPLEMENTED` against MOCK; 2026-10-07).**
+  *C-1a.* The three anomaly branches of `ApplyReceiptEvidence` (cross-provider / reference conflict at attempt
+  resolution, event-type vs operation mismatch, late reference-conflict recheck) now close through
+  `closeAnomalyReceipt`. A new receipt is closed with the strict one-shot `ResolveReceipt` as before. A DUPLICATE is
+  either already resolved (the `UPDATE ... WHERE resolved_at IS NULL` matches nothing: untouched) or an orphaned
+  deferred receipt, which is closed with that same compare-and-set (`attempt_id` NULL, the branch's anomaly resolution), so
+  it stops counting toward `DeferredReceiptCap`. These branches run BEFORE the parent lock, so the close is a tolerant
+  compare-and-set (zero rows accepted, scoped by `tenant_id` and `provider_id` as defence in depth): of two concurrent
+  redeliveries of the orphan one closes it and the other is a no-op, so no `ErrAttemptStateConflict` reaches either
+  (a strict CAS would surface it to the second). The close takes no parent or attempt lock, so it is a documented exception
+  to `ResolveReceipt`'s lock contract; it cannot form a lock cycle (it holds only its own receipt row lock). The
+  interaction with the LOCKED strict-CAS paths is made safe on their side (security/LF L-1): the deferred-receipt drain
+  selects its rows (both queries) `FOR UPDATE`, so a close committed first makes the row drop out of the re-evaluated
+  predicate and a close arriving later waits and matches nothing (otherwise the drain's strict `ResolveReceipt` could fail
+  with a conflict and roll back the whole binding transaction: atomic, no money inconsistency, but a liveness regression),
+  and `receiptIsResolved` reads `FOR UPDATE`. Lock order is parent, attempt, receipt rows. Pinned by the deliberate
+  interleaving test `TestOrphanResolve_Interleaved_AnomalyCloseDuringDrain_NoConflictLeaksToBindingTx`.
+  *Security I-2.* An orphan close writes no audit row; the receipt is reconstructable from `disposition_at_receipt` plus
+  its `resolution`.
+  **PAY-RECEIPT-ANOMALY-APPLIED-1 (named residual; owner `payments` + `ledger-finance`; NOT built, ruled out of scope).**
+  `receiptIsResolved` cannot tell "resolved as applied" from "closed as an anomaly" (`attempt_id` NULL). It arises only when
+  a lock-free anomaly close lands first in a reference-binding race: the main path then treats the receipt as already
+  applied, skipping the terminal-cell audit rows and its own `ResolveReceipt`, so `attempt_id` stays NULL. No state or money
+  effect. Fixing it needs a re-attribution transition on an already-resolved receipt (the strict `ResolveReceipt` would
+  conflict), so a ruling on re-attribution semantics is required before any real provider.
+  *Accepted defence in depth.* Two mutants survive by design: the cross-operation drain select without `FOR UPDATE` and the
+  `receiptIsResolved` read without `FOR UPDATE`; both guard race windows no deterministic test reaches.
+  **PAY-RECEIPT-DRAIN-MERCHANT-REF-1 (LF I-1, record only, NOT implemented).** The drain selects by
+  (provider, provider reference, event type) and does not re-check the receipt's merchant reference (INV-IO-14); the live
+  path does. Proposed: apply the live-path check in the drain. Dispositions and returns are
+  unchanged (`anomaly`); no attempt state, ledger, alert or audit row other than C-1b below changes.
+  *C-1b.* The `payment.decline_reason_bounded` audit is no longer gated on the main path alone. It is written exactly once
+  per receipt, when the receipt is first STORED (not a duplicate), by `auditOversizeForNewReceipt` at every insert site:
+  applied, deferred and anomaly. A deferred receipt is audited when it is deferred (the drain only has the bounded
+  reason, so the original length and hash are available only then); the drain, an orphan redelivery and a resolved
+  duplicate never write it. This is "once per receipt at first store", not "at first application": for a deferred
+  receipt the two moments differ, and the original reason is only available at the first. Receipts stored deferred BEFORE this
+  change have no row and get none (no backfill, no migration).
+  *What remains.* **I-1 (predates-submission on the live redelivery path) is NOT changed**: it is a policy question for
+  `security` (apply, or close as `anomaly_predates_submission`, an orphan older than the attempt's first submission) and stays
+  recorded. LF L-1 stays not built. Tests: `receipt_orphan_resolve_integration_test.go`. Mutation evidence:
+  `docs/plans/prh2-hardening-round/prh2-r11-receipt-orphan-mutation-kill.txt`.

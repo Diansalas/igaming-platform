@@ -90,7 +90,10 @@ func (e rbEnv) b12AssertOneAlert(t *testing.T, attemptID uuid.UUID, reason strin
 	if len(r.Attributes) != 1 || r.Attributes["provider_id"] != e.pid {
 		t.Fatalf("attributes %v, want only provider_id=%q", r.Attributes, e.pid)
 	}
-	blob := fmt.Sprint(r.Attributes, r.Discriminator)
+	// The discriminator legitimately embeds the attempt's own random UUID, whose hex can contain a probe
+	// such as "4111" by chance (a false positive seen in ~1 of 1000 runs). Probe the blob with that known
+	// identifier removed, so only provider-supplied text can trip a probe.
+	blob := strings.ReplaceAll(fmt.Sprint(r.Attributes, r.Discriminator), attemptID.String(), "<attempt>")
 	for _, p := range leakProbes {
 		if p != "" && strings.Contains(blob, p) {
 			t.Fatalf("the alert leaks %q: %s", p, blob)

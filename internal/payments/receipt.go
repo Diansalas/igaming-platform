@@ -34,6 +34,11 @@ import (
 // there; only a dedicated deliberate-interleaving test in the payments
 // package assigns and clears it, single-threaded, before and after driving
 // the one call site that reads it in ApplyReceiptEvidence.
+// testHookAfterDeferredSelect fires inside ApplyDeferredReceiptsForAttempt between the FOR UPDATE select of
+// the deferred rows and the first strict ResolveReceipt, so a test can land a lock-free orphan close in
+// that window. Nil (a no-op) outside tests.
+var testHookAfterDeferredSelect func()
+
 var testHookBeforeReferenceConflictRecheck func()
 
 // ReceiptDisposition mirrors payment_provider_events.disposition_at_receipt.
@@ -363,13 +368,53 @@ func insertReceiptDeduped(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, pr
 	return returnedID, false, nil
 }
 
-// receiptIsResolved reports whether the stored receipt already has its one-shot resolution.
+// receiptIsResolved reports whether the stored receipt already has its one-shot resolution. The read
+// takes the row lock (FOR UPDATE) so it serializes with a lock-free closeAnomalyReceipt in flight.
 func receiptIsResolved(ctx context.Context, tx pgx.Tx, receiptID uuid.UUID) (bool, error) {
 	var resolved bool
-	if err := tx.QueryRow(ctx, `SELECT resolved_at IS NOT NULL FROM payment_provider_events WHERE id = $1`, receiptID).Scan(&resolved); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT resolved_at IS NOT NULL FROM payment_provider_events WHERE id = $1 FOR UPDATE`, receiptID).Scan(&resolved); err != nil {
 		return false, fmt.Errorf("payments: read receipt resolution: %w", err)
 	}
 	return resolved, nil
+}
+
+// closeAnomalyReceipt is PAY-RECEIPT-ORPHAN-RESOLVE-1 (C-1a): an anomaly-branch receipt must end up
+// resolved. A NEW receipt is closed with the strict one-shot CAS. A DUPLICATE is either already resolved
+// (left untouched) or an ORPHANED deferred receipt (stored unresolved by a transaction nothing drained)
+// that this redelivery now classifies as an anomaly: it is closed here, so it stops counting toward
+// DeferredReceiptCap. The duplicate close is a tolerant compare-and-set (WHERE resolved_at IS NULL, zero
+// rows accepted): the anomaly branches run before the parent lock, so a concurrent redelivery may close
+// it first and this one must not fail. attempt_id stays NULL, exactly as for a new anomaly receipt. No
+// state or money is touched.
+//
+// DOCUMENTED EXCEPTION (ledger-finance I-2) to ResolveReceipt's "caller holds the parent and attempt locks"
+// contract: the duplicate close takes NO parent or attempt lock, only the receipt row lock of its own
+// UPDATE, so it can never be part of a lock cycle (every locked path orders parent, attempt, then receipt
+// rows). Its interaction with the locked strict-CAS paths is made safe on the OTHER side: the deferred
+// drain selects its rows FOR UPDATE (a close committed first makes the row drop out of the re-evaluated
+// predicate; a close arriving later waits and then matches nothing), and receiptIsResolved reads FOR UPDATE.
+// No audit row is written for an orphan close (security I-2): the row is reconstructable from the
+// receipt's disposition_at_receipt plus its resolution.
+func closeAnomalyReceipt(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, providerID string, receiptID uuid.UUID, duplicate bool, reason ReceiptResolution) error {
+	if !duplicate {
+		return ResolveReceipt(ctx, tx, receiptID, nil, string(reason))
+	}
+	if _, err := tx.Exec(ctx,
+		`UPDATE payment_provider_events SET attempt_id = NULL, resolution = $2, resolved_at = now()
+		 WHERE id = $1 AND tenant_id = $3 AND provider_id = $4 AND resolved_at IS NULL`, receiptID, string(reason), tenantID, providerID); err != nil {
+		return fmt.Errorf("payments: close orphaned anomaly receipt: %w", err)
+	}
+	return nil
+}
+
+// auditOversizeForNewReceipt is PAY-RECEIPT-ORPHAN-RESOLVE-1 (C-1b): the oversize-decline-reason audit
+// row is written exactly once per receipt, when the receipt is first STORED (not a duplicate), at
+// whichever insert site stores it (applied, deferred, anomaly). A redelivery or a drain never writes it.
+func auditOversizeForNewReceipt(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, providerID string, receiptID uuid.UUID, duplicate, oversized bool, originalReason string) error {
+	if !oversized || duplicate {
+		return nil
+	}
+	return auditOversizeDeclineReasonOnce(ctx, tx, tenantID, "payment_provider_event", receiptID.String(), providerID, originalReason)
 }
 
 // resolvedAttempt is ResolveAttemptForEvidence's outcome.
@@ -520,10 +565,11 @@ func ApplyReceiptEvidence(ctx context.Context, tx pgx.Tx, o *Orchestrator, tenan
 		// cap forever. A precondition anomaly (cross-provider/reference
 		// conflict) has no single attempt to attach to, so attempt_id stays
 		// NULL (the schema allows it) and resolution names the reason.
-		if !duplicate {
-			if err := ResolveReceipt(ctx, tx, receiptID, nil, string(resolved.AnomalyReason)); err != nil {
-				return "", err
-			}
+		if err := closeAnomalyReceipt(ctx, tx, tenantID, verifiedProviderID, receiptID, duplicate, resolved.AnomalyReason); err != nil {
+			return "", err
+		}
+		if err := auditOversizeForNewReceipt(ctx, tx, tenantID, verifiedProviderID, receiptID, duplicate, oversizedDeclineReason, originalDeclineReason); err != nil {
+			return "", err
 		}
 		return DispositionAnomaly, nil
 	}
@@ -538,10 +584,17 @@ func ApplyReceiptEvidence(ctx context.Context, tx pgx.Tx, o *Orchestrator, tenan
 		if n > DeferredReceiptCap {
 			return "", ErrDeferredReceiptCapExceeded
 		}
-		if _, duplicate, err := insertReceiptDeduped(ctx, tx, tenantID, verifiedProviderID, ev, DispositionDeferredUnresolved); err != nil {
+		deferredID, duplicate, err := insertReceiptDeduped(ctx, tx, tenantID, verifiedProviderID, ev, DispositionDeferredUnresolved)
+		if err != nil {
 			return "", err
-		} else if duplicate {
+		}
+		if duplicate {
 			return DispositionDuplicateEffect, nil
+		}
+		// C-1b: a deferred receipt is applied later by the drain (which only has the bounded reason), or by
+		// an orphan redelivery (a duplicate, which never audits), so its one bounding audit row is written here.
+		if err := auditOversizeForNewReceipt(ctx, tx, tenantID, verifiedProviderID, deferredID, duplicate, oversizedDeclineReason, originalDeclineReason); err != nil {
+			return "", err
 		}
 		return DispositionDeferredUnresolved, nil
 	}
@@ -568,10 +621,11 @@ func ApplyReceiptEvidence(ctx context.Context, tx pgx.Tx, o *Orchestrator, tenan
 		if err != nil {
 			return "", err
 		}
-		if !duplicate {
-			if err := ResolveReceipt(ctx, tx, receiptID, nil, string(ResolutionAnomalyOther)); err != nil {
-				return "", err
-			}
+		if err := closeAnomalyReceipt(ctx, tx, tenantID, verifiedProviderID, receiptID, duplicate, ResolutionAnomalyOther); err != nil {
+			return "", err
+		}
+		if err := auditOversizeForNewReceipt(ctx, tx, tenantID, verifiedProviderID, receiptID, duplicate, oversizedDeclineReason, originalDeclineReason); err != nil {
+			return "", err
 		}
 		return DispositionAnomaly, nil
 	}
@@ -605,10 +659,11 @@ func ApplyReceiptEvidence(ctx context.Context, tx pgx.Tx, o *Orchestrator, tenan
 			if err != nil {
 				return "", err
 			}
-			if !duplicate {
-				if err := ResolveReceipt(ctx, tx, receiptID, nil, string(ResolutionAnomalyReferenceConflict)); err != nil {
-					return "", err
-				}
+			if err := closeAnomalyReceipt(ctx, tx, tenantID, verifiedProviderID, receiptID, duplicate, ResolutionAnomalyReferenceConflict); err != nil {
+				return "", err
+			}
+			if err := auditOversizeForNewReceipt(ctx, tx, tenantID, verifiedProviderID, receiptID, duplicate, oversizedDeclineReason, originalDeclineReason); err != nil {
+				return "", err
 			}
 			return DispositionAnomaly, nil
 		}
@@ -629,10 +684,8 @@ func ApplyReceiptEvidence(ctx context.Context, tx pgx.Tx, o *Orchestrator, tenan
 	}
 	// L-e: audit the oversize-reason bounding ONCE, only for a genuinely
 	// new (non-duplicate) receipt - see the top-of-function comment.
-	if oversizedDeclineReason && !duplicate {
-		if err := auditOversizeDeclineReasonOnce(ctx, tx, tenantID, "payment_provider_event", receiptID.String(), verifiedProviderID, originalDeclineReason); err != nil {
-			return "", err
-		}
+	if err := auditOversizeForNewReceipt(ctx, tx, tenantID, verifiedProviderID, receiptID, duplicate, oversizedDeclineReason, originalDeclineReason); err != nil {
+		return "", err
 	}
 
 	// Lock parent then attempt (ADR 0095 §14), re-read under the lock.
@@ -1586,7 +1639,8 @@ func ApplyDeferredReceiptsForAttempt(ctx context.Context, tx pgx.Tx, o *Orchestr
 		 FROM payment_provider_events
 		 WHERE tenant_id = $1 AND provider_id = $2 AND provider_reference = $3 AND resolved_at IS NULL
 		   AND event_type = $4
-		 ORDER BY id`,
+		 ORDER BY id
+		 FOR UPDATE`,
 		attempt.TenantID, *attempt.ProviderID, *attempt.ProviderReference, eventTypeFilter,
 	)
 	if err != nil {
@@ -1617,6 +1671,9 @@ func ApplyDeferredReceiptsForAttempt(ctx context.Context, tx pgx.Tx, o *Orchestr
 		return 0, err
 	}
 	rows.Close()
+	if testHookAfterDeferredSelect != nil {
+		testHookAfterDeferredSelect()
+	}
 
 	// FH-5 security re-verification gap (b): a stored receipt sharing this
 	// (provider_id, provider_reference) but naming a DIFFERENT operation's
@@ -1638,7 +1695,9 @@ func ApplyDeferredReceiptsForAttempt(ctx context.Context, tx pgx.Tx, o *Orchestr
 	crossRows, err := tx.Query(ctx,
 		`SELECT id FROM payment_provider_events
 		 WHERE tenant_id = $1 AND provider_id = $2 AND provider_reference = $3 AND resolved_at IS NULL
-		   AND event_type = $4`,
+		   AND event_type = $4
+		 ORDER BY id
+		 FOR UPDATE`,
 		attempt.TenantID, *attempt.ProviderID, *attempt.ProviderReference, crossOpFilter,
 	)
 	if err != nil {
