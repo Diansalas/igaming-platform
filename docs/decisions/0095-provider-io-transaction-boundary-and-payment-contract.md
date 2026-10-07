@@ -6548,6 +6548,47 @@ text uses the ADR 0101 F13 wording: "a PSP-initiated reversal/tombstone, or allo
 - An **invalid reference** on a statement line is refused at fetch (`validatePaymentLine`): the run
   fails, nothing is stored, and the sweep audits `reconciliation.sweep_run_failed` with severity P1.
 
+- **PO-1: the payout meaning of `pay_captured_unposted` (PAY-PAYOUT-UNBOUND-HOLD-1, Class-B B11;
+  ledger-finance D2 PO-1/PO-2, security D2-L1).** For a **payout** attempt the finding means
+  **"the provider may have paid out, and the platform posted no completion"**: the PSP statement
+  carries a `succeeded` payout line for a payout attempt that is `disputed` and whose
+  `withdrawal_requests` row is still `submitted` (hold held, no `withdrawal_completed`, no release). The
+  exposure is a possible double payout if the hold were released, so the finding stays loud. Resolution
+  for a payout is a PSP-side recall or return, or posting the completion against the hold through the
+  governed manual path (M2, ADR 0101), never an automatic release; the deposit-style suspense
+  allocation is not the main route. Name and detail text are unchanged (deposit wording); this
+  paragraph is the payout reading.
+  - **Pinned decision (what the code does, verified by test, not invented):** reconciliation's capture
+    classes **intentionally apply to payouts**, because `matchPayment`'s `unboundPark()` and
+    `boundCapture()` cases are not gated on the operation and `checkUnmatchedAttempts` is
+    operation-agnostic. Concretely: (a) an **unbound** payout park (`invalid_provider_reference[:*]`,
+    or `provider_reference_conflict` with no bound reference) is reported **in-run** when a
+    `succeeded` payout line resolves to it (by merchant reference, or by reference), cleared on the
+    line's reference; (b) a **bound-class** payout park (for example `callback_amount_asset_mismatch`
+    on a payout that holds its reference) is reported **in-run and standing**. Tests:
+    `internal/payments/b11_payout_unbound_hold_integration_test.go` (`TestB11_Recon_*`).
+  - **Not covered, stated exactly (finding PAY-PAYOUT-UNBOUND-STANDING-1, proposed):** the K3 standing
+    rule for unbound parks (§35.4, `checkStandingUnbound`) and the persisted-evidence loader that feeds
+    it consider **deposit attempts and deposit lines only**. An unbound payout park therefore has **no
+    standing coverage**: a run that carries no `succeeded` payout line for it reports nothing (pinned
+    by `TestB11_Recon_UnboundPayoutPark_InRunFinding_NoStanding_ClearingSignals`; mutants K11/K11p in
+    the evidence file). The clearing signals are the deposit-shaped ones (a `deposit_reversal` line
+    naming the line's reference, or a tombstone ledger row); the statement has no payout-return line
+    kind, so those are what the code reads for a payout too. Whether to add standing coverage and a
+    payout-specific clearing signal is **an open decision for ledger-finance**, not decided here.
+  - **The hold rule behind it (PO-2), now proven:** a payout disputed with an unbound reason keeps its
+    hold on every automatic path (sweeper poll, T2 and T12, synchronous result, callback success,
+    decline and pending, late evidence, escalation, QueryStatus from every stale state), with no
+    `withdrawal_failed` or `withdrawal_completed` posting, an unchanged `player_withdrawal_hold`
+    balance, and the first terminal reason preserved. M2 refuses the reason in Go and in
+    `payment_m2_admits`. The reverse collision (a payout settlement reference equal to an existing
+    `deposit` ledger key) parks as `provider_reference_conflict` (B10), keeps the hold, and a
+    redelivery is stable with one audit row. Evidence:
+    `docs/plans/prh2-hardening-round/prh2-r7-b11-payout-unbound-hold-mutation-kill.txt`.
+  - Observation (not a defect): a stale worker holding a pre-park copy that applies a definite success
+    with no reference anywhere on a never-bound payout gets `ErrInvalidPayoutEvidence` (rolled back),
+    not a silent no-op; nothing is written and the hold is kept.
+
 ### 35.3 Invariants
 
 Reconciliation writes only its run and mismatch rows (INV-IO-12): no posting, no attempt, intent,
