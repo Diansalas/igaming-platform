@@ -6839,7 +6839,7 @@ for a real PSP statement.** It does not open the §35.4 GATE.
     the two.
   - **Status: `IMPLEMENTED` against the MOCK adapter and the MOCK statement source (2026-10-07); PROVIDER
     DEPENDENT for a real PSP statement.** It does not open the §35.4 GATE. No migration and no new line
-    kind; code change in `internal/reconciliation/payment_statement.go` (`capturedUnposted`) only.
+    kind; code change in `internal/reconciliation/payment_statement.go` (`capturedUnposted`; the bound case of `matchPayment` for F-1) and comment/hint text in `payment_statement_k3.go` only.
     - **The fix.** `capturedUnposted`, the predicate shared by the in-run `boundCapture()` site in
       `matchPayment` and by `checkUnmatchedAttempts`, is now per operation. A deposit keeps the rule above
       unchanged (a completed `deposit_reversal` naming X or the typed Y, or a tombstone, with G-Y1/G-Y2).
