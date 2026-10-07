@@ -1,0 +1,31 @@
+PAY-RECEIPT-ORPHAN-RESOLVE-1 (C-1a + C-1b) mutation-kill evidence, baseline 20fa3f3, branch pay-r11-receipt-orphan.
+Method: internal/payments/receipt.go mutated in place with a backup copy; each run builds first (a compile error is
+NOT counted); run set: -tags integration -count=1 -p 1 -v -run 'TestOrphanResolve_|TestRVLF_N5c|TestRVLF_.*C1|TestReceipt_|
+TestCallbackAudit2_Deposit|TestCallbackAudit2_Orphan' against a private scratch DB; the file is restored after every
+mutant and cmp-verified at the end (RESTORED). CONTROL = unmutated code, all pass.
+Mutants:
+ M1 duplicate skips the close (the pre-change behaviour: revert)      -> KILLED
+ M2 closeAnomalyReceipt never closes (never-resolve)                  -> KILLED
+ M3 always strict ResolveReceipt, even for a duplicate (always-resolve, no tolerance) -> KILLED
+ M4 duplicate close without "resolved_at IS NULL" (overwrites a resolved receipt)    -> KILLED
+ M5 site 1/2/3 per-call-site revert (cross-provider+conflict / event-type / late recheck) -> each KILLED
+ M6 oversize audit also on duplicates (always-audit)                  -> KILLED
+ M7 oversize audit never written (never-audit)                        -> KILLED
+ M8 deferred-site audit removed                                       -> KILLED
+ M9 main-path (applied) audit removed                                 -> KILLED
+ M10 extra audit on an unresolved-duplicate orphan on the main path   -> KILLED
+Survivors: none. Compile-error mutants: none (all 13 builds compiled).
+Raw results (PASS/FAIL counts of the run set, first killers):
+CONTROL PASS=28 FAIL=0 killers: 
+M1_dup_skips_close PASS=17 FAIL=11 killers: --- FAIL: TestOrphanResolve_AnomalyBranches_OrphanClosedOnRedelivery_NoMoneyNoState; --- FAIL: TestOrphanResolve_AnomalyBranches_OrphanClosedOnRedelivery_NoMoneyNoState/cross_provider; --- FAIL: TestOrphanResolve_AnomalyBranches_OrphanClosedOnRedelivery_NoMoneyNoState/reference_conflict; --- FAIL: TestOrphanResolve_AnomalyBranches_OrphanClosedOnRedeliver
+M2_never_close PASS=15 FAIL=13 killers: --- FAIL: TestOrphanResolve_AnomalyBranches_OrphanClosedOnRedelivery_NoMoneyNoState; --- FAIL: TestOrphanResolve_AnomalyBranches_OrphanClosedOnRedelivery_NoMoneyNoState/cross_provider; --- FAIL: TestOrphanResolve_AnomalyBranches_OrphanClosedOnRedelivery_NoMoneyNoState/reference_conflict; --- FAIL: TestOrphanResolve_AnomalyBranches_OrphanClosedOnRedelivery_No
+M3_always_strict PASS=12 FAIL=16 killers: --- FAIL: TestOrphanResolve_AnomalyBranches_OrphanClosedOnRedelivery_NoMoneyNoState; --- FAIL: TestOrphanResolve_AnomalyBranches_OrphanClosedOnRedelivery_NoMoneyNoState/cross_provider; --- FAIL: TestOrphanResolve_AnomalyBranches_OrphanClosedOnRedelivery_NoMoneyNoState/reference_conflict; --- FAIL: TestOrphanResolve_AnomalyBranches_OrphanClosedOnRedelivery_
+M4_dup_close_ignores_resolved PASS=12 FAIL=16 killers: --- FAIL: TestOrphanResolve_AnomalyBranches_OrphanClosedOnRedelivery_NoMoneyNoState; --- FAIL: TestOrphanResolve_AnomalyBranches_OrphanClosedOnRedelivery_NoMoneyNoState/cross_provider; --- FAIL: TestOrphanResolve_AnomalyBranches_OrphanClosedOnRedelivery_NoMoneyNoState/reference_conflict; --- FAIL: TestOrphanResolve_AnomalyBranches_OrphanClosed
+M5_site1 PASS=22 FAIL=6 killers: --- FAIL: TestOrphanResolve_AnomalyBranches_OrphanClosedOnRedelivery_NoMoneyNoState; --- FAIL: TestOrphanResolve_AnomalyBranches_OrphanClosedOnRedelivery_NoMoneyNoState/cross_provider; --- FAIL: TestOrphanResolve_AnomalyBranches_OrphanClosedOnRedelivery_NoMoneyNoState/reference_conflict;--- FAIL: TestOrphanResolve_Concurrent_TwoRedeliveries_ResolvedOnce_NoError; --
+M5_site2 PASS=22 FAIL=6 killers: --- FAIL: TestOrphanResolve_AnomalyBranches_OrphanClosedOnRedelivery_NoMoneyNoState; --- FAIL: TestOrphanResolve_AnomalyBranches_OrphanClosedOnRedelivery_NoMoneyNoState/event_type_mismatch;--- FAIL: TestOrphanResolve_Concurrent_TwoRedeliveries_ResolvedOnce_NoError; --- FAIL: TestOrphanResolve_Concurrent_TwoRedeliveries_ResolvedOnce_NoError/event_type_mismatch;--- F
+M5_site3 PASS=26 FAIL=2 killers: --- FAIL: TestOrphanResolve_AnomalyBranches_OrphanClosedOnRedelivery_NoMoneyNoState; --- FAIL: TestOrphanResolve_AnomalyBranches_OrphanClosedOnRedelivery_NoMoneyNoState/late_reference_conflict_recheck;
+M6_audit_on_duplicate PASS=25 FAIL=3 killers: --- FAIL: TestOrphanResolve_C1b_DeferredThenDrained_OneAuditRow;--- FAIL: TestOrphanResolve_C1b_OrphanedThenRedelivered_OneAuditRow;--- FAIL: TestOrphanResolve_C1b_NewApplied_And_NewAnomaly_OneAuditRowEach;
+M7_never_audit PASS=25 FAIL=3 killers: --- FAIL: TestOrphanResolve_C1b_DeferredThenDrained_OneAuditRow;--- FAIL: TestOrphanResolve_C1b_OrphanedThenRedelivered_OneAuditRow;--- FAIL: TestOrphanResolve_C1b_NewApplied_And_NewAnomaly_OneAuditRowEach;
+M8_deferred_site_no_audit PASS=26 FAIL=2 killers: --- FAIL: TestOrphanResolve_C1b_DeferredThenDrained_OneAuditRow;--- FAIL: TestOrphanResolve_C1b_OrphanedThenRedelivered_OneAuditRow;
+M9_main_site_no_audit PASS=27 FAIL=1 killers: --- FAIL: TestOrphanResolve_C1b_NewApplied_And_NewAnomaly_OneAuditRowEach;
+M10_audit_in_applied_dup_unresolved PASS=27 FAIL=1 killers: --- FAIL: TestOrphanResolve_C1b_OrphanedThenRedelivered_OneAuditRow;

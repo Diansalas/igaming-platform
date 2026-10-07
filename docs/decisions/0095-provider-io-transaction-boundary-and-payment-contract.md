@@ -7859,3 +7859,24 @@ terminal-reason CHECK are untouched). Same Kind, discriminator shape, attributes
   on the unique index), optional.
   Mutation evidence:
   `docs/plans/prh2-hardening-round/prh2-r10-callback-audit-2-mutation-kill.txt`.
+  **Residuals C-1a and C-1b RESOLVED (PAY-RECEIPT-ORPHAN-RESOLVE-1, `IMPLEMENTED` against MOCK; 2026-10-07).**
+  *C-1a.* The three anomaly branches of `ApplyReceiptEvidence` (cross-provider / reference conflict at attempt
+  resolution, event-type vs operation mismatch, late reference-conflict recheck) now close through
+  `closeAnomalyReceipt`. A new receipt is closed with the strict one-shot `ResolveReceipt` as before. A DUPLICATE is
+  either already resolved (the `UPDATE ... WHERE resolved_at IS NULL` matches nothing: untouched) or an orphaned
+  deferred receipt, which is closed with that same compare-and-set (`attempt_id` NULL, the branch's anomaly resolution), so
+  it stops counting toward `DeferredReceiptCap`. These branches run BEFORE the parent lock, so the close is a tolerant
+  compare-and-set (zero rows accepted): of two concurrent redeliveries one closes it and the other is a no-op, with no
+  error leaking (a strict CAS here would surface `ErrAttemptStateConflict` to the second). Dispositions and returns are
+  unchanged (`anomaly`); no attempt state, ledger, alert or audit row other than C-1b below changes.
+  *C-1b.* The `payment.decline_reason_bounded` audit is no longer gated on the main path alone. It is written exactly once
+  per receipt, when the receipt is first STORED (not a duplicate), by `auditOversizeForNewReceipt` at every insert site:
+  applied, deferred and anomaly. A deferred receipt is audited when it is deferred (the drain only has the bounded
+  reason, so the original length and hash are available only then); the drain, an orphan redelivery and a resolved
+  duplicate never write it. This is "once per receipt at first store", not "at first application": for a deferred
+  receipt the two moments differ, and the original reason is only available at the first. Receipts stored deferred BEFORE this
+  change have no row and get none (no backfill, no migration).
+  *What remains.* **I-1 (predates-submission on the live redelivery path) is NOT changed**: it is a policy question for
+  `security` (apply, or close as `anomaly_predates_submission`, an orphan older than the attempt's first submission) and stays
+  recorded. LF L-1 stays not built. Tests: `receipt_orphan_resolve_integration_test.go`. Mutation evidence:
+  `docs/plans/prh2-hardening-round/prh2-r11-receipt-orphan-mutation-kill.txt`.
