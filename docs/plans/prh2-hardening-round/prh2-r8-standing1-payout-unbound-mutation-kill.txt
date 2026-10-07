@@ -1,0 +1,98 @@
+PRH-2 round 8: PAY-PAYOUT-UNBOUND-STANDING-1 mutation evidence (ledger-finance)
+Branch pay-payout-unbound-standing-1, base a51dee7 (claude/focused-wright-jw88w9).
+Production files under test (the only production files changed):
+  internal/reconciliation/payment_statement_k3.go
+  internal/reconciliation/payment_statement.go
+Tests:
+  internal/payments/b11_payout_unbound_hold_integration_test.go       (TestB11_Recon_*)
+  internal/reconciliation/prh2_d2_merchant_crosscheck_integration_test.go (TestD2_9b, flipped)
+  internal/reconciliation/prh2_r8_standing1_payout_unbound_integration_test.go (TestStanding1_*)
+  plus the whole existing TestD2_* / TestK3_* reconciliation set (deposit behaviour unchanged).
+
+Method: each mutant is applied IN PLACE to the named production file by a scripted exact-text
+replacement (the anchor must match exactly once, otherwise the mutant is "not applied"), after a
+backup of BOTH production files. The runner then runs:
+  go test -race -tags integration -count=1 -p 1 -run '^TestB11_Recon' ./internal/payments/
+  go test -race -tags integration -count=1 -p 1 -run '^(TestD2_|TestK3_|TestStanding1_)' ./internal/reconciliation/
+against a private scratch database (priv_standing1_lf), restores both files from the backup and
+compares them byte for byte with cmp. A mutant counts as KILLED only when at least one named test
+fails on an assertion. COMPILE-ERROR mutants would be reported and not counted; none occurred
+(every mutant built). MOCK provider and MOCK statement sources only.
+
+CONTROL (unmutated tree, final test set at f480312):
+  ok  internal/payments         27.311s   (TestB11_Recon_*)
+  ok  internal/reconciliation   12.690s   (TestD2_*, TestK3_*, TestStanding1_*)
+
+Infrastructure incident, disclosed: during the first batch the host filesystem ran out of space
+("no space left on device" at link time and SQLSTATE 53100 in Postgres). The runner had marked the
+seven affected mutants KILLED, but those failures came from the environment, not from assertions.
+All seven results were DISCARDED and the mutants were re-run once space was available; only the
+re-runs are reported below. The runner now flags any log containing "no space left" as INVALID.
+The earlier mutants' logs contain no such error.
+
+ID                               Injected defect                                                    Result    Failing top-level tests
+S1-LOADER-PAYOUT-DROPPED         K3 loader no longer collects disputed unbound PAYOUT attempts      KILLED    7: B11 InRunAndStanding, TombstoneNeverClears,
+                                 (the pre-STANDING-1 deposit-only loader)                                     ReverseCollision, WithdrawalCompletedOnLineRefClears,
+                                                                                                              UnrelatedActivity, TenantIsolation; TestD2_9b
+S1-LOADER-PAYOUT-NO-MERCHANT     loader collects the payout park's reference only, not its           KILLED    7 (same set; the sync-shape park holds no reference)
+                                 merchant reference
+S1-STANDING-DEPOSIT-LINES        checkStandingUnbound reads DEPOSIT lines for a payout park          KILLED    7 (same set)
+S1-STANDING-PAYOUT-SKIPPED       checkStandingUnbound skips payout parks                             KILLED    7 (same set)
+S1-STANDING-ANY-STATUS           standing raises on any persisted line status (not only succeeded)  KILLED    1: B11 InRunAndStanding (step d: persisted pending/
+                                                                                                              declined/reversed lines must not raise)
+S1-CLEAR-PAYOUT-DEPOSIT-SIGNALS  payout clearing = the deposit-shaped signals (THE B11 defect:       KILLED    6: InRunAndStanding, TombstoneNeverClears,
+                                 deposit_reversal / tombstone clear a payout finding)                         ReverseCollision, WithdrawalCompleted..., Unrelated...,
+                                                                                                              TestD2_9b
+S1-CLEAR-PAYOUT-OR-DEPOSIT       payout clears on withdrawal_completed OR a deposit-shaped signal   KILLED    4: InRunAndStanding, TombstoneNeverClears,
+                                                                                                              ReverseCollision, TestD2_9b
+S1-CLEAR-PAYOUT-NEVER            a payout finding never clears                                       KILLED    2: WithdrawalCompletedOnLineRefClears,
+                                                                                                              UnrelatedActivity (control: the second park clears)
+S1-CLEAR-ANY-POSTING-TYPE        any deposit / tombstone posting keyed by the reference also         KILLED    2: ReverseCollision (the deposit key R),
+                                 counts as the payout clearing                                                 TombstoneNeverClears
+S1-ATTRIB-SETTLEMENT-DROPPED     attribution: another attempt holding the reference as its          KILLED    2: UnrelatedActivity (another payout's completion
+                                 settlement reference no longer blocks clearing                               under the same reference), TestD2_9b
+S1-ATTRIB-BYREF-DROPPED          attribution: another attempt holding the reference as its payout   KILLED    1: WithdrawalCompletedOnLineRefClears/
+                                 provider reference no longer blocks clearing                                 completion_keyed_by_a_reference_another_attempt_holds
+S1-TEXT-DEPOSIT-WORDING          payout findings get the deposit wording (allocation,                KILLED    7: every payout-finding test (exact ExpectedValue,
+                                 LEDGER-SUSPENSE-B-1)                                                          "LEDGER-SUSPENSE" refused)
+S1-HOLDER-SETTLEMENT-DROPPED     standing detail no longer names the payout settlement holder       KILLED    1: UnrelatedActivity (holder_attempt=<other payout>)
+S1-INRUN-DEPOSIT-CLEAR           matchPayment's unboundPark() case reverts to deposit-shaped        KILLED    3: InRunAndStanding (the in-run finding becomes a
+                                 clearing (the standing rule then re-raises it)                               standing re-raise), TombstoneNeverClears,
+                                                                                                              WithdrawalCompletedOnLineRefClears
+S1-CROSSCHECK-DEPOSIT-CLEAR      merchant cross-check B step reverts to deposit-shaped clearing     KILLED    1: TestD2_9b (asserts the IN-RUN cross-check finding
+                                                                                                              survives the deposit reversal, not a standing re-raise)
+S1-DEPOSIT-ALSO-PAYOUT-CLEAR     a DEPOSIT park also clears on the payout signal                    KILLED    1: TestStanding1_DepositUnboundPark_Unattributed-
+                                                                                                              WithdrawalCompletedNeverClears
+                                 (first run: SURVIVED; the only deposit test then used an attempt-linked completion, which the attribution
+                                 rule refuses anyway. A test with an UNLINKED withdrawal_completed on the deposit line reference was added at
+                                 f480312, and the mutant was re-run: KILLED.)
+S1-DEPOSIT-READS-PAYOUT-LINES    a DEPOSIT park reads PAYOUT lines for standing                     KILLED    9: TestD2_4, TestD2_15, TestK3_C14d, TestK3_C34 (x2),
+                                                                                                              TestK3_C34b, TestK3_C38, TestStanding1_* (x2)
+S1-X6-B-CLEAR-ON-A-REF           D2 mutant X6 re-run: cross-check B step clears on a.providerRef    SURVIVED  0  EQUIVALENT (reclassified): a payout B is cleared only by
+                                 instead of l.ref                                                             an ATTRIBUTABLE withdrawal_completed. In the only shape where
+                                                                                                              l.ref != a.providerRef (a payout line resolved by settlement
+                                                                                                              reference S1 to P1), S1 is P1's settlement and a.providerRef is
+                                                                                                              P1's provider reference, so neither can ever be attributable to
+                                                                                                              B. For deposits l.ref == a.providerRef by construction. No
+                                                                                                              input distinguishes the mutant. It was KILLED by TestD2_9b
+                                                                                                              under D2 only because B then cleared on a deposit reversal,
+                                                                                                              the defect STANDING-1 removes.
+
+Restore + cmp: every run printed "RESTORED cmp=identical"; `git status --short` was empty after the
+last mutant.
+
+Totals: 17 STANDING-1 mutants, all KILLED (S1-DEPOSIT-ALSO-PAYOUT-CLEAR after one test was added).
+One re-run D2 mutant (X6) SURVIVED and is EQUIVALENT for the reason above. No compile-error mutants.
+
+Superseded B11 entries (prh2-r7-b11-payout-unbound-hold-mutation-kill.txt):
+  - K11 (standing reads payout lines alone: SURVIVED, equivalent) and K11p (with the loader gate
+    removed: KILLED by the "no standing" PIN). That pin is now flipped: the behaviour K11p forced is
+    the implemented behaviour. The new guards are S1-LOADER-* and S1-STANDING-*.
+  - K10 (the unbound finding dropped for payouts) is still meaningful. It is covered by every
+    B11 recon test that requires the in-run payout finding.
+
+Not mutated (disclosed): the tenant_id predicates of the K3 queries. RLS (FORCE) is a second line
+behind them, so a dropped predicate is not observable through the runtime role. Tenant isolation is
+asserted behaviourally by TestB11_Recon_TenantIsolation: tenant B, under tenant A's provider id and
+line reference, posts a withdrawal_completed and imports a deposit_reversal and a payout line naming
+A's merchant reference. Neither tenant's finding changes.
