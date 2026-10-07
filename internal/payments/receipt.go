@@ -790,6 +790,27 @@ func applyResolvedReceiptEvidence(ctx context.Context, tx pgx.Tx, o *Orchestrato
 				// cell, after the audit row; it is a no-op for a deposit.
 				return false, ResolutionAnomalyOther, raisePayoutDisputeAlert(ctx, tx, attempt, alertReasonPayoutMismatchedSuccessOnSucceeded)
 			}
+			// PAY-PAYOUT-SUCCEEDED-REF-MISMATCH-1 (ADR 0095 section 42.8, LF M-1; raise only): a
+			// PAYOUT success with matching amount/asset but a DIFFERENT provider reference than the
+			// one on file (reached via the merchant reference, the new reference being unbound) is
+			// not the same duplicate as a true redelivery. Audit row, then the raise as the LAST
+			// statement; no state change, no rebind, no posting. A deposit is unchanged.
+			if attempt.Operation == AttemptOperationPayout {
+				storedRef := attempt.ProviderReference
+				if (storedRef == nil || *storedRef == "") && attempt.WithdrawalRequestID != nil {
+					wr, err := withdrawal.GetByID(ctx, tx, *attempt.WithdrawalRequestID)
+					if err != nil {
+						return false, "", err
+					}
+					storedRef = wr.ProviderReference
+				}
+				if storedRef != nil && *storedRef != "" && ev.ProviderReference != *storedRef {
+					if err := auditPayoutSucceededForeignRef(ctx, tx, attempt, ev, *storedRef); err != nil {
+						return false, "", err
+					}
+					return false, ResolutionAnomalyOther, raisePayoutDisputeAlert(ctx, tx, attempt, alertReasonPayoutForeignRefSuccessOnSucceeded)
+				}
+			}
 			return false, ResolutionApplied, nil // duplicate; the ledger itself is idempotent
 		case AttemptDeclined:
 			if mismatched {

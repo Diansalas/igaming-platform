@@ -347,7 +347,7 @@ func g(ctx, tx any) error { return raisePayoutDisputeAlert(ctx, tx, a, r) }`
 		"internal/payments/payout.go:applyPayoutSuccessCheckedFromStatus:raisePayoutDisputeAlert": 2, // amount/asset + reference mismatch (poll)
 		"internal/payments/payout_refbind.go:payoutGuardReferenceBinding:raisePayoutDisputeAlert": 1, // B10 provider_reference_conflict park
 		"internal/payments/payout_sweep.go:escalateAmbiguousPayout:raisePayoutDisputeAlert":       1, // T16 payout escalation
-		"internal/payments/receipt.go:applyResolvedReceiptEvidence:raisePayoutDisputeAlert":       3, // callback reference-mismatch park + R-5 (declined) and R-6 (succeeded) mismatched success (raise only)
+		"internal/payments/receipt.go:applyResolvedReceiptEvidence:raisePayoutDisputeAlert":       4, // callback reference-mismatch park + R-5 (declined), R-6 (succeeded) mismatched success and M-1 foreign-reference success on succeeded (raise only)
 		"internal/payments/receipt.go:applyResolvedReceiptEvidence:payoutAlertAfterDispute":       4, // T15, T14, callback amount mismatch, tombstone
 		"internal/payments/payout_alerts.go:payoutAlertAfterDispute:raisePayoutDisputeAlert":      1,
 	}
