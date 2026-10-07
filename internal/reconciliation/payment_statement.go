@@ -160,8 +160,14 @@ const (
 	// captured, platform disputed, not posted" - a disputed attempt with
 	// terminal_reason='multiple_success_for_intent' whose statement line
 	// reports succeeded, with no reversal line and no ledger tombstone.
-	// Reported on every run until it clears (a reversal/tombstone appears,
-	// or, later, an allocation posting under LEDGER-SUSPENSE-B-1). An M1
+	// Reported on every run until it clears. DEPOSIT: a reversal/tombstone
+	// appears, or, later, an allocation posting under LEDGER-SUSPENSE-B-1.
+	// PAYOUT (ADR 0095 §35.2 PO-1, §35.6 STANDING-1 / BOUND-CLEAR-1): "the
+	// provider may have paid out and the platform posted no completion";
+	// deposit-shaped signals never clear it, allocation is NEVER a route,
+	// and only the attempt's own positively attributed withdrawal_completed
+	// clears (no production path produces one until
+	// PAY-PAYOUT-UNBOUND-RESOLVE-1: a permanent standing P1). An M1
 	// resolution only acknowledges it and never clears or suppresses it
 	// (ADR 0101 §4, LF-3, F13). Never auto-resolved, never a
 	// T17/re-drive trigger.
@@ -1124,7 +1130,18 @@ func (m *payMatcher) matchPayment(lk string, l payLine) {
 		// clears a PAYOUT park (capturedUnposted, PAY-PAYOUT-BOUND-CLEAR-1). A PSP that keeps
 		// listing X as pending/declined in every window must not suppress the
 		// standing finding. `reversed` stays the R1 in-run clear (above).
-		l.status == statement.PaymentStatusPending || l.status == statement.PaymentStatusDeclined) &&
+		l.status == statement.PaymentStatusPending || l.status == statement.PaymentStatusDeclined ||
+		// PAY-PAYOUT-BOUND-CLEAR-1 F-1 (ledger-finance ruling, fail-closed
+		// tightening; security concurs): the R1 "a reversed line is the PSP's
+		// own refund" rule is a DEPOSIT rule. A `reversed` PAYOUT line naming a
+		// bound payout park is not a clearing signal (only the attempt's own
+		// positively attributed withdrawal_completed clears, capturedUnposted):
+		// it raises like any other line. Before this, it fell to the silent
+		// "disputed" case below - and, the attempt being matched,
+		// checkUnmatchedAttempts skipped it too - for EVERY run in which the
+		// provider repeated the line (with amount and asset equal the whole
+		// run was CLEAN). Deposit R1 is unchanged.
+		(a.operation != paymentStatementKindDeposit && l.status == statement.PaymentStatusReversed)) &&
 		m.capturedUnposted(a) && m.markCaptured(a, a.providerRef):
 		// ADR 0095 §28.9, extended by §35: the disputed reason codes that
 		// are NOT already a plain payments P1 for reconciliation's
@@ -1345,7 +1362,9 @@ func (m *payMatcher) checkUnmatchedAttempts() {
 		// Ledger-finance review C2/F2 (rv-fh3-ledger.md, 076e42e,
 		// HD-LEDGER-UNALLOC-1 (A)): a disputed multiple_success_for_intent
 		// deposit attempt is real, standing, unallocated money off-ledger
-		// until a PSP-side reversal or tombstone clears it - this report
+		// until a PSP-side reversal or tombstone clears it (a payout:
+		// until its own positively attributed withdrawal_completed,
+		// PAY-PAYOUT-BOUND-CLEAR-1 - never a deposit-shaped signal) - this report
 		// is its ONLY record, so it must be raised on EVERY run, not only
 		// the run whose statement happens to carry a line for it (a
 		// capture's own settlement period passes, after which no line
