@@ -270,16 +270,16 @@ func TestOrphanResolve_Concurrent_TwoRedeliveries_ResolvedOnce_NoError(t *testin
 		t.Run(name, func(t *testing.T) {
 			e, b, ev, prov, _ := orRun(t, name)
 			for rep := 0; rep < 20; rep++ {
-				// A fresh orphan per repetition (distinct provider reference => distinct fingerprint).
+				// rep 0 uses the orphan orRun planted; later reps plant a fresh one (distinct reference =>
+				// distinct fingerprint). The reference-conflict orphan is keyed on its one bound reference.
 				evr := ev
-				evr.ProviderReference = ev.ProviderReference + "-" + strconv.Itoa(rep)
-				if b.want == ResolutionAnomalyReferenceConflict {
-					evr = ev // the conflict is keyed on the one bound reference; the single orphan is raced once below
-					if rep > 0 {
+				if rep > 0 {
+					if b.want == ResolutionAnomalyReferenceConflict {
 						continue
 					}
+					evr.ProviderReference = ev.ProviderReference + "-" + strconv.Itoa(rep)
+					e.orPlant(t, prov, evr)
 				}
-				e.orPlant(t, prov, evr)
 				runTwo(t, func(int) error {
 					disp, err := e.orDeliver(prov, evr)
 					if err == nil && disp != DispositionAnomaly {
@@ -522,4 +522,28 @@ func TestOrphanResolve_Interleaved_AnomalyCloseDuringDrain_NoConflictLeaksToBind
 		t.Fatalf("unapplied = %d", got)
 	}
 	assertLedgerBalanced(t, e.pool, e.f.tenantID)
+}
+
+// Defence in depth (security I-1): the lock-free duplicate close is scoped to the receipt's own tenant
+// and provider; a call naming another provider or tenant closes nothing.
+func TestOrphanResolve_TolerantClose_ScopedToTenantAndProvider(t *testing.T) {
+	e, _, ev, prov, _ := orRun(t, "event_type_mismatch")
+	for _, c := range []struct {
+		name   string
+		tenant uuid.UUID
+		prov   string
+	}{{"other_provider", e.f.tenantID, prov + "-x"}, {"other_tenant", uuid.New(), prov}} {
+		if err := e.pool.WithTenant(context.Background(), e.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+			var id uuid.UUID
+			if err := tx.QueryRow(ctx, `SELECT id FROM payment_provider_events WHERE tenant_id=$1 AND provider_reference=$2`, e.f.tenantID, ev.ProviderReference).Scan(&id); err != nil {
+				return err
+			}
+			return closeAnomalyReceipt(ctx, tx, c.tenant, c.prov, id, true, ResolutionAnomalyOther)
+		}); err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		if row := e.orReceipt(t, prov, ev.ProviderReference); row.resolved {
+			t.Fatalf("%s: a mis-scoped close must not resolve the receipt", c.name)
+		}
+	}
 }
