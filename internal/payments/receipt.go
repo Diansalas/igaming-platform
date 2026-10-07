@@ -778,12 +778,17 @@ func applyResolvedReceiptEvidence(ctx context.Context, tx pgx.Tx, o *Orchestrato
 			// a re-used reference) and must be reported, never silently
 			// folded into "already applied". No state change (the attempt
 			// is already terminal and this specialist never auto-resolves
-			// a terminal contradiction) and no posting - P1 audit only.
+			// a terminal contradiction) and no posting - the audit row, plus (R-6, payouts
+			// only) a raise-only P1.
 			if mismatched {
 				if err := auditTerminalAmountAssetMismatch(ctx, tx, attempt, ev); err != nil {
 					return false, "", err
 				}
-				return false, ResolutionAnomalyOther, nil
+				// R-6 (ADR 0095 section 42.8, raise only): for a PAYOUT a different amount/asset naming
+				// the reference of an already-settled payout is a contradiction that must page like
+				// R-5. No state change, no release, no posting. The raise is the last statement of the
+				// cell, after the audit row; it is a no-op for a deposit.
+				return false, ResolutionAnomalyOther, raisePayoutDisputeAlert(ctx, tx, attempt, alertReasonPayoutMismatchedSuccessOnSucceeded)
 			}
 			return false, ResolutionApplied, nil // duplicate; the ledger itself is idempotent
 		case AttemptDeclined:

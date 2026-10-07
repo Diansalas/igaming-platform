@@ -7688,11 +7688,39 @@ terminal-reason CHECK are untouched). Same Kind, discriminator shape, attributes
   `TestStaticWiring_PayoutDisputeRaiseSitesArePinned_B12` (both directions: a missing or an extra site fails); the
   source-order guard now counts 14 sites (was 13); the closed-set test covers the new set. Integration:
   `payout_declined_mismatch_alert_integration_test.go`.
-- **R-6 (REQUIRED follow-up; PRODUCTION BLOCKER alongside ALERT-DELIVERY-1).** The sibling cell, a mismatched success on an
-  already-SUCCEEDED payout, is still audit only with no page. It must get the same raise-only treatment as R-5: a new closed
-  reason (e.g. `mismatched_success_on_succeeded_payout`) in `payoutSignalReasons`, raised as the last statement after
-  `auditTerminalAmountAssetMismatch`, no state change, no release, no settlement. The deposit counterpart (a mismatched
-  success on an already-succeeded/declined DEPOSIT, same audit helper) must be reviewed in the same item. Not done here.
+- **R-6 (RESOLVED for payouts, `IMPLEMENTED` against MOCK, raise only; 2026-10-07).** The sibling cell, a mismatched
+  success (amount or asset differs from the attempt's own) arriving on an already-SUCCEEDED payout
+  (`applyResolvedReceiptEvidence`, `AttemptSucceeded` branch), still writes
+  `payments.callback_amount_asset_mismatch_terminal` exactly as before and now ends with
+  `raisePayoutDisputeAlert(..., alertReasonPayoutMismatchedSuccessOnSucceeded)` as its returned (last) statement. New closed
+  reason `mismatched_success_on_succeeded_payout` in `payoutSignalReasons` (now 2 members; not in `PayoutDisputeReasons()`,
+  no terminal-reason CHECK change, no migration). No state change, no release, no settlement, no posting, no delivery,
+  recipient or channel (ALERT-DELIVERY-1 stays a production blocker); the cell still reports `duplicate_effect`'s
+  no-effect result. A MATCHING repeated success with the SAME provider reference on a succeeded payout is a plain duplicate and raises nothing (this sentence does not cover M-1 below). "Raise is last" (ADR 0102 7.7) means the last statement of the cell; the deferred-receipt drain may write after it. Repeats are
+  ONE open alert with growing occurrences (the audit row is still written per delivery, F-2). Pins: static raise-site count
+  for `receipt.go:applyResolvedReceiptEvidence:raisePayoutDisputeAlert` is now 3 (both directions), the source-order guard
+  counts 15 sites (was 14), closed-set unit test extended. Integration: `payout_succeeded_mismatch_alert_integration_test.go`.
+- **Deposit counterpart (reviewed; NOT implemented; finding).** `receipt.go` `applyResolvedReceiptEvidence`, the
+  `AttemptSucceeded` branch (mismatched, audit helper call) and the `AttemptDeclined` branch (mismatched) are shared with
+  deposits: for a deposit they write only `payments.callback_amount_asset_mismatch_terminal` and return
+  `ResolutionAnomalyOther` with no alert, no state change. Making them page is not a trivial same-pattern change: the deposit
+  alert helpers in `alerts.go` (`alertReasonFor`, `raiseDepositParkAlert`) are keyed on `DepositDisputeTerminalReasons()`
+  (the terminal-reason CHECK mirror) and on the park discriminator, so a no-state-change deposit signal needs its own closed
+  set, discriminator/attribute choice (deposit has the intent and the credit side, so severity and semantics of a mismatched
+  success on a declined vs. a succeeded deposit differ from a payout's double-payout risk) and its own static pins. That is
+  outside R-6's stated scope. Proposed follow-up: **PAY-DEPOSIT-MISMATCH-ALERT-1** (Medium; before real-provider use;
+  needs a security/ledger-finance ruling on the deposit signal semantics).
+- **M-1 follow-up PAY-PAYOUT-SUCCEEDED-REF-MISMATCH-1 (ledger-finance finding; REQUIRED; production blocker alongside
+  ALERT-DELIVERY-1).** A success with a DIFFERENT provider reference but matching amount/asset on an already-SUCCEEDED payout,
+  resolved via the merchant reference, is silently folded in as `duplicate_effect` with 0 alerts and 0 audit rows. The
+  non-terminal path disputes and raises `provider_reference_mismatch` (`receipt.go` ~906-931, S-M1); the terminal-succeeded
+  cell does not. Fix: audit plus raise-only P1 (own closed reason, no state change), R-6 pattern. Not done in R-6.
+- **PAY-DEPOSIT-MISMATCH-ALERT-1 is a HARD GATE before any real-provider deposit.** Split: a mismatched success on a DECLINED
+  deposit is a capture without credit (P1 when built); on a SUCCEEDED deposit it is P1 or P2 depending on the daily provider
+  reconciliation. Security design points: `provider_id` as the sole attribute; discriminator keyed to the intent/attempt id
+  plus a closed reason; raised last; no state change; separate reasons for declined and succeeded; tests for cross-tenant
+  isolation and that a deposit never raises a payout reason. Today's behaviour is pinned by
+  `deposit_mismatch_pin_integration_test.go` (0 alerts, 1 audit row, no state change); change it deliberately.
 - **Follow-ups (PAY-PAYOUT-CALLBACK-AUDIT-2).** (F-2) gate `auditTerminalAmountAssetMismatch` on `!duplicate`
   (`receipt.go` ~783/797): today it writes one audit row per redelivery (audit growth; the L-e oversize-reason audit is the
   precedent for once-per-new-receipt); the test `TestR5_Replay_*` pins the current per-delivery count so the change is
