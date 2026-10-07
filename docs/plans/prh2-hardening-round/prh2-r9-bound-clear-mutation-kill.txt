@@ -134,7 +134,11 @@ Test execution (not skipped)
 - Non-race, with the fix:
   - ./internal/reconciliation/... : PASS=349, SKIP=0, FAIL=0.
   - payments ^(TestB11_|TestStanding1|TestD2|TestK3_): PASS=211, SKIP=0, FAIL=0.
-- Race runs: see the final report of this item.
+- Race, -race -tags integration -count=1 -p 1 -timeout 60m, at commit 4342dcb
+  (code identical to b866a59 + 4437db2):
+  - ./internal/reconciliation/... : PASS=376, SKIP=0, FAIL=0, DATA RACE=0.
+  - payments ^(TestB11_|TestStanding1|TestD2|TestK3_): PASS=211, SKIP=0, FAIL=0,
+    DATA RACE=0.
 
 Open policy question (reported, not decided)
 --------------------------------------------
