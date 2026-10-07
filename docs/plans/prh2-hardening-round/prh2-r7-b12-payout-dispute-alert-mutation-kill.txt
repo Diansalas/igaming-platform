@@ -1,0 +1,103 @@
+B12 (PAY-PAYOUT-DISPUTE-ALERT-1, raise only) mutation-kill evidence, 2026-10-07
+Method: each mutant is applied in place to the real source file (backup in the scratchpad), the package is built
+(a mutant that does not compile is NOT counted), then three targeted suites run:
+  unit   = go test ./internal/payments/ -run the payout-alert unit and source-order tests
+  static = go test ./internal/alerting/ -run TestStaticWiring
+  integ  = -race -tags integration -count=1 -p 1 -run TestB12_   (private scratch DB, runtime role)
+The file is restored from the backup and compared (cmp) after every mutant ("restore-cmp ... OK"); the final
+`git status` showed no source diff. A control run on the unmutated tree passed all three suites (first line below).
+Mutant groups: S* = a raise site removed, C* = closed-set mapping / helper contract, F* = the InTx Pending.Flush
+removed, D* = discarded result / benign replay raising / re-raise, O* = raise placed before the audit row (ordering).
+Reruns: S5 and F1 were first NOT-APPLIED (my harness refused a pattern that occurs twice; nth selection fixed),
+D2's pattern had a wrong indent, and C3 did not compile (unused import); the reruns (S5, F1, D2, C3b) are at the
+end of the log.
+Result: 32 counted mutants, 32 KILLED, 0 SURVIVED. Not counted: C3 (compile error) and the first NOT-APPLIED
+attempts of S5, F1, D2.
+Honesty notes: C6 (operation guard removed) is killed by the unit test only (no integration test raises on a deposit
+attempt; the unit test is the guard). The callback InTx owner (the webhook handler) is not mutated here: its wiring
+is pinned by TestStaticWiring_PaymentCallbackReceiptPathIsInsideInTx and the integration tests call
+ApplyReceiptEvidence inside alerting.InTx exactly as the handler does. Ordering mutants O1/O2 are killed by the
+source-order and site-pin tests (ordering is not observable in database state).
+----- raw log -----
+CONTROL unit=PASS static=PASS integ=PASS
+S1-sync-invalid-ref KILLED unit:TestPayoutDisputeRaiseIsReturnedNeverFollowedByWork_ADR0102_7_7 | static:TestStaticWiring_PayoutDisputeRaiseSitesArePinned_B12 | integ:TestB12_EachSiteAndReason_RaisesExactlyOneAlert_AuditUnchanged_NoMoney,TestB12_InTxFailure_DetachedRetryAfterCommitPersistsTheP1,TestB12_TransientAlertFailure_PropagatesAndRollsBackEverything
+  restore-cmp payout.go OK
+S2-sync-ref-mismatch KILLED unit:TestPayoutDisputeRaiseIsReturnedNeverFollowedByWork_ADR0102_7_7 | static:TestStaticWiring_PayoutDisputeRaiseSitesArePinned_B12 | integ:TestB12_EachSiteAndReason_RaisesExactlyOneAlert_AuditUnchanged_NoMoney
+  restore-cmp payout.go OK
+S3-late-evidence-T14 KILLED unit:TestPayoutDisputeRaiseIsReturnedNeverFollowedByWork_ADR0102_7_7 | static:TestStaticWiring_DerivedRaiseReachingSetIsReviewed_CR2S4,TestStaticWiring_PayoutDisputeRaiseSitesArePinned_B12 | integ:TestB12_EachSiteAndReason_RaisesExactlyOneAlert_AuditUnchanged_NoMoney
+  restore-cmp payout.go OK
+S4-status-invalid-ref KILLED unit:TestPayoutDisputeRaiseIsReturnedNeverFollowedByWork_ADR0102_7_7 | static:TestStaticWiring_PayoutDisputeRaiseSitesArePinned_B12 | integ:TestB12_EachSiteAndReason_RaisesExactlyOneAlert_AuditUnchanged_NoMoney,TestB12_InTxFailure_DetachedRetryAfterCommitPersistsTheP1,TestB12_TransientAlertFailure_PropagatesAndRollsBackEverything
+  restore-cmp payout.go OK
+S5-status-amount NOT-APPLIED (pattern count=2)
+S6-status-refmismatch KILLED unit:TestPayoutDisputeRaiseIsReturnedNeverFollowedByWork_ADR0102_7_7 | static:TestStaticWiring_PayoutDisputeRaiseSitesArePinned_B12 | integ:TestB12_EachSiteAndReason_RaisesExactlyOneAlert_AuditUnchanged_NoMoney
+  restore-cmp payout.go OK
+S7-B10-refbind KILLED unit:TestPayoutDisputeRaiseIsReturnedNeverFollowedByWork_ADR0102_7_7 | static:TestStaticWiring_PayoutDisputeRaiseSitesArePinned_B12 | integ:TestB12_EachSiteAndReason_RaisesExactlyOneAlert_AuditUnchanged_NoMoney
+  restore-cmp payout_refbind.go OK
+S8-sweeper-escalation KILLED unit:TestPayoutDisputeRaiseIsReturnedNeverFollowedByWork_ADR0102_7_7 | static:TestStaticWiring_PayoutDisputeRaiseSitesArePinned_B12 | integ:TestB12_EachSiteAndReason_RaisesExactlyOneAlert_AuditUnchanged_NoMoney,TestB12_Escalation_ThroughResubmitPayoutAmbiguous_ReasonsReachTheAlert,TestB12_InTxFailure_DetachedRetryAfterCommitPersistsTheP1,TestB12_NoSecondRaise_OnReplayOrAlreadyEscalated,TestB12_TransientAlertFailure_PropagatesAndRollsBackEverything
+  restore-cmp payout_sweep.go OK
+S9-receipt-T15 KILLED integ:TestB12_EachSiteAndReason_RaisesExactlyOneAlert_AuditUnchanged_NoMoney
+  restore-cmp receipt.go OK
+S10-receipt-T14 KILLED integ:TestB12_EachSiteAndReason_RaisesExactlyOneAlert_AuditUnchanged_NoMoney,TestB12_InTxFailure_DetachedRetryAfterCommitPersistsTheP1,TestB12_NoSecondRaise_OnReplayOrAlreadyEscalated,TestB12_TenantIsolation_SubjectOnly,TestB12_TransientAlertFailure_PropagatesAndRollsBackEverything
+  restore-cmp receipt.go OK
+S11-receipt-cb-amount KILLED integ:TestB12_EachSiteAndReason_RaisesExactlyOneAlert_AuditUnchanged_NoMoney
+  restore-cmp receipt.go OK
+S12-receipt-tombstone KILLED integ:TestB12_EachSiteAndReason_RaisesExactlyOneAlert_AuditUnchanged_NoMoney
+  restore-cmp receipt.go OK
+S13-receipt-cb-refmismatch KILLED unit:TestPayoutDisputeRaiseIsReturnedNeverFollowedByWork_ADR0102_7_7 | static:TestStaticWiring_PayoutDisputeRaiseSitesArePinned_B12 | integ:TestB12_EachSiteAndReason_RaisesExactlyOneAlert_AuditUnchanged_NoMoney
+  restore-cmp receipt.go OK
+C1-map-dispute-set KILLED unit:TestPayoutAlertReasonFor_ClosedSet | integ:TestB12_DuplicateDiscriminator_OneOpenAlertGrowingOccurrences,TestB12_EachSiteAndReason_RaisesExactlyOneAlert_AuditUnchanged_NoMoney,TestB12_InTxFailure_DetachedRetryAfterCommitPersistsTheP1,TestB12_TenantIsolation_SubjectOnly
+  restore-cmp payout_alerts.go OK
+C2-map-escalation-set KILLED unit:TestPayoutAlertReasonFor_ClosedSet | integ:TestB12_EachSiteAndReason_RaisesExactlyOneAlert_AuditUnchanged_NoMoney,TestB12_Escalation_ThroughResubmitPayoutAmbiguous_ReasonsReachTheAlert,TestB12_InTxFailure_DetachedRetryAfterCommitPersistsTheP1,TestB12_NoSecondRaise_OnReplayOrAlreadyEscalated
+  restore-cmp payout_alerts.go OK
+C3-map-invalid-prefix COMPILE-ERROR (not counted)
+  restore-cmp payout_alerts.go OK
+C4-map-echo-raw KILLED unit:TestPayoutAlertReasonFor_ClosedSet | integ:TestB12_UnknownReason_BecomesUnclassified_NeverEchoed
+  restore-cmp payout_alerts.go OK
+C5-op-guard-inverted KILLED unit:TestRaisePayoutDisputeAlert_DepositIsNoOp | integ:TestB12_DuplicateDiscriminator_OneOpenAlertGrowingOccurrences,TestB12_EachSiteAndReason_RaisesExactlyOneAlert_AuditUnchanged_NoMoney,TestB12_Escalation_ThroughResubmitPayoutAmbiguous_ReasonsReachTheAlert,TestB12_InTxFailure_DetachedRetryAfterCommitPersistsTheP1,TestB12_NoSecondRaise_OnReplayOrAlreadyEscalated,TestB12_TenantIsolation_SubjectOnly,TestB12_TransientAlertFailure_PropagatesAndRollsBackEverything,TestB12_UnknownReason_BecomesUnclassified_NeverEchoed
+  restore-cmp payout_alerts.go OK
+C6-op-guard-removed KILLED unit:TestRaisePayoutDisputeAlert_DepositIsNoOp
+  restore-cmp payout_alerts.go OK
+C7-discriminator-prefix KILLED unit:TestPayoutDisputeAlert_Shape | integ:TestB12_EachSiteAndReason_RaisesExactlyOneAlert_AuditUnchanged_NoMoney,TestB12_Escalation_ThroughResubmitPayoutAmbiguous_ReasonsReachTheAlert,TestB12_InTxFailure_DetachedRetryAfterCommitPersistsTheP1,TestB12_NoSecondRaise_OnReplayOrAlreadyEscalated,TestB12_TenantIsolation_SubjectOnly,TestB12_UnknownReason_BecomesUnclassified_NeverEchoed
+  restore-cmp payout_alerts.go OK
+C8-provider-attr-wrong KILLED unit:TestPayoutDisputeAlert_Shape | integ:TestB12_EachSiteAndReason_RaisesExactlyOneAlert_AuditUnchanged_NoMoney,TestB12_Escalation_ThroughResubmitPayoutAmbiguous_ReasonsReachTheAlert,TestB12_InTxFailure_DetachedRetryAfterCommitPersistsTheP1,TestB12_NoSecondRaise_OnReplayOrAlreadyEscalated,TestB12_TenantIsolation_SubjectOnly,TestB12_UnknownReason_BecomesUnclassified_NeverEchoed
+  restore-cmp payout_alerts.go OK
+C9-attr-leak KILLED unit:TestPayoutDisputeAlert_Shape | integ:TestB12_EachSiteAndReason_RaisesExactlyOneAlert_AuditUnchanged_NoMoney,TestB12_Escalation_ThroughResubmitPayoutAmbiguous_ReasonsReachTheAlert,TestB12_InTxFailure_DetachedRetryAfterCommitPersistsTheP1,TestB12_NoSecondRaise_OnReplayOrAlreadyEscalated,TestB12_TenantIsolation_SubjectOnly,TestB12_UnknownReason_BecomesUnclassified_NeverEchoed
+  restore-cmp payout_alerts.go OK
+C10-after-dispute-ignores-error KILLED unit:TestPayoutAlertAfterDispute_PropagatesDisputeError
+  restore-cmp payout_alerts.go OK
+C11-subject-dropped KILLED unit:TestPayoutDisputeAlert_Shape | integ:TestB12_DuplicateDiscriminator_OneOpenAlertGrowingOccurrences,TestB12_EachSiteAndReason_RaisesExactlyOneAlert_AuditUnchanged_NoMoney,TestB12_Escalation_ThroughResubmitPayoutAmbiguous_ReasonsReachTheAlert,TestB12_InTxFailure_DetachedRetryAfterCommitPersistsTheP1,TestB12_NoSecondRaise_OnReplayOrAlreadyEscalated,TestB12_TenantIsolation_SubjectOnly,TestB12_TransientAlertFailure_PropagatesAndRollsBackEverything,TestB12_UnknownReason_BecomesUnclassified_NeverEchoed
+  restore-cmp payout_alerts.go OK
+F1-flush-ApplyPayoutResult NOT-APPLIED (pattern count=2)
+F2-flush-statusEvidence KILLED static:TestStaticWiring_EvidenceTransactionOwnersOpenThroughInTxAndFlush | integ:TestB12_InTxFailure_DetachedRetryAfterCommitPersistsTheP1
+  restore-cmp payout.go OK
+F3-flush-sweeper KILLED static:TestStaticWiring_EvidenceTransactionOwnersOpenThroughInTxAndFlush | integ:TestB12_InTxFailure_DetachedRetryAfterCommitPersistsTheP1
+  restore-cmp payout_sweep.go OK
+D1-discard-raise-result KILLED static:TestStaticWiring_InTxRaiseResultsAreNeverDiscarded_LFF4 | integ:TestB12_TransientAlertFailure_PropagatesAndRollsBackEverything
+  restore-cmp payout_alerts.go OK
+D2-benign-replay-raises NOT-APPLIED (pattern count=0)
+D3-escalated-reraise KILLED unit:TestPayoutDisputeRaiseIsReturnedNeverFollowedByWork_ADR0102_7_7 | static:TestStaticWiring_PayoutDisputeRaiseSitesArePinned_B12 | integ:TestB12_NoSecondRaise_OnReplayOrAlreadyEscalated
+  restore-cmp payout_sweep.go OK
+O1-late-evidence-raise-before-audit KILLED unit:TestPayoutDisputeRaiseIsReturnedNeverFollowedByWork_ADR0102_7_7 | static:TestStaticWiring_PayoutDisputeRaiseSitesArePinned_B12 | integ:TestB12_EachSiteAndReason_RaisesExactlyOneAlert_AuditUnchanged_NoMoney
+  restore-cmp payout.go OK
+O2-sweeper-raise-before-audit KILLED unit:TestPayoutDisputeRaiseIsReturnedNeverFollowedByWork_ADR0102_7_7 | static:TestStaticWiring_PayoutDisputeRaiseSitesArePinned_B12 | integ:TestB12_EachSiteAndReason_RaisesExactlyOneAlert_AuditUnchanged_NoMoney,TestB12_Escalation_ThroughResubmitPayoutAmbiguous_ReasonsReachTheAlert,TestB12_InTxFailure_DetachedRetryAfterCommitPersistsTheP1,TestB12_NoSecondRaise_OnReplayOrAlreadyEscalated
+  restore-cmp payout_sweep.go OK
+DONE
+S5-status-amount KILLED unit:TestPayoutDisputeRaiseIsReturnedNeverFollowedByWork_ADR0102_7_7 | static:TestStaticWiring_PayoutDisputeRaiseSitesArePinned_B12 | integ:TestB12_EachSiteAndReason_RaisesExactlyOneAlert_AuditUnchanged_NoMoney
+  restore-cmp payout.go OK
+C3b-map-invalid-prefix KILLED unit:TestPayoutAlertReasonFor_ClosedSet | integ:TestB12_EachSiteAndReason_RaisesExactlyOneAlert_AuditUnchanged_NoMoney,TestB12_InTxFailure_DetachedRetryAfterCommitPersistsTheP1
+  restore-cmp payout_alerts.go OK
+F1-flush-ApplyPayoutResult KILLED static:TestStaticWiring_EvidenceTransactionOwnersOpenThroughInTxAndFlush | integ:TestB12_InTxFailure_DetachedRetryAfterCommitPersistsTheP1
+  restore-cmp payout.go OK
+D2-benign-replay-raises KILLED unit:TestPayoutDisputeRaiseIsReturnedNeverFollowedByWork_ADR0102_7_7 | static:TestStaticWiring_PayoutDisputeRaiseSitesArePinned_B12 | integ:TestB12_NoSecondRaise_OnReplayOrAlreadyEscalated
+  restore-cmp payout.go OK
+DONE
+
+----- LF M-1/C1 decline-replay no-op (applyPayoutLateEvidence), added after review -----
+N1 guard removed, N2 guard widened to any reason (would swallow T14), N3 guard on the wrong reason. 3 counted, 3 KILLED, 0 survived.
+N1-decline-noop-removed KILLED integ:TestB12_ConcurrentDeclines_ConvergeCleanly_NoAlert,TestB12_LateDeclineReplay_IsCleanNoOp
+  restore-cmp payout.go OK
+N2-decline-noop-widened-kills-T14 KILLED integ:TestB12_EachSiteAndReason_RaisesExactlyOneAlert_AuditUnchanged_NoMoney
+  restore-cmp payout.go OK
+N3-decline-noop-wrong-reason KILLED integ:TestB12_ConcurrentDeclines_ConvergeCleanly_NoAlert,TestB12_EachSiteAndReason_RaisesExactlyOneAlert_AuditUnchanged_NoMoney,TestB12_LateDeclineReplay_IsCleanNoOp
+  restore-cmp payout.go OK
+DONE
