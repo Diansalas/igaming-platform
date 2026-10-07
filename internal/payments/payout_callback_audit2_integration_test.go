@@ -17,6 +17,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Diansalas/igaming-platform/internal/alerting"
+	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/testsupport/alertinject"
 )
 
@@ -192,6 +193,22 @@ func TestCallbackAudit2_DeferredDrain_MismatchedSuccessOnSucceeded_AuditedOnce(t
 
 // ---- S-1 / C-1: the audit gate is "already RESOLVED", not "already existed" ----
 
+// ca2AssertReceiptResolved: the mismatched receipt (amount) is resolved as anomaly_other and attached to the attempt.
+func ca2AssertReceiptResolved(t *testing.T, pool *db.Pool, tenantID uuid.UUID, ref string, amount int64, attemptID uuid.UUID) {
+	t.Helper()
+	var resolution string
+	var gotAttempt *uuid.UUID
+	if err := pool.WithTenant(context.Background(), tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT resolution, attempt_id FROM payment_provider_events WHERE tenant_id=$1 AND provider_reference=$2 AND amount=$3`,
+			tenantID, ref, amount).Scan(&resolution, &gotAttempt)
+	}); err != nil {
+		t.Fatalf("read receipt: %v", err)
+	}
+	if resolution != string(ResolutionAnomalyOther) || gotAttempt == nil || *gotAttempt != attemptID {
+		t.Fatalf("receipt resolution=%q attempt_id=%v, want %s / %s", resolution, gotAttempt, ResolutionAnomalyOther, attemptID)
+	}
+}
+
 func (e rbEnv) ca2Unresolved(t *testing.T, ref string) int {
 	t.Helper()
 	return fpCount(t, e.pool, e.f.tenantID, `SELECT count(*) FROM payment_provider_events WHERE tenant_id=$1 AND provider_reference=$2 AND resolved_at IS NULL`, e.f.tenantID, ref)
@@ -261,6 +278,7 @@ func TestCallbackAudit2_OrphanedDeferredReceipt_RedeliveredAfterConcurrentBind_A
 			t.Fatalf("after redelivery #%d: the orphaned receipt must be resolved, %d unresolved", i, n)
 		}
 	}
+	ca2AssertReceiptResolved(t, pool, f.tenantID, ref, 499, a.ID)
 	rows := e.b12Rows(t)
 	if len(rows) != 1 || rows[0].State != "open" {
 		t.Fatalf("want one open alert row, got %+v", rows)
@@ -301,6 +319,7 @@ func TestCallbackAudit2_DeferredThenSyncBind_Redelivered_AuditedOnce_Resolved(t 
 	if n := e.ca2Unresolved(t, ref); n != 0 {
 		t.Fatalf("the orphaned receipt must be resolved, %d unresolved", n)
 	}
+	ca2AssertReceiptResolved(t, pool, f.tenantID, ref, 499, a.ID)
 	e.b12AssertOneAlertRowCount(t, a.ID, alertReasonPayoutMismatchedSuccessOnSucceeded)
 }
 
@@ -381,6 +400,7 @@ func TestCallbackAudit2_Deposit_OrphanedReceipt_Redelivered_AuditedOnce_Resolved
 	if unresolved() != 0 {
 		t.Fatalf("the orphaned deposit receipt must be resolved")
 	}
+	ca2AssertReceiptResolved(t, pool, f.tenantID, ref, 4999, res.Attempt.ID)
 	if rows := alertinject.ForSubject(t, pool, f.tenantID); len(rows) != 0 {
 		t.Fatalf("a deposit raises no alert today, got %+v", rows)
 	}

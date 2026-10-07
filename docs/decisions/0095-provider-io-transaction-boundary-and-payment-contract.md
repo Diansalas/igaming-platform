@@ -7808,9 +7808,9 @@ terminal-reason CHECK are untouched). Same Kind, discriminator shape, attributes
   isolation and that a deposit never raises a payout reason. Today's behaviour is pinned by
   `deposit_mismatch_pin_integration_test.go` (0 alerts, 1 audit row, no state change); change it deliberately.
 - **PAY-PAYOUT-CALLBACK-AUDIT-2 (security F-2, ledger-finance L-3, F-3; RESOLVED, `IMPLEMENTED` against MOCK; 2026-10-07).**
-  `applyResolvedReceiptEvidence` now takes `duplicate`, which (after the S-1/C-1 fix below) means the receipt of THIS delivery was
+  `applyResolvedReceiptEvidence` now takes `alreadyApplied` (named `duplicate` until the S-1/C-1 fix below), which means the receipt of THIS delivery was
   already RESOLVED, not merely that its row already existed; the deferred-receipt drain passes `false`, each deferred row is
-  applied once). The two
+  applied once. The two
   no-state-change terminal mismatch cells (`AttemptSucceeded` mismatched, R-6, and `AttemptDeclined` mismatched, R-5) write
   `payments.callback_amount_asset_mismatch_terminal` only when `!duplicate`, and so does the M-1 foreign-reference audit row
   (the same rule, applied to the row added by M-1 so it does not reintroduce the growth). This is the L-e precedent (the
@@ -7847,7 +7847,15 @@ terminal-reason CHECK are untouched). Same Kind, discriminator shape, attributes
   orphan is now closed. The drain is unaffected (its rows are unresolved by construction; ResolveReceipt runs before the
   drain query, and the parent lock plus the CAS prevent a double write). Tests: the two-transaction orphan, the LF
   sequence (deferred, sync bind, redelivery), a deposit form (the audit row is the deposit's only trace), plus the replay
-  1,1,1 and concurrency tests. Not built: LF L-1 (first of two concurrent deliveries fails transiently while the second waits
+  1,1,1 and concurrency tests. Named residuals (LF delta review, none blocking, NOT fixed here):
+  **PAY-RECEIPT-ORPHAN-RESOLVE-1 (C-1a)**: the anomaly branches in `ApplyReceiptEvidence` (cross-provider / reference
+  conflict, the event-type vs operation mismatch, and the late reference-conflict recheck; `receipt.go` ~523/571/608) skip
+  `ResolveReceipt` when the receipt is a duplicate, so an ORPHANED deferred receipt that later turns out to be another
+  operation's or a conflict stays unresolved and counts toward `DeferredReceiptCap`; no money effect. **C-1b**: the
+  oversize-decline-reason audit (~632) is gated on `duplicate`, so a deferred/drained receipt never gets
+  `payment.decline_reason_bounded`. **I-1 (LF delta review; raise with security)**: the live redelivery path has no predates-submission check,
+  unlike the drain (`anomaly_predates_submission`), so an orphan older than the attempt's first submission is applied on
+  redelivery. Not built: LF L-1 (first of two concurrent deliveries fails transiently while the second waits
   on the unique index), optional.
   Mutation evidence:
   `docs/plans/prh2-hardening-round/prh2-r10-callback-audit-2-mutation-kill.txt`.

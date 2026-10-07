@@ -742,9 +742,9 @@ func ApplyReceiptEvidence(ctx context.Context, tx pgx.Tx, o *Orchestrator, tenan
 // and resolution, the value this receipt's payment_provider_events.
 // resolution column is one-shot-set to.
 //
-// duplicate here means "the receipt of THIS delivery was already RESOLVED" (an already-applied
-// redelivery; an unresolved existing row is an orphan and counts as a first application). It gates only the audit rows of the no-state-change terminal cells
-// (PAY-PAYOUT-CALLBACK-AUDIT-2); no state transition, financial effect or raise depends on it.
+// alreadyApplied means "the receipt of THIS delivery was already RESOLVED" (an already-applied
+// redelivery; an unresolved existing row is an orphan and counts as a first application). It gates
+// only the audit rows of the no-state-change terminal cells (PAY-PAYOUT-CALLBACK-AUDIT-2); no state transition, financial effect or raise depends on it.
 //
 // RV-PRH-I1 ledger-finance M1: every §4.4 cell for EVERY reachable attempt
 // state is handled explicitly below - none of them falls through to a CAS
@@ -752,7 +752,7 @@ func ApplyReceiptEvidence(ctx context.Context, tx pgx.Tx, o *Orchestrator, tenan
 // to CAS-conflict and 500-loop for e.g. a mismatched success on an
 // already-succeeded/declined attempt, or ANY evidence on a disputed/
 // created/rejected attempt).
-func applyResolvedReceiptEvidence(ctx context.Context, tx pgx.Tx, o *Orchestrator, attempt PaymentAttempt, ev ReceiptEvidence, duplicate bool) (bool, ReceiptResolution, error) {
+func applyResolvedReceiptEvidence(ctx context.Context, tx pgx.Tx, o *Orchestrator, attempt PaymentAttempt, ev ReceiptEvidence, alreadyApplied bool) (bool, ReceiptResolution, error) {
 	switch ev.Outcome {
 	case OutcomePending:
 		switch attempt.State {
@@ -810,9 +810,9 @@ func applyResolvedReceiptEvidence(ctx context.Context, tx pgx.Tx, o *Orchestrato
 			if mismatched {
 				// PAY-PAYOUT-CALLBACK-AUDIT-2 (F-2 / LF L-3): the audit row is written once per NEW receipt,
 				// never per redelivery (the L-e precedent). The first delivery's row commits atomically with
-				// its receipt row; a delivery whose receipt rolled back is not a duplicate and writes it.
+				// its receipt row; a delivery whose receipt rolled back is not already applied and writes it.
 				// The raise below stays unconditional (the alert dedupes). Deposits share this cell.
-				if !duplicate {
+				if !alreadyApplied {
 					if err := auditTerminalAmountAssetMismatch(ctx, tx, attempt, ev); err != nil {
 						return false, "", err
 					}
@@ -840,7 +840,7 @@ func applyResolvedReceiptEvidence(ctx context.Context, tx pgx.Tx, o *Orchestrato
 				if storedRef != nil && *storedRef != "" && ev.ProviderReference != *storedRef {
 					// PAY-PAYOUT-CALLBACK-AUDIT-2 rule: the audit row is written once per NEW receipt;
 					// the raise stays unconditional (the alert dedupes).
-					if !duplicate {
+					if !alreadyApplied {
 						if err := auditPayoutSucceededForeignRef(ctx, tx, attempt, ev, *storedRef); err != nil {
 							return false, "", err
 						}
@@ -858,7 +858,7 @@ func applyResolvedReceiptEvidence(ctx context.Context, tx pgx.Tx, o *Orchestrato
 				// record, even though (per the ruling) it causes no state
 				// change and no posting.
 				// PAY-PAYOUT-CALLBACK-AUDIT-2: once per NEW receipt (see the succeeded cell above).
-				if !duplicate {
+				if !alreadyApplied {
 					if err := auditTerminalAmountAssetMismatch(ctx, tx, attempt, ev); err != nil {
 						return false, "", err
 					}
@@ -1701,7 +1701,7 @@ func ApplyDeferredReceiptsForAttempt(ctx context.Context, tx pgx.Tx, o *Orchestr
 		if err != nil {
 			return applied, err
 		}
-		// A deferred receipt is applied exactly once (never a duplicate delivery): duplicate=false.
+		// A deferred receipt is applied exactly once (never an already-applied delivery): alreadyApplied=false.
 		changed, resolution, err := applyResolvedReceiptEvidence(ctx, tx, o, current, ev, false)
 		if err != nil {
 			return applied, err
