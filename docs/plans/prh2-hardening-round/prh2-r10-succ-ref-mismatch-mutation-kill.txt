@@ -7,10 +7,9 @@ succeed (a mutant that does not compile is NOT counted), then, stopping at the f
 After every mutant the file is restored from the backup and checked with `git diff --quiet -- <file>` ("restore-cmp ... OK").
 A CONTROL run on the unmutated tree passed first. Harness: scratchpad r10a/mut.py. Compile-error mutants counted: 0.
 
-RESULTS (18 mutants in the first pass, plus 2 reruns of the survivors after the tests were strengthened, plus 2 single-suite reruns)
-  16 KILLED, 3 SURVIVED (all classified below), 0 not counted (compile error)
-  First pass: 14 killed, 4 survived (G4, A2, R5, U1, F1 = 5 survived: see below; counting R5 and U1 as killed after the fix gives
-  16 killed overall of 19 distinct mutants).
+RESULTS (19 distinct mutants)
+  First pass: 14 KILLED, 5 SURVIVED (G4, A2, R5, U1, F1), 0 not counted (compile error).
+  After strengthening the tests (R5, U1): 16 KILLED, 3 SURVIVED (G4, A2, F1; all classified below).
 
 SURVIVOR CLASSIFICATION (honest)
   G4-stored-empty-ok (EQUIVALENT / unreachable): the mutated condition differs from the original only when the stored reference
