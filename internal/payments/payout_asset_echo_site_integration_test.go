@@ -109,7 +109,7 @@ func TestPayoutAssetEcho_Site_InvalidEcho_OnlyLenAndHashPrefix_NeverRaw(t *testi
 		{"newline_markup", "EUR\n<script>alert(1)</script>"},
 		{"17_bytes_one_over_the_limit", strings.Repeat("A", 17)},
 		{"oversized", strings.Repeat("X", 300)},
-		{"non_ascii", "€UR‮"},
+		{"non_ascii", "\u20acUR\u202e"},
 		{"nul_byte", "AS\x00SET"},
 		{"provider_prose", "PROVIDER SAID: card 4111 closed"},
 	}
