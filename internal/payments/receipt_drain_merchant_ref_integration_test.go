@@ -183,21 +183,17 @@ func TestDrainMerchantRef_Deposit_OtherProviderAttempt_ClosedAsCrossProvider(t *
 	}
 }
 
-// Ordering: the predates-submission close still comes first and keeps its label.
+// Ordering: the predates-submission close still comes first and keeps its label (the receipt is stored
+// BEFORE the attempt it is drained against is created, and names another attempt's merchant reference).
 func TestDrainMerchantRef_Deposit_PredatesSubmissionStillWinsOverMerchantCheck(t *testing.T) {
 	e := t4DrainSetup(t, "mock-dm-pre", "dm-pre")
 	c := e.orSecondAmbiguous(t, "dm-pre-c")
 	ref := "dm-pre-" + uuid.NewString()
-	e.orBind(t, e.attempt.ID, ref)
 	e.orPlant(t, e.provider, dmDepositEvent(ref, c.MerchantReference))
-	if err := e.pool.WithTenant(context.Background(), e.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `UPDATE payment_provider_events SET received_at = $1 WHERE tenant_id=$2 AND provider_reference=$3`,
-			time.Now().Add(-48*time.Hour), e.f.tenantID, ref)
-		return err
-	}); err != nil {
-		t.Skipf("cannot backdate receipt (immutable): %v", err)
-	}
-	if got := e.dmDrain(t, e.attempt.ID); got != 0 {
+	time.Sleep(50 * time.Millisecond)
+	d := e.orSecondAmbiguous(t, "dm-pre-d")
+	e.orBind(t, d.ID, ref)
+	if got := e.dmDrain(t, d.ID); got != 0 {
 		t.Fatalf("applied = %d", got)
 	}
 	row := e.orReceipt(t, e.provider, ref)
@@ -264,8 +260,8 @@ func TestDrainMerchantRef_Deposit_TenantIsolation(t *testing.T) {
 	if ra := a.orReceipt(t, a.provider, ref); ra.resolution != string(ResolutionAnomalyReferenceConflict) {
 		t.Fatalf("tenant A receipt = %+v", ra)
 	}
-	if st := a.dmAttemptState(t, a.attempt.ID); st != AttemptAmbiguous {
-		t.Fatalf("tenant A attempt moved: %s", st)
+	if st := a.dmAttemptState(t, a.attempt.ID); st != AttemptPending {
+		t.Fatalf("tenant A attempt moved off its bound (pending) state: %s", st)
 	}
 }
 
@@ -290,9 +286,9 @@ func dmPayoutSetup(t *testing.T, prov string) dmPayoutEnv {
 
 // dmNewPayout creates a payout attempt claimed for submission under providerID; when ref != "" it is accepted
 // (reference bound), exactly as N3 does.
-func (e dmPayoutEnv) dmNewPayout(t *testing.T, key, providerID, ref string) (withdrawalID uuid.UUID, a PaymentAttempt) {
+func (e dmPayoutEnv) dmNewPayout(t *testing.T, orch *Orchestrator, key, providerID, ref string) (withdrawalID uuid.UUID, a PaymentAttempt) {
 	t.Helper()
-	wr, att := notSentPayoutAttempt(t, e.pool, e.orch, e.f, 5000, key)
+	wr, att := notSentPayoutAttempt(t, e.pool, orch, e.f, 5000, key)
 	if err := e.pool.WithTenant(context.Background(), e.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		return ClaimCreatedForSubmission(ctx, tx, att.ID, providerID, uuid.New(), "dm-"+key, time.Now().Add(time.Minute))
 	}); err != nil {
@@ -403,9 +399,17 @@ func TestDrainMerchantRef_Payout_Matrix(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			e := dmPayoutSetup(t, "mock-dm-pay")
+			orchC := e.orch
+			if tc.otherProv != e.prov {
+				// The other provider outranks the first (priority 1) and is the only adapter of its own
+				// orchestrator, so the second payout is routed to it.
+				op := NewMockProvider(tc.otherProv, "EUR")
+				registerCapability(t, e.pool, e.f.orchFixture, op, 1)
+				orchC = NewOrchestrator(map[string]PaymentProvider{tc.otherProv: op}, MultiWebhookCredentialResolver{tc.otherProv: NewMockWebhookCredentials(op)})
+			}
 			ref := "dm-pay-" + tc.name + "-" + uuid.NewString()
-			wrA, a := e.dmNewPayout(t, "dm-pay-a", e.prov, ref)
-			wrC, c := e.dmNewPayout(t, "dm-pay-c", tc.otherProv, "")
+			wrA, a := e.dmNewPayout(t, e.orch, "dm-pay-a", e.prov, ref)
+			wrC, c := e.dmNewPayout(t, orchC, "dm-pay-c", tc.otherProv, "")
 			ev := ReceiptEvidence{EventType: "payout", ProviderReference: ref, MerchantReference: tc.merchant(a, c),
 				Outcome: OutcomeSucceeded, Amount: 5000, AssetCode: "EUR"}
 			e.dmPlant(t, e.prov, ev)

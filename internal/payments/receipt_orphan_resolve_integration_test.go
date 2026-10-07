@@ -524,8 +524,8 @@ func TestOrphanResolve_Interleaved_AnomalyCloseDuringDrain_NoConflictLeaksToBind
 	if applied != 0 || row.attemptID != nil || row.resolution != string(ResolutionAnomalyReferenceConflict) {
 		t.Fatalf("the drain must have closed (not applied) it as a reference conflict: applied=%d receipt=%+v", applied, row)
 	}
-	if st := mustGetAttempt(t, e.pool, e.f.tenantID, e.attempt.ID).State; st != AttemptAmbiguous {
-		t.Fatalf("the binding attempt must be unchanged, got %s", st)
+	if st := mustGetAttempt(t, e.pool, e.f.tenantID, e.attempt.ID).State; st != AttemptPending {
+		t.Fatalf("the binding attempt must stay at its bound (pending) state, got %s", st)
 	}
 	if got := e.orUnapplied(t, e.provider); got != 0 {
 		t.Fatalf("unapplied = %d", got)
