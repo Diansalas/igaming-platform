@@ -327,7 +327,13 @@ func TestD2_9b_MerchantCrossCheck_SettlementLine_NamedUnboundPark_ClearsOnLineRe
 
 	ms = w.d2Run(t, d2Src(line, d2ReversalLine("d2-rev-"+uuid.NewString()[:8], s1, 3000)))
 	d2OneMerchant(t, ms, p1.ID, "names attempt="+b.ID.String())
-	s1PayoutCUFor(t, ms, b.ID, s1) // STANDING-1: a deposit reversal never clears a payout park
+	// STANDING-1: a deposit reversal never clears a payout park - not even in
+	// this run: the finding is still the IN-RUN merchant cross-check one, not a
+	// standing re-raise of a finding the in-run step wrongly cleared.
+	if m := s1PayoutCUFor(t, ms, b.ID, s1); strings.Contains(m.ActualValue, "standing: persisted line") ||
+		!strings.Contains(m.ActualValue, "line resolved by reference to attempt="+p1.ID.String()) {
+		t.Fatalf("want the in-run cross-check finding for B, got %s", m.ActualValue)
+	}
 	s1PayoutCUFor(t, w.d2Run(t, d2PastSrc()), b.ID, s1)
 	w.d2AssertBalanced(t)
 }

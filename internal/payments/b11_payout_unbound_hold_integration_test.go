@@ -1391,6 +1391,24 @@ func TestB11_Recon_UnboundPayoutPark_WithdrawalCompletedOnLineRefClears(t *testi
 		w.b11Complete(p.wr.ID, b11Ref())
 		w.b11RequirePayoutCU(w.b11Recon(w.pastSource(false)), p.stale.ID, ref, true, "completion on another reference")
 	})
+	// The line reference is ANOTHER payout attempt's provider reference (the
+	// line resolves to that attempt by reference and names p by merchant
+	// reference). Even p's own withdrawal completed under that reference does
+	// not clear: the reference is held by the other attempt, so the completion is
+	// not attributable to p (fail closed on ambiguity).
+	t.Run("completion_keyed_by_a_reference_another_attempt_holds_does_not_clear", func(t *testing.T) {
+		w := newK3World(t, k3Opts{base: 1})
+		p := w.b11ParkSync(300, OutcomeSucceeded)
+		_, other := w.payout(150)
+		ref := *other.ProviderReference
+		line := w.payoutLine(ref, p.stale.MerchantReference, "succeeded", p.wr.Amount)
+		ms := w.b11Recon(w.source(false, line))
+		if got := w.b11CU(ms, p.stale.ID); len(got) != 1 {
+			t.Fatalf("setup: want the merchant cross-check finding for p:\n%s", render(ms))
+		}
+		w.b11Complete(p.wr.ID, ref)
+		w.b11RequirePayoutCU(w.b11Recon(w.pastSource(false)), p.stale.ID, ref, true, "completion keyed by another attempt's reference")
+	})
 }
 
 // STANDING-1: unrelated financial activity never resolves the finding - other
@@ -1424,9 +1442,12 @@ func TestB11_Recon_UnboundPayoutPark_UnrelatedActivityNeverClears(t *testing.T) 
 	// line names p by merchant reference, but the completion belongs to the
 	// other attempt (it holds ref as its settlement reference). Not attributable
 	// to p: the finding stays, in-run (via the merchant cross-check) and standing.
-	a, _ := w.payout(250)
+	a, aAtt := w.payout(250)
 	w.b11Complete(a.ID, ref)
-	w.b11RequirePayoutCU(w.b11Recon(w.pastSource(false)), p.stale.ID, ref, true, "another attempt's completion under the same reference, standing")
+	st := w.b11RequirePayoutCU(w.b11Recon(w.pastSource(false)), p.stale.ID, ref, true, "another attempt's completion under the same reference, standing")
+	if !strings.Contains(st.ActualValue, "holder_attempt="+aAtt.ID.String()) {
+		t.Fatalf("the standing detail must name the attempt holding the line reference (payout settlement): %s", st.ActualValue)
+	}
 	ms = w.b11Recon(w.source(false, line))
 	if got := w.b11CU(ms, p.stale.ID); len(got) != 1 {
 		t.Fatalf("another attempt's completion under the same reference must not clear (in-run):\n%s", render(ms))
