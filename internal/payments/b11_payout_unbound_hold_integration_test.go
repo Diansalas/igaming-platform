@@ -1391,6 +1391,61 @@ func TestB11_Recon_UnboundPayoutPark_WithdrawalCompletedOnLineRefClears(t *testi
 		w.b11Complete(p.wr.ID, b11Ref())
 		w.b11RequirePayoutCU(w.b11Recon(w.pastSource(false)), p.stale.ID, ref, true, "completion on another reference")
 	})
+	// Security review L-1 (a): POSITIVE attribution. A withdrawal_completed that
+	// merely shares the line reference - a legacy/unattempted withdrawal's
+	// completion (no payment_attempts row: reconciliation counts it as
+	// legacyUnattempted), or an unlinked posting released by no withdrawal at
+	// all - is not the parked attempt's own release and never clears.
+	t.Run("legacy_unattempted_completion_on_the_line_reference_does_not_clear", func(t *testing.T) {
+		w := newK3World(t, k3Opts{base: 1})
+		p := w.b11ParkSync(300, OutcomeSucceeded)
+		ref := b11Ref()
+		line := w.payoutLine(ref, p.stale.MerchantReference, "succeeded", p.wr.Amount)
+		w.b11RequirePayoutCU(w.b11Recon(w.source(false, line)), p.stale.ID, ref, false, "setup")
+		legacy := w.approveWithdrawal(120, "b11-legacy-"+uuid.NewString())
+		w.tx(func(ctx context.Context, tx pgx.Tx) error {
+			return withdrawal.MarkSubmitted(ctx, tx, legacy.ID, w.provider, "b11-legacy-instr-"+uuid.NewString()[:8])
+		})
+		w.b11Complete(legacy.ID, ref)
+		if n := w.countRows(`SELECT count(*) FROM payment_attempts WHERE tenant_id = $1 AND withdrawal_request_id = $2`, w.f.tenantID, legacy.ID); n != 0 {
+			t.Fatalf("setup: the legacy withdrawal must have no payment attempt, got %d", n)
+		}
+		w.b11RequirePayoutCU(w.b11Recon(w.pastSource(false)), p.stale.ID, ref, true, "legacy completion, standing")
+		w.b11RequirePayoutCU(w.b11Recon(w.source(false, line)), p.stale.ID, ref, false, "legacy completion, in-run")
+		if got := w.withdrawalOf(p.wr.ID); got.State != withdrawal.StateSubmitted || got.ReleaseLedgerTransactionID != nil {
+			t.Fatalf("the parked payout's hold moved: %s", got.State)
+		}
+	})
+	t.Run("unlinked_completion_posting_on_the_line_reference_does_not_clear", func(t *testing.T) {
+		w := newK3World(t, k3Opts{base: 1})
+		p := w.b11ParkSync(300, OutcomeSucceeded)
+		ref := b11Ref()
+		line := w.payoutLine(ref, p.stale.MerchantReference, "succeeded", p.wr.Amount)
+		w.b11RequirePayoutCU(w.b11Recon(w.source(false, line)), p.stale.ID, ref, false, "setup")
+		pid := w.provider
+		w.tx(func(ctx context.Context, tx pgx.Tx) error {
+			cash, err := ledger.GetOrCreateAccount(ctx, tx, w.f.tenantID, &w.f.walletID, ledger.AccountPlayerCash, "EUR")
+			if err != nil {
+				return err
+			}
+			clearing, err := ledger.GetOrCreateAccount(ctx, tx, w.f.tenantID, nil, ledger.AccountPSPClearing, "EUR")
+			if err != nil {
+				return err
+			}
+			_, err = ledger.Post(ctx, tx, ledger.TransactionInput{
+				TenantID: w.f.tenantID, TransactionType: ledger.TxWithdrawalCompleted,
+				IdempotencyKey: pid + ":" + ref, ProviderID: &pid, ProviderTxID: &ref, CorrelationID: uuid.New(),
+				Entries: []ledger.EntryInput{
+					{LedgerAccountID: cash, Direction: ledger.Debit, Amount: 50},
+					{LedgerAccountID: clearing, Direction: ledger.Credit, Amount: 50},
+				},
+			})
+			return err
+		})
+		w.assertInvariants()
+		w.b11RequirePayoutCU(w.b11Recon(w.pastSource(false)), p.stale.ID, ref, true, "unlinked completion, standing")
+		w.b11RequirePayoutCU(w.b11Recon(w.source(false, line)), p.stale.ID, ref, false, "unlinked completion, in-run")
+	})
 	// The line reference is ANOTHER payout attempt's provider reference (the
 	// line resolves to that attempt by reference and names p by merchant
 	// reference). Even p's own withdrawal completed under that reference does
