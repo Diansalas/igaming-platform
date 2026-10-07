@@ -7347,3 +7347,77 @@ criterion A7 (PROVIDER DEPENDENT).
 - Tracked, no code yet: A2 boot-time re-check of stored capabilities/providers before the first real adapter;
   A4 per-provider alert aggregation before ALERT-DELIVERY-1; A5 runbook note that these P1s reuse
   `payment.webhook_integrity` and are not disputes; A6 post-CAS re-read in the T6 drain.
+
+## 42. Amendment — PRH-2 R7: payout dispute, T14 and payout escalation raise a durable P1 (B12, PAY-PAYOUT-DISPUTE-ALERT-1; `payments`, 2026-10-07)
+
+Status: `IMPLEMENTED` against MOCK as **raise only**, on branch `prh2-r7-classb-b12`. Closes the "Alerts for payout
+disputes and T14: NOT IMPLEMENTED" residual of §39.4 (the raise half). Security and ledger-finance reviews are
+requested (see 42.6). **ALERT-DELIVERY-1 is not touched and stays a production blocker**: nothing here adds a route,
+recipient or channel; routing stays disabled.
+
+### 42.1 What is raised
+
+- One durable P1 on the existing platform-owned Kind `payment.webhook_integrity` (ADR 0102 §17.1: no new Kind, no
+  migration). Discriminator `payout_attempt:<attempt_id>:reason:<closed reason>`; the only attribute is `provider_id`
+  (a registered id; none when the attempt has no provider). Subject tenant = the attempt's tenant. A repeated
+  condition is one open alert with growing occurrences.
+- The reason is closed: the keys of `PayoutDisputeReasons()` (which already include the B10
+  `provider_reference_conflict`), plus the payout T16 escalation reasons `non_idempotent_manifest`,
+  `max_resubmits_exhausted`, `resubmit_cas_refused`. `invalid_provider_reference:<detail>` collapses to its prefix.
+  Anything else becomes `unclassified` and is never echoed. No provider text, reference or amount reaches an alert.
+- All of it lives in the new `internal/payments/payout_alerts.go` (`raisePayoutDisputeAlert`,
+  `payoutAlertAfterDispute`); `alerts.go` is unchanged. A deposit attempt is a no-op for these helpers, and
+  `alertAfterDispute` stays a no-op for a payout, so the two compose at the shared receipt cells.
+
+### 42.2 Sites (every payout dispute / T14 / escalation write site, with its decision)
+
+| Site | Reason | Decision |
+|---|---|---|
+| `ApplyPayoutResult` invalid-reference park (`payout.go`) | `invalid_provider_reference` | raise, after the audit row |
+| `applyPayoutStatusEvidenceInTx` invalid-reference park | `invalid_provider_reference` | raise, after the audit row |
+| `applyPayoutSuccess` reference-mismatch park | `provider_reference_mismatch` | raise, after the audit row |
+| `applyPayoutSuccessCheckedFromStatus` amount/asset and reference-mismatch parks | `amount_asset_mismatch`, `provider_reference_mismatch` | raise, after the audit row |
+| `applyPayoutLateEvidence` (T14 and late T10; reached through `applyPayoutSuccess`/`applyPayoutDecline`/`payoutHandleContradiction`) | `late_success_after_terminal`, `late_decline_after_terminal`, `late_contradicting_evidence` | raise, after the audit row; the benign "already resolved" return raises nothing |
+| `payoutGuardReferenceBinding` (B10 park) | `provider_reference_conflict` | raise, after the audit row; `parked` stays true on a raise error |
+| receipt T15 (`success_for_never_sent_attempt`), callback amount/asset mismatch, tombstone, T14 `success_after_payout_declined`, callback reference mismatch (`receipt.go`) | the reason of the cell | raise as the returned value of the cell; these cells wrote no audit row and still write none |
+| `escalateAmbiguousPayout` (`payout_sweep.go`) | the three escalation reasons | raise after the audit row; an already-escalated or already-resolved attempt raises nothing |
+| `gateAndEscalateOnDeny` (KYC-deny T16) | n/a | **audit-only, left as is**: a compliance denial recorded in the KYC decision row and its audit, not a payment-integrity signal; not a dispute. Recorded as a finding; a later item may add a KYC-specific Kind |
+
+`ApplyPayoutResult`, `applyPayoutStatusEvidence` and `escalateAmbiguousPayout` now open their transaction through
+`alerting.InTx` and call `Pending.Flush` after the commit. Payout callbacks already run inside the webhook handler's
+`InTx`.
+
+### 42.3 Lock order and failure semantics (ADR 0102 §7.7)
+
+The raise is the last statement of its site (each call is a returned value; pinned by a source-order test). In
+`applyPayoutStatusEvidence` the optional staff-attribution audit (`payoutResolveAudit`: reads and an audit insert, no
+business-row lock) and, in the receipt path, the receipt-resolution tail still follow the raise: the "audit/commit
+tail" §7.7 allows. A deterministic alert failure (P0001, class 22/23, 42501) never rolls the dispute back and the
+swallowed raise is retried detached after the commit; a transient failure propagates and rolls the whole transaction
+back (dispute, audit and state), so redelivery or the sweeper retries the evidence.
+
+### 42.4 What this does not do
+
+No automatic resolution, release, settlement, posting, cascade or state change: the only new writes are the alert
+rows. No delivery, recipient or channel.
+
+### 42.5 Residuals and findings
+
+- **R-1** `late_decline_after_terminal`: a replayed synchronous decline on an already-declined attempt takes the
+  existing T14-shaped path (declined -> disputed) in `applyPayoutLateEvidence`; it now raises a P1 for what may be a
+  benign replay. Pre-existing behaviour, now loud; whether a same-decline replay should be a no-op is a ledger-finance
+  question and is not changed here.
+- **R-2** The KYC-deny escalation (`gateAndEscalateOnDeny`) stays audit-only (above).
+- **R-3** The callback transaction owner (the webhook handler's `InTx`) is covered by the existing static pin; no new
+  HTTP-level test was added (the integration tests apply receipts inside `alerting.InTx` as the handler does).
+- **R-4** These P1s reuse `payment.webhook_integrity` (ALERT-KINDS-DEDICATED-1) and are not all disputes (escalations
+  are not); runbook note as in §41.5 A5. ALERT-DELIVERY-1 remains open.
+
+### 42.6 Tests and evidence
+
+`internal/payments/payout_alerts_b12_integration_test.go` (every site and closed reason in one table with exact
+discriminator, attributes, audit counts and no-money assertions; duplicates; replay; tenant isolation; unclassified;
+deterministic, in-tx and transient failure semantics at four owners), `payout_alerts_test.go` (closed-set mapping,
+shape, deposit no-op, source-order guard), and the extended `internal/alerting/static_wiring_test.go` and
+`static_derived_raise_set_test.go` (B-1 pin). Mutation evidence:
+`docs/plans/prh2-hardening-round/prh2-r7-b12-payout-dispute-alert-mutation-kill.txt`.
