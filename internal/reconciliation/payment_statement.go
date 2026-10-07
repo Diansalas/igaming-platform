@@ -128,6 +128,11 @@ import (
 //     succeeded line resolving to it by merchant reference - on every run,
 //     unwindowed (PRH-2 K3, ADR 0101 9.2 S1/S2: IMPLEMENTED against MOCK;
 //     the N1 attribution residual is disclosed in ADR 0095 §35.4).
+//   - an unbound PAYOUT park gets the same standing coverage from succeeded
+//     PAYOUT lines only, and clears only on the payout signal (a
+//     withdrawal_completed keyed by the line's reference and attributable
+//     to the attempt): never on a deposit_reversal line or a tombstone
+//     (PAY-PAYOUT-UNBOUND-STANDING-1, ADR 0095 §35.2 PO-1 / §35.6).
 //   - declined attempts absent from the statement are not flagged
 //     (whether a real statement lists declines is PROVIDER DEPENDENT).
 //   - provider-succeeded vs platform-in-flight is NOT age-gated (ADR
@@ -1124,8 +1129,8 @@ func (m *payMatcher) matchPayment(lk string, l payLine) {
 		// silently folded into "disputed: already a payments P1" like
 		// every other disputed reason below.
 		m.r.add(MismatchKindPayCapturedUnposted, ak+" check=captured_unposted",
-			"resolution: a PSP-initiated reversal/tombstone, or allocation (LEDGER-SUSPENSE-B-1); M1 only acknowledges", "platform: "+a.render()+" terminal_reason="+a.terminalReason+m.yHolderNote(a)+"; "+m.label+l.render())
-	case a.unboundPark() && l.status == statement.PaymentStatusSucceeded && m.capturedUnpostedRef(l.ref) && m.markCaptured(a, l.ref):
+			capturedUnpostedHintFor(a, boundCapturedUnpostedResolutionHint), "platform: "+a.render()+" terminal_reason="+a.terminalReason+m.yHolderNote(a)+"; "+m.label+l.render())
+	case a.unboundPark() && l.status == statement.PaymentStatusSucceeded && !m.clearedRefFor(a, l.ref) && m.markCaptured(a, l.ref):
 		// ADR 0095 §35.2 (LF ruling on QA C-F2 (a)): a park that never
 		// bound a reference (a binding conflict, or an invalid reference)
 		// and a succeeded deposit line resolving to it - by construction
@@ -1134,9 +1139,11 @@ func (m *payMatcher) matchPayment(lk string, l payLine) {
 		// attempt ever hold a reference, a succeeded line naming it is the
 		// same exposure and stays loud. The PSP says it captured for this
 		// attempt and the platform posted nothing; the clearing signals
-		// are read on the LINE's reference. In-run only.
+		// are read on the LINE's reference, per operation (clearedRefFor: a
+		// payout park never clears on a deposit-shaped signal,
+		// PAY-PAYOUT-UNBOUND-STANDING-1). Standing: checkStandingUnbound.
 		m.r.add(MismatchKindPayCapturedUnposted, ak+" check=captured_unposted",
-			"resolution: a PSP-initiated reversal/tombstone on this line's reference, or allocation (LEDGER-SUSPENSE-B-1); M1 only acknowledges", "platform: "+a.render()+" terminal_reason="+a.terminalReason+"; "+m.label+l.render())
+			capturedUnpostedHintFor(a, capturedUnpostedResolutionHint), "platform: "+a.render()+" terminal_reason="+a.terminalReason+"; "+m.label+l.render())
 	case a.state == "disputed" || (a.state == "rejected" && !providerSucceeded):
 		// disputed: already a payments P1 (see the file comment).
 	case providerSucceeded && a.state != "succeeded":
@@ -1186,9 +1193,9 @@ func (m *payMatcher) checkMerchantAttribution(lk, ak, op string, a *payAttempt, 
 	m.r.add(MismatchKindPayReferenceMismatch, ak+" check=merchant",
 		"platform: merchant_reference "+a.merchantRef+" ("+a.render()+")",
 		m.label+"merchant_reference names attempt="+b.id.String()+" ("+b.render()+" terminal_reason="+orNone(b.terminalReason)+"); "+l.render())
-	if b.unboundPark() && l.status == statement.PaymentStatusSucceeded && m.capturedUnpostedRef(l.ref) && m.markCaptured(b, l.ref) {
+	if b.unboundPark() && l.status == statement.PaymentStatusSucceeded && !m.clearedRefFor(b, l.ref) && m.markCaptured(b, l.ref) {
 		m.r.add(MismatchKindPayCapturedUnposted, lk+" attempt="+b.id.String()+" check=captured_unposted",
-			"resolution: a PSP-initiated reversal/tombstone on this line's reference, or allocation (LEDGER-SUSPENSE-B-1); M1 only acknowledges",
+			capturedUnpostedHintFor(b, capturedUnpostedResolutionHint),
 			"platform: "+b.render()+" terminal_reason="+b.terminalReason+"; line resolved by reference to attempt="+a.id.String()+"; "+m.label+l.render())
 	}
 }
@@ -1305,15 +1312,6 @@ func (m *payMatcher) yHolderNote(a *payAttempt) string {
 	return "; poll_returned_reference=" + y + " is held by another attempt, park or posting and is not used for clearing (verify with the PSP)"
 }
 
-// capturedUnpostedRef is capturedUnposted's clearing rule for one
-// reference: still captured-and-unposted unless a deposit_reversal line of
-// THIS run names it as its original, or a tombstone ledger row holds it.
-// Nothing else clears it - not an M1 decision, not a mismatch row's
-// investigation_status (ADR 0095 §35.3).
-func (m *payMatcher) capturedUnpostedRef(ref string) bool {
-	return !m.clearedRef(ref)
-}
-
 // checkUnmatchedAttempts: attempts that no line in THIS run matched.
 func (m *payMatcher) checkUnmatchedAttempts() {
 	for _, a := range m.attempts {
@@ -1340,7 +1338,7 @@ func (m *payMatcher) checkUnmatchedAttempts() {
 		// reported here: it holds no reference this rule could clear on.
 		case a.boundCapture() && m.capturedUnposted(a):
 			m.r.add(MismatchKindPayCapturedUnposted, k+" check=captured_unposted",
-				"resolution: a PSP-initiated reversal/tombstone, or allocation (LEDGER-SUSPENSE-B-1); M1 only acknowledges", m.label+"no statement line; platform: "+a.render()+" terminal_reason="+a.terminalReason+m.yHolderNote(a))
+				capturedUnpostedHintFor(a, boundCapturedUnpostedResolutionHint), m.label+"no statement line; platform: "+a.render()+" terminal_reason="+a.terminalReason+m.yHolderNote(a))
 		// The coverage window protects only the "missing provider record"
 		// rule. Ageing is not coverage-gated (code review F2): with a
 		// window no longer than the horizon an in-flight attempt would

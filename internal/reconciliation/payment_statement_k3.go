@@ -50,9 +50,17 @@ const (
 	m2KindPaid                                                 = "m2_declare_paid"
 	m2KindNotPaid                                              = "m2_declare_not_paid"
 	capturedUnpostedResolutionHint                             = "resolution: a PSP-initiated reversal/tombstone on this line's reference, or allocation (LEDGER-SUSPENSE-B-1); M1 only acknowledges"
-	declaredPaidUnconfirmedResolutionHint                      = "resolution: a confirming statement line from an eligible import (payout, succeeded, resolved to this attempt, amount and asset equal) or a withdrawal reversal (WITHDRAWAL-REVERSAL-1); a compensating credit annotates but does not clear"
-	declaredNotPaidButPaidResolutionHint                       = "resolution: executed compensating_entry debits, causation = the withdrawal_failed transaction, totalling at least the withdrawn amount; an off-platform recovery has no clearing path and is tracked through the row's investigation status"
-	declaredPaidCompensatedButPaidResolutionHint               = "resolution: executed compensating_entry debits, causation = the compensating credit's own transaction, totalling at least the credited amount"
+	boundCapturedUnpostedResolutionHint                        = "resolution: a PSP-initiated reversal/tombstone, or allocation (LEDGER-SUSPENSE-B-1); M1 only acknowledges"
+	// payoutCapturedUnpostedResolutionHint is the PAYOUT reading of
+	// pay_captured_unposted (ADR 0095 §35.2 PO-1, PAY-PAYOUT-UNBOUND-STANDING-1):
+	// "the provider may have paid out and the platform posted no completion".
+	// Allocation is NEVER a route for a payout (it would credit player cash for
+	// money the PSP already paid out: a double payout); the resolution path
+	// (PAY-PAYOUT-UNBOUND-RESOLVE-1) is NOT IMPLEMENTED (ADR 0101 R-K3-8).
+	payoutCapturedUnpostedResolutionHint         = "resolution: PSP-side recall/return or governed completion against the hold (NOT IMPLEMENTED, R-K3-8); never allocation; M1 only acknowledges"
+	declaredPaidUnconfirmedResolutionHint        = "resolution: a confirming statement line from an eligible import (payout, succeeded, resolved to this attempt, amount and asset equal) or a withdrawal reversal (WITHDRAWAL-REVERSAL-1); a compensating credit annotates but does not clear"
+	declaredNotPaidButPaidResolutionHint         = "resolution: executed compensating_entry debits, causation = the withdrawal_failed transaction, totalling at least the withdrawn amount; an off-platform recovery has no clearing path and is tracked through the row's investigation status"
+	declaredPaidCompensatedButPaidResolutionHint = "resolution: executed compensating_entry debits, causation = the compensating credit's own transaction, totalling at least the credited amount"
 )
 
 var reconciliationMeter = otel.Meter("github.com/Diansalas/igaming-platform/internal/reconciliation")
@@ -197,11 +205,26 @@ func (m *payMatcher) loadK3Evidence(ctx context.Context, tx pgx.Tx, importIsMock
 	// The references and merchant references the run needs evidence for.
 	refs, merchants := map[string]bool{}, map[string]bool{}
 	for _, a := range m.attempts {
-		if a.operation == "deposit" && a.state == "disputed" {
-			c := a.captureClass()
+		if a.state != "disputed" {
+			continue
+		}
+		c := a.captureClass()
+		switch a.operation {
+		case paymentStatementKindDeposit:
 			if c == reasonBound && a.providerRef != "" {
 				refs[a.providerRef] = true
 			}
+			if c == reasonUnbound {
+				merchants[a.merchantRef] = true
+				if a.providerRef != "" {
+					refs[a.providerRef] = true
+				}
+			}
+		case paymentStatementKindPayout:
+			// PAY-PAYOUT-UNBOUND-STANDING-1 (ADR 0095 §35.2 PO-1): an unbound
+			// payout park gets standing coverage from persisted PAYOUT lines
+			// (checkStandingUnbound). Bound-class payout parks keep their
+			// existing rule (checkUnmatchedAttempts) and need no lines here.
 			if c == reasonUnbound {
 				merchants[a.merchantRef] = true
 				if a.providerRef != "" {
@@ -400,31 +423,102 @@ func (m *payMatcher) markCaptured(a *payAttempt, ref string) bool {
 	return true
 }
 
-// checkStandingUnbound is S1 (STANDING-1): every disputed deposit attempt the
-// D2F-1 runtime rule treats as unbound is reported on EVERY run, unwindowed,
-// while ANY persisted import of this tenant and provider has a succeeded
-// deposit line resolving to it (by merchant reference, or by reference should
-// the attempt hold one) that is not cleared (S2). The detail records the
+// clearedRefFor is the per-OPERATION clearing rule for an unbound park's
+// finding keyed on the evidencing line's reference ref.
+//
+//   - deposit: clearedRef (a completed deposit_reversal line naming ref, or a
+//     tombstone on ref) - unchanged.
+//   - payout (PAY-PAYOUT-UNBOUND-STANDING-1, ADR 0095 §35.2 PO-1): a
+//     deposit-shaped signal (a deposit_reversal line, a tombstone, even naming
+//     the same reference) NEVER clears: in the reverse-collision case the PSP
+//     refund of a real deposit R says nothing about whether a payout under R
+//     left the platform. The only clearing is payoutCompletedRef.
+//
+// Any other operation never clears (fail closed).
+func (m *payMatcher) clearedRefFor(a *payAttempt, ref string) bool {
+	switch a.operation {
+	case paymentStatementKindDeposit:
+		return m.clearedRef(ref)
+	case paymentStatementKindPayout:
+		return m.payoutCompletedRef(a, ref)
+	}
+	return false
+}
+
+// payoutCompletedRef: a withdrawal_completed ledger posting of this provider
+// keyed by ref (the governed completion against the hold, or the PSP's own
+// settlement reference) exists, and it is ATTRIBUTABLE to a: no OTHER attempt
+// holds ref as its payout settlement reference or as its payout provider
+// reference. Borrowed attribution may raise, never clear (the resolvesTo /
+// yAttributable precedent): another payout's completion under the same
+// reference says nothing about a's hold. No new line kind or schema; a
+// future payout_return line kind is a schema change out of scope here.
+func (m *payMatcher) payoutCompletedRef(a *payAttempt, ref string) bool {
+	if ref == "" || m.ledgerByRef["withdrawal_completed\x00"+ref] == nil {
+		return false
+	}
+	if h := m.bySettlement[ref]; h != nil && h != a {
+		return false
+	}
+	if h := m.byRef[paymentStatementKindPayout+"\x00"+ref]; h != nil && h != a {
+		return false
+	}
+	return true
+}
+
+// capturedUnpostedHintFor returns the operator text for a pay_captured_unposted
+// finding on attempt a: the deposit wording (ADR 0101 F13) for a deposit, and
+// the payout reading (never allocation) for a payout.
+func capturedUnpostedHintFor(a *payAttempt, depositHint string) string {
+	if a.operation == paymentStatementKindPayout {
+		return payoutCapturedUnpostedResolutionHint
+	}
+	return depositHint
+}
+
+// checkStandingUnbound is S1 (STANDING-1): every disputed attempt the D2F-1
+// runtime rule treats as unbound is reported on EVERY run, unwindowed, while
+// ANY persisted import of this tenant and provider has a succeeded line OF THE
+// ATTEMPT'S OWN OPERATION resolving to it (by merchant reference, or by
+// reference should the attempt hold one) that is not cleared under that
+// operation's rule (clearedRefFor; S2 for deposits). The detail records the
 // evidencing import, its line number, whether that import is MOCK and the
 // attempt that holds the line's own reference (the N1 residual, C-34b).
+//
+// PAY-PAYOUT-UNBOUND-STANDING-1 (ADR 0095 §35.2 PO-1): payouts run the same
+// rule per operation - linesFor(a, "payout"), the "payout\x00" holder
+// namespace, the payout clearing rule and the payout wording. A deposit line
+// never evidences a payout park and a payout line never evidences a deposit
+// park.
 func (m *payMatcher) checkStandingUnbound() {
 	for _, a := range m.attempts {
 		if !a.unboundPark() {
 			continue
 		}
-		for _, l := range m.k3.linesFor(a, paymentStatementKindDeposit) {
-			if l.status != paymentStatementStatusSucceeded || m.clearedRef(l.ref) {
+		var kind string
+		switch a.operation {
+		case paymentStatementKindDeposit:
+			kind = paymentStatementKindDeposit
+		case paymentStatementKindPayout:
+			kind = paymentStatementKindPayout
+		default:
+			continue
+		}
+		for _, l := range m.k3.linesFor(a, kind) {
+			if l.status != paymentStatementStatusSucceeded || m.clearedRefFor(a, l.ref) {
 				continue
 			}
 			if !m.markCaptured(a, l.ref) {
 				continue
 			}
 			holder := "none"
-			if h := m.byRef["deposit\x00"+l.ref]; h != nil {
+			if h := m.byRef[kind+"\x00"+l.ref]; h != nil {
+				holder = h.id.String()
+			} else if h := m.bySettlement[l.ref]; kind == paymentStatementKindPayout && h != nil {
 				holder = h.id.String()
 			}
 			m.r.add(MismatchKindPayCapturedUnposted, m.key("attempt="+a.id.String(), "provider_reference="+orNone(l.ref), "check=captured_unposted"),
-				capturedUnpostedResolutionHint,
+				capturedUnpostedHintFor(a, capturedUnpostedResolutionHint),
 				"platform: "+a.render()+" terminal_reason="+a.terminalReason+fmt.Sprintf("; standing: persisted line import=%s line_no=%d is_mock=%t holder_attempt=%s; ", l.importID, l.lineNo, l.isMock, holder)+
 					m.label+fmt.Sprintf("kind=%s status=%s amount=%s asset=%s reference=%s", l.kind, l.status, l.amount, l.asset, l.ref))
 		}
