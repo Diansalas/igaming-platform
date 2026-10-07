@@ -7776,11 +7776,30 @@ terminal-reason CHECK are untouched). Same Kind, discriminator shape, attributes
   success on a declined vs. a succeeded deposit differ from a payout's double-payout risk) and its own static pins. That is
   outside R-6's stated scope. Proposed follow-up: **PAY-DEPOSIT-MISMATCH-ALERT-1** (Medium; before real-provider use;
   needs a security/ledger-finance ruling on the deposit signal semantics).
-- **M-1 follow-up PAY-PAYOUT-SUCCEEDED-REF-MISMATCH-1 (ledger-finance finding; REQUIRED; production blocker alongside
-  ALERT-DELIVERY-1).** A success with a DIFFERENT provider reference but matching amount/asset on an already-SUCCEEDED payout,
-  resolved via the merchant reference, is silently folded in as `duplicate_effect` with 0 alerts and 0 audit rows. The
-  non-terminal path disputes and raises `provider_reference_mismatch` (`receipt.go` ~906-931, S-M1); the terminal-succeeded
-  cell does not. Fix: audit plus raise-only P1 (own closed reason, no state change), R-6 pattern. Not done in R-6.
+- **M-1 PAY-PAYOUT-SUCCEEDED-REF-MISMATCH-1 (ledger-finance finding; RESOLVED for payouts, `IMPLEMENTED` against MOCK, raise
+  only; 2026-10-07).** A success with a DIFFERENT provider reference but matching amount/asset on an already-SUCCEEDED payout,
+  resolved via the merchant reference (the new reference being unbound), used to be folded in as `duplicate_effect` with 0
+  alerts and 0 audit rows, while the non-terminal path disputes and raises `provider_reference_mismatch` (S-M1). In
+  `applyResolvedReceiptEvidence`, the `AttemptSucceeded` branch (matching amount/asset, payout only) now compares the delivered
+  reference with the one on file (the attempt's own, falling back to the withdrawal's, the same rule as S-M1). When they
+  differ it writes ONE `payments.payout_succeeded_foreign_reference` audit row (actor system, outcome `denied`, target the
+  attempt; closed vocabulary: `reason`, `attempt_state`, `evidence`, `provider_id`, `stored_reference` (the platform's own
+  bound value), the echoed reference through `echoAuditMeta` (raw only when a valid reference), `stored_amount`,
+  `stored_asset_code`, `withdrawal_request_id`; no provider text) and then raises ONE P1 as the returned LAST statement
+  (`raisePayoutDisputeAlert(..., alertReasonPayoutForeignRefSuccessOnSucceeded)`, new closed reason
+  `foreign_reference_success_on_succeeded_payout` in `payoutSignalReasons`, now 3 members; not a terminal reason, no CHECK
+  change, no migration; same Kind, discriminator shape, `provider_id`-only attributes and failure semantics as R-5/R-6). No
+  state change, no rebind of the stored reference, no release, settlement or posting, no delivery, recipient or channel
+  (ALERT-DELIVERY-1 stays a production blocker); the result stays `duplicate_effect`. The SAME reference (a true duplicate)
+  raises nothing and writes nothing. A deposit is unchanged (the branch is payout-only; `raisePayoutDisputeAlert` is also a
+  no-op for a deposit; pinned by `TestM1_Deposit_ForeignRefSuccessOnSucceeded_Unchanged`). Pins: the static raise-site count
+  for `receipt.go:applyResolvedReceiptEvidence:raisePayoutDisputeAlert` is now 4 (both directions), the source-order guard
+  counts 16 sites (was 15), the closed-set unit test covers the third signal reason. Tests:
+  `payout_succeeded_foreignref_integration_test.go` (audit row and one alert with `provider_id` only and no leaked
+  references, same-reference duplicate raises nothing, three-delivery replay is one open alert with growing occurrences,
+  money/ledger/state/stored reference unchanged, tenant isolation, deterministic / in-tx / transient failure semantics as
+  R-6). Mutation evidence:
+  `docs/plans/prh2-hardening-round/prh2-r10-succ-ref-mismatch-mutation-kill.txt`.
 - **PAY-DEPOSIT-MISMATCH-ALERT-1 is a HARD GATE before any real-provider deposit.** Split: a mismatched success on a DECLINED
   deposit is a capture without credit (P1 when built); on a SUCCEEDED deposit it is P1 or P2 depending on the daily provider
   reconciliation. Security design points: `provider_id` as the sole attribute; discriminator keyed to the intent/attempt id

@@ -67,6 +67,14 @@ func TestM1_ForeignRefSuccessOnSucceededPayout_AuditAndOneP1_NoStateChange(t *te
 			t.Fatalf("audit metadata %s = %v, want %v (%v)", k, r.Metadata[k], want, r.Metadata)
 		}
 	}
+	// The foreign-reference receipt is resolved anomaly_other (not applied) and stored once.
+	var resolution string
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT resolution FROM payment_provider_events WHERE tenant_id=$1 AND provider_reference=$2`,
+			f.tenantID, "m1-foreign-ref").Scan(&resolution)
+	}); err != nil || resolution != string(ResolutionAnomalyOther) {
+		t.Fatalf("foreign-reference receipt resolution = %q (%v), want %s", resolution, err, ResolutionAnomalyOther)
+	}
 	if n := e.b12AuditCount(t, r5Terminal, a.ID); n != 0 {
 		t.Fatalf("the amount/asset mismatch audit must not be written (they match), got %d", n)
 	}
