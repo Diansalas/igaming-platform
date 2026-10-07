@@ -10,9 +10,15 @@
 package payments
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/jackc/pgx/v5"
+
+	"github.com/Diansalas/igaming-platform/internal/alerting"
+	"github.com/Diansalas/igaming-platform/internal/testsupport/alertinject"
 )
 
 func (e rbEnv) m1StoredRef(t *testing.T, o b12Out) string {
@@ -179,4 +185,59 @@ func TestM1_AlertFailureSemantics(t *testing.T) {
 		e.b12AssertOneAlert(t, a.ID, alertReasonPayoutForeignRefSuccessOnSucceeded)
 		e.r6AssertStillSucceeded(t, o)
 	})
+}
+
+// Deposits are unchanged by M-1: a matching success with a DIFFERENT reference on a SUCCEEDED
+// deposit writes no foreign-reference audit row, raises nothing (payout only) and changes nothing.
+func TestM1_Deposit_ForeignRefSuccessOnSucceeded_Unchanged(t *testing.T) {
+	pool := depositV2ScratchPool(t)
+	pid := "mock-psp-m1-dep"
+	f := seedOrchFixture(t, pool)
+	provider := NewMockProvider(pid, "EUR")
+	registerCapability(t, pool, f, provider, 100)
+	orch := NewOrchestrator(map[string]PaymentProvider{pid: provider}, MultiWebhookCredentialResolver{pid: NewMockWebhookCredentials(provider)})
+	res, err := orch.InitiateDepositAttempt(context.Background(), pool, AllowAllDepositKYCGate{}, MockCredentialResolver{}, InitiateDepositParams{
+		Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
+		AssetCode: "EUR", Amount: 5000, PaymentMethod: "card", IdempotencyKey: "m1-dep",
+	})
+	if err != nil {
+		t.Fatalf("InitiateDepositAttempt: %v", err)
+	}
+	ref := "m1-dep-ref"
+	if res.Attempt.ProviderReference != nil {
+		ref = *res.Attempt.ProviderReference
+	}
+	deliver := func(r string) ReceiptDisposition {
+		var disp ReceiptDisposition
+		pending, err := alerting.InTx(context.Background(), alerting.NewTenantRunner(pool, f.tenantID), func(ctx context.Context, tx pgx.Tx) error {
+			var err error
+			disp, err = ApplyReceiptEvidence(ctx, tx, orch, f.tenantID, pid, ReceiptEvidence{
+				EventType: "deposit", ProviderReference: r, MerchantReference: res.Attempt.MerchantReference,
+				Outcome: OutcomeSucceeded, Amount: 5000, AssetCode: "EUR",
+			})
+			return err
+		})
+		if err != nil {
+			t.Fatalf("ApplyReceiptEvidence: %v", err)
+		}
+		pending.Flush(context.Background())
+		return disp
+	}
+	if d := deliver(ref); d != DispositionApplied {
+		t.Fatalf("setup: matching success disposition = %s, want applied", d)
+	}
+	if d := deliver("m1-dep-foreign"); d != DispositionDuplicateEffect {
+		t.Fatalf("a deposit foreign-reference success must stay duplicate_effect, got %s", d)
+	}
+	if got := mustGetAttempt(t, pool, f.tenantID, res.Attempt.ID); got.State != AttemptSucceeded {
+		t.Fatalf("state = %s, want succeeded", got.State)
+	}
+	if rows := alertinject.ForSubject(t, pool, f.tenantID); len(rows) != 0 {
+		t.Fatalf("a deposit must raise no payout alert, got %+v", rows)
+	}
+	if n := fpCount(t, pool, f.tenantID, `SELECT count(*) FROM audit_log WHERE tenant_id=$1 AND action=$2 AND target_id=$3`,
+		f.tenantID, auditActionPayoutSucceededForeignRef, res.Attempt.ID.String()); n != 0 {
+		t.Fatalf("a deposit writes no payout foreign-reference audit row, got %d", n)
+	}
+	assertLedgerBalanced(t, pool, f.tenantID)
 }
