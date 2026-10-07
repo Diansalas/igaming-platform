@@ -91,3 +91,13 @@ F1-flush-ApplyPayoutResult KILLED static:TestStaticWiring_EvidenceTransactionOwn
 D2-benign-replay-raises KILLED unit:TestPayoutDisputeRaiseIsReturnedNeverFollowedByWork_ADR0102_7_7 | static:TestStaticWiring_PayoutDisputeRaiseSitesArePinned_B12 | integ:TestB12_NoSecondRaise_OnReplayOrAlreadyEscalated
   restore-cmp payout.go OK
 DONE
+
+----- LF M-1/C1 decline-replay no-op (applyPayoutLateEvidence), added after review -----
+N1 guard removed, N2 guard widened to any reason (would swallow T14), N3 guard on the wrong reason. 3 counted, 3 KILLED, 0 survived.
+N1-decline-noop-removed KILLED integ:TestB12_ConcurrentDeclines_ConvergeCleanly_NoAlert,TestB12_LateDeclineReplay_IsCleanNoOp
+  restore-cmp payout.go OK
+N2-decline-noop-widened-kills-T14 KILLED integ:TestB12_EachSiteAndReason_RaisesExactlyOneAlert_AuditUnchanged_NoMoney
+  restore-cmp payout.go OK
+N3-decline-noop-wrong-reason KILLED integ:TestB12_ConcurrentDeclines_ConvergeCleanly_NoAlert,TestB12_EachSiteAndReason_RaisesExactlyOneAlert_AuditUnchanged_NoMoney,TestB12_LateDeclineReplay_IsCleanNoOp
+  restore-cmp payout.go OK
+DONE

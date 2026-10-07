@@ -7377,22 +7377,29 @@ recipient or channel; routing stays disabled.
 | `applyPayoutStatusEvidenceInTx` invalid-reference park | `invalid_provider_reference` | raise, after the audit row |
 | `applyPayoutSuccess` reference-mismatch park | `provider_reference_mismatch` | raise, after the audit row |
 | `applyPayoutSuccessCheckedFromStatus` amount/asset and reference-mismatch parks | `amount_asset_mismatch`, `provider_reference_mismatch` | raise, after the audit row |
-| `applyPayoutLateEvidence` (T14 and late T10; reached through `applyPayoutSuccess`/`applyPayoutDecline`/`payoutHandleContradiction`) | `late_success_after_terminal`, `late_decline_after_terminal`, `late_contradicting_evidence` | raise, after the audit row; the benign "already resolved" return raises nothing |
+| `applyPayoutLateEvidence` (T14 and late T10; reached through `applyPayoutSuccess`/`applyPayoutDecline`/`payoutHandleContradiction`) | `late_success_after_terminal`, `late_contradicting_evidence` | raise, after the audit row; the benign "already resolved" return raises nothing. **A decline replayed on an already-declined attempt (`late_decline_after_terminal`) is a clean no-op** (LF M-1/C1, 42.5 R-1): no transition, no audit, no alert |
 | `payoutGuardReferenceBinding` (B10 park) | `provider_reference_conflict` | raise, after the audit row; `parked` stays true on a raise error |
-| receipt T15 (`success_for_never_sent_attempt`), callback amount/asset mismatch, tombstone, T14 `success_after_payout_declined`, callback reference mismatch (`receipt.go`) | the reason of the cell | raise as the returned value of the cell; these cells wrote no audit row and still write none |
+| receipt T15 (`success_for_never_sent_attempt`), callback amount/asset mismatch, tombstone, T14 `success_after_payout_declined` (`receipt.go`) | the reason of the cell | raise as the returned value of the cell; these cells wrote no audit row and still write none (L-1, tracked as PAY-PAYOUT-CALLBACK-AUDIT-1, 42.5) |
+| receipt callback reference-mismatch park (`receipt.go`) | `provider_reference_mismatch` | raise, after its existing `payments.payout_provider_reference_mismatch` audit row |
 | `escalateAmbiguousPayout` (`payout_sweep.go`) | the three escalation reasons | raise after the audit row; an already-escalated or already-resolved attempt raises nothing |
 | `gateAndEscalateOnDeny` (KYC-deny T16) | n/a | **audit-only, left as is**: a compliance denial recorded in the KYC decision row and its audit, not a payment-integrity signal; not a dispute. Recorded as a finding; a later item may add a KYC-specific Kind |
 
 `ApplyPayoutResult`, `applyPayoutStatusEvidence` and `escalateAmbiguousPayout` now open their transaction through
-`alerting.InTx` and call `Pending.Flush` after the commit. Payout callbacks already run inside the webhook handler's
-`InTx`.
+`alerting.InTx` and call `Pending.Flush` after the commit. Receipt cells run inside the webhook handler's `InTx`.
+There is **no payout webhook route today**: `CallbackEventType` is `deposit` / `deposit_reversal` only, so the payout
+receipt cells are reachable only when deposit-typed evidence resolves to a payout attempt (and through tests that
+build payout `ReceiptEvidence` directly).
 
 ### 42.3 Lock order and failure semantics (ADR 0102 §7.7)
 
 The raise is the last statement of its site (each call is a returned value; pinned by a source-order test). In
 `applyPayoutStatusEvidence` the optional staff-attribution audit (`payoutResolveAudit`: reads and an audit insert, no
-business-row lock) and, in the receipt path, the receipt-resolution tail still follow the raise: the "audit/commit
-tail" §7.7 allows. A deterministic alert failure (P0001, class 22/23, 42501) never rolls the dispute back and the
+business-row lock) still follows the raise. In the receipt path the tail after the cell is `ResolveReceipt` (an
+`payment_provider_events` update), the deposit-intent projection recompute for deposits and
+`ApplyDeferredReceiptsForAttempt`, which takes only locks the transaction already holds on the same parent and attempt
+(no different intent, attempt, wallet, account or session). This is a tail, not "audit only": it is what §7.7 means by
+"before the audit/commit tail" and it is the same shape the deposit cells already have; it is stated here so the claim
+is exact. A deterministic alert failure (P0001, class 22/23, 42501) never rolls the dispute back and the
 swallowed raise is retried detached after the commit; a transient failure propagates and rolls the whole transaction
 back (dispute, audit and state), so redelivery or the sweeper retries the evidence.
 
@@ -7403,10 +7410,24 @@ rows. No delivery, recipient or channel.
 
 ### 42.5 Residuals and findings
 
-- **R-1** `late_decline_after_terminal`: a replayed synchronous decline on an already-declined attempt takes the
-  existing T14-shaped path (declined -> disputed) in `applyPayoutLateEvidence`; it now raises a P1 for what may be a
-  benign replay. Pre-existing behaviour, now loud; whether a same-decline replay should be a no-op is a ledger-finance
-  question and is not changed here.
+- **R-1 (resolved in B12 by the LF-pre-approved no-op).** Before B12, a decline replayed on an already-declined
+  attempt (reachable from a stale attempt snapshot in phase C, a poll, or a sweeper resend) took the T14-shaped path
+  (declined -> disputed, `late_decline_after_terminal`). `applyPayoutLateEvidence` now returns nil for exactly that
+  case: no transition, no audit, no alert. This is a behaviour change to the dispute state machine, approved by
+  ledger-finance (M-1/C1). T14 (a success after a decline) is unchanged, and a decline echoing a foreign reference is
+  still parked by the reference guard and raises (`late_contradicting_evidence`). `late_decline_after_terminal` stays
+  in `PayoutDisputeReasons()` (the C-5b pin) for historical rows. Pinned by `TestB12_LateDeclineReplay_IsCleanNoOp`
+  and `TestB12_ConcurrentDeclines_ConvergeCleanly_NoAlert`.
+- **R-5 (open; owner payments + ledger-finance; raise-only fix later).** A success whose amount/asset is mismatched,
+  arriving on an already-declined payout (`receipt.go`, the `AttemptDeclined` mismatched branch), writes only
+  `auditTerminalAmountAssetMismatch`: no state change and **no page**. It is a double-payout candidate (the hold is
+  already released) and should raise like T14. Not changed here.
+- **L-1 (tracked: PAY-PAYOUT-CALLBACK-AUDIT-1).** The callback T14, T15, amount-mismatch and tombstone payout cells
+  write no audit row (only the receipt row and the new alert). A follow-up should add audit rows; B12 keeps audit
+  behaviour exactly as it was.
+- **C-2 (note for ALERT-DELIVERY-1).** The future dispatcher must not hold `alerts` row locks across network I/O: a
+  raise from a business transaction is the terminal lock level (§7.7), so a dispatcher holding those rows during a
+  send would block payout evidence transactions.
 - **R-2** The KYC-deny escalation (`gateAndEscalateOnDeny`) stays audit-only (above).
 - **R-3** The callback transaction owner (the webhook handler's `InTx`) is covered by the existing static pin; no new
   HTTP-level test was added (the integration tests apply receipts inside `alerting.InTx` as the handler does).
@@ -7416,8 +7437,10 @@ rows. No delivery, recipient or channel.
 ### 42.6 Tests and evidence
 
 `internal/payments/payout_alerts_b12_integration_test.go` (every site and closed reason in one table with exact
-discriminator, attributes, audit counts and no-money assertions; duplicates; replay; tenant isolation; unclassified;
-deterministic, in-tx and transient failure semantics at four owners), `payout_alerts_test.go` (closed-set mapping,
+discriminator, attributes, audit counts and no-money assertions; duplicates; replay; tenant isolation, including a
+tenant-B session reading zero alert and occurrence rows; unclassified; deterministic, in-tx and transient failure
+semantics at four owners; the decline-replay no-op, concurrent declines, and transient-failure-then-redelivery
+convergence), `payout_alerts_test.go` (closed-set mapping,
 shape, deposit no-op, source-order guard), and the extended `internal/alerting/static_wiring_test.go` and
 `static_derived_raise_set_test.go` (B-1 pin). Mutation evidence:
 `docs/plans/prh2-hardening-round/prh2-r7-b12-payout-dispute-alert-mutation-kill.txt`.
