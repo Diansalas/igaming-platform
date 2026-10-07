@@ -424,7 +424,9 @@ func (m *payMatcher) markCaptured(a *payAttempt, ref string) bool {
 }
 
 // clearedRefFor is the per-OPERATION clearing rule for an unbound park's
-// finding keyed on the evidencing line's reference ref.
+// finding keyed on the evidencing line's reference ref, and (through
+// capturedUnposted, PAY-PAYOUT-BOUND-CLEAR-1) for a bound PAYOUT park's finding
+// keyed on its held reference X.
 //
 //   - deposit: clearedRef (a completed deposit_reversal line naming ref, or a
 //     tombstone on ref) - unchanged.
