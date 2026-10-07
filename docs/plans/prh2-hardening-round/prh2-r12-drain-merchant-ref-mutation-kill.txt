@@ -1,0 +1,30 @@
+PRH-2 round 12 mutation-kill evidence, 2026-10-07: PAY-RECEIPT-DRAIN-MERCHANT-REF-1 (ADR 0095 section 42.8, LF I-1)
+Method: each mutant is applied in place to internal/payments/receipt.go (backup receipt.go.mutbak beside it), `go build ./internal/payments/`
+must succeed (a mutant that does not compile is NOT counted), then against a private scratch DB (runtime role, no -race for mutants):
+  go test -v -tags integration -count=1 -p 1 ./internal/payments -run 'TestDrainMerchantRef_|TestOrphanResolve_|TestRVLF|TestReceiptT4Drain'
+After every mutant the file is restored from the backup and checked with `git diff --quiet -- internal/payments/receipt.go`.
+A CONTROL run on the unmutated tree passed first (both passes). Harness: scratchpad r12a_mut.py / r12a_mut2.py.
+Compile-error mutants counted: 0.
+
+INVALIDATED RUNS (disclosed, not counted): in the first pass the host disk filled up (ENOSPC while linking the test binary) for M11 and M12;
+their "KILLED" lines are build failures, not test kills. Both were re-run in the second pass after freeing stale /tmp/go-build* dirs.
+M6 SURVIVED the first pass (no test reached an unrouted attempt); TestDrainMerchantRef_Deposit_UnroutedForeignAttempt_ClosedAsCrossProvider
+was added and M6 is KILLED in the second pass.
+
+FINAL RESULTS (12 distinct mutants): 10 KILLED, 2 SURVIVED (M10, M11; both classified below).
+M1  check removed (if false && ...)                         KILLED  ForeignAttemptSameProvider, OtherProviderAttempt, MixedBatch, TenantIsolation, Payout_Matrix(foreign_*), OrphanResolve_Interleaved
+M2  same-attempt compare inverted (ID == attempt.ID)        KILLED  MatchingMerchantRef_Applies, ForeignAttemptSameProvider, MixedBatch, TenantIsolation, Payout_Matrix(matching, foreign_same_provider), Interleaved
+M3  wrong label (conflict closed as cross_provider)         KILLED  ForeignAttemptSameProvider, MixedBatch, TenantIsolation, Payout_Matrix(foreign_same_provider), Interleaved
+M4  wrong label (cross_provider closed as conflict)         KILLED  OtherProviderAttempt, Payout_Matrix(foreign_other_provider)
+M5  provider compare inverted (== instead of !=)            KILLED  10 tests incl. MatchingMerchantRef_Applies, OtherProviderAttempt, Payout_Matrix
+M6  unrouted clause removed (nil ProviderID not cross)      KILLED  (second pass) Deposit_UnroutedForeignAttempt_ClosedAsCrossProvider
+M7  closed with attempt_id = this attempt (not NULL)        KILLED  ForeignAttemptSameProvider, OtherProviderAttempt, MixedBatch, Payout_Matrix, Interleaved
+M8  `continue` removed (closed AND then applied)            KILLED  ForeignAttemptSameProvider, MixedBatch, OtherProviderAttempt, Payout_Matrix, ...
+M9  nil guard on the merchant reference removed             KILLED  TestRVLF_C2_DFR_CallbackSiteDeferredApplyBackstop (nil pointer; also the absent-merchant-ref tests)
+M10 empty-string guard removed (only != nil)                SURVIVED (EQUIVALENT): a merchant reference is always an attempt id string, so
+    looking up '' finds no attempt and the code falls through to apply, exactly as the guard does. Not a test gap.
+M11 tolerant close instead of strict (duplicate=true)       SURVIVED (EQUIVALENT under the lock contract): the drain selected the row FOR UPDATE and holds
+    the parent and attempt locks, so the row cannot be resolved by anything else before this close; strict and tolerant behave
+    identically. Defence in depth, same class as the accepted survivors of PAY-RECEIPT-ORPHAN-RESOLVE-1.
+M12 lookup miss also closes as an anomaly                   KILLED  (second pass) TenantIsolation, UnknownMerchantRef_Applies
+Restore-cmp: OK after every mutant, both passes. No .mutbak left behind.

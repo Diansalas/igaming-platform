@@ -1730,6 +1730,34 @@ func ApplyDeferredReceiptsForAttempt(ctx context.Context, tx pgx.Tx, o *Orchestr
 			}
 			continue
 		}
+		// PAY-RECEIPT-DRAIN-MERCHANT-REF-1 (INV-IO-14): the drain matched this receipt on (provider,
+		// provider reference, event type) only. Apply the SAME merchant-reference consistency check as the
+		// live path (ResolveAttemptForEvidence): a merchant reference resolving to a different provider's
+		// (or an unrouted) attempt is cross_provider; one resolving to a different attempt of this provider
+		// is reference_conflict. Either is closed (strict: the caller holds the parent and attempt locks)
+		// and NOT applied. An absent or unresolvable merchant reference, or one naming this attempt, is
+		// applied exactly as before.
+		if d.merchantReference != nil && *d.merchantReference != "" {
+			byMerchant, mErr := GetAttemptByMerchantReference(ctx, tx, *d.merchantReference)
+			if mErr != nil && !errors.Is(mErr, ErrAttemptNotFound) {
+				return applied, mErr
+			}
+			if mErr == nil {
+				var anomaly ReceiptResolution
+				switch {
+				case byMerchant.ProviderID == nil || *byMerchant.ProviderID != *attempt.ProviderID:
+					anomaly = ResolutionAnomalyCrossProvider
+				case byMerchant.ID != attempt.ID:
+					anomaly = ResolutionAnomalyReferenceConflict
+				}
+				if anomaly != "" {
+					if err := closeAnomalyReceipt(ctx, tx, attempt.TenantID, *attempt.ProviderID, d.id, false, anomaly); err != nil {
+						return applied, err
+					}
+					continue
+				}
+			}
+		}
 		ev := ReceiptEvidence{EventType: d.eventType, ProviderReference: d.providerReference, Outcome: Outcome(d.outcome)}
 		if d.originalProviderReference != nil {
 			ev.OriginalProviderReference = *d.originalProviderReference
