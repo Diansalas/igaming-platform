@@ -1,0 +1,69 @@
+PRH-2 round 7, Class-B B11: PAY-PAYOUT-UNBOUND-HOLD-1 mutation evidence
+Branch prh2-r7-classb-b11, base c044c64. Test file:
+  internal/payments/b11_payout_unbound_hold_integration_test.go (27 top-level tests, TestB11_*)
+Method: each mutant applied IN PLACE to the named production file with a backup taken first;
+tests run with -race -tags integration -count=1 -p 1 -run 'TestB11_' ./internal/payments/ against a
+private scratch database; the file is restored from the backup and compared byte for byte (cmp)
+after every mutant. Compile-error mutants are not counted (none occurred). MOCK provider only.
+
+CONTROL (unmutated tree): ok  github.com/Diansalas/igaming-platform/internal/payments  89.871s
+(all 27 tests pass).
+
+Rule under test: a payout attempt disputed with an UNBOUND reason (invalid_provider_reference:*), or
+parked by B10 as provider_reference_conflict, keeps its withdrawal hold on every automatic path.
+
+ID    Production change (the injected defect)                                           Result    Failing top-level tests
+K1    payout.go ApplyPayoutResult park: call withdrawal.Fail after the dispute           KILLED    23
+K2    payout.go applyPayoutStatusEvidenceInTx park: call withdrawal.Fail after dispute   KILLED    15
+K3    payout.go applyPayoutLateEvidence: withdrawal.Fail when the attempt is disputed    KILLED    8
+K4    payout_refbind.go B10 conflict park (reverse collision): withdrawal.Fail           KILLED    3
+K5    receipt.go decline callback on a disputed payout: withdrawal.Fail                  KILLED    2
+K6    attempt.go ApplySuccess CAS also matches 'disputed'                                KILLED    7  (the DB guard trigger
+      refuses "disputed -> succeeded is not permitted"; the tests see that error, so the trigger is the
+      last line of defence and the tests prove the Go layer does not rely on it silently)
+K7    payout_sweep.go processPayoutAttempt routes AttemptDisputed to QueryStatus          KILLED    1  (provider-call count)
+K8    payout_sweep.go T12: continue to resend decision for a disputed attempt             SURVIVED  0  EQUIVALENT: the
+      ResubmitAmbiguous CAS (state='ambiguous') refuses, escalateAmbiguousPayout is a no-op, no
+      Withdraw call, nothing written. Killed only together with K8b2 (below).
+K8b   K8 + attempt.go ResubmitAmbiguous CAS matches 'disputed' (K8b2)                    KILLED    1  (the DB guard refuses
+      the transition and/or a Withdraw call is observed)
+K9    manual_resolution.go M2ResolvableDispute admits invalid_provider_reference:*        KILLED    1
+K10   reconciliation payment_statement.go unbound-park captured_unposted finding is
+      dropped for payouts (op == "deposit" gate)                                         KILLED    4
+K11   payment_statement_k3.go checkStandingUnbound also reads payout lines (alone)       SURVIVED  0  EQUIVALENT alone: the
+      persisted-evidence loader (same file) only collects references of DEPOSIT attempts, so the
+      loop has nothing to match. This is the second gate that makes "no standing coverage for an
+      unbound payout park" true.
+K11p  K11 + loader gate removed (K11b: a.state == "disputed" without the deposit restriction)  KILLED  2  (the PIN
+      "no standing finding for an unbound payout park" fails and must be updated deliberately)
+K12   payout_refbind.go lookup 3 (ledger key, the reverse collision) skipped              KILLED    3
+K13   payout.go applyPayoutDecline swallows the CAS conflict and proceeds to Fail         KILLED    3  (hold released)
+K14   payout.go applyPayoutSuccess swallows the CAS conflict and proceeds to Complete      KILLED    6  (withdrawal completed)
+
+Restore + cmp: every mutant "RESTORED ... cmp=identical". After the last mutant:
+git status shows only the new test file (this evidence file and the ADR edit are added afterwards).
+A first attempt at K5 was interrupted by a sandbox reset leaving receipt.go mutated; it was detected on
+resume, restored with git checkout and K5 was re-run cleanly (result above).
+
+Surviving mutants: K8 and K11 (alone) are equivalent for the stated reasons; both are killed in
+combination with the second guard (K8b, K11p), which shows each defence-in-depth layer is itself pinned.
+
+----------------------------------------------------------------------------------------------
+LF review condition C2 (database allow-list payment_m2_admits): SQL mutants
+The earlier DB probe was vacuous for 'declined': payment_m2_admits requires an EXECUTING resolution
+whose target_state equals the new state, kind m2_declare_paid for 'succeeded' and m2_declare_not_paid
+for 'declined' (the kind that runs withdrawal.Fail). TestB11_M2_Refused_GoAndDB_EveryUnboundReason now
+requests one resolution of each kind, runs each state's probes under its own kind, and carries POSITIVE
+CONTROLS (provider_reference_mismatch is admitted for succeeded AND for declined).
+Note on method: every test builds its own freshly migrated scratch database, so a CREATE OR REPLACE in
+the private database would not reach the tests. The two SQL mutants were therefore applied in place to
+migrations/0115_payment_force_resolution.up.sql (backup, restore, cmp identical; never committed), and
+the function definition was verified afterwards: a database rebuilt from the restored migrations has
+pg_get_functiondef(payment_m2_admits) byte-identical to the one captured before any mutation.
+
+S1  IN-list also admits p_old_reason LIKE 'invalid_provider_reference%'                 KILLED
+    (admits ... -> succeeded and -> declined for the bare reason and every closed reason)
+S2  declined-only arm: (p_new_state='declined' AND p_old_reason LIKE 'invalid_provider_reference%')  KILLED
+    (fails only on the declined probes, "admits ... -> declined (the hold-releasing kind)": proves the
+    declined probe is no longer vacuous)
+Control run after restore: ok (all 27 TestB11_ tests).

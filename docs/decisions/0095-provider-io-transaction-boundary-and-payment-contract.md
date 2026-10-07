@@ -6548,6 +6548,69 @@ text uses the ADR 0101 F13 wording: "a PSP-initiated reversal/tombstone, or allo
 - An **invalid reference** on a statement line is refused at fetch (`validatePaymentLine`): the run
   fails, nothing is stored, and the sweep audits `reconciliation.sweep_run_failed` with severity P1.
 
+- **PO-1: the payout meaning of `pay_captured_unposted` (PAY-PAYOUT-UNBOUND-HOLD-1, Class-B B11;
+  ledger-finance D2 PO-1/PO-2, security D2-L1; ledger-finance B11 review: APPROVE WITH CONDITIONS).**
+  For a **payout** attempt the finding means **"the provider may have paid out, and the platform
+  posted no completion"**: the PSP statement carries a `succeeded` payout line for a payout attempt
+  that is `disputed` and whose `withdrawal_requests` row is still `submitted` (hold held, no
+  `withdrawal_completed`, no release). The exposure is a possible double payout if the hold were
+  released, so the finding is loud. The name and the detail text are the deposit wording; this
+  paragraph is the payout reading.
+  - **What B11 closes, and what it does not.** B11 closes **"keeps the hold"**, not **"resolvable"**.
+    M2 refuses every unbound reason (Go and `payment_m2_admits`), and ADR 0101 R-K3-8 records that
+    these holds have **no resolution path**. A resolution (a PSP-side recall or return, or a governed
+    completion against the hold) is **NOT IMPLEMENTED**; the open follow-up is
+    **PAY-PAYOUT-UNBOUND-RESOLVE-1** (owner payments, ledger-finance sign-off), **required before any
+    non-MOCK payout**.
+  - **Allocation is NEVER a route for a payout.** The deposit-style suspense allocation
+    (LEDGER-SUSPENSE-B-1) credits player cash for money the PSP already paid out: that is a double
+    payout. LEDGER-SUSPENSE-B-1, when built, must refuse payout attempts. **Finding:** the payout
+    finding's `ExpectedValue` text currently reuses the deposit wording and suggests allocation;
+    reconciliation code is not changed in B11 and the text is corrected under
+    PAY-PAYOUT-UNBOUND-STANDING-1.
+  - **Decision recorded (ratified by ledger-finance, split in two).** *Detection:* reconciliation's
+    capture classes apply to payouts (`matchPayment`'s `unboundPark()` and `boundCapture()` cases are
+    not gated on the operation; `checkUnmatchedAttempts` is operation-agnostic), and raising more
+    findings without posting fails safe: (a) an **unbound** payout park (`invalid_provider_reference[:*]`,
+    or `provider_reference_conflict` with no bound reference) is reported **in-run** when a
+    `succeeded` payout line resolves to it (by merchant reference, or by reference); (b) a
+    **bound-class** payout park (for example `callback_amount_asset_mismatch` on a payout that holds its
+    reference) is reported **in-run and standing**. *Clearing:* the clearing half is **current
+    behaviour, ruled DEFECTIVE for payouts**, to be fixed under PAY-PAYOUT-UNBOUND-STANDING-1.
+  - **Defects pinned as CURRENT behaviour (the tests say so and flip when fixed).**
+    1. **No standing coverage** for an unbound payout park: `checkStandingUnbound` and the
+       persisted-evidence loader that feeds it consider deposit attempts and deposit lines only, so a
+       run with no `succeeded` payout line reports nothing
+       (`TestB11_Recon_UnboundPayoutPark_InRunFinding_NoStanding_ClearingSignals`; mutants K11/K11p in the
+       evidence file).
+    2. **Clearing is fail-open across operations.** The clearing signals are the deposit-shaped ones
+       (a `deposit_reversal` line naming the line's reference, or a tombstone ledger row on it). In the
+       reverse-collision case a PSP refund of the real deposit R emits a `deposit_reversal` naming R (or
+       a deposit tombstone on R), which clears the payout's possible-double-payout finding. Pinned by
+       `TestB11_Recon_..._ClearingSignals` step (e) and `TestB11_Recon_UnboundPayoutPark_TombstoneClears`.
+  - **Required under PAY-PAYOUT-UNBOUND-STANDING-1 (before the first payout to any non-MOCK provider,
+    sandbox payouts included):** the loader collects disputed payout attempts with
+    `captureClass() == reasonUnbound`; the standing rule runs per operation (`linesFor(a, 'payout')`,
+    the `payout\x00` namespace); deposit-shaped signals (a `deposit_reversal` line, a tombstone) must
+    never clear a payout finding; the only clearing is a `withdrawal_completed` keyed by the line
+    reference, or a future `payout_return` line kind (a schema change, out of scope here); the payout
+    finding text becomes "resolution: PSP-side recall/return or governed completion against the hold
+    (NOT IMPLEMENTED, R-K3-8); never allocation; M1 only acknowledges"; plus the R-K3-8 resolution path
+    (PAY-PAYOUT-UNBOUND-RESOLVE-1) with a named owner.
+  - **The hold rule (PO-2), proven by test:** a payout disputed with an unbound reason keeps its hold on
+    every automatic path (sweeper poll, T2 and T12, synchronous result, callback success, decline and
+    pending, late evidence, escalation, QueryStatus from every stale state), with no
+    `withdrawal_failed` or `withdrawal_completed` posting, an unchanged `player_withdrawal_hold`
+    balance, and the first terminal reason preserved. M2 refusal is asserted in Go and in the database
+    function `payment_m2_admits` under each state's own executing resolution kind (positive controls
+    included; SQL mutants in the evidence file). The reverse collision (a payout settlement reference
+    equal to an existing `deposit` ledger key) parks as `provider_reference_conflict` (B10), keeps the
+    hold, and a redelivery is stable with one audit row. Evidence:
+    `docs/plans/prh2-hardening-round/prh2-r7-b11-payout-unbound-hold-mutation-kill.txt`.
+  - Observation (not a defect): a stale worker holding a pre-park copy that applies a definite success
+    with no reference anywhere on a never-bound payout gets `ErrInvalidPayoutEvidence` (rolled back),
+    not a silent no-op; nothing is written and the hold is kept.
+
 ### 35.3 Invariants
 
 Reconciliation writes only its run and mismatch rows (INV-IO-12): no posting, no attempt, intent,
