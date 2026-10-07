@@ -758,10 +758,17 @@ func TestB11_M2_Refused_GoAndDB_EveryUnboundReason(t *testing.T) {
 	if !M2ResolvableDispute(AttemptDisputed, &admitted) {
 		t.Fatalf("control: Go allow-list must admit %q", admitted)
 	}
-	// Database allow-list (payment_m2_admits), both kinds, every reason.
-	_, a := w.ambiguousPayout(120)
-	r := w.mustRequest(w.f1, w.m2In(a.ID, ResolutionM2DeclarePaid))
-	probe := func(reason, newState string) bool {
+	// Database allow-list (payment_m2_admits). The function requires an EXECUTING
+	// resolution whose target_state equals the new state and whose kind is
+	// m2_declare_paid for 'succeeded' and m2_declare_not_paid for 'declined'
+	// (declare-not-paid is the kind that runs withdrawal.Fail, i.e. releases the
+	// hold), so each new state is probed under its OWN resolution; a probe under
+	// the wrong kind would return false for every reason and prove nothing.
+	_, aPaid := w.ambiguousPayout(120)
+	rPaid := w.mustRequest(w.f1, w.m2In(aPaid.ID, ResolutionM2DeclarePaid))
+	_, aNot := w.ambiguousPayout(121)
+	rNot := w.mustRequest(w.f1, w.m2In(aNot.ID, ResolutionM2DeclareNotPaid))
+	probe := func(a PaymentAttempt, r ManualResolution, reason, newState string) bool {
 		var got bool
 		if err := w.inExecuting(r, w.f2, func(ctx context.Context, tx pgx.Tx) error {
 			return tx.QueryRow(ctx, `SELECT payment_m2_admits($1, 'disputed', $2, $3, $4, 'operator')`, a.ID, reason, *a.WithdrawalRequestID, newState).Scan(&got)
@@ -770,14 +777,19 @@ func TestB11_M2_Refused_GoAndDB_EveryUnboundReason(t *testing.T) {
 		}
 		return got
 	}
-	if !probe(admitted, "succeeded") {
-		t.Fatalf("control: payment_m2_admits must admit %q -> succeeded", admitted)
+	// POSITIVE CONTROLS: an admitted reason IS admitted for each state under its own kind.
+	if !probe(aPaid, rPaid, admitted, "succeeded") {
+		t.Fatalf("control: payment_m2_admits must admit %q -> succeeded under m2_declare_paid", admitted)
+	}
+	if !probe(aNot, rNot, admitted, "declined") {
+		t.Fatalf("control: payment_m2_admits must admit %q -> declined under m2_declare_not_paid", admitted)
 	}
 	for _, reason := range reasons {
-		for _, ns := range []string{"succeeded", "declined"} {
-			if probe(reason, ns) {
-				t.Errorf("payment_m2_admits admits %q -> %s", reason, ns)
-			}
+		if probe(aPaid, rPaid, reason, "succeeded") {
+			t.Errorf("payment_m2_admits admits %q -> succeeded", reason)
+		}
+		if probe(aNot, rNot, reason, "declined") {
+			t.Errorf("payment_m2_admits admits %q -> declined (the hold-releasing kind)", reason)
 		}
 	}
 	// End to end through the service, both kinds, both shapes: refused (MR012),
@@ -1114,7 +1126,11 @@ func TestB11_TenantIsolation(t *testing.T) {
 // ---------------------------------------------------------------------------
 // 8. Reconciliation: what the code does for a disputed UNBOUND payout.
 //
-// PINNED (ADR 0095 section 35.2, PO-1). matchPayment's `unboundPark()` case is
+// CURRENT BEHAVIOUR, pinned (ADR 0095 section 35.2, PO-1; ledger-finance B11
+// review). DETECTION is ratified (raising more findings without posting fails
+// safe); the CLEARING half and the missing standing coverage are ruled DEFECTIVE
+// for payouts and flip under PAY-PAYOUT-UNBOUND-STANDING-1 (these pins must then
+// be changed deliberately). matchPayment's `unboundPark()` case is
 // not gated on the operation: a `succeeded` PAYOUT statement line that resolves
 // to the parked payout (by merchant reference, or by reference) raises
 // pay_captured_unposted IN-RUN, cleared on the LINE's reference by the same two
@@ -1181,10 +1197,11 @@ func TestB11_Recon_UnboundPayoutPark_InRunFinding_NoStanding_ClearingSignals(t *
 				t.Fatalf("the finding must be reported on every run carrying the line, got %d", len(again))
 			}
 
-			// (c) PINNED: no standing coverage for an unbound PAYOUT park. A run with
-			// no line for it reports nothing (deposits get S1; payouts do not).
+			// (c) CURRENT behaviour (flips under PAY-PAYOUT-UNBOUND-STANDING-1): no
+			// standing coverage for an unbound PAYOUT park. A run with no line for it
+			// reports nothing (deposits get S1; payouts do not). This is a GAP.
 			if none := w.b11CU(w.b11Recon(w.pastSource(false)), p.stale.ID); len(none) != 0 {
-				t.Fatalf("PIN CHANGED: an unbound payout park is now reported standing; update ADR 0095 35.2 PO-1:\n%s", render(none))
+				t.Fatalf("CURRENT-behaviour pin flipped (expected under PAY-PAYOUT-UNBOUND-STANDING-1): an unbound payout park is now reported standing; update ADR 0095 35.2 PO-1 and this pin:\n%s", render(none))
 			}
 
 			// (d) a pending, declined or reversed line is not the signal.
@@ -1195,21 +1212,26 @@ func TestB11_Recon_UnboundPayoutPark_InRunFinding_NoStanding_ClearingSignals(t *
 				}
 			}
 
-			// (e) clearing: a deposit_reversal line naming the line's reference, or a
-			// tombstone ledger row on it. PINNED as the code behaves (the signals are
-			// deposit-shaped; see the ADR flag).
+			// (e) clearing: CURRENT behaviour, ruled DEFECTIVE for payouts (fail-open
+			// across operations: a deposit_reversal line or a deposit tombstone, for
+			// example the PSP refund of a real deposit that shares the reference in the
+			// reverse-collision case, clears a payout's possible-double-payout finding).
+			// Flips under PAY-PAYOUT-UNBOUND-STANDING-1: then only withdrawal_completed
+			// keyed by the line reference (or a future payout_return line) may clear it.
 			rev := w.payoutLine("b11-rev-"+uuid.NewString()[:8], "", "succeeded", p.wr.Amount)
 			rev.Kind = statement.PaymentLineDepositReversal
 			rev.OriginalProviderReference = lineRef
 			if len(w.b11CU(w.b11Recon(w.source(false, okLine, rev)), p.stale.ID)) != 0 {
-				t.Fatalf("a deposit_reversal naming the line reference must clear (pinned)")
+				t.Fatalf("CURRENT behaviour (defective for payouts, flips under PAY-PAYOUT-UNBOUND-STANDING-1): a deposit_reversal naming the line reference clears the payout finding; it no longer does, update the pin and ADR 0095 35.2")
 			}
 			w.b11Held(p, "recon clearing")
 		})
 	}
 }
 
-// A tombstone on the line's reference clears the in-run finding (pinned).
+// CURRENT behaviour, ruled defective for payouts (flips under
+// PAY-PAYOUT-UNBOUND-STANDING-1): a tombstone on the line's reference (a deposit
+// tombstone, fail-open across operations) clears the in-run payout finding.
 func TestB11_Recon_UnboundPayoutPark_TombstoneClears(t *testing.T) {
 	w := newK3World(t, k3Opts{base: 1})
 	p := w.b11ParkSync(300, OutcomeSucceeded)
@@ -1227,7 +1249,7 @@ func TestB11_Recon_UnboundPayoutPark_TombstoneClears(t *testing.T) {
 		return err
 	})
 	if got := w.b11CU(w.b11Recon(w.source(false, line)), p.stale.ID); len(got) != 0 {
-		t.Fatalf("a tombstone on the line reference must clear (pinned):\n%s", render(got))
+		t.Fatalf("CURRENT behaviour (defective for payouts, flips under PAY-PAYOUT-UNBOUND-STANDING-1): a tombstone on the line reference clears the payout finding; it no longer does, update the pin and ADR 0095 35.2:\n%s", render(got))
 	}
 }
 
@@ -1242,9 +1264,9 @@ func TestB11_Recon_ReverseCollisionPark_InRunFinding(t *testing.T) {
 		t.Fatalf("want one pay_captured_unposted for the parked payout:\n%s", render(ms))
 	}
 	w.b11HeldReverse(p, "recon")
-	// No standing coverage either (same pin as the invalid-reference park).
+	// No standing coverage either (CURRENT behaviour, a GAP; same pin as the invalid-reference park).
 	if got := w.b11CU(w.b11Recon(w.pastSource(false)), p.stale.ID); len(got) != 0 {
-		t.Fatalf("PIN CHANGED: standing coverage appeared for an unbound payout park:\n%s", render(got))
+		t.Fatalf("CURRENT-behaviour pin flipped (expected under PAY-PAYOUT-UNBOUND-STANDING-1): standing coverage appeared for an unbound payout park:\n%s", render(got))
 	}
 }
 
