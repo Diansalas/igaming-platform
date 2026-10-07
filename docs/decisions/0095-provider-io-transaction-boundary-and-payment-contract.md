@@ -7866,8 +7866,26 @@ terminal-reason CHECK are untouched). Same Kind, discriminator shape, attributes
   either already resolved (the `UPDATE ... WHERE resolved_at IS NULL` matches nothing: untouched) or an orphaned
   deferred receipt, which is closed with that same compare-and-set (`attempt_id` NULL, the branch's anomaly resolution), so
   it stops counting toward `DeferredReceiptCap`. These branches run BEFORE the parent lock, so the close is a tolerant
-  compare-and-set (zero rows accepted): of two concurrent redeliveries one closes it and the other is a no-op, with no
-  error leaking (a strict CAS here would surface `ErrAttemptStateConflict` to the second). Dispositions and returns are
+  compare-and-set (zero rows accepted, scoped by `tenant_id` and `provider_id` as defence in depth): of two concurrent
+  redeliveries of the orphan one closes it and the other is a no-op, so no `ErrAttemptStateConflict` reaches either
+  (a strict CAS would surface it to the second). The close takes no parent or attempt lock, so it is a documented exception
+  to `ResolveReceipt`'s lock contract; it cannot form a lock cycle (it holds only its own receipt row lock). The
+  interaction with the LOCKED strict-CAS paths is made safe on their side (security/LF L-1): the deferred-receipt drain
+  selects its rows (both queries) `FOR UPDATE`, so a close committed first makes the row drop out of the re-evaluated
+  predicate and a close arriving later waits and matches nothing (otherwise the drain's strict `ResolveReceipt` could fail
+  with a conflict and roll back the whole binding transaction: atomic, no money inconsistency, but a liveness regression),
+  and `receiptIsResolved` reads `FOR UPDATE`. Lock order is parent, attempt, receipt rows. Pinned by the deliberate
+  interleaving test `TestOrphanResolve_Interleaved_AnomalyCloseDuringDrain_NoConflictLeaksToBindingTx`.
+  *Security I-2.* An orphan close writes no audit row; the receipt is reconstructable from `disposition_at_receipt` plus
+  its `resolution`.
+  *Open, NOT changed (needs a ruling; reported to the coordinator).* `receiptIsResolved` cannot tell "resolved as applied"
+  from "closed as an anomaly with `attempt_id` NULL", so if an anomaly close lands first, the main path treats the
+  receipt as already applied (skips the terminal-cell audit rows and its own `ResolveReceipt`, `attempt_id` stays NULL;
+  state transitions are unaffected). Treating an anomaly close as not-applied would also need a re-attribution of an
+  already-resolved receipt (strict `ResolveReceipt` would conflict), a new receipt state transition, so it was not built.
+  **PAY-RECEIPT-DRAIN-MERCHANT-REF-1 (LF I-1, record only, NOT implemented).** The drain selects by
+  (provider, provider reference, event type) and does not re-check the receipt's merchant reference (INV-IO-14); the live
+  path does. Proposed: apply the live-path check in the drain. Dispositions and returns are
   unchanged (`anomaly`); no attempt state, ledger, alert or audit row other than C-1b below changes.
   *C-1b.* The `payment.decline_reason_bounded` audit is no longer gated on the main path alone. It is written exactly once
   per receipt, when the receipt is first STORED (not a duplicate), by `auditOversizeForNewReceipt` at every insert site:
