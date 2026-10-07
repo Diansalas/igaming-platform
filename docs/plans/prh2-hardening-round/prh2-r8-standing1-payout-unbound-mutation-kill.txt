@@ -185,6 +185,6 @@ Rename (LF C3 / F5): TestD2_9b_MerchantCrossCheck_SettlementLine_NamedUnboundPar
 now TestD2_9b_MerchantCrossCheck_SettlementLine_NamedUnboundPayoutPark_DepositSignalsNeverClear. The
 TestD2_9b prefix is kept, so the D2 evidence files and reviews still resolve.
 
-Final-tip totals: 22 mutants. 17 KILLED. 5 SURVIVED, every one classified EQUIVALENT with the reason
+Final-tip totals: 21 mutants. 16 KILLED. 5 SURVIVED, every one classified EQUIVALENT with the reason
 above: S1-L1-DROP-SETTLEMENTREF-EQ, S1-L1-DROP-BYSETTLEMENT-EQ, S1-CLEAR-ANY-POSTING-TYPE,
 S1-DEPOSIT-ALSO-PAYOUT-CLEAR, S1-X6-B-CLEAR-ON-A-REF. No compile-error mutants.
