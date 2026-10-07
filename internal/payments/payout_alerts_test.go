@@ -46,7 +46,8 @@ func TestPayoutAlertReasonFor_ClosedSet(t *testing.T) {
 			t.Errorf("signal reason %q must not be an escalation reason", reason)
 		}
 	}
-	if len(payoutSignalReasons) != 1 || alertReasonPayoutMismatchedSuccessOnDeclined != "mismatched_success_on_declined_payout" {
+	if len(payoutSignalReasons) != 2 || alertReasonPayoutMismatchedSuccessOnDeclined != "mismatched_success_on_declined_payout" ||
+		alertReasonPayoutMismatchedSuccessOnSucceeded != "mismatched_success_on_succeeded_payout" {
 		t.Fatalf("the payout signal set changed (%v): review the receipt call sites and ADR 0095 section 42", payoutSignalReasons)
 	}
 	for _, in := range []string{
@@ -62,6 +63,7 @@ func TestPayoutAlertReasonFor_ClosedSet(t *testing.T) {
 		alertReasonDepositSettlementWindowExceeded,
 		"invalid_provider_referenceX", "late_success_after_terminal ", "success_after_payout_declined;DROP",
 		"mismatched_success_on_declined_payout ", "Mismatched_success_on_declined_payout", "mismatched_success_on_declined",
+		"mismatched_success_on_succeeded_payout ", "Mismatched_success_on_succeeded_payout", "mismatched_success_on_succeeded",
 	} {
 		if got := payoutAlertReasonFor(in); got != alertReasonUnclassified {
 			t.Errorf("%q maps to %q, want %q", in, got, alertReasonUnclassified)
@@ -129,10 +131,11 @@ func TestPayoutDisputeRaiseIsReturnedNeverFollowedByWork_ADR0102_7_7(t *testing.
 		t.Fatalf("payout dispute raise placement violations:\n  %s", strings.Join(problems, "\n  "))
 	}
 	// 1 sync invalid ref, 1 sync ref mismatch, 1 late evidence, 1 status invalid ref, 2 status
-	// mismatches, 1 refbind park, 1 sweeper escalation, 2+4 receipt cells (the callback
-	// reference-mismatch park and the R-5 declined-payout signal, plus the four chained cells) = 14.
-	if sites != 14 {
-		t.Fatalf("expected 14 payout dispute raise call sites in the reviewed files, found %d", sites)
+	// mismatches, 1 refbind park, 1 sweeper escalation, 3+4 receipt cells (the callback
+	// reference-mismatch park, the R-5 declined-payout signal and the R-6 succeeded-payout signal, plus
+	// the four chained cells) = 15.
+	if sites != 15 {
+		t.Fatalf("expected 15 payout dispute raise call sites in the reviewed files, found %d", sites)
 	}
 }
 

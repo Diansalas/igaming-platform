@@ -59,9 +59,14 @@ var payoutEscalationReasons = map[string]struct{}{
 // CHECK) and not an escalation, hence its own closed set.
 const alertReasonPayoutMismatchedSuccessOnDeclined = "mismatched_success_on_declined_payout"
 
+// R-6 (ADR 0095 section 42.8): the sibling signal for a mismatched success on an already-SUCCEEDED
+// payout. Same pattern as R-5: raise only, no state change, own closed set, not a terminal reason.
+const alertReasonPayoutMismatchedSuccessOnSucceeded = "mismatched_success_on_succeeded_payout"
+
 // payoutSignalReasons is the closed set of payout alert reasons raised with no state change.
 var payoutSignalReasons = map[string]struct{}{
-	alertReasonPayoutMismatchedSuccessOnDeclined: {},
+	alertReasonPayoutMismatchedSuccessOnDeclined:  {},
+	alertReasonPayoutMismatchedSuccessOnSucceeded: {},
 }
 
 // payoutAlertReasonFor maps a payout terminal or escalation reason to its
