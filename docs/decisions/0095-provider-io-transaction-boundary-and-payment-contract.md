@@ -7442,7 +7442,7 @@ recipient or channel; routing stays disabled.
 | `applyPayoutSuccessCheckedFromStatus` amount/asset and reference-mismatch parks | `amount_asset_mismatch`, `provider_reference_mismatch` | raise, after the audit row |
 | `applyPayoutLateEvidence` (T14 and late T10; reached through `applyPayoutSuccess`/`applyPayoutDecline`/`payoutHandleContradiction`) | `late_success_after_terminal`, `late_contradicting_evidence` | raise, after the audit row; the benign "already resolved" return raises nothing. **A decline replayed on an already-declined attempt (`late_decline_after_terminal`) is a clean no-op** (LF M-1/C1, 42.5 R-1): no transition, no audit, no alert |
 | `payoutGuardReferenceBinding` (B10 park) | `provider_reference_conflict` | raise, after the audit row; `parked` stays true on a raise error |
-| receipt T15 (`success_for_never_sent_attempt`), callback amount/asset mismatch, tombstone, T14 `success_after_payout_declined` (`receipt.go`) | the reason of the cell | raise as the returned value of the cell; these cells wrote no audit row and still write none (L-1, tracked as PAY-PAYOUT-CALLBACK-AUDIT-1, 42.5) |
+| receipt T15 (`success_for_never_sent_attempt`), callback amount/asset mismatch, tombstone, T14 `success_after_payout_declined` (`receipt.go`) | the reason of the cell | raise as the returned value of the cell. These cells wrote no audit row in B12; **PAY-PAYOUT-CALLBACK-AUDIT-1 (42.7) now writes one, before the raise** |
 | receipt callback reference-mismatch park (`receipt.go`) | `provider_reference_mismatch` | raise, after its existing `payments.payout_provider_reference_mismatch` audit row |
 | `escalateAmbiguousPayout` (`payout_sweep.go`) | the three escalation reasons | raise after the audit row; an already-escalated or already-resolved attempt raises nothing |
 | `gateAndEscalateOnDeny` (KYC-deny T16) | n/a | **audit-only, left as is**: a compliance denial recorded in the KYC decision row and its audit, not a payment-integrity signal; not a dispute. Recorded as a finding; a later item may add a KYC-specific Kind |
@@ -7485,9 +7485,8 @@ rows. No delivery, recipient or channel.
   arriving on an already-declined payout (`receipt.go`, the `AttemptDeclined` mismatched branch), writes only
   `auditTerminalAmountAssetMismatch`: no state change and **no page**. It is a double-payout candidate (the hold is
   already released) and should raise like T14. Not changed here.
-- **L-1 (tracked: PAY-PAYOUT-CALLBACK-AUDIT-1).** The callback T14, T15, amount-mismatch and tombstone payout cells
-  write no audit row (only the receipt row and the new alert). A follow-up should add audit rows; B12 keeps audit
-  behaviour exactly as it was.
+- **L-1 (RESOLVED: see 42.7, PAY-PAYOUT-CALLBACK-AUDIT-1).** The callback T14, T15, amount-mismatch and tombstone
+  payout cells wrote no audit row in B12 (only the receipt row and the alert). They now write one.
 - **C-2 (note for ALERT-DELIVERY-1).** The future dispatcher must not hold `alerts` row locks across network I/O: a
   raise from a business transaction is the terminal lock level (§7.7), so a dispatcher holding those rows during a
   send would block payout evidence transactions.
@@ -7507,3 +7506,38 @@ convergence), `payout_alerts_test.go` (closed-set mapping,
 shape, deposit no-op, source-order guard), and the extended `internal/alerting/static_wiring_test.go` and
 `static_derived_raise_set_test.go` (B-1 pin). Mutation evidence:
 `docs/plans/prh2-hardening-round/prh2-r7-b12-payout-dispute-alert-mutation-kill.txt`.
+
+### 42.7 PAY-PAYOUT-CALLBACK-AUDIT-1: audit rows for the payout callback park cells (`payments`, 2026-10-07)
+
+Status: `IMPLEMENTED` against MOCK (no real PSP; there is still no payout webhook route, so the cells are reached
+through deposit-typed evidence that resolves to a payout attempt and through tests that build payout
+`ReceiptEvidence`). Closes L-1. Security and ledger-finance review requested (the new write is an audit row only).
+
+- **What.** The four payout receipt-callback cells that move an attempt to `disputed` (T14 `success_after_payout_declined`,
+  T15 `success_for_never_sent_attempt`, callback `amount_asset_mismatch`, `tombstone_precedes_success`) now write ONE
+  `payments.payout_callback_dispute` audit row (`internal/payments/payout_callback_audit.go`,
+  `auditPayoutCallbackDispute`), in the SAME transaction as the dispute CAS, after it and before the B12 raise. Actor
+  system, outcome `denied`, target `payment_attempt` = the attempt id, tenant = the attempt's tenant (RLS-visible only to
+  it), the same shape as the sibling `payments.payout_late_contradicting_evidence` row.
+- **Metadata (closed vocabulary, no provider text).** `terminal_reason` (the cell's closed reason),
+  `attempt_state_before` (the locked re-read state: `declined`, `created`/`rejected`, or `submitting`/`pending`/`ambiguous`),
+  `attempt_state_after` (`disputed`), `evidence` (`callback`), `provider_id` (a registered id), `withdrawal_request_id`,
+  `stored_amount`/`stored_asset_code` (the attempt's own), `echoed_amount` (integer minor units), the echoed asset code
+  through `withAssetEcho` (B5: raw only when it matches `^[A-Z0-9_-]{1,16}$`, else `_len` + `_sha256_prefix`) and the echoed
+  reference through `echoAuditMeta` (raw only when it is a valid reference, else reason, length and hash prefix).
+- **Atomicity and order.** The audit is a returned-value composition inside `payoutAlertAfterDispute`, so it runs after the
+  CAS and before the raise (ADR 0102 7.7: the raise stays the last statement; the source-order guard
+  `TestPayoutCallbackAudit_AuditPrecedesRaise_InEveryReceiptCell` pins the nesting). A failed CAS writes no audit row. An
+  audit failure propagates and rolls the whole delivery back (dispute, receipt, alert); a transient alert failure also rolls
+  the audit row back; a deterministic alert failure keeps the dispute and its audit row.
+- **Idempotence.** After the first delivery the attempt is `disputed`; every replay (the byte-identical redelivery is also
+  deduped at the receipt) is a no-op cell: no second audit row, no alert occurrence, no financial effect.
+- **Unchanged.** No state-machine change, no release, no settlement, no posting, no new alert; a deposit attempt writes no
+  such row (the helper is a no-op for a deposit); the reference-mismatch park already had its own audit row.
+- **Tests.** `payout_callback_audit_integration_test.go` (each cell: one row with exact context, tenant binding, replay,
+  no money moved, ledger balanced; audit-failure rollback and convergence; transient and deterministic alert failure;
+  non-parking cells write nothing), `payout_callback_audit_test.go` (deposit no-op, CAS-error passthrough, action name,
+  source-order guard). Mutation evidence:
+  `docs/plans/prh2-hardening-round/prh2-r8-payout-callback-audit-r5-mutation-kill.txt`.
+- **PAY-PAYOUT-ASSET-ECHO-TEST-1** (same round) adds the missing site-level tests for the payout provider-asset echo site
+  (`applyPayoutSuccessCheckedFromStatus`, `payments.payout_amount_asset_mismatch`); no production change was needed.

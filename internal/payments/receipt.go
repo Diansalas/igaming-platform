@@ -761,9 +761,12 @@ func applyResolvedReceiptEvidence(ctx context.Context, tx pgx.Tx, o *Orchestrato
 			// (or was rejected before reaching) a provider.
 			// B12: alertAfterDispute raises for a deposit and is a no-op for a payout;
 			// payoutAlertAfterDispute is the payout twin (a no-op for a deposit).
+			// PAY-PAYOUT-CALLBACK-AUDIT-1: a payout park also writes its audit row, in this
+			// tx, before the raise (a no-op for a deposit).
 			return true, ResolutionAnomalyOther, payoutAlertAfterDispute(ctx, tx, attempt, TerminalReasonSuccessForNeverSentAttempt,
-				alertAfterDispute(ctx, tx, attempt, TerminalReasonSuccessForNeverSentAttempt,
-					ApplyDisputeFromNeverSent(ctx, tx, attempt.ID, EvidenceCallback, TerminalReasonSuccessForNeverSentAttempt)))
+				auditPayoutCallbackDispute(ctx, tx, attempt, ev, TerminalReasonSuccessForNeverSentAttempt,
+					alertAfterDispute(ctx, tx, attempt, TerminalReasonSuccessForNeverSentAttempt,
+						ApplyDisputeFromNeverSent(ctx, tx, attempt.ID, EvidenceCallback, TerminalReasonSuccessForNeverSentAttempt))))
 		case AttemptDisputed:
 			return false, ResolutionAnomalyOther, nil // already terminal-disputed: no-op
 		case AttemptSucceeded:
@@ -797,11 +800,12 @@ func applyResolvedReceiptEvidence(ctx context.Context, tx pgx.Tx, o *Orchestrato
 				return false, ResolutionAnomalyOther, nil
 			}
 			if attempt.Operation != AttemptOperationDeposit {
-				// B12 (PAY-PAYOUT-DISPUTE-ALERT-1): T14, the double-payout signal. The
-				// raise is the last statement of the cell; no audit row is written here
-				// (unchanged: the dispute row itself and the receipt are the record).
+				// B12 (PAY-PAYOUT-DISPUTE-ALERT-1): T14, the double-payout signal. The raise is
+				// the last statement of the cell. PAY-PAYOUT-CALLBACK-AUDIT-1: the park's audit
+				// row is written in this tx, after the CAS and before the raise.
 				return true, ResolutionAnomalyOther, payoutAlertAfterDispute(ctx, tx, attempt, "success_after_payout_declined",
-					ApplyDisputeFromDeclinedPayout(ctx, tx, attempt.ID, EvidenceCallback, "success_after_payout_declined"))
+					auditPayoutCallbackDispute(ctx, tx, attempt, ev, "success_after_payout_declined",
+						ApplyDisputeFromDeclinedPayout(ctx, tx, attempt.ID, EvidenceCallback, "success_after_payout_declined")))
 			}
 			tombstoned, err := tombstoneExists(ctx, tx, attempt.TenantID, *attempt.ProviderID, ev.ProviderReference)
 			if err != nil {
@@ -841,8 +845,9 @@ func applyResolvedReceiptEvidence(ctx context.Context, tx pgx.Tx, o *Orchestrato
 					return false, "", err
 				}
 				return true, ResolutionAnomalyOther, payoutAlertAfterDispute(ctx, tx, attempt, TerminalReasonCallbackAmountAssetMismatch,
-					alertAfterDispute(ctx, tx, attempt, TerminalReasonCallbackAmountAssetMismatch,
-						ApplyDisputeFromNonTerminal(ctx, tx, attempt.ID, EvidenceCallback, TerminalReasonCallbackAmountAssetMismatch)))
+					auditPayoutCallbackDispute(ctx, tx, attempt, ev, TerminalReasonCallbackAmountAssetMismatch,
+						alertAfterDispute(ctx, tx, attempt, TerminalReasonCallbackAmountAssetMismatch,
+							ApplyDisputeFromNonTerminal(ctx, tx, attempt.ID, EvidenceCallback, TerminalReasonCallbackAmountAssetMismatch))))
 			}
 			tombstoned, err := tombstoneExists(ctx, tx, attempt.TenantID, *attempt.ProviderID, ev.ProviderReference)
 			if err != nil {
@@ -853,8 +858,9 @@ func applyResolvedReceiptEvidence(ctx context.Context, tx pgx.Tx, o *Orchestrato
 				// tombstone (T13t); for a non-declined attempt a
 				// tombstone collision is a plain anomaly dispute.
 				return true, ResolutionAnomalyOther, payoutAlertAfterDispute(ctx, tx, attempt, TerminalReasonTombstonePrecedesSuccess,
-					alertAfterDispute(ctx, tx, attempt, TerminalReasonTombstonePrecedesSuccess,
-						ApplyDisputeFromNonTerminal(ctx, tx, attempt.ID, EvidenceCallback, TerminalReasonTombstonePrecedesSuccess)))
+					auditPayoutCallbackDispute(ctx, tx, attempt, ev, TerminalReasonTombstonePrecedesSuccess,
+						alertAfterDispute(ctx, tx, attempt, TerminalReasonTombstonePrecedesSuccess,
+							ApplyDisputeFromNonTerminal(ctx, tx, attempt.ID, EvidenceCallback, TerminalReasonTombstonePrecedesSuccess))))
 			}
 			if attempt.Operation == AttemptOperationDeposit {
 				disputed, err := applyDepositSuccessAndPost(ctx, tx, o, attempt, ev)
