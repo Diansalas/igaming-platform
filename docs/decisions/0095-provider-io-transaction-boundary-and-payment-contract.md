@@ -6868,14 +6868,38 @@ for a real PSP statement.** It does not open the §35.4 GATE.
       real callback T10. The own completion is a **test stand-in** (`withdrawal.Complete` called
       directly); no production path exists.
     - **Evidence.** `docs/plans/prh2-hardening-round/prh2-r9-bound-clear-mutation-kill.txt`.
-    - **Open policy question (reported, not decided).** A `reversed` **payout** statement line naming X
-      matches the attempt. It falls into `matchPayment`'s R1 branch, which code review R1 wrote for
-      deposits ("the PSP's own refund"). So that run raises no finding for the bound payout park, and
-      `checkUnmatchedAttempts` skips the matched attempt. This suppresses the finding for one run only and
-      never clears it: the next run without such a line reports it again. That is pinned by
-      `TestBoundClear1_PayoutBoundPark_ReversedPayoutLine_OneRunSuppressionOnly`. Whether a `reversed`
-      payout line counts as a "PSP-side recall/return" is a ledger-finance decision, folded into
-      PAY-PAYOUT-UNBOUND-RESOLVE-1.
+    - **F-1: a `reversed` payout line silenced the park. RESOLVED by this fix.** Ledger-finance ruled
+      this a fail-closed tightening within its own authority, not a human decision, and security
+      concurs.
+      - **The defect.** A `reversed` **payout** statement line naming X matched the attempt and fell into
+        `matchPayment`'s silent `disputed` case: the R1 rule, which code review R1 wrote for deposits
+        ("the PSP's own refund"). Because the attempt was matched, `checkUnmatchedAttempts` skipped it
+        too.
+      - **Correction to the first report.** The first BOUND-CLEAR-1 report said "one run only", and
+        that was wrong. The suppression lasted **every run in which the provider repeated the line**.
+        When the line's amount and asset equalled the attempt's, the **whole run was CLEAN** (security
+        probe P1).
+      - **The fix.** The bound case's status condition now also admits
+        `a.operation != deposit && l.status == reversed`. A `reversed` payout line raises the bound
+        `pay_captured_unposted` in-run, by reference or by merchant reference only, on every run.
+        Afterwards the finding keeps standing. Deposit R1 is unchanged.
+      - **Tests.** `TestBoundClear1_PayoutBoundPark_ReversedPayoutLineNeverSilences`, the deliberately
+        flipped `..._ReversedPayoutLine_OneRunSuppressionOnly`, covers three consecutive runs with a
+        line whose amount and asset are equal, plus the merchant-reference-only route. Deposit R1 is
+        pinned by `TestBoundClear1_DepositBoundPark_ReversedLineR1Unchanged`.
+    - **LF F-2: no reachable clearing path.** Until PAY-PAYOUT-UNBOUND-RESOLVE-1, a bound payout park has
+      **NO reachable clearing path**. The only clearing signal is the attempt's own positively attributed
+      `withdrawal_completed` keyed by X, and no production path produces one for a disputed payout. The
+      finding is therefore a **permanent standing P1** on every run.
+    - **L-1 / I-1 (folded into RESOLVE-1).** When the attempt's own completion clears the finding, its
+      amount and asset are **not** compared with the attempt's. The governed completion must define and
+      enforce that comparison.
+    - **F-4 / I-1 (done).**
+      - The stale deposit-only comments are corrected: the `MismatchKindPayCapturedUnposted` doc, and the
+        `checkUnmatchedAttempts` C2/F2 comment.
+      - `capturedUnpostedHintFor` now fails closed for an unknown operation. Such an operation gets a
+        neutral text that suggests no clearing route and never allocation, instead of the deposit
+        wording.
   - **Still NOT IMPLEMENTED: PAY-PAYOUT-UNBOUND-RESOLVE-1** (above). BOUND-CLEAR-1 removes the fail-open
     clearing only. A bound payout park with no own completion stays loud on every run, and no
     production path can produce that completion today.
