@@ -1,0 +1,53 @@
+R11-b R3 static guards mutation-kill record. Baseline 20fa3f3 + cbdbe71. Target file mutated in place with backup: internal/reconciliation/alerts.go (restored + cmp after each).
+Run: go test -count=1 -run 'TestR3_Static' ./internal/reconciliation/ ; KILLED = at least one TestR3_Static test FAILs (compile errors excluded, would be marked INVALID).
+== M1-import-os-exec: KILLED
+--- FAIL: TestR3_Static_TransitiveDependenciesAreReadOnlyPackages (0.11s)
+    r3_observation_static_test.go:239: transitive dependency os/exec: denied std package (exec / plugin / extra network client)
+== M2-import-net-rpc: KILLED
+--- FAIL: TestR3_Static_TransitiveDependenciesAreReadOnlyPackages (0.08s)
+    r3_observation_static_test.go:239: transitive dependency net/rpc: denied std package (exec / plugin / extra network client)
+== M3-import-third-party-x-crypto-bcrypt: KILLED
+--- FAIL: TestR3_Static_TransitiveDependenciesAreReadOnlyPackages (0.07s)
+    r3_observation_static_test.go:239: transitive dependency golang.org/x/crypto/blowfish: third-party package not in the reviewed allow-list
+    r3_observation_static_test.go:239: transitive dependency golang.org/x/crypto/bcrypt: third-party package not in the reviewed allow-list
+== M4-import-internal-payments-not-allowed: KILLED
+--- FAIL: TestR3_Static_ReconciliationImportsNoProviderOrMoneyMovingPackage (0.01s)
+    r3_observation_static_test.go:73: alerts.go imports github.com/Diansalas/igaming-platform/internal/withdrawal: the reconciliation package may not depend on it (R3 read-only guarantee; add it only with ledger-finance and security review)
+--- FAIL: TestR3_Static_TransitiveDependenciesAreReadOnlyPackages (0.11s)
+    r3_observation_static_test.go:239: transitive dependency github.com/Diansalas/igaming-platform/internal/validation: not in the reviewed read-only internal set
+    r3_observation_static_test.go:239: transitive dependency github.com/Diansalas/igaming-platform/internal/jurisdiction: not in the reviewed read-only internal set
+    r3_observation_static_test.go:239: transitive dependency golang.org/x/sys/unix: third-party package not in the reviewed allow-list
+== C0-control (unmutated file, no-op; NOT a mutant, not counted): SURVIVED = guards pass on production code as expected
+== M6-sql-merge: KILLED
+--- FAIL: TestR3_Static_WriteScanHasTeeth (0.02s)
+    r3_observation_static_test.go:358: alerts.go production SQL contains merge into payments
+--- FAIL: TestR3_Static_OnlyOwnStoresAreWritten (0.02s)
+    r3_observation_static_test.go:401: alerts.go uses forbidden SQL write merge into "payments": the reconciliation package may write only via INSERT/UPDATE on its own stores
+== M7-sql-truncate: KILLED
+--- FAIL: TestR3_Static_WriteScanHasTeeth (0.02s)
+    r3_observation_static_test.go:358: alerts.go production SQL contains truncate table ledger_entries
+--- FAIL: TestR3_Static_OnlyOwnStoresAreWritten (0.02s)
+    r3_observation_static_test.go:401: alerts.go uses forbidden SQL write truncate table "ledger_entries": the reconciliation package may write only via INSERT/UPDATE on its own stores
+== M8-sql-lo_import: KILLED
+--- FAIL: TestR3_Static_WriteScanHasTeeth (0.01s)
+    r3_observation_static_test.go:358: alerts.go production SQL contains call lo_import
+--- FAIL: TestR3_Static_OnlyOwnStoresAreWritten (0.02s)
+    r3_observation_static_test.go:401: alerts.go uses forbidden SQL write call "lo_import": the reconciliation package may write only via INSERT/UPDATE on its own stores
+== M9-sql-dblink_exec: KILLED
+--- FAIL: TestR3_Static_WriteScanHasTeeth (0.02s)
+    r3_observation_static_test.go:358: alerts.go production SQL contains call dblink_exec
+--- FAIL: TestR3_Static_OnlyOwnStoresAreWritten (0.02s)
+    r3_observation_static_test.go:401: alerts.go uses forbidden SQL write call "dblink_exec": the reconciliation package may write only via INSERT/UPDATE on its own stores
+== M10-sql-insert-foreign-table: KILLED
+--- FAIL: TestR3_Static_OnlyOwnStoresAreWritten (0.02s)
+    r3_observation_static_test.go:389: alerts.go writes (INSERT) to "wallets": the reconciliation package may write only its own stores
+== M11-sql-update-foreign-table: KILLED
+--- FAIL: TestR3_Static_OnlyOwnStoresAreWritten (0.02s)
+    r3_observation_static_test.go:396: alerts.go writes (UPDATE) to "ledger_entries": the reconciliation package may write only its own stores
+== M12-sql-delete: KILLED
+--- FAIL: TestR3_Static_WriteScanHasTeeth (0.02s)
+    r3_observation_static_test.go:358: alerts.go production SQL contains delete from reconciliation_runs
+--- FAIL: TestR3_Static_OnlyOwnStoresAreWritten (0.02s)
+    r3_observation_static_test.go:399: alerts.go DELETEs from "reconciliation_runs": the reconciliation package never deletes
+restored: cmp identical to backup
+SUMMARY: 11 real mutants (M1-M4, M6-M12), 11 killed, 0 survivors, 0 invalid; 1 control (C0) passes. Not covered: net/http etc. cannot be denied by name (already in closure via pgx/otel); direct-import pin covers direct use.
