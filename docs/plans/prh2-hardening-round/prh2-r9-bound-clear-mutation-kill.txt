@@ -153,3 +153,57 @@ TestBoundClear1_PayoutBoundPark_ReversedPayoutLine_OneRunSuppressionOnly.
 Whether a `reversed` payout line is a "PSP-side recall/return" (R-K3-8) is a
 ledger-finance and RESOLVE-1 decision. The pin should be flipped deliberately
 when that is decided.
+
+================================================================================
+ADDENDUM - F-1 (ledger-finance ruling: fail-closed tightening; security concurs)
+================================================================================
+
+Fix commit d5f0d2c, tests 86dc786.
+
+The fix
+-------
+The bound case in matchPayment now also admits
+a.operation != deposit && l.status == reversed. A `reversed` PAYOUT line naming
+a bound payout park raises the finding instead of falling to the silent
+"disputed" case. Deposit R1 is unchanged.
+
+Correction to the policy-question paragraph above
+-------------------------------------------------
+"one-run suppression" was WRONG. The suppression lasted every run in which the
+provider repeated the line. With the line's amount and asset equal to the
+attempt's, the whole run was CLEAN (security probe P1). The paragraph is
+superseded by this addendum. Its pin was flipped deliberately to
+TestBoundClear1_PayoutBoundPark_ReversedPayoutLineNeverSilences.
+
+Full re-run on the F-1 tip
+--------------------------
+Database: private scratch DB priv_r9_bc2. Same harness and the same -run set.
+At the end: "restore: cmp backup vs file identical=True", and the tree was
+clean.
+
+CONTROL (unmutated): rc=0 PASS=110 SKIP=0 FAIL=[]
+
+The 15 original mutants were re-run, and all are KILLED again:
+- Shared: S-PRE, S-DR, S-TS, S-ATTR, S-NEVER.
+- In-run site: IR-DR, IR-TS, IR-ATTR, IR-AMT-EXACT, IR-AMT-ONE.
+- checkUnmatchedAttempts site: CU-DR, CU-TS, CU-ATTR, CU-AMT-EXACT, CU-AMT-ONE.
+
+Each kills on the same tests as before. S-PRE and S-NEVER now also fail
+ReversedPayoutLineNeverSilences.
+
+New F-1 mutants:
+IR-REV         KILLED  the reversed-payout clause removed (the pre-F-1
+                       behaviour).
+                       Failing tests:
+                       TestBoundClear1_PayoutBoundPark_ReversedPayoutLineNeverSilences.
+IR-REV-ALLOPS  KILLED  the clause widened to deposits (breaks deposit R1).
+                       Failing tests:
+                       TestBoundClear1_DepositBoundPark_ReversedLineR1Unchanged,
+                       TestD2_1_BoundPark_MatchedSucceededLine_ReportsCapturedUnposted.
+IR-REV-AMT-NE  KILLED  the clause applies only when the reversed line's amount
+                       differs, so an equal amount/asset run stays CLEAN (probe P1).
+                       Failing tests:
+                       TestBoundClear1_PayoutBoundPark_ReversedPayoutLineNeverSilences
+                       (the amount/asset-equal subtest).
+
+Totals: 18 mutants, 18 KILLED, 0 survived, 0 equivalent, 0 compile errors.
