@@ -3,11 +3,14 @@
 package reconciliation
 
 import (
+	"context"
 	"strings"
 	"testing"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 
+	"github.com/Diansalas/igaming-platform/internal/ledger"
 	"github.com/Diansalas/igaming-platform/internal/reconciliation/statement"
 )
 
@@ -46,6 +49,54 @@ func TestStanding1_DepositUnboundPark_PayoutSignalsNeverClear_DepositClearingUnc
 	// The payout fixture's own withdrawal_completed is keyed by pk.pspRef by
 	// construction, so check "no posting for the parked attempt" on its intent
 	// only (SUM equality and the projection rebuild still run).
+	w.d2AssertNoMoney(t, d2Parked{attempt: pk.attempt, pspRef: "s1-no-such-ref"})
+}
+
+// The same with a withdrawal_completed keyed by the deposit line's reference
+// that NO attempt holds (an unlinked posting, so the payout attribution rule
+// would accept it for a payout park): it still never clears a DEPOSIT park.
+// This is the shape that separates "deposits use the deposit rule only" from
+// "deposits also accept the payout signal".
+func TestStanding1_DepositUnboundPark_UnattributedWithdrawalCompletedNeverClears(t *testing.T) {
+	w := newD2World(t)
+	pk, _ := w.parkInvalidRef(t)
+	line := d2Line(pk.pspRef, pk.attempt.MerchantReference, statement.PaymentStatusSucceeded, d2Amount)
+	d2CUFor(t, w.d2Run(t, d2Src(line)), pk.attempt.ID)
+
+	ref := pk.pspRef
+	pid := payProvA
+	if err := w.pool.WithTenant(context.Background(), w.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		hold, err := ledger.GetOrCreateAccount(ctx, tx, w.f.tenantID, &w.f.walletID, ledger.AccountPlayerWithdrawalHold, "EUR")
+		if err != nil {
+			return err
+		}
+		clearing, err := ledger.GetOrCreateAccount(ctx, tx, w.f.tenantID, nil, ledger.AccountPSPClearing, "EUR")
+		if err != nil {
+			return err
+		}
+		if _, err := ledger.Post(ctx, tx, ledger.TransactionInput{
+			TenantID: w.f.tenantID, TransactionType: ledger.TxWithdrawalRequested, IdempotencyKey: "s1-wreq-" + uuid.NewString(), CorrelationID: uuid.New(),
+			Entries: []ledger.EntryInput{
+				{LedgerAccountID: w.f.cashAccountID, Direction: ledger.Debit, Amount: d2Amount},
+				{LedgerAccountID: hold, Direction: ledger.Credit, Amount: d2Amount},
+			},
+		}); err != nil {
+			return err
+		}
+		_, err = ledger.Post(ctx, tx, ledger.TransactionInput{
+			TenantID: w.f.tenantID, TransactionType: ledger.TxWithdrawalCompleted, IdempotencyKey: pid + ":" + ref,
+			ProviderID: &pid, ProviderTxID: &ref, CorrelationID: uuid.New(),
+			Entries: []ledger.EntryInput{
+				{LedgerAccountID: hold, Direction: ledger.Debit, Amount: d2Amount},
+				{LedgerAccountID: clearing, Direction: ledger.Credit, Amount: d2Amount},
+			},
+		})
+		return err
+	}); err != nil {
+		t.Fatalf("setup: unlinked withdrawal_completed: %v", err)
+	}
+	d2CUFor(t, w.d2Run(t, d2PastSrc()), pk.attempt.ID)
+	d2CUFor(t, w.d2Run(t, d2Src(line)), pk.attempt.ID)
 	w.d2AssertNoMoney(t, d2Parked{attempt: pk.attempt, pspRef: "s1-no-such-ref"})
 }
 
