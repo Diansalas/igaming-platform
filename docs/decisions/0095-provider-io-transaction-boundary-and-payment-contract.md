@@ -6837,6 +6837,48 @@ for a real PSP statement.** It does not open the §35.4 GATE.
   - **Wording (LF F4, folded in).** STANDING-1 changed only the text at those sites: the R-K3-8 payout
     wording now appears where the clearing still accepts deposit signals. PAY-PAYOUT-BOUND-CLEAR-1 aligns
     the two.
+  - **Status: `IMPLEMENTED` against the MOCK adapter and the MOCK statement source (2026-10-07); PROVIDER
+    DEPENDENT for a real PSP statement.** It does not open the §35.4 GATE. No migration and no new line
+    kind; code change in `internal/reconciliation/payment_statement.go` (`capturedUnposted`) only.
+    - **The fix.** `capturedUnposted`, the predicate shared by the in-run `boundCapture()` site in
+      `matchPayment` and by `checkUnmatchedAttempts`, is now per operation. A deposit keeps the rule above
+      unchanged (a completed `deposit_reversal` naming X or the typed Y, or a tombstone, with G-Y1/G-Y2).
+      Any other operation goes through `clearedRefFor(a, X)`, so a payout clears only through
+      `payoutCompletedRef(a, X)`: the parked attempt's **own** `withdrawal_completed`
+      (`withdrawal_requests.release_ledger_transaction_id`) keyed by its held reference X, with no other
+      attempt holding X. This is the same positive attribution as STANDING-1 (security L-1, LF F6), and an
+      unknown operation never clears.
+    - **What no longer clears a bound payout park** (pins flipped deliberately; the new tests cite
+      BOUND-CLEAR-1):
+      - a tombstone on X;
+      - a completed `deposit_reversal` naming X, of any amount (1, the attempt's amount, or the line's),
+        `succeeded` or `reversed`, from a MOCK or non-MOCK import, in-run or persisted;
+      - the deposit-only typed Y evidence, which a payout never reads;
+      - a `withdrawal_completed` on X that is unlinked, belongs to a legacy/unattempted withdrawal, or
+        belongs to another attempt;
+      - the attempt's own completion under any reference other than X.
+    - **Wording.** The finding text at both sites is the R-K3-8 payout wording
+      (`payoutCapturedUnpostedResolutionHint`): "resolution: PSP-side recall/return or governed completion
+      against the hold (NOT IMPLEMENTED, R-K3-8); never allocation; M1 only acknowledges". It now matches
+      the clearing.
+    - **Unchanged.** Deposit bound parks; STANDING-1's unbound behaviour; the M-S2 rule (a `pending` or
+      `declined` line never hides a bound park).
+    - **Tests.** `internal/reconciliation/prh2_r9_bound_clear_integration_test.go` (`TestBoundClear1_*`).
+      Every reconciliation run executes as the runtime role (not superuser, no BYPASSRLS). The park is the
+      real callback T10. The own completion is a **test stand-in** (`withdrawal.Complete` called
+      directly); no production path exists.
+    - **Evidence.** `docs/plans/prh2-hardening-round/prh2-r9-bound-clear-mutation-kill.txt`.
+    - **Open policy question (reported, not decided).** A `reversed` **payout** statement line naming X
+      matches the attempt. It falls into `matchPayment`'s R1 branch, which code review R1 wrote for
+      deposits ("the PSP's own refund"). So that run raises no finding for the bound payout park, and
+      `checkUnmatchedAttempts` skips the matched attempt. This suppresses the finding for one run only and
+      never clears it: the next run without such a line reports it again. That is pinned by
+      `TestBoundClear1_PayoutBoundPark_ReversedPayoutLine_OneRunSuppressionOnly`. Whether a `reversed`
+      payout line counts as a "PSP-side recall/return" is a ledger-finance decision, folded into
+      PAY-PAYOUT-UNBOUND-RESOLVE-1.
+  - **Still NOT IMPLEMENTED: PAY-PAYOUT-UNBOUND-RESOLVE-1** (above). BOUND-CLEAR-1 removes the fail-open
+    clearing only. A bound payout park with no own completion stays loud on every run, and no
+    production path can produce that completion today.
 
 ## 36. Amendment — PRH-2 D: poll amount and reference evidence, ledger-key binding, deferred-receipt drains, park fault injection (`payments`, 2026-10-03)
 
