@@ -14,6 +14,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -133,8 +134,12 @@ func TestPayoutAssetEcho_Site_InvalidEcho_OnlyLenAndHashPrefix_NeverRaw(t *testi
 				t.Fatalf("want _len=%d and the 12-hex sha256 prefix, got %v", len(h.v), m)
 			}
 			blob, _ := json.Marshal(m)
+			// The row's own server-generated UUIDs (withdrawal_request_id) are random hex and can
+			// contain "4111" by chance (seen in the round-10 merged-tree run); strip them so the
+			// probe only sees provider-influenced text.
+			blobText := aechoUUIDRE.ReplaceAllString(string(blob), "<uuid>")
 			for _, probe := range []string{h.v, "<script>", "4111", "PROVIDER"} {
-				if strings.Contains(h.v, probe) && strings.Contains(string(blob), probe) {
+				if strings.Contains(h.v, probe) && strings.Contains(blobText, probe) {
 					t.Fatalf("the audit metadata leaks %q: %s", probe, blob)
 				}
 			}
@@ -149,6 +154,8 @@ func TestPayoutAssetEcho_Site_InvalidEcho_OnlyLenAndHashPrefix_NeverRaw(t *testi
 		})
 	}
 }
+
+var aechoUUIDRE = regexp.MustCompile(`[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}`)
 
 func fpAuditText(t *testing.T, e rbEnv) string {
 	t.Helper()
