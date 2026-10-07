@@ -461,7 +461,9 @@ func TestOrphanResolve_C1b_NewApplied_And_NewAnomaly_OneAuditRowEach(t *testing.
 // merchant reference names a DIFFERENT attempt, so the redelivery classifies it as a reference-conflict
 // anomaly (the tolerant close) while the binding attempt's drain selects the same row. The drain must
 // not see ErrAttemptStateConflict (that would roll back the whole binding transaction), and the receipt
-// ends resolved exactly once.
+// ends resolved exactly once. Since PAY-RECEIPT-DRAIN-MERCHANT-REF-1 the drain itself closes this receipt
+// as the reference conflict it is (it no longer applies it); the assertion that it was applied documented
+// the former gap and is replaced.
 func TestOrphanResolve_Interleaved_AnomalyCloseDuringDrain_NoConflictLeaksToBindingTx(t *testing.T) {
 	e := t4DrainSetup(t, "mock-orph-interleave", "orph-interleave")
 	c := e.orSecondAmbiguous(t, "orph-interleave-c")
@@ -515,8 +517,15 @@ func TestOrphanResolve_Interleaved_AnomalyCloseDuringDrain_NoConflictLeaksToBind
 	if row.n != 1 || !row.resolved {
 		t.Fatalf("receipt = %+v, want one resolved row", row)
 	}
-	if applied != 1 || row.attemptID == nil || *row.attemptID != e.attempt.ID {
-		t.Fatalf("the drain (which held the lock first) must have applied it: applied=%d receipt=%+v", applied, row)
+	// PAY-RECEIPT-DRAIN-MERCHANT-REF-1: the drain (which held the lock first) applies the live-path merchant
+	// reference check, so it CLOSES the foreign-merchant-reference receipt as a reference conflict (strict
+	// ResolveReceipt, attempt_id NULL like the live path) instead of applying it; the waiting competing
+	// close then matches nothing. The purpose is unchanged: no conflict leaks to the binding transaction.
+	if applied != 0 || row.attemptID != nil || row.resolution != string(ResolutionAnomalyReferenceConflict) {
+		t.Fatalf("the drain must have closed (not applied) it as a reference conflict: applied=%d receipt=%+v", applied, row)
+	}
+	if st := mustGetAttempt(t, e.pool, e.f.tenantID, e.attempt.ID).State; st != AttemptAmbiguous {
+		t.Fatalf("the binding attempt must be unchanged, got %s", st)
 	}
 	if got := e.orUnapplied(t, e.provider); got != 0 {
 		t.Fatalf("unapplied = %d", got)
