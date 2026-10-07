@@ -295,6 +295,18 @@ func TestD2_9_MerchantCrossCheck_PayoutBySettlement(t *testing.T) {
 // (for a deposit resolved by reference they are equal by construction), so it
 // is what pins the ruling's mutant "clear B on a.providerRef instead of l.ref".
 // B is a fixture: a pending payout moved to T10 with an unbound reason.
+//
+// FLIPPED under PAY-PAYOUT-UNBOUND-STANDING-1 (ADR 0095 §35.2 PO-1 / §35.6): B
+// is a PAYOUT park, so a deposit_reversal naming S1 no longer clears it (the
+// D2 pin "clears on a reversal naming the line's reference" was the
+// fail-open-across-operations defect). B's finding uses the payout wording,
+// stands on later runs, and is not cleared by P1's own withdrawal_completed on
+// S1 either (S1 is P1's settlement reference: not attributable to B). The D2
+// mutant "clear B on a.providerRef instead of l.ref" has no distinguishing
+// shape for payouts any more (both references belong to P1, neither is
+// attributable to B); it stays pinned for the clearing it can still change by
+// TestB11_Recon_UnboundPayoutPark_WithdrawalCompletedOnLineRefClears and the
+// STANDING-1 mutation evidence.
 func TestD2_9b_MerchantCrossCheck_SettlementLine_NamedUnboundPark_ClearsOnLineRef(t *testing.T) {
 	w := newD2World(t)
 	s1, i1 := "d2-settle-"+uuid.NewString()[:8], "d2-instr-1-"+uuid.NewString()[:8]
@@ -311,10 +323,11 @@ func TestD2_9b_MerchantCrossCheck_SettlementLine_NamedUnboundPark_ClearsOnLineRe
 	ms := w.d2Run(t, d2Src(line))
 	d2Expect(t, ms, map[MismatchKind]int{MismatchKindPayReferenceMismatch: 1, d2KindCU: 1})
 	d2OneMerchant(t, ms, p1.ID, "names attempt="+b.ID.String())
-	d2CUFor(t, ms, b.ID)
+	s1PayoutCUFor(t, ms, b.ID, s1)
 
 	ms = w.d2Run(t, d2Src(line, d2ReversalLine("d2-rev-"+uuid.NewString()[:8], s1, 3000)))
 	d2OneMerchant(t, ms, p1.ID, "names attempt="+b.ID.String())
-	d2NoCU(t, ms, "a reversal naming the line's (settlement) reference")
+	s1PayoutCUFor(t, ms, b.ID, s1) // STANDING-1: a deposit reversal never clears a payout park
+	s1PayoutCUFor(t, w.d2Run(t, d2PastSrc()), b.ID, s1)
 	w.d2AssertBalanced(t)
 }

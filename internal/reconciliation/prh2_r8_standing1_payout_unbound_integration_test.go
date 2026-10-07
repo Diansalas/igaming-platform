@@ -49,6 +49,28 @@ func TestStanding1_DepositUnboundPark_PayoutSignalsNeverClear_DepositClearingUnc
 	w.d2AssertNoMoney(t, d2Parked{attempt: pk.attempt, pspRef: "s1-no-such-ref"})
 }
 
+// s1PayoutCUFor asserts exactly one pay_captured_unposted for the PAYOUT attempt,
+// keyed on lineRef, with the payout wording (never allocation).
+func s1PayoutCUFor(t *testing.T, ms []Mismatch, attemptID uuid.UUID, lineRef string) Mismatch {
+	t.Helper()
+	var found []Mismatch
+	for _, m := range ms {
+		if m.MismatchKind == MismatchKindPayCapturedUnposted && strings.Contains(m.ReconciliationKey, "attempt="+attemptID.String()) {
+			found = append(found, m)
+		}
+	}
+	if len(found) != 1 {
+		t.Fatalf("want exactly one pay_captured_unposted for payout %s, got %d:\n%s", attemptID, len(found), renderMismatches(ms))
+	}
+	m := found[0]
+	if m.ExpectedValue != payoutCapturedUnpostedResolutionHint || strings.Contains(m.ExpectedValue, "LEDGER-SUSPENSE") ||
+		!strings.Contains(m.ReconciliationKey, "check=captured_unposted") || !strings.Contains(m.ReconciliationKey, "provider_reference="+lineRef) ||
+		!strings.Contains(m.ActualValue, "op=payout") {
+		t.Fatalf("payout finding misrepresented: %s | %s | %s", m.ReconciliationKey, m.ExpectedValue, m.ActualValue)
+	}
+	return m
+}
+
 // A deposit park and a succeeded PAYOUT line naming its merchant reference: the
 // payout line resolves to no payout attempt (pay_missing_platform_record) and
 // never raises a deposit pay_captured_unposted, in-run or standing.
