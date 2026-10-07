@@ -447,17 +447,24 @@ func (m *payMatcher) clearedRefFor(a *payAttempt, ref string) bool {
 
 // payoutCompletedRef: a withdrawal_completed ledger posting of this provider
 // keyed by ref (the governed completion against the hold, or the PSP's own
-// settlement reference) exists, and it is ATTRIBUTABLE to a: no OTHER attempt
-// holds ref as its payout settlement reference or as its payout provider
-// reference. Borrowed attribution may raise, never clear (the resolvesTo /
-// yAttributable precedent): another payout's completion under the same
-// reference says nothing about a's hold. No new line kind or schema; a
-// future payout_return line kind is a schema change out of scope here.
+// settlement reference) exists, and it is POSITIVELY ATTRIBUTED to a: it is
+// the release of a's OWN withdrawal request (a.settlementRef == ref, i.e.
+// withdrawal_requests.release_ledger_transaction_id points at it, and
+// bySettlement resolves ref to a), and no other attempt holds ref as its
+// payout provider reference. A completion that merely shares the reference -
+// an unlinked posting, a legacy/unattempted withdrawal's completion
+// (legacyUnattempted), or another attempt's settlement - never clears
+// (security review L-1 option (a): fail closed; the resolvesTo /
+// yAttributable precedent: borrowed attribution may raise, never clear). No
+// new line kind or schema; a future payout_return line kind is a schema
+// change out of scope here. The completion's amount and asset are NOT
+// compared with the attempt's (security I-1, folded into
+// PAY-PAYOUT-UNBOUND-RESOLVE-1).
 func (m *payMatcher) payoutCompletedRef(a *payAttempt, ref string) bool {
 	if ref == "" || m.ledgerByRef["withdrawal_completed\x00"+ref] == nil {
 		return false
 	}
-	if h := m.bySettlement[ref]; h != nil && h != a {
+	if a.settlementRef != ref || m.bySettlement[ref] != a {
 		return false
 	}
 	if h := m.byRef[paymentStatementKindPayout+"\x00"+ref]; h != nil && h != a {
