@@ -445,3 +445,75 @@ func TestDrainMerchantRef_Payout_Matrix(t *testing.T) {
 		})
 	}
 }
+
+// An UNROUTED attempt (provider_id NULL, 'created', never sent) named by the merchant reference is treated as
+// the live path treats it (ResolveAttemptForEvidence: "a different (or unrouted) provider"): cross_provider.
+func TestDrainMerchantRef_Deposit_UnroutedForeignAttempt_ClosedAsCrossProvider(t *testing.T) {
+	pool := depositV2ScratchPool(t)
+	e := newDepRefEnv(t, pool, "mock-dm-unrouted")
+	e.p.setScript(scriptOutcome(OutcomeDeclined, ""))
+	res1 := rvInit(t, pool, e.orch, e.f, 5000, "dm-un-1") // terminal decline, so a second attempt may be inserted
+	var created PaymentAttempt
+	if err := pool.WithTenant(context.Background(), e.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		var err error
+		created, err = InsertCreatedAttempt(ctx, tx, NewCreatedAttempt{
+			ID: uuid.New(), TenantID: e.f.tenantID, Operation: AttemptOperationDeposit, DepositIntentID: &res1.Intent.ID,
+			AttemptNo: 2, ExcludedProviderIDs: []string{}, PaymentMethod: "card", AssetCode: "EUR", Amount: 5000,
+		})
+		return err
+	}); err != nil {
+		t.Fatalf("setup: insert created attempt: %v", err)
+	}
+	if created.ProviderID != nil {
+		t.Fatalf("setup: the created attempt must be unrouted")
+	}
+	ref := "dm-unrouted-" + uuid.NewString()
+	e.p.setScript(scriptOutcome(OutcomePending, ref))
+	res2 := rvInit(t, pool, e.orch, e.f, 5000, "dm-un-2")
+	if res2.Attempt.ProviderReference == nil || *res2.Attempt.ProviderReference != ref {
+		t.Fatalf("setup: second attempt must hold the scripted reference, got %v", res2.Attempt.ProviderReference)
+	}
+	if err := pool.WithTenant(context.Background(), e.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, dup, err := insertReceiptDeduped(ctx, tx, e.f.tenantID, e.id, ReceiptEvidence{EventType: "deposit", ProviderReference: ref,
+			MerchantReference: created.MerchantReference, Outcome: OutcomeSucceeded, Amount: 5000, AssetCode: "EUR"}, DispositionDeferredUnresolved)
+		if err == nil && dup {
+			t.Fatalf("setup: duplicate plant")
+		}
+		return err
+	}); err != nil {
+		t.Fatalf("plant: %v", err)
+	}
+	var applied int
+	if err := pool.WithTenant(context.Background(), e.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `SELECT id FROM deposit_intents WHERE id = $1 FOR UPDATE`, res2.Intent.ID); err != nil {
+			return err
+		}
+		a, err := GetAttemptByID(ctx, tx, res2.Attempt.ID)
+		if err != nil {
+			return err
+		}
+		applied, err = ApplyDeferredReceiptsForAttempt(ctx, tx, e.orch, a)
+		return err
+	}); err != nil {
+		t.Fatalf("drain: %v", err)
+	}
+	if applied != 0 {
+		t.Fatalf("applied = %d, want 0", applied)
+	}
+	var resolution string
+	var attemptID *uuid.UUID
+	if err := pool.WithTenant(context.Background(), e.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT resolution, attempt_id FROM payment_provider_events WHERE tenant_id=$1 AND provider_reference=$2`, e.f.tenantID, ref).Scan(&resolution, &attemptID)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if resolution != string(ResolutionAnomalyCrossProvider) || attemptID != nil {
+		t.Fatalf("resolution=%q attempt=%v, want cross-provider with NULL attempt", resolution, attemptID)
+	}
+	if st := mustGetAttempt(t, pool, e.f.tenantID, res2.Attempt.ID).State; st != res2.Attempt.State {
+		t.Fatalf("bound attempt moved: %s -> %s", res2.Attempt.State, st)
+	}
+	if st := mustGetAttempt(t, pool, e.f.tenantID, created.ID).State; st != AttemptCreated {
+		t.Fatalf("unrouted attempt moved: %s", st)
+	}
+}

@@ -7886,11 +7886,26 @@ terminal-reason CHECK are untouched). Same Kind, discriminator shape, attributes
   conflict), so a ruling on re-attribution semantics is required before any real provider.
   *Accepted defence in depth.* Two mutants survive by design: the cross-operation drain select without `FOR UPDATE` and the
   `receiptIsResolved` read without `FOR UPDATE`; both guard race windows no deterministic test reaches.
-  **PAY-RECEIPT-DRAIN-MERCHANT-REF-1 (LF I-1, record only, NOT implemented).** The drain selects by
-  - Note (LF round-2 delta review C-2): implementing this follow-up requires reshaping `TestOrphanResolve_Interleaved_AnomalyCloseDuringDrain_NoConflictLeaksToBindingTx`, which today asserts that the drain applies a receipt whose merchant reference names a different attempt. That assertion documents the CURRENT gap and must not be read as endorsing it.
-  (provider, provider reference, event type) and does not re-check the receipt's merchant reference (INV-IO-14); the live
-  path does. Proposed: apply the live-path check in the drain. Dispositions and returns are
-  unchanged (`anomaly`); no attempt state, ledger, alert or audit row other than C-1b below changes.
+  **PAY-RECEIPT-DRAIN-MERCHANT-REF-1 (LF I-1; RESOLVED, `IMPLEMENTED` against MOCK; 2026-10-07).** The drain used to select by
+  (provider, provider reference, event type) and never re-checked the receipt's merchant reference (INV-IO-14), so it could
+  apply evidence the live path classifies as an anomaly. `ApplyDeferredReceiptsForAttempt` now applies the live path's
+  consistency check to each drained receipt that carries a merchant reference: it looks the reference up
+  (`GetAttemptByMerchantReference`, tenant-scoped by RLS) and, when it resolves to an attempt of a DIFFERENT (or unrouted)
+  provider, closes the receipt as `anomaly_cross_provider`; when it resolves to a different attempt of the same provider, as
+  `anomaly_reference_conflict`. The close is `closeAnomalyReceipt` with `duplicate=false`, i.e. the strict one-shot
+  `ResolveReceipt` with `attempt_id` NULL, exactly as the live path closes the same two anomalies (the drain holds the parent
+  and attempt locks and selected the row `FOR UPDATE`, so the strict CAS cannot conflict). The receipt is NOT applied: no
+  attempt state, ledger, withdrawal, alert or audit change on either attempt, and the cap count drops. An ABSENT merchant
+  reference, one that resolves to nothing, or one naming the attempt being bound behaves exactly as before. Unchanged: the
+  predates-submission close still runs first (a receipt that both predates and names a foreign reference keeps
+  `anomaly_predates_submission`), the cross-operation block, ordering, `FOR UPDATE`, return values (the returned count is
+  applied receipts only, so closed ones are not counted). A tenant cannot see another tenant's attempt, so a merchant reference
+  naming one resolves to nothing, as on the live path. Tests: `receipt_drain_merchant_ref_integration_test.go` (deposit and
+  payout; matching, absent, unknown, same-provider foreign, other-provider foreign, predates ordering, mixed batch, replay,
+  tenant isolation, cap count) and the reshaped `TestOrphanResolve_Interleaved_AnomalyCloseDuringDrain_NoConflictLeaksToBindingTx`
+  (LF round-2 delta review C-2: the drain now closes the foreign-merchant-reference receipt as a reference conflict instead of
+  applying it, and still no `ErrAttemptStateConflict` reaches the binding transaction). Mutation evidence:
+  `docs/plans/prh2-hardening-round/prh2-r12-drain-merchant-ref-mutation-kill.txt`. No migration.
   *C-1b.* The `payment.decline_reason_bounded` audit is no longer gated on the main path alone. It is written exactly once
   per receipt, when the receipt is first STORED (not a duplicate), by `auditOversizeForNewReceipt` at every insert site:
   applied, deferred and anomaly. A deferred receipt is audited when it is deferred (the drain only has the bounded
