@@ -66,6 +66,16 @@ export interface NavPermissions {
    */
   paymentForceResolutionAct: boolean
   /**
+   * B13 (ADR 0111 2.9): PermPayoutInstrumentRead - view a player's payout
+   * instruments (display mask only; finance, compliance, platform_admin).
+   */
+  payoutInstruments: boolean
+  /**
+   * B13 (ADR 0111 2.9): PermPayoutInstrumentSuspend - suspend an instrument
+   * (compliance only). There is no staff create/verify/unsuspend/edit.
+   */
+  payoutInstrumentSuspend: boolean
+  /**
    * ALERT-DELIVERY-1 (ADR 0102 section 18): PermAlertRouteManage - author alert
    * routing (who is paged). platform_admin only, and separate from the
    * ack/resolve permission. UI convenience only; the server re-checks.
@@ -95,6 +105,8 @@ const NONE: NavPermissions = {
   manualAdjustmentAct: false,
   paymentForceResolutions: false,
   paymentForceResolutionAct: false,
+  payoutInstruments: false,
+  payoutInstrumentSuspend: false,
   alertRouting: false,
 }
 
@@ -133,6 +145,7 @@ const ROLE_NAV_PERMISSIONS: Record<string, NavPermissions> = {
     manualAdjustmentAct: true,
     paymentForceResolutions: true,
     paymentForceResolutionAct: true,
+    payoutInstruments: true,
     alertRouting: true,
   },
   tenant_admin: {
@@ -151,7 +164,7 @@ const ROLE_NAV_PERMISSIONS: Record<string, NavPermissions> = {
     casinoConfig: true,
   },
   support: { ...NONE, players: true, bonus: true, sportsbook: true, casino: true },
-  compliance: { ...NONE, players: true, kyc: true, rg: true, bonus: true, tenantAudit: true, sportsbook: true, casino: true, manualAdjustments: true, paymentForceResolutions: true },
+  compliance: { ...NONE, players: true, kyc: true, rg: true, bonus: true, tenantAudit: true, sportsbook: true, casino: true, manualAdjustments: true, paymentForceResolutions: true, payoutInstruments: true, payoutInstrumentSuspend: true },
   finance: {
     ...NONE,
     withdrawals: true,
@@ -161,6 +174,7 @@ const ROLE_NAV_PERMISSIONS: Record<string, NavPermissions> = {
     manualAdjustmentAct: true,
     paymentForceResolutions: true,
     paymentForceResolutionAct: true,
+    payoutInstruments: true,
   },
   risk_manager: { ...NONE },
   promotions_manager: { ...NONE, bonus: true },

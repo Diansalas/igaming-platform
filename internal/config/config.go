@@ -360,6 +360,26 @@ type Config struct {
 	ActorProofKeys      SecretValue
 	ActorProofActiveKID string
 
+	// B13 payout instrument key families (ADR 0111 2.2, migration 0123). TWO
+	// independent families with separate lifecycles, each "kid:base64(secret)"
+	// comma-separated plus an active kid:
+	//   PAYOUT_INSTRUMENT_KEYS / PAYOUT_INSTRUMENT_ACTIVE_KID - the master for
+	//     the HKDF seal and detail-AEAD subkeys;
+	//   PAYOUT_INSTRUMENT_FP_KEYS / PAYOUT_INSTRUMENT_FP_ACTIVE_KID - the
+	//     fingerprint key family (long-lived; a new active kid only after the
+	//     re-fingerprint job).
+	// Never stored in the database. Present, Load refuses malformed entries,
+	// keys shorter than 32 bytes, an unknown active kid, a key equal to a JWT
+	// secret, an actor-proof key, the provider-credential fingerprint key, or
+	// a key shared across the two families. Absent is valid here (the feature
+	// is then unavailable); main's startup gate (payoutinstrument.VerifyStartup)
+	// requires them in production or whenever a non-Synthetic payout adapter or
+	// verifier is registered. SecretValue: never rendered.
+	PayoutInstrumentKeys        SecretValue
+	PayoutInstrumentActiveKID   string
+	PayoutInstrumentFPKeys      SecretValue
+	PayoutInstrumentFPActiveKID string
+
 	// SecretStoreBackends lists the secret-store backend schemes this
 	// process constructs (SECRETSTORE_BACKENDS, comma-separated, e.g.
 	// "devfile"). Every entry must pass ValidateSecretBackendScheme, so a
@@ -480,6 +500,56 @@ func (c Config) validateActorProofKeys() error {
 	return nil
 }
 
+// validatePayoutInstrumentKeys applies the B13 key rules (ADR 0111 2.2).
+func (c Config) validatePayoutInstrumentKeys() error {
+	mRaw, fRaw := c.PayoutInstrumentKeys.Reveal(), c.PayoutInstrumentFPKeys.Reveal()
+	if mRaw == "" && fRaw == "" && c.PayoutInstrumentActiveKID == "" && c.PayoutInstrumentFPActiveKID == "" {
+		return nil
+	}
+	parse := func(name, raw, active string) (map[string][]byte, error) {
+		keys, err := actorproof.ParseKeySet(raw)
+		if err != nil {
+			return nil, fmt.Errorf("config: %s: %w", name, err)
+		}
+		if _, ok := keys[active]; !ok {
+			return nil, fmt.Errorf("config: %s: the active kid has no key", name)
+		}
+		return keys, nil
+	}
+	master, err := parse("PAYOUT_INSTRUMENT_KEYS", mRaw, c.PayoutInstrumentActiveKID)
+	if err != nil {
+		return err
+	}
+	fp, err := parse("PAYOUT_INSTRUMENT_FP_KEYS", fRaw, c.PayoutInstrumentFPActiveKID)
+	if err != nil {
+		return err
+	}
+	forbidden := map[string]string{
+		c.JWTSigningSecret: "JWT_SIGNING_SECRET", c.JWTPreviousSecret: "JWT_PREVIOUS_SECRET",
+		c.ProviderCredentialFingerprintKey.Reveal(): "PROVIDER_CREDENTIAL_FINGERPRINT_KEY",
+	}
+	if ap := c.ActorProofKeys.Reveal(); ap != "" {
+		if aks, err := actorproof.ParseKeySet(ap); err == nil {
+			for _, k := range aks {
+				forbidden[string(k)] = "ACTOR_PROOF_KEYS"
+			}
+		}
+	}
+	seen := map[string]string{}
+	for family, keys := range map[string]map[string][]byte{"PAYOUT_INSTRUMENT_KEYS": master, "PAYOUT_INSTRUMENT_FP_KEYS": fp} {
+		for kid, k := range keys {
+			if what, bad := forbidden[string(k)]; bad && string(k) != "" {
+				return fmt.Errorf("config: %s key %q must differ from %s", family, kid, what)
+			}
+			if other, dup := seen[string(k)]; dup {
+				return fmt.Errorf("config: %s key %q duplicates a key of %s (the two families and their kids must be independent)", family, kid, other)
+			}
+			seen[string(k)] = family
+		}
+	}
+	return nil
+}
+
 // Load reads configuration from the process environment. It returns an
 // error rather than panicking so callers (including tests) can handle a
 // misconfigured environment explicitly.
@@ -516,6 +586,10 @@ func Load() (Config, error) {
 		ProviderCredentialFingerprintKey: NewSecretValue(os.Getenv("PROVIDER_CREDENTIAL_FINGERPRINT_KEY")),
 		ActorProofKeys:                   NewSecretValue(os.Getenv("ACTOR_PROOF_KEYS")),
 		ActorProofActiveKID:              os.Getenv("ACTOR_PROOF_ACTIVE_KID"),
+		PayoutInstrumentKeys:             NewSecretValue(os.Getenv("PAYOUT_INSTRUMENT_KEYS")),
+		PayoutInstrumentActiveKID:        os.Getenv("PAYOUT_INSTRUMENT_ACTIVE_KID"),
+		PayoutInstrumentFPKeys:           NewSecretValue(os.Getenv("PAYOUT_INSTRUMENT_FP_KEYS")),
+		PayoutInstrumentFPActiveKID:      os.Getenv("PAYOUT_INSTRUMENT_FP_ACTIVE_KID"),
 		SecretStoreDevFileRoot:           getEnvDefault("SECRETSTORE_DEVFILE_ROOT", "./.secrets/dev"),
 		SecretStoreAWSRegion:             getEnvDefault("AWS_SECRETSMANAGER_REGION", os.Getenv("AWS_REGION")),
 	}
@@ -720,6 +794,10 @@ func Load() (Config, error) {
 
 	// PRH-2 R5 (ADR 0110): validate the signed-actor-proof key configuration.
 	if err := cfg.validateActorProofKeys(); err != nil {
+		return Config{}, err
+	}
+	// B13 (ADR 0111 2.2): payout instrument key families.
+	if err := cfg.validatePayoutInstrumentKeys(); err != nil {
 		return Config{}, err
 	}
 
