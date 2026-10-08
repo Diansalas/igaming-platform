@@ -90,7 +90,7 @@ func TestHSEC5_HTTP_DepositInitiation_NonActiveRefused_RetryAfterReactivation(t 
 			if resp.StatusCode != http.StatusCreated {
 				t.Fatalf("control: want 201, got %d", resp.StatusCode)
 			}
-			resp.Body.Close()
+			_ = resp.Body.Close()
 			intents := countRows(t, pool, tenant.ID, `SELECT count(*) FROM deposit_intents WHERE tenant_id = $1`, tenant.ID)
 			attempts := countRows(t, pool, tenant.ID, `SELECT count(*) FROM payment_attempts WHERE tenant_id = $1`, tenant.ID)
 			ledger := countRows(t, pool, tenant.ID, `SELECT count(*) FROM ledger_transactions WHERE tenant_id = $1`, tenant.ID)
@@ -114,7 +114,7 @@ func TestHSEC5_HTTP_DepositInitiation_NonActiveRefused_RetryAfterReactivation(t 
 			if resp.StatusCode != http.StatusCreated {
 				t.Fatalf("retry after reactivation: want 201, got %d", resp.StatusCode)
 			}
-			resp.Body.Close()
+			_ = resp.Body.Close()
 		})
 	}
 }
@@ -138,7 +138,7 @@ func TestHSEC11_HTTP_WithdrawalRequest_NonActiveRefused_RetryAfterReactivation(t
 			if resp.StatusCode != http.StatusCreated {
 				t.Fatalf("control: want 201, got %d", resp.StatusCode)
 			}
-			resp.Body.Close()
+			_ = resp.Body.Close()
 			reqs := countRows(t, pool, tenant.ID, `SELECT count(*) FROM withdrawal_requests WHERE tenant_id = $1`, tenant.ID)
 			ledger := countRows(t, pool, tenant.ID, `SELECT count(*) FROM ledger_transactions WHERE tenant_id = $1`, tenant.ID)
 
@@ -158,7 +158,7 @@ func TestHSEC11_HTTP_WithdrawalRequest_NonActiveRefused_RetryAfterReactivation(t
 			if resp.StatusCode != http.StatusCreated {
 				t.Fatalf("retry after reactivation: want 201, got %d", resp.StatusCode)
 			}
-			resp.Body.Close()
+			_ = resp.Body.Close()
 		})
 	}
 }
@@ -187,7 +187,7 @@ func TestHSEC11_HTTP_StaffSubmit_NonActiveRefused_StaysApproved_ThenSubmits(t *t
 			}
 			mustOpenReviewQueue(t, srv, financeToken.AccessToken)
 			resp := postJSON(t, srv, "/v1/admin/withdrawals/"+wr.ID.String()+"/approve", financeToken.AccessToken, nil)
-			resp.Body.Close()
+			_ = resp.Body.Close()
 			if resp.StatusCode != http.StatusOK {
 				t.Fatalf("approve: %d", resp.StatusCode)
 			}
@@ -207,7 +207,7 @@ func TestHSEC11_HTTP_StaffSubmit_NonActiveRefused_StaysApproved_ThenSubmits(t *t
 
 			c.reset(t, pool, tenant.ID, brand.ID)
 			resp = postJSON(t, srv, "/v1/admin/withdrawals/"+wr.ID.String()+"/submit", financeToken.AccessToken, map[string]string{"payment_method": "card"})
-			resp.Body.Close()
+			_ = resp.Body.Close()
 			if resp.StatusCode != http.StatusOK {
 				t.Fatalf("submit after reactivation: want 200, got %d", resp.StatusCode)
 			}
