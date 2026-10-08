@@ -154,6 +154,24 @@ func (o *Orchestrator) driveCreatedAttempt(
 				return nil
 			}
 		}
+		// H-SEC-5: an HTTP-driven (player-request cascade) T2 claim is the same
+		// kind of NEW provider call; it gets the tenant+brand initiation gate in
+		// this tx (the sweeper branch above keeps its resolution-only rule, brand
+		// status for the sweeper is a separate ruling). A refusal defers the
+		// created child exactly like the sweeper deferral; the intent stays
+		// pending and the sweeper resolves/expires it.
+		if !sweeperDriven {
+			if gerr := tenant.RequireActiveForPaymentInitiation(actx, tx, intent.TenantID, intent.BrandID); gerr != nil {
+				if !errors.Is(gerr, tenant.ErrNotActiveForPaymentInitiation) {
+					return gerr
+				}
+				if err := rescheduleCreatedForResolutionOnly(actx, tx, created.ID, resolutionOnlyDispatchBackoff(created.PollCount)); err != nil {
+					return err
+				}
+				deferredResolutionOnly = true
+				return nil
+			}
+		}
 		claimToken = uuid.New()
 		if err := ClaimCreatedForSubmission(actx, tx, created.ID, capability.ProviderID, claimToken, leaseOwner, time.Now().Add(depositAttemptClaimLease)); err != nil {
 			// KS-DEP-T2-T3-1 (architect review rv-prh-i1-killswitch-phase2-

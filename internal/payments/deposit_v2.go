@@ -54,6 +54,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/audit"
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/rg"
+	"github.com/Diansalas/igaming-platform/internal/tenant"
 )
 
 // depositAttemptClaimLease is how long a synchronous player-request claim
@@ -127,6 +128,13 @@ func (o *Orchestrator) InitiateDepositAttempt(
 		claimToken     uuid.UUID
 	)
 	err := pool.WithTenant(ctx, params.Scope.TenantID, func(actx context.Context, tx pgx.Tx) error {
+		// H-SEC-5: a NEW deposit intent/attempt for a tenant or brand that is
+		// not 'active' is refused, in THIS tx, before the first insert (no
+		// intent row, so the idempotency key is NOT consumed and a retry after
+		// reactivation is a normal first request). Fail closed.
+		if err := tenant.RequireActiveForPaymentInitiation(actx, tx, params.Scope.TenantID, params.Scope.BrandID); err != nil {
+			return fmt.Errorf("payments: deposit initiation refused: %w", err)
+		}
 		intentID := uuid.New()
 		conflict, _, err := db.IdempotentInsert(actx, tx, func(spTx pgx.Tx) error {
 			_, err := spTx.Exec(actx,

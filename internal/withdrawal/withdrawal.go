@@ -29,6 +29,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/kyc"
 	"github.com/Diansalas/igaming-platform/internal/ledger"
+	"github.com/Diansalas/igaming-platform/internal/tenant"
 )
 
 // State is one of the nine values in withdrawal_requests' CHECK
@@ -394,6 +395,14 @@ func RequestWithdrawal(ctx context.Context, tx pgx.Tx, params RequestParams) (Wi
 	}
 	if params.IdempotencyKey == "" {
 		return WithdrawalRequest{}, fmt.Errorf("%w: idempotency key is required", ErrInvalidInput)
+	}
+
+	// H-SEC-11: a NEW withdrawal request (and its hold) for a tenant or brand
+	// that is not 'active' is refused in THIS tx, before the replay lookup,
+	// the KYC gate, the insert and the hold. Nothing is written, so the
+	// idempotency key is not consumed (it lives only on the request row).
+	if err := tenant.RequireActiveForPaymentInitiation(ctx, tx, params.TenantID, params.BrandID); err != nil {
+		return WithdrawalRequest{}, fmt.Errorf("withdrawal: request refused: %w", err)
 	}
 
 	// ADR 0096 §8 item 3 / ledger-finance N2: a REPLAY of an existing

@@ -190,6 +190,12 @@ func newInitiateDepositHandler(deps Deps) http.HandlerFunc {
 			apierror.Write(w, requestID, apierror.CodeNotFound, "player account not found")
 			return
 		}
+		if errors.Is(err, tenant.ErrNotActiveForPaymentInitiation) {
+			// H-SEC-5: tenant or brand not active; nothing was created.
+			logger.Warn("initiate_deposit_refused_not_active", "request_id", requestID)
+			apierror.Write(w, requestID, apierror.CodeTenantOrBrandNotActive, "deposits are not available right now")
+			return
+		}
 		if db.IsForeignKeyViolation(err) {
 			apierror.Write(w, requestID, apierror.CodeValidation, "unknown asset code")
 			return
