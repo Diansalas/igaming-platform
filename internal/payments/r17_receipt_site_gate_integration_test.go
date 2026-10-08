@@ -8,10 +8,13 @@ package payments
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/wallet"
@@ -227,8 +230,8 @@ func TestR17_ReceiptSite_GateLoadsRealBrand_NotStub(t *testing.T) {
 	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := gateReceiptCascadeChild(ctx, tx, bogus)
 		return err
-	}); err == nil {
-		t.Fatal("an attempt whose tenant differs from the intent's must fail closed")
+	}); err == nil || !strings.Contains(err.Error(), "intent tenant differs") {
+		t.Fatalf("an attempt whose tenant differs from the intent's must fail closed with the tenant-mismatch error, got %v", err)
 	}
 }
 
@@ -247,6 +250,16 @@ func TestR17_Scratch_ReceiptSite_BrandReadError_RollsBackDelivery_RedeliveryConv
 	before := h8Snap(t, owner, f, intentID)
 
 	h8RevokeBrandUpdate(t, owner)
+	// The gate itself returns the underlying read error (42501), it does not merely rely on the
+	// aborted transaction failing a later statement.
+	gerr := rt.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := gateReceiptCascadeChild(ctx, tx, a)
+		return err
+	})
+	var pgErr *pgconn.PgError
+	if !errors.As(gerr, &pgErr) || pgErr.Code != "42501" {
+		t.Fatalf("gate must surface the brand read error (42501), got %v", gerr)
+	}
 	if _, err := r17Deliver(rt, orch, f, "mock-psp-r17f-a", ref); err == nil {
 		t.Fatal("a brand read error at the receipt site must fail the delivery")
 	}
@@ -275,5 +288,31 @@ func TestR17_Scratch_ReceiptSite_BrandReadError_RollsBackDelivery_RedeliveryConv
 	}
 	if n := r17Receipts(t, owner, f.tenantID, ref); n != 1 {
 		t.Fatalf("one receipt row after convergence, got %d", n)
+	}
+}
+
+// Tenant read error at the receipt-site gate (scratch DB, owner revokes SELECT on tenants from the
+// runtime role): the gate returns the error (fail closed), never "active", never skip=false.
+func TestR17_Scratch_ReceiptSite_TenantReadError_FailsClosed(t *testing.T) {
+	owner := depositV2ScratchPool(t)
+	rt := h8RuntimeOnScratch(t, owner)
+	orch, provA, provB := r17Orch("mock-psp-r17t-a", "mock-psp-r17t-b")
+	f := seedOrchFixture(t, owner)
+	registerCapability(t, owner, f, provA, 100)
+	registerCapability(t, owner, f, provB, 200)
+	a, _ := pendingDeposit(t, owner, orch, f, "r17-t1", 5000)
+	if _, err := owner.Raw().Exec(context.Background(), `REVOKE SELECT ON public.tenants FROM igaming_runtime`); err != nil {
+		t.Fatalf("revoke on scratch: %v", err)
+	}
+	gerr := rt.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		skipped, err := gateReceiptCascadeChild(ctx, tx, a)
+		if skipped {
+			t.Error("a read error must not be reported as a skip")
+		}
+		return err
+	})
+	var pgErr *pgconn.PgError
+	if !errors.As(gerr, &pgErr) || pgErr.Code != "42501" {
+		t.Fatalf("gate must surface the tenant read error (42501), got %v", gerr)
 	}
 }
