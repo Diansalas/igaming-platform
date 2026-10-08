@@ -20,6 +20,6 @@ M8  claim BEFORE the brand check (check after ClaimCreatedForSubmission) KILLED 
 M9  RequireBrandActive accepts any status                        KILLED  5 tests (both race tests, both creation tests, TestRequireBrandActive_BrandOnly_FailClosed)
 M10 RequireBrandActive without FOR SHARE                         KILLED  TestH8_ClaimWaitsAtGateForInFlightBrandSuspension_ThenDeferred
 
-Counted: 12 mutants compiled (M1-M5c, M6-M10 incl. M7a-c = 14 listed; M7a first attempt was a compile error and was redone):
+Counted: 14 mutants listed (M7a's first attempt was a compile error, not counted, and was redone with a compiling edit; M2's first edit likewise):
 KILLED 8 (M1, M3, M4, M5a, M5c, M8, M9, M10), SURVIVED 6 (M2, M5b, M6, M7a, M7b, M7c). Survivors are listed honestly above; none is a
 claim that the behaviour is untested where it is observable. Not tested (no seam): injected read errors at the two payments call sites.
