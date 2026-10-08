@@ -1,6 +1,7 @@
 # ADR 0111 — Payout destination binding (B13), governed resolution of unbound payouts (PAY-PAYOUT-UNBOUND-RESOLVE-1) and four-eyes release of frozen `approved` holds (HSEC-APPROVED-HOLD-RELEASE-1)
 
-- **Status: PROPOSED — DESIGN ONLY, revision 3 (`architect`, 2026-10-08).** Revision 3 applies the `ledger-finance`
+- **Status: PROPOSED — DESIGN ONLY, revision 4 (`architect`, 2026-10-08).** Revision 4 applies the `security`
+  co-ruling on §4 (S-1..S-8; 0125 MAY START; BC-2 co-signed; HD-R15-8 resolved by sealed imports; §14). Revision 3 applies the `ledger-finance`
   pre-0125 wording conditions (BC-1, R-1..R-5) and records BC-2, LOW-1, P-2 and notes (§13); LF: 0125 may start once
   these are in. Revision 1 (`30cec95`/`978a58b`) was
   reviewed: `ledger-finance` APPROVE WITH CONDITIONS for §2 (B13) and §6 (HSEC), **§4 (RESOLVE-1) REJECTED AS
@@ -387,16 +388,40 @@ unchanged. Allocation is never a payout route.
   - The INSERT arms of `tenant_staff_scope` on imports and lines (0102) are narrowed to the **system shape**: tenant
     GUC only; principal, platform-admin, player, platform-service and acting GUCs all NULL.
   - Because the system shape is still forgeable under arbitrary SQL, every import also carries a **Go import seal**
-    (B13 seal subkey, label `b13-import-v1`). It covers `canon(import id, tenant, provider, source_label, is_mock,
-    coverage_start, coverage_end, content_digest, line_count, fetched_at, payout_lines_carry_merchant_reference,
-    lines_digest)`, where `lines_digest` is the SHA-256 over the canonical encoding of all lines in `line_no` order.
-  - New import columns: `import_seal`, `seal_kid`, `payout_lines_carry_merchant_reference BOOLEAN` (copied from the
-    statement source's declaration), `imported_by_service`.
+    (B13 seal subkey, label `b13-import-v1`). Its input starts with the domain tag (S-5): `canon("imp", import id,
+    tenant, provider, source_label, is_mock, coverage_start, coverage_end, content_digest, line_count, fetched_at,
+    payout_lines_carry_merchant_reference, imported_by_service, lines_digest)`.
+  - **`lines_digest` (S-5)** is the SHA-256 over the canonical encoding, in `line_no` order, of every line column the
+    verdict or reconciliation reads: `line_no`, `kind`, `provider_reference`, `merchant_reference`,
+    `original_provider_reference`, `settlement_reference`, `status`, `amount`, `asset_code`, `occurred_at`. Any column
+    added to the verdict later must join the digest in the same change.
+  - **The seal is written in the INSERT itself (S-5).** Imports and lines stay immutable; there is no UPDATE path.
+  - **Retired seal key ids (S-5)** stay verify-only while any import references them. The §2.2 startup gate also
+    fires whenever any non-MOCK `PaymentStatementSource` is registered.
+  - **Dependency (S-5):** the import seal uses B13-A's key module (`internal/payoutinstrument` key handling), so
+    **0123 / B13-A merges before 0125**.
+  - New import columns: `import_seal`, `seal_kid`, `payout_lines_carry_merchant_reference BOOLEAN`,
+    `imported_by_service`.
+  - **Source declaration and channel (S-3).** `payout_lines_carry_merchant_reference`, `is_mock`, the provider id and
+    the coverage semantics come **only** from the in-process Go `StatementSourceRegistry` / configuration, never from
+    a DB row the runtime role can write. The importer copies them into the import row and the seal. The statement
+    endpoint and credentials come from the secret store or from governed, proof-bound configuration. Fetching uses
+    an authenticated channel, and the PSP's content signature is verified wherever the PSP offers one. **S-3 is
+    launch-blocking for non-MOCK M4, per real source (PROVIDER DEPENDENT).**
   - **An import without a valid seal is not eligible M4 evidence.** The Go executor verifies the seal and recomputes
     `lines_digest` for every id in `evidence_import_ids` before insert and again at execution.
-- **T10 (forgeable statement lines)** is recorded in ADR 0110 §10a. With sealed imports implemented and confirmed by
-  security, non-MOCK M4 is unblocked; otherwise it stays launch-blocking unless the human explicitly accepts T10
-  (§10.3).
+- **T10 (forgeable statement lines)** is recorded in ADR 0110 §10a. It is resolved by **sealed imports** (option (b),
+  HD-R15-8 resolved), subject to security review of the implementation. The §10.3 T10 flag stays until three things
+  hold: the seal is implemented; it passes security implementation review with mutation evidence; and S-3 is met for
+  the real source. **T10 residuals (S-3):**
+  - **T6:** the seal key is in process; a compromised application host can seal anything.
+  - **Source authenticity and completeness:** the seal proves what was fetched, not that the source is genuine or
+    complete. That is S-3's job.
+  - **Availability:** forged unsealed lines can push the stream over the I-2 cap. That stops reconciliation of the
+    whole tenant × provider stream, deposits included, with a loud P1, but it never clears anything. The LOW-1
+    runbook entry must say: **treat overflow as possible tampering until it is proven to be re-delivery.**
+
+  These residuals are folded into the D-7 acknowledgement (A-13 evidence standard).
 - **Approver view:** shows each evidence line's provenance (import id, `imported_by_service`, `content_digest`,
   `fetched_at`, seal status). Approvers must confirm the line against the **provider portal**; `evidence_ref_hash`
   binds that confirmation.
@@ -409,9 +434,13 @@ provider:
 - for `destination_mismatch`, also by the attempt's bound `provider_reference` (C-6);
 - also on any typed reference evidence Y of the attempt (`payment_attempt_reference_evidence`).
 
-**Bounded (I-2, confirmed):** at most 64 lines are read; the 65th makes the verdict `evidence_overflow`, which is
-refused loudly with an audit row and never truncated. **Eligible import** = sealed (above) and (`is_mock = false`,
-or no `is_mock = false` import exists for the tenant and provider).
+**Bounded (I-2, confirmed; S-4):** the 64-line bound covers **every** line `payout_m4_evidence` reads, across all
+lookups, **including the lookups by R**. R comes from statement content, so it gets no budget of its own. The 65th line
+makes the verdict `evidence_overflow`, which is refused loudly with an audit row and never truncated.
+`evidence_import_ids` = the imports of the lines actually read (so at most 64). **Eligible import** = sealed (above)
+and (`is_mock = false`, or no `is_mock = false` import exists for the tenant and provider). The paid verdict's single
+`succeeded` line must come from an eligible (sealed) import. Lines from unsealed imports **never count as positive
+evidence**, but they still make the verdict `contradictory` or `insufficient` when they contradict.
 
 | Verdict | ALL of the following |
 |---|---|
@@ -434,20 +463,30 @@ or no `is_mock = false` import exists for the tenant and provider).
     request; otherwise `force_resolve_evidence_mismatch`. The verdict must be `paid` / `not_paid` respectively.
   - R-6 pinning extends to `provider_reference_at_submission` and the evidence columns; all of them are in
     `payload_hash`.
-- **Approvers (A-14, D-1):** K3 rules plus **at least one `platform_acting` approver** on both M4 kinds.
+- **Approvers (A-14, D-1; S-6):** K3 rules plus **at least one `platform_acting` approver** on both M4 kinds,
+  enforced **in the DB recount** (`payment_manual_resolution_execution_status`), not only in Go. Test: a resolution
+  with two tenant-scope approvers and no `platform_acting` approver is refused at `→ executing`. The capability
+  description in the back office and in the registry states that `payment_force_resolve` covers M4 (D-9 accepted by
+  security).
 - **Execution** (ADR 0101 §6.3 lock order):
   1. L1 `LockSubmittedForResolution`.
   2. Attempt `FOR UPDATE`.
   3. Resolution `FOR UPDATE`.
   4. Approval insert.
   5. Staff, then grants, `FOR SHARE`.
-  6. Go re-verifies the import seals.
-  7. Re-evaluate. Verdict, pinned line and R must be unchanged. Attempt state and `terminal_reason` must equal the
+  6. **Re-evaluate first (S-2).** Run `payout_m4_evidence` again.
+  7. **Then** Go verifies the seals, and recomputes `lines_digest`, of exactly the `import_ids` that step 6
+     returned, and refuses unless that set equals the pinned `evidence_import_ids`. Verdict, pinned line and R must
+     be unchanged. Attempt state and `terminal_reason` must equal the
      pinned values, and `provider_reference IS NOT DISTINCT FROM provider_reference_at_submission` (NULL for the
      three unbound reasons; the bound value for `destination_mismatch` not-paid) (C-6, R-3). The withdrawal must be
      `submitted`, and its `amount`/`asset_code` must equal the attempt's and the resolution's (R-4). Otherwise
      `refused_at_execution`.
-  8. `executing` → posting → `executed`; link the ledger row; audit; commit.
+  8. `executing` → posting → `executed`; link the ledger row; audit; commit. **The `pending → executing` move in the
+     0115 resolution guard re-runs `payout_m4_evidence` and the R-3/R-4 checks IN THE DB** (verdict, line, R and
+     import set equal the pinned values; `provider_reference IS NOT DISTINCT FROM provider_reference_at_submission`;
+     withdrawal and attempt amount/asset equal the resolution's), mirroring M2's R-6 re-check at 0115:597-611. Go is
+     the first check, not the only one. The seal check alone stays in Go, because the key never enters the DB.
   - `m4_evidence_paid` posts through `withdrawal.Complete(tx, wr.ID, attempt.provider_id, R)`: a
     `withdrawal_completed` keyed `provider_id:R`, with `release_ledger_transaction_id` set. This is the attempt's own
     release keyed by the PSP line reference (LF F6).
@@ -487,6 +526,13 @@ or no `is_mock = false` import exists for the tenant and provider).
 
 - 0125 widens `tenant_system_read_executed` (0115:1419) to the M4 kinds; `loadK3Evidence` also loads executed M4
   rows.
+- **Key set for executed M4 rows (S-1).** For every executed M4 row, `loadK3Evidence` adds these keys to the lookup
+  key set: `evidence_reference` (R), the attempt's merchant reference, its bound `provider_reference` (if any), and
+  every Y. All of them are platform state, so this is consistent with I-2: keys are fixed before the read, and each
+  gets the 64-line budget. Tests:
+  - a contradicting line that names **only R** raises;
+  - a line on the bound reference after a `destination_mismatch` not-paid raises;
+  - a mutant that drops the key additions is killed.
 - **New predicates (no new mismatch kind, no kind-CHECK change; R-1):**
   - an executed `m4_evidence_paid` raises `pay_declared_paid_unconfirmed` on **any** `declined` or `reversed` line on R
     or on the merchant reference, or on a **second distinct** `succeeded` line, **in any import, irrespective of
@@ -750,7 +796,7 @@ Every request, approval, rejection, cancellation, expiry, refusal and execution 
 | **B13-A** (entity, keys, AEAD, seals, verifier interface, player/staff routes, 0123) | **May start now**: every LF and security condition is design-complete in §2 |
 | **HSEC** Go and SQL (0124) | **May start now** (conditions H-4, M-6, M-9, M-10, L-2, L-6 incorporated) |
 | **RESOLVE-1, pure tightenings with no new power and no migration**: `payoutCompletedRef` I-1 amount/asset equality (§4.6); the `loadK3Evidence` I-2 cap with run failure; the L-4 hint text | **May start now** |
-| **RESOLVE-1, everything else** (kinds, evidence function, import seal and policy narrowing, acting SELECT, fences, MR041, §4.8 cells, 0125) | **May start (revision 3):** LF pre-0125 conditions applied. Merge needs BC-2 (security co-signs I-2) and the full §8 gates. Non-MOCK M4 stays blocked by T10/M-5 (§10.3) |
+| **RESOLVE-1, everything else** (kinds, evidence function, import seal and policy narrowing, acting SELECT, fences, MR041, §4.8 cells, 0125) | **May start (security co-ruling, revision 4):** LF and security pre-0125 conditions applied; BC-2 co-signed. Merges **after 0123 / B13-A** (import seal uses its key module, S-5) and needs the full §8 gates. Non-MOCK M4 stays blocked by the T10 flag (§10.3) |
 | **B13-B** | waits for B13-A to merge |
 | Any non-MOCK payout or non-MOCK M4 | blocked by §10.3 flags and the existing gates (S-L1/S-L3/S-L4, ALERT-DELIVERY-1, §35.4 GATE) |
 
@@ -814,8 +860,9 @@ Every part needs mutation-kill evidence, runtime-role integration tests and migr
   (LF L-7).**
 - **HD-R15-6** A confirmed misdirected payout (retained today).
 - **HD-R15-7** (non-blocking) Gate `Approve` on a non-active tenant/brand; always audit a refused staff submit.
-- **HD-R15-8** Accept T10 (forgeable statement lines) explicitly, **or** require sealed imports (designed in §4.3)
-  before non-MOCK M4.
+- **HD-R15-8 — RESOLVED (revision 4, security co-ruling).** Option (b), sealed imports (§4.3), subject to security
+  review of the implementation. No human acceptance of T10 is needed. The T10 residuals (§4.3) are folded into the
+  existing D-7 acknowledgement (A-13 evidence standard).
 - **HD-R15-9 (L-9, RECOMMENDATION, deferred):** player notification and a cooling-off period after instrument
   registration or change.
 - Unchanged and still open: HD-CTF-1(b), HD-CTF-2..10, HD-PRH2-3, HD-PRH2-8.
@@ -843,7 +890,7 @@ Every part needs mutation-kill evidence, runtime-role integration tests and migr
 | Flag | Blocks |
 |---|---|
 | Security H-3: AEAD detail implemented | any real customer instrument data (built into 0123; blocking until implemented and reviewed) |
-| Security M-5 / T10 (HD-R15-8) | any non-MOCK M4 |
+| Security M-5 / T10 | any non-MOCK M4, until the import seal is implemented, passes security implementation review with mutation evidence, **and** S-3 is met for each real source (PROVIDER DEPENDENT) |
 | ADR 0110 T3/T4 (identity-store integrity) | real money, as already recorded |
 | HD-R15-1 | any sandbox/real payout |
 | HD-R15-5 (LF L-7) | any non-MOCK payout |
@@ -851,7 +898,7 @@ Every part needs mutation-kill evidence, runtime-role integration tests and migr
 ### 10.4 Conditions and follow-ups recorded by revision 3 (`ledger-finance` pre-0125 verdict)
 
 These are not human policy decisions unless stated; they are review conditions and follow-ups.
-- **BC-2 (condition before 0125 merges):** `security` co-signs the I-2 formula of §4.6 (64 per lookup key × distinct
+- **BC-2 — CO-SIGNED by `security` (revision 4).** Was: condition before 0125 merges: `security` co-signs the I-2 formula of §4.6 (64 per lookup key × distinct
   keys fixed from platform state before the read; cap + 1 read; overflow fails the run). This answers §12 P-1
   subject to that co-signature.
 - **LOW-1 / RM-4 (follow-up, real-source onboarding):** confirm each real statement source's re-delivery pattern.
@@ -869,6 +916,12 @@ These are not human policy decisions unless stated; they are review conditions a
   This is safe (fail closed); revisit with the real source under an LF ruling.
 - **Non-blocking note:** the 24 h `DefaultSettlementWindow` used in not-paid condition (i) must be re-checked **per
   rail** before any non-MOCK M4 (some rails settle or return later).
+- **S-8 (follow-up, revision 4; pre-existing gap):** freeze `withdrawal_requests.release_ledger_transaction_id` once
+  it is non-NULL. Today the 0026 immutable-fields trigger does not cover it. Tampering would only cause a loud raise
+  (`ledger_join` / I-1), never a clear. Owner `payments` + `ledger-finance`; a migration-sized change, not part of 0125
+  unless LF folds it in.
+- **D-7 widened (revision 4):** the D-7 acknowledgement (A-13 evidence standard) now also covers the T10 residuals of
+  §4.3 (T6, source authenticity/completeness, availability).
 - No new human decision arises from revision 3. The open human items remain §10.1 (HD-R15-1..9), §10.2 (D-1..D-9) and
   the §10.3 launch flags.
 
@@ -979,3 +1032,21 @@ trailing note above.
 | P-2 / RM-3 | standing amount/asset check for bound parks with an own completion | §10.4, §12 note |
 | 0125 hint | drop "NOT IMPLEMENTED", say "MOCK only" while T10 stands | §4.6, §10.4 |
 | Notes | pending-before-succeeded PSPs make M4-paid unusable (safe); 24 h window to be re-checked per rail | §10.4 |
+
+## 14. Revision 4 changes (`architect`, 2026-10-08; `security` co-ruling on §4)
+
+Text only. Owner decisions (ADR 0095 §44) are not broadened. `security`: **0125 MAY START; BC-2 CO-SIGNED; HD-R15-8
+replaced.**
+
+| Item | Change | Section |
+|---|---|---|
+| S-1 | executed M4 rows add R, merchant ref, bound ref and Y to the `loadK3Evidence` key set; three tests incl. a key-drop mutant | §4.6 |
+| S-2 | execution re-evaluates first, then Go seals exactly the returned import ids (must equal the pinned set); the 0115 guard re-runs the evidence and R-3/R-4 checks in the DB at `→ executing` | §4.5 |
+| S-3 | source declaration only from the in-process registry/config; endpoint/credentials from the secret store or governed config; authenticated channel and PSP signature; T10 residuals (T6, authenticity/completeness, availability + runbook "treat overflow as possible tampering"); launch-blocking per real source | §4.3, §10.3, ADR 0110 pointer |
+| S-4 | 64-line bound covers every line read incl. R lookups; `evidence_import_ids` = imports of lines read; paid line from a sealed import; unsealed lines never positive but still contradict | §4.4 |
+| S-5 | domain tag "imp" + `imported_by_service` in the seal; `lines_digest` column list; seal written in the INSERT (no UPDATE); startup gate fires on a non-MOCK statement source; retired kids verify-only; 0123 merges before 0125 | §4.3, §7.3 |
+| S-6 | platform_acting approver floor enforced in the DB recount + test; capability description states M4 coverage (D-9 accepted) | §4.5 |
+| S-7 | ADR 0110 header pointer aligned with §4.5 digest wording | ADR 0110 header |
+| S-8 | follow-up: freeze `release_ledger_transaction_id` once non-NULL | §10.4 |
+| BC-2 | co-signed | §10.4 |
+| HD-R15-8 | resolved by option (b), sealed imports; T10 residuals folded into D-7; T10 launch flag conditions restated | §10.1, §10.3, §4.3 |
