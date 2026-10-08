@@ -75,7 +75,7 @@ func TestH8_ReceiptSiteGate_Pinned(t *testing.T) {
 	}
 	g := h8FuncCalls(t, "sweeper_resolution_only.go", "gateReceiptCascadeChild")
 	load, ten, br := g["GetDepositIntentByID"], g["skipCascadeChildForResolutionOnly"], g["skipCascadeChildForBrand"]
-	if len(load) != 1 || len(ten) != 1 || len(br) != 1 || !(load[0] < ten[0] && ten[0] < br[0]) {
+	if len(load) != 1 || len(ten) != 1 || len(br) != 1 || load[0] >= ten[0] || ten[0] >= br[0] {
 		t.Errorf("gateReceiptCascadeChild must load the intent, then the tenant helper, then the brand helper (load=%d tenant=%d brand=%d)", len(load), len(ten), len(br))
 	}
 	// The brand helper's intent argument must be the loaded variable, not a composite literal.
