@@ -1151,7 +1151,7 @@ func (m *payMatcher) matchPayment(lk string, l payLine) {
 		// every other disputed reason below.
 		m.r.add(MismatchKindPayCapturedUnposted, ak+" check=captured_unposted",
 			capturedUnpostedHintFor(a, boundCapturedUnpostedResolutionHint), "platform: "+a.render()+" terminal_reason="+a.terminalReason+m.yHolderNote(a)+"; "+m.label+l.render())
-	case a.unboundPark() && l.status == statement.PaymentStatusSucceeded && !m.clearedRefFor(a, l.ref) && m.markCaptured(a, l.ref):
+	case a.unboundPark() && l.status == statement.PaymentStatusSucceeded && !m.clearedRefFor(a, l.ref, &evidencingLine{amount: l.amount, asset: l.asset}) && m.markCaptured(a, l.ref):
 		// ADR 0095 §35.2 (LF ruling on QA C-F2 (a)): a park that never
 		// bound a reference (a binding conflict, or an invalid reference)
 		// and a succeeded deposit line resolving to it - by construction
@@ -1214,7 +1214,7 @@ func (m *payMatcher) checkMerchantAttribution(lk, ak, op string, a *payAttempt, 
 	m.r.add(MismatchKindPayReferenceMismatch, ak+" check=merchant",
 		"platform: merchant_reference "+a.merchantRef+" ("+a.render()+")",
 		m.label+"merchant_reference names attempt="+b.id.String()+" ("+b.render()+" terminal_reason="+orNone(b.terminalReason)+"); "+l.render())
-	if b.unboundPark() && l.status == statement.PaymentStatusSucceeded && !m.clearedRefFor(b, l.ref) && m.markCaptured(b, l.ref) {
+	if b.unboundPark() && l.status == statement.PaymentStatusSucceeded && !m.clearedRefFor(b, l.ref, &evidencingLine{amount: l.amount, asset: l.asset}) && m.markCaptured(b, l.ref) {
 		m.r.add(MismatchKindPayCapturedUnposted, lk+" attempt="+b.id.String()+" check=captured_unposted",
 			capturedUnpostedHintFor(b, capturedUnpostedResolutionHint),
 			"platform: "+b.render()+" terminal_reason="+b.terminalReason+"; line resolved by reference to attempt="+a.id.String()+"; "+m.label+l.render())
@@ -1246,14 +1246,16 @@ func (m *payMatcher) capturedUnposted(a *payAttempt) bool {
 	// (clearedRefFor -> payoutCompletedRef, keyed on the held reference X):
 	// only the parked attempt's OWN withdrawal_completed, positively attributed
 	// (its withdrawal_requests.release_ledger_transaction_id, keyed by X, no
-	// other attempt holding X). Deposit-shaped signals - a deposit_reversal
+	// other attempt holding X) whose amount and asset equal the attempt's
+	// (PAY-PAYOUT-UNBOUND-RESOLVE-1 I-1, ADR 0111 §4.6; no evidencing line here,
+	// nil). Deposit-shaped signals - a deposit_reversal
 	// line naming X (of ANY amount), a tombstone on X, and the deposit-only
 	// typed Y evidence below - NEVER clear a payout finding: the PSP refund of
 	// a deposit says nothing about whether a payout left the platform. Any
 	// operation other than deposit goes through clearedRefFor (an unknown
 	// operation never clears: fail closed). Deposits are unchanged.
 	if a.operation != paymentStatementKindDeposit {
-		return !m.clearedRefFor(a, a.providerRef)
+		return !m.clearedRefFor(a, a.providerRef, nil)
 	}
 	// PRH-2 K3 (S4, POLL-REF-CLEAR-1, LF B3): a poll_reference_mismatch park with
 	// typed Y evidence (the poll's returned reference, never audit JSON) also

@@ -1150,6 +1150,15 @@ func TestB11_TenantIsolation(t *testing.T) {
 // b11PayoutHint is the exact payout ExpectedValue (STANDING-1 item 3).
 const b11PayoutHint = "resolution: PSP-side recall/return or governed completion against the hold (NOT IMPLEMENTED, R-K3-8); never allocation; M1 only acknowledges"
 
+// b11M4ScopeHint is the exact ExpectedValue for an unbound payout park INSIDE
+// RESOLVE-1's scope (ADR 0111 §4.1 / C-6: an unbound reason with NO provider
+// reference). FLIPPED deliberately by the RESOLVE-1 L-4 tightening (ADR 0111
+// §4.6 "the unbound-park hint names M4", §7.3 "may start now"; task
+// PAY-PAYOUT-UNBOUND-RESOLVE-1 tightenings, r16-res1): the sync and
+// reverse-collision parks hold no reference and now name M4 (NOT
+// IMPLEMENTED); the poll park holds X and keeps b11PayoutHint.
+const b11M4ScopeHint = "resolution: PSP-side recall/return, or the evidence-backed four-eyes resolution M4 (PAY-PAYOUT-UNBOUND-RESOLVE-1, ADR 0111 §4; NOT IMPLEMENTED); never allocation; M1 only acknowledges"
+
 // b11RequirePayoutCU asserts exactly one pay_captured_unposted for the payout
 // attempt keyed on lineRef, correctly represented as a PAYOUT finding.
 func (w *k3World) b11RequirePayoutCU(ms []reconciliation.Mismatch, attempt uuid.UUID, lineRef string, standing bool, what string) reconciliation.Mismatch {
@@ -1159,11 +1168,15 @@ func (w *k3World) b11RequirePayoutCU(ms []reconciliation.Mismatch, attempt uuid.
 		w.t.Fatalf("%s: want exactly one pay_captured_unposted for payout %s, got %d:\n%s", what, attempt, len(got), render(ms))
 	}
 	m := got[0]
+	wantHint := b11PayoutHint
+	if a := w.attempt(attempt); a.ProviderReference == nil {
+		wantHint = b11M4ScopeHint // RESOLVE-1 L-4 (see b11M4ScopeHint)
+	}
 	switch {
 	case m.MismatchKind != reconciliation.MismatchKindPayCapturedUnposted,
 		!strings.Contains(m.ReconciliationKey, "check=captured_unposted"),
 		!strings.Contains(m.ReconciliationKey, "provider_reference="+lineRef),
-		m.ExpectedValue != b11PayoutHint,
+		m.ExpectedValue != wantHint,
 		strings.Contains(m.ExpectedValue, "LEDGER-SUSPENSE"),
 		!strings.Contains(m.ActualValue, "op=payout"),
 		!strings.Contains(m.ActualValue, "kind=payout"),
