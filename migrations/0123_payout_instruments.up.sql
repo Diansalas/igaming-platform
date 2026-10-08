@@ -100,8 +100,12 @@ CREATE TABLE payout_instrument_verification_max_age (
     jurisdiction_id UUID PRIMARY KEY REFERENCES jurisdictions (id),
     max_age         INTERVAL NOT NULL CHECK (max_age > interval '0' AND max_age <= interval '3650 days')
 );
+-- RLS is ENABLEd but deliberately NOT FORCEd: the table is platform-wide (no
+-- tenant_id) and its only writer is the owner/migration role, which a FORCEd
+-- table with a SELECT-only policy would lock out of its own table. The runtime
+-- role is not the owner, so it is bound by RLS (read policy only) AND has no
+-- write grant.
 ALTER TABLE payout_instrument_verification_max_age ENABLE ROW LEVEL SECURITY;
-ALTER TABLE payout_instrument_verification_max_age FORCE ROW LEVEL SECURITY;
 CREATE POLICY reference_read ON payout_instrument_verification_max_age FOR SELECT USING (true);
 
 -- =========================================================================
