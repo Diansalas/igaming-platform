@@ -12,7 +12,6 @@ package payments
 import (
 	"context"
 	"testing"
-	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -117,20 +116,6 @@ func (h *hsr) mustDecide(actor k3Staff, r HoldResolution, d ResolutionDecision) 
 	return out
 }
 
-// execute drives request (reqA) -> approvals to execution.
-func (h *hsr) execute(wrID uuid.UUID, approvers ...k3Staff) HoldResolution {
-	h.t.Helper()
-	r := h.mustRequest(h.reqA, wrID)
-	var out HoldResolutionOutcome
-	for _, a := range approvers {
-		out = h.mustDecide(a, r, ResolutionApprove)
-	}
-	if !out.Executed {
-		h.t.Fatalf("hold resolution did not execute (counted %d of %d, refused=%v)", out.Counted, out.Required, out.Refused)
-	}
-	return out.Resolution
-}
-
 func (h *hsr) res(id uuid.UUID) HoldResolution {
 	h.t.Helper()
 	r, err := h.svc.Get(k3Ctx(h.reqA), h.target(h.reqA), id, h.meta())
@@ -217,5 +202,3 @@ func (h *hsr) backdate(id uuid.UUID) {
 		h.t.Fatalf("backdate: %v", err)
 	}
 }
-
-var _ = time.Second
