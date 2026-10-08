@@ -78,13 +78,13 @@ S13   KILLED    DB: unverified instrument binds  =>  --- FAIL: TestBinding_Inser
 S14   KILLED    DB: revoked instrument binds  =>  --- FAIL: TestBinding_InsertGuard (0.17s)
 S15   KILLED    DB: snapshot amount not compared to the withdrawal  =>  --- FAIL: TestSnapshot_WriteOnceAndAttemptConstraint (0.10s)
 S16   SURVIVED  DB: snapshot created_txid not required (equivalent: a new attempt cannot have an older snapshot)
-S17   KILLED    RLS: tenant policy admits a player-scope session  =>  --- FAIL: TestRLS_CrossTenantBrandPlayerIsolation (0.23s)
+S17   KILLED    RLS: tenant policies admit a player-scope session  =>  --- FAIL: TestRLS_CrossTenantBrandPlayerIsolation (0.25s)
 S18   KILLED    grant: runtime may DELETE instruments  =>  --- FAIL: TestGrantPin_RuntimeRole (0.04s)
 S19   KILLED    grant: runtime may write kinds  =>  --- FAIL: TestGrantPin_RuntimeRole (0.06s)
 S20   KILLED    DB: composite FK to fingerprint owners removed  =>  --- FAIL: TestPlantedRows_NoOwnerRowAndUnsealedPending (0.06s)
 S21   KILLED    DB: per-player live fingerprint uniqueness removed  =>  --- FAIL: TestRegister_DeterministicInterleaveSameDestination (0.46s)
 S22   KILLED    DB: binding instrument id mutable (the fingerprint column remains guarded)  =>  --- FAIL: TestBinding_InstrumentIDImmutableEvenForSameFingerprint (0.16s)
-S23   KILLED    RLS: insert policy admits any tenant  =>  --- FAIL: TestRLS_CrossTenantBrandPlayerIsolation (0.18s)
+S23   KILLED    RLS: insert policies admit any tenant  =>  --- FAIL: TestRLS_CrossTenantBrandPlayerIsolation (0.26s)
 S24   KILLED    DB: blocking events deletable/editable by the owner role  =>  --- FAIL: TestStateMachine_TransitionsAndTerminalStates (0.26s)
 S25   KILLED    DB: instrument born verified  =>  --- FAIL: TestInstrumentBornPending (0.11s)
 S26   KILLED    DB: person not forced from the account  =>  --- FAIL: TestInstrumentPersonIsForcedFromTheAccount (0.06s)
@@ -98,8 +98,9 @@ RUN HISTORY (honest accounting):
     re-run 2: G30 (run 1 produced a compile error, the mutant was rewritten), G50, S15 (run 1 hit a transient scratch-database rebuild failure), S26;
     re-run 3: G31 (new test: blocking a terminal instrument is a typed refusal), S21 (new test: deterministic interleave of two registrations);
     re-run 4: S25 (new test: an instrument cannot be born in any state but pending_verification);
-    re-run 5: S22 (new test: a bound instrument id cannot be swapped for a same-fingerprint instrument).
-  A first re-run executed against a scratch database that still carried a hand-applied mutant (my own mistake); it was discarded and repeated against a rebuilt database.
+    re-run 5: S22 (new test: a bound instrument id cannot be swapped for a same-fingerprint instrument);
+    re-run 6: S17, S23 (the migration's tenant-family policies were rewritten as static statements for the repo's A-18 scan; the mutants were re-targeted at the new text).
+  A first re-run (after run 1) executed against a scratch database that still carried a hand-applied mutant (my own mistake); it was discarded and repeated against a rebuilt database.
   Mutants initially recorded as survivors and killed after test additions: G31, S21, S22, S25, S26, G50 (and the rewritten G30, S15).
 
 EQUIVALENT / ACCEPTED SURVIVOR:
@@ -108,4 +109,4 @@ EQUIVALENT / ACCEPTED SURVIVOR:
        another transaction. The predicate is kept as defence in depth (it matches the ADR 0111 text) and has no distinguishing test.
 
 NOTE (not part of the mutation loop): the migrate-down function-body restoration is covered by the whole-schema snapshot test
-(TestMigration0123_UpDownUp_WholeSchema compares function body hashes), which is not part of the mutation loop's test selection (it costs ~30 s per run).
+(TestMigration0123_UpDownUp_WholeSchema compares function body hashes); it costs ~30 s per run and is excluded from the per-mutant test selection.
