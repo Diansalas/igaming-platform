@@ -335,7 +335,7 @@ func TestH8_BrandInactive_PreReadKeepsChildDeferredEvenIfClaimTxWouldReject(t *t
 	for _, c := range []string{"no_routable_provider", "kyc_deny"} {
 		t.Run(c, func(t *testing.T) {
 			pool := depositV2ScratchPool(t)
-			spy := newLoopProvider("mock-psp-h8f2-" + c[:3])
+			spy := newLoopProvider("mock-psp-h8f2-" + c[:2])
 			orch := spy.orchestrator()
 			f := seedOrchFixture(t, pool)
 			if c != "no_routable_provider" {
