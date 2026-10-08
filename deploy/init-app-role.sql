@@ -492,3 +492,33 @@ BEGIN
     END LOOP;
 END
 $$;
+
+-- B13 (migration 0123; ADR 0111 section 2.1): least-privilege, re-asserted on
+-- every run, mirroring migration 0123's own in-migration grant block:
+--   payout_instrument_kinds, payout_instrument_verification_max_age
+--                         - migration/owner-written reference data: SELECT only.
+--   payout_instruments    - SELECT/INSERT/UPDATE (state machine and column
+--                           discipline are triggers). Never DELETE.
+--   payout_instrument_verifications, _fingerprint_owners, _blocking_events,
+--   payout_attempt_destination_snapshots
+--                         - append-only / write-once: SELECT/INSERT.
+DO $$
+DECLARE
+    t RECORD;
+BEGIN
+    FOR t IN SELECT * FROM (VALUES
+        ('payout_instrument_kinds', 'SELECT'),
+        ('payout_instrument_verification_max_age', 'SELECT'),
+        ('payout_instruments', 'SELECT, INSERT, UPDATE'),
+        ('payout_instrument_verifications', 'SELECT, INSERT'),
+        ('payout_instrument_fingerprint_owners', 'SELECT, INSERT'),
+        ('payout_instrument_blocking_events', 'SELECT, INSERT'),
+        ('payout_attempt_destination_snapshots', 'SELECT, INSERT')) AS v(name, privs)
+    LOOP
+        IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = t.name) THEN
+            EXECUTE format('REVOKE ALL ON %I FROM igaming_runtime', t.name);
+            EXECUTE format('GRANT %s ON %I TO igaming_runtime', t.privs, t.name);
+        END IF;
+    END LOOP;
+END
+$$;
