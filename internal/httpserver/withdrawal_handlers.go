@@ -923,7 +923,7 @@ func newSubmitWithdrawalHandler(deps Deps) http.HandlerFunc {
 		if errors.Is(err, tenant.ErrNotActiveForPaymentInitiation) {
 			// H-SEC-11: tenant or brand not active; the request is left
 			// `approved`, no attempt, no provider call.
-			logger.Warn("submit_withdrawal_refused_not_active", "request_id", requestID)
+			logger.Warn("submit_withdrawal_refused_not_active", "request_id", requestID, "tenant_id", tc.TenantID)
 			apierror.Write(w, requestID, apierror.CodeTenantOrBrandNotActive, "withdrawals are not available right now")
 			return
 		}
