@@ -446,6 +446,11 @@ func readHoldExecStatus(ctx context.Context, tx pgx.Tx, id uuid.UUID) (holdExecS
 // submit or a second execute against a real execution deterministically.
 var testHookHoldResolutionAfterLocks func(ctx context.Context, id uuid.UUID)
 
+// testHookHoldResolutionAfterShareLocks, when set by an in-package test, runs after the
+// step 5 staff/grant FOR SHARE locks are held and the recount is done - so a test can race
+// a grant revocation against a real execution (the revoke must wait for the commit).
+var testHookHoldResolutionAfterShareLocks func(ctx context.Context, id uuid.UUID)
+
 // Decide opens the caller's acting session and decides.
 func (s *WithdrawalHoldResolutionService) Decide(ctx context.Context, target ResolutionTarget, id uuid.UUID, in HoldResolutionDecisionInput, meta ResolutionMeta) (HoldResolutionOutcome, error) {
 	var out HoldResolutionOutcome
@@ -580,6 +585,9 @@ func (s *WithdrawalHoldResolutionService) decideInTx(ctx context.Context, tx pgx
 		return HoldResolutionOutcome{}, err
 	}
 	out.Counted, out.Required = st.Counted, st.Required
+	if testHookHoldResolutionAfterShareLocks != nil {
+		testHookHoldResolutionAfterShareLocks(ctx, id)
+	}
 	if !st.RequesterValid || st.Counted < st.Required {
 		out.Resolution = res
 		return out, recordHoldResolutionAudit(ctx, tx, call, "approved", res, nil, nil, map[string]any{

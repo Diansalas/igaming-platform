@@ -528,6 +528,12 @@ func TestHSEC_HoldRelease_CTR3_KeyCorrelationShapeLinkForgeries(t *testing.T) {
 		{"another withdrawal's governed key", func(ctx context.Context, tx pgx.Tx) error {
 			return hsrPost(ctx, tx, h, wr2, ledger.TxWithdrawalRejected, wr2.ID.String()+":governed_hold_released", wr2.ID, 401, 401)
 		}},
+		// A header-only insert (no entries): only the header layers can stop it.
+		{"raw header, wrong correlation", func(ctx context.Context, tx pgx.Tx) error {
+			_, err := tx.Exec(ctx, `INSERT INTO ledger_transactions (tenant_id, transaction_type, idempotency_key, correlation_id)
+				VALUES ($1, 'withdrawal_rejected', $2, $3)`, wr.TenantID, key, uuid.New())
+			return err
+		}},
 	}
 	for _, c := range []struct{ layer, off, on, want string }{
 		{"key guard alone", "ledger_transactions_governed_fence", "ledger_transactions_governed_fence", "HR020"},

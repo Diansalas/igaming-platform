@@ -291,18 +291,33 @@ func TestHSEC_HoldRelease_TenantStaffDeniedAtServiceAndDatabase(t *testing.T) {
 	}
 	// The database, bypassing the service: raw INSERT as a finance staff member with
 	// every grant a tenant could hold. The refusal is HR001 (the guard) or 42501 (RLS).
-	err := h.rt.WithPrincipalScope(context.Background(), h.f.tenantID, h.f1.ID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `
-			INSERT INTO withdrawal_hold_resolutions
-				(tenant_id, withdrawal_request_id, kind, brand_id, player_account_id, wallet_id, amount, asset_code,
-				 withdrawal_state_at_submission, tenant_status_at_submission, brand_status_at_submission, reason_code, evidence_ref_hash,
-				 payload_hash, requested_by, requested_by_scope, requested_by_person_id, required_at_submission, contributing_policy_ids, expires_at)
-			VALUES ($1, $2, 'release_hold_to_player', $3, $3, $3, 1, '-', '-', '-', '-', 'x_y', $4, '-', $3, 'platform_acting', $3, 1, '{}', now())`,
-			h.f.tenantID, wr.ID, uuid.Nil, k3EvidenceHash())
-		return err
-	})
-	if !hsrIs(err, "HR001", "42501") {
+	rawInsert := func() error {
+		return h.rt.WithPrincipalScope(context.Background(), h.f.tenantID, h.f1.ID, func(ctx context.Context, tx pgx.Tx) error {
+			_, err := tx.Exec(ctx, `
+				INSERT INTO withdrawal_hold_resolutions
+					(tenant_id, withdrawal_request_id, kind, brand_id, player_account_id, wallet_id, amount, asset_code,
+					 withdrawal_state_at_submission, tenant_status_at_submission, brand_status_at_submission, reason_code, evidence_ref_hash,
+					 payload_hash, requested_by, requested_by_scope, requested_by_person_id, required_at_submission, contributing_policy_ids, expires_at)
+				VALUES ($1, $2, 'release_hold_to_player', $3, $3, $3, 1, '-', '-', '-', '-', 'x_y', $4, '-', $3, 'platform_acting', $3, 1, '{}', now())`,
+				h.f.tenantID, wr.ID, uuid.Nil, k3EvidenceHash())
+			return err
+		})
+	}
+	if err := rawInsert(); !hsrIs(err, "HR001", "42501") {
 		t.Fatalf("tenant-scope raw INSERT: want HR001 or 42501, got %v", err)
+	}
+	// Each layer ALONE: the beneficiary guard fires first (and also refuses a non-acting
+	// scope), so lift it for ONE statement - the resolution guard itself must still say HR001.
+	ddl := func(sql string) {
+		if err := h.pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error { _, err := tx.Exec(ctx, sql); return err }); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ddl(`ALTER TABLE withdrawal_hold_resolutions DISABLE TRIGGER withdrawal_hold_resolutions_beneficiary_guard`)
+	err := rawInsert()
+	ddl(`ALTER TABLE withdrawal_hold_resolutions ENABLE TRIGGER withdrawal_hold_resolutions_beneficiary_guard`)
+	if !hsrIs(err, "HR001") {
+		t.Fatalf("tenant-scope raw INSERT with the beneficiary guard lifted: want HR001 from the resolution guard, got %v", err)
 	}
 	// A tenant session sees no resolution rows at all.
 	var n int
@@ -713,11 +728,16 @@ func TestHSEC_HoldRelease_Concurrency_ExecuteVsReactivation(t *testing.T) {
 
 			reached := make(chan struct{})
 			release := make(chan struct{})
+			var once sync.Once
+			releaseOnce := func() { once.Do(func() { close(release) }) }
 			testHookHoldResolutionAfterLocks = func(ctx context.Context, id uuid.UUID) {
 				close(reached)
 				<-release
 			}
+			// A failing assertion must never leave the executor parked on the hook (it would hold
+			// its connection and hang the pool's Close): release it on every exit.
 			defer func() { testHookHoldResolutionAfterLocks = nil }()
+			defer releaseOnce()
 
 			execDone := make(chan error, 1)
 			var out HoldResolutionOutcome
@@ -741,7 +761,7 @@ func TestHSEC_HoldRelease_Concurrency_ExecuteVsReactivation(t *testing.T) {
 				t.Fatal("the reactivation committed while the release held the status lock")
 			case <-time.After(700 * time.Millisecond):
 			}
-			close(release)
+			releaseOnce()
 			if err := <-execDone; err != nil {
 				t.Fatalf("execute: %v", err)
 			}
@@ -765,11 +785,14 @@ func TestHSEC_HoldRelease_Concurrency_ExecuteVsSubmit(t *testing.T) {
 
 	reached := make(chan struct{})
 	release := make(chan struct{})
+	var once sync.Once
+	releaseOnce := func() { once.Do(func() { close(release) }) }
 	testHookHoldResolutionAfterLocks = func(ctx context.Context, id uuid.UUID) {
 		close(reached)
 		<-release
 	}
 	defer func() { testHookHoldResolutionAfterLocks = nil }()
+	defer releaseOnce()
 	execDone := make(chan error, 1)
 	go func() {
 		_, err := h.decide(h.apprB, r, ResolutionApprove)
@@ -786,7 +809,7 @@ func TestHSEC_HoldRelease_Concurrency_ExecuteVsSubmit(t *testing.T) {
 		t.Fatalf("the submit did not wait for the L1 lock held by the release: %v", err)
 	case <-time.After(700 * time.Millisecond):
 	}
-	close(release)
+	releaseOnce()
 	if err := <-execDone; err != nil {
 		t.Fatalf("execute: %v", err)
 	}
@@ -820,6 +843,100 @@ func TestHSEC_HoldRelease_SubmitFirst_ThenReleaseRefused(t *testing.T) {
 	}
 	if got := h.wr(wr.ID); got.State != withdrawal.StateSubmitted || h.governedTxCount(wr.ID) != 0 {
 		t.Fatalf("the dispatch was disturbed: %s", got.State)
+	}
+	h.assertInvariants()
+}
+
+// The request path takes the L1 withdrawal lock first (ADR 0111 6.5): a request for a
+// withdrawal whose row is locked by another transaction WAITS for it.
+func TestHSEC_HoldRelease_Request_TakesTheWithdrawalL1Lock(t *testing.T) {
+	h := newHSR(t, 1)
+	wr := h.hold(100)
+	h.suspendTenant()
+	locked := make(chan struct{})
+	unlock := make(chan struct{})
+	holderDone := make(chan error, 1)
+	var once sync.Once
+	unlockOnce := func() { once.Do(func() { close(unlock) }) }
+	defer unlockOnce()
+	go func() {
+		holderDone <- h.pool.WithTenant(context.Background(), h.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+			var id uuid.UUID
+			if err := tx.QueryRow(ctx, `SELECT id FROM withdrawal_requests WHERE id = $1 FOR UPDATE`, wr.ID).Scan(&id); err != nil {
+				return err
+			}
+			close(locked)
+			<-unlock
+			return nil
+		})
+	}()
+	<-locked
+	reqDone := make(chan error, 1)
+	go func() {
+		_, err := h.request(h.reqA, wr.ID)
+		reqDone <- err
+	}()
+	select {
+	case err := <-reqDone:
+		unlockOnce()
+		t.Fatalf("the request did not wait for the L1 lock held by another transaction: %v", err)
+	case <-time.After(700 * time.Millisecond):
+	}
+	unlockOnce()
+	if err := <-holderDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-reqDone; err != nil {
+		t.Fatalf("the request after the lock was released: %v", err)
+	}
+}
+
+// Execute vs grant revocation: the executor holds the approvers' grants FOR SHARE from
+// step 5, so a concurrent revocation WAITS for the release to commit (it cannot slip in
+// between the recount and the posting).
+func TestHSEC_HoldRelease_Concurrency_ExecuteVsGrantRevocation(t *testing.T) {
+	h := newHSR(t, 1)
+	wr := h.hold(400)
+	h.suspendTenant()
+	r := h.mustRequest(h.reqA, wr.ID)
+
+	reached := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	releaseOnce := func() { once.Do(func() { close(release) }) }
+	testHookHoldResolutionAfterShareLocks = func(ctx context.Context, id uuid.UUID) {
+		close(reached)
+		<-release
+	}
+	defer func() { testHookHoldResolutionAfterShareLocks = nil }()
+	defer releaseOnce()
+
+	execDone := make(chan error, 1)
+	var out HoldResolutionOutcome
+	go func() {
+		var err error
+		out, err = h.decide(h.apprB, r, ResolutionApprove)
+		execDone <- err
+	}()
+	<-reached
+	revDone := make(chan struct{})
+	go func() {
+		h.revokePlatformGrant(h.apprB, capability.CapabilityWithdrawalHoldResolutionApprove)
+		close(revDone)
+	}()
+	select {
+	case <-revDone:
+		releaseOnce()
+		t.Fatal("the grant revocation committed while the executor held the grants FOR SHARE")
+	case <-time.After(700 * time.Millisecond):
+	}
+	releaseOnce()
+	if err := <-execDone; err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	<-revDone
+	if !out.Executed || h.wr(wr.ID).State != withdrawal.StateRejected || h.governedTxCount(wr.ID) != 1 {
+		t.Fatalf("the release did not win: %+v", out)
 	}
 	h.assertInvariants()
 }
