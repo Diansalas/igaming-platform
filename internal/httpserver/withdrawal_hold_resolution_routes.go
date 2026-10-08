@@ -4,8 +4,8 @@
 // Route shape mirrors payment_force_resolution_routes.go (K3): the target tenant
 // always comes from the {tenantID} path value (a body tenant_id is accepted and
 // IGNORED), canActOnTenant refuses a tenant caller naming another tenant (403, no
-// data), and the service acts ONLY through db.WithPlatformActingInTenant (ADR 0099
-// 6.1), which the database refuses (CG020) unless the platform principal holds an
+// data), and the service acts ONLY through the ADR 0099 6.1 acting-session setter in
+// internal/db, which the database refuses (CG020) unless the platform principal holds an
 // in-force grant for exactly that tenant. This file never opens a session itself and
 // never calls the acting setter.
 //
