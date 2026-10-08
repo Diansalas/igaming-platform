@@ -7148,7 +7148,7 @@ escalation, no state change, and reactivation resumes the work with no special a
    `submitting` attempt's Deposit, which is in-flight money and resolves (it is the same exposure as an engaged
    kill switch after claim). Not a predicate in the CAS (a predicate would need the tenants row visible in the
    CAS statement; unnecessary given the in-tx read under the intent lock).
-5. Resolution-only applies to the SWEEPER only. *(B8, 2026-10-06: the phase-C cascade insert is now gated on every path, but the player-path T2 claim for a cascade child - `driveCreatedAttempt(..., sweeperDriven=false)` from the HTTP request loop - still reads no status; this is part of H-SEC-5 below.)* The HTTP deposit and withdrawal initiation paths read no
+5. *(SUPERSEDED for HTTP initiation by section 43, 2026-10-08: H-SEC-5 and H-SEC-11 are enforced; HTTP deposit and withdrawal initiation now read tenant and brand status in the creating transaction and fail closed. The text below is the historical state.)* Resolution-only applies to the SWEEPER only. *(B8, 2026-10-06: the phase-C cascade insert is now gated on every path, but the player-path T2 claim for a cascade child - `driveCreatedAttempt(..., sweeperDriven=false)` from the HTTP request loop - still reads no status; this is part of H-SEC-5 below.)* The HTTP deposit and withdrawal initiation paths read no
    `tenants.status` (H-SEC-5, pre-existing) and neither path reads brand status (H-SEC-11; resolution-only is
    tenant-scoped); suspension must not be described as stopping payments. **Registered follow-up; required before
    real-provider/launch:** a tenant-status and brand-status gate on HTTP deposit and withdrawal initiation.
@@ -7917,3 +7917,58 @@ terminal-reason CHECK are untouched). Same Kind, discriminator shape, attributes
   `security` (apply, or close as `anomaly_predates_submission`, an orphan older than the attempt's first submission) and stays
   recorded. LF L-1 stays not built. Tests: `receipt_orphan_resolve_integration_test.go`. Mutation evidence:
   `docs/plans/prh2-hardening-round/prh2-r11-receipt-orphan-mutation-kill.txt`.
+
+## 43. Amendment - H-SEC-5 / H-SEC-11 enforced: tenant and brand gate on HTTP deposit and withdrawal initiation (`payments`, 2026-10-08)
+
+### 43.1 H-SEC-5 / H-SEC-11 enforced
+
+Status: `IMPLEMENTED` against `MOCK` (no real provider exists; nothing here is a statement about a real PSP). Owner/security
+rulings (verbatim scope, not broadened): **H-SEC-5** - HTTP deposit initiation fails closed unless the tenant and brand are
+active/eligible at the time of initiation; an inactive/closed tenant or brand must not be able to create a deposit/payment
+attempt through the HTTP initiation path. **H-SEC-11** - the same for HTTP withdrawal initiation (withdrawal/payout attempt).
+PAY-H-FOLLOWUPS-1 items (4) and (14).
+
+- **One helper.** `tenant.RequireActiveForPaymentInitiation(ctx, tx, tenantID, brandID)` (`internal/tenant/payment_initiation_gate.go`),
+  error `tenant.ErrNotActiveForPaymentInitiation`. Tenant half reuses the R3 primitive `tenant.GameplayStatus` (migration 0118
+  per-tenant status advisory lock taken SHARED, then a fresh `tenants.status` read; no migration added). Brand half is
+  `SELECT status FROM brands WHERE id = $1 AND tenant_id = $2 FOR SHARE` (the runtime role can lock-read `brands`: the tenant-scoped
+  UPDATE policy is satisfied; unlike `tenants`, which has no runtime UPDATE path, hence the advisory lock there). Vocabulary:
+  both columns are `active|suspended|closed`; "eligible" = `active` only (the same rule as `tenantResolutionOnly` and the R3 gate).
+  There is no separate "inactive" brand status in the data model. A missing tenant row, a brand row that does not exist or belongs to
+  another tenant, a nil id, any status other than `active`, and any read error all refuse (a read error is returned, never read as active).
+- **Where it runs (always inside the transaction that creates the row, before the first insert, after any lock the path takes).**
+  (a) `InitiateDepositAttempt` phase A, first statement of the creating tx (`deposit_v2.go`), before the `deposit_intents` insert;
+  (b) `withdrawal.RequestWithdrawal`, first statement, before the replay lookup, the KYC gate, the insert and the hold;
+  (c) `ClaimForDispatch` (staff submit, T1p), after `LockApprovedForSubmission` and before the payout KYC gate, so a refusal never
+  commits a KYC deny/hold release or a `submitted` transition; the brand is the request row's own `brand_id`;
+  (d) the player-request (HTTP) cascade-child T2 claim in `driveCreatedAttempt(..., sweeperDriven=false)`, after the intent lock and
+  before the claim CAS. A refusal there defers the `created` child exactly like the sweeper deferral (rescheduled, unclaimed, no provider call;
+  the sweeper then resolves or expires it). The sweeper branch is unchanged (tenant-scoped resolution-only; brand status for the sweeper
+  stays the separate item (8)).
+- **Brand = the brand the player account belongs to**, resolved server-side by the handlers from the authenticated player
+  (`identity.GetPlayerAccountByID`), never from the request body; for the payout claim, the withdrawal request's own `brand_id`.
+- **Race freedom.** A tenant status change takes the advisory lock exclusive (trigger from 0118) and a brand status UPDATE needs the row
+  lock, so an initiation either reads the committed new status or makes the status change wait until the initiation transaction ends. Tests
+  hold an uncommitted status change open and prove the initiation blocks, then refuses (a plain unlocked read would create the row).
+- **Refusal contract.** The domain functions return an error wrapping `ErrNotActiveForPaymentInitiation`; the three handlers (`POST /v1/me/deposits`,
+  `POST /v1/me/withdrawals`, `POST /v1/admin/withdrawals/{id}/submit`) answer **409** with the new code `TENANT_OR_BRAND_NOT_ACTIVE`
+  (`apierror.CodeTenantOrBrandNotActive`, same status class as `SETTLEMENT_TENANT_NOT_ACTIVE`) and a generic message. No row, hold, ledger entry, audit
+  row or provider call results; the refusing transaction rolls back (a warning is logged with the request id only).
+- **Idempotency.** The client idempotency key lives only on the `deposit_intents` / `withdrawal_requests` row. A refusal creates neither, so the key is
+  not consumed; the same key after reactivation is a normal first request (tested through domain and HTTP). The payout submit carries no key (the request
+  stays `approved`). Consequence worth knowing: a retry of an ALREADY-created request/intent while the tenant is non-active is also refused (the gate runs
+  before the replay lookup, fail closed); `GET` routes are unaffected.
+- **Not touched (their own rulings).** Withdrawal approve, reject, resolve, cancel, the kill-switch routes, the read routes, the deposit settlement simulation
+  route, the webhook/callback receipt path, the sweeper, and the resolution-only paths. A player's existing hold stays releasable (reject/cancel) on a non-active tenant.
+- **Pins.** `internal/payments/hsec5_11_integration_test.go` (domain, runtime role, private DB) and `internal/httpserver/hsec5_11_integration_test.go`
+  (HTTP mapping); mutation evidence `docs/plans/prh2-hardening-round/prh2-r13-hsec5-11-mutation-kill.txt`.
+
+### 43.2 Residuals and findings (record only)
+
+- `POST /v1/me/deposits` resolves the wallet in an earlier, separate tenant transaction (`wallet.GetOrCreate`), which is not gated: a refused deposit
+  on a non-active tenant can still leave an empty wallet row for that asset. No intent, attempt, hold, ledger entry or provider call; deliberately not
+  changed (the ruling names the deposit/payment attempt, and wallet creation moves no value).
+- A suspension that commits AFTER the phase-A / T1p transaction commits can still be followed by that one already-claimed attempt's provider call
+  (in-flight money that resolves); same exposure as an engaged kill switch after claim (section 40, item 4). Unchanged.
+- The tenant-closure flow prerequisite in ADR 0107 (H-SEC-5 for deposits and suspended tenants) is satisfied by this section for HTTP initiation; the other
+  ADR 0107 gates and HD-CTF decisions are unchanged and still open.

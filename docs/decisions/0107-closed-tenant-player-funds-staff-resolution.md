@@ -298,7 +298,7 @@ Two new triggers, **not** edits of `payment_attempts_guard()`:
 
 Together these close **H-SEC-5 for payouts of closed tenants**: no code path, including HTTP
 `ClaimForDispatch` driven by uncontrolled closed-tenant staff, can dispatch without a consumed
-permit. **H-SEC-5 for deposits** and for suspended tenants stays open (PAY-H-FOLLOWUPS-1 item 4).
+permit. **H-SEC-5 for deposits** and for suspended tenants was open here (PAY-H-FOLLOWUPS-1 item 4); *update 2026-10-08: closed for HTTP initiation by ADR 0095 section 43 (`tenant.RequireActiveForPaymentInitiation`, tenant and brand, in the creating transaction).*
 **The tenant-closure flow must not launch until H-SEC-5 is closed for `closed` tenants.** This ADR
 closes it for payouts, and the deposit half remains a prerequisite.
 
@@ -570,7 +570,7 @@ shapes (§3), and asserts SUM(D) = SUM(C) and projection = recomputed.
 | TM-CT-5 | A closed tenant's staff dispatch through HTTP (H-SEC-5) | the §6.4 DB gates (payouts) |
 | R-CT-1..R-CT-4 | Funds sit in a closed tenant's `player_cash` (HD-CTF-3); unrequested balances (HD-CTF-4); status read without a lock (money-safe; recorded); CT-BLOCKED holds | as noted |
 | R-CT-5 | Nothing alerts on "a closed tenant holds funds" | ALERT-DELIVERY-1 OPEN; HD-CTF-8 |
-| R-CT-6 | H-SEC-5 for deposits and suspended tenants | PAY-H-FOLLOWUPS-1 item 4; a prerequisite for any tenant-closure flow |
+| R-CT-6 | H-SEC-5 for deposits and suspended tenants | PAY-H-FOLLOWUPS-1 item 4; a prerequisite for any tenant-closure flow. **Closed for HTTP initiation 2026-10-08 (ADR 0095 section 43).** |
 
 **Launch status:** a launch blocker for any tenant-closure flow (ADR 0105 §1). It does not block
 operating active tenants.
