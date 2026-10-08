@@ -191,6 +191,15 @@ func TestStateMachine_TransitionsAndTerminalStates(t *testing.T) {
 		t.Fatalf("a rejecting verifier must reject: %+v %v", res, err)
 	}
 	requireCode(t, w.try(exec(`UPDATE payout_instruments SET state='verified' WHERE id=$1`, rejInst.Instrument.ID)), "PI010", "un-reject")
+	// Revoking / suspending a rejected (terminal) instrument is a typed refusal, not a database error.
+	err = w.rtTx(func(ctx context.Context, tx pgx.Tx) error {
+		_, err := w.svc.Revoke(ctx, tx, BlockParams{TenantID: w.tenantID, InstrumentID: rejInst.Instrument.ID, PlayerAccountID: pr.ID,
+			Actor: Actor{Type: ActorPlayer, ID: pr.ID.String()}, ReasonCode: "player_revoked"})
+		return err
+	})
+	if !errors.Is(err, ErrBadTransition) {
+		t.Fatalf("revoking a rejected instrument = %v, want ErrBadTransition", err)
+	}
 	if _, err := w.svc.Verify(context.Background(), w.rt, w.tenantID, rejInst.Instrument.ID); !errors.Is(err, ErrNotVerifiable) {
 		t.Fatalf("a rejected instrument is not verifiable again: %v", err)
 	}
