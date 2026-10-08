@@ -492,3 +492,25 @@ BEGIN
     END LOOP;
 END
 $$;
+
+-- HSEC-APPROVED-HOLD-RELEASE-1 (migration 0124; ADR 0111 section 6): least-privilege,
+-- re-asserted on every run, mirroring migration 0124's own in-migration grant block:
+--   withdrawal_hold_resolutions          - SELECT/INSERT/UPDATE (the state machine;
+--                                          payload immutable by trigger). Never DELETE.
+--   withdrawal_hold_resolution_approvals - append-only: SELECT/INSERT.
+-- No role, password or attribute change.
+DO $$
+DECLARE
+    t RECORD;
+BEGIN
+    FOR t IN SELECT * FROM (VALUES
+        ('withdrawal_hold_resolutions', 'SELECT, INSERT, UPDATE'),
+        ('withdrawal_hold_resolution_approvals', 'SELECT, INSERT')) AS v(name, privs)
+    LOOP
+        IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = t.name) THEN
+            EXECUTE format('REVOKE ALL ON %I FROM igaming_runtime', t.name);
+            EXECUTE format('GRANT %s ON %I TO igaming_runtime', t.privs, t.name);
+        END IF;
+    END LOOP;
+END
+$$;

@@ -122,3 +122,22 @@ describe('getNavPermissions alert routing flag', () => {
     }
   })
 })
+
+/**
+ * HSEC-APPROVED-HOLD-RELEASE-1 (ADR 0111 6.3 / security H-4): the hold-resolution flags
+ * mirror internal/auth/permission.go exactly - platform_admin ONLY, no tenant role.
+ */
+describe('getNavPermissions withdrawal hold-resolution flags (HSEC)', () => {
+  const hr = (role: string) => {
+    const p = getNavPermissions(role)
+    return [p.withdrawalHoldResolutions, p.withdrawalHoldResolutionAct]
+  }
+  it('platform_admin may view and act (the grant and the acting session are still required server-side)', () => {
+    expect(hr('platform_admin')).toEqual([true, true])
+  })
+  it('every tenant role and every other role neither views nor acts', () => {
+    for (const role of ['tenant_admin', 'finance', 'compliance', 'support', 'risk_manager', 'promotions_manager', 'bonus_operations', 'player', undefined]) {
+      expect(hr(role as string)).toEqual([false, false])
+    }
+  })
+})

@@ -66,6 +66,14 @@ export interface NavPermissions {
    */
   paymentForceResolutionAct: boolean
   /**
+   * HSEC-APPROVED-HOLD-RELEASE-1 (ADR 0111 6.3): PermWithdrawalHoldResolutionRead and
+   * PermWithdrawalHoldResolutionRequest/Approve - the STATIC half only, platform_admin
+   * ONLY (no tenant role, ever). The authority is an in-force platform grant plus a
+   * G-P2 acting session, read server-side - this flag can never stand in for it.
+   */
+  withdrawalHoldResolutions: boolean
+  withdrawalHoldResolutionAct: boolean
+  /**
    * ALERT-DELIVERY-1 (ADR 0102 section 18): PermAlertRouteManage - author alert
    * routing (who is paged). platform_admin only, and separate from the
    * ack/resolve permission. UI convenience only; the server re-checks.
@@ -95,6 +103,8 @@ const NONE: NavPermissions = {
   manualAdjustmentAct: false,
   paymentForceResolutions: false,
   paymentForceResolutionAct: false,
+  withdrawalHoldResolutions: false,
+  withdrawalHoldResolutionAct: false,
   alertRouting: false,
 }
 
@@ -133,6 +143,8 @@ const ROLE_NAV_PERMISSIONS: Record<string, NavPermissions> = {
     manualAdjustmentAct: true,
     paymentForceResolutions: true,
     paymentForceResolutionAct: true,
+    withdrawalHoldResolutions: true,
+    withdrawalHoldResolutionAct: true,
     alertRouting: true,
   },
   tenant_admin: {
