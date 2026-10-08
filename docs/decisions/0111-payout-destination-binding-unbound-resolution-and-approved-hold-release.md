@@ -860,3 +860,101 @@ precondition); the rest is deferred as HD-R15-9.
 | ADR 0110 §10a T9/T10/T11 pointer | ADR 0110 header pointer, §2.2, §4.3 |
 | Deviations D-1..D-8 (+ D-9) and launch flags | §10.2, §10.3 |
 | §7 split revised; start-now vs wait | §7.2, §7.3 |
+
+---
+
+## 12. HSEC implementation notes (HSEC-APPROVED-HOLD-RELEASE-1, migration 0124)
+
+Appended by the `payments` implementer. The design above is **not** rewritten; this section records each
+ambiguity chosen while implementing §6 (safest reading in every case), the objects the implementation touches
+beyond the §6 list, and what the next migration (0125) must build on. Owner decisions (ADR 0095 §44, 13-18) are
+unchanged: no automatic release, the hold remains, a controlled staff path exists, four-eyes for
+resolution/release/cancel, no unilateral single-staff action, kill-switch semantics intact. Status:
+`IMPLEMENTED` against the MOCK stack (migration `0124_withdrawal_hold_resolution`, `internal/payments/
+withdrawal_hold_resolution.go`, `withdrawal.ReleaseForGovernedResolution`, routes under
+`/v1/admin/tenants/{tenantID}/withdrawal-hold-resolutions`); no real provider is involved or called.
+
+**What 0125 must build on (replace-in-place objects).** The four shared objects of §7.2, in 0124's bodies, each
+equal to the 0115 text plus exactly the marked HSEC addition: `ledger_governed_fence_allows` (+ branch (e)),
+`ledger_entries_governed_fence` (+ the `withdrawal_rejected` shape, variable `v_h`), the acting `ledger_accounts`
+`acting_insert` policy (+ the hold account of an executing hold resolution) and the acting `withdrawal_requests`
+`acting_update` policy (+ "state = rejected and an executing hold resolution of this txid"). 0125's down must
+restore these 0124 bodies, not the 0115 ones. Two further objects are also replaced in place by 0124 and a later
+migration that replaces them must start from 0124's text: `financial_policy_required_approvals` (0113 body + 4
+lines) and `actor_proof_require` (0120 body + the operation-table check). Their down files restore the 0113 / 0120
+text byte for byte (whole-schema snapshot test).
+
+**Chosen ambiguities.**
+
+- **HN-1 (`payout_instrument_id`).** 0123 (B13) is a different agent's migration, so 0124 must not reference its
+  column. `withdrawal_hold_resolutions.payout_instrument_id` is a plain nullable UUID (no FK) forced in the insert
+  guard from `NULLIF(to_jsonb(withdrawal_requests) ->> 'payout_instrument_id', '')::uuid`, which is NULL until the
+  column exists. It is a record only and is not part of `payload_hash`.
+- **HN-2 (approval vs precondition re-check).** The approvals guard does not refuse an approval because the
+  preconditions changed; otherwise the final approval after a reactivation could not end `refused_at_execution`
+  (that transition is only legal in the final approval's own transaction). The preconditions are re-checked by the
+  Go executor (`refused_at_execution`, closed codes `withdrawal_not_approved`, `attempt_exists`,
+  `tenant_brand_active_again`, `policy_disabled`) and again by the database at `pending -> executing` (HR010).
+  Non-final approvals record `preconditions_hold` in their audit row.
+- **HN-3 (freeze exemption).** The all-sessions freeze trigger exempts only `approved -> rejected` of an executing
+  hold resolution of this txid (not `cancelled`/`failed`), and an unreadable tenant or brand status counts as
+  non-active (fail closed). The H-SEC gate runs before `DenyForCompliance`, so the normal KYC denial is unaffected;
+  pinned by tests (gate first; active tenant still denies; non-active direct `DenyForCompliance` is HR050).
+- **HN-4 (executing-window discipline).** Beyond §6.4, while a hold resolution is `executing` for a withdrawal the
+  only admitted `withdrawal_requests` change in any session is `approved -> rejected` with the governed release
+  link and no other column touched (trigger `withdrawal_requests_governed_release_guard`); the acting UPDATE policy
+  WITH CHECK additionally requires `state = 'rejected'`. A governed-key release link is accepted only from that
+  context (a second withdrawal cannot borrow it; HR020).
+- **HN-5 (brand lock inside an acting session).** The H-SEC discipline takes `brands ... FOR SHARE`; the existing
+  brand policies are tenant-GUC only, so an acting session would see no row. 0124 adds one lock-only policy
+  `acting_lock ON brands FOR UPDATE USING (acting tenant, valid session) WITH CHECK (false)`. This object is not on
+  the §6 list; it grants no write.
+- **HN-6 (policy extension).** `financial_policy_required_approvals` ignores tenant- and brand-level rows for
+  `withdrawal_hold_resolution` when the tenant **or** the brand is not active (the K2-1 rule extended), so tenant
+  rows can never lower or steer the platform baseline of an operation platform staff perform on a suspended
+  tenant. No platform policy row => disabled (HR014), exactly as K3.
+- **HN-7 (required count).** `required = GREATEST(required_at_submission, policy.required)`, counting approvals of
+  distinct Persons **other than the requester**; a baseline of 1 therefore means requester + one distinct approver
+  (the four-eyes floor); the requester can neither approve nor reject their own request (use cancel). The
+  beneficiary (the withdrawing player's Person) is excluded at request and approval (S-12).
+- **HN-8 (tenant actors).** Both new tables carry only acting-family (A) policies. The guards additionally refuse
+  any non-`platform_acting` session (HR001) and the Go service refuses a tenant-scoped caller before any database
+  work; `eligible_tenant_roles = '{}'` makes a tenant-role grant impossible. Static permissions are
+  `RolePlatformAdmin` only (tenant roles denied, tested by a scan of all declared roles).
+- **HN-9 (uniqueness).** One `pending` and one `executed` resolution per withdrawal (partial UNIQUEs); a new request
+  after `cancelled`/`expired`/`rejected`/`refused_at_execution` is allowed.
+- **HN-10 (proofs).** Operations `withdrawal_hold_resolution:request|cancel|approve|reject`; the verifier and the Go
+  signer both refuse every scope but `platform_acting` (with a tenant) for them. A fresh proof is issued per
+  attempt (request: target `new`, digest of tenant, withdrawal, kind, evidence hash, reason; approve/reject:
+  resolution id + payload hash; cancel: resolution id + payload hash). `pending -> expired` carries no proof and is
+  refused before `expires_at` by both the base guard and, independently, the proof trigger.
+- **HN-11 (ledger key guard).** The CT-R3 trigger is right-anchored (`right(idempotency_key, 23) =
+  ':governed_hold_released'`) and, besides key and correlation, requires type `withdrawal_rejected`, the same
+  tenant and an executing resolution of this txid. Resolution rows are visible only to an acting session, so every
+  other session fails closed. The deferred shape check (HR041) additionally checks the reversal of the hold
+  transaction, no provider ids, exactly two entries, one per direction, wallet, amount and asset.
+- **HN-12 (SQLSTATE class).** A new class `HR` (hold resolution) is used (HR001 ... HR099); callers classify by code
+  only. Closed HTTP tokens: `hold_resolution_{disabled,not_permitted,precondition_failed,conflict,expired,
+  not_found}`; every refusal writes `withdrawal.hold_resolution_denied`.
+- **HN-13 (audit).** One `withdrawal.hold_resolution_<requested|approved|rejected|cancelled|expired|refused|
+  executed>` row per event (actor, requester, approvers of the counted approvals, withdrawal, reason code, evidence
+  hash, statuses, resulting state, ledger transaction) plus `withdrawal.hold_released_governed` from the money
+  movement. The evidence **hash** is recorded, never a reference.
+- **HN-14 (kill switch).** A release is not a dispatch: it creates no attempt, calls no provider and is not gated
+  by an engaged payment kill switch (which still blocks the existing submit path after reactivation); pinned by a
+  test. Whether an engaged kill switch should *also* block a release is recorded as a question for the human (below).
+- **HN-15 (reconciliation).** No new mismatch kind and no `tenant_system_read` policy: the release is an ordinary
+  two-leg `withdrawal_rejected` posting that the existing ledger/projection reconciliation covers.
+- **HN-16 (shared files).** Minimal ordered appends only: `permission.go`, `permissions.ts` (+ its test),
+  `init-app-role.sql`, one line in `routes.go`, the operation constants and one `Claims.validate` case in
+  `actorproof.go`, the capability constants, a second allowed call site in the A-16 static test
+  (`internal/db/acting_setter_static_test.go`) and two table names in the adjustment `zz_actor_proof_guard` catalog
+  test (nine -> eleven). `ADR 0110`'s operation table gains the four operations (scope `platform_acting` only).
+- **HN-17 (test environment).** The up/down/up test needs migrations 0122 and 0123 present (`internal/db` refuses
+  version gaps); during development they were stood in for by untracked no-op placeholders that are **not** part of
+  this change.
+
+**Policy question for the human (not decided here; the design fails closed around it).** Q-HSEC-1: should an
+engaged payment kill switch for the tenant also block `release_hold_to_player` execution? Implemented as "no"
+(the switch stops outbound provider dispatch; this movement returns the player's own funds and sends nothing). If
+the answer is "yes" it is a one-line addition to the executor's preconditions plus the migration-side recheck.
