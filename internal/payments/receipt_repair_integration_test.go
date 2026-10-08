@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -806,6 +807,19 @@ func TestRR_Guard_AdmitsOnlyEvidenceMatchingTarget_SameTenantProviderOperation(t
 	if err := exec(wrongProv, c.attempt.ID); err == nil {
 		t.Error("a receipt of another provider must not be attributed")
 	}
+	// matching merchant reference but a provider reference the attempt never bound
+	unboundRef := c.plant(t, c.provider, ReceiptEvidence{EventType: "payout", ProviderReference: "rr-guard-unbound-ref", MerchantReference: c.attempt.MerchantReference,
+		Outcome: OutcomeSucceeded, Amount: 500, AssetCode: "EUR"}, ResolutionAnomalyCrossProvider)
+	if err := exec(unboundRef, c.attempt.ID); err == nil {
+		t.Error("a receipt whose provider reference the attempt never bound must not be attributed")
+	}
+	// matching provider reference but a merchant reference naming a different attempt
+	_, third := e.claim(t, "rr-guard-third")
+	otherMerchant := c.plant(t, c.provider, ReceiptEvidence{EventType: "payout", ProviderReference: c.ref, MerchantReference: third.MerchantReference,
+		Outcome: OutcomeSucceeded, Amount: 501, AssetCode: "EUR"}, ResolutionAnomalyReferenceConflict)
+	if err := exec(otherMerchant, c.attempt.ID); err == nil {
+		t.Error("a receipt whose merchant reference names a different attempt must not be attributed")
+	}
 	// a nonexistent attempt id (FK) and an attempt of another tenant (invisible under RLS)
 	good := c.plant(t, c.provider, c.ev(22), ResolutionAnomalyCrossProvider)
 	if err := exec(good, uuid.New()); err == nil {
@@ -814,7 +828,6 @@ func TestRR_Guard_AdmitsOnlyEvidenceMatchingTarget_SameTenantProviderOperation(t
 	if err := exec(good, d.attempt.ID); err == nil {
 		t.Error("another tenant's attempt must be refused")
 	}
-	_ = e
 	if err := exec(good, c.attempt.ID); err != nil {
 		t.Errorf("the evidence-matching attempt is admitted by the guard: %v", err)
 	}
@@ -836,5 +849,45 @@ func TestRR_SignalReasons_ClosedSet(t *testing.T) {
 	}
 	if _, ok := receiptRepairSignalReasons[RefusalNotEligible]; ok {
 		t.Error("an ineligible receipt must not raise")
+	}
+}
+
+// The three row locks of the documented order (parent, attempt, receipt) are really taken: with each held by
+// another transaction the repair blocks (its context expires) and writes nothing; once released it succeeds.
+func TestRR_Locks_ParentAttemptAndReceiptAreTaken(t *testing.T) {
+	pool := depositV2ScratchPool(t)
+	c, _ := rrPayoutSucceeded(t, pool, "mock-rr-locks", "rr-locks", "rr-locks-ref")
+	targets := []struct {
+		name, sql string
+		arg       func(rid uuid.UUID) any
+	}{
+		{"parent_withdrawal_request", `SELECT id FROM withdrawal_requests WHERE id = $1 FOR UPDATE`, func(uuid.UUID) any { return *c.attempt.WithdrawalRequestID }},
+		{"attempt", `SELECT id FROM payment_attempts WHERE id = $1 FOR UPDATE`, func(uuid.UUID) any { return c.attempt.ID }},
+		{"receipt", `SELECT id FROM payment_provider_events WHERE id = $1 FOR UPDATE`, func(rid uuid.UUID) any { return rid }},
+	}
+	for i, tg := range targets {
+		rid := c.plant(t, c.provider, c.ev(int64(300+i)), ResolutionAnomalyCrossProvider)
+		var blockedErr error
+		if err := pool.WithTenant(context.Background(), c.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+			if _, err := tx.Exec(ctx, tg.sql, tg.arg(rid)); err != nil {
+				return err
+			}
+			tctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+			defer cancel()
+			_, blockedErr = RepairReceiptAttribution(tctx, pool, ReceiptRepairRequest{TenantID: c.tenantID, ReceiptID: rid,
+				Reason: RepairReasonAnomalyAppliedGap, Caller: "test.repair"})
+			return nil
+		}); err != nil {
+			t.Fatalf("%s: %v", tg.name, err)
+		}
+		if blockedErr == nil {
+			t.Errorf("%s: the repair completed while the %s lock was held elsewhere: that lock is not taken", tg.name, tg.name)
+		}
+		if c.receiptAttempt(t, rid) != nil || c.count(t, `SELECT count(*) FROM audit_log WHERE tenant_id = $1 AND target_id = $2`, c.tenantID, rid.String()) != 0 {
+			t.Errorf("%s: a blocked repair must write nothing", tg.name)
+		}
+		if res := c.repair(t, rid); res.Outcome != RepairRepaired {
+			t.Errorf("%s: after release: %+v", tg.name, res)
+		}
 	}
 }
