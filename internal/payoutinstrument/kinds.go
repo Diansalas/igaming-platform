@@ -9,7 +9,6 @@ import (
 	"regexp"
 	"sort"
 	"strings"
-	"unicode"
 )
 
 // Kind codes seeded by migration 0123. The set is OPEN (decision 6): a new
@@ -139,18 +138,6 @@ func walkStrings(v any, pred func(string) bool) bool {
 		return pred(t.String())
 	}
 	return false
-}
-
-func cleanText(s string, min, max int) bool {
-	if len(s) < min || len(s) > max {
-		return false
-	}
-	for _, r := range s {
-		if unicode.IsControl(r) || r == unicode.ReplacementChar {
-			return false
-		}
-	}
-	return true
 }
 
 func last4(s string) string {

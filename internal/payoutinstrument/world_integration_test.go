@@ -294,13 +294,4 @@ func (w *world) seedWallet(p player, asset string) uuid.UUID {
 	return id
 }
 
-func jsonHas(s string, needles ...string) bool {
-	for _, n := range needles {
-		if strings.Contains(s, n) {
-			return true
-		}
-	}
-	return false
-}
-
 var _ = fmt.Sprintf

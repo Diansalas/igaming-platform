@@ -58,18 +58,6 @@ func scanVerification(row pgx.Row) (Verification, error) {
 	return v, err
 }
 
-func loadVerification(ctx context.Context, tx pgx.Tx, tenantID, id uuid.UUID) (Verification, error) {
-	v, err := scanVerification(tx.QueryRow(ctx,
-		`SELECT `+verificationColumns+` FROM payout_instrument_verifications WHERE id = $1 AND tenant_id = $2`, id, tenantID))
-	if errors.Is(err, pgx.ErrNoRows) {
-		return Verification{}, ErrNotFound
-	}
-	if err != nil {
-		return Verification{}, fmt.Errorf("payoutinstrument: load verification: %w", err)
-	}
-	return v, nil
-}
-
 // latestVerified returns the instrument's latest outcome=verified row.
 func latestVerified(ctx context.Context, tx pgx.Tx, tenantID, instrumentID uuid.UUID) (Verification, bool, error) {
 	v, err := scanVerification(tx.QueryRow(ctx,

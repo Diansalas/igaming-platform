@@ -21,8 +21,6 @@ type PayoutDestination struct {
 	FingerprintKid string          // the adapter computes its echo under this kid
 }
 
-const redactedDestination = "PayoutDestination{detail=[REDACTED]}"
-
 // String never renders Detail.
 func (d PayoutDestination) String() string {
 	return fmt.Sprintf("PayoutDestination{instrument=%s kind=%s detail=[REDACTED]}", d.InstrumentID, d.Kind)
