@@ -29,9 +29,15 @@ var (
 	ErrIntegrity           = errors.New("payoutinstrument: instrument integrity check failed")
 	ErrKYCNotVerified      = errors.New("payoutinstrument: the person's KYC is not verified")
 	ErrMaxAgeNotConfigured = errors.New("payoutinstrument: no verification max-age is configured for the jurisdiction")
-	ErrKindDisabled        = errors.New("payoutinstrument: kind is not enabled for non-synthetic verification")
-	ErrNotVerifiable       = errors.New("payoutinstrument: instrument is not in a verifiable state")
-	ErrBadTransition       = errors.New("payoutinstrument: transition is not allowed from this state")
+	// ErrDestinationBlocked: a staff or provider suspension or revocation exists
+	// for this destination (fingerprint) in the tenant. There is no unblock path
+	// in B13-A (no staff unsuspend, owner decision 7), so re-registering it is
+	// refused - otherwise a player could revoke a compliance-suspended
+	// instrument and register the same destination again.
+	ErrDestinationBlocked = fmt.Errorf("%w: destination is blocked", ErrInvalidRegistration)
+	ErrKindDisabled       = errors.New("payoutinstrument: kind is not enabled for non-synthetic verification")
+	ErrNotVerifiable      = errors.New("payoutinstrument: instrument is not in a verifiable state")
+	ErrBadTransition      = errors.New("payoutinstrument: transition is not allowed from this state")
 )
 
 // Service is the payout-instrument subsystem. It is the ONLY writer of the
@@ -197,6 +203,23 @@ func (s *Service) Register(ctx context.Context, tx pgx.Tx, p RegisterParams) (Re
 		}
 		if owner != personID {
 			return RegisterResult{}, ErrFingerprintConflict
+		}
+	}
+
+	// A destination blocked by compliance or a provider cannot be registered
+	// again (see ErrDestinationBlocked). Player-initiated revocations do not
+	// block: the player may re-add their own destination.
+	for _, kid := range s.keys.FingerprintKIDs() {
+		var blocked bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS (
+			SELECT 1 FROM payout_instruments i
+			  JOIN payout_instrument_blocking_events e ON e.instrument_id = i.id AND e.tenant_id = i.tenant_id
+			 WHERE i.tenant_id = $1 AND i.fingerprint_kid = $2 AND i.fingerprint = $3 AND e.actor_type <> 'player')`,
+			p.TenantID, kid, fps[kid]).Scan(&blocked); err != nil {
+			return RegisterResult{}, fmt.Errorf("payoutinstrument: blocked-destination check: %w", err)
+		}
+		if blocked {
+			return RegisterResult{}, ErrDestinationBlocked
 		}
 	}
 

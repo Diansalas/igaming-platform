@@ -433,3 +433,54 @@ func TestRegisterRefusals(t *testing.T) {
 		t.Errorf("unknown asset: %v", err)
 	}
 }
+
+// A staff/provider block of a destination cannot be undone by the player
+// revoking the instrument and registering the same destination again; a
+// player's own revocation does not block.
+func TestRegister_BlockedDestinationCannotBeReRegistered(t *testing.T) {
+	w := newWorld(t)
+	p := w.newPlayer(w.brandID)
+	suspended := w.verified(p, ibanA)
+	if err := w.block(suspended, EventSuspend, staff(), p); err != nil {
+		t.Fatal(err)
+	}
+	// The player revokes the compliance-suspended instrument ...
+	if err := w.block(suspended, EventRevoke, Actor{Type: ActorPlayer, ID: p.ID.String()}, p); err != nil {
+		t.Fatal(err)
+	}
+	// ... and may not register the same destination again.
+	if _, err := w.register(p, ibanA); !errors.Is(err, ErrDestinationBlocked) || !errors.Is(err, ErrInvalidRegistration) {
+		t.Fatalf("re-registering a staff-suspended destination: %v", err)
+	}
+	// A provider revocation blocks as well.
+	b := w.verified(p, ibanB)
+	if err := w.rtTx(func(ctx context.Context, tx pgx.Tx) error {
+		_, err := w.svc.ApplyProviderBlock(ctx, tx, w.tenantID, b.ID, MockVerifierID, EventRevoke, "provider_revoked")
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.register(p, ibanB); !errors.Is(err, ErrDestinationBlocked) {
+		t.Fatalf("re-registering a provider-revoked destination: %v", err)
+	}
+	// An unregistered verifier cannot block (provider revocation is authenticated).
+	c := w.verified(p, "FR1420041010050500013M02606")
+	err := w.rtTx(func(ctx context.Context, tx pgx.Tx) error {
+		_, err := w.svc.ApplyProviderBlock(ctx, tx, w.tenantID, c.ID, "unknown-verifier", EventRevoke, "provider_revoked")
+		return err
+	})
+	if !errors.Is(err, ErrInvalidRegistration) {
+		t.Fatalf("unregistered verifier: %v", err)
+	}
+	if s := w.load(c.ID).State; s != StateVerified {
+		t.Fatalf("state = %s", s)
+	}
+	// A PLAYER revoke does not block: the player may add their own destination back.
+	d := w.verified(p, "NL91ABNA0417164300")
+	if err := w.block(d, EventRevoke, Actor{Type: ActorPlayer, ID: p.ID.String()}, p); err != nil {
+		t.Fatal(err)
+	}
+	if res, err := w.register(p, "NL91ABNA0417164300"); err != nil || res.Existing || res.Instrument.ID == d.ID {
+		t.Fatalf("re-registering a player-revoked destination: %+v %v", res, err)
+	}
+}

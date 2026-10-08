@@ -93,6 +93,8 @@ func refusalReason(err error) string {
 	switch {
 	case errors.Is(err, payoutinstrument.ErrFingerprintConflict):
 		return "fingerprint_conflict"
+	case errors.Is(err, payoutinstrument.ErrDestinationBlocked):
+		return "destination_blocked"
 	case errors.Is(err, payoutinstrument.ErrPANRefused):
 		return "pan_refused"
 	case errors.Is(err, payoutinstrument.ErrInvalidDetail):

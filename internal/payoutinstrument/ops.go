@@ -249,15 +249,15 @@ func (s *Service) Sweep(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, limi
 // View is the only instrument shape any API returns: the mask and the state,
 // never the detail, the ciphertext, the fingerprint or a seal.
 type View struct {
-	ID             uuid.UUID `json:"id"`
-	PlayerAccount  uuid.UUID `json:"player_account_id,omitempty"`
-	Kind           string    `json:"kind"`
-	Rail           string    `json:"rail"`
-	AssetCodes     []string  `json:"asset_codes"`
-	DisplayMask    string    `json:"display_mask"`
-	State          State     `json:"state"`
-	StateChangedAt time.Time `json:"state_changed_at"`
-	CreatedAt      time.Time `json:"created_at"`
+	ID             uuid.UUID  `json:"id"`
+	PlayerAccount  *uuid.UUID `json:"player_account_id,omitempty"`
+	Kind           string     `json:"kind"`
+	Rail           string     `json:"rail"`
+	AssetCodes     []string   `json:"asset_codes"`
+	DisplayMask    string     `json:"display_mask"`
+	State          State      `json:"state"`
+	StateChangedAt time.Time  `json:"state_changed_at"`
+	CreatedAt      time.Time  `json:"created_at"`
 	// Verification fields (staff and player both see their own).
 	VerificationSource *VerificationSource `json:"verification_source,omitempty"`
 	VerifiedAt         *time.Time          `json:"verified_at,omitempty"`
@@ -282,7 +282,8 @@ func (s *Service) ListForPlayer(ctx context.Context, tx pgx.Tx, tenantID, player
 		var v View
 		var state string
 		var src *string
-		if err := rows.Scan(&v.ID, &v.PlayerAccount, &v.Kind, &v.Rail, &v.AssetCodes, &v.DisplayMask, &state, &v.StateChangedAt, &v.CreatedAt,
+		var pa uuid.UUID
+		if err := rows.Scan(&v.ID, &pa, &v.Kind, &v.Rail, &v.AssetCodes, &v.DisplayMask, &state, &v.StateChangedAt, &v.CreatedAt,
 			&src, &v.VerifiedAt, &v.VerificationExpiry); err != nil {
 			return nil, err
 		}
@@ -291,8 +292,8 @@ func (s *Service) ListForPlayer(ctx context.Context, tx pgx.Tx, tenantID, player
 			vs := VerificationSource(*src)
 			v.VerificationSource = &vs
 		}
-		if !includePlayerID {
-			v.PlayerAccount = uuid.Nil
+		if includePlayerID {
+			v.PlayerAccount = &pa
 		}
 		out = append(out, v)
 	}
