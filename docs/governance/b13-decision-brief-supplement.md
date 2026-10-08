@@ -159,7 +159,7 @@ The following are not authorised:
 | **D3: crypto destination** (ADR 0008) | Custodian owns keys and signing; the platform owns orchestration. No address-handling rule is documented. Custodian selection is a human decision. |
 | **D4: cash / retail** (`07-payments-architecture.md` ~lines 376-390) | Mandatory identity-verification attestation on `complete`. The sufficiency rule is `identity-compliance`'s and is not designed. |
 
-The record also contains one statement that bears on D1 and is not reconciled with B13: 07 §376-390 says "a PSP's own
+The record also contains one statement that bears on D1 and is not reconciled with B13: `07-payments-architecture.md` ~lines 376-390 says "a PSP's own
 KYC/rails already bind the payout instrument to a verified identity". Whether that counts as "verified" for D1 is
 **not established by the record** (Q6).
 
