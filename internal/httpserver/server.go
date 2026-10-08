@@ -15,6 +15,7 @@ import (
 
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
+	"github.com/Diansalas/igaming-platform/internal/admission"
 	"github.com/Diansalas/igaming-platform/internal/audit"
 	"github.com/Diansalas/igaming-platform/internal/auth"
 	"github.com/Diansalas/igaming-platform/internal/casino"
@@ -23,6 +24,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/identityresolution"
 	"github.com/Diansalas/igaming-platform/internal/kyc"
 	"github.com/Diansalas/igaming-platform/internal/payments"
+	"github.com/Diansalas/igaming-platform/internal/payoutinstrument"
 	"github.com/Diansalas/igaming-platform/internal/providercred"
 )
 
@@ -353,6 +355,14 @@ type Deps struct {
 	// Plumbed from the CORS_ALLOWED_ORIGINS environment variable via
 	// internal/config.Config and cmd/platform-api/main.go.
 	CORSAllowedOrigins []string
+
+	// PayoutInstruments is the B13 payout instrument subsystem (ADR 0111,
+	// migration 0123). nil (no key families configured) makes every
+	// /payout-instruments route answer 503 - there is no keyless mode.
+	PayoutInstruments *payoutinstrument.Service
+	// PayoutInstrumentRegisterLimiter is the per-player registration limiter
+	// (ADR 0111 2.9); nil builds the production default.
+	PayoutInstrumentRegisterLimiter *admission.GCRALimiter
 
 	// authLimiter is built by New from AuthRateLimitPerMinute/
 	// TrustedProxyCount and shared by every rate-limited route. Unexported

@@ -11,6 +11,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/identityresolution"
 	"github.com/Diansalas/igaming-platform/internal/kyc"
 	"github.com/Diansalas/igaming-platform/internal/payments"
+	"github.com/Diansalas/igaming-platform/internal/payoutinstrument"
 	"github.com/Diansalas/igaming-platform/internal/providercred"
 	"github.com/Diansalas/igaming-platform/internal/providerkind"
 	"github.com/Diansalas/igaming-platform/internal/secretstore"
@@ -44,6 +45,9 @@ type providerBundle struct {
 	DocumentStorage *kyc.MockDocumentStorageProvider
 	MalwareScanner  kyc.MockMalwareScanner
 	Email           *email.MockProvider
+	// PayoutVerifier is the MOCK payout-instrument verifier (B13, ADR 0111
+	// 2.5): Synthetic, no external I/O, registered with the synthetic guard.
+	PayoutVerifier *payoutinstrument.MockVerifier
 
 	// The MOCK webhook credential resolvers (Stage 10.3 gate-W1 fix round,
 	// security S-4 / code review #2). They are built HERE - not in
@@ -185,6 +189,7 @@ func buildProviderBundle(wiring mockWiring) providerBundle {
 		DocumentStorage: kyc.NewMockDocumentStorageProvider(),
 		MalwareScanner:  kyc.NewMockMalwareScanner(),
 		Email:           email.NewMockProvider(),
+		PayoutVerifier:  payoutinstrument.NewMockVerifier(),
 	}
 	// PROV-OUTBOUND-CRED-1 phase 2 code review C2: this is the one
 	// DELIBERATE hard-wired MockCredentialResolver{} in this file, never
@@ -381,6 +386,7 @@ func buildRegistrations(_ config.Config, b providerBundle) []providerkind.Regist
 		{Domain: "kyc", Name: "document_storage", Component: b.DocumentStorage},
 		{Domain: "kyc", Name: "malware_scanner", Component: b.MalwareScanner},
 		{Domain: "email", Name: "provider", Component: b.Email},
+		{Domain: "payout_instrument", Name: "verifier", Component: b.PayoutVerifier},
 	}
 	if b.KYC != nil {
 		regs = append(regs, providerkind.Registration{Domain: "kyc", Name: "provider", Component: b.KYC})

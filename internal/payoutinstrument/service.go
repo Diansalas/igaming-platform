@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/Diansalas/igaming-platform/internal/audit"
+	"github.com/Diansalas/igaming-platform/internal/db"
 )
 
 // Service errors. The registration refusals are mapped to ONE generic player
@@ -116,7 +117,7 @@ var activeStates = `('pending_verification','verified','verification_expired','s
 func (s *Service) Register(ctx context.Context, tx pgx.Tx, p RegisterParams) (RegisterResult, error) {
 	spec, err := s.kinds.Spec(p.Kind)
 	if err != nil {
-		return RegisterResult{}, fmt.Errorf("%w: %v", ErrInvalidRegistration, err)
+		return RegisterResult{}, fmt.Errorf("%w: %w", ErrInvalidRegistration, err)
 	}
 	var kindVersion int
 	var allowedRails []string
@@ -140,7 +141,7 @@ func (s *Service) Register(ctx context.Context, tx pgx.Tx, p RegisterParams) (Re
 	}
 	norm, err := spec.Normalize(p.Detail)
 	if err != nil {
-		return RegisterResult{}, fmt.Errorf("%w: %v", ErrInvalidRegistration, err)
+		return RegisterResult{}, fmt.Errorf("%w: %w", ErrInvalidRegistration, err)
 	}
 
 	var brandID, personID uuid.UUID
@@ -210,7 +211,7 @@ func (s *Service) Register(ctx context.Context, tx pgx.Tx, p RegisterParams) (Re
 	}
 	ct, nonce, kid, err := s.keys.EncryptDetail(DetailAAD{TenantID: p.TenantID, InstrumentID: id, Kind: p.Kind, SchemaVersion: kindVersion}, norm.Canonical)
 	if err != nil {
-		return RegisterResult{}, fmt.Errorf("%w: %v", ErrInvalidRegistration, err)
+		return RegisterResult{}, fmt.Errorf("%w: %w", ErrInvalidRegistration, err)
 	}
 	inst.DetailCiphertext, inst.DetailNonce, inst.DetailKeyKID = ct, nonce, kid
 	if err := s.keys.SealInstrument(&inst); err != nil {
@@ -342,7 +343,7 @@ type verifyPlan struct {
 // TxRunner is the part of db.Pool the service needs: tenant-scoped
 // transactions. *db.Pool satisfies it.
 type TxRunner interface {
-	WithTenant(ctx context.Context, tenantID uuid.UUID, fn func(ctx context.Context, tx pgx.Tx) error) error
+	WithTenant(ctx context.Context, tenantID uuid.UUID, fn db.TxFunc) error
 }
 
 // Verify runs the ownership verification of a pending (or expired) instrument

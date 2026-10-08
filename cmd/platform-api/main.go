@@ -30,6 +30,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/kyc"
 	"github.com/Diansalas/igaming-platform/internal/observability"
 	"github.com/Diansalas/igaming-platform/internal/payments"
+	"github.com/Diansalas/igaming-platform/internal/payoutinstrument"
 	"github.com/Diansalas/igaming-platform/internal/reconciliation"
 	"github.com/Diansalas/igaming-platform/internal/rg"
 	"github.com/Diansalas/igaming-platform/internal/sportsbook"
@@ -161,6 +162,18 @@ func run() error {
 		return err
 	}
 	actorproof.SetDefault(actorProofIssuer)
+
+	// B13 (ADR 0111 2.2): the payout instrument subsystem. The startup gate
+	// (cfg.GuardEnvironment(); any non-Synthetic payout adapter or verifier)
+	// requires the two key families; the legacy-binding check repeats
+	// migration 0123's assertion (A-11).
+	payoutInstruments, err := buildPayoutInstrumentService(cfg, providers)
+	if err != nil {
+		return err
+	}
+	if err := payoutinstrument.VerifyLegacyBindings(ctx, legacyBindingChecker(pool)); err != nil {
+		return err
+	}
 
 	keys := map[string]string{cfg.JWTActiveKID: cfg.JWTSigningSecret}
 	if cfg.JWTPreviousSecret != "" {
@@ -316,6 +329,7 @@ func run() error {
 
 	handler, webhookAdmission := httpserver.NewWithAdmission(httpserver.Deps{
 		AlertRouting:                alertDispatcher,
+		PayoutInstruments:           payoutInstruments,
 		AlertRoutingProduction:      cfg.GuardEnvironment() == "production",
 		Logger:                      logger,
 		DB:                          pool,
