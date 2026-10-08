@@ -958,6 +958,15 @@ the human or architect should see are in 12.3.
 - **B13A-17 (provider ids).** `payoutinstrument.MockProviderIDs = {"mock-payments"}` equals the literal in 0123's up-time
   assertion; `cmd/platform-api` pins it equal to the ids of the `providerkind.Synthetic` payment adapters the binary registers.
 
+- **B13A-18 (repo-wide catalogue pins).** The `internal/db` catalogue tests (A-18 NULL-arm scan, K2-G1 acting row visibility,
+  the KYC-worker reference allowlists) classify every table. Two ordered appends were made to their reference allowlists
+  (`a18SelectAllowlist`, `workerReferenceAllowlist`) for `payout_instrument_kinds` and `payout_instrument_verification_max_age`
+  (family-R reference tables, no tenant data). The 0123 policies are written as static statements, not a `DO` loop, so the
+  A-18 scan can see them.
+- **B13A-19 (`migrate verify`).** On this branch alone `migrate verify` reports `GAP missing migration version 122` (0122 is
+  PAY-RECEIPT-ANOMALY-APPLIED-1, another workstream); `migrate up` is unaffected. Merge strictly in number order; after 0122
+  merges the report is clean.
+
 ### 12.3 Items for the architect / human (none changes decisions 1-8; each fails closed today)
 
 1. **Closing the NULL-binding arm (B13A-2)** needs a migration number or an amendment of 0123 before it merges. B13-B is
