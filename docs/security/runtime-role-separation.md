@@ -78,6 +78,15 @@ Required privileges, and only these:
   one exists).
 - Nothing else.
 
+Note on `UPDATE` on `brands` (load-bearing): `UPDATE` is required not only by HTTP payment
+initiation (`tenant.RequireActiveForPaymentInitiation`, H-SEC-5 / H-SEC-11) but also by the
+SWEEPER deposit claim transaction and by the cascade-eligible decline transactions (phase C and the
+poll path), which all read the brand row `FOR SHARE` through `tenant.RequireBrandActive` (H(8), ADR
+0095 sections 44-45). PostgreSQL requires the `UPDATE` privilege for any row-locking read, so a
+least-privilege `REVOKE UPDATE ON brands` would make every one of those paths fail closed (error, no
+dispatch, decline transaction rolled back). Pinned by `internal/tenant/brands_grant_pin_integration_test.go`
+and `internal/payments/h8_brand_failclosed_scratch_integration_test.go`.
+
 Explicitly do **not** grant, and confirm these are absent (they are
 absent by default for a freshly created role — the risk is a manual
 `GRANT` later reintroducing one of them, not the initial creation):

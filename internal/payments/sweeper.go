@@ -334,7 +334,7 @@ func (s *Sweeper) processCreated(ctx context.Context, tenantID uuid.UUID, attemp
 		// is deferred exactly like an engaged kill switch. The status is read in a
 		// separate short tx BEFORE driveCreatedAttempt as a cheap early skip; the
 		// authoritative read is inside the T2 claim tx in drive.go (B8).
-		if blocked, err := s.deferIfResolutionOnly(ctx, tenantID, current, "deposit_dispatch"); err != nil || blocked {
+		if blocked, err := s.deferIfResolutionOnly(ctx, tenantID, loadedIntent.BrandID, current, "deposit_dispatch"); err != nil || blocked {
 			return err
 		}
 		if testHookAfterDispatchStatusPreRead != nil {
@@ -812,6 +812,12 @@ func (s *Sweeper) applyStatusEvidence(ctx context.Context, tx pgx.Tx, intent Dep
 					TargetType: "payment_attempt", TargetID: attempt.ID.String(), Outcome: audit.OutcomeDenied,
 					Metadata: map[string]any{"deposit_intent_id": intent.ID.String()},
 				})
+			}
+			// H(8) decision 19 (brand, separate from the tenant check above).
+			if skipped, err := skipCascadeChildForBrand(ctx, tx, attempt, intent); err != nil {
+				return err
+			} else if skipped {
+				return nil
 			}
 			_, err := insertCascadeAttemptIfEligible(ctx, tx, attempt)
 			return err

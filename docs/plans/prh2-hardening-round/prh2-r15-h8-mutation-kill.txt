@@ -1,0 +1,28 @@
+PRH-2 R15 - H(8) brand gate (ADR 0095 section 44 decisions 19-23, section 45) - mutation evidence
+Baseline: dd6cd31 + commits on branch gov-r15-h8. All tests MOCK provider, runtime role, integration tag, private scratch DB.
+Method: each mutant edits the source IN PLACE (backup copied first), `go vet -tags integration` must compile
+(compile-error mutants are NOT counted), the suite `-run 'TestH8_|TestRequireBrandActive'` -count=1 -p 1 -v runs, the file is
+restored from the in-memory original and compared byte-for-byte (assert rd(f)==backup) and `git status` shows only the intended files.
+CONTROL (unmutated): 15 PASS / 0 SKIP / 0 FAIL in internal/payments + internal/tenant (-race).
+
+M1  remove sweeper claim-tx brand check (drive.go)              KILLED  TestH8_BrandSuspendedAfterPreRead_ClaimTxDefers_ReactivationDispatches, TestH8_ClaimWaitsAtGateForInFlightBrandSuspension_ThenDeferred
+M2  remove sweeper pre-read brand check (deferIfResolutionOnly) KILLED  TestH8_BrandInactive_PreReadKeepsChildDeferredEvenIfClaimTxWouldReject (round 2: brand inactive + no-routable-provider / KYC deny must stay deferred; without the pre-read the claim tx rejects terminally)
+M3  remove phase-C brand skip (drive.go)                         KILLED  TestH8_PhaseC_CascadeChildNotCreatedForInactiveBrand
+M4  remove poll-path brand skip (sweeper.go)                     KILLED  TestH8_PollPath_CascadeChildNotCreatedForInactiveBrand
+M5a swap: claim-tx brand check reads the TENANT instead          KILLED  ...PreRead_ClaimTxDefers..., ...ClaimWaitsAtGate...
+M5b swap: pre-read brand helper reads tenants.status             KILLED  same F2 test + TestH8_BrandResolutionOnly_Contract (round 2)
+M5c swap: creation skip writes the TENANT audit action           KILLED  PhaseC and PollPath tests (own audit action asserted, tenant action asserted 0)
+M6  brand check moved BEFORE the intent lock                      SURVIVED (lock ORDER between the intent row and the brand FOR SHARE is not observable by outcome; the check is still before the CAS, so no safety property is lost; ordering is documented in code/ADR, not test-pinned)
+M7a fail-open on non-refusal read error (claim tx)               SURVIVED (EQUIVALENT: PostgreSQL aborts the transaction after any failed statement - measured: the next statement fails with 25P02 "current transaction is aborted" - so ignoring the read error still yields an error, no claim, no provider call. Round 2 tests TestH8_Scratch_ClaimTx_BrandReadError_FailsClosed (UPDATE on brands revoked in a throwaway scratch DB) pin the fail-closed OUTCOME: pass error, zero provider calls, unclaimed attempt, rows unchanged.)
+M7b fail-open on non-refusal read error (creation skip)          SURVIVED (EQUIVALENT, same tx-abort reason; outcome pinned by TestH8_Scratch_PhaseC_BrandReadError_RollsBackDecline and TestH8_Scratch_PollPath_BrandReadError_RollsBackDecline: error, decline rolled back, no child, no provider B call, no skip audit committed)
+M7c missing brand row treated as active (pre-read helper)       KILLED  TestH8_BrandResolutionOnly_Contract (round 2: nil id, missing row, foreign-tenant brand refused)
+M8  claim BEFORE the brand check (check after ClaimCreatedForSubmission) KILLED ...PreRead_ClaimTxDefers..., ...ClaimWaitsAtGate...
+M9  RequireBrandActive accepts any status                        KILLED  5 tests (both race tests, both creation tests, TestRequireBrandActive_BrandOnly_FailClosed)
+M10 RequireBrandActive without FOR SHARE                         KILLED  TestH8_ClaimWaitsAtGateForInFlightBrandSuspension_ThenDeferred
+
+Counted: 14 mutants (M7a first attempt and M2's first edit were compile errors, not counted, redone).
+KILLED 11 (M1, M2, M3, M4, M5a, M5b, M5c, M7c, M8, M9, M10); SURVIVED 3 (M6, M7a, M7b).
+Survivors: M6 (brand check before the intent lock): lock ORDER is not observable by outcome; the check still precedes the CAS; the order is
+recorded in ADR 0095 section 14 and 0082, not test-pinned. M7a/M7b: equivalent mutants under PostgreSQL abort-on-error semantics (see above);
+their fail-closed outcome is test-pinned. Also added (round 2): AST guard h8_brand_gate_static_test.go pinning the four call sites and
+brand-before-CAS ordering (not a mutation killer by itself; it fails if a site is removed or reordered).

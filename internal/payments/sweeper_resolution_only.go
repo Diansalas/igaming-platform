@@ -9,6 +9,11 @@
 //	          creating or dispatching a cascade child, a payout T2 re-claim (new
 //	          Withdraw) or a T12 resend (a Withdraw too).
 //
+// H(8) (ADR 0095 section 44 decisions 19-23, section 45): a non-active BRAND is a SEPARATE
+// policy check with the same effect on new dispatch (never merged with the tenant check; own
+// helper, own metric sites, own audit action): no cascade child is created for it, a sweeper T2
+// claim defers it (FOR SHARE brand read in the claim tx), nothing is cancelled or released.
+//
 // A non-active tenant is treated exactly like an engaged kill switch for new
 // dispatch: the attempt is rescheduled on the ordinary backoff and nothing else
 // changes, so reactivating a suspended tenant resumes it. The status is read per
@@ -30,6 +35,9 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+
+	"github.com/Diansalas/igaming-platform/internal/audit"
+	"github.com/Diansalas/igaming-platform/internal/tenant"
 )
 
 // tenantResolutionOnly reads tenants.status in tx and reports whether the tenant
@@ -86,12 +94,24 @@ func rescheduleCreatedForResolutionOnly(ctx context.Context, tx pgx.Tx, attemptI
 // deferIfResolutionOnly opens one short tenant tx, reads the status in it and,
 // for a non-active tenant, reschedules the attempt (no state change) and returns
 // blocked=true. It holds no transaction across anything else.
-func (s *Sweeper) deferIfResolutionOnly(ctx context.Context, tenantID uuid.UUID, attempt PaymentAttempt, site string) (blocked bool, err error) {
+//
+// H(8) decisions 20/23: the BRAND is checked here too as a SEPARATE policy check (plain
+// lock-free read, cheap early skip; the authoritative FOR SHARE read is in the T2 claim tx in
+// drive.go). It has its own metric site (site + "_brand") and never merges with the tenant reason.
+func (s *Sweeper) deferIfResolutionOnly(ctx context.Context, tenantID, brandID uuid.UUID, attempt PaymentAttempt, site string) (blocked bool, err error) {
 	next := s.backoff(attempt.PollCount)
+	reason := site
 	err = s.Pool.WithTenant(ctx, tenantID, func(actx context.Context, tx pgx.Tx) error {
 		resOnly, err := tenantResolutionOnly(actx, tx, tenantID)
-		if err != nil || !resOnly {
+		if err != nil {
 			return err
+		}
+		if !resOnly {
+			brandOnly, berr := brandResolutionOnly(actx, tx, tenantID, brandID)
+			if berr != nil || !brandOnly {
+				return berr
+			}
+			reason = site + "_brand"
 		}
 		if err := RescheduleNonTerminal(actx, tx, attempt.ID, next); err != nil {
 			return err
@@ -100,9 +120,61 @@ func (s *Sweeper) deferIfResolutionOnly(ctx context.Context, tenantID uuid.UUID,
 		return nil
 	})
 	if blocked && err == nil {
-		recordResolutionOnlyBlock(ctx, site)
+		recordResolutionOnlyBlock(ctx, reason)
 	}
 	return blocked, err
+}
+
+// Metric site labels for deposit deferrals decided inside drive.go. Distinct per caller and per
+// reason (ADR 0095 43.2 follow-up (c); H(8) decision 23).
+const (
+	siteDepositClaimHTTP          = "deposit_dispatch_claim_tx_http"
+	siteDepositClaimSweeperTenant = "deposit_dispatch_claim_tx_sweeper"
+	siteDepositClaimSweeperBrand  = "deposit_dispatch_claim_tx_sweeper_brand"
+	siteDepositCascadeChildBrand  = "deposit_cascade_child_brand"
+)
+
+// brandResolutionOnly is the BRAND-only twin of tenantResolutionOnly (H(8)): a plain, lock-free
+// read of brands.status for the brand of THIS tenant, true when it is anything but 'active'. A
+// missing / foreign / nil brand fails CLOSED. It never reads the tenant (decision 23). Used only
+// as the sweeper's cheap early skip; the claim tx uses tenant.RequireBrandActive (FOR SHARE).
+func brandResolutionOnly(ctx context.Context, tx pgx.Tx, tenantID, brandID uuid.UUID) (bool, error) {
+	if brandID == uuid.Nil {
+		return true, nil
+	}
+	var status string
+	err := tx.QueryRow(ctx, `SELECT status FROM brands WHERE id = $1 AND tenant_id = $2`, brandID, tenantID).Scan(&status)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return true, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return status != "active", nil
+}
+
+// skipCascadeChildForBrand is the H(8) decision 19 brand gate at cascade-CHILD CREATION (phase C
+// and its poll-path twin), run in the decline's own tx right before insertCascadeAttemptIfEligible.
+// A brand that is not active gets NO child (same precedent as the tenant skip; the decline already
+// applied stands), an own audit row and an own metric site. It cancels and releases nothing. A
+// read error is returned (fail closed), never read as "active".
+func skipCascadeChildForBrand(ctx context.Context, tx pgx.Tx, attempt PaymentAttempt, intent DepositIntent) (skipped bool, err error) {
+	berr := tenant.RequireBrandActive(ctx, tx, attempt.TenantID, intent.BrandID)
+	if berr == nil {
+		return false, nil
+	}
+	if !errors.Is(berr, tenant.ErrBrandNotActive) {
+		return false, berr
+	}
+	recordResolutionOnlyBlock(ctx, siteDepositCascadeChildBrand)
+	if err := audit.Record(ctx, tx, audit.Entry{
+		TenantID: attempt.TenantID, ActorType: audit.ActorSystem, Action: "payment.cascade_skipped_brand_inactive",
+		TargetType: "payment_attempt", TargetID: attempt.ID.String(), Outcome: audit.OutcomeDenied,
+		Metadata: map[string]any{"deposit_intent_id": intent.ID.String(), "brand_id": intent.BrandID.String()},
+	}); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // checkPayoutResolutionOnly is the payout twin, called inside the T2/T12 claim
