@@ -9,7 +9,7 @@ Round 1 CONTROL_GO PASS=22 FAIL=0 SKIP=0 ; CONTROL_MIG PASS=7 FAIL=0 SKIP=0.
 Round 2 (after adding TestRR_Locks_* and the guard reference-agreement cases) CONTROL_GO PASS=23 FAIL=0 SKIP=0 ; CONTROL_MIG PASS=7 FAIL=0 SKIP=0.
 
 Mutants (final status after round 2):
- M1  drop the provider/tenant binding check on candidates              -> SURVIVED (equivalent, see below)
+ M1  drop the provider/tenant binding check on candidates              -> round 3: see ROUND 3 below (round-1/2 claim of 'equivalent' withdrawn)
  M2  two different candidates treated as fine (ambiguity ignored)      -> KILLED  TestRR_Ambiguous_*
  M3  operation allow-list check removed (round 1 compile error; redone as M3b) -> M3b KILLED  TestRR_ContradictoryEvidence_*
  M4  application-consistency check removed                             -> KILLED  TestRR_InsufficientEvidence_*
@@ -30,7 +30,7 @@ Mutants (final status after round 2):
  M19 by-reference lookup not tenant-scoped in SQL                      -> SURVIVED (equivalent under RLS, see below)
  M20 receipt merchant reference not required to agree                  -> KILLED  TestRR_ContradictoryEvidence_*
  M21 anomaly predicate dropped from the repair UPDATE                  -> SURVIVED (equivalent: the guard refuses, see below)
- M22 unresolved-receipt branch removed                                 -> SURVIVED (equivalent: anomalyClosed() also refuses, see below)
+ M22 unresolved-receipt branch removed                                 -> see ROUND 3 (the refusal DETAIL differs; 'equivalent' withdrawn)
  G1  guard: anomaly-only requirement removed                           -> KILLED  TestRR_Abuse_DirectUpdatesRefusedByTheGuard
  G2  guard: same-tenant check removed                                  -> SURVIVED (equivalent under RLS, see below)
  G3  guard: same-provider check removed                                -> KILLED  TestRR_Guard_*
