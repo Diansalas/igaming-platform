@@ -407,6 +407,51 @@ func TestHSEC_HoldRelease_CTR3_KeyCorrelationShapeLinkForgeries(t *testing.T) {
 	r := h.mustRequest(h.reqA, wr.ID)
 	key := wr.ID.String() + ":governed_hold_released"
 
+	// A second player and wallet of the SAME tenant (for the cross-wallet shape attacks).
+	person2, player2, wallet2 := uuid.New(), uuid.New(), uuid.New()
+	if err := h.pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `INSERT INTO persons (id) VALUES ($1)`, person2)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var hold2, cash2 uuid.UUID
+	h.tx(func(ctx context.Context, tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `INSERT INTO player_accounts (id, tenant_id, brand_id, person_id, email, password_hash, status) VALUES ($1, $2, $3, $4, $5, 'x', 'active')`,
+			player2, h.f.tenantID, h.f.brandID, person2, player2.String()+"@hsr.invalid"); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO wallets (id, tenant_id, brand_id, player_account_id, asset_code) VALUES ($1, $2, $3, $4, 'EUR')`,
+			wallet2, h.f.tenantID, h.f.brandID, player2); err != nil {
+			return err
+		}
+		ids, err := ledger.GetOrCreateAccounts(ctx, tx, h.f.tenantID,
+			ledger.AccountSpec{WalletID: &wallet2, AccountType: ledger.AccountPlayerWithdrawalHold, AssetCode: "EUR"},
+			ledger.AccountSpec{WalletID: &wallet2, AccountType: ledger.AccountPlayerCash, AssetCode: "EUR"})
+		hold2, cash2 = ids[0], ids[1]
+		return err
+	})
+	crossWallet := func(creditOther bool) func(ctx context.Context, tx pgx.Tx) error {
+		return func(ctx context.Context, tx pgx.Tx) error {
+			own, err := ledger.GetOrCreateAccounts(ctx, tx, wr.TenantID,
+				ledger.AccountSpec{WalletID: &wr.WalletID, AccountType: ledger.AccountPlayerWithdrawalHold, AssetCode: "EUR"},
+				ledger.AccountSpec{WalletID: &wr.WalletID, AccountType: ledger.AccountPlayerCash, AssetCode: "EUR"})
+			if err != nil {
+				return err
+			}
+			debit, credit := own[0], own[1]
+			if creditOther {
+				credit = cash2
+			} else {
+				debit = hold2
+			}
+			_, err = ledger.Post(ctx, tx, ledger.TransactionInput{TenantID: wr.TenantID, TransactionType: ledger.TxWithdrawalRejected, IdempotencyKey: key,
+				CorrelationID: wr.ID, ReversesTransactionID: wr.HoldLedgerTransactionID,
+				Entries: []ledger.EntryInput{{LedgerAccountID: debit, Direction: ledger.Debit, Amount: 400}, {LedgerAccountID: credit, Direction: ledger.Credit, Amount: 400}}})
+			return err
+		}
+	}
+
 	// ACTING session, executing resolution of THIS transaction.
 	attacks := []struct {
 		name string
@@ -425,6 +470,8 @@ func TestHSEC_HoldRelease_CTR3_KeyCorrelationShapeLinkForgeries(t *testing.T) {
 		{"an ordinary key under the resolution", func(ctx context.Context, tx pgx.Tx) error {
 			return hsrPost(ctx, tx, h, wr, ledger.TxWithdrawalRejected, wr.ID.String()+":rejected", wr.ID, 400, 400)
 		}, []string{"CG030"}},
+		{"the credit leg on another wallet's cash", crossWallet(true), []string{"CG030"}},
+		{"the debit leg on another wallet's hold", crossWallet(false), []string{"CG030"}},
 		{"a wrong amount (entry shape)", func(ctx context.Context, tx pgx.Tx) error {
 			return hsrPost(ctx, tx, h, wr, ledger.TxWithdrawalRejected, key, wr.ID, 399, 399)
 		}, []string{"CG030"}},
@@ -495,6 +542,28 @@ func TestHSEC_HoldRelease_CTR3_KeyCorrelationShapeLinkForgeries(t *testing.T) {
 			}
 		}
 		ddl(`ALTER TABLE ledger_transactions ENABLE TRIGGER ` + c.on)
+	}
+
+	// The key guard on its own: a resolution that is only PENDING (not executing) does not
+	// admit the key even where the acting fence is lifted.
+	ddl(`ALTER TABLE ledger_transactions DISABLE TRIGGER ledger_transactions_governed_fence`)
+	pendErr := h.acting(h.apprB, func(ctx context.Context, tx pgx.Tx) error {
+		var hold, cash uuid.UUID
+		q := `SELECT id FROM ledger_accounts WHERE tenant_id = $1 AND wallet_id = $2 AND account_type = $3 AND asset_code = 'EUR'`
+		if err := tx.QueryRow(ctx, q, wr.TenantID, wr.WalletID, "player_withdrawal_hold").Scan(&hold); err != nil {
+			return err
+		}
+		if err := tx.QueryRow(ctx, q, wr.TenantID, wr.WalletID, "player_cash").Scan(&cash); err != nil {
+			return err
+		}
+		_, err := ledger.Post(ctx, tx, ledger.TransactionInput{TenantID: wr.TenantID, TransactionType: ledger.TxWithdrawalRejected, IdempotencyKey: key,
+			CorrelationID: wr.ID, ReversesTransactionID: wr.HoldLedgerTransactionID,
+			Entries: []ledger.EntryInput{{LedgerAccountID: hold, Direction: ledger.Debit, Amount: 400}, {LedgerAccountID: cash, Direction: ledger.Credit, Amount: 400}}})
+		return err
+	})
+	ddl(`ALTER TABLE ledger_transactions ENABLE TRIGGER ledger_transactions_governed_fence`)
+	if !hsrIs(pendErr, "HR020") {
+		t.Fatalf("key guard vs a pending resolution (fence lifted): want HR020, got %v", pendErr)
 	}
 
 	// CONTROL (non-vacuity): the exact key/correlation/type/shape posting and the

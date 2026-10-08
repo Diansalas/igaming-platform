@@ -248,3 +248,58 @@ func (h *hsr) revokePlatformGrant(staff k3Staff, c capability.Capability) {
 		h.t.Fatalf("revoke: %v", err)
 	}
 }
+
+// The policy lookup ignores tenant- and brand-level rows while the tenant OR the brand is
+// not active (K2-1 extended): a tenant admin's tighter row governs an ACTIVE tenant but can
+// never steer the baseline of a platform operation on a non-active one.
+func TestHSEC_HoldRelease_PolicyLookup_IgnoresTenantRowsWhenNonActive(t *testing.T) {
+	h := newHSR(t, 2)
+	ctx := context.Background()
+	ta2 := h.staffMember(h.f.tenantID, "tenant_admin")
+	in := adjustment.PolicyChangeInput{ChangeKind: adjustment.ChangeKindPolicy, OperationKind: OperationKindHoldResolution,
+		Level: adjustment.LevelTenant, BaseRequiredApprovals: k3IntPtr(4)}
+	var c adjustment.PolicyChange
+	if err := h.pool.WithPrincipalScope(ctx, h.f.tenantID, h.tenantAdmin.ID, func(ctx context.Context, tx pgx.Tx) error {
+		var err error
+		c, err = adjustment.ProposePolicyChangeInTx(ctx, tx, adjustment.PolicyCall{ActorID: h.tenantAdmin.ID, TenantID: h.f.tenantID}, in)
+		return err
+	}); err != nil {
+		t.Fatalf("propose tenant row: %v", err)
+	}
+	if err := h.pool.WithPrincipalScope(ctx, h.f.tenantID, ta2.ID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := adjustment.DecidePolicyChangeInTx(ctx, tx, adjustment.PolicyCall{ActorID: ta2.ID, TenantID: h.f.tenantID}, c.ID, adjustment.DecisionApprove, c.ContentHash, "hsr_test")
+		return err
+	}); err != nil {
+		t.Fatalf("approve tenant row: %v", err)
+	}
+	required := func() int {
+		var n int
+		if err := h.pool.WithPrincipalScope(ctx, h.f.tenantID, h.tenantAdmin.ID, func(ctx context.Context, tx pgx.Tx) error {
+			return tx.QueryRow(ctx, `SELECT required FROM financial_policy_required_approvals('withdrawal_hold_resolution', $1, $2, 'EUR', 100, now())`,
+				h.f.tenantID, h.f.brandID).Scan(&n)
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	if got := required(); got != 4 {
+		t.Fatalf("an active tenant and brand: the tenant row (4) must govern, got %d", got)
+	}
+	h.suspendTenant()
+	if got := required(); got != 2 {
+		t.Fatalf("a suspended tenant: only the platform baseline (2) applies, got %d", got)
+	}
+	h.activateTenant()
+	h.suspendBrand()
+	if got := required(); got != 2 {
+		t.Fatalf("a suspended brand: only the platform baseline (2) applies, got %d", got)
+	}
+	// And the K3 operation keeps its own rule (a tenant row still applies for an active tenant).
+	var k3 int
+	if err := h.pool.WithPrincipalScope(ctx, h.f.tenantID, h.tenantAdmin.ID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT required FROM financial_policy_required_approvals('payment_force_resolve', $1, $2, 'EUR', 100, now())`,
+			h.f.tenantID, h.f.brandID).Scan(&k3)
+	}); err != nil || k3 != 1 {
+		t.Fatalf("payment_force_resolve lookup changed: %d %v", k3, err)
+	}
+}
