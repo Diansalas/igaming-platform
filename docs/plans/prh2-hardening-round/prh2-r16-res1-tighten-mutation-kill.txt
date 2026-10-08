@@ -1,0 +1,72 @@
+PAY-PAYOUT-UNBOUND-RESOLVE-1 - no-migration tightenings (ADR 0111 §4.6 / §7.3 "may start now"; ADR 0111 §12)
+Mutation-kill evidence. Task: r16-res1 (branch gov-r16-res1, baseline c5b30c7). LOCAL evidence only (private scratch
+DB priv_r16res1 built from the worktree's migrations; runtime role for every reconciliation run in TestRes1_*).
+
+Code under test (commit c7b61a6; tests aac85e8, db50605):
+  internal/reconciliation/payment_statement_k3.go  payoutCompletedRef (I-1), loadK3Evidence cap (I-2),
+                                                    inM4Scope / capturedUnpostedHintFor (L-4)
+  internal/reconciliation/payment_statement.go      the three call sites passing the evidencing line / nil
+
+Method: each mutant is applied IN PLACE to the committed source with a byte backup; `go vet -tags integration
+./internal/reconciliation/` must pass (a mutant that does not compile/vet is reported COMPILE-ERROR and NOT counted);
+the targeted tests run with -tags integration -count=1 -p 1 -v; the file is restored from the backup and checked
+twice (byte compare with the backup AND `git diff --quiet HEAD -- <file>`): "restored_cmp=OK" below.
+  recon suite: go test -run '^(TestRes1_|TestBoundClear1_|TestStanding1|TestD2_9b|TestK3_)' ./internal/reconciliation/
+  pay suite  : go test -run '^TestB11_Recon_' ./internal/payments/          (L-4 mutants only, "both")
+Script: scratchpad r16_res1_mut.py (not committed).
+
+Run 1 (all mutants, test suite at aac85e8):
+CONTROL recon: rc=0 PASS=65 SKIP=0 FAIL=0
+CONTROL pay: rc=0 PASS=17 SKIP=0 FAIL=0
+I1-a KILLED: drop the completion asset comparison | restored_cmp=OK | recon: rc=1 PASS=61 SKIP=0 FAIL=4 --- FAIL: TestRes1_I1_UnboundPayoutPark_OwnCompletionOtherAmountOrAsset_NeverClears (0.93s); --- FAIL: TestRes1_I1_BoundPayoutPark_OwnCompletionOtherAmountOrAsset_NeverClears (1.23s)
+I1-b KILLED: drop the completion amount comparison | restored_cmp=OK | recon: rc=1 PASS=58 SKIP=0 FAIL=7 --- FAIL: TestRes1_I1_UnboundPayoutPark_OwnCompletionOtherAmountOrAsset_NeverClears (1.14s); --- FAIL: TestRes1_I1_BoundPayoutPark_OwnCompletionOtherAmountOrAsset_NeverClears (1.57s); --- FAIL: TestRes1_I1_TenantIsolation (0.41s)
+I1-c KILLED: completion amount: only an over-release refused (partial clears) | restored_cmp=OK | recon: rc=1 PASS=60 SKIP=0 FAIL=5 --- FAIL: TestRes1_I1_UnboundPayoutPark_OwnCompletionOtherAmountOrAsset_NeverClears (0.91s); --- FAIL: TestRes1_I1_BoundPayoutPark_OwnCompletionOtherAmountOrAsset_NeverClears (1.28s); --- FAIL: TestRes1_I1_TenantIsolation (0.34s)
+I1-d KILLED: drop the evidencing-line asset comparison | restored_cmp=OK | recon: rc=1 PASS=63 SKIP=0 FAIL=2 --- FAIL: TestRes1_I1_UnboundPayoutPark_EvidencingLineOtherAmountOrAsset_NeverClears (0.89s)
+I1-e KILLED: drop the evidencing-line amount comparison | restored_cmp=OK | recon: rc=1 PASS=62 SKIP=0 FAIL=3 --- FAIL: TestRes1_I1_UnboundPayoutPark_EvidencingLineOtherAmountOrAsset_NeverClears (1.03s)
+I1-f KILLED: drop the whole evidencing-line check | restored_cmp=OK | recon: rc=1 PASS=61 SKIP=0 FAIL=4 --- FAIL: TestRes1_I1_UnboundPayoutPark_EvidencingLineOtherAmountOrAsset_NeverClears (0.95s)
+I1-g KILLED: unbound in-run site passes nil (no line comparison) | restored_cmp=OK | recon: rc=1 PASS=61 SKIP=0 FAIL=4 --- FAIL: TestRes1_I1_UnboundPayoutPark_EvidencingLineOtherAmountOrAsset_NeverClears (0.87s)
+I1-h SURVIVED: merchant cross-check B site passes nil | restored_cmp=OK | recon: rc=0 PASS=65 SKIP=0 FAIL=0 
+I1-i KILLED: standing site passes nil | restored_cmp=OK | recon: rc=1 PASS=61 SKIP=0 FAIL=4 --- FAIL: TestRes1_I1_UnboundPayoutPark_EvidencingLineOtherAmountOrAsset_NeverClears (0.96s)
+I1-j KILLED: drop the whole I-1 completion check | restored_cmp=OK | recon: rc=1 PASS=56 SKIP=0 FAIL=9 --- FAIL: TestRes1_I1_UnboundPayoutPark_OwnCompletionOtherAmountOrAsset_NeverClears (0.87s); --- FAIL: TestRes1_I1_BoundPayoutPark_OwnCompletionOtherAmountOrAsset_NeverClears (1.05s); --- FAIL: TestRes1_I1_TenantIsolation (0.44s)
+I2-a KILLED: LIMIT at the cap (cap+1-th row never read: silent truncation) | restored_cmp=OK | recon: rc=1 PASS=63 SKIP=0 FAIL=2 --- FAIL: TestRes1_I2_PersistedLinesCap_OverflowRefusesTheRun (0.26s); --- FAIL: TestRes1_I2_PersistedLinesCap_PerRunAcrossKeys_TenantScoped (0.52s)
+I2-b KILLED: refusal off by one (read > cap+1) | restored_cmp=OK | recon: rc=1 PASS=63 SKIP=0 FAIL=2 --- FAIL: TestRes1_I2_PersistedLinesCap_OverflowRefusesTheRun (0.40s); --- FAIL: TestRes1_I2_PersistedLinesCap_PerRunAcrossKeys_TenantScoped (0.44s)
+I2-c KILLED: refusal removed (the cap+1 rows read are used: silent truncation beyond) | restored_cmp=OK | recon: rc=1 PASS=63 SKIP=0 FAIL=2 --- FAIL: TestRes1_I2_PersistedLinesCap_OverflowRefusesTheRun (0.59s); --- FAIL: TestRes1_I2_PersistedLinesCap_PerRunAcrossKeys_TenantScoped (0.50s)
+I2-d KILLED: per-key bound 64 -> 65 | restored_cmp=OK | recon: rc=1 PASS=63 SKIP=0 FAIL=2 --- FAIL: TestRes1_I2_PersistedLinesCap_OverflowRefusesTheRun (0.15s); --- FAIL: TestRes1_I2_PersistedLinesCap_PerRunAcrossKeys_TenantScoped (0.51s)
+I2-e KILLED: cap not scaled by keys (fixed 64 per run) | restored_cmp=OK | recon: rc=1 PASS=64 SKIP=0 FAIL=1 --- FAIL: TestRes1_I2_PersistedLinesCap_PerRunAcrossKeys_TenantScoped (0.23s)
+I2-f SURVIVED: drop the SQL LIMIT entirely (count check kept) | restored_cmp=OK | recon: rc=0 PASS=65 SKIP=0 FAIL=0 
+I2-g KILLED: overflow error not wrapping the sentinel | restored_cmp=OK | recon: rc=1 PASS=63 SKIP=0 FAIL=2 --- FAIL: TestRes1_I2_PersistedLinesCap_OverflowRefusesTheRun (0.41s); --- FAIL: TestRes1_I2_PersistedLinesCap_PerRunAcrossKeys_TenantScoped (0.62s)
+L4-a KILLED: M4 scope ignores the NULL-reference condition (C-6) | restored_cmp=OK | recon: rc=1 PASS=63 SKIP=0 FAIL=2 --- FAIL: TestD2_9b_MerchantCrossCheck_SettlementLine_NamedUnboundPayoutPark_DepositSignalsNeverClear (0.21s); --- FAIL: TestRes1_L4_M4HintOnlyInResolveScope (0.36s) || pay: rc=1 PASS=11 SKIP=0 FAIL=6 --- FAIL: TestB11_Recon_UnboundPayoutPark_InRunAndStanding_DepositSignalsNeverClear (11.74s); --- FAIL: TestB11_Recon_UnboundPayoutPark_TombstoneNeverClears (8.45s); --- FAIL: TestB11_Recon_UnboundPayoutPark_WithdrawalCompletedOnLineRefClears (21.64s)
+L4-b SURVIVED: M4 scope never true (hint never names M4) | restored_cmp=OK | recon: rc=0 PASS=65 SKIP=0 FAIL=0  || pay: rc=0 PASS=17 SKIP=0 FAIL=0 
+L4-c KILLED: M4 scope drops provider_reference_conflict | restored_cmp=OK | recon: rc=0 PASS=65 SKIP=0 FAIL=0  || pay: rc=1 PASS=16 SKIP=0 FAIL=1 --- FAIL: TestB11_Recon_ReverseCollisionPark_InRunAndStanding_DepositRefundNeverClears (3.60s)
+L4-d KILLED: M4 scope drops the invalid_provider_reference:* family | restored_cmp=OK | recon: rc=1 PASS=53 SKIP=0 FAIL=12 --- FAIL: TestRes1_I1_UnboundPayoutPark_OwnCompletionAmountAssetEqual_Clears (0.16s); --- FAIL: TestRes1_I1_UnboundPayoutPark_OwnCompletionOtherAmountOrAsset_NeverClears (0.95s); --- FAIL: TestRes1_I1_UnboundPayoutPark_EvidencingLineOtherAmountOrAsset_NeverClears (0.53s); --- FAIL: TestRes1_I1_MerchantCrossCheckB_NeverClears (0.19s) || pay: rc=1 PASS=5 SKIP=0 FAIL=12 --- FAIL: TestB11_Recon_UnboundPayoutPark_InRunAndStanding_DepositSignalsNeverClear (7.73s); --- FAIL: TestB11_Recon_UnboundPayoutPark_TombstoneNeverClears (7.08s); --- FAIL: TestB11_Recon_UnboundPayoutPark_WithdrawalCompletedOnLineRefClears (20.88s); --- FAIL: TestB11_Recon_UnboundPayoutPark_UnrelatedActivityNeverClears (3.52s)
+L4-e SURVIVED: M4 scope ignores the operation (deposit parks get the M4 text) | restored_cmp=OK | recon: rc=0 PASS=65 SKIP=0 FAIL=0  || pay: rc=0 PASS=17 SKIP=0 FAIL=0 
+
+Run 2 (after db50605 added the bare-reason case to TestRes1_L4_M4HintOnlyInResolveScope; L4-b relabelled - run 1's
+label "never true" was wrong: `return false && r == A || B || C` drops only the bare reason A, since && binds tighter
+than ||; the first "never true" attempt, L4-f v1 `r == "" && r == A`, was refused by vet "suspect and" and is not counted):
+CONTROL recon: rc=0 PASS=65 SKIP=0 FAIL=0
+CONTROL pay: rc=0 PASS=17 SKIP=0 FAIL=0
+L4-b KILLED: M4 scope drops the BARE invalid_provider_reference reason (relabelled: run 1 mislabelled it 'never true'; && binds tighter than ||) | restored_cmp=OK | recon: rc=1 PASS=64 SKIP=0 FAIL=1 --- FAIL: TestRes1_L4_M4HintOnlyInResolveScope (0.25s) || pay: rc=0 PASS=17 SKIP=0 FAIL=0 
+L4-f COMPILE-ERROR (not counted): M4 scope never true (hint never names M4): internal/reconciliation/payment_statement_k3.go:587:9: suspect and: r == "" && r == "invalid_provider_reference"
+
+Run 3 (L4-f rewritten as `return len(r) < 0 && (A || B || C)`):
+L4-f KILLED: M4 scope never true (hint never names M4) | restored_cmp=OK | recon: rc=1 PASS=53 SKIP=0 FAIL=12 --- FAIL: TestRes1_I1_UnboundPayoutPark_OwnCompletionAmountAssetEqual_Clears (0.34s); --- FAIL: TestRes1_I1_UnboundPayoutPark_OwnCompletionOtherAmountOrAsset_NeverClears (0.72s); --- FAIL: TestRes1_I1_UnboundPayoutPark_EvidencingLineOtherAmountOrAsset_NeverClears (0.65s); --- FAIL: TestRes1_I1_MerchantCrossCheckB_NeverClears (0.35s) || pay: rc=1 PASS=4 SKIP=0 FAIL=13 --- FAIL: TestB11_Recon_UnboundPayoutPark_InRunAndStanding_DepositSignalsNeverClear (10.88s); --- FAIL: TestB11_Recon_UnboundPayoutPark_TombstoneNeverClears (7.57s); --- FAIL: TestB11_Recon_ReverseCollisionPark_InRunAndStanding_DepositRefundNeverClears (3.87s); --- FAIL: TestB11_Recon_UnboundPayoutPark_WithdrawalCompletedOnLineRefClears (24.64s)
+
+TOTAL counted mutants: 23 (I1-a..j = 10, I2-a..g = 7, L4-a..f = 6). KILLED 20, SURVIVED 3 (honest; none weakens a
+refusal or a clearing rule observably):
+  - I1-h SURVIVED (equivalent): the merchant cross-check B step passes nil instead of the evidencing line. Under the
+    positive attribution rule (security L-1) the B step can never clear: B's own release keyed by l.ref would make
+    bySettlement[l.ref] == B, and matchPayment resolves such a line to B first, so it never reaches the B step; any
+    other key is held by another attempt (refused by the byRef / bySettlement check). The I-1 line comparison there
+    narrows an already-closed rule (STANDING-1 mutant X6 has the same equivalence). Pinned behaviourally by
+    TestRes1_I1_MerchantCrossCheckB_NeverClears and TestD2_9b_*.
+  - I2-f SURVIVED (equivalent on every test-observable): dropping the SQL LIMIT keeps the Go-side count refusal, so
+    the verdict (refuse at cap+1) is identical; only the bound on rows FETCHED (the I-2 cost bound) is lost, which no
+    functional test can observe without instrumenting the server. Killing it would need a row-fetch probe; disclosed
+    instead. I2-a (LIMIT at cap: silent truncation) is KILLED.
+  - L4-e SURVIVED (equivalent): inM4Scope's own operation guard is unreachable - capturedUnpostedHintFor already
+    switches on the operation and calls inM4Scope only for payouts. Kept as a defensive guard; deposit wording is
+    pinned by d2CUFor (F13) in TestRes1_I1_DepositUnboundPark_* and the D2/K3 suites.
+
+Controls: every run's unmutated control passed (recon 65 PASS / 0 SKIP / 0 FAIL; pay 17 PASS / 0 SKIP / 0 FAIL, run 1 and
+run 2; run 3 reuses the db50605 suite whose control is run 2). Skipped tests are not evidence: no test skipped.
