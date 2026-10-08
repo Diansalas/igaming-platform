@@ -313,3 +313,37 @@ func TestSnapshot_WriteOnceAndAttemptConstraint(t *testing.T) {
 	}
 	_ = fmt.Sprint
 }
+
+// The bound instrument cannot be swapped for ANOTHER instrument that carries the
+// same fingerprint (the composite FK alone would allow it): the instrument id is
+// immutable on the request as well as the fingerprint.
+func TestBinding_InstrumentIDImmutableEvenForSameFingerprint(t *testing.T) {
+	b := newBindWorld(t)
+	id, fp := b.inst.ID, b.inst.Fingerprint
+	wid, err := b.wd(&id, &fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The request ends (terminal), the player revokes A and registers the same destination again.
+	b.tamper("withdrawal_requests", `UPDATE withdrawal_requests SET state='cancelled' WHERE id = $1`, wid)
+	if err := b.rtTx(func(ctx context.Context, tx pgx.Tx) error {
+		_, err := b.svc.Revoke(ctx, tx, BlockParams{TenantID: b.tenantID, InstrumentID: id, Actor: Actor{Type: ActorPlayer, ID: b.p.ID.String()}, ReasonCode: "player_revoked"})
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	again, err := b.register(b.p, ibanA)
+	if err != nil || again.Existing {
+		t.Fatalf("re-register after revoke: %+v %v", again, err)
+	}
+	if again.Instrument.Fingerprint != fp || again.Instrument.ID == id {
+		t.Fatal("setup: the second instrument must share the fingerprint")
+	}
+	err = b.try(func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `UPDATE withdrawal_requests SET payout_instrument_id = $2 WHERE id = $1`, wid, again.Instrument.ID)
+		return err
+	})
+	if err == nil {
+		t.Fatal("re-pointing a request at another instrument with the same fingerprint must be refused")
+	}
+}
