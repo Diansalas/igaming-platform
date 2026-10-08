@@ -7994,3 +7994,50 @@ PAY-H-FOLLOWUPS-1 items (4) and (14).
   now load-bearing (a future least-privilege REVOKE would make every deposit/withdrawal fail closed) - add a grant pin test; (c) the metric site label
   `deposit_dispatch_claim_tx` is reused for the HTTP and the sweeper deferrals; (d) the refusal warn log carries the request id but not the tenant id;
   (e) optionally a per-brand advisory lock instead of the row lock.
+
+
+## 44. Amendment - human-approved governance decisions of 2026-10-08 (B13, PAY-PAYOUT-UNBOUND-RESOLVE-1, HSEC-APPROVED-HOLD-RELEASE-1 / HD-CTF-6, H(8), PAY-RECEIPT-ANOMALY-APPLIED-1) (`orchestrator`, recorded 2026-10-08)
+
+**Provenance.** The decisions below were approved by the human owner in the instruction `CONTINUOUS-DEVELOPMENT-EXECUTION-CYCLE-2026-10-08` (2026-10-08), answering the decision briefs `b13-decision-brief.md` (+ supplement), `hsec-approved-hold-release-1-decision-brief.md`, `h8-brand-sweeper-gate-decision-brief.md` and `anomaly-applied-1-decision-brief.md` (+ supplement). They are recorded here verbatim in substance (numbering is the owner's). **They are not reinterpreted into broader permissions.** Recording a decision is not an implementation claim; implementation status is tracked per task in `docs/governance/task-registry.md` and is `NOT IMPLEMENTED` at the time of recording.
+
+**B13 - payout destination binding (decided).**
+1. B13 is an independent gate from PAY-PAYOUT-UNBOUND-RESOLVE-1; B13 need not be completed before it.
+2. Before ANY non-MOCK payout, the payout must have a player-bound, verified payout instrument resolved server-side.
+3. Provider callbacks MUST NOT determine, replace or change the payout destination.
+4. Missing or ambiguous destination attribution MUST fail closed / remain parked.
+5. A provider-reported destination mismatch MUST become an anomaly and alert condition with NO payout progression.
+6. Destination handling uses a provider-neutral abstraction able to support bank accounts, cards, crypto addresses/networks, e-wallets and future regulated payout instruments without hard-coding one instrument type.
+7. There is NO normal staff override of payout destination. Any exceptional resolution requires controlled four-eyes governance, positive evidence and complete audit.
+8. MOCK may remain flexible for development/testing, but the security architecture must not create a weaker destination-binding model that could leak into production; sandbox/real-provider behaviour follows the strongest applicable architecture and existing governance.
+
+**PAY-PAYOUT-UNBOUND-RESOLVE-1 (decided).**
+9. An unbound payout MUST NOT automatically resolve.
+10. An unbound payout remains parked/held until positively attributable.
+11. Manual resolution is allowed only through controlled four-eyes governance with complete audit.
+12. Manual resolution MUST NOT release, settle, deliver or otherwise resolve funds without positive evidence sufficient under the approved policy.
+
+**HSEC-APPROVED-HOLD-RELEASE-1 / HD-CTF-6 (decided).**
+13. A suspended/closed tenant or brand MUST NOT automatically release player funds.
+14. The existing hold remains in place.
+15. A controlled staff resolution path is allowed.
+16. Resolution/release/cancel requires four-eyes approval.
+17. A single staff member MUST NOT be able to unilaterally release/cancel the frozen player funds.
+18. The existing kill-switch semantics remain intact: inactive tenant/brand means no normal payout submission.
+
+**H(8) - brand sweeper gate (decided).**
+19. Brand eligibility MUST be checked at cascade-child creation.
+20. Brand eligibility MUST be checked again at sweeper dispatch/claim.
+21. If a child already exists and its brand becomes inactive/refused, it MUST remain deferred and MUST NOT be dispatched.
+22. No automatic cancellation or fund release occurs solely because the brand becomes inactive.
+23. Tenant and brand eligibility are separate policy checks and MUST NOT be conflated.
+
+**PAY-RECEIPT-ANOMALY-APPLIED-1 (decided: OPTION A).**
+24. Option A: one-time locked re-attribution plus missing audit-row repair.
+25. Strictly an attribution/audit repair, NOT a financial correction.
+26. The repair MUST NOT move money, alter balances, release holds, settle payments, create financial entries or change provider money state.
+27. The repair MUST be locked, idempotent and fully audited.
+28. It must identify exactly one receipt and exactly one target attempt.
+29. If attribution evidence is ambiguous or insufficient, DO NOT repair; leave the receipt anomalous.
+30. The repair must be impossible to use as a general-purpose reassignment mechanism.
+
+**Consequences for earlier text.** The "OPEN"/"AWAITING" status of the items above in §42.8, §43 and the briefs is superseded by this section (history preserved, not rewritten). B13 question Q1 (ordering) is answered by decision 1. HD-CTF-6's question for the closed-tenant `approved` hold is answered in policy by decisions 13-18 (mechanism NOT IMPLEMENTED). H(8) is answered by decisions 19-23. Known sub-questions the decisions do not settle (instrument type taxonomy, verification source, re-verification cadence, approver roles/counts beyond "four-eyes", the exact evidence sufficiency standard) are recorded by each implementation as ambiguities and resolved by the safest existing interpretation; any genuine new policy question is raised as a new decision brief rather than invented.
