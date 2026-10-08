@@ -22,6 +22,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/providerref"
 	"github.com/Diansalas/igaming-platform/internal/rg"
+	"github.com/Diansalas/igaming-platform/internal/tenant"
 )
 
 // driveCreatedAttempt: T2 claim (route outside tx, then RG + the KYC
