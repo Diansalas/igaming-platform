@@ -860,3 +860,43 @@ precondition); the rest is deferred as HD-R15-9.
 | ADR 0110 §10a T9/T10/T11 pointer | ADR 0110 header pointer, §2.2, §4.3 |
 | Deviations D-1..D-8 (+ D-9) and launch flags | §10.2, §10.3 |
 | §7 split revised; start-now vs wait | §7.2, §7.3 |
+
+## 12. RESOLVE-1 tightenings implemented (`ledger-finance`, 2026-10-08)
+
+**Status: IMPLEMENTED against MOCK** (the §7.3 "may start now" slice only; no migration; `manual_resolution.go` and
+`migrations/` untouched). **RESOLVE-1 M4 itself remains NOT IMPLEMENTED** (kinds, `payout_m4_evidence`, sealed imports,
+acting SELECT, fences, MR041, §4.8 cells, 0125): it still waits for the `ledger-finance` re-review of §4 and the
+`security` T10/M-5 co-ruling. Owner decisions 9-12 (ADR 0095 §44) are not broadened: nothing here clears, releases,
+settles or posts anything; every change only narrows clearing, refuses a run, or changes operator text.
+
+- **I-1 (§4.6; security I-1 / LF C-4).** `payoutCompletedRef` (`internal/reconciliation/payment_statement_k3.go`) keeps
+  the positive attribution (own release keyed by the reference, no other holder) and additionally requires the
+  completion's `psp_clearing` amount and its single asset to equal the attempt's, at **every** payout site (bound and
+  unbound). Where the finding is keyed on an evidencing line (unbound in-run, merchant cross-check B step, standing),
+  that **line's** amount and asset must equal the attempt's too. The bound sites (`capturedUnposted`: matchPayment's
+  bound case and `checkUnmatchedAttempts`) have no evidencing line by construction (the finding is keyed on X and the
+  standing site has no line), so there the completion is compared; a bound line of another amount still raises
+  `pay_amount_mismatch` in-run (interpretation, see policy question P-2 below).
+- **I-2 (§4.6; security I-2).** `loadK3Evidence`'s persisted-lines read is bounded by a hard per-run cap fixed before
+  the read: **64 per lookup key** (the §4.4 figure security confirmed) × the number of distinct provider/merchant
+  references the run needs. The query reads at most cap+1 rows; the (cap+1)-th row fails the run with
+  `ErrPaymentEvidenceOverflow`: no run row, no mismatch row, ledger untouched, reported by
+  `ReconcilePaymentStatementForTenant` as the existing P1 `reconciliation.sweep_run_failed` (phase `match`) plus the
+  run-failure alert, on every run until resolved. Never a silent truncation, never a partial verdict. INV-M-5 kept.
+- **L-4 hint (§4.6, partial).** An unbound payout park **inside §4.1 scope** (`invalid_provider_reference`,
+  `invalid_provider_reference:*` or `provider_reference_conflict`, **with NULL provider reference**, C-6) now reads
+  "resolution: PSP-side recall/return, or the evidence-backed four-eyes resolution M4 (PAY-PAYOUT-UNBOUND-RESOLVE-1,
+  ADR 0111 §4; NOT IMPLEMENTED); never allocation; M1 only acknowledges". Bound payout parks and unbound reasons that
+  hold a reference keep the R-K3-8 wording; deposits keep F13. The **post-M4-not-paid** hint is **NOT IMPLEMENTED**:
+  it needs executed M4 rows, which cannot exist before 0125 widens `tenant_system_read_executed`.
+- **Pins flipped deliberately.** `b11RequirePayoutCU` (`internal/payments/b11_payout_unbound_hold_integration_test.go`)
+  expects the M4-scope wording for parks with no reference (sync, reverse collision) and the R-K3-8 wording for the poll
+  park (holds X). No STANDING-1 / BOUND-CLEAR-1 clearing pin changed: every existing own-completion test uses equal
+  amounts.
+- **Tests:** `internal/reconciliation/prh2_r16_res1_tighten_integration_test.go` (`TestRes1_*`, runtime role).
+- **Evidence:** `docs/plans/prh2-hardening-round/prh2-r16-res1-tighten-mutation-kill.txt` (23 counted mutants: 20
+  killed, 3 equivalent survivors disclosed: I1-h, I2-f, L4-e). LOCAL evidence only.
+- **Policy questions (for the LF re-review / security):** **P-1** the I-2 cap value and shape (64 per lookup key,
+  per run) versus a fixed absolute per-run number: §4.6 gives no figure; a fixed 64 per run would fail ordinary runs of
+  any tenant with a few parks. **P-2** whether a bound payout park should also refuse to clear while an in-run line
+  naming X carries another amount (today: cleared by an equal own completion, the line raises `pay_amount_mismatch`).
