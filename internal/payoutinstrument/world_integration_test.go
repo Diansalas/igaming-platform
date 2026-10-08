@@ -197,7 +197,13 @@ func (w *world) ownerTx(fn func(ctx context.Context, tx pgx.Tx) error) error {
 // restored before commit. It fails the test if stmt touched no row.
 func (w *world) tamper(table string, stmt string, args ...any) {
 	w.t.Helper()
-	if err := w.ownerTx(func(ctx context.Context, tx pgx.Tx) error {
+	if err := w.tamperErr(table, stmt, args...); err != nil {
+		w.t.Fatalf("tamper %s: %v", table, err)
+	}
+}
+
+func (w *world) tamperErr(table string, stmt string, args ...any) error {
+	return w.ownerTx(func(ctx context.Context, tx pgx.Tx) error {
 		for _, q := range []string{`ALTER TABLE ` + table + ` DISABLE TRIGGER USER`, `ALTER TABLE ` + table + ` NO FORCE ROW LEVEL SECURITY`} {
 			if _, err := tx.Exec(ctx, q); err != nil {
 				return err
@@ -216,9 +222,7 @@ func (w *world) tamper(table string, stmt string, args ...any) {
 			}
 		}
 		return nil
-	}); err != nil {
-		w.t.Fatalf("tamper %s: %v", table, err)
-	}
+	})
 }
 
 func (w *world) gate(inst Instrument, p player, asset string, adapter any) (GateResult, error) {
