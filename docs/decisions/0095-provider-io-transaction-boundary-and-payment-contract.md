@@ -7956,10 +7956,13 @@ PAY-H-FOLLOWUPS-1 items (4) and (14).
   row or provider call results; the refusing transaction rolls back (a warning is logged with the request id only).
 - **Idempotency.** The client idempotency key lives only on the `deposit_intents` / `withdrawal_requests` row. A refusal creates neither, so the key is
   not consumed; the same key after reactivation is a normal first request (tested through domain and HTTP). The payout submit carries no key (the request
-  stays `approved`). Consequence worth knowing: a retry of an ALREADY-created request/intent while the tenant is non-active is also refused (the gate runs
-  before the replay lookup, fail closed); `GET` routes are unaffected.
+  stays `approved`). A retry of an ALREADY-created intent/request is NOT refused: the
+  gate runs AFTER the read-only replay lookup (ADR 0096 s8 item 3 / ledger-finance N2: a status change between a request and its retry never turns a
+  placed hold into a refusal). A replay returns the original, creates nothing, resumes/dispatches nothing and makes no provider call (the deposit replay
+  path returns the current intent and live attempt only); only paths that CREATE rows (intent insert, withdrawal insert + hold, attempt insert) are gated,
+  and the gate precedes the first such insert and follows any lock the path takes. `GET` routes are unaffected.
 - **Not touched (their own rulings).** Withdrawal approve, reject, resolve, cancel, the kill-switch routes, the read routes, the deposit settlement simulation
-  route, the webhook/callback receipt path, the sweeper, and the resolution-only paths. A player's existing hold stays releasable (reject/cancel) on a non-active tenant.
+  route, the webhook/callback receipt path, the sweeper, and the resolution-only paths. **Correction (2026-10-08, review):** an existing hold is NOT generally releasable on a non-active tenant/brand: `Reject` accepts only `pending_review` and `Cancel` only `requested`, so an `approved` request has NO release path; its hold stays and the funds are frozen until reactivation (or ADR 0107 CT-PRE). Recorded as an OWNER decision item together with HD-CTF-6; NOT decided here.
 - **Pins.** `internal/payments/hsec5_11_integration_test.go` (domain, runtime role, private DB) and `internal/httpserver/hsec5_11_integration_test.go`
   (HTTP mapping); mutation evidence `docs/plans/prh2-hardening-round/prh2-r13-hsec5-11-mutation-kill.txt`.
 
@@ -7972,3 +7975,11 @@ PAY-H-FOLLOWUPS-1 items (4) and (14).
   (in-flight money that resolves); same exposure as an engaged kill switch after claim (section 40, item 4). Unchanged.
 - The tenant-closure flow prerequisite in ADR 0107 (H-SEC-5 for deposits and suspended tenants) is satisfied by this section for HTTP initiation; the other
   ADR 0107 gates and HD-CTF decisions are unchanged and still open.
+- **Cascade-child residual (linked to registry item H(8); security/owner ruling pending, NOT decided).** The phase-C cascade-child insert and the
+  sweeper T2 check read the TENANT only, never the brand. A brand-refused HTTP cascade child is therefore deferred by the HTTP T2 gate and may later be
+  sent by the sweeper after backoff. Behaviour deliberately unchanged here.
+- **Follow-ups (LF/security LOW, record only, none implemented):** (a) a refused staff submit leaves no audit row (security/audit-rule question: refusals of
+  mutating financial actions); (b) `brands ... FOR SHARE` adds row-lock contention with brand updates, and the runtime role's UPDATE privilege on `brands` is
+  now load-bearing (a future least-privilege REVOKE would make every deposit/withdrawal fail closed) - add a grant pin test; (c) the metric site label
+  `deposit_dispatch_claim_tx` is reused for the HTTP and the sweeper deferrals; (d) the refusal warn log carries the request id but not the tenant id;
+  (e) optionally a per-brand advisory lock instead of the row lock.

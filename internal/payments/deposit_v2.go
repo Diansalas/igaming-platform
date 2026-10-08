@@ -131,9 +131,16 @@ func (o *Orchestrator) InitiateDepositAttempt(
 		// H-SEC-5: a NEW deposit intent/attempt for a tenant or brand that is
 		// not 'active' is refused, in THIS tx, before the first insert (no
 		// intent row, so the idempotency key is NOT consumed and a retry after
-		// reactivation is a normal first request). Fail closed.
-		if err := tenant.RequireActiveForPaymentInitiation(actx, tx, params.Scope.TenantID, params.Scope.BrandID); err != nil {
-			return fmt.Errorf("payments: deposit initiation refused: %w", err)
+		// reactivation is a normal first request). Fail closed. A REPLAY of an
+		// already-created intent (read-only lookup first) is not a creation: it
+		// falls through to the unchanged replay path below, which only returns
+		// the current state (no resume, no dispatch, no provider call).
+		if _, replay, lerr := loadDepositIntentByIdempotencyKey(actx, tx, params.Scope.TenantID, params.Scope.PlayerAccountID, params.IdempotencyKey); lerr != nil {
+			return lerr
+		} else if !replay {
+			if err := tenant.RequireActiveForPaymentInitiation(actx, tx, params.Scope.TenantID, params.Scope.BrandID); err != nil {
+				return fmt.Errorf("payments: deposit initiation refused: %w", err)
+			}
 		}
 		intentID := uuid.New()
 		conflict, _, err := db.IdempotentInsert(actx, tx, func(spTx pgx.Tx) error {

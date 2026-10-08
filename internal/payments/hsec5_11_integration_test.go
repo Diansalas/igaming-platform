@@ -623,7 +623,7 @@ func TestHSEC5_11_Helper_FailsClosed_MissingUnreadable(t *testing.T) {
 // ADR 0095 section 43.1): a retry of an ALREADY-created intent/request is
 // refused too, and returns the original after reactivation.
 
-func TestHSEC5_Deposit_ReplayOfExistingIntentWhileNonActive_Refused(t *testing.T) {
+func TestHSEC5_Deposit_ReplayOfExistingIntentWhileNonActive_ReturnsOriginal_NewKeyRefused(t *testing.T) {
 	for _, c := range hsecRefusals[:4] {
 		t.Run(c.name, func(t *testing.T) {
 			pool, spy, orch, f := depositWorld(t, "mock-psp-h5-rp-"+strings.ReplaceAll(c.name, "_", "-"))
@@ -631,23 +631,33 @@ func TestHSEC5_Deposit_ReplayOfExistingIntentWhileNonActive_Refused(t *testing.T
 			if err != nil || !first.AttemptCreated {
 				t.Fatalf("setup: %v", err)
 			}
+			before := countsFor(t, pool, f.tenantID)
 			applyHsecCase(t, pool, f, c)
-			if _, err := initDeposit(orch, pool, f, "replay-key"); !errors.Is(err, tenant.ErrNotActiveForPaymentInitiation) {
-				t.Fatalf("replay while non-active must be refused, got %v", err)
+			// A replay creates nothing: the original comes back, no new attempt, no provider call.
+			rep, err := initDeposit(orch, pool, f, "replay-key")
+			if err != nil || rep.Intent.ID != first.Intent.ID || rep.AttemptCreated {
+				t.Fatalf("replay while non-active must return the original read-only: created=%v err=%v", rep.AttemptCreated, err)
+			}
+			// A NEW key is a creation: refused.
+			if _, err := initDeposit(orch, pool, f, "new-key"); !errors.Is(err, tenant.ErrNotActiveForPaymentInitiation) {
+				t.Fatalf("a new intent while non-active must be refused, got %v", err)
+			}
+			if after := countsFor(t, pool, f.tenantID); after != before {
+				t.Fatalf("replay/refusal must create nothing: %+v -> %+v", before, after)
+			}
+			if d, _, _ := spy.counts(); d != 1 {
+				t.Fatalf("exactly one Deposit call overall, got %d", d)
 			}
 			reactivate(t, pool, f)
 			again, err := initDeposit(orch, pool, f, "replay-key")
 			if err != nil || again.Intent.ID != first.Intent.ID {
 				t.Fatalf("replay after reactivation must return the original intent: %v", err)
 			}
-			if d, _, _ := spy.counts(); d != 1 {
-				t.Fatalf("exactly one Deposit call overall, got %d", d)
-			}
 		})
 	}
 }
 
-func TestHSEC11_RequestWithdrawal_ReplayOfExistingRequestWhileNonActive_Refused(t *testing.T) {
+func TestHSEC11_RequestWithdrawal_ReplayOfExistingRequestWhileNonActive_ReturnsOriginal_NewKeyRefused(t *testing.T) {
 	for _, c := range hsecRefusals[:4] {
 		t.Run(c.name, func(t *testing.T) {
 			pool := depositV2ScratchPool(t)
@@ -656,17 +666,23 @@ func TestHSEC11_RequestWithdrawal_ReplayOfExistingRequestWhileNonActive_Refused(
 			if err != nil {
 				t.Fatalf("setup: %v", err)
 			}
+			before := countsFor(t, pool, f.tenantID)
 			applyHsecCase(t, pool, f.orchFixture, c)
-			if _, err := requestWithdrawalTx(pool, f, "replay-key", 500); !errors.Is(err, tenant.ErrNotActiveForPaymentInitiation) {
-				t.Fatalf("replay while non-active must be refused, got %v", err)
+			// LF N2 (ADR 0096 s8 item 3): a replay of a placed hold is never turned into a refusal.
+			rep, err := requestWithdrawalTx(pool, f, "replay-key", 500)
+			if err != nil || rep.ID != first.ID {
+				t.Fatalf("replay while non-active must return the original: %v", err)
+			}
+			if _, err := requestWithdrawalTx(pool, f, "new-key", 500); !errors.Is(err, tenant.ErrNotActiveForPaymentInitiation) {
+				t.Fatalf("a new request while non-active must be refused, got %v", err)
+			}
+			if after := countsFor(t, pool, f.tenantID); after != before {
+				t.Fatalf("replay/refusal must create nothing: %+v -> %+v", before, after)
 			}
 			reactivate(t, pool, f.orchFixture)
 			again, err := requestWithdrawalTx(pool, f, "replay-key", 500)
 			if err != nil || again.ID != first.ID {
 				t.Fatalf("replay after reactivation must return the original request: %v", err)
-			}
-			if c := countsFor(t, pool, f.tenantID); c.requests != 1 {
-				t.Fatalf("requests=%d", c.requests)
 			}
 		})
 	}
