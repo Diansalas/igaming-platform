@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/Diansalas/igaming-platform/internal/db"
 )
@@ -324,4 +325,102 @@ func TestH8_PollPath_CascadeChildNotCreatedForInactiveBrand(t *testing.T) {
 		t.Fatalf("control child expected, got %d", n)
 	}
 	assertLedgerBalanced(t, pool, fNA.tenantID)
+}
+
+// F2: for a brand-inactive child the PRE-READ is what keeps a child that would otherwise be refused
+// terminally in the claim tx (KYC deny or no routable provider run BEFORE the brand gate there) merely
+// deferred. With the brand pre-read the child stays created and deferred (decision 21: no terminal
+// action solely because the brand is inactive); without it the claim tx would reject it terminally.
+func TestH8_BrandInactive_PreReadKeepsChildDeferredEvenIfClaimTxWouldReject(t *testing.T) {
+	for _, c := range []string{"no_routable_provider", "kyc_deny"} {
+		t.Run(c, func(t *testing.T) {
+			pool := depositV2ScratchPool(t)
+			spy := newLoopProvider("mock-psp-h8f2-" + c[:3])
+			orch := spy.orchestrator()
+			f := seedOrchFixture(t, pool)
+			if c != "no_routable_provider" {
+				registerCapability(t, pool, f, spy, 100)
+			}
+			intentID := insertRawDepositIntent(t, pool, f, "pending")
+			attID := insertRawCreatedAttempt(t, pool, f.tenantID, intentID, false, time.Now())
+			setBrandStatus(t, pool, f.tenantID, f.brandID, "suspended")
+			before := h8Snap(t, pool, f, intentID)
+			s := newLoopSweeper(pool, orch, true, nil)
+			if c == "kyc_deny" {
+				s.KYCGate = denyingKYCGate{}
+			}
+			if st := s.RunPass(context.Background(), nil, 0); st.Errors != 0 {
+				t.Fatalf("pass: %+v", st)
+			}
+			h8Refused(t, pool, f, intentID, attID, before, 1)
+			if d, _, _ := spy.counts(); d != 0 {
+				t.Fatalf("no provider call, got %d", d)
+			}
+			// Reactivation: now the claim tx's own gates apply (and here terminally reject), proving the
+			// deferral above was the pre-read's doing and the premise (claim tx WOULD reject) is real.
+			setBrandStatus(t, pool, f.tenantID, f.brandID, "active")
+			dueNow(t, pool, f.tenantID, attID)
+			if st := s.RunPass(context.Background(), nil, 1); st.Errors != 0 {
+				t.Fatalf("pass 2: %+v", st)
+			}
+			if got := mustGetAttempt(t, pool, f.tenantID, attID); got.State != AttemptRejected {
+				t.Fatalf("premise: with an active brand the claim tx must reject this child (%s), got %s", c, got.State)
+			}
+		})
+	}
+}
+
+// brandResolutionOnly contract (direct): nil id, missing row, another tenant's brand are refused;
+// an active brand is not; a non-active one is; a read error is an error (never "not resolution-only").
+func TestH8_BrandResolutionOnly_Contract(t *testing.T) {
+	pool := depositV2ScratchPool(t)
+	a, b := seedOrchFixture(t, pool), seedOrchFixture(t, pool)
+	run := func(tenantID, brandID uuid.UUID) (bool, error) {
+		var res bool
+		err := pool.WithTenant(context.Background(), tenantID, func(ctx context.Context, tx pgx.Tx) error {
+			var e error
+			res, e = brandResolutionOnly(ctx, tx, tenantID, brandID)
+			return e
+		})
+		return res, err
+	}
+	for name, c := range map[string]struct {
+		tenant, brand uuid.UUID
+		want          bool
+	}{
+		"active":        {a.tenantID, a.brandID, false},
+		"nil_id":        {a.tenantID, uuid.Nil, true},
+		"missing_row":   {a.tenantID, uuid.New(), true},
+		"foreign_brand": {a.tenantID, b.brandID, true},
+	} {
+		got, err := run(c.tenant, c.brand)
+		if err != nil || got != c.want {
+			t.Fatalf("%s: got (%v, %v), want (%v, nil)", name, got, err, c.want)
+		}
+	}
+	for _, st := range []string{"suspended", "closed"} {
+		setBrandStatus(t, pool, a.tenantID, a.brandID, st)
+		if got, err := run(a.tenantID, a.brandID); err != nil || !got {
+			t.Fatalf("%s: got (%v, %v), want (true, nil)", st, got, err)
+		}
+	}
+	// Tenant status is irrelevant to the brand-only helper (decision 23).
+	setBrandStatus(t, pool, a.tenantID, a.brandID, "active")
+	setTenantStatus(t, pool, a.tenantID, "suspended")
+	if got, err := run(a.tenantID, a.brandID); err != nil || got {
+		t.Fatalf("suspended tenant + active brand: got (%v, %v), want (false, nil)", got, err)
+	}
+	// Read error: an error, never a silent "not resolution-only".
+	err := pool.WithTenant(context.Background(), b.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		cctx, cancel := context.WithCancel(ctx)
+		cancel()
+		got, e := brandResolutionOnly(cctx, tx, b.tenantID, b.brandID)
+		if e == nil || got {
+			t.Fatalf("read error must be returned (got %v, %v)", got, e)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 }

@@ -322,6 +322,8 @@ apart. E-4 added 2026-09-25 by Amendment A4 (3), ADR 0088 §5.3.)*
 | **L3** | **`wallet_balance_projection` rows — ascending `ledger_accounts.id`** | strictly ascending UUID byte order (Postgres `uuid` comparison; in Go `bytes.Compare(a[:], b[:])`) |
 | **L4** | `ledger_transactions` idempotency-key index insert, `ledger_entries` inserts and the projection updates their trigger performs | n/a — by L3, every projection lock is already held, so these acquire nothing new |
 
+*(R15 / H(8), 2026-10-08, ADR 0095 section 14)* `brands` (tenant brand row, `FOR SHARE` via `tenant.RequireBrandActive`) is a shared lock taken only AFTER the path's L1 locks (deposit intent / attempt) and before the claim CAS or child insert. A brand-status writer must not lock a brand and then L1 rows (brand -> intents inverts the order).
+
 `ledger_accounts` creation (`GetOrCreateAccount`) happens **before L3**
 and is ordered by its own canonical key (§3.2).
 

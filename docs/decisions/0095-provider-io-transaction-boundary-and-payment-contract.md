@@ -2440,6 +2440,18 @@ CREATE TABLE payment_statement_lines (
     already runs RG before its INSERTs;
   - payout T2/T12 per-item claim: withdrawal `FOR UPDATE` → attempt → payout KYC gate (no lock)
     → CAS;
+  - **`brands` (H(8), added 2026-10-08):** the `brands` row of the tenant is a SHARED row lock
+    (`SELECT ... FOR SHARE`, `tenant.RequireBrandActive`) taken AFTER the L1 locks of the path
+    (deposit intent, and the attempt where already held) and before any claim CAS / child insert:
+    in the sweeper deposit T2 claim tx (after the intent lock, before `ClaimCreatedForSubmission`)
+    and in the cascade-eligible decline txs (phase C and poll path, after intent + attempt, before the
+    child insert). It is never taken before an L1 lock and nothing acquires an L1 lock while a brand
+    lock is the next thing awaited by a deposit path. **Rule for any future brand-status writer
+    (suspension/closure): update the `brands` row in its own transaction and do NOT lock the brand
+    and then deposit intents / payment attempts (brand -> intents would invert the order and can
+    deadlock against these paths).** A status writer waits behind in-flight FOR SHARE holders and
+    blocks later ones; with many concurrent claims a multixact on the brand row is expected and bounded
+    by the short claim tx.
   - cascade insert: while holding intent and attempt, insert attempt n+1. The partial unique
     index is the only wait, and it is a key the concurrent contender needs under the same
     intent lock, so there is no cycle.
@@ -8067,3 +8079,12 @@ Status: `IMPLEMENTED` against `MOCK` providers only. Nothing here is a statement
 ### 45.3 Tests and evidence
 
 `internal/payments/h8_brand_gate_integration_test.go`, `internal/tenant/require_brand_active_integration_test.go` (runtime role, integration tag): the matrix (active/active dispatched; brand suspended or closed, tenant suspended or closed, both: deferred, no provider call, attempt untouched, intent unchanged, no ledger row, no terminal attempt), brand suspended in the pre-read/claim gap then reactivation, repeated sweeps (poll_count only, no audit churn), a claim waiting at the gate for an in-flight brand suspension, phase-C and poll-path creation skips (own audit action, control gets the child), brand-only helper fail-closed cases. Mutation evidence: `docs/plans/prh2-hardening-round/prh2-r15-h8-mutation-kill.txt`. Still required before any real-provider use: the receipt-path decision above, and `security` review of the gate (not performed by this change).
+
+### 45.4 Follow-up round (security + ledger-finance: APPROVE WITH CONDITIONS, no money defect) - open items recorded
+
+- **Open registry item (security M-1 / LF F1): receipt-site cascade creation has no brand gate AND no tenant gate.** `receipt.go` (cascade creation at lines ~1090-1117, `insertCascadeAttemptIfEligible`) creates a child for a callback decline with neither check. Implementation trap for the future gate: that call passes a stub `DepositIntent{ID, TenantID}` (see `finalizeDeclined(... DepositIntent{ID: *attempt.DepositIntentID, TenantID: attempt.TenantID} ...)`), so `BrandID` is `uuid.Nil` and the intent's `brand_id` must be loaded first (a nil id would refuse every child, fail closed, rather than gate correctly). Residual until then: such a child for an inactive brand/tenant is not dispatched (claim-time gates defer it), but it is then a stale deferred child: after reactivation it is dispatched, and nothing expires a non-interactive `created` attempt. OWNER QUESTION: should deferred non-interactive children expire after a bounded time, and should the receipt site refuse creation? Tracked as a separate task after PAY-RECEIPT-ANOMALY-APPLIED-1 merges (`receipt.go` not touched here).
+- **L-1 / I-2:** the sweeper's TENANT read (`tenantResolutionOnly`) is a plain read, while the BRAND read in the claim tx is `FOR SHARE`. The asymmetry is deliberate (decision 23 forbids conflating them; unifying changes tenant policy), but a tenant status change committing between the plain read and the claim CAS is not serialised the way a brand change is. Recorded, not changed.
+- **poll_count is not reset on claim:** a child deferred N times keeps its `poll_count` (and so a long backoff) when later dispatched/polled; harmless for correctness, affects poll cadence only.
+- **Metric over-count on rollback:** `recordResolutionOnlyBlock` is called after the claim tx commits for the claim-tx sites, but the creation-skip metric is recorded inside the decline tx; if that tx later rolls back, the counter over-counts (the audit row, being in-tx, does not). Metrics are advisory.
+- **Multixact:** the `FOR SHARE` brand read on a hot brand creates multixact members under concurrency; bounded by claim-tx length; see §14 for the writer rule.
+- **Fail-closed evidence:** brand read errors at the claim tx, phase C and poll path are covered with the grant revoked on a throwaway scratch database (`h8_brand_failclosed_scratch_integration_test.go`); `brandResolutionOnly` has a direct contract test and the call sites are pinned by `h8_brand_gate_static_test.go`.
