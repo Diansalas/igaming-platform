@@ -461,6 +461,18 @@ func TestRes1_L4_M4HintOnlyInResolveScope(t *testing.T) {
 	r := "rs-psp-" + uuid.NewString()
 	rsUnboundCU(t, w.bcRun(t, d2Src(rsLine(r, p.attempt.MerchantReference, rsAmount, "EUR"))), p, r, false, "unbound, no reference")
 
+	// The BARE invalid_provider_reference reason (PAY-POLL-ECHO-HARDENING-1), no
+	// reference: in scope (ADR 0111 §4.1) - the M4 wording too.
+	_, bare := w.rsPayout(t, "", rsAmount, rsAmount, "EUR")
+	if err := w.pool.WithTenant(context.Background(), w.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return payments.ApplyDisputeFromNonTerminal(ctx, tx, bare, payments.EvidenceSync, payments.TerminalReasonInvalidProviderReference)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	bareP := bcPark{attempt: w.attempt(t, bare)}
+	rb := "rs-psp-" + uuid.NewString()
+	rsUnboundCU(t, w.bcRun(t, d2Src(rsLine(rb, bareP.attempt.MerchantReference, rsAmount, "EUR"))), bareP, rb, false, "bare unbound reason, no reference")
+
 	bp := w.rsBoundPark(t, rsAmount, rsAmount, "EUR")
 	bcRequire(t, w.bcRun(t, d2PastSrc()), bp, false, "bound keeps the R-K3-8 wording")
 
