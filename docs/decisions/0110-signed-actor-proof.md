@@ -1,5 +1,7 @@
 # ADR 0110 — Signed actor proof for governed four-eyes writes (PRH-2 R5, SIGNED-ACTOR-PROOF)
 
+- **Pointer (2026-10-08, ADR 0111, PROPOSED):** ADR 0111 §6.3 extends the protected-table list from nine to eleven (`withdrawal_hold_resolutions`, `withdrawal_hold_resolution_approvals`, platform_acting with a tenant only), §4.4 appends `evidence_line_id` to the K3 INSERT digest (M1/M2 digests unchanged), and §2.2 records threat **T9** (payout-instrument writes are not actor-proof bound; mitigated by a Go-side seal). Not implemented.
+
 - **Status:** IMPLEMENTED on branch `prh2-r5-signed-actor-proof` (migration `0120_signed_actor_proof`, amended in
   place - it is unmerged); not merged, not pushed. First review round (security, ledger-finance, code-reviewer):
   APPROVE WITH CONDITIONS; the conditions are applied (section 13). A further review of the amended migration is
