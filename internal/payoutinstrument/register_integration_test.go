@@ -10,6 +10,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -483,4 +484,75 @@ func TestRegister_BlockedDestinationCannotBeReRegistered(t *testing.T) {
 	if res, err := w.register(p, "NL91ABNA0417164300"); err != nil || res.Existing || res.Instrument.ID == d.ID {
 		t.Fatalf("re-registering a player-revoked destination: %+v %v", res, err)
 	}
+}
+
+// Deterministic interleave of two registrations of the same destination: B is
+// held at the owner-row insert by A's uncommitted transaction; when A commits,
+// B's instrument insert hits the partial unique index and returns A's
+// instrument. Without the index there would be two live rows.
+func TestRegister_DeterministicInterleaveSameDestination(t *testing.T) {
+	w := newWorld(t)
+	p := w.newPlayer(w.brandID)
+	rp := w.registerParams(p, ibanA)
+	ctxb := context.Background()
+
+	txA, err := w.rt.Raw().Begin(ctxb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = txA.Rollback(ctxb) }()
+	if _, err := txA.Exec(ctxb, `SELECT set_config('app.tenant_id', $1, true)`, w.tenantID.String()); err != nil {
+		t.Fatal(err)
+	}
+	a, err := w.svc.Register(ctxb, txA, rp)
+	if err != nil || a.Existing {
+		t.Fatalf("A: %+v %v", a, err)
+	}
+	type out struct {
+		res RegisterResult
+		err error
+	}
+	done := make(chan out, 1)
+	go func() {
+		r, err := w.registerWith(w.svc, rp)
+		done <- out{r, err}
+	}()
+	select {
+	case o := <-done:
+		t.Fatalf("B must be blocked on A's uncommitted owner row, returned %+v %v", o.res, o.err)
+	case <-time.After(400 * time.Millisecond):
+	}
+	if err := txA.Commit(ctxb); err != nil {
+		t.Fatal(err)
+	}
+	o := <-done
+	if o.err != nil || !o.res.Existing || o.res.Instrument.ID != a.Instrument.ID {
+		t.Fatalf("B must return A's instrument: %+v %v", o.res, o.err)
+	}
+	if n := w.count("payout_instruments", "player_account_id = $1", p.ID); n != 1 {
+		t.Fatalf("live rows = %d, want 1", n)
+	}
+}
+
+// The Person on an instrument is DB-forced from the player account: a planted
+// row naming another Person (whose owner row exists) is refused by the owner FK.
+func TestInstrumentPersonIsForcedFromTheAccount(t *testing.T) {
+	w := newWorld(t)
+	p, other := w.newPlayer(w.brandID), w.newPlayer(w.brandID)
+	good := w.mustRegister(p, ibanA)
+	fp := "33" + good.Fingerprint[2:]
+	if err := w.ownerTx(func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `INSERT INTO payout_instrument_fingerprint_owners (tenant_id, fingerprint_kid, fingerprint, person_id) VALUES ($1,'f1',$2,$3)`, w.tenantID, fp, other.PersonID)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	err := w.ownerTx(func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `INSERT INTO payout_instruments (id, tenant_id, brand_id, player_account_id, person_id, kind, rail, asset_codes, detail_ciphertext, detail_nonce,
+			detail_key_kid, detail_schema_version, display_mask, fingerprint, fingerprint_kid, instrument_seal, seal_kid)
+			VALUES ($1,$2,$3,$4,$5,'bank_account','sepa','{EUR}',$6,$7,'m1',1,'GB****5432',$8,'f1',$9,'m1')`,
+			uuid.New(), w.tenantID, w.brandID, p.ID, other.PersonID, good.DetailCiphertext, good.DetailNonce, fp, good.InstrumentSeal)
+		return err
+	})
+	requireCode(t, err, "23503", "an instrument naming a Person other than the account's")
 }

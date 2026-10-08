@@ -860,3 +860,116 @@ precondition); the rest is deferred as HD-R15-9.
 | ADR 0110 §10a T9/T10/T11 pointer | ADR 0110 header pointer, §2.2, §4.3 |
 | Deviations D-1..D-8 (+ D-9) and launch flags | §10.2, §10.3 |
 | §7 split revised; start-now vs wait | §7.2, §7.3 |
+
+---
+
+## 12. B13-A implementation notes (appendix, added with the B13-A code; the design above is not rewritten)
+
+Scope delivered: migration `0123_payout_instruments` (the whole B13 **schema**, because section 7.2 keeps B13 as one
+migration and section 7.1 says B13-B "uses 0123") and the Go package `internal/payoutinstrument` with its routes. The
+Go integration of the binding into the withdrawal / payments paths is **B13-B and is NOT part of this change**.
+Where the design left a sub-question open, the safest existing reading was taken and is recorded as `B13A-n`. No
+policy question that changes an owner decision (ADR 0095 section 44, decisions 1-8) was needed; the three questions
+the human or architect should see are in 12.3.
+
+### 12.1 Deliverable status
+
+| Deliverable | Status |
+|---|---|
+| Migration 0123: kinds (seeded, SELECT-only), instruments + DB state machine, verifications, blocking events, fingerprint owners, max-age table, `withdrawal_requests` binding columns + insert guard + immutability, write-once snapshots, `payment_attempts` snapshot constraint, RLS, grants, L-6 up-time assertion | `IMPLEMENTED` (runtime-role integration tests, up/down/up) |
+| AEAD detail (AES-256-GCM, HKDF subkey, AAD = tenant, instrument, kind, schema version), masks, tenant-bound HMAC fingerprint with its own key family, canonical encoding, four Go-side seals | `IMPLEMENTED` |
+| Gate rule (`EvaluateGate`), tiering predicate (`CheckTier`), `WriteSnapshot` / `LoadSnapshot`, `PayoutDestination` (redacting), `DestinationFingerprinter` / `DestinationEcho`, `ForcedSource` | `IMPLEMENTED` (callers are B13-B) |
+| Player routes (register / list / revoke, generic 409, per-player rate limit, no card numbers) and staff routes (read, suspend) with permissions and `permissions.ts` | `IMPLEMENTED` |
+| Startup gate (`VerifyStartup`, `cfg.GuardEnvironment()`), Go legacy-binding check, config key families | `IMPLEMENTED` and wired in `cmd/platform-api` |
+| `PayoutInstrumentVerifier` interface + `MockVerifier` | `MOCK` (Synthetic; registered with the synthetic guard) |
+| Any real PSP / KYC-vendor / custodian instrument verifier | `NOT IMPLEMENTED` (`PROVIDER DEPENDENT`) |
+| Binding at request creation, T1p destination gate and snapshot insert, phase B / T2 / T12 re-checks, `destination_mismatch` park, echo cells, `WithdrawRequest.Destination` | `NOT IMPLEMENTED` (B13-B) |
+| Expiry sweep scheduler, re-fingerprint operator command, provider-callback wiring of `ApplyProviderBlock` | `NOT IMPLEMENTED` (the methods exist and are tested; see the runbook `docs/runbooks/payout-instrument-keys.md`) |
+| Compliance alert on a fingerprint conflict (M-7) | `PARTIALLY IMPLEMENTED`: audit row `payout_instrument.registration_conflict` only; an alert needs a new `alerting` Kind (a migration), see 12.3 |
+| Acting-family read of snapshots under a VALID acting session | `PARTIALLY IMPLEMENTED`: the policy is pinned (SELECT only, `financial_acting_session_valid()`, snapshots only) and an invalid acting session reads nothing; a positive test needs a K1 grant world and belongs with the first consumer (RESOLVE-1) |
+
+### 12.2 Ambiguities and the reading taken
+
+- **B13A-1 (instrument id).** "`id` DB default; a client value is refused": the id is allocated by the database
+  (`SELECT gen_random_uuid()` in the registration transaction) because the AEAD AAD and the instrument seal bind it before
+  the insert. The HTTP surface refuses a client-supplied id (unknown-field rejection; tested). Reading: the *client*
+  cannot choose the id; the platform's own insert path passes the id it just allocated.
+- **B13A-2 (NULL binding, transitional).** Section 2.1 says the `withdrawal_requests` BEFORE INSERT trigger "requires both
+  NOT NULL". Until B13-B wires the request path no code supplies a binding, so enforcing it now would break every existing
+  withdrawal insert. 0123 therefore **validates a binding whenever one is supplied** (same tenant/brand/player, verified,
+  in-force latest verification, no revoke, no later suspend, asset listed, fingerprint equal) and **tolerates NULL/NULL**; the
+  CHECK forces both-or-neither and the immutability trigger forbids adding a binding later. **B13-B must close the NULL arm in
+  the same change that makes the request path always bind** (a follow-up migration whose number the architect assigns, or an
+  amendment of 0123 before it merges). A NULL binding stays dispatchable only to Synthetic adapters (A-11; tiering predicate in
+  Go). This is the single place where B13-A is weaker than the final design; it is deliberate and pinned by
+  `TestBinding_InsertGuard`.
+- **B13A-3 (rails).** Seed `allowed_rails`: `bank_account` {bank_transfer, sepa, faster_payments, pix, spei}; `card_token`
+  {card}; `ewallet_account` {ewallet}; `crypto_address` {crypto}; `synthetic_test` {synthetic, card, bank_transfer, ewallet}.
+  The repo has no rail vocabulary (payment methods are free strings); a new rail is a migration.
+- **B13A-4 (masks and the PAN detector).** Masks: IBAN/account `CC****` + last 4; e-wallet email `x***@domain`;
+  e-wallet id `***` + last 4; crypto first 6 + `...` + last 4; card `network ****` + last 4; synthetic `synthetic:<label>`. The
+  detector refuses a Luhn-valid 12-19 digit string in any string value, key or bare number of any kind. The unit is the
+  **maximal digit run** (single spaces or hyphens allowed between digits); a longer run is not windowed, otherwise most
+  IBANs would be refused. Known over-refusal: a bank detail whose only digit run is a Luhn-valid 12-19 digit string (about
+  1 in 10 such runs) is refused; this is the safe side of "no PAN ever" (L-8).
+- **B13A-5 (seal coverage widened).** The seals cover the ADR column lists **plus**: `display_mask`, `detail_key_kid`,
+  `detail_schema_version` (instrument; otherwise a tampered mask would mislead approvers and the AEAD key id could be
+  downgraded), `verifier_reference_hash` (verification), `actor_id` and `reason_code` (blocking event), `verified_at` and
+  `display_mask` (snapshot). They only add coverage; every ADR column is covered.
+- **B13A-6 (keys).** Variables: `PAYOUT_INSTRUMENT_KEYS` / `_ACTIVE_KID` and `PAYOUT_INSTRUMENT_FP_KEYS` / `_FP_ACTIVE_KID`.
+  `config.Load` refuses a key equal to a JWT secret, an actor-proof key, `PROVIDER_CREDENTIAL_FINGERPRINT_KEY`, or a key shared
+  across the two families. Webhook secrets are per-tenant values in the secret store, not process configuration, so
+  "different from any webhook secret" and "unique per environment" are **operational** requirements (runbook), not
+  machine-checked. Absent keys are valid in `Load`; the startup gate (`VerifyStartup`) requires them in production or when any
+  non-Synthetic payout adapter or verifier is registered; otherwise the routes answer 503 (no keyless mode, no random key).
+- **B13A-7 (verification flow).** Registration commits the pending instrument, then verifies synchronously through the first
+  registered verifier that supports the kind and rail; the vendor call is made **outside any transaction**, after the seal /
+  AEAD / fingerprint integrity check, and the verification row + state change are written in one transaction. `Verify`
+  accepts only `pending_verification` and `verification_expired`: **a `suspended` instrument is not re-verifiable** (the DB
+  allows `suspended -> verified` only with a same-transaction verification, but no B13-A code path offers it; owner decision
+  7: no staff unsuspend). A rejecting outcome moves `pending_verification -> rejected`; a rejected re-verification of an
+  expired instrument records the rejected row and leaves the instrument expired.
+- **B13A-8 (blocked destinations).** Because there is no unblock path, `Register` refuses (generic 409, audit reason
+  `destination_blocked`) a destination for which **any staff or provider blocking event exists** in the tenant; otherwise a
+  player could revoke a compliance-suspended instrument and register the same destination again. A player's own revoke does
+  not block. Whether and how a block is ever lifted is a policy question (12.3).
+- **B13A-9 (KYC verified).** "The Person's KYC status is verified" = the **latest** `kyc_verifications` row of the player
+  account (tenant and brand) is `approved` and unexpired; a newer non-approved row, including an orphan, denies
+  (fail-closed). Cross-tenant Person verification is invisible under RLS and is not consulted.
+- **B13A-10 (max-age table RLS).** `payout_instrument_verification_max_age` is `ENABLE` but **not `FORCE`** row-level
+  security, with a read policy and no runtime write grant: a FORCEd table with a SELECT-only policy would lock the owner/
+  migration role out of the only writer it is meant to have. The runtime role is bound by RLS and has no write grant (pinned).
+- **B13A-11 (staff reach).** The staff routes are tenant-scoped (tenant from the verified token). `platform_admin` holds the
+  static `payout_instrument:read` per section 2.9 but, having no tenant context, gets 403 on these routes (same shape as
+  `sportsbook_bet:read`). No staff create / verify / unsuspend / edit route exists (a test pins 404/405).
+- **B13A-12 (rate limit).** Per player, burst 5, refilling 10 per hour, in-memory per replica (ADR 0097 `GCRALimiter`
+  admission pattern: effective limit = limit x replicas). Refused attempts consume budget. Parameters are code constants.
+- **B13A-13 (idempotent registration).** Registering the same destination (after normalisation) for the same player while a
+  live instrument exists returns that instrument (200, not 201); a concurrent double registration yields exactly one row (the
+  partial unique index plus a savepoint). A destination change is a new instrument (`supersedes_instrument_id`).
+- **B13A-14 (supersession timing).** The old instrument becomes `superseded` in `Service.Sweep`, once the replacement is
+  `verified` **and** no live withdrawal binds the old one (the DB refuses otherwise, PI018). It is not done inside `Verify`,
+  because an in-use refusal there would fail the replacement's verification.
+- **B13A-15 (blocking-event and verification time).** `verified_at` / `occurred_at` are DB-forced to equal the transaction
+  time `now()`; Go reads `SELECT now()` first and seals that value. `created_txid` is DB-forced to `txid_current()`.
+- **B13A-16 (repo hygiene).** `.git/info/exclude` in this repository excludes `/migrations/0123_*` (and `0122_*`) from
+  `git status`; the 0123 files are committed with `git add -f`. The orchestrator should remove those exclude lines when it
+  merges.
+- **B13A-17 (provider ids).** `payoutinstrument.MockProviderIDs = {"mock-payments"}` equals the literal in 0123's up-time
+  assertion; `cmd/platform-api` pins it equal to the ids of the `providerkind.Synthetic` payment adapters the binary registers.
+
+### 12.3 Items for the architect / human (none changes decisions 1-8; each fails closed today)
+
+1. **Closing the NULL-binding arm (B13A-2)** needs a migration number or an amendment of 0123 before it merges. B13-B is
+   blocked on this choice, not on code.
+2. **Lifting a staff/provider block (B13A-8).** Owner decision 7 forbids a staff unsuspend route; the consequence is that a
+   suspended or provider-revoked destination is unusable for that tenant **permanently** until a governed (four-eyes,
+   proof-bound) writer exists. HD-R15-5 covers the stranded-withdrawal side; the registration side is new. Fails closed.
+3. **Compliance alert on a fingerprint conflict (M-7).** `alerting` Kinds are database-checked (migration 0110); a new Kind
+   needs its own migration and attribute trigger. Until then the conflict is an audit row only.
+
+### 12.4 Evidence
+
+Tests (runtime role, scratch database): `internal/payoutinstrument` (unit + integration), `internal/httpserver`
+(`TestPayoutInstrumentRoutes_*`), `internal/auth`, `internal/config`, `cmd/platform-api`. Mutation-kill evidence:
+`docs/plans/prh2-hardening-round/prh2-r16-b13a-mutation-kill.txt`.

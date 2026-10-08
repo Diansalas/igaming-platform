@@ -264,9 +264,30 @@ func TestBlockingEvents_AppendOnlyAndSealedAtBirth(t *testing.T) {
 	if after := w.count("payout_instrument_blocking_events", "instrument_id = $1", rev.ID); after != before {
 		t.Fatalf("a repeat revoke wrote a second event (%d -> %d)", before, after)
 	}
+	// A blocking transition on a terminal instrument is a typed refusal (no event is written).
+	eventsBefore := w.count("payout_instrument_blocking_events", "instrument_id = $1", rev.ID)
+	err := w.rtTx(func(ctx context.Context, tx pgx.Tx) error {
+		_, err := w.svc.Suspend(ctx, tx, BlockParams{TenantID: w.tenantID, InstrumentID: rev.ID, Actor: staff(), ReasonCode: "aml_review"})
+		return err
+	})
+	if !errors.Is(err, ErrBadTransition) {
+		t.Fatalf("suspending a revoked instrument = %v, want ErrBadTransition", err)
+	}
+	if n := w.count("payout_instrument_blocking_events", "instrument_id = $1", rev.ID); n != eventsBefore {
+		t.Fatalf("a refused suspension wrote an event (%d -> %d)", eventsBefore, n)
+	}
+	// A suspension needs a verified or expired instrument: a pending one is refused.
+	pendingInst := w.mustRegister(p, "NL91ABNA0417164300")
+	err = w.rtTx(func(ctx context.Context, tx pgx.Tx) error {
+		_, err := w.svc.Suspend(ctx, tx, BlockParams{TenantID: w.tenantID, InstrumentID: pendingInst.ID, Actor: staff(), ReasonCode: "aml_review"})
+		return err
+	})
+	if !errors.Is(err, ErrBadTransition) {
+		t.Fatalf("suspending a pending instrument = %v, want ErrBadTransition", err)
+	}
 	// Another player's instrument cannot be revoked by this player (404 shape).
 	other := w.newPlayer(w.brandID)
-	err := w.rtTx(func(ctx context.Context, tx pgx.Tx) error {
+	err = w.rtTx(func(ctx context.Context, tx pgx.Tx) error {
 		_, err := w.svc.Revoke(ctx, tx, BlockParams{TenantID: w.tenantID, InstrumentID: inst.ID, PlayerAccountID: other.ID, Actor: Actor{Type: ActorPlayer, ID: other.ID.String()}, ReasonCode: "x_y"})
 		return err
 	})

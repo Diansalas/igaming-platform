@@ -346,6 +346,16 @@ func TestPayoutInstrumentRoutes_AuthzAndStaffSuspend(t *testing.T) {
 			t.Errorf("player on %s: %d", c.path, code)
 		}
 	}
+	// A platform_admin holds the static permission but the routes are tenant-scoped: 403, never a 500.
+	const pw = "a-decent-password-1"
+	pa := mustCreateStaff(t, e.owner, uuid.Nil, identity.StaffRole("platform_admin"), pw)
+	platformTok := mustLoginStaff(t, e.srv, "", pa.Email, pw).AccessToken
+	if code, _ := doReq(t, e, "GET", listPath, platformTok, nil); code != http.StatusForbidden {
+		t.Errorf("platform_admin list: %d, want 403", code)
+	}
+	if code, _ := doReq(t, e, "POST", suspendPath, platformTok, susp); code != http.StatusForbidden {
+		t.Errorf("platform_admin suspend: %d, want 403", code)
+	}
 	// Read: finance and compliance yes; tenant_admin and support no.
 	for name, tc := range map[string]struct {
 		tok  string
