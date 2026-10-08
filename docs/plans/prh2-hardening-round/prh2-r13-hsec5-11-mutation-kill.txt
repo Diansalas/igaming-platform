@@ -66,3 +66,26 @@ Not mutated (and why): "check before lock" for deposit (the gate IS the first st
 after the insert" (equivalent: the refusing transaction rolls back whole; the replay variant M04/M28 is the observable one).
 Other-tenant isolation is asserted by TestHSEC5_Deposit_OtherTenantUnaffected, TestHSEC11_RequestWithdrawal_OtherTenantUnaffected and
 TestHSEC11_ClaimForDispatch_OtherTenantUnaffected (no mutant isolates it separately: the helper is keyed on the caller's ids).
+
+====================================================================================================
+Round 3 (2026-10-08, review change): the gate moved AFTER the read-only replay lookup (LF N2 / ADR 0096 s8 item 3)
+====================================================================================================
+Deposit: a read-only loadDepositIntentByIdempotencyKey precedes the gate; the gate runs only when no intent exists for the key (the
+unchanged conflict/replay path returns state only - no resume, no dispatch, no provider call). Withdrawal: the gate sits after the
+existing replay lookup and before the KYC gate / insert / hold. The old M04/M28 (replay not gated) are now the CORRECT behaviour; the
+two *_ReplayOf* tests were flipped (replay while non-active returns the original; a NEW key is refused; nothing is created either way)
+and a new test pins gate-before-KYC-decision. Same method as above (in place, vet-compile check, TestHSEC on the private DB, restored
+after each; git status clean afterwards). Control: TestHSEC all PASS before the sweep.
+D1 KILLED   deposit: remove the gate
+D2 KILLED   deposit: invert gate condition
+D3 SURVIVED deposit: fail-open on a non-sentinel read error at the call site  (same equivalent-by-transaction-abort survivor as M03, S1 above)
+D4 KILLED   deposit: gate before the replay lookup (the OLD placement; replay would be refused)
+D5 KILLED   deposit: gate only when a replay exists (condition inverted)
+D6 COMPILE-ERROR (not counted) deposit: skip the lookup branch ("declared and not used")
+W1 KILLED   withdrawal: remove the gate (first attempt was a compile error - unused import - NOT counted; re-run with a use of the sentinel)
+W2 KILLED   withdrawal: invert gate condition
+W3 KILLED   withdrawal: gate before the replay lookup (the OLD placement)
+W4 KILLED   withdrawal: gate after the KYC gate (just before the insert)         (TestHSEC11_RequestWithdrawal_NewRequestNonActive_GateBeforeKYCDecision)
+W5 KILLED   withdrawal: gate after the insert/idempotent-insert block            (same test; the KYC decision row is the observable)
+Remaining survivors overall: M03/D3 (equivalent, transaction abort) and M23 (equivalent under RLS). Mutants unaffected by the move
+(payout claim, cascade-child, helper internals, handler mappings: M07-M27 of round 1/2) were not re-run; their code did not change.
