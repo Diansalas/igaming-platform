@@ -61,3 +61,41 @@ func TestH8_BrandGateCallSites_Pinned(t *testing.T) {
 		}
 	}
 }
+
+// R17 (ADR 0095 section 47): the receipt-site call is pinned. The cascade block in
+// applyResolvedReceiptEvidence reaches insertCascadeAttemptIfEligible only after
+// gateReceiptCascadeChild (once, before the insert); the gate loads the REAL intent
+// (GetDepositIntentByID) before the tenant helper and the brand helper, in that order, and passes
+// that loaded value (never a DepositIntent literal / the receipt-site stub) to the brand helper.
+func TestH8_ReceiptSiteGate_Pinned(t *testing.T) {
+	calls := h8FuncCalls(t, "receipt.go", "applyResolvedReceiptEvidence")
+	gate, ins := calls["gateReceiptCascadeChild"], calls["insertCascadeAttemptIfEligible"]
+	if len(gate) != 1 || len(ins) != 1 || gate[0] > ins[0] {
+		t.Errorf("applyResolvedReceiptEvidence must call gateReceiptCascadeChild exactly once, before insertCascadeAttemptIfEligible (gate=%d insert=%d)", len(gate), len(ins))
+	}
+	g := h8FuncCalls(t, "sweeper_resolution_only.go", "gateReceiptCascadeChild")
+	load, ten, br := g["GetDepositIntentByID"], g["skipCascadeChildForResolutionOnly"], g["skipCascadeChildForBrand"]
+	if len(load) != 1 || len(ten) != 1 || len(br) != 1 || !(load[0] < ten[0] && ten[0] < br[0]) {
+		t.Errorf("gateReceiptCascadeChild must load the intent, then the tenant helper, then the brand helper (load=%d tenant=%d brand=%d)", len(load), len(ten), len(br))
+	}
+	// The brand helper's intent argument must be the loaded variable, not a composite literal.
+	_, f := parseSrc(t, "sweeper_resolution_only.go", "")
+	for _, d := range f.Decls {
+		fd, ok := d.(*ast.FuncDecl)
+		if !ok || fd.Name.Name != "gateReceiptCascadeChild" {
+			continue
+		}
+		ast.Inspect(fd.Body, func(n ast.Node) bool {
+			if c, ok := n.(*ast.CallExpr); ok && calleeName(c) == "skipCascadeChildForBrand" {
+				if id, ok := c.Args[len(c.Args)-1].(*ast.Ident); !ok || id.Name != "intent" {
+					t.Error("skipCascadeChildForBrand must receive the loaded `intent` variable, not a stub/literal")
+				}
+			}
+			return true
+		})
+	}
+	// Neither helper may touch the other's primitive (decision 23).
+	if len(h8FuncCalls(t, "sweeper_resolution_only.go", "skipCascadeChildForResolutionOnly")["RequireBrandActive"]) != 0 {
+		t.Error("skipCascadeChildForResolutionOnly must not read the brand")
+	}
+}
