@@ -104,6 +104,12 @@ var staticDerivedRaiseSetReviewed = map[string]bool{
 	"internal/payments/payout_alerts.go:payoutAlertAfterDispute":      true,
 	"internal/payments/payout_alerts.go:raisePayoutDisputeAlert":      true,
 	"internal/payments/payout_refbind.go:payoutGuardReferenceBinding": true,
+	// PAY-RECEIPT-ANOMALY-APPLIED-1 (ADR 0095 section 45): the refused attribution repair signal chain.
+	// The owner RepairReceiptAttribution opens through alerting.InTx (pinned by
+	// TestStaticWiring_EvidenceTransactionOwnersOpenThroughInTxAndFlush) and is not in this set.
+	"internal/payments/receipt_repair.go:refuseRepair":                          true,
+	"internal/payments/receipt_repair.go:repairReceiptAttributionTx":            true,
+	"internal/payments/receipt_repair_alerts.go:raiseReceiptRepairRefusedAlert": true,
 }
 
 func TestStaticWiring_DerivedRaiseReachingSetIsReviewed_CR2S4(t *testing.T) {
