@@ -402,6 +402,32 @@ func f(ctx, tx any) { raiseReceiptRepairRefusedAlert(ctx, tx, t, r, p, x) }`
 	}
 }
 
+// PAY-RECEIPT-ANOMALY-APPLIED-1 (security L-3): RepairReceiptAttribution has ZERO non-test callers. It is
+// system-internal and records ActorSystem; any caller (scheduler, operator path, route) needs a new owner decision
+// (four-eyes governance plus an ADR 0110 signed actor proof, replacing ActorSystem with the authenticated actor) and a
+// reviewed entry in this allow-list (ADR 0095 section 45).
+var staticRepairCallerAllowList = map[string]bool{}
+
+func TestStaticWiring_RepairReceiptAttributionHasNoNonTestCallers_L3(t *testing.T) {
+	bad := `package p
+func f(ctx, pool any) { payments.RepairReceiptAttribution(ctx, pool, r) }`
+	hit := func(calls []staticCall) []string {
+		var out []string
+		for _, c := range calls {
+			if (c.name == "RepairReceiptAttribution" || strings.HasSuffix(c.name, ".RepairReceiptAttribution")) && !staticRepairCallerAllowList[c.file+":"+c.fn] {
+				out = append(out, fmt.Sprintf("%s:%d (%s)", c.file, c.line, c.fn))
+			}
+		}
+		return out
+	}
+	if got := hit(staticCollectFromSource(t, "internal/x/bad.go", bad)); len(got) != 1 {
+		t.Fatalf("negative control must flag the fixture caller, got %v", got)
+	}
+	for _, v := range hit(staticCollectCalls(t)) {
+		t.Errorf("unreviewed caller of RepairReceiptAttribution: %s: needs a new owner decision (four-eyes + ADR 0110 proof) and an allow-list entry", v)
+	}
+}
+
 func TestStaticWiring_EvidenceTransactionOwnersOpenThroughInTxAndFlush(t *testing.T) {
 	hasInTx, hasFlush := map[string]bool{}, map[string]bool{}
 	for _, c := range staticCollectCalls(t) {

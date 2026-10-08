@@ -143,6 +143,7 @@ type repairReceipt struct {
 	AttemptID   *uuid.UUID
 	Resolution  *string
 	ResolvedAt  *time.Time
+	ReceivedAt  time.Time
 }
 
 func (r repairReceipt) anomalyClosed() bool {
@@ -158,7 +159,7 @@ func (r repairReceipt) anomalyClosed() bool {
 
 func readRepairReceipt(ctx context.Context, tx pgx.Tx, tenantID, receiptID uuid.UUID, lock bool) (repairReceipt, error) {
 	q := `SELECT id, tenant_id, provider_id, event_type, provider_reference, merchant_reference, outcome, amount, asset_code,
-	             attempt_id, resolution, resolved_at
+	             attempt_id, resolution, resolved_at, received_at
 	        FROM payment_provider_events WHERE id = $1 AND tenant_id = $2`
 	if lock {
 		q += ` FOR UPDATE`
@@ -166,7 +167,7 @@ func readRepairReceipt(ctx context.Context, tx pgx.Tx, tenantID, receiptID uuid.
 	var r repairReceipt
 	var outcome string
 	err := tx.QueryRow(ctx, q, receiptID, tenantID).Scan(&r.ID, &r.TenantID, &r.ProviderID, &r.EventType, &r.ProviderRef, &r.MerchantRef,
-		&outcome, &r.Amount, &r.AssetCode, &r.AttemptID, &r.Resolution, &r.ResolvedAt)
+		&outcome, &r.Amount, &r.AssetCode, &r.AttemptID, &r.Resolution, &r.ResolvedAt, &r.ReceivedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return repairReceipt{}, ErrReceiptRepairNotFound
 	}
@@ -188,7 +189,7 @@ func readRepairReceipt(ctx context.Context, tx pgx.Tx, tenantID, receiptID uuid.
 // the attempt, so the attempt has itself bound the reference (the circumstantial application trace);
 // when the receipt has a merchant_reference, the SAME attempt carries it; the event type matches the
 // attempt's operation (deposit/payout allow-list); and the evidence is consistent with the attempt
-// having APPLIED it (a success cannot have been applied to an attempt still submitting/pending/ambiguous).
+// having APPLIED it, and the receipt must postdate the attempt's first submission (a success cannot have been applied to an attempt still submitting/pending/ambiguous).
 // Anything else is refused: zero candidates, two different candidates, contradictory evidence, or
 // insufficient evidence. The Y-bound-refP reference-conflict race lands in ambiguous_candidates by design.
 func deriveRepairTarget(ctx context.Context, tx pgx.Tx, r repairReceipt) (*PaymentAttempt, string, error) {
@@ -240,6 +241,12 @@ func deriveRepairTarget(ctx context.Context, tx pgx.Tx, r repairReceipt) (*Payme
 	}
 	if a.Operation != op {
 		return nil, RefusalContradictoryEvidence, nil
+	}
+	// LF C1: the receipt must postdate the attempt's first submission. provider_id and first_submitted_at are
+	// set in the same T2 UPDATE, so a receipt that predates it (the S7 cross-provider closure of an unrouted
+	// cascade child) cannot describe this submission (S95-C3); the drain would close it as predates_submission.
+	if a.FirstSubmittedAt == nil || r.ReceivedAt.Before(*a.FirstSubmittedAt) {
+		return nil, RefusalInsufficientEvidence, nil
 	}
 	if !repairApplicationConsistent(*a, r) {
 		return nil, RefusalInsufficientEvidence, nil
@@ -448,6 +455,12 @@ func replayLostCellAudit(ctx context.Context, tx pgx.Tx, a PaymentAttempt, r rep
 	if a.State != AttemptSucceeded && a.State != AttemptDeclined {
 		return replayed, append(unknowable, "terminal_mismatch_audit_not_replayed_attempt_state_not_succeeded_or_declined"), nil
 	}
+	// LF C2: a terminal_reason (the attempt was parked, then possibly forced by M2 disputed -> succeeded/declined,
+	// R-7 keeps the reason) or operator/legacy evidence means the state at the event may have been disputed, where
+	// the terminal cell did not fire. Replaying would fabricate an audit fact: skip and record it.
+	if a.TerminalReason != nil || a.LastEvidenceKind == EvidenceOperator || a.LastEvidenceKind == EvidenceLegacyDoNotUse {
+		return replayed, append(unknowable, "terminal_mismatch_audit_not_replayed_attempt_parked_or_forced"), nil
+	}
 	ev := ReceiptEvidence{EventType: r.EventType, ProviderReference: r.ProviderRef, Outcome: r.Outcome}
 	if r.Amount != nil {
 		ev.Amount = *r.Amount
@@ -457,7 +470,9 @@ func replayLostCellAudit(ctx context.Context, tx pgx.Tx, a PaymentAttempt, r rep
 	}
 	if err := auditTerminalAmountAssetMismatch(ctx, tx, a, ev, map[string]any{
 		"reconstructed": true, "receipt_id": r.ID.String(), "repair_reason": RepairReasonAnomalyAppliedGap,
-		"attempt_state": string(a.State) + "_inferred",
+		// never a fabricated state: the state at the event is unknowable (a deposit may have been declined
+		// before a T13 success); only the CURRENT state is a fact.
+		"attempt_state": "unknown", "attempt_state_now": string(a.State),
 	}); err != nil {
 		return nil, nil, err
 	}

@@ -17,13 +17,15 @@
 --   (3) the target attempt carries the receipt's OWN provider_reference, and, when the
 --       receipt carries a merchant_reference, that merchant_reference too (so the target is
 --       derived from the receipt's immutable evidence, never a caller-chosen attempt);
---   (4) the receipt's event type matches the attempt's operation (deposit/payout).
+--   (4) the receipt's event type matches the attempt's operation (deposit/payout);
+--   (5) the receipt was received at or after the attempt's first submission (an earlier receipt cannot
+--       describe this submission: S95-C3, and the cross-provider closure of an unrouted cascade child).
 -- resolution and resolved_at stay one-shot, so the original anomaly label is preserved: the
 -- repair is recorded as an append-only audit fact, not as a relabelling. An UPDATE that
 -- attributes a receipt before it is resolved is unchanged (ResolveReceipt sets attempt_id,
 -- resolution and resolved_at together while resolved_at is still NULL).
 --
--- No table, no column, no grant, no policy is added or changed. The guard is not SECURITY
+-- The function pins search_path = pg_catalog, public, pg_temp (security L-1). No table, no column, no grant, no policy is added or changed. The guard is not SECURITY
 -- DEFINER: the target is read under the caller's own RLS scope, so a target in another
 -- tenant is invisible and therefore refused.
 CREATE OR REPLACE FUNCTION payment_provider_events_guard() RETURNS TRIGGER AS $$
@@ -68,6 +70,8 @@ BEGIN
                AND a.tenant_id = OLD.tenant_id
                AND a.provider_id = OLD.provider_id
                AND a.provider_reference = OLD.provider_reference
+               AND a.first_submitted_at IS NOT NULL
+               AND OLD.received_at >= a.first_submitted_at
                AND (OLD.merchant_reference IS NULL OR a.merchant_reference = OLD.merchant_reference)
                AND a.operation = CASE OLD.event_type WHEN 'deposit' THEN 'deposit' WHEN 'payout' THEN 'payout' END
         ) THEN
@@ -76,4 +80,4 @@ BEGIN
     END IF;
     RETURN NEW;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql SET search_path = pg_catalog, public, pg_temp;

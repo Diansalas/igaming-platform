@@ -6,6 +6,8 @@ import (
 	"context"
 	"strings"
 	"testing"
+
+	"github.com/jackc/pgx/v5"
 )
 
 const migration0122Version = 122
@@ -35,6 +37,22 @@ func TestRR_Migration0122UpDownUp_WholeSchema_OnlyTheGuardFunctionChanges(t *tes
 	if n := len(strings.Split(diff, "\n")); n != 2 {
 		t.Fatalf("want exactly the old and new guard function lines, got %d:\n%s", n, diff)
 	}
+	// Security L-1: the replaced guard pins its search_path; down (the 0101 definition) carries none.
+	proconfig := func() string {
+		var cfg *string
+		if err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+			return tx.QueryRow(ctx, `SELECT array_to_string(proconfig, ',') FROM pg_proc WHERE proname = 'payment_provider_events_guard'`).Scan(&cfg)
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if cfg == nil {
+			return ""
+		}
+		return *cfg
+	}
+	if got := proconfig(); got != "search_path=pg_catalog, public, pg_temp" {
+		t.Fatalf("guard proconfig after up = %q, want the pinned search_path", got)
+	}
 	upNames := objectNames(t, pool)
 	for n := range upNames {
 		if !preNames[n] {
@@ -49,6 +67,9 @@ func TestRR_Migration0122UpDownUp_WholeSchema_OnlyTheGuardFunctionChanges(t *tes
 
 	if _, err := pool.MigrateDown(context.Background(), dir, 1); err != nil {
 		t.Fatalf("down: %v", err)
+	}
+	if got := proconfig(); got != "" {
+		t.Fatalf("guard proconfig after down = %q, want none (0101 exactly)", got)
 	}
 	if got := schemaSnapshot15(t, pool); got != preSnap {
 		t.Fatalf("0122 down did not restore the N-1 schema exactly:\n%s", snapDiff(preSnap, got))

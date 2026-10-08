@@ -294,7 +294,7 @@ func TestRR_HappyPath_OrphanAnomalyReceipt_AttributedOnce_AuditedOnce_NoFinancia
 				t.Fatalf("actor_type = %s, want system", actorType)
 			}
 			rm := c.replayMeta(t, rid)
-			if rm["reconstructed"] != true || rm["receipt_id"] != rid.String() || rm["attempt_state"] != "succeeded_inferred" {
+			if rm["reconstructed"] != true || rm["receipt_id"] != rid.String() || rm["attempt_state"] != "unknown" || rm["attempt_state_now"] != "succeeded" {
 				t.Fatalf("replayed audit metadata = %v", rm)
 			}
 			if len(c.repairAlerts(t)) != 0 {
@@ -889,5 +889,150 @@ func TestRR_Locks_ParentAttemptAndReceiptAreTaken(t *testing.T) {
 		if res := c.repair(t, rid); res.Outcome != RepairRepaired {
 			t.Errorf("%s: after release: %+v", tg.name, res)
 		}
+	}
+}
+
+// LF C1: the REAL S7 sequence. An unrouted cascade child (created, provider NULL) receives a success for its
+// merchant reference through the production receipt path: anomaly_cross_provider, NULL attempt. Then T2 routes it
+// (provider_id and first_submitted_at in one UPDATE) and the reference is bound. The receipt predates the
+// submission, so the repair REFUSES (insufficient evidence, signal) and the guard independently refuses a direct
+// attribution. After C1 no reachable shape of Option A remains repairable: the positive tests above plant receipts.
+func TestRR_RealS7Sequence_UnroutedChild_CrossProviderThenRouted_RefusedByC1(t *testing.T) {
+	pool := depositV2ScratchPool(t)
+	const pid = "mock-rr-s7"
+	f := seedOrchFixture(t, pool)
+	mp := NewMockProvider(pid, "EUR")
+	registerCapability(t, pool, f, mp, 100)
+	orch := NewOrchestrator(map[string]PaymentProvider{pid: mp}, MultiWebhookCredentialResolver{pid: NewMockWebhookCredentials(mp)})
+	attemptID := insertRawCreatedAttempt(t, pool, f.tenantID, insertRawDepositIntent(t, pool, f, "pending"), false, time.Now())
+	a := mustGetAttempt(t, pool, f.tenantID, attemptID)
+	const ref = "rr-s7-ref"
+	ev := ReceiptEvidence{EventType: "deposit", ProviderReference: ref, MerchantReference: a.MerchantReference,
+		Outcome: OutcomeSucceeded, Amount: a.Amount, AssetCode: "EUR"}
+	if disp, err := rvApplyReceipt(pool, orch, f.tenantID, pid, ev); err != nil || disp != DispositionAnomaly {
+		t.Fatalf("setup: unrouted merchant-reference match: disp=%s err=%v, want anomaly", disp, err)
+	}
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		if err := ClaimCreatedForSubmission(ctx, tx, attemptID, pid, uuid.New(), "rr-s7", time.Now().Add(time.Minute)); err != nil {
+			return err
+		}
+		return MarkAccepted(ctx, tx, attemptID, EvidenceCallback, ref, time.Now().Add(time.Minute))
+	}); err != nil {
+		t.Fatalf("setup: T2 + reference bind: %v", err)
+	}
+	a = mustGetAttempt(t, pool, f.tenantID, attemptID)
+	if a.FirstSubmittedAt == nil || a.ProviderReference == nil || *a.ProviderReference != ref {
+		t.Fatalf("setup: attempt = %+v", a)
+	}
+	c := rrCase{pool: pool, tenantID: f.tenantID, provider: pid, attempt: a, eventType: "deposit", ref: ref}
+	var rid uuid.UUID
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT id FROM payment_provider_events WHERE tenant_id = $1 AND provider_reference = $2`, f.tenantID, ref).Scan(&rid)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := c.q(t, `SELECT resolution FROM payment_provider_events WHERE id = $1`, rid); got != string(ResolutionAnomalyCrossProvider) {
+		t.Fatalf("setup: resolution = %s", got)
+	}
+	before, rb := c.snap(t), c.receiptNoAttr(t, rid)
+	c.assertRefused(t, c.repair(t, rid), rid, RefusalInsufficientEvidence, true, before, rb)
+	// The database refuses the same attribution when attempted directly.
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `UPDATE payment_provider_events SET attempt_id = $2 WHERE id = $1`, rid, attemptID)
+		return err
+	}); err == nil {
+		t.Fatal("the guard must refuse attributing a receipt that predates the attempt's first submission")
+	}
+}
+
+// LF C3 (M1): a merchant-only match naming an attempt of ANOTHER provider is contradictory (not insufficient).
+func TestRR_MerchantOnlyMatch_OtherProviderAttempt_Contradictory(t *testing.T) {
+	pool := depositV2ScratchPool(t)
+	f, orch, _ := fpOrch(t, pool, "mock-rr-m1")
+	e := rbEnv{pool: pool, f: f, orch: orch, pid: "mock-rr-m1"}
+	_, x := e.claim(t, "rr-m1-x") // submitting, provider mock-rr-m1, no reference
+	c := rrCase{pool: pool, tenantID: f.tenantID, provider: "mock-rr-m1", attempt: mustGetAttempt(t, pool, f.tenantID, x.ID), eventType: "payout", ref: "rr-m1-ref"}
+	rid := c.plant(t, "mock-rr-m1-other", c.ev(0), ResolutionAnomalyCrossProvider)
+	before, rb := c.snap(t), c.receiptNoAttr(t, rid)
+	res := c.repair(t, rid)
+	if res.RefusalReason != RefusalContradictoryEvidence {
+		t.Fatalf("result = %+v, want contradictory_evidence (another provider's attempt is never used)", res)
+	}
+	if c.receiptAttempt(t, rid) != nil || c.receiptNoAttr(t, rid) != rb {
+		t.Fatal("receipt changed")
+	}
+	c.assertNoFinancialChange(t, before)
+}
+
+// LF C3 (M22): the ineligibility detail distinguishes an unresolved receipt from a non-anomaly closure.
+func TestRR_NotEligible_DetailNamesTheReason(t *testing.T) {
+	pool := depositV2ScratchPool(t)
+	c, _ := rrPayoutSucceeded(t, pool, "mock-rr-detail", "rr-detail", "rr-detail-ref")
+	var deferred uuid.UUID
+	if err := pool.WithTenant(context.Background(), c.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		var err error
+		deferred, _, err = insertReceiptDeduped(ctx, tx, c.tenantID, c.provider, c.ev(31), DispositionDeferredUnresolved)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if res := c.repair(t, deferred); res.RefusalReason != RefusalNotEligible {
+		t.Fatalf("%+v", res)
+	}
+	if m := c.meta(t, auditActionReceiptAttributionRepairRefused, deferred.String()); m["detail"] != "receipt_unresolved" {
+		t.Fatalf("detail = %v, want receipt_unresolved", m["detail"])
+	}
+}
+
+// LF C2: an M2-forced attempt (disputed -> succeeded; terminal_reason kept, R-7) must not get a replayed
+// terminal-cell audit row: the state at the event may have been disputed. The gap is recorded.
+func TestRR_M2ForcedAttempt_NoReplay_UnknowableRecorded(t *testing.T) {
+	w := newK3World(t, k3Opts{base: 1})
+	_, a := w.disputedPayout(300, "provider_reference_mismatch")
+	w.executeM2(a.ID, ResolutionM2DeclarePaid)
+	after := w.attempt(a.ID)
+	if after.State != AttemptSucceeded || after.ProviderReference == nil {
+		t.Fatalf("setup shape not reachable here: state=%s ref=%v", after.State, after.ProviderReference)
+	}
+	c := rrCase{pool: w.pool, tenantID: w.f.tenantID, provider: w.provider, attempt: after, eventType: "payout", ref: *after.ProviderReference}
+	rid := c.plant(t, c.provider, c.ev(5), ResolutionAnomalyCrossProvider)
+	base := c.auditN(t, "payments.callback_amount_asset_mismatch_terminal")
+	res := c.repair(t, rid)
+	if res.Outcome != RepairRepaired || len(res.ReplayedAudit) != 0 {
+		t.Fatalf("result = %+v: nothing may be replayed for a parked-then-forced attempt", res)
+	}
+	found := false
+	for _, u := range res.Unknowable {
+		found = found || u == "terminal_mismatch_audit_not_replayed_attempt_parked_or_forced"
+	}
+	if !found || c.auditN(t, "payments.callback_amount_asset_mismatch_terminal") != base {
+		t.Fatalf("unknowable = %v", res.Unknowable)
+	}
+}
+
+// LF C2: a deposit that was declined and later succeeded (T13) was DECLINED at an earlier event; the replayed row
+// therefore never claims a state at the event.
+func TestRR_DepositT13_ReplayStampsStateUnknown(t *testing.T) {
+	e := t4DrainSetup(t, "mock-rr-t13", "rr-t13")
+	const ref = "rr-t13-ref"
+	if _, err := e.apply(ReceiptEvidence{EventType: "deposit", ProviderReference: ref, MerchantReference: e.attempt.MerchantReference,
+		Outcome: OutcomeDeclined, Amount: MockAmountAmbiguous, AssetCode: "EUR", DeclineReason: "x", DeclineStage: DeclineAfterAcceptance}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.apply(ReceiptEvidence{EventType: "deposit", ProviderReference: ref, MerchantReference: e.attempt.MerchantReference,
+		Outcome: OutcomeSucceeded, Amount: MockAmountAmbiguous, AssetCode: "EUR"}); err != nil {
+		t.Fatal(err)
+	}
+	a := mustGetAttempt(t, e.pool, e.f.tenantID, e.attempt.ID)
+	if a.State != AttemptSucceeded {
+		t.Fatalf("setup: state = %s, want succeeded after T13", a.State)
+	}
+	c := rrCase{pool: e.pool, tenantID: e.f.tenantID, provider: e.provider, attempt: a, eventType: "deposit", ref: ref}
+	rid := c.plant(t, c.provider, c.ev(3), ResolutionAnomalyCrossProvider)
+	if res := c.repair(t, rid); res.Outcome != RepairRepaired {
+		t.Fatalf("%+v", res)
+	}
+	if rm := c.replayMeta(t, rid); rm["attempt_state"] != "unknown" || rm["attempt_state_now"] != "succeeded" {
+		t.Fatalf("replayed metadata = %v: the state at the event must be stamped unknown", rm)
 	}
 }
