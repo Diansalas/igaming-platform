@@ -1,11 +1,14 @@
 # ADR 0111 — Payout destination binding (B13), governed resolution of unbound payouts (PAY-PAYOUT-UNBOUND-RESOLVE-1) and four-eyes release of frozen `approved` holds (HSEC-APPROVED-HOLD-RELEASE-1)
 
-- **Status: PROPOSED — DESIGN ONLY, revision 2 (`architect`, 2026-10-08).** Revision 1 (`30cec95`/`978a58b`) was
+- **Status: PROPOSED — DESIGN ONLY, revision 3 (`architect`, 2026-10-08).** Revision 3 applies the `ledger-finance`
+  pre-0125 wording conditions (BC-1, R-1..R-5) and records BC-2, LOW-1, P-2 and notes (§13); LF: 0125 may start once
+  these are in. Revision 1 (`30cec95`/`978a58b`) was
   reviewed: `ledger-finance` APPROVE WITH CONDITIONS for §2 (B13) and §6 (HSEC), **§4 (RESOLVE-1) REJECTED AS
   WRITTEN** until C-1..C-7; `security` APPROVE WITH CONDITIONS. Revision 2 writes every condition into the text;
-  §11 maps each one to the section changed. **§4 needs a `ledger-finance` re-review before any RESOLVE-1 code**
-  (except the pure tightenings listed in §7.3). No code, no migration and no registry change is made by this ADR;
-  every deliverable here is `NOT IMPLEMENTED`.
+  §11 maps each one to the section changed. `ledger-finance` then ruled that rev 2 §4 satisfies C-1..C-7 in
+  substance and that 0125 may start once the revision-3 wording fixes are in (done). This ADR itself makes no code,
+  migration or registry change; apart from the §12 tightenings (implemented against MOCK by another agent), every
+  deliverable here is `NOT IMPLEMENTED`.
 - **Authority.** The owner decisions recorded verbatim in ADR 0095 §44 (decisions 1-8 B13, 9-12 RESOLVE-1, 13-18
   HSEC; 2026-10-08) are **authoritative** and are not broadened. Open sub-questions are resolved as numbered
   AMBIGUITIES (§9, safest reading); where review conditions conflicted, revision 2 took the safer reading and says so
@@ -357,13 +360,18 @@ unchanged. Allocation is never a payout route.
   - `evidence_reference` (R; reserved-prefix CHECK);
   - `evidence_verdict`;
   - `evidence_import_ids UUID[]` (every import the verdict read);
-  - `provider_reference_at_submission` (R-6 pinning, must be NULL for the unbound reasons).
+  - `provider_reference_at_submission` (R-6 pinning, DB-forced from the attempt: NULL for the three unbound reasons,
+    the bound value for `destination_mismatch` not-paid).
 - CHECKs on M4 rows: `operation = 'payout'`; `target_state IS NULL`; `provider_id`, `evidence_ref_hash`,
   `evidence_line_id`, `evidence_verdict` and `evidence_import_ids` NOT NULL; `basis_code =
   'provider_confirmed_out_of_band'`; `finding_code` and `reserved_provider_tx_id` NULL; `(kind =
   'm4_evidence_paid') = (evidence_reference IS NOT NULL)`.
 - **DB insert trigger (M-10):** `m4_evidence_paid` is refused when `terminal_reason = 'destination_mismatch'`; M4 is
   refused for any reason outside §4.1, and for an unbound reason with a non-NULL `provider_reference`.
+- **Amount and asset are DB-forced (R-4).** The M4 row's `amount` and `asset_code` are copied from the attempt by
+  the insert trigger (a client value is refused), and both the insert trigger and execution refuse unless
+  `withdrawal_requests.amount` and `asset_code` equal the attempt's. So an M4-paid can never post a completion of an
+  amount other than the one evidenced, nor one that would never clear under I-1 (§4.6).
 - The existing partial UNIQUE indexes make M2 and M4 mutually exclusive per attempt.
 - `payment_m2_admits` and `payment_attempts_guard()` are **not edited**: M4 never changes the attempt, which stays
   `disputed` (A-15).
@@ -434,9 +442,11 @@ or no `is_mock = false` import exists for the tenant and provider).
   4. Approval insert.
   5. Staff, then grants, `FOR SHARE`.
   6. Go re-verifies the import seals.
-  7. Re-evaluate. Verdict, pinned line and R must be unchanged. Attempt state, `terminal_reason` and
-     `provider_reference IS NULL` must equal the pinned values (C-6), and the withdrawal must be `submitted`.
-     Otherwise `refused_at_execution`.
+  7. Re-evaluate. Verdict, pinned line and R must be unchanged. Attempt state and `terminal_reason` must equal the
+     pinned values, and `provider_reference IS NOT DISTINCT FROM provider_reference_at_submission` (NULL for the
+     three unbound reasons; the bound value for `destination_mismatch` not-paid) (C-6, R-3). The withdrawal must be
+     `submitted`, and its `amount`/`asset_code` must equal the attempt's and the resolution's (R-4). Otherwise
+     `refused_at_execution`.
   8. `executing` → posting → `executed`; link the ledger row; audit; commit.
   - `m4_evidence_paid` posts through `withdrawal.Complete(tx, wr.ID, attempt.provider_id, R)`: a
     `withdrawal_completed` keyed `provider_id:R`, with `release_ledger_transaction_id` set. This is the attempt's own
@@ -452,7 +462,8 @@ or no `is_mock = false` import exists for the tenant and provider).
       `provider_tx_id = m.evidence_reference`, `idempotency_key = m.provider_id || ':' || m.evidence_reference`;
     - entries are exactly two: debit `player_withdrawal_hold` on `w.wallet_id` and credit `psp_clearing` with NULL
       wallet, each `amount = m.amount`, `asset = m.asset_code`;
-    - the attempt's state, `terminal_reason` and `provider_reference` (NULL) equal the pinned values.
+    - the attempt's state and `terminal_reason` equal the pinned values, and `provider_reference IS NOT DISTINCT
+      FROM provider_reference_at_submission` (R-3).
   - **`m4_evidence_not_paid`:**
     - the withdrawal is `failed` with the link;
     - the ledger row is `withdrawal_failed` with key `m.withdrawal_request_id || ':failed'`;
@@ -472,22 +483,46 @@ or no `is_mock = false` import exists for the tenant and provider).
 - **Idempotency / replay:** one pending and one executed resolution per attempt; a retried decide is refused with a
   fresh proof and posts nothing; the ledger keys are unique.
 
-### 4.6 Reconciliation (C-4; 0125 is NOT migration-free)
+### 4.6 Reconciliation (C-4; 0125 is NOT migration-free) — revision 3
 
 - 0125 widens `tenant_system_read_executed` (0115:1419) to the M4 kinds; `loadK3Evidence` also loads executed M4
   rows.
-- **New predicates (no new mismatch kind, no kind-CHECK change):**
-  - an executed `m4_evidence_paid` raises `pay_declared_paid_unconfirmed` on any later `declined` or `reversed` line
-    on R or on the merchant reference, or on a **second distinct** `succeeded` line;
-  - an executed `m4_evidence_not_paid` raises `pay_declared_not_paid_but_paid` on any later `succeeded` line on the
-    merchant reference, the bound reference or a Y.
-- **I-1 tightening:** `payoutCompletedRef` clears a line only when `line.amount = attempt.amount AND line.asset =
-  attempt.asset`.
-- **I-2:** `loadK3Evidence` keeps INV-M-5 but gets a hard per-run cap on lines read; exceeding it fails the run with
-  the existing P1 `reconciliation.sweep_run_failed` (shared with CAS-RECON-SCALE-1).
-- **Hints (L-4):** the unbound-park hint names M4. After an executed M4 not-paid, the `pay_captured_unposted` hint
-  reads "possible double payout after M4 not-paid: recovery via compensating debit (K2) or off-platform recovery;
-  never allocation".
+- **New predicates (no new mismatch kind, no kind-CHECK change; R-1):**
+  - an executed `m4_evidence_paid` raises `pay_declared_paid_unconfirmed` on **any** `declined` or `reversed` line on R
+    or on the merchant reference, or on a **second distinct** `succeeded` line, **in any import, irrespective of
+    `occurred_at` or import time** (a back-dated contradiction counts);
+  - an executed `m4_evidence_not_paid` raises `pay_declared_not_paid_but_paid` on **any** `succeeded` line on the
+    merchant reference, the bound reference or a Y, **in any import, irrespective of `occurred_at` or import time**.
+- **M4-paid completions in the ledger join (R-2).** An M4-paid completion leaves the attempt `disputed` (A-15). The
+  existing `ledger_join` check (`internal/reconciliation/payment_statement.go`, "every deposit / withdrawal_completed
+  posting in the window maps to exactly one succeeded attempt", ~1428-1465) counts only `succeeded` attempts, so
+  without a change it would raise `pay_missing_platform_record` for **every** M4-paid completion on every run.
+  **Ruling (`ledger-finance`):** a `withdrawal_completed` posting `t` counts as attributed (n = 1) **only** when an
+  executed `m4_evidence_paid` resolution has `ledger_transaction_id = t.id` **and** the same attempt's withdrawal has
+  `release_ledger_transaction_id = t.id`. Nothing else qualifies (not the reserved-namespace M2 key, not a shared
+  reference, not a pending or refused resolution). Required 0125 change: the matcher loads executed M4 rows (through
+  the widened `tenant_system_read_executed`) and adds that one case to `succeededFor`; a posting attributed both ways
+  (a succeeded attempt **and** an M4) is n = 2 and still raises. Tests: an M4-paid completion raises no
+  `pay_missing_platform_record`; one with a mismatched link (resolution points at t, withdrawal does not, or the
+  reverse) still raises; a non-executed or M2 resolution never qualifies; double attribution raises; a tenant-B M4 row
+  never attributes a tenant-A posting; mutation evidence.
+- **I-1, implemented shape (BC-1; §12).** `payoutCompletedRef` keeps positive attribution (own release keyed by the
+  reference, no other holder) and additionally requires the completion's `psp_clearing` amount and its **single**
+  asset to equal the attempt's, at **every** payout site (bound and unbound). Where the finding is keyed on an
+  evidencing line (unbound in-run, merchant cross-check B step, standing), that line's amount and asset must also equal
+  the attempt's. A completion whose `psp_clearing` amount or asset resolves to `<none>` or `<multiple>` fails closed
+  (never clears).
+- **I-2, implemented shape (BC-1; §12).** The persisted-lines read is bounded per run by **cap = 64 per lookup key ×
+  the number of distinct lookup keys, fixed from platform state (parked attempts and their references) BEFORE the
+  read**. The SQL reads at most cap + 1 rows. Overflow fails the run with `ErrPaymentEvidenceOverflow` plus the
+  existing P1 `reconciliation.sweep_run_failed` audit and run-failure alert: no run row, no mismatch row, no
+  truncation, no partial verdict. Statement content can never raise its own budget, because the key count comes only
+  from platform rows. INV-M-5 is kept. Shared with CAS-RECON-SCALE-1. **The formula awaits the `security` co-signature
+  (BC-2, §10.4).**
+- **Hints (L-4).** The unbound-park hint names M4 (implemented, §12). When M4 ships, 0125 **drops "NOT IMPLEMENTED"**
+  from that hint and states **"MOCK only"** while the §10.3 T10 flag stands. After an executed M4 not-paid, the
+  `pay_captured_unposted` hint reads "possible double payout after M4 not-paid: recovery via compensating debit (K2) or
+  off-platform recovery; never allocation" (needs executed M4 rows, so it ships with 0125).
 
 ### 4.7 API, errors
 
@@ -715,7 +750,7 @@ Every request, approval, rejection, cancellation, expiry, refusal and execution 
 | **B13-A** (entity, keys, AEAD, seals, verifier interface, player/staff routes, 0123) | **May start now**: every LF and security condition is design-complete in §2 |
 | **HSEC** Go and SQL (0124) | **May start now** (conditions H-4, M-6, M-9, M-10, L-2, L-6 incorporated) |
 | **RESOLVE-1, pure tightenings with no new power and no migration**: `payoutCompletedRef` I-1 amount/asset equality (§4.6); the `loadK3Evidence` I-2 cap with run failure; the L-4 hint text | **May start now** |
-| **RESOLVE-1, everything else** (kinds, evidence function, import seal and policy narrowing, acting SELECT, fences, MR041, §4.8 cells, 0125) | **Waits** for the `ledger-finance` re-review of §4 and the `security` co-ruling on T10/M-5 |
+| **RESOLVE-1, everything else** (kinds, evidence function, import seal and policy narrowing, acting SELECT, fences, MR041, §4.8 cells, 0125) | **May start (revision 3):** LF pre-0125 conditions applied. Merge needs BC-2 (security co-signs I-2) and the full §8 gates. Non-MOCK M4 stays blocked by T10/M-5 (§10.3) |
 | **B13-B** | waits for B13-A to merge |
 | Any non-MOCK payout or non-MOCK M4 | blocked by §10.3 flags and the existing gates (S-L1/S-L3/S-L4, ALERT-DELIVERY-1, §35.4 GATE) |
 
@@ -813,6 +848,30 @@ Every part needs mutation-kill evidence, runtime-role integration tests and migr
 | HD-R15-1 | any sandbox/real payout |
 | HD-R15-5 (LF L-7) | any non-MOCK payout |
 
+### 10.4 Conditions and follow-ups recorded by revision 3 (`ledger-finance` pre-0125 verdict)
+
+These are not human policy decisions unless stated; they are review conditions and follow-ups.
+- **BC-2 (condition before 0125 merges):** `security` co-signs the I-2 formula of §4.6 (64 per lookup key × distinct
+  keys fixed from platform state before the read; cap + 1 read; overflow fails the run). This answers §12 P-1
+  subject to that co-signature.
+- **LOW-1 / RM-4 (follow-up, real-source onboarding):** confirm each real statement source's re-delivery pattern.
+  Overlapping imports count toward the cap, so a real source that re-delivers the same lines on every fetch could
+  overflow with no attacker. Overflow refuses the **whole tenant × provider stream, deposits included**, loudly. Add an
+  operator runbook entry for `ErrPaymentEvidenceOverflow` (cause, impact, how to diagnose, who may change the cap and
+  under which review). PROVIDER DEPENDENT.
+- **P-2 / RM-3 (follow-up):** a standing persisted-line amount/asset check for **bound** payout parks that have an
+  own completion (today the line raises `pay_amount_mismatch` only in-run). Linked to RM-3 (`psp_clearing` vs PSP
+  settlement reconciliation). Owner `payments` + `ledger-finance`.
+- **0125 hint condition:** drop "NOT IMPLEMENTED" from the M4 hint when M4 ships; say "MOCK only" while T10 stands
+  (§4.6).
+- **Non-blocking note (PROVIDER DEPENDENT):** the paid verdict's rule "no `pending` line on R or the merchant
+  reference in any import" makes M4-paid **unusable** with a PSP whose statements list `pending` before `succeeded`.
+  This is safe (fail closed); revisit with the real source under an LF ruling.
+- **Non-blocking note:** the 24 h `DefaultSettlementWindow` used in not-paid condition (i) must be re-checked **per
+  rail** before any non-MOCK M4 (some rails settle or return later).
+- No new human decision arises from revision 3. The open human items remain §10.1 (HD-R15-1..9), §10.2 (D-1..D-9) and
+  the §10.3 launch flags.
+
 ## 11. Review conditions incorporated (revision 2)
 
 Where two conditions overlapped (LF C-3 vs security M-5: "narrow INSERT arms **or** seal imports"), revision 2 does
@@ -900,3 +959,23 @@ settles or posts anything; every change only narrows clearing, refuses a run, or
   per run) versus a fixed absolute per-run number: §4.6 gives no figure; a fixed 64 per run would fail ordinary runs of
   any tenant with a few parks. **P-2** whether a bound payout park should also refuse to clear while an in-run line
   naming X carries another amount (today: cleared by an equal own completion, the line raises `pay_amount_mismatch`).
+- **Revision 3 note (`architect`).** P-1 is answered by the §4.6 I-2 formula, subject to the `security` co-signature
+  (BC-2, §10.4). P-2 is recorded as a follow-up linked to RM-3 (§10.4).
+
+## 13. Revision 3 changes (`architect`, 2026-10-08; `ledger-finance` pre-0125 wording conditions)
+
+Text only. Owner decisions (ADR 0095 §44) are not broadened. §12 (another agent) is kept unchanged apart from the
+trailing note above.
+
+| Item | Change | Section |
+|---|---|---|
+| BC-1 / R-5 | implemented shapes of I-1 (completion `psp_clearing` amount + single asset at every payout site; line amount/asset where line-keyed; `<none>`/`<multiple>` fail closed) and I-2 (64 per key × keys fixed before the read; cap + 1; `ErrPaymentEvidenceOverflow` + P1; no truncation; content cannot raise its budget) | §4.6 |
+| R-1 | predicates count any contradicting line in any import, irrespective of `occurred_at` or import time | §4.6 |
+| R-2 | M4-paid completions attributed in `ledger_join` only via executed `m4_evidence_paid` with `ledger_transaction_id = t.id` and the withdrawal's `release_ledger_transaction_id = t.id`; 0125 matcher change and tests | §4.6 |
+| R-3 | step 7 and MR041 use `provider_reference IS NOT DISTINCT FROM provider_reference_at_submission` | §4.2, §4.5 |
+| R-4 | M4 amount/asset DB-forced from the attempt; insert and execution refuse unless the withdrawal's amount/asset equal the attempt's | §4.2, §4.5 |
+| BC-2 | security co-signature of the I-2 formula before 0125 merges | §10.4, §4.6 |
+| LOW-1 / RM-4 | real-source re-delivery pattern; whole-stream overflow impact; runbook entry | §10.4 |
+| P-2 / RM-3 | standing amount/asset check for bound parks with an own completion | §10.4, §12 note |
+| 0125 hint | drop "NOT IMPLEMENTED", say "MOCK only" while T10 stands | §4.6, §10.4 |
+| Notes | pending-before-succeeded PSPs make M4-paid unusable (safe); 24 h window to be re-checked per rail | §10.4 |
