@@ -1,0 +1,68 @@
+R13 H-SEC-5 / H-SEC-11 - mutation-kill evidence (LOCAL, private scratch DB, runtime role)
+Baseline 2ecfbbc; branch sec-r13-hsec5-11. 2026-10-08. Status of the feature: IMPLEMENTED against MOCK.
+
+Method. Each mutant is applied IN PLACE to one production file (original backed up first), the touched packages are
+compiled (`go vet -tags integration`; a mutant that does not compile is reported as COMPILE-ERROR and NOT counted), then
+`go test -tags integration -count=1 -p 1 -failfast -run TestHSEC <pkgs>` runs against the private DB. KILLED = at least one
+test fails. The original is restored after every mutant. Script: scratchpad r13a_mut.py (not committed).
+Control (unmutated tree): all TestHSEC* tests PASS in internal/payments and internal/httpserver (counts in the
+final report). Restore check: after the whole sweep `git status --short` is empty and `cmp backup file` is identical for
+tenant/payment_initiation_gate.go, payments/deposit_v2.go, payments/payout.go, payments/drive.go, withdrawal/withdrawal.go,
+httpserver/deposit_handlers.go, httpserver/withdrawal_handlers.go (each: identical).
+
+Round 1 (28 mutants, 0 compile errors):
+M01 KILLED   deposit: remove the phase-A gate call
+M02 KILLED   deposit: invert the gate condition (err == nil refuses)
+M03 SURVIVED deposit: fail-open on a non-sentinel (read) error at the call site            [see S1]
+M04 KILLED   deposit: gate only on the new-intent branch (replay of an existing intent not gated)
+M05 KILLED   withdrawal request: remove the gate
+M06 KILLED   withdrawal request: invert
+M07 KILLED   payout claim: remove the gate
+M08 KILLED   payout claim: invert
+M09 KILLED   payout claim: gate runs only after the KYC gate (a KYC deny / hold release could commit first)
+M10 KILLED   payout claim: wrong brand checked (tenant id passed as brand id)
+M11 KILLED   HTTP cascade-child T2 claim: gate disabled
+M12 KILLED   HTTP cascade-child T2 claim: gate applied to the sweeper-driven branch instead (condition inverted)
+M13 KILLED   helper: tenant status check removed (only brand checked)
+M14 KILLED   helper: brand check removed (only tenant checked)
+M15 KILLED   helper: brand refused only when closed (suspended brand passes)
+M16 KILLED   helper: tenant refused only when closed (suspended tenant passes)
+M17 SURVIVED helper: brand read error fails open                                           [round 2: KILLED]
+M18 KILLED   helper: missing brand row fails open
+M19 KILLED   helper: missing tenant row (sentinel from GameplayStatus) fails open
+M20 SURVIVED helper: tenant read/lock error fails open (every non-sentinel error swallowed) [round 2: KILLED]
+M21 KILLED   helper: brand read without FOR SHARE (check without the row lock)
+M22 KILLED   helper: tenant status read without the advisory lock (plain read, check-then-act)
+M23 SURVIVED helper: brand predicate no longer constrained to the tenant                   [see S2]
+M24 SURVIVED helper: nil brand id accepted                                                 [round 2: KILLED]
+M25 KILLED   deposit handler: refusal mapping removed (would be a 500)
+M26 KILLED   withdrawal-request handler: refusal mapping removed
+M27 KILLED   staff-submit handler: refusal mapping removed
+M28 KILLED   withdrawal request: gate moved after the replay lookup (replay of an existing request not gated)
+
+Round 1 survivors M17, M20, M24 were real test gaps (the "unreadable" test used an aborted transaction, whose later commit
+error masked a swallowed gate error; the nil-brand case was caught by an unrelated validation). Tests were strengthened
+(TestHSEC5_11_Helper_ReadErrorUnderLockTimeout_FailsClosed: a status change in flight holds the advisory lock / brand row
+lock and the session lock_timeout makes the gate's own read ERROR; TestHSEC5_11_Helper_FailsClosed_MissingUnreadable now
+asserts the gate's own error and the nil brand) and the survivors re-run:
+Round 2:
+M17 KILLED   (TestHSEC5_11_Helper_ReadErrorUnderLockTimeout_FailsClosed/brand)
+M20 KILLED   (TestHSEC5_11_Helper_FailsClosed_MissingUnreadable)
+M24 KILLED   (TestHSEC5_11_Helper_FailsClosed_MissingUnreadable)
+M03, M23 re-run unchanged: still SURVIVED.
+
+Honest survivors (2):
+S1 M03 (call-site fail-open on a read error in deposit phase A) - EQUIVALENT BY TRANSACTION ABORT, not killed by a test. In PostgreSQL
+   any statement error aborts the transaction, so a swallowed gate read error is followed by the intent insert failing with
+   "current transaction is aborted"; nothing is created and the request still errors (500, not 409). The helper itself is
+   pinned fail-closed by M17/M18/M19/M20. Reasoned, not test-proven at the call site.
+S2 M23 (brand SELECT without `AND tenant_id = $2`) - EQUIVALENT UNDER THE RUNTIME ROLE. `FOR SHARE` applies the brands UPDATE policy
+   (tenant-scoped), so another tenant's brand row is filtered out of a locking read even without the predicate; the explicit predicate
+   is defence in depth (and the composite FK (brand_id, tenant_id) on deposit_intents / withdrawal_requests would also refuse).
+   TestHSEC5_Deposit_BrandOfOtherTenantOrMissing_Refused passes with and without it. Not killable without a superuser/BYPASSRLS
+   connection, which this project forbids.
+
+Not mutated (and why): "check before lock" for deposit (the gate IS the first statement; nothing is locked before it) and "check
+after the insert" (equivalent: the refusing transaction rolls back whole; the replay variant M04/M28 is the observable one).
+Other-tenant isolation is asserted by TestHSEC5_Deposit_OtherTenantUnaffected, TestHSEC11_RequestWithdrawal_OtherTenantUnaffected and
+TestHSEC11_ClaimForDispatch_OtherTenantUnaffected (no mutant isolates it separately: the helper is keyed on the caller's ids).
