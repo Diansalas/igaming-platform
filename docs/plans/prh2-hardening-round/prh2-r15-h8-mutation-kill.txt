@@ -1,0 +1,25 @@
+PRH-2 R15 - H(8) brand gate (ADR 0095 section 44 decisions 19-23, section 45) - mutation evidence
+Baseline: dd6cd31 + commits on branch gov-r15-h8. All tests MOCK provider, runtime role, integration tag, private scratch DB.
+Method: each mutant edits the source IN PLACE (backup copied first), `go vet -tags integration` must compile
+(compile-error mutants are NOT counted), the suite `-run 'TestH8_|TestRequireBrandActive'` -count=1 -p 1 -v runs, the file is
+restored from the in-memory original and compared byte-for-byte (assert rd(f)==backup) and `git status` shows only the intended files.
+CONTROL (unmutated): 15 PASS / 0 SKIP / 0 FAIL in internal/payments + internal/tenant (-race).
+
+M1  remove sweeper claim-tx brand check (drive.go)              KILLED  TestH8_BrandSuspendedAfterPreRead_ClaimTxDefers_ReactivationDispatches, TestH8_ClaimWaitsAtGateForInFlightBrandSuspension_ThenDeferred
+M2  remove sweeper pre-read brand check (deferIfResolutionOnly) SURVIVED (equivalent: the pre-read is only an early skip; the claim-tx check defers the same attempt with the same observable result. Not distinguishable by outcome.)
+M3  remove phase-C brand skip (drive.go)                         KILLED  TestH8_PhaseC_CascadeChildNotCreatedForInactiveBrand
+M4  remove poll-path brand skip (sweeper.go)                     KILLED  TestH8_PollPath_CascadeChildNotCreatedForInactiveBrand
+M5a swap: claim-tx brand check reads the TENANT instead          KILLED  ...PreRead_ClaimTxDefers..., ...ClaimWaitsAtGate...
+M5b swap: pre-read brand helper reads tenants.status             SURVIVED (same equivalence as M2: claim tx still enforces the brand)
+M5c swap: creation skip writes the TENANT audit action           KILLED  PhaseC and PollPath tests (own audit action asserted, tenant action asserted 0)
+M6  brand check moved BEFORE the intent lock                      SURVIVED (lock ORDER between the intent row and the brand FOR SHARE is not observable by outcome; the check is still before the CAS, so no safety property is lost; ordering is documented in code/ADR, not test-pinned)
+M7a fail-open on non-refusal read error (claim tx)               SURVIVED (no error injection seam in the sweeper claim tx; the helper's error contract itself is pinned by TestRequireBrandActive_BrandOnly_FailClosed (cancelled ctx -> plain error, not nil, not a refusal))
+M7b fail-open on non-refusal read error (creation skip)          SURVIVED (same reason as M7a)
+M7c missing brand row treated as active (pre-read helper)       SURVIVED (a missing row cannot occur for an intent (FK) and the claim tx also fails closed; helper fail-closed cases are pinned for tenant.RequireBrandActive only)
+M8  claim BEFORE the brand check (check after ClaimCreatedForSubmission) KILLED ...PreRead_ClaimTxDefers..., ...ClaimWaitsAtGate...
+M9  RequireBrandActive accepts any status                        KILLED  5 tests (both race tests, both creation tests, TestRequireBrandActive_BrandOnly_FailClosed)
+M10 RequireBrandActive without FOR SHARE                         KILLED  TestH8_ClaimWaitsAtGateForInFlightBrandSuspension_ThenDeferred
+
+Counted: 12 mutants compiled (M1-M5c, M6-M10 incl. M7a-c = 14 listed; M7a first attempt was a compile error and was redone):
+KILLED 8 (M1, M3, M4, M5a, M5c, M8, M9, M10), SURVIVED 6 (M2, M5b, M6, M7a, M7b, M7c). Survivors are listed honestly above; none is a
+claim that the behaviour is untested where it is observable. Not tested (no seam): injected read errors at the two payments call sites.

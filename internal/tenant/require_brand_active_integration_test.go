@@ -81,4 +81,14 @@ func TestRequireBrandActive_BrandOnly_FailClosed(t *testing.T) {
 			t.Fatalf("%s: want fail-closed ErrBrandNotActive, got %v", name, err)
 		}
 	}
+
+	// A read error is returned, never read as "active" and never as a brand refusal.
+	err := rt.WithTenant(ctx, a.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		cctx, cancel := context.WithCancel(ctx)
+		cancel()
+		return RequireBrandActive(cctx, tx, a.tenantID, a.brandID)
+	})
+	if err == nil || errors.Is(err, ErrBrandNotActive) {
+		t.Fatalf("a read error must be returned as a plain error (not nil, not a refusal), got %v", err)
+	}
 }
