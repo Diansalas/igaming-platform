@@ -1,5 +1,7 @@
 # ADR 0107 — Closed-tenant player funds: the governed staff resolution path (HD-PRH2-9)
 
+- **Pointer (2026-10-08, ADR 0111 §6, PROPOSED):** the CT-PRE `release_hold_to_player_cash` cell for `approved` withdrawals is designed in ADR 0111 §6 (owner decisions 13-18, ADR 0095 §44), widened to suspended tenants and non-active brands. If ADR 0111 is accepted, `closed_tenant_hold_resolutions` and `closed_tenant_hold_resolution:*` are replaced by `withdrawal_hold_resolutions` and `withdrawal_hold_resolution:*` (security to confirm, ADR 0111 A-20), and this ADR extends those objects instead of creating parallel ones. Everything else here stays PROPOSED / DESIGN ONLY.
+
 - **Status: PROPOSED — DESIGN ONLY.** This ADR is **NOT part of the PRH-2 implementation** and
   authorizes no code. Before any code:
   - the HD-CTF-* human decisions (§12) are answered;

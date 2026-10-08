@@ -1,5 +1,7 @@
 # ADR 0101 — Payment force-resolution M1/M2 (PRH-2 K3; amends ADR 0095 §4.8)
 
+- **Pointer (2026-10-08, ADR 0111 §4, PROPOSED):** new evidence-backed kinds `m4_evidence_paid` / `m4_evidence_not_paid` on `payment_manual_resolutions` for the unbound payout reasons of R-K3-8 (and `destination_mismatch`, not-paid only) are designed in ADR 0111 (PAY-PAYOUT-UNBOUND-RESOLVE-1). The M2 allow-list and `payment_m2_admits` are unchanged. Not implemented.
+
 - **Status:** revision 2 ACCEPTED (2026-09-28): `security` CONFIRMED WITH CONDITIONS (C-3, C-4) and
   `ledger-finance` CONFIRMED WITH CONDITIONS (K3-a). **Revision 3 PROPOSED (2026-10-04, `architect`,
   K3 design phase, base `3517980`).** Revision 3 is a refresh plus a scope decision. It does not

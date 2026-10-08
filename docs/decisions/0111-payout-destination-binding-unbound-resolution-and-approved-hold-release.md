@@ -310,8 +310,8 @@ partial UNIQUE indexes (one pending / one executed per attempt, any kind) make M
 (STABLE, `search_path` pinned, no SECURITY DEFINER), over persisted `kind = 'payout'` lines of
 **eligible imports** (`is_mock = false`, or no `is_mock = false` import exists for (tenant, provider): the existing
 §35.4 rule) with `tenant_id = p_tenant AND provider_id = attempt.provider_id AND merchant_reference =
-attempt.id::text` (index `payment_statement_lines_merchant`; positive attribution: the platform issues the merchant
-reference). **Bounded (security I-2):** the query reads at most `cap + 1` rows (cap = 64, a technical default
+attempt.merchant_reference` (index `payment_statement_lines_merchant`; positive attribution: the platform issues the
+merchant reference, unique per tenant by `payment_attempts_tenant_merchant_ref`, immutable by the 0101 guard). **Bounded (security I-2):** the query reads at most `cap + 1` rows (cap = 64, a technical default
 `security` confirms); more ⇒ verdict `evidence_overflow`, refused loudly with an audit, never truncated.
 
 | Verdict | Conditions (all required) |
