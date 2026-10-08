@@ -210,18 +210,14 @@ func TestHSEC5_Deposit_BrandOfOtherTenantOrMissing_Refused(t *testing.T) {
 	orch := spy.orchestrator()
 	f, other := seedOrchFixture(t, pool), seedOrchFixture(t, pool)
 	registerCapability(t, pool, f, spy, 100)
-	for name, brand := range map[string]uuid.UUID{"other_tenants_brand": other.brandID, "missing_brand": uuid.New(), "nil_brand": uuid.Nil} {
+	for name, brand := range map[string]uuid.UUID{"other_tenants_brand": other.brandID, "missing_brand": uuid.New()} {
 		t.Run(name, func(t *testing.T) {
 			g := f
 			g.brandID = brand
 			before := countsFor(t, pool, f.tenantID)
 			_, err := initDeposit(orch, pool, g, "xb-"+name)
-			if brand == uuid.Nil {
-				if err == nil {
-					t.Fatal("nil brand must fail")
-				}
-			} else if !errors.Is(err, tenant.ErrNotActiveForPaymentInitiation) {
-				t.Fatalf("want refusal, got %v", err)
+			if !errors.Is(err, tenant.ErrNotActiveForPaymentInitiation) {
+				t.Fatalf("want the gate's refusal (not a downstream FK error), got %v", err)
 			}
 			if d, _, _ := spy.counts(); d != 0 {
 				t.Fatalf("no provider call, got %d", d)
@@ -600,16 +596,21 @@ func TestHSEC5_11_Helper_FailsClosed_MissingUnreadable(t *testing.T) {
 	if err := check(uuid.New(), uuid.New()); !errors.Is(err, tenant.ErrNotActiveForPaymentInitiation) {
 		t.Fatalf("missing tenant row must refuse: %v", err)
 	}
+	if err := check(f.tenantID, uuid.Nil); !errors.Is(err, tenant.ErrNotActiveForPaymentInitiation) {
+		t.Fatalf("nil brand must refuse: %v", err)
+	}
 	if err := check(uuid.Nil, f.brandID); !errors.Is(err, tenant.ErrNotActiveForPaymentInitiation) {
 		t.Fatalf("nil tenant must refuse: %v", err)
 	}
 	// Unreadable: the transaction is already aborted when the gate runs; the read
 	// errors and the gate must return that error (never nil = never "active").
-	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+	var gateErr error
+	_ = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		_, _ = tx.Exec(ctx, `SELECT 1/0`)
-		return tenant.RequireActiveForPaymentInitiation(ctx, tx, f.tenantID, f.brandID)
+		gateErr = tenant.RequireActiveForPaymentInitiation(ctx, tx, f.tenantID, f.brandID)
+		return gateErr
 	})
-	if err == nil {
+	if gateErr == nil {
 		t.Fatal("an unreadable status must refuse (non-nil), got nil")
 	}
 	// A vocabulary value other than 'active' can only be a closed enum member
@@ -666,6 +667,34 @@ func TestHSEC11_RequestWithdrawal_ReplayOfExistingRequestWhileNonActive_Refused(
 			}
 			if c := countsFor(t, pool, f.tenantID); c.requests != 1 {
 				t.Fatalf("requests=%d", c.requests)
+			}
+		})
+	}
+}
+
+// A read that FAILS (not "no row"): the status change in flight holds the lock the gate needs and the
+// session's lock_timeout expires. Tenant half = the advisory-lock wait, brand half = the FOR SHARE wait. The
+// gate must return a non-nil error (never "active"), and nothing is created.
+func TestHSEC5_11_Helper_ReadErrorUnderLockTimeout_FailsClosed(t *testing.T) {
+	for _, kind := range []string{"tenant", "brand"} {
+		t.Run(kind, func(t *testing.T) {
+			pool := depositV2ScratchPool(t)
+			f := seedOrchFixture(t, pool)
+			release := holdStatusChange(t, pool, f, kind)
+			var gateErr error
+			_ = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+				if _, err := tx.Exec(ctx, `SET LOCAL lock_timeout = '300ms'`); err != nil {
+					t.Fatalf("set lock_timeout: %v", err)
+				}
+				gateErr = tenant.RequireActiveForPaymentInitiation(ctx, tx, f.tenantID, f.brandID)
+				return gateErr
+			})
+			release()
+			if gateErr == nil {
+				t.Fatal("a status read that errors must fail closed (non-nil error), got nil")
+			}
+			if errors.Is(gateErr, tenant.ErrNotActiveForPaymentInitiation) {
+				t.Fatalf("test premise: this must be a READ error, not a status refusal: %v", gateErr)
 			}
 		})
 	}
