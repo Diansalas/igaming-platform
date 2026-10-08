@@ -53,3 +53,17 @@ Survivors (honest):
      lock (a test hook). No hook was added (the generalised F-L3 static guard governs hooks); the branch is UNTESTED.
  M21, M22 Subsumed by the guard (M21) and by anomalyClosed() (M22), which refuse the same inputs; equivalent.
 Compile-error mutants (not counted): M3, M5, M16 in round 1 (unused variable); each was redone as M3b, M5b, M16b.
+
+ROUND 3 (LF C1/C2/C3 and security L-1 follow-up; same method; CONTROL_GO PASS=28 FAIL=0 SKIP=0, CONTROL_MIG PASS=8 FAIL=0 SKIP=0)
+Corrections: the round 1/2 claims that M1 and M22 were "equivalent" are WITHDRAWN. M1 changes the refusal label for a merchant-only match
+naming another provider's attempt (contradictory vs insufficient); M22 changes the audit `detail` (receipt_unresolved vs receipt_not_anomaly_closed).
+ M1  candidate provider/tenant binding check removed                   -> KILLED  TestRR_MerchantOnlyMatch_OtherProviderAttempt_Contradictory
+ M22 unresolved-receipt branch removed                                 -> KILLED  TestRR_NotEligible_DetailNamesTheReason (asserts detail)
+ C1  Go submission-predate check removed                               -> KILLED  TestRR_RealS7Sequence_* (the PENDING variant isolates it; the guard would then error)
+ C2a replay even for a parked/forced (terminal_reason, operator) attempt -> KILLED  TestRR_M2ForcedAttempt_NoReplay_UnknowableRecorded
+ C2b replay stamps "<state>_inferred" instead of "unknown"             -> KILLED  TestRR_HappyPath_*, TestRR_DepositT13_ReplayStampsStateUnknown
+ G10 guard: first_submitted_at / received_at condition removed         -> KILLED  TestRR_RealS7Sequence_* (direct UPDATE must be refused)
+ G11 guard: search_path pin removed                                    -> KILLED  TestRR_Migration0122UpDownUp_* (proconfig assertion)
+Still SURVIVING (unchanged, honest): M6, M8 (explicit lock reads masked by the UPDATE's row lock and the FK key-share lock), M19 and G2
+(tenant scoping triple-enforced with RLS), M21 (subsumed by the guard). M16b: UNTESTED, no test hook added (needs a testHook* seam under the
+F-L3 static guard; the branch only returns ErrReceiptRepairConcurrentChange with nothing written).

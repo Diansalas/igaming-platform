@@ -899,16 +899,24 @@ func TestRR_Locks_ParentAttemptAndReceiptAreTaken(t *testing.T) {
 // attribution. After C1 no reachable shape of Option A remains repairable: the positive tests above plant receipts.
 func TestRR_RealS7Sequence_UnroutedChild_CrossProviderThenRouted_RefusedByC1(t *testing.T) {
 	pool := depositV2ScratchPool(t)
-	const pid = "mock-rr-s7"
+	for _, oc := range []Outcome{OutcomeSucceeded, OutcomePending} {
+		t.Run(string(oc), func(t *testing.T) { rrS7(t, pool, oc) })
+	}
+}
+
+// rrS7 runs the S7 sequence for one outcome. A PENDING receipt is consistent with any bound attempt, so only the
+// submission-predate check (C1) refuses it.
+func rrS7(t *testing.T, pool *db.Pool, oc Outcome) {
+	pid := "mock-rr-s7-" + string(oc)
 	f := seedOrchFixture(t, pool)
 	mp := NewMockProvider(pid, "EUR")
 	registerCapability(t, pool, f, mp, 100)
 	orch := NewOrchestrator(map[string]PaymentProvider{pid: mp}, MultiWebhookCredentialResolver{pid: NewMockWebhookCredentials(mp)})
 	attemptID := insertRawCreatedAttempt(t, pool, f.tenantID, insertRawDepositIntent(t, pool, f, "pending"), false, time.Now())
 	a := mustGetAttempt(t, pool, f.tenantID, attemptID)
-	const ref = "rr-s7-ref"
+	ref := "rr-s7-ref-" + string(oc)
 	ev := ReceiptEvidence{EventType: "deposit", ProviderReference: ref, MerchantReference: a.MerchantReference,
-		Outcome: OutcomeSucceeded, Amount: a.Amount, AssetCode: "EUR"}
+		Outcome: oc, Amount: a.Amount, AssetCode: "EUR"}
 	if disp, err := rvApplyReceipt(pool, orch, f.tenantID, pid, ev); err != nil || disp != DispositionAnomaly {
 		t.Fatalf("setup: unrouted merchant-reference match: disp=%s err=%v, want anomaly", disp, err)
 	}
