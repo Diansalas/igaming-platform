@@ -715,3 +715,25 @@ func TestHSEC5_11_Helper_ReadErrorUnderLockTimeout_FailsClosed(t *testing.T) {
 		})
 	}
 }
+
+// The gate precedes the KYC gate on a NEW request: with a revoked verification AND a non-active tenant, the
+// answer is the gate's refusal and no KYC decision row is committed.
+func TestHSEC11_RequestWithdrawal_NewRequestNonActive_GateBeforeKYCDecision(t *testing.T) {
+	pool := depositV2ScratchPool(t)
+	f := seedPayoutFixture(t, pool, 10_000, true)
+	revokeVerification(t, pool, f)
+	setTenantStatus(t, pool, f.tenantID, "suspended")
+	_, err := requestWithdrawalTx(pool, f, "kyc-order", 500)
+	if !errors.Is(err, tenant.ErrNotActiveForPaymentInitiation) {
+		t.Fatalf("want the gate's refusal before any KYC decision, got %v", err)
+	}
+	var n int
+	if e := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT count(*) FROM kyc_enforcement_decisions WHERE tenant_id = $1 AND operation = 'withdrawal_hold'`, f.tenantID).Scan(&n)
+	}); e != nil {
+		t.Fatal(e)
+	}
+	if n != 0 {
+		t.Fatalf("no KYC decision row may be committed by a refused request, got %d", n)
+	}
+}
