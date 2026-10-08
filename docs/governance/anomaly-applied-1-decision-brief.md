@@ -110,3 +110,168 @@ Not decided: I-1 predates-submission on the live path (security policy), S-4 ben
 anomaly closes, and every gate listed in `HANDOVER.md` (B13, H-SEC-5/11, ALERT-DELIVERY-1, PAY-DEPOSIT-MISMATCH-ALERT-1,
 B14-B18, sandbox PSP, AWS). Meanwhile the current behaviour stays as merged (`7564653`, `bd3c144`) against MOCK; no
 real provider may be connected on this path until the ruling exists (ADR §42.8).
+
+## Supplement (2026-10-08)
+
+Added by `ledger-finance` at baseline `86a5439` (branch `gate-r14-b`). Document only: no code, test, migration or
+registry change. The sections above are unchanged. Their `receipt.go` line numbers were re-checked at `86a5439` and still
+match. This supplement adds the evidence the ruling in section 8 needs and the brief above did not contain. Where the
+record or the code does not establish something, it says so.
+
+### S1. Completeness check of the brief against the (A)/(B) choice
+
+The brief above is enough to understand the race. It does **not** contain five facts that bear directly on the choice:
+
+1. The database guard on receipts (S3). It decides which parts of option (A), as worded in section 8, are possible
+   without a migration.
+2. Which audit rows are actually lost, by attempt state (S2).
+3. Whether reconciliation or any other reader consumes `attempt_id` or `resolution` (S6).
+4. A second, non-race path to the same receipt shape, found by code reading (S7).
+5. The ownership basis (S9).
+
+### S2. Why there is no financial effect (cited)
+
+- `alreadyApplied` gates only three audit inserts: `auditTerminalAmountAssetMismatch` at `receipt.go:868-872` (succeeded
+  cell, R-6) and `:914-918` (declined cell, R-5), and `auditPayoutSucceededForeignRef` at `:896-900` (M-1). It also gates
+  the main-path `ResolveReceipt` at `:739-743`. Every state transition, posting, hold or withdrawal call and raise in
+  `applyResolvedReceiptEvidence` (`:808-1133`) runs whatever its value. The raises at `:877`, `:901` and `:923` are
+  unconditional, and the function comment at `:798-800` says so.
+- The only cells it gates are the **no-state-change** terminal cells: the attempt is `succeeded` or `declined` and the
+  evidence is a mismatched or foreign-reference success. In those cells nothing posts and nothing transitions
+  (ADR 0095 §42.8 R-5/R-6/M-1: "No state change, no release, no settlement, no posting").
+- **Consequence by attempt state.**
+  - If X is **non-terminal** when B applies E, B's cell runs completely, including any audit row the cell writes itself.
+    For example, the payout reference-conflict park audits `payments.payout_parked_reference_conflict` and raises,
+    regardless of `alreadyApplied`. The only defect left is R's `attempt_id` and `resolution`.
+  - If X is **terminal** (`succeeded`/`declined`) and E is mismatched or carries a foreign reference, the one audit row
+    of that cell is lost. For a payout the P1 alert is still raised. **For a deposit there is no alert** at those cells
+    (PAY-DEPOSIT-MISMATCH-ALERT-1 is not built, §42.8), so the race leaves the receipt row as the deposit's only trace.
+- Existing tests that already assert "no money, no state" for the anomaly-close branches:
+  `TestOrphanResolve_AnomalyBranches_OrphanClosedOnRedelivery_NoMoneyNoState`
+  (`receipt_orphan_resolve_integration_test.go:194`) and `TestOrphanResolve_AlreadyResolvedDuplicate_Untouched` (`:236`).
+  **No test pins the race itself.** The r11 evidence (`prh2-r11-receipt-orphan-mutation-kill.txt:55`) says: "NOT built,
+  hence no mutant".
+- What B's own transition does when Y has just bound `refP`:
+  - **Payout success:** `applyPayoutSuccess` runs `payoutGuardReferenceBinding` before `ApplySuccess`/`Complete`
+    (`payout.go:748-750`). X is therefore parked (`provider_reference_conflict`, hold kept), not completed.
+  - **Payout pending and decline:** both branches also guard (`receipt.go:817-820`; `applyPayoutDecline`, `payout.go`
+    ~778).
+  - **Deposit success:** `postDepositSuccessOrDispute` (`orchestrator.go:815-846`) contains no foreign-reference
+    pre-check that I could find on the receipt path. Whether B then fails on a unique index and rolls back entirely, or
+    takes another path, is **not established** here. This is the ordinary reference-binding race, which the brief
+    already places outside this residual.
+
+### S3. What can and cannot be repaired (database guard)
+
+`payment_provider_events_guard` (`migrations/0101_payment_attempts.up.sql:399-436`) is the only definition of the
+function. No later migration replaces it. It makes every column immutable except three:
+
+- `attempt_id`: a change is refused **only when `OLD.attempt_id IS NOT NULL`**. A NULL → value write is therefore
+  allowed once, **even after `resolved_at` is set**. Re-attributing R's `attempt_id` to X is possible under the current
+  schema.
+- `resolution`: one-shot (`OLD.resolution IS NOT NULL AND NEW.resolution IS DISTINCT FROM OLD.resolution` raises).
+  Changing R from `anomaly_reference_conflict` to the label B would have written **cannot be done without a migration
+  that changes this guard**. The CHECK values are `applied`, `anomaly_cross_provider`, `anomaly_reference_conflict`,
+  `anomaly_predates_submission` and `anomaly_other`.
+- `resolved_at`: one-shot. A re-attribution would not need to change it.
+- `disposition_at_receipt` and the evidence columns (`provider_reference`, `merchant_reference`, `outcome`, `amount`,
+  `asset_code`, `settlement_reference`, …) are immutable. **The evidence itself is never lost.**
+
+What a correct label would be is also not obvious. For a payout success that B parks (S2), B's cell returns
+`ResolutionApplied` (`receipt.go:1048-1051`, because `applyPayoutSuccess` returns nil after a park). A non-terminal "re-label"
+would therefore be `applied`. For the terminal cells it would be `anomaly_other`. Which label the ruling wants is
+**not established by the record**.
+
+Missing audit rows: `audit_log` is append-only by trigger (`migrations/0014_create_audit_log.up.sql:43-53`), so a row
+can only be added later, never back-dated. Its content can be largely rebuilt from the receipt's immutable columns plus
+the attempt's immutable `amount`/`asset_code` (`payment_attempts_guard`, latest definition
+`migrations/0115_payment_force_resolution.up.sql:1030-1065`). One field cannot always be rebuilt: the
+`attempt_state` at the time of the event. A `succeeded` attempt stays `succeeded`, but a `declined` payout may since have
+moved to `disputed` by T14.
+
+The original applied cell's **effect** is not lost and needs no recovery: its state, ledger and alert writes committed in
+B's transaction. Only the audit row and the receipt attribution are missing.
+
+### S4. Could any repair alter money state?
+
+Not by the code paths cited. A re-attribution would be an UPDATE of `payment_provider_events.attempt_id` (and of
+`resolution` only if S3's migration were made). A missing-row repair would be an `audit_log` INSERT. Neither table is a
+ledger, attempt, withdrawal or projection table. Money could move only if a repair **re-ran** `applyResolvedReceiptEvidence`
+or the drain, and neither option in section 8 says that. Under MOCK, no real-provider rows exist that would need
+repair.
+
+### S5. Idempotency, audit and concurrency facts relevant to either option
+
+- **Lock order** (ADR 0095 §14; §42.8 L-1): parent, then attempt, then receipt rows. In step 5 of the race, B already
+  holds the parent and attempt locks, and the receipt row lock taken by `receiptIsResolved`'s `FOR UPDATE`
+  (`receipt.go:373-379`). An UPDATE of R inside B's transaction would therefore take no new lock.
+- **Tolerant close** (`receipt.go:398-408`): it takes only its own receipt row lock and no parent or attempt lock
+  (LF I-2 exception). The residual exists only when A **commits before** B's `FOR UPDATE` read:
+  - If B reads first, A waits on the row lock. After B's strict `ResolveReceipt` commits, A's `resolved_at IS NULL`
+    predicate matches nothing.
+  - If A has not committed when B reads, B waits and then sees it resolved.
+- **The strict `ResolveReceipt`** (`attempt.go:868-872`, `WHERE resolved_at IS NULL`) cannot be reused for a
+  re-attribution, because it would conflict (r11 M3). Any new compare-and-set would need a predicate that tells an
+  anomaly close (`attempt_id IS NULL`, `resolution LIKE 'anomaly_%'`) apart from a genuinely applied receipt.
+  `TestOrphanResolve_AlreadyResolvedDuplicate_Untouched` pins that an applied receipt is never rewritten. The guard
+  already makes `attempt_id` one-shot, so concurrent redeliveries would write it at most once.
+- **The drain** selects `FOR UPDATE` and closes with the strict CAS (§42.8). It applies only unresolved rows, so R is
+  invisible to it either way.
+- **Existing audit rule:** once per NEW receipt, never per redelivery (the L-e precedent; PAY-PAYOUT-CALLBACK-AUDIT-2).
+  Whether a re-attribution writes its own audit row is the open sub-question already in section 8.
+- **Security I-2:** an orphan close writes no audit row, and the receipt is "reconstructable from
+  `disposition_at_receipt` plus its `resolution`" (§42.8). Under the race that reconstruction is wrong for R. That is
+  security's claim, and it is affected by option (B).
+
+### S6. Facts the brief could not establish, now checked in code
+
+- **Does reconciliation read the receipt's `attempt_id` or `resolution`? No.** The only receipt query in
+  `internal/reconciliation` is `checkDeferredReceipts` (`payment_statement.go:1497-1525`). It reads
+  `id, event_type, provider_reference, outcome, received_at` with `resolved_at IS NULL AND disposition_at_receipt =
+  'deferred_unresolved'`. R is resolved in both orderings, so it is never a `pay_unresolved` finding either way.
+- **Any other reader?** No non-test Go code outside `internal/payments` references `payment_provider_events`. No
+  migration defines a view or function over it (0106 changes only the RLS policy; 0115 only adds prefix CHECKs). Inside
+  `internal/payments` the readers are:
+  - `CountUnappliedReceipts` (`receipt.go:259-275`), `receiptIsResolved` and the drain, which use `resolved_at`;
+  - the dedup lookup (`:358`, by fingerprint).
+
+  None reads `resolution` or `attempt_id`. **The mislabel affects audit and human reconstruction only.**
+- **Is B's transition correct when Y has just bound `refP`?** Established for payouts (S2: parked, hold kept). Not
+  established for the deposit receipt path.
+
+### S7. A second path to the same shape (code reading; not in the record; not tested)
+
+`ResolveAttemptForEvidence` treats a merchant-reference match on an attempt whose `provider_id` is NULL as
+`anomaly_cross_provider` (`receipt.go:458-465`). Every other anomaly input is fixed once set: provider id, provider
+reference and operation are immutable. A cascade row (`created`, `provider_id` NULL) gets `provider_id` at T2, though.
+A redelivery after that T2 would:
+
+- resolve by merchant reference;
+- dedup onto the anomaly-closed receipt (`duplicate=true`, `receiptIsResolved=true`);
+- apply E with `alreadyApplied=true`, including any posting, which is not gated.
+
+The result is the same shape (`anomaly_cross_provider`, `attempt_id` NULL, evidence applied) with no concurrency
+involved. Whether an honest provider can reach it is doubtful: the merchant reference is the id of an attempt never
+sent to that provider (INV-IO-3). This is **not established by the record** and contradicts the ADR's "arises only
+when …" wording only if it is reachable. Any (A) predicate would need to decide whether it covers this path.
+
+### S8. Recommendation
+
+**No recommendation is documented.** No ADR, review or registry text prefers (A) or (B), and this supplement makes no
+choice. ADR 0095 §42.8 records the item as "NOT built, ruled out of scope", with a ruling "required before any real
+provider".
+
+### S9. Why the choice sits with ledger-finance (cited)
+
+- CLAUDE.md "Specialist agents": "`ledger-finance` specialist owns financial invariants". CLAUDE.md "Security": every
+  mutating financial action writes an append-only audit record.
+- ADR 0095 §42.8 names the residual's owners as "`payments` + `ledger-finance`" and makes a ruling on re-attribution
+  semantics a precondition for any real provider.
+- `docs/governance/human-decision-register.md` row PAY-RECEIPT-ANOMALY-APPLIED-1 names `ledger-finance` as the decider
+  ("AWAITING LEDGER-FINANCE DECISION").
+- Not established by the record:
+  - whether `security` must co-sign. Its I-2 reconstruction claim is affected (S5).
+  - whether option (A)'s `resolution` change (S3) counts as "mutating a historical entry" under the ledger-finance
+    veto. The receipt table is append-only except three one-shot columns, and it is not the ledger. If (A) includes a
+    `resolution` change, a migration altering `payment_provider_events_guard` is a schema change and needs the usual
+    architect, ADR and review path.
