@@ -150,6 +150,23 @@ func TestStateMachine_TransitionsAndTerminalStates(t *testing.T) {
 	_, gerr := w.gate(w.load(inst.ID), p, "EUR", nil)
 	requireGateReason(t, gerr, ReasonSealInvalid, true)
 
+	// A same-transaction verification whose outcome is REJECTED cannot lift a suspension.
+	requireCode(t, w.try(func(ctx context.Context, tx pgx.Tx) error {
+		vid := uuid.New()
+		if _, err := tx.Exec(ctx, `INSERT INTO payout_instrument_verifications (id, tenant_id, instrument_id, source, ownership_assertion, verifier_provider_id, outcome, verified_at, expires_at, verification_seal, seal_kid, created_txid)
+			VALUES ($1,$2,$3,'synthetic','synthetic_asserted','forged','rejected',now(), now() + interval '1 day', repeat('b',64),'m1',0)`, vid, w.tenantID, inst.ID); err != nil {
+			return err
+		}
+		_, err := tx.Exec(ctx, `UPDATE payout_instruments SET state='verified', current_verification_id=$2 WHERE id=$1`, inst.ID, vid)
+		return err
+	}), "PI014", "a rejected same-tx verification must not lift a suspension")
+	// A same-transaction verification of ANOTHER instrument cannot either.
+	other := w.verified(p, "BE68539007547034")
+	requireCode(t, w.try(func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `UPDATE payout_instruments SET state='verified', current_verification_id=$2 WHERE id=$1`, inst.ID, *other.CurrentVerificationID)
+		return err
+	}), "PI014", "pointing at another instrument's verification")
+
 	// --- terminal states are terminal in every session ---
 	rev := w.verified(p, "FR1420041010050500013M02606")
 	if err := w.block(rev, EventRevoke, Actor{Type: ActorPlayer, ID: p.ID.String()}, p); err != nil {
