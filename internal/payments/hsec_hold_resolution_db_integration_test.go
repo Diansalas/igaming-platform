@@ -472,8 +472,10 @@ func TestHSEC_HoldRelease_CTR3_KeyCorrelationShapeLinkForgeries(t *testing.T) {
 			err := run(func(ctx context.Context, tx pgx.Tx) error {
 				return hsrPost(ctx, tx, h, wr, ledger.TxWithdrawalRejected, key, wr.ID, 400, 400)
 			})
-			if !hsrIs(err, "HR020", "CG030") {
-				t.Fatalf("want HR020 (or CG030 for an acting session), got %v", err)
+			// An acting session without an executing resolution is refused earlier still: by the
+			// acting ledger_accounts WITH CHECK (42501) or the acting ledger fence (CG030).
+			if !hsrIs(err, "HR020", "CG030", "42501") {
+				t.Fatalf("want HR020 (or CG030/42501 for an acting session), got %v", err)
 			}
 		})
 	}
@@ -686,10 +688,12 @@ func TestHSEC_HoldRelease_KillSwitchUntouched(t *testing.T) {
 	h := newHSR(t, 1)
 	released := h.hold(300)
 	kept := h.hold(301)
-	h.tx(func(ctx context.Context, tx pgx.Tx) error {
+	if err := h.pool.WithPrincipalScope(context.Background(), h.f.tenantID, h.tenantAdmin.ID, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := EngageKillSwitch(ctx, tx, h.f.tenantID, "*", KillSwitchOperationAny, "hsec-incident")
 		return err
-	})
+	}); err != nil {
+		t.Fatalf("engage the kill switch: %v", err)
+	}
 	h.suspendTenant()
 	r := h.mustRequest(h.reqA, released.ID)
 	if out := h.mustDecide(h.apprB, r, ResolutionApprove); !out.Executed {
