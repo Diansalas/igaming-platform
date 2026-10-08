@@ -684,27 +684,88 @@ CREATE CONSTRAINT TRIGGER payment_attempts_require_destination_snapshot
 -- 9. RLS (ENABLE + FORCE; no FOR ALL; no SECURITY DEFINER)
 -- =========================================================================
 
-DO $$
-DECLARE
-    t TEXT;
-    tenant_pred CONSTANT TEXT :=
-        $p$ tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid
-            AND NULLIF(current_setting('app.player_account_id', true), '') IS NULL
-            AND NULLIF(current_setting('app.platform_admin_principal_id', true), '') IS NULL
-            AND NULLIF(current_setting('app.platform_service_id', true), '') IS NULL
-            AND NOT financial_acting_gucs_present() $p$;
-BEGIN
-    FOREACH t IN ARRAY ARRAY['payout_instruments', 'payout_instrument_verifications',
-                             'payout_instrument_blocking_events', 'payout_instrument_fingerprint_owners',
-                             'payout_attempt_destination_snapshots']
-    LOOP
-        EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY', t);
-        EXECUTE format('ALTER TABLE %I FORCE ROW LEVEL SECURITY', t);
-        EXECUTE format('CREATE POLICY tenant_scope_select ON %I FOR SELECT USING (%s)', t, tenant_pred);
-        EXECUTE format('CREATE POLICY tenant_scope_insert ON %I FOR INSERT WITH CHECK (%s)', t, tenant_pred);
-    END LOOP;
-    EXECUTE format('CREATE POLICY tenant_scope_update ON payout_instruments FOR UPDATE USING (%s) WITH CHECK (%s)', tenant_pred, tenant_pred);
-END $$;
+-- Tenant family (statically written: no dynamically generated policy, ADR 0099 6.2 / the A-18 scan).
+ALTER TABLE payout_instruments ENABLE ROW LEVEL SECURITY;
+ALTER TABLE payout_instruments FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_scope_select ON payout_instruments FOR SELECT
+    USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid
+           AND NULLIF(current_setting('app.player_account_id', true), '') IS NULL
+           AND NULLIF(current_setting('app.platform_admin_principal_id', true), '') IS NULL
+           AND NULLIF(current_setting('app.platform_service_id', true), '') IS NULL
+           AND NOT financial_acting_gucs_present());
+CREATE POLICY tenant_scope_insert ON payout_instruments FOR INSERT
+    WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid
+           AND NULLIF(current_setting('app.player_account_id', true), '') IS NULL
+           AND NULLIF(current_setting('app.platform_admin_principal_id', true), '') IS NULL
+           AND NULLIF(current_setting('app.platform_service_id', true), '') IS NULL
+           AND NOT financial_acting_gucs_present());
+ALTER TABLE payout_instrument_verifications ENABLE ROW LEVEL SECURITY;
+ALTER TABLE payout_instrument_verifications FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_scope_select ON payout_instrument_verifications FOR SELECT
+    USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid
+           AND NULLIF(current_setting('app.player_account_id', true), '') IS NULL
+           AND NULLIF(current_setting('app.platform_admin_principal_id', true), '') IS NULL
+           AND NULLIF(current_setting('app.platform_service_id', true), '') IS NULL
+           AND NOT financial_acting_gucs_present());
+CREATE POLICY tenant_scope_insert ON payout_instrument_verifications FOR INSERT
+    WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid
+           AND NULLIF(current_setting('app.player_account_id', true), '') IS NULL
+           AND NULLIF(current_setting('app.platform_admin_principal_id', true), '') IS NULL
+           AND NULLIF(current_setting('app.platform_service_id', true), '') IS NULL
+           AND NOT financial_acting_gucs_present());
+ALTER TABLE payout_instrument_blocking_events ENABLE ROW LEVEL SECURITY;
+ALTER TABLE payout_instrument_blocking_events FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_scope_select ON payout_instrument_blocking_events FOR SELECT
+    USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid
+           AND NULLIF(current_setting('app.player_account_id', true), '') IS NULL
+           AND NULLIF(current_setting('app.platform_admin_principal_id', true), '') IS NULL
+           AND NULLIF(current_setting('app.platform_service_id', true), '') IS NULL
+           AND NOT financial_acting_gucs_present());
+CREATE POLICY tenant_scope_insert ON payout_instrument_blocking_events FOR INSERT
+    WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid
+           AND NULLIF(current_setting('app.player_account_id', true), '') IS NULL
+           AND NULLIF(current_setting('app.platform_admin_principal_id', true), '') IS NULL
+           AND NULLIF(current_setting('app.platform_service_id', true), '') IS NULL
+           AND NOT financial_acting_gucs_present());
+ALTER TABLE payout_instrument_fingerprint_owners ENABLE ROW LEVEL SECURITY;
+ALTER TABLE payout_instrument_fingerprint_owners FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_scope_select ON payout_instrument_fingerprint_owners FOR SELECT
+    USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid
+           AND NULLIF(current_setting('app.player_account_id', true), '') IS NULL
+           AND NULLIF(current_setting('app.platform_admin_principal_id', true), '') IS NULL
+           AND NULLIF(current_setting('app.platform_service_id', true), '') IS NULL
+           AND NOT financial_acting_gucs_present());
+CREATE POLICY tenant_scope_insert ON payout_instrument_fingerprint_owners FOR INSERT
+    WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid
+           AND NULLIF(current_setting('app.player_account_id', true), '') IS NULL
+           AND NULLIF(current_setting('app.platform_admin_principal_id', true), '') IS NULL
+           AND NULLIF(current_setting('app.platform_service_id', true), '') IS NULL
+           AND NOT financial_acting_gucs_present());
+ALTER TABLE payout_attempt_destination_snapshots ENABLE ROW LEVEL SECURITY;
+ALTER TABLE payout_attempt_destination_snapshots FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_scope_select ON payout_attempt_destination_snapshots FOR SELECT
+    USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid
+           AND NULLIF(current_setting('app.player_account_id', true), '') IS NULL
+           AND NULLIF(current_setting('app.platform_admin_principal_id', true), '') IS NULL
+           AND NULLIF(current_setting('app.platform_service_id', true), '') IS NULL
+           AND NOT financial_acting_gucs_present());
+CREATE POLICY tenant_scope_insert ON payout_attempt_destination_snapshots FOR INSERT
+    WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid
+           AND NULLIF(current_setting('app.player_account_id', true), '') IS NULL
+           AND NULLIF(current_setting('app.platform_admin_principal_id', true), '') IS NULL
+           AND NULLIF(current_setting('app.platform_service_id', true), '') IS NULL
+           AND NOT financial_acting_gucs_present());
+CREATE POLICY tenant_scope_update ON payout_instruments FOR UPDATE
+    USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid
+           AND NULLIF(current_setting('app.player_account_id', true), '') IS NULL
+           AND NULLIF(current_setting('app.platform_admin_principal_id', true), '') IS NULL
+           AND NULLIF(current_setting('app.platform_service_id', true), '') IS NULL
+           AND NOT financial_acting_gucs_present())
+    WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid
+           AND NULLIF(current_setting('app.player_account_id', true), '') IS NULL
+           AND NULLIF(current_setting('app.platform_admin_principal_id', true), '') IS NULL
+           AND NULLIF(current_setting('app.platform_service_id', true), '') IS NULL
+           AND NOT financial_acting_gucs_present());
 
 -- Player family: SELECT own instruments only.
 CREATE POLICY player_self_select ON payout_instruments FOR SELECT
