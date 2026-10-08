@@ -1,0 +1,235 @@
+PRH-2 round 14 (r14-a) - brands UPDATE grant pin for the H-SEC-5/11 gate
+=======================================================================
+Scope: ADR 0095 section 43.2 follow-up (b). TESTS ONLY - no production code,
+no migration, no deploy/init-app-role.sql change.
+Branch gate-r14-a, baseline 86a5439. Test file:
+  internal/tenant/brands_grant_pin_integration_test.go (build tag integration)
+Environment: private scratch database priv_r14a_brandspin (built by the
+scratchpad priv_db.sh from this worktree's migrations; dropped at the end).
+TEST_DATABASE_URL=owner igaming, TEST_RUNTIME_DATABASE_URL=igaming_runtime
+(asserted current_user=igaming_runtime, rolsuper=f, rolbypassrls=f), both on
+priv_r14a_brandspin; TEST_ADMIN_DATABASE_URL (igaming_test_admin, CREATEDB
+only) used by scratchdb.New for CREATE/DROP DATABASE of the per-test throwaway
+DB in test (3). No role, password, role attribute or shared-DB grant was
+touched. Every GRANT/REVOKE/ALTER POLICY below ran as the table owner on
+priv_r14a_brandspin or on a scratchdb throwaway database only, and was
+reverted (verified) before the next step.
+
+Intended runtime grant set (established from the repository):
+- docs/security/runtime-role-separation.md section 3: "SELECT, INSERT,
+  UPDATE, DELETE on every application table ... Nothing else"; "Explicitly do
+  not grant ... TRUNCATE on any table; REFERENCES, TRIGGER on any table".
+- deploy/init-app-role.sql:99-105: GRANT / ALTER DEFAULT PRIVILEGES ...
+  SELECT, INSERT, UPDATE, DELETE ON TABLES TO igaming_runtime. No narrowing
+  block for brands there; no migration grants/revokes on brands.
+- migrations/0008_create_brands.up.sql:44-67: ENABLE + FORCE RLS;
+  brand_public_read FOR SELECT USING (true); brand_tenant_insert /
+  brand_tenant_update / brand_tenant_delete keyed on
+  NULLIF(current_setting('app.tenant_id', true), '')::uuid. No later
+  migration alters brands policies.
+- Observed on priv_r14a_brandspin: role_table_grants(brands, igaming_runtime)
+  = DELETE,INSERT,SELECT,UPDATE; has_table_privilege TRUNCATE/REFERENCES/
+  TRIGGER = false.
+
+Tests
+-----
+(1) TestBrandsGrantPin_RuntimeHoldsUpdate_GateStatementSucceeds - POSITIVE pin:
+    exact grant set DELETE,INSERT,SELECT,UPDATE; has_table_privilege
+    S/I/U/D true, TRUNCATE/REFERENCES/TRIGGER false; the gate's exact
+    statement inside WithTenant returns 'active'; RequireActiveForPayment-
+    Initiation returns nil, all as igaming_runtime.
+(2) TestBrandsGrantPin_UpdatePrivilegeDoesNotOpenCrossTenantOrTenantlessWrites:
+    tenant A session -> UPDATE name/status of tenant B's brand: 0 rows, no
+    error (USING filter); plain SELECT of B's brand succeeds (public read) but
+    FOR SHARE (gate stmt with B's or A's tenant id, and without tenant
+    predicate) returns no row (UPDATE policy USING applies to locking reads);
+    gate returns ErrNotActiveForPaymentInitiation; B's row unchanged (owner
+    re-read). Re-tenanting A's brand into B: 42501 "new row violates
+    row-level security policy for table "brands"" (WITH CHECK). No tenant
+    context (app.tenant_id unset AND set to ''): targeted and unbounded
+    UPDATEs affect 0 rows, no error; gate stmt returns no row; transaction
+    COMMITTED and both rows verified unchanged. Mechanism: NULLIF(...)::uuid
+    is NULL, USING evaluates NULL, rows filtered.
+(3) TestBrandsGrantPin_GateFailsClosedWithoutUpdate_ScratchOnly: throwaway
+    scratchdb database, migrated; control: gate stmt 'active'; owner REVOKE
+    UPDATE ON brands FROM igaming_runtime (scratch DB only); then gate stmt ->
+    42501 "permission denied for table brands"; RequireActiveForPayment-
+    Initiation -> error carrying 42501 (never nil, never "active"); plain
+    SELECT still succeeds (dependency is the FOR SHARE clause). The scratch
+    database is dropped on cleanup.
+    NOTE: the gate's error after a revoke is a wrapped read error
+    ("tenant: read brand status: ..."), NOT ErrNotActiveForPaymentInitiation.
+    It is fail-closed (non-nil); how each HTTP caller maps a non-sentinel
+    error (presumably 5xx) was not re-verified in this round.
+
+Runs (all on priv_r14a_brandspin)
+---------------------------------
+--- go test -tags integration -count=1 -p 1 -v -run TestBrandsGrantPin ./internal/tenant/ (non-race)
+--- PASS: TestBrandsGrantPin_RuntimeHoldsUpdate_GateStatementSucceeds (0.07s)
+--- PASS: TestBrandsGrantPin_UpdatePrivilegeDoesNotOpenCrossTenantOrTenantlessWrites (0.10s)
+--- PASS: TestBrandsGrantPin_GateFailsClosedWithoutUpdate_ScratchOnly (2.44s)
+ok  	github.com/Diansalas/igaming-platform/internal/tenant	2.626s
+--- go test -race -tags integration -count=1 -p 1 -v -run TestBrandsGrantPin ./internal/tenant/
+--- PASS: TestBrandsGrantPin_RuntimeHoldsUpdate_GateStatementSucceeds (0.12s)
+--- PASS: TestBrandsGrantPin_UpdatePrivilegeDoesNotOpenCrossTenantOrTenantlessWrites (0.14s)
+--- PASS: TestBrandsGrantPin_GateFailsClosedWithoutUpdate_ScratchOnly (2.82s)
+ok  	github.com/Diansalas/igaming-platform/internal/tenant	4.119s
+    counted: PASS=3 SKIP=0 FAIL=0, DATA RACE=0
+--- go test -race -tags integration -count=1 -p 1 -v -run TestHSEC ./internal/payments/ (sanity)
+ok  	github.com/Diansalas/igaming-platform/internal/payments	141.137s
+    counted: 59 === RUN; PASS=59 (21 top-level + 38 subtests) SKIP=0 FAIL=0, DATA RACE=0
+--- gofmt -l internal/tenant: clean; go vet -tags integration ./internal/tenant: clean
+--- golangci-lint 2.9.0 run --build-tags integration --new-from-rev=86a5439 ./internal/tenant/...: 0 issues
+
+Mutation checks (each must FAIL; all reverted, restore verified by a PASS rerun)
+--------------------------------------------------------------------------------
+Layer 1 (test unchanged; DB mutation on priv_r14a_brandspin as owner, or a
+test-side expectation change):
+== M1 private-DB REVOKE UPDATE ON brands FROM igaming_runtime
+##### M1
+    brands_grant_pin_integration_test.go:213: igaming_runtime table grants on brands = "DELETE,INSERT,SELECT", want exactly "DELETE,INSERT,SELECT,UPDATE"
+--- FAIL: TestBrandsGrantPin_RuntimeHoldsUpdate_GateStatementSucceeds (0.09s)
+FAIL
+FAIL	github.com/Diansalas/igaming-platform/internal/tenant	0.096s
+FAIL
+== M2 private-DB GRANT TRUNCATE ON brands TO igaming_runtime (over-grant)
+##### M2
+    brands_grant_pin_integration_test.go:213: igaming_runtime table grants on brands = "DELETE,INSERT,SELECT,TRUNCATE,UPDATE", want exactly "DELETE,INSERT,SELECT,UPDATE"
+--- FAIL: TestBrandsGrantPin_RuntimeHoldsUpdate_GateStatementSucceeds (0.06s)
+FAIL
+FAIL	github.com/Diansalas/igaming-platform/internal/tenant	0.073s
+FAIL
+== M2b private-DB GRANT TRIGGER ON brands TO igaming_runtime (over-grant)
+##### M2b
+    brands_grant_pin_integration_test.go:213: igaming_runtime table grants on brands = "DELETE,INSERT,SELECT,TRIGGER,UPDATE", want exactly "DELETE,INSERT,SELECT,UPDATE"
+--- FAIL: TestBrandsGrantPin_RuntimeHoldsUpdate_GateStatementSucceeds (0.06s)
+FAIL
+FAIL	github.com/Diansalas/igaming-platform/internal/tenant	0.069s
+FAIL
+== M3 private-DB ALTER POLICY brand_tenant_update USING (true) WITH CHECK (true)
+##### M3
+    brands_grant_pin_integration_test.go:280: brands must be FORCE RLS with brand_tenant_update keyed on app.tenant_id; force=true qual="true" with_check="true"
+--- FAIL: TestBrandsGrantPin_UpdatePrivilegeDoesNotOpenCrossTenantOrTenantlessWrites (0.07s)
+FAIL
+FAIL	github.com/Diansalas/igaming-platform/internal/tenant	0.077s
+FAIL
+== M4 private-DB policy also admits tenantless sessions (cross-tenant still scoped)
+##### M4
+    brands_grant_pin_integration_test.go:375: unset: tenantless "UPDATE brands SET name = 'r14 tenantless pwned' WHERE id = ANY($1)" affected 2 rows, want 0
+--- FAIL: TestBrandsGrantPin_UpdatePrivilegeDoesNotOpenCrossTenantOrTenantlessWrites (0.08s)
+FAIL
+FAIL	github.com/Diansalas/igaming-platform/internal/tenant	0.092s
+FAIL
+== M5 private-DB WITH CHECK (true) only (re-tenant)
+##### M5
+    brands_grant_pin_integration_test.go:280: brands must be FORCE RLS with brand_tenant_update keyed on app.tenant_id; force=true qual="(tenant_id = (NULLIF(current_setting('app.tenant_id'::text, true), ''::text))::uuid)" with_check="true"
+--- FAIL: TestBrandsGrantPin_UpdatePrivilegeDoesNotOpenCrossTenantOrTenantlessWrites (0.07s)
+FAIL
+FAIL	github.com/Diansalas/igaming-platform/internal/tenant	0.073s
+FAIL
+== M6 test-side: gate statement without FOR SHARE (scratch REVOKE must then NOT be detected)
+60:const brandGateStmt = `SELECT status FROM public.brands WHERE id = $1 AND tenant_id = $2`
+##### M6
+    brands_grant_pin_integration_test.go:482: gate statement after REVOKE UPDATE: expected SQLSTATE 42501, got success
+--- FAIL: TestBrandsGrantPin_GateFailsClosedWithoutUpdate_ScratchOnly (2.04s)
+FAIL
+FAIL	github.com/Diansalas/igaming-platform/internal/tenant	2.043s
+FAIL
+== M7 test-side: scratch test without the REVOKE (gate must then succeed -> test fails)
+##### M7
+    brands_grant_pin_integration_test.go:478: REVOKE on the scratch database did not take effect
+--- FAIL: TestBrandsGrantPin_GateFailsClosedWithoutUpdate_ScratchOnly (1.89s)
+FAIL
+FAIL	github.com/Diansalas/igaming-platform/internal/tenant	1.899s
+FAIL
+== M8 test-side: expected intended set flipped (UPDATE want false)
+##### M8
+    brands_grant_pin_integration_test.go:227: has_table_privilege('igaming_runtime','brands',"UPDATE") = true, want false (intended set: SELECT, INSERT, UPDATE, DELETE only)
+--- FAIL: TestBrandsGrantPin_RuntimeHoldsUpdate_GateStatementSucceeds (0.09s)
+FAIL
+FAIL	github.com/Diansalas/igaming-platform/internal/tenant	0.093s
+FAIL
+== M9 test-side: expected SQLSTATE in scratch test changed to 42P01
+##### M9
+    brands_grant_pin_integration_test.go:482: gate statement after REVOKE UPDATE: expected SQLSTATE 42P01, got 42501: ERROR: permission denied for table brands (SQLSTATE 42501)
+--- FAIL: TestBrandsGrantPin_GateFailsClosedWithoutUpdate_ScratchOnly (2.70s)
+FAIL
+FAIL	github.com/Diansalas/igaming-platform/internal/tenant	2.710s
+FAIL
+== restore check
+DELETE,INSERT,SELECT,UPDATE
+(tenant_id = (NULLIF(current_setting('app.tenant_id'::text, true), ''::text))::uuid) | (tenant_id = (NULLIF(current_setting('app.tenant_id'::text, true), ''::text))::uuid)
+##### RESTORED
+--- PASS: TestBrandsGrantPin_RuntimeHoldsUpdate_GateStatementSucceeds (0.09s)
+--- PASS: TestBrandsGrantPin_UpdatePrivilegeDoesNotOpenCrossTenantOrTenantlessWrites (0.10s)
+--- PASS: TestBrandsGrantPin_GateFailsClosedWithoutUpdate_ScratchOnly (2.60s)
+ok  	github.com/Diansalas/igaming-platform/internal/tenant	2.793s
+
+Layer 2 (meta assertions - exact grant set / has_table_privilege loop /
+policy-shape check - neutered test-side, so the BEHAVIOURAL assertions are the
+ones that must fire):
+3
+== M1b private-DB REVOKE UPDATE (meta checks neutered) -> gate statement must fail
+##### M1b
+    brands_grant_pin_integration_test.go:234: gate statement as runtime role for the tenant's own brand: ERROR: permission denied for table brands (SQLSTATE 42501)
+--- FAIL: TestBrandsGrantPin_RuntimeHoldsUpdate_GateStatementSucceeds (0.09s)
+FAIL
+FAIL	github.com/Diansalas/igaming-platform/internal/tenant	0.096s
+FAIL
+== M3b private-DB USING (true) WITH CHECK (true) (policy check neutered) -> cross-tenant UPDATE
+##### M3b
+    brands_grant_pin_integration_test.go:296: cross-tenant "UPDATE brands SET name = 'r14 cross-tenant pwned' WHERE id = $1" affected 1 rows of tenant B's brand, want 0
+--- FAIL: TestBrandsGrantPin_UpdatePrivilegeDoesNotOpenCrossTenantOrTenantlessWrites (0.11s)
+FAIL
+FAIL	github.com/Diansalas/igaming-platform/internal/tenant	0.122s
+FAIL
+== M5b private-DB WITH CHECK (true) only (policy check neutered) -> re-tenant
+##### M5b
+    brands_grant_pin_integration_test.go:333: re-tenant own brand into another tenant: expected SQLSTATE 42501, got success
+--- FAIL: TestBrandsGrantPin_UpdatePrivilegeDoesNotOpenCrossTenantOrTenantlessWrites (0.09s)
+FAIL
+FAIL	github.com/Diansalas/igaming-platform/internal/tenant	0.098s
+FAIL
+== M10 private-DB brands NO FORCE ROW LEVEL SECURITY (owner pool seeds; runtime still non-owner) - sanity, expect PASS for runtime-role assertions
+##### M10
+--- PASS: TestBrandsGrantPin_UpdatePrivilegeDoesNotOpenCrossTenantOrTenantlessWrites (0.08s)
+ok  	github.com/Diansalas/igaming-platform/internal/tenant	0.094s
+== restore check
+DELETE,INSERT,SELECT,UPDATE
+t
+(tenant_id = (NULLIF(current_setting('app.tenant_id'::text, true), ''::text))::uuid) | (tenant_id = (NULLIF(current_setting('app.tenant_id'::text, true), ''::text))::uuid)
+##### RESTORED
+--- PASS: TestBrandsGrantPin_RuntimeHoldsUpdate_GateStatementSucceeds (0.08s)
+--- PASS: TestBrandsGrantPin_UpdatePrivilegeDoesNotOpenCrossTenantOrTenantlessWrites (0.12s)
+--- PASS: TestBrandsGrantPin_GateFailsClosedWithoutUpdate_ScratchOnly (2.59s)
+ok  	github.com/Diansalas/igaming-platform/internal/tenant	2.792s
+
+Mutation summary
+- M1  REVOKE UPDATE (private DB)            -> (1) killed by exact grant set
+- M1b same, meta neutered                   -> (1) killed by gate stmt 42501
+- M2  GRANT TRUNCATE (over-grant)           -> (1) killed (exact set)
+- M2b GRANT TRIGGER (over-grant)            -> (1) killed (exact set)
+- M3  policy USING(true) WITH CHECK(true)   -> (2) killed by policy-shape check
+- M3b same, meta neutered                   -> (2) killed: cross-tenant UPDATE affected 1 row
+- M4  policy admits tenantless sessions     -> (2) killed: tenantless UPDATE affected 2 rows
+- M5  WITH CHECK(true) only                 -> (2) killed by policy-shape check
+- M5b same, meta neutered                   -> (2) killed: re-tenant "expected 42501, got success"
+- M6  test gate stmt without FOR SHARE      -> (3) killed: "expected 42501, got success"
+- M7  test REVOKE replaced by SELECT 1      -> (3) killed (revoke self-check)
+- M8  expectation UPDATE=false              -> (1) killed
+- M9  expected SQLSTATE 42P01               -> (3) killed (got 42501)
+- M10 NO FORCE ROW LEVEL SECURITY, meta neutered -> NOT killed, as expected:
+      FORCE only binds the table OWNER; every behavioural assertion runs as
+      the non-owner runtime role, for which RLS applies regardless. Without
+      the neutering, the policy-shape check in (2) does assert
+      relforcerowsecurity=true.
+
+Not in scope / not evidence of
+- No production code or HTTP handler path was changed or re-reviewed; the
+  mapping of the gate's non-sentinel 42501 error at the HTTP layer was not
+  re-verified here.
+- Column-level UPDATE(status) as a possible least-privilege alternative
+  (PostgreSQL requires UPDATE on at least one column for FOR SHARE) was NOT
+  tested; the pin asserts the current table-level grant. A future
+  least-privilege change must update this test deliberately.
+- The shared CI database was not inspected or modified.
