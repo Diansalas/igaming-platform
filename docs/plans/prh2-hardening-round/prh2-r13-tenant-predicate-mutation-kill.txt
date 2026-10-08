@@ -1,0 +1,30 @@
+control (unmutated):
+--- PASS: TestR13_GetAttemptByMerchantReference_TwoTenants_ReturnsOwn (2.58s) --- PASS: TestR13_GetAttemptByMerchantReference_MismatchedExplicitTenant_NotFound (2.52s) --- PASS: TestR13_GetAttemptByMerchantReference_StaticGuard (0.03s) ok  	github.com/Diansalas/igaming-platform/internal/payments	5.144s 
+
+M1 drop tenant predicate (WHERE merchant_reference = $2 only; tenantID arg still passed as $1 unused is invalid so use literal rewrite)
+--- PASS: TestR13_GetAttemptByMerchantReference_TwoTenants_ReturnsOwn (2.45s) --- FAIL: TestR13_GetAttemptByMerchantReference_MismatchedExplicitTenant_NotFound (2.45s) --- PASS: TestR13_GetAttemptByMerchantReference_StaticGuard (0.02s) FAIL FAIL	github.com/Diansalas/igaming-platform/internal/payments	4.940s FAIL 
+
+M2 wrong tenant source in drain (uuid.Nil)
+      1 --- FAIL: TestDrainMerchantRef_Deposit_ForeignAttemptSameProvider_ClosedAsReferenceConflict (2.58s)
+      1 --- FAIL: TestDrainMerchantRef_Deposit_MixedBatch_OnlyForeignClosed_OrderPreserved (3.07s)
+      1 --- FAIL: TestDrainMerchantRef_Deposit_OtherProviderAttempt_ClosedAsCrossProvider (3.64s)
+      1 --- FAIL: TestDrainMerchantRef_Deposit_TenantIsolation (3.91s)
+      1 --- FAIL: TestDrainMerchantRef_Deposit_UnroutedForeignAttempt_ClosedAsCrossProvider (4.33s)
+      1 --- FAIL: TestDrainMerchantRef_Payout_Matrix (9.82s)
+      1 --- FAIL: TestR13_GetAttemptByMerchantReference_StaticGuard (0.05s)
+      2 FAIL
+      1 FAIL	github.com/Diansalas/igaming-platform/internal/payments	46.802s
+
+M3 wrong tenant source in live path (uuid.New())
+      1 --- FAIL: TestCallbackAudit2_Concurrent_DisputeCells_OneAuditRow_OneAlertRow (3.70s)
+      1 --- FAIL: TestCallbackAudit2_Concurrent_IdenticalDeliveries_OneAuditRow_OneAlertRow_SignalCells (3.21s)
+      1 --- FAIL: TestCallbackAudit2_DeferredDrain_MismatchedSuccessOnSucceeded_AuditedOnce (3.12s)
+      1 --- FAIL: TestCallbackAudit2_OrphanedDeferredReceipt_RedeliveredAfterConcurrentBind_AuditedOnce_Resolved (3.23s)
+      1 --- FAIL: TestR13_GetAttemptByMerchantReference_StaticGuard (0.04s)
+      1 --- FAIL: TestRVLF_C1_PreconditionTwoReferenceConflict_OnlyReachableViaReadCommittedRace (3.25s)
+      1 --- FAIL: TestRVLF_C2N12_DeferredAmbiguousBackstopAlsoRecomputesIntentProjection (2.95s)
+      1 --- FAIL: TestRVLF_C2_DFR_CallbackSiteDeferredApplyBackstop (3.16s)
+      1 --- FAIL: TestRVLF_N4b_PreconditionAnomalyReceiptResolved (3.24s)
+      1 --- FAIL: TestRVLF_ResolveConflict_ByRefByMerchantMismatchAnomalyReceiptResolved (3.15s)
+      1 --- FAIL: TestRVLF_SM10_PayoutSuccessProviderReferenceMismatchDisputes (3.16s)
+      1 --- FAIL: TestRVLF_SecGapA2_SM1FallsBackToWithdrawalReference (2.95s)
