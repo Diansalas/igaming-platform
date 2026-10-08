@@ -432,10 +432,11 @@ func TestHSEC_HoldRelease_CTR3_KeyCorrelationShapeLinkForgeries(t *testing.T) {
 			_, err := tx.Exec(ctx, `UPDATE withdrawal_requests SET state = 'submitted' WHERE id = $1`, wr.ID)
 			return err
 		}, []string{"HR030", "42501"}},
+		// state 'rejected' passes the acting policy WITH CHECK, so only the trigger can stop it.
 		{"rejected with an unrelated link", func(ctx context.Context, tx pgx.Tx) error {
 			_, err := tx.Exec(ctx, `UPDATE withdrawal_requests SET state = 'rejected', release_ledger_transaction_id = hold_ledger_transaction_id WHERE id = $1`, wr.ID)
 			return err
-		}, []string{"HR030", "42501"}},
+		}, []string{"HR030"}},
 		{"cancelled", func(ctx context.Context, tx pgx.Tx) error {
 			_, err := tx.Exec(ctx, `UPDATE withdrawal_requests SET state = 'cancelled' WHERE id = $1`, wr.ID)
 			return err
@@ -458,6 +459,44 @@ func TestHSEC_HoldRelease_CTR3_KeyCorrelationShapeLinkForgeries(t *testing.T) {
 			}
 		})
 	}
+	// Each of the two ledger-header layers must hold ALONE: with the acting fence lifted
+	// for ONE statement the all-sessions key guard still refuses the forgeries (HR020), and
+	// with the key guard lifted the acting fence still refuses them (CG030).
+	ctx0 := context.Background()
+	ddl := func(sql string) {
+		if err := h.pool.WithoutTenant(ctx0, func(ctx context.Context, tx pgx.Tx) error { _, err := tx.Exec(ctx, sql); return err }); err != nil {
+			t.Fatal(err)
+		}
+	}
+	headerForgeries := []struct {
+		name string
+		fn   func(ctx context.Context, tx pgx.Tx) error
+	}{
+		{"wrong correlation", func(ctx context.Context, tx pgx.Tx) error {
+			return hsrPost(ctx, tx, h, wr, ledger.TxWithdrawalRejected, key, uuid.New(), 400, 400)
+		}},
+		{"wrong transaction type", func(ctx context.Context, tx pgx.Tx) error {
+			return hsrPost(ctx, tx, h, wr, ledger.TxWithdrawalFailed, key, wr.ID, 400, 400)
+		}},
+		{"another withdrawal's governed key", func(ctx context.Context, tx pgx.Tx) error {
+			return hsrPost(ctx, tx, h, wr2, ledger.TxWithdrawalRejected, wr2.ID.String()+":governed_hold_released", wr2.ID, 401, 401)
+		}},
+	}
+	for _, c := range []struct{ layer, off, on, want string }{
+		{"key guard alone", "ledger_transactions_governed_fence", "ledger_transactions_governed_fence", "HR020"},
+		{"acting fence alone", "ledger_transactions_hold_release_key_guard", "ledger_transactions_hold_release_key_guard", "CG030"},
+	} {
+		ddl(`ALTER TABLE ledger_transactions DISABLE TRIGGER ` + c.off)
+		for _, a := range headerForgeries {
+			err := h.inExecuting(r, h.apprB, func(ctx context.Context, tx pgx.Tx) error { return k3Try(ctx, tx, a.fn) })
+			if !hsrIs(err, c.want) {
+				ddl(`ALTER TABLE ledger_transactions ENABLE TRIGGER ` + c.on)
+				t.Fatalf("%s / %s: want %s, got %v", c.layer, a.name, c.want, err)
+			}
+		}
+		ddl(`ALTER TABLE ledger_transactions ENABLE TRIGGER ` + c.on)
+	}
+
 	// CONTROL (non-vacuity): the exact key/correlation/type/shape posting and the
 	// governed state change both succeed in the same executing context.
 	if err := h.inExecuting(r, h.apprB, func(ctx context.Context, tx pgx.Tx) error {
@@ -516,7 +555,7 @@ func TestHSEC_HoldRelease_CTR3_KeyCorrelationShapeLinkForgeries(t *testing.T) {
 // bypassed: with the fence lifted for ONE statement in this throwaway scratch database,
 // a three-entry (or wrong-account) "release" cannot commit.
 func TestHSEC_HoldRelease_DeferredShapeCheck_CatchesFenceBypass(t *testing.T) {
-	for _, variant := range []string{"three_entries", "credit_to_house_not_cash"} {
+	for _, variant := range []string{"three_entries", "credit_to_house_not_cash", "four_entries_extra_pair", "no_reversal_link", "provider_ids_set"} {
 		t.Run(variant, func(t *testing.T) {
 			h := newHSR(t, 1)
 			wr := h.hold(400)
@@ -554,15 +593,29 @@ func TestHSEC_HoldRelease_DeferredShapeCheck_CatchesFenceBypass(t *testing.T) {
 					return err
 				}
 				entries := []ledger.EntryInput{{LedgerAccountID: accts[0], Direction: ledger.Debit, Amount: 400}}
-				if variant == "three_entries" {
+				reverses, pid, ptx := wr.HoldLedgerTransactionID, (*string)(nil), (*string)(nil)
+				switch variant {
+				case "three_entries":
 					entries = append(entries,
 						ledger.EntryInput{LedgerAccountID: accts[1], Direction: ledger.Credit, Amount: 399},
 						ledger.EntryInput{LedgerAccountID: houseID, Direction: ledger.Credit, Amount: 1})
-				} else {
+				case "credit_to_house_not_cash":
 					entries = append(entries, ledger.EntryInput{LedgerAccountID: houseID, Direction: ledger.Credit, Amount: 400})
+				case "four_entries_extra_pair":
+					entries = append(entries, ledger.EntryInput{LedgerAccountID: accts[1], Direction: ledger.Credit, Amount: 400},
+						ledger.EntryInput{LedgerAccountID: houseID, Direction: ledger.Debit, Amount: 5},
+						ledger.EntryInput{LedgerAccountID: houseID, Direction: ledger.Credit, Amount: 5})
+				case "no_reversal_link":
+					entries = append(entries, ledger.EntryInput{LedgerAccountID: accts[1], Direction: ledger.Credit, Amount: 400})
+					reverses = nil
+				case "provider_ids_set":
+					entries = append(entries, ledger.EntryInput{LedgerAccountID: accts[1], Direction: ledger.Credit, Amount: 400})
+					a, b := "hsr-forged-provider", "hsr-forged-"+uuid.NewString()
+					pid, ptx = &a, &b
 				}
 				res, err := ledger.Post(ctx, tx, ledger.TransactionInput{TenantID: wr.TenantID, TransactionType: ledger.TxWithdrawalRejected,
-					IdempotencyKey: wr.ID.String() + ":governed_hold_released", CorrelationID: wr.ID, ReversesTransactionID: wr.HoldLedgerTransactionID, Entries: entries})
+					IdempotencyKey: wr.ID.String() + ":governed_hold_released", CorrelationID: wr.ID, ReversesTransactionID: reverses,
+					ProviderID: pid, ProviderTxID: ptx, Entries: entries})
 				if err != nil {
 					return err
 				}
