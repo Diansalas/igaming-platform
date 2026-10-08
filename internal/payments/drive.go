@@ -22,6 +22,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/providerref"
 	"github.com/Diansalas/igaming-platform/internal/rg"
+	"github.com/Diansalas/igaming-platform/internal/tenant"
 )
 
 // driveCreatedAttempt: T2 claim (route outside tx, then RG + the KYC
@@ -147,6 +148,24 @@ func (o *Orchestrator) driveCreatedAttempt(
 				return rerr
 			}
 			if resOnly {
+				if err := rescheduleCreatedForResolutionOnly(actx, tx, created.ID, resolutionOnlyDispatchBackoff(created.PollCount)); err != nil {
+					return err
+				}
+				deferredResolutionOnly = true
+				return nil
+			}
+		}
+		// H-SEC-5: an HTTP-driven (player-request cascade) T2 claim is the same
+		// kind of NEW provider call; it gets the tenant+brand initiation gate in
+		// this tx (the sweeper branch above keeps its resolution-only rule, brand
+		// status for the sweeper is a separate ruling). A refusal defers the
+		// created child exactly like the sweeper deferral; the intent stays
+		// pending and the sweeper resolves/expires it.
+		if !sweeperDriven {
+			if gerr := tenant.RequireActiveForPaymentInitiation(actx, tx, intent.TenantID, intent.BrandID); gerr != nil {
+				if !errors.Is(gerr, tenant.ErrNotActiveForPaymentInitiation) {
+					return gerr
+				}
 				if err := rescheduleCreatedForResolutionOnly(actx, tx, created.ID, resolutionOnlyDispatchBackoff(created.PollCount)); err != nil {
 					return err
 				}

@@ -167,7 +167,8 @@ func newK3World(t *testing.T, opts k3Opts) *k3World {
 func newK3WorldOn(t *testing.T, pool *db.Pool, opts k3Opts) *k3World {
 	t.Helper()
 	ctx := context.Background()
-	prooftest.Issuer(t) // SIGNED-ACTOR-PROOF: the issuer must exist even on a scratch DB below 0120
+	prooftest.Issuer(t)                  // SIGNED-ACTOR-PROOF: the issuer must exist even on a scratch DB below 0120
+	ensureTenantStatusGateKeyFn(t, pool) // H-SEC-5/11: the initiation gate needs migration 0118's lock-key function
 	n := k3Counter.Add(1)
 	w := &k3World{t: t, pool: pool, grantIDs: map[string]uuid.UUID{}}
 	initial := int64(1_000_000)
@@ -731,4 +732,31 @@ func (p *k3Provider) setStatus(ref string, st StatusResult) {
 	}
 	p.status[ref] = st
 	p.mu.Unlock()
+}
+
+// ensureTenantStatusGateKeyFn installs migration 0118's tenant_status_gate_key(uuid) (byte-identical body) on a
+// scratch database migrated only through an EARLIER version (these K3 worlds run at 0115), because the H-SEC-5/11
+// payment-initiation gate (tenant.RequireActiveForPaymentInitiation) takes that advisory lock. Production always has
+// 0118. Only the function is installed (not the 0118 trigger/guards), and only when absent, so a database already at
+// or past 0118 is untouched. A test that later migrates this same database up through 0118 must not use this world.
+func ensureTenantStatusGateKeyFn(t *testing.T, pool *db.Pool) {
+	t.Helper()
+	var have bool
+	if err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_proc WHERE proname = 'tenant_status_gate_key' AND pronamespace = 'public'::regnamespace)`).Scan(&have)
+	}); err != nil {
+		t.Fatalf("probe tenant_status_gate_key: %v", err)
+	}
+	if have {
+		return
+	}
+	if err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `CREATE FUNCTION tenant_status_gate_key(p_tenant_id uuid) RETURNS bigint
+			LANGUAGE sql IMMUTABLE PARALLEL SAFE
+			SET search_path = pg_catalog, public, pg_temp
+			AS $$ SELECT hashtextextended('tenant_status_gate:' || p_tenant_id::text, 0) $$`)
+		return err
+	}); err != nil {
+		t.Fatalf("install tenant_status_gate_key on the pre-0118 scratch database: %v", err)
+	}
 }

@@ -58,6 +58,13 @@ const (
 	// open gaming rounds exist (owner decision Q-GP-1, 2026-10-06, ADR 0095
 	// section 40.6; internal/tenant.CodeCloseBlockedOpenRounds). 409.
 	CodeTenantCloseBlockedOpenRounds Code = "TENANT_CLOSE_BLOCKED_OPEN_ROUNDS"
+	// CodeTenantOrBrandNotActive: HTTP deposit/withdrawal initiation was
+	// refused because the tenant or the player's brand is not 'active'
+	// (H-SEC-5 / H-SEC-11). 409; only CREATION is refused and nothing was
+	// created, so a retry with the same idempotency key after reactivation is a
+	// normal first request. A retry of an already-created intent/request is NOT
+	// refused (it returns the original, read-only).
+	CodeTenantOrBrandNotActive Code = "TENANT_OR_BRAND_NOT_ACTIVE"
 )
 
 // Error is the wire format for an API error response.
@@ -86,7 +93,7 @@ func httpStatus(c Code) int {
 	case CodeConflict, CodeSettlementPayloadMismatch, CodeSettlementTombstoned, CodeSettlementBetVoided,
 		CodeSettlementBetAlreadySettled, CodeSettlementGenerationOutOfSequence, CodeSettlementIntegrity,
 		CodeCredentialRegistrationRejected, CodeApprovalRejected, CodeCredentialActivationRejected,
-		CodeCredentialTransitionRejected, CodeSettlementTenantNotActive, CodeTenantCloseBlockedOpenRounds:
+		CodeCredentialTransitionRejected, CodeSettlementTenantNotActive, CodeTenantCloseBlockedOpenRounds, CodeTenantOrBrandNotActive:
 		return http.StatusConflict
 	case CodeSettlementPayoutInvalid, CodeSettlementAssetMismatch:
 		return http.StatusUnprocessableEntity

@@ -520,6 +520,18 @@ func TestINVDEP1_Recon_M_DuplicateDetector_LegacyDataShape(t *testing.T) {
 	// only to 0106.
 	pool := migration0106ReconScratch(t, "invdep1_recon_legacy_")
 	w := newPayWorldOnPool(t, pool)
+	// H-SEC-5/11: InitiateDepositAttempt's initiation gate takes migration 0118's advisory-lock key function,
+	// which does not exist on this pre-0107 database. Install ONLY that function (byte-identical body); the
+	// migrate-forward below stops at 0107's refusal, long before 0118 would CREATE it again.
+	if err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `CREATE FUNCTION tenant_status_gate_key(p_tenant_id uuid) RETURNS bigint
+			LANGUAGE sql IMMUTABLE PARALLEL SAFE
+			SET search_path = pg_catalog, public, pg_temp
+			AS $$ SELECT hashtextextended('tenant_status_gate:' || p_tenant_id::text, 0) $$`)
+		return err
+	}); err != nil {
+		t.Fatalf("install tenant_status_gate_key on the pre-0107 scratch database: %v", err)
+	}
 	buildLegacyShape(t, w)
 	// Migrate the SAME database (which carries the two-succeeded-attempts legacy
 	// shape) the rest of the way to the latest on-disk migration.

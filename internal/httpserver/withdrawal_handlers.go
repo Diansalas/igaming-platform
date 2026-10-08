@@ -167,6 +167,12 @@ func newRequestWithdrawalHandler(deps Deps) http.HandlerFunc {
 			apierror.Write(w, requestID, apierror.CodeNotFound, "player account not found")
 			return
 		}
+		if errors.Is(err, tenant.ErrNotActiveForPaymentInitiation) {
+			// H-SEC-11: tenant or brand not active; nothing was created.
+			logger.Warn("request_withdrawal_refused_not_active", "request_id", requestID)
+			apierror.Write(w, requestID, apierror.CodeTenantOrBrandNotActive, "withdrawals are not available right now")
+			return
+		}
 		if errors.Is(err, wallet.ErrNotFound) {
 			apierror.Write(w, requestID, apierror.CodeValidation, "no wallet for this asset - deposit first")
 			return
@@ -912,6 +918,13 @@ func newSubmitWithdrawalHandler(deps Deps) http.HandlerFunc {
 		)
 		if errors.Is(err, withdrawal.ErrNotFound) {
 			apierror.Write(w, requestID, apierror.CodeNotFound, "withdrawal not found")
+			return
+		}
+		if errors.Is(err, tenant.ErrNotActiveForPaymentInitiation) {
+			// H-SEC-11: tenant or brand not active; the request is left
+			// `approved`, no attempt, no provider call.
+			logger.Warn("submit_withdrawal_refused_not_active", "request_id", requestID)
+			apierror.Write(w, requestID, apierror.CodeTenantOrBrandNotActive, "withdrawals are not available right now")
 			return
 		}
 		if errors.Is(err, withdrawal.ErrStateConflict) {

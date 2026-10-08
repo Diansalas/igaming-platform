@@ -38,6 +38,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/kyc"
 	"github.com/Diansalas/igaming-platform/internal/providercred"
 	"github.com/Diansalas/igaming-platform/internal/providerref"
+	"github.com/Diansalas/igaming-platform/internal/tenant"
 	"github.com/Diansalas/igaming-platform/internal/withdrawal"
 )
 
@@ -298,6 +299,13 @@ func (o *Orchestrator) ClaimForDispatch(ctx context.Context, pool *db.Pool, kycG
 		wr, err := withdrawal.LockApprovedForSubmission(actx, tx, requestID)
 		if err != nil {
 			return err
+		}
+		// H-SEC-11: a payout claim (approved -> submitted, new attempt, new
+		// Withdraw) for a tenant or brand that is not 'active' is refused in
+		// THIS tx, after the request row lock and before any KYC decision,
+		// deny/hold release, or attempt insert. The request stays `approved`.
+		if err := tenant.RequireActiveForPaymentInitiation(actx, tx, tenantID, wr.BrandID); err != nil {
+			return fmt.Errorf("payments: payout claim refused: %w", err)
 		}
 
 		decision, kycParams, err := evaluatePayoutGate(actx, tx, kycGate, wr)
