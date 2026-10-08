@@ -615,3 +615,58 @@ func TestHSEC5_11_Helper_FailsClosed_MissingUnreadable(t *testing.T) {
 	// A vocabulary value other than 'active' can only be a closed enum member
 	// (CHECK active|suspended|closed); each non-active one was covered above.
 }
+
+// ---- replay of an already-created row while the tenant/brand is non-active ----
+//
+// The gate runs before the idempotent-replay lookup (fail closed, documented in
+// ADR 0095 section 43.1): a retry of an ALREADY-created intent/request is
+// refused too, and returns the original after reactivation.
+
+func TestHSEC5_Deposit_ReplayOfExistingIntentWhileNonActive_Refused(t *testing.T) {
+	for _, c := range hsecRefusals[:4] {
+		t.Run(c.name, func(t *testing.T) {
+			pool, spy, orch, f := depositWorld(t, "mock-psp-h5-rp-"+strings.ReplaceAll(c.name, "_", "-"))
+			first, err := initDeposit(orch, pool, f, "replay-key")
+			if err != nil || !first.AttemptCreated {
+				t.Fatalf("setup: %v", err)
+			}
+			applyHsecCase(t, pool, f, c)
+			if _, err := initDeposit(orch, pool, f, "replay-key"); !errors.Is(err, tenant.ErrNotActiveForPaymentInitiation) {
+				t.Fatalf("replay while non-active must be refused, got %v", err)
+			}
+			reactivate(t, pool, f)
+			again, err := initDeposit(orch, pool, f, "replay-key")
+			if err != nil || again.Intent.ID != first.Intent.ID {
+				t.Fatalf("replay after reactivation must return the original intent: %v", err)
+			}
+			if d, _, _ := spy.counts(); d != 1 {
+				t.Fatalf("exactly one Deposit call overall, got %d", d)
+			}
+		})
+	}
+}
+
+func TestHSEC11_RequestWithdrawal_ReplayOfExistingRequestWhileNonActive_Refused(t *testing.T) {
+	for _, c := range hsecRefusals[:4] {
+		t.Run(c.name, func(t *testing.T) {
+			pool := depositV2ScratchPool(t)
+			f := seedPayoutFixture(t, pool, 10_000, true)
+			first, err := requestWithdrawalTx(pool, f, "replay-key", 500)
+			if err != nil {
+				t.Fatalf("setup: %v", err)
+			}
+			applyHsecCase(t, pool, f.orchFixture, c)
+			if _, err := requestWithdrawalTx(pool, f, "replay-key", 500); !errors.Is(err, tenant.ErrNotActiveForPaymentInitiation) {
+				t.Fatalf("replay while non-active must be refused, got %v", err)
+			}
+			reactivate(t, pool, f.orchFixture)
+			again, err := requestWithdrawalTx(pool, f, "replay-key", 500)
+			if err != nil || again.ID != first.ID {
+				t.Fatalf("replay after reactivation must return the original request: %v", err)
+			}
+			if c := countsFor(t, pool, f.tenantID); c.requests != 1 {
+				t.Fatalf("requests=%d", c.requests)
+			}
+		})
+	}
+}
