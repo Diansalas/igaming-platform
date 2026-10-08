@@ -5,6 +5,7 @@ package payoutinstrument
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -370,6 +371,31 @@ func TestPlantedRows_NoOwnerRowAndUnsealedPending(t *testing.T) {
 	}
 	if cv.calls.Load() != 0 {
 		t.Fatal("a vendor call was made for a wrongly sealed row")
+	}
+}
+
+// An instrument cannot be BORN in any state but pending_verification, and a new
+// row cannot carry a verification pointer.
+func TestInstrumentBornPending(t *testing.T) {
+	w := newWorld(t)
+	p := w.newPlayer(w.brandID)
+	good := w.mustRegister(p, ibanA)
+	for i, state := range []string{"verified", "verification_expired", "suspended", "revoked", "rejected", "superseded"} {
+		fp := fmt.Sprintf("%02x", 0x40+i) + good.Fingerprint[2:]
+		if err := w.ownerTx(func(ctx context.Context, tx pgx.Tx) error {
+			_, err := tx.Exec(ctx, `INSERT INTO payout_instrument_fingerprint_owners (tenant_id, fingerprint_kid, fingerprint, person_id) VALUES ($1,'f1',$2,$3)`, w.tenantID, fp, p.PersonID)
+			return err
+		}); err != nil {
+			t.Fatal(err)
+		}
+		err := w.ownerTx(func(ctx context.Context, tx pgx.Tx) error {
+			_, err := tx.Exec(ctx, `INSERT INTO payout_instruments (id, tenant_id, brand_id, player_account_id, person_id, kind, rail, asset_codes, detail_ciphertext, detail_nonce,
+				detail_key_kid, detail_schema_version, display_mask, fingerprint, fingerprint_kid, instrument_seal, seal_kid, state)
+				VALUES ($1,$2,$3,$4,$5,'bank_account','sepa','{EUR}',$6,$7,'m1',1,'GB****5432',$8,'f1',$9,'m1',$10)`,
+				uuid.New(), w.tenantID, w.brandID, p.ID, p.PersonID, good.DetailCiphertext, good.DetailNonce, fp, good.InstrumentSeal, state)
+			return err
+		})
+		requireCode(t, err, "PI004", "an instrument born "+state)
 	}
 }
 
