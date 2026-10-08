@@ -37,8 +37,10 @@ var staticRaiseGuardedHelpers = map[string]bool{
 	"internal/payments/alerts.go:raiseDepositEscalationAlert": true,
 	// B12 (PAY-PAYOUT-DISPUTE-ALERT-1): the payout dispute / T14 / T16 raise.
 	"internal/payments/payout_alerts.go:raisePayoutDisputeAlert": true,
-	"internal/reconciliation/alerts.go:raiseLedgerRunAlerts":     true,
-	"internal/reconciliation/alerts.go:raiseInTxMismatch":        true,
+	// PAY-RECEIPT-ANOMALY-APPLIED-1 (ADR 0095 section 45): the refused receipt attribution repair signal.
+	"internal/payments/receipt_repair_alerts.go:raiseReceiptRepairRefusedAlert": true,
+	"internal/reconciliation/alerts.go:raiseLedgerRunAlerts":                    true,
+	"internal/reconciliation/alerts.go:raiseInTxMismatch":                       true,
 	// PRH-2 E1 (ADR 0106 section 4.3): the KYC outbox terminal alert, raised in-tx
 	// from the tenant phase-C session by runPhaseC / recordApplyConflict.
 	"internal/kyc/outbox_worker.go:raiseSubmissionFailedTerminal": true,
@@ -56,6 +58,8 @@ var staticInTxOwners = []string{
 	"internal/payments/payout.go:ApplyPayoutResult",
 	"internal/payments/payout.go:applyPayoutStatusEvidence",
 	"internal/payments/payout_sweep.go:escalateAmbiguousPayout",
+	// PAY-RECEIPT-ANOMALY-APPLIED-1: the system-internal receipt attribution repair transaction.
+	"internal/payments/receipt_repair.go:RepairReceiptAttribution",
 	// H-W1 moved the ledger_vs_projection evidence transaction (and its InTx/Flush) out of
 	// sweepTenants into runLedgerStreamForTenant, shared by the ordinary and observation sweeps.
 	"internal/reconciliation/scheduler.go:runLedgerStreamForTenant",
@@ -250,6 +254,7 @@ func staticDiscardedRaiseResults(calls []staticCall) []string {
 		"raiseMultipleSuccessAlert": true, "raiseLedgerRunAlerts": true, "raiseInTxMismatch": true, "alertAfterDispute": true,
 		"raiseSubmissionFailedTerminal": true, "raiseDepositEscalationAlert": true,
 		"raisePayoutDisputeAlert": true, "payoutAlertAfterDispute": true,
+		"raiseReceiptRepairRefusedAlert": true,
 	}
 	var out []string
 	for _, c := range calls {
@@ -365,6 +370,34 @@ func g(ctx, tx any) error { return raisePayoutDisputeAlert(ctx, tx, a, r) }`
 	for k, n := range got {
 		if _, ok := want[k]; !ok {
 			t.Errorf("unreviewed payout dispute raise site %s (%d call(s)): review it against ADR 0102 7.7 and ADR 0095 section 42, then pin it", k, n)
+		}
+	}
+}
+
+// PAY-RECEIPT-ANOMALY-APPLIED-1: the refused-repair raise has exactly ONE site, as the last statement of
+// refuseRepair (after its audit row), its result is never dropped (negative control), and nothing else
+// in the module calls it.
+func TestStaticWiring_ReceiptRepairRaiseSiteIsPinned(t *testing.T) {
+	bad := `package p
+func f(ctx, tx any) { raiseReceiptRepairRefusedAlert(ctx, tx, t, r, p, x) }`
+	if d := staticDiscardedRaiseResults(staticCollectFromSource(t, "internal/x/bad.go", bad)); len(d) != 1 {
+		t.Fatalf("discarded-result guard must flag the dropped repair raise, got %v", d)
+	}
+	got := map[string]int{}
+	for _, c := range staticCollectCalls(t) {
+		if c.name == "raiseReceiptRepairRefusedAlert" {
+			got[c.file+":"+c.fn]++
+		}
+	}
+	want := map[string]int{"internal/payments/receipt_repair.go:refuseRepair": 1}
+	for k, n := range want {
+		if got[k] != n {
+			t.Errorf("repair raise site %s: want %d call(s), found %d", k, n, got[k])
+		}
+	}
+	for k, n := range got {
+		if _, ok := want[k]; !ok {
+			t.Errorf("unreviewed receipt repair raise site %s (%d call(s)): review it against ADR 0102 7.7 and ADR 0095 section 45, then pin it", k, n)
 		}
 	}
 }
