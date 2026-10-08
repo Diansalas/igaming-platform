@@ -225,8 +225,15 @@ func GetAttemptByID(ctx context.Context, tx pgx.Tx, id uuid.UUID) (PaymentAttemp
 // GetAttemptByMerchantReference resolves an attempt by its own
 // deterministic external identity (INV-IO-3) - the lookup a callback
 // uses when it echoes the merchant reference (§6.1).
-func GetAttemptByMerchantReference(ctx context.Context, tx pgx.Tx, merchantReference string) (PaymentAttempt, error) {
-	row := tx.QueryRow(ctx, `SELECT `+paymentAttemptColumns+` FROM payment_attempts WHERE merchant_reference = $1`, merchantReference)
+//
+// Defence in depth (security r12 L-1 / LF L-1, ADR 0095 §42.8): the query
+// carries an explicit tenant_id predicate IN ADDITION to row-level
+// security, so another tenant's attempt is ErrAttemptNotFound even for a
+// session that could see several tenants. tenantID MUST be the
+// server-side authenticated tenant (the attempt's / receipt's own
+// TenantID), never a client-supplied value.
+func GetAttemptByMerchantReference(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, merchantReference string) (PaymentAttempt, error) {
+	row := tx.QueryRow(ctx, `SELECT `+paymentAttemptColumns+` FROM payment_attempts WHERE tenant_id = $1 AND merchant_reference = $2`, tenantID, merchantReference)
 	a, err := scanPaymentAttempt(row)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return PaymentAttempt{}, ErrAttemptNotFound

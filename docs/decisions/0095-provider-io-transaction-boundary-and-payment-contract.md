@@ -7917,3 +7917,13 @@ terminal-reason CHECK are untouched). Same Kind, discriminator shape, attributes
   `security` (apply, or close as `anomaly_predates_submission`, an orphan older than the attempt's first submission) and stays
   recorded. LF L-1 stays not built. Tests: `receipt_orphan_resolve_integration_test.go`. Mutation evidence:
   `docs/plans/prh2-hardening-round/prh2-r11-receipt-orphan-mutation-kill.txt`.
+- **L-1 follow-up (security r12 L-1 / LF L-1): `IMPLEMENTED` as defence in depth (PAY-R13-TENANT-PREDICATE, `payments`, 2026-10-08).**
+  `GetAttemptByMerchantReference` now takes the tenant id and carries an explicit `AND tenant_id = $1` predicate in addition to row-level
+  security (RLS and the tenant context are unchanged). Both callers pass the server-side tenant they already hold: the live path
+  (`ResolveAttemptForEvidence`, which gained a `tenantID` parameter from `ApplyReceiptEvidence`) and the deferred drain (`attempt.TenantID`);
+  no unscoped form remains. Not-found mapping (`ErrAttemptNotFound`) and the live-path/drain classification are unchanged. Honest limit:
+  the merchant reference is the attempt id (a global primary key) and the immutability trigger forbids rewriting it, so a genuine
+  same-value collision across tenants cannot be constructed, and platform-admin scope does not widen `payment_attempts` RLS; the change is
+  proven by a mismatched-explicit-tenant lookup returning not-found while RLS alone would have returned the row. Tests:
+  `attempt_tenant_predicate_integration_test.go` (including an AST guard on every call site). Mutation evidence:
+  `docs/plans/prh2-hardening-round/prh2-r13-tenant-predicate-mutation-kill.txt`.

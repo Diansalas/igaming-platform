@@ -432,7 +432,7 @@ type resolvedAttempt struct {
 // or both. A cross-provider or cross-attempt conflict is an anomaly with
 // NO state change - never a rollback, never a 5xx-redelivery loop
 // (LF95-C3, S95-C1).
-func ResolveAttemptForEvidence(ctx context.Context, tx pgx.Tx, verifiedProviderID string, providerReference, merchantReference string) (resolvedAttempt, error) {
+func ResolveAttemptForEvidence(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, verifiedProviderID string, providerReference, merchantReference string) (resolvedAttempt, error) {
 	var byRef, byMerchant *PaymentAttempt
 
 	if providerReference != "" {
@@ -445,7 +445,7 @@ func ResolveAttemptForEvidence(ctx context.Context, tx pgx.Tx, verifiedProviderI
 		}
 	}
 	if merchantReference != "" {
-		a, err := GetAttemptByMerchantReference(ctx, tx, merchantReference)
+		a, err := GetAttemptByMerchantReference(ctx, tx, tenantID, merchantReference)
 		if err != nil && !errors.Is(err, ErrAttemptNotFound) {
 			return resolvedAttempt{}, err
 		}
@@ -550,7 +550,7 @@ func ApplyReceiptEvidence(ctx context.Context, tx pgx.Tx, o *Orchestrator, tenan
 		return applyReversalReceiptEvidence(ctx, tx, tenantID, verifiedProviderID, ev, originalDeclineReason, oversizedDeclineReason)
 	}
 
-	resolved, err := ResolveAttemptForEvidence(ctx, tx, verifiedProviderID, ev.ProviderReference, ev.MerchantReference)
+	resolved, err := ResolveAttemptForEvidence(ctx, tx, tenantID, verifiedProviderID, ev.ProviderReference, ev.MerchantReference)
 	if err != nil {
 		return "", err
 	}
@@ -1738,7 +1738,7 @@ func ApplyDeferredReceiptsForAttempt(ctx context.Context, tx pgx.Tx, o *Orchestr
 		// and NOT applied. An absent or unresolvable merchant reference, or one naming this attempt, is
 		// applied exactly as before.
 		if d.merchantReference != nil && *d.merchantReference != "" {
-			byMerchant, mErr := GetAttemptByMerchantReference(ctx, tx, *d.merchantReference)
+			byMerchant, mErr := GetAttemptByMerchantReference(ctx, tx, attempt.TenantID, *d.merchantReference)
 			if mErr != nil && !errors.Is(mErr, ErrAttemptNotFound) {
 				return applied, mErr
 			}
