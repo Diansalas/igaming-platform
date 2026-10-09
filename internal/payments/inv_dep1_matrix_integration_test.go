@@ -128,6 +128,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Diansalas/igaming-platform/internal/db"
+	"github.com/Diansalas/igaming-platform/internal/payoutinstrument/pitest"
 )
 
 // ---------------------------------------------------------------------
@@ -170,7 +171,7 @@ func newInvDep1SetupWith(t *testing.T, providerAID, providerBID string, refLessA
 		aProv = &refLessAmbiguousProvider{pa}
 	}
 	orch := NewOrchestrator(map[string]PaymentProvider{providerAID: aProv, providerBID: pb},
-		MultiWebhookCredentialResolver{providerAID: NewMockWebhookCredentials(pa), providerBID: NewMockWebhookCredentials(pb)})
+		MultiWebhookCredentialResolver{providerAID: NewMockWebhookCredentials(pa), providerBID: NewMockWebhookCredentials(pb)}).WithPayoutDestinations(pitest.Shared())
 	return invDep1Setup{pool: pool, f: f, pa: pa, pb: pb, orch: orch}
 }
 
@@ -703,7 +704,7 @@ func TestINVDEP1_H_ThreeDistinctReferences_AllButFirstDisputed(t *testing.T) {
 	registerCapability(t, pool, f, pb, 200)
 	registerCapability(t, pool, f, pc, 300)
 	orch := NewOrchestrator(map[string]PaymentProvider{"invdep1-h-a": pa, "invdep1-h-b": pb, "invdep1-h-c": pc},
-		MultiWebhookCredentialResolver{"invdep1-h-a": NewMockWebhookCredentials(pa), "invdep1-h-b": NewMockWebhookCredentials(pb), "invdep1-h-c": NewMockWebhookCredentials(pc)})
+		MultiWebhookCredentialResolver{"invdep1-h-a": NewMockWebhookCredentials(pa), "invdep1-h-b": NewMockWebhookCredentials(pb), "invdep1-h-c": NewMockWebhookCredentials(pc)}).WithPayoutDestinations(pitest.Shared())
 
 	res := rvInit(t, pool, orch, f, 5000, "invdep1-h")
 	refA := *res.Attempt.ProviderReference
@@ -935,7 +936,7 @@ func TestINVDEP1_L_CrossTenantCallback_NoEffectInEitherTenant(t *testing.T) {
 	pa := NewMockProvider("invdep1-l-shared", "EUR")
 	registerCapability(t, pool, fA, pa, 100)
 	registerCapability(t, pool, fB, pa, 100)
-	orch := NewOrchestrator(map[string]PaymentProvider{"invdep1-l-shared": pa}, MultiWebhookCredentialResolver{"invdep1-l-shared": NewMockWebhookCredentials(pa)})
+	orch := NewOrchestrator(map[string]PaymentProvider{"invdep1-l-shared": pa}, MultiWebhookCredentialResolver{"invdep1-l-shared": NewMockWebhookCredentials(pa)}).WithPayoutDestinations(pitest.Shared())
 
 	resA := rvInit(t, pool, orch, fA, 4000, "invdep1-l-a")
 	resB := rvInit(t, pool, orch, fB, 6000, "invdep1-l-b")
@@ -1085,7 +1086,7 @@ func TestINVDEP1_Inverted_T13SecondCapture_BecomesDisputed_NoSecondPosting(t *te
 	registerCapability(t, pool, f, providerA, 100)
 	registerCapability(t, pool, f, providerB, 200)
 	orch := NewOrchestrator(map[string]PaymentProvider{"invdep1-t13inv-a": providerA, "invdep1-t13inv-b": providerB},
-		MultiWebhookCredentialResolver{"invdep1-t13inv-a": NewMockWebhookCredentials(providerA), "invdep1-t13inv-b": NewMockWebhookCredentials(providerB)})
+		MultiWebhookCredentialResolver{"invdep1-t13inv-a": NewMockWebhookCredentials(providerA), "invdep1-t13inv-b": NewMockWebhookCredentials(providerB)}).WithPayoutDestinations(pitest.Shared())
 
 	res, err := orch.InitiateDepositAttempt(context.Background(), pool, AllowAllDepositKYCGate{}, MockCredentialResolver{}, InitiateDepositParams{
 		Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
@@ -1173,7 +1174,7 @@ func TestINVDEP1_Inverted_RVLF_P6_ReversalOfDisputedSecondCaptureTakesTombstoneB
 	registerCapability(t, pool, f, pa, 100)
 	registerCapability(t, pool, f, pb, 200)
 	orch := NewOrchestrator(map[string]PaymentProvider{"invdep1-p6inv-a": pa, "invdep1-p6inv-b": pb},
-		MultiWebhookCredentialResolver{"invdep1-p6inv-a": NewMockWebhookCredentials(pa), "invdep1-p6inv-b": NewMockWebhookCredentials(pb)})
+		MultiWebhookCredentialResolver{"invdep1-p6inv-a": NewMockWebhookCredentials(pa), "invdep1-p6inv-b": NewMockWebhookCredentials(pb)}).WithPayoutDestinations(pitest.Shared())
 	amt := int64(MockAmountProviderDeclineCascade)
 	res := rvInit(t, pool, orch, f, amt, "invdep1-p6inv")
 	childRef := *res.Attempt.ProviderReference

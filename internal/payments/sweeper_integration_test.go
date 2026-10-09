@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Diansalas/igaming-platform/internal/db"
+	"github.com/Diansalas/igaming-platform/internal/payoutinstrument/pitest"
 )
 
 func TestSweeper_PendingConvergesToSucceeded_T7_LedgerBalanced(t *testing.T) {
@@ -21,7 +22,7 @@ func TestSweeper_PendingConvergesToSucceeded_T7_LedgerBalanced(t *testing.T) {
 	f := seedOrchFixture(t, pool)
 	provider := NewMockProvider("mock-psp-sw-a", "EUR")
 	registerCapability(t, pool, f, provider, 100)
-	orch := NewOrchestrator(map[string]PaymentProvider{"mock-psp-sw-a": provider}, MultiWebhookCredentialResolver{"mock-psp-sw-a": NewMockWebhookCredentials(provider)})
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-psp-sw-a": provider}, MultiWebhookCredentialResolver{"mock-psp-sw-a": NewMockWebhookCredentials(provider)}).WithPayoutDestinations(pitest.Shared())
 
 	res, err := orch.InitiateDepositAttempt(context.Background(), pool, AllowAllDepositKYCGate{}, MockCredentialResolver{}, InitiateDepositParams{
 		Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
@@ -68,7 +69,7 @@ func TestSweeper_PendingDeclineCascades_ThenSweptAttemptConvergesOnSecondProvide
 	registerCapability(t, pool, f, providerA, 100)
 	registerCapability(t, pool, f, providerB, 200)
 	orch := NewOrchestrator(map[string]PaymentProvider{"mock-psp-sw-b1": providerA, "mock-psp-sw-b2": providerB},
-		MultiWebhookCredentialResolver{"mock-psp-sw-b1": NewMockWebhookCredentials(providerA), "mock-psp-sw-b2": NewMockWebhookCredentials(providerB)})
+		MultiWebhookCredentialResolver{"mock-psp-sw-b1": NewMockWebhookCredentials(providerA), "mock-psp-sw-b2": NewMockWebhookCredentials(providerB)}).WithPayoutDestinations(pitest.Shared())
 
 	res, err := orch.InitiateDepositAttempt(context.Background(), pool, AllowAllDepositKYCGate{}, MockCredentialResolver{}, InitiateDepositParams{
 		Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
@@ -119,7 +120,7 @@ func TestSweeper_InteractiveCreatedAttempt_ExpiresAfterPresenceWindow(t *testing
 	f := seedOrchFixture(t, pool)
 	provider := NewMockProvider("mock-psp-sw-c", "EUR")
 	registerCapability(t, pool, f, provider, 100)
-	orch := NewOrchestrator(map[string]PaymentProvider{"mock-psp-sw-c": provider}, MultiWebhookCredentialResolver{"mock-psp-sw-c": NewMockWebhookCredentials(provider)})
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-psp-sw-c": provider}, MultiWebhookCredentialResolver{"mock-psp-sw-c": NewMockWebhookCredentials(provider)}).WithPayoutDestinations(pitest.Shared())
 
 	intentID := insertRawDepositIntent(t, pool, f, "pending")
 	attemptID := insertRawCreatedAttempt(t, pool, f.tenantID, intentID, true /* interactive */, time.Now().Add(-time.Hour))

@@ -40,6 +40,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Diansalas/igaming-platform/internal/db"
+	"github.com/Diansalas/igaming-platform/internal/payoutinstrument/pitest"
 )
 
 // testEnvWithLockTimeout is testEnv (server_integration_test.go) with
@@ -107,11 +108,12 @@ func TestRequestWithdrawalHandler_KYCStoreOutageReturns503(t *testing.T) {
 	decisionsBefore := countRows(t, pool, tenant.ID, `SELECT count(*) FROM kyc_enforcement_decisions WHERE tenant_id = $1 AND player_account_id = $2`, tenant.ID, player.ID)
 	auditBefore := countRows(t, pool, tenant.ID, `SELECT count(*) FROM audit_log WHERE action = 'kyc.enforcement_denied'`)
 
+	instrument := pitest.Bind(t, pool, tenant.ID, player.ID, "EUR").String() // before the table lock
 	release := lockKYCVerificationsTable(t, pool)
 	defer release()
 
 	resp := postJSON(t, srv, "/v1/me/withdrawals", player.Tokens.AccessToken, map[string]any{
-		"asset_code": "EUR", "amount": 500, "idempotency_key": uuid.NewString(),
+		"asset_code": "EUR", "amount": 500, "idempotency_key": uuid.NewString(), "payout_instrument_id": instrument,
 	})
 	release()
 

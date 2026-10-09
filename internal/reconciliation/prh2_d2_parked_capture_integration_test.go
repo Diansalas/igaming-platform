@@ -40,6 +40,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Diansalas/igaming-platform/internal/payments"
+	"github.com/Diansalas/igaming-platform/internal/payoutinstrument/pitest"
 	"github.com/Diansalas/igaming-platform/internal/providerref"
 	"github.com/Diansalas/igaming-platform/internal/reconciliation/statement"
 )
@@ -121,7 +122,7 @@ func newD2World(t *testing.T) *d2World {
 	w := &payWorld{pool: pool, f: seedFixture(t, pool), mockA: mp}
 	w.orch = payments.NewOrchestrator(
 		map[string]payments.PaymentProvider{payProvA: p},
-		payments.MultiWebhookCredentialResolver{payProvA: payments.NewMockWebhookCredentials(mp)})
+		payments.MultiWebhookCredentialResolver{payProvA: payments.NewMockWebhookCredentials(mp)}).WithPayoutDestinations(pitest.Shared())
 	w.registerCapability(t, p, 10)
 	w.srcA = payments.NewMockStatementSource(mp, payments.MockCredentialResolver{})
 	return &d2World{payWorld: w, p: p}

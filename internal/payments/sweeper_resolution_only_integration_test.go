@@ -18,6 +18,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Diansalas/igaming-platform/internal/db"
+	"github.com/Diansalas/igaming-platform/internal/payoutinstrument/pitest"
 	"github.com/Diansalas/igaming-platform/internal/withdrawal"
 )
 
@@ -145,7 +146,7 @@ func TestSweeperLoop_NonActiveTenant_NoCascadeChild(t *testing.T) {
 	provB.AcceptAllAmounts = true
 	orch := NewOrchestrator(
 		map[string]PaymentProvider{provA.providerID: provA, provB.providerID: provB},
-		MultiWebhookCredentialResolver{provA.providerID: NewMockWebhookCredentials(provA.MockProvider), provB.providerID: NewMockWebhookCredentials(provB.MockProvider)})
+		MultiWebhookCredentialResolver{provA.providerID: NewMockWebhookCredentials(provA.MockProvider), provB.providerID: NewMockWebhookCredentials(provB.MockProvider)}).WithPayoutDestinations(pitest.Shared())
 	fNA, fAct := seedOrchFixture(t, pool), seedOrchFixture(t, pool)
 	var atts [2]PaymentAttempt
 	for i, f := range []orchFixture{fNA, fAct} {
@@ -207,7 +208,7 @@ func TestSweeperLoop_NonActiveTenant_PayoutResolutionOnly(t *testing.T) {
 		if err != nil {
 			t.Fatalf("claim ambiguous: %v", err)
 		}
-		if err := ApplyPayoutResult(context.Background(), pool, f.tenantID, wrA.ID, claimA.Attempt, GateResult[WithdrawResult]{Class: ErrorClassAmbiguous}, EvidenceSync); err != nil {
+		if err := ApplyPayoutResult(context.Background(), pool, f.tenantID, wrA.ID, claimA.Attempt, GateResult[WithdrawResult]{Class: ErrorClassAmbiguous}, EvidenceSync, WithDestinations(pitest.Shared())); err != nil {
 			t.Fatalf("apply ambiguous: %v", err)
 		}
 		dueNow(t, pool, f.tenantID, claimA.Attempt.ID)
@@ -218,8 +219,8 @@ func TestSweeperLoop_NonActiveTenant_PayoutResolutionOnly(t *testing.T) {
 		if err != nil {
 			t.Fatalf("claim pending: %v", err)
 		}
-		gr := DispatchWithdraw(context.Background(), pool, MockCredentialResolver{}, spy, claimP.Attempt)
-		if err := ApplyPayoutResult(context.Background(), pool, f.tenantID, wrP.ID, claimP.Attempt, gr, EvidenceSync); err != nil {
+		gr := DispatchWithdraw(context.Background(), pool, MockCredentialResolver{}, spy, claimP.Attempt, WithDestinations(pitest.Shared()))
+		if err := ApplyPayoutResult(context.Background(), pool, f.tenantID, wrP.ID, claimP.Attempt, gr, EvidenceSync, WithDestinations(pitest.Shared())); err != nil {
 			t.Fatalf("apply pending: %v", err)
 		}
 		pending[i] = mustGetAttempt(t, pool, f.tenantID, claimP.Attempt.ID)
@@ -386,7 +387,7 @@ func TestSweeperLoop_TenantFaultIsolation_PanicInOneTenantDoesNotStopOthers(t *t
 			bad, good := newLoopProvider("mock-psp-lp-bad"), newLoopProvider("mock-psp-lp-good")
 			orch := NewOrchestrator(
 				map[string]PaymentProvider{bad.providerID: bad, good.providerID: good},
-				MultiWebhookCredentialResolver{bad.providerID: NewMockWebhookCredentials(bad.MockProvider), good.providerID: NewMockWebhookCredentials(good.MockProvider)})
+				MultiWebhookCredentialResolver{bad.providerID: NewMockWebhookCredentials(bad.MockProvider), good.providerID: NewMockWebhookCredentials(good.MockProvider)}).WithPayoutDestinations(pitest.Shared())
 			fBad, fGood := seedOrchFixture(t, pool), seedOrchFixture(t, pool)
 			registerCapability(t, pool, fBad, bad, 100)
 			registerCapability(t, pool, fGood, good, 100)

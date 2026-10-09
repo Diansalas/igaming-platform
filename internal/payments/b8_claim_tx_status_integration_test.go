@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Diansalas/igaming-platform/internal/db"
+	"github.com/Diansalas/igaming-platform/internal/payoutinstrument/pitest"
 )
 
 // insertRawDepositIntentAmount / insertRawCreatedAttemptAmount: like the shared raw helpers
@@ -154,7 +155,7 @@ func TestB8_CascadeChildNotInsertedWhenSuspendedDuringProviderCall(t *testing.T)
 			provNA.providerID:  NewMockWebhookCredentials(provNA.MockProvider),
 			provAct.providerID: NewMockWebhookCredentials(provAct.MockProvider),
 			provB.providerID:   NewMockWebhookCredentials(provB.MockProvider),
-		})
+		}).WithPayoutDestinations(pitest.Shared())
 	fNA, fAct := seedOrchFixture(t, pool), seedOrchFixture(t, pool)
 	var intents [2]uuid.UUID
 	var atts [2]uuid.UUID

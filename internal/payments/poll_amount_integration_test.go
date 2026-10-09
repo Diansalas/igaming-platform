@@ -26,6 +26,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/Diansalas/igaming-platform/internal/db"
+	"github.com/Diansalas/igaming-platform/internal/payoutinstrument/pitest"
 	"github.com/Diansalas/igaming-platform/internal/providerref"
 	"github.com/Diansalas/igaming-platform/internal/withdrawal"
 )
@@ -424,7 +425,7 @@ func newFC4Env(t *testing.T, providerID string) *fc4Env {
 	mp.SetManifest(OperationManifest{SupportsDeposit: true, StatusQuery: "by_provider_reference", IdempotentSubmission: true, SyncSuccessPossible: true})
 	p := &depRefProvider{MockProvider: mp}
 	registerCapability(t, pool, pf.orchFixture, p, 100)
-	orch := NewOrchestrator(map[string]PaymentProvider{providerID: p}, MultiWebhookCredentialResolver{providerID: NewMockWebhookCredentials(mp)})
+	orch := NewOrchestrator(map[string]PaymentProvider{providerID: p}, MultiWebhookCredentialResolver{providerID: NewMockWebhookCredentials(mp)}).WithPayoutDestinations(pitest.Shared())
 	return &fc4Env{depRefEnv: &depRefEnv{pool: pool, f: pf.orchFixture, p: p, orch: orch, id: providerID}, pf: pf}
 }
 

@@ -13,6 +13,7 @@ import (
 
 	"github.com/Diansalas/igaming-platform/internal/alerting"
 	"github.com/Diansalas/igaming-platform/internal/payments"
+	"github.com/Diansalas/igaming-platform/internal/payoutinstrument/pitest"
 	"github.com/Diansalas/igaming-platform/internal/testsupport/alertinject"
 )
 
@@ -34,8 +35,12 @@ func TestIWire_Webhook_ReversalLink_RaisesDetachedP1(t *testing.T) {
 	attemptID := uuid.New()
 	if err := pool.WithTenant(context.Background(), tenant.ID, func(ctx context.Context, tx pgx.Tx) error {
 		wr := uuid.New()
-		if _, err := tx.Exec(ctx, `INSERT INTO withdrawal_requests (id, tenant_id, brand_id, player_account_id, wallet_id, asset_code, amount, state, idempotency_key)
-			VALUES ($1,$2,$3,$4,$5,'EUR',5000,'submitted',$6)`, wr, tenant.ID, brand.ID, player.ID, wallet.ID, "iw-rl-"+wr.String()); err != nil {
+		// B13-B: a LEGACY (NULL-binding) row, as it existed before migration 0126 (the fixture is not about the binding).
+		if err := pitest.WithoutBindingGuard(ctx, tx, func() error {
+			_, err := tx.Exec(ctx, `INSERT INTO withdrawal_requests (id, tenant_id, brand_id, player_account_id, wallet_id, asset_code, amount, state, idempotency_key)
+			VALUES ($1,$2,$3,$4,$5,'EUR',5000,'submitted',$6)`, wr, tenant.ID, brand.ID, player.ID, wallet.ID, "iw-rl-"+wr.String())
+			return err
+		}); err != nil {
 			return err
 		}
 		if _, err := payments.InsertCreatedAttempt(ctx, tx, payments.NewCreatedAttempt{

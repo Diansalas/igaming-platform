@@ -63,6 +63,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/ledger"
 	"github.com/Diansalas/igaming-platform/internal/payments"
+	"github.com/Diansalas/igaming-platform/internal/payoutinstrument/pitest"
 	"github.com/Diansalas/igaming-platform/internal/reconciliation/statement"
 	"github.com/Diansalas/igaming-platform/internal/testsupport/scratchdb"
 )
@@ -431,7 +432,7 @@ func newPayWorldOnPool(t *testing.T, pool *db.Pool) *payWorld {
 		payments.MultiWebhookCredentialResolver{
 			payProvA: payments.NewMockWebhookCredentials(w.mockA),
 			payProvB: payments.NewMockWebhookCredentials(w.mockB),
-		})
+		}).WithPayoutDestinations(pitest.Shared())
 	w.registerCapability(t, w.mockA, 10)
 	w.registerCapability(t, w.mockB, 50)
 	w.srcA = payments.NewMockStatementSource(w.mockA, payments.MockCredentialResolver{})

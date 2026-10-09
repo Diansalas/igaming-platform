@@ -16,6 +16,7 @@ import (
 
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/ledger"
+	"github.com/Diansalas/igaming-platform/internal/payoutinstrument/pitest"
 	"github.com/Diansalas/igaming-platform/internal/withdrawal"
 )
 
@@ -72,16 +73,18 @@ func TestInsufficientFunds_OverDebitRejectedAndSummaryUnchanged(t *testing.T) {
 
 	// One minor unit more than the wallet holds - the smallest possible
 	// over-debit, not a comfortably large one.
+	instrumentID := pitest.Bind(t, pool, f.tenantID, f.playerAccountID, "EUR") // B13-B
 	debitErr := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := withdrawal.RequestWithdrawal(ctx, tx, withdrawal.RequestParams{
-			TenantID:        f.tenantID,
-			BrandID:         f.brandID,
-			PlayerAccountID: f.playerAccountID,
-			PersonID:        f.personID,
-			WalletID:        w.ID,
-			AssetCode:       "EUR",
-			Amount:          101,
-			IdempotencyKey:  "wd-over-balance",
+			TenantID:           f.tenantID,
+			BrandID:            f.brandID,
+			PlayerAccountID:    f.playerAccountID,
+			PersonID:           f.personID,
+			WalletID:           w.ID,
+			AssetCode:          "EUR",
+			Amount:             101,
+			IdempotencyKey:     "wd-over-balance",
+			PayoutInstrumentID: instrumentID, Destinations: pitest.Shared(),
 		})
 		return err
 	})
@@ -95,14 +98,15 @@ func TestInsufficientFunds_OverDebitRejectedAndSummaryUnchanged(t *testing.T) {
 	// not a symptom of an off-by-one that also blocks legitimate debits.
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := withdrawal.RequestWithdrawal(ctx, tx, withdrawal.RequestParams{
-			TenantID:        f.tenantID,
-			BrandID:         f.brandID,
-			PlayerAccountID: f.playerAccountID,
-			PersonID:        f.personID,
-			WalletID:        w.ID,
-			AssetCode:       "EUR",
-			Amount:          100,
-			IdempotencyKey:  "wd-exact-balance",
+			TenantID:           f.tenantID,
+			BrandID:            f.brandID,
+			PlayerAccountID:    f.playerAccountID,
+			PersonID:           f.personID,
+			WalletID:           w.ID,
+			AssetCode:          "EUR",
+			Amount:             100,
+			IdempotencyKey:     "wd-exact-balance",
+			PayoutInstrumentID: instrumentID, Destinations: pitest.Shared(),
 		})
 		return err
 	})

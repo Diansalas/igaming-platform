@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Diansalas/igaming-platform/internal/db"
+	"github.com/Diansalas/igaming-platform/internal/payoutinstrument/pitest"
 )
 
 type h8State struct {
@@ -238,7 +239,7 @@ func TestH8_PhaseC_CascadeChildNotCreatedForInactiveBrand(t *testing.T) {
 			provNA.providerID:  NewMockWebhookCredentials(provNA.MockProvider),
 			provAct.providerID: NewMockWebhookCredentials(provAct.MockProvider),
 			provB.providerID:   NewMockWebhookCredentials(provB.MockProvider),
-		})
+		}).WithPayoutDestinations(pitest.Shared())
 	fNA, fAct := seedOrchFixture(t, pool), seedOrchFixture(t, pool)
 	var intents, atts [2]uuid.UUID
 	for i, f := range []orchFixture{fNA, fAct} {
@@ -295,7 +296,7 @@ func TestH8_PollPath_CascadeChildNotCreatedForInactiveBrand(t *testing.T) {
 	provB.AcceptAllAmounts = true
 	orch := NewOrchestrator(
 		map[string]PaymentProvider{provA.providerID: provA, provB.providerID: provB},
-		MultiWebhookCredentialResolver{provA.providerID: NewMockWebhookCredentials(provA.MockProvider), provB.providerID: NewMockWebhookCredentials(provB.MockProvider)})
+		MultiWebhookCredentialResolver{provA.providerID: NewMockWebhookCredentials(provA.MockProvider), provB.providerID: NewMockWebhookCredentials(provB.MockProvider)}).WithPayoutDestinations(pitest.Shared())
 	fNA, fAct := seedOrchFixture(t, pool), seedOrchFixture(t, pool)
 	var atts [2]PaymentAttempt
 	for i, f := range []orchFixture{fNA, fAct} {

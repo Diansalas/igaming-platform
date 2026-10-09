@@ -29,6 +29,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+
+	"github.com/Diansalas/igaming-platform/internal/payoutinstrument/pitest"
 )
 
 func TestMigration0082_WithdrawalRequestsBrandPinnedToPlayersOwnBrand(t *testing.T) {
@@ -49,12 +51,16 @@ func TestMigration0082_WithdrawalRequestsBrandPinnedToPlayersOwnBrand(t *testing
 	}
 
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx,
-			`INSERT INTO withdrawal_requests
-				(tenant_id, brand_id, player_account_id, wallet_id, asset_code, amount, idempotency_key)
-			 VALUES ($1, $2, $3, $4, 'EUR', 1000, $5)`,
-			f.tenantID, otherBrandID, f.playerAccountID, f.walletID, "mig0082-wrong-brand")
-		return err
+		// B13-B: this attacks the composite brand FK; the BEFORE INSERT binding guard (0126) would
+		// pre-empt it, so it is switched off for this statement (re-enabled in the same tx).
+		return pitest.WithoutBindingGuard(ctx, tx, func() error {
+			_, err := tx.Exec(ctx,
+				`INSERT INTO withdrawal_requests
+					(tenant_id, brand_id, player_account_id, wallet_id, asset_code, amount, idempotency_key)
+				 VALUES ($1, $2, $3, $4, 'EUR', 1000, $5)`,
+				f.tenantID, otherBrandID, f.playerAccountID, f.walletID, "mig0082-wrong-brand")
+			return err
+		})
 	})
 	if err == nil {
 		t.Fatal("expected the composite (player_account_id, tenant_id, brand_id) FK to reject a withdrawal " +
@@ -67,12 +73,14 @@ func TestMigration0082_WithdrawalRequestsBrandPinnedToPlayersOwnBrand(t *testing
 	// The same insert with the player's OWN brand must still succeed -
 	// the constraint must reject misattribution, not ordinary operation.
 	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx,
-			`INSERT INTO withdrawal_requests
-				(tenant_id, brand_id, player_account_id, wallet_id, asset_code, amount, idempotency_key)
-			 VALUES ($1, $2, $3, $4, 'EUR', 1000, $5)`,
-			f.tenantID, f.brandID, f.playerAccountID, f.walletID, "mig0082-right-brand")
-		return err
+		return pitest.WithoutBindingGuard(ctx, tx, func() error {
+			_, err := tx.Exec(ctx,
+				`INSERT INTO withdrawal_requests
+					(tenant_id, brand_id, player_account_id, wallet_id, asset_code, amount, idempotency_key)
+				 VALUES ($1, $2, $3, $4, 'EUR', 1000, $5)`,
+				f.tenantID, f.brandID, f.playerAccountID, f.walletID, "mig0082-right-brand")
+			return err
+		})
 	}); err != nil {
 		t.Fatalf("expected a correctly-branded withdrawal request to remain insertable, got: %v", err)
 	}

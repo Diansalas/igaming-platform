@@ -26,6 +26,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/auth"
 	"github.com/Diansalas/igaming-platform/internal/identityresolution"
 	"github.com/Diansalas/igaming-platform/internal/payments"
+	"github.com/Diansalas/igaming-platform/internal/payoutinstrument/pitest"
 )
 
 // newAuditAPI mirrors newKSAPI exactly, except it lets a test inject
@@ -42,7 +43,7 @@ func newAuditAPI(t *testing.T, resolver audit.PresentationResolver) *ksAPI {
 	issuer := auth.NewIssuer(keys, "audit-test", "audit-test")
 	mock := payments.NewMockProvider("mock", "EUR", "USD")
 	orchestrator := payments.NewOrchestrator(map[string]payments.PaymentProvider{"mock": mock},
-		payments.MultiWebhookCredentialResolver{"mock": payments.NewMockWebhookCredentials(mock)})
+		payments.MultiWebhookCredentialResolver{"mock": payments.NewMockWebhookCredentials(mock)}).WithPayoutDestinations(pitest.Shared())
 	logBuf := &syncBuffer{}
 	srv := httptest.NewServer(New(Deps{
 		Logger:                    slog.New(slog.NewTextHandler(io.MultiWriter(os.Stderr, logBuf), &slog.HandlerOptions{Level: slog.LevelError})),

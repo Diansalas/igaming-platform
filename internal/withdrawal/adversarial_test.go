@@ -19,6 +19,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/Diansalas/igaming-platform/internal/db"
+	"github.com/Diansalas/igaming-platform/internal/payoutinstrument/pitest"
 )
 
 // pgRLSViolationCode is the Postgres SQLSTATE for "new row violates
@@ -108,13 +109,17 @@ func TestCrossTenant_WithdrawalRequestsRLSBlocksReadAndWrite(t *testing.T) {
 	// claiming to belong to tenant B, even supplying tenant B's own real
 	// brand/player/wallet ids.
 	err = runTx(pool, fA.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx,
-			`INSERT INTO withdrawal_requests
-				(id, tenant_id, brand_id, player_account_id, wallet_id, asset_code, amount, idempotency_key)
-			 VALUES ($1, $2, $3, $4, $5, 'EUR', 100, 'forged-cross-tenant-key')`,
-			uuid.New(), fB.tenantID, fB.brandID, fB.playerAccountID, fB.walletID,
-		)
-		return err
+		// B13-B: this attacks RLS WITH CHECK; the BEFORE INSERT binding guard (migration 0126) would
+		// pre-empt it, so it is switched off for this one statement (re-enabled in the same tx).
+		return pitest.WithoutBindingGuard(ctx, tx, func() error {
+			_, err := tx.Exec(ctx,
+				`INSERT INTO withdrawal_requests
+					(id, tenant_id, brand_id, player_account_id, wallet_id, asset_code, amount, idempotency_key)
+				 VALUES ($1, $2, $3, $4, $5, 'EUR', 100, 'forged-cross-tenant-key')`,
+				uuid.New(), fB.tenantID, fB.brandID, fB.playerAccountID, fB.walletID,
+			)
+			return err
+		})
 	})
 	assertRLSViolation(t, err)
 }

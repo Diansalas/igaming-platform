@@ -20,6 +20,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Diansalas/igaming-platform/internal/db"
+	"github.com/Diansalas/igaming-platform/internal/payoutinstrument/pitest"
 	"github.com/Diansalas/igaming-platform/internal/providercred"
 )
 
@@ -66,7 +67,7 @@ func TestInitiateDepositAttempt_PoolThreadedToResolver(t *testing.T) {
 	f := seedOrchFixture(t, pool)
 	provider := NewMockProvider("mock-psp-pool-a", "EUR")
 	registerCapability(t, pool, f, provider, 100)
-	orch := NewOrchestrator(map[string]PaymentProvider{"mock-psp-pool-a": provider}, MultiWebhookCredentialResolver{"mock-psp-pool-a": NewMockWebhookCredentials(provider)})
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-psp-pool-a": provider}, MultiWebhookCredentialResolver{"mock-psp-pool-a": NewMockWebhookCredentials(provider)}).WithPayoutDestinations(pitest.Shared())
 
 	resolver := &poolRecordingResolver{}
 	res, err := orch.InitiateDepositAttempt(context.Background(), pool, AllowAllDepositKYCGate{}, resolver, InitiateDepositParams{
@@ -96,7 +97,7 @@ func TestDriveCreatedAttemptCascade_PoolThreadedToResolver(t *testing.T) {
 	orch := NewOrchestrator(
 		map[string]PaymentProvider{"mock-psp-pool-b1": declining, "mock-psp-pool-b2": accepting},
 		MultiWebhookCredentialResolver{"mock-psp-pool-b1": NewMockWebhookCredentials(declining), "mock-psp-pool-b2": NewMockWebhookCredentials(accepting)},
-	)
+	).WithPayoutDestinations(pitest.Shared())
 
 	resolver := &poolRecordingResolver{}
 	res, err := orch.InitiateDepositAttempt(context.Background(), pool, AllowAllDepositKYCGate{}, resolver, InitiateDepositParams{
@@ -131,7 +132,7 @@ func TestDispatchWithdraw_PoolThreadedToResolver(t *testing.T) {
 		PaymentMethod: "bank_transfer", AssetCode: "EUR", Amount: 500,
 	}
 	resolver := &poolRecordingResolver{}
-	gr := DispatchWithdraw(context.Background(), pool, resolver, provider, attempt)
+	gr := DispatchWithdraw(context.Background(), pool, resolver, provider, attempt, WithDestinations(pitest.Shared()))
 	if gr.Class == ErrorClassNotSent && !gr.Attempted {
 		// A pre-flight gate refusal (e.g. a binding mismatch) would mean
 		// the resolver was never reached the way this test intends -
@@ -153,7 +154,7 @@ func TestPollPayoutStatus_PoolThreadedToResolver(t *testing.T) {
 	f := seedPayoutFixture(t, pool, 100_000, true)
 	provider := NewMockProvider("mock-psp-pool-d", "EUR")
 	registerCapability(t, pool, f.orchFixture, provider, 100)
-	orch := NewOrchestrator(map[string]PaymentProvider{"mock-psp-pool-d": provider}, MultiWebhookCredentialResolver{"mock-psp-pool-d": NewMockWebhookCredentials(provider)})
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-psp-pool-d": provider}, MultiWebhookCredentialResolver{"mock-psp-pool-d": NewMockWebhookCredentials(provider)}).WithPayoutDestinations(pitest.Shared())
 
 	wr := approvedWithdrawal(t, pool, f, MockAmountAmbiguous, "pool-thread-payout-poll")
 	claim, err := orch.ClaimForDispatch(context.Background(), pool, KYCEnforcementPayoutGate{}, f.tenantID, wr.ID, "bank_transfer", testSubmitActor())
@@ -162,8 +163,8 @@ func TestPollPayoutStatus_PoolThreadedToResolver(t *testing.T) {
 	}
 
 	dispatchResolver := &poolRecordingResolver{}
-	gr := DispatchWithdraw(context.Background(), pool, dispatchResolver, provider, claim.Attempt)
-	if err := ApplyPayoutResult(context.Background(), pool, f.tenantID, wr.ID, claim.Attempt, gr, EvidenceSync); err != nil {
+	gr := DispatchWithdraw(context.Background(), pool, dispatchResolver, provider, claim.Attempt, WithDestinations(pitest.Shared()))
+	if err := ApplyPayoutResult(context.Background(), pool, f.tenantID, wr.ID, claim.Attempt, gr, EvidenceSync, WithDestinations(pitest.Shared())); err != nil {
 		t.Fatalf("ApplyPayoutResult: %v", err)
 	}
 	dispatchResolver.assertAllPoolsAre(t, pool)
@@ -196,7 +197,7 @@ func TestSweeperProcessViaQueryStatus_PoolThreadedToResolver(t *testing.T) {
 	f := seedOrchFixture(t, pool)
 	provider := NewMockProvider("mock-psp-pool-e", "EUR")
 	registerCapability(t, pool, f, provider, 100)
-	orch := NewOrchestrator(map[string]PaymentProvider{"mock-psp-pool-e": provider}, MultiWebhookCredentialResolver{"mock-psp-pool-e": NewMockWebhookCredentials(provider)})
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-psp-pool-e": provider}, MultiWebhookCredentialResolver{"mock-psp-pool-e": NewMockWebhookCredentials(provider)}).WithPayoutDestinations(pitest.Shared())
 
 	resolver := &poolRecordingResolver{}
 	res, err := orch.InitiateDepositAttempt(context.Background(), pool, AllowAllDepositKYCGate{}, resolver, InitiateDepositParams{

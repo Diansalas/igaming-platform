@@ -14,6 +14,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+
+	"github.com/Diansalas/igaming-platform/internal/payoutinstrument/pitest"
 )
 
 // LF-8: a lease that expires mid-pass must still yield ONE posting. Instance A is
@@ -157,7 +159,7 @@ func TestSweeperLoop_StaleClaimantCannotRevertFreshClaim_TokenCAS(t *testing.T) 
 	}
 	staleA := claimA.Attempt // submitting, token A
 	// A's NotSent is applied (legitimately) and the attempt is back to created...
-	if err := ApplyPayoutResult(context.Background(), pool, f.tenantID, wr.ID, staleA, GateResult[WithdrawResult]{Class: ErrorClassNotSent}, EvidenceSync); err != nil {
+	if err := ApplyPayoutResult(context.Background(), pool, f.tenantID, wr.ID, staleA, GateResult[WithdrawResult]{Class: ErrorClassNotSent}, EvidenceSync, WithDestinations(pitest.Shared())); err != nil {
 		t.Fatalf("apply A NotSent: %v", err)
 	}
 	// ...and B re-claims it with a fresh token (T2).
@@ -168,7 +170,7 @@ func TestSweeperLoop_StaleClaimantCannotRevertFreshClaim_TokenCAS(t *testing.T) 
 		t.Fatalf("claim B: %v", err)
 	}
 	// A's stale NotSent now arrives a second time (a lapsed-lease double run).
-	_ = ApplyPayoutResult(context.Background(), pool, f.tenantID, wr.ID, staleA, GateResult[WithdrawResult]{Class: ErrorClassNotSent}, EvidenceSync)
+	_ = ApplyPayoutResult(context.Background(), pool, f.tenantID, wr.ID, staleA, GateResult[WithdrawResult]{Class: ErrorClassNotSent}, EvidenceSync, WithDestinations(pitest.Shared()))
 	cur := mustGetAttempt(t, pool, f.tenantID, staleA.ID)
 	if cur.State != AttemptSubmitting || cur.ClaimToken == nil || *cur.ClaimToken != tokenB {
 		t.Fatalf("a stale claimant reverted a fresh claim: state=%s token=%v (want submitting/%s)", cur.State, cur.ClaimToken, tokenB)

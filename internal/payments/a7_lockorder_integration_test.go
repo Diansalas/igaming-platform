@@ -31,6 +31,7 @@ import (
 
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/identity"
+	"github.com/Diansalas/igaming-platform/internal/payoutinstrument/pitest"
 	"github.com/Diansalas/igaming-platform/internal/rg"
 	"github.com/Diansalas/igaming-platform/internal/withdrawal"
 )
@@ -144,7 +145,7 @@ func TestA7_4_N1_SweeperDepositReclaimVsSelfExclusion_SamePerson(t *testing.T) {
 	f := seedOrchFixture(t, pool)
 	spy := &a7DepositCallCountingProvider{MockProvider: NewMockProvider("a7-n1", "EUR")}
 	registerCapability(t, pool, f, spy, 100)
-	orch := NewOrchestrator(map[string]PaymentProvider{"a7-n1": spy}, MultiWebhookCredentialResolver{"a7-n1": NewMockWebhookCredentials(spy.MockProvider)})
+	orch := NewOrchestrator(map[string]PaymentProvider{"a7-n1": spy}, MultiWebhookCredentialResolver{"a7-n1": NewMockWebhookCredentials(spy.MockProvider)}).WithPayoutDestinations(pitest.Shared())
 
 	intentID := insertRawDepositIntent(t, pool, f, "pending")
 	attemptID := insertRawCreatedAttempt(t, pool, f.tenantID, intentID, false, time.Now())
@@ -259,7 +260,7 @@ func TestA7_5a_SweeperDepositClaim_RGGateBlocksBeforeParentLock(t *testing.T) {
 	f := seedOrchFixture(t, pool)
 	spy := &a7DepositCallCountingProvider{MockProvider: NewMockProvider("a7-5a", "EUR")}
 	registerCapability(t, pool, f, spy, 100)
-	orch := NewOrchestrator(map[string]PaymentProvider{"a7-5a": spy}, MultiWebhookCredentialResolver{"a7-5a": NewMockWebhookCredentials(spy.MockProvider)})
+	orch := NewOrchestrator(map[string]PaymentProvider{"a7-5a": spy}, MultiWebhookCredentialResolver{"a7-5a": NewMockWebhookCredentials(spy.MockProvider)}).WithPayoutDestinations(pitest.Shared())
 
 	intentID := insertRawDepositIntent(t, pool, f, "pending")
 	_ = insertRawCreatedAttempt(t, pool, f.tenantID, intentID, false, time.Now())
@@ -324,7 +325,7 @@ func TestA7_5b_ClaimBatch_SkipLockedNeverWaitsOnALockedAttemptRow(t *testing.T) 
 	f := seedOrchFixture(t, pool)
 	provider := NewMockProvider("a7-5b", "EUR")
 	registerCapability(t, pool, f, provider, 100)
-	orch := NewOrchestrator(map[string]PaymentProvider{"a7-5b": provider}, MultiWebhookCredentialResolver{"a7-5b": NewMockWebhookCredentials(provider)})
+	orch := NewOrchestrator(map[string]PaymentProvider{"a7-5b": provider}, MultiWebhookCredentialResolver{"a7-5b": NewMockWebhookCredentials(provider)}).WithPayoutDestinations(pitest.Shared())
 
 	lockedIntentID := insertRawDepositIntent(t, pool, f, "pending")
 	freeIntentID := insertRawDepositIntent(t, pool, f, "pending")
@@ -392,15 +393,15 @@ func TestA7_1b_SweeperClaimVsCallbackPhaseC_SameWithdrawal(t *testing.T) {
 	f := seedPayoutFixture(t, pool, 100_000, true)
 	provider := NewMockProvider("a7-1b", "EUR")
 	registerCapability(t, pool, f.orchFixture, provider, 100)
-	orch := NewOrchestrator(map[string]PaymentProvider{"a7-1b": provider}, MultiWebhookCredentialResolver{"a7-1b": NewMockWebhookCredentials(provider)})
+	orch := NewOrchestrator(map[string]PaymentProvider{"a7-1b": provider}, MultiWebhookCredentialResolver{"a7-1b": NewMockWebhookCredentials(provider)}).WithPayoutDestinations(pitest.Shared())
 
 	wr := approvedWithdrawal(t, pool, f, MockAmountAmbiguous, "a7-1b")
 	claim, err := orch.ClaimForDispatch(context.Background(), pool, KYCEnforcementPayoutGate{}, f.tenantID, wr.ID, "bank_transfer", testSubmitActor())
 	if err != nil {
 		t.Fatalf("ClaimForDispatch: %v", err)
 	}
-	gr := DispatchWithdraw(context.Background(), nil, MockCredentialResolver{}, provider, claim.Attempt)
-	if err := ApplyPayoutResult(context.Background(), pool, f.tenantID, wr.ID, claim.Attempt, gr, EvidenceSync); err != nil {
+	gr := DispatchWithdraw(context.Background(), pool, MockCredentialResolver{}, provider, claim.Attempt, WithDestinations(pitest.Shared()))
+	if err := ApplyPayoutResult(context.Background(), pool, f.tenantID, wr.ID, claim.Attempt, gr, EvidenceSync, WithDestinations(pitest.Shared())); err != nil {
 		t.Fatalf("ApplyPayoutResult: %v", err)
 	}
 	ambiguous := mustGetAttempt(t, pool, f.tenantID, claim.Attempt.ID)
@@ -494,7 +495,7 @@ func TestA7_3_DeferredReceiptAppliedVsFreshCallback_SameAttempt(t *testing.T) {
 	f := seedOrchFixture(t, pool)
 	provider := NewMockProvider("a7-3", "EUR")
 	registerCapability(t, pool, f, provider, 100)
-	orch := NewOrchestrator(map[string]PaymentProvider{"a7-3": &refLessAmbiguousProvider{provider}}, MultiWebhookCredentialResolver{"a7-3": NewMockWebhookCredentials(provider)})
+	orch := NewOrchestrator(map[string]PaymentProvider{"a7-3": &refLessAmbiguousProvider{provider}}, MultiWebhookCredentialResolver{"a7-3": NewMockWebhookCredentials(provider)}).WithPayoutDestinations(pitest.Shared())
 
 	res, err := orch.InitiateDepositAttempt(context.Background(), pool, AllowAllDepositKYCGate{}, MockCredentialResolver{}, InitiateDepositParams{
 		Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},

@@ -20,6 +20,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Diansalas/igaming-platform/internal/db"
+	"github.com/Diansalas/igaming-platform/internal/payoutinstrument/pitest"
 )
 
 // h8RuntimeOnScratch connects the runtime role (igaming_runtime) to the scratch database behind owner.
@@ -120,7 +121,7 @@ func TestH8_Scratch_PhaseC_BrandReadError_RollsBackDecline(t *testing.T) {
 	provB.AcceptAllAmounts = true
 	orch := NewOrchestrator(
 		map[string]PaymentProvider{provA.providerID: provA, provB.providerID: provB},
-		MultiWebhookCredentialResolver{provA.providerID: NewMockWebhookCredentials(provA.MockProvider), provB.providerID: NewMockWebhookCredentials(provB.MockProvider)})
+		MultiWebhookCredentialResolver{provA.providerID: NewMockWebhookCredentials(provA.MockProvider), provB.providerID: NewMockWebhookCredentials(provB.MockProvider)}).WithPayoutDestinations(pitest.Shared())
 	f := seedOrchFixture(t, owner)
 	registerCapability(t, owner, f, provA, 100)
 	registerCapability(t, owner, f, provB, 200)
@@ -163,7 +164,7 @@ func TestH8_Scratch_PollPath_BrandReadError_RollsBackDecline(t *testing.T) {
 	provB.AcceptAllAmounts = true
 	orch := NewOrchestrator(
 		map[string]PaymentProvider{provA.providerID: provA, provB.providerID: provB},
-		MultiWebhookCredentialResolver{provA.providerID: NewMockWebhookCredentials(provA.MockProvider), provB.providerID: NewMockWebhookCredentials(provB.MockProvider)})
+		MultiWebhookCredentialResolver{provA.providerID: NewMockWebhookCredentials(provA.MockProvider), provB.providerID: NewMockWebhookCredentials(provB.MockProvider)}).WithPayoutDestinations(pitest.Shared())
 	f := seedOrchFixture(t, owner)
 	registerCapability(t, owner, f, provA, 100)
 	registerCapability(t, owner, f, provB, 200)

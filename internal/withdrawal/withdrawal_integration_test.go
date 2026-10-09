@@ -16,6 +16,7 @@ import (
 
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/ledger"
+	"github.com/Diansalas/igaming-platform/internal/payoutinstrument/pitest"
 )
 
 func testPool(t *testing.T) *db.Pool {
@@ -44,6 +45,9 @@ type fixture struct {
 	walletID        uuid.UUID
 	cashAccountID   uuid.UUID
 	holdAccountID   uuid.UUID
+	// instrumentID is the verified MOCK payout instrument every fixture binds (B13-B: since migration
+	// 0126 a withdrawal cannot exist without one, in MOCK as well).
+	instrumentID uuid.UUID
 }
 
 // seedFixture creates the fixture and, if initialBalance > 0, deposits
@@ -163,6 +167,7 @@ func seedFixtureRaw(t *testing.T, pool *db.Pool, initialBalance int64, withVerif
 	if err != nil {
 		t.Fatalf("seed tenant-scoped fixture: %v", err)
 	}
+	f.instrumentID = pitest.Bind(t, pool, f.tenantID, f.playerAccountID, "EUR")
 	return f
 }
 
@@ -195,10 +200,11 @@ func requestWithdrawal(t *testing.T, pool *db.Pool, f fixture, amount int64, ide
 			TenantID:        f.tenantID,
 			BrandID:         f.brandID,
 			PlayerAccountID: f.playerAccountID, PersonID: f.personID,
-			WalletID:       f.walletID,
-			AssetCode:      "EUR",
-			Amount:         amount,
-			IdempotencyKey: idemKey,
+			WalletID:           f.walletID,
+			AssetCode:          "EUR",
+			Amount:             amount,
+			IdempotencyKey:     idemKey,
+			PayoutInstrumentID: f.instrumentID, Destinations: pitest.Shared(),
 		})
 		if errors.As(err, &kycDenied) {
 			return nil

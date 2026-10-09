@@ -19,6 +19,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/apierror"
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/identity"
+	"github.com/Diansalas/igaming-platform/internal/payoutinstrument/pitest"
 )
 
 func hsecSetTenantStatus(t *testing.T, pool *db.Pool, tenantID uuid.UUID, status string) {
@@ -132,8 +133,9 @@ func TestHSEC11_HTTP_WithdrawalRequest_NonActiveRefused_RetryAfterReactivation(t
 			fundWallet(t, pool, tenant.ID, brand.ID, player.ID, "EUR", 1_000_000)
 			mustApproveKYCForWithdrawal(t, pool, tenant.ID, brand.ID, player.ID)
 
+			instrument := pitest.Bind(t, pool, tenant.ID, player.ID, "EUR").String()
 			resp := postJSON(t, srv, "/v1/me/withdrawals", player.Tokens.AccessToken, map[string]any{
-				"asset_code": "EUR", "amount": 4000, "idempotency_key": "ctl-" + uuid.NewString(),
+				"asset_code": "EUR", "amount": 4000, "idempotency_key": "ctl-" + uuid.NewString(), "payout_instrument_id": instrument,
 			})
 			if resp.StatusCode != http.StatusCreated {
 				t.Fatalf("control: want 201, got %d", resp.StatusCode)
@@ -144,7 +146,7 @@ func TestHSEC11_HTTP_WithdrawalRequest_NonActiveRefused_RetryAfterReactivation(t
 
 			c.set(t, pool, tenant.ID, brand.ID)
 			key := "retry-" + uuid.NewString()
-			body := map[string]any{"asset_code": "EUR", "amount": 4000, "idempotency_key": key}
+			body := map[string]any{"asset_code": "EUR", "amount": 4000, "idempotency_key": key, "payout_instrument_id": instrument}
 			assertNotActiveRefusal(t, postJSON(t, srv, "/v1/me/withdrawals", player.Tokens.AccessToken, body), "withdrawal request")
 			if n := countRows(t, pool, tenant.ID, `SELECT count(*) FROM withdrawal_requests WHERE tenant_id = $1`, tenant.ID); n != reqs {
 				t.Fatalf("withdrawal request created while refused: %d -> %d", reqs, n)
@@ -194,7 +196,7 @@ func TestHSEC11_HTTP_StaffSubmit_NonActiveRefused_StaysApproved_ThenSubmits(t *t
 			ledger := countRows(t, pool, tenant.ID, `SELECT count(*) FROM ledger_transactions WHERE tenant_id = $1`, tenant.ID)
 
 			c.set(t, pool, tenant.ID, brand.ID)
-			assertNotActiveRefusal(t, postJSON(t, srv, "/v1/admin/withdrawals/"+wr.ID.String()+"/submit", financeToken.AccessToken, map[string]string{"payment_method": "card"}), "submit")
+			assertNotActiveRefusal(t, postJSON(t, srv, "/v1/admin/withdrawals/"+wr.ID.String()+"/submit", financeToken.AccessToken, map[string]string{"payment_method": "bank_transfer"}), "submit")
 			if n := countRows(t, pool, tenant.ID, `SELECT count(*) FROM withdrawal_requests WHERE id = $1 AND state = 'approved'`, wr.ID); n != 1 {
 				t.Fatal("the request must stay approved")
 			}
@@ -206,7 +208,7 @@ func TestHSEC11_HTTP_StaffSubmit_NonActiveRefused_StaysApproved_ThenSubmits(t *t
 			}
 
 			c.reset(t, pool, tenant.ID, brand.ID)
-			resp = postJSON(t, srv, "/v1/admin/withdrawals/"+wr.ID.String()+"/submit", financeToken.AccessToken, map[string]string{"payment_method": "card"})
+			resp = postJSON(t, srv, "/v1/admin/withdrawals/"+wr.ID.String()+"/submit", financeToken.AccessToken, map[string]string{"payment_method": "bank_transfer"})
 			_ = resp.Body.Close()
 			if resp.StatusCode != http.StatusOK {
 				t.Fatalf("submit after reactivation: want 200, got %d", resp.StatusCode)

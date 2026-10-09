@@ -16,6 +16,7 @@ import (
 
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/identity"
+	"github.com/Diansalas/igaming-platform/internal/payoutinstrument/pitest"
 )
 
 // TestRequestWithdrawalHandler_KYCDenyCommitsExactlyOnceAndNothingElse
@@ -40,6 +41,7 @@ func TestRequestWithdrawalHandler_KYCDenyCommitsExactlyOnceAndNothingElse(t *tes
 
 	resp := postJSON(t, srv, "/v1/me/withdrawals", player.Tokens.AccessToken, map[string]any{
 		"asset_code": "EUR", "amount": 500, "idempotency_key": uuid.NewString(),
+		"payout_instrument_id": pitest.Bind(t, pool, tenant.ID, player.ID, "EUR").String(),
 	})
 	if resp.StatusCode != http.StatusConflict {
 		t.Fatalf("expected 409 for an unverified player's withdrawal request, got %d", resp.StatusCode)

@@ -49,6 +49,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/Diansalas/igaming-platform/internal/ledger"
+	"github.com/Diansalas/igaming-platform/internal/payoutinstrument/pitest"
 	"github.com/Diansalas/igaming-platform/internal/providerref"
 	"github.com/Diansalas/igaming-platform/internal/reconciliation"
 	"github.com/Diansalas/igaming-platform/internal/reconciliation/statement"
@@ -157,7 +158,7 @@ func (w *k3World) b11Dispatch(att PaymentAttempt, script func(WithdrawRequest) W
 	if !ok {
 		w.t.Fatalf("provider %s not registered", *att.ProviderID)
 	}
-	return DispatchWithdraw(context.Background(), nil, MockCredentialResolver{}, adapter, att)
+	return DispatchWithdraw(context.Background(), w.pool, MockCredentialResolver{}, adapter, att, WithDestinations(pitest.Shared()))
 }
 
 func (w *k3World) b11Finish(shape string, wr withdrawal.WithdrawalRequest, stale PaymentAttempt, ref string) *b11Parked {
@@ -193,7 +194,7 @@ func (w *k3World) b11ParkSync(amount int64, outcome Outcome) *b11Parked {
 	if gr.Class != ErrorClassProviderRefInvalid {
 		w.t.Fatalf("setup: want class %s, got %s", ErrorClassProviderRefInvalid, gr.Class)
 	}
-	if err := ApplyPayoutResult(context.Background(), w.pool, w.f.tenantID, wr.ID, att, gr, EvidenceSync); err != nil {
+	if err := ApplyPayoutResult(context.Background(), w.pool, w.f.tenantID, wr.ID, att, gr, EvidenceSync, WithDestinations(pitest.Shared())); err != nil {
 		w.t.Fatalf("park (sync): %v", err)
 	}
 	return w.b11Finish("sync", wr, att, "")
@@ -319,13 +320,13 @@ func TestB11_Park_Retry_Idempotent_OneAudit(t *testing.T) {
 	p := w.b11ParkSync(300, OutcomePending)
 	gr := GateResult[WithdrawResult]{Class: ErrorClassProviderRefInvalid, Err: providerref.ValidatePaymentReference("withdraw.provider_reference", b11Bad())}
 	for i := 0; i < 3; i++ {
-		if err := ApplyPayoutResult(context.Background(), w.pool, w.f.tenantID, p.wr.ID, p.stale, gr, EvidenceSync); err != nil {
+		if err := ApplyPayoutResult(context.Background(), w.pool, w.f.tenantID, p.wr.ID, p.stale, gr, EvidenceSync, WithDestinations(pitest.Shared())); err != nil {
 			t.Fatalf("redelivery %d: %v", i, err)
 		}
 	}
 	// A DIFFERENT closed reason arriving later must not replace the first one.
 	gr2 := GateResult[WithdrawResult]{Class: ErrorClassProviderRefInvalid, Err: providerref.ValidatePaymentReference("withdraw.provider_reference", strings.Repeat("x", providerref.MaxBytes+1))}
-	if err := ApplyPayoutResult(context.Background(), w.pool, w.f.tenantID, p.wr.ID, p.stale, gr2, EvidenceSync); err != nil {
+	if err := ApplyPayoutResult(context.Background(), w.pool, w.f.tenantID, p.wr.ID, p.stale, gr2, EvidenceSync, WithDestinations(pitest.Shared())); err != nil {
 		t.Fatalf("second reason: %v", err)
 	}
 	w.b11Held(p, "after retries")
@@ -341,14 +342,14 @@ func TestB11_Park_AdapterErrorWithHostileReference_Parks(t *testing.T) {
 	wr, att := w.b11Claim(300)
 	bad := b11Bad()
 	adapter := &b11ErrProvider{MockProvider: w.mock, ref: bad}
-	res, class, err := payoutAdapterCall(adapter, att)(context.Background(), CallContext{})
+	res, class, err := payoutAdapterCall(adapter, att, resolvedDestination{paymentMethod: att.PaymentMethod})(context.Background(), CallContext{})
 	if class != ErrorClassProviderRefInvalid || err == nil {
 		t.Fatalf("want ProviderRefInvalid with an error, got %s / %v", class, err)
 	}
 	if res.ProviderReference != "" {
 		t.Fatalf("the hostile reference must be scrubbed from the result, got %q", res.ProviderReference)
 	}
-	if e := ApplyPayoutResult(context.Background(), w.pool, w.f.tenantID, wr.ID, att, GateResult[WithdrawResult]{Value: res, Class: class, Err: err}, EvidenceSync); e != nil {
+	if e := ApplyPayoutResult(context.Background(), w.pool, w.f.tenantID, wr.ID, att, GateResult[WithdrawResult]{Value: res, Class: class, Err: err}, EvidenceSync, WithDestinations(pitest.Shared())); e != nil {
 		t.Fatal(e)
 	}
 	p := w.b11Finish("sync", wr, att, "")
@@ -455,7 +456,7 @@ func TestB11_Auto_QueryStatus_Matrix_FromEveryStaleState(t *testing.T) {
 			for _, from := range []AttemptState{AttemptSubmitting, AttemptPending, AttemptAmbiguous} {
 				for _, c := range cases {
 					stale := p.staleAs(from)
-					err := applyPayoutStatusEvidence(context.Background(), w.pool, w.f.tenantID, p.wr.ID, stale, c.gr, EvidenceQueryStatus, time.Now().Add(time.Minute), nil)
+					err := applyPayoutStatusEvidence(context.Background(), w.pool, w.f.tenantID, p.wr.ID, stale, c.gr, EvidenceQueryStatus, time.Now().Add(time.Minute), nil, WithDestinations(pitest.Shared()))
 					b11OKOrConflict(t, err, fmt.Sprintf("%s from %s", c.name, from))
 					w.b11Held(p, fmt.Sprintf("status %s from stale %s", c.name, from))
 				}
@@ -574,7 +575,7 @@ func TestB11_Auto_SyncEvidence_AfterPark(t *testing.T) {
 				for _, c := range cases {
 					stale := p.staleAs(from)
 					stale.EverPossiblySent = stale.EverPossiblySent || c.ever
-					err := ApplyPayoutResult(context.Background(), w.pool, w.f.tenantID, p.wr.ID, stale, c.gr, EvidenceSync)
+					err := ApplyPayoutResult(context.Background(), w.pool, w.f.tenantID, p.wr.ID, stale, c.gr, EvidenceSync, WithDestinations(pitest.Shared()))
 					b11OKOrConflict(t, err, fmt.Sprintf("%s from %s", c.name, from))
 					w.b11Held(p, fmt.Sprintf("sync %s from stale %s", c.name, from))
 				}
@@ -835,7 +836,7 @@ func TestB11_Rollback_PartialPark_LeavesNothing(t *testing.T) {
 	gr := w.b11Dispatch(att, func(WithdrawRequest) WithdrawResult {
 		return WithdrawResult{Outcome: OutcomePending, ProviderReference: b11Bad()}
 	})
-	if e := ApplyPayoutResult(context.Background(), w.pool, w.f.tenantID, wr.ID, att, gr, EvidenceSync); e != nil {
+	if e := ApplyPayoutResult(context.Background(), w.pool, w.f.tenantID, wr.ID, att, gr, EvidenceSync, WithDestinations(pitest.Shared())); e != nil {
 		t.Fatal(e)
 	}
 	p := w.b11Finish("sync", wr, att, "")
@@ -852,7 +853,7 @@ func TestB11_PartialFailure_WrongWithdrawal_Refused_NoWrite(t *testing.T) {
 	p := w.b11ParkSync(300, OutcomePending)
 	before := w.b11Snap(wrB.ID, attB.ID)
 	gr := GateResult[WithdrawResult]{Class: ErrorClassProviderRefInvalid, Err: providerref.ValidatePaymentReference("w", b11Bad())}
-	if err := ApplyPayoutResult(context.Background(), w.pool, w.f.tenantID, wrB.ID, p.stale, gr, EvidenceSync); err == nil {
+	if err := ApplyPayoutResult(context.Background(), w.pool, w.f.tenantID, wrB.ID, p.stale, gr, EvidenceSync, WithDestinations(pitest.Shared())); err == nil {
 		t.Fatalf("applying attempt A's evidence to withdrawal B must be refused")
 	}
 	if now := w.b11Snap(wrB.ID, attB.ID); now != before {
@@ -884,7 +885,7 @@ func TestB11_Concurrency_ParkRacingDefiniteOutcome(t *testing.T) {
 				go func(j int, gr GateResult[WithdrawResult]) {
 					defer wg.Done()
 					<-start
-					errs[j] = ApplyPayoutResult(context.Background(), w.pool, w.f.tenantID, wr.ID, att, gr, EvidenceSync)
+					errs[j] = ApplyPayoutResult(context.Background(), w.pool, w.f.tenantID, wr.ID, att, gr, EvidenceSync, WithDestinations(pitest.Shared()))
 				}(j, gr)
 			}
 			close(start)
@@ -962,7 +963,7 @@ func (w *k3World) b11ParkReverse(amount int64) (*b11Parked, string, GateResult[W
 		w.t.Fatalf("setup: want a succeeded gate result, got %s", gr.Class)
 	}
 	before := w.countRows(`SELECT count(*) FROM ledger_transactions WHERE tenant_id = $1`, w.f.tenantID)
-	if err := ApplyPayoutResult(context.Background(), w.pool, w.f.tenantID, wr.ID, att, gr, EvidenceSync); err != nil {
+	if err := ApplyPayoutResult(context.Background(), w.pool, w.f.tenantID, wr.ID, att, gr, EvidenceSync, WithDestinations(pitest.Shared())); err != nil {
 		w.t.Fatalf("apply (reverse collision): %v", err)
 	}
 	fresh := w.attempt(att.ID)
@@ -1009,7 +1010,7 @@ func TestB11_ReverseCollision_Parks_NoLoop_RedeliveryStable_OneAudit(t *testing.
 	// Redelivery of the same result (sweeper retry / redelivered phase C): no
 	// error (no rollback loop on the ledger idempotency check), no second audit.
 	for i := 0; i < 3; i++ {
-		if err := ApplyPayoutResult(context.Background(), w.pool, w.f.tenantID, p.wr.ID, p.stale, gr, EvidenceSync); err != nil {
+		if err := ApplyPayoutResult(context.Background(), w.pool, w.f.tenantID, p.wr.ID, p.stale, gr, EvidenceSync, WithDestinations(pitest.Shared())); err != nil {
 			t.Fatalf("redelivery %d: %v", i, err)
 		}
 		w.b11HeldReverse(p, "redelivery")
@@ -1030,7 +1031,7 @@ func TestB11_ReverseCollision_Parks_NoLoop_RedeliveryStable_OneAudit(t *testing.
 	}
 	st := GateResult[StatusResult]{Class: ErrorClassSucceeded, Value: StatusResult{Outcome: OutcomeSucceeded, ProviderReference: ref, Amount: p.wr.Amount, AssetCode: "EUR"}}
 	for _, from := range []AttemptState{AttemptSubmitting, AttemptPending, AttemptAmbiguous} {
-		err := applyPayoutStatusEvidence(context.Background(), w.pool, w.f.tenantID, p.wr.ID, p.staleAs(from), st, EvidenceQueryStatus, time.Now().Add(time.Minute), nil)
+		err := applyPayoutStatusEvidence(context.Background(), w.pool, w.f.tenantID, p.wr.ID, p.staleAs(from), st, EvidenceQueryStatus, time.Now().Add(time.Minute), nil, WithDestinations(pitest.Shared()))
 		b11OKOrConflict(t, err, "status success")
 		w.b11HeldReverse(p, "status from "+string(from))
 	}
@@ -1095,12 +1096,12 @@ func TestB11_TenantIsolation(t *testing.T) {
 
 	// Tenant B cannot drive tenant A's attempt (RLS: not found) ...
 	gr := GateResult[WithdrawResult]{Class: ErrorClassSucceeded, Value: WithdrawResult{Outcome: OutcomeSucceeded, ProviderReference: b11Ref()}}
-	if err := ApplyPayoutResult(context.Background(), a.pool, b.f.tenantID, pa.wr.ID, pa.stale, gr, EvidenceSync); err == nil {
+	if err := ApplyPayoutResult(context.Background(), a.pool, b.f.tenantID, pa.wr.ID, pa.stale, gr, EvidenceSync, WithDestinations(pitest.Shared())); err == nil {
 		t.Fatalf("tenant B applied evidence to tenant A's payout")
 	}
 	err := applyPayoutStatusEvidence(context.Background(), a.pool, b.f.tenantID, pa.wr.ID, pa.stale,
 		GateResult[StatusResult]{Class: ErrorClassSucceeded, Value: StatusResult{Outcome: OutcomeSucceeded, ProviderReference: b11Ref(), Amount: pa.wr.Amount, AssetCode: "EUR"}},
-		EvidenceQueryStatus, time.Now().Add(time.Minute), nil)
+		EvidenceQueryStatus, time.Now().Add(time.Minute), nil, WithDestinations(pitest.Shared()))
 	if err == nil {
 		t.Fatalf("tenant B applied status evidence to tenant A's payout")
 	}

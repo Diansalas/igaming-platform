@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/Diansalas/igaming-platform/internal/payoutinstrument/pitest"
 	"github.com/Diansalas/igaming-platform/internal/providerref"
 	"github.com/Diansalas/igaming-platform/internal/reconciliation"
 	"github.com/Diansalas/igaming-platform/internal/withdrawal"
@@ -448,8 +449,8 @@ func (w *k3World) timeoutPayout(amount int64) (withdrawal.WithdrawalRequest, Pay
 		w.t.Fatalf("ClaimForDispatch: %v", err)
 	}
 	if err := ApplyPayoutResult(context.Background(), w.pool, w.f.tenantID, wr.ID, claim.Attempt,
-		GateResult[WithdrawResult]{Class: ErrorClassAmbiguous, Err: errors.New("k3 simulated timeout")}, EvidenceSync); err != nil {
-		w.t.Fatalf("ApplyPayoutResult(ambiguous): %v", err)
+		GateResult[WithdrawResult]{Class: ErrorClassAmbiguous, Err: errors.New("k3 simulated timeout")}, EvidenceSync, WithDestinations(pitest.Shared())); err != nil {
+		w.t.Fatalf("ApplyPayoutResult(ambiguous, WithDestinations(pitest.Shared())): %v", err)
 	}
 	return w.withdrawalOf(wr.ID), w.attempt(claim.Attempt.ID)
 }

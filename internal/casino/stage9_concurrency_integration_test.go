@@ -37,6 +37,7 @@ import (
 
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/ledger"
+	"github.com/Diansalas/igaming-platform/internal/payoutinstrument/pitest"
 	"github.com/Diansalas/igaming-platform/internal/withdrawal"
 )
 
@@ -529,12 +530,14 @@ func TestStage9_ConcurrentBetAndWithdrawalOneWallet_ExactlyOneReservesTheBalance
 			return err
 		})
 	}()
+	instrumentID := pitest.Bind(t, pool, f.tenantID, f.playerAccountID, "EUR") // B13-B
 	go func() {
 		defer wg.Done()
 		withdrawalErr = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 			_, err := withdrawal.RequestWithdrawal(ctx, tx, withdrawal.RequestParams{
 				TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, PersonID: f.personID, WalletID: f.walletID,
 				AssetCode: "EUR", Amount: amount, IdempotencyKey: "s9-wd-vs-bet",
+				PayoutInstrumentID: instrumentID, Destinations: pitest.Shared(),
 			})
 			return err
 		})

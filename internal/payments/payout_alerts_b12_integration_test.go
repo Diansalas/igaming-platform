@@ -20,6 +20,7 @@ import (
 
 	"github.com/Diansalas/igaming-platform/internal/alerting"
 	"github.com/Diansalas/igaming-platform/internal/ledger"
+	"github.com/Diansalas/igaming-platform/internal/payoutinstrument/pitest"
 	"github.com/Diansalas/igaming-platform/internal/providerref"
 	"github.com/Diansalas/igaming-platform/internal/testsupport/alertinject"
 	"github.com/Diansalas/igaming-platform/internal/withdrawal"
@@ -400,15 +401,15 @@ func TestB12_Escalation_ThroughResubmitPayoutAmbiguous_ReasonsReachTheAlert(t *t
 		spy := &withdrawCountingProvider{MockProvider: inner}
 		idem := &idempotentAmbiguousProvider{withdrawCountingProvider: spy}
 		registerCapability(t, pool, f.orchFixture, idem, 100)
-		orch := NewOrchestrator(map[string]PaymentProvider{"mock-b12-e2e-mr": idem}, MultiWebhookCredentialResolver{"mock-b12-e2e-mr": NewMockWebhookCredentials(inner)})
+		orch := NewOrchestrator(map[string]PaymentProvider{"mock-b12-e2e-mr": idem}, MultiWebhookCredentialResolver{"mock-b12-e2e-mr": NewMockWebhookCredentials(inner)}).WithPayoutDestinations(pitest.Shared())
 		e := rbEnv{pool: pool, f: f, orch: orch, pid: "mock-b12-e2e-mr"}
 		wr := approvedWithdrawal(t, pool, f, MockAmountAmbiguous, "b12-e2e-mr")
 		claim, err := orch.ClaimForDispatch(context.Background(), pool, KYCEnforcementPayoutGate{}, f.tenantID, wr.ID, "bank_transfer", testSubmitActor())
 		if err != nil {
 			t.Fatalf("ClaimForDispatch: %v", err)
 		}
-		gr := DispatchWithdraw(context.Background(), nil, MockCredentialResolver{}, idem, claim.Attempt)
-		if err := ApplyPayoutResult(context.Background(), pool, f.tenantID, wr.ID, claim.Attempt, gr, EvidenceSync); err != nil {
+		gr := DispatchWithdraw(context.Background(), pool, MockCredentialResolver{}, idem, claim.Attempt, WithDestinations(pitest.Shared()))
+		if err := ApplyPayoutResult(context.Background(), pool, f.tenantID, wr.ID, claim.Attempt, gr, EvidenceSync, WithDestinations(pitest.Shared())); err != nil {
 			t.Fatalf("ApplyPayoutResult: %v", err)
 		}
 		a := mustGetAttempt(t, pool, f.tenantID, claim.Attempt.ID)
@@ -558,7 +559,7 @@ func b12Sites() []b12Site {
 			gr := GateResult[WithdrawResult]{Class: ErrorClassProviderRefInvalid, Value: WithdrawResult{ProviderReference: over},
 				Err: providerref.Validate("withdraw.provider_reference", over)}
 			return func() error {
-					return ApplyPayoutResult(context.Background(), e.pool, e.f.tenantID, wr.ID, a, gr, EvidenceSync)
+					return ApplyPayoutResult(context.Background(), e.pool, e.f.tenantID, wr.ID, a, gr, EvidenceSync, WithDestinations(pitest.Shared()))
 				}, a.ID, TerminalReasonInvalidProviderReference, "payments.payout_parked_invalid_reference",
 				func(t *testing.T) bool { return mustGetAttempt(t, e.pool, e.f.tenantID, a.ID).State == AttemptDisputed }
 		}},
@@ -567,7 +568,7 @@ func b12Sites() []b12Site {
 			over := strings.Repeat("a", providerref.MaxBytes+1)
 			gr := GateResult[StatusResult]{Class: ErrorClassProviderRefInvalid, Err: providerref.Validate("query_status.provider_reference", over)}
 			return func() error {
-					return applyPayoutStatusEvidence(context.Background(), e.pool, e.f.tenantID, wr.ID, a, gr, EvidenceQueryStatus, time.Now().Add(time.Minute), nil)
+					return applyPayoutStatusEvidence(context.Background(), e.pool, e.f.tenantID, wr.ID, a, gr, EvidenceQueryStatus, time.Now().Add(time.Minute), nil, WithDestinations(pitest.Shared()))
 				}, a.ID, TerminalReasonInvalidProviderReference, "payments.payout_parked_invalid_reference",
 				func(t *testing.T) bool { return mustGetAttempt(t, e.pool, e.f.tenantID, a.ID).State == AttemptDisputed }
 		}},
@@ -726,7 +727,7 @@ func TestB12_ConcurrentDeclines_ConvergeCleanly_NoAlert(t *testing.T) {
 	start := make(chan struct{})
 	go func() {
 		<-start
-		errs <- ApplyPayoutResult(context.Background(), pool, f.tenantID, wr.ID, a, rbResult(ErrorClassDefiniteDecline, OutcomeDeclined, ""), EvidenceSync)
+		errs <- ApplyPayoutResult(context.Background(), pool, f.tenantID, wr.ID, a, rbResult(ErrorClassDefiniteDecline, OutcomeDeclined, ""), EvidenceSync, WithDestinations(pitest.Shared()))
 	}()
 	go func() {
 		<-start
@@ -736,7 +737,7 @@ func TestB12_ConcurrentDeclines_ConvergeCleanly_NoAlert(t *testing.T) {
 		<-start
 		errs <- applyPayoutStatusEvidence(context.Background(), pool, f.tenantID, wr.ID, a,
 			GateResult[StatusResult]{Class: ErrorClassDefiniteDecline, Value: StatusResult{Outcome: OutcomeDeclined}},
-			EvidenceQueryStatus, time.Now().Add(time.Minute), nil)
+			EvidenceQueryStatus, time.Now().Add(time.Minute), nil, WithDestinations(pitest.Shared()))
 	}()
 	close(start)
 	for i := 0; i < 3; i++ {

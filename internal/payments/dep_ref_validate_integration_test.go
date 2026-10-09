@@ -23,6 +23,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Diansalas/igaming-platform/internal/db"
+	"github.com/Diansalas/igaming-platform/internal/payoutinstrument/pitest"
 )
 
 // depRefProvider wraps the MOCK and lets a test rewrite what Deposit returns.
@@ -110,7 +111,7 @@ func newDepRefEnv(t *testing.T, pool *db.Pool, providerID string) *depRefEnv {
 	p := &depRefProvider{MockProvider: mp}
 	f := seedOrchFixture(t, pool)
 	registerCapability(t, pool, f, p, 100)
-	orch := NewOrchestrator(map[string]PaymentProvider{providerID: p}, MultiWebhookCredentialResolver{providerID: NewMockWebhookCredentials(mp)})
+	orch := NewOrchestrator(map[string]PaymentProvider{providerID: p}, MultiWebhookCredentialResolver{providerID: NewMockWebhookCredentials(mp)}).WithPayoutDestinations(pitest.Shared())
 	return &depRefEnv{pool: pool, f: f, p: p, orch: orch, id: providerID}
 }
 
@@ -445,8 +446,12 @@ func seedPayoutAttemptBoundTo(t *testing.T, pool *db.Pool, f orchFixture, provid
 	attemptID := uuid.New()
 	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		wr := uuid.New()
-		if _, err := tx.Exec(ctx, `INSERT INTO withdrawal_requests (id, tenant_id, brand_id, player_account_id, wallet_id, asset_code, amount, state, idempotency_key)
-			VALUES ($1,$2,$3,$4,$5,'EUR',5000,'submitted',$6)`, wr, f.tenantID, f.brandID, f.playerAccountID, f.walletID, "dr-payout-idem-"+wr.String()); err != nil {
+		// B13-B: a LEGACY (NULL-binding) row, as it existed before migration 0126 (the fixture is not about the binding).
+		if err := pitest.WithoutBindingGuard(ctx, tx, func() error {
+			_, err := tx.Exec(ctx, `INSERT INTO withdrawal_requests (id, tenant_id, brand_id, player_account_id, wallet_id, asset_code, amount, state, idempotency_key)
+			VALUES ($1,$2,$3,$4,$5,'EUR',5000,'submitted',$6)`, wr, f.tenantID, f.brandID, f.playerAccountID, f.walletID, "dr-payout-idem-"+wr.String())
+			return err
+		}); err != nil {
 			return err
 		}
 		if _, err := InsertCreatedAttempt(ctx, tx, NewCreatedAttempt{
@@ -806,7 +811,7 @@ func TestDepRefConflict_CascadeDrivenParkReturnsNoRedirect(t *testing.T) {
 	registerCapability(t, pool, f, pa, 100)
 	registerCapability(t, pool, f, pb, 200)
 	orch := NewOrchestrator(map[string]PaymentProvider{"mock-dr-cas-a": pa, "mock-dr-cas-b": pb},
-		MultiWebhookCredentialResolver{"mock-dr-cas-a": NewMockWebhookCredentials(ma), "mock-dr-cas-b": NewMockWebhookCredentials(mb)})
+		MultiWebhookCredentialResolver{"mock-dr-cas-a": NewMockWebhookCredentials(ma), "mock-dr-cas-b": NewMockWebhookCredentials(mb)}).WithPayoutDestinations(pitest.Shared())
 	const boundRef = "cascade-bound-ref-1"
 	seedPayoutAttemptBoundTo(t, pool, f, "mock-dr-cas-b", boundRef)
 	pa.setScript(func(req DepositRequest) DepositResult {

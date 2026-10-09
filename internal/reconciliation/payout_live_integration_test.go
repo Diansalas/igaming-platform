@@ -17,6 +17,7 @@ import (
 
 	"github.com/Diansalas/igaming-platform/internal/ledger"
 	"github.com/Diansalas/igaming-platform/internal/payments"
+	"github.com/Diansalas/igaming-platform/internal/payoutinstrument/pitest"
 	"github.com/Diansalas/igaming-platform/internal/withdrawal"
 )
 
@@ -55,11 +56,13 @@ func TestPaymentStatement_LivePayoutPath_AgainstWiredMockSource_NoMismatches(t *
 	}
 
 	var wr withdrawal.WithdrawalRequest
+	instrumentID := pitest.Bind(t, w.pool, w.f.tenantID, w.f.playerAccountID, "EUR") // B13-B
 	if err := w.pool.WithTenant(ctx, w.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
 		wr, err = withdrawal.RequestWithdrawal(ctx, tx, withdrawal.RequestParams{
 			TenantID: w.f.tenantID, BrandID: w.f.brandID, PlayerAccountID: w.f.playerAccountID, PersonID: personID,
 			WalletID: w.f.walletID, AssetCode: "EUR", Amount: 700, IdempotencyKey: "live-payout-" + uuid.NewString(),
+			PayoutInstrumentID: instrumentID, Destinations: pitest.Shared(),
 		})
 		if err != nil {
 			return err
@@ -84,8 +87,8 @@ func TestPaymentStatement_LivePayoutPath_AgainstWiredMockSource_NoMismatches(t *
 	if mock == nil {
 		t.Fatalf("payout routed to unexpected provider %q", provider)
 	}
-	gr := payments.DispatchWithdraw(ctx, w.pool, payments.MockCredentialResolver{}, mock, claim.Attempt)
-	if err := payments.ApplyPayoutResult(ctx, w.pool, w.f.tenantID, wr.ID, claim.Attempt, gr, payments.EvidenceSync); err != nil {
+	gr := payments.DispatchWithdraw(ctx, w.pool, payments.MockCredentialResolver{}, mock, claim.Attempt, payments.WithDestinations(pitest.Shared()))
+	if err := payments.ApplyPayoutResult(ctx, w.pool, w.f.tenantID, wr.ID, claim.Attempt, gr, payments.EvidenceSync, payments.WithDestinations(pitest.Shared())); err != nil {
 		t.Fatalf("ApplyPayoutResult: %v", err)
 	}
 	var attempt payments.PaymentAttempt

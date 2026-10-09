@@ -48,6 +48,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/identityresolution"
 	"github.com/Diansalas/igaming-platform/internal/ledger"
 	"github.com/Diansalas/igaming-platform/internal/payments"
+	"github.com/Diansalas/igaming-platform/internal/payoutinstrument/pitest"
 	"github.com/Diansalas/igaming-platform/internal/providercred"
 	"github.com/Diansalas/igaming-platform/internal/providercred/providercredtest"
 	"github.com/Diansalas/igaming-platform/internal/secretstore"
@@ -155,7 +156,7 @@ func newIsoWorld(t *testing.T) *isoWorld {
 	w.casinoMock = casino.NewMockCasinoProvider("mock-casino", "EUR")
 	w.payMock = payments.NewMockProvider("mock-psp", "EUR")
 	casinoOrch := casino.NewOrchestrator(map[string]casino.CasinoProvider{"mock-casino": w.casinoMock}, w.sub.Resolver("casino"))
-	w.payOrch = payments.NewOrchestrator(map[string]payments.PaymentProvider{"mock-psp": w.payMock}, w.sub.Resolver("payments"))
+	w.payOrch = payments.NewOrchestrator(map[string]payments.PaymentProvider{"mock-psp": w.payMock}, w.sub.Resolver("payments")).WithPayoutDestinations(pitest.Shared())
 	keys, err := auth.NewKeyRegistry("k1", map[string]string{"k1": testJWTSecret})
 	if err != nil {
 		t.Fatal(err)

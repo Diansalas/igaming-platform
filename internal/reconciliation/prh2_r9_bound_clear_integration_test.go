@@ -15,6 +15,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/ledger"
 	"github.com/Diansalas/igaming-platform/internal/payments"
+	"github.com/Diansalas/igaming-platform/internal/payoutinstrument/pitest"
 	"github.com/Diansalas/igaming-platform/internal/reconciliation/statement"
 	"github.com/Diansalas/igaming-platform/internal/withdrawal"
 )
@@ -91,10 +92,14 @@ func (w *bcWorld) bcPendingPayout(t *testing.T, x string, amount int64) (uuid.UU
 		}); err != nil {
 			return fmt.Errorf("post hold: %w", err)
 		}
-		if _, err := tx.Exec(ctx,
-			`INSERT INTO withdrawal_requests (id, tenant_id, brand_id, player_account_id, wallet_id, asset_code, amount, state, idempotency_key, provider_id, provider_reference)
+		// B13-B: a LEGACY (NULL-binding) row, as it existed before migration 0126 (the fixture is not about the binding).
+		if err := pitest.WithoutBindingGuard(ctx, tx, func() error {
+			_, err := tx.Exec(ctx,
+				`INSERT INTO withdrawal_requests (id, tenant_id, brand_id, player_account_id, wallet_id, asset_code, amount, state, idempotency_key, provider_id, provider_reference)
 			 VALUES ($1,$2,$3,$4,$5,'EUR',$6,'submitted',$7,$8,$9)`,
-			wrID, w.f.tenantID, w.f.brandID, w.f.playerAccountID, w.f.walletID, amount, "bc-wd-"+wrID.String(), payProvA, x); err != nil {
+				wrID, w.f.tenantID, w.f.brandID, w.f.playerAccountID, w.f.walletID, amount, "bc-wd-"+wrID.String(), payProvA, x)
+			return err
+		}); err != nil {
 			return fmt.Errorf("insert withdrawal: %w", err)
 		}
 		if _, err := payments.InsertSubmittingAttempt(ctx, tx, payments.NewSubmittingAttempt{
@@ -328,10 +333,14 @@ func (w *bcWorld) bcLegacyCompletion(t *testing.T, ref string, amount int64) {
 		}); err != nil {
 			return err
 		}
-		if _, err := tx.Exec(ctx,
-			`INSERT INTO withdrawal_requests (id, tenant_id, brand_id, player_account_id, wallet_id, asset_code, amount, state, idempotency_key, provider_id, provider_reference)
+		// B13-B: a LEGACY (NULL-binding) row, as it existed before migration 0126 (the fixture is not about the binding).
+		if err := pitest.WithoutBindingGuard(ctx, tx, func() error {
+			_, err := tx.Exec(ctx,
+				`INSERT INTO withdrawal_requests (id, tenant_id, brand_id, player_account_id, wallet_id, asset_code, amount, state, idempotency_key, provider_id, provider_reference)
 			 VALUES ($1,$2,$3,$4,$5,'EUR',$6,'submitted',$7,$8,$9)`,
-			wrID, w.f.tenantID, w.f.brandID, w.f.playerAccountID, w.f.walletID, amount, "bc-leg-"+wrID.String(), payProvA, "bc-leg-instr-"+wrID.String()[:8]); err != nil {
+				wrID, w.f.tenantID, w.f.brandID, w.f.playerAccountID, w.f.walletID, amount, "bc-leg-"+wrID.String(), payProvA, "bc-leg-instr-"+wrID.String()[:8])
+			return err
+		}); err != nil {
 			return err
 		}
 		return withdrawal.Complete(ctx, tx, wrID, payProvA, ref)

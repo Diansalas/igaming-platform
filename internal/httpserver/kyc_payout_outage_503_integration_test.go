@@ -56,7 +56,7 @@ func TestSubmitWithdrawalHandler_KYCStoreOutageReturns503(t *testing.T) {
 
 	release := lockKYCVerificationsTable(t, pool)
 	defer release()
-	resp = postJSON(t, outageSrv, "/v1/admin/withdrawals/"+wr.ID.String()+"/submit", financeToken.AccessToken, map[string]string{"payment_method": "card"})
+	resp = postJSON(t, outageSrv, "/v1/admin/withdrawals/"+wr.ID.String()+"/submit", financeToken.AccessToken, map[string]string{"payment_method": "bank_transfer"})
 	resp.Body.Close()
 	release()
 

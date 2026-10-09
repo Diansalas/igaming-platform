@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Diansalas/igaming-platform/internal/db"
+	"github.com/Diansalas/igaming-platform/internal/payoutinstrument/pitest"
 )
 
 func kycDecisionCount(t *testing.T, pool *db.Pool, tenantID uuid.UUID) int {
@@ -183,7 +184,7 @@ func TestSweeperLoop_NonActiveTenant_ResolutionOnlyPrecedesKYCGate(t *testing.T)
 		if err != nil {
 			t.Fatalf("claim: %v", err)
 		}
-		if err := ApplyPayoutResult(context.Background(), pool, f.tenantID, wr.ID, claim.Attempt, GateResult[WithdrawResult]{Class: ErrorClassAmbiguous}, EvidenceSync); err != nil {
+		if err := ApplyPayoutResult(context.Background(), pool, f.tenantID, wr.ID, claim.Attempt, GateResult[WithdrawResult]{Class: ErrorClassAmbiguous}, EvidenceSync, WithDestinations(pitest.Shared())); err != nil {
 			t.Fatalf("apply ambiguous: %v", err)
 		}
 		dueNow(t, pool, f.tenantID, claim.Attempt.ID)

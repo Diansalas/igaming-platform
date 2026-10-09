@@ -13,6 +13,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+
+	"github.com/Diansalas/igaming-platform/internal/payoutinstrument/pitest"
 )
 
 func TestReceipt_ResolveByProviderReference_AppliesSuccess_LedgerBalanced(t *testing.T) {
@@ -20,7 +22,7 @@ func TestReceipt_ResolveByProviderReference_AppliesSuccess_LedgerBalanced(t *tes
 	f := seedOrchFixture(t, pool)
 	provider := NewMockProvider("mock-psp-rc-a", "EUR")
 	registerCapability(t, pool, f, provider, 100)
-	orch := NewOrchestrator(map[string]PaymentProvider{"mock-psp-rc-a": provider}, MultiWebhookCredentialResolver{"mock-psp-rc-a": NewMockWebhookCredentials(provider)})
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-psp-rc-a": provider}, MultiWebhookCredentialResolver{"mock-psp-rc-a": NewMockWebhookCredentials(provider)}).WithPayoutDestinations(pitest.Shared())
 
 	res, err := orch.InitiateDepositAttempt(context.Background(), pool, AllowAllDepositKYCGate{}, MockCredentialResolver{}, InitiateDepositParams{
 		Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
@@ -93,7 +95,7 @@ func TestReceipt_MerchantReferenceCrossProvider_IsAnomaly_NoStateChange(t *testi
 	registerCapability(t, pool, f, providerA, 100)
 	registerCapability(t, pool, f, providerB, 200)
 	orch := NewOrchestrator(map[string]PaymentProvider{"mock-psp-rc-b1": providerA, "mock-psp-rc-b2": providerB},
-		MultiWebhookCredentialResolver{"mock-psp-rc-b1": NewMockWebhookCredentials(providerA), "mock-psp-rc-b2": NewMockWebhookCredentials(providerB)})
+		MultiWebhookCredentialResolver{"mock-psp-rc-b1": NewMockWebhookCredentials(providerA), "mock-psp-rc-b2": NewMockWebhookCredentials(providerB)}).WithPayoutDestinations(pitest.Shared())
 
 	res, err := orch.InitiateDepositAttempt(context.Background(), pool, AllowAllDepositKYCGate{}, MockCredentialResolver{}, InitiateDepositParams{
 		Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
@@ -140,7 +142,7 @@ func TestReceipt_Unresolved_DeferredThenAppliedOnceReferenceKnown(t *testing.T) 
 	f := seedOrchFixture(t, pool)
 	provider := NewMockProvider("mock-psp-rc-c", "EUR")
 	registerCapability(t, pool, f, provider, 100)
-	orch := NewOrchestrator(map[string]PaymentProvider{"mock-psp-rc-c": &refLessAmbiguousProvider{provider}}, MultiWebhookCredentialResolver{"mock-psp-rc-c": NewMockWebhookCredentials(provider)})
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-psp-rc-c": &refLessAmbiguousProvider{provider}}, MultiWebhookCredentialResolver{"mock-psp-rc-c": NewMockWebhookCredentials(provider)}).WithPayoutDestinations(pitest.Shared())
 
 	res, err := orch.InitiateDepositAttempt(context.Background(), pool, AllowAllDepositKYCGate{}, MockCredentialResolver{}, InitiateDepositParams{
 		Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
@@ -207,7 +209,7 @@ func TestReceipt_DeferredReceiptCap_ExceededReturnsErrorNothingWritten(t *testin
 	f := seedOrchFixture(t, pool)
 	provider := NewMockProvider("mock-psp-rc-d", "EUR")
 	registerCapability(t, pool, f, provider, 100)
-	orch := NewOrchestrator(map[string]PaymentProvider{"mock-psp-rc-d": provider}, MultiWebhookCredentialResolver{"mock-psp-rc-d": NewMockWebhookCredentials(provider)})
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-psp-rc-d": provider}, MultiWebhookCredentialResolver{"mock-psp-rc-d": NewMockWebhookCredentials(provider)}).WithPayoutDestinations(pitest.Shared())
 
 	// Pre-fill the cap with distinct unresolved receipts for this
 	// (tenant, provider) using a tiny cap so the test is fast.
@@ -292,7 +294,7 @@ func TestReceipt_DeferredReceipt_PredatesSubmission_NeverApplied(t *testing.T) {
 	f := seedOrchFixture(t, pool)
 	provider := NewMockProvider("mock-psp-rc-e", "EUR")
 	registerCapability(t, pool, f, provider, 100)
-	orch := NewOrchestrator(map[string]PaymentProvider{"mock-psp-rc-e": &refLessAmbiguousProvider{provider}}, MultiWebhookCredentialResolver{"mock-psp-rc-e": NewMockWebhookCredentials(provider)})
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-psp-rc-e": &refLessAmbiguousProvider{provider}}, MultiWebhookCredentialResolver{"mock-psp-rc-e": NewMockWebhookCredentials(provider)}).WithPayoutDestinations(pitest.Shared())
 
 	ref := "predates-ref-" + uuid.NewString()
 
