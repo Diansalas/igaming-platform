@@ -123,14 +123,17 @@ func TestDriveCreatedAttemptCascade_PoolThreadedToResolver(t *testing.T) {
 // database read; it only forwards pool to the resolver.
 func TestDispatchWithdraw_PoolThreadedToResolver(t *testing.T) {
 	pool := depositV2ScratchPool(t)
+	f := seedPayoutFixture(t, pool, 100_000, true)
 	provider := NewMockProvider("mock-psp-pool-c", "EUR")
-	claimToken := uuid.New()
-	providerID := "mock-psp-pool-c"
-	attempt := PaymentAttempt{
-		ID: uuid.New(), TenantID: uuid.New(), Operation: AttemptOperationPayout,
-		ProviderID: &providerID, ClaimToken: &claimToken, State: AttemptSubmitting,
-		PaymentMethod: "bank_transfer", AssetCode: "EUR", Amount: 500,
+	registerCapability(t, pool, f.orchFixture, provider, 100)
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-psp-pool-c": provider}, MultiWebhookCredentialResolver{"mock-psp-pool-c": NewMockWebhookCredentials(provider)}).WithPayoutDestinations(pitest.Shared())
+	// B13-B: phase B now re-reads the withdrawal, the instrument and the snapshot BEFORE the call, so a made-up
+	// attempt no longer reaches the resolver; claim a real one.
+	claim, err := orch.ClaimForDispatch(context.Background(), pool, KYCEnforcementPayoutGate{}, f.tenantID, approvedWithdrawal(t, pool, f, 500, "pool-thread-payout-c").ID, "bank_transfer", testSubmitActor())
+	if err != nil {
+		t.Fatalf("ClaimForDispatch: %v", err)
 	}
+	attempt := claim.Attempt
 	resolver := &poolRecordingResolver{}
 	gr := DispatchWithdraw(context.Background(), pool, resolver, provider, attempt, WithDestinations(pitest.Shared()))
 	if gr.Class == ErrorClassNotSent && !gr.Attempted {

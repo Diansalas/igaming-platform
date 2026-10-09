@@ -20,6 +20,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Diansalas/igaming-platform/internal/db"
+	"github.com/Diansalas/igaming-platform/internal/payoutinstrument/pitest"
 )
 
 // dmDrain runs the drain for the attempt exactly as a binding caller does (parent lock, re-read, drain).
@@ -57,7 +58,7 @@ func (e t4DrainEnv) dmOtherProviderAttempt(t *testing.T, otherID string) Payment
 	mp := NewMockProvider(otherID, "EUR")
 	registerCapability(t, e.pool, e.f, mp, 1)
 	orch2 := NewOrchestrator(map[string]PaymentProvider{otherID: &refLessAmbiguousProvider{mp}},
-		MultiWebhookCredentialResolver{otherID: NewMockWebhookCredentials(mp)})
+		MultiWebhookCredentialResolver{otherID: NewMockWebhookCredentials(mp)}).WithPayoutDestinations(pitest.Shared())
 	res := rvInit(t, e.pool, orch2, e.f, MockAmountAmbiguous, "dm-other-"+otherID)
 	if res.Attempt.ProviderID == nil || *res.Attempt.ProviderID != otherID {
 		t.Fatalf("setup: second attempt provider = %v, want %s", res.Attempt.ProviderID, otherID)
@@ -235,7 +236,7 @@ func TestDrainMerchantRef_Deposit_TenantIsolation(t *testing.T) {
 	mp := NewMockProvider("mock-dm-ti", "EUR")
 	registerCapability(t, a.pool, fB, mp, 100)
 	orchB := NewOrchestrator(map[string]PaymentProvider{"mock-dm-ti": &refLessAmbiguousProvider{mp}},
-		MultiWebhookCredentialResolver{"mock-dm-ti": NewMockWebhookCredentials(mp)})
+		MultiWebhookCredentialResolver{"mock-dm-ti": NewMockWebhookCredentials(mp)}).WithPayoutDestinations(pitest.Shared())
 	resB := rvInit(t, a.pool, orchB, fB, MockAmountAmbiguous, "dm-ti-b")
 	b := t4DrainEnv{pool: a.pool, orch: orchB, f: fB, attempt: resB.Attempt, intent: resB.Intent.ID, provider: "mock-dm-ti"}
 
@@ -280,7 +281,7 @@ func dmPayoutSetup(t *testing.T, prov string) dmPayoutEnv {
 	f := seedPayoutFixture(t, pool, 100_000, true)
 	p := NewMockProvider(prov, "EUR")
 	registerCapability(t, pool, f.orchFixture, p, 100)
-	orch := NewOrchestrator(map[string]PaymentProvider{prov: p}, MultiWebhookCredentialResolver{prov: NewMockWebhookCredentials(p)})
+	orch := NewOrchestrator(map[string]PaymentProvider{prov: p}, MultiWebhookCredentialResolver{prov: NewMockWebhookCredentials(p)}).WithPayoutDestinations(pitest.Shared())
 	return dmPayoutEnv{pool: pool, orch: orch, f: f, prov: prov}
 }
 
@@ -405,7 +406,7 @@ func TestDrainMerchantRef_Payout_Matrix(t *testing.T) {
 				// orchestrator, so the second payout is routed to it.
 				op := NewMockProvider(tc.otherProv, "EUR")
 				registerCapability(t, e.pool, e.f.orchFixture, op, 1)
-				orchC = NewOrchestrator(map[string]PaymentProvider{tc.otherProv: op}, MultiWebhookCredentialResolver{tc.otherProv: NewMockWebhookCredentials(op)})
+				orchC = NewOrchestrator(map[string]PaymentProvider{tc.otherProv: op}, MultiWebhookCredentialResolver{tc.otherProv: NewMockWebhookCredentials(op)}).WithPayoutDestinations(pitest.Shared())
 			}
 			ref := "dm-pay-" + tc.name + "-" + uuid.NewString()
 			wrA, a := e.dmNewPayout(t, e.orch, "dm-pay-a", e.prov, ref)

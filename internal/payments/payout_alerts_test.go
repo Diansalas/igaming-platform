@@ -30,7 +30,8 @@ func TestPayoutAlertReasonFor_ClosedSet(t *testing.T) {
 			t.Errorf("payout escalation reason %q maps to %q, want itself", reason, got)
 		}
 	}
-	if len(payoutEscalationReasons) != 3 {
+	// B13-B added destination_not_usable and destination_integrity_failure (T2/T12 destination gate).
+	if len(payoutEscalationReasons) != 5 {
 		t.Fatalf("the payout escalation set changed (%d): review the sweeper call sites", len(payoutEscalationReasons))
 	}
 	// R-5: the no-state-change signal reasons are their own closed set (not terminal reasons, not
@@ -46,7 +47,7 @@ func TestPayoutAlertReasonFor_ClosedSet(t *testing.T) {
 			t.Errorf("signal reason %q must not be an escalation reason", reason)
 		}
 	}
-	if len(payoutSignalReasons) != 3 || alertReasonPayoutForeignRefSuccessOnSucceeded != "foreign_reference_success_on_succeeded_payout" ||
+	if len(payoutSignalReasons) != 4 || alertReasonPayoutForeignRefSuccessOnSucceeded != "foreign_reference_success_on_succeeded_payout" ||
 		alertReasonPayoutMismatchedSuccessOnDeclined != "mismatched_success_on_declined_payout" ||
 		alertReasonPayoutMismatchedSuccessOnSucceeded != "mismatched_success_on_succeeded_payout" {
 		t.Fatalf("the payout signal set changed (%v): review the receipt call sites and ADR 0095 section 42", payoutSignalReasons)

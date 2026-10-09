@@ -61,7 +61,9 @@ func TestDepositDisputeTerminalReasons_CoverEveryWriteSite(t *testing.T) {
 	fset := token.NewFileSet()
 	pkgs, err := parser.ParseDir(fset, ".", func(fi fs.FileInfo) bool {
 		n := fi.Name()
-		return !strings.HasSuffix(n, "_test.go") && n != "payout.go" && n != "payout_sweep.go"
+		// payout_destination.go (B13-B) is payout-only like payout.go / payout_sweep.go: its parks use the
+		// destination_* reasons, which are payout dispute reasons (PayoutDisputeReasons), not deposit ones.
+		return !strings.HasSuffix(n, "_test.go") && n != "payout.go" && n != "payout_sweep.go" && n != "payout_destination.go"
 	}, 0)
 	if err != nil {
 		t.Fatalf("parse: %v", err)

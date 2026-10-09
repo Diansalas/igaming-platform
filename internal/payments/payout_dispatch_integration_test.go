@@ -10,6 +10,7 @@ package payments
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -20,6 +21,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/kyc"
 	"github.com/Diansalas/igaming-platform/internal/ledger"
+	"github.com/Diansalas/igaming-platform/internal/payoutinstrument"
 	"github.com/Diansalas/igaming-platform/internal/payoutinstrument/pitest"
 	"github.com/Diansalas/igaming-platform/internal/providerref"
 	"github.com/Diansalas/igaming-platform/internal/withdrawal"
@@ -167,6 +169,21 @@ func approvedWithdrawal(t *testing.T, pool *db.Pool, f payoutFixture, amount int
 		t.Fatalf("reread approved request: %v", err)
 	}
 	return wr
+}
+
+// snapshotInTx writes the destination snapshot a T1p claim would have written, for the tests that construct a
+// payout attempt directly (B13-B: the database refuses a payout attempt for a BOUND withdrawal without one in
+// the same transaction). MOCK: the Synthetic gate, the shared test service.
+func snapshotInTx(ctx context.Context, tx pgx.Tx, f payoutFixture, wr withdrawal.WithdrawalRequest, attemptID uuid.UUID) error {
+	svc := pitest.Shared()
+	g, err := svc.EvaluateGate(ctx, tx, payoutinstrument.GateParams{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID,
+		PersonID: f.personID, InstrumentID: *wr.PayoutInstrumentID, AssetCode: wr.AssetCode, Lock: true})
+	if err != nil {
+		return err
+	}
+	_, err = svc.WriteSnapshot(ctx, tx, g, payoutinstrument.SnapshotParams{AttemptID: attemptID, WithdrawalRequestID: wr.ID,
+		Amount: strconv.FormatInt(wr.Amount, 10), AssetCode: wr.AssetCode})
+	return err
 }
 
 // testSubmitActor is a fresh, valid-shaped SubmitActor for tests that don't

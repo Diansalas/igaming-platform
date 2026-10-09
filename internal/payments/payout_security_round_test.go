@@ -131,7 +131,10 @@ func TestPayoutResolveAudit_SM2_DisputeRecordsFailureOutcomeAndTerminalReason(t 
 			Interactive: false, ClaimToken: uuid.New(), LeaseOwner: "payout-dispatch",
 			LeaseUntil: time.Now().Add(-time.Hour),
 		})
-		return err
+		if err != nil {
+			return err
+		}
+		return snapshotInTx(ctx, tx, f, wr, attemptID)
 	}); err != nil {
 		t.Fatalf("setup: %v", err)
 	}

@@ -365,11 +365,17 @@ func TestB12_EachSiteAndReason_RaisesExactlyOneAlert_AuditUnchanged_NoMoney(t *t
 		if reason == "late_decline_after_terminal" {
 			continue // LF M-1/C1: a decline replay is a clean no-op, see TestB12_LateDeclineReplay_*
 		}
+		if strings.HasPrefix(reason, "destination_") {
+			continue // B13-B: exercised with the destination fixtures in b13b_destination_integration_test.go (park audit + exactly one P1)
+		}
 		if !covered[reason] {
 			t.Errorf("closed payout reason %q has no row in the table", reason)
 		}
 	}
 	for reason := range payoutEscalationReasons {
+		if strings.HasPrefix(reason, "destination_") {
+			continue // B13-B: TestB13B_T2_Reclaim_EscalatesOnBlockedDestination / TestB13B_T12_Resend_GatedByTheDestination
+		}
 		if !covered[reason] {
 			t.Errorf("closed escalation reason %q has no row in the table", reason)
 		}

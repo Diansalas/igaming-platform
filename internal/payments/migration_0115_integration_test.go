@@ -266,16 +266,32 @@ func TestK3_C16_T18_Migration0115UpDownUp_WholeSchema(t *testing.T) {
 	}
 }
 
+// k3Run0115Down executes migration 0115's DOWN script directly, as one transaction, on a database whose
+// head schema is far beyond 0115. (These refusal tests used to migrate a scratch database to exactly 0115 and
+// run MigrateDown(1); since B13-B the payments code reads the 0123 columns, so a payout world needs the head
+// schema, and stepping the migration runner down from there would first run the later downs.) The script's
+// refusal guard is its first statement, so the assertion is unchanged: MR099 and a whole rollback.
+func k3Run0115Down(t *testing.T, pool *db.Pool) error {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join("..", "..", "migrations", "0115_payment_force_resolution.down.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, string(b))
+		return err
+	})
+}
+
 // C-16 (MIG): the down REFUSES (MR099) while a resolution row, a new-kind
 // mismatch row or an evidence row exists, and the refusal rolls back whole.
 func TestK3_C16_DownRefusals(t *testing.T) {
 	t.Run("resolution_row", func(t *testing.T) {
-		pool, _ := scratchThrough(t, "k3down1_", migration0115Version)
-		dir := migration0101Dir(t, migration0115Version)
+		pool := depositV2ScratchPool(t) // B13-B: head schema; the 0115 down script is executed directly (see k3Run0115Down)
 		w := newK3WorldOn(t, pool, k3Opts{base: 1})
 		_, a := w.ambiguousPayout(100)
 		w.mustRequest(w.f1, w.m2In(a.ID, ResolutionM2DeclareNotPaid))
-		_, err := pool.MigrateDown(context.Background(), dir, 1)
+		err := k3Run0115Down(t, pool)
 		k3RequireCode(t, err, "MR099")
 		// Whole rollback: the tables are still there.
 		var n int
@@ -286,8 +302,7 @@ func TestK3_C16_DownRefusals(t *testing.T) {
 		}
 	})
 	t.Run("new_kind_mismatch_row", func(t *testing.T) {
-		pool, _ := scratchThrough(t, "k3down2_", migration0115Version)
-		dir := migration0101Dir(t, migration0115Version)
+		pool := depositV2ScratchPool(t) // B13-B: head schema; the 0115 down script is executed directly (see k3Run0115Down)
 		w := newK3WorldOn(t, pool, k3Opts{base: 1})
 		w.tx(func(ctx context.Context, tx pgx.Tx) error {
 			runID := uuid.New()
@@ -299,15 +314,14 @@ func TestK3_C16_DownRefusals(t *testing.T) {
 				VALUES (gen_random_uuid(), $1, $2, 'k3 down check', 'x', 'y', 'pay_declared_paid_unconfirmed')`, w.f.tenantID, runID)
 			return err
 		})
-		_, err := pool.MigrateDown(context.Background(), dir, 1)
+		err := k3Run0115Down(t, pool)
 		k3RequireCode(t, err, "MR099")
 	})
 	t.Run("evidence_row", func(t *testing.T) {
-		pool, _ := scratchThrough(t, "k3down3_", migration0115Version)
-		dir := migration0101Dir(t, migration0115Version)
+		pool := depositV2ScratchPool(t) // B13-B: head schema; the 0115 down script is executed directly (see k3Run0115Down)
 		w := newK3WorldOn(t, pool, k3Opts{base: 1})
 		w.parkPollMismatch()
-		_, err := pool.MigrateDown(context.Background(), dir, 1)
+		err := k3Run0115Down(t, pool)
 		k3RequireCode(t, err, "MR099")
 	})
 }

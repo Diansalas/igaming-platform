@@ -18,7 +18,7 @@ import (
 // bypassed (owner side, scratch database) the recount's DISTINCT ON (person) still
 // counts one and the resolution does not execute. Kills M12, M16 and the joint MJ.
 func TestK3_Y12_TwoAccountsOnePersonCountOnce(t *testing.T) {
-	pool, _ := scratchThrough(t, "k3twin_", migration0115Version)
+	pool := depositV2ScratchPool(t) // B13-B: head schema (see TestK3_Y08)
 	w := newK3WorldOn(t, pool, k3Opts{base: 2})
 	_, a := w.ambiguousPayout(100)
 	r := w.mustRequest(w.f1, w.m2In(a.ID, ResolutionM2DeclareNotPaid))
@@ -42,6 +42,11 @@ func TestK3_Y12_TwoAccountsOnePersonCountOnce(t *testing.T) {
 	err := w.pool.WithPrincipalScope(ctx, w.f.tenantID, twin2.ID, func(ctx context.Context, tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, `ALTER TABLE payment_manual_resolution_approvals DISABLE TRIGGER payment_manual_resolution_approvals_guard`); err != nil {
 			t.Fatalf("scratch DB: cannot disable the approvals guard: %v", err)
+		}
+		// B13-B: this test now runs on the head schema (see the pool line above), where 0120 also installs the
+		// signed-actor-proof guard on this table; the owner bypass disables it as well (scratch database only).
+		if _, err := tx.Exec(ctx, `ALTER TABLE payment_manual_resolution_approvals DISABLE TRIGGER zz_actor_proof_guard`); err != nil {
+			t.Fatalf("scratch DB: cannot disable the actor-proof guard: %v", err)
 		}
 		if _, err := tx.Exec(ctx, `INSERT INTO payment_manual_resolution_approvals
 			(tenant_id, resolution_id, decision, payload_hash, decided_by, decided_by_scope, decided_by_person_id, decided_txid, reason_code)

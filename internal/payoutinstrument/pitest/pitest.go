@@ -97,7 +97,18 @@ func Bind(t testing.TB, pool *db.Pool, tenantID, playerAccountID uuid.UUID, asse
 // which a BEFORE INSERT trigger would otherwise pre-empt. The DDL is transactional but a COMMIT
 // would make a disabled trigger permanent, hence the re-enable; on a fn error the caller's tx
 // rolls back. Needs the table owner (the tests' TEST_DATABASE_URL role).
+//
+// On a scratch database migrated to a version BEFORE 0123 the trigger does not exist (a few migration
+// tests pin an old schema): fn then runs as is.
 func WithoutBindingGuard(ctx context.Context, tx pgx.Tx, fn func() error) error {
+	var present bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'withdrawal_requests_payout_binding_guard'
+		AND tgrelid = 'withdrawal_requests'::regclass)`).Scan(&present); err != nil {
+		return err
+	}
+	if !present {
+		return fn()
+	}
 	if _, err := tx.Exec(ctx, `ALTER TABLE withdrawal_requests DISABLE TRIGGER withdrawal_requests_payout_binding_guard`); err != nil {
 		return err
 	}

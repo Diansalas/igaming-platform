@@ -362,7 +362,7 @@ func TestK3_X12_ApprovalOfALaterPolicyAuthorIsNotCounted(t *testing.T) {
 // wait (plan 5.0 T-1), so this runs in a throwaway scratch database where the
 // owner disables the resolution guard for ONE statement to backdate expires_at.
 func TestK3_X10_ExpiredResolutionTakesNoApproval(t *testing.T) {
-	pool, _ := scratchThrough(t, "k3exp_", migration0115Version)
+	pool := depositV2ScratchPool(t) // B13-B: head schema (see TestK3_Y08)
 	w := newK3WorldOn(t, pool, k3Opts{base: 1})
 	_, a := w.ambiguousPayout(100)
 	r := w.mustRequest(w.f1, w.m2In(a.ID, ResolutionM2DeclareNotPaid))

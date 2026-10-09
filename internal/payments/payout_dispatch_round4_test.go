@@ -444,7 +444,10 @@ func TestPollPayoutStatus_N6_MismatchAgainstFallbackWithdrawalReference_Disputes
 			Interactive: false, ClaimToken: uuid.New(), LeaseOwner: "payout-dispatch",
 			LeaseUntil: time.Now().Add(-time.Hour),
 		})
-		return err
+		if err != nil {
+			return err
+		}
+		return snapshotInTx(ctx, tx, f, wr, attemptID)
 	}); err != nil {
 		t.Fatalf("construct attempt directly: %v", err)
 	}
