@@ -24,6 +24,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/identityresolution"
 	"github.com/Diansalas/igaming-platform/internal/ledger"
 	"github.com/Diansalas/igaming-platform/internal/payments"
+	"github.com/Diansalas/igaming-platform/internal/payoutinstrument/pitest"
 	"github.com/Diansalas/igaming-platform/internal/wallet"
 	"github.com/Diansalas/igaming-platform/internal/withdrawal"
 )
@@ -47,7 +48,7 @@ import (
 // to build a signed webhook payload via its own CallbackPayload method.
 func newMockOrchestrator() (*payments.Orchestrator, *payments.MockProvider) {
 	mock := payments.NewMockProvider("mock", "EUR", "USD")
-	return payments.NewOrchestrator(map[string]payments.PaymentProvider{"mock": mock}, payments.MultiWebhookCredentialResolver{"mock": payments.NewMockWebhookCredentials(mock)}), mock
+	return payments.NewOrchestrator(map[string]payments.PaymentProvider{"mock": mock}, payments.MultiWebhookCredentialResolver{"mock": payments.NewMockWebhookCredentials(mock)}).WithPayoutDestinations(pitest.Shared()), mock
 }
 
 // newFinancialTestServer is newTestServer (server_integration_test.go)
@@ -55,7 +56,14 @@ func newMockOrchestrator() (*payments.Orchestrator, *payments.MockProvider) {
 // helper exactly so identity-route behavior is unaffected.
 func newFinancialTestServer(t *testing.T, pool *db.Pool, issuer *auth.Issuer, orchestrator *payments.Orchestrator) *httptest.Server {
 	t.Helper()
-	srv := httptest.NewServer(New(Deps{
+	return newFinancialTestServerWith(t, pool, issuer, orchestrator, nil)
+}
+
+// newFinancialTestServerWith is newFinancialTestServer with a Deps mutation hook (B13-B tests remove the payout
+// instrument service to prove the fail-closed 503).
+func newFinancialTestServerWith(t *testing.T, pool *db.Pool, issuer *auth.Issuer, orchestrator *payments.Orchestrator, mutate func(*Deps)) *httptest.Server {
+	t.Helper()
+	deps := Deps{
 		Logger:              slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
 		DB:                  pool,
 		AuthIssuer:          issuer,
@@ -63,8 +71,13 @@ func newFinancialTestServer(t *testing.T, pool *db.Pool, issuer *auth.Issuer, or
 		AccessTokenTTL:      5 * time.Minute,
 		RefreshTokenTTL:     time.Hour,
 		PaymentOrchestrator: orchestrator, PaymentsOutboundCredentials: payments.MockCredentialResolver{},
-		PersonResolver: identityresolution.NewMockPersonResolver(),
-	}))
+		PersonResolver:    identityresolution.NewMockPersonResolver(),
+		PayoutInstruments: pitest.Shared(), // B13-B: a withdrawal request binds a verified payout instrument
+	}
+	if mutate != nil {
+		mutate(&deps)
+	}
+	srv := httptest.NewServer(New(deps))
 	t.Cleanup(srv.Close)
 	return srv
 }
@@ -226,6 +239,7 @@ func mustApproveKYCForWithdrawal(t *testing.T, pool *db.Pool, tenantID, brandID,
 func mustCreateWithdrawalRequest(t *testing.T, pool *db.Pool, tenantID, brandID, playerAccountID, walletID uuid.UUID, assetCode string, amount int64) withdrawal.WithdrawalRequest {
 	t.Helper()
 	var wr withdrawal.WithdrawalRequest
+	instrumentID := pitest.Bind(t, pool, tenantID, playerAccountID, assetCode) // B13-B: a verified MOCK instrument
 	err := pool.WithTenant(context.Background(), tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		account, err := identity.GetPlayerAccountByID(ctx, tx, playerAccountID)
 		if err != nil {
@@ -245,6 +259,7 @@ func mustCreateWithdrawalRequest(t *testing.T, pool *db.Pool, tenantID, brandID,
 		wr, err = withdrawal.RequestWithdrawal(ctx, tx, withdrawal.RequestParams{
 			TenantID: tenantID, BrandID: brandID, PlayerAccountID: playerAccountID, PersonID: account.PersonID, WalletID: walletID,
 			AssetCode: assetCode, Amount: amount, IdempotencyKey: uuid.NewString(),
+			PayoutInstrumentID: instrumentID, Destinations: pitest.Shared(),
 		})
 		return err
 	})
@@ -697,6 +712,7 @@ func TestFinancialHappyPath_EndToEnd(t *testing.T) {
 	const withdrawalAmount int64 = 4000
 	resp = postJSON(t, srv, "/v1/me/withdrawals", player.Tokens.AccessToken, map[string]any{
 		"asset_code": "EUR", "amount": withdrawalAmount, "idempotency_key": uuid.NewString(),
+		"payout_instrument_id": pitest.Bind(t, pool, tenant.ID, player.ID, "EUR").String(),
 	})
 	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("expected 201 requesting withdrawal, got %d", resp.StatusCode)

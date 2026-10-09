@@ -4,12 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/Diansalas/igaming-platform/internal/alerting"
 	"github.com/Diansalas/igaming-platform/internal/apierror"
 	"github.com/Diansalas/igaming-platform/internal/assetregistry"
 	"github.com/Diansalas/igaming-platform/internal/audit"
@@ -17,6 +19,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/kyc"
 	"github.com/Diansalas/igaming-platform/internal/observability"
 	"github.com/Diansalas/igaming-platform/internal/payments"
+	"github.com/Diansalas/igaming-platform/internal/payoutinstrument"
 	"github.com/Diansalas/igaming-platform/internal/tenant"
 	"github.com/Diansalas/igaming-platform/internal/validation"
 	"github.com/Diansalas/igaming-platform/internal/wallet"
@@ -27,6 +30,10 @@ type requestWithdrawalRequest struct {
 	AssetCode      string `json:"asset_code"`
 	Amount         int64  `json:"amount"`
 	IdempotencyKey string `json:"idempotency_key"`
+	// PayoutInstrumentID (B13-B, ADR 0111 2.4) is the player's chosen payout instrument. The
+	// binding is resolved and re-checked server-side (own instrument, verified, in force, asset
+	// listed); a missing value is a 409 PAYOUT_INSTRUMENT_REQUIRED.
+	PayoutInstrumentID string `json:"payout_instrument_id"`
 }
 
 type withdrawalRequestResponse struct {
@@ -104,6 +111,23 @@ func newRequestWithdrawalHandler(deps Deps) http.HandlerFunc {
 			return
 		}
 
+		// B13-B: binding happens HERE. A missing instrument is refused with a distinct 409 (no row,
+		// no hold, the idempotency key is not consumed); a malformed id is a plain 400.
+		var instrumentID uuid.UUID
+		if req.PayoutInstrumentID == "" {
+			apierror.Write(w, requestID, apierror.CodePayoutInstrumentRequired, "a payout instrument is required")
+			return
+		}
+		if instrumentID, err = uuid.Parse(req.PayoutInstrumentID); err != nil {
+			apierror.Write(w, requestID, apierror.CodeValidation, "payout_instrument_id: must be a UUID")
+			return
+		}
+		// A nil *Service must not become a non-nil interface (fail closed, 503, nothing written).
+		var destinations withdrawal.DestinationGate
+		if deps.PayoutInstruments != nil {
+			destinations = deps.PayoutInstruments
+		}
+
 		var wr withdrawal.WithdrawalRequest
 		// LF-I3-3 (ledger-finance's preferred fix, 2026-09-27): a KYC deny
 		// must commit its decision + audit rows in THIS SAME transaction,
@@ -129,6 +153,7 @@ func newRequestWithdrawalHandler(deps Deps) http.HandlerFunc {
 			wr, err = withdrawal.RequestWithdrawal(ctx, tx, withdrawal.RequestParams{
 				TenantID: tc.TenantID, BrandID: account.BrandID, PlayerAccountID: playerAccountID, PersonID: account.PersonID, WalletID: wl.ID,
 				AssetCode: req.AssetCode, Amount: req.Amount, IdempotencyKey: req.IdempotencyKey,
+				PayoutInstrumentID: instrumentID, Destinations: destinations,
 			})
 			if errors.As(err, &kycDenied) {
 				return nil
@@ -152,6 +177,33 @@ func newRequestWithdrawalHandler(deps Deps) http.HandlerFunc {
 			// policy_version/an amount (security condition 8) - a closed
 			// enum drawn from the decision's own Outcome.
 			apierror.Write(w, requestID, apierror.CodeConflict, "withdrawal requires a passed identity verification: "+string(kycDenied.Decision.Outcome))
+			return
+		}
+		if errors.Is(err, withdrawal.ErrPayoutInstrumentRequired) {
+			apierror.Write(w, requestID, apierror.CodePayoutInstrumentRequired, "a payout instrument is required")
+			return
+		}
+		if errors.Is(err, withdrawal.ErrPayoutInstrumentNotUsable) {
+			// The closed refusal reason is logged server-side only; the player gets one generic
+			// message (no enumeration of another player's instruments, no state oracle).
+			var gr *payoutinstrument.GateRefusal
+			if errors.As(err, &gr) {
+				logger.Warn("request_withdrawal_payout_instrument_not_usable", "reason", gr.Reason, "integrity", gr.Integrity())
+				// Security M-R1: at request time the instrument id is CLIENT input. A relation mismatch (another player's / brand's
+				// / tenant's instrument) is therefore not tampering and is the same generic 409 as any other unusable
+				// instrument: no P1, no integrity audit row (otherwise a player could poison the alert and write audit rows at will).
+				// Only SERVER-state integrity reasons (the instrument's own seal / fingerprint / detail / verification) are a
+				// tamper signal. The relation mismatch stays an integrity alert at T1p, where the binding is server-side.
+				if gr.Integrity() && requestIntegrityReasons[gr.Reason] {
+					recordRequestIntegrityRefusal(deps, logger, tc.TenantID, playerAccountID, instrumentID, requestID, gr.Reason)
+				}
+			}
+			apierror.Write(w, requestID, apierror.CodePayoutInstrumentNotUsable, "the payout instrument cannot be used for this withdrawal")
+			return
+		}
+		if errors.Is(err, withdrawal.ErrDestinationGateUnavailable) {
+			logger.Error("request_withdrawal_destination_gate_unavailable")
+			apierror.Write(w, requestID, apierror.CodeUnavailable, "withdrawals are temporarily unavailable")
 			return
 		}
 		if errors.Is(err, withdrawal.ErrKYCUnavailable) {
@@ -780,6 +832,11 @@ func newRejectWithdrawalHandler(deps Deps) http.HandlerFunc {
 	}
 }
 
+// submitWithdrawalRequest: B13-B (ADR 0111 2.4, A-10) - payment_method is no longer an input. The
+// rail is the bound payout instrument's. The field is accepted only so a stale client does not get
+// a 400 for an unknown field: a value that differs from the bound rail is refused with
+// 400 PAYMENT_METHOD_MISMATCH and it is never used to route or to choose a destination. It is
+// consulted ONLY for a legacy NULL-binding withdrawal (Synthetic adapters only).
 type submitWithdrawalRequest struct {
 	PaymentMethod string `json:"payment_method"`
 }
@@ -865,12 +922,6 @@ func newSubmitWithdrawalHandler(deps Deps) http.HandlerFunc {
 			apierror.Write(w, requestID, apierror.CodeValidation, "invalid request body")
 			return
 		}
-		v := validation.New()
-		v.RequireNonEmpty("payment_method", req.PaymentMethod)
-		if v.HasErrors() {
-			apierror.Write(w, requestID, apierror.CodeValidation, v.Error())
-			return
-		}
 
 		// Stage 3D business decision #1's "approve, reject, or submit" list
 		// includes submit - unlike approve/reject, no INSERT into
@@ -939,6 +990,28 @@ func newSubmitWithdrawalHandler(deps Deps) http.HandlerFunc {
 			apierror.Write(w, requestID, apierror.CodeUnavailable, "verification check is temporarily unavailable, please retry")
 			return
 		}
+		if errors.Is(err, withdrawal.ErrInvalidInput) {
+			apierror.Write(w, requestID, apierror.CodeValidation, "payment_method is required for this withdrawal")
+			return
+		}
+		if errors.Is(err, payments.ErrPaymentMethodMismatch) {
+			apierror.Write(w, requestID, apierror.CodePaymentMethodMismatch, "payment_method does not match the withdrawal's payout instrument")
+			return
+		}
+		if errors.Is(err, payments.ErrPayoutDestinationNotUsable) {
+			// Only the denial audit was committed; the request stays `approved`.
+			var gr *payoutinstrument.GateRefusal
+			if errors.As(err, &gr) {
+				logger.Warn("submit_withdrawal_destination_not_usable", "tenant_id", tc.TenantID, "reason", gr.Reason, "integrity", gr.Integrity())
+			}
+			apierror.Write(w, requestID, apierror.CodePayoutDestinationNotUsable, "the withdrawal's payout destination cannot be used")
+			return
+		}
+		if errors.Is(err, payments.ErrDestinationServiceUnavailable) {
+			logger.Error("submit_withdrawal_destination_service_unavailable")
+			apierror.Write(w, requestID, apierror.CodeUnavailable, "payouts are temporarily unavailable")
+			return
+		}
 		if errors.Is(err, payments.ErrPayoutKillSwitchEngaged) {
 			// Fail-closed, transient (migration 0105): the request is left
 			// exactly `approved` (the whole T1p transaction rolled back) -
@@ -968,12 +1041,12 @@ func newSubmitWithdrawalHandler(deps Deps) http.HandlerFunc {
 		}
 
 		// Phase B: no transaction held.
-		gr := payments.DispatchWithdraw(r.Context(), deps.DB, deps.PaymentsOutboundCredentials, provider, claim.Attempt)
+		gr := payments.DispatchWithdraw(r.Context(), deps.DB, deps.PaymentsOutboundCredentials, provider, claim.Attempt, deps.PaymentOrchestrator.PayoutOptions()...)
 
 		// Phase C: applies under its own context.WithoutCancel-bound
 		// transaction, so it commits even if r.Context() is cancelled by
 		// now (payout.go's own doc comment).
-		if err := payments.ApplyPayoutResult(r.Context(), deps.DB, tc.TenantID, id, claim.Attempt, gr, payments.EvidenceSync); err != nil {
+		if err := payments.ApplyPayoutResult(r.Context(), deps.DB, tc.TenantID, id, claim.Attempt, gr, payments.EvidenceSync, deps.PaymentOrchestrator.PayoutOptions()...); err != nil {
 			// B2 (RV-PRH-I1 code review): this is no longer a dead end.
 			// ClaimForDispatch (T1p) already committed next_action_at =
 			// lease_until on the attempt row, so - whatever failed here -
@@ -1339,4 +1412,49 @@ func newCancelWithdrawalHandler(deps Deps) http.HandlerFunc {
 		}
 		w.WriteHeader(http.StatusNoContent)
 	}
+}
+
+// requestIntegrityReasons are the gate reasons that, at request time, can only come from the stored state of the player's OWN
+// instrument (security M-R1). relation_mismatch is deliberately absent.
+// integrityRefusalSem bounds the in-flight request-time integrity recorders (security C-2).
+var integrityRefusalSem = make(chan struct{}, 8)
+
+var requestIntegrityReasons = map[string]bool{
+	payoutinstrument.ReasonSealInvalid: true, payoutinstrument.ReasonFingerprintMismatch: true, payoutinstrument.ReasonDetailUnavailable: true,
+	payoutinstrument.ReasonVerificationMissing: true, payoutinstrument.ReasonVerificationNotLast: true,
+}
+
+// recordRequestIntegrityRefusal writes the durable audit row (LF L-4) and raises the detached P1 (security L-2) for a request-time
+// integrity refusal. It runs OFF the response path with a bounded context (security M-R1): RaiseDetached retries with backoff, and
+// the request transaction already rolled back, so nothing here may slow or fail the 409.
+func recordRequestIntegrityRefusal(deps Deps, logger *slog.Logger, tenantID, playerAccountID, instrumentID uuid.UUID, requestID, reason string) {
+	// Security C-2: bounded concurrency. When saturated the work is skipped (the P1 dedupes into one alert anyway and the
+	// refusal itself is already logged and answered); a panic in the goroutine is recovered, never crashing the process.
+	select {
+	case integrityRefusalSem <- struct{}{}:
+	default:
+		logger.Warn("request_withdrawal_integrity_record_skipped_saturated")
+		return
+	}
+	go func() {
+		defer func() { <-integrityRefusalSem }()
+		defer func() {
+			if r := recover(); r != nil {
+				logger.Error("request_withdrawal_integrity_record_panic", "panic", fmt.Sprint(r))
+			}
+		}()
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		if err := deps.DB.WithTenant(ctx, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+			return audit.Record(ctx, tx, audit.Entry{
+				TenantID: tenantID, ActorType: audit.ActorPlayer, ActorID: playerAccountID,
+				Action: "withdrawal.request.destination_integrity_refused", TargetType: "payout_instrument", TargetID: instrumentID.String(),
+				Outcome: audit.OutcomeDenied, RequestID: requestID, Metadata: map[string]any{"gate_reason": reason},
+			})
+		}); err != nil {
+			logger.Error("request_withdrawal_integrity_audit_failed", "error", err)
+		}
+		_ = alerting.RaiseDetached(ctx, alerting.NewTenantRunner(deps.DB, tenantID),
+			payments.DestinationIntegrityAlert(tenantID, "payout_instrument:"+instrumentID.String(), reason))
+	}()
 }

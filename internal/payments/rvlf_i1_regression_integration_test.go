@@ -22,6 +22,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Diansalas/igaming-platform/internal/db"
+	"github.com/Diansalas/igaming-platform/internal/payoutinstrument/pitest"
 	"github.com/Diansalas/igaming-platform/internal/withdrawal"
 )
 
@@ -74,7 +75,7 @@ func TestRVLF_P1_ReversalPostsRegardlessOfWireOutcomeReasonCarrier(t *testing.T)
 	f := seedOrchFixture(t, pool)
 	p := NewMockProvider("mock-rv1", "EUR")
 	registerCapability(t, pool, f, p, 100)
-	orch := NewOrchestrator(map[string]PaymentProvider{"mock-rv1": p}, MultiWebhookCredentialResolver{"mock-rv1": NewMockWebhookCredentials(p)})
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-rv1": p}, MultiWebhookCredentialResolver{"mock-rv1": NewMockWebhookCredentials(p)}).WithPayoutDestinations(pitest.Shared())
 
 	for i, oc := range []Outcome{OutcomeDeclined, OutcomeSucceeded} {
 		res := rvInit(t, pool, orch, f, 5000, "p1-"+string(oc))
@@ -118,7 +119,7 @@ func TestRVLF_P1_NonFinalReversalOutcomeNeverPosts(t *testing.T) {
 	f := seedOrchFixture(t, pool)
 	p := NewMockProvider("mock-rv1nf", "EUR")
 	registerCapability(t, pool, f, p, 100)
-	orch := NewOrchestrator(map[string]PaymentProvider{"mock-rv1nf": p}, MultiWebhookCredentialResolver{"mock-rv1nf": NewMockWebhookCredentials(p)})
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-rv1nf": p}, MultiWebhookCredentialResolver{"mock-rv1nf": NewMockWebhookCredentials(p)}).WithPayoutDestinations(pitest.Shared())
 
 	for _, oc := range []Outcome{OutcomePending, OutcomeAmbiguous} {
 		res := rvInit(t, pool, orch, f, 5000, "p1nf-"+string(oc))
@@ -169,7 +170,7 @@ func TestRVLF_P1b_ReversalOfNeverPostedDepositTombstonesRegardlessOfReasonCarrie
 	f := seedOrchFixture(t, pool)
 	p := NewMockProvider("mock-rv1b", "EUR")
 	registerCapability(t, pool, f, p, 100)
-	orch := NewOrchestrator(map[string]PaymentProvider{"mock-rv1b": p}, MultiWebhookCredentialResolver{"mock-rv1b": NewMockWebhookCredentials(p)})
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-rv1b": p}, MultiWebhookCredentialResolver{"mock-rv1b": NewMockWebhookCredentials(p)}).WithPayoutDestinations(pitest.Shared())
 	res := rvInit(t, pool, orch, f, 5000, "p1b")
 	ref := *res.Attempt.ProviderReference
 	if _, err := rvCallback(pool, orch, f, "mock-rv1b", p.CallbackPayload(f.tenantID, CallbackEventDepositReversal, "rev-p1b", ref, OutcomeDeclined, 0, "", "chargeback_lost", false)); err != nil {
@@ -196,7 +197,7 @@ func TestRVLF_P2_KillSwitch_CascadableDeclineCallback(t *testing.T) {
 	f := seedOrchFixture(t, pool)
 	p := NewMockProvider("mock-rv2", "EUR")
 	registerCapability(t, pool, f, p, 100)
-	orch := NewOrchestrator(map[string]PaymentProvider{"mock-rv2": p}, MultiWebhookCredentialResolver{"mock-rv2": NewMockWebhookCredentials(p)})
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-rv2": p}, MultiWebhookCredentialResolver{"mock-rv2": NewMockWebhookCredentials(p)}).WithPayoutDestinations(pitest.Shared())
 	res := rvInit(t, pool, orch, f, 5000, "p2")
 	ref := *res.Attempt.ProviderReference
 	res2 := rvInit(t, pool, orch, f, 6000, "p2-success")
@@ -248,7 +249,7 @@ func TestRVLF_P3_T13RejectsCreatedSibling(t *testing.T) {
 	f := seedOrchFixture(t, pool)
 	p := NewMockProvider("mock-rv3", "EUR")
 	registerCapability(t, pool, f, p, 100)
-	orch := NewOrchestrator(map[string]PaymentProvider{"mock-rv3": p}, MultiWebhookCredentialResolver{"mock-rv3": NewMockWebhookCredentials(p)})
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-rv3": p}, MultiWebhookCredentialResolver{"mock-rv3": NewMockWebhookCredentials(p)}).WithPayoutDestinations(pitest.Shared())
 	res := rvInit(t, pool, orch, f, 5000, "p3")
 	ref := *res.Attempt.ProviderReference
 
@@ -293,7 +294,7 @@ func TestRVLF_P4_MismatchedSuccessOnTerminalAttempt(t *testing.T) {
 	f := seedOrchFixture(t, pool)
 	p := NewMockProvider("mock-rv4", "EUR")
 	registerCapability(t, pool, f, p, 100)
-	orch := NewOrchestrator(map[string]PaymentProvider{"mock-rv4": p}, MultiWebhookCredentialResolver{"mock-rv4": NewMockWebhookCredentials(p)})
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-rv4": p}, MultiWebhookCredentialResolver{"mock-rv4": NewMockWebhookCredentials(p)}).WithPayoutDestinations(pitest.Shared())
 	res := rvInit(t, pool, orch, f, 5000, "p4")
 	ref := *res.Attempt.ProviderReference
 	if _, err := rvCallback(pool, orch, f, "mock-rv4", p.CallbackPayload(f.tenantID, CallbackEventDeposit, ref, "", OutcomeSucceeded, 5000, "EUR", "", false)); err != nil {
@@ -330,7 +331,7 @@ func TestRVLF_P5_ReversalReceiptsResolved(t *testing.T) {
 	f := seedOrchFixture(t, pool)
 	p := NewMockProvider("mock-rv5", "EUR")
 	registerCapability(t, pool, f, p, 100)
-	orch := NewOrchestrator(map[string]PaymentProvider{"mock-rv5": p}, MultiWebhookCredentialResolver{"mock-rv5": NewMockWebhookCredentials(p)})
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-rv5": p}, MultiWebhookCredentialResolver{"mock-rv5": NewMockWebhookCredentials(p)}).WithPayoutDestinations(pitest.Shared())
 	res := rvInit(t, pool, orch, f, 5000, "p5")
 	ref := *res.Attempt.ProviderReference
 	if _, err := rvCallback(pool, orch, f, "mock-rv5", p.CallbackPayload(f.tenantID, CallbackEventDeposit, ref, "", OutcomeSucceeded, 5000, "EUR", "", false)); err != nil {
@@ -374,7 +375,7 @@ func TestRVLF_P7_ReplayOrderings(t *testing.T) {
 	f := seedOrchFixture(t, pool)
 	p := NewMockProvider("mock-rv7", "EUR")
 	registerCapability(t, pool, f, p, 100)
-	orch := NewOrchestrator(map[string]PaymentProvider{"mock-rv7": p}, MultiWebhookCredentialResolver{"mock-rv7": NewMockWebhookCredentials(p)})
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-rv7": p}, MultiWebhookCredentialResolver{"mock-rv7": NewMockWebhookCredentials(p)}).WithPayoutDestinations(pitest.Shared())
 	res := rvInit(t, pool, orch, f, 5000, "p7")
 	ref := *res.Attempt.ProviderReference
 	for _, rr := range []string{"rev-p7-a", "rev-p7-b", "rev-p7-a"} {
@@ -425,7 +426,7 @@ func TestRVLF_P8_DeferredReceiptAppliedByPhaseC(t *testing.T) {
 	mp := NewMockProvider("mock-rv8", "EUR")
 	registerCapability(t, pool, f, mp, 100)
 	rp := &racingCallbackProvider{MockProvider: mp}
-	orch := NewOrchestrator(map[string]PaymentProvider{"mock-rv8": rp}, MultiWebhookCredentialResolver{"mock-rv8": NewMockWebhookCredentials(mp)})
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-rv8": rp}, MultiWebhookCredentialResolver{"mock-rv8": NewMockWebhookCredentials(mp)}).WithPayoutDestinations(pitest.Shared())
 	var raceDisp ReceiptDisposition
 	var raceErr error
 	rp.onRef = func(ref string) {
@@ -476,14 +477,18 @@ func TestRVLF_M4_ReversalNamingPayoutReferenceNeverTombstoned(t *testing.T) {
 	f := seedOrchFixture(t, pool)
 	p := NewMockProvider("mock-m4", "EUR")
 	registerCapability(t, pool, f, p, 100)
-	orch := NewOrchestrator(map[string]PaymentProvider{"mock-m4": p}, MultiWebhookCredentialResolver{"mock-m4": NewMockWebhookCredentials(p)})
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-m4": p}, MultiWebhookCredentialResolver{"mock-m4": NewMockWebhookCredentials(p)}).WithPayoutDestinations(pitest.Shared())
 
 	payoutRef := "payout-ref-m4"
 	payoutAttemptID := uuid.New()
 	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		wr := uuid.New()
-		if _, err := tx.Exec(ctx, `INSERT INTO withdrawal_requests (id, tenant_id, brand_id, player_account_id, wallet_id, asset_code, amount, state, idempotency_key)
-			VALUES ($1,$2,$3,$4,$5,'EUR',5000,'submitted',$6)`, wr, f.tenantID, f.brandID, f.playerAccountID, f.walletID, "rv-m4-idem-"+wr.String()); err != nil {
+		// B13-B: a LEGACY (NULL-binding) row, as it existed before migration 0126 (the fixture is not about the binding).
+		if err := pitest.WithoutBindingGuard(ctx, tx, func() error {
+			_, err := tx.Exec(ctx, `INSERT INTO withdrawal_requests (id, tenant_id, brand_id, player_account_id, wallet_id, asset_code, amount, state, idempotency_key)
+			VALUES ($1,$2,$3,$4,$5,'EUR',5000,'submitted',$6)`, wr, f.tenantID, f.brandID, f.playerAccountID, f.walletID, "rv-m4-idem-"+wr.String())
+			return err
+		}); err != nil {
 			return err
 		}
 		_, err := InsertCreatedAttempt(ctx, tx, NewCreatedAttempt{
@@ -543,7 +548,7 @@ func TestRVLF_F3_LiveSiblingDeclineAfterT13NeverCreatesOrphanCascade(t *testing.
 	registerCapability(t, pool, f, pa, 100)
 	registerCapability(t, pool, f, pb, 200)
 	orch := NewOrchestrator(map[string]PaymentProvider{"mock-f3-a": pa, "mock-f3-b": pb},
-		MultiWebhookCredentialResolver{"mock-f3-a": NewMockWebhookCredentials(pa), "mock-f3-b": NewMockWebhookCredentials(pb)})
+		MultiWebhookCredentialResolver{"mock-f3-a": NewMockWebhookCredentials(pa), "mock-f3-b": NewMockWebhookCredentials(pb)}).WithPayoutDestinations(pitest.Shared())
 
 	amt := int64(MockAmountProviderDeclineCascade)
 	// InitiateDepositAttempt's own synchronous cascade loop: A1 (provider
@@ -629,7 +634,7 @@ func TestRVLF_F3_T2ClaimRefusesCreatedSiblingOfSucceededIntent(t *testing.T) {
 	f := seedOrchFixture(t, pool)
 	p := NewMockProvider("mock-f3-t2", "EUR")
 	registerCapability(t, pool, f, p, 100)
-	orch := NewOrchestrator(map[string]PaymentProvider{"mock-f3-t2": p}, MultiWebhookCredentialResolver{"mock-f3-t2": NewMockWebhookCredentials(p)})
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-f3-t2": p}, MultiWebhookCredentialResolver{"mock-f3-t2": NewMockWebhookCredentials(p)}).WithPayoutDestinations(pitest.Shared())
 
 	res := rvInit(t, pool, orch, f, 5000, "f3-t2-claim")
 	// Succeed the intent's own live attempt first.
@@ -702,7 +707,7 @@ func TestRVLF_H3_DriveGo_SyncCascadableDeclineUnderKillSwitch(t *testing.T) {
 	f := seedOrchFixture(t, pool)
 	p := NewMockProvider("mock-h3-drive", "EUR")
 	registerCapability(t, pool, f, p, 100)
-	orch := NewOrchestrator(map[string]PaymentProvider{"mock-h3-drive": p}, MultiWebhookCredentialResolver{"mock-h3-drive": NewMockWebhookCredentials(p)})
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-h3-drive": p}, MultiWebhookCredentialResolver{"mock-h3-drive": NewMockWebhookCredentials(p)}).WithPayoutDestinations(pitest.Shared())
 
 	// Dispatch normally (no switch engaged yet) - lands on 'pending', a
 	// live state ApplyDecline accepts, standing in for "submitting" (both
@@ -764,7 +769,7 @@ func TestRVLF_H3_SweeperGo_PollCascadableDeclineUnderKillSwitch(t *testing.T) {
 	f := seedOrchFixture(t, pool)
 	p := NewMockProvider("mock-h3-sweep", "EUR")
 	registerCapability(t, pool, f, p, 100)
-	orch := NewOrchestrator(map[string]PaymentProvider{"mock-h3-sweep": p}, MultiWebhookCredentialResolver{"mock-h3-sweep": NewMockWebhookCredentials(p)})
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-h3-sweep": p}, MultiWebhookCredentialResolver{"mock-h3-sweep": NewMockWebhookCredentials(p)}).WithPayoutDestinations(pitest.Shared())
 
 	res, err := orch.InitiateDepositAttempt(context.Background(), pool, AllowAllDepositKYCGate{}, MockCredentialResolver{}, InitiateDepositParams{
 		Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
@@ -816,7 +821,7 @@ func TestRVLF_R4a_PayoutDeclineViaReceiptPathReleasesHold(t *testing.T) {
 	f := seedPayoutFixture(t, pool, 100_000, true)
 	p := NewMockProvider("mock-r4a", "EUR")
 	registerCapability(t, pool, f.orchFixture, p, 100)
-	orch := NewOrchestrator(map[string]PaymentProvider{"mock-r4a": p}, MultiWebhookCredentialResolver{"mock-r4a": NewMockWebhookCredentials(p)})
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-r4a": p}, MultiWebhookCredentialResolver{"mock-r4a": NewMockWebhookCredentials(p)}).WithPayoutDestinations(pitest.Shared())
 
 	wr, attempt := notSentPayoutAttempt(t, pool, orch, f, 5000, "r4a")
 	// notSentPayoutAttempt leaves the attempt 'created' (NotSent, never
@@ -871,7 +876,7 @@ func TestRVLF_R4d_PayoutSuccessViaReceiptPathSettles(t *testing.T) {
 	f := seedPayoutFixture(t, pool, 100_000, true)
 	p := NewMockProvider("mock-r4d", "EUR")
 	registerCapability(t, pool, f.orchFixture, p, 100)
-	orch := NewOrchestrator(map[string]PaymentProvider{"mock-r4d": p}, MultiWebhookCredentialResolver{"mock-r4d": NewMockWebhookCredentials(p)})
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-r4d": p}, MultiWebhookCredentialResolver{"mock-r4d": NewMockWebhookCredentials(p)}).WithPayoutDestinations(pitest.Shared())
 
 	wr, attempt := notSentPayoutAttempt(t, pool, orch, f, 5000, "r4d")
 	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
@@ -920,7 +925,7 @@ func TestRVLF_R4b_EventTypeOperationMismatchIsAnomaly(t *testing.T) {
 	f := seedPayoutFixture(t, pool, 100_000, true)
 	p := NewMockProvider("mock-r4b", "EUR")
 	registerCapability(t, pool, f.orchFixture, p, 100)
-	orch := NewOrchestrator(map[string]PaymentProvider{"mock-r4b": p}, MultiWebhookCredentialResolver{"mock-r4b": NewMockWebhookCredentials(p)})
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-r4b": p}, MultiWebhookCredentialResolver{"mock-r4b": NewMockWebhookCredentials(p)}).WithPayoutDestinations(pitest.Shared())
 
 	// A payout attempt, submitting, with its own provider_reference.
 	_, payoutAttempt := notSentPayoutAttempt(t, pool, orch, f, 5000, "r4b-payout")
@@ -1010,7 +1015,7 @@ func TestRVLF_L2_BridgeCascadeThenT13SecondCapture(t *testing.T) {
 	f := seedOrchFixture(t, pool)
 	p := NewMockProvider("mock-l2", "EUR")
 	registerCapability(t, pool, f, p, 100)
-	orch := NewOrchestrator(map[string]PaymentProvider{"mock-l2": p}, MultiWebhookCredentialResolver{"mock-l2": NewMockWebhookCredentials(p)})
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-l2": p}, MultiWebhookCredentialResolver{"mock-l2": NewMockWebhookCredentials(p)}).WithPayoutDestinations(pitest.Shared())
 
 	var intent DepositIntent
 	var first, second PaymentAttempt
@@ -1083,7 +1088,7 @@ func TestRVLF_L4_TombstoneReceiptBackfillsAmountAssetFromOriginalAttempt(t *test
 	f := seedOrchFixture(t, pool)
 	p := NewMockProvider("mock-l4", "EUR")
 	registerCapability(t, pool, f, p, 100)
-	orch := NewOrchestrator(map[string]PaymentProvider{"mock-l4": p}, MultiWebhookCredentialResolver{"mock-l4": NewMockWebhookCredentials(p)})
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-l4": p}, MultiWebhookCredentialResolver{"mock-l4": NewMockWebhookCredentials(p)}).WithPayoutDestinations(pitest.Shared())
 
 	res := rvInit(t, pool, orch, f, 5000, "l4")
 	ref := *res.Attempt.ProviderReference
@@ -1119,7 +1124,7 @@ func TestRVLF_F2_OversizeDeclineReasonBounded(t *testing.T) {
 	f := seedOrchFixture(t, pool)
 	p := NewMockProvider("mock-f2", "EUR")
 	registerCapability(t, pool, f, p, 100)
-	orch := NewOrchestrator(map[string]PaymentProvider{"mock-f2": p}, MultiWebhookCredentialResolver{"mock-f2": NewMockWebhookCredentials(p)})
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-f2": p}, MultiWebhookCredentialResolver{"mock-f2": NewMockWebhookCredentials(p)}).WithPayoutDestinations(pitest.Shared())
 
 	res := rvInit(t, pool, orch, f, 5000, "f2")
 	ref := *res.Attempt.ProviderReference
@@ -1169,7 +1174,7 @@ func TestRVLF_F2_MultibyteOversizeDeclineReasonBounded(t *testing.T) {
 	f := seedOrchFixture(t, pool)
 	p := NewMockProvider("mock-f2mb", "EUR")
 	registerCapability(t, pool, f, p, 100)
-	orch := NewOrchestrator(map[string]PaymentProvider{"mock-f2mb": p}, MultiWebhookCredentialResolver{"mock-f2mb": NewMockWebhookCredentials(p)})
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-f2mb": p}, MultiWebhookCredentialResolver{"mock-f2mb": NewMockWebhookCredentials(p)}).WithPayoutDestinations(pitest.Shared())
 
 	res := rvInit(t, pool, orch, f, 5000, "f2mb")
 	ref := *res.Attempt.ProviderReference
@@ -1202,7 +1207,7 @@ func TestRVLF_F2_DriveGo_OversizeDeclineReasonBounded(t *testing.T) {
 	f := seedOrchFixture(t, pool)
 	p := NewMockProvider("mock-f2-drive", "EUR")
 	registerCapability(t, pool, f, p, 100)
-	orch := NewOrchestrator(map[string]PaymentProvider{"mock-f2-drive": p}, MultiWebhookCredentialResolver{"mock-f2-drive": NewMockWebhookCredentials(p)})
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-f2-drive": p}, MultiWebhookCredentialResolver{"mock-f2-drive": NewMockWebhookCredentials(p)}).WithPayoutDestinations(pitest.Shared())
 
 	res := rvInit(t, pool, orch, f, 5000, "f2-drive")
 	attemptID, intentID := res.Attempt.ID, res.Intent.ID
@@ -1246,7 +1251,7 @@ func TestRVLF_F2_SweeperGo_OversizeDeclineReasonBounded(t *testing.T) {
 	f := seedOrchFixture(t, pool)
 	p := NewMockProvider("mock-f2-sweep", "EUR")
 	registerCapability(t, pool, f, p, 100)
-	orch := NewOrchestrator(map[string]PaymentProvider{"mock-f2-sweep": p}, MultiWebhookCredentialResolver{"mock-f2-sweep": NewMockWebhookCredentials(p)})
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-f2-sweep": p}, MultiWebhookCredentialResolver{"mock-f2-sweep": NewMockWebhookCredentials(p)}).WithPayoutDestinations(pitest.Shared())
 
 	res := rvInit(t, pool, orch, f, 5000, "f2-sweep")
 	ref := *res.Attempt.ProviderReference
@@ -1279,7 +1284,7 @@ func TestRVLF_N4b_PreconditionAnomalyReceiptResolved(t *testing.T) {
 	registerCapability(t, pool, f, pa, 100)
 	registerCapability(t, pool, f, pb, 200)
 	orch := NewOrchestrator(map[string]PaymentProvider{"mock-n4b-a": pa, "mock-n4b-b": pb},
-		MultiWebhookCredentialResolver{"mock-n4b-a": NewMockWebhookCredentials(pa), "mock-n4b-b": NewMockWebhookCredentials(pb)})
+		MultiWebhookCredentialResolver{"mock-n4b-a": NewMockWebhookCredentials(pa), "mock-n4b-b": NewMockWebhookCredentials(pb)}).WithPayoutDestinations(pitest.Shared())
 
 	res := rvInit(t, pool, orch, f, 5000, "n4b")
 	// A genuinely verified "mock-n4b-b" event naming attempt A's own
@@ -1322,7 +1327,7 @@ func TestRVLF_ResolveConflict_ByRefByMerchantMismatchAnomalyReceiptResolved(t *t
 	f := seedOrchFixture(t, pool)
 	p := NewMockProvider("mock-n5b", "EUR")
 	registerCapability(t, pool, f, p, 100)
-	orch := NewOrchestrator(map[string]PaymentProvider{"mock-n5b": p}, MultiWebhookCredentialResolver{"mock-n5b": NewMockWebhookCredentials(p)})
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-n5b": p}, MultiWebhookCredentialResolver{"mock-n5b": NewMockWebhookCredentials(p)}).WithPayoutDestinations(pitest.Shared())
 
 	resA := rvInit(t, pool, orch, f, 1000, "n5b-a")
 	resB := rvInit(t, pool, orch, f, 2000, "n5b-b")
@@ -1368,7 +1373,7 @@ func TestRVLF_C1_PreconditionTwoReferenceConflict_OnlyReachableViaReadCommittedR
 	f := seedOrchFixture(t, pool)
 	p := NewMockProvider("mock-c1race", "EUR")
 	registerCapability(t, pool, f, p, 100)
-	orch := NewOrchestrator(map[string]PaymentProvider{"mock-c1race": p}, MultiWebhookCredentialResolver{"mock-c1race": NewMockWebhookCredentials(p)})
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-c1race": p}, MultiWebhookCredentialResolver{"mock-c1race": NewMockWebhookCredentials(p)}).WithPayoutDestinations(pitest.Shared())
 
 	// Attempt B: the one this delivery resolves via MERCHANT reference.
 	// Left in 'submitting' (no provider_reference yet) so
@@ -1490,7 +1495,7 @@ func TestRVLF_N5c_CrossOperationAnomalyReceiptResolved(t *testing.T) {
 	f := seedPayoutFixture(t, pool, 100_000, true)
 	p := NewMockProvider("mock-n5c", "EUR")
 	registerCapability(t, pool, f.orchFixture, p, 100)
-	orch := NewOrchestrator(map[string]PaymentProvider{"mock-n5c": p}, MultiWebhookCredentialResolver{"mock-n5c": NewMockWebhookCredentials(p)})
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-n5c": p}, MultiWebhookCredentialResolver{"mock-n5c": NewMockWebhookCredentials(p)}).WithPayoutDestinations(pitest.Shared())
 
 	_, payoutAttempt := notSentPayoutAttempt(t, pool, orch, f, 5000, "n5c-payout")
 	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
@@ -1537,7 +1542,7 @@ func TestRVLF_N1_DeferredApplyNeverReplaysAReversalReceiptAsDeposit(t *testing.T
 	f := seedOrchFixture(t, pool)
 	p := NewMockProvider("mock-n1", "EUR")
 	registerCapability(t, pool, f, p, 100)
-	orch := NewOrchestrator(map[string]PaymentProvider{"mock-n1": p}, MultiWebhookCredentialResolver{"mock-n1": NewMockWebhookCredentials(p)})
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-n1": p}, MultiWebhookCredentialResolver{"mock-n1": NewMockWebhookCredentials(p)}).WithPayoutDestinations(pitest.Shared())
 
 	res := rvInit(t, pool, orch, f, 5000, "n1")
 	ref := *res.Attempt.ProviderReference
@@ -1591,7 +1596,7 @@ func TestRVLF_A7Tomb1_ConcurrentIdenticalTombstoneReversalsNoDeadlockExactlyOneE
 	f := seedOrchFixture(t, pool)
 	p := NewMockProvider("mock-a7tomb", "EUR")
 	registerCapability(t, pool, f, p, 100)
-	orch := NewOrchestrator(map[string]PaymentProvider{"mock-a7tomb": p}, MultiWebhookCredentialResolver{"mock-a7tomb": NewMockWebhookCredentials(p)})
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-a7tomb": p}, MultiWebhookCredentialResolver{"mock-a7tomb": NewMockWebhookCredentials(p)}).WithPayoutDestinations(pitest.Shared())
 
 	// A never-posted original: rvInit puts the attempt in 'pending' with a
 	// real provider_reference, but it has no ledger_transaction_id yet -
@@ -1669,7 +1674,7 @@ func TestRVLF_N3_DeferredApplyNeverReplaysADepositDeclineAsPayoutEvidence(t *tes
 	f := seedPayoutFixture(t, pool, 100_000, true)
 	p := NewMockProvider("mock-n3", "EUR")
 	registerCapability(t, pool, f.orchFixture, p, 100)
-	orch := NewOrchestrator(map[string]PaymentProvider{"mock-n3": p}, MultiWebhookCredentialResolver{"mock-n3": NewMockWebhookCredentials(p)})
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-n3": p}, MultiWebhookCredentialResolver{"mock-n3": NewMockWebhookCredentials(p)}).WithPayoutDestinations(pitest.Shared())
 
 	wr, payoutAttempt := notSentPayoutAttempt(t, pool, orch, f, 5000, "n3-payout")
 	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
@@ -1754,7 +1759,7 @@ func TestRVLF_SM10_PayoutSuccessProviderReferenceMismatchDisputes(t *testing.T) 
 	f := seedPayoutFixture(t, pool, 100_000, true)
 	p := NewMockProvider("mock-sm10", "EUR")
 	registerCapability(t, pool, f.orchFixture, p, 100)
-	orch := NewOrchestrator(map[string]PaymentProvider{"mock-sm10": p}, MultiWebhookCredentialResolver{"mock-sm10": NewMockWebhookCredentials(p)})
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-sm10": p}, MultiWebhookCredentialResolver{"mock-sm10": NewMockWebhookCredentials(p)}).WithPayoutDestinations(pitest.Shared())
 
 	wr, attempt := notSentPayoutAttempt(t, pool, orch, f, 5000, "sm10")
 	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
@@ -1820,7 +1825,7 @@ func TestRVLF_N2_DriveGo_SuccessAfterTombstoneDisputesNotIndexError(t *testing.T
 	f := seedOrchFixture(t, pool)
 	p := NewMockProvider("mock-n2drive", "EUR")
 	registerCapability(t, pool, f, p, 100)
-	orch := NewOrchestrator(map[string]PaymentProvider{"mock-n2drive": p}, MultiWebhookCredentialResolver{"mock-n2drive": NewMockWebhookCredentials(p)})
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-n2drive": p}, MultiWebhookCredentialResolver{"mock-n2drive": NewMockWebhookCredentials(p)}).WithPayoutDestinations(pitest.Shared())
 
 	res := rvInit(t, pool, orch, f, 5000, "n2drive")
 	attemptID, intentID := res.Attempt.ID, res.Intent.ID
@@ -1889,7 +1894,7 @@ func TestRVLF_N4_RejectCreatedSiblingsRecordsCallerEvidenceKind(t *testing.T) {
 	f := seedOrchFixture(t, pool)
 	p := NewMockProvider("mock-n4", "EUR")
 	registerCapability(t, pool, f, p, 100)
-	orch := NewOrchestrator(map[string]PaymentProvider{"mock-n4": p}, MultiWebhookCredentialResolver{"mock-n4": NewMockWebhookCredentials(p)})
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-n4": p}, MultiWebhookCredentialResolver{"mock-n4": NewMockWebhookCredentials(p)}).WithPayoutDestinations(pitest.Shared())
 
 	res := rvInit(t, pool, orch, f, 5000, "n4")
 	attemptID, intentID := res.Attempt.ID, res.Intent.ID
@@ -1961,7 +1966,7 @@ func TestRVLF_N2_SweeperGo_SuccessAfterTombstoneDisputesNotIndexError(t *testing
 	f := seedOrchFixture(t, pool)
 	p := NewMockProvider("mock-n2sweep", "EUR")
 	registerCapability(t, pool, f, p, 100)
-	orch := NewOrchestrator(map[string]PaymentProvider{"mock-n2sweep": p}, MultiWebhookCredentialResolver{"mock-n2sweep": NewMockWebhookCredentials(p)})
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-n2sweep": p}, MultiWebhookCredentialResolver{"mock-n2sweep": NewMockWebhookCredentials(p)}).WithPayoutDestinations(pitest.Shared())
 
 	res := rvInit(t, pool, orch, f, 5000, "n2sweep")
 	attemptID, intentID := res.Attempt.ID, res.Intent.ID
@@ -2020,7 +2025,7 @@ func TestRVLF_SecGapB_CrossOperationDeferredReceiptResolvedAsAnomaly(t *testing.
 	f := seedOrchFixture(t, pool)
 	p := NewMockProvider("mock-secgapb", "EUR")
 	registerCapability(t, pool, f, p, 100)
-	orch := NewOrchestrator(map[string]PaymentProvider{"mock-secgapb": p}, MultiWebhookCredentialResolver{"mock-secgapb": NewMockWebhookCredentials(p)})
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-secgapb": p}, MultiWebhookCredentialResolver{"mock-secgapb": NewMockWebhookCredentials(p)}).WithPayoutDestinations(pitest.Shared())
 
 	res := rvInit(t, pool, orch, f, 5000, "secgapb")
 	ref := *res.Attempt.ProviderReference
@@ -2081,7 +2086,7 @@ func TestRVLF_SecGapA1_UnknownEventTypeIsAnomaly(t *testing.T) {
 	f := seedOrchFixture(t, pool)
 	p := NewMockProvider("mock-secgapa1", "EUR")
 	registerCapability(t, pool, f, p, 100)
-	orch := NewOrchestrator(map[string]PaymentProvider{"mock-secgapa1": p}, MultiWebhookCredentialResolver{"mock-secgapa1": NewMockWebhookCredentials(p)})
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-secgapa1": p}, MultiWebhookCredentialResolver{"mock-secgapa1": NewMockWebhookCredentials(p)}).WithPayoutDestinations(pitest.Shared())
 
 	res := rvInit(t, pool, orch, f, 5000, "secgapa1")
 	ref := *res.Attempt.ProviderReference
@@ -2116,7 +2121,7 @@ func TestRVLF_SecGapA2_SM1FallsBackToWithdrawalReference(t *testing.T) {
 	f := seedPayoutFixture(t, pool, 100_000, true)
 	p := NewMockProvider("mock-secgapa2", "EUR")
 	registerCapability(t, pool, f.orchFixture, p, 100)
-	orch := NewOrchestrator(map[string]PaymentProvider{"mock-secgapa2": p}, MultiWebhookCredentialResolver{"mock-secgapa2": NewMockWebhookCredentials(p)})
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-secgapa2": p}, MultiWebhookCredentialResolver{"mock-secgapa2": NewMockWebhookCredentials(p)}).WithPayoutDestinations(pitest.Shared())
 
 	wr, attempt := notSentPayoutAttempt(t, pool, orch, f, 5000, "secgapa2")
 	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
@@ -2162,7 +2167,7 @@ func TestRVLF_SecGapA3_ReversalFingerprintUsesRawWireOutcome(t *testing.T) {
 	f := seedOrchFixture(t, pool)
 	p := NewMockProvider("mock-secgapa3", "EUR")
 	registerCapability(t, pool, f, p, 100)
-	orch := NewOrchestrator(map[string]PaymentProvider{"mock-secgapa3": p}, MultiWebhookCredentialResolver{"mock-secgapa3": NewMockWebhookCredentials(p)})
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-secgapa3": p}, MultiWebhookCredentialResolver{"mock-secgapa3": NewMockWebhookCredentials(p)}).WithPayoutDestinations(pitest.Shared())
 
 	res := rvInit(t, pool, orch, f, 5000, "secgapa3")
 	ref := *res.Attempt.ProviderReference
@@ -2237,7 +2242,7 @@ func TestINVDEP1_H1b_ReversalFingerprintEndToEnd_RawWireOutcomePreserved(t *test
 	f := seedOrchFixture(t, pool)
 	p := NewMockProvider("mock-h1b", "EUR")
 	registerCapability(t, pool, f, p, 100)
-	orch := NewOrchestrator(map[string]PaymentProvider{"mock-h1b": p}, MultiWebhookCredentialResolver{"mock-h1b": NewMockWebhookCredentials(p)})
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-h1b": p}, MultiWebhookCredentialResolver{"mock-h1b": NewMockWebhookCredentials(p)}).WithPayoutDestinations(pitest.Shared())
 
 	// --- declined (legacy chargeback carrier), the case H1b affects ------
 	res := rvInit(t, pool, orch, f, 5000, "h1b-declined")

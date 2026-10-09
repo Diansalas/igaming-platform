@@ -171,6 +171,11 @@ type OperationManifest struct {
 	// adapter. Registration refuses an adapter declaring true until a flow
 	// exists."
 	SupportsRefund bool
+	// EchoesDestinationFingerprint (B13-B, ADR 0111 2.7): true means a payout success result or
+	// status poll from this adapter always carries a DestinationEcho. A success WITHOUT one is then
+	// ambiguous (never a success). Conformance: a non-Synthetic payout adapter is never called with
+	// an empty Destination; a differing vendor-reported destination yields a mismatch echo.
+	EchoesDestinationFingerprint bool
 	// CallbackEchoesMerchantReference is §10.1's LF95-C5 field: true means
 	// this adapter's callback always carries back the merchant_reference
 	// the platform sent it, so a success can always be convergeable even if

@@ -20,6 +20,7 @@ import (
 
 	"github.com/Diansalas/igaming-platform/internal/capability"
 	"github.com/Diansalas/igaming-platform/internal/payments"
+	"github.com/Diansalas/igaming-platform/internal/payoutinstrument/pitest"
 	"github.com/Diansalas/igaming-platform/internal/withdrawal"
 )
 
@@ -67,7 +68,7 @@ func (w *frWorld) ambiguousPayout() uuid.UUID {
 		t.Fatalf("ClaimForDispatch: %v", err)
 	}
 	if err := payments.ApplyPayoutResult(ctx, pool, w.tenant, wr.ID, claim.Attempt,
-		payments.GateResult[payments.WithdrawResult]{Class: payments.ErrorClassAmbiguous, Err: errors.New("http m2 simulated timeout")}, payments.EvidenceSync); err != nil {
+		payments.GateResult[payments.WithdrawResult]{Class: payments.ErrorClassAmbiguous, Err: errors.New("http m2 simulated timeout")}, payments.EvidenceSync, payments.WithDestinations(pitest.Shared())); err != nil {
 		t.Fatalf("ApplyPayoutResult(ambiguous): %v", err)
 	}
 	return claim.Attempt.ID

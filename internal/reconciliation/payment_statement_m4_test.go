@@ -162,28 +162,35 @@ func TestR1_M4Predicates_Pure(t *testing.T) {
 	}
 }
 
-// Review amendment C-3/C-4 (LF): the destination park wording. Pin 1 - it is
-// INERT today: B13-B's reasons are not classified, so no pay_captured_unposted
-// finding can be raised for them (classifyDisputeReason -> reasonUnclassified;
-// when B13-B classifies them this pin flips deliberately and the hint goes
-// live). Pin 2 - selection by reason, for bound and unbound shapes alike, never
-// the generic payout text and never the M4-scope text. Pin 3 - an executed M4
-// not-paid keeps precedence.
-func TestC3_DestinationHint_InertUntilClassified_SelectedByReason(t *testing.T) {
+// Review amendment C-3/C-4/RR-2 (LF): the destination park wording. B13-B has
+// landed and classifies both reasons (bound-if-referenced), so the hint is now
+// LIVE: this pin flipped deliberately at the B13-B merge. Pin 1 - both reasons
+// are classified (never reasonUnclassified). Pin 2 - selection by reason, never
+// the generic payout text or the M4-scope text; integrity failure gets its own
+// wording with no M4 route (RR-2). Pin 3 - an executed M4 not-paid keeps
+// precedence. Pin 4 - a REFERENCED destination park raises a finding.
+func TestC3_DestinationHint_LiveAfterClassification_SelectedByReason(t *testing.T) {
 	const want = "payout reported to a destination other than the bound one: no completion against the player's hold; PSP recall/return or off-platform recovery; M4 not-paid only on positive decline evidence; never allocation"
 	if destinationPayoutCapturedUnpostedResolutionHint != want {
 		t.Fatalf("destination hint text drifted: %q", destinationPayoutCapturedUnpostedResolutionHint)
 	}
 	for _, r := range []string{"destination_mismatch", "destination_integrity_failure"} {
-		if c := classifyDisputeReason(r); c != reasonUnclassified {
-			t.Fatalf("%s is now classified (%v): B13-B has landed - re-review the destination hint wiring and flip this pin", r, c)
+		if c, ok := payoutDisputeReasonClasses[r]; !ok || c != reasonBoundIfReferenced {
+			t.Fatalf("%s: payout classification %v (present=%v), want bound-if-referenced", r, c, ok)
+		}
+		wantHint := want
+		if r == "destination_integrity_failure" {
+			wantHint = destinationIntegrityPayoutCapturedUnpostedResolutionHint
+			if strings.Contains(wantHint, "M4 not-paid only") {
+				t.Fatalf("integrity-failure hint must not advertise an M4 route: %q", wantHint)
+			}
 		}
 		for _, ref := range []string{"X-bound", ""} {
 			a := &payAttempt{operation: "payout", state: "disputed", terminalReason: r, providerRef: ref}
-			if a.boundCapture() || a.unboundPark() {
-				t.Fatalf("%s/%q raises a captured-unposted finding today", r, ref)
+			if ref != "" && !a.boundCapture() {
+				t.Fatalf("%s/%q: a referenced destination park must raise a captured-unposted finding", r, ref)
 			}
-			if got := capturedUnpostedHintFor(a, capturedUnpostedResolutionHint); got != want {
+			if got := capturedUnpostedHintFor(a, capturedUnpostedResolutionHint); got != wantHint {
 				t.Fatalf("%s/%q: hint %q", r, ref, got)
 			}
 			a.m4NotPaid = true

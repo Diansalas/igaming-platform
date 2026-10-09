@@ -21,6 +21,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/capability"
 	"github.com/Diansalas/igaming-platform/internal/ledger"
 	"github.com/Diansalas/igaming-platform/internal/payments"
+	"github.com/Diansalas/igaming-platform/internal/payoutinstrument/pitest"
 	"github.com/Diansalas/igaming-platform/internal/withdrawal"
 )
 
@@ -97,6 +98,7 @@ func (w *hrWorld) approvedWithdrawalOnSuspendedTenant(amount int64) uuid.UUID {
 	ctx := context.Background()
 	var person uuid.UUID
 	var wrID uuid.UUID
+	instrument := pitest.Bind(t, w.a.pool, w.tenant, w.player, "USD") // B13-B: a withdrawal binds a verified payout instrument
 	if err := w.a.pool.WithTenant(ctx, w.tenant, func(ctx context.Context, tx pgx.Tx) error {
 		if err := tx.QueryRow(ctx, `SELECT person_id FROM player_accounts WHERE id = $1`, w.player).Scan(&person); err != nil {
 			return err
@@ -120,7 +122,8 @@ func (w *hrWorld) approvedWithdrawalOnSuspendedTenant(amount int64) uuid.UUID {
 			return err
 		}
 		wr, err := withdrawal.RequestWithdrawal(ctx, tx, withdrawal.RequestParams{TenantID: w.tenant, BrandID: w.brand, PlayerAccountID: w.player, PersonID: person,
-			WalletID: w.wallet, AssetCode: "USD", Amount: amount, IdempotencyKey: uuid.NewString()})
+			WalletID: w.wallet, AssetCode: "USD", Amount: amount, IdempotencyKey: uuid.NewString(),
+			PayoutInstrumentID: instrument, Destinations: pitest.Shared()})
 		if err != nil {
 			return err
 		}

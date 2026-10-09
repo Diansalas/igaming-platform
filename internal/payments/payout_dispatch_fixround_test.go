@@ -22,6 +22,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/kyc"
 	"github.com/Diansalas/igaming-platform/internal/ledger"
+	"github.com/Diansalas/igaming-platform/internal/payoutinstrument/pitest"
 	"github.com/Diansalas/igaming-platform/internal/wallet"
 	"github.com/Diansalas/igaming-platform/internal/withdrawal"
 )
@@ -165,7 +166,7 @@ func TestPayoutDispatch_T1p_SyncSuccess_SettlesConcreteBalances(t *testing.T) {
 	inner := NewMockProvider("mock-fix-a", "EUR")
 	provider := &syncSuccessWithdrawProvider{MockProvider: inner, ref: "sync-success-ref-1"}
 	registerCapability(t, pool, f.orchFixture, provider, 100)
-	orch := NewOrchestrator(map[string]PaymentProvider{"mock-fix-a": provider}, MultiWebhookCredentialResolver{"mock-fix-a": NewMockWebhookCredentials(inner)})
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-fix-a": provider}, MultiWebhookCredentialResolver{"mock-fix-a": NewMockWebhookCredentials(inner)}).WithPayoutDestinations(pitest.Shared())
 
 	heldBefore := heldForWithdrawal(t, pool, f)
 	clearingBefore := clearingBalance(t, pool, f.tenantID, "EUR")
@@ -175,8 +176,8 @@ func TestPayoutDispatch_T1p_SyncSuccess_SettlesConcreteBalances(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ClaimForDispatch: %v", err)
 	}
-	gr := DispatchWithdraw(context.Background(), nil, MockCredentialResolver{}, provider, claim.Attempt)
-	if err := ApplyPayoutResult(context.Background(), pool, f.tenantID, wr.ID, claim.Attempt, gr, EvidenceSync); err != nil {
+	gr := DispatchWithdraw(context.Background(), pool, MockCredentialResolver{}, provider, claim.Attempt, WithDestinations(pitest.Shared()))
+	if err := ApplyPayoutResult(context.Background(), pool, f.tenantID, wr.ID, claim.Attempt, gr, EvidenceSync, WithDestinations(pitest.Shared())); err != nil {
 		t.Fatalf("ApplyPayoutResult: %v", err)
 	}
 
@@ -217,7 +218,7 @@ func TestPayoutDispatch_T1p_SyncDecline_ReleasesConcreteBalances(t *testing.T) {
 	inner := NewMockProvider("mock-fix-b", "EUR")
 	provider := &syncDeclineWithdrawProvider{MockProvider: inner, reason: "account_closed"}
 	registerCapability(t, pool, f.orchFixture, provider, 100)
-	orch := NewOrchestrator(map[string]PaymentProvider{"mock-fix-b": provider}, MultiWebhookCredentialResolver{"mock-fix-b": NewMockWebhookCredentials(inner)})
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-fix-b": provider}, MultiWebhookCredentialResolver{"mock-fix-b": NewMockWebhookCredentials(inner)}).WithPayoutDestinations(pitest.Shared())
 
 	cashBefore := cashBalance(t, pool, f.orchFixture)
 	heldBefore := heldForWithdrawal(t, pool, f)
@@ -227,8 +228,8 @@ func TestPayoutDispatch_T1p_SyncDecline_ReleasesConcreteBalances(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ClaimForDispatch: %v", err)
 	}
-	gr := DispatchWithdraw(context.Background(), nil, MockCredentialResolver{}, provider, claim.Attempt)
-	if err := ApplyPayoutResult(context.Background(), pool, f.tenantID, wr.ID, claim.Attempt, gr, EvidenceSync); err != nil {
+	gr := DispatchWithdraw(context.Background(), pool, MockCredentialResolver{}, provider, claim.Attempt, WithDestinations(pitest.Shared()))
+	if err := ApplyPayoutResult(context.Background(), pool, f.tenantID, wr.ID, claim.Attempt, gr, EvidenceSync, WithDestinations(pitest.Shared())); err != nil {
 		t.Fatalf("ApplyPayoutResult: %v", err)
 	}
 
@@ -271,7 +272,7 @@ func TestPayoutDispatch_T2Resend_SyncSuccess_SettlesConcreteBalances(t *testing.
 	inner := NewMockProvider("mock-fix-c", "EUR")
 	provider := &syncSuccessWithdrawProvider{MockProvider: inner, ref: "sync-success-ref-t2"}
 	registerCapability(t, pool, f.orchFixture, provider, 100)
-	orch := NewOrchestrator(map[string]PaymentProvider{"mock-fix-c": provider}, MultiWebhookCredentialResolver{"mock-fix-c": NewMockWebhookCredentials(inner)})
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-fix-c": provider}, MultiWebhookCredentialResolver{"mock-fix-c": NewMockWebhookCredentials(inner)}).WithPayoutDestinations(pitest.Shared())
 
 	wr, attempt := notSentPayoutAttempt(t, pool, orch, f, 500, "payout-fix-t2-success")
 
@@ -313,7 +314,7 @@ func TestPayoutDispatch_T2Resend_SyncDecline_ReleasesConcreteBalances(t *testing
 	inner := NewMockProvider("mock-fix-d", "EUR")
 	provider := &syncDeclineWithdrawProvider{MockProvider: inner, reason: "account_closed"}
 	registerCapability(t, pool, f.orchFixture, provider, 100)
-	orch := NewOrchestrator(map[string]PaymentProvider{"mock-fix-d": provider}, MultiWebhookCredentialResolver{"mock-fix-d": NewMockWebhookCredentials(inner)})
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-fix-d": provider}, MultiWebhookCredentialResolver{"mock-fix-d": NewMockWebhookCredentials(inner)}).WithPayoutDestinations(pitest.Shared())
 
 	wr, attempt := notSentPayoutAttempt(t, pool, orch, f, 500, "payout-fix-t2-decline")
 
@@ -357,15 +358,15 @@ func TestSweeper_T12_NonIdempotentManifest_NeverResends(t *testing.T) {
 	inner := NewMockProvider("mock-fix-e", "EUR") // zero-value manifest: IdempotentSubmission=false
 	spy := &withdrawCountingProvider{MockProvider: inner}
 	registerCapability(t, pool, f.orchFixture, spy, 100)
-	orch := NewOrchestrator(map[string]PaymentProvider{"mock-fix-e": spy}, MultiWebhookCredentialResolver{"mock-fix-e": NewMockWebhookCredentials(inner)})
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-fix-e": spy}, MultiWebhookCredentialResolver{"mock-fix-e": NewMockWebhookCredentials(inner)}).WithPayoutDestinations(pitest.Shared())
 
 	wr := approvedWithdrawal(t, pool, f, MockAmountAmbiguous, "payout-fix-t12-nonidempotent")
 	claim, err := orch.ClaimForDispatch(context.Background(), pool, KYCEnforcementPayoutGate{}, f.tenantID, wr.ID, "bank_transfer", testSubmitActor())
 	if err != nil {
 		t.Fatalf("ClaimForDispatch: %v", err)
 	}
-	gr := DispatchWithdraw(context.Background(), nil, MockCredentialResolver{}, spy, claim.Attempt)
-	if err := ApplyPayoutResult(context.Background(), pool, f.tenantID, wr.ID, claim.Attempt, gr, EvidenceSync); err != nil {
+	gr := DispatchWithdraw(context.Background(), pool, MockCredentialResolver{}, spy, claim.Attempt, WithDestinations(pitest.Shared()))
+	if err := ApplyPayoutResult(context.Background(), pool, f.tenantID, wr.ID, claim.Attempt, gr, EvidenceSync, WithDestinations(pitest.Shared())); err != nil {
 		t.Fatalf("ApplyPayoutResult: %v", err)
 	}
 	if spy.count() != 1 {
@@ -422,15 +423,15 @@ func TestSweeper_T12_IdempotentManifest_StopsAtMaxResubmits(t *testing.T) {
 	// "eligible" and the only thing that can stop it is the cap.
 	idem := &idempotentAmbiguousProvider{withdrawCountingProvider: spy}
 	registerCapability(t, pool, f.orchFixture, idem, 100)
-	orch := NewOrchestrator(map[string]PaymentProvider{"mock-fix-f": idem}, MultiWebhookCredentialResolver{"mock-fix-f": NewMockWebhookCredentials(inner)})
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-fix-f": idem}, MultiWebhookCredentialResolver{"mock-fix-f": NewMockWebhookCredentials(inner)}).WithPayoutDestinations(pitest.Shared())
 
 	wr := approvedWithdrawal(t, pool, f, MockAmountAmbiguous, "payout-fix-t12-idempotent")
 	claim, err := orch.ClaimForDispatch(context.Background(), pool, KYCEnforcementPayoutGate{}, f.tenantID, wr.ID, "bank_transfer", testSubmitActor())
 	if err != nil {
 		t.Fatalf("ClaimForDispatch: %v", err)
 	}
-	gr := DispatchWithdraw(context.Background(), nil, MockCredentialResolver{}, idem, claim.Attempt)
-	if err := ApplyPayoutResult(context.Background(), pool, f.tenantID, wr.ID, claim.Attempt, gr, EvidenceSync); err != nil {
+	gr := DispatchWithdraw(context.Background(), pool, MockCredentialResolver{}, idem, claim.Attempt, WithDestinations(pitest.Shared()))
+	if err := ApplyPayoutResult(context.Background(), pool, f.tenantID, wr.ID, claim.Attempt, gr, EvidenceSync, WithDestinations(pitest.Shared())); err != nil {
 		t.Fatalf("ApplyPayoutResult: %v", err)
 	}
 
@@ -514,15 +515,15 @@ func TestPollPayoutStatus_AmountMismatch_Disputes(t *testing.T) {
 		statuses:     []StatusResult{{Outcome: OutcomeSucceeded, Amount: 50_000, AssetCode: "EUR"}}, // requested 500, x100
 	}
 	registerCapability(t, pool, f.orchFixture, provider, 100)
-	orch := NewOrchestrator(map[string]PaymentProvider{"mock-fix-g": provider}, MultiWebhookCredentialResolver{"mock-fix-g": NewMockWebhookCredentials(inner)})
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-fix-g": provider}, MultiWebhookCredentialResolver{"mock-fix-g": NewMockWebhookCredentials(inner)}).WithPayoutDestinations(pitest.Shared())
 
 	wr := approvedWithdrawal(t, pool, f, 500, "payout-fix-amount-mismatch")
 	claim, err := orch.ClaimForDispatch(context.Background(), pool, KYCEnforcementPayoutGate{}, f.tenantID, wr.ID, "bank_transfer", testSubmitActor())
 	if err != nil {
 		t.Fatalf("ClaimForDispatch: %v", err)
 	}
-	gr := DispatchWithdraw(context.Background(), nil, MockCredentialResolver{}, provider, claim.Attempt)
-	if err := ApplyPayoutResult(context.Background(), pool, f.tenantID, wr.ID, claim.Attempt, gr, EvidenceSync); err != nil {
+	gr := DispatchWithdraw(context.Background(), pool, MockCredentialResolver{}, provider, claim.Attempt, WithDestinations(pitest.Shared()))
+	if err := ApplyPayoutResult(context.Background(), pool, f.tenantID, wr.ID, claim.Attempt, gr, EvidenceSync, WithDestinations(pitest.Shared())); err != nil {
 		t.Fatalf("ApplyPayoutResult: %v", err)
 	}
 
@@ -575,15 +576,15 @@ func TestPollPayoutStatus_AssetMismatch_Disputes(t *testing.T) {
 		statuses:     []StatusResult{{Outcome: OutcomeSucceeded, Amount: 500, AssetCode: "USD"}},
 	}
 	registerCapability(t, pool, f.orchFixture, provider, 100)
-	orch := NewOrchestrator(map[string]PaymentProvider{"mock-fix-h": provider}, MultiWebhookCredentialResolver{"mock-fix-h": NewMockWebhookCredentials(inner)})
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-fix-h": provider}, MultiWebhookCredentialResolver{"mock-fix-h": NewMockWebhookCredentials(inner)}).WithPayoutDestinations(pitest.Shared())
 
 	wr := approvedWithdrawal(t, pool, f, 500, "payout-fix-asset-mismatch")
 	claim, err := orch.ClaimForDispatch(context.Background(), pool, KYCEnforcementPayoutGate{}, f.tenantID, wr.ID, "bank_transfer", testSubmitActor())
 	if err != nil {
 		t.Fatalf("ClaimForDispatch: %v", err)
 	}
-	gr := DispatchWithdraw(context.Background(), nil, MockCredentialResolver{}, provider, claim.Attempt)
-	if err := ApplyPayoutResult(context.Background(), pool, f.tenantID, wr.ID, claim.Attempt, gr, EvidenceSync); err != nil {
+	gr := DispatchWithdraw(context.Background(), pool, MockCredentialResolver{}, provider, claim.Attempt, WithDestinations(pitest.Shared()))
+	if err := ApplyPayoutResult(context.Background(), pool, f.tenantID, wr.ID, claim.Attempt, gr, EvidenceSync, WithDestinations(pitest.Shared())); err != nil {
 		t.Fatalf("ApplyPayoutResult: %v", err)
 	}
 	var attempt PaymentAttempt
@@ -634,7 +635,7 @@ func TestDispatchWithdraw_OversizeReference_ParksThroughRealAdapterPath(t *testi
 	inner := NewMockProvider("mock-fix-oversize", "EUR")
 	provider := &oversizeRefWithdrawProvider{MockProvider: inner}
 	registerCapability(t, pool, f.orchFixture, provider, 100)
-	orch := NewOrchestrator(map[string]PaymentProvider{"mock-fix-oversize": provider}, MultiWebhookCredentialResolver{"mock-fix-oversize": NewMockWebhookCredentials(inner)})
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-fix-oversize": provider}, MultiWebhookCredentialResolver{"mock-fix-oversize": NewMockWebhookCredentials(inner)}).WithPayoutDestinations(pitest.Shared())
 
 	wr := approvedWithdrawal(t, pool, f, 500, "payout-fix-oversize-real")
 	claim, err := orch.ClaimForDispatch(context.Background(), pool, KYCEnforcementPayoutGate{}, f.tenantID, wr.ID, "bank_transfer", testSubmitActor())
@@ -644,7 +645,7 @@ func TestDispatchWithdraw_OversizeReference_ParksThroughRealAdapterPath(t *testi
 
 	// The REAL phase B call - through payoutAdapterCall/callProvider, not
 	// a hand-built GateResult.
-	gr := DispatchWithdraw(context.Background(), nil, MockCredentialResolver{}, provider, claim.Attempt)
+	gr := DispatchWithdraw(context.Background(), pool, MockCredentialResolver{}, provider, claim.Attempt, WithDestinations(pitest.Shared()))
 	if gr.Class != ErrorClassProviderRefInvalid {
 		t.Fatalf("expected ErrorClassProviderRefInvalid from the real adapter-call path, got %s (err=%v)", gr.Class, gr.Err)
 	}
@@ -652,7 +653,7 @@ func TestDispatchWithdraw_OversizeReference_ParksThroughRealAdapterPath(t *testi
 		t.Fatalf("expected a non-nil error from the gate")
 	}
 
-	if err := ApplyPayoutResult(context.Background(), pool, f.tenantID, wr.ID, claim.Attempt, gr, EvidenceSync); err != nil {
+	if err := ApplyPayoutResult(context.Background(), pool, f.tenantID, wr.ID, claim.Attempt, gr, EvidenceSync, WithDestinations(pitest.Shared())); err != nil {
 		t.Fatalf("ApplyPayoutResult: %v", err)
 	}
 	var got withdrawal.WithdrawalRequest
@@ -693,15 +694,15 @@ func TestPollPayoutStatus_StillPending_Reschedules(t *testing.T) {
 	// Default Withdraw -> Pending (with a reference), default QueryStatus
 	// -> whatever the mock recorded, which is Pending too.
 	registerCapability(t, pool, f.orchFixture, inner, 100)
-	orch := NewOrchestrator(map[string]PaymentProvider{"mock-fix-i": inner}, MultiWebhookCredentialResolver{"mock-fix-i": NewMockWebhookCredentials(inner)})
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-fix-i": inner}, MultiWebhookCredentialResolver{"mock-fix-i": NewMockWebhookCredentials(inner)}).WithPayoutDestinations(pitest.Shared())
 
 	wr := approvedWithdrawal(t, pool, f, 500, "payout-fix-still-pending")
 	claim, err := orch.ClaimForDispatch(context.Background(), pool, KYCEnforcementPayoutGate{}, f.tenantID, wr.ID, "bank_transfer", testSubmitActor())
 	if err != nil {
 		t.Fatalf("ClaimForDispatch: %v", err)
 	}
-	gr := DispatchWithdraw(context.Background(), nil, MockCredentialResolver{}, inner, claim.Attempt)
-	if err := ApplyPayoutResult(context.Background(), pool, f.tenantID, wr.ID, claim.Attempt, gr, EvidenceSync); err != nil {
+	gr := DispatchWithdraw(context.Background(), pool, MockCredentialResolver{}, inner, claim.Attempt, WithDestinations(pitest.Shared()))
+	if err := ApplyPayoutResult(context.Background(), pool, f.tenantID, wr.ID, claim.Attempt, gr, EvidenceSync, WithDestinations(pitest.Shared())); err != nil {
 		t.Fatalf("ApplyPayoutResult: %v", err)
 	}
 	var attempt PaymentAttempt
@@ -752,7 +753,7 @@ func TestClaimForDispatch_NextActionAtSet_CrashRecovery(t *testing.T) {
 	f := seedPayoutFixture(t, pool, 100_000, true)
 	inner := NewMockProvider("mock-fix-j", "EUR")
 	registerCapability(t, pool, f.orchFixture, inner, 100)
-	orch := NewOrchestrator(map[string]PaymentProvider{"mock-fix-j": inner}, MultiWebhookCredentialResolver{"mock-fix-j": NewMockWebhookCredentials(inner)})
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-fix-j": inner}, MultiWebhookCredentialResolver{"mock-fix-j": NewMockWebhookCredentials(inner)}).WithPayoutDestinations(pitest.Shared())
 
 	wr := approvedWithdrawal(t, pool, f, 500, "payout-fix-crash-recovery")
 	claim, err := orch.ClaimForDispatch(context.Background(), pool, KYCEnforcementPayoutGate{}, f.tenantID, wr.ID, "bank_transfer", testSubmitActor())
@@ -827,7 +828,7 @@ func TestConcurrentClaimForDispatch_ExactlyOneWithdraws(t *testing.T) {
 		inner := NewMockProvider(fmt.Sprintf("mock-fix-cpw4-%d", i), "EUR")
 		spy := &withdrawCountingProvider{MockProvider: inner}
 		registerCapability(t, pool, f.orchFixture, spy, 100)
-		orch := NewOrchestrator(map[string]PaymentProvider{spy.Capabilities().ProviderID: spy}, MultiWebhookCredentialResolver{spy.Capabilities().ProviderID: NewMockWebhookCredentials(inner)})
+		orch := NewOrchestrator(map[string]PaymentProvider{spy.Capabilities().ProviderID: spy}, MultiWebhookCredentialResolver{spy.Capabilities().ProviderID: NewMockWebhookCredentials(inner)}).WithPayoutDestinations(pitest.Shared())
 
 		wr := approvedWithdrawal(t, pool, f, 500, fmt.Sprintf("payout-cpw4-%d", i))
 
@@ -859,8 +860,8 @@ func TestConcurrentClaimForDispatch_ExactlyOneWithdraws(t *testing.T) {
 			t.Fatalf("rep %d: expected exactly 1 payment_attempts row, got %d", i, n)
 		}
 
-		gr := DispatchWithdraw(context.Background(), nil, MockCredentialResolver{}, spy, winningAttempt)
-		if err := ApplyPayoutResult(context.Background(), pool, f.tenantID, wr.ID, winningAttempt, gr, EvidenceSync); err != nil {
+		gr := DispatchWithdraw(context.Background(), pool, MockCredentialResolver{}, spy, winningAttempt, WithDestinations(pitest.Shared()))
+		if err := ApplyPayoutResult(context.Background(), pool, f.tenantID, wr.ID, winningAttempt, gr, EvidenceSync, WithDestinations(pitest.Shared())); err != nil {
 			t.Fatalf("rep %d: ApplyPayoutResult: %v", i, err)
 		}
 		if spy.count() != 1 {
@@ -883,7 +884,7 @@ func TestClaimForDispatch_GateRunsUnderOuterLock(t *testing.T) {
 	f := seedPayoutFixture(t, pool, 10_000, true)
 	provider := NewMockProvider("mock-fix-lock", "EUR")
 	registerCapability(t, pool, f.orchFixture, provider, 100)
-	orch := NewOrchestrator(map[string]PaymentProvider{"mock-fix-lock": provider}, MultiWebhookCredentialResolver{"mock-fix-lock": NewMockWebhookCredentials(provider)})
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-fix-lock": provider}, MultiWebhookCredentialResolver{"mock-fix-lock": NewMockWebhookCredentials(provider)}).WithPayoutDestinations(pitest.Shared())
 
 	wr := approvedWithdrawal(t, pool, f, 500, "payout-fix-lock-presence")
 
@@ -1004,7 +1005,7 @@ func TestClaimForDispatch_KillSwitchEngaged_FailsClosedNoWithdraw(t *testing.T) 
 	inner := NewMockProvider("mock-fix-ks-t1p", "EUR")
 	spy := &withdrawCountingProvider{MockProvider: inner}
 	registerCapability(t, pool, f.orchFixture, spy, 100)
-	orch := NewOrchestrator(map[string]PaymentProvider{"mock-fix-ks-t1p": spy}, MultiWebhookCredentialResolver{"mock-fix-ks-t1p": NewMockWebhookCredentials(inner)})
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-fix-ks-t1p": spy}, MultiWebhookCredentialResolver{"mock-fix-ks-t1p": NewMockWebhookCredentials(inner)}).WithPayoutDestinations(pitest.Shared())
 
 	wr := approvedWithdrawal(t, pool, f, 500, "payout-fix-ks-t1p")
 	engageKillSwitchForTest(t, pool, f, "mock-fix-ks-t1p")
@@ -1149,7 +1150,7 @@ func TestSweeper_T2Reclaim_KillSwitchEngaged_ReschedulesNeverEscalates(t *testin
 	inner := NewMockProvider("mock-fix-ks-t2", "EUR")
 	spy := &withdrawCountingProvider{MockProvider: inner}
 	registerCapability(t, pool, f.orchFixture, spy, 100)
-	orch := NewOrchestrator(map[string]PaymentProvider{"mock-fix-ks-t2": spy}, MultiWebhookCredentialResolver{"mock-fix-ks-t2": NewMockWebhookCredentials(inner)})
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-fix-ks-t2": spy}, MultiWebhookCredentialResolver{"mock-fix-ks-t2": NewMockWebhookCredentials(inner)}).WithPayoutDestinations(pitest.Shared())
 
 	_, attempt := notSentPayoutAttempt(t, pool, orch, f, 500, "payout-fix-ks-t2")
 	engageKillSwitchForTest(t, pool, f, "mock-fix-ks-t2")

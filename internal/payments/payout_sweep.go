@@ -291,6 +291,13 @@ func (s *Sweeper) reclaimPayoutCreated(ctx context.Context, tenantID uuid.UUID, 
 		if err != nil || blocked {
 			return err
 		}
+		// B13-B (ADR 0111 2.4 "T2 re-claim / T12 resend"): the destination gate and the tiering
+		// predicate on the exact adapter, next to the KYC gate. Failure escalates (T16): no
+		// resend, no release. The destination is never re-resolved.
+		allowed, err = s.destinationGateAndEscalate(actx, tx, wr, attempt, nextPoll)
+		if err != nil || !allowed {
+			return err
+		}
 		allowed, err = s.gateAndEscalateOnDeny(actx, tx, wr, attempt, nextPoll)
 		if err != nil || !allowed {
 			return err
@@ -386,6 +393,13 @@ func (s *Sweeper) resubmitPayoutAmbiguous(ctx context.Context, tenantID uuid.UUI
 		if err != nil || blocked {
 			return err
 		}
+		// B13-B (ADR 0111 2.4 "T2 re-claim / T12 resend"): the destination gate and the tiering
+		// predicate on the exact adapter, next to the KYC gate. Failure escalates (T16): no
+		// resend, no release. The destination is never re-resolved.
+		allowed, err = s.destinationGateAndEscalate(actx, tx, wr, attempt, nextPoll)
+		if err != nil || !allowed {
+			return err
+		}
 		allowed, err = s.gateAndEscalateOnDeny(actx, tx, wr, attempt, nextPoll)
 		if err != nil || !allowed {
 			return err
@@ -432,8 +446,8 @@ func (s *Sweeper) dispatchPayoutAttempt(ctx context.Context, tenantID uuid.UUID,
 	if !ok {
 		return fmt.Errorf("%w: %q", ErrSweeperProviderNotRegistered, *attempt.ProviderID)
 	}
-	gr := DispatchWithdraw(ctx, s.Pool, s.CredResolver, provider, attempt)
-	return ApplyPayoutResult(ctx, s.Pool, tenantID, *attempt.WithdrawalRequestID, attempt, gr, EvidenceSync)
+	gr := DispatchWithdraw(ctx, s.Pool, s.CredResolver, provider, attempt, s.Orchestrator.PayoutOptions()...)
+	return ApplyPayoutResult(ctx, s.Pool, tenantID, *attempt.WithdrawalRequestID, attempt, gr, EvidenceSync, s.Orchestrator.PayoutOptions()...)
 }
 
 // resolvePayoutViaQueryStatus resolves a submitting(lease-expired)/pending

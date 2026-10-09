@@ -31,6 +31,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/identityresolution"
 	"github.com/Diansalas/igaming-platform/internal/payments"
+	"github.com/Diansalas/igaming-platform/internal/payoutinstrument/pitest"
 	"github.com/Diansalas/igaming-platform/internal/tenant"
 	"github.com/Diansalas/igaming-platform/internal/testsupport/scratchdb"
 )
@@ -91,7 +92,7 @@ func newKSAPI(t *testing.T) *ksAPI {
 	issuer := auth.NewIssuer(keys, "ks-test", "ks-test")
 	mock := payments.NewMockProvider("mock", "EUR", "USD")
 	orchestrator := payments.NewOrchestrator(map[string]payments.PaymentProvider{"mock": mock},
-		payments.MultiWebhookCredentialResolver{"mock": payments.NewMockWebhookCredentials(mock)})
+		payments.MultiWebhookCredentialResolver{"mock": payments.NewMockWebhookCredentials(mock)}).WithPayoutDestinations(pitest.Shared())
 	logBuf := &syncBuffer{}
 	srv := httptest.NewServer(New(Deps{
 		Logger:              slog.New(slog.NewTextHandler(io.MultiWriter(os.Stderr, logBuf), &slog.HandlerOptions{Level: slog.LevelError})),

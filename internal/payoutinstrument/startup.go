@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 )
 
 // ErrStartupGate is the startup refusal.
@@ -52,15 +53,10 @@ func (r Registrations) NonSyntheticRegistered() bool {
 // integration build tag, so outside both conditions the feature is simply
 // unavailable (keys == nil) rather than silently keyed.
 func VerifyStartup(guardEnvironment string, keys *Keys, regs Registrations) error {
-	// L-8 (security review): until B13-B wires the binding into the withdrawal and
-	// payments paths, NO non-Synthetic payout adapter may be registered - it would
-	// dispatch NULL-binding withdrawals (the 0123 insert guard tolerates NULL/NULL
-	// until B13-B replaces it). Remove this clause in the B13-B change.
-	for _, a := range regs.PaymentAdapters {
-		if a != nil && !IsSyntheticComponent(a) {
-			return fmt.Errorf("%w: a non-Synthetic payout adapter is registered but B13-B (destination binding on the withdrawal and payments paths) has not landed; refusing to start", ErrStartupGate)
-		}
-	}
+	// B13-B (ADR 0111 section 18): the former L-8 clause (refuse every non-Synthetic payout
+	// adapter until the binding lands) is REMOVED in the same change that wires the binding
+	// into the withdrawal and payments paths and closes the NULL arm (migration 0126). A
+	// non-Synthetic adapter now needs the keys below and the per-claim tiering predicate.
 	required := guardEnvironment == "production" || regs.NonSyntheticRegistered()
 	if required && keys == nil {
 		return fmt.Errorf("%w: PAYOUT_INSTRUMENT_KEYS / PAYOUT_INSTRUMENT_ACTIVE_KID and PAYOUT_INSTRUMENT_FP_KEYS / PAYOUT_INSTRUMENT_FP_ACTIVE_KID are required (production, or a non-Synthetic payout adapter, verifier or payment statement source is registered); refusing to start", ErrStartupGate)
@@ -91,6 +87,41 @@ func VerifyLegacyBindings(ctx context.Context, check LegacyBindingChecker) error
 	}
 	if n > 0 {
 		return fmt.Errorf("%w: %d non-terminal withdrawal(s) with a non-MOCK provider_id have no payout destination binding (ADR 0111 A-11)", ErrStartupGate, n)
+	}
+	return nil
+}
+
+// BindingGuardChecker returns the source (pg_proc.prosrc) of withdrawal_requests_payout_binding_guard().
+type BindingGuardChecker func(ctx context.Context) (string, error)
+
+// bindingGuardMarker is the SQLSTATE the 0126 guard raises for NULL/NULL; its presence in the function source is
+// how the binary recognises that the NULL-arm-closing migration is applied.
+const bindingGuardMarker = "PI046"
+
+// HasNonSyntheticPaymentAdapter reports whether any registered payout adapter is not Synthetic.
+func (r Registrations) HasNonSyntheticPaymentAdapter() bool {
+	for _, a := range r.PaymentAdapters {
+		if a != nil && !IsSyntheticComponent(a) {
+			return true
+		}
+	}
+	return false
+}
+
+// VerifyBindingGuardApplied (B13-B security L-4) refuses to start when a non-Synthetic payout adapter is registered
+// but the database guard still tolerates a NULL/NULL withdrawal (migration 0126, which closes the 0123 arm, is not
+// applied). With only Synthetic adapters nothing is checked: the tiering predicate already confines a NULL binding
+// to them.
+func VerifyBindingGuardApplied(ctx context.Context, regs Registrations, check BindingGuardChecker) error {
+	if !regs.HasNonSyntheticPaymentAdapter() {
+		return nil
+	}
+	src, err := check(ctx)
+	if err != nil {
+		return fmt.Errorf("%w: binding guard check: %v", ErrStartupGate, err)
+	}
+	if !strings.Contains(src, bindingGuardMarker) {
+		return fmt.Errorf("%w: a non-Synthetic payout adapter is registered but the withdrawal binding guard still tolerates NULL/NULL (migration 0126 not applied)", ErrStartupGate)
 	}
 	return nil
 }

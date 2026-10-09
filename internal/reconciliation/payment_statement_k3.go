@@ -82,8 +82,13 @@ const (
 	// B13-B classifies these reasons (today they are reasonUnclassified, which
 	// raises no pay_captured_unposted finding; a pin test holds both facts).
 	destinationPayoutCapturedUnpostedResolutionHint = "payout reported to a destination other than the bound one: no completion against the player's hold; PSP recall/return or off-platform recovery; M4 not-paid only on positive decline evidence; never allocation"
-	m4KindPaid                                      = "m4_evidence_paid"
-	m4KindNotPaid                                   = "m4_evidence_not_paid"
+	// destinationIntegrityPayoutCapturedUnpostedResolutionHint (LF RR-2): an
+	// integrity-failure park has NO M4 route (payment_m4_in_scope admits only
+	// destination_mismatch; an M4 on it is refused MR012), so the text must not
+	// advertise one. Bringing it into scope is an architect/owner decision.
+	destinationIntegrityPayoutCapturedUnpostedResolutionHint = "payout parked on a destination integrity failure: no completion against the player's hold and no M4 route (open owner/architect question); PSP recall/return or off-platform recovery; never allocation"
+	m4KindPaid                                               = "m4_evidence_paid"
+	m4KindNotPaid                                            = "m4_evidence_not_paid"
 	// unknownOpCapturedUnpostedResolutionHint: fail-closed neutral text for an
 	// operation reconciliation does not know (security I-1, BOUND-CLEAR-1).
 	unknownOpCapturedUnpostedResolutionHint      = "resolution: none defined for this operation (unknown operation; nothing clears it); never allocation; M1 only acknowledges"
@@ -650,6 +655,9 @@ func capturedUnpostedHintFor(a *payAttempt, depositHint string) string {
 	case paymentStatementKindPayout:
 		if a.m4NotPaid {
 			return m4NotPaidCapturedUnpostedResolutionHint
+		}
+		if a.terminalReason == "destination_integrity_failure" {
+			return destinationIntegrityPayoutCapturedUnpostedResolutionHint
 		}
 		if isDestinationReason(a.terminalReason) {
 			return destinationPayoutCapturedUnpostedResolutionHint

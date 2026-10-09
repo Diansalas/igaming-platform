@@ -16,6 +16,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Diansalas/igaming-platform/internal/db"
+	"github.com/Diansalas/igaming-platform/internal/payoutinstrument/pitest"
 	"github.com/Diansalas/igaming-platform/internal/providercred"
 )
 
@@ -99,7 +100,7 @@ func (p *loopProvider) counts() (deposits, withdraws, queries int) {
 
 func (p *loopProvider) orchestrator() *Orchestrator {
 	id := p.providerID
-	return NewOrchestrator(map[string]PaymentProvider{id: p}, MultiWebhookCredentialResolver{id: NewMockWebhookCredentials(p.MockProvider)})
+	return NewOrchestrator(map[string]PaymentProvider{id: p}, MultiWebhookCredentialResolver{id: NewMockWebhookCredentials(p.MockProvider)}).WithPayoutDestinations(pitest.Shared())
 }
 
 // recordingResolver wraps MockCredentialResolver and records the tenant of every

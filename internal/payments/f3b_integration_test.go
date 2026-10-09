@@ -17,6 +17,8 @@ package payments
 import (
 	"context"
 	"testing"
+
+	"github.com/Diansalas/igaming-platform/internal/payoutinstrument/pitest"
 )
 
 // TestINVDEP1_F3b_SweeperEvidenceDecidesFromFreshState_SucceededXSucceededNoOp
@@ -35,7 +37,7 @@ func TestINVDEP1_F3b_SweeperEvidenceDecidesFromFreshState_SucceededXSucceededNoO
 	f := seedOrchFixture(t, pool)
 	provider := NewMockProvider("mock-f3b-succ", "EUR")
 	registerCapability(t, pool, f, provider, 100)
-	orch := NewOrchestrator(map[string]PaymentProvider{"mock-f3b-succ": provider}, MultiWebhookCredentialResolver{"mock-f3b-succ": NewMockWebhookCredentials(provider)})
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-f3b-succ": provider}, MultiWebhookCredentialResolver{"mock-f3b-succ": NewMockWebhookCredentials(provider)}).WithPayoutDestinations(pitest.Shared())
 
 	res, err := orch.InitiateDepositAttempt(context.Background(), pool, AllowAllDepositKYCGate{}, MockCredentialResolver{}, InitiateDepositParams{
 		Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},

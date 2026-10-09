@@ -29,6 +29,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/capability"
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/ledger"
+	"github.com/Diansalas/igaming-platform/internal/payoutinstrument/pitest"
 	"github.com/Diansalas/igaming-platform/internal/tenant"
 	"github.com/Diansalas/igaming-platform/internal/withdrawal"
 )
@@ -184,7 +185,7 @@ func newK3WorldOn(t *testing.T, pool *db.Pool, opts k3Opts) *k3World {
 	w.prov = &k3Provider{MockProvider: w.mock}
 	registerCapability(t, pool, w.f.orchFixture, w.prov, 100)
 	w.orch = NewOrchestrator(map[string]PaymentProvider{w.provider: w.prov},
-		MultiWebhookCredentialResolver{w.provider: NewMockWebhookCredentials(w.mock)})
+		MultiWebhookCredentialResolver{w.provider: NewMockWebhookCredentials(w.mock)}).WithPayoutDestinations(pitest.Shared())
 	w.reg = &StatementSourceRegistry{}
 	if !opts.noStatementSource {
 		w.reg.Register(w.provider)
@@ -420,6 +421,7 @@ func (w *k3World) approveWithdrawal(amount int64, idemKey string) withdrawal.Wit
 		wr, err = withdrawal.RequestWithdrawal(ctx, tx, withdrawal.RequestParams{
 			TenantID: w.f.tenantID, BrandID: w.f.brandID, PlayerAccountID: w.f.playerAccountID, PersonID: w.f.personID,
 			WalletID: w.f.walletID, AssetCode: "EUR", Amount: amount, IdempotencyKey: idemKey,
+			PayoutInstrumentID: w.f.instrumentID, Destinations: pitest.Shared(),
 		})
 		return err
 	})
@@ -451,8 +453,8 @@ func (w *k3World) payout(amount int64) (withdrawal.WithdrawalRequest, PaymentAtt
 		w.t.Fatalf("ClaimForDispatch: %v", err)
 	}
 	adapter, _ := w.orch.Provider(claim.Capability.ProviderID)
-	gr := DispatchWithdraw(context.Background(), nil, MockCredentialResolver{}, adapter, claim.Attempt)
-	if err := ApplyPayoutResult(context.Background(), w.pool, w.f.tenantID, wr.ID, claim.Attempt, gr, EvidenceSync); err != nil {
+	gr := DispatchWithdraw(context.Background(), w.pool, MockCredentialResolver{}, adapter, claim.Attempt, WithDestinations(pitest.Shared()))
+	if err := ApplyPayoutResult(context.Background(), w.pool, w.f.tenantID, wr.ID, claim.Attempt, gr, EvidenceSync, WithDestinations(pitest.Shared())); err != nil {
 		w.t.Fatalf("ApplyPayoutResult: %v", err)
 	}
 	var a PaymentAttempt

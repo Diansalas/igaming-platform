@@ -33,7 +33,7 @@ import (
 // running system would actually record.
 func mustSubmitWithdrawal(t *testing.T, srv *httptest.Server, financeToken, requestID string) submitWithdrawalResponse {
 	t.Helper()
-	resp := postJSON(t, srv, "/v1/admin/withdrawals/"+requestID+"/submit", financeToken, map[string]string{"payment_method": "card"})
+	resp := postJSON(t, srv, "/v1/admin/withdrawals/"+requestID+"/submit", financeToken, map[string]string{"payment_method": "bank_transfer"})
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		var apiErr apierror.Error
@@ -258,7 +258,7 @@ func TestWithdrawalSubmit_CrossTenantDenied(t *testing.T) {
 
 	auditBefore := countRows(t, pool, tenantB.ID, `SELECT count(*) FROM audit_log WHERE action LIKE 'withdrawal.submit%' AND target_id = $1`, wrB.ID.String())
 
-	resp = postJSON(t, srv, "/v1/admin/withdrawals/"+wrB.ID.String()+"/submit", financeATokens.AccessToken, map[string]string{"payment_method": "card"})
+	resp = postJSON(t, srv, "/v1/admin/withdrawals/"+wrB.ID.String()+"/submit", financeATokens.AccessToken, map[string]string{"payment_method": "bank_transfer"})
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusNotFound {
 		var apiErr apierror.Error
@@ -277,7 +277,7 @@ func TestWithdrawalSubmit_CrossTenantDenied(t *testing.T) {
 	// The withdrawal must still submit normally afterward for the RIGHT
 	// tenant's own staff - proving the refused cross-tenant attempt left
 	// no state change or lock behind.
-	resp = postJSON(t, srv, "/v1/admin/withdrawals/"+wrB.ID.String()+"/submit", financeBTokens.AccessToken, map[string]string{"payment_method": "card"})
+	resp = postJSON(t, srv, "/v1/admin/withdrawals/"+wrB.ID.String()+"/submit", financeBTokens.AccessToken, map[string]string{"payment_method": "bank_transfer"})
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		var apiErr apierror.Error

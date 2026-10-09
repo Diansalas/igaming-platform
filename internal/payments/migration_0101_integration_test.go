@@ -31,6 +31,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/Diansalas/igaming-platform/internal/db"
+	"github.com/Diansalas/igaming-platform/internal/payoutinstrument/pitest"
 	"github.com/Diansalas/igaming-platform/internal/testsupport/scratchdb"
 	"github.com/Diansalas/igaming-platform/internal/wallet"
 )
@@ -225,11 +226,13 @@ func insertWithdrawalRequest(t *testing.T, pool *db.Pool, f m0101Fixture, state 
 	t.Helper()
 	id := uuid.New()
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx,
-			`INSERT INTO withdrawal_requests (id, tenant_id, brand_id, player_account_id, wallet_id, asset_code, amount, state, idempotency_key, provider_id, provider_reference)
-			 VALUES ($1,$2,$3,$4,$5,'EUR',500,$6,$7,$8,$9)`,
-			id, f.tenantID, f.brandID, f.playerID, f.walletID, state, "widem-"+id.String(), providerID, providerReference)
-		return err
+		return pitest.WithoutBindingGuard(ctx, tx, func() error {
+			_, err := tx.Exec(ctx,
+				`INSERT INTO withdrawal_requests (id, tenant_id, brand_id, player_account_id, wallet_id, asset_code, amount, state, idempotency_key, provider_id, provider_reference)
+				 VALUES ($1,$2,$3,$4,$5,'EUR',500,$6,$7,$8,$9)`,
+				id, f.tenantID, f.brandID, f.playerID, f.walletID, state, "widem-"+id.String(), providerID, providerReference)
+			return err
+		})
 	})
 	if err != nil {
 		t.Fatalf("insert withdrawal request: %v", err)

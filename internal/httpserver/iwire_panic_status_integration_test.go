@@ -15,6 +15,7 @@ import (
 
 	"github.com/Diansalas/igaming-platform/internal/casino"
 	"github.com/Diansalas/igaming-platform/internal/payments"
+	"github.com/Diansalas/igaming-platform/internal/payoutinstrument/pitest"
 )
 
 // I-wire final review F1 (security F-1, code review F1): a handler PANIC on a
@@ -120,7 +121,7 @@ func TestIWire_PaymentWebhookPanic_IsA5xxOnTheWire_AccessLogAgrees_ThenRedeliver
 	mock := payments.NewMockProvider("mock", "EUR", "USD")
 	pp := &panicOnCallbackProvider{MockProvider: mock}
 	orchestrator := payments.NewOrchestrator(map[string]payments.PaymentProvider{"mock": pp},
-		payments.MultiWebhookCredentialResolver{"mock": payments.NewMockWebhookCredentials(mock)})
+		payments.MultiWebhookCredentialResolver{"mock": payments.NewMockWebhookCredentials(mock)}).WithPayoutDestinations(pitest.Shared())
 	logger, recs := newPanicLogger("")
 	srv := newFinancialTestServerWithLogger(t, pool, issuer, orchestrator, logger)
 	tenant := mustCreateTenant(t, pool)

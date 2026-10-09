@@ -977,13 +977,13 @@ func TestHSEC_HoldRelease_Migration0124UpDownUp_WholeSchema(t *testing.T) {
 
 func TestHSEC_HoldRelease_Migration0124DownRefusals(t *testing.T) {
 	// The world is migrated to the latest version; every migration above 0124
-	// (0125, PAY-PAYOUT-UNBOUND-RESOLVE-1) is first rolled back (it holds no
-	// data here), so the step that refuses is 0124's own down.
+	// (0125 PAY-PAYOUT-UNBOUND-RESOLVE-1, 0126 B13-B) is first rolled back (they
+	// hold no data here), so the step that refuses is 0124's own down.
 	downTo0124 := func(t *testing.T, h *hsr) error {
 		t.Helper()
 		dir := realMigrationsDir(t)
-		if _, err := h.pool.MigrateDown(context.Background(), dir, 1); err != nil {
-			t.Fatalf("down 0125 (empty): %v", err)
+		if _, err := h.pool.MigrateDown(context.Background(), dir, 2); err != nil {
+			t.Fatalf("down 0126+0125 (empty): %v", err)
 		}
 		_, err := h.pool.MigrateDown(context.Background(), migration0101Dir(t, hsecMigrationVersion), 1)
 		return err

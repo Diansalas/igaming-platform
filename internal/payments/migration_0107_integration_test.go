@@ -24,6 +24,7 @@ import (
 
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/ledger"
+	"github.com/Diansalas/igaming-platform/internal/payoutinstrument/pitest"
 	"github.com/Diansalas/igaming-platform/internal/testsupport/scratchdb"
 )
 
@@ -637,7 +638,7 @@ func TestINVDEP1_Mutation6_TombstonePrecedesMultipleSuccessForIntent(t *testing.
 	registerCapability(t, pool, f, pa, 100)
 	registerCapability(t, pool, f, pb, 200)
 	orch := NewOrchestrator(map[string]PaymentProvider{"m6-a": pa, "m6-b": pb},
-		MultiWebhookCredentialResolver{"m6-a": NewMockWebhookCredentials(pa), "m6-b": NewMockWebhookCredentials(pb)})
+		MultiWebhookCredentialResolver{"m6-a": NewMockWebhookCredentials(pa), "m6-b": NewMockWebhookCredentials(pb)}).WithPayoutDestinations(pitest.Shared())
 
 	res := rvInit(t, pool, orch, f, 5000, "m6")
 	ref := *res.Attempt.ProviderReference
@@ -687,7 +688,7 @@ func TestINVDEP1_O2_ReDriveOfDisputedAttempt_RealMultipleSuccessReason_NoPost(t 
 	registerCapability(t, pool, f, pa, 100)
 	registerCapability(t, pool, f, pb, 200)
 	orch := NewOrchestrator(map[string]PaymentProvider{"m-o2-a": pa, "m-o2-b": pb},
-		MultiWebhookCredentialResolver{"m-o2-a": NewMockWebhookCredentials(pa), "m-o2-b": NewMockWebhookCredentials(pb)})
+		MultiWebhookCredentialResolver{"m-o2-a": NewMockWebhookCredentials(pa), "m-o2-b": NewMockWebhookCredentials(pb)}).WithPayoutDestinations(pitest.Shared())
 
 	res := rvInit(t, pool, orch, f, 5000, "o2")
 	ref := *res.Attempt.ProviderReference
@@ -749,7 +750,7 @@ func TestRVLF_C2_DFR_CallbackSiteDeferredApplyBackstop(t *testing.T) {
 	f := seedOrchFixture(t, pool)
 	p := NewMockProvider("mock-c2dfr", "EUR")
 	registerCapability(t, pool, f, p, 100)
-	orch := NewOrchestrator(map[string]PaymentProvider{"mock-c2dfr": p}, MultiWebhookCredentialResolver{"mock-c2dfr": NewMockWebhookCredentials(p)})
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-c2dfr": p}, MultiWebhookCredentialResolver{"mock-c2dfr": NewMockWebhookCredentials(p)}).WithPayoutDestinations(pitest.Shared())
 
 	res := rvInit(t, pool, orch, f, 5000, "c2dfr-seed")
 	// payment_attempts_one_live_per_intent (INV-IO-8) allows only ONE live
@@ -833,7 +834,7 @@ func TestRVLF_C2_DFS_SweeperSiteDeferredApplyBackstop(t *testing.T) {
 	f := seedOrchFixture(t, pool)
 	p := NewMockProvider("mock-c2dfs", "EUR")
 	registerCapability(t, pool, f, p, 100)
-	orch := NewOrchestrator(map[string]PaymentProvider{"mock-c2dfs": p}, MultiWebhookCredentialResolver{"mock-c2dfs": NewMockWebhookCredentials(p)})
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-c2dfs": p}, MultiWebhookCredentialResolver{"mock-c2dfs": NewMockWebhookCredentials(p)}).WithPayoutDestinations(pitest.Shared())
 	sweeper := NewSweeper(pool, orch, AllowAllDepositKYCGate{}, MockCredentialResolver{})
 
 	res := rvInit(t, pool, orch, f, 5000, "c2dfs-seed")
@@ -919,7 +920,7 @@ func TestRVLF_C3_SIBS_SweeperSuccessRejectsCreatedSibling(t *testing.T) {
 	f := seedOrchFixture(t, pool)
 	p := NewMockProvider("mock-c3sibs", "EUR")
 	registerCapability(t, pool, f, p, 100)
-	orch := NewOrchestrator(map[string]PaymentProvider{"mock-c3sibs": p}, MultiWebhookCredentialResolver{"mock-c3sibs": NewMockWebhookCredentials(p)})
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-c3sibs": p}, MultiWebhookCredentialResolver{"mock-c3sibs": NewMockWebhookCredentials(p)}).WithPayoutDestinations(pitest.Shared())
 	sweeper := NewSweeper(pool, orch, AllowAllDepositKYCGate{}, MockCredentialResolver{})
 
 	res := rvInit(t, pool, orch, f, 5000, "c3sibs")
@@ -983,7 +984,7 @@ func TestRVLF_La_ReversalReceiptStoresBoundedDeclineReason(t *testing.T) {
 	f := seedOrchFixture(t, pool)
 	p := NewMockProvider("mock-la", "EUR")
 	registerCapability(t, pool, f, p, 100)
-	orch := NewOrchestrator(map[string]PaymentProvider{"mock-la": p}, MultiWebhookCredentialResolver{"mock-la": NewMockWebhookCredentials(p)})
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-la": p}, MultiWebhookCredentialResolver{"mock-la": NewMockWebhookCredentials(p)}).WithPayoutDestinations(pitest.Shared())
 
 	res := rvInit(t, pool, orch, f, 5000, "la")
 	ref := *res.Attempt.ProviderReference
@@ -1016,7 +1017,7 @@ func TestRVLF_Le_OversizeDeclineReasonAuditedOnceNotOnRedelivery(t *testing.T) {
 	f := seedOrchFixture(t, pool)
 	p := NewMockProvider("mock-le", "EUR")
 	registerCapability(t, pool, f, p, 100)
-	orch := NewOrchestrator(map[string]PaymentProvider{"mock-le": p}, MultiWebhookCredentialResolver{"mock-le": NewMockWebhookCredentials(p)})
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-le": p}, MultiWebhookCredentialResolver{"mock-le": NewMockWebhookCredentials(p)}).WithPayoutDestinations(pitest.Shared())
 
 	res := rvInit(t, pool, orch, f, 5000, "le")
 	ref := *res.Attempt.ProviderReference
@@ -1062,7 +1063,7 @@ func TestRVLF_C2N12_DeferredAmbiguousBackstopAlsoRecomputesIntentProjection(t *t
 	f := seedOrchFixture(t, pool)
 	p := NewMockProvider("mock-c2n12", "EUR")
 	registerCapability(t, pool, f, p, 100)
-	orch := NewOrchestrator(map[string]PaymentProvider{"mock-c2n12": p}, MultiWebhookCredentialResolver{"mock-c2n12": NewMockWebhookCredentials(p)})
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-c2n12": p}, MultiWebhookCredentialResolver{"mock-c2n12": NewMockWebhookCredentials(p)}).WithPayoutDestinations(pitest.Shared())
 
 	res := rvInit(t, pool, orch, f, 5000, "c2n12-seed")
 	// payment_attempts_one_live_per_intent (INV-IO-8): decline the seed
@@ -1162,7 +1163,7 @@ func TestINVDEP1_FL1_ApplicationChokePointCatchesItBeforeTheDBBackstop(t *testin
 	registerCapability(t, pool, f, pa, 100)
 	registerCapability(t, pool, f, pb, 200)
 	orch := NewOrchestrator(map[string]PaymentProvider{"m-fl1-a": pa, "m-fl1-b": pb},
-		MultiWebhookCredentialResolver{"m-fl1-a": NewMockWebhookCredentials(pa), "m-fl1-b": NewMockWebhookCredentials(pb)})
+		MultiWebhookCredentialResolver{"m-fl1-a": NewMockWebhookCredentials(pa), "m-fl1-b": NewMockWebhookCredentials(pb)}).WithPayoutDestinations(pitest.Shared())
 
 	res := rvInit(t, pool, orch, f, 5000, "fl1")
 	ref := *res.Attempt.ProviderReference
@@ -1228,7 +1229,7 @@ func TestINVDEP1_FL2_MultipleSuccessAlertLogContentIsPinned(t *testing.T) {
 	registerCapability(t, pool, f, pa, 100)
 	registerCapability(t, pool, f, pb, 200)
 	orch := NewOrchestrator(map[string]PaymentProvider{"m-fl2-a": pa, "m-fl2-b": pb},
-		MultiWebhookCredentialResolver{"m-fl2-a": NewMockWebhookCredentials(pa), "m-fl2-b": NewMockWebhookCredentials(pb)})
+		MultiWebhookCredentialResolver{"m-fl2-a": NewMockWebhookCredentials(pa), "m-fl2-b": NewMockWebhookCredentials(pb)}).WithPayoutDestinations(pitest.Shared())
 
 	res := rvInit(t, pool, orch, f, 5000, "fl2")
 	ref := *res.Attempt.ProviderReference
@@ -1326,7 +1327,7 @@ func TestINVDEP1_C3_MultipleSuccessAuditRecordCarriesAmountAndAsset(t *testing.T
 	registerCapability(t, pool, f, pa, 100)
 	registerCapability(t, pool, f, pb, 200)
 	orch := NewOrchestrator(map[string]PaymentProvider{"m-c3-a": pa, "m-c3-b": pb},
-		MultiWebhookCredentialResolver{"m-c3-a": NewMockWebhookCredentials(pa), "m-c3-b": NewMockWebhookCredentials(pb)})
+		MultiWebhookCredentialResolver{"m-c3-a": NewMockWebhookCredentials(pa), "m-c3-b": NewMockWebhookCredentials(pb)}).WithPayoutDestinations(pitest.Shared())
 
 	res := rvInit(t, pool, orch, f, 5000, "c3")
 	ref := *res.Attempt.ProviderReference
@@ -1377,7 +1378,7 @@ func TestINVDEP1_C3_MultipleSuccessAuditRecordCarriesAmountAndAsset(t *testing.T
 func TestINVDEP1_MC2_PostDepositSuccessInternalRecheck(t *testing.T) {
 	pool := depositV2ScratchPool(t)
 	f := seedOrchFixture(t, pool)
-	orch := NewOrchestrator(map[string]PaymentProvider{}, MultiWebhookCredentialResolver{})
+	orch := NewOrchestrator(map[string]PaymentProvider{}, MultiWebhookCredentialResolver{}).WithPayoutDestinations(pitest.Shared())
 
 	var intent DepositIntent
 	var attemptB uuid.UUID
@@ -1509,7 +1510,7 @@ func TestINVDEP1_MC2_PostDepositSuccessInternalRecheck(t *testing.T) {
 func TestX5_LedgerBackstopMapping(t *testing.T) {
 	pool := depositV2ScratchPool(t)
 	f := seedOrchFixture(t, pool)
-	orch := NewOrchestrator(map[string]PaymentProvider{}, MultiWebhookCredentialResolver{})
+	orch := NewOrchestrator(map[string]PaymentProvider{}, MultiWebhookCredentialResolver{}).WithPayoutDestinations(pitest.Shared())
 
 	intentID := uuid.New()
 	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {

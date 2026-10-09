@@ -1573,3 +1573,209 @@ acceptable for MOCK only. **Before any non-MOCK M4 not-paid, §4.8 `success_afte
 
 **Q records (review outcome).** Q-R19-1 ACCEPTED by `security` (owner note: B2B own-licence operators cannot self-serve
 M4); Q-R19-2 CONFIRMED by `ledger-finance`; Q-R19-3 ACKNOWLEDGED by `security` and `ledger-finance` (§17.4).
+
+
+## 18. B13-B implementation notes (appendix, added with the B13-B code; the design above is not rewritten)
+
+Scope delivered (`payments`, 2026-10-09; branch `gov-r18-b13b` on top of the B13-A merge `a355244`): the Go integration of the
+payout destination binding into the withdrawal and payments paths, plus ONE migration that closes the NULL arm that 0123
+tolerated (15.2 B13A-2). The owner decisions (ADR 0095 section 44, decisions 1-8) are implemented as written and are **not**
+weakened: where a sub-question was open the safest reading was taken and is recorded as `B13B-n` in 18.2. Nothing here is a
+statement about a real PSP, a custodian or a licence: every provider in the tests is `MOCK` or a test double.
+
+### 18.1 Deliverable status
+
+| Deliverable | Status |
+|---|---|
+| Migration `0126_payout_binding_required` (**placeholder number**: 0124 = HSEC, 0125 = RESOLVE-1; the orchestrator renumbers at merge): `CREATE OR REPLACE` of `withdrawal_requests_payout_binding_guard()` so an INSERT with NULL/NULL is refused (`PI046`); every other check byte-identical to 0123; legacy rows untouched; down restores the 0123 body | `IMPLEMENTED` (up/down/up whole-schema snapshot test; legacy-row test) |
+| Binding at `withdrawal.RequestWithdrawal` (`RequestParams.PayoutInstrumentID` + `Destinations`; gate rule under `FOR SHARE` after H-SEC-11 and before the KYC evaluation and any write; replay compares the instrument; `WithdrawalRequest` gains the two binding fields) | `IMPLEMENTED` |
+| `POST /v1/me/withdrawals` takes `payout_instrument_id` (409 `PAYOUT_INSTRUMENT_REQUIRED` / `PAYOUT_INSTRUMENT_NOT_USABLE`, 400 for a malformed id, 503 with no service) | `IMPLEMENTED` |
+| Staff submit: `payment_method` no longer selects anything; the rail is the instrument's; a differing value is 400 `PAYMENT_METHOD_MISMATCH`; 409 `PAYOUT_DESTINATION_NOT_USABLE` on a T1p refusal | `IMPLEMENTED` |
+| T1p (`ClaimForDispatch`): destination gate (`EvaluateGate` + `CheckTier` on the routed adapter) before the allow decision row, the state change and the attempt; write-once snapshot in the same transaction | `IMPLEMENTED` |
+| Phase B (`DispatchWithdraw`): re-read + gate + tiering on the exact adapter value, snapshot check, `WithdrawRequest.Destination` built from the snapshot plus the decrypted detail; any failure is NotSent with no provider call | `IMPLEMENTED` |
+| T2 / T12 (`destinationGateAndEscalate`): gate + snapshot check before the KYC gate and the claim CAS; failure escalates (T16) with `destination_not_usable` / `destination_integrity_failure`, audit row, B12 P1 last | `IMPLEMENTED` |
+| Evidence cells (sync phase C, QueryStatus poll, callback/receipt): snapshot integrity + destination echo comparison before anything can settle or advance; mismatch parks `disputed` `destination_mismatch`; missing/unsealed snapshot parks `destination_integrity_failure`; terminal-attempt signal `destination_mismatch_on_terminal_payout` | `IMPLEMENTED` against `MOCK` |
+| `WithdrawRequest.Destination`, `WithdrawResult.DestinationEcho`, `StatusResult.DestinationEcho`, `CallbackEvent.DestinationEcho`, `ReceiptEvidence.DestinationEcho`, `OperationManifest.EchoesDestinationFingerprint` | `IMPLEMENTED` (types); no real adapter populates an echo |
+| Real-adapter echo computation (adapter-side `DestinationFingerprinter`) | `NOT IMPLEMENTED` / `PROVIDER DEPENDENT` (see B13B-8) |
+| L-8 startup clause removed from `payoutinstrument.VerifyStartup` (same change as the migration) | `IMPLEMENTED` |
+| Repo-wide check that no non-mock type embeds a Synthetic-marked type (`providerkind.ScanForSyntheticEmbedding`, negative control) | `IMPLEMENTED` |
+| MOCK tier: a `synthetic_test` instrument (MOCK verifier) binds and pays through a Synthetic adapter; it never satisfies a non-Synthetic adapter | `IMPLEMENTED` |
+| `docs/runbooks/payout-instrument-keys.md` note (dev/MOCK now needs the key families) | `IMPLEMENTED` |
+| M4 "not paid" for a `destination_mismatch` park, the "disputed with an executed M4" echo cells of 2.6 | `NOT IMPLEMENTED` (RESOLVE-1, 0125) |
+| Reconciliation classification of destination parks (payout-scoped table, B13B-13) | `IMPLEMENTED` (Go only; no migration) |
+| Compliance alert on a registration fingerprint conflict (15.3 item 3); lifting a staff/provider block (15.3 item 2); the stranded `approved` withdrawal after a permanent block (HD-R15-5) | `NOT IMPLEMENTED` (unchanged open items) |
+
+### 18.2 Ambiguities and the reading taken
+
+- **B13B-1 (migration number and arm).** `0126` is a placeholder. The guard refuses only **NULL/NULL**; a half binding still reaches the
+  both-or-neither CHECK (`23514`), exactly as under 0123 (so `TestBinding_InsertGuard` keeps its half-binding assertions). `PI046` is new.
+  The migration changes one function body and nothing else (whole-schema snapshot test: exactly the body hash differs).
+- **B13B-2 (what "gate before a callback/poll that settles" means).** 15.6 asks for `EvaluateGate` and `CheckTier` before any retry,
+  resend or callback/poll that settles the attempt. `EvaluateGate` and `CheckTier` run at request creation, T1p, phase B and T2/T12
+  (every point that can cause a **send**). For evidence on an attempt that may already have been sent (sync phase C, poll,
+  callback) the check is the **snapshot integrity check plus the echo comparison**, not the instrument's current state: ADR 0111 2.4
+  (LF95-C10(d)) says polls and evidence are not blocked by a later suspension or revocation, and blocking a settlement of money that
+  was already sent would strand it. A snapshot that is missing, unsealed or inconsistent with the withdrawal, the attempt, the
+  instrument, the amount and the asset fails closed (`destination_integrity_failure`). If the owner wants the instrument's *current*
+  state to also gate settlement, that is a one-line change in `payoutDestinationEvidence` and a policy decision (see 18.4 Q1).
+- **B13B-3 (phase B holds no lock).** The phase B read runs in its own short read transaction that is closed before the provider call
+  (INV-IO-1 / INV-POOL); the instrument is not locked across the call. A revocation that lands between phase B's read and the call is
+  caught at the next gate (T2/T12) and by the evidence check; it cannot be prevented, only parked.
+- **B13B-4 (the staff body).** `payment_method` is accepted but optional. For a bound withdrawal it is only **compared** with the
+  instrument's rail, inside the claim transaction after the row lock, the state check and H-SEC-11 (so those refusals keep their
+  precedence): a different value is 400 `PAYMENT_METHOD_MISMATCH`, nothing is written. For a legacy NULL-binding withdrawal
+  (Synthetic adapters only) it is still the route input and is required.
+- **B13B-5 (how the collaborators reach the free functions).** `DispatchWithdraw`, `ApplyPayoutResult` and the poll path are free
+  functions. They take variadic `PayoutOption`s (`WithDestinations`, `WithProviderLookup`); `Orchestrator.PayoutOptions()` yields the
+  production set. With no destination service a **bound** withdrawal makes no provider call and cannot be settled (parked as
+  `destination_integrity_failure`); a non-Synthetic adapter is never called without a destination. A static test pins that every
+  production call site passes `opts...` (exact site counts, so a new caller is reviewed). The alternative (a package-level
+  registration) was rejected as hidden global state.
+- **B13B-6 (absent echo).** A success without an echo from an adapter whose manifest declares `EchoesDestinationFingerprint` is
+  **ambiguous**: sync phase C marks the attempt ambiguous (the poll decides), the poll reschedules, the callback cell does not apply it
+  (the receipt is closed as an anomaly; a deferred receipt, which stores no echo, therefore never settles such an adapter). An adapter
+  that does not declare an echo settles as before. Consequence for a future real adapter: if it declares the echo and its poll never
+  returns one, the attempt cannot settle automatically and ends in T16 (non-idempotent manifest or max resubmits), which is the
+  fail-closed outcome.
+- **B13B-7 (T1p refusal).** A refusal at T1p commits only the denial audit (`withdrawal.submit.http`, `denied`, `denied_by_destination`,
+  closed `gate_reason`). No B12 alert is raised there because no attempt exists to key the discriminator on; the request stays
+  `approved` and every retry is refused until the instrument is usable again, which for a suspended or provider-revoked instrument is
+  permanent (15.3 item 2, HD-R15-5). T2/T12 refusals, where an attempt exists, escalate and raise.
+- **B13B-8 (the echo is the adapter's job, and it needs the tenant).** S95-C10 requires the echo to be computed **inside the adapter**
+  by an injected `DestinationFingerprinter`, which is tenant-bound (`Keys.FingerprinterFor(tenantID, kinds)`). A multi-tenant adapter
+  instance does not receive the tenant in `Withdraw` / `QueryStatus`, so a real adapter cannot build the right fingerprinter today.
+  The MOCK adapter reports a test-set echo (`SetDestinationEcho`). This is an interface question for the architect (18.4 Q2), not
+  something B13-B decides.
+- **B13B-9 (binding is mandatory in MOCK; dev needs keys).** Decision 8: only the verification source is flexible in MOCK. Without the
+  payout-instrument key families the service is nil and `POST /v1/me/withdrawals` answers 503. See the runbook note.
+- **B13B-10 (embedding check scope).** The scan covers the non-test sources of `internal/` and `cmd/`. A type is accepted only if it
+  declares its **own** `SyntheticComponent` method (deliberately a mock); embedding a marked type, a pointer to one, the
+  `providerkind.Synthetic` interface, or a type that inherited the marker transitively is a finding. Test doubles (which embed
+  `*MockProvider` on purpose) are not scanned. Matching is by (package name, type name), conservative across same-named packages.
+- **B13B-11 (reasons).** `destination_mismatch` and `destination_integrity_failure` are terminal reasons of a parked payout attempt
+  (`PayoutDisputeReasons()`, not M2-admitted, hold kept). `destination_integrity_failure` and `destination_not_usable` are also the
+  T16 escalation reasons; `destination_mismatch_on_terminal_payout` is a raise-only signal. No migration is needed for any reason
+  (`terminal_reason` has only a length CHECK).
+- **B13B-13 (reconciliation classification; implemented as a payout-scoped table, a deviation from the wording of 2.6).** 2.6 says to
+  add `destination_mismatch` to `disputeReasonClasses`. That table is the **deposit** table, pinned to
+  `payments.DepositDisputeTerminalReasons()` and to the MA020 SQL list in `payment_attempt_open_exposure`; adding the payout reasons
+  there was refused by both pins. First recorded as not implemented, then corrected on ledger-finance review (LF M-2): MA020 filters
+  `operation = 'deposit'`, so no migration is needed. **Chosen: implement** a separate Go table `payoutDisputeReasonClasses`
+  (`destination_mismatch` and `destination_integrity_failure`: bound-if-referenced; consulted only for non-deposit attempts in
+  `captureClass`), pinned to `payments.PayoutDisputeReasons()` by `TestPayoutDisputeReasonClasses_PinnedToPayments`, with an integration
+  test (in-run and standing finding). It is small, adds no migration and leaves both deposit pins untouched. It depends on the park
+  binding the provider's reference first (B13B-17, LF H-2).
+- **B13B-14 (tests that pinned a pre-0123 schema).** The payments code now reads and writes the 0123 columns, so a payout world cannot run on a
+  scratch database stopped at 0115. `TestK3_Y08/X10/Y12` now run on the head schema (Y12 also disables the 0120 actor-proof guard in its owner
+  bypass); `TestK3_C16_DownRefusals` runs the 0115 `down` script directly on the head schema (its first statement is the MR099 refusal, so the
+  assertion is unchanged) instead of stepping the migration runner down. Closed-set pins updated deliberately: payout escalation reasons 3 -> 5,
+  payout signal reasons 3 -> 4, `payout_destination.go` joins `payout.go` / `payout_sweep.go` as a payout-only file in the deposit terminal-reason
+  scan, and the B12 per-site table skips the `destination_*` reasons (covered by `TestB13B_*`).
+
+- **B13B-15 (security H-1: an echo-carrying receipt is never deferred).** The echo is deliberately not persisted (S95-C10, no new
+  column), so a payout success callback carrying one that arrived before any attempt held the reference would have been stored as a
+  `deferred_unresolved` receipt and later drained **without** the comparison. Chosen: **(b)** close such a receipt as an anomaly
+  (`anomaly_other`) in `ApplyReceiptEvidence`, write one audit row (`payments.payout_echo_receipt_unattributable`, once per receipt) and
+  raise a receipt-subject P1 (`receipt:<id>:reason:payout_echo_receipt_unattributable`, existing Kind) as the last statement. Not (a):
+  a retryable refusal depends on each provider redelivering on a 5xx (not guaranteed, adapter-specific, PROVIDER DEPENDENT) and would turn
+  a security signal into a retry loop; not (c): it needs a migration and the brief excludes one. Settlement then waits for the
+  QueryStatus poll, which compares. A later echo-free redelivery of the same event dedupes against the closed row. Residual: an adapter
+  that does **not** declare `EchoesDestinationFingerprint` and later sends a separate echo-free success for the reference settles as
+  ordinary evidence (it has no echo to compare); the audit row and the P1 are the control. An echo-declaring adapter cannot settle on an
+  echo-free success (ambiguous).
+- **B13B-16 (security L-1..L-4 and the info finding).** L-1: `gatePayoutDestination` (dispatch gates only) refuses a nil adapter
+  (`tier_refused`); `EvaluateGate`'s nil-adapter "request creation" meaning is no longer reachable from a dispatch gate. L-2: an integrity
+  (seal / fingerprint / snapshot) refusal raises a P1 on the existing Kind: at T1p as the last statement of the claim transaction
+  (`withdrawal:<id>:reason:destination_integrity:<closed reason>`, the claim now opens through `alerting.InTx`), at request time detached
+  after the rollback (`payout_instrument:<id>:...`); ordinary refusals raise nothing. L-3: `ScanForSyntheticEmbedding` also tracks
+  interface embedding (an interface embedding `providerkind.Synthetic` or an inheriting type is a finding; an interface that lists
+  `SyntheticComponent` is a marker declaration) with fixtures. L-4: `payoutinstrument.VerifyBindingGuardApplied`, wired in
+  `cmd/platform-api`, refuses to start when a non-Synthetic payout adapter is registered and the guard source does not contain `PI046`
+  (migration 0126 not applied). 0124 does not replace the guard and 0125 does not exist yet; if RESOLVE-1 (0125) or any later migration
+  `CREATE OR REPLACE`s `withdrawal_requests_payout_binding_guard()` it must keep the `PI046` NULL/NULL refusal (the startup check and
+  `TestMigration0126_UpDownUp_WholeSchema` key on it). Info: `GateResult` (it carries the decrypted `Detail`) redacts under
+  `String`/`GoString`/`Format`/`LogValue`/JSON.
+
+- **B13B-17 (ledger-finance review fixes).** LF H-1: the terminal-attempt destination signal (audit + `destination_mismatch_on_terminal_payout`)
+  is ADDITIVE; the existing cells (T14 success-after-decline, the foreign-reference and amount signals, late evidence) still run after it.
+  LF H-2: a destination park first binds the provider's validated, unconflicted reference (the B10 guard, then `MarkAccepted` and
+  `AttachProviderReference`) and only then parks; a foreign-held reference is parked by the guard as `provider_reference_conflict`.
+  LF L-2: the terminal signal's audit row is written once per distinct (attempt, echo), not keyed on `alreadyApplied` (a bad-echo
+  redelivery dedupes against the earlier good delivery, so `alreadyApplied` is already true for the first bad one); the raise stays
+  unconditional and dedupes into one alert. LF L-4: a request-time integrity refusal also writes a durable audit row
+  (`withdrawal.request.destination_integrity_refused`, own transaction after the rollback) next to the detached P1. Test-only: `pitest.Bind`
+  labels use a digit-free alphabet (a hex label could form a Luhn-valid run); the 0124 down-refusal tests run the down script directly
+  and the HSEC route test binds an instrument.
+- **B13B-18 (security and ledger-finance RE-REVIEW fixes).**
+  - M-R1 (security, merge-blocking): the request-time integrity audit and P1 fire only for reasons that can come solely from the stored
+    state of the player's OWN instrument (seal_invalid, fingerprint_mismatch, detail_unavailable, verification_missing,
+    verification_not_latest). `relation_mismatch` (a client naming another player's instrument) is client input: the same generic 409,
+    no audit row, no alert. The audit write and the detached P1 now run off the response path (goroutine, 15 s bound).
+  - LR-1: the terminal-signal dedupe query on `audit_log` carries `created_at >= attempt.created_at`, so `idx_audit_log_tenant_time`
+    (tenant_id, created_at DESC) bounds it. No migration. Residual: the filter on `target_id`/metadata is still a heap filter within that
+    window; a dedicated index is a deferred consideration, not needed at current volumes.
+  - LR-2 and ledger-finance L-B (P7): an echo-free payout SUCCESS that dedupes against a receipt closed as
+    `payout_echo_receipt_unattributable` is HELD (no settlement; `changed=false`), for every adapter. The closed twin is detected through
+    the audit marker written with the closure (no migration). Settlement then rests on the QueryStatus poll and the P1 raised at the
+    first delivery. Residual (still launch-blocking, as B13B-15): a non-echo-declaring adapter's own later poll success settles as
+    ordinary evidence; only adapters that declare the echo are covered by the poll comparison.
+  - LR-3: the unattributable-echo P1 is one open alert per (tenant, provider) (`provider:<id>:reason:payout_echo_receipt_unattributable`),
+    not one per receipt; per-receipt detail stays in the audit rows.
+  - Ledger-finance L-A: a duplicate of a closed unattributable receipt that changes the attempt writes one audit row
+    `payments.payout_echo_receipt_attributed` linking the receipt to the attempt (the receipt row is one-shot).
+  - Ledger-finance P5: branch test added (reported reference held by another attempt: `provider_reference_conflict`, nothing bound, other
+    attempt untouched, only the conflict P1, ledger unchanged).
+  - Security confirmation C-1/C-2/C-3: the unattributable-echo marker is now written for EVERY receipt the H-1 branch closes (also a
+    duplicate: an echo-free success deferred first, then the mismatching-echo redelivery), idempotently per receipt id, so the LR-2 hold
+    also covers the reverse order. The marker lookup is bounded below by the receipt's received_at. The request-time integrity recorder has
+    an 8-slot semaphore (non-blocking skip when saturated; the P1 dedupes anyway) and a recover.
+  - RESOLVE-1 hint-work item (not changed now): the payout `pay_captured_unposted` hint is misleading for a bound `destination_mismatch`
+    park, because migration 0125 refuses an M4 "paid" resolution for it. The hint text belongs with the RESOLVE-1 work.
+
+### 18.3 Evidence
+
+Tests (all `-race -tags integration -count=1 -p 1`, private scratch database, runtime role where the package uses it):
+`internal/withdrawal` (`TestB13B_*`: bind, every refusal writes nothing and does not consume the key, replay, concurrency, race with a
+suspension, partial failure, the database refuses an unbound INSERT), `internal/payments` (`TestB13B_*`: T1p snapshot and rail, body
+cannot influence, refusal matrix, legacy/Synthetic vs non-Synthetic tiering including a positive sandbox-verified path, phase B no-call
+matrix, T2/T12 escalation and idempotence, sync/poll/callback echo cells, absent-echo by manifest, missing/tampered snapshot,
+concurrency, replay, partial failure; plus the static guards), `internal/payoutinstrument` (`TestMigration0126_*`, flipped
+`TestBinding_InsertGuard`, `TestCheckSnapshot`, `TestCompareEcho`, startup matrix), `internal/httpserver` (`*_B13B_*`),
+`internal/providerkind` (`TestSyntheticEmbedding_*`). Mutation-kill evidence:
+`docs/plans/prh2-hardening-round/prh2-r18-b13b-mutation-kill.txt` (54 counted, 51 killed, 3 equivalent survivors, each a Go check that
+duplicates a database guarantee).
+
+Final runs (top-level tests, `-race -tags integration -count=1 -p 1`, 0 SKIP everywhere, so the integration tests did run): payments 856 PASS /
+0 FAIL (the full package; the later `TestB13B_*` additions re-run separately: 30 PASS), withdrawal 61, payoutinstrument 75, providerkind 10,
+reconciliation 223, casino 280, providercred 92, wallet 9, cmd/platform-api 52, config 52, auth 99, db 137, httpserver 636 PASS / 2 FAIL.
+The two httpserver failures are `TestResolutionIsolation_*` latency bounds (500 ms / 400 ms) that fail intermittently on a loaded shared host;
+they fail the same way on the unmodified base `a355244` (checked), they exercise deposit and casino callbacks, and nothing in this change is on
+their path.
+
+### 18.4 Questions for the owner / architect (none changes decisions 1-8; each fails closed today)
+
+1. **OPEN OWNER QUESTION: should the instrument's current state also gate settlement?** Today a suspension after the call was made
+   does not block recording the provider's result (B13B-2). The alternative parks every evidence on a suspended instrument, which can
+   strand a payout that was actually sent. Recommendations: **security** recommends KEEPING the current behaviour (no gate);
+   **ledger-finance** recommends "no as a gate, yes as a signal" (a non-blocking compliance signal on settlement against a blocked
+   instrument). Both are recommendations only: the policy is the owner's, the signal is recorded as an OPTION and is NOT adopted or built.
+2. **Tenant for the adapter-side echo (B13B-8).** Add the tenant (and the snapshot's `FingerprintKid`) to the request/context the adapter
+   receives, or inject a per-tenant fingerprinter factory. Required before any real adapter can echo.
+3. **Dev/MOCK key provisioning.** Binding is mandatory in MOCK, so every non-production environment needs the key families (runbook). Is
+   a documented throw-away key script acceptable, or should local profiles ship a dev-only key generator behind the integration tag?
+4. **Stranded `approved` withdrawals after a permanent block** (HD-R15-5, unchanged): the request stays `approved` and every submit is
+   refused. A governed release path is RESOLVE-1's / HSEC's scope.
+5. **Reconciliation of destination parks (B13B-13).** Should a follow-up migration extend `payment_attempt_open_exposure` (and the deposit
+   classification pins) so that a `destination_mismatch` / `destination_integrity_failure` park is reported against a captured reference?
+   Until then the P1 alert and the audit row are the only signals.
+6. **Front ends.** `b2c` (`WithdrawalPage`, `api/withdrawals.ts`) still posts a withdrawal without `payout_instrument_id`, which is now a 409
+   `PAYOUT_INSTRUMENT_REQUIRED`; the back office submit call still sends `payment_method` (accepted, compared with the rail). Both belong to the
+   `frontend` / `backoffice` specialists and are not part of this change.
+7. **OPEN architect/owner question: governed resolution of a `destination_integrity_failure` park (LF M-3).** The M2 route excludes
+   it and the 0125 M4 scope covers only a `destination_mismatch` "not paid" resolution, so such a park (hold kept, P1 raised) has no governed
+   path out. No policy is invented here.
+
+**Launch-blocking for non-MOCK payouts (recorded, not built):** (a) every non-Synthetic payout adapter must declare
+`EchoesDestinationFingerprint = true`, or the owner explicitly accepts an adapter that cannot echo (without the echo an adapter's success
+settles on the snapshot integrity check alone, B13B-15); the registration refusal for a non-declaring non-Synthetic adapter is NOT built;
+(b) the tenant-visibility interface question for the adapter-side echo (B13B-8 / Q2) must be answered and implemented.

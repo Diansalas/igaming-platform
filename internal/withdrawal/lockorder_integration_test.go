@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Diansalas/igaming-platform/internal/db"
+	"github.com/Diansalas/igaming-platform/internal/payoutinstrument/pitest"
 )
 
 // loRequestState reads a request's current state - used to prove the
@@ -130,6 +131,7 @@ func TestLockOrder_ConcurrentWithdrawalRequestAndRejection_NoDeadlock(t *testing
 					_, err := RequestWithdrawal(ctx, tx, RequestParams{
 						TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, PersonID: f.personID, WalletID: f.walletID,
 						AssetCode: "EUR", Amount: 500, IdempotencyKey: "lockorder-new-" + tc.name,
+						PayoutInstrumentID: f.instrumentID, Destinations: pitest.Shared(),
 					})
 					return err
 				})

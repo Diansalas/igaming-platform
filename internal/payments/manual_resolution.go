@@ -150,6 +150,11 @@ func PayoutDisputeReasons() map[string]bool {
 		"late_decline_after_terminal":         false,
 		"late_contradicting_evidence":         false,
 		"success_after_payout_declined":       false, // T14: also excluded by the withdrawal-state precondition
+		// B13-B (ADR 0111 2.6): a destination echo that differs from the snapshot, or an attempt
+		// whose snapshot is missing or inconsistent when evidence tries to settle it. Hold kept;
+		// no M2 path (M4 "not paid" is the only exceptional resolution, RESOLVE-1).
+		TerminalReasonDestinationMismatch:         false,
+		TerminalReasonDestinationIntegrityFailure: false,
 	}
 }
 

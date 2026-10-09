@@ -37,6 +37,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/ledger"
 	"github.com/Diansalas/igaming-platform/internal/payments"
+	"github.com/Diansalas/igaming-platform/internal/payoutinstrument/pitest"
 	"github.com/Diansalas/igaming-platform/internal/providerkind"
 	"github.com/Diansalas/igaming-platform/internal/reconciliation/statement"
 	"github.com/Diansalas/igaming-platform/internal/testsupport/scratchdb"
@@ -88,7 +89,7 @@ func newPayWorld(t *testing.T) *payWorld {
 		payments.MultiWebhookCredentialResolver{
 			payProvA: payments.NewMockWebhookCredentials(w.mockA),
 			payProvB: payments.NewMockWebhookCredentials(w.mockB),
-		})
+		}).WithPayoutDestinations(pitest.Shared())
 	// Lower Priority wins the tie-break: A is primary, B the cascade target.
 	w.registerCapability(t, w.mockA, 10)
 	w.registerCapability(t, w.mockB, 50)
@@ -707,10 +708,14 @@ func (w *payWorld) payoutFixture(t *testing.T, provider, instruction, settlement
 		}); err != nil {
 			return fmt.Errorf("post hold: %w", err)
 		}
-		if _, err := tx.Exec(ctx,
-			`INSERT INTO withdrawal_requests (id, tenant_id, brand_id, player_account_id, wallet_id, asset_code, amount, state, idempotency_key, provider_id, provider_reference)
+		// B13-B: a LEGACY (NULL-binding) row, as it existed before migration 0126 (the fixture is not about the binding).
+		if err := pitest.WithoutBindingGuard(ctx, tx, func() error {
+			_, err := tx.Exec(ctx,
+				`INSERT INTO withdrawal_requests (id, tenant_id, brand_id, player_account_id, wallet_id, asset_code, amount, state, idempotency_key, provider_id, provider_reference)
 			 VALUES ($1,$2,$3,$4,$5,'EUR',$6,'submitted',$7,$8,$9)`,
-			wrID, w.f.tenantID, w.f.brandID, w.f.playerAccountID, w.f.walletID, amount, "wd-"+wrID.String(), provider, instruction); err != nil {
+				wrID, w.f.tenantID, w.f.brandID, w.f.playerAccountID, w.f.walletID, amount, "wd-"+wrID.String(), provider, instruction)
+			return err
+		}); err != nil {
 			return fmt.Errorf("insert withdrawal: %w", err)
 		}
 		if _, err := payments.InsertSubmittingAttempt(ctx, tx, payments.NewSubmittingAttempt{

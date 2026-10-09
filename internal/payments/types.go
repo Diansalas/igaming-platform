@@ -32,6 +32,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/Diansalas/igaming-platform/internal/payoutinstrument"
 	"github.com/Diansalas/igaming-platform/internal/webhookauth"
 )
 
@@ -520,7 +521,15 @@ type WithdrawRequest struct {
 	MerchantReference string
 	Amount            int64
 	AssetCode         string
-	PaymentMethod     string
+	// PaymentMethod is the snapshot's rail (server-derived from the bound payout
+	// instrument), never staff input (ADR 0111 2.7).
+	PaymentMethod string
+	// Destination is REQUIRED for a non-Synthetic adapter (ADR 0111 2.7): the
+	// decrypted, kind-validated destination of the attempt's snapshot, built in phase B
+	// from the snapshot and the immutable instrument detail. The platform never calls a
+	// non-Synthetic adapter with an empty Destination. Its String/Format/LogValue/JSON
+	// redact the Detail.
+	Destination payoutinstrument.PayoutDestination
 }
 
 type WithdrawResult struct {
@@ -528,6 +537,11 @@ type WithdrawResult struct {
 	ProviderReference string
 	DeclineReason     string
 	Cascadable        bool
+	// DestinationEcho is the only destination evidence a provider result may carry
+	// (S95-C10 retained): a fingerprint computed INSIDE the adapter under the snapshot's
+	// kid. Optional. It is compared with the snapshot and can never set, replace or change
+	// the destination; a differing echo parks the attempt (destination_mismatch).
+	DestinationEcho *payoutinstrument.DestinationEcho
 }
 
 // StatusResult is QueryStatus's return value - used both to resolve an
@@ -548,6 +562,8 @@ type StatusResult struct {
 	// non-cascadable default.
 	DeclineReason string
 	Cascadable    bool
+	// DestinationEcho: see WithdrawResult.DestinationEcho. Optional.
+	DestinationEcho *payoutinstrument.DestinationEcho
 }
 
 // CallbackEventType distinguishes which financial-transaction-flows.md
@@ -602,6 +618,11 @@ type CallbackEvent struct {
 	// OutcomeDeclined - see StatusResult's identical fields.
 	DeclineReason string
 	Cascadable    bool
+	// DestinationEcho: payout events only, optional (S95-C10: the only destination evidence a
+	// callback may carry; never a raw payer-identifying field). It is compared with the attempt's
+	// snapshot and can never set or change the destination. Not persisted and not part of the
+	// event fingerprint.
+	DestinationEcho *payoutinstrument.DestinationEcho
 }
 
 // PaymentProvider is the interface every adapter (fiat or crypto payment

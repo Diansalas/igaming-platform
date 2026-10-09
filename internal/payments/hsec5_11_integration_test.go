@@ -21,6 +21,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Diansalas/igaming-platform/internal/db"
+	"github.com/Diansalas/igaming-platform/internal/payoutinstrument/pitest"
 	"github.com/Diansalas/igaming-platform/internal/tenant"
 	"github.com/Diansalas/igaming-platform/internal/withdrawal"
 )
@@ -109,6 +110,7 @@ func requestWithdrawalTx(pool *db.Pool, f payoutFixture, key string, amount int6
 		wr, err = withdrawal.RequestWithdrawal(ctx, tx, withdrawal.RequestParams{
 			TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, PersonID: f.personID,
 			WalletID: f.walletID, AssetCode: "EUR", Amount: amount, IdempotencyKey: key,
+			PayoutInstrumentID: f.instrumentID, Destinations: pitest.Shared(),
 		})
 		return err
 	})
@@ -400,6 +402,7 @@ func TestHSEC11_RequestWithdrawal_FlipInsideOpenTxBeforeGate_Refused(t *testing.
 		_, err := withdrawal.RequestWithdrawal(ctx, tx, withdrawal.RequestParams{
 			TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, PersonID: f.personID,
 			WalletID: f.walletID, AssetCode: "EUR", Amount: 500, IdempotencyKey: "h11-flip",
+			PayoutInstrumentID: f.instrumentID, Destinations: pitest.Shared(),
 		})
 		return err
 	})
@@ -455,7 +458,7 @@ func payoutWorld(t *testing.T, id string) (*db.Pool, *withdrawCountingProvider, 
 	f := seedPayoutFixture(t, pool, 10_000, true)
 	p := &withdrawCountingProvider{MockProvider: NewMockProvider(id, "EUR")}
 	registerCapability(t, pool, f.orchFixture, p, 100)
-	orch := NewOrchestrator(map[string]PaymentProvider{id: p}, MultiWebhookCredentialResolver{id: NewMockWebhookCredentials(p.MockProvider)})
+	orch := NewOrchestrator(map[string]PaymentProvider{id: p}, MultiWebhookCredentialResolver{id: NewMockWebhookCredentials(p.MockProvider)}).WithPayoutDestinations(pitest.Shared())
 	return pool, p, orch, f, approvedWithdrawal(t, pool, f, 500, "h11-claim")
 }
 

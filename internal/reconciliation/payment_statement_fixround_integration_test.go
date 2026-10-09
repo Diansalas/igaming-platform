@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Diansalas/igaming-platform/internal/ledger"
+	"github.com/Diansalas/igaming-platform/internal/payoutinstrument/pitest"
 	"github.com/Diansalas/igaming-platform/internal/reconciliation/statement"
 	"github.com/Diansalas/igaming-platform/internal/withdrawal"
 )
@@ -116,10 +117,14 @@ func (w *payWorld) legacyWithdrawalCompleted(t *testing.T, provider, settlement 
 		}); err != nil {
 			return err
 		}
-		if _, err := tx.Exec(ctx,
-			`INSERT INTO withdrawal_requests (id, tenant_id, brand_id, player_account_id, wallet_id, asset_code, amount, state, idempotency_key, provider_id, provider_reference)
+		// B13-B: a LEGACY (NULL-binding) row, as it existed before migration 0126 (the fixture is not about the binding).
+		if err := pitest.WithoutBindingGuard(ctx, tx, func() error {
+			_, err := tx.Exec(ctx,
+				`INSERT INTO withdrawal_requests (id, tenant_id, brand_id, player_account_id, wallet_id, asset_code, amount, state, idempotency_key, provider_id, provider_reference)
 			 VALUES ($1,$2,$3,$4,$5,'EUR',$6,'submitted',$7,$8,$9)`,
-			wrID, w.f.tenantID, w.f.brandID, w.f.playerAccountID, w.f.walletID, amount, "wd-"+wrID.String(), provider, "instr-"+wrID.String()[:8]); err != nil {
+				wrID, w.f.tenantID, w.f.brandID, w.f.playerAccountID, w.f.walletID, amount, "wd-"+wrID.String(), provider, "instr-"+wrID.String()[:8])
+			return err
+		}); err != nil {
 			return err
 		}
 		return withdrawal.Complete(ctx, tx, wrID, provider, settlement)

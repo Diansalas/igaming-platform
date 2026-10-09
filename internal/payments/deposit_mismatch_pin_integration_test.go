@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Diansalas/igaming-platform/internal/alerting"
+	"github.com/Diansalas/igaming-platform/internal/payoutinstrument/pitest"
 	"github.com/Diansalas/igaming-platform/internal/testsupport/alertinject"
 )
 
@@ -31,7 +32,7 @@ func TestDepositMismatchedSuccess_OnSucceededAndDeclined_AuditOnly_NoAlert_NoSta
 			f := seedOrchFixture(t, pool)
 			provider := NewMockProvider(pid, "EUR")
 			registerCapability(t, pool, f, provider, 100)
-			orch := NewOrchestrator(map[string]PaymentProvider{pid: provider}, MultiWebhookCredentialResolver{pid: NewMockWebhookCredentials(provider)})
+			orch := NewOrchestrator(map[string]PaymentProvider{pid: provider}, MultiWebhookCredentialResolver{pid: NewMockWebhookCredentials(provider)}).WithPayoutDestinations(pitest.Shared())
 			res, err := orch.InitiateDepositAttempt(context.Background(), pool, AllowAllDepositKYCGate{}, MockCredentialResolver{}, InitiateDepositParams{
 				Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
 				AssetCode: "EUR", Amount: c.amount, PaymentMethod: "card", IdempotencyKey: "dm-" + c.name,

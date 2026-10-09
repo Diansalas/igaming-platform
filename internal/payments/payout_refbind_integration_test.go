@@ -20,6 +20,7 @@ import (
 
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/ledger"
+	"github.com/Diansalas/igaming-platform/internal/payoutinstrument/pitest"
 	"github.com/Diansalas/igaming-platform/internal/withdrawal"
 )
 
@@ -56,8 +57,8 @@ func rbResult(class ErrorClass, outcome Outcome, ref string) GateResult[Withdraw
 
 func (e rbEnv) apply(t *testing.T, wr withdrawal.WithdrawalRequest, a PaymentAttempt, gr GateResult[WithdrawResult]) {
 	t.Helper()
-	if err := ApplyPayoutResult(context.Background(), e.pool, e.f.tenantID, wr.ID, a, gr, EvidenceSync); err != nil {
-		t.Fatalf("ApplyPayoutResult(%s): %v", gr.Class, err)
+	if err := ApplyPayoutResult(context.Background(), e.pool, e.f.tenantID, wr.ID, a, gr, EvidenceSync, WithDestinations(pitest.Shared())); err != nil {
+		t.Fatalf("ApplyPayoutResult(%s, WithDestinations(pitest.Shared())): %v", gr.Class, err)
 	}
 }
 
@@ -320,7 +321,7 @@ func TestRefBind_OtherTenantReference_NotAConflict(t *testing.T) {
 	f2 := seedPayoutFixture(t, e1.pool, 10_000, true)
 	mp := NewMockProvider(e1.pid, "EUR")
 	registerCapability(t, e1.pool, f2.orchFixture, mp, 100)
-	orch2 := NewOrchestrator(map[string]PaymentProvider{e1.pid: mp}, MultiWebhookCredentialResolver{e1.pid: NewMockWebhookCredentials(mp)})
+	orch2 := NewOrchestrator(map[string]PaymentProvider{e1.pid: mp}, MultiWebhookCredentialResolver{e1.pid: NewMockWebhookCredentials(mp)}).WithPayoutDestinations(pitest.Shared())
 	e2 := rbEnv{pool: e1.pool, f: f2, orch: orch2, pid: e1.pid}
 	wr, a := e2.claim(t, "rb-t-b")
 
@@ -362,7 +363,7 @@ func TestRefBind_Concurrent_SameFreshReference_OneBindsLoserConvergesToPark(t *t
 		go func(i int, r racer) {
 			defer wg.Done()
 			<-start
-			errs[i] = ApplyPayoutResult(context.Background(), e.pool, e.f.tenantID, r.wr.ID, r.a, rbResult(ErrorClassPending, OutcomePending, ref), EvidenceSync)
+			errs[i] = ApplyPayoutResult(context.Background(), e.pool, e.f.tenantID, r.wr.ID, r.a, rbResult(ErrorClassPending, OutcomePending, ref), EvidenceSync, WithDestinations(pitest.Shared()))
 		}(i, r)
 	}
 	close(start)
@@ -377,7 +378,7 @@ func TestRefBind_Concurrent_SameFreshReference_OneBindsLoserConvergesToPark(t *t
 		if !errors.As(err, &pgErr) || pgErr.Code != "23505" {
 			t.Fatalf("racer %d: only a unique violation is an acceptable loser error, got %v", i, err)
 		}
-		if err := ApplyPayoutResult(context.Background(), e.pool, e.f.tenantID, racers[i].wr.ID, racers[i].a, rbResult(ErrorClassPending, OutcomePending, ref), EvidenceSync); err != nil {
+		if err := ApplyPayoutResult(context.Background(), e.pool, e.f.tenantID, racers[i].wr.ID, racers[i].a, rbResult(ErrorClassPending, OutcomePending, ref), EvidenceSync, WithDestinations(pitest.Shared())); err != nil {
 			t.Fatalf("racer %d retry must park, not error again: %v", i, err)
 		}
 	}
@@ -402,8 +403,8 @@ func rbStatus(class ErrorClass, outcome Outcome, ref string) GateResult[StatusRe
 
 func (e rbEnv) applyStatus(t *testing.T, wr withdrawal.WithdrawalRequest, a PaymentAttempt, gr GateResult[StatusResult]) {
 	t.Helper()
-	if err := applyPayoutStatusEvidence(context.Background(), e.pool, e.f.tenantID, wr.ID, a, gr, EvidenceQueryStatus, time.Now().Add(time.Minute), nil); err != nil {
-		t.Fatalf("applyPayoutStatusEvidence(%s): %v", gr.Class, err)
+	if err := applyPayoutStatusEvidence(context.Background(), e.pool, e.f.tenantID, wr.ID, a, gr, EvidenceQueryStatus, time.Now().Add(time.Minute), nil, WithDestinations(pitest.Shared())); err != nil {
+		t.Fatalf("applyPayoutStatusEvidence(%s, WithDestinations(pitest.Shared())): %v", gr.Class, err)
 	}
 }
 
@@ -503,7 +504,7 @@ func TestDepositKYC_PhaseA_OutageVsDeny_DistinctReasons(t *testing.T) {
 			pid := "mock-l2a-" + tc.name
 			mp := NewMockProvider(pid, "EUR")
 			registerCapability(t, pool, f, mp, 100)
-			orch := NewOrchestrator(map[string]PaymentProvider{pid: mp}, MultiWebhookCredentialResolver{pid: NewMockWebhookCredentials(mp)})
+			orch := NewOrchestrator(map[string]PaymentProvider{pid: mp}, MultiWebhookCredentialResolver{pid: NewMockWebhookCredentials(mp)}).WithPayoutDestinations(pitest.Shared())
 			res, err := orch.InitiateDepositAttempt(context.Background(), pool, fixedDepositGate{tc.deny}, MockCredentialResolver{}, InitiateDepositParams{
 				Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
 				AssetCode: "EUR", Amount: 5000, PaymentMethod: "card", IdempotencyKey: "l2a-" + tc.name,
@@ -540,7 +541,7 @@ func TestDepositKYC_CascadeT2_OutageVsDeny_DistinctReasons(t *testing.T) {
 			pid := "mock-l2b-" + tc.name
 			mp := NewMockProvider(pid, "EUR")
 			registerCapability(t, pool, f, mp, 100)
-			orch := NewOrchestrator(map[string]PaymentProvider{pid: mp}, MultiWebhookCredentialResolver{pid: NewMockWebhookCredentials(mp)})
+			orch := NewOrchestrator(map[string]PaymentProvider{pid: mp}, MultiWebhookCredentialResolver{pid: NewMockWebhookCredentials(mp)}).WithPayoutDestinations(pitest.Shared())
 			res := rvInit(t, pool, orch, f, 5000, "l2b-"+tc.name)
 			intentID := res.Intent.ID
 

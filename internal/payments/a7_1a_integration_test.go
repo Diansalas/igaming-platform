@@ -28,6 +28,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+
+	"github.com/Diansalas/igaming-platform/internal/payoutinstrument/pitest"
 )
 
 // a7HoldRow and a7WaitAnyLockWaiter now live in
@@ -57,7 +59,7 @@ func TestA7_1a_SweeperClaimVsCallbackPhaseC_SameDepositIntent(t *testing.T) {
 	registerCapability(t, pool, f, providerA, 100)
 	registerCapability(t, pool, f, providerB, 200)
 	orch := NewOrchestrator(map[string]PaymentProvider{"a7-1a-p1": providerA, "a7-1a-p2": providerB},
-		MultiWebhookCredentialResolver{"a7-1a-p1": NewMockWebhookCredentials(providerA), "a7-1a-p2": NewMockWebhookCredentials(providerB)})
+		MultiWebhookCredentialResolver{"a7-1a-p1": NewMockWebhookCredentials(providerA), "a7-1a-p2": NewMockWebhookCredentials(providerB)}).WithPayoutDestinations(pitest.Shared())
 
 	res, err := orch.InitiateDepositAttempt(context.Background(), pool, AllowAllDepositKYCGate{}, MockCredentialResolver{}, InitiateDepositParams{
 		Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},

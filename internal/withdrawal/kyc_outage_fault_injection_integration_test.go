@@ -32,6 +32,7 @@ import (
 
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/kyc"
+	"github.com/Diansalas/igaming-platform/internal/payoutinstrument/pitest"
 )
 
 // lockKYCVerificationsTable starts a blocker transaction on a SEPARATE
@@ -119,7 +120,7 @@ func TestRequestWithdrawal_KYCStoreOutage_FailsClosedWithOneUnavailableDecision(
 			TenantID: f.tenantID, BrandID: f.brandID,
 			PlayerAccountID: f.playerAccountID, PersonID: f.personID,
 			WalletID: f.walletID, AssetCode: "EUR", Amount: 500,
-			IdempotencyKey: idemKey,
+			IdempotencyKey: idemKey, PayoutInstrumentID: f.instrumentID, Destinations: pitest.Shared(),
 		})
 		if errors.As(reqErr, &kycDenied) {
 			return nil

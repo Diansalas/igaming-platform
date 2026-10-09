@@ -26,6 +26,13 @@ non-Synthetic payout adapter or instrument verifier is registered, in any enviro
 (and without either trigger) the payout instrument routes answer 503. There is no random-key fallback in
 the binary.
 
+**B13-B behaviour change (ADR 0111 section 18): development and MOCK deployments now need the keys too.**
+Binding a payout instrument is mandatory for every NEW withdrawal request, MOCK included (owner decision 8:
+only the verification SOURCE is flexible in MOCK). Without the key families `POST /v1/me/withdrawals` answers 503
+and writes nothing. Generate throw-away keys for a local environment exactly as for production (a fresh 32-byte
+secret per family, base64) and keep them out of the repository. The former L-8 startup clause (refuse every
+non-Synthetic payout adapter until B13-B lands) is removed; a non-Synthetic adapter still needs the keys.
+
 ## 2. Losing a key
 
 * **Master key lost (all kids)**: every stored detail ciphertext and every seal becomes unreadable and

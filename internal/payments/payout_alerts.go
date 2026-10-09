@@ -49,6 +49,9 @@ var payoutEscalationReasons = map[string]struct{}{
 	alertReasonPayoutNonIdempotentManifest: {},
 	alertReasonPayoutMaxResubmits:          {},
 	alertReasonPayoutResubmitCASRefused:    {},
+	// B13-B (ADR 0111 2.4, 2.6): T2/T12 destination gate refusals.
+	alertReasonPayoutDestinationNotUsable:     {},
+	TerminalReasonDestinationIntegrityFailure: {},
 }
 
 // R-5 (ADR 0095 section 42.5): a signal raised WITHOUT any state change. A success whose
@@ -74,6 +77,8 @@ var payoutSignalReasons = map[string]struct{}{
 	alertReasonPayoutMismatchedSuccessOnDeclined:  {},
 	alertReasonPayoutMismatchedSuccessOnSucceeded: {},
 	alertReasonPayoutForeignRefSuccessOnSucceeded: {},
+	// B13-B: a differing destination echo on an already succeeded/declined payout.
+	alertReasonPayoutDestinationMismatchOnTerminal: {},
 }
 
 // payoutAlertReasonFor maps a payout terminal or escalation reason to its

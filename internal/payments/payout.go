@@ -36,6 +36,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/identity"
 	"github.com/Diansalas/igaming-platform/internal/kyc"
+	"github.com/Diansalas/igaming-platform/internal/payoutinstrument"
 	"github.com/Diansalas/igaming-platform/internal/providercred"
 	"github.com/Diansalas/igaming-platform/internal/providerref"
 	"github.com/Diansalas/igaming-platform/internal/tenant"
@@ -285,6 +286,32 @@ func (o *Orchestrator) ClaimForDispatch(ctx context.Context, pool *db.Pool, kycG
 	// here - the caller resolves it fresh via Provider(capability.ProviderID)
 	// for phase B, so nothing about routing crosses the A0/T1p boundary
 	// except the plain data RoutingRequest/ProviderCapability already are.
+	// B13-B (ADR 0111 2.4, A-10): for a BOUND withdrawal the payment method is the bound
+	// instrument's rail - the staff body can never influence the route or the destination. A
+	// body value that differs is refused before anything is read or written. A legacy
+	// NULL-binding withdrawal keeps the caller's value (Synthetic adapters only).
+	var bodyMethod string
+	if routingInput.Bound() {
+		if o.destinations == nil {
+			return ClaimResult{}, fmt.Errorf("%w: refusing a bound payout claim", ErrDestinationServiceUnavailable)
+		}
+		var rail string
+		if err := pool.WithTenantReadOnly(ctx, tenantID, func(actx context.Context, tx pgx.Tx) error {
+			var err error
+			rail, err = o.destinations.RailOf(actx, tx, tenantID, *routingInput.PayoutInstrumentID)
+			return err
+		}); err != nil {
+			return ClaimResult{}, fmt.Errorf("payments: resolve payout instrument rail: %w", err)
+		}
+		// The body's value is kept only to be COMPARED inside the claim transaction (after the row
+		// lock, the state check and the H-SEC-11 gate, so those refusals keep their precedence); it
+		// never selects the route: the rail does.
+		bodyMethod = paymentMethod
+		paymentMethod = rail
+	}
+	if !routingInput.Bound() && paymentMethod == "" {
+		return ClaimResult{}, fmt.Errorf("%w: payment_method is required for a legacy (unbound) withdrawal", withdrawal.ErrInvalidInput)
+	}
 	_, routedCapability, routeErr := RankRoutingCandidates(ctx, candidates, o.providers, o.breaker, RoutingRequest{
 		TenantID: tenantID, BrandID: routingInput.BrandID, AssetCode: routingInput.AssetCode,
 		PaymentMethod: paymentMethod, Amount: routingInput.Amount, Operation: OperationWithdrawal,
@@ -295,7 +322,12 @@ func (o *Orchestrator) ClaimForDispatch(ctx context.Context, pool *db.Pool, kycG
 	// when the evaluator could not decide: only the decision row and the
 	// denied-submit audit were written, see the branch below.
 	var kycUnavailable bool
-	err := pool.WithTenant(ctx, tenantID, func(actx context.Context, tx pgx.Tx) error {
+	// destRefusal is set (and the closure returns nil, so the tx COMMITS) when the destination
+	// gate refuses: only the denial audit is written (ADR 0111 2.4).
+	var destRefusal error
+	// Security L-2: the claim transaction opens through alerting.InTx so an INTEGRITY refusal can raise its P1 as the
+	// last statement of the transaction and flush after the commit (ADR 0102 7.7).
+	pending, err := alerting.InTx(ctx, alerting.NewTenantRunner(pool, tenantID), func(actx context.Context, tx pgx.Tx) error {
 		wr, err := withdrawal.LockApprovedForSubmission(actx, tx, requestID)
 		if err != nil {
 			return err
@@ -306,6 +338,12 @@ func (o *Orchestrator) ClaimForDispatch(ctx context.Context, pool *db.Pool, kycG
 		// deny/hold release, or attempt insert. The request stays `approved`.
 		if err := tenant.RequireActiveForPaymentInitiation(actx, tx, tenantID, wr.BrandID); err != nil {
 			return fmt.Errorf("payments: payout claim refused: %w", err)
+		}
+
+		// B13-B (A-10): a staff body naming a payment method other than the bound instrument's rail is
+		// refused (400 at the handler) before any decision row, state change or attempt; nothing is written.
+		if wr.Bound() && bodyMethod != "" && bodyMethod != paymentMethod {
+			return ErrPaymentMethodMismatch
 		}
 
 		decision, kycParams, err := evaluatePayoutGate(actx, tx, kycGate, wr)
@@ -367,6 +405,41 @@ func (o *Orchestrator) ClaimForDispatch(ctx context.Context, pool *db.Pool, kycG
 			return fmt.Errorf("payments: route payout: %w", routeErr)
 		}
 
+		// B13-B destination gate (ADR 0111 2.4): AFTER the KYC gate and the route error, BEFORE the
+		// ALLOW decision row, the approved -> submitted transition and the attempt insert. It
+		// applies the gate rule (instrument locked FOR SHARE) and the tiering predicate on the
+		// exact routed adapter value. A refusal commits ONLY the denial audit: no allow decision
+		// row, no state change, no attempt - the request stays `approved`.
+		routedAdapter := o.providers[routedCapability.ProviderID]
+		destGate, gerr := gatePayoutDestination(actx, tx, o.destinations, wr, routedAdapter, true, false)
+		if gerr == nil && wr.Bound() && destGate.Instrument.Rail != paymentMethod {
+			gerr = payoutinstrument.RefuseIntegrity(payoutinstrument.ReasonRelationMismatch)
+		}
+		if gerr != nil {
+			g, isRefusal := payoutinstrument.IsGateRefusal(gerr)
+			if !isRefusal {
+				return gerr
+			}
+			reason := alertReasonPayoutDestinationNotUsable
+			if g.Integrity() {
+				reason = TerminalReasonDestinationIntegrityFailure
+			}
+			if err := audit.Record(actx, tx, audit.Entry{
+				TenantID: tenantID, ActorType: audit.ActorStaff, ActorID: actor.StaffID,
+				Action: "withdrawal.submit.http", TargetType: "withdrawal_request", TargetID: requestID.String(),
+				Outcome: audit.OutcomeDenied, IPAddress: actor.IPAddress, UserAgent: actor.UserAgent, RequestID: actor.RequestID,
+				Metadata: map[string]any{"denied_by_destination": reason, "gate_reason": g.Reason},
+			}); err != nil {
+				return err
+			}
+			destRefusal = gerr
+			if g.Integrity() {
+				// raise last: nothing else touches the alert tables after this statement.
+				return alerting.RaiseGuarded(actx, tx, DestinationIntegrityAlert(tenantID, "withdrawal:"+requestID.String(), g.Reason))
+			}
+			return nil
+		}
+
 		// DECISION-ROWS-1: the ALLOW decision row (and its audit) commits in
 		// the SAME transaction as the domain effect it authorizes (ADR 0096
 		// §3.6); a kill-switch or routing rollback below discards it together
@@ -402,6 +475,18 @@ func (o *Orchestrator) ClaimForDispatch(ctx context.Context, pool *db.Pool, kycG
 			return err
 		}
 
+		// B13-B: the write-once destination snapshot, in the SAME transaction as the attempt
+		// insert (the deferred constraint trigger on payment_attempts requires it, with
+		// snapshot = withdrawal = attempt for instrument, amount and asset). A bound
+		// withdrawal without one cannot commit.
+		if wr.Bound() {
+			if _, err := o.destinations.WriteSnapshot(actx, tx, destGate, payoutinstrument.SnapshotParams{
+				AttemptID: attempt.ID, WithdrawalRequestID: requestID, Amount: amountText(wr.Amount), AssetCode: wr.AssetCode,
+			}); err != nil {
+				return err
+			}
+		}
+
 		// B6: staff-attribution audit, same transaction, before commit -
 		// never a best-effort call after the fact.
 		if err := audit.Record(actx, tx, audit.Entry{
@@ -426,6 +511,12 @@ func (o *Orchestrator) ClaimForDispatch(ctx context.Context, pool *db.Pool, kycG
 		}
 		return ClaimResult{}, err
 	}
+	pending.Flush(ctx) // post-commit only; the error path above returned before any Pending exists
+	if destRefusal != nil {
+		// Returned only AFTER the commit above: the denial audit is durable; the request is
+		// still `approved`, no attempt, no provider call.
+		return ClaimResult{}, fmt.Errorf("%w: %w", ErrPayoutDestinationNotUsable, destRefusal)
+	}
 	if kycUnavailable {
 		// Returned only AFTER the commit above: the decision and the denied
 		// audit are durable. The handler maps ErrPayoutKYCUnavailable to a
@@ -442,11 +533,11 @@ func (o *Orchestrator) ClaimForDispatch(ctx context.Context, pool *db.Pool, kycG
 // unconditionally, regardless of what Outcome the adapter also reported,
 // so phase C can never mistake a same-call "succeeded, but with a
 // dangerous reference" for an ordinary success.
-func payoutAdapterCall(provider PaymentProvider, attempt PaymentAttempt) AdapterCall[WithdrawResult] {
+func payoutAdapterCall(provider PaymentProvider, attempt PaymentAttempt, dest resolvedDestination) AdapterCall[WithdrawResult] {
 	return func(callCtx context.Context, cc CallContext) (WithdrawResult, ErrorClass, error) {
 		res, err := provider.Withdraw(callCtx, WithdrawRequest{
 			MerchantReference: attempt.MerchantReference, Amount: attempt.Amount,
-			AssetCode: attempt.AssetCode, PaymentMethod: attempt.PaymentMethod,
+			AssetCode: attempt.AssetCode, PaymentMethod: dest.paymentMethod, Destination: dest.destination,
 		})
 		// PAY-PAYOUT-ERRREF-1 (code review of PRH-2 C, F1): the reference is
 		// validated BEFORE the error return, exactly like depositAdapterCall
@@ -497,10 +588,23 @@ func payoutAdapterCall(provider PaymentProvider, attempt PaymentAttempt) Adapter
 // otherwise. pool (PROV-OUTBOUND-CRED-1, phase 2 orchestrator wiring) is
 // threaded through to the credential resolver only - never used for
 // anything else here, and never held across the call itself.
-func DispatchWithdraw(ctx context.Context, pool providercred.TenantTxRunner, credResolver OutboundCredentialResolver, provider PaymentProvider, attempt PaymentAttempt) GateResult[WithdrawResult] {
+//
+// B13-B (ADR 0111 2.4 "Phase B"): BEFORE the call, the withdrawal, the instrument and the
+// snapshot are re-read in a short read transaction and the gate rule and the tiering predicate
+// are applied to the EXACT provider value about to be invoked; WithdrawRequest.Destination is
+// built only from the snapshot plus the decrypted immutable detail. Any failure returns the
+// NotSent class with NO provider call (T5 -> created; the next T2 gate escalates). Without
+// WithDestinations a bound withdrawal makes no provider call, and a non-Synthetic adapter is
+// never called without a destination.
+func DispatchWithdraw(ctx context.Context, pool providercred.TenantTxRunner, credResolver OutboundCredentialResolver, provider PaymentProvider, attempt PaymentAttempt, opts ...PayoutOption) GateResult[WithdrawResult] {
 	if attempt.ProviderID == nil || attempt.ClaimToken == nil {
 		return GateResult[WithdrawResult]{Class: ErrorClassNotSent,
 			Err: fmt.Errorf("%w: payout attempt %s has no committed provider_id/claim_token", ErrProviderCallRefused, attempt.ID)}
+	}
+	dest, derr := resolvePhaseBDestination(ctx, pool, buildPayoutEnv(opts), provider, attempt)
+	if derr != nil {
+		return GateResult[WithdrawResult]{Class: ErrorClassNotSent,
+			Err: fmt.Errorf("%w: payout attempt %s destination gate: %w", ErrProviderCallRefused, attempt.ID, derr)}
 	}
 	// B1 (RV-PRH-I1 code review): the provider call must never run on a
 	// caller's own request-scoped context - an HTTP staff browser
@@ -516,7 +620,7 @@ func DispatchWithdraw(ctx context.Context, pool providercred.TenantTxRunner, cre
 		AttemptState: attempt.State, ClaimToken: *attempt.ClaimToken, ExpectedClaim: *attempt.ClaimToken,
 		IdempotencyKey: attempt.ExternalIdempotencyKey, Domain: "payments", Manifest: manifest,
 	}
-	return callProvider(dispatchCtx, pool, credResolver, in, payoutAdapterCall(provider, attempt))
+	return callProvider(dispatchCtx, pool, credResolver, in, payoutAdapterCall(provider, attempt, dest))
 }
 
 // ApplyPayoutResult is phase C: applies DispatchWithdraw's GateResult under
@@ -535,7 +639,8 @@ func DispatchWithdraw(ctx context.Context, pool providercred.TenantTxRunner, cre
 // ONLY branch that returns to a re-claimable 'created' state, and it is
 // reached only when the gate/adapter proves the call never reached the
 // provider).
-func ApplyPayoutResult(ctx context.Context, pool *db.Pool, tenantID, requestID uuid.UUID, attempt PaymentAttempt, gr GateResult[WithdrawResult], evidence EvidenceKind) error {
+func ApplyPayoutResult(ctx context.Context, pool *db.Pool, tenantID, requestID uuid.UUID, attempt PaymentAttempt, gr GateResult[WithdrawResult], evidence EvidenceKind, opts ...PayoutOption) error {
+	env := buildPayoutEnv(opts)
 	// L1 (RV-PRH-I1 ledger review): a caller bug applying attempt Y's
 	// evidence to withdrawal X must never silently proceed under RLS's
 	// tenant-only bound.
@@ -582,6 +687,19 @@ func ApplyPayoutResult(ctx context.Context, pool *db.Pool, tenantID, requestID u
 				return err
 			}
 			return raisePayoutDisputeAlert(actx, tx, attempt, reason) // B12: LAST statement of the park
+		}
+
+		// B13-B: snapshot integrity + destination echo BEFORE the result can advance or settle the
+		// attempt. A differing echo parks (destination_mismatch); a success without a declared
+		// echo is ambiguous. A NotSent result carries no provider evidence.
+		if gr.Class != ErrorClassNotSent {
+			verdict, derr := payoutDestinationEvidence(actx, tx, env, attempt, requestID, gr.Class, res.DestinationEcho, evidence, res.ProviderReference)
+			if derr != nil || verdict.Stop {
+				return derr
+			}
+			if verdict.AmbiguousSuccess {
+				gr.Class = ErrorClassAmbiguous
+			}
 		}
 
 		switch gr.Class {
@@ -1000,7 +1118,8 @@ var ErrPayoutDispatchInFlight = errors.New("payments: payout dispatch is still i
 // outcome is cross-checked against the withdrawal's own requested amount/
 // asset (INV-IO-6, B3/H2): a mismatch parks the attempt (T10) and audits
 // it, never completes.
-func applyPayoutStatusEvidence(ctx context.Context, pool *db.Pool, tenantID, requestID uuid.UUID, attempt PaymentAttempt, gr GateResult[StatusResult], evidence EvidenceKind, nextPoll time.Time, actor *SubmitActor) error {
+func applyPayoutStatusEvidence(ctx context.Context, pool *db.Pool, tenantID, requestID uuid.UUID, attempt PaymentAttempt, gr GateResult[StatusResult], evidence EvidenceKind, nextPoll time.Time, actor *SubmitActor, opts ...PayoutOption) error {
+	env := buildPayoutEnv(opts)
 	if attempt.WithdrawalRequestID == nil || *attempt.WithdrawalRequestID != requestID {
 		return fmt.Errorf("payments: apply payout status evidence: attempt %s does not belong to withdrawal request %s", attempt.ID, requestID)
 	}
@@ -1026,7 +1145,7 @@ func applyPayoutStatusEvidence(ctx context.Context, pool *db.Pool, tenantID, req
 		if err != nil {
 			return fmt.Errorf("payments: apply payout status evidence: re-read attempt under lock: %w", err)
 		}
-		if err := applyPayoutStatusEvidenceInTx(actx, tx, tenantID, requestID, attempt, gr, evidence, nextPoll); err != nil {
+		if err := applyPayoutStatusEvidenceInTx(actx, tx, env, tenantID, requestID, attempt, gr, evidence, nextPoll); err != nil {
 			return err
 		}
 		// N3 (RV-PRH-I1 re-review 2): the staff-attribution audit for a
@@ -1048,7 +1167,7 @@ func applyPayoutStatusEvidence(ctx context.Context, pool *db.Pool, tenantID, req
 // run the N3 staff audit AFTER it, inside the exact same transaction,
 // without duplicating it into every one of this switch's many return
 // points.
-func applyPayoutStatusEvidenceInTx(actx context.Context, tx pgx.Tx, tenantID, requestID uuid.UUID, attempt PaymentAttempt, gr GateResult[StatusResult], evidence EvidenceKind, nextPoll time.Time) error {
+func applyPayoutStatusEvidenceInTx(actx context.Context, tx pgx.Tx, env payoutEnv, tenantID, requestID uuid.UUID, attempt PaymentAttempt, gr GateResult[StatusResult], evidence EvidenceKind, nextPoll time.Time) error {
 	{
 		// R3 (RV-PRH-I1 ledger re-review, ADR 0082 A7): withdrawal FIRST,
 		// unconditionally - see ApplyPayoutResult's identical top-of-tx
@@ -1086,6 +1205,18 @@ func applyPayoutStatusEvidenceInTx(actx context.Context, tx pgx.Tx, tenantID, re
 		}
 
 		res := gr.Value
+		// B13-B: snapshot integrity + destination echo BEFORE the poll result can advance or
+		// settle the attempt (ADR 0111 2.6 "poll"). A success without a declared echo stays
+		// non-terminal (the poll decides); the next look is rescheduled.
+		{
+			verdict, derr := payoutDestinationEvidence(actx, tx, env, attempt, requestID, gr.Class, res.DestinationEcho, evidence, res.ProviderReference)
+			if derr != nil || verdict.Stop {
+				return derr
+			}
+			if verdict.AmbiguousSuccess {
+				return RescheduleNonTerminal(actx, tx, attempt.ID, nextPoll)
+			}
+		}
 		switch attempt.State {
 		case AttemptSubmitting:
 			switch gr.Class {
@@ -1457,5 +1588,5 @@ func PollPayoutStatus(ctx context.Context, pool *db.Pool, orch *Orchestrator, cr
 		Domain: "payments", Manifest: manifest,
 	}
 	gr := callProvider(dispatchCtx, pool, credResolver, in, payoutStatusQuery(provider, *ref))
-	return applyPayoutStatusEvidence(ctx, pool, tenantID, requestID, attempt, gr, EvidenceQueryStatus, nextPoll, actor)
+	return applyPayoutStatusEvidence(ctx, pool, tenantID, requestID, attempt, gr, EvidenceQueryStatus, nextPoll, actor, orch.PayoutOptions()...)
 }

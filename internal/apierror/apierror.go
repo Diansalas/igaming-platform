@@ -72,6 +72,15 @@ const (
 	// IN_USE: the player may not revoke an instrument a live withdrawal binds.
 	CodePayoutInstrumentNotAccepted Code = "PAYOUT_INSTRUMENT_NOT_ACCEPTED"
 	CodePayoutInstrumentInUse       Code = "PAYOUT_INSTRUMENT_IN_USE"
+	// B13-B (ADR 0111 2.4). REQUIRED / NOT_USABLE: a withdrawal request named no payout instrument /
+	// an unusable one (nothing was created, the idempotency key is not consumed). DESTINATION_NOT_USABLE:
+	// the staff submit (T1p) destination gate refused; the request stays `approved`. All 409.
+	// PAYMENT_METHOD_MISMATCH: the staff body named a payment method other than the bound instrument's
+	// rail (400, A-10).
+	CodePayoutInstrumentRequired   Code = "PAYOUT_INSTRUMENT_REQUIRED"
+	CodePayoutInstrumentNotUsable  Code = "PAYOUT_INSTRUMENT_NOT_USABLE"
+	CodePayoutDestinationNotUsable Code = "PAYOUT_DESTINATION_NOT_USABLE"
+	CodePaymentMethodMismatch      Code = "PAYMENT_METHOD_MISMATCH"
 )
 
 // Error is the wire format for an API error response.
@@ -89,7 +98,7 @@ func (e *Error) Error() string { return string(e.Code) + ": " + e.Message }
 // every handler produces a consistent status for the same error kind.
 func httpStatus(c Code) int {
 	switch c {
-	case CodeValidation, CodeSettlementValidationFailed, CodeInvalidRequest:
+	case CodeValidation, CodeSettlementValidationFailed, CodeInvalidRequest, CodePaymentMethodMismatch:
 		return http.StatusBadRequest
 	case CodeUnauthorized:
 		return http.StatusUnauthorized
@@ -101,7 +110,8 @@ func httpStatus(c Code) int {
 		CodeSettlementBetAlreadySettled, CodeSettlementGenerationOutOfSequence, CodeSettlementIntegrity,
 		CodeCredentialRegistrationRejected, CodeApprovalRejected, CodeCredentialActivationRejected,
 		CodeCredentialTransitionRejected, CodeSettlementTenantNotActive, CodeTenantCloseBlockedOpenRounds, CodeTenantOrBrandNotActive,
-		CodePayoutInstrumentNotAccepted, CodePayoutInstrumentInUse:
+		CodePayoutInstrumentNotAccepted, CodePayoutInstrumentInUse,
+		CodePayoutInstrumentRequired, CodePayoutInstrumentNotUsable, CodePayoutDestinationNotUsable:
 		return http.StatusConflict
 	case CodeSettlementPayoutInvalid, CodeSettlementAssetMismatch:
 		return http.StatusUnprocessableEntity

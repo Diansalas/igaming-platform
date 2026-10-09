@@ -13,6 +13,7 @@ import (
 
 	"github.com/Diansalas/igaming-platform/internal/audit"
 	"github.com/Diansalas/igaming-platform/internal/ledger"
+	"github.com/Diansalas/igaming-platform/internal/payoutinstrument"
 	"github.com/Diansalas/igaming-platform/internal/providerref"
 	"github.com/Diansalas/igaming-platform/internal/webhookauth"
 )
@@ -66,6 +67,10 @@ type Orchestrator struct {
 	// in an older test) never blocks routing (Breaker.Allow's own nil
 	// receiver handling).
 	breaker *Breaker
+	// destinations is the B13 payout-instrument service (WithPayoutDestinations). Nil refuses
+	// every payout of a BOUND withdrawal (fail closed); only a legacy NULL-binding withdrawal on
+	// a Synthetic adapter proceeds without it.
+	destinations *payoutinstrument.Service
 }
 
 // NewOrchestrator constructs an Orchestrator over the given adapter
@@ -1157,6 +1162,7 @@ func (o *Orchestrator) receiveCallbackViaReceiptPath(ctx context.Context, tx pgx
 		AssetCode:                 event.AssetCode,
 		DeclineReason:             event.DeclineReason,
 		Cascadable:                event.Cascadable,
+		DestinationEcho:           event.DestinationEcho,
 	}
 	if event.EventType == CallbackEventDeposit && event.Outcome == OutcomeDeclined {
 		// A callback is always a post-acceptance signal (§4.4/T8's "declined

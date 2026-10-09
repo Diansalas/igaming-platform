@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/Diansalas/igaming-platform/internal/payoutinstrument/pitest"
 	"github.com/Diansalas/igaming-platform/internal/providerref"
 	"github.com/Diansalas/igaming-platform/internal/reconciliation"
 	"github.com/Diansalas/igaming-platform/internal/reconciliation/statement"
@@ -666,8 +667,8 @@ func (w *k3World) payoutExpect(amount int64) (withdrawal.WithdrawalRequest, Paym
 		w.t.Fatalf("ClaimForDispatch: %v", err)
 	}
 	adapter, _ := w.orch.Provider(claim.Capability.ProviderID)
-	gr := DispatchWithdraw(context.Background(), nil, MockCredentialResolver{}, adapter, claim.Attempt)
-	if err := ApplyPayoutResult(context.Background(), w.pool, w.f.tenantID, wr.ID, claim.Attempt, gr, EvidenceSync); err != nil {
+	gr := DispatchWithdraw(context.Background(), w.pool, MockCredentialResolver{}, adapter, claim.Attempt, WithDestinations(pitest.Shared()))
+	if err := ApplyPayoutResult(context.Background(), w.pool, w.f.tenantID, wr.ID, claim.Attempt, gr, EvidenceSync, WithDestinations(pitest.Shared())); err != nil {
 		w.t.Fatalf("ApplyPayoutResult: %v", err)
 	}
 	return w.withdrawalOf(wr.ID), w.attempt(claim.Attempt.ID)

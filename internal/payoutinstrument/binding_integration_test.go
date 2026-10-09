@@ -47,16 +47,45 @@ func (b *bindWorld) wd(instID *uuid.UUID, fp *string) (uuid.UUID, error) {
 	return id, err
 }
 
+// legacyWd plants a pre-0126-shaped NULL/NULL withdrawal row. The insert guard
+// now refuses NULL/NULL, so the row is planted the way a pre-migration row exists:
+// the owner disables the table's user triggers for one statement (a deliberate SQL
+// tamper, the same technique as world.tamper). Legacy rows are UNAFFECTED by 0126.
+func (b *bindWorld) legacyWd() (uuid.UUID, error) { return b.plantLegacy(b.p, b.wallet) }
+
+// plantLegacy inserts a NULL/NULL withdrawal row as a pre-0126 row exists (owner, triggers off).
+func (w *world) plantLegacy(p player, wallet uuid.UUID) (uuid.UUID, error) {
+	var id uuid.UUID
+	err := w.ownerTx(func(ctx context.Context, tx pgx.Tx) error {
+		for _, q := range []string{`ALTER TABLE withdrawal_requests DISABLE TRIGGER USER`, `ALTER TABLE withdrawal_requests NO FORCE ROW LEVEL SECURITY`} {
+			if _, err := tx.Exec(ctx, q); err != nil {
+				return err
+			}
+		}
+		if err := tx.QueryRow(ctx, `INSERT INTO withdrawal_requests (tenant_id, brand_id, player_account_id, wallet_id, asset_code, amount, idempotency_key)
+			VALUES ($1,$2,$3,$4,'EUR',100,$5) RETURNING id`, w.tenantID, p.BrandID, p.ID, wallet, "legacy-"+uuid.NewString()).Scan(&id); err != nil {
+			return err
+		}
+		for _, q := range []string{`ALTER TABLE withdrawal_requests FORCE ROW LEVEL SECURITY`, `ALTER TABLE withdrawal_requests ENABLE TRIGGER USER`} {
+			if _, err := tx.Exec(ctx, q); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	return id, err
+}
+
 func TestBinding_InsertGuard(t *testing.T) {
 	b := newBindWorld(t)
 	id, fp := b.inst.ID, b.inst.Fingerprint
 	if _, err := b.wd(&id, &fp); err != nil {
 		t.Fatalf("a verified instrument must bind: %v", err)
 	}
-	// Legacy NULL/NULL is tolerated by 0123 (B13-B closes it; see the header).
-	if _, err := b.wd(nil, nil); err != nil {
-		t.Fatalf("legacy NULL binding: %v", err)
-	}
+	// B13-B (migration 0126): NULL/NULL is REFUSED on INSERT, for the runtime role and in
+	// every session shape. (0123 tolerated it; ADR 0111 15.2 B13A-2.)
+	_, err0 := b.wd(nil, nil)
+	requireCode(t, err0, "PI046", "NULL/NULL binding on INSERT")
 	// Half a binding is a CHECK violation.
 	_, err := b.wd(&id, nil)
 	requireCode(t, err, "23514", "instrument without fingerprint")
@@ -160,7 +189,7 @@ func TestBinding_ExpiredVerificationAndImmutability(t *testing.T) {
 		}
 	}
 	// A legacy NULL-binding row cannot gain a binding later.
-	legacy, err := ins(nil, nil)
+	legacy, err := w.plantLegacy(p, wl)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -301,7 +330,7 @@ func TestSnapshot_WriteOnceAndAttemptConstraint(t *testing.T) {
 	requireCode(t, err, "PI051", "snapshot differs from the attempt")
 
 	// A legacy NULL-binding withdrawal needs no snapshot.
-	legacy, err := b.wd(nil, nil)
+	legacy, err := b.legacyWd()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -357,7 +386,7 @@ func TestSnapshotConstraint_FailsClosedWhenWithdrawalUnreadable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	legacyWd, err := b.wd(nil, nil)
+	legacyWd, err := b.legacyWd()
 	if err != nil {
 		t.Fatal(err)
 	}

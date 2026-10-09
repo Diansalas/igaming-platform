@@ -325,7 +325,7 @@ func TestK3_Y07_RevokeVersusExecutionIsSerialisedByTheShareLocks(t *testing.T) {
 // Scratch database: the owner re-links the staff rows (the append-only trigger is
 // disabled for that one transaction).
 func TestK3_Y08_RequesterPersonMustBeUnchangedAtExecution(t *testing.T) {
-	pool, _ := scratchThrough(t, "k3pers_", migration0115Version)
+	pool := depositV2ScratchPool(t) // B13-B: the payments code reads the B13 columns, so a payout world needs the head schema
 	w := newK3WorldOn(t, pool, k3Opts{base: 2})
 	_, a := w.ambiguousPayout(100)
 	p1 := w.f1.PersonID
