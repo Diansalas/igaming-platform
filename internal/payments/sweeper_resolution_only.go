@@ -203,7 +203,7 @@ func skipCascadeChildForResolutionOnly(ctx context.Context, tx pgx.Tx, attempt P
 // callback's own tx (RLS-scoped, then checked against the attempt's tenant): passing the stub to
 // skipCascadeChildForBrand would refuse EVERY receipt-path child. Order: tenant (separate helper,
 // reason, metric), then brand. Lock order: the intent row is already held FOR UPDATE by the caller's
-// parent lock (parent -> attempt -> receipt -> intent -> brand FOR SHARE); the brand read is a leaf
+// parent lock (R0 receipt insert, parent -> attempt -> intent -> brand FOR SHARE); the brand read is a leaf
 // lock, taken before any alert raise (ADR 0102 7.7 raise-last is unaffected). Any read error is
 // returned, which rolls back the whole delivery including its receipt dedupe row, so the redelivery
 // converges.
