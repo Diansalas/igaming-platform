@@ -633,6 +633,20 @@ BEGIN
     THEN
         RAISE EXCEPTION 'payout snapshot: does not equal the verification' USING ERRCODE = 'PI053';
     END IF;
+    -- Defence in depth (the Go gate is the primary control): the instrument is
+    -- verified NOW, the snapshot's verification is its in-force one, it has not
+    -- expired and no revoke / later suspend event exists.
+    IF NOT EXISTS (
+        SELECT 1 FROM payout_instruments pi
+         WHERE pi.id = NEW.instrument_id AND pi.tenant_id = NEW.tenant_id
+           AND pi.state = 'verified' AND pi.current_verification_id = NEW.verification_id)
+       OR NEW.verification_expires_at <= now()
+       OR EXISTS (SELECT 1 FROM payout_instrument_blocking_events e
+                   WHERE e.instrument_id = NEW.instrument_id AND e.tenant_id = NEW.tenant_id
+                     AND (e.event = 'revoke' OR (e.event = 'suspend' AND e.occurred_at > NEW.verified_at)))
+    THEN
+        RAISE EXCEPTION 'payout snapshot: the instrument is not verified, current, unexpired and unblocked' USING ERRCODE = 'PI054';
+    END IF;
     NEW.created_txid := txid_current();
     RETURN NEW;
 END;
@@ -659,7 +673,13 @@ BEGIN
     END IF;
     SELECT wr.payout_instrument_id, wr.payout_instrument_fingerprint, wr.amount, wr.asset_code
       INTO w FROM withdrawal_requests wr WHERE wr.id = NEW.withdrawal_request_id AND wr.tenant_id = NEW.tenant_id;
-    IF NOT FOUND OR w.payout_instrument_id IS NULL THEN
+    -- A payout attempt always has its withdrawal (FK). A withdrawal that cannot be
+    -- read (for example the tenant setting was cleared before commit) must FAIL
+    -- CLOSED, never skip the check; only an explicit NULL binding returns.
+    IF NOT FOUND OR NEW.withdrawal_request_id IS NULL THEN
+        RAISE EXCEPTION 'payment_attempts: the withdrawal of a payout attempt could not be read' USING ERRCODE = 'PI055';
+    END IF;
+    IF w.payout_instrument_id IS NULL THEN
         RETURN NULL;
     END IF;
     IF NOT EXISTS (

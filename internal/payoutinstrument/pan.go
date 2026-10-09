@@ -1,22 +1,23 @@
 package payoutinstrument
 
-import (
-	"regexp"
-	"strings"
-)
+import "regexp"
 
-// panRun matches a maximal run of digits joined by single spaces or hyphens
-// (how a card number is typed).
-var panRun = regexp.MustCompile(`[0-9](?:[ -]?[0-9])*`)
+// panRun matches a maximal run of digits joined by ANY non-alphanumeric
+// characters (spaces, hyphens, dots, underscores, colons, repeated separators,
+// ...): a card number typed with any separator is still a card number. Letters
+// end a run.
+var panRun = regexp.MustCompile(`[0-9](?:[^0-9A-Za-z]*[0-9])*`)
 
 // ContainsPAN reports whether s contains a Luhn-valid string of 12-19 digits
 // (ADR 0111 2.9, L-8): the only way to be sure a primary account number never
 // reaches storage is to refuse anything that could be one. The unit is the
-// MAXIMAL digit run (separators allowed between digits); a longer run is not
+// MAXIMAL digit run (any non-alphanumeric separators allowed between digits); a longer run is not
 // split into windows (that would refuse most IBANs).
+var nonDigit = regexp.MustCompile(`[^0-9]`)
+
 func ContainsPAN(s string) bool {
 	for _, run := range panRun.FindAllString(s, -1) {
-		d := strings.NewReplacer(" ", "", "-", "").Replace(run)
+		d := nonDigit.ReplaceAllString(run, "")
 		if len(d) >= 12 && len(d) <= 19 && luhnValid(d) {
 			return true
 		}

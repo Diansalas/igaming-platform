@@ -347,3 +347,104 @@ func TestBinding_InstrumentIDImmutableEvenForSameFingerprint(t *testing.T) {
 		t.Fatal("re-pointing a request at another instrument with the same fingerprint must be refused")
 	}
 }
+
+// M-1 (security review): the deferred snapshot constraint FAILS CLOSED when the
+// withdrawal cannot be read at commit (the tenant setting cleared before commit).
+func TestSnapshotConstraint_FailsClosedWhenWithdrawalUnreadable(t *testing.T) {
+	b := newBindWorld(t)
+	id, fp := b.inst.ID, b.inst.Fingerprint
+	boundWd, err := b.wd(&id, &fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyWd, err := b.wd(nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, wid := range map[string]uuid.UUID{"bound withdrawal": boundWd, "legacy NULL-binding withdrawal": legacyWd} {
+		ctx := context.Background()
+		tx, err := b.rt.Raw().Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tx.Exec(ctx, `SELECT set_config('app.tenant_id', $1, true)`, b.tenantID.String()); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := b.insertAttempt(ctx, tx, wid, 100); err != nil {
+			_ = tx.Rollback(ctx)
+			t.Fatalf("%s: attempt insert: %v", name, err)
+		}
+		if _, err := tx.Exec(ctx, `SELECT set_config('app.tenant_id', '', true)`); err != nil {
+			t.Fatal(err)
+		}
+		requireCode(t, tx.Commit(ctx), "PI055", name+": commit with an unreadable withdrawal")
+	}
+	if n := b.count("payment_attempts", "withdrawal_request_id = ANY($1)", []uuid.UUID{boundWd, legacyWd}); n != 0 {
+		t.Fatalf("a failed commit left %d attempt row(s)", n)
+	}
+}
+
+// L-6: the database snapshot insert re-checks that the instrument is verified,
+// the verification is the in-force one, unexpired and unblocked.
+func TestSnapshot_DBRechecksInstrumentStillUsable(t *testing.T) {
+	b := newBindWorld(t)
+	g := b.gateRes()
+	id, fp := b.inst.ID, b.inst.Fingerprint
+	wid, err := b.wd(&id, &fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The instrument is revoked by a provider AFTER the gate passed (stale gate result).
+	if err := b.rtTx(func(ctx context.Context, tx pgx.Tx) error {
+		_, err := b.svc.ApplyProviderBlock(ctx, tx, b.tenantID, id, MockVerifierID, EventRevoke, "provider_revoked")
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	err = b.rtTx(func(ctx context.Context, tx pgx.Tx) error {
+		a, err := b.insertAttempt(ctx, tx, wid, 100)
+		if err != nil {
+			return err
+		}
+		_, err = b.svc.WriteSnapshot(ctx, tx, g, SnapshotParams{AttemptID: a, WithdrawalRequestID: wid, Amount: "100", AssetCode: "EUR"})
+		return err
+	})
+	requireCode(t, err, "PI054", "snapshot of a revoked instrument")
+}
+
+func TestSnapshot_DBRechecksVerificationNotExpired(t *testing.T) {
+	w := newWorld(t)
+	p := w.newPlayer(w.brandID)
+	wl := w.seedWallet(p, "EUR")
+	short := NewMockVerifier()
+	short.Now = func() time.Time { return time.Now().Add(-90*24*time.Hour + 1500*time.Millisecond) }
+	svc, _ := NewService(w.keys, DefaultKinds(), short)
+	inst := w.mustRegister(p, ibanA)
+	if _, err := svc.Verify(context.Background(), w.rt, w.tenantID, inst.ID); err != nil {
+		t.Fatal(err)
+	}
+	inst = w.load(inst.ID)
+	b := &bindWorld{world: w, p: p, wallet: wl, inst: inst}
+	var g GateResult
+	if err := w.rtTx(func(ctx context.Context, tx pgx.Tx) error {
+		var err error
+		g, err = svc.EvaluateGate(ctx, tx, GateParams{TenantID: w.tenantID, BrandID: p.BrandID, PlayerAccountID: p.ID, PersonID: p.PersonID, InstrumentID: inst.ID, AssetCode: "EUR", Lock: true})
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	wid, err := b.wd(&inst.ID, &inst.Fingerprint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(1700 * time.Millisecond) // the verification has now expired; the state column still says verified
+	err = w.rtTx(func(ctx context.Context, tx pgx.Tx) error {
+		a, err := b.insertAttempt(ctx, tx, wid, 100)
+		if err != nil {
+			return err
+		}
+		_, err = svc.WriteSnapshot(ctx, tx, g, SnapshotParams{AttemptID: a, WithdrawalRequestID: wid, Amount: "100", AssetCode: "EUR"})
+		return err
+	})
+	requireCode(t, err, "PI054", "snapshot of an instrument whose verification expired")
+}

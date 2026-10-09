@@ -10,6 +10,7 @@ import (
 func TestContainsPAN(t *testing.T) {
 	yes := []string{
 		"4111111111111111", "4111 1111 1111 1111", "4111-1111-1111-1111", "card 4012888888881881 end",
+		"4111.1111.1111.1111", "4111_1111_1111_1111", "4111:1111:1111:1111", "4111--1111--1111--1111", "4111 - 1111 / 1111 | 1111", "4111,1111,1111,1111", "4111\u00a01111\u00a01111\u00a01111", "4111\t1111\n1111\r1111", "pan=4111.1111.1111.1111;",
 		"5555555555554444", "378282246310005" /* 15 digits amex */, "6011111111111117", "3530111333300000",
 		"4222222222222" /* 13 */, "4000056655665556",
 		"100000000008" /* 12: the lower bound */, "6000000000000000004", /* 19: the upper bound */
@@ -20,6 +21,7 @@ func TestContainsPAN(t *testing.T) {
 		}
 	}
 	no := []string{
+		"4111a1111a1111a1111" /* letters end a run */, "4111.1111.1111.1112", /* Luhn-invalid with separators */
 		"", "1234", "4111111111111112" /* Luhn-invalid */, "12345678901", /* 11 digits */
 		"DE89370400440532013000" /* IBAN: its digit run is 20 long */, "tok_abcdef", "20250101", "a1b2c3",
 		"41111111111111111111", /* 20 digits */
@@ -46,6 +48,21 @@ func TestPANRefusedInAnyFieldOfAnyKind(t *testing.T) {
 		_, err := spec.Normalize(json.RawMessage(detail))
 		if !errors.Is(err, ErrPANRefused) {
 			t.Errorf("%s: want ErrPANRefused, got %v", kind, err)
+		}
+	}
+	// Every separator form, in a value of every kind.
+	for _, sep := range []string{".", "_", ":", "--", " - ", "/"} {
+		pan := "4111" + sep + "1111" + sep + "1111" + sep + "1111"
+		for kind, detail := range map[string]string{
+			KindBankAccount:    `{"country":"DE","account_number":"ABC1234","routing_code":"` + pan + `"}`,
+			KindCardToken:      `{"token":"tok_1","network":"visa","last4":"1111","psp_card_fingerprint":"` + pan + `"}`,
+			KindEwalletAccount: `{"provider":"payz","account_id":"` + pan + `"}`,
+			KindSyntheticTest:  `{"label":"x","note":"` + pan + `"}`,
+		} {
+			spec, _ := reg.Spec(kind)
+			if _, err := spec.Normalize(json.RawMessage(detail)); !errors.Is(err, ErrPANRefused) {
+				t.Errorf("%s with separator %q: want ErrPANRefused, got %v", kind, sep, err)
+			}
 		}
 	}
 	// A bare JSON number and a PAN inside a key are refused too.

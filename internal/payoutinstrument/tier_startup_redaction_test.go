@@ -98,8 +98,10 @@ func TestStartupGateMatrix(t *testing.T) {
 		{"production, keys", "production", keys, Registrations{Verifiers: []PayoutInstrumentVerifier{mock}}, false},
 		{"development, no keys, synthetic only", "development", nil, Registrations{PaymentAdapters: []any{syntheticAdapter{}}, Verifiers: []PayoutInstrumentVerifier{mock}}, false},
 		{"development, no keys, real payout adapter", "development", nil, Registrations{PaymentAdapters: []any{realAdapter{}}}, true},
+		{"L-8: real payout adapter refused even WITH keys (B13-B not landed)", "staging", keys, Registrations{PaymentAdapters: []any{realAdapter{}}}, true},
+		{"L-8: real payout adapter refused in production with keys", "production", keys, Registrations{PaymentAdapters: []any{syntheticAdapter{}, realAdapter{}}}, true},
 		{"staging, no keys, real verifier", "staging", nil, Registrations{Verifiers: []PayoutInstrumentVerifier{realVerifier{src: SourcePSPAccount}}}, true},
-		{"development, keys, real adapter", "development", keys, Registrations{PaymentAdapters: []any{realAdapter{}}}, false},
+		{"development, keys, real VERIFIER only", "development", keys, Registrations{Verifiers: []PayoutInstrumentVerifier{realVerifier{src: SourcePSPAccount}}}, false},
 		{"staging, no keys, nothing registered", "staging", nil, Registrations{}, false},
 		{"nil adapters ignored", "development", nil, Registrations{PaymentAdapters: []any{nil}}, false},
 	}
