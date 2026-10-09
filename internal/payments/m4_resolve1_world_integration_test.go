@@ -50,7 +50,13 @@ func m4NewKeys(t *testing.T) *payoutinstrument.Keys {
 
 func newM4World(t *testing.T) *m4World {
 	t.Helper()
-	w := newK3World(t, k3Opts{base: 1})
+	return newM4WorldBase(t, 1)
+}
+
+// newM4WorldBase is newM4World with another platform baseline requirement.
+func newM4WorldBase(t *testing.T, base int) *m4World {
+	t.Helper()
+	w := newK3World(t, k3Opts{base: base})
 	keys := m4NewKeys(t)
 	w.svc.WithImportSealKeys(keys)
 	m := &m4World{k3World: w, keys: keys}

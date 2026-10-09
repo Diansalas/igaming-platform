@@ -40,10 +40,24 @@ func TestM4Recon_PaidCompletion_AttributedInLedgerJoin(t *testing.T) {
 	}
 	m.requireNone(ms, reconciliation.MismatchKindPayCapturedUnposted, p.fresh.ID, "own completion keyed by R clears")
 	m.requireNone(ms, reconciliation.MismatchKindPayDeclaredPaidUnconfirmed, p.fresh.ID, "no contradiction")
+	m4RequireNoMismatchFor(t, ms, p.fresh.ID, r)
 	// And on a later run with no line at all (standing): still attributed, still clean for this attempt.
 	ms = m.stmtRun(m.source(false))
 	if got := mismatchesOf(ms, reconciliation.MismatchKindPayMissingPlatformRecord, "provider_tx_id="+r); len(got) != 0 {
 		t.Fatalf("standing run raised the attributed completion:\n%s", render(ms))
+	}
+	m4RequireNoMismatchFor(t, ms, p.fresh.ID, r)
+}
+
+// m4RequireNoMismatchFor (review amendment F-5/LF): NO mismatch of ANY kind
+// names the attempt or its reference R - not only the kinds probed above.
+func m4RequireNoMismatchFor(t *testing.T, ms []reconciliation.Mismatch, attempt uuid.UUID, r string) {
+	t.Helper()
+	for _, x := range ms {
+		if strings.Contains(x.ReconciliationKey, "attempt="+attempt.String()) || strings.Contains(x.ReconciliationKey, r) ||
+			strings.Contains(x.ActualValue, attempt.String()) {
+			t.Fatalf("a mismatch names the M4-paid attempt or R:\n%s", render(ms))
+		}
 	}
 }
 
@@ -107,8 +121,11 @@ func TestM4Recon_DestinationMismatchNotPaid_LineOnBoundReferenceRaises(t *testin
 	})
 	a = m.attempt(a.ID)
 	x := *a.ProviderReference
+	// The declaring import's payout lines carry the merchant reference (review
+	// amendment H-1: a NULL-merchant payout line in a declaring import makes the
+	// verdict insufficient).
 	m.ingest(m4Imp{start: a.CreatedAt.Add(-time.Minute), end: a.LastSentAt.Add(25 * time.Hour)},
-		m.line(x, "", statement.PaymentStatusDeclined, 640, time.Now()))
+		m.line(x, a.MerchantReference, statement.PaymentStatusDeclined, 640, time.Now()))
 	ev := m.mustEvidence(a.ID, M4VerdictNotPaid)
 	r, err := m.request(m.acting, m.m4In(a.ID, ResolutionM4EvidenceNotPaid, ev.LineID))
 	k3RequireNoErr(t, err, "request")
