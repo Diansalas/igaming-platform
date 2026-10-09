@@ -110,3 +110,13 @@ EQUIVALENT / ACCEPTED SURVIVOR:
 
 NOTE (not part of the mutation loop): the migrate-down function-body restoration is covered by the whole-schema snapshot test
 (TestMigration0123_UpDownUp_WholeSchema compares function body hashes); it costs ~30 s per run and is excluded from the per-mutant test selection.
+
+ADDENDUM - security-review fixes (run 7/8, same method; tree clean and restored after each, control rc=0 for all four suites):
+  G53  PAN separators limited to one space or hyphen (M-2)                       KILLED  TestContainsPAN
+  G54  L-8: real payout adapter allowed before B13-B                              KILLED  TestStartupGateMatrix
+  S27  M-1: deferred snapshot constraint fails open on an unreadable withdrawal   KILLED  TestSnapshotConstraint_FailsClosedWhenWithdrawalUnreadable
+  S28  L-6: snapshot insert does not require a verified instrument               SURVIVED in run 7 (state and revoke-event checks were redundant for a revoked instrument);
+                                                                                  KILLED after the test was extended with a state-only tamper (TestSnapshot_DBRechecksInstrumentStillUsable)
+  S29  L-6: snapshot insert does not re-check expiry                              KILLED  TestSnapshot_DBRechecksVerificationNotExpired
+  S30  L-6: snapshot insert ignores revoke events                                 SURVIVED in run 7 (same redundancy); KILLED after an event-only tamper was added
+Totals including the addendum: 84 counted, 83 killed, 1 survived (S16, equivalent, above).

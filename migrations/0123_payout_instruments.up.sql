@@ -19,9 +19,9 @@
 -- insert. This migration therefore VALIDATES a binding whenever one is supplied
 -- (instrument exists, same tenant/brand/player, verified with an in-force
 -- latest verification, no revoke, no later suspend, asset listed, fingerprint
--- equal) and tolerates NULL/NULL. B13-B must close the NULL arm (a follow-up
--- migration or a number agreed by the architect) in the same change that makes
--- the request path always bind. A NULL binding is dispatchable only to
+-- equal) and tolerates NULL/NULL. B13-B ships its OWN migration that replaces
+-- withdrawal_requests_payout_binding_guard() so it refuses NULL/NULL on INSERT, in
+-- the same change that makes the request path always bind (0123 is not amended). A NULL binding is dispatchable only to
 -- Synthetic adapters (A-11; tiering predicate in Go).
 --
 -- KEYS NEVER IN THE DATABASE. The detail ciphertext, the seals and the

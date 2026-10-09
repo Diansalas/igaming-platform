@@ -863,16 +863,16 @@ precondition); the rest is deferred as HD-R15-9.
 
 ---
 
-## 12. B13-A implementation notes (appendix, added with the B13-A code; the design above is not rewritten)
+## 15. B13-A implementation notes (appendix, added with the B13-A code; the design above is not rewritten)
 
 Scope delivered: migration `0123_payout_instruments` (the whole B13 **schema**, because section 7.2 keeps B13 as one
 migration and section 7.1 says B13-B "uses 0123") and the Go package `internal/payoutinstrument` with its routes. The
 Go integration of the binding into the withdrawal / payments paths is **B13-B and is NOT part of this change**.
 Where the design left a sub-question open, the safest existing reading was taken and is recorded as `B13A-n`. No
 policy question that changes an owner decision (ADR 0095 section 44, decisions 1-8) was needed; the three questions
-the human or architect should see are in 12.3.
+the human or architect should see are in 15.3.
 
-### 12.1 Deliverable status
+### 15.1 Deliverable status
 
 | Deliverable | Status |
 |---|---|
@@ -885,10 +885,10 @@ the human or architect should see are in 12.3.
 | Any real PSP / KYC-vendor / custodian instrument verifier | `NOT IMPLEMENTED` (`PROVIDER DEPENDENT`) |
 | Binding at request creation, T1p destination gate and snapshot insert, phase B / T2 / T12 re-checks, `destination_mismatch` park, echo cells, `WithdrawRequest.Destination` | `NOT IMPLEMENTED` (B13-B) |
 | Expiry sweep scheduler, re-fingerprint operator command, provider-callback wiring of `ApplyProviderBlock` | `NOT IMPLEMENTED` (the methods exist and are tested; see the runbook `docs/runbooks/payout-instrument-keys.md`) |
-| Compliance alert on a fingerprint conflict (M-7) | `PARTIALLY IMPLEMENTED`: audit row `payout_instrument.registration_conflict` only; an alert needs a new `alerting` Kind (a migration), see 12.3 |
+| Compliance alert on a fingerprint conflict (M-7) | `PARTIALLY IMPLEMENTED`: audit row `payout_instrument.registration_conflict` only; an alert needs a new `alerting` Kind (a migration), see 15.3 |
 | Acting-family read of snapshots under a VALID acting session | `PARTIALLY IMPLEMENTED`: the policy is pinned (SELECT only, `financial_acting_session_valid()`, snapshots only) and an invalid acting session reads nothing; a positive test needs a K1 grant world and belongs with the first consumer (RESOLVE-1) |
 
-### 12.2 Ambiguities and the reading taken
+### 15.2 Ambiguities and the reading taken
 
 - **B13A-1 (instrument id).** "`id` DB default; a client value is refused": the id is allocated by the database
   (`SELECT gen_random_uuid()` in the registration transaction) because the AEAD AAD and the instrument seal bind it before
@@ -898,9 +898,9 @@ the human or architect should see are in 12.3.
   NOT NULL". Until B13-B wires the request path no code supplies a binding, so enforcing it now would break every existing
   withdrawal insert. 0123 therefore **validates a binding whenever one is supplied** (same tenant/brand/player, verified,
   in-force latest verification, no revoke, no later suspend, asset listed, fingerprint equal) and **tolerates NULL/NULL**; the
-  CHECK forces both-or-neither and the immutability trigger forbids adding a binding later. **B13-B must close the NULL arm in
-  the same change that makes the request path always bind** (a follow-up migration whose number the architect assigns, or an
-  amendment of 0123 before it merges). A NULL binding stays dispatchable only to Synthetic adapters (A-11; tiering predicate in
+  CHECK forces both-or-neither and the immutability trigger forbids adding a binding later. **Decision (coordinator, after the security review): 0123 merges as written and is
+  not amended afterwards; B13-B ships its OWN migration that replaces `withdrawal_requests_payout_binding_guard()` so it refuses
+  NULL/NULL on INSERT, in the same change that makes the request path always bind.** A NULL binding stays dispatchable only to Synthetic adapters (A-11; tiering predicate in
   Go). This is the single place where B13-A is weaker than the final design; it is deliberate and pinned by
   `TestBinding_InsertGuard`.
 - **B13A-3 (rails).** Seed `allowed_rails`: `bank_account` {bank_transfer, sepa, faster_payments, pix, spei}; `card_token`
@@ -932,7 +932,7 @@ the human or architect should see are in 12.3.
 - **B13A-8 (blocked destinations).** Because there is no unblock path, `Register` refuses (generic 409, audit reason
   `destination_blocked`) a destination for which **any staff or provider blocking event exists** in the tenant; otherwise a
   player could revoke a compliance-suspended instrument and register the same destination again. A player's own revoke does
-  not block. Whether and how a block is ever lifted is a policy question (12.3).
+  not block. Whether and how a block is ever lifted is a policy question (15.3).
 - **B13A-9 (KYC verified).** "The Person's KYC status is verified" = the **latest** `kyc_verifications` row of the player
   account (tenant and brand) is `approved` and unexpired; a newer non-approved row, including an orphan, denies
   (fail-closed). Cross-tenant Person verification is invisible under RLS and is not consulted.
@@ -967,18 +967,51 @@ the human or architect should see are in 12.3.
   PAY-RECEIPT-ANOMALY-APPLIED-1, another workstream); `migrate up` is unaffected. Merge strictly in number order; after 0122
   merges the report is clean.
 
-### 12.3 Items for the architect / human (none changes decisions 1-8; each fails closed today)
+### 15.3 Items for the architect / human (none changes decisions 1-8; each fails closed today)
 
-1. **Closing the NULL-binding arm (B13A-2)** needs a migration number or an amendment of 0123 before it merges. B13-B is
-   blocked on this choice, not on code.
+1. **Closing the NULL-binding arm (B13A-2)**: decided - B13-B's own migration replaces the guard (see B13A-2). B13-B also
+   carries: a missing snapshot on a bound withdrawal is `destination_integrity_failure`; the tier check runs at T1p, phase B and
+   T2/T12; a repo-wide check that no Synthetic marker is inherited through embedding (L-7); and removal of the L-8 startup clause.
 2. **Lifting a staff/provider block (B13A-8).** Owner decision 7 forbids a staff unsuspend route; the consequence is that a
    suspended or provider-revoked destination is unusable for that tenant **permanently** until a governed (four-eyes,
    proof-bound) writer exists. HD-R15-5 covers the stranded-withdrawal side; the registration side is new. Fails closed.
 3. **Compliance alert on a fingerprint conflict (M-7).** `alerting` Kinds are database-checked (migration 0110); a new Kind
    needs its own migration and attribute trigger. Until then the conflict is an audit row only.
 
-### 12.4 Evidence
+### 15.4 Evidence
 
 Tests (runtime role, scratch database): `internal/payoutinstrument` (unit + integration), `internal/httpserver`
 (`TestPayoutInstrumentRoutes_*`), `internal/auth`, `internal/config`, `cmd/platform-api`. Mutation-kill evidence:
 `docs/plans/prh2-hardening-round/prh2-r16-b13a-mutation-kill.txt`.
+
+### 15.5 Security review of B13-A (APPROVE WITH CONDITIONS): fixes and launch flags
+
+Fixed in B13-A (tip after this change):
+- **M-1** the deferred `payment_attempts` snapshot constraint returned NULL when the withdrawal row was not found (reproduced by
+  clearing `app.tenant_id` before commit): it now raises PI055 when the withdrawal cannot be read; only an explicit NULL binding
+  returns. Regression: `TestSnapshotConstraint_FailsClosedWhenWithdrawalUnreadable`.
+- **M-2** the PAN detector treated only one space or hyphen as a separator. A run of digits joined by ANY non-alphanumeric
+  characters (dots, underscores, colons, repeated separators, NBSP, tabs ...) is now one candidate; letters still end a run.
+- **L-8 (chosen: ENFORCED, not just flagged)** `VerifyStartup` refuses to start, in every environment, when any non-Synthetic payout
+  adapter is registered, even with keys, until B13-B lands (it would dispatch NULL-binding withdrawals). B13-B removes the clause.
+- **L-6 (done)** the database snapshot insert also requires the instrument `verified`, the snapshot's verification to be the
+  in-force one, unexpired, and no revoke / later suspend event (PI054). Defence in depth; the Go gate stays primary.
+
+**Launch-blocking for non-MOCK instruments / payouts** (recorded, not built):
+- **M-3** A fingerprint-ownership claim is permanent (A-2: owner rows are never deleted) and there is no release path. A Person who
+  registers a destination that is not theirs, or one they later lose, blocks every other Person in the tenant from it
+  forever (a denial-of-registration vector) and nothing can correct a wrong claim. A governed (four-eyes, proof-bound) release or
+  re-assignment writer is required before any real customer data.
+- **L-1** For `card_token` the `psp_card_fingerprint`, `last4` and `network` are CLIENT-supplied in the registration body. They feed the
+  fingerprint input (L-8 of the ADR) and the mask. Before a real card is accepted these must come from the PSP's hosted-fields
+  response server-side, never from the browser body.
+
+**Recorded residuals / known behaviour:**
+- **L-2** One destination can yield several fingerprints (different normalisations or kinds, e.g. an IBAN as `bank_account` vs the
+  same account entered with `country`+`account_number`; a card with and without a PSP fingerprint). Conflict detection is per
+  normalised input, so equivalent destinations in different forms are not detected as the same.
+- **L-5** The registration response (`200` existing vs `201` new, plus the idempotent replay) is an existence oracle for the
+  caller's OWN destinations only; the cross-Person conflict response is generic. Accepted residual.
+- **L-7** The Synthetic marker (`SyntheticComponent`) is inherited through struct embedding: a real type embedding a Synthetic type
+  silently becomes Synthetic and would satisfy the tiering predicate. B13-B adds a repo-wide embedding check; until then the
+  predicate must not be relied on for a type that embeds a mock.
