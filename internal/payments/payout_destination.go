@@ -300,9 +300,10 @@ func resolvePhaseBDestination(ctx context.Context, pool providercred.TenantTxRun
 // ---- evidence (phase C / poll / callback) ------------------------------------
 
 // parkPayoutDestination parks a non-terminal payout attempt as `disputed` with a closed
-// destination reason: the CAS, then the audit row, then the B12 P1 as the LAST statement. No
-// Complete, no release, no ledger posting: the hold is kept.
-func parkPayoutDestination(ctx context.Context, tx pgx.Tx, attempt PaymentAttempt, requestID uuid.UUID, evidence EvidenceKind, reason string, meta map[string]any, reference string) error {
+// destination reason: the CAS, then the durable park-evidence row (what the provider reported,
+// GOV-R32), then the audit row, then the B12 P1 as the LAST statement. No Complete, no release,
+// no ledger posting: the hold is kept.
+func parkPayoutDestination(ctx context.Context, tx pgx.Tx, attempt PaymentAttempt, requestID uuid.UUID, evidence EvidenceKind, class ErrorClass, reason string, meta map[string]any, reference string) error {
 	// LF H-2: bind the provider's (validated, unconflicted) reference BEFORE the park. A foreign-held reference is
 	// parked by the existing B10 guard as provider_reference_conflict instead (hold kept, its own audit + P1).
 	if parked, err := bindPayoutReferenceForPark(ctx, tx, attempt, requestID, reference, evidence); err != nil || parked {
@@ -310,6 +311,11 @@ func parkPayoutDestination(ctx context.Context, tx pgx.Tx, attempt PaymentAttemp
 	}
 	if err := ApplyDisputeFromNonTerminal(ctx, tx, attempt.ID, evidence, reason); err != nil {
 		return payoutHandleContradiction(ctx, tx, attempt, evidence, ErrorClassSucceeded, err)
+	}
+	// GOV-R32 (ledger-finance HIGH): the provider's reported outcome is recorded durably in the park's own
+	// transaction, so a success-triggered park can never later be resolved "not paid" (payout_m4_evidence reads it).
+	if err := recordDestinationParkEvidence(ctx, tx, attempt.TenantID, attempt.ID, reason, destinationParkOutcome(class), evidence); err != nil {
+		return err
 	}
 	m := map[string]any{"withdrawal_request_id": requestID.String(), "reason": reason, "provider_id": providerIDOrEmpty(attempt)}
 	for k, v := range meta {
@@ -389,7 +395,7 @@ func payoutDestinationEvidence(ctx context.Context, tx pgx.Tx, env payoutEnv, at
 	}
 	if env.destinations == nil {
 		res.Stop = true
-		return res, parkPayoutDestination(ctx, tx, fresh, requestID, evidence, TerminalReasonDestinationIntegrityFailure,
+		return res, parkPayoutDestination(ctx, tx, fresh, requestID, evidence, class, TerminalReasonDestinationIntegrityFailure,
 			map[string]any{"gate_reason": payoutinstrument.ReasonNoGate}, reference)
 	}
 	snap, err := env.destinations.CheckSnapshot(ctx, tx, snapshotExpectFor(wr, fresh))
@@ -399,14 +405,14 @@ func payoutDestinationEvidence(ctx context.Context, tx pgx.Tx, env payoutEnv, at
 			return res, err
 		}
 		res.Stop = true
-		return res, parkPayoutDestination(ctx, tx, fresh, requestID, evidence, TerminalReasonDestinationIntegrityFailure,
+		return res, parkPayoutDestination(ctx, tx, fresh, requestID, evidence, class, TerminalReasonDestinationIntegrityFailure,
 			map[string]any{"gate_reason": g.Reason}, reference)
 	}
 	switch payoutinstrument.CompareEcho(snap, echo) {
 	case payoutinstrument.EchoMismatch:
 		res.Stop = true
 		meta := map[string]any{"snapshot_fingerprint_prefix": fpPrefix(snap.Fingerprint), "echo_kid": echo.Kid, "echo_fingerprint_prefix": fpPrefix(echo.Fingerprint)}
-		return res, parkPayoutDestination(ctx, tx, fresh, requestID, evidence, TerminalReasonDestinationMismatch, meta, reference)
+		return res, parkPayoutDestination(ctx, tx, fresh, requestID, evidence, class, TerminalReasonDestinationMismatch, meta, reference)
 	case payoutinstrument.EchoAbsent:
 		if class == ErrorClassSucceeded && env.echoDeclared(fresh.ProviderID) {
 			res.AmbiguousSuccess = true
@@ -505,4 +511,52 @@ func bindPayoutReferenceForPark(ctx context.Context, tx pgx.Tx, attempt PaymentA
 		return false, payoutHandleContradiction(ctx, tx, attempt, evidence, ErrorClassPending, err)
 	}
 	return false, withdrawal.AttachProviderReference(ctx, tx, requestID, reference)
+}
+
+// ---- durable park evidence (GOV-R32, migration 0127; ADR 0111 23.6) ---------------------------
+
+// destinationParkOutcome is the closed outcome vocabulary of payout_destination_park_evidence.
+func destinationParkOutcome(class ErrorClass) string {
+	switch class {
+	case ErrorClassSucceeded:
+		return "succeeded"
+	case ErrorClassDefiniteDecline:
+		return "declined"
+	case ErrorClassPending:
+		return "pending"
+	}
+	return "ambiguous"
+}
+
+// isDestinationParkReason reports the two destination park reasons.
+func isDestinationParkReason(r *string) bool {
+	return r != nil && (*r == TerminalReasonDestinationMismatch || *r == TerminalReasonDestinationIntegrityFailure)
+}
+
+// recordDestinationParkEvidence appends one row to payout_destination_park_evidence (system shape only,
+// append-only; the database guard requires the attempt to be a payout parked on that destination reason).
+// A repeat of the same (attempt, outcome, source) adds nothing.
+func recordDestinationParkEvidence(ctx context.Context, tx pgx.Tx, tenantID, attemptID uuid.UUID, reason, outcome string, evidence EvidenceKind) error {
+	if _, err := tx.Exec(ctx, `INSERT INTO payout_destination_park_evidence (tenant_id, attempt_id, terminal_reason, reported_outcome, evidence_kind)
+		VALUES ($1, $2, $3, $4, $5) ON CONFLICT (tenant_id, attempt_id, reported_outcome, evidence_kind) DO NOTHING`,
+		tenantID, attemptID, reason, outcome, string(evidence)); err != nil {
+		return fmt.Errorf("payments: record destination park evidence: %w", err)
+	}
+	return nil
+}
+
+// recordSuccessOnDestinationPark records a provider SUCCESS that reaches an attempt ALREADY parked on a
+// destination reason (a callback, a poll, or a late sync/poll result that lost the CAS to the park). It
+// re-reads the attempt in the caller's transaction (the caller holds the withdrawal lock) and is a no-op
+// for anything else. It never changes state, posts, releases or raises: it only makes the success durable
+// so that M4 not-paid is refused (payout_m4_evidence, migration 0127).
+func recordSuccessOnDestinationPark(ctx context.Context, tx pgx.Tx, attemptID uuid.UUID, evidence EvidenceKind) error {
+	a, err := GetAttemptByID(ctx, tx, attemptID)
+	if err != nil {
+		return fmt.Errorf("payments: destination park success: re-read attempt: %w", err)
+	}
+	if a.Operation != AttemptOperationPayout || a.State != AttemptDisputed || !isDestinationParkReason(a.TerminalReason) {
+		return nil
+	}
+	return recordDestinationParkEvidence(ctx, tx, a.TenantID, a.ID, *a.TerminalReason, "succeeded", evidence)
 }

@@ -948,6 +948,12 @@ func applyPayoutLateEvidence(ctx context.Context, tx pgx.Tx, attempt PaymentAtte
 		// replay (an already-parked dispute: nothing further, not itself a P1), EXCEPT after an executed M4: a success after
 		// m4_evidence_not_paid, or a decline after m4_evidence_paid, is the post-resolution signal (audit, then the raise
 		// as the LAST statement; no state change). The cell is a no-op without an executed M4 of the matching kind.
+		// GOV-R32: a success that lost the CAS to a destination park is recorded durably first (no state change).
+		if observed == OutcomeSucceeded {
+			if err := recordSuccessOnDestinationPark(ctx, tx, attempt.ID, evidence); err != nil {
+				return err
+			}
+		}
 		return payoutPostM4Cell(ctx, tx, attempt, observed, evidence, nil, reference)
 	case AttemptSucceeded, AttemptRejected:
 		// Already resolved (a benign replay) - nothing further to do; not itself a P1.
@@ -1311,6 +1317,10 @@ func applyPayoutStatusEvidenceInTx(actx context.Context, tx pgx.Tx, env payoutEn
 			// (no executed M4, pending, ambiguous) stays the no-op it was.
 			switch gr.Class {
 			case ErrorClassSucceeded:
+				// GOV-R32: a success polled on a destination park is recorded durably first (no state change).
+				if err := recordSuccessOnDestinationPark(actx, tx, attempt.ID, evidence); err != nil {
+					return err
+				}
 				return payoutPostM4Cell(actx, tx, attempt, OutcomeSucceeded, evidence, nil, res.ProviderReference)
 			case ErrorClassDefiniteDecline:
 				return payoutPostM4Cell(actx, tx, attempt, OutcomeDeclined, evidence, nil, res.ProviderReference)

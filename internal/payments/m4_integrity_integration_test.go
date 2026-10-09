@@ -537,14 +537,37 @@ func TestR32_IntegrityPark_NoAutomaticExit_ProviderCannotChangeDestinationOrRele
 	if c := m.prov.calls[k3CallWithdraw].Load(); c != p.base.withdrawCalls {
 		t.Fatalf("a provider Withdraw call was made: %d -> %d", p.base.withdrawCalls, c)
 	}
-	// The governed exit is unaffected by the noise.
-	ev := m.r32Decline(p, "r32-D-"+uuid.NewString()[:12])
-	m.execute(p, ResolutionM4EvidenceNotPaid, ev)
-	if m.wd(p.wr.ID).State != withdrawal.StateFailed || m.r32FailedFor(p.wr.ID) != 1 {
+	// GOV-R32 review (LF HIGH): the provider SUCCESSES above were recorded durably on the park, so
+	// even a sealed declaring decline can no longer release the hold: not-paid is contradictory and
+	// the park remains (the governed exit is refused, never forced).
+	if ev := m.r32ParkEvidence(p.fresh.ID); !ev["succeeded/query_status"] || !ev["succeeded/callback"] {
+		t.Fatalf("the reported successes were not recorded: %v", ev)
+	}
+	m.declineOn(p, "r32-D-"+uuid.NewString()[:12])
+	m.mustEvidence(p.fresh.ID, M4VerdictContradictory)
+	_, err := m.request(m.acting, m.m4In(p.fresh.ID, ResolutionM4EvidenceNotPaid, &m4AnyLine))
+	k3RequireCode(t, err, "MR062")
+	m.r32Held(p, snap, "not-paid after recorded provider successes")
+
+	// A park that only ever saw non-success noise keeps its governed exit.
+	q := m.r32Park(1011, r32Missing, false)
+	qsnap := m.r32Snapshot(q.fresh.ID)
+	m.prov.setStatus(q.ref, StatusResult{Outcome: OutcomeDeclined, ProviderReference: q.ref, Amount: 1011, AssetCode: "EUR", DeclineReason: "insufficient_funds"})
+	for i := 0; i < 2; i++ {
+		_ = m.b11Sweeper().RunOnce(context.Background(), []uuid.UUID{m.f.tenantID})
+		b11OKOrConflict(t, PollPayoutStatus(context.Background(), m.pool, m.orch, MockCredentialResolver{}, m.f.tenantID, m.attempt(q.fresh.ID), time.Now().Add(time.Minute), nil), "decline poll")
+		if _, err := m.pm4Callback(q.fresh, OutcomeDeclined, q.ref, 1011, nil); err != nil && !errors.Is(err, ErrAttemptStateConflict) {
+			t.Fatalf("decline callback: %v", err)
+		}
+		m.r32Held(q, qsnap, "decline noise")
+	}
+	ev := m.r32Decline(q, "r32-D-"+uuid.NewString()[:12])
+	m.execute(q, ResolutionM4EvidenceNotPaid, ev)
+	if m.wd(q.wr.ID).State != withdrawal.StateFailed || m.r32FailedFor(q.wr.ID) != 1 {
 		t.Fatal("the governed exit did not execute exactly once")
 	}
-	if got := m.r32Snapshot(p.fresh.ID); got != snap {
-		t.Fatalf("the snapshot changed: %q -> %q", snap, got)
+	if got := m.r32Snapshot(q.fresh.ID); got != qsnap {
+		t.Fatalf("the snapshot changed: %q -> %q", qsnap, got)
 	}
 	m.assertInvariants()
 }
@@ -713,14 +736,39 @@ func TestR32_Migration0127UpDownUp_WholeSchema(t *testing.T) {
 		t.Fatalf("up: %v", err)
 	}
 	upSnap := schemaSnapshot15(t, pool)
-	changed := strings.Split(strings.TrimSpace(snapDiff(preSnap, upSnap)), "\n")
-	for _, l := range changed {
-		if !strings.Contains(l, "payment_m4_in_scope(") {
-			t.Errorf("0127 changed something other than payment_m4_in_scope: %s", l)
+	// Set differences computed here (snapDiff truncates its rendering).
+	setOf := func(snap string) map[string]bool {
+		out := map[string]bool{}
+		for _, l := range strings.Split(snap, "\n") {
+			out[l] = true
+		}
+		return out
+	}
+	pre, up := setOf(preSnap), setOf(upSnap)
+	var removed, added []string
+	for l := range pre {
+		if !up[l] {
+			removed = append(removed, l)
 		}
 	}
-	if len(changed) != 2 {
-		t.Errorf("want exactly the scope function to differ (one - and one +), got %d lines:\n%s", len(changed), snapDiff(preSnap, upSnap))
+	for l := range up {
+		if !pre[l] {
+			added = append(added, l)
+		}
+	}
+	for _, l := range added {
+		if !strings.Contains(l, "payment_m4_in_scope(") && !strings.Contains(l, "payout_m4_evidence(") &&
+			!strings.Contains(l, "payout_destination_park_evidence") {
+			t.Errorf("0127 added something outside its declared objects: %s", l)
+		}
+	}
+	if len(removed) != 2 {
+		t.Errorf("want exactly the two replaced function bodies removed, got %d: %v", len(removed), removed)
+	}
+	for _, l := range removed {
+		if !strings.HasPrefix(l, "function:payment_m4_in_scope(") && !strings.HasPrefix(l, "function:payout_m4_evidence(") {
+			t.Errorf("0127 removed/replaced something other than the two functions: %s", l)
+		}
 	}
 	if np, p := scope(); !np || p {
 		t.Fatalf("0127 up: not-paid=%v paid=%v", np, p)
@@ -734,19 +782,24 @@ func TestR32_Migration0127UpDownUp_WholeSchema(t *testing.T) {
 	if np, _ := scope(); np {
 		t.Fatal("0127 down: still admits the integrity reason")
 	}
-	// The restored body is the 0125 text byte for byte.
-	var src string
-	if err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
-		return tx.QueryRow(ctx, `SELECT prosrc FROM pg_proc WHERE proname = 'payment_m4_in_scope' AND pronamespace = 'public'::regnamespace`).Scan(&src)
-	}); err != nil {
-		t.Fatal(err)
-	}
+	// The restored bodies are the 0125 text byte for byte.
 	b, err := os.ReadFile(realMigrationsDir(t) + "/0125_payout_unbound_resolution_m4.up.sql")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(b), "CREATE FUNCTION payment_m4_in_scope(p_kind text, p_state text, p_reason text, p_ref text) RETURNS boolean AS $$"+src+"$$") {
-		t.Fatalf("0127 down did not restore the 0125 body byte for byte:\n%s", src)
+	for _, f := range []struct{ name, header string }{
+		{"payment_m4_in_scope", "CREATE FUNCTION payment_m4_in_scope(p_kind text, p_state text, p_reason text, p_ref text) RETURNS boolean AS $$"},
+		{"payout_m4_evidence", "CREATE FUNCTION payout_m4_evidence(p_tenant uuid, p_attempt uuid)\n    RETURNS TABLE (verdict text, line_id uuid, reference text, import_ids uuid[]) AS $$"},
+	} {
+		var src string
+		if err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+			return tx.QueryRow(ctx, `SELECT prosrc FROM pg_proc WHERE proname = $1 AND pronamespace = 'public'::regnamespace`, f.name).Scan(&src)
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(b), f.header+src+"$$") {
+			t.Fatalf("0127 down did not restore the 0125 body of %s byte for byte:\n%s", f.name, src)
+		}
 	}
 	if _, err := pool.MigrateUp(context.Background(), dir); err != nil {
 		t.Fatalf("re-up: %v", err)
@@ -807,17 +860,4 @@ func TestR32_Migration0127DownRefusals(t *testing.T) {
 			t.Fatalf("down with only an in-0125-scope M4 row: %v", err)
 		}
 	})
-}
-
-// Q-R32-2 (ADR 0111 23.5; OPEN, pre-existing, applies to destination_mismatch too): not-paid (ii)
-// attributes a declined line by the merchant reference OR the bound reference alone, so a declined
-// line on the bound reference X that names ANOTHER merchant reference still yields not_paid today
-// (the paid branch has the H-2 rule; not-paid has none). Pinned as CURRENT behaviour so a
-// refusal-direction tightening flips this test deliberately.
-func TestR32_QR322_DeclineOnBoundReferenceNamingAnotherMerchant_CurrentBehaviourPinned(t *testing.T) {
-	m := newM4World(t)
-	p := m.r32Park(1070, r32Missing, false)
-	m.ingest(m4Imp{start: p.fresh.CreatedAt.Add(-time.Minute), end: p.fresh.LastSentAt.Add(25 * time.Hour)},
-		m.line(p.ref, "someone-elses-merchant-ref", statement.PaymentStatusDeclined, 1070, time.Now()))
-	m.mustEvidence(p.fresh.ID, M4VerdictNotPaid)
 }

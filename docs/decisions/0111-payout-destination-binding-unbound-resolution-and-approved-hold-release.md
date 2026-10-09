@@ -2126,7 +2126,7 @@ statement about a real PSP, a custodian or a licence.
 
 ### 23.2 What migration 0127 implements (the smallest safe change), and what was verified
 
-**Change.** One function, `payment_m4_in_scope` (0125), is replaced (`CREATE OR REPLACE`, same OID, signature, `IMMUTABLE`, pinned
+**Change (as first written; the review round in 23.6 widens 0127 in the refusal direction).** One function, `payment_m4_in_scope` (0125), is replaced (`CREATE OR REPLACE`, same OID, signature, `IMMUTABLE`, pinned
 `search_path`): the not-paid-only arm admits `destination_integrity_failure` beside `destination_mismatch`, with or without a bound
 reference. The paid arm is unchanged (only the unbound reasons with no reference), so M4 paid on this reason stays `MR012`. Go:
 `M4ResolvableDispute` restates it (parity test over the reason x state x kind x reference matrix, admitted combinations 10 -> 12,
@@ -2251,14 +2251,71 @@ reconciliation `TestRR1_|TestRR4_|TestR1_|TestR2_|TestC3_|TestRes1_|TestPayoutRe
 
 ### 23.5 Open questions (nothing here is decided by this change)
 
-- **Q-R32-1 (owner/architect + ledger-finance).** Decision 1 makes RR-1 apply to a recovered `destination_mismatch` park. The same
+- **Q-R32-1 (CONFIRMED by ledger-finance as the conservative reading, 23.6).** Decision 1 makes RR-1 apply to a recovered `destination_mismatch` park. The same
   bound-site rule would be financially correct for a recovered integrity park (the recovery accounting is identical), but decision 1
   names only `destination_mismatch`. Until extended, the BOUND finding of a recovered integrity park keeps raising (safe, noisy), and an
   implementation of decision 1 must not silently key on "any destination reason".
-- **Q-R32-2 (security + ledger-finance; refusal-direction tightening candidate, pre-existing, applies to `destination_mismatch` too).**
+- **Q-R32-2 (CLOSED by the 23.6 fix, security C-1).**
   Not-paid (ii) attributes a declined line by the merchant reference **or** the bound reference alone; a declined line on the bound
   reference that names **another** merchant reference is not refused (the paid branch has the H-2 rule; not-paid has none). Recommend
   `insufficient` for not-paid when any line read on the bound reference names another merchant reference. Not changed here (it rewrites
   `payout_m4_evidence` for all reasons).
-- **Q-R32-3 (owner).** Is the interim equivalent of 23.3 sufficient, or is an in-place resume (R-B) wanted?
+- **Q-R32-3 (owner; still open).** Is the interim equivalent of 23.3 sufficient, or is an in-place resume (R-B) wanted? Ledger-finance: the interim position (remain parked; M4 not-paid; then a new withdrawal) is sufficient from the financial side.
 - Launch flags unchanged: D-7 provider-dependent parts, T10, S-3 per real source, F-1 for non-MOCK.
+
+### 23.6 Review round (security APPROVE WITH CONDITIONS, ledger-finance REJECT with one HIGH; fixes applied, 2026-10-09)
+
+Every change below is refusal-direction; none broadens owner decision 4 or 6. All of it is folded into migration 0127 (unmerged),
+built on the current 0125 bodies; the down restores both 0125 function bodies byte for byte (whole-schema test plus a `prosrc`
+match against the 0125 file for each) and drops what 0127 added.
+
+**LF HIGH: a provider success the platform already saw was invisible to the not-paid verdict.** B13-B parks a destination payout
+mostly on SUCCESS evidence, but `parkPayoutDestination` only bound the reference; `payout_m4_evidence` reads statement lines and Y, so
+the reproduction (MOCK poll reports success on X, park, then a sealed declaring import with a decline on another reference carrying
+the merchant reference) read `not_paid` and M4 not-paid released the hold.
+- **Record.** New append-only table `payout_destination_park_evidence` (tenant, attempt, destination reason, `reported_outcome` in
+  `succeeded|declined|pending|ambiguous|unknown_pre_0127`, `evidence_kind`, `recorded_at`; UNIQUE per (attempt, outcome, kind) so
+  repeats add nothing). It mirrors the reviewed 0115 `payment_attempt_reference_evidence` pattern: FORCE RLS; INSERT and SELECT only in
+  the **system shape**, SELECT for a **valid acting session** (the M4 evaluation); no tenant-staff, player, platform or UPDATE/DELETE
+  policy; `ledger_deny_mutation` on UPDATE/DELETE/TRUNCATE; runtime grants SELECT, INSERT only; an insert guard (`MR064`, new) admits a
+  row only for a payout attempt currently `disputed` on that same destination reason and never the backfill marker.
+- **Writers (every path).** `parkPayoutDestination`, the single park writer used by sync phase C, the QueryStatus poll and the
+  callback/receipt cell, records the evidence class in the park's own transaction. A success reaching an attempt **already** parked on
+  a destination reason is recorded by `recordSuccessOnDestinationPark` from the three disputed branches: the poll (`case
+  AttemptDisputed`, success), the callback/receipt (`case AttemptDisputed`, success) and the late-evidence path (a sync or poll result
+  that lost the CAS to the park). It changes no state, posts, releases or raises; the post-M4 cell still runs after it.
+- **Verdict.** In the not-paid branch of `payout_m4_evidence`: a `succeeded` record gives `contradictory`; an `unknown_pre_0127` record
+  gives `insufficient`. Both destination reasons. Re-evaluated at `-> executing` like every verdict input (a success that arrives after
+  the request is refused at execution).
+- **Backfill (fail closed).** 0127 up writes `unknown_pre_0127` for every destination park that already exists (their trigger is
+  unknown), lifting FORCE RLS on `payment_attempts` for that one statement only. The down refuses (`MR099`) while any park-evidence row
+  exists (dropping it would reopen not-paid on a success-parked `destination_mismatch` park), in addition to the integrity M4 rows.
+- **R-1 (decided: no change).** A success recorded **before** execution makes the M4 impossible (DB re-check at `-> executing`). A success
+  recorded **after** an executed not-paid arrives through exactly the callback/poll/late paths where the §4.8 cell raises
+  `success_after_m4_not_paid` (audit + P1) in real time; R-1 stays statement-based and raises when the line arrives. Reading the record
+  in reconciliation would add a second, non-statement source to `loadK3Evidence` for no additional detection.
+
+**Security C-1 / LF Q-R32-2: not-paid on an ambiguous attribution.** Before the line selection, the not-paid branch now returns
+`insufficient` when any payout line on the bound reference or on any matched reference (`v_rs`) names a non-NULL merchant reference
+other than the attempt's. These lines are already inside the 64-line read set (S-4). It tightens every M4 not-paid
+(`destination_mismatch` and the unbound reasons as well). Reconciliation R-1 mirrors it: after an executed not-paid, such a line on any
+reference R-1 reads raises `pay_declared_not_paid_but_paid` with `check=m4_not_paid_attribution_ambiguous` (raise only; not subject to
+the RR-1 stop rule, it is not a recovered payout). The former `TestR32_QR322_*` current-behaviour pin is replaced by
+`TestR32_C1_*` (flipped deliberately).
+
+**Security C-2 (LOW), recorded residual.** After this round, an M4 not-paid on a destination park can still be wrong only if the
+snapshot was corrupted (needs DB-owner access, ADR 0110 T6) **and** the payout actually went out **and** the only trace of it is a
+succeeded line in a statement source that does not declare `payout_lines_carry_merchant_reference`, carrying an unrelated reference
+and no merchant reference (never matched by the merchant reference, the bound reference, Y or `v_rs`), with no provider success ever
+reported to the platform for the attempt. That is the S-3 source-completeness residual: `PROVIDER DEPENDENT`, launch-blocking per real
+source as already recorded (§4.3, §10.3).
+
+**Security C-3 (INFO).** `TestR32_C3_RawWritesWithoutProof_EverySessionShape`: a raw M4 INSERT on an integrity park without an actor
+proof is refused in the `platform_acting` (`AP001`), tenant-staff (`AP001`/`MR060`), system (`CG001`/`MR001`) and platform-admin shapes;
+a raw cancel UPDATE and a raw approval INSERT without a proof are refused in every shape; nothing moves.
+
+**MR012 message text.** Left unchanged and recorded (R32-5): fixing the text means replacing the whole `payment_manual_resolutions_guard`
+(0125, ~400 lines) for wording only; the SQLSTATE and the behaviour are correct.
+
+**Questions.** Q-R32-1 confirmed by ledger-finance as the conservative reading (decision 1 names `destination_mismatch` only). Q-R32-2
+closed by C-1. Q-R32-3 stays an owner question; ledger-finance finds the interim position sufficient.
