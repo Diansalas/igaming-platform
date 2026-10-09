@@ -407,6 +407,7 @@ func TestHSEC_HoldRelease_CTR3_KeyCorrelationShapeLinkForgeries(t *testing.T) {
 	r := h.mustRequest(h.reqA, wr.ID)
 	key := wr.ID.String() + ":governed_hold_released"
 
+	otherTenant := seedPayoutFixture(t, h.pool, 1000, true)
 	// A second player and wallet of the SAME tenant (for the cross-wallet shape attacks).
 	person2, player2, wallet2 := uuid.New(), uuid.New(), uuid.New()
 	if err := h.pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
@@ -528,6 +529,12 @@ func TestHSEC_HoldRelease_CTR3_KeyCorrelationShapeLinkForgeries(t *testing.T) {
 		{"another withdrawal's governed key", func(ctx context.Context, tx pgx.Tx) error {
 			return hsrPost(ctx, tx, h, wr2, ledger.TxWithdrawalRejected, wr2.ID.String()+":governed_hold_released", wr2.ID, 401, 401)
 		}},
+		// The tenant binding: a header for ANOTHER tenant carrying this tenant's executing key.
+		{"raw header, another tenant", func(ctx context.Context, tx pgx.Tx) error {
+			_, err := tx.Exec(ctx, `INSERT INTO ledger_transactions (tenant_id, transaction_type, idempotency_key, correlation_id)
+				VALUES ($1, 'withdrawal_rejected', $2, $3)`, otherTenant.tenantID, key, wr.ID)
+			return err
+		}},
 		// A header-only insert (no entries): only the header layers can stop it.
 		{"raw header, wrong correlation", func(ctx context.Context, tx pgx.Tx) error {
 			_, err := tx.Exec(ctx, `INSERT INTO ledger_transactions (tenant_id, transaction_type, idempotency_key, correlation_id)
@@ -630,7 +637,7 @@ func TestHSEC_HoldRelease_CTR3_KeyCorrelationShapeLinkForgeries(t *testing.T) {
 // bypassed: with the fence lifted for ONE statement in this throwaway scratch database,
 // a three-entry (or wrong-account) "release" cannot commit.
 func TestHSEC_HoldRelease_DeferredShapeCheck_CatchesFenceBypass(t *testing.T) {
-	for _, variant := range []string{"three_entries", "credit_to_house_not_cash", "four_entries_extra_pair", "no_reversal_link", "provider_ids_set"} {
+	for _, variant := range []string{"three_entries", "credit_to_house_not_cash", "four_entries_extra_pair", "no_reversal_link", "provider_ids_set", "credit_to_other_wallet_cash", "wrong_amount_both_legs"} {
 		t.Run(variant, func(t *testing.T) {
 			h := newHSR(t, 1)
 			wr := h.hold(400)
@@ -640,6 +647,22 @@ func TestHSEC_HoldRelease_DeferredShapeCheck_CatchesFenceBypass(t *testing.T) {
 			h.tx(func(ctx context.Context, tx pgx.Tx) error {
 				var err error
 				houseID, err = ledger.GetOrCreateAccount(ctx, tx, h.f.tenantID, nil, ledger.AccountHouseGaming, "EUR")
+				return err
+			})
+			var otherCash uuid.UUID
+			h.tx(func(ctx context.Context, tx pgx.Tx) error {
+				person2, player2, wallet2 := uuid.New(), uuid.New(), uuid.New()
+				if _, err := tx.Exec(ctx, `INSERT INTO player_accounts (id, tenant_id, brand_id, person_id, email, password_hash, status) VALUES ($1, $2, $3, (SELECT person_id FROM player_accounts WHERE id = $4), $5, 'x', 'active')`,
+					player2, h.f.tenantID, h.f.brandID, h.f.playerAccountID, player2.String()+"@hsr.invalid"); err != nil {
+					return err
+				}
+				_ = person2
+				if _, err := tx.Exec(ctx, `INSERT INTO wallets (id, tenant_id, brand_id, player_account_id, asset_code) VALUES ($1, $2, $3, $4, 'EUR')`,
+					wallet2, h.f.tenantID, h.f.brandID, player2); err != nil {
+					return err
+				}
+				var err error
+				otherCash, err = ledger.GetOrCreateAccount(ctx, tx, h.f.tenantID, &wallet2, ledger.AccountPlayerCash, "EUR")
 				return err
 			})
 			ctx := context.Background()
@@ -683,6 +706,11 @@ func TestHSEC_HoldRelease_DeferredShapeCheck_CatchesFenceBypass(t *testing.T) {
 				case "no_reversal_link":
 					entries = append(entries, ledger.EntryInput{LedgerAccountID: accts[1], Direction: ledger.Credit, Amount: 400})
 					reverses = nil
+				case "credit_to_other_wallet_cash":
+					entries = append(entries, ledger.EntryInput{LedgerAccountID: otherCash, Direction: ledger.Credit, Amount: 400})
+				case "wrong_amount_both_legs":
+					entries = []ledger.EntryInput{{LedgerAccountID: accts[0], Direction: ledger.Debit, Amount: 399},
+						{LedgerAccountID: accts[1], Direction: ledger.Credit, Amount: 399}}
 				case "provider_ids_set":
 					entries = append(entries, ledger.EntryInput{LedgerAccountID: accts[1], Direction: ledger.Credit, Amount: 400})
 					a, b := "hsr-forged-provider", "hsr-forged-"+uuid.NewString()
@@ -1057,5 +1085,98 @@ func TestHSEC_HoldRelease_CancelAndExpire_NullExecutionColumns(t *testing.T) {
 	}
 	if h.res(r2.ID).State != ResolutionExpired || read(r2.ID) != 1 {
 		t.Fatal("expire left execution-time columns set")
+	}
+}
+
+// Ledger-finance C-1: the governed-release guard fires on EVERY update. After the release
+// (approved -> rejected) inside the executing transaction, a second UPDATE of any column is
+// refused; and HR042: an executing resolution with a governed posting cannot be refused.
+func TestHSEC_HoldRelease_ExecutingWindow_SecondUpdateAndRefusalRefused(t *testing.T) {
+	h := newHSR(t, 1)
+	wr := h.hold(400)
+	h.suspendTenant()
+	r := h.mustRequest(h.reqA, wr.ID)
+	for name, sql := range map[string]string{
+		"provider_id":       `UPDATE withdrawal_requests SET provider_id = 'hsr-x' WHERE id = $1`,
+		"provider_ref":      `UPDATE withdrawal_requests SET provider_reference = 'hsr-ref' WHERE id = $1`,
+		"updated_at":        `UPDATE withdrawal_requests SET updated_at = now() WHERE id = $1`,
+		"state back":        `UPDATE withdrawal_requests SET state = 'approved' WHERE id = $1`,
+		"state to complete": `UPDATE withdrawal_requests SET state = 'completed' WHERE id = $1`,
+	} {
+		err := h.inExecuting(r, h.apprB, func(ctx context.Context, tx pgx.Tx) error {
+			if err := withdrawal.ReleaseForGovernedResolution(ctx, tx, wr.ID); err != nil {
+				return err
+			}
+			return k3Try(ctx, tx, func(ctx context.Context, tx pgx.Tx) error {
+				_, e := tx.Exec(ctx, sql, wr.ID)
+				return e
+			})
+		})
+		if !hsrIs(err, "HR030") {
+			t.Errorf("%s after the release in the executing txn: want HR030, got %v", name, err)
+		}
+	}
+	// HR042.
+	err := h.inExecuting(r, h.apprB, func(ctx context.Context, tx pgx.Tx) error {
+		if err := withdrawal.ReleaseForGovernedResolution(ctx, tx, wr.ID); err != nil {
+			return err
+		}
+		return k3Try(ctx, tx, func(ctx context.Context, tx pgx.Tx) error {
+			_, e := tx.Exec(ctx, `UPDATE withdrawal_hold_resolutions SET state = 'refused_at_execution', refusal_code = 'x' WHERE id = $1`, r.ID)
+			return e
+		})
+	})
+	if !hsrIs(err, "HR042") {
+		t.Errorf("refusing an executing resolution that already posted: want HR042, got %v", err)
+	}
+	// Control: the genuine release still commits.
+	if out := h.mustDecide(h.apprB, r, ResolutionApprove); !out.Executed {
+		t.Fatalf("control: %+v", out)
+	}
+}
+
+// Ledger-finance C-3: catalog pin - the one-pending and one-executed partial UNIQUE indexes exist
+// with the right columns and predicates.
+func TestHSEC_HoldRelease_CatalogPin_OnePendingOneExecutedIndexes(t *testing.T) {
+	h := newHSR(t, 1)
+	for name, state := range map[string]string{"withdrawal_hold_resolutions_one_pending": "pending", "withdrawal_hold_resolutions_one_executed": "executed"} {
+		var def string
+		h.tx(func(ctx context.Context, tx pgx.Tx) error {
+			return tx.QueryRow(ctx, `SELECT indexdef FROM pg_indexes WHERE schemaname = 'public' AND indexname = $1`, name).Scan(&def)
+		})
+		if !strings.Contains(def, "CREATE UNIQUE INDEX") || !strings.Contains(def, "(withdrawal_request_id)") ||
+			!strings.Contains(def, "WHERE (state = '"+state+"'::text)") {
+			t.Errorf("%s: unexpected definition %q", name, def)
+		}
+	}
+}
+
+// Security M-6 fail-closed: when the freeze trigger cannot READ the tenant status it refuses, even
+// for an active tenant (a restrictive policy hides the tenants row in this scratch database only).
+func TestHSEC_HoldRelease_FreezeTrigger_UnreadableStatusFailsClosed(t *testing.T) {
+	h := newHSR(t, 1)
+	wr := h.hold(100)
+	ctx := context.Background()
+	ddl := func(sql string) {
+		if err := h.pool.WithoutTenant(ctx, func(ctx context.Context, tx pgx.Tx) error { _, err := tx.Exec(ctx, sql); return err }); err != nil {
+			t.Fatal(err)
+		}
+	}
+	try := func() error {
+		return h.rt.WithTenant(ctx, h.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+			if _, e := tx.Exec(ctx, `UPDATE withdrawal_requests SET state = 'cancelled' WHERE id = $1`, wr.ID); e != nil {
+				return e
+			}
+			return errK3Rollback
+		})
+	}
+	if err := try(); !errors.Is(err, errK3Rollback) {
+		t.Fatalf("control (readable, active): %v", err)
+	}
+	ddl(`CREATE POLICY hsr_hide ON tenants AS RESTRICTIVE FOR SELECT USING (false)`)
+	err := try()
+	ddl(`DROP POLICY hsr_hide ON tenants`)
+	if !hsrIs(err, "HR050") {
+		t.Fatalf("an unreadable tenant status must fail closed with HR050, got %v", err)
 	}
 }

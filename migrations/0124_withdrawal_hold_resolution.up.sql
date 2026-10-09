@@ -762,7 +762,9 @@ CREATE TRIGGER ledger_transactions_hold_release_key_guard
 -- governed-key posting needs the executing resolution; (ii) while a hold
 -- resolution is executing for this withdrawal in this transaction, the ONLY
 -- admitted change is approved -> rejected with that posting as the release link and
--- no other column touched.
+-- no other column touched. It fires on EVERY update (no WHEN clause; ledger-finance C-1):
+-- a second UPDATE of any column inside the executing transaction, after the release,
+-- finds OLD.state = 'rejected' and is refused.
 CREATE FUNCTION withdrawal_requests_governed_release_guard() RETURNS TRIGGER AS $$
 DECLARE
     v_exec   boolean;
@@ -796,7 +798,6 @@ $$ LANGUAGE plpgsql
 CREATE TRIGGER withdrawal_requests_governed_release_guard
     BEFORE UPDATE ON withdrawal_requests
     FOR EACH ROW
-    WHEN (NEW.state IS DISTINCT FROM OLD.state OR NEW.release_ledger_transaction_id IS DISTINCT FROM OLD.release_ledger_transaction_id)
     EXECUTE FUNCTION withdrawal_requests_governed_release_guard();
 
 -- (c) The approved-hold freeze (security M-6, widened by security C-3): ANY state change out
