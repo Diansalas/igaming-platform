@@ -42,15 +42,10 @@ func (r Registrations) NonSyntheticRegistered() bool {
 // integration build tag, so outside both conditions the feature is simply
 // unavailable (keys == nil) rather than silently keyed.
 func VerifyStartup(guardEnvironment string, keys *Keys, regs Registrations) error {
-	// L-8 (security review): until B13-B wires the binding into the withdrawal and
-	// payments paths, NO non-Synthetic payout adapter may be registered - it would
-	// dispatch NULL-binding withdrawals (the 0123 insert guard tolerates NULL/NULL
-	// until B13-B replaces it). Remove this clause in the B13-B change.
-	for _, a := range regs.PaymentAdapters {
-		if a != nil && !IsSyntheticComponent(a) {
-			return fmt.Errorf("%w: a non-Synthetic payout adapter is registered but B13-B (destination binding on the withdrawal and payments paths) has not landed; refusing to start", ErrStartupGate)
-		}
-	}
+	// B13-B (ADR 0111 section 16): the former L-8 clause (refuse every non-Synthetic payout
+	// adapter until the binding lands) is REMOVED in the same change that wires the binding
+	// into the withdrawal and payments paths and closes the NULL arm (migration 0126). A
+	// non-Synthetic adapter now needs the keys below and the per-claim tiering predicate.
 	required := guardEnvironment == "production" || regs.NonSyntheticRegistered()
 	if required && keys == nil {
 		return fmt.Errorf("%w: PAYOUT_INSTRUMENT_KEYS / PAYOUT_INSTRUMENT_ACTIVE_KID and PAYOUT_INSTRUMENT_FP_KEYS / PAYOUT_INSTRUMENT_FP_ACTIVE_KID are required (production, or a non-Synthetic payout adapter or verifier is registered); refusing to start", ErrStartupGate)
