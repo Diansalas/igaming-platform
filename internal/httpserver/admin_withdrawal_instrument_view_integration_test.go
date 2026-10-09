@@ -179,3 +179,48 @@ func TestAdminGetWithdrawal_LegacyNullBindingIsNull(t *testing.T) {
 		t.Fatalf("a legacy NULL binding must serialize payout_instrument as null, got present=%v %s", present, raw)
 	}
 }
+
+// L-1: a withdrawal that names a payout instrument which cannot be read is an integrity anomaly. It must be a
+// generic 500, never `payout_instrument: null` (which the back office renders as an editable "legacy" withdrawal).
+// Simulated with a RESTRICTIVE select policy hiding exactly that instrument id (the composite FK makes a missing
+// row impossible); the policy is dropped on cleanup and affects no other row.
+func TestAdminGetWithdrawal_UnreadableBoundInstrumentIsA500NotNull(t *testing.T) {
+	pool, issuer := testEnv(t)
+	orchestrator, _ := newMockOrchestrator()
+	srv := newFinancialTestServer(t, pool, issuer, orchestrator)
+	tenant := mustCreateTenant(t, pool)
+	brand := mustCreateBrand(t, pool, tenant)
+	finance := mustCreateStaff(t, pool, tenant.ID, identity.StaffRoleFinance, "finance-l1-pw-1")
+	token := mustLoginStaff(t, srv, tenant.Slug, finance.Email, "finance-l1-pw-1")
+	player := mustRegisterPlayer(t, srv, brand.Slug)
+	walletID := fundWallet(t, pool, tenant.ID, brand.ID, player.ID, "EUR", 50000).ID
+	wr := mustCreateWithdrawalRequest(t, pool, tenant.ID, brand.ID, player.ID, walletID, "EUR", 1500)
+
+	var instID uuid.UUID
+	if err := pool.WithTenant(context.Background(), tenant.ID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT payout_instrument_id FROM withdrawal_requests WHERE id = $1`, wr.ID).Scan(&instID)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	policy := "l1_hide_" + strings.ReplaceAll(instID.String(), "-", "")[:12]
+	if err := pool.WithTenant(context.Background(), tenant.ID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `CREATE POLICY `+policy+` ON payout_instruments AS RESTRICTIVE FOR SELECT USING (id <> '`+instID.String()+`'::uuid)`)
+		return err
+	}); err != nil {
+		t.Fatalf("create the simulation policy: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = pool.WithTenant(context.Background(), tenant.ID, func(ctx context.Context, tx pgx.Tx) error {
+			_, err := tx.Exec(ctx, `DROP POLICY IF EXISTS `+policy+` ON payout_instruments`)
+			return err
+		})
+	})
+
+	status, body := rawBody(t, getJSON(t, srv, "/v1/admin/withdrawals/"+wr.ID.String(), token.AccessToken))
+	if status != http.StatusInternalServerError {
+		t.Fatalf("status %d, want 500: %s", status, body)
+	}
+	if strings.Contains(body, "payout_instrument") || strings.Contains(body, instID.String()) || strings.Contains(body, "null") {
+		t.Fatalf("the 500 must be generic (no instrument data, no null view): %s", body)
+	}
+}

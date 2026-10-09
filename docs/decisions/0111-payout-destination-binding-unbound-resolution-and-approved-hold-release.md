@@ -1779,3 +1779,16 @@ their path.
 `EchoesDestinationFingerprint = true`, or the owner explicitly accepts an adapter that cannot echo (without the echo an adapter's success
 settles on the snapshot integrity check alone, B13B-15); the registration refusal for a non-declaring non-Synthetic adapter is NOT built;
 (b) the tenant-visibility interface question for the adapter-side echo (B13B-8 / Q2) must be answered and implemented.
+
+### 18.5 Staff withdrawal detail: bound instrument display (usability change, branch gov-r24-bo-contract)
+
+`GET /v1/admin/withdrawals/{id}` (the existing `withdrawal:review` permission, tenant-scoped, read-only) returns `payout_instrument`:
+`{id, rail, display_mask}` of the bound instrument, or `null` for a legacy NULL binding. Never the detail, ciphertext, fingerprint, seal,
+kind or state. A bound withdrawal whose instrument row cannot be read is an integrity anomaly (the composite FK makes it impossible in a
+healthy database) and is answered with a generic 500 plus a structured error log carrying ids only, never `null` (which a client would
+render as a legacy withdrawal).
+
+**Accepted residual (security L-2): the mask is shown without seal verification.** The staff view reads `display_mask` and `rail` directly
+and does not verify the instrument seal (B13A-5). Altering those columns requires database-owner access, and every gate (request time,
+T1p, phase B, T2/T12, evidence) still refuses a tampered instrument, so the view can at worst display a wrong label; it cannot cause a
+payout to a different destination. Seal verification in the read path is deliberately not built.

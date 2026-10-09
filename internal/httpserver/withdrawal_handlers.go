@@ -537,6 +537,9 @@ type staffPayoutInstrumentRef struct {
 	DisplayMask string `json:"display_mask"`
 }
 
+// errBoundInstrumentUnreadable: the withdrawal names a payout instrument that cannot be read.
+var errBoundInstrumentUnreadable = errors.New("withdrawal admin detail: bound payout instrument is unreadable")
+
 // staffWithdrawalDetailResponse is the single-withdrawal staff view. The
 // payout_instrument key is always present: null for a legacy row with no
 // binding (pre-B13-B, Synthetic adapters only).
@@ -586,6 +589,9 @@ func newGetAdminWithdrawalHandler(deps Deps) http.HandlerFunc {
 				case err == nil:
 					instrument = &ref
 				case errors.Is(err, pgx.ErrNoRows):
+					// Integrity anomaly (the composite FK makes it impossible in a healthy DB). NEVER
+					// render it as null: that reads as "legacy withdrawal" with an editable method.
+					return errBoundInstrumentUnreadable
 				default:
 					return fmt.Errorf("withdrawal admin detail: bound payout instrument: %w", err)
 				}
@@ -599,6 +605,12 @@ func newGetAdminWithdrawalHandler(deps Deps) http.HandlerFunc {
 		})
 		if errors.Is(err, withdrawal.ErrNotFound) {
 			apierror.Write(w, requestID, apierror.CodeNotFound, "withdrawal not found")
+			return
+		}
+		if errors.Is(err, errBoundInstrumentUnreadable) {
+			// Ids only, no values.
+			logger.Error("get_admin_withdrawal_bound_instrument_unreadable", "withdrawal_id", id.String(), "tenant_id", tc.TenantID.String())
+			apierror.Write(w, requestID, apierror.CodeInternal, "failed to load withdrawal")
 			return
 		}
 		if err != nil {
