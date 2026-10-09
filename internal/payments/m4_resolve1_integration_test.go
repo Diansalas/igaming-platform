@@ -1185,3 +1185,30 @@ func TestM4_MR041_ForgedLinkAndPlantedPosting(t *testing.T) {
 		}
 	})
 }
+
+// S-2 step 7: the import SET the re-evaluation reads must equal the pinned one.
+// The PSP re-delivers the identical succeeded line in a later (sealed) import
+// after the request: verdict, line and R are unchanged, but the import set is
+// not, so the execution ends refused_at_execution (fail closed; a fresh request
+// pins the new set) - Go refuses before the database would raise MR061.
+func TestM4_Execution_RefusedWhenOnlyTheImportSetChanges(t *testing.T) {
+	m := newM4World(t)
+	p := m.park(595)
+	r := "m4-R-" + uuid.NewString()[:12]
+	l := m.line(r, p.fresh.MerchantReference, statement.PaymentStatusSucceeded, 595, time.Now().UTC().Truncate(time.Microsecond))
+	m.ingest(m4Imp{start: time.Now().Add(-2 * time.Hour)}, l)
+	ev := m.mustEvidence(p.fresh.ID, M4VerdictPaid)
+	res, err := m.request(m.acting, m.m4In(p.fresh.ID, ResolutionM4EvidencePaid, ev.LineID))
+	k3RequireNoErr(t, err, "request")
+	m.ingest(m4Imp{start: time.Now().Add(-3 * time.Hour)}, l)
+	ev2 := m.mustEvidence(p.fresh.ID, M4VerdictPaid)
+	if *ev2.LineID != *ev.LineID || *ev2.Reference != r || len(ev2.ImportIDs) != 2 {
+		t.Fatalf("setup: want the same verdict/line/R over two imports, got %+v", ev2)
+	}
+	out, err := m.decide(m.acting2, res, ResolutionApprove)
+	k3RequireNoErr(t, err, "approve")
+	if !out.Refused || out.Resolution.RefusalCode == nil || *out.Resolution.RefusalCode != resolutionRefusedEvidence {
+		t.Fatalf("want refused_at_execution/%s, got %+v", resolutionRefusedEvidence, out)
+	}
+	m.b11Held(p, "import set changed")
+}
