@@ -1285,11 +1285,15 @@ text byte for byte (whole-schema snapshot test).
   hold resolution of this txid (not `cancelled`/`failed`), and an unreadable tenant or brand status counts as
   non-active (fail closed). The H-SEC gate runs before `DenyForCompliance`, so the normal KYC denial is unaffected;
   pinned by tests (gate first; active tenant still denies; non-active direct `DenyForCompliance` is HR050).
-- **HN-4 (executing-window discipline).** Beyond §6.4, while a hold resolution is `executing` for a withdrawal the
-  only admitted `withdrawal_requests` change in any session is `approved -> rejected` with the governed release
-  link and no other column touched (trigger `withdrawal_requests_governed_release_guard`); the acting UPDATE policy
-  WITH CHECK additionally requires `state = 'rejected'`. A governed-key release link is accepted only from that
-  context (a second withdrawal cannot borrow it; HR020).
+- **HN-4 (executing-window discipline; corrected after ledger-finance C-1).** Beyond §6.4, while a hold resolution is
+  `executing` for a withdrawal the only admitted `withdrawal_requests` change in any session is `approved -> rejected`
+  with the governed release link and no other column touched. The first revision claimed this but the guard trigger
+  carried a `WHEN` clause (state or release link changed), so a second UPDATE of another column (for example
+  `provider_id`) inside the executing transaction slipped through. The guard now fires on **every** update (no `WHEN`),
+  and the executing branch requires `OLD.state = 'approved'`, so any later UPDATE finds `rejected` and is refused
+  (HR030). The acting UPDATE policy `WITH CHECK` still only requires `state = 'rejected'` and an executing resolution;
+  the trigger is the control that pins the rest (RESOLVE-1 must keep that division when it copies the policy body).
+  Pinned by `TestHSEC_HoldRelease_ExecutingWindow_SecondUpdateAndRefusalRefused` and mutant S52.
 - **HN-5 (brand lock inside an acting session).** The H-SEC discipline takes `brands ... FOR SHARE`; the existing
   brand policies are tenant-GUC only, so an acting session would see no row. 0124 adds one lock-only policy
   `acting_lock ON brands FOR UPDATE USING (acting tenant, valid session) WITH CHECK (false)`. This object is not on
@@ -1343,3 +1347,12 @@ text byte for byte (whole-schema snapshot test).
 engaged payment kill switch for the tenant also block `release_hold_to_player` execution? Implemented as "no"
 (the switch stops outbound provider dispatch; this movement returns the player's own funds and sends nothing). If
 the answer is "yes" it is a one-line addition to the executor's preconditions plus the migration-side recheck.
+
+**Further open OWNER questions (recorded after the ledger-finance review; nothing is built or decided here).**
+
+- **Q-HSEC-2 (scope of decisions 13-18).** Do the owner decisions cover only `approved` holds on a non-active tenant or
+  brand (as implemented), or also holds in `requested` / `pending_review` on a non-active tenant? Implemented: approved
+  only; the other states keep their hold until reactivation (ADR 0107 CT-PRE territory, not built).
+- **Q-HSEC-3 (HN-6).** Is it acceptable that a tenant's stricter policy rows are ignored for this operation while the
+  tenant or brand is non-active (a suspended tenant cannot raise the number of platform approvers)? Implemented: ignored,
+  platform baseline only; pinned by `PolicyLookup_IgnoresTenantRowsWhenNonActive`.

@@ -123,3 +123,13 @@ S51 freeze trigger WHEN narrowed back to rejected/cancelled/failed              
 Note: the reject branch of S50 is covered only through the same statement (reachable solely via the approvals trigger).
 Totals now: 66 mutants; 61 KILLED; 5 SURVIVED (unchanged, listed above). Files restored and cmp-identical.
 ADR 0111 section "HSEC implementation notes" was renumbered 12 -> 15.
+
+Round 5 (ledger-finance review C-1, C-3, C-4; against the REAL 0123 after merging main 0f2597e; 7 mutants, 0 compile errors):
+S47 partial UNIQUE (one executed per withdrawal) removed                                    KILLED  CatalogPin_OnePendingOneExecutedIndexes  [was a survivor in round 1]
+S52 HN-4 guard trigger WHEN clause restored (second UPDATE slips through)                  KILLED  ExecutingWindow_SecondUpdateAndRefusalRefused
+S53 CT-R3 key guard loses its tenant binding                                                KILLED  CTR3 (raw header for another tenant)
+S54 HR042 (refusing an executing resolution that already posted) removed                    KILLED  ExecutingWindow_SecondUpdateAndRefusalRefused
+S55 freeze trigger: unreadable tenant status treated as active                              KILLED  FreezeTrigger_UnreadableStatusFailsClosed
+S56 deferred check: cash leg no longer bound to the withdrawal's wallet                     KILLED  DeferredShapeCheck (credit_to_other_wallet_cash)
+S57 deferred check: leg amount no longer compared                                           KILLED  DeferredShapeCheck (wrong_amount_both_legs)
+Totals now: 73 mutants; 69 KILLED; 4 SURVIVED (S09, S45, S46, G12 - reasons above; S47 is now killed). Files restored, cmp-identical.
