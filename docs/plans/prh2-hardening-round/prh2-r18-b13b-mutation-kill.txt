@@ -90,3 +90,16 @@ EQUIVALENT / ACCEPTED SURVIVORS (each is a Go check that duplicates a database g
        disables user triggers cannot create it).
   B81  ClaimForDispatch: instrument.rail vs the routed payment method. The method used for routing IS the instrument rail read in A0 (RailOf), and the rail is an immutable instrument column;
        the two can differ only if a tamper changes the rail between A0 and T1p, which the instrument seal (verified by the gate in the same transaction) already refuses first.
+
+ADDENDUM (security review fixes, 2026-10-09; same method, in place on the working tree restored by git after each mutant, no -race): 11 counted, 11 killed
+  C01  KILLED    H-1: echo-carrying receipt allowed to be deferred  =>  --- FAIL: TestB13B_H1_DeferredCallbackWithEcho_NeverSettles (2.91s)
+  C02  KILLED    H-1: no audit row  =>  --- FAIL: TestB13B_H1_DeferredCallbackWithEcho_NeverSettles (3.20s)
+  C03  KILLED    H-1: no P1  =>  --- FAIL: TestB13B_H1_DeferredCallbackWithEcho_NeverSettles (3.07s)
+  C04  KILLED    L-1: nil adapter waved through  =>  --- FAIL: TestB13B_L1_NilAdapterRefusedAtTheDispatchGates (3.17s)
+  C05  KILLED    L-2: no P1 at T1p  =>  --- FAIL: TestB13B_L2_T1pIntegrityRefusalRaisesAP1_OrdinaryRefusalDoesNot (3.21s)
+  C06  KILLED    L-2: P1 raised for every refusal  =>  --- FAIL: TestB13B_L2_T1pIntegrityRefusalRaisesAP1_OrdinaryRefusalDoesNot (6.26s)
+  C07  KILLED    L-2: no request-time P1  =>  --- FAIL: TestRequestWithdrawalHandler_B13B_IntegrityRefusalRaisesAP1 (0.46s)
+  C08  KILLED    L-3: interface embedding not tracked  =>  --- FAIL: TestSyntheticEmbedding_NegativeControl (0.00s)
+  C09  KILLED    L-4: marker check removed  =>  --- FAIL: TestVerifyBindingGuardApplied (0.00s)
+  C10  KILLED    L-4: synthetic-only is checked too  =>  --- FAIL: TestVerifyBindingGuardApplied (0.00s)
+  C11  KILLED    info: GateResult prints Detail  =>  --- FAIL: TestGateResultRedactsDetail (0.00s)
