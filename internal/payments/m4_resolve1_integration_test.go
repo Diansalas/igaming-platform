@@ -1029,3 +1029,128 @@ func TestM4_DBRecheck_AtExecuting_EvidenceChanged(t *testing.T) {
 	k3RequireCode(t, err, "MR061")
 	m.b11Held(p, "DB re-check")
 }
+
+// Fence (f) at the TRANSACTION level (ADR 0111 4.5, C-7). The entries fence is
+// a second line that would also refuse a forged posting, so this probes the
+// ledger_transactions fence on its own with bare INSERTs in an acting session
+// that has an executing m4_evidence_paid: each forged shape is refused (CG030);
+// the exact governed shape is admitted (control; every probe is rolled back).
+func TestM4_Fence_TransactionLevel_EachBinding(t *testing.T) {
+	m := newM4World(t)
+	p, r, ev := m.paidPark(565)
+	res, err := m.request(m.acting, m.m4In(p.fresh.ID, ResolutionM4EvidencePaid, ev.LineID))
+	k3RequireNoErr(t, err, "request")
+	ins := func(typ, key string, corr uuid.UUID, ptx *string) func(ctx context.Context, tx pgx.Tx) error {
+		return func(ctx context.Context, tx pgx.Tx) error {
+			_, err := tx.Exec(ctx, `INSERT INTO ledger_transactions (id, tenant_id, transaction_type, idempotency_key, provider_id, provider_tx_id, correlation_id)
+				VALUES ($1, $2, $3, $4, $5, $6, $7)`, uuid.New(), m.f.tenantID, typ, key, m.provider, ptx, corr)
+			return err
+		}
+	}
+	other := "m4-other-" + uuid.NewString()[:8]
+	if err := m.inExecutingActing(res, m.acting2, func(ctx context.Context, tx pgx.Tx) error {
+		return k3Try(ctx, tx, ins("withdrawal_completed", m.provider+":"+r, p.wr.ID, &r))
+	}); err != nil {
+		t.Fatalf("control: the exact governed completion must pass the transaction fence: %v", err)
+	}
+	for name, f := range map[string]func(ctx context.Context, tx pgx.Tx) error{
+		"correlation":                       ins("withdrawal_completed", m.provider+":"+r, uuid.New(), &r),
+		"provider_tx_id":                    ins("withdrawal_completed", m.provider+":"+r, p.wr.ID, &other),
+		"idempotency key":                   ins("withdrawal_completed", m.provider+":"+other, p.wr.ID, &r),
+		"failed under an executing M4 paid": ins("withdrawal_failed", p.wr.ID.String()+":failed", p.wr.ID, nil),
+	} {
+		err := m.inExecutingActing(res, m.acting2, func(ctx context.Context, tx pgx.Tx) error { return k3Try(ctx, tx, f) })
+		if k3Code(err) != "CG030" {
+			t.Errorf("%s: want CG030 from the transaction fence, got %v", name, err)
+		}
+	}
+	m.b11Held(p, "transaction fence probes")
+}
+
+// MR041 at commit (C-7) closes what the fences cannot see: (a) the withdrawal's
+// release link rewritten inside the executing transaction (S-8 is still open:
+// the column is not frozen), and (b) a completion planted earlier by an ordinary
+// (system-session) posting with the wrong key, then linked by the resolution.
+// Both commit-time refusals roll the whole executing transaction back.
+func TestM4_MR041_ForgedLinkAndPlantedPosting(t *testing.T) {
+	m := newM4World(t)
+	execForge := func(res ManualResolution, forge func(ctx context.Context, tx pgx.Tx, wr withdrawal.WithdrawalRequest) (uuid.UUID, error)) error {
+		return m.pool.WithPlatformActingInTenant(context.Background(), m.acting2.ID, m.f.tenantID, res.ID, OperationKindForceResolve, func(ctx context.Context, tx pgx.Tx) error {
+			if err := prooftest.AttachForSession(ctx, tx, "payment_force_resolve:approve", res.ID.String(), res.PayloadHash); err != nil {
+				return err
+			}
+			if _, err := tx.Exec(ctx, `INSERT INTO payment_manual_resolution_approvals
+				(tenant_id, resolution_id, decision, payload_hash, decided_by, decided_by_scope, decided_by_person_id, decided_txid, reason_code)
+				VALUES ($1, $2, 'approve', $3, $4, 'tenant', $4, 0, 'm4')`, m.f.tenantID, res.ID, res.PayloadHash, uuid.Nil); err != nil {
+				return err
+			}
+			if _, err := tx.Exec(ctx, `UPDATE payment_manual_resolutions SET state = 'executing' WHERE id = $1`, res.ID); err != nil {
+				return err
+			}
+			wr, err := withdrawal.GetByID(ctx, tx, *res.WithdrawalRequestID)
+			if err != nil {
+				return err
+			}
+			link, err := forge(ctx, tx, wr)
+			if err != nil {
+				return err
+			}
+			_, err = tx.Exec(ctx, `UPDATE payment_manual_resolutions SET state = 'executed', ledger_transaction_id = $2 WHERE id = $1`, res.ID, link)
+			return err
+		})
+	}
+	t.Run("release link rewritten", func(t *testing.T) {
+		m.t = t
+		p, r, ev := m.paidPark(567)
+		res, err := m.request(m.acting, m.m4In(p.fresh.ID, ResolutionM4EvidencePaid, ev.LineID))
+		k3RequireNoErr(t, err, "request")
+		err = execForge(res, func(ctx context.Context, tx pgx.Tx, wr withdrawal.WithdrawalRequest) (uuid.UUID, error) {
+			if err := withdrawal.Complete(ctx, tx, wr.ID, m.provider, r); err != nil {
+				return uuid.Nil, err
+			}
+			after, err := withdrawal.GetByID(ctx, tx, wr.ID)
+			if err != nil {
+				return uuid.Nil, err
+			}
+			if _, err := tx.Exec(ctx, `UPDATE withdrawal_requests SET release_ledger_transaction_id = $2 WHERE id = $1`, wr.ID, *wr.HoldLedgerTransactionID); err != nil {
+				return uuid.Nil, err
+			}
+			return *after.ReleaseLedgerTransactionID, nil
+		})
+		k3RequireCode(t, err, "MR041")
+		m.b11Held(p, "forged release link")
+	})
+	t.Run("planted wrong-key completion", func(t *testing.T) {
+		m.t = t
+		p, _, ev := m.paidPark(568)
+		res, err := m.request(m.acting, m.m4In(p.fresh.ID, ResolutionM4EvidencePaid, ev.LineID))
+		k3RequireNoErr(t, err, "request")
+		// An ordinary posting (system session; ADR 0110 T5) shaped like the governed
+		// completion in every respect but its key.
+		var planted uuid.UUID
+		plantedRef := "m4-planted-" + uuid.NewString()[:8]
+		m.tx(func(ctx context.Context, tx pgx.Tx) error {
+			accts, err := ledger.GetOrCreateAccounts(ctx, tx, m.f.tenantID,
+				ledger.AccountSpec{WalletID: &m.f.walletID, AccountType: ledger.AccountPlayerWithdrawalHold, AssetCode: "EUR"},
+				ledger.AccountSpec{AccountType: ledger.AccountPSPClearing, AssetCode: "EUR"})
+			if err != nil {
+				return err
+			}
+			pid := m.provider
+			out, err := ledger.Post(ctx, tx, ledger.TransactionInput{TenantID: m.f.tenantID, TransactionType: ledger.TxWithdrawalCompleted,
+				IdempotencyKey: m.provider + ":" + plantedRef, ProviderID: &pid, ProviderTxID: &plantedRef, CorrelationID: p.wr.ID,
+				Entries: []ledger.EntryInput{{LedgerAccountID: accts[0], Direction: ledger.Debit, Amount: 568},
+					{LedgerAccountID: accts[1], Direction: ledger.Credit, Amount: 568}}})
+			planted = out.TransactionID
+			return err
+		})
+		err = execForge(res, func(ctx context.Context, tx pgx.Tx, wr withdrawal.WithdrawalRequest) (uuid.UUID, error) {
+			_, err := tx.Exec(ctx, `UPDATE withdrawal_requests SET state = 'completed', release_ledger_transaction_id = $2, updated_at = now() WHERE id = $1`, wr.ID, planted)
+			return planted, err
+		})
+		k3RequireCode(t, err, "MR041")
+		if wr := m.wd(p.wr.ID); wr.State != withdrawal.StateSubmitted {
+			t.Fatalf("withdrawal moved: %s", wr.State)
+		}
+	})
+}
