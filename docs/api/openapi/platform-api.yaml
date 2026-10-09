@@ -912,7 +912,10 @@ paths:
         withdrawal:review, tenant-scoped, tenant-wide (not restricted to
         the caller's own withdrawals, unlike the player-self-service
         GET /v1/me/withdrawals/{id}). 404s indistinguishably for an
-        unknown id or one belonging to a different tenant.
+        unknown id or one belonging to a different tenant. Since B13-B
+        the response also carries `payout_instrument`: the bound
+        instrument's id, rail and masked display value (null for a legacy
+        withdrawal with no binding). The list endpoint does not carry it.
       security:
         - bearerAuth: []
       parameters:
@@ -926,7 +929,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/WithdrawalAdmin"
+                $ref: "#/components/schemas/WithdrawalAdminDetail"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
@@ -935,6 +938,325 @@ paths:
           $ref: "#/components/responses/NotFound"
         "500":
           $ref: "#/components/responses/InternalError"
+
+  # --- B13 / B13-B (ADR 0111 2.9, 18): payout instruments and the
+  # withdrawal binding. No response on any of these routes ever carries the
+  # instrument detail, ciphertext, fingerprint or a seal: the only
+  # detail-derived value is display_mask. Request bodies of the registration
+  # route are never logged. ---
+  /v1/me/payout-instruments:
+    get:
+      summary: List the authenticated player's payout instruments (masks only)
+      description: >
+        Player-authenticated; the player is always the authenticated
+        subject. Returns every instrument of the player in any state,
+        newest first (at most 200), as masked views. 503 service_unavailable
+        when the payout-instrument service is not configured on this
+        deployment.
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: The player's instruments (possibly empty)
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/PayoutInstrumentView" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+    post:
+      summary: Register a payout instrument
+      description: >
+        Player-authenticated; the player is the authenticated subject,
+        never a body field. Registration is rate-limited per player (burst
+        5, refilling one attempt per 6 minutes; refused attempts consume
+        budget) and answers 429 with a Retry-After header. Card details are
+        accepted only as a PSP hosted-fields token; any Luhn-valid 12-19
+        digit string in any field is refused. EVERY registration refusal
+        (invalid detail, a card number, an unknown kind or rail, a blocked
+        destination, a fingerprint already owned by another person) is the
+        same 409 PAYOUT_INSTRUMENT_NOT_ACCEPTED, so registration is not an
+        enumeration oracle; the specific reason goes to the audit log only.
+        On success the response is 201 with the masked view, or 200 when an
+        equivalent instrument already existed. Verification is started
+        synchronously on a best-effort basis: the instrument stays
+        `pending_verification` when no verifier is available or a
+        precondition (for example KYC) is not met.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PayoutInstrumentRegisterRequest" }
+      responses:
+        "200":
+          description: An equivalent instrument already existed; its masked view
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PayoutInstrumentView" }
+        "201":
+          description: Registered; the masked view
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PayoutInstrumentView" }
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          description: PAYOUT_INSTRUMENT_NOT_ACCEPTED - the generic registration refusal
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+  /v1/me/payout-instruments/{id}/revoke:
+    post:
+      summary: Revoke one of the authenticated player's payout instruments
+      description: >
+        Player-authenticated. The body is optional; when present it may
+        carry reason_code (default `player_revoked`). An instrument that
+        belongs to another player or tenant is indistinguishable from an
+        unknown one (404). A malformed id or reason_code is 400. 409
+        PAYOUT_INSTRUMENT_IN_USE when a withdrawal in progress is bound to
+        the instrument; 409 conflict when the instrument is in a state that
+        can no longer change.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PayoutInstrumentRevokeRequest" }
+      responses:
+        "200":
+          description: The revoked instrument (masked view)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PayoutInstrumentView" }
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: PAYOUT_INSTRUMENT_IN_USE, or conflict (the instrument can no longer be changed)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+  /v1/admin/players/{playerID}/payout-instruments:
+    get:
+      summary: List a player's payout instruments, staff view (masks only)
+      description: >
+        payout_instrument:read (finance, compliance, platform_admin),
+        tenant-scoped (a token without a tenant is refused with 403).
+        Read-only. Same masked view as the player's own list, plus
+        player_account_id.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: playerID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: The player's instruments in this tenant, newest first (at most 200)
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/PayoutInstrumentView" }
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+  /v1/admin/payout-instruments/{id}/suspend:
+    post:
+      summary: Suspend a payout instrument (staff)
+      description: >
+        payout_instrument:suspend (compliance), tenant-scoped. reason_code
+        is required. Writes a blocking event and an audit record. There is
+        deliberately NO staff create, verify, unsuspend or edit route
+        (ADR 0111 decision 7).
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PayoutInstrumentSuspendRequest" }
+      responses:
+        "200":
+          description: The suspended instrument (masked view)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PayoutInstrumentView" }
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+  /v1/me/withdrawals:
+    post:
+      summary: Request a withdrawal bound to a payout instrument (B13-B)
+      description: >
+        Player-authenticated. The wallet is the player's own wallet for
+        asset_code (never client-supplied). payout_instrument_id is
+        REQUIRED since B13-B: the withdrawal is bound server-side to that
+        instrument (and its fingerprint) and the destination gate is
+        evaluated before anything is written. Every refusal below writes
+        nothing (no row, no hold) and does not consume the idempotency key.
+        A repeat with the same idempotency_key and the same parameters,
+        including the same payout_instrument_id, returns the original; a
+        different instrument or amount under the same key is 409
+        conflict. 409 PAYOUT_INSTRUMENT_NOT_USABLE is one generic answer
+        for an unknown, another player's, or an unusable instrument (the
+        reason is logged server-side only). The 201 body is unchanged and
+        never carries instrument data.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/WithdrawalRequestCreate" }
+      responses:
+        "201":
+          description: The withdrawal request, in state `requested`
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WithdrawalPlayer" }
+        "400":
+          description: >
+            validation_error - invalid body, a missing asset_code or
+            idempotency_key, a non-positive amount, a payout_instrument_id
+            that is not a UUID, or no wallet for the asset
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: >
+            One of PAYOUT_INSTRUMENT_REQUIRED (no payout_instrument_id
+            given), PAYOUT_INSTRUMENT_NOT_USABLE (generic), TENANT_OR_BRAND_NOT_ACTIVE
+            (the tenant or brand is not active; nothing was created),
+            conflict (insufficient available balance, an idempotency key
+            reused with different parameters, or a withdrawal that requires
+            a passed identity verification).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          description: >
+            service_unavailable - the payout-instrument service is not
+            configured, the destination gate or the verification check is
+            temporarily unavailable. Retryable; nothing was written.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+  /v1/admin/withdrawals/{id}/submit:
+    post:
+      summary: Submit an approved withdrawal to its payment provider (staff)
+      description: >
+        withdrawal:submit, tenant-scoped. Only valid on an `approved`
+        withdrawal (otherwise 409 conflict). Since B13-B the destination and
+        the payment rail are those of the bound payout instrument;
+        payment_method no longer selects anything. For a bound withdrawal it
+        is optional and only COMPARED with the instrument's rail: a
+        different value is 400 PAYMENT_METHOD_MISMATCH and nothing is
+        written. For a legacy withdrawal with no binding (Synthetic
+        adapters only) it is still the routing input and is required (400
+        validation_error when empty). 409 PAYOUT_DESTINATION_NOT_USABLE when
+        the destination gate refuses; the request stays `approved`, no
+        attempt is created and no provider is called. The 200 body is
+        returned also when the claim was denied by the payout KYC gate (no
+        provider is called).
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/WithdrawalSubmitRequest" }
+      responses:
+        "200":
+          description: The withdrawal after dispatch, with the provider it went to when one was called
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WithdrawalSubmitted" }
+        "400":
+          description: validation_error, or PAYMENT_METHOD_MISMATCH (payment_method differs from the bound instrument's rail)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: >
+            conflict (not approved and ready), PAYOUT_DESTINATION_NOT_USABLE
+            (the request stays `approved`), or TENANT_OR_BRAND_NOT_ACTIVE.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
 
   # --- Sportsbook (Stage 6, B2C Player/Brand MVP + first sportsbook
   # vertical slice). Catalogue browse is public/unauthenticated (mirrors
@@ -6145,6 +6467,122 @@ components:
             real financial-clarity defect at the withdrawal-approval
             decision point.
       required: [id, asset_code, amount, state, requested_at, player_account_id]
+    WithdrawalAdminDetail:
+      description: >
+        The single-withdrawal staff view (GET /v1/admin/withdrawals/{id}):
+        WithdrawalAdmin plus the bound payout instrument. The key is always
+        present.
+      allOf:
+        - $ref: "#/components/schemas/WithdrawalAdmin"
+        - type: object
+          properties:
+            payout_instrument:
+              nullable: true
+              description: >
+                The payout instrument this withdrawal is bound to; null for a
+                legacy withdrawal with no binding. Exactly these three
+                fields - never the instrument detail, ciphertext,
+                fingerprint, seal, kind or state. `rail` is the payment
+                method the staff submit is compared with.
+              allOf:
+                - $ref: "#/components/schemas/WithdrawalBoundInstrument"
+          required: [payout_instrument]
+    WithdrawalBoundInstrument:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        rail: { type: string, description: "The payment rail, e.g. bank_transfer." }
+        display_mask: { type: string, description: "Masked display value derived from the instrument detail (at most 64 bytes)." }
+      required: [id, rail, display_mask]
+    WithdrawalRequestCreate:
+      type: object
+      additionalProperties: false
+      properties:
+        asset_code: { type: string }
+        amount: { type: integer, format: int64, minimum: 1, description: "Minor units of asset_code." }
+        idempotency_key: { type: string }
+        payout_instrument_id:
+          type: string
+          format: uuid
+          description: >
+            REQUIRED since B13-B. One of the authenticated player's own
+            payout instruments, usable for asset_code. Absent: 409
+            PAYOUT_INSTRUMENT_REQUIRED. Not a UUID: 400. Unknown, another
+            player's or unusable: 409 PAYOUT_INSTRUMENT_NOT_USABLE.
+      required: [asset_code, amount, idempotency_key, payout_instrument_id]
+    WithdrawalPlayer:
+      type: object
+      description: The player's view of a withdrawal request (no instrument data).
+      properties:
+        id: { type: string, format: uuid }
+        asset_code: { type: string }
+        amount: { type: integer, format: int64 }
+        state:
+          type: string
+          enum: [requested, pending_review, approved, rejected, submitted, completed, failed, cancelled, reversed]
+        requested_at: { type: string, format: date-time }
+        hold_ledger_transaction_id: { type: string, format: uuid }
+      required: [id, asset_code, amount, state, requested_at]
+    WithdrawalSubmitRequest:
+      type: object
+      properties:
+        payment_method:
+          type: string
+          description: >
+            Bound withdrawal: optional, compared with the bound instrument's
+            rail (400 PAYMENT_METHOD_MISMATCH on a difference). Legacy
+            withdrawal with no binding: required routing input.
+    WithdrawalSubmitted:
+      allOf:
+        - $ref: "#/components/schemas/WithdrawalPlayer"
+        - type: object
+          properties:
+            provider_id: { type: string }
+            provider_reference: { type: string }
+    PayoutInstrumentRegisterRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        kind: { type: string, description: "Open set, e.g. bank_account, card_token (hosted-fields token only), ewallet_account.  The set of kinds and which are enabled for non-synthetic use is governed by ADR 0111 2.1." }
+        rail: { type: string }
+        asset_codes: { type: array, minItems: 1, items: { type: string } }
+        detail: { type: object, description: "Kind-specific detail; validated and encrypted server-side, never returned." }
+        supersedes_instrument_id: { type: string, format: uuid }
+      required: [kind, rail, asset_codes, detail]
+    PayoutInstrumentRevokeRequest:
+      type: object
+      properties:
+        reason_code: { type: string, pattern: "^[a-z][a-z0-9_]{0,63}$", description: "Default player_revoked." }
+    PayoutInstrumentSuspendRequest:
+      type: object
+      properties:
+        reason_code: { type: string, pattern: "^[a-z][a-z0-9_]{0,63}$" }
+      required: [reason_code]
+    PayoutInstrumentView:
+      type: object
+      description: >
+        A masked payout instrument. The only detail-derived value is
+        display_mask; the detail, ciphertext, fingerprint and seals are
+        never returned.
+      properties:
+        id: { type: string, format: uuid }
+        player_account_id: { type: string, format: uuid, description: "Staff list only." }
+        kind: { type: string }
+        rail: { type: string }
+        asset_codes: { type: array, items: { type: string } }
+        display_mask: { type: string }
+        state:
+          type: string
+          enum: [pending_verification, verified, verification_expired, suspended, revoked, rejected, superseded]
+        state_changed_at: { type: string, format: date-time }
+        created_at: { type: string, format: date-time }
+        verification_source:
+          type: string
+          enum: [psp_account_verification, kyc_vendor_instrument_verification, custodian_address_verification, synthetic]
+          description: Present in list responses when a current verification exists.
+        verified_at: { type: string, format: date-time }
+        verification_expires_at: { type: string, format: date-time }
+      required: [id, kind, rail, asset_codes, display_mask, state, state_changed_at, created_at]
     Selection:
       type: object
       description: >
@@ -6784,6 +7222,13 @@ components:
             - approval_rejected
             - credential_activation_rejected
             - credential_transition_rejected
+            - PAYOUT_INSTRUMENT_NOT_ACCEPTED
+            - PAYOUT_INSTRUMENT_IN_USE
+            - PAYOUT_INSTRUMENT_REQUIRED
+            - PAYOUT_INSTRUMENT_NOT_USABLE
+            - PAYOUT_DESTINATION_NOT_USABLE
+            - PAYMENT_METHOD_MISMATCH
+            - TENANT_OR_BRAND_NOT_ACTIVE
         message:
           type: string
         request_id:
@@ -6834,6 +7279,12 @@ components:
             $ref: "#/components/schemas/Error"
     RateLimited:
       description: Too many failed attempts; locked out for a window
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    ServiceUnavailable:
+      description: service_unavailable - retryable; nothing was written
       content:
         application/json:
           schema:
