@@ -1779,3 +1779,107 @@ their path.
 `EchoesDestinationFingerprint = true`, or the owner explicitly accepts an adapter that cannot echo (without the echo an adapter's success
 settles on the snapshot integrity check alone, B13B-15); the registration refusal for a non-declaring non-Synthetic adapter is NOT built;
 (b) the tenant-visibility interface question for the adapter-side echo (B13B-8 / Q2) must be answered and implemented.
+
+
+## 20. Post-resolution signal cells (ADR 0111 4.8, F-1) implementation notes (appendix, `payments`, 2026-10-09; branch `gov-r22-cells`, base `5ee5885`; the design above is not rewritten)
+
+This section implements the already-governed 4.8 cells and nothing else: no new rule, no migration, no new alert Kind, no change of
+any owner decision (ADR 0095 section 44, decisions 9-12), no state change, posting or release by a cell. Every provider in the
+tests is `MOCK`. Nothing here is a statement about a real PSP or a licence.
+
+### 20.1 Deliverable status
+
+| Deliverable | Status |
+|---|---|
+| 4.8 cell `success_after_m4_not_paid`: a `succeeded` callback, poll or late sync/poll result on a `disputed` payout attempt whose withdrawal was `failed` by an EXECUTED `m4_evidence_not_paid` | `IMPLEMENTED` against `MOCK` |
+| 4.8 cell `contradiction_after_m4_paid`: a `declined` callback, poll or late result on a `disputed` payout attempt whose withdrawal was `completed` by an EXECUTED `m4_evidence_paid` | `IMPLEMENTED` against `MOCK` |
+| One audit row `payments.payout_post_m4_contradiction` (closed vocabulary), then the B12 P1 as the LAST statement (existing Kind `payment.webhook_integrity`, discriminator `payout_attempt:<attempt_id>:reason:<reason>`, attribute `provider_id` only); the two reasons join `payoutSignalReasons` (4 -> 6) | `IMPLEMENTED` |
+| Closing F-1 (17.7) for `MOCK` | `IMPLEMENTED`: the silent no-op of `case AttemptSucceeded, AttemptDisputed, AttemptRejected: return nil` is gone for the disputed-after-executed-M4 case; every other replay on a disputed attempt is still a no-op |
+| F-1 for any NON-MOCK M4 | `PROVIDER DEPENDENT`, still launch-blocking until the real provider's status semantics are confirmed (20.4) |
+| A distinct provider "reversed"/"returned" payout status (`payout_returned` event type, a reversal outcome) | `NOT IMPLEMENTED`: the payout evidence model has only pending / succeeded / declined / ambiguous, and a `payout_returned` receipt is closed as an anomaly before any cell (`receipt.go`, the event-type allow-list). `declined` is the only contradiction of an executed paid that exists today |
+| Migration | none |
+
+### 20.2 Where the cells run (all under L1 withdrawal -> attempt, inside the existing `alerting.InTx` owners)
+
+One function, `payoutPostM4Cell` (`internal/payments/payout_post_m4.go`), is the only implementation. It is a no-op unless the
+attempt is a payout, re-read `disputed` under the withdrawal row lock, the withdrawal is in the state an executed M4 of that kind
+leaves it in (`failed` for not-paid, `completed` for paid), and an `executed` `payment_manual_resolutions` row of the matching M4
+kind exists for this tenant, attempt and withdrawal. A pending, rejected, cancelled, expired or `refused_at_execution` M4 gives no
+signal; neither does evidence that agrees with the M4 (a decline after not-paid, a success after paid), a pending or ambiguous
+outcome, an M1/M2 resolution, or a deposit. Call sites (pinned by `TestStaticWiring_PayoutPostM4CellSitesArePinned_F1`):
+
+| Path | Site | Audit gate |
+|---|---|---|
+| callback / receipt | `receipt.go` `applyResolvedReceiptEvidence`: the success cell `case AttemptDisputed` and the decline cell `case AttemptDisputed` | once per NEW receipt (`!alreadyApplied`, the PAY-PAYOUT-CALLBACK-AUDIT-2 rule); the raise is unconditional (one alert, growing occurrences) |
+| poll | `payout.go` `applyPayoutStatusEvidenceInTx`: `case AttemptDisputed`, definite success / definite decline | once per (attempt, reason, evidence kind), see R22-2 |
+| late sync / poll result that lost the CAS to a disputed attempt (a stale snapshot) | `payout.go` `applyPayoutLateEvidence`: `case AttemptDisputed` (it now takes the observed outcome) | same as poll |
+
+The cell is returned as the value of its cell (receipt) or of its function (payout.go), never followed by another statement; inside
+it the raise is the final `return`, after the audit row (`TestPayoutPostM4Cell_*`, a go/ast pin, plus the alerting pins in 20.5).
+
+### 20.3 Ambiguities and the reading taken (R22-n)
+
+- **R22-1 (what "executed M4" means).** Read from the database, never inferred from the evidence: an `executed` row of the right kind in
+  `payment_manual_resolutions` bound to the attempt's tenant, attempt and withdrawal, AND the withdrawal in the matching terminal state,
+  AND the attempt `disputed`. The row and the state are redundant on purpose (an M4 only executes together with its posting); the tests
+  separate them with a withdrawal closed through another route (`withdrawal.Fail` / `Complete` directly) with no M4 or only a pending
+  request: no signal.
+- **R22-2 (once per receipt, and a poll has no receipt).** A callback writes the audit row only for a new receipt, so a byte-identical
+  redelivery, a racing duplicate and an orphaned-then-redelivered receipt give exactly one row, while a genuinely different event (a new
+  receipt) gives one more. A poll, a sync result or a late result has no receipt; polling the same disputed attempt every few seconds
+  must not grow the audit log without bound (the L-e precedent), so the row is written once per (attempt, reason, evidence kind), looked
+  up in `audit_log` under the withdrawal lock the caller holds (bounded by `created_at >= attempt.created_at`). The raise is unconditional
+  in both, so a replay is one open alert whose occurrences grow.
+- **R22-3 (the destination cells compose, by construction).** On a `disputed` attempt `payoutDestinationEvidence` is a no-op (its state
+  switch only acts on non-terminal and on succeeded/declined attempts), so a callback that carries a differing echo after an executed M4
+  yields the 4.8 cell only: no re-park, no `destination_mismatch_on_terminal_payout` (that signal is for `succeeded` / `declined`
+  attempts and stays additive there, B13B-17 H-1). A `destination_mismatch` park is NOT M4-paid-able (the database scope refuses it), so
+  `contradiction_after_m4_paid` can never arise for it; an M4 not-paid on it leaves the attempt `disputed` / `destination_mismatch`, and a
+  later `PollPayoutStatus` (the attempt holds its bound reference) finding the payout PAID raises `success_after_m4_not_paid`.
+  Without an executed M4 the destination park stays the no-op the 2.6 table says.
+- **R22-4 (which poll is reachable).** An UNBOUND M4-scope park has no reference on the attempt and none on the withdrawal (M4 paid keys
+  its completion on `provider_id:R` and does not store R on the withdrawal), so `PollPayoutStatus` has nothing to query and only
+  reschedules; for those parks the live cell is the callback (resolved through the merchant reference). The poll cell is live for a
+  `destination_mismatch` park (bound reference) and is exercised for the unbound shapes through the production evidence transaction
+  (`applyPayoutStatusEvidence`) directly. This is the existing design, recorded here, not changed.
+- **R22-5 (audit vocabulary).** `reason`, `observed`, `m4_kind`, `m4_resolution_id`, `evidence`, `provider_id`, `withdrawal_request_id`,
+  `withdrawal_state`, `attempt_state`, the attempt's own terminal reason collapsed through `payoutAlertReasonFor` (a closed set), and the
+  reported reference only through `echoAuditMeta` (the value when it is a valid reference, else reason, length and hash prefix). No decline
+  text, no amount echo, no provider text.
+
+### 20.4 What stays open (F-1 is resolved for `MOCK` only)
+
+- **PROVIDER DEPENDENT, launch-blocking for any non-MOCK M4.** The cells decide on the platform's own outcome classes (`succeeded`,
+  `declined`). Whether a real provider reports a payout returned, reversed or recalled as `declined`, as a distinct status, or only on a
+  statement is unknown until a vendor contract exists; a `payout_returned` event is closed as an anomaly today (no signal). The first real
+  adapter must map its return/reversal semantics onto these classes (or an owner decision must add a class) before an M4 is enabled for it.
+- Reconciliation R-1 remains the backstop for a line that never arrives by callback or poll; the cells only remove the latency for the
+  two that do.
+- The audit and alert are signals. Nothing resolves the contradiction: a payout the platform released and the PSP then paid
+  (`success_after_m4_not_paid`), or one the platform completed and the PSP declined (`contradiction_after_m4_paid`), is a human /
+  provider-recall matter (the 17.2 hint texts), exactly as 4.8 says.
+- `ALERT-DELIVERY-1` is unchanged: the P1s are durable rows; there is still no real delivery channel (ADR 0102 17.7).
+
+### 20.5 Evidence
+
+- `go test ./internal/alerting -count=1`: PASS. The static pins were updated per new site, with no wildcard: the raise-site table gains
+  `payout_post_m4.go:payoutPostM4Cell:raisePayoutDisputeAlert: 1`; the derived reaching set gains `payoutPostM4Cell` (reached only from
+  `applyResolvedReceiptEvidence`, `applyPayoutLateEvidence` and `applyPayoutStatusEvidenceInTx`, all already inside `InTx` owners); it joins
+  `staticEvidenceFuncs` (its three callers are already in the reviewed caller allow-list, which is NOT widened); its result is in the
+  never-dropped set; and a new test pins its exact call sites (2 + 1 + 2).
+- Tests: `internal/payments/payout_post_m4_integration_test.go` (both cells in the callback and poll paths; the destination-park composition
+  including `PollPayoutStatus` and a bad echo; the no-M4 control; pending / refused / rejected / cancelled M4; agreeing evidence; replay and
+  redelivery; orphaned receipt; racing duplicate deliveries and polls; late-evidence stale snapshots, sync and poll; a withdrawal closed by
+  another route; tenant isolation with two tenants; transient and deterministic alert failure; closed audit vocabulary; ledger invariants
+  `SUM(D)=SUM(C)` and projection = rebuild after every case) and `payout_post_m4_static_test.go` (raise-last and no-write go/ast pins).
+- Final runs (`-race -tags integration -count=1 -p 1 -timeout 120m`, private scratch database, targeted `-run`, no full-repo sweep): the
+  payments set `TestPostM4_|TestPayoutPostM4Cell|TestPayoutAlertReasonFor|TestPayoutDisputeAlert|TestB11_|TestB12|TestPayoutCallbackAudit|
+  TestCallbackAudit2|TestOrphanResolve|TestB13B_|TestM4_` = 168 top-level PASS, 0 FAIL, 0 SKIP (so the integration tests did run; 20 are the new
+  `TestPostM4_*` / `TestPayoutPostM4Cell_*` tests, 27 new subtests); `go test ./internal/alerting -count=1` PASS; gofmt, `go vet` (both tag
+  modes) and golangci-lint 2.9.0 (`--new-from-rev=5ee5885`) clean. An earlier attempt of the same set hit go test's default 10-minute
+  timeout (163 PASS, then the timeout panic); it was re-run with `-timeout 120m`.
+- Mutation evidence: `docs/plans/prh2-hardening-round/prh2-r22-cells-mutation-kill.txt` (34 counted, 28 killed, 6 survivors, all classified
+  EQUIVALENT: pairs of redundant predicates and the RLS tenant predicate; each pair is killed when both halves are mutated).
+- A finding recorded for the owner (no code change): the system-shaped sessions that run the cells can read only EXECUTED M2/M4 rows
+  (policy `tenant_system_read_executed`, 0125); the cell's own `state = 'executed'` and tenant predicates are therefore redundant there and are
+  pinned for a principal-shaped session by `TestPostM4_PendingM4_NoSignal_EvenInAPrincipalShapedSession`.
