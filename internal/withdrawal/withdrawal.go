@@ -29,6 +29,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/kyc"
 	"github.com/Diansalas/igaming-platform/internal/ledger"
+	"github.com/Diansalas/igaming-platform/internal/payoutinstrument"
 	"github.com/Diansalas/igaming-platform/internal/tenant"
 )
 
@@ -121,8 +122,28 @@ var (
 	// call's idempotency_key matches an existing request whose wallet,
 	// asset, or amount differs from the one now requested - the
 	// workflow-layer equivalent of ledger.ErrIdempotencyKeyReused.
-	ErrIdempotencyKeyReused = errors.New("withdrawal: idempotency key reused with a different wallet/asset/amount")
+	ErrIdempotencyKeyReused = errors.New("withdrawal: idempotency key reused with a different wallet/asset/amount/payout instrument")
+
+	// ErrPayoutInstrumentRequired: a new withdrawal request named no payout
+	// instrument (B13-B, ADR 0111 2.4: binding happens at request creation).
+	// No row and no hold are written and the idempotency key is not consumed.
+	ErrPayoutInstrumentRequired = errors.New("withdrawal: a payout instrument is required")
+	// ErrPayoutInstrumentNotUsable: the named instrument failed the ADR 0111
+	// 2.2 gate rule (wrong player/brand/tenant, unverified, expired, blocked,
+	// asset not listed, integrity failure). Wraps the *payoutinstrument.GateRefusal
+	// (closed reason, never a value). No row, no hold, key not consumed.
+	ErrPayoutInstrumentNotUsable = errors.New("withdrawal: payout instrument is not usable")
+	// ErrDestinationGateUnavailable: the caller supplied no destination gate. A
+	// new withdrawal can never be created without one (fail closed).
+	ErrDestinationGateUnavailable = errors.New("withdrawal: destination gate is not configured")
 )
+
+// DestinationGate is the payout-instrument gate RequestWithdrawal applies
+// (satisfied by *payoutinstrument.Service). Declared here so the withdrawal
+// package depends on the gate's behaviour, not on how it is built.
+type DestinationGate interface {
+	EvaluateGate(ctx context.Context, tx pgx.Tx, p payoutinstrument.GateParams) (payoutinstrument.GateResult, error)
+}
 
 // KYCDeniedError is returned by RequestWithdrawal when ADR 0096's
 // structural withdrawal rule (§3.2 point 1) denies the request - no
@@ -203,11 +224,19 @@ type WithdrawalRequest struct {
 	ReleaseLedgerTransactionID *uuid.UUID
 	RequestedAt                time.Time
 	UpdatedAt                  time.Time
+	// PayoutInstrumentID / PayoutInstrumentFingerprint are the B13 binding (migration
+	// 0123): both set for every request created since B13-B, both NULL only for a legacy
+	// row. The fingerprint is internal and is never serialised by any API type.
+	PayoutInstrumentID          *uuid.UUID
+	PayoutInstrumentFingerprint *string
 }
+
+// Bound reports whether the request carries a payout instrument binding.
+func (wr WithdrawalRequest) Bound() bool { return wr.PayoutInstrumentID != nil }
 
 const requestColumns = `id, tenant_id, brand_id, player_account_id, wallet_id, asset_code, amount, state,
 	idempotency_key, provider_id, provider_reference, hold_ledger_transaction_id, release_ledger_transaction_id,
-	requested_at, updated_at`
+	requested_at, updated_at, payout_instrument_id, payout_instrument_fingerprint`
 
 // rowScanner is satisfied by both pgx.Row (QueryRow) and pgx.Rows (Query,
 // via its own Next()-then-Scan() loop) so scanRequest can be shared by
@@ -221,7 +250,7 @@ func scanRequest(row rowScanner) (WithdrawalRequest, error) {
 	err := row.Scan(
 		&wr.ID, &wr.TenantID, &wr.BrandID, &wr.PlayerAccountID, &wr.WalletID, &wr.AssetCode, &wr.Amount, &wr.State,
 		&wr.IdempotencyKey, &wr.ProviderID, &wr.ProviderReference, &wr.HoldLedgerTransactionID, &wr.ReleaseLedgerTransactionID,
-		&wr.RequestedAt, &wr.UpdatedAt,
+		&wr.RequestedAt, &wr.UpdatedAt, &wr.PayoutInstrumentID, &wr.PayoutInstrumentFingerprint,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return WithdrawalRequest{}, ErrNotFound
@@ -350,6 +379,13 @@ type RequestParams struct {
 	// inserted into a global or ledger-level uniqueness namespace
 	// directly (withdrawal-state-machine.md §4).
 	IdempotencyKey string
+	// PayoutInstrumentID is the player's chosen payout instrument (B13-B, ADR 0111
+	// 2.4). REQUIRED for a new request; the instrument is the ONLY source of the
+	// destination and of the payout rail. Resolved server-side by the caller from
+	// the authenticated player's own instruments; the gate re-checks ownership.
+	PayoutInstrumentID uuid.UUID
+	// Destinations applies the gate rule. REQUIRED (nil refuses: fail closed).
+	Destinations DestinationGate
 }
 
 // RequestWithdrawal creates a WithdrawalRequest row AND posts Flow 3 Step
@@ -403,7 +439,7 @@ func RequestWithdrawal(ctx context.Context, tx pgx.Tx, params RequestParams) (Wi
 	// re-evaluate KYC (a status change between the original request and
 	// its replay must never turn an already-placed hold into a denial).
 	if existing, lookupErr := getByTenantPlayerIdempotencyKey(ctx, tx, params.TenantID, params.PlayerAccountID, params.IdempotencyKey); lookupErr == nil {
-		if existing.WalletID != params.WalletID || existing.AssetCode != params.AssetCode || existing.Amount != params.Amount {
+		if !sameRequest(existing, params) {
 			return WithdrawalRequest{}, fmt.Errorf("%w: existing request %s", ErrIdempotencyKeyReused, existing.ID)
 		}
 		return existing, nil
@@ -419,6 +455,31 @@ func RequestWithdrawal(ctx context.Context, tx pgx.Tx, params RequestParams) (Wi
 	// idempotency key is not consumed (it lives only on the request row).
 	if err := tenant.RequireActiveForPaymentInitiation(ctx, tx, params.TenantID, params.BrandID); err != nil {
 		return WithdrawalRequest{}, fmt.Errorf("withdrawal: request refused: %w", err)
+	}
+
+	// B13-B (ADR 0111 2.4, owner decisions 2 and 4): BINDING happens here. After the
+	// H-SEC-11 gate and BEFORE the KYC evaluation and any write, the named instrument
+	// is locked FOR SHARE and the gate rule applies (same tenant/brand/player/person,
+	// verified, in-force latest verification, unexpired, no revoke / later suspend,
+	// seals and fingerprint intact, asset listed). A refusal returns an error with NO
+	// row, NO hold and NO decision row: the caller rolls back and the idempotency key
+	// is not consumed. No adapter is involved yet, so the tiering predicate is not
+	// applied here (it runs at T1p, phase B and T2/T12).
+	if params.PayoutInstrumentID == uuid.Nil {
+		return WithdrawalRequest{}, ErrPayoutInstrumentRequired
+	}
+	if params.Destinations == nil {
+		return WithdrawalRequest{}, ErrDestinationGateUnavailable
+	}
+	gate, gerr := params.Destinations.EvaluateGate(ctx, tx, payoutinstrument.GateParams{
+		TenantID: params.TenantID, BrandID: params.BrandID, PlayerAccountID: params.PlayerAccountID, PersonID: params.PersonID,
+		InstrumentID: params.PayoutInstrumentID, AssetCode: params.AssetCode, Lock: true,
+	})
+	if gerr != nil {
+		if _, ok := payoutinstrument.IsGateRefusal(gerr); ok {
+			return WithdrawalRequest{}, fmt.Errorf("%w: %w", ErrPayoutInstrumentNotUsable, gerr)
+		}
+		return WithdrawalRequest{}, fmt.Errorf("withdrawal: evaluate payout instrument gate: %w", gerr)
 	}
 
 	// ADR 0096 §5 exact placement: immediately after the idempotency-
@@ -462,10 +523,11 @@ func RequestWithdrawal(ctx context.Context, tx pgx.Tx, params RequestParams) (Wi
 	conflict, _, err := db.IdempotentInsert(ctx, tx, func(spTx pgx.Tx) error {
 		_, err := spTx.Exec(ctx,
 			`INSERT INTO withdrawal_requests
-				(id, tenant_id, brand_id, player_account_id, wallet_id, asset_code, amount, idempotency_key)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+				(id, tenant_id, brand_id, player_account_id, wallet_id, asset_code, amount, idempotency_key,
+				 payout_instrument_id, payout_instrument_fingerprint)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
 			requestID, params.TenantID, params.BrandID, params.PlayerAccountID, params.WalletID, params.AssetCode,
-			params.Amount, params.IdempotencyKey,
+			params.Amount, params.IdempotencyKey, gate.Instrument.ID, gate.Instrument.Fingerprint,
 		)
 		return err
 	})
@@ -478,7 +540,7 @@ func RequestWithdrawal(ctx context.Context, tx pgx.Tx, params RequestParams) (Wi
 		if lookupErr != nil {
 			return WithdrawalRequest{}, fmt.Errorf("withdrawal: look up existing request for idempotency key: %w", lookupErr)
 		}
-		if existing.WalletID != params.WalletID || existing.AssetCode != params.AssetCode || existing.Amount != params.Amount {
+		if !sameRequest(existing, params) {
 			return WithdrawalRequest{}, fmt.Errorf("%w: existing request %s", ErrIdempotencyKeyReused, existing.ID)
 		}
 		return existing, nil
@@ -556,6 +618,8 @@ func RequestWithdrawal(ctx context.Context, tx pgx.Tx, params RequestParams) (Wi
 			"amount":     params.Amount,
 			"asset_code": params.AssetCode,
 			"wallet_id":  params.WalletID.String(),
+			// B13-B: the instrument id only. Never the fingerprint, mask or detail.
+			"payout_instrument_id": gate.Instrument.ID.String(),
 		},
 	}); err != nil {
 		return WithdrawalRequest{}, fmt.Errorf("withdrawal: audit: %w", err)
@@ -583,6 +647,20 @@ func RequestWithdrawal(ctx context.Context, tx pgx.Tx, params RequestParams) (Wi
 	}
 
 	return GetByID(ctx, tx, requestID)
+}
+
+// sameRequest reports whether an idempotency replay names the same wallet,
+// asset, amount AND payout instrument as the stored request (B13-B, ADR 0111
+// 2.4: a replay with a different instrument is ErrIdempotencyKeyReused). A legacy
+// request (NULL binding) replays only with no instrument id.
+func sameRequest(existing WithdrawalRequest, p RequestParams) bool {
+	if existing.WalletID != p.WalletID || existing.AssetCode != p.AssetCode || existing.Amount != p.Amount {
+		return false
+	}
+	if existing.PayoutInstrumentID == nil {
+		return p.PayoutInstrumentID == uuid.Nil
+	}
+	return *existing.PayoutInstrumentID == p.PayoutInstrumentID
 }
 
 // MoveToPendingReview transitions a request from `requested` to

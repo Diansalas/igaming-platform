@@ -240,6 +240,9 @@ func run() error {
 	// (TestMain_ConstructsNoProviderComponentOutsideRegistrations).
 	orchestrator := payments.NewOrchestrator(providers.paymentsAdapters(), providers.paymentsOrchestratorResolver())
 	orchestrator.SetWebhookLogger(logger) // W2A-SEC-2 matched-key_id line
+	// B13-B (ADR 0111 section 16): the payout destination service every payout path (T1p, T2/T12,
+	// phase B/C, poll, callback) uses. Nil (no keys) refuses every bound payout: fail closed.
+	orchestrator.WithPayoutDestinations(payoutInstruments)
 
 	// KYC-WH-1 (Stage 10.2, ADR 0091; final review K11): providers.KYC is
 	// non-nil ONLY when wiring enabled it at bundle-construction time (ADR
