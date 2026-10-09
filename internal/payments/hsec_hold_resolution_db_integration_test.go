@@ -478,7 +478,7 @@ func TestHSEC_HoldRelease_CTR3_KeyCorrelationShapeLinkForgeries(t *testing.T) {
 		{"the state edge to submitted", func(ctx context.Context, tx pgx.Tx) error {
 			_, err := tx.Exec(ctx, `UPDATE withdrawal_requests SET state = 'submitted' WHERE id = $1`, wr.ID)
 			return err
-		}, []string{"HR030", "42501"}},
+		}, []string{"HR050", "HR030", "42501"}},
 		// state 'rejected' passes the acting policy WITH CHECK, so only the trigger can stop it.
 		{"rejected with an unrelated link", func(ctx context.Context, tx pgx.Tx) error {
 			_, err := tx.Exec(ctx, `UPDATE withdrawal_requests SET state = 'rejected', release_ledger_transaction_id = hold_ledger_transaction_id WHERE id = $1`, wr.ID)
@@ -736,7 +736,7 @@ func TestHSEC_HoldRelease_FreezeTrigger(t *testing.T) {
 			default:
 				h.suspendBrand()
 			}
-			for _, to := range []string{"rejected", "cancelled", "failed"} {
+			for _, to := range []string{"rejected", "cancelled", "failed", "submitted", "requested"} {
 				sessions := map[string]func(fn func(ctx context.Context, tx pgx.Tx) error) error{
 					"tenant": func(fn func(ctx context.Context, tx pgx.Tx) error) error {
 						return h.rt.WithTenant(context.Background(), h.f.tenantID, fn)
@@ -964,4 +964,98 @@ func TestHSEC_HoldRelease_Migration0124DownRefusals(t *testing.T) {
 		_, err := h.pool.MigrateDown(context.Background(), migration0101Dir(t, hsecMigrationVersion), 1)
 		k3RequireCode(t, err, "HR099")
 	})
+}
+
+// Security C-1: the deferred check FAILS CLOSED when the resolution row is not visible to the
+// committing session (here the acting settings are cleared before commit).
+func TestHSEC_HoldRelease_DeferredCheck_RaisesWhenRowNotVisibleAtCommit(t *testing.T) {
+	h := newHSR(t, 1)
+	wr := h.hold(100)
+	h.suspendTenant()
+	err := h.acting(h.reqA, func(ctx context.Context, tx pgx.Tx) error {
+		if err := h.proof(ctx, tx, "withdrawal_hold_resolution:request", "new", hsrRequestDigest(h, wr.ID)); err != nil {
+			return err
+		}
+		if err := hsrRawRequest(ctx, tx, h, wr.ID); err != nil {
+			return err
+		}
+		// Control inside the txn: the row is visible now. Then the session settings change.
+		_, err := tx.Exec(ctx, `SELECT set_config('app.acting_tenant_id', '', true), set_config('app.acting_platform_principal_id', '', true)`)
+		return err
+	})
+	if !hsrIs(err, "HR041") {
+		t.Fatalf("an invisible-at-commit resolution must raise HR041, got %v", err)
+	}
+	if n := h.count(`SELECT count(*) FROM audit_log WHERE action = 'withdrawal.hold_resolution_requested'`); n != 0 {
+		t.Fatalf("audit rows: %d", n)
+	}
+}
+
+// Security C-2: the brands lock-only policy grants no write: an acting UPDATE is refused by
+// its WITH CHECK (false), and a locking read still works.
+func TestHSEC_HoldRelease_ActingBrandsPolicyIsLockOnly(t *testing.T) {
+	h := newHSR(t, 1)
+	err := h.acting(h.reqA, func(ctx context.Context, tx pgx.Tx) error {
+		var st string
+		if err := tx.QueryRow(ctx, `SELECT status FROM brands WHERE id = $1 AND tenant_id = $2 FOR SHARE`, h.f.brandID, h.f.tenantID).Scan(&st); err != nil {
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("control: the acting FOR SHARE read must work: %v", err)
+	}
+	err = h.acting(h.reqA, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `UPDATE brands SET name = name WHERE id = $1`, h.f.brandID)
+		return err
+	})
+	if !hsrIs(err, "42501") {
+		t.Fatalf("an acting UPDATE brands must be refused by the policy WITH CHECK (42501), got %v", err)
+	}
+	err = h.acting(h.reqA, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `UPDATE brands SET status = 'closed' WHERE id = $1`, h.f.brandID)
+		return err
+	})
+	if !hsrIs(err, "42501") {
+		t.Fatalf("an acting status UPDATE must be refused (42501), got %v", err)
+	}
+}
+
+// Security F-4: cancel and expire null every execution-time column, even if the UPDATE names values.
+func TestHSEC_HoldRelease_CancelAndExpire_NullExecutionColumns(t *testing.T) {
+	h := newHSR(t, 1)
+	wr := h.hold(100)
+	wr2 := h.hold(101)
+	h.suspendTenant()
+	forged := `, tenant_status_at_execution = 'suspended', brand_status_at_execution = 'suspended', required_at_execution = 9, contributing_policy_ids_at_execution = ARRAY[gen_random_uuid()]`
+	read := func(id uuid.UUID) (n int) {
+		if err := h.acting(h.reqA, func(ctx context.Context, tx pgx.Tx) error {
+			return tx.QueryRow(ctx, `SELECT count(*) FROM withdrawal_hold_resolutions WHERE id = $1 AND tenant_status_at_execution IS NULL
+				AND brand_status_at_execution IS NULL AND required_at_execution IS NULL AND contributing_policy_ids_at_execution IS NULL`, id).Scan(&n)
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	r1 := h.mustRequest(h.reqA, wr.ID)
+	if err := h.attackAs(h.reqA, h.forger.Valid(t, h.reqA.ID, "platform_acting", h.f.tenantID, "withdrawal_hold_resolution:cancel", r1.ID.String(), r1.PayloadHash), func(ctx context.Context, tx pgx.Tx) error {
+		_, e := tx.Exec(ctx, `UPDATE withdrawal_hold_resolutions SET state = 'cancelled'`+forged+` WHERE id = $1`, r1.ID)
+		return e
+	}); err != nil {
+		t.Fatalf("cancel: %v", err)
+	}
+	if h.res(r1.ID).State != ResolutionCancelled || read(r1.ID) != 1 {
+		t.Fatal("cancel left execution-time columns set")
+	}
+	r2 := h.mustRequest(h.reqA, wr2.ID)
+	h.backdate(r2.ID)
+	if err := h.acting(h.reqA, func(ctx context.Context, tx pgx.Tx) error {
+		_, e := tx.Exec(ctx, `UPDATE withdrawal_hold_resolutions SET state = 'expired'`+forged+` WHERE id = $1`, r2.ID)
+		return e
+	}); err != nil {
+		t.Fatalf("expire: %v", err)
+	}
+	if h.res(r2.ID).State != ResolutionExpired || read(r2.ID) != 1 {
+		t.Fatal("expire left execution-time columns set")
+	}
 }

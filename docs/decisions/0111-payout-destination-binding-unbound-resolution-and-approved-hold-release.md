@@ -863,7 +863,7 @@ precondition); the rest is deferred as HD-R15-9.
 
 ---
 
-## 12. HSEC implementation notes (HSEC-APPROVED-HOLD-RELEASE-1, migration 0124)
+## 15. HSEC implementation notes (HSEC-APPROVED-HOLD-RELEASE-1, migration 0124)
 
 Appended by the `payments` implementer. The design above is **not** rewritten; this section records each
 ambiguity chosen while implementing §6 (safest reading in every case), the objects the implementation touches
@@ -873,6 +873,24 @@ resolution/release/cancel, no unilateral single-staff action, kill-switch semant
 `IMPLEMENTED` against the MOCK stack (migration `0124_withdrawal_hold_resolution`, `internal/payments/
 withdrawal_hold_resolution.go`, `withdrawal.ReleaseForGovernedResolution`, routes under
 `/v1/admin/tenants/{tenantID}/withdrawal-hold-resolutions`); no real provider is involved or called.
+
+**Security conditions applied after review (C-1..C-3, F-4).**
+
+- **C-1.** The deferred shape check (HR041) now RAISES when the resolution row is not visible to the committing session
+  (it previously returned silently); pinned by `TestHSEC_HoldRelease_DeferredCheck_RaisesWhenRowNotVisibleAtCommit`.
+- **C-2.** `acting_lock` on `brands` is lock-only: an acting `UPDATE brands` is refused by its `WITH CHECK (false)`
+  (42501), pinned by `TestHSEC_HoldRelease_ActingBrandsPolicyIsLockOnly` and mutant S49.
+- **C-3 (wording).** The approved-hold freeze covers **any state change out of `approved`** (widened trigger `WHEN`:
+  `OLD.state = 'approved' AND NEW.state IS DISTINCT FROM OLD.state`), not only the three direct transitions to
+  rejected/cancelled/failed; the single exemption is `approved -> rejected` of an executing hold resolution of this
+  transaction. The deferred two-leg check and the freeze both read tenant, brand and resolution rows **under the
+  committing session's settings** (RLS and the acting GUCs): a session that can see neither fails closed (HR041 / HR050),
+  but the checks are not independent of session state. **Stated residual (ADR 0110 T5):** a runtime session with
+  arbitrary SQL can still write ordinary, non-governed postings and a forged ordinary posting is bounded only by ledger
+  invariants and reconciliation; these triggers stop the governed key and the frozen state edges, nothing more.
+- **F-4.** Cancel, expire and reject null `tenant_status_at_execution`, `brand_status_at_execution`,
+  `required_at_execution` and `contributing_policy_ids_at_execution` (tests for cancel and expire; the reject branch is
+  the same statement and is reachable only through the approvals trigger).
 
 **What 0125 must build on (replace-in-place objects).** The four shared objects of §7.2, in 0124's bodies, each
 equal to the 0115 text plus exactly the marked HSEC addition: `ledger_governed_fence_allows` (+ branch (e)),
@@ -954,7 +972,7 @@ text byte for byte (whole-schema snapshot test).
   version gaps); during development they were stood in for by untracked no-op placeholders that are **not** part of
   this change.
 
-**Policy question for the human (not decided here; the design fails closed around it).** Q-HSEC-1: should an
+**Open OWNER question (not decided here; the design fails closed around it; no production policy row is added by this change).** Q-HSEC-1: should an
 engaged payment kill switch for the tenant also block `release_hold_to_player` execution? Implemented as "no"
 (the switch stops outbound provider dispatch; this movement returns the player's own funds and sends nothing). If
 the answer is "yes" it is a one-line addition to the executor's preconditions plus the migration-side recheck.

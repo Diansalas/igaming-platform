@@ -114,3 +114,12 @@ Restore check. After every mutant the file was compared with its backup (the har
 sweep `git status --short` is empty and `cmp backup file` is identical for migrations/0124_withdrawal_hold_resolution.up.sql,
 internal/payments/withdrawal_hold_resolution.go, internal/withdrawal/withdrawal.go, internal/actorproof/actorproof.go and
 internal/auth/permission.go (each: identical).
+
+Round 4 (security review conditions C-1, C-2, F-4 and the widened freeze; 4 new mutants, 0 compile errors):
+S48 deferred check returns silently when the resolution row is not visible (C-1)           KILLED  DeferredCheck_RaisesWhenRowNotVisibleAtCommit
+S49 brands acting_lock WITH CHECK (false) -> (true) (C-2)                                   KILLED  ActingBrandsPolicyIsLockOnly
+S50 cancel/expire/reject no longer null the four execution-time columns (F-4)              KILLED  CancelAndExpire_NullExecutionColumns
+S51 freeze trigger WHEN narrowed back to rejected/cancelled/failed                          KILLED  FreezeTrigger (submitted/requested edges)
+Note: the reject branch of S50 is covered only through the same statement (reachable solely via the approvals trigger).
+Totals now: 66 mutants; 61 KILLED; 5 SURVIVED (unchanged, listed above). Files restored and cmp-identical.
+ADR 0111 section "HSEC implementation notes" was renumbered 12 -> 15.

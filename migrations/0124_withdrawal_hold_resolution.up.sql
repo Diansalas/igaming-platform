@@ -454,12 +454,16 @@ BEGIN
             RAISE EXCEPTION 'withdrawal_hold_resolutions: only the requester may cancel' USING ERRCODE = 'HR030';
         END IF;
         NEW.executed_txid := NULL; NEW.ledger_transaction_id := NULL; NEW.refusal_code := NULL;
+        NEW.required_at_execution := NULL; NEW.contributing_policy_ids_at_execution := NULL;
+        NEW.tenant_status_at_execution := NULL; NEW.brand_status_at_execution := NULL;
         RETURN NEW;
     ELSIF OLD.state = 'pending' AND NEW.state = 'expired' THEN
         IF now() < OLD.expires_at THEN
             RAISE EXCEPTION 'withdrawal_hold_resolutions: resolution has not expired' USING ERRCODE = 'HR030';
         END IF;
         NEW.executed_txid := NULL; NEW.ledger_transaction_id := NULL; NEW.refusal_code := NULL;
+        NEW.required_at_execution := NULL; NEW.contributing_policy_ids_at_execution := NULL;
+        NEW.tenant_status_at_execution := NULL; NEW.brand_status_at_execution := NULL;
         RETURN NEW;
     ELSIF OLD.state = 'pending' AND NEW.state = 'rejected' THEN
         IF NOT EXISTS (SELECT 1 FROM withdrawal_hold_resolution_approvals a
@@ -467,6 +471,8 @@ BEGIN
             RAISE EXCEPTION 'withdrawal_hold_resolutions: rejected only via a same-transaction reject decision' USING ERRCODE = 'HR030';
         END IF;
         NEW.executed_txid := NULL; NEW.ledger_transaction_id := NULL; NEW.refusal_code := NULL;
+        NEW.required_at_execution := NULL; NEW.contributing_policy_ids_at_execution := NULL;
+        NEW.tenant_status_at_execution := NULL; NEW.brand_status_at_execution := NULL;
         RETURN NEW;
     ELSIF OLD.state = 'pending' AND NEW.state IN ('refused_at_execution', 'executing') THEN
         IF NOT EXISTS (SELECT 1 FROM withdrawal_hold_resolution_approvals a
@@ -590,7 +596,9 @@ DECLARE
 BEGIN
     SELECT * INTO r FROM withdrawal_hold_resolutions WHERE id = NEW.id;
     IF NOT FOUND THEN
-        RETURN NULL;
+        -- Fail closed (security C-1): a row that was just written but is not visible to the
+        -- committing session (RLS / session settings changed before commit) is never skipped.
+        RAISE EXCEPTION 'withdrawal_hold_resolutions: resolution % is not visible at commit; the deferred shape check cannot run', NEW.id USING ERRCODE = 'HR041';
     END IF;
     IF r.state = 'executing' THEN
         RAISE EXCEPTION 'withdrawal_hold_resolutions: resolution % may not commit in state executing', NEW.id USING ERRCODE = 'HR041';
@@ -791,8 +799,8 @@ CREATE TRIGGER withdrawal_requests_governed_release_guard
     WHEN (NEW.state IS DISTINCT FROM OLD.state OR NEW.release_ledger_transaction_id IS DISTINCT FROM OLD.release_ledger_transaction_id)
     EXECUTE FUNCTION withdrawal_requests_governed_release_guard();
 
--- (c) The approved-hold freeze (security M-6): approved -> rejected | cancelled |
--- failed is refused while the tenant OR the brand is not active (an unreadable
+-- (c) The approved-hold freeze (security M-6, widened by security C-3): ANY state change out
+-- of `approved` (rejected, cancelled, failed, submitted, ...) is refused while the tenant OR the brand is not active (an unreadable
 -- status counts as not active), unless the transition is approved -> rejected of
 -- an executing hold resolution of this transaction. The normal KYC denial
 -- (DenyForCompliance) runs only after the H-SEC gate, i.e. only while both are
@@ -814,7 +822,7 @@ BEGIN
                                              AND h.state = 'executing' AND h.executed_txid = txid_current()) THEN
         RETURN NEW;
     END IF;
-    RAISE EXCEPTION 'withdrawal_requests: an approved hold on a non-active tenant or brand is frozen (approved -> % refused; ADR 0111 6.4)', NEW.state USING ERRCODE = 'HR050';
+    RAISE EXCEPTION 'withdrawal_requests: an approved hold on a non-active tenant or brand is frozen (approved -> % refused; ADR 0111 6.4, security M-6)', NEW.state USING ERRCODE = 'HR050';
 END;
 $$ LANGUAGE plpgsql
     SET search_path = pg_catalog, public, pg_temp;
@@ -822,7 +830,7 @@ $$ LANGUAGE plpgsql
 CREATE TRIGGER withdrawal_requests_approved_hold_freeze
     BEFORE UPDATE ON withdrawal_requests
     FOR EACH ROW
-    WHEN (OLD.state = 'approved' AND NEW.state IN ('rejected', 'cancelled', 'failed'))
+    WHEN (OLD.state = 'approved' AND NEW.state IS DISTINCT FROM OLD.state)
     EXECUTE FUNCTION withdrawal_requests_approved_hold_freeze();
 
 -- =========================================================================
