@@ -1,0 +1,67 @@
+PRH2 R22 post-M4 signal cells (ADR 0111 section 4.8, F-1; section 20) - MUTATION-KILL EVIDENCE
+Scope: internal/payments/payout_post_m4.go (the cell), receipt.go (callback cells), payout.go (poll and late-evidence cells), payout_alerts.go (closed signal set), and the internal/alerting static pins.
+Generated 2026-10-09 on branch gov-r22-cells (base 5ee5885). Method: each mutant is applied IN PLACE to the named file of the worktree after a backup copy is taken, the package is vetted with -tags integration
+(a mutant that fails to compile is reported and NOT counted), the targeted tests run with `-tags integration -count=1 -p 1 -failfast -run TestPostM4_|TestPayoutPostM4Cell|TestPayoutAlertReasonFor` against the private scratch
+database r22_cells_scratch (the payments tests create their own scratch databases), then the file is restored from the backup and compared with cmp (every line below ends restored+cmp=identical).
+The S mutants run `go test ./internal/alerting -count=1` instead. -failfast: the killer is the first failing test. The mutation loops are NOT under -race (compile time); the final suites are (ADR 0111 section 20.5).
+Run 1 covered P01-P18, R01-R06, Y01-Y05, A01 (P12 did not compile). Review of its survivors added tests (TestPostM4_PendingM4_NoSignal_EvenInAPrincipalShapedSession, TestPostM4_AnotherAttemptsExecutedM4_SameTenant_DoesNotTrigger,
+TestPostM4_ReceiptlessSources_OneRowPerEvidenceKind, the poll_stale_amount_mismatch shape) and run 2 re-ran P04, P07, P08, P11, Y04 and added P07b, P12b, S01, S02; the line shown is the LATEST result of each id.
+
+CONTROL (unmutated tree, same command): payments rc=0 (PASS, 0 SKIP); `go test ./internal/alerting -count=1` rc=0
+
+Counted mutants: 34   KILLED: 28   SURVIVED: 6 (all EQUIVALENT, listed below)   not counted (compile/apply error): 1 (run 1 P12, superseded by P12b)
+
+id    result    mutation / first failing test
+A01   KILLED    new reasons missing from the closed signal set (alert maps to unclassified)  =>  --- FAIL: TestPayoutAlertReasonFor_ClosedSet (0.00s)
+P01   SURVIVED  attempt-disputed re-read check dropped  =>  (all targeted tests pass)
+P02   SURVIVED  wr.State check dropped (executed-M4 row still required)  =>  (all targeted tests pass)
+P03   KILLED    cell kinds swapped (success looks for the paid M4)  =>  --- FAIL: TestPostM4_Callback_BothCells_OneAuditRowOneAlert_NothingMoves (4.10s)
+P04   KILLED    executed-state predicate dropped from the M4 lookup  =>  --- FAIL: TestPostM4_PendingM4_NoSignal_EvenInAPrincipalShapedSession (2.52s)
+P05   SURVIVED  kind predicate dropped from the M4 lookup  =>  (all targeted tests pass)
+P05b  KILLED    wr.State check AND kind predicate both dropped  =>  --- FAIL: TestPostM4_AgreeingEvidence_NoSignal (3.66s)
+P06   SURVIVED  tenant predicate dropped from the M4 lookup (RLS remains)  =>  (all targeted tests pass)
+P07   SURVIVED  attempt predicate dropped from the M4 lookup  =>  (all targeted tests pass)
+P07b  KILLED    attempt AND withdrawal predicates both dropped from the M4 lookup  =>  --- FAIL: TestPostM4_AnotherAttemptsExecutedM4_SameTenant_DoesNotTrigger (2.72s)
+P08   SURVIVED  withdrawal predicate dropped from the M4 lookup  =>  (all targeted tests pass)
+P09   KILLED    callback audit written for every delivery (receipt gate ignored)  =>  --- FAIL: TestPostM4_Callback_Replay_OnceAuditPerReceipt_OneAlertGrowingOccurrences (6.26s)
+P10   KILLED    poll/sync audit written on every evidence (once-per-attempt lookup ignored)  =>  --- FAIL: TestPostM4_DestinationMismatchPark_NotPaid_ThenPoll_Succeeded_Signals (3.05s)
+P11   KILLED    audit lookup ignores the evidence kind  =>  --- FAIL: TestPostM4_ReceiptlessSources_OneRowPerEvidenceKind (2.14s)
+P12b  KILLED    audit row never written (write && false)  =>  --- FAIL: TestPostM4_Callback_BothCells_OneAuditRowOneAlert_NothingMoves (2.95s)
+P13   KILLED    alert reason of the success cell is the other cell's reason  =>  --- FAIL: TestPostM4_Callback_BothCells_OneAuditRowOneAlert_NothingMoves (3.21s)
+P14   KILLED    raise BEFORE the audit row  =>  --- FAIL: TestPostM4_Callback_BothCells_OneAuditRowOneAlert_NothingMoves (2.75s)
+P15   KILLED    raise only when an audit row was written (replays raise nothing)  =>  --- FAIL: TestPostM4_DestinationMismatchPark_NotPaid_ThenPoll_Succeeded_Signals (2.76s)
+P16   KILLED    decline cell removed (no contradiction_after_m4_paid)  =>  --- FAIL: TestPostM4_Callback_BothCells_OneAuditRowOneAlert_NothingMoves (6.27s)
+P17   KILLED    success cell removed (no success_after_m4_not_paid)  =>  --- FAIL: TestPostM4_Callback_BothCells_OneAuditRowOneAlert_NothingMoves (3.03s)
+P18   KILLED    audit does not record the M4 resolution id  =>  --- FAIL: TestPostM4_Callback_BothCells_OneAuditRowOneAlert_NothingMoves (3.13s)
+R01   KILLED    receipt success cell on a disputed attempt reverted to the silent no-op  =>  --- FAIL: TestPostM4_Callback_BothCells_OneAuditRowOneAlert_NothingMoves (3.35s)
+R02   KILLED    receipt decline cell on a disputed attempt reverted to the silent no-op  =>  --- FAIL: TestPostM4_Callback_BothCells_OneAuditRowOneAlert_NothingMoves (5.74s)
+R03   KILLED    receipt success cell: audit gate always true (not once per receipt)  =>  --- FAIL: TestPostM4_Callback_Replay_OnceAuditPerReceipt_OneAlertGrowingOccurrences (2.47s)
+R04   KILLED    receipt decline cell: audit gate always true  =>  --- FAIL: TestPostM4_Callback_Replay_OnceAuditPerReceipt_OneAlertGrowingOccurrences (5.31s)
+R05   KILLED    receipt success cell: audit gate always false (never audited)  =>  --- FAIL: TestPostM4_Callback_BothCells_OneAuditRowOneAlert_NothingMoves (3.04s)
+R06   KILLED    receipt decline cell: the cell is told the wrong outcome (succeeded)  =>  --- FAIL: TestPostM4_Callback_BothCells_OneAuditRowOneAlert_NothingMoves (5.79s)
+S01   KILLED    an unreviewed extra caller of payoutPostM4Cell (alerting static pin)  =>  --- FAIL: TestStaticWiring_PayoutPostM4CellSitesArePinned_F1 (0.35s)
+S02   KILLED    a second raisePayoutDisputeAlert in payoutPostM4Cell (alerting raise-site pin)  =>  --- FAIL: TestStaticWiring_PayoutDisputeRaiseSitesArePinned_B12 (0.35s)
+Y01   KILLED    poll: success on a disputed attempt reverted to the silent no-op  =>  --- FAIL: TestPostM4_Poll_BothCells_OneAuditRowOneAlert_NothingMoves (3.23s)
+Y02   KILLED    poll: decline on a disputed attempt reverted to the silent no-op  =>  --- FAIL: TestPostM4_Poll_BothCells_OneAuditRowOneAlert_NothingMoves (5.94s)
+Y03   KILLED    late evidence on a disputed attempt reverted to the silent no-op  =>  --- FAIL: TestPostM4_LateEvidence_StaleSnapshot_Sync_And_Poll (3.13s)
+Y04   KILLED    late-contradiction path always reports a decline  =>  --- FAIL: TestPostM4_LateEvidence_StaleSnapshot_Sync_And_Poll (7.44s)
+Y05   KILLED    late success path reports a decline  =>  --- FAIL: TestPostM4_LateEvidence_StaleSnapshot_Sync_And_Poll (2.30s)
+
+SURVIVORS (honest classification):
+P02  EQUIVALENT: an `executed` M4 row of the kind exists only together with its posting (the withdrawal is `failed` / `completed`; migration 0125 MR041 and the executing-only fences), so the withdrawal-state test cannot differ from the row test in any reachable state. It is load-bearing only in combination with the kind predicate, see P05b.
+P01  EQUIVALENT: a payout attempt leaves `disputed` only through an M2 resolution, and the unique index payment_manual_resolutions_one_executed (one executed resolution per attempt) excludes an M2 beside the executed M4 the cell requires, so the locked re-read can only agree with the caller's `case AttemptDisputed`. Kept as defence in depth against a stale caller copy.
+P02  EQUIVALENT: an `executed` M4 row of the kind exists only together with its posting (the withdrawal is `failed` / `completed`; migration 0125 MR041 and the executing-only fences), so the withdrawal-state test cannot differ from the row test in any reachable state. It is load-bearing only in combination with the kind predicate, see P05b.
+P05  EQUIVALENT: with the withdrawal-state test in force (P02) a row of the other kind cannot coexist (a withdrawal is failed OR completed, one executed M4 per attempt: payment_manual_resolutions_one_executed). Each of the pair is redundant, the pair is not: P05b is KILLED.
+P06  EQUIVALENT under RLS: every session that runs the cell is tenant-bound (WithTenant / WithPrincipalScope), and the policies on payment_manual_resolutions filter by tenant_id, so the explicit tenant predicate is defence in depth. The cross-tenant behaviour itself is pinned by TestPostM4_TenantIsolation_AnotherTenantsM4_CannotTriggerOrSuppress.
+P07  EQUIVALENT: the attempt and the withdrawal predicates each pin the same single attempt of an M4-scope withdrawal; either alone suffices. Each of the pair is redundant, the pair is not: P07b is KILLED.
+P08  EQUIVALENT: see P07.
+
+NOT COVERED by mutation (stated, not hidden): the SQL lookup text of the audit once-per-source check is mutated only through P10/P11; the go/ast raise-last pin (TestPayoutPostM4Cell_*) is exercised by P14 (raise before audit) and S02,
+but a reordering that keeps one raise last and moves a second audit.Record is not mutated. Real-provider status semantics are PROVIDER DEPENDENT and have no mutant (ADR 0111 section 20.4).
+
+ROUND 2 (review conditions LF C-1 / security LOW-1, LOW-2; same method, tests TestPostM4_ReceiptlessAudit_KeyedByReference_AndCapped added)
+K01   KILLED    receipt-less dedupe ignores the reference key  =>  --- FAIL: TestPostM4_ReceiptlessAudit_KeyedByReference_AndCapped
+K02   KILLED    distinct-reference cap (8 rows per attempt and reason) removed  =>  --- FAIL: TestPostM4_ReceiptlessAudit_KeyedByReference_AndCapped
+K03   SURVIVED  receipt-less lookup not bounded by created_at >= the attempt's creation time  =>  (all targeted tests pass)
+K03 is EQUIVALENT in behaviour: the bound only lets the (tenant_id, created_at) index limit the scan (security LOW-2); no row older than the attempt can match target_id.
+A first run of K01-K03 against an unfixed tree was discarded: the late-evidence path dropped the reported reference (it now passes it through applyPayoutLateEvidence).

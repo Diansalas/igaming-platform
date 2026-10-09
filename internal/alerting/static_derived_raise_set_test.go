@@ -122,6 +122,13 @@ var staticDerivedRaiseSetReviewed = map[string]bool{
 	"internal/payments/payout_destination.go:payoutDestinationEvidence":        true,
 	"internal/payments/payout_destination.go:payoutTerminalDestinationSignal":  true,
 	"internal/payments/receipt_repair_alerts.go:raiseReceiptRepairAlertReason": true,
+	// ADR 0111 section 4.8 / section 20 (F-1, post-M4 signal cells): payoutPostM4Cell is the ONE function that raises the
+	// success_after_m4_not_paid / contradiction_after_m4_paid P1. It reaches RaiseGuarded outside an InTx closure itself
+	// (it takes the caller's tx), so it is reviewed here; it is called ONLY from applyResolvedReceiptEvidence (webhook
+	// InTx), applyPayoutLateEvidence and applyPayoutStatusEvidenceInTx (the ApplyPayoutResult / applyPayoutStatusEvidence
+	// InTx owners), all already in this set, and the call sites are pinned by
+	// TestStaticWiring_PayoutPostM4CellSitesArePinned_F1. The raise is its last statement, after its audit row.
+	"internal/payments/payout_post_m4.go:payoutPostM4Cell": true,
 }
 
 func TestStaticWiring_DerivedRaiseReachingSetIsReviewed_CR2S4(t *testing.T) {

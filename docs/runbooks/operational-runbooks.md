@@ -699,3 +699,12 @@ lookup key, keys fixed from platform state). A large legitimate stream (many re-
 therefore hit the overflow refusal sooner than before. The overflow is equally loud and fail-closed (whole stream refused,
 P1, nothing cleared); treat it as possible tampering until it is proven to be re-delivery (ADR 0111 §4.3). The dedicated
 overflow runbook entry (LOW-1 / RM-4) is still open.
+
+### Related alert: `success_after_m4_not_paid` / `contradiction_after_m4_paid` (ADR 0111 §4.8, §20)
+
+These are P1 `payment.webhook_integrity` alerts raised, with no state change, when the provider reports a payout after an
+executed M4 that contradicts it. **An operator may close a `success_after_m4_not_paid` alert only once reconciliation RR-1
+shows `recovered = amount` for exactly one payout** (the platform got the released money back, once). The alert and RR-1 are
+different channels and **neither clears the other**: closing the alert does not recover anything, and a recovery shown by RR-1
+does not close the alert. `contradiction_after_m4_paid` is closed only after a human has established with the provider which
+side is right; nothing in the platform moves money back on its own (governed WITHDRAWAL-REVERSAL-1 is required first).

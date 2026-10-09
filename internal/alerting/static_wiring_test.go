@@ -259,6 +259,7 @@ func staticDiscardedRaiseResults(calls []staticCall) []string {
 		"raiseSubmissionFailedTerminal": true, "raiseDepositEscalationAlert": true,
 		"raisePayoutDisputeAlert": true, "payoutAlertAfterDispute": true,
 		"raiseReceiptRepairRefusedAlert": true, "raiseReceiptRepairAlertReason": true,
+		"payoutPostM4Cell": true, // ADR 0111 4.8 (F-1): its return value IS the raise
 	}
 	var out []string
 	for _, c := range calls {
@@ -367,6 +368,9 @@ func g(ctx, tx any) error { return raisePayoutDisputeAlert(ctx, tx, a, r) }`
 		"internal/payments/payout_destination.go:destinationGateAndEscalate:raisePayoutDisputeAlert":      1, // T2/T12 gate denial escalation
 		"internal/payments/payout_destination.go:parkPayoutDestination:raisePayoutDisputeAlert":           1, // destination_mismatch / integrity park
 		"internal/payments/payout_destination.go:payoutTerminalDestinationSignal:raisePayoutDisputeAlert": 1, // terminal-attempt signal (additive)
+		// ADR 0111 4.8 (F-1): the post-M4 signal cells. One function, one raise, the LAST statement after its audit row;
+		// reached only through the three pinned call sites in TestStaticWiring_PayoutPostM4CellSitesArePinned_F1.
+		"internal/payments/payout_post_m4.go:payoutPostM4Cell:raisePayoutDisputeAlert": 1, // success_after_m4_not_paid / contradiction_after_m4_paid
 	}
 	got := map[string]int{}
 	for _, c := range staticCollectCalls(t) {
@@ -531,6 +535,8 @@ var staticEvidenceFuncs = map[string]bool{
 	// B13-B: the destination evidence chain (each reaches raisePayoutDisputeAlert or payoutHandleContradiction).
 	"payoutDestinationEvidence": true, "parkPayoutDestination": true, "bindPayoutReferenceForPark": true,
 	"payoutTerminalDestinationSignal": true, "s.destinationGateAndEscalate": true, ".destinationGateAndEscalate": true,
+	// ADR 0111 4.8 (F-1): the post-M4 signal cell raises through raisePayoutDisputeAlert.
+	"payoutPostM4Cell": true,
 }
 
 // Reviewed callers: each is only reachable from a transaction owner that opens
@@ -574,6 +580,40 @@ func TestStaticWiring_EvidenceFunctionCallersAreInTxOrReviewed(t *testing.T) {
 			continue
 		}
 		t.Errorf("reachability: %s:%d (%s) calls %s outside an alerting.InTx closure and outside the reviewed caller allowlist", c.file, c.line, c.fn, c.name)
+	}
+}
+
+// ADR 0111 section 4.8 / section 20 (F-1): payoutPostM4Cell has exactly the three reviewed owners, each inside an
+// evidence transaction opened through alerting.InTx (the callback cell under the webhook handler's InTx; the poll and
+// the late-evidence cells under ApplyPayoutResult / applyPayoutStatusEvidence), and its result is never dropped.
+// A new caller changes this table and must be reviewed against ADR 0102 7.7 (the raise is the LAST statement).
+func TestStaticWiring_PayoutPostM4CellSitesArePinned_F1(t *testing.T) {
+	bad := `package p
+func f(ctx, tx any) { payoutPostM4Cell(ctx, tx, a, o, e, nil, "") }
+func g(ctx, tx any) error { return payoutPostM4Cell(ctx, tx, a, o, e, nil, "") }`
+	if d := staticDiscardedRaiseResults(staticCollectFromSource(t, "internal/x/bad.go", bad)); len(d) != 1 {
+		t.Fatalf("negative control: want exactly one dropped payoutPostM4Cell result flagged, got %v", d)
+	}
+	want := map[string]int{
+		"internal/payments/receipt.go:applyResolvedReceiptEvidence": 2, // success cell (disputed) and decline cell (disputed)
+		"internal/payments/payout.go:applyPayoutLateEvidence":       1, // a definite result that lost the CAS to a disputed attempt
+		"internal/payments/payout.go:applyPayoutStatusEvidenceInTx": 2, // poll: definite success and definite decline on a disputed attempt
+	}
+	got := map[string]int{}
+	for _, c := range staticCollectCalls(t) {
+		if c.name == "payoutPostM4Cell" {
+			got[c.file+":"+c.fn]++
+		}
+	}
+	for k, n := range want {
+		if got[k] != n {
+			t.Errorf("payoutPostM4Cell call site %s: want %d, found %d", k, n, got[k])
+		}
+	}
+	for k, n := range got {
+		if _, ok := want[k]; !ok {
+			t.Errorf("unreviewed payoutPostM4Cell call site %s (%d): review it against ADR 0102 7.7 and ADR 0111 section 4.8, then pin it", k, n)
+		}
 	}
 }
 
