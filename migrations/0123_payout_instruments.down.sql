@@ -17,6 +17,13 @@ BEGIN
         total := total + n;
     END LOOP;
     PERFORM set_config('app.tenant_id', '', true);
+    -- F-7: the max-age configuration is owner-written governance data with no default
+    -- content; dropping a non-empty table would silently discard a decision.
+    SELECT count(*) INTO n FROM payout_instrument_verification_max_age;
+    IF n > 0 THEN
+        RAISE EXCEPTION 'migration 0123 down: % payout_instrument_verification_max_age row(s) exist; they are governance configuration and are not discarded (escalate to the human)', n
+            USING ERRCODE = 'PI099';
+    END IF;
     IF total > 0 THEN
         RAISE EXCEPTION 'migration 0123 down: % payout_instruments row(s) exist; they are evidence and are not deleted (escalate to the human)', total
             USING ERRCODE = 'PI099';

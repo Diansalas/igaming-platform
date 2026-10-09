@@ -556,3 +556,56 @@ func TestInstrumentPersonIsForcedFromTheAccount(t *testing.T) {
 	})
 	requireCode(t, err, "23503", "an instrument naming a Person other than the account's")
 }
+
+// C-3: a kind admits only its asset type, enforced by the database (the kinds
+// table carries allowed_asset_type): a bank account cannot list BTC, a crypto
+// address cannot list EUR; a synthetic test instrument may list either.
+func TestKindAssetTypeEnforcedByTheDatabase(t *testing.T) {
+	w := newWorld(t)
+	p := w.newPlayer(w.brandID)
+	btcAddr := []byte(`{"network":"btc","address":"bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq"}`)
+	cases := []struct {
+		name   string
+		kind   string
+		rail   string
+		assets []string
+		detail []byte
+		ok     bool
+	}{
+		{"bank_account + EUR", KindBankAccount, "sepa", []string{"EUR"}, ibanDetail(ibanA), true},
+		{"bank_account + BTC", KindBankAccount, "sepa", []string{"BTC"}, ibanDetail(ibanB), false},
+		{"bank_account + EUR,BTC", KindBankAccount, "sepa", []string{"EUR", "BTC"}, ibanDetail("NL91ABNA0417164300"), false},
+		{"card_token + USDT", KindCardToken, "card", []string{"USDT"}, []byte(`{"token":"tok_abc","network":"visa","last4":"4242"}`), false},
+		{"ewallet + BTC", KindEwalletAccount, "ewallet", []string{"BTC"}, []byte(`{"provider":"payz","email":"a@example.com"}`), false},
+		{"crypto_address + EUR", KindCryptoAddress, "crypto", []string{"EUR"}, btcAddr, false},
+		{"crypto_address + BTC", KindCryptoAddress, "crypto", []string{"BTC"}, btcAddr, true},
+		{"synthetic_test + EUR", KindSyntheticTest, "synthetic", []string{"EUR"}, []byte(`{"label":"a1"}`), true},
+		{"synthetic_test + BTC", KindSyntheticTest, "synthetic", []string{"BTC"}, []byte(`{"label":"a2"}`), true},
+	}
+	for _, c := range cases {
+		_, err := w.registerWith(w.svc, RegisterParams{TenantID: w.tenantID, PlayerAccountID: p.ID, Kind: c.kind, Rail: c.rail, AssetCodes: c.assets, Detail: c.detail})
+		if c.ok && err != nil {
+			t.Errorf("%s must be accepted: %v", c.name, err)
+		}
+		if !c.ok && !errors.Is(err, ErrInvalidRegistration) {
+			t.Errorf("%s must be refused, got %v", c.name, err)
+		}
+	}
+	// And directly in SQL (the Go precheck is not the control).
+	good := w.mustRegister(p, "BE68539007547034")
+	fp := "55" + good.Fingerprint[2:]
+	if err := w.ownerTx(func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `INSERT INTO payout_instrument_fingerprint_owners (tenant_id, fingerprint_kid, fingerprint, person_id) VALUES ($1,'f1',$2,$3)`, w.tenantID, fp, p.PersonID)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	err := w.ownerTx(func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `INSERT INTO payout_instruments (id, tenant_id, brand_id, player_account_id, person_id, kind, rail, asset_codes, detail_ciphertext, detail_nonce,
+			detail_key_kid, detail_schema_version, display_mask, fingerprint, fingerprint_kid, instrument_seal, seal_kid)
+			VALUES ($1,$2,$3,$4,$5,'bank_account','sepa','{BTC}',$6,$7,'m1',1,'GB****5432',$8,'f1',$9,'m1')`,
+			uuid.New(), w.tenantID, w.brandID, p.ID, p.PersonID, good.DetailCiphertext, good.DetailNonce, fp, good.InstrumentSeal)
+		return err
+	})
+	requireCode(t, err, "PI007", "SQL insert of a bank_account listing BTC")
+}

@@ -40,6 +40,11 @@
 --    providerkind.Synthetic payment adapters by a Go test.
 -- =========================================================================
 
+-- C-4: block concurrent writers for the rest of this transaction so no row can gain
+-- a non-MOCK provider_id between the scan below and the ALTER TABLE further down.
+-- (Scale note, ADR 0111 15.5: no lock_timeout / NOT VALID + VALIDATE here.)
+LOCK TABLE withdrawal_requests IN SHARE ROW EXCLUSIVE MODE;
+
 DO $$
 DECLARE
     mock_ids CONSTANT TEXT[] := ARRAY['mock-payments'];
@@ -73,16 +78,19 @@ CREATE TABLE payout_instrument_kinds (
     code                  TEXT PRIMARY KEY CHECK (code ~ '^[a-z][a-z0-9_]{1,31}$'),
     detail_schema_version INT NOT NULL CHECK (detail_schema_version >= 1),
     allowed_rails         TEXT[] NOT NULL CHECK (cardinality(allowed_rails) >= 1),
-    non_synthetic_enabled BOOLEAN NOT NULL
+    non_synthetic_enabled BOOLEAN NOT NULL,
+    -- C-3: the asset type every listed asset must have (assets.asset_type); NULL = any
+    -- (synthetic_test). A bank account cannot list BTC; a crypto address cannot list EUR.
+    allowed_asset_type    TEXT NULL CHECK (allowed_asset_type IN ('fiat', 'crypto'))
 );
 
-INSERT INTO payout_instrument_kinds (code, detail_schema_version, allowed_rails, non_synthetic_enabled) VALUES
-    ('bank_account',     1, ARRAY['bank_transfer', 'sepa', 'faster_payments', 'pix', 'spei'], true),
-    ('card_token',       1, ARRAY['card'],                                                  true),
-    ('ewallet_account',  1, ARRAY['ewallet'],                                               true),
+INSERT INTO payout_instrument_kinds (code, detail_schema_version, allowed_rails, non_synthetic_enabled, allowed_asset_type) VALUES
+    ('bank_account',     1, ARRAY['bank_transfer', 'sepa', 'faster_payments', 'pix', 'spei'], true,  'fiat'),
+    ('card_token',       1, ARRAY['card'],                                                  true,  'fiat'),
+    ('ewallet_account',  1, ARRAY['ewallet'],                                               true,  'fiat'),
     -- ADR 0008 / HD-R15-4: crypto destinations are not enabled for real use.
-    ('crypto_address',   1, ARRAY['crypto'],                                                false),
-    ('synthetic_test',   1, ARRAY['synthetic', 'card', 'bank_transfer', 'ewallet'],         false);
+    ('crypto_address',   1, ARRAY['crypto'],                                                false, 'crypto'),
+    ('synthetic_test',   1, ARRAY['synthetic', 'card', 'bank_transfer', 'ewallet'],         false, NULL);
 
 ALTER TABLE payout_instrument_kinds ENABLE ROW LEVEL SECURITY;
 ALTER TABLE payout_instrument_kinds FORCE ROW LEVEL SECURITY;
@@ -274,6 +282,10 @@ BEGIN
     FOREACH v_asset IN ARRAY NEW.asset_codes LOOP
         IF NOT EXISTS (SELECT 1 FROM assets WHERE code = v_asset AND active) THEN
             RAISE EXCEPTION 'payout_instruments: asset is not in the active asset registry' USING ERRCODE = 'PI005';
+        END IF;
+        IF v_kind.allowed_asset_type IS NOT NULL AND NOT EXISTS (
+            SELECT 1 FROM assets WHERE code = v_asset AND asset_type = v_kind.allowed_asset_type) THEN
+            RAISE EXCEPTION 'payout_instruments: the kind only admits % assets', v_kind.allowed_asset_type USING ERRCODE = 'PI007';
         END IF;
     END LOOP;
     IF NEW.supersedes_instrument_id IS NOT NULL THEN

@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -336,5 +337,98 @@ func TestMigration0123_UpRefusesLegacyNonMockWithdrawal(t *testing.T) {
 				t.Fatalf("0123 must apply (err=%v exists=%v)", err, exists)
 			}
 		})
+	}
+}
+
+// F-7: the down also refuses while max-age configuration rows exist.
+func TestMigration0123_DownRefusesWithMaxAgeConfig(t *testing.T) {
+	pool := scratchThrough(t, "b13age_", migration0123Version)
+	dir := migDir(t, migration0123Version)
+	jid := uuid.New()
+	if err := pool.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `INSERT INTO jurisdictions (id, code, name) VALUES ($1,$2,'j')`, jid, "J-"+jid.String()[:8])
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `INSERT INTO payout_instrument_verification_max_age (jurisdiction_id, max_age) VALUES ($1,'7 days')`, jid)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_, err := pool.MigrateDown(context.Background(), dir, 1)
+	if err == nil || !strings.Contains(err.Error(), "PI099") || !strings.Contains(err.Error(), "max_age") {
+		t.Fatalf("down with max-age config must refuse (PI099): %v", err)
+	}
+	var n int
+	if err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT count(*) FROM payout_instrument_verification_max_age`).Scan(&n)
+	}); err != nil || n != 1 {
+		t.Fatalf("refused down must leave the row: n=%d err=%v", n, err)
+	}
+}
+
+// C-4: the pre-flight scan is serialised with writers. A withdrawal that gains a
+// non-MOCK provider_id in a still-open transaction makes the migration WAIT for
+// that transaction (SHARE ROW EXCLUSIVE lock) and then refuse; without the lock
+// the scan would not see the uncommitted row and 0123 would apply.
+func TestMigration0123_PreflightLockSerialisesWithWriters(t *testing.T) {
+	pool := scratchThrough(t, "b13lock_", migration0123Version-1)
+	tenantID, brandID, playerID, personID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	if err := pool.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `INSERT INTO tenants (id, slug, name, licensing_model) VALUES ($1,$2,'t','under_platform_licence')`, tenantID, "k-"+tenantID.String()[:8]); err != nil {
+			return err
+		}
+		_, err := tx.Exec(ctx, `INSERT INTO persons (id) VALUES ($1)`, personID)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var wid uuid.UUID
+	if err := pool.WithTenant(context.Background(), tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `INSERT INTO brands (id, tenant_id, slug, name) VALUES ($1,$2,'b','b')`, brandID, tenantID); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO player_accounts (id, tenant_id, brand_id, person_id, email, password_hash, status) VALUES ($1,$2,$3,$4,'k@example.test','x','active')`, playerID, tenantID, brandID, personID); err != nil {
+			return err
+		}
+		wl, err := wallet.GetOrCreate(ctx, tx, tenantID, brandID, playerID, "EUR")
+		if err != nil {
+			return err
+		}
+		return tx.QueryRow(ctx, `INSERT INTO withdrawal_requests (tenant_id, brand_id, player_account_id, wallet_id, asset_code, amount, idempotency_key, state)
+			VALUES ($1,$2,$3,$4,'EUR',100,'lock','approved') RETURNING id`, tenantID, brandID, playerID, wl.ID).Scan(&wid)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// An open writer that sets a non-MOCK provider id, not yet committed.
+	ctx := context.Background()
+	txA, err := pool.Raw().Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = txA.Rollback(ctx) }()
+	if _, err := txA.Exec(ctx, `SELECT set_config('app.tenant_id', $1, true)`, tenantID.String()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := txA.Exec(ctx, `UPDATE withdrawal_requests SET provider_id = 'real-psp' WHERE id = $1`, wid); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := pool.MigrateUp(ctx, migDir(t, migration0123Version))
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		t.Fatalf("the migration must wait for the open writer (lock), returned %v", err)
+	case <-time.After(1500 * time.Millisecond):
+	}
+	if err := txA.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err == nil || !strings.Contains(err.Error(), "PI098") {
+		t.Fatalf("after the writer committed the non-MOCK provider id, 0123 must refuse (PI098): %v", err)
 	}
 }
