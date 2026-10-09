@@ -9,6 +9,11 @@
 //	          creating or dispatching a cascade child, a payout T2 re-claim (new
 //	          Withdraw) or a T12 resend (a Withdraw too).
 //
+// H(8) (ADR 0095 section 44 decisions 19-23, section 45): a non-active BRAND is a SEPARATE
+// policy check with the same effect on new dispatch (never merged with the tenant check; own
+// helper, own metric sites, own audit action): no cascade child is created for it, a sweeper T2
+// claim defers it (FOR SHARE brand read in the claim tx), nothing is cancelled or released.
+//
 // A non-active tenant is treated exactly like an engaged kill switch for new
 // dispatch: the attempt is rescheduled on the ordinary backoff and nothing else
 // changes, so reactivating a suspended tenant resumes it. The status is read per
@@ -30,6 +35,9 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+
+	"github.com/Diansalas/igaming-platform/internal/audit"
+	"github.com/Diansalas/igaming-platform/internal/tenant"
 )
 
 // tenantResolutionOnly reads tenants.status in tx and reports whether the tenant
@@ -86,12 +94,24 @@ func rescheduleCreatedForResolutionOnly(ctx context.Context, tx pgx.Tx, attemptI
 // deferIfResolutionOnly opens one short tenant tx, reads the status in it and,
 // for a non-active tenant, reschedules the attempt (no state change) and returns
 // blocked=true. It holds no transaction across anything else.
-func (s *Sweeper) deferIfResolutionOnly(ctx context.Context, tenantID uuid.UUID, attempt PaymentAttempt, site string) (blocked bool, err error) {
+//
+// H(8) decisions 20/23: the BRAND is checked here too as a SEPARATE policy check (plain
+// lock-free read, cheap early skip; the authoritative FOR SHARE read is in the T2 claim tx in
+// drive.go). It has its own metric site (site + "_brand") and never merges with the tenant reason.
+func (s *Sweeper) deferIfResolutionOnly(ctx context.Context, tenantID, brandID uuid.UUID, attempt PaymentAttempt, site string) (blocked bool, err error) {
 	next := s.backoff(attempt.PollCount)
+	reason := site
 	err = s.Pool.WithTenant(ctx, tenantID, func(actx context.Context, tx pgx.Tx) error {
 		resOnly, err := tenantResolutionOnly(actx, tx, tenantID)
-		if err != nil || !resOnly {
+		if err != nil {
 			return err
+		}
+		if !resOnly {
+			brandOnly, berr := brandResolutionOnly(actx, tx, tenantID, brandID)
+			if berr != nil || !brandOnly {
+				return berr
+			}
+			reason = site + "_brand"
 		}
 		if err := RescheduleNonTerminal(actx, tx, attempt.ID, next); err != nil {
 			return err
@@ -100,9 +120,108 @@ func (s *Sweeper) deferIfResolutionOnly(ctx context.Context, tenantID uuid.UUID,
 		return nil
 	})
 	if blocked && err == nil {
-		recordResolutionOnlyBlock(ctx, site)
+		recordResolutionOnlyBlock(ctx, reason)
 	}
 	return blocked, err
+}
+
+// Metric site labels for deposit deferrals decided inside drive.go. Distinct per caller and per
+// reason (ADR 0095 43.2 follow-up (c); H(8) decision 23).
+const (
+	siteDepositClaimHTTP          = "deposit_dispatch_claim_tx_http"
+	siteDepositClaimSweeperTenant = "deposit_dispatch_claim_tx_sweeper"
+	siteDepositClaimSweeperBrand  = "deposit_dispatch_claim_tx_sweeper_brand"
+	siteDepositCascadeChildBrand  = "deposit_cascade_child_brand"
+)
+
+// brandResolutionOnly is the BRAND-only twin of tenantResolutionOnly (H(8)): a plain, lock-free
+// read of brands.status for the brand of THIS tenant, true when it is anything but 'active'. A
+// missing / foreign / nil brand fails CLOSED. It never reads the tenant (decision 23). Used only
+// as the sweeper's cheap early skip; the claim tx uses tenant.RequireBrandActive (FOR SHARE).
+func brandResolutionOnly(ctx context.Context, tx pgx.Tx, tenantID, brandID uuid.UUID) (bool, error) {
+	if brandID == uuid.Nil {
+		return true, nil
+	}
+	var status string
+	err := tx.QueryRow(ctx, `SELECT status FROM brands WHERE id = $1 AND tenant_id = $2`, brandID, tenantID).Scan(&status)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return true, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return status != "active", nil
+}
+
+// skipCascadeChildForBrand is the H(8) decision 19 brand gate at cascade-CHILD CREATION (phase C
+// and its poll-path twin), run in the decline's own tx right before insertCascadeAttemptIfEligible.
+// A brand that is not active gets NO child (same precedent as the tenant skip; the decline already
+// applied stands), an own audit row and an own metric site. It cancels and releases nothing. A
+// read error is returned (fail closed), never read as "active".
+func skipCascadeChildForBrand(ctx context.Context, tx pgx.Tx, attempt PaymentAttempt, intent DepositIntent) (skipped bool, err error) {
+	berr := tenant.RequireBrandActive(ctx, tx, attempt.TenantID, intent.BrandID)
+	if berr == nil {
+		return false, nil
+	}
+	if !errors.Is(berr, tenant.ErrBrandNotActive) {
+		return false, berr
+	}
+	recordResolutionOnlyBlock(ctx, siteDepositCascadeChildBrand)
+	if err := audit.Record(ctx, tx, audit.Entry{
+		TenantID: attempt.TenantID, ActorType: audit.ActorSystem, Action: "payment.cascade_skipped_brand_inactive",
+		TargetType: "payment_attempt", TargetID: attempt.ID.String(), Outcome: audit.OutcomeDenied,
+		Metadata: map[string]any{"deposit_intent_id": intent.ID.String(), "brand_id": intent.BrandID.String()},
+	}); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// skipCascadeChildForResolutionOnly is the TENANT half of the cascade-creation gate as a helper
+// (B8 / PRH-2 H policy, byte-for-byte the inline treatment at phase C and the poll path): a tenant
+// that is not 'active' gets no child, an own audit row and the metric site deposit_cascade_child.
+// A read error is returned (fail closed). It never reads the brand (decision 23).
+func skipCascadeChildForResolutionOnly(ctx context.Context, tx pgx.Tx, attempt PaymentAttempt, intentID uuid.UUID) (skipped bool, err error) {
+	resOnly, err := tenantResolutionOnly(ctx, tx, attempt.TenantID)
+	if err != nil || !resOnly {
+		return false, err
+	}
+	recordResolutionOnlyBlock(ctx, "deposit_cascade_child")
+	if err := audit.Record(ctx, tx, audit.Entry{
+		TenantID: attempt.TenantID, ActorType: audit.ActorSystem, Action: "payment.cascade_skipped_resolution_only",
+		TargetType: "payment_attempt", TargetID: attempt.ID.String(), Outcome: audit.OutcomeDenied,
+		Metadata: map[string]any{"deposit_intent_id": intentID.String()},
+	}); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// gateReceiptCascadeChild is the receipt/callback cascade-creation gate (ADR 0095 section 44
+// decision 19, section 47; closes security M-1 / LF F1). The receipt site only holds a STUB
+// DepositIntent{ID, TenantID} (BrandID == uuid.Nil), so the intent's real row is loaded here, in the
+// callback's own tx (RLS-scoped, then checked against the attempt's tenant): passing the stub to
+// skipCascadeChildForBrand would refuse EVERY receipt-path child. Order: tenant (separate helper,
+// reason, metric), then brand. Lock order: the intent row is already held FOR UPDATE by the caller's
+// parent lock (R0 receipt insert, parent -> attempt -> intent -> brand FOR SHARE); the brand read is a leaf
+// lock, taken before any alert raise (ADR 0102 7.7 raise-last is unaffected). Any read error is
+// returned, which rolls back the whole delivery including its receipt dedupe row, so the redelivery
+// converges.
+func gateReceiptCascadeChild(ctx context.Context, tx pgx.Tx, attempt PaymentAttempt) (skipped bool, err error) {
+	if attempt.DepositIntentID == nil {
+		return false, errors.New("payments: receipt cascade gate: attempt has no deposit intent")
+	}
+	intent, err := GetDepositIntentByID(ctx, tx, *attempt.DepositIntentID)
+	if err != nil {
+		return false, err
+	}
+	if intent.TenantID != attempt.TenantID {
+		return false, errors.New("payments: receipt cascade gate: intent tenant differs from attempt tenant")
+	}
+	if skipped, err := skipCascadeChildForResolutionOnly(ctx, tx, attempt, intent.ID); err != nil || skipped {
+		return skipped, err
+	}
+	return skipCascadeChildForBrand(ctx, tx, attempt, intent)
 }
 
 // checkPayoutResolutionOnly is the payout twin, called inside the T2/T12 claim

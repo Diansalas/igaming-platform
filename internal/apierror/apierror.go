@@ -65,6 +65,13 @@ const (
 	// normal first request. A retry of an already-created intent/request is NOT
 	// refused (it returns the original, read-only).
 	CodeTenantOrBrandNotActive Code = "TENANT_OR_BRAND_NOT_ACTIVE"
+	// B13 (ADR 0111 2.4 / 2.9). 409 both. NOT_ACCEPTED is the ONE generic
+	// player-facing registration refusal (invalid detail, a card number, an
+	// unknown kind or rail, a fingerprint owned by another person): the same
+	// response for every cause, so registration is not an enumeration oracle.
+	// IN_USE: the player may not revoke an instrument a live withdrawal binds.
+	CodePayoutInstrumentNotAccepted Code = "PAYOUT_INSTRUMENT_NOT_ACCEPTED"
+	CodePayoutInstrumentInUse       Code = "PAYOUT_INSTRUMENT_IN_USE"
 )
 
 // Error is the wire format for an API error response.
@@ -93,7 +100,8 @@ func httpStatus(c Code) int {
 	case CodeConflict, CodeSettlementPayloadMismatch, CodeSettlementTombstoned, CodeSettlementBetVoided,
 		CodeSettlementBetAlreadySettled, CodeSettlementGenerationOutOfSequence, CodeSettlementIntegrity,
 		CodeCredentialRegistrationRejected, CodeApprovalRejected, CodeCredentialActivationRejected,
-		CodeCredentialTransitionRejected, CodeSettlementTenantNotActive, CodeTenantCloseBlockedOpenRounds, CodeTenantOrBrandNotActive:
+		CodeCredentialTransitionRejected, CodeSettlementTenantNotActive, CodeTenantCloseBlockedOpenRounds, CodeTenantOrBrandNotActive,
+		CodePayoutInstrumentNotAccepted, CodePayoutInstrumentInUse:
 		return http.StatusConflict
 	case CodeSettlementPayoutInvalid, CodeSettlementAssetMismatch:
 		return http.StatusUnprocessableEntity

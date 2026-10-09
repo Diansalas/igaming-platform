@@ -215,7 +215,7 @@ is not yet a registry closure - the orchestrator closes `PRH-I4-METRICS-1` at me
 Counters and one gauge from `internal/payments/sweeper_loop.go`, none with a tenant, provider or attempt
 label: `payments_sweeper_passes_total`; `payments_sweeper_items_total{result=processed|error|panic}`;
 `payments_sweeper_tenant_failures_total{phase=list|claim|panic}`;
-`payments_sweeper_resolution_only_blocks_total{site=deposit_dispatch|deposit_cascade_child|payout_reclaim|payout_resend}`;
+`payments_sweeper_resolution_only_blocks_total{site=deposit_dispatch|deposit_dispatch_brand|deposit_dispatch_claim_tx_http|deposit_dispatch_claim_tx_sweeper|deposit_dispatch_claim_tx_sweeper_brand|deposit_cascade_child|deposit_cascade_child_brand|payout_reclaim|payout_resend}`;
 gauge `payments_sweeper_last_pass_unix_seconds`. Log lines are prefixed `payments sweeper:` and carry tenant and
 attempt ids (never provider payloads or panic values). **Proposed alert rules** (not wired; no backend and no
 recipients exist, ALERT-DELIVERY-1 OPEN): sweeper stalled when `time() - payments_sweeper_last_pass_unix_seconds

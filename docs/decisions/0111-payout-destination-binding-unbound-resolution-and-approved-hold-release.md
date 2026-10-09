@@ -1,11 +1,15 @@
 # ADR 0111 — Payout destination binding (B13), governed resolution of unbound payouts (PAY-PAYOUT-UNBOUND-RESOLVE-1) and four-eyes release of frozen `approved` holds (HSEC-APPROVED-HOLD-RELEASE-1)
 
-- **Status: PROPOSED — DESIGN ONLY, revision 2 (`architect`, 2026-10-08).** Revision 1 (`30cec95`/`978a58b`) was
+- **Status: PROPOSED — DESIGN ONLY, revision 4 (`architect`, 2026-10-08).** Revision 4 applies the `security`
+  co-ruling on §4 (S-1..S-8; 0125 MAY START; BC-2 co-signed; HD-R15-8 resolved by sealed imports; §14). Revision 3 applies the `ledger-finance`
+  pre-0125 wording conditions (BC-1, R-1..R-5) and records BC-2, LOW-1, P-2 and notes (§13); LF: 0125 may start once
+  these are in. Revision 1 (`30cec95`/`978a58b`) was
   reviewed: `ledger-finance` APPROVE WITH CONDITIONS for §2 (B13) and §6 (HSEC), **§4 (RESOLVE-1) REJECTED AS
   WRITTEN** until C-1..C-7; `security` APPROVE WITH CONDITIONS. Revision 2 writes every condition into the text;
-  §11 maps each one to the section changed. **§4 needs a `ledger-finance` re-review before any RESOLVE-1 code**
-  (except the pure tightenings listed in §7.3). No code, no migration and no registry change is made by this ADR;
-  every deliverable here is `NOT IMPLEMENTED`.
+  §11 maps each one to the section changed. `ledger-finance` then ruled that rev 2 §4 satisfies C-1..C-7 in
+  substance and that 0125 may start once the revision-3 wording fixes are in (done). This ADR itself makes no code,
+  migration or registry change; apart from the §12 tightenings (implemented against MOCK by another agent), every
+  deliverable here is `NOT IMPLEMENTED`.
 - **Authority.** The owner decisions recorded verbatim in ADR 0095 §44 (decisions 1-8 B13, 9-12 RESOLVE-1, 13-18
   HSEC; 2026-10-08) are **authoritative** and are not broadened. Open sub-questions are resolved as numbered
   AMBIGUITIES (§9, safest reading); where review conditions conflicted, revision 2 took the safer reading and says so
@@ -357,13 +361,18 @@ unchanged. Allocation is never a payout route.
   - `evidence_reference` (R; reserved-prefix CHECK);
   - `evidence_verdict`;
   - `evidence_import_ids UUID[]` (every import the verdict read);
-  - `provider_reference_at_submission` (R-6 pinning, must be NULL for the unbound reasons).
+  - `provider_reference_at_submission` (R-6 pinning, DB-forced from the attempt: NULL for the three unbound reasons,
+    the bound value for `destination_mismatch` not-paid).
 - CHECKs on M4 rows: `operation = 'payout'`; `target_state IS NULL`; `provider_id`, `evidence_ref_hash`,
   `evidence_line_id`, `evidence_verdict` and `evidence_import_ids` NOT NULL; `basis_code =
   'provider_confirmed_out_of_band'`; `finding_code` and `reserved_provider_tx_id` NULL; `(kind =
   'm4_evidence_paid') = (evidence_reference IS NOT NULL)`.
 - **DB insert trigger (M-10):** `m4_evidence_paid` is refused when `terminal_reason = 'destination_mismatch'`; M4 is
   refused for any reason outside §4.1, and for an unbound reason with a non-NULL `provider_reference`.
+- **Amount and asset are DB-forced (R-4).** The M4 row's `amount` and `asset_code` are copied from the attempt by
+  the insert trigger (a client value is refused), and both the insert trigger and execution refuse unless
+  `withdrawal_requests.amount` and `asset_code` equal the attempt's. So an M4-paid can never post a completion of an
+  amount other than the one evidenced, nor one that would never clear under I-1 (§4.6).
 - The existing partial UNIQUE indexes make M2 and M4 mutually exclusive per attempt.
 - `payment_m2_admits` and `payment_attempts_guard()` are **not edited**: M4 never changes the attempt, which stays
   `disputed` (A-15).
@@ -379,16 +388,40 @@ unchanged. Allocation is never a payout route.
   - The INSERT arms of `tenant_staff_scope` on imports and lines (0102) are narrowed to the **system shape**: tenant
     GUC only; principal, platform-admin, player, platform-service and acting GUCs all NULL.
   - Because the system shape is still forgeable under arbitrary SQL, every import also carries a **Go import seal**
-    (B13 seal subkey, label `b13-import-v1`). It covers `canon(import id, tenant, provider, source_label, is_mock,
-    coverage_start, coverage_end, content_digest, line_count, fetched_at, payout_lines_carry_merchant_reference,
-    lines_digest)`, where `lines_digest` is the SHA-256 over the canonical encoding of all lines in `line_no` order.
-  - New import columns: `import_seal`, `seal_kid`, `payout_lines_carry_merchant_reference BOOLEAN` (copied from the
-    statement source's declaration), `imported_by_service`.
+    (B13 seal subkey, label `b13-import-v1`). Its input starts with the domain tag (S-5): `canon("imp", import id,
+    tenant, provider, source_label, is_mock, coverage_start, coverage_end, content_digest, line_count, fetched_at,
+    payout_lines_carry_merchant_reference, imported_by_service, lines_digest)`.
+  - **`lines_digest` (S-5)** is the SHA-256 over the canonical encoding, in `line_no` order, of every line column the
+    verdict or reconciliation reads: `line_no`, `kind`, `provider_reference`, `merchant_reference`,
+    `original_provider_reference`, `settlement_reference`, `status`, `amount`, `asset_code`, `occurred_at`. Any column
+    added to the verdict later must join the digest in the same change.
+  - **The seal is written in the INSERT itself (S-5).** Imports and lines stay immutable; there is no UPDATE path.
+  - **Retired seal key ids (S-5)** stay verify-only while any import references them. The §2.2 startup gate also
+    fires whenever any non-MOCK `PaymentStatementSource` is registered.
+  - **Dependency (S-5):** the import seal uses B13-A's key module (`internal/payoutinstrument` key handling), so
+    **0123 / B13-A merges before 0125**.
+  - New import columns: `import_seal`, `seal_kid`, `payout_lines_carry_merchant_reference BOOLEAN`,
+    `imported_by_service`.
+  - **Source declaration and channel (S-3).** `payout_lines_carry_merchant_reference`, `is_mock`, the provider id and
+    the coverage semantics come **only** from the in-process Go `StatementSourceRegistry` / configuration, never from
+    a DB row the runtime role can write. The importer copies them into the import row and the seal. The statement
+    endpoint and credentials come from the secret store or from governed, proof-bound configuration. Fetching uses
+    an authenticated channel, and the PSP's content signature is verified wherever the PSP offers one. **S-3 is
+    launch-blocking for non-MOCK M4, per real source (PROVIDER DEPENDENT).**
   - **An import without a valid seal is not eligible M4 evidence.** The Go executor verifies the seal and recomputes
     `lines_digest` for every id in `evidence_import_ids` before insert and again at execution.
-- **T10 (forgeable statement lines)** is recorded in ADR 0110 §10a. With sealed imports implemented and confirmed by
-  security, non-MOCK M4 is unblocked; otherwise it stays launch-blocking unless the human explicitly accepts T10
-  (§10.3).
+- **T10 (forgeable statement lines)** is recorded in ADR 0110 §10a. It is resolved by **sealed imports** (option (b),
+  HD-R15-8 resolved), subject to security review of the implementation. The §10.3 T10 flag stays until three things
+  hold: the seal is implemented; it passes security implementation review with mutation evidence; and S-3 is met for
+  the real source. **T10 residuals (S-3):**
+  - **T6:** the seal key is in process; a compromised application host can seal anything.
+  - **Source authenticity and completeness:** the seal proves what was fetched, not that the source is genuine or
+    complete. That is S-3's job.
+  - **Availability:** forged unsealed lines can push the stream over the I-2 cap. That stops reconciliation of the
+    whole tenant × provider stream, deposits included, with a loud P1, but it never clears anything. The LOW-1
+    runbook entry must say: **treat overflow as possible tampering until it is proven to be re-delivery.**
+
+  These residuals are folded into the D-7 acknowledgement (A-13 evidence standard).
 - **Approver view:** shows each evidence line's provenance (import id, `imported_by_service`, `content_digest`,
   `fetched_at`, seal status). Approvers must confirm the line against the **provider portal**; `evidence_ref_hash`
   binds that confirmation.
@@ -401,9 +434,13 @@ provider:
 - for `destination_mismatch`, also by the attempt's bound `provider_reference` (C-6);
 - also on any typed reference evidence Y of the attempt (`payment_attempt_reference_evidence`).
 
-**Bounded (I-2, confirmed):** at most 64 lines are read; the 65th makes the verdict `evidence_overflow`, which is
-refused loudly with an audit row and never truncated. **Eligible import** = sealed (above) and (`is_mock = false`,
-or no `is_mock = false` import exists for the tenant and provider).
+**Bounded (I-2, confirmed; S-4):** the 64-line bound covers **every** line `payout_m4_evidence` reads, across all
+lookups, **including the lookups by R**. R comes from statement content, so it gets no budget of its own. The 65th line
+makes the verdict `evidence_overflow`, which is refused loudly with an audit row and never truncated.
+`evidence_import_ids` = the imports of the lines actually read (so at most 64). **Eligible import** = sealed (above)
+and (`is_mock = false`, or no `is_mock = false` import exists for the tenant and provider). The paid verdict's single
+`succeeded` line must come from an eligible (sealed) import. Lines from unsealed imports **never count as positive
+evidence**, but they still make the verdict `contradictory` or `insufficient` when they contradict.
 
 | Verdict | ALL of the following |
 |---|---|
@@ -426,18 +463,30 @@ or no `is_mock = false` import exists for the tenant and provider).
     request; otherwise `force_resolve_evidence_mismatch`. The verdict must be `paid` / `not_paid` respectively.
   - R-6 pinning extends to `provider_reference_at_submission` and the evidence columns; all of them are in
     `payload_hash`.
-- **Approvers (A-14, D-1):** K3 rules plus **at least one `platform_acting` approver** on both M4 kinds.
+- **Approvers (A-14, D-1; S-6):** K3 rules plus **at least one `platform_acting` approver** on both M4 kinds,
+  enforced **in the DB recount** (`payment_manual_resolution_execution_status`), not only in Go. Test: a resolution
+  with two tenant-scope approvers and no `platform_acting` approver is refused at `→ executing`. The capability
+  description in the back office and in the registry states that `payment_force_resolve` covers M4 (D-9 accepted by
+  security).
 - **Execution** (ADR 0101 §6.3 lock order):
   1. L1 `LockSubmittedForResolution`.
   2. Attempt `FOR UPDATE`.
   3. Resolution `FOR UPDATE`.
   4. Approval insert.
   5. Staff, then grants, `FOR SHARE`.
-  6. Go re-verifies the import seals.
-  7. Re-evaluate. Verdict, pinned line and R must be unchanged. Attempt state, `terminal_reason` and
-     `provider_reference IS NULL` must equal the pinned values (C-6), and the withdrawal must be `submitted`.
-     Otherwise `refused_at_execution`.
-  8. `executing` → posting → `executed`; link the ledger row; audit; commit.
+  6. **Re-evaluate first (S-2).** Run `payout_m4_evidence` again.
+  7. **Then** Go verifies the seals, and recomputes `lines_digest`, of exactly the `import_ids` that step 6
+     returned, and refuses unless that set equals the pinned `evidence_import_ids`. Verdict, pinned line and R must
+     be unchanged. Attempt state and `terminal_reason` must equal the
+     pinned values, and `provider_reference IS NOT DISTINCT FROM provider_reference_at_submission` (NULL for the
+     three unbound reasons; the bound value for `destination_mismatch` not-paid) (C-6, R-3). The withdrawal must be
+     `submitted`, and its `amount`/`asset_code` must equal the attempt's and the resolution's (R-4). Otherwise
+     `refused_at_execution`.
+  8. `executing` → posting → `executed`; link the ledger row; audit; commit. **The `pending → executing` move in the
+     0115 resolution guard re-runs `payout_m4_evidence` and the R-3/R-4 checks IN THE DB** (verdict, line, R and
+     import set equal the pinned values; `provider_reference IS NOT DISTINCT FROM provider_reference_at_submission`;
+     withdrawal and attempt amount/asset equal the resolution's), mirroring M2's R-6 re-check at 0115:597-611. Go is
+     the first check, not the only one. The seal check alone stays in Go, because the key never enters the DB.
   - `m4_evidence_paid` posts through `withdrawal.Complete(tx, wr.ID, attempt.provider_id, R)`: a
     `withdrawal_completed` keyed `provider_id:R`, with `release_ledger_transaction_id` set. This is the attempt's own
     release keyed by the PSP line reference (LF F6).
@@ -452,7 +501,8 @@ or no `is_mock = false` import exists for the tenant and provider).
       `provider_tx_id = m.evidence_reference`, `idempotency_key = m.provider_id || ':' || m.evidence_reference`;
     - entries are exactly two: debit `player_withdrawal_hold` on `w.wallet_id` and credit `psp_clearing` with NULL
       wallet, each `amount = m.amount`, `asset = m.asset_code`;
-    - the attempt's state, `terminal_reason` and `provider_reference` (NULL) equal the pinned values.
+    - the attempt's state and `terminal_reason` equal the pinned values, and `provider_reference IS NOT DISTINCT
+      FROM provider_reference_at_submission` (R-3).
   - **`m4_evidence_not_paid`:**
     - the withdrawal is `failed` with the link;
     - the ledger row is `withdrawal_failed` with key `m.withdrawal_request_id || ':failed'`;
@@ -472,22 +522,53 @@ or no `is_mock = false` import exists for the tenant and provider).
 - **Idempotency / replay:** one pending and one executed resolution per attempt; a retried decide is refused with a
   fresh proof and posts nothing; the ledger keys are unique.
 
-### 4.6 Reconciliation (C-4; 0125 is NOT migration-free)
+### 4.6 Reconciliation (C-4; 0125 is NOT migration-free) — revision 3
 
 - 0125 widens `tenant_system_read_executed` (0115:1419) to the M4 kinds; `loadK3Evidence` also loads executed M4
   rows.
-- **New predicates (no new mismatch kind, no kind-CHECK change):**
-  - an executed `m4_evidence_paid` raises `pay_declared_paid_unconfirmed` on any later `declined` or `reversed` line
-    on R or on the merchant reference, or on a **second distinct** `succeeded` line;
-  - an executed `m4_evidence_not_paid` raises `pay_declared_not_paid_but_paid` on any later `succeeded` line on the
-    merchant reference, the bound reference or a Y.
-- **I-1 tightening:** `payoutCompletedRef` clears a line only when `line.amount = attempt.amount AND line.asset =
-  attempt.asset`.
-- **I-2:** `loadK3Evidence` keeps INV-M-5 but gets a hard per-run cap on lines read; exceeding it fails the run with
-  the existing P1 `reconciliation.sweep_run_failed` (shared with CAS-RECON-SCALE-1).
-- **Hints (L-4):** the unbound-park hint names M4. After an executed M4 not-paid, the `pay_captured_unposted` hint
-  reads "possible double payout after M4 not-paid: recovery via compensating debit (K2) or off-platform recovery;
-  never allocation".
+- **Key set for executed M4 rows (S-1).** For every executed M4 row, `loadK3Evidence` adds these keys to the lookup
+  key set: `evidence_reference` (R), the attempt's merchant reference, its bound `provider_reference` (if any), and
+  every Y. All of them are platform state, so this is consistent with I-2: keys are fixed before the read, and each
+  gets the 64-line budget. Tests:
+  - a contradicting line that names **only R** raises;
+  - a line on the bound reference after a `destination_mismatch` not-paid raises;
+  - a mutant that drops the key additions is killed.
+- **New predicates (no new mismatch kind, no kind-CHECK change; R-1):**
+  - an executed `m4_evidence_paid` raises `pay_declared_paid_unconfirmed` on **any** `declined` or `reversed` line on R
+    or on the merchant reference, or on a **second distinct** `succeeded` line, **in any import, irrespective of
+    `occurred_at` or import time** (a back-dated contradiction counts);
+  - an executed `m4_evidence_not_paid` raises `pay_declared_not_paid_but_paid` on **any** `succeeded` line on the
+    merchant reference, the bound reference or a Y, **in any import, irrespective of `occurred_at` or import time**.
+- **M4-paid completions in the ledger join (R-2).** An M4-paid completion leaves the attempt `disputed` (A-15). The
+  existing `ledger_join` check (`internal/reconciliation/payment_statement.go`, "every deposit / withdrawal_completed
+  posting in the window maps to exactly one succeeded attempt", ~1428-1465) counts only `succeeded` attempts, so
+  without a change it would raise `pay_missing_platform_record` for **every** M4-paid completion on every run.
+  **Ruling (`ledger-finance`):** a `withdrawal_completed` posting `t` counts as attributed (n = 1) **only** when an
+  executed `m4_evidence_paid` resolution has `ledger_transaction_id = t.id` **and** the same attempt's withdrawal has
+  `release_ledger_transaction_id = t.id`. Nothing else qualifies (not the reserved-namespace M2 key, not a shared
+  reference, not a pending or refused resolution). Required 0125 change: the matcher loads executed M4 rows (through
+  the widened `tenant_system_read_executed`) and adds that one case to `succeededFor`; a posting attributed both ways
+  (a succeeded attempt **and** an M4) is n = 2 and still raises. Tests: an M4-paid completion raises no
+  `pay_missing_platform_record`; one with a mismatched link (resolution points at t, withdrawal does not, or the
+  reverse) still raises; a non-executed or M2 resolution never qualifies; double attribution raises; a tenant-B M4 row
+  never attributes a tenant-A posting; mutation evidence.
+- **I-1, implemented shape (BC-1; §12).** `payoutCompletedRef` keeps positive attribution (own release keyed by the
+  reference, no other holder) and additionally requires the completion's `psp_clearing` amount and its **single**
+  asset to equal the attempt's, at **every** payout site (bound and unbound). Where the finding is keyed on an
+  evidencing line (unbound in-run, merchant cross-check B step, standing), that line's amount and asset must also equal
+  the attempt's. A completion whose `psp_clearing` amount or asset resolves to `<none>` or `<multiple>` fails closed
+  (never clears).
+- **I-2, implemented shape (BC-1; §12).** The persisted-lines read is bounded per run by **cap = 64 per lookup key ×
+  the number of distinct lookup keys, fixed from platform state (parked attempts and their references) BEFORE the
+  read**. The SQL reads at most cap + 1 rows. Overflow fails the run with `ErrPaymentEvidenceOverflow` plus the
+  existing P1 `reconciliation.sweep_run_failed` audit and run-failure alert: no run row, no mismatch row, no
+  truncation, no partial verdict. Statement content can never raise its own budget, because the key count comes only
+  from platform rows. INV-M-5 is kept. Shared with CAS-RECON-SCALE-1. **The formula awaits the `security` co-signature
+  (BC-2, §10.4).**
+- **Hints (L-4).** The unbound-park hint names M4 (implemented, §12). When M4 ships, 0125 **drops "NOT IMPLEMENTED"**
+  from that hint and states **"MOCK only"** while the §10.3 T10 flag stands. After an executed M4 not-paid, the
+  `pay_captured_unposted` hint reads "possible double payout after M4 not-paid: recovery via compensating debit (K2) or
+  off-platform recovery; never allocation" (needs executed M4 rows, so it ships with 0125).
 
 ### 4.7 API, errors
 
@@ -715,7 +796,7 @@ Every request, approval, rejection, cancellation, expiry, refusal and execution 
 | **B13-A** (entity, keys, AEAD, seals, verifier interface, player/staff routes, 0123) | **May start now**: every LF and security condition is design-complete in §2 |
 | **HSEC** Go and SQL (0124) | **May start now** (conditions H-4, M-6, M-9, M-10, L-2, L-6 incorporated) |
 | **RESOLVE-1, pure tightenings with no new power and no migration**: `payoutCompletedRef` I-1 amount/asset equality (§4.6); the `loadK3Evidence` I-2 cap with run failure; the L-4 hint text | **May start now** |
-| **RESOLVE-1, everything else** (kinds, evidence function, import seal and policy narrowing, acting SELECT, fences, MR041, §4.8 cells, 0125) | **Waits** for the `ledger-finance` re-review of §4 and the `security` co-ruling on T10/M-5 |
+| **RESOLVE-1, everything else** (kinds, evidence function, import seal and policy narrowing, acting SELECT, fences, MR041, §4.8 cells, 0125) | **May start (security co-ruling, revision 4):** LF and security pre-0125 conditions applied; BC-2 co-signed. Merges **after 0123 / B13-A** (import seal uses its key module, S-5) and needs the full §8 gates. Non-MOCK M4 stays blocked by the T10 flag (§10.3) |
 | **B13-B** | waits for B13-A to merge |
 | Any non-MOCK payout or non-MOCK M4 | blocked by §10.3 flags and the existing gates (S-L1/S-L3/S-L4, ALERT-DELIVERY-1, §35.4 GATE) |
 
@@ -779,8 +860,9 @@ Every part needs mutation-kill evidence, runtime-role integration tests and migr
   (LF L-7).**
 - **HD-R15-6** A confirmed misdirected payout (retained today).
 - **HD-R15-7** (non-blocking) Gate `Approve` on a non-active tenant/brand; always audit a refused staff submit.
-- **HD-R15-8** Accept T10 (forgeable statement lines) explicitly, **or** require sealed imports (designed in §4.3)
-  before non-MOCK M4.
+- **HD-R15-8 — RESOLVED (revision 4, security co-ruling).** Option (b), sealed imports (§4.3), subject to security
+  review of the implementation. No human acceptance of T10 is needed. The T10 residuals (§4.3) are folded into the
+  existing D-7 acknowledgement (A-13 evidence standard).
 - **HD-R15-9 (L-9, RECOMMENDATION, deferred):** player notification and a cooling-off period after instrument
   registration or change.
 - Unchanged and still open: HD-CTF-1(b), HD-CTF-2..10, HD-PRH2-3, HD-PRH2-8.
@@ -808,10 +890,40 @@ Every part needs mutation-kill evidence, runtime-role integration tests and migr
 | Flag | Blocks |
 |---|---|
 | Security H-3: AEAD detail implemented | any real customer instrument data (built into 0123; blocking until implemented and reviewed) |
-| Security M-5 / T10 (HD-R15-8) | any non-MOCK M4 |
+| Security M-5 / T10 | any non-MOCK M4, until the import seal is implemented, passes security implementation review with mutation evidence, **and** S-3 is met for each real source (PROVIDER DEPENDENT) |
 | ADR 0110 T3/T4 (identity-store integrity) | real money, as already recorded |
 | HD-R15-1 | any sandbox/real payout |
 | HD-R15-5 (LF L-7) | any non-MOCK payout |
+
+### 10.4 Conditions and follow-ups recorded by revision 3 (`ledger-finance` pre-0125 verdict)
+
+These are not human policy decisions unless stated; they are review conditions and follow-ups.
+- **BC-2 — CO-SIGNED by `security` (revision 4).** Was: condition before 0125 merges: `security` co-signs the I-2 formula of §4.6 (64 per lookup key × distinct
+  keys fixed from platform state before the read; cap + 1 read; overflow fails the run). This answers §12 P-1
+  subject to that co-signature.
+- **LOW-1 / RM-4 (follow-up, real-source onboarding):** confirm each real statement source's re-delivery pattern.
+  Overlapping imports count toward the cap, so a real source that re-delivers the same lines on every fetch could
+  overflow with no attacker. Overflow refuses the **whole tenant × provider stream, deposits included**, loudly. Add an
+  operator runbook entry for `ErrPaymentEvidenceOverflow` (cause, impact, how to diagnose, who may change the cap and
+  under which review). PROVIDER DEPENDENT.
+- **P-2 / RM-3 (follow-up):** a standing persisted-line amount/asset check for **bound** payout parks that have an
+  own completion (today the line raises `pay_amount_mismatch` only in-run). Linked to RM-3 (`psp_clearing` vs PSP
+  settlement reconciliation). Owner `payments` + `ledger-finance`.
+- **0125 hint condition:** drop "NOT IMPLEMENTED" from the M4 hint when M4 ships; say "MOCK only" while T10 stands
+  (§4.6).
+- **Non-blocking note (PROVIDER DEPENDENT):** the paid verdict's rule "no `pending` line on R or the merchant
+  reference in any import" makes M4-paid **unusable** with a PSP whose statements list `pending` before `succeeded`.
+  This is safe (fail closed); revisit with the real source under an LF ruling.
+- **Non-blocking note:** the 24 h `DefaultSettlementWindow` used in not-paid condition (i) must be re-checked **per
+  rail** before any non-MOCK M4 (some rails settle or return later).
+- **S-8 (follow-up, revision 4; pre-existing gap):** freeze `withdrawal_requests.release_ledger_transaction_id` once
+  it is non-NULL. Today the 0026 immutable-fields trigger does not cover it. Tampering would only cause a loud raise
+  (`ledger_join` / I-1), never a clear. Owner `payments` + `ledger-finance`; a migration-sized change, not part of 0125
+  unless LF folds it in.
+- **D-7 widened (revision 4):** the D-7 acknowledgement (A-13 evidence standard) now also covers the T10 residuals of
+  §4.3 (T6, source authenticity/completeness, availability).
+- No new human decision arises from revision 3. The open human items remain §10.1 (HD-R15-1..9), §10.2 (D-1..D-9) and
+  the §10.3 launch flags.
 
 ## 11. Review conditions incorporated (revision 2)
 
@@ -861,9 +973,264 @@ precondition); the rest is deferred as HD-R15-9.
 | Deviations D-1..D-8 (+ D-9) and launch flags | §10.2, §10.3 |
 | §7 split revised; start-now vs wait | §7.2, §7.3 |
 
+## 12. RESOLVE-1 tightenings implemented (`ledger-finance`, 2026-10-08)
+
+**Status: IMPLEMENTED against MOCK** (the §7.3 "may start now" slice only; no migration; `manual_resolution.go` and
+`migrations/` untouched). **RESOLVE-1 M4 itself remains NOT IMPLEMENTED** (kinds, `payout_m4_evidence`, sealed imports,
+acting SELECT, fences, MR041, §4.8 cells, 0125): it still waits for the `ledger-finance` re-review of §4 and the
+`security` T10/M-5 co-ruling. Owner decisions 9-12 (ADR 0095 §44) are not broadened: nothing here clears, releases,
+settles or posts anything; every change only narrows clearing, refuses a run, or changes operator text.
+
+- **I-1 (§4.6; security I-1 / LF C-4).** `payoutCompletedRef` (`internal/reconciliation/payment_statement_k3.go`) keeps
+  the positive attribution (own release keyed by the reference, no other holder) and additionally requires the
+  completion's `psp_clearing` amount and its single asset to equal the attempt's, at **every** payout site (bound and
+  unbound). Where the finding is keyed on an evidencing line (unbound in-run, merchant cross-check B step, standing),
+  that **line's** amount and asset must equal the attempt's too. The bound sites (`capturedUnposted`: matchPayment's
+  bound case and `checkUnmatchedAttempts`) have no evidencing line by construction (the finding is keyed on X and the
+  standing site has no line), so there the completion is compared; a bound line of another amount still raises
+  `pay_amount_mismatch` in-run (interpretation, see policy question P-2 below).
+- **I-2 (§4.6; security I-2).** `loadK3Evidence`'s persisted-lines read is bounded by a hard per-run cap fixed before
+  the read: **64 per lookup key** (the §4.4 figure security confirmed) × the number of distinct provider/merchant
+  references the run needs. The query reads at most cap+1 rows; the (cap+1)-th row fails the run with
+  `ErrPaymentEvidenceOverflow`: no run row, no mismatch row, ledger untouched, reported by
+  `ReconcilePaymentStatementForTenant` as the existing P1 `reconciliation.sweep_run_failed` (phase `match`) plus the
+  run-failure alert, on every run until resolved. Never a silent truncation, never a partial verdict. INV-M-5 kept.
+- **L-4 hint (§4.6, partial).** An unbound payout park **inside §4.1 scope** (`invalid_provider_reference`,
+  `invalid_provider_reference:*` or `provider_reference_conflict`, **with NULL provider reference**, C-6) now reads
+  "resolution: PSP-side recall/return, or the evidence-backed four-eyes resolution M4 (PAY-PAYOUT-UNBOUND-RESOLVE-1,
+  ADR 0111 §4; NOT IMPLEMENTED); never allocation; M1 only acknowledges". Bound payout parks and unbound reasons that
+  hold a reference keep the R-K3-8 wording; deposits keep F13. The **post-M4-not-paid** hint is **NOT IMPLEMENTED**:
+  it needs executed M4 rows, which cannot exist before 0125 widens `tenant_system_read_executed`.
+- **Pins flipped deliberately.** `b11RequirePayoutCU` (`internal/payments/b11_payout_unbound_hold_integration_test.go`)
+  expects the M4-scope wording for parks with no reference (sync, reverse collision) and the R-K3-8 wording for the poll
+  park (holds X). No STANDING-1 / BOUND-CLEAR-1 clearing pin changed: every existing own-completion test uses equal
+  amounts.
+- **Tests:** `internal/reconciliation/prh2_r16_res1_tighten_integration_test.go` (`TestRes1_*`, runtime role).
+- **Evidence:** `docs/plans/prh2-hardening-round/prh2-r16-res1-tighten-mutation-kill.txt` (23 counted mutants: 20
+  killed, 3 equivalent survivors disclosed: I1-h, I2-f, L4-e). LOCAL evidence only.
+- **Policy questions (for the LF re-review / security):** **P-1** the I-2 cap value and shape (64 per lookup key,
+  per run) versus a fixed absolute per-run number: §4.6 gives no figure; a fixed 64 per run would fail ordinary runs of
+  any tenant with a few parks. **P-2** whether a bound payout park should also refuse to clear while an in-run line
+  naming X carries another amount (today: cleared by an equal own completion, the line raises `pay_amount_mismatch`).
+- **Revision 3 note (`architect`).** P-1 is answered by the §4.6 I-2 formula, subject to the `security` co-signature
+  (BC-2, §10.4). P-2 is recorded as a follow-up linked to RM-3 (§10.4).
+
+## 13. Revision 3 changes (`architect`, 2026-10-08; `ledger-finance` pre-0125 wording conditions)
+
+Text only. Owner decisions (ADR 0095 §44) are not broadened. §12 (another agent) is kept unchanged apart from the
+trailing note above.
+
+| Item | Change | Section |
+|---|---|---|
+| BC-1 / R-5 | implemented shapes of I-1 (completion `psp_clearing` amount + single asset at every payout site; line amount/asset where line-keyed; `<none>`/`<multiple>` fail closed) and I-2 (64 per key × keys fixed before the read; cap + 1; `ErrPaymentEvidenceOverflow` + P1; no truncation; content cannot raise its budget) | §4.6 |
+| R-1 | predicates count any contradicting line in any import, irrespective of `occurred_at` or import time | §4.6 |
+| R-2 | M4-paid completions attributed in `ledger_join` only via executed `m4_evidence_paid` with `ledger_transaction_id = t.id` and the withdrawal's `release_ledger_transaction_id = t.id`; 0125 matcher change and tests | §4.6 |
+| R-3 | step 7 and MR041 use `provider_reference IS NOT DISTINCT FROM provider_reference_at_submission` | §4.2, §4.5 |
+| R-4 | M4 amount/asset DB-forced from the attempt; insert and execution refuse unless the withdrawal's amount/asset equal the attempt's | §4.2, §4.5 |
+| BC-2 | security co-signature of the I-2 formula before 0125 merges | §10.4, §4.6 |
+| LOW-1 / RM-4 | real-source re-delivery pattern; whole-stream overflow impact; runbook entry | §10.4 |
+| P-2 / RM-3 | standing amount/asset check for bound parks with an own completion | §10.4, §12 note |
+| 0125 hint | drop "NOT IMPLEMENTED", say "MOCK only" while T10 stands | §4.6, §10.4 |
+| Notes | pending-before-succeeded PSPs make M4-paid unusable (safe); 24 h window to be re-checked per rail | §10.4 |
+
+## 14. Revision 4 changes (`architect`, 2026-10-08; `security` co-ruling on §4)
+
+Text only. Owner decisions (ADR 0095 §44) are not broadened. `security`: **0125 MAY START; BC-2 CO-SIGNED; HD-R15-8
+replaced.**
+
+| Item | Change | Section |
+|---|---|---|
+| S-1 | executed M4 rows add R, merchant ref, bound ref and Y to the `loadK3Evidence` key set; three tests incl. a key-drop mutant | §4.6 |
+| S-2 | execution re-evaluates first, then Go seals exactly the returned import ids (must equal the pinned set); the 0115 guard re-runs the evidence and R-3/R-4 checks in the DB at `→ executing` | §4.5 |
+| S-3 | source declaration only from the in-process registry/config; endpoint/credentials from the secret store or governed config; authenticated channel and PSP signature; T10 residuals (T6, authenticity/completeness, availability + runbook "treat overflow as possible tampering"); launch-blocking per real source | §4.3, §10.3, ADR 0110 pointer |
+| S-4 | 64-line bound covers every line read incl. R lookups; `evidence_import_ids` = imports of lines read; paid line from a sealed import; unsealed lines never positive but still contradict | §4.4 |
+| S-5 | domain tag "imp" + `imported_by_service` in the seal; `lines_digest` column list; seal written in the INSERT (no UPDATE); startup gate fires on a non-MOCK statement source; retired kids verify-only; 0123 merges before 0125 | §4.3, §7.3 |
+| S-6 | platform_acting approver floor enforced in the DB recount + test; capability description states M4 coverage (D-9 accepted) | §4.5 |
+| S-7 | ADR 0110 header pointer aligned with §4.5 digest wording | ADR 0110 header |
+| S-8 | follow-up: freeze `release_ledger_transaction_id` once non-NULL | §10.4 |
+| BC-2 | co-signed | §10.4 |
+| HD-R15-8 | resolved by option (b), sealed imports; T10 residuals folded into D-7; T10 launch flag conditions restated | §10.1, §10.3, §4.3 |
+
 ---
 
-## 15. HSEC implementation notes (HSEC-APPROVED-HOLD-RELEASE-1, migration 0124)
+## 15. B13-A implementation notes (appendix, added with the B13-A code; the design above is not rewritten)
+
+Scope delivered: migration `0123_payout_instruments` (the whole B13 **schema**, because section 7.2 keeps B13 as one
+migration and section 7.1 says B13-B "uses 0123") and the Go package `internal/payoutinstrument` with its routes. The
+Go integration of the binding into the withdrawal / payments paths is **B13-B and is NOT part of this change**.
+Where the design left a sub-question open, the safest existing reading was taken and is recorded as `B13A-n`. No
+policy question that changes an owner decision (ADR 0095 section 44, decisions 1-8) was needed; the three questions
+the human or architect should see are in 15.3.
+
+### 15.1 Deliverable status
+
+| Deliverable | Status |
+|---|---|
+| Migration 0123: kinds (seeded, SELECT-only), instruments + DB state machine, verifications, blocking events, fingerprint owners, max-age table, `withdrawal_requests` binding columns + insert guard + immutability, write-once snapshots, `payment_attempts` snapshot constraint, RLS, grants, L-6 up-time assertion | `IMPLEMENTED` (runtime-role integration tests, up/down/up) |
+| AEAD detail (AES-256-GCM, HKDF subkey, AAD = tenant, instrument, kind, schema version), masks, tenant-bound HMAC fingerprint with its own key family, canonical encoding, four Go-side seals | `IMPLEMENTED` |
+| Gate rule (`EvaluateGate`), tiering predicate (`CheckTier`), `WriteSnapshot` / `LoadSnapshot`, `PayoutDestination` (redacting), `DestinationFingerprinter` / `DestinationEcho`, `ForcedSource` | `IMPLEMENTED` (callers are B13-B) |
+| Player routes (register / list / revoke, generic 409, per-player rate limit, no card numbers) and staff routes (read, suspend) with permissions and `permissions.ts` | `IMPLEMENTED` |
+| Startup gate (`VerifyStartup`, `cfg.GuardEnvironment()`), Go legacy-binding check, config key families | `IMPLEMENTED` and wired in `cmd/platform-api` |
+| `PayoutInstrumentVerifier` interface + `MockVerifier` | `MOCK` (Synthetic; registered with the synthetic guard) |
+| Any real PSP / KYC-vendor / custodian instrument verifier | `NOT IMPLEMENTED` (`PROVIDER DEPENDENT`) |
+| Binding at request creation, T1p destination gate and snapshot insert, phase B / T2 / T12 re-checks, `destination_mismatch` park, echo cells, `WithdrawRequest.Destination` | `NOT IMPLEMENTED` (B13-B) |
+| Expiry sweep scheduler, re-fingerprint operator command, provider-callback wiring of `ApplyProviderBlock` | `NOT IMPLEMENTED` (the methods exist and are tested; see the runbook `docs/runbooks/payout-instrument-keys.md`) |
+| Compliance alert on a fingerprint conflict (M-7) | `PARTIALLY IMPLEMENTED`: audit row `payout_instrument.registration_conflict` only; an alert needs a new `alerting` Kind (a migration), see 15.3 |
+| Acting-family read of snapshots under a VALID acting session | `PARTIALLY IMPLEMENTED`: the policy is pinned (SELECT only, `financial_acting_session_valid()`, snapshots only) and an invalid acting session reads nothing; a positive test needs a K1 grant world and belongs with the first consumer (RESOLVE-1) |
+
+### 15.2 Ambiguities and the reading taken
+
+- **B13A-1 (instrument id).** "`id` DB default; a client value is refused": the id is allocated by the database
+  (`SELECT gen_random_uuid()` in the registration transaction) because the AEAD AAD and the instrument seal bind it before
+  the insert. The HTTP surface refuses a client-supplied id (unknown-field rejection; tested). Reading: the *client*
+  cannot choose the id; the platform's own insert path passes the id it just allocated.
+- **B13A-2 (NULL binding, transitional).** Section 2.1 says the `withdrawal_requests` BEFORE INSERT trigger "requires both
+  NOT NULL". Until B13-B wires the request path no code supplies a binding, so enforcing it now would break every existing
+  withdrawal insert. 0123 therefore **validates a binding whenever one is supplied** (same tenant/brand/player, verified,
+  in-force latest verification, no revoke, no later suspend, asset listed, fingerprint equal) and **tolerates NULL/NULL**; the
+  CHECK forces both-or-neither and the immutability trigger forbids adding a binding later. **Decision (coordinator, after the security review): 0123 merges as written and is
+  not amended afterwards; B13-B ships its OWN migration that replaces `withdrawal_requests_payout_binding_guard()` so it refuses
+  NULL/NULL on INSERT, in the same change that makes the request path always bind.** A NULL binding stays dispatchable only to Synthetic adapters (A-11; tiering predicate in
+  Go). This is the single place where B13-A is weaker than the final design; it is deliberate and pinned by
+  `TestBinding_InsertGuard`.
+- **B13A-3 (rails).** Seed `allowed_rails`: `bank_account` {bank_transfer, sepa, faster_payments, pix, spei}; `card_token`
+  {card}; `ewallet_account` {ewallet}; `crypto_address` {crypto}; `synthetic_test` {synthetic, card, bank_transfer, ewallet}.
+  The repo has no rail vocabulary (payment methods are free strings); a new rail is a migration.
+- **B13A-4 (masks and the PAN detector).** Masks: IBAN/account `CC****` + last 4; e-wallet email `x***@domain`;
+  e-wallet id `***` + last 4; crypto first 6 + `...` + last 4; card `network ****` + last 4; synthetic `synthetic:<label>`. The
+  detector refuses a Luhn-valid 12-19 digit string in any string value, key or bare number of any kind. The unit is the
+  **maximal digit run** (single spaces or hyphens allowed between digits); a longer run is not windowed, otherwise most
+  IBANs would be refused. Known over-refusal: a bank detail whose only digit run is a Luhn-valid 12-19 digit string (about
+  1 in 10 such runs) is refused; this is the safe side of "no PAN ever" (L-8).
+- **B13A-5 (seal coverage widened).** The seals cover the ADR column lists **plus**: `display_mask`, `detail_key_kid`,
+  `detail_schema_version` (instrument; otherwise a tampered mask would mislead approvers and the AEAD key id could be
+  downgraded), `verifier_reference_hash` (verification), `actor_id` and `reason_code` (blocking event), `verified_at` and
+  `display_mask` (snapshot). They only add coverage; every ADR column is covered.
+- **B13A-6 (keys).** Variables: `PAYOUT_INSTRUMENT_KEYS` / `_ACTIVE_KID` and `PAYOUT_INSTRUMENT_FP_KEYS` / `_FP_ACTIVE_KID`.
+  `config.Load` refuses a key equal to a JWT secret, an actor-proof key, `PROVIDER_CREDENTIAL_FINGERPRINT_KEY`, or a key shared
+  across the two families. Webhook secrets are per-tenant values in the secret store, not process configuration, so
+  "different from any webhook secret" and "unique per environment" are **operational** requirements (runbook), not
+  machine-checked. Absent keys are valid in `Load`; the startup gate (`VerifyStartup`) requires them in production or when any
+  non-Synthetic payout adapter or verifier is registered; otherwise the routes answer 503 (no keyless mode, no random key).
+- **B13A-7 (verification flow).** Registration commits the pending instrument, then verifies synchronously through the first
+  registered verifier that supports the kind and rail; the vendor call is made **outside any transaction**, after the seal /
+  AEAD / fingerprint integrity check, and the verification row + state change are written in one transaction. `Verify`
+  accepts only `pending_verification` and `verification_expired`: **a `suspended` instrument is not re-verifiable** (the DB
+  allows `suspended -> verified` only with a same-transaction verification, but no B13-A code path offers it; owner decision
+  7: no staff unsuspend). A rejecting outcome moves `pending_verification -> rejected`; a rejected re-verification of an
+  expired instrument records the rejected row and leaves the instrument expired.
+- **B13A-8 (blocked destinations).** Because there is no unblock path, `Register` refuses (generic 409, audit reason
+  `destination_blocked`) a destination for which **any staff or provider blocking event exists** in the tenant; otherwise a
+  player could revoke a compliance-suspended instrument and register the same destination again. A player's own revoke does
+  not block. Whether and how a block is ever lifted is a policy question (15.3).
+- **B13A-9 (KYC verified).** "The Person's KYC status is verified" = the **latest** `kyc_verifications` row of the player
+  account (tenant and brand) is `approved` and unexpired; a newer non-approved row, including an orphan, denies
+  (fail-closed). Cross-tenant Person verification is invisible under RLS and is not consulted.
+- **B13A-10 (max-age table RLS).** `payout_instrument_verification_max_age` is `ENABLE` but **not `FORCE`** row-level
+  security, with a read policy and no runtime write grant: a FORCEd table with a SELECT-only policy would lock the owner/
+  migration role out of the only writer it is meant to have. The runtime role is bound by RLS and has no write grant (pinned).
+- **B13A-11 (staff reach).** The staff routes are tenant-scoped (tenant from the verified token). `platform_admin` holds the
+  static `payout_instrument:read` per section 2.9 but, having no tenant context, gets 403 on these routes (same shape as
+  `sportsbook_bet:read`). No staff create / verify / unsuspend / edit route exists (a test pins 404/405).
+- **B13A-12 (rate limit).** Per player, burst 5, refilling 10 per hour, in-memory per replica (ADR 0097 `GCRALimiter`
+  admission pattern: effective limit = limit x replicas). Refused attempts consume budget. Parameters are code constants.
+- **B13A-13 (idempotent registration).** Registering the same destination (after normalisation) for the same player while a
+  live instrument exists returns that instrument (200, not 201); a concurrent double registration yields exactly one row (the
+  partial unique index plus a savepoint). A destination change is a new instrument (`supersedes_instrument_id`).
+- **B13A-14 (supersession timing).** The old instrument becomes `superseded` in `Service.Sweep`, once the replacement is
+  `verified` **and** no live withdrawal binds the old one (the DB refuses otherwise, PI018). It is not done inside `Verify`,
+  because an in-use refusal there would fail the replacement's verification.
+- **B13A-15 (blocking-event and verification time).** `verified_at` / `occurred_at` are DB-forced to equal the transaction
+  time `now()`; Go reads `SELECT now()` first and seals that value. `created_txid` is DB-forced to `txid_current()`.
+- **B13A-16 (repo hygiene).** While B13-A was written the repository's shared `.git/info/exclude` hid `/migrations/0122_*` and
+  `/migrations/0123_*` from `git status`, so the 0123 files were committed with `git add -f`; the exclude lines have since been removed
+  by the orchestrator and nothing further is needed.
+- **B13A-17 (provider ids).** `payoutinstrument.MockProviderIDs = {"mock-payments"}` equals the literal in 0123's up-time
+  assertion; `cmd/platform-api` pins it equal to the ids of the `providerkind.Synthetic` payment adapters the binary registers.
+
+- **B13A-18 (repo-wide catalogue pins).** The `internal/db` catalogue tests (A-18 NULL-arm scan, K2-G1 acting row visibility,
+  the KYC-worker reference allowlists) classify every table. Two ordered appends were made to their reference allowlists
+  (`a18SelectAllowlist`, `workerReferenceAllowlist`) for `payout_instrument_kinds` and `payout_instrument_verification_max_age`
+  (family-R reference tables, no tenant data). The 0123 policies are written as static statements, not a `DO` loop, so the
+  A-18 scan can see them.
+- **B13A-19 (`migrate verify`).** On this branch alone `migrate verify` reports `GAP missing migration version 122` (0122 is
+  PAY-RECEIPT-ANOMALY-APPLIED-1, another workstream); `migrate up` is unaffected. Merge strictly in number order; after 0122
+  merges the report is clean.
+
+### 15.3 Items for the architect / human (none changes decisions 1-8; each fails closed today)
+
+1. **Closing the NULL-binding arm (B13A-2)**: decided - B13-B's own migration replaces the guard (see B13A-2). B13-B also
+   carries: a missing snapshot on a bound withdrawal is `destination_integrity_failure`; the tier check runs at T1p, phase B and
+   T2/T12; a repo-wide check that no Synthetic marker is inherited through embedding (L-7); and removal of the L-8 startup clause.
+2. **Lifting a staff/provider block (B13A-8).** Owner decision 7 forbids a staff unsuspend route; the consequence is that a
+   suspended or provider-revoked destination is unusable for that tenant **permanently** until a governed (four-eyes,
+   proof-bound) writer exists. HD-R15-5 covers the stranded-withdrawal side; the registration side is new. Fails closed.
+3. **Compliance alert on a fingerprint conflict (M-7).** `alerting` Kinds are database-checked (migration 0110); a new Kind
+   needs its own migration and attribute trigger. Until then the conflict is an audit row only.
+
+### 15.4 Evidence
+
+Tests (runtime role, scratch database): `internal/payoutinstrument` (unit + integration), `internal/httpserver`
+(`TestPayoutInstrumentRoutes_*`), `internal/auth`, `internal/config`, `cmd/platform-api`. Mutation-kill evidence:
+`docs/plans/prh2-hardening-round/prh2-r16-b13a-mutation-kill.txt`.
+
+### 15.5 Security review of B13-A (APPROVE WITH CONDITIONS): fixes and launch flags
+
+Fixed in B13-A (tip after this change):
+- **M-1** the deferred `payment_attempts` snapshot constraint returned NULL when the withdrawal row was not found (reproduced by
+  clearing `app.tenant_id` before commit): it now raises PI055 when the withdrawal cannot be read; only an explicit NULL binding
+  returns. Regression: `TestSnapshotConstraint_FailsClosedWhenWithdrawalUnreadable`.
+- **M-2** the PAN detector treated only one space or hyphen as a separator. A run of digits joined by ANY non-alphanumeric
+  characters (dots, underscores, colons, repeated separators, NBSP, tabs ...) is now one candidate; letters still end a run.
+- **L-8 (chosen: ENFORCED, not just flagged)** `VerifyStartup` refuses to start, in every environment, when any non-Synthetic payout
+  adapter is registered, even with keys, until B13-B lands (it would dispatch NULL-binding withdrawals). B13-B removes the clause.
+- **L-6 (done)** the database snapshot insert also requires the instrument `verified`, the snapshot's verification to be the
+  in-force one, unexpired, and no revoke / later suspend event (PI054). Defence in depth; the Go gate stays primary.
+
+**Launch-blocking for non-MOCK instruments / payouts** (recorded, not built):
+- **M-3** A fingerprint-ownership claim is permanent (A-2: owner rows are never deleted) and there is no release path. A Person who
+  registers a destination that is not theirs, or one they later lose, blocks every other Person in the tenant from it
+  forever (a denial-of-registration vector) and nothing can correct a wrong claim. A governed (four-eyes, proof-bound) release or
+  re-assignment writer is required before any real customer data.
+- **L-1** For `card_token` the `psp_card_fingerprint`, `last4` and `network` are CLIENT-supplied in the registration body. They feed the
+  fingerprint input (L-8 of the ADR) and the mask. Before a real card is accepted these must come from the PSP's hosted-fields
+  response server-side, never from the browser body.
+
+**Recorded residuals / known behaviour:**
+- **L-2** One destination can yield several fingerprints (different normalisations or kinds, e.g. an IBAN as `bank_account` vs the
+  same account entered with `country`+`account_number`; a card with and without a PSP fingerprint). Conflict detection is per
+  normalised input, so equivalent destinations in different forms are not detected as the same.
+- **L-5** The registration response (`200` existing vs `201` new, plus the idempotent replay) is an existence oracle for the
+  caller's OWN destinations only; the cross-Person conflict response is generic. Accepted residual.
+- **L-7** The Synthetic marker (`SyntheticComponent`) is inherited through struct embedding: a real type embedding a Synthetic type
+  silently becomes Synthetic and would satisfy the tiering predicate. B13-B adds a repo-wide embedding check; until then the
+  predicate must not be relied on for a type that embeds a mock.
+
+### 15.6 Ledger-finance review of B13-A (APPROVE WITH CONDITIONS): fixes, notes and B13-B conditions
+
+Fixed in B13-A (migration 0123, folded in before merge):
+- **C-3 / F-4** `payout_instrument_kinds` gained `allowed_asset_type` (`fiat` for `bank_account`, `card_token`, `ewallet_account`; `crypto`
+  for `crypto_address`; NULL = any for `synthetic_test`). The instrument insert trigger refuses (PI007) an asset whose registry type
+  differs, so a bank account cannot list BTC and a crypto address cannot list EUR. The rule is data in the kinds table, not a code
+  path keyed on a kind. Tests: `TestKindAssetTypeEnforcedByTheDatabase` (Go and direct SQL); mutant S31 killed.
+- **C-4 / F-5** `LOCK TABLE withdrawal_requests IN SHARE ROW EXCLUSIVE MODE` precedes the L-6 pre-flight scan, so no row can gain a
+  non-MOCK `provider_id` between the scan and the `ALTER TABLE`. Test: an open writer makes the migration wait and then refuse
+  (`TestMigration0123_PreflightLockSerialisesWithWriters`); mutant S32 killed.
+- **F-7** the down migration also refuses (PI099) while `payout_instrument_verification_max_age` has any row (governance
+  configuration is not silently discarded). Test and mutant S33 killed.
+
+Recorded, not changed:
+- **F-6 (scale note)** `ALTER TABLE withdrawal_requests` takes an ACCESS EXCLUSIVE lock and validates the new FK / CHECK against the whole
+  table. On a large table run it in a maintenance window; `lock_timeout` and `NOT VALID` + `VALIDATE CONSTRAINT` would shorten the
+  lock but are deliberately not applied here (the migration is not to be amended after merge).
+- **F-8 (info residual)** as recorded by the review; no action in B13-A.
+
+**B13-B conditions (added):** call `EvaluateGate` and `CheckTier` inside `ClaimForDispatch`, before the provider call and before any
+retry, resend or callback/poll that settles the attempt; and remove the L-8 startup clause in `VerifyStartup` in the SAME change that
+closes the NULL arm (the guard-replacing migration).
+---
+
+## 16. HSEC implementation notes (HSEC-APPROVED-HOLD-RELEASE-1, migration 0124)
 
 Appended by the `payments` implementer. The design above is **not** rewritten; this section records each
 ambiguity chosen while implementing §6 (safest reading in every case), the objects the implementation touches

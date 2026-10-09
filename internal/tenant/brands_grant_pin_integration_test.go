@@ -22,6 +22,13 @@
 // only - prove the gate fails CLOSED (42501, never "active") if the grant is
 // removed, so the positive pin is meaningful.
 //
+// The same UPDATE dependency applies to every other caller of the FOR SHARE brand
+// read, tenant.RequireBrandActive (H(8), ADR 0095 sections 44-45): the SWEEPER
+// deposit claim transaction and the cascade-eligible decline transactions (phase C
+// and the poll path) in internal/payments, not only HTTP initiation. Their
+// fail-closed behaviour under a revoked grant is exercised in
+// internal/payments/h8_brand_failclosed_scratch_integration_test.go.
+//
 // Intended runtime-role grant set (the source of the "exactly" assertions):
 // docs/security/runtime-role-separation.md section 3 ("SELECT, INSERT, UPDATE,
 // DELETE on every application table ... Nothing else"; "Explicitly do not

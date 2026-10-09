@@ -1111,8 +1111,16 @@ func applyResolvedReceiptEvidence(ctx context.Context, tx pgx.Tx, o *Orchestrato
 			// insertCascadeAttemptIfEligible downgrades
 			// ErrKillSwitchEngaged to "no child, audited", the decline
 			// itself (already applied above) still commits.
-			if _, err := insertCascadeAttemptIfEligible(ctx, tx, attempt); err != nil {
+			//
+			// H(8) decision 19 / ADR 0095 section 47: the tenant and the BRAND gate run here too, in this
+			// same tx and against the intent's REAL row (gateReceiptCascadeChild loads brand_id; the stub
+			// above carries none). A read error returns and rolls the whole delivery back.
+			if skipped, err := gateReceiptCascadeChild(ctx, tx, attempt); err != nil {
 				return false, "", err
+			} else if !skipped {
+				if _, err := insertCascadeAttemptIfEligible(ctx, tx, attempt); err != nil {
+					return false, "", err
+				}
 			}
 		}
 		return true, ResolutionApplied, nil

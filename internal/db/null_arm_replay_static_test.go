@@ -111,6 +111,11 @@ var a18SelectAllowlist = map[string]bool{
 	// K3 (0115) family-R reference table: the closed finding/basis/context code
 	// vocabulary (ADR 0101 8.1), seeded before FORCE, SELECT-only, no tenant data.
 	"payment_manual_resolution_codes": true,
+	// B13 (0123, ADR 0111 2.1) family-R reference tables: the seeded instrument-kind
+	// vocabulary (SELECT-only for the runtime role, pinned by a grant test) and the
+	// per-jurisdiction verification max age (owner-written, runtime SELECT-only).
+	"payout_instrument_kinds":                true,
+	"payout_instrument_verification_max_age": true,
 }
 
 // a18Policy is one effective (CREATE'd, not yet DROP'd) policy.

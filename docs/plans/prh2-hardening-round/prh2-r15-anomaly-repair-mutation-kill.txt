@@ -1,0 +1,69 @@
+PAY-RECEIPT-ANOMALY-APPLIED-1 Option A (RepairReceiptAttribution + migration 0122) mutation-kill evidence, baseline dd6cd31, branch gov-r15-anom.
+Method: internal/payments/receipt_repair.go (M*) and migrations/0122_receipt_attribution_repair.up.sql (G*) mutated in
+place with a backup copy (file copied to *.r15bak, restored after every mutant, git status clean at the end, RESTORED).
+Each Go mutant is built and vetted first (a compile error is NOT counted). Run set: Go mutants -tags integration -count=1 -p 1
+-v -run 'TestRR_' ; migration mutants -run 'TestRR_Abuse|TestRR_Guard|TestRR_HappyPath|TestRR_CrossTenant|TestRR_Migration'.
+Migration mutants run only against per-test scratch databases (scratchdb), never a shared one.
+PASS/FAIL/SKIP count every -v result line including subtests. CONTROL = unmutated code.
+Round 1 CONTROL_GO PASS=22 FAIL=0 SKIP=0 ; CONTROL_MIG PASS=7 FAIL=0 SKIP=0.
+Round 2 (after adding TestRR_Locks_* and the guard reference-agreement cases) CONTROL_GO PASS=23 FAIL=0 SKIP=0 ; CONTROL_MIG PASS=7 FAIL=0 SKIP=0.
+
+Mutants (final status after round 2):
+ M1  drop the provider/tenant binding check on candidates              -> round 3: see ROUND 3 below (round-1/2 claim of 'equivalent' withdrawn)
+ M2  two different candidates treated as fine (ambiguity ignored)      -> KILLED  TestRR_Ambiguous_*
+ M3  operation allow-list check removed (round 1 compile error; redone as M3b) -> M3b KILLED  TestRR_ContradictoryEvidence_*
+ M4  application-consistency check removed                             -> KILLED  TestRR_InsufficientEvidence_*
+ M5  already-repaired (idempotent) path removed (round 1 compile error; redone as M5b) -> M5b KILLED TestRR_SecondCall_NoOp_*, TestRR_Concurrent_TwoRepairs_*
+ M6  receipt read without FOR UPDATE                                   -> SURVIVED (near-equivalent, see below)
+ M7  parent lock removed                                               -> KILLED  TestRR_Locks_ParentAttemptAndReceiptAreTaken (round 1: survived, test added)
+ M8  attempt row lock removed                                          -> SURVIVED (near-equivalent, see below)
+ M9  repair audit row not written                                      -> KILLED  TestRR_HappyPath_*, others
+ M10 mismatch audit replayed even when the success matched             -> KILLED  TestRR_MatchedSuccess_NoReplayRow_OnlyRepairRow
+ M11 replay never                                                       -> KILLED  TestRR_HappyPath_*
+ M12 refusal never raises the signal                                   -> KILLED  TestRR_Ambiguous_* and others
+ M13 ineligible receipt also raises                                    -> KILLED  TestRR_NotEligible_*
+ M14 UPDATE also sets resolved_at (relabels history)                   -> KILLED  TestRR_HappyPath_* (guard refuses)
+ M15 reason code not validated                                         -> KILLED  TestRR_Request_NoTargetParameter_AndValidation
+ M16 re-derive comparison skipped (round 1 compile error; redone as M16b) -> M16b SURVIVED (untested interleaving, see below)
+ M17 reconstructed flag false                                          -> KILLED  TestRR_HappyPath_*
+ M18 mismatch predicate inverted                                       -> KILLED  TestRR_HappyPath_*
+ M19 by-reference lookup not tenant-scoped in SQL                      -> SURVIVED (equivalent under RLS, see below)
+ M20 receipt merchant reference not required to agree                  -> KILLED  TestRR_ContradictoryEvidence_*
+ M21 anomaly predicate dropped from the repair UPDATE                  -> SURVIVED (equivalent: the guard refuses, see below)
+ M22 unresolved-receipt branch removed                                 -> see ROUND 3 (the refusal DETAIL differs; 'equivalent' withdrawn)
+ G1  guard: anomaly-only requirement removed                           -> KILLED  TestRR_Abuse_DirectUpdatesRefusedByTheGuard
+ G2  guard: same-tenant check removed                                  -> SURVIVED (equivalent under RLS, see below)
+ G3  guard: same-provider check removed                                -> KILLED  TestRR_Guard_*
+ G4  guard: provider_reference agreement removed                       -> KILLED  TestRR_Guard_* (round 1: survived, case added)
+ G5  guard: merchant_reference agreement removed                       -> KILLED  TestRR_Guard_* (round 1: survived, case added)
+ G6  guard: operation agreement removed                                -> KILLED  TestRR_Guard_*
+ G7  guard: whole post-resolution rule gated off                       -> KILLED  TestRR_Abuse_*, TestRR_Guard_*
+ G8  guard: resolution made mutable                                    -> KILLED  TestRR_Abuse_*
+ G9  guard: attempt_id re-assignable                                   -> KILLED  TestRR_Abuse_*
+
+Survivors (honest):
+ M1, M19, G2  The tenant/provider binding is enforced three times (lookup scoped by provider, RLS on payment_attempts under the
+     tenant session, and the guard). Under a tenant-scoped session the removed layer is unobservable, so these are defence-in-depth
+     redundancies, not test gaps; no equivalent-by-construction input exists to kill them without bypassing RLS.
+ M6, M8  Removing the explicit receipt/attempt FOR UPDATE does not change what a test can observe: the later UPDATE of the receipt
+     row takes the same row lock (and its FK check takes FOR KEY SHARE on the attempt row, which conflicts with a held FOR UPDATE),
+     so the repair still blocks. The explicit early lock only fixes the documented ORDER (parent, attempt, receipt); the order itself
+     is not asserted by a test (a deadlock-order test needs two crossing transactions and was not built).
+ M16b The under-lock re-derivation (ErrReceiptRepairConcurrentChange) needs an interleaving between the unlocked derive and the
+     lock (a test hook). No hook was added (the generalised F-L3 static guard governs hooks); the branch is UNTESTED.
+ M21, M22 Subsumed by the guard (M21) and by anomalyClosed() (M22), which refuse the same inputs; equivalent.
+Compile-error mutants (not counted): M3, M5, M16 in round 1 (unused variable); each was redone as M3b, M5b, M16b.
+
+ROUND 3 (LF C1/C2/C3 and security L-1 follow-up; same method; CONTROL_GO PASS=28 FAIL=0 SKIP=0, CONTROL_MIG PASS=8 FAIL=0 SKIP=0)
+Corrections: the round 1/2 claims that M1 and M22 were "equivalent" are WITHDRAWN. M1 changes the refusal label for a merchant-only match
+naming another provider's attempt (contradictory vs insufficient); M22 changes the audit `detail` (receipt_unresolved vs receipt_not_anomaly_closed).
+ M1  candidate provider/tenant binding check removed                   -> KILLED  TestRR_MerchantOnlyMatch_OtherProviderAttempt_Contradictory
+ M22 unresolved-receipt branch removed                                 -> KILLED  TestRR_NotEligible_DetailNamesTheReason (asserts detail)
+ C1  Go submission-predate check removed                               -> KILLED  TestRR_RealS7Sequence_* (the PENDING variant isolates it; the guard would then error)
+ C2a replay even for a parked/forced (terminal_reason, operator) attempt -> KILLED  TestRR_M2ForcedAttempt_NoReplay_UnknowableRecorded
+ C2b replay stamps "<state>_inferred" instead of "unknown"             -> KILLED  TestRR_HappyPath_*, TestRR_DepositT13_ReplayStampsStateUnknown
+ G10 guard: first_submitted_at / received_at condition removed         -> KILLED  TestRR_RealS7Sequence_* (direct UPDATE must be refused)
+ G11 guard: search_path pin removed                                    -> KILLED  TestRR_Migration0122UpDownUp_* (proconfig assertion)
+Still SURVIVING (unchanged, honest): M6, M8 (explicit lock reads masked by the UPDATE's row lock and the FK key-share lock), M19 and G2
+(tenant scoping triple-enforced with RLS), M21 (subsumed by the guard). M16b: UNTESTED, no test hook added (needs a testHook* seam under the
+F-L3 static guard; the branch only returns ErrReceiptRepairConcurrentChange with nothing written).

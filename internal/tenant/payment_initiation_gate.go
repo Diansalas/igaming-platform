@@ -46,22 +46,40 @@ func RequireActiveForPaymentInitiation(ctx context.Context, tx pgx.Tx, tenantID,
 	if status != "active" {
 		return fmt.Errorf("%w: tenant status=%s", ErrNotActiveForPaymentInitiation, status)
 	}
+	return RequireBrandActive(ctx, tx, tenantID, brandID)
+}
+
+// ErrBrandNotActive is the BRAND-only refusal (H(8), ADR 0095 section 44
+// decisions 19-23): the brand row of the tenant is not 'active', is missing /
+// not visible, or no brand id was supplied. It is separate from the tenant
+// policy check on purpose (decision 23): RequireBrandActive never reads the
+// tenant, and the tenant half never reads the brand.
+var ErrBrandNotActive = errors.New("tenant: brand is not active")
+
+// RequireBrandActive is the brand half of RequireActiveForPaymentInitiation as
+// a standalone, brand-only policy check. The brand row of THIS tenant is read
+// FOR SHARE, so a concurrent brand status UPDATE waits for the caller's
+// transaction (no check/use race). A refusal wraps BOTH ErrBrandNotActive and
+// ErrNotActiveForPaymentInitiation (so existing HTTP callers keep matching);
+// fail closed: missing row, foreign tenant's brand, nil id or non-'active'
+// refuses; a read error is returned wrapped, never read as "active".
+func RequireBrandActive(ctx context.Context, tx pgx.Tx, tenantID, brandID uuid.UUID) error {
 	if brandID == uuid.Nil {
-		return fmt.Errorf("%w: no brand id", ErrNotActiveForPaymentInitiation)
+		return fmt.Errorf("%w: %w: no brand id", ErrNotActiveForPaymentInitiation, ErrBrandNotActive)
 	}
 	var brandStatus string
-	err = tx.QueryRow(ctx,
+	err := tx.QueryRow(ctx,
 		`SELECT status FROM public.brands WHERE id = $1 AND tenant_id = $2 FOR SHARE`,
 		brandID, tenantID,
 	).Scan(&brandStatus)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return fmt.Errorf("%w: brand row not visible", ErrNotActiveForPaymentInitiation)
+		return fmt.Errorf("%w: %w: brand row not visible", ErrNotActiveForPaymentInitiation, ErrBrandNotActive)
 	}
 	if err != nil {
 		return fmt.Errorf("tenant: read brand status: %w", err)
 	}
 	if brandStatus != "active" {
-		return fmt.Errorf("%w: brand status=%s", ErrNotActiveForPaymentInitiation, brandStatus)
+		return fmt.Errorf("%w: %w: brand status=%s", ErrNotActiveForPaymentInitiation, ErrBrandNotActive, brandStatus)
 	}
 	return nil
 }

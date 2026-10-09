@@ -2,6 +2,7 @@ package reconciliation
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/big"
 	"sort"
@@ -20,9 +21,10 @@ import (
 //   - ONE cross-import lookup over payment_statement_lines (loadK3Evidence,
 //     ADR 0101 9.3), through migration 0115's indexes. It runs in the stream's
 //     own REPEATABLE READ WithTenantSnapshot session with an explicit
-//     tenant_id predicate (RLS is the second line), never truncates with a
-//     LIMIT (a cap would have to fail the run loudly, never drop evidence:
-//     INV-M-5), and never reads another tenant's lines (C-14d).
+//     tenant_id predicate (RLS is the second line), never truncates (INV-M-5),
+//     and never reads another tenant's lines (C-14d). Its read is bounded by a
+//     hard per-run cap that FAILS the run when exceeded (I-2, ADR 0111 §4.6:
+//     ErrPaymentEvidenceOverflow), never a silent LIMIT.
 //   - Clearing and confirming evidence comes only from ledger rows, persisted
 //     statement lines and the typed evidence table - never from audit JSON
 //     (INV-M-6).
@@ -58,6 +60,16 @@ const (
 	// money the PSP already paid out: a double payout); the resolution path
 	// (PAY-PAYOUT-UNBOUND-RESOLVE-1) is NOT IMPLEMENTED (ADR 0101 R-K3-8).
 	payoutCapturedUnpostedResolutionHint = "resolution: PSP-side recall/return or governed completion against the hold (NOT IMPLEMENTED, R-K3-8); never allocation; M1 only acknowledges"
+	// m4ScopePayoutCapturedUnpostedResolutionHint is the L-4 wording (ADR 0111
+	// §4.6 "the unbound-park hint names M4"; §7.3 "may start now") for an
+	// UNBOUND payout park inside RESOLVE-1's scope (ADR 0111 §4.1: an
+	// invalid_provider_reference / invalid_provider_reference:* /
+	// provider_reference_conflict park holding NO provider reference). It names
+	// M4 and says it is NOT IMPLEMENTED: the M4 kinds, evidence function and
+	// migration 0125 wait for the ledger-finance re-review of ADR 0111 §4. The
+	// post-M4-not-paid wording of §4.6 needs executed M4 rows, which cannot exist
+	// before 0125, and is therefore not here.
+	m4ScopePayoutCapturedUnpostedResolutionHint = "resolution: PSP-side recall/return, or the evidence-backed four-eyes resolution M4 (PAY-PAYOUT-UNBOUND-RESOLVE-1, ADR 0111 §4; NOT IMPLEMENTED); never allocation; M1 only acknowledges"
 	// unknownOpCapturedUnpostedResolutionHint: fail-closed neutral text for an
 	// operation reconciliation does not know (security I-1, BOUND-CLEAR-1).
 	unknownOpCapturedUnpostedResolutionHint      = "resolution: none defined for this operation (unknown operation; nothing clears it); never allocation; M1 only acknowledges"
@@ -65,6 +77,21 @@ const (
 	declaredNotPaidButPaidResolutionHint         = "resolution: executed compensating_entry debits, causation = the withdrawal_failed transaction, totalling at least the withdrawn amount; an off-platform recovery has no clearing path and is tracked through the row's investigation status"
 	declaredPaidCompensatedButPaidResolutionHint = "resolution: executed compensating_entry debits, causation = the compensating credit's own transaction, totalling at least the credited amount"
 )
+
+// k3PersistedLinesPerKey is the I-2 bound (ADR 0111 §4.6) expressed per lookup
+// key: the same 64 that ADR 0111 §4.4 sets (security M-5 / I-2, confirmed) for
+// the lines one attempt's M4 evidence may read. The per-run cap is this times
+// the number of distinct lookup keys (provider references and merchant
+// references) the run needs evidence for, fixed before the read.
+const k3PersistedLinesPerKey = 64
+
+// k3PersistedLinesCap is the hard per-run cap on persisted lines read.
+func k3PersistedLinesCap(keys int) int { return k3PersistedLinesPerKey * keys }
+
+// ErrPaymentEvidenceOverflow: the persisted statement lines the run needs
+// exceed the hard per-run cap (I-2). The run fails loudly; nothing is
+// truncated and no verdict is drawn from a partial read.
+var ErrPaymentEvidenceOverflow = errors.New("reconciliation: persisted payment evidence exceeds the per-run cap (I-2)")
 
 var reconciliationMeter = otel.Meter("github.com/Diansalas/igaming-platform/internal/reconciliation")
 
@@ -246,8 +273,17 @@ func (m *payMatcher) loadK3Evidence(ctx context.Context, tx pgx.Tx, importIsMock
 		merchants[r.attemptMerchnt] = true
 	}
 
-	// Persisted lines across ALL imports of (tenant, provider), no LIMIT.
+	// Persisted lines across ALL imports of (tenant, provider). PAY-PAYOUT-
+	// UNBOUND-RESOLVE-1 I-2 (ADR 0111 §4.6; security I-2; no migration, ADR 0111
+	// §7.3 "may start now"): INV-M-5 is kept - evidence is never dropped - but the
+	// read is BOUNDED by a hard per-run cap (k3PersistedLinesCap). The query reads
+	// at most cap+1 rows; reading the (cap+1)-th row fails the whole run with
+	// ErrPaymentEvidenceOverflow (no run row, no mismatch row: the snapshot
+	// transaction rolls back), which ReconcilePaymentStatementForTenant reports as
+	// the existing P1 reconciliation.sweep_run_failed (phase match) plus the run
+	// failure alert. It is never a silent truncation and never a partial verdict.
 	if len(refs) > 0 || len(merchants) > 0 {
+		lineCap := k3PersistedLinesCap(len(refs) + len(merchants))
 		rows, err = tx.Query(ctx, `
 			SELECT l.import_id, l.line_no, i.is_mock, l.kind, l.provider_reference, COALESCE(l.merchant_reference, ''),
 			       COALESCE(l.original_provider_reference, ''), l.status, l.amount::text, l.asset_code, l.occurred_at
@@ -255,13 +291,21 @@ func (m *payMatcher) loadK3Evidence(ctx context.Context, tx pgx.Tx, importIsMock
 			  JOIN payment_statement_imports i ON i.id = l.import_id AND i.tenant_id = l.tenant_id
 			 WHERE l.tenant_id = $1 AND l.provider_id = $2 AND l.kind IN ('deposit', 'payout')
 			   AND (l.provider_reference = ANY($3) OR l.merchant_reference = ANY($4))
-			 ORDER BY l.provider_reference, l.kind, l.status, l.occurred_at, i.fetched_at, l.import_id, l.line_no`,
-			m.tenantID, m.provider, keysOf(refs), keysOf(merchants))
+			 ORDER BY l.provider_reference, l.kind, l.status, l.occurred_at, i.fetched_at, l.import_id, l.line_no
+			 LIMIT $5`,
+			m.tenantID, m.provider, keysOf(refs), keysOf(merchants), lineCap+1)
 		if err != nil {
 			return fmt.Errorf("persisted statement lines: %w", err)
 		}
 		seen := map[string]*persistedLine{}
+		read := 0
 		for rows.Next() {
+			read++
+			if read > lineCap {
+				rows.Close()
+				return fmt.Errorf("%w: more than %d persisted statement lines (%d per lookup key, %d keys) for provider %q; the run is refused, never truncated",
+					ErrPaymentEvidenceOverflow, lineCap, k3PersistedLinesPerKey, len(refs)+len(merchants), m.provider)
+			}
 			l := &persistedLine{}
 			var amount string
 			if err := rows.Scan(&l.importID, &l.lineNo, &l.isMock, &l.kind, &l.ref, &l.merchant, &l.original, &l.status, &amount, &l.asset, &l.occurredAt); err != nil {
@@ -439,15 +483,26 @@ func (m *payMatcher) markCaptured(a *payAttempt, ref string) bool {
 //     refund of a real deposit R says nothing about whether a payout under R
 //     left the platform. The only clearing is payoutCompletedRef.
 //
-// Any other operation never clears (fail closed).
-func (m *payMatcher) clearedRefFor(a *payAttempt, ref string) bool {
+// Any other operation never clears (fail closed). line is the evidencing
+// line (nil at the bound sites); deposits ignore it (unchanged).
+func (m *payMatcher) clearedRefFor(a *payAttempt, ref string, line *evidencingLine) bool {
 	switch a.operation {
 	case paymentStatementKindDeposit:
 		return m.clearedRef(ref)
 	case paymentStatementKindPayout:
-		return m.payoutCompletedRef(a, ref)
+		return m.payoutCompletedRef(a, ref, line)
 	}
 	return false
+}
+
+// evidencingLine is the amount and asset of the statement line a
+// pay_captured_unposted finding is keyed on (the unbound in-run site, the
+// merchant cross-check B step and the standing rule). nil at the bound sites
+// (capturedUnposted), whose finding is keyed on the attempt's held reference X
+// and is raised with no line at all in checkUnmatchedAttempts.
+type evidencingLine struct {
+	amount *big.Int
+	asset  string
 }
 
 // payoutCompletedRef: a withdrawal_completed ledger posting of this provider
@@ -462,17 +517,38 @@ func (m *payMatcher) clearedRefFor(a *payAttempt, ref string) bool {
 // (security review L-1 option (a): fail closed; the resolvesTo /
 // yAttributable precedent: borrowed attribution may raise, never clear). No
 // new line kind or schema; a future payout_return line kind is a schema
-// change out of scope here. The completion's amount and asset are NOT
-// compared with the attempt's (security I-1, folded into
-// PAY-PAYOUT-UNBOUND-RESOLVE-1).
-func (m *payMatcher) payoutCompletedRef(a *payAttempt, ref string) bool {
-	if ref == "" || m.ledgerByRef["withdrawal_completed\x00"+ref] == nil {
+// change out of scope here.
+//
+// PAY-PAYOUT-UNBOUND-RESOLVE-1 I-1 tightening (ADR 0111 §4.6; security I-1,
+// ledger-finance C-4; no migration, ADR 0111 §7.3 "may start now"): even a
+// positively attributed own completion clears ONLY when
+//   - the completion's psp_clearing amount and its single asset equal the
+//     attempt's (a partial, an over-release or another asset never clears),
+//     at every payout site, bound and unbound; and
+//   - where the finding is keyed on an evidencing line (line != nil), that
+//     line's amount and asset equal the attempt's too: the PSP reporting a
+//     different amount or asset for this payout is not the payout the
+//     platform completed.
+//
+// Narrows clearing only; it never widens it.
+func (m *payMatcher) payoutCompletedRef(a *payAttempt, ref string, line *evidencingLine) bool {
+	if ref == "" {
+		return false
+	}
+	t := m.ledgerByRef["withdrawal_completed\x00"+ref]
+	if t == nil {
 		return false
 	}
 	if a.settlementRef != ref || m.bySettlement[ref] != a {
 		return false
 	}
 	if h := m.byRef[paymentStatementKindPayout+"\x00"+ref]; h != nil && h != a {
+		return false
+	}
+	if t.asset != a.asset || t.amount == nil || t.amount.Cmp(a.amount) != 0 {
+		return false
+	}
+	if line != nil && (line.asset != a.asset || line.amount == nil || line.amount.Cmp(a.amount) != 0) {
 		return false
 	}
 	return true
@@ -487,11 +563,28 @@ func (m *payMatcher) payoutCompletedRef(a *payAttempt, ref string) bool {
 func capturedUnpostedHintFor(a *payAttempt, depositHint string) string {
 	switch a.operation {
 	case paymentStatementKindPayout:
+		if a.inM4Scope() {
+			return m4ScopePayoutCapturedUnpostedResolutionHint
+		}
 		return payoutCapturedUnpostedResolutionHint
 	case paymentStatementKindDeposit:
 		return depositHint
 	}
 	return unknownOpCapturedUnpostedResolutionHint
+}
+
+// inM4Scope reports whether a is a disputed payout inside RESOLVE-1's scope
+// (ADR 0111 §4.1, C-6): an unbound reason - invalid_provider_reference, its
+// invalid_provider_reference:* family, or provider_reference_conflict - with
+// NO provider reference. Wording only (L-4): it grants and clears nothing.
+// destination_mismatch (not-paid only) arrives with B13-B / 0125 and is not a
+// reason reconciliation classifies today.
+func (a *payAttempt) inM4Scope() bool {
+	if a.operation != paymentStatementKindPayout || a.state != "disputed" || a.providerRef != "" {
+		return false
+	}
+	r := a.terminalReason
+	return r == "invalid_provider_reference" || strings.HasPrefix(r, invalidProviderReferencePrefix) || r == "provider_reference_conflict"
 }
 
 // checkStandingUnbound is S1 (STANDING-1): every disputed attempt the D2F-1
@@ -523,7 +616,7 @@ func (m *payMatcher) checkStandingUnbound() {
 			continue
 		}
 		for _, l := range m.k3.linesFor(a, kind) {
-			if l.status != paymentStatementStatusSucceeded || m.clearedRefFor(a, l.ref) {
+			if l.status != paymentStatementStatusSucceeded || m.clearedRefFor(a, l.ref, &evidencingLine{amount: l.amount, asset: l.asset}) {
 				continue
 			}
 			if !m.markCaptured(a, l.ref) {

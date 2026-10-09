@@ -72,12 +72,14 @@ func (o *Orchestrator) driveCreatedAttempt(
 	var (
 		attempt PaymentAttempt
 		claimed bool
-		// deferredResolutionOnly: B8 - the claim tx found the tenant non-active.
-		deferredResolutionOnly bool
-		claimToken             uuid.UUID
-		provider               PaymentProvider
-		capability             ProviderCapability
-		manifest               OperationManifest
+		// deferSite: non-empty when the claim tx deferred the dispatch; it is the
+		// metric site label, kept distinct per reason (B8 tenant, H(8) brand, HTTP
+		// gate) because tenant and brand are separate policy checks.
+		deferSite  string
+		claimToken uuid.UUID
+		provider   PaymentProvider
+		capability ProviderCapability
+		manifest   OperationManifest
 	)
 	err := pool.WithTenant(ctx, intent.TenantID, func(actx context.Context, tx pgx.Tx) error {
 		// RG + KYC deposit gate re-run BEFORE the parent lock (RV-0095
@@ -151,16 +153,30 @@ func (o *Orchestrator) driveCreatedAttempt(
 				if err := rescheduleCreatedForResolutionOnly(actx, tx, created.ID, resolutionOnlyDispatchBackoff(created.PollCount)); err != nil {
 					return err
 				}
-				deferredResolutionOnly = true
+				deferSite = siteDepositClaimSweeperTenant
+				return nil
+			}
+			// H(8) decisions 20/21/23: the BRAND is a separate policy check, read
+			// (FOR SHARE) in this same claim tx after the intent lock and before the
+			// claim CAS. A refusal only reschedules the still-created attempt: no
+			// claim, no provider call, no cancellation, no release; it resumes when
+			// the brand is active again. A non-refusal read error is returned.
+			if berr := tenant.RequireBrandActive(actx, tx, intent.TenantID, intent.BrandID); berr != nil {
+				if !errors.Is(berr, tenant.ErrBrandNotActive) {
+					return berr
+				}
+				if err := rescheduleCreatedForResolutionOnly(actx, tx, created.ID, resolutionOnlyDispatchBackoff(created.PollCount)); err != nil {
+					return err
+				}
+				deferSite = siteDepositClaimSweeperBrand
 				return nil
 			}
 		}
 		// H-SEC-5: an HTTP-driven (player-request cascade) T2 claim is the same
 		// kind of NEW provider call; it gets the tenant+brand initiation gate in
-		// this tx (the sweeper branch above keeps its resolution-only rule, brand
-		// status for the sweeper is a separate ruling). A refusal defers the
-		// created child exactly like the sweeper deferral; the intent stays
-		// pending and the sweeper resolves/expires it.
+		// this tx (unchanged by H(8)). A refusal defers the created child exactly
+		// like the sweeper deferral; the intent stays pending and the sweeper
+		// resolves/expires it.
 		if !sweeperDriven {
 			if gerr := tenant.RequireActiveForPaymentInitiation(actx, tx, intent.TenantID, intent.BrandID); gerr != nil {
 				if !errors.Is(gerr, tenant.ErrNotActiveForPaymentInitiation) {
@@ -169,7 +185,7 @@ func (o *Orchestrator) driveCreatedAttempt(
 				if err := rescheduleCreatedForResolutionOnly(actx, tx, created.ID, resolutionOnlyDispatchBackoff(created.PollCount)); err != nil {
 					return err
 				}
-				deferredResolutionOnly = true
+				deferSite = siteDepositClaimHTTP
 				return nil
 			}
 		}
@@ -225,8 +241,8 @@ func (o *Orchestrator) driveCreatedAttempt(
 	if err != nil {
 		return intent, created, nil, "", "", err
 	}
-	if deferredResolutionOnly {
-		recordResolutionOnlyBlock(ctx, "deposit_dispatch_claim_tx")
+	if deferSite != "" {
+		recordResolutionOnlyBlock(ctx, deferSite)
 	}
 	if !claimed {
 		// Rejected pre-call (RG/KYC deny, or no routable provider) - T3,
@@ -710,6 +726,15 @@ func (o *Orchestrator) applyDepositCallResult(
 				}); err != nil {
 					return intent, nil, err
 				}
+				return updated, nil, nil
+			}
+			// H(8) decision 19 (separate from the tenant check above, decision 23): a
+			// brand that is not active gets no cascade child either; same precedent
+			// as the tenant skip (decline stands, no child) with its own audit action
+			// and metric site. Nothing is cancelled or released.
+			if skipped, err := skipCascadeChildForBrand(ctx, tx, attempt, intent); err != nil {
+				return intent, nil, err
+			} else if skipped {
 				return updated, nil, nil
 			}
 			child, err := insertCascadeAttemptIfEligible(ctx, tx, attempt)
