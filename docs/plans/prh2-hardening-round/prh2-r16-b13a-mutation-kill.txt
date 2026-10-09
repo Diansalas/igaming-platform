@@ -1,0 +1,128 @@
+PRH2 R16 B13-A (ADR 0111 section 2, migration 0123, internal/payoutinstrument) - MUTATION-KILL EVIDENCE
+Generated 2026-10-08 on branch gov-r16-b13a. Method: each mutant is applied IN PLACE to the named file (backup taken first),
+the package is vetted with -tags integration (a mutant that fails to compile is reported and NOT counted), the targeted tests run as the
+RUNTIME role against a private scratch database (PRIV_DB=b13a_priv), then the file is restored from the backup and compared byte-for-byte
+(cmp). SQL mutants edit migrations/0123_payout_instruments.up.sql and rebuild the scratch database ONLY (the shared CI database is untouched);
+the scratch database is rebuilt from the restored file after each SQL mutant. -failfast is used, so 'killer' is the first failing test.
+
+CONTROL (unmutated tree, same commands): control payoutinstrument rc=0; control httpserver rc=0; control config rc=0; control auth rc=0
+
+Counted mutants: 78   KILLED: 77   SURVIVED: 1   not counted (compile/apply error/bad pattern): 0
+
+id    result    mutation / first failing test
+G01   KILLED    AEAD AAD dropped (encrypt+decrypt)  =>  --- FAIL: TestAEADRoundTripAndAAD (0.00s)
+G02   KILLED    fingerprint not tenant-bound  =>  --- FAIL: TestFingerprintTenantBoundAndKeyed (0.00s)
+G03   KILLED    instrument seal drops rail  =>  --- FAIL: TestInstrumentSealCoversEveryColumn (0.00s)
+G04   KILLED    verification seal drops expires_at  =>  --- FAIL: TestVerificationSealCoversEveryColumn (0.00s)
+G05   KILLED    blocking seal drops reason_code  =>  --- FAIL: TestBlockingAndSnapshotSealsCoverEveryColumn (0.00s)
+G06   KILLED    snapshot seal drops amount  =>  --- FAIL: TestBlockingAndSnapshotSealsCoverEveryColumn (0.00s)
+G07   KILLED    instrument seal never fails  =>  --- FAIL: TestInstrumentSealCoversEveryColumn (0.00s)
+G08   KILLED    verification seal never fails  =>  --- FAIL: TestVerificationSealCoversEveryColumn (0.00s)
+G09   KILLED    blocking seal never fails  =>  --- FAIL: TestBlockingAndSnapshotSealsCoverEveryColumn (0.00s)
+G10   KILLED    snapshot seal never fails  =>  --- FAIL: TestSnapshot_WriteOnceAndAttemptConstraint (0.17s)
+G11   KILLED    gate: latest-verification rule removed  =>  --- FAIL: TestGate_Matrix (0.18s)
+G12   KILLED    gate: expiry rule removed  =>  --- FAIL: TestBinding_InsertGuard (0.11s)
+G13   KILLED    gate: revoke-event rule removed  =>  --- FAIL: TestGate_BlockingEventsEvenWithTamperedState (0.15s)
+G14   KILLED    gate: later-suspend rule removed  =>  --- FAIL: TestGate_BlockingEventsEvenWithTamperedState (0.11s)
+G15   KILLED    gate: relational rule removed  =>  --- FAIL: TestGate_Matrix (0.11s)
+G16   KILLED    gate: asset-listed rule removed  =>  --- FAIL: TestGate_Matrix (0.23s)
+G17   KILLED    gate: state rule removed  =>  --- FAIL: TestSweepExpiryAndReverification (2.63s)
+G18   KILLED    gate: registered non-synthetic verifier rule removed  =>  --- FAIL: TestGate_TieringSyntheticVerificationNeverSatisfiesARealAdapter (0.11s)
+G19   KILLED    tiering: kind-enabled condition removed  =>  --- FAIL: TestTieringMatrix (0.00s)
+G20   KILLED    tiering: synthetic source accepted by a real adapter  =>  --- FAIL: TestTieringMatrix (0.00s)
+G21   KILLED    tiering: unbound accepted by a real adapter  =>  --- FAIL: TestTieringMatrix (0.00s)
+G22   KILLED    verifier source: non-Synthetic verifier may declare synthetic  =>  --- FAIL: TestVerify_NonSyntheticRequirements (0.50s)
+G23   KILLED    register: ownership conflict ignored  =>  --- FAIL: TestFingerprintConflictAcrossPersons (0.07s)
+G24   KILLED    register: conflict checked under the active kid only  =>  --- FAIL: TestFingerprintRotation_ConflictUnderAllRetainedKids (0.14s)
+G25   KILLED    verify: integrity not checked before the vendor call  =>  --- FAIL: TestStateMachine_TransitionsAndTerminalStates (0.26s)
+G26   KILLED    verify: KYC precondition removed  =>  --- FAIL: TestVerify_NonSyntheticRequirements (0.17s)
+G27   KILLED    verify: missing max-age accepted  =>  --- FAIL: TestVerify_NonSyntheticRequirements (0.09s)
+G28   KILLED    verify: expiry not clamped to max age  =>  --- FAIL: TestVerify_NonSyntheticRequirements (0.37s)
+G29   KILLED    verify: holder match not required  =>  --- FAIL: TestVerify_NonSyntheticRequirements (0.38s)
+G30   KILLED    revoke: in-use check removed  =>  --- FAIL: TestSupersession (0.10s)
+G31   KILLED    block: terminal check removed (DB trigger remains)  =>  --- FAIL: TestStateMachine_TransitionsAndTerminalStates (0.20s)
+G32   KILLED    sweep: expires early  =>  --- FAIL: TestSweepExpiryAndReverification (0.12s)
+G33   KILLED    provider block: verifier not authenticated  =>  --- FAIL: TestRegister_BlockedDestinationCannotBeReRegistered (0.13s)
+G34   KILLED    register: blocked destination can be re-registered  =>  --- FAIL: TestRegister_BlockedDestinationCannotBeReRegistered (0.14s)
+G35   KILLED    PAN lower bound  =>  --- FAIL: TestContainsPAN (0.00s)
+G36   KILLED    PAN upper bound  =>  --- FAIL: TestContainsPAN (0.00s)
+G37   KILLED    Luhn parity  =>  --- FAIL: TestBinding_InsertGuard (0.05s)
+G38   KILLED    PAN walk removed  =>  --- FAIL: TestPANRefusedInAnyFieldOfAnyKind (0.00s)
+G39   KILLED    unknown detail fields accepted  =>  --- FAIL: TestKindValidationRefusals (0.00s)
+G40   KILLED    e-wallet mask leaks 2 chars  =>  --- FAIL: TestMaskRules (0.00s)
+G41   KILLED    startup gate: non-Synthetic registration ignored  =>  --- FAIL: TestStartupGateMatrix (0.00s)
+G42   KILLED    startup gate: production ignored  =>  --- FAIL: TestStartupGateMatrix (0.00s)
+G43   KILLED    PayoutDestination prints Detail  =>  --- FAIL: TestRegisterVerify_HappyPath (0.09s)
+G44   KILLED    PayoutDestination logs Detail  =>  --- FAIL: TestPayoutDestinationRedaction (0.00s)
+G45   KILLED    revoke: cross-player check removed  =>  --- FAIL: TestBlockingEvents_AppendOnlyAndSealedAtBirth (0.18s)
+G46   KILLED    route leaks the refusal reason  =>  --- FAIL: TestPayoutInstrumentRoutes_GenericConflictResponse (0.37s)
+G47   KILLED    route: rate limit removed  =>  --- FAIL: TestPayoutInstrumentRoutes_RateLimitPerPlayer (0.41s)
+G48   KILLED    route: suspend gated by read permission  =>  --- FAIL: TestPayoutInstrumentRoutes_AuthzAndStaffSuspend (1.25s)
+G49   KILLED    route: revoke not bound to the caller  =>  --- FAIL: TestPayoutInstrumentRoutes_RegisterListRevoke (0.64s)
+G50   KILLED    route: tenant-less staff accepted  =>  --- FAIL: TestPayoutInstrumentRoutes_AuthzAndStaffSuspend (0.97s)
+G51   KILLED    finance may suspend  =>  --- FAIL: TestPayoutInstrumentPermissionMatrix (0.00s)
+G52   KILLED    config: key equal to JWT secret accepted  =>  --- FAIL: TestConfig_PayoutInstrumentKeys_RefusesOtherSecrets (0.00s)
+S01   KILLED    DB: terminal states not terminal  =>  --- FAIL: TestStateMachine_TransitionsAndTerminalStates (0.18s)
+S02   KILLED    DB: rail mutable  =>  --- FAIL: TestStateMachine_TransitionsAndTerminalStates (0.07s)
+S03   KILLED    DB: verified without a same-tx verification  =>  --- FAIL: TestStateMachine_TransitionsAndTerminalStates (0.12s)
+S04   KILLED    DB: rejected verification lifts a block  =>  --- FAIL: TestStateMachine_TransitionsAndTerminalStates (0.17s)
+S05   KILLED    DB: suspension without an event  =>  --- FAIL: TestStateMachine_TransitionsAndTerminalStates (0.12s)
+S06   KILLED    DB: revocation without an event  =>  --- FAIL: TestStateMachine_TransitionsAndTerminalStates (0.08s)
+S07   KILLED    DB: expiry written before it happened  =>  --- FAIL: TestStateMachine_TransitionsAndTerminalStates (0.11s)
+S08   KILLED    DB: supersede an in-use instrument  =>  --- FAIL: TestSupersession (0.10s)
+S09   KILLED    DB: supersede without a verified replacement  =>  --- FAIL: TestSupersession (0.09s)
+S10   KILLED    DB: state_changed_at not forced  =>  --- FAIL: TestStateMachine_TransitionsAndTerminalStates (0.10s)
+S11   KILLED    DB: backdated verification  =>  --- FAIL: TestBlockingEvents_AppendOnlyAndSealedAtBirth (0.10s)
+S12   KILLED    DB: backdated blocking event  =>  --- FAIL: TestBlockingEvents_AppendOnlyAndSealedAtBirth (0.07s)
+S13   KILLED    DB: unverified instrument binds  =>  --- FAIL: TestBinding_InsertGuard (0.11s)
+S14   KILLED    DB: revoked instrument binds  =>  --- FAIL: TestBinding_InsertGuard (0.17s)
+S15   KILLED    DB: snapshot amount not compared to the withdrawal  =>  --- FAIL: TestSnapshot_WriteOnceAndAttemptConstraint (0.10s)
+S16   SURVIVED  DB: snapshot created_txid not required (equivalent: a new attempt cannot have an older snapshot)
+S17   KILLED    RLS: tenant policies admit a player-scope session  =>  --- FAIL: TestRLS_CrossTenantBrandPlayerIsolation (0.25s)
+S18   KILLED    grant: runtime may DELETE instruments  =>  --- FAIL: TestGrantPin_RuntimeRole (0.04s)
+S19   KILLED    grant: runtime may write kinds  =>  --- FAIL: TestGrantPin_RuntimeRole (0.06s)
+S20   KILLED    DB: composite FK to fingerprint owners removed  =>  --- FAIL: TestPlantedRows_NoOwnerRowAndUnsealedPending (0.06s)
+S21   KILLED    DB: per-player live fingerprint uniqueness removed  =>  --- FAIL: TestRegister_DeterministicInterleaveSameDestination (0.46s)
+S22   KILLED    DB: binding instrument id mutable (the fingerprint column remains guarded)  =>  --- FAIL: TestBinding_InstrumentIDImmutableEvenForSameFingerprint (0.16s)
+S23   KILLED    RLS: insert policies admit any tenant  =>  --- FAIL: TestRLS_CrossTenantBrandPlayerIsolation (0.26s)
+S24   KILLED    DB: blocking events deletable/editable by the owner role  =>  --- FAIL: TestStateMachine_TransitionsAndTerminalStates (0.26s)
+S25   KILLED    DB: instrument born verified  =>  --- FAIL: TestInstrumentBornPending (0.11s)
+S26   KILLED    DB: person not forced from the account  =>  --- FAIL: TestInstrumentPersonIsForcedFromTheAccount (0.06s)
+
+SURVIVORS (honest accounting):
+  S16  DB: snapshot created_txid not required (equivalent: a new attempt cannot have an older snapshot)
+
+RUN HISTORY (honest accounting):
+  Run 1 covered all 78 mutants. Its survivors / non-counted entries led to test additions (and, for G30/S15/S21/S25, to mutant or harness fixes); the affected
+  mutants were re-run against the strengthened suite, and the table above shows the LATEST valid result per mutant:
+    re-run 2: G30 (run 1 produced a compile error, the mutant was rewritten), G50, S15 (run 1 hit a transient scratch-database rebuild failure), S26;
+    re-run 3: G31 (new test: blocking a terminal instrument is a typed refusal), S21 (new test: deterministic interleave of two registrations);
+    re-run 4: S25 (new test: an instrument cannot be born in any state but pending_verification);
+    re-run 5: S22 (new test: a bound instrument id cannot be swapped for a same-fingerprint instrument);
+    re-run 6: S17, S23 (the migration's tenant-family policies were rewritten as static statements for the repo's A-18 scan; the mutants were re-targeted at the new text).
+  A first re-run (after run 1) executed against a scratch database that still carried a hand-applied mutant (my own mistake); it was discarded and repeated against a rebuilt database.
+  Mutants initially recorded as survivors and killed after test additions: G31, S21, S22, S25, S26, G50 (and the rewritten G30, S15).
+
+EQUIVALENT / ACCEPTED SURVIVOR:
+  S16  payment_attempts_require_destination_snapshot without 's.created_txid = txid_current()': EQUIVALENT in this schema. The snapshot has a FOREIGN KEY to
+       the attempt, and the attempt row is inserted in the same transaction that the deferred trigger checks, so a snapshot for a NEW attempt cannot pre-exist from
+       another transaction. The predicate is kept as defence in depth (it matches the ADR 0111 text) and has no distinguishing test.
+
+NOTE (not part of the mutation loop): the migrate-down function-body restoration is covered by the whole-schema snapshot test
+(TestMigration0123_UpDownUp_WholeSchema compares function body hashes); it costs ~30 s per run and is excluded from the per-mutant test selection.
+
+ADDENDUM - security-review fixes (run 7/8, same method; tree clean and restored after each, control rc=0 for all four suites):
+  G53  PAN separators limited to one space or hyphen (M-2)                       KILLED  TestContainsPAN
+  G54  L-8: real payout adapter allowed before B13-B                              KILLED  TestStartupGateMatrix
+  S27  M-1: deferred snapshot constraint fails open on an unreadable withdrawal   KILLED  TestSnapshotConstraint_FailsClosedWhenWithdrawalUnreadable
+  S28  L-6: snapshot insert does not require a verified instrument               SURVIVED in run 7 (state and revoke-event checks were redundant for a revoked instrument);
+                                                                                  KILLED after the test was extended with a state-only tamper (TestSnapshot_DBRechecksInstrumentStillUsable)
+  S29  L-6: snapshot insert does not re-check expiry                              KILLED  TestSnapshot_DBRechecksVerificationNotExpired
+  S30  L-6: snapshot insert ignores revoke events                                 SURVIVED in run 7 (same redundancy); KILLED after an event-only tamper was added
+Totals including the addendum: 84 counted, 83 killed, 1 survived (S16, equivalent, above).
+
+ADDENDUM 2 - ledger-finance review fixes (run 9, same method; tree restored, control rc=0):
+  S31  C-3: kind/asset-type rule removed                       KILLED  TestKindAssetTypeEnforcedByTheDatabase
+  S32  C-4: pre-flight table lock removed                      KILLED  TestMigration0123_PreflightLockSerialisesWithWriters
+  S33  F-7: down ignores max-age configuration (down file)     KILLED  TestMigration0123_DownRefusesWithMaxAgeConfig
+Totals including both addenda: 87 counted, 86 killed, 1 survived (S16, equivalent).

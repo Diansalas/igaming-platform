@@ -177,4 +177,6 @@ func registerIdentityRoutes(mux *http.ServeMux, deps Deps) {
 	registerCapabilityRoutes(mux, deps)
 	registerManualAdjustmentRoutes(mux, deps)
 	registerPaymentForceResolutionRoutes(mux, deps)
+	// B13 (ADR 0111 2.9): payout instruments.
+	registerPayoutInstrumentRoutes(mux, deps)
 }

@@ -49,6 +49,14 @@ const (
 	PermWithdrawalApprove Permission = "withdrawal:approve"
 	PermWithdrawalReject  Permission = "withdrawal:reject"
 	PermWithdrawalSubmit  Permission = "withdrawal:submit"
+	// B13 (ADR 0111 2.9): payout instrument staff visibility and the blocking
+	// (suspend) action. read: finance, compliance, platform_admin (masks only,
+	// never detail or fingerprint); suspend: compliance only. There is no
+	// staff create, verify, unsuspend or edit permission (owner decision 7).
+	// A platform_admin holds the static permission but the routes are
+	// tenant-scoped, so it has no reach without a tenant context.
+	PermPayoutInstrumentRead    Permission = "payout_instrument:read"
+	PermPayoutInstrumentSuspend Permission = "payout_instrument:suspend"
 	// PermProviderConfigWrite gates writing a tenant's ProviderCapability
 	// configuration rows (docs/decisions/0022 §2.1 - a platform-level
 	// administrative action, always audited).
@@ -754,6 +762,8 @@ var rolePermissions = map[Role]map[Permission]bool{
 		// ALERT-DELIVERY-1 (ADR 0102 section 18): sole grantee of the routing
 		// authoring permission, kept apart from PermAlertManage.
 		PermAlertRouteManage,
+		// B13 (ADR 0111 2.9): payout instrument read.
+		PermPayoutInstrumentRead,
 		// PRH-2 K1 (ADR 0099 §3.2): platform_admin holds every governance
 		// permission - it is the sole grantee of capability_grant:approve
 		// (R-7) and financial_policy:author, and (like every other role
@@ -922,6 +932,8 @@ var rolePermissions = map[Role]map[Permission]bool{
 		// PRH-I3 (ADR 0096 §6/§13 condition 7): see
 		// PermKYCEnforcementDecisionRead's own doc comment.
 		PermKYCEnforcementDecisionRead,
+		// B13 (ADR 0111 2.9): payout instrument read + suspend (compliance only).
+		PermPayoutInstrumentRead, PermPayoutInstrumentSuspend,
 		// PRH-2 K1 (ADR 0099 §3.2): read-only capability-grant/financial-
 		// policy visibility, same "compliance sees, never acts" shape as
 		// every other read-only grant on this role. Compliance is
@@ -957,6 +969,8 @@ var rolePermissions = map[Role]map[Permission]bool{
 		// no capability_grant:* permission, only the financial-policy read
 		// the catalogue lists it for.
 		PermFinancialPolicyRead,
+		// B13 (ADR 0111 2.9): payout instrument read (masks only).
+		PermPayoutInstrumentRead,
 		// PRH-2 K2 (ADR 0100): finance is the eligible tenant grantee role
 		// for both ledger_adjustment capabilities (ADR 0099 §3.3); the
 		// grant itself is still required, in-tx.

@@ -203,6 +203,8 @@ var workerReferenceAllowlist = map[string]bool{
 	"sb_competitions": true, "sb_events": true, "sb_jurisdiction_restrictions": true, "sb_markets": true,
 	"sb_selections": true, "sb_sports": true, "schema_migrations": true,
 	"payment_manual_resolution_codes": true, // K3 (0115) family-R reference table: closed code vocabulary
+	// B13 (0123) family-R reference tables (no tenant data; SELECT-only for the runtime role).
+	"payout_instrument_kinds": true, "payout_instrument_verification_max_age": true,
 }
 
 // T-ID-1: the worker sees every tenant's outbox rows, claims a due row, and the

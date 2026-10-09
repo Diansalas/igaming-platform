@@ -15,7 +15,9 @@ func clearEnv(t *testing.T) {
 		// Stage 10.3 W3b wiring: the awssm region sources.
 		"AWS_SECRETSMANAGER_REGION", "AWS_REGION",
 		// PRH-2 R5 (ADR 0110): the signed-actor-proof key configuration.
-		"ACTOR_PROOF_KEYS", "ACTOR_PROOF_ACTIVE_KID"} {
+		"ACTOR_PROOF_KEYS", "ACTOR_PROOF_ACTIVE_KID",
+		// B13 (ADR 0111 2.2): payout instrument key families.
+		"PAYOUT_INSTRUMENT_KEYS", "PAYOUT_INSTRUMENT_ACTIVE_KID", "PAYOUT_INSTRUMENT_FP_KEYS", "PAYOUT_INSTRUMENT_FP_ACTIVE_KID"} {
 		t.Setenv(k, "")
 		_ = os.Unsetenv(k)
 	}
