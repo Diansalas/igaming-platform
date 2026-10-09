@@ -410,6 +410,37 @@ func TestSnapshot_DBRechecksInstrumentStillUsable(t *testing.T) {
 		return err
 	})
 	requireCode(t, err, "PI054", "snapshot of a revoked instrument")
+
+	snap := func() error {
+		return b.rtTx(func(ctx context.Context, tx pgx.Tx) error {
+			a, err := b.insertAttempt(ctx, tx, wid, 100)
+			if err != nil {
+				return err
+			}
+			_, err = b.svc.WriteSnapshot(ctx, tx, g, SnapshotParams{AttemptID: a, WithdrawalRequestID: wid, Amount: "100", AssetCode: "EUR"})
+			return err
+		})
+	}
+	// Each condition is independently enforced: the revoke EVENT alone (state tampered back to verified) ...
+	b.tamper("payout_instruments", `UPDATE payout_instruments SET state='verified' WHERE id=$1`, id)
+	requireCode(t, snap(), "PI054", "revoke event with a tampered verified state")
+	// ... and the STATE alone (no blocking event at all).
+	b2 := newBindWorld(t)
+	g2 := b2.gateRes()
+	wid2, err := b2.wd(&b2.inst.ID, &b2.inst.Fingerprint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b2.tamper("payout_instruments", `UPDATE payout_instruments SET state='suspended' WHERE id=$1`, b2.inst.ID)
+	err = b2.rtTx(func(ctx context.Context, tx pgx.Tx) error {
+		a, err := b2.insertAttempt(ctx, tx, wid2, 100)
+		if err != nil {
+			return err
+		}
+		_, err = b2.svc.WriteSnapshot(ctx, tx, g2, SnapshotParams{AttemptID: a, WithdrawalRequestID: wid2, Amount: "100", AssetCode: "EUR"})
+		return err
+	})
+	requireCode(t, err, "PI054", "non-verified state without any event")
 }
 
 func TestSnapshot_DBRechecksVerificationNotExpired(t *testing.T) {
