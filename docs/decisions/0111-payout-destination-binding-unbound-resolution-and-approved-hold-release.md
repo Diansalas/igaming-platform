@@ -460,6 +460,14 @@ evidence**, but they still make the verdict `contradictory` or `insufficient` wh
 > on R (any status, any import, MOCK and unsealed included) carries a non-NULL merchant reference other than the
 > attempt's, R is not unambiguously this attempt's and the verdict is `contradictory` (the cross-import dedupe would
 > otherwise collapse two parks' lines on one R into a single group and read `paid` for both).
+>
+> **Bound exception, named (LF RR-3, r21; §19).** Exactly **one** check in `payout_m4_evidence` reads outside the
+> 64-line bound: the **import-wide declaration-integrity check** of amendment (b) above (0125, the `EXISTS` over
+> `payment_statement_lines l JOIN payment_statement_imports i ... WHERE l.import_id = ANY (v_ids) AND l.kind = 'payout'
+> AND l.merchant_reference IS NULL AND i.payout_lines_carry_merchant_reference`). It scans every payout line of each
+> import in the read set (at most 64 imports, of any size), not only the lines the lookups matched. It is
+> **refusal-only**: it can turn a would-be `not_paid` into `insufficient`, never produce or widen a verdict, and it
+> runs only after the bounded reads have passed. Every other read in the function is inside the 64-line bound (S-4).
 
 - **`evidence_line_id` (L-1)** is deterministic: the earliest qualifying line by (`fetched_at`, `import_id`,
   `line_no`). Execution re-evaluates and checks that the pinned line is still in the qualifying set.
@@ -556,6 +564,9 @@ evidence**, but they still make the verdict `contradictory` or `insufficient` wh
     raises on a `succeeded` line on the evidence line's own reference D (derived in `loadK3Evidence` from
     `evidence_line_id` and added to the S-1 key set), and the paid predicate also raises on any payout line on R that
     names another merchant reference. Raising only; positive attribution only; nothing clears automatically.
+  - *r21 amendment (§19):* the not-paid predicate covers **every** matched reference (the verdict's `v_rs`), within
+    the fixed I-2 budget; an invisible evidence line fails the run closed; and the stop condition of both the not-paid
+    predicate and STANDING-1 for that attempt is the single ledger-finance RR-1 rule.
 - **M4-paid completions in the ledger join (R-2).** An M4-paid completion leaves the attempt `disputed` (A-15). The
   existing `ledger_join` check (`internal/reconciliation/payment_statement.go`, "every deposit / withdrawal_completed
   posting in the window maps to exactly one succeeded attempt", ~1428-1465) counts only `succeeded` attempts, so
@@ -933,6 +944,14 @@ These are not human policy decisions unless stated; they are review conditions a
   This is safe (fail closed); revisit with the real source under an LF ruling.
 - **Non-blocking note:** the 24 h `DefaultSettlementWindow` used in not-paid condition (i) must be re-checked **per
   rail** before any non-MOCK M4 (some rails settle or return later).
+- **Onboarding note (LF RR-3, r21; PROVIDER DEPENDENT).** A real statement source that **declares**
+  `payout_lines_carry_merchant_reference` but emits **any** payout line without a merchant reference makes **M4 not-paid
+  unavailable for every park whose evidence reads that import** (§4.4 amendment (b): the import-wide declaration check
+  makes the verdict `insufficient`). Likewise a source that lists a `pending` line before the `declined` one on the
+  merchant reference, the bound reference, a Y or any matched reference makes not-paid `insufficient` (§4.4 (iii)).
+  Both are fail-closed (no wrong release), but they are availability losses: confirm, per real source, whether every
+  payout line carries the merchant reference and whether `pending` is ever listed before a decline, before declaring
+  the flag and before relying on M4 not-paid for that source.
 - **S-8 (follow-up, revision 4; pre-existing gap):** freeze `withdrawal_requests.release_ledger_transaction_id` once
   it is non-NULL. Today the 0026 immutable-fields trigger does not cover it. Tampering would only cause a loud raise
   (`ledger_join` / I-1), never a clear. Owner `payments` + `ledger-finance`; a migration-sized change, not part of 0125
@@ -1507,6 +1526,10 @@ decisions 9-12 (ADR 0095 §44) are **not broadened or weakened**:
 
 - Seal verification reads every line of each evidencing import (at most 64 imports); a very large real statement makes
   M4 execution slow (MOCK imports are small). PROVIDER DEPENDENT; revisit with the first real source.
+- *(LF RR-3, r21; §19.)* The one read of `payout_m4_evidence` outside the 64-line bound is the **import-wide
+  declaration-integrity check** (§4.4 amendment (b)): it scans every payout line of each import in the read set for a
+  NULL merchant reference under a `payout_lines_carry_merchant_reference` declaration. It is refusal-only (it can only
+  make not-paid `insufficient`), and like seal verification its cost grows with the size of the evidencing imports.
 - T5 (ADR 0110): a runtime session with arbitrary SQL can still write ordinary non-governed postings; the M4 fences stop
   the governed shapes only, as for M2/HSEC. MR041 at commit refuses an executed M4 that links such a planted completion
   (wrong key), pinned by `TestM4_MR041_ForgedLinkAndPlantedPosting`.
@@ -1779,3 +1802,152 @@ their path.
 `EchoesDestinationFingerprint = true`, or the owner explicitly accepts an adapter that cannot echo (without the echo an adapter's success
 settles on the snapshot integrity check alone, B13B-15); the registration refusal for a non-declaring non-Synthetic adapter is NOT built;
 (b) the tenant-visibility interface question for the adapter-side echo (B13B-8 / Q2) must be answered and implemented.
+
+## 19. r21 reconciliation follow-ups to RESOLVE-1: the ledger-finance RR-1 ruling, R-1 over every matched reference, fail-closed evidence joins (appendix)
+
+Appended by the `ledger-finance` implementer (task r21-rr1, branch `gov-r21-rr1`, base `5ee5885`). The design above is **not**
+rewritten (§4.4, §4.6, §10.4 and §17.5 carry short pointer notes). **No migration** (0127 is not used: see 19.2). Every change is
+refusal- or raise-direction only, except the one stop condition the ruling below grants, which is implemented as exactly that
+rule. Owner decisions 9-12 (ADR 0095 §44) are **not broadened**: nothing here resolves a park, releases or settles funds, posts,
+changes an attempt or a withdrawal, or resolves, deletes or rewrites a reconciliation mismatch row.
+
+### 19.1 The RR-1 ruling (ledger-finance, review of 2026-10-09), as implemented
+
+**Problem.** After an executed `m4_evidence_not_paid`, a late `succeeded` payout line plus a **full** K2 recovery with the right
+causation correctly stopped `pay_declared_not_paid_but_paid` (R-1, Q-R19-2). But STANDING-1 (`pay_captured_unposted`,
+PAY-PAYOUT-UNBOUND-STANDING-1) for the same attempt kept raising on every run, forever, with the "possible double payout after
+M4 not-paid" hint, because the attempt stays `disputed` (A-15) and the payout clearing rule (`payoutCompletedRef`) can never
+hold for a failed withdrawal.
+
+**Lifecycle checked first.** Reconciliation findings are rows in `reconciliation_mismatches`, written per run (`persistRun`); there
+is no alert state machine and no "clear" operation. "Stop raising" therefore means: a later run does not add a new row for that
+finding. Earlier rows stay as history with their `investigation_status` untouched (staff own that column). Nothing is deleted.
+
+**Ruling (verbatim in substance).** For an attempt with an executed `m4_evidence_not_paid`, STANDING-1 may stop raising **only if
+ALL** of the following hold; anything else keeps raising:
+- **(a)** the M2 (d) recovery rule holds: executed `compensating_entry` `debit_player` requests whose causation is the
+  resolution's `withdrawal_failed` transaction, on the same wallet and asset, total at least the amount;
+- **(b)** the succeeded line's amount and asset equal the attempt's (an unequal line keeps raising);
+- **(c)** tenant and provider scoping is intact.
+
+**Chosen option: stop raising (not the "recovered; acknowledge" hint).** It is implemented as **one** predicate,
+`m4NotPaidRecovered` (`internal/reconciliation/payment_statement_m4.go`), used by **both** R-1 (`checkM4Standing`) and STANDING-1
+(`clearedRefFor` -> `m4NotPaidRecoveredLine`, which adds only "this finding's line IS the recovered payout"). So R-1 and
+STANDING-1 stop under exactly the same condition, which is exactly the ruling's:
+
+| Ruling | Code | Fail-closed detail |
+|---|---|---|
+| (a) causation, sum >= amount | `loadK3Evidence` sums `ledger_adjustment_requests` with `tenant_id`, `state = 'executed'`, `reason_code = 'compensating_entry'`, `direction = 'debit_player'`, `causation_transaction_id = r.ledger_transaction_id` **and** (new, tightening) `wallet_id` = the withdrawal's wallet and `asset_code` = the resolution's asset; `recovered >= amount` | no recovery read, or a resolution amount/asset other than the attempt's: never stops |
+| (b) line amount/asset equal | the late payout must be **exactly one** distinct succeeded line group over every reference R-1 reads (dedupe key R19-5: reference, amount, asset, occurred_at; re-deliveries collapse into it), and that line's amount and asset equal the attempt's | a second, NEW succeeded line (another reference, or the same reference at another time) keeps raising - the recovery covers one payout of the attempt's amount (R19-n reading below) |
+| (c) scoping | resolution, attempt and lines all come from this run's tenant- and provider-bound reads; the resolution must be this attempt's (`attempt_id`), of kind not-paid | an attempt/line/withdrawal the run cannot see fails the run (19.4) |
+
+**Reading taken (RR1-1, safest).** The ruling speaks of "a late succeeded line" (singular). A recovery of the amount covers one
+payout; two distinct succeeded payouts are two possible double payouts. So "exactly one distinct succeeded line group" is part
+of (b): a later NEW succeeded line raises again (R-1 and STANDING-1, for the old and the new line), and only a re-delivery of the
+same line (same content) keeps the stop. This also **tightens R-1** relative to Q-R19-2: an unequal-amount line, or a second
+payout, after a full recovery now keeps R-1 raising too (raise direction only).
+
+**Reading taken (RR1-2).** The ruling is a STANDING-1 ruling (unbound, line-keyed findings). The BOUND sites (BOUND-CLEAR-1:
+`matchPayment`'s bound case and `checkUnmatchedAttempts`, keyed on X with no line) pass no evidencing line and never stop
+under RR-1. Consequence (pinned, `TestRR1_BoundDestinationMismatchPark_BoundFindingOutsideTheRuling`): a bound
+`destination_mismatch` park after an executed M4 not-paid and a full recovery keeps its `pay_captured_unposted` (post-M4 hint)
+on every run while R-1 stops. Question **Q-R21-1** below.
+
+### 19.2 R-1 reaches every matched decline reference (security LOW condition 1 / LF RR-4)
+
+`payout_m4_evidence` checks, for not-paid (iii), every matched reference `v_rs`: the PSP reference of every payout line (any
+status) matched by the merchant reference, the bound reference or a Y. R-1 keyed only the evidence line's own D (plus the
+merchant reference, bound reference and Y), so a later succeeded line with **no** merchant reference on a **different** matched
+decline reference D2 was not seen after execution.
+
+**Chosen: recompute the same matched-line set** (no migration). After the first bounded read, `loadK3Evidence` derives, per
+executed not-paid, `matchedRefs` = the references of every payout line matched by the merchant reference, the bound reference
+(pinned and current) or Y - the verdict's `v_rs` - and reads the payout lines on those that are **not** already lookup keys.
+
+**I-2 kept.** The key count (64 per key) is still fixed from platform state **before** any read; matched references are statement
+content and get **no** budget of their own: their read is limited to what is **left** of the fixed cap (`lineCap - read`, reading
+at most one row more), shares the run's single row counter, and the row that takes the run past the cap fails it with
+`ErrPaymentEvidenceOverflow` (P1, no run row, no truncation). Lines already read through a key merchant reference are excluded so
+they are not counted twice.
+
+**No partial matching, raise only.** Matching is exact (`= ANY`), tenant- and provider-bound. Lines read only through a matched
+reference are filed apart (`byMatchedRef`) and read **only** by the M4 not-paid predicates: R-1 (raising) and the RR-1 rule, where
+an extra line can only add a distinct succeeded group and so keep the finding raised. No other rule (deposit clearing, Y
+attribution, M2, STANDING-1's line set) sees them. A prefix, an extension, or the same string under another provider never
+matches (tested).
+
+**Why not record the set durably (0127)?** A set recorded at execution would miss a decline reference that first appears in a
+later import (a NEW declined line on the merchant reference, then a merchant-less success on its reference). Recomputing from the
+persisted lines covers that case, needs no schema change and stays inside I-2.
+
+### 19.3 Silent join fallback hardened (security LOW condition 2)
+
+**Where it failed silently.** `loadK3Evidence`'s executed-M4 query (`payment_statement_k3.go`):
+`LEFT JOIN payment_statement_lines d ON d.id = r.evidence_line_id ...` with `COALESCE(d.provider_reference, '')`. An evidence line
+the run could not see read as D = "" and the S-1 key for D was silently **not** added, so a later succeeded line on D with no
+merchant reference was never looked up. Two further silent paths existed in the same place: the **inner** `JOIN payment_attempts`
+(an invisible attempt dropped the whole resolution from R-1) and `checkM4Standing`'s `if a == nil { continue }`.
+
+**Hardening (fail closed, existing convention).** Every join is a `LEFT JOIN` and every joined row is **required**: the attempt
+(of the resolution's provider), the evidence line (of that provider, kind `payout`, non-empty reference) and the withdrawal (its
+wallet scopes the recovery). The resolution is selected by its own `provider_id` (DB-forced from the attempt by the 0125 insert
+guard), so an invisible attempt cannot hide it. A missing row fails the run with the new sentinel `ErrPaymentEvidenceInvisible`,
+surfaced exactly like `ErrPaymentEvidenceOverflow`: no run row, no mismatch row, the existing P1
+`reconciliation.sweep_run_failed` (phase match) and run-failure alert, on every run until resolved. An attempt seen by the join
+but not by the same snapshot's platform read, or two executed M4 not-paid resolutions for one attempt, fail the same way. No
+policy decision was needed: an M4 row always has its evidence line (0125 CHECK + composite FK, lines are append-only), so
+invisibility can only be an RLS or session-shape fault, and failing closed is the convention.
+
+**Availability consequence (recorded).** Like an overflow, this refuses the **whole tenant x provider stream**, deposits
+included, loudly. It cannot occur in the designed session shape.
+
+### 19.4 Deliverable status
+
+| Item | Status |
+|---|---|
+| RR-1: one stop rule for R-1 and STANDING-1 after an executed M4 not-paid (19.1) | `IMPLEMENTED` against MOCK |
+| RR-1 (a) recovery scoped also by the withdrawal's wallet and the resolution's asset (tightening) | `IMPLEMENTED` |
+| R-1 over every matched decline reference within the fixed I-2 budget (19.2) | `IMPLEMENTED` against MOCK |
+| Fail-closed M4 evidence joins, `ErrPaymentEvidenceInvisible` (19.3) | `IMPLEMENTED` |
+| RR-3 doc: the one read outside the 64-line bound named (§4.4 note, §17.5); onboarding note (§10.4) | `IMPLEMENTED` (text) |
+| Migration 0127 | `NOT IMPLEMENTED` (not needed, 19.2) |
+| Bound (BOUND-CLEAR-1) finding of a recovered `destination_mismatch` not-paid park | `NOT IMPLEMENTED` (outside the ruling; Q-R21-1) |
+
+### 19.5 Tests and evidence
+
+- Pure (no database): `internal/reconciliation/payment_statement_rr1_test.go` (`TestRR1_Pure_StopRuleAndEveryNegation`,
+  `TestRR1_Pure_ScopingAndBoundSitesNeverStop`); `TestR1_M4Predicates_Pure` now exercises the not-paid kind too (the recovery is
+  read by `loadK3Evidence`, so `checkM4Standing` no longer queries).
+- Integration (real stream, real M4 four-eyes execution, real K2 path, runtime-shaped role, private scratch databases):
+  `internal/payments/m4_resolve1_rr1_integration_test.go`: unresolved M4 keeps raising every run; full legitimate recovery stops
+  both findings, repeated runs and re-deliveries (also a duplicate inside one statement) stay stopped, history rows are kept and
+  none is resolved, the park is untouched, and a later NEW succeeded line raises again (old and new line); a debit with another
+  causation (full amount), a full debit caused by an unrelated transaction (another park's `withdrawal_failed`), a compensating
+  **credit** with the right causation and a partial recovery all keep raising; unequal-amount and other-asset lines keep raising;
+  cross-tenant evidence (tenant B's recovery, B's lines under A's provider and merchant reference, a B compensation citing A's
+  transaction) cannot stop A's findings; the bound destination park pin (RR1-2); R-1 on a different matched decline reference
+  (no merchant reference) raises, with prefix/extension references and another provider's identical reference never matching,
+  duplicates and replays raising exactly once per run, and multi-reference staying one finding; a matched-reference line after a
+  recovery raises again; the I-2 boundary with matched-reference lines (128 rows for 2 keys runs, 129 refuses); invisible evidence
+  line, attempt and withdrawal each fail the run closed with the P1 through the sweep entry point.
+- Mutation evidence: `docs/plans/prh2-hardening-round/prh2-r21-rr1-mutation-kill.txt` (counts in 19.7).
+- Final runs (`-race -tags integration -count=1 -p 1`, targeted `-run`, private scratch databases; 0 SKIP everywhere, so the
+  integration tests did run): `internal/reconciliation/...` whole package set 235 PASS / 0 FAIL; `internal/payments`
+  `-run 'TestM4|TestB11|TestK3|TestB13B|TestRR|TestMA020|TestHSEC'` 308 PASS / 0 FAIL (top-level); the final
+  `TestRR1_|TestRR4_|TestRR5_|TestM4Recon_` run at the committed tests 18 PASS / 0 FAIL. gofmt clean; `go vet` clean with and
+  without `-tags integration`; golangci-lint 2.9.0 `--new-from-rev=5ee5885 ./internal/...` 0 issues.
+
+### 19.6 Questions (none decided here; each fails closed today)
+
+- **Q-R21-1 (ledger-finance / architect).** Should RR-1 extend to the BOUND site of a recovered `destination_mismatch` not-paid
+  park (a finding keyed on X with no line), or should that finding keep raising until a separate rule? Today it keeps raising
+  (safe, noisy).
+- **Q-R21-2 (ledger-finance).** A recovery of more than one payout (two distinct late succeeded lines, recovered 2x) has no stop
+  path: both findings raise for ever. Is a "sum >= amount x distinct payouts" rule wanted? Not built (no ruling).
+
+### 19.7 Mutation evidence
+
+`docs/plans/prh2-hardening-round/prh2-r21-rr1-mutation-kill.txt`: 31 counted mutants (17 RR-1, 9 RR-4, 5 LOW-2), **26 killed**,
+5 survivors disclosed as equivalent: A03/A04 (the recovery probe's wallet and asset filters; equivalent under MA022
+`causation_not_on_wallet`), A06/B09 (tenant predicates; equivalent under FORCE RLS and the composite causation FK) and C05 (the
+platform-read backstop; subsumed by the same-snapshot attempt check). LOCAL evidence only.
