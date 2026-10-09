@@ -952,9 +952,9 @@ the human or architect should see are in 12.3.
   because an in-use refusal there would fail the replacement's verification.
 - **B13A-15 (blocking-event and verification time).** `verified_at` / `occurred_at` are DB-forced to equal the transaction
   time `now()`; Go reads `SELECT now()` first and seals that value. `created_txid` is DB-forced to `txid_current()`.
-- **B13A-16 (repo hygiene).** `.git/info/exclude` in this repository excludes `/migrations/0123_*` (and `0122_*`) from
-  `git status`; the 0123 files are committed with `git add -f`. The orchestrator should remove those exclude lines when it
-  merges.
+- **B13A-16 (repo hygiene).** While B13-A was written the repository's shared `.git/info/exclude` hid `/migrations/0122_*` and
+  `/migrations/0123_*` from `git status`, so the 0123 files were committed with `git add -f`; the exclude lines have since been removed
+  by the orchestrator and nothing further is needed.
 - **B13A-17 (provider ids).** `payoutinstrument.MockProviderIDs = {"mock-payments"}` equals the literal in 0123's up-time
   assertion; `cmd/platform-api` pins it equal to the ids of the `providerkind.Synthetic` payment adapters the binary registers.
 
