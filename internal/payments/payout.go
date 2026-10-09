@@ -26,6 +26,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -868,7 +869,7 @@ func applyPayoutSuccess(ctx context.Context, tx pgx.Tx, requestID uuid.UUID, att
 	}
 	if err := ApplySuccess(ctx, tx, attempt.ID, SuccessEvidence{Evidence: evidence, ProviderReference: ref}); err != nil {
 		if errors.Is(err, ErrAttemptStateConflict) {
-			return applyPayoutLateEvidence(ctx, tx, attempt, evidence, "late_success_after_terminal", requestID, OutcomeSucceeded)
+			return applyPayoutLateEvidence(ctx, tx, attempt, evidence, "late_success_after_terminal", requestID, OutcomeSucceeded, ref)
 		}
 		return err
 	}
@@ -905,7 +906,7 @@ func applyPayoutDecline(ctx context.Context, tx pgx.Tx, requestID uuid.UUID, att
 		Cascadable: &cascadable, ProviderRef: refPtr,
 	}); err != nil {
 		if errors.Is(err, ErrAttemptStateConflict) {
-			return applyPayoutLateEvidence(ctx, tx, attempt, evidence, "late_decline_after_terminal", requestID, OutcomeDeclined)
+			return applyPayoutLateEvidence(ctx, tx, attempt, evidence, "late_decline_after_terminal", requestID, OutcomeDeclined, providerReference)
 		}
 		return err
 	}
@@ -925,7 +926,7 @@ func applyPayoutDecline(ctx context.Context, tx pgx.Tx, requestID uuid.UUID, att
 // T14 (a real double-payout candidate - P1). Any other contradiction (an
 // attempt that somehow is not in a state this file expects) is parked via
 // T10, never silently dropped.
-func applyPayoutLateEvidence(ctx context.Context, tx pgx.Tx, attempt PaymentAttempt, evidence EvidenceKind, terminalReason string, requestID uuid.UUID, observed Outcome) error {
+func applyPayoutLateEvidence(ctx context.Context, tx pgx.Tx, attempt PaymentAttempt, evidence EvidenceKind, terminalReason string, requestID uuid.UUID, observed Outcome, reference string) error {
 	current, err := GetAttemptByID(ctx, tx, attempt.ID)
 	if err != nil {
 		return err
@@ -947,7 +948,7 @@ func applyPayoutLateEvidence(ctx context.Context, tx pgx.Tx, attempt PaymentAtte
 		// replay (an already-parked dispute: nothing further, not itself a P1), EXCEPT after an executed M4: a success after
 		// m4_evidence_not_paid, or a decline after m4_evidence_paid, is the post-resolution signal (audit, then the raise
 		// as the LAST statement; no state change). The cell is a no-op without an executed M4 of the matching kind.
-		return payoutPostM4Cell(ctx, tx, attempt, observed, evidence, nil, "")
+		return payoutPostM4Cell(ctx, tx, attempt, observed, evidence, nil, reference)
 	case AttemptSucceeded, AttemptRejected:
 		// Already resolved (a benign replay) - nothing further to do; not itself a P1.
 		return nil
@@ -996,7 +997,7 @@ func isPayoutAttemptTerminal(s AttemptState) bool {
 // is ALREADY terminal is real late/contradicting evidence (T14/T10, a P1) -
 // resultClass is the ErrorClass of the evidence phase C was trying to apply
 // when the conflict happened.
-func payoutHandleContradiction(ctx context.Context, tx pgx.Tx, attempt PaymentAttempt, evidence EvidenceKind, resultClass ErrorClass, err error) error {
+func payoutHandleContradiction(ctx context.Context, tx pgx.Tx, attempt PaymentAttempt, evidence EvidenceKind, resultClass ErrorClass, err error, reportedRef ...string) error {
 	if !errors.Is(err, ErrAttemptStateConflict) || attempt.WithdrawalRequestID == nil {
 		return err
 	}
@@ -1020,7 +1021,7 @@ func payoutHandleContradiction(ctx context.Context, tx pgx.Tx, attempt PaymentAt
 	if resultClass == ErrorClassSucceeded {
 		observed = OutcomeSucceeded
 	}
-	return applyPayoutLateEvidence(ctx, tx, attempt, evidence, "late_contradicting_evidence", *attempt.WithdrawalRequestID, observed)
+	return applyPayoutLateEvidence(ctx, tx, attempt, evidence, "late_contradicting_evidence", *attempt.WithdrawalRequestID, observed, strings.Join(reportedRef, ""))
 }
 
 // ErrInvalidPayoutEvidence is returned when a definite outcome carries no
@@ -1407,7 +1408,7 @@ func applyPayoutSuccessCheckedFromStatus(ctx context.Context, tx pgx.Tx, request
 	if status.Amount != wr.Amount || status.AssetCode != wr.AssetCode {
 		reason := "amount_asset_mismatch"
 		if err := ApplyDisputeFromNonTerminal(ctx, tx, attempt.ID, evidence, reason); err != nil {
-			return payoutHandleContradiction(ctx, tx, attempt, evidence, ErrorClassSucceeded, err)
+			return payoutHandleContradiction(ctx, tx, attempt, evidence, ErrorClassSucceeded, err, status.ProviderReference)
 		}
 		if err := audit.Record(ctx, tx, audit.Entry{
 			TenantID: attempt.TenantID, ActorType: audit.ActorSystem, Action: "payments.payout_amount_asset_mismatch",
@@ -1443,7 +1444,7 @@ func applyPayoutSuccessCheckedFromStatus(ctx context.Context, tx pgx.Tx, request
 		status.ProviderReference != *storedRef {
 		reason := "provider_reference_mismatch"
 		if err := ApplyDisputeFromNonTerminal(ctx, tx, attempt.ID, evidence, reason); err != nil {
-			return payoutHandleContradiction(ctx, tx, attempt, evidence, ErrorClassSucceeded, err)
+			return payoutHandleContradiction(ctx, tx, attempt, evidence, ErrorClassSucceeded, err, status.ProviderReference)
 		}
 		if err := audit.Record(ctx, tx, audit.Entry{
 			TenantID: attempt.TenantID, ActorType: audit.ActorSystem, Action: "payments.payout_provider_reference_mismatch",

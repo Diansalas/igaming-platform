@@ -922,6 +922,7 @@ Every part needs mutation-kill evidence, runtime-role integration tests and migr
 | ADR 0110 T3/T4 (identity-store integrity) | real money, as already recorded |
 | HD-R15-1 | any sandbox/real payout |
 | HD-R15-5 (LF L-7) | any non-MOCK payout |
+| LF C-3 (section 20.4): real-provider status mapping for the post-M4 cells (PROVIDER DEPENDENT) | any non-MOCK M4 paid / not-paid, see section 20.4 |
 
 ### 10.4 Conditions and follow-ups recorded by revision 3 (`ledger-finance` pre-0125 verdict)
 
@@ -2063,6 +2064,16 @@ it the raise is the final `return`, after the audit row (`TestPayoutPostM4Cell_*
   `declined`). Whether a real provider reports a payout returned, reversed or recalled as `declined`, as a distinct status, or only on a
   statement is unknown until a vendor contract exists; a `payout_returned` event is closed as an anomaly today (no signal). The first real
   adapter must map its return/reversal semantics onto these classes (or an owner decision must add a class) before an M4 is enabled for it.
+- **Launch-blocking, PROVIDER DEPENDENT, before any non-MOCK M4 paid (LF C-3).** (1) Each real provider's status mapping must map every
+  return, reversal or chargeback-of-payout status to evidence that reaches `contradiction_after_m4_paid` or a dedicated reason; it must
+  never be closed as an anomaly without a signal on an attempt that has an executed M4 paid. (2) The governed WITHDRAWAL-REVERSAL-1
+  path must exist before any money moves back on such a return. (3) Each real provider's success / paid-out / settled / completed
+  statuses must map to `OutcomeSucceeded`, with a conformance test per adapter, so that F-1 is reachable. **F-1 is RESOLVED FOR MOCK
+  ONLY.**
+- **Audit key of the receipt-less sources (LF C-1 / security LOW-1, amends R22-2).** The key is (attempt, reason, evidence kind, reference
+  key), the reference key being a sha256 prefix of the reported reference (none when the evidence carries none: the old key). A second,
+  different payout reported later therefore gets its own row. Capped at 8 rows per attempt and reason; the alert is raised every time.
+  The lookup is bounded by `created_at >=` the attempt's creation (security LOW-2), no migration.
 - Reconciliation R-1 remains the backstop for a line that never arrives by callback or poll; the cells only remove the latency for the
   two that do.
 - The audit and alert are signals. Nothing resolves the contradiction: a payout the platform released and the PSP then paid

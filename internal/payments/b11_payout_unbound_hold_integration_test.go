@@ -632,7 +632,7 @@ func TestB11_Auto_LateEvidence_NoOp_NoAudit_ReasonKept(t *testing.T) {
 			for _, reason := range []string{"late_success_after_terminal", "late_decline_after_terminal", "late_contradicting_evidence"} {
 				for _, from := range []AttemptState{AttemptSubmitting, AttemptPending, AttemptAmbiguous} {
 					if err := w.pool.WithTenant(context.Background(), w.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-						return applyPayoutLateEvidence(ctx, tx, p.staleAs(from), EvidenceCallback, reason, p.wr.ID, OutcomeSucceeded)
+						return applyPayoutLateEvidence(ctx, tx, p.staleAs(from), EvidenceCallback, reason, p.wr.ID, OutcomeSucceeded, "")
 					}); err != nil {
 						t.Fatalf("%s from %s: %v", reason, from, err)
 					}

@@ -767,7 +767,7 @@ func TestPostM4_LateEvidence_StaleSnapshot_Sync_And_Poll(t *testing.T) {
 func TestPostM4_AuditRow_ClosedVocabulary(t *testing.T) {
 	allowed := map[string]bool{"reason": true, "observed": true, "m4_kind": true, "m4_resolution_id": true, "evidence": true,
 		"provider_id": true, "withdrawal_request_id": true, "withdrawal_state": true, "attempt_state": true,
-		"attempt_terminal_reason": true, "echoed_provider_reference": true, "echo_ref_reason": true, "echo_ref_len": true, "echo_ref_sha256_prefix": true}
+		"attempt_terminal_reason": true, "ref_key": true, "echoed_provider_reference": true, "echo_ref_reason": true, "echo_ref_len": true, "echo_ref_sha256_prefix": true}
 	m := newM4World(t)
 	p, _ := m.pm4Executed(ResolutionM4EvidenceNotPaid, 650)
 	// A hostile-shaped reference cannot reach the cells through ingress; the helper is exercised directly with one.
@@ -869,4 +869,53 @@ func TestPostM4_ReceiptlessSources_OneRowPerEvidenceKind(t *testing.T) {
 		t.Fatalf("evidence kinds: %v", rows)
 	}
 	m.pm4Unchanged(p, base, "receiptless sources")
+}
+
+// LF C-1 / security LOW-1: the receipt-less key includes the reported reference. Two DIFFERENT polled references (another
+// payout reported later) give two rows; the same reference polled again gives none; evidence without a reference keeps the
+// (attempt, reason, evidence kind) key; the number of distinct-reference rows is capped while the alert is raised every time.
+func TestPostM4_ReceiptlessAudit_KeyedByReference_AndCapped(t *testing.T) {
+	m := newM4World(t)
+	p, base := m.pm4Executed(ResolutionM4EvidenceNotPaid, 650)
+	poll := func(ref string) {
+		t.Helper()
+		att := p.staleAs(AttemptPending)
+		if ref == "" {
+			att = m.attempt(p.fresh.ID) // a reference-less success only reaches the cell from the disputed snapshot
+		}
+		if err := m.pm4Poll(att, ErrorClassSucceeded, StatusResult{Outcome: OutcomeSucceeded, ProviderReference: ref, Amount: 650, AssetCode: "EUR"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	poll("pm4-k-one")
+	poll("pm4-k-one")
+	if n := m.pm4Audits(p.fresh.ID); n != 1 {
+		t.Fatalf("same reference twice: %d rows, want 1", n)
+	}
+	poll("pm4-k-two")
+	if n := m.pm4Audits(p.fresh.ID); n != 2 {
+		t.Fatalf("two different references: %d rows, want 2", n)
+	}
+	poll("")
+	poll("")
+	if n := m.pm4Audits(p.fresh.ID); n != 3 {
+		t.Fatalf("reference-less evidence keeps the old key: %d rows, want 3", n)
+	}
+	for i := 0; i < postM4MaxRefRowsPerReason+3; i++ {
+		poll(fmt.Sprintf("pm4-k-flood-%d", i))
+	}
+	if n := m.pm4Audits(p.fresh.ID); n != postM4MaxRefRowsPerReason {
+		t.Fatalf("rows = %d, want the cap %d", n, postM4MaxRefRowsPerReason)
+	}
+	al := m.pm4PostM4Alerts(p.fresh.ID)
+	if len(al) != 1 || al[0].Occurrences != 5+postM4MaxRefRowsPerReason+3 {
+		t.Fatalf("alert must be raised on every evidence: %+v", al)
+	}
+	rows := m.sysQuery(`SELECT metadata::text AS md FROM audit_log WHERE tenant_id = $1 AND action = $2 AND target_id = $3`, m.f.tenantID, auditActionPayoutPostM4Contradiction, p.fresh.ID.String())
+	for _, r := range rows {
+		if strings.Contains(r["md"].(string), "pm4-k-flood-") && !strings.Contains(r["md"].(string), "ref_key") {
+			t.Fatalf("row without a ref_key: %v", r)
+		}
+	}
+	m.pm4Unchanged(p, base, "keyed audit")
 }

@@ -58,3 +58,10 @@ P08  EQUIVALENT: see P07.
 
 NOT COVERED by mutation (stated, not hidden): the SQL lookup text of the audit once-per-source check is mutated only through P10/P11; the go/ast raise-last pin (TestPayoutPostM4Cell_*) is exercised by P14 (raise before audit) and S02,
 but a reordering that keeps one raise last and moves a second audit.Record is not mutated. Real-provider status semantics are PROVIDER DEPENDENT and have no mutant (ADR 0111 section 20.4).
+
+ROUND 2 (review conditions LF C-1 / security LOW-1, LOW-2; same method, tests TestPostM4_ReceiptlessAudit_KeyedByReference_AndCapped added)
+K01   KILLED    receipt-less dedupe ignores the reference key  =>  --- FAIL: TestPostM4_ReceiptlessAudit_KeyedByReference_AndCapped
+K02   KILLED    distinct-reference cap (8 rows per attempt and reason) removed  =>  --- FAIL: TestPostM4_ReceiptlessAudit_KeyedByReference_AndCapped
+K03   SURVIVED  receipt-less lookup not bounded by created_at >= the attempt's creation time  =>  (all targeted tests pass)
+K03 is EQUIVALENT in behaviour: the bound only lets the (tenant_id, created_at) index limit the scan (security LOW-2); no row older than the attempt can match target_id.
+A first run of K01-K03 against an unfixed tree was discarded: the late-evidence path dropped the reported reference (it now passes it through applyPayoutLateEvidence).

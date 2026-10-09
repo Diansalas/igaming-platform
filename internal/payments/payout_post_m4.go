@@ -33,6 +33,8 @@ package payments
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 
@@ -50,6 +52,19 @@ const (
 
 	auditActionPayoutPostM4Contradiction = "payments.payout_post_m4_contradiction"
 )
+
+// postM4MaxRefRowsPerReason caps the receipt-less audit rows per attempt and reason (distinct evidence kind / reference keys).
+const postM4MaxRefRowsPerReason = 8
+
+// postM4RefKey is the dedupe key of a reported reference: a sha256 prefix, "" when the evidence carried none (that keeps the
+// (attempt, reason, evidence kind) key). Never the raw text.
+func postM4RefKey(ref string) string {
+	if ref == "" {
+		return ""
+	}
+	h := sha256.Sum256([]byte(ref))
+	return hex.EncodeToString(h[:8])
+}
 
 // postM4Cell names what one cell looks for.
 type postM4Cell struct {
@@ -112,16 +127,22 @@ func payoutPostM4Cell(ctx context.Context, tx pgx.Tx, attempt PaymentAttempt, ob
 	}
 
 	write := false
+	refKey := postM4RefKey(ref)
 	if newReceipt != nil {
 		write = *newReceipt
 	} else {
+		// Receipt-less sources: once per (attempt, reason, evidence kind, reference key). A second, DIFFERENT reference
+		// (another payout reported later) is new evidence and gets its own row; the same reference again does not. Bounded by
+		// created_at >= the attempt's (the (tenant_id, created_at) index limits the scan) and capped at
+		// postM4MaxRefRowsPerReason rows per attempt and reason (the alert is raised every time regardless).
+		var total int
 		var seen bool
-		if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM audit_log WHERE tenant_id = $1 AND action = $2 AND target_id = $3
-			AND created_at >= $6 AND metadata->>'reason' = $4 AND metadata->>'evidence' = $5)`,
-			fresh.TenantID, auditActionPayoutPostM4Contradiction, fresh.ID.String(), cell.reason, string(evidence), fresh.CreatedAt).Scan(&seen); err != nil {
+		if err := tx.QueryRow(ctx, `SELECT count(*), COALESCE(bool_or(metadata->>'evidence' = $5 AND COALESCE(metadata->>'ref_key', '') = $7), false)
+			FROM audit_log WHERE tenant_id = $1 AND action = $2 AND target_id = $3 AND created_at >= $6 AND metadata->>'reason' = $4`,
+			fresh.TenantID, auditActionPayoutPostM4Contradiction, fresh.ID.String(), cell.reason, string(evidence), fresh.CreatedAt, refKey).Scan(&total, &seen); err != nil {
 			return fmt.Errorf("payments: post-M4 cell: audit lookup: %w", err)
 		}
-		write = !seen
+		write = !seen && total < postM4MaxRefRowsPerReason
 	}
 	if write {
 		meta := map[string]any{
@@ -137,6 +158,9 @@ func payoutPostM4Cell(ctx context.Context, tx pgx.Tx, attempt PaymentAttempt, ob
 		}
 		if fresh.TerminalReason != nil {
 			meta["attempt_terminal_reason"] = payoutAlertReasonFor(*fresh.TerminalReason)
+		}
+		if refKey != "" {
+			meta["ref_key"] = refKey
 		}
 		if ref != "" {
 			for k, v := range echoAuditMeta(ref) {
