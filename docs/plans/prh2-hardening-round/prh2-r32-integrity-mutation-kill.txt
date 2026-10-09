@@ -1,0 +1,34 @@
+PRH2 R32 governed exit of a destination_integrity_failure park (owner decision 4, ADR 0095 section 48; ADR 0111 section 23; migration 0127) - MUTATION-KILL EVIDENCE
+Scope: migrations/0127_payout_m4_destination_integrity_not_paid.{up,down}.sql, internal/payments/manual_resolution_m4.go (M4ResolvableDispute),
+internal/reconciliation/payment_statement_k3.go (the integrity hint and its selection).
+Generated 2026-10-09 on branch gov-r32-integrity (base dad803d; implementation at ef8c73f, tests at f87b630). Method: each mutant is applied IN PLACE to the
+named file by a script that first reads the file, requires the original text to occur exactly once, writes the mutant, runs the targeted tests, and then
+writes the original bytes back (after the whole run `git status` showed a clean tree). SQL mutants take effect because every payments scratch database is
+migrated from the files on disk (depositV2ScratchPool -> MigrateUp(realMigrationsDir)). Integration mutants ran `-race -tags integration -count=1 -p 1
+-run <targets>` against private scratch databases (runtime-shaped, non-superuser, non-BYPASSRLS role); the two pure hint mutants ran `go test -count=1 -run
+TestC3_... ./internal/reconciliation/`.
+
+CONTROL (unmutated tree): internal/payments `-run 'TestR32_|TestM4|TestRR1_|TestRR4_|TestRR5_|TestPostM4_|TestPayoutPostM4Cell|TestB13B_|
+TestHSEC_HoldRelease_Migration0124DownRefusals|TestC3_|TestL2_|TestB11_'` = 164 top-level PASS, 0 FAIL, 0 SKIP; reconciliation TestC3_ PASS.
+
+Counted mutants: 14   KILLED: 14   SURVIVED: 0   not counted: 0
+
+id                                    result  mutation  =>  killed by (first failing tests)
+S1-paid-admitted                      KILLED  0127 up: the destination arm admits m4_evidence_paid too  =>  TestR32_IntegrityPark_M4PaidRefused_DBAndGo, TestM4_ScopeParity_GoAndDB
+S2-integrity-dropped                  KILLED  0127 up: destination_integrity_failure removed from the arm  =>  TestR32_IntegrityPark_NotPaid_EndToEnd (both shapes), TestM4_ScopeParity_GoAndDB
+S3-integrity-only-unreferenced        KILLED  0127 up: integrity admitted only with p_ref IS NULL  =>  TestR32_IntegrityPark_NotPaid_EndToEnd (the park holds X), TestM4_ScopeParity_GoAndDB
+S4-integrity-any-state                KILLED  0127 up: integrity not-paid admitted outside state = 'disputed'  =>  TestM4_ScopeParity_GoAndDB
+D1-down-no-refusal                    KILLED  0127 down: the MR099 refusal becomes a NOTICE  =>  TestR32_Migration0127DownRefusals (pending and executed)
+D2-down-refuses-executed-only         KILLED  0127 down: refusal only for executed rows  =>  TestR32_Migration0127DownRefusals/pending_integrity_M4
+D3-down-refuses-any-m4                KILLED  0127 down: refusal for ANY M4 row, whatever the reason  =>  TestR32_Migration0127DownRefusals/only_a_destination_mismatch_M4:_down_allowed
+D4-down-keeps-integrity               KILLED  0127 down: the restored body still admits the integrity reason  =>  TestR32_Migration0127UpDownUp_WholeSchema
+D5-down-whitespace-drift              KILLED  0127 down: one extra space in the restored body (not byte for byte)  =>  TestR32_Migration0127UpDownUp_WholeSchema
+G1-go-paid-admitted                   KILLED  Go M4ResolvableDispute admits paid for integrity  =>  TestR32_IntegrityPark_M4PaidRefused_DBAndGo, TestM4_ScopeParity_GoAndDB
+G2-go-integrity-dropped               KILLED  Go M4ResolvableDispute omits integrity (execution precondition refuses)  =>  TestR32_IntegrityPark_NotPaid_EndToEnd, TestM4_ScopeParity_GoAndDB
+R1-hint-reverted                      KILLED  integrity hint text back to "no M4 route (open owner/architect question)"  =>  TestC3_DestinationHint_LiveAfterClassification_SelectedByReason
+R2-hint-branch-dropped                KILLED  capturedUnpostedHintFor loses the integrity branch (falls to the mismatch text)  =>  TestC3_DestinationHint_LiveAfterClassification_SelectedByReason
+R2i-hint-branch-dropped-integration   KILLED  same mutant, integration oracle  =>  TestR32_IntegrityPark_Recon_HintR1AndRR1
+
+Not mutated (no new code): payout_m4_evidence, the insert/executing guard, the recount floor, MR041, fence (g), the acting K3 arms and the post-M4 cells are
+unchanged and reason-agnostic (ADR 0111 23.2); their own mutation evidence is prh2-r19-resolve1-mutation-kill.txt, prh2-r21-rr1-mutation-kill.txt and
+prh2-r22-cells-mutation-kill.txt. LOCAL evidence only; no real provider, no AWS, no non-MOCK statement source.

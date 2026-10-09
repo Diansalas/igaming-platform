@@ -808,3 +808,16 @@ func TestR32_Migration0127DownRefusals(t *testing.T) {
 		}
 	})
 }
+
+// Q-R32-2 (ADR 0111 23.5; OPEN, pre-existing, applies to destination_mismatch too): not-paid (ii)
+// attributes a declined line by the merchant reference OR the bound reference alone, so a declined
+// line on the bound reference X that names ANOTHER merchant reference still yields not_paid today
+// (the paid branch has the H-2 rule; not-paid has none). Pinned as CURRENT behaviour so a
+// refusal-direction tightening flips this test deliberately.
+func TestR32_QR322_DeclineOnBoundReferenceNamingAnotherMerchant_CurrentBehaviourPinned(t *testing.T) {
+	m := newM4World(t)
+	p := m.r32Park(1070, r32Missing, false)
+	m.ingest(m4Imp{start: p.fresh.CreatedAt.Add(-time.Minute), end: p.fresh.LastSentAt.Add(25 * time.Hour)},
+		m.line(p.ref, "someone-elses-merchant-ref", statement.PaymentStatusDeclined, 1070, time.Now()))
+	m.mustEvidence(p.fresh.ID, M4VerdictNotPaid)
+}

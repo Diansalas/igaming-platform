@@ -2238,7 +2238,16 @@ integrity park; reconciliation hint, R-1 and RR-1 (23.2); migration up/down/up w
 refusals (pending and executed integrity M4) and the allowed down with only a `destination_mismatch` M4. Pins flipped deliberately:
 `TestM4_ScopeParity_GoAndDB` (10 -> 12), `TestC3_DestinationHint_LiveAfterClassification_SelectedByReason` (integrity text). The two
 head-relative down helpers (`m4DownTo0125`, the HSEC `downTo0124`) now derive their step count from the migration files.
-Mutation evidence: `docs/plans/prh2-hardening-round/prh2-r32-integrity-mutation-kill.txt`. Counts and runs: see the task report.
+`TestR32_QR322_*` pins the Q-R32-2 behaviour (23.5) as current, so a tightening flips it deliberately.
+Mutation evidence: `docs/plans/prh2-hardening-round/prh2-r32-integrity-mutation-kill.txt` (14 counted, 14 killed, 0 survivors).
+Final runs (`-race -tags integration -count=1 -p 1`, targeted `-run`, private scratch databases, 0 SKIP everywhere so the integration
+tests did run): payments `TestR32_` 13 PASS / 0 FAIL; `TestR32_IntegrityPark_Concurrency_TwoFinalApprovals` at `-count=10` 10 PASS, no
+race report; payments `TestR32_|TestM4|TestRR1_|TestRR4_|TestRR5_|TestPostM4_|TestPayoutPostM4Cell|TestB13B_|
+TestHSEC_HoldRelease_Migration0124DownRefusals|TestC3_|TestL2_|TestB11_` 164 PASS / 0 FAIL (before the Q-R32-2 pin was added);
+reconciliation `TestRR1_|TestRR4_|TestR1_|TestR2_|TestC3_|TestRes1_|TestPayoutReason|TestPayoutDisputeReasonClasses|TestB13B|TestRS`
+33 PASS / 0 FAIL; payoutinstrument `TestMigration0126|TestBinding_InsertGuard` 3 PASS; httpserver `TestForceResolutionAPI_M4` 2 PASS;
+`go test ./internal/alerting -count=1` PASS. gofmt clean; `go vet` clean with and without `-tags integration`; golangci-lint 2.9.0
+`--build-tags integration --new-from-rev=dad803d ./internal/...` 0 issues. LOCAL evidence only.
 
 ### 23.5 Open questions (nothing here is decided by this change)
 
