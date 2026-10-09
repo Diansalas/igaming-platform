@@ -1911,7 +1911,9 @@ included, loudly. It cannot occur in the designed session shape.
 | Fail-closed M4 evidence joins, `ErrPaymentEvidenceInvisible` (19.3) | `IMPLEMENTED` |
 | RR-3 doc: the one read outside the 64-line bound named (§4.4 note, §17.5); onboarding note (§10.4) | `IMPLEMENTED` (text) |
 | Migration 0127 | `NOT IMPLEMENTED` (not needed, 19.2) |
-| Bound (BOUND-CLEAR-1) finding of a recovered `destination_mismatch` not-paid park | `NOT IMPLEMENTED` (outside the ruling; Q-R21-1) |
+| Bound (BOUND-CLEAR-1) finding of a recovered `destination_mismatch` not-paid park | `NOT IMPLEMENTED` (outside the ruling; Q-R21-1 open, LF recommendation recorded) |
+| Net recovery (debits minus credits) for M2 (d) and RR-1 (security LOW-1) | `NOT IMPLEMENTED` (open LF question, 19.6) |
+| Runbook entry for `ErrPaymentEvidenceInvisible` | `IMPLEMENTED` (text, `docs/runbooks/operational-runbooks.md` §16) |
 
 ### 19.5 Tests and evidence
 
@@ -1937,13 +1939,36 @@ included, loudly. It cannot occur in the designed session shape.
   `TestRR1_|TestRR4_|TestRR5_|TestM4Recon_` run at the committed tests 18 PASS / 0 FAIL. gofmt clean; `go vet` clean with and
   without `-tags integration`; golangci-lint 2.9.0 `--new-from-rev=5ee5885 ./internal/...` 0 issues.
 
-### 19.6 Questions (none decided here; each fails closed today)
+### 19.6 Questions and review outcome (nothing here is decided by this change)
 
-- **Q-R21-1 (ledger-finance / architect).** Should RR-1 extend to the BOUND site of a recovered `destination_mismatch` not-paid
-  park (a finding keyed on X with no line), or should that finding keep raising until a separate rule? Today it keeps raising
-  (safe, noisy).
-- **Q-R21-2 (ledger-finance).** A recovery of more than one payout (two distinct late succeeded lines, recovered 2x) has no stop
-  path: both findings raise for ever. Is a "sum >= amount x distinct payouts" rule wanted? Not built (no ruling).
+Review of `gov-r21-rr1` (2026-10-09): `security` and `ledger-finance` both **APPROVE WITH CONDITIONS**. Security found no way for
+provider evidence to stop a finding early; ledger-finance confirmed the RR1-1 reading (exactly one distinct payout).
+
+- **Q-R21-1 (OPEN, architect + ledger-finance decision; `NOT IMPLEMENTED`).** Should RR-1 extend to the BOUND site of a
+  recovered `destination_mismatch` not-paid park (a finding keyed on X with no line)? Today it keeps raising (safe, noisy).
+  **Ledger-finance recommendation (a recommendation, not a decision):** extend RR-1 to that bound site, stopping **only** when
+  `m4NotPaidRecovered` holds **and** the single succeeded group's reference equals the bound reference X (or that line carries
+  the attempt's merchant reference) **and** its amount and asset equal the attempt's; with a pin test, a negative test (a payout
+  under another reference keeps raising) and a mutant. If the architect declines the extension, the minimum is a "recovered;
+  acknowledge" hint at that site. Until decided, the bound finding keeps raising with the post-M4 hint
+  (`TestRR1_BoundDestinationMismatchPark_BoundFindingOutsideTheRuling` pins it).
+- **Q-R21-2 (CLOSED by ledger-finance: keep conservative).** No "recovered >= amount x n distinct payouts" rule. The K2 cap
+  (INV-ADJ-6) allows at most one amount of compensation per causation and direction (the `withdrawal_failed` transaction's
+  `player_cash` leg), so such a rule could never be met and would advertise a route that does not exist. Recovering a second
+  payout is off-platform or needs a separately governed path; until then both findings keep raising.
+- **Security LOW-1 (OPEN ledger-finance question; `NOT IMPLEMENTED`).** The recovery sum of RR-1 (and of M2 (d), which it
+  reuses) counts executed `debit_player` compensating entries only, not the **net**. With four-eyes collusion, two debits and
+  then two credits with the same causation (each direction capped separately by INV-ADJ-6) would satisfy the sum and stop the
+  finding while the double payout is in fact unrecovered. The fix would be **net recovery**: debits minus credits with the same
+  causation, wallet and asset, excluding reversed debits, for **both** M2 (d) and RR-1. It is not implemented here because it
+  changes the already-ruled M2 (d) rule (Q-R19-2); it needs a ledger-finance ruling first. Mitigations today: four-eyes on every
+  K2 entry, the K2 audit rows, and the compensating credit's own audit trail.
+- **Security INFO (recorded).** (i) The matched-reference reads share what is left of the fixed I-2 budget, so a large
+  legitimate stream can hit `ErrPaymentEvidenceOverflow` sooner than before (fail-closed, loud; runbook note in
+  `docs/runbooks/operational-runbooks.md` §16). (ii) The recovery read is one query per executed M4 not-paid per run; a single
+  grouped query would remove the per-resolution round trip. Not changed (performance only, no correctness effect).
+- **Runbook.** `ErrPaymentEvidenceInvisible` (cause, impact, diagnosis, nothing cleared) and the overflow sensitivity:
+  `docs/runbooks/operational-runbooks.md` §16.
 
 ### 19.7 Mutation evidence
 

@@ -657,3 +657,45 @@ and re-asserts that REVOKE on every run. (Terraform / the ECS task command are n
 **Never:** read `actor_proof_keys` into a ticket or chat; grant the runtime role anything on `actor_proof_keys` or
 `actor_proof_nonces`; re-run `deploy/init-app-role.sql` expecting it to restore a grant (it re-asserts the revoke);
 create a second signer; disable the `zz_actor_proof_guard` triggers.
+
+## 16. Payment statement run refused: `ErrPaymentEvidenceInvisible` (ADR 0111 §19.3, RESOLVE-1 / r21)
+
+**Signal.** The `payment_statement` reconciliation run of one tenant and provider fails with
+"reconciliation: an executed M4 resolution's evidence is not visible to the run (fail closed)". It is reported as the existing
+P1 `reconciliation.sweep_run_failed` (phase `match`; the audit row's `metadata.error` names the resolution, its kind, the attempt
+and which part is missing: `attempt`, `evidence line`, `evidence line of this provider and kind payout`, `withdrawal` or `asset`)
+plus the run-failure alert. It repeats on **every** run until the cause is fixed.
+
+**Cause.** An EXECUTED M4 resolution (`m4_evidence_paid` / `m4_evidence_not_paid`) of this tenant and provider refers to an
+attempt, an evidence statement line, a withdrawal or an asset that the reconciliation session cannot see or that is
+inconsistent (the line belongs to another provider or is not a payout line; the attempt's provider differs from the
+resolution's; two executed not-paid resolutions for one attempt; an attempt seen by the join but not by the platform read). In
+the designed session shape this cannot happen (the M4 row's evidence line is NOT NULL with a composite FK, lines are
+append-only), so treat it as either an **RLS / session-shape fault** (a policy change, a wrong GUC, a migration applied out of
+order) or **tampering**, until proven otherwise.
+
+**Impact.** The **whole tenant x provider `payment_statement` stream** is refused - deposits included - with no run row and no
+mismatch row (nothing is truncated or partially reported). Other tenants and providers are unaffected. **Nothing is cleared,
+resolved, posted or released** by the refusal; existing `reconciliation_mismatches` rows stay as they are.
+
+**Diagnose.**
+1. From the audit row, take the resolution id, attempt id and the missing part.
+2. As the platform DB owner (read-only queries; tenant GUC set to the tenant), check that each row exists and is visible:
+   `payment_manual_resolutions` (state `executed`, `provider_id`, `evidence_line_id`, `withdrawal_request_id`, `asset_code`),
+   `payment_attempts` (same tenant, same `provider_id`), `payment_statement_lines` (id = `evidence_line_id`, same tenant,
+   `provider_id`, `kind = 'payout'`), `withdrawal_requests` (id = `withdrawal_request_id`).
+3. Compare the RLS policies on those tables with the migrations (`\d+`), and check recent deploys / migrations for a changed
+   policy or session shape. If every row is present and consistent for the owner but invisible to the reconciliation session,
+   it is a session/RLS fault: fix the deploy, not the data.
+4. If a row is missing or inconsistent (for example an evidence line of another provider), escalate as a **security incident**
+   (section 9): the M4 tables and statement lines are append-only, so a mismatch means tampering or a broken guard.
+
+**Never:** edit or delete the resolution, the statement line, the attempt or the withdrawal to make the run pass; disable a
+policy or a guard trigger; run reconciliation in another session shape to "get past" it.
+
+**Related sensitivity: `ErrPaymentEvidenceOverflow` sooner (ADR 0111 §19.2).** For an executed M4 not-paid the run also reads
+the payout lines of every matched decline reference, and those lines share what is LEFT of the fixed I-2 budget (64 lines per
+lookup key, keys fixed from platform state). A large legitimate stream (many re-delivered lines on a matched reference) can
+therefore hit the overflow refusal sooner than before. The overflow is equally loud and fail-closed (whole stream refused,
+P1, nothing cleared); treat it as possible tampering until it is proven to be re-delivery (ADR 0111 §4.3). The dedicated
+overflow runbook entry (LOW-1 / RM-4) is still open.
