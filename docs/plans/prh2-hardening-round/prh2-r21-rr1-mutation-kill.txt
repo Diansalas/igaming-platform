@@ -1,0 +1,113 @@
+r21 reconciliation follow-ups to PAY-PAYOUT-UNBOUND-RESOLVE-1 (ADR 0111 §19): ledger-finance RR-1 ruling, R-1 over every
+matched decline reference (security LOW condition 1 / LF RR-4), fail-closed M4 evidence joins (security LOW condition 2).
+Mutation-kill evidence. Task: r21-rr1 (branch gov-r21-rr1, base 5ee5885). LOCAL evidence only: private scratch database
+priv_r21rr1 built from the worktree's migrations; every K3/M4 world is its own private scratch database; runtime-shaped
+non-superuser, non-BYPASSRLS role; MOCK statement sources only.
+
+Code under test:
+  internal/reconciliation/payment_statement_m4.go  m4NotPaidRecovered / m4NotPaidRecoveredLine (RR-1), succeededGroups,
+                                                    notPaidLines, payoutLinesOn (byMatchedRef), checkM4Standing (R-1)
+  internal/reconciliation/payment_statement_k3.go  loadK3Evidence: fail-closed M4 joins (ErrPaymentEvidenceInvisible),
+                                                    the recovery probe (causation, wallet, asset), the matched-reference
+                                                    read inside the fixed I-2 budget; clearedRefFor (STANDING-1 side)
+
+Method: each mutant is applied IN PLACE to the working-tree source with a byte backup (scratchpad r21_mut.py, not
+committed); the mutant must compile and pass `go vet -tags integration` for reconciliation and payments (otherwise
+INVALID, not counted); then
+  pure suite : go test -race -count=1 -v -run 'TestRR1_Pure|TestR1_M4|TestR2_M4|TestC3_' ./internal/reconciliation/
+  integration: go test -race -tags integration -count=1 -p 1 -v -run '<selector per mutant>' ./internal/payments/
+The pure suite runs first; only a pure survivor goes on to its integration selector. The file is restored from the
+backup and byte-compared ("restored cmp=identical"). A mutant is KILLED when a test fails (a panic counts and is named).
+
+Control (unmutated):
+  pure suite  rc=0, 16 PASS (incl. subtests), 0 FAIL, 0 SKIP
+  integration 'TestRR1_|TestRR4_|TestRR5_|TestM4Recon_' rc=0, 23 PASS (incl. subtests), 0 FAIL, 0 SKIP
+
+Raw log (run 1 = every mutant; run 2 = B08 again after TestRR4_MatchedReferenceLines_ShareTheI2Budget gained lines on
+references that only share a prefix with / extend D2, so a non-exact read spends budget and overflows):
+CONTROL pure rc=0 ok=True
+CONTROL pure counts(pass,fail,skip)=(16, 0, 0)
+CONTROL integ rc=0 counts(pass,fail,skip)=(23, 0, 0)
+A01 KILLED by pure tests | RR-1 (a) recovery amount ignored | ['--- FAIL: TestRR1_Pure_StopRuleAndEveryNegation (0.00s)']
+A01 restored cmp=identical
+A02 KILLED by integration (TestRR1_OtherCausation) | RR-1 (a) causation filter dropped | ['--- FAIL: TestRR1_OtherCausation_Unrelated_Partial_KeepRaising (4.14s)']
+A02 restored cmp=identical
+A03 SURVIVED integration (TestRR1_OtherCausation|TestRR1_FullRecovery|TestRR1_CrossTenant) | RR-1 (a) wallet filter dropped | (3, 0, 0)
+A03 restored cmp=identical
+A04 SURVIVED integration (TestRR1_OtherCausation|TestRR1_FullRecovery|TestRR1_UnequalAmount) | RR-1 (a) asset filter dropped | (5, 0, 0)
+A04 restored cmp=identical
+A05 KILLED by integration (TestRR1_OtherCausation) | RR-1 (a) direction filter dropped (credits counted) | ['--- FAIL: TestRR1_OtherCausation_Unrelated_Partial_KeepRaising (5.19s)']
+A05 restored cmp=identical
+A06 SURVIVED integration (TestRR1_CrossTenant) | RR-1 (c) tenant filter of the recovery probe dropped | (1, 0, 0)
+A06 restored cmp=identical
+A07 KILLED by pure tests | RR-1 (b) exactly one payout dropped | ['--- FAIL: TestRR1_Pure_StopRuleAndEveryNegation (0.01s)']
+A07 restored cmp=identical
+A08 KILLED by pure tests | RR-1 (b) line amount equality dropped | ['--- FAIL: TestRR1_Pure_StopRuleAndEveryNegation (0.00s)']
+A08 restored cmp=identical
+A09 KILLED by pure tests | RR-1 (b) line asset equality dropped | ['--- FAIL: TestRR1_Pure_StopRuleAndEveryNegation (0.00s)']
+A09 restored cmp=identical
+A10 KILLED by pure tests | RR-1 (c) resolution amount/asset = attempt's dropped | ['--- FAIL: TestRR1_Pure_ScopingAndBoundSitesNeverStop (0.00s)']
+A10 restored cmp=identical
+A11 KILLED by pure tests | RR-1 (c) resolution belongs to the attempt dropped | ['--- FAIL: TestRR1_Pure_ScopingAndBoundSitesNeverStop (0.00s)']
+A11 restored cmp=identical
+A12 KILLED by pure tests | RR-1 bound site (no line) may stop | ['--- FAIL: TestRR1_Pure_ScopingAndBoundSitesNeverStop (0.00s)']
+A12 restored cmp=identical
+A13 KILLED by pure tests | RR-1 STANDING-1 line must be the recovered one (reference) dropped | ['--- FAIL: TestRR1_Pure_ScopingAndBoundSitesNeverStop (0.00s)']
+A13 restored cmp=identical
+A14 KILLED by pure tests | RR-1 STANDING-1 never consults the rule (always raises) | ['--- FAIL: TestRR1_Pure_StopRuleAndEveryNegation (0.01s)', '--- FAIL: TestRR1_Pure_ScopingAndBoundSitesNeverStop (0.00s)']
+A14 restored cmp=identical
+A15 KILLED by pure tests | RR-1 R-1 uses the old amount-only stop | ['--- FAIL: TestRR1_Pure_StopRuleAndEveryNegation (0.01s)']
+A15 restored cmp=identical
+A16 KILLED by pure tests | RR-1 (b) payout dedupe key drops occurred_at | ['--- FAIL: TestRR1_Pure_StopRuleAndEveryNegation (0.01s)']
+A16 restored cmp=identical
+A17 KILLED by pure tests | RR-1 (b) STANDING-1 line amount compare dropped | ['--- FAIL: TestRR1_Pure_ScopingAndBoundSitesNeverStop (0.00s)']
+A17 restored cmp=identical
+B01 KILLED by integration (TestRR4_NotPaid_Succeeded) | RR-4 matched-reference read skipped | ['--- FAIL: TestRR4_NotPaid_SucceededOnAnotherMatchedDeclineReference_Raises (4.12s)']
+B01 restored cmp=identical
+B02 KILLED by integration (TestRR4_MatchedReferenceLines_Share) | RR-4 matched-reference lines get a fresh budget | ['--- FAIL: TestRR4_MatchedReferenceLines_ShareTheI2Budget (3.78s)']
+B02 restored cmp=identical
+B03 KILLED by integration (TestRR4_MatchedReferenceLines_Share) | RR-4 read-2 merchant exclusion dropped (double count) | ['--- FAIL: TestRR4_MatchedReferenceLines_ShareTheI2Budget (43.29s)']
+B03 restored cmp=identical
+B04 KILLED by integration (TestRR4_NotPaid_Succeeded) | RR-4 matched set ignores the merchant reference | ['--- FAIL: TestRR4_NotPaid_SucceededOnAnotherMatchedDeclineReference_Raises (3.43s)']
+B04 restored cmp=identical
+B05 KILLED by pure tests | RR-4 notPaidLines drops matchedRefs | ['--- FAIL: TestRR1_Pure_StopRuleAndEveryNegation (0.01s)']
+B05 restored cmp=identical
+B06 KILLED by pure tests | RR-4 payoutLinesOn ignores byMatchedRef | ['--- FAIL: TestRR1_Pure_StopRuleAndEveryNegation (0.00s)']
+B06 restored cmp=identical
+B07 KILLED by integration (TestRR4_NotPaid_Succeeded) | RR-4 read-2 provider filter dropped | ['--- FAIL: TestRR4_NotPaid_SucceededOnAnotherMatchedDeclineReference_Raises (3.40s)']
+B07 restored cmp=identical
+B08 SURVIVED integration (TestRR4_NotPaid_Succeeded) | RR-4 read-2 exact match replaced by prefix match | (1, 0, 0)
+B08 restored cmp=identical
+B09 SURVIVED integration (TestRR4_NotPaid_Succeeded|TestRR1_CrossTenant) | RR-4 read-2 tenant filter dropped | (2, 0, 0)
+B09 restored cmp=identical
+C01 KILLED by integration (TestRR5_) | LOW-2 evidence-line visibility check removed | ['--- FAIL: TestRR5_InvisibleEvidence_FailsClosed (3.39s)', '--- FAIL: TestRR5_InvisibleEvidence_FailsClosed/evidence_line (0.02s)']
+C01 restored cmp=identical
+C02 KILLED by integration (TestRR5_) | LOW-2 evidence-line LEFT JOIN made an inner JOIN | ['--- FAIL: TestRR5_InvisibleEvidence_FailsClosed (3.17s)', '--- FAIL: TestRR5_InvisibleEvidence_FailsClosed/evidence_line (0.01s)']
+C02 restored cmp=identical
+C03 KILLED by integration (TestRR5_) | LOW-2 attempt visibility check removed | ['--- FAIL: TestRR5_InvisibleEvidence_FailsClosed (3.53s)', '--- FAIL: TestRR5_InvisibleEvidence_FailsClosed/attempt (0.02s)']
+C03 restored cmp=identical
+C04 KILLED by integration (TestRR5_) | LOW-2 withdrawal visibility check removed (wallet zero) | ['--- FAIL: TestRR5_InvisibleEvidence_FailsClosed (4.00s)', '--- FAIL: TestRR5_InvisibleEvidence_FailsClosed/withdrawal (0.04s)', 'panic: runtime error: invalid memory address or nil pointer dereference [recovered, repanicked]']
+C04 restored cmp=identical
+C05 SURVIVED integration (TestRR5_) | LOW-2 platform-read attempt check becomes a silent skip | (4, 0, 0)
+C05 restored cmp=identical
+=== run 2 (after the boundary test gained partial-reference lines) ===
+B08 KILLED by integration (TestRR4_NotPaid_Succeeded|TestRR4_MatchedReferenceLines_Share) | RR-4 read-2 exact match replaced by prefix match | ['--- FAIL: TestRR4_MatchedReferenceLines_ShareTheI2Budget (3.35s)']
+B08 restored cmp=identical
+
+Summary: 31 counted mutants (A01-A17 RR-1, B01-B09 RR-4, C01-C05 LOW-2); 26 KILLED; 5 SURVIVED, each disclosed as
+equivalent under a database guarantee or an earlier check (none is a gap in raising or clearing):
+  A03 (recovery probe without the wallet filter) and A04 (without the asset filter): equivalent under MA022
+      causation_not_on_wallet (0113/0115 ledger_adjustment_payload_refusal): a compensating_entry whose causation is the
+      withdrawal_failed transaction is refused unless that transaction has a player_cash leg on the request's wallet in
+      the request's asset, so no executed request with the causation and another wallet/asset can exist. The Go filters
+      are defence in depth; a state that kills them cannot be built without disabling a guard trigger (forbidden by the
+      no-trigger-disable guard test).
+  A06 (recovery probe without its tenant predicate) and B09 (matched-reference read without its tenant predicate):
+      equivalent under FORCE RLS on ledger_adjustment_requests (tenant_system_read_executed) and payment_statement_lines
+      (tenant_staff_scope USING): the run's session sees only its tenant. Cross-tenant causation is also impossible by the
+      composite FK (causation_transaction_id, tenant_id). TestRR1_CrossTenantEvidenceCannotStopAnotherTenantsFinding pins
+      the outcome.
+  C05 (an executed M4 whose attempt is missing from the platform read becomes a silent skip): equivalent given C03's
+      check: the M4 query's LEFT JOIN on payment_attempts (attempt visible, provider equal) runs in the SAME snapshot and
+      session as loadPlatform's tenant- and provider-bound attempt read, so the platform-read check cannot fire first. It
+      stays as a fail-closed backstop.
