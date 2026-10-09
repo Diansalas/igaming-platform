@@ -693,7 +693,7 @@ func ApplyPayoutResult(ctx context.Context, pool *db.Pool, tenantID, requestID u
 		// attempt. A differing echo parks (destination_mismatch); a success without a declared
 		// echo is ambiguous. A NotSent result carries no provider evidence.
 		if gr.Class != ErrorClassNotSent {
-			verdict, derr := payoutDestinationEvidence(actx, tx, env, attempt, requestID, gr.Class, res.DestinationEcho, evidence)
+			verdict, derr := payoutDestinationEvidence(actx, tx, env, attempt, requestID, gr.Class, res.DestinationEcho, evidence, res.ProviderReference)
 			if derr != nil || verdict.Stop {
 				return derr
 			}
@@ -1209,7 +1209,7 @@ func applyPayoutStatusEvidenceInTx(actx context.Context, tx pgx.Tx, env payoutEn
 		// settle the attempt (ADR 0111 2.6 "poll"). A success without a declared echo stays
 		// non-terminal (the poll decides); the next look is rescheduled.
 		{
-			verdict, derr := payoutDestinationEvidence(actx, tx, env, attempt, requestID, gr.Class, res.DestinationEcho, evidence)
+			verdict, derr := payoutDestinationEvidence(actx, tx, env, attempt, requestID, gr.Class, res.DestinationEcho, evidence, res.ProviderReference)
 			if derr != nil || verdict.Stop {
 				return derr
 			}

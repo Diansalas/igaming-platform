@@ -273,7 +273,14 @@ func TestK3_C16_T18_Migration0115UpDownUp_WholeSchema(t *testing.T) {
 // refusal guard is its first statement, so the assertion is unchanged: MR099 and a whole rollback.
 func k3Run0115Down(t *testing.T, pool *db.Pool) error {
 	t.Helper()
-	b, err := os.ReadFile(filepath.Join("..", "..", "migrations", "0115_payment_force_resolution.down.sql"))
+	return runMigrationDownScript(t, pool, "0115_payment_force_resolution.down.sql")
+}
+
+// runMigrationDownScript executes one migration's DOWN script directly as a single transaction (the runner cannot step
+// down from a head that contains migrations whose files a pinned directory copy lacks).
+func runMigrationDownScript(t *testing.T, pool *db.Pool, file string) error {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join("..", "..", "migrations", file))
 	if err != nil {
 		t.Fatal(err)
 	}

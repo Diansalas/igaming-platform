@@ -1385,7 +1385,7 @@ statement about a real PSP, a custodian or a licence: every provider in the test
 | MOCK tier: a `synthetic_test` instrument (MOCK verifier) binds and pays through a Synthetic adapter; it never satisfies a non-Synthetic adapter | `IMPLEMENTED` |
 | `docs/runbooks/payout-instrument-keys.md` note (dev/MOCK now needs the key families) | `IMPLEMENTED` |
 | M4 "not paid" for a `destination_mismatch` park, the "disputed with an executed M4" echo cells of 2.6 | `NOT IMPLEMENTED` (RESOLVE-1, 0125) |
-| Reconciliation classification of destination parks (`disputeReasonClasses` line of 2.6) | `NOT IMPLEMENTED` (B13B-13: needs a change to the MA020 SQL function, i.e. a second migration) |
+| Reconciliation classification of destination parks (payout-scoped table, B13B-13) | `IMPLEMENTED` (Go only; no migration) |
 | Compliance alert on a registration fingerprint conflict (15.3 item 3); lifting a staff/provider block (15.3 item 2); the stranded `approved` withdrawal after a permanent block (HD-R15-5) | `NOT IMPLEMENTED` (unchanged open items) |
 
 ### 18.2 Ambiguities and the reading taken
@@ -1439,19 +1439,15 @@ statement about a real PSP, a custodian or a licence: every provider in the test
   (`PayoutDisputeReasons()`, not M2-admitted, hold kept). `destination_integrity_failure` and `destination_not_usable` are also the
   T16 escalation reasons; `destination_mismatch_on_terminal_payout` is a raise-only signal. No migration is needed for any reason
   (`terminal_reason` has only a length CHECK).
-- **B13B-13 (reconciliation classification, a deviation from 2.6).** 2.6 says to add `destination_mismatch` to reconciliation's
-  `disputeReasonClasses` as bound-if-referenced. That table is the **deposit** capture-class table: it is pinned to
-  `payments.DepositDisputeTerminalReasons()` (`TestD2_P1_NoStaleClassification`) and to the SQL reason list inside
-  `payment_attempt_open_exposure(uuid, uuid)` (`TestMA020_Parity_ReasonPinAndReferenceRule`), which lives in a migration. Adding the
-  payout destination reasons there was tried and both pins refused it; making it consistent needs a change to that SQL function, i.e. a
-  second migration, which the owner brief excludes (one new migration). **Not done**: a destination park gets no
-  `pay_captured_unposted` reconciliation class (the pre-D2 behaviour for an unclassified reason: no finding at run time). It is still
-  parked `disputed`, the hold is kept, an audit row is written and the B12 P1 is raised, so the signal is not lost; only the
-  statement-reconciliation cross-check is missing (see 18.4 Q5).
-- **B13B-12 (fixtures).** Since 0126 no fixture can insert a NULL-binding withdrawal. Fixtures that are about the binding bind a MOCK
-  instrument (`internal/payoutinstrument/pitest`, integration build tag only, never in a binary). Fixtures that plant a `submitted`
-  row to test receipts or reconciliation, or that attack a different invariant (RLS, a brand FK), plant a **legacy-shaped** row through
-  `pitest.WithoutBindingGuard` (owner role, trigger disabled and re-enabled in the same transaction).
+- **B13B-13 (reconciliation classification; implemented as a payout-scoped table, a deviation from the wording of 2.6).** 2.6 says to
+  add `destination_mismatch` to `disputeReasonClasses`. That table is the **deposit** table, pinned to
+  `payments.DepositDisputeTerminalReasons()` and to the MA020 SQL list in `payment_attempt_open_exposure`; adding the payout reasons
+  there was refused by both pins. First recorded as not implemented, then corrected on ledger-finance review (LF M-2): MA020 filters
+  `operation = 'deposit'`, so no migration is needed. **Chosen: implement** a separate Go table `payoutDisputeReasonClasses`
+  (`destination_mismatch` and `destination_integrity_failure`: bound-if-referenced; consulted only for non-deposit attempts in
+  `captureClass`), pinned to `payments.PayoutDisputeReasons()` by `TestPayoutDisputeReasonClasses_PinnedToPayments`, with an integration
+  test (in-run and standing finding). It is small, adds no migration and leaves both deposit pins untouched. It depends on the park
+  binding the provider's reference first (B13B-17, LF H-2).
 - **B13B-14 (tests that pinned a pre-0123 schema).** The payments code now reads and writes the 0123 columns, so a payout world cannot run on a
   scratch database stopped at 0115. `TestK3_Y08/X10/Y12` now run on the head schema (Y12 also disables the 0120 actor-proof guard in its owner
   bypass); `TestK3_C16_DownRefusals` runs the 0115 `down` script directly on the head schema (its first statement is the MR099 refusal, so the
@@ -1483,6 +1479,17 @@ statement about a real PSP, a custodian or a licence: every provider in the test
   `TestMigration0126_UpDownUp_WholeSchema` key on it). Info: `GateResult` (it carries the decrypted `Detail`) redacts under
   `String`/`GoString`/`Format`/`LogValue`/JSON.
 
+- **B13B-17 (ledger-finance review fixes).** LF H-1: the terminal-attempt destination signal (audit + `destination_mismatch_on_terminal_payout`)
+  is ADDITIVE; the existing cells (T14 success-after-decline, the foreign-reference and amount signals, late evidence) still run after it.
+  LF H-2: a destination park first binds the provider's validated, unconflicted reference (the B10 guard, then `MarkAccepted` and
+  `AttachProviderReference`) and only then parks; a foreign-held reference is parked by the guard as `provider_reference_conflict`.
+  LF L-2: the terminal signal's audit row is written once per distinct (attempt, echo), not keyed on `alreadyApplied` (a bad-echo
+  redelivery dedupes against the earlier good delivery, so `alreadyApplied` is already true for the first bad one); the raise stays
+  unconditional and dedupes into one alert. LF L-4: a request-time integrity refusal also writes a durable audit row
+  (`withdrawal.request.destination_integrity_refused`, own transaction after the rollback) next to the detached P1. Test-only: `pitest.Bind`
+  labels use a digit-free alphabet (a hex label could form a Luhn-valid run); the 0124 down-refusal tests run the down script directly
+  and the HSEC route test binds an instrument.
+
 ### 18.3 Evidence
 
 Tests (all `-race -tags integration -count=1 -p 1`, private scratch database, runtime role where the package uses it):
@@ -1507,9 +1514,9 @@ their path.
 
 1. **OPEN OWNER QUESTION: should the instrument's current state also gate settlement?** Today a suspension after the call was made
    does not block recording the provider's result (B13B-2). The alternative parks every evidence on a suspended instrument, which can
-   strand a payout that was actually sent. Security recommends KEEPING the current behaviour; this is a policy decision for the owner
-   and is not decided here. A non-blocking compliance signal on settlement against a blocked instrument is recorded as an OPTION only
-   and is NOT adopted or built.
+   strand a payout that was actually sent. Recommendations: **security** recommends KEEPING the current behaviour (no gate);
+   **ledger-finance** recommends "no as a gate, yes as a signal" (a non-blocking compliance signal on settlement against a blocked
+   instrument). Both are recommendations only: the policy is the owner's, the signal is recorded as an OPTION and is NOT adopted or built.
 2. **Tenant for the adapter-side echo (B13B-8).** Add the tenant (and the snapshot's `FingerprintKid`) to the request/context the adapter
    receives, or inject a per-tenant fingerprinter factory. Required before any real adapter can echo.
 3. **Dev/MOCK key provisioning.** Binding is mandatory in MOCK, so every non-production environment needs the key families (runbook). Is
@@ -1522,3 +1529,11 @@ their path.
 6. **Front ends.** `b2c` (`WithdrawalPage`, `api/withdrawals.ts`) still posts a withdrawal without `payout_instrument_id`, which is now a 409
    `PAYOUT_INSTRUMENT_REQUIRED`; the back office submit call still sends `payment_method` (accepted, compared with the rail). Both belong to the
    `frontend` / `backoffice` specialists and are not part of this change.
+7. **OPEN architect/owner question: governed resolution of a `destination_integrity_failure` park (LF M-3).** The M2 route excludes
+   it and the 0125 M4 scope covers only a `destination_mismatch` "not paid" resolution, so such a park (hold kept, P1 raised) has no governed
+   path out. No policy is invented here.
+
+**Launch-blocking for non-MOCK payouts (recorded, not built):** (a) every non-Synthetic payout adapter must declare
+`EchoesDestinationFingerprint = true`, or the owner explicitly accepts an adapter that cannot echo (without the echo an adapter's success
+settles on the snapshot integrity check alone, B13B-15); the registration refusal for a non-declaring non-Synthetic adapter is NOT built;
+(b) the tenant-visibility interface question for the adapter-side echo (B13B-8 / Q2) must be answered and implemented.

@@ -981,7 +981,8 @@ func TestHSEC_HoldRelease_Migration0124DownRefusals(t *testing.T) {
 		wr := h.hold(100)
 		h.suspendTenant()
 		h.mustRequest(h.reqA, wr.ID)
-		_, err := h.pool.MigrateDown(context.Background(), migration0101Dir(t, hsecMigrationVersion), 1)
+		// B13-B: the head now contains 0126, so the runner cannot step down through a 0124-pinned directory copy; run the 0124 down script directly.
+		err := runMigrationDownScript(t, h.pool, "0124_withdrawal_hold_resolution.down.sql")
 		k3RequireCode(t, err, "HR099")
 		if h.count(`SELECT count(*) FROM audit_log WHERE action = 'withdrawal.hold_resolution_requested'`) != 1 {
 			t.Fatal("whole rollback expected")
@@ -989,7 +990,8 @@ func TestHSEC_HoldRelease_Migration0124DownRefusals(t *testing.T) {
 	})
 	t.Run("policy_row", func(t *testing.T) {
 		h := newHSR(t, 1)
-		_, err := h.pool.MigrateDown(context.Background(), migration0101Dir(t, hsecMigrationVersion), 1)
+		// B13-B: the head now contains 0126, so the runner cannot step down through a 0124-pinned directory copy; run the 0124 down script directly.
+		err := runMigrationDownScript(t, h.pool, "0124_withdrawal_hold_resolution.down.sql")
 		k3RequireCode(t, err, "HR099")
 	})
 }

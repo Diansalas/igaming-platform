@@ -365,7 +365,7 @@ func TestB12_EachSiteAndReason_RaisesExactlyOneAlert_AuditUnchanged_NoMoney(t *t
 		if reason == "late_decline_after_terminal" {
 			continue // LF M-1/C1: a decline replay is a clean no-op, see TestB12_LateDeclineReplay_*
 		}
-		if strings.HasPrefix(reason, "destination_") {
+		if b13bTerminalReasonsCoveredElsewhere[reason] {
 			continue // B13-B: exercised with the destination fixtures in b13b_destination_integration_test.go (park audit + exactly one P1)
 		}
 		if !covered[reason] {
@@ -373,7 +373,7 @@ func TestB12_EachSiteAndReason_RaisesExactlyOneAlert_AuditUnchanged_NoMoney(t *t
 		}
 	}
 	for reason := range payoutEscalationReasons {
-		if strings.HasPrefix(reason, "destination_") {
+		if b13bEscalationReasonsCoveredElsewhere[reason] {
 			continue // B13-B: TestB13B_T2_Reclaim_EscalatesOnBlockedDestination / TestB13B_T12_Resend_GatedByTheDestination
 		}
 		if !covered[reason] {
@@ -830,4 +830,15 @@ func TestB12_OtherTenantSessionSeesZeroPayoutAlertRows(t *testing.T) {
 	if n != 0 || occ != 0 {
 		t.Fatalf("tenant B session read %d alerts / %d occurrences of tenant A", n, occ)
 	}
+}
+
+// Explicit lists (LF L-3), not a prefix: a new destination_* reason must be added here deliberately, with its own test.
+var b13bTerminalReasonsCoveredElsewhere = map[string]bool{
+	TerminalReasonDestinationMismatch:         true, // TestB13B_Echo_Sync_Mismatch_ParksEveryOutcome, _Poll, _Callback
+	TerminalReasonDestinationIntegrityFailure: true, // TestB13B_Evidence_MissingOrTamperedSnapshot_ParksAsIntegrityFailure
+}
+
+var b13bEscalationReasonsCoveredElsewhere = map[string]bool{
+	alertReasonPayoutDestinationNotUsable:     true, // TestB13B_T2_Reclaim_EscalatesOnBlockedDestination/suspended
+	TerminalReasonDestinationIntegrityFailure: true, // TestB13B_T2_Reclaim_EscalatesOnBlockedDestination/snapshot_*
 }

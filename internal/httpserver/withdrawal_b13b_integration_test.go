@@ -255,6 +255,10 @@ func TestRequestWithdrawalHandler_B13B_IntegrityRefusalRaisesAP1(t *testing.T) {
 	if !found {
 		t.Fatalf("no P1 %s", want)
 	}
+	if n := countRows(t, pool, tenant.ID, `SELECT count(*) FROM audit_log WHERE tenant_id = $1 AND action = 'withdrawal.request.destination_integrity_refused' AND target_id = $2 AND metadata->>'gate_reason' = $3`,
+		tenant.ID, inst.String(), payoutinstrument.ReasonSealInvalid); n != 1 {
+		t.Fatalf("durable audit rows for the integrity refusal = %d, want 1", n)
+	}
 	if n := countRows(t, pool, tenant.ID, `SELECT count(*) FROM withdrawal_requests WHERE tenant_id = $1`, tenant.ID); n != 0 {
 		t.Fatalf("rows = %d", n)
 	}

@@ -37,11 +37,14 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/identity"
 	"github.com/Diansalas/igaming-platform/internal/payoutinstrument"
 	"github.com/Diansalas/igaming-platform/internal/providercred"
+	"github.com/Diansalas/igaming-platform/internal/providerref"
 	"github.com/Diansalas/igaming-platform/internal/withdrawal"
 )
 
 // Closed destination reasons. terminal_reason has only a length CHECK (migration 0101), so no
 // migration is needed for these (ADR 0111 2.6).
+const terminalSignalAuditAction = "payments.payout_destination_mismatch_terminal"
+
 const (
 	// TerminalReasonDestinationMismatch: a provider-reported destination differs from the
 	// attempt's snapshot (parked, disputed). Not M2-admitted: the hold is kept.
@@ -299,7 +302,12 @@ func resolvePhaseBDestination(ctx context.Context, pool providercred.TenantTxRun
 // parkPayoutDestination parks a non-terminal payout attempt as `disputed` with a closed
 // destination reason: the CAS, then the audit row, then the B12 P1 as the LAST statement. No
 // Complete, no release, no ledger posting: the hold is kept.
-func parkPayoutDestination(ctx context.Context, tx pgx.Tx, attempt PaymentAttempt, requestID uuid.UUID, evidence EvidenceKind, reason string, meta map[string]any) error {
+func parkPayoutDestination(ctx context.Context, tx pgx.Tx, attempt PaymentAttempt, requestID uuid.UUID, evidence EvidenceKind, reason string, meta map[string]any, reference string) error {
+	// LF H-2: bind the provider's (validated, unconflicted) reference BEFORE the park. A foreign-held reference is
+	// parked by the existing B10 guard as provider_reference_conflict instead (hold kept, its own audit + P1).
+	if parked, err := bindPayoutReferenceForPark(ctx, tx, attempt, requestID, reference, evidence); err != nil || parked {
+		return err
+	}
 	if err := ApplyDisputeFromNonTerminal(ctx, tx, attempt.ID, evidence, reason); err != nil {
 		return payoutHandleContradiction(ctx, tx, attempt, evidence, ErrorClassSucceeded, err)
 	}
@@ -348,7 +356,10 @@ type destinationEvidenceResult struct {
 //   - succeeded / declined attempt: a differing echo changes nothing but writes the audit row
 //     and raises the P1 signal destination_mismatch_on_terminal_payout.
 //   - disputed / created / rejected: unchanged existing cells apply.
-func payoutDestinationEvidence(ctx context.Context, tx pgx.Tx, env payoutEnv, attempt PaymentAttempt, requestID uuid.UUID, class ErrorClass, echo *payoutinstrument.DestinationEcho, evidence EvidenceKind) (destinationEvidenceResult, error) {
+//
+// reference is the provider reference the evidence carries ("" when none). A park binds it first (LF H-2) so that
+// reconciliation and RESOLVE-1 see the reference the provider reported.
+func payoutDestinationEvidence(ctx context.Context, tx pgx.Tx, env payoutEnv, attempt PaymentAttempt, requestID uuid.UUID, class ErrorClass, echo *payoutinstrument.DestinationEcho, evidence EvidenceKind, reference string) (destinationEvidenceResult, error) {
 	var res destinationEvidenceResult
 	if class != ErrorClassSucceeded && echo == nil {
 		return res, nil
@@ -379,7 +390,7 @@ func payoutDestinationEvidence(ctx context.Context, tx pgx.Tx, env payoutEnv, at
 	if env.destinations == nil {
 		res.Stop = true
 		return res, parkPayoutDestination(ctx, tx, fresh, requestID, evidence, TerminalReasonDestinationIntegrityFailure,
-			map[string]any{"gate_reason": payoutinstrument.ReasonNoGate})
+			map[string]any{"gate_reason": payoutinstrument.ReasonNoGate}, reference)
 	}
 	snap, err := env.destinations.CheckSnapshot(ctx, tx, snapshotExpectFor(wr, fresh))
 	if err != nil {
@@ -389,13 +400,13 @@ func payoutDestinationEvidence(ctx context.Context, tx pgx.Tx, env payoutEnv, at
 		}
 		res.Stop = true
 		return res, parkPayoutDestination(ctx, tx, fresh, requestID, evidence, TerminalReasonDestinationIntegrityFailure,
-			map[string]any{"gate_reason": g.Reason})
+			map[string]any{"gate_reason": g.Reason}, reference)
 	}
 	switch payoutinstrument.CompareEcho(snap, echo) {
 	case payoutinstrument.EchoMismatch:
 		res.Stop = true
 		meta := map[string]any{"snapshot_fingerprint_prefix": fpPrefix(snap.Fingerprint), "echo_kid": echo.Kid, "echo_fingerprint_prefix": fpPrefix(echo.Fingerprint)}
-		return res, parkPayoutDestination(ctx, tx, fresh, requestID, evidence, TerminalReasonDestinationMismatch, meta)
+		return res, parkPayoutDestination(ctx, tx, fresh, requestID, evidence, TerminalReasonDestinationMismatch, meta, reference)
 	case payoutinstrument.EchoAbsent:
 		if class == ErrorClassSucceeded && env.echoDeclared(fresh.ProviderID) {
 			res.AmbiguousSuccess = true
@@ -407,27 +418,40 @@ func payoutDestinationEvidence(ctx context.Context, tx pgx.Tx, env payoutEnv, at
 // payoutTerminalDestinationSignal handles a differing echo on an already succeeded/declined
 // payout: no state change, no posting; the audit row and the raise-only P1 signal.
 func payoutTerminalDestinationSignal(ctx context.Context, tx pgx.Tx, env payoutEnv, attempt PaymentAttempt, wr withdrawal.WithdrawalRequest, echo *payoutinstrument.DestinationEcho) (destinationEvidenceResult, error) {
-	res := destinationEvidenceResult{Stop: true}
+	// LF H-1: the signal is ADDITIVE. It never stops the evidence: the existing cells (T14 success after a decline, the
+	// foreign-reference and amount signals on a succeeded attempt, late evidence) still run after it.
+	res := destinationEvidenceResult{}
 	var snapFP, kid string
 	if env.destinations != nil {
 		if snap, err := env.destinations.CheckSnapshot(ctx, tx, snapshotExpectFor(wr, attempt)); err == nil {
 			if payoutinstrument.CompareEcho(snap, echo) != payoutinstrument.EchoMismatch {
-				res.Stop = false
 				return res, nil
 			}
 			snapFP, kid = snap.Fingerprint, snap.FingerprintKID
 		}
 	}
-	// A broken snapshot on a terminal attempt cannot prove equality: signal it as well.
-	if err := audit.Record(ctx, tx, audit.Entry{
-		TenantID: attempt.TenantID, ActorType: audit.ActorSystem, Action: "payments.payout_destination_mismatch_terminal",
-		TargetType: "payment_attempt", TargetID: attempt.ID.String(), Outcome: audit.OutcomeDenied,
-		Metadata: map[string]any{
-			"withdrawal_request_id": wr.ID.String(), "provider_id": providerIDOrEmpty(attempt), "state": string(attempt.State),
-			"snapshot_fingerprint_prefix": fpPrefix(snapFP), "snapshot_kid": kid, "echo_kid": echo.Kid, "echo_fingerprint_prefix": fpPrefix(echo.Fingerprint),
-		},
-	}); err != nil {
-		return res, err
+	// A broken snapshot on a terminal attempt cannot prove equality: signal it as well. The audit row is written once per
+	// distinct (attempt, echo) - NOT keyed on the receipt's alreadyApplied flag (LF L-2): the receipt of a bad-echo
+	// redelivery dedupes against the earlier GOOD delivery of the same event (the echo is not in the fingerprint), so
+	// alreadyApplied is true for the very first bad one. The check runs under the withdrawal row lock the caller holds, so
+	// concurrent redeliveries serialise. The raise stays unconditional (the alert dedupes into one open alert).
+	var seen bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM audit_log WHERE tenant_id = $1 AND action = $2 AND target_id = $3
+		AND metadata->>'echo_kid' = $4 AND metadata->>'echo_fingerprint_prefix' = $5)`,
+		attempt.TenantID, terminalSignalAuditAction, attempt.ID.String(), echo.Kid, fpPrefix(echo.Fingerprint)).Scan(&seen); err != nil {
+		return res, fmt.Errorf("payments: terminal destination signal: audit lookup: %w", err)
+	}
+	if !seen {
+		if err := audit.Record(ctx, tx, audit.Entry{
+			TenantID: attempt.TenantID, ActorType: audit.ActorSystem, Action: terminalSignalAuditAction,
+			TargetType: "payment_attempt", TargetID: attempt.ID.String(), Outcome: audit.OutcomeDenied,
+			Metadata: map[string]any{
+				"withdrawal_request_id": wr.ID.String(), "provider_id": providerIDOrEmpty(attempt), "state": string(attempt.State),
+				"snapshot_fingerprint_prefix": fpPrefix(snapFP), "snapshot_kid": kid, "echo_kid": echo.Kid, "echo_fingerprint_prefix": fpPrefix(echo.Fingerprint),
+			},
+		}); err != nil {
+			return res, err
+		}
 	}
 	return res, raisePayoutDisputeAlert(ctx, tx, attempt, alertReasonPayoutDestinationMismatchOnTerminal)
 }
@@ -457,4 +481,28 @@ func DestinationIntegrityAlert(tenantID uuid.UUID, subject, reason string) alert
 		Kind: alerting.KindPaymentWebhookIntegrity, SubjectTenantID: tenantID,
 		Discriminator: subject + ":reason:destination_integrity:" + reason, Attributes: map[string]alerting.AttrValue{},
 	}
+}
+
+// bindPayoutReferenceForPark binds a provider reference the evidence reported before a destination park, through the
+// same path every other payout binding takes: validate, the B10 foreign-reference guard (which itself parks on a
+// conflict and then returns parked=true), then MarkAccepted (submitting|ambiguous -> pending, provider_reference set)
+// and AttachProviderReference on the withdrawal. An attempt that already holds its reference, an empty reference and
+// an invalid reference bind nothing (the park stays reference-less, exactly as before).
+func bindPayoutReferenceForPark(ctx context.Context, tx pgx.Tx, attempt PaymentAttempt, requestID uuid.UUID, reference string, evidence EvidenceKind) (parkedByGuard bool, err error) {
+	if reference == "" || (attempt.ProviderReference != nil && *attempt.ProviderReference != "") {
+		return false, nil
+	}
+	if attempt.State != AttemptSubmitting && attempt.State != AttemptAmbiguous {
+		return false, nil
+	}
+	if verr := providerref.ValidatePaymentReference("provider_reference", reference); verr != nil {
+		return false, nil
+	}
+	if parked, err := payoutGuardReferenceBinding(ctx, tx, attempt, requestID, reference, evidence, ErrorClassPending); err != nil || parked {
+		return parked, err
+	}
+	if err := MarkAccepted(ctx, tx, attempt.ID, evidence, reference, time.Now().Add(payoutNextPollInterval)); err != nil {
+		return false, payoutHandleContradiction(ctx, tx, attempt, evidence, ErrorClassPending, err)
+	}
+	return false, withdrawal.AttachProviderReference(ctx, tx, requestID, reference)
 }

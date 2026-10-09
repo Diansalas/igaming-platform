@@ -234,6 +234,18 @@ var disputeReasonClasses = map[string]disputeReasonClass{
 	"reversal_tombstone_precedes_success": reasonExcluded,          // net zero at the PSP (§28.9)
 }
 
+// payoutDisputeReasonClasses is the PAYOUT-scoped classification (B13-B, ADR 0111 18.2 B13B-13, LF M-2). It is separate from
+// disputeReasonClasses on purpose: that table is the deposit table, pinned to payments.DepositDisputeTerminalReasons and to
+// the MA020 SQL list in payment_attempt_open_exposure (which filters operation = 'deposit'). A payout park by the destination
+// binding keeps the hold and the PSP may or may not have paid, so it is reported against the reference when the attempt holds
+// one (the B13-B park binds the validated reference first) and clears only through the payout rule
+// (clearedRefFor / payoutCompletedRef); with no reference it is reported in-run only. The pin test ties these keys to
+// payments.PayoutDisputeReasons().
+var payoutDisputeReasonClasses = map[string]disputeReasonClass{
+	"destination_mismatch":          reasonBoundIfReferenced,
+	"destination_integrity_failure": reasonBoundIfReferenced,
+}
+
 // classifyDisputeReason returns the class of a terminal reason, including
 // the invalid_provider_reference:<reason> prefix family.
 func classifyDisputeReason(r string) disputeReasonClass {
@@ -260,6 +272,9 @@ func classifyDisputeReason(r string) disputeReasonClass {
 // still records what the reason IS.
 func (a *payAttempt) captureClass() disputeReasonClass {
 	c := classifyDisputeReason(a.terminalReason)
+	if pc, ok := payoutDisputeReasonClasses[a.terminalReason]; ok && a.operation != paymentStatementKindDeposit {
+		c = pc
+	}
 	if c == reasonBound || c == reasonBoundIfReferenced {
 		if a.providerRef != "" {
 			return reasonBound

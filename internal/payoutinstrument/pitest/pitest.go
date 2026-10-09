@@ -14,7 +14,6 @@ package pitest
 import (
 	"context"
 	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"sync"
 	"testing"
@@ -71,7 +70,14 @@ func Bind(t testing.TB, pool *db.Pool, tenantID, playerAccountID uuid.UUID, asse
 	if _, err := rand.Read(raw); err != nil {
 		t.Fatal(err)
 	}
-	detail, _ := json.Marshal(map[string]string{"label": "t" + hex.EncodeToString(raw)})
+	// Digit-free alphabet (LF L-1): a hex label can contain a Luhn-valid 12-19 digit run, which the card-number
+	// detector (correctly) refuses, making the fixture flaky.
+	label := make([]byte, 0, len(raw)+1)
+	label = append(label, 't')
+	for _, c := range raw {
+		label = append(label, 'a'+c%26)
+	}
+	detail, _ := json.Marshal(map[string]string{"label": string(label)})
 	ctx := context.Background()
 	var inst payoutinstrument.Instrument
 	if err := pool.WithTenant(ctx, tenantID, func(ctx context.Context, tx pgx.Tx) error {

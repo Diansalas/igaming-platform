@@ -850,7 +850,7 @@ func applyResolvedReceiptEvidence(ctx context.Context, tx pgx.Tx, o *Orchestrato
 		if ev.Outcome == OutcomeSucceeded {
 			class = ErrorClassSucceeded
 		}
-		verdict, err := payoutDestinationEvidence(ctx, tx, o.payoutEnv(), attempt, *attempt.WithdrawalRequestID, class, ev.DestinationEcho, EvidenceCallback)
+		verdict, err := payoutDestinationEvidence(ctx, tx, o.payoutEnv(), attempt, *attempt.WithdrawalRequestID, class, ev.DestinationEcho, EvidenceCallback, ev.ProviderReference)
 		if err != nil {
 			return false, "", err
 		}

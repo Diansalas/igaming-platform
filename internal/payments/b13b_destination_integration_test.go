@@ -1448,3 +1448,212 @@ func TestB13B_L1_NilAdapterRefusedAtTheDispatchGates(t *testing.T) {
 		t.Fatal("the refusal must escalate (T16)")
 	}
 }
+
+// =============================================================================================
+// Ledger-finance review (LF H-1, H-2, L-2, M-1, M-2)
+// =============================================================================================
+
+// LF H-1: the terminal destination signal is ADDITIVE. A success with a bad echo after a decline still takes the T14
+// path (declined -> disputed success_after_payout_declined, its own P1) and ALSO raises the destination signal.
+func TestB13B_LFH1_DeclineThenSuccessWithBadEcho_StillParksT14(t *testing.T) {
+	w := newB13bW(t, "lfh1")
+	wr, cl, gr := w.submittedWithResult(WithdrawResult{Outcome: OutcomePending, ProviderReference: "ref-lfh1"}, "lfh1")
+	if err := w.apply(wr, cl, gr); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.callback(w.attempt(cl.Attempt.ID), OutcomeDeclined, "ref-lfh1", nil); err != nil {
+		t.Fatal(err)
+	}
+	if a := w.attempt(cl.Attempt.ID); a.State != AttemptDeclined {
+		t.Fatalf("setup: %s", a.State)
+	}
+	if err := w.callback(w.attempt(cl.Attempt.ID), OutcomeSucceeded, "ref-lfh1", w.badEcho(cl.Attempt.ID)); err != nil {
+		t.Fatal(err)
+	}
+	a := w.attempt(cl.Attempt.ID)
+	if a.State != AttemptDisputed || a.TerminalReason == nil || *a.TerminalReason != "success_after_payout_declined" {
+		t.Fatalf("T14 suppressed: attempt = %s %v", a.State, a.TerminalReason)
+	}
+	if _, ok := w.alertFor(a.ID, "success_after_payout_declined"); !ok {
+		t.Fatal("the T14 P1 was suppressed")
+	}
+	if _, ok := w.alertFor(a.ID, alertReasonPayoutDestinationMismatchOnTerminal); !ok {
+		t.Fatal("the destination signal is missing")
+	}
+	w.balanced()
+}
+
+// ... and on a SUCCEEDED attempt the existing amount signal still fires next to the destination signal.
+func TestB13B_LFH1_SucceededThenMismatchedSuccessWithBadEcho_KeepsTheAmountSignal(t *testing.T) {
+	w := newB13bW(t, "lfh1b")
+	wr, cl, gr := w.submittedWithResult(WithdrawResult{Outcome: OutcomePending, ProviderReference: "ref-lfh1b"}, "lfh1b")
+	if err := w.apply(wr, cl, gr); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.callback(w.attempt(cl.Attempt.ID), OutcomeSucceeded, "ref-lfh1b", w.goodEcho(cl.Attempt.ID)); err != nil {
+		t.Fatal(err)
+	}
+	a := w.attempt(cl.Attempt.ID)
+	pending, err := alerting.InTx(w.ctx(), alerting.NewTenantRunner(w.pool, w.f.tenantID), func(ctx context.Context, tx pgx.Tx) error {
+		_, err := ApplyReceiptEvidence(ctx, tx, w.orch, w.f.tenantID, w.pid, ReceiptEvidence{
+			EventType: "payout", ProviderReference: "ref-lfh1b", MerchantReference: a.MerchantReference,
+			Outcome: OutcomeSucceeded, Amount: 499, AssetCode: "EUR", DestinationEcho: w.badEcho(cl.Attempt.ID)})
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending.Flush(w.ctx())
+	if _, ok := w.alertFor(a.ID, alertReasonPayoutMismatchedSuccessOnSucceeded); !ok {
+		t.Fatal("the mismatched-success signal was suppressed by the destination signal")
+	}
+	if _, ok := w.alertFor(a.ID, alertReasonPayoutDestinationMismatchOnTerminal); !ok {
+		t.Fatal("the destination signal is missing")
+	}
+}
+
+// LF L-2: the terminal signal's audit row is written once per receipt: three redeliveries, one audit row, one alert.
+func TestB13B_LFL2_TerminalSignalAuditOncePerReceipt(t *testing.T) {
+	w := newB13bW(t, "lfl2")
+	wr, cl, gr := w.submittedWithResult(WithdrawResult{Outcome: OutcomePending, ProviderReference: "ref-lfl2"}, "lfl2")
+	if err := w.apply(wr, cl, gr); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.callback(w.attempt(cl.Attempt.ID), OutcomeSucceeded, "ref-lfl2", w.goodEcho(cl.Attempt.ID)); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3; i++ {
+		if err := w.callback(w.attempt(cl.Attempt.ID), OutcomeSucceeded, "ref-lfl2", w.badEcho(cl.Attempt.ID)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n := w.count(`SELECT count(*) FROM audit_log WHERE action='payments.payout_destination_mismatch_terminal' AND target_id=$1`, cl.Attempt.ID.String()); n != 1 {
+		t.Fatalf("audit rows after 3 redeliveries = %d, want 1", n)
+	}
+	rows := 0
+	for _, r := range alertinject.ForSubject(t, w.pool, w.f.tenantID) {
+		if strings.HasSuffix(r.Discriminator, ":reason:"+alertReasonPayoutDestinationMismatchOnTerminal) {
+			rows++
+		}
+	}
+	if rows != 1 {
+		t.Fatalf("open alerts = %d, want 1 (occurrences grow)", rows)
+	}
+}
+
+// LF H-2: a sync park by the destination binding keeps the provider's (validated) reference on the attempt and the
+// withdrawal, so reconciliation and RESOLVE-1 can key on it. An invalid reference is not bound (the park stays reference-less).
+func TestB13B_LFH2_SyncParkBindsTheReference(t *testing.T) {
+	for _, kind := range []string{"mismatch", "integrity"} {
+		t.Run(kind, func(t *testing.T) {
+			w := newB13bW(t, "lfh2")
+			wr := w.approved(500, "lfh2")
+			cl := w.mustClaim(wr)
+			res := WithdrawResult{Outcome: OutcomeSucceeded, ProviderReference: "ref-lfh2"}
+			reason := TerminalReasonDestinationMismatch
+			if kind == "mismatch" {
+				res.DestinationEcho = w.badEcho(cl.Attempt.ID)
+			} else {
+				reason = TerminalReasonDestinationIntegrityFailure
+			}
+			w.prov.set(res, StatusResult{})
+			gr := w.dispatch(cl)
+			if kind == "integrity" {
+				w.tamper("payout_attempt_destination_snapshots", `DELETE FROM payout_attempt_destination_snapshots WHERE attempt_id = $1`, cl.Attempt.ID)
+			}
+			if err := w.apply(wr, cl, gr); err != nil {
+				t.Fatal(err)
+			}
+			a := w.attempt(cl.Attempt.ID)
+			w.wantParked(wr, a, reason)
+			if a.ProviderReference == nil || *a.ProviderReference != "ref-lfh2" {
+				t.Fatalf("attempt.provider_reference = %v, want ref-lfh2", a.ProviderReference)
+			}
+			if got := w.wr(wr.ID); got.ProviderReference == nil || *got.ProviderReference != "ref-lfh2" {
+				t.Fatalf("withdrawal.provider_reference = %v, want ref-lfh2", got.ProviderReference)
+			}
+		})
+	}
+}
+
+// LF M-1 probe P3: the callback naming the provider reference arrives BEFORE phase C binds it (the echo-carrying receipt is
+// closed, not deferred), so phase C + a later drain can never settle it.
+func TestB13B_LFM1_ProbeP3_CallbackBeforePhaseC(t *testing.T) {
+	w := newB13bW(t, "lfm1")
+	wr := w.approved(500, "lfm1")
+	cl := w.mustClaim(wr)
+	w.prov.set(WithdrawResult{Outcome: OutcomePending, ProviderReference: "ref-lfm1"}, StatusResult{})
+	gr := w.dispatch(cl)
+	pending, err := alerting.InTx(w.ctx(), alerting.NewTenantRunner(w.pool, w.f.tenantID), func(ctx context.Context, tx pgx.Tx) error {
+		d, err := ApplyReceiptEvidence(ctx, tx, w.orch, w.f.tenantID, w.pid, ReceiptEvidence{
+			EventType: "payout", ProviderReference: "ref-lfm1", Outcome: OutcomeSucceeded, Amount: 500, AssetCode: "EUR", DestinationEcho: w.badEcho(cl.Attempt.ID)})
+		if d != DispositionAnomaly {
+			t.Errorf("disposition = %s, want anomaly", d)
+		}
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending.Flush(w.ctx())
+	if err := w.apply(wr, cl, gr); err != nil {
+		t.Fatal(err)
+	}
+	pending2, err := alerting.InTx(w.ctx(), alerting.NewTenantRunner(w.pool, w.f.tenantID), func(ctx context.Context, tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `SELECT id FROM withdrawal_requests WHERE id=$1 FOR UPDATE`, wr.ID); err != nil {
+			return err
+		}
+		cur, err := GetAttemptByID(ctx, tx, cl.Attempt.ID)
+		if err != nil {
+			return err
+		}
+		_, err = ApplyDeferredReceiptsForAttempt(ctx, tx, w.orch, cur)
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending2.Flush(w.ctx())
+	if got := w.wr(wr.ID); got.State == withdrawal.StateCompleted {
+		t.Fatal("FINDING: the dropped-echo receipt settled the payout")
+	}
+	w.balanced()
+}
+
+// LF M-2: a destination park is visible to statement reconciliation through the PAYOUT-scoped classification: bound-if-
+// referenced (the park binds the reference first), reported in-run and as a standing finding, and never cleared by the
+// park itself. (The deposit table and the MA020 SQL list are untouched.)
+func TestB13B_LFM2_DestinationParkIsReconciled(t *testing.T) {
+	w := newK3World(t, k3Opts{base: 1})
+	wr, pend := w.payout(300)
+	x := *pend.ProviderReference
+	var snap payoutinstrument.Snapshot
+	if err := w.pool.WithTenant(context.Background(), w.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		var err error
+		snap, err = pitest.Shared().LoadSnapshot(ctx, tx, w.f.tenantID, pend.ID)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := alerting.InTx(context.Background(), alerting.NewTenantRunner(w.pool, w.f.tenantID), func(ctx context.Context, tx pgx.Tx) error {
+		_, e := ApplyReceiptEvidence(ctx, tx, w.orch, w.f.tenantID, w.provider, ReceiptEvidence{
+			EventType: "payout", ProviderReference: x, MerchantReference: pend.MerchantReference,
+			Outcome: OutcomeSucceeded, Amount: wr.Amount, AssetCode: "EUR",
+			DestinationEcho: &payoutinstrument.DestinationEcho{Fingerprint: strings.Repeat("ee", 32), Kid: snap.FingerprintKID}})
+		return e
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending.Flush(context.Background())
+	a := w.attempt(pend.ID)
+	if a.State != AttemptDisputed || a.TerminalReason == nil || *a.TerminalReason != TerminalReasonDestinationMismatch || a.ProviderReference == nil {
+		t.Fatalf("setup: %s %v", a.State, a.TerminalReason)
+	}
+	if got := w.b11CU(w.b11Recon(w.source(false, w.payoutLine(x, pend.MerchantReference, "succeeded", wr.Amount))), pend.ID); len(got) != 1 {
+		t.Fatalf("in-run: want one finding, got %d", len(got))
+	}
+	if got := w.b11CU(w.b11Recon(w.pastSource(false)), pend.ID); len(got) != 1 {
+		t.Fatalf("standing: want one finding, got %d", len(got))
+	}
+}

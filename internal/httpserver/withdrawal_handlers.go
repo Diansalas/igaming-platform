@@ -191,6 +191,18 @@ func newRequestWithdrawalHandler(deps Deps) http.HandlerFunc {
 				if gr.Integrity() {
 					// Security L-2: a seal / integrity refusal is a tamper signal. The request transaction rolled
 					// back, so the P1 is raised detached (existing Kind, closed reason, ids only).
+					// LF L-4 (ADR 0111 1.4): the refusal also needs a durable audit row; the request transaction rolled back, so it is
+					// written in its own transaction (ids and the closed reason only).
+					if aerr := deps.DB.WithTenant(context.WithoutCancel(r.Context()), tc.TenantID, func(ctx context.Context, tx pgx.Tx) error {
+						return audit.Record(ctx, tx, audit.Entry{
+							TenantID: tc.TenantID, ActorType: audit.ActorPlayer, ActorID: playerAccountID,
+							Action: "withdrawal.request.destination_integrity_refused", TargetType: "payout_instrument", TargetID: instrumentID.String(),
+							Outcome: audit.OutcomeDenied, RequestID: requestID,
+							Metadata: map[string]any{"gate_reason": gr.Reason},
+						})
+					}); aerr != nil {
+						logger.Error("request_withdrawal_integrity_audit_failed", "error", aerr)
+					}
 					_ = alerting.RaiseDetached(r.Context(), alerting.NewTenantRunner(deps.DB, tc.TenantID),
 						payments.DestinationIntegrityAlert(tc.TenantID, "payout_instrument:"+instrumentID.String(), gr.Reason))
 				}
