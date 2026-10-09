@@ -137,21 +137,9 @@ func TestR1_M4Predicates_Pure(t *testing.T) {
 		{"not paid: only declined lines", mk(m4KindNotPaid, line("Z", "M", "declined", now)), false},
 	}
 	for _, c := range cases {
-		// The not-paid recovery probe needs a database; raise-only cases are
-		// asserted for paid here and for not-paid up to the probe (nil tx would
-		// panic), so not-paid raising is covered by the integration tests.
-		if c.m.k3.m4[0].kind == m4KindNotPaid {
-			var found bool
-			for _, l := range c.m.k3.payoutLinesOn([]string{"B", "", ""}, "M") {
-				if l.status == paymentStatementStatusSucceeded {
-					found = true
-				}
-			}
-			if found != c.raise {
-				t.Errorf("%s: evidence found=%v, want %v", c.name, found, c.raise)
-			}
-			continue
-		}
+		// Since r21 (RR-1) the not-paid recovery is read by loadK3Evidence, so
+		// checkM4Standing needs no database for either kind (no recovery here:
+		// a not-paid with a succeeded line raises).
 		if err := c.m.checkM4Standing(context.Background(), nil); err != nil {
 			t.Fatalf("%s: %v", c.name, err)
 		}

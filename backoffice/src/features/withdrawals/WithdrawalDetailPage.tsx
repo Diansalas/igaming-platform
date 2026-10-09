@@ -20,6 +20,7 @@ import { TextInput } from '../../components/FormField'
 import { LoadingSpinner } from '../../components/LoadingSpinner'
 import { Modal } from '../../components/Modal'
 import { PageHeader } from '../../components/PageHeader'
+import { ApiError } from '../../api/types'
 import { describeError, formatError } from '../../lib/apiErrorMessage'
 import { formatMoney } from '../../lib/money'
 import { useOnceGuard } from '../../lib/useOnceGuard'
@@ -28,6 +29,21 @@ import { withdrawalStatusTone } from './status'
 type DialogState = 'approve' | 'reject' | 'submit' | 'resolve' | null
 
 export const SECOND_APPROVER_MESSAGE = 'Approval recorded — a second, different approver is still required.'
+
+export const PAYMENT_METHOD_MISMATCH_MESSAGE =
+  "The payment method does not match the rail of this withdrawal's payout instrument. Nothing was sent and the withdrawal is unchanged. The details shown have been reloaded; check the instrument rail and try again."
+export const PAYOUT_DESTINATION_NOT_USABLE_MESSAGE =
+  "The player's payout destination cannot be used right now. Nothing was sent and the withdrawal stays approved. It can be submitted again once the destination is usable; if it is not, escalate to compliance."
+
+/** Friendly text for the two submit refusals introduced by the payout-instrument binding; other errors are shown verbatim. */
+function submitErrorMessage(err: unknown): string | null {
+  if (err instanceof ApiError) {
+    const suffix = err.requestId ? ` (Request ID: ${err.requestId})` : ''
+    if (err.code === 'PAYMENT_METHOD_MISMATCH') return PAYMENT_METHOD_MISMATCH_MESSAGE + suffix
+    if (err.code === 'PAYOUT_DESTINATION_NOT_USABLE') return PAYOUT_DESTINATION_NOT_USABLE_MESSAGE + suffix
+  }
+  return null
+}
 
 function providerOutcomeMessage(verb: string, result: SubmittedWithdrawal): string {
   const provider = result.provider_id ? ` to provider ${result.provider_id}` : ''
@@ -58,7 +74,7 @@ export function WithdrawalDetailPage() {
   const [dialog, setDialog] = useState<DialogState>(null)
   const [actionError, setActionError] = useState<string | null>(null)
   const [successMessage, setSuccessMessage] = useState<string | null>(null)
-  const [paymentMethod, setPaymentMethod] = useState('card')
+  const [paymentMethod, setPaymentMethod] = useState('')
   // This page moves real money via a distinct-approver/four-eyes-enforced
   // endpoint - a stray double-submit (see useOnceGuard's doc comment) is a
   // genuinely serious operational risk here, not just a UX nuisance, so
@@ -117,7 +133,11 @@ export function WithdrawalDetailPage() {
       setSuccessMessage(providerOutcomeMessage('submitted', result))
       await invalidate()
     },
-    onError: (err) => setActionError(formatError(describeError(err, 'Failed to submit this withdrawal.'))),
+    onError: (err) => {
+      setActionError(submitErrorMessage(err) ?? formatError(describeError(err, 'Failed to submit this withdrawal.')))
+      // A mismatch means the page's view of the bound instrument is stale: reload it.
+      if (err instanceof ApiError && err.code === 'PAYMENT_METHOD_MISMATCH') void invalidate()
+    },
     onSettled: () => submitGuard.release(),
   })
 
@@ -145,6 +165,9 @@ export function WithdrawalDetailPage() {
   const canDecide = withdrawal.state === 'pending_review'
   const canSubmit = withdrawal.state === 'approved'
   const canResolve = withdrawal.state === 'submitted'
+  const boundInstrument = withdrawal.payout_instrument ?? null
+  // Bound: the rail is the instrument's and is not editable. Legacy (no binding): the staff input, no default.
+  const effectiveMethod = boundInstrument ? boundInstrument.rail : paymentMethod.trim()
   const amountLabel = formatMoney(withdrawal.amount, withdrawal.asset_code, withdrawal.decimal_exponent)
 
   function open(next: DialogState) {
@@ -218,6 +241,19 @@ export function WithdrawalDetailPage() {
             <dt className="text-slate-500">Requested at</dt>
             <dd className="mt-1 text-slate-700">{withdrawal.requested_at}</dd>
           </div>
+          <div data-testid="bound-instrument">
+            <dt className="text-slate-500">Payout instrument</dt>
+            <dd className="mt-1 text-slate-700">
+              {boundInstrument ? (
+                <>
+                  <span className="font-mono">{boundInstrument.display_mask}</span>{' '}
+                  <Badge tone="neutral">{boundInstrument.rail}</Badge>
+                </>
+              ) : (
+                <span className="text-slate-500">None bound (legacy withdrawal)</span>
+              )}
+            </dd>
+          </div>
           {withdrawal.hold_ledger_transaction_id && (
             <div>
               <dt className="text-slate-500">Hold ledger transaction</dt>
@@ -263,7 +299,7 @@ export function WithdrawalDetailPage() {
             noValidate
             onSubmit={(e) => {
               e.preventDefault()
-              const method = paymentMethod.trim()
+              const method = effectiveMethod
               if (!method) return
               submitGuard.run(() => submitMutation.mutate(method))
             }}
@@ -272,13 +308,28 @@ export function WithdrawalDetailPage() {
               Send the approved payout of {amountLabel} to a payment provider. The provider is routed by the tenant&apos;s payment
               capability configuration for this asset and payment method.
             </p>
-            <TextInput label="Payment method" value={paymentMethod} onChange={(e) => setPaymentMethod(e.target.value)} required />
+            {boundInstrument ? (
+              <TextInput
+                label="Payment method"
+                value={boundInstrument.rail}
+                readOnly
+                help={`Taken from the bound payout instrument ${boundInstrument.display_mask}; it cannot be changed here.`}
+              />
+            ) : (
+              <TextInput
+                label="Payment method"
+                value={paymentMethod}
+                onChange={(e) => setPaymentMethod(e.target.value)}
+                help="This withdrawal has no bound payout instrument (legacy); enter the payment method."
+                required
+              />
+            )}
             {actionError && <p className="text-sm text-red-600">{actionError}</p>}
             <div className="flex justify-end gap-2">
               <Button type="button" variant="secondary" onClick={closeDialog} disabled={submitMutation.isPending}>
                 Cancel
               </Button>
-              <Button type="submit" disabled={!paymentMethod.trim()} isLoading={submitMutation.isPending}>
+              <Button type="submit" disabled={!effectiveMethod} isLoading={submitMutation.isPending}>
                 Submit withdrawal
               </Button>
             </div>

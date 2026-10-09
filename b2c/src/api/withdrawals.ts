@@ -29,10 +29,17 @@ export function requestWithdrawal(params: {
   assetCode: string
   amount: number
   idempotencyKey: string
+  /** Required by the backend (B13-B): the player's chosen payout instrument id. Re-validated server-side. */
+  payoutInstrumentId: string
 }): Promise<WithdrawalRequest> {
   return apiFetch<WithdrawalRequest>('/v1/me/withdrawals', {
     method: 'POST',
-    body: JSON.stringify({ asset_code: params.assetCode, amount: params.amount, idempotency_key: params.idempotencyKey }),
+    body: JSON.stringify({
+      asset_code: params.assetCode,
+      amount: params.amount,
+      idempotency_key: params.idempotencyKey,
+      payout_instrument_id: params.payoutInstrumentId,
+    }),
   })
 }
 

@@ -30,6 +30,10 @@ export type ApiErrorCode =
   | 'tenant_mismatch'
   | 'rate_limited'
   | 'network_error'
+  // B13 payout instrument codes (409 unless noted); these are upper-case on the wire.
+  | 'PAYOUT_INSTRUMENT_REQUIRED'
+  | 'PAYOUT_INSTRUMENT_NOT_USABLE'
+  | 'TENANT_OR_BRAND_NOT_ACTIVE'
 
 export class ApiError extends Error {
   readonly code: ApiErrorCode

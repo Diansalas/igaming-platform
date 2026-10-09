@@ -7,7 +7,7 @@ import { setSession } from '../../auth/tokenStore'
 import { server } from '../../test/mswServer'
 import { makeTestJwt } from '../../test/jwt'
 import { renderWithProviders } from '../../test/renderWithProviders'
-import { WithdrawalDetailPage } from './WithdrawalDetailPage'
+import { PAYMENT_METHOD_MISMATCH_MESSAGE, WithdrawalDetailPage } from './WithdrawalDetailPage'
 
 describe('WithdrawalDetailPage approve flow', () => {
   beforeEach(() => {
@@ -112,7 +112,9 @@ describe('WithdrawalDetailPage approve flow', () => {
   })
 })
 
-function mockWithdrawalState(state: string) {
+const BOUND = { id: 'pi-1', rail: 'bank_transfer', display_mask: '**** 4242' }
+
+function mockWithdrawalState(state: string, payoutInstrument?: typeof BOUND | null) {
   server.use(
     http.get('/v1/admin/withdrawals/:id', ({ params }) =>
       HttpResponse.json({
@@ -123,6 +125,7 @@ function mockWithdrawalState(state: string) {
         requested_at: '2026-01-01T00:00:00Z',
         player_account_id: 'player-1',
         decimal_exponent: 2,
+        ...(payoutInstrument === undefined ? {} : { payout_instrument: payoutInstrument }),
       }),
     ),
   )
@@ -215,8 +218,8 @@ describe('WithdrawalDetailPage state-gated actions', () => {
     expect(body).toEqual({ reason_code: 'suspected_fraud' })
   })
 
-  it('for an approved withdrawal offers only Submit, which POSTs {payment_method} (default "card") and shows the provider result', async () => {
-    mockWithdrawalState('approved')
+  it('for an approved BOUND withdrawal shows the instrument mask and rail, preselects the rail read-only and POSTs it', async () => {
+    mockWithdrawalState('approved', BOUND)
     const calls: { path: string; body: unknown }[] = []
     server.use(
       http.post('/v1/admin/withdrawals/:id/submit', async ({ request }) => {
@@ -235,18 +238,98 @@ describe('WithdrawalDetailPage state-gated actions', () => {
     renderDetail()
     const user = userEvent.setup()
     await screen.findByText('Withdrawal wd-1')
+    const card = screen.getByTestId('bound-instrument')
+    expect(card).toHaveTextContent('**** 4242')
+    expect(card).toHaveTextContent('bank_transfer')
     expect(screen.queryByRole('button', { name: 'Approve' })).not.toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'Submit to provider' }))
-    expect(await screen.findByLabelText('Payment method')).toHaveValue('card')
+    const input = await screen.findByLabelText('Payment method')
+    expect(input).toHaveValue('bank_transfer')
+    expect(input).toHaveAttribute('readonly')
     await user.click(screen.getByRole('button', { name: 'Submit withdrawal' }))
     expect(
       await screen.findByText('Withdrawal submitted to provider mock-payments (reference ref-123). Current state: completed.'),
     ).toBeInTheDocument()
-    expect(calls).toEqual([{ path: '/v1/admin/withdrawals/wd-1/submit', body: { payment_method: 'card' } }])
+    expect(calls).toEqual([{ path: '/v1/admin/withdrawals/wd-1/submit', body: { payment_method: 'bank_transfer' } }])
+  })
+
+  it('for a legacy withdrawal (null binding) has NO "card" default: the method is required and typed by staff', async () => {
+    mockWithdrawalState('approved', null)
+    const calls: unknown[] = []
+    server.use(
+      http.post('/v1/admin/withdrawals/:id/submit', async ({ request }) => {
+        calls.push(await request.json())
+        return HttpResponse.json({ id: 'wd-1', asset_code: 'EUR', amount: 10000, state: 'submitted', requested_at: 't' })
+      }),
+    )
+    renderDetail()
+    const user = userEvent.setup()
+    await screen.findByText('Withdrawal wd-1')
+    expect(screen.getByTestId('bound-instrument')).toHaveTextContent('None bound (legacy withdrawal)')
+    await user.click(screen.getByRole('button', { name: 'Submit to provider' }))
+    const input = await screen.findByLabelText('Payment method')
+    expect(input).toHaveValue('')
+    expect(input).not.toHaveAttribute('readonly')
+    expect(screen.getByRole('button', { name: 'Submit withdrawal' })).toBeDisabled()
+    await user.type(input, 'bank_transfer')
+    await user.click(screen.getByRole('button', { name: 'Submit withdrawal' }))
+    await waitFor(() => expect(calls).toEqual([{ payment_method: 'bank_transfer' }]))
+  })
+
+  it('shows a friendly message for 400 PAYMENT_METHOD_MISMATCH, keeps the dialog open and reloads the withdrawal', async () => {
+    mockWithdrawalState('approved', BOUND)
+    let detailGets = 0
+    server.use(
+      http.get('/v1/admin/withdrawals/:id', ({ params }) => {
+        detailGets++
+        return HttpResponse.json({
+          id: params.id,
+          asset_code: 'EUR',
+          amount: 10000,
+          state: 'approved',
+          requested_at: 't',
+          player_account_id: 'player-1',
+          decimal_exponent: 2,
+          payout_instrument: BOUND,
+        })
+      }),
+      http.post('/v1/admin/withdrawals/:id/submit', () =>
+        HttpResponse.json({ code: 'PAYMENT_METHOD_MISMATCH', message: 'payment_method differs', request_id: 'req-9' }, { status: 400 }),
+      ),
+    )
+    renderDetail()
+    const user = userEvent.setup()
+    await screen.findByText('Withdrawal wd-1')
+    await user.click(screen.getByRole('button', { name: 'Submit to provider' }))
+    await user.click(await screen.findByRole('button', { name: 'Submit withdrawal' }))
+    expect(await screen.findByText(new RegExp(`^${PAYMENT_METHOD_MISMATCH_MESSAGE.slice(0, 40)}.*Request ID: req-9`))).toBeInTheDocument()
+    expect(screen.getByRole('dialog', { name: 'Submit withdrawal' })).toBeInTheDocument()
+    await waitFor(() => expect(detailGets).toBeGreaterThan(1))
+  })
+
+  it('shows a friendly message for 409 PAYOUT_DESTINATION_NOT_USABLE and states the withdrawal stays approved', async () => {
+    mockWithdrawalState('approved', BOUND)
+    server.use(
+      http.post('/v1/admin/withdrawals/:id/submit', () =>
+        HttpResponse.json({ code: 'PAYOUT_DESTINATION_NOT_USABLE', message: 'destination not usable', request_id: 'req-10' }, { status: 409 }),
+      ),
+    )
+    renderDetail()
+    const user = userEvent.setup()
+    await screen.findByText('Withdrawal wd-1')
+    await user.click(screen.getByRole('button', { name: 'Submit to provider' }))
+    await user.click(await screen.findByRole('button', { name: 'Submit withdrawal' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Submit withdrawal' })
+    expect(dialog).toHaveTextContent('stays approved')
+    expect(dialog).toHaveTextContent('Request ID: req-10')
+    expect(dialog).not.toHaveTextContent('destination not usable')
+    // The state badge still reads approved and no success banner is shown.
+    expect(screen.queryByRole('status')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Submit to provider' })).toBeInTheDocument()
   })
 
   it('surfaces a 503 no-provider error on submit and keeps the dialog open', async () => {
-    mockWithdrawalState('approved')
+    mockWithdrawalState('approved', BOUND)
     server.use(
       http.post('/v1/admin/withdrawals/:id/submit', () =>
         HttpResponse.json(
@@ -265,7 +348,7 @@ describe('WithdrawalDetailPage state-gated actions', () => {
   })
 
   it('submit fires exactly once on a double click', async () => {
-    mockWithdrawalState('approved')
+    mockWithdrawalState('approved', BOUND)
     const spy = vi.fn()
     server.use(
       http.post('/v1/admin/withdrawals/:id/submit', async () => {

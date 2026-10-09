@@ -112,6 +112,14 @@ func k3PersistedLinesCap(keys int) int { return k3PersistedLinesPerKey * keys }
 // truncated and no verdict is drawn from a partial read.
 var ErrPaymentEvidenceOverflow = errors.New("reconciliation: persisted payment evidence exceeds the per-run cap (I-2)")
 
+// ErrPaymentEvidenceInvisible (security LOW condition 2, ADR 0111 §19): an
+// executed M4 resolution's evidence line, attempt or withdrawal is set but the
+// run cannot see it (RLS, a session-shape or provider inconsistency). The run
+// fails closed exactly like ErrPaymentEvidenceOverflow - no run row, no
+// mismatch row, the existing P1 reconciliation.sweep_run_failed - instead of
+// silently reading "no D" and dropping a lookup key.
+var ErrPaymentEvidenceInvisible = errors.New("reconciliation: an executed M4 resolution's evidence is not visible to the run (fail closed)")
+
 var reconciliationMeter = otel.Meter("github.com/Diansalas/igaming-platform/internal/reconciliation")
 
 // paymentM2DeclaredPaidConfirmedTotal counts confirmations of an M2 "declare
@@ -167,10 +175,29 @@ type m4Resolution struct {
 	attemptRef     string // the attempt's current provider_reference; "" when NULL
 	attemptMerchnt string
 	// evidenceRef is the PSP reference of the resolution's evidence line (the
-	// paid line's R, or the declined line's own reference D for not-paid);
-	// "" when the line is not visible. Review amendment H-1/sec: R-1 must see
-	// a later succeeded line on D even when it carries no merchant reference.
+	// paid line's R, or the declined line's own reference D for not-paid).
+	// Review amendment H-1/sec: R-1 must see a later succeeded line on D even
+	// when it carries no merchant reference. Security LOW condition 2 (r21):
+	// the evidence line is NOT NULL on every M4 row (0125 CHECK + composite FK),
+	// so a line the run cannot see fails the run (ErrPaymentEvidenceInvisible);
+	// evidenceRef is never silently "".
 	evidenceRef string
+	// asset is the resolution's asset (DB-forced from the attempt, R-4).
+	asset string
+	// walletID is the wallet of the resolution's withdrawal request: the only
+	// wallet whose compensating debits count as recovery (RR-1 (a)).
+	walletID uuid.UUID
+	// recovered (not-paid only): executed compensating_entry debit_player
+	// requests with causation = ledgerTx, on walletID and asset - the M2 (d)
+	// recovery rule (ADR 0111 §19 RR-1 (a)). Read once in loadK3Evidence.
+	recovered *big.Int
+	// matchedRefs (not-paid only; security LOW condition 1 / LF RR-4): the PSP
+	// reference of EVERY payout line (any status, any import) matched by the
+	// merchant reference, the bound reference (pinned or current) or Y - the
+	// same matched-line set payout_m4_evidence's v_rs uses. Statement content:
+	// their lines are read within the run's fixed I-2 budget, never with a
+	// budget of their own. Exact equality only (no prefix or partial match).
+	matchedRefs []string
 }
 
 // k3Evidence is everything the K3 additions need beyond the run's own import.
@@ -185,8 +212,17 @@ type k3Evidence struct {
 	// lines: persisted lines by provider reference and by merchant reference.
 	byRef      map[string][]*persistedLine
 	byMerchant map[string][]*persistedLine
-	m2         []m2Resolution
-	m4         []m4Resolution
+	// byMatchedRef: payout lines read ONLY because their reference is a
+	// matchedRefs entry of an executed M4 not-paid (not itself a lookup key).
+	// Kept apart from byRef/byMerchant so that no other rule sees them; only
+	// the M4 not-paid predicates (raising, and the RR-1 rule, where an extra
+	// line can only keep the finding raised) read them via payoutLinesOn.
+	byMatchedRef map[string][]*persistedLine
+	m2           []m2Resolution
+	m4           []m4Resolution
+	// m4NotPaid: attempt id -> its executed m4_evidence_not_paid (at most one
+	// per attempt: 0125's partial UNIQUE index; a second one fails the run).
+	m4NotPaid map[uuid.UUID]*m4Resolution
 	// m2Paid: attempt ids of executed declare-paid resolutions (the
 	// confirmation metric in matchPayment).
 	m2Paid map[uuid.UUID]bool
@@ -207,8 +243,8 @@ func (m *payMatcher) loadK3Evidence(ctx context.Context, tx pgx.Tx, importIsMock
 	e := &k3Evidence{
 		importIsMock:     importIsMock,
 		reversalOriginal: map[string]bool{}, yRef: map[uuid.UUID]string{},
-		byRef: map[string][]*persistedLine{}, byMerchant: map[string][]*persistedLine{},
-		m2Paid: map[uuid.UUID]bool{}, capturedSeen: map[string]bool{},
+		byRef: map[string][]*persistedLine{}, byMerchant: map[string][]*persistedLine{}, byMatchedRef: map[string][]*persistedLine{},
+		m2Paid: map[uuid.UUID]bool{}, capturedSeen: map[string]bool{}, m4NotPaid: map[uuid.UUID]*m4Resolution{},
 	}
 	m.k3 = e
 
@@ -272,15 +308,25 @@ func (m *payMatcher) loadK3Evidence(ctx context.Context, tx pgx.Tx, importIsMock
 	}
 
 	// Executed M4 resolutions (ADR 0111 §4.6; the tenant_system_read_executed
-	// policy widened by migration 0125).
+	// policy widened by migration 0125). Security LOW condition 2 (ADR 0111
+	// §19): every join is a LEFT JOIN and every joined row is REQUIRED below.
+	// An evidence line, attempt or withdrawal the run cannot see used to read
+	// as "no D" (or drop the resolution entirely) and silently shrink the S-1
+	// key set; it now fails the run (ErrPaymentEvidenceInvisible). The
+	// resolution is selected by its own provider_id (DB-forced from the attempt
+	// by the 0125 insert guard) so an invisible attempt cannot hide it.
 	rows, err = tx.Query(ctx, `
-		SELECT r.id, r.attempt_id, r.kind, r.ledger_transaction_id, r.amount::text, COALESCE(r.evidence_reference, ''),
-		       COALESCE(r.provider_reference_at_submission, ''), COALESCE(a.provider_reference, ''), a.merchant_reference,
-		       COALESCE(d.provider_reference, '')
+		SELECT r.id, r.attempt_id, r.kind, r.ledger_transaction_id, r.amount::text, COALESCE(r.asset_code, ''),
+		       COALESCE(r.evidence_reference, ''), COALESCE(r.provider_reference_at_submission, ''),
+		       a.id IS NOT NULL, COALESCE(a.provider_id = r.provider_id, false),
+		       COALESCE(a.provider_reference, ''), COALESCE(a.merchant_reference, ''),
+		       d.id IS NOT NULL, COALESCE(d.provider_id = r.provider_id AND d.kind = 'payout', false), COALESCE(d.provider_reference, ''),
+		       w.wallet_id
 		  FROM payment_manual_resolutions r
-		  JOIN payment_attempts a ON a.id = r.attempt_id AND a.tenant_id = r.tenant_id
+		  LEFT JOIN payment_attempts a ON a.id = r.attempt_id AND a.tenant_id = r.tenant_id
 		  LEFT JOIN payment_statement_lines d ON d.id = r.evidence_line_id AND d.tenant_id = r.tenant_id
-		 WHERE r.tenant_id = $1 AND a.provider_id = $2 AND r.state = 'executed'
+		  LEFT JOIN withdrawal_requests w ON w.id = r.withdrawal_request_id AND w.tenant_id = r.tenant_id
+		 WHERE r.tenant_id = $1 AND r.provider_id = $2 AND r.state = 'executed'
 		   AND r.kind IN ('m4_evidence_paid', 'm4_evidence_not_paid') AND r.ledger_transaction_id IS NOT NULL
 		 ORDER BY r.id`, m.tenantID, m.provider)
 	if err != nil {
@@ -289,7 +335,10 @@ func (m *payMatcher) loadK3Evidence(ctx context.Context, tx pgx.Tx, importIsMock
 	for rows.Next() {
 		var r m4Resolution
 		var amount string
-		if err := rows.Scan(&r.id, &r.attemptID, &r.kind, &r.ledgerTx, &amount, &r.reference, &r.pinnedRef, &r.attemptRef, &r.attemptMerchnt, &r.evidenceRef); err != nil {
+		var attemptSeen, attemptProvider, lineSeen, lineShape bool
+		var wallet *uuid.UUID
+		if err := rows.Scan(&r.id, &r.attemptID, &r.kind, &r.ledgerTx, &amount, &r.asset, &r.reference, &r.pinnedRef,
+			&attemptSeen, &attemptProvider, &r.attemptRef, &r.attemptMerchnt, &lineSeen, &lineShape, &r.evidenceRef, &wallet); err != nil {
 			rows.Close()
 			return err
 		}
@@ -297,16 +346,62 @@ func (m *payMatcher) loadK3Evidence(ctx context.Context, tx pgx.Tx, importIsMock
 			rows.Close()
 			return err
 		}
-		e.m4 = append(e.m4, r)
-		if r.kind == m4KindNotPaid {
-			if a := m.payAttemptByID(r.attemptID); a != nil {
-				a.m4NotPaid = true
-			}
+		var missing string
+		switch {
+		case !attemptSeen || !attemptProvider || r.attemptMerchnt == "":
+			missing = "attempt"
+		case !lineSeen:
+			missing = "evidence line"
+		case !lineShape || r.evidenceRef == "":
+			missing = "evidence line of this provider and kind payout"
+		case wallet == nil:
+			missing = "withdrawal"
+		case r.asset == "":
+			missing = "asset"
 		}
+		if missing != "" {
+			rows.Close()
+			return fmt.Errorf("%w: resolution %s (%s) for attempt %s: %s not visible", ErrPaymentEvidenceInvisible, r.id, r.kind, r.attemptID, missing)
+		}
+		r.walletID = *wallet
+		e.m4 = append(e.m4, r)
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
 		return err
+	}
+	// Pointers are taken only after the slice is complete (append may move it).
+	for i := range e.m4 {
+		r := &e.m4[i]
+		a := m.payAttemptByID(r.attemptID)
+		if a == nil {
+			// loadPlatform read this tenant's and provider's attempts in the same
+			// snapshot: an attempt the join saw but the platform read did not is
+			// an inconsistency, never a silent skip.
+			return fmt.Errorf("%w: resolution %s: attempt %s not in the platform read", ErrPaymentEvidenceInvisible, r.id, r.attemptID)
+		}
+		if r.kind != m4KindNotPaid {
+			continue
+		}
+		if e.m4NotPaid[r.attemptID] != nil {
+			return fmt.Errorf("%w: attempt %s has more than one executed m4_evidence_not_paid", ErrPaymentEvidenceInvisible, r.attemptID)
+		}
+		e.m4NotPaid[r.attemptID] = r
+		a.m4NotPaid = true
+		// RR-1 (a): the M2 (d) recovery rule - executed compensating_entry
+		// debits whose causation is THIS resolution's withdrawal_failed
+		// transaction, on the withdrawal's wallet and the resolution's asset.
+		var recovered string
+		if err := tx.QueryRow(ctx, `
+			SELECT COALESCE(sum(q.amount), 0)::text FROM ledger_adjustment_requests q
+			 WHERE q.tenant_id = $1 AND q.state = 'executed' AND q.reason_code = 'compensating_entry'
+			   AND q.direction = 'debit_player' AND q.causation_transaction_id = $2
+			   AND q.wallet_id = $3 AND q.asset_code = $4`, m.tenantID, r.ledgerTx, r.walletID, r.asset).Scan(&recovered); err != nil {
+			return fmt.Errorf("M4 not-paid recovery probe: %w", err)
+		}
+		if r.recovered, err = parseBig(recovered); err != nil {
+			return err
+		}
 	}
 
 	// The references and merchant references the run needs evidence for.
@@ -373,8 +468,54 @@ func (m *payMatcher) loadK3Evidence(ctx context.Context, tx pgx.Tx, importIsMock
 	// the existing P1 reconciliation.sweep_run_failed (phase match) plus the run
 	// failure alert. It is never a silent truncation and never a partial verdict.
 	if len(refs) > 0 || len(merchants) > 0 {
-		lineCap := k3PersistedLinesCap(len(refs) + len(merchants))
-		rows, err = tx.Query(ctx, `
+		keys := len(refs) + len(merchants)
+		lineCap := k3PersistedLinesCap(keys)
+		seen := map[string]*persistedLine{}
+		read := 0
+		// readLines reads at most limit rows of q and fails the run on the row
+		// that takes the run's total past lineCap (ErrPaymentEvidenceOverflow).
+		// matched = true files the lines under byMatchedRef only.
+		readLines := func(q string, matched bool, args ...any) error {
+			rows, err := tx.Query(ctx, q, args...)
+			if err != nil {
+				return fmt.Errorf("persisted statement lines: %w", err)
+			}
+			defer rows.Close()
+			for rows.Next() {
+				read++
+				if read > lineCap {
+					return fmt.Errorf("%w: more than %d persisted statement lines (%d per lookup key, %d keys) for provider %q; the run is refused, never truncated",
+						ErrPaymentEvidenceOverflow, lineCap, k3PersistedLinesPerKey, keys, m.provider)
+				}
+				l := &persistedLine{}
+				var amount string
+				if err := rows.Scan(&l.importID, &l.lineNo, &l.isMock, &l.kind, &l.ref, &l.merchant, &l.original, &l.status, &amount, &l.asset, &l.occurredAt); err != nil {
+					return err
+				}
+				if l.amount, err = parseBig(amount); err != nil {
+					return err
+				}
+				l.eligible = e.clearEligible(l.isMock)
+				// Overlapping imports repeat the same statement line: dedupe on the
+				// content key; keep the first copy, and make it eligible if any copy is.
+				k := strings.Join([]string{l.kind, l.ref, l.merchant, l.status, l.amount.String(), l.asset, l.occurredAt.UTC().Format(time.RFC3339Nano)}, "\x00")
+				if prev, ok := seen[k]; ok {
+					prev.eligible = prev.eligible || l.eligible
+					continue
+				}
+				seen[k] = l
+				if matched {
+					e.byMatchedRef[l.ref] = append(e.byMatchedRef[l.ref], l)
+					continue
+				}
+				e.byRef[l.ref] = append(e.byRef[l.ref], l)
+				if l.merchant != "" {
+					e.byMerchant[l.merchant] = append(e.byMerchant[l.merchant], l)
+				}
+			}
+			return rows.Err()
+		}
+		if err := readLines(`
 			SELECT l.import_id, l.line_no, i.is_mock, l.kind, l.provider_reference, COALESCE(l.merchant_reference, ''),
 			       COALESCE(l.original_provider_reference, ''), l.status, l.amount::text, l.asset_code, l.occurred_at
 			  FROM payment_statement_lines l
@@ -382,47 +523,50 @@ func (m *payMatcher) loadK3Evidence(ctx context.Context, tx pgx.Tx, importIsMock
 			 WHERE l.tenant_id = $1 AND l.provider_id = $2 AND l.kind IN ('deposit', 'payout')
 			   AND (l.provider_reference = ANY($3) OR l.merchant_reference = ANY($4))
 			 ORDER BY l.provider_reference, l.kind, l.status, l.occurred_at, i.fetched_at, l.import_id, l.line_no
-			 LIMIT $5`,
-			m.tenantID, m.provider, keysOf(refs), keysOf(merchants), lineCap+1)
-		if err != nil {
-			return fmt.Errorf("persisted statement lines: %w", err)
+			 LIMIT $5`, false,
+			m.tenantID, m.provider, keysOf(refs), keysOf(merchants), lineCap+1); err != nil {
+			return err
 		}
-		seen := map[string]*persistedLine{}
-		read := 0
-		for rows.Next() {
-			read++
-			if read > lineCap {
-				rows.Close()
-				return fmt.Errorf("%w: more than %d persisted statement lines (%d per lookup key, %d keys) for provider %q; the run is refused, never truncated",
-					ErrPaymentEvidenceOverflow, lineCap, k3PersistedLinesPerKey, len(refs)+len(merchants), m.provider)
-			}
-			l := &persistedLine{}
-			var amount string
-			if err := rows.Scan(&l.importID, &l.lineNo, &l.isMock, &l.kind, &l.ref, &l.merchant, &l.original, &l.status, &amount, &l.asset, &l.occurredAt); err != nil {
-				rows.Close()
-				return err
-			}
-			if l.amount, err = parseBig(amount); err != nil {
-				rows.Close()
-				return err
-			}
-			l.eligible = e.clearEligible(l.isMock)
-			// Overlapping imports repeat the same statement line: dedupe on the
-			// content key; keep the first copy, and make it eligible if any copy is.
-			k := strings.Join([]string{l.kind, l.ref, l.merchant, l.status, l.amount.String(), l.asset, l.occurredAt.UTC().Format(time.RFC3339Nano)}, "\x00")
-			if prev, ok := seen[k]; ok {
-				prev.eligible = prev.eligible || l.eligible
+
+		// Security LOW condition 1 / LF RR-4 (ADR 0111 §19): R-1 for an executed
+		// M4 not-paid covers EVERY matched reference, exactly as the verdict's
+		// v_rs: the PSP reference of every payout line (any status) matched by
+		// the merchant reference, the bound reference or Y. Those references
+		// are statement content, so they are NOT lookup keys and get no budget:
+		// their lines are read within what is LEFT of the cap fixed above
+		// (lineCap - read, read+1 at most), and the run fails with
+		// ErrPaymentEvidenceOverflow past it. Lines already read (their
+		// merchant reference is a key) are excluded so they are not counted
+		// twice. Exact equality only.
+		matched := map[string]bool{}
+		for i := range e.m4 {
+			r := &e.m4[i]
+			if r.kind != m4KindNotPaid {
 				continue
 			}
-			seen[k] = l
-			e.byRef[l.ref] = append(e.byRef[l.ref], l)
-			if l.merchant != "" {
-				e.byMerchant[l.merchant] = append(e.byMerchant[l.merchant], l)
+			set := map[string]bool{}
+			for _, l := range e.payoutLinesOn([]string{r.pinnedRef, r.attemptRef, e.yRef[r.attemptID]}, r.attemptMerchnt) {
+				set[l.ref] = true
+				if !refs[l.ref] {
+					matched[l.ref] = true
+				}
 			}
+			r.matchedRefs = keysOf(set)
 		}
-		rows.Close()
-		if err := rows.Err(); err != nil {
-			return err
+		if len(matched) > 0 {
+			if err := readLines(`
+				SELECT l.import_id, l.line_no, i.is_mock, l.kind, l.provider_reference, COALESCE(l.merchant_reference, ''),
+				       COALESCE(l.original_provider_reference, ''), l.status, l.amount::text, l.asset_code, l.occurred_at
+				  FROM payment_statement_lines l
+				  JOIN payment_statement_imports i ON i.id = l.import_id AND i.tenant_id = l.tenant_id
+				 WHERE l.tenant_id = $1 AND l.provider_id = $2 AND l.kind = 'payout'
+				   AND l.provider_reference = ANY($3)
+				   AND NOT COALESCE(l.merchant_reference = ANY($4), false)
+				 ORDER BY l.provider_reference, l.kind, l.status, l.occurred_at, i.fetched_at, l.import_id, l.line_no
+				 LIMIT $5`, true,
+				m.tenantID, m.provider, keysOf(matched), keysOf(merchants), lineCap-read+1); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -571,7 +715,11 @@ func (m *payMatcher) markCaptured(a *payAttempt, ref string) bool {
 //     deposit-shaped signal (a deposit_reversal line, a tombstone, even naming
 //     the same reference) NEVER clears: in the reverse-collision case the PSP
 //     refund of a real deposit R says nothing about whether a payout under R
-//     left the platform. The only clearing is payoutCompletedRef.
+//     left the platform. The only clearing is payoutCompletedRef - and, for
+//     a LINE-keyed finding on an attempt whose withdrawal an executed
+//     m4_evidence_not_paid failed, the RR-1 recovery rule
+//     (m4NotPaidRecoveredLine, ADR 0111 §19): it only stops the raise for
+//     that line; it writes, posts, releases and deletes nothing.
 //
 // Any other operation never clears (fail closed). line is the evidencing
 // line (nil at the bound sites); deposits ignore it (unchanged).
@@ -580,7 +728,7 @@ func (m *payMatcher) clearedRefFor(a *payAttempt, ref string, line *evidencingLi
 	case paymentStatementKindDeposit:
 		return m.clearedRef(ref)
 	case paymentStatementKindPayout:
-		return m.payoutCompletedRef(a, ref, line)
+		return m.payoutCompletedRef(a, ref, line) || m.m4NotPaidRecoveredLine(a, ref, line)
 	}
 	return false
 }
