@@ -2104,3 +2104,152 @@ it the raise is the final `return`, after the audit row (`TestPayoutPostM4Cell_*
 - A finding recorded for the owner (no code change): the system-shaped sessions that run the cells can read only EXECUTED M2/M4 rows
   (policy `tenant_system_read_executed`, 0125); the cell's own `state = 'executed'` and tenant predicates are therefore redundant there and are
   pinned for a principal-shaped session by `TestPostM4_PendingM4_NoSignal_EvenInAPrincipalShapedSession`.
+
+
+## 23. Governed exit of a `destination_integrity_failure` park (owner decision 4, ADR 0095 §48) (appendix, `ledger-finance`, 2026-10-09; branch `gov-r32-integrity`, base `dad803d`; migration 0127)
+
+Section numbering: §21 and §22 are left to sibling branches of the same cycle; this section is self-contained. The design above is
+**not** rewritten. Owner decision 4 is authoritative and is **not** broadened: there is no automatic exit; the park stays held
+until a controlled four-eyes resolution; no unilateral staff override; no provider callback or poll changes the destination or
+releases the hold; no automatic release, settlement or beneficiary reassignment; no generic admin override. Owner decision 6 (the
+D-7 evidence standard) is the evidence bar. Every provider and statement source in the tests is `MOCK`; nothing here is a
+statement about a real PSP, a custodian or a licence.
+
+### 23.1 The three controlled outcomes and their status
+
+| Outcome (decision 4) | Mechanism | Status |
+|---|---|---|
+| **Remain parked** if the evidence is ambiguous (the default) | The park itself (B13-B): attempt `disputed` / `destination_integrity_failure`, withdrawal `submitted`, hold kept, B12 P1, reconciliation finding. No job, sweeper, poll, callback or reconciliation path changes it. | `IMPLEMENTED` (verified, 23.2) |
+| **Controlled cancellation/release** where existing financial policy permits | The existing M4 **not-paid** resolution (`m4_evidence_not_paid`, §4), admitted for this reason by migration 0127. Hold returned to the player's **own** `player_cash` only. | `IMPLEMENTED` against `MOCK` |
+| **Resume** when the authoritative destination is positively established | 23.3 (a new attempt against the platform-authoritative bound instrument; never a rebind, never a snapshot rewrite) | `NOT IMPLEMENTED` — **DESIGN ONLY** |
+| (not an outcome) M4 **paid** / M2 / any completion against the hold | Refused in the database (`MR012`) and in Go | `REFUSED` by design |
+
+### 23.2 What migration 0127 implements (the smallest safe change), and what was verified
+
+**Change.** One function, `payment_m4_in_scope` (0125), is replaced (`CREATE OR REPLACE`, same OID, signature, `IMMUTABLE`, pinned
+`search_path`): the not-paid-only arm admits `destination_integrity_failure` beside `destination_mismatch`, with or without a bound
+reference. The paid arm is unchanged (only the unbound reasons with no reference), so M4 paid on this reason stays `MR012`. Go:
+`M4ResolvableDispute` restates it (parity test over the reason x state x kind x reference matrix, admitted combinations 10 -> 12,
+flipped deliberately). The down refuses (`MR099`) while **any** M4 row (any kind, any state) has
+`terminal_reason_at_submission = 'destination_integrity_failure'`, and otherwise restores the 0125 body **byte for byte** (whole-schema
+up/down/up test: exactly the one function line differs; the restored `prosrc` is matched against the 0125 file text).
+
+**Verified unchanged and reason-agnostic (so nothing else needed to change):**
+
+| Object | Why it is already correct for this reason |
+|---|---|
+| `payout_m4_evidence` | Reads by the platform-issued merchant reference, by the attempt's bound reference when it holds one (an integrity park binds the provider's validated, unconflicted reference first, B13B-17 LF H-2), by every typed Y and by every matched reference D; never reads the snapshot. The D-7 bar is unchanged: sealed eligible import, coverage `[created_at, last_sent_at + 24 h]`, a declined line of equal amount/asset after the last send, no succeeded/pending/reversed line on any matched reference in any import, declaration integrity; `last_sent_at IS NULL` is `insufficient`. |
+| insert guard (`payment_manual_resolutions_guard`) | DB-forced amount/asset (R-4), pinned `provider_reference_at_submission` (C-6/R-3), `basis_code = provider_confirmed_out_of_band`, evidence recomputed and the deterministic line required. |
+| `-> executing` (same guard) | Scope re-check (now including the reason), reference pin, withdrawal `submitted`, amount/asset equality, evidence re-run (S-2); the recount `payment_manual_resolution_execution_status` with the `platform_acting` floor (S-6). |
+| MR041 (`..._no_executing_commit`) | Withdrawal `failed` and linked; `withdrawal_failed` keyed `wr.id:failed`, no provider id/tx id; exactly two legs: hold debit and `player_cash` credit, both on the withdrawal's **own** wallet, amount and asset equal; attempt fields equal the pins. |
+| Fence (g), `ledger_entries_governed_fence`, acting K3 arms, `tenant_system_read_executed` | Keyed on the kind `m4_evidence_not_paid`, never on the reason. |
+| Go (`manual_resolution*.go`) | `m4ExecutionRefusal` uses `M4ResolvableDispute`; `requestInTx` / `m4EvidenceRefusal` verify the import seals on every path (L-2 pin unchanged); `postM4` calls `withdrawal.Fail` only. The resolution audit carries no snapshot data, so a missing snapshot cannot break it. |
+| Reconciliation | `payoutDisputeReasonClasses` already classifies the reason bound-if-referenced (B13B-13). R-1 (`pay_declared_not_paid_but_paid`) and the RR-1 stop rule are keyed on the executed M4 not-paid row, not the reason: an integrity park is treated **exactly** like a `destination_mismatch` park. Shown correct by test (23.4): a later succeeded line on the bound reference raises R-1 with the post-M4 hint; after a full K2 recovery R-1 stops while the BOUND finding keeps raising (RR1-2, identical to the `destination_mismatch` pin). |
+| §4.8 post-M4 cells | Keyed on the executed M4 and the withdrawal state; `payoutDestinationEvidence` is a no-op on a `disputed` attempt (R22-3), so a later success on the bound reference raises `success_after_m4_not_paid` (raise-only, MOCK). |
+| Hint | `destinationIntegrityPayoutCapturedUnpostedResolutionHint` now reads "payout parked on a destination integrity failure: no completion against the player's hold and no M4 paid; M4 not-paid only on positive decline evidence; PSP recall/return or off-platform recovery; never allocation" (was "... no M4 route (open owner/architect question) ..."). It names no completion, rebind or resume. Pin `TestC3_DestinationHint_LiveAfterClassification_SelectedByReason` flipped deliberately. |
+| Alerting | No new raise site, Kind or reason; `go test ./internal/alerting` pins unchanged and passing. |
+
+**Readings taken (R32-n, safest each time).**
+- **R32-1 (why not-paid is safe on an untrustworthy attribution).** Brief 2's concern is that neither "paid" nor "not paid" can be
+  taken at face value while the destination is in doubt. That holds for **paid** (refused). For **not paid**, the snapshot plays no
+  part in either the verdict or the posting: the verdict rests on platform keys (merchant reference, the platform-held bound reference,
+  typed Y) over sealed statement imports, and the posting only moves the hold to the cash account of the withdrawal's own wallet. A
+  wrong not-paid can only produce a double payout to whichever destination the PSP used, which R-1 raises on every run and the §4.8
+  cell raises in real time (MOCK), recoverable only through K2 under the RR-1 rule. That is the same residual every M4 not-paid
+  already carries, so D-7's "correct destination/instrument where applicable" is **not applicable** to a positive non-payment finding.
+- **R32-2 ("where existing financial policy permits").** The existing policy that releases a `submitted` payout hold on positive
+  non-payment evidence is M4 not-paid. HSEC (needs `approved` and no attempt) and M2 (excludes the reason) do not apply; no new
+  release path was created.
+- **R32-3 (reference shapes).** Admitted with and without a bound reference, as for `destination_mismatch`: an integrity park made by
+  a poll or callback holds the reported reference; one made by sync phase C on a reference-less result holds none. Either way the
+  reference is pinned at submission and re-checked at execution.
+- **R32-4 (down refusal scope).** Any kind and state: a pending row would be stranded and an executed one would describe a release the
+  restored scope no longer admits.
+- **R32-5 (guard message text).** The `MR012` message in `payment_manual_resolutions_guard` still reads "destination_mismatch not-paid
+  only". Changing it means replacing the whole guard (0125, ~400 lines) for text; the SQLSTATE and the behaviour are correct. Cosmetic
+  residual, recorded.
+- **R32-6 (never-sent parks).** An integrity park with `last_sent_at IS NULL` cannot reach `not_paid` (the 0125 rule) and remains
+  parked. Integrity parks are only written by the evidence paths (sync phase C, poll, callback) on a sent attempt, so this is not
+  expected; if it occurs the park stays held (fail closed) until 23.3 exists.
+
+### 23.3 "Resume when the authoritative destination is positively established" — DESIGN ONLY (`NOT IMPLEMENTED`)
+
+**Constraint.** The snapshot is write-once (0123), keyed by attempt. A resume must therefore never rebind the withdrawal, never write
+or repair a snapshot in place, and never treat a provider echo, callback or poll as establishing the destination (decision 5).
+
+**Interim operational equivalent (available today, no code; a RECOMMENDATION, not a decision).** Execute M4 not-paid (the hold returns
+to the player's cash), then the player places a new withdrawal bound to the same instrument through the normal flow: request-time gate,
+KYC/RG, approval, T1p gate, a **fresh** write-once snapshot, phase B gate. Nothing from the corrupted snapshot is reused. Cost: the
+player must act again and the request is re-approved.
+
+**In-place resume (R-B), if the owner wants one.** A new K3 kind `m5_destination_resume` on `payment_manual_resolutions`:
+- **Eligibility (all, re-checked at execution).** (E1) The old attempt is `disputed` / `destination_integrity_failure` and its park
+  audit row's `gate_reason` is snapshot-confined: `snapshot_missing`, `snapshot_mismatch`, a snapshot `seal_invalid`, or
+  `destination_gate_unavailable`. A park whose present-time instrument checks fail (`seal_invalid` / `fingerprint_mismatch` /
+  `binding_mismatch` / `detail_unavailable` / verification faults on the **instrument**) is never resumable: the authoritative destination
+  itself is in doubt; only not-paid or remain parked. (E2) The **platform-authoritative destination** is positively established now:
+  the withdrawal's immutable binding (`payout_instrument_id`, `payout_instrument_fingerprint`) resolves to an instrument whose seal
+  verifies under the B13 key, whose fingerprint recomputes from the decrypted detail, whose latest verification is the one the gate
+  expects, of the same player and brand, usable for the asset, and `CheckTier` passes on the exact routed adapter, all under
+  `FOR SHARE` (the existing `EvaluateGate`). (E3) The old attempt is positively **not paid**: `payout_m4_evidence = not_paid` under the
+  D-7 standard, seals verified in Go, at request and at execution. (E4) An investigation finding (closed code) and an evidence hash
+  (forensics/portal confirmation) bound into the payload hash. No provider-supplied field contributes to E1-E4 except as the
+  statement evidence of E3.
+- **Who.** A new capability `payout_destination_resume:request|approve` (not `payment_force_resolve`: the D-9 lesson), requester and
+  final approver `platform_acting` only (R19-1 analogue), the DB `platform_acting` floor in the recount, LF-11 distinct Persons, S-12
+  (never the beneficiary), S-2(iii) (no policy author), K3 recount and expiry. ADR 0110 signed actor proofs with two new operations
+  (`payout_resume:request`, `payout_resume:approve`); the request digest binds tenant, withdrawal, old attempt, instrument id,
+  fingerprint, the not-paid evidence line and import ids, the finding code, the evidence hash and the reason code.
+- **Execution (final approval's own transaction; lock order L1 withdrawal -> old attempt -> resolution).** Re-run E1-E3 (DB first,
+  Go seal check second); then create a **new** `payment_attempts` row for the same `submitted` withdrawal (new id, new platform merchant
+  reference, `created_by_resolution_id` UNIQUE) and write its snapshot through the existing T1p snapshot writer **from the instrument**
+  (never from the old snapshot). **No ledger posting** (the hold already covers the amount). Dispatch then runs through phase B and its
+  gates; kill switch and H-SEC tenant state refuse as usual. The old attempt stays `disputed` / `destination_integrity_failure` forever
+  (A-15, history), its P1 stays, and every reconciliation predicate on it keeps running: a later success on the old attempt's
+  references raises as a possible double payout.
+- **Idempotency / concurrency.** One pending or executed resume per old attempt, mutually exclusive with M2/M4 through the existing
+  per-attempt partial UNIQUE; the new attempt is created at most once (UNIQUE `created_by_resolution_id`); a retried decide is refused
+  (not pending) and creates nothing; two final approvals serialise on L1 and the resolution `FOR UPDATE`; sweeper and poll on the old
+  attempt are no-ops (`disputed`).
+- **Why it is not built now.** It is not small and reuses only part of the machinery: it needs a new kind, capability and two proof
+  operations; an attempt-creation entry point for a `submitted` withdrawal (T1p today requires `approved`); guard and MR041 rules for a
+  posting-free execution; reconciliation of a withdrawal with two attempts (one disputed forever) in the ledger join, STANDING-1 and
+  BOUND-CLEAR-1; and a threat model for an attacker who corrupts a snapshot to force a re-dispatch.
+- **Review it needs before any implementation:** `architect` (new kind, attempt lifecycle on a submitted withdrawal, ADR amendment);
+  `security` (capability and proof operations, E1/E2 gate re-evaluation, the re-dispatch threat model, decision 5); `ledger-finance`
+  (posting-free execution, double-payout prevention on the old attempt, multi-attempt reconciliation); `qa` (test matrix);
+  `product-owner-proxy` (whether the interim equivalent above makes R-B unnecessary); then the **owner** (whether an in-place resume is
+  wanted at all, and its capability semantics).
+
+### 23.4 Tests and evidence
+
+`internal/payments/m4_integrity_integration_test.go` (`TestR32_*`; real PostgreSQL, private scratch databases, the runtime-shaped
+non-superuser non-BYPASSRLS role; every park made by the real B13-B writer through the real QueryStatus poll after an owner-level
+snapshot tamper, both "missing" and "tampered"): end-to-end not-paid (request, final approval, execution, the two ledger legs exactly
+once on the player's own wallet, `psp_clearing` untouched, attempt and snapshot untouched, audit trail, idempotent replay of decide and
+request); M4 paid and M2 refused (DB `MR012` and Go, both reference shapes, and the Go execution precondition); R19-1 (tenant staff
+cannot request, tenant approvals never meet the floor, a tenant session cannot move to `executing`, the requester cannot self-approve);
+four-eyes with a two-approval policy (one approver never executes); insufficient/ambiguous/contradictory evidence keeps the park (no
+evidence, pending, reversed, succeeded on the bound reference, unsealed success, unsealed decline, short coverage, other amount, no
+declaration, and evidence contradicted after the request); no automatic exit (sweeper, polls with and without echo on fresh and stale
+copies, callbacks with and without echo, twice) and then the governed exit still executes once; two racing final approvals (exactly one
+`withdrawal_failed`); cross-tenant (request, evaluation, another tenant's lines); `destination_mismatch` cells unchanged beside an
+integrity park; reconciliation hint, R-1 and RR-1 (23.2); migration up/down/up whole schema with byte-for-byte restore, and the down
+refusals (pending and executed integrity M4) and the allowed down with only a `destination_mismatch` M4. Pins flipped deliberately:
+`TestM4_ScopeParity_GoAndDB` (10 -> 12), `TestC3_DestinationHint_LiveAfterClassification_SelectedByReason` (integrity text). The two
+head-relative down helpers (`m4DownTo0125`, the HSEC `downTo0124`) now derive their step count from the migration files.
+Mutation evidence: `docs/plans/prh2-hardening-round/prh2-r32-integrity-mutation-kill.txt`. Counts and runs: see the task report.
+
+### 23.5 Open questions (nothing here is decided by this change)
+
+- **Q-R32-1 (owner/architect + ledger-finance).** Decision 1 makes RR-1 apply to a recovered `destination_mismatch` park. The same
+  bound-site rule would be financially correct for a recovered integrity park (the recovery accounting is identical), but decision 1
+  names only `destination_mismatch`. Until extended, the BOUND finding of a recovered integrity park keeps raising (safe, noisy), and an
+  implementation of decision 1 must not silently key on "any destination reason".
+- **Q-R32-2 (security + ledger-finance; refusal-direction tightening candidate, pre-existing, applies to `destination_mismatch` too).**
+  Not-paid (ii) attributes a declined line by the merchant reference **or** the bound reference alone; a declined line on the bound
+  reference that names **another** merchant reference is not refused (the paid branch has the H-2 rule; not-paid has none). Recommend
+  `insufficient` for not-paid when any line read on the bound reference names another merchant reference. Not changed here (it rewrites
+  `payout_m4_evidence` for all reasons).
+- **Q-R32-3 (owner).** Is the interim equivalent of 23.3 sufficient, or is an in-place resume (R-B) wanted?
+- Launch flags unchanged: D-7 provider-dependent parts, T10, S-3 per real source, F-1 for non-MOCK.
