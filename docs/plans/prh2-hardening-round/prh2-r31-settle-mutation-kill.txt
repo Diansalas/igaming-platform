@@ -4,7 +4,7 @@ Generated 2026-10-09 on branch gov-r31-settle (base dad803d). Method: each mutan
 r31_settle_priv (the payments tests create their own scratch databases, migrated to the latest migration, with the runtime role's grants applied before the migrations), then the file is restored with `git checkout` (git status shows only the new test files afterwards).
 Tests: internal/payments/r31_settle_instrument_state_integration_test.go (TestR31_A..F), internal/httpserver/withdrawal_r31_integration_test.go.
 
-CONTROL (unmutated tree): TestR31_A_ (30 subtests incl. 6 baselines) PASS, TestR31_B_ PASS (5 subtests), TestR31_C_ PASS (8 subtests), TestR31_D_ x2 PASS, TestR31_E_ PASS, TestR31_F_ PASS (13 subtests), HTTP TestRequestWithdrawalHandler_R31 PASS. 0 SKIP.
+CONTROL (unmutated tree): TestR31_A_ (30 subtests incl. 6 baselines) PASS, TestR31_B_ PASS (5 subtests), TestR31_C_ PASS (8 subtests), TestR31_D_ x2 PASS, TestR31_E_ PASS, TestR31_F_ PASS (13 subtests), TestR31_A2_ PASS (10 subtests), HTTP TestRequestWithdrawalHandler_R31 PASS. 0 SKIP.
 
 M1  KILLED (a),(d)   payoutDestinationEvidence additionally runs the dispatch gate (gatePayoutDestination, live instrument state) on the non-terminal evidence path and parks on refusal
                      = "gate settlement on instrument state".
@@ -18,5 +18,9 @@ M3  KILLED (b),(c)   REVERSE control: EvaluateGate stops refusing on state != ve
                      TestR31_B_ FAILS for unverified, suspended, revoked, swept-expired (the by-time expiry arm is a separate predicate and still refuses, PASS as expected);
                      TestR31_C_ T1p/suspended, T1p/revoked, phaseB/suspended, phaseB/revoked FAIL. Shows the same tests pin that initiation/dispatch gating is NOT weakened by this change.
 
-Counted: 3   KILLED: 3   SURVIVED: 0.   Every mutant restored (git checkout) after its run.
+M4  KILLED (a2)     payoutDestinationEvidence parks any attempt with escalated_at set (gating settlement of an ESCALATED attempt on the T12 escalation).
+                     TestR31_A2_ (ambiguous attempt -> T12 destination-gate escalation under suspended / revoked / swept-expired / expired-by-time -> callback success and decline):
+                     the 2 baselines PASS, all 8 mutated subtests FAIL.
+
+Counted: 4   KILLED: 4   SURVIVED: 0.   Every mutant restored (git checkout) after its run.
 Not covered by a mutant: (e) cross-player substitution and (f) echo-mismatch-parks are pinned by their own assertions (database SQLSTATEs PI041/PI050, immutability of the binding, the park state and P1) and were not mutation-tested in this round.

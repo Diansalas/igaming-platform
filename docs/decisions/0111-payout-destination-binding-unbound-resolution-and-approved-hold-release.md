@@ -2155,6 +2155,9 @@ the latest migration; the owner pool only seeds fixtures, writes the max-age con
   `verification_expired`) / row changed; a success **sync**, **poll** (sweeper) and **callback**, and a definite **decline** on each, settle with an outcome
   deep-equal to the untouched-instrument baseline of the same path (withdrawal and attempt state, ledger entries by transaction type, account type, direction
   and amount, hold net 0, one `withdrawal.completed` or `withdrawal.failed` audit row, no park), with `SUM(D)=SUM(C)` and projection = rebuild.
+- (a2) `TestR31_A2_` (ledger-finance condition): an `ambiguous` attempt whose instrument then becomes suspended / revoked / expired (swept and by time) is escalated by the
+  sweeper's T12 destination gate (T16, one denial audit row, hold kept, the provider's Withdraw called exactly once: no resend). A later callback success or decline still
+  settles, deep-equal to the untouched-instrument baseline (no park, no second Withdraw call).
 - (b) `TestR31_B_` and the HTTP test `TestRequestWithdrawalHandler_R31_UnusableInstrumentStates_Generic409`: unverified, suspended, revoked, expired (by time and
   swept): refused, generic 409, no row, no hold, key unconsumed (the same key then succeeds); the binding guard refuses a direct INSERT (PI042).
 - (c) `TestR31_C_`: T1p and phase B still refuse an instrument that became unusable before dispatch.
@@ -2167,8 +2170,8 @@ the latest migration; the owner pool only seeds fixtures, writes the max-age con
 - (f) `TestR31_F_`: a mismatching echo parks as `destination_mismatch` (P1, hold kept, nothing posted) under no change, suspended, revoked and expired, on sync, poll and
   callback, and for a decline; a suspended instrument never turns a mismatch into a settlement.
 
-Mutation evidence: `docs/plans/prh2-hardening-round/prh2-r31-settle-mutation-kill.txt`: M1 (the dispatch gate added to the evidence check) and M2 (the snapshot coupled to
-the live instrument row) are killed by (a) and (d); M3 (the dispatch gate weakened) is killed by (b) and (c). 3 counted, 3 killed.
+Mutation evidence: `docs/plans/prh2-hardening-round/prh2-r31-settle-mutation-kill.txt`: M1 (the dispatch gate added to the evidence check), M4 (settlement of an escalated attempt gated on the escalation, killed by (a2)) and M2 (the snapshot coupled to
+the live instrument row) are killed by (a) and (d); M3 (the dispatch gate weakened) is killed by (b) and (c). 4 counted, 4 killed.
 
 ### 22.5 Residuals and boundaries
 

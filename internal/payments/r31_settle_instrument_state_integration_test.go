@@ -839,3 +839,93 @@ func TestR31_F_EchoMismatchStillParksRegardlessOfInstrumentState(t *testing.T) {
 		w.wantParked(wr, w.attempt(cl.Attempt.ID), TerminalReasonDestinationMismatch)
 	})
 }
+
+// ---- (a2) an ESCALATED ambiguous attempt still settles from a later callback --------------------------------------------------
+
+// runAmbiguousEscalated drives an attempt to `ambiguous` (the provider's answer was ambiguous), applies the instrument change,
+// and (when escalate) lets the sweeper's T12 pass run: the poll stays ambiguous, then the destination gate refuses the RESEND and
+// escalates (T16). It asserts that nothing was resent, and then delivers a callback with the given outcome.
+func (w *r31W) runAmbiguousEscalated(key string, outcome Outcome, chg r31Change) (withdrawal.WithdrawalRequest, ClaimResult) {
+	w.t.Helper()
+	w.prov.idem = true // the manifest permits a resend, so ONLY the destination gate can stop it
+	inst := w.f.instrumentID
+	wr := w.approvedOwner(500, key)
+	w.onRuntime()
+	cl := w.mustClaim(wr)
+	ref := "r31-amb-" + key
+	w.prov.set(WithdrawResult{Outcome: OutcomeAmbiguous, ProviderReference: ref}, StatusResult{ProviderReference: ref, Outcome: OutcomeAmbiguous})
+	if err := w.apply(wr, cl, w.dispatch(cl)); err != nil {
+		w.t.Fatalf("apply ambiguous: %v", err)
+	}
+	if a := w.attempt(cl.Attempt.ID); a.State != AttemptAmbiguous {
+		w.t.Fatalf("attempt = %s, want ambiguous", a.State)
+	}
+	w.change(chg, inst)
+	if chg != chNone {
+		calls := w.prov.calls()
+		if err := w.sweeper().processPayoutAttempt(w.ctx(), w.f.tenantID, w.attempt(cl.Attempt.ID)); err != nil {
+			w.t.Fatalf("T12 pass: %v", err)
+		}
+		a := w.attempt(cl.Attempt.ID)
+		if a.State != AttemptAmbiguous || a.EscalatedAt == nil {
+			w.t.Fatalf("after the T12 gate attempt = %s escalated=%v, want ambiguous and escalated", a.State, a.EscalatedAt != nil)
+		}
+		if w.prov.calls() != calls || w.prov.calls() != 1 {
+			w.t.Fatalf("provider Withdraw calls = %d (was %d): the escalation must resend nothing", w.prov.calls(), calls)
+		}
+		if n := w.count(`SELECT count(*) FROM audit_log WHERE tenant_id=$1 AND action='payments.payout_destination_gate_denied' AND target_id=$2`, w.f.tenantID, cl.Attempt.ID.String()); n != 1 {
+			w.t.Fatalf("destination gate denial audit rows = %d, want 1", n)
+		}
+		if o := w.outcome(wr, cl); o.Withdrawal != "submitted" || o.Hold != 500 {
+			w.t.Fatalf("an escalation must keep the hold: %+v", o)
+		}
+	}
+	if err := w.callbackDecl(w.attempt(cl.Attempt.ID), outcome, ref, w.goodEcho(cl.Attempt.ID)); err != nil {
+		w.t.Fatalf("callback: %v", err)
+	}
+	if w.prov.calls() != 1 {
+		w.t.Fatalf("provider Withdraw calls = %d after settlement, want 1 (no resend, ever)", w.prov.calls())
+	}
+	return wr, cl
+}
+
+func TestR31_A2_EscalatedAmbiguousAttemptStillSettlesFromACallback(t *testing.T) {
+	baseline := map[Outcome]r31Outcome{}
+	for _, out := range []Outcome{OutcomeSucceeded, OutcomeDeclined} {
+		t.Run("baseline/"+string(out), func(t *testing.T) {
+			w := newR31W(t, "g0", 0)
+			wr, cl := w.runAmbiguousEscalated("r31-a2-base", out, chNone)
+			o := w.outcome(wr, cl)
+			if out == OutcomeSucceeded && (o.Withdrawal != "completed" || o.Attempt != "succeeded" || o.CompletedAudit != 1 || o.Hold != 0 || o.Cash != 99_500) ||
+				out == OutcomeDeclined && (o.Withdrawal != "failed" || o.Attempt != "declined" || o.FailedAudit != 1 || o.Hold != 0 || o.Cash != 100_000) {
+				t.Fatalf("baseline outcome unexpected: %+v", o)
+			}
+			w.balanced()
+			baseline[out] = o
+		})
+	}
+	for _, chg := range []r31Change{chSuspended, chRevoked, chExpiredSwep, chExpired} {
+		for _, out := range []Outcome{OutcomeSucceeded, OutcomeDeclined} {
+			t.Run(string(chg)+"/"+string(out), func(t *testing.T) {
+				base, ok := baseline[out]
+				if !ok {
+					t.Fatal("baseline did not run")
+				}
+				maxAge := time.Duration(0)
+				if chg == chExpired || chg == chExpiredSwep {
+					maxAge = 4 * time.Second
+				}
+				w := newR31W(t, "g1", maxAge)
+				wr, cl := w.runAmbiguousEscalated("r31-a2-"+string(chg), out, chg)
+				got := w.outcome(wr, cl)
+				if !reflect.DeepEqual(got, base) {
+					t.Fatalf("escalated ambiguous attempt after %s settled differently from an untouched instrument:\n got  %+v\n want %+v", chg, got, base)
+				}
+				if got.ParkAudit != 0 {
+					t.Fatalf("a settlement must not park: %+v", got)
+				}
+				w.balanced()
+			})
+		}
+	}
+}
