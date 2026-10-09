@@ -1153,4 +1153,35 @@ func TestM4_MR041_ForgedLinkAndPlantedPosting(t *testing.T) {
 			t.Fatalf("withdrawal moved: %s", wr.State)
 		}
 	})
+	t.Run("planted wrong-key failure (not paid)", func(t *testing.T) {
+		m.t = t
+		p, ev := m.notPaidPark(569)
+		res, err := m.request(m.acting, m.m4In(p.fresh.ID, ResolutionM4EvidenceNotPaid, ev.LineID))
+		k3RequireNoErr(t, err, "request")
+		// An ordinary hold -> cash posting correlated to the withdrawal but NOT
+		// under the governed wr.id:failed key.
+		var planted uuid.UUID
+		m.tx(func(ctx context.Context, tx pgx.Tx) error {
+			accts, err := ledger.GetOrCreateAccounts(ctx, tx, m.f.tenantID,
+				ledger.AccountSpec{WalletID: &m.f.walletID, AccountType: ledger.AccountPlayerWithdrawalHold, AssetCode: "EUR"},
+				ledger.AccountSpec{WalletID: &m.f.walletID, AccountType: ledger.AccountPlayerCash, AssetCode: "EUR"})
+			if err != nil {
+				return err
+			}
+			out, err := ledger.Post(ctx, tx, ledger.TransactionInput{TenantID: m.f.tenantID, TransactionType: ledger.TxWithdrawalFailed,
+				IdempotencyKey: p.wr.ID.String() + ":planted", CorrelationID: p.wr.ID,
+				Entries: []ledger.EntryInput{{LedgerAccountID: accts[0], Direction: ledger.Debit, Amount: 569},
+					{LedgerAccountID: accts[1], Direction: ledger.Credit, Amount: 569}}})
+			planted = out.TransactionID
+			return err
+		})
+		err = execForge(res, func(ctx context.Context, tx pgx.Tx, wr withdrawal.WithdrawalRequest) (uuid.UUID, error) {
+			_, err := tx.Exec(ctx, `UPDATE withdrawal_requests SET state = 'failed', release_ledger_transaction_id = $2, updated_at = now() WHERE id = $1`, wr.ID, planted)
+			return planted, err
+		})
+		k3RequireCode(t, err, "MR041")
+		if wr := m.wd(p.wr.ID); wr.State != withdrawal.StateSubmitted {
+			t.Fatalf("withdrawal moved: %s", wr.State)
+		}
+	})
 }
