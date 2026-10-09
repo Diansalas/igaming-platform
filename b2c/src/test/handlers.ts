@@ -11,6 +11,8 @@ export const handlers = [
   http.get('/v1/me/kyc/verifications', () => HttpResponse.json([])),
   http.get('/v1/me/rg/status', () => HttpResponse.json([])),
   http.get('/v1/me/withdrawals', () => HttpResponse.json([])),
+  // Masked payout instruments (B13): none by default, overridden per test.
+  http.get('/v1/me/payout-instruments', () => HttpResponse.json([])),
 
   http.post('/v1/auth/login', async ({ request }) => {
     const body = (await request.json()) as { email: string; password: string; brand_slug?: string }
