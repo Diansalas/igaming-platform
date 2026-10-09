@@ -1,0 +1,26 @@
+PRH2 R31 instrument state must not gate settlement (ADR 0095 section 48 decision 3; ADR 0111 section 22) - MUTATION-KILL EVIDENCE
+Scope: internal/payments/payout_destination.go (payoutDestinationEvidence, the single evidence-side destination check), internal/payoutinstrument/dispatch.go (CheckSnapshot), internal/payoutinstrument/gate.go (EvaluateGate, the dispatch gate).
+Generated 2026-10-09 on branch gov-r31-settle (base dad803d). Method: each mutant is applied in place, the targeted integration tests run with `-tags integration -count=1 -p 1 -run ...` against the private scratch database
+r31_settle_priv (the payments tests create their own scratch databases, migrated to the latest migration, with the runtime role's grants applied before the migrations), then the file is restored with `git checkout` (git status shows only the new test files afterwards).
+Tests: internal/payments/r31_settle_instrument_state_integration_test.go (TestR31_A..F), internal/httpserver/withdrawal_r31_integration_test.go.
+
+CONTROL (unmutated tree): TestR31_A_ (30 subtests incl. 6 baselines) PASS, TestR31_B_ PASS (5 subtests), TestR31_C_ PASS (8 subtests), TestR31_D_ x2 PASS, TestR31_E_ PASS, TestR31_F_ PASS (13 subtests), TestR31_A2_ PASS (10 subtests), HTTP TestRequestWithdrawalHandler_R31 PASS. 0 SKIP.
+
+M1  KILLED (a),(d)   payoutDestinationEvidence additionally runs the dispatch gate (gatePayoutDestination, live instrument state) on the non-terminal evidence path and parks on refusal
+                     = "gate settlement on instrument state".
+                     TestR31_A_ with baseline + suspended + revoked + row_changed_state_mask_label, all paths and both outcomes: the 6 baselines PASS, every one of the
+                     18 mutated subtests FAILS ("settled differently from an untouched instrument"): suspended x6 (sync/poll/callback, succeeded/declined), revoked x6, row_changed x3 (sync/poll/callback).
+                     TestR31_A_ verification_expired_swept/sync/succeeded and verification_expired_by_time/sync/succeeded FAIL (baseline PASS).
+                     TestR31_D_SnapshotIsAuthoritativeAndWriteOnce and TestR31_D_EchoIsComparedWithTheSnapshotNotTheInstrument FAIL.
+M2  KILLED (d)       CheckSnapshot additionally requires snapshot.DisplayMask == the LIVE instrument row's display_mask (the snapshot coupled to the changeable row).
+                     TestR31_A_ row_changed_state_mask_label/{sync,poll,callback}/succeeded FAIL (baselines PASS); TestR31_D_SnapshotIsAuthoritativeAndWriteOnce and TestR31_D_EchoIsComparedWithTheSnapshotNotTheInstrument FAIL.
+M3  KILLED (b),(c)   REVERSE control: EvaluateGate stops refusing on state != verified, on a revoke event and on a later suspend event (initiation/dispatch gating weakened).
+                     TestR31_B_ FAILS for unverified, suspended, revoked, swept-expired (the by-time expiry arm is a separate predicate and still refuses, PASS as expected);
+                     TestR31_C_ T1p/suspended, T1p/revoked, phaseB/suspended, phaseB/revoked FAIL. Shows the same tests pin that initiation/dispatch gating is NOT weakened by this change.
+
+M4  KILLED (a2)     payoutDestinationEvidence parks any attempt with escalated_at set (gating settlement of an ESCALATED attempt on the T12 escalation).
+                     TestR31_A2_ (ambiguous attempt -> T12 destination-gate escalation under suspended / revoked / swept-expired / expired-by-time -> callback success and decline):
+                     the 2 baselines PASS, all 8 mutated subtests FAIL.
+
+Counted: 4   KILLED: 4   SURVIVED: 0.   Every mutant restored (git checkout) after its run.
+Not covered by a mutant: (e) cross-player substitution and (f) echo-mismatch-parks are pinned by their own assertions (database SQLSTATEs PI041/PI050, immutability of the binding, the park state and P1) and were not mutation-tested in this round.
