@@ -596,7 +596,7 @@ func ApplyReceiptEvidence(ctx context.Context, tx pgx.Tx, o *Orchestrator, tenan
 		}
 		if !duplicate {
 			if err := audit.Record(ctx, tx, audit.Entry{
-				TenantID: tenantID, ActorType: audit.ActorSystem, Action: "payments.payout_echo_receipt_unattributable",
+				TenantID: tenantID, ActorType: audit.ActorSystem, Action: auditActionPayoutEchoUnattributable,
 				TargetType: "payment_provider_event", TargetID: receiptID.String(), Outcome: audit.OutcomeDenied,
 				Metadata: map[string]any{"provider_id": verifiedProviderID, "reason": alertReasonPayoutEchoReceiptUnattributable},
 			}); err != nil {
@@ -752,9 +752,38 @@ func ApplyReceiptEvidence(ctx context.Context, tx pgx.Tx, o *Orchestrator, tenan
 		}
 	}
 
-	changed, resolution, err := applyResolvedReceiptEvidence(ctx, tx, o, attempt, ev, alreadyApplied)
-	if err != nil {
-		return "", err
+	// B13-B security LR-2 / ledger-finance L-B (P7): this delivery deduped against a receipt that was CLOSED as
+	// payout_echo_receipt_unattributable (a bad echo arrived before any attempt could be compared). The echo is not part of the
+	// fingerprint, so the echo-free copy would otherwise be applied as ordinary evidence. A SUCCESS is held instead: nothing
+	// settles from a delivery whose twin carried an uncompared echo; the QueryStatus poll and the P1 raised at the first delivery
+	// decide. Detected through the audit marker written with that closure (no migration).
+	var echoClosedTwin bool
+	if duplicate && attempt.Operation == AttemptOperationPayout && ev.EventType == "payout" {
+		if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM audit_log WHERE tenant_id = $1 AND action = $2 AND target_id = $3)`,
+			tenantID, auditActionPayoutEchoUnattributable, receiptID.String()).Scan(&echoClosedTwin); err != nil {
+			return "", fmt.Errorf("payments: echo-closed twin lookup: %w", err)
+		}
+	}
+	var changed bool
+	var resolution ReceiptResolution
+	if echoClosedTwin && ev.Outcome == OutcomeSucceeded {
+		changed, resolution = false, ResolutionAnomalyOther
+	} else {
+		changed, resolution, err = applyResolvedReceiptEvidence(ctx, tx, o, attempt, ev, alreadyApplied)
+		if err != nil {
+			return "", err
+		}
+	}
+	// Ledger-finance L-A: when such a duplicate DID change the attempt (e.g. a pending copy bound the reference), link the
+	// closed receipt to the attempt in the audit trail (the receipt row itself is one-shot and stays closed).
+	if echoClosedTwin && changed {
+		if err := audit.Record(ctx, tx, audit.Entry{
+			TenantID: tenantID, ActorType: audit.ActorSystem, Action: "payments.payout_echo_receipt_attributed",
+			TargetType: "payment_provider_event", TargetID: receiptID.String(), Outcome: audit.OutcomeDenied,
+			Metadata: map[string]any{"provider_id": verifiedProviderID, "attempt_id": attempt.ID.String()},
+		}); err != nil {
+			return "", err
+		}
 	}
 
 	// ADR 0095 §5.1 "Ledger link" / LF95-C7: deposit_intents.status is a

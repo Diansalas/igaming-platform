@@ -1265,7 +1265,7 @@ func TestB13B_T1p_SnapshotConstraintFailure_RollsBackTheClaim(t *testing.T) {
 func (w *b13bW) receiptAnomalyAlert() (alertinject.Row, bool) {
 	w.t.Helper()
 	for _, r := range alertinject.ForSubject(w.t, w.pool, w.f.tenantID) {
-		if strings.HasPrefix(r.Discriminator, "receipt:") && strings.HasSuffix(r.Discriminator, ":reason:"+alertReasonPayoutEchoReceiptUnattributable) {
+		if strings.HasPrefix(r.Discriminator, "provider:") && strings.HasSuffix(r.Discriminator, ":reason:"+alertReasonPayoutEchoReceiptUnattributable) {
 			return r, true
 		}
 	}
@@ -1368,6 +1368,42 @@ func TestB13B_H1_RedeliveryIsIdempotent(t *testing.T) {
 	}
 	if n := w.count(`SELECT count(*) FROM payment_provider_events WHERE resolved_at IS NULL`); n != 0 {
 		t.Fatalf("unresolved receipts = %d", n)
+	}
+}
+
+// Security LR-3: distinct unattributable echoes from one provider fold into ONE open P1 per (tenant, provider); the
+// per-receipt detail stays in the audit rows.
+func TestB13B_LR3_UnattributableEchoAlertIsPerProvider(t *testing.T) {
+	w := newB13bW(t, "lr3")
+	wr := w.approved(500, "b13b-lr3")
+	cl := w.mustClaim(wr)
+	bad := w.badEcho(cl.Attempt.ID)
+	for i := 0; i < 4; i++ {
+		pending, err := alerting.InTx(w.ctx(), alerting.NewTenantRunner(w.pool, w.f.tenantID), func(ctx context.Context, tx pgx.Tx) error {
+			_, err := ApplyReceiptEvidence(ctx, tx, w.orch, w.f.tenantID, w.pid, ReceiptEvidence{
+				EventType: "payout", ProviderReference: fmt.Sprintf("ref-lr3-%d", i), Outcome: OutcomeSucceeded, Amount: 500, AssetCode: "EUR", DestinationEcho: bad,
+			})
+			return err
+		})
+		if err != nil {
+			t.Fatalf("delivery %d: %v", i, err)
+		}
+		pending.Flush(w.ctx())
+	}
+	if n := w.count(`SELECT count(*) FROM audit_log WHERE action = 'payments.payout_echo_receipt_unattributable'`); n != 4 {
+		t.Fatalf("audit rows = %d, want 4 (one per distinct receipt)", n)
+	}
+	open := 0
+	for _, r := range alertinject.ForSubject(w.t, w.pool, w.f.tenantID) {
+		if strings.HasSuffix(r.Discriminator, ":reason:"+alertReasonPayoutEchoReceiptUnattributable) {
+			open++
+			if r.Occurrences != 4 {
+				t.Fatalf("occurrences = %d, want 4", r.Occurrences)
+			}
+		}
+	}
+	if open != 1 {
+		t.Fatalf("open unattributable-echo alerts = %d, want 1 per provider", open)
 	}
 }
 

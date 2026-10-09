@@ -62,8 +62,11 @@ func raiseReceiptRepairRefusedAlert(ctx context.Context, tx pgx.Tx, tenantID, re
 	return alerting.RaiseGuarded(ctx, tx, receiptRepairAlert(tenantID, receiptID, providerID, reason))
 }
 
+// auditActionPayoutEchoUnattributable is the audit marker written with the closure of such a receipt.
+const auditActionPayoutEchoUnattributable = "payments.payout_echo_receipt_unattributable"
+
 // alertReasonPayoutEchoReceiptUnattributable (B13-B security H-1): a payout callback carrying a destination echo
-// arrived before any attempt could be attributed. Closed anomaly, never deferred. Receipt-subject P1.
+// arrived before any attempt could be attributed. Closed anomaly, never deferred. Provider-scoped P1 (LR-3).
 const alertReasonPayoutEchoReceiptUnattributable = "payout_echo_receipt_unattributable"
 
 // raiseReceiptRepairAlertReason raises the receipt-subject P1 for a closed reason of this file's family. The last
@@ -73,5 +76,12 @@ func raiseReceiptRepairAlertReason(ctx context.Context, tx pgx.Tx, tenantID, rec
 		slog.Default().Error("payments_alert_reason_unclassified")
 		reason = alertReasonUnclassified
 	}
-	return alerting.RaiseGuarded(ctx, tx, receiptRepairAlert(tenantID, receiptID, providerID, reason))
+	a := receiptRepairAlert(tenantID, receiptID, providerID, reason)
+	// Security LR-3: this reason is raised from the unauthenticated-by-attempt callback path, so a per-receipt discriminator
+	// would let a flood of distinct unattributable echoes open one P1 each. One open alert per (tenant, provider) instead; the
+	// per-receipt detail stays in the audit rows. Same convention as the other provider-scoped webhook integrity alerts.
+	if providerID != "" {
+		a.Discriminator = "provider:" + providerID + ":reason:" + reason
+	}
+	return alerting.RaiseGuarded(ctx, tx, a)
 }

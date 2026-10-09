@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -188,23 +189,13 @@ func newRequestWithdrawalHandler(deps Deps) http.HandlerFunc {
 			var gr *payoutinstrument.GateRefusal
 			if errors.As(err, &gr) {
 				logger.Warn("request_withdrawal_payout_instrument_not_usable", "reason", gr.Reason, "integrity", gr.Integrity())
-				if gr.Integrity() {
-					// Security L-2: a seal / integrity refusal is a tamper signal. The request transaction rolled
-					// back, so the P1 is raised detached (existing Kind, closed reason, ids only).
-					// LF L-4 (ADR 0111 1.4): the refusal also needs a durable audit row; the request transaction rolled back, so it is
-					// written in its own transaction (ids and the closed reason only).
-					if aerr := deps.DB.WithTenant(context.WithoutCancel(r.Context()), tc.TenantID, func(ctx context.Context, tx pgx.Tx) error {
-						return audit.Record(ctx, tx, audit.Entry{
-							TenantID: tc.TenantID, ActorType: audit.ActorPlayer, ActorID: playerAccountID,
-							Action: "withdrawal.request.destination_integrity_refused", TargetType: "payout_instrument", TargetID: instrumentID.String(),
-							Outcome: audit.OutcomeDenied, RequestID: requestID,
-							Metadata: map[string]any{"gate_reason": gr.Reason},
-						})
-					}); aerr != nil {
-						logger.Error("request_withdrawal_integrity_audit_failed", "error", aerr)
-					}
-					_ = alerting.RaiseDetached(r.Context(), alerting.NewTenantRunner(deps.DB, tc.TenantID),
-						payments.DestinationIntegrityAlert(tc.TenantID, "payout_instrument:"+instrumentID.String(), gr.Reason))
+				// Security M-R1: at request time the instrument id is CLIENT input. A relation mismatch (another player's / brand's
+				// / tenant's instrument) is therefore not tampering and is the same generic 409 as any other unusable
+				// instrument: no P1, no integrity audit row (otherwise a player could poison the alert and write audit rows at will).
+				// Only SERVER-state integrity reasons (the instrument's own seal / fingerprint / detail / verification) are a
+				// tamper signal. The relation mismatch stays an integrity alert at T1p, where the binding is server-side.
+				if gr.Integrity() && requestIntegrityReasons[gr.Reason] {
+					recordRequestIntegrityRefusal(deps, logger, tc.TenantID, playerAccountID, instrumentID, requestID, gr.Reason)
 				}
 			}
 			apierror.Write(w, requestID, apierror.CodePayoutInstrumentNotUsable, "the payout instrument cannot be used for this withdrawal")
@@ -1421,4 +1412,32 @@ func newCancelWithdrawalHandler(deps Deps) http.HandlerFunc {
 		}
 		w.WriteHeader(http.StatusNoContent)
 	}
+}
+
+// requestIntegrityReasons are the gate reasons that, at request time, can only come from the stored state of the player's OWN
+// instrument (security M-R1). relation_mismatch is deliberately absent.
+var requestIntegrityReasons = map[string]bool{
+	payoutinstrument.ReasonSealInvalid: true, payoutinstrument.ReasonFingerprintMismatch: true, payoutinstrument.ReasonDetailUnavailable: true,
+	payoutinstrument.ReasonVerificationMissing: true, payoutinstrument.ReasonVerificationNotLast: true,
+}
+
+// recordRequestIntegrityRefusal writes the durable audit row (LF L-4) and raises the detached P1 (security L-2) for a request-time
+// integrity refusal. It runs OFF the response path with a bounded context (security M-R1): RaiseDetached retries with backoff, and
+// the request transaction already rolled back, so nothing here may slow or fail the 409.
+func recordRequestIntegrityRefusal(deps Deps, logger *slog.Logger, tenantID, playerAccountID, instrumentID uuid.UUID, requestID, reason string) {
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		if err := deps.DB.WithTenant(ctx, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+			return audit.Record(ctx, tx, audit.Entry{
+				TenantID: tenantID, ActorType: audit.ActorPlayer, ActorID: playerAccountID,
+				Action: "withdrawal.request.destination_integrity_refused", TargetType: "payout_instrument", TargetID: instrumentID.String(),
+				Outcome: audit.OutcomeDenied, RequestID: requestID, Metadata: map[string]any{"gate_reason": reason},
+			})
+		}); err != nil {
+			logger.Error("request_withdrawal_integrity_audit_failed", "error", err)
+		}
+		_ = alerting.RaiseDetached(ctx, alerting.NewTenantRunner(deps.DB, tenantID),
+			payments.DestinationIntegrityAlert(tenantID, "payout_instrument:"+instrumentID.String(), reason))
+	}()
 }

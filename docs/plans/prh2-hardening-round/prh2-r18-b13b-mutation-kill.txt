@@ -112,3 +112,10 @@ ADDENDUM 2 (ledger-finance review fixes, 2026-10-09; same in-place method, no -r
   D05  LF M-2: payout reason missing from the table                        KILLED  TestPayoutDisputeReasonClasses_PinnedToPayments
   D06  LF L-4: no durable audit row at request time (action renamed)       KILLED  TestRequestWithdrawalHandler_B13B_IntegrityRefusalRaisesAP1
   (a first form of D06 did not compile and was rewritten; the tree was restored by git after every mutant and is clean.)
+
+ADDENDUM 3 (security and ledger-finance re-review fixes, 2026-10-09; same in-place method, files restored from a copy after each mutant): 4 counted, 4 killed
+  E00  M-R1: relation_mismatch added to requestIntegrityReasons           KILLED  TestRequestWithdrawalHandler_B13B_RelationMismatchIsClientInput_NoAlertNoAudit
+  E01  P7/LR-2: echo-free success after a closed bad-echo twin not held   KILLED  TestB13B_LFRR_P7_EchoFreeSuccessAfterClosedBadEchoDoesNotSettle
+  E02  L-A: link audit row not written                                    KILLED  TestB13B_LFRR_LA_DuplicateOfClosedReceiptThatChangesTheAttemptIsLinked
+  E03  LR-3: per-receipt discriminator kept                               KILLED  TestB13B_LR3_UnattributableEchoAlertIsPerProvider
+  LR-1 (created_at lower bound) is a query-plan change with identical results; not mutation-testable by behaviour (equivalent).

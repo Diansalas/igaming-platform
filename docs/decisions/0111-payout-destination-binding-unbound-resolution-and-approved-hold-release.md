@@ -1489,6 +1489,27 @@ statement about a real PSP, a custodian or a licence: every provider in the test
   (`withdrawal.request.destination_integrity_refused`, own transaction after the rollback) next to the detached P1. Test-only: `pitest.Bind`
   labels use a digit-free alphabet (a hex label could form a Luhn-valid run); the 0124 down-refusal tests run the down script directly
   and the HSEC route test binds an instrument.
+- **B13B-18 (security and ledger-finance RE-REVIEW fixes).**
+  - M-R1 (security, merge-blocking): the request-time integrity audit and P1 fire only for reasons that can come solely from the stored
+    state of the player's OWN instrument (seal_invalid, fingerprint_mismatch, detail_unavailable, verification_missing,
+    verification_not_latest). `relation_mismatch` (a client naming another player's instrument) is client input: the same generic 409,
+    no audit row, no alert. The audit write and the detached P1 now run off the response path (goroutine, 15 s bound).
+  - LR-1: the terminal-signal dedupe query on `audit_log` carries `created_at >= attempt.created_at`, so `idx_audit_log_tenant_time`
+    (tenant_id, created_at DESC) bounds it. No migration. Residual: the filter on `target_id`/metadata is still a heap filter within that
+    window; a dedicated index is a deferred consideration, not needed at current volumes.
+  - LR-2 and ledger-finance L-B (P7): an echo-free payout SUCCESS that dedupes against a receipt closed as
+    `payout_echo_receipt_unattributable` is HELD (no settlement; `changed=false`), for every adapter. The closed twin is detected through
+    the audit marker written with the closure (no migration). Settlement then rests on the QueryStatus poll and the P1 raised at the
+    first delivery. Residual (still launch-blocking, as B13B-15): a non-echo-declaring adapter's own later poll success settles as
+    ordinary evidence; only adapters that declare the echo are covered by the poll comparison.
+  - LR-3: the unattributable-echo P1 is one open alert per (tenant, provider) (`provider:<id>:reason:payout_echo_receipt_unattributable`),
+    not one per receipt; per-receipt detail stays in the audit rows.
+  - Ledger-finance L-A: a duplicate of a closed unattributable receipt that changes the attempt writes one audit row
+    `payments.payout_echo_receipt_attributed` linking the receipt to the attempt (the receipt row is one-shot).
+  - Ledger-finance P5: branch test added (reported reference held by another attempt: `provider_reference_conflict`, nothing bound, other
+    attempt untouched, only the conflict P1, ledger unchanged).
+  - RESOLVE-1 hint-work item (not changed now): the payout `pay_captured_unposted` hint is misleading for a bound `destination_mismatch`
+    park, because migration 0125 refuses an M4 "paid" resolution for it. The hint text belongs with the RESOLVE-1 work.
 
 ### 18.3 Evidence
 

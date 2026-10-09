@@ -437,8 +437,8 @@ func payoutTerminalDestinationSignal(ctx context.Context, tx pgx.Tx, env payoutE
 	// concurrent redeliveries serialise. The raise stays unconditional (the alert dedupes into one open alert).
 	var seen bool
 	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM audit_log WHERE tenant_id = $1 AND action = $2 AND target_id = $3
-		AND metadata->>'echo_kid' = $4 AND metadata->>'echo_fingerprint_prefix' = $5)`,
-		attempt.TenantID, terminalSignalAuditAction, attempt.ID.String(), echo.Kid, fpPrefix(echo.Fingerprint)).Scan(&seen); err != nil {
+		AND created_at >= $6 AND metadata->>'echo_kid' = $4 AND metadata->>'echo_fingerprint_prefix' = $5)`,
+		attempt.TenantID, terminalSignalAuditAction, attempt.ID.String(), echo.Kid, fpPrefix(echo.Fingerprint), attempt.CreatedAt).Scan(&seen); err != nil {
 		return res, fmt.Errorf("payments: terminal destination signal: audit lookup: %w", err)
 	}
 	if !seen {

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -246,20 +247,64 @@ func TestRequestWithdrawalHandler_B13B_IntegrityRefusalRaisesAP1(t *testing.T) {
 		t.Fatal("want the same generic 409")
 	}
 	want := "payout_instrument:" + inst.String() + ":reason:destination_integrity:" + payoutinstrument.ReasonSealInvalid
-	found := false
-	for _, r := range alertinject.ForSubject(t, pool, tenant.ID) {
-		if r.Discriminator == want && r.Severity == "p1" {
-			found = true
+	// The audit row and the P1 are written OFF the response path (security M-R1): wait for them.
+	eventually(t, "the P1 and the durable audit row of an own-instrument integrity refusal", func() bool {
+		found := false
+		for _, r := range alertinject.ForSubject(t, pool, tenant.ID) {
+			if r.Discriminator == want && r.Severity == "p1" {
+				found = true
+			}
 		}
-	}
-	if !found {
-		t.Fatalf("no P1 %s", want)
-	}
-	if n := countRows(t, pool, tenant.ID, `SELECT count(*) FROM audit_log WHERE tenant_id = $1 AND action = 'withdrawal.request.destination_integrity_refused' AND target_id = $2 AND metadata->>'gate_reason' = $3`,
-		tenant.ID, inst.String(), payoutinstrument.ReasonSealInvalid); n != 1 {
-		t.Fatalf("durable audit rows for the integrity refusal = %d, want 1", n)
-	}
+		return found && countRows(t, pool, tenant.ID, `SELECT count(*) FROM audit_log WHERE tenant_id = $1 AND action = 'withdrawal.request.destination_integrity_refused' AND target_id = $2 AND metadata->>'gate_reason' = $3`,
+			tenant.ID, inst.String(), payoutinstrument.ReasonSealInvalid) == 1
+	})
 	if n := countRows(t, pool, tenant.ID, `SELECT count(*) FROM withdrawal_requests WHERE tenant_id = $1`, tenant.ID); n != 0 {
 		t.Fatalf("rows = %d", n)
+	}
+}
+
+func eventually(t *testing.T, what string, f func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		if f() {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for: %s", what)
+}
+
+// Security M-R1 (probe): a player naming ANOTHER player's instrument (client-controlled relation mismatch) gets the same
+// generic 409 every time, and can raise NO P1 and write NO integrity audit row - however often they post it.
+func TestRequestWithdrawalHandler_B13B_RelationMismatchIsClientInput_NoAlertNoAudit(t *testing.T) {
+	pool, issuer := testEnv(t)
+	srv := newFinancialTestServer(t, pool, issuer, nil)
+	tenant := mustCreateTenant(t, pool)
+	brand := mustCreateBrand(t, pool, tenant)
+	player := mustRegisterPlayer(t, srv, brand.Slug)
+	other := mustRegisterPlayer(t, srv, brand.Slug)
+	mustActivatePlayer(t, pool, tenant.ID, player.ID)
+	mustActivatePlayer(t, pool, tenant.ID, other.ID)
+	fundWallet(t, pool, tenant.ID, brand.ID, player.ID, "EUR", 100_000)
+	mustApproveKYCForWithdrawal(t, pool, tenant.ID, brand.ID, player.ID)
+	theirs := pitest.Bind(t, pool, tenant.ID, other.ID, "EUR")
+	for _, k := range []string{"p1", "p2", "p3"} {
+		start := time.Now()
+		resp := postJSON(t, srv, "/v1/me/withdrawals", player.Tokens.AccessToken, map[string]any{
+			"asset_code": "EUR", "amount": 500, "idempotency_key": k, "payout_instrument_id": theirs.String()})
+		if resp.StatusCode != http.StatusConflict || apiCode(t, resp) != apierror.CodePayoutInstrumentNotUsable {
+			t.Fatalf("want the generic 409 NOT_USABLE")
+		}
+		if d := time.Since(start); d > 3*time.Second {
+			t.Fatalf("the refusal took %v: nothing slow may sit on the response path", d)
+		}
+	}
+	time.Sleep(500 * time.Millisecond) // any (wrongly) off-path write would have landed
+	if rows := alertinject.ForSubject(t, pool, tenant.ID); len(rows) != 0 {
+		t.Fatalf("FINDING: a client-controlled relation mismatch raised an alert: %+v", rows)
+	}
+	if n := countRows(t, pool, tenant.ID, `SELECT count(*) FROM audit_log WHERE tenant_id = $1 AND action = 'withdrawal.request.destination_integrity_refused'`, tenant.ID); n != 0 {
+		t.Fatalf("FINDING: %d integrity audit rows from client input", n)
 	}
 }
