@@ -722,7 +722,13 @@ func TestPostM4_WithdrawalClosedByAnotherRoute_NoExecutedM4_NoSignal(t *testing.
 // that loses the CAS to the already-disputed attempt; after an executed M4 that is the same post-resolution signal.
 func TestPostM4_LateEvidence_StaleSnapshot_Sync_And_Poll(t *testing.T) {
 	for _, sc := range pm4Scenarios(t) {
-		for _, shape := range []string{"poll_stale_pending", "sync_stale_submitting"} {
+		shapes := []string{"poll_stale_pending", "sync_stale_submitting"}
+		if sc.observed == OutcomeSucceeded {
+			// A success whose amount differs loses the CAS of the amount/asset park to the disputed attempt and reaches the
+			// late path through payoutHandleContradiction (late_contradicting_evidence).
+			shapes = append(shapes, "poll_stale_amount_mismatch")
+		}
+		for _, shape := range shapes {
 			t.Run(sc.name+"/"+shape, func(t *testing.T) {
 				m := newM4World(t)
 				p, base := m.pm4Executed(sc.m4Kind, sc.amount)
@@ -732,6 +738,10 @@ func TestPostM4_LateEvidence_StaleSnapshot_Sync_And_Poll(t *testing.T) {
 					class = ErrorClassDefiniteDecline
 				}
 				switch shape {
+				case "poll_stale_amount_mismatch":
+					if err := m.pm4Poll(p.staleAs(AttemptPending), class, StatusResult{Outcome: sc.observed, ProviderReference: ref, Amount: sc.amount + 1, AssetCode: "EUR"}); err != nil {
+						t.Fatalf("poll with a stale snapshot and a mismatching amount: %v", err)
+					}
 				case "poll_stale_pending":
 					if err := m.pm4Poll(p.staleAs(AttemptPending), class, StatusResult{Outcome: sc.observed, ProviderReference: ref, Amount: sc.amount, AssetCode: "EUR", DeclineReason: "insufficient_funds"}); err != nil {
 						t.Fatalf("poll with a stale snapshot: %v", err)
@@ -743,7 +753,7 @@ func TestPostM4_LateEvidence_StaleSnapshot_Sync_And_Poll(t *testing.T) {
 					}
 				}
 				ev := string(EvidenceQueryStatus)
-				if shape != "poll_stale_pending" {
+				if shape == "sync_stale_submitting" {
 					ev = string(EvidenceSync)
 				}
 				m.pm4WantSignal(p.fresh, sc.reason, string(sc.m4Kind), string(sc.observed), ev, 1, 1)
@@ -786,4 +796,77 @@ func TestPostM4_AuditRow_ClosedVocabulary(t *testing.T) {
 			t.Fatalf("hostile text stored raw: %s", blob)
 		}
 	}
+}
+
+// Another attempt's executed M4 in the SAME tenant does not trigger a signal for an attempt that has none, even when that
+// attempt's withdrawal was failed through another route (the lookup is bound to the attempt and its withdrawal).
+func TestPostM4_AnotherAttemptsExecutedM4_SameTenant_DoesNotTrigger(t *testing.T) {
+	m := newM4World(t)
+	px, _ := m.pm4Executed(ResolutionM4EvidenceNotPaid, 650)
+	py := m.park(300)
+	m.tx(func(ctx context.Context, tx pgx.Tx) error {
+		return withdrawal.Fail(ctx, tx, py.wr.ID, "pm4_other_route")
+	})
+	m.pm4MustCallback(py.fresh, OutcomeSucceeded, "pm4-sy-"+uuid.NewString()[:8], 300)
+	if err := m.pm4Poll(m.attempt(py.fresh.ID), ErrorClassSucceeded, StatusResult{Outcome: OutcomeSucceeded, ProviderReference: "pm4-sy-p", Amount: 300, AssetCode: "EUR"}); err != nil {
+		t.Fatal(err)
+	}
+	m.pm4WantNoSignal(py.fresh, "another attempt's executed M4")
+	// ...while the executed one still signals.
+	m.pm4MustCallback(px.fresh, OutcomeSucceeded, "pm4-sx-"+uuid.NewString()[:8], 650)
+	m.pm4WantSignal(px.fresh, alertReasonPayoutSuccessAfterM4NotPaid, string(ResolutionM4EvidenceNotPaid), "succeeded", string(EvidenceCallback), 1, 1)
+}
+
+// The lookup's own predicates (tenant, executed state) do not rest on the session shape. The evidence transactions are
+// system-shaped (a tenant session sees only EXECUTED M2/M4 rows, migration 0125 policy tenant_system_read_executed); a
+// principal-shaped tenant session (a staff session) sees PENDING rows too, and must still produce no signal for one.
+func TestPostM4_PendingM4_NoSignal_EvenInAPrincipalShapedSession(t *testing.T) {
+	m := newM4World(t)
+	p, ev := m.notPaidPark(300)
+	_, err := m.request(m.acting, m.m4In(p.fresh.ID, ResolutionM4EvidenceNotPaid, ev.LineID))
+	k3RequireNoErr(t, err, "request")
+	m.tx(func(ctx context.Context, tx pgx.Tx) error {
+		return withdrawal.Fail(ctx, tx, p.wr.ID, "pm4_other_route")
+	})
+	var pending int
+	err = m.pool.WithPrincipalScope(context.Background(), m.f.tenantID, m.tenantAdmin.ID, func(ctx context.Context, tx pgx.Tx) error {
+		if err := tx.QueryRow(ctx, `SELECT count(*) FROM payment_manual_resolutions WHERE attempt_id = $1 AND state = 'pending'`, p.fresh.ID).Scan(&pending); err != nil {
+			return err
+		}
+		newR := true
+		return payoutPostM4Cell(ctx, tx, p.fresh, OutcomeSucceeded, EvidenceCallback, &newR, "pm4-pr-"+uuid.NewString()[:8])
+	})
+	if err != nil {
+		t.Fatalf("cell in a principal-shaped session: %v", err)
+	}
+	if pending != 1 {
+		t.Fatalf("vacuity: the principal-shaped session must see the pending M4 row, saw %d", pending)
+	}
+	m.pm4WantNoSignal(p.fresh, "pending M4 seen by a principal-shaped session")
+}
+
+// The once-per-(attempt, reason, evidence kind) rule for the receipt-less sources is per SOURCE: a poll and a late sync result
+// are different evidence and each leaves its own row; the same source repeated leaves none.
+func TestPostM4_ReceiptlessSources_OneRowPerEvidenceKind(t *testing.T) {
+	m := newM4World(t)
+	p, base := m.pm4Executed(ResolutionM4EvidenceNotPaid, 650)
+	okPoll := StatusResult{Outcome: OutcomeSucceeded, ProviderReference: "pm4-src-p", Amount: 650, AssetCode: "EUR"}
+	for i := 0; i < 2; i++ {
+		if err := m.pm4Poll(p.staleAs(AttemptPending), ErrorClassSucceeded, okPoll); err != nil {
+			t.Fatal(err)
+		}
+	}
+	gr := GateResult[WithdrawResult]{Class: ErrorClassSucceeded, Value: WithdrawResult{Outcome: OutcomeSucceeded, ProviderReference: "pm4-src-s"}}
+	for i := 0; i < 2; i++ {
+		if err := ApplyPayoutResult(context.Background(), m.pool, m.f.tenantID, p.wr.ID, p.staleAs(AttemptSubmitting), gr, EvidenceSync, m.orch.PayoutOptions()...); err != nil {
+			b11OKOrConflict(t, err, "sync")
+		}
+	}
+	m.pm4WantSignal(p.fresh, alertReasonPayoutSuccessAfterM4NotPaid, string(ResolutionM4EvidenceNotPaid), "succeeded", "", 2, 4)
+	rows := m.sysQuery(`SELECT metadata->>'evidence' AS e FROM audit_log WHERE tenant_id = $1 AND action = $2 AND target_id = $3 ORDER BY metadata->>'evidence'`,
+		m.f.tenantID, auditActionPayoutPostM4Contradiction, p.fresh.ID.String())
+	if len(rows) != 2 || rows[0]["e"] != string(EvidenceQueryStatus) || rows[1]["e"] != string(EvidenceSync) {
+		t.Fatalf("evidence kinds: %v", rows)
+	}
+	m.pm4Unchanged(p, base, "receiptless sources")
 }
