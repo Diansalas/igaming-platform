@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
 import { ApiError } from '../../api/types'
+import { isSelectableForAsset, listMyPayoutInstruments } from '../../api/payoutInstruments'
 import { listMyWallets } from '../../api/wallet'
 import { cancelWithdrawal, listMyWithdrawals, requestWithdrawal, type WithdrawalState } from '../../api/withdrawals'
 import { Badge, type BadgeTone } from '../../components/Badge'
@@ -42,12 +43,36 @@ function stateTone(state: WithdrawalState): BadgeTone {
   }
 }
 
+const INSTRUMENT_UNUSABLE_MESSAGE =
+  'This payout destination cannot be used for this withdrawal. Choose another verified destination.'
+
+/**
+ * True when the backend refused the payout instrument itself (missing, stale,
+ * not ours, not verified, expired, revoked/suspended, wrong asset - the
+ * backend deliberately does not say which) or rejected its id as malformed.
+ * The list is then stale or the selection is invalid and must be re-read.
+ */
+function isInstrumentRejection(err: unknown): boolean {
+  if (!(err instanceof ApiError)) return false
+  if (err.code === 'PAYOUT_INSTRUMENT_NOT_USABLE' || err.code === 'PAYOUT_INSTRUMENT_REQUIRED') return true
+  return err.status === 400 && /payout_instrument_id/.test(err.message)
+}
+
 function requestErrorMessage(err: unknown): string {
   if (err instanceof ApiError) {
     if (err.message === 'insufficient available balance') return 'Your available balance does not cover this amount.'
+    if (err.code === 'PAYOUT_INSTRUMENT_REQUIRED') return 'Choose a verified payout destination to withdraw.'
+    if (err.code === 'PAYOUT_INSTRUMENT_NOT_USABLE') return INSTRUMENT_UNUSABLE_MESSAGE
+    if (isInstrumentRejection(err)) return 'The selected payout destination is not valid. Choose a destination from the list.'
+    // 503: payout instruments / verification not configured or temporarily down. Nothing was created.
+    if (err.status === 503) return 'Withdrawals are temporarily unavailable. Please try again shortly.'
     return err.message
   }
   return 'Could not request this withdrawal.'
+}
+
+function instrumentLabel(kind: string, rail: string, mask: string): string {
+  return `${(kind || rail).replace(/_/g, ' ')} - ${mask}`
 }
 
 /**
@@ -71,9 +96,22 @@ export function WithdrawalPage() {
   // first POST may have committed), replaced once the server has answered.
   const [idempotencyKey, setIdempotencyKey] = useState(() => newIdempotencyKey())
 
+  const instrumentsQuery = useQuery({ queryKey: ['payout-instruments'], queryFn: listMyPayoutInstruments })
+  const [instrumentId, setInstrumentId] = useState('')
+
   const wallets = walletsQuery.data ?? []
   const selectedAsset = assetCode || wallets[0]?.asset_code || ''
   const selectedWallet = wallets.find((w) => w.asset_code === selectedAsset)
+
+  // Presentation filter only; the backend re-checks the instrument on submit.
+  const eligibleInstruments = (instrumentsQuery.data ?? []).filter((i) => isSelectableForAsset(i, selectedAsset))
+  // A selection that is no longer offered (list refreshed after a rejection) is dropped, never sent.
+  const effectiveInstrumentId = eligibleInstruments.some((i) => i.id === instrumentId)
+    ? instrumentId
+    : eligibleInstruments.length === 1
+      ? eligibleInstruments[0].id
+      : ''
+  const instrumentsReady = instrumentsQuery.isSuccess
 
   async function refresh() {
     await Promise.all([
@@ -91,7 +129,13 @@ export function WithdrawalPage() {
       setIdempotencyKey(newIdempotencyKey())
       await refresh()
     },
-    onError: (err) => setFormError(requestErrorMessage(err)),
+    onError: (err) => {
+      setFormError(requestErrorMessage(err))
+      if (isInstrumentRejection(err)) {
+        setInstrumentId('')
+        void queryClient.invalidateQueries({ queryKey: ['payout-instruments'] })
+      }
+    },
   })
 
   const cancelMutation = useMutation({ mutationFn: cancelWithdrawal, onSettled: refresh })
@@ -102,13 +146,17 @@ export function WithdrawalPage() {
       setFormError('You have no wallet yet - make a deposit first.')
       return
     }
+    if (!effectiveInstrumentId) {
+      setFormError('Choose a verified payout destination to withdraw.')
+      return
+    }
     const amount = toMinorUnits(amountInput, selectedAsset)
     if (amount === null || amount <= 0) {
       setFormError('Enter a valid amount.')
       return
     }
     setFormError(null)
-    requestMutation.mutate({ assetCode: selectedAsset, amount, idempotencyKey })
+    requestMutation.mutate({ assetCode: selectedAsset, amount, idempotencyKey, payoutInstrumentId: effectiveInstrumentId })
   }
 
   return (
@@ -146,6 +194,30 @@ export function WithdrawalPage() {
                 </div>
               </dl>
             )}
+            {instrumentsQuery.isLoading && <LoadingSpinner label="Loading payout destinations..." />}
+            {instrumentsQuery.error && (
+              <ErrorState error={instrumentsQuery.error} onRetry={() => void instrumentsQuery.refetch()} />
+            )}
+            {instrumentsReady && eligibleInstruments.length === 0 && (
+              <div role="status" className="rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
+                <p className="font-medium">Payout destination required</p>
+                <p>
+                  You have no verified payout destination for {selectedAsset}, so withdrawals are unavailable. A verified
+                  destination must be on file before you can withdraw.
+                </p>
+              </div>
+            )}
+            {instrumentsReady && eligibleInstruments.length > 0 && (
+              <label className="flex flex-col gap-1 text-sm">
+                <span className="font-medium text-slate-700">Payout destination</span>
+                <Select
+                  value={effectiveInstrumentId}
+                  onChange={(e) => setInstrumentId(e.target.value)}
+                  placeholder="Choose a payout destination"
+                  options={eligibleInstruments.map((i) => ({ value: i.id, label: instrumentLabel(i.kind, i.rail, i.display_mask) }))}
+                />
+              </label>
+            )}
             <label className="flex flex-col gap-1 text-sm">
               <span className="font-medium text-slate-700">Amount ({selectedAsset})</span>
               <TextInput
@@ -163,7 +235,11 @@ export function WithdrawalPage() {
                 {formError}
               </p>
             )}
-            <Button isLoading={requestMutation.isPending} onClick={onSubmit}>
+            <Button
+              isLoading={requestMutation.isPending}
+              disabled={!instrumentsReady || eligibleInstruments.length === 0}
+              onClick={onSubmit}
+            >
               Request withdrawal
             </Button>
             {lastRequestId && !requestMutation.isPending && (
