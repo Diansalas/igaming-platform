@@ -30,6 +30,16 @@ func TestNoTriggerDisableOutsideTests(t *testing.T) {
 			if err != nil {
 				return err
 			}
+			// The one sanctioned exception: the B13 integration-only fixture support
+			// (pitest.WithoutBindingGuard plants legacy-shaped NULL-binding rows). It
+			// must carry the integration build tag, so it can never be part of a
+			// production binary; any other file stays forbidden.
+			if filepath.ToSlash(path) == "../../internal/payoutinstrument/pitest/pitest.go" {
+				if !strings.HasPrefix(string(b), "//go:build integration") {
+					t.Errorf("%s may mention a trigger disable only while it is integration-tag only", path)
+				}
+				return nil
+			}
 			if m := forbidden.Find(b); m != nil {
 				t.Errorf("%s mentions %q: production code must not disable triggers", path, m)
 			}
