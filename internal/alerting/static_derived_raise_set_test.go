@@ -110,6 +110,18 @@ var staticDerivedRaiseSetReviewed = map[string]bool{
 	"internal/payments/receipt_repair.go:refuseRepair":                          true,
 	"internal/payments/receipt_repair.go:repairReceiptAttributionTx":            true,
 	"internal/payments/receipt_repair_alerts.go:raiseReceiptRepairRefusedAlert": true,
+	// B13-B (ADR 0111 section 18, ADR 0102 7.7): the destination evidence chain and the unattributable-echo raise. Reviewed
+	// owners: payoutDestinationEvidence is called only from InTx closures (ApplyPayoutResult phase C, the poll evidence
+	// transaction) and from applyResolvedReceiptEvidence (webhook InTx); destinationGateAndEscalate only from the sweeper
+	// T2/T12 claim transactions, which open through alerting.InTx and flush after the commit (payout_sweep.go; before
+	// this review they used a plain WithTenant and would have swallowed the P1 - fixed, not pinned). The raise is the last
+	// statement in each function. raiseReceiptRepairAlertReason: one call site, ApplyReceiptEvidence (already reviewed).
+	"internal/payments/payout_destination.go:bindPayoutReferenceForPark":       true,
+	"internal/payments/payout_destination.go:destinationGateAndEscalate":       true,
+	"internal/payments/payout_destination.go:parkPayoutDestination":            true,
+	"internal/payments/payout_destination.go:payoutDestinationEvidence":        true,
+	"internal/payments/payout_destination.go:payoutTerminalDestinationSignal":  true,
+	"internal/payments/receipt_repair_alerts.go:raiseReceiptRepairAlertReason": true,
 }
 
 func TestStaticWiring_DerivedRaiseReachingSetIsReviewed_CR2S4(t *testing.T) {

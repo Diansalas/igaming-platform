@@ -274,7 +274,9 @@ func (s *Sweeper) reclaimPayoutCreated(ctx context.Context, tenantID uuid.UUID, 
 	nextPoll := s.backoff(attempt.PollCount)
 	var claimed PaymentAttempt
 	var allowed bool
-	err := s.Pool.WithTenant(ctx, tenantID, func(actx context.Context, tx pgx.Tx) error {
+	// B13-B (ADR 0102 7.7, security re-pin): this transaction can raise the B12 destination P1 (destinationGateAndEscalate),
+	// so it opens through alerting.InTx and flushes after the commit, like escalateAmbiguousPayout.
+	pending, err := alerting.InTx(ctx, alerting.NewTenantRunner(s.Pool, tenantID), func(actx context.Context, tx pgx.Tx) error {
 		wr, err := lockSubmittedRequest(actx, tx, *attempt.WithdrawalRequestID)
 		if err != nil {
 			return err
@@ -309,6 +311,9 @@ func (s *Sweeper) reclaimPayoutCreated(ctx context.Context, tenantID uuid.UUID, 
 		claimed, err = GetAttemptByID(actx, tx, attempt.ID)
 		return err
 	})
+	if err == nil {
+		pending.Flush(ctx) // post-commit only
+	}
 	if err != nil || !allowed {
 		return err
 	}
@@ -375,7 +380,9 @@ func (s *Sweeper) resubmitPayoutAmbiguous(ctx context.Context, tenantID uuid.UUI
 
 	var claimed PaymentAttempt
 	var allowed bool
-	err := s.Pool.WithTenant(ctx, tenantID, func(actx context.Context, tx pgx.Tx) error {
+	// B13-B (ADR 0102 7.7, security re-pin): this transaction can raise the B12 destination P1 (destinationGateAndEscalate),
+	// so it opens through alerting.InTx and flushes after the commit, like escalateAmbiguousPayout.
+	pending, err := alerting.InTx(ctx, alerting.NewTenantRunner(s.Pool, tenantID), func(actx context.Context, tx pgx.Tx) error {
 		wr, err := lockSubmittedRequest(actx, tx, *attempt.WithdrawalRequestID)
 		if err != nil {
 			return err
@@ -411,6 +418,9 @@ func (s *Sweeper) resubmitPayoutAmbiguous(ctx context.Context, tenantID uuid.UUI
 		claimed, err = GetAttemptByID(actx, tx, attempt.ID)
 		return err
 	})
+	if err == nil {
+		pending.Flush(ctx) // post-commit only
+	}
 	if err != nil {
 		if errors.Is(err, ErrAttemptStateConflict) {
 			// The CAS-level max_resubmits/legacy_backfill/sibling guard
