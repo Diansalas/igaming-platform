@@ -526,6 +526,25 @@ func newListAdminWithdrawalsHandler(deps Deps) http.HandlerFunc {
 	}
 }
 
+// staffPayoutInstrumentRef is the ONLY view of a withdrawal's bound payout
+// instrument that the staff detail exposes (ADR 0111 18, B13-B usability): the
+// instrument id, its rail (what the staff submit's payment_method is compared
+// with) and the masked display value. Never the detail, ciphertext,
+// fingerprint, seal, kind, state or the verification.
+type staffPayoutInstrumentRef struct {
+	ID          string `json:"id"`
+	Rail        string `json:"rail"`
+	DisplayMask string `json:"display_mask"`
+}
+
+// staffWithdrawalDetailResponse is the single-withdrawal staff view. The
+// payout_instrument key is always present: null for a legacy row with no
+// binding (pre-B13-B, Synthetic adapters only).
+type staffWithdrawalDetailResponse struct {
+	staffWithdrawalResponse
+	PayoutInstrument *staffPayoutInstrumentRef `json:"payout_instrument"`
+}
+
 // newGetAdminWithdrawalHandler is the Stage 5 Back Office withdrawal
 // detail view: tenant-wide (any withdrawal belonging to the caller's own
 // tenant, not just the caller's own - staff legitimately inspect any
@@ -550,11 +569,26 @@ func newGetAdminWithdrawalHandler(deps Deps) http.HandlerFunc {
 
 		var wr withdrawal.WithdrawalRequest
 		var decimalExponent int16
+		var instrument *staffPayoutInstrumentRef
 		err = deps.DB.WithTenant(r.Context(), tc.TenantID, func(ctx context.Context, tx pgx.Tx) error {
 			var err error
 			wr, err = withdrawal.GetByID(ctx, tx, id)
 			if err != nil {
 				return err
+			}
+			if wr.PayoutInstrumentID != nil {
+				// Tenant-scoped read (RLS + explicit tenant filter) of the three
+				// non-secret columns only; a pure read.
+				var ref staffPayoutInstrumentRef
+				switch err := tx.QueryRow(ctx,
+					`SELECT id::text, rail, display_mask FROM payout_instruments WHERE id = $1 AND tenant_id = $2`,
+					*wr.PayoutInstrumentID, tc.TenantID).Scan(&ref.ID, &ref.Rail, &ref.DisplayMask); {
+				case err == nil:
+					instrument = &ref
+				case errors.Is(err, pgx.ErrNoRows):
+				default:
+					return fmt.Errorf("withdrawal admin detail: bound payout instrument: %w", err)
+				}
 			}
 			a, err := assetregistry.GetAsset(ctx, tx, wr.AssetCode)
 			if err != nil {
@@ -582,10 +616,13 @@ func newGetAdminWithdrawalHandler(deps Deps) http.HandlerFunc {
 			apierror.Write(w, requestID, apierror.CodeNotFound, "withdrawal not found")
 			return
 		}
-		writeJSON(w, http.StatusOK, staffWithdrawalResponse{
-			withdrawalRequestResponse: toWithdrawalRequestResponse(wr),
-			PlayerAccountID:           wr.PlayerAccountID.String(),
-			DecimalExponent:           decimalExponent,
+		writeJSON(w, http.StatusOK, staffWithdrawalDetailResponse{
+			staffWithdrawalResponse: staffWithdrawalResponse{
+				withdrawalRequestResponse: toWithdrawalRequestResponse(wr),
+				PlayerAccountID:           wr.PlayerAccountID.String(),
+				DecimalExponent:           decimalExponent,
+			},
+			PayoutInstrument: instrument,
 		})
 	}
 }
