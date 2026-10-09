@@ -39,8 +39,12 @@ var staticRaiseGuardedHelpers = map[string]bool{
 	"internal/payments/payout_alerts.go:raisePayoutDisputeAlert": true,
 	// PAY-RECEIPT-ANOMALY-APPLIED-1 (ADR 0095 section 45): the refused receipt attribution repair signal.
 	"internal/payments/receipt_repair_alerts.go:raiseReceiptRepairRefusedAlert": true,
-	"internal/reconciliation/alerts.go:raiseLedgerRunAlerts":                    true,
-	"internal/reconciliation/alerts.go:raiseInTxMismatch":                       true,
+	// B13-B (security H-1/LR-3, ADR 0111 section 18): the unattributable-echo receipt P1. Its ONE call site is
+	// receipt.go:ApplyReceiptEvidence (pinned by TestStaticWiring_PayoutEchoReceiptRaiseSiteIsPinned_B13B), which runs
+	// only inside the webhook handler's alerting.InTx closure (or a test's InTx); the raise is the last statement there.
+	"internal/payments/receipt_repair_alerts.go:raiseReceiptRepairAlertReason": true,
+	"internal/reconciliation/alerts.go:raiseLedgerRunAlerts":                   true,
+	"internal/reconciliation/alerts.go:raiseInTxMismatch":                      true,
 	// PRH-2 E1 (ADR 0106 section 4.3): the KYC outbox terminal alert, raised in-tx
 	// from the tenant phase-C session by runPhaseC / recordApplyConflict.
 	"internal/kyc/outbox_worker.go:raiseSubmissionFailedTerminal": true,
@@ -254,7 +258,7 @@ func staticDiscardedRaiseResults(calls []staticCall) []string {
 		"raiseMultipleSuccessAlert": true, "raiseLedgerRunAlerts": true, "raiseInTxMismatch": true, "alertAfterDispute": true,
 		"raiseSubmissionFailedTerminal": true, "raiseDepositEscalationAlert": true,
 		"raisePayoutDisputeAlert": true, "payoutAlertAfterDispute": true,
-		"raiseReceiptRepairRefusedAlert": true,
+		"raiseReceiptRepairRefusedAlert": true, "raiseReceiptRepairAlertReason": true,
 	}
 	var out []string
 	for _, c := range calls {
@@ -355,6 +359,14 @@ func g(ctx, tx any) error { return raisePayoutDisputeAlert(ctx, tx, a, r) }`
 		"internal/payments/receipt.go:applyResolvedReceiptEvidence:raisePayoutDisputeAlert":       4, // callback reference-mismatch park + R-5 (declined), R-6 (succeeded) mismatched success and M-1 foreign-reference success on succeeded (raise only)
 		"internal/payments/receipt.go:applyResolvedReceiptEvidence:payoutAlertAfterDispute":       4, // T15, T14, callback amount mismatch, tombstone
 		"internal/payments/payout_alerts.go:payoutAlertAfterDispute:raisePayoutDisputeAlert":      1,
+		// B13-B (ADR 0111 section 18; ADR 0102 7.7 raise-last): each is the LAST statement of its function, after the CAS and
+		// the audit row, inside the caller's transaction. Owners: parkPayoutDestination and payoutTerminalDestinationSignal are
+		// reached only through payoutDestinationEvidence (InTx closures in ApplyPayoutResult and applyPayoutStatusEvidence, and
+		// applyResolvedReceiptEvidence under the webhook InTx); destinationGateAndEscalate only from the sweeper's T2/T12
+		// transactions, which open through alerting.InTx and flush after the commit (payout_sweep.go).
+		"internal/payments/payout_destination.go:destinationGateAndEscalate:raisePayoutDisputeAlert":      1, // T2/T12 gate denial escalation
+		"internal/payments/payout_destination.go:parkPayoutDestination:raisePayoutDisputeAlert":           1, // destination_mismatch / integrity park
+		"internal/payments/payout_destination.go:payoutTerminalDestinationSignal:raisePayoutDisputeAlert": 1, // terminal-attempt signal (additive)
 	}
 	got := map[string]int{}
 	for _, c := range staticCollectCalls(t) {
@@ -516,6 +528,9 @@ var staticEvidenceFuncs = map[string]bool{
 	"applyPayoutSuccess": true, "applyPayoutDecline": true, "applyPayoutLateEvidence": true,
 	"payoutHandleContradiction": true, "payoutGuardReferenceBinding": true,
 	"applyPayoutSuccessCheckedFromStatus": true, "applyPayoutStatusEvidenceInTx": true,
+	// B13-B: the destination evidence chain (each reaches raisePayoutDisputeAlert or payoutHandleContradiction).
+	"payoutDestinationEvidence": true, "parkPayoutDestination": true, "bindPayoutReferenceForPark": true,
+	"payoutTerminalDestinationSignal": true, "s.destinationGateAndEscalate": true, ".destinationGateAndEscalate": true,
 }
 
 // Reviewed callers: each is only reachable from a transaction owner that opens
@@ -541,6 +556,13 @@ var staticEvidenceCallerAllowlist = map[string]bool{
 	"internal/payments/payout.go:applyPayoutStatusEvidenceInTx":       true,
 	"internal/payments/payout_refbind.go:payoutGuardReferenceBinding": true,
 	"internal/payments/receipt.go:applyResolvedReceiptEvidence":       true,
+	// B13-B: the destination evidence chain. Entered only from payoutDestinationEvidence, whose callers are the InTx
+	// closures of ApplyPayoutResult (phase C) and applyPayoutStatusEvidence (poll) and applyResolvedReceiptEvidence
+	// (callback, under the webhook handler's InTx). Mechanically: every call of payoutDestinationEvidence outside this
+	// file is inside an InTx closure or in an already-listed function; the three below are its internal callees.
+	"internal/payments/payout_destination.go:payoutDestinationEvidence":  true, // calls parkPayoutDestination, payoutTerminalDestinationSignal
+	"internal/payments/payout_destination.go:parkPayoutDestination":      true, // calls bindPayoutReferenceForPark, payoutHandleContradiction
+	"internal/payments/payout_destination.go:bindPayoutReferenceForPark": true, // calls payoutGuardReferenceBinding, payoutHandleContradiction
 }
 
 func TestStaticWiring_EvidenceFunctionCallersAreInTxOrReviewed(t *testing.T) {
@@ -552,5 +574,24 @@ func TestStaticWiring_EvidenceFunctionCallersAreInTxOrReviewed(t *testing.T) {
 			continue
 		}
 		t.Errorf("reachability: %s:%d (%s) calls %s outside an alerting.InTx closure and outside the reviewed caller allowlist", c.file, c.line, c.fn, c.name)
+	}
+}
+
+// B13-B (security H-1 / LR-3): raiseReceiptRepairAlertReason has exactly ONE call site, the last statement of the
+// unattributable-echo branch of ApplyReceiptEvidence, and its result is never dropped.
+func TestStaticWiring_PayoutEchoReceiptRaiseSiteIsPinned_B13B(t *testing.T) {
+	bad := `package p
+func f(ctx, tx any) { raiseReceiptRepairAlertReason(ctx, tx, t, r, p, x) }`
+	if d := staticDiscardedRaiseResults(staticCollectFromSource(t, "internal/x/bad.go", bad)); len(d) != 1 {
+		t.Fatalf("discarded-result guard must flag the dropped raise, got %v", d)
+	}
+	got := map[string]int{}
+	for _, c := range staticCollectCalls(t) {
+		if c.name == "raiseReceiptRepairAlertReason" {
+			got[c.file+":"+c.fn]++
+		}
+	}
+	if len(got) != 1 || got["internal/payments/receipt.go:ApplyReceiptEvidence"] != 1 {
+		t.Fatalf("raiseReceiptRepairAlertReason call sites = %v, want exactly receipt.go:ApplyReceiptEvidence once", got)
 	}
 }
