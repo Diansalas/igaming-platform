@@ -120,3 +120,9 @@ ADDENDUM - security-review fixes (run 7/8, same method; tree clean and restored 
   S29  L-6: snapshot insert does not re-check expiry                              KILLED  TestSnapshot_DBRechecksVerificationNotExpired
   S30  L-6: snapshot insert ignores revoke events                                 SURVIVED in run 7 (same redundancy); KILLED after an event-only tamper was added
 Totals including the addendum: 84 counted, 83 killed, 1 survived (S16, equivalent, above).
+
+ADDENDUM 2 - ledger-finance review fixes (run 9, same method; tree restored, control rc=0):
+  S31  C-3: kind/asset-type rule removed                       KILLED  TestKindAssetTypeEnforcedByTheDatabase
+  S32  C-4: pre-flight table lock removed                      KILLED  TestMigration0123_PreflightLockSerialisesWithWriters
+  S33  F-7: down ignores max-age configuration (down file)     KILLED  TestMigration0123_DownRefusesWithMaxAgeConfig
+Totals including both addenda: 87 counted, 86 killed, 1 survived (S16, equivalent).

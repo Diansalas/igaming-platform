@@ -1015,3 +1015,26 @@ Fixed in B13-A (tip after this change):
 - **L-7** The Synthetic marker (`SyntheticComponent`) is inherited through struct embedding: a real type embedding a Synthetic type
   silently becomes Synthetic and would satisfy the tiering predicate. B13-B adds a repo-wide embedding check; until then the
   predicate must not be relied on for a type that embeds a mock.
+
+### 15.6 Ledger-finance review of B13-A (APPROVE WITH CONDITIONS): fixes, notes and B13-B conditions
+
+Fixed in B13-A (migration 0123, folded in before merge):
+- **C-3 / F-4** `payout_instrument_kinds` gained `allowed_asset_type` (`fiat` for `bank_account`, `card_token`, `ewallet_account`; `crypto`
+  for `crypto_address`; NULL = any for `synthetic_test`). The instrument insert trigger refuses (PI007) an asset whose registry type
+  differs, so a bank account cannot list BTC and a crypto address cannot list EUR. The rule is data in the kinds table, not a code
+  path keyed on a kind. Tests: `TestKindAssetTypeEnforcedByTheDatabase` (Go and direct SQL); mutant S31 killed.
+- **C-4 / F-5** `LOCK TABLE withdrawal_requests IN SHARE ROW EXCLUSIVE MODE` precedes the L-6 pre-flight scan, so no row can gain a
+  non-MOCK `provider_id` between the scan and the `ALTER TABLE`. Test: an open writer makes the migration wait and then refuse
+  (`TestMigration0123_PreflightLockSerialisesWithWriters`); mutant S32 killed.
+- **F-7** the down migration also refuses (PI099) while `payout_instrument_verification_max_age` has any row (governance
+  configuration is not silently discarded). Test and mutant S33 killed.
+
+Recorded, not changed:
+- **F-6 (scale note)** `ALTER TABLE withdrawal_requests` takes an ACCESS EXCLUSIVE lock and validates the new FK / CHECK against the whole
+  table. On a large table run it in a maintenance window; `lock_timeout` and `NOT VALID` + `VALIDATE CONSTRAINT` would shorten the
+  lock but are deliberately not applied here (the migration is not to be amended after merge).
+- **F-8 (info residual)** as recorded by the review; no action in B13-A.
+
+**B13-B conditions (added):** call `EvaluateGate` and `CheckTier` inside `ClaimForDispatch`, before the provider call and before any
+retry, resend or callback/poll that settles the attempt; and remove the L-8 startup clause in `VerifyStartup` in the SAME change that
+closes the NULL arm (the guard-replacing migration).
