@@ -1323,6 +1323,12 @@ statement about a real PSP, a custodian or a licence: every provider in the test
   instrument (`internal/payoutinstrument/pitest`, integration build tag only, never in a binary). Fixtures that plant a `submitted`
   row to test receipts or reconciliation, or that attack a different invariant (RLS, a brand FK), plant a **legacy-shaped** row through
   `pitest.WithoutBindingGuard` (owner role, trigger disabled and re-enabled in the same transaction).
+- **B13B-14 (tests that pinned a pre-0123 schema).** The payments code now reads and writes the 0123 columns, so a payout world cannot run on a
+  scratch database stopped at 0115. `TestK3_Y08/X10/Y12` now run on the head schema (Y12 also disables the 0120 actor-proof guard in its owner
+  bypass); `TestK3_C16_DownRefusals` runs the 0115 `down` script directly on the head schema (its first statement is the MR099 refusal, so the
+  assertion is unchanged) instead of stepping the migration runner down. Closed-set pins updated deliberately: payout escalation reasons 3 -> 5,
+  payout signal reasons 3 -> 4, `payout_destination.go` joins `payout.go` / `payout_sweep.go` as a payout-only file in the deposit terminal-reason
+  scan, and the B12 per-site table skips the `destination_*` reasons (covered by `TestB13B_*`).
 
 ### 16.3 Evidence
 

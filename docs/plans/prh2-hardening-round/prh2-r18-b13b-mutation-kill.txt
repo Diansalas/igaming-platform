@@ -1,0 +1,92 @@
+PRH2 R18 B13-B (ADR 0111 section 16; migration 0126 placeholder number) - MUTATION-KILL EVIDENCE
+Scope: migrations/0126_payout_binding_required.up.sql, internal/withdrawal, internal/payments (payout.go, payout_destination.go, payout_sweep.go, receipt.go, manual_resolution.go, payout_alerts.go),
+internal/payoutinstrument (dispatch.go, startup.go), internal/providerkind (embedding_scan.go), internal/httpserver (withdrawal_handlers.go).
+Generated 2026-10-09 on branch gov-r18-b13b. Method: each mutant is applied IN PLACE to the named file of a throw-away copy of the committed tree (git archive; the working tree under test is never
+touched), the target package is vetted with -tags integration (a mutant that fails to compile is reported and NOT counted), the targeted tests run against a private scratch database
+(PRIV_DB=r18b13b_priv3; the payments tests create their own scratch databases), then the file is restored from a backup taken first. -failfast is used, so the killer is the first failing test.
+SQL mutants edit the migration and rebuild the private database from the mutated file, and again from the restored file. The mutation loops are NOT under -race (compile time); the final suites
+are (ADR 0111 section 16.3). A separate Go build cache was used for the loops and deleted afterwards. After the last run the copy was compared with the committed tree (diff -r): identical.
+
+CONTROL (unmutated copy, same commands): internal/withdrawal rc=0; internal/payoutinstrument rc=0; internal/providerkind rc=0; internal/payments rc=0; internal/httpserver rc=0
+
+Counted mutants: 54   KILLED: 51   SURVIVED: 3 (all EQUIVALENT, listed below)   not counted (compile/apply error): 0
+
+id    result    mutation / first failing test
+B01   KILLED    0126: guard does not refuse NULL/NULL  =>  --- FAIL: TestBinding_InsertGuard (0.07s)
+B02   KILLED    0126: guard refuses a half binding with PI046 instead of leaving it to the CHECK (id NULL branch removed)  =>  --- FAIL: TestBinding_InsertGuard (0.11s)
+B03   KILLED    RequestWithdrawal: missing instrument not refused up front  =>  --- FAIL: TestB13B_Request_RefusalsWriteNothing_AndDoNotConsumeTheKey (0.19s)
+B04   KILLED    RequestWithdrawal: nil gate not refused  =>  --- FAIL: TestB13B_Request_RefusalsWriteNothing_AndDoNotConsumeTheKey (0.14s)
+B05   KILLED    RequestWithdrawal: gate refusal not mapped to NotUsable  =>  --- FAIL: TestB13B_Request_RefusalsWriteNothing_AndDoNotConsumeTheKey (0.17s)
+B06   KILLED    replay ignores the instrument  =>  --- FAIL: TestB13B_Request_Replay (0.11s)
+B07   KILLED    request: gate runs without the FOR SHARE lock  =>  --- FAIL: TestB13B_Request_WaitsForARevocationInFlight_ThenIsRefused (0.81s)
+B10   KILLED    T1p: destination gate skipped  =>  --- FAIL: TestB13B_T1p_WritesTheSnapshot_RailFromTheInstrument (4.06s)
+B11   KILLED    T1p: refusal rolls back instead of committing the denial audit  =>  --- FAIL: TestB13B_T1p_DestinationGateRefusals (2.79s)
+B12   KILLED    T1p: snapshot not written  =>  --- FAIL: TestB13B_T1p_WritesTheSnapshot_RailFromTheInstrument (3.10s)
+B13   KILLED    T1p: body method not compared (mismatch accepted)  =>  --- FAIL: TestB13B_T1p_StaffBodyCannotInfluenceTheDestination (4.19s)
+B14   KILLED    T1p: route uses the body method for a bound withdrawal  =>  --- FAIL: TestB13B_T1p_StaffBodyCannotInfluenceTheDestination (3.27s)
+B15   KILLED    T1p: allow decision row written BEFORE the destination gate (refusal leaves an allow row)  =>  --- FAIL: TestB13B_T1p_DestinationGateRefusals (2.80s)
+B16   KILLED    T1p: tiering predicate not applied (adapter passed as nil to the gate rule only for non-Synthetic)  =>  --- FAIL: TestB13B_T1p_NonSyntheticAdapter_TieringMatrix (2.69s)
+B17   KILLED    legacy unbound: tiering predicate skipped (non-Synthetic accepted)  =>  --- FAIL: TestB13B_T1p_LegacyUnbound_SyntheticOnly (2.62s)
+B20   KILLED    phase B: destination gate not applied  =>  --- FAIL: TestB13B_PhaseB_Refusals_MakeNoProviderCall (3.07s)
+B21   KILLED    phase B: tier check runs on a Synthetic stand-in, not the exact adapter value  =>  --- FAIL: TestB13B_PhaseB_Refusals_MakeNoProviderCall (8.62s)
+B22   KILLED    phase B: Destination not handed to the adapter  =>  --- FAIL: TestB13B_T1p_NonSyntheticAdapter_TieringMatrix (3.03s)
+B23   KILLED    phase B: snapshot not checked  =>  --- FAIL: TestB13B_PhaseB_SnapshotMustEqualWhatIsSent (3.94s)
+B24   KILLED    phase B: no-service case allowed for a bound withdrawal  =>  --- FAIL: TestB13B_PhaseB_Refusals_MakeNoProviderCall (12.16s)
+B30   KILLED    T2/T12: destination gate always allows  =>  --- FAIL: TestB13B_T2_Reclaim_EscalatesOnBlockedDestination (2.80s)
+B31   KILLED    T2/T12: snapshot not re-checked  =>  --- FAIL: TestB13B_T2_Reclaim_EscalatesOnBlockedDestination (6.50s)
+B32   KILLED    T2/T12: escalation without the B12 alert  =>  --- FAIL: TestB13B_T2_Reclaim_EscalatesOnBlockedDestination (2.92s)
+B33   KILLED    T2/T12: an already-escalated attempt escalates again (no idempotence)  =>  --- FAIL: TestB13B_T2_Reclaim_EscalatesOnBlockedDestination (4.34s)
+B34   KILLED    sweeper dispatch drops the payout options  =>  --- FAIL: TestB13B_T2_Reclaim_IntactDestinationDispatches (3.23s)
+B35   KILLED    HTTP handler drops the payout options on phase B  =>  --- FAIL: TestB13B_Static_ProductionCallSitesPassPayoutOptions (0.27s)
+B40   KILLED    evidence: echo mismatch ignored (compare always equal)  =>  --- FAIL: TestCompareEcho (0.00s)
+B41   KILLED    evidence: unknown kid not a mismatch  =>  --- FAIL: TestCompareEcho (0.00s)
+B42   KILLED    evidence: mismatch parks nothing (verdict ignored)  =>  --- FAIL: TestB13B_Echo_Sync_Mismatch_ParksEveryOutcome (4.18s)
+B43   KILLED    evidence: sync phase C check removed  =>  --- FAIL: TestB13B_Echo_Sync_Mismatch_ParksEveryOutcome (2.80s)
+B44   KILLED    evidence: poll check removed  =>  --- FAIL: TestB13B_Echo_Poll (2.88s)
+B45   KILLED    evidence: callback hook removed  =>  --- FAIL: TestB13B_Echo_Callback (3.91s)
+B46   KILLED    evidence: absent echo on a declared success settles  =>  --- FAIL: TestB13B_Echo_AbsentOnSuccess_DependsOnTheManifest (4.61s)
+B47   KILLED    evidence: snapshot integrity failure not parked (treated as pass)  =>  --- FAIL: TestB13B_Evidence_MissingOrTamperedSnapshot_ParksAsIntegrityFailure (13.81s)
+B48   KILLED    evidence: no destination service does not fail closed  =>  --- FAIL: TestB13B_Evidence_MissingOrTamperedSnapshot_ParksAsIntegrityFailure (11.70s)
+B49   KILLED    evidence: terminal-attempt signal removed  =>  --- FAIL: TestB13B_Echo_OnTerminalSucceeded_SignalOnly (3.54s)
+B50   KILLED    park: no B12 alert  =>  --- FAIL: TestB13B_Echo_Sync_Mismatch_ParksEveryOutcome (3.59s)
+B51   KILLED    park: no audit row  =>  --- FAIL: TestB13B_Echo_Sync_Mismatch_ParksEveryOutcome (3.58s)
+B52   KILLED    park: the legacy (unbound) check removed (a bound-only comparison runs for unbound rows)  =>  --- FAIL: TestB13B_Echo_LegacyUnboundIsNotCompared (3.22s)
+B60   KILLED    startup: L-8 clause reinstated  =>  --- FAIL: TestStartupGateMatrix (0.00s)
+B61   KILLED    dispute reasons: destination_mismatch M2-admitted  =>  --- FAIL: TestB13B_ClosedReasons (0.00s)
+B62   KILLED    alert reason mapping drops the signal reason  =>  --- FAIL: TestB13B_ClosedReasons (0.00s)
+B63   KILLED    embedding scan ignores pointer embedding  =>  --- FAIL: TestSyntheticEmbedding_NegativeControl (0.00s)
+B64   KILLED    embedding scan has no transitive fixpoint  =>  --- FAIL: TestSyntheticEmbedding_NegativeControl (0.00s)
+B65   KILLED    embedding scan exempts every type (own-marker set widened)  =>  --- FAIL: TestSyntheticEmbedding_NegativeControl (0.00s)
+B66   KILLED    CheckSnapshot: amount not compared  =>  --- FAIL: TestCheckSnapshot (0.16s)
+B67   KILLED    CheckSnapshot: fingerprint not compared  =>  --- FAIL: TestCheckSnapshot (0.10s)
+B68   KILLED    CheckSnapshot: missing snapshot reported as not-usable (non-integrity)  =>  --- FAIL: TestCheckSnapshot (0.11s)
+B70   SURVIVED  HTTP: missing instrument not refused
+B71   KILLED    HTTP: T1p refusal not mapped  =>  --- FAIL: TestSubmitWithdrawalHandler_B13B_UnusableDestination (0.78s)
+B72   KILLED    HTTP: nil service becomes a non-nil interface holding nil (fail-open shape)  =>  --- FAIL: TestRequestWithdrawalHandler_B13B_NoServiceFailsClosed (0.35s)
+B80   SURVIVED  gatePayoutDestination: withdrawal fingerprint vs instrument fingerprint not compared (the composite FK already pins them)
+B81   SURVIVED  T1p: instrument rail vs routed method relation check removed (rail is immutable and is what was routed)
+B82   KILLED    phase B: snapshot rail vs attempt method not compared  =>  --- FAIL: TestB13B_PhaseB_SnapshotMustEqualWhatIsSent (5.33s)
+
+HISTORY (mutants that did not die, or did not compile, on the first run; what changed):
+  B07  run 1: SURVIVED -> run 2 (corrected mutant and/or new test): KILLED
+  B10  run 1: NOTCOUNTED -> run 2 (corrected mutant and/or new test): KILLED
+  B13  run 1: NOTCOUNTED -> run 2 (corrected mutant and/or new test): KILLED
+  B14  run 1: SURVIVED -> run 2 (corrected mutant and/or new test): KILLED
+  B23  run 1: SURVIVED -> run 2 (corrected mutant and/or new test): KILLED
+  B42  run 1: NOTCOUNTED -> run 2 (corrected mutant and/or new test): KILLED
+  B47  run 1: NOTCOUNTED -> run 2 (corrected mutant and/or new test): KILLED
+  B48  run 1: NOTCOUNTED -> run 2 (corrected mutant and/or new test): KILLED
+  B52  run 1: SURVIVED -> run 2 (corrected mutant and/or new test): KILLED
+  B66  run 1: NOTCOUNTED -> run 2 (corrected mutant and/or new test): KILLED
+  B23 additionally needed a new test (TestB13B_PhaseB_SnapshotMustEqualWhatIsSent: the attempt differs from its sealed snapshot); B07 a new deterministic lock test
+  (TestB13B_Request_WaitsForARevocationInFlight_ThenIsRefused); B52 a new legacy test (TestB13B_Echo_LegacyUnboundIsNotCompared); B14 a corrected test selection; B10/B13/B42/B47/B48/B66 were
+  rewritten into forms that compile and vet clean (the first forms left an unused variable / unreachable code).
+
+EQUIVALENT / ACCEPTED SURVIVORS (each is a Go check that duplicates a database guarantee, kept as defence in depth):
+  B70  HTTP handler: a missing payout_instrument_id is turned into uuid.Nil. withdrawal.RequestWithdrawal refuses uuid.Nil with the same ErrPayoutInstrumentRequired, which the handler maps to the
+       same 409 PAYOUT_INSTRUMENT_REQUIRED: two layers refuse the same input with the same response, so removing the handler layer is unobservable.
+  B80  gatePayoutDestination: withdrawal.payout_instrument_fingerprint vs the instrument fingerprint. The composite foreign key (instrument, fingerprint) of migration 0123 makes the two
+       equal by construction and the immutability trigger forbids changing either; a row with a different pair cannot exist (the FK is not a user trigger, so even an owner tamper that
+       disables user triggers cannot create it).
+  B81  ClaimForDispatch: instrument.rail vs the routed payment method. The method used for routing IS the instrument rail read in A0 (RailOf), and the rail is an immutable instrument column;
+       the two can differ only if a tamper changes the rail between A0 and T1p, which the instrument seal (verified by the gate in the same transaction) already refuses first.
