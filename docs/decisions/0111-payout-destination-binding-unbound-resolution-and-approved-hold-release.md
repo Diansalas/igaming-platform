@@ -1340,7 +1340,15 @@ matrix, T2/T12 escalation and idempotence, sync/poll/callback echo cells, absent
 concurrency, replay, partial failure; plus the static guards), `internal/payoutinstrument` (`TestMigration0126_*`, flipped
 `TestBinding_InsertGuard`, `TestCheckSnapshot`, `TestCompareEcho`, startup matrix), `internal/httpserver` (`*_B13B_*`),
 `internal/providerkind` (`TestSyntheticEmbedding_*`). Mutation-kill evidence:
-`docs/plans/prh2-hardening-round/prh2-r18-b13b-mutation-kill.txt`.
+`docs/plans/prh2-hardening-round/prh2-r18-b13b-mutation-kill.txt` (54 counted, 51 killed, 3 equivalent survivors, each a Go check that
+duplicates a database guarantee).
+
+Final runs (top-level tests, `-race -tags integration -count=1 -p 1`, 0 SKIP everywhere, so the integration tests did run): payments 856 PASS /
+0 FAIL (the full package; the later `TestB13B_*` additions re-run separately: 30 PASS), withdrawal 61, payoutinstrument 75, providerkind 10,
+reconciliation 223, casino 280, providercred 92, wallet 9, cmd/platform-api 52, config 52, auth 99, db 137, httpserver 636 PASS / 2 FAIL.
+The two httpserver failures are `TestResolutionIsolation_*` latency bounds (500 ms / 400 ms) that fail intermittently on a loaded shared host;
+they fail the same way on the unmodified base `a355244` (checked), they exercise deposit and casino callbacks, and nothing in this change is on
+their path.
 
 ### 16.4 Questions for the owner / architect (none changes decisions 1-8; each fails closed today)
 
