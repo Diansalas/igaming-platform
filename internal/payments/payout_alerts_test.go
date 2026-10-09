@@ -47,7 +47,7 @@ func TestPayoutAlertReasonFor_ClosedSet(t *testing.T) {
 			t.Errorf("signal reason %q must not be an escalation reason", reason)
 		}
 	}
-	if len(payoutSignalReasons) != 4 || alertReasonPayoutForeignRefSuccessOnSucceeded != "foreign_reference_success_on_succeeded_payout" ||
+	if len(payoutSignalReasons) != 6 || alertReasonPayoutForeignRefSuccessOnSucceeded != "foreign_reference_success_on_succeeded_payout" ||
 		alertReasonPayoutMismatchedSuccessOnDeclined != "mismatched_success_on_declined_payout" ||
 		alertReasonPayoutMismatchedSuccessOnSucceeded != "mismatched_success_on_succeeded_payout" {
 		t.Fatalf("the payout signal set changed (%v): review the receipt call sites and ADR 0095 section 42", payoutSignalReasons)

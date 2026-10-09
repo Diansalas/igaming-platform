@@ -79,6 +79,9 @@ var payoutSignalReasons = map[string]struct{}{
 	alertReasonPayoutForeignRefSuccessOnSucceeded: {},
 	// B13-B: a differing destination echo on an already succeeded/declined payout.
 	alertReasonPayoutDestinationMismatchOnTerminal: {},
+	// ADR 0111 4.8 (F-1): the post-M4 signal cells (payout_post_m4.go). Raise only; the attempt stays disputed.
+	alertReasonPayoutSuccessAfterM4NotPaid:    {},
+	alertReasonPayoutContradictionAfterM4Paid: {},
 }
 
 // payoutAlertReasonFor maps a payout terminal or escalation reason to its

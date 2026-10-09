@@ -938,7 +938,11 @@ func applyResolvedReceiptEvidence(ctx context.Context, tx pgx.Tx, o *Orchestrato
 					alertAfterDispute(ctx, tx, attempt, TerminalReasonSuccessForNeverSentAttempt,
 						ApplyDisputeFromNeverSent(ctx, tx, attempt.ID, EvidenceCallback, TerminalReasonSuccessForNeverSentAttempt))))
 		case AttemptDisputed:
-			return false, ResolutionAnomalyOther, nil // already terminal-disputed: no-op
+			// ADR 0111 4.8 (F-1): a payout success after an EXECUTED m4_evidence_not_paid is the post-resolution signal
+			// success_after_m4_not_paid (audit once per new receipt, then the raise as the LAST statement; no state change,
+			// no posting). Without an executed M4 on this attempt, and for a deposit, it stays the no-op it always was.
+			newReceipt := !alreadyApplied
+			return false, ResolutionAnomalyOther, payoutPostM4Cell(ctx, tx, attempt, OutcomeSucceeded, EvidenceCallback, &newReceipt, ev.ProviderReference)
 		case AttemptSucceeded:
 			// RV-PRH-I1 ledger-finance M1: a mismatched "success" on an
 			// ALREADY-succeeded attempt must never be treated as the same
@@ -1147,6 +1151,12 @@ func applyResolvedReceiptEvidence(ctx context.Context, tx pgx.Tx, o *Orchestrato
 		switch attempt.State {
 		case AttemptSubmitting, AttemptPending, AttemptAmbiguous:
 			// handled below, outside the switch
+		case AttemptDisputed:
+			// ADR 0111 4.8 (F-1): a payout decline after an EXECUTED m4_evidence_paid is the post-resolution signal
+			// contradiction_after_m4_paid (audit once per new receipt, then the raise as the LAST statement; no state change,
+			// no posting). Otherwise (no executed M4, a deposit) the no-op below.
+			newReceipt := !alreadyApplied
+			return false, ResolutionAnomalyOther, payoutPostM4Cell(ctx, tx, attempt, OutcomeDeclined, EvidenceCallback, &newReceipt, ev.ProviderReference)
 		default:
 			// created/rejected/declined/succeeded/disputed: §4.4's
 			// declined/succeeded rows (and every other terminal state)

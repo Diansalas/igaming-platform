@@ -868,7 +868,7 @@ func applyPayoutSuccess(ctx context.Context, tx pgx.Tx, requestID uuid.UUID, att
 	}
 	if err := ApplySuccess(ctx, tx, attempt.ID, SuccessEvidence{Evidence: evidence, ProviderReference: ref}); err != nil {
 		if errors.Is(err, ErrAttemptStateConflict) {
-			return applyPayoutLateEvidence(ctx, tx, attempt, evidence, "late_success_after_terminal", requestID)
+			return applyPayoutLateEvidence(ctx, tx, attempt, evidence, "late_success_after_terminal", requestID, OutcomeSucceeded)
 		}
 		return err
 	}
@@ -905,7 +905,7 @@ func applyPayoutDecline(ctx context.Context, tx pgx.Tx, requestID uuid.UUID, att
 		Cascadable: &cascadable, ProviderRef: refPtr,
 	}); err != nil {
 		if errors.Is(err, ErrAttemptStateConflict) {
-			return applyPayoutLateEvidence(ctx, tx, attempt, evidence, "late_decline_after_terminal", requestID)
+			return applyPayoutLateEvidence(ctx, tx, attempt, evidence, "late_decline_after_terminal", requestID, OutcomeDeclined)
 		}
 		return err
 	}
@@ -925,7 +925,7 @@ func applyPayoutDecline(ctx context.Context, tx pgx.Tx, requestID uuid.UUID, att
 // T14 (a real double-payout candidate - P1). Any other contradiction (an
 // attempt that somehow is not in a state this file expects) is parked via
 // T10, never silently dropped.
-func applyPayoutLateEvidence(ctx context.Context, tx pgx.Tx, attempt PaymentAttempt, evidence EvidenceKind, terminalReason string, requestID uuid.UUID) error {
+func applyPayoutLateEvidence(ctx context.Context, tx pgx.Tx, attempt PaymentAttempt, evidence EvidenceKind, terminalReason string, requestID uuid.UUID, observed Outcome) error {
 	current, err := GetAttemptByID(ctx, tx, attempt.ID)
 	if err != nil {
 		return err
@@ -942,9 +942,14 @@ func applyPayoutLateEvidence(ctx context.Context, tx pgx.Tx, attempt PaymentAtte
 			return nil
 		}
 		applyErr = ApplyDisputeFromDeclinedPayout(ctx, tx, attempt.ID, evidence, terminalReason)
-	case AttemptSucceeded, AttemptDisputed, AttemptRejected:
-		// Already resolved (a benign replay, or an already-parked
-		// dispute) - nothing further to do; not itself a P1.
+	case AttemptDisputed:
+		// ADR 0111 4.8 (F-1): a definite result that lost the CAS to an attempt already parked `disputed`. Normally a benign
+		// replay (an already-parked dispute: nothing further, not itself a P1), EXCEPT after an executed M4: a success after
+		// m4_evidence_not_paid, or a decline after m4_evidence_paid, is the post-resolution signal (audit, then the raise
+		// as the LAST statement; no state change). The cell is a no-op without an executed M4 of the matching kind.
+		return payoutPostM4Cell(ctx, tx, attempt, observed, evidence, nil, "")
+	case AttemptSucceeded, AttemptRejected:
+		// Already resolved (a benign replay) - nothing further to do; not itself a P1.
 		return nil
 	default:
 		applyErr = ApplyDisputeFromNonTerminal(ctx, tx, attempt.ID, evidence, terminalReason)
@@ -1011,7 +1016,11 @@ func payoutHandleContradiction(ctx context.Context, tx pgx.Tx, attempt PaymentAt
 		// look; this is convergence, not a contradiction.
 		return RescheduleNonTerminal(ctx, tx, attempt.ID, time.Now().Add(payoutNextPollInterval))
 	}
-	return applyPayoutLateEvidence(ctx, tx, attempt, evidence, "late_contradicting_evidence", *attempt.WithdrawalRequestID)
+	observed := OutcomeDeclined
+	if resultClass == ErrorClassSucceeded {
+		observed = OutcomeSucceeded
+	}
+	return applyPayoutLateEvidence(ctx, tx, attempt, evidence, "late_contradicting_evidence", *attempt.WithdrawalRequestID, observed)
 }
 
 // ErrInvalidPayoutEvidence is returned when a definite outcome carries no
@@ -1293,6 +1302,19 @@ func applyPayoutStatusEvidenceInTx(actx context.Context, tx pgx.Tx, env payoutEn
 				// resend-vs-escalate by re-reading state afterward (C1/B1).
 				return RescheduleNonTerminal(actx, tx, attempt.ID, nextPoll)
 			}
+
+		case AttemptDisputed:
+			// ADR 0111 4.8 (F-1): a parked attempt polled after an EXECUTED M4. A definite success after
+			// m4_evidence_not_paid / a definite decline after m4_evidence_paid is the post-resolution signal (audit once per
+			// attempt and reason for the poll source, then the raise as the LAST statement; no state change). Anything else
+			// (no executed M4, pending, ambiguous) stays the no-op it was.
+			switch gr.Class {
+			case ErrorClassSucceeded:
+				return payoutPostM4Cell(actx, tx, attempt, OutcomeSucceeded, evidence, nil, res.ProviderReference)
+			case ErrorClassDefiniteDecline:
+				return payoutPostM4Cell(actx, tx, attempt, OutcomeDeclined, evidence, nil, res.ProviderReference)
+			}
+			return nil
 
 		default:
 			// Terminal, or `created` (not pollable by reference) - nothing
