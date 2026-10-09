@@ -100,3 +100,23 @@ func legacyBindingChecker(pool *db.Pool) payoutinstrument.LegacyBindingChecker {
 		return total, nil
 	}
 }
+
+// bindingGuardChecker reads the source of the binding guard function (catalog read; no tenant data).
+func bindingGuardChecker(pool *db.Pool) payoutinstrument.BindingGuardChecker {
+	return func(ctx context.Context) (string, error) {
+		var src string
+		err := pool.WithoutTenant(ctx, func(ctx context.Context, tx pgx.Tx) error {
+			return tx.QueryRow(ctx, `SELECT prosrc FROM pg_proc WHERE proname = 'withdrawal_requests_payout_binding_guard' AND pronamespace = 'public'::regnamespace`).Scan(&src)
+		})
+		return src, err
+	}
+}
+
+// payoutRegistrations is the set the startup gates inspect.
+func payoutRegistrations(b providerBundle) payoutinstrument.Registrations {
+	var adapters []any
+	for _, a := range b.paymentsAdapters() {
+		adapters = append(adapters, a)
+	}
+	return payoutinstrument.Registrations{PaymentAdapters: adapters}
+}

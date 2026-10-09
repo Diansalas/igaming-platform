@@ -14,6 +14,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/apierror"
 	"github.com/Diansalas/igaming-platform/internal/payoutinstrument"
 	"github.com/Diansalas/igaming-platform/internal/payoutinstrument/pitest"
+	"github.com/Diansalas/igaming-platform/internal/testsupport/alertinject"
 )
 
 // B13-B HTTP surface (ADR 0111 2.4): the player binds a payout instrument at POST /v1/me/withdrawals (a
@@ -194,5 +195,67 @@ func TestSubmitWithdrawalHandler_B13B_UnusableDestination(t *testing.T) {
 	}
 	if f.mock.AttemptCount() != 0 {
 		t.Fatal("the provider must not be called")
+	}
+}
+
+// Security L-2: a seal/integrity refusal at request time (a tampered instrument) raises a detached P1; the request
+// still writes nothing and answers the same generic 409.
+func TestRequestWithdrawalHandler_B13B_IntegrityRefusalRaisesAP1(t *testing.T) {
+	pool, issuer := testEnv(t)
+	srv := newFinancialTestServer(t, pool, issuer, nil)
+	tenant := mustCreateTenant(t, pool)
+	brand := mustCreateBrand(t, pool, tenant)
+	player := mustRegisterPlayer(t, srv, brand.Slug)
+	mustActivatePlayer(t, pool, tenant.ID, player.ID)
+	fundWallet(t, pool, tenant.ID, brand.ID, player.ID, "EUR", 100_000)
+	mustApproveKYCForWithdrawal(t, pool, tenant.ID, brand.ID, player.ID)
+	inst := pitest.Bind(t, pool, tenant.ID, player.ID, "EUR")
+	post := func(key string) *http.Response {
+		return postJSON(t, srv, "/v1/me/withdrawals", player.Tokens.AccessToken, map[string]any{
+			"asset_code": "EUR", "amount": 500, "idempotency_key": key, "payout_instrument_id": inst.String(),
+		})
+	}
+	// An ordinary refusal (suspended) raises nothing.
+	if err := pool.WithTenant(context.Background(), tenant.ID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := pitest.Shared().Suspend(ctx, tx, payoutinstrument.BlockParams{TenantID: tenant.ID, InstrumentID: inst,
+			Actor: payoutinstrument.Actor{Type: payoutinstrument.ActorStaff, ID: uuid.NewString()}, ReasonCode: "aml_review"})
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if resp := post("k-l2-a"); resp.StatusCode != http.StatusConflict || apiCode(t, resp) != apierror.CodePayoutInstrumentNotUsable {
+		t.Fatal("want 409 NOT_USABLE")
+	}
+	if rows := alertinject.ForSubject(t, pool, tenant.ID); len(rows) != 0 {
+		t.Fatalf("an ordinary refusal must raise nothing: %+v", rows)
+	}
+	// Tamper a sealed column (owner, triggers off for one statement): integrity refusal.
+	if err := pool.WithTenant(context.Background(), tenant.ID, func(ctx context.Context, tx pgx.Tx) error {
+		for _, q := range []string{`ALTER TABLE payout_instruments DISABLE TRIGGER USER`, `ALTER TABLE payout_instruments NO FORCE ROW LEVEL SECURITY`,
+			`UPDATE payout_instruments SET display_mask = 'XX****0000' WHERE id = '` + inst.String() + `'`,
+			`ALTER TABLE payout_instruments FORCE ROW LEVEL SECURITY`, `ALTER TABLE payout_instruments ENABLE TRIGGER USER`} {
+			if _, err := tx.Exec(ctx, q); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if resp := post("k-l2-b"); resp.StatusCode != http.StatusConflict || apiCode(t, resp) != apierror.CodePayoutInstrumentNotUsable {
+		t.Fatal("want the same generic 409")
+	}
+	want := "payout_instrument:" + inst.String() + ":reason:destination_integrity:" + payoutinstrument.ReasonSealInvalid
+	found := false
+	for _, r := range alertinject.ForSubject(t, pool, tenant.ID) {
+		if r.Discriminator == want && r.Severity == "p1" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("no P1 %s", want)
+	}
+	if n := countRows(t, pool, tenant.ID, `SELECT count(*) FROM withdrawal_requests WHERE tenant_id = $1`, tenant.ID); n != 0 {
+		t.Fatalf("rows = %d", n)
 	}
 }

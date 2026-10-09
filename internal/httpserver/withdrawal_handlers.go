@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/Diansalas/igaming-platform/internal/alerting"
 	"github.com/Diansalas/igaming-platform/internal/apierror"
 	"github.com/Diansalas/igaming-platform/internal/assetregistry"
 	"github.com/Diansalas/igaming-platform/internal/audit"
@@ -187,6 +188,12 @@ func newRequestWithdrawalHandler(deps Deps) http.HandlerFunc {
 			var gr *payoutinstrument.GateRefusal
 			if errors.As(err, &gr) {
 				logger.Warn("request_withdrawal_payout_instrument_not_usable", "reason", gr.Reason, "integrity", gr.Integrity())
+				if gr.Integrity() {
+					// Security L-2: a seal / integrity refusal is a tamper signal. The request transaction rolled
+					// back, so the P1 is raised detached (existing Kind, closed reason, ids only).
+					_ = alerting.RaiseDetached(r.Context(), alerting.NewTenantRunner(deps.DB, tc.TenantID),
+						payments.DestinationIntegrityAlert(tc.TenantID, "payout_instrument:"+instrumentID.String(), gr.Reason))
+				}
 			}
 			apierror.Write(w, requestID, apierror.CodePayoutInstrumentNotUsable, "the payout instrument cannot be used for this withdrawal")
 			return

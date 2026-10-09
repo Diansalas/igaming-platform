@@ -1459,6 +1459,30 @@ statement about a real PSP, a custodian or a licence: every provider in the test
   payout signal reasons 3 -> 4, `payout_destination.go` joins `payout.go` / `payout_sweep.go` as a payout-only file in the deposit terminal-reason
   scan, and the B12 per-site table skips the `destination_*` reasons (covered by `TestB13B_*`).
 
+- **B13B-15 (security H-1: an echo-carrying receipt is never deferred).** The echo is deliberately not persisted (S95-C10, no new
+  column), so a payout success callback carrying one that arrived before any attempt held the reference would have been stored as a
+  `deferred_unresolved` receipt and later drained **without** the comparison. Chosen: **(b)** close such a receipt as an anomaly
+  (`anomaly_other`) in `ApplyReceiptEvidence`, write one audit row (`payments.payout_echo_receipt_unattributable`, once per receipt) and
+  raise a receipt-subject P1 (`receipt:<id>:reason:payout_echo_receipt_unattributable`, existing Kind) as the last statement. Not (a):
+  a retryable refusal depends on each provider redelivering on a 5xx (not guaranteed, adapter-specific, PROVIDER DEPENDENT) and would turn
+  a security signal into a retry loop; not (c): it needs a migration and the brief excludes one. Settlement then waits for the
+  QueryStatus poll, which compares. A later echo-free redelivery of the same event dedupes against the closed row. Residual: an adapter
+  that does **not** declare `EchoesDestinationFingerprint` and later sends a separate echo-free success for the reference settles as
+  ordinary evidence (it has no echo to compare); the audit row and the P1 are the control. An echo-declaring adapter cannot settle on an
+  echo-free success (ambiguous).
+- **B13B-16 (security L-1..L-4 and the info finding).** L-1: `gatePayoutDestination` (dispatch gates only) refuses a nil adapter
+  (`tier_refused`); `EvaluateGate`'s nil-adapter "request creation" meaning is no longer reachable from a dispatch gate. L-2: an integrity
+  (seal / fingerprint / snapshot) refusal raises a P1 on the existing Kind: at T1p as the last statement of the claim transaction
+  (`withdrawal:<id>:reason:destination_integrity:<closed reason>`, the claim now opens through `alerting.InTx`), at request time detached
+  after the rollback (`payout_instrument:<id>:...`); ordinary refusals raise nothing. L-3: `ScanForSyntheticEmbedding` also tracks
+  interface embedding (an interface embedding `providerkind.Synthetic` or an inheriting type is a finding; an interface that lists
+  `SyntheticComponent` is a marker declaration) with fixtures. L-4: `payoutinstrument.VerifyBindingGuardApplied`, wired in
+  `cmd/platform-api`, refuses to start when a non-Synthetic payout adapter is registered and the guard source does not contain `PI046`
+  (migration 0126 not applied). 0124 does not replace the guard and 0125 does not exist yet; if RESOLVE-1 (0125) or any later migration
+  `CREATE OR REPLACE`s `withdrawal_requests_payout_binding_guard()` it must keep the `PI046` NULL/NULL refusal (the startup check and
+  `TestMigration0126_UpDownUp_WholeSchema` key on it). Info: `GateResult` (it carries the decrypted `Detail`) redacts under
+  `String`/`GoString`/`Format`/`LogValue`/JSON.
+
 ### 18.3 Evidence
 
 Tests (all `-race -tags integration -count=1 -p 1`, private scratch database, runtime role where the package uses it):
@@ -1481,9 +1505,11 @@ their path.
 
 ### 18.4 Questions for the owner / architect (none changes decisions 1-8; each fails closed today)
 
-1. **Should the instrument's current state also gate settlement?** Today a suspension after the call was made does not block recording
-   the provider's result (B13B-2). The alternative parks every evidence on a suspended instrument, which can strand a payout that was
-   actually sent.
+1. **OPEN OWNER QUESTION: should the instrument's current state also gate settlement?** Today a suspension after the call was made
+   does not block recording the provider's result (B13B-2). The alternative parks every evidence on a suspended instrument, which can
+   strand a payout that was actually sent. Security recommends KEEPING the current behaviour; this is a policy decision for the owner
+   and is not decided here. A non-blocking compliance signal on settlement against a blocked instrument is recorded as an OPTION only
+   and is NOT adopted or built.
 2. **Tenant for the adapter-side echo (B13B-8).** Add the tenant (and the snapshot's `FingerprintKid`) to the request/context the adapter
    receives, or inject a per-tenant fingerprinter factory. Required before any real adapter can echo.
 3. **Dev/MOCK key provisioning.** Binding is mandatory in MOCK, so every non-production environment needs the key families (runbook). Is

@@ -36,3 +36,25 @@ type Composes struct{ M FixtureMarker }
 
 // Plain is unrelated: NOT a finding.
 type Plain struct{ X int }
+
+// IfaceEmbedsMarker is a "real" interface embedding the Synthetic interface: FINDING (L-3).
+type IfaceEmbedsMarker interface {
+	providerkind.Synthetic
+	Name() string
+}
+
+// IfaceEmbedsLocal embeds a marked-by-method interface declared in this package: FINDING (transitive).
+type IfaceEmbedsLocal interface{ IfaceEmbedsMarker }
+
+// StructEmbedsIface embeds a finding interface: FINDING (the interface is itself Synthetic-inheriting).
+type StructEmbedsIface struct{ IfaceEmbedsMarker }
+
+// IfaceDeclaresMarker lists the marker method itself: a marker declaration, NOT a finding.
+type IfaceDeclaresMarker interface{ SyntheticComponent() }
+
+// StructEmbedsDeclared embeds an interface that declares the marker: FINDING (it inherits the marker).
+type StructEmbedsDeclared struct{ IfaceDeclaresMarker }
+
+// IfacePlain embeds an unrelated interface: NOT a finding.
+type IfacePlain interface{ fmtStringer }
+type fmtStringer interface{ String() string }

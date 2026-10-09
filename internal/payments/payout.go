@@ -325,7 +325,9 @@ func (o *Orchestrator) ClaimForDispatch(ctx context.Context, pool *db.Pool, kycG
 	// destRefusal is set (and the closure returns nil, so the tx COMMITS) when the destination
 	// gate refuses: only the denial audit is written (ADR 0111 2.4).
 	var destRefusal error
-	err := pool.WithTenant(ctx, tenantID, func(actx context.Context, tx pgx.Tx) error {
+	// Security L-2: the claim transaction opens through alerting.InTx so an INTEGRITY refusal can raise its P1 as the
+	// last statement of the transaction and flush after the commit (ADR 0102 7.7).
+	pending, err := alerting.InTx(ctx, alerting.NewTenantRunner(pool, tenantID), func(actx context.Context, tx pgx.Tx) error {
 		wr, err := withdrawal.LockApprovedForSubmission(actx, tx, requestID)
 		if err != nil {
 			return err
@@ -431,6 +433,10 @@ func (o *Orchestrator) ClaimForDispatch(ctx context.Context, pool *db.Pool, kycG
 				return err
 			}
 			destRefusal = gerr
+			if g.Integrity() {
+				// raise last: nothing else touches the alert tables after this statement.
+				return alerting.RaiseGuarded(actx, tx, DestinationIntegrityAlert(tenantID, "withdrawal:"+requestID.String(), g.Reason))
+			}
 			return nil
 		}
 
@@ -505,6 +511,7 @@ func (o *Orchestrator) ClaimForDispatch(ctx context.Context, pool *db.Pool, kycG
 		}
 		return ClaimResult{}, err
 	}
+	pending.Flush(ctx) // post-commit only; the error path above returned before any Pending exists
 	if destRefusal != nil {
 		// Returned only AFTER the commit above: the denial audit is durable; the request is
 		// still `approved`, no attempt, no provider call.

@@ -215,7 +215,8 @@ type ReceiptEvidence struct {
 	RawOutcome Outcome
 
 	// DestinationEcho (B13-B): payout events only; compared with the attempt's snapshot, never
-	// persisted, never part of the event fingerprint (computeEventFingerprint ignores it).
+	// persisted, never part of the event fingerprint. Because it is not persisted, a payout receipt carrying one is never stored as a
+	// deferred receipt (ApplyReceiptEvidence closes it as an anomaly and raises a P1: security H-1).
 	DestinationEcho *payoutinstrument.DestinationEcho
 }
 
@@ -574,6 +575,35 @@ func ApplyReceiptEvidence(ctx context.Context, tx pgx.Tx, o *Orchestrator, tenan
 			return "", err
 		}
 		if err := auditOversizeForNewReceipt(ctx, tx, tenantID, verifiedProviderID, receiptID, duplicate, oversizedDeclineReason, originalDeclineReason); err != nil {
+			return "", err
+		}
+		return DispositionAnomaly, nil
+	}
+
+	if !resolved.Found && ev.EventType == "payout" && ev.DestinationEcho != nil {
+		// B13-B security H-1 (ADR 0111 section 18, B13B-15): a payout receipt that carries a destination echo
+		// can NEVER become a plain deferred receipt. The echo is not persisted (S95-C10), so the drain would
+		// rebuild the evidence without it and apply a success that was never compared with the snapshot. There
+		// is no attempt yet to compare against, so the receipt is closed as an anomaly, audited, and raised as
+		// a P1 (raise last, ADR 0102 7.7). The settlement is left to the QueryStatus poll (fail closed); a later
+		// echo-free redelivery of the same event dedupes against this closed row and is not stored as deferred.
+		receiptID, duplicate, err := insertReceiptDeduped(ctx, tx, tenantID, verifiedProviderID, ev, DispositionAnomaly)
+		if err != nil {
+			return "", err
+		}
+		if err := closeAnomalyReceipt(ctx, tx, tenantID, verifiedProviderID, receiptID, duplicate, ResolutionAnomalyOther); err != nil {
+			return "", err
+		}
+		if !duplicate {
+			if err := audit.Record(ctx, tx, audit.Entry{
+				TenantID: tenantID, ActorType: audit.ActorSystem, Action: "payments.payout_echo_receipt_unattributable",
+				TargetType: "payment_provider_event", TargetID: receiptID.String(), Outcome: audit.OutcomeDenied,
+				Metadata: map[string]any{"provider_id": verifiedProviderID, "reason": alertReasonPayoutEchoReceiptUnattributable},
+			}); err != nil {
+				return "", err
+			}
+		}
+		if err := raiseReceiptRepairAlertReason(ctx, tx, tenantID, receiptID, verifiedProviderID, alertReasonPayoutEchoReceiptUnattributable); err != nil {
 			return "", err
 		}
 		return DispositionAnomaly, nil

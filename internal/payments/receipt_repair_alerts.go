@@ -61,3 +61,17 @@ func raiseReceiptRepairRefusedAlert(ctx context.Context, tx pgx.Tx, tenantID, re
 	}
 	return alerting.RaiseGuarded(ctx, tx, receiptRepairAlert(tenantID, receiptID, providerID, reason))
 }
+
+// alertReasonPayoutEchoReceiptUnattributable (B13-B security H-1): a payout callback carrying a destination echo
+// arrived before any attempt could be attributed. Closed anomaly, never deferred. Receipt-subject P1.
+const alertReasonPayoutEchoReceiptUnattributable = "payout_echo_receipt_unattributable"
+
+// raiseReceiptRepairAlertReason raises the receipt-subject P1 for a closed reason of this file's family. The last
+// statement of its site; inside an alerting.InTx closure's tx.
+func raiseReceiptRepairAlertReason(ctx context.Context, tx pgx.Tx, tenantID, receiptID uuid.UUID, providerID, reason string) error {
+	if reason != alertReasonPayoutEchoReceiptUnattributable {
+		slog.Default().Error("payments_alert_reason_unclassified")
+		reason = alertReasonUnclassified
+	}
+	return alerting.RaiseGuarded(ctx, tx, receiptRepairAlert(tenantID, receiptID, providerID, reason))
+}

@@ -292,6 +292,14 @@ func TestB13B_OptionsFailClosedByDefault(t *testing.T) {
 	if _, err := gatePayoutDestination(context.Background(), nil, nil, withdrawal.WithdrawalRequest{}, NewMockProvider("m"), true, false); err != nil {
 		t.Fatalf("legacy + Synthetic adapter must pass: %v", err)
 	}
+	// Security L-1: a BOUND withdrawal with a nil adapter is a tier refusal at a dispatch gate (EvaluateGate would read nil as
+	// "request creation" and skip the tiering predicate).
+	if _, err := gatePayoutDestination(context.Background(), nil, nil, bound, nil, true, false); func() bool {
+		g, ok := payoutinstrument.IsGateRefusal(err)
+		return !ok || g.Reason != payoutinstrument.ReasonTierRefused
+	}() {
+		t.Fatalf("bound + nil adapter must be tier_refused, got %v", err)
+	}
 	for name, adapter := range map[string]any{"unmarked adapter": unmarkedPaymentsAdapter{NewMockProvider("m")}, "nil adapter": nil} {
 		_, err := gatePayoutDestination(context.Background(), nil, nil, withdrawal.WithdrawalRequest{}, adapter, true, false)
 		if g, ok := payoutinstrument.IsGateRefusal(err); !ok || g.Reason != payoutinstrument.ReasonTierRefused {

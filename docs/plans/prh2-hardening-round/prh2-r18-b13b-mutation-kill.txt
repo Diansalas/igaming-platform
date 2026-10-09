@@ -1,11 +1,11 @@
-PRH2 R18 B13-B (ADR 0111 section 16; migration 0126 placeholder number) - MUTATION-KILL EVIDENCE
+PRH2 R18 B13-B (ADR 0111 section 18; migration 0126 placeholder number) - MUTATION-KILL EVIDENCE
 Scope: migrations/0126_payout_binding_required.up.sql, internal/withdrawal, internal/payments (payout.go, payout_destination.go, payout_sweep.go, receipt.go, manual_resolution.go, payout_alerts.go),
 internal/payoutinstrument (dispatch.go, startup.go), internal/providerkind (embedding_scan.go), internal/httpserver (withdrawal_handlers.go).
 Generated 2026-10-09 on branch gov-r18-b13b. Method: each mutant is applied IN PLACE to the named file of a throw-away copy of the committed tree (git archive; the working tree under test is never
 touched), the target package is vetted with -tags integration (a mutant that fails to compile is reported and NOT counted), the targeted tests run against a private scratch database
 (PRIV_DB=r18b13b_priv3; the payments tests create their own scratch databases), then the file is restored from a backup taken first. -failfast is used, so the killer is the first failing test.
 SQL mutants edit the migration and rebuild the private database from the mutated file, and again from the restored file. The mutation loops are NOT under -race (compile time); the final suites
-are (ADR 0111 section 16.3). A separate Go build cache was used for the loops and deleted afterwards. After the last run the copy was compared with the committed tree (diff -r): identical.
+are (ADR 0111 section 18.3). A separate Go build cache was used for the loops and deleted afterwards. After the last run the copy was compared with the committed tree (diff -r): identical.
 
 CONTROL (unmutated copy, same commands): internal/withdrawal rc=0; internal/payoutinstrument rc=0; internal/providerkind rc=0; internal/payments rc=0; internal/httpserver rc=0
 

@@ -32,6 +32,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/Diansalas/igaming-platform/internal/alerting"
 	"github.com/Diansalas/igaming-platform/internal/audit"
 	"github.com/Diansalas/igaming-platform/internal/identity"
 	"github.com/Diansalas/igaming-platform/internal/payoutinstrument"
@@ -141,6 +142,12 @@ func (e payoutEnv) echoDeclared(providerID *string) bool {
 // predicate with Bound=false (Synthetic adapters only). lock takes the instrument FOR SHARE
 // (T1p); wantDetail returns the decrypted detail (phase B).
 func gatePayoutDestination(ctx context.Context, tx pgx.Tx, svc *payoutinstrument.Service, wr withdrawal.WithdrawalRequest, adapter any, lock, wantDetail bool) (payoutinstrument.GateResult, error) {
+	// Security L-1: this function is ONLY for the dispatch gates (T1p, phase B, T2/T12). EvaluateGate reads a nil
+	// adapter as "request creation: no adapter involved" and skips the tiering predicate; that meaning must not
+	// leak here. A dispatch gate with no adapter value (an unregistered provider id, a nil registry entry) is refused.
+	if adapter == nil {
+		return payoutinstrument.GateResult{}, payoutinstrument.RefuseNotUsable(payoutinstrument.ReasonTierRefused)
+	}
 	if !wr.Bound() {
 		if err := payoutinstrument.CheckTier(adapter, payoutinstrument.TierInput{Bound: false}); err != nil {
 			return payoutinstrument.GateResult{}, payoutinstrument.RefuseNotUsable(payoutinstrument.ReasonTierRefused)
@@ -427,3 +434,27 @@ func payoutTerminalDestinationSignal(ctx context.Context, tx pgx.Tx, env payoutE
 
 // amountText is the canonical decimal minor-unit text the snapshot stores.
 func amountText(v int64) string { return strconv.FormatInt(v, 10) }
+
+// ---- security alert for integrity refusals (security L-2) -----------------------------------------
+
+// integrityAlertReasons is the closed set of gate/snapshot integrity reasons that may appear in a discriminator.
+var integrityAlertReasons = map[string]struct{}{
+	payoutinstrument.ReasonSealInvalid: {}, payoutinstrument.ReasonFingerprintMismatch: {}, payoutinstrument.ReasonDetailUnavailable: {},
+	payoutinstrument.ReasonRelationMismatch: {}, payoutinstrument.ReasonVerificationMissing: {}, payoutinstrument.ReasonVerificationNotLast: {},
+	payoutinstrument.ReasonSnapshotMissing: {}, payoutinstrument.ReasonSnapshotMismatch: {}, payoutinstrument.ReasonBindingMismatch: {},
+}
+
+// DestinationIntegrityAlert builds the P1 (existing Kind payment.webhook_integrity, no new Kind) for a destination
+// integrity refusal where NO attempt exists to key the discriminator on: at request time (subject
+// "payout_instrument:<id>") and at T1p (subject "withdrawal:<id>"). The reason is from the closed set above; anything
+// else becomes "unclassified" and is never echoed. The caller raises it as the LAST statement of its site
+// (alerting.RaiseGuarded inside an alerting.InTx closure) or detached after a rollback (alerting.RaiseDetached).
+func DestinationIntegrityAlert(tenantID uuid.UUID, subject, reason string) alerting.Alert {
+	if _, ok := integrityAlertReasons[reason]; !ok {
+		reason = alertReasonUnclassified
+	}
+	return alerting.Alert{
+		Kind: alerting.KindPaymentWebhookIntegrity, SubjectTenantID: tenantID,
+		Discriminator: subject + ":reason:destination_integrity:" + reason, Attributes: map[string]alerting.AttrValue{},
+	}
+}

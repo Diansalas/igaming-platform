@@ -1257,3 +1257,194 @@ func TestB13B_T1p_SnapshotConstraintFailure_RollsBackTheClaim(t *testing.T) {
 	}
 	w.balanced()
 }
+
+// =============================================================================================
+// Security H-1: a payout receipt carrying a destination echo is NEVER stored as a plain deferred receipt.
+// =============================================================================================
+
+func (w *b13bW) receiptAnomalyAlert() (alertinject.Row, bool) {
+	w.t.Helper()
+	for _, r := range alertinject.ForSubject(w.t, w.pool, w.f.tenantID) {
+		if strings.HasPrefix(r.Discriminator, "receipt:") && strings.HasSuffix(r.Discriminator, ":reason:"+alertReasonPayoutEchoReceiptUnattributable) {
+			return r, true
+		}
+	}
+	return alertinject.Row{}, false
+}
+
+// The probe scenario: phase C returns ambiguous WITHOUT a reference, a success callback with a MISMATCHING echo
+// arrives before any attempt holds the reference, a later echo-free callback binds the reference and drains.
+func TestB13B_H1_DeferredCallbackWithEcho_NeverSettles(t *testing.T) {
+	for _, declared := range []bool{false, true} {
+		t.Run(fmt.Sprintf("manifest declares the echo=%v", declared), func(t *testing.T) {
+			w := newB13bW(t, "h1", func(p *b13bProvider) { p.declared = declared })
+			wr := w.approved(500, "b13b-h1")
+			cl := w.mustClaim(wr)
+			w.prov.set(WithdrawResult{Outcome: OutcomeAmbiguous}, StatusResult{})
+			gr := w.dispatch(cl)
+			bad := w.badEcho(cl.Attempt.ID)
+			var disp ReceiptDisposition
+			pending, err := alerting.InTx(w.ctx(), alerting.NewTenantRunner(w.pool, w.f.tenantID), func(ctx context.Context, tx pgx.Tx) error {
+				var err error
+				disp, err = ApplyReceiptEvidence(ctx, tx, w.orch, w.f.tenantID, w.pid, ReceiptEvidence{
+					EventType: "payout", ProviderReference: "ref-h1-1", Outcome: OutcomeSucceeded, Amount: 500, AssetCode: "EUR", DestinationEcho: bad,
+				})
+				return err
+			})
+			if err != nil {
+				t.Fatalf("callback: %v", err)
+			}
+			pending.Flush(w.ctx())
+			if disp != DispositionAnomaly {
+				t.Fatalf("disposition = %s, want anomaly (never deferred)", disp)
+			}
+			if n := w.count(`SELECT count(*) FROM payment_provider_events WHERE resolved_at IS NULL`); n != 0 {
+				t.Fatalf("%d unresolved (deferred) receipts: an echo-carrying receipt must be closed", n)
+			}
+			if n := w.count(`SELECT count(*) FROM payment_provider_events WHERE resolution = $1`, string(ResolutionAnomalyOther)); n != 1 {
+				t.Fatalf("closed anomaly receipts = %d, want 1", n)
+			}
+			if n := w.count(`SELECT count(*) FROM audit_log WHERE action = 'payments.payout_echo_receipt_unattributable'`); n != 1 {
+				t.Fatalf("audit rows = %d, want 1", n)
+			}
+			al, ok := w.receiptAnomalyAlert()
+			if !ok || al.Severity != "p1" || al.Occurrences != 1 {
+				t.Fatalf("P1 missing: %+v ok=%v", al, ok)
+			}
+			// Phase C, then an echo-free callback binds the reference and drains: nothing may settle.
+			if err := w.apply(wr, cl, gr); err != nil {
+				t.Fatalf("apply: %v", err)
+			}
+			a0 := w.attempt(cl.Attempt.ID)
+			if err := w.callback(a0, OutcomePending, "ref-h1-1", nil); err != nil {
+				t.Fatalf("callback 2: %v", err)
+			}
+			a := w.attempt(cl.Attempt.ID)
+			if a.State == AttemptSucceeded {
+				t.Fatalf("FINDING: the attempt succeeded (%s): the mismatching echo was dropped", a.State)
+			}
+			if got := w.wr(wr.ID); got.State == withdrawal.StateCompleted || got.ReleaseLedgerTransactionID != nil {
+				t.Fatalf("FINDING: the payout completed/released: %s", got.State)
+			}
+			// An echo-free redelivery of the same success dedupes against the closed row: still nothing deferred, nothing settled.
+			if err := w.callback(w.attempt(cl.Attempt.ID), OutcomeSucceeded, "ref-h1-1", nil); err != nil {
+				t.Fatalf("redelivery: %v", err)
+			}
+			// An adapter that DECLARES the echo can never settle on an echo-free success (ambiguous: the poll decides). An
+			// adapter that does not declare one has no echo to compare: its own later echo-free success is ordinary
+			// evidence (ADR 0111 section 18, B13B-15); the control for it is the audit row and the P1 asserted above.
+			if got := w.wr(wr.ID); declared && got.State == withdrawal.StateCompleted {
+				t.Fatal("FINDING: an echo-free redelivery settled the payout of an echo-declaring adapter")
+			}
+			w.balanced()
+		})
+	}
+}
+
+// Redelivering the SAME echo-carrying receipt is idempotent: one audit row, one alert occurrence.
+func TestB13B_H1_RedeliveryIsIdempotent(t *testing.T) {
+	w := newB13bW(t, "h1b")
+	wr := w.approved(500, "b13b-h1b")
+	cl := w.mustClaim(wr)
+	bad := w.badEcho(cl.Attempt.ID)
+	_ = wr
+	for i := 0; i < 3; i++ {
+		pending, err := alerting.InTx(w.ctx(), alerting.NewTenantRunner(w.pool, w.f.tenantID), func(ctx context.Context, tx pgx.Tx) error {
+			_, err := ApplyReceiptEvidence(ctx, tx, w.orch, w.f.tenantID, w.pid, ReceiptEvidence{
+				EventType: "payout", ProviderReference: "ref-h1b", Outcome: OutcomeSucceeded, Amount: 500, AssetCode: "EUR", DestinationEcho: bad,
+			})
+			return err
+		})
+		if err != nil {
+			t.Fatalf("delivery %d: %v", i, err)
+		}
+		pending.Flush(w.ctx())
+	}
+	if n := w.count(`SELECT count(*) FROM audit_log WHERE action = 'payments.payout_echo_receipt_unattributable'`); n != 1 {
+		t.Fatalf("audit rows = %d, want 1", n)
+	}
+	if n := w.count(`SELECT count(*) FROM payment_provider_events`); n != 1 {
+		t.Fatalf("receipt rows = %d, want 1", n)
+	}
+	if n := w.count(`SELECT count(*) FROM payment_provider_events WHERE resolved_at IS NULL`); n != 0 {
+		t.Fatalf("unresolved receipts = %d", n)
+	}
+}
+
+// =============================================================================================
+// Security L-2: an INTEGRITY refusal at T1p raises a P1 (a non-integrity one does not).
+// =============================================================================================
+
+func TestB13B_L2_T1pIntegrityRefusalRaisesAP1_OrdinaryRefusalDoesNot(t *testing.T) {
+	w := newB13bW(t, "l2a")
+	wr := w.approved(500, "b13b-l2a")
+	w.tamper("payout_instruments", `UPDATE payout_instruments SET display_mask = 'XX****0000' WHERE id = $1`, *wr.PayoutInstrumentID)
+	if _, err := w.claim(wr, "bank_transfer"); !errors.Is(err, ErrPayoutDestinationNotUsable) {
+		t.Fatalf("err = %v", err)
+	}
+	want := "withdrawal:" + wr.ID.String() + ":reason:destination_integrity:" + payoutinstrument.ReasonSealInvalid
+	found := false
+	for _, r := range alertinject.ForSubject(t, w.pool, w.f.tenantID) {
+		if r.Discriminator == want && r.Severity == "p1" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("integrity refusal at T1p raised no P1 (%s)", want)
+	}
+	// a repeat is the same open alert (occurrences grow), not a second alert
+	_, _ = w.claim(wr, "bank_transfer")
+	n := 0
+	for _, r := range alertinject.ForSubject(t, w.pool, w.f.tenantID) {
+		if r.Discriminator == want {
+			n++
+			if r.Occurrences != 2 {
+				t.Fatalf("occurrences = %d, want 2", r.Occurrences)
+			}
+		}
+	}
+	if n != 1 {
+		t.Fatalf("alerts = %d, want 1", n)
+	}
+
+	w2 := newB13bW(t, "l2b")
+	wr2 := w2.approved(500, "b13b-l2b")
+	w2.suspend(*wr2.PayoutInstrumentID)
+	if _, err := w2.claim(wr2, "bank_transfer"); !errors.Is(err, ErrPayoutDestinationNotUsable) {
+		t.Fatalf("err = %v", err)
+	}
+	if rows := alertinject.ForSubject(t, w2.pool, w2.f.tenantID); len(rows) != 0 {
+		t.Fatalf("a non-integrity refusal must raise nothing: %+v", rows)
+	}
+}
+
+// Security L-1: a dispatch gate with an unregistered provider id (nil adapter) is refused at T2/T12, not waved through.
+func TestB13B_L1_NilAdapterRefusedAtTheDispatchGates(t *testing.T) {
+	w := newB13bW(t, "l1")
+	wr := w.approved(500, "b13b-l1")
+	cl := w.mustClaim(wr)
+	if err := w.apply(wr, cl, GateResult[WithdrawResult]{Class: ErrorClassNotSent, Err: errors.New("never sent")}); err != nil {
+		t.Fatal(err)
+	}
+	// A sweeper whose registry does not know the attempt's provider id: adapter == nil at the T2 gate.
+	empty := &Orchestrator{providers: map[string]PaymentProvider{}, breaker: NewBreaker(), destinations: w.svc}
+	s := &Sweeper{Pool: w.pool, Orchestrator: empty, PayoutKYCGate: KYCEnforcementPayoutGate{}, CredResolver: MockCredentialResolver{}, Lease: SweeperDefaultLease}
+	var allowed bool
+	err := w.pool.WithTenant(w.ctx(), w.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		wrow, err := withdrawal.LockForPayoutEvidence(ctx, tx, wr.ID)
+		if err != nil {
+			return err
+		}
+		allowed, err = s.destinationGateAndEscalate(ctx, tx, wrow, w.attempt(cl.Attempt.ID), time.Now().Add(time.Minute))
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if allowed {
+		t.Fatal("a nil adapter at a dispatch gate must be refused")
+	}
+	if a := w.attempt(cl.Attempt.ID); a.EscalatedAt == nil {
+		t.Fatal("the refusal must escalate (T16)")
+	}
+}

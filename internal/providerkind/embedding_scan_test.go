@@ -22,8 +22,9 @@ func TestSyntheticEmbedding_RepoWide(t *testing.T) {
 	}
 }
 
-// TestSyntheticEmbedding_NegativeControl proves the scan is real: the fixtures contain exactly four
-// violations (direct, pointer, transitive, interface) and three non-violations.
+// TestSyntheticEmbedding_NegativeControl proves the scan is real: the fixtures contain eight
+// violations (direct, pointer, transitive, struct-embeds-interface, interface-embeds-marker, interface-embeds-interface,
+// struct-embeds-declared-marker interface) and the non-violations.
 func TestSyntheticEmbedding_NegativeControl(t *testing.T) {
 	findings, err := ScanForSyntheticEmbedding(filepath.Join("testdata", "embedding"))
 	if err != nil {
@@ -34,7 +35,7 @@ func TestSyntheticEmbedding_NegativeControl(t *testing.T) {
 		got = append(got, f.Type)
 	}
 	sort.Strings(got)
-	want := []string{"RealEmbedsChain", "RealEmbedsInterface", "RealEmbedsMarker", "RealEmbedsPtr"}
+	want := []string{"IfaceEmbedsLocal", "IfaceEmbedsMarker", "RealEmbedsChain", "RealEmbedsInterface", "RealEmbedsMarker", "RealEmbedsPtr", "StructEmbedsDeclared", "StructEmbedsIface"}
 	if len(got) != len(want) {
 		t.Fatalf("findings = %v, want %v", got, want)
 	}

@@ -140,6 +140,24 @@ func scanStructs(dir string) ([]structInfo, map[string]bool, string, error) {
 					if !ok {
 						continue
 					}
+					if it, isIface := ts.Type.(*ast.InterfaceType); isIface && it.Methods != nil {
+						// Security L-3: interface embedding. An interface that lists SyntheticComponent itself is a
+						// marker declaration (like providerkind.Synthetic): embedding it inherits the marker, so it joins
+						// the marked set. An interface that EMBEDS a marked type/interface (and lists no marker of its
+						// own) is recorded like a struct embedding and is a finding.
+						info := structInfo{pkg: pkg, file: path, name: ts.Name.Name}
+						for _, f := range it.Methods.List {
+							if len(f.Names) == 0 {
+								if key := embeddedKey(f.Type, pkg, aliases); key != "" {
+									info.embedded = append(info.embedded, key)
+								}
+							} else if f.Names[0].Name == "SyntheticComponent" {
+								marked[ts.Name.Name] = true
+							}
+						}
+						out = append(out, info)
+						continue
+					}
 					st, ok := ts.Type.(*ast.StructType)
 					if !ok || st.Fields == nil {
 						continue

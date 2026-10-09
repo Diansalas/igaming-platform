@@ -70,8 +70,24 @@ func TestMigration0126_UpDownUp_WholeSchema(t *testing.T) {
 	if len(changed) != 2 { // one "-" (old body hash) and one "+" (new body hash)
 		t.Errorf("expected exactly the guard function's body hash to differ, got %d differences:\n%s", len(changed), snapDiff(pre, up))
 	}
+	// L-4: the guard source names PI046 only while 0126 is applied (the startup check keys on it).
+	guardSrc := func() string {
+		var src string
+		if err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+			return tx.QueryRow(ctx, `SELECT prosrc FROM pg_proc WHERE proname = 'withdrawal_requests_payout_binding_guard' AND pronamespace = 'public'::regnamespace`).Scan(&src)
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return src
+	}
+	if !strings.Contains(guardSrc(), bindingGuardMarker) {
+		t.Fatal("0126 up: the guard source must contain PI046")
+	}
 	if _, err := pool.MigrateDown(context.Background(), dir, 1); err != nil {
 		t.Fatalf("down: %v", err)
+	}
+	if strings.Contains(guardSrc(), bindingGuardMarker) {
+		t.Fatal("0126 down: the 0123 guard must not contain PI046")
 	}
 	if got := schemaSnapshot(t, pool); got != pre {
 		t.Fatalf("0126 down did not restore the 0123 schema exactly:\n%s", snapDiff(pre, got))

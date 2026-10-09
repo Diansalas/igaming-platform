@@ -174,6 +174,10 @@ func run() error {
 	if err := payoutinstrument.VerifyLegacyBindings(ctx, legacyBindingChecker(pool)); err != nil {
 		return err
 	}
+	// B13-B security L-4: a non-Synthetic payout adapter needs the NULL-arm-closing migration (0126).
+	if err := payoutinstrument.VerifyBindingGuardApplied(ctx, payoutRegistrations(providers), bindingGuardChecker(pool)); err != nil {
+		return err
+	}
 
 	keys := map[string]string{cfg.JWTActiveKID: cfg.JWTSigningSecret}
 	if cfg.JWTPreviousSecret != "" {

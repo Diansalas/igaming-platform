@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/google/uuid"
@@ -211,6 +212,27 @@ func (s *Service) EvaluateGate(ctx context.Context, tx pgx.Tx, p GateParams) (Ga
 		res.Detail = detail
 	}
 	return res, nil
+}
+
+// String never renders Detail (B13-B info finding): GateResult carries the decrypted destination.
+func (r GateResult) String() string {
+	return fmt.Sprintf("GateResult{instrument=%s state=%s detail=[REDACTED]}", r.Instrument.ID, r.Instrument.State)
+}
+
+// GoString redacts like String.
+func (r GateResult) GoString() string { return r.String() }
+
+// Format redacts under every verb.
+func (r GateResult) Format(f fmt.State, _ rune) { _, _ = f.Write([]byte(r.String())) }
+
+// LogValue redacts for slog.
+func (r GateResult) LogValue() slog.Value {
+	return slog.GroupValue(slog.String("instrument_id", r.Instrument.ID.String()), slog.String("detail", "[REDACTED]"))
+}
+
+// MarshalJSON never renders Detail.
+func (r GateResult) MarshalJSON() ([]byte, error) {
+	return []byte(`{"instrument_id":"` + r.Instrument.ID.String() + `","detail":"[REDACTED]"}`), nil
 }
 
 // Destination builds the adapter-facing PayoutDestination from a passing gate
