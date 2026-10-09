@@ -493,6 +493,12 @@ BEGIN
 END
 $$;
 
+-- HSEC-APPROVED-HOLD-RELEASE-1 (migration 0124; ADR 0111 section 6): least-privilege,
+-- re-asserted on every run, mirroring migration 0124's own in-migration grant block:
+--   withdrawal_hold_resolutions          - SELECT/INSERT/UPDATE (the state machine;
+--                                          payload immutable by trigger). Never DELETE.
+--   withdrawal_hold_resolution_approvals - append-only: SELECT/INSERT.
+-- No role, password or attribute change.
 -- B13 (migration 0123; ADR 0111 section 2.1): least-privilege, re-asserted on
 -- every run, mirroring migration 0123's own in-migration grant block:
 --   payout_instrument_kinds, payout_instrument_verification_max_age
@@ -507,6 +513,8 @@ DECLARE
     t RECORD;
 BEGIN
     FOR t IN SELECT * FROM (VALUES
+        ('withdrawal_hold_resolutions', 'SELECT, INSERT, UPDATE'),
+        ('withdrawal_hold_resolution_approvals', 'SELECT, INSERT')) AS v(name, privs)
         ('payout_instrument_kinds', 'SELECT'),
         ('payout_instrument_verification_max_age', 'SELECT'),
         ('payout_instruments', 'SELECT, INSERT, UPDATE'),

@@ -66,6 +66,13 @@ export interface NavPermissions {
    */
   paymentForceResolutionAct: boolean
   /**
+   * HSEC-APPROVED-HOLD-RELEASE-1 (ADR 0111 6.3): PermWithdrawalHoldResolutionRead and
+   * PermWithdrawalHoldResolutionRequest/Approve - the STATIC half only, platform_admin
+   * ONLY (no tenant role, ever). The authority is an in-force platform grant plus a
+   * G-P2 acting session, read server-side - this flag can never stand in for it.
+   */
+  withdrawalHoldResolutions: boolean
+  withdrawalHoldResolutionAct: boolean
    * B13 (ADR 0111 2.9): PermPayoutInstrumentRead - view a player's payout
    * instruments (display mask only; finance, compliance, platform_admin).
    */
@@ -105,6 +112,8 @@ const NONE: NavPermissions = {
   manualAdjustmentAct: false,
   paymentForceResolutions: false,
   paymentForceResolutionAct: false,
+  withdrawalHoldResolutions: false,
+  withdrawalHoldResolutionAct: false,
   payoutInstruments: false,
   payoutInstrumentSuspend: false,
   alertRouting: false,
@@ -145,6 +154,8 @@ const ROLE_NAV_PERMISSIONS: Record<string, NavPermissions> = {
     manualAdjustmentAct: true,
     paymentForceResolutions: true,
     paymentForceResolutionAct: true,
+    withdrawalHoldResolutions: true,
+    withdrawalHoldResolutionAct: true,
     payoutInstruments: true,
     alertRouting: true,
   },

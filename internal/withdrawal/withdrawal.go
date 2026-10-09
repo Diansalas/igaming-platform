@@ -1714,3 +1714,91 @@ func Cancel(ctx context.Context, tx pgx.Tx, requestID uuid.UUID) error {
 		},
 	})
 }
+
+// ReleaseForGovernedResolution is the money movement of the ONE
+// HSEC-APPROVED-HOLD-RELEASE-1 kind, release_hold_to_player (ADR 0111 section 6.4,
+// owner decisions ADR 0095 section 44 decisions 13-18). It is called ONLY by
+// internal/payments' hold-resolution executor, inside the final approval's own
+// transaction, with the resolution already `executing`, under an ACTING session
+// (migration 0124's all-sessions guards refuse the governed key, the state edge and
+// the link in every other shape). It never dispatches anything: the hold returns to
+// the player's own player_cash on the SAME wallet.
+//
+// It takes the L1 withdrawal lock, asserts the request is `approved` with NO payment
+// attempt, and posts withdrawal_rejected: debit player_withdrawal_hold, credit
+// player_cash, for wr.Amount, CorrelationID = the withdrawal id,
+// ReversesTransactionID = the hold transaction, idempotency key
+// `<wr.id>:governed_hold_released` (distinct from :rejected / :cancelled / :kyc_denied /
+// :failed). No reason_code is put on the ledger row (migration 0021's CHECK allows one
+// only for manual_adjustment); the reason lives on the resolution and the audit rows.
+// The state CAS approved -> rejected sets release_ledger_transaction_id in the same
+// conditional UPDATE (rows affected zero => ErrStateConflict, which rolls the posting
+// back). It is `rejected`, not `cancelled` (ADR 0111 A-18).
+func ReleaseForGovernedResolution(ctx context.Context, tx pgx.Tx, requestID uuid.UUID) error {
+	wr, err := lockRequestForUpdate(ctx, tx, requestID)
+	if err != nil {
+		return err
+	}
+	if wr.State != StateApproved {
+		return fmt.Errorf("%w: request %s is in state %q, expected %q", ErrStateConflict, requestID, wr.State, StateApproved)
+	}
+	var attempts int
+	if err := tx.QueryRow(ctx,
+		`SELECT count(*) FROM payment_attempts WHERE withdrawal_request_id = $1 AND tenant_id = $2`,
+		requestID, wr.TenantID).Scan(&attempts); err != nil {
+		return fmt.Errorf("withdrawal: count payment attempts: %w", err)
+	}
+	if attempts != 0 {
+		return fmt.Errorf("%w: request %s already has a payment attempt; a hold with an attempt is never released here", ErrStateConflict, requestID)
+	}
+
+	accounts, err := ledger.GetOrCreateAccounts(ctx, tx, wr.TenantID,
+		ledger.AccountSpec{WalletID: &wr.WalletID, AccountType: ledger.AccountPlayerWithdrawalHold, AssetCode: wr.AssetCode},
+		ledger.AccountSpec{WalletID: &wr.WalletID, AccountType: ledger.AccountPlayerCash, AssetCode: wr.AssetCode},
+	)
+	if err != nil {
+		return fmt.Errorf("withdrawal: resolve hold/cash ledger accounts: %w", err)
+	}
+	holdAccountID, cashAccountID := accounts[0], accounts[1]
+
+	postResult, err := ledger.Post(ctx, tx, ledger.TransactionInput{
+		TenantID:              wr.TenantID,
+		TransactionType:       ledger.TxWithdrawalRejected,
+		IdempotencyKey:        requestID.String() + ":governed_hold_released",
+		CorrelationID:         requestID,
+		ReversesTransactionID: wr.HoldLedgerTransactionID,
+		Entries: []ledger.EntryInput{
+			{LedgerAccountID: holdAccountID, Direction: ledger.Debit, Amount: wr.Amount},
+			{LedgerAccountID: cashAccountID, Direction: ledger.Credit, Amount: wr.Amount},
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("withdrawal: post governed hold release: %w", err)
+	}
+
+	tag, err := tx.Exec(ctx,
+		`UPDATE withdrawal_requests SET state = $1, release_ledger_transaction_id = $2, updated_at = now()
+		 WHERE id = $3 AND state = $4`,
+		StateRejected, postResult.TransactionID, requestID, StateApproved,
+	)
+	if err != nil {
+		return fmt.Errorf("withdrawal: transition to rejected (governed release): %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrStateConflict
+	}
+
+	return audit.Record(ctx, tx, audit.Entry{
+		TenantID:   wr.TenantID,
+		ActorType:  audit.ActorSystem,
+		Action:     "withdrawal.hold_released_governed",
+		TargetType: "withdrawal_request",
+		TargetID:   requestID.String(),
+		Outcome:    audit.OutcomeSuccess,
+		Metadata: map[string]any{
+			"amount":                     wr.Amount,
+			"hold_ledger_transaction":    wr.HoldLedgerTransactionID,
+			"release_ledger_transaction": postResult.TransactionID.String(),
+		},
+	})
+}
