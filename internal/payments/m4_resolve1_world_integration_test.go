@@ -84,10 +84,21 @@ type m4Imp struct {
 	noDecl     bool                   // the source does NOT declare payout_lines_carry_merchant_reference
 	start, end time.Time              // coverage; zero = [now-1h, now+1m)
 	keys       *payoutinstrument.Keys // sealer override (nil = the world's)
+	provider   string                 // the import's provider id ("" = the world's); D-7 tests: another provider in the same tenant
 }
 
 // ingest stores one import through the REAL importer in the system session.
 func (m *m4World) ingest(o m4Imp, lines ...statement.PaymentStatementLine) uuid.UUID {
+	m.t.Helper()
+	id, err := m.ingestErr(o, lines...)
+	if err != nil {
+		m.t.Fatalf("ingest: %v", err)
+	}
+	return id
+}
+
+// ingestErr is ingest returning the importer's error (a refused import) instead of failing.
+func (m *m4World) ingestErr(o m4Imp, lines ...statement.PaymentStatementLine) (uuid.UUID, error) {
 	m.t.Helper()
 	st, en := o.start, o.end
 	if st.IsZero() {
@@ -97,7 +108,11 @@ func (m *m4World) ingest(o m4Imp, lines ...statement.PaymentStatementLine) uuid.
 		en = time.Now().Add(time.Minute).UTC()
 	}
 	st, en = st.UTC().Truncate(time.Microsecond), en.UTC().Truncate(time.Microsecond)
-	src := m4Source{k3Source: k3Source{provider: m.provider, real: o.real, start: st, end: en, lines: lines}, carries: !o.noDecl}
+	prov := m.provider
+	if o.provider != "" {
+		prov = o.provider
+	}
+	src := m4Source{k3Source: k3Source{provider: prov, real: o.real, start: st, end: en, lines: lines}, carries: !o.noDecl}
 	var source statement.PaymentStatementSource = src
 	if !o.real {
 		source = m4MockSource{src}
@@ -114,14 +129,12 @@ func (m *m4World) ingest(o m4Imp, lines ...statement.PaymentStatementLine) uuid.
 		sealer = nil // an untyped nil interface: stored unsealed
 	}
 	var id uuid.UUID
-	if err := m.pool.WithTenant(context.Background(), m.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+	err := m.pool.WithTenant(context.Background(), m.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
 		id, _, err = reconciliation.IngestPaymentStatementSealed(ctx, tx, m.f.tenantID, source, stmt, time.Now(), sealer)
 		return err
-	}); err != nil {
-		m.t.Fatalf("ingest: %v", err)
-	}
-	return id
+	})
+	return id, err
 }
 
 // line is a payout statement line of this provider.
