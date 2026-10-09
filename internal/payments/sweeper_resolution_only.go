@@ -31,6 +31,7 @@ package payments
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"time"
 
 	"github.com/google/uuid"
@@ -209,19 +210,36 @@ func skipCascadeChildForResolutionOnly(ctx context.Context, tx pgx.Tx, attempt P
 // converges.
 func gateReceiptCascadeChild(ctx context.Context, tx pgx.Tx, attempt PaymentAttempt) (skipped bool, err error) {
 	if attempt.DepositIntentID == nil {
+		logReceiptGateInvariant("attempt_without_intent", attempt, nil)
 		return false, errors.New("payments: receipt cascade gate: attempt has no deposit intent")
 	}
 	intent, err := GetDepositIntentByID(ctx, tx, *attempt.DepositIntentID)
+	if errors.Is(err, ErrDepositIntentNotFound) {
+		logReceiptGateInvariant("intent_missing", attempt, attempt.DepositIntentID)
+	}
 	if err != nil {
 		return false, err
 	}
 	if intent.TenantID != attempt.TenantID {
+		logReceiptGateInvariant("intent_tenant_mismatch", attempt, attempt.DepositIntentID)
 		return false, errors.New("payments: receipt cascade gate: intent tenant differs from attempt tenant")
 	}
 	if skipped, err := skipCascadeChildForResolutionOnly(ctx, tx, attempt, intent.ID); err != nil || skipped {
 		return skipped, err
 	}
 	return skipCascadeChildForBrand(ctx, tx, attempt, intent)
+}
+
+// logReceiptGateInvariant is the operator signal for a broken invariant at the receipt-site gate
+// (security L-2, ADR 0095 47.2): without it the returned error is only a silent 5xx redelivery loop.
+// Closed reason token and ids only (never provider text, never the error string); the caller still
+// returns the error, so the host transaction rolls back unchanged (fail closed). No alert kind.
+func logReceiptGateInvariant(reason string, attempt PaymentAttempt, intentID *uuid.UUID) {
+	args := []any{"reason", reason, "tenant_id", attempt.TenantID, "attempt_id", attempt.ID}
+	if intentID != nil {
+		args = append(args, "deposit_intent_id", *intentID)
+	}
+	slog.Default().Error("payments_receipt_cascade_gate_invariant_broken", args...)
 }
 
 // checkPayoutResolutionOnly is the payout twin, called inside the T2/T12 claim

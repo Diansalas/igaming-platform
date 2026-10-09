@@ -7,8 +7,10 @@
 package payments
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"strings"
 	"testing"
 
@@ -314,5 +316,198 @@ func TestR17_Scratch_ReceiptSite_TenantReadError_FailsClosed(t *testing.T) {
 	var pgErr *pgconn.PgError
 	if !errors.As(gerr, &pgErr) || pgErr.Code != "42501" {
 		t.Fatalf("gate must surface the tenant read error (42501), got %v", gerr)
+	}
+}
+
+// R20 (ADR 0095 47.2 review addendum): the same gate reached through the deferred-receipt DRAIN
+// (ApplyDeferredReceiptsForAttempt, as phase C / poll / sweeper host it), not a callback delivery.
+func r20Drain(t *testing.T, pool *db.Pool, orch *Orchestrator, f orchFixture, intentID, attemptID uuid.UUID) int {
+	t.Helper()
+	var applied int
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `SELECT id FROM deposit_intents WHERE id = $1 FOR UPDATE`, intentID); err != nil {
+			return err
+		}
+		a, err := GetAttemptByID(ctx, tx, attemptID)
+		if err != nil {
+			return err
+		}
+		applied, err = ApplyDeferredReceiptsForAttempt(ctx, tx, orch, a)
+		return err
+	}); err != nil {
+		t.Fatalf("drain: %v", err)
+	}
+	return applied
+}
+
+func TestR20_DeferredDrain_CascadeGate(t *testing.T) {
+	pool := depositV2ScratchPool(t)
+	orch, provA, provB := r17Orch("mock-psp-r20-a", "mock-psp-r20-b")
+	const brandAct, tenAct = "payment.cascade_skipped_brand_inactive", "payment.cascade_skipped_resolution_only"
+	cases := []r17Case{
+		{"control active/active still creates the child", "", "", true, ""},
+		{"brand suspended", "", "suspended", false, brandAct},
+		{"tenant suspended", "suspended", "", false, tenAct},
+	}
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			f := seedOrchFixture(t, pool)
+			registerCapability(t, pool, f, provA, 100)
+			registerCapability(t, pool, f, provB, 200)
+			a, ref := pendingDeposit(t, pool, orch, f, "r20-"+uuid.NewString()[:8], 5000)
+			intentID := *a.DepositIntentID
+			// The decline arrives as a deferred (unresolved) receipt, then the status flips, then the drain runs.
+			ev := ReceiptEvidence{EventType: "deposit", ProviderReference: ref, Outcome: OutcomeDeclined, Amount: 5000, AssetCode: "EUR",
+				DeclineReason: "provider_unavailable", Cascadable: true, DeclineStage: DeclineAfterAcceptance}
+			if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+				_, dup, err := insertReceiptDeduped(ctx, tx, f.tenantID, *a.ProviderID, ev, DispositionDeferredUnresolved)
+				if err == nil && dup {
+					t.Fatal("setup: planted receipt was a duplicate")
+				}
+				return err
+			}); err != nil {
+				t.Fatalf("plant deferred decline: %v", err)
+			}
+			if c.tenant != "" {
+				setTenantStatus(t, pool, f.tenantID, c.tenant)
+			}
+			if c.brand != "" {
+				setBrandStatus(t, pool, f.tenantID, f.brandID, c.brand)
+			}
+			ledgerBefore := ledgerTxCount(t, pool, f.tenantID)
+			if n := r20Drain(t, pool, orch, f, intentID, a.ID); n != 1 {
+				t.Fatalf("drain applied %d receipts, want 1", n)
+			}
+			wantAttempts := 1
+			if c.wantChild {
+				wantAttempts = 2
+			}
+			check := func(stage string) {
+				if n := attemptsForIntent(t, pool, f.tenantID, intentID); n != wantAttempts {
+					t.Fatalf("%s: attempts want %d got %d", stage, wantAttempts, n)
+				}
+				if got := mustGetAttempt(t, pool, f.tenantID, a.ID); got.State != AttemptDeclined {
+					t.Fatalf("%s: the decline must stand, got %s", stage, got.State)
+				}
+				if !c.wantChild {
+					if st := depScan[string](t, pool, f.tenantID, `SELECT status FROM deposit_intents WHERE id = $1`, intentID); st != "declined" {
+						t.Fatalf("%s: intent must end declined, got %s", stage, st)
+					}
+				}
+				if un := depScan[int](t, pool, f.tenantID, `SELECT count(*) FROM payment_provider_events WHERE provider_reference = $1 AND resolved_at IS NULL`, ref); un != 0 {
+					t.Fatalf("%s: receipt must be resolved, %d unresolved", stage, un)
+				}
+				au := auditActions(t, pool, f.tenantID)
+				for _, act := range []string{brandAct, tenAct} {
+					want := 0
+					if act == c.wantAudit {
+						want = 1
+					}
+					if au[act] != want {
+						t.Fatalf("%s: audit %s want %d got %d (%v)", stage, act, want, au[act], au)
+					}
+				}
+				if ledgerTxCount(t, pool, f.tenantID) != ledgerBefore {
+					t.Fatalf("%s: no ledger transaction may result from a decline/skip", stage)
+				}
+				assertLedgerBalanced(t, pool, f.tenantID)
+			}
+			check("first drain")
+			// Idempotency: a re-drain finds nothing unresolved; a redelivery of the event is a no-op.
+			if n := r20Drain(t, pool, orch, f, intentID, a.ID); n != 0 {
+				t.Fatalf("re-drain applied %d, want 0", n)
+			}
+			check("re-drain")
+			if _, err := r17Deliver(pool, orch, f, *a.ProviderID, ref); err != nil {
+				t.Fatalf("redelivery: %v", err)
+			}
+			check("redelivery")
+			if n := r17Receipts(t, pool, f.tenantID, ref); n != 1 {
+				t.Fatalf("one receipt row expected, got %d", n)
+			}
+		})
+	}
+}
+
+// R20 security L-2: a broken intent invariant at the receipt-site gate emits an operator-visible
+// structured error (closed reason token, ids only) and STILL fails closed: the host tx rolls back.
+func TestR20_ReceiptGate_BrokenInvariant_LogsAndRollsBack(t *testing.T) {
+	pool := depositV2ScratchPool(t)
+	orch, provA, provB := r17Orch("mock-psp-r20l-a", "mock-psp-r20l-b")
+	f := seedOrchFixture(t, pool)
+	registerCapability(t, pool, f, provA, 100)
+	registerCapability(t, pool, f, provB, 200)
+	a, ref := pendingDeposit(t, pool, orch, f, "r20-l1", 5000)
+	other := seedOrchFixture(t, pool)
+
+	missing := a
+	missingID := uuid.New()
+	missing.DepositIntentID = &missingID
+	cross := a
+	cross.TenantID = other.tenantID
+	noIntent := a
+	noIntent.DepositIntentID = nil
+
+	cases := []struct {
+		name, reason string
+		att          PaymentAttempt
+		intent       *uuid.UUID
+	}{
+		{"missing intent", "intent_missing", missing, &missingID},
+		{"cross-tenant intent", "intent_tenant_mismatch", cross, a.DepositIntentID},
+		{"attempt without intent", "attempt_without_intent", noIntent, nil},
+	}
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			prev := slog.Default()
+			slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+			t.Cleanup(func() { slog.SetDefault(prev) })
+			evRef := ref + "-" + c.reason
+			err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+				// Written first in the same tx: must vanish with the rollback.
+				if _, _, err := insertReceiptDeduped(ctx, tx, f.tenantID, "mock-psp-r20l-a",
+					ReceiptEvidence{EventType: "deposit", ProviderReference: evRef, Outcome: OutcomeDeclined, Amount: 5000, AssetCode: "EUR"}, DispositionDeferredUnresolved); err != nil {
+					return err
+				}
+				skipped, err := gateReceiptCascadeChild(ctx, tx, c.att)
+				if skipped {
+					t.Error("a broken invariant must never report a skip")
+				}
+				return err
+			})
+			if err == nil {
+				t.Fatal("gate must return an error (fail closed)")
+			}
+			if n := r17Receipts(t, pool, f.tenantID, evRef); n != 0 {
+				t.Fatalf("host transaction must roll back, %d receipt rows survived", n)
+			}
+			out := buf.String()
+			for _, want := range []string{"level=ERROR", "payments_receipt_cascade_gate_invariant_broken", "reason=" + c.reason,
+				"attempt_id=" + c.att.ID.String(), "tenant_id=" + c.att.TenantID.String()} {
+				if !strings.Contains(out, want) {
+					t.Fatalf("log missing %q:\n%s", want, out)
+				}
+			}
+			if c.intent != nil && !strings.Contains(out, "deposit_intent_id="+c.intent.String()) {
+				t.Fatalf("log missing intent id:\n%s", out)
+			}
+			if strings.Contains(out, err.Error()) || strings.Count(out, "\n") != 1 {
+				t.Fatalf("log must be one line without error text:\n%s", out)
+			}
+		})
+	}
+	// Control: a healthy attempt logs nothing.
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := gateReceiptCascadeChild(ctx, tx, a)
+		return err
+	}); err != nil || buf.Len() != 0 {
+		t.Fatalf("healthy gate must not log: err=%v log=%q", err, buf.String())
 	}
 }
