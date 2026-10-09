@@ -594,7 +594,14 @@ func ApplyReceiptEvidence(ctx context.Context, tx pgx.Tx, o *Orchestrator, tenan
 		if err := closeAnomalyReceipt(ctx, tx, tenantID, verifiedProviderID, receiptID, duplicate, ResolutionAnomalyOther); err != nil {
 			return "", err
 		}
-		if !duplicate {
+		// Security C-1: the marker is what the echoClosedTwin hold keys on, so it must exist for EVERY receipt this branch
+		// closes - including a duplicate closed here (an echo-free success deferred first, then the mismatching-echo
+		// redelivery). Written once per receipt id (idempotent), not only for a new row.
+		marked, err := payoutEchoMarkerExists(ctx, tx, tenantID, receiptID)
+		if err != nil {
+			return "", err
+		}
+		if !marked {
 			if err := audit.Record(ctx, tx, audit.Entry{
 				TenantID: tenantID, ActorType: audit.ActorSystem, Action: auditActionPayoutEchoUnattributable,
 				TargetType: "payment_provider_event", TargetID: receiptID.String(), Outcome: audit.OutcomeDenied,
@@ -759,9 +766,8 @@ func ApplyReceiptEvidence(ctx context.Context, tx pgx.Tx, o *Orchestrator, tenan
 	// decide. Detected through the audit marker written with that closure (no migration).
 	var echoClosedTwin bool
 	if duplicate && attempt.Operation == AttemptOperationPayout && ev.EventType == "payout" {
-		if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM audit_log WHERE tenant_id = $1 AND action = $2 AND target_id = $3)`,
-			tenantID, auditActionPayoutEchoUnattributable, receiptID.String()).Scan(&echoClosedTwin); err != nil {
-			return "", fmt.Errorf("payments: echo-closed twin lookup: %w", err)
+		if echoClosedTwin, err = payoutEchoMarkerExists(ctx, tx, tenantID, receiptID); err != nil {
+			return "", err
 		}
 	}
 	var changed bool
@@ -1911,4 +1917,17 @@ func validateReceiptReferences(ev ReceiptEvidence) error {
 		providerref.Field{Name: "merchant_reference", Value: ev.MerchantReference, Required: false},
 		providerref.Field{Name: "settlement_reference", Value: ev.SettlementReference, Required: false},
 	)
+}
+
+// payoutEchoMarkerExists reports whether the receipt was closed as payout_echo_receipt_unattributable (the audit marker). The
+// lookup is bounded below by the receipt's received_at (security C-3; the marker cannot predate its receipt) so the tenant/time
+// index limits the scan.
+func payoutEchoMarkerExists(ctx context.Context, tx pgx.Tx, tenantID, receiptID uuid.UUID) (bool, error) {
+	var ok bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM audit_log WHERE tenant_id = $1 AND action = $2 AND target_id = $3
+		AND created_at >= (SELECT received_at FROM payment_provider_events WHERE id = $4 AND tenant_id = $1))`,
+		tenantID, auditActionPayoutEchoUnattributable, receiptID.String(), receiptID).Scan(&ok); err != nil {
+		return false, fmt.Errorf("payments: echo-closed marker lookup: %w", err)
+	}
+	return ok, nil
 }

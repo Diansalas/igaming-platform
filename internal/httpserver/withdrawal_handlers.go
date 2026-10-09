@@ -1416,6 +1416,9 @@ func newCancelWithdrawalHandler(deps Deps) http.HandlerFunc {
 
 // requestIntegrityReasons are the gate reasons that, at request time, can only come from the stored state of the player's OWN
 // instrument (security M-R1). relation_mismatch is deliberately absent.
+// integrityRefusalSem bounds the in-flight request-time integrity recorders (security C-2).
+var integrityRefusalSem = make(chan struct{}, 8)
+
 var requestIntegrityReasons = map[string]bool{
 	payoutinstrument.ReasonSealInvalid: true, payoutinstrument.ReasonFingerprintMismatch: true, payoutinstrument.ReasonDetailUnavailable: true,
 	payoutinstrument.ReasonVerificationMissing: true, payoutinstrument.ReasonVerificationNotLast: true,
@@ -1425,7 +1428,21 @@ var requestIntegrityReasons = map[string]bool{
 // integrity refusal. It runs OFF the response path with a bounded context (security M-R1): RaiseDetached retries with backoff, and
 // the request transaction already rolled back, so nothing here may slow or fail the 409.
 func recordRequestIntegrityRefusal(deps Deps, logger *slog.Logger, tenantID, playerAccountID, instrumentID uuid.UUID, requestID, reason string) {
+	// Security C-2: bounded concurrency. When saturated the work is skipped (the P1 dedupes into one alert anyway and the
+	// refusal itself is already logged and answered); a panic in the goroutine is recovered, never crashing the process.
+	select {
+	case integrityRefusalSem <- struct{}{}:
+	default:
+		logger.Warn("request_withdrawal_integrity_record_skipped_saturated")
+		return
+	}
 	go func() {
+		defer func() { <-integrityRefusalSem }()
+		defer func() {
+			if r := recover(); r != nil {
+				logger.Error("request_withdrawal_integrity_record_panic", "panic", fmt.Sprint(r))
+			}
+		}()
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 		if err := deps.DB.WithTenant(ctx, tenantID, func(ctx context.Context, tx pgx.Tx) error {

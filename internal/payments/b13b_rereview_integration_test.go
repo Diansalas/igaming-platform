@@ -124,3 +124,42 @@ func TestB13B_LFRR_LA_DuplicateOfClosedReceiptThatChangesTheAttemptIsLinked(t *t
 		t.Fatalf("link audit rows = %d, want 1", n)
 	}
 }
+
+// Security C-1 (reverse order): an echo-free success is DEFERRED first, then a redelivery with a mismatching echo closes that
+// same row (duplicate) - the marker must still be written, so that after phase C and a reference-binding pending callback the
+// echo-free success redelivery does not settle.
+func TestB13B_SecC1_ReverseOrderRedeliveryDoesNotSettle(t *testing.T) {
+	w := newB13bW(t, "secc1")
+	wr := w.approved(500, "secc1")
+	cl := w.mustClaim(wr)
+	w.prov.set(WithdrawResult{Outcome: OutcomeAmbiguous}, StatusResult{})
+	gr := w.dispatch(cl)
+	ev := ReceiptEvidence{EventType: "payout", ProviderReference: "ref-secc1", Outcome: OutcomeSucceeded, Amount: 500, AssetCode: "EUR"}
+	if d := w.rawCallback(ev); d != DispositionDeferredUnresolved {
+		t.Fatalf("echo-free success = %s, want deferred", d)
+	}
+	ev.DestinationEcho = w.badEcho(cl.Attempt.ID)
+	w.rawCallback(ev)
+	if n := w.count(`SELECT count(*) FROM audit_log WHERE action = 'payments.payout_echo_receipt_unattributable'`); n != 1 {
+		t.Fatalf("marker rows = %d, want exactly 1 for the closed duplicate", n)
+	}
+	if err := w.apply(wr, cl, gr); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.callback(w.attempt(cl.Attempt.ID), OutcomePending, "ref-secc1", nil); err != nil {
+		t.Fatal(err)
+	}
+	ledgerBefore := w.ledgerTx()
+	ev.DestinationEcho = nil
+	w.rawCallback(ev)
+	if a := w.attempt(cl.Attempt.ID); a.State == AttemptSucceeded {
+		t.Fatalf("FINDING: the echo-free redelivery settled the attempt (%s)", a.State)
+	}
+	if got := w.wr(wr.ID); got.State == withdrawal.StateCompleted || got.ReleaseLedgerTransactionID != nil {
+		t.Fatalf("FINDING: the payout completed: %s", got.State)
+	}
+	if d := w.ledgerTx() - ledgerBefore; d != 0 {
+		t.Fatalf("ledger delta = %d", d)
+	}
+	w.balanced()
+}

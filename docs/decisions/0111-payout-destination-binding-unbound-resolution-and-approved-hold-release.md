@@ -1508,6 +1508,10 @@ statement about a real PSP, a custodian or a licence: every provider in the test
     `payments.payout_echo_receipt_attributed` linking the receipt to the attempt (the receipt row is one-shot).
   - Ledger-finance P5: branch test added (reported reference held by another attempt: `provider_reference_conflict`, nothing bound, other
     attempt untouched, only the conflict P1, ledger unchanged).
+  - Security confirmation C-1/C-2/C-3: the unattributable-echo marker is now written for EVERY receipt the H-1 branch closes (also a
+    duplicate: an echo-free success deferred first, then the mismatching-echo redelivery), idempotently per receipt id, so the LR-2 hold
+    also covers the reverse order. The marker lookup is bounded below by the receipt's received_at. The request-time integrity recorder has
+    an 8-slot semaphore (non-blocking skip when saturated; the P1 dedupes anyway) and a recover.
   - RESOLVE-1 hint-work item (not changed now): the payout `pay_captured_unposted` hint is misleading for a bound `destination_mismatch`
     park, because migration 0125 refuses an M4 "paid" resolution for it. The hint text belongs with the RESOLVE-1 work.
 

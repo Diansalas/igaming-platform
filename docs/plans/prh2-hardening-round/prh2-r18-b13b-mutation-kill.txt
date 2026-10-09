@@ -119,3 +119,9 @@ ADDENDUM 3 (security and ledger-finance re-review fixes, 2026-10-09; same in-pla
   E02  L-A: link audit row not written                                    KILLED  TestB13B_LFRR_LA_DuplicateOfClosedReceiptThatChangesTheAttemptIsLinked
   E03  LR-3: per-receipt discriminator kept                               KILLED  TestB13B_LR3_UnattributableEchoAlertIsPerProvider
   LR-1 (created_at lower bound) is a query-plan change with identical results; not mutation-testable by behaviour (equivalent).
+
+ADDENDUM 4 (security confirmation C-1..C-3; same in-place method): 3 counted, 3 killed
+  F01  C-1: marker written only for a NEW closed row (reverse order)     KILLED  TestB13B_SecC1_ReverseOrderRedeliveryDoesNotSettle
+  F02  C-2: saturated recorder does not skip                             KILLED  TestRecordRequestIntegrityRefusal_SaturatedSkips
+  F03  C-2: recover removed                                              KILLED  TestRecordRequestIntegrityRefusal_PanicIsRecoveredAndSlotReleased (process panic)
+  C-3 (received_at lower bound) is a query-plan bound with identical results (equivalent).
