@@ -26,15 +26,13 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/withdrawal"
 )
 
-type m4APISource struct {
-	lines []statement.PaymentStatementLine
-}
+type m4APISource struct{}
 
 func (m4APISource) SyntheticComponent()                     {}
 func (m4APISource) Label() string                           { return "MOCK m4 http test statement" }
 func (m4APISource) ProviderID() string                      { return "mock" }
 func (m4APISource) PayoutLinesCarryMerchantReference() bool { return true }
-func (s m4APISource) Fetch(context.Context, statement.PaymentFetchRequest) (statement.PaymentStatement, error) {
+func (m4APISource) Fetch(context.Context, statement.PaymentFetchRequest) (statement.PaymentStatement, error) {
 	return statement.PaymentStatement{}, errors.New("not used")
 }
 
