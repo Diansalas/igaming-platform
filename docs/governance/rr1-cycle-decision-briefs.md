@@ -12,7 +12,7 @@ required; unrelated work continues.
 | RR-1, R-1 matched decline references, silent join fallback | Ledger-finance ruled RR-1 (re-review 2026-10-09); R-1 and the join are security LOW conditions on an APPROVED merge, refusal-direction only | IMPLEMENTED on `gov-r21-rr1` (see registry) |
 | s4.8 post-resolution cells (F-1) | Fully specified in ADR 0111 s4.8; RESOLVE-1 "everything else including s4.8 cells" authorised to start (revision 4 co-ruling); provider-independent (MOCK statuses) | IMPLEMENTED on `gov-r22-cells` (see registry) |
 | B2C payout-instrument flow | Backend contract is implemented (B13-B); frontend follow-up named by the B13-B reports | `gov-r23-b2c` (see registry) |
-| Instrument state gates settlement? | **NOT decided.** Only an architect design statement (ADR 0111 s2.4 "polls/evidence are not blocked by instrument state", by analogy with LF95-C10(d)) plus security and ledger-finance RECOMMENDATIONS. ADR 0111 is still `PROPOSED`. No DECIDED row in the register | Brief 1; current behaviour (not gated) left as merged, no policy change |
+| Instrument state gates settlement? | **DECIDED 2026-10-09 (ADR 0095 s48 decision 3; ADR 0111 s22): it does not.** Formerly: **NOT decided.** Only an architect design statement (ADR 0111 s2.4 "polls/evidence are not blocked by instrument state", by analogy with LF95-C10(d)) plus security and ledger-finance RECOMMENDATIONS. ADR 0111 is still `PROPOSED`. No DECIDED row in the register | Brief 1; current behaviour (not gated) left as merged, no policy change |
 | `destination_integrity_failure` exit | **NOT defined** by any ADR or ruling. M2 excludes it; the 0125 M4 scope covers only `destination_mismatch`; ledger-finance M-3 flags the stranded hold | Brief 2 |
 | Adapter destination echo declaration | Mechanism decided (ADR 0111 s2.6: `EchoesDestinationFingerprint` in the manifest; callbacks only compare). **DECIDED (ADR 0095 s48 decision 5; ADR 0111 s24): a mandatory explicit declaration**, fail closed; per-provider acceptability of `Unsupported` still to be defined | Brief 3 (DECIDED) |
 | ALERT-DELIVERY-1 / HD-PRH2-4-OPS | OPEN in the register (no recipients, on-call or channel). Not approved | Left blocked; nothing invented |
@@ -23,6 +23,8 @@ required; unrelated work continues.
 ---
 
 ## Brief 1 - Should the instrument's current state gate settlement of an already-sent payout?
+
+> **DECIDED (2026-10-09, ADR 0095 s48 decision 3): instrument state MUST NOT gate settlement; implemented/verified and tested, see ADR 0111 s22.** The text below is the original brief, kept unchanged.
 
 **Current state.** Implemented as merged (B13-B): the settlement/evidence paths (sync phase C, poll, callback/receipt)
 check snapshot integrity and the destination echo, NOT the instrument's current state. A suspension or revocation
