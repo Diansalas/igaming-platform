@@ -71,12 +71,16 @@ func (k ResolutionKind) IsM4() bool {
 	return k == ResolutionM4EvidencePaid || k == ResolutionM4EvidenceNotPaid
 }
 
-// M4ResolvableDispute is the Go restatement of migration 0125's
-// payment_m4_in_scope (ADR 0111 4.1, A-12, C-6, M-10): a disputed payout whose
-// reason is invalid_provider_reference, invalid_provider_reference:* or
-// provider_reference_conflict and which holds NO provider reference (both
-// kinds), or destination_mismatch (not-paid only). A parity test pins it to the
-// database function.
+// M4ResolvableDispute is the Go restatement of payment_m4_in_scope (migration
+// 0125, widened by 0127; ADR 0111 4.1, A-12, C-6, M-10 and section 23): a
+// disputed payout whose reason is invalid_provider_reference,
+// invalid_provider_reference:* or provider_reference_conflict and which holds NO
+// provider reference (both kinds), or destination_mismatch /
+// destination_integrity_failure (NOT-PAID ONLY, with or without a bound
+// reference). M4 paid is never admitted for a destination reason: completing a
+// payout to a destination other than, or not verifiable against, the bound one
+// is never allowed (owner decision 4, ADR 0095 section 48). A parity test pins
+// it to the database function.
 func M4ResolvableDispute(kind ResolutionKind, state AttemptState, terminalReason, providerReference *string) bool {
 	if !kind.IsM4() || state != AttemptDisputed || terminalReason == nil {
 		return false
@@ -85,7 +89,7 @@ func M4ResolvableDispute(kind ResolutionKind, state AttemptState, terminalReason
 	if providerReference == nil && (r == "invalid_provider_reference" || strings.HasPrefix(r, "invalid_provider_reference:") || r == "provider_reference_conflict") {
 		return true
 	}
-	return kind == ResolutionM4EvidenceNotPaid && r == "destination_mismatch"
+	return kind == ResolutionM4EvidenceNotPaid && (r == TerminalReasonDestinationMismatch || r == TerminalReasonDestinationIntegrityFailure)
 }
 
 func (in ResolutionRequestInput) validateM4() error {
