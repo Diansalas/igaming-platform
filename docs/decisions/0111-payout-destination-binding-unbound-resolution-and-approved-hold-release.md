@@ -2104,3 +2104,76 @@ it the raise is the final `return`, after the audit row (`TestPayoutPostM4Cell_*
 - A finding recorded for the owner (no code change): the system-shaped sessions that run the cells can read only EXECUTED M2/M4 rows
   (policy `tenant_system_read_executed`, 0125); the cell's own `state = 'executed'` and tenant predicates are therefore redundant there and are
   pinned for a principal-shaped session by `TestPostM4_PendingM4_NoSignal_EvenInAPrincipalShapedSession`.
+
+## 22. Ruling: instrument state does not gate settlement (ADR 0095 section 48 decision 3) - verified, tested, no production change (`payments`, 2026-10-09; branch `gov-r31-settle`, base `dad803d`)
+
+### 22.1 The ruling and what it replaces
+
+**Owner decision 3 (DECIDED 2026-10-09, ADR 0095 section 48):** instrument state MUST NOT gate settlement. Once a payout has been properly
+authorised, bound and snapshotted, a later instrument-state change (suspension, revocation, verification expiry) must not automatically prevent
+settlement of that already-authorised transaction. Instrument eligibility remains relevant to initiation and dispatch under the existing policy.
+
+This is now a **ruling**, not a design statement. It replaces the "design statement" status of section 2.4's row "Polls / evidence on an existing
+attempt: not blocked by instrument state (LF95-C10(d))" and the matching sentence of section 2.6 for every evidence path. Nothing else in sections
+2.4 to 2.6 changes.
+
+### 22.2 Verification of the merged code (read, then proven by tests) - STATUS: IMPLEMENTED, NO PRODUCTION CHANGE
+
+The only callers of `EvaluateGate` (the live-instrument gate, which reads the instrument, its verification and its blocking events) are the
+**dispatch** gates, through `gatePayoutDestination`: request creation (`withdrawal.RequestWithdrawal`), T1p (`ClaimForDispatch`), phase B
+(`payoutAdapterCall`) and T2/T12 (`destinationGateAndEscalate`). No evidence path reaches it:
+
+| Evidence path | Destination check it runs | Reads current instrument state? |
+|---|---|---|
+| sync phase C (`ApplyPayoutResult`) | `payoutDestinationEvidence` | no |
+| `QueryStatus` poll (`PollPayoutStatus`, sweeper `resolvePayoutViaQueryStatus`) | `payoutDestinationEvidence` | no |
+| callback / receipt (`ApplyReceiptEvidence`) | `payoutDestinationEvidence` | no |
+| late evidence on a terminal or parked attempt | `payoutTerminalDestinationSignal` / the post-M4 cells | no |
+
+`payoutDestinationEvidence` runs `CheckSnapshot` (the write-once snapshot loaded and seal-verified, then required to equal the withdrawal, the
+attempt and the bound instrument **id and fingerprint as recorded on the withdrawal row**, plus amount and asset) and `CompareEcho` (the provider's
+echo against the **snapshot's** fingerprint and kid). `CheckSnapshot` documents and implements that it never reads the instrument's current state. The
+database side agrees: the snapshot and binding guards are `BEFORE INSERT` only (`payout_attempt_destination_snapshots_before_insert`,
+`withdrawal_requests_payout_binding_guard`), and the deferred `payment_attempts_require_destination_snapshot` fires on attempt insert only, so a later
+state change cannot reject the settlement transaction.
+
+### 22.3 What stays gated (unchanged; HD-R15-5 stays OPEN and unaffected)
+
+A **new** request (generic 409 `PAYOUT_INSTRUMENT_NOT_USABLE`, no row, no hold, key not consumed), T1p, phase B and T2/T12 keep applying the gate rule
+and the tiering predicate exactly as in section 2.4. An approved withdrawal whose instrument became unusable **before** dispatch is still refused at
+T1p (the request stays `approved`, hold kept) and an instrument that becomes unusable between T1p and phase B still stops the provider call (NotSent). Both
+are initiation/dispatch, not settlement, and are the parked behaviour of HD-R15-5, which this section does not touch. A destination echo mismatch and a
+broken or mismatching snapshot still park (`destination_mismatch`, `destination_integrity_failure`) whatever the instrument's state: the decision removes
+the instrument-state gate, not the destination-integrity checks.
+
+### 22.4 Tests (real PostgreSQL, runtime role) and mutation evidence
+
+`internal/payments/r31_settle_instrument_state_integration_test.go` (every flow runs through the runtime-role pool on a per-test scratch database migrated to
+the latest migration; the owner pool only seeds fixtures, writes the max-age configuration and performs the deliberate privileged corruption of (d), (e)):
+
+- (a) `TestR31_A_`: verified instrument, request, approval, T1p snapshot, then suspended / revoked / verification expired (by time, and swept to
+  `verification_expired`) / row changed; a success **sync**, **poll** (sweeper) and **callback**, and a definite **decline** on each, settle with an outcome
+  deep-equal to the untouched-instrument baseline of the same path (withdrawal and attempt state, ledger entries by transaction type, account type, direction
+  and amount, hold net 0, one `withdrawal.completed` or `withdrawal.failed` audit row, no park), with `SUM(D)=SUM(C)` and projection = rebuild.
+- (b) `TestR31_B_` and the HTTP test `TestRequestWithdrawalHandler_R31_UnusableInstrumentStates_Generic409`: unverified, suspended, revoked, expired (by time and
+  swept): refused, generic 409, no row, no hold, key unconsumed (the same key then succeeds); the binding guard refuses a direct INSERT (PI042).
+- (c) `TestR31_C_`: T1p and phase B still refuse an instrument that became unusable before dispatch.
+- (d) `TestR31_D_`: the snapshot is write-once for the runtime role (UPDATE, DELETE, a second INSERT refused); the instrument identity columns are immutable for it
+  (PI011); after the state, mask and detail (label) of the instrument row are changed (owner, triggers off) the attempt still settles against the snapshot, which
+  is unchanged, and a mismatching echo still parks.
+- (e) `TestR31_E_`: no cross-player substitution: request (not usable), direct INSERT (PI041), re-bind UPDATE refused, staff body `payment_method` refused
+  (`ErrPaymentMethodMismatch`), a snapshot naming the other player's instrument refused (PI050), and privileged re-pointing of the withdrawal parks
+  `destination_integrity_failure` instead of settling on the other destination.
+- (f) `TestR31_F_`: a mismatching echo parks as `destination_mismatch` (P1, hold kept, nothing posted) under no change, suspended, revoked and expired, on sync, poll and
+  callback, and for a decline; a suspended instrument never turns a mismatch into a settlement.
+
+Mutation evidence: `docs/plans/prh2-hardening-round/prh2-r31-settle-mutation-kill.txt`: M1 (the dispatch gate added to the evidence check) and M2 (the snapshot coupled to
+the live instrument row) are killed by (a) and (d); M3 (the dispatch gate weakened) is killed by (b) and (c). 3 counted, 3 killed.
+
+### 22.5 Residuals and boundaries
+
+- HD-R15-5 (what happens to an approved withdrawal whose instrument is unusable at dispatch) stays OPEN; the parked behaviour is unchanged and only observed.
+- The decision does not make an instrument-state change a reason to cancel or reverse anything; operators who suspend an instrument with a payout in flight rely
+  on the existing exceptional-resolution paths (decision 7, section 4), not on settlement being blocked.
+- The tests drive MOCK providers only. The HTTP-level request test uses the repository's standard owner test pool (the server fixtures are built that way); the
+  runtime-role proof of the same refusal is `TestR31_B_`.
