@@ -21,8 +21,8 @@ func (synthSrc) SyntheticComponent() {}
 func importSealFixture() (statement.ImportSealInput, []statement.ImportLineCanon) {
 	m := "merchant-1"
 	lines := []statement.ImportLineCanon{
-		{LineNo: 0, Kind: "payout", ProviderReference: "R-1", MerchantReference: &m, Status: "succeeded", Amount: "700", AssetCode: "EUR", OccurredAt: time.Unix(1700000000, 123456000)},
-		{LineNo: 1, Kind: "payout", ProviderReference: "R-2", Status: "declined", Amount: "5", AssetCode: "EUR", OccurredAt: time.Unix(1700000100, 0)},
+		{LineNo: 0, ProviderID: "mock-payments", Kind: "payout", ProviderReference: "R-1", MerchantReference: &m, Status: "succeeded", Amount: "700", AssetCode: "EUR", OccurredAt: time.Unix(1700000000, 123456000)},
+		{LineNo: 1, ProviderID: "mock-payments", Kind: "payout", ProviderReference: "R-2", Status: "declined", Amount: "5", AssetCode: "EUR", OccurredAt: time.Unix(1700000100, 0)},
 	}
 	d := sha256.Sum256([]byte("content"))
 	in := statement.ImportSealInput{ImportID: uuid.New(), TenantID: uuid.New(), ProviderID: "mock-payments", SourceLabel: "MOCK x",
@@ -73,7 +73,8 @@ func TestImportSeal_RoundTrip_AndEveryFieldIsCovered(t *testing.T) {
 	m2 := "merchant-2"
 	o := "orig"
 	mutators := map[string]func(l *statement.ImportLineCanon){
-		"line_no": func(l *statement.ImportLineCanon) { l.LineNo++ }, "kind": func(l *statement.ImportLineCanon) { l.Kind = "deposit" },
+		"line_no":     func(l *statement.ImportLineCanon) { l.LineNo++ },
+		"provider_id": func(l *statement.ImportLineCanon) { l.ProviderID = "other-psp" }, "kind": func(l *statement.ImportLineCanon) { l.Kind = "deposit" },
 		"provider_reference":          func(l *statement.ImportLineCanon) { l.ProviderReference += "x" },
 		"merchant_reference":          func(l *statement.ImportLineCanon) { l.MerchantReference = &m2 },
 		"merchant_reference NULL":     func(l *statement.ImportLineCanon) { l.MerchantReference = nil },

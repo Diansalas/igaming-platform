@@ -63,7 +63,7 @@ func statementLinesCanon(stmt statement.PaymentStatement) []statement.ImportLine
 	out := make([]statement.ImportLineCanon, len(stmt.Lines))
 	for i, l := range stmt.Lines {
 		out[i] = statement.ImportLineCanon{
-			LineNo: i, Kind: l.Kind, ProviderReference: l.ProviderReference,
+			LineNo: i, ProviderID: l.ProviderID, Kind: l.Kind, ProviderReference: l.ProviderReference,
 			MerchantReference: nullIfEmpty(l.MerchantReference), OriginalProviderReference: nullIfEmpty(l.OriginalProviderReference),
 			SettlementReference: nullIfEmpty(l.SettlementReference), Status: l.Status,
 			Amount: strconv.FormatInt(l.Amount, 10), AssetCode: l.AssetCode, OccurredAt: l.OccurredAt.UTC().Truncate(time.Microsecond),

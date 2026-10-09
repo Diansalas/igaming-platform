@@ -40,7 +40,7 @@ func VerifyStatementImportInTx(ctx context.Context, tx pgx.Tx, keys *Keys, tenan
 	}
 	in.ImportedByService = *service
 	rows, err := tx.Query(ctx, `
-		SELECT line_no, kind, provider_reference, merchant_reference, original_provider_reference, settlement_reference,
+		SELECT line_no, provider_id, kind, provider_reference, merchant_reference, original_provider_reference, settlement_reference,
 		       status, amount::text, asset_code, occurred_at
 		  FROM payment_statement_lines WHERE tenant_id = $1 AND import_id = $2 ORDER BY line_no`, tenantID, importID)
 	if err != nil {
@@ -49,7 +49,7 @@ func VerifyStatementImportInTx(ctx context.Context, tx pgx.Tx, keys *Keys, tenan
 	var lines []statement.ImportLineCanon
 	for rows.Next() {
 		var l statement.ImportLineCanon
-		if err := rows.Scan(&l.LineNo, &l.Kind, &l.ProviderReference, &l.MerchantReference, &l.OriginalProviderReference,
+		if err := rows.Scan(&l.LineNo, &l.ProviderID, &l.Kind, &l.ProviderReference, &l.MerchantReference, &l.OriginalProviderReference,
 			&l.SettlementReference, &l.Status, &l.Amount, &l.AssetCode, &l.OccurredAt); err != nil {
 			rows.Close()
 			return err

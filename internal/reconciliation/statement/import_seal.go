@@ -20,8 +20,9 @@ import (
 // coverage_start, coverage_end, content_digest, line_count, fetched_at,
 // payout_lines_carry_merchant_reference, imported_by_service, lines_digest).
 // lines_digest is SHA-256 over the canonical encoding, in line_no order, of
-// EVERY line column the M4 verdict or reconciliation reads (line_no, kind,
-// provider_reference, merchant_reference, original_provider_reference,
+// EVERY line column the M4 verdict or reconciliation reads (line_no,
+// provider_id - review amendment L-1/sec: a line re-pointed at another
+// provider breaks the seal -, kind, provider_reference, merchant_reference, original_provider_reference,
 // settlement_reference, status, amount, asset_code, occurred_at). Any column
 // later added to the verdict must join the digest in the same change. The
 // encoding is the k2_canonical form ("<octet length>:<value>", NULL as "~",
@@ -30,6 +31,7 @@ import (
 // ImportLineCanon is one stored statement line as the digest reads it.
 type ImportLineCanon struct {
 	LineNo                    int
+	ProviderID                string
 	Kind                      string
 	ProviderReference         string
 	MerchantReference         *string
@@ -93,7 +95,7 @@ func ImportLinesDigest(lines []ImportLineCanon) string {
 	h := sha256.New()
 	for i := range lines {
 		l := &lines[i]
-		c := canonJoin(sp("line"), sp(strconv.Itoa(l.LineNo)), sp(l.Kind), sp(l.ProviderReference), l.MerchantReference,
+		c := canonJoin(sp("line"), sp(strconv.Itoa(l.LineNo)), sp(l.ProviderID), sp(l.Kind), sp(l.ProviderReference), l.MerchantReference,
 			l.OriginalProviderReference, l.SettlementReference, sp(l.Status), sp(l.Amount), sp(l.AssetCode), canonTime(l.OccurredAt))
 		h.Write([]byte(strconv.Itoa(len(c))))
 		h.Write([]byte{':'})
