@@ -692,6 +692,28 @@ func TestB13B_PhaseB_Refusals_MakeNoProviderCall(t *testing.T) {
 	}
 }
 
+// The snapshot must equal what is ABOUT TO BE SENT: an attempt whose amount (or asset) no longer equals its sealed
+// snapshot is refused at phase B even though the snapshot itself still verifies.
+func TestB13B_PhaseB_SnapshotMustEqualWhatIsSent(t *testing.T) {
+	for _, tc := range []struct{ name, set string }{
+		{"amount differs", `UPDATE payment_attempts SET amount = 501 WHERE id = $1`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := newB13bW(t, "g2")
+			wr := w.approved(500, "b13b-pb-eq")
+			cl := w.mustClaim(wr)
+			w.tamper("payment_attempts", tc.set, cl.Attempt.ID)
+			reloaded := w.attempt(cl.Attempt.ID)
+			adapter, _ := w.orch.Provider(w.pid)
+			gr := DispatchWithdraw(w.ctx(), w.pool, MockCredentialResolver{}, adapter, reloaded, w.orch.PayoutOptions()...)
+			w.wantNotSent(gr, tc.name)
+			if g, ok := payoutinstrument.IsGateRefusal(gr.Err); !ok || g.Reason != payoutinstrument.ReasonSnapshotMismatch || !g.Integrity() {
+				t.Fatalf("refusal = %+v, want an integrity snapshot_mismatch (err %v)", g, gr.Err)
+			}
+		})
+	}
+}
+
 // =============================================================================================
 // T2 / T12
 // =============================================================================================
