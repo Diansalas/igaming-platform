@@ -72,8 +72,18 @@ const (
 	// m4NotPaidCapturedUnpostedResolutionHint (ADR 0111 §4.6, L-4): a succeeded
 	// line on a payout whose withdrawal an executed m4_evidence_not_paid failed.
 	m4NotPaidCapturedUnpostedResolutionHint = "resolution: possible double payout after M4 not-paid: recovery via compensating debit (K2) or off-platform recovery; never allocation"
-	m4KindPaid                              = "m4_evidence_paid"
-	m4KindNotPaid                           = "m4_evidence_not_paid"
+	// destinationPayoutCapturedUnpostedResolutionHint (review amendment C-3/LF,
+	// ADR 0111 §17.7): a BOUND payout park whose provider reported the payout to
+	// a destination other than the bound one (destination_mismatch /
+	// destination_integrity_failure, B13-B). Completing against the player's
+	// hold would book a payout the player never received, so no completion is
+	// offered; M4 is named for not-paid only, and only on positive decline
+	// evidence. Selected by reason in capturedUnpostedHintFor; INERT until
+	// B13-B classifies these reasons (today they are reasonUnclassified, which
+	// raises no pay_captured_unposted finding; a pin test holds both facts).
+	destinationPayoutCapturedUnpostedResolutionHint = "payout reported to a destination other than the bound one: no completion against the player's hold; PSP recall/return or off-platform recovery; M4 not-paid only on positive decline evidence; never allocation"
+	m4KindPaid                                      = "m4_evidence_paid"
+	m4KindNotPaid                                   = "m4_evidence_not_paid"
 	// unknownOpCapturedUnpostedResolutionHint: fail-closed neutral text for an
 	// operation reconciliation does not know (security I-1, BOUND-CLEAR-1).
 	unknownOpCapturedUnpostedResolutionHint      = "resolution: none defined for this operation (unknown operation; nothing clears it); never allocation; M1 only acknowledges"
@@ -151,6 +161,11 @@ type m4Resolution struct {
 	pinnedRef      string // provider_reference_at_submission; "" when NULL
 	attemptRef     string // the attempt's current provider_reference; "" when NULL
 	attemptMerchnt string
+	// evidenceRef is the PSP reference of the resolution's evidence line (the
+	// paid line's R, or the declined line's own reference D for not-paid);
+	// "" when the line is not visible. Review amendment H-1/sec: R-1 must see
+	// a later succeeded line on D even when it carries no merchant reference.
+	evidenceRef string
 }
 
 // k3Evidence is everything the K3 additions need beyond the run's own import.
@@ -255,9 +270,11 @@ func (m *payMatcher) loadK3Evidence(ctx context.Context, tx pgx.Tx, importIsMock
 	// policy widened by migration 0125).
 	rows, err = tx.Query(ctx, `
 		SELECT r.id, r.attempt_id, r.kind, r.ledger_transaction_id, r.amount::text, COALESCE(r.evidence_reference, ''),
-		       COALESCE(r.provider_reference_at_submission, ''), COALESCE(a.provider_reference, ''), a.merchant_reference
+		       COALESCE(r.provider_reference_at_submission, ''), COALESCE(a.provider_reference, ''), a.merchant_reference,
+		       COALESCE(d.provider_reference, '')
 		  FROM payment_manual_resolutions r
 		  JOIN payment_attempts a ON a.id = r.attempt_id AND a.tenant_id = r.tenant_id
+		  LEFT JOIN payment_statement_lines d ON d.id = r.evidence_line_id AND d.tenant_id = r.tenant_id
 		 WHERE r.tenant_id = $1 AND a.provider_id = $2 AND r.state = 'executed'
 		   AND r.kind IN ('m4_evidence_paid', 'm4_evidence_not_paid') AND r.ledger_transaction_id IS NOT NULL
 		 ORDER BY r.id`, m.tenantID, m.provider)
@@ -267,7 +284,7 @@ func (m *payMatcher) loadK3Evidence(ctx context.Context, tx pgx.Tx, importIsMock
 	for rows.Next() {
 		var r m4Resolution
 		var amount string
-		if err := rows.Scan(&r.id, &r.attemptID, &r.kind, &r.ledgerTx, &amount, &r.reference, &r.pinnedRef, &r.attemptRef, &r.attemptMerchnt); err != nil {
+		if err := rows.Scan(&r.id, &r.attemptID, &r.kind, &r.ledgerTx, &amount, &r.reference, &r.pinnedRef, &r.attemptRef, &r.attemptMerchnt, &r.evidenceRef); err != nil {
 			rows.Close()
 			return err
 		}
@@ -328,11 +345,12 @@ func (m *payMatcher) loadK3Evidence(ctx context.Context, tx pgx.Tx, importIsMock
 		merchants[r.attemptMerchnt] = true
 	}
 	// S-1 (ADR 0111 §4.6): every executed M4 adds R, its merchant reference, its
-	// bound reference (pinned and current) and every Y to the lookup key set.
+	// bound reference (pinned and current), every Y and - review amendment
+	// H-1/sec - its evidence line's own reference D to the lookup key set.
 	// All are platform state, fixed before the read, each with the 64-line
 	// budget (I-2): statement content never raises its own budget.
 	for _, r := range e.m4 {
-		for _, ref := range []string{r.reference, r.pinnedRef, r.attemptRef, e.yRef[r.attemptID]} {
+		for _, ref := range []string{r.reference, r.pinnedRef, r.attemptRef, e.yRef[r.attemptID], r.evidenceRef} {
 			if ref != "" {
 				refs[ref] = true
 			}
@@ -633,6 +651,9 @@ func capturedUnpostedHintFor(a *payAttempt, depositHint string) string {
 		if a.m4NotPaid {
 			return m4NotPaidCapturedUnpostedResolutionHint
 		}
+		if isDestinationReason(a.terminalReason) {
+			return destinationPayoutCapturedUnpostedResolutionHint
+		}
 		if a.inM4Scope() {
 			return m4ScopePayoutCapturedUnpostedResolutionHint
 		}
@@ -647,14 +668,24 @@ func capturedUnpostedHintFor(a *payAttempt, depositHint string) string {
 // (ADR 0111 §4.1, C-6): an unbound reason - invalid_provider_reference, its
 // invalid_provider_reference:* family, or provider_reference_conflict - with
 // NO provider reference. Wording only (L-4): it grants and clears nothing.
-// destination_mismatch (not-paid only) arrives with B13-B / 0125 and is not a
-// reason reconciliation classifies today.
+// destination_mismatch is in M4 scope for not-paid only (migration 0125) but is
+// a BOUND park: its wording is destinationPayoutCapturedUnpostedResolutionHint
+// (isDestinationReason), selected before this predicate. B13-B's reasons
+// (destination_mismatch, destination_integrity_failure) are not yet in
+// disputeReasonClasses, so no pay_captured_unposted finding is raised for them
+// today; the hint becomes live when B13-B classifies them (review C-3/C-4).
 func (a *payAttempt) inM4Scope() bool {
 	if a.operation != paymentStatementKindPayout || a.state != "disputed" || a.providerRef != "" {
 		return false
 	}
 	r := a.terminalReason
 	return r == "invalid_provider_reference" || strings.HasPrefix(r, invalidProviderReferencePrefix) || r == "provider_reference_conflict"
+}
+
+// isDestinationReason reports the B13-B destination park reasons (review
+// amendment C-3/LF): wording only, it grants and clears nothing.
+func isDestinationReason(r string) bool {
+	return r == "destination_mismatch" || r == "destination_integrity_failure"
 }
 
 // checkStandingUnbound is S1 (STANDING-1): every disputed attempt the D2F-1

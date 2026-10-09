@@ -22,10 +22,12 @@ import (
 // irrespective of occurred_at or import time - a back-dated contradiction
 // counts. No new mismatch kind (R-1):
 //   - m4_evidence_paid: pay_declared_paid_unconfirmed on any declined or
-//     reversed payout line on R or on the merchant reference, or on a second
-//     DISTINCT succeeded line (after cross-import dedupe);
+//     reversed payout line on R or on the merchant reference, on a second
+//     DISTINCT succeeded line (after cross-import dedupe), or on any payout
+//     line on R naming another merchant reference (review amendment H-2);
 //   - m4_evidence_not_paid: pay_declared_not_paid_but_paid on any succeeded
-//     payout line on the merchant reference, the bound reference or a Y, until
+//     payout line on the merchant reference, the bound reference, a Y or the
+//     evidence line's own reference D (review amendment H-1), until
 //     executed compensating_entry debits with causation = the withdrawal_failed
 //     transaction total at least the amount (the M2 (d) recovery rule).
 //
@@ -41,9 +43,15 @@ func (m *payMatcher) checkM4Standing(ctx context.Context, tx pgx.Tx) error {
 		}
 		switch r.kind {
 		case m4KindPaid:
-			var contra *persistedLine
+			var contra, other *persistedLine
 			distinct := map[string]bool{}
 			for _, l := range m.k3.payoutLinesOn([]string{r.reference}, r.attemptMerchnt) {
+				// Review amendment H-2/sec, C-1/LF: a payout line on R naming
+				// ANOTHER merchant reference (any status, any import) makes the
+				// attribution of R ambiguous.
+				if other == nil && l.ref == r.reference && l.merchant != "" && l.merchant != r.attemptMerchnt {
+					other = l
+				}
 				switch l.status {
 				case "declined", "reversed":
 					if contra == nil {
@@ -58,6 +66,9 @@ func (m *payMatcher) checkM4Standing(ctx context.Context, tx pgx.Tx) error {
 			case contra != nil:
 				why = fmt.Sprintf("contradicting line import=%s line_no=%d is_mock=%t status=%s reference=%s amount=%s asset=%s",
 					contra.importID, contra.lineNo, contra.isMock, contra.status, contra.ref, contra.amount, contra.asset)
+			case other != nil:
+				why = fmt.Sprintf("payout line on R names another merchant reference: import=%s line_no=%d is_mock=%t status=%s reference=%s merchant=%s",
+					other.importID, other.lineNo, other.isMock, other.status, other.ref, other.merchant)
 			case len(distinct) > 1:
 				why = fmt.Sprintf("%d distinct succeeded payout lines on R or the merchant reference", len(distinct))
 			default:
@@ -68,7 +79,7 @@ func (m *payMatcher) checkM4Standing(ctx context.Context, tx pgx.Tx) error {
 				"platform: "+a.render()+"; M4 evidence paid, completion transaction="+r.ledgerTx.String()+" reference="+r.reference+"; "+why)
 		case m4KindNotPaid:
 			var evidence *persistedLine
-			for _, l := range m.k3.payoutLinesOn([]string{r.pinnedRef, r.attemptRef, m.k3.yRef[r.attemptID]}, r.attemptMerchnt) {
+			for _, l := range m.k3.payoutLinesOn([]string{r.pinnedRef, r.attemptRef, m.k3.yRef[r.attemptID], r.evidenceRef}, r.attemptMerchnt) {
 				if l.status == paymentStatementStatusSucceeded {
 					evidence = l
 					break

@@ -161,3 +161,42 @@ func TestR1_M4Predicates_Pure(t *testing.T) {
 		}
 	}
 }
+
+// Review amendment C-3/C-4 (LF): the destination park wording. Pin 1 - it is
+// INERT today: B13-B's reasons are not classified, so no pay_captured_unposted
+// finding can be raised for them (classifyDisputeReason -> reasonUnclassified;
+// when B13-B classifies them this pin flips deliberately and the hint goes
+// live). Pin 2 - selection by reason, for bound and unbound shapes alike, never
+// the generic payout text and never the M4-scope text. Pin 3 - an executed M4
+// not-paid keeps precedence.
+func TestC3_DestinationHint_InertUntilClassified_SelectedByReason(t *testing.T) {
+	const want = "payout reported to a destination other than the bound one: no completion against the player's hold; PSP recall/return or off-platform recovery; M4 not-paid only on positive decline evidence; never allocation"
+	if destinationPayoutCapturedUnpostedResolutionHint != want {
+		t.Fatalf("destination hint text drifted: %q", destinationPayoutCapturedUnpostedResolutionHint)
+	}
+	for _, r := range []string{"destination_mismatch", "destination_integrity_failure"} {
+		if c := classifyDisputeReason(r); c != reasonUnclassified {
+			t.Fatalf("%s is now classified (%v): B13-B has landed - re-review the destination hint wiring and flip this pin", r, c)
+		}
+		for _, ref := range []string{"X-bound", ""} {
+			a := &payAttempt{operation: "payout", state: "disputed", terminalReason: r, providerRef: ref}
+			if a.boundCapture() || a.unboundPark() {
+				t.Fatalf("%s/%q raises a captured-unposted finding today", r, ref)
+			}
+			if got := capturedUnpostedHintFor(a, capturedUnpostedResolutionHint); got != want {
+				t.Fatalf("%s/%q: hint %q", r, ref, got)
+			}
+			a.m4NotPaid = true
+			if got := capturedUnpostedHintFor(a, capturedUnpostedResolutionHint); got != m4NotPaidCapturedUnpostedResolutionHint {
+				t.Fatalf("%s/%q after M4 not-paid: hint %q", r, ref, got)
+			}
+		}
+	}
+	// Other payout reasons keep their wording.
+	if got := capturedUnpostedHintFor(&payAttempt{operation: "payout", state: "disputed", terminalReason: "provider_reference_conflict"}, ""); got != m4ScopePayoutCapturedUnpostedResolutionHint {
+		t.Fatalf("unbound in-scope park: %q", got)
+	}
+	if got := capturedUnpostedHintFor(&payAttempt{operation: "payout", state: "disputed", terminalReason: "callback_amount_asset_mismatch", providerRef: "X"}, ""); got != payoutCapturedUnpostedResolutionHint {
+		t.Fatalf("bound park: %q", got)
+	}
+}

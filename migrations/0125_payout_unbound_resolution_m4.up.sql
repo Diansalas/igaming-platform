@@ -253,6 +253,7 @@ DECLARE
     v_groups   int;
     v_g        RECORD;
     v_line     uuid;
+    v_paid     boolean;
 BEGIN
     IF NOT payment_m4_scope_visible(p_tenant) THEN
         RAISE EXCEPTION 'payout_m4_evidence: this session cannot see the attempt''s whole statement scope (an error, never a verdict)' USING ERRCODE = 'MR060';
@@ -285,10 +286,12 @@ BEGIN
         RETURN QUERY SELECT 'evidence_overflow'::text, NULL::uuid, NULL::text, '{}'::uuid[];
         RETURN;
     END IF;
-    -- R: every succeeded line's own reference (statement content: no budget of its own).
+    -- The PSP references of EVERY platform-keyed line, any status (review
+    -- amendment H-1/sec: the paid line's R and the declined line's D alike).
+    -- Statement content: no budget of its own; their lines join the read set
+    -- below and count against the same 64-line bound (S-4).
     v_rs := ARRAY(SELECT DISTINCT l.provider_reference FROM payment_statement_lines l
                    WHERE l.tenant_id = p_tenant AND l.provider_id = v_a.provider_id AND l.kind = 'payout'
-                     AND l.status = 'succeeded'
                      AND (l.merchant_reference = v_a.merchant_reference OR l.provider_reference = v_a.provider_reference
                           OR l.provider_reference = ANY (v_ys))
                    ORDER BY 1);
@@ -309,7 +312,13 @@ BEGIN
                            OR l.provider_reference = ANY (v_ys) OR l.provider_reference = ANY (v_rs))
                     ORDER BY 1);
 
-    IF cardinality(v_rs) > 0 THEN
+    v_paid := EXISTS (SELECT 1 FROM payment_statement_lines l
+                       WHERE l.tenant_id = p_tenant AND l.provider_id = v_a.provider_id AND l.kind = 'payout'
+                         AND l.status = 'succeeded'
+                         AND (l.merchant_reference = v_a.merchant_reference OR l.provider_reference = v_a.provider_reference
+                              OR l.provider_reference = ANY (v_ys) OR l.provider_reference = ANY (v_rs)));
+
+    IF v_paid THEN
         -- ---------------- the paid verdict (C-5) ----------------
         -- Exactly one succeeded line after cross-import dedupe on
         -- (provider_reference, status, amount, asset_code, occurred_at).
@@ -337,6 +346,16 @@ BEGIN
                       AND l.status IN ('declined', 'reversed', 'pending')
                       AND (l.merchant_reference = v_a.merchant_reference OR l.provider_reference = v_a.provider_reference
                            OR l.provider_reference = ANY (v_ys) OR l.provider_reference = ANY (v_rs))) THEN
+            RETURN QUERY SELECT 'contradictory'::text, NULL::uuid, NULL::text, v_ids;
+            RETURN;
+        END IF;
+        -- Review amendment H-2/sec, C-1/LF: R must be unambiguously THIS
+        -- attempt's - any payout line on R (any status, any import) naming
+        -- another merchant reference makes the verdict contradictory.
+        IF EXISTS (SELECT 1 FROM payment_statement_lines l
+                    WHERE l.tenant_id = p_tenant AND l.provider_id = v_a.provider_id AND l.kind = 'payout'
+                      AND l.provider_reference = v_g.ref
+                      AND l.merchant_reference IS NOT NULL AND l.merchant_reference <> v_a.merchant_reference) THEN
             RETURN QUERY SELECT 'contradictory'::text, NULL::uuid, NULL::text, v_ids;
             RETURN;
         END IF;
@@ -393,13 +412,24 @@ BEGIN
 
     -- ---------------- the not-paid verdict (H-1) ----------------
     -- (iii) no succeeded, pending or reversed payout line on the merchant
-    -- reference, the bound reference or any Y, in ANY import (no succeeded line
-    -- exists here: v_rs is empty).
+    -- reference, the bound reference, any Y or - review amendment H-1/sec - the
+    -- PSP reference D of any of those lines (the declined line's own reference
+    -- included), in ANY import.
     IF EXISTS (SELECT 1 FROM payment_statement_lines l
                 WHERE l.tenant_id = p_tenant AND l.provider_id = v_a.provider_id AND l.kind = 'payout'
                   AND l.status IN ('succeeded', 'pending', 'reversed')
                   AND (l.merchant_reference = v_a.merchant_reference OR l.provider_reference = v_a.provider_reference
-                       OR l.provider_reference = ANY (v_ys))) THEN
+                       OR l.provider_reference = ANY (v_ys) OR l.provider_reference = ANY (v_rs))) THEN
+        RETURN QUERY SELECT 'insufficient'::text, NULL::uuid, NULL::text, v_ids;
+        RETURN;
+    END IF;
+    -- Review amendment H-1/sec: an import that DECLARES its payout lines carry
+    -- the merchant reference but holds a payout line without one contradicts
+    -- its own declaration: no not-paid verdict while any such import is read.
+    IF EXISTS (SELECT 1 FROM payment_statement_lines l
+                 JOIN payment_statement_imports i ON i.id = l.import_id AND i.tenant_id = l.tenant_id
+                WHERE l.tenant_id = p_tenant AND l.import_id = ANY (v_ids) AND l.kind = 'payout'
+                  AND l.merchant_reference IS NULL AND i.payout_lines_carry_merchant_reference) THEN
         RETURN QUERY SELECT 'insufficient'::text, NULL::uuid, NULL::text, v_ids;
         RETURN;
     END IF;
