@@ -24,7 +24,7 @@ import (
 
 func apiCode(t *testing.T, resp *http.Response) apierror.Code {
 	t.Helper()
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	var e apierror.Error
 	decodeBody(t, resp, &e)
 	return e.Code

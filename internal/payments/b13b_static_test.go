@@ -70,7 +70,7 @@ func TestB13B_Static_ClaimForDispatchOrder(t *testing.T) {
 	allowDecision := strings.LastIndex(body[:mark], "kyc.RecordDecision(")
 	insert := strings.Index(body, "InsertSubmittingAttempt(")
 	snap := strings.Index(body, "WriteSnapshot(")
-	if !(gate < allowDecision && allowDecision < mark && mark < insert && insert < snap) {
+	if gate >= allowDecision || allowDecision >= mark || mark >= insert || insert >= snap {
 		t.Fatalf("T1p order must be gate(%d) < allow decision(%d) < submitted(%d) < attempt insert(%d) < snapshot(%d)", gate, allowDecision, mark, insert, snap)
 	}
 	if !strings.Contains(body, "payoutinstrument.IsGateRefusal(") || !strings.Contains(body, "destRefusal = gerr") {
@@ -85,11 +85,11 @@ func TestB13B_Static_SweeperRechecksTheDestination(t *testing.T) {
 		d := strings.Index(body, "s.destinationGateAndEscalate(")
 		k := strings.Index(body, "s.gateAndEscalateOnDeny(")
 		c := strings.Index(body, claim)
-		if d < 0 || k < 0 || c < 0 || !(d < k && k < c) {
+		if d < 0 || k < 0 || c < 0 || d >= k || k >= c {
 			t.Fatalf("%s: destination gate(%d) must precede the KYC gate(%d) and the claim CAS(%d)", fn, d, k, c)
 		}
 		ks := strings.Index(body, "checkPayoutKillSwitch(")
-		if !(ks >= 0 && ks < d) {
+		if ks < 0 || ks >= d {
 			t.Fatalf("%s: the kill-switch check must stay ahead of the destination gate", fn)
 		}
 	}
