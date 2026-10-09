@@ -283,6 +283,15 @@ func TestD7_P3_WrongProviderReference(t *testing.T) {
 		m.d7BothKindsRefusedAtRequest(p)
 	})
 
+	t.Run("R is the bound reference of a DEPOSIT attempt of the same provider", func(t *testing.T) {
+		m.t = t
+		p := m.park(6330)
+		_, depositRef := m.depositAmbiguousBound()
+		m.ingest(m4Imp{}, m.line(depositRef, p.fresh.MerchantReference, "succeeded", 6330, time.Now()))
+		m.d7NonPositive(p, M4VerdictContradictory)
+		m.d7BothKindsRefusedAtRequest(p)
+	})
+
 	t.Run("R is another attempt's typed Y", func(t *testing.T) {
 		m.t = t
 		p := m.park(634)
@@ -611,6 +620,17 @@ func TestD7_P8_NonFinalProviderStatus(t *testing.T) {
 		m.ingest(m4Imp{}, m.line(m4Ref(), p.fresh.MerchantReference, "succeeded", 713, time.Now()), m.line(m4Ref(), p.fresh.MerchantReference, "pending", 713, time.Now()))
 		m.d7NonPositive(p, M4VerdictContradictory)
 	})
+	t.Run("a declined line and a pending / reversed line on the SAME reference in one sealed import: not paid is not established", func(t *testing.T) {
+		for i, st := range []string{"pending", "reversed"} {
+			m.t = t
+			p := m.park(int64(7140 + i))
+			m.ingest(m4Imp{start: p.fresh.CreatedAt.Add(-time.Minute), end: p.fresh.LastSentAt.Add(25 * time.Hour)},
+				m.line("m4-D-"+uuid.NewString()[:12], p.fresh.MerchantReference, "declined", int64(7140+i), time.Now()),
+				m.line("m4-D-"+uuid.NewString()[:12], p.fresh.MerchantReference, st, int64(7140+i), time.Now()))
+			m.d7NonPositive(p, M4VerdictInsufficient)
+			m.d7BothKindsRefusedAtRequest(p)
+		}
+	})
 	t.Run("a late pending / reversed / declined after the request: refused at execution (paid)", func(t *testing.T) {
 		for i, st := range []string{"pending", "reversed", "declined"} {
 			m.t = t
@@ -679,6 +699,23 @@ func TestD7_P9_CausalLink(t *testing.T) {
 			t.Fatalf("refusal %q", got)
 		}
 	})
+	t.Run("a perfect declined line in a declaring import that also holds ANY payout line without a merchant reference", func(t *testing.T) {
+		m.t = t
+		p := m.park(7310)
+		m.ingest(win(p, m4Imp{}),
+			m.line("m4-D-"+uuid.NewString()[:12], p.fresh.MerchantReference, "declined", 7310, time.Now()),
+			m.line(m4Ref(), "", "succeeded", 1, time.Now())) // unrelated to this attempt, but the declaration is contradicted
+		m.d7NonPositive(p, M4VerdictInsufficient)
+		m.d7BothKindsRefusedAtRequest(p)
+	})
+	t.Run("a window that opens AFTER the attempt was created does not cover its settlement", func(t *testing.T) {
+		m.t = t
+		p := m.park(7311)
+		m.ingest(m4Imp{start: p.fresh.CreatedAt.Add(time.Hour), end: p.fresh.LastSentAt.Add(30 * time.Hour)},
+			m.line("m4-D-"+uuid.NewString()[:12], p.fresh.MerchantReference, "declined", 7311, time.Now()))
+		m.d7NonPositive(p, M4VerdictInsufficient)
+		m.d7BothKindsRefusedAtRequest(p)
+	})
 	t.Run("a declined line dated before the last send is not the answer to it", func(t *testing.T) {
 		m.t = t
 		p := m.park(734)
@@ -733,14 +770,13 @@ func TestD7_EligibilityRefusal_ReasonsAtTheExecutionPoint(t *testing.T) {
 	m := newM4World(t)
 	probe := func(res ManualResolution, att PaymentAttempt) string {
 		var got string
-		m.pool.WithPlatformActingInTenant(context.Background(), m.acting.ID, m.f.tenantID, uuid.Nil, OperationKindForceResolve, func(ctx context.Context, tx pgx.Tx) error {
+		if err := m.pool.WithPlatformActingInTenant(context.Background(), m.acting.ID, m.f.tenantID, uuid.Nil, OperationKindForceResolve, func(ctx context.Context, tx pgx.Tx) error {
 			var err error
 			got, err = m4EligibilityRefusal(ctx, tx, res, att)
-			if err != nil {
-				t.Fatalf("m4EligibilityRefusal: %v", err)
-			}
-			return nil
-		})
+			return err
+		}); err != nil {
+			t.Fatalf("m4EligibilityRefusal: %v", err)
+		}
 		return got
 	}
 	// control: an eligible paid evidence.
@@ -867,6 +903,11 @@ func TestD7_Meta_NoSingleProviderFieldIsSufficient_OnlyThisFieldIsRight(t *testi
 		}},
 		{"everything is right except the seal (unsealed import, perfect succeeded line)", func(p *b11Parked) (m4Imp, []statement.PaymentStatementLine) {
 			return m4Imp{unsealed: true}, []statement.PaymentStatementLine{m.line(m4Ref(), p.fresh.MerchantReference, "succeeded", p.fresh.Amount, time.Now())}
+		}},
+		{"everything is right except the seal (unsealed import, perfect declined line, covering window)", func(p *b11Parked) (m4Imp, []statement.PaymentStatementLine) {
+			o := cover(p)
+			o.unsealed = true
+			return o, []statement.PaymentStatementLine{m.line("m4-D-"+uuid.NewString()[:12], p.fresh.MerchantReference, "declined", p.fresh.Amount, time.Now())}
 		}},
 		{"everything is right except the source declaration (perfect declined line)", func(p *b11Parked) (m4Imp, []statement.PaymentStatementLine) {
 			o := cover(p)

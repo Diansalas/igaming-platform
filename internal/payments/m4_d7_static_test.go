@@ -55,7 +55,7 @@ func TestD7_EligibilityRefusalRunsOnEveryM4Path_AfterTheSeals(t *testing.T) {
 		return pos
 	}
 	// The request: seals, then eligibility, then the requested audit row.
-	if s, e, a := first("requestInTx", "verifyImportSeals"), first("requestInTx", "m4EligibilityRefusal"), first("requestInTx", "recordResolutionAudit"); !(s < e && e < a) {
+	if s, e, a := first("requestInTx", "verifyImportSeals"), first("requestInTx", "m4EligibilityRefusal"), first("requestInTx", "recordResolutionAudit"); s >= e || e >= a {
 		t.Error("requestInTx must verify the seals, then run m4EligibilityRefusal, then write its audit row")
 	}
 	// The execution: seals, then eligibility (inside m4EvidenceRefusal, which decideInTx runs before postM4).

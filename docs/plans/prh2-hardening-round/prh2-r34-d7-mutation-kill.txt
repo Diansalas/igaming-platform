@@ -1,0 +1,93 @@
+PRH2 R34 D-7 conformance (ADR 0111 section 25; owner decision 6 of ADR 0095 section 48) - MUTATION-KILL EVIDENCE
+Scope: migration 0125 (payout_m4_evidence, the resolution guard) as exercised by the D-7 suite, internal/payments/manual_resolution_m4.go and manual_resolution.go (the Go eligibility refusal and the execution re-check),
+and internal/payments/m4_source_contract.go (the adapter-contract checklist).
+Generated 2026-10-09 on branch gov-r34-d7 (base dad803d). Method: each mutant is applied IN PLACE to the named file of the worktree after the file text is held in memory (S* edit the
+migration, which the payments tests apply to their own private scratch databases; the repository migration is restored byte-for-byte and compared after every mutant), the package is vetted with -tags integration
+(a mutant that does not compile is reported NOT COUNTED and fixed), the targeted tests run with `-tags integration -count=1 -p 1 -failfast -run TestD7_|TestM4_DBRecheck|TestM4_Visibility|TestM4_Scope|TestM4_Seals|TestL2_`
+(the C* mutants run the database-free `TestD7_SourceContract|TestD7_StatementLine|TestD7_NoProduction`; G08 additionally `TestD7_EligibilityRefusalRunsOnEveryM4Path`), then the file is restored and compared.
+-failfast: the killer is the first failing test. Not under -race (compile time); the final suites are (ADR 0111 section 25.8).
+Run 1 covered every id once. Its survivors S09, S10, S13, S15, S17 were reviewed: S09, S10, S15, S17 exposed real test gaps (the late-arrival tests were masked by the import-set pin; a window that opens after the attempt had only an ambiguity-table
+row) and tests were added (TestD7_P8 same-import pending/reversed, TestD7_P9 NULL-merchant line in a declaring import and window opening after creation) before run 2; S21 got a deposit-attempt case; run 2 re-ran them. G07/G08/G13 did not compile
+in run 1 (an unused variable/import after the mutation) and were re-expressed. The redundant-clause doubles D01-D03 were added after the survivors S21-S24 were found to be pairs. S34/S35 were added to make the "unreachable" claim of ADR 0111 25.9 a measured one.
+The line shown is the LATEST result for each id.
+
+CONTROL (unmutated tree, same commands): `TestD7_` PASS; the existing M4 suites PASS (ADR 0111 section 25.8).
+
+Counted mutants: 60   KILLED: 49   SURVIVED: 11 (every survivor classified below; none is an unexplained gap)
+
+id    result    mutation / first failing test
+C01   KILLED    checklist: unmapped return/reversal/chargeback no longer a Fail  =>  --- FAIL: TestD7_SourceContract_EachItemIsEffective
+C02   KILLED    checklist: unverified PSP content signature no longer a Fail  =>  --- FAIL: TestD7_SourceContract_EachItemIsEffective
+C03   KILLED    checklist: provider reference may echo the merchant reference  =>  --- FAIL: TestD7_SourceContract_EachItemIsEffective
+C04   KILLED    checklist: destination echo undeclared no longer a Fail  =>  --- FAIL: TestD7_SourceContract_EachItemIsEffective
+C05   KILLED    checklist: unknown-status-as-succeeded accepted  =>  --- FAIL: TestD7_SourceContract_EachItemIsEffective
+C06   KILLED    checklist: M4 paid admitted although the line model carries no destination echo  =>  --- FAIL: TestD7_SourceContract_FullDeclarationConforms_ButPaidStaysInadmissible
+C07   KILLED    checklist: a synthetic source passes  =>  --- FAIL: TestD7_SourceContract_EachItemIsEffective
+C08   KILLED    checklist: reversal window not required  =>  --- FAIL: TestD7_SourceContract_EachItemIsEffective
+D01   KILLED    paid: R as another attempt's typed Y AND payment_y_attributable both dropped  =>  --- FAIL: TestD7_P3_WrongProviderReference
+D02   KILLED    paid: tombstone on R AND ledger row keyed (provider, R) both dropped  =>  --- FAIL: TestD7_P3_WrongProviderReference
+D03   KILLED    paid: R held by another attempt as provider_reference AND payment_y_attributable both dropped  =>  --- FAIL: TestD7_P3_WrongProviderReference
+G01   KILLED    Go: non-MOCK evidence gate dropped  =>  --- FAIL: TestD7_EligibilityRefusal_ReasonsAtTheExecutionPoint
+G02   KILLED    Go: R == platform merchant reference check dropped  =>  --- FAIL: TestD7_P3_WrongProviderReference
+G03   KILLED    Go: R == merchant reference check narrowed to this attempt's own  =>  --- FAIL: TestD7_P3_WrongProviderReference
+G04   KILLED    Go: line-predates-attempt check dropped  =>  --- FAIL: TestD7_P9_CausalLink
+G05   KILLED    Go: line-after-import-coverage check dropped  =>  --- FAIL: TestD7_P9_CausalLink
+G06   KILLED    Go: paid-only checks applied only when kind is not-paid (guard inverted)  =>  --- FAIL: TestD7_P3_WrongProviderReference
+G07   KILLED    Go: eligibility not run at the request  =>  --- FAIL: TestD7_P3_WrongProviderReference
+G08   KILLED    Go: eligibility not run at the execution  =>  --- FAIL: TestD7_EligibilityRefusalRunsOnEveryM4Path_AfterTheSeals
+G09   KILLED    Go: ErrResolutionEvidenceNotEligible classified as a server error (not insufficient)  =>  --- FAIL: TestD7_P3_WrongProviderReference
+G10   SURVIVED  Go: m4ExecutionRefusal withdrawal-submitted check dropped (DB re-check remains)  =>  (all targeted tests pass)
+G11   KILLED    Go + DB: withdrawal-submitted check dropped at execution in BOTH layers  =>  --- FAIL: TestD7_P1_WrongWithdrawal
+G12   SURVIVED  Go: re-evaluation verdict comparison dropped at execution (DB re-check remains)  =>  (all targeted tests pass)
+G13   KILLED    Go + DB: evidence re-check dropped at execution in BOTH layers  =>  --- FAIL: TestD7_P2_WrongAttempt
+G14   KILLED    Go: seal verification at the request dropped  =>  --- FAIL: TestD7_Meta_NoSingleProviderFieldIsSufficient_OneFieldCorrupted
+S01   KILLED    paid: I-1 amount AND asset comparison dropped  =>  --- FAIL: TestD7_P5_P6_WrongAssetOrAmount
+S02   KILLED    paid: asset comparison dropped (amount kept)  =>  --- FAIL: TestD7_P5_P6_WrongAssetOrAmount
+S03   KILLED    paid: amount comparison dropped (asset kept)  =>  --- FAIL: TestD7_P5_P6_WrongAssetOrAmount
+S04   KILLED    not-paid: declined-line amount equality dropped  =>  --- FAIL: TestD7_P5_P6_WrongAssetOrAmount
+S05   KILLED    not-paid: declined-line asset equality dropped  =>  --- FAIL: TestD7_P5_P6_WrongAssetOrAmount
+S06   KILLED    paid: reversed no longer contradicts  =>  --- FAIL: TestD7_P8_NonFinalProviderStatus
+S07   KILLED    paid: pending no longer contradicts  =>  --- FAIL: TestD7_P8_NonFinalProviderStatus
+S08   KILLED    paid: declined no longer contradicts  =>  --- FAIL: TestD7_Ambiguity_ParksWithoutAutomaticPayOrResolve
+S09   KILLED    not-paid (iii): pending line no longer blocks  =>  --- FAIL: TestD7_P8_NonFinalProviderStatus
+S10   KILLED    not-paid (iii): reversed line no longer blocks  =>  --- FAIL: TestD7_P8_NonFinalProviderStatus
+S11   KILLED    H-2: a line on R naming another merchant reference no longer contradicts  =>  --- FAIL: TestD7_Ambiguity_ParksWithoutAutomaticPayOrResolve
+S12   KILLED    paid: seal presence no longer required  =>  --- FAIL: TestD7_Meta_NoSingleProviderFieldIsSufficient_OnlyThisFieldIsRight
+S13   SURVIVED  not-paid: seal presence no longer required  =>  (all targeted tests pass)
+S14   KILLED    not-paid (iv): source declaration no longer required  =>  --- FAIL: TestD7_P9_CausalLink
+S15   KILLED    declaration-integrity (NULL merchant payout line in a declaring import) dropped  =>  --- FAIL: TestD7_P9_CausalLink
+S16   KILLED    not-paid (i): coverage must reach last_sent_at + 24h dropped  =>  --- FAIL: TestD7_P9_CausalLink
+S17   KILLED    not-paid (i): coverage must start by created_at dropped  =>  --- FAIL: TestD7_P9_CausalLink
+S18   KILLED    not-paid (ii): declined line must be at/after last_sent_at dropped  =>  --- FAIL: TestD7_P9_CausalLink
+S19   KILLED    scope: destination_mismatch admitted for the PAID kind  =>  --- FAIL: TestD7_P7_WrongDestination
+S20   KILLED    paid: exactly-one-succeeded-group rule relaxed (two references allowed)  =>  --- FAIL: TestD7_P3_WrongProviderReference
+S21   SURVIVED  paid: R held by another attempt as provider_reference no longer contradicts  =>  (all targeted tests pass)
+S22   SURVIVED  paid: R held by another attempt as typed Y no longer contradicts  =>  (all targeted tests pass)
+S23   SURVIVED  paid: tombstone on R no longer contradicts  =>  (all targeted tests pass)
+S24   SURVIVED  paid: ledger row keyed (provider, R) no longer contradicts  =>  (all targeted tests pass)
+S25   KILLED    paid: provider:R idempotency key no longer contradicts  =>  --- FAIL: TestD7_P3_WrongProviderReference
+S26   KILLED    all line reads: provider filter dropped  =>  --- FAIL: TestD7_P3_WrongProviderReference
+S27   SURVIVED  all line reads: tenant predicate dropped (RLS remains)  =>  (all targeted tests pass)
+S28   KILLED    evidence function: scope-visibility refusal (MR060) dropped  =>  --- FAIL: TestM4_Visibility_ErrorNeverVerdict
+S29   KILLED    request: kind needs the positive verdict - check dropped  =>  --- FAIL: TestD7_P1_WrongWithdrawal
+S30   KILLED    request: requested line must be the deterministic line - check dropped  =>  --- FAIL: TestD7_P1_WrongWithdrawal
+S31   KILLED    -> executing: verdict/line/R/import-set re-check dropped  =>  --- FAIL: TestM4_DBRecheck_AtExecuting_NotPaid_RealImportMakesMockIneligible
+S32   SURVIVED  -> executing: scope + reference-pin re-check dropped  =>  (all targeted tests pass)
+S33   KILLED    request: withdrawal must be submitted - dropped (M4 branch)  =>  --- FAIL: TestD7_P1_WrongWithdrawal
+S34   SURVIVED  request: withdrawal amount/asset = attempt amount/asset (R-4) check dropped  =>  (all targeted tests pass)
+S35   SURVIVED  -> executing: withdrawal/attempt amount and asset = resolution's (R-4) check dropped  =>  (all targeted tests pass)
+
+SURVIVOR CLASSIFICATION (honest)
+S13  EQUIVALENT: an unsealed import is written without the S-3 declaration (R19-3, column default false), so (iv) already refuses it; the seal-presence conjunct of the not-paid selection is redundant for not paid (the paid selection, S12, is killed)
+S21  REDUNDANT PAIR with payment_y_attributable (0119); killed together as D03
+S22  REDUNDANT PAIR with payment_y_attributable (0119); killed together as D01
+S23  REDUNDANT PAIR with the any-type ledger_transactions (provider, R) clause (a tombstone is keyed (provider, R)); killed together as D02
+S24  REDUNDANT PAIR with the tombstone clause; killed together as D02
+S27  EQUIVALENT: row-level security enforces the same tenant boundary (FORCE RLS on payment_statement_lines); the explicit predicate is defence in depth
+S32  UNREACHABLE through the runtime: after a request the attempt cannot leave the unbound scope or gain a reference (the only transition out of disputed is M2, mutually exclusive with M4), and Go m4ExecutionRefusal is the first check; needs a DB-level forgery to exhibit
+S34  UNREACHABLE: withdrawal_requests amount and asset are immutable after insert (migration 0026) and equal the attempt's by construction; no runtime state makes them differ (the same comparison in Go and MR041 remain)
+S35  UNREACHABLE: as S34, at -> executing
+G10  LAYERED: the database -> executing re-check refuses the same state first-class; killed when both layers are dropped (G11)
+G12  LAYERED: the database -> executing re-check compares the same tuple; killed when both layers are dropped (G13)
+
+KILLED ONLY IN COMBINATION (documented layering, not a test gap): G10, G12
