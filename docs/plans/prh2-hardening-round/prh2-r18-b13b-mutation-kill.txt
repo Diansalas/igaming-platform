@@ -103,3 +103,12 @@ ADDENDUM (security review fixes, 2026-10-09; same method, in place on the workin
   C09  KILLED    L-4: marker check removed  =>  --- FAIL: TestVerifyBindingGuardApplied (0.00s)
   C10  KILLED    L-4: synthetic-only is checked too  =>  --- FAIL: TestVerifyBindingGuardApplied (0.00s)
   C11  KILLED    info: GateResult prints Detail  =>  --- FAIL: TestGateResultRedactsDetail (0.00s)
+
+ADDENDUM 2 (ledger-finance review fixes, 2026-10-09; same in-place method, no -race): 6 counted, 6 killed
+  D01  LF H-1: terminal signal stops the evidence (not additive)          KILLED  TestB13B_LFH1_DeclineThenSuccessWithBadEcho_StillParksT14
+  D02  LF H-2: reference not bound before the park                         KILLED  TestB13B_LFH2_SyncParkBindsTheReference
+  D03  LF L-2: terminal audit row on every delivery                        KILLED  TestB13B_LFL2_TerminalSignalAuditOncePerReceipt
+  D04  LF M-2: payout-scoped class not consulted                           KILLED  TestPayoutDisputeReasonClasses_PinnedToPayments
+  D05  LF M-2: payout reason missing from the table                        KILLED  TestPayoutDisputeReasonClasses_PinnedToPayments
+  D06  LF L-4: no durable audit row at request time (action renamed)       KILLED  TestRequestWithdrawalHandler_B13B_IntegrityRefusalRaisesAP1
+  (a first form of D06 did not compile and was rewritten; the tree was restored by git after every mutant and is clean.)
