@@ -302,6 +302,9 @@ var staticAllowed = map[string]bool{
 	filepath.Join("internal", "actorproof"): true,
 	filepath.Join("cmd", "platform-api"):    true, // SetDefault wiring only
 	filepath.Join("internal", "config"):     true, // ParseKeySet validation only
+	// canon.go uses only actorproof.TS (timestamp text encoding) for the
+	// payout-instrument seal input; it never signs (B13-A, ADR 0111 s15).
+	filepath.Join("internal", "payoutinstrument"): true,
 }
 
 // The signing capability may be reached only from the packages that own

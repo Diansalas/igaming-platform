@@ -514,7 +514,7 @@ DECLARE
 BEGIN
     FOR t IN SELECT * FROM (VALUES
         ('withdrawal_hold_resolutions', 'SELECT, INSERT, UPDATE'),
-        ('withdrawal_hold_resolution_approvals', 'SELECT, INSERT')) AS v(name, privs)
+        ('withdrawal_hold_resolution_approvals', 'SELECT, INSERT'),
         ('payout_instrument_kinds', 'SELECT'),
         ('payout_instrument_verification_max_age', 'SELECT'),
         ('payout_instruments', 'SELECT, INSERT, UPDATE'),
