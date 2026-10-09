@@ -448,6 +448,19 @@ evidence**, but they still make the verdict `contradictory` or `insufficient` wh
 | **`not_paid`** (H-1) | (i) an eligible import of this provider with `coverage_start <= attempt.created_at` and `coverage_end >= attempt.last_sent_at + payments.DefaultSettlementWindow` (24 h; NULL `last_sent_at` → `insufficient`); (ii) a `declined` line with equal amount and asset whose `occurred_at >= attempt.last_sent_at`, attributed by the merchant reference or by the attempt's bound `provider_reference`; (iii) **no** `succeeded`, `pending` or `reversed` payout line in **any** import (MOCK included) on the merchant reference, on the attempt's `provider_reference`, or on any Y of the attempt; (iv) the import used for (i) and (ii) has `payout_lines_carry_merchant_reference = true`, otherwise the verdict is `insufficient` |
 | `insufficient`, `contradictory`, `evidence_overflow` | anything else |
 
+> **Review-driven amendment (RESOLVE-1 review, 2026-10-09; security H-1/H-2, ledger-finance C-1; §17.7).** Both
+> amendments only tighten toward refusal and stay inside owner decisions 9-12 (positive attribution only, never
+> automatic). **(a) not_paid (iii)** also covers the PSP reference D of **every** payout line matched by the merchant
+> reference, the bound reference or a Y (any status - so at least the declined line's own reference): no `succeeded`,
+> `pending` or `reversed` payout line on any such D in **any** import. A succeeded line on D makes the paid branch read
+> the declined line on the same reference, so the verdict is `contradictory`; a pending/reversed one gives
+> `insufficient`. These D lookups are statement content, so they spend the same 64-line budget (S-4). **(b)** If an
+> import whose lines were read **declares** `payout_lines_carry_merchant_reference` yet holds a payout line with a NULL
+> merchant reference, the declaration is contradicted and not_paid is `insufficient`. **(c) paid**: if any payout line
+> on R (any status, any import, MOCK and unsealed included) carries a non-NULL merchant reference other than the
+> attempt's, R is not unambiguously this attempt's and the verdict is `contradictory` (the cross-import dedupe would
+> otherwise collapse two parks' lines on one R into a single group and read `paid` for both).
+
 - **`evidence_line_id` (L-1)** is deterministic: the earliest qualifying line by (`fetched_at`, `import_id`,
   `line_no`). Execution re-evaluates and checks that the pinned line is still in the qualifying set.
 - **Sufficiency standard (A-13):** both the machine verdict over sealed imports **and** a four-eyes operator
@@ -539,6 +552,10 @@ evidence**, but they still make the verdict `contradictory` or `insufficient` wh
     `occurred_at` or import time** (a back-dated contradiction counts);
   - an executed `m4_evidence_not_paid` raises `pay_declared_not_paid_but_paid` on **any** `succeeded` line on the
     merchant reference, the bound reference or a Y, **in any import, irrespective of `occurred_at` or import time**.
+  - *Review-driven amendment (2026-10-09; security H-1/H-2, ledger-finance C-1; §17.7):* the not-paid predicate also
+    raises on a `succeeded` line on the evidence line's own reference D (derived in `loadK3Evidence` from
+    `evidence_line_id` and added to the S-1 key set), and the paid predicate also raises on any payout line on R that
+    names another merchant reference. Raising only; positive attribution only; nothing clears automatically.
 - **M4-paid completions in the ledger join (R-2).** An M4-paid completion leaves the attempt `disputed` (A-15). The
   existing `ledger_join` check (`internal/reconciliation/payment_statement.go`, "every deposit / withdrawal_completed
   posting in the window maps to exactly one succeeded attempt", ~1428-1465) counts only `succeeded` attempts, so
@@ -1386,7 +1403,7 @@ decisions 9-12 (ADR 0095 §44) are **not broadened or weakened**:
 | 7. `tenant_system_read_executed` widened; `loadK3Evidence` loads executed M4 rows and adds their keys (S-1) | `IMPLEMENTED` |
 | 8. M4-paid completions attributed in `ledger_join` (R-2) | `IMPLEMENTED` |
 | 9. amount/asset DB-forced (R-4) | `IMPLEMENTED` |
-| 10. "NOT IMPLEMENTED" dropped from the M4-scope hint, now "MOCK only"; post-M4-not-paid hint added | `IMPLEMENTED` (the bound-park R-K3-8 hint keeps "NOT IMPLEMENTED": M4 does not cover it) |
+| 10. "NOT IMPLEMENTED" dropped from the M4-scope hint, now "MOCK only"; post-M4-not-paid hint added | `IMPLEMENTED` (the bound-park R-K3-8 hint keeps "NOT IMPLEMENTED": M4 does not cover it; bound destination parks get their own hint, inert until B13-B, §17.7 C-3) |
 | 11. HSEC policy/trigger split preserved: the acting `withdrawal_requests` UPDATE policy only gains the M4 kinds in the K3 arm; the HSEC arm and `withdrawal_requests_governed_release_guard` are untouched | `IMPLEMENTED` |
 | HTTP: existing route accepts `evidence_line_id`, returns the evidence columns, the four §4.7 tokens | `IMPLEMENTED` |
 | §4.7 read route `GET .../payment-attempts/{id}/resolution-evidence` and the approver provenance view (§4.3) | `NOT IMPLEMENTED` (not in this scope; `payments.EvaluateM4Evidence` is the read primitive) |
@@ -1474,10 +1491,15 @@ decisions 9-12 (ADR 0095 §44) are **not broadened or weakened**:
   bound by `evidence_ref_hash`), widened by revision 4 to the T10 residuals (T6 in-process key, source
   authenticity/completeness, availability), must be acknowledged by the owner **before any non-MOCK M4**. Until then M4
   runs against MOCK statement sources only. No policy was invented here.
-- **Q-R19-1 (security/owner).** Accept that a tenant-scoped principal can never request or finally approve an M4 (R19-1),
-  or give the tenant-staff session a read of the typed reference evidence (a new read power; not done)?
-- **Q-R19-2 (LF).** Confirm the not-paid recovery clearing of R-1 (R19-8).
-- **Q-R19-3 (security + LF).** Acknowledge the MA020 acting-session consequence (R19-18).
+- **Q-R19-1 (security: ACCEPTED, review 2026-10-09; owner note open).** `security` accepts that a tenant-scoped
+  principal can never request or finally approve an M4 (R19-1); no tenant-staff read of the typed reference evidence
+  is added. **Owner note:** this means a B2B operator under its **own licence** (ADR 0006 hybrid model) cannot
+  self-serve M4 - every M4 needs a platform `platform_acting` requester and final approver. Whether that is
+  commercially acceptable for own-licence operators is an owner decision, not an engineering one.
+- **Q-R19-2 (ledger-finance: CONFIRMED, review 2026-10-09).** The not-paid recovery clearing of R-1 (R19-8) is the M2
+  (d) rule; now pinned by `TestM4Recon_NotPaidRecovery_ClearsOnlyOnFullRecoveryWithTheCausation` (C-2).
+- **Q-R19-3 (security + ledger-finance: ACKNOWLEDGED, review 2026-10-09).** The MA020 acting-session consequence
+  (R19-18) is acknowledged by both; no further change.
 - Unchanged and still open: the §10.3 T10 flag, S-3 per real source, LOW-1/RM-4 runbook, P-2/RM-3, S-8 (freeze
   `release_ledger_transaction_id`), the per-rail settlement window, the pending-before-succeeded PSP note.
 
@@ -1501,10 +1523,53 @@ Tests (runtime-shaped non-superuser role, private scratch databases, `-race -tag
 `internal/payments/m4_resolve1_*_integration_test.go` (`TestM4_*`, `TestM4Recon_*`), `internal/reconciliation/
 payment_statement_m4_test.go` (`TestR1_*`, `TestR2_M4*`), `internal/payoutinstrument/importseal_test.go`,
 `internal/httpserver/payment_force_resolution_m4_api_integration_test.go` (`TestForceResolutionAPI_M4_*`). Concurrency is
-exercised by in-test races repeated 3-4 times under `-race` (two final approvals; approval vs a contradicting import;
-approval vs sweeper and stale poll), not by `-count=50`. AP002/AP005 are the shared `actor_proof_require` behaviour already
+exercised by in-test races repeated 3-4 times under `-race` (two final approvals, paid and not-paid; approval vs a
+contradicting import; approval vs sweeper and stale poll; request vs a concurrent ingest), and - after the review round
+(§17.7 F-2) - the whole `TestM4_Concurrency*` set ran at `-race -count=50` (250 PASS, 0 FAIL, no race report). AP002/AP005 are the shared `actor_proof_require` behaviour already
 pinned by the K3 proof tests; M4 adds AP001/AP004 and the digest pin. Mutation-kill evidence:
-`docs/plans/prh2-hardening-round/prh2-r19-resolve1-mutation-kill.txt` (50 counted mutants over the migration, the
-service, reconciliation, the importer and the seal: 46 killed; 4 survivors disclosed as equivalent or partial - S06, S09,
-S17 (its full form S17b is killed), G05). LOCAL evidence only; no real provider, no AWS, no
+`docs/plans/prh2-hardening-round/prh2-r19-resolve1-mutation-kill.txt` (63 counted mutants over the migration, the
+service, reconciliation, the importer and the seal, after the §17.7 review round: 60 killed; 3 survivors disclosed as
+equivalent - S06, S09, G05; S17 is now killed, F-3). LOCAL evidence only; no real provider, no AWS, no
 non-MOCK source.
+
+### 17.7 Review amendments (RESOLVE-1 review round, 2026-10-09; security + ledger-finance)
+
+Every amendment below tightens toward refusal. None broadens owner decisions 9-12: attribution stays positive-only,
+nothing resolves automatically, and the park stays held unless a positive verdict is reached. §4.4 and §4.6 carry the
+review-driven amendment notes; this section records the implementation.
+
+| Finding | Change | Pinned by |
+|---|---|---|
+| **H-1** (security; double payout) | `payout_m4_evidence`: `v_rs` now holds the PSP reference of **every** platform-keyed payout line (any status), so not-paid (iii) also refuses on a succeeded/pending/reversed line on the declined line's own reference D, in any import. A succeeded line on D reads `contradictory` (the paid branch sees the declined line on the same reference); pending/reversed reads `insufficient`. The D lookups share the 64-line budget (S-4). A declaring import holding a NULL-merchant payout line makes not-paid `insufficient`. R-1: `loadK3Evidence` derives D from `evidence_line_id` (LEFT JOIN on the line, tenant-bound), adds it to the S-1 keys and to the not-paid lookup. | `TestM4_H1_NotPaid_LineOnTheDeclinedReference_CrossImport` (incl. refusal at execution), `TestM4_H1_NotPaid_DeclaringImportWithNullMerchantPayoutLine`, `TestM4Recon_NotPaid_SucceededOnlyOnTheDeclinedReference_Raises`; mutants H1a/H1b/H1c, RH1a/RH1b/RH1c |
+| **H-2** (security) / **C-1** (LF) | paid: any payout line on R (any status, any import) with a non-NULL merchant reference other than the attempt's makes the verdict `contradictory`. R-1 paid check mirrors it (`pay_declared_paid_unconfirmed`, `check=m4_paid_contradicted`). | `TestM4_H2_Paid_OneReferenceNamingTwoMerchants_Contradictory` (both parks; and refusal at execution), `TestM4Recon_Paid_LineOnRNamingAnotherMerchant_Raises`; mutants H2a, RH2 |
+| **C-2** (LF) | No code change; the not-paid recovery clearing is now integration-tested: a debit with another causation (even the full amount) does not clear, a partial recovery does not clear, the full recovery with causation = the `withdrawal_failed` transaction clears. | `TestM4Recon_NotPaidRecovery_ClearsOnlyOnFullRecoveryWithTheCausation`; mutants RC2a, RC2b |
+| **C-3 / C-4** (LF; merge prep) | New hint `destinationPayoutCapturedUnpostedResolutionHint` ("payout reported to a destination other than the bound one: no completion against the player's hold; PSP recall/return or off-platform recovery; M4 not-paid only on positive decline evidence; never allocation"), selected by reason (`destination_mismatch`, `destination_integrity_failure`) after the post-M4-not-paid override and before the M4-scope and generic payout texts. **Inert** until B13-B classifies those reasons (today `reasonUnclassified`: no `pay_captured_unposted` finding is raised for them); the stale `inM4Scope` comment is corrected. B13-B (6204ba0) is **not** merged here. | `TestC3_DestinationHint_InertUntilClassified_SelectedByReason` (flips deliberately when B13-B lands); mutants RC3, RC3b |
+| **L-1** (security) | The lines digest of the import seal binds each line's `provider_id`. | `TestImportSeal_*` field table; mutant L1 |
+| **L-2** (security) | Code comment on `verifyImportSeals`; a go/ast static pin: `requestInTx` verifies before its audit row, `m4EvidenceRefusal` re-evaluates then verifies, `postM4` has exactly one caller (`decideInTx`) which calls `m4EvidenceRefusal` first. | `TestL2_EveryM4PathVerifiesImportSeals`; mutants G01, G03 |
+| **L-3** (security) | No code change; a tenant-staff FINAL approval with the platform floor already met raises `MR060` and the whole approval transaction rolls back (no approval row, still pending, park held); a `platform_acting` final approval then executes. | `TestM4_L3_TenantStaffFinalApproval_FloorMet_MR060_RolledBack` |
+| **F-2** (LF) | Two new races: two final approvals of an M4 not-paid (exactly one `withdrawal_failed`), and request-time evidence vs a concurrent contradicting ingest (never a release on contradicted evidence). The whole `TestM4_Concurrency*` set ran at `-race -count=50` (targeted `-run`). | `TestM4_Concurrency_TwoFinalApprovals_NotPaid`, `TestM4_Concurrency_RequestVsConcurrentIngest` |
+| **F-3** (LF) | S17 re-classified (it is **not** equivalent): a real import that matches nothing of the attempt leaves the import set unchanged but makes the MOCK decline ineligible (`v_has_real`), so only the verdict comparison of the `-> executing` re-check refuses it. | `TestM4_DBRecheck_AtExecuting_NotPaid_RealImportMakesMockIneligible` (MR061, and the Go refusal); S17 now KILLED |
+| **F-5** (LF) | `TestM4Recon_PaidCompletion_AttributedInLedgerJoin` asserts that **no** mismatch of any kind names the attempt or R, in-run and standing. | same test |
+
+**Test-fixture consequence of H-1(b).** `TestM4Recon_DestinationMismatchNotPaid_LineOnBoundReferenceRaises` now ingests
+its declined line on the bound reference **with** the attempt's merchant reference: under the amendment a declaring
+import with a NULL-merchant payout line can no longer produce a not-paid verdict.
+
+**F-4 (LF): availability of unsealed imports.** An import is sealed only when the importing process holds the B13 keys.
+A process without them (missing secret, misconfigured deploy) stores imports **unsealed**: reconciliation still reads
+them (they still raise), but they are never positive M4 evidence, so M4 reads `insufficient` for parks whose evidence
+lies only there. Retiring a kid that still seals an import makes every M4 on it refuse (`force_resolve_evidence_unsealed`),
+pending ones included. Re-fetching byte-identical content reuses the unsealed import (same `content_digest`), so it
+does not restore availability; no re-seal job exists (`NOT IMPLEMENTED`). Fail closed: an availability loss, never a
+wrong release. Recorded in `docs/runbooks/payout-instrument-keys.md` §3a.
+
+**F-1 (LF): launch-blocking for any non-MOCK M4 not-paid.** The §4.8 real-time signal cells are `NOT IMPLEMENTED`, and
+`internal/payments/payout.go` (~826-829, `case AttemptSucceeded, AttemptDisputed, AttemptRejected: return nil`) silently
+no-ops a succeeded callback or poll on a `disputed` attempt. Because M4 leaves the attempt `disputed` (A-15), a PSP
+success arriving after an executed M4 not-paid (T14 after M4) produces **no** real-time signal: it is detected only by
+reconciliation R-1 (`pay_declared_not_paid_but_paid`) on the next statement run that carries the line. That latency is
+acceptable for MOCK only. **Before any non-MOCK M4 not-paid, §4.8 `success_after_m4_not_paid` (and
+`contradiction_after_m4_paid`) must be implemented**; this is launch-blocking alongside D-7 and the T10 flag.
+
+**Q records (review outcome).** Q-R19-1 ACCEPTED by `security` (owner note: B2B own-licence operators cannot self-serve
+M4); Q-R19-2 CONFIRMED by `ledger-finance`; Q-R19-3 ACKNOWLEDGED by `security` and `ledger-finance` (§17.4).

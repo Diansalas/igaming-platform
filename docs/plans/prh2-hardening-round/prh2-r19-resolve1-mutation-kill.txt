@@ -105,22 +105,66 @@ Run 5 (after f046675 kept the 0102 FOR ALL statement policy and narrowed only it
 policy text and re-run; no other mutant's anchor or behaviour changed):
 S26 KILLED: S-5: a principal-shaped session may insert statement lines (lines WITH CHECK principal arm dropped) | restored_cmp=OK | pay: rc=1 PASS=35 SKIP=0 FAIL=1 --- FAIL: TestM4_Seals_UnsealedTamperedAndPrincipalInsert
 
-FINAL TALLY (latest run per mutant). Counted mutants: 50 (S01-S29 + S06b + S17b = 31 SQL; G01-G06 = 6; R01-R10 = 10;
-P01-P03 = 3). KILLED 46, SURVIVED 4 (all disclosed; none weakens a refusal observably):
+Run 6 (review round, 2026-10-09: commits 3a85036 H-1/H-2/C-1/C-3, 2a8d032 L-1, f5aef50 L-2, bb922e9 review tests).
+Suites widened: pay = '^(TestM4|TestK3_C9c|TestL2_)' (adds the L-2 static pin), recon = '^(TestR1_|TestR2_M4|TestC3_)' (adds
+the C-3 hint pin). New mutants H1a-H1c, H2a (SQL), RH1a-RH1c, RH2, RC2a, RC2b, RC3, RC3b (reconciliation), L1 (seal canon);
+every evidence-function mutant S03-S14 + S06b, the S-2 re-check pair S17/S17b, the seal-path mutants G01/G03 and P01
+re-run on the final tests (F-3: S17 re-run after TestM4_DBRecheck_AtExecuting_NotPaid_RealImportMakesMockIneligible).
+CONTROL pay: rc=0 PASS=47 SKIP=0 FAIL=0
+CONTROL recon: rc=0 PASS=3 SKIP=0 FAIL=0
+CONTROL pi: rc=0 PASS=3 SKIP=0 FAIL=0
+S03 KILLED: paid: drop the amount/asset equality (I-1) | restored_cmp=OK | pay: rc=1 PASS=46 SKIP=0 FAIL=1 --- FAIL: TestM4_Verdict_PaidConditions
+S04 KILLED: paid: drop the declined/reversed/pending contradiction | restored_cmp=OK | pay: rc=1 PASS=44 SKIP=0 FAIL=3 --- FAIL: TestM4_Verdict_PaidConditions; --- FAIL: TestM4_Verdict_MockIneligibleOnceRealExists; --- FAIL: TestM4_H1_NotPaid_LineOnTheDeclinedReference_CrossImport
+S05 KILLED: S-4: the R lookups do not count against the 64-line bound | restored_cmp=OK | pay: rc=1 PASS=46 SKIP=0 FAIL=1 --- FAIL: TestM4_Verdict_OverflowAt65_IncludingR
+S06 SURVIVED: bound 64 -> 65 (platform-keyed read) | restored_cmp=OK | pay: rc=0 PASS=47 SKIP=0 FAIL=0 
+S07 KILLED: paid: an unsealed import may be positive evidence | restored_cmp=OK | pay: rc=1 PASS=46 SKIP=0 FAIL=1 --- FAIL: TestM4_Verdict_PaidConditions
+S08 KILLED: paid: drop the RC-3 MOCK eligibility rule | restored_cmp=OK | pay: rc=1 PASS=46 SKIP=0 FAIL=1 --- FAIL: TestM4_Verdict_MockIneligibleOnceRealExists
+S09 SURVIVED: paid: drop the tombstone exclusion | restored_cmp=OK | pay: rc=0 PASS=47 SKIP=0 FAIL=0 
+S10 KILLED: paid: drop the provider:R idempotency-key exclusion | restored_cmp=OK | pay: rc=1 PASS=46 SKIP=0 FAIL=1 --- FAIL: TestM4_Verdict_PaidConditions
+S11 KILLED: not-paid: drop coverage (i) end condition | restored_cmp=OK | pay: rc=1 PASS=45 SKIP=0 FAIL=2 --- FAIL: TestM4_Verdict_NotPaidConditions; --- FAIL: TestM4_SettlementWindowPinned
+S12 KILLED: not-paid: drop the source declaration (iv) | restored_cmp=OK | pay: rc=1 PASS=46 SKIP=0 FAIL=1 --- FAIL: TestM4_Verdict_NotPaidConditions
+S13 KILLED: not-paid: drop decline-after-send (ii) | restored_cmp=OK | pay: rc=1 PASS=46 SKIP=0 FAIL=1 --- FAIL: TestM4_Verdict_NotPaidConditions
+S14 KILLED: L-1: latest instead of earliest line | restored_cmp=OK | pay: rc=1 PASS=45 SKIP=0 FAIL=2 --- FAIL: TestM4_Verdict_DeterministicLine; --- FAIL: TestM4_Execution_RefusedWhenOnlyTheImportSetChanges
+S17 KILLED: -> executing: drop the DB evidence re-check (S-2) | restored_cmp=OK | pay: rc=1 PASS=46 SKIP=0 FAIL=1 --- FAIL: TestM4_DBRecheck_AtExecuting_NotPaid_RealImportMakesMockIneligible
+S06b KILLED: both 64-line bounds -> 65 | restored_cmp=OK | pay: rc=1 PASS=46 SKIP=0 FAIL=1 --- FAIL: TestM4_Verdict_OverflowAt65_IncludingR
+S17b KILLED: -> executing: the DB evidence re-check never raises (S-2) | restored_cmp=OK | pay: rc=1 PASS=45 SKIP=0 FAIL=2 --- FAIL: TestM4_DBRecheck_AtExecuting_EvidenceChanged; --- FAIL: TestM4_DBRecheck_AtExecuting_NotPaid_RealImportMakesMockIneligible
+G01 KILLED: execution: seals not re-verified (S-2 step 7) | restored_cmp=OK | pay: rc=1 PASS=45 SKIP=0 FAIL=2 --- FAIL: TestM4_Execution_RefusedWhenSealNoLongerVerifies; --- FAIL: TestL2_EveryM4PathVerifiesImportSeals
+G03 KILLED: request: seals not verified before commit | restored_cmp=OK | pay: rc=1 PASS=45 SKIP=0 FAIL=2 --- FAIL: TestM4_Seals_UnsealedTamperedAndPrincipalInsert; --- FAIL: TestL2_EveryM4PathVerifiesImportSeals
+P01 KILLED: lines digest omits amount | restored_cmp=OK | pi: rc=1 PASS=2 SKIP=0 FAIL=1 --- FAIL: TestImportSeal_RoundTrip_AndEveryFieldIsCovered || pay: rc=0 PASS=47 SKIP=0 FAIL=0 
+H1a KILLED: H-1: not-paid (iii) does not look up D | restored_cmp=OK | pay: rc=1 PASS=46 SKIP=0 FAIL=1 --- FAIL: TestM4_H1_NotPaid_LineOnTheDeclinedReference_CrossImport
+H1b KILLED: H-1: v_rs succeeded-only again (D of a declined line never read) | restored_cmp=OK | pay: rc=1 PASS=45 SKIP=0 FAIL=2 --- FAIL: TestM4_H1_NotPaid_LineOnTheDeclinedReference_CrossImport; --- FAIL: TestM4_Concurrency_RequestVsConcurrentIngest
+H1c KILLED: H-1: NULL-merchant payout line in a declaring import ignored | restored_cmp=OK | pay: rc=1 PASS=46 SKIP=0 FAIL=1 --- FAIL: TestM4_H1_NotPaid_DeclaringImportWithNullMerchantPayoutLine
+H2a KILLED: H-2: a line on R naming another merchant does not contradict paid | restored_cmp=OK | pay: rc=1 PASS=46 SKIP=0 FAIL=1 --- FAIL: TestM4_H2_Paid_OneReferenceNamingTwoMerchants_Contradictory
+RH1a KILLED: R-1 H-1: not-paid check does not look up D | restored_cmp=OK | pay: rc=1 PASS=46 SKIP=0 FAIL=1 --- FAIL: TestM4Recon_NotPaid_SucceededOnlyOnTheDeclinedReference_Raises
+RH1b KILLED: S-1 H-1: D not a lookup key | restored_cmp=OK | pay: rc=1 PASS=46 SKIP=0 FAIL=1 --- FAIL: TestM4Recon_NotPaid_SucceededOnlyOnTheDeclinedReference_Raises
+RH1c KILLED: R-1 H-1: D never derived from the evidence line | restored_cmp=OK | pay: rc=1 PASS=46 SKIP=0 FAIL=1 --- FAIL: TestM4Recon_NotPaid_SucceededOnlyOnTheDeclinedReference_Raises
+RH2 KILLED: R-1 H-2: a line on R naming another merchant not raised | restored_cmp=OK | pay: rc=1 PASS=46 SKIP=0 FAIL=1 --- FAIL: TestM4Recon_Paid_LineOnRNamingAnotherMerchant_Raises
+RC2a KILLED: C-2: a debit with any causation clears | restored_cmp=OK | pay: rc=1 PASS=46 SKIP=0 FAIL=1 --- FAIL: TestM4Recon_NotPaidRecovery_ClearsOnlyOnFullRecoveryWithTheCausation
+RC2b KILLED: C-2: a partial recovery clears | restored_cmp=OK | pay: rc=1 PASS=46 SKIP=0 FAIL=1 --- FAIL: TestM4Recon_NotPaidRecovery_ClearsOnlyOnFullRecoveryWithTheCausation
+RC3 KILLED: C-3: destination hint never selected | restored_cmp=OK | recon: rc=1 PASS=2 SKIP=0 FAIL=1 --- FAIL: TestC3_DestinationHint_InertUntilClassified_SelectedByReason
+RC3b KILLED: C-3: destination hint removed (generic payout text) | restored_cmp=OK | recon: rc=1 PASS=2 SKIP=0 FAIL=1 --- FAIL: TestC3_DestinationHint_InertUntilClassified_SelectedByReason
+L1 KILLED: L-1: lines digest omits provider_id | restored_cmp=OK | pi: rc=1 PASS=2 SKIP=0 FAIL=1 --- FAIL: TestImportSeal_RoundTrip_AndEveryFieldIsCovered
+
+FINAL TALLY (latest run per mutant). Counted mutants: 63 (S01-S29 + S06b + S17b + H1a-H1c + H2a = 35 SQL; G01-G06 = 6;
+R01-R10 + RH1a-RH1c + RH2 + RC2a + RC2b + RC3 + RC3b = 18 reconciliation; P01-P03 + L1 = 4). KILLED 60, SURVIVED 3 (all
+disclosed; none weakens a refusal observably):
   - S06 SURVIVED (equivalent): the FIRST 64-line bound (platform-keyed lookups) raised to 65. The second bound counts the
     full read set S, which contains every platform-keyed line, so a 65-line platform-keyed set still overflows there. The
-    first bound only stops the R collection query from scanning an unbounded set (a resource guard, not a verdict rule).
+    first bound only stops the R/D collection query from scanning an unbounded set (a resource guard, not a verdict rule).
     S06b (both bounds -> 65) is KILLED.
   - S09 SURVIVED (equivalent): the explicit tombstone exclusion on R is subsumed by the next clause, "no ledger row with
     (provider, provider_tx_id = R) of ANY type", which a tombstone on (provider, R) also satisfies. Both are kept because
     ADR 0111 §4.4 lists both.
-  - S17 SURVIVED (partial mutant, superseded by S17b): it disabled only the verdict and line comparisons of the
-    `-> executing` re-check; the reference and import-set comparisons remain and catch every reachable change (imports
-    and lines are immutable, so changed evidence always changes the import set or the reference). S17b (the re-check
-    never raises) is KILLED by TestM4_DBRecheck_AtExecuting_EvidenceChanged.
-  - G05 SURVIVED (equivalent): Go's R-3 pin (provider_reference vs provider_reference_at_submission) at execution. For the
-    unbound reasons M4ResolvableDispute already requires a NULL reference (a reference appearing ends the resolution
-    refused, reason_not_resolvable); for destination_mismatch the reference was non-NULL at submission and is immutable
-    once set (payment_attempts_guard). The database re-checks R-3 at `-> executing` regardless.
+  - G05 SURVIVED (equivalent; run 4, not affected by the review changes): Go's R-3 pin (provider_reference vs
+    provider_reference_at_submission) at execution. For the unbound reasons M4ResolvableDispute already requires a NULL
+    reference (a reference appearing ends the resolution refused, reason_not_resolvable); for destination_mismatch the
+    reference was non-NULL at submission and is immutable once set (payment_attempts_guard). The database re-checks R-3 at
+    `-> executing` regardless.
+Re-classified (LF F-3): S17 was disclosed in runs 1-4 as a partial mutant on the claim that "changed evidence always
+changes the import set or the reference". That claim was wrong for not-paid: a real import that matches nothing of the
+attempt leaves the import set unchanged but makes the MOCK decline ineligible (v_has_real), so only the verdict
+comparison refuses. TestM4_DBRecheck_AtExecuting_NotPaid_RealImportMakesMockIneligible now KILLS S17 (run 6).
 Not counted: G06 run 2 (COMPILE-ERROR: the first mutant text left an import unused; rewritten and KILLED in run 4).
+Concurrency (LF F-2): the whole TestM4_Concurrency* set (5 tests, incl. the two review races) ran with
+-race -tags integration -count=50 -p 1 -run '^TestM4_Concurrency': 250 PASS, 0 FAIL, 0 SKIP, 0 DATA RACE reports.
 LOCAL evidence only.
