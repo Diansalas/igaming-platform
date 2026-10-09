@@ -24,6 +24,7 @@ import (
 
 	"github.com/Diansalas/igaming-platform/internal/audit"
 	"github.com/Diansalas/igaming-platform/internal/ledger"
+	"github.com/Diansalas/igaming-platform/internal/payoutinstrument"
 	"github.com/Diansalas/igaming-platform/internal/providerref"
 	"github.com/Diansalas/igaming-platform/internal/withdrawal"
 )
@@ -212,6 +213,10 @@ type ReceiptEvidence struct {
 	// value) for every other event type, where Outcome IS already the raw
 	// wire value.
 	RawOutcome Outcome
+
+	// DestinationEcho (B13-B): payout events only; compared with the attempt's snapshot, never
+	// persisted, never part of the event fingerprint (computeEventFingerprint ignores it).
+	DestinationEcho *payoutinstrument.DestinationEcho
 }
 
 // ErrDeferredReceiptCapExceeded is returned when the unapplied-receipt
@@ -806,6 +811,26 @@ func ApplyReceiptEvidence(ctx context.Context, tx pgx.Tx, o *Orchestrator, tenan
 // already-succeeded/declined attempt, or ANY evidence on a disputed/
 // created/rejected attempt).
 func applyResolvedReceiptEvidence(ctx context.Context, tx pgx.Tx, o *Orchestrator, attempt PaymentAttempt, ev ReceiptEvidence, alreadyApplied bool) (bool, ReceiptResolution, error) {
+	// B13-B (ADR 0111 2.6): a payout callback can never determine, replace or change the
+	// destination. Before any cell can settle or advance the attempt, the snapshot is verified
+	// and a reported destination echo is COMPARED with it: a mismatch parks the attempt
+	// (destination_mismatch), a success without a declared echo is ambiguous - never applied.
+	if attempt.Operation == AttemptOperationPayout && attempt.WithdrawalRequestID != nil && ev.EventType == "payout" {
+		class := ErrorClassAmbiguous
+		if ev.Outcome == OutcomeSucceeded {
+			class = ErrorClassSucceeded
+		}
+		verdict, err := payoutDestinationEvidence(ctx, tx, o.payoutEnv(), attempt, *attempt.WithdrawalRequestID, class, ev.DestinationEcho, EvidenceCallback)
+		if err != nil {
+			return false, "", err
+		}
+		if verdict.Stop {
+			return true, ResolutionAnomalyOther, nil
+		}
+		if verdict.AmbiguousSuccess {
+			return false, ResolutionAnomalyOther, nil
+		}
+	}
 	switch ev.Outcome {
 	case OutcomePending:
 		switch attempt.State {

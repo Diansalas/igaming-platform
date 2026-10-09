@@ -232,6 +232,10 @@ var disputeReasonClasses = map[string]disputeReasonClass{
 	"invalid_provider_reference":          reasonUnbound,           // bare form (PAY-POLL-ECHO-HARDENING-1)
 	"success_for_never_sent_attempt":      reasonBoundIfReferenced, // T15
 	"reversal_tombstone_precedes_success": reasonExcluded,          // net zero at the PSP (§28.9)
+	// B13-B (ADR 0111 2.6): payout parks on the destination binding. The hold is kept; the PSP may
+	// or may not have paid, so the park is reported against the reference when it holds one.
+	"destination_mismatch":          reasonBoundIfReferenced,
+	"destination_integrity_failure": reasonBoundIfReferenced,
 }
 
 // classifyDisputeReason returns the class of a terminal reason, including

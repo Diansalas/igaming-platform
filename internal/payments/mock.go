@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/Diansalas/igaming-platform/internal/payoutinstrument"
 	"github.com/Diansalas/igaming-platform/internal/webhookauth"
 )
 
@@ -58,6 +59,14 @@ type MockProvider struct {
 	attempts map[string]*mockAttempt
 	seq      int
 
+	// MOCK knobs for the B13 destination tests (never read outside this adapter's own methods):
+	// destinationEcho, when set, is returned verbatim as the Withdraw / QueryStatus DestinationEcho
+	// (a real adapter computes it with an injected DestinationFingerprinter from the vendor-reported
+	// destination - PROVIDER DEPENDENT); lastWithdraw records the last request so a test can assert
+	// the destination reached the adapter.
+	destinationEcho *payoutinstrument.DestinationEcho
+	lastWithdraw    *WithdrawRequest
+
 	// masterSecret is this adapter INSTANCE's own process-local secret,
 	// generated at construction (never config, never the repo, never
 	// recoverable from outside this process). It is used ONLY to DERIVE
@@ -102,6 +111,25 @@ func (m *MockProvider) deriveKey(tenantID uuid.UUID, providerID string) []byte {
 // MOCK-ADAPTER-PROD-1) - a structural marker only, satisfied without this
 // package importing internal/providerkind.
 func (m *MockProvider) SyntheticComponent() {}
+
+// SetDestinationEcho sets (or clears with nil) the destination echo this MOCK reports on
+// Withdraw and QueryStatus results. MOCK only.
+func (m *MockProvider) SetDestinationEcho(e *payoutinstrument.DestinationEcho) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.destinationEcho = e
+}
+
+// LastWithdrawRequest returns the last request Withdraw received (nil when none). MOCK only.
+func (m *MockProvider) LastWithdrawRequest() *WithdrawRequest {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.lastWithdraw == nil {
+		return nil
+	}
+	cp := *m.lastWithdraw
+	return &cp
+}
 
 // MockWebhookCredentials is the MOCK WebhookCredentialResolver
 // (docs/decisions/0022 §3 amendment; design §6). It resolves ONLY
@@ -446,19 +474,22 @@ func (m *MockProvider) Withdraw(ctx context.Context, req WithdrawRequest) (Withd
 
 	ref := m.nextReference()
 	defer m.tagRecord(ctx, ref, req.MerchantReference)
+	reqCopy := req
+	m.lastWithdraw = &reqCopy
+	echo := m.destinationEcho
 	switch req.Amount {
 	case MockAmountPlayerDeclineNoCascade:
 		m.attempts[ref] = &mockAttempt{kind: "withdraw", amount: req.Amount, assetCode: req.AssetCode, outcome: OutcomeDeclined, declineReason: "account_closed"}
-		return WithdrawResult{Outcome: OutcomeDeclined, ProviderReference: ref, DeclineReason: "account_closed", Cascadable: false}, nil
+		return WithdrawResult{Outcome: OutcomeDeclined, ProviderReference: ref, DeclineReason: "account_closed", Cascadable: false, DestinationEcho: echo}, nil
 	case MockAmountProviderDeclineCascade:
 		m.attempts[ref] = &mockAttempt{kind: "withdraw", amount: req.Amount, assetCode: req.AssetCode, outcome: OutcomeDeclined, declineReason: "provider_unavailable", cascadable: true}
-		return WithdrawResult{Outcome: OutcomeDeclined, ProviderReference: ref, DeclineReason: "provider_unavailable", Cascadable: true}, nil
+		return WithdrawResult{Outcome: OutcomeDeclined, ProviderReference: ref, DeclineReason: "provider_unavailable", Cascadable: true, DestinationEcho: echo}, nil
 	case MockAmountAmbiguous:
 		m.attempts[ref] = &mockAttempt{kind: "withdraw", amount: req.Amount, assetCode: req.AssetCode, outcome: OutcomeAmbiguous}
-		return WithdrawResult{Outcome: OutcomeAmbiguous, ProviderReference: ref}, nil
+		return WithdrawResult{Outcome: OutcomeAmbiguous, ProviderReference: ref, DestinationEcho: echo}, nil
 	default:
 		m.attempts[ref] = &mockAttempt{kind: "withdraw", amount: req.Amount, assetCode: req.AssetCode, outcome: OutcomePending}
-		return WithdrawResult{Outcome: OutcomePending, ProviderReference: ref}, nil
+		return WithdrawResult{Outcome: OutcomePending, ProviderReference: ref, DestinationEcho: echo}, nil
 	}
 }
 
@@ -478,6 +509,7 @@ func (m *MockProvider) QueryStatus(_ context.Context, providerReference string) 
 		AssetCode:         a.assetCode,
 		DeclineReason:     a.declineReason,
 		Cascadable:        a.cascadable,
+		DestinationEcho:   m.destinationEcho,
 	}, nil
 }
 
