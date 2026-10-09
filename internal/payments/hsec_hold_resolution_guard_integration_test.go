@@ -192,10 +192,14 @@ func TestHSEC_HoldRelease_ExecutingTransition_DatabaseRechecks(t *testing.T) {
 		wr := h.hold(100)
 		h.suspendTenant()
 		r := h.mustRequest(h.reqA, wr.ID)
+		// approved -> submitted is itself frozen while non-active (the widened freeze): move it
+		// while the tenant is active, then suspend again.
+		h.activateTenant()
 		h.tx(func(ctx context.Context, tx pgx.Tx) error {
 			_, err := tx.Exec(ctx, `UPDATE withdrawal_requests SET state = 'submitted' WHERE id = $1`, wr.ID)
 			return err
 		})
+		h.suspendTenant()
 		if err := rawExecute(h, r, h.apprB); !hsrIs(err, "HR010") {
 			t.Fatalf("want HR010, got %v", err)
 		}
