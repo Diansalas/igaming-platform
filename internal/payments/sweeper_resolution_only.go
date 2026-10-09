@@ -177,6 +177,53 @@ func skipCascadeChildForBrand(ctx context.Context, tx pgx.Tx, attempt PaymentAtt
 	return true, nil
 }
 
+// skipCascadeChildForResolutionOnly is the TENANT half of the cascade-creation gate as a helper
+// (B8 / PRH-2 H policy, byte-for-byte the inline treatment at phase C and the poll path): a tenant
+// that is not 'active' gets no child, an own audit row and the metric site deposit_cascade_child.
+// A read error is returned (fail closed). It never reads the brand (decision 23).
+func skipCascadeChildForResolutionOnly(ctx context.Context, tx pgx.Tx, attempt PaymentAttempt, intentID uuid.UUID) (skipped bool, err error) {
+	resOnly, err := tenantResolutionOnly(ctx, tx, attempt.TenantID)
+	if err != nil || !resOnly {
+		return false, err
+	}
+	recordResolutionOnlyBlock(ctx, "deposit_cascade_child")
+	if err := audit.Record(ctx, tx, audit.Entry{
+		TenantID: attempt.TenantID, ActorType: audit.ActorSystem, Action: "payment.cascade_skipped_resolution_only",
+		TargetType: "payment_attempt", TargetID: attempt.ID.String(), Outcome: audit.OutcomeDenied,
+		Metadata: map[string]any{"deposit_intent_id": intentID.String()},
+	}); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// gateReceiptCascadeChild is the receipt/callback cascade-creation gate (ADR 0095 section 44
+// decision 19, section 47; closes security M-1 / LF F1). The receipt site only holds a STUB
+// DepositIntent{ID, TenantID} (BrandID == uuid.Nil), so the intent's real row is loaded here, in the
+// callback's own tx (RLS-scoped, then checked against the attempt's tenant): passing the stub to
+// skipCascadeChildForBrand would refuse EVERY receipt-path child. Order: tenant (separate helper,
+// reason, metric), then brand. Lock order: the intent row is already held FOR UPDATE by the caller's
+// parent lock (R0 receipt insert, parent -> attempt -> intent -> brand FOR SHARE); the brand read is a leaf
+// lock, taken before any alert raise (ADR 0102 7.7 raise-last is unaffected). Any read error is
+// returned, which rolls back the whole delivery including its receipt dedupe row, so the redelivery
+// converges.
+func gateReceiptCascadeChild(ctx context.Context, tx pgx.Tx, attempt PaymentAttempt) (skipped bool, err error) {
+	if attempt.DepositIntentID == nil {
+		return false, errors.New("payments: receipt cascade gate: attempt has no deposit intent")
+	}
+	intent, err := GetDepositIntentByID(ctx, tx, *attempt.DepositIntentID)
+	if err != nil {
+		return false, err
+	}
+	if intent.TenantID != attempt.TenantID {
+		return false, errors.New("payments: receipt cascade gate: intent tenant differs from attempt tenant")
+	}
+	if skipped, err := skipCascadeChildForResolutionOnly(ctx, tx, attempt, intent.ID); err != nil || skipped {
+		return skipped, err
+	}
+	return skipCascadeChildForBrand(ctx, tx, attempt, intent)
+}
+
 // checkPayoutResolutionOnly is the payout twin, called inside the T2/T12 claim
 // tx (after the withdrawal lock, before the kill-switch and KYC gate) so the
 // decision is made against a fresh read in the very transaction that would claim.

@@ -1,0 +1,35 @@
+R17 receipt-site cascade gate (ADR 0095 section 47) - mutation evidence
+Baseline 4fe5e45; implementation commit 8484736; tests commits follow. Each mutant was applied in place
+with a backup copy, compiled (compile-error mutants are discarded and not counted), run against the
+targeted set  TestR17_ | TestH8_ReceiptSiteGate | TestH8_BrandGateCallSites  (-tags integration,
+runtime role, private scratch DB), then the file was restored from the backup (git status clean after).
+Control (unmutated): all PASS, 0 SKIP, 0 FAIL.
+
+Round 1 (script scratchpad r17_mut.py)
+M1  receipt site: gate result ignored (always insert)            KILLED (matrix: brand/tenant/both cases)
+M2  gate passes the STUB DepositIntent (BrandID nil) to brand    KILLED (control, other-brand, stub-trap, scratch, AST pin)
+M3  tenant helper dropped from the gate                          KILLED (tenant cases, AST pin)
+M4  brand helper dropped from the gate                           KILLED (brand cases, other-brand, stub-trap, AST pin)
+M5  brand read error swallowed in the gate (fails open)          SURVIVED in round 1
+M6  tenant skip writes the BRAND audit action (conflation)       KILLED (tenant cases)
+M7  intent/attempt tenant equality check removed                 SURVIVED in round 1
+M8  tenant helper read error swallowed                           SURVIVED in round 1
+M9  brand checked before tenant (order swapped)                  KILLED (both-inactive case, AST pin)
+M10 tenant skip does not audit                                   KILLED (tenant cases)
+
+Why M5/M7/M8 survived round 1 (honest): M5 - a failed statement aborts the Postgres transaction, so the
+delivery still failed on the NEXT statement; the test saw an error but did not prove the GATE returned it.
+M7 - the mismatching tenant was still refused later (RLS rejects the audit insert), masking the removed
+check. M8 - no test induced a tenant read error at all. All three are real test gaps, not equivalent
+mutants.
+
+Round 2 (after tests: direct gate call asserting the underlying 42501 error; tenant-mismatch error text
+asserted; new scratch test revoking SELECT on tenants)
+M5  KILLED (TestR17_Scratch_ReceiptSite_BrandReadError_...)
+M7  KILLED (TestR17_ReceiptSite_GateLoadsRealBrand_NotStub)
+M8  KILLED (TestR17_Scratch_ReceiptSite_TenantReadError_FailsClosed)
+
+Final: 10 mutants, 10 killed after round 2; 3 survived round 1 and are documented above. Not mutated
+(residual): the metric site label strings (advisory counters; recordResolutionOnlyBlock is not asserted
+anywhere for this site, same as the phase C / poll sites), and the lock-order/raise-last property (no
+interleaving test was added; see ADR 0095 section 47.3).
