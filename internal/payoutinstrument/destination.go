@@ -53,6 +53,43 @@ func (d PayoutDestination) MarshalJSON() ([]byte, error) {
 // Empty reports whether no destination was supplied.
 func (d PayoutDestination) Empty() bool { return d.InstrumentID == uuid.Nil || len(d.Detail) == 0 }
 
+// DestinationEchoSemantics is the mandatory, explicit declaration every payout adapter makes about destination
+// evidence (ADR 0111 24, owner decision 5 of ADR 0095 48). There is no default: the zero value is INVALID and is
+// refused at registration and at startup.
+type DestinationEchoSemantics uint8
+
+const (
+	// DestinationEchoUnset is the zero value: nothing was declared. INVALID; never a default.
+	DestinationEchoUnset DestinationEchoSemantics = iota
+	// DestinationEchoSupported: the adapter computes a tenant-bound fingerprint echo (inside the adapter, with the
+	// injected DestinationFingerprinter) and returns it on every payout success, status poll and callback. A success
+	// without it is ambiguous.
+	DestinationEchoSupported
+	// DestinationEchoUnsupported: the adapter explicitly cannot provide destination evidence. No echo is expected; an
+	// absent echo is not evidence of anything and an echo that nevertheless arrives is untrusted (fail closed). The
+	// compensating control is the statement-level evidence of the M4/reconciliation model. Visible at startup.
+	DestinationEchoUnsupported
+)
+
+// Valid reports whether s is a declared state (not the zero value, not out of range).
+func (s DestinationEchoSemantics) Valid() bool {
+	return s == DestinationEchoSupported || s == DestinationEchoUnsupported
+}
+
+// String is the closed name used in logs and errors.
+func (s DestinationEchoSemantics) String() string {
+	switch s {
+	case DestinationEchoSupported:
+		return "supported"
+	case DestinationEchoUnsupported:
+		return "unsupported"
+	case DestinationEchoUnset:
+		return "unset"
+	default:
+		return "invalid"
+	}
+}
+
 // DestinationEcho is the only destination evidence a provider result may carry
 // (S95-C10 retained): a fingerprint computed INSIDE the adapter by the injected
 // DestinationFingerprinter under the snapshot's kid. No raw payer-identifying

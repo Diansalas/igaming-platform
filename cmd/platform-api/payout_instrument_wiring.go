@@ -10,6 +10,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/actorproof"
 	"github.com/Diansalas/igaming-platform/internal/config"
 	"github.com/Diansalas/igaming-platform/internal/db"
+	"github.com/Diansalas/igaming-platform/internal/payments"
 	"github.com/Diansalas/igaming-platform/internal/payoutinstrument"
 )
 
@@ -46,15 +47,12 @@ func buildPayoutInstrumentService(cfg config.Config, b providerBundle) (*payouti
 	if b.PayoutVerifier != nil {
 		verifiers = append(verifiers, b.PayoutVerifier)
 	}
-	var adapters []any
-	for _, a := range b.paymentsAdapters() {
-		adapters = append(adapters, a)
-	}
+	adapters, echoDecls := payoutAdapterRegistrations(b)
 	var sources []any
 	for _, src := range b.paymentStatementSources() {
 		sources = append(sources, src)
 	}
-	if err := payoutinstrument.VerifyStartup(cfg.GuardEnvironment(), keys, payoutinstrument.Registrations{PaymentAdapters: adapters, Verifiers: verifiers, StatementSources: sources}); err != nil {
+	if err := payoutinstrument.VerifyStartup(cfg.GuardEnvironment(), keys, payoutinstrument.Registrations{PaymentAdapters: adapters, Verifiers: verifiers, StatementSources: sources, PayoutEchoDeclarations: echoDecls}); err != nil {
 		return nil, err
 	}
 	if keys == nil {
@@ -118,9 +116,30 @@ func bindingGuardChecker(pool *db.Pool) payoutinstrument.BindingGuardChecker {
 
 // payoutRegistrations is the set the startup gates inspect.
 func payoutRegistrations(b providerBundle) payoutinstrument.Registrations {
+	adapters, echoDecls := payoutAdapterRegistrations(b)
+	return payoutinstrument.Registrations{PaymentAdapters: adapters, PayoutEchoDeclarations: echoDecls}
+}
+
+// payoutAdapterRegistrations lists the registered payment adapters and, for each, the destination-echo declaration read
+// VERBATIM from its own manifest (ADR 0111 24). Nothing is defaulted here: an unset declaration reaches the startup gate
+// as unset and refuses startup.
+func payoutAdapterRegistrations(b providerBundle) ([]any, []payoutinstrument.PayoutEchoDeclaration) {
+	return payoutAdapterDeclarations(b.paymentsAdapters())
+}
+
+func payoutAdapterDeclarations(set map[string]payments.PaymentProvider) ([]any, []payoutinstrument.PayoutEchoDeclaration) {
 	var adapters []any
-	for _, a := range b.paymentsAdapters() {
+	var decls []payoutinstrument.PayoutEchoDeclaration
+	for _, a := range set {
 		adapters = append(adapters, a)
+		if a == nil {
+			continue
+		}
+		caps := a.Capabilities()
+		decls = append(decls, payoutinstrument.PayoutEchoDeclaration{
+			Adapter: a, ProviderID: caps.ProviderID, PayoutCapable: caps.SupportsWithdrawal,
+			Semantics: caps.Manifest.DestinationEchoSemantics,
+		})
 	}
-	return payoutinstrument.Registrations{PaymentAdapters: adapters}
+	return adapters, decls
 }

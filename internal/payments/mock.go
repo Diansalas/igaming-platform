@@ -273,6 +273,9 @@ func NewMockProvider(providerID string, fiatCurrencies ...string) *MockProvider 
 			AmountLimits:            limits,
 			SettlementBehavior:      "instant",
 			CallbackCapabilities:    CallbackWebhookOnly,
+			// ADR 0111 24: every adapter declares its destination-echo semantics explicitly. The MOCK declares
+			// Unsupported (it computes no tenant-bound echo unless a test scripts one and declares Supported).
+			Manifest: OperationManifest{DestinationEchoSemantics: payoutinstrument.DestinationEchoUnsupported},
 		},
 		health: ProviderHealth{
 			ProviderID:          providerID,
@@ -312,6 +315,12 @@ func (m *MockProvider) AttemptCount() int {
 func (m *MockProvider) SetManifest(manifest OperationManifest) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	// ADR 0111 24: a manifest that leaves the destination-echo declaration unset keeps the MOCK's own explicit
+	// declaration (Unsupported by default) so deposit-focused tests need not repeat it. A test of the unset-is-invalid
+	// rule wraps Capabilities() instead (see the conformance suite).
+	if !manifest.DestinationEchoSemantics.Valid() {
+		manifest.DestinationEchoSemantics = m.capability.Manifest.DestinationEchoSemantics
+	}
 	m.capability.Manifest = manifest
 }
 

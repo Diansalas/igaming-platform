@@ -274,7 +274,7 @@ func TestB13B_ClosedReasons(t *testing.T) {
 // Without the collaborators nothing is configured: fail closed.
 func TestB13B_OptionsFailClosedByDefault(t *testing.T) {
 	e := buildPayoutEnv(nil)
-	if e.destinations != nil || e.providers != nil || e.echoDeclared(nil) {
+	if e.destinations != nil || e.providers != nil || e.echoSemantics(nil) != payoutinstrument.DestinationEchoUnset {
 		t.Fatal("no options must mean no destination service")
 	}
 	var o *Orchestrator

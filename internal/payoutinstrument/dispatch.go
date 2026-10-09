@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"strconv"
 
 	"github.com/google/uuid"
@@ -102,7 +103,51 @@ const (
 	// malformed. A provider-reported destination can only ever be compared; it
 	// never determines, replaces or changes the destination.
 	EchoMismatch
+	// EchoMalformed (ADR 0111 24): the echo is not shaped like anything this platform's fingerprinter can produce
+	// (kid outside the kid grammar, fingerprint not 64 lowercase hex characters). Mismatch-class: fails closed.
+	EchoMalformed
+	// EchoUnexpected (ADR 0111 24): an echo arrived from an adapter whose declaration is not Supported (explicit
+	// Unsupported, or an unset declaration). The adapter declared it cannot provide destination evidence, so the
+	// echo contradicts the declaration: it is untrusted evidence and is NEVER a match. Mismatch-class: fails closed.
+	EchoUnexpected
 )
+
+// Mismatch reports whether the verdict is in the fail-closed mismatch class (a differing, malformed or unexpected
+// echo). EchoAbsent and EchoMatch are not.
+func (v EchoVerdict) Mismatch() bool {
+	return v == EchoMismatch || v == EchoMalformed || v == EchoUnexpected
+}
+
+var (
+	echoKidRE         = regexp.MustCompile(`^[A-Za-z0-9._-]{1,32}$`)
+	echoFingerprintRE = regexp.MustCompile(`^[0-9a-f]{64}$`)
+)
+
+// EchoWellFormed reports whether e has the shape Keys.Fingerprint produces: a kid in the kid grammar and a 64-character
+// lowercase hex fingerprint. It says nothing about whether the echo is correct.
+func EchoWellFormed(e DestinationEcho) bool {
+	return echoKidRE.MatchString(e.Kid) && echoFingerprintRE.MatchString(e.Fingerprint)
+}
+
+// EvaluateEcho is the single echo verdict the payments evidence paths use (ADR 0111 24). The declaration decides
+// whether an echo may be considered at all:
+//
+//   - no echo: EchoAbsent (never a match; the caller decides what absence means for the declaration);
+//   - an echo from an adapter that is not DestinationEchoSupported: EchoUnexpected (never a match);
+//   - an echo that is not well formed: EchoMalformed;
+//   - otherwise CompareEcho (EchoMatch or EchoMismatch, a different/unknown kid being a mismatch).
+func EvaluateEcho(snap Snapshot, echo *DestinationEcho, declared DestinationEchoSemantics) EchoVerdict {
+	if echo == nil {
+		return EchoAbsent
+	}
+	if declared != DestinationEchoSupported {
+		return EchoUnexpected
+	}
+	if !EchoWellFormed(*echo) {
+		return EchoMalformed
+	}
+	return CompareEcho(snap, echo)
+}
 
 // CompareEcho compares echo with the snapshot. An echo under a kid other than
 // the snapshot's counts as a mismatch (A-8: an unknown kid is not "equal").

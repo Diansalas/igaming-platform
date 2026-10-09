@@ -24,6 +24,8 @@ package payments
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"strconv"
@@ -90,7 +92,7 @@ func WithDestinations(svc *payoutinstrument.Service) PayoutOption {
 }
 
 // WithProviderLookup supplies the adapter registry, used to read the manifest's
-// EchoesDestinationFingerprint declaration.
+// DestinationEchoSemantics declaration.
 func WithProviderLookup(f func(providerID string) (PaymentProvider, bool)) PayoutOption {
 	return func(e *payoutEnv) { e.providers = f }
 }
@@ -127,15 +129,19 @@ func (o *Orchestrator) payoutEnv() payoutEnv {
 	return buildPayoutEnv(o.PayoutOptions())
 }
 
-func (e payoutEnv) echoDeclared(providerID *string) bool {
+// echoSemantics returns the destination-echo declaration of the attempt's adapter. An unknown provider, a missing
+// registry or an unset declaration all read as DestinationEchoUnset, which EvaluateEcho treats like Unsupported for an
+// echo (never a match) and which never makes an absent echo ambiguous: an unset declaration cannot register
+// (validateManifest, VerifyStartup), so this value only appears for evidence that cannot be attributed to an adapter.
+func (e payoutEnv) echoSemantics(providerID *string) payoutinstrument.DestinationEchoSemantics {
 	if providerID == nil || e.providers == nil {
-		return false
+		return payoutinstrument.DestinationEchoUnset
 	}
 	p, ok := e.providers(*providerID)
 	if !ok {
-		return false
+		return payoutinstrument.DestinationEchoUnset
 	}
-	return p.Capabilities().Manifest.EchoesDestinationFingerprint
+	return p.Capabilities().Manifest.DestinationEchoSemantics
 }
 
 // ---- the gate ------------------------------------------------------------
@@ -324,6 +330,42 @@ func parkPayoutDestination(ctx context.Context, tx pgx.Tx, attempt PaymentAttemp
 	return raisePayoutDisputeAlert(ctx, tx, attempt, reason)
 }
 
+// echoAuditIdentity is the (kid, fingerprint prefix) pair recorded for an echo. A well-formed echo records its kid and an
+// 8-character fingerprint prefix. A malformed one is provider-controlled text and is NEVER copied into the audit row: a
+// constant and a short hash of the content stand in (so distinct malformed echoes stay distinct for the terminal-signal
+// dedupe, without storing their text).
+func echoAuditIdentity(echo *payoutinstrument.DestinationEcho) (kid, fpp string) {
+	if payoutinstrument.EchoWellFormed(*echo) {
+		return echo.Kid, fpPrefix(echo.Fingerprint)
+	}
+	sum := sha256.Sum256([]byte(echo.Kid + "\x00" + echo.Fingerprint))
+	return "malformed", "h:" + hex.EncodeToString(sum[:4])
+}
+
+// echoMeta is the audit metadata for a mismatch-class echo.
+func echoMeta(snap payoutinstrument.Snapshot, echo *payoutinstrument.DestinationEcho, v payoutinstrument.EchoVerdict) map[string]any {
+	kid, fpp := echoAuditIdentity(echo)
+	return map[string]any{
+		"snapshot_fingerprint_prefix": fpPrefix(snap.Fingerprint), "echo_verdict": echoVerdictName(v),
+		"echo_kid": kid, "echo_fingerprint_prefix": fpp,
+	}
+}
+
+func echoVerdictName(v payoutinstrument.EchoVerdict) string {
+	switch v {
+	case payoutinstrument.EchoMatch:
+		return "match"
+	case payoutinstrument.EchoMismatch:
+		return "mismatch"
+	case payoutinstrument.EchoMalformed:
+		return "malformed"
+	case payoutinstrument.EchoUnexpected:
+		return "unexpected_from_unsupported"
+	default:
+		return "absent"
+	}
+}
+
 func fpPrefix(s string) string {
 	if len(s) >= 8 {
 		return s[:8]
@@ -352,7 +394,9 @@ type destinationEvidenceResult struct {
 //   - Non-terminal attempt: the snapshot must exist, verify and equal the withdrawal/attempt/
 //     instrument (else park destination_integrity_failure); an echo that differs (or names an
 //     unknown kid) parks destination_mismatch; an absent echo on a success from an adapter whose
-//     manifest declares EchoesDestinationFingerprint is ambiguous, never a success.
+//     manifest declares DestinationEchoSupported is ambiguous, never a success. An echo that is malformed, or that
+//     arrives from an adapter that is not DestinationEchoSupported, is mismatch-class too (parks destination_mismatch):
+//     it is never a match and never ignored.
 //   - succeeded / declined attempt: a differing echo changes nothing but writes the audit row
 //     and raises the P1 signal destination_mismatch_on_terminal_payout.
 //   - disputed / created / rejected: unchanged existing cells apply.
@@ -402,13 +446,14 @@ func payoutDestinationEvidence(ctx context.Context, tx pgx.Tx, env payoutEnv, at
 		return res, parkPayoutDestination(ctx, tx, fresh, requestID, evidence, TerminalReasonDestinationIntegrityFailure,
 			map[string]any{"gate_reason": g.Reason}, reference)
 	}
-	switch payoutinstrument.CompareEcho(snap, echo) {
-	case payoutinstrument.EchoMismatch:
+	declared := env.echoSemantics(fresh.ProviderID)
+	verdict := payoutinstrument.EvaluateEcho(snap, echo, declared)
+	switch {
+	case verdict.Mismatch():
 		res.Stop = true
-		meta := map[string]any{"snapshot_fingerprint_prefix": fpPrefix(snap.Fingerprint), "echo_kid": echo.Kid, "echo_fingerprint_prefix": fpPrefix(echo.Fingerprint)}
-		return res, parkPayoutDestination(ctx, tx, fresh, requestID, evidence, TerminalReasonDestinationMismatch, meta, reference)
-	case payoutinstrument.EchoAbsent:
-		if class == ErrorClassSucceeded && env.echoDeclared(fresh.ProviderID) {
+		return res, parkPayoutDestination(ctx, tx, fresh, requestID, evidence, TerminalReasonDestinationMismatch, echoMeta(snap, echo, verdict), reference)
+	case verdict == payoutinstrument.EchoAbsent:
+		if class == ErrorClassSucceeded && declared == payoutinstrument.DestinationEchoSupported {
 			res.AmbiguousSuccess = true
 		}
 	}
@@ -424,7 +469,7 @@ func payoutTerminalDestinationSignal(ctx context.Context, tx pgx.Tx, env payoutE
 	var snapFP, kid string
 	if env.destinations != nil {
 		if snap, err := env.destinations.CheckSnapshot(ctx, tx, snapshotExpectFor(wr, attempt)); err == nil {
-			if payoutinstrument.CompareEcho(snap, echo) != payoutinstrument.EchoMismatch {
+			if !payoutinstrument.EvaluateEcho(snap, echo, env.echoSemantics(attempt.ProviderID)).Mismatch() {
 				return res, nil
 			}
 			snapFP, kid = snap.Fingerprint, snap.FingerprintKID
@@ -435,10 +480,11 @@ func payoutTerminalDestinationSignal(ctx context.Context, tx pgx.Tx, env payoutE
 	// redelivery dedupes against the earlier GOOD delivery of the same event (the echo is not in the fingerprint), so
 	// alreadyApplied is true for the very first bad one. The check runs under the withdrawal row lock the caller holds, so
 	// concurrent redeliveries serialise. The raise stays unconditional (the alert dedupes into one open alert).
+	ekid, efpp := echoAuditIdentity(echo)
 	var seen bool
 	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM audit_log WHERE tenant_id = $1 AND action = $2 AND target_id = $3
 		AND created_at >= $6 AND metadata->>'echo_kid' = $4 AND metadata->>'echo_fingerprint_prefix' = $5)`,
-		attempt.TenantID, terminalSignalAuditAction, attempt.ID.String(), echo.Kid, fpPrefix(echo.Fingerprint), attempt.CreatedAt).Scan(&seen); err != nil {
+		attempt.TenantID, terminalSignalAuditAction, attempt.ID.String(), ekid, efpp, attempt.CreatedAt).Scan(&seen); err != nil {
 		return res, fmt.Errorf("payments: terminal destination signal: audit lookup: %w", err)
 	}
 	if !seen {
@@ -447,7 +493,8 @@ func payoutTerminalDestinationSignal(ctx context.Context, tx pgx.Tx, env payoutE
 			TargetType: "payment_attempt", TargetID: attempt.ID.String(), Outcome: audit.OutcomeDenied,
 			Metadata: map[string]any{
 				"withdrawal_request_id": wr.ID.String(), "provider_id": providerIDOrEmpty(attempt), "state": string(attempt.State),
-				"snapshot_fingerprint_prefix": fpPrefix(snapFP), "snapshot_kid": kid, "echo_kid": echo.Kid, "echo_fingerprint_prefix": fpPrefix(echo.Fingerprint),
+				"snapshot_fingerprint_prefix": fpPrefix(snapFP), "snapshot_kid": kid, "echo_kid": ekid, "echo_fingerprint_prefix": efpp,
+				"echo_verdict": echoVerdictName(payoutinstrument.EvaluateEcho(payoutinstrument.Snapshot{Fingerprint: snapFP, FingerprintKID: kid}, echo, env.echoSemantics(attempt.ProviderID))),
 			},
 		}); err != nil {
 			return res, err

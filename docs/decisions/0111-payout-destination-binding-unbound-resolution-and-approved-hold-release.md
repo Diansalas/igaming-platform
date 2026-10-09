@@ -1742,7 +1742,8 @@ statement about a real PSP, a custodian or a licence: every provider in the test
     `payout_echo_receipt_unattributable` is HELD (no settlement; `changed=false`), for every adapter. The closed twin is detected through
     the audit marker written with the closure (no migration). Settlement then rests on the QueryStatus poll and the P1 raised at the
     first delivery. Residual (still launch-blocking, as B13B-15): a non-echo-declaring adapter's own later poll success settles as
-    ordinary evidence; only adapters that declare the echo are covered by the poll comparison.
+    ordinary evidence; only adapters that declare the echo are covered by the poll comparison. [Superseded by 24 (2026-10-09, owner decision 5): no adapter can now be "non-declaring"; an
+    adapter that cannot echo must say `Unsupported` explicitly, visibly, and its echo is never evidence.]
   - LR-3: the unattributable-echo P1 is one open alert per (tenant, provider) (`provider:<id>:reason:payout_echo_receipt_unattributable`),
     not one per receipt; per-receipt detail stays in the audit rows.
   - Ledger-finance L-A: a duplicate of a closed unattributable receipt that changes the attempt writes one audit row
@@ -1801,7 +1802,8 @@ their path.
 
 **Launch-blocking for non-MOCK payouts (recorded, not built):** (a) every non-Synthetic payout adapter must declare
 `EchoesDestinationFingerprint = true`, or the owner explicitly accepts an adapter that cannot echo (without the echo an adapter's success
-settles on the snapshot integrity check alone, B13B-15); the registration refusal for a non-declaring non-Synthetic adapter is NOT built;
+settles on the snapshot integrity check alone, B13B-15); the registration refusal for a non-declaring non-Synthetic adapter is NOT built; [Update, 24: the boolean is replaced by the mandatory `DestinationEchoSemantics` declaration and the registration/startup refusal IS built;
+the per-provider owner acknowledgement for `Unsupported` is still to be defined.]
 (b) the tenant-visibility interface question for the adapter-side echo (B13B-8 / Q2) must be answered and implemented.
 
 ### 18.5 Staff withdrawal detail: bound instrument display (usability change, branch gov-r24-bo-contract)
@@ -2104,3 +2106,101 @@ it the raise is the final `return`, after the audit row (`TestPayoutPostM4Cell_*
 - A finding recorded for the owner (no code change): the system-shaped sessions that run the cells can read only EXECUTED M2/M4 rows
   (policy `tenant_system_read_executed`, 0125); the cell's own `state = 'executed'` and tenant predicates are therefore redundant there and are
   pinned for a principal-shaped session by `TestPostM4_PendingM4_NoSignal_EvenInAPrincipalShapedSession`.
+
+## 24. Mandatory destination-echo declaration (owner decision 5 of ADR 0095 48; B13B-15 residual) (appendix, `integrations`, 2026-10-09; branch `gov-r33-echo`, base `dad803d`; the design above is not rewritten)
+
+Status of the deliverables: the declaration, registration refusal, startup refusal, the unexpected-echo handling and the conformance suite are
+`IMPLEMENTED` and tested against MOCK adapters only. Real echo computation inside a vendor adapter stays `PROVIDER DEPENDENT` and
+`NOT IMPLEMENTED`; nothing here is a statement about any real PSP, and no provider credential or real provider call was added.
+
+### 24.1 The policy this implements (decision 5, verbatim intent)
+
+Every real / non-Synthetic payout adapter MUST explicitly declare its destination-echo capability and semantics. Callbacks remain evidence only;
+the platform-authoritative destination (the write-once attempt snapshot) remains authoritative; a provider echo never establishes beneficiary
+identity by itself; a mismatch fails closed; and an adapter must not silently pretend it provides destination evidence it does not provide. The
+interface was an engineering decision; this section records it. No migration.
+
+### 24.2 The contract as built
+
+`OperationManifest.EchoesDestinationFingerprint bool` is removed (its `false` zero value meant "no echo" without the adapter ever having said so).
+It is replaced by `OperationManifest.DestinationEchoSemantics`, of type `payoutinstrument.DestinationEchoSemantics` (the type lives in
+`payoutinstrument` because `VerifyStartup` cannot import `payments`):
+
+| State | Meaning | What the platform does with evidence |
+|---|---|---|
+| `DestinationEchoUnset` (zero value) | Nothing declared. **INVALID. Never a default.** | Registration and startup refuse the adapter |
+| `DestinationEchoSupported` | The adapter computes a tenant-bound fingerprint echo inside the adapter (injected `DestinationFingerprinter`, B13B-8) and returns it on every payout success, poll and callback | Absent echo on a success = ambiguous (B13B-6, unchanged). Echo equal to the snapshot (same kid, same fingerprint) = match. Echo that differs, names another or unknown kid = park `destination_mismatch` |
+| `DestinationEchoUnsupported` | The adapter explicitly cannot provide destination evidence | No echo is expected. A success without one settles on ordinary evidence (and is NOT ambiguous), but the absence is not a match and not destination evidence. An echo that arrives anyway is untrusted: see 24.4 |
+
+Evaluation is centralised in `payoutinstrument.EvaluateEcho(snapshot, echo, declared)` with verdicts `EchoAbsent`, `EchoMatch`, `EchoMismatch`,
+`EchoMalformed`, `EchoUnexpected`; `EchoVerdict.Mismatch()` is the fail-closed class (mismatch, malformed, unexpected). A static test pins that no
+non-test code in `payments` calls `CompareEcho` directly (that would bypass the declaration). The three evidence paths (sync phase C, the
+`QueryStatus` poll, the callback/receipt cell) all run `payoutDestinationEvidence`, unchanged in structure; only the verdict source changed.
+
+### 24.3 Registration and startup (fail closed, no default)
+
+1. **Registration** (`validateManifest`, the refusal that already guards `WriteCapability`): any adapter with `SupportsWithdrawal` must declare a
+   valid state. This applies to **Synthetic adapters too** (the field is universally mandatory for payout-capable adapters), so the MOCK adapters
+   were updated: `NewMockProvider` declares `Unsupported` explicitly; `SetManifest` keeps that declaration if a deposit-focused test leaves the
+   field unset (an unset declaration is still testable by wrapping `Capabilities()`). A deposit-only adapter makes no payout and needs none.
+2. **Startup** (`payoutinstrument.VerifyStartup`): `Registrations` gains `PayoutEchoDeclarations`, which `cmd/platform-api` builds by reading
+   each adapter's own manifest verbatim (never defaulting). `VerifyStartup` refuses to start when (a) a non-Synthetic payment adapter has no
+   declaration entry at all, or (b) any payout-capable adapter, Synthetic or not, carries an invalid (unset or out-of-range) state. The error
+   names the provider and cites this section. Adapter identity uses a panic-safe comparison (an uncomparable adapter value never matches).
+3. **Visible marker for `Unsupported`**: for each non-Synthetic payout-capable adapter that declares `Unsupported`, startup writes a `WARN` log
+   `payout_destination_echo_unsupported_adapter_registered` naming `provider_id`, the compensating control (statement-level evidence of the
+   M4/reconciliation model) and that the owner acknowledgement is not yet defined. A MOCK adapter declaring `Unsupported` writes no marker.
+   Only a log marker was built (no metric, no new alert raise site, so the `internal/alerting` static pins are untouched).
+
+### 24.4 Echo handling beyond the original cells (decided here)
+
+* **Malformed echo fails closed.** An echo whose kid is outside the kid grammar `^[A-Za-z0-9._-]{1,32}$`, or whose fingerprint is not 64
+  lowercase hex characters (wrong length, wrong charset), is `EchoMalformed` and parks `destination_mismatch` (non-terminal attempt) or raises the
+  existing terminal-mismatch signal (succeeded / declined attempt). The provider-controlled text of a malformed echo is never copied into an audit
+  row: only the constant `malformed` and a 4-byte hash of the content (kept so the per-(attempt, echo) terminal-signal dedupe stays exact). A
+  well-formed echo still records its kid and an 8-character fingerprint prefix, now with a closed `echo_verdict` name.
+* **An echo from an `Unsupported` (or unset) adapter is mismatch-class, not ignored and not a match.** Reasons: (1) the adapter declared it
+  cannot compute a tenant-bound echo, so any echo contradicts the declaration: either the declaration is wrong or the evidence is forged or
+  from another source; (2) treating it as a match would let a non-computing adapter "pretend" destination evidence, which decision 5 forbids,
+  and an echo equal to the snapshot proves nothing about a fingerprint the adapter cannot have computed; (3) ignoring it for settlement would
+  quietly settle on evidence the platform has just seen to be inconsistent, while parking costs only a governed M4 resolution of a held
+  payout, the same cost as any mismatch; (4) it reuses the existing park, audit, `destination_mismatch` P1 and terminal signal, so no new
+  raise site exists. The equal-to-snapshot case is deliberately parked as well (`echo_verdict = unexpected_from_unsupported`). An unknown or
+  unset declaration at evidence time (an attempt whose provider is not in the registry) reads as `Unset` and behaves like `Unsupported` for an
+  echo; an absent echo is never ambiguous for it. Such evidence cannot arise from a registered adapter.
+* **Callbacks are evidence only (unchanged, re-pinned).** The existing static pins stay green (only T1p writes the snapshot; no evidence path
+  writes any B13 table). The conformance suite adds runtime proof: after a callback carrying any echo, the attempt snapshot is byte-identical,
+  the withdrawal's instrument binding is unchanged and no snapshot or instrument row was written.
+
+### 24.5 Conformance suite
+
+`internal/payments/echo_conformance_integration_test.go` holds `runDestinationEchoConformance(t, subject)`. It reads the adapter's own
+declaration and runs the matching group, so an adapter cannot pass by behaving like the other state. **Any future adapter's test must run it**
+with a constructor returning the harness around its vendor stub (today the harness is the scripted MOCK; the cells need no vendor knowledge).
+Cells: registration accepts the declaration; Supported: echo settles on sync, poll and callback, success without echo is ambiguous,
+mismatched and unknown-kid echo park, ten malformed shapes (kid space / markup / empty / too long; fingerprint short / long / upper-case /
+non-hex / empty / embedded space) park and leave no raw text in the audit, callback replay gives one audit row and one alert occurrence;
+Unsupported: absent echo settles and writes no park, an echo equal to the snapshot, a different echo and a malformed echo all park on
+sync, poll and callback (replay one alert occurrence), an echo on an already succeeded payout is signal-only; both: a callback cannot set the
+destination, and a mismatch-class echo on any channel cannot progress the payout (attempt `disputed`, no Complete, no release, hold kept,
+nothing posted, ledger balanced). Unit tests cover the declaration states, `EchoWellFormed`, `EvaluateEcho`, `validateManifest` for Synthetic and
+non-Synthetic adapters with an unset declaration, `VerifyStartup` (unset non-Synthetic fails, unset Synthetic fails, missing entry fails,
+`Unsupported` starts and logs the marker, deposit-only exempt) and the `cmd/platform-api` wiring that reads the declaration verbatim.
+
+### 24.6 Residuals and open questions (nothing invented)
+
+1. **Whether `Unsupported` is acceptable for a given provider is a per-provider OWNER ACKNOWLEDGEMENT, still to be defined.** What was built
+   is only that `Unsupported` is explicit, cannot be a default, and is visible at startup. No approval workflow, no per-provider allow-list and no
+   rule that refuses `Unsupported` in production exists; the compensating control named is the statement-level evidence of the M4 /
+   reconciliation model, and this section does not decide more than that. Until the acknowledgement is defined, enabling any real adapter that
+   declares `Unsupported` remains a decision for the owner (provider contracts and credentials are also still out of scope).
+2. **Tenant visibility for the adapter-side echo (B13B-8 / Q2) stays an `architect` interface question.** A multi-tenant adapter still does not
+   receive the tenant in `Withdraw` / `QueryStatus`, so a real `Supported` adapter cannot build the tenant-bound fingerprinter today. `Supported`
+   is therefore only exercised by the MOCK (`SetDestinationEcho`). Real echo computation is `PROVIDER DEPENDENT` / `NOT IMPLEMENTED`.
+3. **B13B-15 residual, restated.** A "non-declaring adapter that settles on ordinary evidence" can no longer exist. The remaining residual is the
+   `Unsupported` adapter: its success settles on the snapshot integrity check plus statement-level evidence only, never on a destination echo.
+   This is intentional and visible, not silent.
+4. A test double that is not a registered adapter is not covered by the startup gate (same as the L-7 embedding scan: test doubles are not
+   scanned, by design).
+5. The startup marker is a log line; a metric or alert for it is a deferred consideration (it would add a raise site and alerting pins).
+

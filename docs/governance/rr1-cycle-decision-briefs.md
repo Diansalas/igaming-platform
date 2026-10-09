@@ -14,7 +14,7 @@ required; unrelated work continues.
 | B2C payout-instrument flow | Backend contract is implemented (B13-B); frontend follow-up named by the B13-B reports | `gov-r23-b2c` (see registry) |
 | Instrument state gates settlement? | **NOT decided.** Only an architect design statement (ADR 0111 s2.4 "polls/evidence are not blocked by instrument state", by analogy with LF95-C10(d)) plus security and ledger-finance RECOMMENDATIONS. ADR 0111 is still `PROPOSED`. No DECIDED row in the register | Brief 1; current behaviour (not gated) left as merged, no policy change |
 | `destination_integrity_failure` exit | **NOT defined** by any ADR or ruling. M2 excludes it; the 0125 M4 scope covers only `destination_mismatch`; ledger-finance M-3 flags the stranded hold | Brief 2 |
-| Adapter destination echo declaration | Mechanism decided (ADR 0111 s2.6: `EchoesDestinationFingerprint` in the manifest; callbacks only compare). **Whether a non-Synthetic adapter MUST declare is NOT decided**; B13B-15 residual depends on it | Brief 3 |
+| Adapter destination echo declaration | Mechanism decided (ADR 0111 s2.6: `EchoesDestinationFingerprint` in the manifest; callbacks only compare). **DECIDED (ADR 0095 s48 decision 5; ADR 0111 s24): a mandatory explicit declaration**, fail closed; per-provider acceptability of `Unsupported` still to be defined | Brief 3 (DECIDED) |
 | ALERT-DELIVERY-1 / HD-PRH2-4-OPS | OPEN in the register (no recipients, on-call or channel). Not approved | Left blocked; nothing invented |
 | M-3 (fingerprint ownership claim), L-1 (client-supplied card_token fields), L-2 (several fingerprints per destination) | Recorded as launch-blocking for non-MOCK instruments (ADR 0111 s15.5). M-3 needs an owner/architect choice; L-1/L-2 depend on a real PSP/verifier | Brief 4; nothing enabled |
 | L-7 (Synthetic marker inherited through embedding) | Closed for MOCK by the B13-B repo-wide embedding scan, including interface embedding (ADR 0111 s18, B13B-10) | Verified, residual: test doubles are not scanned (by design) |
@@ -72,6 +72,8 @@ binding (a snapshot is write-once), and must not give a provider callback any au
 its evidence standard. Until then the park remains and the hint keeps saying no M4 route.
 
 ## Brief 3 - Must non-Synthetic payout adapters declare destination-echo semantics?
+
+**DECIDED 2026-10-09** (ADR 0095 s48 decision 5); implemented on `gov-r33-echo`, see ADR 0111 s24. Text below is kept as the original brief.
 
 **Current state.** Decided and implemented: callbacks, polls and statements can never set or change a destination; a
 provider echo is evidence compared with the platform-authoritative snapshot; mismatch parks `disputed` with no
