@@ -43,6 +43,11 @@ func registerPaymentForceResolutionRoutes(mux *http.ServeMux, deps Deps) {
 		return auth.Middleware(deps.AuthIssuer)(auth.RequireStaffPrincipal(h))
 	}
 	svc := payments.NewManualResolutionService(deps.DB, deps.StatementSources)
+	// ADR 0111 4.3: M4 verifies statement-import seals with the B13 key module;
+	// without it every M4 is refused (force_resolve_evidence_unsealed).
+	if deps.PayoutInstruments != nil {
+		svc = svc.WithImportSealKeys(deps.PayoutInstruments.Keys())
+	}
 	// Literal patterns only: the webhook route guard (security C3/L8) fails
 	// closed on any non-literal Handle pattern.
 	mux.Handle("POST /v1/admin/tenants/{tenantID}/payment-force-resolutions",
@@ -177,7 +182,9 @@ func writeResolutionError(ctx context.Context, deps Deps, w http.ResponseWriter,
 		recordResolutionDenied(ctx, deps, c, op, token, payments.ResolutionSQLState(err), ids...)
 		apierror.Write(w, c.requestID, apierror.CodeForbidden, token)
 	case payments.ResolutionErrDisabled, payments.ResolutionErrPrecondition, payments.ResolutionErrNotResolvable,
-		payments.ResolutionErrExpired, payments.ResolutionErrConflict, payments.ResolutionErrRetryable:
+		payments.ResolutionErrExpired, payments.ResolutionErrConflict, payments.ResolutionErrRetryable,
+		payments.ResolutionErrEvidenceInsufficient, payments.ResolutionErrEvidenceMismatch,
+		payments.ResolutionErrEvidenceOverflow, payments.ResolutionErrEvidenceUnsealed:
 		c.logger.Warn("payment_force_resolution_refused", "op", op, "class", string(class), "sqlstate", payments.ResolutionSQLState(err))
 		recordResolutionDenied(ctx, deps, c, op, token, payments.ResolutionSQLState(err), ids...)
 		apierror.Write(w, c.requestID, apierror.CodeConflict, token)
@@ -201,6 +208,9 @@ type requestResolutionBody struct {
 	EvidenceRefHash string  `json:"evidence_ref_hash,omitempty"`
 	ReasonCode      string  `json:"reason_code"`
 	Note            string  `json:"note,omitempty"`
+	// EvidenceLineID (M4 only, ADR 0111 4.5): the statement line the requester
+	// reviewed; the database refuses any line but its deterministic one.
+	EvidenceLineID string `json:"evidence_line_id,omitempty"`
 }
 
 type resolutionDTO struct {
@@ -227,6 +237,12 @@ type resolutionDTO struct {
 	LedgerTransactionID *string `json:"ledger_transaction_id,omitempty"`
 	CreatedAt           string  `json:"created_at"`
 	ExpiresAt           string  `json:"expires_at"`
+	// M4 evidence (ADR 0111 4.2); omitted on every other kind. The reference R is
+	// the PSP's own line reference the approvers confirm on the provider portal.
+	EvidenceLineID    *string  `json:"evidence_line_id,omitempty"`
+	EvidenceReference *string  `json:"evidence_reference,omitempty"`
+	EvidenceVerdict   *string  `json:"evidence_verdict,omitempty"`
+	EvidenceImportIDs []string `json:"evidence_import_ids,omitempty"`
 }
 
 func toResolutionDTO(r payments.ManualResolution) resolutionDTO {
@@ -242,6 +258,14 @@ func toResolutionDTO(r payments.ManualResolution) resolutionDTO {
 	if r.LedgerTransactionID != nil {
 		s := r.LedgerTransactionID.String()
 		dto.LedgerTransactionID = &s
+	}
+	if r.EvidenceLineID != nil {
+		s := r.EvidenceLineID.String()
+		dto.EvidenceLineID = &s
+	}
+	dto.EvidenceReference, dto.EvidenceVerdict = r.EvidenceReference, r.EvidenceVerdict
+	for _, id := range r.EvidenceImportIDs {
+		dto.EvidenceImportIDs = append(dto.EvidenceImportIDs, id.String())
 	}
 	return dto
 }
@@ -268,10 +292,17 @@ func newRequestResolutionHandler(deps Deps, svc *payments.ManualResolutionServic
 			apierror.Write(w, c.requestID, apierror.CodeValidation, "invalid request")
 			return
 		}
+		var lineID uuid.UUID
+		if body.EvidenceLineID != "" {
+			if lineID, err = uuid.Parse(body.EvidenceLineID); err != nil {
+				apierror.Write(w, c.requestID, apierror.CodeValidation, "invalid request")
+				return
+			}
+		}
 		res, err := svc.Request(r.Context(), tg, payments.ResolutionRequestInput{
 			AttemptID: attemptID, Kind: payments.ResolutionKind(body.Kind), FindingCode: body.FindingCode,
 			BasisCode: body.BasisCode, ContextCode: body.ContextCode, EvidenceRefHash: body.EvidenceRefHash,
-			ReasonCode: body.ReasonCode, Note: body.Note,
+			ReasonCode: body.ReasonCode, Note: body.Note, EvidenceLineID: lineID,
 		}, c.meta())
 		if err != nil {
 			writeResolutionError(r.Context(), deps, w, c, "request", err, "", attemptID.String())

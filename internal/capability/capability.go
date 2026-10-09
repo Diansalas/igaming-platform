@@ -40,7 +40,7 @@ const (
 	CapabilityLedgerAdjustmentInitiate   Capability = "ledger_adjustment:initiate"
 	CapabilityLedgerAdjustmentApprove    Capability = "ledger_adjustment:approve"
 	CapabilityPaymentForceResolveRequest Capability = "payment_force_resolve:request"
-	CapabilityPaymentForceResolveApprove Capability = "payment_force_resolve:approve"
+	CapabilityPaymentForceResolveApprove Capability = "payment_force_resolve:approve" // both cover M1, M2 and M4 (ADR 0111 D-9; M4 also needs a platform_acting approver, S-6)
 
 	// HSEC-APPROVED-HOLD-RELEASE-1 (ADR 0111 6.3, migration 0124): platform grantees
 	// only (eligible_tenant_roles is empty; no tenant role is ever eligible).

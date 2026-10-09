@@ -42,6 +42,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/actorproof"
 	"github.com/Diansalas/igaming-platform/internal/audit"
 	"github.com/Diansalas/igaming-platform/internal/db"
+	"github.com/Diansalas/igaming-platform/internal/payoutinstrument"
 	"github.com/Diansalas/igaming-platform/internal/providerref"
 	"github.com/Diansalas/igaming-platform/internal/tenant"
 	"github.com/Diansalas/igaming-platform/internal/withdrawal"
@@ -67,6 +68,12 @@ const (
 	ResolutionM1DepositEvidence ResolutionKind = "m1_deposit_evidence"
 	ResolutionM2DeclarePaid     ResolutionKind = "m2_declare_paid"
 	ResolutionM2DeclareNotPaid  ResolutionKind = "m2_declare_not_paid"
+	// ResolutionM4EvidencePaid / ResolutionM4EvidenceNotPaid are the
+	// evidence-backed resolutions of an UNBOUND payout park (ADR 0111 section 4,
+	// PAY-PAYOUT-UNBOUND-RESOLVE-1; migration 0125). Capability:
+	// payment_force_resolve (D-9). See manual_resolution_m4.go.
+	ResolutionM4EvidencePaid    ResolutionKind = "m4_evidence_paid"
+	ResolutionM4EvidenceNotPaid ResolutionKind = "m4_evidence_not_paid"
 )
 
 // ResolutionState mirrors payment_manual_resolutions.state.
@@ -84,6 +91,8 @@ const (
 	resolutionRefusedPrecond    string          = "precondition_failed"
 	resolutionRefusedNoSource   string          = "no_statement_source"
 	resolutionRefusedNotAllowed string          = "reason_not_resolvable"
+	resolutionRefusedEvidence   string          = "evidence_changed"
+	resolutionRefusedUnsealed   string          = "evidence_unsealed"
 )
 
 // The closed code vocabularies (ADR 0101 3, 5.1; LF ruling 1). The database's
@@ -294,6 +303,13 @@ type ManualResolution struct {
 	CreatedAt                   time.Time
 	ClosedAt                    *time.Time
 	ContributingPolicyIDsAtSubm []uuid.UUID
+	// M4 only (migration 0125; NULL on every other kind). All DB-forced except
+	// EvidenceLineID, which must equal the database's deterministic line.
+	EvidenceLineID                *uuid.UUID
+	EvidenceReference             *string
+	EvidenceVerdict               *string
+	EvidenceImportIDs             []uuid.UUID
+	ProviderReferenceAtSubmission *string
 }
 
 const resolutionColumns = `id, tenant_id, attempt_id, operation, kind, target_state, finding_code, basis_code, context_code,
@@ -301,7 +317,7 @@ const resolutionColumns = `id, tenant_id, attempt_id, operation, kind, target_st
 	reserved_provider_tx_id, reason_code, attempt_state_at_submission, terminal_reason_at_submission,
 	ever_possibly_sent_at_submission, payload_hash, requested_by, requested_by_scope, requested_by_person_id,
 	tenant_status_at_submission, tenant_status_at_execution, required_at_submission, state, expires_at, executed_txid,
-	ledger_transaction_id, refusal_code, created_at, closed_at, contributing_policy_ids`
+	ledger_transaction_id, refusal_code, created_at, closed_at, contributing_policy_ids, ` + m4ResolutionColumns
 
 func scanResolution(row pgx.Row, r *ManualResolution) error {
 	var amount string
@@ -310,7 +326,8 @@ func scanResolution(row pgx.Row, r *ManualResolution) error {
 		&r.ProviderID, &r.ReservedProviderTxID, &r.ReasonCode, &r.AttemptStateAtSubmission, &r.TerminalReasonAtSubmission,
 		&r.EverPossiblySentAtSubmit, &r.PayloadHash, &r.RequestedBy, &r.RequestedByScope, &r.RequestedByPersonID,
 		&r.TenantStatusAtSubmission, &r.TenantStatusAtExecution, &r.RequiredAtSubmission, &r.State, &r.ExpiresAt, &r.ExecutedTxID,
-		&r.LedgerTransactionID, &r.RefusalCode, &r.CreatedAt, &r.ClosedAt, &r.ContributingPolicyIDsAtSubm); err != nil {
+		&r.LedgerTransactionID, &r.RefusalCode, &r.CreatedAt, &r.ClosedAt, &r.ContributingPolicyIDsAtSubm,
+		&r.EvidenceLineID, &r.EvidenceReference, &r.EvidenceVerdict, &r.EvidenceImportIDs, &r.ProviderReferenceAtSubmission); err != nil {
 		return err
 	}
 	n, ok := new(big.Int).SetString(amount, 10)
@@ -341,6 +358,10 @@ type ResolutionRequestInput struct {
 	ReasonCode      string
 	// Note is bounded free text kept on the audit row only.
 	Note string
+	// EvidenceLineID (M4 only) is the statement line the requester reviewed;
+	// the database recomputes the deterministic line and refuses a different one
+	// (force_resolve_evidence_mismatch).
+	EvidenceLineID uuid.UUID
 }
 
 func (in ResolutionRequestInput) validate() error {
@@ -361,7 +382,7 @@ func (in ResolutionRequestInput) validate() error {
 		if !findingCodes[in.FindingCode] {
 			return fmt.Errorf("%w: finding_code is not in the closed set", ErrResolutionInvalidInput)
 		}
-		if in.BasisCode != "" || in.ContextCode != "" {
+		if in.BasisCode != "" || in.ContextCode != "" || in.EvidenceLineID != uuid.Nil {
 			return fmt.Errorf("%w: M1 carries a finding only", ErrResolutionInvalidInput)
 		}
 	case ResolutionM2DeclarePaid, ResolutionM2DeclareNotPaid:
@@ -377,6 +398,11 @@ func (in ResolutionRequestInput) validate() error {
 		if in.EvidenceRefHash == "" {
 			return fmt.Errorf("%w: evidence_ref_hash is required for M2", ErrResolutionInvalidInput)
 		}
+		if in.EvidenceLineID != uuid.Nil {
+			return fmt.Errorf("%w: M2 carries no evidence line", ErrResolutionInvalidInput)
+		}
+	case ResolutionM4EvidencePaid, ResolutionM4EvidenceNotPaid:
+		return in.validateM4()
 	default:
 		return fmt.Errorf("%w: unknown kind", ErrResolutionInvalidInput)
 	}
@@ -429,6 +455,9 @@ type ManualResolutionService struct {
 	pool    *db.Pool
 	sources *StatementSourceRegistry
 	proofs  *actorproof.Issuer
+	// importKeys verifies the statement-import seals an M4 rests on (ADR 0111
+	// 4.3). nil refuses every M4 (force_resolve_evidence_unsealed).
+	importKeys *payoutinstrument.Keys
 }
 
 // WithProofIssuer sets the issuer this service signs actor proofs with (default:
@@ -507,24 +536,40 @@ func (s *ManualResolutionService) requestInTx(ctx context.Context, tx pgx.Tx, ca
 	if err := call.attachProof(ctx, tx, actorproof.OpResolutionRequest, actorproof.TargetNew, actorproof.Digest(
 		actorproof.S(call.TenantID.String()), actorproof.S(in.AttemptID.String()), actorproof.S(string(in.Kind)),
 		actorproof.SP(in.FindingCode), actorproof.SP(in.BasisCode), actorproof.SP(in.ContextCode),
-		actorproof.SP(in.EvidenceRefHash), actorproof.S(in.ReasonCode))); err != nil {
+		actorproof.SP(in.EvidenceRefHash), actorproof.S(in.ReasonCode), actorproof.SP(evidenceLineText(in.EvidenceLineID)))); err != nil {
 		return ManualResolution{}, err
 	}
+	// M4 (migration 0125, R-4): the amount and asset are NULL here - the guard
+	// refuses any client value and copies the attempt's - and the requested
+	// evidence line is supplied. M1/M2 keep the pre-0125 statement (so the
+	// service also runs against a pre-0125 schema).
 	var r ManualResolution
-	row := tx.QueryRow(ctx, `
+	insert := `
 		INSERT INTO payment_manual_resolutions
 			(tenant_id, attempt_id, operation, kind, finding_code, basis_code, context_code, evidence_ref_hash,
 			 amount, asset_code, brand_id, reason_code, attempt_state_at_submission, ever_possibly_sent_at_submission,
 			 payload_hash, requested_by, requested_by_scope, requested_by_person_id, tenant_status_at_submission,
 			 required_at_submission, contributing_policy_ids, expires_at)
 		VALUES ($1, $2, 'deposit', $3, $4, $5, $6, $7, 1, '-', $8, $9, '-', false, '-', $8, 'tenant', $8, '-', 1, '{}', now())
-		RETURNING `+resolutionColumns,
-		call.TenantID, in.AttemptID, string(in.Kind), nilIfEmpty(in.FindingCode), nilIfEmpty(in.BasisCode),
-		nilIfEmpty(in.ContextCode), nilIfEmpty(in.EvidenceRefHash), uuid.Nil, in.ReasonCode)
+		RETURNING ` + resolutionColumns
+	args := []any{call.TenantID, in.AttemptID, string(in.Kind), nilIfEmpty(in.FindingCode), nilIfEmpty(in.BasisCode),
+		nilIfEmpty(in.ContextCode), nilIfEmpty(in.EvidenceRefHash), uuid.Nil, in.ReasonCode}
+	if in.Kind.IsM4() {
+		insert = `
+		INSERT INTO payment_manual_resolutions
+			(tenant_id, attempt_id, operation, kind, finding_code, basis_code, context_code, evidence_ref_hash,
+			 amount, asset_code, brand_id, reason_code, attempt_state_at_submission, ever_possibly_sent_at_submission,
+			 payload_hash, requested_by, requested_by_scope, requested_by_person_id, tenant_status_at_submission,
+			 required_at_submission, contributing_policy_ids, expires_at, evidence_line_id)
+		VALUES ($1, $2, 'deposit', $3, $4, $5, $6, $7, NULL, NULL, $8, $9, '-', false, '-', $8, 'tenant', $8, '-', 1, '{}', now(), $10)
+		RETURNING ` + resolutionColumns
+		args = append(args, in.EvidenceLineID)
+	}
+	row := tx.QueryRow(ctx, insert, args...)
 	if err := scanResolution(row, &r); err != nil {
 		return ManualResolution{}, err
 	}
-	if in.Kind == ResolutionM2DeclareNotPaid || in.Kind == ResolutionM2DeclarePaid {
+	if in.Kind == ResolutionM2DeclareNotPaid || in.Kind == ResolutionM2DeclarePaid || in.Kind.IsM4() {
 		// LF O-4 + PAY-K3-STATEMENT-SOURCE-WIRING-1: BOTH M2 kinds are refused at
 		// submission unless a statement source is registered for THIS attempt's
 		// provider (decided from the process registry). Fail closed in shape: an
@@ -545,9 +590,17 @@ func (s *ManualResolutionService) requestInTx(ctx context.Context, tx pgx.Tx, ca
 			return ManualResolution{}, ErrResolutionNoStatementSource
 		}
 	}
-	if err := recordResolutionAudit(ctx, tx, call, "payment.manual_resolution_requested", r, nil, map[string]any{
-		"note": in.Note, "required_at_submission": r.RequiredAtSubmission,
-	}); err != nil {
+	extra := map[string]any{"note": in.Note, "required_at_submission": r.RequiredAtSubmission}
+	if r.Kind.IsM4() {
+		// ADR 0111 4.3: before this request can commit, every import the
+		// database's verdict read must carry a seal that verifies over its stored
+		// lines (the key never enters the database).
+		if err := s.verifyImportSeals(ctx, tx, r.TenantID, r.EvidenceImportIDs); err != nil {
+			return ManualResolution{}, err
+		}
+		extra["import_seals_verified"] = len(r.EvidenceImportIDs)
+	}
+	if err := recordResolutionAudit(ctx, tx, call, "payment.manual_resolution_requested", r, nil, extra); err != nil {
 		return ManualResolution{}, err
 	}
 	return r, nil
@@ -660,13 +713,22 @@ type resolutionExecStatus struct {
 	Contributing   []uuid.UUID
 	TenantStatus   *string
 	Enabled        bool
+	// PlatformFloorMet: ADR 0111 S-6 - an M4 needs at least one counted
+	// platform_acting approval (computed by the database; true for other kinds).
+	PlatformFloorMet bool
 }
 
 func readResolutionExecStatus(ctx context.Context, tx pgx.Tx, id uuid.UUID) (resolutionExecStatus, error) {
 	var st resolutionExecStatus
-	err := tx.QueryRow(ctx, `SELECT required, counted, counted_approval_ids, requester_valid, contributing_policy_ids, tenant_status, enabled
-		FROM payment_manual_resolution_execution_status($1)`, id).
-		Scan(&st.Required, &st.Counted, &st.CountedIDs, &st.RequesterValid, &st.Contributing, &st.TenantStatus, &st.Enabled)
+	// platform_floor_met is read through to_jsonb so the service also runs on a
+	// pre-0125 schema, where no M4 row can exist (the kind CHECK) and the floor
+	// is therefore vacuous; on 0125 the function never returns NULL.
+	var floor *bool
+	err := tx.QueryRow(ctx, `SELECT s.required, s.counted, s.counted_approval_ids, s.requester_valid, s.contributing_policy_ids, s.tenant_status, s.enabled,
+		       (to_jsonb(s) ->> 'platform_floor_met')::boolean
+		FROM payment_manual_resolution_execution_status($1) s`, id).
+		Scan(&st.Required, &st.Counted, &st.CountedIDs, &st.RequesterValid, &st.Contributing, &st.TenantStatus, &st.Enabled, &floor)
+	st.PlatformFloorMet = floor == nil || *floor
 	return st, err
 }
 
@@ -782,11 +844,12 @@ func (s *ManualResolutionService) decideInTx(ctx context.Context, tx pgx.Tx, cal
 		return ResolutionOutcome{}, err
 	}
 	out.Counted, out.Required = st.Counted, st.Required
-	if !st.RequesterValid || st.Counted < st.Required {
+	if !st.RequesterValid || st.Counted < st.Required || !st.PlatformFloorMet {
 		out.Resolution = res
 		return out, recordResolutionAudit(ctx, tx, call, "payment.manual_resolution_approved", res, nil, map[string]any{
 			"approval_id": approvalID.String(), "decision_reason_code": in.ReasonCode,
 			"counted": st.Counted, "required": st.Required, "requester_valid": st.RequesterValid,
+			"platform_floor_met": st.PlatformFloorMet,
 		})
 	}
 
@@ -804,11 +867,12 @@ func (s *ManualResolutionService) decideInTx(ctx context.Context, tx pgx.Tx, cal
 	if testHookResolutionAfterShareLocks != nil {
 		testHookResolutionAfterShareLocks(ctx, id)
 	}
-	if !st.RequesterValid || st.Counted < st.Required {
+	if !st.RequesterValid || st.Counted < st.Required || !st.PlatformFloorMet {
 		out.Resolution = res
 		return out, recordResolutionAudit(ctx, tx, call, "payment.manual_resolution_approved", res, nil, map[string]any{
 			"approval_id": approvalID.String(), "decision_reason_code": in.ReasonCode,
 			"counted": st.Counted, "required": st.Required, "requester_valid": st.RequesterValid,
+			"platform_floor_met": st.PlatformFloorMet,
 		})
 	}
 
@@ -831,6 +895,13 @@ func (s *ManualResolutionService) decideInTx(ctx context.Context, tx pgx.Tx, cal
 		refusal = "policy_disabled"
 	default:
 		refusal = s.executionRefusal(res, att, wr)
+	}
+	if refusal == "" && res.Kind.IsM4() {
+		// ADR 0111 4.5 steps 6-7 (S-2): re-evaluate the evidence FIRST, then
+		// verify the seals of exactly the imports it returned.
+		if refusal, err = s.m4EvidenceRefusal(ctx, tx, res); err != nil {
+			return ResolutionOutcome{}, err
+		}
 	}
 	if refusal != "" {
 		code := refusal
@@ -859,7 +930,27 @@ func (s *ManualResolutionService) decideInTx(ctx context.Context, tx pgx.Tx, cal
 		"attempt_state_before": string(att.State),
 	}
 	var ledgerTx *uuid.UUID
-	if res.Kind != ResolutionM1DepositEvidence {
+	if res.Kind.IsM4() {
+		// Step 9 (M4): NO attempt update (A-15: the attempt stays disputed);
+		// the withdrawal posting only, through the existing writers.
+		if testHookResolutionBeforePost != nil {
+			if err := testHookResolutionBeforePost(ctx, id); err != nil {
+				return ResolutionOutcome{}, err
+			}
+		}
+		var err error
+		if ledgerTx, err = postM4(ctx, tx, res, wr); err != nil {
+			return ResolutionOutcome{}, err
+		}
+		extra["withdrawal_request_id"] = wr.ID.String()
+		extra["withdrawal_state_before"] = string(wr.State)
+		wrAfter, err := withdrawal.GetByID(ctx, tx, wr.ID)
+		if err != nil {
+			return ResolutionOutcome{}, err
+		}
+		extra["withdrawal_state_after"] = string(wrAfter.State)
+		extra["attempt_state_after"] = string(att.State)
+	} else if res.Kind != ResolutionM1DepositEvidence {
 		// Step 9 (M2 only): the attempt UPDATE (operator evidence, admitted by
 		// payment_m2_admits), then Complete / Fail (L3/L4 inside ledger.Post).
 		target := AttemptSucceeded
@@ -926,6 +1017,9 @@ func (s *ManualResolutionService) executionRefusal(res ManualResolution, att Pay
 	// R-6: the factual basis the approvers saw must be the one that still holds.
 	if string(att.State) != res.AttemptStateAtSubmission || !equalOptString(att.TerminalReason, res.TerminalReasonAtSubmission) {
 		return resolutionRefusedAttempt
+	}
+	if res.Kind.IsM4() {
+		return s.m4ExecutionRefusal(res, att, wr)
 	}
 	if res.Kind == ResolutionM1DepositEvidence {
 		if att.Operation != AttemptOperationDeposit || att.State != AttemptDisputed {
@@ -1138,6 +1232,21 @@ func recordResolutionAudit(ctx context.Context, tx pgx.Tx, call ResolutionCall, 
 	if r.RefusalCode != nil {
 		md["refusal_code"] = *r.RefusalCode
 	}
+	if r.EvidenceLineID != nil {
+		md["evidence_line_id"] = r.EvidenceLineID.String()
+	}
+	if r.EvidenceReference != nil {
+		md["evidence_reference"] = *r.EvidenceReference
+	}
+	if r.EvidenceVerdict != nil {
+		md["evidence_verdict"] = *r.EvidenceVerdict
+	}
+	if r.EvidenceImportIDs != nil {
+		md["evidence_import_ids"] = resolutionUUIDStrings(r.EvidenceImportIDs)
+	}
+	if r.ProviderReferenceAtSubmission != nil {
+		md["provider_reference_at_submission"] = *r.ProviderReferenceAtSubmission
+	}
 	for k, v := range extra {
 		md[k] = v
 	}
@@ -1174,6 +1283,11 @@ const (
 	ResolutionErrRetryable     ResolutionErrClass = "retryable"
 	ResolutionErrSession       ResolutionErrClass = "session_invalid"
 	ResolutionErrOther         ResolutionErrClass = "other"
+	// ADR 0111 4.7: the M4 evidence classes.
+	ResolutionErrEvidenceInsufficient ResolutionErrClass = "evidence_insufficient"
+	ResolutionErrEvidenceMismatch     ResolutionErrClass = "evidence_mismatch"
+	ResolutionErrEvidenceOverflow     ResolutionErrClass = "evidence_overflow"
+	ResolutionErrEvidenceUnsealed     ResolutionErrClass = "evidence_unsealed"
 )
 
 // ResolutionSQLState returns err's SQLSTATE, or "".
@@ -1203,6 +1317,8 @@ func ClassifyResolutionError(err error) ResolutionErrClass {
 		return ResolutionErrInvalid
 	case errors.Is(err, ErrResolutionNoStatementSource):
 		return ResolutionErrPrecondition
+	case errors.Is(err, ErrResolutionEvidenceUnsealed):
+		return ResolutionErrEvidenceUnsealed
 	case errors.Is(err, withdrawal.ErrStateConflict), errors.Is(err, ErrAttemptStateConflict):
 		return ResolutionErrConflict
 	}
@@ -1210,6 +1326,16 @@ func ClassifyResolutionError(err error) ResolutionErrClass {
 	switch {
 	case code == "MR014":
 		return ResolutionErrDisabled
+	case code == "MR060":
+		// ADR 0111 4.3: the session cannot see the whole evidence scope (a
+		// tenant-staff session never can): an error, never a verdict.
+		return ResolutionErrForbidden
+	case code == "MR061":
+		return ResolutionErrEvidenceMismatch
+	case code == "MR062":
+		return ResolutionErrEvidenceInsufficient
+	case code == "MR063":
+		return ResolutionErrEvidenceOverflow
 	case code == "MR012":
 		return ResolutionErrNotResolvable
 	case code == "MR010", code == "MR040", code == "MR041", code == "MR050":
@@ -1243,6 +1369,11 @@ const (
 	TokenForceResolveConflict          = "force_resolve_conflict"
 	TokenForceResolveExpired           = "force_resolve_expired"
 	TokenForceResolveNotFound          = "force_resolve_not_found"
+	// ADR 0111 4.7 (M4).
+	TokenForceResolveEvidenceInsufficient = "force_resolve_evidence_insufficient"
+	TokenForceResolveEvidenceMismatch     = "force_resolve_evidence_mismatch"
+	TokenForceResolveEvidenceOverflow     = "force_resolve_evidence_overflow"
+	TokenForceResolveEvidenceUnsealed     = "force_resolve_evidence_unsealed"
 )
 
 // ResolutionToken returns the closed token for a class, or "" for a class that
@@ -1263,6 +1394,14 @@ func ResolutionToken(class ResolutionErrClass) string {
 		return TokenForceResolveExpired
 	case ResolutionErrNotFound:
 		return TokenForceResolveNotFound
+	case ResolutionErrEvidenceInsufficient:
+		return TokenForceResolveEvidenceInsufficient
+	case ResolutionErrEvidenceMismatch:
+		return TokenForceResolveEvidenceMismatch
+	case ResolutionErrEvidenceOverflow:
+		return TokenForceResolveEvidenceOverflow
+	case ResolutionErrEvidenceUnsealed:
+		return TokenForceResolveEvidenceUnsealed
 	}
 	return ""
 }
