@@ -697,6 +697,8 @@ func TestB13B_PhaseB_Refusals_MakeNoProviderCall(t *testing.T) {
 func TestB13B_PhaseB_SnapshotMustEqualWhatIsSent(t *testing.T) {
 	for _, tc := range []struct{ name, set string }{
 		{"amount differs", `UPDATE payment_attempts SET amount = 501 WHERE id = $1`},
+		{"payment method differs from the snapshot's rail", `UPDATE payment_attempts SET payment_method = 'card' WHERE id = $1`},
+		{"asset differs", `UPDATE payment_attempts SET asset_code = 'USD' WHERE id = $1`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			w := newB13bW(t, "g2")
