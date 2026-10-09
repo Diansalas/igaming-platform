@@ -121,6 +121,15 @@ func (s *ManualResolutionService) WithImportSealKeys(k *payoutinstrument.Keys) *
 }
 
 // verifyImportSeals verifies every import id, in tx's session (fail closed).
+//
+// Review amendment L-2/sec (ADR 0111 §17.7): the database cannot verify a
+// seal (the key never enters it; payout_m4_evidence only sees that a seal is
+// PRESENT), so EVERY M4 path must call this in Go before it commits: the
+// request (requestInTx, before the requested audit row) and the execution
+// (m4EvidenceRefusal, after the re-evaluation and before postM4). A new M4
+// path that skips it would accept a forged or stale import as positive
+// evidence. TestL2_EveryM4PathVerifiesImportSeals (static, go/ast) pins the
+// call sites and their order.
 func (s *ManualResolutionService) verifyImportSeals(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, ids []uuid.UUID) error {
 	if s == nil || s.importKeys == nil || len(ids) == 0 {
 		return ErrResolutionEvidenceUnsealed
