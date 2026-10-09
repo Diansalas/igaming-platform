@@ -929,12 +929,23 @@ func TestM4_Migration0125UpDownUp_WholeSchema(t *testing.T) {
 	}
 }
 
+// m4DownTo0125 rolls back every migration above 0125 (0126, B13-B; it holds no
+// data here) and then runs 0125's own down, which is the step that refuses.
+func m4DownTo0125(t *testing.T, m *m4World) error {
+	t.Helper()
+	if _, err := m.pool.MigrateDown(context.Background(), realMigrationsDir(t), 1); err != nil {
+		t.Fatalf("down 0126 (empty): %v", err)
+	}
+	_, err := m.pool.MigrateDown(context.Background(), migration0101Dir(t, m4MigrationVersion), 1)
+	return err
+}
+
 func TestM4_Migration0125DownRefusals(t *testing.T) {
 	t.Run("sealed_import", func(t *testing.T) {
 		m := newM4World(t)
 		p := m.park(570)
 		m.ingest(m4Imp{}, m.line(m4Ref(), p.fresh.MerchantReference, "succeeded", 570, time.Now()))
-		_, err := m.pool.MigrateDown(context.Background(), migration0101Dir(t, m4MigrationVersion), 1)
+		err := m4DownTo0125(t, m)
 		k3RequireCode(t, err, "MR099")
 	})
 	t.Run("m4_row", func(t *testing.T) {
@@ -942,7 +953,7 @@ func TestM4_Migration0125DownRefusals(t *testing.T) {
 		p, _, ev := m.paidPark(571)
 		_, err := m.request(m.acting, m.m4In(p.fresh.ID, ResolutionM4EvidencePaid, ev.LineID))
 		k3RequireNoErr(t, err, "request")
-		_, err = m.pool.MigrateDown(context.Background(), migration0101Dir(t, m4MigrationVersion), 1)
+		err = m4DownTo0125(t, m)
 		k3RequireCode(t, err, "MR099")
 	})
 }
