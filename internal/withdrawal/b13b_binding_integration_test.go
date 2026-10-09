@@ -7,6 +7,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -330,4 +331,53 @@ func TestB13B_DatabaseRefusesAnUnboundInsert(t *testing.T) {
 	if err == nil {
 		t.Fatal("an unbound INSERT must be refused by the database")
 	}
+}
+
+// Serialisation with a revocation in flight (ADR 0111 2.4): the request takes the instrument FOR SHARE, a
+// revocation/suspension takes it FOR UPDATE, so a request cannot bind an instrument whose block is uncommitted.
+// Deterministic: the suspension is held open; the request must WAIT, and once the suspension commits it is
+// refused. (Without the lock the request would bind the instrument immediately, ignoring the uncommitted block.)
+func TestB13B_Request_WaitsForARevocationInFlight_ThenIsRefused(t *testing.T) {
+	pool := testPool(t)
+	f := seedFixture(t, pool, 10_000)
+	locked := make(chan struct{})
+	release := make(chan struct{})
+	blockDone := make(chan error, 1)
+	go func() {
+		blockDone <- runTx(pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+			if _, err := pitest.Shared().Suspend(ctx, tx, payoutinstrument.BlockParams{TenantID: f.tenantID, InstrumentID: f.instrumentID,
+				Actor: payoutinstrument.Actor{Type: payoutinstrument.ActorStaff, ID: uuid.NewString()}, ReasonCode: "aml_review"}); err != nil {
+				return err
+			}
+			close(locked)
+			<-release
+			return nil
+		})
+	}()
+	<-locked
+	type result struct {
+		wr  WithdrawalRequest
+		err error
+	}
+	reqDone := make(chan result, 1)
+	go func() {
+		wr, err := req(t, pool, f, baseParams(f, "b13b-lockwait", 400))
+		reqDone <- result{wr, err}
+	}()
+	select {
+	case r := <-reqDone:
+		close(release)
+		<-blockDone
+		t.Fatalf("the request must WAIT for the in-flight suspension, but it finished: %+v %v", r.wr.ID, r.err)
+	case <-time.After(700 * time.Millisecond):
+	}
+	close(release)
+	if err := <-blockDone; err != nil {
+		t.Fatal(err)
+	}
+	r := <-reqDone
+	if !errors.Is(r.err, ErrPayoutInstrumentNotUsable) {
+		t.Fatalf("after the suspension committed the request must be refused, got %v", r.err)
+	}
+	nothingWritten(t, pool, f, 10_000, "request behind a revocation")
 }

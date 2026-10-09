@@ -925,6 +925,29 @@ func TestB13B_Echo_Sync_Mismatch_ParksEveryOutcome(t *testing.T) {
 	}
 }
 
+// Legacy (unbound) withdrawals have no destination to compare: an echo on their evidence is ignored and their
+// evidence applies exactly as before B13-B (the legacy path is unaffected, ADR 0111 A-11).
+func TestB13B_Echo_LegacyUnboundIsNotCompared(t *testing.T) {
+	w := newB13bW(t, "lg")
+	legacy := w.legacyApproved(500, "b13b-legacy-echo")
+	cl, err := w.claim(legacy, "bank_transfer")
+	if err != nil {
+		t.Fatalf("legacy claim: %v", err)
+	}
+	w.prov.set(WithdrawResult{Outcome: OutcomePending, ProviderReference: "ref-legacy-1",
+		DestinationEcho: &payoutinstrument.DestinationEcho{Fingerprint: strings.Repeat("cd", 32), Kid: "any"}}, StatusResult{})
+	gr := w.dispatch(cl)
+	if gr.Class != ErrorClassPending {
+		t.Fatalf("legacy dispatch: class=%s err=%v", gr.Class, gr.Err)
+	}
+	if err := w.apply(legacy, cl, gr); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if a := w.attempt(cl.Attempt.ID); a.State != AttemptPending {
+		t.Fatalf("a legacy attempt must not be parked by an echo it has nothing to compare with, got %s", a.State)
+	}
+}
+
 // A matching echo settles normally (the comparison is not a veto on every payout).
 func TestB13B_Echo_Sync_Match_Settles(t *testing.T) {
 	w := newB13bW(t, "l")
