@@ -1,0 +1,126 @@
+PAY-PAYOUT-UNBOUND-RESOLVE-1 - M4 evidence-backed four-eyes resolution, migration 0125 (ADR 0111 §4, §12-§14, §17)
+Mutation-kill evidence. Task: r19-resolve1 (branch gov-r19-resolve1, base 4a2155f). LOCAL evidence only: private
+scratch DB r19res1_priv built from the worktree's migrations (scratchpad priv_db.sh / priv_test.sh); every K3/M4
+world is its own scratch database migrated from the worktree's migrations dir by the test itself, so SQL mutants of
+migrations/0125_payout_unbound_resolution_m4.up.sql are exercised by a fresh migrate-up in every test. MOCK statement
+sources only; no real provider, no AWS.
+
+Code under test (commits da11c99, 5d17218, 8431346; tests 7c7b9d6, c629be8, 1c724e7 and the two later test commits):
+  migrations/0125_payout_unbound_resolution_m4.up.sql      (S..) scope, payout_m4_evidence, guard, recount, MR041, fences, policies
+  internal/payments/manual_resolution.go / _m4.go           (G..) request/execution, seal checks, floor
+  internal/reconciliation/payment_statement*.go             (R..) S-1 keys, R-1 predicates, R-2 attribution, hints, importer
+  internal/reconciliation/statement/import_seal.go, internal/payoutinstrument/startup.go   (P..) seal canon, startup gate
+
+Method: each mutant is applied IN PLACE to the committed source with a byte backup; for Go mutants
+`go vet -tags integration ./internal/payments/ ./internal/reconciliation/... ./internal/payoutinstrument/` must pass (a
+mutant that does not vet is COMPILE-ERROR and NOT counted); the suites below run with -tags integration -count=1 -p 1 -v;
+the file is restored from the backup and checked twice (byte compare AND `git diff --quiet HEAD -- <file>`):
+"restored_cmp=OK".
+  pay  : go test -run '^(TestM4|TestK3_C9c)' ./internal/payments/          (all M4 DB/service/recon tests)
+  recon: go test -run '^(TestR1_|TestR2_M4)' ./internal/reconciliation/   (pure R-1/R-2 matcher tests)
+  pi   : go test -run '^(TestImportSeal|TestStartupGate_NonMock)' ./internal/payoutinstrument/
+Script: scratchpad r19/mut.py (not committed).
+
+Run 1 (SQL mutants S01-S28; test suite at c629be8):
+CONTROL pay: rc=0 PASS=33 SKIP=0 FAIL=0
+CONTROL recon: rc=0 PASS=2 SKIP=0 FAIL=0
+CONTROL pi: rc=0 PASS=3 SKIP=0 FAIL=0
+S01 KILLED: scope: drop the NULL-reference condition (C-6) | restored_cmp=OK | pay: rc=1 PASS=31 SKIP=0 FAIL=2 --- FAIL: TestM4_Scope_DBAndGo; --- FAIL: TestM4_ScopeParity_GoAndDB
+S02 KILLED: scope: destination_mismatch admitted for PAID (M-10) | restored_cmp=OK | pay: rc=1 PASS=31 SKIP=0 FAIL=2 --- FAIL: TestM4_Scope_DBAndGo; --- FAIL: TestM4_ScopeParity_GoAndDB
+S03 KILLED: paid: drop the amount/asset equality (I-1) | restored_cmp=OK | pay: rc=1 PASS=32 SKIP=0 FAIL=1 --- FAIL: TestM4_Verdict_PaidConditions
+S04 KILLED: paid: drop the declined/reversed/pending contradiction | restored_cmp=OK | pay: rc=1 PASS=31 SKIP=0 FAIL=2 --- FAIL: TestM4_Verdict_PaidConditions; --- FAIL: TestM4_Verdict_MockIneligibleOnceRealExists
+S05 KILLED: S-4: the R lookups do not count against the 64-line bound | restored_cmp=OK | pay: rc=1 PASS=32 SKIP=0 FAIL=1 --- FAIL: TestM4_Verdict_OverflowAt65_IncludingR
+S06 SURVIVED: bound 64 -> 65 (platform-keyed read) | restored_cmp=OK | pay: rc=0 PASS=33 SKIP=0 FAIL=0 
+S07 KILLED: paid: an unsealed import may be positive evidence | restored_cmp=OK | pay: rc=1 PASS=32 SKIP=0 FAIL=1 --- FAIL: TestM4_Verdict_PaidConditions
+S08 KILLED: paid: drop the RC-3 MOCK eligibility rule | restored_cmp=OK | pay: rc=1 PASS=32 SKIP=0 FAIL=1 --- FAIL: TestM4_Verdict_MockIneligibleOnceRealExists
+S09 SURVIVED: paid: drop the tombstone exclusion | restored_cmp=OK | pay: rc=0 PASS=33 SKIP=0 FAIL=0 
+S10 KILLED: paid: drop the provider:R idempotency-key exclusion | restored_cmp=OK | pay: rc=1 PASS=32 SKIP=0 FAIL=1 --- FAIL: TestM4_Verdict_PaidConditions
+S11 KILLED: not-paid: drop coverage (i) end condition | restored_cmp=OK | pay: rc=1 PASS=31 SKIP=0 FAIL=2 --- FAIL: TestM4_Verdict_NotPaidConditions; --- FAIL: TestM4_SettlementWindowPinned
+S12 KILLED: not-paid: drop the source declaration (iv) | restored_cmp=OK | pay: rc=1 PASS=32 SKIP=0 FAIL=1 --- FAIL: TestM4_Verdict_NotPaidConditions
+S13 KILLED: not-paid: drop decline-after-send (ii) | restored_cmp=OK | pay: rc=1 PASS=32 SKIP=0 FAIL=1 --- FAIL: TestM4_Verdict_NotPaidConditions
+S14 KILLED: L-1: latest instead of earliest line | restored_cmp=OK | pay: rc=1 PASS=32 SKIP=0 FAIL=1 --- FAIL: TestM4_Verdict_DeterministicLine
+S15 KILLED: insert: drop the requested-line equality (MR061) | restored_cmp=OK | pay: rc=1 PASS=32 SKIP=0 FAIL=1 --- FAIL: TestM4_Request_ForcedColumns_And_EvidenceMismatch
+S16 KILLED: insert: a client amount/asset is silently overwritten (R-4) | restored_cmp=OK | pay: rc=1 PASS=32 SKIP=0 FAIL=1 --- FAIL: TestM4_Request_ForcedColumns_And_EvidenceMismatch
+S17 SURVIVED: -> executing: drop the DB evidence re-check (S-2) | restored_cmp=OK | pay: rc=0 PASS=33 SKIP=0 FAIL=0 
+S18 KILLED: S-6: the platform_acting floor not enforced in the DB recount | restored_cmp=OK | pay: rc=1 PASS=32 SKIP=0 FAIL=1 --- FAIL: TestM4_PlatformFloor_InTheDBRecount
+S19 SURVIVED: MR041: M4 link not checked at commit | restored_cmp=OK | pay: rc=0 PASS=33 SKIP=0 FAIL=0 
+S20 SURVIVED: fence (f): drop the correlation binding | restored_cmp=OK | pay: rc=0 PASS=33 SKIP=0 FAIL=0 
+S21 SURVIVED: fence (f): drop the provider_tx_id = R binding | restored_cmp=OK | pay: rc=0 PASS=33 SKIP=0 FAIL=0 
+S22 SURVIVED: fence (f): admit any key | restored_cmp=OK | pay: rc=0 PASS=33 SKIP=0 FAIL=0 
+S23 KILLED: acting withdrawal UPDATE policy without the M4 kinds | restored_cmp=OK | pay: rc=1 PASS=21 SKIP=0 FAIL=12 --- FAIL: TestM4_Paid_EndToEnd_MOCK; --- FAIL: TestM4_NotPaid_EndToEnd_MOCK; --- FAIL: TestM4_PlatformFloor_InTheDBRecount; --- FAIL: TestM4_PartialFailure_ThenRetry_ExactlyOnce
+S24 KILLED: tenant_system_read_executed not widened (recon cannot see M4) | restored_cmp=OK | pay: rc=1 PASS=28 SKIP=0 FAIL=5 --- FAIL: TestM4Recon_PaidCompletion_AttributedInLedgerJoin; --- FAIL: TestM4Recon_PaidContradicted_ByLineNamingOnlyR_BackDated; --- FAIL: TestM4Recon_PaidSecondDistinctSucceeded; --- FAIL: TestM4Recon_NotPaidThenSucceeded_RaisesWithPostM4Hint
+S25 KILLED: visibility: a tenant-staff session gets a verdict | restored_cmp=OK | pay: rc=1 PASS=32 SKIP=0 FAIL=1 --- FAIL: TestM4_Visibility_ErrorNeverVerdict
+S26 KILLED: S-5: a principal-shaped session may insert statement lines | restored_cmp=OK | pay: rc=1 PASS=32 SKIP=0 FAIL=1 --- FAIL: TestM4_Seals_UnsealedTamperedAndPrincipalInsert
+S27 KILLED: L-1: proof digest without evidence_line_id | restored_cmp=OK | pay: rc=1 PASS=13 SKIP=0 FAIL=20 --- FAIL: TestM4_Paid_EndToEnd_MOCK; --- FAIL: TestM4_NotPaid_EndToEnd_MOCK; --- FAIL: TestM4_PlatformFloor_InTheDBRecount; --- FAIL: TestM4_ActorProof_DigestCarriesEvidenceLine
+S28 SURVIVED: MR041: M4-paid key not checked | restored_cmp=OK | pay: rc=0 PASS=33 SKIP=0 FAIL=0 
+
+Run 2 (after 1c724e7 added TestM4_Fence_TransactionLevel_EachBinding and TestM4_MR041_ForgedLinkAndPlantedPosting; new mutants S06b/S17b/S29; Go payments mutants):
+CONTROL pay: rc=0 PASS=35 SKIP=0 FAIL=0
+CONTROL recon: rc=0 PASS=2 SKIP=0 FAIL=0
+CONTROL pi: rc=0 PASS=3 SKIP=0 FAIL=0
+S17 SURVIVED: -> executing: drop the DB evidence re-check (S-2) | restored_cmp=OK | pay: rc=0 PASS=35 SKIP=0 FAIL=0 
+S19 KILLED: MR041: M4 link not checked at commit | restored_cmp=OK | pay: rc=1 PASS=34 SKIP=0 FAIL=1 --- FAIL: TestM4_MR041_ForgedLinkAndPlantedPosting
+S20 KILLED: fence (f): drop the correlation binding | restored_cmp=OK | pay: rc=1 PASS=34 SKIP=0 FAIL=1 --- FAIL: TestM4_Fence_TransactionLevel_EachBinding
+S21 KILLED: fence (f): drop the provider_tx_id = R binding | restored_cmp=OK | pay: rc=1 PASS=34 SKIP=0 FAIL=1 --- FAIL: TestM4_Fence_TransactionLevel_EachBinding
+S22 KILLED: fence (f): admit any key | restored_cmp=OK | pay: rc=1 PASS=34 SKIP=0 FAIL=1 --- FAIL: TestM4_Fence_TransactionLevel_EachBinding
+S28 KILLED: MR041: M4-paid key not checked | restored_cmp=OK | pay: rc=1 PASS=34 SKIP=0 FAIL=1 --- FAIL: TestM4_MR041_ForgedLinkAndPlantedPosting
+S06b KILLED: both 64-line bounds -> 65 | restored_cmp=OK | pay: rc=1 PASS=34 SKIP=0 FAIL=1 --- FAIL: TestM4_Verdict_OverflowAt65_IncludingR
+S17b KILLED: -> executing: the DB evidence re-check never raises (S-2) | restored_cmp=OK | pay: rc=1 PASS=34 SKIP=0 FAIL=1 --- FAIL: TestM4_DBRecheck_AtExecuting_EvidenceChanged
+S29 SURVIVED: MR041: M4-not-paid key/type not checked | restored_cmp=OK | pay: rc=0 PASS=35 SKIP=0 FAIL=0 
+G01 KILLED: execution: seals not re-verified (S-2 step 7) | restored_cmp=OK | pay: rc=1 PASS=34 SKIP=0 FAIL=1 --- FAIL: TestM4_Execution_RefusedWhenSealNoLongerVerifies
+G02 KILLED: no keys -> accepted | restored_cmp=OK | pay: rc=1 PASS=34 SKIP=0 FAIL=1 --- FAIL: TestM4_Seals_UnsealedTamperedAndPrincipalInsert
+G03 KILLED: request: seals not verified before commit | restored_cmp=OK | pay: rc=1 PASS=34 SKIP=0 FAIL=1 --- FAIL: TestM4_Seals_UnsealedTamperedAndPrincipalInsert
+G04 KILLED: Go: the floor ignored at both counts | restored_cmp=OK | pay: rc=1 PASS=34 SKIP=0 FAIL=1 --- FAIL: TestM4_PlatformFloor_InTheDBRecount
+G05 SURVIVED: Go: R-3 pin not checked at execution | restored_cmp=OK | pay: rc=0 PASS=35 SKIP=0 FAIL=0 
+G06 COMPILE-ERROR (not counted): Go: the import set not compared at execution: vet: internal/payments/manual_resolution_m4.go:28:2: "slices" imported and not used
+
+Run 3 (after the not-paid planted-posting case was added; reconciliation, importer and seal mutants):
+CONTROL pay: rc=0 PASS=35 SKIP=0 FAIL=0
+CONTROL recon: rc=0 PASS=2 SKIP=0 FAIL=0
+CONTROL pi: rc=0 PASS=3 SKIP=0 FAIL=0
+S29 KILLED: MR041: M4-not-paid key/type not checked | restored_cmp=OK | pay: rc=1 PASS=34 SKIP=0 FAIL=1 --- FAIL: TestM4_MR041_ForgedLinkAndPlantedPosting
+G06 SURVIVED: Go: the import set not compared at execution | restored_cmp=OK | pay: rc=0 PASS=35 SKIP=0 FAIL=0 
+R01 KILLED: R-2: the M4 attribution removed | restored_cmp=OK | recon: rc=1 PASS=1 SKIP=0 FAIL=1 --- FAIL: TestR2_M4PaidCompletion_AttributionCases || pay: rc=1 PASS=34 SKIP=0 FAIL=1 --- FAIL: TestM4Recon_PaidCompletion_AttributedInLedgerJoin
+R02 KILLED: R-2: the withdrawal release link not required | restored_cmp=OK | recon: rc=1 PASS=1 SKIP=0 FAIL=1 --- FAIL: TestR2_M4PaidCompletion_AttributionCases || pay: rc=0 PASS=35 SKIP=0 FAIL=0 
+R03 KILLED: R-2: a not-paid M4 attributes too | restored_cmp=OK | recon: rc=1 PASS=1 SKIP=0 FAIL=1 --- FAIL: TestR2_M4PaidCompletion_AttributionCases || pay: rc=0 PASS=35 SKIP=0 FAIL=0 
+R04 KILLED: S-1: the M4 key additions dropped | restored_cmp=OK | pay: rc=1 PASS=33 SKIP=0 FAIL=2 --- FAIL: TestM4Recon_PaidContradicted_ByLineNamingOnlyR_BackDated; --- FAIL: TestM4Recon_DestinationMismatchNotPaid_LineOnBoundReferenceRaises
+R05 KILLED: R-1 paid: declined/reversed never raise | restored_cmp=OK | recon: rc=1 PASS=1 SKIP=0 FAIL=1 --- FAIL: TestR1_M4Predicates_Pure || pay: rc=1 PASS=34 SKIP=0 FAIL=1 --- FAIL: TestM4Recon_PaidContradicted_ByLineNamingOnlyR_BackDated
+R06 KILLED: R-1 paid: a second distinct succeeded line never raises | restored_cmp=OK | recon: rc=1 PASS=1 SKIP=0 FAIL=1 --- FAIL: TestR1_M4Predicates_Pure || pay: rc=1 PASS=34 SKIP=0 FAIL=1 --- FAIL: TestM4Recon_PaidSecondDistinctSucceeded
+R07 KILLED: R-1 not-paid: never raises | restored_cmp=OK | pay: rc=1 PASS=33 SKIP=0 FAIL=2 --- FAIL: TestM4Recon_NotPaidThenSucceeded_RaisesWithPostM4Hint; --- FAIL: TestM4Recon_DestinationMismatchNotPaid_LineOnBoundReferenceRaises
+R08 KILLED: post-M4-not-paid hint never used | restored_cmp=OK | pay: rc=1 PASS=34 SKIP=0 FAIL=1 --- FAIL: TestM4Recon_NotPaidThenSucceeded_RaisesWithPostM4Hint
+R09 KILLED: importer: declaration always false | restored_cmp=OK | pay: rc=1 PASS=29 SKIP=0 FAIL=6 --- FAIL: TestM4_NotPaid_EndToEnd_MOCK; --- FAIL: TestM4_Verdict_NotPaidConditions; --- FAIL: TestM4_MR041_ForgedLinkAndPlantedPosting; --- FAIL: TestM4Recon_NotPaidThenSucceeded_RaisesWithPostM4Hint
+R10 KILLED: importer: never seals | restored_cmp=OK | pay: rc=1 PASS=6 SKIP=0 FAIL=29 --- FAIL: TestM4_Paid_EndToEnd_MOCK; --- FAIL: TestM4_NotPaid_EndToEnd_MOCK; --- FAIL: TestM4_Verdict_PaidConditions; --- FAIL: TestM4_Verdict_MockIneligibleOnceRealExists
+P01 KILLED: lines digest omits amount | restored_cmp=OK | pi: rc=1 PASS=2 SKIP=0 FAIL=1 --- FAIL: TestImportSeal_RoundTrip_AndEveryFieldIsCovered || pay: rc=0 PASS=35 SKIP=0 FAIL=0 
+P02 KILLED: seal omits lines_digest | restored_cmp=OK | pi: rc=1 PASS=2 SKIP=0 FAIL=1 --- FAIL: TestImportSeal_RoundTrip_AndEveryFieldIsCovered || pay: rc=0 PASS=35 SKIP=0 FAIL=0 
+P03 KILLED: startup gate ignores non-MOCK statement sources | restored_cmp=OK | pi: rc=1 PASS=2 SKIP=0 FAIL=1 --- FAIL: TestStartupGate_NonMockStatementSourceRequiresKeys
+
+Run 4 (after TestM4_Execution_RefusedWhenOnlyTheImportSetChanges was added; every run-1..3 survivor re-run on the final tests):
+S06 SURVIVED: bound 64 -> 65 (platform-keyed read) | restored_cmp=OK | pay: rc=0 PASS=36 SKIP=0 FAIL=0 
+S09 SURVIVED: paid: drop the tombstone exclusion | restored_cmp=OK | pay: rc=0 PASS=36 SKIP=0 FAIL=0 
+S17 SURVIVED: -> executing: drop the DB evidence re-check (S-2) | restored_cmp=OK | pay: rc=0 PASS=36 SKIP=0 FAIL=0 
+G05 SURVIVED: Go: R-3 pin not checked at execution | restored_cmp=OK | pay: rc=0 PASS=36 SKIP=0 FAIL=0 
+G06 KILLED: Go: the import set not compared at execution | restored_cmp=OK | pay: rc=1 PASS=35 SKIP=0 FAIL=1 --- FAIL: TestM4_Execution_RefusedWhenOnlyTheImportSetChanges
+
+Run 5 (after f046675 kept the 0102 FOR ALL statement policy and narrowed only its WITH CHECK; S26 re-anchored on the new
+policy text and re-run; no other mutant's anchor or behaviour changed):
+S26 KILLED: S-5: a principal-shaped session may insert statement lines (lines WITH CHECK principal arm dropped) | restored_cmp=OK | pay: rc=1 PASS=35 SKIP=0 FAIL=1 --- FAIL: TestM4_Seals_UnsealedTamperedAndPrincipalInsert
+
+FINAL TALLY (latest run per mutant). Counted mutants: 50 (S01-S29 + S06b + S17b = 31 SQL; G01-G06 = 6; R01-R10 = 10;
+P01-P03 = 3). KILLED 46, SURVIVED 4 (all disclosed; none weakens a refusal observably):
+  - S06 SURVIVED (equivalent): the FIRST 64-line bound (platform-keyed lookups) raised to 65. The second bound counts the
+    full read set S, which contains every platform-keyed line, so a 65-line platform-keyed set still overflows there. The
+    first bound only stops the R collection query from scanning an unbounded set (a resource guard, not a verdict rule).
+    S06b (both bounds -> 65) is KILLED.
+  - S09 SURVIVED (equivalent): the explicit tombstone exclusion on R is subsumed by the next clause, "no ledger row with
+    (provider, provider_tx_id = R) of ANY type", which a tombstone on (provider, R) also satisfies. Both are kept because
+    ADR 0111 §4.4 lists both.
+  - S17 SURVIVED (partial mutant, superseded by S17b): it disabled only the verdict and line comparisons of the
+    `-> executing` re-check; the reference and import-set comparisons remain and catch every reachable change (imports
+    and lines are immutable, so changed evidence always changes the import set or the reference). S17b (the re-check
+    never raises) is KILLED by TestM4_DBRecheck_AtExecuting_EvidenceChanged.
+  - G05 SURVIVED (equivalent): Go's R-3 pin (provider_reference vs provider_reference_at_submission) at execution. For the
+    unbound reasons M4ResolvableDispute already requires a NULL reference (a reference appearing ends the resolution
+    refused, reason_not_resolvable); for destination_mismatch the reference was non-NULL at submission and is immutable
+    once set (payment_attempts_guard). The database re-checks R-3 at `-> executing` regardless.
+Not counted: G06 run 2 (COMPILE-ERROR: the first mutant text left an import unused; rewritten and KILLED in run 4).
+LOCAL evidence only.

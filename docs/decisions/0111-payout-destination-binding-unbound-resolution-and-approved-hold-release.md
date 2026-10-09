@@ -1356,3 +1356,155 @@ the answer is "yes" it is a one-line addition to the executor's preconditions pl
 - **Q-HSEC-3 (HN-6).** Is it acceptable that a tenant's stricter policy rows are ignored for this operation while the
   tenant or brand is non-active (a suspended tenant cannot raise the number of platform approvers)? Implemented: ignored,
   platform baseline only; pinned by `PolicyLookup_IgnoresTenantRowsWhenNonActive`.
+
+---
+
+## 17. RESOLVE-1 implementation notes (PAY-PAYOUT-UNBOUND-RESOLVE-1, migration 0125)
+
+Appended by the `ledger-finance` implementer (task r19-resolve1, branch `gov-r19-resolve1`, base `4a2155f`). The design
+above (§4, §12-§14) is **not** rewritten; this section records what 0125 and its Go code implement, every ambiguity
+chosen while implementing (safest reading each time), the pins flipped deliberately, and what remains open. Owner
+decisions 9-12 (ADR 0095 §44) are **not broadened or weakened**:
+
+| Decision | How 0125 holds it |
+|---|---|
+| 9. never automatic | Nothing in the sweeper, poll, receipt or reconciliation paths resolves an unbound park. The only writer is an **executed** four-eyes resolution, in the final approval's own transaction. |
+| 10. stays held until positively attributable | The park keeps its hold (attempt `disputed`, withdrawal `submitted`) until the database's deterministic verdict over **sealed** imports is `paid`/`not_paid` at request **and** again at `pending -> executing` (S-2), and Go re-verifies every seal. Any other verdict refuses with an audit row and changes nothing. |
+| 11. four-eyes, complete audit | K3 machinery: in-force `payment_force_resolve` grants, LF-11 distinct Persons, S-12, S-2(iii), the DB recount **plus the `platform_acting` approver floor in the recount (S-6)**, signed actor proofs (digest + `evidence_line_id`), and `payment.manual_resolution_*` audit rows carrying the verdict, line, R, import ids, pinned reference and seal count. |
+| 12. no release/settle without sufficient positive evidence | `withdrawal.Complete` (keyed `provider_id:R`) / `withdrawal.Fail` run only behind the executing-only fences (f)/(g), MR041 per kind at commit, R-4 amount/asset equality. The evidence standard itself is **D-7: still an open owner decision** (below). |
+
+### 17.1 Deliverable status
+
+| Item (orchestrator scope) | Status |
+|---|---|
+| 1. kinds `m4_evidence_paid` / `m4_evidence_not_paid` on `payment_manual_resolutions`, capability `payment_force_resolve` (D-9), evidence columns, M4 CHECKs, composite FK to statement lines | `IMPLEMENTED` against MOCK |
+| 2. `payout_m4_evidence(p_tenant, p_attempt)` (§4.4; 64-line bound incl. R lookups, S-4; L-1 deterministic line) | `IMPLEMENTED` against MOCK |
+| 3. sealed statement imports (ADR 0110 T10; S-5): HKDF subkey `b13-import-v1` of the B13 master, `canon("imp", ...)` incl. `lines_digest` (defined key-free in `internal/reconciliation/statement`, so reconciliation never imports the key module: R3 static pin), seal written in the INSERT, retired kids verify-only, startup gate extended to non-MOCK statement sources | `IMPLEMENTED` against MOCK. **The T10 launch flag stands**: security implementation review of the seal is pending and S-3 is `PROVIDER DEPENDENT` per real source |
+| 4. acting SELECT on `payment_statement_imports`, `payment_statement_lines`, `payment_attempt_reference_evidence`; 0102 INSERT arms narrowed to the system shape | `IMPLEMENTED` |
+| 5. `platform_acting` approver floor in the DB recount (`payment_manual_resolution_execution_status.platform_floor_met`) | `IMPLEMENTED` |
+| 6. S-1..S-6 and R-1..R-4 | `IMPLEMENTED` (S-3 only as far as code can: the declaration comes from the in-process source; the authenticated channel / PSP signature is `PROVIDER DEPENDENT`) |
+| 7. `tenant_system_read_executed` widened; `loadK3Evidence` loads executed M4 rows and adds their keys (S-1) | `IMPLEMENTED` |
+| 8. M4-paid completions attributed in `ledger_join` (R-2) | `IMPLEMENTED` |
+| 9. amount/asset DB-forced (R-4) | `IMPLEMENTED` |
+| 10. "NOT IMPLEMENTED" dropped from the M4-scope hint, now "MOCK only"; post-M4-not-paid hint added | `IMPLEMENTED` (the bound-park R-K3-8 hint keeps "NOT IMPLEMENTED": M4 does not cover it) |
+| 11. HSEC policy/trigger split preserved: the acting `withdrawal_requests` UPDATE policy only gains the M4 kinds in the K3 arm; the HSEC arm and `withdrawal_requests_governed_release_guard` are untouched | `IMPLEMENTED` |
+| HTTP: existing route accepts `evidence_line_id`, returns the evidence columns, the four §4.7 tokens | `IMPLEMENTED` |
+| §4.7 read route `GET .../payment-attempts/{id}/resolution-evidence` and the approver provenance view (§4.3) | `NOT IMPLEMENTED` (not in this scope; `payments.EvaluateM4Evidence` is the read primitive) |
+| §4.8 post-resolution signal cells (`success_after_m4_not_paid`, `contradiction_after_m4_paid`) | `NOT IMPLEMENTED` (not in this scope). Reconciliation raises the same contradictions every run (R-1); the real-time receipt/poll cells remain a follow-up |
+| Any non-MOCK statement source / non-MOCK M4 | `BLOCKED` (T10 flag, S-3 PROVIDER DEPENDENT, **D-7 open**) |
+
+### 17.2 Ambiguities and the reading taken (R19-n)
+
+- **R19-1 (who may evaluate the evidence).** §4.3: "raises an error, never a verdict, when the attempt row or any of its
+  statement scope is not visible to the session". The tenant-staff session cannot see the typed reference evidence
+  (0115 R-4), so `payout_m4_evidence` admits only a **valid acting session for the tenant or the system shape** and raises
+  `MR060` otherwise. Consequence: an M4 **request and its final approval** must be made by a `platform_acting` principal;
+  intermediate approvals may be tenant-scoped. This is stricter than A-14/D-1 (fail closed). Question **Q-R19-1** below.
+- **R19-2 (seal check ordering).** The INSERT runs first so the 0115 guard authorises before any evidence or
+  provider signal is computed (security F-2/F-3 ordering); the trigger recomputes the verdict and forces the evidence
+  columns; Go then verifies the seal and recomputes `lines_digest` of every forced import id **in the same
+  transaction, before it can commit**. Nothing uncommitted is visible to anyone else, so this is equivalent to "before
+  insert".
+- **R19-3 (legacy and unkeyed imports).** `import_seal` is nullable: pre-0125 imports, and imports of a process with no
+  B13 keys (dev/MOCK), stay readable by reconciliation (raising unchanged) but are **never** positive M4 evidence. A
+  sealed import must carry `imported_by_service` (CHECK). An unsealed import is written with the pre-0125 column list (no
+  declaration, no service), so the importer still runs on a pre-0125 schema.
+- **R19-3a (policy shape).** "Narrow the INSERT arms of `tenant_staff_scope`" is done by keeping the 0102 `FOR ALL`
+  policy, its name and its `USING`, and replacing only its `WITH CHECK` with the system shape. Splitting it into SELECT +
+  INSERT would have removed the row visibility that lets the append-only triggers refuse UPDATE/DELETE **loudly** (they
+  would become silent zero-row no-ops); `TestPaymentStatement_StoreIsAppendOnly` pins the loud refusal.
+- **R19-4 (verdict labels).** `contradictory` = conflicting statement content or attribution (second reference,
+  declined/reversed/pending, amount/asset, R held elsewhere, tombstone, ledger key, own Y != R); `insufficient` = missing
+  or ineligible evidence. Both refuse with `MR062` / `force_resolve_evidence_insufficient`.
+- **R19-5 (dedupe keys).** Paid: one group on (provider_reference, amount, asset_code, occurred_at) among succeeded
+  lines (status is fixed). R-1 "second distinct succeeded line": the same key, any import.
+- **R19-6 (R lookups).** By `provider_reference` of `kind = 'payout'` lines only (not `settlement_reference`, not deposit
+  lines). The bound reference is read whenever the attempt holds one (only `destination_mismatch` can, for M4).
+- **R19-7 (holders of R).** Another attempt holding R as `provider_reference` or typed Y: same provider (the reference
+  space); `withdrawal_requests.provider_reference = R` and the `provider_id:R` idempotency key: tenant-wide (stricter).
+- **R19-8 (not-paid recovery in reconciliation).** R-1 says the not-paid predicate raises on any succeeded line; it
+  stops raising once executed `compensating_entry` debits with causation = the `withdrawal_failed` transaction reach the
+  amount, exactly the M2 (d) rule and the hint text. LF to confirm (**Q-R19-2**).
+- **R19-9 (MR041 visibility).** The deferred check now **raises** when the resolution is not visible to the committing
+  session, for every kind (0124 C-1 parity; it previously returned silently).
+- **R19-10 (DB-forced columns).** On an M4 INSERT the client must supply `amount`, `asset_code`, `evidence_reference`,
+  `evidence_verdict`, `evidence_import_ids`, `provider_reference_at_submission` as NULL (else `MR010`); the guard copies or
+  computes them. `evidence_line_id` is the request's and must equal the deterministic line (`MR061`).
+- **R19-11 (payload hash).** M4 rows hash the 0115 canonical fields plus `evidence_line_id`, `evidence_reference`,
+  `evidence_verdict`, the import ids (ascending, comma-joined) and `provider_reference_at_submission`; M1/M2 hashes are
+  unchanged, so pending pre-0125 rows stay valid.
+- **R19-12 (the floor).** `platform_floor_met` counts only **counted** approvals made in a `platform_acting` session;
+  `true` for every non-M4 kind. Go treats a recount without the column (a pre-0125 schema, where no M4 can exist) as met;
+  the database enforces the floor regardless.
+- **R19-13 (schema tolerance).** Go reads the five new columns through `to_jsonb(row)` and the M1/M2 INSERT keeps its
+  pre-0125 column list, so the K3 service also runs against a pre-0125 schema (rolling deploys; the 0115-era harnesses).
+  Every M4 path needs 0125.
+- **R19-14 (not-paid window).** `interval '24 hours'` literal, pinned equal to `payments.DefaultSettlementWindow` by a
+  test. Because a fetched statement's coverage end cannot exceed fetch time + 5 min, a not-paid verdict is possible only
+  ≥ 24 h after the last send (tests ingest such coverage directly). Per-rail re-check stays the §10.4 note.
+- **R19-15 (source declaration).** `payout_lines_carry_merchant_reference` comes from an optional in-process interface on
+  the source value (`PayoutLinesCarryMerchantReference() bool`, absent = false); the MOCK source declares `true` (its
+  payout lines carry the merchant reference). `imported_by_service = 'reconciliation.payment_statement'`.
+- **R19-16 (reserved-prefix catalogue).** `provider_reference_at_submission` gets the reserved-prefix CHECK (the ADR 0101
+  5.4 catalogue pin requires it for every `*provider_reference*` column); `evidence_reference` carries the same rule.
+- **R19-17 (destination_mismatch).** No writer exists before B13-B; the scope, the bound-reference pin and the S-1 bound
+  reference key are tested by parking through the real T10 writer with that reason.
+- **R19-18 (MA020 consequence; security/LF to acknowledge).** The acting SELECT policies make the acting K2 session
+  see statement lines and typed Y. For MA020 (`player_open_payment_exposure`, 0119) that session is now
+  system-equivalent: it applies the full rule instead of the F-VIS fail-closed reading (the 0119 pin anticipated this:
+  "If a later policy change makes Y visible to K2 ... F-VIS must be revisited"). The tenant K2 session is unchanged.
+  This relaxes an artefact of invisibility in the acting session only, to the designed rule; it is flagged, not hidden
+  (**Q-R19-3**).
+
+### 17.3 Pins flipped deliberately
+
+- `b11M4ScopeHint` (payments) and `rsUnboundCU` (reconciliation): the M4-scope hint says "MOCK only", no longer "NOT
+  IMPLEMENTED".
+- `TestK3_T7_EvidenceTablePolicies`: the acting session now reads its tenant's typed reference evidence (still never
+  writes).
+- `TestMA020_K2_RLSVisibilityPin`, `..._ReversalLineClearsInTenantSessionOnly`, `..._NoFailOpenWhenYIsInvisible`: the acting
+  session's visibility and MA020 outcome (R19-18).
+- `k3SubmitDigest` (actor-proof K3 tests): the K3 INSERT digest gains the trailing `evidence_line_id` field (`~` for
+  M1/M2), SQL and Go in lockstep.
+- `TestHSEC_HoldRelease_Migration0124DownRefusals`: rolls back the (empty) 0125 first so the refusing step is 0124's.
+
+### 17.4 Open owner decision and questions (nothing here is decided by this change)
+
+- **D-7 (OPEN, owner).** The A-13 evidence standard (machine verdict over sealed imports + four-eyes portal confirmation
+  bound by `evidence_ref_hash`), widened by revision 4 to the T10 residuals (T6 in-process key, source
+  authenticity/completeness, availability), must be acknowledged by the owner **before any non-MOCK M4**. Until then M4
+  runs against MOCK statement sources only. No policy was invented here.
+- **Q-R19-1 (security/owner).** Accept that a tenant-scoped principal can never request or finally approve an M4 (R19-1),
+  or give the tenant-staff session a read of the typed reference evidence (a new read power; not done)?
+- **Q-R19-2 (LF).** Confirm the not-paid recovery clearing of R-1 (R19-8).
+- **Q-R19-3 (security + LF).** Acknowledge the MA020 acting-session consequence (R19-18).
+- Unchanged and still open: the §10.3 T10 flag, S-3 per real source, LOW-1/RM-4 runbook, P-2/RM-3, S-8 (freeze
+  `release_ledger_transaction_id`), the per-rail settlement window, the pending-before-succeeded PSP note.
+
+### 17.5 Residuals
+
+- Seal verification reads every line of each evidencing import (at most 64 imports); a very large real statement makes
+  M4 execution slow (MOCK imports are small). PROVIDER DEPENDENT; revisit with the first real source.
+- T5 (ADR 0110): a runtime session with arbitrary SQL can still write ordinary non-governed postings; the M4 fences stop
+  the governed shapes only, as for M2/HSEC. MR041 at commit refuses an executed M4 that links such a planted completion
+  (wrong key), pinned by `TestM4_MR041_ForgedLinkAndPlantedPosting`.
+- S-8 (still open): `withdrawal_requests.release_ledger_transaction_id` is not frozen; inside an acting executing
+  transaction it can be rewritten. For an executed M4 the commit-time MR041 link check refuses it (same test); the column
+  freeze remains the §10.4 S-8 follow-up.
+- The evidence function is `STABLE` under READ COMMITTED: Go's re-evaluation and the guard's re-run are separate
+  statements; an import committed between them makes the guard raise (`MR061`, the whole final-approval transaction
+  rolls back) rather than execute on stale evidence. A later contradicting line is raised by R-1 on every run.
+
+### 17.6 Evidence
+
+Tests (runtime-shaped non-superuser role, private scratch databases, `-race -tags integration -count=1 -p 1`):
+`internal/payments/m4_resolve1_*_integration_test.go` (`TestM4_*`, `TestM4Recon_*`), `internal/reconciliation/
+payment_statement_m4_test.go` (`TestR1_*`, `TestR2_M4*`), `internal/payoutinstrument/importseal_test.go`,
+`internal/httpserver/payment_force_resolution_m4_api_integration_test.go` (`TestForceResolutionAPI_M4_*`). Concurrency is
+exercised by in-test races repeated 3-4 times under `-race` (two final approvals; approval vs a contradicting import;
+approval vs sweeper and stale poll), not by `-count=50`. AP002/AP005 are the shared `actor_proof_require` behaviour already
+pinned by the K3 proof tests; M4 adds AP001/AP004 and the digest pin. Mutation-kill evidence:
+`docs/plans/prh2-hardening-round/prh2-r19-resolve1-mutation-kill.txt` (50 counted mutants over the migration, the
+service, reconciliation, the importer and the seal: 46 killed; 4 survivors disclosed as equivalent or partial - S06, S09,
+S17 (its full form S17b is killed), G05). LOCAL evidence only; no real provider, no AWS, no
+non-MOCK source.
