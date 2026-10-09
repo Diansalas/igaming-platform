@@ -14,7 +14,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/wallet"
 )
 
-// B13-B migration 0126 (placeholder number; ADR 0111 section 16). It replaces ONE function,
+// B13-B migration 0126 (placeholder number; ADR 0111 section 18). It replaces ONE function,
 // withdrawal_requests_payout_binding_guard(), so a NEW withdrawal without a binding is refused.
 const migration0126Version = 126
 

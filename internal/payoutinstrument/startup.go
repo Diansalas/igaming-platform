@@ -42,7 +42,7 @@ func (r Registrations) NonSyntheticRegistered() bool {
 // integration build tag, so outside both conditions the feature is simply
 // unavailable (keys == nil) rather than silently keyed.
 func VerifyStartup(guardEnvironment string, keys *Keys, regs Registrations) error {
-	// B13-B (ADR 0111 section 16): the former L-8 clause (refuse every non-Synthetic payout
+	// B13-B (ADR 0111 section 18): the former L-8 clause (refuse every non-Synthetic payout
 	// adapter until the binding lands) is REMOVED in the same change that wires the binding
 	// into the withdrawal and payments paths and closes the NULL arm (migration 0126). A
 	// non-Synthetic adapter now needs the keys below and the per-claim tiering predicate.

@@ -1,6 +1,6 @@
 package payments
 
-// B13-B (ADR 0111 section 16; ADR 0095 section 44 decisions 1-8): the payments side of the
+// B13-B (ADR 0111 section 18; ADR 0095 section 44 decisions 1-8): the payments side of the
 // payout destination binding.
 //
 //	T1p          ClaimForDispatch: destination gate (EvaluateGate + CheckTier on the routed

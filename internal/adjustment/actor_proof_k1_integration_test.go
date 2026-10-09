@@ -464,6 +464,8 @@ func TestActorProof_ProofTriggerIsLastBeforeRowTriggerOnEveryGovernedTable(t *te
 		"ledger_adjustment_requests", "ledger_adjustment_approvals", "payment_manual_resolutions", "payment_manual_resolution_approvals",
 		"staff_capability_grant_requests", "staff_capability_grant_approvals", "staff_capability_grants",
 		"financial_approval_policy_changes", "financial_approval_policy_change_approvals",
+		// HSEC-APPROVED-HOLD-RELEASE-1 (migration 0124): nine -> eleven governed tables.
+		"withdrawal_hold_resolutions", "withdrawal_hold_resolution_approvals",
 	}
 	for _, tbl := range tables {
 		var names []string

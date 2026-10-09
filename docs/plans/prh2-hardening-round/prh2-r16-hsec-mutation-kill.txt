@@ -1,0 +1,135 @@
+R16 HSEC-APPROVED-HOLD-RELEASE-1 (ADR 0111 section 6, migration 0124) - mutation-kill evidence
+(LOCAL, private scratch databases, runtime role). Baseline c5b30c7; branch gov-r16-hsec. 2026-10-08.
+Status of the feature: IMPLEMENTED against MOCK (no provider is involved, called or needed).
+
+Method. Each mutant is applied IN PLACE to ONE production file (original backed up first); for a Go mutant the touched
+package is compiled (`go vet -tags integration`; a mutant that does not compile is reported INVALID and NOT counted -
+there were none); then ONE targeted pattern runs with `go test -tags integration -count=1 -p 1 -run <pattern> <pkg>`
+against the private DB. KILLED = at least one test fails. The original is restored after every mutant and compared
+with `cmp` against the backup. SQL mutants are applied to the migration file migrations/0124_..._up.sql IN PLACE: every
+integration test builds its OWN scratch database by migrating that file, so a SQL mutant only ever reaches scratch
+databases (the private DB hsec_r16_probe is never mutated). Script: scratchpad hsec_mut/mut.py + mutants.py (not
+committed). Control: before the first mutant of each pattern the UNMUTATED tree runs the same pattern - every control
+PASSED (a failing control would have voided its mutants). The patterns are the test names listed per mutant.
+
+Round 1: 62 mutants (47 SQL S01-S47, 15 Go G01-G15), 0 compile errors, 0 invalid.
+SQL (migration 0124)
+S01 resolution guard: the platform_acting-only scope check at INSERT removed              [r1 SURVIVED -> r2 KILLED]
+S02 resolution guard: the in-force :request grant check at INSERT removed                 KILLED  FourEyesMatrix_Rest
+S03 resolution guard: "withdrawal is approved" precondition at INSERT removed             KILLED  HappyPath (second request on a released hold)
+S04 resolution guard: "no payment attempt" precondition at INSERT removed                 KILLED  AttemptExists_Refused
+S05 resolution guard: "tenant and brand both active -> refused" at INSERT removed (A-19)  KILLED  ActiveAtRequest_Refused
+S06 resolution guard: policy-disabled refusal (HR014) removed                              KILLED  InertWithoutPlatformPolicy
+S07 resolution guard: S-2(iii) author check on the requester removed                      KILLED  PolicyAuthorsCannotRequestOrApprove
+S08 resolution guard: 'requested_by' added to the mutable-column lists                     [r1 SURVIVED -> r3 KILLED]
+S09 resolution guard: payload_hash recomputation check removed                             SURVIVED (equivalent, see below)
+S10 -> executing: the DB recount (counted < required) removed                              KILLED  ExecutingTransition_DatabaseRechecks
+S11 -> executing: "withdrawal still approved" removed                                      KILLED  ExecutingTransition_DatabaseRechecks
+S12 -> executing: "no payment attempt" removed                                             KILLED  ExecutingTransition_DatabaseRechecks
+S13 -> executing: "tenant and brand active again -> refused" removed (A-19, DB side)       KILLED  ExecutingTransition_DatabaseRechecks
+S14 approvals guard: distinct-Person floor removed (requester may approve)                 KILLED  FourEyesMatrix (single actor)
+S15 approvals guard: "this Person already decided" removed                                 KILLED  FourEyesMatrix_Rest (same approver twice)
+S16 approvals guard: payload_hash binding removed                                          KILLED  FourEyesMatrix_Rest
+S17 approvals guard: in-force :approve grant check removed                                 KILLED  FourEyesMatrix_Rest
+S18 approvals guard: S-2(iii) author check on the approver removed                         KILLED  PolicyAuthorsCannotRequestOrApprove
+S19 beneficiary guard: Person equality (S-12) removed                                       KILLED  BeneficiaryExcluded
+S20 approvals_apply_reject: the reject no longer closes the resolution                     KILLED  FourEyesMatrix_Rest (reject)
+S21 deferred check: "exactly two entries" removed                                          KILLED  DeferredShapeCheck_CatchesFenceBypass (four entries)
+S22 deferred check: reversal of the hold transaction not required                          KILLED  DeferredShapeCheck_CatchesFenceBypass (no_reversal_link)
+S23 deferred check: provider ids must be NULL removed                                      KILLED  DeferredShapeCheck_CatchesFenceBypass (provider_ids_set)
+S24 CT-R3 key guard: transaction type must be withdrawal_rejected removed                  KILLED  CTR3 (fence lifted, wrong type)
+S25 CT-R3 key guard: correlation = withdrawal id removed                                   KILLED  CTR3 (fence lifted, wrong correlation)
+S26 CT-R3 key guard: "executing in this txid" removed (pending resolution admits the key)  KILLED  CTR3 (fence lifted, pending resolution)
+S27 withdrawal_requests guard: a governed link without an executing resolution allowed     KILLED  CTR3 (borrowed link, HR020)
+S28 withdrawal_requests guard: the executing branch no longer requires the governed link   KILLED  CTR3 (rejected with an unrelated link, strict HR030)
+S29 freeze trigger: the executing-resolution exemption removed                             KILLED  HappyPath (the governed path)
+S30 freeze trigger: the brand status ignored                                               KILLED  FreezeTrigger/brand_suspended
+S31 freeze trigger: the tenant status ignored                                              KILLED  FreezeTrigger/tenant_suspended, tenant_closed
+S32 freeze trigger: WHEN list loses 'failed'                                               KILLED  FreezeTrigger
+S33 fence_allows (e): correlation binding removed                                          [r1 SURVIVED -> r2 KILLED]
+S34 entries fence: cash leg no longer bound to the withdrawal's wallet                     KILLED  CTR3 (credit on another wallet's cash)
+S35 entries fence: hold leg no longer bound to the withdrawal's wallet                     KILLED  CTR3 (debit on another wallet's hold)
+S36 acting ledger_accounts INSERT: the hold-release hold-account branch disabled           KILLED  HappyPath
+S37 acting withdrawal_requests UPDATE: the hold-release branch disabled                    KILLED  HappyPath
+S38 brands acting_lock policy USING (false) (the H-SEC brand FOR SHARE finds no row)       KILLED  HappyPath
+S39 verifier operation table: the platform_acting-only restriction removed                 KILLED  VerifierOperationTable_ScopeRestricted
+S40 zz request digest: evidence_ref_hash dropped from the SQL digest                       KILLED  ActorProof_* (Go/SQL digest agree is pinned)
+S41 zz proof trigger: the early-expiry refusal removed (base guard lifted for one statement) KILLED Expired
+S42 resolution table: reason_code pattern CHECK removed                                    KILLED  ResolutionGuard (23514 matrix)
+S43 partial UNIQUE (one pending per withdrawal) removed                                    KILLED  ReplayAndDuplicateRequest
+S44 financial_policy_required_approvals: tenant/brand rows no longer ignored (non-active)  KILLED  PolicyLookup_IgnoresTenantRowsWhenNonActive
+S45 zz proof trigger: "cancel only by the requester" removed                               SURVIVED (equivalent, see below)
+S46 counting function: decided_by_scope = platform_acting filter removed                   SURVIVED (equivalent, see below)
+S47 partial UNIQUE (one executed per withdrawal) removed                                   SURVIVED (equivalent, see below)
+Go
+G01 withdrawal.ReleaseForGovernedResolution: key suffix :governed_hold_released -> :rejected KILLED HappyPath
+G02 service runSession: the tenant-caller refusal removed                                  KILLED  TenantStaffDeniedAtServiceAndDatabase
+G03 executor: "tenant and brand active again" re-check removed                             KILLED  ActiveAgainAtExecution_Refused
+G04 executor: "withdrawal still approved" re-check removed                                 KILLED  SubmitFirst_ThenReleaseRefused
+G05 executor: "no payment attempt" re-check removed                                        KILLED  AttemptExists_Refused
+G06 executor: approval proof bound to a wrong target                                       KILLED  HappyPath
+G07 executor: step-2 status read without the tenant advisory lock / brand FOR SHARE        [r1 killed only by a manual process kill (hang) -> r2 KILLED cleanly] Concurrency_ExecuteVsReactivation (tenant + brand)
+G08 executor: the executed audit row no longer written                                     KILLED  HappyPath
+G09 audit: the approvers of the counted approvals no longer recorded                       KILLED  HappyPath
+G10 classifier: HR014 no longer maps to "disabled"                                         KILLED  TestHSEC_HoldResolutionClassifier
+G11 input validation: reason-code pattern weakened                                         KILLED  TestHSEC_HoldResolutionInputValidation
+G12 request path: the L1 withdrawal lock replaced by a plain read                          SURVIVED (equivalent for observable behaviour, see below)
+G13 executor: the staff/grant FOR SHARE locks skipped                                      [r1 SURVIVED -> r3 KILLED] Concurrency_ExecuteVsGrantRevocation
+G14 actorproof.Claims.validate: the withdrawal_hold_resolution scope restriction removed   KILLED  TestActorProof_HoldResolution_ScopeRestriction
+G15 permission.go: finance additionally holds withdrawal_hold_resolution:request           KILLED  TestHSEC_HoldResolutionPermissions_* (platform_admin ONLY)
+
+Round-1 survivors that were REAL test gaps, fixed and re-run:
+- S01: the beneficiary guard (fires first) also refuses a non-acting scope, masking the resolution guard's own check.
+  Test strengthened: TenantStaffDenied lifts the beneficiary guard for one statement and requires HR001 from the resolution
+  guard itself.                                                                                         r2: S01 KILLED.
+- S08: a raw UPDATE of a payload column without a state change hit the "invalid transition pending -> pending" branch, so
+  the immutable-column list was never the deciding check. Test strengthened: the same column changes ALONGSIDE a legal
+  state change (state='cancelled', requested_by / evidence / reason changed) must be HR030.             r3: S08 KILLED.
+- S33: the acting entries fence repeats the correlation binding, so the wrong-correlation attack through ledger.Post was
+  refused either way. Test strengthened: a header-only raw INSERT into ledger_transactions (no entries) with a wrong
+  correlation, with each header layer lifted in turn (key guard alone -> HR020; acting fence alone -> CG030). r2: S33 KILLED.
+- G07 (hang): the failing assertion left the executor parked on the test hook, holding its connection, so the pool Close
+  hung until the 25 min timeout. The concurrency tests now release the hook on every exit path (sync.Once).  r2: G07 KILLED.
+- G13: no test raced a grant revocation against an execution. New hook testHookHoldResolutionAfterShareLocks and test
+  Concurrency_ExecuteVsGrantRevocation (the revocation must WAIT for the release to commit).               r3: G13 KILLED.
+
+Honest survivors (5: S09, S45, S46, S47, G12), each with the reason it cannot be killed by a behavioural test:
+- S09 payload_hash recomputation check: payload_hash is itself in the immutable-column comparison that runs first, so a
+  forged hash is refused as an immutable-column change; the recomputation is defence in depth.
+- S45 proof trigger "only the requester may cancel": the base resolution guard fires first and refuses a non-requester
+  cancel (HR030); the proof trigger repeats it.
+- S46 counting filter decided_by_scope = 'platform_acting': an approval row of any other scope cannot exist (column CHECK
+  + approvals guard + no tenant RLS policy); the filter is belt and braces.
+- S47 partial UNIQUE (one executed per withdrawal): a second execution is already impossible (the withdrawal leaves
+  `approved`, the L1 lock serialises, the state CAS and the governed-key idempotency); the index is the last line.
+- G12 request-time L1 lock via LockForPayoutEvidence: a plain read still blocks behind a concurrent FOR UPDATE because the
+  FK check of the child INSERT takes FOR KEY SHARE on the withdrawal row. The lock call fixes the LOCK ORDER (L1 before
+  the tenant advisory lock) which no test can observe without a deadlock-prone ordering harness. (Test
+  Request_TakesTheWithdrawalL1Lock pins the waiting behaviour; it passes with either implementation.)
+
+Totals: 62 mutants; 57 KILLED (52 on the first round, 5 after test strengthening: S01, S08, S33, G07, G13); 5 SURVIVED
+(equivalent / defence in depth, listed above); 0 compile errors.
+
+Restore check. After every mutant the file was compared with its backup (the harness asserts `filecmp`); after the whole
+sweep `git status --short` is empty and `cmp backup file` is identical for migrations/0124_withdrawal_hold_resolution.up.sql,
+internal/payments/withdrawal_hold_resolution.go, internal/withdrawal/withdrawal.go, internal/actorproof/actorproof.go and
+internal/auth/permission.go (each: identical).
+
+Round 4 (security review conditions C-1, C-2, F-4 and the widened freeze; 4 new mutants, 0 compile errors):
+S48 deferred check returns silently when the resolution row is not visible (C-1)           KILLED  DeferredCheck_RaisesWhenRowNotVisibleAtCommit
+S49 brands acting_lock WITH CHECK (false) -> (true) (C-2)                                   KILLED  ActingBrandsPolicyIsLockOnly
+S50 cancel/expire/reject no longer null the four execution-time columns (F-4)              KILLED  CancelAndExpire_NullExecutionColumns
+S51 freeze trigger WHEN narrowed back to rejected/cancelled/failed                          KILLED  FreezeTrigger (submitted/requested edges)
+Note: the reject branch of S50 is covered only through the same statement (reachable solely via the approvals trigger).
+Totals now: 66 mutants; 61 KILLED; 5 SURVIVED (unchanged, listed above). Files restored and cmp-identical.
+ADR 0111 section "HSEC implementation notes" was renumbered 12 -> 15.
+
+Round 5 (ledger-finance review C-1, C-3, C-4; against the REAL 0123 after merging main 0f2597e; 7 mutants, 0 compile errors):
+S47 partial UNIQUE (one executed per withdrawal) removed                                    KILLED  CatalogPin_OnePendingOneExecutedIndexes  [was a survivor in round 1]
+S52 HN-4 guard trigger WHEN clause restored (second UPDATE slips through)                  KILLED  ExecutingWindow_SecondUpdateAndRefusalRefused
+S53 CT-R3 key guard loses its tenant binding                                                KILLED  CTR3 (raw header for another tenant)
+S54 HR042 (refusing an executing resolution that already posted) removed                    KILLED  ExecutingWindow_SecondUpdateAndRefusalRefused
+S55 freeze trigger: unreadable tenant status treated as active                              KILLED  FreezeTrigger_UnreadableStatusFailsClosed
+S56 deferred check: cash leg no longer bound to the withdrawal's wallet                     KILLED  DeferredShapeCheck (credit_to_other_wallet_cash)
+S57 deferred check: leg amount no longer compared                                           KILLED  DeferredShapeCheck (wrong_amount_both_legs)
+Totals now: 73 mutants; 69 KILLED; 4 SURVIVED (S09, S45, S46, G12 - reasons above; S47 is now killed). Files restored, cmp-identical.

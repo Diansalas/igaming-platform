@@ -10,7 +10,7 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// B13-B helpers (ADR 0111 section 16): what the withdrawal and payments paths
+// B13-B helpers (ADR 0111 section 18): what the withdrawal and payments paths
 // need around EvaluateGate / CheckTier that is not part of the gate rule itself.
 
 // Closed reasons added by B13-B. All are integrity failures: a bound

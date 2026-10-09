@@ -240,7 +240,7 @@ func run() error {
 	// (TestMain_ConstructsNoProviderComponentOutsideRegistrations).
 	orchestrator := payments.NewOrchestrator(providers.paymentsAdapters(), providers.paymentsOrchestratorResolver())
 	orchestrator.SetWebhookLogger(logger) // W2A-SEC-2 matched-key_id line
-	// B13-B (ADR 0111 section 16): the payout destination service every payout path (T1p, T2/T12,
+	// B13-B (ADR 0111 section 18): the payout destination service every payout path (T1p, T2/T12,
 	// phase B/C, poll, callback) uses. Nil (no keys) refuses every bound payout: fail closed.
 	orchestrator.WithPayoutDestinations(payoutInstruments)
 

@@ -2,7 +2,7 @@
 
 package payments
 
-// B13-B (ADR 0111 section 16; ADR 0095 section 44 decisions 1-8): the payments side of the payout
+// B13-B (ADR 0111 section 18; ADR 0095 section 44 decisions 1-8): the payments side of the payout
 // destination binding, driven through the real T1p / phase B / phase C / T2 / T12 / poll / callback paths
 // against MOCK providers (every provider here is MOCK or a test double; nothing is a statement about a real
 // PSP). Each test has its own scratch database. Money invariants are asserted after every path that could

@@ -1,4 +1,4 @@
--- B13-B (ADR 0111 section 16; ADR 0095 section 44 decisions 1-8): closes the
+-- B13-B (ADR 0111 section 18; ADR 0095 section 44 decisions 1-8): closes the
 -- transitional NULL/NULL arm that 0123 tolerated (ADR 0111 15.2 B13A-2). The
 -- guard function is REPLACED (CREATE OR REPLACE; the trigger from 0123 stays) so
 -- an INSERT into withdrawal_requests without a payout instrument binding is refused
@@ -17,7 +17,7 @@ DECLARE
     v_i payout_instruments%ROWTYPE;
     v_ver payout_instrument_verifications%ROWTYPE;
 BEGIN
-    -- B13-B (ADR 0111 section 16): a NEW withdrawal ALWAYS carries a verified payout
+    -- B13-B (ADR 0111 section 18): a NEW withdrawal ALWAYS carries a verified payout
     -- instrument binding, in MOCK as well (owner decision 8: MOCK flexibility is the
     -- verification SOURCE only). Only NULL/NULL is refused here; a HALF binding is
     -- still refused by the both-or-neither CHECK (23514), as in 0123. Rows that

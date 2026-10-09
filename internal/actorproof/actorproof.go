@@ -66,6 +66,13 @@ const (
 	OpResolutionReject   = "payment_force_resolve:reject"
 	OpResolutionCancel   = "payment_force_resolve:cancel"
 
+	// HSEC-APPROVED-HOLD-RELEASE-1 (ADR 0111 6.3, migration 0124): provable ONLY for
+	// scope platform_acting with a tenant (the verifier refuses every other scope).
+	OpHoldResolutionRequest = "withdrawal_hold_resolution:request"
+	OpHoldResolutionApprove = "withdrawal_hold_resolution:approve"
+	OpHoldResolutionReject  = "withdrawal_hold_resolution:reject"
+	OpHoldResolutionCancel  = "withdrawal_hold_resolution:cancel"
+
 	// K1 capability grants and financial policy changes (scope tenant or platform).
 	OpGrantRequest  = "capability_grant:request"
 	OpGrantApprove  = "capability_grant:approve"
@@ -129,6 +136,8 @@ func (c Claims) validate() error {
 		return fmt.Errorf("%w: platform scope needs a nil tenant and a K1/policy operation", ErrInvalidClaims)
 	case c.Scope != ScopePlatform && c.Tenant == uuid.Nil:
 		return fmt.Errorf("%w: nil tenant", ErrInvalidClaims)
+	case strings.HasPrefix(c.Operation, "withdrawal_hold_resolution:") && c.Scope != ScopePlatformActing:
+		return fmt.Errorf("%w: withdrawal_hold_resolution operations are provable for the platform_acting scope only", ErrInvalidClaims)
 	case !opRE.MatchString(c.Operation):
 		return fmt.Errorf("%w: operation", ErrInvalidClaims)
 	case !targetRE.MatchString(c.Target):

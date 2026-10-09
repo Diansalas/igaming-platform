@@ -26,7 +26,7 @@ non-Synthetic payout adapter or instrument verifier is registered, in any enviro
 (and without either trigger) the payout instrument routes answer 503. There is no random-key fallback in
 the binary.
 
-**B13-B behaviour change (ADR 0111 section 16): development and MOCK deployments now need the keys too.**
+**B13-B behaviour change (ADR 0111 section 18): development and MOCK deployments now need the keys too.**
 Binding a payout instrument is mandatory for every NEW withdrawal request, MOCK included (owner decision 8:
 only the verification SOURCE is flexible in MOCK). Without the key families `POST /v1/me/withdrawals` answers 503
 and writes nothing. Generate throw-away keys for a local environment exactly as for production (a fresh 32-byte

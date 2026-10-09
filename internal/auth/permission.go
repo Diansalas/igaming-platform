@@ -689,6 +689,18 @@ const (
 	PermPaymentForceResolveRead    Permission = "payment_force_resolve:read"
 )
 
+// Withdrawal hold-resolution permissions (HSEC-APPROVED-HOLD-RELEASE-1, ADR 0111
+// 6.3 / security H-4). The STATIC half only: held by RolePlatformAdmin ONLY - no
+// tenant role (including tenant_admin, finance, compliance) holds any of them, and
+// no platform finance role exists. The authority is the in-force
+// withdrawal_hold_resolution:request / :approve platform grant plus a G-P2 acting
+// session for the target tenant, both re-checked by migration 0124's triggers.
+const (
+	PermWithdrawalHoldResolutionRequest Permission = "withdrawal_hold_resolution:request"
+	PermWithdrawalHoldResolutionApprove Permission = "withdrawal_hold_resolution:approve"
+	PermWithdrawalHoldResolutionRead    Permission = "withdrawal_hold_resolution:read"
+)
+
 // rolePermissions is a static, in-code role -> permission-set mapping.
 // Stage 2 does not make this database-driven/partner-configurable - that
 // would be a Stage 6 partner-console feature (custom roles), premature
@@ -775,6 +787,8 @@ var rolePermissions = map[Role]map[Permission]bool{
 		PermLedgerAdjustmentInitiate, PermLedgerAdjustmentApprove, PermLedgerAdjustmentRead,
 		// PRH-2 K3 (ADR 0101 24.9): the static half only, as above.
 		PermPaymentForceResolveRequest, PermPaymentForceResolveApprove, PermPaymentForceResolveRead,
+		// HSEC-APPROVED-HOLD-RELEASE-1 (ADR 0111 6.3): platform_admin ONLY.
+		PermWithdrawalHoldResolutionRequest, PermWithdrawalHoldResolutionApprove, PermWithdrawalHoldResolutionRead,
 	),
 	// Stage 3D business decision #4/#5: tenant_admin (a broad
 	// administrative role that also holds PermStaffManage) deliberately

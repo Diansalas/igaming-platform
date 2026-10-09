@@ -17,7 +17,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/payoutinstrument/pitest"
 )
 
-// B13-B (ADR 0111 section 16, owner decisions 2 and 4): the binding happens at RequestWithdrawal, in the
+// B13-B (ADR 0111 section 18, owner decisions 2 and 4): the binding happens at RequestWithdrawal, in the
 // transaction of the hold. Every refusal leaves NOTHING behind (no row, no hold, no decision row) and
 // does not consume the idempotency key. Ledger invariants asserted throughout: SUM(D) = SUM(C).
 

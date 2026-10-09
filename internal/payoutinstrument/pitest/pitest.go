@@ -1,7 +1,7 @@
 //go:build integration
 
 // Package pitest is the shared B13 test support for packages whose fixtures create withdrawals
-// (B13-B, ADR 0111 section 16). Since migration 0126 a withdrawal row can no longer be inserted
+// (B13-B, ADR 0111 section 18). Since migration 0126 a withdrawal row can no longer be inserted
 // without a verified payout instrument binding, in MOCK as well (owner decision 8), so every
 // fixture binds a MOCK (synthetic_test, verified by the MOCK verifier) instrument.
 //

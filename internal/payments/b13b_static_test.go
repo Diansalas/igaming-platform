@@ -1,6 +1,6 @@
 package payments
 
-// B13-B static guards (ADR 0111 section 16). Lexical (go/ast), no database. Each guard has a negative
+// B13-B static guards (ADR 0111 section 18). Lexical (go/ast), no database. Each guard has a negative
 // control proving it is not vacuous.
 
 import (

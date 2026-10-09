@@ -1228,16 +1228,145 @@ Recorded, not changed:
 **B13-B conditions (added):** call `EvaluateGate` and `CheckTier` inside `ClaimForDispatch`, before the provider call and before any
 retry, resend or callback/poll that settles the attempt; and remove the L-8 startup clause in `VerifyStartup` in the SAME change that
 closes the NULL arm (the guard-replacing migration).
+---
 
-## 16. B13-B implementation notes (appendix, added with the B13-B code; the design above is not rewritten)
+## 16. HSEC implementation notes (HSEC-APPROVED-HOLD-RELEASE-1, migration 0124)
+
+Appended by the `payments` implementer. The design above is **not** rewritten; this section records each
+ambiguity chosen while implementing §6 (safest reading in every case), the objects the implementation touches
+beyond the §6 list, and what the next migration (0125) must build on. Owner decisions (ADR 0095 §44, 13-18) are
+unchanged: no automatic release, the hold remains, a controlled staff path exists, four-eyes for
+resolution/release/cancel, no unilateral single-staff action, kill-switch semantics intact. Status:
+`IMPLEMENTED` against the MOCK stack (migration `0124_withdrawal_hold_resolution`, `internal/payments/
+withdrawal_hold_resolution.go`, `withdrawal.ReleaseForGovernedResolution`, routes under
+`/v1/admin/tenants/{tenantID}/withdrawal-hold-resolutions`); no real provider is involved or called.
+
+**Security conditions applied after review (C-1..C-3, F-4).**
+
+- **C-1.** The deferred shape check (HR041) now RAISES when the resolution row is not visible to the committing session
+  (it previously returned silently); pinned by `TestHSEC_HoldRelease_DeferredCheck_RaisesWhenRowNotVisibleAtCommit`.
+- **C-2.** `acting_lock` on `brands` is lock-only: an acting `UPDATE brands` is refused by its `WITH CHECK (false)`
+  (42501), pinned by `TestHSEC_HoldRelease_ActingBrandsPolicyIsLockOnly` and mutant S49.
+- **C-3 (wording).** The approved-hold freeze covers **any state change out of `approved`** (widened trigger `WHEN`:
+  `OLD.state = 'approved' AND NEW.state IS DISTINCT FROM OLD.state`), not only the three direct transitions to
+  rejected/cancelled/failed; the single exemption is `approved -> rejected` of an executing hold resolution of this
+  transaction. The deferred two-leg check and the freeze both read tenant, brand and resolution rows **under the
+  committing session's settings** (RLS and the acting GUCs): a session that can see neither fails closed (HR041 / HR050),
+  but the checks are not independent of session state. **Stated residual (ADR 0110 T5):** a runtime session with
+  arbitrary SQL can still write ordinary, non-governed postings and a forged ordinary posting is bounded only by ledger
+  invariants and reconciliation; these triggers stop the governed key and the frozen state edges, nothing more.
+- **F-4.** Cancel, expire and reject null `tenant_status_at_execution`, `brand_status_at_execution`,
+  `required_at_execution` and `contributing_policy_ids_at_execution` (tests for cancel and expire; the reject branch is
+  the same statement and is reachable only through the approvals trigger).
+
+**What 0125 must build on (replace-in-place objects).** The four shared objects of §7.2, in 0124's bodies, each
+equal to the 0115 text plus exactly the marked HSEC addition: `ledger_governed_fence_allows` (+ branch (e)),
+`ledger_entries_governed_fence` (+ the `withdrawal_rejected` shape, variable `v_h`), the acting `ledger_accounts`
+`acting_insert` policy (+ the hold account of an executing hold resolution) and the acting `withdrawal_requests`
+`acting_update` policy (+ "state = rejected and an executing hold resolution of this txid"). 0125's down must
+restore these 0124 bodies, not the 0115 ones. Two further objects are also replaced in place by 0124 and a later
+migration that replaces them must start from 0124's text: `financial_policy_required_approvals` (0113 body + 4
+lines) and `actor_proof_require` (0120 body + the operation-table check). Their down files restore the 0113 / 0120
+text byte for byte (whole-schema snapshot test).
+
+**Chosen ambiguities.**
+
+- **HN-1 (`payout_instrument_id`).** 0123 (B13) is a different agent's migration, so 0124 must not reference its
+  column. `withdrawal_hold_resolutions.payout_instrument_id` is a plain nullable UUID (no FK) forced in the insert
+  guard from `NULLIF(to_jsonb(withdrawal_requests) ->> 'payout_instrument_id', '')::uuid`, which is NULL until the
+  column exists. It is a record only and is not part of `payload_hash`.
+- **HN-2 (approval vs precondition re-check).** The approvals guard does not refuse an approval because the
+  preconditions changed; otherwise the final approval after a reactivation could not end `refused_at_execution`
+  (that transition is only legal in the final approval's own transaction). The preconditions are re-checked by the
+  Go executor (`refused_at_execution`, closed codes `withdrawal_not_approved`, `attempt_exists`,
+  `tenant_brand_active_again`, `policy_disabled`) and again by the database at `pending -> executing` (HR010).
+  Non-final approvals record `preconditions_hold` in their audit row.
+- **HN-3 (freeze exemption).** The all-sessions freeze trigger exempts only `approved -> rejected` of an executing
+  hold resolution of this txid (not `cancelled`/`failed`), and an unreadable tenant or brand status counts as
+  non-active (fail closed). The H-SEC gate runs before `DenyForCompliance`, so the normal KYC denial is unaffected;
+  pinned by tests (gate first; active tenant still denies; non-active direct `DenyForCompliance` is HR050).
+- **HN-4 (executing-window discipline; corrected after ledger-finance C-1).** Beyond §6.4, while a hold resolution is
+  `executing` for a withdrawal the only admitted `withdrawal_requests` change in any session is `approved -> rejected`
+  with the governed release link and no other column touched. The first revision claimed this but the guard trigger
+  carried a `WHEN` clause (state or release link changed), so a second UPDATE of another column (for example
+  `provider_id`) inside the executing transaction slipped through. The guard now fires on **every** update (no `WHEN`),
+  and the executing branch requires `OLD.state = 'approved'`, so any later UPDATE finds `rejected` and is refused
+  (HR030). The acting UPDATE policy `WITH CHECK` still only requires `state = 'rejected'` and an executing resolution;
+  the trigger is the control that pins the rest (RESOLVE-1 must keep that division when it copies the policy body).
+  Pinned by `TestHSEC_HoldRelease_ExecutingWindow_SecondUpdateAndRefusalRefused` and mutant S52.
+- **HN-5 (brand lock inside an acting session).** The H-SEC discipline takes `brands ... FOR SHARE`; the existing
+  brand policies are tenant-GUC only, so an acting session would see no row. 0124 adds one lock-only policy
+  `acting_lock ON brands FOR UPDATE USING (acting tenant, valid session) WITH CHECK (false)`. This object is not on
+  the §6 list; it grants no write.
+- **HN-6 (policy extension).** `financial_policy_required_approvals` ignores tenant- and brand-level rows for
+  `withdrawal_hold_resolution` when the tenant **or** the brand is not active (the K2-1 rule extended), so tenant
+  rows can never lower or steer the platform baseline of an operation platform staff perform on a suspended
+  tenant. No platform policy row => disabled (HR014), exactly as K3.
+- **HN-7 (required count).** `required = GREATEST(required_at_submission, policy.required)`, counting approvals of
+  distinct Persons **other than the requester**; a baseline of 1 therefore means requester + one distinct approver
+  (the four-eyes floor); the requester can neither approve nor reject their own request (use cancel). The
+  beneficiary (the withdrawing player's Person) is excluded at request and approval (S-12).
+- **HN-8 (tenant actors).** Both new tables carry only acting-family (A) policies. The guards additionally refuse
+  any non-`platform_acting` session (HR001) and the Go service refuses a tenant-scoped caller before any database
+  work; `eligible_tenant_roles = '{}'` makes a tenant-role grant impossible. Static permissions are
+  `RolePlatformAdmin` only (tenant roles denied, tested by a scan of all declared roles).
+- **HN-9 (uniqueness).** One `pending` and one `executed` resolution per withdrawal (partial UNIQUEs); a new request
+  after `cancelled`/`expired`/`rejected`/`refused_at_execution` is allowed.
+- **HN-10 (proofs).** Operations `withdrawal_hold_resolution:request|cancel|approve|reject`; the verifier and the Go
+  signer both refuse every scope but `platform_acting` (with a tenant) for them. A fresh proof is issued per
+  attempt (request: target `new`, digest of tenant, withdrawal, kind, evidence hash, reason; approve/reject:
+  resolution id + payload hash; cancel: resolution id + payload hash). `pending -> expired` carries no proof and is
+  refused before `expires_at` by both the base guard and, independently, the proof trigger.
+- **HN-11 (ledger key guard).** The CT-R3 trigger is right-anchored (`right(idempotency_key, 23) =
+  ':governed_hold_released'`) and, besides key and correlation, requires type `withdrawal_rejected`, the same
+  tenant and an executing resolution of this txid. Resolution rows are visible only to an acting session, so every
+  other session fails closed. The deferred shape check (HR041) additionally checks the reversal of the hold
+  transaction, no provider ids, exactly two entries, one per direction, wallet, amount and asset.
+- **HN-12 (SQLSTATE class).** A new class `HR` (hold resolution) is used (HR001 ... HR099); callers classify by code
+  only. Closed HTTP tokens: `hold_resolution_{disabled,not_permitted,precondition_failed,conflict,expired,
+  not_found}`; every refusal writes `withdrawal.hold_resolution_denied`.
+- **HN-13 (audit).** One `withdrawal.hold_resolution_<requested|approved|rejected|cancelled|expired|refused|
+  executed>` row per event (actor, requester, approvers of the counted approvals, withdrawal, reason code, evidence
+  hash, statuses, resulting state, ledger transaction) plus `withdrawal.hold_released_governed` from the money
+  movement. The evidence **hash** is recorded, never a reference.
+- **HN-14 (kill switch).** A release is not a dispatch: it creates no attempt, calls no provider and is not gated
+  by an engaged payment kill switch (which still blocks the existing submit path after reactivation); pinned by a
+  test. Whether an engaged kill switch should *also* block a release is recorded as a question for the human (below).
+- **HN-15 (reconciliation).** No new mismatch kind and no `tenant_system_read` policy: the release is an ordinary
+  two-leg `withdrawal_rejected` posting that the existing ledger/projection reconciliation covers.
+- **HN-16 (shared files).** Minimal ordered appends only: `permission.go`, `permissions.ts` (+ its test),
+  `init-app-role.sql`, one line in `routes.go`, the operation constants and one `Claims.validate` case in
+  `actorproof.go`, the capability constants, a second allowed call site in the A-16 static test
+  (`internal/db/acting_setter_static_test.go`) and two table names in the adjustment `zz_actor_proof_guard` catalog
+  test (nine -> eleven). `ADR 0110`'s operation table gains the four operations (scope `platform_acting` only).
+- **HN-17 (test environment).** The up/down/up test needs migrations 0122 and 0123 present (`internal/db` refuses
+  version gaps); during development they were stood in for by untracked no-op placeholders that are **not** part of
+  this change.
+
+**Open OWNER question (not decided here; the design fails closed around it; no production policy row is added by this change).** Q-HSEC-1: should an
+engaged payment kill switch for the tenant also block `release_hold_to_player` execution? Implemented as "no"
+(the switch stops outbound provider dispatch; this movement returns the player's own funds and sends nothing). If
+the answer is "yes" it is a one-line addition to the executor's preconditions plus the migration-side recheck.
+
+**Further open OWNER questions (recorded after the ledger-finance review; nothing is built or decided here).**
+
+- **Q-HSEC-2 (scope of decisions 13-18).** Do the owner decisions cover only `approved` holds on a non-active tenant or
+  brand (as implemented), or also holds in `requested` / `pending_review` on a non-active tenant? Implemented: approved
+  only; the other states keep their hold until reactivation (ADR 0107 CT-PRE territory, not built).
+- **Q-HSEC-3 (HN-6).** Is it acceptable that a tenant's stricter policy rows are ignored for this operation while the
+  tenant or brand is non-active (a suspended tenant cannot raise the number of platform approvers)? Implemented: ignored,
+  platform baseline only; pinned by `PolicyLookup_IgnoresTenantRowsWhenNonActive`.
+
+
+## 18. B13-B implementation notes (appendix, added with the B13-B code; the design above is not rewritten)
 
 Scope delivered (`payments`, 2026-10-09; branch `gov-r18-b13b` on top of the B13-A merge `a355244`): the Go integration of the
 payout destination binding into the withdrawal and payments paths, plus ONE migration that closes the NULL arm that 0123
 tolerated (15.2 B13A-2). The owner decisions (ADR 0095 section 44, decisions 1-8) are implemented as written and are **not**
-weakened: where a sub-question was open the safest reading was taken and is recorded as `B13B-n` in 16.2. Nothing here is a
+weakened: where a sub-question was open the safest reading was taken and is recorded as `B13B-n` in 18.2. Nothing here is a
 statement about a real PSP, a custodian or a licence: every provider in the tests is `MOCK` or a test double.
 
-### 16.1 Deliverable status
+### 18.1 Deliverable status
 
 | Deliverable | Status |
 |---|---|
@@ -1259,7 +1388,7 @@ statement about a real PSP, a custodian or a licence: every provider in the test
 | Reconciliation classification of destination parks (`disputeReasonClasses` line of 2.6) | `NOT IMPLEMENTED` (B13B-13: needs a change to the MA020 SQL function, i.e. a second migration) |
 | Compliance alert on a registration fingerprint conflict (15.3 item 3); lifting a staff/provider block (15.3 item 2); the stranded `approved` withdrawal after a permanent block (HD-R15-5) | `NOT IMPLEMENTED` (unchanged open items) |
 
-### 16.2 Ambiguities and the reading taken
+### 18.2 Ambiguities and the reading taken
 
 - **B13B-1 (migration number and arm).** `0126` is a placeholder. The guard refuses only **NULL/NULL**; a half binding still reaches the
   both-or-neither CHECK (`23514`), exactly as under 0123 (so `TestBinding_InsertGuard` keeps its half-binding assertions). `PI046` is new.
@@ -1271,7 +1400,7 @@ statement about a real PSP, a custodian or a licence: every provider in the test
   (LF95-C10(d)) says polls and evidence are not blocked by a later suspension or revocation, and blocking a settlement of money that
   was already sent would strand it. A snapshot that is missing, unsealed or inconsistent with the withdrawal, the attempt, the
   instrument, the amount and the asset fails closed (`destination_integrity_failure`). If the owner wants the instrument's *current*
-  state to also gate settlement, that is a one-line change in `payoutDestinationEvidence` and a policy decision (see 16.4 Q1).
+  state to also gate settlement, that is a one-line change in `payoutDestinationEvidence` and a policy decision (see 18.4 Q1).
 - **B13B-3 (phase B holds no lock).** The phase B read runs in its own short read transaction that is closed before the provider call
   (INV-IO-1 / INV-POOL); the instrument is not locked across the call. A revocation that lands between phase B's read and the call is
   caught at the next gate (T2/T12) and by the evidence check; it cannot be prevented, only parked.
@@ -1298,7 +1427,7 @@ statement about a real PSP, a custodian or a licence: every provider in the test
 - **B13B-8 (the echo is the adapter's job, and it needs the tenant).** S95-C10 requires the echo to be computed **inside the adapter**
   by an injected `DestinationFingerprinter`, which is tenant-bound (`Keys.FingerprinterFor(tenantID, kinds)`). A multi-tenant adapter
   instance does not receive the tenant in `Withdraw` / `QueryStatus`, so a real adapter cannot build the right fingerprinter today.
-  The MOCK adapter reports a test-set echo (`SetDestinationEcho`). This is an interface question for the architect (16.4 Q2), not
+  The MOCK adapter reports a test-set echo (`SetDestinationEcho`). This is an interface question for the architect (18.4 Q2), not
   something B13-B decides.
 - **B13B-9 (binding is mandatory in MOCK; dev needs keys).** Decision 8: only the verification source is flexible in MOCK. Without the
   payout-instrument key families the service is nil and `POST /v1/me/withdrawals` answers 503. See the runbook note.
@@ -1318,7 +1447,7 @@ statement about a real PSP, a custodian or a licence: every provider in the test
   second migration, which the owner brief excludes (one new migration). **Not done**: a destination park gets no
   `pay_captured_unposted` reconciliation class (the pre-D2 behaviour for an unclassified reason: no finding at run time). It is still
   parked `disputed`, the hold is kept, an audit row is written and the B12 P1 is raised, so the signal is not lost; only the
-  statement-reconciliation cross-check is missing (see 16.4 Q5).
+  statement-reconciliation cross-check is missing (see 18.4 Q5).
 - **B13B-12 (fixtures).** Since 0126 no fixture can insert a NULL-binding withdrawal. Fixtures that are about the binding bind a MOCK
   instrument (`internal/payoutinstrument/pitest`, integration build tag only, never in a binary). Fixtures that plant a `submitted`
   row to test receipts or reconciliation, or that attack a different invariant (RLS, a brand FK), plant a **legacy-shaped** row through
@@ -1330,7 +1459,7 @@ statement about a real PSP, a custodian or a licence: every provider in the test
   payout signal reasons 3 -> 4, `payout_destination.go` joins `payout.go` / `payout_sweep.go` as a payout-only file in the deposit terminal-reason
   scan, and the B12 per-site table skips the `destination_*` reasons (covered by `TestB13B_*`).
 
-### 16.3 Evidence
+### 18.3 Evidence
 
 Tests (all `-race -tags integration -count=1 -p 1`, private scratch database, runtime role where the package uses it):
 `internal/withdrawal` (`TestB13B_*`: bind, every refusal writes nothing and does not consume the key, replay, concurrency, race with a
@@ -1350,7 +1479,7 @@ The two httpserver failures are `TestResolutionIsolation_*` latency bounds (500 
 they fail the same way on the unmodified base `a355244` (checked), they exercise deposit and casino callbacks, and nothing in this change is on
 their path.
 
-### 16.4 Questions for the owner / architect (none changes decisions 1-8; each fails closed today)
+### 18.4 Questions for the owner / architect (none changes decisions 1-8; each fails closed today)
 
 1. **Should the instrument's current state also gate settlement?** Today a suspension after the call was made does not block recording
    the provider's result (B13B-2). The alternative parks every evidence on a suspended instrument, which can strand a payout that was
