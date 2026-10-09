@@ -141,7 +141,8 @@ func TestM4_ImportSeal_WrittenInTheInsert_AndVerified(t *testing.T) {
 		rows[0]["decl"] != true || rows[0]["is_mock"] != true {
 		t.Fatalf("sealed import row: %v", rows[0])
 	}
-	if rows[1]["decl"] != false || rows[2]["sealed"] != false {
+	// The unsealed import uses the pre-0125 column list (no declaration, no service).
+	if rows[1]["decl"] != false || rows[2]["sealed"] != false || rows[2]["imported_by_service"] != nil {
 		t.Fatalf("declaration / unsealed rows: %v %v", rows[1], rows[2])
 	}
 	acting := func(fn func(ctx context.Context, tx pgx.Tx) error) error {

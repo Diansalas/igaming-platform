@@ -703,10 +703,8 @@ DROP FUNCTION payment_m4_in_scope(text, text, text, text);
 -- 3. Statement-table policies back to 0102 (and no acting read).
 DROP POLICY acting_read ON payment_attempt_reference_evidence;
 DROP POLICY acting_read ON payment_statement_lines;
-DROP POLICY system_insert ON payment_statement_lines;
 DROP POLICY tenant_staff_scope ON payment_statement_lines;
 DROP POLICY acting_read ON payment_statement_imports;
-DROP POLICY system_insert ON payment_statement_imports;
 DROP POLICY tenant_staff_scope ON payment_statement_imports;
 CREATE POLICY tenant_staff_scope ON payment_statement_imports
     FOR ALL

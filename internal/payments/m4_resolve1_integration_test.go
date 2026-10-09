@@ -906,7 +906,7 @@ func TestM4_Migration0125UpDownUp_WholeSchema(t *testing.T) {
 	}
 	upSnap := schemaSnapshot15(t, pool)
 	for _, must := range []string{"function:payout_m4_evidence(uuid,uuid)", "policy:payment_statement_lines:acting_read",
-		"policy:payment_statement_imports:system_insert", "policy:payment_attempt_reference_evidence:acting_read",
+		"policy:payment_statement_imports:acting_read", "policy:payment_attempt_reference_evidence:acting_read",
 		"constraint:payment_manual_resolutions:payment_manual_resolutions_m4_shape_check"} {
 		if !strings.Contains(upSnap, must) {
 			t.Errorf("the 0125 schema lacks %q", must)

@@ -21,9 +21,9 @@
 --       CHECKs, and the composite FK target on payment_statement_lines.
 --   2.  payment_statement_imports: import_seal, seal_kid,
 --       payout_lines_carry_merchant_reference, imported_by_service (S-3/S-5).
---   3.  Statement-table policies: the 0102 FOR ALL tenant_staff_scope split into
---       a SELECT (unchanged read) and a SYSTEM-SHAPE-ONLY INSERT (S-5), plus the
---       acting SELECT policies on imports, lines and the typed reference
+--   3.  Statement-table policies: the 0102 FOR ALL tenant_staff_scope keeps its
+--       USING and gets a SYSTEM-SHAPE-ONLY WITH CHECK (the INSERT arm, S-5), plus
+--       the acting SELECT policies on imports, lines and the typed reference
 --       evidence (C-3 / M-5).
 --   4.  payment_m4_in_scope(), payment_m4_scope_visible(), payout_m4_evidence()
 --       (section 4.4; bounded 64 lines incl. the R lookups, S-4).
@@ -144,39 +144,48 @@ ALTER TABLE payment_statement_imports
 
 -- =========================================================================
 -- 3. Statement-table policies.
---    (a) The 0102 FOR ALL tenant_staff_scope is split: SELECT keeps its exact
---        read; INSERT is the SYSTEM SHAPE only (tenant GUC; principal,
---        platform-admin, player, platform-service and acting GUCs all NULL).
---        UPDATE/DELETE keep no policy (they were trigger-refused anyway).
+--    (a) The 0102 FOR ALL tenant_staff_scope keeps its name and its USING (the
+--        read, and the row visibility that lets the append-only triggers refuse
+--        UPDATE/DELETE loudly); only its WITH CHECK - i.e. the INSERT arm - is
+--        narrowed to the SYSTEM SHAPE (tenant GUC; principal, platform-admin,
+--        player, platform-service and acting GUCs all NULL; S-5).
 --    (b) Acting SELECT on imports, lines and the typed reference evidence
 --        (reverses ADR 0101 6.4 for these three tables only; C-3, M-5).
 -- =========================================================================
 
 DROP POLICY tenant_staff_scope ON payment_statement_imports;
-CREATE POLICY tenant_staff_scope ON payment_statement_imports FOR SELECT
-    USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid
-           AND NULLIF(current_setting('app.player_account_id', true), '') IS NULL);
-CREATE POLICY system_insert ON payment_statement_imports FOR INSERT
-    WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid
-           AND NULLIF(current_setting('app.principal_id', true), '') IS NULL
-           AND NULLIF(current_setting('app.platform_admin_principal_id', true), '') IS NULL
-           AND NULLIF(current_setting('app.player_account_id', true), '') IS NULL
-           AND NULLIF(current_setting('app.platform_service_id', true), '') IS NULL
-           AND NOT financial_acting_gucs_present());
+CREATE POLICY tenant_staff_scope ON payment_statement_imports
+    FOR ALL
+    USING (
+        tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid
+        AND NULLIF(current_setting('app.player_account_id', true), '') IS NULL
+    )
+    WITH CHECK (
+        tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid
+        AND NULLIF(current_setting('app.principal_id', true), '') IS NULL
+        AND NULLIF(current_setting('app.platform_admin_principal_id', true), '') IS NULL
+        AND NULLIF(current_setting('app.player_account_id', true), '') IS NULL
+        AND NULLIF(current_setting('app.platform_service_id', true), '') IS NULL
+        AND NOT financial_acting_gucs_present()
+    );
 CREATE POLICY acting_read ON payment_statement_imports FOR SELECT
     USING (tenant_id = NULLIF(current_setting('app.acting_tenant_id', true), '')::uuid AND (SELECT financial_acting_session_valid()));
 
 DROP POLICY tenant_staff_scope ON payment_statement_lines;
-CREATE POLICY tenant_staff_scope ON payment_statement_lines FOR SELECT
-    USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid
-           AND NULLIF(current_setting('app.player_account_id', true), '') IS NULL);
-CREATE POLICY system_insert ON payment_statement_lines FOR INSERT
-    WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid
-           AND NULLIF(current_setting('app.principal_id', true), '') IS NULL
-           AND NULLIF(current_setting('app.platform_admin_principal_id', true), '') IS NULL
-           AND NULLIF(current_setting('app.player_account_id', true), '') IS NULL
-           AND NULLIF(current_setting('app.platform_service_id', true), '') IS NULL
-           AND NOT financial_acting_gucs_present());
+CREATE POLICY tenant_staff_scope ON payment_statement_lines
+    FOR ALL
+    USING (
+        tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid
+        AND NULLIF(current_setting('app.player_account_id', true), '') IS NULL
+    )
+    WITH CHECK (
+        tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid
+        AND NULLIF(current_setting('app.principal_id', true), '') IS NULL
+        AND NULLIF(current_setting('app.platform_admin_principal_id', true), '') IS NULL
+        AND NULLIF(current_setting('app.player_account_id', true), '') IS NULL
+        AND NULLIF(current_setting('app.platform_service_id', true), '') IS NULL
+        AND NOT financial_acting_gucs_present()
+    );
 CREATE POLICY acting_read ON payment_statement_lines FOR SELECT
     USING (tenant_id = NULLIF(current_setting('app.acting_tenant_id', true), '')::uuid AND (SELECT financial_acting_session_valid()));
 

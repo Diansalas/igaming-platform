@@ -531,16 +531,24 @@ func IngestPaymentStatementSealed(ctx context.Context, tx pgx.Tx, tenantID uuid.
 		}
 		seal, kid = &sv, &kv
 	}
-	err = tx.QueryRow(ctx,
-		`INSERT INTO payment_statement_imports
+	// Without a sealer the pre-0125 column list is used (the import is never M4
+	// evidence anyway, and the importer keeps working against a pre-0125 schema).
+	insert := `INSERT INTO payment_statement_imports
+		    (id, tenant_id, provider_id, source_label, is_mock, coverage_start, coverage_end, line_count, content_digest, fetched_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+		 ON CONFLICT (tenant_id, provider_id, source_label, coverage_start, coverage_end, content_digest) DO NOTHING
+		 RETURNING id`
+	args := []any{newID, tenantID, providerID, label, isMock, stmt.CoverageStart, stmt.CoverageEnd, len(stmt.Lines), digest, fetchedAt}
+	if seal != nil {
+		insert = `INSERT INTO payment_statement_imports
 		    (id, tenant_id, provider_id, source_label, is_mock, coverage_start, coverage_end, line_count, content_digest, fetched_at,
 		     payout_lines_carry_merchant_reference, imported_by_service, import_seal, seal_kid)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
 		 ON CONFLICT (tenant_id, provider_id, source_label, coverage_start, coverage_end, content_digest) DO NOTHING
-		 RETURNING id`,
-		newID, tenantID, providerID, label, isMock, stmt.CoverageStart, stmt.CoverageEnd,
-		len(stmt.Lines), digest, fetchedAt, carriesMerchant, ImportedByServicePaymentStatement, seal, kid,
-	).Scan(&importID)
+		 RETURNING id`
+		args = append(args, carriesMerchant, ImportedByServicePaymentStatement, seal, kid)
+	}
+	err = tx.QueryRow(ctx, insert, args...).Scan(&importID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		if err := tx.QueryRow(ctx,
 			`SELECT id FROM payment_statement_imports
