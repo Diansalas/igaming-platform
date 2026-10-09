@@ -12,6 +12,17 @@ export type WithdrawalState =
   | 'cancelled'
   | 'reversed'
 
+/**
+ * The payout instrument a withdrawal is bound to (GET /v1/admin/withdrawals/{id}
+ * only). Masked: the server never returns the instrument detail, fingerprint or
+ * ciphertext. `rail` is the payment method the staff submit is compared with.
+ */
+export interface BoundPayoutInstrument {
+  id: string
+  rail: string
+  display_mask: string
+}
+
 export interface Withdrawal {
   id: string
   asset_code: string
@@ -30,6 +41,12 @@ export interface Withdrawal {
    * defect at an irreversible approval decision point.
    */
   decimal_exponent?: number
+  /**
+   * Detail endpoint only. `null` = legacy withdrawal with no binding (the
+   * payment method is then the submit input); `undefined` = not provided
+   * (list endpoints).
+   */
+  payout_instrument?: BoundPayoutInstrument | null
 }
 
 export function listWithdrawals(params: {
@@ -84,7 +101,12 @@ export interface SubmittedWithdrawal {
   provider_reference?: string
 }
 
-/** POST /v1/admin/withdrawals/{id}/submit {payment_method} - only valid on an `approved` withdrawal. */
+/**
+ * POST /v1/admin/withdrawals/{id}/submit {payment_method} - only valid on an `approved` withdrawal.
+ * For a bound withdrawal the server only COMPARES payment_method with the bound instrument's rail
+ * (400 PAYMENT_METHOD_MISMATCH on a difference; 409 PAYOUT_DESTINATION_NOT_USABLE when the destination
+ * gate refuses, the request stays `approved`).
+ */
 export function submitWithdrawal(id: string, paymentMethod: string): Promise<SubmittedWithdrawal> {
   return apiFetch(`/v1/admin/withdrawals/${id}/submit`, {
     method: 'POST',

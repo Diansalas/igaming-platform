@@ -138,6 +138,11 @@ describe('getNavPermissions withdrawal hold-resolution flags (HSEC)', () => {
   it('every tenant role and every other role neither views nor acts', () => {
     for (const role of ['tenant_admin', 'finance', 'compliance', 'support', 'risk_manager', 'promotions_manager', 'bonus_operations', 'player', undefined]) {
       expect(hr(role as string)).toEqual([false, false])
+    }
+  })
+})
+
+/**
  * B13 (ADR 0111 2.9): the payout-instrument flags mirror
  * internal/auth/permission.go's payout_instrument:{read,suspend} role sets
  * exactly. UI convenience only.

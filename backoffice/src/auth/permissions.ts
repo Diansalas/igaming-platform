@@ -75,6 +75,7 @@ export interface NavPermissions {
    */
   withdrawalHoldResolutions: boolean
   withdrawalHoldResolutionAct: boolean
+  /**
    * B13 (ADR 0111 2.9): PermPayoutInstrumentRead - view a player's payout
    * instruments (display mask only; finance, compliance, platform_admin).
    */

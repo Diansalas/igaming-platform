@@ -27,6 +27,8 @@ export type ApiErrorCode =
   | 'service_unavailable'
   | 'tenant_mismatch'
   | 'rate_limited'
+  | 'PAYMENT_METHOD_MISMATCH'
+  | 'PAYOUT_DESTINATION_NOT_USABLE'
   | 'network_error';
 
 export class ApiError extends Error {
