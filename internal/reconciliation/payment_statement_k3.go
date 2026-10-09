@@ -65,11 +65,15 @@ const (
 	// UNBOUND payout park inside RESOLVE-1's scope (ADR 0111 §4.1: an
 	// invalid_provider_reference / invalid_provider_reference:* /
 	// provider_reference_conflict park holding NO provider reference). It names
-	// M4 and says it is NOT IMPLEMENTED: the M4 kinds, evidence function and
-	// migration 0125 wait for the ledger-finance re-review of ADR 0111 §4. The
-	// post-M4-not-paid wording of §4.6 needs executed M4 rows, which cannot exist
-	// before 0125, and is therefore not here.
-	m4ScopePayoutCapturedUnpostedResolutionHint = "resolution: PSP-side recall/return, or the evidence-backed four-eyes resolution M4 (PAY-PAYOUT-UNBOUND-RESOLVE-1, ADR 0111 §4; NOT IMPLEMENTED); never allocation; M1 only acknowledges"
+	// M4. Migration 0125 implements M4, so "NOT IMPLEMENTED" is dropped (ADR
+	// 0111 §4.6 / §10.4 hint condition); it says "MOCK only" while the §10.3
+	// T10 flag stands (no non-MOCK statement source; D-7 open).
+	m4ScopePayoutCapturedUnpostedResolutionHint = "resolution: PSP-side recall/return, or the evidence-backed four-eyes resolution M4 (PAY-PAYOUT-UNBOUND-RESOLVE-1, ADR 0111 §4; MOCK only); never allocation; M1 only acknowledges"
+	// m4NotPaidCapturedUnpostedResolutionHint (ADR 0111 §4.6, L-4): a succeeded
+	// line on a payout whose withdrawal an executed m4_evidence_not_paid failed.
+	m4NotPaidCapturedUnpostedResolutionHint = "resolution: possible double payout after M4 not-paid: recovery via compensating debit (K2) or off-platform recovery; never allocation"
+	m4KindPaid                              = "m4_evidence_paid"
+	m4KindNotPaid                           = "m4_evidence_not_paid"
 	// unknownOpCapturedUnpostedResolutionHint: fail-closed neutral text for an
 	// operation reconciliation does not know (security I-1, BOUND-CLEAR-1).
 	unknownOpCapturedUnpostedResolutionHint      = "resolution: none defined for this operation (unknown operation; nothing clears it); never allocation; M1 only acknowledges"
@@ -135,6 +139,20 @@ type m2Resolution struct {
 	attemptMerchnt string
 }
 
+// m4Resolution is one executed M4 resolution (ADR 0111 §4.6) with the attempt
+// it resolved; read through the widened tenant_system_read_executed (0125).
+type m4Resolution struct {
+	id             uuid.UUID
+	attemptID      uuid.UUID
+	kind           string
+	ledgerTx       uuid.UUID
+	amount         *big.Int
+	reference      string // R (m4_evidence_paid); "" otherwise
+	pinnedRef      string // provider_reference_at_submission; "" when NULL
+	attemptRef     string // the attempt's current provider_reference; "" when NULL
+	attemptMerchnt string
+}
+
 // k3Evidence is everything the K3 additions need beyond the run's own import.
 type k3Evidence struct {
 	importIsMock bool
@@ -148,6 +166,7 @@ type k3Evidence struct {
 	byRef      map[string][]*persistedLine
 	byMerchant map[string][]*persistedLine
 	m2         []m2Resolution
+	m4         []m4Resolution
 	// m2Paid: attempt ids of executed declare-paid resolutions (the
 	// confirmation metric in matchPayment).
 	m2Paid map[uuid.UUID]bool
@@ -232,6 +251,42 @@ func (m *payMatcher) loadK3Evidence(ctx context.Context, tx pgx.Tx, importIsMock
 		return err
 	}
 
+	// Executed M4 resolutions (ADR 0111 §4.6; the tenant_system_read_executed
+	// policy widened by migration 0125).
+	rows, err = tx.Query(ctx, `
+		SELECT r.id, r.attempt_id, r.kind, r.ledger_transaction_id, r.amount::text, COALESCE(r.evidence_reference, ''),
+		       COALESCE(r.provider_reference_at_submission, ''), COALESCE(a.provider_reference, ''), a.merchant_reference
+		  FROM payment_manual_resolutions r
+		  JOIN payment_attempts a ON a.id = r.attempt_id AND a.tenant_id = r.tenant_id
+		 WHERE r.tenant_id = $1 AND a.provider_id = $2 AND r.state = 'executed'
+		   AND r.kind IN ('m4_evidence_paid', 'm4_evidence_not_paid') AND r.ledger_transaction_id IS NOT NULL
+		 ORDER BY r.id`, m.tenantID, m.provider)
+	if err != nil {
+		return fmt.Errorf("executed M4 resolutions: %w", err)
+	}
+	for rows.Next() {
+		var r m4Resolution
+		var amount string
+		if err := rows.Scan(&r.id, &r.attemptID, &r.kind, &r.ledgerTx, &amount, &r.reference, &r.pinnedRef, &r.attemptRef, &r.attemptMerchnt); err != nil {
+			rows.Close()
+			return err
+		}
+		if r.amount, err = parseBig(amount); err != nil {
+			rows.Close()
+			return err
+		}
+		e.m4 = append(e.m4, r)
+		if r.kind == m4KindNotPaid {
+			if a := m.payAttemptByID(r.attemptID); a != nil {
+				a.m4NotPaid = true
+			}
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
 	// The references and merchant references the run needs evidence for.
 	refs, merchants := map[string]bool{}, map[string]bool{}
 	for _, a := range m.attempts {
@@ -269,6 +324,18 @@ func (m *payMatcher) loadK3Evidence(ctx context.Context, tx pgx.Tx, importIsMock
 	for _, r := range e.m2 {
 		if r.attemptRef != "" {
 			refs[r.attemptRef] = true
+		}
+		merchants[r.attemptMerchnt] = true
+	}
+	// S-1 (ADR 0111 §4.6): every executed M4 adds R, its merchant reference, its
+	// bound reference (pinned and current) and every Y to the lookup key set.
+	// All are platform state, fixed before the read, each with the 64-line
+	// budget (I-2): statement content never raises its own budget.
+	for _, r := range e.m4 {
+		for _, ref := range []string{r.reference, r.pinnedRef, r.attemptRef, e.yRef[r.attemptID]} {
+			if ref != "" {
+				refs[ref] = true
+			}
 		}
 		merchants[r.attemptMerchnt] = true
 	}
@@ -563,6 +630,9 @@ func (m *payMatcher) payoutCompletedRef(a *payAttempt, ref string, line *evidenc
 func capturedUnpostedHintFor(a *payAttempt, depositHint string) string {
 	switch a.operation {
 	case paymentStatementKindPayout:
+		if a.m4NotPaid {
+			return m4NotPaidCapturedUnpostedResolutionHint
+		}
 		if a.inM4Scope() {
 			return m4ScopePayoutCapturedUnpostedResolutionHint
 		}

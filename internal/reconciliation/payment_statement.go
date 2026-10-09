@@ -496,7 +496,17 @@ func nullIfEmpty(s string) *string {
 // already validated, inside tx (a short db.Pool.WithTenant transaction). It
 // returns the import id; reused is true when the identical content was
 // already stored (nothing new is written).
+//
+// PAY-PAYOUT-UNBOUND-RESOLVE-1 (ADR 0111 4.3, S-5): the import is sealed with
+// the process-wide sealer (SetDefaultImportSealer) in the INSERT itself; with
+// no sealer it is stored unsealed (never M4 evidence).
 func IngestPaymentStatement(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, source statement.PaymentStatementSource, stmt statement.PaymentStatement, fetchedAt time.Time) (importID uuid.UUID, reused bool, err error) {
+	return IngestPaymentStatementSealed(ctx, tx, tenantID, source, stmt, fetchedAt, DefaultImportSealer())
+}
+
+// IngestPaymentStatementSealed is IngestPaymentStatement with an explicit
+// sealer (nil = unsealed).
+func IngestPaymentStatementSealed(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, source statement.PaymentStatementSource, stmt statement.PaymentStatement, fetchedAt time.Time, sealer statement.ImportSealer) (importID uuid.UUID, reused bool, err error) {
 	if err := validateSourceIdentity(source); err != nil {
 		return uuid.Nil, false, err
 	}
@@ -506,14 +516,30 @@ func IngestPaymentStatement(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, 
 	providerID, label := source.ProviderID(), source.Label()
 	digest := paymentStatementDigest(stmt)
 	newID := uuid.New()
+	fetchedAt = fetchedAt.UTC().Truncate(time.Microsecond)
+	isMock, carriesMerchant := isSyntheticSource(source), declaresPayoutMerchantReference(source)
+	var seal, kid *string
+	if sealer != nil {
+		sv, kv, serr := sealer.SealStatementImport(statement.ImportSealInput{
+			ImportID: newID, TenantID: tenantID, ProviderID: providerID, SourceLabel: label, IsMock: isMock,
+			CoverageStart: stmt.CoverageStart, CoverageEnd: stmt.CoverageEnd, ContentDigest: digest, LineCount: len(stmt.Lines),
+			FetchedAt: fetchedAt, PayoutLinesCarryMerchantReference: carriesMerchant,
+			ImportedByService: ImportedByServicePaymentStatement, LinesDigest: statement.ImportLinesDigest(statementLinesCanon(stmt)),
+		})
+		if serr != nil {
+			return uuid.Nil, false, fmt.Errorf("reconciliation: seal payment statement import: %w", serr)
+		}
+		seal, kid = &sv, &kv
+	}
 	err = tx.QueryRow(ctx,
 		`INSERT INTO payment_statement_imports
-		    (id, tenant_id, provider_id, source_label, is_mock, coverage_start, coverage_end, line_count, content_digest, fetched_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+		    (id, tenant_id, provider_id, source_label, is_mock, coverage_start, coverage_end, line_count, content_digest, fetched_at,
+		     payout_lines_carry_merchant_reference, imported_by_service, import_seal, seal_kid)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
 		 ON CONFLICT (tenant_id, provider_id, source_label, coverage_start, coverage_end, content_digest) DO NOTHING
 		 RETURNING id`,
-		newID, tenantID, providerID, label, isSyntheticSource(source), stmt.CoverageStart, stmt.CoverageEnd,
-		len(stmt.Lines), digest, fetchedAt.UTC(),
+		newID, tenantID, providerID, label, isMock, stmt.CoverageStart, stmt.CoverageEnd,
+		len(stmt.Lines), digest, fetchedAt, carriesMerchant, ImportedByServicePaymentStatement, seal, kid,
 	).Scan(&importID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		if err := tx.QueryRow(ctx,
@@ -681,6 +707,9 @@ func runPaymentStatementUnchecked(ctx context.Context, tx pgx.Tx, tenantID, impo
 	if err := m.checkM2Standing(ctx, tx); err != nil {
 		return Run{}, nil, PaymentStatementInfo{}, fmt.Errorf("reconciliation: M2 standing check: %w", err)
 	}
+	if err := m.checkM4Standing(ctx, tx); err != nil {
+		return Run{}, nil, PaymentStatementInfo{}, fmt.Errorf("reconciliation: M4 standing check: %w", err)
+	}
 
 	run := Run{
 		ID: uuid.New(), TenantID: tenantID, Stream: StreamPaymentStatement,
@@ -722,6 +751,9 @@ type payAttempt struct {
 	settlementRef       string     // payout: the release tx's provider_tx_id when it is this provider's withdrawal_completed
 	releaseIsCompletion bool
 	terminalReason      string // "" when NULL - ADR 0095 §28.9's pay_captured_unposted condition
+	// m4NotPaid: an executed m4_evidence_not_paid failed this attempt's
+	// withdrawal (ADR 0111 §4.6 hint; set by loadK3Evidence).
+	m4NotPaid bool
 }
 
 type payLedgerTx struct {
@@ -1437,6 +1469,20 @@ func (m *payMatcher) checkLedgerJoin() {
 		}
 		if a.operation == "payout" && a.releaseTx != nil && a.releaseIsCompletion {
 			succeededFor[*a.releaseTx]++
+		}
+	}
+	// R-2 (ADR 0111 §4.6, ledger-finance ruling): an M4-paid completion leaves
+	// its attempt disputed (A-15), so it is attributed (n += 1) ONLY when an
+	// EXECUTED m4_evidence_paid links it (ledger_transaction_id = t.id) AND the
+	// same attempt's withdrawal releases with it (release_ledger_transaction_id
+	// = t.id). Nothing else qualifies; a posting attributed both ways is n = 2
+	// and still raises.
+	for _, r := range m.k3.m4 {
+		if r.kind != m4KindPaid {
+			continue
+		}
+		if a := m.payAttemptByID(r.attemptID); a != nil && a.operation == "payout" && a.releaseTx != nil && *a.releaseTx == r.ledgerTx {
+			succeededFor[r.ledgerTx]++
 		}
 	}
 	for _, t := range m.ledger {

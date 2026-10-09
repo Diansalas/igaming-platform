@@ -16,6 +16,11 @@ type Registrations struct {
 	PaymentAdapters []any
 	// Verifiers are the registered instrument verifiers.
 	Verifiers []PayoutInstrumentVerifier
+	// StatementSources are the registered payment statement sources (ADR 0111
+	// 4.3, S-5: the key families are also required whenever any non-MOCK
+	// statement source is registered, because its imports must be sealed to be
+	// M4 evidence at all).
+	StatementSources []any
 }
 
 // NonSyntheticRegistered reports whether any payout adapter or instrument
@@ -28,6 +33,11 @@ func (r Registrations) NonSyntheticRegistered() bool {
 	}
 	for _, v := range r.Verifiers {
 		if v != nil && !IsSyntheticComponent(v) {
+			return true
+		}
+	}
+	for _, src := range r.StatementSources {
+		if src != nil && !IsSyntheticComponent(src) {
 			return true
 		}
 	}
@@ -53,7 +63,7 @@ func VerifyStartup(guardEnvironment string, keys *Keys, regs Registrations) erro
 	}
 	required := guardEnvironment == "production" || regs.NonSyntheticRegistered()
 	if required && keys == nil {
-		return fmt.Errorf("%w: PAYOUT_INSTRUMENT_KEYS / PAYOUT_INSTRUMENT_ACTIVE_KID and PAYOUT_INSTRUMENT_FP_KEYS / PAYOUT_INSTRUMENT_FP_ACTIVE_KID are required (production, or a non-Synthetic payout adapter or verifier is registered); refusing to start", ErrStartupGate)
+		return fmt.Errorf("%w: PAYOUT_INSTRUMENT_KEYS / PAYOUT_INSTRUMENT_ACTIVE_KID and PAYOUT_INSTRUMENT_FP_KEYS / PAYOUT_INSTRUMENT_FP_ACTIVE_KID are required (production, or a non-Synthetic payout adapter, verifier or payment statement source is registered); refusing to start", ErrStartupGate)
 	}
 	return nil
 }

@@ -174,6 +174,11 @@ func run() error {
 	if err := payoutinstrument.VerifyLegacyBindings(ctx, legacyBindingChecker(pool)); err != nil {
 		return err
 	}
+	// ADR 0111 4.3 (S-5, T10): statement imports are sealed with the same key
+	// module. Without keys imports stay unsealed and are never M4 evidence.
+	if payoutInstruments != nil {
+		reconciliation.SetDefaultImportSealer(payoutInstruments.Keys())
+	}
 
 	keys := map[string]string{cfg.JWTActiveKID: cfg.JWTSigningSecret}
 	if cfg.JWTPreviousSecret != "" {
