@@ -62,7 +62,9 @@ export interface NavPermissions {
    * STATIC half only (finance, platform_admin; never tenant_admin). The
    * authority is an in-force payment_force_resolve capability GRANT read
    * server-side in the action's own transaction - this flag can never stand
-   * in for it.
+   * in for it. ADR 0111 D-9 / S-6: the same capability also covers the
+   * evidence-backed M4 resolutions (m4_evidence_paid / m4_evidence_not_paid),
+   * which additionally need at least one platform_acting approver.
    */
   paymentForceResolutionAct: boolean
   /**

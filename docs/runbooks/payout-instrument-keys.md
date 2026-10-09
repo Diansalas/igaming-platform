@@ -51,6 +51,25 @@ the binary.
    tenant. Existing rows are **not** re-sealed by any job (`NOT IMPLEMENTED`), so in practice a master
    kid is retired only after every instrument it sealed is terminal.
 
+### 3a. Statement-import seals and M4 availability (ADR 0111 §4.3, §17.7 F-4; migration 0125)
+
+The same master family seals payment statement imports (HKDF subkey `b13-import-v1`). An import is sealed
+only when the importing process holds the keys; otherwise it is stored **unsealed**. Unsealed imports are
+still read by reconciliation (they still raise), but they are **never positive M4 evidence**, and the
+retired-kid rule above applies to `payment_statement_imports.seal_kid` as well (add it to the step-3
+query). Operational consequences:
+
+* A process that ingests statements **without** the keys (key secret missing, a misconfigured deploy)
+  silently produces unsealed imports for that window: M4 for parks whose evidence lies only in those
+  imports reads `insufficient` until a later sealed import of the same coverage arrives. This is an
+  **availability** loss, never a wrong release (fail closed).
+* Removing a kid that still seals an import makes every M4 resting on that import refuse at request and
+  at execution (`force_resolve_evidence_unsealed`), including M4 requests already pending.
+* After restoring the keys, re-fetch the affected coverage window so the statement is re-imported
+  sealed (a re-import with different content is a new import; identical content reuses the unsealed
+  import, so a re-fetch that returns byte-identical content does **not** restore availability -
+  `NOT IMPLEMENTED`: no re-seal job exists).
+
 ## 4. Rotating the fingerprint family (re-fingerprint job)
 
 A new fingerprint kid must not become active before ownership is recorded under it, otherwise a second

@@ -46,6 +46,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/identityresolution"
 	"github.com/Diansalas/igaming-platform/internal/payments"
+	"github.com/Diansalas/igaming-platform/internal/payoutinstrument"
 	"github.com/Diansalas/igaming-platform/internal/testsupport/scratchdb"
 )
 
@@ -61,6 +62,11 @@ func cgMigrationsDir(t *testing.T) string {
 // cgAPIStatementSources, when a test sets it BEFORE newCGAPI, becomes the
 // server's Deps.StatementSources (tests run sequentially; reset by the test).
 var cgAPIStatementSources *payments.StatementSourceRegistry
+
+// cgAPIPayoutInstruments, when a test sets it BEFORE newCGAPI, becomes the
+// server's Deps.PayoutInstruments (the B13 key module; M4 verifies statement
+// import seals with it, ADR 0111 4.3). nil = every M4 refused (unsealed).
+var cgAPIPayoutInstruments *payoutinstrument.Service
 
 type cgAPI struct {
 	t      *testing.T
@@ -99,6 +105,8 @@ func newCGAPI(t *testing.T) *cgAPI {
 		PersonResolver:  identityresolution.NewMockPersonResolver(),
 		// PAY-K3-STATEMENT-SOURCE-WIRING-1: nil (refuse every M2) unless a test sets it.
 		StatementSources: cgAPIStatementSources,
+		// PAY-PAYOUT-UNBOUND-RESOLVE-1: nil unless a test sets it.
+		PayoutInstruments: cgAPIPayoutInstruments,
 	}))
 	t.Cleanup(srv.Close)
 	return &cgAPI{t: t, pool: pool, issuer: issuer, srv: srv}

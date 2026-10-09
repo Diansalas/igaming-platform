@@ -1156,8 +1156,11 @@ const b11PayoutHint = "resolution: PSP-side recall/return or governed completion
 // §4.6 "the unbound-park hint names M4", §7.3 "may start now"; task
 // PAY-PAYOUT-UNBOUND-RESOLVE-1 tightenings, r16-res1): the sync and
 // reverse-collision parks hold no reference and now name M4 (NOT
-// IMPLEMENTED); the poll park holds X and keeps b11PayoutHint.
-const b11M4ScopeHint = "resolution: PSP-side recall/return, or the evidence-backed four-eyes resolution M4 (PAY-PAYOUT-UNBOUND-RESOLVE-1, ADR 0111 §4; NOT IMPLEMENTED); never allocation; M1 only acknowledges"
+// IMPLEMENTED); the poll park holds X and keeps b11PayoutHint. FLIPPED again
+// deliberately by migration 0125 (PAY-PAYOUT-UNBOUND-RESOLVE-1 r19, ADR 0111
+// §4.6 / §10.4 hint condition): M4 exists, so "NOT IMPLEMENTED" became "MOCK
+// only" while the T10 flag stands.
+const b11M4ScopeHint = "resolution: PSP-side recall/return, or the evidence-backed four-eyes resolution M4 (PAY-PAYOUT-UNBOUND-RESOLVE-1, ADR 0111 §4; MOCK only); never allocation; M1 only acknowledges"
 
 // b11RequirePayoutCU asserts exactly one pay_captured_unposted for the payout
 // attempt keyed on lineRef, correctly represented as a PAYOUT finding.

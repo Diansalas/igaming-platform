@@ -976,21 +976,31 @@ func TestHSEC_HoldRelease_Migration0124UpDownUp_WholeSchema(t *testing.T) {
 }
 
 func TestHSEC_HoldRelease_Migration0124DownRefusals(t *testing.T) {
+	// The world is migrated to the latest version; every migration above 0124
+	// (0125, PAY-PAYOUT-UNBOUND-RESOLVE-1) is first rolled back (it holds no
+	// data here), so the step that refuses is 0124's own down.
+	downTo0124 := func(t *testing.T, h *hsr) error {
+		t.Helper()
+		dir := realMigrationsDir(t)
+		if _, err := h.pool.MigrateDown(context.Background(), dir, 1); err != nil {
+			t.Fatalf("down 0125 (empty): %v", err)
+		}
+		_, err := h.pool.MigrateDown(context.Background(), migration0101Dir(t, hsecMigrationVersion), 1)
+		return err
+	}
 	t.Run("resolution_row", func(t *testing.T) {
 		h := newHSR(t, 1)
 		wr := h.hold(100)
 		h.suspendTenant()
 		h.mustRequest(h.reqA, wr.ID)
-		_, err := h.pool.MigrateDown(context.Background(), migration0101Dir(t, hsecMigrationVersion), 1)
-		k3RequireCode(t, err, "HR099")
+		k3RequireCode(t, downTo0124(t, h), "HR099")
 		if h.count(`SELECT count(*) FROM audit_log WHERE action = 'withdrawal.hold_resolution_requested'`) != 1 {
 			t.Fatal("whole rollback expected")
 		}
 	})
 	t.Run("policy_row", func(t *testing.T) {
 		h := newHSR(t, 1)
-		_, err := h.pool.MigrateDown(context.Background(), migration0101Dir(t, hsecMigrationVersion), 1)
-		k3RequireCode(t, err, "HR099")
+		k3RequireCode(t, downTo0124(t, h), "HR099")
 	})
 }
 

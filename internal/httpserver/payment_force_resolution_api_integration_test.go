@@ -25,6 +25,9 @@ var frClosedTokens = []string{
 	payments.TokenForceResolveDisabled, payments.TokenForceResolveNotPermitted, payments.TokenForceResolvePreconditionFail,
 	payments.TokenForceResolveReasonNotResolved, payments.TokenForceResolveConflict, payments.TokenForceResolveExpired,
 	payments.TokenForceResolveNotFound,
+	// ADR 0111 4.7 (M4, migration 0125).
+	payments.TokenForceResolveEvidenceInsufficient, payments.TokenForceResolveEvidenceMismatch,
+	payments.TokenForceResolveEvidenceOverflow, payments.TokenForceResolveEvidenceUnsealed,
 }
 
 type frWorld struct {

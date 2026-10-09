@@ -217,8 +217,13 @@ func TestMA020_K2_RLSVisibilityPin(t *testing.T) {
 	if ten != (vis{0, 1, 1, 1, 1}) {
 		t.Fatalf("tenant K2 session visibility changed (F-VIS premise): %+v", ten)
 	}
-	if act != (vis{0, 0, 0, 1, 1}) {
-		t.Fatalf("acting K2 session visibility changed (F-VIS premise): %+v", act)
+	// FLIPPED deliberately by migration 0125 (PAY-PAYOUT-UNBOUND-RESOLVE-1, ADR
+	// 0111 §4.3, LF C-3 / security M-5): the acting session reads its tenant's
+	// statement imports, lines and typed Y evidence. For MA020 the acting K2
+	// session is therefore system-equivalent (the "full port" this pin
+	// anticipated); the tenant K2 session is unchanged (Y still invisible).
+	if act != (vis{1, 1, 1, 1, 1}) {
+		t.Fatalf("acting K2 session visibility changed (0125: full visibility): %+v", act)
 	}
 }
 
@@ -283,8 +288,11 @@ func TestMA020_K2_ReversalLineClearsInTenantSessionOnly(t *testing.T) {
 	if got := creditOutcome(t, svc, w, w.F1, w.F2); got != "" {
 		t.Fatalf("tenant session: want admitted, got %q", got)
 	}
-	if got := creditOutcome(t, svc, w, w.Acting, w.Acting2); got != "MA020" {
-		t.Fatalf("acting session (lines invisible): want MA020 (fail closed), got %q", got)
+	// FLIPPED deliberately by migration 0125 (see TestMA020_K2_RLSVisibilityPin):
+	// the acting session now sees the eligible reversal line, exactly as the
+	// tenant session does, so it clears there too.
+	if got := creditOutcome(t, svc, w, w.Acting, w.Acting2); got != "" {
+		t.Fatalf("acting session (0125: lines visible): want admitted, got %q", got)
 	}
 	w.assertInvariants()
 }
@@ -316,16 +324,17 @@ func TestMA020_K2_NoFailOpenWhenYIsInvisible(t *testing.T) {
 	if sysExposure(t, rt, w) {
 		t.Fatal("system shape: both cleared must admit")
 	}
-	for _, s := range []struct {
-		name            string
-		actor, approver staffMember
-	}{{"tenant", w.F1, w.F2}, {"acting", w.Acting, w.Acting2}} {
-		if got := creditOutcome(t, svc, w, s.actor, s.approver); got != "MA020" {
-			t.Fatalf("%s session: F-VIS keeps a poll_reference_mismatch park open where Y is invisible, got %q", s.name, got)
-		}
+	// The tenant session cannot see Y: F-VIS keeps the park open there.
+	if got := creditOutcome(t, svc, w, w.F1, w.F2); got != "MA020" {
+		t.Fatalf("tenant session: F-VIS keeps a poll_reference_mismatch park open where Y is invisible, got %q", got)
 	}
 	if n := w.adjustmentLedgerTxCount(); n != 0 {
 		t.Fatalf("no credit may have posted, got %d", n)
+	}
+	// FLIPPED deliberately by migration 0125: the acting session sees Y, so it
+	// applies the full rule (both cleared -> admitted), like the system shape.
+	if got := creditOutcome(t, svc, w, w.Acting, w.Acting2); got != "" {
+		t.Fatalf("acting session (0125: Y visible, both cleared): want admitted, got %q", got)
 	}
 	w.assertInvariants()
 }

@@ -165,7 +165,7 @@ func k3RawRequest(ctx context.Context, tx pgx.Tx, w *k3World, in ResolutionReque
 func k3SubmitDigest(w *k3World, in ResolutionRequestInput) string {
 	return actorproof.Digest(actorproof.S(w.f.tenantID.String()), actorproof.S(in.AttemptID.String()), actorproof.S(string(in.Kind)),
 		actorproof.SP(in.FindingCode), actorproof.SP(in.BasisCode), actorproof.SP(in.ContextCode), actorproof.SP(in.EvidenceRefHash),
-		actorproof.S(in.ReasonCode))
+		actorproof.S(in.ReasonCode), actorproof.SP(evidenceLineText(in.EvidenceLineID)))
 }
 
 // (1a) ADVERSARIAL, approve: GUC impersonation of eligible finance staff.

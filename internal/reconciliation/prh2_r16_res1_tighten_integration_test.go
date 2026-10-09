@@ -35,7 +35,8 @@ import (
 //     ErrPaymentEvidenceOverflow, reported as the existing P1
 //     reconciliation.sweep_run_failed. Never a silent truncation.
 //   - L-4: an unbound payout park inside RESOLVE-1's scope (no provider
-//     reference) names M4, labelled NOT IMPLEMENTED.
+//     reference) names M4, labelled NOT IMPLEMENTED (r16); since migration 0125
+//     (r19) labelled "MOCK only".
 //
 // Every run executes as the RUNTIME role (bcWorld.rt) and asserts it wrote only
 // its run and mismatch rows plus SUM(debits) = SUM(credits) and a clean
@@ -145,7 +146,9 @@ func rsUnboundCU(t *testing.T, ms []Mismatch, p bcPark, ref string, standing boo
 		t.Fatalf("%s: want exactly one pay_captured_unposted for the unbound payout park %s, got %d:\n%s", what, p.attempt.ID, len(got), renderMismatches(ms))
 	}
 	m := got[0]
-	if m.ExpectedValue != m4ScopePayoutCapturedUnpostedResolutionHint || !strings.Contains(m.ExpectedValue, "M4") || !strings.Contains(m.ExpectedValue, "NOT IMPLEMENTED") ||
+	if m.ExpectedValue != m4ScopePayoutCapturedUnpostedResolutionHint || !strings.Contains(m.ExpectedValue, "M4") ||
+		// Flipped deliberately by migration 0125 (r19): M4 exists; "MOCK only" while T10 stands.
+		strings.Contains(m.ExpectedValue, "NOT IMPLEMENTED") || !strings.Contains(m.ExpectedValue, "MOCK only") ||
 		strings.Contains(m.ExpectedValue, "LEDGER-SUSPENSE") || !strings.Contains(m.ReconciliationKey, "provider_reference="+ref) || !strings.Contains(m.ActualValue, "op=payout") {
 		t.Fatalf("%s: unbound payout finding misrepresented: %s | %s | %s", what, m.ReconciliationKey, m.ExpectedValue, m.ActualValue)
 	}

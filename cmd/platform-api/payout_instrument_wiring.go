@@ -50,7 +50,11 @@ func buildPayoutInstrumentService(cfg config.Config, b providerBundle) (*payouti
 	for _, a := range b.paymentsAdapters() {
 		adapters = append(adapters, a)
 	}
-	if err := payoutinstrument.VerifyStartup(cfg.GuardEnvironment(), keys, payoutinstrument.Registrations{PaymentAdapters: adapters, Verifiers: verifiers}); err != nil {
+	var sources []any
+	for _, src := range b.paymentStatementSources() {
+		sources = append(sources, src)
+	}
+	if err := payoutinstrument.VerifyStartup(cfg.GuardEnvironment(), keys, payoutinstrument.Registrations{PaymentAdapters: adapters, Verifiers: verifiers, StatementSources: sources}); err != nil {
 		return nil, err
 	}
 	if keys == nil {

@@ -179,8 +179,15 @@ func TestK3_T7_EvidenceTablePolicies(t *testing.T) {
 					// no privilege/policy at all is also a refusal
 					return nil
 				}
-				if n != 0 {
-					t.Errorf("%s session SELECT sees %d evidence row(s)", s.name, n)
+				// FLIPPED deliberately by migration 0125 (ADR 0111 §4.3, LF C-3 /
+				// security M-5): the acting session reads its own tenant's typed
+				// reference evidence (the M4 verdict reads Y); it still never writes.
+				want := 0
+				if s.name == "acting" {
+					want = 1
+				}
+				if n != want {
+					t.Errorf("%s session SELECT sees %d evidence row(s), want %d", s.name, n, want)
 				}
 				if err := k3Try(ctx, tx, insert); err == nil {
 					t.Errorf("%s session INSERT was admitted", s.name)

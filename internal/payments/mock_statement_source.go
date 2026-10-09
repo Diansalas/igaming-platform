@@ -68,6 +68,11 @@ func NewMockStatementSource(provider *MockProvider, resolver OutboundCredentialR
 // SyntheticComponent implements providerkind.Synthetic (MOCK-ADAPTER-PROD-1).
 func (s *MockStatementSource) SyntheticComponent() {}
 
+// PayoutLinesCarryMerchantReference is the S-3 source declaration (ADR 0111
+// 4.3): every payout line this MOCK renders carries the attempt's platform
+// merchant reference. Declared in code, never read from a database row.
+func (s *MockStatementSource) PayoutLinesCarryMerchantReference() bool { return true }
+
 // Label implements statement.PaymentStatementSource.
 func (s *MockStatementSource) Label() string { return MockStatementSourceLabel }
 

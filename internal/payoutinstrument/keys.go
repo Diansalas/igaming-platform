@@ -25,6 +25,9 @@ const MinKeyBytes = 32
 const (
 	labelSeal   = "b13-seal-v1"
 	labelDetail = "b13-detail-aead-v1"
+	// labelImport derives the statement-import seal subkey (ADR 0111 4.3,
+	// S-5; T10): a third independent subkey of the same master.
+	labelImport = "b13-import-v1"
 
 	fpLabel = "b13-fp-v1"
 
@@ -60,6 +63,7 @@ type Keys struct {
 	masterActive string
 	seal         map[string][]byte // kid -> seal subkey
 	detail       map[string][]byte // kid -> detail subkey
+	imp          map[string][]byte // kid -> statement-import seal subkey
 	fpActive     string
 	fp           map[string][]byte
 }
@@ -90,7 +94,7 @@ func NewKeys(masterActiveKID string, master map[string][]byte, fpActiveKID strin
 		return nil, fmt.Errorf("%w: active fingerprint kid has no key", ErrKeyConfig)
 	}
 	k := &Keys{masterActive: masterActiveKID, fpActive: fpActiveKID,
-		seal: map[string][]byte{}, detail: map[string][]byte{}, fp: map[string][]byte{}}
+		seal: map[string][]byte{}, detail: map[string][]byte{}, imp: map[string][]byte{}, fp: map[string][]byte{}}
 	seen := map[string]bool{}
 	for kid, m := range master {
 		if !kidRE.MatchString(kid) || len(m) < MinKeyBytes {
@@ -108,7 +112,11 @@ func NewKeys(masterActiveKID string, master map[string][]byte, fpActiveKID strin
 		if err != nil {
 			return nil, fmt.Errorf("%w: hkdf", ErrKeyConfig)
 		}
-		k.seal[kid], k.detail[kid] = sk, dk
+		ik, err := hkdf.Key(sha256.New, m, nil, labelImport, 32)
+		if err != nil {
+			return nil, fmt.Errorf("%w: hkdf", ErrKeyConfig)
+		}
+		k.seal[kid], k.detail[kid], k.imp[kid] = sk, dk, ik
 	}
 	for kid, m := range fp {
 		if !kidRE.MatchString(kid) || len(m) < MinKeyBytes {
