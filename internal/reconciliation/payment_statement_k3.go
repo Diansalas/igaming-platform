@@ -93,7 +93,7 @@ const (
 	// operation reconciliation does not know (security I-1, BOUND-CLEAR-1).
 	unknownOpCapturedUnpostedResolutionHint      = "resolution: none defined for this operation (unknown operation; nothing clears it); never allocation; M1 only acknowledges"
 	declaredPaidUnconfirmedResolutionHint        = "resolution: a confirming statement line from an eligible import (payout, succeeded, resolved to this attempt, amount and asset equal) or a withdrawal reversal (WITHDRAWAL-REVERSAL-1); a compensating credit annotates but does not clear"
-	declaredNotPaidButPaidResolutionHint         = "resolution: executed compensating_entry debits, causation = the withdrawal_failed transaction, totalling at least the withdrawn amount; an off-platform recovery has no clearing path and is tracked through the row's investigation status"
+	declaredNotPaidButPaidResolutionHint         = "resolution: a NET recovery of at least the withdrawn amount - executed compensating_entry debits, causation = the withdrawal_failed transaction, same wallet and asset, none of them reversed, minus every executed credit with that causation; an off-platform recovery has no clearing path and is tracked through the row's investigation status"
 	declaredPaidCompensatedButPaidResolutionHint = "resolution: executed compensating_entry debits, causation = the compensating credit's own transaction, totalling at least the credited amount"
 )
 
@@ -160,6 +160,11 @@ type m2Resolution struct {
 	attemptReason  string
 	attemptRef     string
 	attemptMerchnt string
+	// walletID is the wallet of the resolution's withdrawal request (nil when
+	// the run cannot see it: the (d) recovery is then never read, so (d) keeps
+	// raising - fail closed). The NET recovery (owner decision 2, ADR 0095
+	// §48) is scoped to it.
+	walletID *uuid.UUID
 }
 
 // m4Resolution is one executed M4 resolution (ADR 0111 §4.6) with the attempt
@@ -187,9 +192,10 @@ type m4Resolution struct {
 	// walletID is the wallet of the resolution's withdrawal request: the only
 	// wallet whose compensating debits count as recovery (RR-1 (a)).
 	walletID uuid.UUID
-	// recovered (not-paid only): executed compensating_entry debit_player
-	// requests with causation = ledgerTx, on walletID and asset - the M2 (d)
-	// recovery rule (ADR 0111 §19 RR-1 (a)). Read once in loadK3Evidence.
+	// recovered (not-paid only): the NET recovery under causation = ledgerTx
+	// on walletID and asset (netRecovery; owner decision 2, ADR 0095 §48;
+	// ADR 0111 §21) - the M2 (d) recovery rule as RR-1 (a) reuses it. Read
+	// once in loadK3Evidence.
 	recovered *big.Int
 	// matchedRefs (not-paid only; security LOW condition 1 / LF RR-4): the PSP
 	// reference of EVERY payout line (any status, any import) matched by the
@@ -277,9 +283,11 @@ func (m *payMatcher) loadK3Evidence(ctx context.Context, tx pgx.Tx, importIsMock
 	// Executed M2 resolutions (the tenant_system_read_executed policy).
 	rows, err = tx.Query(ctx, `
 		SELECT r.id, r.attempt_id, r.kind, r.ledger_transaction_id, r.amount::text, r.asset_code,
-		       a.state, COALESCE(a.terminal_reason, ''), COALESCE(a.provider_reference, ''), a.merchant_reference
+		       a.state, COALESCE(a.terminal_reason, ''), COALESCE(a.provider_reference, ''), a.merchant_reference,
+		       w.wallet_id
 		  FROM payment_manual_resolutions r
 		  JOIN payment_attempts a ON a.id = r.attempt_id AND a.tenant_id = r.tenant_id
+		  LEFT JOIN withdrawal_requests w ON w.id = r.withdrawal_request_id AND w.tenant_id = r.tenant_id
 		 WHERE r.tenant_id = $1 AND a.provider_id = $2 AND r.state = 'executed'
 		   AND r.kind IN ('m2_declare_paid', 'm2_declare_not_paid') AND r.ledger_transaction_id IS NOT NULL
 		 ORDER BY r.id`, m.tenantID, m.provider)
@@ -289,7 +297,7 @@ func (m *payMatcher) loadK3Evidence(ctx context.Context, tx pgx.Tx, importIsMock
 	for rows.Next() {
 		var r m2Resolution
 		var amount string
-		if err := rows.Scan(&r.id, &r.attemptID, &r.kind, &r.ledgerTx, &amount, &r.asset, &r.attemptState, &r.attemptReason, &r.attemptRef, &r.attemptMerchnt); err != nil {
+		if err := rows.Scan(&r.id, &r.attemptID, &r.kind, &r.ledgerTx, &amount, &r.asset, &r.attemptState, &r.attemptReason, &r.attemptRef, &r.attemptMerchnt, &r.walletID); err != nil {
 			rows.Close()
 			return err
 		}
@@ -388,19 +396,11 @@ func (m *payMatcher) loadK3Evidence(ctx context.Context, tx pgx.Tx, importIsMock
 		}
 		e.m4NotPaid[r.attemptID] = r
 		a.m4NotPaid = true
-		// RR-1 (a): the M2 (d) recovery rule - executed compensating_entry
-		// debits whose causation is THIS resolution's withdrawal_failed
+		// RR-1 (a): the M2 (d) recovery rule, NET (owner decision 2, ADR 0095
+		// §48; ADR 0111 §21) - under THIS resolution's withdrawal_failed
 		// transaction, on the withdrawal's wallet and the resolution's asset.
-		var recovered string
-		if err := tx.QueryRow(ctx, `
-			SELECT COALESCE(sum(q.amount), 0)::text FROM ledger_adjustment_requests q
-			 WHERE q.tenant_id = $1 AND q.state = 'executed' AND q.reason_code = 'compensating_entry'
-			   AND q.direction = 'debit_player' AND q.causation_transaction_id = $2
-			   AND q.wallet_id = $3 AND q.asset_code = $4`, m.tenantID, r.ledgerTx, r.walletID, r.asset).Scan(&recovered); err != nil {
+		if r.recovered, err = netRecovery(ctx, tx, m.tenantID, r.ledgerTx, r.walletID, r.asset); err != nil {
 			return fmt.Errorf("M4 not-paid recovery probe: %w", err)
-		}
-		if r.recovered, err = parseBig(recovered); err != nil {
-			return err
 		}
 	}
 
@@ -610,6 +610,59 @@ func (m *payMatcher) loadK3Evidence(ctx context.Context, tx pgx.Tx, importIsMock
 		}
 	}
 	return nil
+}
+
+// netRecoverySQL is the NET recovery of a not-paid resolution (owner decision 2
+// of 2026-10-09, ADR 0095 §48; ADR 0111 §21), shared by the M2 (d) rule and
+// RR-1 (a): with F = the resolution's withdrawal_failed transaction ($2), W =
+// its withdrawal's wallet ($3) and A = its asset ($4),
+//
+//	net = sum(D) over executed compensating_entry debit_player requests with
+//	      causation F on W and A that are NOT reversed
+//	    - sum(C) over EVERY executed credit_player request with causation F
+//
+// A debit D is REVERSED when an executed credit_player request (any reason
+// code) names D's own manual_adjustment transaction as its causation (the K2
+// correction of a correction), or when any ledger transaction names it in
+// reverses_transaction_id (no K2 path writes one; a planted posting, ADR 0110
+// T5, must not count as recovery). A reversed debit counts zero. The
+// subtraction side is deliberately unfiltered by reason code, wallet and
+// asset (fail closed: it can only lower the net; MA022 forces W and A anyway).
+// Only compensating_entry debits count as recovery (the M2 (d) rule; a debit
+// of another reason code is not a recovery of this payout).
+//
+// INV-ADJ-6 (0115 ledger_adjustment_payload_refusal) caps the compensating
+// debits per (F, debit) at F's player_cash leg on W, i.e. the amount. So
+// net >= amount holds exactly when the debits reach the amount, none is
+// reversed and no credit names F: any offset keeps the finding raised, and
+// because the cap counts a reversed debit too, a reversed recovery cannot be
+// redone under F (it stays raised: off-platform or a separately governed
+// path). The formula is still written as the net so that it stays right if
+// the cap ever changes. Integer minor units in NUMERIC(38,0), read as text
+// into big.Int: no float, the asset's precision untouched.
+const netRecoverySQL = `
+	SELECT (
+	    COALESCE((SELECT sum(d.amount) FROM ledger_adjustment_requests d
+	               WHERE d.tenant_id = $1 AND d.state = 'executed' AND d.reason_code = 'compensating_entry'
+	                 AND d.direction = 'debit_player' AND d.causation_transaction_id = $2
+	                 AND d.wallet_id = $3 AND d.asset_code = $4
+	                 AND NOT EXISTS (SELECT 1 FROM ledger_adjustment_requests c
+	                                  WHERE c.tenant_id = $1 AND c.state = 'executed' AND c.direction = 'credit_player'
+	                                    AND c.causation_transaction_id = d.ledger_transaction_id)
+	                 AND NOT EXISTS (SELECT 1 FROM ledger_transactions t
+	                                  WHERE t.tenant_id = $1 AND t.reverses_transaction_id = d.ledger_transaction_id)), 0)
+	  - COALESCE((SELECT sum(c.amount) FROM ledger_adjustment_requests c
+	               WHERE c.tenant_id = $1 AND c.state = 'executed' AND c.direction = 'credit_player'
+	                 AND c.causation_transaction_id = $2), 0)
+	)::text`
+
+// netRecovery reads netRecoverySQL for one not-paid resolution.
+func netRecovery(ctx context.Context, tx pgx.Tx, tenantID, causation, walletID uuid.UUID, asset string) (*big.Int, error) {
+	var net string
+	if err := tx.QueryRow(ctx, netRecoverySQL, tenantID, causation, walletID, asset).Scan(&net); err != nil {
+		return nil, err
+	}
+	return parseBig(net)
 }
 
 func keysOf(set map[string]bool) []string {
@@ -1015,9 +1068,20 @@ func (m *payMatcher) checkM2Standing(ctx context.Context, tx pgx.Tx) error {
 			if !t14 && evidence == nil {
 				continue
 			}
-			recovered := sumFor("debit_player", map[uuid.UUID]bool{r.ledgerTx: true})
-			if recovered.Cmp(r.amount) >= 0 {
-				continue
+			// The NET recovery (owner decision 2, ADR 0095 §48; ADR 0111 §21):
+			// debits minus credits under the causation, reversed debits
+			// excluded, on the withdrawal's wallet and the resolution's asset.
+			// No visible withdrawal: no recovery is read, (d) keeps raising.
+			recovered := "<none>"
+			if r.walletID != nil {
+				net, err := netRecovery(ctx, tx, m.tenantID, r.ledgerTx, *r.walletID, r.asset)
+				if err != nil {
+					return fmt.Errorf("M2 not-paid recovery probe: %w", err)
+				}
+				if net.Cmp(r.amount) >= 0 {
+					continue
+				}
+				recovered = net.String()
 			}
 			why := "T14 success_after_payout_declined"
 			if evidence != nil {

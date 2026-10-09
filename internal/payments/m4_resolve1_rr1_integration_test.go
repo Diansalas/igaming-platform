@@ -228,11 +228,10 @@ func TestRR1_OtherCausation_Unrelated_Partial_KeepRaising(t *testing.T) {
 	m.rr1RequireRaised(m.stmtRun(m.source(false)), p.fresh.ID, "a debit with another causation")
 	m.rr1Debit(850, otherFailedTx, "an unrelated transaction (another park's withdrawal_failed), full amount")
 	m.rr1RequireRaised(m.stmtRun(m.source(false)), p.fresh.ID, "a debit caused by an unrelated transaction")
-	// A compensating CREDIT with the right causation is not a recovery.
-	if o, err := m.k2Compensate(adjustment.DirectionCreditPlayer, 850, failedTx); err != nil || !o.Executed {
-		t.Fatalf("compensating credit with the causation: %v %+v", err, o)
-	}
-	m.rr1RequireRaised(m.stmtRun(m.source(false)), p.fresh.ID, "a credit with the causation")
+	// A compensating CREDIT with the right causation is not a recovery; under the
+	// NET rule (owner decision 2, ADR 0095 §48) it is SUBTRACTED, so it is pinned
+	// apart (TestRR30_DebitOffsetByCredit_KeepsRaising_NetReported) and this
+	// test's control stays reachable.
 	m.rr1Debit(849, failedTx, "partial recovery")
 	m.rr1RequireRaised(m.stmtRun(m.source(false)), p.fresh.ID, "partial recovery 849 of 850")
 	m.rr1Debit(1, failedTx, "the last unit")
@@ -310,10 +309,12 @@ func TestRR1_CrossTenantEvidenceCannotStopAnotherTenantsFinding(t *testing.T) {
 	b.assertInvariants()
 }
 
-// RR-1 is a STANDING-1 (unbound, line-keyed) ruling. A BOUND destination_mismatch
-// not-paid park keeps its BOUND-CLEAR-1 finding (keyed on X, no line) even after
-// R-1 stops: pinned so a change is deliberate (ADR 0111 §19 residual).
-func TestRR1_BoundDestinationMismatchPark_BoundFindingOutsideTheRuling(t *testing.T) {
+// Owner decision 1 of 2026-10-09 (ADR 0095 §48, Q-R21-1 DECIDED; ADR 0111 §21):
+// RR-1 also applies to the BOUND finding (keyed on X, no line) of a recovered
+// destination_mismatch not-paid park. This was the deliberate r21 pin "bound
+// finding kept"; it flips here: after the complete recovery BOTH R-1 and the
+// bound finding stop. The negations are in m4_resolve1_rr1net_integration_test.go.
+func TestRR1_BoundDestinationMismatchPark_StopsUnderOwnerDecision1(t *testing.T) {
 	m := newM4World(t)
 	m.k2Setup()
 	wr, a := m.payout(880)
@@ -334,11 +335,12 @@ func TestRR1_BoundDestinationMismatchPark_BoundFindingOutsideTheRuling(t *testin
 	}
 	l := m.rr1Line(x, a.MerchantReference, 880, "EUR")
 	m.rr1RequireRaised(m.stmtRun(m.source(false, l)), a.ID, "before recovery")
-	m.rr1Debit(880, *out.Resolution.LedgerTransactionID, "full recovery")
+	m.rr1Debit(879, *out.Resolution.LedgerTransactionID, "partial recovery")
+	m.rr1RequireRaised(m.stmtRun(m.source(false)), a.ID, "partial recovery")
+	m.rr1Debit(1, *out.Resolution.LedgerTransactionID, "the last unit")
 	ms := m.stmtRun(m.source(false))
-	cu, r1 := rr1Raised(ms, a.ID)
-	if r1 != 0 || cu != 1 {
-		t.Fatalf("want R-1 stopped and the bound finding kept, got cu=%d r1=%d:\n%s", cu, r1, render(ms))
+	if cu, r1 := rr1Raised(ms, a.ID); r1 != 0 || cu != 0 {
+		t.Fatalf("want R-1 and the bound finding stopped, got cu=%d r1=%d:\n%s", cu, r1, render(ms))
 	}
 }
 
