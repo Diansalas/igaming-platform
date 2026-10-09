@@ -1,0 +1,153 @@
+r30 owner decisions 1 and 2 of 2026-10-09 (ADR 0095 §48; ADR 0111 §21): NET recovery for M2 (d) and RR-1, RR-1 at the
+BOUND destination_mismatch site, reversed-payout-line tightening (RR30-3). Mutation-kill evidence.
+Task: r30-rr1net (branch gov-r30-rr1net, base dad803d). LOCAL evidence only: private scratch database r30_rr1net built
+from the worktree's migrations (scratchpad priv_db.sh); every K3/M4 world is its own private scratch database;
+runtime-shaped non-superuser, non-BYPASSRLS role; MOCK statement sources only.
+
+Code under test:
+  internal/reconciliation/payment_statement_k3.go  netRecoverySQL / netRecovery (decision 2), used by loadK3Evidence
+                                                    (RR-1 (a): m4Resolution.recovered) and checkM2Standing (M2 (d),
+                                                    wallet via a new LEFT JOIN withdrawal_requests)
+  internal/reconciliation/payment_statement_m4.go  m4NotPaidRecovered (RR30-3 reversed payout line),
+                                                    m4NotPaidRecoveredBound (decision 1), succeededGroupKey
+  internal/reconciliation/payment_statement.go     capturedUnposted (payout branch consults m4NotPaidRecoveredBound)
+
+Method: each mutant is applied IN PLACE to the working-tree source with a byte backup (scratchpad r30_mut.py, not
+committed); the mutant must compile and pass `go vet -tags integration` for reconciliation and payments (otherwise
+INVALID, not counted, anchor fixed and re-run); then
+  pure suite : go test -race -count=1 -v -run 'TestRR1_Pure|TestRR30_Pure|TestR1_M4|TestR2_M4|TestC3_' ./internal/reconciliation/
+  integration: go test -race -tags integration -count=1 -p 1 -timeout 60m -v -run '<selector per mutant>' ./internal/payments/
+The pure suite runs first; only a pure survivor goes on to its integration selector (mutants with selector None are
+pure-only). The file is restored from the backup and byte-compared ("restored cmp=identical"). A mutant is KILLED when a
+test fails.
+
+Control (unmutated; integration selector 'TestRR1_|TestRR30_|TestK3_C7_|TestK3_Y05_'):
+  pure suite  rc=0, 31 PASS (incl. subtests), 0 FAIL, 0 SKIP
+  integration rc=0, 25 PASS (incl. subtests), 0 FAIL, 0 SKIP   (both runs; 0 SKIP, so the integration tests did run)
+Note: the first batch (pure-only mutants B02-B04, B07-B09, B11, R01) was run before the first CONTROL line; the controls
+of the two later runs, on byte-identical sources (every restore cmp=identical), pass.
+
+Summary: 27 counted mutants (15 NET formula / M2 (d) / RR-1 wiring, 1 RR30-3, 11 bound site); 24 KILLED; 3 SURVIVED,
+all disclosed as EQUIVALENT:
+  N10 (debit wallet filter dropped) and N11 (debit asset filter dropped): MA022 (0115 ledger_adjustment_payload_refusal,
+      causation_not_on_wallet) refuses any request whose wallet/asset carries no player_cash leg of the causation F, and
+      F (withdrawal_failed) has exactly one player_cash leg, on the withdrawal's wallet in the attempt's asset. So no
+      executed debit under F can be on another wallet or asset; the filters are defence in depth. Same classification
+      as r21 A03/A04. TestRR30_WrongWalletOrAsset_NoRecovery pins that K2 refuses both and the finding keeps raising.
+  N12 (state = 'executed' dropped from the credit subtraction): the reconciliation session is system-shaped and sees
+      ledger_adjustment_requests only through tenant_system_read_executed (0113: state = 'executed'), so a non-executed
+      credit is invisible either way. Mutating towards subtracting MORE would only raise more (fail closed).
+INVALID in the first run (did not compile: an unused variable after the edit), anchors fixed, re-run and KILLED:
+  R01, B07 (re-run in the first batch), B06 (re-run in run 2).
+N04 SURVIVED in run 1; TestRR30_WrongWalletOrAsset_NoRecovery then gained a credit under an UNRELATED causation (the
+withdrawal's hold) before the control recovery; run 2 KILLED it (it was a test gap, not an equivalent mutant).
+
+Mutant table (id | rule):
+  N01 net: credits under the causation not subtracted (debit-only, the pre-decision rule)
+  N02 net: only compensating_entry credits subtracted
+  N03 net: credit subtraction matches any direction
+  N04 net: credit subtraction ignores the causation (all tenant credits)
+  N05 net: a debit reversed by a K2 credit (causation = the debit's transaction) still counts
+  N06 net: a debit reversed by a ledger reversal (reverses_transaction_id) still counts
+  N07 net: debits of another reason code count as recovery
+  N08 net: debit causation filter dropped
+  N09 net: debit direction filter dropped
+  N10 net: debit wallet filter dropped                         (EQUIVALENT, MA022)
+  N11 net: debit asset filter dropped                          (EQUIVALENT, MA022)
+  N12 net: state filter of the credit subtraction dropped      (EQUIVALENT, RLS tenant_system_read_executed)
+  N13 M2 (d) back to the debit-only sum
+  N14 M2 (d) wallet join broken (never recovers)
+  N15 RR-1 (M4) recovery forced to "full" (debit-only shortcut)
+  R01 RR30-3 reversed payout line ignored
+  B01 bound: capturedUnposted never consults the bound rule
+  B02 bound: reason scope dropped (destination_integrity_failure / any reason may stop)
+  B03 bound: pinned reference (provider_reference_at_submission) check dropped
+  B04 bound: empty X guard dropped
+  B05 bound: another merchant reference in the group tolerated
+  B06 bound: attribution dropped (any payout stops)
+  B07 bound: merchant-reference attribution dropped (X only)
+  B08 bound: X attribution dropped (merchant only)
+  B09 bound: empty merchant reference treated as another merchant
+  B10 bound: the shared RR-1 predicate (NET recovery, one payout) not required
+  B11 bound/RR-1: group key ignores occurred_at (two payouts merge)
+
+Raw log (scratchpad r30_mut_run.txt, verbatim, lines cut at 400 characters):
+R01 INVALID (does not compile): # github.com/Diansalas/igaming-platform/internal/reconciliation
+internal/reconciliation/payment_statement_m4.go:190:9: declared and not used: l
+
+R01 restored cmp=identical
+B02 KILLED by pure tests | bound: reason scope dropped (integrity failure / any reason) | ['--- FAIL: TestRR30_Pure_BoundDestinationMismatch_StopRuleAndEveryNegation (0.02s)']
+B02 restored cmp=identical
+B03 KILLED by pure tests | bound: pinned reference check dropped | ['--- FAIL: TestRR30_Pure_BoundDestinationMismatch_StopRuleAndEveryNegation (0.01s)']
+B03 restored cmp=identical
+B04 KILLED by pure tests | bound: empty X guard dropped | ['--- FAIL: TestRR30_Pure_BoundDestinationMismatch_StopRuleAndEveryNegation (0.02s)']
+B04 restored cmp=identical
+B07 INVALID (does not compile): # github.com/Diansalas/igaming-platform/internal/reconciliation
+internal/reconciliation/payment_statement_m4.go:260:2: declared and not used: byMerchant
+
+B07 restored cmp=identical
+B08 KILLED by pure tests | bound: X attribution dropped (merchant only) | ['--- FAIL: TestRR30_Pure_BoundDestinationMismatch_StopRuleAndEveryNegation (0.01s)', '--- FAIL: TestRR30_Pure_BoundDestinationMismatch_StopRuleAndEveryNegation/line_on_X_without_a_merchant_reference:_stops_(on_X) (0.00s)']
+B08 restored cmp=identical
+B09 KILLED by pure tests | bound: empty merchant treated as another merchant | ['--- FAIL: TestRR30_Pure_BoundDestinationMismatch_StopRuleAndEveryNegation (0.01s)', '--- FAIL: TestRR30_Pure_BoundDestinationMismatch_StopRuleAndEveryNegation/line_on_X_without_a_merchant_reference:_stops_(on_X) (0.00s)', '--- FAIL: TestRR30_Pure_BoundDestinationMismatch_StopRuleAndEveryNegation/a_re-delivery_without_
+B09 restored cmp=identical
+B11 KILLED by pure tests | bound: group key ignores occurred_at (two payouts merge) | ['--- FAIL: TestRR1_Pure_StopRuleAndEveryNegation (0.00s)', '--- FAIL: TestRR1_Pure_StopRuleAndEveryNegation/a_second_NEW_succeeded_line_(same_reference,_other_time):_raises (0.00s)', '--- FAIL: TestRR30_Pure_BoundDestinationMismatch_StopRuleAndEveryNegation (0.00s)']
+B11 restored cmp=identical
+R01 KILLED by pure tests | RR30-3 reversed payout line ignored | ['--- FAIL: TestRR30_Pure_ReversedPayoutLineKeepsRaising (0.00s)', '--- FAIL: TestRR30_Pure_BoundDestinationMismatch_StopRuleAndEveryNegation (0.00s)']
+R01 restored cmp=identical
+B07 KILLED by pure tests | bound: merchant-reference attribution dropped (X only) | ['--- FAIL: TestRR30_Pure_BoundDestinationMismatch_StopRuleAndEveryNegation (0.01s)', "--- FAIL: TestRR30_Pure_BoundDestinationMismatch_StopRuleAndEveryNegation/line_on_another_reference_carrying_the_attempt's_merchant_reference:_stops (0.00s)", '--- FAIL: TestRR30_Pure_BoundDestinationMismatch_StopRuleAndEveryNega
+B07 restored cmp=identical
+CONTROL pure rc=0 counts(pass,fail,skip)=(31, 0, 0)
+CONTROL integ rc=0 counts(pass,fail,skip)=(25, 0, 0)
+N01 KILLED by integration (TestRR30_DebitOffsetByCredit|TestRR30_CreditOfAnotherReasonCode) | net: credits under the causation not subtracted (debit-only) | ['--- FAIL: TestRR30_DebitOffsetByCredit_KeepsRaising_NetReported (5.34s)', '--- FAIL: TestRR30_CreditOfAnotherReasonCode_IsSubtracted (5.41s)']
+N01 restored cmp=identical
+N02 KILLED by integration (TestRR30_CreditOfAnotherReasonCode) | net: only compensating_entry credits subtracted | ['--- FAIL: TestRR30_CreditOfAnotherReasonCode_IsSubtracted (5.68s)']
+N02 restored cmp=identical
+N03 KILLED by integration (TestRR30_DebitOffsetByCredit|TestRR1_FullRecovery) | net: credit subtraction matches any direction | ['--- FAIL: TestRR1_FullRecovery_Stops_Idempotent_HistoryKept_NewLineRaisesAgain (5.00s)', '--- FAIL: TestRR30_DebitOffsetByCredit_KeepsRaising_NetReported (5.03s)']
+N03 restored cmp=identical
+N04 SURVIVED integration (TestRR1_FullRecovery|TestRR1_CrossTenant|TestRR30_DuplicateRecovery) | net: credit subtraction ignores the causation | (3, 0, 0)
+N04 restored cmp=identical
+N05 KILLED by integration (TestRR30_ReversedDebit|TestRR30_M2d) | net: a debit reversed by a K2 credit still counts | ['--- FAIL: TestRR30_ReversedDebit_DoesNotCount (7.06s)', '--- FAIL: TestRR30_ReversedDebit_DoesNotCount/K2_credit_caused_by_the_debit (0.69s)', '--- FAIL: TestRR30_M2d_NetRecovery (10.64s)', '--- FAIL: TestRR30_M2d_NetRecovery/reversed_debit (4.88s)']
+N05 restored cmp=identical
+N06 KILLED by integration (TestRR30_ReversedDebit) | net: a debit reversed by a ledger reversal still counts | ['--- FAIL: TestRR30_ReversedDebit_DoesNotCount (5.98s)', '--- FAIL: TestRR30_ReversedDebit_DoesNotCount/planted_ledger_reversal_of_the_debit (0.40s)']
+N06 restored cmp=identical
+N07 KILLED by integration (TestRR30_DebitOfAnotherReasonCode) | net: debits of another reason code count as recovery | ['--- FAIL: TestRR30_DebitOfAnotherReasonCode_IsNotRecovery (5.09s)']
+N07 restored cmp=identical
+N08 KILLED by integration (TestRR1_OtherCausation|TestRR30_BoundDestinationMismatch_Incomplete) | net: debit causation filter dropped | ['--- FAIL: TestRR1_OtherCausation_Unrelated_Partial_KeepRaising (8.36s)', '--- FAIL: TestRR30_BoundDestinationMismatch_IncompleteRecoveries_KeepRaising (6.24s)']
+N08 restored cmp=identical
+N09 KILLED by integration (TestRR30_DebitOffsetByCredit|TestRR30_M2d) | net: debit direction filter dropped | ['--- FAIL: TestRR30_DebitOffsetByCredit_KeepsRaising_NetReported (4.64s)', '--- FAIL: TestRR30_M2d_NetRecovery (7.86s)', '--- FAIL: TestRR30_M2d_NetRecovery/debit_offset_by_a_credit (3.79s)']
+N09 restored cmp=identical
+N10 SURVIVED integration (TestRR30_WrongWalletOrAsset|TestRR1_CrossTenant) | net: debit wallet filter dropped | (2, 0, 0)
+N10 restored cmp=identical
+N11 SURVIVED integration (TestRR30_WrongWalletOrAsset|TestRR1_UnequalAmount) | net: debit asset filter dropped | (4, 0, 0)
+N11 restored cmp=identical
+N12 SURVIVED integration (TestRR30_DebitOffsetByCredit|TestRR30_DuplicateRecovery) | net: state filter of the credit subtraction dropped | (2, 0, 0)
+N12 restored cmp=identical
+N13 KILLED by integration (TestRR30_M2d) | M2 (d) back to the debit-only sum | ['--- FAIL: TestRR30_M2d_NetRecovery (10.04s)', '--- FAIL: TestRR30_M2d_NetRecovery/debit_offset_by_a_credit (5.39s)', '--- FAIL: TestRR30_M2d_NetRecovery/reversed_debit (4.64s)']
+N13 restored cmp=identical
+N14 KILLED by integration (TestK3_C7_|TestK3_Y05_|TestRR30_M2d) | M2 (d) wallet join broken (never recovers) | ['--- FAIL: TestK3_Y05_UnrelatedCompensatingDebitDoesNotClear (6.34s)', '--- FAIL: TestK3_C7_LateSuccessAfterNotPaid_StandingUntilFullRecovery (4.95s)', '--- FAIL: TestRR30_M2d_NetRecovery (11.26s)', '--- FAIL: TestRR30_M2d_NetRecovery/debit_offset_by_a_credit (5.61s)']
+N14 restored cmp=identical
+N15 KILLED by integration (TestRR30_DebitOffsetByCredit|TestRR1_OtherCausation) | RR-1 (M4) back to the debit-only sum | ['--- FAIL: TestRR1_OtherCausation_Unrelated_Partial_KeepRaising (5.12s)', '--- FAIL: TestRR30_DebitOffsetByCredit_KeepsRaising_NetReported (5.20s)']
+N15 restored cmp=identical
+B01 KILLED by pure tests | bound: capturedUnposted never consults the bound rule | ['--- FAIL: TestRR30_Pure_BoundDestinationMismatch_StopRuleAndEveryNegation (0.01s)', '--- FAIL: TestRR30_Pure_BoundDestinationMismatch_StopRuleAndEveryNegation/line_on_X_with_the_merchant_reference:_stops (0.00s)', '--- FAIL: TestRR30_Pure_BoundDestinationMismatch_StopRuleAndEveryNegation/line_on_X_without_a_mercha
+B01 restored cmp=identical
+B05 KILLED by pure tests | bound: another merchant reference in the group tolerated | ['--- FAIL: TestRR30_Pure_BoundDestinationMismatch_StopRuleAndEveryNegation (0.01s)', '--- FAIL: TestRR30_Pure_BoundDestinationMismatch_StopRuleAndEveryNegation/line_on_X_naming_another_merchant_reference:_raises (0.00s)', '--- FAIL: TestRR30_Pure_BoundDestinationMismatch_StopRuleAndEveryNegation/the_group_also_n
+B05 restored cmp=identical
+B06 INVALID (does not compile): # github.com/Diansalas/igaming-platform/internal/reconciliation
+internal/reconciliation/payment_statement_m4.go:260:2: declared and not used: byMerchant
+
+B06 restored cmp=identical
+B10 KILLED by pure tests | bound: the shared RR-1 predicate not required | ['--- FAIL: TestRR30_Pure_BoundDestinationMismatch_StopRuleAndEveryNegation (0.01s)', '--- FAIL: TestRR30_Pure_BoundDestinationMismatch_StopRuleAndEveryNegation/partial_NET_recovery_99_of_100:_raises (0.00s)', '--- FAIL: TestRR30_Pure_BoundDestinationMismatch_StopRuleAndEveryNegation/no_recovery:_raises (0.00s)']
+B10 restored cmp=identical
+--- run 2 (after TestRR30_WrongWalletOrAsset_NoRecovery gained an unrelated-causation credit; B06 anchor fixed) ---
+CONTROL pure rc=0 counts(pass,fail,skip)=(31, 0, 0)
+CONTROL integ rc=0 counts(pass,fail,skip)=(25, 0, 0)
+N04 KILLED by integration (TestRR1_FullRecovery|TestRR1_CrossTenant|TestRR30_DuplicateRecovery|TestRR30_WrongWalletOrAsset) | net: credit subtraction ignores the causation | ['--- FAIL: TestRR30_WrongWalletOrAsset_NoRecovery (4.99s)']
+N04 restored cmp=identical
+N10 SURVIVED integration (TestRR30_WrongWalletOrAsset|TestRR1_CrossTenant) | net: debit wallet filter dropped | (2, 0, 0)
+N10 restored cmp=identical
+N11 SURVIVED integration (TestRR30_WrongWalletOrAsset|TestRR1_UnequalAmount) | net: debit asset filter dropped | (4, 0, 0)
+N11 restored cmp=identical
+N12 SURVIVED integration (TestRR30_DebitOffsetByCredit|TestRR30_DuplicateRecovery) | net: state filter of the credit subtraction dropped | (2, 0, 0)
+N12 restored cmp=identical
+B06 KILLED by pure tests | bound: attribution dropped (any payout) | ['--- FAIL: TestRR30_Pure_BoundDestinationMismatch_StopRuleAndEveryNegation (0.01s)', '--- FAIL: TestRR30_Pure_BoundDestinationMismatch_StopRuleAndEveryNegation/unrelated_payout:_another_reference,_no_merchant_reference:_raises (0.00s)']
+B06 restored cmp=identical
