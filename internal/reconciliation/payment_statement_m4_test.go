@@ -195,3 +195,25 @@ func TestC3_DestinationHint_LiveAfterClassification_SelectedByReason(t *testing.
 		t.Fatalf("bound park: %q", got)
 	}
 }
+
+// ADR 0111 24.4 (ledger-finance MEDIUM-1): a destination_mismatch park caused by an unexpected echo from an adapter that
+// declared it cannot echo must not be described as a destination mismatch; a real mismatch keeps its wording.
+func TestC3_UnexpectedEchoPark_HasItsOwnHint(t *testing.T) {
+	a := &payAttempt{operation: "payout", state: "disputed", terminalReason: "destination_mismatch", providerRef: "X", unexpectedEcho: true}
+	got := capturedUnpostedHintFor(a, "")
+	if got != unexpectedEchoPayoutCapturedUnpostedResolutionHint || strings.Contains(got, "reported to a destination other than the bound one") {
+		t.Fatalf("hint = %q", got)
+	}
+	if !strings.Contains(got, "no governed completion route") {
+		t.Fatal("the hint must state there is no governed completion route")
+	}
+	a.unexpectedEcho = false
+	if got := capturedUnpostedHintFor(a, ""); got != destinationPayoutCapturedUnpostedResolutionHint {
+		t.Fatalf("a real mismatch keeps its wording: %q", got)
+	}
+	a.unexpectedEcho = true
+	a.m4NotPaid = true
+	if got := capturedUnpostedHintFor(a, ""); got != m4NotPaidCapturedUnpostedResolutionHint {
+		t.Fatalf("an executed M4 not-paid keeps precedence: %q", got)
+	}
+}

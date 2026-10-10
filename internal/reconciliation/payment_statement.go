@@ -777,6 +777,10 @@ type payAttempt struct {
 	// m4NotPaid: an executed m4_evidence_not_paid failed this attempt's
 	// withdrawal (ADR 0111 §4.6 hint; set by loadK3Evidence).
 	m4NotPaid bool
+	// unexpectedEcho: a destination_mismatch park whose park audit row records echo_verdict =
+	// unexpected_from_unsupported (ADR 0111 24.4): the adapter declared it cannot echo, so the park does NOT mean the
+	// destination was shown to differ. Read from the existing audit row; no persistence beyond it.
+	unexpectedEcho bool
 }
 
 type payLedgerTx struct {
@@ -870,7 +874,11 @@ func (m *payMatcher) loadPlatform(ctx context.Context, tx pgx.Tx) error {
 		       a.ledger_transaction_id, wr.release_ledger_transaction_id,
 		       COALESCE(rl.provider_tx_id, ''),
 		       COALESCE(rl.transaction_type = 'withdrawal_completed' AND rl.provider_id = a.provider_id, false),
-		       COALESCE(a.terminal_reason, '')
+		       COALESCE(a.terminal_reason, ''),
+		       (a.terminal_reason = 'destination_mismatch' AND EXISTS (
+		          SELECT 1 FROM audit_log al
+		           WHERE al.tenant_id = a.tenant_id AND al.action = 'payments.payout_parked_destination'
+		             AND al.target_id = a.id::text AND al.metadata->>'echo_verdict' = 'unexpected_from_unsupported'))
 		  FROM payment_attempts a
 		  LEFT JOIN withdrawal_requests wr ON wr.id = a.withdrawal_request_id
 		  LEFT JOIN ledger_transactions rl ON rl.id = wr.release_ledger_transaction_id
@@ -885,7 +893,7 @@ func (m *payMatcher) loadPlatform(ctx context.Context, tx pgx.Tx) error {
 		a := &payAttempt{}
 		var amount string
 		if err := rows.Scan(&a.id, &a.operation, &a.depositIntent, &a.providerRef, &a.merchantRef, &a.state, &amount, &a.asset,
-			&a.sentAt, &a.ledgerTx, &a.releaseTx, &a.settlementRef, &a.releaseIsCompletion, &a.terminalReason); err != nil {
+			&a.sentAt, &a.ledgerTx, &a.releaseTx, &a.settlementRef, &a.releaseIsCompletion, &a.terminalReason, &a.unexpectedEcho); err != nil {
 			rows.Close()
 			return err
 		}

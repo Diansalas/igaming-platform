@@ -14,6 +14,7 @@ package payments
 import (
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -67,11 +68,95 @@ func runDestinationEchoConformance(t *testing.T, subject echoSubject) {
 	runCommonCells(t, subject)
 }
 
+// ---- shared drivers ------------------------------------------------------------------------------------
+
+var echoChannels = []string{"sync", "poll", "callback"}
+
+// echoMaker builds the echo the provider will report, once the attempt (and so its snapshot) exists. nil = no echo.
+type echoMaker func(w *b13bW, cl ClaimResult) *payoutinstrument.DestinationEcho
+
+func noEcho(*b13bW, ClaimResult) *payoutinstrument.DestinationEcho { return nil }
+func goodEchoOf(w *b13bW, cl ClaimResult) *payoutinstrument.DestinationEcho {
+	return w.goodEcho(cl.Attempt.ID)
+}
+func unknownKidEcho(w *b13bW, cl ClaimResult) *payoutinstrument.DestinationEcho {
+	return &payoutinstrument.DestinationEcho{Fingerprint: w.snapshot(cl.Attempt.ID).Fingerprint, Kid: "no-such-kid"}
+}
+func differentEcho(w *b13bW, cl ClaimResult) *payoutinstrument.DestinationEcho {
+	return w.badEcho(cl.Attempt.ID)
+}
+func malformedEchoOf(name string) echoMaker {
+	return func(w *b13bW, cl ClaimResult) *payoutinstrument.DestinationEcho {
+		return malformedEchoes(w.snapshot(cl.Attempt.ID))[name]
+	}
+}
+
+// driveEcho claims a fresh withdrawal and has the provider report outcome carrying mk's echo through the given channel
+// (sync = the Withdraw result, poll = the QueryStatus result, callback = a verified payout callback). The echo is
+// scripted verbatim: the harness never corrects it. Declined outcomes use a deterministic decline reason.
+func driveEcho(t *testing.T, w *b13bW, channel, key string, outcome Outcome, mk echoMaker) (withdrawal.WithdrawalRequest, ClaimResult) {
+	t.Helper()
+	ref := "ref-" + key
+	wr := w.approved(500, key)
+	cl := w.mustClaim(wr)
+	echo := mk(w, cl)
+	res := WithdrawResult{Outcome: outcome, ProviderReference: ref, DestinationEcho: echo}
+	if outcome == OutcomeDeclined {
+		res.DeclineReason = "account_closed"
+	}
+	switch channel {
+	case "sync":
+		w.prov.set(res, StatusResult{})
+		if err := w.apply(wr, cl, w.dispatch(cl)); err != nil {
+			t.Fatalf("apply: %v", err)
+		}
+	case "poll":
+		w.prov.set(WithdrawResult{Outcome: OutcomePending, ProviderReference: ref}, StatusResult{})
+		if err := w.apply(wr, cl, w.dispatch(cl)); err != nil {
+			t.Fatal(err)
+		}
+		st := StatusResult{Outcome: outcome, Amount: 500, AssetCode: "EUR", DestinationEcho: echo}
+		if outcome == OutcomeDeclined {
+			st.DeclineReason = "account_closed"
+		}
+		w.prov.set(WithdrawResult{}, st)
+		if err := PollPayoutStatus(w.ctx(), w.pool, w.orch, MockCredentialResolver{}, w.f.tenantID, w.attempt(cl.Attempt.ID), time.Now().Add(time.Minute), nil); err != nil {
+			t.Fatalf("poll: %v", err)
+		}
+	case "callback":
+		w.prov.set(WithdrawResult{Outcome: OutcomePending, ProviderReference: ref}, StatusResult{})
+		if err := w.apply(wr, cl, w.dispatch(cl)); err != nil {
+			t.Fatal(err)
+		}
+		if err := w.callback(w.attempt(cl.Attempt.ID), outcome, ref, echo); err != nil {
+			t.Fatalf("callback: %v", err)
+		}
+	default:
+		t.Fatalf("unknown channel %q", channel)
+	}
+	return wr, cl
+}
+
+// wantNotSettled asserts the payout did not settle: no Succeeded attempt, no Complete, no release, nothing posted.
+func (w *b13bW) wantNotSettled(wr withdrawal.WithdrawalRequest, cl ClaimResult) {
+	w.t.Helper()
+	if a := w.attempt(cl.Attempt.ID); a.State == AttemptSucceeded {
+		w.t.Fatalf("attempt = %s: the evidence was accepted", a.State)
+	}
+	if got := w.wr(wr.ID); got.State != withdrawal.StateSubmitted || got.ReleaseLedgerTransactionID != nil {
+		w.t.Fatalf("withdrawal = %s release=%v: the payout progressed", got.State, got.ReleaseLedgerTransactionID)
+	}
+	if w.baseLedgerSet && w.ledgerTx() != w.baseLedger {
+		w.t.Fatal("ledger moved")
+	}
+	w.balanced()
+}
+
 // ---- cells common to both declarations -----------------------------------------------------------------
 
 func runCommonCells(t *testing.T, subject echoSubject) {
 	// A callback can never set or change a destination: the attempt snapshot, the instrument binding on the withdrawal
-	// and the snapshot/instrument row counts are byte-identical before and after any callback, whatever it carries.
+	// and the snapshot/instrument row counts are identical before and after any callback, whatever it carries.
 	t.Run("callback cannot set the destination", func(t *testing.T) {
 		w := subject(t, "cf-cb")
 		wr, cl, gr := w.submittedWithResult(WithdrawResult{Outcome: OutcomePending, ProviderReference: "ref-cf-cb"}, "cf-cb")
@@ -100,106 +185,69 @@ func runCommonCells(t *testing.T, subject echoSubject) {
 		w.wantParked(wr, w.attempt(cl.Attempt.ID), TerminalReasonDestinationMismatch)
 	})
 
-	// A mismatch-class echo can never progress the payout, on every channel, for every outcome that could settle it.
+	// A mismatch-class echo can never progress the payout, on every channel, for a success AND a decline (a decline would
+	// otherwise release the hold).
 	t.Run("a mismatch cannot progress the payout", func(t *testing.T) {
-		for _, ch := range []string{"sync", "poll", "callback"} {
-			t.Run(ch, func(t *testing.T) {
-				w := subject(t, "cf-np-"+ch)
-				bad := &payoutinstrument.DestinationEcho{Fingerprint: strings.Repeat("ab", 32), Kid: "no-such-kid"}
-				wr, cl := driveEcho(t, w, ch, "cf-np-"+ch, bad)
-				ledger := w.ledgerTx()
-				a := w.attempt(cl.Attempt.ID)
-				if a.State != AttemptDisputed {
-					t.Fatalf("attempt = %s, want disputed", a.State)
-				}
-				if got := w.wr(wr.ID); got.State == withdrawal.StateCompleted || got.ReleaseLedgerTransactionID != nil {
-					t.Fatalf("withdrawal = %s release=%v: a mismatch progressed the payout", got.State, got.ReleaseLedgerTransactionID)
-				}
-				if w.ledgerTx() != ledger {
-					t.Fatal("ledger moved")
-				}
-				w.balanced()
-			})
+		for _, outcome := range []Outcome{OutcomeSucceeded, OutcomeDeclined} {
+			for _, ch := range echoChannels {
+				t.Run(string(outcome)+"/"+ch, func(t *testing.T) {
+					w := subject(t, "cf-np")
+					wr, cl := driveEcho(t, w, ch, "cf-np", outcome, unknownKidEcho)
+					w.wantParked(wr, w.attempt(cl.Attempt.ID), TerminalReasonDestinationMismatch)
+					w.wantNotSettled(wr, cl)
+				})
+			}
 		}
 	})
-}
 
-// driveEcho runs one withdrawal (identified by key) to the point where the provider reports success carrying echo, via
-// the given channel. The echo is scripted verbatim: the harness never corrects it.
-func driveEcho(t *testing.T, w *b13bW, channel, key string, echo *payoutinstrument.DestinationEcho) (withdrawal.WithdrawalRequest, ClaimResult) {
-	t.Helper()
-	ref := "ref-" + key
-	var wrOut withdrawal.WithdrawalRequest
-	var clOut ClaimResult
-	switch channel {
-	case "sync":
-		wr, cl, gr := w.submittedWithResult(WithdrawResult{Outcome: OutcomeSucceeded, ProviderReference: ref, DestinationEcho: echo}, key)
-		wrOut, clOut = wr, cl
-		if err := w.apply(wr, cl, gr); err != nil {
-			t.Fatalf("apply: %v", err)
-		}
-	case "poll":
-		wr, cl, gr := w.submittedWithResult(WithdrawResult{Outcome: OutcomePending, ProviderReference: ref}, key)
-		wrOut, clOut = wr, cl
-		if err := w.apply(wr, cl, gr); err != nil {
+	// Concurrency: a callback and a poll race with the same mismatched echo (two of each). Exactly one park, one audit row,
+	// one alert occurrence; the hold untouched.
+	t.Run("racing callback and poll with a mismatched echo: one park", func(t *testing.T) {
+		w := subject(t, "cf-race")
+		wr := w.approved(500, "cf-race")
+		cl := w.mustClaim(wr)
+		bad := differentEcho(w, cl)
+		w.prov.set(WithdrawResult{Outcome: OutcomePending, ProviderReference: "ref-cf-race"}, StatusResult{})
+		if err := w.apply(wr, cl, w.dispatch(cl)); err != nil {
 			t.Fatal(err)
 		}
-		w.prov.set(WithdrawResult{}, StatusResult{Outcome: OutcomeSucceeded, Amount: 500, AssetCode: "EUR", DestinationEcho: echo})
-		if err := PollPayoutStatus(w.ctx(), w.pool, w.orch, MockCredentialResolver{}, w.f.tenantID, w.attempt(cl.Attempt.ID), time.Now().Add(time.Minute), nil); err != nil {
-			t.Fatalf("poll: %v", err)
+		w.prov.set(WithdrawResult{}, StatusResult{Outcome: OutcomeSucceeded, Amount: 500, AssetCode: "EUR", DestinationEcho: bad})
+		pending := w.attempt(cl.Attempt.ID)
+		var wg sync.WaitGroup
+		errs := make(chan error, 4)
+		for i := 0; i < 2; i++ {
+			wg.Add(2)
+			go func() {
+				defer wg.Done()
+				errs <- w.callback(pending, OutcomeSucceeded, "ref-cf-race", bad)
+			}()
+			go func() {
+				defer wg.Done()
+				errs <- PollPayoutStatus(w.ctx(), w.pool, w.orch, MockCredentialResolver{}, w.f.tenantID, pending, time.Now().Add(time.Minute), nil)
+			}()
 		}
-	case "callback":
-		wr, cl, gr := w.submittedWithResult(WithdrawResult{Outcome: OutcomePending, ProviderReference: ref}, key)
-		wrOut, clOut = wr, cl
-		if err := w.apply(wr, cl, gr); err != nil {
-			t.Fatal(err)
+		wg.Wait()
+		close(errs)
+		for err := range errs {
+			if err != nil {
+				t.Fatalf("racing evidence: %v", err)
+			}
 		}
-		if err := w.callback(w.attempt(cl.Attempt.ID), OutcomeSucceeded, ref, echo); err != nil {
-			t.Fatalf("callback: %v", err)
+		w.wantParked(wr, w.attempt(cl.Attempt.ID), TerminalReasonDestinationMismatch)
+		if al, _ := w.alertFor(cl.Attempt.ID, TerminalReasonDestinationMismatch); al.Occurrences != 1 {
+			t.Fatalf("alert occurrences = %d, want 1", al.Occurrences)
 		}
-	default:
-		t.Fatalf("unknown channel %q", channel)
-	}
-	return wrOut, clOut
+	})
 }
 
 // ---- Supported ----------------------------------------------------------------------------------------
 
 func runSupportedCells(t *testing.T, subject echoSubject) {
 	t.Run("supported echo settles on every channel", func(t *testing.T) {
-		for _, ch := range []string{"sync", "poll", "callback"} {
+		for _, ch := range echoChannels {
 			t.Run(ch, func(t *testing.T) {
-				w := subject(t, "cf-ok-"+ch)
-				// The good echo needs the snapshot, which T1p writes at claim time: claim first.
-				key := "cf-ok-" + ch
-				wr := w.approved(500, key)
-				cl := w.mustClaim(wr)
-				good := w.goodEcho(cl.Attempt.ID)
-				ref := "ref-" + key
-				switch ch {
-				case "sync":
-					w.prov.set(WithdrawResult{Outcome: OutcomeSucceeded, ProviderReference: ref, DestinationEcho: good}, StatusResult{})
-					if err := w.apply(wr, cl, w.dispatch(cl)); err != nil {
-						t.Fatal(err)
-					}
-				case "poll":
-					w.prov.set(WithdrawResult{Outcome: OutcomePending, ProviderReference: ref}, StatusResult{})
-					if err := w.apply(wr, cl, w.dispatch(cl)); err != nil {
-						t.Fatal(err)
-					}
-					w.prov.set(WithdrawResult{}, StatusResult{Outcome: OutcomeSucceeded, Amount: 500, AssetCode: "EUR", DestinationEcho: good})
-					if err := PollPayoutStatus(w.ctx(), w.pool, w.orch, MockCredentialResolver{}, w.f.tenantID, w.attempt(cl.Attempt.ID), time.Now().Add(time.Minute), nil); err != nil {
-						t.Fatal(err)
-					}
-				case "callback":
-					w.prov.set(WithdrawResult{Outcome: OutcomePending, ProviderReference: ref}, StatusResult{})
-					if err := w.apply(wr, cl, w.dispatch(cl)); err != nil {
-						t.Fatal(err)
-					}
-					if err := w.callback(w.attempt(cl.Attempt.ID), OutcomeSucceeded, ref, good); err != nil {
-						t.Fatal(err)
-					}
-				}
+				w := subject(t, "cf-ok")
+				wr, cl := driveEcho(t, w, ch, "cf-ok", OutcomeSucceeded, goodEchoOf)
 				if a := w.attempt(cl.Attempt.ID); a.State != AttemptSucceeded {
 					t.Fatalf("attempt = %s, want succeeded", a.State)
 				}
@@ -211,60 +259,74 @@ func runSupportedCells(t *testing.T, subject echoSubject) {
 		}
 	})
 
-	t.Run("a success without the echo is ambiguous, never a success", func(t *testing.T) {
-		w := subject(t, "cf-abs")
-		wr, cl, gr := w.submittedWithResult(WithdrawResult{Outcome: OutcomeSucceeded, ProviderReference: "ref-cf-abs"}, "cf-abs")
-		if err := w.apply(wr, cl, gr); err != nil {
-			t.Fatal(err)
+	// A success without the echo is ambiguous, never a success: sync marks the attempt ambiguous, the poll reschedules (the
+	// attempt stays pending), the callback cell is a no-op for it.
+	t.Run("a success without the echo is never a success", func(t *testing.T) {
+		for _, ch := range echoChannels {
+			t.Run(ch, func(t *testing.T) {
+				w := subject(t, "cf-abs")
+				wr, cl := driveEcho(t, w, ch, "cf-abs", OutcomeSucceeded, noEcho)
+				a := w.attempt(cl.Attempt.ID)
+				switch ch {
+				case "sync":
+					if a.State != AttemptAmbiguous {
+						t.Fatalf("attempt = %s, want ambiguous", a.State)
+					}
+				default:
+					if a.State != AttemptPending && a.State != AttemptAmbiguous {
+						t.Fatalf("attempt = %s, want pending or ambiguous (rescheduled / no-op)", a.State)
+					}
+				}
+				w.wantNotSettled(wr, cl)
+			})
 		}
-		if a := w.attempt(cl.Attempt.ID); a.State != AttemptAmbiguous {
-			t.Fatalf("attempt = %s, want ambiguous", a.State)
-		}
-		if got := w.wr(wr.ID); got.State != withdrawal.StateSubmitted || got.ReleaseLedgerTransactionID != nil {
-			t.Fatal("no completion without the declared echo")
-		}
-		w.balanced()
 	})
 
-	t.Run("mismatched and unknown-kid echo park destination_mismatch", func(t *testing.T) {
-		for _, kind := range []string{"different fingerprint", "unknown kid"} {
-			t.Run(kind, func(t *testing.T) {
-				w := subject(t, "cf-mm")
-				wr := w.approved(500, "cf-mm")
-				cl := w.mustClaim(wr)
-				echo := w.badEcho(cl.Attempt.ID)
-				if kind == "unknown kid" {
-					echo = &payoutinstrument.DestinationEcho{Fingerprint: w.snapshot(cl.Attempt.ID).Fingerprint, Kid: "no-such-kid"}
-				}
-				w.prov.set(WithdrawResult{Outcome: OutcomeSucceeded, ProviderReference: "ref-cf-mm", DestinationEcho: echo}, StatusResult{})
-				if err := w.apply(wr, cl, w.dispatch(cl)); err != nil {
-					t.Fatal(err)
-				}
+	t.Run("mismatched and unknown-kid echo park destination_mismatch on every channel", func(t *testing.T) {
+		for name, mk := range map[string]echoMaker{"different fingerprint": differentEcho, "unknown kid": unknownKidEcho} {
+			for _, ch := range echoChannels {
+				t.Run(name+"/"+ch, func(t *testing.T) {
+					w := subject(t, "cf-mm")
+					wr, cl := driveEcho(t, w, ch, "cf-mm", OutcomeSucceeded, mk)
+					w.wantParked(wr, w.attempt(cl.Attempt.ID), TerminalReasonDestinationMismatch)
+				})
+			}
+		}
+	})
+
+	t.Run("a decline carrying a mismatched echo parks too (the hold is not released)", func(t *testing.T) {
+		for _, ch := range echoChannels {
+			t.Run(ch, func(t *testing.T) {
+				w := subject(t, "cf-dm")
+				wr, cl := driveEcho(t, w, ch, "cf-dm", OutcomeDeclined, differentEcho)
 				w.wantParked(wr, w.attempt(cl.Attempt.ID), TerminalReasonDestinationMismatch)
 			})
 		}
 	})
 
+	// Malformed echoes fail closed on every channel and their text is never stored. All ten shapes on the sync channel, a
+	// representative three (kid grammar, charset, length) on poll and callback.
 	t.Run("malformed echo fails closed and its text is not stored", func(t *testing.T) {
 		w0 := subject(t, "cf-mal0")
 		wr0 := w0.approved(500, "cf-mal0")
 		cl0 := w0.mustClaim(wr0)
-		names := malformedEchoes(w0.snapshot(cl0.Attempt.ID))
-		i := 0
-		for name := range names {
-			i++
-			t.Run(name, func(t *testing.T) {
-				w := subject(t, "cf-mal")
-				wr := w.approved(500, "cf-mal")
-				cl := w.mustClaim(wr)
-				echo := malformedEchoes(w.snapshot(cl.Attempt.ID))[name]
-				w.prov.set(WithdrawResult{Outcome: OutcomeSucceeded, ProviderReference: "ref-cf-mal", DestinationEcho: echo}, StatusResult{})
-				if err := w.apply(wr, cl, w.dispatch(cl)); err != nil {
-					t.Fatal(err)
+		reps := map[string]bool{"kid with markup": true, "fingerprint upper-case charset": true, "fingerprint too short": true}
+		for name := range malformedEchoes(w0.snapshot(cl0.Attempt.ID)) {
+			for _, ch := range echoChannels {
+				if ch != "sync" && !reps[name] {
+					continue
 				}
-				w.wantParked(wr, w.attempt(cl.Attempt.ID), TerminalReasonDestinationMismatch)
-				w.wantNoRawEchoInAudit(cl.Attempt.ID, echo)
-			})
+				t.Run(name+"/"+ch, func(t *testing.T) {
+					w := subject(t, "cf-mal")
+					var echo *payoutinstrument.DestinationEcho
+					wr, cl := driveEcho(t, w, ch, "cf-mal", OutcomeSucceeded, func(w *b13bW, cl ClaimResult) *payoutinstrument.DestinationEcho {
+						echo = malformedEchoOf(name)(w, cl)
+						return echo
+					})
+					w.wantParked(wr, w.attempt(cl.Attempt.ID), TerminalReasonDestinationMismatch)
+					w.wantNoRawEchoInAudit(cl.Attempt.ID, echo)
+				})
+			}
 		}
 	})
 
@@ -305,48 +367,28 @@ func runUnsupportedCells(t *testing.T, subject echoSubject) {
 		w.balanced()
 	})
 
-	// An echo from an Unsupported adapter is untrusted evidence: it is NEVER a match (not even when it equals the snapshot,
-	// since the adapter declared it cannot compute one), and it is not silently ignored. It fails closed as a mismatch-class
-	// anomaly (ADR 0111 24).
+	// An echo from an Unsupported adapter is untrusted evidence: NEVER a match (not even when it equals the snapshot) and not
+	// silently ignored. It fails closed as a mismatch-class anomaly (ADR 0111 24.4).
 	t.Run("an echo from an unsupported adapter is untrusted: matching, mismatching and malformed all park", func(t *testing.T) {
-		for _, kind := range []string{"equal to the snapshot", "different fingerprint", "malformed"} {
-			for _, ch := range []string{"sync", "poll", "callback"} {
+		kinds := map[string]echoMaker{
+			"equal to the snapshot": goodEchoOf,
+			"different fingerprint": differentEcho,
+			"malformed": func(*b13bW, ClaimResult) *payoutinstrument.DestinationEcho {
+				return &payoutinstrument.DestinationEcho{Fingerprint: "NOT-HEX", Kid: "bad kid"}
+			},
+		}
+		for kind, mk := range kinds {
+			for _, ch := range echoChannels {
 				t.Run(kind+"/"+ch, func(t *testing.T) {
 					w := subject(t, "cf-u-echo")
-					key := "cf-u-echo"
-					wr := w.approved(500, key)
-					cl := w.mustClaim(wr)
-					snap := w.snapshot(cl.Attempt.ID)
-					echo := &payoutinstrument.DestinationEcho{Fingerprint: snap.Fingerprint, Kid: snap.FingerprintKID}
-					switch kind {
-					case "different fingerprint":
-						echo = w.badEcho(cl.Attempt.ID)
-					case "malformed":
-						echo = &payoutinstrument.DestinationEcho{Fingerprint: "NOT-HEX", Kid: "bad kid"}
-					}
-					ref := "ref-" + key
-					switch ch {
-					case "sync":
-						w.prov.set(WithdrawResult{Outcome: OutcomeSucceeded, ProviderReference: ref, DestinationEcho: echo}, StatusResult{})
-						if err := w.apply(wr, cl, w.dispatch(cl)); err != nil {
-							t.Fatal(err)
-						}
-					case "poll":
-						w.prov.set(WithdrawResult{Outcome: OutcomePending, ProviderReference: ref}, StatusResult{})
-						if err := w.apply(wr, cl, w.dispatch(cl)); err != nil {
-							t.Fatal(err)
-						}
-						w.prov.set(WithdrawResult{}, StatusResult{Outcome: OutcomeSucceeded, Amount: 500, AssetCode: "EUR", DestinationEcho: echo})
-						if err := PollPayoutStatus(w.ctx(), w.pool, w.orch, MockCredentialResolver{}, w.f.tenantID, w.attempt(cl.Attempt.ID), time.Now().Add(time.Minute), nil); err != nil {
-							t.Fatal(err)
-						}
-					case "callback":
-						w.prov.set(WithdrawResult{Outcome: OutcomePending, ProviderReference: ref}, StatusResult{})
-						if err := w.apply(wr, cl, w.dispatch(cl)); err != nil {
-							t.Fatal(err)
-						}
-						for i := 0; i < 2; i++ { // replay
-							if err := w.callback(w.attempt(cl.Attempt.ID), OutcomeSucceeded, ref, echo); err != nil {
+					var echo *payoutinstrument.DestinationEcho
+					wr, cl := driveEcho(t, w, ch, "cf-u-echo", OutcomeSucceeded, func(w *b13bW, cl ClaimResult) *payoutinstrument.DestinationEcho {
+						echo = mk(w, cl)
+						return echo
+					})
+					if ch == "callback" { // replay
+						for i := 0; i < 2; i++ {
+							if err := w.callback(w.attempt(cl.Attempt.ID), OutcomeSucceeded, "ref-cf-u-echo", echo); err != nil {
 								t.Fatal(err)
 							}
 						}
@@ -356,8 +398,21 @@ func runUnsupportedCells(t *testing.T, subject echoSubject) {
 					}
 					w.wantParked(wr, w.attempt(cl.Attempt.ID), TerminalReasonDestinationMismatch)
 					w.wantNoRawEchoInAudit(cl.Attempt.ID, echo)
+					if n := w.count(`SELECT count(*) FROM audit_log WHERE action='payments.payout_parked_destination' AND target_id=$1 AND metadata->>'echo_verdict'='unexpected_from_unsupported'`, cl.Attempt.ID.String()); n != 1 {
+						t.Fatalf("park audit rows recording echo_verdict=unexpected_from_unsupported = %d, want 1", n)
+					}
 				})
 			}
+		}
+	})
+
+	t.Run("a decline carrying an echo from an unsupported adapter parks too", func(t *testing.T) {
+		for _, ch := range echoChannels {
+			t.Run(ch, func(t *testing.T) {
+				w := subject(t, "cf-u-dm")
+				wr, cl := driveEcho(t, w, ch, "cf-u-dm", OutcomeDeclined, goodEchoOf)
+				w.wantParked(wr, w.attempt(cl.Attempt.ID), TerminalReasonDestinationMismatch)
+			})
 		}
 	})
 

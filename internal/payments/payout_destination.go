@@ -84,6 +84,9 @@ type PayoutOption func(*payoutEnv)
 type payoutEnv struct {
 	destinations *payoutinstrument.Service
 	providers    func(providerID string) (PaymentProvider, bool)
+	// frozen is the immutable provider-id -> destination-echo declaration map taken when the orchestrator was wired
+	// (ADR 0111 24.7). nil means "not frozen" (an env built by hand): the live manifest is then the only source.
+	frozen map[string]payoutinstrument.DestinationEchoSemantics
 }
 
 // WithDestinations supplies the payout-instrument service.
@@ -95,6 +98,15 @@ func WithDestinations(svc *payoutinstrument.Service) PayoutOption {
 // DestinationEchoSemantics declaration.
 func WithProviderLookup(f func(providerID string) (PaymentProvider, bool)) PayoutOption {
 	return func(e *payoutEnv) { e.providers = f }
+}
+
+// WithFrozenEchoDeclarations supplies the frozen provider-id -> declaration map (a private copy is taken).
+func WithFrozenEchoDeclarations(m map[string]payoutinstrument.DestinationEchoSemantics) PayoutOption {
+	cp := make(map[string]payoutinstrument.DestinationEchoSemantics, len(m))
+	for k, v := range m {
+		cp[k] = v
+	}
+	return func(e *payoutEnv) { e.frozen = cp }
 }
 
 func buildPayoutEnv(opts []PayoutOption) payoutEnv {
@@ -122,26 +134,44 @@ func (o *Orchestrator) PayoutOptions() []PayoutOption {
 	if o == nil {
 		return nil
 	}
-	return []PayoutOption{WithDestinations(o.destinations), WithProviderLookup(o.Provider)}
+	return []PayoutOption{WithDestinations(o.destinations), WithProviderLookup(o.Provider), WithFrozenEchoDeclarations(o.echoFrozen)}
 }
 
 func (o *Orchestrator) payoutEnv() payoutEnv {
 	return buildPayoutEnv(o.PayoutOptions())
 }
 
-// echoSemantics returns the destination-echo declaration of the attempt's adapter. An unknown provider, a missing
-// registry or an unset declaration all read as DestinationEchoUnset, which EvaluateEcho treats like Unsupported for an
-// echo (never a match) and which never makes an absent echo ambiguous: an unset declaration cannot register
-// (validateManifest, VerifyStartup), so this value only appears for evidence that cannot be attributed to an adapter.
-func (e payoutEnv) echoSemantics(providerID *string) payoutinstrument.DestinationEchoSemantics {
+// echoState is the destination-echo declaration the evidence handling relies on, and whether it can be trusted.
+type echoState struct {
+	declared payoutinstrument.DestinationEchoSemantics
+	// untrusted: the declaration cannot be relied on for this provider (ADR 0111 24.7): the provider is unknown to the
+	// registry (LOW-2), or its live manifest no longer equals the declaration frozen at wiring (LOW-1), or the live value
+	// is not a valid declaration. A success under an untrusted declaration is never accepted: it is ambiguous.
+	untrusted bool
+}
+
+// echoState returns the frozen declaration for the attempt's adapter. The live manifest is consulted only to DETECT
+// drift: a live value that differs from the frozen one (or an adapter the registry no longer knows) makes the state
+// untrusted; it never replaces the frozen declaration, so a runtime change from Supported to Unsupported/Unset cannot turn
+// an ambiguous success into an accepted one. An unfrozen env (built by hand, never in production wiring) uses the live
+// value alone.
+func (e payoutEnv) echoState(providerID *string) echoState {
 	if providerID == nil || e.providers == nil {
-		return payoutinstrument.DestinationEchoUnset
+		return echoState{declared: payoutinstrument.DestinationEchoUnset, untrusted: true}
 	}
 	p, ok := e.providers(*providerID)
-	if !ok {
-		return payoutinstrument.DestinationEchoUnset
+	if !ok || p == nil {
+		return echoState{declared: payoutinstrument.DestinationEchoUnset, untrusted: true}
 	}
-	return p.Capabilities().Manifest.DestinationEchoSemantics
+	live := p.Capabilities().Manifest.DestinationEchoSemantics
+	if e.frozen == nil {
+		return echoState{declared: live, untrusted: !live.Valid()}
+	}
+	f, ok := e.frozen[*providerID]
+	if !ok || !f.Valid() {
+		return echoState{declared: payoutinstrument.DestinationEchoUnset, untrusted: true}
+	}
+	return echoState{declared: f, untrusted: live != f}
 }
 
 // ---- the gate ------------------------------------------------------------
@@ -446,19 +476,25 @@ func payoutDestinationEvidence(ctx context.Context, tx pgx.Tx, env payoutEnv, at
 		return res, parkPayoutDestination(ctx, tx, fresh, requestID, evidence, TerminalReasonDestinationIntegrityFailure,
 			map[string]any{"gate_reason": g.Reason}, reference)
 	}
-	declared := env.echoSemantics(fresh.ProviderID)
-	verdict := payoutinstrument.EvaluateEcho(snap, echo, declared)
+	st := env.echoState(fresh.ProviderID)
+	verdict := payoutinstrument.EvaluateEcho(snap, echo, st.declared)
 	switch {
 	case verdict.Mismatch():
 		res.Stop = true
 		return res, parkPayoutDestination(ctx, tx, fresh, requestID, evidence, TerminalReasonDestinationMismatch, echoMeta(snap, echo, verdict), reference)
-	case verdict == payoutinstrument.EchoAbsent:
-		if class == ErrorClassSucceeded && declared == payoutinstrument.DestinationEchoSupported {
+	default:
+		// EchoAbsent or EchoMatch. A success is ambiguous (the poll decides, never a success) when a Supported adapter sent
+		// no echo, and ALSO whenever the declaration is untrusted (unknown provider, or drift from the frozen declaration),
+		// even if the echo happens to match.
+		if class == ErrorClassSucceeded && (st.untrusted || (verdict == payoutinstrument.EchoAbsent && st.declared == payoutinstrument.DestinationEchoSupported)) {
 			res.AmbiguousSuccess = true
 		}
 	}
 	return res, nil
 }
+
+// terminalSignalAuditMaxDistinctEchoes caps the audit rows one attempt can accumulate through terminal-echo signals.
+const terminalSignalAuditMaxDistinctEchoes = 8
 
 // payoutTerminalDestinationSignal handles a differing echo on an already succeeded/declined
 // payout: no state change, no posting; the audit row and the raise-only P1 signal.
@@ -469,7 +505,7 @@ func payoutTerminalDestinationSignal(ctx context.Context, tx pgx.Tx, env payoutE
 	var snapFP, kid string
 	if env.destinations != nil {
 		if snap, err := env.destinations.CheckSnapshot(ctx, tx, snapshotExpectFor(wr, attempt)); err == nil {
-			if !payoutinstrument.EvaluateEcho(snap, echo, env.echoSemantics(attempt.ProviderID)).Mismatch() {
+			if !payoutinstrument.EvaluateEcho(snap, echo, env.echoState(attempt.ProviderID).declared).Mismatch() {
 				return res, nil
 			}
 			snapFP, kid = snap.Fingerprint, snap.FingerprintKID
@@ -487,6 +523,17 @@ func payoutTerminalDestinationSignal(ctx context.Context, tx pgx.Tx, env payoutE
 		attempt.TenantID, terminalSignalAuditAction, attempt.ID.String(), ekid, efpp, attempt.CreatedAt).Scan(&seen); err != nil {
 		return res, fmt.Errorf("payments: terminal destination signal: audit lookup: %w", err)
 	}
+	// LOW-3 (ADR 0111 24.7): a provider can vary a malformed echo on every delivery, and the dedupe above is per distinct
+	// echo. The distinct-echo audit rows per attempt are therefore capped; beyond the cap only occurrences are counted
+	// (the raise below is unconditional and dedupes into one open alert whose occurrence count keeps rising).
+	if !seen {
+		var distinct int
+		if err := tx.QueryRow(ctx, `SELECT count(*) FROM audit_log WHERE tenant_id = $1 AND action = $2 AND target_id = $3 AND created_at >= $4`,
+			attempt.TenantID, terminalSignalAuditAction, attempt.ID.String(), attempt.CreatedAt).Scan(&distinct); err != nil {
+			return res, fmt.Errorf("payments: terminal destination signal: audit count: %w", err)
+		}
+		seen = distinct >= terminalSignalAuditMaxDistinctEchoes
+	}
 	if !seen {
 		if err := audit.Record(ctx, tx, audit.Entry{
 			TenantID: attempt.TenantID, ActorType: audit.ActorSystem, Action: terminalSignalAuditAction,
@@ -494,7 +541,7 @@ func payoutTerminalDestinationSignal(ctx context.Context, tx pgx.Tx, env payoutE
 			Metadata: map[string]any{
 				"withdrawal_request_id": wr.ID.String(), "provider_id": providerIDOrEmpty(attempt), "state": string(attempt.State),
 				"snapshot_fingerprint_prefix": fpPrefix(snapFP), "snapshot_kid": kid, "echo_kid": ekid, "echo_fingerprint_prefix": efpp,
-				"echo_verdict": echoVerdictName(payoutinstrument.EvaluateEcho(payoutinstrument.Snapshot{Fingerprint: snapFP, FingerprintKID: kid}, echo, env.echoSemantics(attempt.ProviderID))),
+				"echo_verdict": echoVerdictName(payoutinstrument.EvaluateEcho(payoutinstrument.Snapshot{Fingerprint: snapFP, FingerprintKID: kid}, echo, env.echoState(attempt.ProviderID).declared)),
 			},
 		}); err != nil {
 			return res, err

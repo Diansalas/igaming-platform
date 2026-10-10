@@ -2238,12 +2238,15 @@ non-test code in `payments` calls `CompareEcho` directly (that would bypass the 
 * **An echo from an `Unsupported` (or unset) adapter is mismatch-class, not ignored and not a match.** Reasons: (1) the adapter declared it
   cannot compute a tenant-bound echo, so any echo contradicts the declaration: either the declaration is wrong or the evidence is forged or
   from another source; (2) treating it as a match would let a non-computing adapter "pretend" destination evidence, which decision 5 forbids,
-  and an echo equal to the snapshot proves nothing about a fingerprint the adapter cannot have computed; (3) ignoring it for settlement would
-  quietly settle on evidence the platform has just seen to be inconsistent, while parking costs only a governed M4 resolution of a held
-  payout, the same cost as any mismatch; (4) it reuses the existing park, audit, `destination_mismatch` P1 and terminal signal, so no new
-  raise site exists. The equal-to-snapshot case is deliberately parked as well (`echo_verdict = unexpected_from_unsupported`). An unknown or
-  unset declaration at evidence time (an attempt whose provider is not in the registry) reads as `Unset` and behaves like `Unsupported` for an
-  echo; an absent echo is never ambiguous for it. Such evidence cannot arise from a registered adapter.
+  and an echo equal to the snapshot proves nothing about a fingerprint the adapter cannot have computed; (3) ignoring it for settlement would quietly settle on evidence the platform has just seen to be inconsistent. The cost of parking is real
+  and is NOT small (corrected after the ledger-finance review): a payout the PSP really paid, carrying a bogus or spurious echo, parks
+  `destination_mismatch` with the hold kept and the withdrawal stuck in `submitted`, and **there is currently NO governed exit for that
+  park**: the 0125 M4 route admits `destination_mismatch` for "not paid" on positive decline evidence only, so a really-paid payout has no
+  governed "paid" completion. Fail-closed is chosen over silently settling, but the stuck hold is a real operational and financial
+  consequence, recorded as the OWNER/ARCHITECT QUESTION in 24.6 item 6; (4) it reuses the existing park, audit, `destination_mismatch` P1 and terminal signal, so no new
+  raise site exists. The equal-to-snapshot case is deliberately parked as well (`echo_verdict = unexpected_from_unsupported`). An unknown provider or
+  unset declaration at evidence time reads as `Unset`, is `untrusted` and behaves like `Unsupported` for an echo; a success from it is
+  ambiguous, never accepted (24.7 LOW-1/LOW-2). Such evidence cannot arise from a correctly wired registered adapter.
 * **Callbacks are evidence only (unchanged, re-pinned).** The existing static pins stay green (only T1p writes the snapshot; no evidence path
   writes any B13 table). The conformance suite adds runtime proof: after a callback carrying any echo, the attempt snapshot is byte-identical,
   the withdrawal's instrument binding is unchanged and no snapshot or instrument row was written.
@@ -2279,3 +2282,38 @@ non-Synthetic adapters with an unset declaration, `VerifyStartup` (unset non-Syn
 4. A test double that is not a registered adapter is not covered by the startup gate (same as the L-7 embedding scan: test doubles are not
    scanned, by design).
 5. The startup marker is a log line; a metric or alert for it is a deferred consideration (it would add a raise site and alerting pins).
+6. **OWNER/ARCHITECT QUESTION (ledger-finance MEDIUM-1): should a park caused by an unexpected echo from an `Unsupported` adapter get a governed
+   completion route, for example M4 "paid" on positive statement evidence?** Today the park has no governed exit (see 24.4 item 3). Not
+   decided and not built here. Until answered, an adapter that declares `Unsupported` and ever sends an echo strands the hold of that payout.
+7. **Security recommendation, awaiting an OWNER decision (NOT built):** refuse production startup for a non-Synthetic payout adapter that
+   declares `Unsupported` unless an explicit per-provider acknowledgement is configured. The owner has not defined that acknowledgement
+   (item 1), so no flag, allow-list or refusal was invented; the WARN marker (24.3) remains the only control.
+8. **Cross-branch HIGH (ledger-finance): r33 and r32 must NOT reach a non-MOCK provider before the r32 fix lands.** `destination_mismatch`
+   parks are created on success evidence, and this change makes them more frequent (every unexpected, malformed or drifted echo parks).
+   `gov-r32-integrity` owns the fix: a durable "success reported" record that makes an M4 not-paid contradictory. It is not implemented
+   here. Both branches stay MOCK-only until it is merged.
+
+### 24.7 Review conditions applied (security LOW-1/2/3, ledger-finance MEDIUM-1 and LOW conformance gaps; same branch)
+
+* **LOW-1 (frozen declaration).** `NewOrchestrator` takes an immutable provider-id to declaration map when the adapters are wired (after
+  `VerifyStartup` has accepted them; `cmd/platform-api` builds the orchestrator from the same adapters). `PayoutOptions` carries a private
+  copy (`WithFrozenEchoDeclarations`). `payoutEnv.echoState` relies on the FROZEN value; the live manifest is read only to detect drift.
+  A live value that differs from the frozen one (Supported to Unsupported or Unset, or the reverse) makes the declaration `untrusted`, and any
+  success under an untrusted declaration is ambiguous (never accepted, even carrying a matching echo); an echo under a frozen
+  `Unsupported` still parks. A runtime change can therefore never turn an ambiguous success into an accepted one.
+* **LOW-2 (unknown provider).** A provider id the registry does not know (or a nil id, or no registry) reads as `Unset` and `untrusted`: a
+  success from it is ambiguous, not accepted. This replaces the earlier statement that such evidence "settles".
+* **LOW-3 (audit bound).** The terminal-signal audit row stays per distinct echo, but at most 8 such rows exist per attempt
+  (`terminalSignalAuditMaxDistinctEchoes`); beyond that only occurrences are counted. The raise is unchanged (unconditional, deduped into one
+  open alert whose occurrence count keeps growing).
+* **MEDIUM-1 (hint).** The `destination_mismatch` park audit row already records `echo_verdict`. Reconciliation reads it (no migration, no
+  new persistence) and, for `echo_verdict = unexpected_from_unsupported`, uses its own hint: the destination is NOT shown to differ, the echo
+  is untrusted evidence, there is no governed completion route (open question, 24.6 item 6). A real mismatch keeps the existing wording; an
+  executed M4 not-paid keeps precedence.
+* **Conformance gaps closed.** Every cell now runs on all three channels (sync, poll, callback), including: Supported success without an
+  echo (sync ambiguous, poll reschedules, callback no-op); Supported mismatch, unknown kid and malformed (all ten shapes on sync, a
+  representative three on poll and callback); a decline carrying a mismatched echo (parks, hold not released) for Supported and
+  Unsupported; and a concurrency cell (two callbacks racing two polls with a mismatched echo: one park, one audit row, one alert
+  occurrence). `wantParked` now also asserts the ledger transaction count is unchanged from the approval. Hardening tests:
+  `echo_hardening_integration_test.go` (drift in three directions with and without an echo, unknown provider, capped audit rows, the
+  reconciliation hint through a real reconciliation run) and unit tests for `echoState` and the orchestrator freeze.

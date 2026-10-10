@@ -39,6 +39,7 @@ type b13bProvider struct {
 	wres     WithdrawResult
 	sres     StatusResult
 	reqs     []WithdrawRequest
+	unset    bool // test hook: the live manifest drifts to the INVALID unset declaration (ADR 0111 24.7)
 	declared bool // manifest DestinationEchoSemantics: true = Supported, false = Unsupported (ADR 0111 24)
 	idem     bool // manifest IdempotentSubmission
 }
@@ -65,6 +66,9 @@ func (p *b13bProvider) Capabilities() AdapterCapability {
 	c.Manifest.DestinationEchoSemantics = payoutinstrument.DestinationEchoUnsupported
 	if p.declared {
 		c.Manifest.DestinationEchoSemantics = payoutinstrument.DestinationEchoSupported
+	}
+	if p.unset {
+		c.Manifest.DestinationEchoSemantics = payoutinstrument.DestinationEchoUnset
 	}
 	c.Manifest.IdempotentSubmission = p.idem
 	return c
@@ -94,6 +98,10 @@ type b13bW struct {
 	orch *Orchestrator
 	svc  *payoutinstrument.Service
 	pid  string
+	// baseLedger is the ledger transaction count right after the latest approval (the hold). A park must leave it
+	// unchanged (ledger-finance LOW): wantParked asserts it.
+	baseLedger    int
+	baseLedgerSet bool
 }
 
 func newB13bW(t *testing.T, id string, mut ...func(*b13bProvider)) *b13bW {
@@ -114,7 +122,9 @@ func newB13bW(t *testing.T, id string, mut ...func(*b13bProvider)) *b13bW {
 func (w *b13bW) ctx() context.Context { return context.Background() }
 
 func (w *b13bW) approved(amount int64, key string) withdrawal.WithdrawalRequest {
-	return approvedWithdrawal(w.t, w.pool, w.f, amount, key)
+	wr := approvedWithdrawal(w.t, w.pool, w.f, amount, key)
+	w.baseLedger, w.baseLedgerSet = w.ledgerTx(), true
+	return wr
 }
 
 func (w *b13bW) claim(wr withdrawal.WithdrawalRequest, method string) (ClaimResult, error) {
@@ -874,6 +884,9 @@ func (w *b13bW) wantParked(wr withdrawal.WithdrawalRequest, a PaymentAttempt, re
 	got := w.wr(wr.ID)
 	if got.State != withdrawal.StateSubmitted || got.ReleaseLedgerTransactionID != nil {
 		w.t.Fatalf("withdrawal = %s (release=%v): NO payout progression and the hold stays", got.State, got.ReleaseLedgerTransactionID)
+	}
+	if w.baseLedgerSet && w.ledgerTx() != w.baseLedger {
+		w.t.Fatalf("ledger transactions = %d, want %d: a destination park must post nothing", w.ledgerTx(), w.baseLedger)
 	}
 	if n := w.count(`SELECT count(*) FROM audit_log WHERE action='payments.payout_parked_destination' AND target_id=$1 AND metadata->>'reason'=$2`, a.ID.String(), reason); n != 1 {
 		w.t.Fatalf("park audit rows = %d, want 1", n)

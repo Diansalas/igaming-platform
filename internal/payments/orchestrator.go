@@ -31,6 +31,8 @@ const defaultMaxCascadeDepth = 3
 // Flow 1/Flow 2 shapes - no provider-specific branch exists anywhere in
 // this file (docs/decisions/0022 §1).
 type Orchestrator struct {
+	// echoFrozen is the destination-echo declaration of each registered adapter, taken once at NewOrchestrator (ADR 0111 24.7).
+	echoFrozen map[string]payoutinstrument.DestinationEchoSemantics
 	// providers is the Go-level adapter registry keyed by provider_id -
 	// the authority on which PaymentProvider implementation a
 	// provider_id actually is (docs/decisions/0022 §2.1: "a capability
@@ -89,10 +91,19 @@ func NewOrchestrator(providers map[string]PaymentProvider, resolver WebhookCrede
 	// declared WebhookRetrySemantics refuses registration - fail closed,
 	// since admission (B1) cannot answer 429 vs 503 safely otherwise.
 	webhookauth.MustRequireRetrySemantics("payments", providers)
+	// ADR 0111 24.7: freeze each adapter's destination-echo declaration at wiring. Evidence handling relies on this copy;
+	// the live manifest is only compared against it to detect drift (fail closed).
+	frozen := make(map[string]payoutinstrument.DestinationEchoSemantics, len(providers))
+	for id, p := range providers {
+		if p != nil {
+			frozen[id] = p.Capabilities().Manifest.DestinationEchoSemantics
+		}
+	}
 	return &Orchestrator{
 		providers: providers, webhookCredentialResolver: resolver, MaxCascadeDepth: defaultMaxCascadeDepth,
 		webhookSchemes: mustPaymentsSchemeSet(providers),
 		breaker:        NewBreaker(),
+		echoFrozen:     frozen,
 	}
 }
 
