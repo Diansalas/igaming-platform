@@ -492,6 +492,8 @@ gate; legacy backfill; PII lint; separate decision `licensing_model`; tenant and
     nothing yet fails a COMMIT of a suspension that left a stale `pending` activation/closure behind (a deferred
     check over the subject at commit). Not done soundly in slice 1; the slice-3 executor performs the supersede and
     its test asserts no stale `pending` request survives a suspension.
+    *(Slice 2 adds two slice-3 obligations: the brand status-change path uses `SET LOCAL lock_timeout` with a bounded,
+    audited retry, and the executor refuses a brand-then-tenant status change in one transaction; see section 13.)*
 11. **Snapshot isolation (security r2).** An approval-based `pending -> executing` is refused (`LA011`) unless the
     transaction is READ COMMITTED, because a reject committed after a REPEATABLE READ / SERIALIZABLE snapshot is
     invisible to the reject check and the approvals guard only row-locks the request (SSI does not abort). The slice-3
@@ -555,6 +557,25 @@ player's BRAND is not `active`.
   (c) Casino rounds open at a brand suspension/closure can still be won or rolled back (not gated); sportsbook bets open
   at a brand closure stay open and settle normally. (d) The public casino webhook preamble still checks the tenant only
   before verification; the brand refusal happens in the posting transaction (409).
+  (e) *(ledger-finance review of slice 2)* `ledger_wager_brand_active_guard` takes the brand key only at COMMIT, i.e.
+  after the posting's L0.2..L4 locks. It cannot deadlock: the only exclusive holder of a brand key is a brand status
+  writer, which holds nothing but the `brands` row, its own launch-table rows and the key, and no gameplay path waits
+  on those. It is defence in depth only: a NEW new-stake entry point MUST call `tenant.RequireBrandActiveForGameplay`
+  in its posting transaction (before L0.2), never rely on the backstop. (f) SQLSTATE `GP011` is not mapped to an HTTP
+  status: it is unreachable through the two gated paths (the Go gate refuses first under the same key), so a GP011
+  would surface as a generic 500 from a commit error; residual, map it if an unguarded path is ever added. (g) The
+  backstop sees only entries visible to the posting session: a posting with no player-wallet entry, or whose entries
+  are RLS-invisible to the session (a non-tenant-scoped session), finds no brand and passes; every gameplay path runs
+  tenant-scoped and `ledger.Post` never writes an entry-less non-tombstone posting. (h) A static pin
+  (`internal/tenant/brand_gate_static_test.go`, security C3) bans `SET CONSTRAINTS ALL` and naming
+  `ledger_wager_brand_active_guard` in a `SET CONSTRAINTS` outside tests: forced IMMEDIATE the trigger would run before
+  the entries exist and fail open.
+- **Inherited by slice 3 (security C1/C2, recorded only, not built here).** (1) The executor's brand status-change path
+  MUST `SET LOCAL lock_timeout` and retry a bounded number of times with an audited outcome, so a suspension never
+  silently hangs behind a long or stuck new-stake transaction holding the brand key SHARED (it waits for in-flight
+  placements by design). (2) The executor MUST refuse, in one transaction, a brand status change followed by a status
+  change of that brand's tenant (brand key X then tenant key X inverts the tenant-then-brand order of placements); one
+  subject per executing transaction.
 
 Docs (architecture 15 and 36, task registry, decision register, HANDOVER) are updated by `architect` and the
 orchestrator per slice; TENANT-STATUS-AUTHZ-1 is closed only after security reviews slices 1, 3 and 4. Labels: all
