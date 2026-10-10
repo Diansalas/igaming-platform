@@ -2676,7 +2676,12 @@ SQL gaps were flipped deliberately (`TestD7_P3_*`, the G-TIME subtests, the Go p
 `dbNonPositive`); the Go gate is unchanged and still agrees (probed on the same lines).
 
 Down: MR099 while any integrity M4 row exists or any park-evidence row records `succeeded` or `unknown_pre_0127` (the only rows that refuse a verdict; once every M4-scope park writes a row, refusing on any row would make 0125's own down refusals unreachable, which `TestM4_Migration0125DownRefusals` caught); both 0125 bodies restored byte for byte.
-Mutation evidence: `docs/plans/prh2-hardening-round/prh2-r32-integrity-mutation-kill.txt` (rounds 2 and 3).
+Tests: `TestR32_AllParkWriters_SuccessRecorded_NotPaidRefused` (invalid reference sync success/pending, poll success, conflict park,
+callback and late success on a parked unbound attempt), `TestR32_DestinationBindConflict_RecordsReportedSuccess`,
+`TestR32_GTIME_CoverageEndBoundary_InTheDB`, `TestR32_GTIME_LowerBoundIsFirstSendNotCreation_InTheDB`, plus the flipped D-7 pins.
+Mutation evidence: `docs/plans/prh2-hardening-round/prh2-r32-integrity-mutation-kill.txt` (rounds 1-3: 42 counted, 40 killed, 2
+equivalent survivors H5 and G6, each explained there). Runs: see that file's CONTROL lines (all `-race -tags integration -count=1 -p 1`,
+0 SKIP).
 
 
 ## 25. D-7 conformance: the M4 evidence standard as a traceable model (appendix, `qa`, 2026-10-09; branch `gov-r34-d7`, base `dad803d`; the design above is not rewritten)

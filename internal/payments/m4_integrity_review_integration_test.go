@@ -558,3 +558,39 @@ func TestR32_DestinationBindConflict_RecordsReportedSuccess(t *testing.T) {
 	}
 	m.r32RequireNotPaidRefused(&b11Parked{wr: wr, stale: att, fresh: fresh}, M4VerdictContradictory)
 }
+
+// G-TIME lower bound is the FIRST SEND, not the attempt's creation: with a first send recorded later than
+// creation (an owner-level edit simulating an attempt created, then sent later), a succeeded line between
+// creation and the first send is insufficient in the DB; a line at the first send is paid.
+func TestR32_GTIME_LowerBoundIsFirstSendNotCreation_InTheDB(t *testing.T) {
+	m := newM4World(t)
+	p := m.park(1199)
+	later := p.fresh.CreatedAt.Add(30 * time.Second).UTC().Truncate(time.Microsecond)
+	if err := m.pool.WithTenant(context.Background(), m.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		for _, q := range []string{`ALTER TABLE payment_attempts DISABLE TRIGGER USER`, `ALTER TABLE payment_attempts NO FORCE ROW LEVEL SECURITY`} {
+			if _, err := tx.Exec(ctx, q); err != nil {
+				return err
+			}
+		}
+		if _, err := tx.Exec(ctx, `UPDATE payment_attempts SET first_submitted_at = $2 WHERE id = $1`, p.fresh.ID, later); err != nil {
+			return err
+		}
+		for _, q := range []string{`ALTER TABLE payment_attempts FORCE ROW LEVEL SECURITY`, `ALTER TABLE payment_attempts ENABLE TRIGGER USER`} {
+			if _, err := tx.Exec(ctx, q); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	between := p.fresh.CreatedAt.Add(10 * time.Second)
+	r1 := m4Ref()
+	m.ingest(m4Imp{start: p.fresh.CreatedAt.Add(-time.Hour)}, m.line(r1, p.fresh.MerchantReference, "succeeded", 1199, between))
+	m.mustEvidence(p.fresh.ID, M4VerdictInsufficient)
+	// The same payout re-delivered at the first-send instant is the paid evidence (same reference, other time:
+	// two groups would be contradictory, so use a fresh park for the positive control).
+	q := m.park(1200)
+	m.ingest(m4Imp{}, m.line(m4Ref(), q.fresh.MerchantReference, "succeeded", 1200, *q.fresh.FirstSubmittedAt))
+	m.mustEvidence(q.fresh.ID, M4VerdictPaid)
+}

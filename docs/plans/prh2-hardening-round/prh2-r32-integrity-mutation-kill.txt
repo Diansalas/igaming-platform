@@ -32,3 +32,53 @@ R2i-hint-branch-dropped-integration   KILLED  same mutant, integration oracle  =
 Not mutated (no new code): payout_m4_evidence, the insert/executing guard, the recount floor, MR041, fence (g), the acting K3 arms and the post-M4 cells are
 unchanged and reason-agnostic (ADR 0111 23.2); their own mutation evidence is prh2-r19-resolve1-mutation-kill.txt, prh2-r21-rr1-mutation-kill.txt and
 prh2-r22-cells-mutation-kill.txt. LOCAL evidence only; no real provider, no AWS, no non-MOCK statement source.
+
+==========================================================================================================================================
+ROUND 2 - review fixes (security C-1, LF HIGH; ADR 0111 23.6). Code at c6669b5 (the table was then named payout_destination_park_evidence;
+renamed payout_park_evidence in round 3). Same method; tree clean after the run.
+CONTROL: internal/payments 373 PASS / 0 FAIL / 0 SKIP (TestR32_|TestM4|TestRR|TestC3_|TestPostM4_|TestPayoutPostM4Cell|TestB13B_|TestHSEC_|
+TestL2_|TestB11_|TestB12|TestStatic|TestPayoutCallbackAudit|TestCallbackAudit2|TestOrphanResolve|TestK3_); reconciliation 33; httpserver 3.
+
+Counted: 15   KILLED: 14   SURVIVED: 1 (EQUIVALENT)
+H1-sql-success-check-dropped               KILLED    not-paid ignores a recorded success  =>  TestR32_HIGH_SuccessParked_RefusesNotPaid_BothReasons
+H2-sql-unknown-check-dropped               KILLED    not-paid ignores the backfill marker  =>  TestR32_Migration0127_BackfillsExistingDestinationParks
+H3-sql-backfill-dropped                    KILLED    no backfill of existing parks  =>  TestR32_Migration0127_BackfillsExistingDestinationParks
+H4-sql-acting-read-dropped                 KILLED    the acting session cannot read the record (verdict blind)  =>  TestR32_HIGH_SuccessParked_*
+H5-sql-guard-state-dropped                 SURVIVED  EQUIVALENT: the insert guard's state <> 'disputed' arm is subsumed by its same-reason arm (an M4-scope
+                                                     terminal_reason exists only on a disputed attempt, which never leaves that state)
+H6-sql-guard-marker-allowed                KILLED    the runtime may write the backfill marker  =>  TestR32_ParkEvidence_AppendOnlySystemWritten
+H7-down-evidence-refusal-dropped           KILLED    (against the then any-row refusal; superseded by D8/D9 below)  =>  TestR32_Migration0127_Backfills*
+H8-go-park-writer-no-record                KILLED    parkPayoutDestination writes no record  =>  TestR32_HIGH_SuccessParked_*, TestR32_HIGH_DeclineParked_*
+H9-go-outcome-always-declined              KILLED    a success park recorded as declined  =>  TestR32_HIGH_SuccessParked_*
+H10-go-receipt-parked-success-not-recorded KILLED    callback success on a parked attempt not recorded  =>  TestR32_HIGH_RecordWrittenOnEveryPath, ..._SuccessAfterRequest_*
+H11-go-poll-parked-success-not-recorded    KILLED    poll success on a parked attempt not recorded  =>  TestR32_HIGH_RecordWrittenOnEveryPath
+H12-go-late-success-not-recorded           KILLED    late (CAS-lost) success not recorded  =>  TestR32_HIGH_RecordWrittenOnEveryPath
+C1a-sql-merchant-check-dropped             KILLED    C-1 refusal removed  =>  TestR32_C1_NotPaid_LineNamingAnotherMerchant_Refused
+C1b-sql-merchant-check-bound-ref-only      KILLED    C-1 limited to the bound reference (matched references ignored)  =>  TestR32_C1_NotPaid_* (unbound subtest)
+C1c-r1-mirror-dropped                      KILLED    reconciliation R-1 mirror removed  =>  TestR32_C1_R1Mirror_RaisesAfterExecutedNotPaid
+
+==========================================================================================================================================
+ROUND 3 - D-7 review refinements (every M4-scope park writer; G-REF / G-TIME in SQL; ADR 0111 23.7). Code at 6547efb (+ the first-send test).
+CONTROL: internal/payments 428 PASS (TestR32_|TestD7_|TestR31|TestM4|TestRR|TestC3_|... as above |TestPayoutRefBind|TestRefBind) with 2 failures
+that this round fixed (TestM4_Verdict_PaidConditions fixture, TestM4_Migration0125DownRefusals via the narrowed 0127 down), then the affected
+families TestR32_|TestD7_|TestM4_Verdict|TestM4_Migration|TestHSEC_HoldRelease_Migration|TestM4_ScopeParity|TestK3_C16 = 55 PASS / 0 FAIL / 0 SKIP;
+reconciliation 35, httpserver 3.
+
+Counted: 13   KILLED: 12   SURVIVED: 1 (EQUIVALENT)   (W3 first ran as a non-compiling form: not counted; re-run in a compiling form)
+W1-refbind-park-no-record                  KILLED    the provider_reference_conflict park writes no record  =>  TestR32_AllParkWriters_*, TestR32_DestinationBindConflict_*
+W2-invalid-ref-outcome-success-as-pending  KILLED    invalid-reference park records success as pending  =>  TestR32_AllParkWriters_* (sync SUCCESS)
+W3-success-on-park-destination-reasons-only KILLED   success on a parked UNBOUND attempt not recorded  =>  TestR32_AllParkWriters_* (callback / late sync)
+W4-destination-bind-records-routing-class  KILLED    the destination bind records its routing class (pending)  =>  TestR32_DestinationBindConflict_RecordsReportedSuccess
+W5-sql-reason-check-destination-only       KILLED    the table admits only destination reasons  =>  TestR32_AllParkWriters_*
+G1-sql-gref-dropped                        KILLED    G-REF removed from SQL  =>  TestD7_P3_WrongProviderReference, TestD7_Meta_*
+G2-sql-gtime-lower-dropped                 KILLED    G-TIME lower bound removed  =>  TestD7_P9_CausalLink
+G3-sql-gtime-upper-dropped                 KILLED    G-TIME upper bound removed  =>  TestR32_GTIME_CoverageEndBoundary_InTheDB
+G4-sql-gtime-lower-is-created-at           KILLED    lower bound = created_at instead of the first send (survived round 3a; killed after
+                                                     TestR32_GTIME_LowerBoundIsFirstSendNotCreation_InTheDB was added)
+G5-sql-gtime-boundary-strict               KILLED    coverage_end exclusive instead of inclusive  =>  TestR32_GTIME_CoverageEndBoundary_InTheDB
+G6-sql-never-sent-check-dropped            SURVIVED  EQUIVALENT: with both timestamps NULL the line filter `occurred_at >= COALESCE(NULL, NULL)` selects no line, so the
+                                                     verdict is insufficient either way; the explicit check is defensive and documents intent
+D8-down-refuses-any-evidence-row           KILLED    0127 down refuses on any evidence row  =>  TestM4_Migration0125DownRefusals (0125's refusals unreachable)
+D9-down-evidence-refusal-dropped           KILLED    0127 down ignores success/backfill evidence  =>  TestR32_Migration0127_BackfillsExistingDestinationParks
+
+TOTAL (rounds 1-3): 42 counted, 40 killed, 2 equivalent survivors (H5, G6). LOCAL evidence only.
