@@ -1200,6 +1200,29 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
+    get:
+      summary: List the calling player's own withdrawals
+      description: >
+        Player-authenticated (player principals only; a staff token is 403).
+        Runs under the player-self scope, so only the caller's own
+        withdrawal requests in the caller's tenant are returned. Unbounded
+        bare array (no pagination). Carries no payout-instrument data.
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: The caller's withdrawal requests
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/WithdrawalPlayer" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
   /v1/admin/withdrawals/{id}/submit:
     post:
       summary: Submit an approved withdrawal to its payment provider (staff)
@@ -5396,6 +5419,768 @@ paths:
                 $ref: "#/components/schemas/Error"
         "500":
           $ref: "#/components/responses/InternalError"
+  /v1/me/withdrawals/{id}:
+    get:
+      summary: Get one of the calling player's own withdrawals
+      description: >
+        Player-authenticated. A withdrawal that does not exist, belongs to
+        another player or another tenant is an indistinguishable 404.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: The withdrawal
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WithdrawalPlayer" }
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/me/withdrawals/{id}/cancel:
+    post:
+      summary: Cancel the calling player's own withdrawal while still `requested`
+      description: >
+        Player-authenticated; no request body. Ownership is checked under
+        the player-self scope first (another player's or an unknown id is
+        404). Only a withdrawal still in state `requested` can be cancelled:
+        once the staff review queue has promoted it to `pending_review` (or
+        it has moved further) the answer is 409 conflict. Reverses the hold
+        through the ledger.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "204":
+          description: Cancelled
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: conflict - the withdrawal can no longer be cancelled
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/admin/withdrawals:
+    get:
+      summary: Staff review queue - pending withdrawals (four-eyes)
+      description: >
+        withdrawal:review, tenant-scoped (a platform-scoped token is 403).
+        Held by the finance role. SIDE EFFECT: before reading, every
+        `requested` withdrawal in the tenant is promoted to `pending_review`,
+        which closes the player's cancel window; use
+        GET /v1/admin/withdrawals/history for a side-effect-free read. Returns
+        the `pending_review` withdrawals, oldest first, as a bare array
+        (no pagination). decimal_exponent is not populated on this list.
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Withdrawals awaiting a decision
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/WithdrawalAdmin" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/admin/withdrawals/submitted:
+    get:
+      summary: Staff stranded-hold recovery queue - submitted withdrawals
+      description: >
+        withdrawal:review, tenant-scoped. Every withdrawal currently in state
+        `submitted` (sent to the provider, no terminal outcome yet), as a
+        bare array. Use POST /v1/admin/withdrawals/{id}/resolve to poll the
+        provider for the outcome.
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Submitted withdrawals
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/WithdrawalAdmin" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/admin/withdrawals/{id}/approve:
+    post:
+      summary: Record a four-eyes approval of a withdrawal (staff)
+      description: >
+        withdrawal:approve, tenant-scoped (finance). No request body; the
+        approver is always the caller's authenticated subject, never a body
+        field. The decision is recorded and `approved` in the response says
+        whether this decision completed the approval (the withdrawal moved to
+        `approved`) or only counted towards the required number of
+        approvals. 403 forbidden is returned for: approving your own
+        withdrawal (the staff member and the player are the same Person),
+        a staff account with no confirmed Person linkage, an inactive staff
+        account, or a withdrawal whose resolved policy requires a step-up
+        challenge that the platform cannot yet perform (fails closed). 409
+        conflict: the withdrawal is not awaiting review, or the caller
+        already recorded a decision on it.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Decision recorded
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  approved: { type: boolean }
+                required: [approved]
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/admin/withdrawals/{id}/reject:
+    post:
+      summary: Reject a withdrawal and reverse its hold (staff)
+      description: >
+        withdrawal:reject, tenant-scoped (finance). The approver is the
+        caller's authenticated subject. reason_code is required. 403 forbidden
+        for a staff account with no confirmed Person linkage or an inactive
+        one. 409 conflict: the withdrawal is not awaiting review, or the
+        caller already recorded a decision on it.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason_code: { type: string }
+              required: [reason_code]
+      responses:
+        "204":
+          description: Rejected; the hold was reversed
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/admin/withdrawals/{id}/resolve:
+    post:
+      summary: Resolve a stranded `submitted` withdrawal by polling its provider (staff)
+      description: >
+        withdrawal:submit, tenant-scoped (finance). No request body. Queries
+        the SAME provider and reference already recorded on the live payment
+        attempt (never a second send, never a different provider) and applies
+        the outcome: `completed`, `failed`, or unchanged `submitted` while the
+        provider is still undecided. The 200 body is the withdrawal after the
+        poll. Safe to repeat and to call concurrently. 403 forbidden for a
+        staff account with no confirmed Person linkage or an inactive one.
+        409 conflict, all with code `conflict` and distinguished by message:
+        (a) the withdrawal is not `submitted`; (b) it has no live payment
+        attempt yet; (c) the attempt is still awaiting automatic re-claim and
+        cannot be polled; (d) "dispatch is still in progress for this
+        withdrawal - try again shortly" - the attempt's dispatch lease has not
+        expired, retry later; (e) "provider-confirmed amount/asset does not
+        match the withdrawal request" - the provider confirmed success but
+        the amount or asset differs from the request, the payment attempt is
+        parked as disputed and the hold is kept (not auto-resolved; it needs
+        the governed resolution paths). 503 service_unavailable: resolution
+        is not enabled on this deployment, or the provider recorded on the
+        withdrawal is not available on it.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: The withdrawal after the provider poll
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WithdrawalSubmitted" }
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+  /v1/admin/withdrawal-policies:
+    get:
+      summary: List the tenant's withdrawal approval policies
+      description: >
+        withdrawal_policy:write, tenant-scoped (tenant_admin only; deliberately
+        not finance). Every policy row of the caller's tenant, ordered by asset
+        then newest effective_from. Bare array.
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Policy rows
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/WithdrawalPolicy" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    post:
+      summary: Create a withdrawal approval policy row (insert-only)
+      description: >
+        withdrawal_policy:write, tenant-scoped (tenant_admin only). Always
+        creates a new versioned row, never updates one. The tenant is the
+        caller's own; jurisdiction and approver-role fields are not accepted.
+        effective_from may be in the future but not in the past (400).
+        asset_code or brand_id that does not reference a record of this
+        tenant is 400. Writes an audit record.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/WithdrawalPolicyWrite" }
+      responses:
+        "201":
+          description: The created policy row
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WithdrawalPolicy" }
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/admin/withdrawal-policies/{id}:
+    delete:
+      summary: Delete a (mistaken) withdrawal approval policy row
+      description: >
+        withdrawal_policy:write, tenant-scoped (tenant_admin only). The
+        reason_code query parameter is required and is recorded, with the
+        deleted row's values, in the audit record. Past approval decisions
+        are unaffected (each snapshots the threshold at decision time). A row
+        of another tenant is indistinguishable from an unknown id (404).
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: reason_code
+          in: query
+          required: true
+          schema: { type: string }
+      responses:
+        "204":
+          description: Deleted
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/admin/tenants/{tenantID}/payment-force-resolutions:
+    post:
+      summary: Request a payment force-resolution
+      description: >
+        payment_force_resolve:request (finance, platform_admin), staff principals only.
+        Four-eyes governed resolution of a stuck payment attempt: M1 records evidence on a disputed deposit without changing it; M2 declares an ambiguous or allow-listed disputed payout paid or not paid; M4 resolves an unbound payout park from sealed statement-import evidence.
+        M4 is a platform-acting flow (the evidence scope is not visible to a tenant-staff session) and is MOCK-only: it is implemented against MOCK statement sources, and an M4 resting on a non-MOCK statement import is refused with 409 force_resolve_evidence_insufficient (non-MOCK M4 is blocked, ADR 0111). Nothing executes on request: the money moves only when the final required approval is recorded, in that approval's own transaction.
+        Target tenant is the {tenantID} path value only; a body tenant_id is accepted and ignored. A tenant-scoped caller may name only its own tenant (otherwise 403,
+        no data); a platform-scoped caller may name any tenant but acts only through a platform acting session, which the database refuses unless the caller holds an
+        in-force capability grant for exactly that tenant. The route permission is only the first layer: the grant, the distinct-Person and beneficiary rules, the
+        pinned payload and the approval recount are decided by the database inside the action's own transaction. The signed actor proof (ADR 0110) is produced
+        server-side; the client supplies no proof header or field. Every refusal writes an audit row. Error bodies carry the generic envelope code plus a fixed
+        closed-token message; no internal detail is returned.
+        kind selects the shape. m1_deposit_evidence needs finding_code; m2_declare_paid and m2_declare_not_paid need basis_code and evidence_ref_hash (context_code optional); m4_evidence_paid and m4_evidence_not_paid need basis_code provider_confirmed_out_of_band, evidence_ref_hash and evidence_line_id. Amount and asset are copied from the attempt by the database, never taken from the request. An M2 or M4 is refused (409 force_resolve_precondition_failed) when no statement source is registered for the attempt's provider.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: tenantID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PaymentForceResolutionRequest" }
+      responses:
+        "201":
+          description: The pending resolution
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PaymentForceResolution" }
+        "400":
+          $ref: "#/components/responses/ResolutionInvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/ForceResolutionForbidden"
+        "404":
+          $ref: "#/components/responses/ForceResolutionNotFound"
+        "409":
+          $ref: "#/components/responses/ForceResolutionConflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    get:
+      summary: List the tenant's payment force-resolutions
+      description: >
+        payment_force_resolve:read (finance, compliance, platform_admin), staff principals only. Up to 100 most recent resolutions of the target tenant, as an object with an items array. Same tenant rule as the request route.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: tenantID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: The resolutions
+          content:
+            application/json:
+              schema: { type: object, properties: { items: { type: array, items: { $ref: "#/components/schemas/PaymentForceResolution" } } }, required: [items] }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/ForceResolutionForbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/admin/tenants/{tenantID}/payment-force-resolutions/{resolutionID}:
+    get:
+      summary: Get one payment force-resolution
+      description: >
+        payment_force_resolve:read (finance, compliance, platform_admin), staff principals only. A resolution that does not exist for the target tenant is 404.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: tenantID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: resolutionID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: The resolution
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PaymentForceResolution" }
+        "400":
+          $ref: "#/components/responses/ResolutionInvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/ForceResolutionForbidden"
+        "404":
+          $ref: "#/components/responses/ForceResolutionNotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/admin/tenants/{tenantID}/payment-force-resolutions/{resolutionID}/approve:
+    post:
+      summary: Approve a payment force-resolution
+      description: >
+        payment_force_resolve:approve (finance, platform_admin), staff principals only.
+        The approver must pin the payload_hash of the resolution it reviewed. When this approval is the final required one the resolution executes in the same transaction (executed=true); if the preconditions no longer hold it ends `refused_at_execution` (refused=true, committed and audited). Otherwise counted_approvals is below required_approvals and the resolution stays `pending`. An approval after expires_at is 409 force_resolve_expired.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: tenantID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: resolutionID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ResolutionDecisionRequest" }
+      responses:
+        "200":
+          description: The decision outcome
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PaymentForceResolutionDecision" }
+        "400":
+          $ref: "#/components/responses/ResolutionInvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/ForceResolutionForbidden"
+        "404":
+          $ref: "#/components/responses/ForceResolutionNotFound"
+        "409":
+          $ref: "#/components/responses/ForceResolutionConflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/admin/tenants/{tenantID}/payment-force-resolutions/{resolutionID}/reject:
+    post:
+      summary: Reject a payment force-resolution
+      description: >
+        payment_force_resolve:approve (finance, platform_admin), staff principals only.
+        A rejection is recorded against the pinned payload_hash. The response carries the resolution as re-read after the rejection; executed and refused are false and the approval counts are 0.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: tenantID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: resolutionID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ResolutionDecisionRequest" }
+      responses:
+        "200":
+          description: The decision outcome
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PaymentForceResolutionDecision" }
+        "400":
+          $ref: "#/components/responses/ResolutionInvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/ForceResolutionForbidden"
+        "404":
+          $ref: "#/components/responses/ForceResolutionNotFound"
+        "409":
+          $ref: "#/components/responses/ForceResolutionConflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/admin/tenants/{tenantID}/payment-force-resolutions/{resolutionID}/cancel:
+    post:
+      summary: Cancel a pending payment force-resolution
+      description: >
+        payment_force_resolve:request (finance, platform_admin), staff principals only. No request body. Only the original requester can cancel (enforced by the database) and only while the resolution is `pending`; the response is the cancelled resolution.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: tenantID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: resolutionID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: The cancelled resolution
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PaymentForceResolution" }
+        "400":
+          $ref: "#/components/responses/ResolutionInvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/ForceResolutionForbidden"
+        "404":
+          $ref: "#/components/responses/ForceResolutionNotFound"
+        "409":
+          $ref: "#/components/responses/ForceResolutionConflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/admin/tenants/{tenantID}/withdrawal-hold-resolutions:
+    post:
+      summary: Request a withdrawal hold-resolution
+      description: >
+        withdrawal_hold_resolution:request (platform_admin only), staff principals only.
+        Four-eyes, platform-acting release of the hold of an `approved` withdrawal on a tenant or brand that is not active: the single kind release_hold_to_player moves the withdrawal approved -> rejected and returns the hold to the player's own cash wallet. No tenant role holds these permissions, so a tenant-scoped caller is refused 403 at the permission gate. There is no generic override route and nothing releases a hold without the counted approvals. MOCK-only: implemented against the MOCK stack; it dispatches nothing and calls no provider.
+        Target tenant is the {tenantID} path value only; a body tenant_id is accepted and ignored. A tenant-scoped caller may name only its own tenant (otherwise 403,
+        no data); a platform-scoped caller may name any tenant but acts only through a platform acting session, which the database refuses unless the caller holds an
+        in-force capability grant for exactly that tenant. The route permission is only the first layer: the grant, the distinct-Person and beneficiary rules, the
+        pinned payload and the approval recount are decided by the database inside the action's own transaction. The signed actor proof (ADR 0110) is produced
+        server-side; the client supplies no proof header or field. Every refusal writes an audit row. Error bodies carry the generic envelope code plus a fixed
+        closed-token message; no internal detail is returned.
+        At execution the database re-checks the pinned preconditions; it ends `refused_at_execution` with a refusal_code of withdrawal_not_approved (the withdrawal is no longer `approved`), attempt_exists, tenant_brand_active_again or policy_disabled.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: tenantID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/WithdrawalHoldResolutionRequest" }
+      responses:
+        "201":
+          description: The pending resolution
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WithdrawalHoldResolution" }
+        "400":
+          $ref: "#/components/responses/ResolutionInvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/HoldResolutionForbidden"
+        "404":
+          $ref: "#/components/responses/HoldResolutionNotFound"
+        "409":
+          $ref: "#/components/responses/HoldResolutionConflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    get:
+      summary: List the tenant's withdrawal hold-resolutions
+      description: >
+        withdrawal_hold_resolution:read (platform_admin only), staff principals only. Up to 100 most recent resolutions of the target tenant, as an object with an items array. Same tenant rule as the request route.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: tenantID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: The resolutions
+          content:
+            application/json:
+              schema: { type: object, properties: { items: { type: array, items: { $ref: "#/components/schemas/WithdrawalHoldResolution" } } }, required: [items] }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/HoldResolutionForbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/admin/tenants/{tenantID}/withdrawal-hold-resolutions/{resolutionID}:
+    get:
+      summary: Get one withdrawal hold-resolution
+      description: >
+        withdrawal_hold_resolution:read (platform_admin only), staff principals only. A resolution that does not exist for the target tenant is 404.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: tenantID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: resolutionID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: The resolution
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WithdrawalHoldResolution" }
+        "400":
+          $ref: "#/components/responses/ResolutionInvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/HoldResolutionForbidden"
+        "404":
+          $ref: "#/components/responses/HoldResolutionNotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/admin/tenants/{tenantID}/withdrawal-hold-resolutions/{resolutionID}/approve:
+    post:
+      summary: Approve a withdrawal hold-resolution
+      description: >
+        withdrawal_hold_resolution:approve (platform_admin only), staff principals only.
+        The approver must pin the payload_hash of the resolution it reviewed. When this approval is the final required one the hold is released in the same transaction (executed=true); if the preconditions no longer hold it ends `refused_at_execution` (refused=true). Otherwise the resolution stays `pending` with counted_approvals below required_approvals. An approval after expires_at is 409 hold_resolution_expired.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: tenantID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: resolutionID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ResolutionDecisionRequest" }
+      responses:
+        "200":
+          description: The decision outcome
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WithdrawalHoldResolutionDecision" }
+        "400":
+          $ref: "#/components/responses/ResolutionInvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/HoldResolutionForbidden"
+        "404":
+          $ref: "#/components/responses/HoldResolutionNotFound"
+        "409":
+          $ref: "#/components/responses/HoldResolutionConflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/admin/tenants/{tenantID}/withdrawal-hold-resolutions/{resolutionID}/reject:
+    post:
+      summary: Reject a withdrawal hold-resolution
+      description: >
+        withdrawal_hold_resolution:approve (platform_admin only), staff principals only.
+        A rejection is recorded against the pinned payload_hash. The response carries the resolution as re-read after the rejection; executed and refused are false and the approval counts are 0.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: tenantID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: resolutionID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ResolutionDecisionRequest" }
+      responses:
+        "200":
+          description: The decision outcome
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WithdrawalHoldResolutionDecision" }
+        "400":
+          $ref: "#/components/responses/ResolutionInvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/HoldResolutionForbidden"
+        "404":
+          $ref: "#/components/responses/HoldResolutionNotFound"
+        "409":
+          $ref: "#/components/responses/HoldResolutionConflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/admin/tenants/{tenantID}/withdrawal-hold-resolutions/{resolutionID}/cancel:
+    post:
+      summary: Cancel a pending withdrawal hold-resolution
+      description: >
+        withdrawal_hold_resolution:request (platform_admin only), staff principals only. No request body. Only the original requester can cancel (enforced by the database) and only while the resolution is `pending`; the response is the cancelled resolution.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: tenantID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: resolutionID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: The cancelled resolution
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WithdrawalHoldResolution" }
+        "400":
+          $ref: "#/components/responses/ResolutionInvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/HoldResolutionForbidden"
+        "404":
+          $ref: "#/components/responses/HoldResolutionNotFound"
+        "409":
+          $ref: "#/components/responses/HoldResolutionConflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
   /v1/admin/tenants/{tenantID}/payments/kill-switches:
     get:
       summary: List the tenant's payment kill switches (PRH-I1, ADR 0095 §10.5)
@@ -6539,6 +7324,163 @@ components:
           properties:
             provider_id: { type: string }
             provider_reference: { type: string }
+    PaymentForceResolutionRequest:
+      type: object
+      description: >
+        tenant_id is accepted and ignored (the tenant is the path value).
+        Unknown fields are rejected (400). See the route description for which
+        fields each kind requires.
+      properties:
+        tenant_id: { type: string, description: Accepted and ignored. }
+        attempt_id: { type: string, format: uuid }
+        kind:
+          type: string
+          enum: [m1_deposit_evidence, m2_declare_paid, m2_declare_not_paid, m4_evidence_paid, m4_evidence_not_paid]
+        finding_code:
+          type: string
+          enum: [awaiting_psp_refund, refund_requested_from_psp, investigated_no_platform_action]
+          description: M1 only.
+        basis_code:
+          type: string
+          enum: [provider_confirmed_out_of_band, reconciliation_exhausted]
+          description: M2 and M4. M4 requires provider_confirmed_out_of_band.
+        context_code:
+          type: string
+          enum: [provider_unqueryable, past_resubmission_horizon]
+          description: M2 only, optional.
+        evidence_ref_hash:
+          type: string
+          pattern: "^[0-9a-f]{64}$"
+          description: Hash of the reviewer's evidence reference. Required for M2 and M4.
+        reason_code: { type: string, minLength: 1, maxLength: 64 }
+        note: { type: string, maxLength: 1000 }
+        evidence_line_id:
+          type: string
+          format: uuid
+          description: M4 only, required. The statement line the requester reviewed.
+      required: [attempt_id, kind, reason_code]
+    PaymentForceResolution:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        tenant_id: { type: string, format: uuid }
+        attempt_id: { type: string, format: uuid }
+        operation: { type: string }
+        kind: { type: string }
+        target_state: { type: string }
+        finding_code: { type: string }
+        basis_code: { type: string }
+        context_code: { type: string }
+        evidence_ref_hash: { type: string }
+        amount_minor_units: { type: string, description: Integer minor units as a decimal string. }
+        asset_code: { type: string }
+        reason_code: { type: string }
+        payload_hash: { type: string, description: The hash an approver must pin on approve or reject. }
+        requested_by: { type: string, format: uuid }
+        requested_by_scope: { type: string, enum: [tenant, platform_acting] }
+        required_at_submission: { type: integer, description: Number of approvals required, fixed at submission. }
+        tenant_status_at_submission: { type: string }
+        state:
+          type: string
+          enum: [pending, executing, executed, rejected, cancelled, expired, refused_at_execution]
+        refusal_code: { type: string }
+        ledger_transaction_id: { type: string, format: uuid }
+        created_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time }
+        evidence_line_id: { type: string, format: uuid, description: M4 only. }
+        evidence_reference: { type: string, description: M4 only. The provider's own line reference. }
+        evidence_verdict: { type: string, description: M4 only. }
+        evidence_import_ids: { type: array, items: { type: string, format: uuid }, description: M4 only. }
+      required: [id, tenant_id, attempt_id, operation, kind, amount_minor_units, asset_code, reason_code, payload_hash, requested_by, requested_by_scope, required_at_submission, tenant_status_at_submission, state, created_at, expires_at]
+    ResolutionDecisionRequest:
+      type: object
+      description: tenant_id is accepted and ignored. Unknown fields are rejected (400).
+      properties:
+        tenant_id: { type: string, description: Accepted and ignored. }
+        payload_hash: { type: string, description: The payload_hash of the resolution the decider reviewed. }
+        reason_code: { type: string }
+      required: [payload_hash, reason_code]
+    PaymentForceResolutionDecision:
+      type: object
+      properties:
+        resolution: { $ref: "#/components/schemas/PaymentForceResolution" }
+        executed: { type: boolean, description: True when this was the final approval and the resolution executed. }
+        refused: { type: boolean, description: True when the final approval found the preconditions no longer held (refused_at_execution). }
+        counted_approvals: { type: integer }
+        required_approvals: { type: integer }
+      required: [resolution, executed, refused, counted_approvals, required_approvals]
+    WithdrawalHoldResolutionRequest:
+      type: object
+      description: tenant_id is accepted and ignored. Unknown fields are rejected (400).
+      properties:
+        tenant_id: { type: string, description: Accepted and ignored. }
+        withdrawal_request_id: { type: string, format: uuid }
+        kind: { type: string, enum: [release_hold_to_player] }
+        reason_code: { type: string, pattern: "^[a-z][a-z0-9_]{0,63}$" }
+        evidence_ref_hash: { type: string, pattern: "^[0-9a-f]{64}$" }
+        note: { type: string, maxLength: 1000 }
+      required: [withdrawal_request_id, kind, reason_code, evidence_ref_hash]
+    WithdrawalHoldResolution:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        tenant_id: { type: string, format: uuid }
+        withdrawal_request_id: { type: string, format: uuid }
+        kind: { type: string, enum: [release_hold_to_player] }
+        amount_minor_units: { type: string, description: Integer minor units as a decimal string. }
+        asset_code: { type: string }
+        reason_code: { type: string }
+        evidence_ref_hash: { type: string }
+        payload_hash: { type: string, description: The hash an approver must pin on approve or reject. }
+        requested_by: { type: string, format: uuid }
+        required_at_submission: { type: integer, description: Number of approvals required, fixed at submission. }
+        tenant_status_at_submission: { type: string }
+        brand_status_at_submission: { type: string }
+        state:
+          type: string
+          enum: [pending, executing, executed, rejected, cancelled, expired, refused_at_execution]
+        refusal_code:
+          type: string
+          description: Set when state is refused_at_execution (withdrawal_not_approved, attempt_exists, tenant_brand_active_again, policy_disabled).
+        ledger_transaction_id: { type: string, format: uuid }
+        created_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time }
+      required: [id, tenant_id, withdrawal_request_id, kind, amount_minor_units, asset_code, reason_code, evidence_ref_hash, payload_hash, requested_by, required_at_submission, tenant_status_at_submission, brand_status_at_submission, state, created_at, expires_at]
+    WithdrawalHoldResolutionDecision:
+      type: object
+      properties:
+        resolution: { $ref: "#/components/schemas/WithdrawalHoldResolution" }
+        executed: { type: boolean, description: True when this was the final approval and the hold was released. }
+        refused: { type: boolean, description: True when the final approval found the preconditions no longer held (refused_at_execution). }
+        counted_approvals: { type: integer }
+        required_approvals: { type: integer }
+      required: [resolution, executed, refused, counted_approvals, required_approvals]
+    WithdrawalPolicy:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        tenant_id: { type: string, format: uuid }
+        brand_id: { type: string, format: uuid, description: Absent means the policy applies to every brand of the tenant. }
+        asset_code: { type: string }
+        approval_threshold_minor_units: { type: integer, format: int64 }
+        required_approvals: { type: integer }
+        require_step_up: { type: boolean }
+        policy_version: { type: integer }
+        effective_from: { type: string, format: date-time }
+        created_at: { type: string, format: date-time, description: Empty string on the create response. }
+      required: [id, tenant_id, asset_code, approval_threshold_minor_units, required_approvals, require_step_up, policy_version, effective_from]
+    WithdrawalPolicyWrite:
+      type: object
+      description: The tenant is always the caller's own. Unknown fields are rejected.
+      properties:
+        brand_id: { type: string, format: uuid }
+        asset_code: { type: string }
+        approval_threshold_minor_units: { type: integer, format: int64, minimum: 0 }
+        required_approvals: { type: integer, minimum: 1 }
+        require_step_up: { type: boolean }
+        policy_version: { type: integer, minimum: 0, description: Defaults to 1. }
+        effective_from: { type: string, format: date-time, description: Defaults to now; must not be in the past. }
+      required: [asset_code, approval_threshold_minor_units, required_approvals]
     PayoutInstrumentRegisterRequest:
       type: object
       additionalProperties: false
@@ -7235,6 +8177,77 @@ components:
           type: string
       required: [code, message]
   responses:
+    ResolutionInvalidRequest:
+      description: >
+        400. invalid_request for a malformed JSON body, an unknown body field
+        or a malformed path id; validation_error (message "invalid request")
+        for a value that fails validation (a malformed id or hash inside the
+        body, a code outside its closed set, a field combination the kind does
+        not allow, a length bound).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    ForceResolutionForbidden:
+      description: >
+        403 forbidden. Beyond the generic gate refusals (not a staff
+        principal, route permission missing), the message is the closed token
+        force_resolve_not_permitted: a tenant caller naming another tenant, no
+        in-force capability grant or acting session, another database-enforced authority
+        rule refused it, or an actor-proof refusal. Every such refusal writes a denied
+        audit row.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    ForceResolutionNotFound:
+      description: 404 not_found, message force_resolve_not_found.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    ForceResolutionConflict:
+      description: >
+        409 conflict. The message is one closed token: force_resolve_disabled,
+        force_resolve_precondition_failed (including no statement source for
+        the provider), force_resolve_reason_not_resolvable,
+        force_resolve_conflict (including the resolution not being pending, a
+        state conflict or a retryable serialization failure),
+        force_resolve_expired, force_resolve_evidence_insufficient (including
+        non-MOCK M4, which is blocked), force_resolve_evidence_mismatch,
+        force_resolve_evidence_overflow, force_resolve_evidence_unsealed.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    HoldResolutionForbidden:
+      description: >
+        403 forbidden. Beyond the generic gate refusals (not a staff
+        principal, route permission missing - every tenant role), the message
+        is the closed token hold_resolution_not_permitted: a tenant caller
+        naming another tenant, no in-force platform grant or acting session, a
+        another database-enforced authority rule refused it, or an actor-proof refusal. Every such refusal
+        writes a denied audit row.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    HoldResolutionNotFound:
+      description: 404 not_found, message hold_resolution_not_found.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    HoldResolutionConflict:
+      description: >
+        409 conflict. The message is one closed token: hold_resolution_disabled,
+        hold_resolution_precondition_failed, hold_resolution_conflict
+        (including the resolution not being pending or a retryable
+        serialization failure), hold_resolution_expired.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
     ProviderCredentialInvalidRequest:
       description: >
         400 invalid_request - syntactic errors only (malformed JSON, unknown
