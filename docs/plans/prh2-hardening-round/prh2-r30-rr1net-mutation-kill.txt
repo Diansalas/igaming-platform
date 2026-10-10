@@ -42,6 +42,11 @@ INVALID in the first run (did not compile: an unused variable after the edit), a
 N04 SURVIVED in run 1; TestRR30_WrongWalletOrAsset_NoRecovery then gained a credit under an UNRELATED causation (the
 withdrawal's hold) before the control recovery; run 2 KILLED it (it was a test gap, not an equivalent mutant).
 
+Review round (security + ledger-finance APPROVE WITH CONDITIONS; LF C-c / Q-R30-1): M2 (c2) moved onto the same NET recovery.
+Run 3 adds 7 counted mutants C01-C07 against TestRR30_C2_NetRecovery (and TestK3_ for C02): 7 KILLED, 0 SURVIVED.
+C02 was INVALID on its first attempt (unused variable), anchor fixed, re-run and KILLED. Overall: 34 counted, 31 killed,
+3 equivalent survivors (N10, N11, N12, unchanged).
+
 Mutant table (id | rule):
   N01 net: credits under the causation not subtracted (debit-only, the pre-decision rule)
   N02 net: only compensating_entry credits subtracted
@@ -70,6 +75,13 @@ Mutant table (id | rule):
   B09 bound: empty merchant reference treated as another merchant
   B10 bound: the shared RR-1 predicate (NET recovery, one payout) not required
   B11 bound/RR-1: group key ignores occurred_at (two payouts merge)
+  C01 (c2) back to the debit-only sum
+  C02 (c2) recovery read under the Step B causation instead of each credit C
+  C03 (c2) threshold off by one (a partial recovery clears)
+  C04 (c2) only the first credit's recovery is read (scaled)
+  C05 (c2) shared SQL: credits under the causation not subtracted (N01 against the c2 tests)
+  C06 (c2) shared SQL: a reversed debit still counts (N05 against the c2 tests)
+  C07 (c2) M2 wallet join broken, never recovers (N14 against the c2 tests)
 
 Raw log (scratchpad r30_mut_run.txt, verbatim, lines cut at 400 characters):
 R01 INVALID (does not compile): # github.com/Diansalas/igaming-platform/internal/reconciliation
@@ -151,3 +163,24 @@ N12 SURVIVED integration (TestRR30_DebitOffsetByCredit|TestRR30_DuplicateRecover
 N12 restored cmp=identical
 B06 KILLED by pure tests | bound: attribution dropped (any payout) | ['--- FAIL: TestRR30_Pure_BoundDestinationMismatch_StopRuleAndEveryNegation (0.01s)', '--- FAIL: TestRR30_Pure_BoundDestinationMismatch_StopRuleAndEveryNegation/unrelated_payout:_another_reference,_no_merchant_reference:_raises (0.00s)']
 B06 restored cmp=identical
+--- run 3 (LF C-c: M2 (c2) on the NET recovery; TestRR30_C2_NetRecovery added; integration control adds TestK3_Y06_) ---
+CONTROL pure rc=0 counts(pass,fail,skip)=(31, 0, 0)
+CONTROL integ rc=0 counts(pass,fail,skip)=(33, 0, 0)
+C01 KILLED by integration (TestRR30_C2_) | (c2) back to the debit-only sum | ['--- FAIL: TestRR30_C2_NetRecovery (25.98s)', '--- FAIL: TestRR30_C2_NetRecovery/a_debit_offset_by_a_credit_with_the_causation_keeps_raising (3.86s)', '--- FAIL: TestRR30_C2_NetRecovery/a_reversed_recovery_debit_does_not_count (4.54s)']
+C01 restored cmp=identical
+C02 INVALID (does not compile): # github.com/Diansalas/igaming-platform/internal/reconciliation
+internal/reconciliation/payment_statement_k3.go:1049:12: declared and not used: c
+
+C02 restored cmp=identical
+C03 KILLED by integration (TestRR30_C2_) | (c2) threshold off by one (partial clears) | ['--- FAIL: TestRR30_C2_NetRecovery (25.77s)', '--- FAIL: TestRR30_C2_NetRecovery/partial_keeps_raising,_the_remaining_unit_clears,_replay_is_not_double_counted (3.91s)', '--- FAIL: TestRR30_C2_NetRecovery/a_debit_offset_by_a_credit_with_the_causation_keeps_raising (4.19s)']
+C03 restored cmp=identical
+C04 KILLED by integration (TestRR30_C2_) | (c2) only the first credit's recovery is read | ['--- FAIL: TestRR30_C2_NetRecovery (24.46s)', '--- FAIL: TestRR30_C2_NetRecovery/two_credits:_each_must_be_recovered (3.86s)']
+C04 restored cmp=identical
+C05 KILLED by integration (TestRR30_C2_) | (c2) via the shared SQL: credits under the causation not subtracted (N01 against the c2 tests) | ['--- FAIL: TestRR30_C2_NetRecovery (24.20s)', '--- FAIL: TestRR30_C2_NetRecovery/a_debit_offset_by_a_credit_with_the_causation_keeps_raising (3.91s)']
+C05 restored cmp=identical
+C06 KILLED by integration (TestRR30_C2_) | (c2) via the shared SQL: a reversed debit still counts (N05 against the c2 tests) | ['--- FAIL: TestRR30_C2_NetRecovery (24.17s)', '--- FAIL: TestRR30_C2_NetRecovery/a_reversed_recovery_debit_does_not_count (3.57s)']
+C06 restored cmp=identical
+C07 KILLED by integration (TestRR30_C2_) | (c2) via the M2 wallet join broken (never recovers; N14 against the c2 tests) | ['--- FAIL: TestRR30_C2_NetRecovery (21.63s)', '--- FAIL: TestRR30_C2_NetRecovery/partial_keeps_raising,_the_remaining_unit_clears,_replay_is_not_double_counted (3.84s)', '--- FAIL: TestRR30_C2_NetRecovery/a_debit_offset_by_a_credit_with_the_causation_keeps_raising (3.52s)', '
+C07 restored cmp=identical
+C02 KILLED by integration (TestRR30_C2_|TestK3_) | (c2) recovery read under the Step B causation instead of each credit C | ['--- FAIL: TestK3_C22_C29_CompensationAnnotatesNeverClears (3.66s)', '--- FAIL: TestRR30_C2_NetRecovery (39.32s)', '--- FAIL: TestRR30_C2_NetRecovery/partial_keeps_raising,_the_remaining_unit_clears,_replay_is_not_double_counted (5.36s)', '--- FAIL: TestRR30_C2_NetRecovery/a
+C02 restored cmp=identical

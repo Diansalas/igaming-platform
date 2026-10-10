@@ -2203,6 +2203,7 @@ bound finding keeps raising (that payout is not positively this park's) - pinned
   its availability, unlike the M4 joins of §19.3 which fail the run). An executed M2 payout always has its withdrawal (0115 CHECK).
 - **RR30-6 (M2 (c2) unchanged).** `pay_declared_paid_compensated_but_paid` still counts recovery debits against the compensating
   credits (debit-only). It is not the M2 (d) rule and not in decision 2's scope; recorded as an open question (21.8).
+  *Superseded by the review round: (c2) now uses the same net (21.11, LF C-c).*
 
 ### 21.5 Deliverable status
 
@@ -2216,6 +2217,9 @@ bound finding keeps raising (that payout is not positively this park's) - pinned
 | Decision 1: RR-1 at the bound `destination_mismatch` site (both bound sites) | `IMPLEMENTED` against MOCK |
 | `destination_integrity_failure` | `NOT IMPLEMENTED` here by instruction (not M4-eligible; owned by another task) |
 | Migration | none (0127 reserved; 0128 not needed: 21.6) |
+| Review round: M2 (c2) on the same net (LF C-c) | `IMPLEMENTED` (21.11) |
+| Review round: permanent-raise cases documented (LF C-b) | `IMPLEMENTED` (text, 21.12 and the runbook) |
+| Review round: credit-after-stop monitoring rule (security LOW-1) | `NOT IMPLEMENTED` (tracked follow-up, 21.13) |
 
 ### 21.6 Why no migration
 
@@ -2285,7 +2289,8 @@ unrelated-causation credit). Three mutants were INVALID on the first run (an unu
 
 ### 21.10 Residuals and open questions (nothing here is decided by this change)
 
-- **Q-R30-1 (ledger-finance / owner; open).** M2 (c2) (`pay_declared_paid_compensated_but_paid`) still counts its recovery
+- **Q-R30-1 — RESOLVED in the review round (LF C-c; 21.11, `IMPLEMENTED`).** Original text kept: *(ledger-finance / owner;
+  open).* M2 (c2) (`pay_declared_paid_compensated_but_paid`) still counts its recovery
   debit-only (debits caused by the compensating credits against the credited amount). It has the LOW-1 shape but is not the M2 (d)
   rule and is outside decision 2's text; extending the net there is a separate, small change if wanted.
 - **Residual (RR30-2, by the cap).** Once a recovery under F is offset or reversed, it cannot be redone under F (INV-ADJ-6 counts
@@ -2297,6 +2302,57 @@ unrelated-causation credit). Three mutants were INVALID on the first run (an unu
   M4-eligible, extending `m4NotPaidRecoveredBound`'s reason scope is a deliberate change (pure test and mutant B02 pin the
   exclusion).
 - §4.8 / F-1 and the D-7, T10 and S-3 launch flags are unchanged: everything here runs against MOCK sources only.
+
+### 21.11 Review round (security + ledger-finance: APPROVE WITH CONDITIONS): M2 (c2) on the same net (LF C-c / Q-R30-1)
+
+`pay_declared_paid_compensated_but_paid` (M2 (c2), `checkM2Standing`) now reads its recovery through the same `netRecovery`:
+for each executed compensating credit C whose causation is the Step B transaction, recovery = executed `compensating_entry`
+debits with causation C on the withdrawal's wallet and the resolution's asset, none reversed, minus every executed credit with
+causation C; the per-credit nets are summed and compared with the credited total. INV-ADJ-6 caps the debits under each C at
+C's amount, so the sum reaches the total only when every credit is fully and irreversibly recovered (two credits: recovering
+one does not clear). No visible withdrawal: no recovery is read and (c2) keeps raising. Raise direction only; the (c)
+annotation reports the same net. The hint names the net. `IMPLEMENTED`.
+
+Tests: `TestRR30_C2_NetRecovery` (partial keeps raising and the remaining unit clears; a replayed approval is `ErrNotPending`
+and not double counted; a credit under C re-raises; a reversed recovery debit counts zero; wrong wallet and wrong asset are
+refused by K2, a full debit under an unrelated causation does not count; two credits must each be recovered; cross-tenant: B
+cannot cite A's credit and B's recovery never clears A). The existing (c2) tests (`TestK3_Y05_`, `TestK3_Y06_`, the K3 recon set)
+still pass. Mutants C01-C07 (21.14).
+
+### 21.12 Findings with NO automatic stop path (LF C-b)
+
+The following keep `pay_declared_not_paid_but_paid`, `pay_declared_paid_compensated_but_paid` and the post-M4
+`pay_captured_unposted` (STANDING-1 and the bound site) raising **permanently**; nothing in the platform will stop them:
+- a `reversed` payout line on any reference the M4 not-paid reads (RR30-3);
+- an executed credit (any reason code) whose causation is F (for (c2): C): it is subtracted, and INV-ADJ-6 caps the debits under
+  F (C) at the amount, so the net can never again reach it;
+- a reversed recovery (a credit caused by the recovery debit, or a ledger reversal of it): the debit counts zero and the cap
+  counts it as spent, so it cannot be redone under F (C).
+
+The exits are off-platform recovery (PSP or player), tracked by staff through the rows' `investigation_status`, or a future,
+separately governed path (none exists). Runbook: `docs/runbooks/operational-runbooks.md` §16, "Related: recovery findings with
+NO automatic stop path".
+
+### 21.13 Monitoring follow-up (security LOW-1, review round; tracked, `NOT IMPLEMENTED`)
+
+The net sees only K2 entries whose causation is F (or C). After an RR-1 (or M2) stop, a four-eyes pair can return the money to
+the same player through a credit with **no** causation (`goodwill_credit`; `operational_error_correction` /
+`external_instruction` without one) or with an unrelated causation; the net cannot see it. Tracked follow-up (not built): a
+monitoring rule "flag any `credit_player` on the same wallet after an RR-1 stop". Until it exists the mitigation is the four-eyes
+approval and the periodic K2 audit review (runbook entry above).
+
+### 21.14 Review-round evidence
+
+- Mutation (appended to `docs/plans/prh2-hardening-round/prh2-r30-rr1net-mutation-kill.txt`, run 3): 7 counted (c2) mutants
+  C01-C07 (debit-only sum; recovery read under the Step B causation instead of each credit; threshold off by one; only the first
+  credit read; and the shared-SQL rules N01, N05, N14 re-run against the (c2) tests), **7 killed**, 0 survivors. C02 was INVALID on
+  its first attempt (an unused variable), fixed and killed. Control: pure 31 PASS, integration 33 PASS, 0 FAIL, 0 SKIP.
+
+- Runs after the merge of main (`72bf943`) and the review-round changes (`-race -tags integration -count=1 -p 1`, targeted, fresh
+  private scratch database; 0 SKIP everywhere, so the integration tests did run): `internal/reconciliation/...` 436 PASS (incl.
+  subtests) / 0 FAIL; `internal/payments -run 'TestRR1_|TestRR30_|TestRR4_|TestRR5_|TestM4Recon_|TestK3|TestMA020'` 121 top-level
+  PASS (+65 subtests) / 0 FAIL / 0 SKIP; reconciliation unit tests (`-race`) PASS; `go test ./internal/alerting -count=1` PASS;
+  gofmt clean; `go vet ./internal/...` clean in both tag modes; golangci-lint 2.9.0 `--new-from-rev=dad803d` 0 issues.
 
 ## 22. Ruling: instrument state does not gate settlement (ADR 0095 section 48 decision 3) - verified, tested, no production change (`payments`, 2026-10-09; branch `gov-r31-settle`, base `dad803d`)
 
