@@ -76,7 +76,8 @@ func TestLaunchGov_LF5_TriggerFiringOrder(t *testing.T) {
 	if g, l := index(tu, "tenants_status_change_gate"), index(tu, "zz_launch_status_governed"); g < 0 || l < 0 || g >= l {
 		t.Fatalf("tenants BEFORE UPDATE order %v: tenants_status_change_gate must fire before zz_launch_status_governed", tu)
 	}
-	// brands: the launch guard is the (only) BEFORE UPDATE status trigger; slice 2 adds the per-brand lock inside it.
+	// brands: the launch guard is the (only) BEFORE UPDATE status trigger; since slice 2 (0129) it takes the
+	// per-brand gameplay lock inside it (TestBrandGate_Catalog_0129 pins that).
 	if bu := order("brands", true); index(bu, "zz_launch_status_governed") < 0 {
 		t.Fatalf("brands BEFORE UPDATE order %v: zz_launch_status_governed missing", bu)
 	}

@@ -564,6 +564,15 @@ func newCasinoWebhookHandler(deps Deps) http.HandlerFunc {
 			apierror.Write(w, requestID, apierror.CodeConflict, "callback rejected")
 			return
 		}
+		if errors.Is(err, casino.ErrBrandNotActive) {
+			// ADR 0112 LF1 (slice 2): a NEW bet for a player of a brand that
+			// is not active. Same contract as the tenant branch above (409,
+			// generic body, no integrity alert, audit row written by
+			// recordCasinoCallbackRejection), distinct log event.
+			logger.Warn("casino_webhook_refused_brand_not_active", "provider_id", providerID, "tenant_id", t.ID.String(), "request_id", requestID)
+			apierror.Write(w, requestID, apierror.CodeConflict, "callback rejected")
+			return
+		}
 		if errors.Is(err, casino.ErrOriginalTombstoned) {
 			// Stage 10.3 CAS-CAP-ROLLBACK-1, E10: a win naming a
 			// provider_tx_id a tombstone already covers (its own rollback

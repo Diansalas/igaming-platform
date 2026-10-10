@@ -7812,13 +7812,18 @@ components:
         bet: { $ref: "#/components/schemas/Bet" }
         rejection_category:
           type: string
-          enum: [odds_changed, event_not_open, insufficient_funds, rg_denied, risk_denied, jurisdiction_denied, tenant_not_active]
+          enum: [odds_changed, event_not_open, insufficient_funds, rg_denied, risk_denied, jurisdiction_denied, kyc_denied, tenant_not_active, brand_not_active]
           description: >-
             jurisdiction_denied (Stage 9.2, ADR 0083 Part C) collapses two
             internally-distinguishable outcomes (jurisdiction_blocked /
             jurisdiction_unresolved) into one opaque
             rejection_code/rejection_message at this HTTP boundary (K3-6)
             - the two are never distinguishable in this response.
+            kyc_denied (PRH-I3, ADR 0096) - KYC-before-play policy denied the
+            bet; rejection_code is always the collapsed
+            verification_required. brand_not_active (ADR 0112 LF1) - the player's brand is not
+            active (pending launch, suspended or closed); no new bet is
+            accepted.
         rejection_code: { type: string }
         rejection_message: { type: string }
       required: [accepted]

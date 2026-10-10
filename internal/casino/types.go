@@ -208,6 +208,15 @@ var (
 	// against its CHECK constraint (reconciliation partition); the durable
 	// record is an append-only audit_log row instead (RecordCallbackRejection).
 	ErrTenantNotActive = errors.New("casino: tenant is not active; new gameplay postings are refused")
+	// ErrBrandNotActive is returned when a verified NEW bet would take a
+	// stake for a player of a brand that is not 'active' (pending_launch,
+	// suspended, closed; ADR 0112 LF1, slice 2, migration 0129). Only a new
+	// bet is refused: wins, rollbacks and terminal stake returns of rounds
+	// already accepted are not brand-gated. Deterministic, not retryable,
+	// nothing is posted; never conflated with ErrTenantNotActive. Like it, the
+	// durable record is an append-only audit_log row (RecordCallbackRejection),
+	// not a casino_callback_rejections class.
+	ErrBrandNotActive = errors.New("casino: brand is not active; new bets are refused")
 	// ErrRiskOutcomeUnrecognized is returned when risk.Evaluate returns a
 	// RiskDecision whose Outcome is none of allow/deny/review. Unreachable
 	// through risk.Evaluate itself (which self-checks its own output), and

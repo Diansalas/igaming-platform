@@ -322,6 +322,8 @@ apart. E-4 added 2026-09-25 by Amendment A4 (3), ADR 0088 §5.3.)*
 | **L3** | **`wallet_balance_projection` rows — ascending `ledger_accounts.id`** | strictly ascending UUID byte order (Postgres `uuid` comparison; in Go `bytes.Compare(a[:], b[:])`) |
 | **L4** | `ledger_transactions` idempotency-key index insert, `ledger_entries` inserts and the projection updates their trigger performs | n/a — by L3, every projection lock is already held, so these acquire nothing new |
 
+*(ADR 0112 slice 2 / LF1, 2026-10-10)* Status-gate advisory keys (`tenant_status_gate_key`, then `brand_status_gate_key`) are taken SHARED by a new-stake posting before L0.2, tenant key before brand key; on the casino bet path the L0.1 bet-delivery advisory lock precedes both status keys (it is taken first, before the replay and tombstone checks); the 0129 deferred backstop re-takes the brand key SHARED only at COMMIT (re-entrant for the gated paths); a brand status writer takes the `brands` row and then the brand key EXCLUSIVE (`zz_launch_status_governed`), and no gameplay path locks a `brands` row. One transaction must not change a brand status and then its tenant's status. Details: ADR 0112 section 13.
+
 *(R15 / H(8), 2026-10-08, ADR 0095 section 14)* `brands` (tenant brand row, `FOR SHARE` via `tenant.RequireBrandActive`) is a shared lock taken only AFTER the path's L1 locks (deposit intent / attempt) and before the claim CAS or child insert. A brand-status writer must not lock a brand and then L1 rows (brand -> intents inverts the order).
 
 `ledger_accounts` creation (`GetOrCreateAccount`) happens **before L3**

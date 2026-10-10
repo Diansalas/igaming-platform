@@ -181,6 +181,32 @@ func PlaceBet(ctx context.Context, tx pgx.Tx, params PlaceBetParams) (PlaceBetRe
 			RejectionMessage: "betting is not available for this operator"}, nil
 	}
 
+	// ADR 0112 LF1 (slice 2, migration 0129): the brand twin of the gate above.
+	// A NEW stake for a brand that is not 'active' (pending_launch, suspended,
+	// closed) is declined under the per-brand status lock taken SHARED (after
+	// the tenant key: canonical status-gate order), before any evaluation or
+	// write. params.BrandID is server-derived and pinned to the player by the
+	// sportsbook_bets FK (0078); the database backstop (0129) checks the
+	// wallet's own brand. A decline (not a Go error), so its audit commits.
+	if err := tenant.RequireBrandActiveForGameplay(ctx, tx, params.TenantID, params.BrandID); err != nil {
+		if !errors.Is(err, tenant.ErrBrandNotActiveForGameplay) {
+			return PlaceBetResult{}, fmt.Errorf("sportsbook: check brand status: %w", err)
+		}
+		if aerr := audit.Record(ctx, tx, audit.Entry{
+			TenantID: params.TenantID, ActorType: audit.ActorSystem, Action: "sportsbook_bet.denied_brand_not_active",
+			TargetType: "player_account", TargetID: params.PlayerAccountID.String(), Outcome: audit.OutcomeDenied,
+			Metadata: map[string]any{
+				"reason_code": "brand_not_active", "brand_id": params.BrandID.String(),
+				"selection_id": params.SelectionID.String(), "asset_code": params.AssetCode,
+				"stake_amount": params.StakeAmount,
+			},
+		}); aerr != nil {
+			return PlaceBetResult{}, fmt.Errorf("sportsbook: audit brand-not-active denial: %w", aerr)
+		}
+		return PlaceBetResult{Accepted: false, RejectionCategory: RejectionBrandNotActive, RejectionCode: "brand_not_active",
+			RejectionMessage: "betting is not available for this brand"}, nil
+	}
+
 	// Structural validation (doc 09 §3.3 step 1, narrowed to this stage's
 	// scope): the selection must exist, its event must still be open for
 	// betting (not finished/cancelled - live is allowed since this stage

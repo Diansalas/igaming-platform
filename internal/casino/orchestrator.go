@@ -979,6 +979,23 @@ func requireActiveTenantForNewPosting(ctx context.Context, tx pgx.Tx, tenantID u
 	return fmt.Errorf("%w: %w", ErrTenantNotActive, err)
 }
 
+// requireActiveBrandForNewStake is the casino entry point of ADR 0112 LF1
+// (slice 2): a NEW bet for a player of a non-active brand is refused with
+// ErrBrandNotActive, in the posting transaction, via the shared race-free
+// primitive tenant.RequireBrandActiveForGameplay. Called only from postBet,
+// after its replay and tombstone short-circuits (a replay of a bet posted
+// while the brand was active returns the original outcome, never this).
+func requireActiveBrandForNewStake(ctx context.Context, tx pgx.Tx, tenantID, brandID uuid.UUID) error {
+	err := tenant.RequireBrandActiveForGameplay(ctx, tx, tenantID, brandID)
+	if err == nil {
+		return nil
+	}
+	if !errors.Is(err, tenant.ErrBrandNotActiveForGameplay) {
+		return fmt.Errorf("casino: check brand status: %w", err)
+	}
+	return fmt.Errorf("%w: %w", ErrBrandNotActive, err)
+}
+
 // ReceiveCallbackResult is what ReceiveCallback returns for a caller
 // (an HTTP handler) that needs to know the outcome without exposing the
 // full ledger internals - mirrors internal/payments.ReceiveCallbackResult.
@@ -1540,6 +1557,18 @@ func (o *Orchestrator) postBet(ctx context.Context, tx pgx.Tx, tenantID uuid.UUI
 	}
 	if session.AssetCode != event.AssetCode {
 		return ReceiveCallbackResult{}, fmt.Errorf("%w: asset_code does not match the launch session", ErrInvalidInput)
+	}
+
+	// ADR 0112 LF1 (slice 2, migration 0129): a NEW stake for a player of a
+	// brand that is not 'active' (pending_launch, suspended, closed) is
+	// refused, race-free, under the per-brand status lock taken SHARED.
+	// session.BrandID is the player's own brand (migration 0079 pins it to the
+	// player account). Placed after the tenant gate above (canonical
+	// status-gate order: tenant key, then brand key; both before the L0.2
+	// player lock below) and only on this new-bet path: wins, rollbacks and
+	// terminal stake returns are not brand-gated. Nothing has been written yet.
+	if err := requireActiveBrandForNewStake(ctx, tx, tenantID, session.BrandID); err != nil {
+		return ReceiveCallbackResult{}, err
 	}
 
 	// Stage 10.3 CAS-CAP-ROLLBACK-1 (§1.3/§1.4 step 2.5): the ONLY capability
