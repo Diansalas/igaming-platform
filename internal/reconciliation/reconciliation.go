@@ -141,6 +141,16 @@ func RunLedgerVsProjection(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, p
 		}
 
 		switch {
+		case !projected.Found && rebuilt.DebitTotal == 0 && rebuilt.CreditTotal == 0:
+			// A never-posted account: no ledger_entries (amount > 0 is a
+			// CHECK, so zero totals mean no entries) and no projection row.
+			// Ordinary, not a mismatch (see the comment below); for example
+			// a sportsbook settlement event resolves house_gaming before any
+			// posting, and a void of an open bet never posts to it. Before
+			// this case the comparison below reported it as a
+			// balance_mismatch (empty projected asset/type) - a false
+			// positive (ADR 0112 slice 2 ledger-finance condition).
+			continue
 		case !projected.Found && (rebuilt.DebitTotal != 0 || rebuilt.CreditTotal != 0):
 			// Directive item 4's first detection case: no
 			// wallet_balance_projection row exists at all, yet

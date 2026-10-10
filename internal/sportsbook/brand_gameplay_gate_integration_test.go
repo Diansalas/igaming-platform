@@ -15,7 +15,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -108,15 +107,6 @@ func bgReconcileClean(t *testing.T, owner *db.Pool, tenantID uuid.UUID) {
 		t.Fatalf("reconciliation: %v", err)
 	}
 	for _, m := range mismatches {
-		// PRE-EXISTING, unrelated to the gate (recorded as a finding in the slice-2
-		// report): a void of an OPEN bet resolves the tenant's house_gaming account
-		// (settlement.go loadBetLedgerAccounts) without posting to it, and this stream
-		// reports a never-posted account with no projection row as balance_mismatch
-		// (zero totals, empty projected asset/type). Admitted only in exactly that shape.
-		if m.MismatchKind == reconciliation.MismatchKindBalanceMismatch &&
-			strings.HasSuffix(m.ExpectedValue, " debit=0 credit=0") && m.ActualValue == "asset= type= debit=0 credit=0" {
-			continue
-		}
 		if m.MismatchKind != reconciliation.MismatchKindLedgerUnlinkedManualAdjustment {
 			t.Fatalf("reconciliation finding %s on %s: expected %s actual %s", m.MismatchKind, m.ReconciliationKey, m.ExpectedValue, m.ActualValue)
 		}
