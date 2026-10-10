@@ -1,0 +1,21 @@
+ADR 0112 slice 2 (LF1, migration 0129) - brand gameplay gate - mutation-kill evidence
+Date: 2026-10-10. Base: d86141f + 8aec8e1. Private database lfs2_ad458abd (sanctioned priv_db.sh harness,
+rebuilt from the worktree migrations for every SQL mutant). Tests run as igaming_runtime where they assert it.
+Each mutant was applied alone, the named tests run (-tags integration -p 1 -count=1), then reverted; the tree
+was verified clean (git status) and the private DB rebuilt from the unmutated migrations afterwards.
+
+| Id | Mutation | Killed by | Result |
+|----|----------|-----------|--------|
+| G1 | RequireBrandActiveForGameplay: `status != "active"` -> never refuses | TestRequireBrandActiveForGameplay_Matrix_FailClosed, TestBrandGate_Sportsbook_Matrix, TestBrandGate_Casino_Matrix | KILLED |
+| G2 | RequireBrandActiveForGameplay: shared brand key not taken | TestLF9_..._Slice2_BetIsRefused, TestBrandGate_Sportsbook_RaceSuspensionFirst (placement no longer waits; the 0129 backstop then refuses at COMMIT with GP011 instead of a decline) | KILLED |
+| G3 | RequireBrandActiveForGameplay: `AND tenant_id = $2` binding dropped (brands are publicly readable, so the binding is load-bearing) | TestRequireBrandActiveForGameplay_Matrix_FailClosed, TestBrandGate_CrossTenantBrandIsolation | KILLED |
+| G4 | casino.postBet: brand gate result ignored | TestBrandGate_Casino_Matrix | KILLED |
+| G5 | sportsbook.PlaceBet: brand gate result ignored | TestBrandGate_Sportsbook_Matrix, TestLF9 | KILLED |
+| G6 | casino rejectionClassFor: brand_not_active class not mapped | TestBrandGate_Casino_Matrix | KILLED |
+| S1 | launch_subject_status_guard: brand key EXCLUSIVE not taken | TestBrandGate_GovernedBrandChange_HoldsKeyExclusive, both race suites (sportsbook, casino), TestLF9 | KILLED |
+| S2 | ledger_wager_brand_active_guard: never raises | TestBrandGate_DatabaseBackstop | KILLED |
+| S3 | backstop WHEN list loses 'sportsbook_bet' | TestBrandGate_DatabaseBackstop, TestBrandGate_Catalog_0129 | KILLED |
+| S4 | backstop `b.tenant_id = NEW.tenant_id` binding dropped | not run: EQUIVALENT (wallets.tenant_id = ledger_entries.tenant_id = NEW.tenant_id by the join and the 0022 FK) | EQUIVALENT |
+
+Not mutated: the same-status early return of launch_subject_status_guard (0128 logic, pinned by the slice-1 suite and by
+TestBrandGate_GovernedBrandChange_HoldsKeyExclusive's same-status UPDATE case).
