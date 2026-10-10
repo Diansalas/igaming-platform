@@ -20,6 +20,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/audit"
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/identity"
+	"github.com/Diansalas/igaming-platform/internal/testsupport/launchfix"
 )
 
 func testPool(t *testing.T) *db.Pool {
@@ -49,8 +50,10 @@ func seedFixture(t *testing.T, pool *db.Pool) fixture {
 	f.tenantID = uuid.New()
 	// Stage 4I Phase E-SECURITY (migration 0077): `tenants` writes now
 	// require a genuinely platform-admin-scoped transaction.
-	err := pool.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
-		tag, err := tx.Exec(ctx, `INSERT INTO tenants (id, slug, name, licensing_model) VALUES ($1, $2, 'Test Tenant', 'under_platform_licence')`,
+	// ADR 0112 / LF2: the callers of seedFixture may hold the RUNTIME-role pool, which may only
+	// create pending_launch rows (LA021); the ACTIVE tenant and brand come from the owner pool.
+	err := launchfix.OwnerFor(t, pool).WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `INSERT INTO tenants (id, slug, name, licensing_model, status) VALUES ($1, $2, 'Test Tenant', 'under_platform_licence', 'active')`,
 			f.tenantID, "t-"+f.tenantID.String()[:8])
 		if err != nil {
 			return err
@@ -66,12 +69,15 @@ func seedFixture(t *testing.T, pool *db.Pool) fixture {
 		t.Fatalf("seed tenant/person: %v", err)
 	}
 
+	f.brandID = uuid.New()
+	if err := launchfix.OwnerFor(t, pool).WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `INSERT INTO brands (id, tenant_id, slug, name, status) VALUES ($1, $2, $3, 'Test Brand', 'active')`,
+			f.brandID, f.tenantID, "b-"+f.brandID.String()[:8])
+		return err
+	}); err != nil {
+		t.Fatalf("seed brand: %v", err)
+	}
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		f.brandID = uuid.New()
-		if _, err := tx.Exec(ctx, `INSERT INTO brands (id, tenant_id, slug, name) VALUES ($1, $2, $3, 'Test Brand')`,
-			f.brandID, f.tenantID, "b-"+f.brandID.String()[:8]); err != nil {
-			return err
-		}
 		f.playerID = uuid.New()
 		_, err := tx.Exec(ctx,
 			`INSERT INTO player_accounts (id, tenant_id, brand_id, person_id, email, password_hash, status)

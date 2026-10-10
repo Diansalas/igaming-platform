@@ -348,7 +348,7 @@ func seedTenantWithLicenceForJurisdictionTest(t *testing.T, pool *db.Pool) (tena
 
 	err := pool.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx,
-			`INSERT INTO tenants (id, slug, name, licensing_model) VALUES ($1, $2, 'SB Jurisdiction Test Tenant', 'under_platform_licence')`,
+			`INSERT INTO tenants (id, slug, name, licensing_model, status) VALUES ($1, $2, 'SB Jurisdiction Test Tenant', 'under_platform_licence', 'active')`,
 			tenantID, "sbjt-"+tenantID.String()[:8]); err != nil {
 			return err
 		}
@@ -368,7 +368,7 @@ func seedTenantWithLicenceForJurisdictionTest(t *testing.T, pool *db.Pool) (tena
 		t.Fatalf("seed tenant with licence: %v", err)
 	}
 	err = pool.WithTenant(context.Background(), tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `INSERT INTO brands (id, tenant_id, slug, name) VALUES ($1, $2, $3, 'SB Test Brand')`,
+		_, err := tx.Exec(ctx, `INSERT INTO brands (id, tenant_id, slug, name, status) VALUES ($1, $2, $3, 'SB Test Brand', 'active')`,
 			brandID, tenantID, "sbb-"+brandID.String()[:8])
 		return err
 	})

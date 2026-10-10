@@ -49,7 +49,10 @@ func (p *Pool) ConnectingRoleHoldsTemp(ctx context.Context) (bool, error) {
 }
 
 // ConnectingRoleOwnsNoTables reports whether the role this Pool is
-// connected as owns zero tables in the "public" schema. It exists purely
+// connected as owns zero tables in the "public" schema, directly OR through
+// membership of an owning role (pg_has_role MEMBER; ADR 0112 security S-7: a
+// role that merely inherits the migration-owner role can switch off triggers and
+// RLS exactly like the owner). It exists purely
 // as a PLAT-ROLESPLIT-1 (docs/security/runtime-role-separation.md)
 // production safety signal: table ownership is what lets a Postgres role
 // bypass every row-level-security policy regardless of GRANTs (RLS never
@@ -63,7 +66,7 @@ func (p *Pool) ConnectingRoleOwnsNoTables(ctx context.Context) (bool, error) {
 	err := p.pool.QueryRow(ctx,
 		`SELECT NOT EXISTS (
 			SELECT 1 FROM pg_tables
-			WHERE schemaname = 'public' AND tableowner = current_user
+			WHERE schemaname = 'public' AND pg_has_role(current_user, tableowner::name, 'MEMBER')
 		)`,
 	).Scan(&ownsNothing)
 	if err != nil {

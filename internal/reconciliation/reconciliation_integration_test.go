@@ -48,7 +48,7 @@ func seedFixture(t *testing.T, pool *db.Pool) fixture {
 	// require a genuinely platform-admin-scoped transaction.
 	err := pool.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
 		tag, err := tx.Exec(ctx,
-			`INSERT INTO tenants (id, slug, name, licensing_model) VALUES ($1, $2, 'Test Tenant', 'under_platform_licence')`,
+			`INSERT INTO tenants (id, slug, name, licensing_model, status) VALUES ($1, $2, 'Test Tenant', 'under_platform_licence', 'active')`,
 			f.tenantID, "t-"+f.tenantID.String()[:8])
 		if err != nil {
 			return err
@@ -65,7 +65,7 @@ func seedFixture(t *testing.T, pool *db.Pool) fixture {
 
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx,
-			`INSERT INTO brands (id, tenant_id, slug, name) VALUES ($1, $2, $3, 'Test Brand')`,
+			`INSERT INTO brands (id, tenant_id, slug, name, status) VALUES ($1, $2, $3, 'Test Brand', 'active')`,
 			f.brandID, f.tenantID, "b-"+f.brandID.String()[:8]); err != nil {
 			return err
 		}

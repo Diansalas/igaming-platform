@@ -92,7 +92,7 @@ func seedFixture(t *testing.T, pool *db.Pool) fixture {
 	err := pool.WithPlatformAdmin(context.Background(), f.platformAdmin, func(ctx context.Context, tx pgx.Tx) error {
 		for _, id := range []uuid.UUID{f.tenantID, f.otherTenantID} {
 			tag, err := tx.Exec(ctx,
-				`INSERT INTO tenants (id, slug, name, licensing_model) VALUES ($1, $2, 'Test Tenant', 'under_platform_licence')`,
+				`INSERT INTO tenants (id, slug, name, licensing_model, status) VALUES ($1, $2, 'Test Tenant', 'under_platform_licence', 'active')`,
 				id, "t-"+id.String()[:8])
 			if err != nil {
 				return err
@@ -151,7 +151,7 @@ func seedFixture(t *testing.T, pool *db.Pool) fixture {
 
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		f.brandID = uuid.New()
-		if _, err := tx.Exec(ctx, `INSERT INTO brands (id, tenant_id, slug, name) VALUES ($1, $2, $3, 'Brand A')`,
+		if _, err := tx.Exec(ctx, `INSERT INTO brands (id, tenant_id, slug, name, status) VALUES ($1, $2, $3, 'Brand A', 'active')`,
 			f.brandID, f.tenantID, "b-"+f.brandID.String()[:8]); err != nil {
 			return err
 		}

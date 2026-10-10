@@ -46,7 +46,7 @@ func seedSiblingBrand(t *testing.T, pool *db.Pool, tenantID uuid.UUID) casinoFix
 
 	err = pool.WithTenant(context.Background(), tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx,
-			`INSERT INTO brands (id, tenant_id, slug, name) VALUES ($1, $2, $3, 'Sibling Brand')`,
+			`INSERT INTO brands (id, tenant_id, slug, name, status) VALUES ($1, $2, $3, 'Sibling Brand', 'active')`,
 			f.brandID, tenantID, "b-"+f.brandID.String()[:8]); err != nil {
 			return err
 		}

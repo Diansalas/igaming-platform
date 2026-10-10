@@ -102,7 +102,7 @@ func m0109SeedTenant(t *testing.T, pool *db.Pool) uuid.UUID {
 	t.Helper()
 	id := uuid.New()
 	if err := pool.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `INSERT INTO tenants (id, name, slug, licensing_model) VALUES ($1, $2, $3, 'under_platform_licence')`,
+		_, err := tx.Exec(ctx, `INSERT INTO tenants (id, name, slug, licensing_model, status) VALUES ($1, $2, $3, 'under_platform_licence', 'active')`,
 			id, "m0109 tenant "+id.String(), "m0109-"+id.String())
 		return err
 	}); err != nil {

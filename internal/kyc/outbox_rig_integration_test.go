@@ -19,6 +19,7 @@ import (
 
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/testsupport/alertinject"
+	"github.com/Diansalas/igaming-platform/internal/testsupport/launchfix"
 )
 
 // rig is one tenant plus a worker whose vendor calls are counted.
@@ -206,16 +207,8 @@ func auditByAction(rows []auditRow, action string) []auditRow {
 // (the only sanctioned writer of tenants).
 func setTenantStatus(t *testing.T, pool *db.Pool, tenantID uuid.UUID, status string) {
 	t.Helper()
-	if err := pool.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
-		tag, err := tx.Exec(ctx, `UPDATE tenants SET status = $2 WHERE id = $1`, tenantID, status)
-		if err != nil {
-			return err
-		}
-		if tag.RowsAffected() != 1 {
-			t.Fatalf("tenant status update touched %d rows", tag.RowsAffected())
-		}
-		return nil
-	}); err != nil {
+	// ADR 0112: governed fixture (real launch guards), not a raw UPDATE.
+	if err := launchfix.TrySetTenantStatusOn(context.Background(), t, pool, tenantID, status); err != nil {
 		t.Fatalf("set tenant status %s: %v", status, err)
 	}
 }

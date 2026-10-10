@@ -130,8 +130,11 @@ func (w *World) SeedAdmin() uuid.UUID {
 func (w *World) SeedTenant(admin uuid.UUID) uuid.UUID {
 	w.T.Helper()
 	id := uuid.New()
-	if err := w.Pool.WithPlatformAdmin(context.Background(), admin, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `INSERT INTO tenants (id, name, slug, licensing_model) VALUES ($1, $2, $3, 'own_licence')`,
+	// ADR 0112 / LF2: an ACTIVE tenant is provisioned by the table-owner pool (the runtime
+	// role may only create pending_launch rows; guard LA021). The database records the
+	// owner_provisioned transition.
+	if err := w.Owner.WithPlatformAdmin(context.Background(), admin, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `INSERT INTO tenants (id, name, slug, licensing_model, status) VALUES ($1, $2, $3, 'own_licence', 'active')`,
 			id, "w-"+id.String()[:8], "w-"+id.String()[:8])
 		return err
 	}); err != nil {

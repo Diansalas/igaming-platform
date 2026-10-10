@@ -16,6 +16,7 @@ import (
 
 	"github.com/Diansalas/igaming-platform/internal/apierror"
 	"github.com/Diansalas/igaming-platform/internal/payments"
+	"github.com/Diansalas/igaming-platform/internal/testsupport/launchfix"
 )
 
 // TestWebhook_SameTenant_AcceptedAndCredited is QA plan T1/T4: A-signed
@@ -86,10 +87,7 @@ func TestWebhook_EnumerationOracle_IndistinguishableResponses(t *testing.T) {
 
 	suspendedTenant := mustCreateTenant(t, pool)
 	mustCreateBrand(t, pool, suspendedTenant)
-	if err := pool.WithPlatformAdmin(context.Background(), activeTenant.ID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `UPDATE tenants SET status = 'suspended' WHERE id = $1`, suspendedTenant.ID)
-		return err
-	}); err != nil {
+	if err := launchfix.TrySetTenantStatus(context.Background(), suspendedTenant.ID, "suspended"); err != nil {
 		t.Fatalf("suspend tenant: %v", err)
 	}
 

@@ -31,6 +31,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/ledger"
 	"github.com/Diansalas/igaming-platform/internal/payoutinstrument/pitest"
 	"github.com/Diansalas/igaming-platform/internal/tenant"
+	"github.com/Diansalas/igaming-platform/internal/testsupport/launchfix"
 	"github.com/Diansalas/igaming-platform/internal/withdrawal"
 )
 
@@ -341,10 +342,7 @@ func (w *k3World) approvePolicy(in adjustment.PolicyChangeInput, requester, appr
 
 func (w *k3World) setTenantStatus(status string) {
 	w.t.Helper()
-	if err := w.pool.WithPlatformAdmin(context.Background(), w.adminA.ID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `UPDATE tenants SET status = $2 WHERE id = $1`, w.f.tenantID, status)
-		return err
-	}); err != nil {
+	if err := launchfix.TrySetTenantStatusOn(context.Background(), w.t, w.pool, w.f.tenantID, status); err != nil {
 		w.t.Fatalf("set tenant status %s: %v", status, err)
 	}
 }

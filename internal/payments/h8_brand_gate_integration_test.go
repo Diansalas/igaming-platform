@@ -16,6 +16,7 @@ import (
 
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/payoutinstrument/pitest"
+	"github.com/Diansalas/igaming-platform/internal/testsupport/launchfix"
 )
 
 type h8State struct {
@@ -65,6 +66,8 @@ func TestH8_SweeperDispatch_Matrix(t *testing.T) {
 		{"active_tenant_brand_closed", "", "closed"},
 		{"tenant_suspended_active_brand", "suspended", ""},
 		{"tenant_closed_active_brand", "closed", ""},
+		{"active_tenant_brand_pending", "", "pending_launch"},
+		{"tenant_pending_active_brand", "pending_launch", ""},
 		{"both_inactive", "suspended", "suspended"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -145,6 +148,24 @@ func TestH8_BrandSuspendedAfterPreRead_ClaimTxDefers_ReactivationDispatches(t *t
 			h8Refused(t, pool, fRace, intentID, attID, before, 1)
 
 			testHookAfterDispatchStatusPreRead = nil
+			if status == "closed" {
+				// closed is terminal (ADR 0112 3.1): the database refuses the reopening, and the
+				// refused attempt is never dispatched by a later pass.
+				if err := launchfix.TrySetBrandStatusOn(context.Background(), t, pool, fRace.tenantID, fRace.brandID, "active"); !launchfix.IsClosedTerminalRefusal(err) {
+					t.Fatalf("a closed brand must not be reopenable: the database must answer LA020, got %v", err)
+				}
+				dueNow(t, pool, fRace.tenantID, attID)
+				if st := s.RunPass(context.Background(), nil, 1); st.Errors != 0 {
+					t.Fatalf("pass 2: %+v", st)
+				}
+				if d, _, _ := spy.counts(); d != 1 {
+					t.Fatalf("a closed brand's attempt must never dispatch, got %d provider calls", d)
+				}
+				if mustGetAttempt(t, pool, fRace.tenantID, attID).State != AttemptCreated {
+					t.Fatal("a closed brand's attempt must stay created")
+				}
+				return
+			}
 			setBrandStatus(t, pool, fRace.tenantID, fRace.brandID, "active")
 			dueNow(t, pool, fRace.tenantID, attID)
 			if st := s.RunPass(context.Background(), nil, 1); st.Errors != 0 {
@@ -399,17 +420,20 @@ func TestH8_BrandResolutionOnly_Contract(t *testing.T) {
 			t.Fatalf("%s: got (%v, %v), want (%v, nil)", name, got, err, c.want)
 		}
 	}
-	for _, st := range []string{"suspended", "closed"} {
-		setBrandStatus(t, pool, a.tenantID, a.brandID, st)
-		if got, err := run(a.tenantID, a.brandID); err != nil || !got {
-			t.Fatalf("%s: got (%v, %v), want (true, nil)", st, got, err)
-		}
+	// closed is terminal (ADR 0112 3.1), so it is applied last, to the other fixture's brand.
+	setBrandStatus(t, pool, a.tenantID, a.brandID, "suspended")
+	if got, err := run(a.tenantID, a.brandID); err != nil || !got {
+		t.Fatalf("suspended: got (%v, %v), want (true, nil)", got, err)
 	}
 	// Tenant status is irrelevant to the brand-only helper (decision 23).
 	setBrandStatus(t, pool, a.tenantID, a.brandID, "active")
 	setTenantStatus(t, pool, a.tenantID, "suspended")
 	if got, err := run(a.tenantID, a.brandID); err != nil || got {
 		t.Fatalf("suspended tenant + active brand: got (%v, %v), want (false, nil)", got, err)
+	}
+	setBrandStatus(t, pool, b.tenantID, b.brandID, "closed")
+	if got, err := run(b.tenantID, b.brandID); err != nil || !got {
+		t.Fatalf("closed: got (%v, %v), want (true, nil)", got, err)
 	}
 	// Read error: an error, never a silent "not resolution-only".
 	err := pool.WithTenant(context.Background(), b.tenantID, func(ctx context.Context, tx pgx.Tx) error {

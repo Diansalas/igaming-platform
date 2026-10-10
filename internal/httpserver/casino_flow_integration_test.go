@@ -14,7 +14,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -31,6 +30,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/identity"
 	"github.com/Diansalas/igaming-platform/internal/identityresolution"
+	"github.com/Diansalas/igaming-platform/internal/testsupport/launchfix"
 	"github.com/Diansalas/igaming-platform/internal/webhookauth"
 )
 
@@ -329,16 +329,9 @@ func TestCasinoWebhook_UnknownAndSuspendedTenantIdenticalNotFound(t *testing.T) 
 	// require a genuinely platform-admin-scoped transaction - a
 	// WithoutTenant UPDATE here would be a silent zero-row no-op, not an
 	// error, so rows-affected is checked explicitly.
-	err := pool.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
-		tag, err := tx.Exec(ctx, `UPDATE tenants SET status = 'suspended' WHERE id = $1`, tenant.ID)
-		if err != nil {
-			return err
-		}
-		if tag.RowsAffected() != 1 {
-			return fmt.Errorf("expected to update 1 tenant row, updated %d", tag.RowsAffected())
-		}
-		return nil
-	})
+	// ADR 0112: the status moves through the governed fixture (real guards); it returns an
+	// error unless exactly the tenant's own row changed.
+	err := launchfix.TrySetTenantStatus(context.Background(), tenant.ID, "suspended")
 	if err != nil {
 		t.Fatalf("suspend tenant: %v", err)
 	}

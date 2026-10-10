@@ -77,7 +77,7 @@ func newMAWorld(t *testing.T) *maWorld {
 		t.Fatal(err)
 	}
 	if err := a.pool.WithTenant(ctx, w.tenant, func(ctx context.Context, tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx, `INSERT INTO brands (id, tenant_id, name, slug) VALUES ($1, $2, 'b', $3)`, w.brand, w.tenant, "mab-"+w.brand.String()[:8]); err != nil {
+		if _, err := tx.Exec(ctx, `INSERT INTO brands (id, tenant_id, name, slug, status) VALUES ($1, $2, 'b', $3, 'active')`, w.brand, w.tenant, "mab-"+w.brand.String()[:8]); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(ctx, `INSERT INTO player_accounts (id, tenant_id, brand_id, person_id, email, password_hash, status) VALUES ($1, $2, $3, $4, $5, 'x', 'active')`,

@@ -245,7 +245,9 @@ func TestOutbox_07a_TenantInactive_DefersWithoutAttempt_ThenResumes_T_H(t *testi
 			before := r.snapshot(v.ID)
 			row := onlyRow(t, r.pool, r.f.tenantID, v.ID, OpCreate)
 			setTenantStatus(t, r.pool, r.f.tenantID, status)
-			t.Cleanup(func() { setTenantStatus(t, r.pool, r.f.tenantID, "active") })
+			if status != "closed" { // closed is terminal (ADR 0112 3.1): nothing to restore
+				t.Cleanup(func() { setTenantStatus(t, r.pool, r.f.tenantID, "active") })
+			}
 
 			if st := r.pass(); st.Results[resultDeferred] != 1 {
 				t.Fatalf("expected one deferral, got %+v", st.Results)
@@ -266,6 +268,9 @@ func TestOutbox_07a_TenantInactive_DefersWithoutAttempt_ThenResumes_T_H(t *testi
 			got = onlyRow(t, r.pool, r.f.tenantID, v.ID, OpCreate)
 			if got.FailedAttempts != 0 || got.Claims != 2 {
 				t.Fatalf("after a second deferral: attempts=%d claims=%d, want 0 / 2 (claims counts worker activity, IC C5)", got.FailedAttempts, got.Claims)
+			}
+			if status == "closed" {
+				return // closed is terminal: a closed tenant is never reactivated, so there is no resume
 			}
 			// Resume on reactivation.
 			setTenantStatus(t, r.pool, r.f.tenantID, "active")

@@ -504,15 +504,18 @@ func TestSweeperLoop_TenantResolutionOnly_StatusTable_MissingRowFailsClosed(t *t
 	if read(f.tenantID) {
 		t.Fatal("an active tenant must not be resolution-only")
 	}
-	for _, status := range []string{"suspended", "closed"} {
-		setTenantStatus(t, pool, f.tenantID, status)
-		if !read(f.tenantID) {
-			t.Fatalf("a %s tenant must be resolution-only", status)
-		}
+	setTenantStatus(t, pool, f.tenantID, "suspended")
+	if !read(f.tenantID) {
+		t.Fatal("a suspended tenant must be resolution-only")
 	}
 	setTenantStatus(t, pool, f.tenantID, "active")
 	if read(f.tenantID) {
 		t.Fatal("reactivation must lift resolution-only immediately (no caching)")
+	}
+	// closed is terminal (ADR 0112 3.1), so it is checked last.
+	setTenantStatus(t, pool, f.tenantID, "closed")
+	if !read(f.tenantID) {
+		t.Fatal("a closed tenant must be resolution-only")
 	}
 	if !read(uuid.New()) {
 		t.Fatal("a missing tenant row must fail closed")

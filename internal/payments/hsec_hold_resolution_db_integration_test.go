@@ -821,6 +821,10 @@ func TestHSEC_HoldRelease_FreezeTrigger(t *testing.T) {
 				t.Fatal("the hold moved")
 			}
 
+			if variant == "tenant_closed" {
+				h.assertInvariants()
+				return // closed is terminal (ADR 0112 3.1): there is no reactivation
+			}
 			// Reactivated: the normal KYC denial works and releases the hold (the freeze does not
 			// break it).
 			h.activateTenant()
@@ -981,6 +985,33 @@ func TestHSEC_HoldRelease_Migration0124DownRefusals(t *testing.T) {
 	// rolled back (they hold no data here), so the step that refuses is 0124's own down.
 	downTo0124 := func(t *testing.T, h *hsr) error {
 		t.Helper()
+		// 0128 (ADR 0112) refuses its own down while a governed transition exists (S13, covered by
+		// internal/tenant/migration_0128_integration_test.go). This test is about 0124's down, and the
+		// world's status flips are governed, so on this THROWAWAY scratch database the launch history is
+		// removed first, inside one owner transaction (transactional DDL: an error leaves everything as it was).
+		if err := h.pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+			for _, stmt := range []string{
+				`ALTER TABLE launch_status_transitions NO FORCE ROW LEVEL SECURITY`,
+				`ALTER TABLE launch_authorisation_approvals NO FORCE ROW LEVEL SECURITY`,
+				`ALTER TABLE launch_authorisation_requests NO FORCE ROW LEVEL SECURITY`,
+				`ALTER TABLE launch_status_transitions DISABLE TRIGGER USER`,
+				`ALTER TABLE launch_authorisation_approvals DISABLE TRIGGER USER`,
+				`ALTER TABLE launch_authorisation_requests DISABLE TRIGGER USER`,
+				`DELETE FROM launch_status_transitions WHERE kind = 'governed'`,
+				`DELETE FROM launch_authorisation_approvals`,
+				`DELETE FROM launch_authorisation_requests`,
+				`ALTER TABLE launch_status_transitions ENABLE TRIGGER USER`,
+				`ALTER TABLE launch_authorisation_approvals ENABLE TRIGGER USER`,
+				`ALTER TABLE launch_authorisation_requests ENABLE TRIGGER USER`,
+			} {
+				if _, err := tx.Exec(ctx, stmt); err != nil {
+					return errors.New(stmt + ": " + err.Error())
+				}
+			}
+			return nil
+		}); err != nil {
+			t.Fatalf("clear launch history on the scratch world: %v", err)
+		}
 		dir := realMigrationsDir(t)
 		if _, err := h.pool.MigrateDown(context.Background(), dir, migrationsAbove(t, hsecMigrationVersion)); err != nil {
 			t.Fatalf("down above 0124 (empty): %v", err)
@@ -1054,8 +1085,18 @@ func TestHSEC_HoldRelease_ActingBrandsPolicyIsLockOnly(t *testing.T) {
 		_, err := tx.Exec(ctx, `UPDATE brands SET status = 'closed' WHERE id = $1`, h.f.brandID)
 		return err
 	})
+	// ADR 0112 (security S-4): the BEFORE UPDATE launch guard refuses a status change BEFORE the
+	// policy WITH CHECK is evaluated, so the status UPDATE is exactly LA020 ...
+	if !hsrIs(err, "LA020") {
+		t.Fatalf("an acting status UPDATE must be refused by the launch guard (LA020), got %v", err)
+	}
+	// ... while an acting UPDATE of a NON-status column is still exactly the policy's 42501.
+	err = h.acting(h.reqA, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `UPDATE brands SET name = 'acting rename' WHERE id = $1`, h.f.brandID)
+		return err
+	})
 	if !hsrIs(err, "42501") {
-		t.Fatalf("an acting status UPDATE must be refused (42501), got %v", err)
+		t.Fatalf("an acting UPDATE of brands.name must be exactly the policy refusal (42501), got %v", err)
 	}
 }
 

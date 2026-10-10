@@ -18,6 +18,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/casino"
 	"github.com/Diansalas/igaming-platform/internal/ledger"
 	"github.com/Diansalas/igaming-platform/internal/sportsbook"
+	"github.com/Diansalas/igaming-platform/internal/testsupport/launchfix"
 )
 
 // findOutcome returns the SweepOutcome for tenantID, failing the test if
@@ -270,9 +271,7 @@ func TestSweepTenantSelection_ActiveOnlyScopedAndUnscoped(t *testing.T) {
 	suspended := seedFixture(t, pool)
 	closed := seedFixture(t, pool)
 	for id, status := range map[uuid.UUID]string{suspended.tenantID: "suspended", closed.tenantID: "closed"} {
-		if err := pool.WithPlatformAdmin(ctx, uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
-			return execOne(ctx, tx, `UPDATE tenants SET status = $2 WHERE id = $1`, id, status)
-		}); err != nil {
+		if err := launchfix.TrySetTenantStatusOn(ctx, t, pool, id, status); err != nil {
 			t.Fatalf("set tenant %s %s: %v", id, status, err)
 		}
 	}

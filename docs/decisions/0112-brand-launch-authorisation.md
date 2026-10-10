@@ -102,7 +102,14 @@ pending ──▶ executing ──▶ executed
   approval being inserted in this txid, or (b) for `action = 'suspend'` with `required_approvals = 0`. `executing` is
   a closed state: in the same transaction it must end `executed` or `refused_at_execution`; a deferred commit check
   refuses any request still `executing` at commit (`LA030`). `pending -> rejected` needs a `reject` approval decided
-  in the same txid.
+  in the same txid. **As implemented in slice 1 (S-8, C-3):** the approvals may be decided in earlier transactions
+  (the count spans txids) but the FINAL approval must be inserted in the executing txid; a recorded `reject` approval
+  blocks `pending -> executing` for good (`LA011`); the database does NOT bound approval age or the readiness-evidence
+  hash at execution time. **Slice 3 (`launchgov`) must** reject an execution whose approvals are older than the policy
+  window and whose recomputed readiness hash differs from the one the approvers saw; until then neither is enforced
+  by any layer. The deferred commit check fails closed: a request it cannot see at COMMIT (cleared session scope) is
+  refused with `LA030`, never passed. `superseded` is admitted only once the suspension's `governed` transition exists
+  in the same txid (S-2).
 - **S3.** The one-pending-request-per-subject partial UNIQUE **excludes** `action = 'suspend'`, so a suspension can
   never be blocked by a pending activation/closure. Executing a suspension marks every other `pending` request of the
   same subject `superseded` in the same transaction (audit row each). Expiry is computed on access: every read and the
@@ -341,13 +348,19 @@ change is mandatory). Transitions are bound through their same-txid executing re
    `internal/launchgov`, keeping the GP020 translation and the separate-transaction refusal audit. A static test pins
    that the only non-test writer of either status column is that executor.
 2. Independently of Go, `zz_launch_status_governed` refuses any status change without a same-txid governed transition
-   of an executing request, so a runtime-role SQL session of any shape cannot change either status; the tenant-scoped
-   `brands.status` rewrite of section 1 is closed.
+   of an executing request, so a runtime-role SQL session of any shape cannot change either status without ALSO
+   fabricating that request, its approvals and its transition; the tenant-scoped `brands.status` rewrite of section 1
+   is closed against a bare UPDATE. **S-3, stated precisely:** until the slice-3 `zz_actor_proof_guard` lands, the
+   database four-eyes control rests on trusting session settings (GUCs): a runtime session that can set them can
+   impersonate the requester and the approvers and drive a complete governed sequence. Slice 1 therefore makes the
+   status change auditable and non-accidental, not unforgeable by a hostile runtime session.
 3. **Registration / login gate.** `RegisterPlayer*` refuses unless brand and tenant are `active`; login refuses on a
    `pending_launch` brand. **S4:** a plain non-locking read in the registering transaction (no `FOR SHARE`, no
    advisory lock: registration moves no money and must not contend with a suspension); fail closed on an unreadable
-   row; 409 `BRAND_NOT_ACCEPTING_REGISTRATIONS`. Login on `suspended`/`closed` stays allowed so players can see
-   balances.
+   row; 409 `BRAND_NOT_ACCEPTING_REGISTRATIONS` for `suspended`/`closed`. **S-5/S-6:** a `pending_launch` brand, or an
+   `active` brand of a `pending_launch` tenant, is hidden: registration AND login answer the same 404
+   `unknown brand` as an unknown slug, so a pre-launch brand's existence is not disclosed. Login on `suspended`/`closed`
+   stays allowed so players can see balances.
 4. `CreateBrand`/`CreateTenant` insert `pending_launch`; creation no longer means launch.
 5. HD-CTF-9 stays OPEN and is not decided here.
 
@@ -472,6 +485,26 @@ gate; legacy backfill; PII lint; separate decision `licensing_model`; tenant and
 6. Casino rounds have no open state (Q-GP-6); closure checks count sportsbook bets only (LF4).
 7. `R-PROVIDER-TIER` describes the process, not a per-tenant provider binding (none exists yet).
 8. Brand-level jurisdiction scoping stays tenant-level (ADR 0012); jurisdictions on a brand decision are a record.
+9. **S-3 (hard prerequisite).** Until `zz_actor_proof_guard` (slice 3) exists, DB four-eyes trusts GUCs (see 7.2).
+   No HTTP or console route may write the three launch tables, and no real launch may be authorised through them,
+   before that guard is in place and `security` has reviewed it.
+10. **C-3(b).** A committed suspension supersedes pending requests of the same subject in its own transaction, but
+    nothing yet fails a COMMIT of a suspension that left a stale `pending` activation/closure behind (a deferred
+    check over the subject at commit). Not done soundly in slice 1; the slice-3 executor performs the supersede and
+    its test asserts no stale `pending` request survives a suspension.
+11. **Snapshot isolation (security r2).** An approval-based `pending -> executing` is refused (`LA011`) unless the
+    transaction is READ COMMITTED, because a reject committed after a REPEATABLE READ / SERIALIZABLE snapshot is
+    invisible to the reject check and the approvals guard only row-locks the request (SSI does not abort). The slice-3
+    executor must run in READ COMMITTED.
+12. **Slice-3 notes.** (i) A recorded `reject` is bound to its request only: it does NOT carry over to a later
+    identical request on the same subject, so an approver can be "shopped" by re-requesting. Slice 3 must decide and
+    record the policy (for example a cool-down, or surfacing prior rejects of the same payload hash to the next
+    approvers); nothing in slice 1 prevents it. (ii) A tenant's own-brand suspension supersedes and discards the
+    platform's pending requests for that subject (S3). The audit trail and the console must show that explicitly
+    (request, superseding suspension, actor), not as a silent disappearance.
+13. **C-5.** The slice-1 closure tests realise an admitted closure through the owner-run governed fixture, and the
+    `tenant.status_change` audit assertion of the pre-0128 tests is not made (ChangeStatus fails closed). Slice 3
+    restores that assertion on the executor. Runtime-role raw-UPDATE refusal (GP020 / LA020) is covered separately.
 
 ## 13. Work breakdown (slices; none starts before LO-1 is put to the owner or explicitly defaulted)
 
@@ -479,9 +512,9 @@ gate; legacy backfill; PII lint; separate decision `licensing_model`; tenant and
 |---|---|---|---|
 | 1 | Migration (tables, vocabularies, RLS, grants, guards, CHECK widening, S12 backfill, defaults, S13 down); status-reader inventory and literal pin; LF2 test-only fixture path and migration of existing fixtures; S11 startup check; `CreateTenant`/`CreateBrand` pending; registration/login gate | backend (identity-compliance for the registration gate) | security, ledger-finance (0118/0121 interplay, fixtures), code-reviewer, qa |
 | 2 | Brand gameplay gate (LF1): per-brand advisory lock key function, Go `RequireBrandActiveForGameplay`, DB backstop on new casino/sportsbook wagering, terminal stake returns allowed, lock taken exclusively by `zz_launch_status_governed`; ADR 0095 / 0118 amendment note | casino + sportsbook (design by ledger-finance) | **ledger-finance sign-off required**, security, code-reviewer, qa |
-| 3 | `internal/launchgov`: readiness evaluator, request/approve/reject/cancel/suspend, executor (absorbs `ChangeStatus`), audit; permissions; ADR 0110 proof extension (ops, platform-scope allowance, signer allow-list) | backend (proof extension: security) | security, ledger-finance (LF3 closure preconditions), identity-compliance, code-reviewer, qa |
+| 3 | **Hard prerequisites (S-3, S-8, C-3(b)): `zz_actor_proof_guard`, approval-age and readiness-hash bounds, suspension-supersede commit check.** `internal/launchgov`: readiness evaluator, request/approve/reject/cancel/suspend, executor (absorbs `ChangeStatus`), audit; permissions; ADR 0110 proof extension (ops, platform-scope allowance, signer allow-list) | backend (proof extension: security) | security, ledger-finance (LF3 closure preconditions), identity-compliance, code-reviewer, qa |
 | 4 | HTTP routes, OpenAPI, error codes | backend | security, code-reviewer |
-| 5 | Back Office panel with fixed disclaimers | backoffice (UI frontend, copy ux-design) | product-owner-proxy, security |
+| 5 | Back Office panel with fixed disclaimers; a `pending_launch` badge and list filter for tenants and brands (C-8: the console must show the new status, not render it as an unknown value) | backoffice (UI frontend, copy ux-design) | product-owner-proxy, security |
 
 Docs (architecture 15 and 36, task registry, decision register, HANDOVER) are updated by `architect` and the
 orchestrator per slice; TENANT-STATUS-AUTHZ-1 is closed only after security reviews slices 1, 3 and 4. Labels: all

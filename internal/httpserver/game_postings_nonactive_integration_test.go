@@ -24,6 +24,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/casino"
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/identity"
+	"github.com/Diansalas/igaming-platform/internal/testsupport/launchfix"
 )
 
 func gateRuntimePool(t *testing.T) *db.Pool {
@@ -56,24 +57,22 @@ func gateRuntimePool(t *testing.T) *db.Pool {
 // owner transaction only (transactional DDL; no other session sees it disabled).
 func gateSetTenantStatus(t *testing.T, owner *db.Pool, tenantID uuid.UUID, status string) {
 	t.Helper()
-	err := owner.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
-		if status == "closed" {
-			if _, err := tx.Exec(ctx, `ALTER TABLE tenants DISABLE TRIGGER tenants_status_change_gate`); err != nil {
-				return err
-			}
-		}
-		if _, err := tx.Exec(ctx, `UPDATE tenants SET status = $1 WHERE id = $2`, status, tenantID); err != nil {
+	// ADR 0112: the status moves through the governed fixture (the real launch guards run;
+	// only the unrelated GP020 closure gate is suspended for 'closed', exactly as before,
+	// inside this one owner transaction).
+	var h launchfix.Hooks
+	if status == "closed" {
+		h.BeforeUpdate = func(ctx context.Context, tx pgx.Tx) error {
+			_, err := tx.Exec(ctx, `ALTER TABLE tenants DISABLE TRIGGER tenants_status_change_gate`)
 			return err
 		}
-		if status == "closed" {
-			// RETURN the error so the transaction aborts and the trigger stays enabled.
-			if _, err := tx.Exec(ctx, `ALTER TABLE tenants ENABLE TRIGGER tenants_status_change_gate`); err != nil {
-				return err
-			}
+		// RETURN the error so the transaction aborts and the trigger stays enabled.
+		h.AfterUpdate = func(ctx context.Context, tx pgx.Tx) error {
+			_, err := tx.Exec(ctx, `ALTER TABLE tenants ENABLE TRIGGER tenants_status_change_gate`)
+			return err
 		}
-		return nil
-	})
-	if err != nil {
+	}
+	if err := launchfix.TrySetTenantStatusHooked(context.Background(), tenantID, status, h); err != nil {
 		t.Fatalf("set tenant status: %v", err)
 	}
 }
@@ -243,13 +242,9 @@ func TestGamePostingsNonActive_WebhookRaceWithClosure(t *testing.T) {
 	releaseOnce := func() { once.Do(func() { close(release) }) }
 	t.Cleanup(releaseOnce)
 	go func() {
-		closerDone <- owner.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
-			if _, err := tx.Exec(ctx, `UPDATE tenants SET status = 'closed' WHERE id = $1`, tenant.ID); err != nil {
-				return err
-			}
+		closerDone <- launchfix.TrySetTenantStatusHolding(context.Background(), tenant.ID, "closed", func() {
 			close(updated)
 			<-release
-			return nil
 		})
 	}()
 	<-updated

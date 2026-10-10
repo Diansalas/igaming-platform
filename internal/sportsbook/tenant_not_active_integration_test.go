@@ -25,6 +25,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/ledger"
 	"github.com/Diansalas/igaming-platform/internal/tenant"
+	"github.com/Diansalas/igaming-platform/internal/testsupport/launchfix"
 )
 
 // runtimePool connects as the runtime role and asserts it is neither a
@@ -61,29 +62,28 @@ func runtimePool(t *testing.T) *db.Pool {
 // disabled). Every other status change goes through the trigger.
 func setTenantStatus(t *testing.T, owner *db.Pool, tenantID uuid.UUID, status string) {
 	t.Helper()
-	err := owner.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
-		if status == "closed" {
-			if _, err := tx.Exec(ctx, `ALTER TABLE tenants DISABLE TRIGGER tenants_status_change_gate`); err != nil {
-				return err
-			}
+	if status == "pending_launch" {
+		if err := launchfix.ForcePending(context.Background(), t, owner, tenantID, nil); err != nil {
+			t.Fatalf("force tenant pending_launch: %v", err)
 		}
-		tag, err := tx.Exec(ctx, `UPDATE tenants SET status = $1 WHERE id = $2`, status, tenantID)
-		if err != nil {
+		return
+	}
+	// ADR 0112: the real launch guards run through the governed fixture; only the unrelated
+	// GP020 closure gate is suspended for 'closed', inside this one owner transaction.
+	var h launchfix.Hooks
+	if status == "closed" {
+		h.BeforeUpdate = func(ctx context.Context, tx pgx.Tx) error {
+			_, err := tx.Exec(ctx, `ALTER TABLE tenants DISABLE TRIGGER tenants_status_change_gate`)
 			return err
 		}
-		if tag.RowsAffected() != 1 {
-			return errors.New("tenant row not updated")
+		// The error is RETURNED so the transaction aborts (transactional DDL:
+		// the trigger then stays enabled for every session).
+		h.AfterUpdate = func(ctx context.Context, tx pgx.Tx) error {
+			_, err := tx.Exec(ctx, `ALTER TABLE tenants ENABLE TRIGGER tenants_status_change_gate`)
+			return err
 		}
-		if status == "closed" {
-			// The error is RETURNED so the transaction aborts (transactional DDL:
-			// the trigger then stays enabled for every session).
-			if _, err := tx.Exec(ctx, `ALTER TABLE tenants ENABLE TRIGGER tenants_status_change_gate`); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
-	if err != nil {
+	}
+	if err := launchfix.TrySetTenantStatusHooked(context.Background(), tenantID, status, h); err != nil {
 		t.Fatalf("set tenant status %s: %v", status, err)
 	}
 }
@@ -160,10 +160,14 @@ func placeBetRT(t *testing.T, pool *db.Pool, f sbFixture, sel Selection, stake i
 
 var nonActiveStatuses = []string{"suspended", "closed"}
 
+// gateStatuses is the GP010 gate matrix (ADR 0112 / ledger-finance L-2): pending_launch is refused
+// by the gameplay gate exactly like suspended and closed.
+var gateStatuses = []string{"suspended", "closed", "pending_launch"}
+
 func TestTenantNotActive_PlaceBetRefusedAndReplayIsRead(t *testing.T) {
 	owner := testPool(t)
 	rt := runtimePool(t)
-	for _, status := range nonActiveStatuses {
+	for _, status := range gateStatuses {
 		t.Run(status, func(t *testing.T) {
 			f := seedFixture(t, owner)
 			fundWallet(t, owner, f, 100_000)
@@ -211,6 +215,19 @@ func TestTenantNotActive_PlaceBetRefusedAndReplayIsRead(t *testing.T) {
 				t.Fatalf("replay posted something: tx %d->%d", txs0, txs2)
 			}
 
+			if status == "closed" {
+				// ADR 0112 section 3.1: closed is terminal (HD-CTF-9 stays open); the reopening
+				// this test used to perform is refused by the database (LA020), and the closed
+				// tenant keeps declining new bets.
+				if err := launchfix.TrySetTenantStatus(context.Background(), f.tenantID, "active"); !launchfix.IsClosedTerminalRefusal(err) {
+					t.Fatalf("a closed tenant must not be reopenable: the database must answer LA020, got %v", err)
+				}
+				again, err := placeBetRT(t, rt, f, sel, 1000, "after-failed-reopen")
+				if err != nil || again.Accepted || again.RejectionCategory != RejectionTenantNotActive {
+					t.Fatalf("a closed tenant must keep declining a new bet: %+v err=%v", again, err)
+				}
+				return
+			}
 			// Reactivation restores placement (an active tenant is unchanged).
 			setTenantStatus(t, owner, f.tenantID, "active")
 			ok, err := placeBetRT(t, rt, f, sel, 1000, "after-reactivation")
@@ -242,7 +259,7 @@ func TestTenantNotActive_SettlementPathsRefused(t *testing.T) {
 			mustSimulate(t, owner, f.tenantID, settleEvent(b, a, 1, SettlementOutcomeWon, stdPayout))
 		}, func(b, a uuid.UUID) SettlementEvent { return rollbackEvent(b, a, 1) }, BetStatusSettledWon},
 	}
-	for _, status := range nonActiveStatuses {
+	for _, status := range gateStatuses {
 		for _, s := range steps {
 			t.Run(status+"/"+s.name, func(t *testing.T) {
 				f, actor, betID := newStdBet(t, owner)
@@ -409,15 +426,11 @@ func TestTenantNotActive_StatusChangeVsSettlementRace(t *testing.T) {
 		releaseOnce := func() { releaseOnceGuard.Do(func() { close(release) }) }
 		t.Cleanup(releaseOnce) // never leave a held transaction behind on a failed assertion
 		go func() {
-			closerDone <- owner.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
-				// SUSPEND (not close): the bet is still open, and closing a tenant
-				// with an open bet is now refused (Q-GP-1, migration 0121).
-				if _, err := tx.Exec(ctx, `UPDATE tenants SET status = 'suspended' WHERE id = $1`, f.tenantID); err != nil {
-					return err
-				}
+			// SUSPEND (not close): the bet is still open, and closing a tenant
+			// with an open bet is now refused (Q-GP-1, migration 0121).
+			closerDone <- launchfix.TrySetTenantStatusHolding(context.Background(), f.tenantID, "suspended", func() {
 				close(updated)
 				<-release // hold the status-change transaction open (uncommitted)
-				return nil
 			})
 		}()
 		<-updated
@@ -468,10 +481,7 @@ func TestTenantNotActive_StatusChangeVsSettlementRace(t *testing.T) {
 		<-inTx
 		closed := make(chan error, 1)
 		go func() {
-			closed <- owner.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
-				_, err := tx.Exec(ctx, `UPDATE tenants SET status = 'closed' WHERE id = $1`, f.tenantID)
-				return err
-			})
+			closed <- launchfix.TrySetTenantStatus(context.Background(), f.tenantID, "closed")
 		}()
 		select {
 		case err := <-closed:
@@ -530,7 +540,7 @@ func TestTenantNotActive_GateFailsClosedWhenTheRowIsNotVisible(t *testing.T) {
 // late settle, so its tombstone is written even for a suspended tenant, is
 // idempotent, and the late settle stays refused (also after reactivation).
 func TestTenantNotActive_TombstonesAreAlwaysWritten(t *testing.T) {
-	for _, status := range nonActiveStatuses {
+	for _, status := range gateStatuses {
 		t.Run(status, func(t *testing.T) { tombstonesAlwaysWritten(t, status) })
 	}
 }
@@ -560,6 +570,10 @@ func tombstonesAlwaysWritten(t *testing.T, status string) {
 	late, err := simulateSettlement(t, rt, f.tenantID, settleEvent(betID, actor, 1, SettlementOutcomeWon, stdPayout))
 	if err != nil || late.RejectionCode != SettlementRejectTombstoned {
 		t.Fatalf("late settle must be refused as tombstoned: %+v err=%v", late, err)
+	}
+	if status == "closed" {
+		// closed is terminal (ADR 0112 3.1): there is no reactivation for a closed tenant.
+		return
 	}
 	setTenantStatus(t, owner, f.tenantID, "active")
 	late, err = simulateSettlement(t, rt, f.tenantID, settleEvent(betID, actor, 1, SettlementOutcomeWon, stdPayout))
@@ -607,7 +621,7 @@ func TestTenantNotActive_BackstopReplayWithDifferentTypeWritesNothing(t *testing
 func TestTenantNotActive_LockAndPostTombstoneExemptionIsNarrow(t *testing.T) {
 	owner := testPool(t)
 	rt := runtimePool(t)
-	for _, status := range nonActiveStatuses {
+	for _, status := range gateStatuses {
 		f := seedFixture(t, owner)
 		setTenantStatus(t, owner, f.tenantID, status)
 		tomb := ledger.TransactionInput{TenantID: f.tenantID, TransactionType: ledger.TxTombstone}

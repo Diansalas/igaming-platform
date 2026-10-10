@@ -20,24 +20,19 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/identity"
 	"github.com/Diansalas/igaming-platform/internal/payoutinstrument/pitest"
+	"github.com/Diansalas/igaming-platform/internal/testsupport/launchfix"
 )
 
 func hsecSetTenantStatus(t *testing.T, pool *db.Pool, tenantID uuid.UUID, status string) {
 	t.Helper()
-	if err := pool.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `UPDATE tenants SET status = $2 WHERE id = $1`, tenantID, status)
-		return err
-	}); err != nil {
+	if err := launchfix.TrySetTenantStatus(context.Background(), tenantID, status); err != nil {
 		t.Fatalf("set tenant status: %v", err)
 	}
 }
 
 func hsecSetBrandStatus(t *testing.T, pool *db.Pool, tenantID, brandID uuid.UUID, status string) {
 	t.Helper()
-	if err := pool.WithTenant(context.Background(), tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `UPDATE brands SET status = $2 WHERE id = $1`, brandID, status)
-		return err
-	}); err != nil {
+	if err := launchfix.TrySetBrandStatus(context.Background(), tenantID, brandID, status); err != nil {
 		t.Fatalf("set brand status: %v", err)
 	}
 }
@@ -51,15 +46,17 @@ var hsecHTTPCases = []hsecHTTPCase{
 	{"tenant_suspended",
 		func(t *testing.T, p *db.Pool, tn, _ uuid.UUID) { hsecSetTenantStatus(t, p, tn, "suspended") },
 		func(t *testing.T, p *db.Pool, tn, _ uuid.UUID) { hsecSetTenantStatus(t, p, tn, "active") }},
+	// closed is terminal (ADR 0112 section 3.1; HD-CTF-9 open): a closed subject has no reactivation
+	// step (reset == nil), the refusal and the no-rows-created assertions still run.
 	{"tenant_closed",
 		func(t *testing.T, p *db.Pool, tn, _ uuid.UUID) { hsecSetTenantStatus(t, p, tn, "closed") },
-		func(t *testing.T, p *db.Pool, tn, _ uuid.UUID) { hsecSetTenantStatus(t, p, tn, "active") }},
+		nil},
 	{"brand_suspended",
 		func(t *testing.T, p *db.Pool, tn, b uuid.UUID) { hsecSetBrandStatus(t, p, tn, b, "suspended") },
 		func(t *testing.T, p *db.Pool, tn, b uuid.UUID) { hsecSetBrandStatus(t, p, tn, b, "active") }},
 	{"brand_closed",
 		func(t *testing.T, p *db.Pool, tn, b uuid.UUID) { hsecSetBrandStatus(t, p, tn, b, "closed") },
-		func(t *testing.T, p *db.Pool, tn, b uuid.UUID) { hsecSetBrandStatus(t, p, tn, b, "active") }},
+		nil},
 }
 
 func assertNotActiveRefusal(t *testing.T, resp *http.Response, what string) {
@@ -110,6 +107,9 @@ func TestHSEC5_HTTP_DepositInitiation_NonActiveRefused_RetryAfterReactivation(t 
 				t.Fatalf("ledger row created while refused: %d -> %d", ledger, n)
 			}
 
+			if c.reset == nil {
+				return // closed is terminal: nothing to reactivate
+			}
 			c.reset(t, pool, tenant.ID, brand.ID)
 			resp = postJSON(t, srv, "/v1/me/deposits", player.Tokens.AccessToken, body)
 			if resp.StatusCode != http.StatusCreated {
@@ -155,6 +155,9 @@ func TestHSEC11_HTTP_WithdrawalRequest_NonActiveRefused_RetryAfterReactivation(t
 				t.Fatalf("hold/ledger row created while refused: %d -> %d", ledger, n)
 			}
 
+			if c.reset == nil {
+				return // closed is terminal: nothing to reactivate
+			}
 			c.reset(t, pool, tenant.ID, brand.ID)
 			resp = postJSON(t, srv, "/v1/me/withdrawals", player.Tokens.AccessToken, body)
 			if resp.StatusCode != http.StatusCreated {
@@ -207,6 +210,9 @@ func TestHSEC11_HTTP_StaffSubmit_NonActiveRefused_StaysApproved_ThenSubmits(t *t
 				t.Fatalf("ledger row created while refused: %d -> %d", ledger, n)
 			}
 
+			if c.reset == nil {
+				return // closed is terminal: nothing to reactivate
+			}
 			c.reset(t, pool, tenant.ID, brand.ID)
 			resp = postJSON(t, srv, "/v1/admin/withdrawals/"+wr.ID.String()+"/submit", financeToken.AccessToken, map[string]string{"payment_method": "bank_transfer"})
 			_ = resp.Body.Close()

@@ -141,7 +141,7 @@ func seedFixture095(t *testing.T, pool *db.Pool) fixture {
 	var f fixture
 	f.tenantID = uuid.New()
 	err := pool.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx, `INSERT INTO tenants (id, slug, name, licensing_model) VALUES ($1, $2, 'Migration 0095 Test Tenant', 'under_platform_licence')`,
+		if _, err := tx.Exec(ctx, `INSERT INTO tenants (id, slug, name, licensing_model, status) VALUES ($1, $2, 'Migration 0095 Test Tenant', 'under_platform_licence', 'active')`,
 			f.tenantID, "t95-"+f.tenantID.String()[:8]); err != nil {
 			return err
 		}
@@ -154,7 +154,7 @@ func seedFixture095(t *testing.T, pool *db.Pool) fixture {
 	}
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		f.brandID = uuid.New()
-		if _, err := tx.Exec(ctx, `INSERT INTO brands (id, tenant_id, slug, name) VALUES ($1, $2, $3, 'Migration 0095 Test Brand')`,
+		if _, err := tx.Exec(ctx, `INSERT INTO brands (id, tenant_id, slug, name, status) VALUES ($1, $2, $3, 'Migration 0095 Test Brand', 'active')`,
 			f.brandID, f.tenantID, "b95-"+f.brandID.String()[:8]); err != nil {
 			return err
 		}

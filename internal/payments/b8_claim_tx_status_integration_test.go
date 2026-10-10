@@ -99,6 +99,17 @@ func TestB8_SuspensionAfterPreReadBeforeClaim_NoClaimNoDeposit_ThenResumes(t *te
 
 			// Reactivation resumes the identical attempt.
 			testHookAfterDispatchStatusPreRead = nil
+			if status == "closed" {
+				// closed is terminal (ADR 0112 3.1): no reactivation; the attempt is never dispatched.
+				dueNow(t, pool, raceTenant, ids[0])
+				if st := s.RunPass(context.Background(), nil, 1); st.Errors != 0 {
+					t.Fatalf("pass 2: %+v", st)
+				}
+				if d, _, _ := spy.counts(); d != 1 {
+					t.Fatalf("a closed tenant's attempt must never dispatch, got %d Deposit calls", d)
+				}
+				return
+			}
 			setTenantStatus(t, pool, raceTenant, "active")
 			dueNow(t, pool, raceTenant, ids[0])
 			if st := s.RunPass(context.Background(), nil, 1); st.Errors != 0 {

@@ -154,7 +154,7 @@ func TestR17_ReceiptSite_OtherBrandSameTenant_Unaffected(t *testing.T) {
 	f2 := f
 	f2.brandID, f2.playerAccountID = uuid.New(), uuid.New()
 	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx, `INSERT INTO brands (id, tenant_id, slug, name) VALUES ($1, $2, $3, 'R17 Brand 2')`, f2.brandID, f.tenantID, "r17-"+f2.brandID.String()[:8]); err != nil {
+		if _, err := tx.Exec(ctx, `INSERT INTO brands (id, tenant_id, slug, name, status) VALUES ($1, $2, $3, 'R17 Brand 2', 'active')`, f2.brandID, f.tenantID, "r17-"+f2.brandID.String()[:8]); err != nil {
 			return err
 		}
 		personID := uuid.New()

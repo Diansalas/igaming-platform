@@ -174,7 +174,7 @@ func seedLockedAccountRow(t *testing.T, pool *db.Pool, accountType string) uuid.
 	// require a genuinely platform-admin-scoped transaction.
 	err := pool.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
 		tag, err := tx.Exec(ctx,
-			`INSERT INTO tenants (id, slug, name, licensing_model) VALUES ($1, $2, 'Migration Test Tenant', 'under_platform_licence')`,
+			`INSERT INTO tenants (id, slug, name, licensing_model, status) VALUES ($1, $2, 'Migration Test Tenant', 'under_platform_licence', 'active')`,
 			tenantID, "t-"+tenantID.String()[:8])
 		if err != nil {
 			return err
@@ -191,7 +191,7 @@ func seedLockedAccountRow(t *testing.T, pool *db.Pool, accountType string) uuid.
 
 	err = pool.WithTenant(context.Background(), tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx,
-			`INSERT INTO brands (id, tenant_id, slug, name) VALUES ($1, $2, $3, 'Migration Test Brand')`,
+			`INSERT INTO brands (id, tenant_id, slug, name, status) VALUES ($1, $2, $3, 'Migration Test Brand', 'active')`,
 			brandID, tenantID, "b-"+brandID.String()[:8]); err != nil {
 			return err
 		}

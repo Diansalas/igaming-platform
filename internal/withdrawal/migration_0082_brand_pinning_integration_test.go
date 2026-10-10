@@ -43,7 +43,7 @@ func TestMigration0082_WithdrawalRequestsBrandPinnedToPlayersOwnBrand(t *testing
 	otherBrandID := uuid.New()
 	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := tx.Exec(ctx,
-			`INSERT INTO brands (id, tenant_id, slug, name) VALUES ($1, $2, $3, 'Other Brand')`,
+			`INSERT INTO brands (id, tenant_id, slug, name, status) VALUES ($1, $2, $3, 'Other Brand', 'active')`,
 			otherBrandID, f.tenantID, "b-"+otherBrandID.String()[:8])
 		return err
 	}); err != nil {

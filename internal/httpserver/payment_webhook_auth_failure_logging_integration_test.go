@@ -30,6 +30,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/identityresolution"
 	"github.com/Diansalas/igaming-platform/internal/payments"
+	"github.com/Diansalas/igaming-platform/internal/testsupport/launchfix"
 )
 
 // paymentWebhookAllowedLogKeys is PAY-WH-TENANT-1 design §3.3's exact
@@ -185,10 +186,7 @@ func TestWebhook_AuthFailureLogging_AllowListOnly(t *testing.T) {
 
 	suspendedTenant := mustCreateTenant(t, pool)
 	mustCreateBrand(t, pool, suspendedTenant)
-	if err := pool.WithPlatformAdmin(context.Background(), activeTenant.ID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `UPDATE tenants SET status = 'suspended' WHERE id = $1`, suspendedTenant.ID)
-		return err
-	}); err != nil {
+	if err := launchfix.TrySetTenantStatus(context.Background(), suspendedTenant.ID, "suspended"); err != nil {
 		t.Fatalf("suspend tenant: %v", err)
 	}
 

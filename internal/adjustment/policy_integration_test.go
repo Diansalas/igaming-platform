@@ -9,6 +9,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+
+	"github.com/Diansalas/igaming-platform/internal/testsupport/launchfix"
 )
 
 // evaluate calls the ONE evaluator from a tenant session of w.
@@ -355,10 +357,7 @@ func TestB26_NonActiveTenant(t *testing.T) {
 
 func (w *world) setTenantStatus(status string) {
 	w.t.Helper()
-	if err := w.pool.WithPlatformAdmin(context.Background(), w.AdminA.ID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `UPDATE tenants SET status = $2 WHERE id = $1`, w.Tenant, status)
-		return err
-	}); err != nil {
+	if err := launchfix.TrySetTenantStatusOn(context.Background(), w.t, w.pool, w.Tenant, status); err != nil {
 		w.t.Fatalf("tenant status: %v", err)
 	}
 }

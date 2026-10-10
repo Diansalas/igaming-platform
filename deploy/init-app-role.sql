@@ -530,3 +530,35 @@ BEGIN
     END LOOP;
 END
 $$;
+
+-- ADR 0112 slice 1 (migration 0128, launch authorisation status governance):
+-- least-privilege, re-asserted on every run, mirroring migration 0128's own
+-- in-migration grant block. RLS (FORCE on all three) plus the guard triggers are the
+-- binding controls; these grants are defence in depth, narrower than the blanket
+-- backfill GRANT above, which would otherwise re-grant DELETE on re-run:
+--   launch_authorisation_requests  - SELECT/INSERT, and UPDATE on the four state
+--                                    columns only (the state machine is the guard
+--                                    trigger's; request content is immutable). Never
+--                                    DELETE or TRUNCATE.
+--   launch_authorisation_approvals,
+--   launch_status_transitions      - append-only: SELECT/INSERT only.
+-- The owner-only transition kinds (legacy_baseline, owner_provisioned) are written by
+-- the table owner role, never by igaming_runtime (guard LA013, S2). No role, password
+-- or attribute change.
+DO $$
+BEGIN
+    IF to_regclass('public.launch_authorisation_requests') IS NOT NULL THEN
+        EXECUTE 'REVOKE ALL ON launch_authorisation_requests FROM igaming_runtime';
+        EXECUTE 'GRANT SELECT, INSERT ON launch_authorisation_requests TO igaming_runtime';
+        EXECUTE 'GRANT UPDATE (status, decided_at, refusal_code, executing_txid) ON launch_authorisation_requests TO igaming_runtime';
+    END IF;
+    IF to_regclass('public.launch_authorisation_approvals') IS NOT NULL THEN
+        EXECUTE 'REVOKE ALL ON launch_authorisation_approvals FROM igaming_runtime';
+        EXECUTE 'GRANT SELECT, INSERT ON launch_authorisation_approvals TO igaming_runtime';
+    END IF;
+    IF to_regclass('public.launch_status_transitions') IS NOT NULL THEN
+        EXECUTE 'REVOKE ALL ON launch_status_transitions FROM igaming_runtime';
+        EXECUTE 'GRANT SELECT, INSERT ON launch_status_transitions TO igaming_runtime';
+    END IF;
+END
+$$;

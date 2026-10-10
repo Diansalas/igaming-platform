@@ -13,6 +13,7 @@ import (
 
 	"github.com/Diansalas/igaming-platform/internal/casino"
 	"github.com/Diansalas/igaming-platform/internal/sportsbook"
+	"github.com/Diansalas/igaming-platform/internal/testsupport/launchfix"
 )
 
 // R3-TEST-GAPS-1 (LF N-5; mutant LF3 survived): the observation flag marks ONLY
@@ -25,9 +26,7 @@ func TestR3_ActiveTenantLedgerAuditCarriesNoObservationFlag(t *testing.T) {
 	ctx := context.Background()
 	active := seedFixture(t, pool)
 	suspended := seedFixture(t, pool)
-	if err := pool.WithPlatformAdmin(ctx, uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
-		return execOne(ctx, tx, `UPDATE tenants SET status = 'suspended' WHERE id = $1`, suspended.tenantID)
-	}); err != nil {
+	if err := launchfix.TrySetTenantStatusOn(ctx, t, pool, suspended.tenantID, "suspended"); err != nil {
 		t.Fatalf("suspend tenant: %v", err)
 	}
 

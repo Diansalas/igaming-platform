@@ -704,10 +704,11 @@ func TestR3_Concurrency_TwoSchedulerInstances(t *testing.T) {
 	r3RequireNoMoneyEffect(t, before, w.r3Snapshot())
 }
 
-// R3-9: the tenant status changes between runs and mid-run. active -> closed ->
+// R3-9: the tenant status changes between runs and mid-run. active -> suspended ->
 // active again: the finding continues without a gap and the audit flag follows
 // the status at selection; a tenant closed DURING the fetch phase of an
-// ordinary run still completes it and nothing breaks.
+// ordinary run still completes it, and the next run observes it as closed (closed
+// is terminal, ADR 0112 3.1, so it comes last) and nothing breaks.
 func TestR3_TenantStatusChangesBetweenAndDuringRuns(t *testing.T) {
 	w := newK3World(t, k3Opts{base: 1})
 	a := w.disputedDeposit(500)
@@ -730,8 +731,6 @@ func TestR3_TenantStatusChangesBetweenAndDuringRuns(t *testing.T) {
 		}
 	}
 	check("active", false, "")
-	w.setTenantStatus("closed")
-	check("closed", true, "closed")
 	w.setTenantStatus("suspended")
 	check("suspended", true, "suspended")
 	w.setTenantStatus("active")
@@ -748,6 +747,9 @@ func TestR3_TenantStatusChangesBetweenAndDuringRuns(t *testing.T) {
 	if !r3Has(w.r3Findings(ps.Run.ID), reconciliation.MismatchKindPayCapturedUnposted, a.ID) {
 		t.Fatal("a tenant closed mid-run lost its finding")
 	}
+	// ADR 0112: closed is terminal, so the closed observation is checked last (the tenant is
+	// closed by the mid-run closure above and cannot be reopened).
+	check("closed", true, "closed")
 	w.assertInvariants()
 }
 
@@ -812,7 +814,10 @@ func (s r3ReactivatingSettlementSource) StatementLines(ctx context.Context, tx p
 func TestR3_TenantReactivatedDuringTheSweepIsNotObservedAsNonActive(t *testing.T) {
 	x := newK3World(t, k3Opts{base: 1})
 	y := newK3WorldOn(t, x.pool, k3Opts{base: 1})
-	y.setTenantStatus("closed")
+	// ADR 0112: closed is terminal, so the tenant that is non-active at the first listing and active
+	// again at the second is a SUSPENDED one (the property under test is the non-active -> active
+	// transition between the two listings).
+	y.setTenantStatus("suspended")
 	src := newR3Source(y.provider)
 	var once sync.Once
 	sb := r3ReactivatingSettlementSource{hook: func() { once.Do(func() { y.setTenantStatus("active") }) }}

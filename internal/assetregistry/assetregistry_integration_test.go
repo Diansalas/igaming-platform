@@ -97,12 +97,12 @@ func seedTenantFixture(t *testing.T, pool *db.Pool) fixture {
 	}
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		f.brandID = uuid.New()
-		if _, err := tx.Exec(ctx, `INSERT INTO brands (id, tenant_id, slug, name) VALUES ($1, $2, $3, 'Brand A')`,
+		if _, err := tx.Exec(ctx, `INSERT INTO brands (id, tenant_id, slug, name, status) VALUES ($1, $2, $3, 'Brand A', 'active')`,
 			f.brandID, f.tenantID, "b-"+f.brandID.String()[:8]); err != nil {
 			return err
 		}
 		f.otherBrandID = uuid.New()
-		if _, err := tx.Exec(ctx, `INSERT INTO brands (id, tenant_id, slug, name) VALUES ($1, $2, $3, 'Brand B')`,
+		if _, err := tx.Exec(ctx, `INSERT INTO brands (id, tenant_id, slug, name, status) VALUES ($1, $2, $3, 'Brand B', 'active')`,
 			f.otherBrandID, f.tenantID, "b-"+f.otherBrandID.String()[:8]); err != nil {
 			return err
 		}

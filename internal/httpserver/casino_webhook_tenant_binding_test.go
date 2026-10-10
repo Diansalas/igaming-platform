@@ -19,6 +19,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/casino"
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/identity"
+	"github.com/Diansalas/igaming-platform/internal/testsupport/launchfix"
 	"github.com/Diansalas/igaming-platform/internal/testsupport/noeffect"
 	"github.com/Diansalas/igaming-platform/internal/webhookauth"
 )
@@ -313,10 +314,7 @@ func TestCasinoWebhook_EnumerationOracle_IndistinguishableResponses(t *testing.T
 	mustEnableCasinoCapability(t, srv, pool, activeTenant)
 
 	suspendedTenant := mustCreateTenant(t, pool)
-	if err := pool.WithPlatformAdmin(context.Background(), activeTenant.ID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `UPDATE tenants SET status = 'suspended' WHERE id = $1`, suspendedTenant.ID)
-		return err
-	}); err != nil {
+	if err := launchfix.TrySetTenantStatus(context.Background(), suspendedTenant.ID, "suspended"); err != nil {
 		t.Fatalf("suspend tenant: %v", err)
 	}
 

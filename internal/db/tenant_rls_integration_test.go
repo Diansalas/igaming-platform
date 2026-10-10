@@ -69,7 +69,7 @@ func createTestTenant(t *testing.T, pool *Pool) uuid.UUID {
 	id := uuid.New()
 	err := pool.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
 		tag, err := tx.Exec(ctx,
-			`INSERT INTO tenants (id, name, slug, licensing_model) VALUES ($1, $2, $3, 'under_platform_licence')`,
+			`INSERT INTO tenants (id, name, slug, licensing_model, status) VALUES ($1, $2, $3, 'under_platform_licence', 'active')`,
 			id, "Test Tenant "+id.String(), "test-"+id.String(),
 		)
 		if err != nil {

@@ -113,7 +113,7 @@ func (a *ksAPI) tenant() uuid.UUID {
 	id := uuid.New()
 	platformAdmin := uuid.New()
 	if err := a.pool.WithPlatformAdmin(context.Background(), platformAdmin, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `INSERT INTO tenants (id, name, slug, licensing_model) VALUES ($1, 'KS API', $2, 'under_platform_licence')`,
+		_, err := tx.Exec(ctx, `INSERT INTO tenants (id, name, slug, licensing_model, status) VALUES ($1, 'KS API', $2, 'under_platform_licence', 'active')`,
 			id, "ksapi-"+strings.ReplaceAll(id.String(), "-", "")[:16])
 		return err
 	}); err != nil {

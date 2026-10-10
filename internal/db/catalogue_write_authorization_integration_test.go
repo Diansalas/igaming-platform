@@ -704,7 +704,7 @@ func TestCatalogueRLS_CasinoGamesRequiresRealPlatformPrincipal(t *testing.T) {
 		tenantID := uuid.New()
 		err := pool.WithPlatformAdmin(context.Background(), seedPlatformAdminStaffPrincipal(t, pool), func(ctx context.Context, tx pgx.Tx) error {
 			tag, err := tx.Exec(ctx,
-				`INSERT INTO tenants (id, slug, name, licensing_model) VALUES ($1, $2, 'SEC-S91-3 Tenant', 'under_platform_licence')`,
+				`INSERT INTO tenants (id, slug, name, licensing_model, status) VALUES ($1, $2, 'SEC-S91-3 Tenant', 'under_platform_licence', 'active')`,
 				tenantID, "sec-s91-3-"+tenantID.String()[:8])
 			if err != nil {
 				return err

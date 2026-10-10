@@ -20,6 +20,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/Diansalas/igaming-platform/internal/ledger"
+	"github.com/Diansalas/igaming-platform/internal/testsupport/launchfix"
 )
 
 func (w gateWorld) deliverRollbackAs(ref, original, round string, amount int64, player uuid.UUID) (ReceiveCallbackResult, error) {
@@ -329,13 +330,9 @@ func TestStakeReturn_CasinoStatusChangeRace(t *testing.T) {
 		releaseOnce := func() { once.Do(func() { close(release) }) }
 		t.Cleanup(releaseOnce)
 		go func() {
-			closerDone <- owner.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
-				if _, err := tx.Exec(ctx, `UPDATE tenants SET status = 'suspended' WHERE id = $1`, w.f.tenantID); err != nil {
-					return err
-				}
+			closerDone <- launchfix.TrySetTenantStatusHolding(context.Background(), w.f.tenantID, "suspended", func() {
 				close(updated)
 				<-release
-				return nil
 			})
 		}()
 		<-updated
@@ -388,10 +385,7 @@ func TestStakeReturn_CasinoStatusChangeRace(t *testing.T) {
 		<-inTx
 		closed := make(chan error, 1)
 		go func() {
-			closed <- owner.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
-				_, err := tx.Exec(ctx, `UPDATE tenants SET status = 'closed' WHERE id = $1`, w.f.tenantID)
-				return err
-			})
+			closed <- launchfix.TrySetTenantStatus(context.Background(), w.f.tenantID, "closed")
 		}()
 		select {
 		case err := <-closed:

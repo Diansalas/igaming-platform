@@ -74,7 +74,7 @@ func seedKYCOutbox(t *testing.T, owner *Pool) kycSeed {
 	}
 	err := owner.WithTenant(ctx, s.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		s.brandID, s.playerID, s.verificationID = uuid.New(), uuid.New(), uuid.New()
-		if _, err := tx.Exec(ctx, `INSERT INTO brands (id, tenant_id, slug, name) VALUES ($1, $2, $3, 'KYC Test Brand')`,
+		if _, err := tx.Exec(ctx, `INSERT INTO brands (id, tenant_id, slug, name, status) VALUES ($1, $2, $3, 'KYC Test Brand', 'active')`,
 			s.brandID, s.tenantID, "b-"+s.brandID.String()[:8]); err != nil {
 			return fmt.Errorf("brand: %w", err)
 		}

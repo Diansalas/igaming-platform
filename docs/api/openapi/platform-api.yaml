@@ -103,13 +103,20 @@ paths:
         "400":
           $ref: "#/components/responses/ValidationError"
         "404":
-          description: Unknown brand_slug
+          description: Unknown brand_slug, or a brand (or its tenant) that is still `pending_launch` (indistinguishable by design)
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
         "409":
-          description: An account with this email already exists for this brand
+          description: >
+            Either an account with this email already exists for this brand
+            (code `conflict`), or the brand or its tenant is not `active`
+            (code `BRAND_NOT_ACCEPTING_REGISTRATIONS`; ADR 0112 section 7.3 -
+            a suspended or closed brand or tenant accepts no new
+            registration). Nothing is created in either case. A brand or
+            tenant that is still `pending_launch` does NOT answer 409: it
+            answers 404 exactly like an unknown brand_slug.
           content:
             application/json:
               schema:
@@ -125,6 +132,10 @@ paths:
         docs/architecture/05-identity-architecture.md's login_attempts
         design) - locked-out requests return 429 even with a correct
         password, matching the documented threshold/window.
+        A brand (or its tenant) that is still `pending_launch` (never launched, ADR 0112
+        section 7.3) answers exactly like an unknown brand slug (404);
+        login on a `suspended` or `closed` brand stays allowed so players
+        can see their balances.
       security: []
       requestBody:
         required: true
@@ -159,7 +170,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
         "404":
-          description: Unknown brand_slug
+          description: Unknown brand_slug, or a brand that is still `pending_launch` (indistinguishable by design)
           content:
             application/json:
               schema:
@@ -7065,7 +7076,13 @@ components:
         licensing_model:
           type: string
           enum: [under_platform_licence, own_licence]
-        status: { type: string }
+        status:
+          type: string
+          description: >
+            `pending_launch` (every new tenant, ADR 0112), `active`,
+            `suspended` or `closed` (terminal). A status changes only
+            through a governed, audited launch decision; creation is not launch.
+          enum: [pending_launch, active, suspended, closed]
       required: [id, name, slug, licensing_model, status]
     Brand:
       type: object
@@ -7074,7 +7091,13 @@ components:
         tenant_id: { type: string, format: uuid }
         name: { type: string }
         slug: { type: string }
-        status: { type: string }
+        status:
+          type: string
+          description: >
+            `pending_launch` (every new brand, ADR 0112), `active`,
+            `suspended` or `closed` (terminal). Only an `active` brand of an
+            `active` tenant accepts player registration.
+          enum: [pending_launch, active, suspended, closed]
       required: [id, tenant_id, name, slug, status]
     StaffUser:
       type: object
@@ -8201,6 +8224,7 @@ components:
             - PAYOUT_DESTINATION_NOT_USABLE
             - PAYMENT_METHOD_MISMATCH
             - TENANT_OR_BRAND_NOT_ACTIVE
+            - BRAND_NOT_ACCEPTING_REGISTRATIONS
         message:
           type: string
         request_id:

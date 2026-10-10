@@ -64,7 +64,7 @@ func seedM0105Fixture(t *testing.T, pool *db.Pool) m0105Fixture {
 	}
 	if err := pool.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
 		for _, tid := range []uuid.UUID{f.tenantID, f.otherTenantID} {
-			if _, err := tx.Exec(ctx, `INSERT INTO tenants (id, slug, name, licensing_model) VALUES ($1,$2,'m0105 tenant','under_platform_licence')`,
+			if _, err := tx.Exec(ctx, `INSERT INTO tenants (id, slug, name, licensing_model, status) VALUES ($1,$2,'m0105 tenant','under_platform_licence', 'active')`,
 				tid, "m0105-"+tid.String()[:8]); err != nil {
 				return err
 			}

@@ -16,6 +16,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Diansalas/igaming-platform/internal/db"
+	"github.com/Diansalas/igaming-platform/internal/testsupport/launchfix"
 )
 
 // dormantKeysFor collects every dormancy key ("trigger_type" or
@@ -124,10 +125,7 @@ func TestListDormantJurisdictionTriggers_ExcludesNonActiveTenants(t *testing.T) 
 				t.Fatalf("expected the jurisdiction to appear as dormant while the tenant is active (fixture sanity check failed)")
 			}
 
-			err := pool.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
-				_, err := tx.Exec(ctx, `UPDATE tenants SET status = $1 WHERE id = $2`, status, f.tenantID)
-				return err
-			})
+			err := launchfix.TrySetTenantStatusOn(context.Background(), t, pool, f.tenantID, status)
 			if err != nil {
 				t.Fatalf("set tenant status=%s: %v", status, err)
 			}
