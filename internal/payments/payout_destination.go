@@ -505,7 +505,7 @@ func bindPayoutReferenceForPark(ctx context.Context, tx pgx.Tx, attempt PaymentA
 	if verr := providerref.ValidatePaymentReference("provider_reference", reference); verr != nil {
 		return false, nil
 	}
-	if parked, err := payoutGuardReferenceBindingReported(ctx, tx, attempt, requestID, reference, evidence, ErrorClassPending, reported); err != nil || parked {
+	if parked, err := payoutGuardReferenceBinding(ctx, tx, attempt, requestID, reference, evidence, ErrorClassPending, reported); err != nil || parked {
 		return parked, err
 	}
 	if err := MarkAccepted(ctx, tx, attempt.ID, evidence, reference, time.Now().Add(payoutNextPollInterval)); err != nil {

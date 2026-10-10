@@ -105,15 +105,16 @@ func payoutForeignReferenceBinding(ctx context.Context, tx pgx.Tx, tenantID uuid
 // writes one audit row in the same transaction, and returns parked=true; the
 // caller then returns nil so the park commits and nothing retries in a loop. A
 // redelivery of the SAME attempt's own reference is not a conflict.
-func payoutGuardReferenceBinding(ctx context.Context, tx pgx.Tx, attempt PaymentAttempt, requestID uuid.UUID, reference string, evidence EvidenceKind, class ErrorClass) (bool, error) {
-	return payoutGuardReferenceBindingReported(ctx, tx, attempt, requestID, reference, evidence, class, class)
-}
-
-// payoutGuardReferenceBindingReported is payoutGuardReferenceBinding with the provider's REPORTED outcome
-// class kept apart from the routing class: class still routes a CAS conflict (payoutHandleContradiction),
-// reported is what the park records durably in payout_park_evidence (GOV-R32, migration 0127). The
+//
+// GOV-R32 (migration 0127): reportedClass, when given, is the provider's REPORTED outcome class, kept apart
+// from the routing class: class still routes a CAS conflict (payoutHandleContradiction), the reported class
+// is what the park records durably in payout_park_evidence. Absent, the routing class is recorded. The
 // destination flow binds with the routing class pending but may be carrying a reported success.
-func payoutGuardReferenceBindingReported(ctx context.Context, tx pgx.Tx, attempt PaymentAttempt, requestID uuid.UUID, reference string, evidence EvidenceKind, class, reported ErrorClass) (bool, error) {
+func payoutGuardReferenceBinding(ctx context.Context, tx pgx.Tx, attempt PaymentAttempt, requestID uuid.UUID, reference string, evidence EvidenceKind, class ErrorClass, reportedClass ...ErrorClass) (bool, error) {
+	reported := class
+	if len(reportedClass) > 0 {
+		reported = reportedClass[0]
+	}
 	if reference == "" || attempt.ProviderID == nil || *attempt.ProviderID == "" {
 		return false, nil
 	}
