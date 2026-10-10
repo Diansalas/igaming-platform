@@ -43,7 +43,7 @@ func registerStatus(t *testing.T, srv *httptest.Server, slug string) (int, apier
 	resp := postJSON(t, srv, "/v1/auth/register", "", map[string]string{
 		"brand_slug": slug, "email": "gate-" + uuid.NewString() + "@example.com", "password": "a-decent-password-1",
 	})
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		return resp.StatusCode, apierror.Error{}
 	}
@@ -141,7 +141,7 @@ func TestLaunchGate_Login_PendingBrandLooksUnknown_SuspendedAndClosedStayAllowed
 
 	login := func(slug string) int {
 		resp := postJSON(t, srv, "/v1/auth/login", "", map[string]string{"brand_slug": slug, "email": p.Email, "password": "a-decent-password-1"})
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		return resp.StatusCode
 	}
 	if c := login(b.Slug); c != http.StatusOK {
@@ -160,8 +160,8 @@ func TestLaunchGate_Login_PendingBrandLooksUnknown_SuspendedAndClosedStayAllowed
 	pending := mustCreatePendingBrand(t, pool, tenant.ID)
 	pendingResp := postJSON(t, srv, "/v1/auth/login", "", map[string]string{"brand_slug": pending.Slug, "email": p.Email, "password": "a-decent-password-1"})
 	unknownResp := postJSON(t, srv, "/v1/auth/login", "", map[string]string{"brand_slug": "no-such-" + uuid.NewString(), "email": p.Email, "password": "a-decent-password-1"})
-	defer pendingResp.Body.Close()
-	defer unknownResp.Body.Close()
+	defer func() { _ = pendingResp.Body.Close() }()
+	defer func() { _ = unknownResp.Body.Close() }()
 	if pendingResp.StatusCode != http.StatusNotFound || unknownResp.StatusCode != http.StatusNotFound {
 		t.Fatalf("pending brand login = %d, unknown brand login = %d, want both 404", pendingResp.StatusCode, unknownResp.StatusCode)
 	}
