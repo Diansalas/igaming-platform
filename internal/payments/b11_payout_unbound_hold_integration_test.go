@@ -963,7 +963,7 @@ func (w *k3World) b11ParkReverse(amount int64) (*b11Parked, string, GateResult[W
 		w.t.Fatalf("setup: want a succeeded gate result, got %s", gr.Class)
 	}
 	before := w.countRows(`SELECT count(*) FROM ledger_transactions WHERE tenant_id = $1`, w.f.tenantID)
-	if err := ApplyPayoutResult(context.Background(), w.pool, w.f.tenantID, wr.ID, att, gr, EvidenceSync, WithDestinations(pitest.Shared())); err != nil {
+	if err := ApplyPayoutResult(context.Background(), w.pool, w.f.tenantID, wr.ID, att, gr, EvidenceSync, w.orch.PayoutOptions()...); err != nil {
 		w.t.Fatalf("apply (reverse collision): %v", err)
 	}
 	fresh := w.attempt(att.ID)
