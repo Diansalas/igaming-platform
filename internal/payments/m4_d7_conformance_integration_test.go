@@ -252,26 +252,26 @@ func TestD7_P2_WrongAttempt(t *testing.T) {
 func TestD7_P3_WrongProviderReference(t *testing.T) {
 	m := newM4World(t)
 
-	t.Run("R equals the attempt's OWN merchant reference: the DB reads paid, Go refuses (known SQL gap, see ADR 0111 s25.4)", func(t *testing.T) {
+	t.Run("R equals the attempt's OWN merchant reference: the DB reads contradictory (G-REF, migration 0127), Go refuses too", func(t *testing.T) {
 		m.t = t
 		p := m.park(630)
 		mr := p.fresh.MerchantReference
 		m.ingest(m4Imp{}, m.line(mr, mr, "succeeded", 630, time.Now()))
-		// PIN OF THE SQL GAP: payout_m4_evidence (migration 0125) has no "R is not a platform-issued
-		// reference" clause. When it gains one this assertion flips to contradictory/insufficient.
-		ev := m.mustEvidence(p.fresh.ID, M4VerdictPaid)
-		if *ev.Reference != mr {
-			t.Fatalf("setup: R=%q", *ev.Reference)
+		// FLIPPED DELIBERATELY (gov-r32-integrity, 0127): the former pin of the SQL gap.
+		m.d7DBRefusesPaid(p, M4VerdictContradictory)
+		if got := m.d7ProbeLine(p, mr); got != m4EligPlatformRef {
+			t.Fatalf("Go eligibility: %q", got)
 		}
-		m.d7ReqNotEligible(p, ResolutionM4EvidencePaid, ev, m4EligPlatformRef)
 	})
 
 	t.Run("R equals ANOTHER attempt's merchant reference: refused in Go", func(t *testing.T) {
 		m.t = t
 		a, b := m.park(631), m.park(632)
 		m.ingest(m4Imp{}, m.line(b.fresh.MerchantReference, a.fresh.MerchantReference, "succeeded", 631, time.Now()))
-		ev := m.mustEvidence(a.fresh.ID, M4VerdictPaid)
-		m.d7ReqNotEligible(a, ResolutionM4EvidencePaid, ev, m4EligPlatformRef)
+		m.d7DBRefusesPaid(a, M4VerdictContradictory) // G-REF in the DB (0127)
+		if got := m.d7ProbeLine(a, b.fresh.MerchantReference); got != m4EligPlatformRef {
+			t.Fatalf("Go eligibility: %q", got)
+		}
 	})
 
 	t.Run("R is another attempt's provider_reference (X)", func(t *testing.T) {
@@ -729,20 +729,26 @@ func TestD7_P9_CausalLink(t *testing.T) {
 			m.line("m4-D-"+uuid.NewString()[:12], p.fresh.MerchantReference, "declined", 735, time.Now()))
 		m.d7NonPositive(p, M4VerdictInsufficient)
 	})
-	t.Run("a succeeded line dated BEFORE the attempt existed is not its payout: DB reads paid (SQL gap), Go refuses", func(t *testing.T) {
+	t.Run("a succeeded line dated BEFORE the attempt existed is not its payout: DB (G-TIME, 0127) and Go refuse", func(t *testing.T) {
 		m.t = t
 		p := m.park(736)
-		m.ingest(m4Imp{}, m.line(m4Ref(), p.fresh.MerchantReference, "succeeded", 736, p.fresh.CreatedAt.Add(-48*time.Hour)))
-		// PIN OF THE SQL GAP: the paid branch of payout_m4_evidence reads no timestamp.
-		ev := m.mustEvidence(p.fresh.ID, M4VerdictPaid)
-		m.d7ReqNotEligible(p, ResolutionM4EvidencePaid, ev, m4EligPredates)
+		r := m4Ref()
+		m.ingest(m4Imp{}, m.line(r, p.fresh.MerchantReference, "succeeded", 736, p.fresh.CreatedAt.Add(-48*time.Hour)))
+		// FLIPPED DELIBERATELY (gov-r32-integrity, 0127): the former pin of the SQL gap.
+		m.d7DBRefusesPaid(p, M4VerdictInsufficient)
+		if got := m.d7ProbeLine(p, r); got != m4EligPredates {
+			t.Fatalf("Go eligibility: %q", got)
+		}
 	})
-	t.Run("a succeeded line dated AFTER the coverage its import vouches for: DB reads paid (SQL gap), Go refuses", func(t *testing.T) {
+	t.Run("a succeeded line dated AFTER the coverage its import vouches for: DB (G-TIME, 0127) and Go refuse", func(t *testing.T) {
 		m.t = t
 		p := m.park(737)
-		m.ingest(m4Imp{}, m.line(m4Ref(), p.fresh.MerchantReference, "succeeded", 737, time.Now().Add(10*24*time.Hour)))
-		ev := m.mustEvidence(p.fresh.ID, M4VerdictPaid)
-		m.d7ReqNotEligible(p, ResolutionM4EvidencePaid, ev, m4EligAfterCoverage)
+		r := m4Ref()
+		m.ingest(m4Imp{}, m.line(r, p.fresh.MerchantReference, "succeeded", 737, time.Now().Add(10*24*time.Hour)))
+		m.d7DBRefusesPaid(p, M4VerdictInsufficient)
+		if got := m.d7ProbeLine(p, r); got != m4EligAfterCoverage {
+			t.Fatalf("Go eligibility: %q", got)
+		}
 	})
 	t.Run("the lower bound is the FIRST SEND, zero tolerance: one microsecond before is refused, the instant itself executes", func(t *testing.T) {
 		m.t = t
@@ -757,9 +763,12 @@ func TestD7_P9_CausalLink(t *testing.T) {
 		// A line between creation and the first send is refused (the bound is the first send, not creation).
 		if first.After(p.fresh.CreatedAt) {
 			q := m.park(739)
-			m.ingest(m4Imp{}, m.line(m4Ref(), q.fresh.MerchantReference, "succeeded", 739, q.fresh.FirstSubmittedAt.Add(-time.Microsecond)))
-			evq := m.mustEvidence(q.fresh.ID, M4VerdictPaid)
-			m.d7ReqNotEligible(q, ResolutionM4EvidencePaid, evq, m4EligPredates)
+			rq := m4Ref()
+			m.ingest(m4Imp{}, m.line(rq, q.fresh.MerchantReference, "succeeded", 739, q.fresh.FirstSubmittedAt.Add(-time.Microsecond)))
+			m.d7DBRefusesPaid(q, M4VerdictInsufficient) // G-TIME in the DB, zero tolerance
+			if got := m.d7ProbeLine(q, rq); got != m4EligPredates {
+				t.Fatalf("Go eligibility: %q", got)
+			}
 		}
 		m.ingest(m4Imp{}, m.line(m4Ref(), p.fresh.MerchantReference, "succeeded", 738, first))
 		ev := m.mustEvidence(p.fresh.ID, M4VerdictPaid)
@@ -879,20 +888,25 @@ func TestD7_EligibilityRefusal_ReasonsAtTheExecutionPoint(t *testing.T) {
 	// R = merchant reference.
 	q := m.park(741)
 	m.ingest(m4Imp{}, m.line(q.fresh.MerchantReference, q.fresh.MerchantReference, "succeeded", 741, time.Now()))
-	evq := m.mustEvidence(q.fresh.ID, M4VerdictPaid)
+	m.mustEvidence(q.fresh.ID, M4VerdictContradictory) // G-REF in the DB (0127)
+	evq := m.d7LineEvidence(q.fresh.MerchantReference)
 	if got := probe(mk(q, evq, ResolutionM4EvidencePaid), q.fresh); got != m4EligPlatformRef {
 		t.Fatalf("R=merchant ref: %q", got)
 	}
 	// predates / after coverage.
 	s := m.park(742)
-	m.ingest(m4Imp{}, m.line(m4Ref(), s.fresh.MerchantReference, "succeeded", 742, s.fresh.CreatedAt.Add(-time.Hour)))
-	evs := m.mustEvidence(s.fresh.ID, M4VerdictPaid)
+	rs := m4Ref()
+	m.ingest(m4Imp{}, m.line(rs, s.fresh.MerchantReference, "succeeded", 742, s.fresh.CreatedAt.Add(-time.Hour)))
+	m.mustEvidence(s.fresh.ID, M4VerdictInsufficient) // G-TIME in the DB (0127)
+	evs := m.d7LineEvidence(rs)
 	if got := probe(mk(s, evs, ResolutionM4EvidencePaid), s.fresh); got != m4EligPredates {
 		t.Fatalf("predates: %q", got)
 	}
 	u := m.park(743)
-	m.ingest(m4Imp{}, m.line(m4Ref(), u.fresh.MerchantReference, "succeeded", 743, time.Now().Add(72*time.Hour)))
-	evu := m.mustEvidence(u.fresh.ID, M4VerdictPaid)
+	ru := m4Ref()
+	m.ingest(m4Imp{}, m.line(ru, u.fresh.MerchantReference, "succeeded", 743, time.Now().Add(72*time.Hour)))
+	m.mustEvidence(u.fresh.ID, M4VerdictInsufficient) // G-TIME in the DB (0127)
+	evu := m.d7LineEvidence(ru)
 	if got := probe(mk(u, evu, ResolutionM4EvidencePaid), u.fresh); got != m4EligAfterCoverage {
 		t.Fatalf("after coverage: %q", got)
 	}
@@ -1039,7 +1053,7 @@ func TestD7_Meta_NoSingleProviderFieldIsSufficient_OneFieldCorrupted(t *testing.
 		}, positiveByDesign},
 		{"provider_reference -> the platform merchant reference", func(p *b11Parked, l *statement.PaymentStatementLine, o *m4Imp) {
 			l.ProviderReference = p.fresh.MerchantReference
-		}, goRefuses},
+		}, dbNonPositive}, // G-REF in the DB since gov-r32 (0127); flipped deliberately from goRefuses
 		{"provider_reference -> a reserved-prefix value", func(p *b11Parked, l *statement.PaymentStatementLine, o *m4Imp) {
 			l.ProviderReference = m.rowString(`SELECT payment_reserved_ref_prefix()`) + "x"
 		}, importRefused},
@@ -1055,10 +1069,10 @@ func TestD7_Meta_NoSingleProviderFieldIsSufficient_OneFieldCorrupted(t *testing.
 		{"status -> declined (window too short for not-paid)", func(p *b11Parked, l *statement.PaymentStatementLine, o *m4Imp) { l.Status = "declined" }, dbNonPositive},
 		{"occurred_at -> before the attempt existed", func(p *b11Parked, l *statement.PaymentStatementLine, o *m4Imp) {
 			l.OccurredAt = p.fresh.CreatedAt.Add(-24 * time.Hour)
-		}, goRefuses},
+		}, dbNonPositive}, // G-TIME in the DB since gov-r32 (0127); flipped deliberately from goRefuses
 		{"occurred_at -> after the import's coverage", func(p *b11Parked, l *statement.PaymentStatementLine, o *m4Imp) {
 			l.OccurredAt = time.Now().Add(96 * time.Hour)
-		}, goRefuses},
+		}, dbNonPositive}, // G-TIME in the DB since gov-r32 (0127); flipped deliberately from goRefuses
 		{"import seal -> absent", func(p *b11Parked, l *statement.PaymentStatementLine, o *m4Imp) { o.unsealed = true }, dbNonPositive},
 		{"import seal -> made with a key this process does not hold", func(p *b11Parked, l *statement.PaymentStatementLine, o *m4Imp) { o.keys = m4NewKeys(t) }, sealRefuses},
 		{"source -> a non-MOCK (real-shaped) source", func(p *b11Parked, l *statement.PaymentStatementLine, o *m4Imp) { o.real = true }, goRefuses},
@@ -1187,4 +1201,49 @@ func TestD7_Ambiguity_ParksWithoutAutomaticPayOrResolve(t *testing.T) {
 		m.d7Held(p, "after reconciliation")
 		m.assertInvariants()
 	})
+}
+
+// --- GOV-R32 (migration 0127): the SQL counterparts of G-REF / G-TIME ------------------------------
+
+// d7DBRefusesPaid asserts the DB verdict is the given non-positive one and that an M4 paid request is
+// refused by the database guard (MR062) before any Go eligibility check; nothing moves.
+func (m *m4World) d7DBRefusesPaid(p *b11Parked, want string) {
+	m.t.Helper()
+	ev := m.mustEvidence(p.fresh.ID, want)
+	if ev.LineID != nil || ev.Reference != nil {
+		m.t.Fatalf("a non-positive verdict carries a line or reference: %+v", ev)
+	}
+	_, err := m.request(m.acting, m.m4In(p.fresh.ID, ResolutionM4EvidencePaid, &m4AnyLine))
+	k3RequireCode(m.t, err, "MR062")
+	m.d7Held(p, "DB-refused M4 paid")
+}
+
+// d7LineEvidence builds the pinned evidence fields of a paid resolution directly from the (single) payout
+// line with this provider reference, for driving the Go eligibility check now that the DB verdict no longer
+// returns such a line.
+func (m *m4World) d7LineEvidence(ref string) M4Evidence {
+	m.t.Helper()
+	rows := m.sysQuery(`SELECT id, import_id FROM payment_statement_lines WHERE tenant_id = $1 AND provider_reference = $2 AND kind = 'payout'`, m.f.tenantID, ref)
+	if len(rows) != 1 {
+		m.t.Fatalf("want one line on %s, got %d", ref, len(rows))
+	}
+	id := uuid.UUID(rows[0]["id"].([16]byte))
+	imp := uuid.UUID(rows[0]["import_id"].([16]byte))
+	return M4Evidence{Verdict: M4VerdictPaid, LineID: &id, Reference: &ref, ImportIDs: []uuid.UUID{imp}}
+}
+
+// d7ProbeLine runs the Go eligibility check on a paid resolution pinned to the line with reference ref.
+func (m *m4World) d7ProbeLine(p *b11Parked, ref string) string {
+	m.t.Helper()
+	ev := m.d7LineEvidence(ref)
+	res := ManualResolution{TenantID: m.f.tenantID, AttemptID: p.fresh.ID, Kind: ResolutionM4EvidencePaid, EvidenceLineID: ev.LineID, EvidenceReference: ev.Reference, EvidenceImportIDs: ev.ImportIDs}
+	var got string
+	if err := m.pool.WithPlatformActingInTenant(context.Background(), m.acting.ID, m.f.tenantID, uuid.Nil, OperationKindForceResolve, func(ctx context.Context, tx pgx.Tx) error {
+		var err error
+		got, err = m4EligibilityRefusal(ctx, tx, res, p.fresh)
+		return err
+	}); err != nil {
+		m.t.Fatalf("m4EligibilityRefusal: %v", err)
+	}
+	return got
 }

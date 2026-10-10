@@ -86,11 +86,14 @@ const (
 	// park caused by an echo from an adapter that declared it cannot echo. The destination was NOT shown to differ, so
 	// the text must not say it was; and there is no governed completion route (open owner/architect question).
 	unexpectedEchoPayoutCapturedUnpostedResolutionHint = "payout parked because an adapter that declares no destination echo sent one (the destination is NOT shown to differ; the echo is untrusted evidence): no completion against the player's hold and no governed completion route (open owner/architect question); PSP recall/return or off-platform recovery; M4 not-paid only on positive decline evidence; never allocation"
-	// destinationIntegrityPayoutCapturedUnpostedResolutionHint (LF RR-2): an
-	// integrity-failure park has NO M4 route (payment_m4_in_scope admits only
-	// destination_mismatch; an M4 on it is refused MR012), so the text must not
-	// advertise one. Bringing it into scope is an architect/owner decision.
-	destinationIntegrityPayoutCapturedUnpostedResolutionHint = "payout parked on a destination integrity failure: no completion against the player's hold and no M4 route (open owner/architect question); PSP recall/return or off-platform recovery; never allocation"
+	// destinationIntegrityPayoutCapturedUnpostedResolutionHint (LF RR-2, updated
+	// by GOV-R32 / owner decision 4, ADR 0095 §48; ADR 0111 §23): migration 0127
+	// admits destination_integrity_failure to M4 NOT-PAID only (positive decline
+	// evidence, four-eyes with a platform_acting requester and final approver).
+	// M4 PAID stays refused (MR012): completing a payout to a destination the
+	// platform cannot verify is never offered. The text names exactly that; it
+	// never names a completion, a rebind or a "resume" (DESIGN ONLY, §23.3).
+	destinationIntegrityPayoutCapturedUnpostedResolutionHint = "payout parked on a destination integrity failure: no completion against the player's hold and no M4 paid; M4 not-paid only on positive decline evidence; PSP recall/return or off-platform recovery; never allocation"
 	m4KindPaid                                               = "m4_evidence_paid"
 	m4KindNotPaid                                            = "m4_evidence_not_paid"
 	// unknownOpCapturedUnpostedResolutionHint: fail-closed neutral text for an
@@ -894,12 +897,11 @@ func capturedUnpostedHintFor(a *payAttempt, depositHint string) string {
 // (ADR 0111 §4.1, C-6): an unbound reason - invalid_provider_reference, its
 // invalid_provider_reference:* family, or provider_reference_conflict - with
 // NO provider reference. Wording only (L-4): it grants and clears nothing.
-// destination_mismatch is in M4 scope for not-paid only (migration 0125) but is
-// a BOUND park: its wording is destinationPayoutCapturedUnpostedResolutionHint
-// (isDestinationReason), selected before this predicate. B13-B's reasons
-// (destination_mismatch, destination_integrity_failure) are not yet in
-// disputeReasonClasses, so no pay_captured_unposted finding is raised for them
-// today; the hint becomes live when B13-B classifies them (review C-3/C-4).
+// destination_mismatch (migration 0125) and destination_integrity_failure
+// (migration 0127) are in M4 scope for not-paid only; their wording is the
+// destination text (isDestinationReason / the integrity text), selected before
+// this predicate. Both are classified bound-if-referenced in
+// payoutDisputeReasonClasses (B13B-13), so the destination hints are live.
 func (a *payAttempt) inM4Scope() bool {
 	if a.operation != paymentStatementKindPayout || a.state != "disputed" || a.providerRef != "" {
 		return false

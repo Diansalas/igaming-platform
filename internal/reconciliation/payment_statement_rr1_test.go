@@ -292,14 +292,14 @@ func TestRR30_Pure_BoundDestinationMismatch_StopRuleAndEveryNegation(t *testing.
 	if !f.m.capturedUnposted(f.a) {
 		t.Fatal("a reversed payout line must keep the bound finding raised")
 	}
-	// Scope: destination_integrity_failure is NOT M4-eligible; any other
+	// Scope: destination_integrity_failure is outside owner decision 1 (ADR 0111 §23 Q-R32-1); any other
 	// reason, a park no longer holding the pinned X, an empty X, and a run
 	// without K3 evidence never stop.
 	for _, mut := range []struct {
 		name string
 		fn   func(f *rr1Fix)
 	}{
-		{"destination_integrity_failure", func(f *rr1Fix) { f.a.terminalReason = "destination_integrity_failure" }},
+		{"destination_integrity_failure (outside owner decision 1)", func(f *rr1Fix) { f.a.terminalReason = "destination_integrity_failure" }},
 		{"another bound reason", func(f *rr1Fix) { f.a.terminalReason = "callback_amount_asset_mismatch" }},
 		{"pinned reference differs from the held X", func(f *rr1Fix) { f.r.pinnedRef = "X-old" }},
 		{"no held reference at all", func(f *rr1Fix) { f.a.providerRef = ""; f.r.pinnedRef = "" }},

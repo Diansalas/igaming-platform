@@ -2433,116 +2433,258 @@ the live instrument row) are killed by (a) and (d); M3 (the dispatch gate weaken
   runtime-role proof of the same refusal is `TestR31_B_`.
 
 
+
+## 23. Governed exit of a `destination_integrity_failure` park (owner decision 4, ADR 0095 §48) (appendix, `ledger-finance`, 2026-10-09; branch `gov-r32-integrity`, base `dad803d`; migration 0127)
+
+Section numbering: §21 and §22 are left to sibling branches of the same cycle; this section is self-contained. The design above is
+**not** rewritten. Owner decision 4 is authoritative and is **not** broadened: there is no automatic exit; the park stays held
+until a controlled four-eyes resolution; no unilateral staff override; no provider callback or poll changes the destination or
+releases the hold; no automatic release, settlement or beneficiary reassignment; no generic admin override. Owner decision 6 (the
+D-7 evidence standard) is the evidence bar. Every provider and statement source in the tests is `MOCK`; nothing here is a
+statement about a real PSP, a custodian or a licence.
+
+### 23.1 The three controlled outcomes and their status
+
+| Outcome (decision 4) | Mechanism | Status |
+|---|---|---|
+| **Remain parked** if the evidence is ambiguous (the default) | The park itself (B13-B): attempt `disputed` / `destination_integrity_failure`, withdrawal `submitted`, hold kept, B12 P1, reconciliation finding. No job, sweeper, poll, callback or reconciliation path changes it. | `IMPLEMENTED` (verified, 23.2) |
+| **Controlled cancellation/release** where existing financial policy permits | The existing M4 **not-paid** resolution (`m4_evidence_not_paid`, §4), admitted for this reason by migration 0127. Hold returned to the player's **own** `player_cash` only. | `IMPLEMENTED` against `MOCK` |
+| **Resume** when the authoritative destination is positively established | 23.3 (a new attempt against the platform-authoritative bound instrument; never a rebind, never a snapshot rewrite) | `NOT IMPLEMENTED` — **DESIGN ONLY** |
+| (not an outcome) M4 **paid** / M2 / any completion against the hold | Refused in the database (`MR012`) and in Go | `REFUSED` by design |
+
+### 23.2 What migration 0127 implements (the smallest safe change), and what was verified
+
+**Change (as first written; the review round in 23.6 widens 0127 in the refusal direction).** One function, `payment_m4_in_scope` (0125), is replaced (`CREATE OR REPLACE`, same OID, signature, `IMMUTABLE`, pinned
+`search_path`): the not-paid-only arm admits `destination_integrity_failure` beside `destination_mismatch`, with or without a bound
+reference. The paid arm is unchanged (only the unbound reasons with no reference), so M4 paid on this reason stays `MR012`. Go:
+`M4ResolvableDispute` restates it (parity test over the reason x state x kind x reference matrix, admitted combinations 10 -> 12,
+flipped deliberately). The down refuses (`MR099`) while **any** M4 row (any kind, any state) has
+`terminal_reason_at_submission = 'destination_integrity_failure'`, and otherwise restores the 0125 body **byte for byte** (whole-schema
+up/down/up test: exactly the one function line differs; the restored `prosrc` is matched against the 0125 file text).
+
+**Verified unchanged and reason-agnostic (so nothing else needed to change):**
+
+| Object | Why it is already correct for this reason |
+|---|---|
+| `payout_m4_evidence` | Reads by the platform-issued merchant reference, by the attempt's bound reference when it holds one (an integrity park binds the provider's validated, unconflicted reference first, B13B-17 LF H-2), by every typed Y and by every matched reference D; never reads the snapshot. The D-7 bar is unchanged: sealed eligible import, coverage `[created_at, last_sent_at + 24 h]`, a declined line of equal amount/asset after the last send, no succeeded/pending/reversed line on any matched reference in any import, declaration integrity; `last_sent_at IS NULL` is `insufficient`. |
+| insert guard (`payment_manual_resolutions_guard`) | DB-forced amount/asset (R-4), pinned `provider_reference_at_submission` (C-6/R-3), `basis_code = provider_confirmed_out_of_band`, evidence recomputed and the deterministic line required. |
+| `-> executing` (same guard) | Scope re-check (now including the reason), reference pin, withdrawal `submitted`, amount/asset equality, evidence re-run (S-2); the recount `payment_manual_resolution_execution_status` with the `platform_acting` floor (S-6). |
+| MR041 (`..._no_executing_commit`) | Withdrawal `failed` and linked; `withdrawal_failed` keyed `wr.id:failed`, no provider id/tx id; exactly two legs: hold debit and `player_cash` credit, both on the withdrawal's **own** wallet, amount and asset equal; attempt fields equal the pins. |
+| Fence (g), `ledger_entries_governed_fence`, acting K3 arms, `tenant_system_read_executed` | Keyed on the kind `m4_evidence_not_paid`, never on the reason. |
+| Go (`manual_resolution*.go`) | `m4ExecutionRefusal` uses `M4ResolvableDispute`; `requestInTx` / `m4EvidenceRefusal` verify the import seals on every path (L-2 pin unchanged); `postM4` calls `withdrawal.Fail` only. The resolution audit carries no snapshot data, so a missing snapshot cannot break it. |
+| Reconciliation | `payoutDisputeReasonClasses` already classifies the reason bound-if-referenced (B13B-13). R-1 (`pay_declared_not_paid_but_paid`) and the RR-1 stop rule are keyed on the executed M4 not-paid row, not the reason: an integrity park is treated **exactly** like a `destination_mismatch` park. Shown correct by test (23.4): a later succeeded line on the bound reference raises R-1 with the post-M4 hint; after a full K2 recovery R-1 stops while the BOUND finding keeps raising (RR1-2, identical to the `destination_mismatch` pin). |
+| §4.8 post-M4 cells | Keyed on the executed M4 and the withdrawal state; `payoutDestinationEvidence` is a no-op on a `disputed` attempt (R22-3), so a later success on the bound reference raises `success_after_m4_not_paid` (raise-only, MOCK). |
+| Hint | `destinationIntegrityPayoutCapturedUnpostedResolutionHint` now reads "payout parked on a destination integrity failure: no completion against the player's hold and no M4 paid; M4 not-paid only on positive decline evidence; PSP recall/return or off-platform recovery; never allocation" (was "... no M4 route (open owner/architect question) ..."). It names no completion, rebind or resume. Pin `TestC3_DestinationHint_LiveAfterClassification_SelectedByReason` flipped deliberately. |
+| Alerting | No new raise site, Kind or reason; `go test ./internal/alerting` pins unchanged and passing. |
+
+**Readings taken (R32-n, safest each time).**
+- **R32-1 (why not-paid is safe on an untrustworthy attribution).** Brief 2's concern is that neither "paid" nor "not paid" can be
+  taken at face value while the destination is in doubt. That holds for **paid** (refused). For **not paid**, the snapshot plays no
+  part in either the verdict or the posting: the verdict rests on platform keys (merchant reference, the platform-held bound reference,
+  typed Y) over sealed statement imports, and the posting only moves the hold to the cash account of the withdrawal's own wallet. A
+  wrong not-paid can only produce a double payout to whichever destination the PSP used, which R-1 raises on every run and the §4.8
+  cell raises in real time (MOCK), recoverable only through K2 under the RR-1 rule. That is the same residual every M4 not-paid
+  already carries, so D-7's "correct destination/instrument where applicable" is **not applicable** to a positive non-payment finding.
+- **R32-2 ("where existing financial policy permits").** The existing policy that releases a `submitted` payout hold on positive
+  non-payment evidence is M4 not-paid. HSEC (needs `approved` and no attempt) and M2 (excludes the reason) do not apply; no new
+  release path was created.
+- **R32-3 (reference shapes).** Admitted with and without a bound reference, as for `destination_mismatch`: an integrity park made by
+  a poll or callback holds the reported reference; one made by sync phase C on a reference-less result holds none. Either way the
+  reference is pinned at submission and re-checked at execution.
+- **R32-4 (down refusal scope).** Any kind and state: a pending row would be stranded and an executed one would describe a release the
+  restored scope no longer admits.
+- **R32-5 (guard message text).** The `MR012` message in `payment_manual_resolutions_guard` still reads "destination_mismatch not-paid
+  only". Changing it means replacing the whole guard (0125, ~400 lines) for text; the SQLSTATE and the behaviour are correct. Cosmetic
+  residual, recorded.
+- **R32-6 (never-sent parks).** An integrity park with `last_sent_at IS NULL` cannot reach `not_paid` (the 0125 rule) and remains
+  parked. Integrity parks are only written by the evidence paths (sync phase C, poll, callback) on a sent attempt, so this is not
+  expected; if it occurs the park stays held (fail closed) until 23.3 exists.
+
+### 23.3 "Resume when the authoritative destination is positively established" — DESIGN ONLY (`NOT IMPLEMENTED`)
+
+**Constraint.** The snapshot is write-once (0123), keyed by attempt. A resume must therefore never rebind the withdrawal, never write
+or repair a snapshot in place, and never treat a provider echo, callback or poll as establishing the destination (decision 5).
+
+**Interim operational equivalent (available today, no code; a RECOMMENDATION, not a decision).** Execute M4 not-paid (the hold returns
+to the player's cash), then the player places a new withdrawal bound to the same instrument through the normal flow: request-time gate,
+KYC/RG, approval, T1p gate, a **fresh** write-once snapshot, phase B gate. Nothing from the corrupted snapshot is reused. Cost: the
+player must act again and the request is re-approved.
+
+**In-place resume (R-B), if the owner wants one.** A new K3 kind `m5_destination_resume` on `payment_manual_resolutions`:
+- **Eligibility (all, re-checked at execution).** (E1) The old attempt is `disputed` / `destination_integrity_failure` and its park
+  audit row's `gate_reason` is snapshot-confined: `snapshot_missing`, `snapshot_mismatch`, a snapshot `seal_invalid`, or
+  `destination_gate_unavailable`. A park whose present-time instrument checks fail (`seal_invalid` / `fingerprint_mismatch` /
+  `binding_mismatch` / `detail_unavailable` / verification faults on the **instrument**) is never resumable: the authoritative destination
+  itself is in doubt; only not-paid or remain parked. (E2) The **platform-authoritative destination** is positively established now:
+  the withdrawal's immutable binding (`payout_instrument_id`, `payout_instrument_fingerprint`) resolves to an instrument whose seal
+  verifies under the B13 key, whose fingerprint recomputes from the decrypted detail, whose latest verification is the one the gate
+  expects, of the same player and brand, usable for the asset, and `CheckTier` passes on the exact routed adapter, all under
+  `FOR SHARE` (the existing `EvaluateGate`). (E3) The old attempt is positively **not paid**: `payout_m4_evidence = not_paid` under the
+  D-7 standard, seals verified in Go, at request and at execution. (E4) An investigation finding (closed code) and an evidence hash
+  (forensics/portal confirmation) bound into the payload hash. No provider-supplied field contributes to E1-E4 except as the
+  statement evidence of E3.
+- **Who.** A new capability `payout_destination_resume:request|approve` (not `payment_force_resolve`: the D-9 lesson), requester and
+  final approver `platform_acting` only (R19-1 analogue), the DB `platform_acting` floor in the recount, LF-11 distinct Persons, S-12
+  (never the beneficiary), S-2(iii) (no policy author), K3 recount and expiry. ADR 0110 signed actor proofs with two new operations
+  (`payout_resume:request`, `payout_resume:approve`); the request digest binds tenant, withdrawal, old attempt, instrument id,
+  fingerprint, the not-paid evidence line and import ids, the finding code, the evidence hash and the reason code.
+- **Execution (final approval's own transaction; lock order L1 withdrawal -> old attempt -> resolution).** Re-run E1-E3 (DB first,
+  Go seal check second); then create a **new** `payment_attempts` row for the same `submitted` withdrawal (new id, new platform merchant
+  reference, `created_by_resolution_id` UNIQUE) and write its snapshot through the existing T1p snapshot writer **from the instrument**
+  (never from the old snapshot). **No ledger posting** (the hold already covers the amount). Dispatch then runs through phase B and its
+  gates; kill switch and H-SEC tenant state refuse as usual. The old attempt stays `disputed` / `destination_integrity_failure` forever
+  (A-15, history), its P1 stays, and every reconciliation predicate on it keeps running: a later success on the old attempt's
+  references raises as a possible double payout.
+- **Idempotency / concurrency.** One pending or executed resume per old attempt, mutually exclusive with M2/M4 through the existing
+  per-attempt partial UNIQUE; the new attempt is created at most once (UNIQUE `created_by_resolution_id`); a retried decide is refused
+  (not pending) and creates nothing; two final approvals serialise on L1 and the resolution `FOR UPDATE`; sweeper and poll on the old
+  attempt are no-ops (`disputed`).
+- **Why it is not built now.** It is not small and reuses only part of the machinery: it needs a new kind, capability and two proof
+  operations; an attempt-creation entry point for a `submitted` withdrawal (T1p today requires `approved`); guard and MR041 rules for a
+  posting-free execution; reconciliation of a withdrawal with two attempts (one disputed forever) in the ledger join, STANDING-1 and
+  BOUND-CLEAR-1; and a threat model for an attacker who corrupts a snapshot to force a re-dispatch.
+- **Review it needs before any implementation:** `architect` (new kind, attempt lifecycle on a submitted withdrawal, ADR amendment);
+  `security` (capability and proof operations, E1/E2 gate re-evaluation, the re-dispatch threat model, decision 5); `ledger-finance`
+  (posting-free execution, double-payout prevention on the old attempt, multi-attempt reconciliation); `qa` (test matrix);
+  `product-owner-proxy` (whether the interim equivalent above makes R-B unnecessary); then the **owner** (whether an in-place resume is
+  wanted at all, and its capability semantics).
+
+### 23.4 Tests and evidence
+
+`internal/payments/m4_integrity_integration_test.go` (`TestR32_*`; real PostgreSQL, private scratch databases, the runtime-shaped
+non-superuser non-BYPASSRLS role; every park made by the real B13-B writer through the real QueryStatus poll after an owner-level
+snapshot tamper, both "missing" and "tampered"): end-to-end not-paid (request, final approval, execution, the two ledger legs exactly
+once on the player's own wallet, `psp_clearing` untouched, attempt and snapshot untouched, audit trail, idempotent replay of decide and
+request); M4 paid and M2 refused (DB `MR012` and Go, both reference shapes, and the Go execution precondition); R19-1 (tenant staff
+cannot request, tenant approvals never meet the floor, a tenant session cannot move to `executing`, the requester cannot self-approve);
+four-eyes with a two-approval policy (one approver never executes); insufficient/ambiguous/contradictory evidence keeps the park (no
+evidence, pending, reversed, succeeded on the bound reference, unsealed success, unsealed decline, short coverage, other amount, no
+declaration, and evidence contradicted after the request); no automatic exit (sweeper, polls with and without echo on fresh and stale
+copies, callbacks with and without echo, twice) and then the governed exit still executes once; two racing final approvals (exactly one
+`withdrawal_failed`); cross-tenant (request, evaluation, another tenant's lines); `destination_mismatch` cells unchanged beside an
+integrity park; reconciliation hint, R-1 and RR-1 (23.2); migration up/down/up whole schema with byte-for-byte restore, and the down
+refusals (pending and executed integrity M4) and the allowed down with only a `destination_mismatch` M4. Pins flipped deliberately:
+`TestM4_ScopeParity_GoAndDB` (10 -> 12), `TestC3_DestinationHint_LiveAfterClassification_SelectedByReason` (integrity text). The two
+head-relative down helpers (`m4DownTo0125`, the HSEC `downTo0124`) now derive their step count from the migration files.
+`TestR32_QR322_*` pins the Q-R32-2 behaviour (23.5) as current, so a tightening flips it deliberately.
+Mutation evidence: `docs/plans/prh2-hardening-round/prh2-r32-integrity-mutation-kill.txt` (14 counted, 14 killed, 0 survivors).
+Final runs (`-race -tags integration -count=1 -p 1`, targeted `-run`, private scratch databases, 0 SKIP everywhere so the integration
+tests did run): payments `TestR32_` 13 PASS / 0 FAIL; `TestR32_IntegrityPark_Concurrency_TwoFinalApprovals` at `-count=10` 10 PASS, no
+race report; payments `TestR32_|TestM4|TestRR1_|TestRR4_|TestRR5_|TestPostM4_|TestPayoutPostM4Cell|TestB13B_|
+TestHSEC_HoldRelease_Migration0124DownRefusals|TestC3_|TestL2_|TestB11_` 164 PASS / 0 FAIL (before the Q-R32-2 pin was added);
+reconciliation `TestRR1_|TestRR4_|TestR1_|TestR2_|TestC3_|TestRes1_|TestPayoutReason|TestPayoutDisputeReasonClasses|TestB13B|TestRS`
+33 PASS / 0 FAIL; payoutinstrument `TestMigration0126|TestBinding_InsertGuard` 3 PASS; httpserver `TestForceResolutionAPI_M4` 2 PASS;
+`go test ./internal/alerting -count=1` PASS. gofmt clean; `go vet` clean with and without `-tags integration`; golangci-lint 2.9.0
+`--build-tags integration --new-from-rev=dad803d ./internal/...` 0 issues. LOCAL evidence only.
+
+### 23.5 Open questions (nothing here is decided by this change)
+
+- **Q-R32-1 (CONFIRMED by ledger-finance as the conservative reading, 23.6).** Decision 1 makes RR-1 apply to a recovered `destination_mismatch` park. The same
+  bound-site rule would be financially correct for a recovered integrity park (the recovery accounting is identical), but decision 1
+  names only `destination_mismatch`. Until extended, the BOUND finding of a recovered integrity park keeps raising (safe, noisy), and an
+  implementation of decision 1 must not silently key on "any destination reason".
+- **Q-R32-2 (CLOSED by the 23.6 fix, security C-1).**
+  Not-paid (ii) attributes a declined line by the merchant reference **or** the bound reference alone; a declined line on the bound
+  reference that names **another** merchant reference is not refused (the paid branch has the H-2 rule; not-paid has none). Recommend
+  `insufficient` for not-paid when any line read on the bound reference names another merchant reference. Not changed here (it rewrites
+  `payout_m4_evidence` for all reasons).
+- **Q-R32-3 (owner; still open).** Is the interim equivalent of 23.3 sufficient, or is an in-place resume (R-B) wanted? Ledger-finance: the interim position (remain parked; M4 not-paid; then a new withdrawal) is sufficient from the financial side.
+- Launch flags unchanged: D-7 provider-dependent parts, T10, S-3 per real source, F-1 for non-MOCK.
+
+### 23.6 Review round (security APPROVE WITH CONDITIONS, ledger-finance REJECT with one HIGH; fixes applied, 2026-10-09)
+
+Every change below is refusal-direction; none broadens owner decision 4 or 6. All of it is folded into migration 0127 (unmerged),
+built on the current 0125 bodies; the down restores both 0125 function bodies byte for byte (whole-schema test plus a `prosrc`
+match against the 0125 file for each) and drops what 0127 added.
+
+**LF HIGH: a provider success the platform already saw was invisible to the not-paid verdict.** B13-B parks a destination payout
+mostly on SUCCESS evidence, but `parkPayoutDestination` only bound the reference; `payout_m4_evidence` reads statement lines and Y, so
+the reproduction (MOCK poll reports success on X, park, then a sealed declaring import with a decline on another reference carrying
+the merchant reference) read `not_paid` and M4 not-paid released the hold.
+- **Record.** New append-only table `payout_park_evidence` (tenant, attempt, destination reason, `reported_outcome` in
+  `succeeded|declined|pending|ambiguous|unknown_pre_0127`, `evidence_kind`, `recorded_at`; UNIQUE per (attempt, outcome, kind) so
+  repeats add nothing). It mirrors the reviewed 0115 `payment_attempt_reference_evidence` pattern: FORCE RLS; INSERT and SELECT only in
+  the **system shape**, SELECT for a **valid acting session** (the M4 evaluation); no tenant-staff, player, platform or UPDATE/DELETE
+  policy; `ledger_deny_mutation` on UPDATE/DELETE/TRUNCATE; runtime grants SELECT, INSERT only; an insert guard (`MR064`, new) admits a
+  row only for a payout attempt currently `disputed` on that same destination reason and never the backfill marker.
+- **Writers (every path).** `parkPayoutDestination`, the single park writer used by sync phase C, the QueryStatus poll and the
+  callback/receipt cell, records the evidence class in the park's own transaction. A success reaching an attempt **already** parked on
+  a destination reason is recorded by `recordSuccessOnDestinationPark` from the three disputed branches: the poll (`case
+  AttemptDisputed`, success), the callback/receipt (`case AttemptDisputed`, success) and the late-evidence path (a sync or poll result
+  that lost the CAS to the park). It changes no state, posts, releases or raises; the post-M4 cell still runs after it.
+- **Verdict.** In the not-paid branch of `payout_m4_evidence`: a `succeeded` record gives `contradictory`; an `unknown_pre_0127` record
+  gives `insufficient`. Both destination reasons. Re-evaluated at `-> executing` like every verdict input (a success that arrives after
+  the request is refused at execution).
+- **Backfill (fail closed).** 0127 up writes `unknown_pre_0127` for every destination park that already exists (their trigger is
+  unknown), lifting FORCE RLS on `payment_attempts` for that one statement only. The down refuses (`MR099`) while any park-evidence row
+  exists (dropping it would reopen not-paid on a success-parked `destination_mismatch` park), in addition to the integrity M4 rows.
+- **R-1 (decided: no change).** A success recorded **before** execution makes the M4 impossible (DB re-check at `-> executing`). A success
+  recorded **after** an executed not-paid arrives through exactly the callback/poll/late paths where the §4.8 cell raises
+  `success_after_m4_not_paid` (audit + P1) in real time; R-1 stays statement-based and raises when the line arrives. Reading the record
+  in reconciliation would add a second, non-statement source to `loadK3Evidence` for no additional detection.
+
+**Security C-1 / LF Q-R32-2: not-paid on an ambiguous attribution.** Before the line selection, the not-paid branch now returns
+`insufficient` when any payout line on the bound reference or on any matched reference (`v_rs`) names a non-NULL merchant reference
+other than the attempt's. These lines are already inside the 64-line read set (S-4). It tightens every M4 not-paid
+(`destination_mismatch` and the unbound reasons as well). Reconciliation R-1 mirrors it: after an executed not-paid, such a line on any
+reference R-1 reads raises `pay_declared_not_paid_but_paid` with `check=m4_not_paid_attribution_ambiguous` (raise only; not subject to
+the RR-1 stop rule, it is not a recovered payout). The former `TestR32_QR322_*` current-behaviour pin is replaced by
+`TestR32_C1_*` (flipped deliberately).
+
+**Security C-2 (LOW), recorded residual.** After this round, an M4 not-paid on a destination park can still be wrong only if the
+snapshot was corrupted (needs DB-owner access, ADR 0110 T6) **and** the payout actually went out **and** the only trace of it is a
+succeeded line in a statement source that does not declare `payout_lines_carry_merchant_reference`, carrying an unrelated reference
+and no merchant reference (never matched by the merchant reference, the bound reference, Y or `v_rs`), with no provider success ever
+reported to the platform for the attempt. That is the S-3 source-completeness residual: `PROVIDER DEPENDENT`, launch-blocking per real
+source as already recorded (§4.3, §10.3).
+
+**Security C-3 (INFO).** `TestR32_C3_RawWritesWithoutProof_EverySessionShape`: a raw M4 INSERT on an integrity park without an actor
+proof is refused in the `platform_acting` (`AP001`), tenant-staff (`AP001`/`MR060`), system (`CG001`/`MR001`) and platform-admin shapes;
+a raw cancel UPDATE and a raw approval INSERT without a proof are refused in every shape; nothing moves.
+
+**MR012 message text.** Left unchanged and recorded (R32-5): fixing the text means replacing the whole `payment_manual_resolutions_guard`
+(0125, ~400 lines) for wording only; the SQLSTATE and the behaviour are correct.
+
+**Questions.** Q-R32-1 confirmed by ledger-finance as the conservative reading (decision 1 names `destination_mismatch` only). Q-R32-2
+closed by C-1. Q-R32-3 stays an owner question; ledger-finance finds the interim position sufficient.
+
+
 ---
 
-## 25. D-7 conformance: the M4 evidence standard as a traceable model (appendix, `qa`, 2026-10-09; branch `gov-r34-d7`, base `dad803d`; the design above is not rewritten)
+### 23.7 D-7 review refinements (ledger-finance + security on the D-7 branch; folded into 0127, 2026-10-10)
 
-**What this section is.** Owner decision 6 (D-7, ADR 0095 §48) APPROVED the M4 evidence standard: before any non-MOCK M4 payout resolution or payment the platform must hold positive evidence sufficient to establish, as applicable, (1) the correct withdrawal, (2) the correct payout attempt, (3) the correct provider transaction/reference, (4) the correct player/tenant context, (5) the correct asset, (6) the correct amount, (7) the correct destination/instrument, (8) the final provider status, and (9) the causal relationship between the provider evidence and the attempt; **no single untrusted provider field may be sufficient to establish all of this**; ambiguous evidence parks, alerts and is investigated, and is never guessed, paid or resolved automatically. This section supersedes the "D-7 (OPEN, owner)" bullet of §17.4: the standard is decided. It does **not** enable non-MOCK M4 and connects no provider. The matrix below was built by reading migration 0125, `manual_resolution*.go`, `payout_post_m4.go` and `internal/reconciliation/payment_statement_{m4,k3}.go`, not from the ADR text above; line numbers refer to `migrations/0125_payout_unbound_resolution_m4.up.sql` at the base.
+**(1) The durable record covers every M4-scope park writer; the refusal applies to every M4 not-paid reason.** The table is
+renamed `payout_park_evidence` (0127 is unmerged) and its reason CHECK, backfill and insert guard cover every reason an M4 not-paid
+can be asked for: `invalid_provider_reference`, `invalid_provider_reference:*`, `provider_reference_conflict`, `destination_mismatch`,
+`destination_integrity_failure`. The not-paid refusal in `payout_m4_evidence` was already reason-agnostic (it reads the record, not the
+reason), so a recorded success now makes not-paid `contradictory` for ALL of them. Writers that set `terminal_reason` on a payout
+attempt (from `grep ApplyDisputeFrom*`), and their treatment:
 
-### 25.1 Deliverable status
-
-| Item | Status |
-|---|---|
-| D-7 matrix (25.2-25.3) and the conformance suite (25.8) | `IMPLEMENTED` against MOCK (documentation and tests) |
-| Go-side, refusal-only eligibility check (25.4: three checks the SQL verdict does not carry) | `IMPLEMENTED` (no migration; migration 0125 and the SQL functions are untouched) |
-| SQL equivalents of those three checks, and a positive destination clause | `NOT IMPLEMENTED` (need a migration; reported, 25.4; the `0127` owner or a later migration) |
-| Adapter contract and conformance checklist (25.6) | `IMPLEMENTED` as an interface plus a pure checker; **every provider-specific implementation is `PROVIDER DEPENDENT` and `NOT IMPLEMENTED`** |
-| Non-MOCK M4 (paid or not paid) | **`BLOCKED`** (25.7) |
-
-### 25.2 The matrix, short form
-
-| # | D-7 property | Enforced by (exact) | Re-checked when the final approval executes | Proved by (`internal/payments`) | Verdict |
-|---|---|---|---|---|---|
-| 1 | correct withdrawal | resolution's `withdrawal_request_id` is DB-forced from the attempt (guard `:634`); withdrawal `submitted` (`:694`); amount/asset equal (`:697`) | DB `-> executing` (`:893-899`); Go `m4ExecutionRefusal`; MR041 (`:976`, ledger `correlation_id` = withdrawal; entries on the withdrawal's wallet `:1015-1017`) | `TestD7_P1_WrongWithdrawal` | enforced |
-| 2 | correct payout attempt | M4 scope `payment_m4_in_scope` (`:203`, request `:691`); evidence is read only by the attempt's platform-issued merchant reference / bound reference / typed Y (`:278-312`); one reference naming two merchant references is `contradictory` (H-2 `:353-358`); the requested line must be the deterministic line (`:753`) | DB `:889-905`; Go scope + reference pin + re-evaluation (`m4EvidenceRefusal`); MR041 pins state/reason/reference (`:984-996`) | `TestD7_P2_WrongAttempt` | enforced |
-| 3 | correct provider transaction/reference | exactly one succeeded group (`:332`); R must not carry the reserved prefix, be attributable (`payment_y_attributable`), have a tombstone, be held by another attempt as reference or typed Y, differ from the attempt's own Y, equal a `withdrawal_requests.provider_reference`, key a ledger row or the `provider:R` idempotency key (`:367-385`); the importer's CHECK refuses a reserved-prefix line; **Go: R is not any platform-issued merchant reference (25.4 G-REF)**; R is pinned into the resolution, the ledger key `provider:R` and MR041 (`:1004-1006`) | DB `:901-905`; Go re-evaluation; MR041 | `TestD7_P3_WrongProviderReference` | enforced; **residual: for an unbound attempt R has no platform-side fact to be compared with (25.5)** |
-| 4 | correct player / tenant | `tenant_id = p_tenant` on every read plus FORCE RLS; `payment_m4_scope_visible` (`:218`, error MR060, never a verdict); tenant is the server-side target (`NewResolutionTarget`); platform actor needs an in-force grant for THAT tenant; entries must sit on the withdrawal's `wallet_id` (MR041 `:1016`) | same predicates in `payout_m4_evidence` at `-> executing`; MR041 | `TestD7_P4_WrongPlayerOrTenant` | enforced (the `tenant_id` predicates inside the function are defence in depth to RLS: mutant S27 survives, 25.9) |
-| 5 | correct asset | paid: I-1 `:363`; not paid: `:448`; R-4 DB-forced asset (guard `:597`, `:697`) | DB `:897-899`; Go `m4ExecutionRefusal`; MR041 `e.asset_code = r.asset_code` | `TestD7_P5_P6_WrongAssetOrAmount` | enforced |
-| 6 | correct amount | as 5 (`NUMERIC`, equality in minor units) | as 5 | `TestD7_P5_P6_WrongAssetOrAmount` | enforced |
-| 7 | correct destination / instrument | **negative only:** `destination_mismatch` is outside the paid scope (`:210`, guard `:691`, MR012; Go `M4ResolvableDispute`); the per-attempt destination snapshot is write-once (0123). **No positive evidence: a statement line has no destination field.** For non-MOCK sources the Go gate (G-NONMOCK) refuses | DB `:889`; Go scope | `TestD7_P7_WrongDestination`, `TestD7_NonMockM4IsBlocked_*` | **PARTIAL (25.4 G-DEST)** |
-| 8 | final provider status | paid needs one succeeded group and no declined/reversed/pending line on the merchant reference, bound reference, R or any Y in any import, MOCK and unsealed included (`:344-351`); not paid needs a declined line and no succeeded/pending/reversed line on the same set plus every matched PSP reference D (`:414-422`); closed status vocabulary (CHECK); R-1 and the post-M4 cells catch later reversals | DB `:901-905`; Go re-evaluation | `TestD7_P8_NonFinalProviderStatus` | enforced for **M4 paid** and for the platform vocabulary; **PARTIAL for M4 NOT PAID** (G-SUCCESS-PARK, 25.4: several parks are created on a provider success that is not stored durably, so a later declined line could release the hold); the provider-to-vocabulary mapping is `PROVIDER DEPENDENT` (checklist C3, C7) |
-| 9 | causal relationship | attribution by the merchant reference only; not-paid needs the source's `payout_lines_carry_merchant_reference` (`:454`), no NULL-merchant payout line in a declaring import (`:426-435`), `occurred_at >= last_sent_at` (`:449`), coverage over `[created_at, last_sent_at + 24 h]` (`:455-456`); sealed imports (`:401`, `:452`) with the HMAC verified in Go at request and execution (`verifyImportSeals`); platform_acting approver floor (`:847`); four-eyes portal confirmation; **Go: the paid line lies inside `[attempt's first send, its import's coverage_end]` (25.4 G-TIME)** | DB `:901`; Go seals + re-evaluation + eligibility; R-1 after execution | `TestD7_P9_CausalLink`, the meta tests | enforced; **authenticity of the statement content is S-3/T10, `PROVIDER DEPENDENT`** |
-
-### 25.3 What each enforcement is, and where the Go layer is the only one
-
-- **Both layers.** Properties 1, 2, 3 (except G-REF), 4, 5, 6, 8 and 9 (except G-TIME and the seal) are enforced in the database at the request (`payment_manual_resolutions_guard`, INSERT) **and** again at `pending -> executing` (the same guard, `:881-905`), with Go as the first check at execution (`m4ExecutionRefusal`, `m4EvidenceRefusal`), and MR041 as the commit-time check of what was posted.
-- **Go only, by necessity.** The import seal HMAC (the key never enters the database). The database sees only that a seal is present.
-- **Go only, found by this work (25.4).** Three checks: non-MOCK evidence, "R is not a platform-issued merchant reference", "the paid line lies inside the attempt's window". They run at the request (`requestInTx`) and at the execution (`m4EvidenceRefusal`), after the seals and before anything can post; a static pin (`TestD7_EligibilityRefusalRunsOnEveryM4Path_AfterTheSeals`) fixes the call order. The database's `-> executing` re-check does not carry them (a SQL gap, reported).
-
-### 25.4 Gaps found (each with the test that exhibits it)
-
-| Id | Gap | Exhibited by | Disposition |
+| Writer | Reason(s) | M4 not-paid scope | Record |
 |---|---|---|---|
-| **G-REF** | `payout_m4_evidence` returned `paid` for a succeeded line whose provider reference **equals the platform's own merchant reference** (or another attempt's). One provider field (the merchant-reference echo) then supplied both the causal link (property 9) and the "provider transaction reference" (property 3) and became the ledger key `provider:R`. | `TestD7_P3_WrongProviderReference/R_equals_the_attempt's_OWN_merchant_reference...` and `.../R_equals_ANOTHER_attempt's_merchant_reference...` assert the **database** still reads `paid` (a pin of the SQL gap that flips when the SQL gains the clause) and that the request is now refused in Go with `m4EligPlatformRef` | **Fixed in Go** (refusal-only, no migration). Smallest SQL fix: in the attribution block (`:367`) add `OR EXISTS (SELECT 1 FROM payment_attempts a WHERE a.tenant_id = p_tenant AND a.merchant_reference = v_g.ref)` |
-| **G-TIME** | The paid branch reads **no timestamp**: a succeeded line dated before the attempt existed, or after the coverage its own import vouches for, read `paid`. A payout that predates the attempt cannot be its payout. (The not-paid branch already requires `occurred_at >= last_sent_at`.) | `TestD7_P9_CausalLink/..._BEFORE_the_attempt_existed...`, `.../..._AFTER_the_coverage...` (database `paid`, Go refusal), first-send boundary (one microsecond before is refused, the instant itself executes) | **Fixed in Go** (`occurred_at` in `[first_submitted_at (falling back to last_sent_at), import.coverage_end]`; zero tolerance, fail closed: park and investigate; an attempt with no recorded send has no eligible line). A line dated before `last_sent_at` but after the first send is **not** refused, because an earlier send of a resent attempt may be the one that paid (security LOW-2). The lower bound was `created_at` in the first revision. A per-source skew tolerance, applied to the lower bound only, is a checklist declaration (C11, bounded, default and MOCK zero, ledger-finance reviewed per source). Smallest SQL fix, carried by `gov-r32-integrity` (0127) with the same bound: add the two comparisons to the `v_line` selection (`:393-407`) |
-| **G-SUCCESS-PARK** (ledger-finance C-1; **not introduced by this work, not fixed by it**) | M4 **not paid** relies on a declined statement line and on the absence of a succeeded/pending/reversed one. But several parks are created **on a provider SUCCESS that the platform does not store durably**: `provider_reference_conflict` (`payout_refbind.go` ~108-150), `destination_mismatch` and `destination_integrity_failure` (`payout_destination.go`). The platform then holds no record that the provider ever reported success, so a later declined line can satisfy the not-paid verdict and release a hold on money the provider may have paid. Property 8 is therefore only PARTIAL for not paid. | Documenting subtest `TestD7_P9_CausalLink/DOCUMENTING...success-triggered_parks` (logs the exposed reasons; deliberately asserts nothing r32 would change) | **Launch condition**, carried by `gov-r32-integrity` (migration 0127): a durable success-reported record in every park writer and path, and the not-paid verdict `contradictory` for ALL M4 not-paid reasons. Recorded in 25.7 |
-| **G-NONMOCK** | Nothing technical stopped non-MOCK M4 other than the process registry and the startup gate: a registered real source with sealed imports would have been accepted by the database and by Go. | `TestD7_NonMockM4IsBlocked_PositiveDatabaseVerdictOnARealImportIsRefused`, `TestD7_EligibilityRefusal_ReasonsAtTheExecutionPoint` | **Fixed in Go**: every M4 whose evidence set contains a non-MOCK import is refused (`m4EligNonMock`, unconditionally; lifting it is a reviewed code change, 25.7) |
-| **G-DEST** | The statement-line model (`statement.PaymentStatementLine`) has **no destination or instrument field**, so no statement line can positively evidence property 7. M4 paid on a bound payout is today justified by the platform's write-once destination snapshot and the absence of a `destination_mismatch` park, never by provider evidence about the destination. Acceptable for MOCK only. | `TestD7_P7_WrongDestination/every_bound_payout_carries..._(the_documented_gap)`; `TestD7_StatementLineHasNoDestinationField_PinsTheConstant` | **Structural, `PROVIDER DEPENDENT`.** Closed for non-MOCK by G-NONMOCK. A positive clause needs: a destination-echo field on the line, a migration, and a comparison in `payout_m4_evidence` against the snapshot fingerprint (the same decision-5 echo semantics). It is **not** a refusal-direction Go change and is not attempted. The `0127` branch changes `payment_m4_in_scope` / `payout_m4_evidence` for `destination_integrity_failure`; this work did not touch them |
+| `payout.go` sync phase C, `ErrorClassProviderRefInvalid` | `invalid_provider_reference[:*]` | yes (no reference) | reported `Outcome` of the result (`parkOutcomeForOutcome`) |
+| `payout.go` QueryStatus poll, `ErrorClassProviderRefInvalid` | `invalid_provider_reference[:*]` | no (holds X) | reported `Outcome` (recorded anyway; scope refuses) |
+| `payout_refbind.go` `payoutGuardReferenceBinding` (sync, poll, callback, `applyPayoutSuccess`/`Decline`, the destination bind) | `provider_reference_conflict` | yes | the REPORTED class; `bindPayoutReferenceForPark` now passes the destination evidence's real class (its routing class stays `pending`, so CAS-conflict routing is unchanged) |
+| `payout_destination.go` `parkPayoutDestination` (sync, poll, callback) | `destination_mismatch`, `destination_integrity_failure` | yes | the evidence class |
+| success on an ALREADY parked attempt: poll `case AttemptDisputed`, callback `case AttemptDisputed`, `applyPayoutLateEvidence` `case AttemptDisputed` | any of the above | - | `succeeded` (`recordSuccessOnPark`) |
+| `payout.go` `provider_reference_mismatch`, `amount_asset_mismatch`, late T10/T14 reasons; `receipt.go` `success_for_never_sent_attempt`, `success_after_payout_declined`, `callback_amount_asset_mismatch`, `reversal_tombstone_precedes_success`, `provider_reference_mismatch`; `orchestrator.go`/`drive.go` (deposits) | non-M4 reasons | no (M2 or none) | not recorded: M4 cannot be requested for them (`MR012`) |
 
-Observations that are **not** gaps this change closes (recorded so the next reader does not rediscover them): (a) `payment_statement_lines.provider_id` is not cross-checked against the import's `provider_id` by the database (the FK is `(import_id, tenant_id)`); it is held by `validatePaymentLine` in the fetch path (INV-IO-14), by the evidence function filtering on the line's own `provider_id`, and by the seal digest that binds each line's provider id (L-1); (b) `evidence_ref_hash` is an opaque 64-hex attestation of the operator's portal check; nothing compares it to R (25.5).
+**(2) G-REF and G-TIME in SQL (the counterparts of the D-7 Go gate `m4EligibilityRefusal`, so the DB re-check at `-> executing`
+carries them).** In the PAID branch of `payout_m4_evidence`: R equal to ANY attempt's merchant reference (this attempt's or another's)
+is `contradictory` (G-REF); the evidencing line must satisfy `occurred_at >= COALESCE(first_submitted_at, last_sent_at)` and
+`occurred_at <= its import's coverage_end`, zero tolerance, and an attempt with neither timestamp is `insufficient` (G-TIME). A line
+dated before `last_sent_at` but after the first send is NOT refused (an earlier send may have paid). The D-7 tests that pinned the two
+SQL gaps were flipped deliberately (`TestD7_P3_*`, the G-TIME subtests, the Go probe test, three `TestD7_Meta_*` cases now
+`dbNonPositive`); the Go gate is unchanged and still agrees (probed on the same lines).
 
-### 25.5 No single untrusted provider field is sufficient
+Down: MR099 while any integrity M4 row exists or any park-evidence row records `succeeded` or `unknown_pre_0127` (the only rows that refuse a verdict; once every M4-scope park writes a row, refusing on any row would make 0125's own down refusals unreachable, which `TestM4_Migration0125DownRefusals` caught); both 0125 bodies restored byte for byte.
+Tests: `TestR32_AllParkWriters_SuccessRecorded_NotPaidRefused` (invalid reference sync success/pending, poll success, conflict park,
+callback and late success on a parked unbound attempt), `TestR32_DestinationBindConflict_RecordsReportedSuccess`,
+`TestR32_GTIME_CoverageEndBoundary_InTheDB`, `TestR32_GTIME_LowerBoundIsFirstSendNotCreation_InTheDB`, plus the flipped D-7 pins.
+Mutation evidence: `docs/plans/prh2-hardening-round/prh2-r32-integrity-mutation-kill.txt` (rounds 1-3: 42 counted, 40 killed, 2
+equivalent survivors H5 and G6, each explained there). Runs: see that file's CONTROL lines (all `-race -tags integration -count=1 -p 1`,
+0 SKIP).
 
-The provider controls, per line: `provider_reference` (R), `merchant_reference`, `amount`, `asset_code`, `status`, `occurred_at`, `provider_id`, and per import: the coverage window, the `payout_lines_carry_merchant_reference` declaration and `is_mock`; the platform controls the seal. Two tests state the property from both ends:
-
-1. **Only this field is right** (`TestD7_Meta_NoSingleProviderFieldIsSufficient_OnlyThisFieldIsRight`, 13 rows): a statement in which exactly one field (merchant reference; amount and asset; status; R; `occurred_at`; the seal; the coverage and declaration) is correct and everything else is wrong or absent never yields a positive verdict for either kind, and both kinds are refused at the request. Two "everything right except one" rows (unsealed import; undeclared source) show the seal and the declaration are each necessary.
-2. **One field corrupted from a perfect baseline** (`TestD7_Meta_NoSingleProviderFieldIsSufficient_OneFieldCorrupted`, 16 rows plus the `provider_id` case): R to a reserved value (the importer refuses to store it), R to the merchant reference (database `paid`, Go refuses), merchant reference emptied/foreign/another park's, amount, asset, status (pending/reversed/declined), `occurred_at` (before the attempt, after coverage: Go refuses), seal absent, seal made with a key the process does not hold (database `paid`, Go refuses), a non-MOCK source (Go refuses), `provider_id` of another provider (the fetch path refuses the whole statement). **One row is positive by design:** R replaced by another fresh PSP-looking reference. R is the **output** of the verdict, not a checked input: for an unbound attempt the platform has issued no PSP reference, so there is nothing to compare it with, and the verdict pins whatever single, exclusive R the sealed line carries.
-
-**The honest statement of the residual.** Sufficiency here is a conjunction of corroborations that the platform can check independently: merchant reference against `payment_attempts.merchant_reference` (platform-issued, unique per tenant), amount and asset against the attempt, status against the closed vocabulary and the absence of contradicting lines, `occurred_at` against the attempt's window, R against the exclusivity set, the seal against the platform's key, and a **human** four-eyes confirmation against the provider's portal. A source that controls **every** field of a line and the channel it travels on (it knows the merchant reference, amount and asset: they were sent to it) could still fabricate a paid line. Software on this side cannot close that; its defences are the authenticated channel and the PSP content signature (S-3), the seal (T10), and the operator's portal confirmation. All three are launch conditions for any non-MOCK M4 (25.7). Whether and how the portal confirmation is machine-bound to R is an open owner/`security` question with two proposals, recorded in 25.7.
-
-### 25.6 Adapter contract for the provider-specific part (`internal/payments/m4_source_contract.go`)
-
-`PROVIDER DEPENDENT`, **gated, no implementation.** `M4SourceContract` is what a future non-MOCK statement source must declare; `CheckM4SourceContract` is the pure checklist a real source's own tests must call and pass with **no `Fail` finding**. Absence is never "false": every declaration is explicit (decision 5: an adapter must not pretend a capability it does not have).
-
-| Item | The source must declare | Fails when | Protects D-7 |
-|---|---|---|---|
-| C1 identity | provider id, label, `Synthetic() == false` | missing, or a synthetic/MOCK source | 3, 4, 9 |
-| C2 merchant-reference declaration (S-3) | `payout_lines_carry_merchant_reference` tri-state | undeclared, or `false` (no line can be attributed) | 2, 9 |
-| C3 status vocabulary | every provider status -> event (`paid_out`, `pending`, `rejected`, `returned`, `reversed`, `chargeback`) -> platform class | an event unmapped (a return, reversal or chargeback of a payout must exist), an event mapped to the wrong class, a duplicate or unknown entry | 8 |
-| C4 unknown status | `reject_import` or `treat_as_pending` | anything else, notably "treat as succeeded" | 8 |
-| C5 channel (S-3) | authenticated to the PSP; endpoint and credentials from governed configuration; PSP content signature verified when the PSP offers one | any of the three missing | 3, 4, 9 |
-| C6 destination echo (decision 5) | `none`, `fingerprint` or `full_instrument`, and whether it is **on the statement line** | undeclared or unknown is `Fail`; `none` or "not on statement lines" is a `Limit`: M4 paid not admissible | 7 |
-| C7 final status | terminal-paid and terminal-declined statuses (mapped to succeeded / declined), whether a paid payout can be reversed, the reversal window, and that a late reversal appears on the statement | a non-terminal success, overlapping sets, a reversible payout with no window or not reported on the statement | 8 |
-| C8 amount and asset | integer minor units, exponent from the Asset registry, asset code on every line, amount is the payout principal (not net of fees or FX) | any false | 5, 6 |
-| C9 provider reference | PSP-issued, stable per payout, **never an echo of the merchant reference** | otherwise | 2, 3 |
-| C10 completeness (T10 residual) | coverage window vouched for by the PSP; pagination completeness proven | otherwise | 9 |
-| C11 time semantics (G-TIME) | `occurred_at` is the provider event time; the lower bound is the first send; an optional lower-bound-only clock-skew tolerance in `[0, 5 min]` (default and MOCK: 0; ledger-finance reviews each non-zero value per source) | otherwise | 9 |
-
-**A passing checklist is necessary but not sufficient.** C5 and C10 (and C2, C9, C11) are self-declared by the adapter; only the vendor-specific conformance tests, the `security` S-3 review of the real channel and the T10 seal review establish them. C1 does not trust the `Synthetic()` declaration alone: a contract object carrying the `providerkind.Synthetic` marker (`payoutinstrument.IsSyntheticComponent`) is refused as well (security LOW-1, `TestD7_SourceContract_SyntheticMarkerDisqualifiesDespiteTheDeclaration`).
-
-`TestD7_SourceContract_EachItemIsEffective` removes one declaration at a time from a fully declared **test fixture** (not a provider) and shows exactly that item's finding appears with the stated severity and disqualifies the source. Even a fully conformant declaration reports `PaidAdmissible == false` while `m4StatementLineCarriesDestinationEcho` is false; `TestD7_StatementLineHasNoDestinationField_PinsTheConstant` ties that constant to the line struct so it flips only together with the SQL clause. `TestD7_NoProductionTypeImplementsTheSourceContract` shows the MOCK source is not an `M4SourceContract`.
-
-### 25.7 Non-MOCK M4 stays `BLOCKED`
-
-No part of this change lifts any launch condition. Non-MOCK M4, paid or not paid, remains `BLOCKED` until **all** of the following hold, and the Go gate `m4EligNonMock` refuses regardless until a reviewed change removes it:
-
-1. a real source exists and passes the 25.6 checklist (C1-C10) with no `Fail`, with a conformance test per adapter against its real wire format (`PROVIDER DEPENDENT`);
-2. S-3 is met for that source: authenticated channel, PSP content signature, endpoint and credentials from governed configuration (`PROVIDER DEPENDENT`, §10.3);
-3. the T10 launch flag is cleared: the import seal passes `security` implementation review with mutation evidence (§10.3), plus the T10 residuals (T6 in-process key, authenticity/completeness, availability);
-4. for **M4 paid**, a positive destination clause (G-DEST): a destination-echo field on the statement line, a migration, and the comparison in `payout_m4_evidence`; until then `PaidAdmissible` is false by construction;
-5. LF C-3 (§20.4): the real provider's return/reversal/chargeback statuses reach `contradiction_after_m4_paid` or a dedicated reason, with a conformance test per adapter, and the governed WITHDRAWAL-REVERSAL-1 path exists; HD-R15-1 and HD-R15-5 (§10.3);
-6. **G-SUCCESS-PARK is fixed** (ledger-finance C-1, `gov-r32-integrity`, migration 0127): a durable success-reported record in every park writer and path, and the not-paid verdict `contradictory` for ALL M4 not-paid reasons. This work does not introduce the exposure and does not fix it;
-7. **the SQL counterparts of G-REF, G-TIME and G-NONMOCK exist** (ledger-finance C-2): today they are enforced in Go only and are **not** in the database recount at `pending -> executing`. G-REF and G-TIME are being folded into 0127 (same first-send bound); G-NONMOCK's SQL form is decided with the real-source work. Until then a session able to drive `executing` directly bypasses them (T5).
-
-**Proposals for the owner and `security` (NOT decided, NOT implemented; launch-condition proposals).**
-
-- *Binding the human confirmation to R (`evidence_ref_hash`).* `ledger-finance` proposes requiring `evidence_ref_hash` to equal a platform-computed digest over `(provider_id, R, amount, asset, merchant_reference)`, shown to the approvers. `security` prefers **blind entry**: the requester and each approver independently type R (no prefill), the server compares each entry to the verdict's R, and `evidence_ref_hash` is the hash of the portal confirmation artefact; for **not paid**, the same blind entry of the portal's declined status and reference. The two views differ on whether the platform shows the value or the humans re-derive it from the portal; the owner and `security` choose.
-- *Proposed design for the positive destination clause (G-DEST), for a future migration.* The statement line gains a `destination_echo` (key id plus fingerprint) covered by `lines_digest`; every line of the single succeeded group must carry a well-formed echo equal to the attempt snapshot's; any differing, malformed or unexpected echo makes the verdict `contradictory`, a missing echo makes it `insufficient`; a legacy unbound attempt is never paid-admissible; the `-> executing` re-check pins the echo verdict.
-
-### 25.8 Evidence
-
-- **Conformance suite** (`internal/payments/m4_d7_conformance_integration_test.go`, real PostgreSQL, runtime-shaped non-superuser role, `newM4World`/`newM4WorldOn` fixtures, platform `acting` requester/approver as the existing M4 world): `TestD7_P1_...` to `TestD7_P9_...`, `TestD7_Meta_...` (2), `TestD7_Ambiguity_ParksWithoutAutomaticPayOrResolve`, `TestD7_NonMockM4IsBlocked_...`, `TestD7_EligibilityRefusal_ReasonsAtTheExecutionPoint`. Each property test proves a wrong value in that property alone leaves the verdict `insufficient`/`contradictory` (never `paid`/`not_paid`), refuses both kinds at the request (`MR062`, token `force_resolve_evidence_insufficient`) with the withdrawal still `submitted`, no resolution row, no posting and the ledger invariants intact, and refuses at execution (`refused_at_execution` / `MR061` / `MR010`) when the change lands after the request. Ambiguity (two plausible attempts, duplicate lines of different timestamps, one reference naming two merchants, succeeded and declined together, partial coverage before and after) parks: the sweeper and a reconciliation run change nothing, and the reconciliation run raises the existing `pay_captured_unposted` finding.
-- **Unit and static** (no database): `m4_source_contract_test.go`, `m4_d7_static_test.go`.
-- The existing M4 suites were re-run unchanged except for one fixture (`TestM4Recon_Paid_LineOnRNamingAnotherMerchant_Raises` dated its paid line a minute before the attempt existed; G-TIME refuses that, so the fixture is now dated now: a deliberate pin flip) and a provider override on the import helper.
-- **Mutation evidence:** `docs/plans/prh2-hardening-round/prh2-r34-d7-mutation-kill.txt` (66 counted mutants over the migration, the Go verification layer and the checklist: 55 killed, 11 survivors, every one classified: S13 equivalent, S27 equivalent, S34/S35 unreachable, S32 unreachable, G10/G12 layered and killed with their database twin, S21-S24 redundant pairs killed as the doubles D01-D03. Review of run 1's survivors added the same-import pending/reversed, NULL-merchant-in-a-declaring-import and window-opens-after-creation tests).
-- Local evidence only: no real provider, no AWS, no non-MOCK source.
-
-### 25.9 Residuals
-
-- G-DEST (structural), the G-REF/G-TIME/G-NONMOCK SQL equivalents, and the `evidence_ref_hash` binding question (25.5).
-- Defence in depth that no test can separate from its sibling is reported as a survivor rather than hidden: the explicit `tenant_id` predicates inside `payout_m4_evidence` (row-level security enforces the same boundary, S27), and the request-time and `-> executing` R-4 comparisons of the withdrawal's amount and asset against the attempt's (S34/S35; `withdrawal_requests` amount and asset are immutable after insert, migration 0026, so no reachable state separates them), the `-> executing` scope and reference-pin re-check (S32; after a request the attempt cannot leave the unbound scope or gain a reference, and Go is the first check), the seal-presence conjunct of the not-paid selection (S13; an unsealed import is written without the S-3 declaration, so condition (iv) already refuses it) and four paid-attribution clauses that mask one another (S21-S24: they are killed in pairs, D01-D03). The Go withdrawal-state and re-evaluation checks at execution (G10, G12) are killed only together with their database twin, by design (Go is the first check, the database the second).
-- T5 (ADR 0110): a session able to run arbitrary SQL as the acting role could drive `pending -> executing` directly and skip the Go-only checks of 25.3. The same actor can already plant ordinary non-governed postings (§17.5); MR041 at commit still refuses an executed M4 whose link does not carry the pinned keys and amounts.
-- The fixture contract in `m4_source_contract_test.go` models no vendor; a real source's checklist test is `PROVIDER DEPENDENT`.
 
 ## 24. Mandatory destination-echo declaration (owner decision 5 of ADR 0095 48; B13B-15 residual) (appendix, `integrations`, 2026-10-09; branch `gov-r33-echo`, base `dad803d`; the design above is not rewritten)
 
@@ -2678,3 +2820,112 @@ non-Synthetic adapters with an unset declaration, `VerifyStartup` (unset non-Syn
   occurrence). `wantParked` now also asserts the ledger transaction count is unchanged from the approval. Hardening tests:
   `echo_hardening_integration_test.go` (drift in three directions with and without an echo, unknown provider, capped audit rows, the
   reconciliation hint through a real reconciliation run) and unit tests for `echoState` and the orchestrator freeze.
+
+## 25. D-7 conformance: the M4 evidence standard as a traceable model (appendix, `qa`, 2026-10-09; branch `gov-r34-d7`, base `dad803d`; the design above is not rewritten)
+
+**What this section is.** Owner decision 6 (D-7, ADR 0095 §48) APPROVED the M4 evidence standard: before any non-MOCK M4 payout resolution or payment the platform must hold positive evidence sufficient to establish, as applicable, (1) the correct withdrawal, (2) the correct payout attempt, (3) the correct provider transaction/reference, (4) the correct player/tenant context, (5) the correct asset, (6) the correct amount, (7) the correct destination/instrument, (8) the final provider status, and (9) the causal relationship between the provider evidence and the attempt; **no single untrusted provider field may be sufficient to establish all of this**; ambiguous evidence parks, alerts and is investigated, and is never guessed, paid or resolved automatically. This section supersedes the "D-7 (OPEN, owner)" bullet of §17.4: the standard is decided. It does **not** enable non-MOCK M4 and connects no provider. The matrix below was built by reading migration 0125, `manual_resolution*.go`, `payout_post_m4.go` and `internal/reconciliation/payment_statement_{m4,k3}.go`, not from the ADR text above; line numbers refer to `migrations/0125_payout_unbound_resolution_m4.up.sql` at the base.
+
+### 25.1 Deliverable status
+
+| Item | Status |
+|---|---|
+| D-7 matrix (25.2-25.3) and the conformance suite (25.8) | `IMPLEMENTED` against MOCK (documentation and tests) |
+| Go-side, refusal-only eligibility check (25.4: three checks the SQL verdict does not carry) | `IMPLEMENTED` (no migration; migration 0125 and the SQL functions are untouched) |
+| SQL equivalents of those three checks, and a positive destination clause | `NOT IMPLEMENTED` (need a migration; reported, 25.4; the `0127` owner or a later migration) |
+| Adapter contract and conformance checklist (25.6) | `IMPLEMENTED` as an interface plus a pure checker; **every provider-specific implementation is `PROVIDER DEPENDENT` and `NOT IMPLEMENTED`** |
+| Non-MOCK M4 (paid or not paid) | **`BLOCKED`** (25.7) |
+
+### 25.2 The matrix, short form
+
+| # | D-7 property | Enforced by (exact) | Re-checked when the final approval executes | Proved by (`internal/payments`) | Verdict |
+|---|---|---|---|---|---|
+| 1 | correct withdrawal | resolution's `withdrawal_request_id` is DB-forced from the attempt (guard `:634`); withdrawal `submitted` (`:694`); amount/asset equal (`:697`) | DB `-> executing` (`:893-899`); Go `m4ExecutionRefusal`; MR041 (`:976`, ledger `correlation_id` = withdrawal; entries on the withdrawal's wallet `:1015-1017`) | `TestD7_P1_WrongWithdrawal` | enforced |
+| 2 | correct payout attempt | M4 scope `payment_m4_in_scope` (`:203`, request `:691`); evidence is read only by the attempt's platform-issued merchant reference / bound reference / typed Y (`:278-312`); one reference naming two merchant references is `contradictory` (H-2 `:353-358`); the requested line must be the deterministic line (`:753`) | DB `:889-905`; Go scope + reference pin + re-evaluation (`m4EvidenceRefusal`); MR041 pins state/reason/reference (`:984-996`) | `TestD7_P2_WrongAttempt` | enforced |
+| 3 | correct provider transaction/reference | exactly one succeeded group (`:332`); R must not carry the reserved prefix, be attributable (`payment_y_attributable`), have a tombstone, be held by another attempt as reference or typed Y, differ from the attempt's own Y, equal a `withdrawal_requests.provider_reference`, key a ledger row or the `provider:R` idempotency key (`:367-385`); the importer's CHECK refuses a reserved-prefix line; **Go: R is not any platform-issued merchant reference (25.4 G-REF)**; R is pinned into the resolution, the ledger key `provider:R` and MR041 (`:1004-1006`) | DB `:901-905`; Go re-evaluation; MR041 | `TestD7_P3_WrongProviderReference` | enforced; **residual: for an unbound attempt R has no platform-side fact to be compared with (25.5)** |
+| 4 | correct player / tenant | `tenant_id = p_tenant` on every read plus FORCE RLS; `payment_m4_scope_visible` (`:218`, error MR060, never a verdict); tenant is the server-side target (`NewResolutionTarget`); platform actor needs an in-force grant for THAT tenant; entries must sit on the withdrawal's `wallet_id` (MR041 `:1016`) | same predicates in `payout_m4_evidence` at `-> executing`; MR041 | `TestD7_P4_WrongPlayerOrTenant` | enforced (the `tenant_id` predicates inside the function are defence in depth to RLS: mutant S27 survives, 25.9) |
+| 5 | correct asset | paid: I-1 `:363`; not paid: `:448`; R-4 DB-forced asset (guard `:597`, `:697`) | DB `:897-899`; Go `m4ExecutionRefusal`; MR041 `e.asset_code = r.asset_code` | `TestD7_P5_P6_WrongAssetOrAmount` | enforced |
+| 6 | correct amount | as 5 (`NUMERIC`, equality in minor units) | as 5 | `TestD7_P5_P6_WrongAssetOrAmount` | enforced |
+| 7 | correct destination / instrument | **negative only:** `destination_mismatch` is outside the paid scope (`:210`, guard `:691`, MR012; Go `M4ResolvableDispute`); the per-attempt destination snapshot is write-once (0123). **No positive evidence: a statement line has no destination field.** For non-MOCK sources the Go gate (G-NONMOCK) refuses | DB `:889`; Go scope | `TestD7_P7_WrongDestination`, `TestD7_NonMockM4IsBlocked_*` | **PARTIAL (25.4 G-DEST)** |
+| 8 | final provider status | paid needs one succeeded group and no declined/reversed/pending line on the merchant reference, bound reference, R or any Y in any import, MOCK and unsealed included (`:344-351`); not paid needs a declined line and no succeeded/pending/reversed line on the same set plus every matched PSP reference D (`:414-422`); closed status vocabulary (CHECK); R-1 and the post-M4 cells catch later reversals | DB `:901-905`; Go re-evaluation | `TestD7_P8_NonFinalProviderStatus` | enforced for **M4 paid** and for the platform vocabulary; **PARTIAL for M4 NOT PAID** (G-SUCCESS-PARK, 25.4: several parks are created on a provider success that is not stored durably, so a later declined line could release the hold); the provider-to-vocabulary mapping is `PROVIDER DEPENDENT` (checklist C3, C7) |
+| 9 | causal relationship | attribution by the merchant reference only; not-paid needs the source's `payout_lines_carry_merchant_reference` (`:454`), no NULL-merchant payout line in a declaring import (`:426-435`), `occurred_at >= last_sent_at` (`:449`), coverage over `[created_at, last_sent_at + 24 h]` (`:455-456`); sealed imports (`:401`, `:452`) with the HMAC verified in Go at request and execution (`verifyImportSeals`); platform_acting approver floor (`:847`); four-eyes portal confirmation; **Go: the paid line lies inside `[attempt's first send, its import's coverage_end]` (25.4 G-TIME)** | DB `:901`; Go seals + re-evaluation + eligibility; R-1 after execution | `TestD7_P9_CausalLink`, the meta tests | enforced; **authenticity of the statement content is S-3/T10, `PROVIDER DEPENDENT`** |
+
+### 25.3 What each enforcement is, and where the Go layer is the only one
+
+- **Both layers.** Properties 1, 2, 3 (except G-REF), 4, 5, 6, 8 and 9 (except G-TIME and the seal) are enforced in the database at the request (`payment_manual_resolutions_guard`, INSERT) **and** again at `pending -> executing` (the same guard, `:881-905`), with Go as the first check at execution (`m4ExecutionRefusal`, `m4EvidenceRefusal`), and MR041 as the commit-time check of what was posted.
+- **Go only, by necessity.** The import seal HMAC (the key never enters the database). The database sees only that a seal is present.
+- **Go only, found by this work (25.4).** Three checks: non-MOCK evidence, "R is not a platform-issued merchant reference", "the paid line lies inside the attempt's window". They run at the request (`requestInTx`) and at the execution (`m4EvidenceRefusal`), after the seals and before anything can post; a static pin (`TestD7_EligibilityRefusalRunsOnEveryM4Path_AfterTheSeals`) fixes the call order. The database's `-> executing` re-check does not carry them (a SQL gap, reported).
+
+### 25.4 Gaps found (each with the test that exhibits it)
+
+| Id | Gap | Exhibited by | Disposition |
+|---|---|---|---|
+| **G-REF** | `payout_m4_evidence` returned `paid` for a succeeded line whose provider reference **equals the platform's own merchant reference** (or another attempt's). One provider field (the merchant-reference echo) then supplied both the causal link (property 9) and the "provider transaction reference" (property 3) and became the ledger key `provider:R`. | `TestD7_P3_WrongProviderReference/R_equals_the_attempt's_OWN_merchant_reference...` and `.../R_equals_ANOTHER_attempt's_merchant_reference...` assert the **database** still reads `paid` (a pin of the SQL gap that flips when the SQL gains the clause) and that the request is now refused in Go with `m4EligPlatformRef` | **Fixed in Go** (refusal-only, no migration). Smallest SQL fix: in the attribution block (`:367`) add `OR EXISTS (SELECT 1 FROM payment_attempts a WHERE a.tenant_id = p_tenant AND a.merchant_reference = v_g.ref)` |
+| **G-TIME** | The paid branch reads **no timestamp**: a succeeded line dated before the attempt existed, or after the coverage its own import vouches for, read `paid`. A payout that predates the attempt cannot be its payout. (The not-paid branch already requires `occurred_at >= last_sent_at`.) | `TestD7_P9_CausalLink/..._BEFORE_the_attempt_existed...`, `.../..._AFTER_the_coverage...` (database `paid`, Go refusal), first-send boundary (one microsecond before is refused, the instant itself executes) | **Fixed in Go** (`occurred_at` in `[first_submitted_at (falling back to last_sent_at), import.coverage_end]`; zero tolerance, fail closed: park and investigate; an attempt with no recorded send has no eligible line). A line dated before `last_sent_at` but after the first send is **not** refused, because an earlier send of a resent attempt may be the one that paid (security LOW-2). The lower bound was `created_at` in the first revision. A per-source skew tolerance, applied to the lower bound only, is a checklist declaration (C11, bounded, default and MOCK zero, ledger-finance reviewed per source). Smallest SQL fix, carried by `gov-r32-integrity` (0127) with the same bound: add the two comparisons to the `v_line` selection (`:393-407`) |
+| **G-SUCCESS-PARK** (ledger-finance C-1; **not introduced by this work, not fixed by it**) | M4 **not paid** relies on a declined statement line and on the absence of a succeeded/pending/reversed one. But several parks are created **on a provider SUCCESS that the platform does not store durably**: `provider_reference_conflict` (`payout_refbind.go` ~108-150), `destination_mismatch` and `destination_integrity_failure` (`payout_destination.go`). The platform then holds no record that the provider ever reported success, so a later declined line can satisfy the not-paid verdict and release a hold on money the provider may have paid. Property 8 is therefore only PARTIAL for not paid. | Documenting subtest `TestD7_P9_CausalLink/DOCUMENTING...success-triggered_parks` (logs the exposed reasons; deliberately asserts nothing r32 would change) | **Launch condition**, carried by `gov-r32-integrity` (migration 0127): a durable success-reported record in every park writer and path, and the not-paid verdict `contradictory` for ALL M4 not-paid reasons. Recorded in 25.7 |
+| **G-NONMOCK** | Nothing technical stopped non-MOCK M4 other than the process registry and the startup gate: a registered real source with sealed imports would have been accepted by the database and by Go. | `TestD7_NonMockM4IsBlocked_PositiveDatabaseVerdictOnARealImportIsRefused`, `TestD7_EligibilityRefusal_ReasonsAtTheExecutionPoint` | **Fixed in Go**: every M4 whose evidence set contains a non-MOCK import is refused (`m4EligNonMock`, unconditionally; lifting it is a reviewed code change, 25.7) |
+| **G-DEST** | The statement-line model (`statement.PaymentStatementLine`) has **no destination or instrument field**, so no statement line can positively evidence property 7. M4 paid on a bound payout is today justified by the platform's write-once destination snapshot and the absence of a `destination_mismatch` park, never by provider evidence about the destination. Acceptable for MOCK only. | `TestD7_P7_WrongDestination/every_bound_payout_carries..._(the_documented_gap)`; `TestD7_StatementLineHasNoDestinationField_PinsTheConstant` | **Structural, `PROVIDER DEPENDENT`.** Closed for non-MOCK by G-NONMOCK. A positive clause needs: a destination-echo field on the line, a migration, and a comparison in `payout_m4_evidence` against the snapshot fingerprint (the same decision-5 echo semantics). It is **not** a refusal-direction Go change and is not attempted. The `0127` branch changes `payment_m4_in_scope` / `payout_m4_evidence` for `destination_integrity_failure`; this work did not touch them |
+
+Observations that are **not** gaps this change closes (recorded so the next reader does not rediscover them): (a) `payment_statement_lines.provider_id` is not cross-checked against the import's `provider_id` by the database (the FK is `(import_id, tenant_id)`); it is held by `validatePaymentLine` in the fetch path (INV-IO-14), by the evidence function filtering on the line's own `provider_id`, and by the seal digest that binds each line's provider id (L-1); (b) `evidence_ref_hash` is an opaque 64-hex attestation of the operator's portal check; nothing compares it to R (25.5).
+
+### 25.5 No single untrusted provider field is sufficient
+
+The provider controls, per line: `provider_reference` (R), `merchant_reference`, `amount`, `asset_code`, `status`, `occurred_at`, `provider_id`, and per import: the coverage window, the `payout_lines_carry_merchant_reference` declaration and `is_mock`; the platform controls the seal. Two tests state the property from both ends:
+
+1. **Only this field is right** (`TestD7_Meta_NoSingleProviderFieldIsSufficient_OnlyThisFieldIsRight`, 13 rows): a statement in which exactly one field (merchant reference; amount and asset; status; R; `occurred_at`; the seal; the coverage and declaration) is correct and everything else is wrong or absent never yields a positive verdict for either kind, and both kinds are refused at the request. Two "everything right except one" rows (unsealed import; undeclared source) show the seal and the declaration are each necessary.
+2. **One field corrupted from a perfect baseline** (`TestD7_Meta_NoSingleProviderFieldIsSufficient_OneFieldCorrupted`, 16 rows plus the `provider_id` case): R to a reserved value (the importer refuses to store it), R to the merchant reference (database `paid`, Go refuses), merchant reference emptied/foreign/another park's, amount, asset, status (pending/reversed/declined), `occurred_at` (before the attempt, after coverage: Go refuses), seal absent, seal made with a key the process does not hold (database `paid`, Go refuses), a non-MOCK source (Go refuses), `provider_id` of another provider (the fetch path refuses the whole statement). **One row is positive by design:** R replaced by another fresh PSP-looking reference. R is the **output** of the verdict, not a checked input: for an unbound attempt the platform has issued no PSP reference, so there is nothing to compare it with, and the verdict pins whatever single, exclusive R the sealed line carries.
+
+**The honest statement of the residual.** Sufficiency here is a conjunction of corroborations that the platform can check independently: merchant reference against `payment_attempts.merchant_reference` (platform-issued, unique per tenant), amount and asset against the attempt, status against the closed vocabulary and the absence of contradicting lines, `occurred_at` against the attempt's window, R against the exclusivity set, the seal against the platform's key, and a **human** four-eyes confirmation against the provider's portal. A source that controls **every** field of a line and the channel it travels on (it knows the merchant reference, amount and asset: they were sent to it) could still fabricate a paid line. Software on this side cannot close that; its defences are the authenticated channel and the PSP content signature (S-3), the seal (T10), and the operator's portal confirmation. All three are launch conditions for any non-MOCK M4 (25.7). Whether and how the portal confirmation is machine-bound to R is an open owner/`security` question with two proposals, recorded in 25.7.
+
+### 25.6 Adapter contract for the provider-specific part (`internal/payments/m4_source_contract.go`)
+
+`PROVIDER DEPENDENT`, **gated, no implementation.** `M4SourceContract` is what a future non-MOCK statement source must declare; `CheckM4SourceContract` is the pure checklist a real source's own tests must call and pass with **no `Fail` finding**. Absence is never "false": every declaration is explicit (decision 5: an adapter must not pretend a capability it does not have).
+
+| Item | The source must declare | Fails when | Protects D-7 |
+|---|---|---|---|
+| C1 identity | provider id, label, `Synthetic() == false` | missing, or a synthetic/MOCK source | 3, 4, 9 |
+| C2 merchant-reference declaration (S-3) | `payout_lines_carry_merchant_reference` tri-state | undeclared, or `false` (no line can be attributed) | 2, 9 |
+| C3 status vocabulary | every provider status -> event (`paid_out`, `pending`, `rejected`, `returned`, `reversed`, `chargeback`) -> platform class | an event unmapped (a return, reversal or chargeback of a payout must exist), an event mapped to the wrong class, a duplicate or unknown entry | 8 |
+| C4 unknown status | `reject_import` or `treat_as_pending` | anything else, notably "treat as succeeded" | 8 |
+| C5 channel (S-3) | authenticated to the PSP; endpoint and credentials from governed configuration; PSP content signature verified when the PSP offers one | any of the three missing | 3, 4, 9 |
+| C6 destination echo (decision 5) | `none`, `fingerprint` or `full_instrument`, and whether it is **on the statement line** | undeclared or unknown is `Fail`; `none` or "not on statement lines" is a `Limit`: M4 paid not admissible | 7 |
+| C7 final status | terminal-paid and terminal-declined statuses (mapped to succeeded / declined), whether a paid payout can be reversed, the reversal window, and that a late reversal appears on the statement | a non-terminal success, overlapping sets, a reversible payout with no window or not reported on the statement | 8 |
+| C8 amount and asset | integer minor units, exponent from the Asset registry, asset code on every line, amount is the payout principal (not net of fees or FX) | any false | 5, 6 |
+| C9 provider reference | PSP-issued, stable per payout, **never an echo of the merchant reference** | otherwise | 2, 3 |
+| C10 completeness (T10 residual) | coverage window vouched for by the PSP; pagination completeness proven | otherwise | 9 |
+| C11 time semantics (G-TIME) | `occurred_at` is the provider event time; the lower bound is the first send; an optional lower-bound-only clock-skew tolerance in `[0, 5 min]` (default and MOCK: 0; ledger-finance reviews each non-zero value per source) | otherwise | 9 |
+
+**A passing checklist is necessary but not sufficient.** C5 and C10 (and C2, C9, C11) are self-declared by the adapter; only the vendor-specific conformance tests, the `security` S-3 review of the real channel and the T10 seal review establish them. C1 does not trust the `Synthetic()` declaration alone: a contract object carrying the `providerkind.Synthetic` marker (`payoutinstrument.IsSyntheticComponent`) is refused as well (security LOW-1, `TestD7_SourceContract_SyntheticMarkerDisqualifiesDespiteTheDeclaration`).
+
+`TestD7_SourceContract_EachItemIsEffective` removes one declaration at a time from a fully declared **test fixture** (not a provider) and shows exactly that item's finding appears with the stated severity and disqualifies the source. Even a fully conformant declaration reports `PaidAdmissible == false` while `m4StatementLineCarriesDestinationEcho` is false; `TestD7_StatementLineHasNoDestinationField_PinsTheConstant` ties that constant to the line struct so it flips only together with the SQL clause. `TestD7_NoProductionTypeImplementsTheSourceContract` shows the MOCK source is not an `M4SourceContract`.
+
+### 25.7 Non-MOCK M4 stays `BLOCKED`
+
+No part of this change lifts any launch condition. Non-MOCK M4, paid or not paid, remains `BLOCKED` until **all** of the following hold, and the Go gate `m4EligNonMock` refuses regardless until a reviewed change removes it:
+
+1. a real source exists and passes the 25.6 checklist (C1-C10) with no `Fail`, with a conformance test per adapter against its real wire format (`PROVIDER DEPENDENT`);
+2. S-3 is met for that source: authenticated channel, PSP content signature, endpoint and credentials from governed configuration (`PROVIDER DEPENDENT`, §10.3);
+3. the T10 launch flag is cleared: the import seal passes `security` implementation review with mutation evidence (§10.3), plus the T10 residuals (T6 in-process key, authenticity/completeness, availability);
+4. for **M4 paid**, a positive destination clause (G-DEST): a destination-echo field on the statement line, a migration, and the comparison in `payout_m4_evidence`; until then `PaidAdmissible` is false by construction;
+5. LF C-3 (§20.4): the real provider's return/reversal/chargeback statuses reach `contradiction_after_m4_paid` or a dedicated reason, with a conformance test per adapter, and the governed WITHDRAWAL-REVERSAL-1 path exists; HD-R15-1 and HD-R15-5 (§10.3);
+6. **G-SUCCESS-PARK is fixed** (ledger-finance C-1, `gov-r32-integrity`, migration 0127): a durable success-reported record in every park writer and path, and the not-paid verdict `contradictory` for ALL M4 not-paid reasons. This work does not introduce the exposure and does not fix it;
+7. **the SQL counterparts of G-REF, G-TIME and G-NONMOCK exist** (ledger-finance C-2): today they are enforced in Go only and are **not** in the database recount at `pending -> executing`. G-REF and G-TIME are being folded into 0127 (same first-send bound); G-NONMOCK's SQL form is decided with the real-source work. Until then a session able to drive `executing` directly bypasses them (T5).
+
+**Proposals for the owner and `security` (NOT decided, NOT implemented; launch-condition proposals).**
+
+- *Binding the human confirmation to R (`evidence_ref_hash`).* `ledger-finance` proposes requiring `evidence_ref_hash` to equal a platform-computed digest over `(provider_id, R, amount, asset, merchant_reference)`, shown to the approvers. `security` prefers **blind entry**: the requester and each approver independently type R (no prefill), the server compares each entry to the verdict's R, and `evidence_ref_hash` is the hash of the portal confirmation artefact; for **not paid**, the same blind entry of the portal's declined status and reference. The two views differ on whether the platform shows the value or the humans re-derive it from the portal; the owner and `security` choose.
+- *Proposed design for the positive destination clause (G-DEST), for a future migration.* The statement line gains a `destination_echo` (key id plus fingerprint) covered by `lines_digest`; every line of the single succeeded group must carry a well-formed echo equal to the attempt snapshot's; any differing, malformed or unexpected echo makes the verdict `contradictory`, a missing echo makes it `insufficient`; a legacy unbound attempt is never paid-admissible; the `-> executing` re-check pins the echo verdict.
+
+### 25.8 Evidence
+
+- **Conformance suite** (`internal/payments/m4_d7_conformance_integration_test.go`, real PostgreSQL, runtime-shaped non-superuser role, `newM4World`/`newM4WorldOn` fixtures, platform `acting` requester/approver as the existing M4 world): `TestD7_P1_...` to `TestD7_P9_...`, `TestD7_Meta_...` (2), `TestD7_Ambiguity_ParksWithoutAutomaticPayOrResolve`, `TestD7_NonMockM4IsBlocked_...`, `TestD7_EligibilityRefusal_ReasonsAtTheExecutionPoint`. Each property test proves a wrong value in that property alone leaves the verdict `insufficient`/`contradictory` (never `paid`/`not_paid`), refuses both kinds at the request (`MR062`, token `force_resolve_evidence_insufficient`) with the withdrawal still `submitted`, no resolution row, no posting and the ledger invariants intact, and refuses at execution (`refused_at_execution` / `MR061` / `MR010`) when the change lands after the request. Ambiguity (two plausible attempts, duplicate lines of different timestamps, one reference naming two merchants, succeeded and declined together, partial coverage before and after) parks: the sweeper and a reconciliation run change nothing, and the reconciliation run raises the existing `pay_captured_unposted` finding.
+- **Unit and static** (no database): `m4_source_contract_test.go`, `m4_d7_static_test.go`.
+- The existing M4 suites were re-run unchanged except for one fixture (`TestM4Recon_Paid_LineOnRNamingAnotherMerchant_Raises` dated its paid line a minute before the attempt existed; G-TIME refuses that, so the fixture is now dated now: a deliberate pin flip) and a provider override on the import helper.
+- **Mutation evidence:** `docs/plans/prh2-hardening-round/prh2-r34-d7-mutation-kill.txt` (66 counted mutants over the migration, the Go verification layer and the checklist: 55 killed, 11 survivors, every one classified: S13 equivalent, S27 equivalent, S34/S35 unreachable, S32 unreachable, G10/G12 layered and killed with their database twin, S21-S24 redundant pairs killed as the doubles D01-D03. Review of run 1's survivors added the same-import pending/reversed, NULL-merchant-in-a-declaring-import and window-opens-after-creation tests).
+- Local evidence only: no real provider, no AWS, no non-MOCK source.
+
+### 25.9 Residuals
+
+- G-DEST (structural), the G-REF/G-TIME/G-NONMOCK SQL equivalents, and the `evidence_ref_hash` binding question (25.5).
+- Defence in depth that no test can separate from its sibling is reported as a survivor rather than hidden: the explicit `tenant_id` predicates inside `payout_m4_evidence` (row-level security enforces the same boundary, S27), and the request-time and `-> executing` R-4 comparisons of the withdrawal's amount and asset against the attempt's (S34/S35; `withdrawal_requests` amount and asset are immutable after insert, migration 0026, so no reachable state separates them), the `-> executing` scope and reference-pin re-check (S32; after a request the attempt cannot leave the unbound scope or gain a reference, and Go is the first check), the seal-presence conjunct of the not-paid selection (S13; an unsealed import is written without the S-3 declaration, so condition (iv) already refuses it) and four paid-attribution clauses that mask one another (S21-S24: they are killed in pairs, D01-D03). The Go withdrawal-state and re-evaluation checks at execution (G10, G12) are killed only together with their database twin, by design (Go is the first check, the database the second).
+- T5 (ADR 0110): a session able to run arbitrary SQL as the acting role could drive `pending -> executing` directly and skip the Go-only checks of 25.3. The same actor can already plant ordinary non-governed postings (§17.5); MR041 at commit still refuses an executed M4 whose link does not carry the pinned keys and amounts.
+- The fixture contract in `m4_source_contract_test.go` models no vendor; a real source's checklist test is `PROVIDER DEPENDENT`.

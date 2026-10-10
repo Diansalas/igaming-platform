@@ -155,12 +155,18 @@ func TestR1_M4Predicates_Pure(t *testing.T) {
 // LIVE: this pin flipped deliberately at the B13-B merge. Pin 1 - both reasons
 // are classified (never reasonUnclassified). Pin 2 - selection by reason, never
 // the generic payout text or the M4-scope text; integrity failure gets its own
-// wording with no M4 route (RR-2). Pin 3 - an executed M4 not-paid keeps
-// precedence. Pin 4 - a REFERENCED destination park raises a finding.
+// wording (RR-2). GOV-R32 (owner decision 4, migration 0127) flipped the
+// integrity wording deliberately: it now names M4 NOT-PAID on positive decline
+// evidence and still refuses M4 PAID and any completion. Pin 3 - an executed M4
+// not-paid keeps precedence. Pin 4 - a REFERENCED destination park raises a finding.
 func TestC3_DestinationHint_LiveAfterClassification_SelectedByReason(t *testing.T) {
 	const want = "payout reported to a destination other than the bound one: no completion against the player's hold; PSP recall/return or off-platform recovery; M4 not-paid only on positive decline evidence; never allocation"
 	if destinationPayoutCapturedUnpostedResolutionHint != want {
 		t.Fatalf("destination hint text drifted: %q", destinationPayoutCapturedUnpostedResolutionHint)
+	}
+	const wantIntegrity = "payout parked on a destination integrity failure: no completion against the player's hold and no M4 paid; M4 not-paid only on positive decline evidence; PSP recall/return or off-platform recovery; never allocation"
+	if destinationIntegrityPayoutCapturedUnpostedResolutionHint != wantIntegrity {
+		t.Fatalf("integrity hint text drifted: %q", destinationIntegrityPayoutCapturedUnpostedResolutionHint)
 	}
 	for _, r := range []string{"destination_mismatch", "destination_integrity_failure"} {
 		if c, ok := payoutDisputeReasonClasses[r]; !ok || c != reasonBoundIfReferenced {
@@ -169,8 +175,16 @@ func TestC3_DestinationHint_LiveAfterClassification_SelectedByReason(t *testing.
 		wantHint := want
 		if r == "destination_integrity_failure" {
 			wantHint = destinationIntegrityPayoutCapturedUnpostedResolutionHint
-			if strings.Contains(wantHint, "M4 not-paid only") {
-				t.Fatalf("integrity-failure hint must not advertise an M4 route: %q", wantHint)
+			// GOV-R32: the not-paid route is named, the paid route and any
+			// completion/resume/rebind are not (owner decision 4).
+			if !strings.Contains(wantHint, "M4 not-paid only on positive decline evidence") || !strings.Contains(wantHint, "no M4 paid") ||
+				strings.Contains(wantHint, "no M4 route") {
+				t.Fatalf("integrity-failure hint must name M4 not-paid and refuse M4 paid: %q", wantHint)
+			}
+			for _, banned := range []string{"resume", "rebind", "re-bind", "governed completion"} {
+				if strings.Contains(strings.ToLower(wantHint), banned) {
+					t.Fatalf("integrity-failure hint advertises %q: %q", banned, wantHint)
+				}
 			}
 		}
 		for _, ref := range []string{"X-bound", ""} {
