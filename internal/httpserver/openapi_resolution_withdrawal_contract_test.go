@@ -84,7 +84,7 @@ func TestOpenAPI_ResolutionAndWithdrawalFamilies_Documented(t *testing.T) {
 
 	// Specific contract points.
 	resolve := openAPIPathBlock(t, spec, "/v1/admin/withdrawals/{id}/resolve")
-	for _, want := range []string{"dispatch is still in progress", "amount/asset does not", `"409"`, `"503"`} {
+	for _, want := range []string{"dispatch is still in progress", "amount/asset does not", "PSP recall", "No automatic, M2, M4 or hold-release path", `"409"`, `"503"`} {
 		if !strings.Contains(resolve, want) {
 			t.Errorf("resolve: OpenAPI entry lacks %q", want)
 		}
@@ -100,7 +100,17 @@ func TestOpenAPI_ResolutionAndWithdrawalFamilies_Documented(t *testing.T) {
 			}
 		}
 	}
-	if !strings.Contains(openAPIPathBlock(t, spec, "/v1/admin/tenants/{tenantID}/payment-force-resolutions"), "non-MOCK M4") {
+	for _, want := range []string{"HoldResolutionDecisionRequest:\n", `pattern: "^[0-9a-f]{64}$"`, `pattern: "^[a-z][a-z0-9_]{0,63}$"`} {
+		if !strings.Contains(spec, want) {
+			t.Errorf("spec lacks %q", want)
+		}
+	}
+	for _, p := range []string{"/v1/admin/tenants/{tenantID}/payment-force-resolutions", "/v1/admin/tenants/{tenantID}/withdrawal-hold-resolutions"} {
+		if !strings.Contains(openAPIPathBlock(t, spec, p), "ResolutionInvalidRequest") {
+			t.Errorf("%s: list/request routes must document 400 ResolutionInvalidRequest", p)
+		}
+	}
+	if !strings.Contains(openAPIPathBlock(t, spec, "/v1/admin/tenants/{tenantID}/payment-force-resolutions"), "Non-MOCK M4 is blocked") {
 		t.Error("payment force-resolution entry must state that non-MOCK M4 is blocked")
 	}
 }
