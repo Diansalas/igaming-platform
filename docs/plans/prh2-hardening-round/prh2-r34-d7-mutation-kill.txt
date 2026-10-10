@@ -13,7 +13,7 @@ The line shown is the LATEST result for each id.
 
 CONTROL (unmutated tree, same commands): `TestD7_` PASS; the existing M4 suites PASS (ADR 0111 section 25.8).
 
-Counted mutants: 60   KILLED: 49   SURVIVED: 11 (every survivor classified below; none is an unexplained gap)
+Counted mutants: 66   KILLED: 55   SURVIVED: 11 (every survivor classified below; none is an unexplained gap)
 
 id    result    mutation / first failing test
 C01   KILLED    checklist: unmapped return/reversal/chargeback no longer a Fail  =>  --- FAIL: TestD7_SourceContract_EachItemIsEffective
@@ -76,6 +76,13 @@ S32   SURVIVED  -> executing: scope + reference-pin re-check dropped  =>  (all t
 S33   KILLED    request: withdrawal must be submitted - dropped (M4 branch)  =>  --- FAIL: TestD7_P1_WrongWithdrawal
 S34   SURVIVED  request: withdrawal amount/asset = attempt amount/asset (R-4) check dropped  =>  (all targeted tests pass)
 S35   SURVIVED  -> executing: withdrawal/attempt amount and asset = resolution's (R-4) check dropped  =>  (all targeted tests pass)
+C09   KILLED    checklist: providerkind.Synthetic marker no longer disqualifies  =>  --- FAIL: TestD7_SourceContract_SyntheticMarkerDisqualifiesDespiteTheDeclaration
+C10   KILLED    checklist: first-send lower bound no longer required  =>  --- FAIL: TestD7_SourceContract_EachItemIsEffective
+C11   KILLED    checklist: skew tolerance no longer bounded  =>  --- FAIL: TestD7_SourceContract_EachItemIsEffective
+G15   KILLED    Go: lower bound reverted to created_at  =>  --- FAIL: TestD7_P9_CausalLink
+G16   KILLED    Go: lower bound is last_sent_at instead of the first send  =>  --- FAIL: TestD7_P9_CausalLink
+G17   KILLED    Go: an attempt with no recorded send is no longer refused  =>  --- FAIL: TestD7_P9_CausalLink
+(C09-C11, G15-G17 added by the security/ledger-finance review round: marker in C1, C11 time semantics, first-send lower bound.)
 
 SURVIVOR CLASSIFICATION (honest)
 S13  EQUIVALENT: an unsealed import is written without the S-3 declaration (R19-3, column default false), so (iv) already refuses it; the seal-presence conjunct of the not-paid selection is redundant for not paid (the paid selection, S12, is killed)
