@@ -880,6 +880,7 @@ paths:
           schema: { type: string, enum: [requested, pending_review, approved, rejected, submitted, completed, failed, cancelled, reversed] }
         - name: limit
           in: query
+          description: Values above 200 are clamped to 200; a missing, non-numeric or non-positive value uses the default 50. Never a 400.
           schema: { type: integer, default: 50, maximum: 200 }
         - name: offset
           in: query
@@ -930,6 +931,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/WithdrawalAdminDetail"
+        "400":
+          $ref: "#/components/responses/ValidationError"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
@@ -1177,6 +1180,8 @@ paths:
               schema: { $ref: "#/components/schemas/Error" }
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
@@ -5601,6 +5606,7 @@ paths:
           application/json:
             schema:
               type: object
+              additionalProperties: false
               properties:
                 reason_code: { type: string }
               required: [reason_code]
@@ -5638,8 +5644,12 @@ paths:
         expired, retry later; (e) "provider-confirmed amount/asset does not
         match the withdrawal request" - the provider confirmed success but
         the amount or asset differs from the request, the payment attempt is
-        parked as disputed and the hold is kept (not auto-resolved; it needs
-        the governed resolution paths). 503 service_unavailable: resolution
+        parked as disputed (terminal reason amount_asset_mismatch) and the
+        hold is kept. No automatic, M2, M4 or hold-release path admits this
+        reason today (M2 refuses it, M4 admits only the invalid or conflicting
+        provider reference and destination reasons, and the hold release
+        refuses a withdrawal that has an attempt): it needs operator
+        investigation, for example a PSP recall. 503 service_unavailable: resolution
         is not enabled on this deployment, or the provider recorded on the
         withdrawal is not available on it.
       security:
@@ -5761,13 +5771,15 @@ paths:
       description: >
         payment_force_resolve:request (finance, platform_admin), staff principals only.
         Four-eyes governed resolution of a stuck payment attempt: M1 records evidence on a disputed deposit without changing it; M2 declares an ambiguous or allow-listed disputed payout paid or not paid; M4 resolves an unbound payout park from sealed statement-import evidence.
-        M4 is a platform-acting flow (the evidence scope is not visible to a tenant-staff session) and is MOCK-only: it is implemented against MOCK statement sources, and an M4 resting on a non-MOCK statement import is refused with 409 force_resolve_evidence_insufficient (non-MOCK M4 is blocked, ADR 0111). Nothing executes on request: the money moves only when the final required approval is recorded, in that approval's own transaction.
+        M4 is a platform-acting flow (the evidence scope is not visible to a tenant-staff session) and is MOCK-only: it is implemented against MOCK statement sources, and an M4 resting on a non-MOCK statement import is refused at request with 409 force_resolve_evidence_insufficient; if detected at the final approval the resolution ends `refused_at_execution` (200, refused=true). Non-MOCK M4 is blocked (ADR 0111). A tenant-scoped caller's M4 request or final approval is refused 403 force_resolve_not_permitted. Nothing executes on request: the money moves only when the final required approval is recorded, in that approval's own transaction.
         Target tenant is the {tenantID} path value only; a body tenant_id is accepted and ignored. A tenant-scoped caller may name only its own tenant (otherwise 403,
         no data); a platform-scoped caller may name any tenant but acts only through a platform acting session, which the database refuses unless the caller holds an
         in-force capability grant for exactly that tenant. The route permission is only the first layer: the grant, the distinct-Person and beneficiary rules, the
         pinned payload and the approval recount are decided by the database inside the action's own transaction. The signed actor proof (ADR 0110) is produced
-        server-side; the client supplies no proof header or field. Every refusal writes an audit row. Error bodies carry the generic envelope code plus a fixed
-        closed-token message; no internal detail is returned.
+        server-side; the client supplies no proof header or field. A denied audit row is written for the 403 raised by the tenant check or by the
+        service, and for every 409; generic gate refusals (not a staff principal, route permission missing), tenant-target
+        validation failures, 400s and 404s write none. Error bodies carry the generic envelope code plus a fixed closed-token message where the
+        responses below say so; no internal detail is returned.
         kind selects the shape. m1_deposit_evidence needs finding_code; m2_declare_paid and m2_declare_not_paid need basis_code and evidence_ref_hash (context_code optional); m4_evidence_paid and m4_evidence_not_paid need basis_code provider_confirmed_out_of_band, evidence_ref_hash and evidence_line_id. Amount and asset are copied from the attempt by the database, never taken from the request. An M2 or M4 is refused (409 force_resolve_precondition_failed) when no statement source is registered for the attempt's provider.
       security:
         - bearerAuth: []
@@ -5816,6 +5828,8 @@ paths:
           content:
             application/json:
               schema: { type: object, properties: { items: { type: array, items: { $ref: "#/components/schemas/PaymentForceResolution" } } }, required: [items] }
+        "400":
+          $ref: "#/components/responses/ResolutionInvalidRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
@@ -5859,7 +5873,7 @@ paths:
       summary: Approve a payment force-resolution
       description: >
         payment_force_resolve:approve (finance, platform_admin), staff principals only.
-        The approver must pin the payload_hash of the resolution it reviewed. When this approval is the final required one the resolution executes in the same transaction (executed=true); if the preconditions no longer hold it ends `refused_at_execution` (refused=true, committed and audited). Otherwise counted_approvals is below required_approvals and the resolution stays `pending`. An approval after expires_at is 409 force_resolve_expired.
+        The approver must pin the payload_hash of the resolution it reviewed. When this approval is the final required one the resolution executes in the same transaction (executed=true); if the preconditions no longer hold it ends `refused_at_execution` (refused=true, committed and audited). Otherwise counted_approvals is below required_approvals and the resolution stays `pending`. After expires_at the resolution is moved to `expired` (committed) and the call returns 409 force_resolve_expired.
       security:
         - bearerAuth: []
       parameters:
@@ -5899,7 +5913,7 @@ paths:
       summary: Reject a payment force-resolution
       description: >
         payment_force_resolve:approve (finance, platform_admin), staff principals only.
-        A rejection is recorded against the pinned payload_hash. The response carries the resolution as re-read after the rejection; executed and refused are false and the approval counts are 0.
+        A rejection is recorded against the pinned payload_hash. The response carries the resolution as re-read after the rejection; executed and refused are false and the approval counts are 0. After expires_at the resolution is moved to `expired` (committed) and the call returns 409 force_resolve_expired.
       security:
         - bearerAuth: []
       parameters:
@@ -5973,13 +5987,15 @@ paths:
       summary: Request a withdrawal hold-resolution
       description: >
         withdrawal_hold_resolution:request (platform_admin only), staff principals only.
-        Four-eyes, platform-acting release of the hold of an `approved` withdrawal on a tenant or brand that is not active: the single kind release_hold_to_player moves the withdrawal approved -> rejected and returns the hold to the player's own cash wallet. No tenant role holds these permissions, so a tenant-scoped caller is refused 403 at the permission gate. There is no generic override route and nothing releases a hold without the counted approvals. MOCK-only: implemented against the MOCK stack; it dispatches nothing and calls no provider.
+        Four-eyes, platform-acting release of the hold of an `approved` withdrawal on a tenant or brand that is not active: the single kind release_hold_to_player moves the withdrawal approved -> rejected and returns the hold to the player's own cash wallet. No tenant role holds these permissions, so a tenant-scoped caller is refused 403 at the permission gate. There is no generic override route and nothing releases a hold without the counted approvals. Status per ADR 0111 section 16: IMPLEMENTED against the MOCK stack; the release dispatches nothing and calls no provider.
         Target tenant is the {tenantID} path value only; a body tenant_id is accepted and ignored. A tenant-scoped caller may name only its own tenant (otherwise 403,
         no data); a platform-scoped caller may name any tenant but acts only through a platform acting session, which the database refuses unless the caller holds an
         in-force capability grant for exactly that tenant. The route permission is only the first layer: the grant, the distinct-Person and beneficiary rules, the
         pinned payload and the approval recount are decided by the database inside the action's own transaction. The signed actor proof (ADR 0110) is produced
-        server-side; the client supplies no proof header or field. Every refusal writes an audit row. Error bodies carry the generic envelope code plus a fixed
-        closed-token message; no internal detail is returned.
+        server-side; the client supplies no proof header or field. A denied audit row is written for the 403 raised by the tenant check or by the
+        service, and for every 409; generic gate refusals (not a staff principal, route permission missing), tenant-target
+        validation failures, 400s and 404s write none. Error bodies carry the generic envelope code plus a fixed closed-token message where the
+        responses below say so; no internal detail is returned.
         At execution the database re-checks the pinned preconditions; it ends `refused_at_execution` with a refusal_code of withdrawal_not_approved (the withdrawal is no longer `approved`), attempt_exists, tenant_brand_active_again or policy_disabled.
       security:
         - bearerAuth: []
@@ -6028,6 +6044,8 @@ paths:
           content:
             application/json:
               schema: { type: object, properties: { items: { type: array, items: { $ref: "#/components/schemas/WithdrawalHoldResolution" } } }, required: [items] }
+        "400":
+          $ref: "#/components/responses/ResolutionInvalidRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
@@ -6071,7 +6089,7 @@ paths:
       summary: Approve a withdrawal hold-resolution
       description: >
         withdrawal_hold_resolution:approve (platform_admin only), staff principals only.
-        The approver must pin the payload_hash of the resolution it reviewed. When this approval is the final required one the hold is released in the same transaction (executed=true); if the preconditions no longer hold it ends `refused_at_execution` (refused=true). Otherwise the resolution stays `pending` with counted_approvals below required_approvals. An approval after expires_at is 409 hold_resolution_expired.
+        The approver must pin the payload_hash of the resolution it reviewed. When this approval is the final required one the hold is released in the same transaction (executed=true); if the preconditions no longer hold it ends `refused_at_execution` (refused=true). Otherwise the resolution stays `pending` with counted_approvals below required_approvals. After expires_at the resolution is moved to `expired` (committed) and the call returns 409 hold_resolution_expired.
       security:
         - bearerAuth: []
       parameters:
@@ -6087,7 +6105,7 @@ paths:
         required: true
         content:
           application/json:
-            schema: { $ref: "#/components/schemas/ResolutionDecisionRequest" }
+            schema: { $ref: "#/components/schemas/HoldResolutionDecisionRequest" }
       responses:
         "200":
           description: The decision outcome
@@ -6111,7 +6129,7 @@ paths:
       summary: Reject a withdrawal hold-resolution
       description: >
         withdrawal_hold_resolution:approve (platform_admin only), staff principals only.
-        A rejection is recorded against the pinned payload_hash. The response carries the resolution as re-read after the rejection; executed and refused are false and the approval counts are 0.
+        A rejection is recorded against the pinned payload_hash. The response carries the resolution as re-read after the rejection; executed and refused are false and the approval counts are 0. After expires_at the resolution is moved to `expired` (committed) and the call returns 409 hold_resolution_expired.
       security:
         - bearerAuth: []
       parameters:
@@ -6127,7 +6145,7 @@ paths:
         required: true
         content:
           application/json:
-            schema: { $ref: "#/components/schemas/ResolutionDecisionRequest" }
+            schema: { $ref: "#/components/schemas/HoldResolutionDecisionRequest" }
       responses:
         "200":
           description: The decision outcome
@@ -7235,7 +7253,7 @@ components:
       properties:
         id: { type: string, format: uuid }
         asset_code: { type: string }
-        amount: { type: integer }
+        amount: { type: integer, format: int64 }
         state:
           type: string
           enum: [requested, pending_review, approved, rejected, submitted, completed, failed, cancelled, reversed]
@@ -7246,8 +7264,9 @@ components:
           type: integer
           description: >
             Minor-unit exponent for asset_code (e.g. 2 for EUR meaning
-            `amount` is in cents). Absent means unknown - a client must
-            not assume 0. Added after a ledger-finance review flagged the
+            `amount` is in cents). Absent when the exponent is unknown or 0
+            (the field is omitted when zero) - a client must not assume
+            a particular exponent from absence alone. Added after a ledger-finance review flagged the
             Back Office rendering raw minor units with no exponent as a
             real financial-clarity defect at the withdrawal-approval
             decision point.
@@ -7310,6 +7329,7 @@ components:
       required: [id, asset_code, amount, state, requested_at]
     WithdrawalSubmitRequest:
       type: object
+      additionalProperties: false
       properties:
         payment_method:
           type: string
@@ -7382,6 +7402,7 @@ components:
         tenant_status_at_submission: { type: string }
         state:
           type: string
+          description: '`executing` is transient inside the final approval transaction.'
           enum: [pending, executing, executed, rejected, cancelled, expired, refused_at_execution]
         refusal_code: { type: string }
         ledger_transaction_id: { type: string, format: uuid }
@@ -7397,8 +7418,16 @@ components:
       description: tenant_id is accepted and ignored. Unknown fields are rejected (400).
       properties:
         tenant_id: { type: string, description: Accepted and ignored. }
-        payload_hash: { type: string, description: The payload_hash of the resolution the decider reviewed. }
-        reason_code: { type: string }
+        payload_hash: { type: string, pattern: "^[0-9a-f]{64}$", description: The payload_hash of the resolution the decider reviewed. }
+        reason_code: { type: string, minLength: 1, maxLength: 64 }
+      required: [payload_hash, reason_code]
+    HoldResolutionDecisionRequest:
+      type: object
+      description: tenant_id is accepted and ignored. Unknown fields are rejected (400).
+      properties:
+        tenant_id: { type: string, description: Accepted and ignored. }
+        payload_hash: { type: string, pattern: "^[0-9a-f]{64}$", description: The payload_hash of the resolution the decider reviewed. }
+        reason_code: { type: string, pattern: "^[a-z][a-z0-9_]{0,63}$" }
       required: [payload_hash, reason_code]
     PaymentForceResolutionDecision:
       type: object
@@ -7438,6 +7467,7 @@ components:
         brand_status_at_submission: { type: string }
         state:
           type: string
+          description: '`executing` is transient inside the final approval transaction.'
           enum: [pending, executing, executed, rejected, cancelled, expired, refused_at_execution]
         refusal_code:
           type: string
@@ -8194,8 +8224,11 @@ components:
         principal, route permission missing), the message is the closed token
         force_resolve_not_permitted: a tenant caller naming another tenant, no
         in-force capability grant or acting session, another database-enforced authority
-        rule refused it, or an actor-proof refusal. Every such refusal writes a denied
-        audit row.
+        rule refused it, or an actor-proof refusal. A tenant-scoped M4 request or
+        final approval is refused with this token (the evidence scope is not
+        visible to a tenant-staff session). Each such refusal that passes the
+        service or the tenant check writes a denied audit row; a refusal at the
+        generic gate or at tenant-target validation writes none.
       content:
         application/json:
           schema:
@@ -8214,7 +8247,7 @@ components:
         force_resolve_conflict (including the resolution not being pending, a
         state conflict or a retryable serialization failure),
         force_resolve_expired, force_resolve_evidence_insufficient (including
-        non-MOCK M4, which is blocked), force_resolve_evidence_mismatch,
+        non-MOCK M4 at request, which is blocked), force_resolve_evidence_mismatch,
         force_resolve_evidence_overflow, force_resolve_evidence_unsealed.
       content:
         application/json:
@@ -8225,9 +8258,10 @@ components:
         403 forbidden. Beyond the generic gate refusals (not a staff
         principal, route permission missing - every tenant role), the message
         is the closed token hold_resolution_not_permitted: a tenant caller
-        naming another tenant, no in-force platform grant or acting session, a
-        another database-enforced authority rule refused it, or an actor-proof refusal. Every such refusal
-        writes a denied audit row.
+        naming another tenant, no in-force platform grant or acting session,
+        another database-enforced authority rule refused it, or an actor-proof refusal. Each such refusal
+        that passes the service or the tenant check writes a denied audit row; a refusal at the generic gate
+        or at tenant-target validation writes none.
       content:
         application/json:
           schema:
