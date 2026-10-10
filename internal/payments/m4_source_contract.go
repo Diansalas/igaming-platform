@@ -25,6 +25,9 @@
 //   - amount and asset fields;
 //   - that the provider reference is PSP-issued, not an echo.
 //
+// A passing checklist is NECESSARY, NOT SUFFICIENT: C5 and C10 are self-declared and only the
+// vendor-specific tests, the S-3 review and the T10 seal review establish them.
+//
 // A source's own tests must call CheckM4SourceContract on its declaration and
 // require zero Fail findings. The checklist is deliberately about declarations
 // the adapter must make explicitly, so that an adapter can never "pretend" a
@@ -36,6 +39,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/Diansalas/igaming-platform/internal/payoutinstrument"
 	"github.com/Diansalas/igaming-platform/internal/reconciliation/statement"
 )
 
@@ -157,7 +161,29 @@ type M4SourceContract interface {
 	AmountAsset() M4AmountAsset
 	Reference() M4Reference
 	Completeness() M4Completeness
+	TimeSemantics() M4TimeSemantics
 }
+
+// M4MaxLowerBoundSkew bounds any per-source clock-skew tolerance a contract may declare.
+const M4MaxLowerBoundSkew = 5 * time.Minute
+
+// M4TimeSemantics declares how a line's occurred_at is read (ADR 0111 25.4 G-TIME).
+type M4TimeSemantics struct {
+	// OccurredAtIsProviderEventTime: occurred_at is the time the PSP paid/declined, not a
+	// statement-generation or settlement-batch time.
+	OccurredAtIsProviderEventTime bool
+	// LowerBound must be M4LowerBoundFirstSend: a succeeded line must not predate the
+	// attempt's first send (first_submitted_at, else last_sent_at). A line dated before
+	// last_sent_at is NOT refused (an earlier send of a resent attempt may have paid).
+	LowerBound string
+	// LowerBoundSkew is a clock-skew tolerance applied ONLY to the lower bound: 0 (the
+	// default, and the MOCK value) up to M4MaxLowerBoundSkew, ledger-finance reviewed per
+	// source. Never applied to the upper bound.
+	LowerBoundSkew time.Duration
+}
+
+// M4LowerBoundFirstSend is the only conformant lower bound.
+const M4LowerBoundFirstSend = "first_send"
 
 // M4FindingSeverity: a Fail disqualifies the source from every M4; a Limit
 // removes one direction (M4 paid) but is not a defect.
@@ -201,6 +227,7 @@ const (
 	M4ItemAmountAsset  = "C8-amount-asset"
 	M4ItemReference    = "C9-provider-reference"
 	M4ItemCompleteness = "C10-completeness"
+	M4ItemTime         = "C11-time-semantics"
 )
 
 // m4StatementLineCarriesDestinationEcho is true only when statement.PaymentStatementLine
@@ -236,7 +263,9 @@ func CheckM4SourceContract(c M4SourceContract) M4SourceReport {
 	if c.ProviderID() == "" || c.Label() == "" {
 		add(M4ItemIdentity, M4Fail, []int{3, 4}, "provider id and label are required (every line must carry the provider id)")
 	}
-	if c.Synthetic() {
+	// The declaration is not trusted alone: the providerkind.Synthetic marker of the live
+	// object (the tiering predicate's source of truth, ADR 0111 2.5) also disqualifies.
+	if c.Synthetic() || payoutinstrument.IsSyntheticComponent(c) {
 		add(M4ItemIdentity, M4Fail, []int{9}, "a synthetic source is MOCK only and is never eligible for non-MOCK M4")
 	}
 	// C2: the S-3 merchant-reference declaration.
@@ -353,6 +382,14 @@ func CheckM4SourceContract(c M4SourceContract) M4SourceReport {
 	cp := c.Completeness()
 	if !cp.CoverageAuthoritative || !cp.PaginationComplete {
 		add(M4ItemCompleteness, M4Fail, []int{9}, "coverage not authoritative or pagination completeness not proven (coverage_authoritative=%v pagination_complete=%v)", cp.CoverageAuthoritative, cp.PaginationComplete)
+	}
+	// C11: time semantics.
+	ts := c.TimeSemantics()
+	if !ts.OccurredAtIsProviderEventTime || ts.LowerBound != M4LowerBoundFirstSend {
+		add(M4ItemTime, M4Fail, []int{9}, "occurred_at must be the provider event time and the lower bound the first send (event_time=%v lower_bound=%q)", ts.OccurredAtIsProviderEventTime, ts.LowerBound)
+	}
+	if ts.LowerBoundSkew < 0 || ts.LowerBoundSkew > M4MaxLowerBoundSkew {
+		add(M4ItemTime, M4Fail, []int{9}, "lower-bound clock-skew tolerance %s is outside [0, %s]", ts.LowerBoundSkew, M4MaxLowerBoundSkew)
 	}
 
 	r.Conformant = true

@@ -744,12 +744,100 @@ func TestD7_P9_CausalLink(t *testing.T) {
 		ev := m.mustEvidence(p.fresh.ID, M4VerdictPaid)
 		m.d7ReqNotEligible(p, ResolutionM4EvidencePaid, ev, m4EligAfterCoverage)
 	})
-	t.Run("the boundary: a line at the attempt's creation instant is eligible and executes", func(t *testing.T) {
+	t.Run("the lower bound is the FIRST SEND, zero tolerance: one microsecond before is refused, the instant itself executes", func(t *testing.T) {
 		m.t = t
 		p := m.park(738)
-		m.ingest(m4Imp{}, m.line(m4Ref(), p.fresh.MerchantReference, "succeeded", 738, p.fresh.CreatedAt))
+		if p.fresh.FirstSubmittedAt == nil {
+			t.Fatal("setup: the park has no first_submitted_at")
+		}
+		first := *p.fresh.FirstSubmittedAt
+		if first.Before(p.fresh.CreatedAt) {
+			t.Fatalf("setup: first send %s before creation %s", first, p.fresh.CreatedAt)
+		}
+		// A line between creation and the first send is refused (the bound is the first send, not creation).
+		if first.After(p.fresh.CreatedAt) {
+			q := m.park(739)
+			m.ingest(m4Imp{}, m.line(m4Ref(), q.fresh.MerchantReference, "succeeded", 739, q.fresh.FirstSubmittedAt.Add(-time.Microsecond)))
+			evq := m.mustEvidence(q.fresh.ID, M4VerdictPaid)
+			m.d7ReqNotEligible(q, ResolutionM4EvidencePaid, evq, m4EligPredates)
+		}
+		m.ingest(m4Imp{}, m.line(m4Ref(), p.fresh.MerchantReference, "succeeded", 738, first))
 		ev := m.mustEvidence(p.fresh.ID, M4VerdictPaid)
 		m.execute(p, ResolutionM4EvidencePaid, ev)
+	})
+	t.Run("a succeeded line dated before last_sent_at but after the first send is NOT refused (an earlier send may have paid)", func(t *testing.T) {
+		m.t = t
+		p := m.park(7381)
+		if p.fresh.LastSentAt.After(*p.fresh.FirstSubmittedAt) {
+			m.ingest(m4Imp{}, m.line(m4Ref(), p.fresh.MerchantReference, "succeeded", 7381, p.fresh.FirstSubmittedAt.Add(time.Microsecond)))
+			ev := m.mustEvidence(p.fresh.ID, M4VerdictPaid)
+			m.execute(p, ResolutionM4EvidencePaid, ev)
+			return
+		}
+		// Single send: last_sent_at == first_submitted_at; the resend ordering is probed below.
+		t.Log("single-send park: the resend ordering is probed in 'an attempt with no recorded send'")
+	})
+	t.Run("an attempt with no recorded send has no eligible paid line", func(t *testing.T) {
+		m.t = t
+		p := m.park(7382)
+		res := ManualResolution{TenantID: m.f.tenantID, AttemptID: p.fresh.ID, Kind: ResolutionM4EvidencePaid}
+		m.ingest(m4Imp{}, m.line(m4Ref(), p.fresh.MerchantReference, "succeeded", 7382, time.Now()))
+		ev := m.mustEvidence(p.fresh.ID, M4VerdictPaid)
+		res.EvidenceLineID, res.EvidenceReference, res.EvidenceImportIDs = ev.LineID, ev.Reference, ev.ImportIDs
+		att := p.fresh
+		att.FirstSubmittedAt, att.LastSentAt = nil, nil
+		var got string
+		if err := m.pool.WithPlatformActingInTenant(context.Background(), m.acting.ID, m.f.tenantID, uuid.Nil, OperationKindForceResolve, func(ctx context.Context, tx pgx.Tx) error {
+			var err error
+			got, err = m4EligibilityRefusal(ctx, tx, res, att)
+			return err
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if got != m4EligNeverSent {
+			t.Fatalf("want %s, got %q", m4EligNeverSent, got)
+		}
+		// first_submitted_at absent, last_sent_at present: the fallback bound is last_sent_at.
+		att = p.fresh
+		att.FirstSubmittedAt = nil
+		later := time.Now().Add(time.Hour)
+		att.LastSentAt = &later
+		if err := m.pool.WithPlatformActingInTenant(context.Background(), m.acting.ID, m.f.tenantID, uuid.Nil, OperationKindForceResolve, func(ctx context.Context, tx pgx.Tx) error {
+			var err error
+			got, err = m4EligibilityRefusal(ctx, tx, res, att)
+			return err
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if got != m4EligPredates {
+			t.Fatalf("fallback to last_sent_at: want %s, got %q", m4EligPredates, got)
+		}
+		// A resent attempt: first send an hour ago, last send an hour ahead; the line (now) lies between
+		// them. The bound is the FIRST send, so it is eligible.
+		early := time.Now().Add(-time.Hour)
+		att.FirstSubmittedAt = &early
+		if err := m.pool.WithPlatformActingInTenant(context.Background(), m.acting.ID, m.f.tenantID, uuid.Nil, OperationKindForceResolve, func(ctx context.Context, tx pgx.Tx) error {
+			var err error
+			got, err = m4EligibilityRefusal(ctx, tx, res, att)
+			return err
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if got != "" {
+			t.Fatalf("a line before last_sent_at but after the first send must be eligible, got %q", got)
+		}
+	})
+	t.Run("DOCUMENTING (no assertion on the r32 outcome): success-triggered parks", func(t *testing.T) {
+		// ADR 0111 25.4 G-SUCCESS-PARK. provider_reference_conflict, destination_mismatch and
+		// destination_integrity_failure parks are raised on a provider SUCCESS that is not stored
+		// durably; a later declined statement line can therefore satisfy the not-paid verdict. The
+		// fix (a durable success-reported record in every park writer, not-paid contradictory for
+		// ALL M4 not-paid reasons) is carried by gov-r32-integrity (migration 0127). This subtest
+		// only records, with the present scope, which not-paid reasons are exposed; it asserts
+		// nothing that r32 would change.
+		for _, r := range []string{"provider_reference_conflict", "destination_mismatch", "destination_integrity_failure"} {
+			t.Logf("not-paid scope admits %-32s today: %v (exposed to G-SUCCESS-PARK until 0127)", r, M4ResolvableDispute(ResolutionM4EvidenceNotPaid, AttemptDisputed, k3StrPtr(r), nil))
+		}
 	})
 }
 

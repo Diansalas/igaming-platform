@@ -166,10 +166,13 @@ const (
 	// merchant reference is what attributes a line to the attempt; if R is the same string
 	// one provider field is both the causal link and the provider transaction reference.
 	m4EligPlatformRef = "reference_is_platform_issued"
-	// m4EligPredates: the succeeded line is dated before the attempt existed, so it cannot
-	// be the payout of this attempt (the not-paid verdict already requires occurred_at >=
-	// last_sent_at; the paid verdict reads no timestamp).
+	// m4EligPredates: the succeeded line is dated before the attempt's FIRST send
+	// (first_submitted_at, falling back to last_sent_at), so it cannot be the payout of this
+	// attempt. Zero tolerance. A line dated before last_sent_at but after the first send is
+	// NOT refused: an earlier send of a resent attempt may be the one that paid.
 	m4EligPredates = "line_predates_attempt"
+	// m4EligNeverSent: the attempt records no send at all, so no line can be its payout.
+	m4EligNeverSent = "attempt_never_sent"
 	// m4EligAfterCoverage: the succeeded line is dated after the coverage end of the import
 	// that carries it, i.e. after the window the source vouches for.
 	m4EligAfterCoverage = "line_after_import_coverage"
@@ -208,7 +211,14 @@ func m4EligibilityRefusal(ctx context.Context, tx pgx.Tx, res ManualResolution, 
 		WHERE l.id = $1 AND l.tenant_id = $2`, *res.EvidenceLineID, res.TenantID).Scan(&occurred, &coverageEnd); err != nil {
 		return "", err
 	}
-	if occurred.Before(att.CreatedAt) {
+	first := att.FirstSubmittedAt
+	if first == nil {
+		first = att.LastSentAt
+	}
+	if first == nil {
+		return m4EligNeverSent, nil
+	}
+	if occurred.Before(*first) {
 		return m4EligPredates, nil
 	}
 	if occurred.After(coverageEnd) {

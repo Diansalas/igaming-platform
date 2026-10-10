@@ -25,6 +25,7 @@ type d7FixtureContract struct {
 	amountAsset M4AmountAsset
 	reference   M4Reference
 	complete    M4Completeness
+	timeSem     M4TimeSemantics
 }
 
 func (c d7FixtureContract) ProviderID() string                          { return c.id }
@@ -39,6 +40,12 @@ func (c d7FixtureContract) FinalStatus() M4FinalStatus                  { return
 func (c d7FixtureContract) AmountAsset() M4AmountAsset                  { return c.amountAsset }
 func (c d7FixtureContract) Reference() M4Reference                      { return c.reference }
 func (c d7FixtureContract) Completeness() M4Completeness                { return c.complete }
+func (c d7FixtureContract) TimeSemantics() M4TimeSemantics              { return c.timeSem }
+
+// d7MarkedFixture carries the providerkind.Synthetic marker while DECLARING Synthetic() == false.
+type d7MarkedFixture struct{ d7FixtureContract }
+
+func (d7MarkedFixture) SyntheticComponent() {}
 
 func d7Conformant() d7FixtureContract {
 	return d7FixtureContract{
@@ -59,6 +66,7 @@ func d7Conformant() d7FixtureContract {
 		amountAsset: M4AmountAsset{MinorUnits: true, ExponentFromAssetRegistry: true, AssetCodePerLine: true, AmountIsPayoutPrincipal: true},
 		reference:   M4Reference{PSPIssued: true, StablePerPayout: true},
 		complete:    M4Completeness{CoverageAuthoritative: true, PaginationComplete: true},
+		timeSem:     M4TimeSemantics{OccurredAtIsProviderEventTime: true, LowerBound: M4LowerBoundFirstSend},
 	}
 }
 
@@ -146,6 +154,10 @@ func TestD7_SourceContract_EachItemIsEffective(t *testing.T) {
 		{"reference not PSP issued", func(c *d7FixtureContract) { c.reference.PSPIssued = false }, M4ItemReference, M4Fail},
 		{"reference not stable", func(c *d7FixtureContract) { c.reference.StablePerPayout = false }, M4ItemReference, M4Fail},
 		{"reference may echo the merchant reference", func(c *d7FixtureContract) { c.reference.EchoesMerchantReference = true }, M4ItemReference, M4Fail},
+		{"occurred_at is not the provider event time", func(c *d7FixtureContract) { c.timeSem.OccurredAtIsProviderEventTime = false }, M4ItemTime, M4Fail},
+		{"lower bound is not the first send", func(c *d7FixtureContract) { c.timeSem.LowerBound = "created_at" }, M4ItemTime, M4Fail},
+		{"negative skew", func(c *d7FixtureContract) { c.timeSem.LowerBoundSkew = -time.Second }, M4ItemTime, M4Fail},
+		{"skew above the bound", func(c *d7FixtureContract) { c.timeSem.LowerBoundSkew = M4MaxLowerBoundSkew + time.Second }, M4ItemTime, M4Fail},
 		{"coverage not authoritative", func(c *d7FixtureContract) { c.complete.CoverageAuthoritative = false }, M4ItemCompleteness, M4Fail},
 		{"pagination completeness not proven", func(c *d7FixtureContract) { c.complete.PaginationComplete = false }, M4ItemCompleteness, M4Fail},
 	}
@@ -196,5 +208,24 @@ func TestD7_NoProductionTypeImplementsTheSourceContract(t *testing.T) {
 	var ms any = &MockStatementSource{}
 	if _, ok := ms.(M4SourceContract); ok {
 		t.Fatal("the MOCK statement source implements M4SourceContract: MOCK must never be eligible for non-MOCK M4")
+	}
+}
+
+// The Synthetic() declaration is not trusted alone: a contract object that carries the
+// providerkind.Synthetic marker is refused even when it declares itself non-synthetic.
+func TestD7_SourceContract_SyntheticMarkerDisqualifiesDespiteTheDeclaration(t *testing.T) {
+	c := d7MarkedFixture{d7Conformant()}
+	if c.Synthetic() {
+		t.Fatal("setup: the fixture must declare Synthetic() == false")
+	}
+	r := CheckM4SourceContract(c)
+	if r.Conformant || !d7HasFinding(r, M4ItemIdentity, M4Fail) {
+		t.Fatalf("a marker-carrying contract conformed: %+v", r)
+	}
+	// A bounded skew is conformant.
+	f := d7Conformant()
+	f.timeSem.LowerBoundSkew = 2 * time.Minute
+	if r := CheckM4SourceContract(f); !r.Conformant {
+		t.Fatalf("a bounded skew must conform: %+v", r.Findings)
 	}
 }
