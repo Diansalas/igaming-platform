@@ -66,6 +66,8 @@ func TestH8_SweeperDispatch_Matrix(t *testing.T) {
 		{"active_tenant_brand_closed", "", "closed"},
 		{"tenant_suspended_active_brand", "suspended", ""},
 		{"tenant_closed_active_brand", "closed", ""},
+		{"active_tenant_brand_pending", "", "pending_launch"},
+		{"tenant_pending_active_brand", "pending_launch", ""},
 		{"both_inactive", "suspended", "suspended"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -149,8 +151,8 @@ func TestH8_BrandSuspendedAfterPreRead_ClaimTxDefers_ReactivationDispatches(t *t
 			if status == "closed" {
 				// closed is terminal (ADR 0112 3.1): the database refuses the reopening, and the
 				// refused attempt is never dispatched by a later pass.
-				if err := launchfix.TrySetBrandStatusOn(context.Background(), t, pool, fRace.tenantID, fRace.brandID, "active"); err == nil {
-					t.Fatal("a closed brand must not be reopenable")
+				if err := launchfix.TrySetBrandStatusOn(context.Background(), t, pool, fRace.tenantID, fRace.brandID, "active"); !launchfix.IsClosedTerminalRefusal(err) {
+					t.Fatalf("a closed brand must not be reopenable: the database must answer LA020, got %v", err)
 				}
 				dueNow(t, pool, fRace.tenantID, attID)
 				if st := s.RunPass(context.Background(), nil, 1); st.Errors != 0 {

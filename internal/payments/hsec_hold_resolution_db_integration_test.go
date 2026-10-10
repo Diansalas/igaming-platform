@@ -822,6 +822,7 @@ func TestHSEC_HoldRelease_FreezeTrigger(t *testing.T) {
 			}
 
 			if variant == "tenant_closed" {
+				h.assertInvariants()
 				return // closed is terminal (ADR 0112 3.1): there is no reactivation
 			}
 			// Reactivated: the normal KYC denial works and releases the hold (the freeze does not
@@ -1084,10 +1085,18 @@ func TestHSEC_HoldRelease_ActingBrandsPolicyIsLockOnly(t *testing.T) {
 		_, err := tx.Exec(ctx, `UPDATE brands SET status = 'closed' WHERE id = $1`, h.f.brandID)
 		return err
 	})
-	// ADR 0112: the BEFORE UPDATE launch guard (LA020) now refuses a status change before the
-	// policy WITH CHECK (42501) is evaluated; either way the acting session cannot change a status.
-	if !hsrIs(err, "42501") && !hsrIs(err, "LA020") {
-		t.Fatalf("an acting status UPDATE must be refused (42501 or LA020), got %v", err)
+	// ADR 0112 (security S-4): the BEFORE UPDATE launch guard refuses a status change BEFORE the
+	// policy WITH CHECK is evaluated, so the status UPDATE is exactly LA020 ...
+	if !hsrIs(err, "LA020") {
+		t.Fatalf("an acting status UPDATE must be refused by the launch guard (LA020), got %v", err)
+	}
+	// ... while an acting UPDATE of a NON-status column is still exactly the policy's 42501.
+	err = h.acting(h.reqA, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `UPDATE brands SET name = 'acting rename' WHERE id = $1`, h.f.brandID)
+		return err
+	})
+	if !hsrIs(err, "42501") {
+		t.Fatalf("an acting UPDATE of brands.name must be exactly the policy refusal (42501), got %v", err)
 	}
 }
 

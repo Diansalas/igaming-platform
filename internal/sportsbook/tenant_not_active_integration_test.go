@@ -62,6 +62,12 @@ func runtimePool(t *testing.T) *db.Pool {
 // disabled). Every other status change goes through the trigger.
 func setTenantStatus(t *testing.T, owner *db.Pool, tenantID uuid.UUID, status string) {
 	t.Helper()
+	if status == "pending_launch" {
+		if err := launchfix.ForcePending(context.Background(), t, owner, tenantID, nil); err != nil {
+			t.Fatalf("force tenant pending_launch: %v", err)
+		}
+		return
+	}
 	// ADR 0112: the real launch guards run through the governed fixture; only the unrelated
 	// GP020 closure gate is suspended for 'closed', inside this one owner transaction.
 	var h launchfix.Hooks
@@ -154,10 +160,14 @@ func placeBetRT(t *testing.T, pool *db.Pool, f sbFixture, sel Selection, stake i
 
 var nonActiveStatuses = []string{"suspended", "closed"}
 
+// gateStatuses is the GP010 gate matrix (ADR 0112 / ledger-finance L-2): pending_launch is refused
+// by the gameplay gate exactly like suspended and closed.
+var gateStatuses = []string{"suspended", "closed", "pending_launch"}
+
 func TestTenantNotActive_PlaceBetRefusedAndReplayIsRead(t *testing.T) {
 	owner := testPool(t)
 	rt := runtimePool(t)
-	for _, status := range nonActiveStatuses {
+	for _, status := range gateStatuses {
 		t.Run(status, func(t *testing.T) {
 			f := seedFixture(t, owner)
 			fundWallet(t, owner, f, 100_000)
@@ -209,8 +219,8 @@ func TestTenantNotActive_PlaceBetRefusedAndReplayIsRead(t *testing.T) {
 				// ADR 0112 section 3.1: closed is terminal (HD-CTF-9 stays open); the reopening
 				// this test used to perform is refused by the database (LA020), and the closed
 				// tenant keeps declining new bets.
-				if err := launchfix.TrySetTenantStatus(context.Background(), f.tenantID, "active"); err == nil {
-					t.Fatal("a closed tenant must not be reopenable")
+				if err := launchfix.TrySetTenantStatus(context.Background(), f.tenantID, "active"); !launchfix.IsClosedTerminalRefusal(err) {
+					t.Fatalf("a closed tenant must not be reopenable: the database must answer LA020, got %v", err)
 				}
 				again, err := placeBetRT(t, rt, f, sel, 1000, "after-failed-reopen")
 				if err != nil || again.Accepted || again.RejectionCategory != RejectionTenantNotActive {
@@ -249,7 +259,7 @@ func TestTenantNotActive_SettlementPathsRefused(t *testing.T) {
 			mustSimulate(t, owner, f.tenantID, settleEvent(b, a, 1, SettlementOutcomeWon, stdPayout))
 		}, func(b, a uuid.UUID) SettlementEvent { return rollbackEvent(b, a, 1) }, BetStatusSettledWon},
 	}
-	for _, status := range nonActiveStatuses {
+	for _, status := range gateStatuses {
 		for _, s := range steps {
 			t.Run(status+"/"+s.name, func(t *testing.T) {
 				f, actor, betID := newStdBet(t, owner)
@@ -530,7 +540,7 @@ func TestTenantNotActive_GateFailsClosedWhenTheRowIsNotVisible(t *testing.T) {
 // late settle, so its tombstone is written even for a suspended tenant, is
 // idempotent, and the late settle stays refused (also after reactivation).
 func TestTenantNotActive_TombstonesAreAlwaysWritten(t *testing.T) {
-	for _, status := range nonActiveStatuses {
+	for _, status := range gateStatuses {
 		t.Run(status, func(t *testing.T) { tombstonesAlwaysWritten(t, status) })
 	}
 }
@@ -611,7 +621,7 @@ func TestTenantNotActive_BackstopReplayWithDifferentTypeWritesNothing(t *testing
 func TestTenantNotActive_LockAndPostTombstoneExemptionIsNarrow(t *testing.T) {
 	owner := testPool(t)
 	rt := runtimePool(t)
-	for _, status := range nonActiveStatuses {
+	for _, status := range gateStatuses {
 		f := seedFixture(t, owner)
 		setTenantStatus(t, owner, f.tenantID, status)
 		tomb := ledger.TransactionInput{TenantID: f.tenantID, TransactionType: ledger.TxTombstone}

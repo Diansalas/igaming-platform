@@ -415,6 +415,11 @@ BEGIN
               FROM public.launch_authorisation_approvals a
              WHERE a.request_id = OLD.id AND a.decision = 'approve' AND a.payload_hash = OLD.payload_hash
                AND a.decided_by_person_id <> OLD.requested_by_person_id AND a.decided_by <> OLD.requested_by;
+            -- C-3(a): a recorded 'reject' decision blocks execution of this request for good.
+            IF EXISTS (SELECT 1 FROM public.launch_authorisation_approvals a
+                        WHERE a.request_id = OLD.id AND a.decision = 'reject') THEN
+                RAISE EXCEPTION 'launch request: a reject decision is recorded; the request cannot execute' USING ERRCODE = 'LA011';
+            END IF;
             IF v_n < OLD.required_approvals OR OLD.required_approvals < 1 THEN
                 RAISE EXCEPTION 'launch request: % of % required approvals', v_n, OLD.required_approvals USING ERRCODE = 'LA011';
             END IF;
@@ -448,7 +453,13 @@ BEGIN
                         WHERE s.id <> OLD.id AND s.tenant_id = OLD.tenant_id AND s.subject_kind = OLD.subject_kind
                           AND s.brand_id IS NOT DISTINCT FROM OLD.brand_id
                           AND s.action = 'suspend' AND s.status IN ('executing', 'executed')
-                          AND s.executing_txid = txid_current()) THEN
+                          AND s.executing_txid = txid_current()
+                          -- security S-2: only once the suspension's own governed transition exists
+                          -- in this transaction (an 'executing' request alone, e.g. a tenant
+                          -- session's own suspend, proves nothing yet).
+                          AND EXISTS (SELECT 1 FROM public.launch_status_transitions st
+                                       WHERE st.request_id = s.id AND st.kind = 'governed'
+                                         AND st.txid = txid_current())) THEN
             RAISE EXCEPTION 'launch request: superseded only in the transaction that executes a suspension of the same subject' USING ERRCODE = 'LA011';
         END IF;
         NEW.decided_at := now(); NEW.refusal_code := NULL; NEW.executing_txid := NULL;
@@ -492,9 +503,13 @@ AS $$
 DECLARE
     v_status text;
 BEGIN
+    -- FAIL CLOSED (security S-1): the row is read under the committing session's own RLS. If the
+    -- session no longer sees it (its GUCs were cleared or changed before COMMIT), that is NOT a pass:
+    -- an invisible request could be 'executing' and stay stuck. No SECURITY DEFINER read is used
+    -- (it would bypass the isolation this table exists to keep), so NOT FOUND refuses the commit.
     SELECT r.status INTO v_status FROM public.launch_authorisation_requests r WHERE r.id = NEW.id;
-    IF v_status = 'executing' THEN
-        RAISE EXCEPTION 'launch request % is still executing at commit', NEW.id USING ERRCODE = 'LA030';
+    IF NOT FOUND OR v_status = 'executing' THEN
+        RAISE EXCEPTION 'launch request % is still executing, or not visible, at commit', NEW.id USING ERRCODE = 'LA030';
     END IF;
     RETURN NULL;
 END

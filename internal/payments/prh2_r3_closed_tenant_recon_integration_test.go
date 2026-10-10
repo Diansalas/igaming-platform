@@ -704,10 +704,11 @@ func TestR3_Concurrency_TwoSchedulerInstances(t *testing.T) {
 	r3RequireNoMoneyEffect(t, before, w.r3Snapshot())
 }
 
-// R3-9: the tenant status changes between runs and mid-run. active -> closed ->
+// R3-9: the tenant status changes between runs and mid-run. active -> suspended ->
 // active again: the finding continues without a gap and the audit flag follows
 // the status at selection; a tenant closed DURING the fetch phase of an
-// ordinary run still completes it and nothing breaks.
+// ordinary run still completes it, and the next run observes it as closed (closed
+// is terminal, ADR 0112 3.1, so it comes last) and nothing breaks.
 func TestR3_TenantStatusChangesBetweenAndDuringRuns(t *testing.T) {
 	w := newK3World(t, k3Opts{base: 1})
 	a := w.disputedDeposit(500)

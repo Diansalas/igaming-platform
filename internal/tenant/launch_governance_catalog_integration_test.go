@@ -10,11 +10,13 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Diansalas/igaming-platform/internal/db"
+	"github.com/Diansalas/igaming-platform/internal/testsupport/scratchdb"
 )
 
 // LF5: the BEFORE-row trigger firing order is pinned in the catalog. PostgreSQL fires
@@ -449,6 +451,38 @@ func TestLaunchGov_S6_StatusGuardRestoresTenantGUC(t *testing.T) {
 	}
 	if after != f.tenantID.String() {
 		t.Fatalf("app.tenant_id after the brand UPDATE = %q, want it restored to %s", after, f.tenantID)
+	}
+}
+
+// Security S-7: a role that is a MEMBER of the table-owner role (it inherits ownership and can disable
+// triggers and RLS) is refused by the production startup check even though it owns nothing itself.
+func TestLaunchGov_S7_ProductionCheckRefusesMemberOfOwnerRole(t *testing.T) {
+	ctx := context.Background()
+	scratch := scratchdb.New(t, "s7own_")
+	owner, err := db.Connect(ctx, scratch, 3, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(owner.Close)
+	if _, err := owner.MigrateUp(ctx, "../../migrations"); err != nil {
+		t.Fatal(err)
+	}
+	member, err := db.Connect(ctx, scratchdb.AsAdmin(t, scratch), 3, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(member.Close)
+	var directOwner bool
+	if err := member.WithoutTenant(ctx, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT bool_or(tableowner = current_user) FROM pg_tables WHERE schemaname = 'public'`).Scan(&directOwner)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if directOwner {
+		t.Fatal("test premise: the member role must not own any table directly")
+	}
+	if err := db.VerifyRuntimeRoleInProduction(ctx, "production", member); err == nil || !strings.Contains(err.Error(), "owns tables") {
+		t.Fatalf("a member of the owner role must be refused in production, got %v", err)
 	}
 }
 

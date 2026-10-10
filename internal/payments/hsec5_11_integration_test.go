@@ -38,11 +38,21 @@ var hsecRefusals = []hsecCase{
 	{"tenant_closed", "closed", ""},
 	{"brand_suspended", "", "suspended"},
 	{"brand_closed", "", "closed"},
+	// ADR 0112 gate matrix (ledger-finance L-2): a pending_launch tenant / brand is refused by every
+	// gate exactly like a suspended one, and "reactivation" is the governed ACTIVATION.
+	{"tenant_pending", "pending_launch", ""},
+	{"brand_pending", "", "pending_launch"},
 	{"both_suspended", "suspended", "suspended"},
 }
 
 func setBrandStatus(t *testing.T, pool *db.Pool, tenantID, brandID uuid.UUID, status string) {
 	t.Helper()
+	if status == "pending_launch" {
+		if err := launchfix.ForcePending(context.Background(), t, pool, tenantID, &brandID); err != nil {
+			t.Fatalf("force brand pending_launch: %v", err)
+		}
+		return
+	}
 	if err := launchfix.TrySetBrandStatusOn(context.Background(), t, pool, tenantID, brandID, status); err != nil {
 		t.Fatalf("set brand status %s: %v", status, err)
 	}
@@ -300,7 +310,7 @@ func holdStatusChange(t *testing.T, pool *db.Pool, f orchFixture, kind string) (
 // HTTP-driven cascade child T2 claim: the same gate applies (player-request
 // driver, sweeperDriven=false); a refused child is deferred, never dispatched.
 func TestHSEC5_Deposit_HTTPCascadeChildT2Claim_RefusedWhenNotActive(t *testing.T) {
-	for _, c := range append([]hsecCase{{"active_control", "", ""}}, hsecRefusals[:4]...) {
+	for _, c := range append([]hsecCase{{"active_control", "", ""}}, hsecRefusals[:6]...) {
 		t.Run(c.name, func(t *testing.T) {
 			pool, spy, orch, f := depositWorld(t, "mock-psp-h5-casc-"+strings.ReplaceAll(c.name, "_", "-"))
 			intentID := insertRawDepositIntent(t, pool, f, "pending")
@@ -623,7 +633,7 @@ func TestHSEC5_11_Helper_FailsClosed_MissingUnreadable(t *testing.T) {
 // refused too, and returns the original after reactivation.
 
 func TestHSEC5_Deposit_ReplayOfExistingIntentWhileNonActive_ReturnsOriginal_NewKeyRefused(t *testing.T) {
-	for _, c := range hsecRefusals[:4] {
+	for _, c := range hsecRefusals[:6] {
 		t.Run(c.name, func(t *testing.T) {
 			pool, spy, orch, f := depositWorld(t, "mock-psp-h5-rp-"+strings.ReplaceAll(c.name, "_", "-"))
 			first, err := initDeposit(orch, pool, f, "replay-key")
@@ -660,7 +670,7 @@ func TestHSEC5_Deposit_ReplayOfExistingIntentWhileNonActive_ReturnsOriginal_NewK
 }
 
 func TestHSEC11_RequestWithdrawal_ReplayOfExistingRequestWhileNonActive_ReturnsOriginal_NewKeyRefused(t *testing.T) {
-	for _, c := range hsecRefusals[:4] {
+	for _, c := range hsecRefusals[:6] {
 		t.Run(c.name, func(t *testing.T) {
 			pool := depositV2ScratchPool(t)
 			f := seedPayoutFixture(t, pool, 10_000, true)

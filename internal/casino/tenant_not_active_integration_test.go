@@ -51,6 +51,12 @@ func runtimePoolForGate(t *testing.T) *db.Pool {
 
 func setStatusForGate(t *testing.T, owner *db.Pool, tenantID uuid.UUID, status string) {
 	t.Helper()
+	if status == "pending_launch" {
+		if err := launchfix.ForcePending(context.Background(), t, owner, tenantID, nil); err != nil {
+			t.Fatalf("force tenant pending_launch: %v", err)
+		}
+		return
+	}
 	err := launchfix.TrySetTenantStatus(context.Background(), tenantID, status)
 	if err != nil {
 		t.Fatalf("set tenant status %s: %v", status, err)
@@ -140,7 +146,7 @@ func (w gateWorld) record(t *testing.T, err error) {
 func TestTenantNotActive_CasinoNewPostingsRefused(t *testing.T) {
 	owner := testPool(t)
 	rt := runtimePoolForGate(t)
-	for _, status := range []string{"suspended", "closed"} {
+	for _, status := range []string{"suspended", "closed", "pending_launch"} {
 		t.Run(status, func(t *testing.T) {
 			w := newGateWorld(t, owner, rt)
 			// History while ACTIVE: an open bet (round-open), a settled round
@@ -237,8 +243,8 @@ func TestTenantNotActive_CasinoNewPostingsRefused(t *testing.T) {
 				// ADR 0112 section 3.1: closed is terminal (HD-CTF-9 stays open), so the
 				// reopening this test used to perform is now refused by the database
 				// (LA020); the tenant keeps refusing new postings.
-				if err := launchfix.TrySetTenantStatus(context.Background(), w.f.tenantID, "active"); err == nil {
-					t.Fatal("a closed tenant must not be reopenable")
+				if err := launchfix.TrySetTenantStatus(context.Background(), w.f.tenantID, "active"); !launchfix.IsClosedTerminalRefusal(err) {
+					t.Fatalf("a closed tenant must not be reopenable: the database must answer LA020, got %v", err)
 				}
 				if _, err := w.deliver(t, CallbackEventBet, "b-after", "", "round-after", 100); !errors.Is(err, ErrTenantNotActive) {
 					t.Fatalf("a closed tenant must keep refusing a new bet: %v", err)
@@ -402,7 +408,7 @@ func TestTenantNotActive_CasinoStatusChangeVsPostingRace(t *testing.T) {
 // original_tombstoned (the C7 cas_tombstone_late_original input), also after
 // reactivation; a late original win is refused as tombstoned.
 func TestTenantNotActive_CasinoTombstonesAlwaysWrittenAndLateOriginalRecorded(t *testing.T) {
-	for _, status := range []string{"suspended", "closed"} {
+	for _, status := range []string{"suspended", "closed", "pending_launch"} {
 		t.Run(status, func(t *testing.T) { casinoTombstonesAlwaysWritten(t, status) })
 	}
 }

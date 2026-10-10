@@ -110,6 +110,29 @@ func New(t testing.TB, prefix string) string {
 	return scratchURL
 }
 
+// AsAdmin returns a URL for the SAME scratch database connected as the test-admin role
+// (TEST_ADMIN_DATABASE_URL's user). That role is a MEMBER of the application owner role but does
+// not own the tables itself, which is exactly the case the production role check must still
+// refuse (ADR 0112 security S-7). Used for that one assertion only; the helper stays in this
+// file so the CI guard on reading TEST_ADMIN_DATABASE_URL keeps holding.
+func AsAdmin(t testing.TB, scratchURL string) string {
+	t.Helper()
+	adminURL := os.Getenv("TEST_ADMIN_DATABASE_URL")
+	if adminURL == "" {
+		t.Skip("TEST_ADMIN_DATABASE_URL not set")
+	}
+	a, err := url.Parse(adminURL)
+	if err != nil {
+		t.Fatalf("parse TEST_ADMIN_DATABASE_URL: %v", err)
+	}
+	s, err := url.Parse(scratchURL)
+	if err != nil {
+		t.Fatalf("parse scratch URL: %v", err)
+	}
+	a.Path = s.Path
+	return a.String()
+}
+
 // assertUnprivilegedOwner proves the scratch database is used exactly as
 // every other integration test uses the shared one: connected as the
 // non-superuser, non-BYPASSRLS owner. Without this, a misconfigured admin

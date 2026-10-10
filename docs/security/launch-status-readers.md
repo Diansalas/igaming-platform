@@ -13,7 +13,15 @@
   `'suspended'` / `'closed'` outside the allow-list below) and
   `TestStatusReaderInventory_GoReadersAreExactlyTheReviewedSet` (the set of Go files reading either column by SQL is
   exactly the table in section 1; a new reader fails the test until it is added here and classified). Both are heuristics
-  over source text, the same family as `no_trigger_disable_test.go`.
+  over source text, the same family as `no_trigger_disable_test.go`. Hardened after code review C-1 / L-1: the literal pin
+  now scans EVERY `migrations/*.up.sql` (not a hand-picked file list) and
+  `TestStatusLiteralPin_ReviewedReaderFilesCarryNoSuspendedOrClosedLiteral` bans any quoted `suspended` / `closed` code
+  literal in the reviewed reader files whatever the variable, operator (`==`, `!=`, `IN`, `NOT IN`, `case`) or quote
+  style (three non-gate lines are allow-listed: `ChangeStatus` input validation and two `player_accounts` constants).
+  The inventory pin recognises a reader whether the status column appears before or after the `FROM` / `JOIN` of
+  `tenants` / `brands` (`SELECT t.status ... JOIN tenants`). `TestStatusPins_NegativeCases_ReviewerViolationsAreDetected`
+  proves the reviewer's two violating changes and the missed shape now fail the pins. Still heuristics: they do not
+  parse SQL, and a status read built by string concatenation would escape them.
 
 ## 1. Go readers (non-test)
 
@@ -55,7 +63,7 @@ Read from `pg_proc` on a fully migrated database (functions whose body reads eit
 | `kyc_submission_outbox_guard` (0114) | `tenants.status IS NOT DISTINCT FROM 'active'` | A | not active |
 | `ledger_adjustment_payload_refusal` (0113) | `p_tenant_status IS DISTINCT FROM 'active'` | A | non-active |
 | `ledger_adjustment_*`, `payment_manual_resolution_*`, `withdrawal_hold_resolution_*`, `withdrawal_requests_approved_hold_freeze` (0113, 0115, 0124) | tenant / brand status to record `tenant_status_at_*`, `brand_status_at_*`, or `= 'active'` tests | A / D | recorded verbatim; none of the recording columns has a vocabulary CHECK (checked), so `pending_launch` is storable |
-| `payment_manual_resolutions_guard`, `payment_manual_resolution_approvals_guard`, `payment_manual_resolution_execution_status` (0115) | **`tenant_status = 'closed'` / `IS DISTINCT FROM 'closed'`** | **L, LF7** | `pending_launch` is treated as NOT closed; tenant-scope force-resolution stays allowed for a pending tenant, harmless because a pending tenant has no payments (ledger-finance LF7, ADR 0112 section 14.1) |
+| `payment_manual_resolutions_guard`, `payment_manual_resolution_approvals_guard`, `payment_manual_resolution_execution_status` (0115, restated in 0125) | **`tenant_status = 'closed'` / `IS DISTINCT FROM 'closed'`** | **L, LF7** | `pending_launch` is treated as NOT closed; tenant-scope force-resolution stays allowed for a pending tenant, harmless because a pending tenant has no payments (ledger-finance LF7, ADR 0112 section 14.1) |
 | `operating_country_policies_enforce_ceiling` (0076) | licence ceiling; no status decision on the tenant | - | n/a |
 | `launch_subject_status_guard`, `launch_subject_insert_guard`, `launch_subject_owner_provisioned`, `launch_transitions_match_subject_at_commit`, `launch_requests_guard` (0128) | the new governance guards | W | by design |
 
@@ -67,7 +75,7 @@ constraint has a tenant / brand status vocabulary (checked against `pg_constrain
 
 | Where | Literal | Why it is safe for `pending_launch` |
 |---|---|---|
-| `migrations/0115_payment_force_resolution.up.sql` (3 sites, 4 lines) | `tenant_status = 'closed'` / `IS DISTINCT FROM 'closed'` | LF7: `pending_launch` is NOT closed; harmless, a pending tenant has no payments |
+| `migrations/0115_payment_force_resolution.up.sql` and `migrations/0125_payout_unbound_resolution_m4.up.sql` (each: 3 sites, 3 allow-listed lines) | `tenant_status = 'closed'` / `IS DISTINCT FROM 'closed'` | LF7: `pending_launch` is NOT closed; harmless, a pending tenant has no payments |
 | `migrations/0121_gameplay_stake_return_and_closure_guard.up.sql` | `IF NEW.status = 'closed'` in `tenants_status_change_gate` | the closure gate fires for a transition INTO `closed`, from any status |
 | `migrations/0128_launch_authorisation_status_governance.up.sql` | `IF OLD.status = 'closed'` in `launch_subject_status_guard` | closed is terminal (ADR 0112 3.1) |
 

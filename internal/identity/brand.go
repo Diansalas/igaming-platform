@@ -35,6 +35,13 @@ const StatusPendingLaunch = "pending_launch"
 // ErrNotAcceptingRegistrations is returned by the player registration entry points when
 // the brand or its tenant is not active (ADR 0112 section 7.3). HTTP answers 409
 // BRAND_NOT_ACCEPTING_REGISTRATIONS.
+// Unlaunched reports whether the brand or its tenant is still pending_launch (only meaningful
+// for a Brand returned by GetBrandBySlug). An unlaunched brand is hidden: registration and login
+// answer exactly as for an unknown brand slug (ADR 0112 7.3, security S-5/S-6).
+func (b Brand) Unlaunched() bool {
+	return b.Status == StatusPendingLaunch || b.TenantStatus == StatusPendingLaunch
+}
+
 var ErrNotAcceptingRegistrations = errors.New("identity: the brand is not accepting registrations")
 
 // ErrSlugTaken is returned when a tenant or brand slug collides with an
@@ -50,6 +57,10 @@ type Brand struct {
 	Name     string
 	Slug     string
 	Status   string
+	// TenantStatus is the owning tenant's status. Populated ONLY by GetBrandBySlug (the
+	// pre-authentication lookup) so the register / login handlers can hide an unlaunched
+	// (pending_launch) brand or tenant exactly like an unknown brand (ADR 0112 7.3).
+	TenantStatus string
 }
 
 // GetBrandBySlug resolves a brand by its public slug. This is the
@@ -66,9 +77,10 @@ func GetBrandBySlug(ctx context.Context, pool *db.Pool, slug string) (Brand, err
 	var b Brand
 	err := pool.WithoutTenant(ctx, func(ctx context.Context, tx pgx.Tx) error {
 		return tx.QueryRow(ctx,
-			`SELECT id, tenant_id, name, slug, status FROM brands WHERE slug = $1`,
+			`SELECT b.id, b.tenant_id, b.name, b.slug, b.status, t.status
+			   FROM brands b JOIN tenants t ON t.id = b.tenant_id WHERE b.slug = $1`,
 			slug,
-		).Scan(&b.ID, &b.TenantID, &b.Name, &b.Slug, &b.Status)
+		).Scan(&b.ID, &b.TenantID, &b.Name, &b.Slug, &b.Status, &b.TenantStatus)
 	})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Brand{}, ErrNotFound

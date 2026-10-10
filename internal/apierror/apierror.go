@@ -66,8 +66,9 @@ const (
 	// refused (it returns the original, read-only).
 	CodeTenantOrBrandNotActive Code = "TENANT_OR_BRAND_NOT_ACTIVE"
 	// CodeBrandNotAcceptingRegistrations: player registration was refused because the
-	// brand or its tenant is not 'active' (ADR 0112 section 7.3; a brand is created
-	// pending_launch). 409; nothing was created.
+	// brand or its tenant is suspended or closed (ADR 0112 section 7.3). A pending_launch
+	// brand or tenant is NOT reported this way: it answers 404 like an unknown brand
+	// (security S-5). 409; nothing was created.
 	CodeBrandNotAcceptingRegistrations Code = "BRAND_NOT_ACCEPTING_REGISTRATIONS"
 	// B13 (ADR 0111 2.4 / 2.9). 409 both. NOT_ACCEPTED is the ONE generic
 	// player-facing registration refusal (invalid detail, a card number, an

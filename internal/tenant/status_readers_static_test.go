@@ -59,6 +59,11 @@ var allowedLiteralCompares = map[string]string{
 	"migrations/0115_payment_force_resolution.up.sql:AND (tenant_status IS DISTINCT FROM 'closed' OR r.requested_by_scope = 'platform_acting')": "LF7",
 	"migrations/0115_payment_force_resolution.up.sql:AND (tenant_status IS DISTINCT FROM 'closed' OR a.decided_by_scope = 'platform_acting')":   "LF7",
 	"migrations/0115_payment_force_resolution.up.sql:IF v_policy.tenant_status = 'closed' AND v_actor.scope <> 'platform_acting' THEN":          "LF7",
+	// 0125 (L-1): the M4 payout-unbound resolution restates the same three 0115 comparisons
+	// (closed tenants: platform_acting only). Same LF7 reasoning: pending_launch is not 'closed'.
+	"migrations/0125_payout_unbound_resolution_m4.up.sql:AND (tenant_status IS DISTINCT FROM 'closed' OR r.requested_by_scope = 'platform_acting')": "LF7 (0125 restatement)",
+	"migrations/0125_payout_unbound_resolution_m4.up.sql:AND (tenant_status IS DISTINCT FROM 'closed' OR a.decided_by_scope = 'platform_acting')":   "LF7 (0125 restatement)",
+	"migrations/0125_payout_unbound_resolution_m4.up.sql:IF v_policy.tenant_status = 'closed' AND v_actor.scope <> 'platform_acting' THEN":          "LF7 (0125 restatement)",
 	// 0121 item B: the closure gate fires for a transition INTO 'closed'. pending_launch ->
 	// closed is such a transition and is counted like any other (a pending tenant has no
 	// bets, so the count is 0 and the closure proceeds).
@@ -111,13 +116,9 @@ func TestStatusLiteralPin_NoSuspendedOrClosedComparisonOutsideAllowList(t *testi
 			strings.Contains(l, "new.status") || strings.Contains(l, "old.status") || strings.Contains(l, "v_status")
 	}
 	for _, m := range migs {
-		base := filepath.Base(m)
-		// Migrations whose NEW.status / OLD.status / v_status concern OTHER tables are not
-		// tenant / brand readers; they are screened by the file list below.
-		if strings.HasPrefix(base, "0115_") || strings.HasPrefix(base, "0121_") || strings.HasPrefix(base, "0128_") ||
-			bytesMentionTenantStatus(t, m) {
-			check(m, literalCompare, tenantBrandLine)
-		}
+		// L-1: EVERY migration is scanned (the line filter below limits matches to tenant /
+		// brand status expressions), not a hand-picked file list.
+		check(m, literalCompare, tenantBrandLine)
 	}
 
 	// Non-test Go.
@@ -156,18 +157,6 @@ func TestStatusLiteralPin_NoSuspendedOrClosedComparisonOutsideAllowList(t *testi
 	}
 }
 
-// bytesMentionTenantStatus reports whether a migration reads tenants.status or brands.status
-// (so its NEW.status / v_status lines are screened too).
-func bytesMentionTenantStatus(t *testing.T, path string) bool {
-	t.Helper()
-	b, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	s := strings.ToLower(string(b))
-	return regexp.MustCompile(`(from|join)\s+(public\.)?(tenants|brands)\b[^;]{0,200}status|status[^;]{0,200}(from|join)\s+(public\.)?(tenants|brands)\b`).MatchString(s)
-}
-
 // reviewedStatusReaderFiles is the exact set of non-test Go files that read tenants.status or
 // brands.status by SQL text (docs/security/launch-status-readers.md, section "Go readers").
 // Each is classified there; every one tests = 'active' / <> 'active' / an explicit reviewed list.
@@ -186,9 +175,106 @@ var reviewedStatusReaderFiles = []string{
 	"internal/tenant/status.go",
 }
 
-var sqlStatusReader = regexp.MustCompile(
-	"(?is)`[^`]*\\b(select|update|insert\\s+into|join)\\b[^`]*\\b(tenants|brands)\\b[^`]*\\bstatus\\b[^`]*`|" +
-		"`[^`]*\\bstatus\\b[^`]*\\bfrom\\s+(public\\.)?(tenants|brands)\\b[^`]*`")
+// A raw string is a status reader when it names tenants / brands as a table (FROM / JOIN / UPDATE /
+// INTO, in any order relative to the status column, so `SELECT t.status ... JOIN tenants t` counts:
+// code review C-1) and mentions a status column (bare or alias-qualified).
+var (
+	statusReaderTable = regexp.MustCompile(`(?i)\b(from|join|update|into)\s+(public\.)?(tenants|brands)\b`)
+	statusReaderCol   = regexp.MustCompile(`(?i)\b(\w+\.)?status\b`)
+)
+
+func isStatusReaderSource(src string) bool {
+	for _, lit := range rawString.FindAllString(src, -1) {
+		if statusReaderTable.MatchString(lit) && statusReaderCol.MatchString(lit) {
+			return true
+		}
+	}
+	return false
+}
+
+// anyStatusLiteral matches a quoted 'suspended' / 'closed' in either quote style: in the REVIEWED
+// reader files no code line may mention them at all (a gate is `= 'active'` / `<> 'active'`), whatever
+// the variable name, the operator (==, !=, IN, NOT IN, switch/case) or the quote style.
+var anyStatusLiteral = regexp.MustCompile(`["'](suspended|closed)["']`)
+
+// statusLiteralLines returns the non-comment lines of a Go source that carry such a literal.
+func statusLiteralLines(src string) []string {
+	var out []string
+	for _, line := range strings.Split(src, "\n") {
+		trim := strings.TrimSpace(line)
+		if strings.HasPrefix(trim, "//") || strings.HasPrefix(trim, "--") || strings.HasPrefix(trim, "*") {
+			continue
+		}
+		if anyStatusLiteral.MatchString(trim) {
+			out = append(out, trim)
+		}
+	}
+	return out
+}
+
+// reviewedReaderLiteralAllow lists the only code lines in reviewed reader files that carry a
+// 'suspended' / 'closed' literal, with the reason each is not a status gate.
+var reviewedReaderLiteralAllow = map[string]string{
+	"internal/tenant/status.go:case \"active\", \"suspended\", \"closed\":":                                   "ChangeStatus input validation (not a gate)",
+	"internal/identity/player_account.go:PlayerStatusSuspended           PlayerAccountStatus = \"suspended\"": "player_accounts status constant, not tenants/brands",
+	"internal/identity/player_account.go:PlayerStatusClosed              PlayerAccountStatus = \"closed\"":    "player_accounts status constant, not tenants/brands",
+}
+
+func TestStatusLiteralPin_ReviewedReaderFilesCarryNoSuspendedOrClosedLiteral(t *testing.T) {
+	root := repoRoot(t)
+	seen := map[string]bool{}
+	for _, rel := range reviewedStatusReaderFiles {
+		b, err := os.ReadFile(filepath.Join(root, rel))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, line := range statusLiteralLines(string(b)) {
+			key := rel + ":" + line
+			if _, ok := reviewedReaderLiteralAllow[key]; ok {
+				seen[key] = true
+				continue
+			}
+			t.Errorf("%s carries a 'suspended'/'closed' literal in code (ADR 0112 LF7-LF9: gates test = 'active' / <> 'active'): %s", rel, line)
+		}
+	}
+	for key := range reviewedReaderLiteralAllow {
+		if !seen[key] {
+			t.Errorf("literal allow-list entry no longer matches (remove or fix): %s", key)
+		}
+	}
+}
+
+// Negative tests (code review C-1): the two violating changes the reviewer applied, and the reader
+// shape the old inventory regex missed, are now detected.
+func TestStatusPins_NegativeCases_ReviewerViolationsAreDetected(t *testing.T) {
+	for name, src := range map[string]string{
+		"gameplay_gate status == suspended || closed":  "if status == \"suspended\" || status == \"closed\" {\n return err\n}",
+		"payment gate NOT IN list":                     "q := `SELECT 1 FROM tenants WHERE id = $1 AND status NOT IN ('suspended', 'closed')`",
+		"IN list with other first entry":               "q := `SELECT 1 FROM brands WHERE status IN ('pending_launch', 'closed')`",
+		"switch case":                                  "switch s {\ncase \"closed\":\n}",
+		"single-quoted compare in SQL under any alias": "WHERE x.status = 'suspended'",
+	} {
+		if len(statusLiteralLines(src)) == 0 {
+			t.Errorf("%s: not detected by the literal pin", name)
+		}
+	}
+	if len(statusLiteralLines("// a suspended tenant is refused (\"closed\" is fine in a comment)\nx := 1")) != 0 {
+		t.Error("comments must not trip the pin")
+	}
+	for name, src := range map[string]string{
+		"SELECT t.status ... JOIN tenants": "q := `SELECT b.status, t.status FROM brands b JOIN tenants t ON t.id = b.tenant_id`",
+		"status before FROM tenants":       "q := `SELECT status FROM tenants WHERE id = $1`",
+		"join only, status in WHERE":       "q := `SELECT 1 FROM x JOIN tenants t ON t.id = x.tenant_id WHERE t.status = 'active'`",
+		"update status":                    "q := `UPDATE brands SET status = $2 WHERE id = $1`",
+	} {
+		if !isStatusReaderSource(src) {
+			t.Errorf("%s: not detected by the reader-inventory pin", name)
+		}
+	}
+	if isStatusReaderSource("q := `SELECT status FROM player_accounts`") {
+		t.Error("another table's status must not count as a tenants/brands reader")
+	}
+}
 
 func TestStatusReaderInventory_GoReadersAreExactlyTheReviewedSet(t *testing.T) {
 	root := repoRoot(t)
@@ -210,7 +296,7 @@ func TestStatusReaderInventory_GoReadersAreExactlyTheReviewedSet(t *testing.T) {
 			if err != nil {
 				return err
 			}
-			if sqlStatusReader.Match(b) {
+			if isStatusReaderSource(string(b)) {
 				got = append(got, rel)
 			}
 			return nil

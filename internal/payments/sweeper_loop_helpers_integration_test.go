@@ -145,6 +145,12 @@ func newLoopSweeper(pool *db.Pool, orch *Orchestrator, hint bool, resolver Outbo
 
 func setTenantStatus(t *testing.T, pool *db.Pool, tenantID uuid.UUID, status string) {
 	t.Helper()
+	if status == "pending_launch" {
+		if err := launchfix.ForcePending(context.Background(), t, pool, tenantID, nil); err != nil {
+			t.Fatalf("force tenant pending_launch: %v", err)
+		}
+		return
+	}
 	if err := launchfix.TrySetTenantStatusOn(context.Background(), t, pool, tenantID, status); err != nil {
 		t.Fatalf("set tenant status %s: %v", status, err)
 	}

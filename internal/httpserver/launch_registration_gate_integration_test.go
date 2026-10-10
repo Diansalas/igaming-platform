@@ -71,13 +71,22 @@ func TestLaunchGate_Registration_RefusedUnlessBrandAndTenantActive(t *testing.T)
 		t.Fatalf("control: an active brand of an active tenant must accept registration, got %d", code)
 	}
 
-	// pending_launch, suspended, closed brand of an ACTIVE tenant.
+	// pending_launch brand of an ACTIVE tenant: security S-5, answers EXACTLY like an unknown brand.
 	pending := mustCreatePendingBrand(t, pool, tenant.ID)
+	pCode, pErr := registerStatus(t, srv, pending.Slug)
+	uCode, uErr := registerStatus(t, srv, "no-such-"+uuid.NewString())
+	if pCode != http.StatusNotFound || uCode != http.StatusNotFound || pErr.Code != uErr.Code || pErr.Message != uErr.Message {
+		t.Fatalf("a pending_launch brand must be indistinguishable from an unknown one: %d %+v vs %d %+v", pCode, pErr, uCode, uErr)
+	}
+	if n := countPlayers(t, pool, tenant.ID, pending.ID); n != 0 {
+		t.Fatalf("a refused registration created %d player rows", n)
+	}
+	// suspended and closed brands keep the explicit 409.
 	suspended := mustCreateBrand(t, pool, tenant)
 	launchfix.SetBrandStatus(t, tenant.ID, suspended.ID, "suspended")
 	closed := mustCreateBrand(t, pool, tenant)
 	launchfix.SetBrandStatus(t, tenant.ID, closed.ID, "closed")
-	for name, b := range map[string]identity.Brand{"pending_launch": pending, "suspended": suspended, "closed": closed} {
+	for name, b := range map[string]identity.Brand{"suspended": suspended, "closed": closed} {
 		code, e := registerStatus(t, srv, b.Slug)
 		if code != http.StatusConflict || e.Code != apierror.CodeBrandNotAcceptingRegistrations {
 			t.Fatalf("%s brand: want 409 %s, got %d %+v", name, apierror.CodeBrandNotAcceptingRegistrations, code, e)
@@ -112,8 +121,14 @@ func TestLaunchGate_Registration_RefusedUnlessBrandAndTenantActive(t *testing.T)
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if code, e := registerStatus(t, srv, pendTenantBrand.Slug); code != http.StatusConflict || e.Code != apierror.CodeBrandNotAcceptingRegistrations {
-		t.Fatalf("pending_launch tenant: want 409, got %d %+v", code, e)
+	// security S-5/S-6: a pending_launch TENANT hides its (active) brand the same way, for register and login.
+	if code, e := registerStatus(t, srv, pendTenantBrand.Slug); code != http.StatusNotFound || e.Code != apierror.CodeNotFound {
+		t.Fatalf("pending_launch tenant: want 404 like an unknown brand, got %d %+v", code, e)
+	}
+	if resp := postJSON(t, srv, "/v1/auth/login", "", map[string]string{"brand_slug": pendTenantBrand.Slug, "email": "x@example.com", "password": "a-decent-password-1"}); resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("login on a brand of a pending_launch tenant: want 404, got %d", resp.StatusCode)
+	} else {
+		_ = resp.Body.Close()
 	}
 }
 

@@ -37,6 +37,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/identity"
@@ -281,6 +282,20 @@ func flip(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, brandID *uuid.UUID
 	if from == to {
 		return nil
 	}
+	if from == "closed" {
+		// closed is terminal (ADR 0112 3.1). There is no governed action for it, so the move is
+		// attempted as a RAW status UPDATE and the DATABASE answers (SQLSTATE LA020): the "not
+		// reopenable" assertions of the existing suites reach the guard instead of a Go check.
+		if brandID == nil {
+			_, err := tx.Exec(ctx, `UPDATE tenants SET status = $1 WHERE id = $2`, to, tenantID)
+			return err
+		}
+		if _, err := tx.Exec(ctx, `SELECT set_config('app.tenant_id', $1, true)`, tenantID.String()); err != nil {
+			return err
+		}
+		_, err := tx.Exec(ctx, `UPDATE brands SET status = $1 WHERE id = $2`, to, *brandID)
+		return err
+	}
 	action, err := actionFor(from, to)
 	if err != nil {
 		return err
@@ -395,6 +410,53 @@ func TrySetTenantStatusAt(ctx context.Context, url string, tenantID uuid.UUID, s
 // TrySetBrandStatusAt is the brand twin (the tenant GUC technique of ADR 0112 S6).
 func TrySetBrandStatusAt(ctx context.Context, url string, tenantID, brandID uuid.UUID, status string) error {
 	return run(ctx, url, func(tx pgx.Tx) error { return flip(ctx, tx, tenantID, &brandID, status, Hooks{}) })
+}
+
+// IsClosedTerminalRefusal reports whether err is the database's LA020 refusal (a status change
+// the governance guard refuses, here: leaving the terminal closed status).
+func IsClosedTerminalRefusal(err error) bool {
+	var pe *pgconn.PgError
+	return errors.As(err, &pe) && pe.Code == "LA020"
+}
+
+// ForcePending puts an existing tenant (brandID nil) or brand into pending_launch, a state no
+// governed move can reach (pending_launch is only ever an initial status). It exists so the
+// gate-matrix suites can exercise a subject that "had history while active" and is then pending
+// (and so every gate is shown to refuse pending_launch). It disables the status guard INSIDE one
+// owner transaction on a synthetic database (transactional DDL: an error leaves it enabled) and
+// is therefore the second sanctioned integration-tag-only exception in
+// internal/tenant/no_trigger_disable_test.go.
+func ForcePending(ctx context.Context, tb testing.TB, p *db.Pool, tenantID uuid.UUID, brandID *uuid.UUID) error {
+	tb.Helper()
+	return runOn(ctx, OwnerFor(tb, p), func(tx pgx.Tx) error {
+		if err := ensureOperators(ctx, tx); err != nil {
+			return err
+		}
+		if err := setPlatform(ctx, tx, requesterStaff); err != nil {
+			return err
+		}
+		table, trg := "tenants", "zz_launch_status_governed"
+		if brandID != nil {
+			table = "brands"
+		}
+		if _, err := tx.Exec(ctx, `ALTER TABLE `+table+` DISABLE TRIGGER `+trg); err != nil {
+			return err
+		}
+		if brandID == nil {
+			if _, err := tx.Exec(ctx, `UPDATE tenants SET status = 'pending_launch' WHERE id = $1`, tenantID); err != nil {
+				return err
+			}
+		} else {
+			if _, err := tx.Exec(ctx, `SELECT set_config('app.tenant_id', $1, true)`, tenantID.String()); err != nil {
+				return err
+			}
+			if _, err := tx.Exec(ctx, `UPDATE brands SET status = 'pending_launch' WHERE id = $1`, *brandID); err != nil {
+				return err
+			}
+		}
+		_, err := tx.Exec(ctx, `ALTER TABLE `+table+` ENABLE TRIGGER `+trg)
+		return err
+	})
 }
 
 // TrySetTenantStatusOn runs the governed fixture against the database p is connected to (shared
