@@ -567,6 +567,9 @@ evidence**, but they still make the verdict `contradictory` or `insufficient` wh
   - *r21 amendment (§19):* the not-paid predicate covers **every** matched reference (the verdict's `v_rs`), within
     the fixed I-2 budget; an invisible evidence line fails the run closed; and the stop condition of both the not-paid
     predicate and STANDING-1 for that attempt is the single ledger-finance RR-1 rule.
+  - *r30 amendment (§21; owner decisions 1 and 2 of 2026-10-09, ADR 0095 §48):* the recovery of RR-1 and of M2 (d) is NET
+    (debits minus credits under the causation, reversed debits excluded), and RR-1 also stops the BOUND finding of a recovered
+    `destination_mismatch` park, only on the complete predicate.
 - **M4-paid completions in the ledger join (R-2).** An M4-paid completion leaves the attempt `disputed` (A-15). The
   existing `ledger_join` check (`internal/reconciliation/payment_statement.go`, "every deposit / withdrawal_completed
   posting in the window maps to exactly one succeeded attempt", ~1428-1465) counts only `succeeded` attempts, so
@@ -1927,8 +1930,8 @@ included, loudly. It cannot occur in the designed session shape.
 | Fail-closed M4 evidence joins, `ErrPaymentEvidenceInvisible` (19.3) | `IMPLEMENTED` |
 | RR-3 doc: the one read outside the 64-line bound named (§4.4 note, §17.5); onboarding note (§10.4) | `IMPLEMENTED` (text) |
 | Migration 0127 | `NOT IMPLEMENTED` (not needed, 19.2) |
-| Bound (BOUND-CLEAR-1) finding of a recovered `destination_mismatch` not-paid park | `NOT IMPLEMENTED` (outside the ruling; Q-R21-1 open, LF recommendation recorded) |
-| Net recovery (debits minus credits) for M2 (d) and RR-1 (security LOW-1) | `NOT IMPLEMENTED` (open LF question, 19.6) |
+| Bound (BOUND-CLEAR-1) finding of a recovered `destination_mismatch` not-paid park | `NOT IMPLEMENTED` (outside the ruling; Q-R21-1 open, LF recommendation recorded). **Superseded (r30): RESOLVED by owner decision 1 (ADR 0095 §48), `IMPLEMENTED` against MOCK in §21** |
+| Net recovery (debits minus credits) for M2 (d) and RR-1 (security LOW-1) | `NOT IMPLEMENTED` (open LF question, 19.6). **Superseded (r30): RESOLVED by owner decision 2 (ADR 0095 §48), `IMPLEMENTED` in §21** |
 | Runbook entry for `ErrPaymentEvidenceInvisible` | `IMPLEMENTED` (text, `docs/runbooks/operational-runbooks.md` §16) |
 
 ### 19.5 Tests and evidence
@@ -1960,7 +1963,8 @@ included, loudly. It cannot occur in the designed session shape.
 Review of `gov-r21-rr1` (2026-10-09): `security` and `ledger-finance` both **APPROVE WITH CONDITIONS**. Security found no way for
 provider evidence to stop a finding early; ledger-finance confirmed the RR1-1 reading (exactly one distinct payout).
 
-- **Q-R21-1 (OPEN, architect + ledger-finance decision; `NOT IMPLEMENTED`).** Should RR-1 extend to the BOUND site of a
+- **Q-R21-1 — RESOLVED by owner decision 1 of 2026-10-09 (ADR 0095 §48); `IMPLEMENTED` against MOCK in §21 (r30).** The
+  original r21 record follows unchanged (history): *(OPEN, architect + ledger-finance decision; `NOT IMPLEMENTED`).* Should RR-1 extend to the BOUND site of a
   recovered `destination_mismatch` not-paid park (a finding keyed on X with no line)? Today it keeps raising (safe, noisy).
   **Ledger-finance recommendation (a recommendation, not a decision):** extend RR-1 to that bound site, stopping **only** when
   `m4NotPaidRecovered` holds **and** the single succeeded group's reference equals the bound reference X (or that line carries
@@ -1972,7 +1976,8 @@ provider evidence to stop a finding early; ledger-finance confirmed the RR1-1 re
   (INV-ADJ-6) allows at most one amount of compensation per causation and direction (the `withdrawal_failed` transaction's
   `player_cash` leg), so such a rule could never be met and would advertise a route that does not exist. Recovering a second
   payout is off-platform or needs a separately governed path; until then both findings keep raising.
-- **Security LOW-1 (OPEN ledger-finance question; `NOT IMPLEMENTED`).** The recovery sum of RR-1 (and of M2 (d), which it
+- **Security LOW-1 — RESOLVED by owner decision 2 of 2026-10-09 (ADR 0095 §48); `IMPLEMENTED` in §21 (r30), for both M2 (d)
+  and RR-1.** The original r21 record follows unchanged (history): *(OPEN ledger-finance question; `NOT IMPLEMENTED`).* The recovery sum of RR-1 (and of M2 (d), which it
   reuses) counts executed `debit_player` compensating entries only, not the **net**. With four-eyes collusion, two debits and
   then two credits with the same causation (each direction capped separately by INV-ADJ-6) would satisfy the sum and stop the
   finding while the double payout is in fact unrecovered. The fix would be **net recovery**: debits minus credits with the same
@@ -2107,6 +2112,250 @@ it the raise is the final `return`, after the audit row (`TestPayoutPostM4Cell_*
   (policy `tenant_system_read_executed`, 0125); the cell's own `state = 'executed'` and tenant predicates are therefore redundant there and are
   pinned for a principal-shaped session by `TestPostM4_PendingM4_NoSignal_EvenInAPrincipalShapedSession`.
 
+## 21. Owner decisions 1 and 2 of 2026-10-09 implemented: NET recovery for M2 (d) and RR-1; RR-1 at the bound `destination_mismatch` site (appendix, `ledger-finance`, 2026-10-09; branch `gov-r30-rr1net`, base `dad803d`; the design above is not rewritten)
+
+Provenance: ADR 0095 §48 decisions 1 (Q-R21-1) and 2 (RR-1 recovery calculation), recorded verbatim there and not
+reinterpreted here. They supersede the open status of Q-R21-1 and security LOW-1 (§19.6, whose text is kept as history with a
+RESOLVED marker). **No migration** (0127 stays reserved for the `destination_integrity_failure` task; 0128 is not used): every
+input already exists and is readable by the reconciliation session (21.6). Nothing here resolves a park, releases, settles or
+posts funds, changes an attempt or a withdrawal, or resolves, deletes or rewrites a reconciliation mismatch row. Every provider in
+the tests is `MOCK`.
+
+### 21.1 What was inspected before deciding (the K2 representation)
+
+- A K2 adjustment is a `ledger_adjustment_requests` row (0113) whose execution links exactly one `manual_adjustment` ledger
+  transaction (two entries: `player_cash` on the request's wallet and the tenant `manual_adjustment` account; MA040). Its
+  `causation_transaction_id` names the transaction it compensates.
+- A **compensating credit** under the not-paid causation F (the resolution's `withdrawal_failed`) is a `credit_player` request with
+  `causation_transaction_id = F`. MA020 (`player_open_payment_exposure`, 0119) blocks credits only for **deposit** exposure, so such a
+  credit is executable after an M4/M2 not-paid (the r21 tests executed one).
+- A **reversal of a recovery debit** D is, in K2, a `credit_player` request whose causation is D's own `manual_adjustment`
+  transaction (allowed: causation types refused are only deposit, deposit_reversal and tombstone; D has a `player_cash` leg on the
+  wallet). No K2 path writes `ledger_transactions.reverses_transaction_id` on a manual adjustment (MA040 refuses it on the linked
+  transaction), but nothing in the schema stops a separate posting from naming D there (ADR 0110 T5).
+- **INV-ADJ-6** (0115 `ledger_adjustment_payload_refusal`): for `compensating_entry`, the executed amount per (causation,
+  direction) never exceeds the causation's `player_cash` leg on the request's wallet and asset - for F, the withdrawn amount, for
+  debits and credits separately. `operational_error_correction` and `external_instruction` take an optional same-wallet causation
+  and are **not** capped. MA022 forces the request's wallet and asset to carry a `player_cash` leg of the causation.
+
+### 21.2 The NET formula (decision 2), shared by M2 (d) and RR-1 (a)
+
+`netRecoverySQL` / `netRecovery` (`internal/reconciliation/payment_statement_k3.go`), one query per not-paid resolution, with F =
+the resolution's `withdrawal_failed` transaction, W = its withdrawal's wallet, A = its asset:
+
+```
+net = sum(D.amount) over executed compensating_entry debit_player requests with causation F, wallet W, asset A,
+                    that are NOT reversed
+    - sum(C.amount) over EVERY executed credit_player request with causation F (any reason code, wallet or asset)
+recovered  <=>  net >= the resolution's amount
+```
+
+- **Reversed debit (counts zero):** an executed `credit_player` request of any reason code names D's `manual_adjustment` transaction
+  as its causation, **or** any ledger transaction names D in `reverses_transaction_id`.
+- **Positive side strict, negative side broad (fail closed).** Only `compensating_entry` debits are recovery (the M2 (d) rule; a
+  debit of another reason code is not a recovery of this payout). The subtraction counts every executed credit under F whatever its
+  reason code, and is not filtered by wallet or asset: it can only lower the net (MA022 forces W and A on it anyway).
+- **Precision:** amounts are `NUMERIC(38,0)` integer minor units summed in SQL and read as text into `big.Int`; no float, the
+  asset's exponent is never touched, and only same-asset debits are added.
+- **Used by:** M2 (d) (`checkM2Standing`, `pay_declared_not_paid_but_paid`; the wallet now comes from the resolution's withdrawal,
+  a new LEFT JOIN) and RR-1 (a) (`loadK3Evidence` -> `m4Resolution.recovered`, read by `m4NotPaidRecovered`, so R-1, STANDING-1 and
+  the bound site below all stop under one recovery). The finding details report the net (`recovered=<net> of <amount>`; it may
+  be negative). The M2 (d) hint now says "a NET recovery of at least the withdrawn amount ... minus every executed credit with that
+  causation".
+
+**INV-ADJ-6 consequence (no dead logic).** Because the compensating debits under F are capped at the amount and the cap counts a
+reversed debit too, `net >= amount` holds exactly when the debits under F reach the amount, none of them is reversed and no credit
+names F. Any offset therefore keeps the finding raised, and a reversed recovery cannot be redone under F (the cap is spent): the
+finding stays raised and recovery is off-platform or a separately governed path (the Q-R21-2 reasoning, unchanged). The formula is
+still written as the net, not as a set of existence checks, so that it stays correct if the cap ever changes; no partial-reversal
+or depth-2 arithmetic was added, because under the cap it could never change a verdict.
+
+### 21.3 RR-1 at the BOUND `destination_mismatch` site (decision 1)
+
+`m4NotPaidRecoveredBound` (`payment_statement_m4.go`), consulted by `capturedUnposted` for payouts, i.e. at both bound sites
+(`matchPayment`'s bound case with a line this run, `checkUnmatchedAttempts` with none). The BOUND-CLEAR-1 finding (keyed on X, the
+post-M4 hint) stops **only** when ALL hold:
+
+| Condition | Code |
+|---|---|
+| the park is `destination_mismatch` (the only bound reason M4 not-paid admits) and still holds X = the reference pinned at submission (`provider_reference_at_submission`) | `a.terminalReason`, `a.providerRef != ""`, `r.pinnedRef == a.providerRef` |
+| the complete RR-1 predicate holds: NET recovery >= amount; exactly one distinct succeeded payout group (RR1-1) of the attempt's amount and asset; no reversed payout line (RR30-3) | `m4NotPaidRecovered` |
+| that single payout is positively this park's: its reference is X, **or** a line of its group carries the attempt's merchant reference; and **no** line of the group names another merchant reference | group scan over `notPaidLines` |
+
+A destination mismatch is itself never recovery. A later callback, a destination that later "looks valid", a debit alone (no
+succeeded payout), an unrelated payout (another reference, no merchant reference) and a second payout are not read as recovery
+and keep the finding raised. `destination_integrity_failure` is **not** M4-eligible and never stops here (owner decision 4; another
+task owns it). R-1 and the bound site share one recovery: with an unrelated payout R-1 may stop (one recovered payout) while the
+bound finding keeps raising (that payout is not positively this park's) - pinned.
+
+### 21.4 Readings taken (RR30-n; the safest each time)
+
+- **RR30-1 (subtraction side).** Unfiltered by reason code, wallet and asset (21.2). Under MA022 the wallet/asset filters would be
+  equivalent; leaving them out removes a fail-open path should MA022 ever change.
+- **RR30-2 (re-debit after an offset).** A debit whose causation is a credit (the correction of a correcting credit) is not counted:
+  "same causation" is F. Fail closed: the finding stays raised; the operator path is off-platform or a governed path.
+- **RR30-3 (reversed payout line).** `m4NotPaidRecovered` also requires that no `reversed` payout line exists on the references R-1
+  reads. A recovery from the player after the PSP reported the payout reversed is a possible over-recovery; it must not silently
+  stop the findings. This tightens R-1, STANDING-1 and the bound site alike (raise direction only). A `declined` line (the M4
+  evidence shape) does not block the stop (tested).
+- **RR30-4 (group attribution at the bound site).** "That line carries the attempt's merchant reference" is read over the
+  dedupe group: at least one line of the group carries it and none names another; a copy without a merchant reference (a
+  re-delivery on a matched reference) joins the group.
+- **RR30-5 (M2 (d) without a visible withdrawal).** No recovery is read and (d) keeps raising (raise-direction fail closed; M2 keeps
+  its availability, unlike the M4 joins of §19.3 which fail the run). An executed M2 payout always has its withdrawal (0115 CHECK).
+- **RR30-6 (M2 (c2) unchanged).** `pay_declared_paid_compensated_but_paid` still counts recovery debits against the compensating
+  credits (debit-only). It is not the M2 (d) rule and not in decision 2's scope; recorded as an open question (21.8).
+  *Superseded by the review round: (c2) now uses the same net (21.11, LF C-c).*
+
+### 21.5 Deliverable status
+
+| Item | Status |
+|---|---|
+| Decision 2: NET recovery for M2 (d) | `IMPLEMENTED` |
+| Decision 2: NET recovery for RR-1 (a) (R-1, STANDING-1 and the bound site) | `IMPLEMENTED` against MOCK |
+| Reversed-debit exclusion (K2 credit caused by the debit; ledger reversal) | `IMPLEMENTED` |
+| RR1-1 (one distinct payout) and the equal amount/asset rule kept | `IMPLEMENTED` (unchanged) |
+| RR30-3 reversed payout line keeps raising | `IMPLEMENTED` |
+| Decision 1: RR-1 at the bound `destination_mismatch` site (both bound sites) | `IMPLEMENTED` against MOCK |
+| `destination_integrity_failure` | `NOT IMPLEMENTED` here by instruction (not M4-eligible; owned by another task) |
+| Migration | none (0127 reserved; 0128 not needed: 21.6) |
+| Review round: M2 (c2) on the same net (LF C-c) | `IMPLEMENTED` (21.11) |
+| Review round: permanent-raise cases documented (LF C-b) | `IMPLEMENTED` (text, 21.12 and the runbook) |
+| Review round: credit-after-stop monitoring rule (security LOW-1) | `NOT IMPLEMENTED` (tracked follow-up, 21.13) |
+
+### 21.6 Why no migration
+
+The net reads only `ledger_adjustment_requests` (executed rows are visible to the reconciliation session through
+`tenant_system_read_executed`, 0113, whatever the reason code) and `ledger_transactions` (tenant isolation policy). The lookups
+use existing indexes: `ledger_adjustment_requests_causation (tenant_id, causation_transaction_id)` for both the causation F and the
+"credit caused by D" probe, and `idx_ledger_transactions_reverses` for the ledger reversal probe. The M2 wallet comes from
+`withdrawal_requests` through `payment_manual_resolutions.withdrawal_request_id` (0115, NOT NULL for payouts). No column,
+constraint, policy or function was needed.
+
+### 21.7 Pins flipped deliberately
+
+- `TestRR1_BoundDestinationMismatchPark_BoundFindingOutsideTheRuling` (r21: "bound finding kept") is replaced by
+  `TestRR1_BoundDestinationMismatchPark_StopsUnderOwnerDecision1` (partial keeps raising; complete stops R-1 and the bound finding).
+- `TestRR1_OtherCausation_Unrelated_Partial_KeepRaising`: its step "a compensating credit with the causation keeps raising, then
+  debits stop it" is no longer reachable under the net (the credit is subtracted and the cap forbids re-debiting); the credit case
+  moved to `TestRR30_DebitOffsetByCredit_KeepsRaising_NetReported`, and the test keeps its other-causation, unrelated and partial
+  cases and its control.
+- `declaredNotPaidButPaidResolutionHint` (M2 (d)) names the NET rule; `TestK3_Y11_NotPaidButPaidHintTextIsHonest` still holds.
+
+### 21.8 Tests and evidence
+
+- Pure (no database), `internal/reconciliation/payment_statement_rr1_test.go`: `TestRR30_Pure_ReversedPayoutLineKeepsRaising`
+  (RR30-3, with the declined-line control) and `TestRR30_Pure_BoundDestinationMismatch_StopRuleAndEveryNegation` (every condition
+  of 21.3 and its negation, through `capturedUnposted` and through `checkUnmatchedAttempts`; scope: `destination_integrity_failure`,
+  another bound reason, a moved X, an empty X, no M4, no K3 evidence; R-1 stops while the bound finding raises on an unattributed
+  payout).
+- Integration (real stream, real M4 four-eyes execution, real K2 path, runtime-shaped role, private scratch databases),
+  `internal/payments/m4_resolve1_rr1net_integration_test.go`:
+  - recovered not-paid M4 and NET clearing: the controls of every test below;
+  - debit-only false positive: a full debit stops, ONE unit of compensating credit with the causation re-raises both findings on
+    every run with `recovered=839 of 840`, the re-debit is refused by INV-ADJ-6 and the findings stay raised
+    (`TestRR30_DebitOffsetByCredit_KeepsRaising_NetReported`);
+  - a credit of another reason code is subtracted (`..._CreditOfAnotherReasonCode_IsSubtracted`); a debit of another reason code is
+    not recovery (`..._DebitOfAnotherReasonCode_IsNotRecovery`);
+  - a reversed debit does not count, both by a K2 credit caused by the debit and by a planted ledger reversal
+    (`..._ReversedDebit_DoesNotCount`);
+  - wrong wallet and wrong asset are refused by K2 and keep raising; a credit under an unrelated causation does not offset
+    (`..._WrongWalletOrAsset_NoRecovery`); wrong causation (even the full amount) stays pinned by
+    `TestRR1_OtherCausation_Unrelated_Partial_KeepRaising` and, at the bound site, by `..._IncompleteRecoveries_KeepRaising`;
+  - duplicate recovery: a replayed final approval is `ErrNotPending`, posts nothing and is not counted twice; a second full debit is
+    refused by the cap (`..._DuplicateRecovery_ReplayIsIdempotent_NoDoubleCount`);
+  - M2 (d) under the same net: offset by a credit, reversed debit (`TestRR30_M2d_NetRecovery`);
+  - recovered `destination_mismatch` M4: the bound finding raises before any payout, after a debit alone, after a later succeeded
+    callback; stops in-run and on standing runs and re-deliveries once complete; history rows kept, none resolved, park/attempt/
+    withdrawal unchanged; a second payout raises again (`TestRR30_BoundDestinationMismatch_RecoveredStops_OnlyOnCompleteRecovery`);
+    wrong causation, partial and offset keep raising (`..._IncompleteRecoveries_KeepRaising`); an unrelated payout, a payout on X
+    naming another merchant, a second payout, an unequal amount and another asset keep raising (`..._UnattributedPayouts_KeepRaising`);
+    tenant isolation with two tenants (`..._CrossTenantIsolation`);
+  - the flipped pin `TestRR1_BoundDestinationMismatchPark_StopsUnderOwnerDecision1`.
+- Final runs (`-race -tags integration -count=1 -p 1`, targeted `-run`, private scratch database `r30_rr1net`, no full-repo sweep;
+  0 SKIP everywhere, so the integration tests did run): `internal/reconciliation/...` whole package set 436 PASS (incl. subtests) /
+  0 FAIL; `internal/payments -run 'TestM4|TestB11|TestK3|TestB13B|TestRR|TestMA020|TestHSEC|TestC3' -timeout 90m` 319 top-level PASS
+  (+284 subtests) / 0 FAIL / 0 SKIP (2341 s; a first attempt hit go test's default 10-minute timeout at 41 PASS and was re-run with
+  `-timeout 90m`); after the last test edit, `-run 'TestRR1_|TestRR30_|TestRR4_|TestRR5_|TestM4Recon_|TestK3_C7_|TestK3_Y05_|TestK3_Y11_'`
+  32 top-level PASS (+9 subtests) / 0 FAIL / 0 SKIP, and the reconciliation unit tests (`-race`) PASS. `go test ./internal/alerting
+  -count=1` PASS. gofmt clean; `go vet ./internal/...` clean with and without `-tags integration`; golangci-lint 2.9.0
+  `--build-tags integration --new-from-rev=dad803d ./internal/...` 0 issues. LOCAL evidence only; MOCK sources; no real provider.
+
+### 21.9 Mutation evidence
+
+`docs/plans/prh2-hardening-round/prh2-r30-rr1net-mutation-kill.txt`: 27 counted mutants (15 net formula / M2 (d) / RR-1 wiring, 1
+RR30-3, 11 bound site), **24 killed**, 3 survivors disclosed as EQUIVALENT: N10/N11 (the debit wallet and asset filters; MA022
+`causation_not_on_wallet`, as r21 A03/A04) and N12 (the credit subtraction's `state = 'executed'`; the system-shaped session sees
+executed rows only, `tenant_system_read_executed`). N04 survived the first run and was killed after a test gap was closed (an
+unrelated-causation credit). Three mutants were INVALID on the first run (an unused variable), fixed and killed.
+
+### 21.10 Residuals and open questions (nothing here is decided by this change)
+
+- **Q-R30-1 — RESOLVED in the review round (LF C-c; 21.11, `IMPLEMENTED`).** Original text kept: *(ledger-finance / owner;
+  open).* M2 (c2) (`pay_declared_paid_compensated_but_paid`) still counts its recovery
+  debit-only (debits caused by the compensating credits against the credited amount). It has the LOW-1 shape but is not the M2 (d)
+  rule and is outside decision 2's text; extending the net there is a separate, small change if wanted.
+- **Residual (RR30-2, by the cap).** Once a recovery under F is offset or reversed, it cannot be redone under F (INV-ADJ-6 counts
+  the spent amount): the findings stay raised for good. That is the safe direction; the operator path is off-platform recovery,
+  tracked through the rows' `investigation_status`, or a separately governed path (none exists; Q-R21-2 reasoning).
+- **Residual (RR30-3).** A `reversed` payout line keeps R-1, STANDING-1 and the bound finding raised permanently, even when the
+  platform later credits the player back (that credit lowers the net too). Noisy, never silent.
+- **`destination_integrity_failure`.** Excluded by instruction and by owner decision 4; if the other task later makes it
+  M4-eligible, extending `m4NotPaidRecoveredBound`'s reason scope is a deliberate change (pure test and mutant B02 pin the
+  exclusion).
+- §4.8 / F-1 and the D-7, T10 and S-3 launch flags are unchanged: everything here runs against MOCK sources only.
+
+### 21.11 Review round (security + ledger-finance: APPROVE WITH CONDITIONS): M2 (c2) on the same net (LF C-c / Q-R30-1)
+
+`pay_declared_paid_compensated_but_paid` (M2 (c2), `checkM2Standing`) now reads its recovery through the same `netRecovery`:
+for each executed compensating credit C whose causation is the Step B transaction, recovery = executed `compensating_entry`
+debits with causation C on the withdrawal's wallet and the resolution's asset, none reversed, minus every executed credit with
+causation C; the per-credit nets are summed and compared with the credited total. INV-ADJ-6 caps the debits under each C at
+C's amount, so the sum reaches the total only when every credit is fully and irreversibly recovered (two credits: recovering
+one does not clear). No visible withdrawal: no recovery is read and (c2) keeps raising. Raise direction only; the (c)
+annotation reports the same net. The hint names the net. `IMPLEMENTED`.
+
+Tests: `TestRR30_C2_NetRecovery` (partial keeps raising and the remaining unit clears; a replayed approval is `ErrNotPending`
+and not double counted; a credit under C re-raises; a reversed recovery debit counts zero; wrong wallet and wrong asset are
+refused by K2, a full debit under an unrelated causation does not count; two credits must each be recovered; cross-tenant: B
+cannot cite A's credit and B's recovery never clears A). The existing (c2) tests (`TestK3_Y05_`, `TestK3_Y06_`, the K3 recon set)
+still pass. Mutants C01-C07 (21.14).
+
+### 21.12 Findings with NO automatic stop path (LF C-b)
+
+The following keep `pay_declared_not_paid_but_paid`, `pay_declared_paid_compensated_but_paid` and the post-M4
+`pay_captured_unposted` (STANDING-1 and the bound site) raising **permanently**; nothing in the platform will stop them:
+- a `reversed` payout line on any reference the M4 not-paid reads (RR30-3);
+- an executed credit (any reason code) whose causation is F (for (c2): C): it is subtracted, and INV-ADJ-6 caps the debits under
+  F (C) at the amount, so the net can never again reach it;
+- a reversed recovery (a credit caused by the recovery debit, or a ledger reversal of it): the debit counts zero and the cap
+  counts it as spent, so it cannot be redone under F (C).
+
+The exits are off-platform recovery (PSP or player), tracked by staff through the rows' `investigation_status`, or a future,
+separately governed path (none exists). Runbook: `docs/runbooks/operational-runbooks.md` §16, "Related: recovery findings with
+NO automatic stop path".
+
+### 21.13 Monitoring follow-up (security LOW-1, review round; tracked, `NOT IMPLEMENTED`)
+
+The net sees only K2 entries whose causation is F (or C). After an RR-1 (or M2) stop, a four-eyes pair can return the money to
+the same player through a credit with **no** causation (`goodwill_credit`; `operational_error_correction` /
+`external_instruction` without one) or with an unrelated causation; the net cannot see it. Tracked follow-up (not built): a
+monitoring rule "flag any `credit_player` on the same wallet after an RR-1 stop". Until it exists the mitigation is the four-eyes
+approval and the periodic K2 audit review (runbook entry above).
+
+### 21.14 Review-round evidence
+
+- Mutation (appended to `docs/plans/prh2-hardening-round/prh2-r30-rr1net-mutation-kill.txt`, run 3): 7 counted (c2) mutants
+  C01-C07 (debit-only sum; recovery read under the Step B causation instead of each credit; threshold off by one; only the first
+  credit read; and the shared-SQL rules N01, N05, N14 re-run against the (c2) tests), **7 killed**, 0 survivors. C02 was INVALID on
+  its first attempt (an unused variable), fixed and killed. Control: pure 31 PASS, integration 33 PASS, 0 FAIL, 0 SKIP.
+
+- Runs after the merge of main (`72bf943`) and the review-round changes (`-race -tags integration -count=1 -p 1`, targeted, fresh
+  private scratch database; 0 SKIP everywhere, so the integration tests did run): `internal/reconciliation/...` 436 PASS (incl.
+  subtests) / 0 FAIL; `internal/payments -run 'TestRR1_|TestRR30_|TestRR4_|TestRR5_|TestM4Recon_|TestK3|TestMA020'` 121 top-level
+  PASS (+65 subtests) / 0 FAIL / 0 SKIP; reconciliation unit tests (`-race`) PASS; `go test ./internal/alerting -count=1` PASS;
+  gofmt clean; `go vet ./internal/...` clean in both tag modes; golangci-lint 2.9.0 `--new-from-rev=dad803d` 0 issues.
+
 ## 22. Ruling: instrument state does not gate settlement (ADR 0095 section 48 decision 3) - verified, tested, no production change (`payments`, 2026-10-09; branch `gov-r31-settle`, base `dad803d`)
 
 ### 22.1 The ruling and what it replaces
@@ -2182,6 +2431,118 @@ the live instrument row) are killed by (a) and (d); M3 (the dispatch gate weaken
   on the existing exceptional-resolution paths (decision 7, section 4), not on settlement being blocked.
 - The tests drive MOCK providers only. The HTTP-level request test uses the repository's standard owner test pool (the server fixtures are built that way); the
   runtime-role proof of the same refusal is `TestR31_B_`.
+
+
+---
+
+## 25. D-7 conformance: the M4 evidence standard as a traceable model (appendix, `qa`, 2026-10-09; branch `gov-r34-d7`, base `dad803d`; the design above is not rewritten)
+
+**What this section is.** Owner decision 6 (D-7, ADR 0095 §48) APPROVED the M4 evidence standard: before any non-MOCK M4 payout resolution or payment the platform must hold positive evidence sufficient to establish, as applicable, (1) the correct withdrawal, (2) the correct payout attempt, (3) the correct provider transaction/reference, (4) the correct player/tenant context, (5) the correct asset, (6) the correct amount, (7) the correct destination/instrument, (8) the final provider status, and (9) the causal relationship between the provider evidence and the attempt; **no single untrusted provider field may be sufficient to establish all of this**; ambiguous evidence parks, alerts and is investigated, and is never guessed, paid or resolved automatically. This section supersedes the "D-7 (OPEN, owner)" bullet of §17.4: the standard is decided. It does **not** enable non-MOCK M4 and connects no provider. The matrix below was built by reading migration 0125, `manual_resolution*.go`, `payout_post_m4.go` and `internal/reconciliation/payment_statement_{m4,k3}.go`, not from the ADR text above; line numbers refer to `migrations/0125_payout_unbound_resolution_m4.up.sql` at the base.
+
+### 25.1 Deliverable status
+
+| Item | Status |
+|---|---|
+| D-7 matrix (25.2-25.3) and the conformance suite (25.8) | `IMPLEMENTED` against MOCK (documentation and tests) |
+| Go-side, refusal-only eligibility check (25.4: three checks the SQL verdict does not carry) | `IMPLEMENTED` (no migration; migration 0125 and the SQL functions are untouched) |
+| SQL equivalents of those three checks, and a positive destination clause | `NOT IMPLEMENTED` (need a migration; reported, 25.4; the `0127` owner or a later migration) |
+| Adapter contract and conformance checklist (25.6) | `IMPLEMENTED` as an interface plus a pure checker; **every provider-specific implementation is `PROVIDER DEPENDENT` and `NOT IMPLEMENTED`** |
+| Non-MOCK M4 (paid or not paid) | **`BLOCKED`** (25.7) |
+
+### 25.2 The matrix, short form
+
+| # | D-7 property | Enforced by (exact) | Re-checked when the final approval executes | Proved by (`internal/payments`) | Verdict |
+|---|---|---|---|---|---|
+| 1 | correct withdrawal | resolution's `withdrawal_request_id` is DB-forced from the attempt (guard `:634`); withdrawal `submitted` (`:694`); amount/asset equal (`:697`) | DB `-> executing` (`:893-899`); Go `m4ExecutionRefusal`; MR041 (`:976`, ledger `correlation_id` = withdrawal; entries on the withdrawal's wallet `:1015-1017`) | `TestD7_P1_WrongWithdrawal` | enforced |
+| 2 | correct payout attempt | M4 scope `payment_m4_in_scope` (`:203`, request `:691`); evidence is read only by the attempt's platform-issued merchant reference / bound reference / typed Y (`:278-312`); one reference naming two merchant references is `contradictory` (H-2 `:353-358`); the requested line must be the deterministic line (`:753`) | DB `:889-905`; Go scope + reference pin + re-evaluation (`m4EvidenceRefusal`); MR041 pins state/reason/reference (`:984-996`) | `TestD7_P2_WrongAttempt` | enforced |
+| 3 | correct provider transaction/reference | exactly one succeeded group (`:332`); R must not carry the reserved prefix, be attributable (`payment_y_attributable`), have a tombstone, be held by another attempt as reference or typed Y, differ from the attempt's own Y, equal a `withdrawal_requests.provider_reference`, key a ledger row or the `provider:R` idempotency key (`:367-385`); the importer's CHECK refuses a reserved-prefix line; **Go: R is not any platform-issued merchant reference (25.4 G-REF)**; R is pinned into the resolution, the ledger key `provider:R` and MR041 (`:1004-1006`) | DB `:901-905`; Go re-evaluation; MR041 | `TestD7_P3_WrongProviderReference` | enforced; **residual: for an unbound attempt R has no platform-side fact to be compared with (25.5)** |
+| 4 | correct player / tenant | `tenant_id = p_tenant` on every read plus FORCE RLS; `payment_m4_scope_visible` (`:218`, error MR060, never a verdict); tenant is the server-side target (`NewResolutionTarget`); platform actor needs an in-force grant for THAT tenant; entries must sit on the withdrawal's `wallet_id` (MR041 `:1016`) | same predicates in `payout_m4_evidence` at `-> executing`; MR041 | `TestD7_P4_WrongPlayerOrTenant` | enforced (the `tenant_id` predicates inside the function are defence in depth to RLS: mutant S27 survives, 25.9) |
+| 5 | correct asset | paid: I-1 `:363`; not paid: `:448`; R-4 DB-forced asset (guard `:597`, `:697`) | DB `:897-899`; Go `m4ExecutionRefusal`; MR041 `e.asset_code = r.asset_code` | `TestD7_P5_P6_WrongAssetOrAmount` | enforced |
+| 6 | correct amount | as 5 (`NUMERIC`, equality in minor units) | as 5 | `TestD7_P5_P6_WrongAssetOrAmount` | enforced |
+| 7 | correct destination / instrument | **negative only:** `destination_mismatch` is outside the paid scope (`:210`, guard `:691`, MR012; Go `M4ResolvableDispute`); the per-attempt destination snapshot is write-once (0123). **No positive evidence: a statement line has no destination field.** For non-MOCK sources the Go gate (G-NONMOCK) refuses | DB `:889`; Go scope | `TestD7_P7_WrongDestination`, `TestD7_NonMockM4IsBlocked_*` | **PARTIAL (25.4 G-DEST)** |
+| 8 | final provider status | paid needs one succeeded group and no declined/reversed/pending line on the merchant reference, bound reference, R or any Y in any import, MOCK and unsealed included (`:344-351`); not paid needs a declined line and no succeeded/pending/reversed line on the same set plus every matched PSP reference D (`:414-422`); closed status vocabulary (CHECK); R-1 and the post-M4 cells catch later reversals | DB `:901-905`; Go re-evaluation | `TestD7_P8_NonFinalProviderStatus` | enforced for **M4 paid** and for the platform vocabulary; **PARTIAL for M4 NOT PAID** (G-SUCCESS-PARK, 25.4: several parks are created on a provider success that is not stored durably, so a later declined line could release the hold); the provider-to-vocabulary mapping is `PROVIDER DEPENDENT` (checklist C3, C7) |
+| 9 | causal relationship | attribution by the merchant reference only; not-paid needs the source's `payout_lines_carry_merchant_reference` (`:454`), no NULL-merchant payout line in a declaring import (`:426-435`), `occurred_at >= last_sent_at` (`:449`), coverage over `[created_at, last_sent_at + 24 h]` (`:455-456`); sealed imports (`:401`, `:452`) with the HMAC verified in Go at request and execution (`verifyImportSeals`); platform_acting approver floor (`:847`); four-eyes portal confirmation; **Go: the paid line lies inside `[attempt's first send, its import's coverage_end]` (25.4 G-TIME)** | DB `:901`; Go seals + re-evaluation + eligibility; R-1 after execution | `TestD7_P9_CausalLink`, the meta tests | enforced; **authenticity of the statement content is S-3/T10, `PROVIDER DEPENDENT`** |
+
+### 25.3 What each enforcement is, and where the Go layer is the only one
+
+- **Both layers.** Properties 1, 2, 3 (except G-REF), 4, 5, 6, 8 and 9 (except G-TIME and the seal) are enforced in the database at the request (`payment_manual_resolutions_guard`, INSERT) **and** again at `pending -> executing` (the same guard, `:881-905`), with Go as the first check at execution (`m4ExecutionRefusal`, `m4EvidenceRefusal`), and MR041 as the commit-time check of what was posted.
+- **Go only, by necessity.** The import seal HMAC (the key never enters the database). The database sees only that a seal is present.
+- **Go only, found by this work (25.4).** Three checks: non-MOCK evidence, "R is not a platform-issued merchant reference", "the paid line lies inside the attempt's window". They run at the request (`requestInTx`) and at the execution (`m4EvidenceRefusal`), after the seals and before anything can post; a static pin (`TestD7_EligibilityRefusalRunsOnEveryM4Path_AfterTheSeals`) fixes the call order. The database's `-> executing` re-check does not carry them (a SQL gap, reported).
+
+### 25.4 Gaps found (each with the test that exhibits it)
+
+| Id | Gap | Exhibited by | Disposition |
+|---|---|---|---|
+| **G-REF** | `payout_m4_evidence` returned `paid` for a succeeded line whose provider reference **equals the platform's own merchant reference** (or another attempt's). One provider field (the merchant-reference echo) then supplied both the causal link (property 9) and the "provider transaction reference" (property 3) and became the ledger key `provider:R`. | `TestD7_P3_WrongProviderReference/R_equals_the_attempt's_OWN_merchant_reference...` and `.../R_equals_ANOTHER_attempt's_merchant_reference...` assert the **database** still reads `paid` (a pin of the SQL gap that flips when the SQL gains the clause) and that the request is now refused in Go with `m4EligPlatformRef` | **Fixed in Go** (refusal-only, no migration). Smallest SQL fix: in the attribution block (`:367`) add `OR EXISTS (SELECT 1 FROM payment_attempts a WHERE a.tenant_id = p_tenant AND a.merchant_reference = v_g.ref)` |
+| **G-TIME** | The paid branch reads **no timestamp**: a succeeded line dated before the attempt existed, or after the coverage its own import vouches for, read `paid`. A payout that predates the attempt cannot be its payout. (The not-paid branch already requires `occurred_at >= last_sent_at`.) | `TestD7_P9_CausalLink/..._BEFORE_the_attempt_existed...`, `.../..._AFTER_the_coverage...` (database `paid`, Go refusal), first-send boundary (one microsecond before is refused, the instant itself executes) | **Fixed in Go** (`occurred_at` in `[first_submitted_at (falling back to last_sent_at), import.coverage_end]`; zero tolerance, fail closed: park and investigate; an attempt with no recorded send has no eligible line). A line dated before `last_sent_at` but after the first send is **not** refused, because an earlier send of a resent attempt may be the one that paid (security LOW-2). The lower bound was `created_at` in the first revision. A per-source skew tolerance, applied to the lower bound only, is a checklist declaration (C11, bounded, default and MOCK zero, ledger-finance reviewed per source). Smallest SQL fix, carried by `gov-r32-integrity` (0127) with the same bound: add the two comparisons to the `v_line` selection (`:393-407`) |
+| **G-SUCCESS-PARK** (ledger-finance C-1; **not introduced by this work, not fixed by it**) | M4 **not paid** relies on a declined statement line and on the absence of a succeeded/pending/reversed one. But several parks are created **on a provider SUCCESS that the platform does not store durably**: `provider_reference_conflict` (`payout_refbind.go` ~108-150), `destination_mismatch` and `destination_integrity_failure` (`payout_destination.go`). The platform then holds no record that the provider ever reported success, so a later declined line can satisfy the not-paid verdict and release a hold on money the provider may have paid. Property 8 is therefore only PARTIAL for not paid. | Documenting subtest `TestD7_P9_CausalLink/DOCUMENTING...success-triggered_parks` (logs the exposed reasons; deliberately asserts nothing r32 would change) | **Launch condition**, carried by `gov-r32-integrity` (migration 0127): a durable success-reported record in every park writer and path, and the not-paid verdict `contradictory` for ALL M4 not-paid reasons. Recorded in 25.7 |
+| **G-NONMOCK** | Nothing technical stopped non-MOCK M4 other than the process registry and the startup gate: a registered real source with sealed imports would have been accepted by the database and by Go. | `TestD7_NonMockM4IsBlocked_PositiveDatabaseVerdictOnARealImportIsRefused`, `TestD7_EligibilityRefusal_ReasonsAtTheExecutionPoint` | **Fixed in Go**: every M4 whose evidence set contains a non-MOCK import is refused (`m4EligNonMock`, unconditionally; lifting it is a reviewed code change, 25.7) |
+| **G-DEST** | The statement-line model (`statement.PaymentStatementLine`) has **no destination or instrument field**, so no statement line can positively evidence property 7. M4 paid on a bound payout is today justified by the platform's write-once destination snapshot and the absence of a `destination_mismatch` park, never by provider evidence about the destination. Acceptable for MOCK only. | `TestD7_P7_WrongDestination/every_bound_payout_carries..._(the_documented_gap)`; `TestD7_StatementLineHasNoDestinationField_PinsTheConstant` | **Structural, `PROVIDER DEPENDENT`.** Closed for non-MOCK by G-NONMOCK. A positive clause needs: a destination-echo field on the line, a migration, and a comparison in `payout_m4_evidence` against the snapshot fingerprint (the same decision-5 echo semantics). It is **not** a refusal-direction Go change and is not attempted. The `0127` branch changes `payment_m4_in_scope` / `payout_m4_evidence` for `destination_integrity_failure`; this work did not touch them |
+
+Observations that are **not** gaps this change closes (recorded so the next reader does not rediscover them): (a) `payment_statement_lines.provider_id` is not cross-checked against the import's `provider_id` by the database (the FK is `(import_id, tenant_id)`); it is held by `validatePaymentLine` in the fetch path (INV-IO-14), by the evidence function filtering on the line's own `provider_id`, and by the seal digest that binds each line's provider id (L-1); (b) `evidence_ref_hash` is an opaque 64-hex attestation of the operator's portal check; nothing compares it to R (25.5).
+
+### 25.5 No single untrusted provider field is sufficient
+
+The provider controls, per line: `provider_reference` (R), `merchant_reference`, `amount`, `asset_code`, `status`, `occurred_at`, `provider_id`, and per import: the coverage window, the `payout_lines_carry_merchant_reference` declaration and `is_mock`; the platform controls the seal. Two tests state the property from both ends:
+
+1. **Only this field is right** (`TestD7_Meta_NoSingleProviderFieldIsSufficient_OnlyThisFieldIsRight`, 13 rows): a statement in which exactly one field (merchant reference; amount and asset; status; R; `occurred_at`; the seal; the coverage and declaration) is correct and everything else is wrong or absent never yields a positive verdict for either kind, and both kinds are refused at the request. Two "everything right except one" rows (unsealed import; undeclared source) show the seal and the declaration are each necessary.
+2. **One field corrupted from a perfect baseline** (`TestD7_Meta_NoSingleProviderFieldIsSufficient_OneFieldCorrupted`, 16 rows plus the `provider_id` case): R to a reserved value (the importer refuses to store it), R to the merchant reference (database `paid`, Go refuses), merchant reference emptied/foreign/another park's, amount, asset, status (pending/reversed/declined), `occurred_at` (before the attempt, after coverage: Go refuses), seal absent, seal made with a key the process does not hold (database `paid`, Go refuses), a non-MOCK source (Go refuses), `provider_id` of another provider (the fetch path refuses the whole statement). **One row is positive by design:** R replaced by another fresh PSP-looking reference. R is the **output** of the verdict, not a checked input: for an unbound attempt the platform has issued no PSP reference, so there is nothing to compare it with, and the verdict pins whatever single, exclusive R the sealed line carries.
+
+**The honest statement of the residual.** Sufficiency here is a conjunction of corroborations that the platform can check independently: merchant reference against `payment_attempts.merchant_reference` (platform-issued, unique per tenant), amount and asset against the attempt, status against the closed vocabulary and the absence of contradicting lines, `occurred_at` against the attempt's window, R against the exclusivity set, the seal against the platform's key, and a **human** four-eyes confirmation against the provider's portal. A source that controls **every** field of a line and the channel it travels on (it knows the merchant reference, amount and asset: they were sent to it) could still fabricate a paid line. Software on this side cannot close that; its defences are the authenticated channel and the PSP content signature (S-3), the seal (T10), and the operator's portal confirmation. All three are launch conditions for any non-MOCK M4 (25.7). Whether and how the portal confirmation is machine-bound to R is an open owner/`security` question with two proposals, recorded in 25.7.
+
+### 25.6 Adapter contract for the provider-specific part (`internal/payments/m4_source_contract.go`)
+
+`PROVIDER DEPENDENT`, **gated, no implementation.** `M4SourceContract` is what a future non-MOCK statement source must declare; `CheckM4SourceContract` is the pure checklist a real source's own tests must call and pass with **no `Fail` finding**. Absence is never "false": every declaration is explicit (decision 5: an adapter must not pretend a capability it does not have).
+
+| Item | The source must declare | Fails when | Protects D-7 |
+|---|---|---|---|
+| C1 identity | provider id, label, `Synthetic() == false` | missing, or a synthetic/MOCK source | 3, 4, 9 |
+| C2 merchant-reference declaration (S-3) | `payout_lines_carry_merchant_reference` tri-state | undeclared, or `false` (no line can be attributed) | 2, 9 |
+| C3 status vocabulary | every provider status -> event (`paid_out`, `pending`, `rejected`, `returned`, `reversed`, `chargeback`) -> platform class | an event unmapped (a return, reversal or chargeback of a payout must exist), an event mapped to the wrong class, a duplicate or unknown entry | 8 |
+| C4 unknown status | `reject_import` or `treat_as_pending` | anything else, notably "treat as succeeded" | 8 |
+| C5 channel (S-3) | authenticated to the PSP; endpoint and credentials from governed configuration; PSP content signature verified when the PSP offers one | any of the three missing | 3, 4, 9 |
+| C6 destination echo (decision 5) | `none`, `fingerprint` or `full_instrument`, and whether it is **on the statement line** | undeclared or unknown is `Fail`; `none` or "not on statement lines" is a `Limit`: M4 paid not admissible | 7 |
+| C7 final status | terminal-paid and terminal-declined statuses (mapped to succeeded / declined), whether a paid payout can be reversed, the reversal window, and that a late reversal appears on the statement | a non-terminal success, overlapping sets, a reversible payout with no window or not reported on the statement | 8 |
+| C8 amount and asset | integer minor units, exponent from the Asset registry, asset code on every line, amount is the payout principal (not net of fees or FX) | any false | 5, 6 |
+| C9 provider reference | PSP-issued, stable per payout, **never an echo of the merchant reference** | otherwise | 2, 3 |
+| C10 completeness (T10 residual) | coverage window vouched for by the PSP; pagination completeness proven | otherwise | 9 |
+| C11 time semantics (G-TIME) | `occurred_at` is the provider event time; the lower bound is the first send; an optional lower-bound-only clock-skew tolerance in `[0, 5 min]` (default and MOCK: 0; ledger-finance reviews each non-zero value per source) | otherwise | 9 |
+
+**A passing checklist is necessary but not sufficient.** C5 and C10 (and C2, C9, C11) are self-declared by the adapter; only the vendor-specific conformance tests, the `security` S-3 review of the real channel and the T10 seal review establish them. C1 does not trust the `Synthetic()` declaration alone: a contract object carrying the `providerkind.Synthetic` marker (`payoutinstrument.IsSyntheticComponent`) is refused as well (security LOW-1, `TestD7_SourceContract_SyntheticMarkerDisqualifiesDespiteTheDeclaration`).
+
+`TestD7_SourceContract_EachItemIsEffective` removes one declaration at a time from a fully declared **test fixture** (not a provider) and shows exactly that item's finding appears with the stated severity and disqualifies the source. Even a fully conformant declaration reports `PaidAdmissible == false` while `m4StatementLineCarriesDestinationEcho` is false; `TestD7_StatementLineHasNoDestinationField_PinsTheConstant` ties that constant to the line struct so it flips only together with the SQL clause. `TestD7_NoProductionTypeImplementsTheSourceContract` shows the MOCK source is not an `M4SourceContract`.
+
+### 25.7 Non-MOCK M4 stays `BLOCKED`
+
+No part of this change lifts any launch condition. Non-MOCK M4, paid or not paid, remains `BLOCKED` until **all** of the following hold, and the Go gate `m4EligNonMock` refuses regardless until a reviewed change removes it:
+
+1. a real source exists and passes the 25.6 checklist (C1-C10) with no `Fail`, with a conformance test per adapter against its real wire format (`PROVIDER DEPENDENT`);
+2. S-3 is met for that source: authenticated channel, PSP content signature, endpoint and credentials from governed configuration (`PROVIDER DEPENDENT`, §10.3);
+3. the T10 launch flag is cleared: the import seal passes `security` implementation review with mutation evidence (§10.3), plus the T10 residuals (T6 in-process key, authenticity/completeness, availability);
+4. for **M4 paid**, a positive destination clause (G-DEST): a destination-echo field on the statement line, a migration, and the comparison in `payout_m4_evidence`; until then `PaidAdmissible` is false by construction;
+5. LF C-3 (§20.4): the real provider's return/reversal/chargeback statuses reach `contradiction_after_m4_paid` or a dedicated reason, with a conformance test per adapter, and the governed WITHDRAWAL-REVERSAL-1 path exists; HD-R15-1 and HD-R15-5 (§10.3);
+6. **G-SUCCESS-PARK is fixed** (ledger-finance C-1, `gov-r32-integrity`, migration 0127): a durable success-reported record in every park writer and path, and the not-paid verdict `contradictory` for ALL M4 not-paid reasons. This work does not introduce the exposure and does not fix it;
+7. **the SQL counterparts of G-REF, G-TIME and G-NONMOCK exist** (ledger-finance C-2): today they are enforced in Go only and are **not** in the database recount at `pending -> executing`. G-REF and G-TIME are being folded into 0127 (same first-send bound); G-NONMOCK's SQL form is decided with the real-source work. Until then a session able to drive `executing` directly bypasses them (T5).
+
+**Proposals for the owner and `security` (NOT decided, NOT implemented; launch-condition proposals).**
+
+- *Binding the human confirmation to R (`evidence_ref_hash`).* `ledger-finance` proposes requiring `evidence_ref_hash` to equal a platform-computed digest over `(provider_id, R, amount, asset, merchant_reference)`, shown to the approvers. `security` prefers **blind entry**: the requester and each approver independently type R (no prefill), the server compares each entry to the verdict's R, and `evidence_ref_hash` is the hash of the portal confirmation artefact; for **not paid**, the same blind entry of the portal's declined status and reference. The two views differ on whether the platform shows the value or the humans re-derive it from the portal; the owner and `security` choose.
+- *Proposed design for the positive destination clause (G-DEST), for a future migration.* The statement line gains a `destination_echo` (key id plus fingerprint) covered by `lines_digest`; every line of the single succeeded group must carry a well-formed echo equal to the attempt snapshot's; any differing, malformed or unexpected echo makes the verdict `contradictory`, a missing echo makes it `insufficient`; a legacy unbound attempt is never paid-admissible; the `-> executing` re-check pins the echo verdict.
+
+### 25.8 Evidence
+
+- **Conformance suite** (`internal/payments/m4_d7_conformance_integration_test.go`, real PostgreSQL, runtime-shaped non-superuser role, `newM4World`/`newM4WorldOn` fixtures, platform `acting` requester/approver as the existing M4 world): `TestD7_P1_...` to `TestD7_P9_...`, `TestD7_Meta_...` (2), `TestD7_Ambiguity_ParksWithoutAutomaticPayOrResolve`, `TestD7_NonMockM4IsBlocked_...`, `TestD7_EligibilityRefusal_ReasonsAtTheExecutionPoint`. Each property test proves a wrong value in that property alone leaves the verdict `insufficient`/`contradictory` (never `paid`/`not_paid`), refuses both kinds at the request (`MR062`, token `force_resolve_evidence_insufficient`) with the withdrawal still `submitted`, no resolution row, no posting and the ledger invariants intact, and refuses at execution (`refused_at_execution` / `MR061` / `MR010`) when the change lands after the request. Ambiguity (two plausible attempts, duplicate lines of different timestamps, one reference naming two merchants, succeeded and declined together, partial coverage before and after) parks: the sweeper and a reconciliation run change nothing, and the reconciliation run raises the existing `pay_captured_unposted` finding.
+- **Unit and static** (no database): `m4_source_contract_test.go`, `m4_d7_static_test.go`.
+- The existing M4 suites were re-run unchanged except for one fixture (`TestM4Recon_Paid_LineOnRNamingAnotherMerchant_Raises` dated its paid line a minute before the attempt existed; G-TIME refuses that, so the fixture is now dated now: a deliberate pin flip) and a provider override on the import helper.
+- **Mutation evidence:** `docs/plans/prh2-hardening-round/prh2-r34-d7-mutation-kill.txt` (66 counted mutants over the migration, the Go verification layer and the checklist: 55 killed, 11 survivors, every one classified: S13 equivalent, S27 equivalent, S34/S35 unreachable, S32 unreachable, G10/G12 layered and killed with their database twin, S21-S24 redundant pairs killed as the doubles D01-D03. Review of run 1's survivors added the same-import pending/reversed, NULL-merchant-in-a-declaring-import and window-opens-after-creation tests).
+- Local evidence only: no real provider, no AWS, no non-MOCK source.
+
+### 25.9 Residuals
+
+- G-DEST (structural), the G-REF/G-TIME/G-NONMOCK SQL equivalents, and the `evidence_ref_hash` binding question (25.5).
+- Defence in depth that no test can separate from its sibling is reported as a survivor rather than hidden: the explicit `tenant_id` predicates inside `payout_m4_evidence` (row-level security enforces the same boundary, S27), and the request-time and `-> executing` R-4 comparisons of the withdrawal's amount and asset against the attempt's (S34/S35; `withdrawal_requests` amount and asset are immutable after insert, migration 0026, so no reachable state separates them), the `-> executing` scope and reference-pin re-check (S32; after a request the attempt cannot leave the unbound scope or gain a reference, and Go is the first check), the seal-presence conjunct of the not-paid selection (S13; an unsealed import is written without the S-3 declaration, so condition (iv) already refuses it) and four paid-attribution clauses that mask one another (S21-S24: they are killed in pairs, D01-D03). The Go withdrawal-state and re-evaluation checks at execution (G10, G12) are killed only together with their database twin, by design (Go is the first check, the database the second).
+- T5 (ADR 0110): a session able to run arbitrary SQL as the acting role could drive `pending -> executing` directly and skip the Go-only checks of 25.3. The same actor can already plant ordinary non-governed postings (§17.5); MR041 at commit still refuses an executed M4 whose link does not carry the pinned keys and amounts.
+- The fixture contract in `m4_source_contract_test.go` models no vendor; a real source's checklist test is `PROVIDER DEPENDENT`.
 
 ## 24. Mandatory destination-echo declaration (owner decision 5 of ADR 0095 48; B13B-15 residual) (appendix, `integrations`, 2026-10-09; branch `gov-r33-echo`, base `dad803d`; the design above is not rewritten)
 
