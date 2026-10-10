@@ -27,6 +27,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -306,7 +307,7 @@ func resolvePhaseBDestination(ctx context.Context, pool providercred.TenantTxRun
 func parkPayoutDestination(ctx context.Context, tx pgx.Tx, attempt PaymentAttempt, requestID uuid.UUID, evidence EvidenceKind, class ErrorClass, reason string, meta map[string]any, reference string) error {
 	// LF H-2: bind the provider's (validated, unconflicted) reference BEFORE the park. A foreign-held reference is
 	// parked by the existing B10 guard as provider_reference_conflict instead (hold kept, its own audit + P1).
-	if parked, err := bindPayoutReferenceForPark(ctx, tx, attempt, requestID, reference, evidence); err != nil || parked {
+	if parked, err := bindPayoutReferenceForPark(ctx, tx, attempt, requestID, reference, evidence, class); err != nil || parked {
 		return err
 	}
 	if err := ApplyDisputeFromNonTerminal(ctx, tx, attempt.ID, evidence, reason); err != nil {
@@ -314,7 +315,7 @@ func parkPayoutDestination(ctx context.Context, tx pgx.Tx, attempt PaymentAttemp
 	}
 	// GOV-R32 (ledger-finance HIGH): the provider's reported outcome is recorded durably in the park's own
 	// transaction, so a success-triggered park can never later be resolved "not paid" (payout_m4_evidence reads it).
-	if err := recordDestinationParkEvidence(ctx, tx, attempt.TenantID, attempt.ID, reason, destinationParkOutcome(class), evidence); err != nil {
+	if err := recordParkEvidence(ctx, tx, attempt.TenantID, attempt.ID, reason, parkOutcomeForClass(class), evidence); err != nil {
 		return err
 	}
 	m := map[string]any{"withdrawal_request_id": requestID.String(), "reason": reason, "provider_id": providerIDOrEmpty(attempt)}
@@ -494,7 +495,7 @@ func DestinationIntegrityAlert(tenantID uuid.UUID, subject, reason string) alert
 // conflict and then returns parked=true), then MarkAccepted (submitting|ambiguous -> pending, provider_reference set)
 // and AttachProviderReference on the withdrawal. An attempt that already holds its reference, an empty reference and
 // an invalid reference bind nothing (the park stays reference-less, exactly as before).
-func bindPayoutReferenceForPark(ctx context.Context, tx pgx.Tx, attempt PaymentAttempt, requestID uuid.UUID, reference string, evidence EvidenceKind) (parkedByGuard bool, err error) {
+func bindPayoutReferenceForPark(ctx context.Context, tx pgx.Tx, attempt PaymentAttempt, requestID uuid.UUID, reference string, evidence EvidenceKind, reported ErrorClass) (parkedByGuard bool, err error) {
 	if reference == "" || (attempt.ProviderReference != nil && *attempt.ProviderReference != "") {
 		return false, nil
 	}
@@ -504,7 +505,7 @@ func bindPayoutReferenceForPark(ctx context.Context, tx pgx.Tx, attempt PaymentA
 	if verr := providerref.ValidatePaymentReference("provider_reference", reference); verr != nil {
 		return false, nil
 	}
-	if parked, err := payoutGuardReferenceBinding(ctx, tx, attempt, requestID, reference, evidence, ErrorClassPending); err != nil || parked {
+	if parked, err := payoutGuardReferenceBindingReported(ctx, tx, attempt, requestID, reference, evidence, ErrorClassPending, reported); err != nil || parked {
 		return parked, err
 	}
 	if err := MarkAccepted(ctx, tx, attempt.ID, evidence, reference, time.Now().Add(payoutNextPollInterval)); err != nil {
@@ -513,10 +514,10 @@ func bindPayoutReferenceForPark(ctx context.Context, tx pgx.Tx, attempt PaymentA
 	return false, withdrawal.AttachProviderReference(ctx, tx, requestID, reference)
 }
 
-// ---- durable park evidence (GOV-R32, migration 0127; ADR 0111 23.6) ---------------------------
+// ---- durable park evidence (GOV-R32, migration 0127; ADR 0111 23.6/23.7) -------------------------
 
-// destinationParkOutcome is the closed outcome vocabulary of payout_destination_park_evidence.
-func destinationParkOutcome(class ErrorClass) string {
+// parkOutcomeForClass is the closed outcome vocabulary of payout_park_evidence for an evidence class.
+func parkOutcomeForClass(class ErrorClass) string {
 	switch class {
 	case ErrorClassSucceeded:
 		return "succeeded"
@@ -528,35 +529,58 @@ func destinationParkOutcome(class ErrorClass) string {
 	return "ambiguous"
 }
 
-// isDestinationParkReason reports the two destination park reasons.
-func isDestinationParkReason(r *string) bool {
-	return r != nil && (*r == TerminalReasonDestinationMismatch || *r == TerminalReasonDestinationIntegrityFailure)
+// parkOutcomeForOutcome is the same vocabulary for a provider Outcome (the invalid-reference parks know the
+// reported outcome but their class is provider_ref_invalid).
+func parkOutcomeForOutcome(o Outcome) string {
+	switch o {
+	case OutcomeSucceeded:
+		return "succeeded"
+	case OutcomeDeclined:
+		return "declined"
+	case OutcomePending:
+		return "pending"
+	}
+	return "ambiguous"
 }
 
-// recordDestinationParkEvidence appends one row to payout_destination_park_evidence (system shape only,
-// append-only; the database guard requires the attempt to be a payout parked on that destination reason).
-// A repeat of the same (attempt, outcome, source) adds nothing.
-func recordDestinationParkEvidence(ctx context.Context, tx pgx.Tx, tenantID, attemptID uuid.UUID, reason, outcome string, evidence EvidenceKind) error {
-	if _, err := tx.Exec(ctx, `INSERT INTO payout_destination_park_evidence (tenant_id, attempt_id, terminal_reason, reported_outcome, evidence_kind)
+// isM4ParkReason reports every park reason an M4 not-paid can be asked for (ADR 0111 4.1 + migration 0127):
+// invalid_provider_reference[:*], provider_reference_conflict, destination_mismatch,
+// destination_integrity_failure. It mirrors the payout_park_evidence reason CHECK.
+func isM4ParkReason(r *string) bool {
+	if r == nil {
+		return false
+	}
+	switch *r {
+	case "invalid_provider_reference", TerminalReasonProviderReferenceConflict, TerminalReasonDestinationMismatch, TerminalReasonDestinationIntegrityFailure:
+		return true
+	}
+	return strings.HasPrefix(*r, "invalid_provider_reference:")
+}
+
+// recordParkEvidence appends one row to payout_park_evidence (system shape only, append-only; the database
+// guard requires the attempt to be a payout parked on that reason). A repeat of the same (attempt, outcome,
+// source) adds nothing.
+func recordParkEvidence(ctx context.Context, tx pgx.Tx, tenantID, attemptID uuid.UUID, reason, outcome string, evidence EvidenceKind) error {
+	if _, err := tx.Exec(ctx, `INSERT INTO payout_park_evidence (tenant_id, attempt_id, terminal_reason, reported_outcome, evidence_kind)
 		VALUES ($1, $2, $3, $4, $5) ON CONFLICT (tenant_id, attempt_id, reported_outcome, evidence_kind) DO NOTHING`,
 		tenantID, attemptID, reason, outcome, string(evidence)); err != nil {
-		return fmt.Errorf("payments: record destination park evidence: %w", err)
+		return fmt.Errorf("payments: record park evidence: %w", err)
 	}
 	return nil
 }
 
-// recordSuccessOnDestinationPark records a provider SUCCESS that reaches an attempt ALREADY parked on a
-// destination reason (a callback, a poll, or a late sync/poll result that lost the CAS to the park). It
-// re-reads the attempt in the caller's transaction (the caller holds the withdrawal lock) and is a no-op
-// for anything else. It never changes state, posts, releases or raises: it only makes the success durable
-// so that M4 not-paid is refused (payout_m4_evidence, migration 0127).
-func recordSuccessOnDestinationPark(ctx context.Context, tx pgx.Tx, attemptID uuid.UUID, evidence EvidenceKind) error {
+// recordSuccessOnPark records a provider SUCCESS that reaches an attempt ALREADY parked on an M4-scope reason
+// (a callback, a poll, or a late sync/poll result that lost the CAS to the park). It re-reads the attempt in
+// the caller's transaction (the caller holds the withdrawal lock) and is a no-op for anything else. It never
+// changes state, posts, releases or raises: it only makes the success durable so that M4 not-paid is refused
+// (payout_m4_evidence, migration 0127).
+func recordSuccessOnPark(ctx context.Context, tx pgx.Tx, attemptID uuid.UUID, evidence EvidenceKind) error {
 	a, err := GetAttemptByID(ctx, tx, attemptID)
 	if err != nil {
-		return fmt.Errorf("payments: destination park success: re-read attempt: %w", err)
+		return fmt.Errorf("payments: park success: re-read attempt: %w", err)
 	}
-	if a.Operation != AttemptOperationPayout || a.State != AttemptDisputed || !isDestinationParkReason(a.TerminalReason) {
+	if a.Operation != AttemptOperationPayout || a.State != AttemptDisputed || !isM4ParkReason(a.TerminalReason) {
 		return nil
 	}
-	return recordDestinationParkEvidence(ctx, tx, a.TenantID, a.ID, *a.TerminalReason, "succeeded", evidence)
+	return recordParkEvidence(ctx, tx, a.TenantID, a.ID, *a.TerminalReason, "succeeded", evidence)
 }

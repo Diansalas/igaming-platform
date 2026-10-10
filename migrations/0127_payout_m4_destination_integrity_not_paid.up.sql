@@ -5,14 +5,15 @@
 -- MUST RUN INSIDE A SINGLE TRANSACTION (db.MigrateUp does this).
 --
 -- What this adds / replaces:
---   1. payout_destination_park_evidence (NEW, append-only, system-written only):
+--   1. payout_park_evidence (NEW, append-only, system-written only):
 --      the durable record of what the provider reported when the platform parked
---      a payout on a destination reason (destination_mismatch /
---      destination_integrity_failure), and of every provider SUCCESS reported
---      later on such a parked attempt (sync phase C, QueryStatus poll,
---      callback/receipt, late evidence). Ledger-finance HIGH: before this, a
+--      a payout on ANY reason an M4 not-paid can be asked for (the unbound
+--      invalid_provider_reference[:*] / provider_reference_conflict parks and the
+--      destination_mismatch / destination_integrity_failure parks), and of every
+--      provider SUCCESS reported later on such a parked attempt (sync phase C,
+--      QueryStatus poll, callback/receipt, late evidence). Ledger-finance HIGH: before this, a
 --      success-triggered park left no durable trace and M4 not-paid could
---      release a hold the PSP had paid out. Existing destination parks are
+--      release a hold the PSP had paid out. Existing M4-scope parks are
 --      backfilled as 'unknown_pre_0127' (fail closed). Policies, guard,
 --      immutability and grants mirror payment_attempt_reference_evidence (0115).
 --   2. payout_m4_evidence: the 0125 body plus, in the NOT-PAID branch only,
@@ -21,6 +22,12 @@
 --      bound reference or on any matched reference names ANOTHER merchant
 --      reference (security C-1 / LF Q-R32-2; tightens destination_mismatch and
 --      every other M4 not-paid as well). Refusal direction only.
+--   2b. payout_m4_evidence, PAID branch (D-7 review, owner decision 6; the SQL
+--      counterparts of the Go m4EligibilityRefusal checks so the DB recount at
+--      `-> executing` carries them): G-REF - R equal to ANY attempt's
+--      merchant reference is contradictory; G-TIME - the evidencing line must be
+--      dated >= the attempt's first send (first_submitted_at, else last_sent_at;
+--      never sent = insufficient) and <= its import's coverage_end, zero tolerance.
 --   3. payment_m4_in_scope: the 0125 body plus destination_integrity_failure
 --      beside destination_mismatch in the NOT-PAID-ONLY arm. M4 PAID stays
 --      REFUSED for both destination reasons (MR012).
@@ -36,14 +43,18 @@
 -- exists, and otherwise restores the 0125 bodies byte for byte.
 
 -- =========================================================================
--- 1. payout_destination_park_evidence
+-- 1. payout_park_evidence
 -- =========================================================================
 
-CREATE TABLE payout_destination_park_evidence (
+CREATE TABLE payout_park_evidence (
     id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     tenant_id        UUID NOT NULL,
     attempt_id       UUID NOT NULL,
-    terminal_reason  TEXT NOT NULL CHECK (terminal_reason IN ('destination_mismatch', 'destination_integrity_failure')),
+    -- Every reason an M4 not-paid can be asked for (ADR 0111 4.1 + 0127): the
+    -- unbound reasons and the two destination reasons.
+    terminal_reason  TEXT NOT NULL CHECK (terminal_reason IN ('invalid_provider_reference', 'provider_reference_conflict',
+                                                              'destination_mismatch', 'destination_integrity_failure')
+                                          OR starts_with(terminal_reason, 'invalid_provider_reference:')),
     reported_outcome TEXT NOT NULL CHECK (reported_outcome IN ('succeeded', 'declined', 'pending', 'ambiguous', 'unknown_pre_0127')),
     evidence_kind    TEXT NOT NULL CHECK (evidence_kind IN ('sync', 'callback', 'query_status', 'sweeper', 'operator', 'platform', 'migration_0127')),
     recorded_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -55,7 +66,7 @@ CREATE TABLE payout_destination_park_evidence (
     CHECK ((reported_outcome = 'unknown_pre_0127') = (evidence_kind = 'migration_0127'))
 );
 
--- Backfill (fail closed): every destination park that exists now has an
+-- Backfill (fail closed): every M4-scope park that exists now has an
 -- unknown trigger. The owner reads payment_attempts with FORCE RLS lifted for
 -- this one statement (as 0125's down does), then restores it.
 DO $$
@@ -66,11 +77,13 @@ BEGIN
     IF v_forced THEN
         EXECUTE 'ALTER TABLE payment_attempts NO FORCE ROW LEVEL SECURITY';
     END IF;
-    INSERT INTO payout_destination_park_evidence (tenant_id, attempt_id, terminal_reason, reported_outcome, evidence_kind)
+    INSERT INTO payout_park_evidence (tenant_id, attempt_id, terminal_reason, reported_outcome, evidence_kind)
     SELECT a.tenant_id, a.id, a.terminal_reason, 'unknown_pre_0127', 'migration_0127'
       FROM payment_attempts a
      WHERE a.operation = 'payout' AND a.state = 'disputed'
-       AND a.terminal_reason IN ('destination_mismatch', 'destination_integrity_failure');
+       AND (a.terminal_reason IN ('invalid_provider_reference', 'provider_reference_conflict',
+                                  'destination_mismatch', 'destination_integrity_failure')
+            OR starts_with(a.terminal_reason, 'invalid_provider_reference:'));
     IF v_forced THEN
         EXECUTE 'ALTER TABLE payment_attempts FORCE ROW LEVEL SECURITY';
     END IF;
@@ -79,7 +92,7 @@ END $$;
 -- Only a parked destination payout of the same reason may be described, and
 -- never with the backfill marker (O-5 style: the attempt row is locked so its
 -- state cannot move under the check).
-CREATE FUNCTION payout_destination_park_evidence_guard() RETURNS TRIGGER AS $$
+CREATE FUNCTION payout_park_evidence_guard() RETURNS TRIGGER AS $$
 DECLARE
     v_att RECORD;
 BEGIN
@@ -90,7 +103,7 @@ BEGIN
        OR v_att.state <> 'disputed'
        OR v_att.terminal_reason IS DISTINCT FROM NEW.terminal_reason
        OR NEW.reported_outcome = 'unknown_pre_0127' THEN
-        RAISE EXCEPTION 'payout_destination_park_evidence: a row may only describe a payout parked on that destination reason' USING ERRCODE = 'MR064';
+        RAISE EXCEPTION 'payout_park_evidence: a row may only describe a payout parked on that reason' USING ERRCODE = 'MR064';
     END IF;
     NEW.recorded_at := now();
     RETURN NEW;
@@ -98,43 +111,43 @@ END;
 $$ LANGUAGE plpgsql
     SET search_path = pg_catalog, public, pg_temp;
 
-CREATE TRIGGER payout_destination_park_evidence_guard
-    BEFORE INSERT ON payout_destination_park_evidence
-    FOR EACH ROW EXECUTE FUNCTION payout_destination_park_evidence_guard();
-CREATE TRIGGER payout_destination_park_evidence_immutable
-    BEFORE UPDATE OR DELETE ON payout_destination_park_evidence
+CREATE TRIGGER payout_park_evidence_guard
+    BEFORE INSERT ON payout_park_evidence
+    FOR EACH ROW EXECUTE FUNCTION payout_park_evidence_guard();
+CREATE TRIGGER payout_park_evidence_immutable
+    BEFORE UPDATE OR DELETE ON payout_park_evidence
     FOR EACH ROW EXECUTE FUNCTION ledger_deny_mutation();
-CREATE TRIGGER payout_destination_park_evidence_no_truncate
-    BEFORE TRUNCATE ON payout_destination_park_evidence
+CREATE TRIGGER payout_park_evidence_no_truncate
+    BEFORE TRUNCATE ON payout_park_evidence
     FOR EACH STATEMENT EXECUTE FUNCTION ledger_deny_mutation();
 
 -- System shape writes and reads (the payout evidence paths and reconciliation);
 -- a VALID acting session reads (payout_m4_evidence in the M4 request and
 -- execution). No tenant-staff, player, platform or UPDATE/DELETE policy.
-ALTER TABLE payout_destination_park_evidence ENABLE ROW LEVEL SECURITY;
-ALTER TABLE payout_destination_park_evidence FORCE ROW LEVEL SECURITY;
-CREATE POLICY system_insert ON payout_destination_park_evidence FOR INSERT
+ALTER TABLE payout_park_evidence ENABLE ROW LEVEL SECURITY;
+ALTER TABLE payout_park_evidence FORCE ROW LEVEL SECURITY;
+CREATE POLICY system_insert ON payout_park_evidence FOR INSERT
     WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid
            AND NULLIF(current_setting('app.principal_id', true), '') IS NULL
            AND NULLIF(current_setting('app.platform_admin_principal_id', true), '') IS NULL
            AND NULLIF(current_setting('app.player_account_id', true), '') IS NULL
            AND NULLIF(current_setting('app.platform_service_id', true), '') IS NULL
            AND NOT financial_acting_gucs_present());
-CREATE POLICY system_select ON payout_destination_park_evidence FOR SELECT
+CREATE POLICY system_select ON payout_park_evidence FOR SELECT
     USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid
            AND NULLIF(current_setting('app.principal_id', true), '') IS NULL
            AND NULLIF(current_setting('app.platform_admin_principal_id', true), '') IS NULL
            AND NULLIF(current_setting('app.player_account_id', true), '') IS NULL
            AND NULLIF(current_setting('app.platform_service_id', true), '') IS NULL
            AND NOT financial_acting_gucs_present());
-CREATE POLICY acting_read ON payout_destination_park_evidence FOR SELECT
+CREATE POLICY acting_read ON payout_park_evidence FOR SELECT
     USING (tenant_id = NULLIF(current_setting('app.acting_tenant_id', true), '')::uuid AND (SELECT financial_acting_session_valid()));
 
 DO $$
 BEGIN
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'igaming_runtime') THEN
-        EXECUTE 'REVOKE ALL ON payout_destination_park_evidence FROM igaming_runtime';
-        EXECUTE 'GRANT SELECT, INSERT ON payout_destination_park_evidence TO igaming_runtime';
+        EXECUTE 'REVOKE ALL ON payout_park_evidence FROM igaming_runtime';
+        EXECUTE 'GRANT SELECT, INSERT ON payout_park_evidence TO igaming_runtime';
     END IF;
 END $$;
 
@@ -161,7 +174,7 @@ BEGIN
         RAISE EXCEPTION 'payout_m4_evidence: this session cannot see the attempt''s whole statement scope (an error, never a verdict)' USING ERRCODE = 'MR060';
     END IF;
     SELECT a.operation, a.provider_id, a.provider_reference, a.merchant_reference, a.amount, a.asset_code,
-           a.created_at, a.last_sent_at INTO v_a
+           a.created_at, a.last_sent_at, a.first_submitted_at INTO v_a
       FROM payment_attempts a WHERE a.id = p_attempt AND a.tenant_id = p_tenant;
     IF NOT FOUND THEN
         RAISE EXCEPTION 'payout_m4_evidence: attempt % is not visible in tenant %', p_attempt, p_tenant USING ERRCODE = 'MR060';
@@ -288,11 +301,24 @@ BEGIN
            OR EXISTS (SELECT 1 FROM ledger_transactions t
                        WHERE t.tenant_id = p_tenant AND t.provider_id = v_a.provider_id AND t.provider_tx_id = v_g.ref)
            OR EXISTS (SELECT 1 FROM ledger_transactions t
-                       WHERE t.tenant_id = p_tenant AND t.idempotency_key = v_a.provider_id || ':' || v_g.ref) THEN
+                       WHERE t.tenant_id = p_tenant AND t.idempotency_key = v_a.provider_id || ':' || v_g.ref)
+           -- GOV-R32 / D-7 G-REF (migration 0127): R must not be a platform-issued
+           -- merchant reference (this attempt's own or ANOTHER attempt's): one echoed
+           -- field would otherwise supply both the causal link and the ledger key.
+           OR EXISTS (SELECT 1 FROM payment_attempts o
+                       WHERE o.tenant_id = p_tenant AND o.merchant_reference = v_g.ref) THEN
             RETURN QUERY SELECT 'contradictory'::text, NULL::uuid, NULL::text, v_ids;
             RETURN;
         END IF;
-        -- The single succeeded line must come from an ELIGIBLE (sealed) import.
+        -- GOV-R32 / D-7 G-TIME (migration 0127): the attempt must have been sent.
+        IF COALESCE(v_a.first_submitted_at, v_a.last_sent_at) IS NULL THEN
+            RETURN QUERY SELECT 'insufficient'::text, NULL::uuid, NULL::text, v_ids;
+            RETURN;
+        END IF;
+        -- The single succeeded line must come from an ELIGIBLE (sealed) import,
+        -- and (G-TIME, zero tolerance) be dated no earlier than the attempt's FIRST
+        -- send and no later than that import's own coverage end. A line before
+        -- last_sent_at is NOT refused: an earlier send may have paid.
         SELECT l.id INTO v_line
           FROM payment_statement_lines l
           JOIN payment_statement_imports i ON i.id = l.import_id AND i.tenant_id = l.tenant_id
@@ -300,6 +326,8 @@ BEGIN
            AND l.status = 'succeeded'
            AND l.provider_reference = v_g.ref AND l.amount = v_g.amount AND l.asset_code = v_g.asset_code
            AND l.occurred_at = v_g.occurred_at
+           AND l.occurred_at >= COALESCE(v_a.first_submitted_at, v_a.last_sent_at)
+           AND l.occurred_at <= i.coverage_end
            AND i.import_seal IS NOT NULL
            AND (NOT i.is_mock OR NOT v_has_real)
          ORDER BY i.fetched_at, l.import_id, l.line_no
@@ -314,17 +342,17 @@ BEGIN
 
     -- ---------------- the not-paid verdict (H-1) ----------------
     -- GOV-R32 (migration 0127; ledger-finance HIGH): a provider SUCCESS the
-    -- platform recorded when it parked this attempt on a destination reason (or
+    -- platform recorded when it parked this attempt (any M4-scope reason) (or
     -- later, on the parked attempt) contradicts "not paid", whatever the
-    -- statement says. A destination park that predates 0127 carries the
+    -- statement says. A park that predates 0127 carries the
     -- backfilled 'unknown_pre_0127' record: its trigger is unknown, so not-paid
     -- is insufficient (fail closed).
-    IF EXISTS (SELECT 1 FROM payout_destination_park_evidence e
+    IF EXISTS (SELECT 1 FROM payout_park_evidence e
                 WHERE e.tenant_id = p_tenant AND e.attempt_id = p_attempt AND e.reported_outcome = 'succeeded') THEN
         RETURN QUERY SELECT 'contradictory'::text, NULL::uuid, NULL::text, v_ids;
         RETURN;
     END IF;
-    IF EXISTS (SELECT 1 FROM payout_destination_park_evidence e
+    IF EXISTS (SELECT 1 FROM payout_park_evidence e
                 WHERE e.tenant_id = p_tenant AND e.attempt_id = p_attempt AND e.reported_outcome = 'unknown_pre_0127') THEN
         RETURN QUERY SELECT 'insufficient'::text, NULL::uuid, NULL::text, v_ids;
         RETURN;

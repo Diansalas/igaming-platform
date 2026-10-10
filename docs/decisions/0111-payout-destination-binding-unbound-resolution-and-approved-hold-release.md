@@ -2599,7 +2599,7 @@ match against the 0125 file for each) and drops what 0127 added.
 mostly on SUCCESS evidence, but `parkPayoutDestination` only bound the reference; `payout_m4_evidence` reads statement lines and Y, so
 the reproduction (MOCK poll reports success on X, park, then a sealed declaring import with a decline on another reference carrying
 the merchant reference) read `not_paid` and M4 not-paid released the hold.
-- **Record.** New append-only table `payout_destination_park_evidence` (tenant, attempt, destination reason, `reported_outcome` in
+- **Record.** New append-only table `payout_park_evidence` (tenant, attempt, destination reason, `reported_outcome` in
   `succeeded|declined|pending|ambiguous|unknown_pre_0127`, `evidence_kind`, `recorded_at`; UNIQUE per (attempt, outcome, kind) so
   repeats add nothing). It mirrors the reviewed 0115 `payment_attempt_reference_evidence` pattern: FORCE RLS; INSERT and SELECT only in
   the **system shape**, SELECT for a **valid acting session** (the M4 evaluation); no tenant-staff, player, platform or UPDATE/DELETE
@@ -2648,6 +2648,36 @@ closed by C-1. Q-R32-3 stays an owner question; ledger-finance finds the interim
 
 
 ---
+
+### 23.7 D-7 review refinements (ledger-finance + security on the D-7 branch; folded into 0127, 2026-10-10)
+
+**(1) The durable record covers every M4-scope park writer; the refusal applies to every M4 not-paid reason.** The table is
+renamed `payout_park_evidence` (0127 is unmerged) and its reason CHECK, backfill and insert guard cover every reason an M4 not-paid
+can be asked for: `invalid_provider_reference`, `invalid_provider_reference:*`, `provider_reference_conflict`, `destination_mismatch`,
+`destination_integrity_failure`. The not-paid refusal in `payout_m4_evidence` was already reason-agnostic (it reads the record, not the
+reason), so a recorded success now makes not-paid `contradictory` for ALL of them. Writers that set `terminal_reason` on a payout
+attempt (from `grep ApplyDisputeFrom*`), and their treatment:
+
+| Writer | Reason(s) | M4 not-paid scope | Record |
+|---|---|---|---|
+| `payout.go` sync phase C, `ErrorClassProviderRefInvalid` | `invalid_provider_reference[:*]` | yes (no reference) | reported `Outcome` of the result (`parkOutcomeForOutcome`) |
+| `payout.go` QueryStatus poll, `ErrorClassProviderRefInvalid` | `invalid_provider_reference[:*]` | no (holds X) | reported `Outcome` (recorded anyway; scope refuses) |
+| `payout_refbind.go` `payoutGuardReferenceBinding` (sync, poll, callback, `applyPayoutSuccess`/`Decline`, the destination bind) | `provider_reference_conflict` | yes | the REPORTED class; `bindPayoutReferenceForPark` now passes the destination evidence's real class (its routing class stays `pending`, so CAS-conflict routing is unchanged) |
+| `payout_destination.go` `parkPayoutDestination` (sync, poll, callback) | `destination_mismatch`, `destination_integrity_failure` | yes | the evidence class |
+| success on an ALREADY parked attempt: poll `case AttemptDisputed`, callback `case AttemptDisputed`, `applyPayoutLateEvidence` `case AttemptDisputed` | any of the above | - | `succeeded` (`recordSuccessOnPark`) |
+| `payout.go` `provider_reference_mismatch`, `amount_asset_mismatch`, late T10/T14 reasons; `receipt.go` `success_for_never_sent_attempt`, `success_after_payout_declined`, `callback_amount_asset_mismatch`, `reversal_tombstone_precedes_success`, `provider_reference_mismatch`; `orchestrator.go`/`drive.go` (deposits) | non-M4 reasons | no (M2 or none) | not recorded: M4 cannot be requested for them (`MR012`) |
+
+**(2) G-REF and G-TIME in SQL (the counterparts of the D-7 Go gate `m4EligibilityRefusal`, so the DB re-check at `-> executing`
+carries them).** In the PAID branch of `payout_m4_evidence`: R equal to ANY attempt's merchant reference (this attempt's or another's)
+is `contradictory` (G-REF); the evidencing line must satisfy `occurred_at >= COALESCE(first_submitted_at, last_sent_at)` and
+`occurred_at <= its import's coverage_end`, zero tolerance, and an attempt with neither timestamp is `insufficient` (G-TIME). A line
+dated before `last_sent_at` but after the first send is NOT refused (an earlier send may have paid). The D-7 tests that pinned the two
+SQL gaps were flipped deliberately (`TestD7_P3_*`, the G-TIME subtests, the Go probe test, three `TestD7_Meta_*` cases now
+`dbNonPositive`); the Go gate is unchanged and still agrees (probed on the same lines).
+
+Down: unchanged contract (MR099 while any park-evidence row or integrity M4 row exists; both 0125 bodies restored byte for byte).
+Mutation evidence: `docs/plans/prh2-hardening-round/prh2-r32-integrity-mutation-kill.txt` (rounds 2 and 3).
+
 
 ## 25. D-7 conformance: the M4 evidence standard as a traceable model (appendix, `qa`, 2026-10-09; branch `gov-r34-d7`, base `dad803d`; the design above is not rewritten)
 

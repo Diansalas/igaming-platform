@@ -3,7 +3,7 @@
 // GOV-R32 review round (ADR 0111 23.6; migration 0127): refusal-direction fixes.
 //
 //   - LF HIGH: a destination park (destination_mismatch / destination_integrity_failure)
-//     records durably what the provider reported (payout_destination_park_evidence), on every
+//     records durably what the provider reported (payout_park_evidence), on every
 //     path: sync phase C, QueryStatus poll, callback/receipt, and a success that reaches an
 //     ALREADY parked attempt (fresh poll, callback, stale/late result). A recorded success
 //     makes M4 not-paid `contradictory`, at request and at execution.
@@ -35,7 +35,7 @@ import (
 func (m *m4World) r32ParkEvidence(attemptID uuid.UUID) map[string]bool {
 	m.t.Helper()
 	out := map[string]bool{}
-	for _, r := range m.sysQuery(`SELECT reported_outcome || '/' || evidence_kind AS k FROM payout_destination_park_evidence
+	for _, r := range m.sysQuery(`SELECT reported_outcome || '/' || evidence_kind AS k FROM payout_park_evidence
 		WHERE tenant_id = $1 AND attempt_id = $2`, m.f.tenantID, attemptID) {
 		out[r["k"].(string)] = true
 	}
@@ -244,7 +244,7 @@ func TestR32_ParkEvidence_AppendOnlySystemWritten(t *testing.T) {
 	_ = other
 	ins := func(attempt uuid.UUID, reason, outcome, kind string) func(ctx context.Context, tx pgx.Tx) error {
 		return func(ctx context.Context, tx pgx.Tx) error {
-			_, err := tx.Exec(ctx, `INSERT INTO payout_destination_park_evidence (tenant_id, attempt_id, terminal_reason, reported_outcome, evidence_kind)
+			_, err := tx.Exec(ctx, `INSERT INTO payout_park_evidence (tenant_id, attempt_id, terminal_reason, reported_outcome, evidence_kind)
 				VALUES ($1, $2, $3, $4, $5)`, m.f.tenantID, attempt, reason, outcome, kind)
 			return err
 		}
@@ -264,17 +264,17 @@ func TestR32_ParkEvidence_AppendOnlySystemWritten(t *testing.T) {
 	// Append-only: no UPDATE/DELETE reaches a row (no policy), and with RLS lifted the trigger refuses.
 	before := m.r32ParkEvidence(p.fresh.ID)
 	m.tx(func(ctx context.Context, tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx, `UPDATE payout_destination_park_evidence SET reported_outcome = 'declined' WHERE attempt_id = $1`, p.fresh.ID); err != nil {
+		if _, err := tx.Exec(ctx, `UPDATE payout_park_evidence SET reported_outcome = 'declined' WHERE attempt_id = $1`, p.fresh.ID); err != nil {
 			return err
 		}
-		_, err := tx.Exec(ctx, `DELETE FROM payout_destination_park_evidence WHERE attempt_id = $1`, p.fresh.ID)
+		_, err := tx.Exec(ctx, `DELETE FROM payout_park_evidence WHERE attempt_id = $1`, p.fresh.ID)
 		return err
 	})
 	err = m.pool.WithTenant(context.Background(), m.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx, `ALTER TABLE payout_destination_park_evidence NO FORCE ROW LEVEL SECURITY`); err != nil {
+		if _, err := tx.Exec(ctx, `ALTER TABLE payout_park_evidence NO FORCE ROW LEVEL SECURITY`); err != nil {
 			return err
 		}
-		_, err := tx.Exec(ctx, `DELETE FROM payout_destination_park_evidence WHERE attempt_id = $1`, p.fresh.ID)
+		_, err := tx.Exec(ctx, `DELETE FROM payout_park_evidence WHERE attempt_id = $1`, p.fresh.ID)
 		return err
 	})
 	if err == nil {
@@ -456,4 +456,74 @@ func TestR32_Migration0127_BackfillsExistingDestinationParks(t *testing.T) {
 		m.r32RequireNotPaidRefused(p, M4VerdictInsufficient)
 	}
 	k3RequireCode(t, r32DownTo0126(t, m), "MR099")
+}
+
+// --- D-7 review (refinement 1): EVERY park writer that a provider success can trigger -----------------
+
+// A success-triggered park of ANY M4-scope reason records the success and refuses not-paid; a
+// pending-triggered park records pending and keeps its not-paid exit; a success reaching an already
+// parked unbound attempt (callback, late sync) is recorded too.
+func TestR32_AllParkWriters_SuccessRecorded_NotPaidRefused(t *testing.T) {
+	m := newM4World(t)
+	t.Run("invalid_provider_reference, sync SUCCESS", func(t *testing.T) {
+		m.t = t
+		p := m.b11ParkSync(1190, OutcomeSucceeded)
+		m.r32RequireEvidence(p.fresh.ID, "succeeded/sync")
+		m.r32RequireNotPaidRefused(p, M4VerdictContradictory)
+	})
+	t.Run("invalid_provider_reference, sync PENDING (control: not-paid still works)", func(t *testing.T) {
+		m.t = t
+		p := m.park(1191)
+		m.r32RequireEvidence(p.fresh.ID, "pending/sync")
+		m.declineOn(p, "r32-D-"+uuid.NewString()[:12])
+		m.execute(p, ResolutionM4EvidenceNotPaid, m.mustEvidence(p.fresh.ID, M4VerdictNotPaid))
+	})
+	t.Run("invalid_provider_reference, poll SUCCESS (park holding X)", func(t *testing.T) {
+		m.t = t
+		pp := m.b11ParkPoll(1192, OutcomeSucceeded)
+		m.r32RequireEvidence(pp.fresh.ID, "succeeded/query_status")
+	})
+	t.Run("provider_reference_conflict, sync SUCCESS", func(t *testing.T) {
+		m.t = t
+		p, _, _ := m.b11ParkReverse(1193)
+		m.r32RequireEvidence(p.fresh.ID, "succeeded/sync")
+		m.r32RequireNotPaidRefused(p, M4VerdictContradictory)
+	})
+	t.Run("callback SUCCESS on an already parked unbound attempt", func(t *testing.T) {
+		m.t = t
+		p := m.park(1194)
+		if _, err := m.pm4Callback(p.fresh, OutcomeSucceeded, "r32-cb-"+uuid.NewString()[:10], 1194, nil); err != nil {
+			t.Fatalf("callback: %v", err)
+		}
+		m.r32RequireEvidence(p.fresh.ID, "pending/sync", "succeeded/callback")
+		m.r32RequireNotPaidRefused(p, M4VerdictContradictory)
+	})
+	t.Run("late sync SUCCESS on an already parked unbound attempt", func(t *testing.T) {
+		m.t = t
+		p := m.park(1195)
+		gr := GateResult[WithdrawResult]{Class: ErrorClassSucceeded, Value: WithdrawResult{Outcome: OutcomeSucceeded, ProviderReference: "r32-late-" + uuid.NewString()[:10]}}
+		err := ApplyPayoutResult(context.Background(), m.pool, m.f.tenantID, p.wr.ID, p.staleAs(AttemptPending), gr, EvidenceSync, WithDestinations(pitest.Shared()))
+		b11OKOrConflict(t, err, "late sync")
+		m.r32RequireEvidence(p.fresh.ID, "pending/sync", "succeeded/sync")
+		m.r32RequireNotPaidRefused(p, M4VerdictContradictory)
+	})
+}
+
+// --- D-7 review (G-TIME upper bound in the DB, zero tolerance) ----------------------------------------
+
+func TestR32_GTIME_CoverageEndBoundary_InTheDB(t *testing.T) {
+	m := newM4World(t)
+	end := time.Now().Add(2 * time.Minute).UTC().Truncate(time.Microsecond)
+	t.Run("a line exactly at its import's coverage end is paid", func(t *testing.T) {
+		m.t = t
+		p := m.park(1196)
+		m.ingest(m4Imp{end: end}, m.line(m4Ref(), p.fresh.MerchantReference, "succeeded", 1196, end))
+		m.mustEvidence(p.fresh.ID, M4VerdictPaid)
+	})
+	t.Run("one microsecond after its import's coverage end is insufficient (DB, MR062)", func(t *testing.T) {
+		m.t = t
+		p := m.park(1197)
+		m.ingest(m4Imp{end: end}, m.line(m4Ref(), p.fresh.MerchantReference, "succeeded", 1197, end.Add(time.Microsecond)))
+		m.d7DBRefusesPaid(p, M4VerdictInsufficient)
+	})
 }

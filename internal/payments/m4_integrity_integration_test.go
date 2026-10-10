@@ -758,7 +758,7 @@ func TestR32_Migration0127UpDownUp_WholeSchema(t *testing.T) {
 	}
 	for _, l := range added {
 		if !strings.Contains(l, "payment_m4_in_scope(") && !strings.Contains(l, "payout_m4_evidence(") &&
-			!strings.Contains(l, "payout_destination_park_evidence") {
+			!strings.Contains(l, "payout_park_evidence") {
 			t.Errorf("0127 added something outside its declared objects: %s", l)
 		}
 	}

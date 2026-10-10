@@ -5,22 +5,22 @@
 -- Reverses 0127 (GOV-R32, ADR 0111 section 23). REFUSES (MR099) while ANY M4 row
 -- (any kind, any state) exists whose pinned dispute reason is
 -- destination_integrity_failure (under the restored 0125 scope such a row would be
--- outside M4), or while ANY payout_destination_park_evidence row exists (dropping
+-- outside M4), or while ANY payout_park_evidence row exists (dropping
 -- it would discard a recorded provider success and reopen M4 not-paid on a
--- success-parked destination_mismatch park). Otherwise it drops the evidence table
+-- success-parked park). Otherwise it drops the evidence table
 -- and its guard and restores the 0125 bodies of payout_m4_evidence and
 -- payment_m4_in_scope BYTE FOR BYTE (the whole-schema snapshot test verifies it).
 
 ALTER TABLE payment_manual_resolutions NO FORCE ROW LEVEL SECURITY;
-ALTER TABLE payout_destination_park_evidence NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE payout_park_evidence NO FORCE ROW LEVEL SECURITY;
 
 DO $$
 BEGIN
     IF EXISTS (SELECT 1 FROM payment_manual_resolutions
                 WHERE kind IN ('m4_evidence_paid', 'm4_evidence_not_paid')
                   AND terminal_reason_at_submission = 'destination_integrity_failure')
-       OR EXISTS (SELECT 1 FROM payout_destination_park_evidence) THEN
-        RAISE EXCEPTION '0127 down refused: M4 rows on a destination_integrity_failure park or destination park evidence exist' USING ERRCODE = 'MR099';
+       OR EXISTS (SELECT 1 FROM payout_park_evidence) THEN
+        RAISE EXCEPTION '0127 down refused: M4 rows on a destination_integrity_failure park or park evidence exists' USING ERRCODE = 'MR099';
     END IF;
 END $$;
 
@@ -262,5 +262,5 @@ END;
 $$ LANGUAGE plpgsql STABLE
     SET search_path = pg_catalog, public, pg_temp;
 
-DROP TABLE payout_destination_park_evidence;
-DROP FUNCTION payout_destination_park_evidence_guard();
+DROP TABLE payout_park_evidence;
+DROP FUNCTION payout_park_evidence_guard();
