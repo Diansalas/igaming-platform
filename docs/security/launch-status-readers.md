@@ -27,7 +27,7 @@
 
 | File | Reads | Decision made | Class | `pending_launch` behaviour |
 |---|---|---|---|---|
-| `internal/tenant/gameplay_gate.go` | `tenants.status` under the shared per-tenant lock (R3, 0118/0121) | refuse new gameplay unless `active` | A | refused (GP010) |
+| `internal/tenant/gameplay_gate.go` | `tenants.status` under the shared per-tenant lock (R3, 0118/0121); since ADR 0112 slice 2 also `brands.status` under the shared per-brand lock (`RequireBrandActiveForGameplay`, LF1, 0129; plain read bound to `tenant_id`, no row lock) | refuse new gameplay unless the tenant is `active`; refuse a NEW stake (casino bet, sportsbook placement) unless the brand is `active` | A | refused (tenant: GP010 / `tenant_not_active`; brand: `brand_not_active`, DB backstop GP011) |
 | `internal/tenant/payment_initiation_gate.go` | `brands.status` `FOR SHARE` (H-SEC-5/11, H(8)) | refuse initiation unless `active` | A | refused |
 | `internal/tenant/status.go` | `tenants.status FOR UPDATE` (`ChangeStatus`) | audited before-state of a change | W/D | a real change is refused by the database (LA020); same-status is a no-op |
 | `internal/identity/player_account.go` | brand and tenant status in the registering transaction, plain non-locking read (ADR 0112 7.3, S4) | refuse registration unless both `active` | A | refused (409 `BRAND_NOT_ACCEPTING_REGISTRATIONS`) |
@@ -66,6 +66,8 @@ Read from `pg_proc` on a fully migrated database (functions whose body reads eit
 | `payment_manual_resolutions_guard`, `payment_manual_resolution_approvals_guard`, `payment_manual_resolution_execution_status` (0115, restated in 0125) | **`tenant_status = 'closed'` / `IS DISTINCT FROM 'closed'`** | **L, LF7** | `pending_launch` is treated as NOT closed; tenant-scope force-resolution stays allowed for a pending tenant, harmless because a pending tenant has no payments (ledger-finance LF7, ADR 0112 section 14.1) |
 | `operating_country_policies_enforce_ceiling` (0076) | licence ceiling; no status decision on the tenant | - | n/a |
 | `launch_subject_status_guard`, `launch_subject_insert_guard`, `launch_subject_owner_provisioned`, `launch_transitions_match_subject_at_commit`, `launch_requests_guard` (0128) | the new governance guards | W | by design |
+| `launch_subject_status_guard` (0129, CREATE OR REPLACE of 0128's) | on `brands`, a real status change first takes the per-brand gameplay key EXCLUSIVE (`brand_status_gate_key`, LF1); otherwise 0128's body unchanged, including the allow-listed `OLD.status = 'closed'` | W / L (restated 0128 literal) | a change into or out of any status serialises against in-flight new-stake placements of the brand |
+| `ledger_wager_brand_active_guard` (0129, deferred constraint trigger on `ledger_transactions`, `casino_bet` / `sportsbook_bet` only) | `brands.status` of every player wallet the posting moves, under the shared per-brand key, `IS DISTINCT FROM 'active'` refuses | A | GP011 for a new stake; terminal stake returns, wins and settlements are not covered |
 
 Row-level-security policies: none reads `tenants.status` or `brands.status` (checked against `pg_policies`).
 `CHECK` constraints: only `tenants_status_check` and `brands_status_check` (widened by 0128 to include `pending_launch`); no other
@@ -78,6 +80,7 @@ constraint has a tenant / brand status vocabulary (checked against `pg_constrain
 | `migrations/0115_payment_force_resolution.up.sql` and `migrations/0125_payout_unbound_resolution_m4.up.sql` (each: 3 sites, 3 allow-listed lines) | `tenant_status = 'closed'` / `IS DISTINCT FROM 'closed'` | LF7: `pending_launch` is NOT closed; harmless, a pending tenant has no payments |
 | `migrations/0121_gameplay_stake_return_and_closure_guard.up.sql` | `IF NEW.status = 'closed'` in `tenants_status_change_gate` | the closure gate fires for a transition INTO `closed`, from any status |
 | `migrations/0128_launch_authorisation_status_governance.up.sql` | `IF OLD.status = 'closed'` in `launch_subject_status_guard` | closed is terminal (ADR 0112 3.1) |
+| `migrations/0129_brand_gameplay_gate.up.sql` | the same `IF OLD.status = 'closed'` (0129 restates 0128's guard with the LF1 brand lock added) | closed is terminal, unchanged |
 
 ## 4. Writers
 

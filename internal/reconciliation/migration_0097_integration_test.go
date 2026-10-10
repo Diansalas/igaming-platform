@@ -276,4 +276,19 @@ func applyGameplayGateMigration(t *testing.T, pool *db.Pool) {
 	}); err != nil {
 		t.Fatalf("apply 0118 on scratch: %v", err)
 	}
+	// ADR 0112 slice 2: the casino new-bet path also calls the per-brand gameplay gate
+	// (brand_status_gate_key) and the 0129 new-stake backstop is part of the current
+	// posting environment. 0129's function definitions do not depend on the 0128 tables
+	// at creation time (plpgsql bodies are resolved at call time; its replacement of
+	// launch_subject_status_guard stays unattached on this pre-0128 scratch schema).
+	b, err = os.ReadFile(filepath.Join("..", "..", "migrations", "0129_brand_gameplay_gate.up.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, string(b))
+		return err
+	}); err != nil {
+		t.Fatalf("apply 0129 on scratch: %v", err)
+	}
 }

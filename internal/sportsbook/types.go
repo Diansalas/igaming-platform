@@ -329,6 +329,12 @@ const (
 	// suspended or closed, so no NEW bet is accepted. Carries no detail; the
 	// audit record (sportsbook_bet.denied_tenant_not_active) names the status.
 	RejectionTenantNotActive = "tenant_not_active"
+	// RejectionBrandNotActive is ADR 0112 LF1's addition (slice 2): the
+	// player's brand is pending_launch, suspended or closed, so no NEW bet is
+	// accepted. Never conflated with RejectionTenantNotActive (a tenant AND
+	// brand both non-active report the tenant reason: the tenant gate runs
+	// first). Audit record: sportsbook_bet.denied_brand_not_active.
+	RejectionBrandNotActive = "brand_not_active"
 )
 
 // Provider is sportsbook's minimal, provider-neutral catalogue-sync

@@ -516,6 +516,46 @@ gate; legacy backfill; PII lint; separate decision `licensing_model`; tenant and
 | 4 | HTTP routes, OpenAPI, error codes | backend | security, code-reviewer |
 | 5 | Back Office panel with fixed disclaimers; a `pending_launch` badge and list filter for tenants and brands (C-8: the console must show the new status, not render it as an unknown value) | backoffice (UI frontend, copy ux-design) | product-owner-proxy, security |
 
+**Slice 2 implementation note and ADR 0095 section 40.5 / migration 0118 amendment (LF1; `ledger-finance`, 2026-10-10;
+`IMPLEMENTED` against MOCK providers, reviews by security, code-reviewer and qa still required).** Amends the R3 gate
+of ADR 0095 section 40.5 (migrations 0118/0121, never edited): new wagering is now refused when the TENANT or the
+player's BRAND is not `active`.
+- **Key.** `brand_status_gate_key(uuid)` (migration 0129), namespace `brand_status_gate:`, the one derivation shared by
+  Go and SQL (mirrors `tenant_status_gate_key`).
+- **Go.** `tenant.RequireBrandActiveForGameplay(ctx, tx, tenantID, brandID)` takes the key SHARED, then reads
+  `brands.status` bound to `tenant_id` in a fresh statement (no row lock); non-`active`, missing, foreign or nil fails
+  closed with `tenant.ErrBrandNotActiveForGameplay` (never conflated with the tenant or payment-initiation sentinels).
+  Called only on the two NEW-STAKE paths, after the tenant gate and after each path's replay short-circuit:
+  `casino.postBet` (brand = the launch session's brand, pinned to the player by 0079; `casino.ErrBrandNotActive`,
+  rejection class `brand_not_active`, audit `casino_callback.rejected_brand_not_active`, HTTP 409 like the tenant
+  case) and `sportsbook.PlaceBet` (decline `brand_not_active`, audit `sportsbook_bet.denied_brand_not_active`).
+- **Writer side.** `launch_subject_status_guard` (`zz_launch_status_governed`) is replaced by 0129 with one addition: on
+  `brands`, a real status change first takes the key EXCLUSIVE and holds it to commit. Every writer of `brands.status`
+  is covered; a same-status UPDATE takes nothing. The 0128 guard logic is otherwise byte-identical (the 0129 down
+  restores 0128's body exactly; tested by schema snapshot).
+- **DB backstop.** `ledger_wager_brand_active_guard`: DEFERRED constraint trigger on `ledger_transactions`, `casino_bet`
+  and `sportsbook_bet` only; at commit it resolves the brand of every player wallet the posting moves
+  (`ledger_entries.wallet_id -> wallets.brand_id`), takes each key SHARED in ascending brand order and refuses with
+  SQLSTATE `GP011` unless `active`. Deferred because the brand is only derivable from the entries (0121's
+  `ledger_sportsbook_rollback_requires_void` precedent). A replay inserts no row, so it never fires.
+- **Not brand-gated (Q-GP-5 analogue, as decided in section 2 item 3).** `casino_win`, `casino_rollback`,
+  `sportsbook_settlement`, `sportsbook_void`, `sportsbook_rollback`, tombstones: terminal stake returns and the
+  settlement of rounds the brand already accepted stay exactly as the TENANT gate leaves them. No brand-closure open-bet
+  refusal (the GP020 mirror was cut, LF1). No ledger math, balance or projection change.
+- **Lock order (ADR 0082).** Status-gate advisory keys: tenant key, then brand key, both before L0.2 (casino: after L0.1
+  delivery lock and the session read; sportsbook: first). A brand status writer holds the `brands` row (its UPDATE's
+  tuple lock) and then the brand key; no gameplay path locks a `brands` row, so the pair cannot invert. A single
+  transaction must not change a brand status and then its tenant's status (brand X then tenant X inverts the placement
+  order; the slice-3 executor changes one subject per transaction, section 3.1). Tested: concurrent placements, voids,
+  governed brand and tenant suspend/reactivate, x20, no 40P01.
+- **Residuals.** (a) The backstop resolves the brand from entries visible to the posting session (tenant scope, as
+  every gameplay path runs); a wager row moving no player wallet has no brand and passes (`ledger.Post` never writes an
+  entry-less non-tombstone posting). (b) The brand key is held for the whole posting transaction, so a brand suspension
+  waits for in-flight placements of that brand (same operational note as ADR 0095 40.5: use `lock_timeout` and retry).
+  (c) Casino rounds open at a brand suspension/closure can still be won or rolled back (not gated); sportsbook bets open
+  at a brand closure stay open and settle normally. (d) The public casino webhook preamble still checks the tenant only
+  before verification; the brand refusal happens in the posting transaction (409).
+
 Docs (architecture 15 and 36, task registry, decision register, HANDOVER) are updated by `architect` and the
 orchestrator per slice; TENANT-STATUS-AUTHZ-1 is closed only after security reviews slices 1, 3 and 4. Labels: all
 `NOT IMPLEMENTED` until each slice lands; the licensing content recorded is human-dependent and never a statement of
@@ -543,6 +583,8 @@ legal authorisation.
   capability grant catalogue**, not this ADR.
 - **LF9 (LOW):** section 10 adds a test of a governed brand closure racing a sportsbook bet placement. Before slice 2
   (brand gameplay gate) this race is expected to let the bet in (documenting LF1); after slice 2 it must be refused.
+  *(Slice 2: flipped; `TestLF9_BrandClosureRacingBetPlacement_Slice2_BetIsRefused` now requires the racing placement to
+  wait and be refused, and a later placement to be refused.)*
 - **S5 (CONDITION, security review):** brand suspension and closure do not stop gameplay today: the 0118/0121 posting
   triggers and `GameplayStatus` read only `tenants.status`. Amendment text: either the 0118 posting gate also reads
   `brands.status` under a per-brand advisory key that brand status changes take exclusively (a gate change needing

@@ -70,6 +70,9 @@ var allowedLiteralCompares = map[string]string{
 	"migrations/0121_gameplay_stake_return_and_closure_guard.up.sql:IF NEW.status = 'closed' THEN": "0121 closure gate (transition INTO closed)",
 	// 0128 (this slice): the closed-is-terminal rule of the status guard.
 	"migrations/0128_launch_authorisation_status_governance.up.sql:IF OLD.status = 'closed' THEN": "0128 closed is terminal",
+	// 0129 (ADR 0112 slice 2, LF1): CREATE OR REPLACE of the same 0128 guard with the
+	// per-brand gameplay lock added; the closed-is-terminal line is 0128's, unchanged.
+	"migrations/0129_brand_gameplay_gate.up.sql:IF OLD.status = 'closed' THEN": "0129 restates 0128 closed is terminal",
 }
 
 func TestStatusLiteralPin_NoSuspendedOrClosedComparisonOutsideAllowList(t *testing.T) {

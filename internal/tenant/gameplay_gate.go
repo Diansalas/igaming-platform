@@ -75,3 +75,58 @@ func GameplayStatus(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID) (string,
 	}
 	return status, nil
 }
+
+// ErrBrandNotActiveForGameplay is returned by RequireBrandActiveForGameplay
+// when the brand is pending_launch, suspended, closed, any other non-'active'
+// status, its row is not visible, it belongs to another tenant, or no brand id
+// was supplied. It is distinct from ErrNotActiveForGameplay (tenant) and from
+// ErrBrandNotActive (payment initiation): the three are never conflated.
+// Callers translate it into their own deterministic, non-retryable refusal;
+// nothing may be posted after it.
+var ErrBrandNotActiveForGameplay = errors.New("tenant: brand is not active; new wagering is refused")
+
+// RequireBrandActiveForGameplay is the per-brand twin of
+// RequireActiveForGameplay (ADR 0112 decision LF1, slice 2; amends ADR 0095
+// section 40.5): a NEW wager (casino bet, sportsbook bet placement) of a brand
+// that is not 'active' is refused. Only new stakes are gated: terminal stake
+// returns (Q-GP-5) and settlements / wins of rounds already accepted are NOT
+// routed here, so a brand suspension or closure never strands a stake the
+// brand already took (the tenant gate still applies to them as before).
+//
+// It must be called inside the SAME transaction that posts, before the first
+// ledger write, after RequireActiveForGameplay (canonical status-gate order:
+// tenant key before brand key), and only on a path that would create a new
+// stake (a replay must not call it).
+//
+// Race freedom (migration 0129): it takes the per-brand status advisory lock
+// SHARED (key brand_status_gate_key, the one derivation shared with the
+// database), then reads brands.status in a fresh statement. A brand status
+// change takes the same lock EXCLUSIVE inside zz_launch_status_governed
+// (launch_subject_status_guard) and holds it to the end of its transaction, so
+// a status change either committed before this read (and is seen) or waits
+// until this transaction ends. The brand row itself is never locked here: a
+// brand status writer holds the row before it takes the advisory key, so a
+// gameplay path that held the key and then wanted the row could deadlock.
+//
+// The read is bound to tenantID (a brand of another tenant is not visible and
+// fails closed). A missing or unreadable row fails closed.
+func RequireBrandActiveForGameplay(ctx context.Context, tx pgx.Tx, tenantID, brandID uuid.UUID) error {
+	if tenantID == uuid.Nil || brandID == uuid.Nil {
+		return fmt.Errorf("%w: no tenant or brand id", ErrBrandNotActiveForGameplay)
+	}
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock_shared(public.brand_status_gate_key($1))`, brandID); err != nil {
+		return fmt.Errorf("tenant: take brand status gate lock: %w", err)
+	}
+	var status string
+	err := tx.QueryRow(ctx, `SELECT status FROM public.brands WHERE id = $1 AND tenant_id = $2`, brandID, tenantID).Scan(&status)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("%w: brand row not visible", ErrBrandNotActiveForGameplay)
+	}
+	if err != nil {
+		return fmt.Errorf("tenant: read brand status: %w", err)
+	}
+	if status != "active" {
+		return fmt.Errorf("%w: status=%s", ErrBrandNotActiveForGameplay, status)
+	}
+	return nil
+}

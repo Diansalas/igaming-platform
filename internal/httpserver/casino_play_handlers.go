@@ -273,6 +273,13 @@ func writeCasinoCallbackError(w http.ResponseWriter, requestID string, logger in
 		apierror.Write(w, requestID, apierror.CodeConflict, "request rejected")
 		return
 	}
+	if errors.Is(err, casino.ErrBrandNotActive) {
+		// ADR 0112 LF1 (slice 2): a new bet for a non-active brand; same
+		// deterministic 409 as the tenant branch, nothing posted.
+		logger.Error("casino_play_refused_brand_not_active", "action", action)
+		apierror.Write(w, requestID, apierror.CodeConflict, "request rejected")
+		return
+	}
 	if errors.Is(err, casino.ErrOriginalTombstoned) {
 		// Mirrors newCasinoWebhookHandler's own identical branch (Stage
 		// 10.3 CAS-CAP-ROLLBACK-1, E10; gate 10.3-W1 ledger-finance

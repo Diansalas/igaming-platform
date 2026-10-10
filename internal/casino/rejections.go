@@ -88,11 +88,22 @@ const (
 	// RecordCallbackRejection writes this class as an append-only audit_log
 	// row (action casino_callback.rejected_tenant_not_active) instead.
 	RejectionTenantNotActive RejectionClass = "tenant_not_active"
+
+	// RejectionBrandNotActive: a verified NEW bet for a player of a brand
+	// that is not 'active' (ADR 0112 LF1, slice 2). Like
+	// RejectionTenantNotActive it is NOT a casino_callback_rejections
+	// reason_class (same reasoning); it is written as an append-only
+	// audit_log row (action casino_callback.rejected_brand_not_active).
+	RejectionBrandNotActive RejectionClass = "brand_not_active"
 )
 
 // AuditActionCallbackRejectedTenantNotActive is the audit_log action that
 // carries a RejectionTenantNotActive record.
 const AuditActionCallbackRejectedTenantNotActive = "casino_callback.rejected_tenant_not_active"
+
+// AuditActionCallbackRejectedBrandNotActive is the audit_log action that
+// carries a RejectionBrandNotActive record.
+const AuditActionCallbackRejectedBrandNotActive = "casino_callback.rejected_brand_not_active"
 
 // rejectionClassFor maps a post-verification error from postBet/postWin/
 // postRollback to its rejection class. ok=false means "not a recorded
@@ -111,6 +122,8 @@ func rejectionClassFor(err error) (RejectionClass, bool) {
 		return "", false
 	case errors.Is(err, ErrTenantNotActive):
 		return RejectionTenantNotActive, true
+	case errors.Is(err, ErrBrandNotActive):
+		return RejectionBrandNotActive, true
 	case errors.Is(err, ErrProviderTxPayloadMismatch):
 		return RejectionPayloadMismatch, true
 	case errors.Is(err, ErrOriginalTombstoned):
@@ -213,12 +226,17 @@ func RecordCallbackRejection(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID,
 	if tenantID == uuid.Nil || providerID == "" || rej.ProviderTxID == "" || rej.Class == "" {
 		return false, fmt.Errorf("%w: a callback rejection requires tenant, provider, provider_tx_id and class", ErrInvalidInput)
 	}
-	if rej.Class == RejectionTenantNotActive {
+	if rej.Class == RejectionTenantNotActive || rej.Class == RejectionBrandNotActive {
 		// Durable evidence for staff and reconciliation, in the append-only
 		// audit store (no casino_callback_rejections row; see the class doc).
+		// The tenant and brand refusals keep distinct actions and reasons.
+		action, reason, what := AuditActionCallbackRejectedTenantNotActive, "tenant_not_active", "tenant"
+		if rej.Class == RejectionBrandNotActive {
+			action, reason, what = AuditActionCallbackRejectedBrandNotActive, "brand_not_active", "brand"
+		}
 		md := map[string]any{
 			"provider_id": providerID, "event_type": string(rej.EventType), "provider_tx_id": rej.ProviderTxID,
-			"round_id": rej.RoundID, "asset_code": rej.AssetCode, "reason": "tenant_not_active",
+			"round_id": rej.RoundID, "asset_code": rej.AssetCode, "reason": reason,
 			"request_id": requestID,
 		}
 		if rej.EventType == CallbackEventRollback {
@@ -230,11 +248,11 @@ func RecordCallbackRejection(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID,
 			md["sub_reason"] = rej.SubReason
 		}
 		if err := audit.Record(ctx, tx, audit.Entry{
-			TenantID: tenantID, ActorType: audit.ActorSystem, Action: AuditActionCallbackRejectedTenantNotActive,
+			TenantID: tenantID, ActorType: audit.ActorSystem, Action: action,
 			TargetType: "casino_provider_tx", TargetID: providerID + ":" + rej.ProviderTxID, Outcome: audit.OutcomeDenied,
 			RequestID: requestID, Metadata: md,
 		}); err != nil {
-			return false, fmt.Errorf("casino: audit callback refused for non-active tenant: %w", err)
+			return false, fmt.Errorf("casino: audit callback refused for non-active %s: %w", what, err)
 		}
 		return true, nil
 	}
