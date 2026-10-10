@@ -942,6 +942,12 @@ func applyResolvedReceiptEvidence(ctx context.Context, tx pgx.Tx, o *Orchestrato
 			// success_after_m4_not_paid (audit once per new receipt, then the raise as the LAST statement; no state change,
 			// no posting). Without an executed M4 on this attempt, and for a deposit, it stays the no-op it always was.
 			newReceipt := !alreadyApplied
+			// GOV-R32: a payout success delivered to a park is recorded durably first (no state change).
+			if attempt.Operation == AttemptOperationPayout {
+				if err := recordSuccessOnPark(ctx, tx, attempt.ID, EvidenceCallback); err != nil {
+					return false, ResolutionAnomalyOther, err
+				}
+			}
 			return false, ResolutionAnomalyOther, payoutPostM4Cell(ctx, tx, attempt, OutcomeSucceeded, EvidenceCallback, &newReceipt, ev.ProviderReference)
 		case AttemptSucceeded:
 			// RV-PRH-I1 ledger-finance M1: a mismatched "success" on an

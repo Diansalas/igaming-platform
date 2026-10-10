@@ -263,8 +263,11 @@ func TestPostM4_DestinationMismatchPark_NotPaid_ThenPoll_Succeeded_Signals(t *te
 	if _, err := m.request(m.acting, m.m4In(a.ID, ResolutionM4EvidencePaid, ev.LineID)); err == nil {
 		t.Fatal("an M4 paid request for a destination_mismatch park must be refused")
 	}
-	// A poll BEFORE the M4 (no executed M4): the disputed park stays a no-op (replay idempotence).
-	m.prov.setStatus(x, StatusResult{Outcome: OutcomeSucceeded, ProviderReference: x, Amount: 640, AssetCode: "EUR"})
+	// A poll BEFORE the M4 (no executed M4): the disputed park stays a no-op (replay idempotence). GOV-R32 review
+	// (LF HIGH, flipped deliberately): this poll reports PENDING, not SUCCESS - a success reported on a destination park
+	// before the M4 is now recorded durably and refuses M4 not-paid (TestR32_HIGH_*), so it cannot precede an executed
+	// not-paid here.
+	m.prov.setStatus(x, StatusResult{Outcome: OutcomePending, ProviderReference: x, Amount: 640, AssetCode: "EUR"})
 	if err := PollPayoutStatus(context.Background(), m.pool, m.orch, MockCredentialResolver{}, m.f.tenantID, m.attempt(a.ID), time.Now().Add(time.Minute), nil); err != nil {
 		t.Fatalf("poll before M4: %v", err)
 	}
@@ -282,6 +285,7 @@ func TestPostM4_DestinationMismatchPark_NotPaid_ThenPoll_Succeeded_Signals(t *te
 	if pp.fresh.State != AttemptDisputed || pp.fresh.TerminalReason == nil || *pp.fresh.TerminalReason != "destination_mismatch" {
 		t.Fatalf("M4 not-paid must leave the destination park disputed: %s %v", pp.fresh.State, pp.fresh.TerminalReason)
 	}
+	m.prov.setStatus(x, StatusResult{Outcome: OutcomeSucceeded, ProviderReference: x, Amount: 640, AssetCode: "EUR"})
 	for i := 0; i < 3; i++ {
 		if err := PollPayoutStatus(context.Background(), m.pool, m.orch, MockCredentialResolver{}, m.f.tenantID, m.attempt(a.ID), time.Now().Add(time.Minute), nil); err != nil {
 			t.Fatalf("poll after M4 #%d: %v", i, err)

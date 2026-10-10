@@ -105,7 +105,16 @@ func payoutForeignReferenceBinding(ctx context.Context, tx pgx.Tx, tenantID uuid
 // writes one audit row in the same transaction, and returns parked=true; the
 // caller then returns nil so the park commits and nothing retries in a loop. A
 // redelivery of the SAME attempt's own reference is not a conflict.
-func payoutGuardReferenceBinding(ctx context.Context, tx pgx.Tx, attempt PaymentAttempt, requestID uuid.UUID, reference string, evidence EvidenceKind, class ErrorClass) (bool, error) {
+//
+// GOV-R32 (migration 0127): reportedClass, when given, is the provider's REPORTED outcome class, kept apart
+// from the routing class: class still routes a CAS conflict (payoutHandleContradiction), the reported class
+// is what the park records durably in payout_park_evidence. Absent, the routing class is recorded. The
+// destination flow binds with the routing class pending but may be carrying a reported success.
+func payoutGuardReferenceBinding(ctx context.Context, tx pgx.Tx, attempt PaymentAttempt, requestID uuid.UUID, reference string, evidence EvidenceKind, class ErrorClass, reportedClass ...ErrorClass) (bool, error) {
+	reported := class
+	if len(reportedClass) > 0 {
+		reported = reportedClass[0]
+	}
 	if reference == "" || attempt.ProviderID == nil || *attempt.ProviderID == "" {
 		return false, nil
 	}
@@ -130,6 +139,11 @@ func payoutGuardReferenceBinding(ctx context.Context, tx pgx.Tx, attempt Payment
 		// A concurrent transition already moved the attempt: the same routing
 		// every other phase-C CAS conflict takes. Never fall through to the bind.
 		return true, payoutHandleContradiction(ctx, tx, attempt, evidence, class, err)
+	}
+	// GOV-R32 (LF HIGH, D-7 review): what the provider reported is recorded durably with the park, so a
+	// success-triggered conflict park can never later be resolved "not paid".
+	if err := recordParkEvidence(ctx, tx, attempt.TenantID, attempt.ID, TerminalReasonProviderReferenceConflict, parkOutcomeForClass(reported), evidence); err != nil {
+		return false, err
 	}
 	if err := audit.Record(ctx, tx, audit.Entry{
 		TenantID: attempt.TenantID, ActorType: audit.ActorSystem, Action: payoutReferenceConflictAuditAction,

@@ -87,6 +87,19 @@ func (m *payMatcher) checkM4Standing(ctx context.Context, tx pgx.Tx) error {
 				declaredPaidUnconfirmedResolutionHint,
 				"platform: "+a.render()+"; M4 evidence paid, completion transaction="+r.ledgerTx.String()+" reference="+r.reference+"; "+why)
 		case m4KindNotPaid:
+			// GOV-R32 (security C-1 / LF Q-R32-2; mirrors migration 0127's not-paid refusal): a payout line
+			// on any reference R-1 reads (bound, Y, the evidence line's D, every matched reference) that names
+			// ANOTHER merchant reference makes the attribution behind the executed not-paid ambiguous. Raise
+			// only; it is not subject to the RR-1 stop rule (it is not a recovered payout).
+			for _, l := range m.k3.notPaidLines(&r) {
+				if l.merchant != "" && l.merchant != r.attemptMerchnt {
+					m.r.add(MismatchKindPayDeclaredNotPaidButPaid, m.key("attempt="+a.id.String(), "resolution="+r.id.String(), "check=m4_not_paid_attribution_ambiguous"),
+						m4NotPaidCapturedUnpostedResolutionHint,
+						fmt.Sprintf("platform: %s; M4 evidence not paid, withdrawal_failed transaction=%s; payout line names another merchant reference: import=%s line_no=%d is_mock=%t status=%s reference=%s merchant=%s",
+							a.render(), r.ledgerTx, l.importID, l.lineNo, l.isMock, l.status, l.ref, l.merchant))
+					break
+				}
+			}
 			var evidence *persistedLine
 			for _, l := range m.k3.notPaidLines(&r) {
 				if l.status == paymentStatementStatusSucceeded {
@@ -231,9 +244,10 @@ func (m *payMatcher) m4NotPaidRecoveredLine(a *payAttempt, ref string, line *evi
 // mismatch is itself NOT recovery; the finding stops raising ONLY when ALL of
 // these hold, anything else keeps raising:
 //
-//   - the park is destination_mismatch (the only bound reason M4 not-paid
-//     admits; destination_integrity_failure is NOT M4-eligible and never
-//     stops here) and still holds X, the reference pinned at submission
+//   - the park is destination_mismatch (owner decision 1 names only this
+//     reason; destination_integrity_failure is M4 not-paid eligible since
+//     migration 0127 but is outside owner decision 1, so it never stops
+//     here - ADR 0111 §23 Q-R32-1) and still holds X, the reference pinned at submission
 //     (provider_reference_at_submission, R-6);
 //   - m4NotPaidRecovered holds: the NET recovery, exactly one distinct
 //     succeeded payout of the attempt's amount and asset, no reversed line;

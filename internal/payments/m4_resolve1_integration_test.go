@@ -182,6 +182,9 @@ func TestM4_Verdict_PaidConditions(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			m.t = t
 			p := m.park(int64(400 + i))
+			// GOV-R32 G-TIME (0127): a paid line must not predate the attempt's first send, so the
+			// lines are dated after the park (the closures read now).
+			now = time.Now()
 			c.setup(p)
 			ev := m.mustEvidence(p.fresh.ID, c.want)
 			if c.want != M4VerdictPaid && (ev.LineID != nil || ev.Reference != nil) {
@@ -367,7 +370,9 @@ func TestM4_ScopeParity_GoAndDB(t *testing.T) {
 	m := newM4World(t)
 	reasons := []string{"invalid_provider_reference", "invalid_provider_reference:empty", "invalid_provider_reference:control_char",
 		"provider_reference_conflict", "destination_mismatch", "provider_reference_mismatch", "success_for_never_sent_attempt",
-		"amount_asset_mismatch", "late_success_after_terminal", "invalid_provider_referencex"}
+		"amount_asset_mismatch", "late_success_after_terminal", "invalid_provider_referencex",
+		// GOV-R32 (migration 0127): destination_integrity_failure joins the not-paid-only arm.
+		"destination_integrity_failure", "destination_integrity_failurex"}
 	refs := []*string{nil, k3StrPtr("x-ref")}
 	states := []AttemptState{AttemptDisputed, AttemptAmbiguous, AttemptPending}
 	n := 0
@@ -393,9 +398,10 @@ func TestM4_ScopeParity_GoAndDB(t *testing.T) {
 		}
 		return nil
 	})
-	// paid: the 4 unbound forms with no reference; not-paid: the same 4 + destination_mismatch with and without a reference.
-	if n != 10 {
-		t.Fatalf("admitted combinations: want 10, got %d", n)
+	// paid: the 4 unbound forms with no reference; not-paid: the same 4 + destination_mismatch and (GOV-R32, 0127)
+	// destination_integrity_failure, each with and without a reference. Flipped deliberately from 10 to 12.
+	if n != 12 {
+		t.Fatalf("admitted combinations: want 12, got %d", n)
 	}
 }
 
@@ -929,12 +935,14 @@ func TestM4_Migration0125UpDownUp_WholeSchema(t *testing.T) {
 	}
 }
 
-// m4DownTo0125 rolls back every migration above 0125 (0126, B13-B; it holds no
-// data here) and then runs 0125's own down, which is the step that refuses.
+// m4DownTo0125 rolls back every migration above 0125 (0126 B13-B, 0127 GOV-R32;
+// they hold no data here) and then runs 0125's own down, which is the step that
+// refuses. The step count is derived from the migration files, so a later head
+// migration does not silently turn this into a down of the wrong version.
 func m4DownTo0125(t *testing.T, m *m4World) error {
 	t.Helper()
-	if _, err := m.pool.MigrateDown(context.Background(), realMigrationsDir(t), 1); err != nil {
-		t.Fatalf("down 0126 (empty): %v", err)
+	if _, err := m.pool.MigrateDown(context.Background(), realMigrationsDir(t), migrationsAbove(t, m4MigrationVersion)); err != nil {
+		t.Fatalf("down above 0125 (empty): %v", err)
 	}
 	_, err := m.pool.MigrateDown(context.Background(), migration0101Dir(t, m4MigrationVersion), 1)
 	return err

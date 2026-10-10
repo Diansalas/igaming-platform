@@ -50,6 +50,8 @@ stays A and no code changes.
 
 ## Brief 2 - Governed exit for a `destination_integrity_failure` park
 
+> **DECIDED by owner decision 4 (ADR 0095 §48).** Implementation and design: ADR 0111 §23 (M4 not-paid admitted by migration 0127, `IMPLEMENTED` against MOCK; M4 paid refused; "resume" DESIGN ONLY). The text below is the pre-decision brief, kept as history.
+
 **Current state.** A bound withdrawal whose snapshot is missing, unsealed or inconsistent parks its attempt
 `disputed` / `destination_integrity_failure` (hold kept, B12 P1, reconciliation standing finding). M2 does not admit the
 reason and the 0125 M4 scope admits only `destination_mismatch`, so there is no governed way out: the hold is

@@ -680,6 +680,10 @@ func ApplyPayoutResult(ctx context.Context, pool *db.Pool, tenantID, requestID u
 			if err := ApplyDisputeFromNonTerminal(actx, tx, attempt.ID, evidence, reason); err != nil {
 				return payoutHandleContradiction(actx, tx, attempt, evidence, gr.Class, err)
 			}
+			// GOV-R32 (D-7 review): the provider's reported outcome is recorded durably with the park.
+			if err := recordParkEvidence(actx, tx, tenantID, attempt.ID, reason, parkOutcomeForOutcome(gr.Value.Outcome), evidence); err != nil {
+				return err
+			}
 			if err := audit.Record(actx, tx, audit.Entry{
 				TenantID: tenantID, ActorType: audit.ActorSystem, Action: "payments.payout_parked_invalid_reference",
 				TargetType: "payment_attempt", TargetID: attempt.ID.String(), Outcome: audit.OutcomeDenied,
@@ -948,6 +952,12 @@ func applyPayoutLateEvidence(ctx context.Context, tx pgx.Tx, attempt PaymentAtte
 		// replay (an already-parked dispute: nothing further, not itself a P1), EXCEPT after an executed M4: a success after
 		// m4_evidence_not_paid, or a decline after m4_evidence_paid, is the post-resolution signal (audit, then the raise
 		// as the LAST statement; no state change). The cell is a no-op without an executed M4 of the matching kind.
+		// GOV-R32: a success that lost the CAS to a park is recorded durably first (no state change).
+		if observed == OutcomeSucceeded {
+			if err := recordSuccessOnPark(ctx, tx, attempt.ID, evidence); err != nil {
+				return err
+			}
+		}
 		return payoutPostM4Cell(ctx, tx, attempt, observed, evidence, nil, reference)
 	case AttemptSucceeded, AttemptRejected:
 		// Already resolved (a benign replay) - nothing further to do; not itself a P1.
@@ -1196,6 +1206,10 @@ func applyPayoutStatusEvidenceInTx(actx context.Context, tx pgx.Tx, env payoutEn
 			if err := ApplyDisputeFromNonTerminal(actx, tx, attempt.ID, evidence, reason); err != nil {
 				return payoutHandleContradiction(actx, tx, attempt, evidence, gr.Class, err)
 			}
+			// GOV-R32 (D-7 review): the provider's reported outcome is recorded durably with the park.
+			if err := recordParkEvidence(actx, tx, tenantID, attempt.ID, reason, parkOutcomeForOutcome(gr.Value.Outcome), evidence); err != nil {
+				return err
+			}
 			if err := audit.Record(actx, tx, audit.Entry{
 				TenantID: tenantID, ActorType: audit.ActorSystem, Action: "payments.payout_parked_invalid_reference",
 				TargetType: "payment_attempt", TargetID: attempt.ID.String(), Outcome: audit.OutcomeDenied,
@@ -1311,6 +1325,10 @@ func applyPayoutStatusEvidenceInTx(actx context.Context, tx pgx.Tx, env payoutEn
 			// (no executed M4, pending, ambiguous) stays the no-op it was.
 			switch gr.Class {
 			case ErrorClassSucceeded:
+				// GOV-R32: a success polled on a park is recorded durably first (no state change).
+				if err := recordSuccessOnPark(actx, tx, attempt.ID, evidence); err != nil {
+					return err
+				}
 				return payoutPostM4Cell(actx, tx, attempt, OutcomeSucceeded, evidence, nil, res.ProviderReference)
 			case ErrorClassDefiniteDecline:
 				return payoutPostM4Cell(actx, tx, attempt, OutcomeDeclined, evidence, nil, res.ProviderReference)
