@@ -27,6 +27,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -55,6 +56,11 @@ const m4ResolutionColumns = `(to_jsonb(payment_manual_resolutions) ->> 'evidence
 	     THEN ARRAY(SELECT j.x::uuid FROM jsonb_array_elements_text(to_jsonb(payment_manual_resolutions) -> 'evidence_import_ids') WITH ORDINALITY AS j(x, o) ORDER BY j.o)
 	END,
 	to_jsonb(payment_manual_resolutions) ->> 'provider_reference_at_submission'`
+
+// ErrResolutionEvidenceNotEligible: the database's verdict is positive, but a Go-side
+// D-7 eligibility check (ADR 0111 section 25, m4EligibilityRefusal) refuses it. It
+// only ever refuses; it classifies as force_resolve_evidence_insufficient.
+var ErrResolutionEvidenceNotEligible = errors.New("payments: M4 evidence is not eligible (D-7 Go-side refusal)")
 
 // M4 verdicts (payout_m4_evidence).
 const (
@@ -146,6 +152,81 @@ func (s *ManualResolutionService) verifyImportSeals(ctx context.Context, tx pgx.
 	return nil
 }
 
+// The closed reasons of m4EligibilityRefusal (ADR 0111 section 25).
+const (
+	// m4EligNonMock: the evidence rests on an import of a non-MOCK source. Non-MOCK M4 is
+	// BLOCKED (ADR 0111 10.3: T10 / S-3 / LF C-3 / HD-R15-5; owner decision D-7): the
+	// statement-line model carries no destination echo and no real source has passed the
+	// section 25 checklist (m4_source_contract.go), so this refusal is unconditional and is
+	// lifted only by a reviewed code change.
+	m4EligNonMock = "non_mock_m4_blocked"
+	// m4EligIncomplete: a paid resolution without its pinned R or line (the database forces both).
+	m4EligIncomplete = "paid_evidence_incomplete"
+	// m4EligPlatformRef: the evidenced R is a platform-issued merchant reference. The
+	// merchant reference is what attributes a line to the attempt; if R is the same string
+	// one provider field is both the causal link and the provider transaction reference.
+	m4EligPlatformRef = "reference_is_platform_issued"
+	// m4EligPredates: the succeeded line is dated before the attempt's FIRST send
+	// (first_submitted_at, falling back to last_sent_at), so it cannot be the payout of this
+	// attempt. Zero tolerance. A line dated before last_sent_at but after the first send is
+	// NOT refused: an earlier send of a resent attempt may be the one that paid.
+	m4EligPredates = "line_predates_attempt"
+	// m4EligNeverSent: the attempt records no send at all, so no line can be its payout.
+	m4EligNeverSent = "attempt_never_sent"
+	// m4EligAfterCoverage: the succeeded line is dated after the coverage end of the import
+	// that carries it, i.e. after the window the source vouches for.
+	m4EligAfterCoverage = "line_after_import_coverage"
+)
+
+// m4EligibilityRefusal is the Go-side, refusal-only half of the D-7 standard
+// that payout_m4_evidence does not enforce (ADR 0111 section 25; migration 0125 is not
+// edited). "" when the evidence is eligible. It runs at the request (after the seals)
+// and at the execution (after the seals), on exactly the pinned evidence.
+func m4EligibilityRefusal(ctx context.Context, tx pgx.Tx, res ManualResolution, att PaymentAttempt) (string, error) {
+	var nonMock bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM payment_statement_imports
+		WHERE tenant_id = $1 AND id = ANY ($2) AND NOT is_mock)`, res.TenantID, res.EvidenceImportIDs).Scan(&nonMock); err != nil {
+		return "", err
+	}
+	if nonMock {
+		return m4EligNonMock, nil
+	}
+	if res.Kind != ResolutionM4EvidencePaid {
+		return "", nil
+	}
+	if res.EvidenceReference == nil || res.EvidenceLineID == nil {
+		return m4EligIncomplete, nil
+	}
+	var platformRef bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM payment_attempts WHERE tenant_id = $1 AND merchant_reference = $2)`,
+		res.TenantID, *res.EvidenceReference).Scan(&platformRef); err != nil {
+		return "", err
+	}
+	if platformRef {
+		return m4EligPlatformRef, nil
+	}
+	var occurred, coverageEnd time.Time
+	if err := tx.QueryRow(ctx, `SELECT l.occurred_at, i.coverage_end FROM payment_statement_lines l
+		JOIN payment_statement_imports i ON i.id = l.import_id AND i.tenant_id = l.tenant_id
+		WHERE l.id = $1 AND l.tenant_id = $2`, *res.EvidenceLineID, res.TenantID).Scan(&occurred, &coverageEnd); err != nil {
+		return "", err
+	}
+	first := att.FirstSubmittedAt
+	if first == nil {
+		first = att.LastSentAt
+	}
+	if first == nil {
+		return m4EligNeverSent, nil
+	}
+	if occurred.Before(*first) {
+		return m4EligPredates, nil
+	}
+	if occurred.After(coverageEnd) {
+		return m4EligAfterCoverage, nil
+	}
+	return "", nil
+}
+
 // M4Evidence is one payout_m4_evidence result.
 type M4Evidence struct {
 	Verdict   string
@@ -209,6 +290,16 @@ func (s *ManualResolutionService) m4EvidenceRefusal(ctx context.Context, tx pgx.
 			return resolutionRefusedUnsealed, nil
 		}
 		return "", err
+	}
+	// D-7 (ADR 0111 section 25): the Go-side, refusal-only eligibility of the pinned evidence.
+	att, err := GetAttemptByID(ctx, tx, res.AttemptID)
+	if err != nil {
+		return "", err
+	}
+	if reason, err := m4EligibilityRefusal(ctx, tx, res, att); err != nil {
+		return "", err
+	} else if reason != "" {
+		return resolutionRefusedEvidence, nil
 	}
 	return "", nil
 }
