@@ -353,6 +353,13 @@ func validateManifest(provider PaymentProvider, declared AdapterCapability) erro
 			ErrManifestRegistrationRefused, declared.ProviderID, m.SettlementWindow, MaxSettlementWindow)
 	}
 
+	// ADR 0111 24 (owner decision 5): a withdrawal-capable adapter - Synthetic or not - must DECLARE its destination-echo
+	// semantics. The zero value is invalid and there is no default.
+	if declared.SupportsWithdrawal && !m.DestinationEchoSemantics.Valid() {
+		return fmt.Errorf("%w: adapter %s supports withdrawal but declares no valid destination-echo semantics (%s): declare supported or unsupported explicitly (ADR 0111 24)",
+			ErrManifestRegistrationRefused, declared.ProviderID, m.DestinationEchoSemantics)
+	}
+
 	// LF95-C5: a PRODUCTION-ELIGIBLE (non-Synthetic) adapter supporting
 	// deposit or withdrawal must be able to converge a success even when the
 	// provider_reference alone is ambiguous - either its callback always

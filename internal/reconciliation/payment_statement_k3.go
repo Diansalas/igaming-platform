@@ -82,6 +82,10 @@ const (
 	// B13-B classifies these reasons (today they are reasonUnclassified, which
 	// raises no pay_captured_unposted finding; a pin test holds both facts).
 	destinationPayoutCapturedUnpostedResolutionHint = "payout reported to a destination other than the bound one: no completion against the player's hold; PSP recall/return or off-platform recovery; M4 not-paid only on positive decline evidence; never allocation"
+	// unexpectedEchoPayoutCapturedUnpostedResolutionHint (ADR 0111 24.4, ledger-finance MEDIUM-1): a destination_mismatch
+	// park caused by an echo from an adapter that declared it cannot echo. The destination was NOT shown to differ, so
+	// the text must not say it was; and there is no governed completion route (open owner/architect question).
+	unexpectedEchoPayoutCapturedUnpostedResolutionHint = "payout parked because an adapter that declares no destination echo sent one (the destination is NOT shown to differ; the echo is untrusted evidence): no completion against the player's hold and no governed completion route (open owner/architect question); PSP recall/return or off-platform recovery; M4 not-paid only on positive decline evidence; never allocation"
 	// destinationIntegrityPayoutCapturedUnpostedResolutionHint (LF RR-2, updated
 	// by GOV-R32 / owner decision 4, ADR 0095 §48; ADR 0111 §23): migration 0127
 	// admits destination_integrity_failure to M4 NOT-PAID only (positive decline
@@ -872,6 +876,9 @@ func capturedUnpostedHintFor(a *payAttempt, depositHint string) string {
 		}
 		if a.terminalReason == "destination_integrity_failure" {
 			return destinationIntegrityPayoutCapturedUnpostedResolutionHint
+		}
+		if a.unexpectedEcho {
+			return unexpectedEchoPayoutCapturedUnpostedResolutionHint
 		}
 		if isDestinationReason(a.terminalReason) {
 			return destinationPayoutCapturedUnpostedResolutionHint

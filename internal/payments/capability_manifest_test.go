@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Diansalas/igaming-platform/internal/payoutinstrument"
 	"github.com/Diansalas/igaming-platform/internal/webhookauth"
 )
 
@@ -113,7 +114,7 @@ func TestB7_ValidateManifest_MerchantReferenceStatusQueryAloneRefused(t *testing
 		{"deposit", AdapterCapability{ProviderID: "real-psp-3", SupportsDeposit: true,
 			Manifest: OperationManifest{SupportsDeposit: true, StatusQuery: "by_provider_or_merchant_reference"}}},
 		{"withdrawal", AdapterCapability{ProviderID: "real-psp-3w", SupportsWithdrawal: true,
-			Manifest: OperationManifest{StatusQuery: "by_provider_or_merchant_reference"}}},
+			Manifest: OperationManifest{StatusQuery: "by_provider_or_merchant_reference", DestinationEchoSemantics: payoutinstrument.DestinationEchoSupported}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			err := validateManifest(nonSyntheticFakeProvider{capability: tc.cap}, tc.cap)
@@ -129,6 +130,7 @@ func TestB7_ValidateManifest_MerchantReferenceStatusQueryWithCallbackEchoAccepte
 		ProviderID: "real-psp-3b", SupportsDeposit: true, SupportsWithdrawal: true,
 		Manifest: OperationManifest{
 			SupportsDeposit: true, CallbackEchoesMerchantReference: true, StatusQuery: "by_provider_or_merchant_reference",
+			DestinationEchoSemantics: payoutinstrument.DestinationEchoUnsupported,
 		},
 	}
 	if err := validateManifest(nonSyntheticFakeProvider{capability: declared}, declared); err != nil {

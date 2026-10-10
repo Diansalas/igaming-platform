@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
+	"reflect"
 	"sort"
 	"strings"
 )
@@ -22,6 +24,76 @@ type Registrations struct {
 	// statement source is registered, because its imports must be sealed to be
 	// M4 evidence at all).
 	StatementSources []any
+
+	// PayoutEchoDeclarations carries each registered payment adapter's destination-echo declaration (ADR 0111 24),
+	// read by the binary from the adapter's own manifest (never defaulted here). Every non-Synthetic entry of
+	// PaymentAdapters MUST have exactly one entry, and every payout-capable entry (Synthetic or not) must declare a
+	// valid state: an unset declaration refuses startup.
+	PayoutEchoDeclarations []PayoutEchoDeclaration
+}
+
+// PayoutEchoDeclaration is one adapter's declaration as the startup gate sees it.
+type PayoutEchoDeclaration struct {
+	// Adapter is the registered adapter value (the same value placed in PaymentAdapters).
+	Adapter any
+	// ProviderID names the provider in refusals and in the startup marker.
+	ProviderID string
+	// PayoutCapable is the adapter's own SupportsWithdrawal capability. A deposit-only adapter makes no payout and
+	// needs no echo declaration.
+	PayoutCapable bool
+	// Semantics is the manifest's declaration, verbatim.
+	Semantics DestinationEchoSemantics
+}
+
+// EchoUnsupportedStartupEvent is the structured log message of the visible, auditable marker written at startup for each
+// non-Synthetic payout adapter that declares DestinationEchoUnsupported (ADR 0111 24). Tests and log-based alerting key on it.
+const EchoUnsupportedStartupEvent = "payout_destination_echo_unsupported_adapter_registered"
+
+func sameComponent(a, b any) bool {
+	if a == nil || b == nil {
+		return false
+	}
+	ta, tb := reflect.TypeOf(a), reflect.TypeOf(b)
+	if ta != tb || !ta.Comparable() {
+		return false
+	}
+	return a == b
+}
+
+// verifyEchoDeclarations is the ADR 0111 24 startup rule: no default, fail closed.
+func verifyEchoDeclarations(regs Registrations) error {
+	for _, a := range regs.PaymentAdapters {
+		if a == nil || IsSyntheticComponent(a) {
+			continue
+		}
+		found := false
+		for _, d := range regs.PayoutEchoDeclarations {
+			if sameComponent(d.Adapter, a) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return fmt.Errorf("%w: a non-Synthetic payment adapter (%T) is registered without a destination-echo declaration (ADR 0111 24); refusing to start", ErrStartupGate, a)
+		}
+	}
+	for _, d := range regs.PayoutEchoDeclarations {
+		if !d.PayoutCapable {
+			continue
+		}
+		if !d.Semantics.Valid() {
+			return fmt.Errorf("%w: payout adapter %q has no valid destination-echo declaration (%s): it must declare supported or unsupported explicitly, there is no default (ADR 0111 24); refusing to start", ErrStartupGate, d.ProviderID, d.Semantics)
+		}
+	}
+	for _, d := range regs.PayoutEchoDeclarations {
+		if d.PayoutCapable && d.Semantics == DestinationEchoUnsupported && d.Adapter != nil && !IsSyntheticComponent(d.Adapter) {
+			slog.Warn(EchoUnsupportedStartupEvent, "provider_id", d.ProviderID,
+				"destination_echo", d.Semantics.String(),
+				"compensating_control", "statement-level evidence (M4/reconciliation)",
+				"owner_acknowledgement", "per-provider, not yet defined (ADR 0111 24)")
+		}
+	}
+	return nil
 }
 
 // NonSyntheticRegistered reports whether any payout adapter or instrument
@@ -57,6 +129,9 @@ func VerifyStartup(guardEnvironment string, keys *Keys, regs Registrations) erro
 	// adapter until the binding lands) is REMOVED in the same change that wires the binding
 	// into the withdrawal and payments paths and closes the NULL arm (migration 0126). A
 	// non-Synthetic adapter now needs the keys below and the per-claim tiering predicate.
+	if err := verifyEchoDeclarations(regs); err != nil {
+		return err
+	}
 	required := guardEnvironment == "production" || regs.NonSyntheticRegistered()
 	if required && keys == nil {
 		return fmt.Errorf("%w: PAYOUT_INSTRUMENT_KEYS / PAYOUT_INSTRUMENT_ACTIVE_KID and PAYOUT_INSTRUMENT_FP_KEYS / PAYOUT_INSTRUMENT_FP_ACTIVE_KID are required (production, or a non-Synthetic payout adapter, verifier or payment statement source is registered); refusing to start", ErrStartupGate)

@@ -23,6 +23,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/Diansalas/igaming-platform/internal/payoutinstrument"
 	"github.com/Diansalas/igaming-platform/internal/providercred"
 )
 
@@ -171,11 +172,20 @@ type OperationManifest struct {
 	// adapter. Registration refuses an adapter declaring true until a flow
 	// exists."
 	SupportsRefund bool
-	// EchoesDestinationFingerprint (B13-B, ADR 0111 2.7): true means a payout success result or
-	// status poll from this adapter always carries a DestinationEcho. A success WITHOUT one is then
-	// ambiguous (never a success). Conformance: a non-Synthetic payout adapter is never called with
-	// an empty Destination; a differing vendor-reported destination yields a mismatch echo.
-	EchoesDestinationFingerprint bool
+	// DestinationEchoSemantics (ADR 0111 24, owner decision 5 of ADR 0095 48) is the MANDATORY, explicit declaration
+	// of a payout adapter's destination evidence. It replaces the former EchoesDestinationFingerprint boolean, whose
+	// false zero value silently meant "no echo". The zero value (DestinationEchoUnset) is INVALID: registration
+	// (validateManifest) refuses every withdrawal-capable adapter that leaves it unset, Synthetic included, and the
+	// startup gate (payoutinstrument.VerifyStartup) repeats the check. There is no default.
+	//
+	//   - DestinationEchoSupported: every payout success, poll or callback carries a tenant-bound DestinationEcho
+	//     computed inside the adapter. A success WITHOUT one is ambiguous; a differing, malformed or unknown-kid echo
+	//     parks destination_mismatch.
+	//   - DestinationEchoUnsupported: the adapter cannot provide destination evidence. No echo is expected; none is a
+	//     match; an echo that arrives anyway is untrusted and fails closed like a mismatch.
+	//
+	// A provider echo never establishes beneficiary identity and never sets or changes a destination.
+	DestinationEchoSemantics payoutinstrument.DestinationEchoSemantics
 	// CallbackEchoesMerchantReference is §10.1's LF95-C5 field: true means
 	// this adapter's callback always carries back the merchant_reference
 	// the platform sent it, so a success can always be convergeable even if

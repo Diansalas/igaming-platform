@@ -1,0 +1,38 @@
+R33 destination-echo declaration (ADR 0111 24) mutation evidence. Worktree r33-echo, baseline dad803d + the R33 change.
+Method: each mutant applied in place with a backup, the named tests run, the file restored from the backup (git diff checked after).
+Unit mutants: go test -count=1 -run <tests> <pkg>. Integration mutants: -race -tags integration -count=1 -p 1 -run <tests> ./internal/payments/ on a private scratch DB.
+A mutant that only failed to COMPILE is not counted as killed (M4 and M11 were re-written to compile before being counted).
+
+M1  payoutinstrument/dispatch.go EvaluateEcho: remove the "declared != Supported -> EchoUnexpected" branch            KILLED  TestEvaluateEcho
+M2  payments/capability.go validateManifest: unset-declaration refusal disabled (if false)                              KILLED  TestEchoDeclaration_UnsetIsRefusedForEveryWithdrawalCapableAdapter
+M3  payoutinstrument/startup.go verifyEchoDeclarations: Valid() check disabled                                          KILLED  TestVerifyStartup_EchoDeclarations
+M4  payoutinstrument/startup.go verifyEchoDeclarations: "no declaration entry for a non-Synthetic adapter" disabled     KILLED  TestVerifyStartup_EchoDeclarations
+M5  payoutinstrument/startup.go: the Unsupported startup marker downgraded from Warn to Debug (not visible)             KILLED  TestVerifyStartup_EchoDeclarations
+M6  payoutinstrument/dispatch.go EchoWellFormed always true                                                             KILLED  TestEchoWellFormed, TestEvaluateEcho
+M7  payments/payout_destination.go: a Supported adapter's absent echo on a success no longer ambiguous                  KILLED  TestEchoConformance_MockSupported/a_success_without_the_echo_is_ambiguous
+M8  payoutinstrument/dispatch.go EchoVerdict.Mismatch(): only EchoMismatch is the fail-closed class                     KILLED  TestEvaluateEcho
+M9  payments/payout_destination.go echoAuditIdentity: stores the raw (malformed) echo text in the audit row              KILLED  TestEchoConformance_MockSupported/malformed_echo_fails_closed_and_its_text_is_not_stored
+M10 payments/payout_destination.go terminal signal: only a plain mismatch (not malformed/unexpected) signals             KILLED  TestEchoConformance_MockUnsupported/an_echo_on_an_already-succeeded_unsupported_payout_is_signal-only
+M11 payments/payout_destination.go echoSemantics: every adapter read as Supported                                       KILLED  TestEchoConformance_MockUnsupported/no_echo_is_expected:_a_success_settles... (attempt = ambiguous)
+M12 cmd/platform-api payoutAdapterDeclarations: hard-codes Supported instead of reading the manifest                    KILLED  TestPayoutInstrument_StartupRefusesUnsetEchoDeclaration
+M14 payments/mock.go SetManifest: no longer preserves the MOCK's explicit declaration                                   KILLED  TestEchoDeclaration_MockDeclaresExplicitly
+M15 payments/payout_destination.go payoutDestinationEvidence: EchoUnexpected no longer parks                            KILLED  TestEchoConformance_MockUnsupported/an_echo_from_an_unsupported_adapter_is_untrusted...
+M16 payments/payout_destination.go: a direct CompareEcho call added (bypasses the declaration)                           KILLED  TestEchoDeclaration_Static_NoBooleanNoDirectCompare
+
+Counted: 15. Killed: 15. Survivors: 0.
+Not mutated (stated honestly): the callback-evidence-only static pins (b13b_static_test.go, unchanged and green) were not re-mutated here; the "mismatch cannot progress"
+cell has no dedicated mutant beyond M15 (which parks) because the park/no-progress code path is the pre-existing B13-B code, covered by the existing TestB13B_* mutations.
+
+== Review-conditions round (security LOW-1/2/3, ledger-finance MEDIUM-1 and conformance gaps; same branch, ADR 0111 24.7)
+Same method (-race -tags integration -count=1 -p 1, private scratch DB; unit tests without the tag).
+N1  payments/payout_destination.go echoState: relies on the LIVE manifest instead of the frozen declaration            KILLED  TestEchoState_FrozenDeclarationAndDrift, TestEchoHardening_LOW1_*
+N2  payments/payout_destination.go: a success under an untrusted declaration is no longer ambiguous                    KILLED  TestEchoHardening_LOW1_* (attempt = succeeded: the evidence was accepted)
+N3  payments/payout_destination.go echoState: an unknown provider is trusted                                           KILLED  TestEchoState_FrozenDeclarationAndDrift, TestEchoHardening_LOW2_UnknownProviderSuccessIsAmbiguous
+N4  payments/payout_destination.go: the distinct-echo audit cap disabled                                               KILLED  TestEchoHardening_LOW3 (terminal audit rows = 12, want the cap 8)
+N5  reconciliation/payment_statement.go: the park-audit read for the unexpected-echo hint keyed on the wrong verdict    KILLED  TestEchoHardening_MEDIUM1 (the hint claims a destination mismatch for an unexpected echo)
+N6  payments/payout.go poll site: AmbiguousSuccess no longer reschedules                                              KILLED  TestEchoConformance_MockSupported/a_success_without_the_echo (poll)
+N7  payments/receipt.go callback site: AmbiguousSuccess no longer blocks the callback cell                              KILLED  TestEchoConformance_MockSupported/a_success_without_the_echo (callback)
+N8  payments/payout_destination.go: declines are not checked for an echo                                               KILLED  TestEchoConformance_MockSupported (decline cells: attempt = declined)
+Counted 8, killed 8, survivors 0. Not mutated: the racing callback+poll cell (its "one park" property rests on the withdrawal row lock that
+pre-dates this change and is exercised by TestB13B_Echo_ConcurrentMismatch_ExactlyOnePark); wantParked's new ledger-count assertion (an assertion, not a code path).
+The container restarted during N8; the file was checked and restored by hand, and the final test runs below are on the restored tree.

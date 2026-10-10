@@ -39,7 +39,8 @@ type b13bProvider struct {
 	wres     WithdrawResult
 	sres     StatusResult
 	reqs     []WithdrawRequest
-	declared bool // manifest EchoesDestinationFingerprint
+	unset    bool // test hook: the live manifest drifts to the INVALID unset declaration (ADR 0111 24.7)
+	declared bool // manifest DestinationEchoSemantics: true = Supported, false = Unsupported (ADR 0111 24)
 	idem     bool // manifest IdempotentSubmission
 }
 
@@ -62,7 +63,13 @@ func (p *b13bProvider) QueryStatus(_ context.Context, ref string) (StatusResult,
 
 func (p *b13bProvider) Capabilities() AdapterCapability {
 	c := p.MockProvider.Capabilities()
-	c.Manifest.EchoesDestinationFingerprint = p.declared
+	c.Manifest.DestinationEchoSemantics = payoutinstrument.DestinationEchoUnsupported
+	if p.declared {
+		c.Manifest.DestinationEchoSemantics = payoutinstrument.DestinationEchoSupported
+	}
+	if p.unset {
+		c.Manifest.DestinationEchoSemantics = payoutinstrument.DestinationEchoUnset
+	}
 	c.Manifest.IdempotentSubmission = p.idem
 	return c
 }
@@ -79,6 +86,10 @@ func (p *b13bProvider) set(w WithdrawResult, s StatusResult) {
 	p.wres, p.sres = w, s
 }
 
+// b13bEchoSupported declares DestinationEchoSupported (ADR 0111 24): the cells that compare a scripted echo with the
+// snapshot only apply to an adapter that declares it. The default b13bProvider declares Unsupported.
+func b13bEchoSupported(p *b13bProvider) { p.declared = true }
+
 type b13bW struct {
 	t    *testing.T
 	pool *db.Pool
@@ -87,6 +98,10 @@ type b13bW struct {
 	orch *Orchestrator
 	svc  *payoutinstrument.Service
 	pid  string
+	// baseLedger is the ledger transaction count right after the latest approval (the hold). A park must leave it
+	// unchanged (ledger-finance LOW): wantParked asserts it.
+	baseLedger    int
+	baseLedgerSet bool
 }
 
 func newB13bW(t *testing.T, id string, mut ...func(*b13bProvider)) *b13bW {
@@ -107,7 +122,9 @@ func newB13bW(t *testing.T, id string, mut ...func(*b13bProvider)) *b13bW {
 func (w *b13bW) ctx() context.Context { return context.Background() }
 
 func (w *b13bW) approved(amount int64, key string) withdrawal.WithdrawalRequest {
-	return approvedWithdrawal(w.t, w.pool, w.f, amount, key)
+	wr := approvedWithdrawal(w.t, w.pool, w.f, amount, key)
+	w.baseLedger, w.baseLedgerSet = w.ledgerTx(), true
+	return wr
 }
 
 func (w *b13bW) claim(wr withdrawal.WithdrawalRequest, method string) (ClaimResult, error) {
@@ -868,6 +885,9 @@ func (w *b13bW) wantParked(wr withdrawal.WithdrawalRequest, a PaymentAttempt, re
 	if got.State != withdrawal.StateSubmitted || got.ReleaseLedgerTransactionID != nil {
 		w.t.Fatalf("withdrawal = %s (release=%v): NO payout progression and the hold stays", got.State, got.ReleaseLedgerTransactionID)
 	}
+	if w.baseLedgerSet && w.ledgerTx() != w.baseLedger {
+		w.t.Fatalf("ledger transactions = %d, want %d: a destination park must post nothing", w.ledgerTx(), w.baseLedger)
+	}
 	if n := w.count(`SELECT count(*) FROM audit_log WHERE action='payments.payout_parked_destination' AND target_id=$1 AND metadata->>'reason'=$2`, a.ID.String(), reason); n != 1 {
 		w.t.Fatalf("park audit rows = %d, want 1", n)
 	}
@@ -895,7 +915,7 @@ func TestB13B_Echo_Sync_Mismatch_ParksEveryOutcome(t *testing.T) {
 	} {
 		for _, kind := range []string{"different fingerprint", "unknown kid"} {
 			t.Run(o.name+"/"+kind, func(t *testing.T) {
-				w := newB13bW(t, "k")
+				w := newB13bW(t, "k", b13bEchoSupported)
 				wr := w.approved(500, "b13b-echo")
 				cl := w.mustClaim(wr)
 				echo := w.badEcho(cl.Attempt.ID)
@@ -952,7 +972,7 @@ func TestB13B_Echo_LegacyUnboundIsNotCompared(t *testing.T) {
 
 // A matching echo settles normally (the comparison is not a veto on every payout).
 func TestB13B_Echo_Sync_Match_Settles(t *testing.T) {
-	w := newB13bW(t, "l")
+	w := newB13bW(t, "l", b13bEchoSupported)
 	wr := w.approved(500, "b13b-echo-match")
 	cl := w.mustClaim(wr)
 	w.prov.set(WithdrawResult{Outcome: OutcomeSucceeded, ProviderReference: "ref-match-1", DestinationEcho: w.goodEcho(cl.Attempt.ID)}, StatusResult{})
@@ -1038,7 +1058,7 @@ func TestB13B_Evidence_MissingOrTamperedSnapshot_ParksAsIntegrityFailure(t *test
 
 // Poll: the QueryStatus result is compared too. A mismatch parks; a match settles.
 func TestB13B_Echo_Poll(t *testing.T) {
-	w := newB13bW(t, "q")
+	w := newB13bW(t, "q", b13bEchoSupported)
 	wr, cl, gr := w.submittedWithResult(WithdrawResult{Outcome: OutcomePending, ProviderReference: "ref-poll-1", DestinationEcho: nil}, "b13b-poll")
 	if err := w.apply(wr, cl, gr); err != nil {
 		t.Fatal(err)
@@ -1059,7 +1079,7 @@ func TestB13B_Echo_Poll(t *testing.T) {
 	}
 	w.wantParked(wr, w.attempt(cl.Attempt.ID), TerminalReasonDestinationMismatch)
 
-	w2 := newB13bW(t, "r")
+	w2 := newB13bW(t, "r", b13bEchoSupported)
 	wr2, cl2, gr2 := w2.submittedWithResult(WithdrawResult{Outcome: OutcomePending, ProviderReference: "ref-poll-2"}, "b13b-poll-2")
 	if err := w2.apply(wr2, cl2, gr2); err != nil {
 		t.Fatal(err)
@@ -1091,7 +1111,7 @@ func (w *b13bW) callback(a PaymentAttempt, outcome Outcome, ref string, echo *pa
 // Callback: a payout success callback with a differing destination parks the attempt; it never settles; and
 // a callback can never determine a destination (no B13 table is written - pinned statically as well).
 func TestB13B_Echo_Callback(t *testing.T) {
-	w := newB13bW(t, "s")
+	w := newB13bW(t, "s", b13bEchoSupported)
 	wr, cl, gr := w.submittedWithResult(WithdrawResult{Outcome: OutcomePending, ProviderReference: "ref-cb-1"}, "b13b-cb")
 	if err := w.apply(wr, cl, gr); err != nil {
 		t.Fatal(err)
@@ -1112,7 +1132,7 @@ func TestB13B_Echo_Callback(t *testing.T) {
 	w.wantParked(wr, w.attempt(cl.Attempt.ID), TerminalReasonDestinationMismatch)
 
 	// A matching callback settles.
-	w2 := newB13bW(t, "t")
+	w2 := newB13bW(t, "t", b13bEchoSupported)
 	wr2, cl2, gr2 := w2.submittedWithResult(WithdrawResult{Outcome: OutcomePending, ProviderReference: "ref-cb-2"}, "b13b-cb-2")
 	if err := w2.apply(wr2, cl2, gr2); err != nil {
 		t.Fatal(err)
@@ -1128,7 +1148,7 @@ func TestB13B_Echo_Callback(t *testing.T) {
 
 // A differing echo on an ALREADY succeeded payout changes nothing but is audited and raised.
 func TestB13B_Echo_OnTerminalSucceeded_SignalOnly(t *testing.T) {
-	w := newB13bW(t, "u")
+	w := newB13bW(t, "u", b13bEchoSupported)
 	wr, cl, gr := w.submittedWithResult(WithdrawResult{Outcome: OutcomePending, ProviderReference: "ref-term-1"}, "b13b-term")
 	if err := w.apply(wr, cl, gr); err != nil {
 		t.Fatal(err)
@@ -1521,7 +1541,7 @@ func TestB13B_LFH1_DeclineThenSuccessWithBadEcho_StillParksT14(t *testing.T) {
 
 // ... and on a SUCCEEDED attempt the existing amount signal still fires next to the destination signal.
 func TestB13B_LFH1_SucceededThenMismatchedSuccessWithBadEcho_KeepsTheAmountSignal(t *testing.T) {
-	w := newB13bW(t, "lfh1b")
+	w := newB13bW(t, "lfh1b", b13bEchoSupported)
 	wr, cl, gr := w.submittedWithResult(WithdrawResult{Outcome: OutcomePending, ProviderReference: "ref-lfh1b"}, "lfh1b")
 	if err := w.apply(wr, cl, gr); err != nil {
 		t.Fatal(err)
@@ -1550,7 +1570,7 @@ func TestB13B_LFH1_SucceededThenMismatchedSuccessWithBadEcho_KeepsTheAmountSigna
 
 // LF L-2: the terminal signal's audit row is written once per receipt: three redeliveries, one audit row, one alert.
 func TestB13B_LFL2_TerminalSignalAuditOncePerReceipt(t *testing.T) {
-	w := newB13bW(t, "lfl2")
+	w := newB13bW(t, "lfl2", b13bEchoSupported)
 	wr, cl, gr := w.submittedWithResult(WithdrawResult{Outcome: OutcomePending, ProviderReference: "ref-lfl2"}, "lfl2")
 	if err := w.apply(wr, cl, gr); err != nil {
 		t.Fatal(err)
