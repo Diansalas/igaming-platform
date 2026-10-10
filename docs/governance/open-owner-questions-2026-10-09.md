@@ -117,3 +117,27 @@ ADR 0095 s45-s47); "no" means no record makes it a prerequisite, not that it is 
 | Resume of a `destination_integrity_failure` park (Q-R32-3) | no | no (interim route sufficient) | no | no |
 | D-REG-1 (are bank/e-wallet identifiers "raw credentials" for decision 8) | no | yes before accepting real instruments via the raw-detail route | no | yes |
 | ALERT-DELIVERY-1 / HD-PRH2-4-OPS | no (owner YES in principle) | no | yes (AWS-hosted channels) | yes |
+
+---
+
+## NEW (2026-10-10): GAP-AAM - no governed exit for an `amount_asset_mismatch` park
+
+1. **Exact finding** (security fidelity review of the OpenAPI documentation, verified against the code on 2026-10-10): a payout attempt
+   that the provider confirms with an amount or asset different from the withdrawal request is parked `disputed` with terminal
+   reason `amount_asset_mismatch` and the hold is kept. The `resolve` route answers 409 "provider-confirmed amount/asset does not
+   match the withdrawal request". `amount_asset_mismatch` is `false` in `PayoutDisputeReasons` (not admitted to M2), is not in
+   `payment_m4_in_scope` (not admitted to M4), and the HSEC hold release requires an `approved` withdrawal while this one is
+   `submitted`. Therefore **no automatic, M2, M4 or hold-release path admits this reason today.**
+2. **Why open.** No owner decision addresses this reason. Decisions 9-12 (RESOLVE-1) and 13-18 (HSEC) name other parks;
+   decision 4 (2026-10-09) covers only `destination_integrity_failure`.
+3. **State.** Fail closed: the hold stays, B12 alert raised, reconciliation raises the bound `pay_captured_unposted` finding.
+   Recovery today is operator investigation / PSP recall / off-platform.
+4. **Recommendation.** None recorded. Options for the owner/ledger-finance: (a) leave parked with operator investigation (current);
+   (b) admit it to M4 NOT-PAID only on positive decline evidence on the bound reference (same standard as the other bound parks;
+   a provider-confirmed different amount is a success-triggered park, so the durable success record would make not-paid
+   `contradictory`: the exit would effectively never open); (c) a dedicated governed resolution that accepts the provider's
+   actual amount (a partial/over payout) with four-eyes and an adjustment, which is a new financial design.
+5. **Decision required (owner + ledger-finance):** choose (a), (b) or (c) for `amount_asset_mismatch` parks.
+6. **Unblocks.** (a): closes it as accepted. (b)/(c): a governed exit (migration + tests + reviews).
+7. **Blocks.** Sandbox: no. Real providers / non-MOCK money: yes (a real PSP will eventually confirm a different amount, e.g. fees).
+   AWS: no. Production: yes.
