@@ -32,9 +32,6 @@ var ErrNotFound = errors.New("identity: not found")
 // migration 0128). It is refused by every runtime gate that tests status = 'active'.
 const StatusPendingLaunch = "pending_launch"
 
-// ErrNotAcceptingRegistrations is returned by the player registration entry points when
-// the brand or its tenant is not active (ADR 0112 section 7.3). HTTP answers 409
-// BRAND_NOT_ACCEPTING_REGISTRATIONS.
 // Unlaunched reports whether the brand or its tenant is still pending_launch (only meaningful
 // for a Brand returned by GetBrandBySlug). An unlaunched brand is hidden: registration and login
 // answer exactly as for an unknown brand slug (ADR 0112 7.3, security S-5/S-6).
@@ -42,6 +39,9 @@ func (b Brand) Unlaunched() bool {
 	return b.Status == StatusPendingLaunch || b.TenantStatus == StatusPendingLaunch
 }
 
+// ErrNotAcceptingRegistrations is returned by the player registration entry points when
+// the brand or its tenant is not active (ADR 0112 section 7.3). HTTP answers 409
+// BRAND_NOT_ACCEPTING_REGISTRATIONS for suspended/closed; a pending_launch brand is hidden as 404.
 var ErrNotAcceptingRegistrations = errors.New("identity: the brand is not accepting registrations")
 
 // ErrSlugTaken is returned when a tenant or brand slug collides with an

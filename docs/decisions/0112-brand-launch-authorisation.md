@@ -492,7 +492,17 @@ gate; legacy backfill; PII lint; separate decision `licensing_model`; tenant and
     nothing yet fails a COMMIT of a suspension that left a stale `pending` activation/closure behind (a deferred
     check over the subject at commit). Not done soundly in slice 1; the slice-3 executor performs the supersede and
     its test asserts no stale `pending` request survives a suspension.
-11. **C-5.** The slice-1 closure tests realise an admitted closure through the owner-run governed fixture, and the
+11. **Snapshot isolation (security r2).** An approval-based `pending -> executing` is refused (`LA011`) unless the
+    transaction is READ COMMITTED, because a reject committed after a REPEATABLE READ / SERIALIZABLE snapshot is
+    invisible to the reject check and the approvals guard only row-locks the request (SSI does not abort). The slice-3
+    executor must run in READ COMMITTED.
+12. **Slice-3 notes.** (i) A recorded `reject` is bound to its request only: it does NOT carry over to a later
+    identical request on the same subject, so an approver can be "shopped" by re-requesting. Slice 3 must decide and
+    record the policy (for example a cool-down, or surfacing prior rejects of the same payload hash to the next
+    approvers); nothing in slice 1 prevents it. (ii) A tenant's own-brand suspension supersedes and discards the
+    platform's pending requests for that subject (S3). The audit trail and the console must show that explicitly
+    (request, superseding suspension, actor), not as a silent disappearance.
+13. **C-5.** The slice-1 closure tests realise an admitted closure through the owner-run governed fixture, and the
     `tenant.status_change` audit assertion of the pre-0128 tests is not made (ChangeStatus fails closed). Slice 3
     restores that assertion on the executor. Runtime-role raw-UPDATE refusal (GP020 / LA020) is covered separately.
 

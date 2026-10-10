@@ -415,6 +415,14 @@ BEGIN
               FROM public.launch_authorisation_approvals a
              WHERE a.request_id = OLD.id AND a.decision = 'approve' AND a.payload_hash = OLD.payload_hash
                AND a.decided_by_person_id <> OLD.requested_by_person_id AND a.decided_by <> OLD.requested_by;
+            -- Security r2: the reject check below reads the approvals under THIS transaction's snapshot.
+            -- Under REPEATABLE READ / SERIALIZABLE a reject that committed after the snapshot would be
+            -- invisible (and the approvals guard only row-locks the request, so SSI does not abort), so
+            -- an approval-based execution is admitted in READ COMMITTED only, where every statement
+            -- sees the committed rejects. (Suspensions with 0 approvals carry no reject to miss.)
+            IF current_setting('transaction_isolation') <> 'read committed' THEN
+                RAISE EXCEPTION 'launch request: an approval-based execution requires a READ COMMITTED transaction' USING ERRCODE = 'LA011';
+            END IF;
             -- C-3(a): a recorded 'reject' decision blocks execution of this request for good.
             IF EXISTS (SELECT 1 FROM public.launch_authorisation_approvals a
                         WHERE a.request_id = OLD.id AND a.decision = 'reject') THEN
