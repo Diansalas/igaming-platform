@@ -40,6 +40,12 @@ func newRBEnv(t *testing.T, pid string) rbEnv {
 	return rbEnv{pool: pool, f: f, orch: orch, pid: pid}
 }
 
+// opts are the production payout options of the env's orchestrator (provider lookup + the declarations frozen at wiring, ADR 0111
+// 24.7) with the shared destination service: an env without a provider lookup is untrusted and a success would be ambiguous.
+func (e rbEnv) opts() []PayoutOption {
+	return append(e.orch.PayoutOptions(), WithDestinations(pitest.Shared()))
+}
+
 // claim approves a fresh withdrawal and claims it (attempt in `submitting`).
 func (e rbEnv) claim(t *testing.T, key string) (withdrawal.WithdrawalRequest, PaymentAttempt) {
 	t.Helper()
@@ -57,8 +63,8 @@ func rbResult(class ErrorClass, outcome Outcome, ref string) GateResult[Withdraw
 
 func (e rbEnv) apply(t *testing.T, wr withdrawal.WithdrawalRequest, a PaymentAttempt, gr GateResult[WithdrawResult]) {
 	t.Helper()
-	if err := ApplyPayoutResult(context.Background(), e.pool, e.f.tenantID, wr.ID, a, gr, EvidenceSync, WithDestinations(pitest.Shared())); err != nil {
-		t.Fatalf("ApplyPayoutResult(%s, WithDestinations(pitest.Shared())): %v", gr.Class, err)
+	if err := ApplyPayoutResult(context.Background(), e.pool, e.f.tenantID, wr.ID, a, gr, EvidenceSync, e.opts()...); err != nil {
+		t.Fatalf("ApplyPayoutResult(%s, e.opts()): %v", gr.Class, err)
 	}
 }
 
@@ -403,8 +409,8 @@ func rbStatus(class ErrorClass, outcome Outcome, ref string) GateResult[StatusRe
 
 func (e rbEnv) applyStatus(t *testing.T, wr withdrawal.WithdrawalRequest, a PaymentAttempt, gr GateResult[StatusResult]) {
 	t.Helper()
-	if err := applyPayoutStatusEvidence(context.Background(), e.pool, e.f.tenantID, wr.ID, a, gr, EvidenceQueryStatus, time.Now().Add(time.Minute), nil, WithDestinations(pitest.Shared())); err != nil {
-		t.Fatalf("applyPayoutStatusEvidence(%s, WithDestinations(pitest.Shared())): %v", gr.Class, err)
+	if err := applyPayoutStatusEvidence(context.Background(), e.pool, e.f.tenantID, wr.ID, a, gr, EvidenceQueryStatus, time.Now().Add(time.Minute), nil, e.opts()...); err != nil {
+		t.Fatalf("applyPayoutStatusEvidence(%s, e.opts()): %v", gr.Class, err)
 	}
 }
 

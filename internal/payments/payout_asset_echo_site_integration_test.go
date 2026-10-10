@@ -22,7 +22,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
-	"github.com/Diansalas/igaming-platform/internal/payoutinstrument/pitest"
 	"github.com/Diansalas/igaming-platform/internal/withdrawal"
 )
 
@@ -254,7 +253,7 @@ func TestPayoutAssetEcho_Site_AuditFailure_RollsBackThePark_ThenConverges(t *tes
 		return applyPayoutStatusEvidence(context.Background(), e.pool, e.f.tenantID, wr.ID, a,
 			GateResult[StatusResult]{Class: ErrorClassSucceeded, Value: StatusResult{Outcome: OutcomeSucceeded,
 				ProviderReference: "aecho-fail-ref", Amount: 500, AssetCode: "bad\necho"}},
-			EvidenceQueryStatus, time.Now().Add(time.Minute), nil, WithDestinations(pitest.Shared()))
+			EvidenceQueryStatus, time.Now().Add(time.Minute), nil, e.opts()...)
 	}
 	t.Run("faulty", func(t *testing.T) {
 		r8InstallAuditFailure(t, e, payoutAmountAssetMismatchAudit)

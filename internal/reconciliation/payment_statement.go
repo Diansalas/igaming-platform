@@ -878,7 +878,7 @@ func (m *payMatcher) loadPlatform(ctx context.Context, tx pgx.Tx) error {
 		       (a.terminal_reason = 'destination_mismatch' AND EXISTS (
 		          SELECT 1 FROM audit_log al
 		           WHERE al.tenant_id = a.tenant_id AND al.action = 'payments.payout_parked_destination'
-		             AND al.target_id = a.id::text AND al.metadata->>'echo_verdict' = 'unexpected_from_unsupported'))
+		             AND al.target_id = a.id::text AND al.created_at >= a.created_at AND al.metadata->>'echo_verdict' = 'unexpected_from_unsupported'))
 		  FROM payment_attempts a
 		  LEFT JOIN withdrawal_requests wr ON wr.id = a.withdrawal_request_id
 		  LEFT JOIN ledger_transactions rl ON rl.id = wr.release_ledger_transaction_id

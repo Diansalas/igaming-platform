@@ -177,7 +177,7 @@ func TestPayoutDispatch_T1p_SyncSuccess_SettlesConcreteBalances(t *testing.T) {
 		t.Fatalf("ClaimForDispatch: %v", err)
 	}
 	gr := DispatchWithdraw(context.Background(), pool, MockCredentialResolver{}, provider, claim.Attempt, WithDestinations(pitest.Shared()))
-	if err := ApplyPayoutResult(context.Background(), pool, f.tenantID, wr.ID, claim.Attempt, gr, EvidenceSync, WithDestinations(pitest.Shared())); err != nil {
+	if err := ApplyPayoutResult(context.Background(), pool, f.tenantID, wr.ID, claim.Attempt, gr, EvidenceSync, orch.PayoutOptions()...); err != nil {
 		t.Fatalf("ApplyPayoutResult: %v", err)
 	}
 

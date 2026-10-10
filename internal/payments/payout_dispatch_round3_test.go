@@ -370,7 +370,7 @@ func TestPayoutDispatch_R3_LockOrderConsistentAcrossConcurrentEvidence_NoDeadloc
 	go func() {
 		defer close(applyDone)
 		gr := DispatchWithdraw(context.Background(), pool, MockCredentialResolver{}, provider, claim.Attempt, WithDestinations(pitest.Shared()))
-		applyErr = ApplyPayoutResult(context.Background(), pool, f.tenantID, wr.ID, claim.Attempt, gr, EvidenceSync, WithDestinations(pitest.Shared()))
+		applyErr = ApplyPayoutResult(context.Background(), pool, f.tenantID, wr.ID, claim.Attempt, gr, EvidenceSync, orch.PayoutOptions()...)
 	}()
 
 	// Give ApplyPayoutResult a moment to reach (and block behind) its own
@@ -820,7 +820,7 @@ func TestPayoutDispatch_SecGapC_SyncSuccessProviderReferenceMismatchDisputes(t *
 	// Establish an on-file reference first (an ordinary accepted/pending
 	// result), so the later success has something to conflict with.
 	pending := GateResult[WithdrawResult]{Class: ErrorClassPending, Value: WithdrawResult{Outcome: OutcomePending, ProviderReference: "secgapc-on-file-ref"}}
-	if err := ApplyPayoutResult(context.Background(), pool, f.tenantID, wr.ID, claim.Attempt, pending, EvidenceSync, WithDestinations(pitest.Shared())); err != nil {
+	if err := ApplyPayoutResult(context.Background(), pool, f.tenantID, wr.ID, claim.Attempt, pending, EvidenceSync, orch.PayoutOptions()...); err != nil {
 		t.Fatalf("ApplyPayoutResult (pending): %v", err)
 	}
 	var accepted PaymentAttempt
@@ -834,7 +834,7 @@ func TestPayoutDispatch_SecGapC_SyncSuccessProviderReferenceMismatchDisputes(t *
 
 	// A SYNCHRONOUS success result echoing a DIFFERENT reference.
 	success := GateResult[WithdrawResult]{Class: ErrorClassSucceeded, Value: WithdrawResult{Outcome: OutcomeSucceeded, ProviderReference: "secgapc-DIFFERENT-ref"}}
-	if err := ApplyPayoutResult(context.Background(), pool, f.tenantID, wr.ID, accepted, success, EvidenceSync, WithDestinations(pitest.Shared())); err != nil {
+	if err := ApplyPayoutResult(context.Background(), pool, f.tenantID, wr.ID, accepted, success, EvidenceSync, orch.PayoutOptions()...); err != nil {
 		t.Fatalf("ApplyPayoutResult (mismatched success): %v", err)
 	}
 

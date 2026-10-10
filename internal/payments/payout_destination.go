@@ -28,7 +28,9 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -161,6 +163,7 @@ func (e payoutEnv) echoState(providerID *string) echoState {
 	}
 	p, ok := e.providers(*providerID)
 	if !ok || p == nil {
+		warnEchoDeclarationOnce(*providerID, "unknown_provider", payoutinstrument.DestinationEchoUnset, payoutinstrument.DestinationEchoUnset)
 		return echoState{declared: payoutinstrument.DestinationEchoUnset, untrusted: true}
 	}
 	live := p.Capabilities().Manifest.DestinationEchoSemantics
@@ -171,7 +174,23 @@ func (e payoutEnv) echoState(providerID *string) echoState {
 	if !ok || !f.Valid() {
 		return echoState{declared: payoutinstrument.DestinationEchoUnset, untrusted: true}
 	}
+	if live != f {
+		warnEchoDeclarationOnce(*providerID, "declaration_drift", f, live)
+	}
 	return echoState{declared: f, untrusted: live != f}
+}
+
+// echoWarned records the providers whose untrusted echo declaration was already logged (once per provider and cause per process).
+var echoWarned sync.Map
+
+// warnEchoDeclarationOnce logs, at the first detection per provider and cause, that the live manifest no longer matches the
+// declaration frozen at wiring (or that the provider is unknown). Log only: no alert raise site is added (ADR 0111 24.7).
+func warnEchoDeclarationOnce(providerID, cause string, frozen, live payoutinstrument.DestinationEchoSemantics) {
+	if _, loaded := echoWarned.LoadOrStore(providerID+"\x00"+cause, struct{}{}); loaded {
+		return
+	}
+	slog.Warn("payout_destination_echo_declaration_untrusted", "provider_id", providerID, "cause", cause,
+		"frozen", frozen.String(), "live", live.String(), "effect", "payout success evidence is ambiguous until the declaration matches again")
 }
 
 // ---- the gate ------------------------------------------------------------

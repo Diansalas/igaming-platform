@@ -3,10 +3,12 @@ package payments
 // ADR 0111 24: the destination-echo declaration is mandatory, explicit and has no default. No database.
 
 import (
+	"bytes"
 	"errors"
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -180,5 +182,27 @@ func TestEchoState_OrchestratorFreezesAtWiring(t *testing.T) {
 	src["frz"] = payoutinstrument.DestinationEchoUnsupported
 	if e.frozen["frz"] != payoutinstrument.DestinationEchoSupported {
 		t.Fatal("the frozen map must be a private copy")
+	}
+}
+
+// Drift is not silent: the first detection per provider logs a WARN (once), and adds no alert raise site.
+func TestEchoState_DriftIsLoggedOncePerProvider(t *testing.T) {
+	var buf bytes.Buffer
+	old := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	defer slog.SetDefault(old)
+	m := NewMockProvider("drift-log-p", "EUR") // declares Unsupported
+	id := "drift-log-p"
+	env := payoutEnv{
+		providers: func(string) (PaymentProvider, bool) { return m, true },
+		frozen:    map[string]payoutinstrument.DestinationEchoSemantics{id: payoutinstrument.DestinationEchoSupported},
+	}
+	for i := 0; i < 3; i++ {
+		if st := env.echoState(&id); !st.untrusted {
+			t.Fatal("drift must be untrusted")
+		}
+	}
+	if n := strings.Count(buf.String(), "payout_destination_echo_declaration_untrusted"); n != 1 || !strings.Contains(buf.String(), "provider_id=drift-log-p") {
+		t.Fatalf("want exactly one WARN naming the provider, got %d: %s", n, buf.String())
 	}
 }
