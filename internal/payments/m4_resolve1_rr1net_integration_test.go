@@ -526,3 +526,118 @@ func TestRR30_BoundDestinationMismatch_CrossTenantIsolation(t *testing.T) {
 	a.assertInvariants()
 	b.assertInvariants()
 }
+
+// --- LF C-c / Q-R30-1: M2 (c2) on the same NET recovery -----------------------------------------
+
+// c2World is an M2 declare-paid payout of 500 whose Step B was compensated by a
+// credit C of 200, with a succeeded statement line: (c2) is raised.
+type c2World struct {
+	w      *k3World
+	a      PaymentAttempt
+	credit uuid.UUID
+	pl     statement.PaymentStatementLine
+}
+
+func newC2World(t *testing.T, w *k3World) *c2World {
+	t.Helper()
+	w.k2Setup()
+	_, a := w.ambiguousPayout(500)
+	res := w.executeM2(a.ID, ResolutionM2DeclarePaid)
+	c := w.rr30Must(adjustment.DirectionCreditPlayer, adjustment.ReasonCompensatingEntry, 200, *res.LedgerTransactionID, "Step B compensating credit")
+	f := &c2World{w: w, a: a, credit: c,
+		pl: w.payoutLine(*a.ProviderReference, a.MerchantReference, statement.PaymentStatusSucceeded, 500)}
+	f.raised(f.w.source(false, f.pl), "credited then paid", "recovered=0")
+	return f
+}
+
+// raised requires exactly one (c2) whose detail contains want.
+func (f *c2World) raised(src statement.PaymentStatementSource, what, want string) {
+	f.w.t.Helper()
+	m := f.w.requireOne(f.w.stmtRun(src), reconciliation.MismatchKindPayDeclaredPaidCompensatedButPaid, f.a.ID, what)
+	if !strings.Contains(m.ActualValue, "compensated credits=200 "+want+";") || !strings.Contains(m.ExpectedValue, "NET") {
+		f.w.t.Fatalf("%s: (c2) detail/hint: %+v", what, m)
+	}
+}
+
+func (f *c2World) cleared(what string) {
+	f.w.t.Helper()
+	f.w.requireNone(f.w.stmtRun(f.w.source(false)), reconciliation.MismatchKindPayDeclaredPaidCompensatedButPaid, f.a.ID, what)
+}
+
+func TestRR30_C2_NetRecovery(t *testing.T) {
+	t.Run("partial keeps raising, the remaining unit clears, replay is not double counted", func(t *testing.T) {
+		f := newC2World(t, newK3World(t, k3Opts{base: 1}))
+		o, r, _, err := f.w.rr30K2(f.w.f.walletID, "EUR", adjustment.DirectionDebitPlayer, adjustment.ReasonCompensatingEntry, 199, f.credit)
+		if err != nil || !o.Executed {
+			t.Fatalf("partial: %v %+v", err, o)
+		}
+		if _, err := f.w.k2Decide(f.w.f4, r); !errors.Is(err, adjustment.ErrNotPending) {
+			t.Fatalf("a replayed decision must be refused as not pending, got %v", err)
+		}
+		f.raised(f.w.source(false), "partial 199 of 200 after a replay", "recovered=199")
+		if o, _, _, err := f.w.rr30K2(f.w.f.walletID, "EUR", adjustment.DirectionDebitPlayer, adjustment.ReasonCompensatingEntry, 200, f.credit); err == nil && o.Executed {
+			t.Fatal("INV-ADJ-6 must refuse a debit beyond the credit's leg")
+		}
+		f.w.rr30Must(adjustment.DirectionDebitPlayer, adjustment.ReasonCompensatingEntry, 1, f.credit, "the remaining unit")
+		f.cleared("complete NET recovery")
+		f.cleared("complete NET recovery, again")
+		f.w.assertInvariants()
+	})
+	t.Run("a debit offset by a credit with the causation keeps raising", func(t *testing.T) {
+		f := newC2World(t, newK3World(t, k3Opts{base: 1}))
+		f.w.rr30Must(adjustment.DirectionDebitPlayer, adjustment.ReasonCompensatingEntry, 200, f.credit, "full debit")
+		f.cleared("control: full NET recovery")
+		f.w.rr30Must(adjustment.DirectionCreditPlayer, adjustment.ReasonOperationalErrorCorrection, 1, f.credit, "credit of one unit under C")
+		f.raised(f.w.source(false), "offset by a credit", "recovered=199")
+	})
+	t.Run("a reversed recovery debit does not count", func(t *testing.T) {
+		f := newC2World(t, newK3World(t, k3Opts{base: 1}))
+		d := f.w.rr30Must(adjustment.DirectionDebitPlayer, adjustment.ReasonCompensatingEntry, 200, f.credit, "full debit")
+		f.cleared("control: full NET recovery")
+		f.w.rr30Must(adjustment.DirectionCreditPlayer, adjustment.ReasonCompensatingEntry, 200, d, "credit reversing the debit")
+		f.raised(f.w.source(false), "reversed debit", "recovered=0")
+	})
+	t.Run("wrong wallet, wrong asset and wrong causation never recover", func(t *testing.T) {
+		f := newC2World(t, newK3World(t, k3Opts{base: 1}))
+		if o, _, _, err := f.w.rr30K2(f.w.otherWallet(), "EUR", adjustment.DirectionDebitPlayer, adjustment.ReasonCompensatingEntry, 200, f.credit); err == nil && o.Executed {
+			t.Fatal("a debit under C on another wallet executed")
+		}
+		if o, _, _, err := f.w.rr30K2(f.w.f.walletID, "USD", adjustment.DirectionDebitPlayer, adjustment.ReasonCompensatingEntry, 200, f.credit); err == nil && o.Executed {
+			t.Fatal("a debit under C in another asset executed")
+		}
+		_, other := f.w.ambiguousPayout(300)
+		otherFailed := f.w.executeM2(other.ID, ResolutionM2DeclareNotPaid)
+		f.w.rr30Must(adjustment.DirectionDebitPlayer, adjustment.ReasonCompensatingEntry, 200, *otherFailed.LedgerTransactionID, "debit under an unrelated causation, the full amount")
+		f.raised(f.w.source(false), "wrong wallet / asset / causation", "recovered=0")
+		f.w.rr30Must(adjustment.DirectionDebitPlayer, adjustment.ReasonCompensatingEntry, 200, f.credit, "the right recovery")
+		f.cleared("control")
+	})
+	t.Run("two credits: each must be recovered", func(t *testing.T) {
+		w := newK3World(t, k3Opts{base: 1})
+		w.k2Setup()
+		_, a := w.ambiguousPayout(500)
+		res := w.executeM2(a.ID, ResolutionM2DeclarePaid)
+		c1 := w.rr30Must(adjustment.DirectionCreditPlayer, adjustment.ReasonCompensatingEntry, 100, *res.LedgerTransactionID, "credit 1")
+		c2 := w.rr30Must(adjustment.DirectionCreditPlayer, adjustment.ReasonCompensatingEntry, 100, *res.LedgerTransactionID, "credit 2")
+		pl := w.payoutLine(*a.ProviderReference, a.MerchantReference, statement.PaymentStatusSucceeded, 500)
+		w.requireOne(w.stmtRun(w.source(false, pl)), reconciliation.MismatchKindPayDeclaredPaidCompensatedButPaid, a.ID, "two credits, paid")
+		w.rr30Must(adjustment.DirectionDebitPlayer, adjustment.ReasonCompensatingEntry, 100, c1, "recovery of credit 1")
+		m := w.requireOne(w.stmtRun(w.source(false)), reconciliation.MismatchKindPayDeclaredPaidCompensatedButPaid, a.ID, "one of two credits recovered")
+		if !strings.Contains(m.ActualValue, "compensated credits=200 recovered=100;") {
+			t.Fatalf("detail: %s", m.ActualValue)
+		}
+		w.rr30Must(adjustment.DirectionDebitPlayer, adjustment.ReasonCompensatingEntry, 100, c2, "recovery of credit 2")
+		w.requireNone(w.stmtRun(w.source(false)), reconciliation.MismatchKindPayDeclaredPaidCompensatedButPaid, a.ID, "both recovered")
+	})
+	t.Run("cross-tenant: B cannot cite A's credit and B's recovery never clears A", func(t *testing.T) {
+		wa := newK3World(t, k3Opts{base: 1})
+		fa := newC2World(t, wa)
+		fb := newC2World(t, newK3WorldOn(t, wa.pool, k3Opts{base: 1}))
+		if o, _, _, err := fb.w.rr30K2(fb.w.f.walletID, "EUR", adjustment.DirectionDebitPlayer, adjustment.ReasonCompensatingEntry, 200, fa.credit); err == nil && o.Executed {
+			t.Fatal("tenant B executed a recovery caused by tenant A's credit")
+		}
+		fb.w.rr30Must(adjustment.DirectionDebitPlayer, adjustment.ReasonCompensatingEntry, 200, fb.credit, "B's own recovery")
+		fb.cleared("B after its own recovery")
+		fa.raised(fa.w.source(false), "A is unaffected by B", "recovered=0")
+	})
+}

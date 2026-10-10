@@ -94,7 +94,7 @@ const (
 	unknownOpCapturedUnpostedResolutionHint      = "resolution: none defined for this operation (unknown operation; nothing clears it); never allocation; M1 only acknowledges"
 	declaredPaidUnconfirmedResolutionHint        = "resolution: a confirming statement line from an eligible import (payout, succeeded, resolved to this attempt, amount and asset equal) or a withdrawal reversal (WITHDRAWAL-REVERSAL-1); a compensating credit annotates but does not clear"
 	declaredNotPaidButPaidResolutionHint         = "resolution: a NET recovery of at least the withdrawn amount - executed compensating_entry debits, causation = the withdrawal_failed transaction, same wallet and asset, none of them reversed, minus every executed credit with that causation; an off-platform recovery has no clearing path and is tracked through the row's investigation status"
-	declaredPaidCompensatedButPaidResolutionHint = "resolution: executed compensating_entry debits, causation = the compensating credit's own transaction, totalling at least the credited amount"
+	declaredPaidCompensatedButPaidResolutionHint = "resolution: a NET recovery of at least the credited amount - executed compensating_entry debits, causation = the compensating credit's own transaction, same wallet and asset, none reversed, minus every executed credit with that causation"
 )
 
 // k3PersistedLinesPerKey is the I-2 bound (ADR 0111 §4.6) expressed per lookup
@@ -665,6 +665,16 @@ func netRecovery(ctx context.Context, tx pgx.Tx, tenantID, causation, walletID u
 	return parseBig(net)
 }
 
+// keysOfUUID returns the set's members in a stable order.
+func keysOfUUID(set map[uuid.UUID]bool) []uuid.UUID {
+	out := make([]uuid.UUID, 0, len(set))
+	for k := range set {
+		out = append(out, k)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].String() < out[j].String() })
+	return out
+}
+
 func keysOf(set map[string]bool) []string {
 	out := make([]string, 0, len(set))
 	for k := range set {
@@ -1026,7 +1036,28 @@ func (m *payMatcher) checkM2Standing(ctx context.Context, tx pgx.Tx) error {
 					creditTxs[c.ledgerTx] = true
 				}
 			}
-			recovered := sumFor("debit_player", creditTxs)
+			// (c2) recovery, NET per compensating credit C (LF C-c / Q-R30-1,
+			// ADR 0111 §21.11; the same netRecovery as M2 (d) and RR-1): debits
+			// with causation C on the withdrawal's wallet and the resolution's
+			// asset, none reversed, minus every credit with causation C, summed
+			// over the credits. INV-ADJ-6 caps each C's debits at C's amount, so
+			// the sum reaches the credited total only when every C is fully and
+			// irreversibly recovered. No visible withdrawal: no recovery is read
+			// (recovered stays 0) and (c2) keeps raising (raise direction only).
+			recovered, recoveryRead := new(big.Int), r.walletID != nil
+			if recoveryRead {
+				for _, c := range keysOfUUID(creditTxs) {
+					net, err := netRecovery(ctx, tx, m.tenantID, c, *r.walletID, r.asset)
+					if err != nil {
+						return fmt.Errorf("M2 (c2) recovery probe: %w", err)
+					}
+					recovered.Add(recovered, net)
+				}
+			}
+			recoveredText := "<none>"
+			if recoveryRead {
+				recoveredText = recovered.String()
+			}
 
 			// (c) standing, clears only on a confirming line or a reversal of this
 			// Step B. A compensating credit annotates, never clears.
@@ -1039,7 +1070,7 @@ func (m *payMatcher) checkM2Standing(ctx context.Context, tx pgx.Tx) error {
 				if !reversed {
 					note := "no compensating credit"
 					if credited.Sign() > 0 {
-						note = fmt.Sprintf("compensating credits executed=%s recovered=%s (annotation only)", credited, recovered)
+						note = fmt.Sprintf("compensating credits executed=%s recovered=%s (annotation only)", credited, recoveredText)
 					}
 					m.r.add(MismatchKindPayDeclaredPaidUnconfirmed, m.key("attempt="+a.id.String(), "resolution="+r.id.String(), "check=declared_paid_unconfirmed"),
 						declaredPaidUnconfirmedResolutionHint,
@@ -1052,7 +1083,7 @@ func (m *payMatcher) checkM2Standing(ctx context.Context, tx pgx.Tx) error {
 				m.r.add(MismatchKindPayDeclaredPaidCompensatedButPaid, m.key("attempt="+a.id.String(), "resolution="+r.id.String(), "check=declared_paid_compensated_but_paid"),
 					declaredPaidCompensatedButPaidResolutionHint,
 					fmt.Sprintf("platform: %s; compensated credits=%s recovered=%s; line: import=%s line_no=%d is_mock=%t status=%s amount=%s asset=%s",
-						a.render(), credited, recovered, anySucceeded.importID, anySucceeded.lineNo, anySucceeded.isMock, anySucceeded.status, anySucceeded.amount, anySucceeded.asset))
+						a.render(), credited, recoveredText, anySucceeded.importID, anySucceeded.lineNo, anySucceeded.isMock, anySucceeded.status, anySucceeded.amount, anySucceeded.asset))
 			}
 		case m2KindNotPaid:
 			// (d) the attempt reached T14, or ANY import has a succeeded line for it
